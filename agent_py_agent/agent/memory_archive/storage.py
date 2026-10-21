@@ -125,6 +125,8 @@ def append_raw_event(root: str | Path, event: RawMemoryEvent) -> Path:
     return path
 
 
+# LLM: JSONL 审计与快照尾部回读只验证刚追加的记录；大账本先从文件末尾有界切片回扫，仅当单条超长或尾部未命中时回退全量读取，保持完整相等校验与 LF 切分语义。
+# 函数用途: 从末尾倒序核对刚写入的 JSONL 记录已完整落盘，避免每次追加都把整日大文件全量读入内存。
 def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[str, Any]) -> None:
     """Read a JSONL file backwards and confirm the just-written record is present.
 
@@ -133,8 +135,58 @@ def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[st
     """
 
     normalized_expected = _normalized_json(expected)
+    min_tail_bytes = max(256 * 1024, len(normalized_expected.encode("utf-8")) * 2 + 4096)
+    tail_text = _read_tail_jsonl_text(path, min_bytes=min_tail_bytes)
+    if tail_text is not None and _scan_verified_jsonl_lines(
+        tail_text,
+        key=key,
+        value=value,
+        normalized_expected=normalized_expected,
+    ):
+        return
+    if _scan_verified_jsonl_lines(
+        path.read_text(encoding="utf-8"),
+        key=key,
+        value=value,
+        normalized_expected=normalized_expected,
+    ):
+        return
+    raise MemoryArchiveError(f"readback failed for {key}={value} in {path}")
+
+
+# LLM: 仅在文件尺寸超过尾部窗口时按字节 seek 并丢弃首段残行，确保切分点落在物理 LF 之后，不破坏多字节 UTF-8 字符。
+# 函数用途: 读取大 JSONL 文件尾部完整行文本；小文件或尾部无完整换行时返回 None 交由全量读取兜底。
+def _read_tail_jsonl_text(path: Path, *, min_bytes: int) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            if size <= min_bytes:
+                return None
+            handle.seek(size - min_bytes)
+            raw = handle.read()
+    except OSError:
+        return None
+    first_nl = raw.find(b"\n")
+    if first_nl < 0:
+        return None
+    try:
+        return raw[first_nl + 1 :].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+# LLM: JSONL 记录边界只能是物理 LF；命中目标主键但内容不一致时必须立即抛 MemoryArchiveError，不能静默继续。
+# 函数用途: 倒序扫描给定 JSONL 文本段，找到目标记录并完成规范化 JSON 一致性比对。
+def _scan_verified_jsonl_lines(
+    text: str,
+    *,
+    key: str,
+    value: str,
+    normalized_expected: str,
+) -> bool:
     # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-    for line in reversed(jsonl_lines(path.read_text(encoding="utf-8"))):
+    for line in reversed(jsonl_lines(text)):
         if not line.strip():
             continue
         try:
@@ -145,8 +197,8 @@ def _verify_record_exists(path: Path, *, key: str, value: str, expected: dict[st
             continue
         if _normalized_json(payload) != normalized_expected:
             raise MemoryArchiveError(f"readback payload mismatch for {key}={value}")
-        return
-    raise MemoryArchiveError(f"readback failed for {key}={value} in {path}")
+        return True
+    return False
 
 
 def _verify_json_file_payload(path: Path, *, expected: dict[str, Any]) -> None:

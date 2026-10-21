@@ -1,3 +1,7 @@
+## 2026-10-21 子代理 canonical 缺失路径负缓存（长期运行性能收敛）
+
+`subagents/services/persistence/service.py` 在 `list_runs` 的进程内缓存基础上，对 `locator` 存在但 `canonical task.json` 已被清理的死项增加负缓存 `_missing_canonical_cache`。只有 `locator` 的 `mtime` 早于 2 秒粗时间窗阈值且读取 `canonical_path` 抛 `FileNotFoundError` 时才记录 `(locator_stat_signature, canonical_path)`，并在 `locator` 5 元组 stat 签名变化、canonical 文件恢复或 `list_runs` 发现 locator 已删除时立即失效，避免长期运行后每次 `list_runs` 反复对数百个已清理历史子代理重解析 locator JSON。
+
 ## 2026-10-18 runner 内部正文兼容与宿主状态（554候选）
 
 runner 的自然文字及模型自行生成的旧结果 JSON 仍是归档内容，不成为状态、工具、

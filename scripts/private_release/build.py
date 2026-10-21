@@ -83,7 +83,7 @@ __MY_AGENT_PAYLOAD__
     return header.replace("@LINE@", str(header.count("\n") + 1)).replace("@DIGEST@", digest).encode()
 
 
-# LLM: main在编译和归档前调用；只改发行副本，native飞书后端优先，保留wheel已有资源，缺后端硬拒绝。
+# LLM: main在编译和归档前调用；只改发行副本，native飞书后端优先，保留wheel已有资源，缺后端或资源硬拒绝。
 # 函数用途: 复制bwrap、飞书CLI后端及lark资源，统一后端执行权限，避免发布残包。
 def copy_native_assets(root: Path, package: Path) -> None:
     # 保持原vendor发现入口，子进程即使不继承PATH也能找到Ubuntu兼容版本。
@@ -96,10 +96,13 @@ def copy_native_assets(root: Path, package: Path) -> None:
         shutil.copyfile(root / "native/feishu-cli-host.linux-x86_64", backend)
     if backend.is_file():
         backend.chmod(0o755)
+    lark_dir = package / "vendor/lark_cli"
     if (root / "native/lark_cli").is_dir():
-        shutil.copytree(root / "native/lark_cli", package / "vendor/lark_cli", dirs_exist_ok=True)
-    if not backend.is_file():
+        shutil.copytree(root / "native/lark_cli", lark_dir, dirs_exist_ok=True)
+    if backend.is_symlink() or not backend.is_file() or backend.stat().st_size <= 0:
         raise ValueError("发行包缺少随包飞书 CLI 后端: vendor/bin/feishu-cli-host.linux-x86_64")
+    if lark_dir.is_symlink() or not lark_dir.is_dir() or not any(lark_dir.iterdir()):
+        raise ValueError("发行包缺少随包飞书 CLI 资源: vendor/lark_cli")
 
 
 # LLM: 只接收一次冻结后的payload；先核原生后端完整，再编译及归档，未来重打必须使用新version。

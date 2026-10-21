@@ -1,3 +1,7 @@
+## 2026-10-21 审计与快照 JSONL 写后尾部有界回读（长期运行性能收敛）
+
+`memory_archive/storage.py::_verify_record_exists` 在 `append_raw_event` 与 `append_snapshot` 写后校验时，优先按文件末尾有界窗口（`max(256 KiB, 2 * len(expected) + 4096)`）读取并在首个物理 LF 后解码 UTF-8 倒序核对刚追加记录；仅在小文件或尾部未命中时回退全量 `read_text`，消除单日大体积 `audit/<date>.jsonl` 每次工具调用都全量读入内存的 $O(N^2)$ 放大，同时保持完整规范化 JSON 相等性校验。
+
 ## 2026-10-20 策展发现与执行的时间/配置一致性（独立候选，待真实复验）
 
 策展 consumer 与 owner 发现共用 `memory_store/curator_due.py` 的纯本地时间、日终和间隔判据。C 从原 owner 配置解析实际 interval、daily_finalize_hour 与 timezone；空 timezone 继续使用宿主本地时区，未来日界重新按该日期的时区规则计算，避免当前固定 offset 跨 DST。失败退避基数与 consumer 同为 `max(30,min(300,interval_seconds))`，原特殊失败码一小时不变。mtime 仍只是来源粗筛，不代表真实 batch、排除名单或 turn_threshold 已满足。

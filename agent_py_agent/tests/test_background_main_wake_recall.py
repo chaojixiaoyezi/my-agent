@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from agent_py_agent.agent.backends import ModelResponse
 from agent_py_agent.agent.contracts.error_taxonomy import error_contract
@@ -777,3 +780,189 @@ def test_worker_and_supervisor_pools_resolve_identical_conversation_store_root(t
     assert claim is not None
     renewed = super_store.claims.renew({"thread_id": thread.thread_id, "claim_id": claim["claim_id"], "lease_seconds": 30, "now": 21.0})
     assert renewed is not None
+
+
+# LLM: 使用临时owner的真实进程与会话存储，只合成持久记录，不启动、查询或停止主机真实任务。
+# 函数用途: 给巡检性能回归提供准确收件地址和可验证的完成回执。
+def _completion_churn_case(tmp_path, status='exited'):
+    from agent_py_agent.agent.conversation import process_events
+    from agent_py_agent.agent.tooling.process_registry import BackgroundProcess
+    from agent_py_agent.agent.tooling.process_scope import ProcessAccessScope
+    from agent_py_agent.agent.tooling.process_session_records import (
+        LEGACY_PROCESS_SESSION_SCHEMA,
+        PROCESS_SESSION_SCHEMA,
+    )
+    from agent_py_agent.agent.tooling.process_session_store import (
+        ProcessSessionStore,
+        process_session_store_root,
+    )
+
+    owner = tmp_path / 'owner'
+    store = ConversationStore(owner / 'conversations')
+    thread = store.threads.get_or_create({'canonical_user_id': 'local', 'channel': 'tui', 'channel_conversation_id': 'room'})
+    agent = SimpleNamespace(conversation_store=store, home_paths=SimpleNamespace(owner_home_dir=owner), config=AgentConfig())
+    target = {'store_root': str(store.storage.root), 'thread_id': thread.thread_id, 'task_id': 'task-churn', 'run_id': 'run-churn'}
+    root = process_session_store_root(owner, owner)
+    record = BackgroundProcess('bg-churn', 'synthetic', 99999999, 1.0, status=status, exit_code=0, pid_birth_token='synthetic',
+        access_scope=ProcessAccessScope('local', thread.thread_id, str(owner)), completion_target=target,
+        output_file=str(tmp_path / 'process.log'))
+    record.persisted_snapshot = {'schema': LEGACY_PROCESS_SESSION_SCHEMA}
+    authority = ProcessSessionStore(root)
+    payload = record.to_record()
+    if status == 'unknown':
+        payload.update(schema=PROCESS_SESSION_SCHEMA, revision=0, activation_scope=None, retain_until_consumed=False,
+            execution_scope={'owner_home': str(owner), 'thread_id': thread.thread_id, 'root_task_id': 'task-churn',
+                'run_id': 'run-churn', 'attempt_id': 'attempt-churn'},
+            launcher_pid=99999997, launcher_birth_token='synthetic-launcher', child_pid=99999998,
+            child_pid_birth_token='synthetic-child', reserved_at=1.0, child_launch_started=True,
+            handoff_confirmed=True, stop_requested=False, exit_code=None, finished_at=None)
+    authority.write(payload)
+    return process_events, agent, authority
+
+
+def test_persisted_unknown_process_does_not_refresh_status_each_tick(tmp_path, monkeypatch):
+    events, agent, authority = _completion_churn_case(tmp_path, 'unknown')
+    calls = []
+    registry = SimpleNamespace(status=lambda session_id, **kwargs: calls.append(session_id) or {'status': 'unknown'})
+    monkeypatch.setattr(events, 'process_registry', registry)
+    assert events.reconcile_process_completions(agent) == 0
+    assert events.reconcile_process_completions(agent) == 0
+    assert calls == []
+    assert authority.load('bg-churn').record['status'] == 'unknown'
+    assert not agent.conversation_store.wakes.pending(limit=0)
+
+
+def test_native_process_completion_refresh_never_reads_log_tail(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import process_registry as registry_module
+
+    events, agent, authority = _completion_churn_case(tmp_path)
+    monkeypatch.setattr(events, 'process_registry', registry_module.ProcessRegistry())
+    tail_reads = []
+    monkeypatch.setattr(registry_module, '_read_log_tail', lambda *args:
+        tail_reads.append(args) or registry_module.ProcessLogTail())
+    assert events.reconcile_process_completions(agent) == 1
+    assert events.reconcile_process_completions(agent) == 0
+    assert tail_reads == []
+    signals = agent.conversation_store.wakes.pending(limit=0)
+    assert len(signals) == 1
+    assert authority.load('bg-churn').record['completion_notice_id'] == signals[0].wake_signal_id
+
+
+@pytest.mark.parametrize('replacement', ['instance', 'class', 'stub'])
+def test_process_completion_preserves_patched_status_contract(tmp_path, monkeypatch, replacement):
+    from agent_py_agent.agent.tooling.process_registry import ProcessRegistry
+
+    events, agent, _authority = _completion_churn_case(tmp_path)
+    state = {'status': 'running'}
+    calls = []
+
+    # LLM: 有意让status与盘上exited不同，以检测产品是否绕开替身合同。
+    # 函数用途: 验证实例、类方法和外部替身三种status替换都继续被调用。
+    def status(*args, **kwargs):
+        calls.append(args[-1])
+        return dict(state)
+
+    registry = ProcessRegistry()
+    if replacement == 'instance':
+        monkeypatch.setattr(registry, 'status', status)
+    elif replacement == 'class':
+        monkeypatch.setattr(ProcessRegistry, 'status', status)
+    else:
+        registry = SimpleNamespace(status=status)
+    monkeypatch.setattr(events, 'process_registry', registry)
+    assert events.reconcile_process_completions(agent) == 0
+    assert not agent.conversation_store.wakes.pending(limit=0)
+    state['status'] = 'exited'
+    assert events.reconcile_process_completions(agent) == 1
+    assert calls == ['bg-churn', 'bg-churn']
+
+
+@pytest.mark.parametrize('failure_stage', ['', 'prepare', 'ready'])
+def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure_stage):
+    from agent_py_agent.agent.io import sqlite_scope
+    from agent_py_agent.cli.gateway_lane_retry import BackgroundLaneRetry
+    from agent_py_agent.cli.gateway_loops import _BackgroundMainSupervisor
+
+    database = tmp_path / 'runtime.db'
+    initial = sqlite3.connect(database)
+    initial.execute('PRAGMA journal_mode=WAL').fetchone()
+    initial.close()
+    connections, failures, submitted_scopes = [], [], []
+
+    # LLM: 真实SQLite物理连接计数，不替换产品scope；只读SELECT不改业务数据。
+    # 函数用途: 为一次规划中的多次短查询提供可复核的连接开关计数。
+    def connect():
+        connection = sqlite3.connect(database, factory=sqlite_scope.sqlite_connection_factory())
+        connections.append(connection)
+        return connection
+
+    # LLM: 复用产品scoped_connection借用协议，所有游标与连接由原实现关闭。
+    # 函数用途: 模拟规划阶段相邻的十一条真实SQLite查询。
+    def queries():
+        for _ in range(11):
+            with sqlite_scope.scoped_connection(database, False, connect) as connection:
+                assert connection.execute('SELECT 1').fetchone()[0] == 1
+
+    # LLM: 只有规划业务是替身，数据库与scope均为真实实现；第一owner可在任一阶段失败。
+    # 类用途: 捕获作用域缺失和异常后owner隔离，不启动后台模型线程。
+    class Scheduler:
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def prepare_tick(self, *, now, include_orphan_supervision):
+            assert include_orphan_supervision is False
+            queries()
+            if self.fail and failure_stage == 'prepare':
+                failures.append('prepare')
+                raise ValueError('synthetic planning failure')
+
+        def ready_thread_ids(self, **kwargs):
+            queries()
+            if self.fail and failure_stage == 'ready':
+                failures.append('ready')
+                raise ValueError('synthetic ready failure')
+            return ()
+
+    supervisor = object.__new__(_BackgroundMainSupervisor)
+    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace(background_owner_workers=2, background_threads_per_owner=2))
+    supervisor._base_scheduler = Scheduler(fail=True)
+    supervisor._owner_schedulers = {'other': Scheduler()}
+    supervisor._inflight = {}
+    supervisor._lane_retry = BackgroundLaneRetry()
+    supervisor._submit_thread_candidates = lambda *args, **kwargs: submitted_scopes.append(sqlite_scope._SQLITE_ACTIVE_SCOPE.get())
+    supervisor._submit_ready_thread_ticks()
+    assert len(connections) == 2
+    assert submitted_scopes == [None]
+    assert sqlite_scope._SQLITE_ACTIVE_SCOPE.get() is None
+    assert failures == ([failure_stage] if failure_stage else [])
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute('SELECT 1')
+
+
+def test_process_completion_status_patch_before_import_is_not_bypassed():
+    import subprocess
+    import sys
+
+    code = '''
+import importlib
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+from agent_py_agent.agent.tooling.process_registry import ProcessRegistry
+calls = []
+def status(self, session_id, **kwargs):
+    calls.append(session_id)
+    return {"status": "running"}
+ProcessRegistry.status = status
+name = "agent_py_agent.agent.conversation.process_events"
+sys.modules.pop(name, None)
+events = importlib.import_module(name)
+events.process_registry = ProcessRegistry()
+events.process_registry.get = lambda *args, **kwargs: SimpleNamespace(status="exited")
+result = events._process_completion_status("bg-preimport", Path.cwd())
+assert result == {"status": "running"}, (result, calls)
+assert calls == ["bg-preimport"], calls
+'''
+    result = subprocess.run([sys.executable, '-c', code], cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -685,6 +685,9 @@ def c4_build_case(tmp_path, monkeypatch):
 def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source):
     case = c4_build_case
     backend = case.package / 'vendor/bin/feishu-cli-host.linux-x86_64'
+    old = case.package / 'vendor/lark_cli'
+    old.mkdir()
+    (old / 'existing.txt').write_text('preserved')
     if source in {'wheel', 'both'}:
         backend.write_bytes(b'wheel backend')
         backend.chmod(0o600)
@@ -695,9 +698,6 @@ def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source)
         lark = case.root / 'native/lark_cli'
         lark.mkdir()
         (lark / 'release.json').write_text('{"version":"fixture"}')
-        old = case.package / 'vendor/lark_cli'
-        old.mkdir()
-        (old / 'existing.txt').write_text('preserved')
     assert build.main() == 0
     expected = b'wheel backend' if source == 'wheel' else b'native backend'
     assert backend.read_bytes() == expected and backend.stat().st_mode & 0o777 == 0o755
@@ -707,6 +707,8 @@ def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source)
     with tarfile.open(case.output / 'my-agent-test.cli-linux-x86_64.tar.gz') as archive:
         member = archive.getmember('bundle/' + relative)
         assert member.mode & 0o777 == 0o755 and archive.extractfile(member).read() == expected
+        existing_member = 'bundle/' + (case.package / 'vendor/lark_cli/existing.txt').relative_to(case.root).as_posix()
+        assert archive.extractfile(existing_member).read() == b'preserved'
         if source != 'wheel':
             lark_member = 'bundle/' + (case.package / 'vendor/lark_cli/release.json').relative_to(case.root).as_posix()
             assert archive.extractfile(lark_member).read() == b'{"version":"fixture"}'
@@ -714,9 +716,18 @@ def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source)
     assert (case.output / 'my-agent-test.cli-linux-x86_64.run').stat().st_mode & 0o777 == 0o755
 
 
-def test_c4_build_refuses_missing_cli_backend_before_publishing(c4_build_case):
+@pytest.mark.parametrize('missing', ['backend', 'lark_cli'])
+def test_c4_build_refuses_missing_cli_backend_before_publishing(c4_build_case, missing):
     case = c4_build_case
-    with pytest.raises(ValueError, match='发行包缺少随包飞书 CLI 后端: vendor/bin/feishu-cli-host.linux-x86_64'):
+    if missing == 'lark_cli':
+        (case.package / 'vendor/bin/feishu-cli-host.linux-x86_64').write_bytes(b'wheel backend')
+        match = '发行包缺少随包飞书 CLI 资源: vendor/lark_cli'
+    else:
+        lark = case.package / 'vendor/lark_cli'
+        lark.mkdir()
+        (lark / 'existing.txt').write_text('preserved')
+        match = '发行包缺少随包飞书 CLI 后端: vendor/bin/feishu-cli-host.linux-x86_64'
+    with pytest.raises(ValueError, match=match):
         build.main()
     assert not case.output.exists()
     assert (case.package / '__init__.py').is_file()

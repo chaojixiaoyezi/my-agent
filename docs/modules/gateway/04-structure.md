@@ -1,3 +1,10 @@
+## 2026-10-21 网关热循环与沙箱/产物保护减负结构
+
+- `cli/gateway_loops.py::_BackgroundMainSupervisor._submit_ready_thread_ticks` 在单 owner 规划窗口的 `sqlite_connection_scope(True)` 内执行 `prepare_tick(include_orphan_supervision=False)` 与 `ready_thread_ids`，并在进入 `_submit_thread_candidates` 前退出连接作用域；`conversation/process_events.py::reconcile_process_completions` 仅对非终态且非 `unknown` 的后台进程通过 `_process_completion_status` 调用 `process_registry.get(process_id)`，不再在高频巡检中读盘日志尾部。
+- `runtime_db/schema.py` 在 `_RUNTIME_MIGRATION_SQL` 中确保 `idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)` 与 `idx_task_runs_closed_at ON task_runs(closed_at)`；`local_storage/runtime_gate_ledger.py::list_runtime_gate_ledger` 先按 `created_at DESC, operation_id DESC LIMIT ?` 截取最新记录再按升序返回。
+- `tooling/sandbox.py` 通过 `_is_ephemeral_readonly_sidecar` 区分持久只读路径（`--ro-bind`）与易失侧车（`--ro-bind-try`），`_mount_snapshot` 与 `_remove_shadowed_mount_arguments` 对二者保持同等只读语义。
+- `artifacts/shell_protection.py` 的 `_post_shell_status` 在受管 FD 上先算 `sha256`，仅当哈希不同于快照时才调用 `_write_validation_copy` 落盘 `.postcheck` 副本；`reconcile_shell_artifact_operation_items` 使用 `artifact_operation_recorded_ids` 单次扫描账本并批量写回 `unchanged` 状态。
+
 ## 2026-10-21 三层看门狗维护锁、Adapter自愈与插件宿主扩展接口（paths / supervisor / plugin_broker_api）
 
 `gateway_parts/paths.py` 提供 `maintenance_lock` 与 `supervisor_service` 只读属性；`gateway_parts/supervisor.py` 实现 `write_maintenance_lock` / `read_maintenance_lock` / `clear_maintenance_lock` 与 `_check_and_recover_adapter`（仅在无有效维护锁、Gateway 健康且 `adapter_state.json` 记录 `running` 意图但原 PID 不存活时按单调时钟冷却恢复）。`gateway_parts/plugin_broker_api.py` 封装 `PluginBrokerService`，按冻结 `owner_id` / `owner_home` 隔离挂载 `assets.*`、`telemetry.*` 与 `execute.*` 主题（含 `patched_step_output` / `updated_data_sources` 续跑参数），并与 `plugins/plugin_host_api.py`、`plugins/plugin_host_broker_topics.py` 对齐；`scheduler/tool_work.py::execute_scheduled_tool` 对 `workflows`/`scripts` 的 `paused_for_resume` / `needs_repair=True` 返回做结构化 `record_rule_result` 写入并在配置 `prompt` 时调用 `notify`。

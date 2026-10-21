@@ -1,3 +1,7 @@
+## 2026-10-21 JSONL 归档尾部回读校验结构
+
+`memory_archive/storage.py` 拆分为 `_verify_record_exists`、`_read_tail_jsonl_text` 与 `_scan_verified_jsonl_lines`：当文件字节数超过 `min_tail_bytes` 时，`seek` 到尾部窗口并丢弃首个 `\n` 之前的半行字节再做 UTF-8 解码，避免切碎多字节字符；`_scan_verified_jsonl_lines` 继续用 `jsonl_lines` 按物理 LF 切分并倒序比对 `_normalized_json`，主键命中但内容不符立即抛 `MemoryArchiveError`。
+
 ## 2026-10-20 策展发现与执行的时间/配置一致性（独立候选，待真实复验）
 
 策展 consumer 与 owner 发现共用 `memory_store/curator_due.py` 的纯本地时间、日终和间隔判据。C 从原 owner 配置解析实际 interval、daily_finalize_hour 与 timezone；空 timezone 继续使用宿主本地时区，未来日界重新按该日期的时区规则计算，避免当前固定 offset 跨 DST。失败退避基数与 consumer 同为 `max(30,min(300,interval_seconds))`，原特殊失败码一小时不变。mtime 仍只是来源粗筛，不代表真实 batch、排除名单或 turn_threshold 已满足。

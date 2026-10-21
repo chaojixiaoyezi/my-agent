@@ -1,6 +1,7 @@
 # LLM: 任务进程终态由原 ProcessSessionStore 核实，共享激活不参与业务通知；通知只进入既有 ConversationStore wake。
 # 不重放命令、不新建任务、不靠正文判完成；同 session 的通知发布与重启补发共用去重键。
 # 便宜检查只影响初次目录内容读取，正式通知前仍核原始状态、归属与去重回执。
+# 持久unknown不再刷新；原registry轻量get不读日志，替换status的调用方仍守原接口。
 # 模块用途: 让后台命令结束后主动叫醒所属主会话，或在活动主回合安全点交接，省掉模型短轮询。
 from __future__ import annotations
 
@@ -8,12 +9,18 @@ import json
 import logging
 from pathlib import Path
 
-from ..tooling.process_registry import ProcessSessionAuthorityError, process_registry
+from ..tooling import process_registry as _registry_module
+from ..tooling.process_registry import (
+    ProcessRegistry,
+    ProcessSessionAuthorityError,
+    process_registry,
+)
 from ..tooling.process_session_records import PROCESS_TERMINAL_STATUSES
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
 PROCESS_COMPLETION_REASON = "managed_process_exited"
 _LOG = logging.getLogger(__name__)
+_PROCESS_REGISTRY_STATUS = ProcessRegistry.status
 
 
 # LLM: 目标由宿主当前主会话身份冻结，子代理生命周期仍由直属父级协议负责，不额外启动影子主代理。
@@ -47,8 +54,8 @@ def _agent_process_root(agent: object) -> Path | None:
 
 
 # LLM: Count0保原循环/锁顺序，MP仅共用单会话发表叶；宿主周期tick与前台安全点共用；配置仅控制初步目录内容读取，发通知前仍核原status/target并持久去重，不缓存通知结论。
-# 仅任务的自然 exited 可唤醒，共享激活不通知；starting/unknown 不通知，明确停止只结算；写回重读原 ID。
-# 函数用途: 自动收割已结束后台命令并通知所属主会话；一个损坏记录不会阻塞其它会话。
+# 仅任务的自然exited可唤醒；持久unknown不可再转终态，直接跳过；其余轻量刷新后重读原ID与收件身份。
+# 函数用途: 不读日志地收割后台命令并通知所属主会话；保留坏记录重试与通知去重，不反复查询历史未知项。
 def reconcile_process_completions(agent: object) -> int:
     store = getattr(agent, "conversation_store", None)
     root = _agent_process_root(agent)
@@ -65,7 +72,7 @@ def reconcile_process_completions(agent: object) -> int:
         _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s", len(errors))
     sent = 0
     for payload in records:
-        if payload.get("activation_scope") is not None:
+        if payload.get("activation_scope") is not None or payload.get("status") == "unknown":
             continue
         target = payload.get("completion_target") or {}
         if not target or payload.get("completion_notice_id"):
@@ -77,7 +84,7 @@ def reconcile_process_completions(agent: object) -> int:
             _LOG.error("PROCESS_COMPLETION_SCOPE_CONFLICT session=%s", payload["session_id"])
             continue
         try:
-            summary = process_registry.status(str(payload["session_id"]), store_root=root)
+            summary = _process_completion_status(str(payload["session_id"]), root)
             if not summary or summary["status"] not in PROCESS_TERMINAL_STATUSES:
                 continue
             report = authority.load(str(payload["session_id"]))
@@ -92,6 +99,18 @@ def reconcile_process_completions(agent: object) -> int:
         except Exception:
             _LOG.exception("PROCESS_COMPLETION_RETRY session=%s", payload["session_id"])
     return sent
+
+
+# LLM: 仅原类、原status身份且函数确属registry模块命名空间才轻量get；导入前后替换和外部替身仍走status。
+# 函数用途: 取得通知所需的最新状态，不为后台巡检打开日志；归属校验和最终回执仍由原收割循环负责。
+def _process_completion_status(session_id: str, root: Path) -> dict[str, object] | None:
+    status = process_registry.status
+    if (type(process_registry) is ProcessRegistry
+            and getattr(status, "__func__", None) is _PROCESS_REGISTRY_STATUS
+            and getattr(_PROCESS_REGISTRY_STATUS, "__globals__", None) is vars(_registry_module)):
+        record = process_registry.get(session_id, store_root=root)
+        return {"status": record.status} if record is not None else None
+    return status(session_id, store_root=root)
 
 
 # LLM: 单条已核终态共用原Wake reason/facts/dedupe；调用者负责原owner/target/状态与写门，不能据本函数授执行权。

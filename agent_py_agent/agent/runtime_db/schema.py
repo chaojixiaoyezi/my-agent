@@ -392,6 +392,8 @@ _RUNTIME_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 
 _RUNTIME_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
+    "CREATE INDEX IF NOT EXISTS idx_task_runs_closed_at ON task_runs(closed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
 )
 
 

@@ -185,3 +185,59 @@ def test_token_estimate_handles_mixed_language_and_tool_payload():
 
     assert estimate_tokens(payload) > 0
     assert estimate_tokens("纯中文内容也要保守估算") >= 1
+
+
+def test_verify_record_exists_reads_tail_for_large_utf8_jsonl(tmp_path, monkeypatch):
+    root = tmp_path
+    audit_path = root / "audit" / "2026-04-30.jsonl"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    # 写入超过 300 KiB 的多字节中文历史行，确认追加验证走尾部切片而非全量 read_text。
+    filler_line = json.dumps({"event_id": "old", "text": "中文历史记录" * 200}, ensure_ascii=False) + "\n"
+    audit_path.write_text(filler_line * 300, encoding="utf-8")
+
+    def fail_full_read(*args, **kwargs):
+        pytest.fail("Path.read_text should not be called when tail window hits the newly appended record")
+
+    event = _demo_raw_event()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "read_text", fail_full_read)
+        written = append_raw_event(root, event)
+    assert written == audit_path
+
+
+def test_runtime_gate_ledger_limit_returns_newest_in_chronological_order(tmp_path):
+    from agent_py_agent.agent.local_storage.runtime_gate_ledger import RuntimeGateLedgerRecord
+    from agent_py_agent.agent.local_storage.store import LocalStore
+
+    store = LocalStore(tmp_path / "local.db")
+    for idx in range(5):
+        store.record_runtime_gate_ledger(
+            RuntimeGateLedgerRecord(
+                run_id="run-1",
+                task_id="task-1",
+                operation_id=f"op-{idx:02d}",
+                tool="run_command",
+                status="succeeded",
+                created_at=1000.0 + idx,
+            )
+        )
+    records = store.list_runtime_gate_ledger(run_id="run-1", limit=3)
+    assert [item.operation_id for item in records] == ["op-02", "op-03", "op-04"]
+
+
+def test_runtime_db_creates_agent_runs_run_id_and_task_runs_closed_at_indexes(tmp_path):
+    import sqlite3
+
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    db_path = tmp_path / "runtime.db"
+    RuntimeRepository(db_path)
+    with sqlite3.connect(db_path) as conn:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+    assert "idx_agent_runs_run_id" in indexes
+    assert "idx_task_runs_closed_at" in indexes

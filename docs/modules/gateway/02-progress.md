@@ -1,3 +1,12 @@
+## 2026-10-21 网关热循环减负、草稿截断、沙箱侧车容错与离线包自检（0.3.0-tui-preview.20261021.2）
+
+- `cli/gateway_loops.py::_BackgroundMainSupervisor._submit_ready_thread_ticks` 在单 owner 规划窗口内将 `scheduler.prepare_tick(include_orphan_supervision=False)` 与 `ready_thread_ids` 收进同一 `sqlite_connection_scope(True)` 并在调用 `_submit_thread_candidates` 前退出作用域，配合 `runtime_db/schema.py` 新增 `idx_agent_runs_run_id` 与 `idx_task_runs_closed_at` 索引，消除高频 tick 反复建连与全表扫描。
+- `conversation/process_events.py::reconcile_process_completions` 跳过已持久化 `status == "unknown"` 的历史项，并在 `_process_completion_status` 中优先使用 `process_registry.get(process_id)`（内部刷新存活状态且不读取日志尾部）替代每次读取命令输出日志尾部的 `status()` / `inspect()`。
+- `adapter/progress_draft.py::trim_draft_text` 在重绘前剥离旧 `更新于 HH:MM:SS` 页脚（`_DRAFT_FOOTER_RE`）并按 `_MAX_DRAFT_CHARS = 3500` 有界裁剪展示正文，防止内存与飞书草稿消息随重绘轮次无界膨胀。
+- `tooling/sandbox.py::_is_ephemeral_readonly_sidecar` 对易失 SQLite 侧车与锁文件（`-wal`/`-shm`/`-journal`/`.lock`）使用 `--ro-bind-try`，修复 WAL checkpoint 并发消失导致 `bwrap` 启动失败。
+- `artifacts/shell_protection.py` 与 `artifacts/registry.py` 在 `_post_shell_status` 中先流式计算 SHA256，未变化产物不再写 `.postcheck` 临时文件与 `fsync`，仅当哈希改变时才调用 `_write_validation_copy`，并批量收敛 `unchanged` 清单落盘与账本扫描。
+- `scripts/private_release/build.py` 与 `installer.py` 强制打入并校验 Linux 飞书原生宿主 `feishu-cli-host.linux-x86_64` 与 `vendor/lark_cli/`（缺失任一均硬拒绝出包），同时在 `installer.py::_send_pidfd_signal` 中为旧版 glibc 便携 Python 提供 Linux x86_64 `SYS_pidfd_send_signal = 424` syscall 兜底。
+
 ## 2026-10-21 三层看门狗维护锁、Adapter崩溃自愈与插件宿主扩展接口（supervisor / paths / plugin_broker_api）
 
 新增 `gateway_parts/paths.py` 的 `maintenance_lock` 与 `supervisor_service` 路径属性；`gateway_parts/supervisor.py` 支持结构化 `maintenance_lock.json`（含 TTL 到期与坏锁防守）在离线升级或管理员维护期暂停自动拉起，并在 Gateway 健康且 Adapter 具有 `running` 意图而原 PID 死亡/缺失时按 30 秒单调冷却自动拉起 Adapter。同时新增 `gateway_parts/plugin_broker_api.py`，向插件宿主与内部网关提供 Owner 隔离、敏感字段脱敏的一等公民资产（`Skill`/`Script`/`Workflow`/`Monitor`）、自由组合拓扑、任务调用链（`TaskCallInspector`，含自动模型轮与 Token 投影）、工具耗时账本（`ToolTelemetryLedger`）及主动工具/脚本/工作流执行与断点续跑门面；`scheduler/tool_work.py` 支持 `use_llm=False` 规则零 Token 直接调度工作流与脚本，并在断点挂起（`paused_for_resume` / `needs_repair=True`）时持久化结构化结果、触发下游修复规则或上抛通知。详见 [插件宿主接口](../../design/PLUGIN_HOST_API.md)。

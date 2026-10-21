@@ -236,26 +236,6 @@ def latest_artifact_records_report(workspace_root: str | Path) -> ArtifactRegist
     return ArtifactRegistryReadReport(records=latest, errors=errors)
 
 
-# LLM: Crash recovery must detect an append that reached disk before the caller observed success.
-# Scan every durable row because a later record for the same artifact may already be the latest.
-# 函数用途: 判断指定 shell protection operation 的产物变更行是否已经完整落账。
-def artifact_operation_record_exists(
-    workspace_root: str | Path,
-    *,
-    artifact_id: str,
-    operation_key: str,
-    backup_ref: str,
-) -> bool:
-    return artifact_metadata_record_exists(
-        workspace_root,
-        artifact_id=artifact_id,
-        required_metadata={
-            "protection_operation_id": operation_key,
-            "backup_ref": backup_ref,
-        },
-    )
-
-
 # LLM: Batch recovery scans once, retains exact historical operation/ref matches, and rejects any corrupt row.
 # 函数用途: 一次安全读取账本，批量找出同一 shell operation 已落账的产物编号。
 def artifact_operation_recorded_ids(

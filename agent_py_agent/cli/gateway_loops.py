@@ -6,7 +6,8 @@
 #   C孤儿业务只走原独立来源请求，这里的旧owner扫车道不直接物化远端Agent；标志只收窄不授执行。
 #   C冷组合只运行同源metadata producer与请求盖章，心跳末写核原lease；Count0业务公平、三旧控制线程顺序不变。
 #   C输入段仅接原queued/cursor元数据源，绑定输入延期不构造foreign Agent；Count0旧receipt/guidance链保持。
-# 模块用途: 连接请求处理、按用户公平调度、维护和心跳；不在此新增任务状态、权限或默认模型。
+#   单owner规划阶段短查询复用本轮SQLite连接；连接不跨提交和后台模型车道。
+# 模块用途: 连接请求处理、公平调度、维护和心跳，减少规划连接抖动；不新增任务状态、权限或默认模型。
 
 from __future__ import annotations
 
@@ -812,8 +813,11 @@ class _BackgroundThreadLaneSupervisorMixin:
     # across owners, bounded globally and per owner, and keyed by durable thread id.
     # Gateway's independent orphan reconciler owns recovery scans, so preparation
     # must skip the duplicate inline sweep before ready lanes are submitted.
-    # 函数用途: 公平提交就绪会话；配置等待、环境暂停和普通冷却不占执行工位，不影响其它窗口。
+    # 每个owner的prepare/ready短查询共用本轮SQLite连接，异常也须回收；提交和后台执行不继承连接。
+    # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
+        from ..agent.io.sqlite_scope import sqlite_connection_scope
+
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
         if available <= 0:
@@ -832,14 +836,15 @@ class _BackgroundThreadLaneSupervisorMixin:
             if owner_slots <= 0:
                 continue
             try:
-                scheduler.prepare_tick(
-                    now=planned_at,
-                    include_orphan_supervision=False,
-                )
-                ready = scheduler.ready_thread_ids(
-                    now=planned_at,
-                    limit=per_owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
-                )
+                with sqlite_connection_scope(True):
+                    scheduler.prepare_tick(
+                        now=planned_at,
+                        include_orphan_supervision=False,
+                    )
+                    ready = scheduler.ready_thread_ids(
+                        now=planned_at,
+                        limit=per_owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
+                    )
             except Exception as exc:
                 _print_gateway_loop_error(
                     "gateway_background_main.plan",

@@ -1155,3 +1155,150 @@ def test_unreadable_execution_state_holds_child_under_completed_parent(
     assert decision.allowed is False
     assert decision.should_cancel is False
     assert decision.reason == "parent_execution_state_unavailable"
+
+
+# LLM: 原create_run生产真实locator/canonical后，仅移除本例临时canonical；计数不替换原读取实现。
+# 函数用途: 复现历史子任务清理后的重复加载，并保留稍后恢复原文件的真实字节。
+def _missing_canonical_case(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagents.services.agent_run_state import (
+        canonical_state_path_from_payload,
+    )
+
+    agent = SimpleAgent(AgentConfig(enable_tools=False, memory_path='memory.jsonl'), tmp_path)
+    task = agent.subagents.create_run(goal='missing canonical cache', agent_name='worker')
+    service = agent.subagents.persistence
+    locator = service.workspace / task.id / 'task.json'
+    payload = json.loads(locator.read_text(encoding='utf-8'))
+    canonical = canonical_state_path_from_payload(payload)
+    raw = canonical.read_bytes()
+    canonical.unlink()
+    stamp = locator.stat()
+    os.utime(locator, ns=(stamp.st_atime_ns, time.time_ns() - 10_000_000_000))
+    service._run_cache.clear()
+    original_load = service.load
+    original_read = Path.read_text
+    calls, reads = [], []
+
+    # LLM: Spy透传真实canonical loader；不把错误换成伪成功，也不改变磁盘读门。
+    # 函数用途: 计数每轮全量扫描是否又进入同一个缺失locator的重解析。
+    def load(run_id):
+        calls.append(run_id)
+        return original_load(run_id)
+
+    # LLM: 只计本例准确locator的打开，其他产品文件仍由原Path读口处理。
+    # 函数用途: 证明缓存命中不反复打开locator正文。
+    def read(path, *args, **kwargs):
+        if path == locator:
+            reads.append(path)
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(service, 'load', load)
+    monkeypatch.setattr(Path, 'read_text', read)
+    return SimpleNamespace(agent=agent, service=service, run_id=task.id, locator=locator,
+        canonical=canonical, raw=raw, payload=payload, calls=calls, reads=reads)
+
+
+def test_missing_canonical_locator_is_loaded_only_once_across_orphan_scans(tmp_path, monkeypatch):
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    for _ in range(5):
+        report = case.service.list_runs_report()
+        assert report.runs == []
+        assert len(report.load_errors) == 1 and report.load_errors[0]['run_id'] == case.run_id
+    assert case.calls == [case.run_id]
+    assert len(case.reads) <= 2
+
+
+def test_missing_canonical_cache_reloads_when_target_reappears(tmp_path, monkeypatch):
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    assert case.service.list_runs_report().load_errors
+    assert case.service.list_runs_report().load_errors
+    case.canonical.write_bytes(case.raw)
+    report = case.service.list_runs_report()
+    assert report.load_errors == [] and [run.id for run in report.runs] == [case.run_id]
+    assert case.calls == [case.run_id, case.run_id]
+    assert case.run_id not in getattr(case.service, '_missing_canonical_cache', {})
+
+
+def test_missing_canonical_cache_invalidates_on_locator_replace_with_old_mtime(tmp_path, monkeypatch):
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    assert case.service.list_runs_report().load_errors
+    assert case.service.list_runs_report().load_errors
+    target = case.canonical.parent.with_name('relocated') / case.canonical.name
+    target.parent.mkdir(parents=True)
+    canonical_payload = {**json.loads(case.raw), 'goal': 'relocated canonical', 'agent_run_workspace_dir': str(target.parent)}
+    target.write_text(json.dumps(canonical_payload), encoding='utf-8')
+    replacement = case.locator.with_suffix('.replacement')
+    replacement.write_text(json.dumps({**case.payload, 'agent_run_workspace_dir': str(target.parent)}), encoding='utf-8')
+    stamp = case.locator.stat()
+    os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    replacement.replace(case.locator)
+    report = case.service.list_runs_report()
+    assert report.load_errors == []
+    assert report.runs[0].goal == 'relocated canonical'
+    assert case.calls == [case.run_id, case.run_id]
+
+
+def test_recent_missing_canonical_is_not_cached_until_guard_window_expires(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagents.services.persistence import service as persistence_module
+
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    mtime = case.locator.stat().st_mtime_ns / 1e9
+    guard = case.service._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS
+    monkeypatch.setattr(persistence_module, '_now', lambda: mtime + guard / 2)
+    assert case.service.list_runs_report().load_errors
+    assert case.service.list_runs_report().load_errors
+    assert case.calls == [case.run_id, case.run_id]
+    assert case.run_id not in getattr(case.service, '_missing_canonical_cache', {})
+    monkeypatch.setattr(persistence_module, '_now', lambda: mtime + guard + 1)
+    assert case.service.list_runs_report().load_errors
+    assert case.service.list_runs_report().load_errors
+    assert case.calls == [case.run_id] * 3
+
+
+def test_deleted_locator_evicts_negative_cache_with_other_runs_still_present(tmp_path, monkeypatch):
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    assert case.service.list_runs_report().load_errors
+    cache = getattr(case.service, '_missing_canonical_cache', {})
+    assert case.run_id in cache
+    other = case.agent.subagents.create_run(goal='unrelated live run', agent_name='worker')
+    case.locator.unlink()
+    report = case.service.list_runs_report()
+    assert report.load_errors == [] and [run.id for run in report.runs] == [other.id]
+    assert case.run_id not in cache
+
+
+@pytest.mark.parametrize('failure', ['invalid_json', 'permission'])
+def test_nonmissing_canonical_errors_never_enter_negative_cache(tmp_path, monkeypatch, failure):
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    if failure == 'invalid_json':
+        case.locator.write_text('{broken', encoding='utf-8')
+    else:
+        # LLM: 合成权限错误不代表文件不存在；不得以负缓存将它固化为缺失。
+        # 函数用途: 保留每轮真实错误重试，不把权限失败静默成空任务列表。
+        def denied(run_id):
+            case.calls.append(run_id)
+            raise PermissionError('synthetic denied')
+
+        monkeypatch.setattr(case.service, 'load', denied)
+    assert case.service.list_runs_report().load_errors
+    assert case.service.list_runs_report().load_errors
+    assert case.calls == [case.run_id, case.run_id]
+    assert case.run_id not in getattr(case.service, '_missing_canonical_cache', {})
+
+
+def test_missing_canonical_cache_does_not_hide_symlink_retarget(tmp_path, monkeypatch):
+    case = _missing_canonical_case(tmp_path, monkeypatch)
+    link = case.canonical.parent.with_name('canonical-link')
+    link.symlink_to(case.canonical.parent, target_is_directory=True)
+    case.locator.write_text(json.dumps({**case.payload, 'agent_run_workspace_dir': str(link)}), encoding='utf-8')
+    stamp = case.locator.stat()
+    os.utime(case.locator, ns=(stamp.st_atime_ns, time.time_ns() - 10_000_000_000))
+    assert case.service.list_runs_report().load_errors
+    restored = case.canonical.parent.with_name('canonical-restored') / case.canonical.name
+    restored.parent.mkdir(parents=True)
+    restored.write_bytes(case.raw)
+    link.unlink()
+    link.symlink_to(restored.parent, target_is_directory=True)
+    report = case.service.list_runs_report()
+    assert report.load_errors == []
+    assert [run.id for run in report.runs] == [case.run_id]

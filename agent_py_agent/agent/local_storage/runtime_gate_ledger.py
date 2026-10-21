@@ -64,6 +64,8 @@ class LocalStoreRuntimeGateLedgerMixin:
             ).fetchone()
         return _runtime_gate_record_from_row(row) if row else None
 
+    # LLM: 保持按时间正序返回供调用方重放，但有界 limit 必须截取最新尾部记录，避免超长会话永远只看最早 500 条而漏掉近期失败与限流。
+    # 函数用途: 查询运行时门禁账本；在限制条数时先取最新 N 条再按时间升序返回。
     def list_runtime_gate_ledger(
         self,
         *,
@@ -78,10 +80,13 @@ class LocalStoreRuntimeGateLedgerMixin:
         with self._connection() as conn:
             rows = conn.execute(
                 f"""
-                SELECT * FROM runtime_gate_ledger
-                {where}
+                SELECT * FROM (
+                    SELECT * FROM runtime_gate_ledger
+                    {where}
+                    ORDER BY created_at DESC, operation_id DESC
+                    LIMIT ?
+                )
                 ORDER BY created_at ASC, operation_id ASC
-                LIMIT ?
                 """,
                 [*params, limit],
             ).fetchall()
