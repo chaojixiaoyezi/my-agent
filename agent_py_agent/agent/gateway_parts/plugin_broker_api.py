@@ -194,15 +194,16 @@ class PluginBrokerService:
             'result': result, 'telemetry_persisted': persisted}
 
 
-# LLM: 身份字段已由Service裁决；scripts/workflows的身份仅属Broker控制域，其他工具保留可信实参；路径/管理员覆盖仍拒绝。
-# 函数用途: 将脚本和工作流动作转换为受控工具调用。
+# LLM: 身份由Service裁决；恢复补丁及数据源仅透传给受控工具验证，不能覆盖宿主身份或路径。
+# 函数用途: 将脚本、工作流及其修复恢复动作转换为受控工具调用。
 def _execution_arguments(action, payload):
     if action == 'execute.tool':
         name, arguments = payload['tool_name'], payload.get('arguments', {})
     else:
         mapping = {'execute.script': ('scripts', 'run', 'script_id', ('inputs', 'override_data_sources')),
                    'execute.workflow': ('workflows', 'run', 'workflow_id', ('inputs',)),
-                   'execute.workflow_resume': ('workflows', 'resume', 'workflow_run_id', ('from_step_id',))}
+                   'execute.workflow_resume': ('workflows', 'resume', 'workflow_run_id',
+                                               ('from_step_id', 'patched_step_output', 'updated_data_sources'))}
         name, operation, id_key, options = mapping[action]
         arguments = {'action': operation, id_key: payload[id_key]}
         arguments.update({key: payload[key] for key in options if key in payload})

@@ -669,3 +669,29 @@ def test_source_permission_fail_closed(homes, permissions):
     grant.activation['host_api'] = permissions
     result = service.dispatch('assets.get', {'kind': 'script', 'id': 's'})['data']
     assert result['code'] == '' and result['source_redacted'] is True
+
+
+# LLM: Broker只调用明确授权的本地工具；实际脚本失败与补丁恢复贯穿同一运行账本。
+# 函数用途: 验证新恢复参数经Broker透传后完成真实工作流修复。
+def test_broker_patched_workflow_resume(homes):
+    from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
+    from agent_py_agent.agent.tooling.workflows_tool import WorkflowsTool
+    scripts, workflows = ScriptsTool(homes[0]), WorkflowsTool(homes[0])
+    # LLM: 测试invoker仅映射两种固定工具，不授予任意工具或跨Owner权限。
+    # 函数用途: 让Broker进入真实工作流工具执行入口。
+    def invoke(name, arguments):
+        return {'scripts': scripts, 'workflows': workflows}[name].execute(arguments)
+    service = broker.PluginBrokerService(homes[0], owner_id='providers/test/users/alice', tool_invoker=invoke)
+    assert service.dispatch('assets.save', {'kind': 'script', 'descriptor': {'id': 'bad', 'kind': 'script',
+        'name': '失败脚本', 'io_contract': {'outputs': ['value']}}, 'code': 'raise SystemExit(4)'})['ok']
+    assert service.dispatch('assets.save', {'kind': 'workflow', 'descriptor': {'id': 'repair', 'kind': 'workflow', 'name': '修复'},
+        'steps': [{'step_id': 'bad', 'name': '失败', 'mode': 'deterministic_script', 'script_id': 'bad'}]})['ok']
+    paused = service.dispatch('execute.workflow', {'workflow_id': 'repair'})['data']['result']
+    assert paused['status'] == 'paused_for_resume'
+    request = {'workflow_run_id': paused['workflow_run_id'], 'patched_step_output': {'value': 14}, 'updated_data_sources': []}
+    final = service.dispatch('execute.workflow_resume', request)
+    assert final['ok'] and final['data']['status'] == 'ok'
+    assert final['data']['result']['final_output'] == {'value': 14}
+    assert final['data']['result']['steps'][0]['status'] == 'escalated_recovered'
+    from agent_py_agent.agent.workflows import WorkflowRunStore
+    assert WorkflowRunStore(homes[0]).load_workflow_snapshot(paused['workflow_run_id'])['descriptor']['data_sources'] == []

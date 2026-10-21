@@ -2,9 +2,13 @@
 # 模块用途: 提供工作流CRUD、动态Skill绑定、运行、断点续跑及快照检查的Agent工具。
 from __future__ import annotations
 
+import inspect
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
+from ..common.log_redaction import redact_sensitive_value
+from ..common.nofollow_fs import read_text_beneath
 from .models import BaseTool
 from .scripts_tool import (
     _descriptor,
@@ -68,17 +72,47 @@ def _resolve_owner_skills(owner_home, step, context):
     return list(dict.fromkeys(found or ids))
 
 
-# LLM: 默认只汇总已分析键与匹配技能，不调用模型、不执行技能正文，不宣称业务推理完成。
-# 函数用途: 为未注入分析器的工具提供明确的结构化分析摘要。
-def _analysis_summary(step, resolved_skills, context):
+# LLM: 旧资产API缺include_body时复用同一安全发现顺序，正文仍从Owner根nofollow读取；不拼请求ID路径。
+# 函数用途: 兼容当前只返回元数据的技能getter，并优先使用新增的安全正文接口。
+def _skill_descriptor(owner_home, skill_id):
+    from ..assets.skill_adapter import (
+        _owner_skill_paths,
+        extract_skill_descriptor,
+        get_owner_skill_descriptor,
+    )
+    if 'include_body' in inspect.signature(get_owner_skill_descriptor).parameters:
+        return get_owner_skill_descriptor(owner_home, skill_id, include_body=True)
+    descriptor = get_owner_skill_descriptor(owner_home, skill_id)
+    for path in _owner_skill_paths(Path(owner_home), ()):
+        if extract_skill_descriptor(path)['id'] == descriptor['id']:
+            body = read_text_beneath(owner_home, path.relative_to(owner_home).parts)
+            return {**descriptor, 'body_markdown': body or ''}
+    raise FileNotFoundError('Owner技能正文不存在')
+
+
+# LLM: 正文仅由Owner安全发现接口加载，缺失技能不伪造正文；先脱敏再截断，不执行技能或模型。
+# 函数用途: 为未注入分析器的工具提供真实技能步骤预览和结构化分析摘要。
+def _analysis_summary(step, resolved_skills, context, *, owner_home):
+    summaries = []
+    for skill_id in resolved_skills:
+        try:
+            descriptor = _skill_descriptor(owner_home, skill_id)
+        except FileNotFoundError:
+            continue
+        safe = redact_sensitive_value(descriptor)
+        lines = safe.get('body_markdown', '').splitlines()
+        if lines and lines[0].strip() == '---':
+            lines = lines[next(i for i in range(1, len(lines)) if lines[i].strip() == '---') + 1:]
+        summaries.append({key: safe.get(key, '') for key in ('id', 'name', 'summary')} | {
+            'procedure_preview': '\n'.join(lines).strip()[:200]})
     return {'step_id': step.step_id, 'mode': step.mode, 'resolved_skills': list(resolved_skills),
-            'analyzed_keys': sorted((context or {}).keys()), 'status': 'analyzed'}
+            'analyzed_keys': sorted((context or {}).keys()), 'status': 'analyzed', 'skill_summaries': summaries}
 
 
-# LLM: 参与标记绑定当前回调本身，宿主替换为模型处理器后不继承默认摘要的零模型标记。
-# 函数用途: 适配引擎既有回调顺序并声明此处理器不调用模型。
-def _default_analysis_handler(step, context, resolved):
-    return _analysis_summary(SimpleNamespace(**step), resolved, context)
+# LLM: 当前回调只读宿主绑定Owner的技能正文，替换为模型处理器后不继承零模型标记。
+# 函数用途: 适配引擎回调顺序并传入可信Owner，不从步骤参数获取路径。
+def _default_analysis_handler(step, context, resolved, *, owner_home):
+    return _analysis_summary(SimpleNamespace(**step), resolved, context, owner_home=owner_home)
 
 
 _default_analysis_handler.llm_involved = False
@@ -91,6 +125,8 @@ class WorkflowsTool(BaseTool):
         ['list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run'], {
             **{key: {'type': 'string'} for key in ('workflow_id', 'step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
             'definition': {'type': 'object', 'description': 'descriptor、steps及body_markdown组成的工作流定义'},
+            'patched_step_output': {'type': 'object', 'description': '断点续跑时注入并经脚本IO契约校验的步骤修复输出'},
+            'updated_data_sources': {'type': ['object', 'array'], 'description': '断点续跑时更新的数据源配置'},
             'inputs': {'type': 'object'}})
     runtime_policy = _policy('workflows', ('list', 'get', 'inspect_run'), ('run', 'resume', 'delete'))
 
@@ -117,16 +153,18 @@ class WorkflowsTool(BaseTool):
             self.store = module.WorkflowStore(self.owner_home)
         return self.store
 
-    # LLM: 默认摘要回调不调模型；宿主注入Engine仍优先，不替换真实分析实现。
-    # 函数用途: 延迟取得与当前Owner相同的工作流执行器。
+    # LLM: 默认回调绑定可信Owner且标明不调模型；显式注入的Engine和后续模型回调替换仍优先。
+    # 函数用途: 延迟取得同Owner执行器，安全加载技能正文摘要。
     def _engine(self):
         if self.engine is None:
             module = _optional('workflows')
             if module is None:
                 raise RuntimeError('工作流模块未就绪，请宿主注入WorkflowEngine协议')
+            handler = partial(_default_analysis_handler, owner_home=self.owner_home)
+            handler.llm_involved = False
             self.engine = module.WorkflowEngine(self.owner_home,
                 skill_resolver=lambda step, context: _resolve_owner_skills(self.owner_home, step, context),
-                analysis_handler=_default_analysis_handler)
+                analysis_handler=handler)
         return self.engine
 
     # LLM: inspect历史失败是成功读取；只有本次run/resume业务未成功才返回执行失败，快照完整保留。
@@ -144,12 +182,13 @@ class WorkflowsTool(BaseTool):
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
-    # LLM: resume只接运行ID/可选步骤，定义和前缀来自c6冻结快照，不让实参覆盖历史输入。
-    # 函数用途: 以精确action分派CRUD、绑定、运行或检查。
+    # LLM: 恢复只允许显式修复输出与数据源变更；定义、输入与前缀仍由冻结快照裁决。
+    # 函数用途: 分派CRUD、绑定、运行、补丁恢复或快照检查。
     def _dispatch(self, params):
         action = params['action']
         if action == 'resume':
-            return _plain(self._engine().resume_workflow_run(params['workflow_run_id'], params.get('from_step_id')))
+            return _plain(self._engine().resume_workflow_run(params['workflow_run_id'], params.get('from_step_id'),
+                patched_step_output=params.get('patched_step_output'), updated_data_sources=params.get('updated_data_sources')))
         if action == 'inspect_run':
             return _plain(self._engine().store.load_run(params['workflow_run_id']))
         store = self._store()

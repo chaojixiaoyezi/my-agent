@@ -688,3 +688,107 @@ def test_invalid_store_definition_never_falls_back(tmp_path, monkeypatch):
     with pytest.raises((ValueError, TypeError)):
         engine.run_workflow('daily')
     assert engine.store.list_runs() == []
+
+
+# LLM: 补丁输出仅替代失败步骤，不重新执行原失败脚本，后缀仍走真实runner。
+# 函数用途: 验证修复指引、契约拒绝、别名入口和补丁续跑的持久化闭环。
+def test_repair_guide_and_patched_resume(tmp_path):
+    folder = script(tmp_path, 'raise SystemExit(4)')
+    script(tmp_path, 'import json,sys;print(json.dumps({"value":json.load(sys.stdin)["v"]+1}))', script_id='tail')
+    engine = WorkflowEngine(tmp_path)
+    run = engine.run_workflow(workflow(step(), step('tail', script_id='tail', inputs_map={'v': {'step_id': 'collect', 'key': 'value'}})))
+    assert 'repair_guide' in run.steps[0].escalation_result
+    guide = run.steps[0].escalation_result['repair_guide']
+    assert (guide['failed_step_id'], guide['script_id'], guide['error_code']) == ('collect', 'collect', 'SCRIPT_EXIT_NONZERO')
+    assert guide['io_contract']['outputs'] == ['value']
+    assert tuple(guide['resume_options']) == ('patched_step_output', 'updated_data_sources', 'rerun_from_step')
+    before = engine.store.load_run(run.workflow_run_id)
+    with pytest.raises(ValueError, match='修复输出不符合脚本契约: SCRIPT_MISSING_OUTPUT_KEYS'):
+        engine.resume_workflow_run(run.workflow_run_id, patched_step_output={})
+    assert engine.store.load_run(run.workflow_run_id) == before
+    assert hasattr(engine, 'resume_workflow')
+    final = engine.resume_workflow(run.workflow_run_id, patched_step_output={'value': 8})
+    repaired = final.steps[0]
+    assert final.status == 'succeeded' and final.final_output == {'value': 9}
+    assert repaired.status == 'escalated_recovered' and repaired.llm_involved and not repaired.needs_repair
+    assert repaired.error_code == repaired.error_message == final.failed_step_id == ''
+    assert repaired.escalation_result['repaired_via'] == 'patched_step_output'
+    assert engine.store.load_run(final.workflow_run_id) == final
+    assert (folder / 'main.py').read_text() == 'raise SystemExit(4)'
+
+
+# LLM: 更新只属于同一运行的冻结定义，不改资产；空容器也表示显式清空，不可被truthiness吞掉。
+# 函数用途: 验证字典及列表数据源覆盖会跨引擎重建保留且真实传入脚本。
+@pytest.mark.parametrize('sources', [{'active': ['new']}, [], {}])
+def test_resume_sources_survive_restart_and_clear(tmp_path, sources):
+    script(tmp_path, 'import json,os;print(json.dumps({"value":json.loads(os.environ["MY_AGENT_DATA_SOURCES_JSON"])}))')
+    definition = workflow(step(), step('broken', script_id='missing'))
+    engine = WorkflowEngine(tmp_path)
+    first = engine.run_workflow(definition)
+    changed = engine.resume_workflow_run(first.workflow_run_id, 'collect', updated_data_sources=sources)
+    assert changed.steps[0].output_snapshot == {'value': sources}
+    snapshot = json.loads((engine.store.run_dir(first.workflow_run_id) / 'workflow_snapshot.json').read_text())
+    assert snapshot['descriptor']['data_sources'] == sources
+    assert engine.store.load_workflow_snapshot(first.workflow_run_id)['descriptor']['data_sources'] == sources
+    again = WorkflowEngine(tmp_path).resume_workflow_run(first.workflow_run_id, 'collect')
+    assert again.steps[0].output_snapshot == {'value': sources}
+    assert 'data_sources' not in definition['descriptor']
+
+
+# LLM: 参数非法时不发布运行或冻结快照变更，避免补丁验证之前先改数据源。
+# 函数用途: 覆盖恢复参数类型与非法合同的无副作用拒绝。
+@pytest.mark.parametrize('options', [{'patched_step_output': []}, {'updated_data_sources': '[]'},
+    {'patched_step_output': {}, 'updated_data_sources': {'new': True}}])
+def test_invalid_repair_does_not_change_run(tmp_path, options):
+    script(tmp_path, 'raise SystemExit(4)')
+    engine = WorkflowEngine(tmp_path)
+    run = engine.run_workflow(workflow(step()))
+    before = (engine.store.run_dir(run.workflow_run_id) / 'run.json').read_bytes()
+    with pytest.raises(ValueError):
+        engine.resume_workflow_run(run.workflow_run_id, **options)
+    assert (engine.store.run_dir(run.workflow_run_id) / 'run.json').read_bytes() == before
+    assert not (engine.store.run_dir(run.workflow_run_id) / 'workflow_snapshot.json').exists()
+
+
+# LLM: 输出补丁不能证明进程组已清理；清理失败暂停必须保留，不能通过注入输出绕过。
+# 函数用途: 复现并守住人工修复入口的进程清理硬门禁。
+def test_repair_cannot_override_cleanup_failure(tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows import script_runner as module
+    # LLM: 回收真实进程后注入确定性清理拒绝，不留下后台进程。
+    # 函数用途: 生成带未验证清理上下文的真实脚本结果。
+    def deny_cleanup(process):
+        process.wait(timeout=3)
+        raise PermissionError('simulated cleanup denial')
+    script(tmp_path)
+    monkeypatch.setattr(module, '_terminate', deny_cleanup)
+    engine = WorkflowEngine(tmp_path)
+    run = engine.run_workflow(workflow(step()))
+    assert run.status == 'paused_for_resume'
+    assert run.steps[0].escalation_result['cleanup_error']['group_cleanup_verified'] is False
+    with pytest.raises(ValueError, match='进程组清理未验证'):
+        engine.resume_workflow_run(run.workflow_run_id, patched_step_output={'value': 9})
+    assert engine.store.load_run(run.workflow_run_id) == run
+
+
+# LLM: 资产摘要必须覆盖两种中断出口；尽力摘要失败不能吞掉中断或改变账本事实。
+# 函数用途: 复现中断后的摘要遗漏，并验证恢复成功再次结算摘要。
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit])
+def test_interruption_updates_workflow_summary(tmp_path, interruption):
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStore
+    # LLM: 在真实分析入口模拟中断，后续恢复使用另一分析器。
+    # 函数用途: 触发保存暂停事实后原样传播的控制流。
+    def interrupt(*args):
+        raise interruption
+    definition = workflow(step('judge', mode='llm_skill_analysis', script_id=''))
+    definition['descriptor'].update(kind='workflow', name='daily')
+    assets, engine = WorkflowStore(tmp_path), WorkflowEngine(tmp_path, analysis_handler=interrupt)
+    assets.save_workflow(WorkflowDefinition.from_dict(definition))
+    with pytest.raises(interruption):
+        engine.run_workflow('daily')
+    record, = engine.store.list_runs()
+    summary = assets.get_workflow('daily').descriptor.runtime_summary
+    assert record.status == 'paused_for_resume'
+    assert summary.run_count == 1 and summary.last_status == 'paused_for_resume'
+    final = WorkflowEngine(tmp_path, analysis_handler=lambda *args: {}).resume_workflow_run(record.workflow_run_id)
+    assert final.status == 'succeeded'
+    assert assets.get_workflow('daily').descriptor.runtime_summary.run_count == 2

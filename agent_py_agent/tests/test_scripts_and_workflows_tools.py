@@ -434,8 +434,9 @@ def test_default_workflow_skill_analysis(api, tmp_path, mode, match):
     expected = ['missing-id'] if match == 'fallback' else ['audit-id']
     assert run['steps'][0]['resolved_skill_ids'] == expected
     assert run['steps'][0]['llm_involved'] is False
+    summaries = [] if match == 'fallback' else [{'id': 'audit-id', 'name': 'audit-name', 'summary': '日志异常分析', 'procedure_preview': '只读分析'}]
     assert run['final_output'] == {'step_id': 'judge', 'mode': mode, 'resolved_skills': expected,
-                                   'analyzed_keys': ['judge'] if mode == 'hybrid' else [], 'status': 'analyzed'}
+                                   'analyzed_keys': ['judge'] if mode == 'hybrid' else [], 'status': 'analyzed', 'skill_summaries': summaries}
 
 
 # LLM: 同形JSON字符串不是原生结构，预检拒绝时不能创建Owner或进入后端。
@@ -477,3 +478,41 @@ def test_default_resolver_does_not_match_reference_keys(api, tmp_path):
     call(tool, 'save', workflow_id='daily', definition=data)
     run = call(tool, 'run', workflow_id='daily')
     assert run['steps'][0]['resolved_skill_ids'] == []
+
+
+# LLM: 工具使用真实资产与运行账本；修复输出必须经过Schema和脚本契约而不是直接改状态。
+# 函数用途: 验证工具补丁恢复、摘要回写及全流程修复标记清除。
+def test_tool_patched_resume_and_workflow_summary(api, tmp_path):
+    scripts, workflows = api
+    register(scripts(tmp_path), code='raise SystemExit(4)')
+    tool = workflows(tmp_path)
+    data = definition()
+    data['steps'] = data['steps'][:1]
+    call(tool, 'save', workflow_id='daily', definition=data)
+    paused = json.loads(tool.execute({'action': 'run', 'workflow_id': 'daily'}).output)
+    assert paused['status'] == 'paused_for_resume'
+    assert 'patched_step_output' in tool.model_spec.input_schema['properties']
+    bad = tool.execute({'action': 'resume', 'workflow_run_id': paused['workflow_run_id'], 'patched_step_output': {}})
+    assert not bad.ok and bad.error_code == 'TOOL_INVALID_ARGUMENTS'
+    final = call(workflows(tmp_path), 'resume', workflow_run_id=paused['workflow_run_id'], patched_step_output={'value': 12})
+    assert final['status'] == 'succeeded' and final['steps'][0]['status'] == 'escalated_recovered'
+    summary = call(tool, 'get', workflow_id='daily')['descriptor']['runtime_summary']
+    assert summary['run_count'] == 2 and summary['last_status'] == 'succeeded'
+
+
+# LLM: 真实技能正文只读取并脱敏截断，不执行其中命令；返回事实摘要不是模型推理。
+# 函数用途: 验证默认分析加载技能描述和安全procedure_preview。
+def test_default_analysis_loads_real_skill_summaries(api, tmp_path):
+    root = tmp_path / 'skills' / 'audit'
+    root.mkdir(parents=True)
+    (root / 'SKILL.md').write_text('---\nid: audit-id\nname: audit\ndescription: 诊断步骤\n---\n先查错误\npassword="test-only-secret"\n' + '继续只读核验。' * 100)
+    tool, data = api[1](tmp_path), definition()
+    data['steps'] = [{'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis', 'skill_tags': ['诊断']}]
+    call(tool, 'save', workflow_id='daily', definition=data)
+    run = call(tool, 'run', workflow_id='daily')
+    assert 'skill_summaries' in run['final_output']
+    row, = run['final_output']['skill_summaries']
+    assert (row['id'], row['name'], row['summary']) == ('audit-id', 'audit', '诊断步骤')
+    assert '先查错误' in row['procedure_preview'] and len(row['procedure_preview']) <= 200
+    assert 'test-only-secret' not in row['procedure_preview']
+    assert not run['steps'][0]['llm_involved']
