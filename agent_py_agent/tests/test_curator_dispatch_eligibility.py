@@ -141,6 +141,7 @@ def test_daily_finalize_still_runs_without_candidate_trigger(tmp_path):
 def _curator_clock(monkeypatch, instant, local_zone):
     import time
     from contextlib import contextmanager
+    from pathlib import Path
 
     from agent_py_agent.agent import owner_wake_discovery
 
@@ -152,6 +153,9 @@ def _curator_clock(monkeypatch, instant, local_zone):
         try:
             with monkeypatch.context() as patch:
                 if has_tzset:
+                    if not (Path('/usr/share/zoneinfo') / local_zone).is_file():
+                        import tzdata
+                        patch.setenv('TZDIR', str(Path(tzdata.__file__).resolve().parent / 'zoneinfo'))
                     patch.setenv('TZ',local_zone)
                     time.tzset()
                 else:
