@@ -892,6 +892,48 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     return False
 
 
+_TASK_STATUS_CACHE_MAX_ENTRIES_COUNT = 32768
+_TASK_STATUS_CACHE_LOCK = threading.Lock()
+_TASK_STATUS_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], str, str]] = OrderedDict()
+
+
+# LLM: 仅缓存物理指纹未变文件的 (task_id, status) 字符串投影；读取或解析失败返回 None 且不写缓存。
+# 函数用途: 读取任务链接或运行状态文件的 task_id 与 status，未变化文件复用内存指纹快照。
+def _read_cached_task_status_fields(path: Path) -> tuple[str, str] | None:
+    try:
+        before_st = path.stat()
+    except OSError:
+        return None
+    before_fp = (before_st.st_ino, before_st.st_size, before_st.st_mtime_ns, before_st.st_ctime_ns)
+    key = str(path)
+    with _TASK_STATUS_CACHE_LOCK:
+        cached = _TASK_STATUS_CACHE.get(key)
+        if cached is not None and cached[0] == before_fp:
+            _TASK_STATUS_CACHE.move_to_end(key)
+            return cached[1], cached[2]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    task_id = str(payload.get("task_id") or "").strip()
+    status = str(payload.get("status") or "").strip()
+    try:
+        after_st = path.stat()
+    except OSError:
+        after_st = None
+    if after_st is not None:
+        after_fp = (after_st.st_ino, after_st.st_size, after_st.st_mtime_ns, after_st.st_ctime_ns)
+        if after_fp == before_fp:
+            with _TASK_STATUS_CACHE_LOCK:
+                _TASK_STATUS_CACHE[key] = (after_fp, task_id, status)
+                _TASK_STATUS_CACHE.move_to_end(key)
+                while len(_TASK_STATUS_CACHE) > _TASK_STATUS_CACHE_MAX_ENTRIES_COUNT:
+                    _TASK_STATUS_CACHE.popitem(last=False)
+    return task_id, status
+
+
 def unfinished_task_ids(
     owner_home: Path,
     *,
@@ -921,14 +963,11 @@ def unfinished_task_ids(
     link_statuses: dict[str, set[str]] = {}
     link_files, link_dirs = _conversation_task_link_scan(links_root, conversation_tasks_dir)
     for path in link_files:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
+        fields = _read_cached_task_status_fields(path)
+        if fields is None:
             continue
-        if not isinstance(payload, dict):
-            continue
-        task_id = str(payload.get("task_id") or "").strip()
-        status = str(payload.get("status") or "").strip().lower()
+        task_id, raw_status = fields
+        status = raw_status.lower()
         if task_id:
             link_statuses.setdefault(task_id, set()).add(status)
         if task_id and status == THREAD_TASK_LINK_ACTIVE_STATUS and task_id not in active_ids:
@@ -950,14 +989,12 @@ def unfinished_task_ids(
         return []
     ledger_ids: set[str] = set()
     for path in task_files:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
+        fields = _read_cached_task_status_fields(path)
+        if fields is None:
             continue
-        if isinstance(payload, dict) and str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
-            task_id = str(payload.get("task_id") or "").strip()
-            if task_id:
-                ledger_ids.add(task_id)
+        task_id, raw_status = fields
+        if raw_status.upper() in _UNFINISHED_RUN_STATUSES and task_id:
+            ledger_ids.add(task_id)
     candidates = [task_id for task_id in active_ids if task_id in ledger_ids]
     return _filter_by_runtime_authority(
         owner_home,
@@ -1428,8 +1465,13 @@ def existing_conversation_store_roots(owner_home: str | Path) -> tuple[Path, ...
 def _has_pending_wake_signal(store_root: Path) -> bool:
     # wake_queue/{urgent,normal} 里的文件即待处理(处理过的会被挪进 handled/)。
     for kind in ("urgent", "normal"):
-        if any((store_root / "wake_queue" / kind).glob("*.json")):
-            return True
+        directory = store_root / "wake_queue" / kind
+        try:
+            with os.scandir(directory) as entries:
+                if any(entry.name.endswith(".json") for entry in entries):
+                    return True
+        except OSError:
+            continue
     return False
 
 

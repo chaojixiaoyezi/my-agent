@@ -920,9 +920,12 @@ class RuntimeRepository(
 
     # LLM: This upgrade repair trusts only the current_attempt pointer, never PID age or model
     # prose. A non-current pending/running row has no execution authority and must use the same
-    # UNKNOWN/DIRTY cleanup as live takeover. Owner supervision calls this as an idempotent no-op.
-    # 函数用途: 清理旧版本遗留的非 current 幽灵运行轮，返回实际收口的 attempt ID。
+    # UNKNOWN/DIRTY cleanup as live takeover. Owner supervision calls this as an idempotent no-op;
+    # precheck read-only first so steady-state ticks do not acquire BEGIN IMMEDIATE or scan full tables.
+    # 函数用途: 清理旧版本遗留的非 current 幽灵运行轮，无候选时只读返回，避免空转写锁。
     def reconcile_superseded_attempts(self, *, now: float | None = None) -> list[str]:
+        if not self._has_reconcilable_superseded_or_terminal_ops():
+            return []
         current = time.time() if now is None else now
         reconciled: list[str] = []
         with self.transaction() as conn:
@@ -954,6 +957,32 @@ class RuntimeRepository(
             #   这类孤儿不在上面的换代范围内（ended_at>0 已被排除），需要独立清扫。
             self._cleanup_terminal_attempt_operations_conn(conn, now=current)
         return reconciled
+
+    # LLM: 只读探测是否存在非 current 的未结 attempt 或终态 attempt 下残留的未结工具操作；
+    #   仅决定是否开启写事务，真实收敛仍在原 transaction 内复核并提交。
+    # 函数用途: 在开启写锁前快速判断是否有待收口的旧运行轮或残留工具操作。
+    def _has_reconcilable_superseded_or_terminal_ops(self) -> bool:
+        terminal = sorted(_ATTEMPT_TERMINAL_STATUSES)
+        placeholders = ",".join("?" for _ in terminal)
+        with self._runtime_connection() as conn:
+            stale_attempt = conn.execute(
+                "SELECT 1 FROM agent_runs ar JOIN agent_attempts aa "
+                "ON aa.agent_run_id = ar.agent_run_id "
+                "WHERE ar.current_attempt_id != '' "
+                "AND aa.attempt_id != ar.current_attempt_id "
+                "AND aa.status IN (?, 'running') AND aa.ended_at = 0 LIMIT 1",
+                (ATTEMPT_STATUS_PENDING,),
+            ).fetchone()
+            if stale_attempt is not None:
+                return True
+            stale_op = conn.execute(
+                "SELECT 1 FROM tool_operations op JOIN agent_attempts aa "
+                "ON aa.attempt_id = op.attempt_id "
+                f"WHERE (op.status = ? OR (op.status = ? AND op.handler_started_at > 0)) "
+                f"AND aa.ended_at > 0 AND aa.status IN ({placeholders}) LIMIT 1",
+                (OP_EXECUTING, OP_CLAIMED, *terminal),
+            ).fetchone()
+            return stale_op is not None
 
     # LLM: 终态 attempt 下残留的 CLAIMED/EXECUTING 操作没有任何回收路径：EXECUTING→UNKNOWN
     #   只在换代事务里发生，而执行器死亡（attempt 直接标 unknown）、孤儿回收与人工 /recover

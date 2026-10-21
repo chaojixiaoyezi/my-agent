@@ -807,3 +807,34 @@ def test_c4_pidfd_unsupported_fallback_closes_handle(c4_signal_case, monkeypatch
         os.fstat(case.opened[0])
     loader.assert_not_called()
     installer.os.kill.assert_not_called()
+
+
+@pytest.mark.parametrize('machine', ['x86_64', 'amd64'])
+def test_c4_pidfd_open_syscall_fallback_when_os_pidfd_open_missing(fake_install_proc, monkeypatch, machine):
+    from unittest.mock import Mock
+
+    case = fake_install_proc
+    _proc_entry(case.proc, 703, case.executable, argv=['python3'])
+    identity = installer._process_identity(703)
+    monkeypatch.delattr(installer.os, 'pidfd_open', raising=False)
+    monkeypatch.delattr(signal, 'pidfd_send_signal', raising=False)
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setattr(os, 'uname', lambda: SimpleNamespace(machine=machine))
+    monkeypatch.setattr(installer.os, 'kill', Mock(side_effect=AssertionError('不能回落裸PID信号')))
+    r_fd, w_fd = os.pipe()
+    os.close(w_fd)
+    calls = []
+
+    def fake_syscall(number, *args):
+        calls.append((number, args))
+        if number == 434:
+            return r_fd
+        if number == 424:
+            return 0
+        raise AssertionError(f'unexpected syscall {number}')
+
+    monkeypatch.setattr(ctypes, 'CDLL', Mock(return_value=SimpleNamespace(syscall=fake_syscall)))
+    installer._signal_process(703, identity, signal.SIGTERM)
+    assert calls == [(434, (703, 0)), (424, (r_fd, int(signal.SIGTERM), None, 0))]
+    with pytest.raises(OSError):
+        os.fstat(r_fd)

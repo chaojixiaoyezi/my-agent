@@ -2838,27 +2838,31 @@ def _skip_pending_wake_signal(
         is not None
     ):
         return True
-    if signal.thread_id in reported and not _is_scheduler_wake_signal(signal):
-        # One model turn already owns this thread for the current tick.
-        return True
     if _reported_audit_finding_wake(scheduler, signal):
         # Provider receipts are the delivery authority after a publish crash.
         scheduler._mark_signal(signal, current, handled)
         return True
-    if _successful_completion_waiting_for_batch(scheduler, signal, current):
-        return True
     from .process_events import process_completion_delivery_state
 
-    if (not _wake_survives_inactive_root(signal)
-        and _wake_signal_root_is_inactive(scheduler.store, signal)):
+    if (
+        not _wake_survives_inactive_root(signal)
+        and _wake_signal_root_is_inactive(scheduler.store, signal)
+    ):
         completion = process_completion_delivery_state(scheduler.runtime.agent, signal)
-        if completion:
-            return completion != "ready"
-        # Ordinary late child lifecycle signals cannot revive an inactive root.
-        scheduler._mark_signal(signal, current, handled)
+        if not completion:
+            # Ordinary late child lifecycle signals cannot revive an inactive root.
+            scheduler._mark_signal(signal, current, handled)
+            return True
+        if completion != "ready":
+            return True
+    if signal.thread_id in reported and not _is_scheduler_wake_signal(signal):
+        # One model turn already owns this thread for the current tick.
+        return True
+    if _successful_completion_waiting_for_batch(scheduler, signal, current):
         return True
     return False
 # LLM: 批次执行先经过 scheduler 共享的供应冷却，再沿原耐久 wake 确认；runtime 已提交 canonical 回复，这里不能另存正文。
+#   若主信号在 _run_wake_signal 内已作为失效/取消来源结案（report=None 且已不在 pending），释放尚未结案的同批兄弟信号，避免误做 30 秒失败退避。
 # 函数用途: 运行一批同源唤醒、登记调度结果并处理确认或退避，不创建第二条通知主链。
 def _consume_wake_signal_batch(
     scheduler: BackgroundMainAgentScheduler,
@@ -2879,6 +2883,14 @@ def _consume_wake_signal_batch(
         partial(scheduler._run_wake_signal, execution_signal, now=current),
     )
     if report is None:
+        if scheduler.store.wakes.pending_one(execution_signal.wake_signal_id) is None:
+            handled.add(execution_signal.wake_signal_id)
+            for member in wake_batch[1:]:
+                if scheduler.store.wakes.pending_one(member.wake_signal_id) is None:
+                    handled.add(member.wake_signal_id)
+                else:
+                    attempted.discard(member.wake_signal_id)
+            return
         _defer_failed_wake_batch(scheduler, wake_batch, execution_signal, current)
         return
     # 正文由 runtime 统一提交；所有后台车道只把调度报告放进返回列表。
@@ -3346,12 +3358,26 @@ def _observation_batch_semantics(
     }
 
 
+# LLM: 优先按 task_id 单条读取任务关联判断根任务是否已非 active；不兼容直读的测试桩回退 list_report。
+# 函数用途: 判断唤醒信号绑定的根任务是否已离开 active 状态。
 def _wake_signal_root_is_inactive(store: object, signal: WakeSignal) -> bool:
     root_task_id = str(getattr(signal, "root_task_id", "") or "").strip()
     if not root_task_id:
         return False
+    tasks_store = getattr(store, "tasks", None)
+    load_report = getattr(tasks_store, "load_report", None)
+    if callable(load_report):
+        try:
+            link, error = load_report(root_task_id)
+        except Exception:
+            return False
+        if error is not None or link is None:
+            return False
+        if str(getattr(link, "thread_id", "") or "") != str(signal.thread_id or ""):
+            return False
+        return str(getattr(link, "status", "") or "").strip().lower() != "active"
     try:
-        links, _load_errors = store.tasks.list_report(signal.thread_id)
+        links, _load_errors = tasks_store.list_report(signal.thread_id)
     except Exception:
         return False
     return any(
@@ -3555,13 +3581,23 @@ def _ready_background_thread_ids(
         ready.append(normalized)
 
     for signal in scheduler.store.wakes.pending(limit=0):
+        if limit > 0 and len(ready) >= limit:
+            break
+        normalized = str(signal.thread_id or "").strip()
+        if not normalized or normalized in seen:
+            continue
         if _wake_waits_this_tick(scheduler, signal, current):
             continue
-        append(signal.thread_id, signal.root_task_id)
+        append(normalized, signal.root_task_id)
     for observation in scheduler.store.observations.unhandled_requiring_main(limit=0):
+        if limit > 0 and len(ready) >= limit:
+            break
+        normalized = str(observation.thread_id or "").strip()
+        if not normalized or normalized in seen:
+            continue
         if _observation_waits_for_linked_wake(scheduler.store, observation):
             continue
-        append(observation.thread_id, observation.root_task_id)
+        append(normalized, observation.root_task_id)
     enabled, _load_errors = scheduler.store.progress.list_report(enabled_only=True)
     due = [policy for policy in enabled if policy.next_due_at <= current]
     runnable, _suppressed = _runnable_due_policies(
@@ -3920,13 +3956,22 @@ class _BackgroundSchedulerTickMixin:
         except Exception:  # noqa: BLE001 读不到=fail-closed 不自动补字条
             return False
 
+    # LLM: 任务的 work_kind(link 权威)；优先按 task_id 单条读取，读不到返回空串(fail-open 补字条)。
+    # 函数用途: 查询会话任务的工作类型，供定时调度判断是否属于命名工作。
     def _task_work_kind(self, task_id: str) -> str:
         """任务的 work_kind(link 权威); 读不到返回空串(fail-open 补字条)。"""
         try:
-            thread = self.store.tasks.thread_for(task_id)
+            tasks_store = getattr(self.store, "tasks", None)
+            load_report = getattr(tasks_store, "load_report", None)
+            if callable(load_report):
+                link, error = load_report(task_id)
+                if error is None and link is not None:
+                    return str(getattr(link, "work_kind", "") or "").strip().lower()
+                return ""
+            thread = tasks_store.thread_for(task_id)
             if thread is None:
                 return ""
-            links, _errors = self.store.tasks.list_report(thread.thread_id)
+            links, _errors = tasks_store.list_report(thread.thread_id)
             for link in links:
                 if str(getattr(link, "task_id", "") or "") == task_id:
                     return str(getattr(link, "work_kind", "") or "").strip().lower()
@@ -3934,6 +3979,8 @@ class _BackgroundSchedulerTickMixin:
             pass
         return ""
 
+    # LLM: 热层唤醒前核 link 状态；优先按 task_id 单条读取，文件缺失判 missing，损坏或异常判 unknown。
+    # 函数用途: 区分任务关联处于活跃、终态、缺失或读取未知，阻止终态任务被定时闹钟复活。
     def _task_link_status(self, thread_id: str, task_id: str) -> str:
         """热层唤醒前核 link 状态: active/terminal/missing/unknown。
 
@@ -3942,8 +3989,23 @@ class _BackgroundSchedulerTickMixin:
         生命周期 wake 在任务终态后直接作废, 不能复活任务。unknown(账本读
         失败)不在这里作废, 唤醒信号照发, 由消费链 _wake_signal_root_is_
         inactive 再核(fail-open, 读失败不丢闹钟)。"""
+        tasks_store = getattr(self.store, "tasks", None)
+        load_report = getattr(tasks_store, "load_report", None)
+        if callable(load_report):
+            try:
+                link, error = load_report(task_id)
+            except Exception:  # noqa: BLE001
+                return "unknown"
+            if error is not None:
+                if str(error.get("error_type") or "") == "FileNotFoundError":
+                    return "missing"
+                return "unknown"
+            if link is None or str(getattr(link, "thread_id", "") or "") != str(thread_id or ""):
+                return "missing"
+            status = str(getattr(link, "status", "") or "").strip().lower()
+            return "active" if status == "active" else "terminal"
         try:
-            links, _errors = self.store.tasks.list_report(thread_id)
+            links, _errors = tasks_store.list_report(thread_id)
         except Exception:  # noqa: BLE001
             return "unknown"
         status = None
@@ -5391,11 +5453,25 @@ def _is_running_durable_audit_root_policy(store: object, policy: ProgressPolicy)
     )
 
 
+# LLM: 优先按 policy.task_id 单条读取任务关联判断终态，不兼容直读的测试桩回退 list(thread_id)。
+# 函数用途: 判断进度策略观察的任务关联是否已进入可退休终态。
 def _policy_task_link_is_terminal(store, policy: ProgressPolicy) -> bool:
     if not policy.task_id:
         return False
+    tasks_store = getattr(store, "tasks", None)
+    load_report = getattr(tasks_store, "load_report", None)
+    if callable(load_report):
+        try:
+            link, error = load_report(policy.task_id)
+        except Exception:
+            return False
+        if error is not None or link is None:
+            return False
+        if str(getattr(link, "thread_id", "") or "") != str(policy.thread_id or ""):
+            return False
+        return str(getattr(link, "status", "") or "").upper() in _POLICY_RETIRE_TERMINAL_STATUSES
     try:
-        links = store.tasks.list(policy.thread_id)
+        links = tasks_store.list(policy.thread_id)
     except Exception:
         return False
     for link in links:

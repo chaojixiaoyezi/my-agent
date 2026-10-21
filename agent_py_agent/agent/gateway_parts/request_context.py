@@ -600,8 +600,9 @@ def _gateway_subagent_completion_context(
 
 # LLM: A continued foreground turn gets a new task id while retaining the same canonical task
 # workspace. Exact task-link path equality is the only lineage join; prompt prose and cwd do not
-# participate, and detached named work remains outside the ordinary lineage.
-# 函数用途: 找出当前持续工作目录在同一 thread 中使用过的结构化主任务 id，供后续轮接回早先 child 交付。
+# participate, detached named work remains outside the ordinary lineage, and raw task_path strings
+# are memoized within the call so repeated links do not repeat Path.resolve(strict=True) syscalls.
+# 函数用途: 找出当前持续工作目录在同一 thread 中使用过的结构化主任务 id，按原始路径去重复用路径解析结果。
 def _gateway_workspace_lineage_task_ids(
     store: object,
     thread_id: str,
@@ -620,12 +621,20 @@ def _gateway_workspace_lineage_task_ids(
         )
         return {current_task_id}
     load_errors.extend(error for error in errors if isinstance(error, dict))
+    resolved_cache: dict[str, str] = {"": ""}
+
+    def _resolved_link_path(raw_value: object) -> str:
+        key = str(raw_value or "").strip()
+        if key not in resolved_cache:
+            resolved_cache[key] = _existing_gateway_workspace_path(key)
+        return resolved_cache[key]
+
     selected = {
         str(getattr(link, "task_id", "") or "").strip()
         for link in links
         if str(getattr(link, "task_id", "") or "").strip()
         if str(getattr(link, "cancellation_scope", "") or "").strip().lower() != "detached"
-        if _existing_gateway_workspace_path(getattr(link, "task_path", "")) == task_path
+        if _resolved_link_path(getattr(link, "task_path", "")) == task_path
     }
     selected.add(current_task_id)
     return selected

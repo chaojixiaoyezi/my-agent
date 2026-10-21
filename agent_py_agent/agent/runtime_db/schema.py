@@ -181,6 +181,7 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_tool_operations_attempt ON tool_operations(attempt_id)",
     "CREATE INDEX IF NOT EXISTS idx_tool_operations_run ON tool_operations(agent_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_status ON tool_operations(status)",
     # 资源锁（G.6）：holder instance + PID/start token + attempt generation +
     # workspace_epoch + lease。UNIQUE(canonical_scope) = 同一资源至多一个持有者。
     """
@@ -394,6 +395,7 @@ _RUNTIME_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
     "CREATE INDEX IF NOT EXISTS idx_task_runs_closed_at ON task_runs(closed_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_tool_operations_status ON tool_operations(status)",
 )
 
 

@@ -588,14 +588,19 @@ class _SchedulerRunOperations:
             active[str(run["job_id"])] = deepcopy(run)
         return active, errors
 
+    # LLM: 绑定活跃 run 的唤醒信号编号；若已绑定同一编号则跳过无变化的整库重写与配额扫描。
+    # 函数用途: 记录当前排队或等待中的定时运行所关联的唤醒信号编号。
     def attach_wake_signal(self, run_id: str, wake_signal_id: str) -> None:
+        normalized_wake_id = str(wake_signal_id or "")
         with self._mutation_scope() as (store, admission):
             run = self._require_run(store, run_id)
             if run["status"] not in _ACTIVE_RUN_STATUSES:
                 return
+            if str(run.get("wake_signal_id") or "") == normalized_wake_id:
+                return
             store["runs"][run_id] = {
                 **run,
-                "wake_signal_id": str(wake_signal_id or ""),
+                "wake_signal_id": normalized_wake_id,
                 "updated_at": time.time(),
             }
             self._write_store_unlocked(store, admission)

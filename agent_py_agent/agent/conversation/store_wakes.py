@@ -2,8 +2,11 @@
 # 模块用途: 保存唤醒、配对观察、宿主认证义务与处理回执；模型正文仍归原投递冻结，不运行模型。
 from __future__ import annotations
 
+import copy
 import json
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -99,17 +102,47 @@ def _read_wake_signal_payload(path: Path) -> tuple[dict[str, Any] | None, dict[s
         return None, report
 
 
+_WAKE_SIGNAL_MODEL_CACHE_MAX_ENTRIES_COUNT = 8192
+_WAKE_SIGNAL_MODEL_CACHE_LOCK = threading.Lock()
+_WAKE_SIGNAL_MODEL_CACHE: OrderedDict[str, tuple[dict[str, Any], WakeSignal]] = OrderedDict()
+
+
+# LLM: WakeSignal 的 metadata 为可变字典；缓存保存与返回边界必须克隆该字典，防止调用方原地修改污染增量索引或模型缓存。
+# 函数用途: 克隆缓存中的 WakeSignal 对象，隔离 metadata 可变字典。
+def _clone_cached_wake_signal(signal: WakeSignal) -> WakeSignal:
+    return replace(
+        signal,
+        metadata=copy.deepcopy(signal.metadata) if signal.metadata else {},
+    )
+
+
 # LLM: 建模失败与解析失败共用同一 context/path 口径,消费方(guidance/运行时)以 load_error
-# 是否存在作硬门,因此这里绝不能吞掉任何一条失败事实。
+# 是否存在作硬门,因此这里绝不能吞掉任何一条失败事实。当增量索引返回同一份未变 payload
+# 字典对象时直接复用已建模的冻结 WakeSignal,避免大队列每轮重复调用 WakeSignal.from_dict。
 # 函数用途: 把一条已解析的唤醒信号负载建模成 WakeSignal,失败时给出同口径错误报告。
 def _wake_signal_from_payload(
     path: Path, payload: dict[str, Any]
 ) -> tuple[WakeSignal | None, dict[str, Any] | None]:
+    key = str(path)
+    with _WAKE_SIGNAL_MODEL_CACHE_LOCK:
+        cached = _WAKE_SIGNAL_MODEL_CACHE.get(key)
+        if cached is not None and cached[0] is payload:
+            _WAKE_SIGNAL_MODEL_CACHE.move_to_end(key)
+            cached_signal = cached[1]
+    if cached is not None and cached[0] is payload:
+        return _clone_cached_wake_signal(cached_signal), None
     try:
-        return WakeSignal.from_dict(payload), None
+        signal = _clone_cached_wake_signal(WakeSignal.from_dict(payload))
+        snapshot = _clone_cached_wake_signal(signal)
+        with _WAKE_SIGNAL_MODEL_CACHE_LOCK:
+            _WAKE_SIGNAL_MODEL_CACHE[key] = (payload, snapshot)
+            _WAKE_SIGNAL_MODEL_CACHE.move_to_end(key)
+            while len(_WAKE_SIGNAL_MODEL_CACHE) > _WAKE_SIGNAL_MODEL_CACHE_MAX_ENTRIES_COUNT:
+                _WAKE_SIGNAL_MODEL_CACHE.popitem(last=False)
+        return signal, None
     except Exception as exc:
         report = runtime_error_report(exc, context="conversation.wake_signal.read")
-        report["path"] = str(path)
+        report["path"] = key
         return None, report
 
 

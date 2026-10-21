@@ -173,15 +173,33 @@ def _send_pidfd_signal(descriptor: int, sig: int) -> None:
         raise OSError(error, os.strerror(error))
 
 
-# LLM: 必须有pidfd_open且打开前后身份一致才发送；发送器可用受限syscall，finally关FD，绝不裸PID发信号。
+# LLM: 优先os.pidfd_open，便携Python缺接口时仅Linux x86_64/amd64经434号syscall打开句柄。
+# 函数用途: 打开指定PID的安全内核句柄，进程已消失抛ProcessLookupError，平台不支持抛ValueError。
+def _open_pidfd(pid: int) -> int:
+    if hasattr(os, 'pidfd_open'):
+        return os.pidfd_open(pid)
+    if sys.platform != 'linux' or os.uname().machine not in ('x86_64', 'amd64'):
+        raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    descriptor = int(syscall(434, int(pid), 0))
+    if descriptor < 0:
+        error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            raise ProcessLookupError(error, os.strerror(error))
+        if error in (errno.ENOSYS, errno.EPERM, errno.EINVAL):
+            raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')
+        raise OSError(error, os.strerror(error))
+    return descriptor
+
+
+# LLM: 必须拿到pidfd且打开前后身份一致才发送；句柄与发送器均可走受限syscall，finally关FD，绝不裸PID发信号。
 # 函数用途: 给原一代进程发TERM或KILL，退出/换代无信号，缺安全句柄时拒绝自动清理。
 def _signal_process(pid, identity, sig):
     if _process_identity(pid) != identity:
         return
     try:
-        if not hasattr(os, 'pidfd_open'):
-            raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')
-        descriptor = os.pidfd_open(pid)
+        descriptor = _open_pidfd(pid)
         try:
             if _process_identity(pid) == identity:
                 _send_pidfd_signal(descriptor, sig)

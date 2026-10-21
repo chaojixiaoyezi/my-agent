@@ -2,10 +2,13 @@
 # 模块用途: 保存任务、工作区投影和一次选择标记；终态沿原能力关闭进度，坏选择标记不影响普通任务读取。
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
+import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import replace
@@ -22,6 +25,7 @@ from ..runtime_errors import DataCorruptionError, runtime_error_report
 from .capability_selection_state import TaskCapabilitySelection
 from .host_actor import HostActorError, HostChannelActor
 from .host_message_context import HostMessageContextBinding
+from .store_index import _file_fingerprint
 
 
 # LLM: 身份只来自 typed keyword；已有主根不能被新发言人覆盖，旧未知根不自动补认。
@@ -120,28 +124,92 @@ def _thread_without_task(
     )
 
 
+_TASK_LINK_CACHE_MAX_ENTRIES_COUNT = 32768
+_TASK_LINK_CACHE_LOCK = threading.Lock()
+_TASK_LINK_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], ThreadTaskLink]] = OrderedDict()
+
+
+# LLM: ThreadTaskLink虽为frozen dataclass，但内部字典/绑定元组仍可变；缓存读写边界必须隔离可变容器，防止调用方原地修改污染后续读取。
+# 函数用途: 克隆缓存中的任务关联对象，隔离内部可变字典成员。
+def _clone_cached_task_link(link: ThreadTaskLink) -> ThreadTaskLink:
+    if (
+        not link.effective_source_bindings
+        and not link.skill_snapshot_refs
+        and not link.continuation_refs
+        and not link.continuation_diagnostics
+        and link.capability_selection_corruption is None
+        and link.host_channel_actor is None
+        and link.host_message_context is None
+    ):
+        return replace(link)
+    return replace(
+        link,
+        effective_source_bindings=copy.deepcopy(link.effective_source_bindings)
+        if link.effective_source_bindings
+        else (),
+        skill_snapshot_refs=tuple(dict(item) for item in link.skill_snapshot_refs)
+        if link.skill_snapshot_refs
+        else (),
+        continuation_refs=copy.deepcopy(link.continuation_refs)
+        if link.continuation_refs
+        else (),
+        continuation_diagnostics=copy.deepcopy(link.continuation_diagnostics)
+        if link.continuation_diagnostics
+        else (),
+        capability_selection_corruption=copy.deepcopy(link.capability_selection_corruption)
+        if link.capability_selection_corruption is not None
+        else None,
+        host_channel_actor=copy.deepcopy(link.host_channel_actor)
+        if link.host_channel_actor is not None
+        else None,
+        host_message_context=copy.deepcopy(link.host_message_context)
+        if link.host_message_context is not None
+        else None,
+    )
+
+
 # LLM: 请求 task_id 必须与原文件 payload.task_id 精确相同，即便 thread 相同也不能串账；失败沿原 load_report 坏账错误返回。
-# 函数用途: 读取精确任务关联并核验身份，保留坏账错误而不推断其它任务。
+#   仅在读取前后物理文件指纹相同且身份校验通过时缓存 ThreadTaskLink，错误绝不缓存以保持原 context 诊断。
+# 函数用途: 读取精确任务关联并核验身份，未变化文件复用内存快照，保留坏账错误而不推断其它任务。
 def _read_task_link(
     path,
     task_id: str,
     *,
     context: str = "conversation.task_link.read",
 ) -> tuple[ThreadTaskLink | None, dict[str, Any] | None]:
+    resolved_path = path if isinstance(path, Path) else Path(path)
+    key = str(resolved_path)
+    before_fp = _file_fingerprint(resolved_path)
+    if before_fp is not None:
+        with _TASK_LINK_CACHE_LOCK:
+            cached = _TASK_LINK_CACHE.get(key)
+            if cached is not None and cached[0] == before_fp and cached[1].task_id == task_id:
+                _TASK_LINK_CACHE.move_to_end(key)
+                cached_link = cached[1]
+        if cached is not None and cached[0] == before_fp and cached[1].task_id == task_id:
+            return _clone_cached_task_link(cached_link), None
     try:
-        if not path.exists():
-            raise FileNotFoundError(str(path))
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not resolved_path.exists():
+            raise FileNotFoundError(key)
+        payload = json.loads(resolved_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"conversation task link is {type(payload).__name__}, expected object")
         link = ThreadTaskLink.from_dict(payload)
         if link.task_id != task_id:
             raise ValueError("conversation task link identity does not match requested task")
+        after_fp = _file_fingerprint(resolved_path)
+        if before_fp is not None and after_fp == before_fp:
+            snapshot = _clone_cached_task_link(link)
+            with _TASK_LINK_CACHE_LOCK:
+                _TASK_LINK_CACHE[key] = (after_fp, snapshot)
+                _TASK_LINK_CACHE.move_to_end(key)
+                while len(_TASK_LINK_CACHE) > _TASK_LINK_CACHE_MAX_ENTRIES_COUNT:
+                    _TASK_LINK_CACHE.popitem(last=False)
         return link, None
     except Exception as exc:
         report = runtime_error_report(exc, context=context)
         report["task_id"] = task_id
-        report["path"] = str(path)
+        report["path"] = key
         return None, report
 
 

@@ -1092,3 +1092,195 @@ def test_repeated_hot_queries_are_stable_and_ordered(tmp_path) -> None:
     assert pytest.approx(_due_snapshot(store)[0]["next_due_at"]) == _due_snapshot(store)[0][
         "next_due_at"
     ]
+
+
+def test_task_link_fingerprint_cache_and_wake_model_cache_avoid_repeated_reads(
+    tmp_path, monkeypatch
+) -> None:
+    from agent_py_agent.agent.conversation.models import WakeSignal
+
+    root = tmp_path / "conversations"
+    store = ConversationStore(root)
+    thread = _thread(store)
+    link = store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-cache-001",
+            "title": "cache check",
+            "now": 100.0,
+        }
+    )
+    assert link.status == "active"
+    signal = store.wakes.raise_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": link.task_id,
+            "reason": "subagent_runner_finished",
+            "urgency": "normal",
+            "now": 101.0,
+        }
+    )
+    # 首次暖机读取填充指纹缓存与 WakeSignal 模型缓存。
+    links_first, errors_first = store.tasks.list_report(thread.thread_id)
+    assert not errors_first and [item.task_id for item in links_first] == ["task-cache-001"]
+    wakes_first, wake_errors_first = store.wakes.pending_report(limit=0)
+    assert not wake_errors_first and [item.wake_signal_id for item in wakes_first] == [
+        signal.wake_signal_id
+    ]
+
+    task_path = store.storage.task_path("task-cache-001")
+    original_read_text = Path.read_text
+    task_reads: list[str] = []
+
+    def counting_read_text(self: Path, *args, **kwargs):
+        if self == task_path:
+            task_reads.append(self.name)
+        return original_read_text(self, *args, **kwargs)
+
+    original_from_dict = WakeSignal.from_dict
+    wake_model_calls: list[str] = []
+
+    def counting_from_dict(data):
+        wake_model_calls.append(str(data.get("wake_signal_id") or ""))
+        return original_from_dict(data)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    monkeypatch.setattr(WakeSignal, "from_dict", counting_from_dict)
+
+    links_second, errors_second = store.tasks.list_report(thread.thread_id)
+    assert not errors_second and [item.task_id for item in links_second] == ["task-cache-001"]
+    assert task_reads == []
+
+    wakes_second, wake_errors_second = store.wakes.pending_report(limit=0)
+    assert not wake_errors_second and [item.wake_signal_id for item in wakes_second] == [
+        signal.wake_signal_id
+    ]
+    assert wake_model_calls == []
+
+    # 状态更新后指纹变化，必须立即读到新状态。
+    updated = store.tasks.update_status(
+        {"task_id": "task-cache-001", "status": "completed", "expected_status": "active"}
+    )
+    assert updated is not None and updated.status == "completed"
+    links_third, errors_third = store.tasks.list_report(thread.thread_id)
+    assert not errors_third and [item.status for item in links_third] == ["completed"]
+
+
+def test_task_link_and_wake_cache_isolate_in_place_dict_mutations(tmp_path) -> None:
+    import json
+
+    root = tmp_path / "conversations"
+    store = ConversationStore(root)
+    thread = _thread(store)
+    store.tasks.bind(
+        {
+            "thread_id": thread.thread_id,
+            "task_id": "task-mut-001",
+            "title": "mutation isolation",
+            "now": 100.0,
+        }
+    )
+    task_path = store.storage.task_path("task-mut-001")
+    payload = json.loads(task_path.read_text(encoding="utf-8"))
+    payload["host_channel_actor"] = {
+        "owner_id": thread.owner_id,
+        "source_thread_id": thread.thread_id,
+        "actor_key": "original",
+    }
+    payload["effective_source_bindings"] = [{"source_id": "src-1"}]
+    task_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    first_link, err1 = store.tasks.load_report("task-mut-001")
+    assert err1 is None and first_link is not None
+    assert first_link.host_channel_actor is not None
+    first_link.host_channel_actor["actor_key"] = "mutated"
+    first_link.effective_source_bindings[0]["source_id"] = "mutated-src"
+
+    second_link, err2 = store.tasks.load_report("task-mut-001")
+    assert err2 is None and second_link is not None
+    assert second_link.host_channel_actor == {
+        "owner_id": thread.owner_id,
+        "source_thread_id": thread.thread_id,
+        "actor_key": "original",
+    }
+    assert second_link.effective_source_bindings == ({"source_id": "src-1"},)
+
+    sig = store.wakes.raise_signal(
+        {
+            "thread_id": thread.thread_id,
+            "root_task_id": "task-mut-001",
+            "reason": "subagent_runner_finished",
+            "urgency": "normal",
+            "metadata": {"k": "original"},
+            "now": 101.0,
+        }
+    )
+    first_wakes, werr1 = store.wakes.pending_report(limit=0)
+    assert not werr1 and len(first_wakes) == 1
+    first_wakes[0].metadata["k"] = "mutated"
+
+    second_wakes, werr2 = store.wakes.pending_report(limit=0)
+    assert not werr2 and len(second_wakes) == 1
+    assert second_wakes[0].wake_signal_id == sig.wake_signal_id
+    assert second_wakes[0].metadata == {"k": "original"}
+
+
+def test_reclaim_dead_running_runs_passes_all_tasks_for_host_pid_veto(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import capability_auto_sweep
+
+    stalled_running = SimpleNamespace(
+        id="run-stalled",
+        status="RUNNING",
+        heartbeat_at=1.0,
+        updated_at=1.0,
+        attributes={
+            "audit_source_worker": True,
+            "audit_source_watch_id": "w-1",
+            "audit_source_owner_home": "/tmp/owner",
+            "runner_session": {
+                "status": "running",
+                "worker_pid": 424242,
+                "in_process": False,
+                "heartbeat_at": 1.0,
+            },
+        },
+    )
+    pending_sibling = SimpleNamespace(
+        id="run-sibling",
+        status="PENDING",
+        heartbeat_at=9999999999.0,
+        updated_at=9999999999.0,
+        attributes={
+            "audit_source_worker": True,
+            "audit_source_watch_id": "w-2",
+            "audit_source_owner_home": "/tmp/owner",
+            "runner_session": {
+                "status": "running",
+                "worker_pid": 424242,
+                "in_process": False,
+                "heartbeat_at": 9999999999.0,
+            },
+        },
+    )
+    captured_host_pids: list[set[int]] = []
+    monkeypatch.setattr(
+        "agent_py_agent.agent.subagents.process_control.is_pid_alive",
+        lambda pid: pid == 424242,
+    )
+    monkeypatch.setattr(
+        capability_auto_sweep,
+        "_terminate_fully_stalled_source_hosts",
+        lambda pids: captured_host_pids.append(set(pids)) or {},
+    )
+    monkeypatch.setattr(
+        capability_auto_sweep,
+        "conversation_lifecycle_decisions",
+        lambda _agent, _tasks: {},
+    )
+    agent = SimpleNamespace(
+        subagents=SimpleNamespace(list_runs=lambda: [stalled_running, pending_sibling])
+    )
+    capability_auto_sweep._reclaim_dead_running_runs(agent)
+    assert captured_host_pids == [set()]

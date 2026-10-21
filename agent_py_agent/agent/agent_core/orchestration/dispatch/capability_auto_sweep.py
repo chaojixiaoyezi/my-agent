@@ -108,7 +108,19 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     if manager is None:
         return {"started": 0}
     try:
-        tasks = manager.list_runs()
+        from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
+
+        tasks = [
+            task
+            for task in manager.list_runs()
+            if normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES
+        ]
+        if not tasks:
+            return {
+                "started": 0,
+                "authority_recovery_blocked": 0,
+                "recovery_blocks": [],
+            }
         decisions = conversation_lifecycle_decisions(agent, tasks)
         stalled: list[Any] = []
         recovery_blocks: list[dict[str, str]] = []
@@ -272,10 +284,13 @@ def _has_live_abandoned_runner_attempt(task: Any) -> bool:
 #   durable 复活可派孤儿(刚 requeue 的同一轮就被拉起),零 LLM 成本、无候选即 no-op。
 # 函数用途: 后台调度器/定时提醒路的机制层巡查:把静默死掉的岗位和孤儿捡回来。
 def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
+    from ....io.sqlite_scope import sqlite_connection_scope
+
     manager = getattr(agent, "subagents", None)
     workspace = getattr(manager, "workspace", None)
     if not isinstance(workspace, str | Path):
-        return _supervise_stalled_orphans_unlocked(agent)
+        with sqlite_connection_scope(True):
+            return _supervise_stalled_orphans_unlocked(agent)
     from .lock import _DispatchWatchLock
 
     stack = ExitStack()
@@ -293,7 +308,7 @@ def supervise_stalled_orphans(agent: Any) -> dict[str, object]:
             "orphan_launches_reused": 0,
             "skipped_locked": 1,
         }
-    with stack:
+    with stack, sqlite_connection_scope(True):
         return _supervise_stalled_orphans_unlocked(agent)
 
 
@@ -509,8 +524,15 @@ def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     if manager is None:
         return []
     reclaimed: list[dict[str, object]] = []
-    tasks = manager.list_runs()
-    fully_stalled_host_pids = _fully_stalled_source_host_pids(tasks)
+    all_tasks = list(manager.list_runs())
+    tasks = [
+        task
+        for task in all_tasks
+        if str(getattr(task, "status", "") or "").strip().upper() == "RUNNING"
+    ]
+    if not tasks:
+        return []
+    fully_stalled_host_pids = _fully_stalled_source_host_pids(all_tasks)
     # A suspended host can retain task/watch file locks indefinitely.  Fence
     # the host process before rewriting its durable attempts; doing this in
     # the opposite order made five frozen workers consume several lock
@@ -986,6 +1008,8 @@ def _close_reclaimed_runner_session(task: Any, *, reason: str) -> None:
     task.attributes = attrs
 
 
+# LLM: 只对未终态子代理或 Audit 来源 worker 计算父会话生命周期裁决；普通终态子代理不重查历史会话与执行权。
+# 函数用途: 巡查并关闭失去父级执行权的活跃子代理，或把自然结算的来源岗位投影为完成。
 def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -995,7 +1019,21 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
             "source_workers_completed": 0,
             "source_workers_completion_pending": 0,
         }
-    tasks = manager.list_runs()
+    from ....common.audit_activation import structured_audit_source_worker_attributes
+
+    tasks = [
+        task
+        for task in manager.list_runs()
+        if not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
+        or structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {})
+    ]
+    if not tasks:
+        return {
+            "parent_closed_cancelled": 0,
+            "parent_recovery_held": 0,
+            "source_workers_completed": 0,
+            "source_workers_completion_pending": 0,
+        }
     decisions = conversation_lifecycle_decisions(agent, tasks)
     cancelled = 0
     completed = 0
@@ -1224,16 +1262,21 @@ def _redispatch_stalled_subagents(agent: Any) -> int:
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return 0
-    tasks = manager.list_runs()
-    decisions = conversation_lifecycle_decisions(agent, tasks)
     from ...runner.dispatch import _is_dispatch_runner_candidate
 
+    tasks = [
+        task
+        for task in manager.list_runs()
+        if _is_dispatch_runner_candidate(task)
+    ]
+    if not tasks:
+        return 0
+    decisions = conversation_lifecycle_decisions(agent, tasks)
     candidates = [
         task
         for task in tasks
         if decisions.get(str(getattr(task, "id", "") or ""), None) is not None
         and decisions[str(getattr(task, "id", "") or "")].allowed
-        and _is_dispatch_runner_candidate(task)
     ]
     if not candidates:
         return 0

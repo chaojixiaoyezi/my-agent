@@ -1,9 +1,9 @@
-## 2026-10-21 命令沙箱侧车容错、产物保护批量落盘与长期运行性能收敛回归（0.3.0-tui-preview.20261021.2）
+## 2026-10-21 命令沙箱侧车容错、产物保护批量落盘与长期运行性能收敛回归（0.3.0-tui-preview.20261021.2 / 20261021.3）
 
 - `test_sandbox_perf.py`：新增 `test_readonly_sidecar_flags_preserve_persistent_mounts`、`test_mount_snapshot_recognizes_readonly_try`、`test_remove_shadowed_readonly_try_arguments`、`test_parent_remount_preserves_readonly_try_child` 与 `test_real_bwrap_readonly_sidecar_survives_exec_race`，验证 `-wal`/`-shm`/`-journal`/`.lock` 映射为 `--ro-bind-try` 且持久路径保持 `--ro-bind`。
 - `test_tools/test_shell_tool.py`：验证未变更产物在 `_post_shell_status` 阶段不产生 `.postcheck-*.blob` 临时文件拷贝，`reconcile_shell_artifact_operation_items` 单次扫描 `registry.jsonl` 并批量持久化 `unchanged` 清单，破坏后仍可从 pre-backup 完整恢复。
-- `test_private_release.py` 与 `test_im_progress_draft.py`：验证 Linux 离线包强制捆绑并校验 `feishu-cli-host.linux-x86_64` 与 `vendor/lark_cli/`（缺失任一均拒绝出包）、旧 glibc 下 `pidfd_send_signal`（syscall 424）回退，以及 `trim_draft_text` 剥离旧页脚并按 `_MAX_DRAFT_CHARS` 截断超长正文。
-- `test_background_main_wake_recall.py`、`test_gateway_orphan_reconciler.py` 与 `test_memory_archive.py`：验证 `reconcile_process_completions` 跳过已持久化 `unknown` 项且通过 `process_registry.get()` 避免读日志尾、缺失 canonical 子代理状态的负缓存、大体积 UTF-8 JSONL 尾部有界回读校验、`list_runtime_gate_ledger` 最新窗口截取及 `runtime.db` 新增索引。
+- `test_private_release.py` 与 `test_im_progress_draft.py`：验证 Linux 离线包强制捆绑并校验 `feishu-cli-host.linux-x86_64` 与 `vendor/lark_cli/`（缺失任一均拒绝出包）、旧 glibc 便携 Python 下 `pidfd_open`（syscall 434）与 `pidfd_send_signal`（syscall 424）回退，以及 `trim_draft_text` 剥离旧页脚并按 `_MAX_DRAFT_CHARS` 截断超长正文。
+- `test_store_scan_indexes.py`、`test_scheduler_scan_costs.py`、`test_owner_wake_discovery.py`、`test_background_main_wake_recall.py`、`test_gateway_orphan_reconciler.py` 与 `test_memory_archive.py`：验证 `store_tasks._read_task_link` 指纹缓存与 `store_wakes._wake_signal_from_payload` 模型缓存复用及更新可见性、`reconcile_process_completions` 跳过已持久化 `unknown` 项且通过 `process_registry.get()` 避免读日志尾、缺失 canonical 子代理状态的负缓存、大体积 UTF-8 JSONL 尾部有界回读校验、`list_runtime_gate_ledger` 最新窗口截取及 `runtime.db` 新增索引（含 `idx_tool_operations_status`）。
 
 ## 2026-10-21 可组合工作流/固化脚本一等公民与插件遥测 Broker 定向回归
 
