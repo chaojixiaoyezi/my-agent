@@ -1,3 +1,7 @@
+## 2026-10-21 工具出口耗时遥测接缝
+
+`verification/runtime.py::_record_tool_telemetry` 挂接在唯一工具核验出口 `record_tool_verification` 内：仅当 `agent.home_paths.owner_home_dir` 是已存在的目录时向同 Owner 的 `observability/telemetry_ledger.py::ToolTelemetryLedger` 追加单次调用耗时明细，复用同一 `VerificationContext` 的 `task_id` 与 `owner_ref`，不新增第二条工具执行切面。
+
 ## 2026-10-20 后台通知共用原回复槽（源码候选，待独审及实际复验）
 
 解决问题：同一后台工作已用消息工具回原会话，普通或需用户处理的收尾仍可能再次发送。两个出口现共核原成功操作、执行信封、owner/home、执行及来源线程、发起人、渠道/目标与准确 request/run/task/attempt；失败、UNKNOWN、未执行、旧标志及其它目标不能占槽。原control关闭发布后固定末次工作身份，通知新轮不能覆盖它。审计事件继续要求原schema/资格与完整evidence_refs，正文不参与去重。

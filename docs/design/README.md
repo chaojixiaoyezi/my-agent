@@ -77,3 +77,4 @@
 
 - [长任务运行时审查与 L 线实施](LONG_TASK_RUNTIME_REVIEW.md)：Goal、模型采用、调度与元数据查询；实施中。
 - [定时执行策略合同](SCHEDULER_EXECUTION_POLICIES.md)：独立上下文、继承/固定模型、排队和失败策略、只读预检与原检查点。
+- [四大一等公民与插件全量数据及执行网关](COMPOSABLE_WORKFLOW_SCRIPT_PLUGIN_BROKER.md)：Monitor/Workflow/Script/Skill 统一标准提取 Key、双模工作流引擎（纯脚本快跑 + 报错唤醒 LLM 自愈 + Step 级断点续跑）与面向插件的资产拓扑/任务遥测/工具耗时/主动执行接口。

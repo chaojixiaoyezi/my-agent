@@ -1,3 +1,7 @@
+## 2026-10-21 插件宿主扩展接口门面（plugin_broker_api）
+
+`gateway_parts/plugin_broker_api.py` 封装 `PluginBrokerService`，按冻结 `owner_id` / `owner_home` 隔离挂载 `assets.*`、`telemetry.*` 与 `execute.*` 主题，并与 `plugins/plugin_host_api.py`、`plugins/plugin_host_broker_topics.py` 对齐。
+
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
 实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。

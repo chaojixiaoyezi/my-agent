@@ -15,10 +15,13 @@
   `MY_AGENT_HOST_API_URL`（`http://127.0.0.1:<Gateway端口>/plugin-host/query`）与 `MY_AGENT_HOST_API_TOKEN`。
 - 令牌在插件客户端构造时发放，绑定该插件激活；每个请求都复核激活仍是同一代，停用、卸载、换代或 Gateway 停止即失效，失效后不复活。
   直连模式（没有 Gateway HTTP 服务）不发放。
-- 请求：`POST`，头 `X-Plugin-Host-Token`，正文 `{"topics": [...], "thread_id": "..."}`；只接受回环来源。
+- 请求：`POST`，头 `X-Plugin-Host-Token`，正文支持两种模式（只接受回环来源）：
+  1. 批量主题查询：`{"topics": [...], "thread_id": "..."}`。
+  2. 单动作 Broker 查询：`{"action": "assets.list" | "assets.get" | "assets.topology" | "telemetry.tasks.list" | "telemetry.tasks.get" | "telemetry.tool_calls.list" | "telemetry.tool_calls.get" | "telemetry.tool_stats" | "telemetry.workflows.runs.list" | "telemetry.workflows.runs.get", "payload": {...}}`。
 - 主题白名单：`threads`（最近 20 个线程的编号、截短标题、状态、更新时间、压缩代次）、`activity`（指定线程的
-  activity/run_state/context，与面板主题同一投影）、`plugins`（插件 ID、版本、启用状态、简介）、`gateway`（进程号与端口）。
+  activity/run_state/context，与面板主题同一投影）、`plugins`（插件 ID、版本、启用状态、简介）、`gateway`（进程号与端口），以及一等公民资产与遥测主题：`assets_summary`（四类一等公民描述符列表）、`topology`（`Monitor`/`Workflow`/`Script`/`Skill` 自由组合拓扑图 `nodes + edges`）、`recent_tasks`（最近布置任务的调用摘要）、`recent_tool_calls`（最近工具调用耗时明细）、`tool_stats`（各工具与各固化脚本的调用次数、成功率、均值/P50/P95/Max `duration_ms`）、`workflow_runs`（工作流运行状态与断点摘要）。
   owner 未加载时线程与活动为空并标注 `owner_loaded=false`，不为插件加载 owner 实例。
+- 宿主内受控网关入口 `PluginBrokerService`（`agent_py_agent/agent/gateway_parts/plugin_broker_api.py`）对已认证 Gateway 请求还支持同 Owner 的 `assets.save`、`assets.update_sources`、`assets.bind` 与受控执行 `execute.tool`、`execute.script`、`execute.workflow`、`execute.workflow_resume`（插件只读 `grant` 令牌调用写操作将返回 `BROKER_SCOPE_DENIED`）。
 
 ## 边界
 

@@ -1,3 +1,39 @@
+## 2026-10-21 可组合工作流/固化脚本一等公民与插件遥测 Broker
+
+```text
+|-- agent_py_agent/agent/assets/
+|   |-- __init__.py # 四类一等公民资产描述符、存储与拓扑导出
+|   |-- descriptor.py # 统一标准提取键 AssetDescriptor 与候选数据源评估校验
+|   |-- monitor_adapter.py # Monitor 计划与绑定向统一 AssetDescriptor 适配
+|   |-- script_store.py # Owner 固化脚本原子存储与数据源/候选评估热更新
+|   |-- skill_adapter.py # Owner Skill frontmatter 向统一 AssetDescriptor 适配
+|   |-- topology.py # Monitor/Workflow/Script/Skill 自由组合拓扑图与环路检测
+|   `-- workflow_store.py # Owner 工作流 JSON+MD 双层定义存储与步骤 Skill 挂载
+|-- agent_py_agent/agent/workflows/
+|   |-- __init__.py # 工作流执行引擎、脚本运行器与断点存储导出
+|   |-- engine.py # 双模态工作流引擎、失败上抛 Agent 与断点续跑
+|   |-- models.py # 步骤运行回执与工作流运行快照数据模型
+|   |-- run_store.py # 工作流运行快照与步骤产物持久化
+|   `-- script_runner.py # 受控子进程脚本执行器与凭据环境清洗
+|-- agent_py_agent/agent/observability/
+|   |-- __init__.py # 工具耗时遥测账本与任务调用检查器导出
+|   |-- task_call_inspector.py # 每次布置任务的完整代理/模型/资产/工具调用数据聚合
+|   `-- telemetry_ledger.py # 每个工具调用耗时账本与 P50/P95/Max 统计聚合
+|-- agent_py_agent/agent/tooling/scripts_tool.py # Agent 固化脚本管理、候选源评估与单次运行工具
+|-- agent_py_agent/agent/tooling/workflows_tool.py # Agent 工作流管理、动态 Skill 绑定与断点续跑工具
+|-- agent_py_agent/agent/gateway_parts/plugin_broker_api.py # 插件宿主资产/遥测/受控执行统一封装服务
+|-- agent_py_agent/agent/plugin_host_broker_topics.py # 插件宿主只读主题投影与同 Owner 资产适配
+|-- agent_py_agent/tests/test_asset_descriptors_and_stores.py # 标准提取键、脚本/工作流存储与拓扑单测
+|-- agent_py_agent/tests/test_monitor_and_skill_asset_adapters.py # Monitor 与 Skill 资产描述符适配单测
+|-- agent_py_agent/tests/test_workflow_script_engine.py # 双模态工作流引擎、错误上抛与断点续跑单测
+|-- agent_py_agent/tests/test_scripts_and_workflows_tools.py # scripts 与 workflows 工具合同单测
+|-- agent_py_agent/tests/test_telemetry_ledger_and_inspector.py # 工具耗时账本与任务调用检查器单测
+|-- agent_py_agent/tests/test_plugin_broker_api.py # 插件 Broker 资产/遥测/受控执行与 Owner 隔离单测
+`-- docs/design/COMPOSABLE_WORKFLOW_SCRIPT_PLUGIN_BROKER.md # 可组合工作流、固化脚本一等公民与插件遥测接口设计文档
+```
+
+关键文件说明：`assets/` 与 `workflows/` 将 `Script` 和 `Workflow` 提升为与 `Skill`、`Monitor` 同级的 Owner 一等公民；`observability/` 与 `plugin_broker_api.py` 为后续外部插件暴露资产拓扑、每次任务调用树、每个工具调用时间明细与受控执行接口。
+
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
 新增`agent_py_agent/tests/test_nofollow_zero_link_copyout.py`：确定性copyout模型与原身份、元数据、目录和FD清理边界；产品实现仍集中common/nofollow_fs.py，不新增状态源。

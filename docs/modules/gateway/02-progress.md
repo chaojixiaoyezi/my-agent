@@ -1,3 +1,7 @@
+## 2026-10-21 插件宿主扩展接口与一等公民资产门面（plugin_broker_api）
+
+新增 `gateway_parts/plugin_broker_api.py`，向插件宿主与内部网关提供 Owner 隔离、敏感字段脱敏的一等公民资产（`Skill`/`Script`/`Workflow`/`Monitor`）、自由组合拓扑、任务调用链（`TaskCallInspector`）、工具耗时账本（`ToolTelemetryLedger`）及主动工具/脚本/工作流执行与断点续跑门面。详见 [插件宿主接口](../../design/PLUGIN_HOST_API.md)。
+
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
 实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。

@@ -11,11 +11,13 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .plugin_host_broker_topics import TOPIC_ACTIONS, query_broker_topics
+
 HOST_API_READ = "read"
 HOST_API_URL_ENV = "MY_AGENT_HOST_API_URL"
 HOST_API_TOKEN_ENV = "MY_AGENT_HOST_API_TOKEN"
 HOST_API_PATH = "/plugin-host/query"
-HOST_API_TOPICS = ("threads", "activity", "plugins", "gateway")
+HOST_API_TOPICS = ("threads", "activity", "plugins", "gateway", *TOPIC_ACTIONS)
 # 宿主 API 最多同时报告的线程数；防止宿主状态面板列出全部线程。
 MAX_THREAD_COUNT = 20
 # 宿主 API 标题的最大字符数；超长截断，保持面板标题一行显示。
@@ -32,6 +34,13 @@ _GRANTS: dict[str, _Grant] = {}
 class _Grant:
     activation_ref: object
     plugin_id: str
+
+    # LLM: 权限来自鲜活安装声明，不接受HTTP正文覆盖；旧安装无声明时按最小权限处理。
+    # 函数用途: 为Broker提供同一激活的只读权限视图。
+    @property
+    def activation(self) -> dict:
+        current = self.activation_ref.require()
+        return {'host_api': getattr(getattr(current, 'manifest', None), 'host_api', ())}
 
 
 # LLM: 只由 Gateway HTTP 服务在启动/停止时调用；None 表示当前进程没有可用的宿主 API（例如直连模式）。
@@ -112,11 +121,15 @@ def _plugins(owner) -> list[dict]:
              "summary": row.manifest.summary} for row in PluginInstallStore(owner).snapshot()]
 
 
-# LLM: 主题白名单外的请求直接拒绝；owner 未加载时线程/活动为空并标注，不为插件加载 owner 实例。
-# 函数用途: 按请求的主题组装只读结果。
+# LLM: 主题白名单外的请求直接拒绝；支持只读公开主题及按同一 grant 分发受控 Broker 动作；owner 未加载时线程/活动为空并标注。
+# 函数用途: 按请求的主题组装只读结果，或委托 PluginBrokerService 执行同 Owner 的资产/遥测查询。
 def query_host(base_agent, grant: _Grant, body: dict, *, gateway_status: dict | None = None) -> dict:
     from .gateway_parts.request_worker import _resolve_loaded_request_agent_for_owner
 
+    if isinstance(body, dict) and "action" in body and "topics" not in body:
+        from .gateway_parts.plugin_broker_api import PluginBrokerService
+
+        return PluginBrokerService.from_grant(grant).dispatch(body.get("action"), body.get("payload"))
     topics = body.get("topics")
     if not isinstance(topics, list) or not topics or any(topic not in HOST_API_TOPICS for topic in topics):
         raise ValueError("topics 必须是非空数组，且只能取 " + "、".join(HOST_API_TOPICS))
@@ -134,6 +147,10 @@ def query_host(base_agent, grant: _Grant, body: dict, *, gateway_status: dict | 
         result["plugins"] = _plugins(owner)
     if "gateway" in topics:
         result["gateway"] = dict(gateway_status or {})
+    broker_topics = [topic for topic in topics if topic in TOPIC_ACTIONS]
+    if broker_topics and getattr(owner, "home_dir", None) is not None:
+        owner_id = str(getattr(owner, "owner_id", "") or getattr(owner, "identity", "") or "")
+        result.update(query_broker_topics(owner.home_dir, owner_id, {"topics": broker_topics}, grant=grant))
     return result
 
 

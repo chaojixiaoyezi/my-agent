@@ -1,3 +1,13 @@
+## 2026-10-21 可组合工作流/固化脚本一等公民与插件遥测 Broker 定向回归
+
+新增 6 个测试文件并在 `test_plugin_host_api.py`、`test_tool_default_deferral.py` 补齐主干接线断言（联合 `test_self_map_*` 与 `test_verification_runtime.py` 共 13 文件 465 项通过）：
+- `test_asset_descriptors_and_stores.py`（86 节点）：验证 `AssetDescriptor` 标准提取键、`evaluated_candidates` 候选源多次评估历史去重追加、凭据/端点明文硬拒与数字 Token 计数保留、`ScriptStore`/`WorkflowStore` 原子读写与 symlink 防护、`build_asset_topology` 自由组合有向图与 Tarjan 环路检测（`cycles`/`has_cycles`/`in_cycle`）。
+- `test_monitor_and_skill_asset_adapters.py`（24 节点）：验证 `Monitor` 与 `Skill`（含 `skills/learned` 与中文/特殊字符目录安全 ID 派生）向统一 `AssetDescriptor` 适配及反向 `used_by` 拓扑联动。
+- `test_workflow_script_engine.py`（56 节点）：验证 `ScriptRunner` 从 `ScriptStore` 读取冻结代码物化执行、接入 `AttemptExecutionSandbox` 与 `scrub_subprocess_env`、回写运行摘要、`WorkflowEngine` 双模态执行、独立条件评估、`on_error="skip" | "escalate_to_agent" | "fail"` 与 `paused_for_resume` + `needs_repair=True` 状态机、断点续跑及单次 `override_data_sources` 零写回污染。
+- `test_scripts_and_workflows_tools.py`（57 节点）：验证 `ScriptsTool` 与 `WorkflowsTool` 动作校验、默认 `skill_resolver`/`analysis_handler` 接线、候选源记录与动态 Skill 绑定。
+- `test_telemetry_ledger_and_inspector.py`（50 节点）：验证 `ToolTelemetryLedger` 单次调用耗时记录、命令字符串内嵌秘密脱敏、P50/P95/Max 聚合，`TaskCallInspector` 自动从工具账本合成真实任务调用树（主/子代理、父根关系、挂载资产、工具调用链），以及 `record_tool_verification` 独立 `try/except` 遥测异常隔离。
+- `test_plugin_broker_api.py`（68 节点）与 `test_plugin_host_api.py`（19 节点）：验证 `PluginBrokerService` 资产/遥测/受控执行接口、宿主路径剥离、`from_grant` 细粒度源码读取控制（`source_redacted`）、`execute.*` 并发身份冲突裁决（`scope_resolution`/`scope_warnings`）、跨 Owner 隔离与 `/plugin-host/query` 主题/动作接线。
+
 ## 2026-10-20 凭据配置幂等与定时/凭据轮 web_fetch 可见性定向回归（B690 修复）
 
 `test_task_credential_forms.py` 与 `test_task_credential_discovery.py` 新增同方案幂等配置（不重写文件）、跨方案配置结构化拒绝、`authentication=collected` 参数拒绝，以及状态/摘要中 `authentication` 与 `authentication_configured` 字段断言。`test_thread_tool_discovery.py` 新增 `credential` 与 `credential_discovery` 信封在单轮、线程持久化、Compact 重建中的 `web_fetch` 可见性，后台完整目录首轮预加载、普通前台及显式 `allowed_tools` 不变、损坏信封与权限过滤负例，以及 `shell` 的 `avoid_when` 提示回归。所有新增节点纳入双平台包内普通运行义务，不扩 source-only。

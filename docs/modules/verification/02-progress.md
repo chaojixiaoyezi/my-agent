@@ -1,3 +1,7 @@
+## 2026-10-21 公共工具出口自动记录调用耗时遥测
+
+`verification/runtime.py::record_tool_verification` 在存在真实 `owner_home_dir` 时同步调用 `_record_tool_telemetry`，把主代理与子代理每次工具调用的起止时间、`duration_ms`、状态（`ok`/`denied`/`timeout`/`error`）、错误码、脱敏参数摘要和输出字节追加到 `ToolTelemetryLedger`（`<owner_home>/data/telemetry/tool_calls.jsonl`）。遥测异常由外层吞掉，不改变原验证证据和工具返回值。
+
 ## 2026-10-20 后台通知共用原回复槽（源码候选，待独审及实际复验）
 
 解决问题：同一后台工作已用消息工具回原会话，普通或需用户处理的收尾仍可能再次发送。两个出口现共核原成功操作、执行信封、owner/home、执行及来源线程、发起人、渠道/目标与准确 request/run/task/attempt；失败、UNKNOWN、未执行、旧标志及其它目标不能占槽。原control关闭发布后固定末次工作身份，通知新轮不能覆盖它。审计事件继续要求原schema/资格与完整evidence_refs，正文不参与去重。

@@ -1,3 +1,14 @@
+## 2026-10-21 可组合工作流与固化脚本一等公民 + 插件宿主封装接口（已实现，待双复核）
+
+围绕用户提出的两大底座支柱，在不提前建设前端页面的前提下完成通用后端底座与主干接线：
+1. **一等公民（`Workflow` / `Script` 与 `Skill` / `Monitor` 同级）及韧性运行**：
+   - 新增 `agent_py_agent/agent/assets/`：统一四类 Owner 资产的标准提取键 `AssetDescriptor`（`id`/`kind`/`name`/`summary`/`version`/`owner_id`/`access_targets`/`data_sources` 含 `evaluated_candidates` 候选源评估 `active|ignored|pending`、原因与样本数/`credential_refs` 仅存引用不存明文密钥/`io_contract`/`refs`/`used_by`/`runtime_summary`），提供 `<owner_home>/scripts/<script_id>/` 与 `<owner_home>/workflows/<workflow_id>/` 原子存储、`monitor_adapter`/`skill_adapter` 适配及 `build_asset_topology` 自由组合 DAG 拓扑与环路检测。
+   - 新增 `agent_py_agent/agent/workflows/`：实现双模态步骤执行（`deterministic_script`、`llm_skill_analysis`、`hybrid`）、失败不盲目重试并挂起 `status="paused_for_resume"` + `needs_repair=True`（`on_error="escalate_to_agent"`）、`<owner_home>/data/workflow_runs/<workflow_run_id>/` 断点快照与 `resume_workflow_run` 续跑、单次运行临时覆盖 `override_data_sources` 不污染持久资产。
+   - 新增 `ScriptsTool` 与 `WorkflowsTool`（声明默认收起 `default_deferred=True`，随 `main_agent`/`user` 装配），支持 Agent 对固化脚本、候选源评估、工作流定义、动态 Skill 挂载及断点续跑进行结构化管理。
+2. **插件宿主与 Gateway 封装接口 + 每次任务与每个工具调用耗时账本**：
+   - 新增 `agent_py_agent/agent/observability/`：`ToolTelemetryLedger`（`<owner_home>/data/telemetry/tool_calls.jsonl`）在公共工具出口自动记录每次工具调用的 `started_at`/`ended_at`/`duration_ms`、脱敏参数摘要 `args_summary`、状态与错误码，并提供工具与固化脚本的调用次数、成功率、均值/P50/P95/Max 耗时聚合；`TaskCallInspector` 汇总每次布置任务的完整调用树（主/子代理 `runs`、模型 `rounds`、`token_usage`、挂载的四类资产 `mounted_assets`、工具调用时间线与产物）。
+   - 新增 `PluginBrokerService`（`gateway_parts/plugin_broker_api.py`）与 `plugin_host_broker_topics.py`，并在 `/plugin-host/query` 接入 `assets_summary`、`topology`、`recent_tasks`、`recent_tool_calls`、`tool_stats`、`workflow_runs` 六个只读主题及同 Owner 的 `assets.*`/`telemetry.*`/`execute.*` 封装接口。
+
 ## 2026-10-20 凭据配置幂等、结构化拒绝与定时/发现轮 web_fetch 可见性（B690 修复候选）
 
 `configure_credential` 仅用于将 `collected` 升级为 HTTP 认证配置；已配置同方案、同 `auth_config` 与 `header_name` 时幂等返回 `already_configured=True` 且不重写记录，已配置为其他方案或不同配置时抛 `CREDENTIAL_BINDING_INVALID`（`stage=record_management`，`reason=authentication_already_configured`），目标为 `collected` 时抛 `TOOL_INVALID_ARGUMENTS`。`request`/`update`/`status`/`revoke`/`find`/`list` 摘要公开 `authentication` 与 `authentication_configured`。`RequestCredentialsTool.execute` 对其余 `ValueError/KeyError` 补齐 `stage=execution`、`effect_outcome=not_started` 与结构化异常类型诊断。
