@@ -2,8 +2,11 @@
 # 模块用途: 保存会话元数据与通道绑定，原子更新保留并发状态；新默认绑定记录真实初始化事实。
 from __future__ import annotations
 
+import copy
 import hashlib
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import fields, replace
 from pathlib import Path
@@ -21,11 +24,94 @@ from .models import (
     ConversationThread,
     new_id,
 )
+from .store_index import _file_fingerprint
 from .store_io import (
     now,
     read_json_object_report,
 )
 from .store_layout import ConversationStorage
+
+_THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT = 65536
+_THREAD_RECORD_CACHE_LOCK = threading.Lock()
+_THREAD_RECORD_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], ConversationThread]] = OrderedDict()
+
+
+# LLM: frozen线程仍含可变成员；缓存出入均深拷贝字典和字典元组，空字典也新建，不共享调用者对象。
+# 函数用途: 克隆线程快照，隔离摘要证据、设置、诊断、宿主通知和会话方法账本。
+def _clone_cached_thread(thread: ConversationThread) -> ConversationThread:
+    return replace(
+        thread,
+        compact_operation_evidence=copy.deepcopy(thread.compact_operation_evidence) if thread.compact_operation_evidence else {},
+        provider_context_observation=copy.deepcopy(thread.provider_context_observation) if thread.provider_context_observation else {},
+        model_context_usage=copy.deepcopy(thread.model_context_usage) if thread.model_context_usage else {},
+        learning_source=copy.deepcopy(thread.learning_source) if thread.learning_source else {},
+        metadata=copy.deepcopy(thread.metadata) if thread.metadata else {},
+        decision_settings=copy.deepcopy(thread.decision_settings) if thread.decision_settings else {},
+        model_metrics=copy.deepcopy(thread.model_metrics) if thread.model_metrics else {},
+        pending_host_notices=copy.deepcopy(thread.pending_host_notices),
+        conversation_methods=copy.deepcopy(thread.conversation_methods),
+    )
+
+
+# LLM: 只接收同次稳定读取的非空指纹，不持锁做深拷贝；缓存是有界派生投影，不替代磁盘权威。
+# 函数用途: 保存独立的线程快照，更新LRU顺序并淘汰最旧记录。
+def _store_cached_thread(
+    path: Path, fingerprint: tuple[int, int, int, int] | None, thread: ConversationThread,
+) -> None:
+    if fingerprint is None:
+        return
+    snapshot = _clone_cached_thread(thread)
+    key = str(path)
+    with _THREAD_RECORD_CACHE_LOCK:
+        _THREAD_RECORD_CACHE[key] = (fingerprint, snapshot)
+        _THREAD_RECORD_CACHE.move_to_end(key)
+        while len(_THREAD_RECORD_CACHE) > _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT:
+            _THREAD_RECORD_CACHE.popitem(last=False)
+
+
+# LLM: 写入、空记录与读取失败都丢弃旧投影；只触碰内存，不掩盖或修改原错误。
+# 函数用途: 在线程缓存锁内幂等移除指定路径。
+def _drop_cached_thread(path: Path) -> None:
+    with _THREAD_RECORD_CACHE_LOCK:
+        _THREAD_RECORD_CACHE.pop(str(path), None)
+
+
+# LLM: 仅相同物理指纹的有效记录复用，克隆在锁外；未命中保留原reader/from_dict和错误身份，不缓存空值或错误。
+# 函数用途: 读取独立线程快照，只把读前读后稳定的文件放进有界缓存。
+def _read_thread_record_report(
+    path: Path, *, thread_id: str = "",
+) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+    before_fp = _file_fingerprint(path)
+    cached_thread = None
+    if before_fp is not None:
+        with _THREAD_RECORD_CACHE_LOCK:
+            cached = _THREAD_RECORD_CACHE.get(str(path))
+            if cached is not None and cached[0] == before_fp:
+                _THREAD_RECORD_CACHE.move_to_end(str(path))
+                cached_thread = cached[1]
+    if cached_thread is not None:
+        return _clone_cached_thread(cached_thread), None
+    payload, error = read_json_object_report(path, context="conversation.thread.read")
+    actual_thread_id = str(thread_id or path.stem)
+    if error is not None:
+        _drop_cached_thread(path)
+        error["thread_id"] = actual_thread_id
+        return None, error
+    if not payload:
+        _drop_cached_thread(path)
+        return None, None
+    try:
+        thread = ConversationThread.from_dict(payload)
+        after_fp = _file_fingerprint(path)
+        if before_fp is not None and after_fp == before_fp:
+            _store_cached_thread(path, after_fp, thread)
+        return _clone_cached_thread(thread), None
+    except Exception as exc:
+        _drop_cached_thread(path)
+        report = runtime_error_report(exc, context="conversation.thread.read")
+        report["thread_id"] = actual_thread_id
+        report["path"] = str(path)
+        return None, report
 
 
 # LLM: 只校验当前原子事务的选择变化，不提供授权、采用或重试；元数据/Compact 普通更新保持选择事实原样。
@@ -430,13 +516,17 @@ class ThreadStore:
         return thread
 
     # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
-    # LLM: store_threads 的持久化合同：原子保存一份已校验线程记录，调用方负责锁和身份边界；修改须同步本领域调用方与存储回归。
-    # 函数用途: 原子保存一份已校验线程记录，调用方负责锁和身份边界。
+    # LLM: 原writer与blocking形状不变；返回时另一写者可能已提交，仅失效缓存，不给旧对象贴新文件指纹。
+    # 函数用途: 原子保存线程并丢弃旧投影，下次读取从磁盘建立新缓存。
     def write(self, thread: ConversationThread, *, blocking: bool = True) -> None:
-        write_json_file_atomic(self.storage.thread_path(thread.thread_id), thread.to_dict(), **({} if blocking else {"blocking": False}))
+        path = self.storage.thread_path(thread.thread_id)
+        try:
+            write_json_file_atomic(path, thread.to_dict(), **({} if blocking else {"blocking": False}))
+        finally:
+            _drop_cached_thread(path)
 
-    # LLM: Compact/设置/模型选择写回共用原文件锁；_apply_thread_update校验身份与扩展字段；C显式非阻塞，默认等待合同不变。
-    # 函数用途: 在原锁内保存线程和单调选择事实，避免覆盖并发状态；不因此授予模型自动采用能力。
+    # LLM: Compact/设置/选择沿原锁与CAS，C显式非阻塞不变；锁已在writer返回时释放，只失效缓存避免并发旧值配新指纹。
+    # 函数用途: 原子更新线程，返回独立对象；下一次读取重新缓存真实文件。
     def update_atomic(
         self,
         thread_id: str,
@@ -445,9 +535,13 @@ class ThreadStore:
     ) -> ConversationThread:
         path = self.storage.thread_path(thread_id)
 
-        payload = update_json_file_atomic(path, lambda value: _apply_thread_update(value, thread_id, updater),
-                                          require_existing=True, **({} if blocking else {"blocking": False}))
-        return ConversationThread.from_dict(payload)
+        try:
+            payload = update_json_file_atomic(path, lambda value: _apply_thread_update(value, thread_id, updater),
+                                              require_existing=True, **({} if blocking else {"blocking": False}))
+        finally:
+            _drop_cached_thread(path)
+        thread = ConversationThread.from_dict(payload)
+        return _clone_cached_thread(thread)
 
     # LLM: store_threads 的持久化合同：读回通道到线程索引，损坏时返回错误，禁止静默创建替代绑定；修改须同步本领域调用方与存储回归。
     # 函数用途: 读回通道到线程索引，损坏时返回错误，禁止静默创建替代绑定。
@@ -519,28 +613,15 @@ class ThreadStore:
             **({} if blocking else {"blocking": False}),
         )
 
-    # LLM: store_threads 的持久化合同：解析单个线程文件并核验身份，将读取或解析失败归入原错误报告；修改须同步本领域调用方与存储回归。
-    # 函数用途: 解析单个线程文件并核验身份，将读取或解析失败归入原错误报告。
+    # LLM: 仅指纹相同的有效线程命中；未命中按原reader/from_dict恢复，读前后不稳定不缓存，错误上下文保持不变。
+    # 函数用途: 读取独立线程对象，复用未变化文件；空记录或坏账立即移除旧缓存。
     def _load_path_report(
         self,
         path: Path,
         *,
         thread_id: str = "",
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
-        payload, error = read_json_object_report(path, context="conversation.thread.read")
-        actual_thread_id = str(thread_id or path.stem)
-        if error is not None:
-            error["thread_id"] = actual_thread_id
-            return None, error
-        if not payload:
-            return None, None
-        try:
-            return ConversationThread.from_dict(payload), None
-        except Exception as exc:
-            report = runtime_error_report(exc, context="conversation.thread.read")
-            report["thread_id"] = actual_thread_id
-            report["path"] = str(path)
-            return None, report
+        return _read_thread_record_report(path, thread_id=thread_id)
 
 
 # LLM: 只在代次未推进时写 compact_vision_failed_generation=当前代次；不碰 consecutive_failures/failure_code，因此不进熔断。

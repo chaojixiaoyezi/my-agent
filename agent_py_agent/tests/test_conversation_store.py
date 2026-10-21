@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 
@@ -1803,3 +1808,297 @@ def test_memory_archive_jsonl_readers_handle_unicode_separators(tmp_path) -> Non
         value="e1",
         expected={"event_id": "e1", "content": tricky},
     )
+
+
+# LLM: 真实ThreadStore/JSON文件，spy只记录线程reader调用并透传；不初始化额外缓存或修改产品权限。
+# 函数用途: 为逐文件缓存回归准备冷记录与读盘计数，不依赖其它测试留下的全局状态。
+@pytest.fixture
+def thread_record_cache_case(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import store_threads
+    from agent_py_agent.agent.conversation.models import ConversationThread
+
+    store = ConversationStore(tmp_path / 'conversations')
+    thread = ConversationThread(thread_id='cache-thread', canonical_user_id='owner', title='initial', updated_at=2.0)
+    path = store.storage.thread_path(thread.thread_id)
+    path.write_text(json.dumps(thread.to_dict()), encoding='utf-8')
+    reads = []
+    original = store_threads.read_json_object_report
+
+    # LLM: 所有返回与异常仍来自原JSON reader，调用次数是缓存是否避开重解析的实际观察点。
+    # 函数用途: 计数目标线程文件的读取，不模拟缓存命中或解析结果。
+    def read(path, **kwargs):
+        reads.append(path)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(store_threads, 'read_json_object_report', read)
+    return SimpleNamespace(store=store, thread=thread, path=path, module=store_threads, reads=reads, reader=read)
+
+
+# LLM: 同路径的独立Store须复用真实文件快照，返回值仍独立，不能只验证私有缓存存在。
+# 函数用途: 核对第二次读取不再走JSON reader。
+def test_thread_record_cache_reuses_reads_across_store_instances(thread_record_cache_case):
+    case = thread_record_cache_case
+    first, error = case.store.threads.load_report(case.thread.thread_id)
+    reopened = ConversationStore(case.store.storage.root, initialize=False)
+    second, reopened_error = reopened.threads.load_report(case.thread.thread_id)
+    assert error is reopened_error is None
+    assert first == second and first is not second
+    assert case.reads == [case.path]
+
+
+# LLM: 文件缓存不得冻结目录成员或改变排序/limit；新增和删除必须在下一次原glob扫描中体现。
+# 函数用途: 计数冷热列表读取并核对增删线程后的返回顺序。
+def test_thread_record_cache_list_hits_keep_order_limit_and_new_files(thread_record_cache_case):
+    case = thread_record_cache_case
+    for name, stamp in [('alpha', 1), ('beta', 3)]:
+        path = case.store.storage.thread_path(name)
+        path.write_text(json.dumps(replace(case.thread, thread_id=name, updated_at=stamp).to_dict()), encoding='utf-8')
+    first, errors = case.store.threads.list_report(limit=0)
+    assert errors == [] and [item.thread_id for item in first] == ['alpha', 'cache-thread', 'beta']
+    assert len(case.reads) == 3
+    limited, errors = case.store.threads.list_report(limit=1)
+    assert errors == [] and [item.thread_id for item in limited] == ['beta']
+    assert len(case.reads) == 3
+    case.store.storage.thread_path('alpha').unlink()
+    case.store.storage.thread_path('gamma').write_text(
+        json.dumps(replace(case.thread, thread_id='gamma', updated_at=4).to_dict()), encoding='utf-8',
+    )
+    refreshed, errors = case.store.threads.list_report(limit=0)
+    assert errors == [] and [item.thread_id for item in refreshed] == ['cache-thread', 'beta', 'gamma']
+    assert len(case.reads) == 4
+
+
+# LLM: mtime与size相同不能保证内容相同；原地写依赖ctime，原子替换依赖inode。
+# 函数用途: 覆盖两种保留旧mtime的外部改写，防止复用旧线程。
+@pytest.mark.parametrize('atomic', [False, True])
+def test_thread_record_cache_invalidates_same_size_same_mtime_changes(thread_record_cache_case, atomic):
+    case = thread_record_cache_case
+    assert case.store.threads.require(case.thread.thread_id).title == 'initial'
+    before = case.path.stat()
+    payload = case.thread.to_dict()
+    payload['title'] = 'changed'
+    destination = case.path.with_suffix('.replacement') if atomic else case.path
+    destination.write_text(json.dumps(payload), encoding='utf-8')
+    os.utime(destination, ns=(before.st_atime_ns, before.st_mtime_ns))
+    if atomic:
+        destination.replace(case.path)
+    after = case.path.stat()
+    assert before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+    assert (before.st_ino, before.st_ctime_ns) != (after.st_ino, after.st_ctime_ns)
+    assert case.store.threads.require(case.thread.thread_id).title == 'changed'
+    assert case.store.threads.require(case.thread.thread_id).title == 'changed'
+    assert len(case.reads) == 2
+
+
+# LLM: 错误和空对象必须逐次回读并保留原context/path/thread_id，修复文件后可再次命中。
+# 函数用途: 验证语法、对象类型、模型转换失败和空记录都不进入正缓存。
+@pytest.mark.parametrize('content', ['{broken', '[]', '{}', '{"compact_generation": "bad"}'])
+def test_thread_record_cache_never_caches_corruption_or_empty_records(thread_record_cache_case, content):
+    case = thread_record_cache_case
+    assert case.store.threads.require(case.thread.thread_id).title == 'initial'
+    case.path.write_text(content, encoding='utf-8')
+    for _ in range(2):
+        value, error = case.store.threads.load_report(case.thread.thread_id)
+        assert value is None
+        if content == '{}':
+            assert error is None
+        else:
+            assert error['context'] == 'conversation.thread.read'
+            assert error['thread_id'] == case.thread.thread_id and error['path'] == str(case.path)
+        assert str(case.path) not in getattr(case.module, '_THREAD_RECORD_CACHE', {})
+    case.path.write_text(json.dumps(case.thread.to_dict()), encoding='utf-8')
+    assert case.store.threads.require(case.thread.thread_id).title == 'initial'
+    assert case.store.threads.require(case.thread.thread_id).title == 'initial'
+    assert len(case.reads) == 4
+
+
+# LLM: 删除不允许被旧投影掩盖，返回原(None,None)并清缓存；同路径重新出现须恢复新内容。
+# 函数用途: 核对线程删除与重建的读取语义。
+def test_thread_record_cache_drops_deleted_records(thread_record_cache_case):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    case.path.unlink()
+    assert case.store.threads.load_report(case.thread.thread_id) == (None, None)
+    assert str(case.path) not in getattr(case.module, '_THREAD_RECORD_CACHE', {})
+    case.path.write_text(json.dumps(replace(case.thread, title='restored').to_dict()), encoding='utf-8')
+    assert case.store.threads.require(case.thread.thread_id).title == 'restored'
+
+
+# LLM: 冷读取返回到后置stat之间发生真实替换时，本轮数据可返回但不可缓存为新版本。
+# 函数用途: 验证不稳定读窗不会污染后续稳定命中。
+def test_thread_record_cache_requires_a_stable_read_fingerprint(thread_record_cache_case, monkeypatch):
+    case = thread_record_cache_case
+
+    # LLM: 在原reader返回后用真实外部改写制造读窗换代；首轮结果可返回，但不得写入缓存。
+    # 函数用途: 验证读前读后指纹不同会放弃缓存，下一轮从新文件恢复。
+    def changing_reader(path, **kwargs):
+        value = case.reader(path, **kwargs)
+        path.write_text(json.dumps(replace(case.thread, title='changed').to_dict()), encoding='utf-8')
+        monkeypatch.setattr(case.module, 'read_json_object_report', case.reader)
+        return value
+
+    monkeypatch.setattr(case.module, 'read_json_object_report', changing_reader)
+    assert case.store.threads.require(case.thread.thread_id).title == 'initial'
+    assert case.store.threads.require(case.thread.thread_id).title == 'changed'
+    assert case.store.threads.require(case.thread.thread_id).title == 'changed'
+    assert len(case.reads) == 2
+
+
+# LLM: stat不可用不授权复用投影，仍每次调用原reader且不发布新缓存。
+# 函数用途: 核对无指纹时退回真实读取。
+def test_thread_record_cache_cannot_hit_when_stat_is_unavailable(thread_record_cache_case, monkeypatch):
+    case = thread_record_cache_case
+    monkeypatch.setattr(case.module, '_file_fingerprint', lambda path: None, raising=False)
+    assert case.store.threads.load_report(case.thread.thread_id)[1] is None
+    assert case.store.threads.load_report(case.thread.thread_id)[1] is None
+    assert len(case.reads) == 2
+    assert str(case.path) not in getattr(case.module, '_THREAD_RECORD_CACHE', {})
+
+
+# LLM: 缩小容量仍验证公开load行为和真实reader计数，命中必须刷新LRU而不靠文件时间排序。
+# 函数用途: 核对超限淘汰最久未使用的记录。
+def test_thread_record_cache_is_bounded_and_uses_lru(thread_record_cache_case, monkeypatch):
+    case = thread_record_cache_case
+    monkeypatch.setattr(case.module, '_THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT', 2, raising=False)
+    for name in ['a', 'b', 'c']:
+        case.store.storage.thread_path(name).write_text(json.dumps(replace(case.thread, thread_id=name).to_dict()), encoding='utf-8')
+    for name in ['a', 'b', 'a', 'c', 'b']:
+        assert case.store.threads.require(name).thread_id == name
+    assert len(case.reads) == 4
+    cache = getattr(case.module, '_THREAD_RECORD_CACHE', {})
+    assert list(cache) == [str(case.store.storage.thread_path(name)) for name in ['c', 'b']]
+
+
+# LLM: 当前模型全部七个字典都需隔离，尤其空字典不能通过replace浅拷贝共享。
+# 函数用途: 修改首次返回对象，验证后续命中的嵌套数据与原文件一致。
+@pytest.mark.parametrize('nested', [False, True])
+def test_thread_record_cache_clones_empty_and_nested_mutable_fields(thread_record_cache_case, nested):
+    case = thread_record_cache_case
+    fields = ['compact_operation_evidence', 'provider_context_observation', 'model_context_usage',
+        'learning_source', 'metadata', 'decision_settings', 'model_metrics']
+    if nested:
+        payload = case.thread.to_dict()
+        for name in fields:
+            if name != 'decision_settings':
+                payload[name] = {'nested': [{'value': 'disk'}]}
+        case.path.write_text(json.dumps(payload), encoding='utf-8')
+    first = case.store.threads.require(case.thread.thread_id)
+    expected = copy.deepcopy(first.to_dict())
+    for name in fields:
+        container = getattr(first, name)
+        if 'nested' in container:
+            container['nested'][0]['value'] = 'caller-only'
+        container['caller-only'] = True
+    second = case.store.threads.require(case.thread.thread_id)
+    assert second.to_dict() == expected
+    for name in fields:
+        assert getattr(first, name) is not getattr(second, name)
+    assert len(case.reads) == 1
+
+
+# LLM: 写后更新或失效都允许，但输入对象和返回对象的嵌套修改都不能影响缓存。
+# 函数用途: 覆盖两个写入口的可见性和调用者对象隔离。
+@pytest.mark.parametrize('method', ['write', 'update_atomic'])
+def test_thread_record_cache_writer_refreshes_without_sharing_caller_data(thread_record_cache_case, method):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    snapshot = replace(case.thread, title='updated', metadata={'nested': [{'value': 'saved'}]})
+    if method == 'write':
+        case.store.threads.write(snapshot)
+    else:
+        result = case.store.threads.update_atomic(case.thread.thread_id, lambda _: snapshot)
+        result.metadata['nested'][0]['value'] = 'returned-only'
+    snapshot.metadata['nested'][0]['value'] = 'caller-only'
+    assert case.store.threads.require(case.thread.thread_id).metadata == {'nested': [{'value': 'saved'}]}
+    assert case.store.threads.require(case.thread.thread_id).title == 'updated'
+    assert len(case.reads) <= 2
+
+
+# LLM: writer已释放文件锁后，后置stat不能证明返回的旧对象仍等于磁盘的新内容。
+# 函数用途: 两个写入口均不得把另一写者的指纹绑定给旧快照。
+@pytest.mark.parametrize('method', ['write', 'update_atomic'])
+def test_thread_record_cache_writer_does_not_publish_another_writers_fingerprint(thread_record_cache_case, monkeypatch, method):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    primitive_name = 'write_json_file_atomic' if method == 'write' else 'update_json_file_atomic'
+    original = getattr(case.module, primitive_name)
+    external_write = case.module.write_json_file_atomic
+
+    # LLM: 原提交完成到ThreadStore收到返回值之间，插入另一写者的真实提交；不改原更新返回值。
+    # 函数用途: 防止给本轮旧对象贴上另一写者的新文件指纹，污染后续读取。
+    def change_after_commit(path, *args, **kwargs):
+        result = original(path, *args, **kwargs)
+        external_write(path, replace(case.thread, title='external').to_dict())
+        return result
+
+    monkeypatch.setattr(case.module, primitive_name, change_after_commit)
+    if method == 'write':
+        case.store.threads.write(replace(case.thread, title='own-write'))
+    else:
+        assert case.store.threads.update_summary(case.thread.thread_id, 'own-summary').summary == 'own-summary'
+    assert case.store.threads.require(case.thread.thread_id).title == 'external'
+
+
+# LLM: 即使线程已缓存，权限变化后的真实reader失败仍应保留原错误；错误本身不能缓存。
+# 函数用途: 用受控文件读取拒绝验证缓存失效及权限错误的重复报告。
+def test_thread_record_cache_drops_permission_failures(thread_record_cache_case, monkeypatch):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    before = case.path.stat()
+    os.utime(case.path, ns=(before.st_atime_ns, before.st_mtime_ns + 1))
+    original = Path.read_text
+
+    # LLM: 只拒绝目标文件的真实读取，存在性检查和其它文件仍沿原路径；不模拟JSON错误信封。
+    # 函数用途: 精确注入可重复的PermissionError，不依赖测试执行者的系统属主权限。
+    def denied(path, *args, **kwargs):
+        if path == case.path:
+            raise PermissionError('cache read denied')
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', denied)
+    for _ in range(2):
+        thread, error = case.store.threads.load_report(case.thread.thread_id)
+        assert thread is None and error['context'] == 'conversation.thread.read'
+        assert error['path'] == str(case.path) and error['thread_id'] == case.thread.thread_id
+        assert str(case.path) not in case.module._THREAD_RECORD_CACHE
+    assert len(case.reads) == 3
+
+
+# LLM: 同路径并发命中只允许共享私有快照，不共享返回字典；使用真实线程池和原reader计数。
+# 函数用途: 验证缓存锁和克隆在八个并发调用者间不丢记录、不串数据。
+def test_thread_record_cache_parallel_reads_are_isolated(thread_record_cache_case):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    barrier = Barrier(8)
+
+    # LLM: 每个worker多次读同一物理文件并原地改自己的返回字典，不写权威线程。
+    # 函数用途: 同时触发LRU命中与对象克隆，核对每次读到的仍是原空metadata。
+    def read_and_mutate(index):
+        barrier.wait(timeout=10)
+        for _ in range(25):
+            value = case.store.threads.require(case.thread.thread_id)
+            assert value.metadata == {}
+            value.metadata['caller'] = index
+        return index
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        assert list(workers.map(read_and_mutate, range(8))) == list(range(8))
+    assert len(case.reads) == 1
+
+
+# LLM: 私有克隆原语还需隔离两个字典元组，构造合法dataclass后直接验证入缓存/出缓存两边界。
+# 函数用途: 核对通知和方法账本的元组内部字典不会被来源对象或返回对象修改。
+def test_thread_record_cache_clones_dictionary_tuple_fields(thread_record_cache_case):
+    case = thread_record_cache_case
+    snapshot = replace(case.thread, pending_host_notices=({'nested': [1]},), conversation_methods=({'nested': [2]},))
+    case.module._store_cached_thread(case.path, case.module._file_fingerprint(case.path), snapshot)
+    snapshot.pending_host_notices[0]['nested'].append('input')
+    snapshot.conversation_methods[0]['nested'].append('input')
+    first = case.store.threads.require(case.thread.thread_id)
+    assert first.pending_host_notices == ({'nested': [1]},)
+    assert first.conversation_methods == ({'nested': [2]},)
+    first.pending_host_notices[0]['nested'].append('output')
+    first.conversation_methods[0]['nested'].append('output')
+    second = case.store.threads.require(case.thread.thread_id)
+    assert second.pending_host_notices == ({'nested': [1]},)
+    assert second.conversation_methods == ({'nested': [2]},)
