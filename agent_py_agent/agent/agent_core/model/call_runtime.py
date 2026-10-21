@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +33,10 @@ from ...conversation.context_usage import (
 )
 from ...conversation.model_metrics import publish_model_metrics
 from ...memory_archive import estimate_tokens
+from ...observability.task_call_inspector import (
+    bind_model_call_telemetry,
+    record_model_call_telemetry,
+)
 from ...settings.defaults import context_window_or_default, output_cap_for_window
 from ..dynamic_timeout import DYNAMIC_TIMEOUT_SAFETY_MARGIN
 from ..tool_stream import ToolBoundaryChunkFilter
@@ -66,7 +71,7 @@ _HOST_SHUTDOWN_CLOSURE = ModelCallAdmissionClosure(
 
 
 # LLM: 调用者可传真实预计算快照，超时/账本/TUI共用一次计量及其捕获代次；遥测缺绑定只弃持久化，不阻模型或重算另一套版本。
-# 函数用途: 在原账登记真实轮次、用途与运行身份，并按同一上下文快照计算慢模型超时。
+# 函数用途: 在原账登记真实轮次并绑定可选任务遥测，按同一上下文快照计算慢模型超时。
 def start_model_call_record(
     request: object,
     *,
@@ -83,48 +88,34 @@ def start_model_call_record(
         binding = capture_context_usage_binding(agent, params)
         context_snapshot = model_visible_context_snapshot(agent, params, prompt, usage_binding=binding)
     input_tokens = context_snapshot.current_tokens
-    estimate = estimate_first_token_timeout(
-        FirstTokenTimeoutParams(
-            input_tokens=input_tokens,
-            ledger=ledger,
-            options=first_token_timeout_options(getattr(request, "agent", None)),
-        )
-    )
+    estimate = estimate_first_token_timeout(FirstTokenTimeoutParams(
+        input_tokens=input_tokens, ledger=ledger, options=first_token_timeout_options(agent)))
     logical_call_id = logical_model_call_id(request)
     physical_attempt = 1 + sum(
         str(record.metadata.get("logical_call_id") or "") == logical_call_id
         for record in ledger.records()
     )
-    call_id = (
-        f"{logical_call_id}:attempt-{physical_attempt}:"
-        f"{uuid.uuid4().hex[:8]}"
-    )
+    call_id = f"{logical_call_id}:attempt-{physical_attempt}:{uuid.uuid4().hex[:8]}"
     backend = getattr(agent, "backend", None)
     from ...settings.model_scope import model_selection_metadata
     from .response_provenance import response_call_purpose
 
-    ledger.started(
-        ModelCallStartedParams(
-            call_id=call_id,
-            backend=str(getattr(backend, "name", "") or ""),
-            model=model_name(getattr(request, "agent", None)),
-            input_tokens=input_tokens,
-            output_tokens_estimate=max_output_tokens(getattr(request, "agent", None)),
-            request_id=str(getattr(params, "request_id", "") or ""),
-            run_id=str(getattr(params, "run_id", "") or ""),
+    ledger.started(ModelCallStartedParams(
+            call_id=call_id, backend=str(getattr(backend, "name", "") or ""), model=model_name(agent),
+            input_tokens=input_tokens, output_tokens_estimate=max_output_tokens(agent),
+            request_id=str(getattr(params, "request_id", "") or ""), run_id=str(getattr(params, "run_id", "") or ""),
             metadata={
-                "purpose": response_call_purpose(params),
-                "attempt_id": str(getattr(params, "attempt_id", "") or ""),
+                "purpose": response_call_purpose(params), "attempt_id": str(getattr(params, "attempt_id", "") or ""),
                 "tool_rounds": getattr(request, "tool_rounds", 0),
                 "task_id": str(getattr(params, "task_id", "") or ""),
                 "thread_id": str((getattr(params, "task_attributes", None) or {}).get("conversation_thread_id") or ""),
                 "logical_call_id": logical_call_id,
-                "physical_attempt": physical_attempt,
-                "model_selection": model_selection_metadata(agent),
+                "physical_attempt": physical_attempt, "model_selection": model_selection_metadata(agent),
                 "first_token_timeout_estimate": estimate.to_dict(),
             },
-        )
-    )
+        ))
+    with suppress(Exception):
+        bind_model_call_telemetry(ledger, call_id, agent, params)
     _publish_model_context_usage(request, context_snapshot.to_public_dict(),
                                  binding=getattr(context_snapshot, "usage_binding", None))
     publish_model_metrics(agent, params, pending=True)
@@ -171,18 +162,15 @@ def observed_chunk_filter(
 ):
     seen_first_token = False
 
+    # LLM: 仅观察结构化流活动；可选展示异常不得中断原chunk过滤器。
+    # 函数用途: 给首事件和后续输出记时，并继续处理当前文本块。
     def _on_chunk(chunk: str) -> None:
         nonlocal seen_first_token
         if chunk and not seen_first_token:
             seen_first_token = True
             record_model_call_first_token(ledger, call_id, chunk, first_token_estimate)
         elif chunk:
-            ledger.activity(
-                ModelCallActivityParams(
-                    call_id=call_id,
-                    output_tokens_seen=estimate_tokens(chunk),
-                )
-            )
+            ledger.activity(ModelCallActivityParams(call_id=call_id, output_tokens_seen=estimate_tokens(chunk)))
         if chunk and callable(activity_callback):
             try:
                 activity_callback(chunk)
@@ -193,6 +181,8 @@ def observed_chunk_filter(
     return _on_chunk
 
 
+# LLM: 只更新原账本同call_id，不从流正文派生身份或新请求；联测model_call_ledger。
+# 函数用途: 保存首个输出事件的延迟与缓存疑似事实。
 def record_model_call_first_token(
     ledger: ModelCallLedger,
     call_id: str,
@@ -205,30 +195,23 @@ def record_model_call_first_token(
     latency = max(0.0, float(ledger.context.now()) - record.started_at)
     ledger.first_token(
         ModelCallFirstTokenParams(
-            call_id=call_id,
-            output_tokens_seen=estimate_tokens(chunk),
-            cache_suspected=is_cache_suspected(
-                input_tokens=record.input_tokens,
-                first_token_latency_seconds=latency,
-                estimate=first_token_estimate,
-            ),
+            call_id=call_id, output_tokens_seen=estimate_tokens(chunk),
+            cache_suspected=is_cache_suspected(input_tokens=record.input_tokens,
+                                             first_token_latency_seconds=latency, estimate=first_token_estimate),
         )
     )
 
 
 # LLM: 用量沿原归一读取器，首终态仍归原 ledger；准确调用已 failed 且原因与唯一准入 closure 完全匹配时抛原异常，
 #   阻止生成出口签发来源或执行迟到工具。已成功、超时及其它失败不重新归类；不能按正文猜停机或重开终态。
-# 函数用途: 把完成事实提交原账，并将宿主已结清的迟到响应交回原重启恢复出口，不为决策响应伪造生成内容。
+# 函数用途: 提交完成事实并尽力投影任务轮次，仍将停机后迟到响应交回原准入异常出口。
 def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: object) -> None:
     input_tokens = input_token_usage(response)
     output_tokens = output_token_usage(response)
     if output_tokens is None:
         output_tokens = estimate_tokens(response.text) if hasattr(response, "text") else 0
-    record = ledger.finished(
-        ModelCallFinishParams(
-            call_id=call_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+    record = ledger.finished(ModelCallFinishParams(
+            call_id=call_id, input_tokens=input_tokens, output_tokens=output_tokens,
             cached_input_tokens=reported_cache_read_token_usage(response),
             cache_creation_input_tokens=cache_creation_input_token_usage(response),
             provider_usage_reported=bool(response_usage(response)),
@@ -239,30 +222,28 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
             runtime_reason=str(getattr(response, "runtime_reason", "") or ""),
             turn_end_reason=str(getattr(response, "turn_end_reason", "") or ""),
             truncated=bool(getattr(response, "truncated", False)),
-        )
-    )
+        ))
+    with suppress(Exception):
+        record_model_call_telemetry(ledger, record)
     closure = model_call_admission_closure()
     if (closure is not None and record.status == "failed"
             and record.error_type == closure.error_type and record.error_code == closure.error_code):
         raise ModelCallAdmissionClosedError(closure)
 
 
+# LLM: 首个失败仍归原ledger；可选遥测即使被替换为抛异常的函数也不能改变账本或主链。
+# 函数用途: 保存失败事实并自动投影当前任务轮次。
 def record_model_call_failed(
     ledger: ModelCallLedger,
     call_id: str,
     exc: BaseException,
 ) -> None:
-    ledger.failed(
-        ModelCallFailureParams(
-            call_id=call_id,
-            error_type=type(exc).__name__,
-            error_code=str(
-                getattr(exc, "error_code", "")
-                or getattr(exc, "code", "")
-                or ""
-            ),
-        )
-    )
+    record = ledger.failed(ModelCallFailureParams(
+            call_id=call_id, error_type=type(exc).__name__,
+            error_code=str(getattr(exc, "error_code", "") or getattr(exc, "code", "") or ""),
+        ))
+    with suppress(Exception):
+        record_model_call_telemetry(ledger, record)
 
 
 # LLM: 排队只属展示、不得登记物理尝试；其余传输事件按结构化字段转成账本参数（含 progress 与分段计时），不读正文；
@@ -277,13 +258,9 @@ def record_model_provider_attempt(
         return
     ledger.provider_attempt(
         ModelCallProviderAttemptParams(
-            call_id=call_id,
-            attempt_id=str(event.get("attempt_id") or ""),
-            status=str(event.get("status") or "unknown"),
-            method=str(event.get("method") or ""),
-            path=str(event.get("path") or ""),
-            http_status=_nonnegative_int(event.get("http_status")),
-            error_type=str(event.get("error_type") or ""),
+            call_id=call_id, attempt_id=str(event.get("attempt_id") or ""), status=str(event.get("status") or "unknown"),
+            method=str(event.get("method") or ""), path=str(event.get("path") or ""),
+            http_status=_nonnegative_int(event.get("http_status")), error_type=str(event.get("error_type") or ""),
             retry_scheduled=event.get("retry_scheduled") is True,
             request_surface=dict(event.get("request_surface") or {}),
             transport=event["transport"] if isinstance(event.get("transport"), dict) else {},
@@ -308,23 +285,21 @@ class ModelCallTimeoutFacts:
     timeout_wait_phase: str = ""
 
 
+# LLM: 超时阶段和用量仍归原账本；遥测只是可失败投影，不改原超时诊断和重试语义。
+# 函数用途: 提交超时账并自动记录任务模型轮次。
 def record_model_call_timeout(ledger: ModelCallLedger, facts: ModelCallTimeoutFacts) -> None:
     """落超时账。``facts.timeout_wait_phase`` 只承载诊断用的连接位置（默认空串），
     不参与任何放行/退避判定，只透传给账本；其余字段语义见 ``ModelCallTimeoutFacts``。"""
-    ledger.timeout(
+    record = ledger.timeout(
         ModelCallTimeoutParams(
-            call_id=facts.call_id,
-            timeout_seconds=facts.timeout_seconds,
-            timeout_stage=facts.timeout_stage,
+            call_id=facts.call_id, timeout_seconds=facts.timeout_seconds, timeout_stage=facts.timeout_stage,
             elapsed_seconds=max(0.0, float(facts.elapsed_seconds)),
-            idle_silence_seconds=(
-                max(0.0, float(facts.idle_silence_seconds))
-                if facts.idle_silence_seconds is not None
-                else None
-            ),
+            idle_silence_seconds=max(0.0, float(facts.idle_silence_seconds)) if facts.idle_silence_seconds is not None else None,
             timeout_wait_phase=facts.timeout_wait_phase,
         )
     )
+    with suppress(Exception):
+        record_model_call_telemetry(ledger, record)
 
 
 # LLM: 同一 agent 的首次并发调用必须取得同一本账；只锁初始化，不串行模型调用，不能建立第二工厂或状态源。
@@ -358,19 +333,13 @@ def settle_open_model_calls_for_shutdown() -> tuple[dict[str, object], ...]:
 # 函数用途: 把一条被中断的调用记录压成可写进 Gateway 停机事件的小字典。
 def _interrupted_call_projection(record: Any) -> dict[str, object]:
     return {
-        "call_id": record.call_id,
-        "request_id": record.request_id,
-        "run_id": record.run_id,
-        "backend": record.backend,
-        "model": record.model,
-        "purpose": model_call_purpose(record),
+        "call_id": record.call_id, "request_id": record.request_id, "run_id": record.run_id,
+        "backend": record.backend, "model": record.model, "purpose": model_call_purpose(record),
         "first_token_seen": record.first_token_at is not None,
         "elapsed_seconds": round(float(record.total_latency_seconds or 0.0), 3),
         "estimated_input_tokens": int(record.input_tokens),
         "provider_attempt_count": int(record.provider_attempt_count),
-        "is_probe": bool(record.is_probe),
-        "error_code": record.error_code,
-        "settlement": "unsettled",
+        "is_probe": bool(record.is_probe), "error_code": record.error_code, "settlement": "unsettled",
     }
 
 
@@ -389,17 +358,11 @@ def model_call_summary(
     run_id = str(run_id or "").strip()
     cumulative = ledger.cumulative_summary(request_id=request_id, run_id=run_id)
     if cumulative is not None:
-        return {
-            "schema": "model_call_summary.v1",
-            **cumulative,
-        }
+        return {"schema": "model_call_summary.v1", **cumulative}
     records = [
-        record
-        for record in ledger.records()
-        if (
-            (request_id and record.request_id == request_id)
-            or (not request_id and run_id and record.run_id == run_id)
-        )
+        record for record in ledger.records()
+        if ((request_id and record.request_id == request_id)
+            or (not request_id and run_id and record.run_id == run_id))
     ]
     if not records:
         return _empty_model_call_summary()
@@ -418,6 +381,8 @@ def _empty_model_call_summary() -> dict[str, object]:
     return {"schema": "model_call_summary.v1", **summarize_model_call_records(()), "status_counts": {}}
 
 
+# LLM: 动态预算复用配置和唯一输出上限，不缩短已配置的请求超时；调用方沿用原超时语义。
+# 函数用途: 合并固定请求时限与动态生成预算。
 def effective_model_request_timeout_seconds(agent: object, first_token_timeout_seconds: float) -> float:
     base_timeout = model_request_timeout_seconds(agent)
     if base_timeout <= 0:
@@ -432,6 +397,8 @@ def effective_model_request_timeout_seconds(agent: object, first_token_timeout_s
     return max(base_timeout, dynamic_timeout)
 
 
+# LLM: 配置优先，缺失时读后端；非法值归零，不为遥测另设隐式时间限制。
+# 函数用途: 读取当前请求有效的固定超时秒数。
 def model_request_timeout_seconds(agent: object) -> float:
     config = getattr(agent, "config", None)
     raw = getattr(config, "request_timeout", None)
@@ -491,6 +458,8 @@ def logical_model_call_id(request: object) -> str:
     return f"model-call:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}"
 
 
+# LLM: 只归一非负整数，不能把格式错误升级为调用链异常。
+# 函数用途: 安全读取传输事实里的计数字段。
 def _nonnegative_int(value: object) -> int:
     try:
         return max(0, int(value or 0))
@@ -498,6 +467,8 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
+# LLM: 后端选定模型优先于配置回退，模型名只作账本身份而非授权判断。
+# 函数用途: 读取当前实际后端的模型名称。
 def model_name(agent: object) -> str:
     backend = getattr(agent, "backend", None)
     config = getattr(agent, "config", None)
@@ -558,19 +529,20 @@ def _output_generation_timeout_seconds(agent: object) -> float:
     if tokens <= 0:
         return 0.0
     config = getattr(agent, "config", None)
-    rate = max(
-        1.0,
-        float_config(config, "estimated_output_tokens_per_second", 20.0),
-    )
+    rate = max(1.0, float_config(config, "estimated_output_tokens_per_second", 20.0))
     return tokens / rate
 
 
+# LLM: 上下限只读原首事件选项，非法倒置区间按原最小值夹取。
+# 函数用途: 把动态预算约束在当前配置的时间范围。
 def _clamp_dynamic_request_timeout(value: float, options: FirstTokenTimeoutOptions) -> float:
     minimum = max(0.0, float(options.min_timeout_seconds))
     maximum = max(minimum, float(options.max_timeout_seconds))
     return max(minimum, min(maximum, float(value)))
 
 
+# LLM: 读取无副作用；仅数值转换失败时使用调用方指定默认值。
+# 函数用途: 安全取得浮点配置项。
 def float_config(config: object, name: str, default: float) -> float:
     try:
         return float(getattr(config, name, default))
@@ -580,14 +552,7 @@ def float_config(config: object, name: str, default: float) -> float:
 
 
 __all__ = [
-    "effective_model_request_timeout_seconds",
-    "model_request_timeout_seconds",
-    "model_call_summary",
-    "observed_chunk_filter",
-    "record_model_call_failed",
-    "record_model_call_finished",
-    "record_model_provider_attempt",
-    "record_model_call_timeout",
-    "ModelCallTimeoutFacts",
-    "start_model_call_record",
+    "effective_model_request_timeout_seconds", "model_request_timeout_seconds", "model_call_summary",
+    "observed_chunk_filter", "record_model_call_failed", "record_model_call_finished",
+    "record_model_provider_attempt", "record_model_call_timeout", "ModelCallTimeoutFacts", "start_model_call_record",
 ]

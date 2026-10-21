@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,6 +29,7 @@ from ..common.log_redaction import redact_sensitive_value
 
 SCHEMA = "task_call_telemetry.v1"
 STATUSES = {"running", "succeeded", "failed", "paused", "cancelled"}
+_MODEL_SCOPE_LOCK = threading.Lock()
 
 
 # LLM: task_id 直接参与文件名，禁止任何路径分隔和特殊目录段。
@@ -38,10 +40,11 @@ def _path(task_id):
     return (*PARTS, "task_calls", task_id + ".json")
 
 
-# LLM: cached_tokens 是输入子集，不重复加进 total；调用方提供 total 时保留其供应商口径。
+# LLM: 规范字段优先于输入/输出/缓存别名；缓存是输入子集不重复累加，显式total仍保留供应商口径。
 # 函数用途: 规范化一轮或整个任务的 Token 用量。
 def _usage(data):
-    usage = {k: data.get(k, 0) for k in ("prompt_tokens", "completion_tokens", "cached_tokens")}
+    aliases = dict(prompt_tokens="input_tokens", completion_tokens="output_tokens", cached_tokens="cached_input_tokens")
+    usage = {key: data.get(key, data.get(alias, 0)) for key, alias in aliases.items()}
     usage["total_tokens"] = data.get("total_tokens", usage["prompt_tokens"] + usage["completion_tokens"])
     for value in usage.values():
         if type(value) is not int or _number(value) < 0:
@@ -233,17 +236,23 @@ class TaskCallInspector:
             existing = self._read(payload["task_id"]) or {}
             return self._save({**existing, **payload})
 
-    # LLM: 已有任务才可追加，所有 token 验证在持锁保存中完成。
-    # 函数用途: 追加一次模型请求并刷新累计用量。
-    def append_round(self, task_id, round_data):
+    # LLM: 默认必须已有任务；仅显式create在同一锁内建记录，轮次和树节点一起原子发表，不能覆盖已持久终态。
+    # 函数用途: 追加模型轮次、补齐对应运行节点并刷新累计用量。
+    def append_round(self, task_id, round_data, *, create_if_missing: bool = False):
         _path(task_id)
         with _lock(self._home):
             row = self._read(task_id)
             if row is None:
-                raise KeyError(task_id)
+                if not create_if_missing:
+                    raise KeyError(task_id)
+                row = TaskCallRecord(task_id=task_id, owner_id=self._owner_id,
+                                     thread_id=str(round_data.get("thread_id") or ""),
+                                     started_at=float(round_data.get("started_at") or time.time()),
+                                     root_run_id=str(round_data.get("root_run_id") or "")).to_dict()
             data = dict(round_data)
             if "duration_ms" in data:
                 _number(data["duration_ms"])
+            _append_model_run(row, data)
             row["rounds"].append(data)
             return self._save(row)
 
@@ -288,3 +297,87 @@ class TaskCallInspector:
                 raise
             return _merge_task(None, calls)
         return _merge_task(self._read(task_id), calls)
+
+
+# LLM: 已有节点非空事实优先，轮次仅补空字段，不把模型调用终态冒充整个运行结束。
+# 函数用途: 为新轮次补齐运行树节点和任务根编号。
+def _append_model_run(row, data):
+    run_id = str(data.get("run_id") or "")
+    row["root_run_id"] = row.get("root_run_id") or str(data.get("root_run_id") or "")
+    if not run_id:
+        return
+    node = dict(run_id=run_id, parent_run_id=str(data.get("parent_run_id") or ""),
+                root_run_id=str(data.get("root_run_id") or ""), model_name=str(data.get("model") or ""),
+                status="running", started_at=float(data.get("started_at") or row.get("started_at") or 0.0),
+                duration_ms=float(data.get("duration_ms") or 0.0))
+    previous = next((item for item in row["runs"] if item.get("run_id") == run_id), None)
+    if previous is None:
+        row["runs"].append(node)
+    else:
+        previous.update({key: value for key, value in node.items() if not previous.get(key)})
+
+
+# LLM: 只读结构化身份；来源必须run匹配，再按优先级补不冲突的空父根字段，不能拼接相互矛盾的链。
+# 函数用途: 取得当前模型调用的完整父根关系和线程编号。
+def _model_scope_identity(agent, params):
+    attrs = getattr(params, "task_attributes", None) or {}
+    current = getattr(agent, "_current_run_params", None)
+    run_id = str(getattr(params, "run_id", "") or "")
+    sources = ((params, run_id), (attrs, run_id), (getattr(agent, "_current_run_scope", None), ""),
+               (current, ""), (getattr(current, "task_attributes", None), str(getattr(current, "run_id", "") or "")))
+    identity = {}
+    for source, inherited_run in sources:
+        values = {key: str((source.get(key) if isinstance(source, dict) else getattr(source, key, "")) or "")
+                  for key in ("run_id", "parent_run_id", "root_run_id")}
+        if ((values["run_id"] or inherited_run) != run_id
+                or any(identity.get(key) and values[key] and identity[key] != values[key]
+                       for key in ("parent_run_id", "root_run_id"))):
+            continue
+        identity.update({key: value for key, value in values.items() if value and not identity.get(key)})
+    return dict(run_id=run_id, parent_run_id=identity.get("parent_run_id", ""), root_run_id=identity.get("root_run_id", ""),
+                thread_id=str(getattr(params, "thread_id", "") or attrs.get("conversation_thread_id") or attrs.get("thread_id") or ""))
+
+
+# LLM: 只绑定既有Owner和合法任务ID；有界私有作用域不改ModelCallRecord.metadata、不建目录，异常不得影响主链。
+# 函数用途: 为准确call_id冻结Owner、任务、父根关系和墙钟开始时间。
+def bind_model_call_telemetry(ledger: object, call_id: str, agent: object, params: object) -> None:
+    try:
+        paths = getattr(agent, "home_paths", None)
+        home = getattr(paths, "home_dir", None)
+        task_id = str(getattr(params, "task_id", "") or "")
+        if not home or not Path(home).is_dir():
+            return
+        _path(task_id)
+        scope = dict(home_dir=str(Path(home).absolute()), owner_id=str(getattr(paths, "owner_id", "") or ""),
+                     task_id=task_id, wall_started_at=time.time(), **_model_scope_identity(agent, params))
+        with _MODEL_SCOPE_LOCK:
+            scopes = getattr(ledger, "_telemetry_call_scopes", None)
+            if scopes is None:
+                ledger._telemetry_call_scopes = scopes = {}
+            scopes[call_id] = scope
+            while len(scopes) > 256:
+                scopes.pop(next(iter(scopes)))
+    except Exception:
+        return
+
+
+# LLM: 首终态消费绑定且只投影数值/身份，不存prompt或response；原metadata和终态不变，IO失败只丢可选遥测。
+# 函数用途: 将完成、失败或超时的实际模型调用自动写入任务详情。
+def record_model_call_telemetry(ledger: object, record: object) -> None:
+    try:
+        if getattr(record, "status", "") not in {"finished", "failed", "timed_out"}:
+            return
+        with _MODEL_SCOPE_LOCK:
+            scope = getattr(ledger, "_telemetry_call_scopes", {}).pop(record.call_id, None)
+        if scope is None or record.run_id != scope["run_id"]:
+            return
+        data = dict(round_id=record.call_id, run_id=record.run_id, parent_run_id=scope["parent_run_id"],
+                    root_run_id=scope["root_run_id"], thread_id=scope["thread_id"], model=record.model, backend=record.backend,
+                    purpose=str(record.metadata.get("purpose") or "main"), status=record.status,
+                    started_at=float(scope["wall_started_at"]), duration_ms=round(max(0.0, float(record.total_latency_seconds or 0.0)) * 1000, 3),
+                    prompt_tokens=max(0, int(record.accounted_input_tokens if record.status == "finished" else record.input_tokens)),
+                    completion_tokens=max(0, int(record.output_tokens)), cached_tokens=max(0, int(record.cached_input_tokens)),
+                    error_code=str(record.error_code or ""), stop_reason=str(record.stop_reason or ""))
+        TaskCallInspector(scope["home_dir"], owner_id=scope["owner_id"]).append_round(scope["task_id"], data, create_if_missing=True)
+    except Exception:
+        return

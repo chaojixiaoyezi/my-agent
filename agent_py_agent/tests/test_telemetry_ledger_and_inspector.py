@@ -1,9 +1,14 @@
 # LLM: 只在 pytest 临时 owner 内验收账本真实落盘、边界和聚合，不修改生产 owner。
 # 模块用途: 覆盖工具遥测与任务调用详情的持久化合同。
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.agent_core.model import call_runtime
+from agent_py_agent.agent.contracts.model_call_ledger import ModelCallLedger, ModelCallLedgerContext
+from agent_py_agent.agent.observability import task_call_inspector as inspector_module
+from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector, TaskCallRecord
 from agent_py_agent.agent.observability.telemetry_ledger import ToolTelemetryLedger
 
 
@@ -87,10 +92,9 @@ def test_parallel_writers(tmp_path):
     assert len(ToolTelemetryLedger(tmp_path).query_tool_calls()) == 32
 
 
-# LLM: 从公开接口验证任务写入、模型轮次和跨页工具明细，晚导入用于识别未实现阶段。
+# LLM: 从公开接口验证任务写入、模型轮次和跨页工具明细，公共类型导入集中在模块头。
 # 函数用途: 测试任务完整生命周期。
 def test_task_lifecycle_and_timeline(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path, owner_id="one")
     assert inspector.list_task_calls() == []
     assert inspector.get_task_call_detail("t1") is None
@@ -117,7 +121,6 @@ def test_task_lifecycle_and_timeline(tmp_path):
 # 函数用途: 验证任务查询和写入的身份边界。
 @pytest.mark.parametrize("task_id", ["../escape", "/tmp/escape", "a/b", "a\\b", "..", ""])
 def test_task_path_rejection(tmp_path, task_id):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path, owner_id="one")
     with pytest.raises(ValueError):
         inspector.upsert_task_call(dict(task_id=task_id))
@@ -128,7 +131,6 @@ def test_task_path_rejection(tmp_path, task_id):
 # LLM: 任务 JSON 是权威，索引丢失或陈旧不能导致任务丢失。
 # 函数用途: 验证重启、索引修复以及多实例并发追加。
 def test_task_restart_index_and_concurrent_rounds(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path, owner_id="one")
     inspector.upsert_task_call(dict(task_id="t1", started_at=10))
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -191,7 +193,6 @@ def test_dataclass_input_and_associations(tmp_path):
 # 函数用途: 验证非法任务更新的原子拒绝。
 @pytest.mark.parametrize("change", [{"status": "ok"}, {"trigger_kind": "unknown"}, {"token_usage": {"prompt_tokens": -1}}, {"ended_at": 9}, {"runs": {}}])
 def test_task_invalid_update(tmp_path, change):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path)
     inspector.upsert_task_call(dict(task_id="t1", started_at=10))
     before = inspector.get_task_call_detail("t1")
@@ -203,10 +204,6 @@ def test_task_invalid_update(tmp_path, change):
 # LLM: 四类触发源使用相同存储与过滤合同，引用列表不能丢失。
 # 函数用途: 检查所有触发类型、资产和任务分页。
 def test_trigger_assets_and_task_pages(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import (
-        TaskCallInspector,
-        TaskCallRecord,
-    )
     inspector = TaskCallInspector(tmp_path)
     for i, kind in enumerate(["interactive", "monitor", "workflow", "plugin_api"]):
         inspector.upsert_task_call(TaskCallRecord(str(i), trigger_kind=kind, started_at=i, mounted_assets={"monitor_id": "m", "workflow_id": "w", "script_ids": ["s"], "skill_ids": ["k"]}, artifacts=["artifact://test"]))
@@ -220,7 +217,6 @@ def test_trigger_assets_and_task_pages(tmp_path):
 # LLM: 目标叶子或父链软链接不能越界读写。
 # 函数用途: 检查任务叶子链接拒绝。
 def test_task_symlink_leaf(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path)
     inspector.upsert_task_call(dict(task_id="t1"))
     external = tmp_path / "outside.json"
@@ -249,7 +245,6 @@ def test_embedded_secrets_and_numeric_token_counts(tmp_path):
 # LLM: 保存和追加轮次必须使用同一脱敏出口，计数不受影响。
 # 函数用途: 验证任务各嵌套字段在真实文件中不泄露秘密。
 def test_task_recursive_persistence_redaction(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path)
     secret = "dummy-task-secret"
     payload = dict(task_id="redact", runs=[{"password": secret}], rounds=[{"note": "secret=" + secret}],
@@ -265,10 +260,6 @@ def test_task_recursive_persistence_redaction(tmp_path):
 # LLM: 目标正文目前不在记录模型里；先用字段合同断言避免把 TypeError 当复现。
 # 函数用途: 验证 goal 被接受并在持久化之前脱敏。
 def test_task_goal_is_supported_and_redacted(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import (
-        TaskCallInspector,
-        TaskCallRecord,
-    )
     assert "goal" in TaskCallRecord.__dataclass_fields__
     secret = "dummy-goal-secret"
     inspector = TaskCallInspector(tmp_path)
@@ -280,7 +271,6 @@ def test_task_goal_is_supported_and_redacted(tmp_path):
 # LLM: 无显式任务写入时也要从工具账本发现任务，并保留树身份与资产去重。
 # 函数用途: 验证只读自动合成、过滤、时间、状态与统计。
 def test_auto_task_from_ledger(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     ledger = ToolTelemetryLedger(tmp_path, owner_id="one")
     for i, tool in enumerate(("scripts", "workflows", "skill_search", "schedule")):
         ledger.record_tool_call(dict(call_id=str(i), tool_name=tool, task_id="task_auto_1", run_id="child",
@@ -304,7 +294,6 @@ def test_auto_task_from_ledger(tmp_path):
 # LLM: 明确记录的终态、模型和轮次优先；账本只补新节点、树关系和资产。
 # 函数用途: 验证合并去重、只读与 owner 隔离。
 def test_persisted_task_merges_live_runs_and_assets(tmp_path):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path, owner_id="one")
     inspector.upsert_task_call(dict(task_id="t1", status="paused", runs=[dict(run_id="root", model_name="model")], mounted_assets={"script_ids": ["old"]}))
     ledger = ToolTelemetryLedger(tmp_path, owner_id="one")
@@ -357,7 +346,6 @@ def test_runtime_telemetry_tree_identity(tmp_path):
 
     from test_verification_runtime import _agent, _call, _success
 
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     from agent_py_agent.agent.verification.runtime import record_tool_verification
     agent, project, home = _agent(tmp_path)
     home.mkdir()
@@ -376,7 +364,6 @@ def test_runtime_telemetry_tree_identity(tmp_path):
 def test_auto_tasks_beyond_ledger_page(tmp_path):
     import json
 
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     ledger = ToolTelemetryLedger(tmp_path, owner_id="one")
     sample = ledger.record_tool_call(call()).to_dict()
     path = tmp_path / "data/telemetry/tool_calls.jsonl"
@@ -395,7 +382,6 @@ def test_auto_tasks_beyond_ledger_page(tmp_path):
 def test_runtime_asset_references(tmp_path, tool, key, plural):
     from test_verification_runtime import _agent, _call, _success
 
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     from agent_py_agent.agent.verification.runtime import record_tool_verification
     agent, _, home = _agent(tmp_path)
     home.mkdir()
@@ -411,7 +397,6 @@ def test_runtime_asset_references(tmp_path, tool, key, plural):
 # 函数用途: 验证非文件名任务身份仍可从账本自动发现。
 @pytest.mark.parametrize("task_id", ["task/a", "任务甲", "task-path:123", "../outside"])
 def test_auto_task_opaque_identity(tmp_path, task_id):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     ledger = ToolTelemetryLedger(tmp_path)
     ledger.record_tool_call(dict(call_id="opaque", tool_name="read", task_id=task_id))
     inspector = TaskCallInspector(tmp_path)
@@ -429,7 +414,6 @@ def test_auto_task_opaque_identity(tmp_path, task_id):
 # 函数用途: 验证旧观测及空占位不会压住新的调用事实。
 @pytest.mark.parametrize("node", [dict(run_id="r", ended_at=0, duration_ms=0, status="paused"), dict(run_id="r", ended_at=1, duration_ms=1, status="succeeded", status_source="tool_calls")])
 def test_live_run_refreshes_observed_and_empty_fields(tmp_path, node):
-    from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
     inspector = TaskCallInspector(tmp_path)
     inspector.upsert_task_call(dict(task_id="t1", runs=[node]))
     ToolTelemetryLedger(tmp_path).record_tool_call(dict(call_id="run", tool_name="read", task_id="t1", run_id="r", started_at=10, ended_at=12, status="error"))
@@ -448,3 +432,96 @@ def test_runtime_identity_does_not_mix_different_runs():
     scope = SimpleNamespace(run_id="child", parent_run_id="parent", root_run_id="root")
     identity = _telemetry_identity(SimpleNamespace(_current_run_scope=scope), context, SimpleNamespace(run_id="child"))
     assert identity == dict(run_id="child", parent_run_id="parent", root_run_id="root")
+
+
+# LLM: 使用真实调用账本和受控时钟，只替换模型响应；上下文快照不含真实提示词或网络调用。
+# 函数用途: 构造可从开始驱动到终态的临时Owner请求。
+def _model_request(home):
+    clock = [100.0]
+    agent = SimpleNamespace(home_paths=SimpleNamespace(home_dir=home, owner_id="one"),
+                            backend=SimpleNamespace(name="test-backend", model_name="test-model", max_tokens=128),
+                            config=SimpleNamespace(), _model_call_ledger=ModelCallLedger(context=ModelCallLedgerContext(now=lambda: clock[0])))
+    params = SimpleNamespace(task_id="model-task", run_id="child", request_id="request", context_scope="isolated",
+                             task_attributes={"conversation_thread_id": "thread"})
+    return SimpleNamespace(agent=agent, params=params, prompt="synthetic-prompt-not-persisted", tool_rounds=0), clock
+
+
+# LLM: 三种真实终态入口共用同一合成响应，不绕过ledger的首终态规则。
+# 函数用途: 结束一次请求以验证自动遥测与重放。
+def _end_model_call(ledger, call_id, status):
+    if status == "finished":
+        call_runtime.record_model_call_finished(ledger, call_id, SimpleNamespace(text="synthetic-response-not-persisted",
+            usage=dict(prompt_tokens=10, completion_tokens=3, prompt_tokens_details=dict(cached_tokens=4)), stop_reason="end_turn"))
+    elif status == "failed":
+        call_runtime.record_model_call_failed(ledger, call_id, RuntimeError("synthetic-error-not-persisted"))
+    else:
+        call_runtime.record_model_call_timeout(ledger, call_runtime.ModelCallTimeoutFacts(call_id, 2, "wall_clock"))
+
+
+# LLM: 公开开始与三种终态都必须实际写入Inspector，身份只取同run的完整来源，重复终态不多记轮次。
+# 函数用途: 验证模型轮次、四种身份来源、累计Token、耗时和隐私边界。
+@pytest.mark.parametrize("status", ["finished", "failed", "timed_out"])
+@pytest.mark.parametrize("source", ["params", "attrs", "scope", "current", "split-parent", "split-root"])
+def test_model_rounds_auto_lifecycle(tmp_path, status, source):
+    request, clock = _model_request(tmp_path)
+    identity = dict(run_id="child", parent_run_id="parent", root_run_id="root")
+    target = {"params": request.params, "attrs": request.params.task_attributes,
+              "scope": SimpleNamespace(), "current": SimpleNamespace()}.get(source, request.params)
+    if isinstance(target, dict):
+        target.update(identity)
+    else:
+        vars(target).update(identity)
+    if source.startswith("split-"):
+        setattr(request.params, source.removeprefix("split-") + "_run_id", "")
+        request.params.task_attributes.update(identity)
+    request.agent._current_run_scope = target if source == "scope" else SimpleNamespace(run_id="foreign", root_run_id="wrong")
+    request.agent._current_run_params = target if source == "current" else None
+    ledger, call_id, _ = call_runtime.start_model_call_record(request, context_snapshot=SimpleNamespace(current_tokens=17, to_public_dict=lambda: {}))
+    metadata = dict(ledger.records()[0].metadata)
+    clock[0] += 2
+    _end_model_call(ledger, call_id, status)
+    _end_model_call(ledger, call_id, "finished")
+    detail = inspector_module.TaskCallInspector(tmp_path, owner_id="one").get_task_call_detail("model-task")
+    assert detail is not None, "模型调用没有自动写入任务轮次"
+    assert detail["root_run_id"] == "root" and detail["thread_id"] == "thread"
+    assert len(detail["rounds"]) == len(detail["runs"]) == 1
+    row = detail["rounds"][0]
+    assert (row["round_id"], row["run_id"], row["parent_run_id"], row["status"]) == (call_id, "child", "parent", status)
+    assert (row["model"], row["backend"], row["purpose"], row["duration_ms"]) == ("test-model", "test-backend", "main", 2000)
+    assert detail["token_usage"] == (dict(prompt_tokens=10, completion_tokens=3, cached_tokens=4, total_tokens=13) if status == "finished" else dict(prompt_tokens=17, completion_tokens=0, cached_tokens=0, total_tokens=17))
+    assert detail["runs"][0]["parent_run_id"] == "parent" and detail["runs"][0]["root_run_id"] == "root"
+    assert ledger.records()[0].metadata == metadata and getattr(ledger, "_telemetry_call_scopes", {}) == {}
+    assert "synthetic-" not in (tmp_path / "data/telemetry/task_calls/model-task.json").read_text()
+
+
+# LLM: 注入遥测入口或写入内部故障，真实调用账本始终保持既有返回与终态。
+# 函数用途: 验证可选遥测失败不会破坏模型主链。
+@pytest.mark.parametrize("point", ["bind_model_call_telemetry", "record_model_call_telemetry", "append_round"])
+@pytest.mark.parametrize("status", ["finished", "failed", "timed_out"])
+def test_model_rounds_failure_is_optional(tmp_path, monkeypatch, point, status):
+    request, _ = _model_request(tmp_path)
+    # LLM: 只替换遥测边界，账本开始及终态仍执行真实实现。
+    # 函数用途: 注入可选遥测故障。
+    def fail(*args, **kwargs):
+        raise OSError("synthetic telemetry failure")
+    target = inspector_module.TaskCallInspector if point == "append_round" else call_runtime
+    assert callable(getattr(target, point, None)), "模型遥测接口尚未接入"
+    monkeypatch.setattr(target, point, fail)
+    ledger, call_id, estimate = call_runtime.start_model_call_record(request, context_snapshot=SimpleNamespace(current_tokens=17, to_public_dict=lambda: {}))
+    _end_model_call(ledger, call_id, status)
+    assert estimate is not None and ledger.records()[0].status == status
+
+
+# LLM: 别名只在规范字段缺失时使用，已有零值和四字段返回合同不能改变。
+# 函数用途: 验证Token归一及仅显式允许的任务自动创建。
+def test_model_rounds_aliases_and_atomic_create(tmp_path):
+    inspector = inspector_module.TaskCallInspector(tmp_path, owner_id="one")
+    assert inspector_module._usage(dict(input_tokens=10, output_tokens=3, cached_input_tokens=4)) == dict(prompt_tokens=10, completion_tokens=3, cached_tokens=4, total_tokens=13)
+    assert inspector_module._usage(dict(prompt_tokens=0, input_tokens=10))["prompt_tokens"] == 0
+    with pytest.raises(KeyError):
+        inspector.append_round("new", {})
+    inspector.append_round("new", dict(run_id="child", parent_run_id="parent", root_run_id="root", model="m", started_at=10, prompt_tokens=1), create_if_missing=True)
+    inspector.append_round("new", dict(run_id="child", prompt_tokens=2), create_if_missing=True)
+    detail = inspector.get_task_call_detail("new")
+    assert len(detail["runs"]) == 1 and detail["token_usage"]["prompt_tokens"] == 3
+    assert detail["runs"][0]["parent_run_id"] == "parent"
