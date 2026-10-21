@@ -26,8 +26,8 @@ enabled 的 policy 文件存在 / wake_queue 待处理信号文件存在 / 在�
 排序键(不是下标),owner 增删只会把续页位置对齐到键边界,不会丢项或重复。
 
 事实判定(``_owner_fact_kind``)同样按"结构化签名 + 时间边界"复用:签名覆盖 owner home
-下判定读到的每个文件(mtime_ns/size/inode/条目名),因此新增、删除或原地改写 wake/policy/
-子代理 run/任务账本/link/调度账本/策展 state/候选/watch 快照/runtime.db 都会立刻失效;
+下判定读取的路径；小目录和活跃状态每轮现读，大目录稳定终态复用最多60秒，
+历史消息复用最多1秒并始终检查最近32条和60秒内修改项；目录增删及链接原子替换立即失效;
 时间驱动的转变(policy 与 job 到点、策展 interval/退避/日终、watch 窗口关闭)由判定时算出的
 最近边界兜住,另有 ``_FACT_TTL_SECONDS`` 兜底。缓存只对"判定本身足够贵"的 owner 生效
 (见 ``_FACT_MIN_CACHED_SECONDS``):空/安静 owner 的判定比签名还便宜,为它们维护签名是负收益。
@@ -44,8 +44,9 @@ import threading
 import time
 from bisect import bisect_right
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -90,8 +91,8 @@ _SNAPSHOT_LOCK = threading.Lock()
 #
 # 复用要求两个上界同时成立:
 #   ① 结构签名一致(owner home 下判定读到的每个文件/目录的 mtime_ns+size+inode+名字集合)
-#      → 新增/删除/原地改写 wake 文件、policy、子代理 state.json、任务账本、link、调度账本、
-#        策展 state、候选 jsonl、watch 快照、runtime.db(-wal/-shm) 都会立刻改变签名;
+#      → 小目录/活跃文件的新增、删除和原地改写立即失效；大目录历史项由下面的
+#        _DirectoryProjection 有界复核，目录变更与链接原子替换不等待兜底时间;
 #   ② 未超过"最近一次可能因时间而改变结论的时刻"(policy 到期、job 到期、策展 interval/
 #      退避/日终、watch 窗口关闭、执行权锁过期重探),且未超过兜底 TTL。
 # 缓存只是投影:进程重启后为空;签名计算或读取异常一律回退现读,且绝不写缓存。
@@ -605,15 +606,19 @@ def _file_signature(path: Path) -> tuple[Any, ...]:
     return (status.st_mtime_ns, status.st_size, status.st_ino)
 
 
+# LLM: 小目录逐项现读；大目录签名复用有界投影，活跃项即刻检测，历史项定期复核。
+# 函数用途: 为事实缓存提供目录签名，不在每轮重新遍历历史状态。
 def _dir_entries_signature(root: Path, pattern: str) -> tuple[Any, ...]:
-    """目录内匹配条目的结构化签名: 每个条目的名字 + (mtime_ns, size, inode),再加目录自身指纹。
-
-    LLM: 逐条目 stat 是必需的——只看目录 mtime 会漏掉"文件被原地改写"(目录 mtime 不变),
-    而 enabled/next_due_at/status 这类内容正是判定要读的东西。目录自身指纹(mtime_ns+inode)
-    覆盖"匹配集合没变但目录被动过"的形态;任何一项不可读都写显式占位,恢复可读后签名必变。
-    函数用途: 让"新增/删除/改写"三类变化都能让事实判定缓存立刻失效,同时只做元数据读取。
-    """
     try:
+        if pattern == "*/*/work/state.json":
+            return tuple(scan.signature for scan in _ledger_directory_scans(root)), _directory_fp(root)
+        if pattern == "*/conversations/tasks/*.json":
+            folders = _conversation_task_link_dirs(root)
+            if folders is None:
+                return (("scan_error",),)
+            return tuple(_directory_scan(folder, "link").signature for folder in folders), _directory_fp(root)
+        if "/" not in pattern:
+            return _directory_scan(root, "flat", pattern).signature
         paths = sorted(root.glob(pattern))
     except OSError:
         return (("glob_error",),)
@@ -752,17 +757,37 @@ def _add_deadline(deadline_out: list[float] | None, moment: float) -> None:
 # LLM: mtime 只用于发现“需要 tick”的 owner；真正 cursor/due 判定仍由 CuratorService 的结构化 state 完成。
 # 函数用途: 检查 ConversationStore 消息或 owner audit 是否晚于最近成功策展。
 def _curator_input_newer_than(owner_home: Path, timestamp: float) -> bool:
-    candidates = [
-        *(path for root in _store_roots(owner_home) for path in (root / "messages").glob("*.jsonl")),
-        *(owner_home / "audit").glob("*.jsonl"),
-    ]
-    for path in candidates:
-        try:
-            if path.is_file() and path.stat().st_size > 0 and path.stat().st_mtime > timestamp:
-                return True
-        except OSError:
-            return True
+    roots = [*(root / "messages" for root in _store_roots(owner_home)), owner_home / "audit"]
+    return any(_curator_directory_newer_than(root, timestamp) for root in roots)
+
+
+# LLM: 只读目录；每个匹配文件只stat一次，读取异常保守判为有输入，不吞掉后续唤醒。
+# 函数用途: 检查单个消息或audit目录是否存在晚于策展时间的非空输入。
+def _curator_directory_newer_than(root: Path, timestamp: float) -> bool:
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".jsonl"):
+                    continue
+                if _curator_entry_newer_than(entry, timestamp):
+                    return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
     return False
+
+
+# LLM: 单条消失只跳过该条，不提前结束整个目录；DirEntry缓存保证is_file不额外stat。
+# 函数用途: 读取一条消息元数据并处理文件在枚举后消失的竞态。
+def _curator_entry_newer_than(entry: os.DirEntry, timestamp: float) -> bool:
+    try:
+        st = entry.stat()
+        return entry.is_file() and st.st_size > 0 and st.st_mtime > timestamp
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 def _has_due_scheduler_fact(
@@ -892,16 +917,173 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     return False
 
 
-_TASK_STATUS_CACHE_MAX_ENTRIES_COUNT = 32768
+_TASK_STATUS_CACHE_MAX_ENTRIES_COUNT = 131072
 _TASK_STATUS_CACHE_LOCK = threading.Lock()
 _TASK_STATUS_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], str, str]] = OrderedDict()
 
+# 历史状态只复用60秒，任意手动原地改写不会永久隐形；原子链接替换由目录fp立即失效。
+_HISTORY_REVERIFY_SECONDS = 60.0
+_FLAT_REVERIFY_SECONDS = 1.0
+_DIRECTORY_CACHE_MAX_ENTRIES = 4096
+_DIRECTORY_SCAN_LOCK = threading.RLock()
+_LEDGER_DATE_DIR_CACHE: OrderedDict[str, _DirectoryProjection] = OrderedDict()
+_FACT_DIRECTORY_CACHE: OrderedDict[str, _DirectoryProjection] = OrderedDict()
 
-# LLM: 仅缓存物理指纹未变文件的 (task_id, status) 字符串投影；读取或解析失败返回 None 且不写缓存。
-# 函数用途: 读取任务链接或运行状态文件的 task_id 与 status，未变化文件复用内存指纹快照。
-def _read_cached_task_status_fields(path: Path) -> tuple[str, str] | None:
+
+@dataclass(frozen=True)
+class _DirectoryProjection:
+    """LLM: 锁内发布的只读目录投影；records/statuses 不得在发布后原地修改。
+    类用途: 同时缓存运行名、历史元数据、活跃集合和摘要，热路径不再遍历所有历史条目。
+    """
+
+    dir_fp: tuple[int, ...]
+    run_names: tuple[str, ...]
+    records: dict[str, tuple[Any, ...]]
+    live_names: tuple[str, ...]
+    active_rows: tuple[tuple[str, str, Path], ...]
+    statuses: dict[str, frozenset[str]]
+    signature: tuple[Any, ...]
+    verified_at: float
+
+
+# LLM: ctime补足恢复mtime的原子替换；目录不可读仍由扫描层分别处理缺失和错误。
+# 函数用途: 读取目录的完整结构指纹，不读取目录中每个文件。
+def _directory_fp(root: Path) -> tuple[int, ...]:
     try:
-        before_st = path.stat()
+        st = root.stat()
+    except FileNotFoundError:
+        return ()
+    return st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size
+
+
+# LLM: DirEntry类型信息来自目录枚举；仅在目录指纹变化时重枚举运行名或匹配文件名。
+# 函数用途: 按模式取排序后的条目名，lock等非匹配文件不构造Path也不stat。
+def _scan_names(root: Path, mode: str, pattern: str) -> tuple[str, ...]:
+    try:
+        with os.scandir(root) as entries:
+            names = tuple(sorted(
+                entry.name for entry in entries
+                if (entry.is_dir() if mode == "ledger" else fnmatchcase(entry.name, pattern))
+            ))
+        # 小关联目录保留既有glob错误边界，避免将列不全误认作无关联；大目录完全绕过glob。
+        if mode == "link" and len(names) <= 32:
+            return tuple(sorted(path.name for path in root.glob(pattern)))
+        return names
+    except FileNotFoundError:
+        return ()
+
+
+# LLM: 账本状态位于固定叶子，链接与平层签名条目直接位于目录内。
+# 函数用途: 将缓存的条目名转换成扫描对象，不做路径resolve。
+def _scan_entry_path(root: Path, name: str, mode: str) -> Path:
+    return root / name / "work" / "state.json" if mode == "ledger" else root / name
+
+
+# LLM: 状态解析与现有_TASK_STATUS_CACHE同源；读期间变更的状态不允许成为稳定终态。
+# 函数用途: 一次stat读取状态与物理指纹，缺失或竞态返回需下轮重查的投影。
+def _directory_record(path: Path, mode: str) -> tuple[Any, ...]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    fp = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    if mode == "flat":
+        return fp, None
+    fields = _read_cached_task_status_fields(path, stat_result=st)
+    with _TASK_STATUS_CACHE_LOCK:
+        cached = _TASK_STATUS_CACHE.get(str(path))
+        if cached is None or cached[0] != fp or cached[1:] != fields:
+            return None, fields
+    return fp, fields
+
+
+# LLM: 无效、未知或活跃状态不能当终态跳过；终态mtime距现在超过5秒才可稳定复用。
+# 函数用途: 判定单条账本或链接是否仍需每轮现读。
+def _status_record_live(record: tuple[Any, ...], mode: str, now_ns: int) -> bool:
+    fp, fields = record
+    if fp is None or fields is None or not fields[1]:
+        return True
+    terminal = (fields[1].upper() not in _UNFINISHED_RUN_STATUSES if mode == "ledger"
+                else conversation_task_link_is_terminal(fields[1].lower()))
+    return not terminal or now_ns - fp[2] <= 5_000_000_000
+
+
+# LLM: 只在冷读或内容变更时构造全量索引/摘要；正常轮询只访问live_names与active_rows。
+# 函数用途: 从同一次记录快照生成签名和用于发现/补关的状态索引。
+def _build_directory_projection(root, mode, fp, names, records, verified_at):
+    now_ns = time.time_ns()
+    if mode == "flat":
+        recent = set(sorted(names, key=lambda name: (records[name][0] or (0, 0, 0, 0))[2], reverse=True)[:32])
+        live = tuple(name for name in names if name in recent
+                     or records[name][0] is None or now_ns - records[name][0][2] <= 60_000_000_000)
+    else:
+        live = tuple(name for name in names if _status_record_live(records[name], mode, now_ns))
+    active, statuses = [], {}
+    for name, (_file_fp, fields) in records.items():
+        if fields is not None and fields[0]:
+            task_id, status = fields
+            statuses.setdefault(task_id, set()).add(status.lower())
+            if (status.upper() in _UNFINISHED_RUN_STATUSES if mode == "ledger"
+                    else status.lower() == THREAD_TASK_LINK_ACTIVE_STATUS):
+                active.append((task_id, status, _scan_entry_path(root, name, mode)))
+    blob = repr(tuple((name, records[name][0]) for name in names)).encode("utf-8", "surrogatepass")
+    signature = (str(root), fp, len(names), hashlib.blake2b(blob, digest_size=16).hexdigest())
+    return _DirectoryProjection(fp, names, records, live, tuple(active),
+                                {key: frozenset(value) for key, value in statuses.items()}, signature, verified_at)
+
+
+# LLM: 投影读改写共用锁，防止旧投影覆盖新记录；目录上限4096，解析LRU独立限制131072。
+# 函数用途: 返回共享目录投影，扫描异常由调用方保守处理。
+def _directory_scan(root: Path, mode: str, pattern: str = "*.json") -> _DirectoryProjection:
+    with _DIRECTORY_SCAN_LOCK:
+        cache = _LEDGER_DATE_DIR_CACHE if mode == "ledger" else _FACT_DIRECTORY_CACHE
+        key = str(root) if mode == "ledger" else f"{root}:{mode}:{pattern}"
+        cached = cache.get(key)
+        projection = _refresh_directory_projection(root, mode, pattern, cached)
+        cache[key] = projection
+        cache.move_to_end(key)
+        while len(cache) > _DIRECTORY_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+        return projection
+
+
+# LLM: 目录变更即全量复核；小目录始终stat；大目录只检查活跃/新近记录，TTL兜手动历史改写。
+# 函数用途: 刷新共享目录快照，未变时直接返回旧摘要，避免每轮hash十万条记录。
+def _refresh_directory_projection(root, mode, pattern, cached):
+    fp, now = _directory_fp(root), time.monotonic()
+    same_dir = cached is not None and cached.dir_fp == fp
+    names = cached.run_names if same_dir else _scan_names(root, mode, pattern)
+    limit = 64 if mode == "flat" else 32
+    ttl = _FLAT_REVERIFY_SECONDS if mode == "flat" else _HISTORY_REVERIFY_SECONDS
+    full = not same_dir or len(names) <= limit or now - cached.verified_at >= ttl
+    check_names = names if full else cached.live_names
+    updates = {}
+    for name in check_names:
+        record = _directory_record(_scan_entry_path(root, name, mode), mode)
+        if cached is None or cached.records.get(name) != record:
+            updates[name] = record
+    if same_dir and not updates and not full:
+        if mode == "flat":
+            return cached
+        live = tuple(name for name in cached.live_names if _status_record_live(cached.records[name], mode, time.time_ns()))
+        return cached if live == cached.live_names else replace(cached, live_names=live)
+    records = {name: updates.get(name, cached.records.get(name)) for name in names} if cached else updates
+    projection = _build_directory_projection(root, mode, fp, names, records, now if full else cached.verified_at)
+    # 大消息目录冷扫描可能比1秒TTL还慢，平层复核完成后才开始计算复用窗口。
+    return replace(projection, verified_at=time.monotonic()) if full and mode == "flat" else projection
+
+
+# LLM: 根目录只枚举日期层；每个日期下运行名和状态摘要由有界目录缓存复用。
+# 函数用途: 同源提供runs与tasks的账本扫描，不下钻glob每个work目录。
+def _ledger_directory_scans(root: Path) -> tuple[_DirectoryProjection, ...]:
+    return tuple(_directory_scan(root / name, "ledger") for name in _scan_names(root, "ledger", ""))
+
+
+# LLM: 仅缓存物理指纹未变文件的字符串投影；扫描器可传已读stat，失败不缓存。
+# 函数用途: 读取任务链接或运行状态文件的 task_id 与 status，未变化文件复用内存指纹快照。
+def _read_cached_task_status_fields(path: Path, *, stat_result=None) -> tuple[str, str] | None:
+    try:
+        before_st = path.stat() if stat_result is None else stat_result
     except OSError:
         return None
     before_fp = (before_st.st_ino, before_st.st_size, before_st.st_mtime_ns, before_st.st_ctime_ns)
@@ -934,6 +1116,8 @@ def _read_cached_task_status_fields(path: Path) -> tuple[str, str] | None:
     return task_id, status
 
 
+# LLM: 链接生命周期、账本交集与runtime权威不变；扫描投影只复用历史项，活跃项每轮检查。
+# 函数用途: 从默认/配置关联及运行账本中找仍须驱动的任务，并保留崩溃补关路径。
 def unfinished_task_ids(
     owner_home: Path,
     *,
@@ -960,41 +1144,24 @@ def unfinished_task_ids(
     links_root = owner_home / "workspace" / "runtime" / "workspaces"
     active_ids: list[str] = []
     links_by_task: dict[str, Path] = {}
-    link_statuses: dict[str, set[str]] = {}
-    link_files, link_dirs = _conversation_task_link_scan(links_root, conversation_tasks_dir)
-    for path in link_files:
-        fields = _read_cached_task_status_fields(path)
-        if fields is None:
-            continue
-        task_id, raw_status = fields
-        status = raw_status.lower()
-        if task_id:
-            link_statuses.setdefault(task_id, set()).add(status)
-        if task_id and status == THREAD_TASK_LINK_ACTIVE_STATUS and task_id not in active_ids:
+    link_scans, link_dirs = _conversation_task_link_scan(links_root, conversation_tasks_dir)
+    active_rows = sorted((row for scan in link_scans for row in scan.active_rows), key=lambda row: str(row[2]), reverse=True)
+    for task_id, _status, path in active_rows:
+        if task_id not in links_by_task:
             active_ids.append(task_id)
             links_by_task[task_id] = path
     repo = _runtime_repo_for_owner(owner_home)
     if repo is not None:
-        _reconcile_terminal_conversation_task_runs(repo, link_statuses, link_dirs)
+        _reconcile_terminal_conversation_task_runs(repo, {}, link_dirs, link_scans=link_scans)
     if not active_ids:
         return []
     # 新记录在 runs，存量在 tasks；仅扫描标准宿主 state 叶子，不从业务文件名推断活跃运行。
     try:
-        task_files = sorted(
-            (path for root in ("runs", "tasks")
-             for path in (owner_home / root).glob("*/*/work/state.json")),
-            reverse=True,
-        )
+        ledger_scans = tuple(scan for root in ("runs", "tasks")
+                             for scan in _ledger_directory_scans(owner_home / root))
     except OSError:
         return []
-    ledger_ids: set[str] = set()
-    for path in task_files:
-        fields = _read_cached_task_status_fields(path)
-        if fields is None:
-            continue
-        task_id, raw_status = fields
-        if raw_status.upper() in _UNFINISHED_RUN_STATUSES and task_id:
-            ledger_ids.add(task_id)
+    ledger_ids = {row[0] for scan in ledger_scans for row in scan.active_rows}
     candidates = [task_id for task_id in active_ids if task_id in ledger_ids]
     return _filter_by_runtime_authority(
         owner_home,
@@ -1018,6 +1185,8 @@ def _reconcile_terminal_conversation_task_runs(
     repo: RuntimeRepository,
     link_statuses: dict[str, set[str]],
     link_dirs: tuple[Path, ...] | None,
+    *,
+    link_scans: tuple[_DirectoryProjection, ...] = (),
 ) -> None:
     try:
         open_runs = repo.open_task_runs()
@@ -1026,7 +1195,10 @@ def _reconcile_terminal_conversation_task_runs(
     for task_run in open_runs:
         task_id = str(task_run["task_id"] or "").strip()
         try:
-            reason = _task_run_reconcile_reason(repo, task_id, link_statuses.get(task_id, set()), link_dirs)
+            statuses = set(link_statuses.get(task_id, set()))
+            for scan in link_scans:
+                statuses.update(scan.statuses.get(task_id, ()))
+            reason = _task_run_reconcile_reason(repo, task_id, statuses, link_dirs)
         except Exception:  # noqa: BLE001 单条坏账不影响其它 owner 任务发现
             continue
         if not reason:
@@ -1042,33 +1214,27 @@ def _reconcile_terminal_conversation_task_runs(
             continue
 
 
-# LLM: 关联文件的唯一扫描入口，在册任务发现与补关共用同一份结果。默认布局部分与旧实现逐字一致（同一通配、
-#   同一排序、列不全时文件按空、目录按 None）。runtime_tasks_dir 是调用方 agent 实际会话存储的关联目录；
-#   只有它不在默认通配之内（配置了 conversation_workspace 指向别处）才额外扫，并补进补关的目录清单；它列不全或
-#   整个不存在时目录清单为 None，补关一律保持打开。只做目录与文件元数据读取。
-# 函数用途: 列出本 owner 全部会话任务关联文件，以及补关判断"关联是否存在"要查的目录清单。
+# LLM: 发现与补关共用关联状态投影；配置目录不可见时保留默认关联，只禁止按无关联补关。
+# 函数用途: 返回本owner默认/额外关联目录的扫描投影和完整性标记。
 def _conversation_task_link_scan(
     links_root: Path, runtime_tasks_dir: Path | None,
-) -> tuple[list[Path], tuple[Path, ...] | None]:
-    link_files: list[Path] = []
-    if links_root.is_dir():
-        try:
-            link_files = sorted(links_root.glob("*/conversations/tasks/*.json"), reverse=True)
-        except OSError:
-            link_files = []
+) -> tuple[tuple[_DirectoryProjection, ...], tuple[Path, ...] | None]:
     link_dirs = _conversation_task_link_dirs(links_root)
     extra = _configured_task_links_dir(links_root, runtime_tasks_dir)
-    if extra is None:
-        return link_files, link_dirs
-    # 会话存储初始化时就建好关联目录（store_layout.managed_dirs），这里不在只可能是异常（如外接盘没挂上）：
-    # 当作列不全，补关一律保持打开，不能把"看不到"当成"没有关联"。
-    if not extra.is_dir():
-        return link_files, None
+    folders = list(link_dirs or ())
+    complete = link_dirs is not None
+    if extra is not None:
+        if not extra.is_dir():
+            complete = False
+        else:
+            folders.append(extra)
+    scans = []
     try:
-        extra_files = sorted(extra.glob("*.json"), reverse=True)
+        for folder in folders:
+            scans.append(_directory_scan(folder, "link"))
     except OSError:
-        return link_files, None
-    return [*link_files, *extra_files], (None if link_dirs is None else (*link_dirs, extra))
+        return tuple(scans), None
+    return tuple(scans), tuple(folders) if complete else None
 
 
 # LLM: 默认布局的关联目录都匹配 `<links_root>/*/conversations/tasks`，已在通配里，返回 None 免得同一目录扫两遍；
@@ -1095,7 +1261,12 @@ def _conversation_task_link_dirs(links_root: Path) -> tuple[Path, ...] | None:
     if not links_root.is_dir():
         return ()
     try:
-        return tuple(links_root.glob("*/conversations/tasks"))
+        workspaces = _scan_names(links_root, "ledger", "")
+        # 稀疏工作区保留原glob的错误语义；大量工作区只检查固定两层目录。
+        if len(workspaces) <= 32:
+            return tuple(links_root.glob("*/conversations/tasks"))
+        return tuple(folder for name in workspaces
+                     if (folder := links_root / name / "conversations" / "tasks").is_dir())
     except OSError:
         return None
 

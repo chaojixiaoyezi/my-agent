@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1086,3 +1087,252 @@ def test_terminal_run_without_closeout_is_not_a_hard_fact(tmp_path) -> None:
     found = discover_wake_pending_owners(owners)
 
     assert found == []
+
+
+# LLM: 使用真实磁盘账本，只将终态 mtime 调旧；不模拟状态或发现结果。
+# 函数用途: 创建大目录性能测试的历史终态和单个活跃账本。
+def _settled_history(home, root_name="runs", count=100):
+    day = home / root_name / "2026-10-20"
+    old_ns = time.time_ns() - 120_000_000_000
+    settled = set()
+    for index in range(count + 1):
+        path = day / f"run-{index:05d}" / "work" / "state.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"task_id": f"task-{index}", "status": "DONE" if index < count else "RUNNING"}))
+        if index < count:
+            os.utime(path, ns=(old_ns, old_ns))
+            settled.add(path)
+    _write_link(home, f"task-{count}", "active")
+    return settled, path
+
+
+# LLM: 在真正的 Path.stat/os.scandir 边界计数；调用者仅在测试体内持有 monkeypatch。
+# 函数用途: 记录历史 state 文件 stat 与日期目录重枚举，防止只换扫描 API 而未降本。
+def _count_history_io(monkeypatch, settled, day):
+    calls = {"settled_stat": 0, "date_scan": 0}
+    real_stat, real_scan = Path.stat, os.scandir
+
+    # LLM: 只观察指定旧文件，其余参数、返回值和异常原样传递。
+    # 函数用途: 记录每次旧终态文件的元数据读取。
+    def stat(path, *args, **kwargs):
+        if path in settled:
+            calls["settled_stat"] += 1
+        return real_stat(path, *args, **kwargs)
+
+    # LLM: 只观察指定日期目录；不替换枚举结果。
+    # 函数用途: 记录每次日期目录的子运行名枚举。
+    def scandir(path):
+        if Path(path) == day:
+            calls["date_scan"] += 1
+        return real_scan(path)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(os, "scandir", scandir)
+    return calls
+
+
+# LLM: 两个账本布局共享同一合同；终态100条不应在稳态重新stat，RUNNING仍必须即刻检测。
+# 函数用途: 验证发现和摘要共用历史缓存、活跃收口、日期枚举复用。
+@pytest.mark.parametrize("root_name", ["runs", "tasks"])
+def test_settled_history_skips_stats_and_detects_active_settlement(tmp_path, monkeypatch, root_name):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    settled, active = _settled_history(home, root_name)
+    assert discovery.unfinished_task_ids(home) == ["task-100"]
+    before = discovery._owner_fact_signature_digest(home)[0]
+    with monkeypatch.context() as patch:
+        calls = _count_history_io(patch, settled, active.parents[2])
+        for _ in range(3):
+            assert discovery.unfinished_task_ids(home) == ["task-100"]
+            assert discovery._owner_fact_signature_digest(home)[0] == before
+        assert calls == {"settled_stat": 0, "date_scan": 0}
+        active.write_text(json.dumps({"task_id": "task-100", "status": "DONE"}))
+        assert discovery.unfinished_task_ids(home) == []
+        assert discovery._owner_fact_signature_digest(home)[0] != before
+        assert calls["settled_stat"] == 0
+
+
+# LLM: 大链接目录混入lock sidecar，原子替换旧终态关联必须在下一次调用生效。
+# 函数用途: 验证链接扫描和签名不重复stat旧终态，且目录变化立即失效。
+def test_settled_links_reuse_metadata_and_atomic_replacement_invalidates(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    _, active = _settled_history(home)
+    for index in range(100):
+        _write_link(home, f"old-{index}", "completed")
+    folder = home / "workspace/runtime/workspaces/ws-1/conversations/tasks"
+    old_ns = time.time_ns() - 120_000_000_000
+    settled = set(folder.glob("old-*.json"))
+    for path in settled:
+        os.utime(path, ns=(old_ns, old_ns))
+        path.with_suffix(".lock").touch()
+    assert discovery.unfinished_task_ids(home) == ["task-100"]
+    before = discovery._owner_fact_signature_digest(home)[0]
+    with monkeypatch.context() as patch:
+        calls = _count_history_io(patch, settled, folder)
+        assert discovery.unfinished_task_ids(home) == ["task-100"]
+        assert discovery._owner_fact_signature_digest(home)[0] == before
+        assert calls == {"settled_stat": 0, "date_scan": 0}
+    replacement = folder / "replacement.tmp"
+    replacement.write_text(json.dumps({"task_id": "task-100", "status": "completed"}))
+    replacement.replace(folder / "task-100.json")
+    assert discovery.unfinished_task_ids(home) == []
+    assert discovery._owner_fact_signature_digest(home)[0] != before
+    assert active.exists()
+
+
+# LLM: 大消息目录使用最近活跃集合；静态旧消息不应每轮stat，原地追加仍改变摘要。
+# 函数用途: 验证单层签名缓存的稳态成本和最近消息追加失效。
+def test_large_message_signature_reuses_history_and_detects_append(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    folder = tmp_path / "messages"
+    folder.mkdir()
+    old_ns = time.time_ns() - 120_000_000_000
+    old = []
+    for index in range(100):
+        path = folder / f"thread-{index:03d}.jsonl"
+        path.write_text("{}\n")
+        os.utime(path, ns=(old_ns + index, old_ns + index))
+        old.append(path)
+    active = folder / "active.jsonl"
+    active.write_text("{}\n")
+    before = discovery._dir_entries_signature(folder, "*.jsonl")
+    with monkeypatch.context() as patch:
+        calls = _count_history_io(patch, set(old[:60]), folder)
+        assert discovery._dir_entries_signature(folder, "*.jsonl") == before
+        assert calls == {"settled_stat": 0, "date_scan": 0}
+        with active.open("a") as stream:
+            stream.write('{"new":true}\n')
+        assert discovery._dir_entries_signature(folder, "*.jsonl") != before
+
+
+# LLM: 元数据读取同时拦截Path与DirEntry，避免改换API后重复stat被漏计。
+# 函数用途: 验证策展输入每个匹配文件最多读取一次元数据，不读取lock。
+def test_curator_input_stats_each_jsonl_once(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    for name in ("a.jsonl", "b.jsonl", "c.lock"):
+        (folder / name).write_text("{}\n")
+    calls = []
+    path_stat, entry_stat = Path.stat, os.DirEntry.stat
+
+    # LLM: 原样执行stat，只记录被测audit目录下的文件读取。
+    # 函数用途: 为两种扫描API提供相同的元数据计数器。
+    def stat(path, *args, **kwargs):
+        if Path(path.path if isinstance(path, os.DirEntry) else path).parent == folder:
+            calls.append(path.name)
+        return (entry_stat if isinstance(path, os.DirEntry) else path_stat)(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "stat", stat)
+        patch.setattr(os.DirEntry, "stat", stat)
+        assert not discovery._curator_input_newer_than(tmp_path, time.time() + 3600)
+    assert sorted(calls) == ["a.jsonl", "b.jsonl"]
+
+
+# LLM: 配置位置不可见只能阻止无关联补关，不能掩盖默认位置已在跑的任务。
+# 函数用途: 验证额外存储异常时默认任务发现仍按原合同工作。
+def test_missing_extra_link_directory_keeps_default_active_tasks(tmp_path):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    _settled_history(home, count=1)
+    assert discovery.unfinished_task_ids(home, conversation_tasks_dir=tmp_path / "missing") == ["task-1"]
+
+
+# LLM: 原地修改旧终态不改变日期目录；用monotonic推进兜底复核，不依赖sleep。
+# 函数用途: 验证历史缓存到期后从磁盘重读，且新增运行立即被发现。
+def test_history_rechecks_external_terminal_edit_and_new_run(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    settled, active = _settled_history(home)
+    assert discovery.unfinished_task_ids(home) == ["task-100"]
+    before = discovery._owner_fact_signature_digest(home)[0]
+    old = min(settled)
+    old.write_text(json.dumps({"task_id": "reopened", "status": "RUNNING"}))
+    _write_link(home, "reopened", "active")
+    clock = time.monotonic()
+    monkeypatch.setattr(discovery.time, "monotonic", lambda: clock + 61)
+    assert set(discovery.unfinished_task_ids(home)) == {"task-100", "reopened"}
+    assert discovery._owner_fact_signature_digest(home)[0] != before
+    new = active.parents[2] / "new-run" / "work" / "state.json"
+    new.parent.mkdir(parents=True)
+    new.write_text(json.dumps({"task_id": "new", "status": "RUNNING"}))
+    _write_link(home, "new", "active")
+    assert set(discovery.unfinished_task_ids(home)) == {"task-100", "reopened", "new"}
+
+
+# LLM: 固定真实DirEntry的顺序，悬空项不能让后续有效输入被跳过。
+# 函数用途: 回归独立审查发现的单项消失掩盖同目录输入问题。
+def test_curator_dangling_entry_does_not_hide_newer_input(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    folder = tmp_path / "audit"
+    folder.mkdir()
+    (folder / "a.jsonl").symlink_to(folder / "missing")
+    (folder / "b.jsonl").write_text("{}\n")
+    real_scan = os.scandir
+
+    # LLM: 只排序真实目录条目；不伪造文件或stat结果。
+    # 函数用途: 稳定复现先遇悬空项、后遇有效输入的顺序。
+    @contextmanager
+    def ordered_scan(root):
+        with real_scan(root) as entries:
+            yield iter(sorted(entries, key=lambda entry: entry.name))
+
+    monkeypatch.setattr(os, "scandir", ordered_scan)
+    assert discovery._curator_input_newer_than(tmp_path, 0)
+
+
+# LLM: 将状态LRU预算缩小模拟单日期超过预算；目录名投影仍必须复用。
+# 函数用途: 防止大日期目录完整构建后自淘汰，造成每轮冷扫描。
+def test_directory_projection_outlives_status_lru_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    settled, active = _settled_history(home, count=40)
+    monkeypatch.setattr(discovery, "_TASK_STATUS_CACHE_MAX_ENTRIES_COUNT", 32)
+    assert discovery.unfinished_task_ids(home) == ["task-40"]
+    with monkeypatch.context() as patch:
+        calls = _count_history_io(patch, settled, active.parents[2])
+        assert discovery.unfinished_task_ids(home) == ["task-40"]
+        assert calls == {"settled_stat": 0, "date_scan": 0}
+
+
+# LLM: 确定性模拟一次耗时超过TTL的真实元数据扫描，不模拟文件状态或摘要结果。
+# 函数用途: 防止大消息目录扫描结束时TTL已过，导致永远无法命中缓存。
+def test_slow_flat_scan_starts_ttl_after_completion(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    folder = tmp_path / "messages"
+    folder.mkdir()
+    old_ns = time.time_ns() - 120_000_000_000
+    for index in range(100):
+        path = folder / f"{index}.jsonl"
+        path.write_text("{}\n")
+        os.utime(path, ns=(old_ns, old_ns))
+    clock, reads = [1000.0], []
+    original = discovery._directory_record
+
+    # LLM: 真实读取后仅推进受控时钟，每条20ms使冷扫描超过1秒TTL。
+    # 函数用途: 记录扫描量并重现生产慢盘上的缓存自过期。
+    def slow_read(path, mode):
+        result = original(path, mode)
+        reads.append(path)
+        clock[0] += 0.02
+        return result
+
+    monkeypatch.setattr(discovery.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(discovery, "_directory_record", slow_read)
+    first = discovery._dir_entries_signature(folder, "*.jsonl")
+    reads.clear()
+    assert discovery._dir_entries_signature(folder, "*.jsonl") == first
+    assert len(reads) == 32
