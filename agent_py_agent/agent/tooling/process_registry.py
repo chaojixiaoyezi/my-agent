@@ -690,38 +690,59 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
 
 
 # LLM: 仅独立组长且出生身份在枚举前后相同才拥有整组；不恢复已回收 root 的旧 PGID，不读取命令文字或扩大到宿主组。
-# 函数用途: 用关闭 stdin 的只读探测找出原组成员，避免外层 Shell 退出后漏掉被系统接管的子进程或抢读宿主输入。
+# 函数用途: Linux用procfs、其它平台用关闭stdin的ps找原组成员，仍核对组长出生身份与宿主组边界。
 def _exclusive_group_members(root_pid: int) -> tuple[list[int], bool]:
     birth = capture_process_birth_token(root_pid)
     if not birth:
         return [], _process_instance_terminated(root_pid, "")
-    try:
-        result = subprocess.run(
-            ["ps", "-axo", "pid=,pgid="], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=1, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return [], False
-    members: list[int] = []
-    root_group: int | None = None
-    complete = result.returncode == 0
-    for line in result.stdout.splitlines():
-        try:
-            pid, pgid = map(int, line.split())
-        except (TypeError, ValueError):
-            complete = False
-            continue
-        if pgid == root_pid:
-            members.append(pid)
-        if pid == root_pid:
-            root_group = pgid
+    groups, complete = _process_group_map()
+    root_group = groups.get(root_pid)
     if not _same_process(root_pid, birth):
         return [], False
     if root_group is None:
         return [], False
     if root_group != root_pid or root_group == os.getpgrp():
         return [], complete
-    return members, complete
+    return [pid for pid, pgid in groups.items() if pgid == root_pid], complete
+
+
+# LLM: 只读PID/pgrp，不fork Linux Gateway；消失项跳过，拒读/坏stat/枚举失败保留不完整；无proc保留原ps入口。
+# 函数用途: 从proc stat或系统ps获取进程组表，供精确组长身份核对后使用。
+def _process_group_map() -> tuple[dict[int, int], bool]:
+    proc_root = Path('/proc')
+    groups: dict[int, int] = {}
+    complete = True
+    if proc_root.is_dir():
+        try:
+            entries = tuple(proc_root.iterdir())
+        except OSError:
+            return {}, False
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            try:
+                stat = (entry / 'stat').read_text(encoding='utf-8', errors='replace')
+                groups[int(entry.name)] = int(stat.rsplit(')', 1)[1].split()[2])
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (OSError, IndexError, TypeError, ValueError):
+                complete = False
+        return groups, complete and bool(groups)
+    try:
+        result = subprocess.run(
+            ['ps', '-axo', 'pid=,pgid='], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=1, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}, False
+    complete = result.returncode == 0
+    for line in result.stdout.splitlines():
+        try:
+            pid, pgid = map(int, line.split())
+            groups[pid] = pgid
+        except (TypeError, ValueError):
+            complete = False
+    return groups, complete
 
 
 # LLM: 进程枚举只使用系统结构化字段；无法访问或解析时返回不完整，禁止用空表证明退出。
@@ -864,6 +885,8 @@ def _record_matches_store(
     return actual == expected
 
 
+# LLM: 仅同出生活进程可授组信号范围，跳过僵尸避免虚报sent及空等宽限；调用者自身及原组边界不变。
+# 函数用途: 向仍存活的快照后代发送组和单PID信号，不给已退出的僵尸进程发信号。
 def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
     """先信号各独立进程组，再逐个信号后代；绝不碰调用者自己的进程组。"""
     own_pid = os.getpid()
@@ -871,7 +894,8 @@ def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
         own_pgid = os.getpgrp()
     except OSError:
         own_pgid = -1
-    live = [(pid, token) for pid, token in snapshot.items() if pid != own_pid and _same_process(pid, token)]
+    live = [(pid, token) for pid, token in snapshot.items()
+            if pid != own_pid and _same_process(pid, token) and not _process_is_zombie(pid)]
     groups: set[int] = set()
     for pid, _token in live:
         try:

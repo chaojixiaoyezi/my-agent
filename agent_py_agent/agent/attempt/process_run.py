@@ -8,7 +8,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..common.cancellation import (
@@ -17,6 +17,7 @@ from ..common.cancellation import (
     register_cancellation_callback,
 )
 from ..tooling.process_output_capture import ProcessOutputCapture
+from ..tooling.sandbox import prune_transient_bwrap_sidecar_mounts
 
 # 取消可能仅来自外部结构化检查（没有 token.cancel 回调），每 0.1 秒复核，不能等到整个命令超时。
 _CANCELLATION_POLL_SECONDS = 0.1
@@ -67,11 +68,32 @@ class SandboxProcessOptions:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
-# LLM: argv/cwd 已由唯一沙箱入口校验，Popen 必须显式接收 cwd，不继承一个白名单外的宿主目录；不在此裁决权限。
+# LLM: 仅捕获输出且无stdout的瞬时侧车启动失败最多重试三次；每轮取消检查优先预算返回，单次回收不变，总期限/原args保留。
+# 函数用途: 在同一时间预算内重试可识别的bwrap侧车竞态，其余成功、超时143和业务失败原样交回。
+def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
+    deadline = time.monotonic() + max(0.0, options.timeout)
+    current_argv = argv
+    result = None
+    for attempt in range(4):
+        raise_if_cancelled()
+        remaining = options.timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
+        if result is not None and remaining <= 0:
+            return result
+        result = _run_sandbox_process_once(current_argv, replace(options, timeout=remaining))
+        result.args = argv
+        if options.capture_output and result.returncode not in (0, 143) and not result.stdout and attempt < 3:
+            pruned = prune_transient_bwrap_sidecar_mounts(current_argv, result.stderr or '')
+            if pruned is not None:
+                current_argv = pruned
+                continue
+        return result
+
+
+# LLM: argv/cwd已由唯一沙箱入口校验，每次Popen显式传cwd；不裁决权限，退出前完成本次取消与管道清理再供重试。
 #   取消前后都检查；二进制管道仅由通用采集器读取，不能再 communicate；DEVNULL、独立会话及 143 合同保持不变。
 #   环境沿主线统一擦洗，宿主 SecretRef 来源不进入命令；不增加新的启动或登记入口。
 # 函数用途: 启动一次非交互命令，注册取消回收并等待终态；取消抛共用 ToolCancelled，超时仍返回 143。
-def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
+def _run_sandbox_process_once(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
     from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 
     raise_if_cancelled()

@@ -35,10 +35,9 @@ class _RulesetAttr(ctypes.Structure):
     _fields_ = [("handled_access_fs", ctypes.c_uint64), ("handled_access_net", ctypes.c_uint64)]
 
 
-# LLM: 单条端口规则；_pack_=1 对齐 uapi。allowed_access 必须与 ruleset 声明的访问位一致。
+# LLM: 两个uint64按自然布局即内核UAPI的16字节，不需弃用的pack；allowed_access必须与ruleset声明一致，联测launcher布局。
 # 类用途: 传给 landlock_add_rule 的 LANDLOCK_RULE_NET_PORT 规则。
 class _NetPortAttr(ctypes.Structure):
-    _pack_ = 1
     _fields_ = [("allowed_access", ctypes.c_uint64), ("port", ctypes.c_uint64)]
 
 
@@ -104,15 +103,21 @@ def _create_net_ruleset(libc: ctypes.CDLL, nums: tuple[int, int, int]) -> int:
     raise LandlockApplyError(f"CREATE_RULESET_FAILED:{err}")
 
 
-# LLM: 给被拒端口以外的所有端口（含 0）各加一条允许规则。任一条失败即 fail-closed。ae 车道实测约 0.045 秒。
+# LLM: 同步syscall可复用同一ctypes规则和参数；仍逐个添加未拒端口（含0），任一失败立即fail-closed，联测端口值与对象复用。
 # 函数用途: 批量加端口允许规则。
 def _add_allow_rules(libc: ctypes.CDLL, nums: tuple[int, int, int], fd: int, blocked_ports: set[int]) -> None:
+    rule = _NetPortAttr(_ACCESS_NET_CONNECT_TCP, 0)
+    c_fd = ctypes.c_int(fd)
+    c_type = ctypes.c_int(_RULE_NET_PORT_TYPE)
+    rule_ref = ctypes.byref(rule)
+    c_flags = ctypes.c_uint32(0)
+    syscall = libc.syscall
+    add_rule_nr = nums[1]
     for port in range(0, 65536):
         if port in blocked_ports:
             continue
-        rule = _NetPortAttr(_ACCESS_NET_CONNECT_TCP, port)
-        if libc.syscall(nums[1], ctypes.c_int(fd), ctypes.c_int(_RULE_NET_PORT_TYPE),
-                        ctypes.byref(rule), ctypes.c_uint32(0)) != 0:
+        rule.port = port
+        if syscall(add_rule_nr, c_fd, c_type, rule_ref, c_flags) != 0:
             raise LandlockApplyError(f"ADD_RULE_FAILED:{port}:{ctypes.get_errno()}")
 
 

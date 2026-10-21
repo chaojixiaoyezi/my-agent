@@ -548,6 +548,30 @@ def _is_ephemeral_readonly_sidecar(path: Path) -> bool:
     return path.name.endswith((*SQLITE_SIDECAR_SUFFIXES, HOST_STATE_LOCK_SUFFIX))
 
 
+# LLM: 只裁剪stderr命中的瞬时try-bind及同时消失的侧车，不动硬RO/用户命令；调用方还须守住无stdout、失败码及重试上限。
+# 函数用途: 返回可供有界重试的侧车挂载参数；未确认是瞬时侧车错误时不重试。
+def prune_transient_bwrap_sidecar_mounts(argv: list[str], stderr: str) -> list[str] | None:
+    if not any(marker in stderr for marker in ("bwrap: Can't bind mount ", "bwrap: Can't find source path ")):
+        return None
+    limit = len(argv) - 1 - argv[::-1].index('--') if '--' in argv else len(argv)
+    pruned: list[str] = []
+    matched_stderr = False
+    index = 0
+    while index < limit:
+        if index + 2 < limit and argv[index] == '--ro-bind-try':
+            source, target = argv[index + 1:index + 3]
+            if _is_ephemeral_readonly_sidecar(Path(source)):
+                matched = source in stderr or target in stderr
+                matched_stderr = matched_stderr or matched
+                if matched or not Path(source).exists():
+                    index += 3
+                    continue
+        pruned.append(argv[index])
+        index += 1
+    pruned.extend(argv[limit:])
+    return pruned if matched_stderr and len(pruned) < len(argv) else None
+
+
 # LLM: 缺失项快跳；瞬时侧车try-bind容忍exec前删除，持久路径仍硬RO；有效同源只读才去重，不跨调用缓存权限。
 # 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略仍生效的重复挂载。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
@@ -808,6 +832,7 @@ __all__ = [
     "build_bwrap_argv",
     "find_bwrap",
     "probe_sandbox",
+    "prune_transient_bwrap_sidecar_mounts",
     "require_sandbox_ready",
     "wrap_shell_command",
 ]

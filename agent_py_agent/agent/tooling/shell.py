@@ -86,7 +86,7 @@ from .process_registry import (
 )
 from .process_scope import ProcessAccessScope, ProcessExecutionScope, process_access_scope
 from .process_session_store import process_session_store_root
-from .sandbox import SandboxUnavailable
+from .sandbox import SandboxUnavailable, prune_transient_bwrap_sidecar_mounts
 from .shell_syntax import contains_unmanaged_background_operator
 from .write_boundary import SandboxWriteProtection
 
@@ -2095,7 +2095,7 @@ def _run_shell_command(
     )
 
 
-# LLM: 前台只能吃 attempt argv；stdin 关闭且准确 host 环境来源剥离，沙箱失败不回退宿主 shell。
+# LLM: 前台只吃attempt argv；仅无stdout的瞬时侧车挂载失败裁剪后最多重试三次，共用期限和原取消/回收；不回退宿主shell。
 # 函数用途: 在 attempt 沙箱内运行非交互命令并等待完成；无显式输入时得到 EOF，而不是白等宿主终端四分钟。
 def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
@@ -2117,8 +2117,29 @@ def _run_attempt_sandboxed_shell_command(
         SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
         host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names),
     )
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    completed = None
+    for attempt in range(4):
+        if is_interrupted() or cancellation_requested():
+            raise CommandInterruptedError(command)
+        remaining = timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
+        if completed is not None and remaining <= 0:
+            return completed
+        proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
+        completed = _communicate_process(proc, command=command, timeout=remaining)
+        if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
+            pruned = prune_transient_bwrap_sidecar_mounts(exec_arg, completed.stderr or '')
+            if pruned is not None:
+                exec_arg = pruned
+                continue
+        return completed
+
+
+# LLM: 每次启动沿用同一沙箱权限、独立会话及宿主环境擦洗，异常仍映射SandboxUnavailable；不含回退或重试判定。
+# 函数用途: 以关闭stdin和捕获管道的方式启动本次attempt命令。
+def _start_attempt_shell_process(exec_arg, use_shell: bool, target: Path, tool: ShellTool) -> subprocess.Popen:
     try:
-        proc = subprocess.Popen(
+        return subprocess.Popen(
             exec_arg,
             shell=use_shell,
             cwd=str(target),
@@ -2128,10 +2149,9 @@ def _run_attempt_sandboxed_shell_command(
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=_subprocess_text_env(owner_home, hidden_roots=tool.host_private_roots, sandboxed=True,
+            env=_subprocess_text_env(tool.path_access_policy.owner_scope_root, hidden_roots=tool.host_private_roots, sandboxed=True,
                                      host_credential_env_names=tool.host_credential_env_names),
             start_new_session=True,
         )
     except OSError as exc:
         raise SandboxUnavailable(f"BWRAP_EXEC_FAILED:{exc}") from exc
-    return _communicate_process(proc, command=command, timeout=timeout)

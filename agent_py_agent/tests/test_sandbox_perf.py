@@ -8,6 +8,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -277,3 +279,236 @@ else:
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert (tmp_path / 'parent-write-control').read_text() == 'writable'
     assert not leaf.exists() if disappear else leaf.read_text() == 'original'
+
+
+# LLM: 仅提供任务列出的三类bwrap错误数据，不把模拟当Linux实测。
+# 函数用途: 构造源缺失、挂载表缺项和只读重挂失败的回归输入。
+def _sidecar_error(path, kind=0):
+    if kind == 0:
+        return f"bwrap: Can't find source path {path}: No such file or directory"
+    reason = (f'Unable to find "{path}" in mount table' if kind == 1 else
+              f'Unable to remount destination "{path}" with correct flags: Invalid argument')
+    return f"bwrap: Can't bind mount /oldroot{path} on /newroot{path}: {reason}"
+
+
+# LLM: 同时匹配stderr和瞬时try-bind，只扫描最后分隔符以前，输入argv不原地改变。
+# 函数用途: 核验三种竞态裁剪，以及持久挂载、存活侧车和用户命令的保留。
+@pytest.mark.parametrize('kind', range(3))
+@pytest.mark.parametrize('name', ['runtime.db-wal', 'runtime.db-shm', 'runtime.db-journal', 'policy.lock'])
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_prune_transient_sidecar_mounts(tmp_path, kind, name, wrapped):
+    leaf, live, missing = (tmp_path / name, tmp_path / 'live-wal', tmp_path / 'gone-shm')
+    leaf.write_text('present')
+    live.write_text('present')
+    prefix = ['python', '-I', 'landlock_launcher.py', '--deny', '8420', '--'] if wrapped else []
+    base = [*prefix, 'bwrap', '--ro-bind', '/config', '/config']
+    tail = ['--', 'echo', '--ro-bind-try', str(leaf), str(leaf)]
+    argv = [*base, '--ro-bind-try', str(leaf), str(leaf), '--ro-bind-try', str(live), str(live),
+            '--ro-bind-try', str(missing), str(missing), *tail]
+    before = argv.copy()
+    assert sandbox.prune_transient_bwrap_sidecar_mounts(argv, _sidecar_error(leaf, kind)) == [
+        *base, '--ro-bind-try', str(live), str(live), *tail]
+    assert argv == before
+
+
+# LLM: 有缺失侧车不能把其它错误变成重试，不能扫描用户命令内的挂载形状参数。
+# 函数用途: 锁住普通失败、持久文件、命令参数及不完整三元组的拒绝边界。
+@pytest.mark.parametrize('case', ['ordinary', 'persistent', 'hard-sidecar', 'unmatched', 'command', 'incomplete'])
+def test_prune_transient_sidecar_rejects_unrelated_failure(case):
+    argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal']
+    error = _sidecar_error('/absent-wal')
+    if case == 'ordinary':
+        error = 'ordinary command failed'
+    elif case == 'persistent':
+        argv += ['--ro-bind', '/runtime.db', '/runtime.db']
+        error = _sidecar_error('/runtime.db')
+    elif case == 'hard-sidecar':
+        argv[1] = '--ro-bind'
+    elif case == 'unmatched':
+        error = _sidecar_error('/another-wal')
+    elif case == 'command':
+        argv = ['bwrap', '--', 'echo', *argv[1:]]
+    else:
+        argv.pop()
+    assert sandbox.prune_transient_bwrap_sidecar_mounts(argv, error) is None
+
+
+# LLM: 目的路径可以异名；无分隔符按约定扫描整份argv，仍只删除瞬时try-bind。
+# 函数用途: 验证异名目的路径匹配和公开导出。
+def test_prune_transient_sidecar_matches_destination():
+    argv = ['bwrap', '--ro-bind-try', '/source-wal', '/alias']
+    assert sandbox.prune_transient_bwrap_sidecar_mounts(argv, _sidecar_error('/alias', 2)) == ['bwrap']
+    assert 'prune_transient_bwrap_sidecar_mounts' in sandbox.__all__
+
+
+# LLM: 仅替换平台构参及Popen/等待出口；调用真实Shell重试控制，不启动平台沙箱。
+# 函数用途: 提供真实裁剪输入和可核对的启动、等待记录。
+@pytest.fixture
+def sidecar_shell(monkeypatch, tmp_path):
+    argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'true']
+    tool = SimpleNamespace(path_access_policy=SimpleNamespace(owner_scope_root=None), protected_persona_root=None,
+                           host_private_roots=(), host_credential_env_names=frozenset())
+    popen = Mock()
+    communicate = Mock()
+    monkeypatch.setattr(shell, '_sandbox_exec', lambda *a, **k: (argv.copy(), False))
+    monkeypatch.setattr(shell.subprocess, 'Popen', popen)
+    monkeypatch.setattr(shell, '_communicate_process', communicate)
+    return tool, tmp_path, argv, popen, communicate
+
+
+# LLM: 成功对象必须保留捕获/回收事实；每次启动仍关闭stdin、独立会话及擦洗环境。
+# 函数用途: 复现瞬时失败后Shell透明恢复。
+def test_shell_retries_transient_sidecar_failure(sidecar_shell):
+    tool, target, argv, popen, communicate = sidecar_shell
+    success = subprocess.CompletedProcess('true', 0, 'done', '')
+    success.capture = {'complete': True}
+    success.termination = object()
+    communicate.side_effect = [subprocess.CompletedProcess('true', 1, '', _sidecar_error('/absent-wal')), success]
+    assert shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None) is success
+    assert [call.args[0] for call in popen.call_args_list] == [argv, ['bwrap', '--', 'true']]
+    assert all(call.kwargs['stdin'] == subprocess.DEVNULL and call.kwargs['start_new_session'] for call in popen.call_args_list)
+
+
+# LLM: 有stdout的结果、普通失败和成功均不能重放，避免重复业务副作用。
+# 函数用途: 保留Shell非重试分支的原结果。
+@pytest.mark.parametrize(('code', 'out', 'err'), [(0, '', _sidecar_error('/absent-wal')),
+    (1, 'already ran', _sidecar_error('/absent-wal')), (1, '', 'ordinary failure')])
+def test_shell_does_not_replay_command_results(sidecar_shell, code, out, err):
+    tool, target, _argv, popen, communicate = sidecar_shell
+    result = subprocess.CompletedProcess('true', code, out, err)
+    communicate.return_value = result
+    assert shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None) is result
+    assert popen.call_count == 1
+
+
+# LLM: 假裁剪出口只核验三次重试上限，不作为真实bwrap启动证据。
+# 函数用途: 保证Shell最多四次启动且共用剩余时间。
+def test_shell_sidecar_retries_share_deadline(sidecar_shell, monkeypatch):
+    tool, target, _argv, popen, communicate = sidecar_shell
+    now = [100.0]
+    monkeypatch.setattr(shell.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(shell, 'prune_transient_bwrap_sidecar_mounts', lambda argv, err: argv[:-1], raising=False)
+    # LLM: 每次等待仅推进测试时钟两秒，不执行或清理宿主进程。
+    # 函数用途: 让重试预算递减可确定地被断言捕获。
+    def completed(*args, **kwargs):
+        now[0] += 2
+        return subprocess.CompletedProcess('true', 1, '', 'transient')
+    communicate.side_effect = completed
+    shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None)
+    assert popen.call_count == 4
+    assert [call.kwargs['timeout'] for call in communicate.call_args_list] == [10, 8, 6, 4]
+
+
+# LLM: 保留真实每次finally回收，只替换Popen、管道采集和终态等待，不启动宿主进程。
+# 函数用途: 复现同步入口重试，核对剩余期限、原args及每次管道清理。
+def test_attempt_sidecar_retry_keeps_budget_and_cleanup(monkeypatch, tmp_path):
+    from agent_py_agent.agent.attempt import process_run as run
+    now = [100.0]
+    waits = []
+    processes = []
+    argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'true']
+    monkeypatch.setattr(run.time, 'monotonic', lambda: now[0])
+    capture = Mock()
+    monkeypatch.setattr(run, 'ProcessOutputCapture', lambda proc: capture)
+    # LLM: 假Popen只持有可观察close的管道，避免测试信号落到宿主PID。
+    # 函数用途: 留存每次同步启动的参数与独立清理对象。
+    def spawn(args, **kwargs):
+        proc = Mock(stdout=Mock(), stderr=Mock())
+        processes.append((args.copy(), proc, kwargs))
+        return proc
+    # LLM: 真实控制函数负责重试，替身仅交回预exec失败和成功并推进两秒测试时钟。
+    # 函数用途: 观察每次同步等待的剩余预算。
+    def wait(state, args, timeout):
+        waits.append(timeout)
+        now[0] += 2
+        return subprocess.CompletedProcess(args, 1 if len(waits) == 1 else 0, '', _sidecar_error('/absent-wal'))
+    monkeypatch.setattr(run.subprocess, 'Popen', spawn)
+    monkeypatch.setattr(run, '_wait_for_process', wait)
+    result = run.run_sandbox_process(argv, run.SandboxProcessOptions(10, .1, True, tmp_path))
+    assert result.returncode == 0 and result.args == argv and waits == [10, 8]
+    assert [args for args, _proc, _kwargs in processes] == [argv, ['bwrap', '--', 'true']]
+    for _args, proc, kwargs in processes:
+        proc.stdout.close.assert_called_once()
+        proc.stderr.close.assert_called_once()
+        assert kwargs['cwd'] == tmp_path and kwargs['stdin'] == subprocess.DEVNULL
+    assert capture.finish.call_count == 2
+
+
+# LLM: 超时143、已有stdout和未捕获输出均不能确认为预exec失败，不能重放。
+# 函数用途: 核验同步入口拒绝重试的四类结果。
+@pytest.mark.parametrize(('code', 'out', 'captured'), [(0, '', True), (143, '', True), (1, 'ran', True), (1, '', False)])
+def test_attempt_does_not_retry_non_preexec_results(monkeypatch, tmp_path, code, out, captured):
+    from agent_py_agent.agent.attempt import process_run as run
+    popen = Mock(return_value=Mock(stdout=None, stderr=None))
+    monkeypatch.setattr(run.subprocess, 'Popen', popen)
+    monkeypatch.setattr(run, 'ProcessOutputCapture', lambda proc: Mock())
+    monkeypatch.setattr(run, '_wait_for_process', lambda state, argv, timeout:
+                        subprocess.CompletedProcess(argv, code, out, _sidecar_error('/absent-wal')))
+    argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'false']
+    result = run.run_sandbox_process(argv, run.SandboxProcessOptions(10, .1, captured, tmp_path))
+    assert result.returncode == code and popen.call_count == 1
+
+
+# LLM: 用真实取消令牌复现审查指出的预算提前返回窗口；假单次执行不创建任何宿主进程。
+# 函数用途: 保证裁剪期间取消且预算耗尽时仍抛ToolCancelled，不交回旧bwrap错误。
+def test_attempt_cancel_wins_expired_retry_budget(monkeypatch, tmp_path):
+    from agent_py_agent.agent.attempt import process_run as run
+    from agent_py_agent.agent.common.cancellation import (
+        CancellationToken,
+        ToolCancelled,
+        bind_cancellation_token,
+    )
+    now = [100.0]
+    token = CancellationToken()
+    argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'true']
+    once = Mock(return_value=subprocess.CompletedProcess(argv, 1, '', _sidecar_error('/absent-wal')))
+    monkeypatch.setattr(run, '_run_sandbox_process_once', once)
+    monkeypatch.setattr(run.time, 'monotonic', lambda: now[0])
+    # LLM: 模拟首次命令已清理、裁剪期间收到取消并越过总期限；仍调用真实裁剪helper。
+    # 函数用途: 稳定触发取消检查与提前返回的竞争窗口。
+    def prune(args, error):
+        token.cancel('cancel-during-prune')
+        now[0] += 20
+        return sandbox.prune_transient_bwrap_sidecar_mounts(args, error)
+    monkeypatch.setattr(run, 'prune_transient_bwrap_sidecar_mounts', prune)
+    with bind_cancellation_token(token), pytest.raises(ToolCancelled, match='cancel-during-prune'):
+        run.run_sandbox_process(argv, run.SandboxProcessOptions(10, .1, True, tmp_path))
+    assert once.call_count == 1
+
+
+# LLM: 四个真实存活侧车逐次各失败一项，裁剪不能依赖缺失路径才能生效；单次等待仅推进测试时钟。
+# 函数用途: 核验同步入口四次启动上限及预算耗尽不再启动。
+@pytest.mark.parametrize(('budget', 'expected'), [(10, [10, 8, 6, 4]), (1, [1])])
+def test_attempt_sidecar_retry_limit_and_budget(monkeypatch, tmp_path, budget, expected):
+    from agent_py_agent.agent.attempt import process_run as run
+    argv = ['bwrap']
+    for number in range(4):
+        sidecar = tmp_path / f'state{number}-wal'
+        sidecar.write_text('present')
+        argv += ['--ro-bind-try', str(sidecar), str(sidecar)]
+    argv += ['--', 'true']
+    now = [100.0]
+    waits = []
+    monkeypatch.setattr(run.time, 'monotonic', lambda: now[0])
+    # LLM: 外层调用真实helper；仅替换已由其它用例覆盖的单次进程执行。
+    # 函数用途: 在每次启动模拟当前首个侧车报错并记录剩余时间。
+    def once(args, options):
+        waits.append(options.timeout)
+        now[0] += 2
+        source = args[args.index('--ro-bind-try') + 1]
+        return subprocess.CompletedProcess(args, 1, '', _sidecar_error(source))
+    monkeypatch.setattr(run, '_run_sandbox_process_once', once)
+    result = run.run_sandbox_process(argv, run.SandboxProcessOptions(budget, .1, True, tmp_path))
+    assert result.returncode == 1 and result.args == argv and waits == expected
+
+
+# LLM: 原shell或字符串执行形态不在侧车重试范围，不能因为stderr看似bwrap错误而改写执行方式。
+# 函数用途: 锁住Shell两种明确排除的argv形态。
+@pytest.mark.parametrize('use_shell', [False, True])
+def test_shell_does_not_retry_shell_or_string_argv(sidecar_shell, monkeypatch, use_shell):
+    tool, target, argv, popen, communicate = sidecar_shell
+    argument = argv if use_shell else 'bwrap command text'
+    monkeypatch.setattr(shell, '_sandbox_exec', lambda *a, **k: (argument, use_shell))
+    communicate.return_value = subprocess.CompletedProcess('true', 1, '', _sidecar_error('/absent-wal'))
+    shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None)
+    assert popen.call_count == 1

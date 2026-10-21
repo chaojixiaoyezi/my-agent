@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import json
 import socket
@@ -261,3 +262,51 @@ def test_shell_leaves_ordinary_nonzero_as_command_failed(tmp_path):
     _output, succeeded, error_code, _facts = _run_shell_process_text(
         tool, "false", tmp_path, 30, None, None, None)
     assert succeeded is False and error_code == "COMMAND_FAILED"
+
+
+# LLM: 只检查ctypes内存布局，不施加任何网络限制；自然uint64对齐应与内核UAPI一致。
+# 函数用途: 锁住端口规则16字节与两个字段偏移，禁止回到弃用的pack声明。
+def test_net_port_attr_uses_natural_uapi_layout():
+    assert ctypes.sizeof(ll._NetPortAttr) == 16
+    assert ll._NetPortAttr.allowed_access.offset == 0 and ll._NetPortAttr.port.offset == 8
+    assert '_pack_' not in ll._NetPortAttr.__dict__
+
+
+# LLM: 同步读取每次syscall的端口值并留住原参数，防止指针复用掩盖错端口或allocator地址复用误判。
+# 函数用途: 核验65536个候选端口覆盖及ctypes规则/参数只创建一次。
+def test_add_allow_rules_reuses_ctypes_arguments():
+    calls = []
+    ports = []
+    blocked = {0, 8420, 65535}
+    # LLM: 假libc同步采样，不做真实系统调用，不在pytest进程施加不可逆限制。
+    # 类用途: 收集原始ctypes引用与调用当时的端口数字。
+    class Libc:
+        # LLM: 保存引用用于身份断言，端口值必须当场复制而非调用后再解引用。
+        # 函数用途: 观察一次允许规则调用。
+        def syscall(self, nr, *args):
+            calls.append(args)
+            rule = args[2]._obj
+            ports.append(rule.port)
+            assert nr == 445 and rule.allowed_access == ll._ACCESS_NET_CONNECT_TCP
+            assert args[0].value == 7 and args[1].value == ll._RULE_NET_PORT_TYPE and args[3].value == 0
+            return 0
+    ll._add_allow_rules(Libc(), (444, 445, 446), 7, blocked)
+    assert ports == [p for p in range(65536) if p not in blocked]
+    assert all(all(arg is first for arg, first in zip(call, calls[0], strict=True)) for call in calls)
+
+
+# LLM: 任一内核规则失败仍需立即fail-closed，不继续添加或exec，优化不能吞errno。
+# 函数用途: 验证失败准确落到对应端口且后续端口未执行。
+def test_add_allow_rules_keeps_first_failure(monkeypatch):
+    ports = []
+    # LLM: 只模拟ADD_RULE在端口7失败，不调用真实libc。
+    # 函数用途: 记录失败前的规则顺序。
+    def syscall(nr, *args):
+        port = args[2]._obj.port
+        ports.append(port)
+        return -1 if port == 7 else 0
+    monkeypatch.setattr(ll.ctypes, 'get_errno', lambda: errno.EINVAL)
+    from types import SimpleNamespace
+    with pytest.raises(ll.LandlockApplyError, match=f'^ADD_RULE_FAILED:7:{errno.EINVAL}$'):
+        ll._add_allow_rules(SimpleNamespace(syscall=syscall), (444, 445, 446), 7, {3})
+    assert ports == [0, 1, 2, 4, 5, 6, 7]
