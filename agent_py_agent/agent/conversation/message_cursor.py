@@ -1,4 +1,4 @@
-# LLM: 替换MessageStore只读游标扫描，不改变JSONL/追加/幂等/Compact推进；共享粗时间窗口内不信任或保存定位缓存，错误合同不变。
+# LLM: MessageStore只读游标缓存含初始空尾证明；不改变JSONL/追加/幂等/Compact推进，粗时间窗口内不信任或保存hint，错误合同不变。
 # 模块用途: 缓存已稳定文件的精确message_id首位置，让稳态空线程零打开、追加线程校验锚行后读尾，避免同tick等长改写漏报。
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from ..runtime_errors import DataCorruptionError
 from .display_checkpoint import is_display_checkpoint
 from .store_io import json_row, jsonl_error
 
-# 4096条覆盖800线程及近期推进位置；LRU淘汰只让定位重扫，不会从头重放消息。
-_MESSAGE_CURSOR_CACHE_MAX_COUNT = 4096
-# 每份首ID过滤器8KiB，4096份极端上界32MiB；实际同一次读取的多个位置共享不可变过滤器。
+# 32768条容纳数万活跃游标，避免6212线程轮询时逐轮淘汰；淘汰只让定位重扫，不会从头重放消息。
+_MESSAGE_CURSOR_CACHE_MAX_COUNT = 32768
+# 每份首ID过滤器8KiB，32768份极端上界256MiB；同一次读取的多个位置共享不可变过滤器。
 _MESSAGE_CURSOR_FILTER_BYTES = 8 * 1024
 _MESSAGE_CURSORS = CursorCache(_MESSAGE_CURSOR_CACHE_MAX_COUNT)
 
@@ -111,21 +111,22 @@ def _locate_open(handle, path: Path, target: str) -> MessageCursor:
     return cursor
 
 
-# LLM: 只有共享窗口外的完整指纹且精确游标就在EOF才能零打开；真实stat同tick也会相同，不能把fresh stamp当未改写证明。
-# 函数用途: 识别已稳定且追平的线程；近期写入沿原扫描保留缺cursor与损坏诊断。
+# LLM: 共享窗口外完整stamp相同才可复用；空键还必须有empty_tail证明，显式空ID定位的EOF不能代替从头空扫。
+# 函数用途: 识别稳定且已追平的命名游标或初始空尾，不把近期写入和空ID偏移当作无新增。
 def _unchanged_end(path: Path, target: str) -> bool:
-    cached = _MESSAGE_CURSORS.get(cursor_key(path, target))
+    blank_target = not str(target or "").strip()
+    cached = _MESSAGE_CURSORS.get(cursor_key(path, "" if blank_target else target))
     if cached is None:
         return False
     stamp = file_stamp(path.stat())
     return (cache_entry_trustworthy(stamp.mtime_ns) and cached.stamp == stamp
-            and (cached.empty_tail or cached.end == stamp.size))
+            and (cached.empty_tail or (not blank_target and cached.end == stamp.size)))
 
 
-# LLM: 真实读尾仍保留display/坏行/limit原规则；位置只对原始首ID提示，解析消息及错误由MessageStore负责。
-# 函数用途: 获取精确游标后的原JSON对象及读取错误，空稳态不打开文件。
+# LLM: 初始空游标只在正limit且可信empty_tail时短路；非空ID精确匹配，fd首末stamp、display/坏行原规则不改。
+# 函数用途: 有界读取原消息尾部；已证从头空扫的稳定线程零打开，零预算不冒充扫描完成。
 def read_after_rows(path: Path, target: str, limit: int):
-    if str(target or "").strip() and _unchanged_end(path, target):
+    if (str(target or "").strip() or limit > 0) and _unchanged_end(path, target):
         return [], []
     cursor = locate_message_cursor(path, target) if str(target or "").strip() else None
     with path.open("rb") as handle:
@@ -134,18 +135,21 @@ def read_after_rows(path: Path, target: str, limit: int):
         seen = bytearray(cursor.seen if cursor else bytes(_MESSAGE_CURSOR_FILTER_BYTES))
         rows, errors, positions = _read_tail(handle, path, limit, seen)
         if (cursor is None or cursor.stamp.same_file(stamp)) and file_stamp(os.fstat(handle.fileno())) == stamp:
-            _cache_read(path, stamp, (target, cursor), (rows, errors, positions, seen))
+            _cache_read(path, stamp, (target, cursor), (rows, errors, positions, seen), limit=limit)
         return rows, errors
 
 
-# LLM: 单批稳定读取才更新提示，空尾包括display/空白行；不把错误当无新增，也不改原消费状态。
-# 函数用途: 保存尾读可证明的新位置与空尾指纹。
-def _cache_read(path: Path, stamp: FileStamp, anchor: tuple, result: tuple) -> None:
+# LLM: 调用方已核同fd首末stamp；仅无行无错且初始正limit时记从零空尾，_remember仍守freshness，不推进消费状态。
+# 函数用途: 保存精确首位置和空尾证明，包含空文件及仅展示/空白行，不缓存错误或未执行的扫描。
+def _cache_read(path: Path, stamp: FileStamp, anchor: tuple, result: tuple, *, limit: int) -> None:
     target, cursor = anchor
     rows, errors, positions, seen = result
     _save_positions(path, stamp, seen, positions)
-    if cursor and not rows and not errors:
-        _remember(path, target, replace(cursor, stamp=stamp, seen=bytes(seen), empty_tail=True))
+    if not rows and not errors:
+        if cursor is not None:
+            _remember(path, target, replace(cursor, stamp=stamp, seen=bytes(seen), empty_tail=True))
+        elif not str(target or "").strip() and limit > 0:
+            _remember(path, "", MessageCursor(stamp, 0, stamp.size, bytes(seen), empty_tail=True))
 
 
 # LLM: UTF-8/JSON坏行即停，display不计条数；Bloom误报只不记位置，读取对象和错误保持原样。
@@ -192,9 +196,11 @@ def _tail_row(line: bytes, path: Path):
     return json_row(text, context="conversation.messages.after", path=path, line_number=0)
 
 
-# LLM: 一次尾读的位置共享同一不可变过滤器；过长键不缓存，淘汰仅变慢，不缓存正文或异常。
-# 函数用途: 为下一批可能推进到的消息ID记录首位置。
+# LLM: 一次尾读共享不可变过滤器；空ID不占初始空尾键，其余精确ID/过长键/淘汰规则不变，不缓存正文或异常。
+# 函数用途: 为非空消息ID记录首位置，避免空ID行的中间偏移污染从头读取。
 def _save_positions(path: Path, stamp: FileStamp, seen: bytearray, positions: list) -> None:
     frozen = bytes(seen)
     for target, start, end in positions:
+        if not target:
+            continue
         _remember(path, target, MessageCursor(stamp, start, end, frozen))

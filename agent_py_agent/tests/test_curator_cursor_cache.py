@@ -280,3 +280,160 @@ def test_recent_audit_hint_cannot_hide_original_corruption(tmp_path, monkeypatch
     expected = legacy_collect_audit(root, after_event_id=target, limit=3, max_chars=20_000)
     assert expected[1]
     assert _collect_audit(root, after_event_id=target, limit=3, max_chars=20_000) == expected
+
+
+# LLM: 每例隔离进程内hint，真实Store和文件保持原实现；不触及正式owner或修改stat/fstat。
+# 函数用途: 为初始空游标的正反例提供空线程和一条可用原格式样本。
+@pytest.fixture
+def initial_cursor_case(tmp_path, monkeypatch):
+    cache = CursorCache(message_cursor._MESSAGE_CURSOR_CACHE_MAX_COUNT)
+    monkeypatch.setattr(message_cursor, '_MESSAGE_CURSORS', cache)
+    store, tid, rows = make_messages(tmp_path, count=1)
+    path = store.storage.message_path(tid)
+    path.write_bytes(b'')
+    return SimpleNamespace(cache=cache, store=store, tid=tid, row=rows[0], path=path)
+
+
+def test_slice3_message_cursor_capacity_retains_6212_thread_keys(tmp_path):
+    assert message_cursor._MESSAGE_CURSOR_CACHE_MAX_COUNT == 32768
+    assert message_cursor._MESSAGE_CURSORS.limit == 32768
+    cache = CursorCache(message_cursor._MESSAGE_CURSOR_CACHE_MAX_COUNT)
+    path = tmp_path / 'sample.jsonl'
+    path.write_bytes(b'')
+    hint = message_cursor.MessageCursor(file_stamp(path.stat()), 0, 0,
+        bytes(message_cursor._MESSAGE_CURSOR_FILTER_BYTES), empty_tail=True)
+    # 仅验证LRU容量，不把内存键样本说成6212份真实文件扫描。
+    keys = [cursor_key(tmp_path / f'thread-{index}.jsonl', '') for index in range(6212)]
+    for key in keys:
+        cache.put(key, hint)
+    for _ in range(2):
+        assert all(cache.get(key) is hint for key in keys)
+    assert len(cache._items) == 6212
+
+
+@pytest.mark.parametrize('target', ['', ' ', '\t'])
+@pytest.mark.parametrize('kind', ['empty', 'display', 'blank_lines'])
+def test_slice3_initial_empty_cursor_has_zero_open_steady_state(initial_cursor_case, monkeypatch, target, kind):
+    case = initial_cursor_case
+    if kind == 'display':
+        case.path.write_bytes(encode_row(replace(case.row, role=DISPLAY_CHECKPOINT_ROLE, message_id='').to_dict()))
+    elif kind == 'blank_lines':
+        case.path.write_bytes(b'\n \n\t\n')
+    settle_files([case.path])
+    counts = observe_reads(monkeypatch, [case.path])
+    assert case.store.messages.after_report(case.tid, after_message_id=target) == ([], [])
+    assert counts.opens == [str(case.path)]
+    counts.clear()
+    for _ in range(3):
+        assert case.store.messages.after_report(case.tid, after_message_id=target) == ([], [])
+    assert counts.opens == [] and counts.bytes == 0
+    cached = case.cache.get(cursor_key(case.path, ''))
+    assert cached.empty_tail and cached.start == 0 and cached.end == case.path.stat().st_size
+    assert cached.stamp == file_stamp(case.path.stat())
+
+
+def test_slice3_blank_message_id_never_saves_a_tail_position(initial_cursor_case):
+    case = initial_cursor_case
+    row = replace(case.row, message_id='').to_dict()
+    case.path.write_bytes(encode_row(row))
+    settle_files([case.path])
+    assert message_cursor.read_after_rows(case.path, '', 10) == ([row], [])
+    assert case.cache.get(cursor_key(case.path, '')) is None
+
+
+@pytest.mark.parametrize('target', ['', ' ', '\t'])
+def test_slice3_explicit_blank_offset_is_not_an_empty_tail(initial_cursor_case, target):
+    case = initial_cursor_case
+    rows = [case.row.to_dict(), replace(case.row, message_id='').to_dict()]
+    case.path.write_bytes(b''.join(encode_row(row) for row in rows))
+    settle_files([case.path])
+    assert case.store.messages.byte_offset_after(case.tid, '') == case.path.stat().st_size
+    cached = case.cache.get(cursor_key(case.path, ''))
+    assert cached is not None and not cached.empty_tail
+    assert not message_cursor._unchanged_end(case.path, target)
+    assert message_cursor.read_after_rows(case.path, target, 10) == (rows, [])
+
+
+@pytest.mark.parametrize('limit', [0, -1])
+@pytest.mark.parametrize('primed', [False, True])
+def test_slice3_nonpositive_initial_limit_neither_skips_nor_certifies_scan(initial_cursor_case, monkeypatch, limit, primed):
+    case = initial_cursor_case
+    settle_files([case.path])
+    key = cursor_key(case.path, '')
+    if primed:
+        case.cache.put(key, message_cursor.MessageCursor(file_stamp(case.path.stat()), 0, 0,
+            bytes(message_cursor._MESSAGE_CURSOR_FILTER_BYTES), empty_tail=True))
+    previous = case.cache.get(key)
+    counts = observe_reads(monkeypatch, [case.path])
+    assert message_cursor.read_after_rows(case.path, '', limit) == ([], [])
+    assert counts.opens == [str(case.path)] and case.cache.get(key) is previous
+    row = case.row.to_dict()
+    case.path.write_bytes(encode_row(row))
+    settle_files([case.path])
+    assert message_cursor.read_after_rows(case.path, '', limit) == ([], [])
+    assert case.cache.get(key) is previous
+    assert message_cursor.read_after_rows(case.path, '', 10) == ([row], [])
+
+
+@pytest.mark.parametrize('raw', [b'{broken\n', b'\xff\n'])
+def test_slice3_initial_corruption_never_becomes_cached_empty(initial_cursor_case, monkeypatch, raw):
+    case = initial_cursor_case
+    case.path.write_bytes(raw)
+    settle_files([case.path])
+    expected = LegacyMessageReader(case.store).after_report(case.tid, after_message_id='')
+    assert expected[1]
+    counts = observe_reads(monkeypatch, [case.path])
+    for _ in range(2):
+        assert case.store.messages.after_report(case.tid, after_message_id='') == expected
+    assert counts.opens == [str(case.path)] * 2
+    assert case.cache.get(cursor_key(case.path, '')) is None
+
+
+@pytest.mark.parametrize('stale_hint', [False, True])
+def test_slice3_fresh_initial_empty_never_trusts_or_saves_hint(initial_cursor_case, monkeypatch, stale_hint):
+    case = initial_cursor_case
+    hold_fresh_clock(monkeypatch, case.path)
+    key = cursor_key(case.path, '')
+    if stale_hint:
+        case.cache.put(key, message_cursor.MessageCursor(file_stamp(case.path.stat()), 0, 0,
+            bytes(message_cursor._MESSAGE_CURSOR_FILTER_BYTES), empty_tail=True))
+    previous = case.cache.get(key)
+    counts = observe_reads(monkeypatch, [case.path])
+    for _ in range(2):
+        assert message_cursor.read_after_rows(case.path, '', 10) == ([], [])
+    assert counts.opens == [str(case.path)] * 2 and case.cache.get(key) is previous
+
+
+@pytest.mark.parametrize('change', ['append', 'replace', 'rewrite', 'truncate', 'corrupt'])
+def test_slice3_initial_empty_rechecks_changed_stamp(initial_cursor_case, monkeypatch, change):
+    case = initial_cursor_case
+    display = encode_row(replace(case.row, role=DISPLAY_CHECKPOINT_ROLE).to_dict())
+    case.path.write_bytes(display)
+    settle_files([case.path])
+    assert case.store.messages.after_report(case.tid) == ([], [])
+    cached = case.cache.get(cursor_key(case.path, ''))
+    assert cached is not None and cached.empty_tail
+    message = encode_row(case.row.to_dict())
+    if change == 'replace':
+        replacement = case.path.with_suffix('.replacement')
+        replacement.write_bytes(message)
+        os.replace(replacement, case.path)
+    else:
+        case.path.write_bytes({'append': display + message, 'rewrite': message,
+            'truncate': b'', 'corrupt': b'{broken\n'}[change])
+    settle_files([case.path])
+    assert file_stamp(case.path.stat()) != cached.stamp
+    expected = LegacyMessageReader(case.store).after_report(case.tid)
+    counts = observe_reads(monkeypatch, [case.path])
+    assert case.store.messages.after_report(case.tid) == expected
+    assert counts.opens == [str(case.path)]
+
+
+def test_slice3_nonblank_cursor_keeps_exact_whitespace_in_id(initial_cursor_case):
+    case = initial_cursor_case
+    rows = [replace(case.row, message_id=target).to_dict() for target in (' spaced ', 'spaced')]
+    case.path.write_bytes(b''.join(encode_row(row) for row in rows))
+    settle_files([case.path])
+    assert case.store.messages.after_report(case.tid, after_message_id='spaced') == ([], [])
+    expected = LegacyMessageReader(case.store).after_report(case.tid, after_message_id=' spaced ')
+    assert expected[0] and case.store.messages.after_report(case.tid, after_message_id=' spaced ') == expected
