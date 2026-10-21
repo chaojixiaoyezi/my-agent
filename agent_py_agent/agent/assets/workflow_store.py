@@ -1,5 +1,5 @@
-# LLM: 工作流定义只描述步骤与引用，不调度或执行；结构化condition仅透传原执行器，权威存储固定于Owner/workflows/id。
-# 模块用途: 管理工作流定义、说明、步骤Skill绑定、自动引用及运行摘要。
+# LLM: 工作流只描述不执行，普通写入固定于Owner/workflows/id；全局兜底只读，管理员显式工厂绑定全局写根。
+# 模块用途: 分层读取并管理工作流定义、说明、Skill绑定、自动引用及安全运行摘要。
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -8,6 +8,7 @@ from . import _AssetStore, next_run_summary, positive_timeout, safe_asset_id
 from .descriptor import AssetDescriptor, _Record
 
 WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid")
+WORKFLOW_ON_ERROR_POLICIES = ("escalate_to_agent", "fail", "skip")
 
 
 # LLM: mode只允许三种结构化执行声明；condition保留空字符串或JSON比较结构，inputs_map同为数据，均不在存储层执行。
@@ -25,12 +26,14 @@ class WorkflowStepSpec(_Record):
     inputs_map: dict[str, object] = field(default_factory=dict)
     timeout_seconds: float = 120
 
-    # LLM: 标识符和超时先验证；不能把script_id当路径或把错误mode静默改成脚本模式。
-    # 函数用途: 在构造或JSON恢复时校验工作流步骤。
+    # LLM: 资产层是步骤字段校验权威，子类继承同一检查；模式、错误策略、标识符和超时均不可静默修正。
+    # 函数用途: 在构造或JSON恢复时拒绝非法工作流步骤。
     def __post_init__(self):
         super().__post_init__()
         if self.mode not in WORKFLOW_STEP_MODES:
             raise ValueError("未知工作流步骤mode")
+        if self.on_error not in WORKFLOW_ON_ERROR_POLICIES:
+            raise ValueError(f"Unsupported on_error policy: {self.on_error}")
         positive_timeout(self.timeout_seconds)
         for asset_id in (*self.skill_ids, *((self.script_id,) if self.script_id else ())):
             safe_asset_id(asset_id)
@@ -70,10 +73,16 @@ def _with_step_refs(definition):
 # LLM: 所有读改写共用Owner集合锁，不执行步骤、Skill或正文；WORKFLOW.md只是JSON正文的同步展示副本。
 # 类用途: 为工具、执行引擎与Broker提供工作流唯一存储入口。
 class WorkflowStore(_AssetStore):
-    # LLM: 构造固定workflows目录，不创建或调度工作流运行。
-    # 函数用途: 绑定当前Owner工作流存储。
-    def __init__(self, owner_home):
-        super().__init__(owner_home, "workflows", "workflow.json")
+    # LLM: 普通实例只写宿主给定Owner；extra仅可读，is_admin不自动开放兜底写入，也不执行工作流。
+    # 函数用途: 绑定工作流写根及有序全局只读候选。
+    def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False):
+        super().__init__(owner_home, "workflows", "workflow.json", extra_roots=extra_roots, is_admin=is_admin)
+
+    # LLM: 描述符经冻结值对象复制；全局作用域只加在返回投影，不持久化或改变步骤引用。
+    # 函数用途: 标记只读全局工作流的来源。
+    def _mark_global(self, definition):
+        descriptor = definition.descriptor
+        return replace(definition, descriptor=replace(descriptor, metadata={**descriptor.metadata, 'asset_scope': 'global'}))
 
     # LLM: 平铺资产Key先严格恢复，再恢复步骤；不吞掉损坏JSON或未知字段。
     # 函数用途: 锁内读取完整定义，缺失返回None。
@@ -110,18 +119,20 @@ class WorkflowStore(_AssetStore):
             self._get(definition.descriptor.id)
             return self._save(definition)
 
-    # LLM: 只读指定Owner当前定义，未知ID为None；路径和叶链接错误上抛。
-    # 函数用途: 取得工作流定义。
+    # LLM: Owner坏记录不得触发回退；真实缺失才释放Owner锁后读取全局，不能把兜底对象交给本地更新入口。
+    # 函数用途: 优先读取Owner工作流，缺失时只读全局定义。
     def get_workflow(self, workflow_id):
         safe_asset_id(workflow_id)
         with self._locked():
-            return self._get(workflow_id)
+            definition = self._get(workflow_id)
+        return definition if definition is not None else self._global_get(workflow_id)
 
-    # LLM: 按ID稳定枚举，损坏记录不静默过滤为缺失。
-    # 函数用途: 列出本Owner已保存工作流。
+    # LLM: Owner先认领ID，释放其锁后逐个全局根取锁，不读取已被遮蔽的低优先级定义。
+    # 函数用途: 合并Owner及全局工作流，按ID稳定返回去重结果。
     def list_workflows(self):
         with self._locked():
-            return [definition for asset_id in self._ids() if (definition := self._get(asset_id)) is not None]
+            records = self._local_records()
+        return self._merge_globals(records)
 
     # LLM: 先验证权威定义再受控删除；不跟随目录或文件链接。
     # 函数用途: 删除单个工作流目录，缺失返回False。
@@ -144,10 +155,15 @@ class WorkflowStore(_AssetStore):
                           if step.step_id == step_id else step for step in definition.steps)
             return self._save(replace(definition, steps=steps))
 
-    # LLM: 摘要更新只消费本次结构化运行结果，同一集合锁覆盖读取和发布，不丢并发次数。
-    # 函数用途: 保存工作流最近运行与连续失败摘要。
-    def record_run_summary(self, workflow_id, status, duration_ms, run_at):
+    # LLM: 本Owner摘要仍原锁读改写；仅全局存在时释放Owner锁后返回只读定义，不更新共享摘要。
+    # 函数用途: 保存本地工作流运行摘要，安全跳过全局摘要写入。
+    def record_run_summary(self, workflow_id, status, duration_ms, run_at=None, *, last_error=""):
         with self._locked():
-            definition = self._required(workflow_id)
-            summary = next_run_summary(definition.descriptor.runtime_summary, status, duration_ms, run_at)
-            return self._save(replace(definition, descriptor=replace(definition.descriptor, runtime_summary=summary)))
+            definition = self._get(workflow_id)
+            if definition is not None:
+                summary = next_run_summary(definition.descriptor.runtime_summary, status, duration_ms, run_at, last_error=last_error)
+                return self._save(replace(definition, descriptor=replace(definition.descriptor, runtime_summary=summary)))
+        definition = self._global_get(workflow_id)
+        if definition is None:
+            raise KeyError(workflow_id)
+        return definition

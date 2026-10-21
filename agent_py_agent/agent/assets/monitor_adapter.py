@@ -1,5 +1,5 @@
-# LLM: 监控适配只读Scheduler事实并保存独立绑定元数据，不调度、不执行、不读取凭据；公开值统一过AssetDescriptor。
-# 模块用途: 给监控提供标准提取Key和工作流、脚本、技能绑定，唯一扩展存储为data/monitors/<id>.json。
+# LLM: 监控仅读Scheduler事实及显式资产ID，保存独立绑定，不执行引用动作或读取凭据；公开值统一过AssetDescriptor。
+# 模块用途: 提供监控标准Key，自动合并规则/预检的工作流脚本拓扑边，扩展绑定仍存data/monitors/<id>.json。
 from __future__ import annotations
 
 import json
@@ -130,15 +130,17 @@ def _schedule(job, binding):
     return result
 
 
-# LLM: 公共字段复用AssetDescriptor的类型/秘密过滤，metadata保留扩展，顶层schedule_spec供适配调用方直接展示。
-# 函数用途: 生成监控标准字典，Scheduler始终拥有运行摘要和版本的最终解释权。
+# LLM: AssetDescriptor仍负责类型/秘密过滤；引用按绑定优先再原规则顺序去重，规则只提供边而不授予执行权。
+# 函数用途: 合并监控绑定和Scheduler自动引用，保留调度/运行摘要的唯一权威与展示扩展。
 def _monitor_dict(home, identifier, binding, job):
     schedule = _schedule(job, binding)
     refs = dict(binding.get('refs', {}))
+    for kind, identifiers in _scheduler_tool_asset_ids(job).items():
+        refs[kind] = list(dict.fromkeys([*refs.get(kind, []), *identifiers]))
     refs['skills'] = list(dict.fromkeys([*refs.get('skills', []), *_scheduler_skill_ids(job.get('skill_refs', []))]))
     runtime = {'last_run_at': _run_time(job.get('last_run_at')), 'last_status': job.get('last_run_status', ''),
                'last_duration_ms': job.get('last_duration_ms'), 'run_count': job.get('run_count', 0),
-               'consecutive_failures': job.get('consecutive_failures', 0)}
+               'consecutive_failures': job.get('consecutive_failures', 0), 'last_error': job.get('last_error') or ''}
     descriptor = AssetDescriptor(id=identifier, kind='monitor', name=binding.get('name') or job.get('name') or identifier,
         summary=binding.get('summary') or job.get('prompt', ''), version=str(job.get('version', binding.get('version', '1.0.0'))),
         owner_id=job.get('owner', {}).get('id', home.name), refs=refs, runtime_summary=runtime,
@@ -160,3 +162,24 @@ def _scheduler_skill_ids(references):
             continue
         identifiers.append(safe_asset_id(stable_id.partition(':')[2] if ':' in stable_id else stable_id))
     return identifiers
+
+
+# LLM: 只读rules.tool/rules.precheck及顶层precheck的显式参数；不解释prompt，不执行动作，不安全ID沿原校验拒绝。
+# 函数用途: 为定时工作流或脚本自动提取拓扑引用，缺失、空值或非字符串不构成资产边。
+def _scheduler_tool_asset_ids(job):
+    refs = {'workflows': [], 'scripts': []}
+    actions = []
+    for rule in job.get('rules') or ():
+        actions.extend((rule.get('tool'), rule.get('precheck')))
+    actions.append(job.get('precheck'))
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        name = action.get('name', action.get('tool_name'))
+        arguments = action.get('arguments')
+        if name not in ('workflows', 'scripts') or not isinstance(arguments, dict):
+            continue
+        identifier = arguments.get('workflow_id' if name == 'workflows' else 'script_id')
+        if isinstance(identifier, str) and identifier:
+            refs[name].append(safe_asset_id(identifier))
+    return refs

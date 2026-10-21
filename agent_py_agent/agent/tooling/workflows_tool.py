@@ -7,8 +7,8 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_text_beneath
+from ..workflows.models import redact_bearer_values
 from .models import BaseTool
 from .scripts_tool import (
     _descriptor,
@@ -99,7 +99,7 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home):
             descriptor = _skill_descriptor(owner_home, skill_id)
         except FileNotFoundError:
             continue
-        safe = redact_sensitive_value(descriptor)
+        safe = redact_bearer_values(descriptor)
         lines = safe.get('body_markdown', '').splitlines()
         if lines and lines[0].strip() == '---':
             lines = lines[next(i for i in range(1, len(lines)) if lines[i].strip() == '---') + 1:]

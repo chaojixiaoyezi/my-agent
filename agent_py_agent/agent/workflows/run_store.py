@@ -10,10 +10,15 @@ from pathlib import Path
 from threading import local
 
 from ..common.json_io import locked_json_path
-from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
 from ..common.nofollow_fs import list_names_beneath as list_dir_names_beneath
-from .models import StepExecutionRecord, WorkflowRunRecord, payload, safe_path
+from .models import (
+    StepExecutionRecord,
+    WorkflowRunRecord,
+    payload,
+    redact_bearer_values,
+    safe_path,
+)
 
 _HELD_LOCKS = local()
 
@@ -27,7 +32,7 @@ class _RunBusy(RuntimeError, ValueError):
 # LLM: 调用方已持run.json锁，正文与中间目录始终从Owner锚点nofollow；先复制脱敏，绝不修改调用方内存。
 # 函数用途: 将结构化记录以0600原子写入账本。
 def _write_json(root, parts, value):
-    raw = json.dumps(redact_sensitive_value(payload(value)), ensure_ascii=False, indent=2, allow_nan=False)
+    raw = json.dumps(redact_bearer_values(payload(value)), ensure_ascii=False, indent=2, allow_nan=False)
     write_text_atomic_beneath(root, parts, raw + '\n')
 
 

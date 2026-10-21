@@ -1,13 +1,13 @@
-# LLM: NO业务经原后台车道、工具与历史；只有typed首次认证拒绝可转原零工具通知，不以输出文字猜成功或告警。
-# 模块用途: 执行监控的明确工具动作并记录结构化 JSON 结果，供同监控规则条件使用。
+# LLM: NO业务经原权限/车道与历史；仅workflows/scripts的结构化断点可升级原修复轮，typed认证通知边界不变。
+# 模块用途: 执行监控工具并保存JSON对象结果，让断点触发依赖修复或按非空run提示词进入原模型续跑。
 from __future__ import annotations
 
 import json
 import time
 
 
-# LLM: 原租约与工具不变；只有typed认证义务才进入通知热轮，普通NO失败零新增core/model，actual未结不伪结。
-# 函数用途: 运行NO工具并保存结果；准确认证拒绝交原通知表达，普通业务保持零模型与原TaskLink收口。
+# LLM: 原租约/权限不变；断点先入账，run.prompt非空才借原notify修复；否则仅完成监控观察供依赖消费，不改变工具失败事实。
+# 函数用途: 运行NO工具并保存对象结果，结构化断点按任务冻结参数升级，普通失败保持零模型与原收口。
 def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None):
     from ..agent_core.runtime.loop_models import RunParams
     from ..agent_core.tool_only_execution import execute_tool_work
@@ -34,20 +34,27 @@ def execute_scheduled_tool(agent, service, claim, signal, kwargs, *, notify=None
             with notification_scope(agent, request):
                 if freeze_tool_notice(agent, request, execution.result):
                     return notify(kwargs)
-    if ok:
-        try:
-            value = json.loads(output)
-        except (ValueError, TypeError):
-            value = {'call_id': execution.call.call_id, 'ok': True}
-        service.repository.record_rule_result(claim.run_id, claim.claim_id, value)
+    try:
+        parsed = json.loads(output)
+    except (ValueError, TypeError):
+        parsed = None
+    parsed = parsed if isinstance(parsed, dict) else None
+    needs_repair = (action['name'] in ('workflows', 'scripts') and isinstance(parsed, dict)
+        and (parsed.get('needs_repair') is True or parsed.get('status') == 'paused_for_resume'))
+    confirmed = ok or needs_repair
+    if confirmed:
+        service.repository.record_rule_result(claim.run_id, claim.claim_id,
+            parsed if isinstance(parsed, dict) else {'call_id': execution.call.call_id, 'ok': True})
+    if needs_repair and notify is not None and str(claim.run.get('prompt') or '').strip():
+        return notify(kwargs)
     now = time.time()
-    service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'completed' if ok else 'abandoned',
+    service.conversation_store.tasks.update_status({'task_id': claim.run_id, 'status': 'completed' if confirmed else 'abandoned',
         'expected_status': 'active', 'now': now})
     commit = _commit_tool_result(agent, service, claim, kwargs, output) if ok else None
     if commit is not None and commit.outbox_frozen:
         service.park_waiting(claim,response=output,delivery_status=commit.delivery_status,delivery_reason='tool_rule_result',now=now)
         return
-    service.finish(claim, status='done' if ok else 'failed', response=output,
+    service.finish(claim, status='done' if confirmed else 'failed', response=output,
         delivery_status=commit.delivery_status if commit is not None else 'suppressed',
         delivery_reason='tool_rule_result' if commit is not None else 'tool_only_internal_result',
         error_code=execution.result.error_code or '', now=now)

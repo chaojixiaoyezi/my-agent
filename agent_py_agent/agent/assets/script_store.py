@@ -1,5 +1,5 @@
-# LLM: 固化脚本权威仅在构造时Owner/scripts/id；元数据平铺标准Key，代码通过nofollow读取，不执行脚本。
-# 模块用途: 保存与管理固化脚本、动态查询范围、候选评估和运行摘要。
+# LLM: 普通写入固定于Owner/scripts/id，全局兜底仅nofollow只读；管理员显式工厂绑定全局写根，不执行脚本。
+# 模块用途: 分层发现与管理固化脚本、动态查询范围、候选评估和安全运行摘要。
 from __future__ import annotations
 
 from dataclasses import replace
@@ -59,10 +59,24 @@ def _preserve_history(descriptor, old):
 # LLM: 每个public操作共用原集合锁；调用方只传安全ID，根路径不从输入记录恢复。
 # 类用途: 在Owner空间管理固化脚本，供工具、工作流和Broker共用。
 class ScriptStore(_AssetStore):
-    # LLM: 只构造scripts集合，不读取或执行任何脚本。
-    # 函数用途: 固定Owner脚本权威目录。
-    def __init__(self, owner_home):
-        super().__init__(owner_home, "scripts", "script.json")
+    # LLM: 普通实例只写宿主给定Owner；额外根仅可读，is_admin不自动重定位或开放兜底写入。
+    # 函数用途: 绑定脚本写根和有序全局只读候选。
+    def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False):
+        super().__init__(owner_home, "scripts", "script.json", extra_roots=extra_roots, is_admin=is_admin)
+
+    # LLM: 标记只存在于返回副本，不写共享元数据，不从元数据取得路径或写入权。
+    # 函数用途: 给全局脚本的详情或列表补充真实来源标记。
+    def _mark_global(self, record):
+        return {**record, 'metadata': {**record['metadata'], 'asset_scope': 'global'}}
+
+    # LLM: 全局和Owner列表均只读元数据；继承基座事务校验，不加载代码或返回执行路径。
+    # 函数用途: 严格解码一条脚本列表投影。
+    def _list_entry(self, script_id):
+        payload = self._read(script_id)
+        if payload is None:
+            return None
+        descriptor, options = _decode_script(payload)
+        return descriptor.to_dict() | options
 
     # LLM: 不重入锁；先校验元数据再nofollow读代码，路径只是展示，后续执行仍须冻结代码或重新核验。
     # 函数用途: 锁内取得包含安全代码副本的完整脚本记录。
@@ -105,20 +119,20 @@ class ScriptStore(_AssetStore):
             self._write(descriptor.to_dict() | options, files)
             return self._get(descriptor.id)
 
-    # LLM: 返回的是副本，不缓存其它Owner；缺失为None，损坏或链接拒绝上抛。
-    # 函数用途: 读取指定脚本及其代码。
+    # LLM: Owner损坏明确失败而非回退；仅真实缺失才在释放Owner锁后顺序读取全局，不跨Owner枚举。
+    # 函数用途: 优先读取本Owner脚本，缺失时返回只读全局代码副本。
     def get_script(self, script_id):
         safe_asset_id(script_id)
         with self._locked():
-            return self._get(script_id)
+            record = self._get(script_id)
+        return record if record is not None else self._global_get(script_id)
 
-    # LLM: 列表不读取代码；每条元数据仍须严格校验，不以坏记录冒充空列表。
-    # 函数用途: 按ID稳定列出本Owner所有脚本标准Key和执行声明。
+    # LLM: 列表不读取代码；Owner先认领ID，释放锁后合并全局同ID首项，不吞当前来源损坏。
+    # 函数用途: 按ID稳定列出Owner和全局脚本的去重元数据。
     def list_scripts(self):
         with self._locked():
-            records = [self._read(asset_id) for asset_id in self._ids()]
-            return [descriptor.to_dict() | options for descriptor, options in
-                    (_decode_script(row) for row in records if row is not None)]
+            records = self._local_records()
+        return self._merge_globals(records)
 
     # LLM: 删除前验证代码及元数据，基座拒绝所有链接和未支持目录；不执行文件。
     # 函数用途: 删除单个脚本目录，缺失返回False。
@@ -155,12 +169,17 @@ class ScriptStore(_AssetStore):
             self._write(replace(descriptor, data_sources=tuple(sources)).to_dict() | options)
             return self._get(script_id)
 
-    # LLM: 同一集合锁覆盖读改写，多个Store实例不会覆盖计数；只写摘要，不创建运行或调用模型。
-    # 函数用途: 保存脚本最近运行和连续失败摘要。
-    def record_run_summary(self, script_id, status, duration_ms, run_at):
+    # LLM: 本Owner摘要仍原锁读改写；仅全局存在时释放Owner锁后返回只读副本，绝不累计到共享文件。
+    # 函数用途: 保存本地脚本运行摘要，安全跳过只读全局摘要写入。
+    def record_run_summary(self, script_id, status, duration_ms, run_at=None, *, last_error=""):
         with self._locked():
-            record = self._required(script_id)
-            descriptor, options = _decode_script({key: value for key, value in record.items() if key not in {"code", "entrypoint_path"}})
-            summary = next_run_summary(descriptor.runtime_summary, status, duration_ms, run_at)
-            self._write(replace(descriptor, runtime_summary=summary).to_dict() | options)
-            return self._get(script_id)
+            record = self._get(script_id)
+            if record is not None:
+                descriptor, options = _decode_script({key: value for key, value in record.items() if key not in {"code", "entrypoint_path"}})
+                summary = next_run_summary(descriptor.runtime_summary, status, duration_ms, run_at, last_error=last_error)
+                self._write(replace(descriptor, runtime_summary=summary).to_dict() | options)
+                return self._get(script_id)
+        record = self._global_get(script_id)
+        if record is None:
+            raise KeyError(script_id)
+        return record

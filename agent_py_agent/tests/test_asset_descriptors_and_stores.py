@@ -2,9 +2,11 @@
 # 模块用途: 锁住统一资产协议、原子保存、安全路径、数据源更新、运行计数和拓扑反向引用。
 import importlib
 import importlib.util
+import inspect
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -132,7 +134,7 @@ def test_script_run_summary_and_concurrent_updates(api, tmp_path):
         list(executor.map(lambda _: api.ScriptStore(tmp_path).record_run_summary("collect", "succeeded", 3, "2026-10-21"), range(8)))
     summary = store.get_script("collect")["runtime_summary"]
     assert summary == {"last_run_at": "2026-10-21", "last_status": "succeeded", "last_duration_ms": 3,
-                       "run_count": 10, "consecutive_failures": 0}
+                       "run_count": 10, "consecutive_failures": 0, "last_error": ""}
     with pytest.raises(ValueError):
         store.record_run_summary("collect", "failed", -1, "2026-10-21")
 
@@ -522,3 +524,492 @@ def test_short_sk_prefix_is_not_a_raw_secret(api):
     endpoint = 'https://example.test/sk-SK/docs'
     assert api.AccessTarget('docs', 'http', endpoint).endpoint == endpoint
     assert api.CredentialBindingRef('vault:team/sk-prod').credential_ref == 'vault:team/sk-prod'
+
+
+# LLM: 直接测资产权威层，不让引擎子类的额外检查掩盖存储契约缺口；无IO。
+# 函数用途: 验证非法错误策略在构造和JSON恢复时均被拒绝。
+@pytest.mark.parametrize('policy', ['ignore', '', 'FAIL'])
+def test_asset_step_rejects_unsupported_on_error(api, policy):
+    values = {'step_id': 's', 'name': 'step', 'mode': 'hybrid', 'on_error': policy}
+    with pytest.raises(ValueError, match=f'Unsupported on_error policy: {policy}'):
+        api.WorkflowStepSpec(**values)
+    with pytest.raises(ValueError, match=f'Unsupported on_error policy: {policy}'):
+        api.WorkflowStepSpec.from_dict(values)
+
+
+# LLM: 两个公开构造入口继续接受同一完整策略集合，资产层是新增权威；无IO。
+# 函数用途: 验证三个合法策略及默认策略仍可正常往返。
+@pytest.mark.parametrize('policy', ['escalate_to_agent', 'fail', 'skip'])
+def test_asset_step_supported_on_error_policies(api, policy):
+    assert getattr(api, 'WORKFLOW_ON_ERROR_POLICIES', None) == ('escalate_to_agent', 'fail', 'skip')
+    models = importlib.import_module('agent_py_agent.agent.workflows.models')
+    assert api.WORKFLOW_ON_ERROR_POLICIES == models.WORKFLOW_ON_ERROR_POLICIES
+    for step_type in (api.WorkflowStepSpec, models.WorkflowStepSpec):
+        step = step_type('s', 'step', 'hybrid', on_error=policy)
+        assert step_type.from_dict(step.to_dict()) == step
+        assert step_type('s', 'step', 'hybrid').on_error == 'escalate_to_agent'
+
+
+# LLM: 老JSON没有错误字段时兼容空串，新增字符串仍必须走统一脱敏；不使用真实凭据。
+# 函数用途: 验证运行摘要的旧格式恢复、严格字段类型及秘密清洗。
+def test_runtime_summary_legacy_default_and_error_redaction(api):
+    legacy = api.RuntimeSummary.from_dict({'last_status': 'failed', 'consecutive_failures': 1})
+    assert legacy.to_dict().get('last_error') == ''
+    raw = 'Bearer synthetic-summary-secret timeout'
+    summary = api.RuntimeSummary(last_error=raw)
+    assert summary.last_error == api.clean_json(raw) and 'synthetic-summary-secret' not in summary.last_error
+    assert api.RuntimeSummary.from_dict(summary.to_dict()) == summary
+    assert api.RuntimeSummary.from_dict({'last_error': raw}) == summary
+    with pytest.raises(ValueError):
+        api.RuntimeSummary.from_dict({'last_error': 12})
+
+
+# LLM: 失败状态必须累计并继承已知错误；省略时间生成UTC，显式空时间不被替换；无IO。
+# 函数用途: 验证所有失败状态的默认时间、错误脱敏和旧错误保留。
+@pytest.mark.parametrize('status', ['failed', 'error', 'timeout', 'timed_out'])
+def test_next_run_summary_failure_error_and_default_utc(api, status):
+    module = importlib.import_module('agent_py_agent.agent.assets')
+    assert 'last_error' in inspect.signature(module.next_run_summary).parameters
+    previous = api.RuntimeSummary(run_count=3, consecutive_failures=1, last_error='old detail')
+    before = datetime.now(timezone.utc)
+    raw = 'Bearer synthetic-summary-secret timeout'
+    current = module.next_run_summary(previous, status, 12.5, last_error=raw)
+    observed = datetime.fromisoformat(current.last_run_at)
+    assert observed.utcoffset() == timedelta(0) and before <= observed <= datetime.now(timezone.utc)
+    assert current.last_status == status and current.last_duration_ms == 12.5
+    assert current.run_count == 4 and current.consecutive_failures == 2
+    assert current.last_error == api.clean_json(raw) and 'synthetic-summary-secret' not in current.last_error
+    inherited = module.next_run_summary(current, status, 1, '', last_error='')
+    assert inherited.last_run_at == '' and inherited.last_error == current.last_error
+    assert inherited.run_count == 5 and inherited.consecutive_failures == 3
+
+
+# LLM: 非失败状态默认清除历史错误，也允许保留调用方显式说明；原摘要不能被修改。
+# 函数用途: 验证成功及其它非失败状态的归零和错误覆盖规则。
+@pytest.mark.parametrize('status', ['succeeded', 'skipped', 'paused'])
+def test_next_run_summary_nonfailure_clears_error(api, status):
+    module = importlib.import_module('agent_py_agent.agent.assets')
+    assert 'last_error' in inspect.signature(module.next_run_summary).parameters
+    previous = api.RuntimeSummary(run_count=2, consecutive_failures=2, last_error='old failure')
+    cleared = module.next_run_summary(previous, status, 5, '2026-10-21')
+    assert cleared.to_dict() == {'last_run_at': '2026-10-21', 'last_status': status, 'last_duration_ms': 5,
+                                 'run_count': 3, 'consecutive_failures': 0, 'last_error': ''}
+    supplied = module.next_run_summary(previous, status, 5, last_error='--password=synthetic-summary-secret')
+    assert supplied.last_error == api.clean_json('--password=synthetic-summary-secret')
+    assert previous.last_error == 'old failure' and previous.consecutive_failures == 2
+
+
+# LLM: 两类Store均使用真实临时资产和磁盘JSON，不以返回对象冒充持久化；无真实Owner写入。
+# 函数用途: 验证错误落盘脱敏、失败继承、成功清空及新Store读回。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_stores_persist_last_error_and_clear_after_success(api, tmp_path, kind):
+    store = api.ScriptStore(tmp_path) if kind == 'script' else api.WorkflowStore(tmp_path)
+    parameters = inspect.signature(store.record_run_summary).parameters
+    assert 'last_error' in parameters, 'Store尚未支持last_error'
+    assert parameters['last_error'].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters['run_at'].default is None and parameters['last_error'].default == ''
+    if kind == 'script':
+        store.save_script(asset(api), 'pass')
+    else:
+        store.save_workflow(api.WorkflowDefinition(asset(api, 'workflow'), ()))
+    path = tmp_path / f'{kind}s/collect/{kind}.json'
+    store.record_run_summary('collect', status='failed', duration_ms=12.5, last_error='Bearer <redacted> timeout')
+    first = json.loads(path.read_text())['runtime_summary']
+    assert first['last_error'] == api.clean_json('Bearer <redacted> timeout') and first['last_error']
+    raw = 'Bearer synthetic-summary-secret timeout'
+    store.record_run_summary('collect', 'error', 10, '2026-10-21', last_error=raw)
+    assert 'synthetic-summary-secret' not in path.read_text()
+    failed = json.loads(path.read_text())['runtime_summary']
+    assert failed['last_error'] == api.clean_json(raw) and failed['consecutive_failures'] == 2
+    store.record_run_summary('collect', 'timeout', 8)
+    inherited = json.loads(path.read_text())['runtime_summary']
+    assert inherited['last_error'] == failed['last_error'] and inherited['consecutive_failures'] == 3
+    store.record_run_summary('collect', status='succeeded', duration_ms=5.0)
+    final = json.loads(path.read_text())['runtime_summary']
+    assert final['consecutive_failures'] == 0 and final['last_error'] == '' and final['run_count'] == 4
+    fresh = type(store)(tmp_path)
+    restored = fresh.get_script('collect')['runtime_summary'] if kind == 'script' else fresh.get_workflow('collect').descriptor.runtime_summary.to_dict()
+    assert restored == final
+
+
+# LLM: 真实Runner按签名探测调用摘要入口，只执行临时脚本且关闭内核沙箱，不宣称验证平台隔离。
+# 函数用途: 验证执行器失败原因确实写入Store，随后真实成功运行清除旧错误。
+def test_script_runner_persists_last_error_through_signature_probe(api, tmp_path):
+    from agent_py_agent.agent.workflows import ScriptRunner
+    store = api.ScriptStore(tmp_path)
+    store.save_script(asset(api), 'raise SystemExit(7)')
+    runner = ScriptRunner(tmp_path, use_sandbox=False)
+    result = runner.run_script('collect')
+    assert not result.ok and result.error_code == 'SCRIPT_EXIT_NONZERO'
+    summary = api.ScriptStore(tmp_path).get_script('collect')['runtime_summary']
+    assert summary.get('last_error') == result.error_code and summary['consecutive_failures'] == 1
+    store.save_script(asset(api), 'print("{}")')
+    assert runner.run_script('collect').ok
+    final = api.ScriptStore(tmp_path).get_script('collect')['runtime_summary']
+    assert final['last_error'] == '' and final['consecutive_failures'] == 0 and final['run_count'] == 2
+
+
+# LLM: 测试工厂仅接临时根，缺少新增入口时以契约断言报红，不把TypeError冒充功能反例。
+# 函数用途: 为两类存储统一构造Owner或管理员测试实例。
+def scoped_store(api, home, kind, *, admin=False, **options):
+    store_type = api.ScriptStore if kind == 'script' else api.WorkflowStore
+    if admin:
+        assert callable(getattr(store_type, 'for_global_admin', None)), '尚未实现全局管理员存储入口'
+        return store_type.for_global_admin(home, **options)
+    assert set(options) <= inspect.signature(store_type).parameters.keys(), '尚未实现分层存储构造参数'
+    return store_type(home, **options)
+
+
+# LLM: 测试资产仅含无网络JSON输出或空操作步骤；保存始终走真实公开Store入口。
+# 函数用途: 为脚本和工作流生成同形的层级遮蔽样本。
+def save_scoped_asset(api, store, kind, asset_id='shared', version='global'):
+    descriptor = asset(api, kind, asset_id, version=version)
+    if kind == 'script':
+        return store.save_script(descriptor, 'print("{}")')
+    return store.save_workflow(api.WorkflowDefinition(descriptor, (api.WorkflowStepSpec('s', 'step', 'hybrid'),)))
+
+
+# LLM: 只统一返回对象形状，不重新读取磁盘或改动生产契约。
+# 函数用途: 抽取两类记录的标准描述符供断言复用。
+def scoped_descriptor(record):
+    return record if isinstance(record, dict) else record.descriptor.to_dict()
+
+
+# LLM: 只观察pytest临时全局集合，包含字节、mtime和权限；读回相同字节不能掩盖chmod或重复写入。
+# 函数用途: 核对普通读取与更新尝试完全没有改写全局集合。
+def collection_snapshot(path):
+    if not path.exists():
+        return None
+    return {str(item.relative_to(path)): (item.stat().st_mode, item.stat().st_mtime_ns,
+            item.read_bytes() if item.is_file() else None) for item in (path, *path.rglob('*'))}
+
+
+# LLM: is_admin必须是宿主传入的精确True，不接受真假等价值；拒绝时不能创建目标根。
+# 函数用途: 验证管理员入口拒绝普通身份且不会先创建全局目录。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+@pytest.mark.parametrize('flag', [False, None, 0, 1, 'true'])
+def test_global_admin_rejects_non_true_authority(api, tmp_path, kind, flag):
+    root = tmp_path / 'not-created'
+    store_type = api.ScriptStore if kind == 'script' else api.WorkflowStore
+    assert callable(getattr(store_type, 'for_global_admin', None))
+    with pytest.raises(PermissionError, match='仅管理员可修改全局脚本或工作流'):
+        store_type.for_global_admin(root, is_admin=flag)
+    assert not root.exists()
+
+
+# LLM: 本地与飞书Owner布局均自动寻找owners父根；用户写删只影响覆盖副本，不暴露其它Owner。
+# 函数用途: 验证自动兜底、作用域标记、稳定合并、同ID遮蔽及删除后恢复全局视图。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+@pytest.mark.parametrize('relative', ['owners/local/main', 'owners/providers/feishu/users/u1', 'owners/legacy'])
+def test_global_auto_fallback_owner_override_and_delete(api, tmp_path, kind, relative):
+    global_store = scoped_store(api, tmp_path, kind)
+    asset_id = 'global_ping' if kind == 'script' else 'global_wf'
+    save_scoped_asset(api, global_store, kind, asset_id)
+    save_scoped_asset(api, global_store, kind, 'alpha')
+    user = scoped_store(api, tmp_path / relative, kind)
+    get, listing, delete = getattr(user, f'get_{kind}'), getattr(user, f'list_{kind}s'), getattr(user, f'delete_{kind}')
+    shared = get(asset_id)
+    assert shared is not None, 'Owner尚不能读取默认全局资产'
+    assert scoped_descriptor(shared)['metadata']['asset_scope'] == 'global'
+    assert [scoped_descriptor(row)['id'] for row in listing()] == ['alpha', asset_id]
+    before = collection_snapshot(tmp_path / f'{kind}s')
+    save_scoped_asset(api, user, kind, asset_id, 'owner')
+    assert scoped_descriptor(get(asset_id))['version'] == 'owner'
+    assert scoped_descriptor(get(asset_id))['metadata'].get('asset_scope', 'owner') == 'owner'
+    assert [scoped_descriptor(row)['version'] for row in listing()] == ['global', 'owner']
+    other = scoped_store(api, tmp_path / 'owners/local/other', kind)
+    assert scoped_descriptor(getattr(other, f'get_{kind}')(asset_id))['version'] == 'global'
+    assert delete(asset_id) is True and delete(asset_id) is False
+    assert scoped_descriptor(get(asset_id))['version'] == 'global'
+    assert collection_snapshot(tmp_path / f'{kind}s') == before
+    assert scoped_descriptor(getattr(global_store, f'get_{kind}')(asset_id))['version'] == 'global'
+
+
+# LLM: 普通更新必须使用本Owner必需记录；运行摘要遇共享资产只能返回只读投影，不触碰全局锁权限或字节。
+# 函数用途: 验证全局资产的普通删除、源更新、技能挂载和摘要都不跨界写入。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_global_readonly_update_and_summary_do_not_write(api, tmp_path, kind):
+    publisher = scoped_store(api, tmp_path, kind)
+    save_scoped_asset(api, publisher, kind)
+    collection = tmp_path / f'{kind}s'
+    (collection / '.assets.lock').chmod(0o644)
+    before = collection_snapshot(collection)
+    user = scoped_store(api, tmp_path / 'owners/providers/feishu/users/u1', kind)
+    shared = getattr(user, f'get_{kind}')('shared')
+    assert shared is not None, '缺少全局只读读取'
+    assert getattr(user, f'delete_{kind}')('shared') is False
+    with pytest.raises(KeyError):
+        if kind == 'script':
+            user.update_data_sources('shared', 'apps', query_scope={'new': True})
+        else:
+            user.attach_skill_to_step('shared', 's', 'skill-new')
+    returned = user.record_run_summary('shared', 'failed', 12, last_error='synthetic failure')
+    assert scoped_descriptor(returned)['runtime_summary']['run_count'] == 0
+    assert scoped_descriptor(returned)['metadata']['asset_scope'] == 'global'
+    assert getattr(user, f'list_{kind}s')()
+    assert collection_snapshot(collection) == before
+    with pytest.raises(KeyError):
+        user.record_run_summary('absent', 'failed', 1)
+
+
+# LLM: 全局写入口依赖可信宿主身份布尔值，不自行认证；管理员的原事务、源更新和挂载能力仍可用。
+# 函数用途: 验证显式管理员可以完整创建、更新、记摘要和删除全局资产。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_global_admin_can_publish_update_and_delete(api, tmp_path, kind):
+    admin = scoped_store(api, tmp_path, kind, admin=True, is_admin=True)
+    save_scoped_asset(api, admin, kind, 'shared', '1')
+    save_scoped_asset(api, admin, kind, 'shared', '2')
+    if kind == 'script':
+        admin.update_data_sources('shared', 'apps', query_scope={'region': 'west'})
+    else:
+        admin.attach_skill_to_step('shared', 's', 'skill-new')
+    admin.record_run_summary('shared', 'failed', 12, last_error='synthetic failure')
+    user = scoped_store(api, tmp_path / 'owners/local/main', kind)
+    descriptor = scoped_descriptor(getattr(user, f'get_{kind}')('shared'))
+    assert descriptor['version'] == '2' and descriptor['runtime_summary']['run_count'] == 1
+    assert descriptor['metadata']['asset_scope'] == 'global'
+    if kind == 'script':
+        assert descriptor['data_sources'][0]['query_scope']['region'] == 'west'
+    else:
+        assert descriptor['refs']['skills'] == ['skill-new']
+    assert getattr(admin, f'delete_{kind}')('shared') is True
+    assert getattr(user, f'get_{kind}')('shared') is None
+
+
+# LLM: 默认全局先于显式extra，同ID只读取首个来源；缺失、重复和Owner自身根不创建或递归查询。
+# 函数用途: 验证额外只读根的稳定优先级、去重和被遮蔽坏记录不干扰有效列表。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_global_extra_roots_order_dedup_and_shadowed_corruption(api, tmp_path, kind):
+    default, first, second, missing = (tmp_path / name for name in ('default', 'first', 'second', 'absent'))
+    for root, version in ((default, 'default'), (first, 'first'), (second, 'second')):
+        save_scoped_asset(api, scoped_store(api, root, kind), kind, version=version)
+    save_scoped_asset(api, scoped_store(api, first, kind), kind, 'alpha')
+    (second / f'{kind}s/shared/{kind}.json').write_text('{broken')
+    home = default / 'owners/local/main'
+    user = scoped_store(api, home, kind, extra_roots=(missing, first, first, second, home), is_admin=False)
+    assert scoped_descriptor(getattr(user, f'get_{kind}')('shared'))['version'] == 'default'
+    assert [scoped_descriptor(row)['id'] for row in getattr(user, f'list_{kind}s')()] == ['alpha', 'shared']
+    assert getattr(scoped_store(api, default, kind), f'delete_{kind}')('shared') is True
+    assert scoped_descriptor(getattr(user, f'get_{kind}')('shared'))['version'] == 'first'
+    assert [scoped_descriptor(row)['id'] for row in getattr(user, f'list_{kind}s')()] == ['alpha', 'shared']
+    arbitrary = scoped_store(api, tmp_path / 'arbitrary-owner', kind, extra_roots=(first,))
+    assert scoped_descriptor(getattr(arbitrary, f'get_{kind}')('shared'))['version'] == 'first'
+    assert not missing.exists()
+
+
+# LLM: 默认全局不存在或为空时不创建集合、锁或候选根；本Owner原读写语义不变。
+# 函数用途: 验证空全局零侵入及Owner普通资产的完整读回。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+@pytest.mark.parametrize('empty_collection', [False, True])
+def test_global_absent_or_empty_is_noninvasive(api, tmp_path, kind, empty_collection):
+    collection, missing = tmp_path / f'{kind}s', tmp_path / 'missing-extra'
+    if empty_collection:
+        collection.mkdir()
+    before = collection_snapshot(collection)
+    user = scoped_store(api, tmp_path / 'owners/local/main', kind, extra_roots=(missing,))
+    assert getattr(user, f'get_{kind}')('absent') is None
+    assert getattr(user, f'list_{kind}s')() == []
+    save_scoped_asset(api, user, kind, version='owner')
+    assert scoped_descriptor(getattr(user, f'get_{kind}')('shared'))['version'] == 'owner'
+    assert collection_snapshot(collection) == before and not missing.exists()
+
+
+# LLM: 全局读口必须与Owner同样逐段nofollow；拒绝链接时不得触碰哨兵或返回伪装缺失。
+# 函数用途: 验证全局集合、资产目录和元数据叶符号链接拒绝。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+@pytest.mark.parametrize('level', ['collection', 'asset', 'metadata'])
+def test_global_symlink_paths_are_rejected(api, tmp_path, kind, level):
+    publisher = scoped_store(api, tmp_path, kind)
+    save_scoped_asset(api, publisher, kind)
+    collection = tmp_path / f'{kind}s'
+    leaf = collection if level == 'collection' else collection / 'shared' if level == 'asset' else collection / f'shared/{kind}.json'
+    target = tmp_path / 'linked-target'
+    leaf.rename(target)
+    leaf.symlink_to(target, target_is_directory=level != 'metadata')
+    before = collection_snapshot(target)
+    user = scoped_store(api, tmp_path / 'owners/local/main', kind)
+    for read in (lambda: getattr(user, f'get_{kind}')('shared'), lambda: getattr(user, f'list_{kind}s')()):
+        with pytest.raises((OSError, ValueError)):
+            read()
+    assert collection_snapshot(target) == before
+
+
+# LLM: 真实硬链接创建若被权限拒绝，只注入nlink=2核验原拒绝分支，不冒称真实硬链接验证；符号链接使用实物。
+# 函数用途: 验证全局代码链接拒绝，硬链接夹具不可建时保留精确元数据分支覆盖。
+@pytest.mark.parametrize('link_kind', ['symlink', 'hardlink'])
+def test_global_script_code_rejects_links(api, tmp_path, monkeypatch, record_property, link_kind):
+    import os
+
+    from agent_py_agent.agent.common import nofollow_fs
+    publisher = scoped_store(api, tmp_path, 'script')
+    save_scoped_asset(api, publisher, 'script')
+    path, target = tmp_path / 'scripts/shared/main.py', tmp_path / 'code-target'
+    path.rename(target)
+    if link_kind == 'symlink':
+        path.symlink_to(target)
+    else:
+        try:
+            os.link(target, path)
+            record_property('hardlink_observation', 'native')
+        except PermissionError as error:
+            record_property('hardlink_observation', f'metadata_injection_after_errno_{error.errno}')
+            path.write_bytes(target.read_bytes())
+            original_stat = os.stat
+
+            # LLM: 只给目标代码的nofollow预检注入nlink=2，其它真实stat及所有生产拒绝逻辑保持不变。
+            # 函数用途: 在无法创建硬链接的运行中核验相同的链接数拒绝条件。
+            def linked_metadata(name, *args, **kwargs):
+                metadata = original_stat(name, *args, **kwargs)
+                if name == 'main.py' and kwargs.get('follow_symlinks') is False:
+                    values = list(metadata)
+                    values[3] = 2
+                    return os.stat_result(values)
+                return metadata
+
+            monkeypatch.setattr(nofollow_fs.os, 'stat', linked_metadata)
+    user = scoped_store(api, tmp_path / 'owners/local/main', 'script')
+    with pytest.raises((OSError, ValueError)):
+        user.get_script('shared')
+    assert target.read_text() == 'print("{}")'
+
+
+# LLM: 根本身也必须nofollow，不因是宿主显式extra就接受符号链接；没有额外写权。
+# 函数用途: 验证额外全局根不能通过链接绕开根校验。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_global_extra_root_symlink_is_rejected(api, tmp_path, kind):
+    root, link = tmp_path / 'root', tmp_path / 'linked-root'
+    save_scoped_asset(api, scoped_store(api, root, kind), kind)
+    link.symlink_to(root, target_is_directory=True)
+    before = collection_snapshot(root)
+    user = scoped_store(api, tmp_path / 'owner', kind, extra_roots=(link,))
+    with pytest.raises((OSError, ValueError)):
+        getattr(user, f'get_{kind}')('shared')
+    assert collection_snapshot(root) == before
+
+
+# LLM: 只读兜底不能执行undo恢复；未提交事务显式失败且留给管理员修复，不把混合版本当成功。
+# 函数用途: 验证全局事务挂起时读取不修改任何字节，管理员仍能沿原机制恢复。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_global_pending_transaction_requires_admin_recovery(api, tmp_path, kind):
+    publisher = scoped_store(api, tmp_path, kind)
+    save_scoped_asset(api, publisher, kind)
+    collection = tmp_path / f'{kind}s'
+    metadata = collection / f'shared/{kind}.json'
+    journal = metadata.with_name('asset-transaction.json')
+    journal.write_text(json.dumps({'schema_version': 'asset_transaction.v1', 'previous': {metadata.name: metadata.read_text()}}))
+    before = collection_snapshot(collection)
+    user = scoped_store(api, tmp_path / 'owners/local/main', kind)
+    for read in (lambda: getattr(user, f'get_{kind}')('shared'), lambda: getattr(user, f'list_{kind}s')()):
+        with pytest.raises(ValueError, match='全局.*事务'):
+            read()
+    assert collection_snapshot(collection) == before and journal.is_file()
+    admin = scoped_store(api, tmp_path, kind, admin=True)
+    assert getattr(admin, f'get_{kind}')('shared') is not None
+    assert not journal.exists() and getattr(user, f'get_{kind}')('shared') is not None
+
+
+# LLM: 本Owner坏记录不能伪装成缺失而回退全局；低优先级坏记录不能覆盖高优先级有效副本。
+# 函数用途: 验证Owner损坏明确失败和Owner遮蔽全局坏JSON的边界。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+def test_global_fallback_does_not_hide_owner_corruption(api, tmp_path, kind):
+    save_scoped_asset(api, scoped_store(api, tmp_path, kind), kind)
+    home = tmp_path / 'owners/local/main'
+    user = scoped_store(api, home, kind)
+    save_scoped_asset(api, user, kind, version='owner')
+    global_path, owner_path = (root / f'{kind}s/shared/{kind}.json' for root in (tmp_path, home))
+    original = owner_path.read_text()
+    owner_path.write_text('{broken')
+    with pytest.raises(ValueError):
+        getattr(user, f'get_{kind}')('shared')
+    owner_path.write_text(original)
+    global_path.write_text('{broken')
+    assert scoped_descriptor(getattr(user, f'get_{kind}')('shared'))['version'] == 'owner'
+    assert [scoped_descriptor(row)['version'] for row in getattr(user, f'list_{kind}s')()] == ['owner']
+
+
+# LLM: 只执行临时发布的无网络脚本；关闭平台沙箱，仅验证全局加载、Owner冻结执行及摘要不越权。
+# 函数用途: 验证真实Runner运行全局脚本后仍不修改共享元数据或代码。
+def test_global_script_runner_reads_without_global_summary_write(api, tmp_path):
+    from agent_py_agent.agent.workflows import ScriptRunner
+    save_scoped_asset(api, scoped_store(api, tmp_path, 'script'), 'script')
+    before = collection_snapshot(tmp_path / 'scripts')
+    home = tmp_path / 'owners/local/main'
+    user = scoped_store(api, home, 'script')
+    assert user.get_script('shared') is not None, '缺少全局读取入口'
+    result = ScriptRunner(home, use_sandbox=False).run_script('shared')
+    assert result.ok and result.output_data == {}
+    assert collection_snapshot(tmp_path / 'scripts') == before
+    assert not (home / 'scripts/shared').exists()
+
+
+# LLM: 真实替换临时全局锁叶模拟等待后改名及首次发布竞态；不得把失效锁下的读取当一致快照。
+# 函数用途: 验证全局锁缺失后出生或读取前后换身份时明确拒绝本次结果。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+@pytest.mark.parametrize('change', ['born_during_read', 'replaced_after_lock', 'replaced_during_read'])
+def test_global_lock_conflicts_fail_closed(api, tmp_path, monkeypatch, kind, change):
+    module = importlib.import_module('agent_py_agent.agent.assets')
+    save_scoped_asset(api, scoped_store(api, tmp_path, kind), kind)
+    lock = tmp_path / f'{kind}s/.assets.lock'
+    user = scoped_store(api, tmp_path / 'owners/local/main', kind)
+    if change == 'born_during_read':
+        lock.unlink()
+    original_read, original_flock = module._AssetStore._read, module._flock_descriptor
+
+    # LLM: 仅替换测试共享锁的真实inode，保留数据及其它锁不变；复现不能依赖随机sleep。
+    # 函数用途: 制造可确定观测到的全局锁身份变化。
+    def replace_lock():
+        replacement = lock.with_name('.replacement-lock')
+        replacement.write_text('')
+        replacement.replace(lock)
+
+    # LLM: 只拦全局只读视图的元数据读取，在结果返回前模拟新锁或替换，不替代生产解码。
+    # 函数用途: 稳定复现未持锁读取或持锁期间的锁叶变化。
+    def read_during_change(store, asset_id):
+        record = original_read(store, asset_id)
+        if getattr(store, '_read_only', False) and change != 'replaced_after_lock':
+            replace_lock()
+        return record
+
+    # LLM: 只拦只读锁的已取得时刻，模拟等待期间名字已换，原flock仍真实执行。
+    # 函数用途: 验证拿到旧锁FD后必须重新核对路径身份。
+    def lock_after_change(descriptor):
+        original_flock(descriptor)
+        if change == 'replaced_after_lock':
+            replace_lock()
+
+    monkeypatch.setattr(module._AssetStore, '_read', read_during_change)
+    monkeypatch.setattr(module, '_flock_descriptor', lock_after_change)
+    with pytest.raises(BlockingIOError, match='全局.*锁'):
+        getattr(user, f'get_{kind}')('shared')
+
+
+# LLM: 读取抛错也必须核锁；锁未变保留真实事务错误，锁出生或换身份则提供重试信号，不执行恢复写。
+# 函数用途: 复现独审发现的异常出口跳过锁复核问题。
+@pytest.mark.parametrize('kind', ['script', 'workflow'])
+@pytest.mark.parametrize('change', ['stable', 'born_during_read', 'replaced_during_read'])
+def test_global_lock_change_is_checked_when_read_raises(api, tmp_path, monkeypatch, kind, change):
+    module = importlib.import_module('agent_py_agent.agent.assets')
+    save_scoped_asset(api, scoped_store(api, tmp_path, kind), kind)
+    collection = tmp_path / f'{kind}s'
+    lock, journal = collection / '.assets.lock', collection / 'shared/asset-transaction.json'
+    if change == 'born_during_read':
+        lock.unlink()
+    original_read = module._AssetStore._read
+
+    # LLM: 准确在全局元数据读取前模拟锁及undo出生，随后仍走原_read抛错，不伪造异常类型。
+    # 函数用途: 触发需要后置锁复核区分的正在发布与残留事务。
+    def read_with_pending_transaction(store, asset_id):
+        if getattr(store, '_read_only', False):
+            if change != 'stable':
+                replacement = lock.with_name('.new-lock')
+                replacement.write_text('')
+                replacement.replace(lock)
+            journal.write_text('pending')
+        return original_read(store, asset_id)
+
+    monkeypatch.setattr(module._AssetStore, '_read', read_with_pending_transaction)
+    user = scoped_store(api, tmp_path / 'owners/local/main', kind)
+    expected = ValueError if change == 'stable' else BlockingIOError
+    with pytest.raises(expected, match='全局.*(?:锁|事务)'):
+        getattr(user, f'get_{kind}')('shared')
+    assert journal.read_text() == 'pending'

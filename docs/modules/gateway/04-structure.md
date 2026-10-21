@@ -1,6 +1,6 @@
-## 2026-10-21 插件宿主扩展接口门面（plugin_broker_api）
+## 2026-10-21 插件宿主扩展接口门面与定时工作流断点挂接（plugin_broker_api / tool_work）
 
-`gateway_parts/plugin_broker_api.py` 封装 `PluginBrokerService`，按冻结 `owner_id` / `owner_home` 隔离挂载 `assets.*`、`telemetry.*` 与 `execute.*` 主题，并与 `plugins/plugin_host_api.py`、`plugins/plugin_host_broker_topics.py` 对齐。
+`gateway_parts/plugin_broker_api.py` 封装 `PluginBrokerService`，按冻结 `owner_id` / `owner_home` 隔离挂载 `assets.*`、`telemetry.*` 与 `execute.*` 主题（含 `patched_step_output` / `updated_data_sources` 续跑参数），并与 `plugins/plugin_host_api.py`、`plugins/plugin_host_broker_topics.py` 对齐；`scheduler/tool_work.py::execute_scheduled_tool` 对 `workflows`/`scripts` 的 `paused_for_resume` / `needs_repair=True` 返回做结构化 `record_rule_result` 写入并在配置 `prompt` 时调用 `notify`。
 
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 

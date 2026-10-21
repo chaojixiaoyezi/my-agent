@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..assets.workflow_store import WorkflowStepSpec as AssetWorkflowStepSpec
+from ..common.log_redaction import redact_sensitive_value
 
+_BEARER_VALUE = re.compile(r'''(?i)(\bbearer\s+)(?!<redacted\b|\[redacted\])[^\s,;"'<>]+''')
 WORKFLOW_ON_ERROR_POLICIES = ('escalate_to_agent', 'fail', 'skip')
 StepStatus = Literal['pending', 'running', 'succeeded', 'skipped', 'failed',
                      'escalated_recovered', 'paused_for_resume']
@@ -112,6 +114,21 @@ class WorkflowRunRecord:
 # 函数用途: 将 dataclass 或 JSON 配置转成独立的普通数据。
 def payload(value):
     return json.loads(json.dumps(asdict(value) if is_dataclass(value) else value, allow_nan=False))
+
+
+# LLM: 在通用脱敏后补齐裸Bearer值遮蔽，保持字典键和数值类型不变。
+# 函数用途: 递归遮蔽对象或字符串中的独立Bearer凭据片段。
+def redact_bearer_values(value):
+    value = redact_sensitive_value(value)
+    if isinstance(value, str):
+        return _BEARER_VALUE.sub(r'\1<redacted>', value)
+    if isinstance(value, dict):
+        return {k: redact_bearer_values(v) for k, v in value.items()}
+    if isinstance(value, tuple):
+        return tuple(redact_bearer_values(v) for v in value)
+    if isinstance(value, list):
+        return [redact_bearer_values(v) for v in value]
+    return value
 
 
 # LLM: 资产和账本路径只接受单段稳定标识，不跟随 Owner 根以下的符号链接。

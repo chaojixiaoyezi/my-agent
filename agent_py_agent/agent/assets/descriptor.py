@@ -18,6 +18,7 @@ _TOKEN_METRICS = frozenset(('tokens', 'max_tokens', 'input_tokens', 'output_toke
 # 短sk-前缀也可能是locale或引用名；真实密钥形状由公共redactor统一识别。
 _RAW_SECRET = re.compile(r'(?i)(?:\bbearer\s+|(?:api_?key|token)\s*=|<redacted[^>]*>|\[redacted\])')
 _URL_CREDENTIAL = re.compile(r'(?i)://[^/?#\s]*:[^/?#\s]*@|[?&](?:api_?key|access_token|password|secret|token)=')
+_BEARER_VALUE = re.compile(r'''(?i)(\bbearer\s+)[^\s,;"'<>]+''')
 
 
 # LLM: 字段秘密判定沿统一脱敏口；camelCase只规范用于判定，不改公开键名，安全计数不丢失。
@@ -29,8 +30,8 @@ def _keep_field(key, value):
     return normalized != 'bearer' and redact_sensitive_value(None, field_name=normalized) is None
 
 
-# LLM: 递归沿统一脱敏口处理保留字符串；JSON类型/有限数验证仍严格，返回独立容器且不执行正文。
-# 函数用途: 过滤真实秘密字段并遮蔽普通说明里的命令、URL和HTTP凭据，保留数字预算。
+# LLM: 字符串先走统一脱敏口，再补独立Bearer值遮蔽；JSON类型/有限数仍严格，返回独立容器且不执行正文。
+# 函数用途: 过滤秘密字段及说明中的命令、URL、HTTP头和裸Bearer凭据，保留数字预算。
 def clean_json(value):
     if isinstance(value, dict):
         if any(not isinstance(key, str) for key in value):
@@ -38,7 +39,9 @@ def clean_json(value):
         return {key: clean_json(item) for key, item in value.items() if _keep_field(key, item)}
     if isinstance(value, (list, tuple)):
         return [clean_json(item) for item in value]
-    if value is None or type(value) in (str, int, bool):
+    if type(value) is str:
+        return _BEARER_VALUE.sub(r'\1<redacted>', redact_sensitive_value(value))
+    if value is None or type(value) in (int, bool):
         return redact_sensitive_value(value)
     if type(value) is float and math.isfinite(value):
         return value
@@ -195,8 +198,8 @@ class AssetRefs(_Record):
     skill_dir: str = ''
 
 
-# LLM: 摘要只表示累计观察，不替代运行账本；计数和耗时必须非负。
-# 类用途: 显示资产最近运行和连续失败摘要。
+# LLM: 摘要只表示累计观察，不替代运行账本；计数和耗时非负，错误自动脱敏，旧JSON缺省空错误。
+# 类用途: 显示资产最近运行、连续失败和安全错误摘要。
 @dataclass(frozen=True)
 class RuntimeSummary(_Record):
     last_run_at: str | None = None
@@ -204,6 +207,7 @@ class RuntimeSummary(_Record):
     last_duration_ms: float | None = None
     run_count: int = 0
     consecutive_failures: int = 0
+    last_error: str = ""
 
 
 # LLM: 标准提取Key是四类资产共同投影；不携带owner_home或授权，不写入任何状态。

@@ -12,7 +12,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from ..assets.workflow_store import WorkflowStore
-from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from .models import (
     WORKFLOW_ON_ERROR_POLICIES,
@@ -23,6 +22,7 @@ from .models import (
     safe_path,
     skill_sequence,
 )
+from .models import redact_bearer_values as redact_sensitive_value
 from .run_store import WorkflowRunStore
 from .script_runner import ScriptRunner, load_script, parse_script_output
 
@@ -134,7 +134,7 @@ class WorkflowEngine:
             output, error = parse_script_output(json.dumps(output, allow_nan=False), contract)
             if error:
                 raise ValueError(f'修复输出不符合脚本契约: {error}')
-        return replace(target, status='escalated_recovered', output_snapshot=output, needs_repair=False,
+        return replace(target, status='escalated_recovered', output_snapshot=redact_sensitive_value(output), needs_repair=False,
                        llm_involved=True, error_code='', error_message='', ended_at=time.time(),
                        escalation_result=redact_sensitive_value({**payload(target.escalation_result),
                            'recovered': True, 'repaired_via': 'patched_step_output'}))

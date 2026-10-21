@@ -18,6 +18,7 @@ from agent_py_agent.agent.common.nofollow_fs import (
 )
 
 from ..common.log_redaction import redact_sensitive_value
+from ..workflows.models import redact_bearer_values
 
 SCHEMA = "tool_call_telemetry.v1"
 PARTS = ("data", "telemetry")
@@ -34,7 +35,7 @@ def _sanitize(value: Any, depth: int = 0) -> Any:
     if isinstance(value, (list, tuple)):
         return [_sanitize(v, depth + 1) for v in value[:50]]
     if isinstance(value, str):
-        return redact_sensitive_value(value)[:200]
+        return redact_bearer_values(value)[:200]
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float) and math.isfinite(value):

@@ -25,7 +25,7 @@ from agent_py_agent.agent.observability.telemetry_ledger import (
     _stats,
 )
 
-from ..common.log_redaction import redact_sensitive_value
+from ..workflows.models import redact_bearer_values as redact_sensitive_value
 
 SCHEMA = "task_call_telemetry.v1"
 STATUSES = {"running", "succeeded", "failed", "paused", "cancelled"}

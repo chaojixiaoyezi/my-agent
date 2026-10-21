@@ -6,7 +6,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from ..common.log_redaction import redact_sensitive_value
+from ..workflows.models import redact_bearer_values
 
 READ_ACTIONS = frozenset(('assets.list', 'assets.get', 'assets.topology',
     'telemetry.tasks.list', 'telemetry.tasks.get', 'telemetry.workflows.runs.list',
@@ -27,7 +27,7 @@ def public_payload(value):
         value = [public_payload(item) for item in value]
     elif isinstance(value, Path):
         value = str(value)
-    return redact_sensitive_value(value)
+    return redact_bearer_values(value)
 
 
 # LLM: 仅平台管理员可在只读动作中选择规范 owner；路径必须与原身份后缀一致，禁止目录猜测或穿越。

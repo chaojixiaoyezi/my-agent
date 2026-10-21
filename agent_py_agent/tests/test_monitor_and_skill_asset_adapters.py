@@ -79,7 +79,7 @@ def test_scheduler_fields_override_stale_binding(tmp_path, schedule, expression)
     assert descriptor['schedule_spec']['expression'] == expression
     assert descriptor['schedule_spec']['enabled'] is False and descriptor['schedule_spec']['next_run_at'] == 2000
     assert descriptor['runtime_summary'] == {'last_run_at': '1970-01-01T00:16:40Z',
-        'last_status': 'failed', 'last_duration_ms': 42, 'run_count': 5, 'consecutive_failures': 2}
+        'last_status': 'failed', 'last_duration_ms': 42, 'run_count': 5, 'consecutive_failures': 2, 'last_error': ''}
     assert descriptor['owner_id'] == 'local/main' and descriptor['version'] == '3'
     assert descriptor['refs']['skills'] == ['analyse'] and json.dumps(job) == before
 
