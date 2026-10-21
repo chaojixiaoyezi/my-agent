@@ -2,6 +2,8 @@
 # 模块用途: 验证离线安装数据保留、更新服务维护、详细诊断和遗留进程清理边界。
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -9,8 +11,10 @@ import py_compile
 import signal
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -655,3 +659,140 @@ def test_installer_maintenance_pauses_real_supervisor_health_entry(update_instal
     assert supervisor.read_maintenance_lock(paths) is None
     assert supervisor._run_health_check(watcher, 2) == 0
     assert checked == ['gateway', 'adapter']
+
+
+# LLM: 合成运行时只供真实build.main编译和归档，不执行伪原生文件或安装入口，不读取当前安装。
+# 函数用途: 准备包含既有bwrap资源的最小发行构建目录。
+@pytest.fixture
+def c4_build_case(tmp_path, monkeypatch):
+    root, helpers, output = tmp_path / 'bundle', tmp_path / 'helpers', tmp_path / 'output'
+    package = root / 'runtime/lib/python3.11/site-packages/agent_py_agent'
+    for path in (root / 'runtime/bin', root / 'native/lib', package / 'vendor/bin', package / 'vendor/bubblewrap', package / 'config', helpers):
+        path.mkdir(parents=True, exist_ok=True)
+    (root / 'runtime/bin/python3').write_bytes(b'synthetic runtime')
+    (root / 'native/bwrap').write_bytes(b'synthetic bwrap')
+    (root / 'native/lib/libfixture.so').write_bytes(b'synthetic library')
+    (root / 'native/PROVENANCE.txt').write_text('synthetic provenance')
+    (package / '__init__.py').write_text('VALUE = 1\n')
+    for name in ('installer', 'configure'):
+        (helpers / f'{name}.py').write_text('VALUE = 1\n')
+    monkeypatch.setattr(sys, 'argv', ['build', '--bundle', str(root), '--helpers', str(helpers), '--output', str(output),
+        '--version', 'test.cli', '--base-commit', 'fixture', '--source-sha256', '0' * 64])
+    return SimpleNamespace(root=root, package=package, output=output)
+
+
+@pytest.mark.parametrize('source', ['native', 'wheel', 'both'])
+def test_c4_build_includes_cli_backend_and_lark_resources(c4_build_case, source):
+    case = c4_build_case
+    backend = case.package / 'vendor/bin/feishu-cli-host.linux-x86_64'
+    if source in {'wheel', 'both'}:
+        backend.write_bytes(b'wheel backend')
+        backend.chmod(0o600)
+    if source in {'native', 'both'}:
+        native = case.root / 'native/feishu-cli-host.linux-x86_64'
+        native.write_bytes(b'native backend')
+        native.chmod(0o600)
+        lark = case.root / 'native/lark_cli'
+        lark.mkdir()
+        (lark / 'release.json').write_text('{"version":"fixture"}')
+        old = case.package / 'vendor/lark_cli'
+        old.mkdir()
+        (old / 'existing.txt').write_text('preserved')
+    assert build.main() == 0
+    expected = b'wheel backend' if source == 'wheel' else b'native backend'
+    assert backend.read_bytes() == expected and backend.stat().st_mode & 0o777 == 0o755
+    relative = backend.relative_to(case.root).as_posix()
+    manifest = json.loads((case.root / 'release.json').read_text())
+    assert manifest['files'][relative]['sha256'] == hashlib.sha256(expected).hexdigest()
+    with tarfile.open(case.output / 'my-agent-test.cli-linux-x86_64.tar.gz') as archive:
+        member = archive.getmember('bundle/' + relative)
+        assert member.mode & 0o777 == 0o755 and archive.extractfile(member).read() == expected
+        if source != 'wheel':
+            lark_member = 'bundle/' + (case.package / 'vendor/lark_cli/release.json').relative_to(case.root).as_posix()
+            assert archive.extractfile(lark_member).read() == b'{"version":"fixture"}'
+            assert (case.package / 'vendor/lark_cli/existing.txt').read_text() == 'preserved'
+    assert (case.output / 'my-agent-test.cli-linux-x86_64.run').stat().st_mode & 0o777 == 0o755
+
+
+def test_c4_build_refuses_missing_cli_backend_before_publishing(c4_build_case):
+    case = c4_build_case
+    with pytest.raises(ValueError, match='发行包缺少随包飞书 CLI 后端: vendor/bin/feishu-cli-host.linux-x86_64'):
+        build.main()
+    assert not case.output.exists()
+    assert (case.package / '__init__.py').is_file()
+
+
+# LLM: 用合成proc及真实可关闭文件FD代替进程句柄；裸PID信号即失败，所有native/syscall发送由各例替换。
+# 函数用途: 追踪发信号前的身份重核及句柄关闭，不触及真实进程。
+@pytest.fixture
+def c4_signal_case(fake_install_proc, monkeypatch):
+    case = fake_install_proc
+    _proc_entry(case.proc, 703, case.executable, argv=['python3'])
+    case.identity, case.opened = installer._process_identity(703), []
+    original_open = installer.os.pidfd_open
+
+    # LLM: 捕获真实临时FD，调用后用fstat验证已关闭；不向内核申请真实进程pidfd。
+    # 函数用途: 记录合成句柄打开情况。
+    def opened(pid):
+        descriptor = original_open(pid)
+        case.opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(installer.os, 'pidfd_open', opened)
+    monkeypatch.setattr(installer.os, 'kill', Mock(side_effect=AssertionError('不能回落裸PID信号')))
+    return case
+
+
+def test_c4_pidfd_native_signal_is_preferred(c4_signal_case, monkeypatch):
+    case = c4_signal_case
+    sender, loader = Mock(), Mock(side_effect=AssertionError('native接口存在时不能调用syscall'))
+    monkeypatch.setattr(signal, 'pidfd_send_signal', sender, raising=False)
+    monkeypatch.setattr(ctypes, 'CDLL', loader)
+    installer._signal_process(703, case.identity, signal.SIGTERM)
+    sender.assert_called_once_with(case.opened[0], signal.SIGTERM)
+    loader.assert_not_called()
+    with pytest.raises(OSError):
+        os.fstat(case.opened[0])
+
+
+@pytest.mark.parametrize('machine', ['x86_64', 'amd64'])
+@pytest.mark.parametrize('error', [0, errno.ESRCH, errno.EPERM])
+def test_c4_pidfd_syscall_fallback_and_errno(c4_signal_case, monkeypatch, machine, error):
+    case = c4_signal_case
+    monkeypatch.delattr(signal, 'pidfd_send_signal', raising=False)
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setattr(os, 'uname', lambda: SimpleNamespace(machine=machine))
+    syscall = Mock(return_value=-1 if error else 0)
+    loader = Mock(return_value=SimpleNamespace(syscall=syscall))
+    get_errno = Mock(return_value=error)
+    monkeypatch.setattr(ctypes, 'CDLL', loader)
+    monkeypatch.setattr(ctypes, 'get_errno', get_errno)
+    if error == errno.EPERM:
+        with pytest.raises(OSError) as caught:
+            installer._signal_process(703, case.identity, signal.SIGTERM)
+        assert caught.value.errno == error
+    else:
+        installer._signal_process(703, case.identity, signal.SIGTERM)
+    loader.assert_called_once_with(None, use_errno=True)
+    syscall.assert_called_once_with(424, case.opened[0], int(signal.SIGTERM), None, 0)
+    assert get_errno.call_count == bool(error)
+    installer.os.kill.assert_not_called()
+    with pytest.raises(OSError):
+        os.fstat(case.opened[0])
+
+
+@pytest.mark.parametrize('platform,machine', [('darwin', 'x86_64'), ('linux', 'aarch64')])
+def test_c4_pidfd_unsupported_fallback_closes_handle(c4_signal_case, monkeypatch, platform, machine):
+    case = c4_signal_case
+    monkeypatch.delattr(signal, 'pidfd_send_signal', raising=False)
+    monkeypatch.setattr(sys, 'platform', platform)
+    monkeypatch.setattr(os, 'uname', lambda: SimpleNamespace(machine=machine))
+    loader = Mock(side_effect=AssertionError('不能在未支持架构执行424'))
+    monkeypatch.setattr(ctypes, 'CDLL', loader)
+    with pytest.raises(ValueError, match='pidfd'):
+        installer._signal_process(703, case.identity, signal.SIGTERM)
+    assert len(case.opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(case.opened[0])
+    loader.assert_not_called()
+    installer.os.kill.assert_not_called()

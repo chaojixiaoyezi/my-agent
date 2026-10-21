@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -409,3 +410,73 @@ def test_status_uses_latest_typed_state_not_stale_start(monkeypatch):
     assert "等待模型响应" in control_service._recent_progress(None, "request")
     rows.append({"kind": "model_delta", "text": "secret not read"})
     assert "模型已返回内容" in control_service._recent_progress(None, "request")
+
+
+# LLM: 使用真实pending/dispatch和DeliveryService，仅provider及时间为替身，不向飞书外发。
+# 函数用途: 为增量页脚与裁剪回归提供同一条可编辑进度消息。
+@pytest.fixture
+def c4_stream_case(tmp_path, monkeypatch):
+    from agent_py_agent.agent.adapter.progress_draft import send_gateway_draft
+
+    case = SimpleNamespace(clock=1000.0, batch=GatewayProgressBatch((), 0), final=None, finals=[])
+    monkeypatch.setattr('agent_py_agent.agent.adapter.progress_draft.time.time', lambda: case.clock)
+    case.store, case.provider = GatewayReplyDeliveryStore(tmp_path), Adapter()
+    registry = ChannelAdapterRegistry()
+    registry.register_adapter('feishu', case.provider, capabilities=ChannelCapabilities(edit_progress=True))
+    service = DeliveryService(registry)
+    case.worker = GatewayReplyDeliveryWorker(case.store, poll_response=lambda _: case.final,
+        deliver_response=lambda _, text: case.finals.append(text) or True,
+        poll_progress=lambda _: case.batch,
+        deliver_progress=lambda row, text: send_gateway_draft(service, row, text))
+    case.worker.enqueue(PendingGatewayReply(request_id='c4-preview', channel='feishu', user_id='ou_fixture', message_id='om_in'))
+    return case
+
+
+def test_c4_append_progress_keeps_only_latest_timestamp_in_same_message(c4_stream_case):
+    case = c4_stream_case
+    for cursor in range(1, 4):
+        case.batch = GatewayProgressBatch((f'完整步骤 {cursor}',), cursor, 'stream', False, 1000,
+            f'2026-10-21T10:20:0{cursor}+08:00')
+        case.worker.run_once()
+        content = case.store.pending()[0].progress_draft['content']
+        assert content == '\n'.join(f'完整步骤 {step}' for step in range(1, cursor + 1)) + f'\n更新于 10:20:0{cursor}'
+        assert content.count('更新于 ') == 1
+        assert case.store.pending()[0].progress_cursor == cursor
+        case.clock += 2
+    assert len(case.provider.created) == 1
+    assert [message for message, _ in case.provider.edits] == ['om_preview', 'om_preview']
+
+
+@pytest.mark.parametrize('timestamp', ['', '2026-10-21T10:20:30+08:00'])
+@pytest.mark.parametrize('content,budget,expected', [
+    ('discarded partial line\n完整进度甲\n完整进度乙', len('partial line\n完整进度甲\n完整进度乙'), '完整进度甲\n完整进度乙'),
+    ('单行很长但仍应保留末尾', 5, '应保留末尾'),
+    ('完整第一行\n完整第二行', 100, '完整第一行\n完整第二行'),
+    ('完整步骤\n  ', 4, '完整步骤'),
+])
+def test_c4_stream_trims_partial_lines_not_single_line_or_full_content(c4_stream_case, timestamp, content, budget, expected):
+    case = c4_stream_case
+    footer = '\n更新于 10:20:30' if timestamp else ''
+    limit = budget + len(footer)
+    case.batch = GatewayProgressBatch((content,), 1, 'stream', True, limit, timestamp)
+    case.worker.run_once()
+    shown = case.store.pending()[0].progress_draft['content']
+    assert shown == expected + footer and len(shown) <= limit
+    assert next(iter(case.provider.created.values()))[2] == shown
+    case.final = '未经预览裁剪的完整结果' * 100
+    case.clock += 2
+    case.worker.run_once()
+    assert case.finals == [case.final] and not case.store.pending()
+
+
+@pytest.mark.parametrize('limit', [1, 12, 13, 14])
+def test_c4_timestamp_budget_never_leaks_unbounded_body(c4_stream_case, limit):
+    case = c4_stream_case
+    footer = '\n更新于 10:20:30'
+    content = '很长的单行正文' * 100
+    case.batch = GatewayProgressBatch((content,), 1, 'stream', True, limit, '2026-10-21T10:20:30+08:00')
+    case.worker.run_once()
+    shown = case.store.pending()[0].progress_draft['content']
+    budget = max(0, limit - len(footer))
+    assert shown == (content[-budget:] if budget else '') + footer[-limit:]
+    assert len(shown) == limit

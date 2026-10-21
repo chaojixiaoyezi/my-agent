@@ -1,8 +1,10 @@
-# LLM: 仅管理显式prefix的安装与维护；进程清理限定同uid、无tty及已核出生身份，不覆盖数据或改动其它安装。
+# LLM: 仅管理显式prefix；清理限同uid、无tty和已核出生身份，Linux x86_64可走pidfd系统调用，绝不裸PID发信号。
 # 模块用途: 离线校验和原子升级，先暂停守望与排空服务，再精准清理本安装遗留脚本，最后恢复原服务。
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -154,18 +156,35 @@ def _orphan_targets(prefix, rows):
     return targets
 
 
-# LLM: 仅用pidfd绑定进程并重核身份后发送，缺安全句柄拒绝自动清理；不回落存在复用竞态的裸PID信号。
-# 函数用途: 给原一代进程发TERM或KILL，退出/换代无信号，旧平台保留诊断而不误杀。
+# LLM: 只消费调用方已打开且核验身份的pidfd；优先Python接口，仅Linux x86_64/amd64允许424，不使用裸PID。
+# 函数用途: 给安全进程句柄发送信号，兼容便携Python缺少接口，并保留内核退出及权限错误。
+def _send_pidfd_signal(descriptor: int, sig: int) -> None:
+    if hasattr(signal, 'pidfd_send_signal'):
+        signal.pidfd_send_signal(descriptor, sig)
+        return
+    if sys.platform != 'linux' or os.uname().machine not in ('x86_64', 'amd64'):
+        raise ValueError('缺少安全pidfd信号接口，请手动停止后重试')
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    if syscall(424, int(descriptor), int(sig), None, 0) < 0:
+        error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            raise ProcessLookupError(error, os.strerror(error))
+        raise OSError(error, os.strerror(error))
+
+
+# LLM: 必须有pidfd_open且打开前后身份一致才发送；发送器可用受限syscall，finally关FD，绝不裸PID发信号。
+# 函数用途: 给原一代进程发TERM或KILL，退出/换代无信号，缺安全句柄时拒绝自动清理。
 def _signal_process(pid, identity, sig):
     if _process_identity(pid) != identity:
         return
     try:
-        if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+        if not hasattr(os, 'pidfd_open'):
             raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')
         descriptor = os.pidfd_open(pid)
         try:
             if _process_identity(pid) == identity:
-                signal.pidfd_send_signal(descriptor, sig)
+                _send_pidfd_signal(descriptor, sig)
         finally:
             os.close(descriptor)
     except ProcessLookupError:

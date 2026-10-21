@@ -1,4 +1,4 @@
-# LLM: 在 Ubuntu 20.04 构建环境中处理原 production wheel；不打包 Git 工作树、测试、运行数据或凭据。
+# LLM: 在 Ubuntu 20.04 整理原production wheel和native资源；飞书CLI后端缺失则拒绝出包，不打包工作树、运行数据或凭据。
 # 归档时间归零，避免构建机和内网目标机时钟不同产生大量安装警告；不改变文件内容清单。
 # 模块用途: 将已安装的自包含 Python 运行时整理成可校验、可重复升级的无业务源码离线包。
 from __future__ import annotations
@@ -83,8 +83,27 @@ __MY_AGENT_PAYLOAD__
     return header.replace("@LINE@", str(header.count("\n") + 1)).replace("@DIGEST@", digest).encode()
 
 
-# LLM: 只接收一次冻结后的 payload，已安装 wheel 由原发行边界校验；未来重打必须使用新 version。
-# 函数用途: 保留运行资源，编译业务模块，写构建清单和离线安装器。
+# LLM: main在编译和归档前调用；只改发行副本，native飞书后端优先，保留wheel已有资源，缺后端硬拒绝。
+# 函数用途: 复制bwrap、飞书CLI后端及lark资源，统一后端执行权限，避免发布残包。
+def copy_native_assets(root: Path, package: Path) -> None:
+    # 保持原vendor发现入口，子进程即使不继承PATH也能找到Ubuntu兼容版本。
+    shutil.copyfile(root / "native/bwrap", package / "vendor/bin/bwrap.linux-x86_64")
+    (package / "vendor/bin/bwrap.linux-x86_64").chmod(0o755)
+    shutil.copytree(root / "native/lib", package / "vendor/bin/lib", dirs_exist_ok=True)
+    shutil.copyfile(root / "native/PROVENANCE.txt", package / "vendor/bubblewrap/UBUNTU_BUILD.txt")
+    backend = package / "vendor/bin/feishu-cli-host.linux-x86_64"
+    if (root / "native/feishu-cli-host.linux-x86_64").is_file():
+        shutil.copyfile(root / "native/feishu-cli-host.linux-x86_64", backend)
+    if backend.is_file():
+        backend.chmod(0o755)
+    if (root / "native/lark_cli").is_dir():
+        shutil.copytree(root / "native/lark_cli", package / "vendor/lark_cli", dirs_exist_ok=True)
+    if not backend.is_file():
+        raise ValueError("发行包缺少随包飞书 CLI 后端: vendor/bin/feishu-cli-host.linux-x86_64")
+
+
+# LLM: 只接收一次冻结后的payload；先核原生后端完整，再编译及归档，未来重打必须使用新version。
+# 函数用途: 校验保留运行资源，编译业务模块，写构建清单和离线安装器。
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle", type=Path, required=True)
@@ -97,11 +116,7 @@ def main() -> int:
     root = args.bundle.resolve()
     package = root / "runtime/lib/python3.11/site-packages/agent_py_agent"
     relocate_console_scripts(root / "runtime")
-    # 保持原 vendor 发现入口，子进程即使不继承 PATH 也能找到 Ubuntu 兼容版本。
-    shutil.copyfile(root / "native/bwrap", package / "vendor/bin/bwrap.linux-x86_64")
-    (package / "vendor/bin/bwrap.linux-x86_64").chmod(0o755)
-    shutil.copytree(root / "native/lib", package / "vendor/bin/lib", dirs_exist_ok=True)
-    shutil.copyfile(root / "native/PROVENANCE.txt", package / "vendor/bubblewrap/UBUNTU_BUILD.txt")
+    copy_native_assets(root, package)
     snapshot = {"schema": "my-agent.parameter-readers.v1", "readers": field_readers()}
     (package / "config/parameter_readers.json").write_text(json.dumps(snapshot, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     count = 0

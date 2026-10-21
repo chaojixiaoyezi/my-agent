@@ -1,7 +1,8 @@
-# LLM: 单条进度的内容、ID 和游标只存在原 PendingGatewayReply；不创建第二份队列或账本，错误不能吞最终答复。
+# LLM: 单条进度内容、ID和游标只存在原PendingGatewayReply；新批次去旧页脚及裁剪残行，冻结外发重放不改，错误不能吞最终答复。
 # 模块用途: 合并流式进度批次，并沿原 claim/dispatch/CAS 保存可恢复的编辑消息身份。
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, replace
 
@@ -24,8 +25,8 @@ class GatewayProgressBatch:
         yield self.next_cursor
 
 
-# LLM: mode/ID 来自原记录/已授权批次；展示上限读取原 worker 配置，已冻结外发重放不改正文，节流不改变 final 或内部全文。
-# 函数用途: 合并并发送一次进度，持久化失败沿原 dispatch 恢复，不重新创建另一条预览。
+# LLM: mode/ID沿原记录；新批次先脱敏再在页脚预算内按完整行裁剪，单行保留尾部语义；冻结dispatch与final全文不改。
+# 函数用途: 去除增量旧时间戳并合并发送一条有界进度，失败沿原dispatch恢复，不另建预览。
 def deliver_stream_progress(worker: object, record: object, batch: GatewayProgressBatch):
     draft = dict(record.progress_draft)
     if draft.get("disabled"):
@@ -42,6 +43,8 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
         if not batch.messages:
             return worker._commit_progress(record, batch.next_cursor) if batch.next_cursor != record.progress_cursor else record
         prefix = "" if batch.replace_content else str(draft.get("content") or "")
+        if not batch.replace_content:
+            prefix = re.sub(r"(?:\n|^)更新于 \d{2}:\d{2}:\d{2}\s*$", "", prefix)
         limit = batch.preview_max_chars if batch.preview_max_chars is not None else worker.stream_preview_max_chars
         from datetime import datetime
 
@@ -53,7 +56,13 @@ def deliver_stream_progress(worker: object, record: object, batch: GatewayProgre
 
         content = redact_sensitive_text((prefix + "\n" + "\n".join(batch.messages)).strip(),
             redacted_marker="[REDACTED]", redact_assignment_labels=True)
-        text = (content[-max(0, limit - len(footer)):] if limit > len(footer) else "") + footer[-limit:]
+        budget = max(0, limit - len(footer))
+        tail = content[-budget:] if budget else ""
+        if len(content) > budget and "\n" in tail:
+            complete_lines = tail[tail.find("\n") + 1:]
+            if complete_lines.strip():
+                tail = complete_lines
+        text = tail + footer[-limit:]
         next_cursor = batch.next_cursor
         draft.update(mode="stream", content=text)
         updated = replace(record, progress_draft=draft)
