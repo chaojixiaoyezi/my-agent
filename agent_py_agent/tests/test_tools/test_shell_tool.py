@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -1519,3 +1520,328 @@ def test_shell_tool_model_spec_has_run_command(shell_tool: ShellTool) -> None:
     assert "command" in shell_tool.model_spec.parameter_descriptions
     assert "timeout" in shell_tool.model_spec.parameter_descriptions
     assert "working_dir" in shell_tool.model_spec.parameter_descriptions
+
+
+# LLM: Build real registered bytes under the test root; callers exercise the production journal.
+# 函数用途: 创建多产物工作区，供性能与恢复测试共享。
+def _shell_perf_case(tmp_path: Path, count: int = 4):
+    from agent_py_agent.agent.artifacts.registry import ArtifactRegistration, register_artifact
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for index in range(count):
+        path = workspace / f"report-{index}.custom"
+        path.write_text(f"before-{index}", encoding="utf-8")
+        register_artifact(ArtifactRegistration(
+            workspace_root=workspace, path=path, artifact_id=f"artifact-{index}",
+            kind="custom", status="ready",
+        ))
+    return workspace, tmp_path / "backups"
+
+
+# LLM: The no-op hot path must perform one ledger scan and two durable item transitions, independent of N.
+# 函数用途: 验证未变化产物不写校验副本，且账本读取和清单写入次数固定。
+@pytest.mark.parametrize("count", [1, 8, 32])
+def test_shell_perf_unchanged_batch_io(tmp_path: Path, count: int) -> None:
+    from agent_py_agent.agent.artifacts import registry
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path, count)
+    snapshots = protection.snapshot_ready_artifacts(workspace, store)
+    key = protection.mark_shell_artifact_operation_executing(store, snapshots)
+    protection.release_shell_artifact_operation(key)
+    with (
+        patch.object(registry, "read_text_beneath", wraps=registry.read_text_beneath) as reads,
+        patch.object(protection, "write_operation_manifest", wraps=protection.write_operation_manifest) as writes,
+        patch.object(protection, "_write_validation_copy", wraps=protection._write_validation_copy) as copies,
+    ):
+        summary = protection.reconcile_shell_artifact_operation_items(
+            workspace, snapshots, backup_store_root=store,
+        )
+    assert len(summary["unchanged"]) == count
+    assert not summary["changed"] and not summary["cleanup_deferred"]
+    assert not list(store.rglob("*.blob"))
+    assert copies.call_count == 0
+    assert reads.call_count == 1
+    assert writes.call_count == 2
+    manifest = protection.read_operation_manifest(store, key)
+    assert {item["state"] for item in manifest["items"]} == {"unchanged"}
+
+
+# LLM: Each blob still fsyncs its bytes; only repeated directory initialization and directory sync are coalesced.
+# 函数用途: 验证批量前像只初始化三层目录一次，并在发布清单前统一同步。
+def test_shell_perf_snapshot_directory_work_is_constant(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path)
+    with (
+        patch.object(protection, "_chmod_private", wraps=protection._chmod_private) as chmod,
+        patch.object(protection, "_fsync_directory", wraps=protection._fsync_directory) as sync,
+    ):
+        snapshots = protection.snapshot_ready_artifacts(workspace, store)
+    assert len(snapshots) == 4
+    assert sync.call_count == 1
+    assert sum(call.kwargs["directory"] for call in chmod.call_args_list) == 3
+    for snapshot in snapshots:
+        backup = protection.resolve_shell_artifact_backup(store, snapshot.backup_ref)
+        assert hashlib.sha256(backup.read_bytes()).hexdigest() == snapshot.sha256
+        if os.name == "posix":
+            assert backup.stat().st_mode & 0o777 == 0o600
+    assert protection.read_operation_manifest(store, snapshots[0].operation_key)["state"] == "prepared"
+
+
+# LLM: Empty and unchanged postimages need no validator copy; changed nonempty bytes still use the real validator.
+# 函数用途: 逐类核对哈希快路与深度校验分路，不牺牲变更登记的哈希和大小。
+@pytest.mark.parametrize("content,status,copies", [("before-0", "unchanged", 0), ("", "invalid_after_shell", 0), ("new", "changed_ready", 1)])
+def test_shell_perf_postcheck_copy_only_for_changed_nonempty(tmp_path, content, status, copies):
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path, 1)
+    snapshot = protection.snapshot_ready_artifacts(workspace, store)[0]
+    path = Path(snapshot.path)
+    path.write_text(content, encoding="utf-8")
+    with patch.object(protection, "_write_validation_copy", wraps=protection._write_validation_copy) as copy:
+        observation = protection._post_shell_status(path, workspace, snapshot, (workspace,), store)
+    assert observation.change_status == status
+    assert observation.sha256 == hashlib.sha256(content.encode()).hexdigest()
+    assert observation.size_bytes == len(content.encode())
+    assert copy.call_count == copies
+    assert not list(store.rglob(".postcheck-*.blob"))
+
+
+# LLM: Historical matches require exact operation/ref pairs and a single no-follow read, not latest-row lookup.
+# 函数用途: 核对批量查询的历史命中、引用隔离、缺失项与读取次数。
+def test_shell_perf_registry_batch_matches_history_once(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import registry
+
+    query = getattr(registry, "artifact_operation_recorded_ids", None)
+    assert callable(query)
+    path = registry.registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    rows = [
+        {"artifact_id": "a", "metadata": {"protection_operation_id": "op", "backup_ref": "ref-a"}},
+        {"artifact_id": "a", "metadata": {}},
+        {"artifact_id": "b", "metadata": {"protection_operation_id": "other", "backup_ref": "ref-b"}},
+        {"artifact_id": "c", "metadata": {"protection_operation_id": "op", "backup_ref": "wrong"}},
+        {"artifact_id": "d", "metadata": {"protection_operation_id": "op", "backup_ref": "ref-d"}},
+    ]
+    path.write_text("\n" + "\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    with patch.object(registry, "read_text_beneath", wraps=registry.read_text_beneath) as reads:
+        assert query(tmp_path, operation_key="op", expected_backup_refs={
+            "a": "ref-a", "b": "ref-b", "c": "ref-c", "d": "ref-d", "missing": "ref-m",
+        }) == {"a", "d"}
+    assert reads.call_count == 1
+
+
+# LLM: Registry corruption must fail closed even when an earlier row matched; no-follow failures remain errors.
+# 函数用途: 防止批量查询把坏账本当作未落账而触发重复追加或错误清理。
+@pytest.mark.parametrize("tail", ["{broken", "[]", "null"])
+def test_shell_perf_registry_batch_rejects_corruption(tmp_path: Path, tail: str) -> None:
+    from agent_py_agent.agent.artifacts import registry
+
+    query = getattr(registry, "artifact_operation_recorded_ids", None)
+    assert callable(query)
+    path = registry.registry_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    row = {"artifact_id": "a", "metadata": {"protection_operation_id": "op", "backup_ref": "ref"}}
+    path.write_text(json.dumps(row) + "\n" + tail, encoding="utf-8")
+    with pytest.raises(OSError, match="artifact registry contains"):
+        query(tmp_path, operation_key="op", expected_backup_refs={"a": "ref"})
+
+
+# LLM: Release only the process marker, keeping the real executing journal for restart tests.
+# 函数用途: 建立可供重启复核的真实前像和执行阶段清单。
+def _shell_perf_executing(tmp_path: Path):
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path)
+    snapshots = protection.snapshot_ready_artifacts(workspace, store)
+    key = protection.mark_shell_artifact_operation_executing(store, snapshots)
+    protection.release_shell_artifact_operation(key)
+    return workspace, store, snapshots, key
+
+
+# LLM: Inject loss around both durable batch barriers and midway through deletion; replay must not reclassify observed bytes.
+# 函数用途: 验证批量阶段提交前后及清理中断的恢复语义。
+@pytest.mark.parametrize("phase", ["observe_before", "observe_after", "cleanup_mid", "finish_before"])
+def test_shell_perf_batch_crash_replay(tmp_path, monkeypatch, phase):
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store, snapshots, key = _shell_perf_executing(tmp_path)
+    real_write = protection.write_operation_manifest
+    real_discard = protection._discard_backup
+    writes = 0
+
+    # LLM: Fail at the selected persistence boundary without falsifying the on-disk manifest.
+    # 函数用途: 模拟阶段写入前失败或写入成功后回执丢失。
+    def fail_write(root, operation_key, manifest):
+        nonlocal writes
+        writes += 1
+        if (phase == "observe_before" and writes == 1) or (phase == "finish_before" and writes == 2):
+            raise RuntimeError("crash")
+        real_write(root, operation_key, manifest)
+        if phase == "observe_after" and writes == 1:
+            raise RuntimeError("crash")
+
+    # LLM: Every deletion must be preceded by a durable observation of every unchanged item.
+    # 函数用途: 删除前读回清单核对屏障，并可在首个 blob 删除后模拟崩溃。
+    def checked_discard(root, ref):
+        durable = protection.read_operation_manifest(root, key)
+        assert {item["state"] for item in durable["items"]} == {"unchanged_observed"}
+        real_discard(root, ref)
+        if phase == "cleanup_mid":
+            raise RuntimeError("crash")
+
+    with monkeypatch.context() as faults:
+        faults.setattr(protection, "write_operation_manifest", fail_write)
+        faults.setattr(protection, "_discard_backup", checked_discard)
+        with pytest.raises(RuntimeError, match="crash"):
+            protection.reconcile_shell_artifact_operation_items(workspace, snapshots, backup_store_root=store)
+    durable = protection.read_operation_manifest(store, key)
+    expected_state = "prepared" if phase == "observe_before" else "unchanged_observed"
+    assert {item["state"] for item in durable["items"]} == {expected_state}
+    assert len(list(store.rglob("*.blob"))) == {"observe_before": 4, "observe_after": 4, "cleanup_mid": 3, "finish_before": 0}[phase]
+    with patch.object(protection, "_post_shell_status", wraps=protection._post_shell_status) as observations:
+        summary = protection.reconcile_shell_artifact_operation_items(workspace, snapshots, backup_store_root=store)
+    assert observations.call_count == (4 if phase == "observe_before" else 0)
+    assert len(summary["unchanged"]) == 4
+    assert not list(store.rglob("*.blob"))
+    assert {item["state"] for item in protection.read_operation_manifest(store, key)["items"]} == {"unchanged"}
+
+
+# LLM: Cleanup failures are durable debt, not lost observations or new registry appends.
+# 函数用途: 验证部分 blob 删除失败时保存债务，重试只清理失败项。
+def test_shell_perf_batch_cleanup_debt(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store, snapshots, key = _shell_perf_executing(tmp_path)
+    real_discard = protection._discard_backup
+    failed_ref = snapshots[1].backup_ref
+
+    # LLM: Ref-specific injected failure leaves the actual preimage untouched.
+    # 函数用途: 模拟一份备份忙碌，其他备份正常清理。
+    def busy(root, ref):
+        if ref == failed_ref:
+            raise OSError("busy")
+        real_discard(root, ref)
+
+    with patch.object(protection, "_discard_backup", side_effect=busy):
+        summary = protection.reconcile_shell_artifact_operation_items(workspace, snapshots, backup_store_root=store)
+    assert summary["cleanup_deferred"] == [failed_ref]
+    assert len(list(store.rglob("*.blob"))) == 1
+    assert protection.read_operation_manifest(store, key)["items"][1]["state"] == "cleanup_pending"
+    with (
+        patch.object(protection, "_post_shell_status", side_effect=AssertionError("must not reobserve")),
+        patch.object(protection, "write_operation_manifest", wraps=protection.write_operation_manifest) as writes,
+    ):
+        summary = protection.reconcile_shell_artifact_operation_items(workspace, snapshots, backup_store_root=store)
+    assert len(summary["unchanged"]) == 4 and not summary["cleanup_deferred"]
+    assert writes.call_count == 1
+    assert not list(store.rglob("*.blob"))
+
+
+# LLM: A durable changed-row append with a lost acknowledgment must not be repeated after restart.
+# 函数用途: 混合批次中核对变更落账回执丢失，确保恢复不重复追加或删除变更前像。
+def test_shell_perf_mixed_batch_lost_append_ack(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import registry
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store, snapshots, key = _shell_perf_executing(tmp_path)
+    Path(snapshots[1].path).write_text("changed", encoding="utf-8")
+    real_append = protection.register_observed_artifact
+
+    # LLM: Persist the real registry row before losing its acknowledgment.
+    # 函数用途: 模拟账本写成但调用方收到异常。
+    def lost_ack(*args, **kwargs):
+        real_append(*args, **kwargs)
+        raise OSError("lost acknowledgment")
+
+    with patch.object(protection, "register_observed_artifact", side_effect=lost_ack):
+        with pytest.raises(OSError, match="lost acknowledgment"):
+            protection.reconcile_shell_artifact_operation_items(workspace, snapshots, backup_store_root=store)
+    before = registry.registry_path(workspace).read_bytes()
+    assert len(list(store.rglob("*.blob"))) == 4
+    with patch.object(protection, "register_observed_artifact", side_effect=AssertionError("duplicate append")):
+        summary = protection.reconcile_shell_artifact_operation_items(workspace, snapshots, backup_store_root=store)
+    assert registry.registry_path(workspace).read_bytes() == before
+    assert len(summary["changed"]) == 1 and len(summary["unchanged"]) == 3
+    assert summary["changed"][0]["change_status"] == "recovered_committed_record"
+    assert len(list(store.rglob("*.blob"))) == 1
+    assert protection.resolve_shell_artifact_backup(store, snapshots[1].backup_ref).read_text() == "before-1"
+    assert protection.read_operation_manifest(store, key)["items"][1]["state"] == "registered"
+
+
+# LLM: The fast hash and second copy are separate observations; registry facts must describe validated copy bytes.
+# 函数用途: 验证两次读取之间发生修改时不混用第一次哈希与第二次副本。
+@pytest.mark.parametrize("second", ["another-version", "", "before-0"])
+def test_shell_perf_copy_identity_after_hash(tmp_path, second):
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path, 1)
+    snapshot = protection.snapshot_ready_artifacts(workspace, store)[0]
+    path = Path(snapshot.path)
+    path.write_text("first-change", encoding="utf-8")
+    real_copy = protection._write_validation_copy
+
+    # LLM: Mutate before the copy starts; the copier still enforces stability during its read.
+    # 函数用途: 模拟哈希之后、校验副本读取之前发生的完整版本替换。
+    def change_then_copy(*args, **kwargs):
+        path.write_text(second, encoding="utf-8")
+        return real_copy(*args, **kwargs)
+
+    with patch.object(protection, "_write_validation_copy", side_effect=change_then_copy):
+        observation = protection._post_shell_status(path, workspace, snapshot, (workspace,), store)
+    assert observation.sha256 == hashlib.sha256(second.encode()).hexdigest()
+    assert observation.size_bytes == len(second.encode())
+    assert observation.change_status == {"": "invalid_after_shell", "before-0": "unchanged"}.get(second, "changed_ready")
+    assert not list(store.rglob(".postcheck-*.blob"))
+
+
+# LLM: Directory-sync failure must happen before manifest publication and before command launch.
+# 函数用途: 验证批量同步失败时清理所有已复制前像，不发布可执行清单。
+def test_shell_perf_snapshot_sync_failure_rolls_back(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path)
+    with (
+        patch.object(protection, "_fsync_directory", side_effect=OSError("sync failed")),
+        patch.object(protection, "_write_shell_operation_state", wraps=protection._write_shell_operation_state) as publish,
+    ):
+        with pytest.raises(OSError, match="sync failed"):
+            protection.snapshot_ready_artifacts(workspace, store)
+    assert publish.call_count == 0
+    assert not list(store.rglob("*.blob")) and not list(store.rglob("operation.json"))
+
+
+# LLM: Default standalone backups retain directory initialization and fsync, including migration callers.
+# 函数用途: 核对新增可选参数没有改变单份备份的默认耐久行为。
+def test_shell_perf_standalone_backup_default_sync(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import shell_protection as protection
+
+    workspace, store = _shell_perf_case(tmp_path, 1)
+    opened = protection._open_regular_source(workspace / "report-0.custom", (workspace,))
+    try:
+        with patch.object(protection, "_fsync_directory", wraps=protection._fsync_directory) as sync:
+            backup, digest, size = protection._write_atomic_backup(opened, store / "v1" / "op", artifact_id="a")
+    finally:
+        opened.close()
+    assert sync.call_count == 1
+    assert backup.read_bytes() == b"before-0"
+    assert digest == hashlib.sha256(b"before-0").hexdigest() and size == 8
+
+
+# LLM: No expected refs require no read, while a missing safe registry is empty and linked registry paths fail closed.
+# 函数用途: 核对批量查询空输入、缺账本和符号链接拒绝边界。
+def test_shell_perf_registry_empty_missing_and_symlink(tmp_path: Path) -> None:
+    from agent_py_agent.agent.artifacts import registry
+
+    with patch.object(registry, "read_text_beneath", wraps=registry.read_text_beneath) as reads:
+        assert registry.artifact_operation_recorded_ids(tmp_path, operation_key="op", expected_backup_refs={}) == set()
+        assert reads.call_count == 0
+        assert registry.artifact_operation_recorded_ids(tmp_path, operation_key="op", expected_backup_refs={"a": "r"}) == set()
+        assert reads.call_count == 1
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "data").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError, match="cannot be scanned safely"):
+        registry.artifact_operation_recorded_ids(tmp_path, operation_key="op", expected_backup_refs={"a": "r"})

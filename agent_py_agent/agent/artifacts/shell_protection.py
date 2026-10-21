@@ -29,8 +29,9 @@ from .registry import (
     SHELL_PREIMAGE_POLICY_INCLUDE,
     SHELL_PREIMAGE_POLICY_METADATA_KEY,
     ArtifactRegistration,
+    ArtifactRegistryRecord,
     artifact_metadata_record_exists,
-    artifact_operation_record_exists,
+    artifact_operation_recorded_ids,
     latest_artifact_records_report,
     register_observed_artifact,
 )
@@ -123,6 +124,7 @@ class OpenedArtifactSource:
 
 
 # LLM: 备份只覆盖受信根内存在的普通文件；过时/越界 registry 引用不是当前命令的执行前置条件。selection_counts 只写计数，不泄露路径。
+# 批量备份仍逐个同步 blob 内容，只把目录初始化及目录同步合并到清单发布前。
 # 函数用途: 为当前可保护产物建立私有前像；跳过不存在或权限外的旧引用，保留真正备份失败和 no-follow 防护。
 def snapshot_ready_artifacts(
     workspace_root: str | Path,
@@ -176,30 +178,16 @@ def snapshot_ready_artifacts(
             if opened is None:
                 continue
             try:
-                backup, digest, size_bytes = _write_atomic_backup(
-                    opened,
-                    operation_dir,
-                    artifact_id=record.artifact_id,
+                if not snapshots:
+                    _prepare_backup_directory(operation_dir)
+                snapshots.append(
+                    _copy_ready_snapshot(record, opened, operation_dir, store_root)
                 )
             finally:
                 opened.close()
-            snapshots.append(
-                ShellArtifactSnapshot(
-                    artifact_id=record.artifact_id,
-                    run_id=record.run_id,
-                    task_id=record.task_id,
-                    agent_id=record.agent_id,
-                    kind=record.kind,
-                    mime_type=record.mime_type,
-                    path=str(opened.path),
-                    sha256=digest,
-                    size_bytes=size_bytes,
-                    backup_ref=_backup_ref(store_root, backup),
-                    operation_key=operation_key,
-                )
-            )
         if not snapshots:
             return []
+        _fsync_directory(operation_dir)
         _write_shell_operation_state(
             store_root,
             operation_key,
@@ -222,6 +210,32 @@ def snapshot_ready_artifacts(
         _prune_empty_backup_dirs(operation_dir, store_root / _BACKUP_SCHEMA)
         raise
     return snapshots
+
+
+# LLM: The batch caller owns source lifetime and directory durability; identity comes from copied bytes, not registry hashes.
+# 函数用途: 将已安全打开的产物复制成前像，并组装同一操作下的强类型快照。
+def _copy_ready_snapshot(
+    record: ArtifactRegistryRecord,
+    opened: OpenedArtifactSource,
+    operation_dir: Path,
+    store_root: Path,
+) -> ShellArtifactSnapshot:
+    backup, digest, size_bytes = _write_atomic_backup(
+        opened, operation_dir, artifact_id=record.artifact_id, sync_directory=False,
+    )
+    return ShellArtifactSnapshot(
+        artifact_id=record.artifact_id,
+        run_id=record.run_id,
+        task_id=record.task_id,
+        agent_id=record.agent_id,
+        kind=record.kind,
+        mime_type=record.mime_type,
+        path=str(opened.path),
+        sha256=digest,
+        size_bytes=size_bytes,
+        backup_ref=_backup_ref(store_root, backup),
+        operation_key=operation_dir.name,
+    )
 
 
 # LLM: 范围判断发生在任何文件解析/打开之前；只吞掉明确的旧引用缺失/越界，权限、符号链接、设备和损坏错误继续失败关闭。
@@ -878,9 +892,9 @@ def _path_identity(path: Path) -> tuple[int, int]:
     return (int(metadata.st_dev), int(metadata.st_ino))
 
 
-# LLM: Reconcile one snapshot at a time and commit the per-item phase after each append/cleanup.
-# If append acknowledgment is lost, scan the exact operation/ref row before touching live bytes.
-# 函数用途: 幂等复核一次 shell operation 的所有产物，并在每项完成后立即刷入私有清单。
+# LLM: Scan durable operation/ref rows once before observation; changed items still commit individually.
+# Batch unchanged observations before deleting any blob, then persist cleanup debt/completion together.
+# 函数用途: 幂等复核所有产物，逐项保存变更，并用两个耐久阶段批量清理未变化前像。
 def reconcile_shell_artifact_operation_items(
     workspace_root: str | Path,
     snapshots: list[ShellArtifactSnapshot],
@@ -894,43 +908,28 @@ def reconcile_shell_artifact_operation_items(
     items = manifest.get("items")
     if not isinstance(items, list) or len(items) != len(snapshots):
         raise OSError("shell artifact operation items are invalid")
-    aggregate = _empty_reconciliation_summary(len(snapshots))
-    for index, snapshot in enumerate(snapshots):
-        item = items[index]
-        if not isinstance(item, dict) or item.get("snapshot") != snapshot.to_dict():
-            raise OSError("shell artifact operation item does not match snapshot")
+    if any(
+        not isinstance(item, dict) or item.get("snapshot") != snapshot.to_dict()
+        for item, snapshot in zip(items, snapshots)
+    ):
+        raise OSError("shell artifact operation item does not match snapshot")
+    recorded_ids = artifact_operation_recorded_ids(
+        workspace_root,
+        operation_key=operation_key,
+        expected_backup_refs={
+            snapshot.artifact_id: snapshot.backup_ref
+            for item, snapshot in zip(items, snapshots)
+            if str(item.get("state") or "") == "prepared"
+        },
+    )
+    observed_unchanged = False
+    for item, snapshot in zip(items, snapshots):
         state = str(item.get("state") or "")
-        stored_summary = item.get("summary")
-        if state in {"registered", "unchanged"}:
-            _merge_reconciliation_summary(aggregate, stored_summary)
-            continue
-        if state in {"unchanged_observed", "cleanup_pending"}:
-            cleanup_deferred = _finish_unchanged_item_cleanup(
-                backup_store_root,
-                snapshot,
-            )
-            item["state"] = "cleanup_pending" if cleanup_deferred else "unchanged"
-            summary = (
-                dict(stored_summary)
-                if isinstance(stored_summary, dict)
-                else _unchanged_item_summary(snapshot)
-            )
-            summary["cleanup_deferred"] = cleanup_deferred
-            item["summary"] = summary
-            item["updated_at"] = time.time()
-            manifest["items"] = items
-            manifest["updated_at"] = time.time()
-            write_operation_manifest(backup_store_root, operation_key, manifest)
-            _merge_reconciliation_summary(aggregate, summary)
+        if state in {"registered", "unchanged", "unchanged_observed", "cleanup_pending"}:
             continue
         if state != "prepared":
             raise OSError("shell artifact operation item has invalid state")
-        if artifact_operation_record_exists(
-            workspace_root,
-            artifact_id=snapshot.artifact_id,
-            operation_key=operation_key,
-            backup_ref=snapshot.backup_ref,
-        ):
+        if snapshot.artifact_id in recorded_ids:
             summary = {
                 "snapshots": 1,
                 "changed": [
@@ -959,25 +958,19 @@ def reconcile_shell_artifact_operation_items(
                 item["state"] = "registered"
             else:
                 item["state"] = "unchanged_observed"
-                item["summary"] = summary
-                item["updated_at"] = time.time()
-                manifest["items"] = items
-                manifest["updated_at"] = time.time()
-                write_operation_manifest(backup_store_root, operation_key, manifest)
-                cleanup_deferred = _finish_unchanged_item_cleanup(
-                    backup_store_root,
-                    snapshot,
-                )
-                summary["cleanup_deferred"] = cleanup_deferred
-                item["state"] = (
-                    "cleanup_pending" if cleanup_deferred else "unchanged"
-                )
+                observed_unchanged = True
         item["summary"] = summary
         item["updated_at"] = time.time()
-        manifest["items"] = items
+        if item["state"] == "registered":
+            manifest["updated_at"] = time.time()
+            write_operation_manifest(backup_store_root, operation_key, manifest)
+    if observed_unchanged:
         manifest["updated_at"] = time.time()
         write_operation_manifest(backup_store_root, operation_key, manifest)
-        _merge_reconciliation_summary(aggregate, summary)
+    _retry_manifest_cleanup(backup_store_root, operation_key, manifest, snapshots)
+    aggregate = _empty_reconciliation_summary(len(snapshots))
+    for item in items:
+        _merge_reconciliation_summary(aggregate, item.get("summary"))
     return aggregate
 
 
@@ -1042,9 +1035,9 @@ def _unchanged_item_summary(snapshot: ShellArtifactSnapshot) -> dict[str, Any]:
     }
 
 
-# LLM: Terminal manifests may retain cleanup debt without changing the command outcome. Retry only
-# those recorded refs and persist each transition; never rerun validation or shell execution.
-# 函数用途: 核对终态清单时重试无变化前像的清理债务。
+# LLM: Only durably observed refs may be cleaned; batch all resulting transitions into one write.
+# Used after observation commit and for terminal cleanup debt; never revalidate live bytes or rerun shell.
+# 函数用途: 批量清理已落盘的无变化前像，并一次保存成功状态或待重试债务。
 def _retry_manifest_cleanup(
     backup_store_root: str | Path,
     operation_key: str,
@@ -1065,8 +1058,9 @@ def _retry_manifest_cleanup(
         deferred = _finish_unchanged_item_cleanup(backup_store_root, snapshot)
         item["state"] = "cleanup_pending" if deferred else "unchanged"
         summary = item.get("summary")
-        if isinstance(summary, dict):
-            summary["cleanup_deferred"] = deferred
+        summary = dict(summary) if isinstance(summary, dict) else _unchanged_item_summary(snapshot)
+        summary["cleanup_deferred"] = deferred
+        item["summary"] = summary
         item["updated_at"] = time.time()
         changed = True
     if changed:
@@ -1199,6 +1193,7 @@ def shell_artifact_protection_note(summary: dict[str, Any]) -> str:
 
 
 # LLM: Post-check compares against the exact copied preimage, not a possibly stale registry digest.
+# Hash stable authorized bytes first; only changed nonempty content needs a private validation copy.
 # 函数用途: 判断 shell 是否删除、破坏、修改或保持了某份已登记产物。
 def _post_shell_status(
     path: Path,
@@ -1222,6 +1217,16 @@ def _post_shell_status(
     try:
         if backup_store_root is None:
             raise OSError("canonical owner artifact backup root is unavailable")
+        current_sha, current_size = _sha256_opened_source(opened)
+        if current_sha == snapshot.sha256:
+            return ShellArtifactObservation("unchanged", [], current_sha, current_size)
+        if current_size == 0:
+            return ShellArtifactObservation(
+                "invalid_after_shell",
+                [{"code": "ARTIFACT_EMPTY_AFTER_SHELL", "message": "artifact is empty"}],
+                current_sha,
+                current_size,
+            )
         validation_copy, current_sha, current_size = _write_validation_copy(
             opened,
             backup_store_root,
@@ -1631,14 +1636,9 @@ def _lexical_absolute_path(value: str | Path) -> Path:
     return Path(os.path.abspath(os.path.normpath(str(expanded))))
 
 
-# LLM: The write is temp-file + fsync + atomic replace; a partial copy must never become a durable backup ref.
-# 函数用途: 原子复制一份产物并返回最终 blob 路径、内容哈希和字节数。
-def _write_atomic_backup(
-    source: OpenedArtifactSource,
-    operation_dir: Path,
-    *,
-    artifact_id: str,
-) -> tuple[Path, str, int]:
+# LLM: Batch snapshot callers initialize once after the first eligible source opens; standalone writers do so per call.
+# 函数用途: 为本次操作准备三层私有备份目录。
+def _prepare_backup_directory(operation_dir: Path) -> None:
     for directory in (
         operation_dir.parent.parent,
         operation_dir.parent,
@@ -1646,6 +1646,20 @@ def _write_atomic_backup(
     ):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         _chmod_private(directory, directory=True)
+
+
+# LLM: Always fsync blob bytes before atomic replace. sync_directory=False requires caller-prepared
+# private directories and one directory fsync before publishing the batch manifest; defaults preserve standalone use.
+# 函数用途: 原子复制产物并返回内容身份，批量调用可推迟目录同步但不能省略内容刷盘。
+def _write_atomic_backup(
+    source: OpenedArtifactSource,
+    operation_dir: Path,
+    *,
+    artifact_id: str,
+    sync_directory: bool = True,
+) -> tuple[Path, str, int]:
+    if sync_directory:
+        _prepare_backup_directory(operation_dir)
     temp_path = operation_dir / f".tmp-{secrets.token_hex(16)}"
     digest = hashlib.sha256()
     size_bytes = 0
@@ -1669,7 +1683,8 @@ def _write_atomic_backup(
         os.replace(temp_path, target)
         published = target
         _chmod_private(target, directory=False)
-        _fsync_directory(operation_dir)
+        if sync_directory:
+            _fsync_directory(operation_dir)
         return target, digest.hexdigest(), size_bytes
     except BaseException:
         if descriptor >= 0:

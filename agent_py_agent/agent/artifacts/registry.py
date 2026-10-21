@@ -256,6 +256,43 @@ def artifact_operation_record_exists(
     )
 
 
+# LLM: Batch recovery scans once, retains exact historical operation/ref matches, and rejects any corrupt row.
+# 函数用途: 一次安全读取账本，批量找出同一 shell operation 已落账的产物编号。
+def artifact_operation_recorded_ids(
+    workspace_root: str | Path,
+    *,
+    operation_key: str,
+    expected_backup_refs: dict[str, str],
+) -> set[str]:
+    if not expected_backup_refs:
+        return set()
+    root = _workspace_root_path(workspace_root)
+    try:
+        text = read_text_beneath(root, tuple(REGISTRY_RELATIVE_PATH.parts))
+    except (NoFollowPathError, OSError, UnicodeError) as exc:
+        raise OSError("artifact registry cannot be scanned safely") from exc
+    recorded: set[str] = set()
+    for line in (text or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise OSError("artifact registry contains malformed rows") from exc
+        if not isinstance(payload, dict):
+            raise OSError("artifact registry contains invalid rows")
+        artifact_id = str(payload.get("artifact_id") or "")
+        metadata = payload.get("metadata")
+        if (
+            artifact_id in expected_backup_refs
+            and isinstance(metadata, dict)
+            and metadata.get("protection_operation_id") == operation_key
+            and metadata.get("backup_ref") == expected_backup_refs[artifact_id]
+        ):
+            recorded.add(artifact_id)
+    return recorded
+
+
 # LLM: Durable recovery checks may need to match a historical row after a later append superseded
 # it. Read every row and compare only explicit metadata keys supplied by host code.
 # 函数用途: 扫描完整产物账本，确认某个 artifact_id 是否存在匹配指定结构化元数据的历史记录。
