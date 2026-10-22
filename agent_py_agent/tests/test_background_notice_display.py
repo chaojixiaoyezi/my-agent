@@ -1577,6 +1577,8 @@ def test_gateway_notice_cold_owner_does_not_materialize_agent(monkeypatch) -> No
     assert snapshot["transcript_events"] == []
 
 
+# LLM: 验证薄客户端后台通知轮询携带独立进程事件流标识并使用 5.0 秒网关请求超时。
+# 函数用途: 确认 request_background_notices 将 event_stream_id 与 after 游标分离发送且 timeout=5.0。
 def test_thin_client_sends_process_identity_separate_from_message_offset():
     from agent_py_agent.cli.chat_client_context import GatewayChatClientAgent
 
@@ -1591,7 +1593,7 @@ def test_thin_client_sends_process_identity_separate_from_message_offset():
         client, "session-a", after=234, event_after=900, event_stream_id="process-a",
     ) == {"ok": True}
     path, body, kwargs = requests[0]
-    assert path == "/client/notices" and kwargs == {"timeout": 2.0}
+    assert path == "/client/notices" and kwargs == {"timeout": 5.0}
     assert body["after"] == 234 and body["event_after"] == 900
     assert body["event_stream_id"] == "process-a" and body["conversation_id"] == "session-a"
 

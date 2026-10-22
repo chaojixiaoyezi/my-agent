@@ -142,8 +142,8 @@ class _NoticeWarnDebounce:
 # inactive sessions poll at five seconds. Transport failures use a separate exponential backoff
 # that resets after the next valid snapshot, so detached TUIs cannot storm the single Gateway.
 # "Unsynced" is debounced by _NoticeWarnDebounce: a single over-deadline round must not flash a
-# warning, and any success clears it immediately.
-# 函数用途: 按游标读取会话更新，近期通知去重有界；失败退避并标记未同步，不终止后台任务。
+# warning, and any success clears it immediately. Only healthy scheduled waits refresh the failure time base.
+# 函数用途: 按游标读取会话更新，健康休眠不计故障时长；失败退避并标记未同步，不终止后台任务。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -200,6 +200,8 @@ def _background_notice_loop(
             )
         if stop_event.wait(delay):
             break
+        if snapshot_ok:
+            debounce.last_success_at = time.monotonic()
 
 
 # LLM: Each poll reads one canonical thread snapshot. The boolean result distinguishes transport

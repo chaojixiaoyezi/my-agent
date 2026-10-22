@@ -305,3 +305,58 @@ def test_child_that_cannot_use_the_tui_hands_the_terminal_back_immediately(monke
     follow.drop_handoff_screen()
     follow._restore_terminal_at_exit()
     assert out.getvalue().count(follow._TERMINAL_RESET) == 1
+
+
+# LLM: 三种不可切换原因都使用真实状态读取；follow_disabled经正式组装入口表达为无handoff回调。
+# 函数用途: 验证重开提示首次立即展示，跨多个30秒周期不重复，新上下文仍可独立提示。
+@pytest.mark.parametrize('reason', ['no-callback', 'unsupported', 'follow-disabled'])
+def test_reopen_notice_is_once_per_context_even_after_repeat_interval(tmp_path, monkeypatch, reason):
+    own, other = _runtime_dir(tmp_path, 'runtime-a'), _runtime_dir(tmp_path, 'runtime-b')
+    ctx, calls = _context(tmp_path, _state(other), own, idle=True)
+    monkeypatch.setattr(follow, 'handoff_supported', lambda: reason != 'unsupported')
+    if reason == 'no-callback':
+        ctx.request_handoff = None
+    elif reason == 'follow-disabled':
+        follow._STATE.follow_disabled = True
+        contexts = []
+        monkeypatch.setattr(follow, 'start_upgrade_follow_watcher', contexts.append)
+        hooks = follow.HandoffHooks(app=_App(), is_idle=ctx.is_idle, stop_event=ctx.stop_event,
+            set_notice=ctx.set_notice, clear_notice=lambda kind: None, session_id='session-upgrade')
+        follow.start_tui_upgrade_follow(state_path=ctx.state_path, own_prefix=str(own), enabled=True, hooks=hooks)
+        ctx, = contexts
+        assert ctx.request_handoff is None
+    clock = [100.0]
+    monkeypatch.setattr(follow.time, 'monotonic', lambda: clock[0])
+    outcome, last = follow.check_upgrade_once(ctx, last_notice_at=clock[0])
+    assert outcome == 'notice' and calls['notices'] == [follow.REOPEN_NOTICE_TEXT]
+    assert last == clock[0] and ctx.reopen_notified
+    for elapsed in (1.0, follow._NOTICE_REPEAT_SECONDS, 300.0):
+        clock[0] = 100.0 + elapsed
+        outcome, last = follow.check_upgrade_once(ctx, last_notice_at=last)
+        assert outcome == 'notice' and last == 100.0
+        assert calls['notices'] == [follow.REOPEN_NOTICE_TEXT] and calls['handoff'] == []
+    fresh, fresh_calls = _context(tmp_path, _state(other), own, idle=True)
+    fresh.request_handoff = None
+    follow.check_upgrade_once(fresh, last_notice_at=clock[0])
+    assert fresh_calls['notices'] == [follow.REOPEN_NOTICE_TEXT]
+
+
+# LLM: 可原地切换但暂忙时仍按原30秒阈值重复；变为空闲后仍须请求原handoff，不被一次性提示状态压制。
+# 函数用途: 锁住忙态限频边界和随后空闲切换行为。
+def test_busy_upgrade_notice_repeats_at_interval_then_hands_off(tmp_path, monkeypatch):
+    own, other = _runtime_dir(tmp_path, 'runtime-a'), _runtime_dir(tmp_path, 'runtime-b')
+    ctx, calls = _context(tmp_path, _state(other), own, idle=False)
+    clock = [100.0]
+    monkeypatch.setattr(follow, 'handoff_supported', lambda: True)
+    monkeypatch.setattr(follow.time, 'monotonic', lambda: clock[0])
+    outcome, last = follow.check_upgrade_once(ctx, last_notice_at=-1e9)
+    assert outcome == 'notice' and calls['notices'] == [follow.BUSY_NOTICE_TEXT]
+    clock[0] += follow._NOTICE_REPEAT_SECONDS - .1
+    _, last = follow.check_upgrade_once(ctx, last_notice_at=last)
+    assert calls['notices'] == [follow.BUSY_NOTICE_TEXT] and last == 100.0
+    clock[0] = 100.0 + follow._NOTICE_REPEAT_SECONDS
+    _, last = follow.check_upgrade_once(ctx, last_notice_at=last)
+    assert calls['notices'] == [follow.BUSY_NOTICE_TEXT] * 2 and last == clock[0]
+    ctx.is_idle = lambda: True
+    assert follow.check_upgrade_once(ctx, last_notice_at=last)[0] == 'handoff'
+    assert calls['handoff'] == [str(other / 'bin' / 'my-agent')]

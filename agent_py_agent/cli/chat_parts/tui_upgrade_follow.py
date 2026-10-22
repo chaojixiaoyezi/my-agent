@@ -282,8 +282,8 @@ def tui_idle_for_restart(facts: TuiIdleFacts) -> bool:
             and facts.following and facts.input_focused)
 
 
-# LLM: pending 表示已排到 UI 线程、尚未 exec；failed 表示本进程 exec 失败过，之后只保留旧界面，不再反复尝试。
-# 类用途: 升级守护线程的输入与跨线程标志。
+# LLM: pending 表示已排到 UI 线程、尚未 exec；failed 表示exec失败后不再尝试；reopen_notified只在本上下文去重重开提示，不抑制忙态或排空提示。
+# 类用途: 保存升级守护线程输入、切换标志及本上下文是否已提示重开。
 @dataclass
 class UpgradeFollowContext:
     state_path: Path
@@ -296,6 +296,7 @@ class UpgradeFollowContext:
     poll_seconds: float = POLL_SECONDS
     pending: bool = False
     failed: bool = False
+    reopen_notified: bool = False
 
 
 # LLM: 排空阶段只读状态文件里 Gateway 写的 restart_drain.phase（restart_service 的投影），不看文案；cancelled/缺失都不提示。
@@ -308,8 +309,8 @@ def restart_drain_notice(state: dict | None) -> str:
 
 
 # LLM: 单次检查：Gateway 排空中先给重启提示（每次轮询续显，不影响升级判断）；再算目标，按空闲与否二选一
-#   （排队原地切换 / 限频提示）；pending 或 failed 时什么都不做。
-# 函数用途: 读一次 Gateway 状态并决定是切换、提示还是保持不动。
+#   （排队原地切换 / 忙态限频提示）；不能切换时每上下文只提示重开一次，pending或failed时不做事。
+# 函数用途: 读一次Gateway状态，空闲时切换、忙时限频提示，不能切换时只提醒一次重开。
 def check_upgrade_once(ctx: UpgradeFollowContext, *, last_notice_at: float) -> tuple[str, float]:
     if ctx.pending or ctx.failed:
         return "", last_notice_at
@@ -320,14 +321,20 @@ def check_upgrade_once(ctx: UpgradeFollowContext, *, last_notice_at: float) -> t
     target = upgrade_restart_target(report.payload, ctx.own_prefix, enabled=ctx.enabled)
     if not target:
         return "", last_notice_at
-    if handoff_supported() and ctx.request_handoff is not None and ctx.is_idle():
+    can_switch = handoff_supported() and ctx.request_handoff is not None
+    if can_switch and ctx.is_idle():
         ctx.pending = True
         ctx.request_handoff(target)
         return "handoff", last_notice_at
+    if not can_switch:
+        if not ctx.reopen_notified:
+            ctx.set_notice(REOPEN_NOTICE_TEXT, _NOTICE_SECONDS, NOTICE_KIND)
+            ctx.reopen_notified = True
+            last_notice_at = time.monotonic()
+        return "notice", last_notice_at
     now = time.monotonic()
     if now - last_notice_at >= _NOTICE_REPEAT_SECONDS:
-        can_switch = handoff_supported() and ctx.request_handoff is not None
-        ctx.set_notice(BUSY_NOTICE_TEXT if can_switch else REOPEN_NOTICE_TEXT, _NOTICE_SECONDS, NOTICE_KIND)
+        ctx.set_notice(BUSY_NOTICE_TEXT, _NOTICE_SECONDS, NOTICE_KIND)
         last_notice_at = now
     return "notice", last_notice_at
 

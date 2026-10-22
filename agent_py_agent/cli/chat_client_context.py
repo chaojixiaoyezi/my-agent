@@ -304,8 +304,8 @@ class GatewayChatClientAgent:
         )
         return body or {"ok": False, "error_code": "GATEWAY_UNAVAILABLE", "message": "完整原文暂时不可读取。"}
 
-    # LLM: canonical 游标不随进程流重置；显式声明能按请求去重前台消息，旧客户端不被强发未知用户事件。
-    # 函数用途: 显式声明前台和检查点能力；沿同一持久游标补过程，失败不清空已有显示。
+    # LLM: canonical 游标不随进程流重置；显式声明能按请求去重前台消息，旧客户端不被强发未知用户事件；五秒预算容忍短暂Gateway繁忙。
+    # 函数用途: 显式声明前台和检查点能力；五秒内沿同一持久游标补过程，失败不清空已有显示。
     def request_background_notices(
         self,
         session_id: str,
@@ -314,7 +314,7 @@ class GatewayChatClientAgent:
         event_after: int = 0,
         event_stream_id: str = "",
     ) -> dict[str, object]:
-        # 后台状态只是易失展示；2 秒仍无响应就交给 TUI 退避，不能让每个窗口长期占住连接。
+        # 给 Gateway 短暂繁忙留五秒；仍无响应就交给 TUI 退避，不让每个窗口长期占住连接。
         _status, body = self.post_gateway_json(
             "/client/notices",
             {
@@ -326,7 +326,7 @@ class GatewayChatClientAgent:
                 "channel": "chat",
                 "conversation_id": str(session_id or "default"),
             },
-            timeout=2.0,
+            timeout=5.0,
         )
         return body or {
             "ok": False,
@@ -340,8 +340,8 @@ class GatewayChatClientAgent:
         }
 
     # LLM: Agent detail polling is an explicit owner-scoped HTTP projection. The
-    # thin client sends one run id and display cursor and never opens child files.
-    # 函数用途: 拉取当前选中子代理的状态、过程事件、Todo、直属下级和最终回复。
+    # thin client sends one run id and display cursor and never opens child files; the timeout is five seconds.
+    # 函数用途: 用五秒预算拉取当前选中子代理的状态、过程事件、Todo、直属下级和最终回复。
     def request_agent_view(
         self,
         session_id: str,
@@ -358,7 +358,7 @@ class GatewayChatClientAgent:
                 "run_id": str(run_id or "").strip(),
                 "event_after": max(0, int(event_after or 0)),
             },
-            timeout=2.0,
+            timeout=5.0,
         )
         return body or {"ok": False, "error_code": "GATEWAY_UNAVAILABLE"}
 
