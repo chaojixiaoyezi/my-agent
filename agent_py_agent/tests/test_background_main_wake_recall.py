@@ -952,6 +952,11 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
     for connection in connections:
         with pytest.raises(sqlite3.ProgrammingError):
             connection.execute('SELECT 1')
+    if not failure_stage:
+        supervisor._base_agent.config.sqlite_connection_reuse = False
+        connections.clear()
+        supervisor._submit_ready_thread_ticks()
+        assert len(connections) == 44
 
 
 def test_process_completion_status_patch_before_import_is_not_bypassed():

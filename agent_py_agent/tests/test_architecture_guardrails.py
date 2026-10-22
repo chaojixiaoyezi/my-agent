@@ -110,6 +110,18 @@ BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
         "Transparent retry runner forwards arbitrary callable arguments; "
         "callers must not use this as a product interface pattern."
     ),
+    "agent_py_agent/agent/observability/task_call_inspector.py:list_task_calls": (
+        "Strict allowlist-validated query filter entry point (status/trigger_kind/since/until) "
+        "keeps parameter count <= 6 while rejecting unknown filter keys."
+    ),
+    "agent_py_agent/agent/observability/telemetry_ledger.py:query_tool_calls": (
+        "Strict allowlist-validated telemetry query filter entry point "
+        "keeps parameter count <= 6 while rejecting unknown filter keys."
+    ),
+    "agent_py_agent/agent/assets/monitor_adapter.py:save_monitor_binding": (
+        "Strict allowlist-validated monitor binding writer "
+        "keeps parameter count <= 6 while rejecting unknown binding keys with TypeError."
+    ),
 }
 
 RUNTIME_ARTIFACT_NAMES = {

@@ -96,11 +96,11 @@ class WorkflowRunStore:
         except BlockingIOError as exc:
             raise _RunBusy('工作流正在执行，运行锁繁忙') from exc
 
-    # LLM: parts只由固定路径与安全单段编号组成；缺失记录不能冒充空JSON。
-    # 函数用途: 从Owner根读取一个账本对象。
-    def _read(self, workflow_run_id, *parts):
+    # LLM: name只由固定文件名与安全单段编号组成；缺失记录不能冒充空JSON。
+    # 函数用途: 从Owner根读取一个工作流运行账本对象。
+    def _read(self, workflow_run_id, name):
         self._folder(workflow_run_id)
-        raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, *parts))
+        raw = read_text_beneath(self.owner_home, ('data', 'workflow_runs', workflow_run_id, name))
         if raw is None:
             raise FileNotFoundError('工作流运行记录不存在')
         return json.loads(raw)

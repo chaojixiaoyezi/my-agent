@@ -91,9 +91,10 @@ class TaskCallRecord:
 
 
 # LLM: 分页走真实账本接口，不把任务文件缺失解释为无调用；不设置历史截断上限。
-# 函数用途: 按 owner 范围读取全部匹配工具调用。
-def _calls(ledger, **filters):
+# 函数用途: 按 owner 范围读取全部或指定 task_id 的匹配工具调用。
+def _calls(ledger, *, task_id=None):
     cursor = 0
+    filters = {"task_id": task_id} if task_id is not None else {}
     while True:
         page = ledger.query_tool_calls(limit=10000, cursor=cursor, **filters)
         yield from page
