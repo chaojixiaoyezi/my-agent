@@ -705,15 +705,11 @@ def _settle_terminal_queued_input(paths: GatewayPaths, receipt: GatewayInputRece
     return "terminal_unknown"
 
 
-# LLM: 插话持久操作经 guidance 领域组件； The Gateway loop performs bounded durable repair without one thread per message. Owner
-# resolution uses the stored authenticated request and never falls back to another user's store.
-#   返回的 summary 是结构化事实：除各状态计数外，terminal_unknown_errors/last_terminal_unknown_error 表示
-#   "试过但因坏账/IO 无法收口"的回执，调用方（派发者对账段）必须经 raise_if_input_reconcile_unsettled 上报；
-#   单条回执的处理在 _reconcile_unsettled_receipt。
-# 函数用途: 周期性扫描少量未完成入口回执，修复进程崩溃留下的 active 或 queued 投影，并汇总对账结果。
-# LLM: typed运输未知立即保原cursor位置并上抛，不以finally推进假进度；普通单条坏账仍沿原轮转，不让一条错误饿死后续。
-# LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
-# LLM: 原请求归档且无热队列的queued回执转原单条对账入口，不把物化False永久记成queued。
+# LLM: 逐条恢复仍经原owner和guidance权威；已收敛terminal_unknown只计数，不重入目标结算锁。
+#   批尾finally仅提交一次最后完成扫描的位置；typed未知立即停止且不越过当前项（只提交前一项），
+#   批内异常优先于提交失败；双重错误保留原异常对象，并以异常链保留游标写入失败，不伪称落盘成功。
+#   普通坏账继续轮转，terminal_unknown_errors/last_terminal_unknown_error仍交原循环守卫上报，不补claim或释放。
+# 函数用途: 有界扫描入口回执，跳过已收敛终态，汇总恢复结果并在本批退出时保存一次扫描位置。
 def reconcile_gateway_input_receipts(
     paths: GatewayPaths,
     agent: object,
@@ -727,39 +723,71 @@ def reconcile_gateway_input_receipts(
         "terminal_unknown_errors": 0,
         "last_terminal_unknown_error": {},
     }
-    for path in _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1))):
-        advance_cursor = True
-        try:
-            receipt = read_gateway_input_receipt(paths, path.stem)
-            if receipt is None:
-                continue
-            summary["checked"] += 1
-            if receipt.state == "queued":
-                with gateway_input_transition(paths, receipt.request_id):
-                    materialized = _materialize_prepared_request_locked(paths, receipt)
-                if not materialized and _terminal_request_without_hot(paths, receipt.request_id):
-                    _reconcile_unsettled_receipt(paths, agent, receipt, summary)
-                    continue
-                summary["queued"] += 1
-                continue
-            if receipt.state == "consumed":
-                summary["consumed"] += 1
-                continue
-            _reconcile_unsettled_receipt(paths, agent, receipt, summary)
-        except RequestExecutionOutcomeUncertainError:
-            advance_cursor = False
-            raise
-        except Exception as exc:
-            _raise_input_transport_uncertain(exc)
-            summary["errors"] += 1
-        finally:
-            if advance_cursor:
-                try:
-                    _commit_reconcile_cursor(paths, path)
-                except Exception as exc:
-                    _raise_input_transport_uncertain(exc)
-                    summary["errors"] += 1
+    last_path: Path | None = None
+    pending_error: BaseException | None = None
+    try:
+        for path in _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1))):
+            try:
+                _reconcile_receipt_path(paths, agent, path, summary)
+            except RequestExecutionOutcomeUncertainError:
+                raise
+            except Exception as exc:
+                _raise_input_transport_uncertain(exc)
+                summary["errors"] += 1
+            last_path = path
+    except BaseException as exc:
+        pending_error = exc
+        raise
+    finally:
+        if last_path is not None:
+            try:
+                _commit_reconcile_cursor(paths, last_path)
+            except Exception as exc:
+                if pending_error is not None:
+                    raise pending_error from (pending_error.__cause__ if getattr(pending_error, "__cause__", None) is not None else exc)
+                _raise_input_transport_uncertain(exc)
+                summary["errors"] += 1
     return summary
+
+
+# LLM: 只读原回执裁决短路；仅当无错误且恢复责任已结清（请求已归档且无热区文件，或关联guidance非pending）时才跳过目标锁，否则仍沿原owner解析/恢复链重试。
+#   queued原物化及归档收口不变，缺失项不计checked，错误由批扫描入口原样隔离或上抛。
+# 函数用途: 处理一条回执并累计状态，不逐条写批游标或把未结清的终态未知当作已收口。
+def _reconcile_receipt_path(paths: GatewayPaths, agent: object, path: Path, summary: dict[str, Any]) -> None:
+    receipt = read_gateway_input_receipt(paths, path.stem)
+    if receipt is None:
+        return
+    summary["checked"] += 1
+    if receipt.state == "queued":
+        with gateway_input_transition(paths, receipt.request_id):
+            materialized = _materialize_prepared_request_locked(paths, receipt)
+        if not materialized and _terminal_request_without_hot(paths, receipt.request_id):
+            _reconcile_unsettled_receipt(paths, agent, receipt, summary)
+            return
+        summary["queued"] += 1
+        return
+    if receipt.state == "consumed":
+        summary["consumed"] += 1
+        return
+    if receipt.state == "terminal_unknown" and not receipt.reconcile_error and _is_settled_terminal_unknown(paths, agent, receipt):
+        summary["terminal_unknown"] += 1
+        return
+    _reconcile_unsettled_receipt(paths, agent, receipt, summary)
+
+
+# LLM: 仅做无锁只读核对：若请求已在terminal且无热文件，或关联guidance不再处于pending，才算恢复义务已结清。
+# 函数用途: 区分已真正收口的终态未知与仅因短暂读错误退入unknown但目标仍在跑的回执。
+def _is_settled_terminal_unknown(paths: GatewayPaths, agent: object, receipt: GatewayInputReceipt) -> bool:
+    if _terminal_request_without_hot(paths, receipt.request_id):
+        return True
+    try:
+        from .request_worker import _resolve_request_agent
+
+        scoped = _resolve_request_agent(agent, receipt.prepared_request)
+        binding = gateway_input_guidance_binding(receipt, scoped.conversation_store)
+    except Exception:  # noqa: BLE001
+        return False
+    return binding is None or str(getattr(binding[0], "status", "") or "") != "pending"
 
 
 # LLM: 对账先解析原 owner 和已经校验绑定的 guidance；目标类型/编号只取原账，不能从同名请求文件猜测。
@@ -1250,10 +1278,9 @@ def _cached_receipt_candidates(directory: Path) -> tuple[tuple[str, ...], tuple[
     return names, candidates
 
 
-# LLM: Cursor advancement happens only after the selected receipt was processed. A crash may
-# repeat one idempotent transition, but it can never skip the rest of a selected page.
-#   C只传本轮原来源的末writer；延期可记examined但不是settled，typed失源调用方不推进。None沿原Count0原子写。
-# 函数用途: 在一条入口回执处理完以后，原子记录下一轮扫描起点。
+# LLM: 保存调用方最后扫描的回执位置，崩溃可重复扫描幂等批次；位置不代表业务已结算，不能跳过本批未扫描行。
+#   C仅传本轮原来源的末writer，是否提交仍由各producer的原作用域裁决；None沿原Count0原子写。
+# 函数用途: 在批次退出或原producer安全点，原子保存下一轮回执扫描起点。
 def _commit_reconcile_cursor(paths: GatewayPaths, processed_path: Path, *, write_cursor: Callable | None = None) -> None:
     cursor_path = paths.root / "input_receipts" / "state" / "reconcile_cursor.json"
     writer = write_json_file_atomic if write_cursor is None else write_cursor

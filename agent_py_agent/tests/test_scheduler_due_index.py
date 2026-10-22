@@ -644,3 +644,110 @@ def test_cpu6_parent_backoff_applies_to_monitor_candidates(tmp_path, monkeypatch
         patch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
         assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
     assert {row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=cheap)} == {"busy", "free"}
+
+
+# LLM: waiting运行在TaskLink仍active时不每秒唤醒，但TaskLink已终态时必须被发现层判定为硬事实以收口。
+# 函数用途: 回归R6-3冷owner终态waiting调度保持可发现并可由reconcile_waiting_runs收口。
+def test_terminal_waiting_run_remains_discoverable(tmp_path):
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.owner_wake_discovery import (
+        _has_due_scheduler_fact,
+        _owner_has_hard_facts,
+    )
+    from agent_py_agent.agent.scheduler.service import SchedulerService
+
+    home = tmp_path / "owner"
+    index = SchedulerDueIndex(tmp_path / "due.sqlite3")
+    repo = SchedulerRepository(
+        home / "data/scheduler", owner_provider="feishu", owner_kind="user", owner_id="probe", due_index=index
+    )
+    conversation = ConversationStore(home / "conversations")
+    thread = conversation.threads.get_or_create(
+        {
+            "canonical_user_id": "probe",
+            "channel": "internal",
+            "channel_conversation_id": "probe",
+            "channel_user_id": "probe",
+            "now": 100,
+        }
+    )
+    repo.create_job(
+        SchedulerJobCreateRequest(
+            name="probe",
+            prompt="probe",
+            thread_id=thread.thread_id,
+            schedule={"kind": "every", "every_seconds": 600, "anchor_at": 200, "timezone": "UTC"},
+            now=100,
+        )
+    )
+    run = repo.reserve_due_runs(now=200)[0]
+    claimed = repo.claim_run(run["run_id"], lease_seconds=30, now=201)
+    repo.mark_run_running(run["run_id"], claimed["claim_id"], now=202)
+    conversation.tasks.bind({"thread_id": thread.thread_id, "task_id": run["run_id"], "goal": "probe", "now": 202})
+    repo.park_run_waiting(run["run_id"], claimed["claim_id"], now=203)
+    assert _has_due_scheduler_fact(home) is False
+    conversation.tasks.update_status({"task_id": run["run_id"], "status": "failed", "now": 204})
+    assert _has_due_scheduler_fact(home) is True
+    assert _owner_has_hard_facts(home) is True
+    service = SchedulerService(repo, conversation_store=conversation)
+    assert service.reconcile_waiting_runs(now=800) == [run["run_id"]]
+    assert len(repo.reserve_due_runs(now=800)) == 1
+
+
+# LLM: 保持真实_connect返回值及事务语义，强引用连接避免GC代劳；SQL授权器只为异常分支注入真实SQLite拒绝。
+# 函数用途: 验证六个索引入口正常返回或抛错后立即关闭全部连接，包括迁移检查和迁移写入两段。
+@pytest.mark.parametrize("operation", ["allocate_job_alias", "sync_owner", "claim_due_owners",
+    "repair_legacy_owner_ledgers", "snapshot", "_migration_complete"])
+@pytest.mark.parametrize("fail_sql", [False, True])
+def test_opt6_operations_close_connections_immediately(tmp_path, monkeypatch, operation, fail_sql):
+    import sqlite3
+
+    from agent_py_agent.agent.scheduler.due_index import SchedulerDueIndexError
+
+    index = SchedulerDueIndex(tmp_path / "due.sqlite3")
+    original, connections = index._connect, []
+    denied = False
+
+    # LLM: 仅拒绝一次SQL；后续SELECT探针恢复正常，避免把授权器拒绝误当成句柄已关闭。
+    # 函数用途: 注入真实SQL异常后放行连接关闭状态探针。
+    def deny_once(*_args):
+        nonlocal denied
+        if denied:
+            return sqlite3.SQLITE_OK
+        denied = True
+        return sqlite3.SQLITE_DENY
+
+    # LLM: 返回原始sqlite3.Connection；迁移失败延至第二个连接，确保测试触及迁移事务而非仅前置查询。
+    # 函数用途: 捕获各次真实连接，并按用例在其返回前安装SQL拒绝器。
+    def connect():
+        conn = original()
+        connections.append(conn)
+        if fail_sql and (operation != "repair_legacy_owner_ledgers" or len(connections) == 2):
+            conn.set_authorizer(deny_once)
+        return conn
+
+    monkeypatch.setattr(index, "_connect", connect)
+    actions = {
+        "allocate_job_alias": index.allocate_job_alias,
+        "sync_owner": lambda: index.sync_owner(_owner("alice"), _store(next_run_at=200), now=100),
+        "claim_due_owners": lambda: index.claim_due_owners(now=200),
+        "repair_legacy_owner_ledgers": lambda: index.repair_legacy_owner_ledgers(tmp_path / "owners"),
+        "snapshot": index.snapshot,
+        "_migration_complete": lambda: index._migration_complete("probe"),
+    }
+    try:
+        if fail_sql:
+            expected = sqlite3.Error if operation == "allocate_job_alias" else SchedulerDueIndexError
+            with pytest.raises(expected):
+                actions[operation]()
+        else:
+            actions[operation]()
+        assert len(connections) == (2 if operation == "repair_legacy_owner_ledgers" else 1)
+        for conn in connections:
+            assert isinstance(conn, sqlite3.Connection)
+            with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                conn.execute("SELECT 1")
+    finally:
+        # 旧实现预期失败也须释放测试自己强引用的句柄；断言发生在此处兜底之前。
+        for conn in connections:
+            conn.close()

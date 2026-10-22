@@ -161,13 +161,29 @@ def test_new_terminal_file_is_projected_after_directory_change(tmp_path):
     assert _projection_path(paths, "gwreq-probe-000").exists()
 
 
-def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path):
+# LLM: 真实终态流程跨页追赶时只枚举一次并复用名称元组；目录新增后须立即重枚举且保留原追平合同。
+# 函数用途: 验证分页补投影、缓存复用、二分游标定位及新增终态失效，不放宽原轮数和修复数量断言。
+def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path, monkeypatch):
+    from bisect import bisect_right
+
+    from agent_py_agent.agent.gateway_parts import recovery
+
     agent = _make_recovery_agent(tmp_path)
     paths = gateway_paths(agent)
     _ensure_gateway_dirs(paths)
-    _seed_terminal_archive(agent, paths, copies=5)
+    request_id = _seed_terminal_archive(agent, paths, copies=5)
     _warm_terminal_locks(paths)
     stamp = _directory_stamp(paths.terminal)
+    calls = _counting_terminal_glob(monkeypatch, paths)
+    seeks = []
+
+    # LLM: 名称来自产品真实候选，原bisect算法负责定位；不替换排序结果或游标。
+    # 函数用途: 记录跨页是否二分定位及是否复用同一名称元组。
+    def seek(names, previous):
+        seeks.append((names, previous))
+        return bisect_right(names, previous)
+
+    monkeypatch.setattr(recovery, "bisect_right", seek, raising=False)
 
     rounds: list[tuple[int, int, bool]] = []
     for _ in range(3):
@@ -181,10 +197,30 @@ def test_backlog_drains_across_rounds_with_stable_directory_stamp(tmp_path):
     assert all(_marker_path(paths, f"gwreq-probe-{index:03d}").exists() for index in range(5))
     cursor = read_json_file(paths.root / _CURSOR_RELATIVE)
     assert cursor["caught_up"] is True
+    assert calls == ["*.json"], "目录代次不变的多页追赶只能枚举一次"
+    assert [previous for _names, previous in seeks] == ["gwreq-probe-000.json", "gwreq-probe-002.json"]
+    assert seeks[0][0] is seeks[1][0]
 
     # 追平后恢复稳态跳过。
     projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
     assert (projected, errors) == (0, [])
+    assert calls == ["*.json"]
+
+    # 只预热新文件的真实读锁，不用glob辅助函数污染产品枚举计数。
+    new_id = "gwreq-probe-005"
+    _copy_terminal_as(paths, request_id, new_id)
+    read_json_file_report(paths.terminal / f"{new_id}.json", context="tests.terminal_projection_scan.warm")
+    assert _directory_stamp(paths.terminal) != stamp
+    projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
+    assert (projected, errors) == (0, [])
+    assert calls == ["*.json", "*.json"], "目录变化后的首轮就必须重新枚举"
+    for _ in range(3):
+        _projected, errors = repair_gateway_terminal_projections(paths, agent=agent, limit=2)
+        assert errors == []
+    assert _marker_path(paths, new_id).exists()
+    assert _projection_path(paths, new_id).exists()
+    assert read_json_file(paths.root / _CURSOR_RELATIVE)["caught_up"] is True
+    assert calls == ["*.json", "*.json"]
 
 
 def test_round_limit_caps_files_examined_per_call(tmp_path):
@@ -377,3 +413,71 @@ def test_changed_directory_does_not_starve_previous_backlog(tmp_path, monkeypatc
         write_json_file(terminal / f"{name}.json", {"id": name})
         repair_gateway_terminal_projections(paths, agent=None, limit=16)
     assert "gwreq-backlog-099" in repaired
+
+
+# LLM: 仅准备临时目录与候选JSON；缓存测试另行将marker匹配置为真，不模拟业务执行或授予恢复权限。
+# 函数用途: 为有界候选缓存测试提供小型真实文件目录。
+def _opt6_scan_paths(root):
+    from types import SimpleNamespace
+
+    terminal = root / "terminal"
+    terminal.mkdir(parents=True)
+    (terminal / "gwreq-000.json").write_text('{"id":"gwreq-000"}', encoding="utf-8")
+    return SimpleNamespace(root=root, terminal=terminal)
+
+
+# LLM: 调用真实分页入口装入33个目录；只替换投影完成判定，缓存和glob都由产品实现管理。
+# 函数用途: 验证缓存最多32个目录，最早目录被逐出后再次请求确实重枚举。
+def test_opt6_terminal_candidate_cache_is_bounded(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import recovery
+
+    cache = {}
+    monkeypatch.setattr(recovery, "_TERMINAL_CANDIDATES_CACHE", cache, raising=False)
+    monkeypatch.setattr(recovery, "_terminal_projection_marker_matches", lambda *_args: True)
+    paths = [_opt6_scan_paths(tmp_path / str(index)) for index in range(33)]
+    calls = _counting_terminal_glob(monkeypatch, paths[0])
+    for item in paths:
+        assert repair_gateway_terminal_projections(item, agent=None, full_scan=True) == (0, [])
+    assert len(cache) == 32
+    assert paths[0].terminal not in cache and paths[-1].terminal in cache
+    assert repair_gateway_terminal_projections(paths[0], agent=None, full_scan=True) == (0, [])
+    assert calls == ["*.json", "*.json"]
+    assert len(cache) == 32
+
+
+# LLM: stamp未知时不能借旧缓存或误命中稳态跳过；只在首次预热使用full_scan，后续走默认入口。
+# 函数用途: 验证缺少目录代次时移除旧缓存，追平后新增文件仍逐次重新枚举。
+def test_opt6_unknown_stamp_discards_terminal_candidate_cache(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import recovery
+
+    paths = _opt6_scan_paths(tmp_path)
+    cache = {}
+    monkeypatch.setattr(recovery, "_TERMINAL_CANDIDATES_CACHE", cache, raising=False)
+    monkeypatch.setattr(recovery, "_terminal_projection_marker_matches", lambda *_args: True)
+    calls = _counting_terminal_glob(monkeypatch, paths)
+    assert repair_gateway_terminal_projections(paths, agent=None, full_scan=True) == (0, [])
+    assert paths.terminal in cache
+    monkeypatch.setattr(recovery, "_terminal_directory_stamp", lambda _directory: None)
+    for index in range(2):
+        request_id = f"gwreq-new-{index}"
+        (paths.terminal / f"{request_id}.json").write_text(json.dumps({"id": request_id}), encoding="utf-8")
+        assert repair_gateway_terminal_projections(paths, agent=None) == (0, [])
+        assert paths.terminal not in cache
+    assert calls == ["*.json"] * 3
+
+
+# LLM: 空目录候选也是可复用的不可变快照，但持久游标不得保留已消失的last_name。
+# 函数用途: 验证空目录清空旧游标，并在代次稳定时复用空候选。
+def test_opt6_empty_terminal_candidates_reset_cursor_and_are_cached(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import recovery
+
+    paths = _opt6_scan_paths(tmp_path)
+    (paths.terminal / "gwreq-000.json").unlink()
+    monkeypatch.setattr(recovery, "_TERMINAL_CANDIDATES_CACHE", {}, raising=False)
+    write_json_file(paths.root / _CURSOR_RELATIVE, {"last_name": "gwreq-old.json", "caught_up": False})
+    calls = _counting_terminal_glob(monkeypatch, paths)
+    assert repair_gateway_terminal_projections(paths, agent=None, full_scan=True) == (0, [])
+    cursor = read_json_file(paths.root / _CURSOR_RELATIVE)
+    assert cursor["last_name"] == "" and cursor["caught_up"] is True
+    assert repair_gateway_terminal_projections(paths, agent=None, full_scan=True) == (0, [])
+    assert calls == ["*.json"]

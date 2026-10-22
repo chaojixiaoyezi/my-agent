@@ -4,7 +4,9 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -140,7 +142,7 @@ def test_full_proposals_rotate_oldest_and_keep_new_candidate(tmp_path, monkeypat
     monkeypatch.setattr(store, "state_lock", observed_lock)
     monkeypatch.setattr(store, "append_event", observed_append)
     newest = _draft(store, "rotate-new", "new")
-    active = list_learning_proposals(store)
+    active = list_learning_proposals(store, include_overflow=False)
     all_rows = list_learning_proposals(store, include_overflow=True)
     assert len(active) == 20 and len(all_rows) == 21
     assert rows[0]["proposal_id"] not in {row["proposal_id"] for row in active}
@@ -167,7 +169,7 @@ def test_legacy_proposal_rotation_uses_mtime_not_hash_order(tmp_path):
         seconds = 1 if row == oldest else 100
         os.utime(path, (seconds, seconds))
     _draft(store, "legacy-new", "new")
-    active_ids = {row["proposal_id"] for row in list_learning_proposals(store)}
+    active_ids = {row["proposal_id"] for row in list_learning_proposals(store, include_overflow=False)}
     assert oldest["proposal_id"] not in active_ids
     assert learning_proposal(store, oldest["proposal_id"])["status"] == "pending"
 
@@ -178,7 +180,7 @@ def test_same_name_pending_is_superseded_and_duplicate_does_not_revive_it(tmp_pa
     store = _runtime(tmp_path).store
     old = _draft(store)
     new = _draft(store, key="new", body=BODY + "\n补充校验顺序。")
-    assert [row["proposal_id"] for row in list_learning_proposals(store)] == [new["proposal_id"]]
+    assert [row["proposal_id"] for row in list_learning_proposals(store, include_overflow=False)] == [new["proposal_id"]]
     previous = learning_proposal(store, old["proposal_id"])
     assert previous["status"] == "superseded" and previous["superseded_by"] == new["proposal_id"]
     with pytest.raises(SkillLearningGateError, match="PROPOSAL_CONFLICT"):
@@ -205,7 +207,7 @@ def test_archived_candidate_resolves_through_exact_user_revision(tmp_path, decis
     store = _runtime(tmp_path).store
     row = _draft(store)
     _archive_existing(store, row)
-    assert list_learning_proposals(store) == []
+    assert list_learning_proposals(store, include_overflow=False) == []
     assert learning_proposal(store, row["proposal_id"]) == row
     assert list_learning_proposals(store, include_overflow=True) == [row]
     with pytest.raises(SkillLearningGateError, match="PROPOSAL_CONFLICT"):
@@ -272,7 +274,7 @@ def test_archived_candidate_hash_tampering_fails_closed(tmp_path):
 def test_proposal_overflow_retains_at_most_100_records(tmp_path):
     store = _runtime(tmp_path).store
     rows = [_draft(store, f"capacity-{index}", str(index)) for index in range(121)]
-    active = list_learning_proposals(store)
+    active = list_learning_proposals(store, include_overflow=False)
     all_rows = list_learning_proposals(store, include_overflow=True)
     assert len(active) == 20 and len(all_rows) == 120
     with pytest.raises(ValueError):
@@ -347,7 +349,7 @@ def test_concurrent_confirmation_and_rotation_do_not_lose_resolution(tmp_path, m
         rotation.result(timeout=10)
     assert result["status"] == "committed"
     assert learning_proposal(store, rows[0]["proposal_id"]) == result
-    assert sum(row["status"] == "pending" for row in list_learning_proposals(store)) == 20
+    assert sum(row["status"] == "pending" for row in list_learning_proposals(store, include_overflow=False)) == 20
     assert len(store.events("concurrent-0", limit=0)) == 1
 
 
@@ -387,7 +389,7 @@ def test_rotated_candidate_end_to_end_resolution(tmp_path, decision):
     assert store.skill_path("e2e-0").exists() == (decision == "confirm")
     path = store.directory / "proposals_overflow" / (old["proposal_id"] + ".json")
     assert json.loads(path.read_text()) == result
-    assert len(list_learning_proposals(store)) == 20
+    assert len(list_learning_proposals(store, include_overflow=False)) == 20
 
 
 # LLM: 使用真实owner配额与原state锁，空间不足不能借归档新增写入，也不能改掉旧候选状态。
@@ -523,7 +525,7 @@ def test_subprocess_archive_crash_projects_superseded_and_recovers(tmp_path):
     store = _runtime(tmp_path).store
     before = {str(path.relative_to(store.directory)): path.read_bytes()
               for path in store.directory.rglob("*") if path.is_file()}
-    active = list_learning_proposals(store)
+    active = list_learning_proposals(store, include_overflow=False)
     all_rows = list_learning_proposals(store, include_overflow=True)
     previous = learning_proposal(store, old["proposal_id"])
     assert previous["status"] == "superseded" and previous["revision"] == 2
@@ -555,7 +557,7 @@ def test_subprocess_replacement_every_durable_prefix(tmp_path, point):
     committed = point != "intent"
     assert previous["status"] == ("superseded" if committed else "pending")
     assert len(rows) == (2 if committed else 1)
-    assert len(list_learning_proposals(store)) == 1
+    assert len(list_learning_proposals(store, include_overflow=False)) == 1
     assert {str(path): path.read_bytes() for path in store.directory.rglob("*") if path.is_file()} == before
     new = _draft(store, key="replacement")
     assert new["status"] == "pending"
@@ -574,7 +576,7 @@ def test_subprocess_capacity_and_archive_trim_prefixes(tmp_path, point):
     _crash_draft(tmp_path, name="capacity-new", point=point)
     store = _runtime(tmp_path).store
     before = {str(path): path.read_bytes() for path in store.directory.rglob("*") if path.is_file()}
-    assert len(list_learning_proposals(store)) == 20
+    assert len(list_learning_proposals(store, include_overflow=False)) == 20
     assert len(list_learning_proposals(store, include_overflow=True)) == 120
     with pytest.raises(ValueError):
         learning_proposal(store, rows[0]["proposal_id"])
@@ -641,7 +643,7 @@ def test_legacy_crash_duplicate_converges_without_an_intent(tmp_path, superseded
     before = {str(path): path.read_bytes() for path in store.directory.rglob("*") if path.is_file()}
     previous = learning_proposal(store, old["proposal_id"])
     assert previous["status"] == ("superseded" if superseded else "pending")
-    assert len(list_learning_proposals(store)) == (1 if superseded else 20)
+    assert len(list_learning_proposals(store, include_overflow=False)) == (1 if superseded else 20)
     assert {str(path): path.read_bytes() for path in store.directory.rglob("*") if path.is_file()} == before
     if superseded:
         with pytest.raises(SkillLearningGateError, match="PROPOSAL_CONFLICT"):
@@ -767,7 +769,7 @@ def test_subprocess_replaces_all_same_name_active_and_archived_pending(tmp_path,
     for old in (active_old, archived_old):
         previous = learning_proposal(store, old["proposal_id"])
         assert previous["status"] == "superseded" and previous["revision"] == 2
-    assert len(list_learning_proposals(store)) == 1
+    assert len(list_learning_proposals(store, include_overflow=False)) == 1
     assert len(list_learning_proposals(store, include_overflow=True)) == 3
     _draft(store, "unrelated", "unrelated")
     assert _draft(store, key="legacy-archived")["status"] == "superseded"
@@ -794,3 +796,229 @@ def test_subprocess_recovered_candidate_still_obeys_user_disable(tmp_path):
     assert store.skill_path(NAME).read_bytes() == before
     assert learning_proposal(store, pending["proposal_id"])["status"] == "pending"
     assert not (store.directory / ".proposals-intent.json").exists()
+
+
+# LLM: 真正填满并轮转更新候选；查询前后逐字核对业务文件，避免把显式单条查找当成列表可见。
+# 函数用途: 验证默认读口、CLI、IM及维护保护均能发现overflow中的pending更新。
+@pytest.mark.parametrize("surface", ["default", "cli", "im", "protection"])
+def test_overflow_pending_is_visible_through_real_surfaces(tmp_path, monkeypatch, capsys, surface):
+    ctx = _runtime(tmp_path)
+    first = _draft(ctx.store)
+    resolve_learning_proposal(ctx.store, first["proposal_id"], 1, decision="confirm")
+    pending = _draft(ctx.store, key="update-to-protect", body=BODY + "\n待审的新版本。",
+                     current=ctx.store.load_registry().skills[NAME])
+    for index in range(20):
+        _draft(ctx.store, f"visible-{index}", str(index))
+    assert (ctx.store.directory / "proposals_overflow" / (pending["proposal_id"] + ".json")).is_file()
+    before = {str(path): path.read_bytes() for path in ctx.home.owner_home_dir.rglob("*") if path.is_file()}
+    if surface == "default":
+        assert pending["proposal_id"] in {row["proposal_id"] for row in list_learning_proposals(ctx.store)}
+        assert pending["proposal_id"] not in {row["proposal_id"] for row in list_learning_proposals(ctx.store, include_overflow=False)}
+    elif surface == "cli":
+        from agent_py_agent.cli import skill_learning_commands as cli
+        monkeypatch.setattr(cli, "_owner_context", lambda _args: cli._LearnedCommandContext(ctx.store, "main", None))
+        assert cli.cmd_learning_proposals(SimpleNamespace(skills_learned_action="proposals", json=True)) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert pending["proposal_id"] in {row["proposal_id"] for row in payload["proposals"]}
+    elif surface == "im":
+        from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+        from agent_py_agent.agent.gateway_parts.skill_control_service import (
+            SkillControlHost,
+            run_skill_control,
+        )
+        text = run_skill_control(SkillControlHost(ctx.home, None), parse_conversation_control("/skills learned proposals"))
+        assert pending["proposal_id"] in text and NAME in text
+    else:
+        from agent_py_agent.agent.capability.skill_learning_protection import (
+            learning_protection_for_agent,
+        )
+        agent = SimpleNamespace(
+            home_paths=ctx.home,
+            conversation_store=SimpleNamespace(tasks=SimpleNamespace(storage=SimpleNamespace(tasks_dir=tmp_path / "no-tasks"))),
+            scheduler_repository=SimpleNamespace(list_jobs=lambda **_kwargs: ([], [])),
+            subagents=SimpleNamespace(list_runs_report=lambda: SimpleNamespace(load_errors=[], runs=[])),
+        )
+        result = learning_protection_for_agent(agent)
+        assert result["protection_complete"] and f"owner:{NAME}" in result["protected_ids"]
+    assert {str(path): path.read_bytes() for path in ctx.home.owner_home_dir.rglob("*") if path.is_file()} == before
+
+
+# LLM: 观察原quota、state和proposals真实锁的进入顺序，错误时在阻塞前断言，不以空context替换互斥。
+# 函数用途: 验证所有提案入口都遵守owner配额→state→proposals且publisher不会重复取不可重入锁。
+@pytest.mark.parametrize("operation", ["propose", "read", "list", "confirm", "reject"])
+def test_proposal_entrances_use_global_lock_order(tmp_path, monkeypatch, operation):
+    from agent_py_agent.agent.capability import skill_learning_proposals as proposals
+    from agent_py_agent.agent.capability import skill_learning_store as stores
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.user_space import owner_quota
+    ctx = _runtime(tmp_path)
+    quota = ctx.home.owner_home_dir / "quota.json"
+    quota.write_text(json.dumps({**json.loads(quota.read_text()), "max_disk_mb": 16}))
+    store = ctx.store
+    row = _draft(store)
+    original, held, acquired = json_io.locked_json_path, [], []
+    ranks = {".owner-quota": 0, ".state": 1, ".proposals": 2}
+
+    # LLM: 保留底层线程/flock和原admission；缺少外层锁与重入都明确失败，避免变成超时。
+    # 函数用途: 记录并校验这一次真实锁嵌套。
+    @contextmanager
+    def observe(path, **kwargs):
+        name = Path(path).name
+        if name in ranks:
+            assert held == list(ranks)[:ranks[name]], f"锁顺序错误: {held} -> {name}"
+        with original(path, **kwargs):
+            if name in ranks:
+                held.append(name)
+                acquired.append(name)
+            try:
+                yield
+            finally:
+                if name in ranks:
+                    assert held.pop() == name
+
+    for module in (proposals, stores, owner_quota):
+        monkeypatch.setattr(module, "locked_json_path", observe)
+    if operation == "propose":
+        _draft(store, "lock-ordered-new", "new")
+    elif operation == "read":
+        assert learning_proposal(store, row["proposal_id"]) == row
+    elif operation == "list":
+        assert list_learning_proposals(store) == [row]
+    else:
+        result = resolve_learning_proposal(store, row["proposal_id"], 1, decision=operation)
+        assert result["status"] == ("committed" if operation == "confirm" else "rejected")
+    assert acquired[:3] == list(ranks) and not held
+    assert store._quota_admission.get() is None
+
+
+# LLM: 首次查询没有业务目录时不创建配额/state/proposals锁；未知编号仍按原合同拒绝。
+# 函数用途: 保证新增统一锁序不会把无目录只读查询变成初始化写入。
+def test_empty_proposal_reads_do_not_create_any_lock(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+    store = SkillLearningStore(tmp_path / "owner" / "data" / "skill_learning", tmp_path / "owner" / "skills")
+    assert list_learning_proposals(store) == []
+    with pytest.raises(ValueError):
+        learning_proposal(store, "learning-proposal-" + "0" * 32)
+    assert not (tmp_path / "owner").exists()
+
+
+# LLM: 两个独立解释器用真实owner锁竞争；一方已持quota/state再取proposals，另一方执行产品写入口。
+# 函数用途: 确定性重现反向锁序的跨进程死锁，并有界清理所有测试进程。
+@pytest.mark.parametrize("operation", ["propose", "confirm", "reject"])
+def test_proposal_writers_do_not_deadlock_other_owner_transactions(tmp_path, operation):
+    ctx = _runtime(tmp_path)
+    quota = ctx.home.owner_home_dir / "quota.json"
+    quota.write_text(json.dumps({**json.loads(quota.read_text()), "max_disk_mb": 16}))
+    store = ctx.store
+    row = _draft(store)
+    script = '''
+import json
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from agent_py_agent.agent.capability import skill_learning_proposals as proposals
+from agent_py_agent.agent.common.json_io import locked_json_path
+from agent_py_agent.agent.user_space import owner_quota
+from agent_py_agent.tests.test_skill_learning import _runtime
+from agent_py_agent.tests.test_skill_learning_confirmation import _draft
+root, role, operation, identifier = json.loads(sys.argv[1])
+root = Path(root)
+store = _runtime(root).store
+ready, waiting = root / 'holder-ready', root / 'writer-waiting'
+if role == 'holder':
+    with store.state_lock():
+        ready.touch()
+        deadline = time.monotonic() + 10
+        while not waiting.exists():
+            assert time.monotonic() < deadline, 'writer never reached lock entrance'
+            time.sleep(0.01)
+        with locked_json_path(store.directory / '.proposals'):
+            pass
+else:
+    # LLM: quota等待前发信号；旧实现则先实际持有proposals后发信号，保证反转不是概率窗口。
+    # 函数用途: 同步真实锁竞争，不替换或跳过任何底层锁。
+    @contextmanager
+    def observed(path, **kwargs):
+        if Path(path).name == '.owner-quota':
+            waiting.touch()
+        with locked_json_path(path, **kwargs):
+            if Path(path).name == '.proposals':
+                waiting.touch()
+            yield
+    proposals.locked_json_path = owner_quota.locked_json_path = observed
+    if operation == 'propose':
+        _draft(store, 'cross-process-new', 'new')
+    else:
+        proposals.resolve_learning_proposal(store, identifier, 1, decision=operation)
+'''
+    args = [str(tmp_path), "holder", operation, row["proposal_id"]]
+    holder = subprocess.Popen([sys.executable, "-c", script, json.dumps(args)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    writer = None
+    try:
+        import time
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "holder-ready").exists():
+            assert holder.poll() is None, holder.communicate()
+            assert time.monotonic() < deadline, "holder did not acquire real quota/state"
+            time.sleep(0.01)
+        args[1] = "writer"
+        writer = subprocess.Popen([sys.executable, "-c", script, json.dumps(args)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = holder.communicate(timeout=8)
+        assert holder.returncode == 0, out + err
+        out, err = writer.communicate(timeout=8)
+        assert writer.returncode == 0, out + err
+    finally:
+        for process in (holder, writer):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+    if operation == "propose":
+        assert len(list_learning_proposals(store)) == 2
+    else:
+        assert learning_proposal(store, row["proposal_id"])["status"] == ("committed" if operation == "confirm" else "rejected")
+
+
+# LLM: 发布已生效但确认事件尚未落盘的原恢复点不能丢失；失败后必须释放原ContextVar及所有真实锁。
+# 函数用途: 验证publisher或账本中断后可按operation_id重试且不重复发布，仍保留原owner配额准入。
+@pytest.mark.parametrize("failure_point", ["publisher", "ledger"])
+def test_confirmation_retry_reuses_publication_after_interrupted_receipt(tmp_path, monkeypatch, failure_point):
+    from agent_py_agent.agent.capability import skill_learning_proposals as proposals
+    ctx = _runtime(tmp_path)
+    quota = ctx.home.owner_home_dir / "quota.json"
+    quota.write_text(json.dumps({**json.loads(quota.read_text()), "max_disk_mb": 16}))
+    row = _draft(ctx.store)
+    original_publish, original_append = proposals.publish_learned_skill, proposals.append_private_jsonl_capped
+    publications = []
+
+    # LLM: 仍执行原publisher所有guard/CAS和真实写入，只在其已返回后制造一次可恢复中断。
+    # 函数用途: 记录发布次数并覆盖发布成功到确认落盘之间的失败点。
+    def interrupted_publish(*args, **kwargs):
+        event = original_publish(*args, **kwargs)
+        publications.append(event)
+        if failure_point == "publisher":
+            raise OSError("interrupted before confirmation receipt")
+        return event
+
+    # LLM: 不伪造成功账本，第一次追加前明确报错；后续重试必须由产品再次完整写入。
+    # 函数用途: 模拟账本暂时失败而不改变已发布登记事实。
+    def interrupted_append(*args, **kwargs):
+        raise OSError("interrupted before confirmation receipt")
+
+    monkeypatch.setattr(proposals, "publish_learned_skill", interrupted_publish)
+    if failure_point == "ledger":
+        monkeypatch.setattr(proposals, "append_private_jsonl_capped", interrupted_append)
+    with pytest.raises(OSError, match="interrupted"):
+        resolve_learning_proposal(ctx.store, row["proposal_id"], 1, decision="confirm")
+    assert ctx.store._quota_admission.get() is None
+    assert learning_proposal(ctx.store, row["proposal_id"])["status"] == "pending"
+    published = ctx.store.skill_path(NAME).read_bytes()
+    assert ctx.store.load_registry().skills[NAME].version == 1 and not ctx.store.events(limit=0)
+    monkeypatch.setattr(proposals, "append_private_jsonl_capped", original_append)
+    result = resolve_learning_proposal(ctx.store, row["proposal_id"], 1, decision="confirm", actor_id="retry-user")
+    assert result["status"] == "committed" and result["revision"] == 2
+    assert result["resolved_by"]["actor_id"] == "retry-user"
+    assert len(publications) == 1 and len(ctx.store.events(NAME, limit=0)) == 1
+    assert ctx.store.skill_path(NAME).read_bytes() == published
+    assert resolve_learning_proposal(ctx.store, row["proposal_id"], 1, decision="confirm") == result
+    assert len(ctx.store.events(NAME, limit=0)) == 1 and ctx.store._quota_admission.get() is None

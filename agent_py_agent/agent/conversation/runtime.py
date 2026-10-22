@@ -3553,8 +3553,8 @@ def _consume_due_policies(
 
 
 # LLM: Ready-thread discovery may inspect durable sources but must not claim, consume, or run them;
-# the per-thread execution lane remains authoritative for every state transition.
-# 函数用途: 按持久 wake、observation 和到期 policy 找出需要后台续跑的会话。
+# the per-thread execution lane remains authoritative; an admitted-thread limit skips lower-priority scans.
+# 函数用途: 按持久 wake、observation 和到期 policy 找出后台会话，满额后立即停止后续扫描。
 def _ready_background_thread_ids(
     scheduler: BackgroundMainAgentScheduler,
     *,
@@ -3589,6 +3589,10 @@ def _ready_background_thread_ids(
         if _wake_waits_this_tick(scheduler, signal, current):
             continue
         append(normalized, signal.root_task_id)
+        if limit > 0 and len(ready) >= limit:
+            return tuple(ready)
+    if limit > 0 and len(ready) >= limit:
+        return tuple(ready)
     for observation in scheduler.store.observations.unhandled_requiring_main(limit=0):
         if limit > 0 and len(ready) >= limit:
             break
@@ -3598,6 +3602,8 @@ def _ready_background_thread_ids(
         if _observation_waits_for_linked_wake(scheduler.store, observation):
             continue
         append(normalized, observation.root_task_id)
+    if limit > 0 and len(ready) >= limit:
+        return tuple(ready)
     enabled, _load_errors = scheduler.store.progress.list_report(enabled_only=True)
     due = [policy for policy in enabled if policy.next_due_at <= current]
     runnable, _suppressed = _runnable_due_policies(

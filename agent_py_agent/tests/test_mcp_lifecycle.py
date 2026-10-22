@@ -1,10 +1,14 @@
 """MCP 生命周期的确定性交错与临时进程组件测试；不属于真实 TUI 或模型验收。"""
 from __future__ import annotations
 
+import gc
 import json
 import os
 import threading
 import time
+import weakref
+from contextlib import nullcontext
+from dataclasses import field, make_dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -440,3 +444,118 @@ def test_complete_catalog_pages_keep_original_connection(monkeypatch):
         assert json.loads(json.dumps(client.server_info))["name"] == "echo-server"
     finally:
         client.stop()
+
+
+# LLM: 替代仅限进程启动，真实start和退出注册仍执行；保存hook模拟atexit的强引用容器，不启动遗留进程。
+# 函数用途: 验证退出注册只登记一次模块函数，不阻止无人持有的客户端回收。
+def test_opt6_exit_hook_does_not_retain_unowned_clients(monkeypatch):
+    hooks = []
+    monkeypatch.setattr(mcp_client.atexit, 'register', hooks.append)
+    monkeypatch.setattr(mcp_client, '_EXIT_HOOK_REGISTERED', False, raising=False)
+    monkeypatch.setattr(mcp_client, '_LIVE_MCP_CLIENTS', weakref.WeakSet(), raising=False)
+    monkeypatch.setattr(MCPStdioClient, '_start_transport', lambda self: object())
+    refs = []
+    for _ in range(3):
+        client = MCPStdioClient(_config(_ECHO_SERVER))
+        client.start()
+        refs.append(weakref.ref(client))
+        del client
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+    assert len(hooks) == 1 and hooks[0] is mcp_client._stop_live_mcp_clients
+
+
+# LLM: 清理回执使用原类型，未知客户端仍存活且留在弱集合；退出扫描不得持锁调用stop或被单实例异常中断。
+# 函数用途: 验证退出钩子停止活实例，并按confirmed决定是否移出追踪。
+def test_opt6_exit_hook_stops_live_clients_and_keeps_unknown(monkeypatch):
+    monkeypatch.setattr(mcp_client.atexit, 'register', lambda callback: None)
+    monkeypatch.setattr(mcp_client, '_EXIT_HOOK_REGISTERED', False, raising=False)
+    monkeypatch.setattr(mcp_client, '_LIVE_MCP_CLIENTS', weakref.WeakSet(), raising=False)
+    monkeypatch.setattr(MCPStdioClient, '_start_transport', lambda self: object())
+    clients = [MCPStdioClient(_config(_ECHO_SERVER)) for _ in range(2)]
+    stopped = []
+    for index, client in enumerate(clients):
+        client.start()
+        client._transport = SimpleNamespace(revoke=lambda: None, terminate=lambda i=index: (
+            stopped.append(i) or ProcessTerminationReceipt('test', i == 0, None, 0)))
+    callback = getattr(mcp_client, '_stop_live_mcp_clients', None)
+    assert callable(callback)
+    callback()
+    assert sorted(stopped) == [0, 1]
+    assert clients[0] not in mcp_client._LIVE_MCP_CLIENTS
+    assert clients[1] in mcp_client._LIVE_MCP_CLIENTS
+
+
+# LLM: 轻量DTO保留真实worker入口参数，运输只提供真实代码读取的父tools身份，不构造业务运行权。
+# 函数用途: 准备独立或共享工具的worker生命周期测试材料。
+def _opt6_worker_params(tmp_path, *, parent_tools=None):
+    from agent_py_agent.agent.agent_core.runner.worker import RunSubagentWorkerParams
+    transport = None
+    if parent_tools is not None:
+        dto = make_dataclass('TestTransport', [('scope', object), ('worker_agent', object, field(default=None))])
+        transport = dto(SimpleNamespace(execution=SimpleNamespace(agent=SimpleNamespace(tools=parent_tools))))
+    return RunSubagentWorkerParams(config=SimpleNamespace(), root=tmp_path, run_id='worker-test', instruction='',
+        dry_run=True, max_cards=0, probe=False, retry_reason='', request_transport=transport)
+
+
+# LLM: 构造/授权和overlay以受控依赖替换，只检查真实build在替换旧worker前的清理；共享父tools不得关闭。
+# 函数用途: 验证配置overlay重建时旧worker工具独立才关闭。
+@pytest.mark.parametrize('shared', [False, True])
+def test_opt6_overlay_rebuild_closes_only_independent_tools(tmp_path, monkeypatch, shared):
+    from agent_py_agent.agent.agent_core.runner import worker as module
+    from agent_py_agent.agent.gateway_parts import multiprocess_child_execution_binding as binding
+    from agent_py_agent.agent.settings import model_profiles
+    closed = []
+    tools = SimpleNamespace(close_mcp_clients=lambda: closed.append('old'))
+    parent_tools = tools if shared else SimpleNamespace()
+    params = _opt6_worker_params(tmp_path, parent_tools=parent_tools)
+    first = SimpleNamespace(tools=tools, subagents=SimpleNamespace(workspace_root=tmp_path))
+    second = SimpleNamespace(tools=SimpleNamespace())
+    candidates = iter([first, second])
+    monkeypatch.setattr(module, '_construct_transported_worker', lambda *_args: next(candidates))
+    monkeypatch.setattr(module, '_attach_worker_runtime', lambda *_args: None)
+    monkeypatch.setattr(module, 'authorize_operation', lambda *_args: object())
+    monkeypatch.setattr(model_profiles, 'inherited_model_config', lambda *_args: object())
+    monkeypatch.setattr(module, 'apply_task_runtime_config_overlay', lambda *_args, **_kw: object())
+    monkeypatch.setattr(binding, 'capture_original_child_dispatch', lambda *_args: None)
+    assert module._build_worker_agent(None, params) is second
+    assert closed == ([] if shared else ['old'])
+
+
+# LLM: 使用真实worker外层与finally，业务成功/抛错和关闭抛错分别观测；共享父tools始终不被关闭。
+# 函数用途: 验证worker所有退出路径确定性清理且关闭异常不覆盖业务结果。
+@pytest.mark.parametrize('condition', ['success', 'business_error', 'close_error', 'shared'])
+def test_opt6_worker_exit_closes_independent_tools(tmp_path, monkeypatch, condition):
+    from agent_py_agent.agent.agent_core.runner import worker as module
+    from agent_py_agent.agent.gateway_parts import multiprocess_subagent_execution as execution
+    closed = []
+
+    # LLM: 故障只发生在测试独立工具的清理边界，不改真实业务返回值。
+    # 函数用途: 记录清理并按场景抛错，确保finally不遮蔽业务结果。
+    def close():
+        closed.append('closed')
+        if condition == 'close_error':
+            raise OSError('controlled cleanup error')
+
+    tools = SimpleNamespace(close_mcp_clients=close)
+    worker = SimpleNamespace(tools=tools)
+    params = _opt6_worker_params(tmp_path, parent_tools=tools if condition == 'shared' else SimpleNamespace())
+    result = object()
+
+    # LLM: 用可辨认原异常检查业务异常不被finally吞掉。
+    # 函数用途: 返回原结果或抛出业务错误供worker外层收尾测试。
+    def run(*_args):
+        if condition == 'business_error':
+            raise ValueError('controlled business error')
+        return result
+
+    monkeypatch.setattr(module, '_admission_closed_refusal', lambda *_args: None)
+    monkeypatch.setattr(module, '_build_worker_agent', lambda *_args: worker)
+    monkeypatch.setattr(module, '_run_bound_subagent_worker', run)
+    monkeypatch.setattr(execution, 'child_worker_scope', lambda *_args: nullcontext())
+    if condition == 'business_error':
+        with pytest.raises(ValueError, match='controlled business error'):
+            module._run_subagent_worker(params)
+    else:
+        assert module._run_subagent_worker(params) is result
+    assert closed == ([] if condition == 'shared' else ['closed'])

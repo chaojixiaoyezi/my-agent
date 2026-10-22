@@ -177,14 +177,17 @@ def _human_lines(payload: dict[str, object]) -> list[str]:
     return [f"已把 {payload.get('skill_name')} 退回到第 {payload.get('version')} 版。"]
 
 
-# LLM: 每个 Skill 一行摘要，完整事件用 show 查看。
+# LLM: 每个 Skill 一行摘要并附带溢出队列与有效使用统计，完整事件用 show 查看。
 # 函数用途: 生成列表的中文展示。
 def _list_lines(payload: dict[str, object]) -> list[str]:
     switch = "开启" if payload.get("self_learning_enabled") else "关闭"
     limit = payload.get("daily_limit") or "不限"
+    overflow = int(payload.get("overflow_requests") or 0)
+    usage = payload.get("skill_usage") if isinstance(payload.get("skill_usage"), dict) else {}
+    effective = int(usage.get("effective_uses") or 0)
     lines = [
         f"自动总结的 Skill（owner {payload.get('owner_id')}，共 {payload.get('count')} 个；自学习开关：{switch}）",
-        f"待处理请求 {payload.get('pending_requests')} 条；今日总结调用 {payload.get('calls_today')}/{limit} 次",
+        f"待处理请求 {payload.get('pending_requests')} 条（溢出 {overflow} 条）；今日总结调用 {payload.get('calls_today')}/{limit} 次；累计有效使用 {effective} 次",
     ]
     for item in payload.get("skills") or []:
         state = _STATE_LABELS.get(item["state"], item["state"])
@@ -228,12 +231,12 @@ def cmd_learning_proposals(args):
         resolve_learning_proposal,
     )
 
-    # LLM: owner解析沿原CLI上下文，不接受候选内容指定owner。
+    # LLM: owner解析沿原CLI上下文，不接受候选内容指定owner；列表只读包含归档pending。
     # 函数用途: 执行这一条用户候选命令。
     def operation(context, selected):
         action = selected.skills_learned_action
         if action == "proposals":
-            return {"ok":True,"proposals":list_learning_proposals(context.store)}
+            return {"ok":True,"proposals":list_learning_proposals(context.store,include_overflow=True)}
         if action == "proposal-show":
             return {"ok":True,"proposal":learning_proposal(context.store,selected.proposal_id)}
         row = resolve_learning_proposal(context.store,selected.proposal_id,selected.revision,decision=action,guard_config=context.config,actor_id="local-cli")

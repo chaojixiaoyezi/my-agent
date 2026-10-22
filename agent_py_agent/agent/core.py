@@ -1237,13 +1237,11 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
     agent.tools.register(PublishAuditUpdateTool(agent))
     # skill 树第一期:skill_search 检索台(千级冷路,prompt 零索引成本)。
     agent.tools.register(SkillSearchTool(agent))
+    from .capability.skill_feedback_tool import SkillFeedbackTool
     from .tooling.skill_transfer_tool import SkillTransferTool
 
     agent.tools.register(SkillTransferTool(agent))
-    if agent.config.enable_self_learning:
-        from .capability.skill_feedback_tool import SkillFeedbackTool
-
-        agent.tools.register(SkillFeedbackTool(agent))
+    agent.tools.register(SkillFeedbackTool(agent))
     # 历史检索台(对标 长期助手 session_search 三模式):封装 LocalStore 的 FTS5/最近列表/
     # 时间窗,让模型能查/翻本地历史记录(记忆、产物、归档),零 LLM 成本纯读。
     agent.tools.register(SessionSearchTool(agent))

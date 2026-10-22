@@ -321,3 +321,125 @@ def test_received_resources_use_existing_file_and_sandbox_permissions(transfer_c
     assert not cross.ok
     protected=execute_registry_test_call(target.tools,'write_file',{'path':str(target.home_paths.owner_permissions_json),'content':'{}'},register_with=target,call_id='protected-policy')
     assert not protected.ok
+
+
+# LLM: 只验证参数形状，不把缺字段统一成不可重试系统故障；错误不得回显私人路径或值。
+# 函数用途: 检查模型工具的逐字段修正提示。
+@pytest.mark.parametrize('params,field', [({}, 'action'), ({'action': 'unknown'}, 'action'),
+    ({'action': 'prepare'}, 'target'), ({'action': 'prepare', 'target': {}}, 'provider'),
+    ({'action': 'prepare', 'target': {'provider': 'feishu', 'owner_kind': 'group', 'owner_id': 'oc_target'}}, 'skills'),
+    ({'action': 'prepare', 'target': {'provider': 'feishu', 'owner_kind': 'group', 'owner_id': 'oc_target'}, 'skills': [{}]}, 'skills[0]'),
+    ({'action': 'status', 'reference': 7}, 'reference'), ({'action': 'status', 'skills': []}, 'skills'),
+    ({'action': 'prepare', 'reference': ''}, 'reference')])
+def test_transfer_argument_errors_name_the_invalid_field(transfer_case, params, field):
+    source, *_ = transfer_case
+    result = SkillTransferTool(source).execute(params)
+    assert not result.ok and result.error_code in {'SKILL_TRANSFER_ARGUMENTS_INVALID', 'SKILL_TRANSFER_MANIFEST_INVALID'}
+    assert field in result.output and '迁移参数无效' not in result.output
+
+
+# LLM: 原核心入口也必须做同样的形状校验，不能只修schema；安全快照与授权门继续由原manifest执行。
+# 函数用途: 检查核心prepare对空列表、缺摘要、非法资源和clone类型的字段说明。
+@pytest.mark.parametrize('change,field', [({'skills': []}, 'skills'), ({'skills': [{}]}, 'stable_id'),
+    ({'skills': [{'stable_id': 'owner:sample'}]}, 'content_sha256'),
+    ({'skills': [{'stable_id': 'owner:sample', 'content_sha256': 'bad'}]}, 'content_sha256'),
+    ({'resources': 'bad'}, 'resources'), ({'clone': 'yes'}, 'clone')])
+def test_transfer_prepare_core_has_field_level_errors(transfer_case, change, field):
+    source, _target, _other, selection, _path = transfer_case
+    selected = [{**selection, **({'resources': change['resources']} if 'resources' in change else {})}]
+    with pytest.raises(SkillTransferError) as raised:
+        skill_transfer.prepare_transfer(source, asdict(OwnerIdentity.provider_group('feishu', 'oc_target')),
+            change.get('skills', selected), clone=change.get('clone', False))
+    assert field in str(raised.value)
+
+
+# LLM: 无reference只列本owner原账，查询不创建目录、确认来源或导入目标；原单引用查询合同保留。
+# 函数用途: 验证准备、双端确认、落地及旁观身份的列表回执。
+@pytest.mark.parametrize('reference', [None, ''])
+def test_transfer_status_without_reference_lists_owner_receipts(transfer_case, reference):
+    source, target, other, *_ = transfer_case
+    offer = prepare(transfer_case)
+    params = {'action': 'status', **({'reference': reference} if reference is not None else {})}
+    before = SkillLearningStore.for_home(source.home_paths).registry_path.read_bytes()
+    first = SkillTransferTool(source).execute(params)
+    assert first.ok, first.output
+    sent = json.loads(first.output)
+    assert sent['ok'] and len(sent['outgoing']) == 1 and sent['incoming'] == []
+    row = sent['outgoing'][0]
+    assert row['reference'] == offer['reference'] and row['status'] == 'draft' and row['imported'] is None
+    assert row['source_owner'] == asdict(OwnerIdentity.provider_user('feishu', 'ou_source'))
+    assert row['target_owner'] == asdict(OwnerIdentity.provider_group('feishu', 'oc_target'))
+    assert row['skills'] and f'/skills transfer authorize {offer["reference"]}' in row['next_commands']
+    assert SkillLearningStore.for_home(source.home_paths).registry_path.read_bytes() == before
+    assert json.loads(SkillTransferTool(target).execute(params).output)['incoming'] == []
+    assert control(source, 'authorize', offer['reference']).ok
+    accepted = control(target, 'accept', offer['reference'])
+    assert accepted.ok, accepted.message
+    received = json.loads(SkillTransferTool(target).execute(params).output)
+    assert len(received['incoming']) == 1 and received['outgoing'] == []
+    receipt = received['incoming'][0]
+    assert receipt['reference'] == offer['reference'] and receipt['status'] == 'committed'
+    assert receipt['imported'] == accepted.details['imported'] and receipt['source_owner'] == row['source_owner']
+    sent = json.loads(SkillTransferTool(source).execute(params).output)['outgoing'][0]
+    assert sent['status'] == 'authorized' and sent['imported'] == accepted.details['imported']
+    assert json.loads(SkillTransferTool(other).execute(params).output) == {'ok': True, 'outgoing': [], 'incoming': []}
+    assert 'data' not in sent and str(source.home_paths.owner_home_dir) not in first.output
+
+
+# LLM: 回执是目标原提交的辅助元数据；来源回执写坏不得反转已提交导入，也不能伪造送达。
+# 函数用途: 验证落地成功但回执暂不可写时显示未知，再次确认原编号能补回原回执。
+@pytest.mark.parametrize('error_type', ['os', 'store'])
+def test_transfer_receipt_write_failure_preserves_committed_import(transfer_case, monkeypatch, error_type):
+    from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStoreError
+    source, target, *_ = transfer_case
+    offer = prepare(transfer_case)
+    assert control(source, 'authorize', offer['reference']).ok
+    save = SkillLearningStore.save_registry
+    # LLM: 仅阻断来源侧新增回执，不破坏目标原事务或原确认记录。
+    # 函数用途: 注入回执落盘失败以区分提交与回执状态。
+    def fail_receipt(store, registry):
+        if store.skills_root.parent == source.home_paths.owner_home_dir and any(row.get('receipt') for row in registry.import_operations.values()):
+            if error_type == 'store':
+                raise SkillLearningStoreError('RECEIPT_UNAVAILABLE')
+            raise OSError('receipt unavailable')
+        return save(store, registry)
+    monkeypatch.setattr(SkillLearningStore, 'save_registry', fail_receipt)
+    accepted = control(target, 'accept', offer['reference'])
+    assert accepted.ok, accepted.message
+    status = SkillTransferTool(source).execute({'action': 'status'})
+    assert status.ok and json.loads(status.output)['outgoing'][0]['imported'] is None
+    assert len(SkillLearningStore.for_home(target.home_paths).load_registry().skills) == 1
+    monkeypatch.setattr(SkillLearningStore, 'save_registry', save)
+    assert control(target, 'accept', offer['reference']).details == accepted.details
+    status = SkillTransferTool(source).execute({'action': 'status'})
+    assert json.loads(status.output)['outgoing'][0]['imported'] == accepted.details['imported']
+
+
+# LLM: 只扫描当前owner固定transfers目录；tx索引不授予任何读取其他owner正文的权限。
+# 函数用途: 验证旧tx索引与原账去重、外owner条目过滤及链接目录拒绝。
+def test_transfer_status_reads_local_tx_index_without_cross_owner_access(transfer_case):
+    source, _target, other, *_ = transfer_case
+    offer = prepare(transfer_case)
+    store = SkillLearningStore.for_home(source.home_paths)
+    directory = store.directory / 'transfers'
+    payload = {'reference': offer['reference'], 'status': 'draft', 'source_owner': asdict(OwnerIdentity.provider_user('feishu', 'ou_source')),
+        'target_owner': asdict(OwnerIdentity.provider_group('feishu', 'oc_target')), 'skills': ['sample'], 'imported': None}
+    (directory / 'tx_existing.json').write_text(json.dumps(payload))
+    extra = {**payload, 'source_owner': asdict(OwnerIdentity.provider_group('feishu', 'oc_other')), 'reference': 'private-other-ref'}
+    (directory / 'tx_foreign.json').write_text(json.dumps(extra))
+    status = SkillTransferTool(source).execute({'action': 'status'})
+    assert status.ok, status.output
+    assert len(json.loads(status.output)['outgoing']) == 1 and 'private-other-ref' not in status.output
+    (directory / 'tx_link.json').symlink_to(other.home_paths.owner_home_dir / 'registry.json')
+    assert not SkillTransferTool(source).execute({'action': 'status'}).ok
+
+
+# LLM: 正式ToolCall校验后仍须到达无reference列表分支，不调用来源授权或目标接收入口。
+# 函数用途: 验证投递列表经真实工具执行器返回，不仅是handler直调用。
+def test_transfer_list_status_through_canonical_executor(transfer_case):
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+    source, *_ = transfer_case
+    offer = prepare(transfer_case)
+    result = execute_registry_test_call(source.tools, 'skill_transfer', {'action': 'status'}, register_with=source)
+    assert result.ok, result.output
+    assert offer['reference'] in result.output and 'outgoing' in result.output

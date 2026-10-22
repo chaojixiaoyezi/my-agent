@@ -790,16 +790,15 @@ def _curator_entry_newer_than(entry: os.DirEntry, timestamp: float) -> bool:
         return True
 
 
+# LLM: deadline_out 收集最近一个可触发 job/rule 的有效到期时间（含 backoff_until 并跳过已有 waiting/活动 run 的规则），
+#   到点时结论从 none 变成 hard；不传参时保持布尔语义。
+# 函数用途: 从 owner 调度账本发现真正到期或待恢复的运行，避免 waiting 运行或退避期规则每秒空唤醒。
 def _has_due_scheduler_fact(
     owner_home: Path,
     *,
     deadline_out: list[float] | None = None,
 ) -> bool:
-    """Discover due jobs and recoverable nonterminal runs from the owner ledger.
-
-    LLM: ``deadline_out`` 收集"最近一个 active job 的 next_run_at"——job 到点这一刻结论会从
-    none 变成 hard,所以缓存有效期不能越过它。不传参时行为与旧实现逐字一致。
-    """
+    """Discover due jobs and recoverable nonterminal runs from the owner ledger."""
 
     path = owner_home / "data" / "scheduler" / "store.json"
     if not path.is_file():
@@ -813,31 +812,64 @@ def _has_due_scheduler_fact(
     if not isinstance(payload, dict):
         return True
     runs = payload.get("runs")
-    if isinstance(runs, dict) and any(
-        isinstance(run, dict)
-        and str(run.get("status") or "") in {"queued", "claimed", "running"}
-        for run in runs.values()
-    ):
-        return True
-    jobs = payload.get("jobs")
     current = time.time()
-    due = False
-    upcoming: list[float] = []
-    if isinstance(jobs, dict):
-        for job in jobs.values():
-            if not isinstance(job, dict) or str(job.get("status") or "") != "active":
+    if isinstance(runs, dict):
+        for run in runs.values():
+            if not isinstance(run, dict):
                 continue
-            next_run_at = _scheduler_timestamp(job.get("next_run_at"))
-            if 0 < next_run_at <= current:
-                due = True
-                break
-            if next_run_at > current:
-                upcoming.append(next_run_at)
-    if due:
+            status = str(run.get("status") or "")
+            if status in {"queued", "claimed", "running"}:
+                return True
+            if status == "waiting" and _waiting_scheduler_run_needs_wake(
+                owner_home, run, now=current, deadline_out=deadline_out
+            ):
+                return True
+    from .scheduler.due_index import _earliest_due_at
+
+    earliest = _earliest_due_at(payload, now=current)
+    if 0 < earliest <= current:
         return True
-    if upcoming:
-        _add_deadline(deadline_out, min(upcoming))
+    if earliest > current:
+        _add_deadline(deadline_out, earliest)
     return False
+
+
+# LLM: waiting运行若关联TaskLink已进入终态则立即唤醒收口；若仍为active则只投影低频复核deadline，避免每秒空转。
+# 函数用途: 为冷重启或漏通知的终态waiting调度保留发现入口，同时不恢复正常等待期间的每秒唤醒。
+def _waiting_scheduler_run_needs_wake(
+    owner_home: Path,
+    run: dict[str, object],
+    *,
+    now: float,
+    deadline_out: list[float] | None,
+) -> bool:
+    run_id = str(run.get("run_id") or "").strip()
+    if not run_id:
+        return False
+    status = _find_waiting_run_task_status(owner_home, run_id)
+    if not status:
+        return False
+    if conversation_task_link_is_terminal(status):
+        return True
+    if status == "active":
+        updated = _scheduler_timestamp(run.get("updated_at")) or now
+        _add_deadline(deadline_out, max(updated + 60.0, now + 60.0))
+    return False
+
+
+# LLM: 按已知会话根顺序读取waiting关联TaskLink状态（复用_read_cached_task_status_fields缓存），不递归全盘。
+# 函数用途: 兼容工作区与直连会话布局下的定时任务关联状态查询。
+def _find_waiting_run_task_status(owner_home: Path, run_id: str) -> str:
+    name = f"{run_id}.json"
+    for rel in ("conversations/tasks", "data/conversations/tasks"):
+        fields = _read_cached_task_status_fields(owner_home / rel / name)
+        if fields is not None and fields[1]:
+            return str(fields[1]).strip().lower()
+    for folder in _conversation_task_link_dirs(owner_home / "workspace" / "runtime" / "workspaces") or ():
+        fields = _read_cached_task_status_fields(folder / name)
+        if fields is not None and fields[1]:
+            return str(fields[1]).strip().lower()
+    return ""
 
 
 def _scheduler_timestamp(value: object) -> float:

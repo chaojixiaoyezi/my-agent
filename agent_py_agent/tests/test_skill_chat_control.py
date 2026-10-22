@@ -165,3 +165,83 @@ def test_a_failure_after_the_change_does_not_claim_nothing_changed(tmp_path, mon
     monkeypatch.setattr(module, "learned_skills_report", _registry_unreadable)
     unreadable = _run(monkeypatch, ctx.home, "/skills learned")
     assert unreadable.ok is False and unreadable.message == "技能提案或自动 Skill 暂时读不到，请稍后重试。"
+
+
+# LLM: 真实候选通过原propose保存，测试不直接伪造正式Skill或绕过确认链。
+# 函数用途: 在给定owner创建一份自动总结候选。
+def _automatic_candidate(home, name='automatic-method'):
+    from agent_py_agent.agent.capability.skill_learning_prompt import parse_skill_learning_decision
+    from agent_py_agent.agent.capability.skill_learning_proposals import (
+        learning_proposal,
+        propose_learning,
+    )
+    from agent_py_agent.agent.capability.skill_learning_publish import PublishRequest
+
+    store = SkillLearningStore.for_home(home)
+    event = propose_learning(store, PublishRequest(parse_skill_learning_decision(_output(name=name), frozenset()),
+        {'request_key': name, 'task_id': 'task-automatic'}))
+    return learning_proposal(store, event.reason)
+
+
+# LLM: 两类提案共用原owner；新增展示不能改旧提案命令格式、确认版本或自动发布正式内容。
+# 函数用途: 验证overview/proposals/all同时展示旧提案和自动候选及完整命令。
+@pytest.mark.parametrize('command', ['/skills', '/skills proposals', '/skills proposals all'])
+def test_chat_lists_automatic_candidates_with_existing_proposals(tmp_path, monkeypatch, command):
+    ctx = _proposal_ctx(tmp_path)
+    row = _automatic_candidate(ctx.home)
+    store = SkillLearningStore.for_home(ctx.home)
+    result = _run(monkeypatch, ctx.home, command, self_learning=False)
+    assert result.ok, result.message
+    assert ctx.proposal.target.skill_name in result.message
+    assert f'/skills confirm {ctx.proposal.proposal_id[:8]} 1' in result.message
+    assert 'automatic-method' in result.message and row['decision']['description'] in result.message
+    assert f'/skills learned proposal-show {row["proposal_id"]}' in result.message
+    assert f'/skills learned confirm {row["proposal_id"]} {row["revision"]}' in result.message
+    assert f'/skills learned reject {row["proposal_id"]} {row["revision"]}' in result.message
+    assert f'修订 {row["revision"]}' in result.message
+    assert not store.load_registry().skills and str(ctx.home.owner_home_dir) not in result.message
+
+
+# LLM: 存在自动候选时不能同时称“没有提案”；all显示历史但不给已拒绝候选可误用的确认命令。
+# 函数用途: 验证仅有自动候选、拒绝后pending过滤和all历史展示。
+@pytest.mark.parametrize('command', ['/skills', '/skills proposals'])
+def test_chat_automatic_only_candidates_are_not_reported_empty(tmp_path, monkeypatch, command):
+    from agent_py_agent.agent.capability.skill_learning_proposals import resolve_learning_proposal
+
+    ctx = _learning_runtime(tmp_path)
+    row = _automatic_candidate(ctx.home)
+    result = _run(monkeypatch, ctx.home, command)
+    assert result.ok and row['proposal_id'] in result.message
+    assert '没有需要你处理的提案' not in result.message
+    resolve_learning_proposal(ctx.store, row['proposal_id'], row['revision'], decision='reject')
+    pending = _run(monkeypatch, ctx.home, '/skills proposals')
+    assert pending.ok and row['proposal_id'] not in pending.message
+    history = _run(monkeypatch, ctx.home, '/skills proposals all')
+    assert history.ok and row['proposal_id'] in history.message and '已拒绝' in history.message
+    assert f'/skills learned confirm {row["proposal_id"]}' not in history.message
+    assert f'/skills learned reject {row["proposal_id"]}' not in history.message
+
+
+# LLM: 自动候选为空时返回必须逐字兼容旧展示，不改变子代理提案服务格式或审核顺序点。
+# 函数用途: 锁住空候选时overview和proposals的原文。
+def test_chat_empty_automatic_candidate_lists_preserve_exact_old_output(tmp_path, monkeypatch):
+    ctx = _learning_runtime(tmp_path)
+    assert _run(monkeypatch, ctx.home, '/skills proposals').message == '待确认的技能提案：0 条（自学习：开启）\n没有需要你处理的提案。'
+    assert _run(monkeypatch, ctx.home, '/skills').message == ('待确认的技能提案：0 条（自学习：开启）\n没有需要你处理的提案。\n\n'
+        '自动总结的 Skill：0 个（发 /skills learned 查看）。\n待确认学习候选：0份（/skills learned proposals 查看，确认前不写正式Skill）。')
+
+
+# LLM: 新式候选读口的include_overflow为只读范围开关，不是另一套候选存储；旧接口无此参数时仍兼容。
+# 函数用途: 验证overview与proposals不会漏掉可选溢出候选。
+@pytest.mark.parametrize('command', ['/skills', '/skills proposals', '/skills proposals all'])
+def test_chat_candidate_lists_include_optional_overflow(tmp_path, monkeypatch, command):
+    ctx = _learning_runtime(tmp_path)
+    first = _automatic_candidate(ctx.home, 'ordinary-method')
+    overflow = _automatic_candidate(ctx.home, 'overflow-method')
+    # LLM: 使用两条真实候选作为读口返回值，只模拟新版本的默认过滤，不更改候选文件。
+    # 函数用途: 暴露带include_overflow参数的新式列表接口。
+    def candidates(_store, *, include_overflow=False):
+        return [first, overflow] if include_overflow else [first]
+    monkeypatch.setattr(module, 'list_learning_proposals', candidates)
+    result = _run(monkeypatch, ctx.home, command)
+    assert result.ok and overflow['proposal_id'] in result.message and first['proposal_id'] in result.message

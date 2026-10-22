@@ -478,16 +478,32 @@ def _control_supervisor_unit(action, unit):
         raise ValueError('Supervisor用户服务控制未完成：' + action + ' ' + unit)
 
 
-# LLM: 原gateway/adapter控制失败仍硬拒绝；仅supervisor-stop允许旧CLI无此命令，后续清理和安装核验不放宽。
+# LLM: 原gateway/adapter控制失败仍硬拒绝；旧发行adapter stop仅等5秒时补等最多15秒确认进程已退；supervisor-stop允许旧CLI无此命令。
 # 函数用途: 串行执行准确安装启动器的服务动作，不使用shell或按名字杀进程。
 def _run_update_commands(prefix, commands):
     launcher = str(prefix / 'bin' / 'my-agent-preview')
     for arguments in commands:
         result = subprocess.run([launcher, *arguments], timeout=6000, check=False)
+        if result.returncode and arguments[:2] == ['adapter', 'stop'] and _wait_legacy_adapter_exited(prefix):
+            continue
         if result.returncode and arguments[:2] != ['gateway', 'supervisor-stop']:
             raise ValueError('原实例服务控制未完成：' + ' '.join(arguments[:2]))
         if result.returncode:
             print('Supervisor停止命令未成功，继续原服务排空与遗留进程核验（旧发行可能不支持该命令）')
+
+
+# LLM: 旧发行adapter stop发SIGTERM后仅等5秒，此处补等最多15秒，仅在原adapter_pid确实退出后清理遗留文件并放行。
+# 函数用途: 兼容旧版CLI停止超时过短导致的飞书通道收尾假失败。
+def _wait_legacy_adapter_exited(prefix: Path, timeout: float = 15.0) -> bool:
+    paths = _update_service_paths(prefix)
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        if not _service_alive(paths.adapter_pid):
+            paths.adapter_pid.unlink(missing_ok=True)
+            (paths.root / 'adapter_stop.request').unlink(missing_ok=True)
+            return True
+        time.sleep(0.2)
+    return not _service_alive(paths.adapter_pid)
 
 
 # LLM: 独立尝试每个原活跃组件，收集错误后一起报；准确维护根由停止调用栈或当前原路径解析传入。

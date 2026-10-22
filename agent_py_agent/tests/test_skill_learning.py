@@ -326,11 +326,15 @@ def test_max_skills_limits_creation_only(tmp_path: Path) -> None:
     assert list(ctx.store.load_registry().skills) == [NAME]
 
 
+# LLM: 配额测试使用两条不同会话的独立材料，避免被新的同上下文最新材料收敛规则合并；预算断言保持不变。
+# 函数用途: 验证当日额度耗尽后保留尚未处理的独立请求且不再调用模型。
 def test_daily_limit_defers_remaining_requests(tmp_path: Path) -> None:
     settings = SkillLearningSettings(min_tool_rounds=3, daily_limit=1)
     ctx = _runtime(tmp_path, _output(), settings=settings)
-    ctx.service.enqueue_from_finalize(_ctx("run-1"))
-    ctx.service.enqueue_from_finalize(_ctx("run-2"))
+    for index in (1, 2):
+        ctx.service.enqueue_from_finalize(_ctx(f"run-{index}", task_attributes={
+            "conversation_thread_id": f"daily-thread-{index}", "conversation_task_completed": True,
+        }))
 
     assert ctx.service.run_pending().status == "published"
     assert ctx.service.run_pending().status == "daily_limit"
@@ -362,7 +366,7 @@ def test_busy_run_lock_and_foreground_model_defer_without_calls(tmp_path: Path, 
     assert ctx.backend.prompts == [] and len(ctx.store.pending_requests()) == 1
 
 
-# LLM: 热队列20条之外先保存最旧请求，重复键包括溢出区；只有总缓冲满才允许QUEUE_FULL。
+# LLM: 热队列保存最老20条，新请求进入溢出区，重复键包括两区；只有总缓冲满才允许QUEUE_FULL。
 # 函数用途: 验证不同会话经验不因热队列满而丢失，且总存储容量仍有明确上限。
 def test_queue_is_bounded_and_duplicates_are_ignored(tmp_path: Path) -> None:
     ctx = _runtime(tmp_path)
@@ -512,16 +516,15 @@ def test_c6_full_queue_merges_matching_identity_without_losing_new_request(tmp_p
     assert any(store.read_request(path)["request_key"] == new["request_key"] for path in store.pending_requests())
 
 
-# LLM: 在途请求可能被轮转到溢出区，重试与收口仍须按原文件身份定位它，不能重放已完成材料。
-# 函数用途: 验证轮转后旧路径可重试/删除，清空热队列会恢复剩余溢出请求。
+# LLM: 溢出区中的请求即便通过热区同名路径引用，重试与收口仍须按原文件名定位它，不能重放已完成材料。
+# 函数用途: 验证溢出区请求跨目录可重试/删除，清空热队列会恢复剩余溢出请求。
 def test_c6_overflow_refill_and_inflight_request_cleanup(tmp_path):
     store = _runtime(tmp_path).store
-    for index in range(20):
+    for index in range(21):
         assert store.enqueue(_c6_request(index)) == "queued"
-    old = store.pending_requests()[0]
-    request = store.read_request(old)
-    assert store.enqueue(_c6_request(20)) == "queued"
     overflow = store.directory / "requests_overflow"
+    old = store.requests_dir / store.overflow_requests()[0].name
+    request = store.read_request(old)
     assert (overflow / old.name).is_file()
     store.rewrite_request(old, {**request, "attempts": 1})
     assert store.read_request(overflow / old.name)["attempts"] == 1
@@ -922,6 +925,216 @@ def test_c6_overflow_refill_at_full_real_owner_quota(tmp_path):
     assert used < 1024 * 1024
     (ctx.home.owner_home_dir / "quota-fill.bin").write_bytes(b"x" * (1024 * 1024 - used))
     assert owner_logical_usage_bytes(ctx.home.owner_home_dir) == 1024 * 1024
-    assert store.pending_requests() == [source]
+    assert store.pending_requests(refill=True) == [source]
     assert source.read_bytes() == content and store.overflow_requests() == []
     assert owner_logical_usage_bytes(ctx.home.owner_home_dir) == 1024 * 1024
+
+
+# LLM: 使用生产请求schema与明确FIFO文件名，只搭建两区磁盘状态，不替换待测发现、消费或恢复函数。
+# 函数用途: 为返工回归准备一条热区或溢出请求。
+def _rw_seed_request(store, index, folder="requests", *, thread="", task=""):
+    row = _c6_request(index, thread=thread, task=task)
+    path = store.directory / folder / f"{1700000000000 + index:013d}-{row['request_key']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    return path
+
+
+# LLM: 发现入口与C同样不持执行事务；默认与显式False均不得请求短写门、建锁或挪动溢出材料。
+# 函数用途: 验证只有溢出请求时仍可被只读发现，文件字节不变。
+@pytest.mark.parametrize("options", [{}, {"refill": False}])
+def test_rw_overflow_discovery_is_readonly_by_default(tmp_path, monkeypatch, options):
+    store = _runtime(tmp_path).store
+    path = _rw_seed_request(store, 1, "requests_overflow")
+    before = {p.relative_to(store.directory): p.read_bytes() for p in store.directory.rglob("*") if p.is_file()}
+
+    # LLM: 禁止发现路径请求执行事务，以断言直接暴露错误调用，不把权限错误当作环境问题。
+    # 函数用途: 捕获只读查询误入写门。
+    def forbid_transaction(*args, **kwargs):
+        raise AssertionError("readonly discovery entered a write transaction")
+
+    monkeypatch.setattr("agent_py_agent.agent.common.request_execution_ports.gateway_short_transaction", forbid_transaction)
+    assert store.pending_requests(**options) == [path]
+    assert {p.relative_to(store.directory): p.read_bytes() for p in store.directory.rglob("*") if p.is_file()} == before
+
+
+# LLM: discovery给出的overflow路径是真实旧位置；消费必须在准确执行门内显式回填并用文件名核源。
+# 函数用途: 验证溢出源跨位置后仍完成一次生产学习器调用，不因路径不同返回busy。
+def test_rw_learner_accepts_discovered_overflow_source_after_refill(tmp_path):
+    ctx = _runtime(tmp_path, _output("skip", name="", description="", when_to_use="", tags=[], body=""))
+    original = _rw_seed_request(ctx.store, 1, "requests_overflow")
+    result = SkillLearningService.run_pending(ctx.service, expected_request_path=original)
+    assert result.status == "skipped", result
+    assert len(ctx.backend.prompts) == 1
+    assert ctx.store.pending_requests() == [] and ctx.store.overflow_requests() == []
+
+
+# LLM: 固定同一毫秒模拟真实突发入队；FIFO须按接收先后而非随机request_key排序，持续补充不能饿死旧溢出。
+# 函数用途: 验证21条入队后连续30次消费加补充的全局顺序。
+def test_rw_global_fifo_never_starves_under_steady_enqueue(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import skill_learning_store as module
+
+    store = _runtime(tmp_path).store
+    monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: 1700000000.0))
+    for index in range(21):
+        assert store.enqueue(_c6_request(index)) == "queued"
+    consumed = []
+    for index in range(30):
+        path = store.pending_requests(refill=True)[0]
+        consumed.append(store.read_request(path)["run_id"])
+        store.discard_request(path)
+        assert store.enqueue(_c6_request(index + 21)) == "queued"
+        hot = store._request_paths("requests")
+        overflow = store.overflow_requests()
+        assert len(hot) == 20 and len(overflow) == 1
+        assert hot[-1].name < overflow[0].name
+    assert consumed == [f"c6-{index}" for index in range(30)]
+
+
+# LLM: 保留现有非空thread或task同类规则，但查找必须覆盖overflow；身份空值不能合并无关请求。
+# 函数用途: 验证同类请求在缓冲区时新材料替代旧材料而不是额外占槽。
+@pytest.mark.parametrize("field", ["thread", "task"])
+def test_rw_full_queue_merges_context_from_overflow(tmp_path, field):
+    store = _runtime(tmp_path).store
+    for index in range(20):
+        _rw_seed_request(store, index, thread=f"other-{index}", task=f"task-{index}")
+    old = _rw_seed_request(store, 20, "requests_overflow", **{field: "same-context"})
+    newest = _c6_request(99, **{field: "same-context"})
+    assert store.enqueue(newest) == "queued"
+    paths = store._request_paths("requests") + store.overflow_requests()
+    assert len(paths) == 21
+    assert not old.exists()
+    assert sum(store.read_request(path)["request_key"] == newest["request_key"] for path in paths) == 1
+
+
+# LLM: 新合并文件耐久后、删旧前真实退出；恢复覆盖删除旧/新请求，发现只读，不能复活已被替代材料。
+# 函数用途: 验证跨区合并中断后去重、热区上限及任一准确请求的安全收口。
+@pytest.mark.parametrize("old_zone", ["requests", "requests_overflow"])
+@pytest.mark.parametrize("operation", ["refill", "enqueue", "discard", "discard_newest"])
+def test_rw_merge_crash_converges_on_next_store_operation(tmp_path, old_zone, operation):
+    import subprocess
+    import sys
+
+    store = _runtime(tmp_path).store
+    for index in range(20):
+        _rw_seed_request(store, index, thread=f"thread-{index}")
+    if old_zone == "requests":
+        old = next(p for p in store._request_paths("requests") if store.read_request(p)["thread_id"] == "thread-5")
+    else:
+        old = _rw_seed_request(store, 20, old_zone, thread="replacement-thread")
+    new = _c6_request(99, thread=store.read_request(old)["thread_id"])
+    script = '''
+import json, os, sys
+from pathlib import Path
+from agent_py_agent.agent.capability import skill_learning_store as m
+s = m.SkillLearningStore(Path(sys.argv[1]), Path(sys.argv[2]))
+request = json.loads(sys.argv[3])
+original = m.write_text_atomic_beneath
+# LLM: 仅在新请求真实原子写完成后结束独立进程，不替换恢复代码或伪造锁成功。
+# 函数用途: 固定重现合并未删旧文件的进程中断。
+def exit_after_new(root, parts, text):
+    original(root, parts, text)
+    if parts[0] in ("requests", "requests_overflow") and json.loads(text).get("request_key") == request["request_key"]:
+        os._exit(93)
+m.write_text_atomic_beneath = exit_after_new
+s.enqueue(request)
+'''
+    result = subprocess.run([sys.executable, "-c", script, str(store.directory), str(store.skills_root), json.dumps(new)],
+                            cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 93, result.stderr
+    before = {p: p.read_bytes() for p in store.directory.rglob("*.json")}
+    visible = store.pending_requests(refill=False)
+    assert len(visible) <= 20
+    assert old.name not in {p.name for p in visible}
+    assert {p: p.read_bytes() for p in store.directory.rglob("*.json")} == before
+    if operation == "refill":
+        store.pending_requests(refill=True)
+    elif operation == "enqueue":
+        assert store.enqueue(_c6_request(100)) == "queued"
+    elif operation == "discard_newest":
+        newest = next(p for p in store._request_paths("requests") + store.overflow_requests()
+                      if store.read_request(p)["request_key"] == new["request_key"])
+        store.discard_request(newest)
+    else:
+        store.discard_request(old)
+    paths = store._request_paths("requests") + store.overflow_requests()
+    assert len(store._request_paths("requests")) <= 20
+    assert old.name not in {p.name for p in paths}
+    expected_new = 0 if operation == "discard_newest" else 1
+    assert sum(store.read_request(p)["request_key"] == new["request_key"] for p in paths) == expected_new
+    if operation == "discard_newest":
+        assert old.name not in {p.name for p in store.pending_requests()}
+
+
+# LLM: 只有溢出区时发现须完整返回排序路径；严格热区查询另用显式参数，不得为查询搬文件。
+# 函数用途: 验证超过20条的纯溢出队列仍完整可见且支持热区只读视图。
+def test_rw_overflow_only_projection_is_complete_and_hot_only_is_explicit(tmp_path):
+    store = _runtime(tmp_path).store
+    paths = [_rw_seed_request(store, index, "requests_overflow") for index in range(21)]
+    assert store.pending_requests() == paths
+    assert store.pending_requests(hot_only=True) == []
+    assert not store.requests_dir.exists()
+
+
+# LLM: 旧版本会把最老请求放入overflow；热区已满不能掩盖这个存量状态或令其永久饥饿。
+# 函数用途: 验证旧布局先只读发现最老溢出，再显式恢复为全局FIFO热区。
+def test_rw_legacy_oldest_overflow_is_discovered_and_rebalanced(tmp_path):
+    store = _runtime(tmp_path).store
+    oldest = _rw_seed_request(store, 0, "requests_overflow")
+    for index in range(1, 21):
+        _rw_seed_request(store, index)
+    assert store.pending_requests()[0] == oldest
+    pending = store.pending_requests(refill=True)
+    assert pending[0].name == oldest.name and len(pending) == 20
+    assert pending[-1].name < store.overflow_requests()[0].name
+
+
+# LLM: 合并中断可能在消费别的请求后降至20条；恢复不能靠总条数推测是否存在同上下文重复。
+# 函数用途: 验证删掉无关请求后仍收敛合并旧副本而不遗留再次消费。
+def test_rw_discard_unrelated_request_still_recovers_merge_duplicates(tmp_path):
+    store = _runtime(tmp_path).store
+    paths = [_rw_seed_request(store, index, thread=f"thread-{index}") for index in range(20)]
+    newest = _rw_seed_request(store, 99, thread="thread-5")
+    store.discard_request(paths[0])
+    assert not paths[5].exists()
+    assert newest.exists()
+    assert len(store._request_paths("requests")) == 19
+
+
+# LLM: 源文件名匹配只适用于同owner两个队列目录；不能用外部同名路径冒充已发现的准确请求。
+# 函数用途: 验证学习器不接受其它owner目录的同名预期源。
+def test_rw_learner_rejects_foreign_same_named_expected_source(tmp_path):
+    ctx = _runtime(tmp_path, _output("skip", name="", description="", when_to_use="", tags=[], body=""))
+    local = _rw_seed_request(ctx.store, 1)
+    foreign = tmp_path / "another-owner" / "requests" / local.name
+    result = SkillLearningService.run_pending(ctx.service, expected_request_path=foreign)
+    assert result.status == "busy"
+    assert not ctx.backend.prompts and local.exists()
+
+
+# LLM: 使用生产C的owner来源枚举和真实freeze_source，不替换路径合同；无执行事务时也必须发现纯溢出源且零写盘。
+# 函数用途: 保留纯溢出请求从只读发现进入生产运输的端到端回归，揭示范围外白名单缺口。
+def test_rw_production_discovery_freezes_overflow_without_writes(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts.multiprocess_background_discovery import (
+        CoordinatorBackgroundRequests,
+    )
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    ctx = _runtime(tmp_path)
+    original = _rw_seed_request(ctx.store, 1, "requests_overflow")
+    config = SimpleNamespace(owner_maintenance_scan_interval_seconds=0, memory_curator_enabled=False, enable_self_learning=True)
+    discovery = SimpleNamespace(control=SimpleNamespace(home_root=ctx.home.root, config=config), _source_cursors={})
+    before = {p.relative_to(ctx.home.owner_home_dir): p.read_bytes() for p in ctx.home.owner_home_dir.rglob("*") if p.is_file()}
+
+    # LLM: 仅把未获授权的短写门变为显式失败，生产发现与冻结逻辑仍原样执行。
+    # 函数用途: 捕获只读来源发现误请求写事务。
+    def forbid_transaction(*args, **kwargs):
+        raise AssertionError("production discovery entered a write transaction")
+
+    monkeypatch.setattr("agent_py_agent.agent.common.request_execution_ports.gateway_short_transaction", forbid_transaction)
+    refs = list(CoordinatorBackgroundRequests._owner_sources(
+        discovery, SimpleNamespace(identity=OwnerIdentity.local_main(), home_dir=ctx.home.owner_home_dir),
+    ))
+    assert {p.relative_to(ctx.home.owner_home_dir): p.read_bytes() for p in ctx.home.owner_home_dir.rglob("*") if p.is_file()} == before
+    assert len(refs) == 1, "overflow learning source must survive production freeze_source validation"
+    assert refs[0]["kind"] == "learning" and refs[0]["source_ref"] == original.relative_to(ctx.home.owner_home_dir).as_posix()

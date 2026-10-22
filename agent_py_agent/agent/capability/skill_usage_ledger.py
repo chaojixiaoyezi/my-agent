@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,24 +24,42 @@ KEEP_USAGE_LEDGER_EVENTS = 1000
 _CONTEXT_DEFAULTS = {"request_id": "", "thread_id": "", "task_id": "", "chars": 0}
 
 
-# LLM: 关键字兼容且上下文白名单固定；原state锁内先补齐明细水位再分配事件序号，所有异常只warning。
+# LLM: 关键字兼容且上下文白名单固定；与批量口共用原state事务，Agent上下文在进锁前冻结，所有异常只warning。
 # 函数用途: 记录一次使用事实，不改变业务调用的结果。
 def record_skill_usage_event(agent_or_store, *, event, skill_id, source, kind="skill", **context) -> None:
     try:
-        row = _usage_row(agent_or_store, event, skill_id, source, kind, context)
+        row = _usage_row(agent_or_store, event, skill_id, source, kind, **context)
         store = _usage_store(agent_or_store)
-        _check_usage_directory(store)
-        with store.state_lock() as admission:
-            rows = _ledger_rows(store)
-            summary = _read_summary(store, rows)
+        _record_usage_rows(store, [row])
+    except Exception:  # noqa: BLE001 - 附带统计不能改变原工具/宿主的成功或失败。
+        logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
+
+
+# LLM: 整批先校验再拿原owner配额→state锁；空批次不创建目录，任何统计故障只warning，不写半批合法事件。
+# 函数用途: 为一次搜索的全部命中只追加并保存一次使用台账。
+def record_skill_usage_events(store: SkillLearningStore, events: Sequence[dict[str, object]]) -> None:
+    try:
+        rows = [_usage_row(store, **event) for event in events]
+        if rows:
+            _record_usage_rows(_usage_store(store), rows)
+    except Exception:  # noqa: BLE001 - 附带批量统计不能改变原工具结果。
+        logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
+
+
+# LLM: 仅接收本地已校验事件；同一锁内恢复水位、连续编号、联合核额并保存一次，沿原双文件故障恢复。
+# 函数用途: 让单条与批量记账共用同一个持久事务。
+def _record_usage_rows(store, events: list[dict]) -> None:
+    _check_usage_directory(store)
+    with store.state_lock() as admission:
+        rows = _ledger_rows(store)
+        summary = _read_summary(store, rows)
+        for row in events:
             row["sequence"] = summary["last_sequence"] + 1
             _add_event(summary, row)
             rows.append(row)
             if len(rows) > MAX_USAGE_LEDGER_EVENTS:
                 rows = rows[-KEEP_USAGE_LEDGER_EVENTS:]
-            _save_usage(store, admission, rows, summary)
-    except Exception:  # noqa: BLE001 - 附带统计不能改变原工具/宿主的成功或失败。
-        logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
+        _save_usage(store, admission, rows, summary)
 
 
 # LLM: 只读恢复已写明细尚未写汇总的事件，不创建目录或保存恢复状态；故障不影响报告主入口。
@@ -70,7 +89,7 @@ def _usage_store(value) -> SkillLearningStore:
 
 # LLM: 只接收固定事件/种类与结构化标识，未知上下文键拒绝；不把 query、正文或异常文本抄到账本。
 # 函数用途: 生成一行有 UTC 日期和有界关联标识的使用记录。
-def _usage_row(agent, event, skill_id, source, kind, context) -> dict:
+def _usage_row(agent, event, skill_id, source, kind="skill", **context) -> dict:
     if event not in USAGE_EVENTS or kind not in {"skill", "capability_package"} or not skill_id:
         raise ValueError("invalid usage identity")
     if set(context) - set(_CONTEXT_DEFAULTS):
@@ -130,7 +149,7 @@ def _empty_summary() -> dict:
     return {"totals": _empty_counts(), "by_skill": {}, "daily_history": {}, "last_sequence": 0}
 
 
-# LLM: 生命周期计数取原汇总，只补水位之后的明细；旧无序号记录在下次写入时统一编号，不从裁剪尾部重算。
+# LLM: 生命周期计数取原汇总；先合并旧by_skill前缀键再补水位后明细，迁移不改总数、水位或日期，不在只读口落盘。
 # 函数用途: 加载汇总并检查基本结构，拒绝损坏状态被新事件覆盖。
 def _read_summary(store, rows: list | None = None) -> dict:
     text = _read_usage_text(store, "usage_summary.json")
@@ -139,8 +158,37 @@ def _read_summary(store, rows: list | None = None) -> dict:
             or not isinstance(summary.get("by_skill"), dict) or not isinstance(summary.get("daily_history"), dict)):
         raise ValueError("invalid usage summary")
     _summary_sequence(summary)
+    _normalize_by_skill(summary)
     _replay_usage_rows(summary, _ledger_rows(store) if rows is None else rows)
     return summary
+
+
+# LLM: 仅规范化统计聚合键，不改变快照、pin、授权身份或原始明细里的调用者stable_id。
+# 函数用途: 去掉能力包和普通Skill的引用包装前缀，避免同一方法被拆开计数。
+def _canonical_skill_id(kind: str, skill_id: str) -> str:
+    if kind == "capability_package" or skill_id.startswith("capability:"):
+        skill_id = skill_id.removeprefix("capability:")
+    return skill_id.removeprefix("skill:")
+
+
+# LLM: 只对各身份四类事件求和并重算有效使用；最近元数据来自时间最新的旧行，生命周期与每日历史原样保留。
+# 函数用途: 在内存中合并旧摘要的前缀别名，下次正常写入时保存规范键。
+def _normalize_by_skill(summary: dict) -> None:
+    merged = {}
+    for skill_id, counts in summary["by_skill"].items():
+        canonical = _canonical_skill_id(counts.get("kind", "skill"), skill_id)
+        if not canonical:
+            raise ValueError("invalid usage skill identity")
+        target = merged.setdefault(canonical, _empty_counts())
+        for event in USAGE_EVENTS:
+            value = counts.get(event, 0)
+            if type(value) is not int or value < 0:
+                raise ValueError("invalid usage count")
+            target[event] += value
+        target["effective_uses"] = target["manual_get"] + target["host_injected"]
+        if counts.get("last_used_at", "") >= target.get("last_used_at", ""):
+            target.update({key: counts[key] for key in ("last_used_at", "last_source", "kind") if key in counts})
+    summary["by_skill"] = merged
 
 
 # LLM: 每事件恰增四类中的一项，旧汇总可由四项之和恢复水位；不把effective_uses再加一次。
@@ -203,12 +251,15 @@ def _prune_daily(summary: dict) -> None:
                                 if oldest <= day <= today.isoformat()}
 
 
-# LLM: 只对已核连续序号累加四类计数与UTC日期映射，同时推进同一水位，不重复记已包含的耐久明细。
+# LLM: 只对已核连续序号累加四类计数与UTC日期映射；by_skill统一规范身份，原始明细仍保留调用者身份以供追溯。
 # 函数用途: 将一条事实累加到生命周期、单技能和每日汇总。
 def _add_event(summary: dict, row: dict) -> None:
     event = row["event"]
     _increment(summary["totals"], event)
-    skill = summary["by_skill"].setdefault(row["skill_id"], _empty_counts())
+    skill_id = _canonical_skill_id(row["kind"], row["skill_id"])
+    if not skill_id:
+        raise ValueError("invalid usage skill identity")
+    skill = summary["by_skill"].setdefault(skill_id, _empty_counts())
     _increment(skill, event)
     skill.update(last_used_at=row["at"], last_source=row["source"], kind=row["kind"])
     daily = summary["daily_history"].setdefault(row["date"], dict.fromkeys(USAGE_EVENTS, 0))
@@ -217,7 +268,7 @@ def _add_event(summary: dict, row: dict) -> None:
     _prune_daily(summary)
 
 
-# LLM: 原锁内联合核额，正常明细先写而回滚汇总先恢复；任意中断不造出领先汇总，已耐久事件由水位补记。
+# LLM: 原锁内只联合核额一次，不对每个文件另扫owner目录；正常明细先写而回滚汇总先恢复，耐久事件由水位补记。
 # 函数用途: 保存有界账本及生命周期汇总，不写任何方法正文。
 def _save_usage(store, admission, rows: list, summary: dict) -> None:
     texts = {"usage_ledger.jsonl": "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
@@ -226,7 +277,6 @@ def _save_usage(store, admission, rows: list, summary: dict) -> None:
     changes = []
     for name, text in texts.items():
         path = store.directory / name
-        store.check_write(path, text)
         changes.append(OwnerQuotaChange(path, len(text.encode("utf-8"))))
     admission.check(changes)
     try:

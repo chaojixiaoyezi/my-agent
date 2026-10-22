@@ -55,7 +55,8 @@ class RunSubagentWorkerParams:
 # LLM: worker 先精确激活再发布 session，退出后把原 attempt 传给待续跑核对；拒绝接纳不写 runner 结果或租约，不能覆盖后来轮次。
 #   入口先问准入关门（_admission_closed_refusal）：这是顺序批次（gate.run_single_runner）与并行批次（gate._counted_worker）
 #   共同的启动边界，关门时不建 worker、不激活、不续派也不唤醒父级。
-# 函数用途: 运行子代理工作片，退出等待片后结束 exact attempt 但保留任务，再继续获批工作或唤醒直属父级；未知副作用不释放。
+#   worker退出确定性关闭独立MCP工具；清理异常不覆盖业务结果，也不关闭父agent共享工具。
+# 函数用途: 运行子代理工作片并收尾独立MCP客户端，保留原attempt及待续跑合同。
 def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResult:
     from ...core import SimpleAgent
 
@@ -64,10 +65,27 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
     worker = _build_worker_agent(SimpleAgent, params)
     from ...gateway_parts.multiprocess_subagent_execution import child_worker_scope
 
-    if params.request_transport is not None:
-        params = replace(params, request_transport=replace(params.request_transport, worker_agent=worker))
-    with child_worker_scope(params.request_transport, worker):
-        return _run_bound_subagent_worker(worker, params)
+    try:
+        if params.request_transport is not None:
+            params = replace(params, request_transport=replace(params.request_transport, worker_agent=worker))
+        with child_worker_scope(params.request_transport, worker):
+            return _run_bound_subagent_worker(worker, params)
+    finally:
+        _close_worker_mcp_clients(worker, params)
+
+
+# LLM: 仅清理worker独立tools；父身份取原运输scope，不猜owner或关闭共享注册表，异常只告警。
+# 函数用途: 在worker被替换或退出时释放其MCP客户端，不掩盖业务返回或异常。
+def _close_worker_mcp_clients(worker, params: RunSubagentWorkerParams) -> None:
+    tools = getattr(worker, "tools", None)
+    scope = getattr(params.request_transport, "scope", None)
+    parent = getattr(getattr(scope, "execution", None), "agent", None)
+    if tools is None or tools is getattr(parent, "tools", None):
+        return
+    try:
+        tools.close_mcp_clients()
+    except Exception:
+        _LOGGER.warning("WORKER_MCP_CLEANUP_UNAVAILABLE", exc_info=True)
 
 
 # LLM: builder已核原dispatch与canonical child，原激活/配置/租约/结果/可恢复片收口顺序保main；只有原请求短门授写，模型等待不持T。
@@ -229,7 +247,7 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
         )
 
 
-# LLM: 保原owner/dispatch授权与模型引用；仅实际child沿同roots/W bootstrap构造后冻结原dispatch receipt，不从task字段补来源，激活前不发旧overlay。
+# LLM: 保原owner/dispatch授权与模型引用；配置重建前清理旧worker独立MCP，child原roots/dispatch来源保持。
 # 函数用途: 构造子代理依赖并恢复正确模型配置，元数据在准确激活后才条件保存。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     worker = _construct_transported_worker(simple_agent_cls, params, params.config)
@@ -253,6 +271,7 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
         workspace_root=worker.subagents.workspace_root,
     )
     if effective_config is not params.config:
+        _close_worker_mcp_clients(worker, params)
         worker = _construct_transported_worker(simple_agent_cls, params, effective_config)
         _attach_worker_runtime(worker, params)
     if params.request_transport is not None:

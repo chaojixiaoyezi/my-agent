@@ -21,7 +21,7 @@ _HEADER = (
 )
 
 # LLM: text 只保留本次交付页，不持久化第二份包；entry_status 按选中顺序记录投递诊断，不表示 pin 是否成功。
-#   当前主/子入口只消费 text/warning_codes；诊断不参与权限、选择或采用判定，选择 refs 仍由调用方保留。
+#   usage_events仅含已投递页的身份与计数，供延后提交的主选包使用；不复制正文、权限或选择refs。
 # 类用途: 返回一次入口准备的可见上下文、逐包投递形态与有限诊断。
 @dataclass(frozen=True)
 class PackageEntryContext:
@@ -29,6 +29,7 @@ class PackageEntryContext:
     loaded_count: int
     warning_codes: tuple[str, ...]
     entry_status: tuple[dict, ...] = ()
+    usage_events: tuple[dict, ...] = ()
 
 
 # LLM: 外层已领取原主选择/child首请求并持原活动事务或创建锁；authority.check 核当前执行，child pin 只验既有引用，不改授权。
@@ -36,7 +37,7 @@ class PackageEntryContext:
 #   取消、读失败）→ 不 pin（取消照常上抛）；③ 准入通过且读出有效页，只是总预算放不下正文 → 要 pin。
 #   pin 在 read_package_page 内校验有效页后、返回前锁内完成；caller 不补 pin，取消后不撤销已成功的版本归属。
 #   每包只按自己的独立编码与均分份额裁剪，无剩余预算或整体 token 差；最终文本固定顺序，诊断仍按输入顺序。
-#   track_usage 仅供会话沿用延后到 IR 提交后统一计数；默认逐个实际返回页记账，pin 成功但没投递的不记。
+#   track_usage=False供主选包/会话沿用延后到提交后计数；直接调用保持默认记实际返回页，pin成功但没投递的不记。
 # 函数用途: 固定每个读出有效页的选中包，再按均分份额交付入口正文，把准入失败/读失败/预算不足记为 entry_status。
 def prepare_package_entry_context(agent, params, scope, references, *, authority, claim_id: str, max_tokens: int,
                                   track_usage: bool = True) -> PackageEntryContext:
@@ -82,21 +83,27 @@ def prepare_package_entry_context(agent, params, scope, references, *, authority
             warnings.append("CAPABILITY_SELECTION_ENTRY_UNAVAILABLE")
             entry_status.append(_entry_status_row(ref, "not_delivered", reason="unavailable"))
     result = PackageEntryContext(_render(pages) if pages else "", len(pages),
-                                 tuple(dict.fromkeys(warnings)), tuple(entry_status))
+                                 tuple(dict.fromkeys(warnings)), tuple(entry_status), _entry_usage_events(params, pages))
     if track_usage:
-        _record_entry_usage(agent, params, pages)
+        record_package_entry_usage(agent, result)
     return result
 
 
-# LLM: 仅消费已裁剪并将被返回的 pages；不记预算外/失败页，不在台账保存正文或改变准入、pin 和投递结果。
-# 函数用途: 为每个实际投递的入口页记录一次宿主使用及实际字符数。
-def _record_entry_usage(agent, params, pages: list[dict]) -> None:
+# LLM: 仅消费已裁剪且将返回的页，冻结关联标识与实际字符数；不记预算外/失败页，不复制正文或落盘。
+# 函数用途: 为提交边界准备无正文的待记录使用事件。
+def _entry_usage_events(params, pages: list[dict]) -> tuple[dict, ...]:
     attrs = getattr(params, "task_attributes", None) or {}
-    for page in pages:
-        record_skill_usage_event(agent, event="host_injected", skill_id=page["package_id"], kind="capability_package",
-                                 source="capability_package_entry_context", chars=len(page.get("body") or ""),
-                                 request_id=getattr(params, "request_id", ""), task_id=getattr(params, "task_id", ""),
-                                 thread_id=attrs.get("conversation_thread_id", ""))
+    return tuple({"event": "host_injected", "skill_id": page["package_id"], "kind": "capability_package",
+                  "source": "capability_package_entry_context", "chars": len(page.get("body") or ""),
+                  "request_id": getattr(params, "request_id", ""), "task_id": getattr(params, "task_id", ""),
+                  "thread_id": attrs.get("conversation_thread_id", "")} for page in pages)
+
+
+# LLM: 调用方负责提交门；默认直接返回入口或主选包已成功写IR后才调用，统计自身只软失败，不改准入或pin。
+# 函数用途: 为实际投递的包入口保存使用事实，准备阶段不提前计数。
+def record_package_entry_usage(agent, context: PackageEntryContext) -> None:
+    for event in context.usage_events:
+        record_skill_usage_event(agent, **event)
 
 
 # LLM: entry_status 只写投递诊断与分页信息，不含正文、不持久化；not_delivered 不能推断是否 pin，当前调用方未消费该字段。

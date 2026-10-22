@@ -266,7 +266,7 @@ def _ensure_service_logging() -> None:
     logging.getLogger("agent_py_agent").setLevel(logging.INFO)
 
 
-# LLM: 先核对 Gateway 客户端凭据，再起通道/PID/状态；配置 token 优先；开关开且凭据失败时不启动无凭据客户端。
+# LLM: 先核对 Gateway 客户端凭据并清理遗留停止标记，再起通道/PID/状态；配置 token 优先；开关开且凭据失败时不启动无凭据客户端。
 # 函数用途: 在原适配器生命周期入口绑定宿主凭据并运行通道服务，不把秘密传给子进程或状态。
 def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     _ensure_service_logging()
@@ -281,6 +281,7 @@ def _run_adapter_foreground(agent, options: AdapterOptions, gpaths) -> int:
     _register_requested_adapters(manager, options.channel, agent)
     globals()["_adapter_manager"] = manager
 
+    adapter_stop_path(gpaths.root).unlink(missing_ok=True)
     write_pid_record(gpaths.adapter_pid)
     _write_adapter_state_guarded(gpaths, "starting", {"requested_channel": options.channel})
     print(f"starting channel adapter: {options.channel}", file=sys.stderr)
@@ -330,7 +331,30 @@ def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -
         _register_channel_adapter(manager, "qq", agent)
 
 
-# LLM: 停止文件沿daemon写者同一gpaths定位，短Event等待并finally清理；本循环异常优先，单独清理失败仍上抛；原心跳守卫和requested_channel不变。
+# LLM: 停止文件存在且未带异代PID时才视为当前进程的停止请求；若文件声明了旧代PID则立即清理并忽略，防止跨代误杀。
+# 函数用途: 判断停止请求文件是否面向当前适配器进程。
+def _stop_request_matches_current_process(stop_path: Path) -> bool:
+    if not stop_path.exists():
+        return False
+    try:
+        raw = json.loads(stop_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return stop_path.exists()
+    if isinstance(raw, dict) and raw.get("pid") is not None:
+        try:
+            target_pid = int(raw["pid"])
+        except (ValueError, TypeError):
+            target_pid = 0
+        if target_pid > 0 and target_pid != os.getpid():
+            try:
+                stop_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+    return True
+
+
+# LLM: 停止文件沿daemon写者同一gpaths定位并核对目标PID，短Event等待并finally清理；本循环异常优先，单独清理失败仍上抛；原心跳守卫和requested_channel不变。
 # 函数用途: 等待停止请求或信号后交调用方优雅收尾，不让短轮询增加原状态文件写入频率。
 def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: threading.Event | None = None, *, requested_channel: str | None = None) -> None:
     stop_event = stop_event if stop_event is not None else threading.Event()
@@ -346,9 +370,9 @@ def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: thre
     signal.signal(signal.SIGTERM, _sig_handler)
     failed = False
     try:
-        while not stop_event.is_set() and not stop_path.exists():
+        while not stop_event.is_set() and not _stop_request_matches_current_process(stop_path):
             timeout = min(ADAPTER_STOP_POLL_INTERVAL_SECONDS, max(0.0, next_state_write - time.monotonic()))
-            if stop_event.wait(timeout) or stop_path.exists():
+            if stop_event.wait(timeout) or _stop_request_matches_current_process(stop_path):
                 break
             if time.monotonic() < next_state_write:
                 continue

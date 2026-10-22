@@ -122,7 +122,7 @@ def validate_source_ref(value):
     return value
 
 
-# LLM: 学习来源只选原FIFO文件或唯一registry维护；完整SHA/同fd时间仅限制运输CAS，不是用户批准或新owner权。
+# LLM: 学习来源只选原FIFO文件（含requests与requests_overflow）或唯一registry维护；完整SHA/同fd时间仅限制运输CAS，不是用户批准或新owner权。
 # 函数用途: 验证原自学习来源的规范路径形状。
 def _validate_learning_ref(value, parts):
     if parts == ("data", "skill_learning", "registry.json"):
@@ -131,7 +131,7 @@ def _validate_learning_ref(value, parts):
                 or value["source_id"] != source_digest({"registry_sha256": value["source_sha256"], "modified_ns": value["input_revision"]})):
             raise ValueError("background_source_path_invalid")
         return
-    if (len(parts) != 4 or parts[:3] != ("data", "skill_learning", "requests")
+    if (len(parts) != 4 or parts[:3] not in {("data", "skill_learning", "requests"), ("data", "skill_learning", "requests_overflow")}
             or not re.fullmatch(r"[0-9]{13}-[0-9a-f]{16}\.json", parts[-1])
             or parts[-1][-21:-5] != value["source_id"] or value["thread_id"]
             or value["store_ref"] or value["input_revision"]):

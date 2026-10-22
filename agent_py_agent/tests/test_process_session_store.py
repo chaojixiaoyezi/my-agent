@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.common import directory_lock as lock_module
+from agent_py_agent.agent.tooling import background_process_host as host
 from agent_py_agent.agent.tooling import process_session_commit as commit_module
+from agent_py_agent.agent.tooling.process_registry import ProcessTerminationReceipt
 from agent_py_agent.agent.tooling.process_scope import ProcessExecutionScope
 from agent_py_agent.agent.tooling.process_session_commit import ProcessSessionCommitPendingError
 from agent_py_agent.agent.tooling.process_session_records import (
@@ -525,3 +530,287 @@ def test_missing_os_lock_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="OS file lock"):
         store.write(_reservation())
     assert not store.root.exists()
+
+
+# LLM: 真实直接child用stdin屏障阻止提前退出；只在全部不回收观察断言之后才wait回收。
+# 函数用途: 核对运行态为False、退出态可重复读True且Popen尚未回收（覆盖POSIX waitid与Darwin sysctl）。
+@pytest.mark.skipif(os.name != "posix" or (sys.platform != "darwin" and not all(hasattr(os, key) for key in
+                    ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))), reason="requires POSIX waitid WNOWAIT or Darwin sysctl")
+def test_opt6_waitid_observes_real_child_without_reaping():
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert host._direct_child_exited_unreaped(child) is False
+        assert child.returncode is None
+        child.stdin.close()
+        deadline = time.monotonic() + 5
+        while host._direct_child_exited_unreaped(child) is False and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert host._direct_child_exited_unreaped(child) is True
+        assert host._direct_child_exited_unreaped(child) is True
+        assert child.returncode is None
+    finally:
+        child.stdin.close()
+        child.wait(timeout=5)
+    assert child.returncode == 0
+
+
+# LLM: 只替换本模块的os引用，不改全局os.name；错误和能力缺失不能触发waitpid/poll。
+# 函数用途: 核对waitid被中断时继续轮询，普通系统错误时回退原身份检查。
+@pytest.mark.parametrize("error, expected", [(InterruptedError(), False), (OSError("unsupported"), None)])
+def test_opt6_waitid_error_fallback(monkeypatch, error, expected):
+    calls = []
+
+    # LLM: 精确记录waitid参数后注入系统调用错误。
+    # 函数用途: 模拟无权观察或临时中断，不产生真实进程副作用。
+    def waitid(*args):
+        calls.append(args)
+        raise error
+
+    monkeypatch.setattr(host, "os", SimpleNamespace(name="posix", P_PID=1, WEXITED=4, WNOHANG=1, WNOWAIT=32, waitid=waitid))
+    assert host._direct_child_exited_unreaped(SimpleNamespace(pid=123)) is expected
+    assert calls == [(1, 123, 4 | 1 | 32)]
+
+
+# LLM: 平台或WNOWAIT能力不足必须返回None，而不是把未知当作退出。
+# 函数用途: 核对不支持waitid的环境不会尝试系统调用。
+@pytest.mark.parametrize("missing", ["waitid", "WNOWAIT", "non_posix"])
+def test_opt6_waitid_missing_capability_returns_unknown(monkeypatch, missing):
+    monkeypatch.setattr(host, "sys", SimpleNamespace(platform="linux"))
+    api = {"name": "posix", "P_PID": 1, "WEXITED": 4, "WNOHANG": 1, "WNOWAIT": 32, "waitid": pytest.fail}
+    if missing == "non_posix":
+        api["name"] = "nt"
+    else:
+        del api[missing]
+    monkeypatch.setattr(host, "os", SimpleNamespace(**api))
+    assert host._direct_child_exited_unreaped(SimpleNamespace(pid=123)) is None
+
+
+# LLM: 正常附着宿主已在reservation核过父身份；此处只测每个tick不再调用出生或终止探测。
+# 函数用途: 验证直属父launcher快路径接入_stop_reason，交接前和附着交接后都不重复探测。
+@pytest.mark.skipif(os.name != "posix", reason="direct-parent shortcut is POSIX-only")
+@pytest.mark.parametrize("handoff", [False, True])
+def test_opt6_direct_parent_launcher_avoids_identity_probes(monkeypatch, handoff):
+    record = _running(launcher_pid=os.getppid(), launcher_birth_token="already-verified", handoff_confirmed=handoff)
+    monkeypatch.setattr(host, "capture_process_birth_token", pytest.fail)
+    monkeypatch.setattr(host, "_process_instance_terminated", pytest.fail)
+    assert host._launcher_instance_alive(record) is True
+    for _ in range(20):
+        assert host._stop_reason(record, 0, stop_on_launcher_exit=handoff) == ""
+
+
+# LLM: 亲子关系改变或非POSIX时保持原birth比对；birth不匹配不能再核无关实例的终止状态。
+# 函数用途: 核对非直接父launcher的存活、终止、PID复用及非POSIX回退分支。
+@pytest.mark.parametrize("case", ["live", "terminated", "reused", "non_posix"])
+def test_opt6_launcher_fallback_checks_original_birth(monkeypatch, case):
+    calls = []
+    monkeypatch.setattr(host, "os", SimpleNamespace(name="nt" if case == "non_posix" else "posix", getppid=lambda: 73 if case == "non_posix" else 74))
+
+    # LLM: 记录精确PID，返回匹配或已复用的出生令牌。
+    # 函数用途: 模拟非直属启动者的出生身份观察。
+    def capture(pid):
+        calls.append(("birth", pid))
+        return "reused-birth" if case == "reused" else "launcher-birth"
+
+    # LLM: 只在出生令牌匹配后接收同一PID和原令牌。
+    # 函数用途: 模拟启动者实例的终止状态。
+    def terminated(pid, birth):
+        calls.append(("ended", pid, birth))
+        return case == "terminated"
+
+    monkeypatch.setattr(host, "capture_process_birth_token", capture)
+    monkeypatch.setattr(host, "_process_instance_terminated", terminated)
+    assert host._launcher_instance_alive({"launcher_pid": 73, "launcher_birth_token": "launcher-birth"}) is (case in {"live", "non_posix"})
+    expected = [("birth", 73)] + ([] if case == "reused" else [("ended", 73, "launcher-birth")])
+    assert calls == expected
+
+
+# LLM: 用原Store写终态，child/终止回执仅为边界替身，不对真实PID发信号；loop只在None时允许旧身份检查。
+# 函数用途: 核对monitor接入三态观察，False继续、True终止、None回退，并保留终止出生令牌。
+@pytest.mark.parametrize("observations", [(None,), (False, True), (True,)])
+def test_opt6_monitor_uses_unreaped_observer_before_fallback(tmp_path, monkeypatch, observations):
+    store = ProcessSessionStore(tmp_path)
+    store.write(_running(handoff_confirmed=True))
+    remaining, fallback, stopped = list(observations), [], []
+
+    # LLM: 返回脚本化的内核观察结果，不触碰Popen的poll或wait。
+    # 函数用途: 让monitor分别走三态退出观察分支。
+    def observe(child):
+        assert child.pid == 102
+        return remaining.pop(0)
+
+    # LLM: 只有不支持内核观察时才允许身份回退。
+    # 函数用途: 记录原出生身份检查，发现不必要回退立即失败。
+    def ended(pid, birth):
+        assert observations == (None,)
+        fallback.append((pid, birth))
+        return True
+
+    # LLM: 终止必须带原child句柄和原birth；替身不发信号，不冒充真实树回收验证。
+    # 函数用途: 返回正式回执形状，供真实Store终态落盘。
+    def terminate(pid, child, **kwargs):
+        stopped.append((pid, child.pid, kwargs))
+        return ProcessTerminationReceipt("already_gone", True, 0, 1)
+
+    monkeypatch.setattr(host, "_direct_child_exited_unreaped", observe)
+    monkeypatch.setattr(host, "_process_instance_terminated", ended)
+    monkeypatch.setattr(host, "terminate_process_tree", terminate)
+    monkeypatch.setattr(host, "_HOST_POLL_SECONDS", 0)
+    assert host._monitor_child(store, "bg-a", SimpleNamespace(pid=102), "child-birth", 0,
+                               host._MonitorPolicy(listen_scope="lan")) == 0
+    assert remaining == []
+    assert fallback == ([(102, "child-birth")] if observations == (None,) else [])
+    assert stopped == [(102, 102, {"expected_birth_token": "child-birth", "grace_seconds": 0.5})]
+    assert store.load("bg-a").record["status"] == "exited"
+
+
+# LLM: 真实Popen、不回收观察、terminate_process_tree和Store；仅拦截提前poll/wait及热路径旧探测，不替换树回收结果。
+#   真树入口需要原出生令牌及进程表能力，沿公共能力门；受限环境不冒充已完成该整链验证，强制模式仍须真跑。
+# 函数用途: 验证运行到退出的monitor保留组长出生身份直到正式终止入口，且不再重复身份探测。
+@pytest.mark.skipif(os.name != "posix" or (sys.platform != "darwin" and not all(hasattr(os, key) for key in
+                    ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT"))), reason="requires POSIX waitid WNOWAIT or Darwin sysctl")
+@pytest.mark.sandbox_capability("ps", "background_launcher_identity")
+def test_opt6_real_monitor_preserves_child_until_tree_termination(tmp_path, monkeypatch):
+    parent_pid = os.getppid()
+    parent_birth = host.capture_process_birth_token(parent_pid)
+    host._require_reservation(_reservation(launcher_pid=parent_pid, launcher_birth_token=parent_birth))
+    child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"], stdin=subprocess.PIPE,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    poll, wait, observe, terminate = child.poll, child.wait, host._direct_child_exited_unreaped, host.terminate_process_tree
+    observations, terminating = [], []
+    try:
+        birth = host.capture_process_birth_token(child.pid)
+        assert birth and parent_birth
+        store = ProcessSessionStore(tmp_path)
+        store.write(_running(launcher_pid=parent_pid, launcher_birth_token=parent_birth,
+                             child_pid=child.pid, child_pid_birth_token=birth, handoff_confirmed=True))
+
+        # LLM: 第一轮child被stdin屏障保活，观察后释放它；原内核观察及不回收语义不变。
+        # 函数用途: 证明真实monitor至少经过运行态和退出态两个分支。
+        def observe_child(process):
+            result = observe(process)
+            observations.append(result)
+            if result is False:
+                child.stdin.close()
+            return result
+
+        # LLM: 只有原终止树入口开始后才允许回收child，原poll保持原行为。
+        # 函数用途: 捕获monitor提前poll导致出生身份丢失的回归。
+        def guarded_poll(*args, **kwargs):
+            assert terminating, "monitor must not poll before tree termination"
+            return poll(*args, **kwargs)
+
+        # LLM: wait与poll同样受终止入口顺序约束；真实回收不被mock。
+        # 函数用途: 捕获monitor提前wait导致组长被回收的回归。
+        def guarded_wait(*args, **kwargs):
+            assert terminating, "monitor must not wait before tree termination"
+            return wait(*args, **kwargs)
+
+        # LLM: 入终止函数时child仍未回收且已退出；出生令牌沿原调用传入，实际清理照常执行。
+        # 函数用途: 核对自然退出进入真实树回收前的身份与顺序。
+        def terminate_child(pid, process, **kwargs):
+            assert pid == child.pid and process is child and process.returncode is None
+            assert kwargs["expected_birth_token"] == birth and observe(child) is True
+            terminating.append(pid)
+            return terminate(pid, process, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(child, "poll", guarded_poll)
+            patch.setattr(child, "wait", guarded_wait)
+            patch.setattr(host, "_direct_child_exited_unreaped", observe_child)
+            patch.setattr(host, "terminate_process_tree", terminate_child)
+            patch.setattr(host, "capture_process_birth_token", pytest.fail)
+            patch.setattr(host, "_process_instance_terminated", pytest.fail)
+            result = host._monitor_child(store, "bg-a", child, birth, 0,
+                                         host._MonitorPolicy(stop_on_launcher_exit=True, listen_scope="lan"))
+        assert result == 0 and terminating == [child.pid]
+        assert observations[0] is False and observations[-1] is True
+        record = store.load("bg-a").record
+        assert record["status"] == "exited" and record["exit_code"] == 0 and record["termination"]["confirmed"]
+    finally:
+        child.stdin.close()
+        child.wait(timeout=5)
+
+
+# LLM: ctypes边界用结构化sysctl替身，不依赖ps或修改原始进程；失败不可推为已退出。
+# 函数用途: 核对Darwin状态字节、两阶段失败、空缓冲和短结构的三态结果。
+@pytest.mark.parametrize("case, expected", [("live", False), ("zombie", True), ("query_error", None),
+    ("read_error", None), ("empty", None), ("short", None), ("exception", None)])
+def test_darwin_bghost_sysctl_states(monkeypatch, case, expected):
+    calls = []
+
+    # LLM: 精确核对MIB及size指针，模拟内核返回结构，不执行真实系统调用。
+    # 函数用途: 为sysctl两阶段读提供状态及错误。
+    def sysctl(mib, length, buf, size_ptr, new, new_size):
+        calls.append(buf is None)
+        assert list(mib) == [1, 14, 1, 123] and length == 4 and new is None and new_size == 0
+        if case == "exception":
+            raise OSError("sysctl denied")
+        size = host.ctypes.cast(size_ptr, host.ctypes.POINTER(host.ctypes.c_size_t)).contents
+        size.value = 0 if case == "empty" else 36 if case == "short" else 64
+        if buf is not None and size.value >= 37:
+            buf[36] = b"\x05" if case == "zombie" else b"\x02"
+        return -1 if case == ("query_error" if buf is None else "read_error") else 0
+
+    monkeypatch.setattr(host, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(host, "_darwin_libc", lambda: SimpleNamespace(sysctl=sysctl))
+    assert host._darwin_child_is_zombie(123) is expected
+    assert calls
+
+
+# LLM: 仅缺少waitid时选择Darwin回退，原waitid平台优先级不变。
+# 函数用途: 核对Python3.12形态下的原生观察接线。
+def test_darwin_bghost_missing_waitid_uses_sysctl(monkeypatch):
+    calls = []
+
+    # LLM: 只观察传入的直接child PID，不模拟回收。
+    # 函数用途: 记录Darwin回退调用。
+    def zombie(pid):
+        calls.append(pid)
+        return True
+
+    monkeypatch.setattr(host, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(host, "_darwin_child_is_zombie", zombie)
+    assert host._direct_child_exited_unreaped(SimpleNamespace(pid=123)) is True
+    assert calls == [123]
+
+
+# LLM: 真实Store会取目录锁；缓存必须容忍本次load自己的锁目录变化，仍捕捉后续结构变化。
+# 函数用途: 核对稳定记录少于0.5秒只完整读一次，TTL、记录、根目录及redo立即失效。
+@pytest.mark.parametrize("change", ["ttl", "record", "root", "redo", "corrupt"])
+def test_darwin_bghost_record_projection_invalidates(tmp_path, monkeypatch, change):
+    store = ProcessSessionStore(tmp_path)
+    store.write(_running(handoff_confirmed=True))
+    original, calls, clock = store.load, [], [10.0]
+
+    # LLM: 保持真实load及错误报告，只统计完整读取。
+    # 函数用途: 记录是否真正绕过了取锁和JSON重读。
+    def load(session_id):
+        calls.append(session_id)
+        return original(session_id)
+
+    monkeypatch.setattr(store, "load", load)
+    monkeypatch.setattr(host, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    projection = host._HostRecordProjection()
+    first = projection.load(store, "bg-a")
+    for index in range(1, 10):
+        clock[0] = 10 + index * 0.04
+        assert projection.load(store, "bg-a") is first
+    assert calls == ["bg-a"]
+    if change == "ttl":
+        clock[0] = 10.5
+    elif change == "record":
+        store.request_stop(SCOPE)
+    elif change == "root":
+        (store.root / "another-entry").touch()
+    elif change == "redo":
+        (store.root / ".process-sessions.redo.json").write_text("{")
+    else:
+        store.record_path("bg-a").write_text("{")
+    second = projection.load(store, "bg-a")
+    assert calls == ["bg-a", "bg-a"] and second is not first
+    if change == "record":
+        assert second.record["stop_requested"]
+    if change in {"redo", "corrupt"}:
+        assert second.load_error
+        assert projection.load(store, "bg-a").load_error and len(calls) == 3

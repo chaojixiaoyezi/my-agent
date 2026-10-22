@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import math
 import os
+import stat
 import subprocess
+import sys
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from ..common.json_io import read_json_object_report
@@ -213,8 +217,113 @@ def _release_host_pipes() -> None:
             os.dup2(sink.fileno(), fd)
 
 
-# LLM: 不提前回收组长；自然退出也核对后代。只有宿主显式要求时，handoff 后仍受 launcher 和原期限约束。
-# 函数用途: 持续检查停止、寿命和日志上限，按真实树退出回执持久化结果。
+# LLM: 延迟绑定Darwin libc的sysctl，进程内复用原生句柄，不创建子进程；不可用保持未知。
+# 函数用途: 取得带明确ctypes签名的sysctl函数入口。
+@lru_cache(maxsize=1)
+def _darwin_libc():
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                               ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+        libc.sysctl.restype = ctypes.c_int
+        return libc
+    except (AttributeError, OSError):
+        return None
+
+
+# LLM: 仅Darwin直接child使用；kinfo_proc偏移36的p_stat为5表示僵尸，只观察不回收，失败交原身份路径。
+# 函数用途: 在无waitid的macOS解释器上用两阶段sysctl零fork观察直接子进程退出。
+def _darwin_child_is_zombie(pid: int) -> bool | None:
+    if sys.platform != "darwin" or pid <= 0:
+        return None
+    try:
+        libc = _darwin_libc()
+        if libc is None:
+            return None
+        mib = (ctypes.c_int * 4)(1, 14, 1, int(pid))
+        size = ctypes.c_size_t(0)
+        if libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0 or size.value == 0:
+            return None
+        buf = ctypes.create_string_buffer(size.value)
+        if libc.sysctl(mib, 4, buf, ctypes.byref(size), None, 0) != 0 or size.value < 37:
+            return None
+        return bool(buf.raw[36] == 5)
+    except Exception:
+        return None
+
+
+# LLM: 仅真实根目录与普通记录可缓存；redo存在、权限错误或链接都返回None，不把无法确认当成稳定。
+# 函数用途: 读取根与记录的lstat五元组，并确认没有待恢复redo。
+def _monitored_record_stamp(store: ProcessSessionStore, session_id: str) -> tuple | None:
+    try:
+        path = store.record_path(session_id)
+        root, record = store.root.lstat(), path.lstat()
+        if not stat.S_ISDIR(root.st_mode) or not stat.S_ISREG(record.st_mode):
+            return None
+        try:
+            (store.root / ".process-sessions.redo.json").lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            return None
+        fields = ("st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns", "st_size")
+        stamps = tuple(tuple(getattr(info, name) for name in fields) for info in (root, record))
+        return (store.root, path, *stamps)
+    except OSError:
+        return None
+
+
+# LLM: 每个monitor独享只读成功投影；两五元组及路径不变、无redo且距上次完整读取不足0.5秒才复用。
+# 类用途: 避免50ms循环反复抢记录锁并解析同一JSON，同时保持有界强制全读。
+class _HostRecordProjection:
+    # LLM: 初始无可信内容，缓存命中不刷新完整读取时间。
+    # 函数用途: 初始化本monitor的单条记录投影。
+    def __init__(self) -> None:
+        self._report = None
+        self._stamp = None
+        self._loaded_at = 0.0
+
+    # LLM: load前后记录五元组及根dev/inode必须一致；根mtime允许原load自身锁目录改变，命中仍比完整根五元组。
+    #   不缓存错误或缺失，读取中记录变化不发布投影，异常前先废弃旧缓存；monotonic倒退也强制重读。
+    # 函数用途: 复用稳定的短期成功报告，失效时立即走原Store读取和redo恢复。
+    def load(self, store: ProcessSessionStore, session_id: str):
+        now = time.monotonic()
+        before = _monitored_record_stamp(store, session_id)
+        if (before is not None and before == self._stamp and self._report is not None
+                and 0 <= now - self._loaded_at < 0.5):
+            return self._report
+        self._report = self._stamp = None
+        report = store.load(session_id)
+        after = _monitored_record_stamp(store, session_id)
+        if (not report.load_error and report.record and before is not None and after is not None
+                and before[:2] == after[:2] and before[2][:2] == after[2][:2] and before[3] == after[3]):
+            self._report, self._stamp, self._loaded_at = report, after, now
+        return report
+
+
+# LLM: 仅用于本host的直接child；WNOWAIT保留组长僵尸态与出生身份，实际回收仍归原terminate_process_tree。
+# 函数用途: 优先waitid，无该API的Darwin走sysctl；均失败则返回None交原身份检查。
+def _direct_child_exited_unreaped(child: subprocess.Popen[bytes]) -> bool | None:
+    required = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+    if os.name != "posix":
+        return None
+    if not all(hasattr(os, key) for key in required):
+        return _darwin_child_is_zombie(child.pid)
+    try:
+        result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except InterruptedError:
+        return False
+    except OSError:
+        return None
+    return bool(result is not None and getattr(result, "si_pid", 0) == child.pid)
+
+
+# LLM: 先以WNOWAIT观察直接child，不支持时才查原出生身份；终止树验证前不得poll/wait回收组长，自然退出也核对后代。
+#   只有宿主显式要求时，handoff后仍受launcher和原期限约束，监听与终态账不变。
+#   成功记录仅在stat稳定、无redo且半秒以内复用，不缓存停止裁决或绕过终止前的原权威事务。
+# 函数用途: 持续检查停止、寿命和日志上限，用不回收的退出观察驱动原终止树入口及结果持久化。
 def _monitor_child(
     store: ProcessSessionStore,
     session_id: str,
@@ -224,9 +333,10 @@ def _monitor_child(
     policy: _MonitorPolicy | None = None,
 ) -> int:
     policy = policy or _MonitorPolicy()
+    projection = _HostRecordProjection()
     next_listen_check = time.monotonic()
     while True:
-        report = store.load(session_id)
+        report = projection.load(store, session_id)
         if report.load_error or not report.record:
             raise OSError("managed background authority unreadable")
         record = report.record
@@ -235,7 +345,9 @@ def _monitor_child(
         if not reason and policy.listen_scope != "lan" and time.monotonic() >= next_listen_check:
             next_listen_check = time.monotonic() + _LISTEN_CHECK_SECONDS
             reason = _listen_scope_check(store, session_id, child.pid, policy.listen_scope, policy.listen_scope_enforce)
-        ended = _process_instance_terminated(child.pid, birth)
+        ended = _direct_child_exited_unreaped(child)
+        if ended is None:
+            ended = _process_instance_terminated(child.pid, birth)
         if reason or ended:
             receipt = terminate_process_tree(
                 child.pid, child, expected_birth_token=birth, grace_seconds=0.5
@@ -283,8 +395,18 @@ def _listen_scope_check(
     return LISTEN_SCOPE_VIOLATION if enforce else ""
 
 
-# LLM: 控制只读结构化事实及同一 monotonic 期限，不解析正文；既有长期后台仍允许 launcher 交接后退出。
-# 函数用途: 判断是否收回精确 child，准备进程可因宿主消失或到期而停止。
+# LLM: reservation已在启动时核过launcher出生身份；仍是直接父进程时PID不会在该父子关系中复用，非直接父关系回退原出生核对。
+# 函数用途: 正常POSIX父子关系用getppid零子进程开销确认启动方存活，否则核对原出生令牌和终止状态。
+def _launcher_instance_alive(record: dict[str, object]) -> bool:
+    pid = int(record["launcher_pid"])
+    birth = str(record["launcher_birth_token"])
+    if os.name == "posix" and pid > 0 and os.getppid() == pid:
+        return True
+    return capture_process_birth_token(pid) == birth and not _process_instance_terminated(pid, birth)
+
+
+# LLM: 控制只读结构化事实及同一monotonic期限，不解析正文；launcher只在仍为直属父时短路身份探测，既有长期后台仍允许交接后退出。
+# 函数用途: 判断是否收回精确child；停止和期限保持优先，需附着launcher时沿安全亲子快路径或原出生核对。
 def _stop_reason(record: dict[str, object], max_log_bytes: int, *,
                  deadline_monotonic: float = 0.0, stop_on_launcher_exit: bool = False) -> str:
     if record["stop_requested"]:
@@ -292,8 +414,7 @@ def _stop_reason(record: dict[str, object], max_log_bytes: int, *,
     if deadline_monotonic and time.monotonic() >= deadline_monotonic:
         return "deadline_exceeded"
     if stop_on_launcher_exit or not record["handoff_confirmed"]:
-        pid, birth = record["launcher_pid"], record["launcher_birth_token"]
-        if capture_process_birth_token(pid) != birth or _process_instance_terminated(pid, birth):
+        if not _launcher_instance_alive(record):
             return "launcher_unavailable"
     try:
         if max_log_bytes > 0 and Path(record["output_file"]).stat().st_size > max_log_bytes:

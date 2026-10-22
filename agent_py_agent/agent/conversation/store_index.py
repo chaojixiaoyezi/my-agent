@@ -38,6 +38,16 @@ def _file_fingerprint(path: Path) -> tuple[int, int, int, int] | None:
     return (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+# LLM: 只给紧邻的 ordered_paths/usable 配对核对目录身份和成员版本；不能代替文件 read 的指纹校验。
+# 函数用途: 取得目录设备、inode、mtime 和 ctime，不可 stat 时禁止复用本次 listing。
+def _directory_fingerprint(directory: Path) -> tuple[int, int, int, int] | None:
+    try:
+        info = directory.stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+
 # LLM: 身份字段(file stem 与记录内主键)必须一致,否则该投影条目视为不可信并强制回到权威
 # 读取;这既能拦住被污染的投影,也不会改变"文件名与主键不一致"的既有语义(仍按主键返回)。
 # 函数用途: 校验一条投影负载的主键是否与文件名 stem 相符。
@@ -110,17 +120,26 @@ class ScanIndex:
         self._records = 0
         self._order_names: frozenset[str] | None = None
         self._order_paths: list[Path] | None = None
+        self._last_scan: tuple[
+            Path, tuple[int, int, int, int], str, frozenset[str], threading.Thread
+        ] | None = None
         self._lock = threading.RLock()
 
     # LLM: 目录扫描的 canonical 顺序完全由"文件名集合"决定(同一父目录、目录内名字唯一),
     # 因此按 frozenset(名字) 记忆排序结果:集合没变就直接复用,集合变了才重新排序。排序是
     # 集合的纯函数,所以这不是新的顺序规则,只是不再每轮为几千个 Path 做 pathlib 比较;
-    # 文件集合仍每轮重新枚举(见 ScanIndexes.usable 的同一份 listing)。
+    # 文件集合仍每轮重新枚举，usable 仅一次性复用同线程、目录/模式且版本未变的本轮 listing。
     # 目录列不出来时退回旧的 glob 口径继续枚举:枚举失败绝不能让调用方少看一批文件,清不清理
     # 是 ScanIndexes.usable 的事,与"本次能看到哪些路径"无关。
     # 函数用途: 返回目录下匹配 pattern 的路径,按旧实现的 canonical 顺序排列;返回值只读。
     def ordered_paths(self, directory: Path, pattern: str) -> list[Path]:
+        stamp = _directory_fingerprint(directory)
         names = _scan_dir_match_names(directory, pattern)
+        with self._lock:
+            self._last_scan = (
+                (directory, stamp, pattern, names, threading.current_thread())
+                if stamp is not None and names is not None else None
+            )
         if names is None:
             # 目录读不到 ≠ 目录是空的,因此这里也绝不更新排序记忆,否则"暂时读不到"会被记成
             # "目录为空"并在下一次冒充权威集合。glob 的返回值仍然给出真实路径。
@@ -292,6 +311,7 @@ class ScanIndex:
         with self._lock:
             self._entries.clear()
             self._records = 0
+            self._last_scan = None
 
     # LLM: 统计是锁内的一致副本，只用于诊断，不能据此裁决唤醒或恢复。
     # 函数用途: 返回该索引的条目/记录占用、淘汰/清理/降级计数与命中统计,供诊断和测试断言。
@@ -340,7 +360,7 @@ class ScanIndexes:
     # LLM: 该判定只回答"这次能不能用投影加速",不回答任何业务问题;不可用时本次调用整体
     # 退回全量权威扫描并留结构化告警,因此索引缺失/损坏永远不会让人少读一条记录。
     # 判定同时承担"跟盘对账":上界若只按当前目录文件数判断,被删除/轮换掉的旧文件名条目
-    # 会一直驻留(实测 max_entries=4 时驻留 41 个已删名字)。因此这里重新列一次目录,并在
+    # 会一直驻留(实测 max_entries=4 时驻留 41 个已删名字)。因此这里复用同轮 listing 或重新枚举，并在
     # **列目录成功**时清掉已确认消失文件名的投影;目录列不出来时一条都不清,只降级全量扫描。
     # pattern 必须与调用方 ordered_paths 用的那个逐字相同:上界口径与"本次实际要扫的文件
     # 集合"必须同源,否则给目录换一个更宽的模式就会凭空改变 dir_too_large 的触发点。
@@ -348,6 +368,9 @@ class ScanIndexes:
     def usable(
         self, index: ScanIndex, *, key: str, directory: Path, pattern: str
     ) -> bool:
+        with index._lock:
+            last_scan = index._last_scan
+            index._last_scan = None
         if index.schema != _SCAN_INDEX_SCHEMA:
             index.warn(
                 "index_rejected",
@@ -355,7 +378,14 @@ class ScanIndexes:
                 details={"expected": _SCAN_INDEX_SCHEMA, "found": str(index.schema)},
             )
             return False
-        live_names = _scan_dir_match_names(directory, pattern)
+        stamp = _directory_fingerprint(directory)
+        live_names = (
+            last_scan[3]
+            if stamp is not None and last_scan is not None
+            and last_scan[:3] == (directory, stamp, pattern)
+            and last_scan[4] is threading.current_thread()
+            else _scan_dir_match_names(directory, pattern)
+        )
         if index.prune_missing(directory, live_names) < 0:
             # 目录暂时读不到(权限/IO 抖动):保持全部投影不动,本次退回全量扫描,
             # 结果依旧正确,绝不用"读不到"冒充"已删除"。

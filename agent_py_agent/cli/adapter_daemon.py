@@ -126,11 +126,11 @@ def read_pid_record(path: Path):
     return _read_json_file(path)
 
 
-# LLM: 先写原停止请求并尊重用户预算，再沿原PID发送SIGTERM；第二段15秒覆盖manager的6+5秒收尾，未退出仍返回失败。
+# LLM: 先写绑定目标PID的停止请求并尊重用户预算，再沿原PID发送SIGTERM；第二段15秒覆盖manager的6+5秒收尾，未退出仍返回失败。
 # 函数用途: 请求适配器优雅退出，必要时发原终止信号并等待足够收尾时间。
 def stop_adapter_daemon(request: AdapterStopRequest) -> int:
     print(f"stopping adapter (PID {request.pid})...", file=sys.stderr)
-    _write_stop_request(request.gpaths)
+    _write_stop_request(request.gpaths, pid=request.pid)
     if wait_for_pid_exit(request.pid, timeout=request.options.stop_timeout):
         remove_pid_file_if_owned(request.pid_file)
         print("adapter stopped", file=sys.stderr)
@@ -150,12 +150,12 @@ def adapter_stop_path(service_state_dir: Path) -> Path:
     return Path(service_state_dir) / "adapter_stop.request"
 
 
-# LLM: 保留原JSON请求字段和写入语义，仅复用与等待者一致的路径；不发送信号或改PID记录。
+# LLM: 保留原JSON请求字段并可选绑定目标PID，仅复用与等待者一致的路径；不发送信号或改PID记录。
 # 函数用途: 在指定服务目录发布适配器停止请求文件。
-def _write_stop_request(gpaths) -> None:
+def _write_stop_request(gpaths, *, pid: int | None = None) -> None:
     stop_request_path = adapter_stop_path(gpaths.root)
     stop_request_path.parent.mkdir(parents=True, exist_ok=True)
-    stop_request_path.write_text(
-        json.dumps({"requested_at": time.time(), "reason": "user request"}, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    payload: dict[str, object] = {"requested_at": time.time(), "reason": "user request"}
+    if pid is not None and int(pid) > 0:
+        payload["pid"] = int(pid)
+    stop_request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

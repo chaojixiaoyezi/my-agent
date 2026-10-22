@@ -63,9 +63,10 @@ class SchedulerDueIndex:
         self._ensure_schema()
 
     # LLM: 展示编号使用原全局 SQLite 的原子分配器，唯一 job 仍在 owner 账；丢弃的预留允许留空号，不回收编号。
-    # 函数用途: 为同一部署的监控分配不冲突的 job01 编号，让跨群/私聊汇总可直接使用。
+    #   先退出原事务再立即close短连接，_connect仍返回原始SQLite连接以兼容既有hook。
+    # 函数用途: 为同一部署的监控分配不冲突的 job01 编号，完成后立即释放连接。
     def allocate_job_alias(self) -> str:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("CREATE TABLE IF NOT EXISTS scheduler_job_numbers (number INTEGER PRIMARY KEY AUTOINCREMENT)")
             cursor = conn.execute("INSERT INTO scheduler_job_numbers DEFAULT VALUES")
@@ -74,7 +75,8 @@ class SchedulerDueIndex:
         return f"job{number:02d}"
 
     # LLM: 索引仍非执行权威；新时间相等或有效租约内向后推进不得清租，更早工作才能提前重新领取。
-    # 函数用途: 更新 owner 到期投影，同时保留未过期且不阻挡更早工作的领取租约。
+    #   原提交/回滚完成后立即关闭连接，异常归类和租约门不变。
+    # 函数用途: 更新 owner 到期投影并释放连接，保留未过期且不阻挡更早工作的领取租约。
     def sync_owner(
         self,
         owner: dict[str, object],
@@ -86,7 +88,7 @@ class SchedulerDueIndex:
         current = float(time.time() if now is None else now)
         next_due_at = _earliest_due_at(store, now=current)
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if next_due_at > 0:
                     conn.execute(
@@ -123,7 +125,8 @@ class SchedulerDueIndex:
         return next_due_at
 
     # LLM: 到期owner全局领取只归C；守原父类公开门使W adapter及直接父类均拒，sync_owner/alias受控业务保持。
-    # 函数用途: 在共享调度领取事务前拒W，不改变排序、租期或owner自身投影更新。
+    #   原领取事务退出后立即close连接，返回已取出的行，不延长SQLite资源寿命。
+    # 函数用途: 在共享领取前拒W，沿原排序和租期领取后释放连接。
     def claim_due_owners(
         self,
         *,
@@ -138,7 +141,7 @@ class SchedulerDueIndex:
         selected_limit = max(1, min(int(limit or 1), 1024))
         lease_until = current + max(1.0, float(lease_seconds or 1.0))
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 rows = conn.execute(
                     """
@@ -176,7 +179,8 @@ class SchedulerDueIndex:
         ]
 
     # LLM: 全局旧账扫描/修复只归C；拒门先于扫描和SQLite事务，不影响W原existing-only构造及owner更新。
-    # 函数用途: 阻止W修复共享到期索引，保留Count0原迁移标记和错误计数。
+    #   迁移事务成功或失败均关闭短连接，原完成标记和错误计数不变。
+    # 函数用途: 受控修复旧账到期投影，保留迁移语义并及时释放SQLite连接。
     def repair_legacy_owner_ledgers(self, owners_dir: str | Path) -> dict[str, int | bool]:
         """One-time projection rebuild for jobs created before this index existed."""
         from ..common.global_write_guard import require_global_writer
@@ -190,7 +194,7 @@ class SchedulerDueIndex:
         except OSError as exc:
             raise SchedulerDueIndexError("scheduler due index legacy scan failed") from exc
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.executemany(
                     """
@@ -233,9 +237,11 @@ class SchedulerDueIndex:
             "errors": errors,
         }
 
+    # LLM: 快照仅返回已取出的行数据，原读取异常包装保持；退出事务后立即close，不依赖GC释放句柄。
+    # 函数用途: 读取按到期顺序排列的owner投影并关闭本次连接。
     def snapshot(self) -> list[DueOwner]:
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 rows = conn.execute(
                     """
                     SELECT provider, owner_kind, owner_id, next_due_at
@@ -301,9 +307,11 @@ class SchedulerDueIndex:
         after = _schema_file_key(self.path)
         return after if after == connected else None
 
+    # LLM: 只查原迁移标记，查询或异常后均关闭连接；不改标记或吞掉原SQLite读取错误。
+    # 函数用途: 用短连接检查指定迁移是否完成。
     def _migration_complete(self, key: str) -> bool:
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 row = conn.execute(
                     "SELECT value FROM scheduler_due_meta WHERE key = ?",
                     (key,),

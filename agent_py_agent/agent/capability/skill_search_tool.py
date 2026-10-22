@@ -46,8 +46,9 @@ from .package_read import (
 from .package_resources import package_resource_reference
 from .package_snapshot import package_read_parameters
 from .router import CapabilityRouter, tokenize
+from .skill_learning_store import SkillLearningStore
 from .skill_snapshot import PACKAGE_PIN_ERROR_MESSAGES, SkillSnapshotError
-from .skill_usage_ledger import record_skill_usage_event
+from .skill_usage_ledger import record_skill_usage_event, record_skill_usage_events
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -140,7 +141,7 @@ class SkillSearchTool(BaseTool):
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
-    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要；成功命中逐卡计 manual_search，不计有效使用、不存 query、不预读或 pin。
+    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要；成功命中一次批量计 manual_search，不计有效使用、不存 query、不预读或 pin。
     # 函数用途: 返回公开方法卡及可原样重用的读取参数，让模型无需从多种身份字段猜调用方式。
     def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
@@ -191,11 +192,7 @@ class SkillSearchTool(BaseTool):
             "hint": "选择后原样使用对应 next_read 调用本工具；Skill 用 skill_id，能力包用 package_id，不能混用。",
         }
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
-        for match in matches:
-            package = match["kind"] == "capability_package"
-            record_skill_usage_event(self.agent, event="manual_search", kind=match["kind"],
-                                     skill_id=match["package_id"] if package else match["skill_id"],
-                                     source="package" if package else match["source"])
+        _record_search_matches(self.agent, matches)
         return outcome
 
     # LLM: 解析不到包时先看主任务 pin 诊断（停用/换代则回执让模型告诉用户）；解析到后先比对显式代次，不符只回参数纠错；
@@ -291,6 +288,25 @@ class SkillSearchTool(BaseTool):
         record_method_read(self.agent, entry)
         record_skill_usage_event(self.agent, event="manual_get", skill_id=entry.stable_id, source=entry.source, chars=len(body))
         return outcome
+
+
+# LLM: 只记录返回卡片的结构化身份；当前请求/线程提前冻结，批量写入失败仅告警，不影响检索回执。
+# 函数用途: 把全部人工搜索命中交给一次owner使用事务，避免逐命中扫描整个目录。
+def _record_search_matches(agent, matches: list[dict]) -> None:
+    import logging
+
+    try:
+        params = getattr(agent, "_current_run_params", None)
+        attrs = getattr(params, "task_attributes", None) or {}
+        context = {"request_id": getattr(params, "request_id", ""), "task_id": getattr(params, "task_id", ""),
+                   "thread_id": attrs.get("conversation_thread_id", "")}
+        batch = [{"event": "manual_search", "kind": match["kind"],
+                  "skill_id": match["package_id"] if match["kind"] == "capability_package" else match["skill_id"],
+                  "source": "package" if match["kind"] == "capability_package" else match["source"], **context}
+                 for match in matches]
+        record_skill_usage_events(SkillLearningStore.for_home(agent.home_paths), batch)
+    except Exception:  # noqa: BLE001 - 附带统计不能改变搜索成功事实。
+        logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
 
 # LLM: learnpack 只对本机管理员开放，别的 owner 一律空集；读不到安装表或存储也是空集（made_by_me 都为 false），不让检索失败。只读。

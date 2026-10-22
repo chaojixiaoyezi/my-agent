@@ -27,10 +27,10 @@ def test_default_reuse_switch_is_enabled():
 # 函数用途: 保证两项性能开关默认开启且用户仍可逐项关闭。
 @pytest.mark.parametrize("key", ["sqlite_connection_reuse", "background_tick_cheap_checks"])
 def test_cpu6_performance_defaults_and_explicit_yaml_false(tmp_path, key):
-    import yaml
+    from agent_py_agent.agent.settings.config import load_simple_yaml
 
     packaged = Path(__file__).parents[1] / "config" / "agent_config.yaml"
-    assert yaml.safe_load(packaged.read_text(encoding="utf-8"))[key] is True
+    assert load_simple_yaml(packaged)[key] is True
     path = tmp_path / "config.yaml"
     path.write_text("model_backend: echo\n", encoding="utf-8")
     assert getattr(load_config(path), key) is True

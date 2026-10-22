@@ -6,7 +6,7 @@ from ..conversation.models import THREAD_TASK_LINK_INACTIVE_STATUSES
 from ..subagents.models import SUBAGENT_ENDED_STATUSES, task_status_in
 
 
-# LLM: owner Agent原stores是唯一来源；扫描上限只导致incomplete，不代表多余任务没有保护。
+# LLM: owner原stores是唯一来源，候选含归档pending更新；扫描上限只导致incomplete，不代表多余任务没有保护。
 # 函数用途: 返回本owner必须保留的方法编号与完整性，不访问其它owner或模型。
 def learning_protection_for_agent(agent, *, scan_limit=1000):
     protected = set()
@@ -32,7 +32,7 @@ def learning_protection_for_agent(agent, *, scan_limit=1000):
             _include_refs(protected,job.get('payload') or {})
         from .skill_learning_proposals import list_learning_proposals
         from .skill_learning_store import SkillLearningStore
-        for proposal in list_learning_proposals(SkillLearningStore.for_home(agent.home_paths)):
+        for proposal in list_learning_proposals(SkillLearningStore.for_home(agent.home_paths),include_overflow=True):
             if proposal['status']=='pending' and proposal.get('expected_sha256'):
                 protected.add('owner:'+proposal['decision']['name'])
         report = agent.subagents.list_runs_report()

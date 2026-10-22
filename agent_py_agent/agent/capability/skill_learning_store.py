@@ -236,7 +236,7 @@ class SkillLearningStore:
     def run_lock(self):
         return locked_json_path(self.directory / ".run", blocking=False)
 
-    # LLM: 热/溢出区共同按键去重；满20先合并同上下文或轮转最旧，仅总容量满才拒绝，事件在state锁外追加。
+    # LLM: 热/溢出区共同按键与非空上下文去重，最老20条驻留热区，仅总容量满才拒绝，事件在state锁外追加。
     # 函数用途: 有界保存学习材料，返回queued/duplicate/queue_full，不调用模型或发布Skill。
     def enqueue(self, request: dict[str, object]) -> str:
         key = str(request.get("request_key") or "")
@@ -248,17 +248,16 @@ class SkillLearningStore:
             self.append_event(event)
         return outcome
 
-    # LLM: 默认在热队列空时原state锁内恢复最早溢出；refill=False供发现/报告只读使用，不创建目录。
-    # 函数用途: 按原文件名FIFO返回热请求，必要时从最多100条缓冲恢复下一批。
-    def pending_requests(self, *, refill: bool = True) -> list[Path]:
-        pending = self._request_paths("requests")
-        if pending or not refill or not self.overflow_requests():
-            return pending
-        from ..common.request_execution_ports import gateway_short_transaction
+    # LLM: 默认只读全局FIFO投影；纯溢出返回完整排序路径，hot_only仅限物理热区；显式refill才在短门与state锁内写。
+    # 函数用途: 发现可消费的学习请求，可选严格热区视图或执行崩溃收敛与溢出回填。
+    def pending_requests(self, *, refill: bool = False, hot_only: bool = False) -> list[Path]:
+        if not refill:
+            return self._projected_requests(hot_only=hot_only)
+        if self._needs_recovery_or_refill():
+            from ..common.request_execution_ports import gateway_short_transaction
 
-        with gateway_short_transaction("skill_learning_refill_requests"), self.state_lock():
-            if not self._request_paths("requests"):
-                self._refill_requests_locked()
+            with gateway_short_transaction("skill_learning_refill_requests"), self.state_lock():
+                self._recover_requests_locked()
         return self._request_paths("requests")
 
     # LLM: 只列本owner固定目录中的宿主请求名，不跟随目录链接；不执行回填或修改队列。
@@ -272,29 +271,98 @@ class SkillLearningStore:
         names = list_names_beneath(self.directory, (folder,))
         return [self.directory / folder / name for name in sorted(names) if _REQUEST_FILE_RE.fullmatch(name)]
 
-    # LLM: 调用方持原state/配额锁；新文件用新request_key，旧在途收口只能删旧键，不得覆盖新材料。
-    # 函数用途: 执行请求去重、同类替换和最旧溢出，返回需锁外记录的告警。
+    # LLM: 只读扫描两区并按宿主文件名保留同键/上下文最新材料；旧布局也按全局FIFO，纯溢出完整返回，不写盘建锁。
+    # 函数用途: 计算崩溃后或正常运行时的去重投影，允许显式限制在物理热区。
+    def _projected_requests(self, *, hot_only: bool = False) -> list[Path]:
+        hot = self._request_paths("requests")
+        overflow = self.overflow_requests()
+        if not hot and not overflow:
+            return []
+        surviving, _superseded = self._classify_requests([*hot, *overflow])
+        if hot_only:
+            return [path for path in surviving if path.parent == self.requests_dir][:MAX_PENDING_REQUESTS]
+        return surviving[:MAX_PENDING_REQUESTS] if hot else surviving
+
+    # LLM: 只读比较物理热区与全局FIFO前20条，覆盖旧布局的更老溢出、未满热区以及任意规模中断重复。
+    # 函数用途: 判断消费端refill=True是否需要进入短写事务收敛磁盘状态。
+    def _needs_recovery_or_refill(self) -> bool:
+        hot = self._request_paths("requests")
+        overflow = self.overflow_requests()
+        surviving, superseded = self._classify_requests([*hot, *overflow])
+        return bool(superseded) or hot != surviving[:MAX_PENDING_REQUESTS]
+
+    # LLM: 从最新到最旧扫描，同文件名、request_key或非空thread_id/task_id只保留最新材料；不依赖队列是否满额。
+    # 函数用途: 区分全局FIFO有效请求与合并中断遗留的旧副本。
+    def _classify_requests(self, paths: list[Path]) -> tuple[list[Path], list[Path]]:
+        ordered = sorted(paths, key=lambda item: (item.name, 0 if item.parent.name == "requests" else 1))
+        seen_names: set[str] = set()
+        seen_keys: set[str] = set()
+        seen_threads: set[str] = set()
+        seen_tasks: set[str] = set()
+        kept_reversed: list[Path] = []
+        superseded: list[Path] = []
+        for path in reversed(ordered):
+            if path.name in seen_names:
+                superseded.append(path)
+                continue
+            payload = self.read_request(path)
+            req_key = str((payload or {}).get("request_key") or path.stem.rsplit("-", 1)[-1])
+            thread_id = str((payload or {}).get("thread_id") or "").strip()
+            task_id = str((payload or {}).get("task_id") or "").strip()
+            if (
+                req_key in seen_keys
+                or (thread_id and thread_id in seen_threads)
+                or (task_id and task_id in seen_tasks)
+            ):
+                superseded.append(path)
+                continue
+            seen_names.add(path.name)
+            if req_key:
+                seen_keys.add(req_key)
+            if thread_id:
+                seen_threads.add(thread_id)
+            if task_id:
+                seen_tasks.add(task_id)
+            kept_reversed.append(path)
+        kept_reversed.reverse()
+        return kept_reversed, superseded
+
+    # LLM: 保持13位毫秒前缀文件名协议；同一毫秒突发入队时按既有最大前缀递增1，确保文件名严格单调体现FIFO。
+    # 函数用途: 为新入队请求生成严格单调递增的请求文件名。
+    def _next_request_name(self, key: str, existing: list[Path]) -> str:
+        now_ms = int(time.time() * 1000)
+        last_ms = max((int(path.name[:13]) for path in existing), default=0)
+        stamp = min(9_999_999_999_999, max(now_ms, last_ms + 1))
+        return f"{stamp:013d}-{key}.json"
+
+    # LLM: 调用方持原state/配额锁；先收敛中断遗留，再跨热/溢出双区去重与同上下文合并，维持热区始终是最老20条。
+    # 函数用途: 执行请求去重、跨区同类替换和全局FIFO溢出，返回需锁外记录的告警。
     def _enqueue_locked(self, request: dict[str, object], key: str):
-        if not self._request_paths("requests"):
-            self._refill_requests_locked()
+        self._recover_requests_locked()
         pending, overflow = self._request_paths("requests"), self.overflow_requests()
-        if any(path.name.endswith(f"-{key}.json") for path in [*pending, *overflow]):
+        all_paths = [*pending, *overflow]
+        if any(path.name.endswith(f"-{key}.json") for path in all_paths):
             return "duplicate", None
-        name, event = f"{int(time.time() * 1000):013d}-{key}.json", None
+        name = self._next_request_name(key, all_paths)
         if len(pending) >= MAX_PENDING_REQUESTS:
-            match = next((path for path in pending if self._same_request_context(path, request)), None)
+            match = next((path for path in all_paths if self._same_request_context(path, request)), None)
             if match is not None:
-                self._write_request_locked("requests", name, request)
-                unlink_file_beneath(self.directory, ("requests", match.name))
+                target_folder = match.parent.name
+                self._write_request_locked(target_folder, name, request)
+                unlink_file_beneath(self.directory, (target_folder, match.name))
+                self._recover_requests_locked()
                 return "queued", None
             if len(overflow) >= MAX_OVERFLOW_REQUESTS:
                 return "queue_full", None
-            oldest = pending[0]
-            self._transfer_request_locked(oldest, "requests_overflow")
-            event = SkillLearningEvent("overflowed", "SKILL_LEARNING_QUEUE_OVERFLOW_SAVED",
-                                       request_key=oldest.stem.rsplit("-", 1)[-1])
+            self._write_request_locked("requests_overflow", name, request)
+            return "queued", SkillLearningEvent(
+                "overflowed",
+                "SKILL_LEARNING_QUEUE_OVERFLOW_SAVED",
+                request_key=key,
+            )
         self._write_request_locked("requests", name, request)
-        return "queued", event
+        self._recover_requests_locked()
+        return "queued", None
 
     # LLM: 同类仅凭非空结构化thread_id/task_id精确相等，不能从正文、请求时间或名字猜测关系。
     # 函数用途: 判断满队列中一条待处理请求是否可被新材料替代。
@@ -331,11 +399,34 @@ class SkillLearningStore:
         write_text_atomic_beneath(self.directory, destination, text)
         unlink_file_beneath(self.directory, parts)
 
-    # LLM: 只在热队列已空且持state锁时调用；最多恢复20条，剩余缓冲仍原样保存。
-    # 函数用途: 恢复最早一批溢出请求，让后台按原FIFO继续学习。
+    # LLM: 在持state锁内清理中断遗留的被替代旧文件，并将全局FIFO最老20条维持在requests/、其余维持在requests_overflow/。
+    # 函数用途: 收敛跨区合并中断状态并按全局FIFO补齐热队列，杜绝溢出饿死。
+    def _recover_requests_locked(self) -> None:
+        all_paths = [*self._request_paths("requests"), *self.overflow_requests()]
+        if not all_paths:
+            return
+        surviving, superseded = self._classify_requests(all_paths)
+        for old_path in superseded:
+            if old_path.parent.name in ("requests", "requests_overflow"):
+                other = "requests_overflow" if old_path.parent.name == "requests" else "requests"
+                other_text = read_text_beneath(self.directory, (other, old_path.name))
+                own_text = read_text_beneath(self.directory, (old_path.parent.name, old_path.name))
+                if other_text is not None and own_text is not None and other_text != own_text:
+                    raise SkillLearningStoreError(CODE_REQUEST_CORRUPT, "conflicting buffered request")
+            unlink_file_beneath(self.directory, (old_path.parent.name, old_path.name))
+        desired_hot = surviving[:MAX_PENDING_REQUESTS]
+        desired_overflow = surviving[MAX_PENDING_REQUESTS:]
+        for path in desired_overflow:
+            if path.parent.name != "requests_overflow":
+                self._transfer_request_locked(path, "requests_overflow")
+        for path in desired_hot:
+            if path.parent.name != "requests":
+                self._transfer_request_locked(path, "requests")
+
+    # LLM: 兼容保留的内部入口，直接委托给全局FIFO收敛与回填实现。
+    # 函数用途: 恢复溢出请求并保持热区不超过20条。
     def _refill_requests_locked(self) -> None:
-        for source in self.overflow_requests()[:MAX_PENDING_REQUESTS]:
-            self._transfer_request_locked(source, "requests")
+        self._recover_requests_locked()
 
     # LLM: 请求路径必须是本owner两个固定目录的单个宿主文件名，拒绝外部路径、遍历段及任意目录。
     # 函数用途: 将可信队列路径转换为nofollow读写使用的相对分量。
@@ -370,15 +461,15 @@ class SkillLearningStore:
                 if read_text_beneath(self.directory, (folder, name)) is not None:
                     self._write_request_locked(folder, name, request)
 
-    # LLM: state锁内按原文件名删除热/溢出副本，不删除同上下文的新请求；热区清空后恢复缓冲，保持可发现性。
-    # 函数用途: 从队列删除一条请求。
+    # LLM: state锁内先验路径并收敛中断替代关系，再按原文件名删除；删新不复活旧、删旧不误删新，最后补齐FIFO热区。
+    # 函数用途: 在保留崩溃替代事实的前提下删除准确请求并补齐热队列。
     def discard_request(self, path: Path) -> None:
         with self.state_lock():
             _folder, name = self._request_parts(path)
+            self._recover_requests_locked()
             for folder in ("requests", "requests_overflow"):
                 unlink_file_beneath(self.directory, (folder, name))
-            if not self._request_paths("requests"):
-                self._refill_requests_locked()
+            self._recover_requests_locked()
 
     # LLM: 文件不存在视为空登记表；存在但损坏时抛 REGISTRY_CORRUPT，绝不按空表覆盖写回。
     # 函数用途: 读取登记表。

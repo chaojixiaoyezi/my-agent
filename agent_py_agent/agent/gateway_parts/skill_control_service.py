@@ -4,13 +4,15 @@
 #   同一入口）。不构造 Agent、不暴露给模型；回执不含本机绝对路径。改动须同步 control_commands._skills_command、
 #   command_catalog 的 skills 条目、TUI control_runtime 的文本还原与本地拒绝，以及 test_skill_chat_control.py。
 #   using 仅通过 owner_conversation_store 和 method_carry 操作当前线程隐藏登记，不加载正文或冷 Agent。
-# 模块用途: 在 TUI 和 IM 管理技能提案、自动总结 Skill 和本会话方法沿用。
+# 模块用途: 在TUI和IM展示两类技能候选及准确确认命令，管理已发布Skill和本会话方法沿用。
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from inspect import signature
 
 from ..capability.decision_skill_proposal_review import skill_proposal_review_order
+from ..capability.skill_learning_proposals import list_learning_proposals
 from ..capability.skill_learning_publish import SkillLearningGateError
 from ..capability.skill_learning_report import (
     apply_learned_skill_action,
@@ -165,25 +167,55 @@ def _proposal_by_ref(service: SkillProposalService, ref: str) -> SkillProposal:
     return matches[0]
 
 
-# 函数用途: /skills —— 待确认的提案（可能按审核顺序排列）加自动总结 Skill 的数量。
+# LLM: 同owner原候选为唯一状态源；可选溢出沿公开读口一次读取，不回填；all仅改变状态过滤，不授确认权。
+# 函数用途: 取得当前owner完整待确认或全部自动学习候选，兼容原列表接口。
+def _automatic_proposals(host, *, include_all=False):
+    options = {'include_overflow': True} if 'include_overflow' in signature(list_learning_proposals).parameters else {}
+    rows = list_learning_proposals(SkillLearningStore.for_home(host.home_paths), **options)
+    return [row for row in rows if include_all or row['status'] == 'pending']
+
+
+# LLM: 只投影名称/修订/摘要及原控制命令，不展示或发布正文；历史候选仅给查看，不给无效确认命令。
+# 函数用途: 生成自动学习候选可直接审阅操作的聊天列表。
+def _automatic_proposal_lines(rows):
+    if not rows:
+        return []
+    lines = ['', f'自动学习候选：{len(rows)} 条（确认前不写正式Skill）']
+    labels = {'pending': '待确认', 'committed': '已确认并安装', 'rejected': '已拒绝'}
+    for index, row in enumerate(rows, 1):
+        identifier, revision = row['proposal_id'], row['revision']
+        lines.append(f"{index}. {row['decision']['name']} 修订 {revision}［{labels.get(row['status'], row['status'])}］{row['decision']['description']}")
+        commands = f'查看 /skills learned proposal-show {identifier}'
+        if row['status'] == 'pending':
+            commands += f'　确认 /skills learned confirm {identifier} {revision}　拒绝 /skills learned reject {identifier} {revision}'
+        lines.append(f'   {commands}')
+    return lines
+
+
+# LLM: 原子代理提案格式保持；自动候选存在时直接列名称/修订/摘要和命令，候选为空时原输出逐字保持。
+# 函数用途: /skills展示两类待审提案，再汇总已发布数量，不会自动确认。
 def _overview(host: SkillControlHost, tokens: list[str]) -> str:
-    lines = _proposal_list_lines(host, status=PROPOSAL_PENDING)
+    drafts = _automatic_proposals(host)
+    lines = _proposal_list_lines(host, status=PROPOSAL_PENDING, include_empty_notice=not drafts)
+    lines += _automatic_proposal_lines(drafts)
     report = learned_skills_report(SkillLearningStore.for_home(host.home_paths), host.config)
     lines += ["", f"自动总结的 Skill：{report['count']} 个（发 /skills learned 查看）。"]
-    from ..capability.skill_learning_proposals import list_learning_proposals
-    drafts = [row for row in list_learning_proposals(SkillLearningStore.for_home(host.home_paths)) if row["status"]=="pending"]
     lines.append(f"待确认学习候选：{len(drafts)}份（/skills learned proposals 查看，确认前不写正式Skill）。")
     return "\n".join(lines)
 
 
-# 函数用途: /skills proposals [all] —— 列出待确认或全部提案。
+# LLM: 原提案与自动学习候选分别沿原服务读取，all包括历史；无自动候选时保持原格式。
+# 函数用途: /skills proposals [all]展示两类待确认或全部提案及有效操作命令。
 def _proposals(host: SkillControlHost, tokens: list[str]) -> str:
-    return "\n".join(_proposal_list_lines(host, status=None if tokens[1:] == ["all"] else PROPOSAL_PENDING))
+    include_all = tokens[1:] == ['all']
+    drafts = _automatic_proposals(host, include_all=include_all)
+    lines = _proposal_list_lines(host, status=None if include_all else PROPOSAL_PENDING, include_empty_notice=not drafts)
+    return '\n'.join(lines + _automatic_proposal_lines(drafts))
 
 
-# LLM: 列表调用审核顺序点（与 CLI 同一入口）；它返回 None 时保持服务原顺序，只有采用时才重排并加宿主标签。只读。
-# 函数用途: 生成提案列表的聊天展示，每条待确认提案附上可直接复制的查看、确认、拒绝命令。
-def _proposal_list_lines(host: SkillControlHost, *, status: str | None) -> list[str]:
+# LLM: 原审核顺序点及格式不变；仅在另有自动候选时省略空提示，由结构化候选存在性决定，绝不解析文案。
+# 函数用途: 生成原子代理提案列表及命令，避免有自动候选却称没有待办。
+def _proposal_list_lines(host: SkillControlHost, *, status: str | None, include_empty_notice: bool = True) -> list[str]:
     service = _proposals_service(host)
     proposals = service.list(status=status)
     review = skill_proposal_review_order(host, service, proposals)
@@ -193,7 +225,7 @@ def _proposal_list_lines(host: SkillControlHost, *, status: str | None) -> list[
     title = "待确认的技能提案" if status == PROPOSAL_PENDING else "技能提案"
     lines = [f"{title}：{len(ordered)} 条（自学习：{switch}）"]
     if not ordered:
-        return lines + ["没有需要你处理的提案。"]
+        return lines + (["没有需要你处理的提案。"] if include_empty_notice else [])
     if review is not None:
         lines.append(_REVIEW_NOTE)
     for index, proposal in enumerate(ordered, 1):
@@ -265,14 +297,17 @@ def _outcome_text(outcome: SkillProposalOutcome, proposal: SkillProposal) -> str
     return f"已拒绝提案 {proposal.proposal_id[:_SHORT_ID_CHARS]}（{proposal.target.skill_name}）。"
 
 
-# LLM: 事实来自 skill_learning_report（与 CLI 同一推导）；只读。
+# LLM: 事实来自 skill_learning_report（与 CLI 同一推导）；只读展示含溢出请求与有效使用次数。
 # 函数用途: /skills learned —— 列出自动总结的 Skill，每个附上查看、回滚、删除命令。
 def _learned(host: SkillControlHost, tokens: list[str]) -> str:
     report = learned_skills_report(SkillLearningStore.for_home(host.home_paths), host.config)
     switch = "开启" if report["self_learning_enabled"] else "关闭"
     limit = report["daily_limit"] or "不限"
-    lines = [f"自动总结的 Skill：{report['count']} 个（自学习：{switch}；待处理请求 {report['pending_requests']} 条；"
-             f"今日总结 {report['calls_today']}/{limit} 次）"]
+    overflow = int(report.get("overflow_requests") or 0)
+    usage = report.get("skill_usage") if isinstance(report.get("skill_usage"), dict) else {}
+    effective = int(usage.get("effective_uses") or 0)
+    lines = [f"自动总结的 Skill：{report['count']} 个（自学习：{switch}；待处理请求 {report['pending_requests']} 条，溢出 {overflow} 条；"
+             f"今日总结 {report['calls_today']}/{limit} 次；有效使用 {effective} 次）"]
     if not report["skills"]:
         return "\n".join(lines + ["还没有自动总结的 Skill。"])
     for index, item in enumerate(report["skills"], 1):
@@ -314,7 +349,7 @@ def _learned_action(host: SkillControlHost, tokens: list[str]) -> str:
 
 
 
-# LLM: 此入口只收已认证用户control，候选确认不暴露给模型工具；原owner裁决和expected revision不变。
+# LLM: 此入口只收已认证用户control，展示包括归档pending；确认不暴露给模型工具，原owner和revision不变。
 # 函数用途: 让普通/群IM用户查看并确认或拒绝自己的学习候选，不依赖管理员CLI。
 def _learning_proposal(host, tokens):
     from ..capability.skill_learning_proposals import (
@@ -325,7 +360,7 @@ def _learning_proposal(host, tokens):
     store = SkillLearningStore.for_home(host.home_paths)
     action = tokens[1]
     if action == 'proposals':
-        rows = [row for row in list_learning_proposals(store) if row['status']=='pending']
+        rows = [row for row in list_learning_proposals(store,include_overflow=True) if row['status']=='pending']
         return '\n'.join(f"{row['proposal_id']} 修订{row['revision']}：{row['decision']['name']}；查看 /skills learned proposal-show {row['proposal_id']}" for row in rows) or '没有待确认学习候选。'
     row = learning_proposal(store,tokens[2])
     if action == 'proposal-show':

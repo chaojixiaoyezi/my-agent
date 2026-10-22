@@ -289,7 +289,7 @@ class SkillLearningService:
             and self.store.registry_path.exists()
             and learning_maintenance_due(self.store.registry_path.stat().st_mtime, self.settings.maintenance_mode, time.time()))
 
-    # LLM: 最早核准确Agent/原执行，FIFO路径只约束当前源；维护/候选/收尾写入重核短门，模型等待在门外。
+    # LLM: 最早核准确Agent/原执行与同owner源目录，预筛只读FIFO；维护/候选/收尾写入重核短门，模型等待在门外。
     #   maintenance_only只由真实registry来源内部选择，完成原维护即返回，不消费后来FIFO或调用模型；默认False保原预算/人工proposals。
     # 函数用途: 在后台处理最早的一条学习请求。
     def run_pending(self, *, expected_request_path: Path | None = None, maintenance_only: bool = False) -> SkillLearningRunResult:
@@ -297,10 +297,14 @@ class SkillLearningService:
 
         require_request_execution(component=self, component_attribute="skill_learning")
         if expected_request_path is not None:
+            try:
+                self.store._request_parts(expected_request_path)
+            except (ValueError, SkillLearningStoreError):
+                return SkillLearningRunResult(STATUS_BUSY)
             pending = self.store.pending_requests()
             if not pending:
                 return SkillLearningRunResult(STATUS_IDLE)
-            if pending[0] != expected_request_path:
+            if pending[0].name != expected_request_path.name:
                 return SkillLearningRunResult(STATUS_BUSY)
         if self.runtime.lesson_provider:
             from .skill_learning_migration import adopt_committed_lessons
@@ -325,14 +329,14 @@ class SkillLearningService:
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return SkillLearningRunResult(EVENT_FAILED,"SKILL_LEARNING_STORAGE_LIMIT")
 
-    # LLM: 原.run锁内再核FIFO，候选满额交propose合并/轮转而不拦模型；预算、owner与实际未知原对象传播保持。
+    # LLM: 原.run锁内显式回填后按同owner文件名再核FIFO，旧overflow源移动不误判；预算与实际未知原对象传播保持。
     # 函数用途: 在运行锁内处理一条请求。
     def _run_first(self, *, expected_request_path: Path | None = None) -> SkillLearningRunResult:
-        pending = self.store.pending_requests()
+        pending = self.store.pending_requests(refill=True)
         if not pending:
             return SkillLearningRunResult(STATUS_IDLE)
         path = pending[0]
-        if expected_request_path is not None and path != expected_request_path:
+        if expected_request_path is not None and path.name != expected_request_path.name:
             return SkillLearningRunResult(STATUS_BUSY)
         request = self.store.read_request(path)
         if request is None:

@@ -19,6 +19,7 @@ processing liveness 直接读取 lease_service，不再经过 runtime 聚合层�
 
 import math
 import time
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -45,6 +46,11 @@ if TYPE_CHECKING:
 _TERMINAL_PROJECTION_MARKER_SCHEMA = "gateway_terminal_projection_complete.v1"
 # 只节流可重建投影；启动和每小时完整复核兜住原位改写，规范终态与结算仍逐条核验。
 _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS = 3600.0
+# 候选仅是可重建的名称快照，不缓存终态正文或授予结算权限；按目录数有界保留。
+_TERMINAL_CANDIDATES_CACHE: dict[
+    Path, tuple[tuple[int, int], tuple[Path, ...], tuple[str, ...]]
+] = {}
+_TERMINAL_CANDIDATES_CACHE_MAX = 32
 _ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
 GATEWAY_SAFE_RESTART_CAUSE = "gateway_safe_restart"
 # 续跑次数用完时请求收口的错误码（登记在 contracts.error_taxonomy，恢复动作 request_user_input）。
@@ -622,6 +628,27 @@ def _write_terminal_projection_cursor(
     )
 
 
+# LLM: 仅在终态目录directory_stamp未变时复用排序路径与名称元组；代次变化或未知时重走glob，使跨进程新增可见。
+# 函数用途: 获取按文件名排序的终态JSON候选，避免积压分页时重复枚举与排序全目录。
+def _sorted_terminal_candidates(
+    terminal_dir: Path,
+    directory_stamp: tuple[int, int] | None,
+) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+    if directory_stamp is not None:
+        cached = _TERMINAL_CANDIDATES_CACHE.get(terminal_dir)
+        if cached is not None and cached[0] == directory_stamp:
+            return cached[1], cached[2]
+    candidates = tuple(sorted(terminal_dir.glob("*.json"), key=lambda item: item.name))
+    names = tuple(item.name for item in candidates)
+    if directory_stamp is not None:
+        if len(_TERMINAL_CANDIDATES_CACHE) >= _TERMINAL_CANDIDATES_CACHE_MAX and terminal_dir not in _TERMINAL_CANDIDATES_CACHE:
+            _TERMINAL_CANDIDATES_CACHE.pop(next(iter(_TERMINAL_CANDIDATES_CACHE)), None)
+        _TERMINAL_CANDIDATES_CACHE[terminal_dir] = (directory_stamp, candidates, names)
+    else:
+        _TERMINAL_CANDIDATES_CACHE.pop(terminal_dir, None)
+    return candidates, names
+
+
 # LLM: The live dispatcher walks canonical terminal authorities in bounded rotating pages. Repair
 # never delays Gateway readiness, and one corrupt archive is reported without blocking others.
 # 稳态节流：目录时间戳没变、且上一轮已沿文件名追平目录末尾（caught_up）、且不在低频全量复核
@@ -629,7 +656,8 @@ def _write_terminal_projection_cursor(
 # 保证任何崩溃场景最终补齐。启动全扫由调用方传 full_scan=True；运行中被外部改坏的投影由
 # _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS 到期的全量复核兜住。
 # LLM: 正多进程只消费dispatcher传入的原gate，缺来源保原pending；不得削弱当前分页/finite/CAS合同。
-# 函数用途: 分批补原终态投影；保持原追平与目录代次，未知不重放业务。
+#   同代次候选只枚举排序一次，跨页二分定位；未知代次不命中稳态跳过，原pass_stamp和整轮欠账语义不变。
+# 函数用途: 复用候选并分批补原终态投影，保持原追平、目录代次和结算欠账，未知不重放业务。
 def repair_gateway_terminal_projections(
     paths: GatewayPaths,
     *,
@@ -658,14 +686,18 @@ def repair_gateway_terminal_projections(
     if not math.isfinite(last_full_scan_at):
         last_full_scan_at = 0.0
     full_due = full_scan or now_epoch - last_full_scan_at >= _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS
-    if not full_due and caught_up and directory_stamp == _cursor_directory_stamp(cursor):
+    if (
+        not full_due and caught_up and directory_stamp is not None
+        and directory_stamp == _cursor_directory_stamp(cursor)
+    ):
         return projected, errors
-    candidates = sorted(paths.terminal.glob("*.json"), key=lambda item: item.name)
-    if not candidates:
+    candidates, candidate_names = _sorted_terminal_candidates(paths.terminal, directory_stamp)
+    total = len(candidates)
+    if total == 0:
         _write_terminal_projection_cursor(
             cursor_path,
             _TerminalProjectionCursor(
-                last_name=previous,
+                last_name="",
                 directory_stamp=directory_stamp,
                 full_scan_at=now_epoch if full_due else last_full_scan_at,
                 caught_up=True,
@@ -674,7 +706,9 @@ def repair_gateway_terminal_projections(
         return projected, errors
     if full_due or caught_up:
         previous = ""
-    start = next((index for index, path in enumerate(candidates) if path.name > previous), 0)
+    start = bisect_right(candidate_names, previous) if previous else 0
+    if start >= total and previous:
+        start = 0
     # 分页保持线性；不把尾部加前缀混成“已覆盖整轮”。并发新增时先推进旧积压，再完整复核下一轮。
     selected = candidates[start : start + max(1, int(limit or 1))]
     pass_stamp = directory_stamp if start == 0 else _cursor_directory_stamp(cursor)

@@ -1,6 +1,6 @@
 ## 2026-10-21 子代理持久化缺失 canonical 负缓存结构
 
-`subagents/services/persistence/service.py::SubAgentPersistenceService` 维护 `_missing_canonical_cache: dict[str, tuple[tuple[int, int, int, int, int], Path]]`，键为 `run_id`、值为 `(locator_stat_signature, canonical_path)`。`_load_from_locator` 在 `locator` 5 元组签名命中负缓存且 `not canonical.exists()` 时直接抛出 `FileNotFoundError` 而不重读 locator JSON；一旦 `canonical` 重新出现、`locator` 签名变更或 `list_runs` 清理已不存在的 `run_id` 时立即失效。
+`subagents/services/persistence/service.py::SubAgentPersistenceService` 维护 `_missing_canonical_cache: dict[str, tuple[tuple[int, int, int, int, int], Path]]`（与 `_run_cache` 共同受 `_MAX_RUN_CACHE_ENTRIES = 512` 容量保护），键为 `run_id`、值为 `(locator_stat_signature, canonical_path)`。`_load_from_locator` 在 `locator` 5 元组签名命中负缓存且 `not canonical.exists()` 时直接抛出 `FileNotFoundError` 而不重读 locator JSON；一旦 `canonical` 重新出现、`locator` 签名变更或 `list_runs` 清理已不存在的 `run_id` 时立即失效。
 
 ## 2026-10-17 调试引用编码边界
 

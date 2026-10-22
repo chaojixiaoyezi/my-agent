@@ -6,9 +6,14 @@ import hashlib
 import json
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 
-from ..common.json_io import locked_json_path
+from ..common.json_io import (
+    append_private_jsonl_capped,
+    locked_json_path,
+    read_jsonl_objects_report,
+)
 from ..common.nofollow_fs import (
     list_names_beneath,
     open_readonly_file_beneath,
@@ -27,7 +32,7 @@ from .skill_learning_publish import (
     publish_learned_skill,
     render_learned_skill,
 )
-from .skill_learning_store import SkillLearningEvent
+from .skill_learning_store import MAX_LEDGER_EVENTS, SkillLearningEvent
 from .skill_snapshot import skill_content_sha256
 
 MAX_PENDING_PROPOSALS = 20
@@ -47,7 +52,7 @@ def _proposal_name(proposal_id):
     return proposal_id+'.json'
 
 
-# LLM: 全局候选锁覆盖轮转与完整resolve，内部仍走owner配额→state；账本只能在state外追加，禁止锁反转。
+# LLM: 原state_lock先持owner配额再持state，最后才取候选锁；轮转事件在全部锁外沿原账本入口追加。
 # 函数用途: 先收敛上次中断，再保存脱敏且过guard的草稿；同名替代、满额轮转而不自动发布。
 def propose_learning(store, publish):
     publish, redacted = _redacted_publish(publish)
@@ -57,8 +62,8 @@ def propose_learning(store, publish):
         'taken_names':sorted(publish.taken_names),'max_skills':publish.max_skills,'redacted':redacted,
         'created_at_ns':time.time_ns()}
     proposal_id = record['proposal_id'] = _identity_id(record)
-    with locked_json_path(store.directory/'.proposals'):
-        with store.state_lock() as admission:
+    with store.state_lock() as admission:
+        with locked_json_path(store.directory/'.proposals'):
             _recover_proposals(store,admission)
             rows = _all_proposals(store)
             if any(row['proposal_id'] == proposal_id for _, row in rows):
@@ -67,8 +72,8 @@ def propose_learning(store, publish):
                 _stage_and_check(store,publish,render_learned_skill(publish.decision))
                 final, events = _rotation_plan(store, rows, record)
                 _apply_plan(store, rows, final, admission)
-        for event in events:
-            store.append_event(event)
+    for event in events:
+        store.append_event(event)
     return SkillLearningEvent('proposed',skill_name=publish.decision.name,request_key=str(publish.request.get('request_key','')),reason=proposal_id)
 
 
@@ -106,10 +111,13 @@ def _locate_proposal(store, proposal_id):
     return found[0]
 
 
-# LLM: 共享锁让展示不观察到移动中间态；读取并不授权确认，仍限定当前owner固定目录。
+# LLM: 只读判空不创建锁；有候选时统一沿owner配额→state→proposals读取投影，不恢复或修改业务文件。
 # 函数用途: 按编号读取主区或overflow候选供用户核对。
 def learning_proposal(store, proposal_id):
-    with locked_json_path(store.directory/'.proposals'):
+    _proposal_name(proposal_id)
+    if not _has_proposals(store):
+        raise ValueError('学习候选不存在、重复或已损坏')
+    with store.state_lock(), locked_json_path(store.directory/'.proposals'):
         return _locate_proposal(store,proposal_id)[1]
 
 
@@ -139,14 +147,20 @@ def _all_proposals(store, include_overflow=True):
     return [(folder,row) for folder,row in projected if include_overflow or folder == _ACTIVE]
 
 
-# LLM: 默认只读主区，显式可读归档；空目录先只读检查，不能因为状态查询首次创建候选目录或锁。
-# 函数用途: 列出当前owner候选的只读事务投影，可选包含有界归档。
-def list_learning_proposals(store, include_overflow=False):
+# LLM: 空目录只读判空，意图存在即需投影；不清理文件，不因首次查询创建owner或领域锁。
+# 函数用途: 判断所选候选范围是否存在可读取文件或待投影事务。
+def _has_proposals(store, include_overflow=True):
     folders = (_ACTIVE,_OVERFLOW) if include_overflow else (_ACTIVE,)
-    if not _read_intent(store) and not any(name.startswith('learning-proposal-') and name.endswith('.json')
-               for folder in folders for name in list_names_beneath(store.directory,(folder,))):
+    return bool(_read_intent(store)) or any(name.startswith('learning-proposal-') and name.endswith('.json')
+               for folder in folders for name in list_names_beneath(store.directory,(folder,)))
+
+
+# LLM: 默认涵盖归档pending；hot-only调用须显式False，非空查询按owner配额→state→proposals锁序只读投影。
+# 函数用途: 列出当前owner完整候选，可显式只读主区，不执行崩溃恢复或迁移。
+def list_learning_proposals(store, include_overflow=True):
+    if not _has_proposals(store,include_overflow):
         return []
-    with locked_json_path(store.directory/'.proposals'):
+    with store.state_lock(), locked_json_path(store.directory/'.proposals'):
         return [row for _,row in _all_proposals(store,include_overflow)]
 
 
@@ -336,7 +350,7 @@ def _check_changes(store, admission, changes):
                      for parts,text in {**changes,_INTENT:None}.items()])
 
 
-# LLM: 只在候选→owner配额→state原锁序的写入口重放，恢复不移除意图直到所有目标写入和删除完成。
+# LLM: 只在owner配额→state→候选锁序的写入口重放，恢复不移除意图直到所有目标写入和删除完成。
 # 函数用途: 将已验证的事务或旧版迁移投影幂等落盘，允许恢复自身再次崩溃。
 def _recover_proposals(store, admission):
     rows = _physical_proposals(store)
@@ -357,17 +371,48 @@ def _recover_proposals(store, admission):
     unlink_file_beneath(store.directory,_INTENT)
 
 
-# LLM: 仅用户CLI/结构化控制调用，共享候选锁跨越publisher到结果落盘；原CAS/guard和用户actor审计不变。
+# LLM: 只在本次原state事务内借用admission；不修改共享store，也不让publisher重取不可重入的quota/state锁。
+# 类用途: 给原publisher提供已有事务的同步视图，其余属性和写入仍委托原store。
+class _ProposalPublishStore:
+    # LLM: 该视图仅由持原state锁的resolve栈创建，不注册或缓存额外配额权威。
+    # 函数用途: 绑定原store及其当前准入对象。
+    def __init__(self, store, admission):
+        self._store, self._admission = store, admission
+
+    # LLM: 原写者的check_write、save_registry及版本写入仍读取原ContextVar准入。
+    # 函数用途: 将发布数据操作委托到同一owner原store。
+    def __getattr__(self, name):
+        return getattr(self._store,name)
+
+    # LLM: 同步publisher只复用仍生效的准入；视图逃逸或事务结束立即拒绝，绝不把旧admission当新授权。
+    # 函数用途: 在已持锁的发布调用内免除重复取锁。
+    @contextmanager
+    def state_lock(self):
+        if self._store._quota_admission.get() is not self._admission:
+            raise RuntimeError('学习候选发布缺少原配额事务')
+        yield self._admission
+
+
+# LLM: resolve已持原owner准入；复用原有界私有JSONL写者而非append_event再次取quota，保留先记账后确认的崩溃重试点。
+# 函数用途: 在原准入中核算并追加确认事件，账本路径、容量与编码合同同SkillLearningStore.append_event。
+def _append_resolution_event(store, admission, event):
+    row = event.to_record()
+    existing = read_jsonl_objects_report(store.ledger_path,context='skill_learning.ledger.quota').records if store.ledger_path.exists() else []
+    text = ''.join(json.dumps(item,ensure_ascii=False,sort_keys=True)+'\n' for item in [*existing,row][-MAX_LEDGER_EVENTS:])
+    admission.check([OwnerQuotaChange(store.ledger_path,len(text.encode()))])
+    append_private_jsonl_capped(store.ledger_path,row,max_records=MAX_LEDGER_EVENTS)
+
+
+# LLM: 仅用户CLI/结构化控制调用；owner配额→state→候选锁贯穿原publisher和确认落盘，CAS/guard/actor不变。
 # 函数用途: 先恢复候选迁移再确认或拒绝准确草稿，不把开关或模型理由当确认。
 def resolve_learning_proposal(store, proposal_id, expected_revision, *, decision, guard_config=None, actor_id=""):
     if not isinstance(actor_id,str) or len(actor_id)>300 or len(actor_id.splitlines())>1:
         raise ValueError('学习确认者编号无效')
     if decision not in {'confirm','reject'} or isinstance(expected_revision,bool) or not isinstance(expected_revision,int):
         raise ValueError('学习候选决定无效')
-    # 候选锁→publisher原owner配额/state；轮转与resolve同锁，绝不持state再等候选锁或append_event。
-    with locked_json_path(store.directory/'.proposals'):
-        with store.state_lock() as admission:
-            _recover_proposals(store,admission)
+    # publisher复用当前state准入，账本沿原私有writer追加，不能在候选锁内重新申请owner配额。
+    with store.state_lock() as admission, locked_json_path(store.directory/'.proposals'):
+        _recover_proposals(store,admission)
         folder,row = _locate_proposal(store,proposal_id)
         if row['status'] == ('committed' if decision == 'confirm' else 'rejected') and row['revision'] == expected_revision + 1:
             return row
@@ -381,18 +426,17 @@ def resolve_learning_proposal(store, proposal_id, expected_revision, *, decision
             if record and record.last_operation_id == proposal_id and record.sha256 == skill_content_sha256(render_learned_skill(SkillLearningDecision(**draft))):
                 event = SkillLearningEvent('published' if draft['decision']=='create' else 'updated',skill_name=record.name,version=record.version,sha256=record.sha256)
             else:
-                event = publish_learned_skill(store,PublishRequest(SkillLearningDecision(**draft),request,frozenset(row['taken_names']),
+                event = publish_learned_skill(_ProposalPublishStore(store,admission),PublishRequest(SkillLearningDecision(**draft),request,frozenset(row['taken_names']),
                     row['max_skills'],guard_config,row['expected_revision'],row['expected_sha256']))
             if row.get('redacted'):
                 event = replace(event,code='SKILL_LEARNING_REDACTED')
-            store.append_event(event)
+            _append_resolution_event(store,admission,event)
             row.update(status='committed',receipt=event.to_record())
         else:
             row['status'] = 'rejected'
         row['resolved_by'] = {'actor_id':actor_id,'owner_scope':'current_store'}
         row['revision'] += 1
-        with store.state_lock():
-            text = json.dumps(row,ensure_ascii=False)
-            store.check_write(store.directory/folder/_proposal_name(proposal_id),text)
-            write_text_atomic_beneath(store.directory,(folder,_proposal_name(proposal_id)),text)
+        text = json.dumps(row,ensure_ascii=False)
+        store.check_write(store.directory/folder/_proposal_name(proposal_id),text)
+        write_text_atomic_beneath(store.directory,(folder,_proposal_name(proposal_id)),text)
     return row

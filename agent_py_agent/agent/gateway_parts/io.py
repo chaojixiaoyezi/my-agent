@@ -59,6 +59,8 @@ except ImportError:  # pragma: no cover - POSIX import guard.
 _JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
 _GATEWAY_HISTORY_CACHE_LOCK = threading.Lock()
+# 限制历史文件进程内快照缓存条目上限，防止多工作区长期运行无界增长。
+_MAX_GATEWAY_HISTORY_CACHE_ENTRIES = 64
 _GATEWAY_HISTORY_CACHE: dict[
     str,
     tuple[tuple[int, int], tuple[str, ...], dict[str, _GatewayHistoryIndexEntry]],
@@ -935,6 +937,11 @@ def _gateway_history_snapshot(
                 conflict=existing.conflict or existing.payload != row,
             )
     with _GATEWAY_HISTORY_CACHE_LOCK:
+        if (
+            key not in _GATEWAY_HISTORY_CACHE
+            and len(_GATEWAY_HISTORY_CACHE) >= _MAX_GATEWAY_HISTORY_CACHE_ENTRIES
+        ):
+            _GATEWAY_HISTORY_CACHE.pop(next(iter(_GATEWAY_HISTORY_CACHE)), None)
         _GATEWAY_HISTORY_CACHE[key] = (stamp, tuple(lines), dict(index))
     return lines, index
 
@@ -958,8 +965,14 @@ def _store_gateway_history_cache(
     lines: list[str],
     index: dict[str, _GatewayHistoryIndexEntry],
 ) -> None:
+    key = str(path.resolve())
     with _GATEWAY_HISTORY_CACHE_LOCK:
-        _GATEWAY_HISTORY_CACHE[str(path.resolve())] = (
+        if (
+            key not in _GATEWAY_HISTORY_CACHE
+            and len(_GATEWAY_HISTORY_CACHE) >= _MAX_GATEWAY_HISTORY_CACHE_ENTRIES
+        ):
+            _GATEWAY_HISTORY_CACHE.pop(next(iter(_GATEWAY_HISTORY_CACHE)), None)
+        _GATEWAY_HISTORY_CACHE[key] = (
             _gateway_history_stamp(path),
             tuple(lines),
             dict(index),

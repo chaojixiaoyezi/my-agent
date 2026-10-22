@@ -218,3 +218,18 @@ def test_supervisor_stop_parser_to_handler_budget(monkeypatch, timeout_args, bud
     make_agent.assert_called_once_with(args)
     gateway_paths.assert_called_once_with(agent)
     stop.assert_called_once_with(paths, timeout=budget)
+
+
+# LLM: 旧代PID停止请求在新代启动清理后延迟落盘时，应被新代忽略并清理，仅同代PID或信号才触发退出。
+# 函数用途: 回归R6-1跨代停止标记不误杀新代适配器进程。
+def test_delayed_old_generation_stop_request_does_not_exit_new_generation(tmp_path):
+    import os
+
+    gpaths = SimpleNamespace(root=tmp_path)
+    adapter_daemon._write_stop_request(gpaths, pid=os.getpid() + 99999)
+    stop_path = adapter_daemon.adapter_stop_path(tmp_path)
+    assert stop_path.exists()
+    assert adapter._stop_request_matches_current_process(stop_path) is False
+    assert not stop_path.exists()
+    adapter_daemon._write_stop_request(gpaths, pid=os.getpid())
+    assert adapter._stop_request_matches_current_process(stop_path) is True

@@ -1,33 +1,83 @@
-# LLM: 工具只准备本owner清单；授权与接收只由认证人类控制入口调用，双端grant绑定完整hash、稳定owner和有效期。
-# 模块用途: 沿原学习registry保存导出意图及双端确认，签名引用不是工具权限、不能让群直接读取别人的私人目录。
+# LLM: 工具只准备本owner清单并只读本owner回执；授权/接收仍由认证人类入口调用，原双端grant/hash/expiry不变。
+# 模块用途: 沿原registry保存意图与确认，提供字段错误和双向回执；引用与索引均不授予跨owner正文权限。
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
+import re
 import time
 import uuid
 from contextlib import ExitStack
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from ..common.nofollow_fs import read_bytes_beneath, unlink_file_beneath, write_bytes_atomic_beneath
+from ..common.nofollow_fs import (
+    list_names_beneath,
+    read_bytes_beneath,
+    unlink_file_beneath,
+    write_bytes_atomic_beneath,
+)
 from ..user_space.interaction_refs import interaction_key
 from ..user_space.owner_quota import OwnerQuotaChange
 from ..user_space.owner_resolver import OwnerIdentity, home_paths_with_owner, resolve_owner_home
 from .self_install_switches import read_fresh_capability_switch
-from .skill_learning_store import MAX_PENDING_REQUESTS, SkillLearningStore
+from .skill_learning_store import MAX_PENDING_REQUESTS, SkillLearningStore, SkillLearningStoreError
 from .skill_transfer_import import _submit_import_locked
 from .skill_transfer_manifest import (
     MAX_TRANSFER_BYTES,
+    MAX_TRANSFER_FILES,
+    MAX_TRANSFER_SKILLS,
     SkillTransferError,
     build_skill_bundles,
     host_owner,
     manifest_hash,
     public_manifest,
 )
+
+
+# LLM: 继承原错误协议以保留所有调用方catch；message仅为宿主字段说明，不携参数值、正文或底层异常。
+# 类用途: 在不修改共享manifest模块的情况下携带安全的字段级修正提示。
+class SkillTransferInputError(SkillTransferError):
+    # LLM: code保持原结构化拒绝码，message只供展示，不参与授权。
+    # 函数用途: 构造带准确参数说明的迁移错误。
+    def __init__(self, message, code='SKILL_TRANSFER_ARGUMENTS_INVALID'):
+        super().__init__(code)
+        self.message = message
+        self.args = (message,)
+
+
+# LLM: 仅检验选择项形状；来源、hash对应关系、路径和秘密仍交给原manifest硬门，不复制安全裁决。
+# 函数用途: 在读取或写入前指出skills条目缺失字段。
+def _validate_selections(selections):
+    if not isinstance(selections, list) or len(selections) > MAX_TRANSFER_SKILLS:
+        raise SkillTransferInputError(f'skills 必须为数组，最多 {MAX_TRANSFER_SKILLS} 项，每项包含 stable_id 与 content_sha256。')
+    for index, item in enumerate(selections):
+        prefix = f'skills[{index}]'
+        if not isinstance(item, dict) or set(item) - {'stable_id', 'content_sha256', 'resources', 'target_name'}:
+            raise SkillTransferInputError(f'{prefix} 必须为对象，仅含 stable_id、content_sha256、resources、target_name。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+        if not isinstance(item.get('stable_id'), str) or not item['stable_id'].strip():
+            raise SkillTransferInputError(f'{prefix} 缺少字段 stable_id（非空字符串）。')
+        if not isinstance(item.get('content_sha256'), str) or re.fullmatch(r'[0-9a-f]{64}', item['content_sha256']) is None:
+            raise SkillTransferInputError(f'{prefix}.content_sha256 必须为64位小写十六进制摘要。')
+        resources = item.get('resources', [])
+        if not isinstance(resources, list) or len(resources) >= MAX_TRANSFER_FILES or not all(isinstance(value, str) for value in resources):
+            raise SkillTransferInputError(f'{prefix}.resources 必须为相对路径字符串数组，少于 {MAX_TRANSFER_FILES} 项。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+
+
+# LLM: 纯形状检查可在工具claim前执行；memory-only复刻沿原语义允许，不误收紧既有双端授权功能。
+# 函数用途: 检查prepare的技能、复刻布尔值和显式记忆候选组合。
+def validate_transfer_selection(selections, *, clone=False, memory_candidates=()):
+    if type(clone) is not bool:
+        raise SkillTransferInputError('clone 必须为布尔值 true / false。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+    _validate_selections(selections)
+    if not selections and not memory_candidates:
+        raise SkillTransferInputError('action=prepare 缺少必填参数 skills（非空数组，每项需含 stable_id 与 content_sha256；复刻可显式选择 memory_candidates）。')
+    if memory_candidates and not clone:
+        raise SkillTransferInputError('memory_candidates 仅可在 clone=true 时提供。', 'SKILL_TRANSFER_MEMORY_MANIFEST_INVALID')
 
 
 # LLM: 开关只启用入口，不替代双端用户授权；所有准备/读取/确认均现读，关闭后旧ref不能继续接收。
@@ -37,33 +87,37 @@ def require_transfer_enabled(host):
         raise SkillTransferError('SKILL_TRANSFER_DISABLED')
 
 
-# LLM: owner只接受规范三元组，不能通过自造provider/kind访问任意路径或用模型身份覆盖宿主owner。
-# 函数用途: 校验工具给出的准确目标身份，纯解析不创建目标owner。
+# LLM: owner只接受原规范三元组；格式问题显示字段名，不回显身份值或路径，不创建目标owner。
+# 函数用途: 校验准确target身份并提供缺字段的修正格式。
 def transfer_owner(root, value):
     if not isinstance(value, dict) or set(value) != {'provider', 'owner_kind', 'owner_id'}:
-        raise SkillTransferError('SKILL_TRANSFER_OWNER_INVALID')
-    identity = OwnerIdentity(**value)
-    if identity.owner_kind not in {'user', 'group'} and identity != OwnerIdentity.local_main():
-        raise SkillTransferError('SKILL_TRANSFER_OWNER_INVALID')
-    resolve_owner_home(root, identity)
+        raise SkillTransferInputError('target（target_owner）必须为对象，准确包含 provider、owner_kind、owner_id。')
+    if not all(isinstance(value[key], str) and value[key].strip() for key in value):
+        raise SkillTransferInputError('target.provider、target.owner_kind、target.owner_id 必须为非空字符串。')
+    try:
+        identity = OwnerIdentity(**value)
+        if identity.owner_kind not in {'user', 'group'} and identity != OwnerIdentity.local_main():
+            raise ValueError('invalid kind')
+        resolve_owner_home(root, identity)
+    except (TypeError, ValueError):
+        raise SkillTransferInputError('target 的 provider、owner_kind、owner_id 必须为规范owner三元组。', 'SKILL_TRANSFER_OWNER_INVALID') from None
     return asdict(identity)
 
 
-# LLM: 准备阶段只读取当前owner明确选择的快照，不给目标读权限；bundle/导出记录均在原quota→state事务保存。
-# 函数用途: 固定待分享/复刻清单并返回双端可核对引用，尚未授权或导入任何目标内容。
+# LLM: 先指出字段问题，再走原快照/manifest硬门；bundle及元数据只在原quota→state事务保存，不给目标读权限。
+# 函数用途: 固定分享/复刻清单并保存可查询摘要，尚未授权或导入目标内容。
 def prepare_transfer(agent, target, selections, *, clone=False, memory_candidates=()):
     require_transfer_enabled(agent)
     target = transfer_owner(agent.home_paths.root, target)
-    if type(clone) is not bool or target == host_owner(agent):
-        raise SkillTransferError('SKILL_TRANSFER_MANIFEST_INVALID')
-    if memory_candidates and not clone:
-        raise SkillTransferError('SKILL_TRANSFER_MEMORY_MANIFEST_INVALID')
+    validate_transfer_selection(selections, clone=clone, memory_candidates=memory_candidates)
+    if target == host_owner(agent):
+        raise SkillTransferInputError('target 必须与当前 source_owner 不同。', 'SKILL_TRANSFER_MANIFEST_INVALID')
     from .skill_transfer_memory import build_memory_candidates
     memories = build_memory_candidates(agent, memory_candidates)
     manifest = {'schema_version': 'skill_transfer.v1', 'source_owner': host_owner(agent), 'receiver_owner': target,
         'clone': clone, 'skills': build_skill_bundles(agent, selections), 'memory_candidates': memories}
     if not manifest['skills'] and not memories:
-        raise SkillTransferError('SKILL_TRANSFER_MANIFEST_INVALID')
+        raise SkillTransferInputError('skills 或 memory_candidates 至少提供一项有效选择。', 'SKILL_TRANSFER_MANIFEST_INVALID')
     operation_id = uuid.uuid4().hex
     payload = {'operation_id': operation_id, 'source_owner': manifest['source_owner'], 'receiver_owner': target,
         'manifest_hash': manifest_hash(manifest), 'expires_at': time.time() + 86400}
@@ -75,7 +129,8 @@ def prepare_transfer(agent, target, selections, *, clone=False, memory_candidate
         if sum(row.get('role') == 'export' and row.get('status') in {'draft', 'authorized'} for row in registry.import_operations.values()) >= MAX_PENDING_REQUESTS:
             raise SkillTransferError('SKILL_TRANSFER_PENDING_LIMIT')
         path = store.directory / 'transfers' / operation_id / 'bundle.json'
-        row = {**payload, 'role': 'export', 'status': 'draft', 'target_names': [], 'reference': reference}
+        row = {**payload, 'role': 'export', 'status': 'draft', 'target_names': [], 'reference': reference,
+            'skill_names': [item['source_name'] for item in manifest['skills']]}
         updated = replace(registry, import_operations={**registry.import_operations, 'export:' + operation_id: row})
         metadata = json.dumps(updated.to_record(), ensure_ascii=False, indent=2, sort_keys=True) + '\n'
         admission.check([OwnerQuotaChange(path, len(raw)), OwnerQuotaChange(store.registry_path, len(metadata.encode()))])
@@ -132,8 +187,8 @@ def authorize_transfer(host, reference, actor, *, revoke=False):
     return {'ok': True, 'status': updated['status'], 'manifest': public_manifest(manifest), 'reference': reference}
 
 
-# LLM: 接收按两端canonical owner顺序持原quota/state锁，复核source grant并保持到目标commit；撤回与接收线性化，权限不复制。
-# 函数用途: 当前目标人类确认后提交原Skill登记，重复/并发复刻沿接收owner原幂等账裁决。
+# LLM: 原双端quota/state锁保持至目标commit；成功后仅镜像元数据回执，不反转成功导入或把回执当授权。
+# 函数用途: 人类确认后按原幂等账导入，向来源原账补充可查询的落地结果。
 def accept_transfer(host, reference, actor):
     require_transfer_enabled(host)
     payload = _verify_reference(host.home_paths.root, reference)
@@ -157,8 +212,100 @@ def accept_transfer(host, reference, actor):
         names = {entry.name for entry in host.skills_service.snapshot_for().entries}
         result = _submit_import_locked(host, target, admissions[str(target.skills_root.parent)], manifest,
             payload['operation_id'], source_grant=row['source_grant'], receiver_grant=grant, taken_names=names)
+        _save_transfer_receipt(source, payload, result)
     host.skills_service.clear_cache()
     return result
+
+
+# LLM: 调用方已持来源原quota/state锁；仅保存目标原提交结果，不改变authorized状态或双端grant，异常只警告。
+# 函数用途: 将成功导入回执镜像到来源原导出行，失败可在原编号重放时补回。
+def _save_transfer_receipt(store, payload, result):
+    try:
+        registry = store.load_registry()
+        key = 'export:' + payload['operation_id']
+        row = registry.import_operations[key]
+        if row.get('receipt') == result:
+            return
+        store.save_registry(replace(registry, import_operations={**registry.import_operations, key: {**row, 'receipt': result}}))
+    except (SkillLearningStoreError, SkillTransferError, OSError, RuntimeError, ValueError, KeyError):
+        logging.getLogger(__name__).warning('Skill投递已提交，来源回执暂未完整保存；可按原引用查目标或重放原确认。')
+
+
+# LLM: 只读取当前store固定目录；旧导出未保存名称摘要时，从同owner原bundle投影名称，不返回资源字节。
+# 函数用途: 获取一条本地原导出的技能名称列表。
+def _export_skill_names(store, key, row):
+    if 'skill_names' in row:
+        return row['skill_names']
+    identifier = key.removeprefix('export:')
+    if uuid.UUID(identifier).hex != identifier:
+        raise SkillTransferInputError('import_operations.operation_id 必须为原UUID编号。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+    raw = read_bytes_beneath(store.directory, ('transfers', identifier, 'bundle.json'), max_bytes=MAX_TRANSFER_BYTES * 2, require_dir_fd=True)
+    if raw is None:
+        return []
+    manifest = json.loads(raw)
+    if manifest_hash(manifest) != row.get('manifest_hash'):
+        raise SkillTransferError('SKILL_TRANSFER_SOURCE_CHANGED')
+    return [item.get('source_name', item['name']) for item in manifest['skills']]
+
+
+# LLM: 仅显示已有状态与原提交回执；缺回执必须是未知，绝不把authorized视为对方已收到或导入。
+# 函数用途: 生成不含bundle、actor、私有路径的投递列表行和人工命令提示。
+def _transfer_status_row(reference, row, skills, *, outgoing):
+    receipt = row.get('receipt', {}) if outgoing else row.get('result', {})
+    if not receipt and isinstance(row.get('imported'), list):
+        receipt = {'ok': True, 'imported': row['imported']}
+    imported = receipt.get('imported') if receipt.get('ok') is True else None
+    status = row.get('status', 'unknown')
+    commands = [f'/skills transfer show {reference}']
+    if outgoing and status == 'draft':
+        commands.append(f'/skills transfer authorize {reference}')
+    elif not outgoing and status in {'preparing', 'failed'}:
+        commands.append(f'/skills transfer accept {reference}')
+    return {'reference': reference, 'status': status, 'source_owner': row['source_owner'],
+        'target_owner': row.get('receiver_owner', row.get('target_owner')), 'skills': skills, 'imported': imported,
+        'delivery_status': 'committed' if imported is not None else 'unconfirmed', 'next_commands': commands}
+
+
+# LLM: tx索引只在原owner目录无跟链读取，owner字段仅筛选本地展示，不参与授权；坏记录明确失败，不能假装空。
+# 函数用途: 读取已有tx索引的本地元数据，不访问其它owner目录。
+def _local_transfer_indexes(store, owner):
+    rows = {}
+    for name in list_names_beneath(store.directory, ('transfers',)):
+        if not name.startswith('tx_') or not name.endswith('.json'):
+            continue
+        raw = read_bytes_beneath(store.directory, ('transfers', name), max_bytes=MAX_TRANSFER_BYTES, require_dir_fd=True)
+        row = json.loads(raw) if raw is not None else None
+        if not isinstance(row, dict):
+            raise SkillTransferInputError('transfers.tx_*.json 必须为有效投递对象。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+        outgoing = row.get('source_owner') == owner
+        if not outgoing and row.get('receiver_owner', row.get('target_owner')) != owner:
+            continue
+        reference = row.get('reference')
+        if not isinstance(reference, str) or not reference:
+            raise SkillTransferInputError('transfers.tx_*.json 缺少非空 reference。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+        rows[reference] = (outgoing, _transfer_status_row(reference, row, row.get('skills', []), outgoing=outgoing))
+    return rows
+
+
+# LLM: 只扫描当前owner的索引和原registry；canonical行优先去重，不读接收方私有目录，不创建目录或更新状态。
+# 函数用途: 列出本身份发出和已接收的投递回执，区分未确认与真实落地。
+def list_transfer_statuses(agent):
+    require_transfer_enabled(agent)
+    store = SkillLearningStore.for_home(agent.home_paths)
+    owner = host_owner(agent)
+    rows = _local_transfer_indexes(store, owner)
+    for key, row in store.load_registry().import_operations.items():
+        outgoing = row.get('role') == 'export' and row.get('source_owner') == owner
+        incoming = row.get('role') == 'import' and row.get('receiver_owner') == owner
+        if not outgoing and not incoming:
+            continue
+        reference = row.get('reference') if outgoing else row.get('source_grant', {}).get('reference')
+        if not reference:
+            raise SkillTransferInputError('import_operations.reference 缺失，无法核验投递回执。', 'SKILL_TRANSFER_MANIFEST_INVALID')
+        skills = _export_skill_names(store, key, row) if outgoing else row.get('target_names', [])
+        rows[reference] = (outgoing, _transfer_status_row(reference, row, skills, outgoing=outgoing))
+    return {'ok': True, 'outgoing': [row for outgoing, row in rows.values() if outgoing],
+        'incoming': [row for outgoing, row in rows.values() if not outgoing]}
 
 
 # LLM: MAC带独立skill-transfer用途，不复用私人卡actor放行规则；payload只含稳定身份和清单摘要。

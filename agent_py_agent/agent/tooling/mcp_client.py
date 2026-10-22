@@ -34,6 +34,7 @@ import re
 import subprocess
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -385,6 +386,22 @@ def _parse_tool_info(item: object) -> MCPToolInfo:
 
 _Publication = TypeVar("_Publication")
 
+_LIVE_MCP_CLIENTS: weakref.WeakSet[MCPStdioClient] = weakref.WeakSet()
+_EXIT_HOOK_LOCK = threading.Lock()
+_EXIT_HOOK_REGISTERED = False
+
+
+# LLM: 只在锁内快照弱引用，锁外逐个stop避免重入；退出收尾异常不能妨碍其余实例清理。
+# 函数用途: 进程退出时停止仍被业务持有的MCP客户端，不靠atexit延长实例寿命。
+def _stop_live_mcp_clients() -> None:
+    with _EXIT_HOOK_LOCK:
+        clients = list(_LIVE_MCP_CLIENTS)
+    for client in clients:
+        try:
+            client.stop()
+        except Exception:
+            pass
+
 
 # LLM: 客户端持有唯一当前连接和永久关闭状态；所有 IO 绑定固定 transport，永久关闭不能被运行边界恢复。
 # 类用途: 管理 MCP 的启动、握手、临时重连和最终关闭，供注册层发布同连接的工具目录。
@@ -400,7 +417,6 @@ class MCPStdioClient:
         self._closed = threading.Event()
         self._starting = False
         self._launch_failure: BackgroundLaunchError | ProcessSessionCleanupError | None = None
-        self._exit_registered = False
         # 最近一次目录发布的结构化结果（published / rejected / unavailable），由注册层写，状态投影只读
         self.publication: MCPPublication | None = None
 
@@ -436,9 +452,10 @@ class MCPStdioClient:
         with self._state_lock:
             return dict(self._transport.capabilities) if self._transport is not None else {}
 
-    # LLM: 启动串行化但不持状态锁等待握手；stop 可先永久撤销，候选返回后必须再次核对再发布。
+    # LLM: 启动串行化但不持状态锁等待握手；退出钩子仅注册一次模块函数并弱追踪，stop撤销后候选不可发布。
     # 函数用途: 启动一个服务并返回本次固定连接，失败只清理本次候选。
     def start(self) -> MCPTransport:
+        global _EXIT_HOOK_REGISTERED
         deadline = time.monotonic() + self.config.connect_timeout
         with bounded_mcp_lock(self._connect_lock, deadline, closed=self._closed):
             with self._state_lock:
@@ -452,9 +469,11 @@ class MCPStdioClient:
                 if self._transport is not None:
                     raise MCPError("MCP 旧连接已断开，须在运行边界重连", code="MCP_CONNECTION_CLOSED")
                 self._starting = True
-                if not self._exit_registered:
-                    atexit.register(self.stop)
-                    self._exit_registered = True
+                with _EXIT_HOOK_LOCK:
+                    _LIVE_MCP_CLIENTS.add(self)
+                    if not _EXIT_HOOK_REGISTERED:
+                        atexit.register(_stop_live_mcp_clients)
+                        _EXIT_HOOK_REGISTERED = True
             return self._start_transport()
 
     # LLM: 插件只走原托管启动；两种进程都先擦洗 host 默认继承再叠加原 native env，来源不从 RPC 参数读取。
@@ -523,7 +542,7 @@ class MCPStdioClient:
         transport.capabilities = result["capabilities"]
         transport.notify("notifications/initialized", {})
 
-    # LLM: 先撤销再清理；启动未返回保持 pending，未接管资源的启动/清理未知异常仍保留，不能改报 not_started。
+    # LLM: 先撤销再清理；仅确认清理后移除弱追踪，启动pending和未知异常留在集合，不改报not_started。
     # 函数用途: 永久关闭客户端，返回原资源或进程树回执，禁止后续重连。
     def stop(self) -> MCPCleanupReceipt:
         with self._state_lock:
@@ -534,12 +553,14 @@ class MCPStdioClient:
         if transport is not None:
             receipt = transport.terminate()
             if receipt.confirmed:
-                atexit.unregister(self.stop)
+                with _EXIT_HOOK_LOCK:
+                    _LIVE_MCP_CLIENTS.discard(self)
             return receipt
         if failure is not None:
             raise failure
         if not starting:
-            atexit.unregister(self.stop)
+            with _EXIT_HOOK_LOCK:
+                _LIVE_MCP_CLIENTS.discard(self)
         return ProcessTerminationReceipt("launch_pending" if starting else "not_started", not starting, None, 0)
 
     # LLM: 临时失败只关闭调用方持有的 transport；传入旧连接不能改变或清理新连接。

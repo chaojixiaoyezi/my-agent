@@ -194,6 +194,8 @@ class SubAgentPersistenceService:
     # LLM: 粗 mtime 保护窗口与指纹判定的唯一实现在 common/cache_freshness；本类不再自带第二套阈值。
     # 类用途: 管理子代理任务的持久化与列表读取；缓存规则改变时同步检查 list_runs 和 create_subagents 的状态复用测试。
     _RUN_CACHE_COARSE_MTIME_GUARD_SECONDS = CACHE_TRUST_AGE_SECONDS
+    # 限制进程内子代理状态与缺失 canonical 缓存上限，避免只走按 ID 查询时缓存无界累积。
+    _MAX_RUN_CACHE_ENTRIES = 512
 
     # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
     # projection may share it, but callers always receive deep copies and canonical files remain
@@ -322,6 +324,8 @@ class SubAgentPersistenceService:
                     self._cache_missing_canonical(run_id, task_file, signature)
                 raise
             if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
+                    self._run_cache.pop(next(iter(self._run_cache)), None)
                 self._run_cache[run_id] = (signature, task)
             else:
                 self._run_cache.pop(run_id, None)
@@ -342,6 +346,11 @@ class SubAgentPersistenceService:
             declared = Path(str(payload.get("agent_run_workspace_dir") or "").strip())
             if declared != canonical.parent or canonical.exists():
                 return
+            if (
+                run_id not in self._missing_canonical_cache
+                and len(self._missing_canonical_cache) >= self._MAX_RUN_CACHE_ENTRIES
+            ):
+                self._missing_canonical_cache.pop(next(iter(self._missing_canonical_cache)), None)
             self._missing_canonical_cache[run_id] = (signature, canonical)
         except (OSError, TypeError, ValueError):
             return

@@ -40,8 +40,8 @@ _POLICY_FAILURE_RETIRE_AFTER_COUNT = 3
 _POLICY_OBJ_CACHE_MAX_ENTRIES_COUNT = 512
 
 
-# LLM: 在原ScanIndex.read之后按负载对象身份记忆，强引用防id复用；错误不记忆，metadata出入均隔离。
-# 函数用途: 复用有效进度策略对象，不改变索引统计或错误报告。
+# LLM: 在原ScanIndex.read之后按负载对象身份记忆，错误不记忆；非空metadata深复制，空值每次创建独立字典。
+# 函数用途: 复用有效进度策略对象，省去空metadata深复制，不改变统计、错误报告或副本隔离。
 def _memo_progress_policy(store, path, payload, *, cacheable):
     key = str(path)
     with store._policy_obj_cache_lock:
@@ -50,16 +50,16 @@ def _memo_progress_policy(store, path, payload, *, cacheable):
         if policy is not None:
             store._policy_obj_cache.move_to_end(key)
     if policy is not None:
-        return replace(policy, metadata=copy.deepcopy(policy.metadata)), None
+        return replace(policy, metadata=copy.deepcopy(policy.metadata) if policy.metadata else {}), None
     policy, error = _progress_policy_from_payload(path, payload)
     if cacheable and policy is not None and error is None:
-        snapshot = replace(policy, metadata=copy.deepcopy(policy.metadata))
+        snapshot = replace(policy, metadata=copy.deepcopy(policy.metadata) if policy.metadata else {})
         with store._policy_obj_cache_lock:
             store._policy_obj_cache[key] = (payload, snapshot)
             store._policy_obj_cache.move_to_end(key)
             while len(store._policy_obj_cache) > _POLICY_OBJ_CACHE_MAX_ENTRIES_COUNT:
                 store._policy_obj_cache.popitem(last=False)
-    return (replace(policy, metadata=copy.deepcopy(policy.metadata)) if policy is not None else None), error
+    return (replace(policy, metadata=copy.deepcopy(policy.metadata) if policy.metadata else {}) if policy is not None else None), error
 
 
 # LLM: 策略解析和建模错误必须保持同一 context、path、policy_id 口径。

@@ -13,7 +13,7 @@ from ..conversation.authority import CONVERSATION_WORKSPACE_TASK_ID_ATTR
 from ..conversation.task_promotion import promote_conversation_task_for_run
 from .package_selection import build_package_selection_material, select_capability_packages
 from .package_selection_authority import PackageSelectionAuthority, package_selection_model_digest
-from .package_selection_context import prepare_package_entry_context
+from .package_selection_context import prepare_package_entry_context, record_package_entry_usage
 from .package_selection_scope import package_selection_scope
 
 
@@ -89,7 +89,7 @@ def _prepare_pending_selection(agent, params, scope, link) -> None:
         authority.atomic(lambda: _commit_selection(agent, params, scope, authority, claim, result, window))
 
 
-# LLM: 入口通过原 policy 和 shared reader；finished 是选择回执而不是采用/质量保证。CAS 成功后才写 RuntimeFacts，后续正常 capture 含同一正文。
+# LLM: 入口通过原policy和reader但不提前记使用；finished仅为选择回执，CAS与RuntimeFacts均成功后才记录host_injected。
 # 函数用途: 在同一活动回合内完成入口读取与一次性收口，把必要告警和已读资料交给主模型；失败原因只写回执，不给模型。
 def _commit_selection(agent, params, scope, authority, claim, result, window: int) -> None:
     warnings = list(result.warning_codes)
@@ -103,7 +103,7 @@ def _commit_selection(agent, params, scope, authority, claim, result, window: in
         else:
             context = prepare_package_entry_context(
                 agent, params, scope, result.selected_refs, authority=authority, claim_id=claim.claim_id,
-                max_tokens=min(budget, window) if budget else window,
+                max_tokens=min(budget, window) if budget else window, track_usage=False,
             )
             warnings.extend(context.warning_codes)
     authority.check()
@@ -116,7 +116,8 @@ def _commit_selection(agent, params, scope, authority, claim, result, window: in
         return
     authority.check()
     if context is not None and context.text:
-        record_runtime_facts_turn_ir(params, context.text, source="capability_package_entries")
+        if record_runtime_facts_turn_ir(params, context.text, source="capability_package_entries") is True:
+            record_package_entry_usage(agent, context)
     if warnings:
         _selection_warning(params, tuple(dict.fromkeys(warnings)))
 

@@ -484,12 +484,14 @@ def _carry_text(pieces: list) -> str:
 
 # LLM: 线程锁内复核同代、同登记实例，再投递 IR 和推进代次；并发 remove 不复活、晚到提交不降代。
 #   多个准备可读到相同候选，但同方法同代的实际 IR 投递在原线程锁内去重，不另建持久领取表。
-#   使用计数只在 record_runtime_facts_turn_ir 明确返回 True 后记录每个 delivered，失败不记。
+#   使用计数只在IR明确返回True且线程更新返回后记录，线程JSON锁内不嵌套owner使用台账锁。
 # 函数用途: 只为真正进入本轮 RuntimeFacts 的条目更新已带回代次，投递失败不消费资格。
 def _commit_method_carry(request: _MethodCarryRequest, pieces: list) -> None:
     from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
 
-    # LLM: 仅本地内存投递在锁内；不在此锁内读取包/pin，避免和原 TaskStore 争锁。
+    delivered_for_usage = []
+
+    # LLM: 仅本地内存投递和待记账条目收集在锁内；不在此锁内读取包/pin或写使用台账。
     # 函数用途: 排除已经带回或删除重建的条目后，提交参考资料和对应代次。
     def update(thread):
         request.authority.check()
@@ -500,13 +502,15 @@ def _commit_method_carry(request: _MethodCarryRequest, pieces: list) -> None:
         selected = [(row, text) for row, text in pieces if (row["stable_id"], row["record_id"]) in eligible]
         if not selected or record_runtime_facts_turn_ir(request.params, _carry_text(selected), source="conversation_method_carry") is not True:
             return thread
-        _record_carried_usage(request, selected)
+        delivered_for_usage.extend(selected)
         delivered = {row["stable_id"] for row, _text in selected}
         rows = tuple(dict(row, carried_generation=max(row["carried_generation"], request.generation))
                      if row["stable_id"] in delivered else row for row in latest)
         return replace(thread, conversation_methods=rows)
 
     request.agent.conversation_store.threads.update_atomic(request.thread_id, update)
+    if delivered_for_usage:
+        _record_carried_usage(request, delivered_for_usage)
 
 
 # LLM: 仅在IR明确提交成功后记账；沿用行的stable_id/kind保持原身份，不把包沿用身份改成另一种编号。

@@ -38,8 +38,8 @@ def _clone_main_events(events: tuple[ObservationEvent, ...]) -> list[Observation
     return [replace(event, metadata=copy.deepcopy(event.metadata) if event.metadata else {}) for event in events]
 
 
-# LLM: 原ScanIndex读口之后才可复用；强持rows并用is判同一负载，避免裸id复用；错误/未知handled版本不记忆。
-# 函数用途: 复用稳定分片的未处理主代理事件，保持原handled_at和requires过滤。
+# LLM: 原ScanIndex读口之后才可复用；强持rows判同一负载；错误/未知handled不记忆，空快照不分配克隆列表。
+# 函数用途: 复用未处理主代理事件，保持原过滤与副本隔离，空分片直接返回空 tuple。
 def _memo_main_events(store, path, rows, handled, handled_fp, *, cacheable):
     key = str(path)
     with store._memo_lock:
@@ -48,7 +48,7 @@ def _memo_main_events(store, path, rows, handled, handled_fp, *, cacheable):
         if snapshot is not None:
             store._shard_main_events_cache.move_to_end(key)
     if snapshot is not None:
-        return _clone_main_events(snapshot)
+        return _clone_main_events(snapshot) if snapshot else ()
     parsed, errors = _observation_events(rows or [], handled)
     snapshot = tuple(event for event in parsed if event.handled_at <= 0 and (event.requires_main_agent or event.requires_llm_report))
     if cacheable and handled_fp is not None and not errors:
@@ -57,7 +57,7 @@ def _memo_main_events(store, path, rows, handled, handled_fp, *, cacheable):
             store._shard_main_events_cache.move_to_end(key)
             while len(store._shard_main_events_cache) > _SHARD_MAIN_EVENTS_CACHE_MAX_ENTRIES_COUNT:
                 store._shard_main_events_cache.popitem(last=False)
-    return _clone_main_events(snapshot)
+    return _clone_main_events(snapshot) if snapshot else ()
 
 
 # LLM: 处理账是唯一确认源，观察行不被回写或复制。

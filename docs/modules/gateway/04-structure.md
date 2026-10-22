@@ -1,3 +1,10 @@
+## 2026-10-22 适配器停止信号轮询、回执对账短路、调度预筛与 Skill 控制面结构（0.3.0-tui-preview.20261021.6）
+
+- `cli/adapter.py::_wait_for_adapter_shutdown` 通过 `_stop_request_matches_current_process` 按 0.2s 轮询 `adapter_stop_path(gpaths.root)` 并核对同代目标 PID（自动清理异代残留标记）；`cli/adapter_daemon.py::stop_adapter_daemon` 写入带 `pid` 的停止请求并在 `SIGTERM` 后等待 15.0s；`cli/supervisor.py::cmd_supervisor_stop` 默认预算设为 25.0s；`scripts/private_release/installer.py::_run_update_commands` 通过 `_wait_legacy_adapter_exited` 兼容旧版 CLI 5s 超时退出。
+- `gateway_parts/input_delivery_service.py::_reconcile_receipt_path` 通过 `_is_settled_terminal_unknown` 对已归档无热文件或关联 guidance 非 `pending` 的无错 `terminal_unknown` 回执直接短路，并在 `reconcile_gateway_input_receipts` 的 `finally` 中按已完成项单次调用 `_commit_reconcile_cursor`，保留原异常 `__cause__`。
+- `scheduler/repository.py` 在 `reserve_due_runs` 中先执行 `_snapshot_due_candidates_exist` / `_collect_due_job_keys` 无锁预筛，在 `prepare_run_context` 中对已冻结且无显式迁移上下文直接深拷贝；`owner_wake_discovery.py::_has_due_scheduler_fact` 通过 `_waiting_scheduler_run_needs_wake` 与 `_find_waiting_run_task_status` 为关联 `TaskLink` 已终态的 `waiting` 调度保留冷恢复入口；`cli/gateway_loops.py::_GatewaySchedulerDueController.tick` 仅对新进入 `ActiveOwnerRegistry` 的 owner 打印宣告日志。
+- `gateway_parts/skill_control_service.py` 在 `_overview`、`_proposals` 与 `_learned` 中接入 `list_learning_proposals`（含溢出区）与 `skill_usage` 统计，配合 `capability/skill_feedback_tool.py`、`capability/skill_transfer.py`、`capability/skill_usage_ledger.py` 与 `capability/skill_learning_store.py` 形成完整只读查询与 20+100 有界队列。
+
 ## 2026-10-21 高基数目录投影缓存、线程记录缓存与沙箱启动减负结构（0.3.0-tui-preview.20261021.4）
 
 - `owner_wake_discovery.py` 使用 `_DirectoryProjection`、`_LEDGER_DATE_DIR_CACHE` 与 `_FACT_DIRECTORY_CACHE` 缓存按日期分片工作目录及扁平目录的条目投影，并在 `_directory_scan`、`_refresh_directory_projection`、`_build_directory_projection`、`_ledger_directory_scans` 与 `_conversation_task_link_scan` 中复用已沉淀终态与 `os.scandir` 的 `DirEntry.stat()`，同时保留损坏/非终态记录的实时重检；`_curator_input_newer_than` 使用 `os.scandir` 在发现首个较新条目时立即短路。

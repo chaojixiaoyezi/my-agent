@@ -6,7 +6,10 @@ from concurrent.futures import CancelledError
 from dataclasses import replace
 
 from ..common.cancellation import ToolCancelled
-from .package_selection_context import prepare_package_entry_context
+from .package_selection_context import (
+    prepare_package_entry_context,
+    record_package_entry_usage,
+)
 from .package_selection_scope import PackageSelectionScope
 from .runtime_config_reload import capability_config_for_agent
 from .self_install_switches import read_fresh_capability_switch
@@ -84,7 +87,8 @@ def prepare_subagent_package_entries(agent: object, params: object) -> None:
         if context is None:
             return
         if context.text:
-            record_runtime_facts_turn_ir(params, context.text, source="capability_package_entries")
+            if record_runtime_facts_turn_ir(params, context.text, source="capability_package_entries") is True:
+                record_package_entry_usage(agent, context)
         if context.warning_codes:
             record_runtime_facts_turn_ir(params, "能力包入口准备提示：" + ", ".join(context.warning_codes),
                                          source="capability_package_entry_warning")
@@ -114,4 +118,5 @@ def _prepare_entries(agent: object, params: object, task: object, authority: Sub
     return prepare_package_entry_context(
         agent, params, PackageSelectionScope(config, snapshot, tools), references,
         authority=authority, claim_id=params.attempt_id, max_tokens=min(budget, window) if budget else window,
+        track_usage=False,
     )
