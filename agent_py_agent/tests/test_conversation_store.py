@@ -16,10 +16,190 @@ from agent_py_agent.agent.contracts.model_call_ledger import (
     ModelCallLedger,
     ModelCallStartedParams,
 )
-from agent_py_agent.agent.conversation import ConversationStore
+from agent_py_agent.agent.conversation import ConversationStore, message_scan
 from agent_py_agent.agent.conversation.models import ConversationCompactCommit
 from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
+
+
+# LLM: 只生成临时canonical夹具，保留UTF8与换行字节，不触及用户历史。
+# 函数用途: 构造有稳定消息身份和去重键的完整原始行。
+def _opt7_dedupe_row(key, *, content="正文", role="user"):
+    return (json.dumps({"message_id": f"msg-{key}", "thread_id": "thread-opt7", "role": role,
+                        "content": content, "created_at": 1.0, "metadata": {"dedupe_key": key}},
+                       ensure_ascii=False) + "\n").encode("utf-8")
+
+
+# LLM: 使用真实append_once入口，只替换本扫描模块的JSON命名空间统计实际解析次数。
+# 函数用途: 验证50次追加按尾增量解析，首条键遇迟到重复仍返回原消息且热未命中不重解析。
+def test_opt7_dedupe_append_once_uses_incremental_watermark(tmp_path, monkeypatch):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-opt7"})
+    parsed = []
+
+    # LLM: 保持真实JSON解析及异常，只计扫描器处理的行，不能把调用替身当性能结果。
+    # 函数用途: 记录增量路径实际解析了多少行。
+    def loads(text):
+        parsed.append(1)
+        return json.loads(text)
+
+    monkeypatch.setattr(message_scan, "json", SimpleNamespace(loads=loads))
+    rows = [store.messages.append_once({"thread_id": thread.thread_id, "role": "user", "content": f"正文 {index}"},
+                                       dedupe_key=f"key-{index}") for index in range(50)]
+    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": "迟到的同键不同内容",
+                           "metadata": {"dedupe_key": "key-0"}})
+    replay = store.messages.append_once({"thread_id": thread.thread_id, "role": "user", "content": "正文 0"},
+                                        dedupe_key="key-0")
+    assert replay == rows[0]
+    assert len(parsed) <= 60, "append_once must not reparse the validated transcript prefix"
+    before = len(parsed)
+    path = store.storage.message_path(thread.thread_id)
+    assert message_scan.find_message_dedupe(path, "missing") is None
+    assert len(parsed) == before
+
+
+# LLM: 缓存必须先实际建立；中段改写位于尾锚之外，等长改写也不能让旧成功结果盖住损坏。
+# 函数用途: 从append_once入口核对原地截断和中段损坏仍拒绝写入并返回DataCorruptionError。
+@pytest.mark.parametrize("change", ["truncate", "middle"])
+def test_opt7_dedupe_rejects_in_place_corruption(tmp_path, change):
+    store = ConversationStore(tmp_path / "conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-opt7"})
+    rows = [store.messages.append_once({"thread_id": thread.thread_id, "role": "user", "content": "x" * 9000},
+                                       dedupe_key=f"key-{index}") for index in range(3)]
+    path = store.storage.message_path(thread.thread_id)
+    assert message_scan.find_message_dedupe(path, "key-0") == rows[0]
+    assert str(path) in getattr(message_scan, "_DEDUPE_INDEX_CACHE", {})
+    data = path.read_bytes()
+    middle = data.index(b"\n") + 1
+    with path.open("r+b") as handle:
+        if change == "truncate":
+            handle.truncate(len(data) - 1)
+        else:
+            handle.seek(middle)
+            handle.write(b"!")
+    if change == "middle":
+        assert path.read_bytes()[-4096:] == data[-4096:]
+    with pytest.raises(DataCorruptionError):
+        store.messages.append_once({"thread_id": thread.thread_id, "role": "user", "content": "新消息"},
+                                   dedupe_key="new-key")
+
+
+# LLM: 命中已有键后仍须验证新增字节，不包装原始UTF8/JSON/model异常；append_once的外层包装保持原合同。
+# 函数用途: 验证热索引不会吞掉新尾的四种损坏，也不发布损坏水位。
+@pytest.mark.parametrize("bad, error", [(b'{"partial":', DataCorruptionError), (b"\xff\n", UnicodeDecodeError),
+    (b"not-json\n", json.JSONDecodeError), (b'{"created_at":"invalid"}\n', ValueError)])
+def test_opt7_dedupe_tail_keeps_exception_types(tmp_path, bad, error):
+    path = tmp_path / "thread.jsonl"
+    path.write_bytes(_opt7_dedupe_row("first"))
+    assert message_scan.find_message_dedupe(path, "first").message_id == "msg-first"
+    assert str(path) in getattr(message_scan, "_DEDUPE_INDEX_CACHE", {})
+    with path.open("ab") as handle:
+        handle.write(bad)
+    with pytest.raises(error):
+        message_scan.find_message_dedupe(path, "first")
+    assert str(path) not in message_scan._DEDUPE_INDEX_CACHE
+
+
+# LLM: 使用小上限触发真实LRU及饱和分支；饱和后必须完整扫描，不能遗漏第N+1个键。
+# 函数用途: 验证文件按访问淘汰，键数量有界，满额文件不发布不完整索引。
+def test_opt7_dedupe_lru_and_key_capacity(tmp_path, monkeypatch):
+    monkeypatch.setattr(message_scan, "_MAX_DEDUPE_INDEX_FILES", 2, raising=False)
+    monkeypatch.setattr(message_scan, "_MAX_DEDUPE_KEYS_PER_FILE", 3, raising=False)
+    paths = [tmp_path / f"thread-{index}.jsonl" for index in range(3)]
+    for path in paths:
+        path.write_bytes(_opt7_dedupe_row("first"))
+    for index in (0, 1, 0, 2):
+        assert message_scan.find_message_dedupe(paths[index], "missing") is None
+    cache = getattr(message_scan, "_DEDUPE_INDEX_CACHE", {})
+    assert tuple(cache) == (str(paths[0]), str(paths[2]))
+    path = paths[2]
+    with path.open("ab") as handle:
+        handle.write(b"".join(_opt7_dedupe_row(f"later-{index}") for index in range(3)))
+    assert message_scan.find_message_dedupe(path, "later-2").message_id == "msg-later-2"
+    assert str(path) not in cache
+    assert message_scan.find_message_dedupe(path, "first").message_id == "msg-first"
+    assert all(len(index.key_offsets) < 3 for index in cache.values())
+
+
+# LLM: 缓存旧行地址必须读回核对；改写旧键后追加新同键，不能仅凭尾部命中保留旧地址。
+# 函数用途: 验证前缀键不匹配时从0重建，并绑定真实第一条匹配行的位置。
+def test_opt7_dedupe_mismatched_prefix_address_rebuilds(tmp_path):
+    path = tmp_path / "thread.jsonl"
+    first = _opt7_dedupe_row("target")
+    prefix = first + _opt7_dedupe_row("filler", content="x" * 9000)
+    path.write_bytes(prefix)
+    message_scan.find_message_dedupe(path, "missing")
+    with path.open("r+b") as handle:
+        handle.write(first.replace(b"target", b"otherx"))
+    with path.open("ab") as handle:
+        handle.write(_opt7_dedupe_row("target", content="new"))
+    assert message_scan.find_message_dedupe(path, "target").content == "new"
+    cache = getattr(message_scan, "_DEDUPE_INDEX_CACHE", {})
+    assert str(path) in cache
+    assert cache[str(path)].key_offsets["target"][0] == len(prefix)
+
+
+# LLM: Unicode空白与display均沿原规则处理，尾锚内的等长有效改写不能继续返回旧键。
+# 函数用途: 验证首条真实记录胜出、inode替换和尾锚不匹配会重建索引。
+@pytest.mark.parametrize("replacement", ["rewrite", "inode", "anchor_append"])
+def test_opt7_dedupe_checkpoint_and_replacement(tmp_path, replacement):
+    path = tmp_path / "thread.jsonl"
+    path.write_bytes(b" \t\n" + "\u3000\n".encode() + _opt7_dedupe_row("target", role="display")
+                     + _opt7_dedupe_row("target", content="first") + _opt7_dedupe_row("target", content="last"))
+    assert message_scan.find_message_dedupe(path, "target").content == "first"
+    changed = path.read_bytes().replace(b"target", b"otherx")
+    if replacement == "inode":
+        other = tmp_path / "replacement"
+        other.write_bytes(changed)
+        other.replace(path)
+    else:
+        with path.open("r+b") as handle:
+            handle.write(changed)
+        if replacement == "anchor_append":
+            with path.open("ab") as handle:
+                handle.write(_opt7_dedupe_row("later"))
+    assert message_scan.find_message_dedupe(path, "target") is None
+    assert message_scan.find_message_dedupe(path, "otherx").content == "first"
+
+
+# LLM: 改写旧中段后增长仍须失效；旧尾锚未变且新键不在旧索引时，不能把未知键当不存在。
+# 函数用途: 复现独立评审的键遗漏和损坏漏检，覆盖局部尾锚无法证明的旧字节。
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_opt7_dedupe_growth_cannot_hide_prefix_rewrite(tmp_path, corrupt):
+    path = tmp_path / "thread.jsonl"
+    first = _opt7_dedupe_row("aaa")
+    prefix = first + _opt7_dedupe_row("padding", content="x" * 9000)
+    path.write_bytes(prefix)
+    message_scan.find_message_dedupe(path, "missing")
+    with path.open("r+b") as handle:
+        handle.write(b"!" if corrupt else first.replace(b"aaa", b"bbb"))
+    with path.open("ab") as handle:
+        handle.write(_opt7_dedupe_row("later"))
+    assert path.read_bytes()[len(prefix) - 4096:len(prefix)] == prefix[-4096:]
+    if corrupt:
+        with pytest.raises(json.JSONDecodeError):
+            message_scan.find_message_dedupe(path, "bbb")
+    else:
+        result = message_scan.find_message_dedupe(path, "bbb")
+        assert result is not None and result.message_id == "msg-bbb"
+
+
+# LLM: 多线程仅并发只读同一已提交文件；缓存不得共享半更新键表或使首条结果受LRU竞争影响。
+# 函数用途: 验证多文件重复查找的线程安全及空key原合同。
+def test_opt7_dedupe_concurrent_reads_and_empty_key(tmp_path):
+    paths = [tmp_path / f"thread-{index}.jsonl" for index in range(4)]
+    for path in paths:
+        path.write_bytes(_opt7_dedupe_row("first") + _opt7_dedupe_row("", content="empty-key"))
+
+    # LLM: 各线程走同一真实find入口，不手工操作缓存或模拟文件描述符。
+    # 函数用途: 交错查询已有键与空键，比较原消息正文。
+    def lookup(index):
+        key = "first" if index % 2 else ""
+        return message_scan.find_message_dedupe(paths[index % len(paths)], key).content
+
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        results = list(workers.map(lookup, range(80)))
+    assert results == ["正文" if index % 2 else "empty-key" for index in range(80)]
 
 
 def test_passive_store_open_and_missing_reads_do_not_create_directories(tmp_path) -> None:

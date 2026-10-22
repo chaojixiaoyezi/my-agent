@@ -1,9 +1,13 @@
-# LLM: canonical消息的只读扫描原语；复用原文件字节地址，不建索引或覆盖证明，调用方持有写入/幂等锁。
-# 模块用途: 提供固定尾界、按字节限额的完整行分页和低内存幂等查找，不修改历史或线程状态。
+# LLM: canonical只读扫描；去重索引仅是原append-only合同下的进程内加速，不是持久覆盖证明，调用方持有幂等锁。
+# 模块用途: 提供固定尾界、完整行分页及有界增量幂等查找，不修改历史或线程状态。
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -11,6 +15,28 @@ from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError
 from .display_checkpoint import is_display_checkpoint
 from .models import MessageLogEntry
 from .store_io import complete_jsonl_end
+
+_MAX_DEDUPE_INDEX_FILES = 64
+_MAX_DEDUPE_KEYS_PER_FILE = 16384
+
+
+# LLM: 仅保存首条非display键的原字节地址；尾锚加完整前缀摘要防中段改写后增长，不持有旧正文。
+# 类用途: 用有界键表、尾锚和固定长度前缀摘要复用已验证JSON，旧字节校验仍需分块读取。
+@dataclass
+class _TranscriptDedupeIndex:
+    dev: int
+    ino: int
+    scanned_offset: int
+    tail_anchor_offset: int
+    tail_anchor_digest: bytes
+    key_offsets: dict[str, tuple[int, int]]
+    prefix_digest: bytes
+    mtime_ns: int
+    ctime_ns: int
+
+
+_DEDUPE_INDEX_CACHE: OrderedDict[str, _TranscriptDedupeIndex] = OrderedDict()
+_DEDUPE_INDEX_LOCK = threading.Lock()
 
 
 # LLM: 超预算不代表canonical损坏；调用方按error_type处理，不能跳行、推进游标或当作空页结束。
@@ -107,31 +133,122 @@ def read_message_page(
     return entries, cursor
 
 
-# LLM: 幂等检查扫描固定物理EOF前全部行；UTF8解码后按原Unicode空白/display规则跳过，保留首key；先拒绝未终止LF，命中后仍检查后续损坏。
-# 函数用途: 用最多一行正文及首个匹配项的内存核对旧历史，调用方仍在原append-once锁内决定是否写入。
+# LLM: 不包装UTF8、JSON及model异常，Unicode空白沿原语义跳过；未终止LF在解码之前拒绝。
+# 函数用途: 按去重扫描原合同解析一条完整原始消息行。
+def _dedupe_message_from_line(line: bytes) -> MessageLogEntry | None:
+    if not line:
+        raise DataCorruptionError("canonical transcript truncated during dedupe scan")
+    if not line.endswith(b"\n"):
+        raise DataCorruptionError("canonical transcript has an incomplete final row")
+    text = line.decode("utf-8")
+    return MessageLogEntry.from_dict(json.loads(text)) if text.strip() else None
+
+
+# LLM: 只读取水位前最多4096字节，不把局部锚声称为任意历史改写证明。
+# 函数用途: 计算已验证前缀的尾部字节锚，供后续增量扫描核对。
+def _dedupe_tail_anchor(handle: BinaryIO, offset: int) -> tuple[int, bytes]:
+    start = max(0, offset - 4096)
+    handle.seek(start)
+    return start, hashlib.blake2b(handle.read(offset - start), digest_size=16).digest()
+
+
+# LLM: 局部尾锚不能证明整个前缀；元数据或锚异常重扫，其他命中按64KiB块校验完整旧字节但不解析旧JSON。
+#   传入空hasher，成功后其状态包含旧前缀；失败时调用方必须丢弃，不能拿部分摘要发布新水位。
+# 函数用途: 核对缓存对应文件身份和完整旧前缀，防止等长中段改写加新尾绕过失效。
+def _dedupe_index_matches(handle: BinaryIO, index: _TranscriptDedupeIndex, status: os.stat_result, end: int,
+                          hasher) -> bool:
+    if (index.dev, index.ino) != (status.st_dev, status.st_ino) or not 0 < index.scanned_offset <= end:
+        return False
+    if end == index.scanned_offset and (index.mtime_ns, index.ctime_ns) != (status.st_mtime_ns, status.st_ctime_ns):
+        return False
+    if _dedupe_tail_anchor(handle, index.scanned_offset) != (index.tail_anchor_offset, index.tail_anchor_digest):
+        return False
+    handle.seek(0)
+    remaining = index.scanned_offset
+    while remaining:
+        block = handle.read(min(65536, remaining))
+        if not block:
+            return False
+        hasher.update(block)
+        remaining -= len(block)
+    return hasher.digest() == index.prefix_digest
+
+
+# LLM: 旧地址命中必须读回完整行并核对真实key及display角色；不匹配或解析失败只触发从0重扫，不吞最终损坏异常。
+# 函数用途: 从已索引字节地址恢复首个匹配消息，不能直接信任缓存中的旧行身份。
+def _indexed_dedupe_message(handle: BinaryIO, key: str, address: tuple[int, int]) -> MessageLogEntry | None:
+    start, length = address
+    handle.seek(start)
+    line = handle.read(length)
+    if len(line) != length:
+        return None
+    try:
+        entry = _dedupe_message_from_line(line)
+    except (DataCorruptionError, ValueError, TypeError, AttributeError, OverflowError):
+        return None
+    if entry is not None and not is_display_checkpoint(entry) and str(entry.metadata.get("dedupe_key") or "").strip() == key:
+        return entry
+    return None
+
+
+# LLM: 固定EOF前所有新行都必须校验，即使命中也不提前返回；摘要包含空白行，键满后仍扫描但不扩容。
+# 函数用途: 从当前位置扫描新增完整行，增量更新完整前缀摘要和有界键地址，保留首匹配。
+def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: dict[str, tuple[int, int]],
+                      existing: MessageLogEntry | None, hasher) -> MessageLogEntry | None:
+    while handle.tell() < end:
+        start = handle.tell()
+        line = handle.readline(end - start)
+        entry = _dedupe_message_from_line(line)
+        hasher.update(line)
+        if entry is None or is_display_checkpoint(entry):
+            continue
+        row_key = str(entry.metadata.get("dedupe_key") or "").strip()
+        if row_key and row_key not in key_offsets and len(key_offsets) < _MAX_DEDUPE_KEYS_PER_FILE:
+            key_offsets[row_key] = (start, len(line))
+        if existing is None and row_key == key:
+            existing = entry
+    return existing
+
+
+# LLM: 原append-once锁仍是跨进程幂等权威；本锁仅保护有界LRU和索引扫描，错误时已摘除旧缓存，不发布半成品。
+#   缓存只省略已验证前缀；先恢复其首匹配再扫描新尾，避免迟到同键覆盖首条；空key保持原全扫行为。
+# 函数用途: 校验水位、尾锚及前缀字节后增量解析新尾，旧地址不符则从0解析，饱和键表不缓存。
 def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
+    cache_key = str(path)
     try:
         handle = path.open("rb")
     except FileNotFoundError:
+        with _DEDUPE_INDEX_LOCK:
+            _DEDUPE_INDEX_CACHE.pop(cache_key, None)
         return None
-    existing = None
-    with handle:
+    with handle, _DEDUPE_INDEX_LOCK:
+        index = _DEDUPE_INDEX_CACHE.pop(cache_key, None)
+        status = os.fstat(handle.fileno())
         end = handle.seek(0, 2)
-        handle.seek(0)
-        while handle.tell() < end:
-            line = handle.readline(end - handle.tell())
-            if not line:
-                raise DataCorruptionError("canonical transcript truncated during dedupe scan")
-            if not line.endswith(b"\n"):
-                raise DataCorruptionError("canonical transcript has an incomplete final row")
-            text = line.decode("utf-8")
-            if not text.strip():
-                continue
-            entry = MessageLogEntry.from_dict(json.loads(text))
-            if (existing is None and not is_display_checkpoint(entry)
-                    and str(entry.metadata.get("dedupe_key") or "").strip() == key):
-                existing = entry
-    return existing
+        cursor, key_offsets, existing = 0, {}, None
+        hasher = hashlib.blake2b(digest_size=16)
+        if key and index is not None and _dedupe_index_matches(handle, index, status, end, hasher):
+            cursor, key_offsets = index.scanned_offset, index.key_offsets
+            if key in key_offsets:
+                existing = _indexed_dedupe_message(handle, key, key_offsets[key])
+                if existing is None:
+                    cursor, key_offsets = 0, {}
+                    hasher = hashlib.blake2b(digest_size=16)
+        else:
+            hasher = hashlib.blake2b(digest_size=16)
+        handle.seek(cursor)
+        existing = _scan_dedupe_tail(handle, end, key, key_offsets, existing, hasher)
+        if end and len(key_offsets) < _MAX_DEDUPE_KEYS_PER_FILE:
+            anchor_offset, anchor_digest = _dedupe_tail_anchor(handle, end)
+            _DEDUPE_INDEX_CACHE[cache_key] = _TranscriptDedupeIndex(
+                dev=status.st_dev, ino=status.st_ino, scanned_offset=end,
+                tail_anchor_offset=anchor_offset, tail_anchor_digest=anchor_digest, key_offsets=key_offsets,
+                prefix_digest=hasher.digest(),
+                mtime_ns=status.st_mtime_ns, ctime_ns=status.st_ctime_ns,
+            )
+            while len(_DEDUPE_INDEX_CACHE) > _MAX_DEDUPE_INDEX_FILES:
+                _DEDUPE_INDEX_CACHE.popitem(last=False)
+        return existing
 
 
 # LLM: 固定LF尾界内严格解析，空白仍计hash；可选地址visitor只生成临时引用，原inode及取消在读取边界检查。
