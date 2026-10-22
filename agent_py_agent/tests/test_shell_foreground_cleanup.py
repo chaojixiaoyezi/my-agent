@@ -242,11 +242,15 @@ def test_linux_zombie_observation_keeps_parent_for_cleanup(monkeypatch):
     terminate.assert_called_once_with(12345, proc, expected_birth_token="proc:111")
 
 
+# LLM: 真实关闭管道的父进程继续存活，按Q1的新退避合同检查频率上界和各次最短间隔，不将EOF等同于退出。
+# 函数用途: 确认2ms起步、50ms封顶仍有界且最终保留父进程结果及回收证明。
 @pytest.mark.skipif(os.name == "nt", reason="POSIX 关闭输出后继续运行的前台进程")
 def test_closed_pipes_live_parent_has_bounded_exit_probes(monkeypatch):
     original = shell.finish_foreground_process
     probes = []
 
+    # LLM: 只观察真实退出探测，不替换回收逻辑或发送额外信号。
+    # 函数用途: 留下本次退出探测的单调时间点。
     def observe(proc, *, expected_birth_token):
         probes.append(time.monotonic())
         return original(proc, expected_birth_token=expected_birth_token)
@@ -261,7 +265,9 @@ def test_closed_pipes_live_parent_has_bounded_exit_probes(monkeypatch):
         result = shell._communicate_process(proc, command="live-parent-after-output-close", timeout=5)
         assert result.returncode == 0
         assert result.termination.confirmed is True
-        assert all(later - earlier >= 0.2 for earlier, later in zip(probes, probes[1:]))
+        assert len(probes) <= 16
+        assert all(later - earlier >= min(.002 * 2 ** index, .05)
+                   for index, (earlier, later) in enumerate(zip(probes, probes[1:])))
     finally:
         if proc.poll() is None:
             proc.kill()

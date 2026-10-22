@@ -1,3 +1,7 @@
+## 2026-10-22 子代理持久化 `_run_cache` 双重字节预算结构
+
+`subagents/services/persistence/service.py::SubAgentPersistenceService._load_from_locator` 在评估 `within_budget` 时同时检查 `locator`（`task_file`）和 `canonical_state.json`（位于 `task.agent_run_workspace_dir`）的物理文件尺寸是否小于等于 `_MAX_RUN_CACHE_ITEM_BYTES`（256 KiB），超限条目仅按单次解析返回而不缓存在 `_run_cache` 中。
+
 ## 2026-10-21 子代理持久化缺失 canonical 负缓存结构
 
 `subagents/services/persistence/service.py::SubAgentPersistenceService` 维护 `_missing_canonical_cache: dict[str, tuple[tuple[int, int, int, int, int], Path]]`（与 `_run_cache` 共同受 `_MAX_RUN_CACHE_ENTRIES = 512` 容量保护），键为 `run_id`、值为 `(locator_stat_signature, canonical_path)`。`_load_from_locator` 在 `locator` 5 元组签名命中负缓存且 `not canonical.exists()` 时直接抛出 `FileNotFoundError` 而不重读 locator JSON；一旦 `canonical` 重新出现、`locator` 签名变更或 `list_runs` 清理已不存在的 `run_id` 时立即失效。

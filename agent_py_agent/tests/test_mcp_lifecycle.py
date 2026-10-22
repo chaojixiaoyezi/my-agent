@@ -373,13 +373,39 @@ def test_queue_clock_advance_never_passes_negative_timeout(monkeypatch):
 
 # LLM: 所有路径由 tmp_path 提供，服务是临时组件；不连接真实用户 MCP 或修改真实 Gateway。
 # 函数用途: 构造原 ToolRegistry，验证共享权限视图和真实本地 MCP 进程的关系。
-def _registry(tmp_path):
+def _registry(tmp_path, *, script=_ECHO_SERVER):
     return ToolRegistry(ToolRegistryParams(
         workspace_root=tmp_path, max_chars=1000, max_entries=20, max_matches=10,
         web_max_chars=1000, http_timeout=10, catalog_limit=10, retrieval_limit=3,
         vector_search_enabled=False,
-        mcp_servers={"echo": {"command": _config(_ECHO_SERVER).command, "args": ["-c", _ECHO_SERVER]}},
+        mcp_servers={"echo": {"command": _config(script).command, "args": ["-c", script]}},
     ))
+
+
+# LLM: 合成服务首次发现后将echo改名；原prepare入口必须更新表，不能仅靠旧client仍可调用来冒充刷新。
+# 函数用途: 验证新工具注册、旧工具移除、注册表新proxy执行及连接保留，最后保留真实进程退出断言。
+def test_q4_refresh_keeps_live_mcp_client_and_transport(tmp_path):
+    list_reply = 'send({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})'
+    script = _ECHO_SERVER.replace(list_reply, list_reply + '\n            TOOLS[0]["name"] = "echo_v2"')
+    script = script.replace('if name == "echo":', 'if name in ("echo", "echo_v2"):')
+    registry = _registry(tmp_path, script=script)
+    client = registry._mcp_clients[0]
+    transport = client.connection()
+    process = transport.binding.process
+    try:
+        assert "mcp__echo__echo" in registry.tools
+        transport.inbox.tools_changed = True
+        registry.prepare_for_run()
+        assert "mcp__echo__echo_v2" in registry.tools
+        assert "mcp__echo__echo" not in registry.tools
+        assert registry._mcp_clients == [client]
+        assert client.connection() is transport
+        assert process.poll() is None
+        result = registry.tools["mcp__echo__echo_v2"].execute({"text": "after-refresh"})
+        assert result.ok and "after-refresh" in result.output
+    finally:
+        registry.close_mcp_clients()
+    assert process.poll() is not None
 
 
 def test_close_shared_permission_view_prevents_other_view_reconnect(tmp_path):

@@ -326,6 +326,15 @@ class SubAgentPersistenceService:
                 if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
                     self._cache_missing_canonical(run_id, task_file, signature)
                 raise
+            # 同时核对 canonical_state.json 的物理字节大小，避免通过小体积 locator 把超大 canonical 任务对象常驻缓存在内存里。
+            canonical_workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+            if canonical_workspace:
+                try:
+                    canonical_size = (Path(canonical_workspace) / "canonical_state.json").stat().st_size
+                except OSError:
+                    canonical_size = 0
+                if canonical_size > self._MAX_RUN_CACHE_ITEM_BYTES:
+                    within_budget = False
             if within_budget and mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
                 if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
                     self._run_cache.pop(next(iter(self._run_cache)), None)

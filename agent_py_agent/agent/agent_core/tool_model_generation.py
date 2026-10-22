@@ -119,6 +119,7 @@ class ModelGenerateParams:
     params: ToolLoopExecuteParams
     prompt: str
     tool_rounds: int
+    context_assembly_started_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -225,8 +226,11 @@ class _ModelGenerationState:
 # LLM: 工具模型轮先按可选真实 child 范围冻结输入，再沿原 IR/preflight/调用/用量路径；冻结未知不改变有效模型。
 # 函数用途: 在上下文预检后调用模型，记录真实 native 工具使用和成本，再完成本轮响应归档。
 def generate_model_response(request: ModelGenerateParams):
+    from .model.call_runtime import model_call_ledger
     from .subagent.model_selection import capture_first_request_input
 
+    if request.context_assembly_started_at <= 0.0:
+        request = replace(request, context_assembly_started_at=float(model_call_ledger(request.agent).context.now()))
     capture_first_request_input(request.agent, request.params, request.prompt)
     request = _materialize_native_prompt_facts(request)
     if preflight := preflight_context_pressure_response(request):
@@ -554,6 +558,9 @@ def _retry_once_after_timeout(
         return None
     if _logical_physical_attempt_count(request) > 1:
         return None
+    from .model.call_runtime import model_call_ledger
+
+    request = replace(request, context_assembly_started_at=float(model_call_ledger(request.agent).context.now()))
     retry_state = _start_model_generation(request)
     try:
         response = _generate_with_wall_timeout(

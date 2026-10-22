@@ -6,12 +6,13 @@
 #   C孤儿业务只走原独立来源请求，这里的旧owner扫车道不直接物化远端Agent；标志只收窄不授执行。
 #   C冷组合只运行同源metadata producer与请求盖章，心跳末写核原lease；Count0业务公平、三旧控制线程顺序不变。
 #   C输入段仅接原queued/cursor元数据源，绑定输入延期不构造foreign Agent；Count0旧receipt/guidance链保持。
-#   单owner规划阶段短查询复用本轮SQLite连接；连接不跨提交和后台模型车道。
+#   单owner规划阶段跨拍复用SQLite物理连接；离开规划即解除Context，不跨提交和后台模型车道。
 # 模块用途: 连接请求处理、公平调度、维护和心跳，减少规划连接抖动；不新增任务状态、权限或默认模型。
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import threading
@@ -74,6 +75,7 @@ from ..agent.user_space.owner_maintenance import OwnerMaintenanceResult, run_own
 from ..agent.user_space.owner_resolver import (
     OwnerIdentity,
     home_paths_with_owner,
+    owner_identity_from_config,
     resolve_owner_home,
 )
 from .gateway_lane_retry import BackgroundLaneRetry
@@ -808,37 +810,184 @@ def _memory_curator_workers(agent: object) -> int:
 # LLM: This mixin owns only process-local planning/execution slots; durable
 # conversation sources and run claims remain in BackgroundMainAgentScheduler/Store.
 # 类用途: 为单 Gateway 按 owner 公平提交独立的 thread 后台车道。
-class _BackgroundThreadLaneSupervisorMixin:
+class _BackgroundOwnerPlannerMixin:
+    # LLM: 只读取原store/数据库已声明路径的stat和登记本活动代次；未知或拒读时禁用退避，不扫描正文或创建新权威。
+    # 函数用途: 发现新唤醒、请求、策略与数据库写入，使空闲owner在下一拍立即恢复规划。
+    def _owner_planner_signature(self, scheduler: object) -> tuple | None:
+        store = getattr(scheduler, "store", None)
+        agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+        paths = [getattr(store, name, None) for name in (
+            "wake_queue_dir", "policies_dir", "tasks_dir", "goals_dir", "observations_dir",
+            "guidance_dir", "session_tasks_dir", "background_claims_dir",
+        )]
+        for repo in (getattr(getattr(agent, "subagents", None), "runtime_db", None), getattr(agent, "store", None)):
+            db_path = getattr(repo, "db_path", None)
+            if db_path is not None:
+                paths.extend((db_path, str(db_path) + "-wal"))
+        service_repo = getattr(getattr(scheduler, "scheduler_service", None), "repository", None)
+        paths.append(getattr(service_repo, "store_path", None))
+        collaboration = getattr(scheduler, "collaboration_store", None)
+        paths.append(getattr(collaboration, "cases_dir", None))
+        signatures = []
+        for path in paths:
+            if path is None:
+                continue
+            try:
+                stat = Path(path).stat()
+                stamp = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            except FileNotFoundError:
+                stamp = None
+            except OSError:
+                return None
+            signatures.append((str(path), stamp))
+        if not signatures:
+            return None
+        registry, activity = getattr(self, "_registry", None), 0.0
+        if registry is not None and hasattr(registry, "_recorded_at"):
+            owner = owner_identity_from_config(agent.config)
+            with registry._lock:
+                activity = registry._recorded_at.get((owner.provider, owner.owner_kind, owner.owner_id), 0.0)
+        return tuple(signatures), activity
+
+    # LLM: 0/非法配置或未知来源维持每拍规划；活动、新代次、失败重试先清零，表里仅保留旧身份不算新活动。
+    # 函数用途: 决定这个owner能否等待下一次空闲规划截止点。
+    def _owner_plan_backoff_state(self, key: object, scheduler: object, *, active: bool) -> tuple:
+        streaks = self.__dict__.setdefault("_owner_idle_streaks", {})
+        checks = self.__dict__.setdefault("_owner_next_check_at", {})
+        signatures = self.__dict__.setdefault("_owner_plan_signatures", {})
+        try:
+            cap = float(getattr(self._base_agent.config, "background_idle_owner_max_backoff_seconds", 0.0))
+        except (TypeError, ValueError):
+            cap = 0.0
+        cap = cap if math.isfinite(cap) and cap > 0 else 0.0
+        signature = self._owner_planner_signature(scheduler) if cap else None
+        changed = key in signatures and signatures[key] != signature
+        reset = active or changed or not cap or signature is None or bool(self._lane_retry.count(str(key)))
+        if reset:
+            streaks[key], checks[key] = 0, 0.0
+        wait = not reset and time.monotonic() < checks.get(key, 0.0)
+        return wait, cap, signature, reset
+
+    # LLM: 已知策略到期及尚未消费的wake不能被空闲退避盖住；只在空规划时沿原读取口核实，坏账立即重查。
+    # 函数用途: 将指数退避限制在原有待办的最早可行动时间以内。
+    def _owner_plan_idle_delay(self, scheduler: object, delay: float, planned_at: float) -> float:
+        store = getattr(scheduler, "store", None)
+        pending = getattr(getattr(store, "wakes", None), "pending", None)
+        if callable(pending) and pending(limit=1):
+            return 0.0
+        report = getattr(getattr(store, "progress", None), "list_report", None)
+        if callable(report):
+            policies, errors = report(enabled_only=True)
+            if errors:
+                return 0.0
+            for policy in policies:
+                delay = min(delay, max(0.0, float(policy.next_due_at) - planned_at))
+        return delay
+
+    # LLM: 空规划只改变进程内下次检查时刻，不修改wake/claim/任务；有活动或新代次时保持零退避。
+    # 函数用途: 记录本owner本拍结果并递增封顶的空闲等待。
+    def _note_owner_plan(self, key: object, signature: tuple | None, delay: float, planned_mono: float) -> None:
+        self._owner_plan_signatures[key] = signature
+        next_at = planned_mono + delay
+        if delay <= 0 or next_at <= time.monotonic():
+            self._owner_idle_streaks[key], self._owner_next_check_at[key] = 0, 0.0
+            return
+        self._owner_idle_streaks[key] = min(5, self._owner_idle_streaks.get(key, 0) + 1)
+        self._owner_next_check_at[key] = next_at
+
+    # LLM: 只在真正规划的线程创建原作用域；关闭配置时清理旧表并显式禁用外层缓存，不改变后台执行连接。
+    # 函数用途: 为一个owner激活跨拍复用的SQLite规划连接表。
+    def _planner_sqlite_scope(self, owner_key: object):
+        from ..agent.runtime_db.sqlite_scope import (
+            activate_sqlite_scope,
+            new_persistent_sqlite_scope,
+        )
+
+        scopes = self.__dict__.setdefault("_owner_planner_sqlite_scopes", {})
+        used_at = self.__dict__.setdefault("_owner_planner_scope_used_at", {})
+        if not bool(getattr(self._base_agent.config, "sqlite_connection_reuse", False)):
+            self._drop_owner_planner_scope(owner_key)
+            return activate_sqlite_scope(None)
+        scope = scopes.get(owner_key)
+        if scope is None or scope.closed:
+            scope = new_persistent_sqlite_scope()
+            scopes[owner_key] = scope
+        used_at[owner_key] = time.monotonic()
+        return activate_sqlite_scope(scope)
+
+    # LLM: 只回收进程内规划表，保留原持久任务；关闭失败按原日志上报，不吞中断或改owner身份。
+    # 函数用途: 在owner退休、禁用复用或停机时关闭其规划连接。
+    def _drop_owner_planner_scope(self, owner_key: object) -> None:
+        from ..agent.runtime_db.sqlite_scope import close_persistent_sqlite_scope
+
+        scope = getattr(self, "_owner_planner_sqlite_scopes", {}).pop(owner_key, None)
+        getattr(self, "_owner_planner_scope_used_at", {}).pop(owner_key, None)
+        if scope is not None:
+            close_persistent_sqlite_scope(scope)
+
+    # LLM: 表只跟随当前owner调度器，60秒未使用即退役；逐owner收集错误后继续清理，最后传播首错。
+    # 函数用途: 有界保留当前规划者并释放退出或长期未规划的owner连接。
+    def _retain_owner_planner_scopes(self, owner_keys: set[object]) -> None:
+        now = time.monotonic()
+        used_at = getattr(self, "_owner_planner_scope_used_at", {})
+        first_error = None
+        for key in tuple(getattr(self, "_owner_planner_sqlite_scopes", {})):
+            if key not in owner_keys or now - used_at.get(key, now) >= 60.0:
+                try:
+                    self._drop_owner_planner_scope(key)
+                except BaseException as exc:
+                    first_error = exc if first_error is None else first_error
+        for name in ("_owner_idle_streaks", "_owner_next_check_at", "_owner_plan_signatures"):
+            state = getattr(self, name, {})
+            for key in tuple(state):
+                if key not in owner_keys:
+                    state.pop(key, None)
+        if first_error is not None:
+            raise first_error
+
+
+# LLM: 仅持有本进程执行槽；规划缓存继承私有mixin，原scheduler/store仍是durable执行权威。
+# 类用途: 公平提交owner/thread后台车道，不把规划连接传给执行线程。
+class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
     # LLM: Planning is single-threaded and model-free; submission is round-robin
     # across owners, bounded globally and per owner, and keyed by durable thread id.
     # Gateway's independent orphan reconciler owns recovery scans, so preparation
     # must skip the duplicate inline sweep before ready lanes are submitted.
-    # 每个owner的prepare/ready短查询按配置sqlite_connection_reuse复用本轮SQLite连接，异常也须回收；提交和后台执行不继承连接。
+    # 每个owner的prepare/ready短查询按配置sqlite_connection_reuse跨拍复用连接；异常也解除Context，提交和后台执行不继承连接。
     # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
-        from ..agent.io.sqlite_scope import sqlite_connection_scope
-
         global_limit = _background_owner_workers(self._base_agent)
         available = max(0, global_limit - len(self._inflight))
-        if available <= 0:
-            return
         per_owner_limit = _background_threads_per_owner(self._base_agent)
         schedulers = [
             (_BASE_SCHEDULER_KEY, self._base_scheduler),
             *list(self._owner_schedulers.items()),
         ]
+        self._retain_owner_planner_scopes({key for key, _scheduler in schedulers})
+        if available <= 0:
+            return
         self._lane_retry.retain_owners(str(key) for key, _scheduler in schedulers)
         candidates: list[tuple[object, BackgroundMainAgentScheduler, list[str]]] = []
+        planned_mono = time.monotonic()
         planned_at = time.time()
+        # 池内缓存驻留不代表执行；只有原pin计数才说明前台/后台正在租用这个实例。
+        pool = getattr(self, "_owner_pool", None)
+        active_agents = set()
+        if pool is not None and hasattr(pool, "_pins"):
+            with pool._lock:
+                active_agents = {key for key, count in pool._pins.items() if count > 0}
         for owner_key, scheduler in schedulers:
             active_threads = self._active_threads_for_owner(owner_key)
             owner_slots = max(0, per_owner_limit - len(active_threads))
             if owner_slots <= 0:
                 continue
             try:
-                with sqlite_connection_scope(
-                    bool(getattr(self._base_agent.config, "sqlite_connection_reuse", False))
-                ):
+                agent = getattr(getattr(scheduler, "runtime", None), "agent", None)
+                active = bool(active_threads) or id(agent) in active_agents
+                wait, cap, signature, reset = self._owner_plan_backoff_state(owner_key, scheduler, active=active)
+                if wait:
+                    continue
+                with self._planner_sqlite_scope(owner_key):
                     scheduler.prepare_tick(
                         now=planned_at,
                         include_orphan_supervision=False,
@@ -847,6 +996,11 @@ class _BackgroundThreadLaneSupervisorMixin:
                         now=planned_at,
                         limit=per_owner_limit + len(active_threads) + self._lane_retry.count(str(owner_key)),
                     )
+                    streak = self._owner_idle_streaks.get(owner_key, 0) + 1
+                    delay = min(cap, 0.5 * (2 ** min(streak, 5))) if not reset and not ready else 0.0
+                    if delay:
+                        delay = self._owner_plan_idle_delay(scheduler, delay, planned_at)
+                self._note_owner_plan(owner_key, signature, delay, planned_mono)
             except Exception as exc:
                 _print_gateway_loop_error(
                     "gateway_background_main.plan",
@@ -955,9 +1109,10 @@ class _BackgroundThreadLaneSupervisorMixin:
     # 关池之前先给本进程在途的唤醒尝试打停机标记（C6，mark_inflight_attempts_stopping 内部逐条吞掉写失败，不会让停机失败），
     # 下次 preflight 按不计数的 attempt:gateway_stopped 补记，部署重启不给在途唤醒计失败。
     # LLM: 主会话已运行future沿准确claim中断并共用两秒绝对预算核收，未退/未结必须交cleanup为incomplete。
-    # 函数用途: 停止主会话与记忆策展线程池，不删除任何持久任务或记忆游标；会给在途唤醒尝试写停机标记。
+    # 函数用途: 停止主会话与记忆策展线程池并关闭规划SQLite连接；不删除持久任务或记忆游标。
     def shutdown(self) -> None:
         from ..agent.conversation.wake_attempt_tracking import mark_inflight_attempts_stopping
+        from ..agent.io.sqlite_scope import _cleanup_preserving_error
 
         mark_inflight_attempts_stopping(now=time.time())
         self._shutdown_control.stop()
@@ -967,10 +1122,17 @@ class _BackgroundThreadLaneSupervisorMixin:
         )
         self._executor = None
         self._curator_executor = None
-        for executor in executors:
-            if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
-        self._shutdown_control.wait()
+        body_error = None
+        try:
+            for executor in executors:
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
+            self._shutdown_control.wait()
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            _cleanup_preserving_error(lambda: self._retain_owner_planner_scopes(set()), body_error)
 
     # LLM: 异常由 typed 退避组件隔离，不能终止 supervisor、消费事件或修改 Goal；慢流中的执行不经过此门。
     # LLM: 仅本宿主关闭期间的typed中断不计业务失败；其它异常仍沿原退避与结构化诊断。
@@ -1012,6 +1174,11 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._registry = shared_active_owner_registry(context.agent)
         self._owner_pool: object | None = None
         self._owner_schedulers: dict[int, BackgroundMainAgentScheduler] = {}
+        self._owner_planner_sqlite_scopes: dict[object, object] = {}
+        self._owner_planner_scope_used_at: dict[object, float] = {}
+        self._owner_idle_streaks: dict[object, int] = {}
+        self._owner_next_check_at: dict[object, float] = {}
+        self._owner_plan_signatures: dict[object, tuple | None] = {}
         self._next_owner_retire_at = 0.0
         # 后台整合按 owner + thread 分车道。持久 run claim 保证同会话单飞，
         # 进程内 in-flight 去重防止同一 thread 重复提交；不同 thread 可在有界池中并发。
@@ -1183,6 +1350,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         for key in list(self._owner_schedulers):
             if key not in active and not self._active_threads_for_owner(key):
                 self._owner_schedulers.pop(key, None)  # scoped agent 被 LRU 逐出且没在跑 → 丢弃其调度器
+                self._drop_owner_planner_scope(key)
         for key, scoped_agent in active.items():
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)

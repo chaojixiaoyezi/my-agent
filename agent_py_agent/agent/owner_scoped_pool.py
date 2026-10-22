@@ -36,6 +36,30 @@ def _close_agent_mcp_clients(agent: Any) -> None:
         pass
 
 
+# LLM: 仅在get与pin竞态使对象在进入pin前已被离池关闭时于池锁外调用；恢复其本次租用期内的MCP可用性。
+# 函数用途: 清除已淘汰实例在进入租用前被提前置位的MCP关闭标记，最后一次pin释放时仍会再次退役关闭。
+def _reopen_agent_mcp_clients(agent: Any) -> None:
+    try:
+        tools = getattr(agent, "tools", None)
+        if tools is None:
+            return
+        reopen_mcp = getattr(tools, "reopen_mcp_clients", None)
+        if callable(reopen_mcp):
+            reopen_mcp()
+            return
+        closed_event = getattr(tools, "_mcp_closed", None)
+        clear = getattr(closed_event, "clear", None)
+        if callable(clear):
+            lock = getattr(tools, "_mcp_prepare_lock", None)
+            if lock is not None:
+                with lock:
+                    clear()
+            else:
+                clear()
+    except Exception:
+        pass
+
+
 def _resolved_max_agents(value: Any) -> int:
     try:
         resolved = int(value)
@@ -238,13 +262,23 @@ class OwnerScopedAgentPool:
             with self._lock:
                 self._building.pop(key, None)
 
-    # LLM: 租用只固定身份不授予任务权；finally中最后pin释放才退役离池对象，所有MCP关闭移到池锁外。
+    # LLM: 租用只固定身份不授予任务权；若进入pin前已被逐出则恢复租用期MCP并在最后pin释放时退役，所有MCP操作移到池锁外。
     # 函数用途: 保护执行中的实例，并在最后一次释放后清理已淘汰实例的MCP资源。
     @contextmanager
     def pin(self, agent: Any, *, touch: bool = True):
         identity = id(agent)
+        reopen = False
         with self._lock:
             self._pins[identity] = self._pins.get(identity, 0) + 1
+            in_pool = (
+                any(value is agent for value in self._hard_agents.values())
+                or any(value is agent for value in self._soft_agents.values())
+            )
+            if not in_pool:
+                self._retired_agents[identity] = agent
+                reopen = True
+        if reopen:
+            _reopen_agent_mcp_clients(agent)
         try:
             yield agent
         finally:

@@ -1498,9 +1498,11 @@ def next_tool_loop_model_response(
         reject_request_selection,
         select_request_model,
     )
+    from .model.call_runtime import model_call_ledger
     from .model.selection_refresh import refresh_selected_model
     from .subagent.model_selection import select_first_request_model
 
+    assembly_started_at = float(model_call_ledger(agent).context.now())
     committed = committed_request_selection(agent, params)
     if committed is not None:
         # 恢复候选已提交：重试原样复用，旧请求不再发送；新插话留到下一轮由新参数送出。
@@ -1515,7 +1517,7 @@ def next_tool_loop_model_response(
         model_params = natural_user_reply_model_params(params)
         if model_params is not params:
             prompt, response = _request_tool_loop_model_response(
-                agent, model_params, tool_rounds,
+                agent, model_params, tool_rounds, assembly_started_at=assembly_started_at,
             )
             return ModelTurnRequest(prompt, response, params)
         if tool_rounds == 0:
@@ -1526,7 +1528,9 @@ def next_tool_loop_model_response(
             params = prepare_delegated_execution(agent, params) or params
             model_params = natural_user_reply_model_params(params)
             if model_params is not params:
-                prompt, response = _request_tool_loop_model_response(agent, model_params, tool_rounds)
+                prompt, response = _request_tool_loop_model_response(
+                    agent, model_params, tool_rounds, assembly_started_at=assembly_started_at,
+                )
                 return ModelTurnRequest(prompt, response, params)
             prepare_capability_package_selection(agent, params)
             prepare_conversation_method_carry(agent, params)
@@ -1537,14 +1541,14 @@ def next_tool_loop_model_response(
     selected, selected_prompt = select_request_model(agent, baseline, baseline_prompt)
     try:
         prompt, response = _request_tool_loop_model_response(
-            agent, selected, tool_rounds, first_prompt=selected_prompt,
+            agent, selected, tool_rounds, first_prompt=selected_prompt, assembly_started_at=assembly_started_at,
         )
         return ModelTurnRequest(prompt, response, selected)
     except ModelRequestSelectionRejected:
         # 宿主只在候选首次发送前拒绝；撤销候选后沿同一次准备的原参数与原 prompt 执行一次。
         reject_request_selection(agent, selected)
         prompt, response = _request_tool_loop_model_response(
-            agent, baseline, tool_rounds, first_prompt=baseline_prompt,
+            agent, baseline, tool_rounds, first_prompt=baseline_prompt, assembly_started_at=assembly_started_at,
         )
         return ModelTurnRequest(prompt, response, baseline)
 
@@ -1558,15 +1562,23 @@ def _request_tool_loop_model_response(
     tool_rounds: int,
     *,
     first_prompt: str | None = None,
+    assembly_started_at: float = 0.0,
 ) -> tuple[str, ModelResponse]:
+    from .model.call_runtime import model_call_ledger
     from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX_COUNT
 
-    rebuild = partial(build_tool_loop_prompt, agent, model_params)
+    started_box = [assembly_started_at or float(model_call_ledger(agent).context.now())]
+
+    def _rebuild_with_timer() -> str:
+        started_box[0] = float(model_call_ledger(agent).context.now())
+        return build_tool_loop_prompt(agent, model_params)
+
     return request_model_response(
-        build_prompt=rebuild if first_prompt is None else _prebuilt_prompt_first(first_prompt, rebuild),
+        build_prompt=_rebuild_with_timer if first_prompt is None else _prebuilt_prompt_first(first_prompt, _rebuild_with_timer),
         generate_response=lambda prompt: generate_model_response(
             ModelGenerateParams(
-                agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds
+                agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds,
+                context_assembly_started_at=started_box[0],
             )
         ),
         restore_rejected_input=partial(

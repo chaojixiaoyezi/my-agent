@@ -127,11 +127,11 @@ def project_native_prompt_history(
 
 
 # LLM: 实际出站和容量投影共用唯一布局 B：applied 摘要→已结束历史→当前时间线；仅按 source 移动摘要。
-# carried handoff 仍跟当前 opener，工具与推理不重排；候选只改副本，失败由原事务恢复。
-# 函数用途: 将当前适用摘要放在历史前，防止下一回合头部换位；投影不消费 seen 或改原列表。
+# carried handoff仍跟当前opener；默认隔离prior，copy_prior=False仅给只读消费者，不得修改共享嵌套内容。
+# 函数用途: 保留唯一出站布局及默认深拷贝，允许计量和指纹显式借用prior，不消费seen或改原IR。
 def project_native_provider_messages(
     history: object, *, prior_messages: object = (),
-    tool_context: object = (), forwarded_guidance: object = (),
+    tool_context: object = (), forwarded_guidance: object = (), copy_prior: bool = True,
 ) -> list[dict[str, Any]]:
     from ..backends.message_adapter import project_native_history_messages
     from .tool_ir_guidance import unforwarded_runtime_guidance
@@ -140,7 +140,7 @@ def project_native_provider_messages(
     guidance = unforwarded_runtime_guidance(list(tool_context or ()), set(forwarded_guidance or ()))
     if guidance:
         record_runtime_facts_turn_ir(projected, "\n\n".join(guidance), source="runtime.guidance")
-    return project_native_history_messages(projected.tool_ir_history, prior_messages)
+    return project_native_history_messages(projected.tool_ir_history, prior_messages, copy_prior=copy_prior)
 
 
 # LLM: 开轮与 live 候选统一 generation 标题，检查点仍存原始 summary；不写状态或发请求。
@@ -154,7 +154,7 @@ def applied_compact_summary_item(text: str, generation: int, provider_compaction
 
 # LLM: 逻辑回合身份要覆盖"实际出站内容"：native 下 tool_context/IR 变化不反映在渲染 prompt 上，
 #   只认 prompt 指纹会把内容真变化的重跑误并进旧回合。这里对与真实出站同源的纯投影结果做规范化
-#   指纹（只读：投影只改内部副本，不消费 seen、不写 IR）。同一请求的断流重试里，未转发指引先经
+#   指纹（只读：显式借用prior，不消费seen、不写IR或修改投影）。同一请求的断流重试里，未转发指引先经
 #   tool_context、再经 IR 投影，两次输出一致，因此身份稳定。判定或投影失败时返回空串，身份退化为
 #   prompt 指纹，绝不中断模型主链。改动时同步核对 call_runtime.logical_model_call_id 与
 #   tool_model_generation._native_provider_messages 的出站口径。
@@ -172,6 +172,7 @@ def provider_messages_fingerprint(params: object) -> str:
             prior_messages=getattr(params, "provider_history_messages", None),
             tool_context=getattr(params, "tool_context", None),
             forwarded_guidance=seen if isinstance(seen, set) else (),
+            copy_prior=False,
         )
         encoded = json.dumps(messages, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:

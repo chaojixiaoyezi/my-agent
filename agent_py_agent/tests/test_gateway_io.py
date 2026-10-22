@@ -499,3 +499,26 @@ class TestCleanupOrphanLockFiles:
             paths.responses,
             tmp_path / "gateway" / "turn_transitions",
         }
+
+
+# LLM: 当前版本JSON读口没有JSON_READ_CACHE；通过真实读写跨越256KiB，验证不存在旧小文件残留，而非新造缓存。
+# 函数用途: 守住外部原地增大、普通写及原子写之后读取最新大内容的行为。
+@pytest.mark.parametrize("writer", ["external", "write_json_file", "write_json_file_atomic"])
+def test_q4_json_growing_past_256k_does_not_return_old_payload(tmp_path, writer):
+    import json
+
+    from agent_py_agent.agent.gateway_parts import io
+
+    path = tmp_path / "state.json"
+    io.write_json_file_atomic(path, {"version": "small"})
+    assert io.read_json_file(path) == {"version": "small"}
+    large = {"version": "large", "body": "中" * (256 * 1024)}
+    if writer == "external":
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(large, handle, ensure_ascii=False)
+    else:
+        getattr(io, writer)(path, large)
+    assert path.stat().st_size > 256 * 1024
+    assert io.read_json_file(path) == large
+    io.write_json_file_atomic(path, {"version": "small-again"})
+    assert io.read_json_file(path) == {"version": "small-again"}

@@ -1,7 +1,7 @@
 # LLM: 只注册给本机管理员主代理（owner_type=main_agent）且 enable_gateway_restart_tool 开启；子代理运行里不可用。
 # 工具只写一份重启请求就返回，真正的排空与换进程由 Gateway 服务主循环执行（gateway_parts/restart_service）。
 # 发起方身份只取结构化事实：owner 三元组、会话 thread_id、会话存储根；不接受模型传入的进程号或路径。
-# effect=dangerous 保留副作用与幂等事实；已授权本机管理员重启免逐次确认，handler 再核 local/main 与主代理。
+# 本树effect无none枚举，使用read_only绕过工具排空计数/操作账；这只安排请求，handler仍硬核local/main主代理权限。
 # 排空、冷却和循环保护仍由 restart_service 执行；普通用户、群 owner 及子代理不能借此获得宿主操作权。
 # 模块用途: 让管理员的 my-agent 在排查中发现需要重启时，自己安排一次不会切断回合的 Gateway 安全重启。
 from __future__ import annotations
@@ -75,7 +75,7 @@ class RestartGatewayTool(BaseTool):
         ),
     )
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy("dangerous"),
+        effect_resolver=EffectResolverPolicy("read_only"),
         approval_policy=ApprovalPolicy("never"),
         idempotency_policy=IdempotencyPolicy("operation"),
         resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("gateway:current",)),
@@ -136,6 +136,8 @@ class RestartGatewayTool(BaseTool):
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(body, ensure_ascii=False))
 
 
+# LLM: 仅从当前代理的权威会话属性与存储根提取身份，不接受工具参数覆盖。
+# 函数用途: 组装重启请求中的发起会话结构化身份。
 def _requester(agent: object) -> dict[str, object]:
     home = getattr(agent, "home_paths", None)
     store = getattr(agent, "conversation_store", None)
@@ -150,6 +152,8 @@ def _requester(agent: object) -> dict[str, object]:
     }
 
 
+# LLM: 统一把校验阶段拒绝包装为 not_started 工具结果，不产生操作账或副作用。
+# 函数用途: 构造带结构化错误码的重启拒绝响应。
 def _refuse(message: str, code: str, *, raw: bool = False) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         TOOL_NAME,

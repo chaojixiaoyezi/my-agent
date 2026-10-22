@@ -1,3 +1,15 @@
+## 2026-10-22 线上性能归因四项达标与网关每日重启/卡死事故治理（.7 已实现）
+
+- **每条命令沙箱与前台进程组开销收敛（目标 `< 1.0s`）**：`sandbox.py` 缓存保护目标扫描与 macOS Seatbelt / Linux `bwrap` 参数探针；新增 `sandbox_full_access_other_owner_homes`（默认 `"read_only"`），在 `full_access` 模式下不再对数十个其他 Owner Home 做全目录深度快照，仅对存在且非本 Owner 的目录挂载 `--ro-bind`；`shell.py` 前台正常退出且进程组无残留子进程时跳过固定 `150ms` 轮询等待；`managed_operation_store.py` 正常执行跳过冗余 `list_blocking_operations` 全表扫描。
+- **每轮模型上下文零拷贝、表面指纹缓存与轮间耗时/Token 对账**：`message_adapter.py` 与 `tool_ir_history.py` 对历史轮次启用只读零深拷贝适配；`context_pressure.py` 按模型可见表面结构指纹缓存字符度量；`call_runtime.py`、`model_selection_status.py`、`gateway_status.py` 与 `task_call_inspector.py` 新增 `context_assembly_ms`、`inter_round_gap_ms`、`estimated_input_tokens`、`uncached_input_tokens` 等结构化诊断字段，并过滤 `None` 轮次耗时防 `TypeError`。
+- **多 Owner 空闲 CPU 指数退避与持久规划 SQLite 作用域（目标 `< 0.2` 核）**：新增 `background_idle_owner_max_backoff_seconds`（默认 `10.0s`），无到期任务且无唤醒的空闲 Owner 指数退避至 `10s`，新消息/唤醒到达立即清零退避；`runtime_db/sqlite_scope.py` 为单线程规划复用跨拍 SQLite 连接并在拍末 `commit()` 释放读快照；`input_delivery_service.py` 与 `scheduler/repository.py` 增加目录/文件指纹守卫避免每拍重扫。
+- **网关每日 04:00 安全重启排空闭环与主进程 Hang 强杀/栈保全**：`BackgroundShutdown.active_slice_count()` 纳入 `drain_for_requested_restart` 第一段 `turn_wait` 计数，修复后台 `isolated` 定时回合发起 `restart_gateway` 后同回合后续工具被提前关门卡住 `600s` 的根因；`RestartGatewayTool` 改为 `read_only` 效应与 `operation` 幂等；新增 `gateway_restart_force_on_drain_timeout`（默认 `True`）与 `restart_gate.executing_tool_snapshot()` 占门工具快照；独立定时会话取消重启时只写被动观测并将唤醒转交 `origin_thread_id` 防二次触发；修复 `daemon_metadata.py` 对 `/proc/<pid>/stat` 含空格 `comm` 的 `rfind(")")` 解析；新增 `hang_diagnostics.py`（`SIGUSR1` + `SigCgt` 校验、一次性 C 层看门狗、`/proc` `wchan`/压力快照与二代 GC 慢暂停日志）；`supervisor.py` 抑制启动期 `_health_unconfirmed` 刷屏、在 `SIGTERM` 超时后升级 `SIGKILL` 并核实退出、稳定健康运行满 600 秒自动重置 `_restart_count` 预算，并为子进程默认注入 `MALLOC_ARENA_MAX=2`。
+
+## 2026-10-22 前台用户回合自动解除 unknown 阻塞与重度历史账本增量/预算优化（已实现）
+
+- **前台用户回合自动恢复与模型核实提示**：当上一轮执行因进程重启或中断落入 `unknown` 时，无人值守后台自动续跑（`source="background_main_agent"`）继续暂停以防重复副作用；但当人类用户显式发送新前台消息（`source="gateway"`、`continuation_seq == 0`）时，`_bind_main_agent_authority` 自动以 `operator="foreground-user-turn"`、`effect_disposition="abandoned"` 解除主链与同线程子代理 `unknown` 阻塞，并将未确认工具清单注入本轮系统提示交由模型只读核实。`/recover` 同步支持 `1/2/3/继续/已生效/未生效` 简写。
+- **重度历史数据增量索引与缓存字节预算**：`message_scan.find_message_dedupe` 引入按 `(st_dev, st_ino)`、前缀摘要与字节水位线的有界增量去重索引（最多 64 文件、单文件 16384 键）；`scheduler/repository.py` 与 `event_effects.py` 增加 `history.jsonl` 增量 `run_id` 去重缓存与指纹解析缓存；`memory_store/candidates.py` 增加 `candidates.jsonl` 指纹与摘要缓存；`OwnerScopedAgentPool` 在无 pin 淘汰及最后一次 `pin` 释放时自动关闭退役 Agent 的 MCP 客户端；`gateway_parts/io.py`、`subagents/services/persistence/service.py` 与 `conversation/store_threads.py` 补齐单文件与总字节预算上限；`runtime_db/schema.py` 补齐 `idx_agent_runs_current_attempt`、`idx_agent_attempts_status_ended` 等 5 个索引消除大库巡检全表扫描；`installer.py` 启动器默认注入 `MALLOC_ARENA_MAX=2`、`MALLOC_TRIM_THRESHOLD_=131072`、`MallocLargeCache=0` 并自动升级旧模板性能开关。
+
 ## 2026-10-21 管理员三层看门狗治理与日常脚本边界（P3源码候选）
 
 - `runtime_governance.status`只读投影三层：OS用户服务的原登记及Linux `systemctl --user is-active`结果；Supervisor独立PID/state及维护锁；Gateway/Adapter原PID/state/heartbeat。所有输出复用`redact_bearer_values`，记录存在不等于服务ready。

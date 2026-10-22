@@ -519,6 +519,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     sqlite_connection_reuse: bool = True
     # 默认开启后台只读内容投影，实际领取与写入仍读取原权威；显式 False 可关闭投影优化。
     background_tick_cheap_checks: bool = True
+    # 后台主代理车道对无待办信号（无到期任务/唤醒/进展汇报/待处理观测）的空闲 owner 采用指数退避检查的最大间隔秒数（0=不退避）。
+    background_idle_owner_max_backoff_seconds: float = 10.0
+    # 前台用户主动发新消息时若存在上一轮中断遗留的 unknown 副作用操作，默认自动登记为待核实并放行本轮（注入结构化核实提示）；False 则保留手动 /recover 硬拦。
+    foreground_unknown_auto_recover: bool = True
+    # Full Access 模式下对同一宿主其它 owner 目录的挂载策略：read_only 将 owners 根目录整棵只读挂载（避免逐个 owner 产生数百条 bwrap 挂载与 Landlock 规则），isolate 则逐个其它 owner 挂载空 tmpfs 隔离。
+    sandbox_full_access_other_owner_homes: str = "read_only"
     # 供应商临时故障的回合级自动续跑次数上限（0=关闭；跨 Gateway 重启累计，重排不重放工具）。
     provider_transient_turn_resume_max_count: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。
@@ -553,8 +559,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_ready_timeout_seconds: int = 3
     # 安全重启第一段：停领新请求后，等本进程在跑回合结束的上限秒数；超时后关闭工具关口，停在工具前的回合由接班进程续跑。
     gateway_restart_turn_wait_seconds: int = 300
-    # 安全重启第二段：等执行中的副作用工具归零的上限秒数，0=不限；超时取消本次重启并恢复服务，不强杀。
+    # 安全重启第二段：等执行中的副作用工具归零的上限秒数，0=不限；超时后按 gateway_restart_force_on_drain_timeout 决定强制换进程或取消。
     gateway_restart_drain_timeout_seconds: int = 600
+    # 安全重启第二段等待超时后是否仍强制完成交接重启（默认 True，避免单个卡死工具无限期阻断每日维护重启；新进程启动恢复会自动核销未完成操作）。
+    gateway_restart_force_on_drain_timeout: bool = True
     # 两次安全重启之间的最短间隔秒数，0=不限；间隔内的请求直接返回冷却中。
     gateway_restart_cooldown_seconds: int = 30
     adapter_workspace: str = ""

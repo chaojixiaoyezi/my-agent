@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.cache_freshness import cache_entry_trustworthy
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.json_io import check_io_deadline
 from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
@@ -705,7 +705,86 @@ def _settle_terminal_queued_input(paths: GatewayPaths, receipt: GatewayInputRece
     return "terminal_unknown"
 
 
-# LLM: 逐条恢复仍经原owner和guidance权威；已收敛terminal_unknown只计数，不重入目标结算锁。
+_RECEIPT_SWEEP_MAX_DIRECTORY_COUNT = 32
+_RECEIPT_SWEEP_RECHECK_SECONDS = 60.0
+_RECEIPT_SWEEP_LOCK = threading.Lock()
+
+
+# LLM: 只记录完整连续扫描的覆盖证据，不缓存正文或业务裁决；未扫描完不能把一页终态推成全目录终态。
+# 类用途: 保存某一代回执目录的连续扫描位置和完成核验时刻。
+@dataclass(frozen=True)
+class _ReceiptSweep:
+    stamp: tuple[int, int, int, int, int]
+    seen: int
+    last_name: str
+    complete: bool
+    verified_at: float
+
+
+_RECEIPT_SWEEP_CACHE: OrderedDict[str, _ReceiptSweep] = OrderedDict()
+
+
+# LLM: 目录缺失或拒读时不信旧门；签名额外包含inode/ctime，不能只按mtime和size漏掉同名换代。
+# 函数用途: 只stat回执顶层目录，生成扫描门的文件系统代次。
+def _receipt_sweep_stamp(directory: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        return cache_stat_signature(directory.stat())
+    except OSError:
+        return None
+
+
+# LLM: 只有完整连续扫描全是consumed且同代可信时才跳过；热命中不续期，60秒后必须重新轮转。
+# 函数用途: 用一次目录stat跳过稳定且无未消费回执的整个扫描入口。
+def _receipt_sweep_gate(paths: GatewayPaths) -> tuple[tuple | None, bool]:
+    directory = paths.root / "input_receipts"
+    stamp, now = _receipt_sweep_stamp(directory), time.monotonic()
+    with _RECEIPT_SWEEP_LOCK:
+        cached = _RECEIPT_SWEEP_CACHE.get(str(directory))
+        if cached is not None and (
+            stamp != cached.stamp or (cached.complete and now - cached.verified_at >= _RECEIPT_SWEEP_RECHECK_SECONDS)
+        ):
+            _RECEIPT_SWEEP_CACHE.pop(str(directory), None)
+            cached = None
+        skip = bool(cached is not None and cached.complete and stamp is not None and cache_entry_trustworthy(stamp[3]))
+        if skip:
+            _RECEIPT_SWEEP_CACHE.move_to_end(str(directory))
+        return stamp, skip
+
+
+# LLM: 复用原名字投影验证页连续性，外部游标跳跃/错误/缺失或非consumed立即清证；目录变化不发布完整门。
+# 函数用途: 跨多批累计真正连续覆盖的回执，只有整圈无待办时才开放O(1)空闲短路。
+def _record_receipt_sweep(paths: GatewayPaths, stamp: tuple | None, page: tuple[Path, ...], summary: dict) -> None:
+    directory, key = paths.root / "input_receipts", str(paths.root / "input_receipts")
+    with _RECEIPT_DIR_CACHE_LOCK:
+        projection = _RECEIPT_DIR_CACHE.get(key)
+    clean = (stamp is not None and summary["errors"] == 0 and summary["terminal_unknown_errors"] == 0
+             and summary["checked"] == summary["consumed"] == len(page))
+    if not clean or projection is None or _receipt_sweep_stamp(directory) != stamp:
+        with _RECEIPT_SWEEP_LOCK:
+            _RECEIPT_SWEEP_CACHE.pop(key, None)
+        return
+    if projection[0] != (stamp[0], stamp[1], stamp[3], stamp[4]):
+        return
+    names = projection[1]
+    total = len(names)
+    first = bisect_right(names, page[0].name) - 1 if page else 0
+    if any(path.name != names[(first + index) % total] for index, path in enumerate(page)):
+        return
+    with _RECEIPT_SWEEP_LOCK:
+        cached = _RECEIPT_SWEEP_CACHE.get(key)
+        seen = len(page)
+        if cached is not None and cached.stamp == stamp and not cached.complete and page and total:
+            if names[bisect_right(names, cached.last_name) % total] == page[0].name:
+                seen += cached.seen
+        _RECEIPT_SWEEP_CACHE[key] = _ReceiptSweep(
+            stamp, min(seen, total), page[-1].name if page else "", seen >= total, time.monotonic(),
+        )
+        _RECEIPT_SWEEP_CACHE.move_to_end(key)
+        while len(_RECEIPT_SWEEP_CACHE) > _RECEIPT_SWEEP_MAX_DIRECTORY_COUNT:
+            _RECEIPT_SWEEP_CACHE.popitem(last=False)
+
+
+# LLM: 逐条恢复仍经原owner和guidance权威；完整无待办目录可按代次短路，不能只凭首批consumed跳过后页。
 #   批尾finally仅提交一次最后完成扫描的位置；typed未知立即停止且不越过当前项（只提交前一项），
 #   批内异常优先于提交失败；双重错误保留原异常对象，并以异常链保留游标写入失败，不伪称落盘成功。
 #   普通坏账继续轮转，terminal_unknown_errors/last_terminal_unknown_error仍交原循环守卫上报，不补claim或释放。
@@ -723,10 +802,14 @@ def reconcile_gateway_input_receipts(
         "terminal_unknown_errors": 0,
         "last_terminal_unknown_error": {},
     }
+    sweep_stamp, skip = _receipt_sweep_gate(paths)
+    if skip:
+        return summary
     last_path: Path | None = None
     pending_error: BaseException | None = None
+    page = _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1)))
     try:
-        for path in _reconcile_receipt_paths(paths, limit=max(1, int(limit or 1))):
+        for path in page:
             try:
                 _reconcile_receipt_path(paths, agent, path, summary)
             except RequestExecutionOutcomeUncertainError:
@@ -747,13 +830,54 @@ def reconcile_gateway_input_receipts(
                     raise pending_error from (pending_error.__cause__ if getattr(pending_error, "__cause__", None) is not None else exc)
                 _raise_input_transport_uncertain(exc)
                 summary["errors"] += 1
+    _record_receipt_sweep(paths, sweep_stamp, page, summary)
     return summary
 
 
-# LLM: 只读原回执裁决短路；仅当无错误且恢复责任已结清（请求已归档且无热区文件，或关联guidance非pending）时才跳过目标锁，否则仍沿原owner解析/恢复链重试。
+_CONSUMED_RECEIPT_STAMP_MAX_ENTRIES = 512
+_CONSUMED_RECEIPT_STAMP_CACHE: OrderedDict[str, tuple[int, int, int, int, int]] = OrderedDict()
+_CONSUMED_RECEIPT_STAMP_LOCK = threading.Lock()
+
+
+# LLM: 只有原回执读前后稳定且足够老才记消费投影；单条stat失败不改变已确认的消费计数。
+# 函数用途: 有界记住已消费回执的文件指纹，避免主对账函数深层嵌套。
+def _remember_consumed_receipt_stamp(path: Path, cache_key: str, before_stamp: tuple | None) -> None:
+    if before_stamp is None:
+        return
+    try:
+        after_stat = path.stat()
+    except OSError:
+        return
+    if cache_stat_signature(after_stat) != before_stamp or not cache_entry_trustworthy(after_stat.st_mtime_ns):
+        return
+    with _CONSUMED_RECEIPT_STAMP_LOCK:
+        _CONSUMED_RECEIPT_STAMP_CACHE[cache_key] = before_stamp
+        _CONSUMED_RECEIPT_STAMP_CACHE.move_to_end(cache_key)
+        while len(_CONSUMED_RECEIPT_STAMP_CACHE) > _CONSUMED_RECEIPT_STAMP_MAX_ENTRIES:
+            _CONSUMED_RECEIPT_STAMP_CACHE.popitem(last=False)
+
+
+# LLM: 只读原回执裁决短路；已消费回执按五元stat指纹跳过重复打开与JSON解析，仅当无错误且恢复责任已结清（请求已归档且无热区文件，或关联guidance非pending）时才跳过目标锁。
 #   queued原物化及归档收口不变，缺失项不计checked，错误由批扫描入口原样隔离或上抛。
 # 函数用途: 处理一条回执并累计状态，不逐条写批游标或把未结清的终态未知当作已收口。
 def _reconcile_receipt_path(paths: GatewayPaths, agent: object, path: Path, summary: dict[str, Any]) -> None:
+    cache_key = str(path)
+    try:
+        before_stat = path.stat()
+    except FileNotFoundError:
+        with _CONSUMED_RECEIPT_STAMP_LOCK:
+            _CONSUMED_RECEIPT_STAMP_CACHE.pop(cache_key, None)
+        return
+    except OSError:
+        before_stat = None
+    before_stamp = cache_stat_signature(before_stat) if before_stat is not None else None
+    if before_stamp is not None:
+        with _CONSUMED_RECEIPT_STAMP_LOCK:
+            if _CONSUMED_RECEIPT_STAMP_CACHE.get(cache_key) == before_stamp:
+                _CONSUMED_RECEIPT_STAMP_CACHE.move_to_end(cache_key)
+                summary["checked"] += 1
+                summary["consumed"] += 1
+                return
     receipt = read_gateway_input_receipt(paths, path.stem)
     if receipt is None:
         return
@@ -767,6 +891,7 @@ def _reconcile_receipt_path(paths: GatewayPaths, agent: object, path: Path, summ
         summary["queued"] += 1
         return
     if receipt.state == "consumed":
+        _remember_consumed_receipt_stamp(path, cache_key, before_stamp)
         summary["consumed"] += 1
         return
     if receipt.state == "terminal_unknown" and not receipt.reconcile_error and _is_settled_terminal_unknown(paths, agent, receipt):

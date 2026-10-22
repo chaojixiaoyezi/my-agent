@@ -145,8 +145,8 @@ class GatewayStatusTool(BaseTool):
         return _metadata_projection(snapshot) if metadata_only else snapshot
 
 
-# LLM: 嵌套对象逐字段白名单，未来完整快照新增正文或地址不会自动泄漏；不复制 load_errors 或日志内容。
-# 函数用途: 将原 Gateway 快照转换成可供无正文诊断使用的状态。
+# LLM: 嵌套对象逐字段白名单；只透传已有数值用量及组装/轮间耗时，新增正文、地址、错误或日志不会自动泄漏。
+# 函数用途: 将原Gateway快照投影为无正文诊断，保留估算与实报token的区别和未知值。
 def _metadata_projection(snapshot: dict) -> dict:
     result = {key: snapshot.get(key) for key in (
         "schema", "status", "alive", "uptime_seconds", "quarantined_wakes",
@@ -172,9 +172,10 @@ def _metadata_projection(snapshot: dict) -> dict:
                        "selection_source", "selection_thread_id", "scheduler_run_id")),
             ("activity", ("phase", "updated_at")),
             ("last_request", ("call_id", "request_id", "run_id", "task_id", "model_name", "backend", "status", "started_at", "finished_at",
+                              "context_assembly_ms", "inter_round_gap_ms", "estimated_input_tokens", "duration_ms", "first_token_wait_ms",
                               "profile_id", "selection_revision", "selected_at", "adopted_at", "provider_usage_reported",
                               "selection_source", "selection_thread_id", "scheduler_run_id", "call_time_clock", "selection_time_clock",
-                              "cached_input_tokens", "cache_creation_input_tokens")),
+                              "input_tokens", "cached_input_tokens", "uncached_input_tokens", "output_tokens", "cache_creation_input_tokens")),
         ):
             row = selection.get(group)
             result["model_selection"][group] = {key: row.get(key) for key in keys} if isinstance(row, dict) else None

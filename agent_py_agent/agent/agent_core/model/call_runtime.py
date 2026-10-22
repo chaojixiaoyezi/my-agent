@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
+from weakref import ref
 
 from ...contracts.model_call_ledger import (
     ModelCallActivityParams,
@@ -60,6 +62,8 @@ from .usage import (
 # 模块用途: 连接实际调用与账本、超时及统计，让生成和决策响应共用用量读取并保留缺报事实。
 
 _LEDGER_CREATION_LOCK = threading.Lock()
+# 仅记当前线程最近完成的作用域、账本弱引用及原账时钟，不跨worker、owner或run借用时间。
+_LAST_MODEL_CALL_COMPLETED_AT = threading.local()
 # LLM: 停机中断的唯一结构化原因码/类型；消费端按 error_code 识别"未结算"，不解析文案。
 MODEL_CALL_INTERRUPTED_ERROR_CODE = "MODEL_CALL_INTERRUPTED_HOST_SHUTDOWN"
 MODEL_CALL_INTERRUPTED_ERROR_TYPE = "HostShutdownInterrupted"
@@ -70,8 +74,8 @@ _HOST_SHUTDOWN_CLOSURE = ModelCallAdmissionClosure(
 )
 
 
-# LLM: 调用者可传真实预计算快照，超时/账本/TUI共用一次计量及其捕获代次；遥测缺绑定只弃持久化，不阻模型或重算另一套版本。
-# 函数用途: 在原账登记真实轮次并绑定可选任务遥测，按同一上下文快照计算慢模型超时。
+# LLM: 超时/账本/TUI共用预计算快照；估算单独保留，组装用单调时钟，轮间隔只借同线程同账本同run/request的终态点。
+# 函数用途: 登记调用及组装/轮间耗时、绑定可选任务遥测，并按同一快照计算慢模型超时。
 def start_model_call_record(
     request: object,
     *,
@@ -100,6 +104,12 @@ def start_model_call_record(
     from ...settings.model_scope import model_selection_metadata
     from .response_provenance import response_call_purpose
 
+    assembly_started = float(getattr(request, "context_assembly_started_at", 0.0) or 0.0)
+    context_assembly_ms = (
+        round(max(0.0, (time.monotonic() - assembly_started) * 1000.0), 3)
+        if assembly_started > 0.0
+        else 0.0
+    )
     ledger.started(ModelCallStartedParams(
             call_id=call_id, backend=str(getattr(backend, "name", "") or ""), model=model_name(agent),
             input_tokens=input_tokens, output_tokens_estimate=max_output_tokens(agent),
@@ -112,6 +122,9 @@ def start_model_call_record(
                 "logical_call_id": logical_call_id,
                 "physical_attempt": physical_attempt, "model_selection": model_selection_metadata(agent),
                 "first_token_timeout_estimate": estimate.to_dict(),
+                "context_assembly_ms": context_assembly_ms,
+                "inter_round_gap_ms": _model_call_inter_round_gap_ms(ledger, params),
+                "estimated_input_tokens": input_tokens,
             },
         ))
     with suppress(Exception):
@@ -120,6 +133,27 @@ def start_model_call_record(
                                  binding=getattr(context_snapshot, "usage_binding", None))
     publish_model_metrics(agent, params, pending=True)
     return ledger, call_id, estimate
+
+
+# LLM: 用该账本的时钟与原终态点相减，兼容注入时钟；没有可靠前序或时钟倒退保持None，不伪造首轮零间隔。
+# 函数用途: 计算同线程、账本和请求运行从上次完成到本次登记的宿主间隔。
+def _model_call_inter_round_gap_ms(ledger: ModelCallLedger, params: object) -> float | None:
+    previous = getattr(_LAST_MODEL_CALL_COMPLETED_AT, "last", None)
+    scope = (str(getattr(params, "run_id", "") or ""), str(getattr(params, "request_id", "") or ""))
+    if previous is None or previous[0]() is not ledger or previous[1] != scope or not any(scope):
+        return None
+    gap = float(ledger.context.now()) - previous[2]
+    return round(gap * 1000.0, 3) if gap >= 0.0 else None
+
+
+# LLM: 只观察首终态的固定时间，不以回调到达时间重签；迟到/重复回调不回退同账本时间，弱引用不延长账本寿命。
+# 函数用途: 在线程内记住最近完成、失败或超时的模型调用边界，供下一轮计算宿主间隔。
+def _remember_model_call_completion(ledger: ModelCallLedger, record: object) -> None:
+    completed = record.finished_at if record.finished_at is not None else record.last_activity_at
+    previous = getattr(_LAST_MODEL_CALL_COMPLETED_AT, "last", None)
+    if previous is not None and previous[0]() is ledger and previous[2] > completed:
+        return
+    _LAST_MODEL_CALL_COMPLETED_AT.last = (ref(ledger), (record.run_id, record.request_id), float(completed))
 
 
 # LLM: 数值与采样时 typed 版本成套保存；禁止用 publish 时最新线程重签旧数，原 live sink 仍只显示本请求实际计量。
@@ -204,7 +238,8 @@ def record_model_call_first_token(
 
 # LLM: 用量沿原归一读取器，首终态仍归原 ledger；准确调用已 failed 且原因与唯一准入 closure 完全匹配时抛原异常，
 #   阻止生成出口签发来源或执行迟到工具。已成功、超时及其它失败不重新归类；不能按正文猜停机或重开终态。
-# 函数用途: 提交完成事实并尽力投影任务轮次，仍将停机后迟到响应交回原准入异常出口。
+#   线程内完成点取原账终态时间，不用遥测落盘结束或迟到通知时刻覆盖。
+# 函数用途: 提交完成、记录原终态时间并投影任务轮次，停机后迟到响应仍走原准入异常出口。
 def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: object) -> None:
     input_tokens = input_token_usage(response)
     output_tokens = output_token_usage(response)
@@ -223,6 +258,7 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
             turn_end_reason=str(getattr(response, "turn_end_reason", "") or ""),
             truncated=bool(getattr(response, "truncated", False)),
         ))
+    _remember_model_call_completion(ledger, record)
     with suppress(Exception):
         record_model_call_telemetry(ledger, record)
     closure = model_call_admission_closure()
@@ -231,8 +267,8 @@ def record_model_call_finished(ledger: ModelCallLedger, call_id: str, response: 
         raise ModelCallAdmissionClosedError(closure)
 
 
-# LLM: 首个失败仍归原ledger；可选遥测即使被替换为抛异常的函数也不能改变账本或主链。
-# 函数用途: 保存失败事实并自动投影当前任务轮次。
+# LLM: 首个失败仍归原ledger，原终态时间只记线程内；可选遥测失败不能改变账本或主链。
+# 函数用途: 保存失败及完成边界，并自动投影当前任务轮次。
 def record_model_call_failed(
     ledger: ModelCallLedger,
     call_id: str,
@@ -242,6 +278,7 @@ def record_model_call_failed(
             call_id=call_id, error_type=type(exc).__name__,
             error_code=str(getattr(exc, "error_code", "") or getattr(exc, "code", "") or ""),
         ))
+    _remember_model_call_completion(ledger, record)
     with suppress(Exception):
         record_model_call_telemetry(ledger, record)
 
@@ -285,8 +322,8 @@ class ModelCallTimeoutFacts:
     timeout_wait_phase: str = ""
 
 
-# LLM: 超时阶段和用量仍归原账本；遥测只是可失败投影，不改原超时诊断和重试语义。
-# 函数用途: 提交超时账并自动记录任务模型轮次。
+# LLM: 超时阶段和用量仍归原账本，线程内只取原终态时间；遥测不改超时诊断和重试语义。
+# 函数用途: 提交超时、保存完成边界并自动记录任务模型轮次。
 def record_model_call_timeout(ledger: ModelCallLedger, facts: ModelCallTimeoutFacts) -> None:
     """落超时账。``facts.timeout_wait_phase`` 只承载诊断用的连接位置（默认空串），
     不参与任何放行/退避判定，只透传给账本；其余字段语义见 ``ModelCallTimeoutFacts``。"""
@@ -298,6 +335,7 @@ def record_model_call_timeout(ledger: ModelCallLedger, facts: ModelCallTimeoutFa
             timeout_wait_phase=facts.timeout_wait_phase,
         )
     )
+    _remember_model_call_completion(ledger, record)
     with suppress(Exception):
         record_model_call_telemetry(ledger, record)
 

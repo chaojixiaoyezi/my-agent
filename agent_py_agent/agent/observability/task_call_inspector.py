@@ -190,18 +190,54 @@ class TaskCallInspector:
             raise ValueError("owner mismatch")
         return row
 
-    # LLM: 无目录返回空；按固定安全文件名读取权威 JSON，不以索引遗漏解释为没有任务。
-    # 函数用途: 列举所有任务的当前状态。
+    # LLM: 无目录返回空；列表后文件消失只过滤None，损坏/越权仍沿原异常，不把索引遗漏解释为没有任务。
+    # 函数用途: 安全列举仍存在的任务，避开并发清理留下的空记录。
     def _records(self):
         try:
             names = list_names_beneath(self._home, (*PARTS, "task_calls"))
         except FileNotFoundError:
             return []
-        return [self._read(name[:-5]) for name in sorted(names) if name.endswith(".json")]
+        rows = []
+        for name in sorted(names):
+            if name.endswith(".json"):
+                loaded = self._read(name[:-5])
+                if loaded is not None:
+                    rows.append(loaded)
+        return rows
 
-    # LLM: 保存前验证并递归脱敏；JSON 原子提交后重建索引，索引失败时权威可能已提交。
+    # LLM: 增量更新索引行，缺失或目录文件名不一致时只补读缺失任务，内容未变时不重写索引文件。
+    # 函数用途: 维护任务索引投影，避免每次追加模型轮次时重读全部历史任务JSON。
+    def _write_index(self, row):
+        keys = ("task_id", "owner_id", "title", "status", "trigger_kind", "started_at", "ended_at")
+        try:
+            names = [name[:-5] for name in sorted(list_names_beneath(self._home, (*PARTS, "task_calls"))) if name.endswith(".json")]
+        except FileNotFoundError:
+            names = [row["task_id"]]
+        existing_text = read_text_beneath(self._home, (*PARTS, "task_calls_index.jsonl"))
+        by_id = {}
+        if existing_text:
+            try:
+                for line in existing_text.splitlines():
+                    if not line.strip():
+                        continue
+                    item = json.loads(line)
+                    if isinstance(item, dict) and isinstance(item.get("task_id"), str) and all(k in item for k in keys):
+                        by_id[item["task_id"]] = {k: item[k] for k in keys}
+            except ValueError:
+                by_id = {}
+        by_id[row["task_id"]] = {k: row[k] for k in keys}
+        for tid in names:
+            if tid not in by_id:
+                loaded = self._read(tid)
+                if loaded is not None:
+                    by_id[tid] = {k: loaded[k] for k in keys}
+        index = "".join(_encode(by_id[tid]) for tid in names if tid in by_id)
+        if existing_text != index:
+            write_text_atomic_beneath(self._home, (*PARTS, "task_calls_index.jsonl"), index)
+
+    # LLM: 保存前验证并递归脱敏；JSON 原子提交后按需同步索引，追加轮次且索引已存在时不重扫目录。
     # 函数用途: 在调用方持有锁时保存完整记录及索引投影。
-    def _save(self, payload):
+    def _save(self, payload, *, sync_index: bool = True):
         data = dict(payload)
         if data.pop("schema", SCHEMA) != SCHEMA:
             raise ValueError("unsupported schema")
@@ -223,9 +259,9 @@ class TaskCallInspector:
         item.token_usage = _sum_usage(item.rounds) if item.rounds else _usage(item.token_usage)
         row = redact_sensitive_value(item.to_dict())
         write_text_atomic_beneath(self._home, _path(item.task_id), _encode(row))
-        keys = ("task_id", "owner_id", "title", "status", "trigger_kind", "started_at", "ended_at")
-        index = "".join(_encode({k: r[k] for k in keys}) for r in self._records())
-        write_text_atomic_beneath(self._home, (*PARTS, "task_calls_index.jsonl"), index)
+        index_path = self._home.joinpath(*PARTS, "task_calls_index.jsonl")
+        if sync_index or not index_path.is_file() or index_path.stat().st_size <= 0:
+            self._write_index(row)
         return row
 
     # LLM: 字典是部分更新，dataclass 是完整快照；锁内先读后合并，防止覆盖并发追加轮次。
@@ -243,7 +279,8 @@ class TaskCallInspector:
         _path(task_id)
         with _lock(self._home):
             row = self._read(task_id)
-            if row is None:
+            created = row is None
+            if created:
                 if not create_if_missing:
                     raise KeyError(task_id)
                 row = TaskCallRecord(task_id=task_id, owner_id=self._owner_id,
@@ -255,7 +292,7 @@ class TaskCallInspector:
                 _number(data["duration_ms"])
             _append_model_run(row, data)
             row["rounds"].append(data)
-            return self._save(row)
+            return self._save(row, sync_index=created)
 
     # LLM: completed 状态不含 running；结束时间未指定时取当前时间，负耗时由保存校验拒绝。
     # 函数用途: 更新任务终态及总耗时。
@@ -362,8 +399,8 @@ def bind_model_call_telemetry(ledger: object, call_id: str, agent: object, param
         return
 
 
-# LLM: 首终态消费绑定且只投影数值/身份，不存prompt或response；原metadata和终态不变，IO失败只丢可选遥测。
-# 函数用途: 将完成、失败或超时的实际模型调用自动写入任务详情。
+# LLM: 首终态消费绑定且只投影数值/身份；估算与供应商用量分开，首轮间隔保持None，不存正文或改变原终态。
+# 函数用途: 将完成、失败或超时的调用及组装/轮间耗时写入任务详情，IO失败只丢可选遥测。
 def record_model_call_telemetry(ledger: object, record: object) -> None:
     try:
         if getattr(record, "status", "") not in {"finished", "failed", "timed_out"}:
@@ -372,12 +409,19 @@ def record_model_call_telemetry(ledger: object, record: object) -> None:
             scope = getattr(ledger, "_telemetry_call_scopes", {}).pop(record.call_id, None)
         if scope is None or record.run_id != scope["run_id"]:
             return
+        prompt_tokens = max(0, int(record.accounted_input_tokens if record.status == "finished" else record.input_tokens))
+        cached_tokens = max(0, int(record.cached_input_tokens))
         data = dict(round_id=record.call_id, run_id=record.run_id, parent_run_id=scope["parent_run_id"],
                     root_run_id=scope["root_run_id"], thread_id=scope["thread_id"], model=record.model, backend=record.backend,
                     purpose=str(record.metadata.get("purpose") or "main"), status=record.status,
                     started_at=float(scope["wall_started_at"]), duration_ms=round(max(0.0, float(record.total_latency_seconds or 0.0)) * 1000, 3),
-                    prompt_tokens=max(0, int(record.accounted_input_tokens if record.status == "finished" else record.input_tokens)),
-                    completion_tokens=max(0, int(record.output_tokens)), cached_tokens=max(0, int(record.cached_input_tokens)),
+                    context_assembly_ms=round(max(0.0, float(record.metadata.get("context_assembly_ms") or 0.0)), 3),
+                    inter_round_gap_ms=record.metadata.get("inter_round_gap_ms"),
+                    estimated_input_tokens=record.metadata.get("estimated_input_tokens", record.input_tokens),
+                    first_token_wait_ms=round(max(0.0, float(record.first_token_latency_seconds or 0.0)) * 1000, 3),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=max(0, int(record.output_tokens)), cached_tokens=cached_tokens,
+                    uncached_tokens=max(0, prompt_tokens - cached_tokens),
                     error_code=str(record.error_code or ""), stop_reason=str(record.stop_reason or ""))
         TaskCallInspector(scope["home_dir"], owner_id=scope["owner_id"]).append_round(scope["task_id"], data, create_if_missing=True)
     except Exception:

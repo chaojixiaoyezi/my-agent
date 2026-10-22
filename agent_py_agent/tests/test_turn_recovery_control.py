@@ -223,11 +223,21 @@ def test_tui_serializes_recover_and_local_mode_requires_gateway():
     assert local.ok is False and "Gateway" in local.message
 
 
-# LLM: record_run_creation回执不包含run_id，须从真实agent_run行读出，不能凭返回协议猜字段。
-# 函数用途: 为新绑定回归补齐原未知执行夹具的真实运行编号。
+# LLM: record_run_creation回执不包含run_id，须从真实行读出；前台恢复还须有同owner私有通道的真实ThreadStore身份。
+# 函数用途: 为原未知执行夹具补齐运行编号及可验证的本地交互来源，不绕过恢复授权门。
 def _opt7_unknown_turn(tmp_path):
+    from agent_py_agent.agent.conversation.models import ChannelBinding, ConversationThread
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
     repo, rec, owner, thread, operation = _unknown_turn(tmp_path)
     rec = {**rec, "run_id": str(repo.get_agent_run(rec["agent_run_id"])["run_id"])}
+    owner.home_paths = SimpleNamespace(owner_id="local/main", owner_provider="local", owner_kind="main")
+    owner.config = SimpleNamespace()
+    owner.conversation_store = ConversationStore(tmp_path / "local-conversations")
+    owner.conversation_store.threads.write(ConversationThread(
+        thread_id="thread-recover", canonical_user_id="local-agent", owner_id="local/main",
+        channel_bindings=(ChannelBinding("tui", "session", "local-agent", "local-agent", "thread-recover"),),
+    ))
     return repo, rec, owner, thread, operation
 
 
@@ -275,7 +285,7 @@ def test_opt7_foreground_recovers_and_injects_verification_before_model(tmp_path
     original = repo.unsettled_attempt_operations
 
     # LLM: 只增加不得进入模型的噪声字段；操作名、状态和开始时间仍来自真实仓库读口。
-    # 函数用途: 检查核实提示不泄露工具参数、结果、路径或操作编号。
+    # 函数用途: 检查核实提示不泄露工具参数和结果；operation_id按Q4要求进入结构化核实清单。
     def unsettled(attempt_id):
         return [{**item, "arguments": "PRIVATE_ARGUMENTS", "result": "PRIVATE_RESULT"}
                 for item in original(attempt_id)]
@@ -300,7 +310,8 @@ def test_opt7_foreground_recovers_and_injects_verification_before_model(tmp_path
     assert "run_command" in notice and "只读" in notice and "不会自动重做" in notice
     for item in old_operations:
         assert item["status"] in notice and str(item["handler_started_at"]) in notice
-    assert "PRIVATE_ARGUMENTS" not in notice and "PRIVATE_RESULT" not in notice and operation not in notice
+    assert "PRIVATE_ARGUMENTS" not in notice and "PRIVATE_RESULT" not in notice
+    assert operation in notice and '"operation_id"' in notice
     request = RuntimeContextRequest("继续", bound.inject, None)
     injections = _base_runtime_injections(request, "", SimpleNamespace(injected_sections=[]))
     assert "原有注入" in injections and notice in injections
@@ -434,7 +445,8 @@ def test_opt7_review_retry_keeps_committed_recovery_notice(tmp_path, monkeypatch
     recovered_id = child["attempt_id"] if failure == "fresh_root" else rec["attempt_id"]
     assert repo.get_attempt(recovered_id)["status"] == "recovered"
     cold_repo = RuntimeRepository(str(next(tmp_path.glob("runtime-*.db"))))
-    cold_owner = SimpleNamespace(subagents=SimpleNamespace(runtime_db=cold_repo))
+    cold_owner = SimpleNamespace(subagents=SimpleNamespace(runtime_db=cold_repo),
+        home_paths=owner.home_paths, config=owner.config, conversation_store=owner.conversation_store)
     retried = runtime_mixin._bind_main_agent_authority(cold_owner, RunParams(
         source="gateway", run_id=params.run_id, task_id=params.task_id,
         task_attributes={"conversation_thread_id": "thread-recover"},

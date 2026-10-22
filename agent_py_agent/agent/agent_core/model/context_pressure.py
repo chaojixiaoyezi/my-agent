@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 
 from ...backends import ModelResponse, is_provider_context_window_error
 from ...backends.request_content import classify_nontext_content
@@ -23,6 +23,7 @@ from ...conversation.compact_progress import (
 )
 from ...conversation.context_usage import ContextUsageBinding
 from ...memory_archive import estimate_tokens
+from ...memory_archive.tokens import _item_length_fingerprint
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
 from ...settings.defaults import configured_context_window_tokens
@@ -47,6 +48,8 @@ _OWNER_RATIO_CALIBRATION_SCOPE = CALIBRATION_SCOPE_OWNER_RATIO
 _PROVIDER_CONTEXT_OWNER_RATIO_KEY = "_provider_context_owner_ratio"
 # 压缩提交后派生观测的结构化标记：它不是供应商实测，而是“已接受候选按同一观测折算”的本轮基线。
 _COMPACT_CANDIDATE_OBSERVATION_BASIS = "compact_candidate"
+# 只有原纯估算器能按可见输入复用；替代估算器可能依赖消息之外的动态状态，不能假定它也满足纯函数合同。
+_MEMO_ESTIMATE_TOKENS = estimate_tokens
 
 
 @dataclass(frozen=True)
@@ -427,14 +430,12 @@ def frozen_compact_request_calibration(
     )
 
 
-# LLM: 回合中原生 IR 压缩（_tool_loop_service._native_tool_history_summary）没有恢复宿主冻结的校准事实，这里按同一规则
-#   现算：同一份请求投影的表面指纹 + frozen_compact_request_calibration 的观测水合。投影会再算一遍，只在压缩那一刻调用；
-#   没有可用观测返回 None，调用方的预算检查按原始上界。
-# 函数用途: 给回合中压缩的预算检查取主请求的校准事实。
+# LLM: 校准只需稳定system/prompt/tools表面，与完整计量同源但不投影消息、不估算token；水合仍沿原校准合同。
+# 函数用途: 为回合内压缩冻结主请求校准，省去仅为指纹进行的全量消息组装和估算。
 def compact_request_calibration_for_request(
     agent: object, params: object, prompt: object,
 ) -> CompactRequestCalibration | None:
-    _protocol, _raw, _components, fingerprint = _model_visible_context_components(agent, params, prompt)
+    fingerprint = _model_visible_surface_fingerprint(agent, params, prompt)
     return frozen_compact_request_calibration(agent, params, context_surface_fingerprint=fingerprint)
 
 
@@ -678,23 +679,58 @@ def _provider_observation_matches(observation: object, fingerprint: str) -> bool
     )
 
 
-# LLM: 本入口准备宿主事实；投影后交唯一纯计量，原 native 清扫/引导/ToolChoice 与发送共源，不写 IR。
-# 函数用途: 采集实际消息与工具展示后估算上下文；稳定指纹不含动态状态，校准仍归外层原合同。
+# LLM: 每个live_archive_state仅缓存一份数字快照；键覆盖内容摘要、session和工具表面，不靠list身份或首尾猜中段未变。
+#   命中不组装消息或重估token，校准/触发线仍由外层逐次计算；缓存不含消息，返回分类新字典避免调用方污染。
+# 函数用途: 共享同一轮可见输入的原始计量；内容变化或不能证明安全缓存时沿原纯计量重新计算。
 def _model_visible_context_components(
     agent: object,
     params: object | None,
     prompt: object,
 ) -> tuple[str, int, dict[str, int], str]:
+    projection, history, guidance, already_forwarded = _model_visible_request_projection(agent, params, prompt)
+    fingerprint = request_projection_surface_fingerprint(agent, projection)
+    state = getattr(params, "live_archive_state", None)
+    key = _context_estimate_key(params, projection, history, guidance, already_forwarded, fingerprint) if isinstance(state, dict) else None
+    cached = state.get("_last_estimate_cache") if isinstance(state, dict) else None
+    if key is not None and isinstance(cached, tuple) and len(cached) == 5 and cached[0] == key:
+        return cached[1], cached[2], dict(cached[3]), cached[4]
+    native = projection.messages is not None
+    if native:
+        from ..tool_ir_history import project_native_provider_messages
+
+        messages = project_native_provider_messages(
+            history, prior_messages=getattr(params, "provider_history_messages", None),
+            tool_context=getattr(params, "tool_context", None), forwarded_guidance=already_forwarded, copy_prior=False,
+        )
+        projection = replace(projection, messages=messages)
+    current, components = projected_model_context_components(
+        projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve() if native else 0,
+    )
+    protocol = "native" if native else "text"
+    if key is not None:
+        state["_last_estimate_cache"] = (key, protocol, current, tuple(components.items()), fingerprint)
+    return protocol, current, components, fingerprint
+
+
+# LLM: 与完整计量共用准备入口和稳定指纹；空messages只是native标志，不读取或转换prior历史，不触发token估算。
+# 函数用途: 给压缩校准只取稳定展示面，保持与完整请求的校准身份逐字一致。
+def _model_visible_surface_fingerprint(agent: object, params: object | None, prompt: object) -> str:
+    projection, _history, _guidance, _forwarded = _model_visible_request_projection(agent, params, prompt)
+    return request_projection_surface_fingerprint(agent, projection)
+
+
+# LLM: 仅冻结轻量提示/工具事实和浅IR列表；真实消息清扫延迟到memo未命中，和发送共用原引导、ToolChoice及动态状态来源。
+# 函数用途: 为纯指纹和计量准备同源请求表面，空messages标记native但不是已完成的出站请求。
+def _model_visible_request_projection(agent: object, params: object | None, prompt: object):
     system_instruction = provider_system_instruction(getattr(agent, "backend", None))
     if not native_tool_use_active(params):
         projection = ToolLoopRequestProjection(
             "ready", provider_prompt=str(prompt or ""), system_instruction=system_instruction,
         )
-        current, components = projected_model_context_components(projection)
-        return "text", current, components, request_projection_surface_fingerprint(agent, projection)
+        return projection, [], [], set()
 
     from ..tool_ir_guidance import unforwarded_runtime_guidance
-    from ..tool_ir_history import project_native_prompt_history, project_native_provider_messages
+    from ..tool_ir_history import project_native_prompt_history
 
     projected_prompt, history = project_native_prompt_history(params, prompt)
     state = getattr(params, "live_archive_state", None)
@@ -707,22 +743,58 @@ def _model_visible_context_components(
         getattr(params, "tool_context", None),
         set(already_forwarded),
     )
-    messages = project_native_provider_messages(
-        history, prior_messages=getattr(params, "provider_history_messages", None),
-        tool_context=getattr(params, "tool_context", None), forwarded_guidance=already_forwarded,
-    )
     available_tools = resolve_native_tools(agent, params)
     choice = model_turn_tool_choice(params, available_tools)
     tools = tools_for_choice(available_tools, choice)
-    provider_prompt = _native_provider_prompt_adjunct(projected_prompt)
     projection = ToolLoopRequestProjection(
         "ready", provider_prompt=projected_prompt, system_instruction=system_instruction,
-        messages=messages, tools=tools or None, tool_choice=choice,
+        messages=[], tools=tools or None, tool_choice=choice,
     )
-    current, components = projected_model_context_components(
-        projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve(),
-    )
-    return "native", current, components, request_projection_surface_fingerprint(agent, projection)
+    return projection, history, guidance, already_forwarded
+
+
+# LLM: 不序列化历史；递归折叠容器节点及typed IR字段，字符串沿用估算器的缓存hash。仅存64位摘要，不保留正文或嵌套树副本。
+#   中段原位变化也失效；未知对象、环和过深结构返回None放弃memo，碰撞口径与原token元素缓存一致，不参与授权。
+# 函数用途: 以轻量内容摘要证明输入未变，避免id/条数/首尾相同但中间内容改变时沿用旧估算。
+def _context_value_fingerprint(value: object) -> int | None:
+    kind = type(value)
+    if kind is dict:
+        if any(type(key) is not str for key in value):
+            return None
+        entries = value.items()
+    elif kind in (list, tuple):
+        entries = enumerate(value)
+    elif is_dataclass(value) and not isinstance(value, type):
+        entries = ((item.name, getattr(value, item.name)) for item in fields(value))
+    else:
+        return _item_length_fingerprint(value)
+    digest = hash(kind)
+    for key, item in entries:
+        part = _context_value_fingerprint(item)
+        if part is None:
+            return None
+        digest = hash((digest, key, part))
+    return digest
+
+
+# LLM: 跨阶段只复用原纯估算器，不缓存校准/阈值；替代估算器的外部状态未知时放弃memo，session/run/request隔离。
+# 函数用途: 为当前请求生成不含正文的单项memo键；不能可靠取内容摘要时返回None执行原路径。
+def _context_estimate_key(params, projection, history, guidance, forwarded, surface):
+    if estimate_tokens is not _MEMO_ESTIMATE_TOKENS:
+        return None
+    native = projection.messages is not None
+    sources = (str(projection.provider_prompt or ""), history, guidance,
+               getattr(params, "provider_history_messages", None) if native else None,
+               getattr(params, "tool_context", None) if native else None, tuple(sorted(forwarded)))
+    try:
+        content = _context_value_fingerprint(sources)
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        return None
+    if content is None:
+        return None
+    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
+    return (scope, surface, content, media_token_reserve(), id(estimate_tokens),
+            id(projected_model_context_components), id(classify_nontext_content))
 
 
 # LLM: 预检与恢复宿主共用的稳定表面指纹入口：从同一 ToolLoopRequestProjection 取协议、系统提示、稳定提示附件与

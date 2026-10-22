@@ -174,7 +174,7 @@ class ManagedOperationStore:
         _require_running_authority(row, request.run_id, attempt_id)
 
     # ------------------------------------------------------------- claim
-    # LLM: 同事务核验当前attempt后，等价UNKNOWN先走原操作核对，不许新call编号绕过；不改未来独立run。
+    # LLM: 取得写锁后才采样默认开始时刻（now=0仍沿旧合同表示当前时刻）；等价UNKNOWN先核对，不许新call编号绕过。
     # 函数用途: 原子领取一次执行或返回原未知操作，会写操作账/资源锁，修改需同步幂等和跨attempt回归。
     def claim_tool_operation(
         self,
@@ -183,7 +183,6 @@ class ManagedOperationStore:
         _validate_claim_request(request)
         if self._repo is None:
             raise AuthorityContextMissing("MANAGED run 无权威库（repo 缺失）")
-        now = float(request.now or time.time())
         attempt_id = str(request.attempt_id or "").strip()
         if not attempt_id:
             raise AuthorityContextMissing(
@@ -191,6 +190,7 @@ class ManagedOperationStore:
             )
         with self._repo._runtime_connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            now = float(request.now or time.time())
             # attempt 锚定（seq 248 #1/#4）：调用者 attempt 经 agent_attempts
             # 定位 agent_run（root/child 同 run_id 不再歧义），同一事务读
             # current pointer + 权威 task_id；空 task 声明跳过比对（attempt

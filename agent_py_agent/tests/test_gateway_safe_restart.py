@@ -363,8 +363,11 @@ def test_restart_control_requires_admin_and_schedules_for_this_gateway(tmp_path)
     assert execute_restart_control(admin, None, command, paths=paths).message.startswith("已合并")
 
 
+# LLM: 显式关闭强制超时策略，继续验证原取消、开门与发起会话通知合同。
+# 函数用途: 验证非强制重启超时后仍正常服务并通知取消。
 def test_drain_timeout_cancels_restart_and_notifies_requester(tmp_path, monkeypatch):
-    agent = _agent(tmp_path, gateway_restart_turn_wait_seconds=0, gateway_restart_drain_timeout_seconds=1)
+    agent = _agent(tmp_path, gateway_restart_turn_wait_seconds=0, gateway_restart_drain_timeout_seconds=1,
+                   gateway_restart_force_on_drain_timeout=False)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(handover, "log_gateway_event", lambda *_args: None)
@@ -547,3 +550,192 @@ def test_update_stop_uses_original_drain_but_does_not_launch_successor(tmp_path)
     report={'summary':'drained','restart':{'operation':'stop_for_update','request_id':'req-test'}}
     termination=_classify_gateway_service_return(context,report)
     assert termination.kind=='planned_update_stop' and termination.exit_code==0
+
+
+# LLM: 活跃计数只读进程内finished，不调用会检查持久claim/worker的blockers，也不改变停止状态。
+# 函数用途: 验证未完成后台片计数且已结束但未核清的片不重复计入回合。
+def test_incident_background_active_slice_count_is_memory_only(monkeypatch):
+    from agent_py_agent.agent.conversation.background_shutdown import (
+        BackgroundShutdown,
+        BackgroundSlice,
+    )
+
+    shutdown = BackgroundShutdown()
+    finished = BackgroundSlice(shutdown, None)
+    finished.finished = True
+    shutdown.slices.add(finished)
+    # LLM: 禁止计数器借blockers查库或核对worker，发现调用就明确失败。
+    # 函数用途: 守住纯内存计数的边界。
+    def forbid_blockers(_self):
+        raise AssertionError('active count accessed blockers')
+    count = getattr(shutdown, 'active_slice_count', lambda: -1)
+    monkeypatch.setattr(BackgroundSlice, 'blockers', forbid_blockers)
+    assert count() == 0
+    live = BackgroundSlice(shutdown, None)
+    shutdown.slices.add(live)
+    assert count() == 1 and not shutdown.stopping
+    live.finished = True
+    assert count() == 0 and shutdown.slices == {live, finished}
+
+
+# LLM: 用真实后台observe、restart工具、工具门和本机子进程追加日志；不启动或重启真实Gateway。
+# 函数用途: 验证后台发起重启后的同片写日志可完成，前后台均归零后才关闭工具门。
+@pytest.mark.parametrize('foreground', [0, 2])
+def test_incident_background_slice_finishes_log_before_tool_drain(tmp_path, monkeypatch, foreground):
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.conversation.background_shutdown import BackgroundShutdown
+    from agent_py_agent.agent.tooling.gateway_restart_tool import RestartGatewayTool
+
+    agent = _agent(tmp_path, gateway_restart_turn_wait_seconds=2, gateway_restart_drain_timeout_seconds=1)
+    paths, shutdown = gateway_paths(agent), BackgroundShutdown()
+    context = SimpleNamespace(paths=paths, agent=agent, process_started_at=1, background_shutdown=shutdown)
+    ready, turn_wait, logged = threading.Event(), threading.Event(), threading.Event()
+    errors, phases, turns = [], [], {'count': foreground}
+    log = tmp_path / 'scheduled-final.log'
+    monkeypatch.setenv(service.HOSTING_GATEWAY_PID_ENV, str(os.getpid()))
+    monkeypatch.setattr(handover.admission, 'snapshot', lambda: {'total': turns['count']})
+    # LLM: 仅冻结进程切换前的真实阶段观察，等待回合时不得已关闭工具门。
+    # 函数用途: 把turn_wait交给后台片继续，并核对下一阶段已完成日志。
+    def progress(_agent, event, facts):
+        if event != 'gateway_restart_draining':
+            return
+        phases.append(facts['phase'])
+        if facts['phase'] == 'turn_wait':
+            assert facts['active_turns'] == foreground + 1
+            assert not restart_gate.tool_gate_closed()
+            turn_wait.set()
+        else:
+            assert logged.is_set() and shutdown.active_slice_count() == 0
+    # LLM: 隔离后台片先安排重启，再经真实工具门写日志；异常交回主测试，不留停车线程。
+    # 函数用途: 模拟isolated定时回合顺序完成重启请求和最后的run_command副作用。
+    def scheduled_slice():
+        try:
+            with shutdown.observe(None):
+                assert RestartGatewayTool(agent).execute({'reason': '定时维护'}).ok
+                ready.set()
+                assert turn_wait.wait(3)
+                with restart_gate.tool_execution_admission() as admitted:
+                    assert admitted
+                    subprocess.run([sys.executable, '-c', 'import sys;open(sys.argv[1],"a").write("done\\n")', str(log)],
+                                   check=True, timeout=2)
+                logged.set()
+                turns['count'] = 0
+        except BaseException as exc:
+            errors.append(exc)
+            ready.set()
+    monkeypatch.setattr(handover, 'log_gateway_event', progress)
+    worker = threading.Thread(target=scheduled_slice)
+    worker.start()
+    try:
+        assert ready.wait(3) and not errors
+        report = handover.drain_for_requested_restart(context, {'pid': os.getpid()})
+        assert report['restart']['active_turns_at_exit'] == 0
+        assert log.read_text() == 'done\n' and not errors
+        assert phases == ['turn_wait', 'tool_drain']
+    finally:
+        service.reset_restart_drain_state()
+        turn_wait.set()
+        worker.join(5)
+    assert not worker.is_alive() and not errors
+
+
+# LLM: 长工具仍真实持有准入；restart按配置强制并保留计数，stop_for_update无论开关都必须取消。
+# 函数用途: 验证强制超时标记/事件透传、默认策略及离线更新的非强制边界。
+@pytest.mark.parametrize('operation,force,expected', [
+    ('restart', True, True), ('restart', None, True), ('restart', False, False), ('stop_for_update', True, False),
+])
+def test_incident_handover_force_timeout_metadata(tmp_path, monkeypatch, operation, force, expected):
+    paths = _paths(tmp_path)
+    config = SimpleNamespace(gateway_restart_turn_wait_seconds=0, gateway_restart_drain_timeout_seconds=.01)
+    if force is not None:
+        config.gateway_restart_force_on_drain_timeout = force
+    agent = SimpleNamespace(config=config)
+    context = SimpleNamespace(paths=paths, agent=agent, process_started_at=1)
+    service.submit_restart_request(paths, target_pid=os.getpid(), requester={}, reason='r',
+                                   cooldown_seconds=0, operation=operation)
+    events, entered, release = [], threading.Event(), threading.Event()
+    monkeypatch.setattr(handover, 'log_gateway_event', lambda _a, event, facts: events.append((event, facts)))
+    # LLM: 在真实工具准入中停住线程，直到主测试读完超时结果才退出，不执行外部业务。
+    # 函数用途: 确保超时当刻确实还有一个工具未退。
+    def long_tool():
+        with restart_gate.tool_execution_admission():
+            entered.set()
+            release.wait(5)
+    worker = threading.Thread(target=long_tool)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        result = handover.drain_for_requested_restart(context, {'pid': os.getpid()})
+        assert restart_gate.executing_tool_count() == 1
+        if expected:
+            marker = read_json_file(service.restart_completed_path(paths))
+            assert result['restart'] == marker
+            assert marker['forced_after_drain_timeout'] is True and marker['executing_tools_at_exit'] == 1
+            assert restart_gate.tool_gate_closed() and service.restart_phase()['phase'] == 'exiting'
+            assert events[-1][0] == 'gateway_restart_drained'
+            assert events[-1][1]['forced_after_drain_timeout'] is True
+            assert events[-1][1]['executing_tools_at_exit'] == 1
+        else:
+            assert result is None and not service.restart_completed_path(paths).exists()
+            assert not restart_gate.tool_gate_closed()
+            assert events[-1][1]['reason'] == 'drain_timeout'
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+
+
+# LLM: 停止可在回合等待、关闭门、进度回调或等待返回时到达，均应优先撤销并恢复一致状态。
+# 函数用途: 验证tool_drain前后及两种等待结果的停止竞态。
+@pytest.mark.parametrize('stop_at', ['turn_wait', 'close', 'tool_drain', 'wait_success', 'wait_timeout'])
+@pytest.mark.parametrize('force', [False, True])
+def test_incident_stop_requested_at_drain_boundaries(monkeypatch, stop_at, force):
+    stopping, waited = {'value': False}, []
+    original_close = service.close_tool_gate
+    # LLM: 保留真实关门动作，只注入关门时到达的停止事实。
+    # 函数用途: 捕获关闭门与第二次停止检查之间的竞态。
+    def close():
+        original_close()
+        stopping['value'] = stop_at == 'close'
+    # LLM: 只通过原进度回调注入停止，不替换排空状态机。
+    # 函数用途: 覆盖第一段和第二段开始处的停止信号。
+    def progress(facts):
+        if facts['phase'] == stop_at:
+            stopping['value'] = True
+    # LLM: 模拟等待成功/超时的同刻出现停止，不能让成功或强制分支覆盖停止。
+    # 函数用途: 固定复现等待返回后的停止优先级。
+    def wait(_timeout):
+        waited.append(True)
+        stopping['value'] = True
+        return stop_at != 'wait_timeout'
+    monkeypatch.setattr(service, 'close_tool_gate', close)
+    monkeypatch.setattr(service, 'wait_until_no_executing_tools', wait)
+    result = service.run_restart_drain({'request_id': 'stop-case'}, active_turns=lambda: 0,
+                                      turn_wait_seconds=0, drain_timeout_seconds=1,
+                                      force_on_drain_timeout=force,
+                                      stop_requested=lambda: stopping['value'], on_progress=progress)
+    assert result == {'ok': False, 'reason': 'stop_requested', 'request_id': 'stop-case'}
+    assert service.restart_phase()['phase'] == 'idle' and not restart_gate.tool_gate_closed()
+    assert bool(waited) == stop_at.startswith('wait_')
+
+
+# LLM: 排空返回成功与handover复核之间到达停止也必须开门复位，不能留下exiting但取消标记。
+# 函数用途: 验证完成排空后抢先到达的停止请求仍优先于重启。
+def test_incident_stop_arriving_after_drain_reopens_gate(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    context = SimpleNamespace(paths=paths, agent=_cli_agent(), process_started_at=1)
+    service.submit_restart_request(paths, target_pid=os.getpid(), requester={}, reason='r', cooldown_seconds=0)
+    monkeypatch.setattr(handover, 'log_gateway_event', lambda *_args: None)
+    monkeypatch.setattr(handover, 'stop_request_targets_process', lambda *_args, **_kwargs: True)
+    # LLM: 执行真实排空，随后注入原停止文件；不伪造成功或替换工具门。
+    # 函数用途: 固定重现两层停止复核之间的竞态。
+    def drain(*args, **kwargs):
+        result = service.run_restart_drain(*args, **kwargs)
+        paths.stop_request.write_text('{}')
+        return result
+    monkeypatch.setattr(handover, 'run_restart_drain', drain)
+    assert handover.drain_for_requested_restart(context, {'pid': os.getpid()}) is None
+    assert service.restart_phase()['phase'] == 'idle' and not restart_gate.tool_gate_closed()
+    assert not service.restart_completed_path(paths).exists()

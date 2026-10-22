@@ -396,14 +396,41 @@ def _append_allowlist_symlink_aliases(argv: list[str], spec: SandboxSpec) -> Non
 # LLM: 只比较POSIX词法字符串，不resolve别名，不通过高频ValueError判断普通不包含。
 # 函数用途: 快速判断挂载路径层级，区分兄弟前缀、相对路径和双斜杠根。
 def _lexically_within(path: Path, root: Path) -> bool:
-    sp, sr = str(path), str(root)
+    return _str_lexically_within(os.fspath(path), os.fspath(root))
+
+
+# LLM: 纯字符串词法包含判断，语义与 _lexically_within 完全一致，避免高频构造或转换 Path 对象。
+# 函数用途: 直接在 POSIX 路径字符串上判断层级包含关系。
+def _str_lexically_within(sp: str, sr: str) -> bool:
+    if sp == sr:
+        return True
     if sr == '/':
         return sp.startswith('/') and not sp.startswith('//')
     if sr == '//':
         return sp.startswith('//')
     if sr == '.':
-        return not path.is_absolute()
-    return sp == sr or sp.startswith(sr + '/')
+        return not sp.startswith('/')
+    return sp.startswith(sr) and sp[len(sr):len(sr) + 1] == '/'
+
+
+# LLM: 纯字符串词法祖先序列，与 tuple(str(p) for p in Path(s).parents) 严格等价，不触发 pathlib 对象分配。
+# 函数用途: 返回 POSIX 路径字符串的全部词法父路径字符串。
+def _str_parents(s: str) -> tuple[str, ...]:
+    if s in ("/", "//", ".", ""):
+        return ()
+    res: list[str] = []
+    if s.startswith("//") and not s.startswith("///"):
+        root, prefix, body = "//", "//", s[2:].strip("/")
+    elif s.startswith("/"):
+        root, prefix, body = "/", "/", s.lstrip("/")
+    else:
+        root, prefix, body = ".", "", s.strip("/")
+    while "/" in body:
+        body = body.rsplit("/", 1)[0].rstrip("/")
+        if body:
+            res.append(prefix + body)
+    res.append(root)
+    return tuple(res)
 
 
 # LLM: 整根只读后再挂新的 /dev、/proc，最后逐个可写绑定 write_roots；受保护只读路径最后覆盖。不挂私有 /tmp：
@@ -587,25 +614,85 @@ def prune_transient_bwrap_sidecar_mounts(argv: list[str], stderr: str) -> list[s
 # LLM: 缺失项快跳；瞬时侧车try-bind容忍exec前删除，持久路径仍硬RO；列表追加同次投影，有效同源硬RO祖先才覆盖去重，不跨调用缓存权限。
 # 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略精确或祖先仍生效的重复挂载。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
-    seen: set[Path] = set()
+    seen: set[str] = set()
     mounts: list[_MountProjection] = list(_mount_snapshot(argv))
+    latest_at_target: dict[str, int] = {}
+    latest_in_subtree: dict[str, int] = {}
+    for idx, mount in enumerate(mounts):
+        _record_mount_overlap_index(os.fspath(mount.target), idx, latest_at_target, latest_in_subtree)
+    resolved_parents: dict[Path, Path] = {}
     for raw in paths:
         try:
             path = Path(raw).expanduser()
-            if not path.exists() and not path.is_symlink():
-                continue
-            path = path.resolve(strict=False)
+            st = path.lstat()
+            if stat.S_ISLNK(st.st_mode):
+                path = path.resolve(strict=False)
+                if not path.exists():
+                    continue
+            else:
+                parent = path.parent
+                resolved_parent = resolved_parents.get(parent)
+                if resolved_parent is None:
+                    resolved_parent = parent.resolve(strict=False)
+                    resolved_parents[parent] = resolved_parent
+                path = resolved_parent / path.name if path.name else resolved_parent
         except (OSError, RuntimeError):
             continue
-        if path in seen or not path.exists():
+        path_str = os.fspath(path)
+        if path_str in seen:
             continue
-        seen.add(path)
+        seen.add(path_str)
         flag = '--ro-bind-try' if _is_ephemeral_readonly_sidecar(path) else '--ro-bind'
-        arguments = (flag, str(path), str(path))
-        if _readonly_mount_unchanged(path, arguments, mounts):
+        arguments = (flag, path_str, path_str)
+        if _readonly_mount_unchanged_indexed(path_str, arguments, mounts, latest_at_target, latest_in_subtree):
             continue
         argv.extend(arguments)
+        idx = len(mounts)
         mounts.append(_MountProjection(path, path, arguments=arguments))
+        _record_mount_overlap_index(path_str, idx, latest_at_target, latest_in_subtree)
+
+
+# LLM: 仅在单次只读挂载追加循环内维护目标与祖先最新下标，等价于逆序扫描完整挂载列表的首个词法交叠项。
+# 函数用途: 记录一条挂载在当前挂载表中的精确位置与祖先子树位置，避免成千路径逐条逆序全表扫描。
+def _record_mount_overlap_index(
+    target_str: str,
+    index: int,
+    latest_at_target: dict[str, int],
+    latest_in_subtree: dict[str, int],
+) -> None:
+    latest_at_target[target_str] = index
+    latest_in_subtree[target_str] = index
+    for parent_str in _str_parents(target_str):
+        latest_in_subtree[parent_str] = index
+
+
+# LLM: 按精确/子树最新下标直接定位与 _readonly_mount_unchanged 逆序扫描完全一致的首个交叠挂载。
+# 函数用途: 用路径深度级查表判断只读保护路径是否已被同次挂载覆盖且未发生子挂载变更。
+def _readonly_mount_unchanged_indexed(
+    path_str: str,
+    arguments: tuple[str, str, str],
+    mounts: Sequence[_MountProjection],
+    latest_at_target: dict[str, int],
+    latest_in_subtree: dict[str, int],
+) -> bool:
+    idx = latest_in_subtree.get(path_str, -1)
+    for parent_str in _str_parents(path_str):
+        parent_idx = latest_at_target.get(parent_str, -1)
+        if parent_idx > idx:
+            idx = parent_idx
+    if idx < 0:
+        return False
+    mount = mounts[idx]
+    target_str = os.fspath(mount.target)
+    if target_str == path_str and mount.arguments == arguments:
+        return True
+    return (
+        arguments == ("--ro-bind", path_str, path_str)
+        and _str_lexically_within(path_str, target_str)
+        and not mount.writable
+        and not mount.alias
+        and mount.arguments == ("--ro-bind", target_str, target_str)
+    )
 
 
 # LLM: 只去重精确原参或同源硬RO祖先；逆序遇首个交叠后停止，后发RW、异源RO、alias或空覆盖均不能证明子树未变。
@@ -914,10 +1001,48 @@ def _empty_mount_arguments(argv: list[str], index: int) -> tuple[str, ...]:
     return tuple(argv[index:end])
 
 
+_LAST_MOUNT_LOOKUP_INDEX: tuple[
+    tuple[_MountProjection, ...],
+    dict[str, tuple[int, _MountProjection]],
+    tuple[_MountProjection, ...],
+] | None = None
+
+
+# LLM: 仅为同一不可变挂载快照元组构建目标最新下标与异名挂载子表，不跨调用缓存路径权限。
+# 函数用途: 将同一轮底图快照的线性遍历转换为按路径祖先查表与异名挂载过滤。
+def _mount_lookup_index(
+    mounts: tuple[_MountProjection, ...],
+) -> tuple[dict[str, tuple[int, _MountProjection]], tuple[_MountProjection, ...]]:
+    global _LAST_MOUNT_LOOKUP_INDEX
+    cached = _LAST_MOUNT_LOOKUP_INDEX
+    if cached is not None and cached[0] is mounts:
+        return cached[1], cached[2]
+    target_map: dict[str, tuple[int, _MountProjection]] = {}
+    remap_mounts: list[_MountProjection] = []
+    for idx, mount in enumerate(mounts):
+        target_map[os.fspath(mount.target)] = (idx, mount)
+        if mount.source is not None and mount.source != mount.target:
+            remap_mounts.append(mount)
+    remapped = tuple(remap_mounts)
+    _LAST_MOUNT_LOOKUP_INDEX = (mounts, target_map, remapped)
+    return target_map, remapped
+
+
 # LLM: 后发父覆盖压过旧子mount；只比较已保存的词法坐标，不能再resolve根或把骨架/symlink当新读源。
 # 函数用途: 找到最终底图覆盖一个namespace路径的有效挂载。
 def _effective_mount(path: Path, mounts: tuple[_MountProjection, ...]) -> _MountProjection | None:
-    return next((mount for mount in reversed(mounts) if _lexically_within(path, mount.target)), None)
+    target_map, _ = _mount_lookup_index(mounts)
+    path_str = os.fspath(path)
+    best_idx = -1
+    best_mount: _MountProjection | None = None
+    pair = target_map.get(path_str)
+    if pair is not None:
+        best_idx, best_mount = pair
+    for parent_str in _str_parents(path_str):
+        pair = target_map.get(parent_str)
+        if pair is not None and pair[0] > best_idx:
+            best_idx, best_mount = pair
+    return best_mount
 
 
 # LLM: 已发symlink/异名bind沿同批mount映射回host源；元数据根缺mount时只准入口冻结权威，隐藏覆盖不能变成读授权。
@@ -943,7 +1068,12 @@ def _persona_projected_source(
 # LLM: 逐段展开原名及每次readlink目标（包括..），每个symlink都按同次mount快照核父写位；不重解析授权根或扩大读写面。
 #   canonical自绑定不能防目标链目录项unlink/recreate；缺失默认路径仍可选，异常和循环失败关闭，不承诺内核bind前无竞争。
 # 函数用途: 对完整人格名称链及链接目标链中位于实际可写父目录的symlink失败关闭。
-def _reject_persona_mutable_alias(path: Path, mounts: tuple[_MountProjection, ...]) -> None:
+def _reject_persona_mutable_alias(
+    path: Path,
+    mounts: tuple[_MountProjection, ...],
+    *,
+    checked_nodes: set[Path] | None = None,
+) -> None:
     original = path.expanduser().absolute()
     parent = Path(original.anchor)
     pending = list(original.parts[1:])
@@ -954,11 +1084,16 @@ def _reject_persona_mutable_alias(path: Path, mounts: tuple[_MountProjection, ..
             parent = parent.parent
             continue
         node = parent / part
+        if checked_nodes is not None and node in checked_nodes:
+            parent = node
+            continue
         try:
             metadata = node.lstat()
         except FileNotFoundError:
             return
         if not stat.S_ISLNK(metadata.st_mode):
+            if checked_nodes is not None:
+                checked_nodes.add(node)
             parent = node
             continue
         if _persona_parent_writable(parent, mounts):
@@ -980,9 +1115,10 @@ def _persona_namespace_names(path: Path, mounts: tuple[_MountProjection, ...]) -
     source = path.resolve(strict=False)
     names = {path, source}
     pending = list(names)
+    _, remap_mounts = _mount_lookup_index(mounts)
     while pending:
         location = pending.pop()
-        for mount in mounts:
+        for mount in remap_mounts:
             if mount.source is None or not _lexically_within(location, mount.source):
                 continue
             name = mount.target / location.relative_to(mount.source)
@@ -1024,10 +1160,11 @@ def _append_persona_readonly_mounts(
         projected_root = _persona_projected_source(namespace_root, mounts_snapshot, unmounted_root=authority_root)
         if projected_root is not None and projected_root != authority_root:
             raise AgentsSourceProtectionError("PATH_AGENTS_SOURCE_PROTECTION_INVALID: changed authority root")
-        _reject_persona_mutable_alias(namespace_root, mounts_snapshot)
+        checked_alias_nodes: set[Path] = set()
+        _reject_persona_mutable_alias(namespace_root, mounts_snapshot, checked_nodes=checked_alias_nodes)
         snapshot = persona_process_protection_snapshot(authority_root, all_owners=spec.full_access)
         for item in snapshot:
-            _reject_persona_mutable_alias(item.path, mounts_snapshot)
+            _reject_persona_mutable_alias(item.path, mounts_snapshot, checked_nodes=checked_alias_nodes)
         projection = [(name, item.path.resolve(strict=False)) for item in snapshot
                       for name in _persona_namespace_names(item.path, mounts_snapshot)]
         sources = dict(projection)
@@ -1073,8 +1210,9 @@ def _append_persona_paths(
                                  expected_identity=(identities or {}).get(source))
 
 
-# LLM: 必需配置identity先复核再检查存在，失踪/替换绝不能静默跳过；无配置默认缺persona仍仅做namespace占位。
-# 函数用途: 从已批准canonical源覆盖一个保护名称，未知身份失败关闭，默认缺失控制目录只读占位。
+# LLM: 必需配置identity先复核，失踪/替换绝不能静默跳过；默认缺persona仅try-bind，禁止tmpfs挂载点在可写宿主父目录创建0755目录。
+#   缺失源由bwrap跳过，不保证保护命令运行中随后新建的目录；这里不承担宿主目录初始化或权限修复。
+# 函数用途: 保护已有canonical人格源，缺失默认目录不创建宿主占位，必需配置身份仍失败关闭。
 def _append_persona_path(
     argv: list[str], protected: Path, placeholders: list[str], *,
     source: Path | None = None, expected_identity: str | None = None
@@ -1084,7 +1222,7 @@ def _append_persona_path(
         validate_persona_source_identity(actual, expected_identity)
     if not actual.exists():
         if protected.name == "persona":
-            placeholders += ["--tmpfs", str(protected), "--remount-ro", str(protected)]
+            placeholders += ["--ro-bind-try", str(actual), str(protected)]
         return
     if actual.is_file() and actual.stat().st_nlink != 1:
         raise AgentsSourceProtectionError("persona hardlink")
@@ -1122,13 +1260,13 @@ def _persona_parent_writable(path: Path, mounts: tuple[_MountProjection, ...]) -
 # LLM: 逆序单次遍历挂载，用已覆盖的路径前缀排除影子项；成本随总路径段数增长，不逐项重扫挂载表。
 # 函数用途: 取得保持原顺序的最终有效挂载，保留异名、空覆盖和嵌套写根。
 def _effective_mounts(mounts: tuple[_MountProjection, ...]) -> tuple[_MountProjection, ...]:
-    covered: set[tuple[str, tuple[str, ...]]] = set()
+    covered: set[str] = set()
     effective = []
     for mount in reversed(mounts):
-        parts, anchor = mount.target.parts, mount.target.anchor
-        if any((anchor, parts[:end]) in covered for end in range(len(parts), -1, -1)):
+        target_str = os.fspath(mount.target)
+        if target_str in covered or any(parent in covered for parent in _str_parents(target_str)):
             continue
-        covered.add((anchor, parts))
+        covered.add(target_str)
         effective.append(mount)
     return tuple(reversed(effective))
 
@@ -1152,15 +1290,39 @@ def _remove_shadowed_mount_arguments(argv: list[str], arguments: set[tuple[str, 
 # LLM: 父挂载之后只重放同次有效子覆盖，并移除其旧影子项；不读取新授权，不改变B7及人格防rename语义。
 # 函数用途: 线性筛选并压缩重挂子边界，避免多层祖先造成平方CPU与重复挂载膨胀。
 def _append_mount_preserving_children(argv: list[str], arguments: tuple[str, ...]) -> None:
-    target = Path(arguments[2])
-    mounts = _mount_snapshot(argv)
-    shadowed = {mount.arguments for mount in mounts if mount.target != target and _lexically_within(mount.target, target)}
-    descendants = [mount for mount in _effective_mounts(mounts)
-                   if mount.target != target and _lexically_within(mount.target, target)]
+    target_str = os.fspath(Path(arguments[2]))
+    relevant: list[tuple[str, tuple[str, ...]]] = []
+    shadowed: set[tuple[str, ...]] = set()
+    for index, flag in enumerate(argv):
+        if flag in {'--bind', '--ro-bind', '--ro-bind-try', '--dev-bind', '--symlink'}:
+            m_target = os.fspath(Path(argv[index + 2])) if argv[index + 2].endswith('/') and argv[index + 2] not in ('/', '//') else argv[index + 2]
+            entry = tuple(argv[index:index + 3])
+        elif flag in {'--tmpfs', '--proc', '--dev'}:
+            m_target = os.fspath(Path(argv[index + 1])) if argv[index + 1].endswith('/') and argv[index + 1] not in ('/', '//') else argv[index + 1]
+            entry = _empty_mount_arguments(argv, index)
+        else:
+            continue
+        if _str_lexically_within(m_target, target_str):
+            relevant.append((m_target, entry))
+            if m_target != target_str:
+                shadowed.add(entry)
+        elif _str_lexically_within(target_str, m_target):
+            relevant.append((m_target, entry))
+    if not shadowed:
+        argv.extend(arguments)
+        return
+    covered: set[str] = set()
+    descendants_rev: list[tuple[str, ...]] = []
+    for m_target, entry in reversed(relevant):
+        if m_target in covered or any(parent in covered for parent in _str_parents(m_target)):
+            continue
+        covered.add(m_target)
+        if m_target != target_str and _str_lexically_within(m_target, target_str):
+            descendants_rev.append(entry)
     _remove_shadowed_mount_arguments(argv, shadowed)
     argv.extend(arguments)
-    for mount in descendants:
-        argv.extend(mount.arguments)
+    for entry in reversed(descendants_rev):
+        argv.extend(entry)
 
 
 # LLM: 严格H2隐藏只能最后生效；投影仍使用移除前的完整底图。read_only_root/hide_home允许原workspace/public重挂，不移动其隐藏。

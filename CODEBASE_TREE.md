@@ -1,3 +1,20 @@
+## 2026-10-22 线上性能归因与网关排空/卡死治理（.7 增量）
+
+```text
+|-- agent_py_agent/agent/gateway_parts/hang_diagnostics.py # Gateway 全线程栈 SIGUSR1/看门狗导出、/proc 内核等待点采集与二代 GC 暂停记录
+|-- agent_py_agent/agent/runtime_db/sqlite_scope.py # Gateway 后台单线程规划者跨拍持久 SQLite 作用域与空闲连接提交
+|-- agent_py_agent/tests/test_gateway_hang_diagnostics.py # 信号/看门狗导出、SigCgt 位校验、/proc 合成现场与 GC 阈值单测
+|-- agent_py_agent/tests/test_gateway_owner_idle_backoff.py # 多 Owner 空闲指数退避、唤醒立即复位与配置热更新单测
+|-- agent_py_agent/tests/test_gateway_receipt_directory_gate.py # InputDeliveryService 回执目录指纹跳过与过期清理单测
+|-- agent_py_agent/tests/test_model_latency_q2.py # 历史适配零深拷贝、表面指纹缓存、轮间耗时与估算/实报 token 对账单测
+|-- agent_py_agent/tests/test_persistent_planner_sqlite_scope.py # 规划持久 SQLite 作用域连接复用、WAL 快照释放与线程隔离单测
+|-- agent_py_agent/tests/test_q4_foreground_recovery_regressions.py # 前台自动恢复未知操作、通道/操作者校验与模型核实引导回归单测
+|-- agent_py_agent/tests/test_sandbox_command_overhead.py # 沙箱保护目标缓存、跨 Owner Home 只读收敛与前台进程组快速收尾单测
+`-- agent_py_agent/tests/test_scheduler_store_payload_cache.py # SchedulerRepository 磁盘快照指纹复用与损坏重新抛出单测
+```
+
+关键文件说明：`hang_diagnostics.py` 在 Gateway 失联强杀前保全 `/proc` 内核等待点、内存压力与 Python 全线程栈；`runtime_db/sqlite_scope.py` 为后台单线程规划复用跨拍连接并在拍末释放读快照。
+
 ## 2026-10-21 管理员运行治理（P3源码候选）
 
 ```text

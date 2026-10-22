@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.cache_freshness import cache_entry_trustworthy
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from ..common.heartbeat import process_start_time, start_time_relation
 from ..common.json_io import (
     append_private_jsonl_records,
@@ -82,6 +82,8 @@ _MAX_PROMPT_CHARS = 32_000
 _MAX_SKILL_REFS_COUNT = 32
 # 手动派活默认推迟 2 秒再入队：给调用方一个可确认的窗口，避免同一时刻重复派发。
 _MANUAL_DISPATCH_DELAY_SECONDS = 2.0
+_STORE_PAYLOAD_CACHE_MAX_BYTES = 4 * 1024 * 1024
+_STORE_PAYLOAD_CACHE_RECHECK_SECONDS = 60.0
 
 _LOGGER = logging.getLogger(__name__)
 _HISTORY_RUN_IDS_CACHE_MAX_PATHS = 32
@@ -104,32 +106,43 @@ class _HistoryRunIdsProjection:
 _HISTORY_RUN_IDS_CACHE: OrderedDict[str, _HistoryRunIdsProjection] = OrderedDict()
 
 
-# LLM: 固定读取已扫描位置前最多4096字节；短读或IO异常必须回退，不能冒充空锚点。
-# 函数用途: 读取历史边界锚点以验证追加前缀的末尾未变。
-def _read_history_anchor(path: Path, offset: int) -> bytes:
-    start = max(0, offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
-    with path.open("rb") as handle:
-        handle.seek(start)
-        anchor = handle.read(offset - start)
-    if len(anchor) != offset - start:
-        raise OSError("history anchor short read")
-    return anchor
+# LLM: 计算完整已扫描前缀的blake2b摘要与末尾是否为LF；短读或IO异常必须回退，不能冒充有效前缀。
+# 函数用途: 校验历史文件的完整已扫描前缀未被改写，并返回前缀摘要与换行完整标志。
+def _read_history_prefix_state(handle: Any, offset: int) -> tuple[str, bool] | None:
+    hasher = hashlib.blake2b(digest_size=16)
+    remaining = offset
+    last_byte = b"\n"
+    while remaining > 0:
+        chunk = handle.read(min(65536, remaining))
+        if not chunk:
+            return None
+        hasher.update(chunk)
+        last_byte = chunk[-1:]
+        remaining -= len(chunk)
+    return hasher.hexdigest(), last_byte == b"\n"
 
 
-# LLM: 只接受同设备/inode、增长、原完整LF边界且4096字节锚点相同的追加；任一坏行或竞态退回原全量报告器。
+# LLM: 只接受同设备/inode、增长、原完整LF边界且完整前缀摘要相同的追加；任一坏行或竞态退回原全量报告器。
 # 函数用途: 验证历史追加后只解析新增字节，返回新的不可变ID投影。
 def _extend_history_run_ids(path, stamp, cached):
     if stamp is None or stamp[2:4] != cached.stamp[2:4] or stamp[1] <= cached.offset or not cached.complete_line:
         return None
     try:
-        start = max(0, cached.offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
         with path.open("rb") as handle:
             info = os.fstat(handle.fileno())
             if (info.st_ino, info.st_dev) != stamp[2:4]:
                 return None
-            handle.seek(start)
-            anchor = handle.read(cached.offset - start)
-            if len(anchor) != cached.offset - start or _store_bytes_digest(anchor) != cached.anchor_digest:
+            hasher = hashlib.blake2b(digest_size=16)
+            remaining = cached.offset
+            last_byte = b"\n"
+            while remaining > 0:
+                chunk = handle.read(min(65536, remaining))
+                if not chunk:
+                    return None
+                hasher.update(chunk)
+                last_byte = chunk[-1:]
+                remaining -= len(chunk)
+            if last_byte != b"\n" or hasher.hexdigest() != cached.anchor_digest:
                 return None
             tail = handle.read(stamp[1] - cached.offset)
         if len(tail) != stamp[1] - cached.offset or not tail.endswith(b"\n"):
@@ -144,25 +157,26 @@ def _extend_history_run_ids(path, stamp, cached):
             added.add(str(row.get("run_id") or ""))
         if _history_file_stamp(path) != stamp:
             return None
-        digest = _store_bytes_digest((anchor + tail)[-_HISTORY_RUN_IDS_ANCHOR_BYTES:])
-        return _HistoryRunIdsProjection(stamp, stamp[1], digest, True, cached.run_ids | added)
+        hasher.update(tail)
+        return _HistoryRunIdsProjection(stamp, stamp[1], hasher.hexdigest(), True, cached.run_ids | added)
     except (OSError, UnicodeError, ValueError):
         return None
 
 
 # LLM: 坏行仍沿原报告器跳过，去重集合语义不变；损坏/缺失/读中变化只返回本次结果，不缓存。
-# 函数用途: 冷读或异常时重建历史ID，记录稳定的尾部锚点与换行边界。
+# 函数用途: 冷读或异常时重建历史ID，记录稳定的完整前缀摘要与换行边界。
 def _full_history_run_ids(path, stamp):
     report = read_jsonl_objects_report(path, context="scheduler.history.dedupe")
     ids = frozenset(str(row.get("run_id") or "") for row in report.records)
     if stamp is not None and not report.load_errors and _history_file_stamp(path) == stamp:
         try:
-            anchor = _read_history_anchor(path, stamp[1])
+            with path.open("rb") as handle:
+                prefix_state = _read_history_prefix_state(handle, stamp[1])
         except OSError:
             return ids, None
-        if _history_file_stamp(path) == stamp:
+        if prefix_state is not None and _history_file_stamp(path) == stamp:
             return ids, _HistoryRunIdsProjection(
-                stamp, stamp[1], _store_bytes_digest(anchor), not anchor or anchor.endswith(b"\n"), ids,
+                stamp, stamp[1], prefix_state[0], prefix_state[1], ids,
             )
     return ids, None
 
@@ -924,9 +938,13 @@ class _SchedulerRunOperations:
     def _runtime_snapshot_summary(self) -> tuple[int, int, int, list[str], list[str]]:
         return self._runtime_summary_from_store(self._store_snapshot())
 
-    # LLM: 原子 rename 保证读到一代完整 JSON；只读入口不获取可写锁，写方 CAS 和 quota 不经过此函数。
-    # 函数用途: 获取有界现读快照，探针被替换或损坏时重新读取原文件，不改账本或目录。
+    # LLM: 只读入口不获取写锁；可信同代时复制有界缓存，冷读仍走原no-follow探针，CAS/quota保持原入口。
+    # 函数用途: 获取完整账本快照，稳定文件省去重复读取和解析，损坏仍报告原错误。
     def _store_snapshot(self) -> dict[str, Any]:
+        stamp = _store_payload_stamp(self.store_path)
+        hit = self._store_payload_cache_hit(stamp)
+        if hit is not None:
+            return hit
         probe = _probe_store_bytes(self.store_path, digest=False)
         if probe is not None:
             try:
@@ -934,6 +952,7 @@ class _SchedulerRunOperations:
             except SchedulerStateError:
                 store = None
             if store is not None and _store_stat_key(self.store_path) == probe.stat_key:
+                self._remember_store_payload(stamp, store, len(probe.data))
                 return store
         return self._load_store_unlocked()
 
@@ -1027,6 +1046,46 @@ class _SchedulerWaitingRunOperations:
 class _SchedulerStoreSupport:
     """Private owner-store parsing, locking, quota admission, and validation support."""
 
+    # LLM: 仅同owner、可信五元stat代次、60秒非滑动期限内命中；命中仍核普通文件边界，不作为写CAS或授权。
+    # 函数用途: 返回未变化账本的深副本，不读取或重新解析store.json正文。
+    def _store_payload_cache_hit(self, stamp: tuple | None) -> dict | None:
+        lock = getattr(self, "_store_payload_cache_lock", None)
+        if lock is None or stamp is None or not cache_entry_trustworthy(stamp[3]):
+            return None
+        with lock:
+            payload = self._cached_store_payload
+            if (payload is None or stamp != self._cached_store_stamp or payload["owner"] != self.owner
+                    or time.monotonic() - self._store_payload_verified_at >= _STORE_PAYLOAD_CACHE_RECHECK_SECONDS):
+                return None
+            try:
+                if not regular_file_exists_beneath(self.root, (self.store_path.name,)):
+                    return None
+            except OSError:
+                return None
+            return deepcopy(payload)
+
+    # LLM: 仅保存读取前后五元指纹一致且离开粗时间窗的成功完整账本；每实例一代、最多4MiB原字节。
+    # 函数用途: 发布由本次原no-follow读取和校验得到的稳定账本副本。
+    def _remember_store_payload(self, stamp: tuple | None, store: dict, byte_count: int) -> None:
+        lock = getattr(self, "_store_payload_cache_lock", None)
+        if (lock is None or stamp is None or byte_count > _STORE_PAYLOAD_CACHE_MAX_BYTES
+                or byte_count != stamp[2] or not cache_entry_trustworthy(stamp[3])
+                or _store_payload_stamp(self.store_path) != stamp):
+            return
+        with lock:
+            self._cached_store_payload = deepcopy(store)
+            self._cached_store_stamp = stamp
+            self._store_payload_verified_at = time.monotonic()
+
+    # LLM: 只清进程内副本，不改权威文件；写方仍持原quota/文件锁和既有CAS。
+    # 函数用途: 成功写入账本后丢弃旧的解析缓存。
+    def _invalidate_store_payload(self) -> None:
+        lock = getattr(self, "_store_payload_cache_lock", None)
+        if lock is not None:
+            with lock:
+                self._cached_store_payload = None
+                self._cached_store_stamp = None
+
     @contextmanager
     def _mutation_scope(self) -> Iterator[tuple[dict[str, Any], OwnerQuotaAdmission]]:
         """Lock quota before the scheduler authority to keep one lock order."""
@@ -1035,11 +1094,19 @@ class _SchedulerStoreSupport:
             with locked_json_path(self.store_path):
                 yield self._load_store_unlocked(), admission
 
-    # LLM: 写方已持原锁，读方无锁；两者现读同一代 no-follow 文件，不吞权限或文件系统错误。
-    # 函数用途: 读取和校验原账本，缺失按空账本处理，坏内容提供明确错误码。
+    # LLM: 写方已持原锁，读方无锁；可信未变副本可复用，否则沿原no-follow完整读取，不吞权限或文件系统错误。
+    # 函数用途: 读取校验原账本并缓存稳定代次，缺失与坏内容保留原语义。
     def _load_store_unlocked(self) -> dict[str, Any]:
+        stamp = _store_payload_stamp(self.store_path)
+        hit = self._store_payload_cache_hit(stamp)
+        if hit is not None:
+            return hit
         content = _read_store_bytes(self.store_path)
-        return self._validate_store_unlocked({}, None) if content is None else self._load_store_from_bytes_unlocked(content)
+        if content is None:
+            return self._validate_store_unlocked({}, None)
+        store = self._load_store_from_bytes_unlocked(content)
+        self._remember_store_payload(stamp, store, len(content))
+        return store
 
     def _load_store_from_bytes_unlocked(self, data: bytes) -> dict[str, Any]:
         """从"已经读进内存的 store.json 字节"解析,语义与 _load_store_unlocked 逐字一致。
@@ -1160,6 +1227,8 @@ class _SchedulerStoreSupport:
                 _WAITING_PROJECTION_CACHE.popitem(last=False)
         return projection
 
+    # LLM: 原quota→原文件锁→历史追加→原子写顺序不变；成功写入后只失效当前实例解析缓存。
+    # 函数用途: 持久化当前owner账本并阻止后续查询使用旧副本。
     def _write_store_unlocked(
         self,
         store: dict[str, Any],
@@ -1192,6 +1261,7 @@ class _SchedulerStoreSupport:
             # 历史账本是宿主数据：私有追加（0600 文件、0700 目录），内容逐字节不变（pw2）。
             append_private_jsonl_records(self.history_path, history_rows)
         write_json_file_atomic_unlocked(self.store_path, store)
+        self._invalidate_store_payload()
 
     def _sync_due_index_unlocked(self, store: dict[str, Any]) -> None:
         if self.due_index is not None:
@@ -1567,6 +1637,8 @@ class SchedulerRepository(
 ):
     """Single owner-local facade over job, run, and store responsibilities."""
 
+    # LLM: 保留owner/quota/due-index装配；仅增加每实例有界解析副本和线程锁，不建立第二存储权威。
+    # 函数用途: 初始化原调度仓库和可失效的只读账本缓存。
     def __init__(
         self,
         root: str | Path,
@@ -1598,6 +1670,10 @@ class SchedulerRepository(
             max_bytes=0,
         )
         self.due_index = due_index
+        self._store_payload_cache_lock = threading.Lock()
+        self._cached_store_payload: dict | None = None
+        self._cached_store_stamp: tuple | None = None
+        self._store_payload_verified_at = 0.0
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
         ensure_private_dir(self.root)
 
@@ -1656,6 +1732,16 @@ class _StoreBytesProbe:
     digest: str
     data: bytes
     trusted_at_read: bool = False
+
+
+# LLM: 读取前即冻结可信窗口；ctime检测恢复mtime的同尺寸写，lstat不跟随文件链接，异常沿原读口保留。
+# 函数用途: 获取账本解析缓存使用的完整文件代次。
+def _store_payload_stamp(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        status = path.stat(follow_symlinks=False)
+        return cache_stat_signature(status) if cache_entry_trustworthy(status.st_mtime_ns) else None
+    except OSError:
+        return None
 
 
 def _store_stat_key(path: Path) -> tuple[int, int, int, int] | None:

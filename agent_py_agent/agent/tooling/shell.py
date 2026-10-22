@@ -110,6 +110,8 @@ _OWNER_SANDBOX_BOUNDARY_HINT = (
 _ACCESS_MODE_RANK = {"restricted": 0, "workspace-write": 1, "full-access": 2}
 _TOOL_DEADLINE_UNIX_ENV = "MY_AGENT_TOOL_DEADLINE_UNIX"
 _TOOL_DEADLINE_MARGIN_SECONDS_ENV = "MY_AGENT_TOOL_DEADLINE_MARGIN_SECONDS"
+# Gateway启动器的malloc调优仅属于Gateway，不应改变用户业务进程的分配器策略。
+_GATEWAY_ONLY_MALLOC_ENV_VARS = ("MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "MallocLargeCache")
 _INTERNAL_AGENT_PATH_RE = re.compile(
     r"(?P<prefix>(?:^|[\s'\";|&])(?:\S*/)?tasks/\S+/work/agents(?:/|\b)|(?:^|[\s'\";|&])work/agents(?:/|\b))",
     re.I,
@@ -445,7 +447,7 @@ def _command_display(result: subprocess.CompletedProcess[str]) -> dict[str, obje
 # hidden_roots 是沙箱拒读的宿主根：宿主 HOME 落在其中时改指到 owner home（见 _redirected_home）。
 # sandboxed=True（只给真的进了 attempt 沙箱的命令：前台、后台、PTY）时设 H3 的“宿主状态只读”标记，否则去掉继承来的同名变量。
 # 凭据擦洗对所有权限档生效；宿主来源名不是模型参数，full-access 的文件访问范围保持原合同。
-# 函数用途: 构造 shell 子进程环境，并把普通缓存及 npm 缓存安全地放进任务持久临时区。
+# 函数用途: 构造子进程环境，剥离Gateway分配器调优并把缓存安全地放进任务持久临时区。
 def _subprocess_text_env(
     owner_home: object = None, *, hidden_roots: tuple[str, ...] = (), sandboxed: bool = False,
     host_credential_env_names: frozenset[str] = frozenset(),
@@ -453,6 +455,8 @@ def _subprocess_text_env(
     from ..path_access_policy import HOST_STATE_READ_ONLY_ENV
 
     env = dict(os.environ)
+    for name in _GATEWAY_ONLY_MALLOC_ENV_VARS:
+        env.pop(name, None)
     env.setdefault("PYTHONIOENCODING", "utf-8")
     # ptyleak 根因（2026-10-05）：PTY 里 git 等命令看到 TTY 就起分页器等按键，命令永不退出、
     # 会话永不被回收（真机实锤：git grep 挂 9 小时）。这里默认禁用分页；宿主环境已显式设置的
@@ -517,8 +521,9 @@ _MAX_BG_LOG_BYTES = (
 )
 # 进程管道排空超时 2 秒：收尾时防止子进程输出把管道堵死。
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
-# 前台命令退出探测间隔 0.25 秒：平衡退出响应速度与轮询开销。
-_FOREGROUND_EXIT_PROBE_SECONDS = 0.25
+# EOF后的退出复探从2ms指数退避到50ms，既不盲等短命令，也不忙轮询长存活父进程。
+_FOREGROUND_EXIT_PROBE_SECONDS = 0.05
+_FOREGROUND_EXIT_PROBE_INITIAL_SECONDS = 0.002
 
 
 # LLM: 前台和后台共用原终止实现；前台传入启动时冻结的出生身份，不能凭旧 PID 或函数被调用就宣称清理成功。
@@ -534,7 +539,7 @@ def _process_output_text(value: str | bytes | None) -> str:
 
 
 # LLM: 前台宿主与沙箱共用采集和终止；从启动冻结出生身份，管道 EOF 后也不能先 poll，必须先清理可验证的原组。
-# EOF 后父仍活时限制内核探测频率；取消与 deadline 继续每轮检查，不把短期探测变成持久轮询器。
+# EOF后从2ms指数退避至50ms，单次休眠不超20ms；取消与deadline每轮检查，不能将EOF视为进程退出。
 # 函数用途: 等待命令与管道完成并收回前台后代；保留原退出码、有限输出及独立清理回执，联测 foreground/orphan cleanup。
 def _communicate_process(
     proc: subprocess.Popen[str],
@@ -546,6 +551,7 @@ def _communicate_process(
     birth_token = capture_process_birth_token(proc.pid) if os.name != "nt" else None
     capture = ProcessOutputCapture(proc)
     next_exit_probe = 0.0
+    probe_interval = _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS
     with register_cancellation_callback(lambda: _kill_process_group(proc, birth_token)):
         while True:
             if is_interrupted() or cancellation_requested():
@@ -561,9 +567,11 @@ def _communicate_process(
                 error.capture = facts
                 raise error
             code, termination = None, None
-            if capture.done() and time.monotonic() >= next_exit_probe:
+            done = capture.done()
+            if done and time.monotonic() >= next_exit_probe:
                 code, termination = finish_foreground_process(proc, expected_birth_token=birth_token)
-                next_exit_probe = time.monotonic() + _FOREGROUND_EXIT_PROBE_SECONDS
+                next_exit_probe = time.monotonic() + probe_interval
+                probe_interval = min(_FOREGROUND_EXIT_PROBE_SECONDS, probe_interval * 2)
             if code is not None:
                 out, err, facts = capture.result()
                 if cancellation_requested():
@@ -572,7 +580,8 @@ def _communicate_process(
                 result.capture = facts
                 result.termination = termination
                 return result
-            time.sleep(min(0.02, remaining))
+            wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.02
+            time.sleep(max(0.0, min(0.02, remaining, wait)))
 
 
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。

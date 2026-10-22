@@ -877,8 +877,8 @@ def test_process_completion_preserves_patched_status_contract(tmp_path, monkeypa
     assert calls == ['bg-churn', 'bg-churn']
 
 
-# LLM: 验证后台线程规划阶段受 sqlite_connection_reuse 配置控制并在提交前释放连接作用域。
-# 函数用途: 确认启用 sqlite_connection_reuse 时复用单连接且异常隔离，关闭时不强制开启复用。
+# LLM: 规划连接按owner跨拍复用，但提交前必须解除Context；异常隔离、关闭开关和停机均不能泄漏物理连接。
+# 函数用途: 验证连续两拍只建每owner一条连接，直到停机或禁用复用才关闭。
 @pytest.mark.parametrize('failure_stage', ['', 'prepare', 'ready'])
 def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure_stage):
     from agent_py_agent.agent.io import sqlite_scope
@@ -948,15 +948,24 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
     assert len(connections) == 2
     assert submitted_scopes == [None]
     assert sqlite_scope._SQLITE_ACTIVE_SCOPE.get() is None
-    assert failures == ([failure_stage] if failure_stage else [])
-    for connection in connections:
-        with pytest.raises(sqlite3.ProgrammingError):
-            connection.execute('SELECT 1')
+    supervisor._submit_ready_thread_ticks()
+    assert len(connections) == 2
+    assert submitted_scopes == [None, None]
+    assert failures == ([failure_stage, failure_stage] if failure_stage else [])
+    retained = list(connections)
+    for connection in retained:
+        assert connection.execute('SELECT 1').fetchone()[0] == 1
     if not failure_stage:
         supervisor._base_agent.config.sqlite_connection_reuse = False
         connections.clear()
         supervisor._submit_ready_thread_ticks()
         assert len(connections) == 44
+    supervisor._shutdown_control = SimpleNamespace(stop=lambda: None, wait=lambda: None)
+    supervisor._executor = supervisor._curator_executor = None
+    supervisor.shutdown()
+    for connection in retained:
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute('SELECT 1')
 
 
 def test_process_completion_status_patch_before_import_is_not_bypassed():

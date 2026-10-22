@@ -533,6 +533,14 @@ gateway_request_max_attempts: 2
 sqlite_connection_reuse: true
 # 后台检查只缓存可重建内容投影，实际到期、领取和状态写入仍走原权威；默认开启，可显式 false 关闭。
 background_tick_cheap_checks: true
+# 后台主代理车道对没有任何待办信号的空闲 owner 采用指数退避检查的最大间隔秒数（0 表示不退避，每拍都查）。
+background_idle_owner_max_backoff_seconds: 10.0
+# 前台用户主动发新消息时，若上一轮异常中断留下未确认（unknown）的副作用操作，是否自动登记为待核实并继续本轮（同时提醒模型先核实外部结果）。设为 false 则恢复手动 /recover 阻塞。
+foreground_unknown_auto_recover: true
+# Full Access 模式下对同一宿主其它 owner 目录的沙箱挂载方式：
+# - "read_only"（默认）：将 owners 根目录作为单条只读挂载、仅放开当前 owner 可写，消除多 owner 场景下每条命令数百个挂载点的固定沙箱开销。
+# - "isolate"：逐个把其它 owner 目录挂载为空 tmpfs 完全隐藏。
+sandbox_full_access_other_owner_homes: "read_only"
 # 模型接口临时故障（响应流未完整结束、自动重试总时长用尽）导致回合失败时，自动重排续跑的最大次数。
 # 0 表示关闭；每个请求跨 Gateway 重启累计，用满后按失败收口（发“继续”可以手动接着做）。
 # 只对已有完成工具往返的回合生效：重排从已落盘历史继续，不重放工具，退避 30/120 秒。
@@ -574,9 +582,11 @@ gateway_ready_timeout_seconds: 3
 # - gateway_restart_cooldown_seconds：两次安全重启之间的最短间隔秒数，0 表示不限。
 #   另有固定防循环：同一会话 10 分钟内最多安排 3 次重启。
 gateway_restart_turn_wait_seconds: 300
-# 安全重启第二段最多等执行中的副作用工具跑完多少秒，超时就取消这次重启、恢复正常服务，不强杀任何工具；0 表示不限。
+# 安全重启第二段最多等执行中的副作用工具跑完多少秒；0 表示不限。
 # 长任务多、希望重启更温和时可以调大。
 gateway_restart_drain_timeout_seconds: 600
+# 安全重启第二段等待超时后，是否仍强制交接换新进程（默认 true，防止极少数卡死工具导致每日定时重启连续失效；设为 false 则超时取消本次重启）。
+gateway_restart_force_on_drain_timeout: true
 # 两次安全重启 Gateway 之间必须间隔的最少秒数。
 # 用来防止反复重启形成死循环；冷却期内提交的重启请求会被直接拒绝并提示正在冷却。
 # 只有你觉得重启太频繁或希望更快地连续重启时才需要调整；写成 `0` 表示不设冷却间隔。

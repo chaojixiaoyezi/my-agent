@@ -86,6 +86,7 @@ _BASE_RUNTIME_SQL = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_task_run ON agent_runs(task_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_parent ON agent_runs(parent_agent_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
     """
     CREATE TABLE IF NOT EXISTS agent_attempts (
         attempt_id TEXT PRIMARY KEY,
@@ -395,7 +396,12 @@ _RUNTIME_MIGRATION_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_wake_queue_lease ON wake_queue(status, lease_until)",
     "CREATE INDEX IF NOT EXISTS idx_task_runs_closed_at ON task_runs(closed_at)",
     "CREATE INDEX IF NOT EXISTS idx_agent_runs_run_id ON agent_runs(run_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_runs_current_attempt ON agent_runs(current_attempt_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_attempts_status_ended ON agent_attempts(status, ended_at)",
     "CREATE INDEX IF NOT EXISTS idx_tool_operations_status ON tool_operations(status)",
+    "CREATE INDEX IF NOT EXISTS idx_resource_locks_attempt ON resource_locks(attempt_id)",
+    "CREATE INDEX IF NOT EXISTS idx_runtime_events_task_run ON runtime_events(task_run_id, seq)",
+    "CREATE INDEX IF NOT EXISTS idx_resource_mutations_state ON resource_mutations(state)",
 )
 
 

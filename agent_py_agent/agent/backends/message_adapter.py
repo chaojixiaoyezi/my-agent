@@ -56,13 +56,15 @@ def is_applied_compact_summary(item: object) -> bool:
     return isinstance(item, CompactionSummary) and item.source == "applied_compact"
 
 
-# LLM: applied 摘要固定在已结束历史前；其余 IR 按时间原样转换，工具与推理整对保留；不改源或持久状态。
-# 函数用途: 为主请求、容量估算和再次压缩提供唯一布局，避免同代跨回合重排。
-def project_native_history_messages(history: object, prior_messages: object = ()) -> list[dict[str, Any]]:
+# LLM: applied摘要固定在历史前；默认深拷贝prior保护真实出站。copy_prior=False仅给只读计量/指纹，嵌套对象可能共享，调用方不得修改。
+# 函数用途: 共用唯一消息布局，让只读消费者省去历史深拷贝，保持默认发送隔离和孤儿清扫。
+def project_native_history_messages(
+    history: object, prior_messages: object = (), *, copy_prior: bool = True,
+) -> list[dict[str, Any]]:
     items = list(history or ())
     prefix = [item for item in items if is_applied_compact_summary(item)]
     current = [item for item in items if not is_applied_compact_summary(item)]
-    prior = [deepcopy(item) for item in list(prior_messages or ()) if isinstance(item, dict)]
+    prior = [deepcopy(item) if copy_prior else item for item in list(prior_messages or ()) if isinstance(item, dict)]
     adapter = AnthropicMessageAdapter()
     return strip_orphaned_tool_blocks([*adapter.to_provider_messages(prefix), *prior, *adapter.to_provider_messages(current)])
 

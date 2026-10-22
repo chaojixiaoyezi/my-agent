@@ -106,3 +106,31 @@ def test_direct_handler_rejects_ordinary_group_and_child_without_writing(tmp_pat
     finally:
         restore_current_subagent_context(admin, old)
     assert not service.restart_request_path(gateway_paths(admin)).exists()
+
+
+# LLM: 经canonical执行器核实重启请求不占真实工具门、不写tool_operations；仅在临时目录写请求，不重启。
+# 函数用途: 验证管理员重启控制工具绕过副作用排空计数与操作账，但确实提交请求。
+def test_incident_restart_control_bypasses_tool_gate_and_operation_ledger(tmp_path, monkeypatch):
+    from agent_py_agent.agent.concurrency import restart_gate
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.tooling import gateway_restart_tool as module
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    monkeypatch.setenv(service.HOSTING_GATEWAY_PID_ENV, str(os.getpid()))
+    agent = _agent(tmp_path)
+    store = LocalStore(tmp_path / 'operations.db', enable_fts=False)
+    observed = []
+    original = module.submit_restart_request
+    # LLM: 包装原请求写者只记录入口工具计数，不替换其持久请求逻辑。
+    # 函数用途: 检查handler执行期间也没有计入待排空工具。
+    def submit(*args, **kwargs):
+        observed.append(restart_gate.executing_tool_count())
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, 'submit_restart_request', submit)
+    outcome = execute_canonical_test_call(tmp_path, tools={'restart_gateway': RestartGatewayTool(agent)},
+                                        tool_name='restart_gateway', arguments={'reason': '定时维护'},
+                                        operation_store=store, operation_store_required=True).result
+    assert outcome.ok, outcome.content
+    assert observed == [0], 'restart工具不能占用被自己排空的工具计数'
+    assert store.list_tool_operations(owner_id='test-owner') == []
+    assert service.pending_restart_request(gateway_paths(agent), pid=os.getpid()) is not None

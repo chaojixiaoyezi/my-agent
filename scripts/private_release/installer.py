@@ -242,6 +242,7 @@ def cleanup_orphan_background_processes(prefix: Path, *, timeout: float = 5.0) -
 
 
 # LLM: 启动入口固定解析安装记录；数据与配置是持久路径，-B 显式禁止隔离解释器在不可变版本写缓存。
+#   默认注入 glibc 低碎片 Arena/Trim 阈值与 macOS MallocLargeCache=0，防止多线程大 JSON 解析后常驻内存虚高。
 # 函数用途: 生成可在任意工作目录调用的启动器，用户的 HOME 不参与后续升级目标选择。
 def launcher_text(prefix: Path) -> str:
     quoted = shlex.quote(str(prefix))
@@ -255,6 +256,9 @@ export TMPDIR="$prefix/data/tmp"
 export XDG_CACHE_HOME="$prefix/data/cache"
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUTF8=1
+export MALLOC_ARENA_MAX="${{MALLOC_ARENA_MAX:-2}}"
+export MALLOC_TRIM_THRESHOLD_="${{MALLOC_TRIM_THRESHOLD_:-131072}}"
+export MallocLargeCache="${{MallocLargeCache:-0}}"
 export PATH="$release/runtime/bin:$PATH:$release/native"
 if [ -z "${{SSL_CERT_FILE:-}}" ]; then
   if [ -f /etc/ssl/certs/ca-certificates.crt ]; then export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

@@ -14,6 +14,7 @@ tests, and runtime entrypoints all target the same command surface.
 """
 
 import argparse
+import faulthandler
 import json
 import os
 import signal
@@ -389,10 +390,7 @@ def _unidentified_stale_attempts(repo: object) -> list[str]:
         return []
 
 
-# LLM: Gateway setup is the single startup mutation boundary. It rejects an overlapping live
-# generation before touching state, then recovers durable queue claims and publishes startup facts.
-# A fresh safe-restart marker (consumed before recovery) makes recovery resume turns without delay and
-# triggers the requester continuation after recovery.
+# LLM: setup先拒绝重叠活代再恢复持久请求；starting沿原路径原子发布，原安全重启标记仍先于恢复消费。
 # 函数用途: 先阻止两个 Gateway 重叠运行，再创建目录、调和崩溃遗留（安全重启接班时立即续跑）并写入 starting 状态。
 def _cmd_gateway_run_setup(agent, paths):
     pid = os.getpid()
@@ -413,7 +411,7 @@ def _cmd_gateway_run_setup(agent, paths):
     requeued = recovery["requeued"]
     attempt_recovery = _recover_gateway_stale_attempts(agent)
     write_pid_record(paths.pid)
-    write_json_file(
+    write_json_file_atomic(
         paths.state,
         {
             "status": "starting",
@@ -498,7 +496,7 @@ def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
     # 就认定网关就绪。若在 HTTP bind 之前启动 heartbeat 线程，绑定失败崩溃时
     # start 会对一个已死的网关谎报成功（旧时序：heartbeat 先写 running，再 bind）。
     heartbeat_thread.start()
-    write_json_file(paths.state, _build_run_state(request, pid))
+    write_json_file_atomic(paths.state, _build_run_state(request, pid))
     log_gateway_event(agent, "gateway_run_running", _build_run_payload(request, pid))
     print(
         "[gateway-run] "
@@ -750,7 +748,7 @@ def _record_surviving_background_sessions_state(paths: GatewayPaths, cleanup: di
         "surviving_background_sessions": int(cleanup.get("surviving_background_sessions") or 0),
         "updated_at": time.time(),
     }
-    write_json_file(paths.state, payload)
+    write_json_file_atomic(paths.state, payload)
 
 
 # LLM: The context identity is captured before startup mutations. Tests/legacy embedders that did
@@ -790,12 +788,41 @@ def _run_gateway_service_loop(context: GatewayRunContext) -> object:
         time.sleep(0.25)
 
 
-# LLM: SIGTERM/SIGINT 不得再表现成“Python 正常消失”；handler 只写一份小型结构化停止请求，
-# 让现有 watch stop_file 路径负责退出和 drain。它不猜信号发送者，也不在 handler 里跑重诊断。
-#   停止请求的目标身份用启动时记下的本代身份（与 _run_gateway_service_loop 比对的是同一份），不在 handler 里现算。
-# 函数用途: 安装网关信号处理器并返回原 handler，调用方在退出后必须恢复以免污染测试/嵌入运行。
+# LLM: 仅进程内保存原handler及同代公告目标，兼容原字典调用方；不增加持久生命周期权威。
+# 类用途: 让恢复函数能先撤销诊断公告，再注销本次安装的SIGUSR1。
+class _GatewaySignalHandlers(dict[int, object]):
+    # LLM: 参数来自本次真实Gateway上下文；不由磁盘补造身份，不安装信号。
+    # 函数用途: 记录当前网关诊断注册的恢复资料。
+    def __init__(self, paths: GatewayPaths, identity: dict[str, object]) -> None:
+        super().__init__()
+        self.paths, self.identity = paths, dict(identity)
+        self.diagnostic_published = False
+
+
+# LLM: 公告只是同代SIGUSR1注册事实，不授健康或停止权；state必须已绑定本代，原子写失败保守拒发。
+# 函数用途: 在原状态中发布或撤销栈信号已注册标记。
+def _publish_gateway_diagnostic_signal(previous: _GatewaySignalHandlers, enabled: bool) -> bool:
+    report = read_json_file_report(previous.paths.state, context="gateway.diagnostics.publish.read")
+    state = report.payload or {}
+    if report.load_error is not None:
+        return False
+    if state.get("process_identity") != previous.identity or state.get("pid") != previous.identity.get("pid"):
+        return not enabled
+    try:
+        write_json_file_atomic(previous.paths.state, {**state, "diagnostic_sigusr1": enabled})
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+# LLM: TERM/INT只写绑定启动原身份的停止请求；USR1只在faulthandler注册成功后公告，不向旧版盲发。
+# 函数用途: 安装停止处理及全线程栈导出，返回原handler供原生命周期恢复。
 def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict[str, object]) -> dict[int, object]:
-    previous: dict[int, object] = {}
+    previous = _GatewaySignalHandlers(paths, process_identity)
+    try:
+        faulthandler.enable(all_threads=True)
+    except (OSError, RuntimeError, ValueError):
+        pass
 
     def handler(signum: int, _frame: object) -> None:
         _record_gateway_signal_stop_request(paths, signum, process_identity)
@@ -803,14 +830,32 @@ def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict
     for signum in (signal.SIGTERM, signal.SIGINT):
         previous[signum] = signal.getsignal(signum)
         signal.signal(signum, handler)
+    if hasattr(signal, "SIGUSR1"):
+        old_usr1 = signal.getsignal(signal.SIGUSR1)
+        try:
+            faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        else:
+            previous[signal.SIGUSR1] = old_usr1
+            previous.diagnostic_published = _publish_gateway_diagnostic_signal(previous, True)
     return previous
 
 
-# LLM: 恢复动作只接受本函数安装前捕获的 handler 表，不从磁盘或模型内容决定信号行为。
-# 函数用途: 在网关主循环结束后还原宿主进程原有 SIGTERM/SIGINT 处理方式。
+# LLM: 先撤同代公告再注销；公告撤销失败保留诊断handler，防止仍活的旧目标被SIGUSR1默认动作误终止。
+# 函数用途: 网关清理后恢复原信号处理方式，并注销本次栈导出。
 def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
+    keep_usr1 = (isinstance(previous, _GatewaySignalHandlers) and previous.diagnostic_published
+                 and not _publish_gateway_diagnostic_signal(previous, False))
+    usr1 = getattr(signal, "SIGUSR1", None)
+    if usr1 in previous and not keep_usr1:
+        try:
+            faulthandler.unregister(usr1)
+        except (OSError, RuntimeError, ValueError):
+            pass
     for signum, handler in previous.items():
-        signal.signal(signum, handler)
+        if signum != usr1 or not keep_usr1:
+            signal.signal(signum, handler)
 
 
 # LLM: 快照保留 signal、父进程和 systemd 环境事实；只有属于本代进程的已有停止请求
@@ -917,7 +962,7 @@ def _classify_gateway_service_return(
     )
 
 
-# LLM: 两种拓扑终态均保存本次context原身份与启动时间；C末写仍核原lease，不读旧state或P4补身份。
+# LLM: 终态只保context原身份；仅继承严格同代诊断公告到cleanup末注销，C末写仍核原lease。
 # 函数用途: 写入正式停止或异常返回事实，避免正count终态丢出生事实而无法由冷监护核验原封存。
 def _record_gateway_service_termination(
     paths: GatewayPaths,
@@ -942,8 +987,7 @@ def _record_gateway_service_termination(
     if failed:
         payload["error_code"] = "GATEWAY_SERVICE_LOOP_UNEXPECTED_RETURN"
     if context is not None:
-        payload.update(process_identity=dict(context.process_identity),
-                       started_at=context.process_started_at)
+        payload.update(_gateway_termination_identity_fields(paths, context))
     if context is not None and context.control_plane is not None:
         from .gateway_coordinated_run import publish_coordinated_state
 
@@ -951,12 +995,27 @@ def _record_gateway_service_termination(
     else:
         if context is not None:
             payload.update(worker_count=0)
-        write_json_file(paths.state, payload)
+        write_json_file_atomic(paths.state, payload)
     event = "gateway_run_failed" if failed else "gateway_run_stopped"
     if agent is not None or context is None or getattr(context, "control_plane", None) is None:
         log_gateway_event(agent, event, payload)
 
 
+# LLM: 身份只取捕获的context，不从旧文件补造；诊断公告仅在原state同PID/完整身份时继承，直到实际注销。
+# 函数用途: 为终态保留本代身份及仍有效的栈信号注册事实。
+def _gateway_termination_identity_fields(paths: GatewayPaths, context: GatewayRunContext) -> dict:
+    identity = dict(context.process_identity)
+    fields = {"process_identity": identity, "started_at": context.process_started_at}
+    report = read_json_file_report(paths.state, context="gateway.diagnostics.termination.read")
+    state = report.payload or {}
+    if (report.load_error is None and state.get("process_identity") == identity
+            and state.get("pid") == identity.get("pid") and state.get("diagnostic_sigusr1") is True):
+        fields["diagnostic_sigusr1"] = True
+    return fields
+
+
+# LLM: 只原子更新既有state的排空失败事实，不以文件截断制造Supervisor假身份错误。
+# 函数用途: 保留未退出线程诊断并发布排空未完成终态。
 def _record_gateway_drain_failure(
     paths: GatewayPaths,
     agent: object,
@@ -975,19 +1034,27 @@ def _record_gateway_drain_failure(
         "updated_at": time.time(),
         "exit_code": 2,
     }
-    write_json_file(paths.state, payload)
+    write_json_file_atomic(paths.state, payload)
     log_gateway_event(agent, "gateway_run_failed", payload)
 
 
-def _record_gateway_run_interrupted(paths, agent, pid: int) -> None:
+# LLM: 发布沿原状态路径原子替换，事件语义不变，不签排空完成。
+# 函数用途: 记录网关被键盘中断的终态。
+def _record_gateway_run_interrupted(paths, agent, pid: int, *, context: GatewayRunContext | None = None) -> None:
     payload = {"status": "interrupted", "pid": pid, "stopped_at": time.time()}
-    write_json_file(paths.state, payload)
+    if context is not None:
+        payload.update(_gateway_termination_identity_fields(paths, context))
+    write_json_file_atomic(paths.state, payload)
     log_gateway_event(agent, "gateway_run_interrupted", payload)
 
 
-def _record_gateway_run_failed(paths, agent, pid: int, exc: Exception) -> None:
+# LLM: 错误沿原事件口记录，state原子发布避免读者观察半截JSON。
+# 函数用途: 保存本次网关异常退出事实。
+def _record_gateway_run_failed(paths, agent, pid: int, exc: Exception, *, context: GatewayRunContext | None = None) -> None:
     payload = {"status": "failed", "pid": pid, "error": str(exc), "updated_at": time.time()}
-    write_json_file(paths.state, payload)
+    if context is not None:
+        payload.update(_gateway_termination_identity_fields(paths, context))
+    write_json_file_atomic(paths.state, payload)
     log_gateway_event(agent, "gateway_run_failed", payload)
 
 
@@ -1158,12 +1225,12 @@ def _run_standalone_gateway(args, lifecycle) -> int:
         if exit_code:
             print(termination.reason, file=sys.stderr)
     except KeyboardInterrupt:
-        _record_gateway_run_interrupted(paths, agent, pid)
+        _record_gateway_run_interrupted(paths, agent, pid, context=run_context)
         termination_status = "interrupted"
         termination_reason = "keyboard interrupt"
         exit_code = 130
     except Exception as exc:
-        _record_gateway_run_failed(paths, agent, pid, exc)
+        _record_gateway_run_failed(paths, agent, pid, exc, context=run_context)
         termination_status = "failed"
         termination_reason = f"{type(exc).__name__}: {exc}"
         print(str(exc), file=sys.stderr)
@@ -1377,11 +1444,13 @@ def _background_processes_for_stop(agent) -> tuple[list, list]:
         return [], [runtime_error_report(exc, context="gateway.stop.background_processes")]
 
 
+# LLM: 保持原CLI的TERM/等待语义，仅将killed投影改为原子发布；不把此名称当SIGKILL升级入口。
+# 函数用途: 沿旧CLI强停收尾路径发布退出状态。
 def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
     terminate_pid(pid)
     if not wait_for_pid_exit(pid, 5):
         return False
-    write_json_file(paths.state, {"status": "killed", "pid": pid, "stopped_at": time.time()})
+    write_json_file_atomic(paths.state, {"status": "killed", "pid": pid, "stopped_at": time.time()})
     log_gateway_event(
         agent,
         "gateway_killed",

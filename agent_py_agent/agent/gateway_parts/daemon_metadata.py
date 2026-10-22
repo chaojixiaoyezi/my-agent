@@ -41,6 +41,8 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# LLM: comm可含空格和左右括号，只从最后右括号后定位出生字段；无可靠proc观测时沿原ps回退，不猜代际。
+# 函数用途: 读取进程出生标识供同代比较，无法观察时返回未知。
 def _get_process_start_time(pid: int) -> int | str | None:
     """返回进程出生时间；只用于**同一进程的前后比较**（相等即同代），不是可换算的时间戳。
 
@@ -51,8 +53,13 @@ def _get_process_start_time(pid: int) -> int | str | None:
         return None
     stat_path = Path(f"/proc/{pid}/stat")
     try:
-        # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
-        return int(stat_path.read_text().split()[21])
+        raw = stat_path.read_text()
+        comm_end = raw.rfind(")")
+        if comm_end <= 0:
+            raise ValueError("missing process name terminator in proc stat")
+        # 右括号后从第3字段state开始；第22字段starttime在尾部索引19。
+        fields = raw[comm_end + 1:].split()
+        return int(fields[19])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
         pass
     # 非 Linux：用 ps 拿同一进程稳定的出生时间字符串（不解析成时间戳，只做相等比较）。

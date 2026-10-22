@@ -1,6 +1,7 @@
 # LLM: Gateway 安全重启的唯一状态源：重启请求文件、进程内排空阶段、排空完成标记与冷却/防循环记录都在这里。
 # 两段排空：先停领新请求、等处理中的回合结束（上限 turn_wait）；再关闭 restart_gate、等执行中的副作用工具归零（上限 drain_timeout，
-# 0 不限）。第二段超时就取消重启、恢复服务，不强杀。只认结构化字段（目标进程号、请求编号、requester 身份），不读正文。
+# 0 不限）。第二段超时默认取消；调用方可显式允许restart强制交接，标记保留未退工具数，不宣称已物理排空或强杀。
+# 只认结构化字段（目标进程号、请求编号、requester身份），不读正文。
 # 进程外的接班启动由 cli/gateway_process 负责。改动时同步 test_gateway_restart_service.py 与 docs/design/GATEWAY_SAFE_RESTART.md。
 # 模块用途: 让代理、/restart 和终端都能安全地安排 Gateway 重启：先排空再换进程，重启后由新进程续跑并通知发起方。
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 from ..concurrency.restart_gate import (
     close_tool_gate,
     executing_tool_count,
+    executing_tool_snapshot,
     open_tool_gate,
     wait_until_no_executing_tools,
 )
@@ -200,9 +202,9 @@ def pending_restart_request(paths: GatewayPaths, *, pid: int) -> dict[str, objec
     return payload
 
 
-# LLM: 在服务主线程同步运行；active_turns 由调用方给出本进程正在执行的请求数（Gateway 用 admission 计数，不数
+# LLM: 在服务主线程同步运行；active_turns由调用方合计本进程前台准入与后台活跃片，不数
 # processing 目录，避免遗留文件拖满等待）。第一段期间派发与后台 tick 暂停，在跑的回合照常完成；第二段关闭工具关口。
-# 成功时保持 exiting 与关口关闭，直到进程退出；第二段超时则打开关口、回到 idle 并返回取消原因，不强杀。
+# 成功时保持exiting与关口关闭；停止优先复位，默认超时取消，显式强制则携带未退工具数交接，不强杀或声称物理归零。
 # 函数用途: 执行两段排空并返回结果；会改变进程内排空阶段与工具关口，并通过 on_progress 回报阶段。
 def run_restart_drain(
     request: dict[str, object],
@@ -210,6 +212,7 @@ def run_restart_drain(
     active_turns: Callable[[], int],
     turn_wait_seconds: float,
     drain_timeout_seconds: float,
+    force_on_drain_timeout: bool = False,
     stop_requested: Callable[[], bool] = lambda: False,
     on_progress: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
@@ -222,20 +225,32 @@ def run_restart_drain(
     while turns > 0 and time.monotonic() < deadline and not stop_requested():
         time.sleep(_POLL_SECONDS)
         turns = int(active_turns())
+    if stop_requested():
+        reset_restart_drain_state()
+        return {"ok": False, "reason": "stop_requested", "request_id": request_id}
     _set_phase("tool_drain", request_id)
     close_tool_gate()
     report({"phase": "tool_drain", "active_turns": turns, "executing_tools": executing_tool_count()})
+    if stop_requested():
+        reset_restart_drain_state()
+        return {"ok": False, "reason": "stop_requested", "request_id": request_id}
     timeout = float(drain_timeout_seconds or 0.0)
     drained = wait_until_no_executing_tools(timeout if timeout > 0 else None)
-    if not drained:
+    if stop_requested():
+        reset_restart_drain_state()
+        return {"ok": False, "reason": "stop_requested", "request_id": request_id}
+    if not drained and not force_on_drain_timeout:
         executing = executing_tool_count()
         reset_restart_drain_state()
         return {"ok": False, "reason": "drain_timeout", "executing": executing, "request_id": request_id}
     _set_phase("exiting", request_id)
-    return {"ok": True, "request_id": request_id, "active_turns_at_exit": turns}
+    result = {"ok": True, "request_id": request_id, "active_turns_at_exit": turns}
+    if not drained:
+        result.update(forced_after_drain_timeout=True, executing_tools_at_exit=executing_tool_count())
+    return result
 
 
-# LLM: 旧进程排空成功后调用：把请求原子改写为完成标记并删除请求文件，同时记下冷却起点；不启动任何进程。
+# LLM: 旧进程排空或显式强制超时后原子写交接标记；强制保留工具未退事实，不授重放权，不启动任何进程。
 # 函数用途: 写入“排空完成、等待接班”标记，供新进程启动时续跑与通知发起方。
 def mark_restart_drained(
     paths: GatewayPaths,
@@ -244,6 +259,9 @@ def mark_restart_drained(
     old_pid: int,
     old_process_started_at: float,
     active_turns_at_exit: int,
+    forced_after_drain_timeout: bool = False,
+    executing_tools_at_exit: int = 0,
+    executing_tools: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     now = time.time()
     marker = {
@@ -254,6 +272,10 @@ def mark_restart_drained(
         "drained_at": now,
         "active_turns_at_exit": int(active_turns_at_exit),
     }
+    if forced_after_drain_timeout:
+        snapshot = executing_tool_snapshot() if executing_tools is None else list(executing_tools)
+        marker.update(forced_after_drain_timeout=True, executing_tools_at_exit=int(executing_tools_at_exit),
+                      **({"executing_tools": snapshot} if snapshot else {}))
     write_json_file_atomic(restart_completed_path(paths), marker)
     try:
         restart_request_path(paths).unlink()
@@ -274,12 +296,14 @@ def cancel_restart_request(paths: GatewayPaths, request: dict[str, object], resu
         restart_request_path(paths).unlink()
     except OSError:
         pass
+    snapshot = list(result.get("executing_tools") or executing_tool_snapshot())
     update_json_file_atomic(
         restart_state_path(paths),
         lambda state: {**state, "schema": STATE_SCHEMA, "last_cancelled": {
             "request_id": str(request.get("request_id") or ""),
             "reason": str(result.get("reason") or ""),
             "executing": int(result.get("executing") or 0),
+            **({"executing_tools": snapshot} if snapshot else {}),
             "cancelled_at": time.time(),
         }},
     )
@@ -340,7 +364,7 @@ def append_restart_cancellation(
 
 
 # LLM: 只给记录了会话存储根与会话编号的发起方各写一条观测+唤醒（按事件类型+请求编号去重）；存储根必须位于 my-agent
-# 数据根之内且已存在，否则跳过，不创建目录。唤醒由后台调度按原 owner/thread 权限处理。
+# 数据根之内且已存在，否则跳过，不创建目录。独立定时运行会话取消时只写被动观测，唤醒转给origin_thread_id防二次触发。
 # 函数用途: 把重启完成/取消事实写进发起会话的持久唤醒；返回写入条数与跳过原因（只含异常类型）。
 def notify_restart_requesters(
     record: dict[str, object], *, home_root: str | Path, event_type: str, summary: str,
@@ -364,10 +388,23 @@ def notify_restart_requesters(
         shared = {"thread_id": thread_id, "urgency": "normal",
                   "metadata": {"restart_request_id": request_id, "old_pid": record.get("old_pid") or record.get("target_pid")}}
         try:
-            ConversationStore(store_root, initialize=False).wakes.append_observation(
-                {**shared, "event_type": event_type, "requires_main_agent": True, "summary": summary},
-                {**shared, "reason": event_type, "summary": summary, "dedupe_key": f"{event_type}:{request_id}"},
-            )
+            store = ConversationStore(store_root, initialize=False)
+            thread = store.threads.load(thread_id)
+            meta = thread.metadata if thread is not None and isinstance(thread.metadata, dict) else {}
+            if event_type == CANCELLED_EVENT_TYPE and (meta.get("thread_kind") == "scheduled" or thread_id.startswith("thread-srun_")):
+                store.observations.append({**shared, "event_type": event_type, "requires_main_agent": False, "summary": summary})
+                origin_id = str(meta.get("origin_thread_id") or "")
+                if origin_id and origin_id != thread_id and store.threads.load(origin_id) is not None:
+                    origin_shared = {**shared, "thread_id": origin_id}
+                    store.wakes.append_observation(
+                        {**origin_shared, "event_type": event_type, "requires_main_agent": True, "summary": summary},
+                        {**origin_shared, "reason": event_type, "summary": summary, "dedupe_key": f"{event_type}:{request_id}"},
+                    )
+            else:
+                store.wakes.append_observation(
+                    {**shared, "event_type": event_type, "requires_main_agent": True, "summary": summary},
+                    {**shared, "reason": event_type, "summary": summary, "dedupe_key": f"{event_type}:{request_id}"},
+                )
             written += 1
         except Exception as exc:  # noqa: BLE001 - 单个会话通知失败不能阻止 Gateway 启动或恢复服务
             skipped.append({"thread_id": thread_id, "reason": type(exc).__name__})

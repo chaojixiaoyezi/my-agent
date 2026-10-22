@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 
 from .daemon_control import (
@@ -24,7 +25,7 @@ from .daemon_control import (
     remove_pid_file_if_owned,
     write_targeted_gateway_stop_request,
 )
-from .daemon_metadata import build_process_identity, process_identity_is_live
+from .daemon_metadata import _flocked_sidecar, build_process_identity, process_identity_is_live
 from .io import read_json_file_report, write_json_file_atomic
 from .paths import GatewayPaths, gateway_paths
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
@@ -112,6 +113,7 @@ def record_health_load_error(
         "Gateway health load error: "
         f"context={load_error.get('context', '')} "
         f"path={load_error.get('path', '')} "
+        f"reason={load_error.get('reason', '')} "
         f"error={load_error.get('message', '')}"
     )
 
@@ -154,11 +156,13 @@ def _gateway_process_flags() -> tuple[int, bool]:
     return 0, True
 
 
-# LLM: home/config来自原可信Agent配置解析；Popen显式覆盖这两个环境事实，避免交互上级或服务管理器继承错误根。
+# LLM: home/config来自原可信Agent；低碎片参数只填未设置项，不覆盖服务管理器显式选择。
 # 函数用途: 在同一宿主目录记录启动日志并创建原Gateway进程，不复制配置或业务状态。
 def _spawn_gateway_process(supervisor, cmd: list[str], creationflags: int, start_new_session: bool):
     supervisor._paths.root.mkdir(parents=True, exist_ok=True)
     environment = os.environ.copy()
+    environment.setdefault("MALLOC_ARENA_MAX", "2")
+    environment.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
     environment["MY_AGENT_HOME"] = str(supervisor._agent.home_paths.root.resolve())
     environment["MY_AGENT_CONFIG"] = str(Path(supervisor.config_path).expanduser().resolve())
     with supervisor._paths.log.open("ab") as log_file:
@@ -169,7 +173,7 @@ def _spawn_gateway_process(supervisor, cmd: list[str], creationflags: int, start
         )
 
 
-# LLM: 原120秒预算内复用同一角色健康读门，ready另核立即保存的原child出生；timeout保留Popen，不以PID充成功。
+# LLM: 原120秒预算内静音预期未就绪；超时再记录一次原因，ready仍核原child出生，不以PID充成功。
 # 函数用途: 等Gateway自己的身份、running记录和dispatcher心跳同时成立，失败只返回未就绪。
 def _wait_for_gateway_start(supervisor, process) -> int | None:
     deadline = time.monotonic() + 120.0
@@ -177,19 +181,20 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
         if process.poll() is not None:
             supervisor._log_error("Gateway子进程在就绪前已退出。")
             return None
-        if supervisor._is_gateway_healthy():
+        if supervisor._is_gateway_healthy(quiet_unconfirmed=True):
             report = get_running_pid_report(supervisor._paths.pid, cleanup_stale=False)
             if report.pid == process.pid:
                 from .supervisor_generation import complete_gateway_start
 
                 return complete_gateway_start(supervisor, process, report.pid)
         time.sleep(0.5)
+    supervisor._is_gateway_healthy(quiet_unconfirmed=False)
     supervisor._log_error("Gateway在120秒内未确认就绪；保留进程与记录供原状态入口核验。")
     return None
 
 
-# LLM: 仅原Gateway角色及同一真实生年代可发停止请求/TERM；restart可传冻结身份，不能停止换代后的新C；物理退出不代表P6关闭。
-# 函数用途: 沿原目标停止合同关停准确旧Gateway，超时保原TERM策略但再次核验同代。
+# LLM: 仅原角色/生年代可停止；请求超时先诊断再TERM，仍未退出仅Count0重核后KILL；不授P6关闭。
+# 函数用途: 关停准确旧Gateway，保留TERM成功短路与未知身份拒止。
 def stop_gateway(supervisor, timeout: float = 20.0, *, expected_identity: dict | None = None) -> bool:
     supervisor._resolve_agent_and_paths()
     report = get_running_pid_report(supervisor._paths.pid, cleanup_stale=False)
@@ -213,8 +218,122 @@ def stop_gateway(supervisor, timeout: float = 20.0, *, expected_identity: dict |
     if process_identity_is_live(identity) is not True:
         supervisor._log_error("原Gateway身份变化或不可核验，拒绝向该PID发送TERM。")
         return False
+    if _capture_unresponsive_gateway_diagnostics(supervisor, report.pid, identity) is False:
+        return False
+    if process_identity_is_live(identity) is not True:
+        supervisor._log_error("原Gateway诊断后身份变化或不可核验，拒绝向该PID发送TERM。")
+        return False
     terminate_pid(report.pid)
-    return _wait_gateway_exit(supervisor, report.pid, identity, 5)
+    if _wait_gateway_exit(supervisor, report.pid, identity, 5):
+        return True
+    return _force_stop_gateway(supervisor, report.pid, identity)
+
+
+# LLM: 当前process_control/io无KILL原语，局限本模块；调用者必须先核原代及Count0，失败不吞作成功。
+# 函数用途: 向已核验的原Gateway发送一次SIGKILL。
+def kill_pid(pid: int) -> None:
+    os.kill(pid, signal.SIGKILL)
+
+
+# LLM: TERM失败后重核完整旧身份；正N仍走原完整关闭门，物理退出不等于业务排空。
+# 函数用途: 仅Count0同代目标升级强停，确认退出后再清旧代文件。
+def _force_stop_gateway(supervisor, pid: int, identity: dict) -> bool:
+    if process_identity_is_live(identity) is not True:
+        supervisor._log_error("原Gateway身份变化或不可核验，拒绝向该PID发送KILL。")
+        return False
+    try:
+        count = int(getattr(getattr(supervisor._agent, "config", None), "gateway_worker_process_count", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if count != 0 or not hasattr(signal, "SIGKILL"):
+        return False
+    supervisor._log_warn(f"原Gateway(pid={pid})在SIGTERM后未退出，已核验同代身份并升级SIGKILL。")
+    try:
+        kill_pid(pid)
+    except OSError as error:
+        supervisor._log_warn(f"Gateway SIGKILL发送未确认：{type(error).__name__}")
+        return False
+    exited = bool(_wait_gateway_exit(supervisor, pid, identity, 5))
+    if exited:
+        _cleanup_force_stopped_gateway(supervisor, identity)
+    return exited
+
+
+# LLM: 使用原写者同一sidecar锁比较后删除；严格比较原身份，不让旧代清理后继或legacy未知请求。
+# 函数用途: 强停已确认退出后，只清仍绑定旧Gateway的PID与stop请求。
+def _cleanup_force_stopped_gateway(supervisor, identity: dict) -> None:
+    paths = supervisor._paths
+    try:
+        with _flocked_sidecar(paths.pid):
+            report = read_pid_record_report(paths.pid)
+            record = report.payload or {}
+            if (report.load_error is None and record.get("kind") == "my-agent-gateway"
+                    and {key: record.get(key) for key in identity} == identity):
+                paths.pid.unlink(missing_ok=True)
+            with _flocked_sidecar(paths.stop_request):
+                stop = read_json_file_report(paths.stop_request, context="gateway.supervisor.stop_cleanup.read")
+                if stop.load_error is None and (stop.payload or {}).get("target_process") == identity:
+                    paths.stop_request.unlink(missing_ok=True)
+    except OSError as error:
+        supervisor._log_warn(f"Gateway旧代文件清理未完成：{type(error).__name__}")
+
+
+# LLM: 只读proc元数据，各文件限量且线程最多16项；不读命令正文，不扩权限，采集失败不伪造诊断。
+# 函数用途: 提取卡死Gateway的Linux状态与等待点摘要。
+def _linux_gateway_diagnostics(pid: int) -> dict:
+    root = Path(f"/proc/{pid}")
+    status = _read_gateway_proc_value(root / "status", 8192)
+    result = {key: value.strip()[:128] for line in status.splitlines() if ":" in line
+              for key, value in [line.split(":", 1)] if key in {"State", "VmRSS", "VmSwap", "Threads"}}
+    result["wchan"] = _read_gateway_proc_value(root / "wchan", 128).strip()
+    result["task_wchan"] = {}
+    deadline = time.monotonic() + 0.5
+    try:
+        with os.scandir(root / "task") as tasks:
+            for entry in islice(tasks, 16):
+                if time.monotonic() >= deadline:
+                    break
+                if entry.name.isdecimal():
+                    result["task_wchan"][entry.name] = _read_gateway_proc_value(root / "task" / entry.name / "wchan", 128).strip()
+    except OSError as error:
+        result["task_error"] = type(error).__name__
+    if not any(key in result for key in ("State", "VmRSS", "VmSwap", "Threads")):
+        result["status_error"] = status[:128]
+    return result
+
+
+# LLM: proc文件只读且最多limit字符，权限/消失以错误类型呈现；不把失败解释成目标无阻塞。
+# 函数用途: 有界读取单个诊断字段。
+def _read_gateway_proc_value(path: Path, limit: int) -> str:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            return stream.read(limit)
+    except OSError as error:
+        return f"unavailable:{type(error).__name__}"
+
+
+# LLM: 旧版SIGUSR1默认可致退出，只有同代state已公告注册且末核仍活才发送；诊断不授重启或清记录权。
+# 函数用途: 停止请求超时后记录Linux摘要，并请求已注册的Gateway导出全线程栈。
+def _capture_unresponsive_gateway_diagnostics(supervisor, pid: int, identity: dict) -> bool | None:
+    if sys.platform.startswith("linux"):
+        summary = _linux_gateway_diagnostics(pid)
+        supervisor._log_warn(f"Gateway(pid={pid})停止超时诊断：{json.dumps(summary, ensure_ascii=False)}")
+    if not hasattr(signal, "SIGUSR1"):
+        return None
+    state = read_json_file_report(supervisor._paths.state, context="gateway.supervisor.diagnostics.read")
+    payload = state.payload or {}
+    if (state.load_error is not None or payload.get("diagnostic_sigusr1") is not True
+            or payload.get("process_identity") != identity or payload.get("pid") != pid):
+        supervisor._log_warn("Gateway未公告同代SIGUSR1诊断注册，跳过栈信号。")
+        return None
+    if process_identity_is_live(identity) is not True:
+        supervisor._log_warn("Gateway诊断前身份变化或不可核验，拒绝发送信号。")
+        return False
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except OSError as error:
+        supervisor._log_warn(f"Gateway栈信号发送未确认：{type(error).__name__}")
+    return None
 
 
 # LLM: 只对本S真实保留的原child使用Popen poll/reap；外部C原OS等待不变，绝不由PID重建进程对象。
@@ -360,7 +479,10 @@ def _monitor_until_stopped(supervisor) -> None:
         consecutive_failures = _run_health_check(supervisor, consecutive_failures)
 
 
-# LLM: 维护先于所有健康检查和自动恢复；清锁/到期后复用原Gateway三次失败门及Adapter意图。
+RESTART_BUDGET_RESET_SECONDS = 600.0
+
+
+# LLM: 维护先于所有健康检查和自动恢复；清锁/到期后复用原Gateway三次失败门及Adapter意图，持续健康满窗口清零重启计数。
 # 函数用途: 维护时清零失败次数，正常时分别监护Gateway和有启动意图的适配器。
 def _run_health_check(supervisor, consecutive_failures: int) -> int:
     supervisor._resolve_agent_and_paths()
@@ -369,6 +491,11 @@ def _run_health_check(supervisor, consecutive_failures: int) -> int:
     healthy = supervisor._is_gateway_healthy()
     adapter_healthy = supervisor._check_adapter_health()
     if healthy:
+        restart_count = int(getattr(supervisor, "_restart_count", 0) or 0)
+        last_restart_at = float(getattr(supervisor, "_last_restart_at", 0.0) or 0.0)
+        if restart_count > 0 and time.time() - last_restart_at >= RESTART_BUDGET_RESET_SECONDS:
+            supervisor._restart_count = 0
+            supervisor._log_info("Gateway已稳定健康运行满600秒，重置监护重启计数。")
         if not adapter_healthy and read_adapter_state(supervisor._paths.root / "adapter_state.json").get("state") == "running":
             supervisor._restart_adapter()
         return 0
@@ -542,9 +669,9 @@ class GatewaySupervisor:
         self._resolve_agent_and_paths()
         return read_gateway_heartbeat_report(self._paths.heartbeat)
 
-    # LLM: 健康须原C同PID/birth/running/dispatcher，正N再核P4全W真实birth/15s就绪及首末同代；不删除或补写记录。
+    # LLM: 健康仍核原C和正N全W；启动期仅静音预期unconfirmed，坏记录读错误保留原告警；不清PID。
     # 函数用途: 只读组合原身份和ready事实，拒绝新鲜但属于监护者或旧代的心跳。
-    def _is_gateway_healthy(self) -> bool:
+    def _is_gateway_healthy(self, *, quiet_unconfirmed: bool = False) -> bool:
         self._resolve_agent_and_paths()
         self._last_health_load_errors = []
         heartbeat_report = self._read_gateway_heartbeat_report()
@@ -562,41 +689,45 @@ class GatewaySupervisor:
         record, pid = record_report.payload or {}, pid_report.pid
         identity = {key: record.get(key) for key in ("host_id", "pid", "start_time")}
         if not pid or record.get("kind") != "my-agent-gateway" or identity["pid"] != pid:
-            return self._health_unconfirmed("gateway_role_or_pid_unconfirmed")
+            return self._health_unconfirmed("gateway_role_or_pid_unconfirmed", quiet=quiet_unconfirmed)
         if process_identity_is_live(identity) is not True:
-            return self._health_unconfirmed("gateway_birth_unconfirmed")
+            return self._health_unconfirmed("gateway_birth_unconfirmed", quiet=quiet_unconfirmed)
         state_report = read_json_file_report(self._paths.state, context="gateway.supervisor.state.read")
         if state_report.load_error is not None:
             self._record_health_load_error(state_report.load_error)
             return False
         state, heartbeat = state_report.payload or {}, heartbeat_report.payload or {}
         if state.get("pid") != pid or state.get("process_identity") != identity:
-            return self._health_unconfirmed("gateway_state_identity_unconfirmed")
+            return self._health_unconfirmed("gateway_state_identity_unconfirmed", quiet=quiet_unconfirmed)
         started = state.get("started_at")
         if (type(started) not in (int, float) or started <= 0 or started > time.time()
                 or (type(started) is float and not math.isfinite(started))):
-            return self._health_unconfirmed("gateway_start_unconfirmed")
+            return self._health_unconfirmed("gateway_start_unconfirmed", quiet=quiet_unconfirmed)
         if heartbeat.get("pid") != pid or heartbeat.get("started_at") != started:
-            return self._health_unconfirmed("gateway_heartbeat_identity_unconfirmed")
+            return self._health_unconfirmed("gateway_heartbeat_identity_unconfirmed", quiet=quiet_unconfirmed)
         if heartbeat.get("status") != "running" or not self._heartbeat_is_fresh(heartbeat):
-            return self._health_unconfirmed("gateway_heartbeat_not_running")
+            return self._health_unconfirmed("gateway_heartbeat_not_running", quiet=quiet_unconfirmed)
         if heartbeat.get("dispatcher_alive") is not True or heartbeat.get("dispatcher_state") != "running":
-            return self._health_unconfirmed("gateway_dispatcher_unconfirmed")
+            return self._health_unconfirmed("gateway_dispatcher_unconfirmed", quiet=quiet_unconfirmed)
         if not gateway_readiness(self._paths, pid=pid, process_alive=True).ready:
-            return self._health_unconfirmed("gateway_not_ready")
+            return self._health_unconfirmed("gateway_not_ready", quiet=quiet_unconfirmed)
         try:
             from .supervisor_generation import require_healthy_workers
 
             require_healthy_workers(self, state, time.time())
         except (OSError, ValueError):
-            return self._health_unconfirmed("gateway_worker_generation_unconfirmed")
+            return self._health_unconfirmed("gateway_worker_generation_unconfirmed", quiet=quiet_unconfirmed)
         return True
 
-    # LLM: 固定结构码仅展示未知原因，不写状态/清PID/推断业务失败；未知仍阻止重复启动。
+    # LLM: 静音仍留本轮结构化原因但不刷日志；默认保运行期WARN，不写状态/清PID或授启动权。
     # 函数用途: 留下可行动的只读健康拒绝原因。
-    def _health_unconfirmed(self, reason: str) -> bool:
-        self._record_health_load_error({"context": "gateway.supervisor.health.read", "reason": reason,
-                                       "message": "Gateway身份或就绪资料未确认，请核原配置对应状态后正常重启。"})
+    def _health_unconfirmed(self, reason: str, *, quiet: bool = False) -> bool:
+        error = {"context": "gateway.supervisor.health.read", "reason": reason,
+                 "message": "Gateway身份或就绪资料未确认，请核原配置对应状态后正常重启。"}
+        if quiet:
+            self._last_health_load_errors.append(error)
+        else:
+            self._record_health_load_error(error)
         return False
 
     # LLM: 每轮诊断只写本实例列表及日志，不修改服务身份。

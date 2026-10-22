@@ -103,27 +103,37 @@ class _ToolOperationClaimAttempt:
     lease_expires_at: float
 
 
-# LLM: 领取、执行、结算全程处在重启关口之内；关口关闭时新的副作用工具在领取前等待，被中断则按未启动收口。
+# LLM: 领取、执行、结算全程处在重启关口内；只登记工具/操作/run/owner身份，不传参数正文，关门仍等待且中断按未启动收口。
 # 函数用途: 领取、执行一次、持久化并可重放一次副作用工具调用；Gateway 安全重启排空时不让新工具开跑。
 def execute_tool_operation(
     request: ToolOperationExecutionRequest,
 ) -> ToolHandlerOutcome:
     """Claim, execute once, persist, and replay an exact side-effect result."""
 
-    with tool_execution_admission() as admitted:
+    with tool_execution_admission({
+        "tool_name": str(getattr(request, "tool_name", "") or ""),
+        "operation_id": str(getattr(request, "operation_id", "") or ""),
+        "run_id": str(getattr(request, "run_id", "") or ""),
+        "owner_id": str(getattr(request, "owner_id", "") or ""),
+    }) as admitted:
         if not admitted:
             return _restart_gate_not_started(request)
         return _execute_admitted_tool_operation(request)
 
 
-# LLM: 只在重启关口等待期间被协作中断时使用；工具从未领取执行权，副作用可证明未发生。
+# LLM: 仅等待中断时使用，工具未领取执行权；对象及宿主JSON同带专用reported码，保留CANCELLED分类，不绕过全局错误目录。
 # 函数用途: 生成“Gateway 重启排空中、工具未开跑”的结构化结果。
 def _restart_gate_not_started(request: ToolOperationExecutionRequest) -> ToolHandlerOutcome:
     result = _operation_error(
         request.tool_name,
         "CANCELLED",
         "Gateway 正在安全重启，工具在开跑前被停止，没有执行。",
+        reported_error_code="GATEWAY_RESTART_DRAINING",
     )
+    # 只补宿主工厂自建的拒绝JSON，不解析或信任工具返回的业务正文。
+    payload = json.loads(result.output)
+    payload["reported_error_code"] = result.reported_error_code
+    result.output = json.dumps(payload, ensure_ascii=False)
     _attach_operation_facts(result, request, status="not_started", action="gateway_restart_drain")
     return apply_tool_execution_facts(
         result,

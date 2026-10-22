@@ -132,6 +132,12 @@ class BackgroundShutdown:
         self.supervisor = None
         self.slices = set()
 
+    # LLM: 只读进程内活跃后台执行片计数；不访问数据库或磁盘，供安全重启turn_wait统计在途后台回合。
+    # 函数用途: 返回当前正在执行、尚未结束的后台会话/定时任务执行片数量。
+    def active_slice_count(self) -> int:
+        with self.lock:
+            return sum(1 for item in self.slices if not item.finished)
+
     # LLM: 原后台loop只能绑定其自己创建的同一supervisor，不能换成另一个对象抹掉责任。
     # 函数用途: 保存已存在的调度器引用，供cleanup读取其原future集合。
     def bind(self, supervisor):

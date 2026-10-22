@@ -653,3 +653,45 @@ def test_allowlisted_directory_skips_missing_roots_without_raising(tmp_path) -> 
     assert allowlisted_directory(cwd, (missing, tmp_path)) is True
     assert allowlisted_directory(cwd, (missing,)) is False
     assert allowlisted_directory(tmp_path / "nope", (tmp_path,)) is False
+
+
+# LLM: 在合成规范Owner树运行真实构参，缺persona时不得请求bwrap在宿主可写父目录建立tmpfs挂载点。
+# 函数用途: 验证缺失保护目录只try-bind，并且构参两次不创建宿主路径或改变权限。
+def test_missing_persona_uses_try_bind_without_host_mountpoint_creation(tmp_path):
+    root = tmp_path.resolve() / ".my-agent"
+    home = root / "owners/local/main"
+    other = root / "owners/providers/feishu/users/other"
+    home.mkdir(parents=True, mode=0o700)
+    other.mkdir(parents=True, mode=0o700)
+    spec = SandboxSpec(owner_home=home, workspace=home, protected_persona_root=home,
+                       full_access=True, bwrap_path="/fake/bwrap")
+    before = {path.relative_to(root): path.lstat().st_mode for path in root.rglob("*")}
+    first = build_bwrap_argv(spec)
+    second = build_bwrap_argv(spec)
+    assert first == second
+    assert {path.relative_to(root): path.lstat().st_mode for path in root.rglob("*")} == before
+    for owner in (home, other):
+        path = str(owner / "persona")
+        assert ["--tmpfs", path] not in [first[index:index + 2] for index in range(len(first))]
+        assert ["--ro-bind-try", path, path] in [first[index:index + 3] for index in range(len(first))]
+        assert not (owner / "persona").exists()
+
+
+# LLM: 真Linux/bwrap执行只运行/bin/true，观察宿主树的路径和mode；平台或readiness缺失明确跳过。
+# 函数用途: 防止bwrap创建挂载点这类argv构参阶段看不出的宿主副作用。
+def test_linux_missing_persona_command_keeps_host_paths_and_modes(tmp_path):
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("需要Linux bwrap观察点")
+    readiness = probe_sandbox()
+    if not readiness.ready:
+        pytest.skip(f"bwrap未就绪：{readiness.code}")
+    home = tmp_path.resolve() / ".my-agent/owners/local/main"
+    home.mkdir(parents=True, mode=0o700)
+    before = {path.relative_to(tmp_path): path.lstat().st_mode for path in tmp_path.rglob("*")}
+    spec = SandboxSpec(owner_home=home, workspace=home, protected_persona_root=home,
+                       full_access=True, bwrap_path=readiness.bwrap_path)
+    result = subprocess.run([*build_bwrap_argv(spec), "--", "/bin/true"], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert {path.relative_to(tmp_path): path.lstat().st_mode for path in tmp_path.rglob("*")} == before

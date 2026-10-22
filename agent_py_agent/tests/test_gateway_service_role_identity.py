@@ -202,10 +202,12 @@ def test_restart_requires_old_gateway_stop_success(health, monkeypatch, stop_res
     assert effects == (['spawn'] if stop_result else [])
 
 
+# LLM: 新增采集后末核仍只增加同代观察，不增等待次数；换代/未知刺激与不发信号断言保持。
+# 函数用途: 验证停止请求及TERM仅作用于原Gateway角色与出生身份。
 @pytest.mark.parametrize('mode', ['graceful', 'same_generation_term', 'reused_pid', 'unknown_birth', 'wrong_role', 'unknown_record'])
 def test_stop_gateway_signals_only_verified_original_generation(health, monkeypatch, mode):
     effects = []
-    lives = iter([True, False] if mode == 'reused_pid' else [True, None] if mode == 'unknown_birth' else [True, True])
+    lives = iter([True, False] if mode == 'reused_pid' else [True, None] if mode == 'unknown_birth' else [True, True, True])
     monkeypatch.setattr(sv, 'process_identity_is_live', lambda identity: next(lives))
     if mode == 'wrong_role':
         health.record['kind'] = 'my-agent-supervisor'
@@ -221,12 +223,14 @@ def test_stop_gateway_signals_only_verified_original_generation(health, monkeypa
                        ['request', ('TERM', 12345)] if mode == 'same_generation_term' else [])
 
 
+# LLM: health替身接受新的quiet关键字，原ready/超时/子进程退出/异PID断言不变。
+# 函数用途: 验证启动等待仍不得把未就绪Popen PID冒充成功。
 @pytest.mark.parametrize('mode', ['ready', 'timeout', 'child_exited', 'other_pid'])
 def test_start_wait_never_projects_unready_popen_pid_as_success(health, monkeypatch, mode):
     counter = iter(range(0, 1000, 61))
     monkeypatch.setattr(sv.time, 'monotonic', lambda: next(counter))
     monkeypatch.setattr(sv.time, 'sleep', lambda _: None)
-    monkeypatch.setattr(health.supervisor, '_is_gateway_healthy', lambda: mode in {'ready', 'other_pid'})
+    monkeypatch.setattr(health.supervisor, '_is_gateway_healthy', lambda **kwargs: mode in {'ready', 'other_pid'})
     process = SimpleNamespace(pid=12346 if mode == 'other_pid' else 12345, poll=lambda: 0 if mode == 'child_exited' else None)
     assert sv._wait_for_gateway_start(health.supervisor, process) == (12345 if mode == 'ready' else None)
 
@@ -296,3 +300,89 @@ def test_working_directory_uses_native_single_path_field(directory):
 def test_working_directory_rejects_line_or_nul_injection(separator):
     with pytest.raises(ValueError):
         gateway_service._format_systemd_unit_section('/bin/true', '/tmp/root'+separator+'injected', '/usr/bin')
+
+
+# LLM: 仅替换真实模块的系统读取边界，不读真实proc、不执行ps；其余路径读者保持原样。
+# 函数用途: 为进程出生解析回归提供可控stat原文与ps回退结果。
+@pytest.fixture
+def proc_stat_reader(monkeypatch):
+    from agent_py_agent.agent.gateway_parts import daemon_metadata as dm
+
+    reader = SimpleNamespace(module=dm, raw='', fallback='', ps_calls=[], read_paths=[])
+    original_read = dm.Path.read_text
+
+    # LLM: 只截获合成PID的stat路径，避免影响pytest和产品其它文件读取。
+    # 函数用途: 将合成stat原文交给真实出生时间解析器。
+    def read_stat(path, *args, **kwargs):
+        if str(path) == '/proc/12345/stat':
+            reader.read_paths.append(str(path))
+            if isinstance(reader.raw, Exception):
+                raise reader.raw
+            return reader.raw
+        return original_read(path, *args, **kwargs)
+
+    # LLM: ps回退只记录调用并返回合成stdout或异常，禁止实际创建子进程。
+    # 函数用途: 模拟现有ps回退的成功、空值与失败边界。
+    def run_ps(*args, **kwargs):
+        reader.ps_calls.append((args, kwargs))
+        if isinstance(reader.fallback, Exception):
+            raise reader.fallback
+        return SimpleNamespace(stdout=reader.fallback)
+
+    monkeypatch.setattr(dm.sys, 'platform', 'linux')
+    monkeypatch.setattr(dm.Path, 'read_text', read_stat)
+    monkeypatch.setattr(dm.subprocess, 'run', run_ps)
+    return reader
+
+
+# LLM: comm内空白与括号都是合法名称内容，必须从最后右括号后按内核字段定位，不能全行split。
+# 函数用途: 确认真实模块在复杂进程名下仍返回第22字段，且不误走ps。
+@pytest.mark.parametrize('comm', ['worker pool', 'worker (nested) pool', 'worker) pool(', 'worker(nested)'])
+def test_proc_stat_start_time_uses_last_comm_parenthesis(proc_stat_reader, comm):
+    reader = proc_stat_reader
+    fields = ['S', *map(str, range(4, 22)), '424242', '987654']
+    reader.raw = f"12345 ({comm}) {' '.join(fields)}\n"
+    reader.fallback = 'must not replace valid proc ticks'
+    assert reader.module._get_process_start_time(12345) == 424242
+    assert reader.read_paths == ['/proc/12345/stat']
+    assert reader.ps_calls == []
+
+
+# LLM: 无右括号不能靠split恰好读出数字；短字段和坏整数也必须沿原ps回退或保持未知。
+# 函数用途: 核对损坏stat时ps回退的返回类型、空值和异常处理保持原合同。
+@pytest.mark.parametrize('fault', ['missing_parenthesis', 'short_fields', 'bad_integer', 'missing_file', 'unreadable'])
+@pytest.mark.parametrize('fallback_kind', ['value', 'empty', 'error'])
+def test_proc_stat_invalid_input_preserves_ps_fallback(proc_stat_reader, fault, fallback_kind):
+    reader = proc_stat_reader
+    fields = ['S', *map(str, range(4, 22)), '424242', '987654']
+    if fault == 'missing_parenthesis':
+        reader.raw = f"12345 (unterminated {' '.join(fields)}"
+    elif fault == 'short_fields':
+        reader.raw = '12345 (worker) S 1 2'
+    elif fault == 'bad_integer':
+        fields[19] = 'not-an-integer'
+        reader.raw = f"12345 (worker) {' '.join(fields)}"
+    else:
+        reader.raw = FileNotFoundError('synthetic stat missing') if fault == 'missing_file' else PermissionError('synthetic stat denied')
+    reader.fallback = '  Mon Oct 19 12:34:56 2026\n' if fallback_kind == 'value' else OSError('synthetic ps failure') if fallback_kind == 'error' else ' \n'
+    expected = 'Mon Oct 19 12:34:56 2026' if fallback_kind == 'value' else None
+    assert reader.module._get_process_start_time(12345) == expected
+    assert reader.ps_calls == [
+        ((['ps', '-o', 'lstart=', '-p', '12345'],), {'capture_output': True, 'text': True, 'timeout': 5})
+    ]
+
+
+# LLM: 身份核验仍调用真实解析器；仅以假host和假kill边界模拟存活，不向任何真实PID发信号。
+# 函数用途: 确认复杂comm解析修复不改变同代真、异代假、无法观察为未知的三态语义。
+@pytest.mark.parametrize(('recorded', 'ticks', 'expected'), [(424242, '424242', True), (424241, '424242', False), (424242, 'bad', None)])
+def test_proc_stat_identity_keeps_three_state_semantics(proc_stat_reader, monkeypatch, recorded, ticks, expected):
+    reader = proc_stat_reader
+    dm = reader.module
+    fields = ['S', *map(str, range(4, 22)), ticks, '987654']
+    reader.raw = f"12345 (worker (nested) pool) {' '.join(fields)}"
+    signals = []
+    monkeypatch.setattr(dm, 'process_host_id', lambda: 'synthetic-host')
+    monkeypatch.setattr(dm.os, 'kill', lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(dm, '_process_start_observation', lambda pid, recorded_start=None: dm._get_process_start_time(pid))
+    assert dm.process_identity_is_live({'host_id': 'synthetic-host', 'pid': 12345, 'start_time': recorded}) is expected
+    assert signals == [(12345, 0)]

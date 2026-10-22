@@ -280,13 +280,14 @@ class _ForegroundRecoveryRunParams(RunParams):
     foreground_recovery_attempt_ids: tuple[str, ...] = ()
 
 
-# LLM: 核实提示只读operation_type/status/handler_started_at，不带参数、结果或操作ID；inject才是本版本模型真实消费者。
+# LLM: 核实提示只投影工具名、状态、开始时间及operation_id，不带参数和结果；inject才是本版本模型真实消费者。
 # 函数用途: 保留原注入并追加中文核实要求，让后续replace和Compact续接都携带提示。
 def _foreground_recovery_params(params: RunParams, operations: list[dict]) -> RunParams:
     lines = ["【系统恢复提示】上一轮执行中途中断，以下工具操作在中断前已发起但结果未确认："]
     lines.extend(
-        f"- {item.get('operation_type') or '未知工具'}（状态：{item.get('status') or 'UNKNOWN'}；"
-        f"开始时间：{item.get('handler_started_at') or '未知'}）" for item in operations
+        "- " + json.dumps({key: item.get(key) for key in (
+            "operation_type", "status", "handler_started_at", "operation_id",
+        )}, ensure_ascii=False) for item in operations
     )
     if not operations:
         lines.append("未记录到可确认的工具操作；上一轮执行结果仍需核实。")
@@ -326,9 +327,69 @@ def _pending_foreground_recovery_attempts(repo, row, params: RunParams) -> tuple
     return tuple(str(item["attempt_id"]) for item in rows)
 
 
+# LLM: 恢复前只读原RuntimeDB任务与ThreadStore/TaskLink的冻结principal；attrs只能缩小线程范围，不能创建actor或覆盖原人。
+# 函数用途: 仅准准确本地私有交互或原外部发起人接手旧attempt，身份缺失和坏记录均拒绝。
+def _foreground_recovery_principal_matches(agent, repo, params: RunParams, attempt_id: str) -> bool:
+    from ..conversation.channels import LOCAL_PRIVATE_CHANNELS
+    from ..conversation.host_actor import HostActorError, HostChannelActor, background_host_actor
+
+    try:
+        home = agent.home_paths
+        attempt = repo.get_attempt(attempt_id)
+        run = repo.get_agent_run(attempt["agent_run_id"])
+        task_id = repo.task_id_for_run_id(run["run_id"])
+        task = repo.get_task(task_id)
+        thread_id = str(task["thread_id"] or "")
+        attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+        if task["owner_id"] != home.owner_id or attrs.get("conversation_thread_id", thread_id) != thread_id:
+            return False
+        thread, error = agent.conversation_store.threads.load_report(thread_id)
+        if error or thread is None or thread.owner_id != home.owner_id:
+            return False
+        actor = params.host_channel_actor
+        if actor is None:
+            return (home.owner_provider == "local" and home.owner_kind == "main"
+                    and bool(thread.channel_bindings)
+                    and all(binding.channel in LOCAL_PRIVATE_CHANNELS for binding in thread.channel_bindings))
+        if (not isinstance(actor, HostChannelActor) or actor.owner_id != home.owner_id
+                or not params.request_id or actor.entry_request_id != params.request_id):
+            return False
+        principal = background_host_actor(agent, thread_id, task_id)
+        return (principal is not None and principal.owner_id == actor.owner_id
+                and principal.source_thread_id == actor.source_thread_id and principal.binding() == actor.binding())
+    except (HostActorError, OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+
+
+# LLM: 本版本恢复出口返回recovered而非acknowledge回执；若扩展回执仍有remaining_unknown则失败关闭，不把部分确认当成功。
+# 函数用途: 验证恢复结果并告警剩余未知条目，返回None让调用方沿原阻塞异常处理。
+def _checked_foreground_recovery_result(result: dict) -> dict | None:
+    remaining = result.get("remaining_unknown")
+    if remaining:
+        logging.getLogger(__name__).warning("前台恢复未完成：remaining_unknown仍非空，保留阻塞。")
+        return None
+    return result if result.get("recovered") else None
+
+
+# LLM: 只按原principal筛选线程级交接；当前主根身份冲突仍阻塞，别人的子链提示不注入、不确认也不阻断新任务。
+# 函数用途: 从原恢复事件选出当前发起人可接手的待核实执行轮。
+def _foreground_recovery_pending_for_principal(agent, repo, row, params: RunParams) -> tuple[str, ...]:
+    from ..runtime_db.operations import RuntimeRecoveryRequiredError
+
+    current_run_id = str((dict(row) if row is not None else {}).get("agent_run_id") or "")
+    pending = []
+    for attempt_id in _pending_foreground_recovery_attempts(repo, row, params):
+        if _foreground_recovery_principal_matches(agent, repo, params, attempt_id):
+            pending.append(attempt_id)
+        elif current_run_id and str(repo.get_attempt(attempt_id)["agent_run_id"]) == current_run_id:
+            raise RuntimeRecoveryRequiredError("恢复核实提示仅限原发起人接手，请通过 /recover 显式核实")
+    return tuple(pending)
+
+
 # LLM: 仅gateway首片且非Compact才按原CAS弃置未知阻塞，先取未结操作再恢复；不改操作结论、不重放、不替后台放行。
 #   子链只取显式当前线程未关TaskRun的unknown投影；任何恢复拒绝仍失败关闭，不宣称已解阻。
 #   已提交但未交接的核实要求从审计重建；无提示的后台仍拒绝，已有提示的同片Compact可原样携带。
+#   关闭配置、宿主回执和唤醒事件不处置未知；每个目标单独复核原principal，不能借同群同线程扩权。
 # 函数用途: 让用户新消息接手核实中断操作，沿原权威入口恢复当前主链及本线程未知子链。
 def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: RunParams) -> RunParams:
     from ..runtime_db.child_recovery import (
@@ -338,9 +399,12 @@ def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: Run
     from ..runtime_db.operations import RuntimeRecoveryRequiredError
 
     notice = str(getattr(params, "compact_continuation_injection", "") or "")
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
     if (str(getattr(params, "source", "") or "") != "gateway"
             or int(getattr(params, "continuation_seq", 0) or 0) != 0
-            or int(getattr(params, "compact_auto_continue_depth", 0) or 0) != 0):
+            or int(getattr(params, "compact_auto_continue_depth", 0) or 0) != 0
+            or not bool(getattr(getattr(agent, "config", None), "foreground_unknown_auto_recover", True))
+            or "host_im_task_ack" in attrs or params.turn_trigger is not None):
         pending = _pending_foreground_recovery_attempts(repo, row, params)
         carried = (bool(notice) and notice in (params.inject or [])
                    and set(pending).issubset(getattr(params, "foreground_recovery_attempt_ids", ())))
@@ -351,7 +415,6 @@ def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: Run
     attempt_id = str(current.get("current_attempt_id") or "")
     attempt = repo.get_attempt(attempt_id) if attempt_id else None
     main_unknown = current.get("status") == "unknown" or (attempt is not None and attempt["status"] == "unknown")
-    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
     thread_id = str(attrs.get("conversation_thread_id") or "").strip()
     children = unknown_child_attempts_for_thread(repo, thread_id) if thread_id else []
     targets = ([(attempt_id, None)] if main_unknown and attempt_id else [])
@@ -359,6 +422,10 @@ def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: Run
     operations = []
     recovered = []
     for previous_attempt_id, child in targets:
+        if not _foreground_recovery_principal_matches(agent, repo, params, previous_attempt_id):
+            if child is not None:
+                continue
+            raise RuntimeRecoveryRequiredError("当前请求不是原任务的交互发起人，请通过 /recover 显式核实")
         unsettled = repo.unsettled_attempt_operations(previous_attempt_id)
         if child is None:
             result = repo.recover_attempt_unknown(
@@ -367,12 +434,12 @@ def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: Run
             )
         else:
             result = recover_child_attempt_unknown(repo, child, "abandoned", "foreground-user-turn")
-        if not result.get("recovered"):
+        if _checked_foreground_recovery_result(result) is None:
             raise RuntimeRecoveryRequiredError("未知执行恢复条件已变化，未创建新执行轮")
         operations.extend(unsettled)
         recovered.append(previous_attempt_id)
-    # 在子链扫描和恢复之后读取审计，接住其他调用者在扫描期间已经提交的恢复。
-    pending = _pending_foreground_recovery_attempts(repo, row, params)
+    # 在子链扫描和恢复之后读取审计，接住同principal在扫描期间已经提交的恢复。
+    pending = _foreground_recovery_pending_for_principal(agent, repo, row, params)
     carried = (bool(notice) and notice in (params.inject or [])
                and set(pending).issubset(getattr(params, "foreground_recovery_attempt_ids", ())))
     if not recovered and (not pending or carried):

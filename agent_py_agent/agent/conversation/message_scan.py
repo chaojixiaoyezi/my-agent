@@ -36,7 +36,23 @@ class _TranscriptDedupeIndex:
 
 
 _DEDUPE_INDEX_CACHE: OrderedDict[str, _TranscriptDedupeIndex] = OrderedDict()
+_DEDUPE_FILE_LOCKS: OrderedDict[str, threading.Lock] = OrderedDict()
 _DEDUPE_INDEX_LOCK = threading.Lock()
+
+
+# LLM: 全局锁仅保护有界LRU映射；单文件扫描持路径锁，不让慢盘或大文件阻塞其他owner的去重查询。
+# 函数用途: 获取或创建有界的单路径扫描锁，防止跨路径去重查询互相串行阻塞。
+def _dedupe_file_lock(cache_key: str) -> threading.Lock:
+    with _DEDUPE_INDEX_LOCK:
+        lock = _DEDUPE_FILE_LOCKS.get(cache_key)
+        if lock is not None:
+            _DEDUPE_FILE_LOCKS.move_to_end(cache_key)
+            return lock
+        lock = threading.Lock()
+        _DEDUPE_FILE_LOCKS[cache_key] = lock
+        while len(_DEDUPE_FILE_LOCKS) > _MAX_DEDUPE_INDEX_FILES * 2:
+            _DEDUPE_FILE_LOCKS.popitem(last=False)
+        return lock
 
 
 # LLM: 超预算不代表canonical损坏；调用方按error_type处理，不能跳行、推进游标或当作空页结束。
@@ -210,25 +226,33 @@ def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: dict[st
     return existing
 
 
-# LLM: 原append-once锁仍是跨进程幂等权威；本锁仅保护有界LRU和索引扫描，错误时已摘除旧缓存，不发布半成品。
+# LLM: 原append-once锁仍是跨进程幂等权威；全局锁仅保护有界LRU字典，单路径锁保护本文件增量扫描，不阻塞其他文件。
 #   缓存只省略已验证前缀；先恢复其首匹配再扫描新尾，避免迟到同键覆盖首条；空key保持原全扫行为。
 # 函数用途: 校验水位、尾锚及前缀字节后增量解析新尾，旧地址不符则从0解析，饱和键表不缓存。
 def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
     cache_key = str(path)
+    with _dedupe_file_lock(cache_key):
+        return _find_message_dedupe_locked(path, cache_key, key)
+
+
+# LLM: 调用方已持有本路径扫描锁；只在锁内打开、复核前缀与更新LRU缓存。
+# 函数用途: 执行单路径去重扫描与增量索引维护。
+def _find_message_dedupe_locked(path: Path, cache_key: str, key: str) -> MessageLogEntry | None:
     try:
         handle = path.open("rb")
     except FileNotFoundError:
         with _DEDUPE_INDEX_LOCK:
             _DEDUPE_INDEX_CACHE.pop(cache_key, None)
         return None
-    with handle, _DEDUPE_INDEX_LOCK:
-        index = _DEDUPE_INDEX_CACHE.pop(cache_key, None)
+    with handle:
+        with _DEDUPE_INDEX_LOCK:
+            index = _DEDUPE_INDEX_CACHE.pop(cache_key, None)
         status = os.fstat(handle.fileno())
         end = handle.seek(0, 2)
         cursor, key_offsets, existing = 0, {}, None
         hasher = hashlib.blake2b(digest_size=16)
         if key and index is not None and _dedupe_index_matches(handle, index, status, end, hasher):
-            cursor, key_offsets = index.scanned_offset, index.key_offsets
+            cursor, key_offsets = index.scanned_offset, dict(index.key_offsets)
             if key in key_offsets:
                 existing = _indexed_dedupe_message(handle, key, key_offsets[key])
                 if existing is None:
@@ -240,14 +264,16 @@ def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
         existing = _scan_dedupe_tail(handle, end, key, key_offsets, existing, hasher)
         if end and len(key_offsets) < _MAX_DEDUPE_KEYS_PER_FILE:
             anchor_offset, anchor_digest = _dedupe_tail_anchor(handle, end)
-            _DEDUPE_INDEX_CACHE[cache_key] = _TranscriptDedupeIndex(
+            new_index = _TranscriptDedupeIndex(
                 dev=status.st_dev, ino=status.st_ino, scanned_offset=end,
                 tail_anchor_offset=anchor_offset, tail_anchor_digest=anchor_digest, key_offsets=key_offsets,
                 prefix_digest=hasher.digest(),
                 mtime_ns=status.st_mtime_ns, ctime_ns=status.st_ctime_ns,
             )
-            while len(_DEDUPE_INDEX_CACHE) > _MAX_DEDUPE_INDEX_FILES:
-                _DEDUPE_INDEX_CACHE.popitem(last=False)
+            with _DEDUPE_INDEX_LOCK:
+                _DEDUPE_INDEX_CACHE[cache_key] = new_index
+                while len(_DEDUPE_INDEX_CACHE) > _MAX_DEDUPE_INDEX_FILES:
+                    _DEDUPE_INDEX_CACHE.popitem(last=False)
         return existing
 
 

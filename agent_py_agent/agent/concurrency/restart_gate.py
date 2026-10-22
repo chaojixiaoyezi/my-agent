@@ -14,22 +14,28 @@ from .interrupt import is_interrupted
 _condition = threading.Condition()
 _closed = False
 _executing = 0
+_executing_ops: dict[int, dict[str, object]] = {}
+_next_token = 0
 # 重启闸门轮询等待的秒数；重启间隔不足时按这个切片反复探测，避免忙等。
 _WAIT_SLICE_SECONDS = 0.2
 
 
-# LLM: 关口关闭时阻塞调用线程，直到重新打开或本线程被协作中断；进程退出时等待中的守护线程随之结束。
-# 函数用途: 包住一次副作用工具的领取与执行；产出 True 表示已准入并计入执行中，False 表示因中断未准入。
+# LLM: 关门仍等待或协作中断；仅准入时在同一condition锁内登记/计数，finally按唯一token清理，标签由调用方限定为宿主身份而非参数正文。
+# 函数用途: 包住副作用工具的领取与执行，并登记尚未退出的工具身份；True为已准入，False为等待中断。
 @contextmanager
-def tool_execution_admission() -> Iterator[bool]:
-    global _executing
-    admitted = False
+def tool_execution_admission(label: dict[str, object] | None = None) -> Iterator[bool]:
+    global _executing, _next_token
+    admitted, token = False, 0
     with _condition:
         while _closed:
             if is_interrupted():
                 break
             _condition.wait(timeout=_WAIT_SLICE_SECONDS)
         else:
+            row = {**dict(label or {}), "admitted_at": time.time()}
+            _next_token += 1
+            token = _next_token
+            _executing_ops[token] = row
             _executing += 1
             admitted = True
     try:
@@ -38,6 +44,7 @@ def tool_execution_admission() -> Iterator[bool]:
         if admitted:
             with _condition:
                 _executing -= 1
+                _executing_ops.pop(token, None)
                 _condition.notify_all()
 
 
@@ -50,7 +57,7 @@ def close_tool_gate() -> None:
         _condition.notify_all()
 
 
-# LLM: 重启取消或测试收尾时调用，等待中的线程会立即继续。
+# LLM: 重启取消或测试收尾时调用，等待者继续；已准入工具的计数/登记必须保留，不能重开门就假装排空。
 # 函数用途: 重新打开关口，让等待中的工具照常开跑。
 def open_tool_gate() -> None:
     global _closed
@@ -73,6 +80,14 @@ def executing_tool_count() -> int:
         return _executing
 
 
+# LLM: 同一condition锁内排序并浅拷贝已准入身份，不含工具参数或输出；只供进程级诊断，不持久化、不授予执行权。
+# 函数用途: 返回按准入时刻排序的占门工具清单，默认最多20条，非正上限返回空列表。
+def executing_tool_snapshot(limit: int = 20) -> list[dict[str, object]]:
+    with _condition:
+        rows = sorted(_executing_ops.values(), key=lambda row: float(row.get("admitted_at") or 0.0))
+        return [dict(row) for row in rows[:max(0, limit)]]
+
+
 # LLM: 超时返回 False，不改变关口状态；timeout 为 None 表示一直等。
 # 函数用途: 等到执行中的副作用工具数量归零，供重启排空判断能否换进程。
 def wait_until_no_executing_tools(timeout: float | None) -> bool:
@@ -89,6 +104,7 @@ def wait_until_no_executing_tools(timeout: float | None) -> bool:
 __all__ = [
     "close_tool_gate",
     "executing_tool_count",
+    "executing_tool_snapshot",
     "open_tool_gate",
     "tool_execution_admission",
     "tool_gate_closed",

@@ -27,6 +27,7 @@ from ..agent.gateway_parts.restart_service import (
     consume_restart_marker,
     mark_restart_drained,
     pending_restart_request,
+    reset_restart_drain_state,
     run_restart_drain,
     submit_restart_request,
 )
@@ -42,7 +43,7 @@ MULTIPROCESS_RESTART_ERROR_CODE = "GATEWAY_MULTIPROCESS_RESTART_UNSUPPORTED"
 
 # LLM: 只在服务主循环里调用；有指向本进程的请求才排空。停止请求优先于重启：排空期间收到停止请求就撤销重启，
 # 交回主循环按停止处理。排空超时取消时给发起会话写一条取消通知。成功时返回带 restart 标记的结束报告，其余返回 None 继续服务。
-# 函数用途: 发现安全重启请求时执行两段排空，并把阶段写进 Gateway 状态文件供 /status 查看。
+# 函数用途: 汇总前后台回合后两段排空；按重启策略记录强制超时，停止请求优先并复位工具门。
 # LLM: 内部正count只能沿实际原C取消请求并继续服务；未实现B4滚动重启，不得进入Count0排空或接班。
 def drain_for_requested_restart(context: GatewayRunContext, process_identity: dict[str, object]) -> dict | None:
     paths = context.paths
@@ -55,6 +56,15 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     agent = context.agent
     config = agent.config
     request_id = str(request.get("request_id") or "")
+    background_shutdown = getattr(context, "background_shutdown", None)
+
+    # LLM: 仅合计前台准入与后台纯内存片计数，不把blockers/数据库/指标投影当生命周期权威。
+    # 函数用途: 让后台发起重启的当前回合也能在开门阶段完成工具收尾。
+    def active_turns() -> int:
+        foreground = int(admission.snapshot().get("total") or 0)
+        background = (int(background_shutdown.active_slice_count())
+                      if background_shutdown is not None and hasattr(background_shutdown, "active_slice_count") else 0)
+        return foreground + background
 
     def stop_requested() -> bool:
         return paths.stop_request.exists() and stop_request_targets_process(
@@ -71,13 +81,16 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
     })
     result = run_restart_drain(
         request,
-        active_turns=lambda: int(admission.snapshot().get("total") or 0),
+        active_turns=active_turns,
         turn_wait_seconds=float(config.gateway_restart_turn_wait_seconds),
         drain_timeout_seconds=float(config.gateway_restart_drain_timeout_seconds),
+        force_on_drain_timeout=(str(request.get("operation") or "restart") == "restart"
+                                and bool(getattr(config, "gateway_restart_force_on_drain_timeout", True))),
         stop_requested=stop_requested,
         on_progress=progress,
     )
     if result.get("ok") and stop_requested():
+        reset_restart_drain_state()
         result = {"ok": False, "reason": "stop_requested", "request_id": request_id}
     if not result.get("ok"):
         cancel_restart_request(paths, request, result)
@@ -88,13 +101,26 @@ def drain_for_requested_restart(context: GatewayRunContext, process_identity: di
             notified = append_restart_cancellation(request, result, home_root=home_root)
         log_gateway_event(agent, "gateway_restart_cancelled", {**result, "requesters_notified": notified.get("written", 0)})
         return None
+    return _mark_drained_restart(context, request, result)
+
+
+# LLM: 只复用原完成标记写者；强制超时事实同样传给持久标记和事件，不启动进程，不清理未退工具。
+# 函数用途: 保存排空交接结果并生成主循环的重启结束报告。
+def _mark_drained_restart(context, request: dict, result: dict) -> dict:
     marker = mark_restart_drained(
-        paths, request, old_pid=os.getpid(),
+        context.paths, request, old_pid=os.getpid(),
         old_process_started_at=float(context.process_started_at or 0.0),
         active_turns_at_exit=int(result.get("active_turns_at_exit") or 0),
+        forced_after_drain_timeout=bool(result.get("forced_after_drain_timeout")),
+        executing_tools_at_exit=int(result.get("executing_tools_at_exit") or 0),
+        executing_tools=result.get("executing_tools"),
     )
-    log_gateway_event(agent, "gateway_restart_drained", {
-        "request_id": request_id, "active_turns_at_exit": marker.get("active_turns_at_exit"),
+    log_gateway_event(context.agent, "gateway_restart_drained", {
+        "request_id": str(request.get("request_id") or ""), "active_turns_at_exit": marker.get("active_turns_at_exit"),
+        **({"forced_after_drain_timeout": True,
+            "executing_tools_at_exit": int(marker.get("executing_tools_at_exit") or 0),
+            **({"executing_tools": list(marker.get("executing_tools"))} if marker.get("executing_tools") else {})}
+           if marker.get("forced_after_drain_timeout") else {}),
     })
     return {"summary": "safe restart drained", "restart": marker}
 

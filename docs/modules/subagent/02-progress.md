@@ -1,3 +1,7 @@
+## 2026-10-22 子代理 `_run_cache` 同时校验 `canonical_state.json` 字节预算
+
+`subagents/services/persistence/service.py` 在决定是否将 `SubAgentTask` 放入进程内 `_run_cache` 时，除检查 `locator` 文件尺寸外同步检查 `canonical_state.json` 的物理文件大小是否超过 `_MAX_RUN_CACHE_ITEM_BYTES`（256 KiB），避免小体积 locator 指向超大 canonical 状态文件时绕过单条目内存预算上限。
+
 ## 2026-10-21 子代理 canonical 缺失路径负缓存（长期运行性能收敛）
 
 `subagents/services/persistence/service.py` 在 `list_runs` 的进程内缓存基础上，对 `locator` 存在但 `canonical task.json` 已被清理的死项增加负缓存 `_missing_canonical_cache`，并以 `_MAX_RUN_CACHE_ENTRIES = 512` 约束 `_run_cache` 与 `_missing_canonical_cache` 容量上限。只有 `locator` 的 `mtime` 早于 2 秒粗时间窗阈值且读取 `canonical_path` 抛 `FileNotFoundError` 时才记录 `(locator_stat_signature, canonical_path)`，并在 `locator` 5 元组 stat 签名变化、canonical 文件恢复或 `list_runs` 发现 locator 已删除时立即失效，避免长期运行后每次 `list_runs` 反复对数百个已清理历史子代理重解析 locator JSON。
