@@ -663,16 +663,26 @@ def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
         pass
 
 
-# LLM: 快照合并父子关系与仍可核对的独立进程组；只有活的或未回收组长能授予组范围，旧 PID 不能；枚举失败保留不完整，联测 shell orphan kill。
+# LLM: 默认Linux父/组表共享一次proc扫描；任一map被替换则保留旧调用路径，完整性与出生身份守卫不变。
 # 函数用途: 只读采集原进程树及已换父进程的同组后代出生标识，供本次终止和退出核对共用。
 def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     if root_pid <= 0:
         return {}, False
     children: dict[int, list[int]] = {}
-    parents, complete = _process_parent_map()
+    if (Path("/proc").is_dir() and _process_parent_map is _DEFAULT_PROCESS_PARENT_MAP
+            and _process_group_map is _DEFAULT_PROCESS_GROUP_MAP):
+        birth = capture_process_birth_token(root_pid)
+        parents, groups = _linux_proc_parent_and_group_maps()
+        complete = bool(parents) and getattr(parents, "complete", True)
+        group_members, group_complete = _exclusive_group_members(root_pid, groups=groups)
+        # 预取表也必须被扫描前的同一组长身份约束，不能把旧组成员套给复用后的PID。
+        if group_members and (not birth or not _same_process(root_pid, birth)):
+            group_members, group_complete = [], False
+    else:
+        parents, complete = _process_parent_map()
+        group_members, group_complete = _exclusive_group_members(root_pid)
     for child, parent in parents.items():
         children.setdefault(parent, []).append(child)
-    group_members, group_complete = _exclusive_group_members(root_pid)
     complete = complete and group_complete
     ordered: list[int] = []
     pending = [root_pid, *group_members]
@@ -689,13 +699,16 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     return snapshot, complete
 
 
-# LLM: 仅独立组长且出生身份在枚举前后相同才拥有整组；不恢复已回收 root 的旧 PGID，不读取命令文字或扩大到宿主组。
+# LLM: 可共享同次扫描的groups，但仍须核对组长出生身份、独立组与宿主组；不得用不完整映射证明清理完成。
 # 函数用途: Linux用procfs、其它平台用关闭stdin的ps找原组成员，仍核对组长出生身份与宿主组边界。
-def _exclusive_group_members(root_pid: int) -> tuple[list[int], bool]:
+def _exclusive_group_members(root_pid: int, *, groups: dict[int, int] | None = None) -> tuple[list[int], bool]:
     birth = capture_process_birth_token(root_pid)
     if not birth:
         return [], _process_instance_terminated(root_pid, "")
-    groups, complete = _process_group_map()
+    if groups is None:
+        groups, complete = _process_group_map()
+    else:
+        complete = bool(groups) and getattr(groups, "complete", True)
     root_group = groups.get(root_pid)
     if not _same_process(root_pid, birth):
         return [], False
@@ -745,29 +758,70 @@ def _process_group_map() -> tuple[dict[int, int], bool]:
     return groups, complete
 
 
-# LLM: 进程枚举只使用系统结构化字段；无法访问或解析时返回不完整，禁止用空表证明退出。
+# LLM: dict内容仍是PID到父/组号；complete只承载原枚举缺口，不是另一份进程权威或跨调用缓存。
+# 类用途: 在保持双dict返回合同的同时携带父表与组表各自的完整性事实。
+class _ProcRelationMap(dict[int, int]):
+    complete: bool = True
+
+
+# LLM: 只枚举Linux procfs一次，stat失败回退status只恢复父表；读不到组号不得冒充完整组表。
+# 函数用途: 一次枚举收集父进程与组号，供进程树快照共享。
+def _linux_proc_parent_and_group_maps(proc_root: Path | None = None) -> tuple[dict[int, int], dict[int, int]]:
+    root = proc_root if proc_root is not None else Path("/proc")
+    parents, groups = _ProcRelationMap(), _ProcRelationMap()
+    try:
+        entries = tuple(root.iterdir())
+    except OSError:
+        parents.complete = groups.complete = False
+        return parents, groups
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            parents.complete = groups.complete = False
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            fields = stat.rsplit(")", 1)[1].split()
+            parent, group = int(fields[1]), int(fields[2])
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+        except (OSError, IndexError, TypeError, ValueError):
+            groups.complete = False
+        else:
+            parents[pid], groups[pid] = parent, group
+            continue
+        parent, parent_complete = _linux_proc_status_parent(entry)
+        parents.complete = parents.complete and parent_complete
+        if parent is not None:
+            parents[pid] = parent
+        if parent is not None or not parent_complete:
+            groups.complete = False
+    return parents, groups
+
+
+# LLM: 消失项不算拒读，status坏文本/权限错误保留父表缺口；不得从父表推断进程组。
+# 函数用途: 为仅有status的旧测试或竞态中的进程读取PPid回退字段。
+def _linux_proc_status_parent(entry: Path) -> tuple[int | None, bool]:
+    try:
+        status = (entry / "status").read_text(encoding="utf-8", errors="replace")
+        line = next(line for line in status.splitlines() if line.startswith("PPid:"))
+        return int(line.split(":", 1)[1].strip()), True
+    except (FileNotFoundError, ProcessLookupError):
+        return None, True
+    except (OSError, StopIteration, TypeError, ValueError):
+        return None, False
+
+
+# LLM: Linux复用stat优先的单遍映射，保留status回退与父表完整性；无proc平台仍走原ps合同。
 # 函数用途: 读取宿主机父子关系，探测命令关闭 stdin；进程消失不算错误，其余读取失败保留核对缺口。
 def _process_parent_map() -> tuple[dict[int, int], bool]:
     proc_root = Path("/proc")
     if proc_root.is_dir():
-        result: dict[int, int] = {}
-        try:
-            entries = tuple(proc_root.iterdir())
-        except OSError:
-            return {}, False
-        complete = True
-        for entry in entries:
-            if not entry.name.isdigit():
-                continue
-            try:
-                status = (entry / "status").read_text(encoding="utf-8", errors="replace")
-                parent_line = next(line for line in status.splitlines() if line.startswith("PPid:"))
-                result[int(entry.name)] = int(parent_line.split(":", 1)[1].strip())
-            except (FileNotFoundError, ProcessLookupError):
-                continue
-            except (OSError, StopIteration, TypeError, ValueError):
-                complete = False
-        return result, complete and bool(result)
+        result, _groups = _linux_proc_parent_and_group_maps(proc_root)
+        return result, bool(result) and getattr(result, "complete", True)
     try:
         completed = subprocess.run(
             ["ps", "-axo", "pid=,ppid="],
@@ -788,6 +842,11 @@ def _process_parent_map() -> tuple[dict[int, int], bool]:
         except (TypeError, ValueError):
             complete = False
     return result, complete and bool(result)
+
+
+# 函数身份引用仅用于保留既有monkeypatch边界，不缓存任何进程或出生信息。
+_DEFAULT_PROCESS_PARENT_MAP = _process_parent_map
+_DEFAULT_PROCESS_GROUP_MAP = _process_group_map
 
 
 # LLM: 信号失败、身份读取失败或权限不足不能证明死亡；僵尸以宿主内核状态确认，
