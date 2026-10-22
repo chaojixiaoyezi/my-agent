@@ -7,7 +7,11 @@
 
 from __future__ import annotations
 
+import json
+from collections import OrderedDict
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.owner_scoped_pool import (
     ActiveOwnerRegistry,
@@ -306,3 +310,265 @@ def test_config_with_owner_overrides_owner_keeps_rest(tmp_path) -> None:
     assert scoped.my_agent_owner_id == "alice"
     assert scoped.model_backend == "echo"  # 其余配置继承
     assert base.my_agent_owner_id == "main"  # 原 config 不被改(replace 返回新实例)
+
+
+# LLM: 真实JSONL读取/写后刷新共用缓存，缩小预算只为命中边界，不修改正文或放宽返回断言。
+# 函数用途: 验证超大历史文件仍可解析但不留在进程缓存，包括清掉旧的小版本快照。
+@pytest.mark.parametrize('entry', ['read', 'write'])
+def test_opt7_history_oversize_is_returned_without_retention(tmp_path, monkeypatch, entry):
+    from agent_py_agent.agent.gateway_parts import io
+
+    monkeypatch.setattr(io, '_GATEWAY_HISTORY_CACHE', {})
+    monkeypatch.setattr(io, '_MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES', 80, raising=False)
+    path = tmp_path / 'history.jsonl'
+    row = {'id': 'one', 'content': 'small'}
+    path.write_text(json.dumps(row) + '\n')
+    io._gateway_history_snapshot(path)
+    assert str(path.resolve()) in io._GATEWAY_HISTORY_CACHE
+    row['content'] = '正文' * 100
+    path.write_text(json.dumps(row, ensure_ascii=False) + '\n', encoding='utf-8')
+    lines, index = io._gateway_history_snapshot(path)
+    if entry == 'write':
+        io._store_gateway_history_cache(path, lines, index)
+    assert index['one'].payload == row and json.loads(lines[0]) == row
+    assert str(path.resolve()) not in io._GATEWAY_HISTORY_CACHE
+
+
+# LLM: 每个文件单独不超限，总预算取实际stat字节，两条边界可保留，第三条淘汰最早项。
+# 函数用途: 验证历史冷读和写后刷新均受总字节预算约束而非只有条数上限。
+@pytest.mark.parametrize('entry', ['read', 'write'])
+def test_opt7_history_total_budget_evicts_oldest(tmp_path, monkeypatch, entry):
+    from agent_py_agent.agent.gateway_parts import io
+
+    monkeypatch.setattr(io, '_GATEWAY_HISTORY_CACHE', {})
+    paths = [tmp_path / f'{number}.jsonl' for number in range(3)]
+    body = json.dumps({'id': 'one', 'content': 'x' * 20}) + '\n'
+    for path in paths:
+        path.write_text(body)
+    size = paths[0].stat().st_size
+    monkeypatch.setattr(io, '_MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES', size * 2, raising=False)
+    for path in paths:
+        if entry == 'read':
+            io._gateway_history_snapshot(path)
+        else:
+            io._store_gateway_history_cache(path, [body.rstrip('\n')], {})
+    assert list(io._GATEWAY_HISTORY_CACHE) == [str(path.resolve()) for path in paths[1:]]
+    assert sum(row[0][1] for row in io._GATEWAY_HISTORY_CACHE.values()) == size * 2
+
+
+# LLM: 使用真实stat和JSON解析，只替代领域对象构造；固定本地缓存时钟避免粗mtime窗口隐藏大小断言。
+# 函数用途: 验证run超限仍每次返回解析副本，小版本缓存不残留且256KiB上限看size而非inode。
+def test_opt7_run_large_item_bypasses_cache_and_drops_old_entry(tmp_path, monkeypatch):
+    from agent_py_agent.agent.subagents.services.persistence import service as module
+
+    service = module.SubAgentPersistenceService(SimpleNamespace(workspace=tmp_path))
+    path = tmp_path / 'task.json'
+    path.write_text(json.dumps({'id': 'one', 'result': 'small'}))
+    monkeypatch.setattr(module, '_now', lambda: path.stat().st_mtime + 10)
+    monkeypatch.setattr(service, '_MAX_RUN_CACHE_ITEM_BYTES', 80, raising=False)
+    reads = []
+
+    # LLM: 每次实际读JSON，计数仅观察缓存是否避开读取，不伪造stat或cache命中。
+    # 函数用途: 解析本测试的权威文件并返回独立对象。
+    def load(_run_id):
+        reads.append(True)
+        return SimpleNamespace(**json.loads(path.read_text()))
+
+    monkeypatch.setattr(service, 'load', load)
+    assert service._cached_run_copy('one', path).result == 'small'
+    assert 'one' in service._run_cache
+    path.write_text(json.dumps({'id': 'one', 'result': '大' * 100}, ensure_ascii=False), encoding='utf-8')
+    first = service._cached_run_copy('one', path)
+    second = service._cached_run_copy('one', path)
+    assert first.result == second.result == '大' * 100 and first is not second
+    assert len(reads) == 3 and 'one' not in service._run_cache
+
+
+# LLM: 负缓存现实现已有条数限制，本测试改变独立上限确保新增常量真正被使用，不降低正缓存容量。
+# 函数用途: 验证缺失canonical缓存单独限制为512条的合同及FIFO淘汰。
+def test_opt7_negative_run_cache_has_independent_entry_budget(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common.cache_freshness import cache_stat_signature
+    from agent_py_agent.agent.subagents.services.persistence import service as module
+
+    service = module.SubAgentPersistenceService(SimpleNamespace(workspace=tmp_path))
+    monkeypatch.setattr(service, '_MAX_NEGATIVE_RUN_CACHE_ENTRIES', 2, raising=False)
+    monkeypatch.setattr(service, '_MAX_RUN_CACHE_ENTRIES', 100)
+    for number in range(3):
+        path = tmp_path / f'locator-{number}.json'
+        path.write_text(json.dumps({'task_workspace_dir': str(tmp_path),
+            'agent_run_workspace_dir': str(tmp_path / 'work' / 'agents' / f'run-{number}')}))
+        service._cache_missing_canonical(str(number), path, cache_stat_signature(path.stat()))
+    assert list(service._missing_canonical_cache) == ['1', '2']
+
+
+# LLM: 真实线程解析及LRU读取，字节数取UTF8文件stat；不以缓存项数或对象存在冒充字节预算。
+# 函数用途: 验证线程总量淘汰最久未用项，重复替换与深拷贝仍正确。
+def test_opt7_thread_cache_total_budget_preserves_lru_and_copy(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import store_threads as module
+    from agent_py_agent.agent.conversation.models import ConversationThread
+
+    monkeypatch.setattr(module, '_THREAD_RECORD_CACHE', OrderedDict())
+    paths = [tmp_path / f'{number}.json' for number in range(3)]
+    for number, path in enumerate(paths):
+        row = ConversationThread(thread_id=str(number), canonical_user_id='owner', metadata={'text': '字' * 10})
+        path.write_text(json.dumps(row.to_dict(), ensure_ascii=False), encoding='utf-8')
+    size = paths[0].stat().st_size
+    monkeypatch.setattr(module, '_THREAD_CACHE_MAX_TOTAL_BYTES', size * 2, raising=False)
+    for path in paths[:2]:
+        row, error = module._read_thread_record_report(path)
+        assert error is None and row.thread_id == path.stem
+    module._read_thread_record_report(paths[0])
+    row, error = module._read_thread_record_report(paths[2])
+    assert error is None and row.thread_id == '2'
+    assert list(module._THREAD_RECORD_CACHE) == [str(paths[0]), str(paths[2])]
+    row.metadata['text'] = 'caller mutation'
+    again, error = module._read_thread_record_report(paths[2])
+    assert error is None and again.metadata['text'] == '字' * 10
+    cached = module._THREAD_RECORD_CACHE[str(paths[2])]
+    assert cached.size_bytes == paths[2].stat().st_size
+
+
+_OPT7_MCP_EVICTIONS = (
+    ('idle', True), ('hard_lru', True), ('soft_lru', False),
+    ('hard_replaces_soft', False), ('soft_id', False),
+)
+
+
+# LLM: 真实池入口与锁，不起进程；回调记录锁可获取性而不在会被产品吞错的回调里断言。
+# 函数用途: 构造可观察MCP关闭次数、身份和锁外调用事实的测试池。
+def _opt7_mcp_pool(tmp_path, *, close_raises=False):
+    pool, _ = _counting_pool(tmp_path, max_agents=1)
+    closed = []
+
+    # LLM: 仅替代重量级Agent初始化，每次独立返回对象，保留原get/_store及pin生命周期。
+    # 函数用途: 给新owner附加可观察的MCP关闭回调。
+    def build(_base, _root, owner, _workspace_roots):
+        agent = SimpleNamespace(owner_id=owner.owner_id)
+
+        # LLM: 不阻塞拿锁，不抛断言；失败事实交测试主体检查，模拟异常仍必须记录调用。
+        # 函数用途: 记录关闭目标及调用时池锁已释放，并可模拟清理失败。
+        def close():
+            unlocked = pool._lock.acquire(blocking=False)
+            if unlocked:
+                pool._lock.release()
+            closed.append((agent, unlocked))
+            if close_raises:
+                raise RuntimeError('MCP close failed')
+
+        agent.tools = SimpleNamespace(close_mcp_clients=close)
+        return agent
+
+    pool._builder = build
+    return pool, closed
+
+
+# LLM: 每条路线使用原公开回收入口；LRU仍由真实get触发，不手改池内部容量或缓存引用。
+# 函数用途: 统一触发空闲、硬软LRU和软实例ID淘汰，并核对原对象确实离池。
+def _opt7_evict_mcp_agent(pool, agent, route):
+    owner = OwnerIdentity.provider_user('feishu', agent.owner_id)
+    key = (owner.provider, owner.owner_kind, owner.owner_id)
+    if route == 'idle':
+        assert pool.evict_idle(key, agent, pool._last_used[key]) is True
+    elif route == 'soft_id':
+        assert pool.evict_soft_agent_id(id(agent)) is True
+    else:
+        pool.get(OwnerIdentity.provider_user('feishu', 'replacement'), hard=route != 'soft_lru')
+    assert pool.peek(owner) is None
+
+
+# LLM: 原淘汰和新MCP关闭一起观察；清理异常不能改变淘汰结果，锁外事实在主体断言。
+# 函数用途: 验证所有无pin淘汰分支仅关闭被释放实例一次且不持池锁。
+@pytest.mark.parametrize('route,hard', _OPT7_MCP_EVICTIONS)
+@pytest.mark.parametrize('close_raises', [False, True])
+def test_opt7_pool_mcp_unpinned_eviction_closes_outside_lock(tmp_path, route, hard, close_raises):
+    pool, closed = _opt7_mcp_pool(tmp_path, close_raises=close_raises)
+    agent = pool.get(OwnerIdentity.provider_user('feishu', 'victim'), hard=hard)
+    _opt7_evict_mcp_agent(pool, agent, route)
+    assert len(closed) == 1 and closed[0][0] is agent and closed[0][1] is True
+    assert not getattr(pool, '_retired_agents', {})
+
+
+# LLM: 两层真实pin释放，逐出后保留强引用，不把第一次释放或缓存移除当成可关闭事实。
+# 函数用途: 验证在途淘汰到最后一次pin释放才执行一次锁外关闭。
+@pytest.mark.parametrize('route,hard', _OPT7_MCP_EVICTIONS[1:])
+def test_opt7_pool_mcp_pinned_eviction_waits_for_last_release(tmp_path, route, hard):
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    agent = pool.get(OwnerIdentity.provider_user('feishu', 'victim'), hard=hard)
+    with pool.pin(agent):
+        with pool.pin(agent, touch=False):
+            _opt7_evict_mcp_agent(pool, agent, route)
+            assert closed == []
+            assert getattr(pool, '_retired_agents', {}).get(id(agent)) is agent
+        assert closed == [] and pool._pins[id(agent)] == 1
+    assert len(closed) == 1 and closed[0][0] is agent and closed[0][1] is True
+    assert not pool._pins and not pool._retired_agents
+
+
+# LLM: 保留原空闲CAS和pin保护，不为了覆盖关闭而放宽evict_idle的既有拒绝条件。
+# 函数用途: 验证活跃租用不能空闲回收，释放后按新触摸版本才能回收并关闭。
+def test_opt7_pool_mcp_idle_keeps_pinned_agent(tmp_path):
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    owner = OwnerIdentity.provider_user('feishu', 'victim')
+    agent = pool.get(owner)
+    key = (owner.provider, owner.owner_kind, owner.owner_id)
+    touched = pool._last_used[key]
+    with pool.pin(agent):
+        assert pool.evict_idle(key, agent, touched) is False
+        assert pool.peek(owner) is agent and closed == []
+    assert closed == []
+    _opt7_evict_mcp_agent(pool, agent, 'idle')
+    assert len(closed) == 1 and closed[0] == (agent, True)
+
+
+# LLM: 同对象仍在另一张表有引用时不能关闭；按身份而非owner键或相等性决定退役。
+# 函数用途: 验证软引用移除不会关闭仍被硬表持有的实例。
+def test_opt7_pool_mcp_shared_pool_reference_prevents_early_close(tmp_path):
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    pool._max_agents = 2
+    agent = pool.get(OwnerIdentity.provider_user('feishu', 'victim'), hard=False)
+    alias = ('feishu', 'user', 'alias')
+    assert pool._store(alias, agent, hard=True) is agent
+    assert pool.evict_soft_agent_id(id(agent)) is True
+    assert pool.active_count() == 1 and closed == []
+    assert pool.evict_idle(alias, agent, pool._last_used[alias]) is True
+    assert len(closed) == 1 and closed[0] == (agent, True)
+
+
+# LLM: _store双检和准入拒绝返回原结果，但新建且未采用的Agent同样不可遗留MCP资源。
+# 函数用途: 验证重复构建或软准入失败只关闭未采用实例，不关闭已缓存实例。
+@pytest.mark.parametrize('duplicate', [True, False])
+def test_opt7_pool_mcp_store_closes_unused_candidate(tmp_path, duplicate):
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    owner = OwnerIdentity.provider_user('feishu', 'cached')
+    cached = pool.get(owner)
+    candidate = pool._builder(None, None, OwnerIdentity.provider_user('feishu', 'candidate'), None)
+    key = ('feishu', 'user', 'cached' if duplicate else 'rejected')
+    result = pool._store(key, candidate, hard=duplicate)
+    assert result is (cached if duplicate else None)
+    assert pool.peek(owner) is cached
+    assert len(closed) == 1 and closed[0][0] is candidate and closed[0][1] is True
+    assert pool._store(('feishu', 'user', 'cached'), cached, hard=True) is cached
+    assert len(closed) == 1
+
+
+# LLM: 先完成替换再决定旧对象是否仍被引用；同对象换键不等于退役。
+# 函数用途: 验证容量淘汰后原对象又成为新条目时不关闭仍在池的MCP。
+def test_opt7_pool_mcp_same_object_reinserted_by_store_stays_open(tmp_path):
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    agent = pool.get(OwnerIdentity.provider_user('feishu', 'victim'))
+    assert pool._store(('feishu', 'user', 'replacement'), agent, hard=True) is agent
+    assert pool.active_agents() == [agent] and closed == []
+
+
+# LLM: 业务异常传播不受清理异常影响，contextmanager finally仍必须释放最后pin及退休强引用。
+# 函数用途: 验证异常退出时关闭失败不会吞业务错误或遗留退休对象。
+def test_opt7_pool_mcp_pin_exception_still_retires(tmp_path):
+    pool, closed = _opt7_mcp_pool(tmp_path, close_raises=True)
+    agent = pool.get(OwnerIdentity.provider_user('feishu', 'victim'), hard=False)
+    with pytest.raises(ValueError, match='business error'):
+        with pool.pin(agent):
+            _opt7_evict_mcp_agent(pool, agent, 'soft_id')
+            assert closed == []
+            raise ValueError('business error')
+    assert len(closed) == 1 and closed[0] == (agent, True)
+    assert not pool._pins and not getattr(pool, '_retired_agents', {})

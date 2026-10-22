@@ -196,6 +196,8 @@ class SubAgentPersistenceService:
     _RUN_CACHE_COARSE_MTIME_GUARD_SECONDS = CACHE_TRUST_AGE_SECONDS
     # 限制进程内子代理状态与缺失 canonical 缓存上限，避免只走按 ID 查询时缓存无界累积。
     _MAX_RUN_CACHE_ENTRIES = 512
+    _MAX_RUN_CACHE_ITEM_BYTES = 256 * 1024
+    _MAX_NEGATIVE_RUN_CACHE_ENTRIES = 512
 
     # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
     # projection may share it, but callers always receive deep copies and canonical files remain
@@ -299,15 +301,16 @@ class SubAgentPersistenceService:
     ) -> SubAgentListRunsReport:
         return _list_runs_for_root_report(self, root_task_id)
 
-    # LLM: Cache access is serialized because ThreadingHTTPServer may render several TUI/Web
-    # projections concurrently. Matching entries are safe to reuse because only reads older than
-    # the coarse window are cached; fresh misses must return without storing their parsed snapshot.
+    # LLM: 锁内复用稳定文件，256KiB按公共五元指纹size位置[2]判断；超限只解析返回并删除旧缓存，不改变深拷贝及粗mtime合同。
     # 缺失缓存每次核locator指纹和canonical存在性；近期、损坏及权限错误不作负缓存，错误仍交原报告口。
     # 函数用途: 复用稳定解析结果或缺失目标事实；文件重现或locator换代立即重读，不把缓存当权威。
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
             stat = task_file.stat()
             signature = cache_stat_signature(stat)
+            within_budget = stat.st_size <= self._MAX_RUN_CACHE_ITEM_BYTES
+            if not within_budget:
+                self._run_cache.pop(run_id, None)
             cached = self._run_cache.get(run_id)
             if cached is not None and cached[0] == signature:
                 return copy.deepcopy(cached[1])
@@ -323,7 +326,7 @@ class SubAgentPersistenceService:
                 if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
                     self._cache_missing_canonical(run_id, task_file, signature)
                 raise
-            if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+            if within_budget and mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
                 if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
                     self._run_cache.pop(next(iter(self._run_cache)), None)
                 self._run_cache[run_id] = (signature, task)
@@ -331,7 +334,7 @@ class SubAgentPersistenceService:
                 self._run_cache.pop(run_id, None)
             return copy.deepcopy(task)
 
-    # LLM: 仅由持_run_cache_lock且已核旧mtime的缺失分支调用；沿原解析器，不缓存经符号链接变换的目标。
+    # LLM: 仅由持_run_cache_lock且已核旧mtime的缺失分支调用；负缓存独立上限512，沿原解析器与nofollow边界。
     # 函数用途: 为稳定、直达且确实缺失的canonical建负缓存；探测失败只放弃优化，保留调用方原始缺失错误。
     def _cache_missing_canonical(
         self, run_id: str, task_file: Path, signature: tuple[int, int, int, int, int],
@@ -348,7 +351,7 @@ class SubAgentPersistenceService:
                 return
             if (
                 run_id not in self._missing_canonical_cache
-                and len(self._missing_canonical_cache) >= self._MAX_RUN_CACHE_ENTRIES
+                and len(self._missing_canonical_cache) >= self._MAX_NEGATIVE_RUN_CACHE_ENTRIES
             ):
                 self._missing_canonical_cache.pop(next(iter(self._missing_canonical_cache)), None)
             self._missing_canonical_cache[run_id] = (signature, canonical)

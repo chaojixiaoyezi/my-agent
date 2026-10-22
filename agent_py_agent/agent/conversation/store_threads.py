@@ -8,7 +8,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +33,20 @@ from .store_layout import ConversationStorage
 
 _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT = 16384
 _THREAD_RECORD_CACHE_MAX_RECORD_BYTES = 64 * 1024
+_THREAD_CACHE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
 _THREAD_RECORD_CACHE_LOCK = threading.Lock()
-_THREAD_RECORD_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], ConversationThread]] = OrderedDict()
+
+
+# LLM: 仅内存缓存条目，字节来自同次稳定文件指纹，不是精确Python堆占用或新的状态权威。
+# 类用途: 保存线程快照、版本指纹及总预算核算用的原始字节数。
+@dataclass(frozen=True)
+class _CachedThread:
+    fingerprint: tuple[int, int, int, int]
+    thread: ConversationThread
+    size_bytes: int = 0
+
+
+_THREAD_RECORD_CACHE: OrderedDict[str, _CachedThread] = OrderedDict()
 
 
 # LLM: frozen线程仍含可变成员；缓存出入均深拷贝字典和字典元组，空字典也新建，不共享调用者对象。
@@ -54,7 +66,7 @@ def _clone_cached_thread(thread: ConversationThread) -> ConversationThread:
     )
 
 
-# LLM: 只接收同次稳定读取且不超过64KiB的指纹，过大/无指纹清旧投影；不持锁深拷贝，不替代磁盘权威。
+# LLM: 仅缓存稳定且不超64KiB单条的独立快照，总量32MiB并保原LRU条数限制；字节预算不替代磁盘权威。
 # 函数用途: 保存独立的线程快照，更新LRU顺序并淘汰最旧记录。
 def _store_cached_thread(
     path: Path, fingerprint: tuple[int, int, int, int] | None, thread: ConversationThread,
@@ -65,10 +77,15 @@ def _store_cached_thread(
     snapshot = _clone_cached_thread(thread)
     key = str(path)
     with _THREAD_RECORD_CACHE_LOCK:
-        _THREAD_RECORD_CACHE[key] = (fingerprint, snapshot)
+        _THREAD_RECORD_CACHE[key] = _CachedThread(fingerprint, snapshot, fingerprint[1])
         _THREAD_RECORD_CACHE.move_to_end(key)
-        while len(_THREAD_RECORD_CACHE) > _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT:
-            _THREAD_RECORD_CACHE.popitem(last=False)
+        total = sum(row.size_bytes for row in _THREAD_RECORD_CACHE.values())
+        while _THREAD_RECORD_CACHE and (
+            len(_THREAD_RECORD_CACHE) > _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT
+            or total > _THREAD_CACHE_MAX_TOTAL_BYTES
+        ):
+            _key, removed = _THREAD_RECORD_CACHE.popitem(last=False)
+            total -= removed.size_bytes
 
 
 # LLM: 写入、空记录与读取失败都丢弃旧投影；只触碰内存，不掩盖或修改原错误。
@@ -78,7 +95,7 @@ def _drop_cached_thread(path: Path) -> None:
         _THREAD_RECORD_CACHE.pop(str(path), None)
 
 
-# LLM: 仅同指纹/同身份且不超过64KiB的记录复用；大记录返回本次解析的独立对象，不重复深拷贝或保留旧缓存。
+# LLM: 仅同指纹/同身份的有界记录复用，缓存条目包含字节元数据；大记录返回独立解析对象，仍沿原磁盘校验与深拷贝。
 # 函数用途: 读取并校验独立线程快照，只把身份一致且读前读后稳定的文件放进有界缓存。
 def _read_thread_record_report(
     path: Path, *, thread_id: str = "",
@@ -89,9 +106,9 @@ def _read_thread_record_report(
     if before_fp is not None and before_fp[1] <= _THREAD_RECORD_CACHE_MAX_RECORD_BYTES:
         with _THREAD_RECORD_CACHE_LOCK:
             cached = _THREAD_RECORD_CACHE.get(str(path))
-            if cached is not None and cached[0] == before_fp and cached[1].thread_id == actual_thread_id:
+            if cached is not None and cached.fingerprint == before_fp and cached.thread.thread_id == actual_thread_id:
                 _THREAD_RECORD_CACHE.move_to_end(str(path))
-                cached_thread = cached[1]
+                cached_thread = cached.thread
     if cached_thread is not None:
         return _clone_cached_thread(cached_thread), None
     payload, error = read_json_object_report(path, context="conversation.thread.read")

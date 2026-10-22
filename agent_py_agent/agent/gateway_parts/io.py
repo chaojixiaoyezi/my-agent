@@ -61,6 +61,8 @@ _JSON_FILE_LOCKS_GUARD = threading.Lock()
 _GATEWAY_HISTORY_CACHE_LOCK = threading.Lock()
 # 限制历史文件进程内快照缓存条目上限，防止多工作区长期运行无界增长。
 _MAX_GATEWAY_HISTORY_CACHE_ENTRIES = 64
+_MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES = 4 * 1024 * 1024
+_MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES = 16 * 1024 * 1024
 _GATEWAY_HISTORY_CACHE: dict[
     str,
     tuple[tuple[int, int], tuple[str, ...], dict[str, _GatewayHistoryIndexEntry]],
@@ -902,8 +904,7 @@ def append_gateway_history_once(paths: GatewayPaths, payload: dict) -> bool:
     return True
 
 
-# LLM: Snapshot parsing preserves raw lines for atomic conflict repair while the index stores only
-# valid object rows. Cache validity is a filesystem stamp, never a delivery or completion fact.
+# LLM: 原行与索引保留冲突修复合同；单文件及总字节预算只限制内存驻留，不改变返回正文或磁盘权威。
 # 函数用途: 读取 Gateway 历史一次并构建按请求 ID 查询的进程内索引。
 def _gateway_history_snapshot(
     path: Path,
@@ -912,7 +913,7 @@ def _gateway_history_snapshot(
     key = str(path.resolve())
     with _GATEWAY_HISTORY_CACHE_LOCK:
         cached = _GATEWAY_HISTORY_CACHE.get(key)
-    if cached is not None and cached[0] == stamp:
+    if cached is not None and cached[0] == stamp and stamp[1] <= _MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES:
         return list(cached[1]), dict(cached[2])
     # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
     lines = jsonl_lines(path.read_text(encoding="utf-8")) if path.exists() else []
@@ -936,14 +937,25 @@ def _gateway_history_snapshot(
                 count=existing.count + 1,
                 conflict=existing.conflict or existing.payload != row,
             )
-    with _GATEWAY_HISTORY_CACHE_LOCK:
-        if (
-            key not in _GATEWAY_HISTORY_CACHE
-            and len(_GATEWAY_HISTORY_CACHE) >= _MAX_GATEWAY_HISTORY_CACHE_ENTRIES
-        ):
-            _GATEWAY_HISTORY_CACHE.pop(next(iter(_GATEWAY_HISTORY_CACHE)), None)
-        _GATEWAY_HISTORY_CACHE[key] = (stamp, tuple(lines), dict(index))
+    _cache_gateway_history_snapshot(key, stamp, lines, index)
     return lines, index
+
+
+# LLM: 冷读与写后刷新共用同一锁内预算，超大项移除旧版本；按原插入顺序淘汰，不另存正文副本。
+# 函数用途: 仅保留单文件不超4MiB、合计不超16MiB且条数有界的历史快照。
+def _cache_gateway_history_snapshot(key: str, stamp: tuple[int, int], lines: list[str], index: dict) -> None:
+    with _GATEWAY_HISTORY_CACHE_LOCK:
+        if stamp[1] > _MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES:
+            _GATEWAY_HISTORY_CACHE.pop(key, None)
+            return
+        _GATEWAY_HISTORY_CACHE[key] = (stamp, tuple(lines), dict(index))
+        total = sum(row[0][1] for row in _GATEWAY_HISTORY_CACHE.values())
+        while _GATEWAY_HISTORY_CACHE and (
+            len(_GATEWAY_HISTORY_CACHE) > _MAX_GATEWAY_HISTORY_CACHE_ENTRIES
+            or total > _MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES
+        ):
+            removed = _GATEWAY_HISTORY_CACHE.pop(next(iter(_GATEWAY_HISTORY_CACHE)))
+            total -= removed[0][1]
 
 
 # LLM: mtime and size detect writes from other Gateway processes without making this cache a
@@ -957,8 +969,7 @@ def _gateway_history_stamp(path: Path) -> tuple[int, int]:
     return int(stat.st_mtime_ns), int(stat.st_size)
 
 
-# LLM: Caller has persisted these exact lines under the global history transition lock, so the
-# refreshed stamp and copied values are safe as the next O(1) lookup snapshot.
+# LLM: 调用方已按原历史事务落盘；读新stat后仍经统一条数/字节准入，超大文件不保留旧快照。
 # 函数用途: 在写入历史后同步刷新对应进程内索引缓存。
 def _store_gateway_history_cache(
     path: Path,
@@ -966,14 +977,4 @@ def _store_gateway_history_cache(
     index: dict[str, _GatewayHistoryIndexEntry],
 ) -> None:
     key = str(path.resolve())
-    with _GATEWAY_HISTORY_CACHE_LOCK:
-        if (
-            key not in _GATEWAY_HISTORY_CACHE
-            and len(_GATEWAY_HISTORY_CACHE) >= _MAX_GATEWAY_HISTORY_CACHE_ENTRIES
-        ):
-            _GATEWAY_HISTORY_CACHE.pop(next(iter(_GATEWAY_HISTORY_CACHE)), None)
-        _GATEWAY_HISTORY_CACHE[key] = (
-            _gateway_history_stamp(path),
-            tuple(lines),
-            dict(index),
-        )
+    _cache_gateway_history_snapshot(key, _gateway_history_stamp(path), lines, index)
