@@ -1,15 +1,22 @@
 
-# LLM: 路径只读、Agent 缓存和显式重载共用优先级；本次选源事实在失败时仍保留，冷路径不写缓存或初始化 owner。
+# LLM: 路径只读、Agent快照和显式重载共用优先级；选源失败不重选，stat LRU只在进程内复用，不写盘或初始化owner。
 #   agent 读取会缓存快照，显式重载可能更新 router.config；改动须复核编排、Compact 与运行配置测试。
 # 模块用途: 读取并按文件版本重载能力配置，保持真实配置优先级，不让占位对象意外开启可选能力。
 
 from __future__ import annotations
 
 import hashlib
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
-from .config import CapabilityConfig, load_capability_config
+from .config import CapabilityConfig, _config_stat_key, load_capability_config
 from .runtime_config_models import CapabilityConfigReloadResult, CapabilityConfigSnapshot
+
+_BUNDLED_CAPABILITY_CONFIG_PATH = (Path(__file__).resolve().parents[2] / 'config' / 'capability_config.yaml').resolve()
+_LEGACY_WARNING_CACHE: OrderedDict[tuple, str | None] = OrderedDict()
+_LEGACY_WARNING_CACHE_LOCK = threading.RLock()
+_LEGACY_WARNING_CACHE_MAX_SIZE = 64
 
 DEPLOYMENT_CAPABILITY_KEYS = frozenset({
     "owner_default_permission_mode", "tool_approval_timeout_seconds", "feishu_cli_backend_enabled",
@@ -40,9 +47,10 @@ def default_capability_config_path(root: str | Path) -> Path:
     return Path(root) / "config" / "capability_config.yaml"
 
 
-# 函数用途: 返回随包默认 capability 配置文件（agent_py_agent/config/capability_config.yaml），只读永不被写。
+# LLM: 随包位置仅在模块导入时解析，热路径不反复realpath；返回路径只读，不作为用户写入目标。
+# 函数用途: 返回预计算的随包默认capability路径，保留原调用入口。
 def bundled_capability_config_path() -> Path:
-    return Path(__file__).resolve().parent.parent.parent / "config" / "capability_config.yaml"
+    return _BUNDLED_CAPABILITY_CONFIG_PATH
 
 
 # LLM: 运行时“实际读哪一份”的统一答案：用户位置存在就用用户位置（写进去重启就能读到），
@@ -133,23 +141,35 @@ def _read_capability_config(
     return loaded, snapshot, selected_user
 
 
-# LLM: 旧候选 <root>/agent_py_agent/config/capability_config.yaml 只在“不是随包默认文件”时告警：
-#   开发模式下 root 是仓库目录，那里就是随包默认本身（路径或内容相同都算），属正常只读来源，不能误报。
-# 函数用途: 旧候选位置存在非随包默认文件时给出结构化告警文字，否则返回 None。
+# LLM: 保留原旧候选位置，缺文件立即返回；同inode无需正文，双文件stat LRU最多64，读失败不缓存，诊断不授配置权限。
+# 函数用途: 复用旧位置告警或无告警结果，任一文件改变都重新比较。
 def _legacy_location_warning(root: object) -> str | None:
     if root is None:
         return None
     legacy = Path(root) / "agent_py_agent" / "config" / "capability_config.yaml"
-    bundled = bundled_capability_config_path()
-    if not legacy.exists() or legacy.resolve() == bundled.resolve():
+    if not legacy.exists():
         return None
-    try:
-        if legacy.read_bytes() == bundled.read_bytes():
-            return None
-    except OSError:
-        pass
-    return (f"旧位置 {legacy} 有一份 capability 配置文件（不是随包默认），已不再读取；"
-            f"用户 capability 配置统一放在 {Path(root) / 'config' / 'capability_config.yaml'}。")
+    bundled = bundled_capability_config_path()
+    legacy_key, target_key = _config_stat_key(legacy), _config_stat_key(bundled)
+    cacheable = legacy_key[1] != -1 and target_key[1] != -1
+    if cacheable and legacy_key[1:3] == target_key[1:3]:
+        return None
+    key = (*legacy_key, str(bundled), target_key)
+    with _LEGACY_WARNING_CACHE_LOCK:
+        if key in _LEGACY_WARNING_CACHE:
+            _LEGACY_WARNING_CACHE.move_to_end(key)
+            return _LEGACY_WARNING_CACHE[key]
+        warning = (f"旧位置 {legacy} 有一份 capability 配置文件（不是随包默认），已不再读取；"
+                   f"用户 capability 配置统一放在 {Path(root) / 'config' / 'capability_config.yaml'}。")
+        try:
+            result = None if legacy.read_bytes() == bundled.read_bytes() else warning
+        except OSError:
+            return warning
+        if cacheable:
+            _LEGACY_WARNING_CACHE[key] = result
+            if len(_LEGACY_WARNING_CACHE) > _LEGACY_WARNING_CACHE_MAX_SIZE:
+                _LEGACY_WARNING_CACHE.popitem(last=False)
+        return result
 
 
 # 函数用途: 把旧位置告警挂到加载出的 CapabilityConfig.config_warnings（配置告警展示能看到）。

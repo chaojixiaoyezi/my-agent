@@ -1,4 +1,4 @@
-# LLM: Count0 cleanup须核原后台执行片与物理模型责任，循环已退不能单独签排空；原任务与独立资源不取消。
+# LLM: Count0清理保原责任；GIL间隔只在Gateway执行入口调整，不在import时改变调用进程的解释器设置。
 
 
 from __future__ import annotations
@@ -113,6 +113,15 @@ from .models import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# LLM: Gateway启动前的进程级调度提示，不改变业务预算/线程顺序；不支持此API时继续原流程，联测两入口。
+# 函数用途: 将Gateway解释器GIL切换间隔调到1ms，减轻后台CPU工作对活跃线程的争用。
+def _tune_gateway_gil_switch_interval() -> None:
+    try:
+        sys.setswitchinterval(0.001)
+    except (AttributeError, ValueError):
+        pass
 
 
 @dataclass(frozen=True)
@@ -446,9 +455,10 @@ def _cmd_gateway_run_setup(agent, paths):
     return requeued, pid
 
 
-# LLM: Count0保原三循环/端口顺序；实际control才走原C设施producer，不以count字符串或None Agent制造就绪。
+# LLM: 入口先调GIL，Count0保原三循环/端口顺序；实际control才走原C设施producer，不以字符串或None Agent制造就绪。
 # 函数用途: 启动本代请求、后台和心跳循环，协调者的原资源由独立同生命周期入口保留。
 def _cmd_gateway_run_threads(request: GatewayThreadsRequest):
+    _tune_gateway_gil_switch_interval()
     if getattr(request.context, "control_plane", None) is not None:
         from .gateway_coordinated_run import start_coordinated_loops
 
@@ -1110,10 +1120,11 @@ def cmd_gateway_run(args) -> int:
         return coordinated_refusal(exc.error_code, reason=str(exc))
 
 
-# LLM: 正常停止末端同锁记录stop-v1，先显式准备SQLite读取设施再双读责任；不自证physicalquiet，旧宿主死亡由后继fresh核。
+# LLM: 入口先调进程级GIL间隔；正常停止末端同锁记录stop-v1，不自证physicalquiet，旧宿主死亡由后继fresh核。
 # LLM: 原单进程生命周期整体在canonical锁内执行，正常终止后仅发布有限观察；不能据此签全责任quiet或MP迁移。
 # 函数用途: 保持原认证、恢复、循环与收尾顺序，并保存本代真实身份。
 def _run_standalone_gateway(args, lifecycle) -> int:
+    _tune_gateway_gil_switch_interval()
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)

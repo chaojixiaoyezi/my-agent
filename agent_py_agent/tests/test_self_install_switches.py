@@ -9,7 +9,12 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -169,3 +174,250 @@ def test_model_can_view_switch_value_read_only(tmp_path):
     parameter = json.loads(outcome.output)["parameter"]
     assert outcome.ok and parameter["running_value"] == "true" and parameter["writable"] is False
     assert parameter["effect_when"] == EFFECT_IMMEDIATE
+
+
+# LLM: spy仅观察原标准库YAML入口，真实临时文件驱动配置变化，不以墙钟阈值判断缓存有效。
+# 函数用途: 验证未变文件只解析一次，磁盘改动立即生效，返回告警及其它列表互不污染。
+def test_capability_stat_cache_is_fresh_and_returns_isolated_values(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import config as module
+    path = tmp_path / 'capability.yaml'
+    path.write_text('plugin_self_install_enabled: false\nobsolete_key: 1\nadmin_message_channels: ["feishu"]\n')
+    parse = Mock(wraps=module.load_simple_yaml)
+    monkeypatch.setattr(module, 'load_simple_yaml', parse)
+    first = module.load_capability_config(path)
+    second = module.load_capability_config(path)
+    assert first == second and first is not second and parse.call_count == 1
+    first.config_warnings.append('x')
+    second.admin_message_channels.append('untrusted')
+    third = module.load_capability_config(path)
+    assert 'x' not in third.config_warnings and third.admin_message_channels == ['feishu']
+    path.write_text('plugin_self_install_enabled: true\n')
+    assert module.load_capability_config(path).plugin_self_install_enabled is True
+    assert parse.call_count == 2
+
+
+# LLM: 不让缓存跨过显式文件删除/非法值的失败关闭，也核对恢复同尺寸mtime时ctime/替换身份参与失效。
+# 函数用途: 验证配置安全开关缓存不能变成旧值兜底。
+def test_capability_cache_invalidates_replacement_and_keeps_failures(tmp_path):
+    path = tmp_path / 'capability.yaml'
+    path.write_text('session_pair_hourly_limit: 11\n')
+    before = path.stat()
+    assert load_capability_config(path).session_pair_hourly_limit == 11
+    replacement = tmp_path / 'replacement'
+    replacement.write_text('session_pair_hourly_limit: 22\n')
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement.replace(path)
+    assert load_capability_config(path).session_pair_hourly_limit == 22
+    path.write_text('owner_default_permission_mode: invalid\n')
+    with pytest.raises(ValueError):
+        load_capability_config(path)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        load_capability_config(path)
+
+
+# LLM: 锁内的miss装载须防并发重复解析；仅线程并发读取同一临时文件，不启动Gateway。
+# 函数用途: 验证配置缓存冷启动并发读与每个返回实例隔离。
+def test_capability_cache_serializes_concurrent_misses(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import config as module
+    path = tmp_path / 'threaded.yaml'
+    path.write_text('plugin_self_install_enabled: true\n')
+    parse = Mock(wraps=module.load_simple_yaml)
+    monkeypatch.setattr(module, 'load_simple_yaml', parse)
+    with ThreadPoolExecutor(max_workers=6) as workers:
+        configs = list(workers.map(module.load_capability_config, [path] * 24))
+    assert all(cfg.plugin_self_install_enabled for cfg in configs)
+    assert len({id(cfg) for cfg in configs}) == 24 and parse.call_count == 1
+
+
+# LLM: cache替身只隔开其它测试的全局条目，装载与stat仍是真实实现；不新增产品清理API。
+# 函数用途: 验证两个配置缓存均有64项上限，命中会刷新LRU顺序。
+@pytest.mark.parametrize('kind', ['capability', 'guard'])
+def test_config_stat_caches_are_bounded_lru(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.settings import runtime_guard_config as guard
+    module, name, load = (capability, '_CAPABILITY_CONFIG_CACHE', capability.load_capability_config) if kind == 'capability' else (
+        guard, '_RUNTIME_GUARD_RAW_CACHE', guard.runtime_guard_policy)
+    cache = OrderedDict()
+    monkeypatch.setattr(module, name, cache, raising=False)
+    paths = [tmp_path / f'config-{index}.yaml' for index in range(65)]
+    for path in paths:
+        path.write_text('session_pair_hourly_limit: 7\n')
+    for path in paths[:64]:
+        load(path)
+    load(paths[0])
+    load(paths[64])
+    assert len(cache) == 64
+    assert str(paths[0]) in {key[0] for key in cache} and str(paths[1]) not in {key[0] for key in cache}
+
+
+# LLM: 缓存只能保存原始配置，不得把一次调用的overrides或返回列表带给下一次调用。
+# 函数用途: 核验守卫原始配置复用、覆盖层隔离、修改失效及OSError原合同。
+def test_runtime_guard_raw_cache_is_fresh_and_isolated(tmp_path, monkeypatch):
+    from agent_py_agent.agent.settings import runtime_guard_config as module
+    path = tmp_path / 'guard.yaml'
+    path.write_text('limit: 7\ndelays: [1, 2]\n')
+    parse = Mock(wraps=module.load_simple_yaml)
+    monkeypatch.setattr(module, 'load_simple_yaml', parse)
+    first = module.runtime_guard_policy(path, overrides={'limit': 9})
+    first.values['delays'].append(99)
+    second = module.runtime_guard_policy(path)
+    assert second.values == {'limit': 7, 'delays': [1, 2]} and parse.call_count == 1
+    assert second.sources['limit'] == str(path) and first.sources['limit'] == 'runtime_override'
+    path.write_text('limit: 8\n')
+    assert module.runtime_guard_policy(path).values == {'limit': 8} and parse.call_count == 2
+    path.unlink()
+    assert module.runtime_guard_policy(path, overrides={'limit': 3}).values == {'limit': 3}
+
+
+# LLM: 没有旧文件时不探测随包源；随包路径函数本身也不再反复realpath。
+# 函数用途: 守住两个无需额外路径解析的热路径。
+def test_legacy_missing_fast_path_and_bundled_path_constant(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import runtime_config_reload as module
+    bundled = module.bundled_capability_config_path()
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, 'resolve', Mock(side_effect=AssertionError('must not resolve on hot path')))
+        assert module.bundled_capability_config_path() == bundled
+    monkeypatch.setattr(module, 'bundled_capability_config_path', Mock(side_effect=AssertionError('missing legacy must return early')))
+    assert module._legacy_location_warning(tmp_path) is None
+
+
+# LLM: 使用现行旧位置而不是任务旧稿里的另一条路径；相同/不同内容及两边修改均须及时反映。
+# 函数用途: 证明旧位置告警按两份文件的stat复用比较结果且立即失效。
+def test_legacy_warning_cache_avoids_repeated_content_reads(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import runtime_config_reload as module
+    legacy = tmp_path / 'agent_py_agent/config/capability_config.yaml'
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('old\n')
+    bundled = tmp_path / 'bundled.yaml'
+    bundled.write_text('new\n')
+    monkeypatch.setattr(module, 'bundled_capability_config_path', lambda: bundled)
+    original = Path.read_bytes
+    reads = []
+    # LLM: 保留真实字节比较，不缓存或伪造测试输入内容。
+    # 函数用途: 计数两份文件实际读取的次数。
+    def read(path):
+        reads.append(path)
+        return original(path)
+    monkeypatch.setattr(Path, 'read_bytes', read)
+    warning = module._legacy_location_warning(tmp_path)
+    assert warning and module._legacy_location_warning(tmp_path) == warning
+    assert reads == [legacy, bundled]
+    legacy.write_text('new\n')
+    assert module._legacy_location_warning(tmp_path) is None
+    reads.clear()
+    assert module._legacy_location_warning(tmp_path) is None and not reads
+    bundled.write_text('changed\n')
+    assert module._legacy_location_warning(tmp_path)
+
+
+# LLM: 用真实软链接验证同inode早返；当前主机硬链接夹具报EPERM，不以该环境错误当产品分支失败。
+# 函数用途: 验证旧文件与随包目标同一实例时无需读两遍正文。
+def test_legacy_warning_same_inode_skips_reads(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import runtime_config_reload as module
+    legacy = tmp_path / 'agent_py_agent/config/capability_config.yaml'
+    legacy.parent.mkdir(parents=True)
+    bundled = tmp_path / 'bundled.yaml'
+    bundled.write_text('same\n')
+    legacy.symlink_to(bundled)
+    monkeypatch.setattr(Path, 'resolve', Mock(side_effect=AssertionError('same inode must not resolve')))
+    monkeypatch.setattr(module, 'bundled_capability_config_path', lambda: bundled)
+    monkeypatch.setattr(Path, 'read_bytes', Mock(side_effect=AssertionError('same inode must not read')))
+    assert module._legacy_location_warning(tmp_path) is None
+
+
+# LLM: 两个生产入口都要在任何线程/Agent构造前设置间隔，替身在首个业务动作停止，绝不启动服务。
+# 函数用途: 核验standalone、普通线程及协调线程路径的真实入口调用顺序。
+@pytest.mark.parametrize('entry', ['standalone', 'threads', 'coordinated'])
+def test_gateway_entry_tunes_gil_before_work(monkeypatch, entry):
+    from agent_py_agent.cli import gateway_coordinated_run
+    from agent_py_agent.cli import gateway_process as module
+    events = []
+    monkeypatch.setattr(module.sys, 'setswitchinterval', lambda value: events.append(('gil', value)))
+    # LLM: 在入口第一个业务动作处结束测试，不允许碰真实Gateway或创建线程。
+    # 函数用途: 留下GIL设置后的入口观察点。
+    def stop(*args, **kwargs):
+        events.append(('work', None))
+        raise ValueError('stop-before-start')
+    if entry == 'standalone':
+        monkeypatch.setattr(module, 'make_agent', stop)
+        invoke = partial(module._run_standalone_gateway, SimpleNamespace(), None)
+    else:
+        context = SimpleNamespace(control_plane=object() if entry == 'coordinated' else None, paths=None, agent=None)
+        monkeypatch.setattr(gateway_coordinated_run, 'start_coordinated_loops', stop)
+        monkeypatch.setattr(module.threading, 'Event', stop)
+        invoke = partial(module._cmd_gateway_run_threads, SimpleNamespace(context=context))
+    with pytest.raises(ValueError, match='stop-before-start'):
+        invoke()
+    assert events == [('gil', .001), ('work', None)]
+
+
+# LLM: 只调整子进程启动路径中的解释器调度提示，不因不支持该API而阻断Gateway。
+# 函数用途: 核验任务规定的两个兼容异常均被吞掉。
+@pytest.mark.parametrize('error', [AttributeError, ValueError])
+def test_gateway_gil_tuning_tolerates_unsupported_api(monkeypatch, error):
+    from agent_py_agent.cli import gateway_process as module
+    tune = getattr(module, '_tune_gateway_gil_switch_interval', None)
+    assert callable(tune)
+    monkeypatch.setattr(module.sys, 'setswitchinterval', Mock(side_effect=error('unsupported')))
+    assert tune() is None
+
+
+# LLM: 只在本测试解释器中真实设置并finally恢复，不触碰运行中Gateway。
+# 函数用途: 验证解释器实际采纳1ms值，入口顺序另由替身测试守住。
+def test_gateway_gil_tuning_sets_real_interval():
+    from agent_py_agent.cli import gateway_process as module
+    previous = module.sys.getswitchinterval()
+    try:
+        module._tune_gateway_gil_switch_interval()
+        assert module.sys.getswitchinterval() == pytest.approx(.001)
+    finally:
+        module.sys.setswitchinterval(previous)
+
+
+# LLM: 只替换本测试的内存cache，真实旧位置文件与目标仍按产品stat/比较逻辑读取。
+# 函数用途: 验证第三个缓存也受64项LRU上限约束。
+def test_legacy_warning_cache_is_bounded_lru(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import runtime_config_reload as module
+    cache = OrderedDict()
+    monkeypatch.setattr(module, '_LEGACY_WARNING_CACHE', cache)
+    bundled = tmp_path / 'bundled.yaml'
+    bundled.write_text('new\n')
+    monkeypatch.setattr(module, 'bundled_capability_config_path', lambda: bundled)
+    roots = [tmp_path / str(index) for index in range(65)]
+    for root in roots:
+        path = root / 'agent_py_agent/config/capability_config.yaml'
+        path.parent.mkdir(parents=True)
+        path.write_text('old\n')
+    for root in roots[:64]:
+        assert module._legacy_location_warning(root)
+    module._legacy_location_warning(roots[0])
+    module._legacy_location_warning(roots[64])
+    assert len(cache) == 64
+    keys = {key[0] for key in cache}
+    assert str(roots[0] / 'agent_py_agent/config/capability_config.yaml') in keys
+    assert str(roots[1] / 'agent_py_agent/config/capability_config.yaml') not in keys
+
+
+# LLM: 恢复mtime且保留inode/size后仍须重新解析；两个配置入口必须依赖ctime而不是仅mtime缓存。
+# 函数用途: 验证同尺寸原位更新不会隐身于stat缓存。
+@pytest.mark.parametrize('kind', ['capability', 'guard'])
+def test_config_cache_detects_same_size_edit_with_restored_mtime(tmp_path, kind):
+    from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
+    path = tmp_path / 'config.yaml'
+    path.write_text('session_pair_hourly_limit: 11\n')
+    before = path.stat()
+    if kind == 'capability':
+        assert load_capability_config(path).session_pair_hourly_limit == 11
+    else:
+        assert runtime_guard_policy(path).values['session_pair_hourly_limit'] == 11
+    path.write_text('session_pair_hourly_limit: 22\n')
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    if kind == 'capability':
+        assert load_capability_config(path).session_pair_hourly_limit == 22
+    else:
+        assert runtime_guard_policy(path).values['session_pair_hourly_limit'] == 22
+
+
+def test_capability_config_without_path_uses_original_bundled_resolver():
+    assert load_capability_config() == load_capability_config(bundled_capability_config_path())

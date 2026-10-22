@@ -7,13 +7,20 @@ from __future__ import annotations
 它刻意和 `agent_config.yaml` 分开，避免主配置文件越来越像一个杂物间。
 """
 
-from dataclasses import dataclass, field
+import threading
+from collections import OrderedDict
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..settings.config import load_simple_yaml
 
 # LLM: 子代理权限、凭据默认保留期限、运行投影和包候选的唯一默认配置；新增字段同步随包 YAML 与测试。
-# 模块用途: 集中读取协作能力设置；包候选只影响上下文，阶段提醒不作为执行超时或权限授予。
+# 模块用途: 集中读取协作能力设置，同stat文件复用解析且返回隔离副本；缓存不改变路径选择、非法值拒绝或权限。
+
+_CAPABILITY_CONFIG_CACHE_LOCK = threading.RLock()
+_CAPABILITY_CONFIG_CACHE: OrderedDict[tuple[str, int, int, int, int, int], CapabilityConfig] = OrderedDict()
+_CAPABILITY_CONFIG_CACHE_MAX_SIZE = 64
 
 # LLM: 包准备默认关闭，方法沿用默认开；凭据期限不改变owner/任务授权；默认与YAML须保持同源。
 # 类用途: 定义子代理能力和包上下文设置；推荐只展示摘要，选包会消耗模型用量并记录原任务，数值配额为零仍受模型窗口限制。
@@ -191,9 +198,48 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     return value
 
 
-# LLM: 决策能力点严格校验，有限正秒数不沿用普通配额的零值约定；不授予新能力。
+# LLM: 只缓存成功解析的准确stat，RLock覆盖冷装载、容量64；交回可变字段副本，显式缺失仍抛错，不借默认开启能力。
+# 函数用途: 复用未变化的能力配置；省略路径才由原解析器选择默认，磁盘改变立即重新加载。
+def load_capability_config(config_path: str | Path | None = None) -> CapabilityConfig:
+    from .runtime_config_reload import resolve_capability_config_path
+
+    path = Path(config_path) if config_path is not None else resolve_capability_config_path()
+    stat_key = _config_stat_key(path)
+    with _CAPABILITY_CONFIG_CACHE_LOCK:
+        if stat_key in _CAPABILITY_CONFIG_CACHE:
+            _CAPABILITY_CONFIG_CACHE.move_to_end(stat_key)
+            return _copy_capability_config(_CAPABILITY_CONFIG_CACHE[stat_key])
+        result = _load_capability_config(path)
+        if stat_key[1] != -1:
+            _CAPABILITY_CONFIG_CACHE[stat_key] = _copy_capability_config(result)
+            if len(_CAPABILITY_CONFIG_CACHE) > _CAPABILITY_CONFIG_CACHE_MAX_SIZE:
+                _CAPABILITY_CONFIG_CACHE.popitem(last=False)
+        return result
+
+
+# LLM: 签名含dev/inode/size/mtime/ctime；缺失或失败返回哨兵且不复用旧成功配置，供缓存与旧位置诊断共用。
+# 函数用途: 只读文件版本，识别原子替换、同大小修改和权限变化，不读取正文。
+def _config_stat_key(resolved_path: Path) -> tuple[str, int, int, int, int, int]:
+    try:
+        if resolved_path.exists():
+            st = resolved_path.stat()
+            return (str(resolved_path), int(st.st_dev), int(st.st_ino), int(st.st_size),
+                    int(st.st_mtime_ns), int(st.st_ctime_ns))
+    except OSError:
+        pass
+    return (str(resolved_path), -1, -1, -1, -1, -1)
+
+
+# LLM: 告警和其它可变配置字段不能与LRU共享；保留原dataclass类型，不改变归一或授权。
+# 函数用途: 复制能力配置的列表/字典，避免调用方修改污染后续读者。
+def _copy_capability_config(config: CapabilityConfig) -> CapabilityConfig:
+    return replace(config, **{key: deepcopy(value) for key, value in vars(config).items()
+                              if isinstance(value, (list, dict))})
+
+
+# LLM: 原标准库YAML解析及安全开关校验保持；失败不进入成功缓存，不迁移未知或已删字段。
 # 函数用途: 加载原能力配置，已删/未知字段记告警并忽略，非法决策设置仍旧报错。
-def load_capability_config(config_path: str | Path) -> CapabilityConfig:
+def _load_capability_config(config_path: str | Path) -> CapabilityConfig:
     """加载能力路由配置；未知字段只记告警并忽略（与主配置一致），非法值仍报错。"""
 
     path = Path(config_path)

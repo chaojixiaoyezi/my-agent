@@ -1,7 +1,12 @@
 
+# LLM: 守卫配置按stat在进程内最多缓存64项原始字典；原路径、OSError与覆盖层语义保持，不写配置或缓存调用方policy。
+# 模块用途: 提供共享守卫策略及其来源，每次返回隔离值，配置改变立即重新解析。
 from __future__ import annotations
 
+import threading
 import time
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -9,6 +14,9 @@ from typing import Any
 from .config_io import load_simple_yaml
 
 DEFAULT_RUNTIME_GUARD_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "runtime_guard_config.yaml"
+_RUNTIME_GUARD_RAW_CACHE: OrderedDict[tuple[str, int, int, int, int, int], dict[str, Any]] = OrderedDict()
+_RUNTIME_GUARD_RAW_CACHE_LOCK = threading.RLock()
+_RUNTIME_GUARD_RAW_CACHE_MAX_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -63,6 +71,8 @@ def runtime_guard_data(
     return _effective_policy(path=path, policy=policy).values
 
 
+# LLM: 只复用同版本原始配置，overrides/时间/来源每次新建；OSError保持空原始策略，不拿旧成功内容兜底。
+# 函数用途: 读取共享守卫配置并合成本次独立策略，调用方覆盖不会污染其它请求。
 def runtime_guard_policy(
     path: Path | str | None = None,
     *,
@@ -70,7 +80,7 @@ def runtime_guard_policy(
 ) -> RuntimeGuardPolicy:
     config_path = _config_path(path)
     try:
-        data = load_simple_yaml(config_path)
+        data = _runtime_guard_raw(config_path)
     except OSError:
         data = {}
     values = data if isinstance(data, dict) else {}
@@ -83,6 +93,25 @@ def runtime_guard_policy(
         values=merged,
         sources=sources,
     )
+
+
+# LLM: stat失败沿原OSError向上传递；RLock覆盖冷解析，失败不入LRU，存浅字典但输出深复制避免嵌套共享。
+# 函数用途: 复用未变化的守卫文件正文，保留64项上限与即时磁盘失效。
+def _runtime_guard_raw(config_path: Path) -> dict[str, Any]:
+    st = config_path.stat()
+    key = (str(config_path), int(st.st_dev), int(st.st_ino), int(st.st_size),
+           int(st.st_mtime_ns), int(st.st_ctime_ns))
+    with _RUNTIME_GUARD_RAW_CACHE_LOCK:
+        if key in _RUNTIME_GUARD_RAW_CACHE:
+            _RUNTIME_GUARD_RAW_CACHE.move_to_end(key)
+            return deepcopy(_RUNTIME_GUARD_RAW_CACHE[key])
+        loaded = load_simple_yaml(config_path)
+        if not isinstance(loaded, dict):
+            return loaded
+        _RUNTIME_GUARD_RAW_CACHE[key] = dict(loaded)
+        if len(_RUNTIME_GUARD_RAW_CACHE) > _RUNTIME_GUARD_RAW_CACHE_MAX_SIZE:
+            _RUNTIME_GUARD_RAW_CACHE.popitem(last=False)
+        return deepcopy(loaded)
 
 
 def runtime_guard_int(
