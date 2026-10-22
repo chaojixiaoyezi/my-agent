@@ -18,7 +18,7 @@ import os
 import sys
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from types import SimpleNamespace
 
 from ..concurrency.interrupt import is_interrupted
@@ -272,11 +272,143 @@ class SimpleAgentRuntimeMixin:
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
 
+# LLM: 当前RunParams没有恢复提示字段；局部子类让replace保留提示，模型仍由原inject入口读取，不新增权限或持久身份。
+# 类用途: 携带本次前台自动恢复的核实提示，保留所有原运行参数与宿主回调。
+@dataclass
+class _ForegroundRecoveryRunParams(RunParams):
+    compact_continuation_injection: str = ""
+    foreground_recovery_attempt_ids: tuple[str, ...] = ()
+
+
+# LLM: 核实提示只读operation_type/status/handler_started_at，不带参数、结果或操作ID；inject才是本版本模型真实消费者。
+# 函数用途: 保留原注入并追加中文核实要求，让后续replace和Compact续接都携带提示。
+def _foreground_recovery_params(params: RunParams, operations: list[dict]) -> RunParams:
+    lines = ["【系统恢复提示】上一轮执行中途中断，以下工具操作在中断前已发起但结果未确认："]
+    lines.extend(
+        f"- {item.get('operation_type') or '未知工具'}（状态：{item.get('status') or 'UNKNOWN'}；"
+        f"开始时间：{item.get('handler_started_at') or '未知'}）" for item in operations
+    )
+    if not operations:
+        lines.append("未记录到可确认的工具操作；上一轮执行结果仍需核实。")
+    lines.append("系统已根据用户的新消息自动解除未知阻塞，且不会自动重做这些操作；"
+                 "请先通过只读检查核实其是否已生效，再继续处理用户请求。")
+    previous = str(getattr(params, "compact_continuation_injection", "") or "")
+    combined = "\n\n".join(part for part in (previous, "\n".join(lines)) if part)
+    injections = [combined if previous and item == previous else item for item in (params.inject or [])]
+    if not previous or previous not in (params.inject or []):
+        injections.append(combined)
+    if not isinstance(params, _ForegroundRecoveryRunParams):
+        params = _ForegroundRecoveryRunParams(**{field.name: getattr(params, field.name) for field in fields(RunParams)})
+    return replace(params, compact_continuation_injection=combined, inject=injections)
+
+
+# LLM: 原attempt_recovered事件是耐久交接源，确认事件只表示模型成功收到提示，不表示旧操作已核实生效。
+#   主链只取绑定的同一agent_run；子链只取本线程原CAS事件，不重处置历史或已关TaskRun。
+# 函数用途: 找出恢复已落账但提示尚未成功交给模型的执行轮，跨失败和进程重建保留核实要求。
+def _pending_foreground_recovery_attempts(repo, row, params: RunParams) -> tuple[str, ...]:
+    current = dict(row) if row is not None else {}
+    agent_run_id = str(current.get("agent_run_id") or "")
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    if not agent_run_id and not thread_id:
+        return ()
+    with repo._runtime_connection() as conn:
+        rows = conn.execute(
+            "SELECT e.attempt_id FROM runtime_events e WHERE e.event_type='attempt_recovered' "
+            "AND json_extract(e.payload_json, '$.operator')='foreground-user-turn' "
+            "AND ((e.agent_run_id=? AND ?!='') OR ("
+            "json_extract(e.payload_json, '$.recovery_target')='child_agent_run' "
+            "AND json_extract(e.payload_json, '$.thread_id')=? AND ?!='')) "
+            "AND NOT EXISTS (SELECT 1 FROM runtime_events d WHERE d.attempt_id=e.attempt_id "
+            "AND d.event_type='foreground_recovery_notice_delivered') ORDER BY e.rowid",
+            (agent_run_id, agent_run_id, thread_id, thread_id),
+        ).fetchall()
+    return tuple(str(item["attempt_id"]) for item in rows)
+
+
+# LLM: 仅gateway首片且非Compact才按原CAS弃置未知阻塞，先取未结操作再恢复；不改操作结论、不重放、不替后台放行。
+#   子链只取显式当前线程未关TaskRun的unknown投影；任何恢复拒绝仍失败关闭，不宣称已解阻。
+#   已提交但未交接的核实要求从审计重建；无提示的后台仍拒绝，已有提示的同片Compact可原样携带。
+# 函数用途: 让用户新消息接手核实中断操作，沿原权威入口恢复当前主链及本线程未知子链。
+def _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params: RunParams) -> RunParams:
+    from ..runtime_db.child_recovery import (
+        recover_child_attempt_unknown,
+        unknown_child_attempts_for_thread,
+    )
+    from ..runtime_db.operations import RuntimeRecoveryRequiredError
+
+    notice = str(getattr(params, "compact_continuation_injection", "") or "")
+    if (str(getattr(params, "source", "") or "") != "gateway"
+            or int(getattr(params, "continuation_seq", 0) or 0) != 0
+            or int(getattr(params, "compact_auto_continue_depth", 0) or 0) != 0):
+        pending = _pending_foreground_recovery_attempts(repo, row, params)
+        carried = (bool(notice) and notice in (params.inject or [])
+                   and set(pending).issubset(getattr(params, "foreground_recovery_attempt_ids", ())))
+        if pending and not carried:
+            raise RuntimeRecoveryRequiredError("恢复核实提示尚未交接，请由用户新消息接手")
+        return params
+    current = dict(row) if row is not None else {}
+    attempt_id = str(current.get("current_attempt_id") or "")
+    attempt = repo.get_attempt(attempt_id) if attempt_id else None
+    main_unknown = current.get("status") == "unknown" or (attempt is not None and attempt["status"] == "unknown")
+    attrs = params.task_attributes if isinstance(params.task_attributes, dict) else {}
+    thread_id = str(attrs.get("conversation_thread_id") or "").strip()
+    children = unknown_child_attempts_for_thread(repo, thread_id) if thread_id else []
+    targets = ([(attempt_id, None)] if main_unknown and attempt_id else [])
+    targets.extend((target.attempt_id, target) for target in children)
+    operations = []
+    recovered = []
+    for previous_attempt_id, child in targets:
+        unsettled = repo.unsettled_attempt_operations(previous_attempt_id)
+        if child is None:
+            result = repo.recover_attempt_unknown(
+                previous_attempt_id, operator="foreground-user-turn", effect_disposition="abandoned",
+                reason="用户发起新回合自动解除未知阻塞并交由模型核实",
+            )
+        else:
+            result = recover_child_attempt_unknown(repo, child, "abandoned", "foreground-user-turn")
+        if not result.get("recovered"):
+            raise RuntimeRecoveryRequiredError("未知执行恢复条件已变化，未创建新执行轮")
+        operations.extend(unsettled)
+        recovered.append(previous_attempt_id)
+    # 在子链扫描和恢复之后读取审计，接住其他调用者在扫描期间已经提交的恢复。
+    pending = _pending_foreground_recovery_attempts(repo, row, params)
+    carried = (bool(notice) and notice in (params.inject or [])
+               and set(pending).issubset(getattr(params, "foreground_recovery_attempt_ids", ())))
+    if not recovered and (not pending or carried):
+        return params
+    for previous_attempt_id in pending:
+        if previous_attempt_id not in recovered:
+            operations.extend(repo.unsettled_attempt_operations(previous_attempt_id))
+    return replace(_foreground_recovery_params(params, operations),
+                   foreground_recovery_attempt_ids=tuple(dict.fromkeys([*pending, *recovered])))
+
+
+# LLM: 只在原执行和保存成功返回ok后追加交接确认；不改旧tool_operations结论，写确认失败保留pending并不盖住业务结果。
+# 函数用途: 标记核实提示已交给模型，避免正常后续回合重复提醒；失败则下次继续提醒。
+def _acknowledge_foreground_recovery_notice(agent, params: RunParams, result) -> None:
+    attempts = getattr(params, "foreground_recovery_attempt_ids", ())
+    if not attempts or str(getattr(result, "runtime_status", "")) != "ok":
+        return
+    repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
+    try:
+        for attempt_id in attempts:
+            attempt = repo.get_attempt(attempt_id)
+            repo.append_event(
+                event_type="foreground_recovery_notice_delivered", attempt_id=attempt_id,
+                agent_run_id=str(attempt["agent_run_id"]),
+                payload={"delivered_by_attempt_id": params.attempt_id},
+            )
+    except Exception:  # noqa: BLE001 交接确认失败仅保留下一轮核实，不能推翻模型实际返回结果
+        logging.getLogger(__name__).warning("核实提示交接确认未保存，下次前台回合将再次核实。")
+
+
 # LLM: 主代理每轮必须挂到 params.task_id 对应的权威根 run；run_id 命中旧任务时
 # 必须丢弃该行并按 task 回退，绝不能仅凭线程级旧身份跨任务创建 attempt。
 #   Gateway 在模型/工具之前收到真实 DB 身份；request_id 保留消息身份，run/attempt 一起回填，
 #   Compact 再入仍按消息编号发布宿主凭据。同步检查跨身份续跑与工具权威门测试。
-# 函数用途: 登记并传回成对的执行身份，避免追问拿新消息编号执行旧任务；凭据保存失败不进入模型。
+#   仅显式前台首片在原挂载闸前按CAS解除unknown并注入核实提示；后台与Compact拒绝语义不变。
+# 函数用途: 让前台新消息接手未知核实，再登记成对执行身份；凭据保存失败不进入模型。
 def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
     """MANAGED 下主代理 run 登记权威链（seq 255 单一闭合：root/main AgentRun）。
 
@@ -323,6 +455,7 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
         # taskrun/agentrun 双份，create_attempt 挂载闸被绕过）。
         row = repo.main_agent_run_for_task(task_id)
     if row is None:
+        params = _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params)
         record = repo.record_run_creation(
             owner_id=owner_id,
             goal=str(getattr(params, "root_user_prompt", "") or "")[:200],
@@ -335,6 +468,7 @@ def _bind_main_agent_authority(agent, params: RunParams) -> RunParams:
         agent_run_id = str(record.get("agent_run_id") or "")
         authority_run_id = run_id
     else:
+        params = _auto_recover_unknown_for_foreground_user_turn(agent, repo, row, params)
         attempt = repo.create_attempt(str(row["agent_run_id"]))
         attempt_id = str(attempt["attempt_id"] or "").strip()
         agent_run_id = str(row["agent_run_id"] or "")
@@ -641,7 +775,8 @@ def _bind_main_agent_turn_params(
 
 # LLM: 顶层运行和所有自动 Compact 续接共用这一返回缝隙；只有最终不再续接时才能投影 standalone 终态。
 # 宿主实验授权钩子只在首个执行片绑定 run/attempt 之后、首次模型调用之前触发一次；Compact 续接不再授权。
-# 函数用途: 执行一次完整请求，必要时续接 Compact，并在真正结束时收尾任务工作区。
+# 核实提示只在成功模型回合保存后确认交接；提前失败保留原恢复审计，不能丢掉下一轮核实要求。
+# 函数用途: 执行完整请求及Compact续接，真正结束并保存后收尾工作区与核实提示交接。
 def _run_with_params(agent, user_prompt: str, params: RunParams):
     current_params = run_params_with_request_id(params)
     if not current_params.root_user_prompt:
@@ -685,6 +820,7 @@ def _run_with_params(agent, user_prompt: str, params: RunParams):
         finish_run_task_workspace_if_needed(agent, current_params, result)
         _settle_main_agent_run(agent, current_params, result)
         persist_cli_run_assistant(agent, current_params, result)
+        _acknowledge_foreground_recovery_notice(agent, current_params, result)
         return result
 
 

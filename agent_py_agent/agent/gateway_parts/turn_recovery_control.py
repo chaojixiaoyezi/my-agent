@@ -354,7 +354,8 @@ def _refused(result: dict[str, object]) -> ConversationControlResult:
 
 
 # LLM: 只渲染结构化字段（工具名、状态、开始时间），不读工具参数或结果正文，避免把命令原文和路径投到 IM。
-# 函数用途: 生成主链 /recover 查看结果：列出未确认的操作和三种处置命令。
+#   旧英文处置行原样保留，补充用户新消息自动接手核实与数字/中文简写入口。
+# 函数用途: 列出未确认操作、三种原处置命令及友好接手说明，不做恢复写入。
 def _render_block(operations: list[dict[str, object]]) -> str:
     lines = ["上一轮执行中断，结果未确认，本会话已暂停自动执行。"]
     if operations:
@@ -365,6 +366,7 @@ def _render_block(operations: list[dict[str, object]]) -> str:
     lines.append("请先核对这些操作在外部是否已经生效，然后选择一种处置：")
     lines.extend(_disposition_lines())
     lines.append("三种处置都会解除阻塞，下一条消息接着原任务继续；系统不会自动重做这些操作。")
+    lines.append("（也可直接发送新消息由助手自动接手核实，或输入简写：/recover 1、/recover 2、/recover 3、/recover 继续）")
     return "\n".join(lines)
 
 

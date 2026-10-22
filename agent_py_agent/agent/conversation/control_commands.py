@@ -693,6 +693,11 @@ def _wakes_command(trailing: object) -> ConversationControlCommand:
 
 # 确认码固定 12 位十六进制字符，与宿主其它结构化预览确认保持一致。
 _RECOVER_CONFIRM_CODE = re.compile(r"^[0-9a-f]{12}$")
+_RECOVER_EFFECT_ALIASES = {
+    "1": "recorded", "已生效": "recorded", "生效": "recorded",
+    "2": "confirmed_noop", "未生效": "confirmed_noop", "没生效": "confirmed_noop", "noop": "confirmed_noop",
+    "3": "abandoned", "继续": "abandoned", "跳过": "abandoned", "不再核对": "abandoned", "auto": "abandoned",
+}
 _RECOVER_USAGE = (
     "用法：/recover 查看；/recover <处置> [编号]；/recover owner；"
     "/recover owner <处置> [--confirm <确认码>]。处置为 "
@@ -703,14 +708,15 @@ _RECOVER_USAGE = (
 
 # LLM: 处置、目标编号和 owner 确认码都在入口做拒绝式结构化解析；编号只走 opaque ID 校验，不能从正文猜目标。
 #   owner 处置先产生绑定当前目标集合的预览码，只有显式 --confirm 才进入写入口。
-# 函数用途: 解析本会话按编号恢复和管理员 owner 级历史恢复命令。
+#   中文/数字只在显式命令的处置位置归一化，仍须通过原枚举及目标校验。
+# 函数用途: 解析本会话恢复的友好简写、精确编号和管理员owner历史命令。
 def _recover_command(trailing: object) -> ConversationControlCommand:
     parts = str(trailing or "").split()
     if not parts:
         return ConversationControlCommand("recover", operation="view", usage=_RECOVER_USAGE)
     if parts[0].lower() == "owner":
         return _owner_recover_command(parts[1:])
-    disposition = parts[0].lower()
+    disposition = _RECOVER_EFFECT_ALIASES.get(parts[0].lower(), parts[0].lower())
     target_id = parts[1] if len(parts) == 2 else ""
     valid_target = not target_id or is_opaque_id(target_id, kind="run_id")
     return ConversationControlCommand(
@@ -724,11 +730,12 @@ def _recover_command(trailing: object) -> ConversationControlCommand:
 
 
 # LLM: owner 语法固定为查看、预览、确认三态；确认码只接受宿主生成的 12 位十六进制摘要，不接受位置变体或自由文字。
-# 函数用途: 解析 `/recover owner` 的只读查看、处置预览和带确认码执行形式。
+#   与线程入口共用处置别名，不改变确认码及管理员权限合同。
+# 函数用途: 解析 `/recover owner` 的友好处置简写、只读预览和带确认码执行。
 def _owner_recover_command(parts: list[str]) -> ConversationControlCommand:
     if not parts:
         return ConversationControlCommand("recover", operation="owner_view", usage=_RECOVER_USAGE)
-    disposition = parts[0].lower()
+    disposition = _RECOVER_EFFECT_ALIASES.get(parts[0].lower(), parts[0].lower())
     confirmation = parts[2].lower() if len(parts) == 3 and parts[1].lower() == "--confirm" else ""
     operation = "owner_apply" if confirmation else "owner_preview"
     valid = disposition in ATTEMPT_EFFECT_DISPOSITIONS and (
