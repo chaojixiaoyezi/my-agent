@@ -1,7 +1,7 @@
 # LLM: skill_search 模型工具(skill 树第一期,千级 search-first 冷路):prompt
 #   常驻只有类目索引,具体技能由模型按需检索——千级 skill 的索引成本从 prompt
 #   层(几十 K token)移到工具调用(单次 ~5ms,score_card 含中文 n-gram)。契约:
-#   ①公开检索不写状态；②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
+#   ①公开检索不改授权/选择，仅附带匿名内容之外的使用计数；②search 返回卡片和稳定 id，get 经同一 turn snapshot 读取正文;
 #   ③category 过滤可选;④包内成员只在显式 package_id 下检索/读取，不进入全局 Skill。
 #   包正文读取由原 task pin 保存精确引用；大结果沿原归档保留可见来源和预览，不执行脚本。
 #   next_read/next_search 只投影同代显式调用参数；包命名空间仅指已声明成员，不从正文推断业务路径归属。
@@ -47,6 +47,7 @@ from .package_resources import package_resource_reference
 from .package_snapshot import package_read_parameters
 from .router import CapabilityRouter, tokenize
 from .skill_snapshot import PACKAGE_PIN_ERROR_MESSAGES, SkillSnapshotError
+from .skill_usage_ledger import record_skill_usage_event
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -139,7 +140,7 @@ class SkillSearchTool(BaseTool):
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
-    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要；next_read 只从公开身份生成，不含成员路径、不预读或 pin。
+    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要；成功命中逐卡计 manual_search，不计有效使用、不存 query、不预读或 pin。
     # 函数用途: 返回公开方法卡及可原样重用的读取参数，让模型无需从多种身份字段猜调用方式。
     def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
@@ -189,10 +190,16 @@ class SkillSearchTool(BaseTool):
             "matches": matches,
             "hint": "选择后原样使用对应 next_read 调用本工具；Skill 用 skill_id，能力包用 package_id，不能混用。",
         }
-        return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        for match in matches:
+            package = match["kind"] == "capability_package"
+            record_skill_usage_event(self.agent, event="manual_search", kind=match["kind"],
+                                     skill_id=match["package_id"] if package else match["skill_id"],
+                                     source="package" if package else match["source"])
+        return outcome
 
     # LLM: 解析不到包时先看主任务 pin 诊断（停用/换代则回执让模型告诉用户）；解析到后先比对显式代次，不符只回参数纠错；
-    #   再用同一 resolve 判未声明成员并仅给参数纠错；取消/中断传播，真实读取仍共用 reader 和原 pin。
+    #   再用同一 resolve 判未声明成员并仅给参数纠错；取消/中断传播，真实读取仍共用 reader 和原 pin；每个成功 get 页按实际正文字符记账。
     # 函数用途: 检索或读取包资源，成功 get 才记沿用；路径或版本字段填错不自动换路径、读正文或改任务引用。
     def _package_action(self, params: dict[str, object], action: str) -> ToolHandlerOutcome:
         if action not in {"search", "get"} or params.get("skill_id"):
@@ -226,9 +233,12 @@ class SkillSearchTool(BaseTool):
                     offset=offset, max_chars=_nonnegative_int(params, "max_chars", max(1, int(config.tool_read_max_chars))),
                 )
             payload = {**_package_navigation(package), **payload}
+            outcome = _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
             if action == "get":
                 record_method_read(self.agent, package, resource_path)
-            return _package_read_outcome(payload, max(0, int(config.tool_output_preview_chars)))
+                record_skill_usage_event(self.agent, event="manual_get", skill_id=package_id,
+                                         kind="capability_package", source="package", chars=len(payload.get("body") or ""))
+            return outcome
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
         except InterruptedError:
@@ -237,7 +247,7 @@ class SkillSearchTool(BaseTool):
             return _invalid(str(exc))
 
     # LLM: 保持普通 Skill resolve 的既有优先级；失败后仅精确匹配当前受限包身份来给建议，不读成员、不 pin、不转换执行。
-    #   读正文失败时回执在 details.error_code 带出快照异常的结构化码，调用方不解析 error 文案。
+    #   读正文失败时回执在 details.error_code 带出快照异常的结构化码；成功才以 entry.stable_id/source 和实际字符计 manual_get。
     # 函数用途: 读取普通 Skill，成功后记主会话沿用；错填包身份仍失败，不记账或自动读取。
     def _get(self, params: dict[str, object]) -> ToolHandlerOutcome:
         skill_id = str(params.get("skill_id") or "").strip()
@@ -277,8 +287,10 @@ class SkillSearchTool(BaseTool):
             "content_sha256": entry.content_sha256,
             "body": body,
         }
+        outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         record_method_read(self.agent, entry)
-        return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
+        record_skill_usage_event(self.agent, event="manual_get", skill_id=entry.stable_id, source=entry.source, chars=len(body))
+        return outcome
 
 
 # LLM: learnpack 只对本机管理员开放，别的 owner 一律空集；读不到安装表或存储也是空集（made_by_me 都为 false），不让检索失败。只读。

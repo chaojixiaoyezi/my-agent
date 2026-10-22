@@ -4,7 +4,7 @@
 #   前台同端点模型在忙就顺延、每日上限、无工具结构化调用（复用记忆整理的 backend 与 call_backend_with_timeout）、
 #   严格解析、原guard、待用户确认候选、账本、删请求。模型失败最多重试 MAX_REQUEST_ATTEMPT_COUNT 次；输出不合规和闸门拒绝不重试。
 #   不给模型注册任何工具。同步检查 core.py 装配、_finalization_service.py、cli/gateway_loops.py 与 test_skill_learning*.py。
-# 模块用途: 在原请求作用域生成owner学习候选，正式Skill仍由用户准确确认，不以来源权限代替确认。
+# 模块用途: 原作用域消费有界学习队列并轮转候选，未确认候选不阻断后续总结，正式发布仍需用户准确确认。
 from __future__ import annotations
 
 import threading
@@ -224,7 +224,7 @@ class SkillLearningService:
     #   本轮召回的相关记忆，作为用户要求总结时的材料。有标记就按用户要求入队这份材料（不看最少工具轮数，其余结构化条件照旧）；
     #   没有标记就照常按门槛入队自动总结的请求（不带记忆，和原来逐字节一样）。最后（入队抛错也照做）把材料记成这个会话最近完成
     #   的那次活：按用户要求入队成功才记"已入队过"，队列满或入队出错都不记，用户还能再要（复审 3 轮）。不合格返回 ineligible；
-    #   队列满时丢弃并记 dropped/QUEUE_FULL。副作用：写 requests/ 与账本、改内存里的两张表。
+    #   热队列满时由Store合并或保存溢出，仅总缓冲满才记dropped/QUEUE_FULL。副作用：写请求与账本、改两张内存表。
     # 函数用途: 收口时按结构化条件登记一次学习请求，返回 queued/duplicate/queue_full/ineligible。
     def enqueue_from_finalize(self, ctx: object) -> str:
         attrs = getattr(ctx, "task_attributes", None)
@@ -272,20 +272,20 @@ class SkillLearningService:
                 self._user.release(str(thread_id or ""))
         return outcome, request
 
-    # LLM: 写一条请求；队列满时记 dropped/QUEUE_FULL。有写文件副作用。
-    # 函数用途: 入队并在队列满时记账。
+    # LLM: 写原请求；热区合并/溢出由Store记事件，仅热区及缓冲都满时记dropped/QUEUE_FULL。
+    # 函数用途: 入队并对最终容量拒绝留可追溯账本。
     def _enqueue(self, request: dict[str, object]) -> str:
         outcome = self.store.enqueue(request)
         if outcome == "queue_full":
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
         return outcome
 
-    # LLM: FIFO仍优先，registry到期只复用同一纯时间判据；Count0原文件检查顺序不变，不创建维护请求或读第二账。
+    # LLM: 发现仅只读检查热/溢出FIFO，不能为了判待办先搬文件；registry到期仍复用原判据。
     # 函数用途: 判断原队列或自主维护是否待处理，发现只作预筛不授执行权。
     def has_pending(self) -> bool:
         from .skill_learning_maintenance import learning_maintenance_due
 
-        return bool(self.store.pending_requests()) or (self.settings.maintenance_mode == "autonomous"
+        return bool(self.store.pending_requests(refill=False) or self.store.overflow_requests()) or (self.settings.maintenance_mode == "autonomous"
             and self.store.registry_path.exists()
             and learning_maintenance_due(self.store.registry_path.stat().st_mtime, self.settings.maintenance_mode, time.time()))
 
@@ -325,7 +325,7 @@ class SkillLearningService:
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return SkillLearningRunResult(EVENT_FAILED,"SKILL_LEARNING_STORAGE_LIMIT")
 
-    # LLM: 原.run锁内再核FIFO；保main候选上限、owner与部署预算，四类实际未知原对象上抛，不记失败或删源。
+    # LLM: 原.run锁内再核FIFO，候选满额交propose合并/轮转而不拦模型；预算、owner与实际未知原对象传播保持。
     # 函数用途: 在运行锁内处理一条请求。
     def _run_first(self, *, expected_request_path: Path | None = None) -> SkillLearningRunResult:
         pending = self.store.pending_requests()
@@ -339,9 +339,6 @@ class SkillLearningService:
             with gateway_short_transaction("skill_learning_drop_corrupt"):
                 self.store.discard_request(path)
                 return self._finish(path, {}, SkillLearningEvent(EVENT_DROPPED, CODE_REQUEST_CORRUPT))
-        from .skill_learning_proposals import list_learning_proposals
-        if sum(row["status"]=="pending" for row in list_learning_proposals(self.store)) >= 20:
-            return SkillLearningRunResult("awaiting_confirmation",request_key=str(request.get("request_key") or ""))
         from .skill_learning_budget import (
             deployment_learning_available,
             reserve_deployment_learning,

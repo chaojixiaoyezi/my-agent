@@ -4,9 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 from dataclasses import asdict, replace
 
-from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
+from ..common.json_io import locked_json_path
+from ..common.nofollow_fs import (
+    list_names_beneath,
+    open_readonly_file_beneath,
+    read_bytes_beneath,
+    read_text_beneath,
+    unlink_file_beneath,
+    write_text_atomic_beneath,
+)
+from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_learning_prompt import SkillLearningDecision
 from .skill_learning_publish import (
     PublishRequest,
@@ -19,6 +30,14 @@ from .skill_learning_publish import (
 from .skill_learning_store import SkillLearningEvent
 from .skill_snapshot import skill_content_sha256
 
+MAX_PENDING_PROPOSALS = 20
+MAX_OVERFLOW_PROPOSALS = 100
+_ACTIVE = 'proposals'
+_OVERFLOW = 'proposals_overflow'
+_INTENT = ('.proposals-intent.json',)
+_INTENT_BYTES = 65536
+_META = frozenset({'revision','status','created_at_ns','archived_at_ns','superseded_by'})
+
 
 # LLM: 只接受宿主安全编号，不允许模型提供文件路径；候选在同owner学习目录，非正式Skill目录。
 # 函数用途: 校验一个学习候选的稳定标识。
@@ -28,68 +47,328 @@ def _proposal_name(proposal_id):
     return proposal_id+'.json'
 
 
-# LLM: 生成候选前脱敏并走原解析/guard，不存完整聊天材料；相同请求与内容去重，不产生正式目录。
-# 函数用途: 保存一份等待用户确认的总结草稿并返回结构化proposed事件。
+# LLM: 全局候选锁覆盖轮转与完整resolve，内部仍走owner配额→state；账本只能在state外追加，禁止锁反转。
+# 函数用途: 先收敛上次中断，再保存脱敏且过guard的草稿；同名替代、满额轮转而不自动发布。
 def propose_learning(store, publish):
     publish, redacted = _redacted_publish(publish)
-    store.directory.mkdir(parents=True,exist_ok=True)
-    with store.state_lock():
-        _stage_and_check(store,publish,render_learned_skill(publish.decision))
-    identity = json.dumps({'request_key':publish.request.get('request_key'),'decision':asdict(publish.decision),
-        'expected_revision':publish.expected_revision,'expected_sha256':publish.expected_sha256},sort_keys=True,ensure_ascii=False)
-    proposal_id = 'learning-proposal-'+hashlib.sha256(identity.encode()).hexdigest()[:32]
-    record = {'schema_version':'skill-learning-proposal.v1','proposal_id':proposal_id,'revision':1,'status':'pending',
+    record = {'schema_version':'skill-learning-proposal.v1','revision':1,'status':'pending',
         'decision':asdict(publish.decision),'expected_revision':publish.expected_revision,'expected_sha256':publish.expected_sha256,
         'request':{key:publish.request.get(key,'') for key in ('request_key','run_id','task_id','thread_id')},
-        'taken_names':sorted(publish.taken_names),'max_skills':publish.max_skills,'redacted':redacted}
-    store.directory.mkdir(parents=True,exist_ok=True)
-    with store.state_lock():
-        existing = read_text_beneath(store.directory,('proposals',_proposal_name(proposal_id)))
-        if existing is None:
-            if sum(item['status']=='pending' for item in list_learning_proposals(store)) >= 20:
-                raise SkillLearningGateError('SKILL_LEARNING_PROPOSALS_FULL')
-            text = json.dumps(record,ensure_ascii=False)
-            store.check_write(store.directory/'proposals'/_proposal_name(proposal_id),text)
-            write_text_atomic_beneath(store.directory,('proposals',_proposal_name(proposal_id)),text)
+        'taken_names':sorted(publish.taken_names),'max_skills':publish.max_skills,'redacted':redacted,
+        'created_at_ns':time.time_ns()}
+    proposal_id = record['proposal_id'] = _identity_id(record)
+    with locked_json_path(store.directory/'.proposals'):
+        with store.state_lock() as admission:
+            _recover_proposals(store,admission)
+            rows = _all_proposals(store)
+            if any(row['proposal_id'] == proposal_id for _, row in rows):
+                events = []
+            else:
+                _stage_and_check(store,publish,render_learned_skill(publish.decision))
+                final, events = _rotation_plan(store, rows, record)
+                _apply_plan(store, rows, final, admission)
+        for event in events:
+            store.append_event(event)
     return SkillLearningEvent('proposed',skill_name=publish.decision.name,request_key=str(publish.request.get('request_key','')),reason=proposal_id)
 
 
-# LLM: 草稿展示不授予发布；只读原owner固定目录，不接受另一owner路径。
-# 函数用途: 读取准确候选供用户查看与确认前核对。
-def learning_proposal(store, proposal_id):
-    text = read_text_beneath(store.directory,('proposals',_proposal_name(proposal_id)))
-    row = json.loads(text) if text is not None else {}
-    if row.get('schema_version') != 'skill-learning-proposal.v1' or row.get('proposal_id') != proposal_id:
-        raise ValueError('学习候选不存在或已损坏')
+# LLM: 创建时间和位置不参与原身份哈希，兼容旧候选；正文、来源request_key和原发布CAS仍逐字绑定。
+# 函数用途: 按既有协议计算学习候选稳定编号。
+def _identity_id(row):
     identity = json.dumps({'request_key':row['request'].get('request_key'),'decision':row['decision'],
         'expected_revision':row['expected_revision'],'expected_sha256':row['expected_sha256']},sort_keys=True,ensure_ascii=False)
-    if 'learning-proposal-'+hashlib.sha256(identity.encode()).hexdigest()[:32] != proposal_id:
+    return 'learning-proposal-'+hashlib.sha256(identity.encode()).hexdigest()[:32]
+
+
+# LLM: 两处目录共用schema与身份验证，坏文件不当成缺失；目录与叶均走原no-follow链。
+# 函数用途: 读取指定固定目录的一份候选，缺失时返回None。
+def _read_proposal(store, folder, proposal_id):
+    text = read_text_beneath(store.directory,(folder,_proposal_name(proposal_id)))
+    if text is None:
+        return None
+    row = json.loads(text) if text is not None else {}
+    if not isinstance(row,dict) or row.get('schema_version') != 'skill-learning-proposal.v1' or row.get('proposal_id') != proposal_id:
+        raise ValueError('学习候选不存在或已损坏')
+    if _identity_id(row) != proposal_id:
         raise ValueError('学习候选内容已被修改')
+    if type(row.get('revision')) is not int or row['revision'] < 1 or row.get('status') not in {'pending','committed','rejected','superseded'}:
+        raise ValueError('学习候选状态已损坏')
     return row
 
 
-# LLM: 目录只作索引，候选状态取每条canonical行，坏记录不假装为空以继续发布。
-# 函数用途: 列出学习候选，不扫描正式Skill或其它owner。
-def list_learning_proposals(store):
-    directory = store.directory/'proposals'
-    if not directory.exists():
+# LLM: 只从验证后的事务投影定位，不以主区优先掩盖superseded；调用方已持候选锁。
+# 函数用途: 自动定位主区或归档中的准确候选，包括崩溃后尚未落盘的投影。
+def _locate_proposal(store, proposal_id):
+    _proposal_name(proposal_id)
+    found = [(folder,row) for folder,row in _all_proposals(store) if row['proposal_id'] == proposal_id]
+    if len(found) != 1:
+        raise ValueError('学习候选不存在、重复或已损坏')
+    return found[0]
+
+
+# LLM: 共享锁让展示不观察到移动中间态；读取并不授权确认，仍限定当前owner固定目录。
+# 函数用途: 按编号读取主区或overflow候选供用户核对。
+def learning_proposal(store, proposal_id):
+    with locked_json_path(store.directory/'.proposals'):
+        return _locate_proposal(store,proposal_id)[1]
+
+
+# LLM: 物理快照允许迁移产生双位置，但绝不跳过坏文件；验证和去重必须在事务投影之后。
+# 函数用途: 在调用方已持候选锁时读取两个固定目录的原始候选。
+def _physical_proposals(store):
+    rows = []
+    for folder in (_ACTIVE,_OVERFLOW):
+        for name in list_names_beneath(store.directory,(folder,)):
+            if not name.startswith('learning-proposal-') or not name.endswith('.json'):
+                continue
+            row = _read_proposal(store,folder,name[:-5])
+            if row is None:
+                raise ValueError('学习候选不存在、重复或已损坏')
+            rows.append((folder,row))
+    return rows
+
+
+# LLM: 查询只验证、投影，不清理意图或修改业务文件；没有可证明的迁移关系仍拒绝双位置。
+# 函数用途: 返回崩溃一致的候选索引，可选只展示主区。
+def _all_proposals(store, include_overflow=True):
+    rows = _physical_proposals(store)
+    intent = _read_intent(store)
+    projected = _intent_projection(rows,intent) if intent else _legacy_projection(rows)
+    if len({row['proposal_id'] for _,row in projected}) != len(projected):
+        raise ValueError('学习候选不存在、重复或已损坏')
+    return [(folder,row) for folder,row in projected if include_overflow or folder == _ACTIVE]
+
+
+# LLM: 默认只读主区，显式可读归档；空目录先只读检查，不能因为状态查询首次创建候选目录或锁。
+# 函数用途: 列出当前owner候选的只读事务投影，可选包含有界归档。
+def list_learning_proposals(store, include_overflow=False):
+    folders = (_ACTIVE,_OVERFLOW) if include_overflow else (_ACTIVE,)
+    if not _read_intent(store) and not any(name.startswith('learning-proposal-') and name.endswith('.json')
+               for folder in folders for name in list_names_beneath(store.directory,(folder,))):
         return []
-    if directory.is_symlink():
-        raise ValueError('学习候选目录无效')
-    return [learning_proposal(store,path.stem) for path in sorted(directory.glob('learning-proposal-*.json'))]
+    with locked_json_path(store.directory/'.proposals'):
+        return [row for _,row in _all_proposals(store,include_overflow)]
 
 
-# LLM: 仅用户CLI/结构化控制调用，锁内核候选修订；确认经原发布CAS/guard，宿主人类actor只写审计不授予权限，拒绝不改正式内容；重放同结果幂等。
-# 函数用途: 确认或拒绝准确一份草稿，不把开关或模型理由当确认。
+# LLM: 新记录用宿主创建时间，旧记录回退真实FD的mtime；绝不拿随机哈希编号作时间排序。
+# 函数用途: 取得候选创建或归档的纳秒时间排序键。
+def _proposal_time(store, folder, row, field='created_at_ns'):
+    value = row.get(field)
+    if value is not None:
+        if type(value) is not int or value < 1:
+            raise ValueError('学习候选时间已损坏')
+        return value
+    descriptor = open_readonly_file_beneath(store.directory,(folder,_proposal_name(row['proposal_id'])))
+    try:
+        return os.fstat(descriptor).st_mtime_ns
+    finally:
+        os.close(descriptor)
+
+
+# LLM: 移动pending保留原revision和创建时间；superseded单独递增修订，不能伪装成用户拒绝。
+# 函数用途: 生成一份归档记录，可选标记它被新同名候选替代。
+def _archived_row(store, folder, row, superseded_by=''):
+    updated = {**row,'created_at_ns':_proposal_time(store,folder,row),
+               'archived_at_ns':row.get('archived_at_ns') or time.time_ns()}
+    if superseded_by:
+        updated.update(status='superseded',revision=row['revision']+1,superseded_by=superseded_by)
+    return updated
+
+
+# LLM: 只改内存计划，原文件通过验证和配额前不动；替代涵盖主区和overflow所有同名pending。
+# 函数用途: 规划同名替代、最旧pending轮转及100条归档裁剪。
+def _rotation_plan(store, rows, record):
+    active = {row['proposal_id']:row for folder,row in rows if folder == _ACTIVE}
+    overflow = {row['proposal_id']:row for folder,row in rows if folder == _OVERFLOW}
+    for folder,row in rows:
+        if row['status'] != 'pending' or row['decision']['name'] != record['decision']['name']:
+            continue
+        proposal_id = row['proposal_id']
+        active.pop(proposal_id,None)
+        overflow[proposal_id] = _archived_row(store,folder,row,record['proposal_id'])
+    pending = [row for row in active.values() if row['status'] == 'pending']
+    events = []
+    while len(pending) >= MAX_PENDING_PROPOSALS:
+        oldest = min(pending,key=lambda row:_proposal_time(store,_ACTIVE,row))
+        proposal_id = oldest['proposal_id']
+        overflow[proposal_id] = _archived_row(store,_ACTIVE,oldest)
+        del active[proposal_id]
+        pending.remove(oldest)
+        events.append(SkillLearningEvent('overflowed','SKILL_LEARNING_PROPOSAL_OVERFLOW_ROTATED',
+                      skill_name=oldest['decision']['name'],reason=proposal_id))
+    active[record['proposal_id']] = record
+    ordered = sorted(overflow.values(),key=lambda row:_proposal_time(store,_OVERFLOW,row,'archived_at_ns'))
+    overflow = {row['proposal_id']:row for row in ordered[-MAX_OVERFLOW_PROPOSALS:]}
+    return [*((_ACTIVE,row) for row in active.values()), *((_OVERFLOW,row) for row in overflow.values())], events
+
+
+# LLM: 只执行调用方已获原owner批量配额准入的差异，写在删之前防止迁移丢失；每步仍走原no-follow。
+# 函数用途: 应用一组候选内容变更，None表示清理原位置。
+def _write_changes(store, changes):
+    for parts,text in changes.items():
+        if text is not None:
+            write_text_atomic_beneath(store.directory,parts,text)
+    for parts,text in changes.items():
+        if text is None:
+            unlink_file_beneath(store.directory,parts)
+
+
+# LLM: 意图先准入并刷盘，新候选首写作为提交点；普通IO回滚最后删新候选，任意中断仍可重做或验证原态。
+# 函数用途: 在候选锁与原owner配额/state事务内安全应用可重启的轮转计划。
+def _apply_plan(store, before, after, admission):
+    previous = {(folder,row['proposal_id']):row for folder,row in before}
+    final = {(folder,row['proposal_id']):row for folder,row in after}
+    changes = {(folder,_proposal_name(proposal_id)):json.dumps(row,ensure_ascii=False)
+              for (folder,proposal_id),row in final.items() if previous.get((folder,proposal_id)) != row}
+    for folder,proposal_id in previous.keys()-final.keys():
+        changes[(folder,_proposal_name(proposal_id))] = None
+    backup = {parts:read_text_beneath(store.directory,parts) for parts in changes}
+    new_ids = {row['proposal_id'] for _,row in after}-{row['proposal_id'] for _,row in before}
+    new_id = next(iter(new_ids),'')
+    entries = [[folder,proposal_id,_row_hash(previous.get((folder,proposal_id))),_row_hash(final.get((folder,proposal_id))),
+                {key:value for key,value in final.get((folder,proposal_id),{}).items() if key in _META}]
+               for folder,name in changes for proposal_id in (name[:-5],)]
+    intent = json.dumps({'v':1,'new':new_id,'changes':entries},ensure_ascii=False,separators=(',',':'))
+    if len(intent.encode()) > _INTENT_BYTES:
+        raise ValueError('学习候选事务过大')
+    _check_changes(store,admission,changes)
+    store.check_write(store.directory.joinpath(*_INTENT),intent)
+    write_text_atomic_beneath(store.directory,_INTENT,intent)
+    # 新候选必须在所有旧候选修改前完整刷盘，意图本身不复制或授权正文。
+    changes = dict(sorted(changes.items(),key=lambda item:item[0] != (_ACTIVE,_proposal_name(new_id)) if new_id else False))
+    try:
+        _write_changes(store,changes)
+    except OSError:
+        backup = dict(sorted(backup.items(),key=lambda item:item[0] == (_ACTIVE,_proposal_name(new_id)) if new_id else False))
+        _write_changes(store,backup)
+        unlink_file_beneath(store.directory,_INTENT)
+        raise
+    unlink_file_beneath(store.directory,_INTENT)
+
+
+# LLM: 哈希绑定全部状态、正文与来源字段，不只依赖忽略revision/status的稳定候选ID。
+# 函数用途: 为事务变更前后记录计算规范化完整哈希。
+def _row_hash(row):
+    return hashlib.sha256(json.dumps(row,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest() if row is not None else None
+
+
+# LLM: 单个固定意图文件有字节/条数上限，路径只接受两处固定目录和原安全编号；损坏不当缺失。
+# 函数用途: 通过原no-follow链读取并校验有界候选事务描述。
+def _read_intent(store):
+    raw = read_bytes_beneath(store.directory,_INTENT,max_bytes=_INTENT_BYTES)
+    if raw is None:
+        return None
+    intent = json.loads(raw)
+    if (not isinstance(intent,dict) or type(intent.get('v')) is not int or intent['v'] != 1 or not isinstance(intent.get('new'),str)
+            or not isinstance(intent.get('changes'),list) or not 1 <= len(intent['changes']) <= 243):
+        raise ValueError('学习候选事务已损坏')
+    if intent['new']:
+        _proposal_name(intent['new'])
+    seen = set()
+    for entry in intent['changes']:
+        if not isinstance(entry,list) or len(entry) != 5:
+            raise ValueError('学习候选事务已损坏')
+        folder,proposal_id,before,after,meta = entry
+        _proposal_name(proposal_id)
+        if folder not in (_ACTIVE,_OVERFLOW) or (folder,proposal_id) in seen or not isinstance(meta,dict) or meta.keys()-_META:
+            raise ValueError('学习候选事务路径或状态无效')
+        for digest in (before,after):
+            if digest is not None and (not isinstance(digest,str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest)):
+                raise ValueError('学习候选事务哈希无效')
+        seen.add((folder,proposal_id))
+    return intent
+
+
+# LLM: 新候选落盘前只能投影原态；之后按前后哈希验证每个物理前缀，只重建身份不变的宿主元数据。
+# 函数用途: 对正常写入、清理或回滚任意中断计算唯一可验证的最终候选状态。
+def _intent_projection(rows, intent):
+    physical = {(folder,row['proposal_id']):row for folder,row in rows}
+    new_id = intent['new']
+    committed = not new_id or (_ACTIVE,new_id) in physical
+    if new_id and not any(folder == _ACTIVE and proposal_id == new_id and before is None and after
+                          for folder,proposal_id,before,after,_ in intent['changes']):
+        raise ValueError('学习候选事务提交点无效')
+    projected = dict(physical)
+    for folder,proposal_id,before,after,meta in intent['changes']:
+        key = (folder,proposal_id)
+        digest = _row_hash(physical.get(key))
+        if digest not in (before,after) or (not committed and digest != before):
+            raise ValueError('学习候选事务内容已被修改')
+        if not committed:
+            continue
+        projected.pop(key,None)
+        if after is not None:
+            candidates = [{**{k:v for k,v in row.items() if k not in _META},**meta}
+                          for _,row in rows if row['proposal_id'] == proposal_id]
+            matches = [row for row in candidates if _row_hash(row) == after]
+            if not matches:
+                raise ValueError('学习候选事务缺少可信正文')
+            projected[key] = matches[0]
+    result = list(projected.items())
+    return [(folder,row) for (folder,_),row in result]
+
+
+# LLM: 兼容旧版本无意图的双位置，只接受原记录加归档元数据或精确同名替代；绝不简单主区/归档优先。
+# 函数用途: 验证旧版已写归档尚未删主区的迁移，并生成只读收敛投影。
+def _legacy_projection(rows):
+    active = {row['proposal_id']:row for folder,row in rows if folder == _ACTIVE}
+    removed = set()
+    for folder,row in rows:
+        old = active.get(row['proposal_id']) if folder == _OVERFLOW else None
+        if old is None:
+            continue
+        expected = {**old,'created_at_ns':row.get('created_at_ns'),'archived_at_ns':row.get('archived_at_ns')}
+        if row.get('superseded_by'):
+            replacement = active.get(row['superseded_by'])
+            if old['status'] != 'pending' or not replacement or replacement['status'] != 'pending' or replacement['decision']['name'] != old['decision']['name']:
+                raise ValueError('学习候选替代关系已损坏')
+            expected.update(status='superseded',revision=old['revision']+1,superseded_by=replacement['proposal_id'])
+        if expected != row or any(type(row.get(field)) is not int or row[field] < 1 for field in ('created_at_ns','archived_at_ns')):
+            raise ValueError('学习候选重复或已损坏')
+        removed.add(row['proposal_id'])
+    return [(folder,row) for folder,row in rows if folder != _ACTIVE or row['proposal_id'] not in removed]
+
+
+# LLM: 删除和写入一起投影最终占额；意图清理同时计入，移动的短暂副本不误算为永久双份。
+# 函数用途: 通过原owner准入检查完整候选变更的最终字节。
+def _check_changes(store, admission, changes):
+    admission.check([OwnerQuotaChange(store.directory.joinpath(*parts),len(text.encode('utf-8')) if text is not None else None)
+                     for parts,text in {**changes,_INTENT:None}.items()])
+
+
+# LLM: 只在候选→owner配额→state原锁序的写入口重放，恢复不移除意图直到所有目标写入和删除完成。
+# 函数用途: 将已验证的事务或旧版迁移投影幂等落盘，允许恢复自身再次崩溃。
+def _recover_proposals(store, admission):
+    rows = _physical_proposals(store)
+    intent = _read_intent(store)
+    projected = _intent_projection(rows,intent) if intent else _legacy_projection(rows)
+    if len({row['proposal_id'] for _,row in projected}) != len(projected):
+        raise ValueError('学习候选重复或已损坏')
+    if not intent:
+        if rows != projected:
+            _apply_plan(store,rows,projected,admission)
+        return
+    physical = {(folder,_proposal_name(row['proposal_id'])):row for folder,row in rows}
+    final = {(folder,_proposal_name(row['proposal_id'])):row for folder,row in projected}
+    changes = {parts:json.dumps(row,ensure_ascii=False) for parts,row in final.items() if physical.get(parts) != row}
+    changes.update(dict.fromkeys(physical.keys()-final.keys()))
+    _check_changes(store,admission,changes)
+    _write_changes(store,changes)
+    unlink_file_beneath(store.directory,_INTENT)
+
+
+# LLM: 仅用户CLI/结构化控制调用，共享候选锁跨越publisher到结果落盘；原CAS/guard和用户actor审计不变。
+# 函数用途: 先恢复候选迁移再确认或拒绝准确草稿，不把开关或模型理由当确认。
 def resolve_learning_proposal(store, proposal_id, expected_revision, *, decision, guard_config=None, actor_id=""):
     if not isinstance(actor_id,str) or len(actor_id)>300 or len(actor_id.splitlines())>1:
         raise ValueError('学习确认者编号无效')
     if decision not in {'confirm','reject'} or isinstance(expected_revision,bool) or not isinstance(expected_revision,int):
         raise ValueError('学习候选决定无效')
-    # publisher使用同一state锁，先持候选专属锁，禁止与其它入口相反锁序。
-    from ..common.json_io import locked_json_path
-    with locked_json_path(store.directory/'proposals'/(_proposal_name(proposal_id)+'.decision')):
-        row = learning_proposal(store,proposal_id)
+    # 候选锁→publisher原owner配额/state；轮转与resolve同锁，绝不持state再等候选锁或append_event。
+    with locked_json_path(store.directory/'.proposals'):
+        with store.state_lock() as admission:
+            _recover_proposals(store,admission)
+        folder,row = _locate_proposal(store,proposal_id)
         if row['status'] == ('committed' if decision == 'confirm' else 'rejected') and row['revision'] == expected_revision + 1:
             return row
         if row['revision'] != expected_revision or row['status'] != 'pending':
@@ -114,6 +393,6 @@ def resolve_learning_proposal(store, proposal_id, expected_revision, *, decision
         row['revision'] += 1
         with store.state_lock():
             text = json.dumps(row,ensure_ascii=False)
-            store.check_write(store.directory/'proposals'/_proposal_name(proposal_id),text)
-            write_text_atomic_beneath(store.directory,('proposals',_proposal_name(proposal_id)),text)
+            store.check_write(store.directory/folder/_proposal_name(proposal_id),text)
+            write_text_atomic_beneath(store.directory,(folder,_proposal_name(proposal_id)),text)
     return row

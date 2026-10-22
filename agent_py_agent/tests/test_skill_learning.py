@@ -362,14 +362,30 @@ def test_busy_run_lock_and_foreground_model_defer_without_calls(tmp_path: Path, 
     assert ctx.backend.prompts == [] and len(ctx.store.pending_requests()) == 1
 
 
+# LLM: 热队列20条之外先保存最旧请求，重复键包括溢出区；只有总缓冲满才允许QUEUE_FULL。
+# 函数用途: 验证不同会话经验不因热队列满而丢失，且总存储容量仍有明确上限。
 def test_queue_is_bounded_and_duplicates_are_ignored(tmp_path: Path) -> None:
     ctx = _runtime(tmp_path)
-    outcomes = [ctx.service.enqueue_from_finalize(_ctx(f"run-{index}")) for index in range(21)]
+    outcomes = [ctx.service.enqueue_from_finalize(_ctx(f"run-{index}", task_attributes={
+        "conversation_thread_id": f"thread-{index}", "conversation_task_completed": True,
+    })) for index in range(21)]
 
-    assert outcomes[:20] == ["queued"] * 20 and outcomes[20] == "queue_full"
+    assert outcomes == ["queued"] * 21
+    assert len(ctx.store.pending_requests()) == 20
+    overflow = ctx.store.directory / "requests_overflow"
+    assert len(list(overflow.glob("*.json"))) == 1
     assert ctx.service.enqueue_from_finalize(_ctx("run-0")) == "duplicate"
     assert ctx.service.enqueue_from_finalize(_ctx("run-x", tool_rounds=1)) == "ineligible"
-    assert _events(ctx) == [("dropped", "SKILL_LEARNING_QUEUE_FULL")]
+    assert _events(ctx) == [("overflowed", "SKILL_LEARNING_QUEUE_OVERFLOW_SAVED")]
+    for index in range(21, 120):
+        assert ctx.service.enqueue_from_finalize(_ctx(f"run-{index}", task_attributes={
+            "conversation_thread_id": f"thread-{index}", "conversation_task_completed": True,
+        })) == "queued"
+    assert len(ctx.store.pending_requests()) == 20 and len(list(overflow.glob("*.json"))) == 100
+    assert ctx.service.enqueue_from_finalize(_ctx("run-full", task_attributes={
+        "conversation_thread_id": "thread-full", "conversation_task_completed": True,
+    })) == "queue_full"
+    assert _events(ctx)[-1] == ("dropped", "SKILL_LEARNING_QUEUE_FULL")
 
 
 def test_corrupt_request_is_dropped_and_corrupt_registry_fails_closed(tmp_path: Path) -> None:
@@ -470,3 +486,442 @@ def test_background_call_binds_its_own_host_session_for_session_header_providers
     assert backend.sessions == [expected, expected]
     with pytest.raises(ValueError):
         request_headers({}, {}, "x-test-session")
+
+
+# LLM: 仅用生产请求构造器建立有不同身份的材料，不模拟存储返回或队列排序。
+# 函数用途: 为队列合并/回填回归生成标准学习请求。
+def _c6_request(index, *, thread="", task=""):
+    record = build_learning_request(_ctx(f"c6-{index}"), 1)
+    record.update(thread_id=thread, task_id=task)
+    return record
+
+
+# LLM: 满队列只合并非空同会话或同任务；新请求文件身份必须不同，旧在途收口不能删除新材料。
+# 函数用途: 验证同类请求替换以及旧路径收口的数据隔离。
+@pytest.mark.parametrize("identity", ["thread_id", "task_id"])
+def test_c6_full_queue_merges_matching_identity_without_losing_new_request(tmp_path, identity):
+    store = _runtime(tmp_path).store
+    for index in range(20):
+        assert store.enqueue(_c6_request(index, thread=f"thread-{index}", task=f"task-{index}")) == "queued"
+    old = next(path for path in store.pending_requests() if store.read_request(path)[identity] == identity.replace("_id", "") + "-5")
+    new = _c6_request(99, **{"thread" if identity == "thread_id" else "task": identity.replace("_id", "") + "-5"})
+    assert store.enqueue(new) == "queued"
+    assert len(store.pending_requests()) == 20
+    assert not list((store.directory / "requests_overflow").glob("*.json"))
+    store.discard_request(old)
+    assert any(store.read_request(path)["request_key"] == new["request_key"] for path in store.pending_requests())
+
+
+# LLM: 在途请求可能被轮转到溢出区，重试与收口仍须按原文件身份定位它，不能重放已完成材料。
+# 函数用途: 验证轮转后旧路径可重试/删除，清空热队列会恢复剩余溢出请求。
+def test_c6_overflow_refill_and_inflight_request_cleanup(tmp_path):
+    store = _runtime(tmp_path).store
+    for index in range(20):
+        assert store.enqueue(_c6_request(index)) == "queued"
+    old = store.pending_requests()[0]
+    request = store.read_request(old)
+    assert store.enqueue(_c6_request(20)) == "queued"
+    overflow = store.directory / "requests_overflow"
+    assert (overflow / old.name).is_file()
+    store.rewrite_request(old, {**request, "attempts": 1})
+    assert store.read_request(overflow / old.name)["attempts"] == 1
+    store.discard_request(old)
+    assert not (overflow / old.name).exists()
+    assert store.enqueue(_c6_request(21)) == "queued"
+    for path in store.pending_requests():
+        store.discard_request(path)
+    restored = store.pending_requests()
+    assert len(restored) == 1
+    assert store.read_request(restored[0])["request_key"] != request["request_key"]
+    assert not list(overflow.glob("*.json"))
+
+
+# LLM: UTC换天保留后台LLM调用历史，不把预算拒绝或Skill正文使用算作模型调用；旧登记表自动补足最近单日。
+# 函数用途: 验证30日历史、旧格式兼容及每日限额。
+def test_c6_daily_call_history_retains_thirty_days_and_legacy_snapshot(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from agent_py_agent.agent.capability import skill_learning_store as module
+
+    current = [datetime(2026, 10, 1, tzinfo=timezone.utc)]
+
+    # LLM: 只替换存储模块的UTC挂钟，不改变读写或预算结果。
+    # 类用途: 控制跨日计数测试的时间。
+    class Clock:
+        # LLM: 所有时区请求都返回本测试固定UTC时刻。
+        # 函数用途: 提供可推进日期的挂钟。
+        @classmethod
+        def now(cls, tz=None):
+            return current[0]
+
+    monkeypatch.setattr(module, "datetime", Clock)
+    store = _runtime(tmp_path).store
+    for _ in range(31):
+        assert store.consume_daily_call(1)
+        assert not store.consume_daily_call(1)
+        current[0] += timedelta(days=1)
+    raw = json.loads(store.registry_path.read_text())
+    assert len(raw.get("daily_history", {})) == 30
+    assert "2026-10-01" not in raw["daily_history"]
+    assert raw["daily_history"]["2026-10-31"] == 1
+    raw.pop("daily_history")
+    store.registry_path.write_text(json.dumps(raw))
+    assert store.consume_daily_call(1)
+    assert store.load_registry().daily_history == {"2026-10-31": 1, "2026-11-01": 1}
+
+
+# LLM: 报告是只读结构化投影；新计数必须区分队列溢出、候选、总结调用和Skill正文使用。
+# 函数用途: 验证报告暴露新字段且不会因展示自动回填或创建使用台账。
+def test_c6_learning_report_exposes_separate_usage_and_queue_history(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_report import learned_skills_report
+
+    ctx = _runtime(tmp_path)
+    report = learned_skills_report(ctx.store, SimpleNamespace())
+    assert report.get("daily_history") == {}
+    assert report.get("overflow_requests") == 0 and report.get("pending_proposals") == 0
+    assert report["skill_usage"]["totals"]["effective_uses"] == 0
+    assert not (ctx.store.directory / "usage_ledger.jsonl").exists()
+
+
+# LLM: 正式内容仍需逐候选用户确认，但待确认满20不能阻止后续经验总结或skip消费。
+# 函数用途: 用真实20份不同技能草稿验证服务不再停在awaiting_confirmation。
+def test_c6_pending_proposal_capacity_does_not_block_learning_queue(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_proposals import propose_learning
+
+    ctx = _runtime(tmp_path, _output("skip", name="", description="", when_to_use="", tags=[], body=""))
+    for index in range(20):
+        decision = SkillLearningDecision("create", "可复用", "", f"c6-draft-{index}",
+                                         "稳定读取并核对多个CSV的表头与日期", "CSV合并", (), BODY)
+        propose_learning(ctx.store, PublishRequest(decision, {"request_key": f"proposal-{index}", "run_id": str(index)}))
+    assert ctx.service.enqueue_from_finalize(_ctx("after-proposals-full")) == "queued"
+    assert ctx.service.run_pending().status == "skipped"
+    assert ctx.store.pending_requests() == []
+
+
+# LLM: 统计按真实四类事件累加；UTC日映射与请求关联字段按任务协议输出，不能与总结调用混算。
+# 函数用途: 验证有效使用口径、逐日结构、关联字段和不同owner隔离。
+def test_c6_usage_ledger_separates_events_and_uses_date_keyed_history(tmp_path):
+    from agent_py_agent.agent.capability.skill_usage_ledger import (
+        load_skill_usage_summary,
+        record_skill_usage_event,
+    )
+
+    ctx = _runtime(tmp_path)
+    for event in ("manual_search", "manual_get", "host_injected", "adopted"):
+        record_skill_usage_event(ctx.store, event=event, skill_id="builtin:example", source="test-source",
+                                  request_id="request-c6", thread_id="thread-c6", task_id="task-c6", chars=17)
+    summary = load_skill_usage_summary(ctx.store)
+    assert summary["totals"] == {"manual_search": 1, "manual_get": 1, "host_injected": 1, "adopted": 1, "effective_uses": 2}
+    assert isinstance(summary["daily_history"], dict)
+    rows = [json.loads(line) for line in (ctx.store.directory / "usage_ledger.jsonl").read_text().splitlines()]
+    assert len(rows) == 4
+    assert summary["daily_history"][rows[0]["date"]] == {"manual_search": 1, "manual_get": 1, "host_injected": 1, "adopted": 1}
+    assert rows[-1]["request_id"] == "request-c6" and rows[-1]["thread_id"] == "thread-c6"
+    assert rows[-1]["task_id"] == "task-c6" and rows[-1]["chars"] == 17
+    assert load_skill_usage_summary(ctx.home.owner_home_dir) == summary
+    other = _runtime(tmp_path / "another-home")
+    assert load_skill_usage_summary(other.store)["totals"]["effective_uses"] == 0
+
+
+# LLM: 使用现有feedback工具的显式可选Store钩子，不修改其权限、采用校验或工具文件；状态真实执行到execute。
+# 函数用途: 验证统一Store写入钩子与skill_feedback状态读口实际相连。
+def test_c6_feedback_store_hooks_expose_usage_in_status(tmp_path):
+    from agent_py_agent.agent.capability.skill_feedback_tool import SkillFeedbackTool
+
+    ctx = _runtime(tmp_path)
+    assert callable(getattr(ctx.store, "record_skill_usage", None))
+    assert callable(getattr(ctx.store, "usage_summary", None))
+    ctx.store.record_skill_usage(event="adopted", skill_id="owner:test-method", source="owner", task_id="task-adopted")
+    tool = SkillFeedbackTool(SimpleNamespace(home_paths=ctx.home, config=SimpleNamespace(enable_self_learning=False)))
+    result = tool.execute({"operation": "status"})
+    assert result.ok, result.output
+    overview = json.loads(result.output)
+    assert overview["skill_usage"]["totals"]["adopted"] == 1
+    assert overview["skill_usage"]["totals"]["effective_uses"] == 0
+    assert overview["daily_history"] == {}
+
+
+# LLM: CLI/feedback共用的报告是read_only；即使自学习目录从未存在也不能因列候选创建锁目录。
+# 函数用途: 验证空owner首次读取状态没有持久化副作用。
+def test_c6_empty_learning_report_does_not_create_store_directory(tmp_path):
+    from agent_py_agent.agent.capability.skill_learning_report import learned_skills_report
+
+    store = SkillLearningStore(tmp_path / "owner" / "data" / "skill_learning", tmp_path / "owner" / "skills")
+    assert not store.directory.exists()
+    assert learned_skills_report(store, SimpleNamespace())["pending_proposals"] == 0
+    assert not store.directory.exists()
+
+
+# LLM: 明细裁剪不能降低生命周期总计；测试直接准备完整2000行基线避免循环重写掩盖裁剪分支。
+# 函数用途: 验证明细1000条保留窗口与汇总计数独立，并能继续累计。
+def test_c6_usage_ledger_trims_detail_without_resetting_lifetime_totals(tmp_path):
+    from agent_py_agent.agent.capability.skill_usage_ledger import (
+        load_skill_usage_summary,
+        record_skill_usage_event,
+    )
+
+    store = _runtime(tmp_path).store
+    record_skill_usage_event(store, event="manual_get", skill_id="builtin:trim", source="builtin")
+    ledger = store.directory / "usage_ledger.jsonl"
+    row = json.loads(ledger.read_text())
+    ledger.write_text("".join(json.dumps({**row, "sequence": index + 1}) + "\n" for index in range(2000)))
+    (store.directory / "usage_summary.json").unlink()
+    record_skill_usage_event(store, event="manual_get", skill_id="builtin:trim", source="builtin")
+    assert len(ledger.read_text().splitlines()) == 1000
+    assert load_skill_usage_summary(store)["totals"]["effective_uses"] == 2001
+    record_skill_usage_event(store, event="manual_get", skill_id="builtin:trim", source="builtin")
+    assert load_skill_usage_summary(store)["totals"]["effective_uses"] == 2002
+
+
+# LLM: 两份使用文件要一起保持原有计数；普通summary写失败只warning，不能留下随后永久漏算的明细。
+# 函数用途: 注入一次第二份文件写失败，验证回滚和主流程软失败。
+def test_c6_usage_summary_write_failure_keeps_previous_pair(tmp_path, monkeypatch, caplog):
+    from agent_py_agent.agent.capability import skill_usage_ledger as module
+
+    store = _runtime(tmp_path).store
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:fault", source="builtin")
+    names = ("usage_ledger.jsonl", "usage_summary.json")
+    before = {name: (store.directory / name).read_bytes() for name in names}
+    original = module.write_text_atomic_beneath
+    failed = []
+
+    # LLM: 只注入一次汇总IO故障，后续恢复写使用真实原子写函数，不修改业务返回。
+    # 函数用途: 复现明细已写而汇总失败的中间态。
+    def fail_summary_once(root, parts, text):
+        if parts[-1] == "usage_summary.json" and not failed:
+            failed.append(True)
+            raise OSError("injected summary failure")
+        return original(root, parts, text)
+
+    monkeypatch.setattr(module, "write_text_atomic_beneath", fail_summary_once)
+    assert module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:fault", source="builtin") is None
+    assert {name: (store.directory / name).read_bytes() for name in names} == before
+    assert "SKILL_USAGE_RECORD_UNAVAILABLE" in caplog.text
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:fault", source="builtin")
+    assert module.load_skill_usage_summary(store)["totals"]["effective_uses"] == 2
+
+
+# LLM: 使用独立解释器在明细原子发表后立即退出，验证普通异常回滚捕获不到的真实进程崩溃。
+# 函数用途: 验证持久事件水位在日常追加和2000行裁剪时都可恢复，不重算有界明细之外的生命周期。
+@pytest.mark.parametrize("existing", [1, 2000])
+def test_c6_usage_summary_recovers_process_exit_after_ledger_publish(tmp_path, existing):
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.capability import skill_usage_ledger as module
+
+    store = _runtime(tmp_path).store
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:crash", source="builtin")
+    ledger = store.directory / "usage_ledger.jsonl"
+    row = json.loads(ledger.read_text())
+    ledger.write_text("".join(json.dumps({**row, "sequence": index + 1}) + "\n" for index in range(existing)))
+    summary = module.load_skill_usage_summary(store)
+    for counts in (summary["totals"], summary["by_skill"]["builtin:crash"]):
+        counts["manual_get"] = counts["effective_uses"] = existing
+    summary["daily_history"][row["date"]]["manual_get"] = existing
+    summary["last_sequence"] = existing
+    (store.directory / "usage_summary.json").write_text(json.dumps(summary))
+    script = '''
+import os, sys
+from pathlib import Path
+from agent_py_agent.agent.capability import skill_usage_ledger as m
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+s = SkillLearningStore(Path(sys.argv[1]), Path(sys.argv[2]))
+original = m.write_text_atomic_beneath
+# LLM: 只在明细已发表、汇总尚未发表的真实边界终止独立解释器。
+# 函数用途: 产生追加或裁剪中断后的耐久文件组合。
+def terminate(root, parts, text):
+    if parts[-1] == "usage_summary.json":
+        os._exit(92)
+    return original(root, parts, text)
+m.write_text_atomic_beneath = terminate
+m.record_skill_usage_event(s, event="manual_get", skill_id="builtin:crash", source="builtin")
+'''
+    process = subprocess.run([sys.executable, "-c", script, str(store.directory), str(store.skills_root)],
+                             cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30)
+    assert process.returncode == 92, process.stderr
+    assert module.load_skill_usage_summary(store)["totals"]["effective_uses"] == existing + 1
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:crash", source="builtin")
+    assert module.load_skill_usage_summary(store)["totals"]["effective_uses"] == existing + 2
+
+
+# LLM: 使用真实SimpleAgent/快照和工具execute，不替换记账函数；搜索展示不能增加正文有效使用。
+# 函数用途: 覆盖普通Skill get、能力包get和search命中实际连到同一owner台账。
+def test_c6_search_and_both_get_entries_record_real_usage(tmp_path):
+    from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
+    from agent_py_agent.agent.capability.skill_usage_ledger import load_skill_usage_summary
+    from agent_py_agent.tests.test_conversation_method_carry import method_fixture, read_package
+
+    fixture = method_fixture(tmp_path)
+    store = SkillLearningStore.for_home(fixture.agent.home_paths)
+    entry = fixture.scope.skills.enabled_entries()[0]
+    tool = SkillSearchTool(fixture.agent)
+    skill_result = tool.execute({"action": "get", "skill_id": entry.stable_id})
+    assert skill_result.ok, skill_result.output
+    assert read_package(fixture).ok
+    search = tool.execute({"action": "search", "query": entry.name, "limit": 1})
+    assert search.ok, search.output
+    totals = load_skill_usage_summary(store)["totals"]
+    assert totals["manual_get"] == 2 and totals["manual_search"] == 1
+    assert totals["effective_uses"] == 2
+    rows = [json.loads(line) for line in (store.directory / "usage_ledger.jsonl").read_text().splitlines()]
+    ordinary = next(row for row in rows if row["event"] == "manual_get" and row["kind"] == "skill")
+    assert ordinary["skill_id"] == entry.stable_id and ordinary["source"] == entry.source
+    assert ordinary["chars"] == len(json.loads(skill_result.output)["body"])
+    assert all(row["request_id"] == fixture.params.request_id for row in rows)
+
+
+# LLM: 真实入口prepare按实际可见pages记账，budget不足不能因reader/pin成功而算作已注入。
+# 函数用途: 覆盖入口未投递与实际投递的计数及字符数。
+def test_c6_package_host_entry_counts_delivered_pages_only(tmp_path):
+    from agent_py_agent.agent.capability.skill_usage_ledger import load_skill_usage_summary
+    from agent_py_agent.tests.test_capability_package_entry_context import (
+        _entries,
+        _fixture,
+        _prepare,
+    )
+
+    fixture = _fixture(tmp_path, bodies=(b"ENTRY-C6",))
+    store = SkillLearningStore.for_home(fixture.agent.home_paths)
+    assert _prepare(fixture, budget=1).text == ""
+    assert load_skill_usage_summary(store)["totals"]["host_injected"] == 0
+    result = _prepare(fixture, budget=10000)
+    pages = _entries(result)
+    assert len(pages) == 1 and pages[0]["body"] == "ENTRY-C6"
+    assert load_skill_usage_summary(store)["totals"]["host_injected"] == 1
+    [row] = [json.loads(line) for line in (store.directory / "usage_ledger.jsonl").read_text().splitlines()]
+    assert row["source"] == "capability_package_entry_context" and row["chars"] == len(pages[0]["body"])
+
+
+# LLM: IR返回False不记host_injected，重新合法尝试成功只记一次，不把准备包入口重复计入；身份遵从原stable_id。
+# 函数用途: 覆盖完整carry投递失败、成功和同代重放的真实计数门。
+def test_c6_method_carry_counts_only_successful_ir_commit(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.capability.skill_usage_ledger import load_skill_usage_summary
+    from agent_py_agent.tests.test_conversation_method_carry import (
+        method_fixture,
+        read_package,
+        records,
+    )
+    from agent_py_agent.tests.test_conversation_method_restore import carry, compact
+
+    fixture = method_fixture(tmp_path)
+    store = SkillLearningStore.for_home(fixture.agent.home_paths)
+    assert read_package(fixture).ok
+    stable_id = records(fixture)[0]["stable_id"]
+    compact(fixture)
+    with monkeypatch.context() as temporary:
+        temporary.setattr("agent_py_agent.agent.agent_core.tool_ir_history.record_runtime_facts_turn_ir", lambda *a, **kw: False)
+        assert carry(fixture) == []
+        assert load_skill_usage_summary(store)["totals"]["host_injected"] == 0
+    fixture.params = replace(fixture.params, conversation_method_carry_attempts=set())
+    fixture.agent._current_run_params = fixture.params
+    turns = carry(fixture)
+    assert len(turns) == 1
+    assert load_skill_usage_summary(store)["totals"]["host_injected"] == 1
+    assert carry(fixture) == turns
+    assert load_skill_usage_summary(store)["totals"]["host_injected"] == 1
+    rows = [json.loads(line) for line in (store.directory / "usage_ledger.jsonl").read_text().splitlines()]
+    [row] = [row for row in rows if row["event"] == "host_injected"]
+    assert row["source"] == "conversation_method_carry" and row["skill_id"] == stable_id
+
+
+# LLM: 真正发表新汇总后注入IO错误，再在任一恢复写后杀掉解释器；不能只测writer替换之前抛错。
+# 函数用途: 守住普通追加及裁剪时回滚再次崩溃的持久前缀，并验证后续记账不会断号卡死。
+@pytest.mark.parametrize("existing", [1, 2000])
+@pytest.mark.parametrize("exit_after", ["usage_ledger.jsonl", "usage_summary.json"])
+def test_c6_usage_rollback_process_exit_remains_recoverable(tmp_path, existing, exit_after):
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.capability import skill_usage_ledger as module
+
+    store = _runtime(tmp_path).store
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:rollback", source="builtin")
+    ledger = store.directory / "usage_ledger.jsonl"
+    summary_path = store.directory / "usage_summary.json"
+    row = json.loads(ledger.read_text())
+    ledger.write_text("".join(json.dumps({**row, "sequence": index + 1}) + "\n" for index in range(existing)))
+    summary = module.load_skill_usage_summary(store)
+    summary_path.write_text(json.dumps(summary))
+    script = '''
+import os, sys
+from pathlib import Path
+from agent_py_agent.agent.capability import skill_usage_ledger as m
+from agent_py_agent.agent.capability.skill_learning_store import SkillLearningStore
+s = SkillLearningStore(Path(sys.argv[1]), Path(sys.argv[2]))
+original = m.write_text_atomic_beneath
+failed = False
+# LLM: 汇总先真实发表再抛错，下一次恢复目标真实发表后退出，不伪造崩溃后状态。
+# 函数用途: 命中回滚自身中断的两类持久前缀。
+def interrupted_rollback(root, parts, text):
+    global failed
+    original(root, parts, text)
+    if not failed and parts[-1] == "usage_summary.json":
+        failed = True
+        raise OSError("after summary publish")
+    if failed and parts[-1] == sys.argv[3]:
+        os._exit(93)
+m.write_text_atomic_beneath = interrupted_rollback
+m.record_skill_usage_event(s, event="manual_get", skill_id="builtin:rollback", source="builtin")
+'''
+    process = subprocess.run([sys.executable, "-c", script, str(store.directory), str(store.skills_root), exit_after],
+                             cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30)
+    assert process.returncode == 93, process.stderr
+    persisted = json.loads(summary_path.read_text())
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    assert persisted["last_sequence"] <= rows[-1]["sequence"]
+    recovered = module.load_skill_usage_summary(store)["totals"]["effective_uses"]
+    assert recovered in (existing, existing + 1)
+    for _ in range(2):
+        module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:rollback", source="builtin")
+    assert module.load_skill_usage_summary(store)["totals"]["effective_uses"] == recovered + 2
+
+
+# LLM: 旧错误顺序可能已留下汇总领先明细；只信已验证汇总内的历史缺口，不捏造丢失行或默默清空总数。
+# 函数用途: 验证旧中断状态可继续计数并告警，而水位之后缺失事件仍然拒绝。
+def test_c6_usage_legacy_ahead_summary_does_not_poison_future_events(tmp_path, caplog):
+    from agent_py_agent.agent.capability import skill_usage_ledger as module
+
+    store = _runtime(tmp_path).store
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:ahead", source="builtin")
+    ledger = store.directory / "usage_ledger.jsonl"
+    first = ledger.read_text()
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:ahead", source="builtin")
+    ledger.write_text(first)
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:ahead", source="builtin")
+    assert module.load_skill_usage_summary(store)["totals"]["effective_uses"] == 3
+    assert [json.loads(line)["sequence"] for line in ledger.read_text().splitlines()] == [1, 3]
+    assert "SKILL_USAGE_DETAIL_GAP" in caplog.text
+    last = json.loads(ledger.read_text().splitlines()[-1])
+    ledger.write_text(ledger.read_text() + json.dumps({**last, "sequence": 5}) + "\n")
+    before = ledger.read_bytes()
+    module.record_skill_usage_event(store, event="manual_get", skill_id="builtin:ahead", source="builtin")
+    assert ledger.read_bytes() == before
+    assert "SKILL_USAGE_RECORD_UNAVAILABLE" in caplog.text
+
+
+# LLM: 真实1MiB owner配额已经用满，跨目录移动无净增长；目标写和源删除必须在同一原admission核算。
+# 函数用途: 验证满配额时溢出请求仍可通过生产pending_requests回填，且内容与最终用量不变。
+def test_c6_overflow_refill_at_full_real_owner_quota(tmp_path):
+    from agent_py_agent.agent.user_space.owner_quota import owner_logical_usage_bytes
+
+    ctx = _runtime(tmp_path)
+    store = ctx.store
+    assert store.enqueue(_c6_request(1)) == "queued"
+    [source] = store.pending_requests()
+    content = source.read_bytes()
+    store.overflow_requests_dir.mkdir()
+    source.rename(store.overflow_requests_dir / source.name)
+    quota = ctx.home.owner_home_dir / "quota.json"
+    settings = json.loads(quota.read_text())
+    settings["max_disk_mb"] = 1
+    quota.write_text(json.dumps(settings))
+    used = owner_logical_usage_bytes(ctx.home.owner_home_dir)
+    assert used < 1024 * 1024
+    (ctx.home.owner_home_dir / "quota-fill.bin").write_bytes(b"x" * (1024 * 1024 - used))
+    assert owner_logical_usage_bytes(ctx.home.owner_home_dir) == 1024 * 1024
+    assert store.pending_requests() == [source]
+    assert source.read_bytes() == content and store.overflow_requests() == []
+    assert owner_logical_usage_bytes(ctx.home.owner_home_dir) == 1024 * 1024

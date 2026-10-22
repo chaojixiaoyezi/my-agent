@@ -11,6 +11,7 @@ from ..common.cancellation import ToolCancelled
 from ..memory_archive import estimate_tokens
 from .package_read import PackagePageChecks, package_continuation, read_package_page
 from .package_selection_authority import package_entry_policy
+from .skill_usage_ledger import record_skill_usage_event
 
 _HEADER = (
     "[能力包入口参考]\n"
@@ -35,8 +36,10 @@ class PackageEntryContext:
 #   取消、读失败）→ 不 pin（取消照常上抛）；③ 准入通过且读出有效页，只是总预算放不下正文 → 要 pin。
 #   pin 在 read_package_page 内校验有效页后、返回前锁内完成；caller 不补 pin，取消后不撤销已成功的版本归属。
 #   每包只按自己的独立编码与均分份额裁剪，无剩余预算或整体 token 差；最终文本固定顺序，诊断仍按输入顺序。
+#   track_usage 仅供会话沿用延后到 IR 提交后统一计数；默认逐个实际返回页记账，pin 成功但没投递的不记。
 # 函数用途: 固定每个读出有效页的选中包，再按均分份额交付入口正文，把准入失败/读失败/预算不足记为 entry_status。
-def prepare_package_entry_context(agent, params, scope, references, *, authority, claim_id: str, max_tokens: int) -> PackageEntryContext:
+def prepare_package_entry_context(agent, params, scope, references, *, authority, claim_id: str, max_tokens: int,
+                                  track_usage: bool = True) -> PackageEntryContext:
     pages: list[dict] = []
     warnings: list[str] = []
     entry_status: list[dict] = []
@@ -78,8 +81,22 @@ def prepare_package_entry_context(agent, params, scope, references, *, authority
         except Exception:
             warnings.append("CAPABILITY_SELECTION_ENTRY_UNAVAILABLE")
             entry_status.append(_entry_status_row(ref, "not_delivered", reason="unavailable"))
-    return PackageEntryContext(_render(pages) if pages else "", len(pages),
-                               tuple(dict.fromkeys(warnings)), tuple(entry_status))
+    result = PackageEntryContext(_render(pages) if pages else "", len(pages),
+                                 tuple(dict.fromkeys(warnings)), tuple(entry_status))
+    if track_usage:
+        _record_entry_usage(agent, params, pages)
+    return result
+
+
+# LLM: 仅消费已裁剪并将被返回的 pages；不记预算外/失败页，不在台账保存正文或改变准入、pin 和投递结果。
+# 函数用途: 为每个实际投递的入口页记录一次宿主使用及实际字符数。
+def _record_entry_usage(agent, params, pages: list[dict]) -> None:
+    attrs = getattr(params, "task_attributes", None) or {}
+    for page in pages:
+        record_skill_usage_event(agent, event="host_injected", skill_id=page["package_id"], kind="capability_package",
+                                 source="capability_package_entry_context", chars=len(page.get("body") or ""),
+                                 request_id=getattr(params, "request_id", ""), task_id=getattr(params, "task_id", ""),
+                                 thread_id=attrs.get("conversation_thread_id", ""))
 
 
 # LLM: entry_status 只写投递诊断与分页信息，不含正文、不持久化；not_delivered 不能推断是否 pin，当前调用方未消费该字段。

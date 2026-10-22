@@ -15,6 +15,7 @@ from ..common.cancellation import ToolCancelled
 from ..conversation.authority import current_conversation_task_attributes
 from ..memory_archive import estimate_tokens
 from .self_install_switches import read_fresh_capability_switch
+from .skill_usage_ledger import record_skill_usage_event
 
 # 单个主会话允许沿用的方法数（包与 skill 共用）。
 CONVERSATION_METHOD_LIMIT_COUNT = 5
@@ -403,6 +404,7 @@ def _prepare_method_reference(request: _MethodCarryRequest, row: dict, remaining
 
 # LLM: 资料清单（她读到哪里）只能靠这里带回，入口正文可分页重读；所以清单只占不超过一半余量时先预留，
 #   长入口截短后按分页续读；清单更大或预算很紧时入口优先，不让短入口被挤掉。reader/policy/pins 保持。
+#   这里只准备包入口，禁用入口阶段计数，最终由 IR 提交门记录，避免提交失败和同一带回重复计数。
 # 函数用途: 带回包入口和压缩前读过的资料清单，不加载资料正文或执行脚本。
 def _prepare_package_method(request: _MethodCarryRequest, row: dict, remaining: int) -> str:
     from .package_selection_context import prepare_package_entry_context
@@ -415,7 +417,7 @@ def _prepare_package_method(request: _MethodCarryRequest, row: dict, remaining: 
     entry = prepare_package_entry_context(
         request.agent, request.params, request.scope, [package.to_ref()], authority=request.authority,
         claim_id=f"carry:{request.thread_id}:{request.generation}",
-        max_tokens=remaining - reserve if reserve <= remaining - reserve else remaining)
+        max_tokens=remaining - reserve if reserve <= remaining - reserve else remaining, track_usage=False)
     if not entry.text:
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_ENTRY_UNAVAILABLE")
         return ""
@@ -482,6 +484,7 @@ def _carry_text(pieces: list) -> str:
 
 # LLM: 线程锁内复核同代、同登记实例，再投递 IR 和推进代次；并发 remove 不复活、晚到提交不降代。
 #   多个准备可读到相同候选，但同方法同代的实际 IR 投递在原线程锁内去重，不另建持久领取表。
+#   使用计数只在 record_runtime_facts_turn_ir 明确返回 True 后记录每个 delivered，失败不记。
 # 函数用途: 只为真正进入本轮 RuntimeFacts 的条目更新已带回代次，投递失败不消费资格。
 def _commit_method_carry(request: _MethodCarryRequest, pieces: list) -> None:
     from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
@@ -495,11 +498,22 @@ def _commit_method_carry(request: _MethodCarryRequest, pieces: list) -> None:
         latest = methods_from(thread.conversation_methods)
         eligible = {(row["stable_id"], row["record_id"]) for row in latest if request.generation > row["carried_generation"]}
         selected = [(row, text) for row, text in pieces if (row["stable_id"], row["record_id"]) in eligible]
-        if not selected or not record_runtime_facts_turn_ir(request.params, _carry_text(selected), source="conversation_method_carry"):
+        if not selected or record_runtime_facts_turn_ir(request.params, _carry_text(selected), source="conversation_method_carry") is not True:
             return thread
+        _record_carried_usage(request, selected)
         delivered = {row["stable_id"] for row, _text in selected}
         rows = tuple(dict(row, carried_generation=max(row["carried_generation"], request.generation))
                      if row["stable_id"] in delivered else row for row in latest)
         return replace(thread, conversation_methods=rows)
 
     request.agent.conversation_store.threads.update_atomic(request.thread_id, update)
+
+
+# LLM: 仅在IR明确提交成功后记账；沿用行的stable_id/kind保持原身份，不把包沿用身份改成另一种编号。
+# 函数用途: 为已进入本轮上下文的每个方法记录一笔并关联原请求和线程。
+def _record_carried_usage(request: _MethodCarryRequest, selected: list) -> None:
+    for row, text in selected:
+        record_skill_usage_event(request.agent, event="host_injected", kind=row["kind"],
+                                 skill_id=row["stable_id"],
+                                 source="conversation_method_carry", chars=len(text), thread_id=request.thread_id,
+                                 request_id=getattr(request.params, "request_id", ""), task_id=getattr(request.params, "task_id", ""))

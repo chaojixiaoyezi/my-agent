@@ -3,7 +3,7 @@
 #   versions/ 版本全文、removed/ 用户删除归档。发布位置是 <owner_home>/skills/learned/<name>/SKILL.md。
 #   .state 短锁保护登记表/队列读改写；.run 非阻塞长锁只保证同一 owner 同时只有一个总结在跑。
 #   同步检查 skill_learning.py / skill_learning_publish.py / cli/skill_learning_commands.py 与 test_skill_learning*.py。
-# 模块用途: 读写自动总结 Skill 的请求队列、登记表、账本和版本存档；不调用模型，也不做发布闸门判断。
+# 模块用途: 读写有界请求及溢出缓冲、每日总结调用历史、登记表和版本；不调用模型，不代替正式发布确认。
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +16,7 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ..common.json_io import (
@@ -26,7 +26,12 @@ from ..common.json_io import (
     read_jsonl_objects_report,
     write_json_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
+from ..common.nofollow_fs import (
+    list_names_beneath,
+    read_text_beneath,
+    unlink_file_beneath,
+    write_text_atomic_beneath,
+)
 from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 
 REQUEST_SCHEMA_VERSION = "my-agent.skill-learning-request.v1"
@@ -35,6 +40,7 @@ EVENT_SCHEMA_VERSION = "my-agent.skill-learning-event.v1"
 LEARNED_DIR_NAME = "learned"
 # 学习请求队列最大积压条数。
 MAX_PENDING_REQUESTS = 20
+MAX_OVERFLOW_REQUESTS = 100
 # 单条学习请求最多重试次数。
 MAX_REQUEST_ATTEMPT_COUNT = 2
 MAX_LEDGER_EVENTS = 2000
@@ -127,7 +133,7 @@ class LearnedSkill:
 
 
 # LLM: skills 是自学 Skill 的唯一登记；blocked_names 是用户删过的名字，自动流程永不再新建；
-#   daily_date/daily_calls 是按 UTC 日期滚动的模型调用计数。
+#   daily_date/daily_calls与最近30日daily_history仅统计总结模型调用，不统计Skill正文使用。
 # 类用途: registry.json 的完整内容。
 @dataclass(frozen=True)
 class SkillLearningRegistry:
@@ -136,8 +142,9 @@ class SkillLearningRegistry:
     daily_date: str = ""
     daily_calls: int = 0
     import_operations: dict = field(default_factory=dict)
+    daily_history: dict[str, int] = field(default_factory=dict)
 
-    # LLM: 按名字排序输出，保证同一状态写出同一文件。
+    # LLM: 保持原schema和单日快照，另存有界每日调用历史；不改正式Skill登记事实。
     # 函数用途: 转成写入 registry.json 的字典。
     def to_record(self) -> dict[str, object]:
         return {
@@ -145,6 +152,7 @@ class SkillLearningRegistry:
             "skills": {name: self.skills[name].to_record() for name in sorted(self.skills)},
             "blocked_names": sorted(set(self.blocked_names)),
             "daily": {"date": self.daily_date, "calls": self.daily_calls},
+            "daily_history": dict(self.daily_history),
             "import_operations":dict(self.import_operations),
         }
 
@@ -181,15 +189,16 @@ class SkillLearningEvent:
 
 
 # LLM: 所有路径都从 owner 规范布局推导；构造不创建任何目录，第一次写入时才创建。
-# 类用途: 一个 owner 的自学 Skill 存储（请求、登记表、账本、版本、删除归档）。
+# 类用途: 一个owner的学习存储，热请求20条、溢出100条并保留独立每日总结调用历史。
 class SkillLearningStore:
-    # LLM: skills_root 必须是 SkillsService 的 owner 根（owner_home/skills），发布目录在其下 learned/。
+    # LLM: 只绑定原owner根与热/溢出目录，不在构造中创建目录或自动消费请求。
     # 函数用途: 绑定自学数据目录与 owner Skill 根。
     def __init__(self, directory: Path, skills_root: Path) -> None:
         self.directory = Path(directory)
         self.skills_root = Path(skills_root)
         self.learned_root = self.skills_root / LEARNED_DIR_NAME
         self.requests_dir = self.directory / "requests"
+        self.overflow_requests_dir = self.directory / "requests_overflow"
         self.registry_path = self.directory / "registry.json"
         self.ledger_path = self.directory / "ledger.jsonl"
         self.versions_dir = self.directory / "versions"
@@ -227,50 +236,149 @@ class SkillLearningStore:
     def run_lock(self):
         return locked_json_path(self.directory / ".run", blocking=False)
 
-    # LLM: 同一 request_key 已在队列里就不再写；队列满时不写并返回 queue_full，由调用方记账。
-    #   副作用：首次写入时创建 requests/ 目录。
-    # 函数用途: 把一条学习请求写入队列，返回 queued / duplicate / queue_full。
+    # LLM: 热/溢出区共同按键去重；满20先合并同上下文或轮转最旧，仅总容量满才拒绝，事件在state锁外追加。
+    # 函数用途: 有界保存学习材料，返回queued/duplicate/queue_full，不调用模型或发布Skill。
     def enqueue(self, request: dict[str, object]) -> str:
         key = str(request.get("request_key") or "")
+        if not re.fullmatch(r"[0-9a-f]{16}", key):
+            raise SkillLearningStoreError(CODE_REQUEST_CORRUPT, "invalid learning request key")
         with self.state_lock():
-            pending = self.pending_requests()
-            if any(path.name.endswith(f"-{key}.json") for path in pending):
-                return "duplicate"
-            if len(pending) >= MAX_PENDING_REQUESTS:
-                return "queue_full"
-            name = f"{int(time.time() * 1000):013d}-{key}.json"
-            self.check_write(self.requests_dir/name,json.dumps(request,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
-            write_json_file_atomic_unlocked(self.requests_dir / name, request)
-        return "queued"
+            outcome, event = self._enqueue_locked(request, key)
+        if event is not None:
+            self.append_event(event)
+        return outcome
 
-    # LLM: 只认宿主命名的请求文件；锁文件、原子写临时文件都以点开头被排除。文件名前缀是毫秒时间，排序即先进先出。
-    # 函数用途: 返回按创建先后排列的待处理请求路径。
-    def pending_requests(self) -> list[Path]:
-        if not self.requests_dir.is_dir():
-            return []
-        return sorted(path for path in self.requests_dir.iterdir() if _REQUEST_FILE_RE.fullmatch(path.name))
+    # LLM: 默认在热队列空时原state锁内恢复最早溢出；refill=False供发现/报告只读使用，不创建目录。
+    # 函数用途: 按原文件名FIFO返回热请求，必要时从最多100条缓冲恢复下一批。
+    def pending_requests(self, *, refill: bool = True) -> list[Path]:
+        pending = self._request_paths("requests")
+        if pending or not refill or not self.overflow_requests():
+            return pending
+        from ..common.request_execution_ports import gateway_short_transaction
 
-    # LLM: 读不出、不是对象或 schema 不符都返回 None，由调用方丢弃并记 REQUEST_CORRUPT。
+        with gateway_short_transaction("skill_learning_refill_requests"), self.state_lock():
+            if not self._request_paths("requests"):
+                self._refill_requests_locked()
+        return self._request_paths("requests")
+
+    # LLM: 只列本owner固定目录中的宿主请求名，不跟随目录链接；不执行回填或修改队列。
+    # 函数用途: 返回溢出缓冲的FIFO路径，供去重、报告与恢复使用。
+    def overflow_requests(self) -> list[Path]:
+        return self._request_paths("requests_overflow")
+
+    # LLM: 目录名仅由本类固定调用提供，名单经nofollow枚举；每次正文访问仍重新验证父链和叶子。
+    # 函数用途: 只列合法请求文件名，排除锁与临时文件。
+    def _request_paths(self, folder: str) -> list[Path]:
+        names = list_names_beneath(self.directory, (folder,))
+        return [self.directory / folder / name for name in sorted(names) if _REQUEST_FILE_RE.fullmatch(name)]
+
+    # LLM: 调用方持原state/配额锁；新文件用新request_key，旧在途收口只能删旧键，不得覆盖新材料。
+    # 函数用途: 执行请求去重、同类替换和最旧溢出，返回需锁外记录的告警。
+    def _enqueue_locked(self, request: dict[str, object], key: str):
+        if not self._request_paths("requests"):
+            self._refill_requests_locked()
+        pending, overflow = self._request_paths("requests"), self.overflow_requests()
+        if any(path.name.endswith(f"-{key}.json") for path in [*pending, *overflow]):
+            return "duplicate", None
+        name, event = f"{int(time.time() * 1000):013d}-{key}.json", None
+        if len(pending) >= MAX_PENDING_REQUESTS:
+            match = next((path for path in pending if self._same_request_context(path, request)), None)
+            if match is not None:
+                self._write_request_locked("requests", name, request)
+                unlink_file_beneath(self.directory, ("requests", match.name))
+                return "queued", None
+            if len(overflow) >= MAX_OVERFLOW_REQUESTS:
+                return "queue_full", None
+            oldest = pending[0]
+            self._transfer_request_locked(oldest, "requests_overflow")
+            event = SkillLearningEvent("overflowed", "SKILL_LEARNING_QUEUE_OVERFLOW_SAVED",
+                                       request_key=oldest.stem.rsplit("-", 1)[-1])
+        self._write_request_locked("requests", name, request)
+        return "queued", event
+
+    # LLM: 同类仅凭非空结构化thread_id/task_id精确相等，不能从正文、请求时间或名字猜测关系。
+    # 函数用途: 判断满队列中一条待处理请求是否可被新材料替代。
+    def _same_request_context(self, path: Path, request: dict[str, object]) -> bool:
+        previous = self.read_request(path)
+        return previous is not None and any(
+            isinstance(request.get(key), str) and request[key].strip() and previous.get(key) == request[key]
+            for key in ("thread_id", "task_id")
+        )
+
+    # LLM: 只在原state/配额事务内写固定目录；新记录先原子落盘，不改变请求正文协议或确认权限。
+    # 函数用途: 安全写入一条热请求或重试记录。
+    def _write_request_locked(self, folder: str, name: str, request: dict[str, object]) -> None:
+        text = json.dumps(request, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        self.check_write(self.directory / folder / name, text)
+        write_text_atomic_beneath(self.directory, (folder, name), text)
+
+    # LLM: 原admission联合核算目标写入和源删除的最终字节；先复制后删，崩溃同名副本可收口，异内容拒绝覆盖。
+    # 函数用途: 在热区与缓冲区间移动一条请求，保持原文件名和FIFO顺序。
+    def _transfer_request_locked(self, source: Path, folder: str) -> None:
+        parts = self._request_parts(source)
+        text = read_text_beneath(self.directory, parts)
+        if text is None:
+            return
+        destination = (folder, source.name)
+        existing = read_text_beneath(self.directory, destination)
+        if existing is not None and existing != text:
+            raise SkillLearningStoreError(CODE_REQUEST_CORRUPT, "conflicting buffered request")
+        admission = self._quota_admission.get()
+        if admission is None:
+            raise RuntimeError("学习移动缺少原配额事务")
+        admission.check([OwnerQuotaChange(self.directory.joinpath(*destination), len(text.encode("utf-8"))),
+                         OwnerQuotaChange(self.directory.joinpath(*parts), None)])
+        write_text_atomic_beneath(self.directory, destination, text)
+        unlink_file_beneath(self.directory, parts)
+
+    # LLM: 只在热队列已空且持state锁时调用；最多恢复20条，剩余缓冲仍原样保存。
+    # 函数用途: 恢复最早一批溢出请求，让后台按原FIFO继续学习。
+    def _refill_requests_locked(self) -> None:
+        for source in self.overflow_requests()[:MAX_PENDING_REQUESTS]:
+            self._transfer_request_locked(source, "requests")
+
+    # LLM: 请求路径必须是本owner两个固定目录的单个宿主文件名，拒绝外部路径、遍历段及任意目录。
+    # 函数用途: 将可信队列路径转换为nofollow读写使用的相对分量。
+    def _request_parts(self, path: Path) -> tuple[str, str]:
+        parts = Path(path).relative_to(self.directory).parts
+        if len(parts) != 2 or parts[0] not in {"requests", "requests_overflow"} or not _REQUEST_FILE_RE.fullmatch(parts[1]):
+            raise SkillLearningStoreError(CODE_REQUEST_CORRUPT, "invalid request path")
+        return parts
+
+    # LLM: nofollow读取同owner精确请求；原路径刚轮转时找同名缓冲，坏内容/身份不符仍返回None，不读其它键。
     # 函数用途: 读取一条请求。
     def read_request(self, path: Path) -> dict[str, object] | None:
-        report = read_json_object_report(path, context="skill_learning.request")
-        payload = report.payload if report.load_error is None else None
+        try:
+            folder, name = self._request_parts(path)
+            text = read_text_beneath(self.directory, (folder, name))
+            if text is None:
+                other = "requests_overflow" if folder == "requests" else "requests"
+                text = read_text_beneath(self.directory, (other, name))
+            payload = json.loads(text) if text is not None else None
+        except (OSError, ValueError):
+            return None
         if not isinstance(payload, dict) or payload.get("schema_version") != REQUEST_SCHEMA_VERSION:
             return None
         return payload
 
-    # LLM: 只用于失败重试时把 attempts 写回；请求其余字段只读。
+    # LLM: 重试只改原键，已轮转时写同名缓冲，已被同类新请求替代时不复活旧请求。
     # 函数用途: 原子覆盖一条请求。
     def rewrite_request(self, path: Path, request: dict[str, object]) -> None:
         with self.state_lock():
-            if path.is_file():
-                self.check_write(path,json.dumps(request,ensure_ascii=False,indent=2,sort_keys=True)+"\n")
-                write_json_file_atomic_unlocked(path, request)
+            _folder, name = self._request_parts(path)
+            for folder in ("requests", "requests_overflow"):
+                if read_text_beneath(self.directory, (folder, name)) is not None:
+                    self._write_request_locked(folder, name, request)
 
-    # LLM: 幂等删除；处理完、丢弃或损坏的请求都走这里。
+    # LLM: state锁内按原文件名删除热/溢出副本，不删除同上下文的新请求；热区清空后恢复缓冲，保持可发现性。
     # 函数用途: 从队列删除一条请求。
     def discard_request(self, path: Path) -> None:
-        path.unlink(missing_ok=True)
+        with self.state_lock():
+            _folder, name = self._request_parts(path)
+            for folder in ("requests", "requests_overflow"):
+                unlink_file_beneath(self.directory, (folder, name))
+            if not self._request_paths("requests"):
+                self._refill_requests_locked()
 
     # LLM: 文件不存在视为空登记表；存在但损坏时抛 REGISTRY_CORRUPT，绝不按空表覆盖写回。
     # 函数用途: 读取登记表。
@@ -296,16 +404,19 @@ class SkillLearningStore:
         self.check_write(self.registry_path, json.dumps(registry.to_record(),ensure_ascii=False,indent=2,sort_keys=True)+"\n")
         write_json_file_atomic_unlocked(self.registry_path, registry.to_record())
 
-    # LLM: 计数按 UTC 日期滚动；limit<=0 表示不限。在 state_lock 内读改写，发请求前扣减，失败也算一次调用。
+    # LLM: 原state锁内发请求前扣额度，失败也计数；UTC快照和30天历史同步，拒绝额度不产生新计数。
     # 函数用途: 尝试占用今天的一次总结调用额度，返回是否成功。
     def consume_daily_call(self, limit: int) -> bool:
         today = datetime.now(timezone.utc).date().isoformat()
         with self.state_lock():
             registry = self.load_registry()
-            calls = registry.daily_calls if registry.daily_date == today else 0
+            history = dict(registry.daily_history)
+            calls = max(registry.daily_calls if registry.daily_date == today else 0, history.get(today, 0))
             if limit > 0 and calls >= limit:
                 return False
-            self.save_registry(replace(registry, daily_date=today, daily_calls=calls + 1))
+            history[today] = calls + 1
+            self.save_registry(replace(registry, daily_date=today, daily_calls=calls + 1,
+                                       daily_history=_recent_daily_history(history)))
         return True
 
     # LLM: 有界追加（保留最近 MAX_LEDGER_EVENTS 条），自带 per-path 锁，调用方不需要持 state_lock。
@@ -326,6 +437,20 @@ class SkillLearningStore:
         records = read_jsonl_objects_report(self.ledger_path, context="skill_learning.ledger").records
         selected = [item for item in records if not name or item.get("skill_name") == name]
         return selected[-limit:] if limit > 0 else selected
+
+    # LLM: 现有skill_feedback状态读口通过此显式钩子复用统一使用台账；延迟导入避免Store与台账循环依赖。
+    # 函数用途: 只读返回本owner的Skill使用汇总，不创建另一份统计或访问其它owner。
+    def usage_summary(self) -> dict[str, object]:
+        from .skill_usage_ledger import load_skill_usage_summary
+
+        return load_skill_usage_summary(self)
+
+    # LLM: adopted原权限与claim核验仍由feedback负责；这里只把已确认的采用事实转交统一软失败台账。
+    # 函数用途: 接通现有采用反馈的可选写账钩子，不确认或发布任何Skill内容。
+    def record_skill_usage(self, **event) -> None:
+        from .skill_usage_ledger import record_skill_usage_event
+
+        record_skill_usage_event(self, **event)
 
     # LLM: 每个发布修订存不可变全文供回滚和在途快照；同编号异内容拒绝，暂不清理仍可能被引用的版本。调用方必须已持 state_lock，
     #   所以用不再取 per-path 锁的原子写，版本目录里不会留下 .lock 文件。副作用：写 versions/<name>/。
@@ -378,7 +503,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# LLM: 与 SkillLearningRegistry.to_record 对称；键名不符、名字与键不一致或 daily 形状不对都抛 ValueError。
+# LLM: 原登记校验保持；新增每日历史严格校验且兼容缺字段旧表，损坏不得当空表覆盖。
 # 函数用途: 从 registry.json 内容恢复登记表。
 def _registry_from(payload: object) -> SkillLearningRegistry:
     if not isinstance(payload, dict) or payload.get("schema_version") != REGISTRY_SCHEMA_VERSION:
@@ -396,7 +521,40 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
     calls = daily.get("calls") or 0
     if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
         raise ValueError("registry daily calls must be a non-negative integer")
-    return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), str(daily.get("date") or ""), calls, dict(payload.get("import_operations") or {}))
+    daily_date = str(daily.get("date") or "")
+    history = _registry_daily_history(payload.get("daily_history", {}), daily_date, calls)
+    return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), daily_date, calls,
+                                 dict(payload.get("import_operations") or {}), history)
+
+
+# LLM: 每日历史只保留UTC最近30天的整数计数；合法ISO日期作结构化键，不靠展示文字推断日期。
+# 函数用途: 校验并裁剪每日总结调用统计，避免跨日覆盖或无限增长。
+def _recent_daily_history(history: object) -> dict[str, int]:
+    if not isinstance(history, dict):
+        raise ValueError("registry daily_history must be an object")
+    today = datetime.now(timezone.utc).date()
+    cutoff = (today - timedelta(days=29)).isoformat()
+    result = {}
+    for day, count in history.items():
+        if (not isinstance(day, str) or date.fromisoformat(day).isoformat() != day
+                or isinstance(count, bool) or not isinstance(count, int) or count < 0):
+            raise ValueError("registry daily_history has invalid counts or dates")
+        if cutoff <= day <= today.isoformat():
+            result[day] = count
+    return dict(sorted(result.items()))
+
+
+# LLM: 旧表只有daily快照时将合法最近日期补入历史；已有历史不被更低旧快照覆盖，原daily字段保留。
+# 函数用途: 恢复向后兼容的每日调用历史，不重置今日预算。
+def _registry_daily_history(raw: object, daily_date: str, calls: int) -> dict[str, int]:
+    history = _recent_daily_history(raw)
+    try:
+        valid_date = date.fromisoformat(daily_date).isoformat() == daily_date
+    except ValueError:
+        valid_date = False
+    if valid_date:
+        history[daily_date] = max(history.get(daily_date, 0), calls)
+    return _recent_daily_history(history)
 
 
 # LLM: 必填字符串字段；空值视为损坏。

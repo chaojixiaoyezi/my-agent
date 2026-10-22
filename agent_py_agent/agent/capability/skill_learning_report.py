@@ -3,7 +3,7 @@
 #   成功后把事件写进账本。不构造 Agent、不调模型，不要暴露成模型工具。
 #   改动须同步 cli/skill_learning_commands.py、gateway_parts/skill_control_service.py 与 test_skill_learning_integration.py、
 #   test_skill_chat_control.py。
-# 模块用途: 统一“自动总结的 Skill 现在是什么状态、最近发生了什么”的事实，以及用户要求的回滚与删除。
+# 模块用途: 统一自学Skill状态、学习队列/每日总结历史与独立正文使用统计，以及用户要求的回滚和删除。
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -16,6 +16,7 @@ from .skill_learning_publish import (
 )
 from .skill_learning_store import LearnedSkill, SkillLearningStore
 from .skill_snapshot import skill_content_sha256
+from .skill_usage_ledger import load_skill_usage_summary
 
 
 # LLM: 行内容是登记记录加路径与状态；状态 active/user_modified/missing 只由文件事实推导。只读。
@@ -31,21 +32,33 @@ def learned_skill_row(store: SkillLearningStore, record: LearnedSkill) -> dict[s
     return {**record.to_record(), "path": str(path), "state": state}
 
 
-# LLM: 只读列出，不创建目录；今日调用数按 UTC 日期，与服务端计数同口径；开关状态只作展示。
-# 函数用途: 汇总自动总结 Skill 的列表、待处理请求数、今日调用次数与被屏蔽的名字。
+# LLM: 只读投影，不触发溢出回填；总结LLM历史与manual_get/host_injected有效使用分开，开关不授确认权。
+# 函数用途: 汇总学习状态、候选/缓冲积压、30日调用历史和Skill实际使用台账。
 def learned_skills_report(store: SkillLearningStore, config: object) -> dict[str, object]:
     registry = store.load_registry()
     today = datetime.now(timezone.utc).date().isoformat()
     return {
         "self_learning_enabled": bool(getattr(config, "enable_self_learning", False)),
         "learned_root": str(store.learned_root),
-        "pending_requests": len(store.pending_requests()),
+        "pending_requests": len(store.pending_requests(refill=False)),
+        "overflow_requests": len(store.overflow_requests()),
+        "pending_proposals": _pending_proposal_count(store),
         "calls_today": registry.daily_calls if registry.daily_date == today else 0,
+        "daily_history": dict(registry.daily_history),
+        "skill_usage": load_skill_usage_summary(store),
         "daily_limit": int(getattr(config, "self_learning_daily_limit", 0) or 0),
         "blocked_names": sorted(set(registry.blocked_names)),
         "count": len(registry.skills),
         "skills": [learned_skill_row(store, registry.skills[name]) for name in sorted(registry.skills)],
     }
+
+
+# LLM: 活跃和溢出候选均来自同一canonical读取入口；只统计仍pending的项，不把superseded当待确认。
+# 函数用途: 展示全部可确认候选积压，不进行回填、确认或发布。
+def _pending_proposal_count(store: SkillLearningStore) -> int:
+    from .skill_learning_proposals import list_learning_proposals
+
+    return sum(row.get("status") == "pending" for row in list_learning_proposals(store, include_overflow=True))
 
 
 # LLM: 名字先在登记表里精确查找，不在表里就抛 CODE_NOT_LEARNED，不用它拼路径；事件只含结构化字段与有界 reason。只读。

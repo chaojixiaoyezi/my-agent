@@ -2250,6 +2250,7 @@ agent_py_agent/
 |   |   |-- skill_learning_prompt.py   # S3 提示词、严格 JSON schema 与输出解析（frontmatter 无损规范化）
 |   |   |-- skill_learning_publish.py  # S3 自动闸门与发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
 |   |   |-- skill_learning_store.py    # S3 唯一落盘权威：请求队列、registry.json、ledger.jsonl、版本全文、removed 归档与锁
+|   |   |-- skill_usage_ledger.py       # owner使用明细与汇总：区分搜索展示、正文读取、宿主注入和采用；有效使用仅正文读取与注入
 |   |   |-- skill_learning_report.py   # 自动总结 Skill 的状态推导与用户回滚/删除，CLI 与聊天 /skills 共用
 |   |   |-- decision_skill_proposal_review.py # 自学习 S2：`skills proposals list` 的可选审核顺序点，只重排展示并加宿主标签，从不确认/拒绝/写入
 |   |   |-- persona_repository.py      # owner SOUL/USER/AGENTS 受控加载、版本/CAS/回滚唯一入口
@@ -3441,6 +3442,7 @@ docs/
 - `agent/gateway_parts/admin_control_service.py`：`/admin`、`/approve`、`/deny` 的唯一执行入口；只信任认证 scope 与结构化私聊类型，批准只写原 permission bridge 的精确决定文件。
 - `agent/gateway_parts/skill_control_service.py`：聊天 `/skills` 的唯一执行入口，TUI 与 IM 共用；按控制范围解析 owner（与 `/model` 同一解析），提案确认/拒绝必须带用户看到的版本号并由服务端锁内复核，列提案时调用审核顺序点；自动总结 Skill 走 `skill_learning_report`；回执不含本机路径，不暴露给模型。
 - `agent/capability/skill_learning_report.py`：自动总结 Skill 的状态推导（active/user_modified/missing）、列表、详情与用户回滚/删除，CLI `skills learned` 与聊天 `/skills learned` 共用。
+- `agent/capability/skill_usage_ledger.py`：在原owner的 `data/skill_learning/` 写有界 `usage_ledger.jsonl` 与原子 `usage_summary.json`，仅存身份、来源与计数，不存正文。`effective_uses` 只计显式正文读取和实际宿主注入；明细序号与汇总水位支持中断后补记，裁剪不重置生命周期总数；使用失败仅告警，不阻断原工具。学习队列的热区与溢出、候选同名合并与可确认归档、`registry.daily_history` 的每日总结LLM调用另按各自口径记录，不互相冒充。候选迁移通过有界元数据意图和前后完整哈希恢复，只读查询投影一致状态，写入口按原锁与配额收敛，不放宽用户确认或发布CAS。
 - `agent/user_space/admin_password.py` 与 `admin_channel_identity.py`：管理员密码（scrypt、节流）与 IM 身份绑定的唯一权威，位于 `config/`；owner 解析经 `request_worker.admin_channel_identity_for_request` 精确匹配。
 - `cli/admin_identity_commands.py`：本机管理员设置密码与管理绑定的唯一 CLI 入口；设计见 `docs/design/ADMIN_CHANNEL_IDENTITY.md`。
 - `agent/gateway_parts/owner_conversation_store.py`：沿原配置与 owner 路径组装模型菜单和插件管理共用的轻量会话 Store，不初始化完整 Agent。
