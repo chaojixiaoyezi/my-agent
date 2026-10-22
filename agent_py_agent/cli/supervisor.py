@@ -308,13 +308,13 @@ def cmd_supervisor_status(args) -> int:
     return 0
 
 
-# LLM: 唯一CLI组合根先解析实际Agent，再把其规范路径交原停止函数；不在runtime重建Agent或改变目标PID/等待门。
-# 函数用途: 停止所选配置对应的监护进程，保留原返回码和超时。
+# LLM: 原CLI组合根固定Agent及规范路径；argparse缺省None或原零值采用25秒覆盖子服务收尾，显式非零预算和原返回码不变。
+# 函数用途: 停止所选监护者，默认留足子服务优雅退出时间，不改变停止目标或身份门。
 def cmd_supervisor_stop(args) -> int:
     agent = make_agent(args)
     paths = gateway_paths(agent)
 
-    if stop_supervisor(paths, timeout=args.timeout or 10.0):
+    if stop_supervisor(paths, timeout=args.timeout or 25.0):
         print("supervisor 已停止")
         return 0
     else:

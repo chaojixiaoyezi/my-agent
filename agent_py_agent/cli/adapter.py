@@ -39,6 +39,7 @@ from ..agent.gateway_parts.io import write_json_file_atomic
 from .adapter_daemon import (
     AdapterDaemonRequest,
     AdapterStopRequest,
+    adapter_stop_path,
     daemonize_adapter,
     print_daemon_adapter_status,
     stop_adapter_daemon,
@@ -49,6 +50,8 @@ from .models import AdapterOptions
 
 # 适配器常驻进程每隔多久把自己的状态写进 adapter_state.json（channel_health 按 30 秒判陈旧）。
 ADAPTER_STATE_WRITE_INTERVAL_SECONDS = 5.0
+# 停止请求独立短轮询，不把原五秒状态心跳提高到每秒多次写盘。
+ADAPTER_STOP_POLL_INTERVAL_SECONDS = 0.2
 # 状态写入失败的进程内记录：只记内存，不做 IO；下一次写成功时一并写进状态文件，让恢复过程可见。
 _ADAPTER_STATE_WRITE_HEALTH: dict[str, object] = {"failures": 0, "last_error": {}}
 _adapter_logger = logging.getLogger("agent_py_agent.adapter")
@@ -327,25 +330,45 @@ def _register_requested_adapters(manager: ChannelManager, channel: str, agent) -
         _register_channel_adapter(manager, "qq", agent)
 
 
-# LLM: 等待循环里的周期状态写入走守卫版：写失败只记账、下一轮重试，绝不让 OSError 逃出循环杀掉进程。
-#   stop_event 可注入只为测试驱动停止；保留原 requested_channel，更新器可恢复同一启动范围。
-# 函数用途: 挂住主线程直到收到 SIGINT/SIGTERM（或注入的 stop_event 置位），期间周期刷新状态文件。
+# LLM: 停止文件沿daemon写者同一gpaths定位，短Event等待并finally清理；本循环异常优先，单独清理失败仍上抛；原心跳守卫和requested_channel不变。
+# 函数用途: 等待停止请求或信号后交调用方优雅收尾，不让短轮询增加原状态文件写入频率。
 def _wait_for_adapter_shutdown(manager: ChannelManager, gpaths, stop_event: threading.Event | None = None, *, requested_channel: str | None = None) -> None:
     stop_event = stop_event if stop_event is not None else threading.Event()
+    stop_path = adapter_stop_path(gpaths.root)
+    next_state_write = time.monotonic() + ADAPTER_STATE_WRITE_INTERVAL_SECONDS
 
+    # LLM: 信号仅设置原等待事件，实际manager停止及PID收尾仍归前台调用栈。
+    # 函数用途: 让SIGINT和SIGTERM中断当前等待片。
     def _sig_handler(signum, frame):
         stop_event.set()
 
     signal.signal(signal.SIGINT, _sig_handler)
     signal.signal(signal.SIGTERM, _sig_handler)
+    failed = False
     try:
-        while not stop_event.wait(ADAPTER_STATE_WRITE_INTERVAL_SECONDS):
+        while not stop_event.is_set() and not stop_path.exists():
+            timeout = min(ADAPTER_STOP_POLL_INTERVAL_SECONDS, max(0.0, next_state_write - time.monotonic()))
+            if stop_event.wait(timeout) or stop_path.exists():
+                break
+            if time.monotonic() < next_state_write:
+                continue
             extra = {"channels": manager.runtime_channel_statuses()}
             if requested_channel is not None:
                 extra["requested_channel"] = requested_channel
             _write_adapter_state_guarded(gpaths, "running", extra)
+            next_state_write = time.monotonic() + ADAPTER_STATE_WRITE_INTERVAL_SECONDS
     except KeyboardInterrupt:
         pass
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            stop_path.unlink(missing_ok=True)
+        except OSError as exc:
+            if not failed:
+                raise
+            _adapter_logger.warning("adapter_stop_request_cleanup_failed error=%s", type(exc).__name__)
 
 
 # LLM: 状态文件是原子写（temp+replace）：写失败时旧内容保持完整，不会留下半截 JSON 让读者报"状态不可读"。
