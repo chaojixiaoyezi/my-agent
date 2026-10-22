@@ -850,6 +850,9 @@ def _scheduler_timestamp(value: object) -> float:
 # 未完成 = 还需要被驱动:待派(PLANNING/PENDING)、在跑(RUNNING,重启后需判活回收)、
 # 待解阻(BLOCKED,能力批复/续派通道)。终态与人为暂停(PAUSED)不算。
 _UNFINISHED_RUN_STATUSES = frozenset({"PLANNING", "PENDING", "RUNNING", "BLOCKED"})
+_SETTLED_LEDGER_STATUSES = frozenset(
+    {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR", "COMPLETED", "PAUSED"}
+)
 
 # R1-03 发现层 repo 缓存：唤醒轮每 tick 调 unfinished_task_ids，每 tick 重建
 # RuntimeRepository（schema 初始化开销）不可接受。按 db 文件 mtime_ns 失效——
@@ -997,13 +1000,13 @@ def _directory_record(path: Path, mode: str) -> tuple[Any, ...]:
     return fp, fields
 
 
-# LLM: 无效、未知或活跃状态不能当终态跳过；终态mtime距现在超过5秒才可稳定复用。
-# 函数用途: 判定单条账本或链接是否仍需每轮现读。
+# LLM: 仅显式合法终态可复用，未知/损坏/活跃状态必须保留实时复核；终态mtime距现在超过5秒才可稳定复用。
+# 函数用途: 判定单条账本或任务链接是否仍需每轮现读，防止未知状态被误归入已沉淀终态。
 def _status_record_live(record: tuple[Any, ...], mode: str, now_ns: int) -> bool:
     fp, fields = record
     if fp is None or fields is None or not fields[1]:
         return True
-    terminal = (fields[1].upper() not in _UNFINISHED_RUN_STATUSES if mode == "ledger"
+    terminal = (fields[1].upper() in _SETTLED_LEDGER_STATUSES if mode == "ledger"
                 else conversation_task_link_is_terminal(fields[1].lower()))
     return not terminal or now_ns - fp[2] <= 5_000_000_000
 

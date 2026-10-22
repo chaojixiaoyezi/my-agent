@@ -1,3 +1,10 @@
+## 2026-10-21 网关高基数目录投影缓存、线程记录指纹缓存与沙箱侧车竞态裁剪（0.3.0-tui-preview.20261021.4）
+
+- `owner_wake_discovery.py` 为 `runs/*/*/work/state.json`、`tasks/*/*/work/state.json`、`*/conversations/tasks/*.json` 与扁平 `messages/*.jsonl` 引入按目录物理四元指纹（`st_ino, st_size, st_mtime_ns, st_ctime_ns`）索引的有界内存投影缓存（`_LEDGER_DATE_DIR_CACHE`、`_FACT_DIRECTORY_CACHE`），对超过 32 项的高基数目录中已沉淀超过 5 秒的终态 `state.json` 与 `TaskLink` 在 60 秒窗口内直接复用终态事实，避免每轮发现对数千历史目录重复执行 `Path.glob` 与内核 VFS `stat`；同时 `_curator_input_newer_than` 改用 `os.scandir` 并在单条 `entry.stat().st_mtime > cursor_epoch` 时立即短路返回。
+- `conversation/store_threads.py` 新增按线程 JSON 文件物理四元指纹索引的 `_THREAD_RECORD_CACHE`（上限 65,536），命中时通过 `_clone_cached_thread` 深拷贝可变容器字段，损坏记录绝不入缓存，消除 `ThreadStore.list_report(limit=0)` 在数千线程规模下的全量重读与 JSON 反序列化。
+- `tooling/sandbox.py::prune_transient_bwrap_sidecar_mounts`、`tooling/shell.py::_run_attempt_sandboxed_shell_command` 与 `attempt/process_run.py::run_sandbox_process` 针对 `bwrap` 构建 rootfs 期间并发消失的 SQLite 易失侧车/锁文件（`-wal`/`-shm`/`-journal`/`.lock`）导致的挂载表/重挂失败，提供最多 3 次精确剥离该侧车挂载参数后的重试，且单次尝试超时、取消信号及用户命令自身的同文案输出绝不误判为重试。
+- `attempt/landlock_launcher.py` 移除 `_NetPortAttr` 的 `_pack_ = 1` 以对齐内核 `struct landlock_net_port_attr` 自然 64 位布局，并在 `_add_allow_rules` 65,536 端口循环中复用单个结构体与 `ctypes` 指针；`tooling/process_registry.py` 在 Linux 下通过 `_linux_proc_process_group_map` 直接读取 `/proc/<pid>/stat` 替代 `fork` 网关进程执行 `ps -axo pid=,pgid=`，并在 `_signal_process_snapshot` 中跳过僵尸进程信号发送。
+
 ## 2026-10-21 网关热循环减负、草稿截断、沙箱侧车容错与离线包自检（0.3.0-tui-preview.20261021.2 / 20261021.3）
 
 - `cli/gateway_loops.py::_BackgroundMainSupervisor._submit_ready_thread_ticks` 在单 owner 规划窗口内将 `scheduler.prepare_tick(include_orphan_supervision=False)` 与 `ready_thread_ids` 收进同一 `sqlite_connection_scope(True)` 并在调用 `_submit_thread_candidates` 前退出作用域，配合 `runtime_db/schema.py` 新增 `idx_agent_runs_run_id`、`idx_task_runs_closed_at` 与 `idx_tool_operations_status` 索引，以及 `runtime_db/repository.py::reconcile_superseded_attempts` 的只读前置探测与 `capability_auto_sweep.py::supervise_stalled_orphans` 的 `sqlite_connection_scope(True)` + 活跃候选预筛，消除高频 tick 与孤儿监督反复建连及全表/全历史扫描。

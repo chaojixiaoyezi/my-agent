@@ -548,12 +548,24 @@ def _is_ephemeral_readonly_sidecar(path: Path) -> bool:
     return path.name.endswith((*SQLITE_SIDECAR_SUFFIXES, HOST_STATE_LOCK_SUFFIX))
 
 
+# LLM: 仅识别landlock_launcher前置包装后的首个bwrap命令分隔符，不把用户命令内部的--当成挂载区结尾。
+# 函数用途: 返回bwrap挂载选项的扫描上界下标，隔离--之后的用户命令参数。
+def _bwrap_mount_limit(argv: list[str]) -> int:
+    if "--" not in argv:
+        return len(argv)
+    first = argv.index("--")
+    start = first + 1 if any("landlock_launcher" in str(item) for item in argv[:first]) else 0
+    return argv.index("--", start) if "--" in argv[start:] else len(argv)
+
+
 # LLM: 只裁剪stderr命中的瞬时try-bind及同时消失的侧车，不动硬RO/用户命令；调用方还须守住无stdout、失败码及重试上限。
 # 函数用途: 返回可供有界重试的侧车挂载参数；未确认是瞬时侧车错误时不重试。
 def prune_transient_bwrap_sidecar_mounts(argv: list[str], stderr: str) -> list[str] | None:
     if not any(marker in stderr for marker in ("bwrap: Can't bind mount ", "bwrap: Can't find source path ")):
         return None
-    limit = len(argv) - 1 - argv[::-1].index('--') if '--' in argv else len(argv)
+    limit = _bwrap_mount_limit(argv)
+    if any("bwrap:" in str(item) for item in argv[limit + 1:]):
+        return None
     pruned: list[str] = []
     matched_stderr = False
     index = 0

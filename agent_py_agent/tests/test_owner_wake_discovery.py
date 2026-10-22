@@ -1336,3 +1336,18 @@ def test_slow_flat_scan_starts_ttl_after_completion(tmp_path, monkeypatch):
     reads.clear()
     assert discovery._dir_entries_signature(folder, "*.jsonl") == first
     assert len(reads) == 32
+
+
+# LLM: 未知账本状态不得被当成已沉淀终态跳过重检；修复为RUNNING后下一轮必须立即发现。
+# 函数用途: 保证仅合法终态进入历史复用，未知状态保持每轮实时复核。
+def test_unknown_ledger_status_remains_live_until_settled(tmp_path):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    _settled, active = _settled_history(home, count=40)
+    old_ns = time.time_ns() - 120_000_000_000
+    active.write_text(json.dumps({"task_id": "task-40", "status": "UNKNOWN_STATE"}))
+    os.utime(active, ns=(old_ns, old_ns))
+    assert discovery.unfinished_task_ids(home) == []
+    active.write_text(json.dumps({"task_id": "task-40", "status": "RUNNING"}))
+    assert discovery.unfinished_task_ids(home) == ["task-40"]

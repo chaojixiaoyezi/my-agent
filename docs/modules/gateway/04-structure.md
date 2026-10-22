@@ -1,3 +1,10 @@
+## 2026-10-21 高基数目录投影缓存、线程记录缓存与沙箱启动减负结构（0.3.0-tui-preview.20261021.4）
+
+- `owner_wake_discovery.py` 使用 `_DirectoryProjection`、`_LEDGER_DATE_DIR_CACHE` 与 `_FACT_DIRECTORY_CACHE` 缓存按日期分片工作目录及扁平目录的条目投影，并在 `_directory_scan`、`_refresh_directory_projection`、`_build_directory_projection`、`_ledger_directory_scans` 与 `_conversation_task_link_scan` 中复用已沉淀终态与 `os.scandir` 的 `DirEntry.stat()`，同时保留损坏/非终态记录的实时重检；`_curator_input_newer_than` 使用 `os.scandir` 在发现首个较新条目时立即短路。
+- `conversation/store_threads.py::_read_thread_record_report` 按物理文件四元指纹（`st_ino, st_size, st_mtime_ns, st_ctime_ns`）查询 `_THREAD_RECORD_CACHE`，命中时由 `_clone_cached_thread` 复制 `ThreadRecord` 的可变字典/列表字段，失败或异常保持原诊断返回且不入缓存。
+- `tooling/sandbox.py::prune_transient_bwrap_sidecar_mounts` 解析 `bwrap` 标准错误中的易失侧车挂载路径并从参数向量中精确剥离对应 `--ro-bind-try` / `--ro-bind` 三元组；`tooling/shell.py::_run_attempt_sandboxed_shell_command` 与 `attempt/process_run.py::run_sandbox_process` 在剩余超时预算与取消令牌有效的前提下最多有界重试 3 次。
+- `attempt/landlock_launcher.py::_NetPortAttr` 采用自然对齐的双 `c_uint64` 结构并在 `_add_allow_rules` 中单次分配复用；`tooling/process_registry.py::_process_group_map` 在 Linux `/proc` 可读时直接解析 `/proc/<pid>/stat` 的 `(pid, pgid)`，`_signal_process_snapshot` 对 `stat == "Z"` 的僵尸快照跳过信号发送。
+
 ## 2026-10-21 网关热循环与沙箱/产物保护减负结构（0.3.0-tui-preview.20261021.2 / 20261021.3）
 
 - `cli/gateway_loops.py::_BackgroundMainSupervisor._submit_ready_thread_ticks` 在单 owner 规划窗口的 `sqlite_connection_scope(True)` 内执行 `prepare_tick(include_orphan_supervision=False)` 与 `ready_thread_ids`，并在进入 `_submit_thread_candidates` 前退出连接作用域；`agent_core/orchestration/dispatch/capability_auto_sweep.py::supervise_stalled_orphans` 同样在 `sqlite_connection_scope(True)` 内运行并对 `_reconcile_conversation_parent_lifecycle`、`_reclaim_dead_running_runs`、`auto_start_stalled_orphans` 与 `_redispatch_stalled_subagents` 先做活跃/可派候选筛选；`conversation/process_events.py::reconcile_process_completions` 仅对非终态且非 `unknown` 的后台进程通过 `_process_completion_status` 调用 `process_registry.get(process_id)`，不再在高频巡检中读盘日志尾部。

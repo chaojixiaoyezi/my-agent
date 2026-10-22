@@ -76,23 +76,23 @@ def _drop_cached_thread(path: Path) -> None:
         _THREAD_RECORD_CACHE.pop(str(path), None)
 
 
-# LLM: 仅相同物理指纹的有效记录复用，克隆在锁外；未命中保留原reader/from_dict和错误身份，不缓存空值或错误。
-# 函数用途: 读取独立线程快照，只把读前读后稳定的文件放进有界缓存。
+# LLM: 仅相同物理指纹且线程身份匹配的有效记录复用，克隆在锁外；未命中校验thread_id身份，不缓存失配、空值或错误。
+# 函数用途: 读取并校验独立线程快照，只把身份一致且读前读后稳定的文件放进有界缓存。
 def _read_thread_record_report(
     path: Path, *, thread_id: str = "",
 ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
+    actual_thread_id = str(thread_id or path.stem)
     before_fp = _file_fingerprint(path)
     cached_thread = None
     if before_fp is not None:
         with _THREAD_RECORD_CACHE_LOCK:
             cached = _THREAD_RECORD_CACHE.get(str(path))
-            if cached is not None and cached[0] == before_fp:
+            if cached is not None and cached[0] == before_fp and cached[1].thread_id == actual_thread_id:
                 _THREAD_RECORD_CACHE.move_to_end(str(path))
                 cached_thread = cached[1]
     if cached_thread is not None:
         return _clone_cached_thread(cached_thread), None
     payload, error = read_json_object_report(path, context="conversation.thread.read")
-    actual_thread_id = str(thread_id or path.stem)
     if error is not None:
         _drop_cached_thread(path)
         error["thread_id"] = actual_thread_id
@@ -102,6 +102,8 @@ def _read_thread_record_report(
         return None, None
     try:
         thread = ConversationThread.from_dict(payload)
+        if not thread.thread_id or thread.thread_id != actual_thread_id:
+            raise DataCorruptionError(f"conversation thread identity is invalid: {actual_thread_id}")
         after_fp = _file_fingerprint(path)
         if before_fp is not None and after_fp == before_fp:
             _store_cached_thread(path, after_fp, thread)

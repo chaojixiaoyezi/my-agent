@@ -313,7 +313,7 @@ def test_prune_transient_sidecar_mounts(tmp_path, kind, name, wrapped):
 
 # LLM: 有缺失侧车不能把其它错误变成重试，不能扫描用户命令内的挂载形状参数。
 # 函数用途: 锁住普通失败、持久文件、命令参数及不完整三元组的拒绝边界。
-@pytest.mark.parametrize('case', ['ordinary', 'persistent', 'hard-sidecar', 'unmatched', 'command', 'incomplete'])
+@pytest.mark.parametrize('case', ['ordinary', 'persistent', 'hard-sidecar', 'unmatched', 'command', 'command-double-dash', 'command-bwrap-echo', 'incomplete'])
 def test_prune_transient_sidecar_rejects_unrelated_failure(case):
     argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal']
     error = _sidecar_error('/absent-wal')
@@ -328,6 +328,10 @@ def test_prune_transient_sidecar_rejects_unrelated_failure(case):
         error = _sidecar_error('/another-wal')
     elif case == 'command':
         argv = ['bwrap', '--', 'echo', *argv[1:]]
+    elif case == 'command-double-dash':
+        argv = ['bwrap', '--', 'echo', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'end']
+    elif case == 'command-bwrap-echo':
+        argv = ['bwrap', '--ro-bind-try', '/absent-wal', '/absent-wal', '--', 'bash', '-c', f"echo '{error}' >&2; exit 1"]
     else:
         argv.pop()
     assert sandbox.prune_transient_bwrap_sidecar_mounts(argv, error) is None

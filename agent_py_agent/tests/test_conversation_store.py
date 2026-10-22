@@ -2102,3 +2102,20 @@ def test_thread_record_cache_clones_dictionary_tuple_fields(thread_record_cache_
     second = case.store.threads.require(case.thread.thread_id)
     assert second.pending_host_notices == ({'nested': [1]},)
     assert second.conversation_methods == ({'nested': [2]},)
+
+
+# LLM: 线程文件内thread_id与文件名身份不一致时视为损坏，不得写入正缓存或返回错误身份对象。
+# 函数用途: 验证身份不匹配的线程记录在读取与枚举时均报错且不入缓存。
+def test_thread_record_cache_rejects_mismatched_identity(thread_record_cache_case):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    assert str(case.path) in case.module._THREAD_RECORD_CACHE
+    mismatched = replace(case.thread, thread_id='different-thread').to_dict()
+    case.path.write_text(json.dumps(mismatched), encoding='utf-8')
+    thread, error = case.store.threads.load_report(case.thread.thread_id)
+    assert thread is None and error is not None
+    assert error['thread_id'] == case.thread.thread_id
+    assert str(case.path) not in case.module._THREAD_RECORD_CACHE
+    threads, errors = case.store.threads.list_report(limit=0)
+    assert threads == [] and len(errors) == 1
+    assert str(case.path) not in case.module._THREAD_RECORD_CACHE
