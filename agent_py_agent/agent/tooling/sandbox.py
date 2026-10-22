@@ -584,27 +584,83 @@ def prune_transient_bwrap_sidecar_mounts(argv: list[str], stderr: str) -> list[s
     return pruned if matched_stderr and len(pruned) < len(argv) else None
 
 
-# LLM: 供两种同步执行入口识别原参数挂载竞态；不改变任何挂载或权限，仅返回副本供原有界重试使用。
-# 函数用途: 检查主文件替换期间的bwrap挂载错误，未确认竞态时不重试。
-def retry_bwrap_mount_race_argv(argv: list[str], stderr: str) -> list[str] | None:
-    if not argv or Path(argv[0]).name != "bwrap":
+# LLM: 仅识别直接bwrap或宿主landlock_launcher首个分隔符后的bwrap，不能扫描载荷自己的选项。
+# 函数用途: 返回bwrap挂载区的起止下标，排除包装器和业务命令参数。
+def _bwrap_mount_bounds(argv: list[str]) -> tuple[int, int] | None:
+    if not argv:
         return None
-    if not any(marker in stderr for marker in ("bwrap: Can't bind mount ", "bwrap: Can't find source path ")):
+    if Path(argv[0]).name == "bwrap":
+        start = 1
+    elif "--" in argv:
+        first_sep = argv.index("--")
+        if (not any("landlock_launcher" in str(item) for item in argv[:first_sep])
+                or first_sep + 1 >= len(argv) or Path(argv[first_sep + 1]).name != "bwrap"):
+            return None
+        start = first_sep + 2
+    else:
         return None
-    limit = _bwrap_mount_limit(argv)
-    if any("bwrap:" in str(item) for item in argv[limit:]):
-        return None
-    index = 1
+    limit = argv.index("--", start) if "--" in argv[start:] else len(argv)
+    return start, limit
+
+
+# LLM: 两同步入口必须在每次启动前采集非根bind源身份；只读stat，失败留哨兵，不修改挂载或权限。
+# 函数用途: 冻结本次bwrap保护源的dev/ino，为退出后是否发生替换提供前像。
+def snapshot_bwrap_mount_sources(argv: list[str]) -> dict[str, tuple[int, int]]:
+    bounds = _bwrap_mount_bounds(argv)
+    if bounds is None:
+        return {}
+    index, limit = bounds
+    snapshot: dict[str, tuple[int, int]] = {}
     while index + 2 < limit:
         if argv[index] in {"--ro-bind", "--ro-bind-try", "--bind", "--bind-try"}:
             source, target = argv[index + 1:index + 3]
-            if source in stderr or target in stderr:
-                source_path = Path(source)
-                if source_path.exists() or source_path.is_symlink():
-                    return list(argv)
+            if source != "/" and target != "/":
+                try:
+                    st = Path(source).stat()
+                    snapshot[source] = (int(st.st_dev), int(st.st_ino))
+                except OSError:
+                    snapshot[source] = (-1, -1)
             index += 3
         else:
             index += 1
+    return snapshot
+
+
+# LLM: 共享stderr不能单独授权重放；两入口须传本次启动前像，仅匹配非根挂载源身份真实变化时原参有界重试。
+# 函数用途: 以dev/ino变化确认主文件挂载竞态，稳定源或缺少证据时拒绝重放业务命令。
+def retry_bwrap_mount_race_argv(
+    argv: list[str], stderr: str, before_sources: dict[str, tuple[int, int]] | None = None,
+) -> list[str] | None:
+    if not before_sources:
+        return None
+    bounds = _bwrap_mount_bounds(argv)
+    if bounds is None:
+        return None
+    index, limit = bounds
+    if not any(marker in stderr for marker in ("bwrap: Can't bind mount ", "bwrap: Can't find source path ")):
+        return None
+    if any("bwrap:" in str(item) for item in argv[limit:]):
+        return None
+    while index + 2 < limit:
+        if argv[index] not in {"--ro-bind", "--ro-bind-try", "--bind", "--bind-try"}:
+            index += 1
+            continue
+        source, target = argv[index + 1:index + 3]
+        index += 3
+        if source == "/" or target == "/":
+            continue
+        matched = any(token in stderr for token in (
+            f"/oldroot{source}", f"/newroot{target}", f"source path {source}",
+            f"destination {target}", f"mount {source} on {target}",
+        ))
+        if not matched or source not in before_sources:
+            continue
+        try:
+            st = Path(source).stat()
+        except OSError:
+            continue
+        if (int(st.st_dev), int(st.st_ino)) != before_sources[source]:
+            return list(argv)
     return None
 
 
@@ -877,6 +933,7 @@ __all__ = [
     "probe_sandbox",
     "prune_transient_bwrap_sidecar_mounts",
     "retry_bwrap_mount_race_argv",
+    "snapshot_bwrap_mount_sources",
     "require_sandbox_ready",
     "wrap_shell_command",
 ]

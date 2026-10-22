@@ -90,6 +90,7 @@ from .sandbox import (
     SandboxUnavailable,
     prune_transient_bwrap_sidecar_mounts,
     retry_bwrap_mount_race_argv,
+    snapshot_bwrap_mount_sources,
 )
 from .shell_syntax import contains_unmanaged_background_operator
 from .write_boundary import SandboxWriteProtection
@@ -2101,7 +2102,7 @@ def _run_shell_command(
     )
 
 
-# LLM: 前台只吃attempt argv；无stdout的侧车失败先裁剪，再识别存活源挂载竞态原参重试；共用最多三次重试、期限和原取消/回收，不回退宿主shell。
+# LLM: 前台只吃attempt argv；无stdout的侧车失败先裁剪，非侧车须用本次预快照确认源身份变化；共用最多三次重试、期限和原取消/回收，不回退宿主shell。
 # 函数用途: 在 attempt 沙箱内运行非交互命令并等待完成；无显式输入时得到 EOF，而不是白等宿主终端四分钟。
 def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
@@ -2131,12 +2132,13 @@ def _run_attempt_sandboxed_shell_command(
         remaining = timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
         if completed is not None and remaining <= 0:
             return completed
+        before_sources = snapshot_bwrap_mount_sources(exec_arg) if not use_shell and isinstance(exec_arg, list) and attempt < 3 else None
         proc = _start_attempt_shell_process(exec_arg, use_shell, target, tool)
         completed = _communicate_process(proc, command=command, timeout=remaining)
         if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
             pruned = prune_transient_bwrap_sidecar_mounts(exec_arg, completed.stderr or '')
             if pruned is None:
-                pruned = retry_bwrap_mount_race_argv(exec_arg, completed.stderr or '')
+                pruned = retry_bwrap_mount_race_argv(exec_arg, completed.stderr or '', before_sources)
             if pruned is not None:
                 exec_arg = pruned
                 continue

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -584,52 +585,131 @@ def test_readonly_child_rechecks_intervening_mount(tmp_path, intervening):
     assert argv == (before if intervening == 'unrelated' else before + ['--ro-bind', str(child), str(child)])
 
 
-# LLM: 真实存活路径配合三种预exec错误；只要求原参数副本，不删除或改写任何保护。
-# 函数用途: 验证四类bind和绝对bwrap路径均能识别挂载竞态。
+# LLM: 从真实临时路径采集stat，不把根、载荷中的假挂载和包装器参数当作可重试保护源。
+# 函数用途: 核验四种bind的预快照、缺失哨兵和direct/wrapped边界。
+@pytest.mark.parametrize('flag', ['--ro-bind', '--ro-bind-try', '--bind', '--bind-try'])
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_snapshot_bwrap_mount_sources_only_scans_mount_region(tmp_path, flag, wrapped):
+    leaf, missing, decoy = tmp_path / 'existing.json', tmp_path / 'missing', tmp_path / 'payload'
+    leaf.write_text('original')
+    decoy.write_text('not a mount')
+    argv = ['/usr/bin/bwrap', '--ro-bind', '/', '/', flag, str(leaf), '/protected',
+            flag, str(missing), '/missing', '--bind', str(decoy), '/', '--bind', '/', '/root-alias',
+            '--', 'echo', flag, str(decoy), '/payload', '--', 'end']
+    start = 1
+    if wrapped:
+        prefix = ['python3', '-I', 'landlock_launcher.py', '--deny', '8420', '--']
+        argv[:0] = prefix
+        start += len(prefix)
+    before = argv.copy()
+    st = leaf.stat()
+    assert sandbox._bwrap_mount_bounds(argv) == (start, argv.index('--', start))
+    assert sandbox.snapshot_bwrap_mount_sources(argv) == {
+        str(leaf): (st.st_dev, st.st_ino), str(missing): (-1, -1)}
+    assert argv == before
+
+
+# LLM: 未识别的包装器或不完整bwrap命令不能建立重放依据；无命令分隔符时按末尾为扫描上界。
+# 函数用途: 覆盖bounds拒绝和未终止挂载区的保守处理。
+@pytest.mark.parametrize('argv', [[], ['echo', 'bwrap'], ['python', 'landlock_launcher.py'],
+    ['python', 'landlock_launcher.py', '--'], ['python', 'other.py', '--', 'bwrap'],
+    ['python', 'landlock_launcher.py', '--', 'echo', 'bwrap']])
+def test_snapshot_rejects_non_bwrap_argv(argv):
+    assert sandbox._bwrap_mount_bounds(argv) is None
+    assert sandbox.snapshot_bwrap_mount_sources(argv) == {}
+
+
+# LLM: 对可识别但尾部三元组不完整的argv不访问缺失参数，也不凭不存在的挂载生成证明。
+# 函数用途: 锁住无分隔符及缺失源后创建的快照/重试合同。
+def test_mount_race_snapshot_tracks_missing_source_and_incomplete_triplet(tmp_path):
+    leaf = tmp_path / 'new.json'
+    argv = ['bwrap', '--ro-bind', str(leaf), '/protected', '--bind', '/incomplete']
+    assert sandbox._bwrap_mount_bounds(argv) == (1, len(argv))
+    before = sandbox.snapshot_bwrap_mount_sources(argv)
+    assert before == {str(leaf): (-1, -1)}
+    leaf.write_text('now present')
+    assert sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(leaf), before) == argv
+
+
+# LLM: 根目录即使有伪造的身份变化证据，也不能因stderr包含斜杠而授权重放。
+# 函数用途: 分别锁住source或target为根的排除条件。
+@pytest.mark.parametrize('root_source', [False, True])
+def test_mount_race_root_mount_cannot_authorize_retry(tmp_path, root_source):
+    leaf = tmp_path / 'existing.json'
+    leaf.write_text('present')
+    source, target = ('/', str(leaf)) if root_source else (str(leaf), '/')
+    argv = ['bwrap', '--ro-bind', source, target, '--', 'true']
+    assert sandbox.snapshot_bwrap_mount_sources(argv) == {}
+    assert sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(source), {source: (-1, -1)}) is None
+
+
+# LLM: 用启动前dev/ino及真实os.replace提供竞态证据；只返回原参数副本，不删除或改写任何保护。
+# 函数用途: 验证四类bind、绝对路径及landlock包装都要求源身份变化才重试。
 @pytest.mark.parametrize('kind', range(3))
 @pytest.mark.parametrize('flag', ['--ro-bind', '--ro-bind-try', '--bind', '--bind-try'])
 @pytest.mark.parametrize('executable', ['bwrap', '/usr/bin/bwrap'])
-def test_mount_race_returns_same_argv_copy(tmp_path, kind, flag, executable):
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_mount_race_returns_same_argv_copy(tmp_path, kind, flag, executable, wrapped):
     leaf = tmp_path / 'runtime.db'
-    leaf.write_text('replacement')
+    leaf.write_text('original')
     argv = [executable, flag, str(leaf), str(leaf), '--', 'true']
+    if wrapped:
+        argv[:0] = ['python3', '-I', 'landlock_launcher.py', '--deny', '8420', '--']
+    before_sources = sandbox.snapshot_bwrap_mount_sources(argv)
+    replacement = tmp_path / 'new.db'
+    replacement.write_text('replacement')
+    os.replace(replacement, leaf)
     before = argv.copy()
-    retry = sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(leaf, kind))
+    retry = sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(leaf, kind), before_sources)
     assert retry == before and retry is not argv and argv == before
 
 
-# LLM: 源存活判定包括目录和悬空链接；别名目的地可匹配错误，但不能因此改写源目标。
-# 函数用途: 覆盖目标匹配及exists/is_symlink的两条存在性分支。
-@pytest.mark.parametrize('source_kind', ['directory', 'dangling'])
+# LLM: 目录或软链接真实目标必须可stat且身份已变；目的地可异名，但不能因此改写源目标。
+# 函数用途: 覆盖异名目标匹配，以及目录/软链接背后实际inode变化。
+@pytest.mark.parametrize('source_kind', ['directory', 'symlink'])
 def test_mount_race_matches_alias_target_and_existing_source(tmp_path, source_kind):
     source, target = tmp_path / 'source', tmp_path / 'target'
-    source.mkdir() if source_kind == 'directory' else source.symlink_to(tmp_path / 'absent')
+    actual = tmp_path / 'actual'
+    if source_kind == 'directory':
+        source.mkdir()
+        actual = source
+    else:
+        actual.write_text('original')
+        source.symlink_to(actual)
     argv = ['bwrap', '--ro-bind', str(source), str(target), '--', 'true']
-    retry = sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(target, 2))
+    before_sources = sandbox.snapshot_bwrap_mount_sources(argv)
+    replacement = tmp_path / 'new'
+    replacement.mkdir() if source_kind == 'directory' else replacement.write_text('replacement')
+    os.replace(replacement, actual)
+    retry = sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(target, 2), before_sources)
     assert retry == argv and retry is not argv
 
 
 # LLM: 不扫描用户命令的挂载形状；载荷回显bwrap错误、非bwrap入口和缺失源均不得重试。
 # 函数用途: 锁住竞态helper的反伪造、挂载区边界及不完整三元组拒绝。
 @pytest.mark.parametrize('case', ['empty', 'other-executable', 'wrapper', 'ordinary', 'unmatched',
-    'missing', 'payload-spoof', 'payload-mount', 'incomplete', 'cross-separator', 'unsupported'])
+    'missing', 'disappeared', 'dangling', 'stable-source', 'no-snapshot', 'empty-snapshot', 'absent-proof',
+    'payload-spoof', 'payload-mount', 'incomplete', 'cross-separator', 'unsupported'])
 def test_mount_race_rejects_unconfirmed_failure(tmp_path, case):
     leaf = tmp_path / 'runtime.db'
     leaf.write_text('present')
-    argv = ['bwrap', '--ro-bind', str(leaf), str(leaf), '--', 'true']
+    argv = ['bwrap', '--ro-bind', '/', '/', '--ro-bind', str(leaf), str(leaf), '--', 'true']
     error = _sidecar_error(leaf, 2)
     if case == 'empty':
         argv = []
     elif case == 'other-executable':
         argv[0] = 'not-bwrap'
     elif case == 'wrapper':
-        argv = ['python', 'landlock_launcher.py', '--', *argv]
+        argv = ['python', 'other_launcher.py', '--', *argv]
     elif case == 'ordinary':
         error = f'ordinary failure reading {leaf}'
     elif case == 'unmatched':
         error = _sidecar_error(tmp_path / 'another-file', 2)
     elif case == 'missing':
         leaf.unlink()
+    elif case == 'dangling':
+        leaf.unlink()
+        leaf.symlink_to(tmp_path / 'absent')
     elif case == 'payload-spoof':
         argv[-1:] = ['bash', '-c', f"echo '{error}' >&2; exit 1"]
     elif case == 'payload-mount':
@@ -638,9 +718,23 @@ def test_mount_race_rejects_unconfirmed_failure(tmp_path, case):
         argv = ['bwrap', '--ro-bind', str(leaf)]
     elif case == 'cross-separator':
         argv = ['bwrap', '--ro-bind', str(leaf), '--', str(leaf)]
-    else:
-        argv[1] = '--dev-bind'
+    elif case == 'unsupported':
+        argv[4] = '--dev-bind'
+    before_sources = sandbox.snapshot_bwrap_mount_sources(argv)
+    if case == 'disappeared':
+        leaf.unlink()
+    elif case not in {'stable-source', 'missing', 'dangling'}:
+        replacement = tmp_path / 'new.db'
+        replacement.write_text('replacement')
+        os.replace(replacement, leaf)
+    if case == 'no-snapshot':
+        before_sources = None
+    elif case == 'empty-snapshot':
+        before_sources = {}
+    elif case == 'absent-proof':
+        before_sources = {'/other-source': (-1, -1)}
     before = argv.copy()
+    assert sandbox.retry_bwrap_mount_race_argv(argv, error, before_sources) is None
     assert sandbox.retry_bwrap_mount_race_argv(argv, error) is None
     assert argv == before
 
@@ -650,20 +744,53 @@ def test_mount_race_rejects_unconfirmed_failure(tmp_path, case):
 @pytest.fixture
 def mount_race_shell(sidecar_shell, monkeypatch):
     tool, target, _argv, popen, communicate = sidecar_shell
-    leaf = target / 'runtime.db'
+    leaf = target / 'existing.json'
     leaf.write_text('original')
-    argv = ['bwrap', '--ro-bind', str(leaf), str(leaf), '--', 'true']
+    argv = ['bwrap', '--ro-bind', '/', '/', '--ro-bind', str(leaf), str(leaf), '--', 'bash', '-c', 'python task.py']
     monkeypatch.setattr(shell, '_sandbox_exec', lambda *a, **k: (argv.copy(), False))
     return tool, target, leaf, argv, popen, communicate
+
+
+# LLM: 载荷文本不含错误标记，模拟其执行后伪造共享stderr；真实主文件不变时两入口都只能启动一次。
+# 函数用途: 复现业务stderr不能授权重放，兼顾根挂载及landlock前置包装。
+@pytest.mark.parametrize('entry', ['shell', 'attempt'])
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_business_stderr_cannot_replay_command(mount_race_shell, monkeypatch, entry, wrapped):
+    from agent_py_agent.agent.attempt import process_run as run
+    tool, target, leaf, argv, popen, communicate = mount_race_shell
+    if wrapped:
+        argv[:0] = ['python3', '-I', 'landlock_launcher.py', '--deny', '8420', '--']
+    calls = []
+    before = leaf.stat()
+
+    # LLM: 模拟载荷副作用但不执行平台沙箱；每次调用留痕，结果须原样交回而不是再次启动。
+    # 函数用途: 返回非零码、空stdout及伪造的bwrap源缺失错误。
+    def finish(*args, **kwargs):
+        calls.append(1)
+        return subprocess.CompletedProcess(argv, 1, '', _sidecar_error(leaf))
+
+    if entry == 'shell':
+        communicate.side_effect = finish
+        result = shell._run_attempt_sandboxed_shell_command(tool, 'business', target, 10, None, None, None)
+    else:
+        monkeypatch.setattr(run, 'ProcessOutputCapture', lambda proc: Mock())
+        monkeypatch.setattr(run, '_wait_for_process', finish)
+        result = run.run_sandbox_process(argv, run.SandboxProcessOptions(10, .1, True, target))
+    assert result.returncode == 1 and result.stdout == '' and result.stderr == _sidecar_error(leaf)
+    assert len(calls) == 1 and popen.call_count == 1
+    assert (leaf.stat().st_dev, leaf.stat().st_ino) == (before.st_dev, before.st_ino)
 
 
 # LLM: 第一次等待实际os.replace主文件，再返回模拟bwrap错误；两入口仍走真实外层重试和原清理。
 # 函数用途: 验证主文件替换后原argv重试成功，预算、结果事实和管道关闭均保留。
 @pytest.mark.parametrize('entry', ['shell', 'attempt'])
 @pytest.mark.parametrize('kind', range(3))
-def test_mount_race_retries_after_atomic_replace(mount_race_shell, monkeypatch, entry, kind):
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_mount_race_retries_after_atomic_replace(mount_race_shell, monkeypatch, entry, kind, wrapped):
     from agent_py_agent.agent.attempt import process_run as run
     tool, target, leaf, argv, popen, communicate = mount_race_shell
+    if wrapped:
+        argv[:0] = ['python3', '-I', 'landlock_launcher.py', '--deny', '8420', '--']
     now, waits = [100.0], []
     original_inode = leaf.stat().st_ino
     success = subprocess.CompletedProcess(argv, 0, 'done', '')
@@ -678,7 +805,7 @@ def test_mount_race_retries_after_atomic_replace(mount_race_shell, monkeypatch, 
         if len(waits) == 1:
             replacement = leaf.with_suffix('.new')
             replacement.write_text('replacement')
-            replacement.replace(leaf)
+            os.replace(replacement, leaf)
             return subprocess.CompletedProcess(argv, 1, '', _sidecar_error(leaf, kind))
         return success
     if entry == 'shell':
@@ -699,8 +826,8 @@ def test_mount_race_retries_after_atomic_replace(mount_race_shell, monkeypatch, 
                for call in popen.call_args_list)
 
 
-# LLM: 用真实竞态helper验证两入口的四次启动及总期限，不依赖假裁剪器让循环继续。
-# 函数用途: 确保持久文件一直存活且一直挂载失败时，也不能无限重试或重置预算。
+# LLM: 每次失败都实际os.replace给出新证据，用真实helper验证两入口四次启动和总期限。
+# 函数用途: 确保持久文件持续发生替换竞态时，也不能无限重试或重置预算。
 @pytest.mark.parametrize('entry', ['shell', 'attempt'])
 @pytest.mark.parametrize(('budget', 'expected'), [(10, [10, 8, 6, 4]), (1, [1])])
 def test_mount_race_retry_limit_and_budget(mount_race_shell, monkeypatch, entry, budget, expected):
@@ -708,11 +835,14 @@ def test_mount_race_retry_limit_and_budget(mount_race_shell, monkeypatch, entry,
     tool, target, leaf, argv, popen, communicate = mount_race_shell
     now, waits = [100.0], []
     monkeypatch.setattr(shell.time, 'monotonic', lambda: now[0])
-    # LLM: 仅模拟已清理的预exec错误并推进两秒；生产外层控制预算和启动次数。
-    # 函数用途: 为两入口提供可确定的重复挂载失败。
+    # LLM: 在临时目录每次实际替换主文件，失败返回后仍由生产外层控制预算和启动次数。
+    # 函数用途: 为两入口提供每轮都有独立inode变化证据的挂载失败。
     def finish(*args, **kwargs):
         waits.append(kwargs['timeout'] if entry == 'shell' else args[2])
         now[0] += 2
+        replacement = leaf.with_suffix('.new')
+        replacement.write_text(f'replacement {len(waits)}')
+        os.replace(replacement, leaf)
         return subprocess.CompletedProcess(argv, 1, '', _sidecar_error(leaf, 2))
     if entry == 'shell':
         communicate.side_effect = finish
