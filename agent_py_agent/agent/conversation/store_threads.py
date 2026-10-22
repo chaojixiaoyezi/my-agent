@@ -31,7 +31,8 @@ from .store_io import (
 )
 from .store_layout import ConversationStorage
 
-_THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT = 65536
+_THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT = 16384
+_THREAD_RECORD_CACHE_MAX_RECORD_BYTES = 64 * 1024
 _THREAD_RECORD_CACHE_LOCK = threading.Lock()
 _THREAD_RECORD_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], ConversationThread]] = OrderedDict()
 
@@ -53,12 +54,13 @@ def _clone_cached_thread(thread: ConversationThread) -> ConversationThread:
     )
 
 
-# LLM: 只接收同次稳定读取的非空指纹，不持锁做深拷贝；缓存是有界派生投影，不替代磁盘权威。
+# LLM: 只接收同次稳定读取且不超过64KiB的指纹，过大/无指纹清旧投影；不持锁深拷贝，不替代磁盘权威。
 # 函数用途: 保存独立的线程快照，更新LRU顺序并淘汰最旧记录。
 def _store_cached_thread(
     path: Path, fingerprint: tuple[int, int, int, int] | None, thread: ConversationThread,
 ) -> None:
-    if fingerprint is None:
+    if fingerprint is None or fingerprint[1] > _THREAD_RECORD_CACHE_MAX_RECORD_BYTES:
+        _drop_cached_thread(path)
         return
     snapshot = _clone_cached_thread(thread)
     key = str(path)
@@ -76,7 +78,7 @@ def _drop_cached_thread(path: Path) -> None:
         _THREAD_RECORD_CACHE.pop(str(path), None)
 
 
-# LLM: 仅相同物理指纹且线程身份匹配的有效记录复用，克隆在锁外；未命中校验thread_id身份，不缓存失配、空值或错误。
+# LLM: 仅同指纹/同身份且不超过64KiB的记录复用；大记录返回本次解析的独立对象，不重复深拷贝或保留旧缓存。
 # 函数用途: 读取并校验独立线程快照，只把身份一致且读前读后稳定的文件放进有界缓存。
 def _read_thread_record_report(
     path: Path, *, thread_id: str = "",
@@ -84,7 +86,7 @@ def _read_thread_record_report(
     actual_thread_id = str(thread_id or path.stem)
     before_fp = _file_fingerprint(path)
     cached_thread = None
-    if before_fp is not None:
+    if before_fp is not None and before_fp[1] <= _THREAD_RECORD_CACHE_MAX_RECORD_BYTES:
         with _THREAD_RECORD_CACHE_LOCK:
             cached = _THREAD_RECORD_CACHE.get(str(path))
             if cached is not None and cached[0] == before_fp and cached[1].thread_id == actual_thread_id:
@@ -105,9 +107,12 @@ def _read_thread_record_report(
         if not thread.thread_id or thread.thread_id != actual_thread_id:
             raise DataCorruptionError(f"conversation thread identity is invalid: {actual_thread_id}")
         after_fp = _file_fingerprint(path)
-        if before_fp is not None and after_fp == before_fp:
+        if (before_fp is not None and after_fp == before_fp
+                and before_fp[1] <= _THREAD_RECORD_CACHE_MAX_RECORD_BYTES):
             _store_cached_thread(path, after_fp, thread)
-        return _clone_cached_thread(thread), None
+            return _clone_cached_thread(thread), None
+        _drop_cached_thread(path)
+        return thread, None
     except Exception as exc:
         _drop_cached_thread(path)
         report = runtime_error_report(exc, context="conversation.thread.read")

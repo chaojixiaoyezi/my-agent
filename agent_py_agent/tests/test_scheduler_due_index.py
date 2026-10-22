@@ -4,6 +4,8 @@ import json
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from agent_py_agent.agent.owner_scoped_pool import ActiveOwnerRegistry
 from agent_py_agent.agent.scheduler import (
     SchedulerDueIndex,
@@ -206,3 +208,131 @@ def test_gateway_due_controller_records_only_claimed_scoped_owners(monkeypatch, 
     assert [(row.provider, row.owner_kind, row.owner_id) for row in registry.snapshot()] == [
         ("feishu", "user", "alice")
     ]
+
+
+@pytest.mark.parametrize("replacement", ["deleted", "replaced", "empty"])
+# LLM: spy只记录真实SQLite连接；同文件热构造零连接，新inode/删除/截断必须重新初始化。
+# 函数用途: 验证schema缓存命中与数据库文件换代失效，不绕过实际建表和查询。
+def test_scaling_d_schema_cache_skips_connect_and_reinitializes(tmp_path, monkeypatch, replacement):
+    import sqlite3
+
+    path = tmp_path / "due.sqlite3"
+    SchedulerDueIndex(path)
+    original = SchedulerDueIndex._connect
+    calls = []
+
+    # LLM: 保留真实连接与SQL执行，仅计数构造是否还访问数据库。
+    # 函数用途: 记录schema初始化的连接次数。
+    def connect(self):
+        calls.append(self.path)
+        return original(self)
+
+    monkeypatch.setattr(SchedulerDueIndex, "_connect", connect)
+    for _ in range(3):
+        SchedulerDueIndex(path)
+    assert calls == []
+    if replacement == "deleted":
+        path.unlink()
+    elif replacement == "empty":
+        path.write_bytes(b"")
+    else:
+        other = path.with_suffix(".replacement")
+        conn = sqlite3.connect(other)
+        conn.execute("CREATE TABLE unrelated (id INTEGER)")
+        conn.close()
+        other.replace(path)
+    restored = SchedulerDueIndex(path)
+    assert calls == [path]
+    assert restored.snapshot() == []
+
+
+# LLM: 进程级缓存丢失时，已初始化数据库只需验证版本和表；不能重复CREATE或赋值user_version。
+# 函数用途: 模拟另一进程冷启动，用真实SQL trace证明schema读验证不写DDL。
+def test_scaling_d_existing_schema_cold_start_has_no_ddl(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
+    from agent_py_agent.agent.scheduler import due_index
+
+    path = tmp_path / "due.sqlite3"
+    SchedulerDueIndex(path)
+    monkeypatch.setattr(due_index, "_SCHEMA_INITIALIZED_DBS", OrderedDict(), raising=False)
+    statements = []
+    original = SchedulerDueIndex._connect
+
+    # LLM: trace来自真实SQLite连接，不模拟PRAGMA或sqlite_master查询结果。
+    # 函数用途: 收集冷构造实际执行的SQL。
+    def connect(self):
+        conn = original(self)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(SchedulerDueIndex, "_connect", connect)
+    SchedulerDueIndex(path)
+    writes = [sql for sql in statements if sql.lstrip().upper().startswith("CREATE ")
+              or "USER_VERSION=" in sql.replace(" ", "").upper()]
+    assert writes == []
+
+
+# LLM: SQLite连接上下文只提交事务，不自动close；schema短连接必须释放，避免空文件重建仍被旧WAL锁住。
+# 函数用途: 捕获实际初始化连接，验证构造返回时句柄已关闭而非等待GC。
+def test_scaling_d_schema_initializer_closes_its_connection(tmp_path, monkeypatch):
+    import sqlite3
+
+    original = SchedulerDueIndex._connect
+    connections = []
+
+    # LLM: 保存真实连接供构造后的只读句柄检查，不替换SQLite事务行为。
+    # 函数用途: 观测初始化连接的关闭时机。
+    def connect(self):
+        conn = original(self)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(SchedulerDueIndex, "_connect", connect)
+    SchedulerDueIndex(tmp_path / "due.sqlite3")
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        connections[0].execute("SELECT 1")
+
+
+# LLM: 使用真实SQLite连接和文件替换，在连接关闭后/缓存发布前换入未初始化库，不能缓存新库假成功。
+# 函数用途: 复现跨进程替换的时序窗口，要求重新验证当前文件而非给新inode沿用旧schema结论。
+def test_scaling_d_schema_replacement_during_cache_publication(tmp_path, monkeypatch):
+    import sqlite3
+    from collections import OrderedDict
+
+    from agent_py_agent.agent.scheduler import due_index
+
+    path = tmp_path / "due.sqlite3"
+    replacement = tmp_path / "replacement.sqlite3"
+    SchedulerDueIndex(path)
+    original = sqlite3.connect
+    conn = original(replacement)
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.close()
+    swapped = False
+
+    class ReplacingConnection(sqlite3.Connection):
+        # LLM: 先关闭已验证的真实连接，再替换路径；模拟另一个进程在发布窗口换文件。
+        # 函数用途: 注入一次确定性的数据库文件换代。
+        def close(self):
+            nonlocal swapped
+            super().close()
+            if not swapped:
+                replacement.replace(path)
+                swapped = True
+
+    # LLM: 原SQLite工厂负责全部读写，只让close具有上述一次性时序钩子。
+    # 函数用途: 让产品初始化使用可观察关闭窗口的真实连接。
+    def connect(*args, **kwargs):
+        return original(*args, factory=ReplacingConnection, **kwargs)
+
+    monkeypatch.setattr(due_index, "_SCHEMA_INITIALIZED_DBS", OrderedDict())
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    restored = SchedulerDueIndex(path)
+    conn = original(path)
+    tables = conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' "
+                          "AND name IN ('scheduler_due_owners', 'scheduler_due_meta')").fetchone()[0]
+    conn.close()
+    assert swapped and tables == 2
+    assert restored.snapshot() == []

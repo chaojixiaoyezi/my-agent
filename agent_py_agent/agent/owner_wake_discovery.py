@@ -850,8 +850,10 @@ def _scheduler_timestamp(value: object) -> float:
 # 未完成 = 还需要被驱动:待派(PLANNING/PENDING)、在跑(RUNNING,重启后需判活回收)、
 # 待解阻(BLOCKED,能力批复/续派通道)。终态与人为暂停(PAUSED)不算。
 _UNFINISHED_RUN_STATUSES = frozenset({"PLANNING", "PENDING", "RUNNING", "BLOCKED"})
+# PAUSED不在未完成集合中，因此暂停时不唤醒；也不是沉淀终态，必须留在live_names，
+# 才能在>32条运行目录中原地恢复为RUNNING后立即发现，而不等待60秒历史复核。
 _SETTLED_LEDGER_STATUSES = frozenset(
-    {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR", "COMPLETED", "PAUSED"}
+    {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR", "COMPLETED"}
 )
 
 # R1-03 发现层 repo 缓存：唤醒轮每 tick 调 unfinished_task_ids，每 tick 重建

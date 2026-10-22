@@ -2119,3 +2119,194 @@ def test_thread_record_cache_rejects_mismatched_identity(thread_record_cache_cas
     threads, errors = case.store.threads.list_report(limit=0)
     assert threads == [] and len(errors) == 1
     assert str(case.path) not in case.module._THREAD_RECORD_CACHE
+
+
+# LLM: 大线程仍完整解析且返回独立对象，但不得驻留缓存或额外克隆；此前的小记录必须被逐出。
+# 函数用途: 用超过64KiB的真实metadata验证缓存体积上限和大记录直返。
+def test_scaling_d_large_thread_bypasses_cache_and_cloning(thread_record_cache_case, monkeypatch):
+    case = thread_record_cache_case
+    case.store.threads.require(case.thread.thread_id)
+    payload = replace(case.thread, metadata={"large": "x" * (70 * 1024), "nested": [1]}).to_dict()
+    case.path.write_text(json.dumps(payload), encoding="utf-8")
+    clones = []
+    original = case.module._clone_cached_thread
+
+    # LLM: 克隆仍执行原实现，计数不替代数据隔离或读取结果。
+    # 函数用途: 核对大记录读取没有额外deepcopy。
+    def clone(thread):
+        clones.append(thread.thread_id)
+        return original(thread)
+
+    monkeypatch.setattr(case.module, "_clone_cached_thread", clone)
+    first = case.store.threads.require(case.thread.thread_id)
+    assert first.metadata == payload["metadata"]
+    assert str(case.path) not in case.module._THREAD_RECORD_CACHE
+    first.metadata["nested"].append(2)
+    second = case.store.threads.require(case.thread.thread_id)
+    assert second.metadata["nested"] == [1]
+    assert clones == []
+    assert case.module._THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT == 16384
+    assert case.module._THREAD_RECORD_CACHE_MAX_RECORD_BYTES == 64 * 1024
+
+
+# LLM: 空文件走真实消息尾读并跨线程保留独立游标，只有不可变零位图应共享。
+# 函数用途: 验证空seen过滤器不按线程重复分配8KiB，且游标容量保持32768。
+def test_scaling_d_empty_message_cursors_share_seen_filter(tmp_path):
+    from agent_py_agent.agent.conversation import message_cursor
+    from agent_py_agent.agent.io.cursor_cache import cursor_key
+
+    seen = []
+    for name in ("a", "b"):
+        path = tmp_path / f"{name}.jsonl"
+        path.touch()
+        os.utime(path, (1, 1))
+        assert message_cursor.read_after_rows(path, "", 10) == ([], [])
+        seen.append(message_cursor._MESSAGE_CURSORS.get(cursor_key(path, "")).seen)
+    assert seen[0] == seen[1] == bytes(8192)
+    assert seen[0] is seen[1]
+    assert seen[0] is message_cursor._EMPTY_SEEN_FILTER
+    assert message_cursor._MESSAGE_CURSOR_CACHE_MAX_COUNT == 32768
+
+
+# LLM: 同次缓存提交的锚点和新增位置必须共用一次冻结，计数真实bytes构造而非mock缓存结果。
+# 函数用途: 验证非空seen在_save_positions与空尾更新之间不会重复复制。
+def test_scaling_d_nonempty_seen_is_frozen_once(tmp_path, monkeypatch):
+    import builtins
+
+    from agent_py_agent.agent.conversation import message_cursor
+    from agent_py_agent.agent.io.cursor_cache import cursor_key, file_stamp
+
+    path = tmp_path / "messages.jsonl"
+    path.write_text("{}\n")
+    os.utime(path, (1, 1))
+    stamp = file_stamp(path.stat())
+    seen = bytearray(8192)
+    seen[0] = 1
+    cursor = message_cursor.MessageCursor(stamp, 0, 1, bytes(seen))
+    calls = []
+
+    # LLM: 只观察当前模块把bytearray转bytes的次数，所有字节内容仍由内建构造器生成。
+    # 函数用途: 捕获过滤器复制，避免只检查对象存在。
+    def freeze(value):
+        if isinstance(value, bytearray):
+            calls.append(1)
+        return builtins.bytes(value)
+
+    monkeypatch.setattr(message_cursor, "bytes", freeze, raising=False)
+    message_cursor._cache_read(path, stamp, ("anchor", cursor), ([], [], [("next", 1, 2)], seen), limit=10)
+    assert calls == [1]
+    a = message_cursor._MESSAGE_CURSORS.get(cursor_key(path, "anchor"))
+    b = message_cursor._MESSAGE_CURSORS.get(cursor_key(path, "next"))
+    assert a.seen is b.seen and a.seen[0] == 1
+
+
+# LLM: 真实回执/排队文件/终态文件验证整条对账入口；热队列仍存在时不能错误结算。
+# 函数用途: 验证queued请求已归档且不在热队列时落盘终态未知，不再永久queued。
+@pytest.mark.parametrize("hot", [None, "inbox", "processing"])
+# LLM: 每个场景只操作临时Gateway，不运行模型、业务命令或网络请求。
+# 函数用途: 对比终态唯一与终态/热队列共存的回执状态。
+def test_scaling_d_terminal_queued_receipt_settles(tmp_path, hot):
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as delivery
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.tests.test_steer_delivery_recovery import _background_input
+
+    agent, paths, request_id = _background_input(tmp_path, "scaling-task")
+    agent.conversation_store.tasks.update_status({"task_id": "scaling-task", "status": "completed"})
+    delivery.reconcile_gateway_input_receipts(paths, agent)
+    source = paths.inbox / f"{request_id}.json"
+    payload = json.loads(source.read_text())
+    if hot is None:
+        source.unlink()
+    elif hot == "processing":
+        source.replace(paths.processing / source.name)
+    write_json_file_atomic(paths.terminal / source.name, {**payload, "status": "completed", "turn_phase": "closed"})
+    summary = delivery.reconcile_gateway_input_receipts(paths, agent)
+    expected = "terminal_unknown" if hot is None else "queued"
+    assert delivery.read_gateway_input_receipt(paths, request_id).state == expected
+    assert summary[expected] == 1 and summary["errors"] == 0
+
+
+# LLM: 真实目录和游标文件，glob spy透传；state子目录写入不应失效父目录投影。
+# 函数用途: 核对回执扫描按名字二分轮转，缓存复用与新增文件下一轮可见。
+def test_scaling_d_receipt_directory_cache_rotates_without_reglob(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as delivery
+    from agent_py_agent.tests.test_steer_delivery_recovery import _gateway_agent
+
+    _agent, paths = _gateway_agent(tmp_path)
+    root = paths.root / "input_receipts"
+    (root / "state").mkdir(parents=True, exist_ok=True)
+    for name in ("a", "b", "c"):
+        (root / f"{name}.json").write_text("{}")
+    os.utime(root, (1, 1))
+    calls = []
+    original = Path.glob
+
+    # LLM: 只记录本次临时回执目录枚举，其他文件访问保持原样。
+    # 函数用途: 证明游标更新后没有重复全目录排序。
+    def glob(path, pattern, *args, **kwargs):
+        if path == root:
+            calls.append(pattern)
+        return original(path, pattern, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", glob)
+    assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["a.json", "b.json"]
+    before = root.stat().st_mtime_ns
+    delivery._commit_reconcile_cursor(paths, root / "b.json")
+    assert root.stat().st_mtime_ns == before
+    assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "a.json"]
+    assert calls == ["*.json"]
+    (root / "d.json").write_text("{}")
+    assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "d.json"]
+
+
+@pytest.mark.parametrize("outcome", ["consumed", "uncertain"])
+# LLM: 回执和canonical文件真实落盘，仅在新helper读取guidance的边界注入消费证明或typed未知；不伪装真实端到端鉴权。
+# 函数用途: 覆盖终态queued的consumed分支，以及原typed异常同对象传播且游标/回执不推进。
+def test_scaling_d_terminal_queued_consumption_and_uncertain_cursor(tmp_path, monkeypatch, outcome):
+    from agent_py_agent.agent.common.request_execution_ports import (
+        RequestExecutionOutcomeUncertainError,
+    )
+    from agent_py_agent.agent.gateway_parts import input_delivery_service as delivery
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    from agent_py_agent.tests.test_steer_delivery_recovery import _background_input
+
+    agent, paths, request_id = _background_input(tmp_path, "scaling-task")
+    agent.conversation_store.tasks.update_status({"task_id": "scaling-task", "status": "completed"})
+    delivery.reconcile_gateway_input_receipts(paths, agent)
+    source = paths.inbox / f"{request_id}.json"
+    payload = json.loads(source.read_text())
+    source.unlink()
+    write_json_file_atomic(paths.terminal / source.name, {**payload, "status": "completed", "turn_phase": "closed"})
+    cursor = paths.root / "input_receipts/state/reconcile_cursor.json"
+    before_cursor = cursor.read_bytes()
+    before_receipt = delivery.gateway_input_receipt_path(paths, request_id).read_bytes()
+    error = RequestExecutionOutcomeUncertainError({
+        "id": request_id, "execution_attempt_id": "test-attempt",
+        "lease_epoch": 1, "lease_owner": "test-attempt",
+    }, "test-original-guidance-read")
+    original = delivery.gateway_input_guidance_binding
+    calls = []
+
+    # LLM: 外层目标检查沿真实guidance，只有第二次（新helper）读取注入分支输入，保持异常身份不包装。
+    # 函数用途: 将消费确认或原运输未结放在终态queued收口的精确边界。
+    def binding(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            return original(*args)
+        if outcome == "uncertain":
+            raise error
+        return SimpleNamespace(status="consumed"), ""
+
+    monkeypatch.setattr(delivery, "gateway_input_guidance_binding", binding)
+    if outcome == "uncertain":
+        with pytest.raises(RequestExecutionOutcomeUncertainError) as caught:
+            delivery.reconcile_gateway_input_receipts(paths, agent)
+        assert caught.value is error
+        assert cursor.read_bytes() == before_cursor
+        assert delivery.gateway_input_receipt_path(paths, request_id).read_bytes() == before_receipt
+    else:
+        summary = delivery.reconcile_gateway_input_receipts(paths, agent)
+        assert summary["consumed"] == 1 and summary["errors"] == 0
+        assert delivery.read_gateway_input_receipt(paths, request_id).state == "consumed"
+    assert len(calls) == 2
+    assert not source.exists()

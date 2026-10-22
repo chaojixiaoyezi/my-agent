@@ -17,7 +17,14 @@ from .store_io import json_row, jsonl_error
 _MESSAGE_CURSOR_CACHE_MAX_COUNT = 32768
 # 每份首ID过滤器8KiB，32768份极端上界256MiB；同一次读取的多个位置共享不可变过滤器。
 _MESSAGE_CURSOR_FILTER_BYTES = 8 * 1024
+_EMPTY_SEEN_FILTER = bytes(_MESSAGE_CURSOR_FILTER_BYTES)
 _MESSAGE_CURSORS = CursorCache(_MESSAGE_CURSOR_CACHE_MAX_COUNT)
+
+
+# LLM: 空位图共享唯一不可变bytes；非空位图冻结一次后可在同次位置/空尾投影间共享，不改变Bloom语义。
+# 函数用途: 冻结seen过滤器，避免为空闲线程重复保留8KiB零字节。
+def _freeze_seen(seen: bytearray) -> bytes:
+    return _EMPTY_SEEN_FILTER if not any(seen) else bytes(seen)
 
 
 # LLM: 偏移指向首条匹配记录，seen不含正文；未验证指纹与锚行时不得用于读尾。
@@ -51,7 +58,7 @@ def _anchor_matches(handle, cursor: MessageCursor, target: str) -> bool:
     return isinstance(row, dict) and str(row.get("message_id") or "") == target and handle.tell() == cursor.end
 
 
-# LLM: 逐行JSON/UTF-8异常保持原DataCorruptionError；非对象行仍可越过，首条匹配后不扫描更晚坏行。
+# LLM: 逐行异常和首ID语义不变；定位结果通过统一冻结入口保存不可变seen，不保留可变位图。
 # 函数用途: 校验失效或冷启动时完整定位原精确消息游标，并累积有界首ID过滤器。
 def _scan_cursor(handle, path: Path, target: str, stamp: FileStamp) -> MessageCursor:
     handle.seek(0)
@@ -66,7 +73,7 @@ def _scan_cursor(handle, path: Path, target: str, stamp: FileStamp) -> MessageCu
         except (json.JSONDecodeError, UnicodeError) as exc:
             raise DataCorruptionError(f"conversation transcript contains an unreadable row: {path}") from exc
         if _note_row(seen, row) == target:
-            return MessageCursor(stamp, start, handle.tell(), bytes(seen))
+            return MessageCursor(stamp, start, handle.tell(), _freeze_seen(seen))
     raise DataCorruptionError(f"conversation compact message cursor is missing from transcript: {target}")
 
 
@@ -123,7 +130,7 @@ def _unchanged_end(path: Path, target: str) -> bool:
             and (cached.empty_tail or (not blank_target and cached.end == stamp.size)))
 
 
-# LLM: 初始空游标只在正limit且可信empty_tail时短路；非空ID精确匹配，fd首末stamp、display/坏行原规则不改。
+# LLM: 初始空游标复用共享零位图作扫描起点；正limit/empty_tail和同fd首末stamp规则不变，不改变坏行处理。
 # 函数用途: 有界读取原消息尾部；已证从头空扫的稳定线程零打开，零预算不冒充扫描完成。
 def read_after_rows(path: Path, target: str, limit: int):
     if (str(target or "").strip() or limit > 0) and _unchanged_end(path, target):
@@ -132,24 +139,25 @@ def read_after_rows(path: Path, target: str, limit: int):
     with path.open("rb") as handle:
         stamp = file_stamp(os.fstat(handle.fileno()))
         handle.seek(cursor.end if cursor else 0)
-        seen = bytearray(cursor.seen if cursor else bytes(_MESSAGE_CURSOR_FILTER_BYTES))
+        seen = bytearray(cursor.seen if cursor else _EMPTY_SEEN_FILTER)
         rows, errors, positions = _read_tail(handle, path, limit, seen)
         if (cursor is None or cursor.stamp.same_file(stamp)) and file_stamp(os.fstat(handle.fileno())) == stamp:
             _cache_read(path, stamp, (target, cursor), (rows, errors, positions, seen), limit=limit)
         return rows, errors
 
 
-# LLM: 调用方已核同fd首末stamp；仅无行无错且初始正limit时记从零空尾，_remember仍守freshness，不推进消费状态。
+# LLM: 同次提交只冻结一次seen并共享给位置与空尾；原同fd首末stamp/freshness/正limit规则不变，不推进消费状态。
 # 函数用途: 保存精确首位置和空尾证明，包含空文件及仅展示/空白行，不缓存错误或未执行的扫描。
 def _cache_read(path: Path, stamp: FileStamp, anchor: tuple, result: tuple, *, limit: int) -> None:
     target, cursor = anchor
     rows, errors, positions, seen = result
-    _save_positions(path, stamp, seen, positions)
+    frozen = _freeze_seen(seen)
+    _save_positions(path, stamp, frozen, positions)
     if not rows and not errors:
         if cursor is not None:
-            _remember(path, target, replace(cursor, stamp=stamp, seen=bytes(seen), empty_tail=True))
+            _remember(path, target, replace(cursor, stamp=stamp, seen=frozen, empty_tail=True))
         elif not str(target or "").strip() and limit > 0:
-            _remember(path, "", MessageCursor(stamp, 0, stamp.size, bytes(seen), empty_tail=True))
+            _remember(path, "", MessageCursor(stamp, 0, stamp.size, frozen, empty_tail=True))
 
 
 # LLM: UTF-8/JSON坏行即停，display不计条数；Bloom误报只不记位置，读取对象和错误保持原样。
@@ -196,10 +204,10 @@ def _tail_row(line: bytes, path: Path):
     return json_row(text, context="conversation.messages.after", path=path, line_number=0)
 
 
-# LLM: 一次尾读共享不可变过滤器；空ID不占初始空尾键，其余精确ID/过长键/淘汰规则不变，不缓存正文或异常。
+# LLM: 接受同次已冻结位图直接共享，旧bytearray调用沿统一冻结入口；空ID不占初始空尾键，不缓存正文或异常。
 # 函数用途: 为非空消息ID记录首位置，避免空ID行的中间偏移污染从头读取。
-def _save_positions(path: Path, stamp: FileStamp, seen: bytearray, positions: list) -> None:
-    frozen = bytes(seen)
+def _save_positions(path: Path, stamp: FileStamp, seen: bytearray | bytes, positions: list) -> None:
+    frozen = _freeze_seen(seen) if isinstance(seen, bytearray) else seen
     for target, start, end in positions:
         if not target:
             continue

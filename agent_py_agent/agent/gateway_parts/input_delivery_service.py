@@ -13,13 +13,17 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import threading
 import time
+from bisect import bisect_right
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.json_io import check_io_deadline
 from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
@@ -47,6 +51,9 @@ from .steer_closeout_replay import (
 )
 
 _INPUT_RECEIPT_SCHEMA = "gateway_input_receipt.v2"
+_RECEIPT_DIR_CACHE_LOCK = threading.Lock()
+_RECEIPT_DIR_CACHE_MAX_COUNT = 32
+_RECEIPT_DIR_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], tuple[str, ...], tuple[Path, ...]]] = OrderedDict()
 _INPUT_RECEIPT_STATES = {
     "pending",
     "active_pending",
@@ -598,6 +605,7 @@ def gateway_input_guidance_binding(
 # 函数用途: 对账一条普通消息；明确拒绝才排队，已认领但未确认则保持终态未知。
 # LLM: 状态迁移始终在原输入T；v3冻结运输缺guidance仍pending，不能按旧v2缺席queue；恢复关联owner/actor/thread由原source核，typed拒绝不改unknown回执。
 # LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
+# LLM: queued且原请求已归档、无热队列时须结算；canonical终态不能单独证明消息被消费，仍以原guidance为准。
 def reconcile_gateway_input_request(
     paths: GatewayPaths,
     *,
@@ -610,7 +618,9 @@ def reconcile_gateway_input_request(
         if receipt is None:
             return ""
         if receipt.state == "queued":
-            _materialize_prepared_request_locked(paths, receipt)
+            materialized = _materialize_prepared_request_locked(paths, receipt)
+            if not materialized and _terminal_request_without_hot(paths, receipt.request_id):
+                return _settle_terminal_queued_input(paths, receipt, conversation_store)
             return "queued"
         if receipt.state == "consumed":
             return "consumed"
@@ -665,6 +675,31 @@ def reconcile_gateway_input_request(
         return "active_pending"
 
 
+# LLM: 此条件只是对账提示，不授予终态写入；内层入口锁会重读并校验canonical原请求及热队列。
+# 函数用途: 判断归档请求是否已离开inbox/processing，避免误结算仍在排队或处理的输入。
+def _terminal_request_without_hot(paths: GatewayPaths, request_id: str) -> bool:
+    name = f"{request_id}.json"
+    return ((paths.terminal / name).is_file() and not (paths.inbox / name).is_file()
+            and not (paths.processing / name).is_file())
+
+
+# LLM: 调用方持原输入锁并已核canonical摘要；只有原guidance确认consumed才写消费，拒绝/缺失仍保终态未知。
+# 函数用途: 收敛已结束运输请求的queued回执，不重排业务，也不把请求完成冒充消息已消费。
+def _settle_terminal_queued_input(paths: GatewayPaths, receipt: GatewayInputReceipt, store: object) -> str:
+    try:
+        binding = gateway_input_guidance_binding(receipt, store)
+    except Exception as exc:
+        _raise_input_transport_uncertain(exc)
+        _write_terminal_unknown(paths, receipt, exc)
+        return "terminal_unknown"
+    if binding is not None and binding[0].status == "consumed":
+        updated = replace(receipt, state="consumed", updated_at=time.time(), reconcile_error={})
+        write_json_file_atomic(gateway_input_receipt_path(paths, receipt.request_id), updated.to_dict())
+        return "consumed"
+    _write_terminal_unknown(paths, receipt, None)
+    return "terminal_unknown"
+
+
 # LLM: 插话持久操作经 guidance 领域组件； The Gateway loop performs bounded durable repair without one thread per message. Owner
 # resolution uses the stored authenticated request and never falls back to another user's store.
 #   返回的 summary 是结构化事实：除各状态计数外，terminal_unknown_errors/last_terminal_unknown_error 表示
@@ -673,6 +708,7 @@ def reconcile_gateway_input_request(
 # 函数用途: 周期性扫描少量未完成入口回执，修复进程崩溃留下的 active 或 queued 投影，并汇总对账结果。
 # LLM: typed运输未知立即保原cursor位置并上抛，不以finally推进假进度；普通单条坏账仍沿原轮转，不让一条错误饿死后续。
 # LLM: 输入catch优先保实际canonical来源/退出未结与GlobalWriteError同对象；同码普通异常仍沿本函数原隔离/轮转，不补claim或释放。
+# LLM: 原请求归档且无热队列的queued回执转原单条对账入口，不把物化False永久记成queued。
 def reconcile_gateway_input_receipts(
     paths: GatewayPaths,
     agent: object,
@@ -695,7 +731,10 @@ def reconcile_gateway_input_receipts(
             summary["checked"] += 1
             if receipt.state == "queued":
                 with gateway_input_transition(paths, receipt.request_id):
-                    _materialize_prepared_request_locked(paths, receipt)
+                    materialized = _materialize_prepared_request_locked(paths, receipt)
+                if not materialized and _terminal_request_without_hot(paths, receipt.request_id):
+                    _reconcile_unsettled_receipt(paths, agent, receipt, summary)
+                    continue
                 summary["queued"] += 1
                 continue
             if receipt.state == "consumed":
@@ -1156,23 +1195,54 @@ def _gateway_turn_lifecycle_locked(paths: GatewayPaths, target_turn_id: str) -> 
     return "unknown"
 
 
-# LLM: A durable cursor rotates through the whole receipt directory; a long prefix of completed
-# inputs can never starve newer pending work. Reprocessing after a cursor-write crash is idempotent.
+# LLM: 仅复用可信且完整结构指纹未变的回执目录；游标仍逐次读原文件，二分取有界页，不复制全目录。
 # 函数用途: 从上次位置继续领取有界回执扫描页，到目录末尾后循环。
 def _reconcile_receipt_paths(paths: GatewayPaths, *, limit: int) -> tuple[Path, ...]:
     receipt_dir = paths.root / "input_receipts"
-    candidates = sorted(receipt_dir.glob("*.json"), key=lambda item: item.name)
+    names, candidates = _cached_receipt_candidates(receipt_dir)
     if not candidates:
         return ()
     cursor_path = receipt_dir / "state" / "reconcile_cursor.json"
     report = read_json_file_report(cursor_path, context="gateway.input_reconcile_cursor.read")
     previous = str(report.payload.get("last_name") or "") if report.load_error is None else ""
-    start = next(
-        (index for index, path in enumerate(candidates) if path.name > previous),
-        0,
-    )
-    ordered = candidates[start:] + candidates[:start]
-    return tuple(ordered[:limit])
+    start = bisect_right(names, previous) if previous else 0
+    if start >= len(candidates):
+        start = 0
+    count = min(max(0, limit), len(candidates))
+    page = candidates[start:start + count]
+    return page + candidates[:count - len(page)] if len(page) < count else page
+
+
+# LLM: 目录失踪/拒读不使用旧投影；原glob仍决定读取错误语义，ctime和inode捕捉同名替换。
+# 函数用途: 读取回执目录的设备/inode/mtime/ctime结构指纹，不stat每条回执。
+def _receipt_directory_stamp(directory: Path) -> tuple[int, int, int, int] | None:
+    try:
+        st = directory.stat()
+    except OSError:
+        return None
+    return st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns
+
+
+# LLM: 排序在锁外；只发布枚举前后相同且离开粗时间窗口的投影，LRU最多32目录；从不缓存回执正文。
+# 函数用途: 复用回执名字和Path列表，让state子目录游标写入不重复触发全目录glob排序。
+def _cached_receipt_candidates(directory: Path) -> tuple[tuple[str, ...], tuple[Path, ...]]:
+    key, stamp = str(directory), _receipt_directory_stamp(directory)
+    trustworthy = stamp is not None and cache_entry_trustworthy(stamp[2])
+    with _RECEIPT_DIR_CACHE_LOCK:
+        cached = _RECEIPT_DIR_CACHE.get(key)
+        if trustworthy and cached is not None and cached[0] == stamp:
+            _RECEIPT_DIR_CACHE.move_to_end(key)
+            return cached[1], cached[2]
+        _RECEIPT_DIR_CACHE.pop(key, None)
+    candidates = tuple(sorted(directory.glob("*.json"), key=lambda item: item.name))
+    names = tuple(path.name for path in candidates)
+    if trustworthy and _receipt_directory_stamp(directory) == stamp:
+        with _RECEIPT_DIR_CACHE_LOCK:
+            _RECEIPT_DIR_CACHE[key] = (stamp, names, candidates)
+            _RECEIPT_DIR_CACHE.move_to_end(key)
+            while len(_RECEIPT_DIR_CACHE) > _RECEIPT_DIR_CACHE_MAX_COUNT:
+                _RECEIPT_DIR_CACHE.popitem(last=False)
+    return names, candidates
 
 
 # LLM: Cursor advancement happens only after the selected receipt was processed. A crash may

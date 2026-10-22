@@ -1351,3 +1351,21 @@ def test_unknown_ledger_status_remains_live_until_settled(tmp_path):
     assert discovery.unfinished_task_ids(home) == []
     active.write_text(json.dumps({"task_id": "task-40", "status": "RUNNING"}))
     assert discovery.unfinished_task_ids(home) == ["task-40"]
+
+
+# LLM: PAUSED不唤醒但可恢复，旧mtime和未变日期目录不能令它落入60秒历史复核。
+# 函数用途: 验证40条历史终态旁的暂停运行在原地恢复后下一次调用立即被发现。
+def test_scaling_d_paused_run_resumes_without_date_directory_change(tmp_path):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    _settled, active = _settled_history(home, count=40)
+    active.write_text(json.dumps({"task_id": "task-40", "status": "PAUSED"}))
+    old_ns = time.time_ns() - 120_000_000_000
+    os.utime(active, ns=(old_ns, old_ns))
+    day = active.parents[2]
+    before = day.stat().st_mtime_ns
+    assert discovery.unfinished_task_ids(home) == []
+    active.write_text(json.dumps({"task_id": "task-40", "status": "RUNNING"}))
+    assert day.stat().st_mtime_ns == before
+    assert discovery.unfinished_task_ids(home) == ["task-40"]

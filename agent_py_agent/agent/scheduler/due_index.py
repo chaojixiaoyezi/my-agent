@@ -13,14 +13,21 @@ reserved or executed.
 
 import json
 import sqlite3
+import threading
 import time
+from collections import OrderedDict
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any
 
 from ..storage_backend import ensure_sqlite_wal
 
 _SCHEMA_VERSION = 1
+_SCHEMA_INIT_LOCK = threading.Lock()
+_SCHEMA_INITIALIZED_DBS: OrderedDict[str, tuple[int, int, int]] = OrderedDict()
+_SCHEMA_INITIALIZED_MAX = 256
 _ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running"})
 _LEGACY_SCAN_KEY = "owner_scheduler_ledgers_v1"
 
@@ -247,41 +254,45 @@ class SchedulerDueIndex:
         conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
+    # LLM: 缓存只绑定实际验证的文件代次；换代有界重试且不发布旧成功；短连接始终close，不遗留WAL锁。
+    # 函数用途: 热构造只stat不连接SQLite；进程冷启动验证已有表，新库才执行DDL与版本写入。
     def _ensure_schema(self) -> None:
         try:
-            with self._connect() as conn:
-                ensure_sqlite_wal(conn)
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS scheduler_due_owners (
-                        provider TEXT NOT NULL,
-                        owner_kind TEXT NOT NULL,
-                        owner_id TEXT NOT NULL,
-                        next_due_at REAL NOT NULL,
-                        lease_until REAL NOT NULL DEFAULT 0,
-                        updated_at REAL NOT NULL,
-                        PRIMARY KEY (provider, owner_kind, owner_id)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS scheduler_due_meta (
-                        key TEXT PRIMARY KEY,
-                        value TEXT NOT NULL,
-                        updated_at REAL NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    CREATE INDEX IF NOT EXISTS scheduler_due_owner_ready_idx
-                    ON scheduler_due_owners (next_due_at, lease_until)
-                    """
-                )
-                conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            with _SCHEMA_INIT_LOCK:
+                key, identity = str(self.path), _schema_file_key(self.path)
+                if identity is not None and _SCHEMA_INITIALIZED_DBS.get(key) == identity:
+                    _SCHEMA_INITIALIZED_DBS.move_to_end(key)
+                    return
+                _SCHEMA_INITIALIZED_DBS.pop(key, None)
+                for _attempt in range(3):
+                    identity = self._initialize_current_schema()
+                    if identity is None:
+                        continue
+                    _SCHEMA_INITIALIZED_DBS[key] = identity
+                    _SCHEMA_INITIALIZED_DBS.move_to_end(key)
+                    while len(_SCHEMA_INITIALIZED_DBS) > _SCHEMA_INITIALIZED_MAX:
+                        _SCHEMA_INITIALIZED_DBS.popitem(last=False)
+                    return
+                raise SchedulerDueIndexError("scheduler due index changed during initialization")
         except (OSError, sqlite3.Error) as exc:
             raise SchedulerDueIndexError("scheduler due index initialization failed") from exc
+
+    # LLM: 连接前后及关闭后均核对物理文件身份；换代只返回None交调用方有界重试，不发布缓存或旧成功。
+    # 函数用途: 用必关闭的短连接验证/初始化当前库，返回可以安全发布的schema文件代次。
+    def _initialize_current_schema(self) -> tuple[int, int, int] | None:
+        before = _schema_file_key(self.path, allow_empty=True)
+        with closing(self._connect()) as conn, conn:
+            connected = _schema_file_key(self.path, allow_empty=True)
+            if connected is None or (before is not None and connected != before):
+                return None
+            initialized = (conn.execute("PRAGMA user_version").fetchone()[0] == _SCHEMA_VERSION
+                           and conn.execute("SELECT count(*) FROM sqlite_master WHERE type='table' "
+                                            "AND name IN ('scheduler_due_owners', 'scheduler_due_meta')").fetchone()[0] == 2)
+            ensure_sqlite_wal(conn)
+            if not initialized:
+                _create_due_schema(conn)
+        after = _schema_file_key(self.path)
+        return after if after == connected else None
 
     def _migration_complete(self, key: str) -> bool:
         try:
@@ -293,6 +304,31 @@ class SchedulerDueIndex:
         except (OSError, sqlite3.Error) as exc:
             raise SchedulerDueIndexError("scheduler due index migration state read failed") from exc
         return bool(row is not None and str(row["value"]) == "complete")
+
+
+# LLM: 仅非空普通文件可命中schema缓存；空文件身份仅用于初始化前后代次核对，不按业务mtime重复建表。
+# 函数用途: 取得SQLite文件的设备/inode/版本键，缺失或空文件交给原初始化路径。
+def _schema_file_key(path: Path, *, allow_empty: bool = False) -> tuple[int, int, int] | None:
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return ((int(st.st_dev), int(st.st_ino), _SCHEMA_VERSION)
+            if S_ISREG(st.st_mode) and (allow_empty or st.st_size > 0) else None)
+
+
+# LLM: 只在版本/表验证未通过时执行原schema定义；不改owner权限、业务表内容或claim协议。
+# 函数用途: 初始化原due表、元数据表、到期索引和schema版本。
+def _create_due_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS scheduler_due_owners (
+        provider TEXT NOT NULL, owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL,
+        next_due_at REAL NOT NULL, lease_until REAL NOT NULL DEFAULT 0,
+        updated_at REAL NOT NULL, PRIMARY KEY (provider, owner_kind, owner_id))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS scheduler_due_meta (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)""")
+    conn.execute("""CREATE INDEX IF NOT EXISTS scheduler_due_owner_ready_idx
+        ON scheduler_due_owners (next_due_at, lease_until)""")
+    conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
 
 def _load_legacy_due_rows(
