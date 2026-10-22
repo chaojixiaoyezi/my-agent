@@ -46,8 +46,8 @@ class TuiTranscriptModeSnapshot:
 # LLM: TuiTranscriptModeState 在同一锁内维护模式和搜索；冻结 snapshot 只属于当前显示来源，control 动作仍由外层 keybinding 调用。
 # 类用途: 管理 Ctrl-O 进入/退出、Ctrl-E、`/` 搜索、n/N 导航与 resize 清理。
 class TuiTranscriptModeState:
-    # LLM: 冻结显示窗口有界且不删除持久历史；invalidate 只请求重绘，不能从 worker 操作 layout。
-    # 函数用途: 创建详情控制器；连续翻旧页时淘汰窗口末端，Ctrl+End 可回到实时正文。
+    # LLM: 冻结窗口与搜索坐标只属于当前显示，行组强引用避免id重用；invalidate只请求重绘，不改变持久历史。
+    # 函数用途: 初始化有界详情窗口和按行组身份复用的搜索状态。
     def __init__(self, invalidate: Callable[[], None] | None = None, *, max_frozen_blocks: int = 20_000) -> None:
         self._max_frozen_blocks = max(1, max_frozen_blocks)
         self._active = False
@@ -64,6 +64,7 @@ class TuiTranscriptModeState:
         self._anchor_line = 0
         self._matches: tuple[TuiTranscriptSearchMatch, ...] = ()
         self._matches_query = ""
+        self._matches_lines: tuple[FormattedLine, ...] | None = None
         self._current_match_index = -1
         self._render_width = 0
         self._frozen_snapshot: TuiViewSnapshot | None = None
@@ -159,8 +160,8 @@ class TuiTranscriptModeState:
             self._reset_search_locked()
         self._notify()
 
-    # LLM: 冻结阅读只追加指定旧页，不能混入新回复；保留靠近上翻位置的有界窗口，磁盘历史不变。
-    # 函数用途: 补入旧页并释放远离阅读位置的末端快照，避免一直按 Ctrl+Home 累积整份历史。
+    # LLM: 旧页加入只改冻结投影，必须同时丢搜索行身份，不能复用旧窗口坐标或混入新回复。
+    # 函数用途: 有界补入旧页并清除旧窗口的搜索memo。
     def prepend_history(self, live_snapshot: TuiViewSnapshot, block_ids: tuple[str, ...]) -> None:
         with self._lock:
             frozen = self._frozen_snapshot
@@ -177,6 +178,7 @@ class TuiTranscriptModeState:
             self._complete_pages = ()
             self._complete_page = 0
             self._matches, self._matches_query = (), ""
+            self._matches_lines = None
         self._notify()
 
     # LLM: show-all 仅在 transcript 模式可切换；普通聊天视图没有隐藏的第二份开关状态。
@@ -293,8 +295,8 @@ class TuiTranscriptModeState:
         if not self._complete_pages and self._frozen_snapshot is not None:
             self._complete_pages = build_complete_detail_pages(self._frozen_snapshot)
 
-    # LLM: open_search 保存进入搜索前的 committed query 与滚动锚点；编辑框总从空串开始，匹配 less 的 `/` 习惯。
-    # 函数用途: 打开 transcript 搜索栏。
+    # LLM: 打开搜索仍保存committed query与锚点，空编辑框不能沿用前次搜索的行身份或坐标。
+    # 函数用途: 打开transcript搜索栏并复位搜索memo。
     def open_search(self, anchor_line: int) -> None:
         with self._lock:
             if not self._active or self._search_open:
@@ -305,21 +307,23 @@ class TuiTranscriptModeState:
             self._anchor_line = max(0, int(anchor_line or 0))
             self._matches = ()
             self._matches_query = ""
+            self._matches_lines = None
             self._current_match_index = -1
         self._notify()
 
-    # LLM: query 只是可见全文筛选条件；正文不触发命令、状态变化或业务搜索。
-    # 函数用途: 增量更新 transcript 搜索词。
+    # LLM: query只过滤可见正文；编辑时丢弃原行身份memo，下次装饰重新计算，不触发业务搜索。
+    # 函数用途: 更新搜索词并失效匹配缓存。
     def update_search_query(self, query: str) -> None:
         with self._lock:
             if not self._search_open:
                 return
             self._editing_query = str(query or "")
             self._matches_query = ""
+            self._matches_lines = None
         self._notify()
 
-    # LLM: commit 仅在已有匹配时持久化 query；零匹配关闭搜索并清空导航状态。
-    # 函数用途: 用 Enter 接受 transcript 搜索并返回当前命中行。
+    # LLM: 仅有匹配才提交query并保留有效memo；零匹配清行身份及导航，不保留幽灵坐标。
+    # 函数用途: 接受当前搜索或清掉无结果搜索。
     def commit_search(self) -> int | None:
         with self._lock:
             if not self._search_open:
@@ -330,13 +334,14 @@ class TuiTranscriptModeState:
             if not self._committed_query:
                 self._matches = ()
                 self._matches_query = ""
+                self._matches_lines = None
                 self._current_match_index = -1
             line = self._current_line_locked()
         self._notify()
         return line
 
-    # LLM: cancel 恢复 `/` 之前 committed query 与滚动锚点，临时 query 的匹配和高亮不能泄漏。
-    # 函数用途: 用 Esc/Ctrl-C/Ctrl-G 取消 transcript 搜索并返回原锚点。
+    # LLM: 取消恢复原query和锚点，临时搜索行身份一并失效，不能留下过时匹配或高亮。
+    # 函数用途: 取消搜索并返回原滚动位置。
     def cancel_search(self) -> int:
         with self._lock:
             self._search_open = False
@@ -344,6 +349,7 @@ class TuiTranscriptModeState:
             self._editing_query = ""
             self._matches = ()
             self._matches_query = ""
+            self._matches_lines = None
             self._current_match_index = -1
             anchor = self._anchor_line
         self._notify()
@@ -363,8 +369,8 @@ class TuiTranscriptModeState:
         self._notify()
         return line
 
-    # LLM: 只装饰格式化行和搜索结果；preserve_footer 来自实时 typed context，不能解析提示文案或冻结正文判断健康。
-    # 函数用途: 添加搜索高亮与模式说明；有高优先级实时提示时保留原底栏，不清除搜索状态。
+    # LLM: 同query/行组身份复用匹配，空搜索不扫描、无命中不复制；resize清坐标，实时footer仍优先。
+    # 函数用途: 低开销装饰详情搜索与模式说明，不改变原正文或提示优先级。
     def decorate_frame(
         self, frame: TuiRenderFrame, *, width: int, preserve_footer: bool = False,
     ) -> TuiRenderFrame:
@@ -378,17 +384,11 @@ class TuiTranscriptModeState:
                 self._search_open = False
                 self._matches = ()
                 self._matches_query = ""
+                self._matches_lines = None
                 self._current_match_index = -1
             self._render_width = normalized_width
             query = self._editing_query if self._search_open else self._committed_query
-            matches = _find_transcript_matches(frame.transcript_lines, query)
-            if query != self._matches_query or matches != self._matches:
-                self._matches = matches
-                self._matches_query = query
-                self._current_match_index = _nearest_match_index(
-                    matches,
-                    self._anchor_line,
-                )
+            matches = _transcript_matches_locked(self, frame.transcript_lines, query)
             current_index = self._current_match_index
             search_open = self._search_open
             show_all = self._show_all
@@ -396,7 +396,7 @@ class TuiTranscriptModeState:
             frame.transcript_lines,
             matches,
             current_index=current_index,
-        )
+        ) if matches else frame.transcript_lines
         footer = frame.footer if preserve_footer else _transcript_footer(
             normalized_width,
             show_all=show_all,
@@ -418,8 +418,8 @@ class TuiTranscriptModeState:
         with self._lock:
             return self._current_line_locked()
 
-    # LLM: 内部 reset 必须在已持锁上下文调用，并清理所有 query/match/width 状态。
-    # 函数用途: 复位一次 less transcript 会话。
+    # LLM: 调用方已持锁；退出、重绑来源与翻页须清除全部query/行身份/坐标，不能跨视图复用匹配。
+    # 函数用途: 完整复位一次less搜索会话及其memo。
     def _reset_search_locked(self) -> None:
         self._search_open = False
         self._committed_query = ""
@@ -428,6 +428,7 @@ class TuiTranscriptModeState:
         self._anchor_line = 0
         self._matches = ()
         self._matches_query = ""
+        self._matches_lines = None
         self._current_match_index = -1
         self._render_width = 0
 
@@ -445,6 +446,26 @@ class TuiTranscriptModeState:
             callback = self._invalidate
         if callback is not None:
             callback()
+
+
+# LLM: 原state锁内按query/行身份复用；新行组重扫但相同query/坐标保留n/N位置，内容改变才重新选最近锚点。
+# 函数用途: 计算或复用可见命中，空搜索不扫描、动态尾部重绘不吞掉导航。
+def _transcript_matches_locked(
+    state: TuiTranscriptModeState, lines: tuple[FormattedLine, ...], query: str,
+) -> tuple[TuiTranscriptSearchMatch, ...]:
+    if not query:
+        state._matches = ()
+        state._matches_query = ""
+        state._matches_lines = lines
+        state._current_match_index = -1
+    elif query != state._matches_query or state._matches_lines is not lines:
+        matches = _find_transcript_matches(lines, query)
+        if query != state._matches_query or matches != state._matches:
+            state._current_match_index = _nearest_match_index(matches, state._anchor_line)
+        state._matches = matches
+        state._matches_query = query
+        state._matches_lines = lines
+    return state._matches
 
 
 # LLM: 仅组合当前位置附近至多四页，远端沿原异步读取与八页缓存，不拥有第二份阅读状态。

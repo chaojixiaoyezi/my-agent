@@ -270,8 +270,8 @@ def _switch_transcript_control_store(
 # LLM: TuiTranscriptControl 只投影 provider transcript 行并维护可视 cursor anchor；它不复制 transcript 字符串。
 # 类用途: 给 Window 提供有界正文、阅读位置、follow-tail 和直接移动视口的滚动。
 class TuiTranscriptControl(UIControl):
-    # LLM: cursor_line 是渲染锚点而非会话位置；新消息仅在 follow=True 时把锚点推进末尾。
-    # 函数用途: 创建滚动控件、各页面视口和按需旧页回调；没有后台模型或文件读取。
+    # LLM: 光标只为渲染锚点；计数缓存强持当前stable/active两个tuple，仅源身份变化时重算，不保存业务状态。
+    # 函数用途: 初始化滚动、选区与只读消息ID缓存，不发起模型或文件读取。
     def __init__(self, provider: TuiFrameProvider) -> None:
         self.provider = provider
         self._state_store = provider.state_store
@@ -282,6 +282,8 @@ class TuiTranscriptControl(UIControl):
         self._last_render_height = 1
         self._unseen_baseline: frozenset[str] | None = None
         self._unseen_block_ids: frozenset[str] = frozenset()
+        self._counted_sources: tuple[object, object] = (None, None)
+        self._counted_ids: frozenset[str] = frozenset()
         self._selection: TuiTextSelection | None = None
         self._selection_dragging = False
         self._selection_copied = False
@@ -315,15 +317,23 @@ class TuiTranscriptControl(UIControl):
     def is_focusable(self) -> bool:
         return True
 
-    # LLM: create_content 复用共享 frame，仅在布局需要补行时分配；空 transcript 仍返回合法 UIContent。
-    # 函数用途: 生成行访问器；窗口中任何归档未就绪时保留来源锚点，前文加载也不能推走正在看的消息。
+    # LLM: 调用方未持control锁；同stable/active容器身份才复用，强引用防id重用，块变更仍由原计数器计算。
+    # 函数用途: 返回当前可计数消息ID，渲染与所有滚动入口共享一次历史扫描。
+    def _visible_message_block_ids(self, snapshot: TuiViewSnapshot) -> frozenset[str]:
+        with self._lock:
+            if snapshot.stable_blocks is self._counted_sources[0] and snapshot.active_blocks is self._counted_sources[1]:
+                return self._counted_ids
+            self._counted_ids = _counted_message_block_ids(snapshot)
+            self._counted_sources = (snapshot.stable_blocks, snapshot.active_blocks)
+            return self._counted_ids
+
+    # LLM: 原frame/补行/锚点规则不变；保存tuple子类身份以省整段复制，消息ID与滚动共用同一源身份memo。
+    # 函数用途: 生成合法行访问器，复用安全行组且保留阅读位置与选区。
     def create_content(self, width: int, height: int) -> UIContent:
         frame = self.provider.frame(width)
         line_count = scrollable_line_count(frame, max(1, height), self.provider.transcript_state)
         lines = _pad_transcript_lines(frame.transcript_lines, line_count)
-        visible_block_ids = _counted_message_block_ids(
-            self.provider.state_store.snapshot()
-        )
+        visible_block_ids = self._visible_message_block_ids(self.provider.state_store.snapshot())
         with self._lock:
             anchor = self._pending_reading_anchor
             detail_top = None
@@ -337,7 +347,7 @@ class TuiTranscriptControl(UIControl):
                 self._selection_dragging = False
                 self._right_copy_armed = False
             self._selection_width = width
-            self._last_lines = tuple(lines)
+            self._last_lines = lines if isinstance(lines, tuple) else tuple(lines)
             self._line_count = len(lines)
             self._last_render_height = max(1, int(height or 1))
             if detail_top is not None:
@@ -394,15 +404,13 @@ class TuiTranscriptControl(UIControl):
         with self._lock:
             return bool(self.follow)
 
-    # LLM: 滚动直接移动视口顶部；内部原文页只换有界窗口，不恢复实时跟随或触发模型。
-    # 函数用途: 每次上下键和滚轮立即移动画面，原文到页边界自动接续。
+    # LLM: 原滚动/原文边界和follow规则不变；同source复用消息ID，不能在按键路径重扫未变历史。
+    # 函数用途: 移动视口并沿原文窗口接续，更新即时未读基线。
     def move(self, delta: int) -> None:
         frame = self.provider.frame(self.provider.last_width)
         frame, top = scroll_detail_window(self, frame, int(delta))
         line_count = scrollable_line_count(frame, self._last_render_height, self.provider.transcript_state)
-        visible_block_ids = _counted_message_block_ids(
-            self.provider.state_store.snapshot()
-        )
+        visible_block_ids = self._visible_message_block_ids(self.provider.state_store.snapshot())
         with self._lock:
             self._begin_manual_scroll_locked(visible_block_ids)
             self._pending_reading_anchor = None
@@ -421,17 +429,15 @@ class TuiTranscriptControl(UIControl):
         if request_older and self._older_history is not None:
             self._older_history(False)
 
-    # LLM: home 显式离开 follow-tail 并把 anchor 设为首行。
-    # 函数用途: 跳到 transcript 顶部。
+    # LLM: home仍离开follow并保原旧页回调，消息基线共用只读memo，不重复扫描历史。
+    # 函数用途: 跳到正文顶部并记录当前可计数消息。
     def move_home(self) -> None:
         mode = self.provider.transcript_state
         if mode is not None and mode.snapshot().show_all:
             mode.move_complete_page(-mode.snapshot().complete_page)
         self._last_reading_frame = None
         self._pending_reading_anchor = None
-        visible_block_ids = _counted_message_block_ids(
-            self.provider.state_store.snapshot()
-        )
+        visible_block_ids = self._visible_message_block_ids(self.provider.state_store.snapshot())
         with self._lock:
             self._begin_manual_scroll_locked(visible_block_ids)
             self.follow = False
@@ -491,13 +497,11 @@ class TuiTranscriptControl(UIControl):
             self._unseen_baseline = None
             self._unseen_block_ids = frozenset()
 
-    # LLM: jump_to 使用已渲染行坐标并关闭 follow；搜索命中不会通过修改 Window 私有 scroll 字段实现。
-    # 函数用途: 将 transcript 锚点跳到指定可见行。
+    # LLM: 仍按已渲染坐标关闭follow并跳转；复用消息ID memo，不从搜索文本或行数猜消息身份。
+    # 函数用途: 将锚点移到指定行并保留即时未读基线。
     def jump_to(self, line_index: int) -> None:
         frame = self.provider.frame(self.provider.last_width)
-        visible_block_ids = _counted_message_block_ids(
-            self.provider.state_store.snapshot()
-        )
+        visible_block_ids = self._visible_message_block_ids(self.provider.state_store.snapshot())
         with self._lock:
             self._pending_reading_anchor = None
             self._last_reading_frame = frame
@@ -535,12 +539,10 @@ class TuiTranscriptControl(UIControl):
         with self._lock:
             return max(0, int(self.cursor_line))
 
-    # LLM: 指示器只根据 follow flag 和滚动时冻结的 typed block ids 计算，不能以 transcript 文案或行数猜消息数。
-    # 函数用途: 返回 `Jump to bottom` 或新增消息数；位于尾部时返回 None。
+    # LLM: 原follow/typed ID差集口径不变；footer也复用源身份memo，不能成为每帧全扫漏口。
+    # 函数用途: 返回跳底提示或新增消息数，同块active转stable不重复计数。
     def scroll_indicator(self) -> str | None:
-        visible_block_ids = _counted_message_block_ids(
-            self.provider.state_store.snapshot()
-        )
+        visible_block_ids = self._visible_message_block_ids(self.provider.state_store.snapshot())
         with self._lock:
             if self.follow:
                 return None

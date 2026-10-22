@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 
@@ -639,3 +642,155 @@ def test_resize_clears_viewport_selection() -> None:
     control.create_content(20, 5)
 
     assert control.selected_text() == ""
+
+
+# LLM: 夹具走真实typed事件归约，不用假renderer或人工行数替代显示结果。
+# 函数用途: 为Ctrl+O缓存测试准备稳定正文。
+def _ctrlo_store(count=3):
+    store = TuiStateStore()
+    seq = TuiEventSequencer('ctrlo-prefix', clock=lambda: 1.0)
+    for index in range(count):
+        store.publish(seq.emit('assistant_completed', 'completed', f'a-{index}', {'text': f'answer {index}'}))
+    return store, seq
+
+
+# LLM: sort/render探针透传真实实现，旧块必须完全不进入扩展循环；同时核对原行锚点和最终冷渲染结果。
+# 函数用途: 验证有序追加只排序与渲染尾部，旧布局保持不变。
+def test_ctrlo_prefix_extension_only_sorts_and_renders_added_tail(monkeypatch):
+    from agent_py_agent.cli.chat_parts import tui_block_renderer as module
+
+    store, seq = _ctrlo_store()
+    context = TuiRenderContext(width=80)
+    cache = module.TuiBlockRenderCache()
+    previous = cache.stable_prefix(store.snapshot().stable_blocks, context)
+    original_sort, original_render = module._block_sort_key, cache.render
+    sorted_ids, rendered_ids = [], []
+
+    # LLM: 每次排序键读取都针对真实块，旧块出现即意味着增量路径退化。
+    # 函数用途: 记录扩展过程访问的排序键。
+    def key(block):
+        sorted_ids.append(block.block_id)
+        return original_sort(block)
+
+    # LLM: 不跳过原缓存或净化，只记录被要求重新走render入口的块。
+    # 函数用途: 记录扩展过程渲染的块。
+    def render(block, context):
+        rendered_ids.append(block.block_id)
+        return original_render(block, context)
+
+    store.publish(seq.emit('assistant_completed', 'completed', 'tail', {'text': 'tail answer'}))
+    snapshot = store.snapshot()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, '_block_sort_key', key)
+        patch.setattr(cache, 'render', render)
+        extended = cache.stable_prefix(snapshot.stable_blocks, context)
+    assert rendered_ids == ['tail']
+    assert sorted_ids and set(sorted_ids) == {'tail'}
+    assert extended.lines[:len(previous.lines)] == previous.lines
+    assert extended.offsets[:len(previous.offsets)] == previous.offsets
+    assert extended.line_ends[:len(previous.line_ends)] == previous.line_ends
+    assert extended.offset_ends[:len(previous.offset_ends)] == previous.offset_ends
+    assert module.render_tui_snapshot(snapshot, context, cache=cache) == module.render_tui_snapshot(snapshot, context)
+
+
+# LLM: 四组context按最近使用淘汰；block条目命中不能冒充稳定布局命中。
+# 函数用途: 核对布局LRU容量、最近使用刷新及24M默认字符预算。
+def test_ctrlo_prefix_context_lru_is_bounded_and_refreshes_hits():
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiBlockRenderCache
+
+    store, _seq = _ctrlo_store()
+    blocks = store.snapshot().stable_blocks
+    cache = TuiBlockRenderCache()
+    assert cache.max_chars == 24_000_000
+    contexts = [TuiRenderContext(width=width) for width in range(80, 85)]
+    prefixes = [cache.stable_prefix(blocks, context) for context in contexts[:4]]
+    assert cache.stable_prefix(blocks, contexts[0]) is prefixes[0]
+    cache.stable_prefix(blocks, contexts[4])
+    assert len(cache._stable_prefixes) == 4
+    assert cache.stable_prefix(blocks, contexts[0]) is prefixes[0]
+    assert cache.stable_prefix(blocks, contexts[1]) is not prefixes[1]
+    assert len(cache._stable_prefixes) == 4
+
+
+@pytest.mark.parametrize('change', ['early', 'replace', 'remove', 'reverse', 'dynamic', 'chars', 'entries'])
+# LLM: 只有完整且有序的原前缀可增量扩展，活动屏障与预算截断不可跳过；必须等同原无缓存渲染。
+# 函数用途: 对乱序、旧块变化、动态块及两种预算核对回退和最终显示。
+def test_ctrlo_prefix_extension_preserves_fallback_and_budgets(change):
+    from agent_py_agent.cli.chat_parts import tui_block_renderer as module
+
+    store, seq = _ctrlo_store()
+    snapshot = store.snapshot()
+    cache = module.TuiBlockRenderCache(max_chars=15 if change == 'chars' else 24_000_000,
+                                       max_entries=2 if change == 'entries' else 20_000)
+    context = TuiRenderContext(width=80)
+    cache.stable_prefix(snapshot.stable_blocks, context)
+    store.publish(seq.emit('assistant_completed', 'completed', 'tail', {'text': 'tail answer'}))
+    changed = store.snapshot()
+    blocks = changed.stable_blocks
+    if change == 'early':
+        blocks = (*blocks[:-1], replace(blocks[-1], created_seq=0, updated_seq=0))
+    elif change == 'replace':
+        blocks = (replace(blocks[0], text='changed first', updated_seq=99), *blocks[1:])
+    elif change == 'remove':
+        blocks = blocks[1:]
+    elif change == 'reverse':
+        blocks = tuple(reversed(blocks))
+    elif change == 'dynamic':
+        blocks = (*blocks[:-1], replace(blocks[-1], role='connection', phase='started'))
+    changed = replace(changed, stable_blocks=blocks)
+    warm = module.render_tui_snapshot(changed, context, cache=cache)
+    assert warm == module.render_tui_snapshot(changed, context)
+    assert len(cache._stable_prefix.line_ends) <= cache.max_entries
+    assert module._rendered_char_count(cache._stable_prefix.lines) <= cache.max_chars
+
+
+# LLM: provider输出的安全tuple已净化，control保存时不能再转换丢掉身份；不复制正文也不绕过最终安全出口。
+# 函数用途: 验证create_content保留原安全行组用于选区。
+def test_ctrlo_control_preserves_safe_tuple_lines_identity():
+    store, _seq = _ctrlo_store(10)
+    provider = _provider(store)
+    control = TuiTranscriptControl(provider)
+    lines = provider.frame(80).transcript_lines
+    control.create_content(80, 5)
+    assert control._last_lines is lines
+    control.select_all()
+    assert 'answer 0' in control.selected_text()
+
+
+# LLM: 每个计数入口都必须按stable/active tuple身份命中，不能在footer/home/search跳转留下全量扫描漏口。
+# 函数用途: 验证渲染和滚动复用消息ID，新增活动块及完成转换仍即时更新未读数。
+def test_ctrlo_control_reuses_counted_ids_across_redraw_scroll_and_footer(monkeypatch):
+    from agent_py_agent.cli.chat_parts import tui_view as module
+
+    store, seq = _ctrlo_store(10)
+    control = TuiTranscriptControl(_provider(store))
+    original = module._counted_message_block_ids
+    calls = []
+
+    # LLM: 计数仍由真实typed snapshot计算，不模拟ID集合。
+    # 函数用途: 记录完整历史计数器的调用。
+    def counted(snapshot):
+        calls.append(snapshot)
+        return original(snapshot)
+
+    monkeypatch.setattr(module, '_counted_message_block_ids', counted)
+    control.create_content(80, 5)
+    control.move(-1)
+    control.create_content(80, 5)
+    control.move_home()
+    control.jump_to(2)
+    assert control.scroll_indicator() == 'Jump to bottom'
+    assert len(calls) == 1
+    store.publish(seq.emit('assistant_started', 'started', 'new'))
+    store.publish(seq.emit('assistant_delta', 'delta', 'new', {'text': 'new answer'}))
+    assert control.scroll_indicator() == '1 new message'
+    assert len(calls) == 2
+    store.publish(seq.emit('assistant_completed', 'completed', 'new', {'text': 'new answer'}))
+    control.create_content(80, 5)
+    assert control.scroll_indicator() == '1 new message'
+    assert len(calls) == 3
+    snap = store.snapshot()
+    equivalent = replace(snap, stable_blocks=(*snap.stable_blocks,))
+    monkeypatch.setattr(store, 'snapshot', lambda: equivalent)
+    control.scroll_indicator()
+    assert len(calls) == 4

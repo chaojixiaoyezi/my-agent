@@ -459,8 +459,8 @@ def _rendered_char_count(lines: tuple[FormattedLine, ...]) -> int:
     return sum(len(str(fragment[1])) for line in lines for fragment in line)
 
 
-# LLM: 稳定布局只保存一个 source/context 版本和有界静态前缀；块身份、顺序与行锚点必须一起失效。
-# 类用途: 保存已排版的稳定正文，活动块从正确顺序位置接入，不重新排版前面的历史。
+# LLM: 每个context只保留一份有界前缀，缓存至多四个context；chars只计已接受行，块顺序与锚点一起失效。
+# 类用途: 保存稳定布局及其字符记账，允许模式切换复用和有序尾部扩展。
 @dataclass(frozen=True)
 class _StableBlockPrefix:
     source: tuple[TuiBlock, ...]
@@ -471,16 +471,22 @@ class _StableBlockPrefix:
     offsets: tuple[tuple[str, int], ...]
     line_ends: tuple[int, ...]
     offset_ends: tuple[int, ...]
+    chars: int = 0
+
+
+# LLM: 仅列出稳定排版使用的显示输入；活动动画不进入稳定前缀键，动态块仍沿原刷新路径。
+# 函数用途: 为普通/详情模式和宽度、品牌生成独立布局键。
+def _stable_prefix_context_key(context: TuiRenderContext) -> tuple[Any, ...]:
+    return (context.width, context.detailed_transcript, context.show_all,
+            context.agent_name, context.version, context.model_name, context.workspace)
 
 
 # LLM: 块 LRU 与稳定前缀都只缓存显示值，前缀按相同字符预算有界，任何正文/模式/顺序变化均失效。
 # 类用途: 复用已净化块与历史布局，减少每帧遍历，同时保留活动内容和插话顺序。
 class TuiBlockRenderCache:
-    # LLM: max_entries 与 max_chars 都是 UI 内存边界，裁剪只影响重渲染性能，不改变 transcript 事实。
-    # 流式活动块每更新一版就会新增一个 key（含 updated_seq），只限条数时缓存字符量实测可达最终文本数百倍；
-    # 因此同时按字符预算淘汰，并在同一 block 出新版本时立刻丢掉旧版本。
-    # 函数用途: 创建一个有界（条数 + 字符）的 LRU block cache。
-    def __init__(self, *, max_entries: int = 20_000, max_chars: int = 6_000_000) -> None:
+    # LLM: block LRU仍按条数/字符淘汰；独立前缀最多四个context，每份也受同一预算限制，不改持久历史。
+    # 函数用途: 初始化支持普通/详情布局共存的有界渲染缓存。
+    def __init__(self, *, max_entries: int = 20_000, max_chars: int = 24_000_000) -> None:
         self.max_entries = max(1, int(max_entries or 1))
         self.max_chars = max(1, int(max_chars or 1))
         self._entries: OrderedDict[tuple[Any, ...], tuple[FormattedLine, ...]] = OrderedDict()
@@ -491,6 +497,7 @@ class TuiBlockRenderCache:
         self._live_last_key: dict[str, tuple[Any, ...]] = {}
         self._live_last_at: dict[str, float] = {}
         self._stable_prefix: _StableBlockPrefix | None = None
+        self._stable_prefixes: OrderedDict[tuple[Any, ...], _StableBlockPrefix] = OrderedDict()
 
     # LLM: 缓存只保存已净化的不可变行，安全出口按类型复用；键仍绑定 block 版本、宽度和显示模式。
     # 函数用途: 返回已检查的缓存行；新版本才重新排版和过滤终端字符，稳定历史不随动画重扫。
@@ -527,38 +534,70 @@ class TuiBlockRenderCache:
             self._drop_entry(next(iter(self._entries)))
         return rendered
 
-    # LLM: 仅缓存静态块前缀；动态角色沿原逐块路径刷新。source 强引用避免 id 重用，前缀也受字符预算限制，不能无限持有被 LRU 淘汰的行。
-    # 函数用途: 历史或显示宽度/模式变化时重建一次布局；流式增量和动画复用同一前缀。
+    # LLM: source身份相同直接复用同context布局；有序追加只处理尾部，其余变化冷建；保留旧单槽别名并按四context LRU淘汰。
+    # 函数用途: 在Ctrl+O切换时复用两模式前缀，避免历史布局反复重建。
     def stable_prefix(self, blocks: tuple[TuiBlock, ...], context: TuiRenderContext) -> _StableBlockPrefix:
-        key = (context.width, context.detailed_transcript, context.show_all,
-               context.agent_name, context.version, context.model_name, context.workspace)
-        previous = self._stable_prefix
+        key = _stable_prefix_context_key(context)
+        previous = self._stable_prefixes.get(key)
         if previous is not None and previous.source is blocks and previous.context_key == key:
+            self._stable_prefixes.move_to_end(key)
+            self._stable_prefix = previous
             return previous
-        ordered = tuple(sorted(blocks, key=_block_sort_key))
-        lines: list[FormattedLine] = []
-        offsets: list[tuple[str, int]] = []
-        line_ends: list[int] = []
-        offset_ends: list[int] = []
-        chars = 0
-        for block in ordered:
+        prefix = self._extend_stable_prefix(previous, blocks, context) if previous is not None else None
+        if prefix is None:
+            ordered = tuple(sorted(blocks, key=_block_sort_key))
+            prefix = self._build_stable_prefix(blocks, context, ordered, tuple(map(_block_sort_key, ordered)))
+        self._stable_prefixes[key] = prefix
+        self._stable_prefixes.move_to_end(key)
+        while len(self._stable_prefixes) > 4:
+            self._stable_prefixes.popitem(last=False)
+        self._stable_prefix = prefix
+        return prefix
+
+    # LLM: 仅完整、同context且原source未变的前缀可扩展；早插/旧块变化/预算或动态截断必须退回完整排序。
+    # 函数用途: 只排序新增尾部并沿原预算和动态屏障规则延伸布局。
+    def _extend_stable_prefix(self, previous: _StableBlockPrefix, blocks: tuple[TuiBlock, ...], context: TuiRenderContext) -> _StableBlockPrefix | None:
+        size = len(previous.source)
+        if (previous.context_key != _stable_prefix_context_key(context) or not 0 < size < len(blocks)
+                or len(previous.line_ends) != len(previous.blocks) or blocks[:size] != previous.source):
+            return None
+        added = tuple(sorted(blocks[size:], key=_block_sort_key))
+        added_keys = tuple(map(_block_sort_key, added))
+        if previous.sort_keys and added_keys[0] < previous.sort_keys[-1]:
+            return None
+        return self._build_stable_prefix(blocks, context, previous.blocks + added,
+                                         previous.sort_keys + added_keys, previous)
+
+    # LLM: 冷建与增量共用原停止/追加规则；旧chars和边界直接复用，不重读被block LRU淘汰的旧条目或旧排序键。
+    # 函数用途: 从空布局或完整旧布局追加静态块，生成行、锚点与有界字符记账。
+    def _build_stable_prefix(
+        self, blocks: tuple[TuiBlock, ...], context: TuiRenderContext,
+        ordered: tuple[TuiBlock, ...], sort_keys: tuple[tuple[int, int, str], ...],
+        previous: _StableBlockPrefix | None = None,
+    ) -> _StableBlockPrefix:
+        lines = list(previous.lines) if previous is not None else []
+        offsets = list(previous.offsets) if previous is not None else []
+        line_ends = list(previous.line_ends) if previous is not None else []
+        offset_ends = list(previous.offset_ends) if previous is not None else []
+        chars = previous.chars if previous is not None else 0
+        start = len(previous.blocks) if previous is not None else 0
+        for block in ordered[start:]:
             if block.role in {"connection", "todo"} or _is_live_stream_block(block) or (
                 block.role == "background" and block.phase not in TERMINAL_RENDER_PHASES
             ):
                 break
             rendered = self.render(block, context)
-            chars += _rendered_char_count(rendered)
-            if chars > self.max_chars or len(line_ends) >= self.max_entries:
+            rendered_chars = _rendered_char_count(rendered)
+            if chars + rendered_chars > self.max_chars or len(line_ends) >= self.max_entries:
                 break
+            chars += rendered_chars
             _append_block(lines, rendered)
             if rendered:
                 offsets.append((block.block_id, len(lines) - len(rendered)))
             line_ends.append(len(lines))
             offset_ends.append(len(offsets))
-        prefix = _StableBlockPrefix(blocks, key, ordered, tuple(map(_block_sort_key, ordered)),
-                                    SafeFormattedLines(lines), tuple(offsets), tuple(line_ends), tuple(offset_ends))
-        self._stable_prefix = prefix
-        return prefix
+        return _StableBlockPrefix(blocks, _stable_prefix_context_key(context), ordered, sort_keys,
+                                  SafeFormattedLines(lines), tuple(offsets), tuple(line_ends), tuple(offset_ends), chars)
 
     # LLM: 淘汰与显式丢弃共用同一条记账路径，字符预算不能因漏减而失真。
     # 函数用途: 移除一个缓存条目并同步字符记账。
@@ -574,9 +613,9 @@ class TuiBlockRenderCache:
     def stats(self) -> TuiRenderCacheStats:
         return TuiRenderCacheStats(self._hits, self._misses, len(self._entries))
 
-# LLM: render_tui_snapshot 只组合 typed block/order；缓存前缀止于首个活动块之前，余下按原顺序合流，不改写 reducer。
+# LLM: 仍按typed顺序合流与动态规则刷新；没有变化尾部时保留安全前缀行组身份，让搜索重绘复用匹配，不跳过净化。
 # 主活动从规范background块或typed前台状态的纯展示补位行置于消息末尾；不将补位写进历史。
-# 函数用途: 复用稳定历史布局并渲染变化尾部；活动回合无其它可见指示时补纯展示行，不创建执行块或修改状态。
+# 函数用途: 复用稳定布局并渲染真实变化尾部，原前台活动补位只影响显示。
 def render_tui_snapshot(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -647,7 +686,7 @@ def render_tui_snapshot(
     start = len(prefix_lines) + len(separator)
     return sanitize_tui_render_frame(
         TuiRenderFrame(
-            SafeFormattedLines.join((prefix_lines, separator, lines)),
+            SafeFormattedLines.join((prefix_lines, separator, lines)) if lines else prefix_lines,
             tuple(overlay),
             _render_input_status(snapshot, context),
             _render_fixed_todo(snapshot, context),
