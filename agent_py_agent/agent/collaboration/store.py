@@ -314,6 +314,8 @@ class CollaborationCapabilityStore(CollaborationEvidenceStore):
 # collaboration cases
 # ---------------------------------------------------------------------------
 
+# LLM: 协作 case 的创建、持久化、列表缓存与成员绑定继承自能力存储基类；改动时保持 case_id/thread_id/task_id 账本契约与 test_collaboration_store.py / test_store_scan_indexes.py 一致。
+# 类用途: 管理多代理协作 case 的落盘记录、状态流转与按物理文件指纹复用的读取缓存。
 class CollaborationCaseStore(CollaborationCapabilityStore):
     def open_case(self, request: dict) -> CollaborationCase:
         current = current_time(request.get("now"))

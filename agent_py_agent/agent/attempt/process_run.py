@@ -17,11 +17,7 @@ from ..common.cancellation import (
     register_cancellation_callback,
 )
 from ..tooling.process_output_capture import ProcessOutputCapture
-from ..tooling.sandbox import (
-    prune_transient_bwrap_sidecar_mounts,
-    retry_bwrap_mount_race_argv,
-    snapshot_bwrap_mount_sources,
-)
+from ..tooling.sandbox import prune_transient_bwrap_sidecar_mounts
 
 # 取消可能仅来自外部结构化检查（没有 token.cancel 回调），每 0.1 秒复核，不能等到整个命令超时。
 _CANCELLATION_POLL_SECONDS = 0.1
@@ -72,8 +68,8 @@ class SandboxProcessOptions:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
 
 
-# LLM: 仅捕获且无stdout的挂载失败最多重试三次；先裁剪侧车，否则须有本次启动前像证明源身份变化；取消优先预算返回，回收及总期限/原args不变。
-# 函数用途: 在同一时间预算内重试可识别的bwrap挂载竞态，其余成功、超时143和业务失败原样交回。
+# LLM: 仅捕获输出且无stdout的瞬时侧车启动失败最多重试三次；无独立pre-exec证据时不重放持久挂载；每轮取消检查优先预算返回，单次回收不变，总期限/原args保留。
+# 函数用途: 在同一时间预算内重试可识别的bwrap侧车竞态，其余成功、超时143和业务失败原样交回。
 def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subprocess.CompletedProcess:
     deadline = time.monotonic() + max(0.0, options.timeout)
     current_argv = argv
@@ -83,13 +79,10 @@ def run_sandbox_process(argv: list[str], options: SandboxProcessOptions) -> subp
         remaining = options.timeout if attempt == 0 else max(0.0, deadline - time.monotonic())
         if result is not None and remaining <= 0:
             return result
-        before_sources = snapshot_bwrap_mount_sources(current_argv) if options.capture_output and attempt < 3 else None
         result = _run_sandbox_process_once(current_argv, replace(options, timeout=remaining))
         result.args = argv
         if options.capture_output and result.returncode not in (0, 143) and not result.stdout and attempt < 3:
             pruned = prune_transient_bwrap_sidecar_mounts(current_argv, result.stderr or '')
-            if pruned is None:
-                pruned = retry_bwrap_mount_race_argv(current_argv, result.stderr or '', before_sources)
             if pruned is not None:
                 current_argv = pruned
                 continue

@@ -1741,6 +1741,8 @@ def _coordinator_request_context(context: GatewayRunContext) -> bool:
             or getattr(context, "control_plane", None) is not None)
 
 
+# LLM: 独立于对话回合的死 runner 孤儿收敛器；复用共享 owner 登记表与独立 scoped-agent 池，巡检节流与完成水位变化联动须与 test_gateway_orphan_reconciler.py 保持一致。
+# 类用途: 在网关后台周期性扫描并回收失联的子代理与任务运行态，不阻塞主模型执行。
 class _GatewayOrphanReconciler:
     """Reconcile dead runners without waiting for an LLM conversation turn.
 
