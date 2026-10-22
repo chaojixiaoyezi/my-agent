@@ -45,6 +45,75 @@ from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
 from agent_py_agent.cli import gateway_loops
 
 
+@pytest.mark.parametrize("lane", ["base", "owner"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_slice2_slow_sweep_has_post_completion_cooldown(tmp_path, monkeypatch, lane, fails):
+    from concurrent.futures import Future
+
+    base, owner, _scoped = _scoped_restart_fixture(tmp_path)
+    shared_active_owner_registry(base).record(owner)
+    monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _: base)
+    reconciler = gateway_loops._GatewayOrphanReconciler(_context(base, tmp_path))
+    reconciler._next_discovery_at = float("inf")
+    monkeypatch.setattr(reconciler, "_ensure_owner_pool", lambda: _PassThroughOwnerPool())
+    clock = [100.0]
+    monkeypatch.setattr(gateway_loops.time, "monotonic", lambda: clock[0])
+    calls = []
+
+    def slow(_agent, label):
+        calls.append(label)
+        clock[0] += 120.0
+        if fails:
+            raise RuntimeError("sweep failed")
+        return {"owner": label}
+
+    class Executor:
+        def submit(self, fn, *args):
+            future = Future()
+            try:
+                future.set_result(fn(*args))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+    monkeypatch.setattr(reconciler, "_sweep", slow)
+    reconciler._base_executor = reconciler._owner_executor = Executor()
+    submit = reconciler._submit_base_sweep if lane == "base" else reconciler._submit_owner_sweeps
+    submit(clock[0])
+    reconciler._collect_finished_sweeps()
+    due = reconciler._base_next_at if lane == "base" else reconciler._owner_next_at[reconciler._owner_key(owner)]
+    assert due == 280.0
+    clock[0] = 279.0
+    submit(clock[0])
+    assert len(calls) == 1
+    clock[0] = 280.0
+    submit(clock[0])
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_slice2_owner_setup_cooldown_preserves_later_deadline(tmp_path, monkeypatch, fails):
+    base, owner, _scoped = _scoped_restart_fixture(tmp_path)
+    monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _: base)
+    reconciler = gateway_loops._GatewayOrphanReconciler(_context(base, tmp_path))
+    key = reconciler._owner_key(owner)
+    reconciler._owner_next_at[key] = 400.0
+    monkeypatch.setattr(gateway_loops.time, "monotonic", lambda: 220.0)
+
+    def unavailable():
+        if fails:
+            raise RuntimeError("setup failed")
+        return None
+
+    monkeypatch.setattr(reconciler, "_ensure_owner_pool", unavailable)
+    if fails:
+        with pytest.raises(RuntimeError, match="setup failed"):
+            reconciler._sweep_owner(owner, "owner")
+    else:
+        assert reconciler._sweep_owner(owner, "owner")["state"] == "owner_pool_unavailable"
+    assert reconciler._owner_next_at[key] == 400.0
+
+
 def _runner_session(*, heartbeat_at: float) -> dict[str, object]:
     return {
         "schema_version": "runner_session_pool.v1",

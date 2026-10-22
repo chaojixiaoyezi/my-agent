@@ -1835,6 +1835,8 @@ class _GatewayOrphanReconciler:
                 exc,
             )
 
+    # LLM: 提交时先占据节拍，执行包装器在完成后延长冷却；single-flight仍由原future维护。
+    # 函数用途: 有空位且到期时提交base巡检，不把执行耗时算入下一次休息。
     def _submit_base_sweep(self, now: float) -> None:
         if self._base_inflight is not None or now < self._base_next_at:
             return
@@ -1842,7 +1844,15 @@ class _GatewayOrphanReconciler:
         if executor is None:
             return
         self._base_next_at = now + self.interval
-        self._base_inflight = executor.submit(self._sweep, self._base_agent, "base")
+        self._base_inflight = executor.submit(self._sweep_base)
+
+    # LLM: 成功及异常都在future完成前写入完成时间冷却；max保留已存在的更晚预约。
+    # 函数用途: 执行base巡检并保证结束后至少休息一个interval。
+    def _sweep_base(self) -> dict[str, object]:
+        try:
+            return self._sweep(self._base_agent, "base")
+        finally:
+            self._base_next_at = max(self._base_next_at, time.monotonic() + self.interval)
 
     # LLM: Submit at most the actual worker capacity and pick the newest LRU owners first.
     # Queued cold owners must not hide a just-reconnected long task behind dozens of agent builds.
@@ -1886,19 +1896,23 @@ class _GatewayOrphanReconciler:
             if available_slots <= 0:
                 break
 
-    # LLM: 维护扫描租用准确实例但不续空闲期；退出租用不得取消持久工具或修改任务终态。
-    # 函数用途: 安全检查一个用户的遗留工作，避免巡检本身让空闲实例永久常驻。
+    # LLM: 租用准确实例不续空闲期；初始化/租用/巡检失败都在finally记录完成后冷却，不影响其它owner车道。
+    # 函数用途: 安全巡检单个用户，退出后至少休息一个interval，避免慢巡检无间隔重跑。
     def _sweep_owner(
         self,
         owner: OwnerIdentity,
         label: str,
     ) -> dict[str, object]:
-        pool = self._ensure_owner_pool()
-        if pool is None:
-            return {"owner": label, "state": "owner_pool_unavailable"}
-        scoped = pool.get(owner, touch=False)
-        with pool.pin(scoped, touch=False):
-            return self._sweep(scoped, label)
+        key = self._owner_key(owner)
+        try:
+            pool = self._ensure_owner_pool()
+            if pool is None:
+                return {"owner": label, "state": "owner_pool_unavailable"}
+            scoped = pool.get(owner, touch=False)
+            with pool.pin(scoped, touch=False):
+                return self._sweep(scoped, label)
+        finally:
+            self._owner_next_at[key] = max(self._owner_next_at.get(key, 0.0), time.monotonic() + self.interval)
 
     @staticmethod
     def _owner_key(owner: OwnerIdentity) -> tuple[str, str, str]:

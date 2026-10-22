@@ -653,8 +653,8 @@ class TaskStore:
             )
         )
 
-    # LLM: store_tasks 的持久化合同：在原线程文件锁内合并任务索引，避免并发任务互相覆盖；修改须同步本领域调用方与存储回归。
-    # 函数用途: 在原线程文件锁内合并任务索引，避免并发任务互相覆盖。
+    # LLM: 在原线程文件锁内合并索引；成员未变时保留原payload和时间戳，避免重复状态写入驱动索引投影。
+    # 函数用途: 修复任务历史/活动成员关系，关系已满足时不重写线程。
     def update_thread_index(
         self,
         thread_id: str,
@@ -662,8 +662,8 @@ class TaskStore:
         status: str,
         current: float,
     ) -> ConversationThread:
-        # LLM: store_tasks 的持久化合同：持锁校验线程身份后按任务状态合并活动索引，保留并发字段；修改须同步本领域调用方与存储回归。
-        # 函数用途: 持锁校验线程身份后按任务状态合并活动索引，保留并发字段。
+        # LLM: 身份验证先于去重；只有历史及活动成员都相同时返回原字典，实际变化仍沿原时间戳规则。
+        # 函数用途: 持锁合并索引并跳过无变化写入，保留并发字段。
         def updater(data: dict[str, Any]) -> dict[str, Any]:
             if not data:
                 raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
@@ -675,6 +675,8 @@ class TaskStore:
                 if str(status or "").strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
                 else _thread_with_task(latest, task_id, current)
             )
+            if updated.task_ids == latest.task_ids and updated.active_task_ids == latest.active_task_ids:
+                return data
             return updated.to_dict()
 
         payload = update_json_file_atomic(
@@ -932,48 +934,10 @@ class TaskStore:
             return None, None
         return self._load_thread_report(link.thread_id)
 
-    # LLM: store_tasks 的持久化合同：通过任务状态 CAS 提交变更，再刷新索引和工作区，终态最后关闭进度策略；修改须同步本领域调用方与存储回归。
-    # 函数用途: 通过任务状态 CAS 提交变更，再刷新索引和工作区，终态最后关闭进度策略。
+    # LLM: 状态及线程成员已满足时只读返回；未满足沿原CAS修复，锁内重复状态保留原payload，不重做终态副作用。
+    # 函数用途: 幂等提交任务状态和索引，真实状态变化才同步工作区及关闭进度策略。
     def update_status(self, request: dict) -> ThreadTaskLink | None:
-        task_id = str(request.get("task_id") or "")
-        path = self.storage.task_path(task_id)
-        if not path.exists():
-            return None
-        current = now(request.get("now"))
-        requested_status = str(request.get("status") or "active")
-        expected_status = str(request.get("expected_status") or "").strip().lower()
-        updated = False
-
-        # LLM: store_tasks 的持久化合同：校验任务身份及 expected_status 后更新状态，CAS 不匹配保持原记录；修改须同步本领域调用方与存储回归。
-        # 函数用途: 校验任务身份及 expected_status 后更新状态，CAS 不匹配保持原记录。
-        def updater(data: dict[str, Any]) -> dict[str, Any]:
-            nonlocal updated
-            if not data:
-                raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
-            link_current = ThreadTaskLink.from_dict(data)
-            if not link_current.thread_id or link_current.task_id != task_id:
-                raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
-            if (
-                expected_status
-                and str(link_current.status or "").strip().lower() != expected_status
-            ):
-                return data
-            updated = True
-            return replace(link_current, status=requested_status).to_dict()
-
-        payload = update_json_file_atomic(path, updater, require_existing=True)
-        if not updated:
-            return None
-        link = ThreadTaskLink.from_dict(payload)
-        # active_task_ids 是候选任务索引，不是历史归档。终态链接保留在
-        # tasks/<id>.json 供精确反查，但必须从热索引移除，避免普通聊天
-        # 每轮扫描并注入越来越多已完成工作。索引更新也在文件锁内合并，
-        # 避免多个子任务同时绑定/结束时彼此覆盖 thread.task_ids。
-        indexed_thread = self.update_thread_index(link.thread_id, task_id, link.status, current)
-        sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
-        if str(link.status or "").strip().lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
-            self._disable_task_progress_policies(task_id, now=current)
-        return link
+        return _update_task_status(self, request)
 
     # LLM: Goal edits update display intent only and preserve task/thread/workspace identity.
     # 函数用途: 精确修改一个持久任务的用户可见目标文本。
@@ -1013,6 +977,61 @@ class TaskStore:
         return _append_task_link_row(self.storage, "continuation_diagnostics", request)
 
 
+
+
+# LLM: 仅由TaskStore.update_status调用，保持原JSON锁、CAS及投影顺序；模块级实现避免TaskStore超出类体量门禁。
+# 函数用途: 在状态与索引都已满足时零写返回，否则按原入口提交变更或修复索引。
+def _update_task_status(store: TaskStore, request: dict) -> ThreadTaskLink | None:
+    task_id = str(request.get("task_id") or "")
+    path = store.storage.task_path(task_id)
+    if not path.exists():
+        return None
+    current = now(request.get("now"))
+    requested_status = str(request.get("status") or "active")
+    expected_status = str(request.get("expected_status") or "").strip().lower()
+    cached_link, _ = _read_task_link(path, task_id)
+    if (cached_link is not None and str(cached_link.status or "") == requested_status
+            and (not expected_status or str(cached_link.status or "").strip().lower() == expected_status)):
+        thread, _ = store._load_thread_report(cached_link.thread_id)
+        should_be_inactive = requested_status.strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
+        if (thread is not None and task_id in thread.task_ids
+                and should_be_inactive == (task_id not in thread.active_task_ids)):
+            return cached_link
+    updated = False
+    already_satisfied = False
+
+    # LLM: 身份及expected_status在原JSON锁内重验；已满足不序列化重建link，保留未知字段且允许后续修复线程索引。
+    # 函数用途: 区分CAS未命中、状态已满足和真正状态变更。
+    def updater(data: dict[str, Any]) -> dict[str, Any]:
+        nonlocal updated, already_satisfied
+        if not data:
+            raise DataCorruptionError(f"conversation task link is unreadable: {task_id}")
+        link_current = ThreadTaskLink.from_dict(data)
+        if not link_current.thread_id or link_current.task_id != task_id:
+            raise DataCorruptionError(f"conversation task link identity is invalid: {task_id}")
+        if (
+            expected_status
+            and str(link_current.status or "").strip().lower() != expected_status
+        ):
+            return data
+        if str(link_current.status or "") == requested_status:
+            already_satisfied = True
+            return data
+        updated = True
+        return replace(link_current, status=requested_status).to_dict()
+
+    payload = update_json_file_atomic(path, updater, require_existing=True)
+    if not updated and not already_satisfied:
+        return None
+    link = ThreadTaskLink.from_dict(payload)
+    # 终态保留历史身份但移出热索引；原文件锁内合并，避免并发任务索引互相覆盖。
+    indexed_thread = store.update_thread_index(link.thread_id, task_id, link.status, current)
+    if already_satisfied:
+        return link
+    sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
+    if str(link.status or "").strip().lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
+        store._disable_task_progress_policies(task_id, now=current)
+    return link
 
 
 # LLM: 续跑追加逻辑放模块级以控制 TaskStore 类体量；row 必须是结构化 dict（不存正文），判重键按字段选：

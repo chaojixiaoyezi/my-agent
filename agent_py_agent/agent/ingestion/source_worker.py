@@ -492,8 +492,11 @@ def source_worker_facts(agent: object | None, state: WatchState) -> dict[str, ob
 
 # LLM: Worker creation reuses the canonical create_subagents path and stable
 # work-scope idempotency; this adapter never starts a second execution runtime.
+# LLM: runs_snapshot仅为本轮匹配输入；None沿原读取，空列表也复用，真正创建及重复退休仍走原权限链。
 # 函数用途: 为一条未关闭的 Audit watch 确保存在唯一来源子代理，容量不足时如实降级等待。
-def ensure_audit_source_worker(agent: object, state: WatchState) -> dict[str, object]:
+def ensure_audit_source_worker(
+    agent: object, state: WatchState, *, runs_snapshot: list[object] | None = None,
+) -> dict[str, object]:
     audit_id, worker_key, terminal = _source_worker_preflight(agent, state)
     if terminal is not None:
         return terminal
@@ -502,6 +505,7 @@ def ensure_audit_source_worker(agent: object, state: WatchState) -> dict[str, ob
         worker_key,
         retire_duplicates=True,
         run_epoch=state.audit_run_epoch,
+        runs_snapshot=runs_snapshot,
     )
     if existing is None:
         adopted = _adopt_current_audit_subagent(agent, state, worker_key)
@@ -1168,7 +1172,8 @@ def _cancel_if_watch_closed_during_create(
 
 # LLM: Periodic reconciliation scans persisted watch facts and invokes the same
 # idempotent ensure function; it is not a separate scheduler or model loop.
-# 函数用途: 在现有孤儿巡检节拍中补齐本 owner 丢失或提前退出的来源子代理。
+# LLM: 同轮复用manager原run快照；创建、接替及状态变化后刷新，不跨轮缓存执行权。
+# 函数用途: 在现有孤儿巡检节拍中补齐来源子代理，避免每条watch重扫全部run。
 def reconcile_audit_source_workers(agent: object) -> dict[str, object]:
     owner_home = _agent_owner_home(agent)
     if owner_home is None:
@@ -1176,11 +1181,16 @@ def reconcile_audit_source_workers(agent: object) -> dict[str, object]:
     summary = _source_reconcile_summary()
     workers: list[dict[str, object]] = []
     capacity_groups: dict[str, list[tuple[WatchState, str]]] = {}
+    runs_snapshot = _worker_runs_snapshot(agent)
+    statuses = {str(getattr(task, "id", "")): str(getattr(task, "status", "")) for task in runs_snapshot}
     for row in list_states(owner_home):
         state = _open_audit_watch(owner_home, row)
         if state is None:
             continue
-        result = _reconcile_one_audit_source_worker(agent, state)
+        result = _reconcile_one_audit_source_worker(agent, state, runs_snapshot=runs_snapshot)
+        if _source_worker_snapshot_changed(result, statuses):
+            runs_snapshot = _worker_runs_snapshot(agent)
+            statuses = {str(getattr(task, "id", "")): str(getattr(task, "status", "")) for task in runs_snapshot}
         workers.append(result)
         _record_source_reconcile_result(summary, capacity_groups, state, result)
     summary["capacity_alerts"] = _reconcile_capacity_groups(
@@ -1190,6 +1200,18 @@ def reconcile_audit_source_workers(agent: object) -> dict[str, object]:
     )
     summary["workers"] = workers
     return summary
+
+
+# LLM: 使用当前结果的结构化变更事实失效本轮快照；status取调用前副本，不受原对象原地变更影响。
+# 函数用途: 创建、收回、重排或新run出现时要求下一条来源重读快照。
+def _source_worker_snapshot_changed(result: dict[str, object], statuses: dict[str, str]) -> bool:
+    run_id = str(result.get("run_id") or "")
+    return bool(
+        any(result.get(key) for key in ("created", "adopted", "worker_cancelled", "duplicate_workers_retired"))
+        or result.get("action") in {"dispatched", "recovered_false_cancel", "verify_retry_scheduled"}
+        or (run_id and (run_id not in statuses
+                        or (result.get("task_status") and result["task_status"] != statuses[run_id])))
+    )
 
 
 def retire_published_audit_sources(
@@ -1259,9 +1281,13 @@ def _open_audit_watch(owner_home: Path, row: dict[str, object]) -> WatchState | 
     return state if state is not None and not state.closed else None
 
 
+# LLM: 快照仅传给匹配步骤；epoch、父任务及outbox仍读取原权威，不能由快照跳过原边界。
+# 函数用途: 核对单路来源后沿ensure复用本轮run列表。
 def _reconcile_one_audit_source_worker(
     agent: object,
     state: WatchState,
+    *,
+    runs_snapshot: list[object] | None = None,
 ) -> dict[str, object]:
     if not _source_state_matches_current_audit_epoch(agent, state):
         return _close_reconciled_source(
@@ -1291,7 +1317,7 @@ def _reconcile_one_audit_source_worker(
             "parent_state": parent_state,
             "created": False,
         }
-    result = ensure_audit_source_worker(agent, state)
+    result = ensure_audit_source_worker(agent, state, runs_snapshot=runs_snapshot)
     run_id = str(result.get("run_id") or "").strip()
     if run_id:
         result["finding_outbox"] = reconcile_audit_finding_outbox(agent, run_id)
@@ -3191,19 +3217,28 @@ def _matching_worker_task(
     return task
 
 
+# LLM: 使用agent现有manager，不构造另一套workspace存储；读取失败保留原匹配函数的空列表语义。
+# 函数用途: 一次读取本agent的run列表，供当前巡检或单次匹配使用。
+def _worker_runs_snapshot(agent: object | None) -> list[object]:
+    manager = getattr(agent, "subagents", None) if agent is not None else None
+    if manager is None or not callable(getattr(manager, "list_runs", None)):
+        return []
+    try:
+        return manager.list_runs()
+    except Exception:
+        return []
+
+
+# LLM: None按原入口读取，显式空快照不回退I/O；key/epoch/结构化属性筛选保持一致。
+# 函数用途: 从本轮快照或实时run列表筛出准确来源岗位。
 def _matching_worker_tasks(
     agent: object | None,
     worker_key: str,
     *,
     run_epoch: object | None = None,
+    runs_snapshot: list[object] | None = None,
 ) -> list[object]:
-    manager = getattr(agent, "subagents", None) if agent is not None else None
-    if manager is None or not callable(getattr(manager, "list_runs", None)):
-        return []
-    try:
-        tasks = manager.list_runs()
-    except Exception:
-        return []
+    tasks = _worker_runs_snapshot(agent) if runs_snapshot is None else runs_snapshot
     matching = []
     selected_epoch = None if run_epoch is None else _normalized_run_epoch(run_epoch)
     for task in tasks:
@@ -3223,17 +3258,21 @@ def _matching_worker_tasks(
     return matching
 
 
+# LLM: 快照不改变canonical排序、epoch或取消重复岗位的原校验；独立调用默认实时读取。
+# 函数用途: 从候选快照选择唯一岗位，按原流程退休重复活跃记录。
 def _canonical_worker_task(
     agent: object | None,
     worker_key: str,
     *,
     retire_duplicates: bool,
     run_epoch: object | None = None,
+    runs_snapshot: list[object] | None = None,
 ) -> tuple[object | None, int]:
     matching = _matching_worker_tasks(
         agent,
         worker_key,
         run_epoch=run_epoch,
+        runs_snapshot=runs_snapshot,
     )
     if not matching:
         return None, 0

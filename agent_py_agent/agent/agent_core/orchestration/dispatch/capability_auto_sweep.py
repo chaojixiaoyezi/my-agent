@@ -1008,7 +1008,31 @@ def _close_reclaimed_runner_session(task: Any, *, reason: str) -> None:
     task.attributes = attrs
 
 
-# LLM: 只对未终态子代理或 Audit 来源 worker 计算父会话生命周期裁决；普通终态子代理不重查历史会话与执行权。
+# LLM: 只读原TaskLink判断已结算来源；当前run模型使用id/attributes，坏账不当作已完成，旧误取消仍进入修复。
+# 函数用途: 排除已投影完成的来源岗位，保留未完成、未知及旧误取消的生命周期复核。
+def _source_worker_needs_lifecycle_reconcile(store: Any, record: Any) -> bool:
+    status = str(getattr(record, "status", "") or "").strip().upper()
+    if status not in SUBAGENT_ENDED_STATUSES:
+        return False
+    if store is None:
+        return True
+    link, error = store.tasks.load_report(str(getattr(record, "id", "") or "").strip())
+    if error is not None:
+        return True
+    link_status = str(getattr(link, "status", "") or "").strip().lower()
+    if status == "DONE" and str(getattr(record, "verification_status", "") or "").strip().upper() == "VERIFIED":
+        return link is not None and link_status != "completed"
+    if status in SUBAGENT_RECOVERY_CLOSED_STATUSES:
+        attrs = getattr(record, "attributes", None)
+        cancel_meta = attrs.get("cancel_subagents") if isinstance(attrs, dict) else None
+        legacy = (status == "CANCELLED" and isinstance(cancel_meta, dict)
+                  and str(cancel_meta.get("reason") or "").strip() == "conversation_lifecycle:audit_source_watch_complete")
+        if not legacy and link is not None and link_status in {"failed", "cancelled", "rejected", "completed"}:
+            return False
+    return True
+
+
+# LLM: 只对未终态子代理或未结算Audit来源计算父会话裁决；已完成来源只读TaskLink，不触发重复收尾。
 # 函数用途: 巡查并关闭失去父级执行权的活跃子代理，或把自然结算的来源岗位投影为完成。
 def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     manager = getattr(agent, "subagents", None)
@@ -1021,11 +1045,13 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
         }
     from ....common.audit_activation import structured_audit_source_worker_attributes
 
+    store = getattr(agent, "conversation_store", None)
     tasks = [
         task
         for task in manager.list_runs()
         if not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
-        or structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {})
+        or (structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {})
+            and _source_worker_needs_lifecycle_reconcile(store, task))
     ]
     if not tasks:
         return {

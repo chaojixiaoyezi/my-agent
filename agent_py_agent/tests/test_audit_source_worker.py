@@ -196,6 +196,184 @@ def _bind_audit_workspace(
     return root
 
 
+@pytest.mark.parametrize("status", ["completed", "active"])
+def test_slice2_same_status_is_zero_write(tmp_path: Path, monkeypatch, status: str) -> None:
+    from agent_py_agent.agent.conversation import store_tasks
+
+    agent, owner_home = _agent(tmp_path)
+    _bind_audit_workspace(agent, owner_home, "audit-source-test", tmp_path)
+    tasks = agent.conversation_store.tasks
+    link = tasks.update_status({"task_id": "audit-source-test", "status": status})
+    paths = [tasks.storage.task_path(link.task_id), tasks.storage.thread_path(link.thread_id)]
+    before = [(path.stat().st_mtime_ns, path.read_bytes()) for path in paths]
+    updates, policies = [], []
+    original = store_tasks.update_json_file_atomic
+
+    def capture(path, updater, **kwargs):
+        updates.append(path)
+        return original(path, updater, **kwargs)
+
+    monkeypatch.setattr(store_tasks, "update_json_file_atomic", capture)
+    monkeypatch.setattr(tasks, "_disable_task_progress_policies", lambda *a, **k: policies.append(a))
+    for _ in range(3):
+        assert tasks.update_status({"task_id": link.task_id, "status": status,
+                                    "expected_status": status}) == link
+    assert [(path.stat().st_mtime_ns, path.read_bytes()) for path in paths] == before
+    assert updates == []
+    assert policies == []
+
+
+def test_slice2_same_status_repairs_membership_without_rewriting_task(tmp_path: Path) -> None:
+    from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
+
+    agent, owner_home = _agent(tmp_path)
+    _bind_audit_workspace(agent, owner_home, "audit-source-test", tmp_path)
+    tasks = agent.conversation_store.tasks
+    link = tasks.update_status({"task_id": "audit-source-test", "status": "completed"})
+    task_path = tasks.storage.task_path(link.task_id)
+    thread_path = tasks.storage.thread_path(link.thread_id)
+    update_json_file_atomic(task_path, lambda data: {**data, "future_field": "preserve"})
+    update_json_file_atomic(thread_path, lambda data: {**data, "active_task_ids": [link.task_id]})
+    before = task_path.stat().st_mtime_ns, task_path.read_bytes()
+    assert tasks.update_status({"task_id": link.task_id, "status": "completed"}) == link
+    assert (task_path.stat().st_mtime_ns, task_path.read_bytes()) == before
+    thread, error = tasks._load_thread_report(link.thread_id)
+    assert error is None and link.task_id not in thread.active_task_ids
+    before_thread = thread_path.stat().st_mtime_ns, thread_path.read_bytes()
+    tasks.update_thread_index(link.thread_id, link.task_id, "completed", thread.updated_at + 50)
+    assert (thread_path.stat().st_mtime_ns, thread_path.read_bytes()) == before_thread
+    assert tasks.update_status({"task_id": link.task_id, "status": "completed",
+                                "expected_status": "active"}) is None
+
+
+@pytest.mark.parametrize("status,verified,link_status,legacy,expected", [
+    ("DONE", "VERIFIED", "completed", False, False),
+    ("DONE", "VERIFIED", None, False, False),
+    ("DONE", "VERIFIED", "active", False, True),
+    ("DONE", "VERIFIED", "failed", False, True),
+    ("DONE", "VERIFIED", "cancelled", False, True),
+    ("DONE", "VERIFIED", "rejected", False, True),
+    ("DONE", "PENDING", "active", False, True),
+    ("CANCELLED", "PENDING", "cancelled", False, False),
+    ("CANCELLED", "PENDING", "cancelled", True, True),
+    ("TAKEN_OVER", "PENDING", "completed", False, False),
+    ("FAILED", "PENDING", "failed", False, True),
+    ("RUNNING", "PENDING", "active", False, True),
+])
+def test_slice2_lifecycle_only_visits_unsettled_source_workers(
+    monkeypatch, status, verified, link_status, legacy, expected,
+) -> None:
+    from agent_py_agent.agent.agent_core.orchestration.dispatch import (
+        capability_auto_sweep as sweep,
+    )
+
+    attrs = {AUDIT_ATTR: True, AUDIT_SOURCE_WORKER_ATTR: True,
+             CONVERSATION_REQUEST_ID_ATTR: "audit", AUDIT_SOURCE_ID_ATTR: "source",
+             AUDIT_SOURCE_WATCH_ID_ATTR: "watch",
+             AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key("audit", "watch"),
+             AUDIT_SOURCE_OWNER_HOME_ATTR: "/owner"}
+    if legacy:
+        attrs["cancel_subagents"] = {"reason": "conversation_lifecycle:audit_source_watch_complete"}
+    record = SimpleNamespace(id="worker", status=status, verification_status=verified, attributes=attrs)
+    link = SimpleNamespace(status=link_status) if link_status else None
+    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: [record]),
+                            conversation_store=SimpleNamespace(tasks=SimpleNamespace(load_report=lambda _: (link, None))))
+    visited = []
+    monkeypatch.setattr(sweep, "conversation_lifecycle_decisions", lambda a, tasks: visited.extend(tasks) or {})
+    report = sweep._reconcile_conversation_parent_lifecycle(agent)
+    assert visited == ([record] if expected else [])
+    assert not any(report.values())
+
+
+def test_slice2_reconcile_reuses_one_run_snapshot(tmp_path: Path, monkeypatch) -> None:
+    from agent_py_agent.agent.agent_core.orchestration import lifecycle
+
+    monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *a: {"status": "not_needed", "run_ids": []})
+    agent, owner_home = _agent(tmp_path)
+    _bind_audit_workspace(agent, owner_home, "audit-source-test", tmp_path)
+    states = [_watch(owner_home, "audit-source-test", i) for i in range(3)]
+    for state in states:
+        assert ensure_audit_source_worker(agent, state)["run_id"]
+    original = agent.subagents.list_runs
+    reads = []
+
+    def counted():
+        reads.append(1)
+        return original()
+
+    monkeypatch.setattr(agent.subagents, "list_runs", counted)
+    report = reconcile_audit_source_workers(agent)
+    assert report["checked"] == 3 and report["waiting"] == 3
+    assert len(reads) == 1
+
+
+def test_slice2_explicit_empty_snapshot_does_not_reload():
+    reads = []
+    record = SimpleNamespace(attributes={AUDIT_SOURCE_WORKER_ATTR: True,
+        CONVERSATION_REQUEST_ID_ATTR: "audit", AUDIT_SOURCE_ID_ATTR: "source",
+        AUDIT_SOURCE_WATCH_ID_ATTR: "watch", AUDIT_SOURCE_OWNER_HOME_ATTR: "/owner",
+        AUDIT_SOURCE_WORKER_KEY_ATTR: audit_source_worker_key("audit", "watch"),
+        AUDIT_RUN_EPOCH_ATTR: 2})
+    agent = SimpleNamespace(subagents=SimpleNamespace(list_runs=lambda: reads.append(1) or [record]))
+    matching = source_worker_module._matching_worker_tasks
+    key = audit_source_worker_key("audit", "watch")
+    assert matching(agent, key, runs_snapshot=[]) == []
+    assert matching(agent, key, runs_snapshot=[record], run_epoch=1) == []
+    assert matching(agent, key, runs_snapshot=[record], run_epoch=2) == [record]
+    assert reads == []
+    assert matching(agent, key, run_epoch=2) == [record]
+    assert reads == [1]
+
+
+def test_slice2_real_creation_refreshes_snapshot_for_next_watch(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core.orchestration import lifecycle
+
+    monkeypatch.setattr(lifecycle, "auto_start_tasks", lambda *a: {"status": "not_needed", "run_ids": []})
+    agent, owner_home = _agent(tmp_path)
+    _bind_audit_workspace(agent, owner_home, "audit-source-test", tmp_path)
+    for i in range(3):
+        _watch(owner_home, "audit-source-test", i)
+    seen = []
+    original = source_worker_module.ensure_audit_source_worker
+
+    def capture(agent, state, *, runs_snapshot=None):
+        seen.append([task.id for task in runs_snapshot])
+        return original(agent, state, runs_snapshot=runs_snapshot)
+
+    monkeypatch.setattr(source_worker_module, "ensure_audit_source_worker", capture)
+    report = reconcile_audit_source_workers(agent)
+    assert report["checked"] == 3
+    assert [len(snapshot) for snapshot in seen] == [0, 1, 2]
+    assert len(agent.subagents.list_runs()) == 3
+
+
+@pytest.mark.parametrize("change", ["created", "dispatched", "recovered_false_cancel", "verify_retry_scheduled"])
+def test_slice2_snapshot_refreshes_after_mutation(tmp_path, monkeypatch, change):
+    agent, owner_home = _agent(tmp_path)
+    for i in range(2):
+        _watch(owner_home, "audit-source-test", i)
+    records, snapshots, reads = [], [], []
+
+    def listing():
+        reads.append(1)
+        return list(records)
+
+    def reconcile(agent, state, *, runs_snapshot=None):
+        snapshots.append(runs_snapshot)
+        if len(snapshots) == 1:
+            records.append(SimpleNamespace(id="new-worker", status="PENDING"))
+            return {"created": change == "created", "action": change}
+        return {}
+
+    monkeypatch.setattr(agent.subagents, "list_runs", listing)
+    monkeypatch.setattr(source_worker_module, "_reconcile_one_audit_source_worker", reconcile)
+    monkeypatch.setattr(source_worker_module, "_record_source_reconcile_result", lambda *a: None)
+    monkeypatch.setattr(source_worker_module, "_reconcile_capacity_groups", lambda *a: [])
+    reconcile_audit_source_workers(agent)
+    assert snapshots == [[], records]
+    assert len(reads) == 2
+
+
 def test_named_audit_keeps_watch_checkpoint_scope_but_rotates_worker_attempt_scope() -> None:
     audit_id = "audit-restarted"
     watch_scope_1 = audit_watch_scope_id(audit_id, 1)
