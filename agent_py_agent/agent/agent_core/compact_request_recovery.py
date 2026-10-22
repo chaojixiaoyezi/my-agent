@@ -332,13 +332,20 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
     return not recovery.source.messages and tool_source is None
 
 
-# LLM: 只供select异常分支；强制、结构错误和超窗永不降级；精确类型检查不迭代已释放/中毒历史，摘要期不留旧副本。
+# LLM: 只供select异常分支；强制、结构/坏账/未知副作用错误和超窗永不降级；重建时传include_compact_summary=False避免与IR已应用摘要重复。
 # 函数用途: 可选压缩失败但原请求仍装得下时，从原种子重建原生历史并恢复本轮冻结输入。
 def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
-    if recovery.force or compact_exception_code(exc) in {
-        "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
-        "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT",
-    }:
+    from ..runtime_errors import DataCorruptionError
+    from .host_turn_scope import UNSETTLED_HOST_ERRORS
+
+    if (
+        recovery.force
+        or isinstance(exc, (*UNSETTLED_HOST_ERRORS, DataCorruptionError, TypeError, AttributeError, LookupError, ValueError, AssertionError))
+        or compact_exception_code(exc) in {
+            "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
+            "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT",
+        }
+    ):
         return False
     if calibrated_compact_request_tokens(before_tokens, recovery.calibration) >= model_request_input_ceiling(
         recovery.agent, recovery.source.policy.context_window_tokens,
@@ -347,7 +354,7 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     if (type(params.__dict__.get("provider_history_messages")) is not list
             or getattr(params, "conversation_history_seed", None) is None):
         return False
-    restored = _native_provider_history_messages(params)
+    restored = _native_provider_history_messages(params, include_compact_summary=False)
     object.__setattr__(params, "provider_history_messages", restored)
     recovery.resolved_input = replace(frozen, provider_history_messages=tuple(restored))
     return True

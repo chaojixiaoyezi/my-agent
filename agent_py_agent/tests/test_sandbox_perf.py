@@ -256,7 +256,7 @@ def test_parent_remount_preserves_readonly_try_child(parent_flag):
 def test_real_bwrap_readonly_sidecar_survives_exec_race(tmp_path, name, disappear):
     leaf = tmp_path / name
     leaf.write_text('original')
-    argv = [shutil.which('bwrap'), '--ro-bind', '/', '/', '--bind', str(tmp_path), str(tmp_path)]
+    argv = [shutil.which('bwrap'), '--ro-bind', '/', '/', '--dev', '/dev', '--bind', str(tmp_path), str(tmp_path)]
     sandbox._append_readonly_mounts(argv, (leaf,))
     assert argv[-3:] == ['--ro-bind-try', str(leaf), str(leaf)]
     if disappear:

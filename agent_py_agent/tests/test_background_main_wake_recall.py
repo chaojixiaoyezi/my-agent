@@ -877,6 +877,8 @@ def test_process_completion_preserves_patched_status_contract(tmp_path, monkeypa
     assert calls == ['bg-churn', 'bg-churn']
 
 
+# LLM: 验证后台线程规划阶段受 sqlite_connection_reuse 配置控制并在提交前释放连接作用域。
+# 函数用途: 确认启用 sqlite_connection_reuse 时复用单连接且异常隔离，关闭时不强制开启复用。
 @pytest.mark.parametrize('failure_stage', ['', 'prepare', 'ready'])
 def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure_stage):
     from agent_py_agent.agent.io import sqlite_scope
@@ -906,9 +908,13 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
     # LLM: 只有规划业务是替身，数据库与scope均为真实实现；第一owner可在任一阶段失败。
     # 类用途: 捕获作用域缺失和异常后owner隔离，不启动后台模型线程。
     class Scheduler:
+        # LLM: 初始化规划测试调度器替身并记录是否在第一 owner 注入异常。
+        # 函数用途: 构造可控失败阶段的 Scheduler 替身。
         def __init__(self, fail=False):
             self.fail = fail
 
+        # LLM: 模拟 prepare_tick 阶段的十一次数据库查询并按 failure_stage 抛出异常。
+        # 函数用途: 验证 prepare_tick 处于连接复用作用域且异常不泄漏作用域。
         def prepare_tick(self, *, now, include_orphan_supervision):
             assert include_orphan_supervision is False
             queries()
@@ -916,6 +922,8 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
                 failures.append('prepare')
                 raise ValueError('synthetic planning failure')
 
+        # LLM: 模拟 ready_thread_ids 阶段的十一次数据库查询并按 failure_stage 抛出异常。
+        # 函数用途: 验证与 prepare_tick 共享同一连接作用域。
         def ready_thread_ids(self, **kwargs):
             queries()
             if self.fail and failure_stage == 'ready':
@@ -924,7 +932,13 @@ def test_thread_tick_planning_reuses_sqlite_and_releases_scope(tmp_path, failure
             return ()
 
     supervisor = object.__new__(_BackgroundMainSupervisor)
-    supervisor._base_agent = SimpleNamespace(config=SimpleNamespace(background_owner_workers=2, background_threads_per_owner=2))
+    supervisor._base_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            background_owner_workers=2,
+            background_threads_per_owner=2,
+            sqlite_connection_reuse=True,
+        )
+    )
     supervisor._base_scheduler = Scheduler(fail=True)
     supervisor._owner_schedulers = {'other': Scheduler()}
     supervisor._inflight = {}

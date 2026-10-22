@@ -667,6 +667,11 @@ def reconcile_gateway_input_request(
             )
             return "consumed"
         if guidance.status == "rejected":
+            # 已结算为 terminal_unknown 且热队列已不存在时不再回刷 queued，避免对账振荡。
+            if receipt.state == "terminal_unknown" and _terminal_request_without_hot(paths, request_id):
+                if not _materialize_prepared_request_locked(paths, receipt):
+                    _write_terminal_unknown(paths, receipt, None)
+                    return "terminal_unknown"
             queued, _created = queue_gateway_input_locked(paths, receipt)
             return queued.state
         if target_terminal or receipt.state == "terminal_unknown":

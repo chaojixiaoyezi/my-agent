@@ -813,7 +813,7 @@ class _BackgroundThreadLaneSupervisorMixin:
     # across owners, bounded globally and per owner, and keyed by durable thread id.
     # Gateway's independent orphan reconciler owns recovery scans, so preparation
     # must skip the duplicate inline sweep before ready lanes are submitted.
-    # 每个owner的prepare/ready短查询共用本轮SQLite连接，异常也须回收；提交和后台执行不继承连接。
+    # 每个owner的prepare/ready短查询按配置sqlite_connection_reuse复用本轮SQLite连接，异常也须回收；提交和后台执行不继承连接。
     # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
         from ..agent.io.sqlite_scope import sqlite_connection_scope
@@ -836,7 +836,9 @@ class _BackgroundThreadLaneSupervisorMixin:
             if owner_slots <= 0:
                 continue
             try:
-                with sqlite_connection_scope(True):
+                with sqlite_connection_scope(
+                    bool(getattr(self._base_agent.config, "sqlite_connection_reuse", False))
+                ):
                     scheduler.prepare_tick(
                         now=planned_at,
                         include_orphan_supervision=False,

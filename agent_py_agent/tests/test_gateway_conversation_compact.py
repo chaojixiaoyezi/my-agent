@@ -59,18 +59,31 @@ from agent_py_agent.tests._gateway_history_helpers import context_history
 
 
 # LLM: 真实Gateway/恢复宿主/来源与provider builder，仅摘要故障和完整请求估算注入；摘要期不额外保存旧历史。
-# 函数用途: 在90%触发线与扣除输出预留后的窗口之间，摘要瞬断后重建种子历史并完成业务。
+# 函数用途: 在已压缩线程上触发可选预检瞬断后，重建尾历史且不重复已应用的压缩摘要。
 @pytest.mark.parametrize("failure", ["transient", "timeout", "circuit"])
 def test_p2a_optional_preflight_failure_restores_seed_and_completes_turn(tmp_path, monkeypatch, failure):
     from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
     from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
     from agent_py_agent.agent.conversation import compact
-    from agent_py_agent.agent.gateway_parts import request_execution
+    from agent_py_agent.agent.gateway_parts import request_context, request_execution
     from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 
     fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
     fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    monkeypatch.setattr(compact, "_summarize", lambda *a, **k: "已提交的第一代摘要")
+    prepare_conversation_context(
+        fixture.agent, fixture.agent.conversation_store,
+        fixture.agent.conversation_store.threads.require(fixture.thread_id),
+        options=ConversationCompactOptions(current_prompt="预压缩", force=True),
+    )
+    seeded = request_context.gateway_conversation_context(request_context.GatewayConversationLoadRequest(
+        fixture.agent, fixture.context.request, fixture.context.request_id, fixture.context.request["prompt"],
+    ))
+    for role in ("user", "assistant"):
+        assert append_gateway_conversation_message(
+            fixture.agent, {}, seeded, request_id="post-compact-" + role, role=role, content="压后新增的原始资料",
+        )
     state, summaries = {}, []
     original = recovery.PreparedCompactRecovery.select
     monkeypatch.setattr(recovery, "projected_model_context_components", lambda *a, **k: (95_000, {}))
@@ -105,22 +118,29 @@ def test_p2a_optional_preflight_failure_restores_seed_and_completes_turn(tmp_pat
     assert result.response == "资料整理完成。" and len(business) == 1 and summaries == [True]
     assert state["before"] > 0 and state["before"] == state["after"] == state["resolved"]
     assert not state["committed"]
-    assert "之前核对过的原始资料" in json.dumps(business[0][0]["messages"], ensure_ascii=False)
+    wire = json.dumps(business[0][0]["messages"], ensure_ascii=False)
+    assert wire.count("Earlier Conversation Summary (generation 1)") == 1
+    assert "已提交的第一代摘要" in wire and "压后新增的原始资料" in wire
     thread = fixture.agent.conversation_store.threads.require(fixture.thread_id)
-    assert thread.compact_generation == 0 and thread.compact_consecutive_failures == 1
+    assert thread.compact_generation == 1 and thread.compact_consecutive_failures == 1
 
 
 # LLM: 仍经真实Gateway恢复入口；仅在摘要阶段注入结构错误/取消/不安全载体，不允许可选降级掩盖合同问题。
-# 函数用途: 锁住五种结构错误、精确窗口上限、强制模式、无种子和中毒历史的拒恢复边界。
+# 函数用途: 锁住结构/坏账/未知结果错误、精确窗口上限、强制模式、无种子和中毒历史的拒恢复边界。
 @pytest.mark.parametrize("failure", [
     "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
-    "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT", "ceiling", "force", "no-seed", "poison", "cancel", "token",
+    "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT", "uncertain", "corruption",
+    "ceiling", "force", "no-seed", "poison", "cancel", "token",
 ])
 def test_p2a_preflight_does_not_mask_hard_failures(tmp_path, monkeypatch, failure):
     from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
     from agent_py_agent.agent.backends.errors import ProviderTransientError
+    from agent_py_agent.agent.common.request_execution_ports import (
+        RequestExecutionOutcomeUncertainError,
+    )
     from agent_py_agent.agent.conversation import compact
     from agent_py_agent.agent.gateway_parts import request_execution
+    from agent_py_agent.agent.runtime_errors import DataCorruptionError
     from agent_py_agent.tests.test_compact_recovery_release import _PoisonedHistory
     from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
@@ -148,6 +168,13 @@ def test_p2a_preflight_does_not_mask_hard_failures(tmp_path, monkeypatch, failur
         summaries.append(True)
         if failure.startswith("COMPACT_"):
             raise ConversationCompactError("structural failure", code=failure)
+        if failure == "uncertain":
+            raise RequestExecutionOutcomeUncertainError(
+                {"id": "req-1", "execution_attempt_id": "att-1", "lease_epoch": 1, "lease_owner": "w1"},
+                "compact_commit",
+            )
+        if failure == "corruption":
+            raise DataCorruptionError("corrupted compact ledger")
         if failure == "cancel":
             raise InterruptedError("summary cancelled")
         if failure == "token":

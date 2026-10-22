@@ -2222,8 +2222,18 @@ def test_scaling_d_terminal_queued_receipt_settles(tmp_path, hot):
     write_json_file_atomic(paths.terminal / source.name, {**payload, "status": "completed", "turn_phase": "closed"})
     summary = delivery.reconcile_gateway_input_receipts(paths, agent)
     expected = "terminal_unknown" if hot is None else "queued"
-    assert delivery.read_gateway_input_receipt(paths, request_id).state == expected
+    settled = delivery.read_gateway_input_receipt(paths, request_id)
+    assert settled.state == expected
     assert summary[expected] == 1 and summary["errors"] == 0
+    receipt_path = delivery.gateway_input_receipt_path(paths, request_id)
+    first_bytes = receipt_path.read_bytes()
+    for _ in range(3):
+        again = delivery.reconcile_gateway_input_receipts(paths, agent)
+        current = delivery.read_gateway_input_receipt(paths, request_id)
+        assert current.state == expected
+        assert current.updated_at == settled.updated_at
+        assert receipt_path.read_bytes() == first_bytes
+        assert again[expected] == 1 and again["errors"] == 0
 
 
 # LLM: 真实目录和游标文件，glob spy透传；state子目录写入不应失效父目录投影。
