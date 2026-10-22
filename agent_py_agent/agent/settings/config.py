@@ -515,10 +515,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     gateway_processing_timeout_seconds: int = 900
     # 仅计 processing 租约失效的失败次数；服务重启续接不计，0 不限，副作用未知仍禁止盲目重放。
     gateway_request_max_attempts: int = 2
-    # 单次 Gateway 请求线程内有界复用 SQLite 连接；作用域结束回收，原事务及时提交不变。
-    sqlite_connection_reuse: bool = False
-    # 只缓存后台检查的内容投影，实际到期、领取与状态写入始终读取原权威；关闭保持原检查路径。
-    background_tick_cheap_checks: bool = False
+    # 默认开启单次 Gateway 请求线程内有界 SQLite 复用；结束回收、及时提交不变，显式 False 可关闭。
+    sqlite_connection_reuse: bool = True
+    # 默认开启后台只读内容投影，实际领取与写入仍读取原权威；显式 False 可关闭投影优化。
+    background_tick_cheap_checks: bool = True
     # 供应商临时故障的回合级自动续跑次数上限（0=关闭；跨 Gateway 重启累计，重排不重放工具）。
     provider_transient_turn_resume_max_count: int = 2
     # 后台会话全局线程池上限；超出留在持久队列，同 thread 仍由 run claim 单飞。

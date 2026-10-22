@@ -28,7 +28,7 @@ _SCHEMA_VERSION = 1
 _SCHEMA_INIT_LOCK = threading.Lock()
 _SCHEMA_INITIALIZED_DBS: OrderedDict[str, tuple[int, int, int]] = OrderedDict()
 _SCHEMA_INITIALIZED_MAX = 256
-_ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running"})
+_ACTIVE_RUN_STATUSES = frozenset({"queued", "claimed", "running", "waiting"})
 _LEGACY_SCAN_KEY = "owner_scheduler_ledgers_v1"
 
 
@@ -73,6 +73,8 @@ class SchedulerDueIndex:
             conn.commit()
         return f"job{number:02d}"
 
+    # LLM: 索引仍非执行权威；新时间相等或有效租约内向后推进不得清租，更早工作才能提前重新领取。
+    # 函数用途: 更新 owner 到期投影，同时保留未过期且不阻挡更早工作的领取租约。
     def sync_owner(
         self,
         owner: dict[str, object],
@@ -97,12 +99,15 @@ class SchedulerDueIndex:
                             lease_until = CASE
                                 WHEN scheduler_due_owners.next_due_at = excluded.next_due_at
                                 THEN scheduler_due_owners.lease_until
+                                WHEN scheduler_due_owners.lease_until > ?
+                                     AND excluded.next_due_at >= scheduler_due_owners.next_due_at
+                                THEN scheduler_due_owners.lease_until
                                 ELSE 0
                             END,
                             updated_at = excluded.updated_at
                         WHERE excluded.updated_at >= scheduler_due_owners.updated_at
                         """,
-                        (provider, owner_kind, owner_id, next_due_at, current),
+                        (provider, owner_kind, owner_id, next_due_at, current, current),
                     )
                 else:
                     conn.execute(
@@ -413,33 +418,63 @@ def _owner_key(owner: dict[str, object]) -> tuple[str, str, str]:
     return provider, owner_kind, owner_id
 
 
-# LLM: due index 只投影原 job/run，未来周期必须同时满足 next_run_at 与 backoff_until；索引不授予执行权。
-# 函数用途: 计算该 owner 下一次需要调度关注的时间，不发模型请求或写原账本。
+# LLM: 活动 job/rule 不再重复投影旧周期；queued 按派发、claimed/running 按租约唤醒，waiting 由原会话续接。
+# 函数用途: 合并可运行规则与活动进程的真实关注时间，避免等待阶段用 now 重复唤醒 owner。
 def _earliest_due_at(store: dict[str, object], *, now: float) -> float:
-    from .event_sources import event_due_times
-
     candidates: list[float] = []
+    raw_runs = store.get("runs")
+    runs = [raw for raw in raw_runs.values() if isinstance(raw, dict)
+            and str(raw.get("status") or "") in _ACTIVE_RUN_STATUSES] if isinstance(raw_runs, dict) else []
+    active_jobs, active_rules = _validated_active_keys(store, runs)
     jobs = store.get("jobs")
     if isinstance(jobs, dict):
-        for raw in jobs.values():
+        for job_id, raw in jobs.items():
             if not isinstance(raw, dict) or str(raw.get("status") or "") != "active":
                 continue
-            value = _positive_timestamp(raw.get("next_run_at"))
-            if value > 0:
-                candidates.append(max(value, _positive_timestamp(raw.get("backoff_until"))))
-            candidates.extend(event_due_times(raw, now))
-    runs = store.get("runs")
-    if isinstance(runs, dict):
-        for raw in runs.values():
-            if not isinstance(raw, dict) or str(raw.get("status") or "") not in _ACTIVE_RUN_STATUSES:
-                continue
-            status = str(raw.get("status") or "")
-            if status == "queued":
-                value = _positive_timestamp(raw.get("dispatch_after")) or now
-            else:
-                value = _positive_timestamp(raw.get("claim_expires_at")) or now
-            candidates.append(value)
+            candidates.extend(_job_due_times(raw, str(raw.get("job_id") or job_id), active_jobs, active_rules, now))
+    for raw in runs:
+        status = str(raw.get("status") or "")
+        if status == "waiting":
+            continue
+        field = "dispatch_after" if status == "queued" else "claim_expires_at"
+        candidates.append(_positive_timestamp(raw.get(field)) or now)
     return min(candidates) if candidates else 0.0
+
+
+# LLM: 只借用原纯解析器，不构造 Repository 或访问目录；坏 schema/owner/epoch 等记录不得排除合法周期。
+# 函数用途: 让索引的活动运行阻挡口径与原 owner 账本完全一致，避免坏 waiting 导致漏唤醒。
+def _validated_active_keys(store: dict, runs: list[dict]) -> tuple[set[str], set[tuple[str, str]]]:
+    from .repository import _SchedulerRecordParsing
+
+    owner = store.get("owner")
+    if not isinstance(owner, dict):
+        return set(), set()
+    parser = _SchedulerRecordParsing()
+    parser.owner = owner
+    valid = [run for raw in runs if (run := parser._parse_run(raw)[0]) is not None]
+    return ({str(run["job_id"]) for run in valid},
+            {(str(run["job_id"]), str(run.get("rule_id") or "")) for run in valid})
+
+
+# LLM: 周期规则同时服从原预约的父 job 时间/退避门槛；活动运行按 job/rule 排除，事件 pending 仍按原事件入口投影。
+# 函数用途: 合并未被占用规则的父子有效到期时间，避免旧顶层退避引起空轮取锁。
+def _job_due_times(job: dict, job_id: str, active_jobs: set[str], active_rules: set[tuple[str, str]], now: float) -> list[float]:
+    from .event_sources import event_due_times
+
+    rules = job.get("rules")
+    if isinstance(rules, list):
+        available = [rule for rule in rules if isinstance(rule, dict) and rule.get("enabled")
+                     and (job_id, str(rule.get("id") or "")) not in active_rules]
+        job = {**job, "rules": available}
+    elif job_id in active_jobs:
+        return []
+    else:
+        available = [job]
+    job_next = _positive_timestamp(job.get("next_run_at"))
+    gate = max(job_next, _positive_timestamp(job.get("backoff_until")))
+    due = [max(gate, value, _positive_timestamp(rule.get("backoff_until"))) for rule in available
+           if job_next > 0 and (value := _positive_timestamp(rule.get("next_run_at"))) > 0]
+    return [*due, *event_due_times(job, now)]
 
 
 def _positive_timestamp(value: Any) -> float:

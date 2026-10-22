@@ -442,8 +442,10 @@ class _SchedulerJobOperations:
 # LLM: run 的预留、领取与终态只写原 owner 仓库；错过周期和退避不创建第二个执行者，恢复仍服从原 claim CAS。
 # 类用途: 管理定时运行的单次身份、实际开工和结果历史，修改时联测过期与交付重试。
 # LLM: 可选内容投影只排除不存在的候选，规则与取消仍在原写事务重核，不缓存时间结论。
-class _SchedulerRunOperations:
-    """Public durable run reservation, claim, completion, and history operations."""
+# LLM: 预留只生成原 owner 账本中的 run；候选快路不授权写入，实际预约仍遵循原锁顺序及状态复核。
+# 类用途: 集中手动和到期预约，避免执行/历史操作类继续堆积预留职责。
+class _SchedulerReservationOperations:
+    """Public durable manual and due run reservation operations."""
 
     # LLM: 手动运行准确 rule_id，原活动 run 和状态检查不绕过。
     # 函数用途: 手动运行准确 rule_id，原活动 run 和状态检查不绕过。 修改需同步原控制、恢复或权限测试。
@@ -469,10 +471,8 @@ class _SchedulerRunOperations:
             self._write_store_unlocked(store, admission)
         return deepcopy(run)
 
-    # LLM: 到期检查沿原锁读取 job，按 skip/coalesce 预留最多一次；未来周期退避只延迟新 run，不重放旧执行。
-    # 函数用途: 为已到期且不重叠的计划预留原 run，记录错过周期并推进下次自然时间。
-    # LLM: 按独立rule_id检查活动运行；开关开启只用投影排除没有到期键的情形，候选仍进原owner锁实时重核。
-    # 函数用途: 按独立 rule_id 检查活动运行，原 owner 锁和 due 投影保持。 修改需同步原控制、恢复或权限测试。
+    # LLM: 投影及无锁快照只排除无候选空轮；退避、独立规则和活动运行仍在原 quota→owner 锁内实时重核。
+    # 函数用途: 为真正可预约的到期计划预留运行，不为已有在途任务或未来周期持写锁空转。
     def reserve_due_runs(
         self,
         *,
@@ -482,6 +482,8 @@ class _SchedulerRunOperations:
     ) -> list[dict[str, object]]:
         current = _now(now)
         if cheap_checks and not self._cheap_due_candidates_exist(now=current):
+            return []
+        if not _snapshot_due_candidates_exist(self, now=current):
             return []
         reserved: list[dict[str, object]] = []
         skipped: list[dict[str, object]] = []
@@ -544,6 +546,12 @@ class _SchedulerRunOperations:
             if reserved or skipped:
                 self._write_store_unlocked(store, admission, history_records=skipped)
         return deepcopy(reserved)
+
+
+# LLM: 执行状态与历史仍由同一 owner 账本及 claim CAS 管理；预留职责在独立组合类中，不新增存储或权限。
+# 类用途: 提供原运行的队列查询、领取、执行、收尾及历史读取操作。
+class _SchedulerRunOperations:
+    """Public durable run claim, completion, and history operations."""
 
     # LLM: 便宜路径只排除仍在未来的轻量键；候选必须重读完整原运行，取消、事件代次与投递由原消费者核验。
     # 函数用途: 按当前时间列出排队运行，未到期的空轮可省去完整账本读取。
@@ -1375,10 +1383,8 @@ class _SchedulerProjectionSupport:
             _bump_store_projection_stat("cheap_hit")
         return hit
 
-    # LLM: E10 一期候选②的 due 判据: 投影里有没有 next_run_at<=now 的 active job。为假 ⇒
-    #   reserve 原路径必然 reserved/skipped 为空、不写 store ⇒ 可直接返回空(不进写锁/不读盘);
-    #   为真/无缓存/异常 ⇒ True 走原路径(写锁内重新读、重新判)。
-    # 函数用途: 判断本拍是否有到期 job 可能被预留,供 reserve_due_runs 省掉写事务读。
+    # LLM: 有效到期键已排除活动 job/rule 并合并退避；每拍重算 now，缓存缺失仍回完整快照而非判空。
+    # 函数用途: 从可信只读投影判断本拍是否可能需要预约，空轮不进写事务。
     def _cheap_due_candidates_exist(self, *, now: float) -> bool:
         hit = self._cheap_projection_hit()
         if hit is None:
@@ -1405,7 +1411,7 @@ class _SchedulerProjectionSupport:
             raise
         rows = tuple(_select_waiting_runs(runs))
         queued_keys, queued_ok = _collect_queued_keys(runs)
-        due_job_keys, due_ok = _collect_due_job_keys(jobs)
+        due_job_keys, due_ok = _collect_due_job_keys(jobs, runs)
         projection = _StoreProjection(
             stat_key=probe.stat_key if probe is not None else (-1, -1, -1, -1),
             digest=probe.digest if probe is not None else "",
@@ -1448,6 +1454,7 @@ class SchedulerRepository(
     SchedulerEventSourceOperations,
     SchedulerRunPreparation,
     _SchedulerJobOperations,
+    _SchedulerReservationOperations,
     _SchedulerRunOperations,
     _SchedulerWaitingRunOperations,
     _SchedulerProjectionSupport,
@@ -1489,6 +1496,24 @@ class SchedulerRepository(
         self.due_index = due_index
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
         ensure_private_dir(self.root)
+
+    # LLM: 已冻结 dict 且无迁移时只读深复制；首次冻结和显式来源迁移始终委托原 mixin 的锁/CAS/证明校验。
+    # 函数用途: 避免 queued 运行每拍重复准备来源时取得原 owner 变更锁。
+    def prepare_run_context(self, run_id: str, context: dict, *, origin_migration: dict | None = None) -> dict:
+        if origin_migration is None:
+            run, _error = self._parse_run(self._store_snapshot()["runs"].get(run_id))
+            if run is not None and isinstance(run.get("execution_context"), dict):
+                return deepcopy(run)
+        return super().prepare_run_context(run_id, context, origin_migration=origin_migration)
+
+    # LLM: 相同或空 wake 输入只返回原快照深副本；真正换绑仍委托原 owner/quota 锁重新验证并写入。
+    # 函数用途: 为活跃运行挂接唤醒信号，幂等重放不取变更锁也不清空已有信号。
+    def attach_wake_signal(self, run_id: str, wake_signal_id: str) -> dict[str, object] | None:
+        normalized_wake_id = str(wake_signal_id or "")
+        unchanged = _attached_wake_snapshot(self, run_id, normalized_wake_id)
+        if unchanged is not None:
+            return unchanged
+        return super().attach_wake_signal(run_id, normalized_wake_id)
 
 
 # LLM: One parsed ``waiting_runs`` result bound to the exact store.json bytes it was parsed from.
@@ -1747,24 +1772,61 @@ def _collect_queued_keys(
     return tuple(keys), ok
 
 
-# LLM: 只投影主线已解析active job的到期键；规则与事件选择仍由原预留事务实时裁决。
-# 函数用途: 收集可能到期的计划键，不缓存本拍是否到期。
+# LLM: 冷读和关闭优化都只在无候选时免锁；坏数值仍回原事务保留原错误语义，快照不授权预约。
+# 函数用途: 现读同一代合法 job/run，判断是否值得进入预约事务。
+def _snapshot_due_candidates_exist(repository, *, now: float) -> bool:
+    store = repository._store_snapshot()
+    jobs, _job_errors = repository._valid_jobs(store)
+    runs, _run_errors = repository._valid_runs(store)
+    keys, ok = _collect_due_job_keys(jobs, runs)
+    return not ok or any(due_at <= now for due_at, _job_id in keys)
+
+
+# LLM: 只接受主线解析的本 owner 活跃 run；不变的 wake 深复制返回，其他情况仍交原写事务验证。
+# 函数用途: 在取锁前识别相同或空唤醒信号的幂等挂接。
+def _attached_wake_snapshot(repository, run_id: str, wake_signal_id: str) -> dict[str, object] | None:
+    run, _error = repository._parse_run(repository._store_snapshot()["runs"].get(str(run_id or "")))
+    if run is not None and (not wake_signal_id or str(run.get("wake_signal_id") or "") == wake_signal_id):
+        return deepcopy(run)
+    return None
+
+
+# LLM: 输入须为原解析器的合法 job/run；普通 job 按 job 阻挡、监控按 rule 阻挡，坏时间拒缓存并保守回退。
+# 函数用途: 收集合并退避后的可预约时间键，排除已有活动运行但不阻挡其他独立规则。
 def _collect_due_job_keys(
     jobs: list[dict[str, object]],
+    runs: list[dict[str, object]],
 ) -> tuple[tuple[tuple[float, str], ...], bool]:
-    """只收集主线已解析计划的到期键；规则、依赖、事件与取消仍由原预留事务判断。"""
     keys: list[tuple[float, str]] = []
     ok = True
+    active_jobs = {str(run["job_id"]) for run in runs}
+    active_rules = {(str(run["job_id"]), str(run.get("rule_id") or "")) for run in runs}
     for job in jobs:
         if job["status"] != "active":
             continue
+        job_id = str(job["job_id"])
+        rules = job.get("rules")
+        if rules is None and job_id in active_jobs:
+            continue
         try:
-            next_run_at = float(job.get("next_run_at") or 0.0)
+            job_next = float(job.get("next_run_at") or 0.0)
+            job_backoff = float(job.get("backoff_until") or 0.0)
         except (TypeError, ValueError):
             ok = False
             continue
-        if next_run_at > 0:
-            keys.append((next_run_at, str(job["job_id"])))
+        if job_next <= 0:
+            continue
+        for rule in rules if rules is not None else [job]:
+            if rules is not None and (not rule["enabled"] or (job_id, str(rule["id"])) in active_rules):
+                continue
+            try:
+                next_run_at = float(rule.get("next_run_at") or 0.0)
+                backoff_until = float(rule.get("backoff_until") or 0.0)
+            except (TypeError, ValueError):
+                ok = False
+                continue
+            if next_run_at > 0:
+                keys.append((max(job_next, job_backoff, next_run_at, backoff_until), job_id))
     return tuple(sorted(keys)), ok
 
 

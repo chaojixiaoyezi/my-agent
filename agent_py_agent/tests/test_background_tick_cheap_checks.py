@@ -10,7 +10,7 @@
   ③ tooling/process_session_store 的进程记录目录 stat 门:
      目录身份 (dev, ino, mtime_ns) 未变且离开保护窗口才复用; root 内任何
      新建/改写/删除都改目录 mtime; 60 秒兜底无条件全读。
-另覆盖: 开关开/关外部可见结果一致(语义不变)、配置默认关且运行时动态读到、
+另覆盖: 开关开/关外部可见结果一致(语义不变)、配置默认开且运行时动态读到、
 缓存上界 LRU 逐出。
 """
 
@@ -1430,13 +1430,14 @@ def test_tick_cheap_checks_reads_live_config() -> None:
     assert mixin._tick_cheap_checks(SimpleNamespace()) is False
 
 
-def test_config_defaults_off_and_yaml_switch_is_read(tmp_path) -> None:
-    """默认关; YAML 显式打开后装载读到 True。"""
-    assert AgentConfig().background_tick_cheap_checks is False
+# LLM: 默认开启优化但不取消用户回退能力，必须从真实 YAML 读取显式关闭值。
+# 函数用途: 验证便宜检查默认开启且配置 false 后确实关闭。
+def test_config_defaults_on_and_yaml_switch_can_disable(tmp_path) -> None:
+    assert AgentConfig().background_tick_cheap_checks is True
     yaml_path = tmp_path / "agent_config.yaml"
     yaml_path.write_text(
-        "model_backend: echo\nbackground_tick_cheap_checks: true\n",
+        "model_backend: echo\nbackground_tick_cheap_checks: false\n",
         encoding="utf-8",
     )
     loaded = load_config(yaml_path)
-    assert loaded.background_tick_cheap_checks is True
+    assert loaded.background_tick_cheap_checks is False

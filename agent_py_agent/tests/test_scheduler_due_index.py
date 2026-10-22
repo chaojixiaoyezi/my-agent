@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -338,3 +340,307 @@ def test_scaling_d_schema_replacement_during_cache_publication(tmp_path, monkeyp
     conn.close()
     assert swapped and tables == 2
     assert restored.snapshot() == []
+
+
+# LLM: 通过真实创建入口准备普通任务或独立规则监控，后续只在临时账本注入到期/在途状态。
+# 函数用途: 为调度器无锁与到期回归提供合法任务和运行夹具。
+def _cpu6_case(tmp_path, *, monitor=False):
+    repo = SchedulerRepository(tmp_path / "scheduler", owner_provider="feishu", owner_kind="user", owner_id="alice")
+    schedule = {"kind": "every", "every_seconds": 3600, "anchor_at": 200, "timezone": "UTC"}
+    rules = [{"id": key, "name": key, "prompt": key, "schedule": schedule, "use_llm": True} for key in ("busy", "free")]
+    job, _created = repo.create_job(SchedulerJobCreateRequest(
+        name="cpu6", prompt="tick", thread_id="thread-a", schedule=schedule,
+        rules=rules if monitor else None, now=100, misfire_grace_seconds=3600,
+    ))
+    run = repo.reserve_manual_run(job["job_id"], rule_id="busy" if monitor else "", now=100)
+    return repo, job, run
+
+
+# LLM: 测试快路必须绑定真实文件指纹和完整解析投影，不伪造缓存命中。
+# 函数用途: 把已写入的临时账本预热到便宜检查可复用状态。
+def _cpu6_prime(repo):
+    old = time.time() - 3
+    os.utime(repo.store_path, (old, old))
+    repo.waiting_runs(cheap_checks=True)
+
+
+# LLM: 将写事务入口设为明确失败，区分不写账本与根本不取 owner/quota 锁。
+# 函数用途: 禁止空轮进入调度变更事务。
+def _cpu6_forbidden_scope():
+    pytest.fail("空轮不应进入 _mutation_scope")
+
+
+# LLM: 四种在途状态均阻挡同一普通 job；开关两态都要在持锁前排除，热投影也不能误报候选。
+# 函数用途: 复现已有运行且旧周期已到期时每拍重复加锁的问题。
+@pytest.mark.parametrize("status", ["queued", "claimed", "running", "waiting"])
+@pytest.mark.parametrize("cheap", [False, True])
+def test_cpu6_active_job_reservation_never_enters_mutation(tmp_path, monkeypatch, status, cheap):
+    repo, job, run = _cpu6_case(tmp_path)
+    store = json.loads(repo.store_path.read_text())
+    store["jobs"][job["job_id"]]["next_run_at"] = 200
+    store["runs"][run["run_id"]]["status"] = status
+    repo.store_path.write_text(json.dumps(store))
+    if cheap:
+        _cpu6_prime(repo)
+        assert repo._cheap_due_candidates_exist(now=210) is False
+    monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+    assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
+
+
+# LLM: 冷启动和关闭优化时同样不能为未来任务/空账本取得写锁。
+# 函数用途: 冻结预约入口的无候选快照空返合同。
+@pytest.mark.parametrize("cheap", [False, True])
+def test_cpu6_cold_future_job_never_enters_mutation(tmp_path, monkeypatch, cheap):
+    repo, _job, _run = _cpu6_case(tmp_path)
+    store = json.loads(repo.store_path.read_text())
+    store["runs"] = {}
+    repo.store_path.write_text(json.dumps(store))
+    monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+    assert repo.reserve_due_runs(now=150, cheap_checks=cheap) == []
+
+
+# LLM: 规则退避结束前应无锁空返，时间跨过边界后同一账本必须仍能真正预约。
+# 函数用途: 验证监控有效到期时间、热投影和边界重算一致。
+@pytest.mark.parametrize("cheap", [False, True])
+def test_cpu6_rule_backoff_is_respected_without_locks_and_expires(tmp_path, monkeypatch, cheap):
+    from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
+    from agent_py_agent.agent.scheduler.monitor_state import _project
+
+    repo, job, _run = _cpu6_case(tmp_path, monitor=True)
+    store = json.loads(repo.store_path.read_text())
+    store["runs"] = {}
+    raw = store["jobs"][job["job_id"]]
+    raw["next_run_at"] = 200
+    raw["rules"][0].update(next_run_at=200, backoff_until=800)
+    raw["rules"][1]["enabled"] = False
+    repo.store_path.write_text(json.dumps(store))
+    assert _project(raw)["next_run_at"] == 800
+    assert _earliest_due_at(store, now=210) == 800
+    if cheap:
+        _cpu6_prime(repo)
+        assert repo._cheap_due_candidates_exist(now=210) is False
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+        assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
+    assert [row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=cheap)] == ["busy"]
+
+
+# LLM: 一条规则的 waiting/running 不能挡另一条规则；索引不沿用被阻挡规则的旧顶层最小值。
+# 函数用途: 保证独立规则预约与按规则排除活动运行的语义一致。
+@pytest.mark.parametrize("status", ["running", "waiting"])
+@pytest.mark.parametrize("cheap", [False, True])
+def test_cpu6_active_rule_keeps_other_rule_schedulable(tmp_path, status, cheap):
+    from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
+
+    repo, job, run = _cpu6_case(tmp_path, monitor=True)
+    store = json.loads(repo.store_path.read_text())
+    raw = store["jobs"][job["job_id"]]
+    raw["next_run_at"] = 100
+    raw["rules"][0]["next_run_at"] = 100
+    raw["rules"][1]["next_run_at"] = 200
+    store["runs"][run["run_id"]].update(status=status, claim_expires_at=500 if status == "running" else 0)
+    repo.store_path.write_text(json.dumps(store))
+    assert _earliest_due_at(store, now=210) == 200
+    if cheap:
+        _cpu6_prime(repo)
+    assert [row["rule_id"] for row in repo.reserve_due_runs(now=210, cheap_checks=cheap)] == ["free"]
+
+
+# LLM: 唯一已到期规则被活动运行占用时，另一条未来规则不能使冷读/热投影误判本拍需要写锁。
+# 函数用途: 锁定复合监控按规则排除活动运行的空轮快路。
+@pytest.mark.parametrize("status", ["running", "waiting"])
+@pytest.mark.parametrize("cheap", [False, True])
+def test_cpu6_active_rule_with_future_sibling_is_lock_free(tmp_path, monkeypatch, status, cheap):
+    from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
+
+    repo, job, run = _cpu6_case(tmp_path, monitor=True)
+    store = json.loads(repo.store_path.read_text())
+    raw = store["jobs"][job["job_id"]]
+    raw["next_run_at"] = 200
+    raw["rules"][0]["next_run_at"] = 200
+    raw["rules"][1]["next_run_at"] = 800
+    store["runs"][run["run_id"]].update(status=status, claim_expires_at=500 if status == "running" else 0)
+    repo.store_path.write_text(json.dumps(store))
+    assert _earliest_due_at(store, now=210) == (500 if status == "running" else 800)
+    if cheap:
+        _cpu6_prime(repo)
+        assert repo._cheap_due_candidates_exist(now=210) is False
+    monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+    assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
+
+
+# LLM: 普通 job 有活动运行时只投影运行自身的派发/租约时间，waiting 无进程租约不能回退成 now。
+# 函数用途: 防止活动任务的旧周期把 due owner 每秒重新唤醒。
+@pytest.mark.parametrize("status,expected", [("queued", 300), ("claimed", 500), ("running", 500), ("waiting", 0)])
+def test_cpu6_due_index_uses_active_run_not_stale_job_time(tmp_path, status, expected):
+    from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
+
+    repo, job, run = _cpu6_case(tmp_path)
+    store = json.loads(repo.store_path.read_text())
+    store["jobs"][job["job_id"]]["next_run_at"] = 100
+    store["runs"][run["run_id"]].update(status=status, dispatch_after=300,
+        claim_expires_at=0 if status == "waiting" else 500)
+    assert _earliest_due_at(store, now=210) == expected
+
+
+# LLM: 冻结来源的重放只读返回且深复制，传入新 context 不能覆盖原快照。
+# 函数用途: 复现 queued run 等待会话时每拍准备来源重复取锁。
+def test_cpu6_prepared_context_is_returned_without_mutation(tmp_path, monkeypatch):
+    repo, _job, run = _cpu6_case(tmp_path)
+    frozen = {"nested": {"values": [1]}}
+    repo.prepare_run_context(run["run_id"], frozen)
+    before = repo.store_path.read_bytes()
+    monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+    replay = repo.prepare_run_context(run["run_id"], {"different": True})
+    assert replay["execution_context"] == frozen
+    replay["execution_context"]["nested"]["values"].append(2)
+    assert repo.get_active_run(run["run_id"])["execution_context"] == frozen
+    assert repo.store_path.read_bytes() == before
+
+
+# LLM: 无锁来源快路只适用无迁移的幂等读取；显式迁移仍须进入原 CAS 和证明检查。
+# 函数用途: 防止缓存绕过来源迁移拒绝逻辑。
+def test_cpu6_origin_migration_still_uses_original_transaction(tmp_path, monkeypatch):
+    from agent_py_agent.agent.scheduler.repository import SchedulerConflictError
+
+    repo, _job, run = _cpu6_case(tmp_path)
+    repo.prepare_run_context(run["run_id"], {"frozen": True})
+    original, calls = repo._mutation_scope, []
+
+    # LLM: 不替换原锁或原事务结果，只记录是否进入写方验证。
+    # 函数用途: 统计真实变更事务调用次数。
+    def scope():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(repo, "_mutation_scope", scope)
+    with pytest.raises(SchedulerConflictError, match="不能替换"):
+        repo.prepare_run_context(run["run_id"], {}, origin_migration={"to_thread_id": "foreign"})
+    assert calls == [1]
+
+
+# LLM: 首次冻结来源与换成不同 wake 都是实质变更，必须沿原 owner/quota 事务并实际保存。
+# 函数用途: 保证无锁快路不吞掉需要写入的新上下文或新信号。
+def test_cpu6_changed_context_and_wake_still_use_original_transactions(tmp_path, monkeypatch):
+    repo, _job, run = _cpu6_case(tmp_path)
+    original, calls = repo._mutation_scope, []
+
+    # LLM: 只计数，原锁顺序、配额及账本写入不做替换。
+    # 函数用途: 观察实质变更是否进入原事务。
+    def scope():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(repo, "_mutation_scope", scope)
+    assert repo.prepare_run_context(run["run_id"], {"first": True})["execution_context"] == {"first": True}
+    repo.attach_wake_signal(run["run_id"], "first")
+    repo.attach_wake_signal(run["run_id"], "second")
+    assert calls == [1, 1, 1]
+    saved = repo.get_active_run(run["run_id"])
+    assert saved["execution_context"] == {"first": True}
+    assert saved["wake_signal_id"] == "second"
+
+
+# LLM: 同一 wake 及空输入都是只读幂等重放，不能清除原 wake，也不能共享嵌套可变对象。
+# 函数用途: 复现重复挂接唤醒信号时持锁空转。
+@pytest.mark.parametrize("wake_id", ["wake-1", "", None])
+def test_cpu6_existing_wake_attachment_is_lock_free(tmp_path, monkeypatch, wake_id):
+    repo, _job, run = _cpu6_case(tmp_path)
+    repo.attach_wake_signal(run["run_id"], "wake-1")
+    before = repo.store_path.read_bytes()
+    monkeypatch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+    replay = repo.attach_wake_signal(run["run_id"], wake_id)
+    assert replay["wake_signal_id"] == "wake-1"
+    replay["wake_signal_id"] = "poison"
+    assert repo.get_active_run(run["run_id"])["wake_signal_id"] == "wake-1"
+    assert repo.store_path.read_bytes() == before
+
+
+# LLM: 到期时间向后推进但已有租约仍有效时不得重置；更早的新工作及租约到期必须仍能被领取。
+# 函数用途: 冻结 sync_owner 时间变化时租约保留与释放的边界。
+@pytest.mark.parametrize("updated_due,updated_at,claim_at,expected", [(110, 101, 110, []), (90, 101, 101, ["alice"]), (110, 131, 131, ["alice"])])
+def test_cpu6_due_sync_preserves_live_lease_unless_work_is_earlier(tmp_path, updated_due, updated_at, claim_at, expected):
+    index = SchedulerDueIndex(tmp_path / "due.sqlite3")
+    index.sync_owner(_owner("alice"), _store(next_run_at=100), now=90)
+    assert len(index.claim_due_owners(now=100, lease_seconds=30)) == 1
+    index.sync_owner(_owner("alice"), _store(next_run_at=updated_due), now=updated_at)
+    assert [row.owner_id for row in index.claim_due_owners(now=claim_at)] == expected
+    if not expected:
+        assert [row.owner_id for row in index.claim_due_owners(now=130)] == ["alice"]
+
+
+# LLM: 使用真实索引和真实登记表跨越领取租期，活跃 owner 重复领取不能重复计数/打印；退休后可重新宣告。
+# 函数用途: 验证 scheduler due 循环不再持续刷同一 owner 的宣告日志。
+def test_cpu6_due_controller_announces_only_new_registry_owners(tmp_path, monkeypatch, capsys):
+    from agent_py_agent.agent.user_space import OwnerIdentity
+    from agent_py_agent.cli import gateway_loops
+
+    index = SchedulerDueIndex(tmp_path / "due.sqlite3")
+    index.sync_owner(_owner("alice"), _store(next_run_at=100), now=50)
+    registry = ActiveOwnerRegistry()
+    base = SimpleNamespace(config=SimpleNamespace(owner_agent_pool_max_agents=64, background_owner_workers=8),
+        scheduler_repository=SimpleNamespace(due_index=index), home_paths=SimpleNamespace(global_index_dir=tmp_path))
+    monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _context: base)
+    monkeypatch.setattr(gateway_loops, "shared_active_owner_registry", lambda _agent: registry)
+    controller = gateway_loops._GatewaySchedulerDueController(SimpleNamespace(agent=base))
+    assert controller.tick(now=100) == 1
+    assert "due owners announced: 1" in capsys.readouterr().out
+    assert controller.tick(now=131) == 0
+    assert capsys.readouterr().out == ""
+    owner = OwnerIdentity.provider_user("feishu", "alice")
+    assert registry.discard_idle((owner.provider, owner.owner_kind, owner.owner_id), time.monotonic())
+    assert controller.tick(now=162) == 1
+    assert "due owners announced: 1" in capsys.readouterr().out
+
+
+# LLM: 损坏或异 owner 的运行不能成为排除合法周期的依据；活动阻挡必须与原解析器口径一致。
+# 函数用途: 复现坏 waiting 使 due_index 删掉仍可预约 owner 的漏唤醒。
+@pytest.mark.parametrize("monitor", [False, True])
+@pytest.mark.parametrize("corruption", ["schema", "owner", "claim_epoch", "delivery"])
+def test_cpu6_invalid_waiting_cannot_hide_valid_due_job(tmp_path, monitor, corruption):
+    from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
+
+    repo, job, run = _cpu6_case(tmp_path, monitor=monitor)
+    store = json.loads(repo.store_path.read_text())
+    raw = store["jobs"][job["job_id"]]
+    raw["next_run_at"] = 200
+    if monitor:
+        raw["rules"][0]["next_run_at"] = 200
+        raw["rules"][1]["enabled"] = False
+    broken = store["runs"][run["run_id"]]
+    broken.update(status="waiting", claim_expires_at=0)
+    broken[{"schema": "schema_version", "owner": "owner", "claim_epoch": "claim_epoch", "delivery": "delivery"}[corruption]] = {
+        "schema": "invalid", "owner": _owner("foreign"), "claim_epoch": -1, "delivery": "invalid",
+    }[corruption]
+    assert repo._parse_run(broken)[0] is None
+    assert _earliest_due_at(store, now=210) == 200
+    index = SchedulerDueIndex(tmp_path / "due.sqlite3")
+    index.sync_owner(repo.due_owner, store, now=210)
+    assert [row.owner_id for row in index.claim_due_owners(now=210)] == ["alice"]
+    repo.store_path.write_text(json.dumps(store))
+    assert len(repo.reserve_due_runs(now=210)) == 1
+
+
+# LLM: 迁移监控可保留旧 job 顶层退避；只读候选必须同时遵守原预约事务的顶层门槛。
+# 函数用途: 复现规则已到期但父 job 仍退避时误入写锁的空轮。
+@pytest.mark.parametrize("cheap", [False, True])
+def test_cpu6_parent_backoff_applies_to_monitor_candidates(tmp_path, monkeypatch, cheap):
+    from agent_py_agent.agent.scheduler.due_index import _earliest_due_at
+
+    repo, job, _run = _cpu6_case(tmp_path, monitor=True)
+    store = json.loads(repo.store_path.read_text())
+    store["runs"] = {}
+    raw = store["jobs"][job["job_id"]]
+    raw.update(next_run_at=200, backoff_until=800)
+    for rule in raw["rules"]:
+        rule.update(next_run_at=200, backoff_until=0)
+    assert repo._parse_job(raw)[0] is not None
+    repo.store_path.write_text(json.dumps(store))
+    assert _earliest_due_at(store, now=210) == 800
+    if cheap:
+        _cpu6_prime(repo)
+        assert repo._cheap_due_candidates_exist(now=210) is False
+    with monkeypatch.context() as patch:
+        patch.setattr(repo, "_mutation_scope", _cpu6_forbidden_scope)
+        assert repo.reserve_due_runs(now=210, cheap_checks=cheap) == []
+    assert {row["rule_id"] for row in repo.reserve_due_runs(now=800, cheap_checks=cheap)} == {"busy", "free"}

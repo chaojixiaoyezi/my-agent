@@ -219,11 +219,12 @@ def _initialize_rule(rule, now):
             'run_count': 0, 'last_run_at': 0, 'last_run_status': '', 'consecutive_failures': 0, 'backoff_until': 0}
 
 
-# LLM: 顶层 next_run_at 是原 due_index 的可重建投影，唯一规则时间在 rules；暂停监控不会被索引重新唤醒。
-# 函数用途: 刷新监控的最早到期时间和已用尽的一次性规则状态。
+# LLM: 顶层 next_run_at 只投影启用且仍有周期的规则，必须合并各自退避；唯一规则状态仍在 rules。
+# 函数用途: 刷新监控真正最早可运行时间，避免退避期间按旧周期重复唤醒。
 def _project(job):
     enabled = [r for r in job['rules'] if r['enabled']]
-    due = [float(r.get('next_run_at') or 0) for r in enabled if r.get('next_run_at')]
+    due = [max(float(r.get('next_run_at') or 0), float(r.get('backoff_until') or 0))
+           for r in enabled if float(r.get('next_run_at') or 0) > 0]
     return {**job, 'next_run_at': min(due, default=0),
             'status': 'paused' if job['status'] == 'active' and not enabled else job['status']}
 

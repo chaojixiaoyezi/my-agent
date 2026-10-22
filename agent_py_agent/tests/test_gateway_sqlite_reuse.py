@@ -17,8 +17,25 @@ from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
 from agent_py_agent.agent.settings.config import AgentConfig, load_config
 
 
-def test_default_reuse_switch_preserves_old_behavior():
-    assert getattr(AgentConfig(), "sqlite_connection_reuse", None) is False
+# LLM: 性能默认值来自真实 dataclass，关闭能力由 YAML 装载及真实 worker 连接计数共同约束。
+# 函数用途: 冻结 SQLite 复用默认开启，避免无配置时每次请求重复连接。
+def test_default_reuse_switch_is_enabled():
+    assert AgentConfig().sqlite_connection_reuse is True
+
+
+# LLM: 同时验证随包 YAML、缺省装载和显式 false；不把字符串真值当布尔开关。
+# 函数用途: 保证两项性能开关默认开启且用户仍可逐项关闭。
+@pytest.mark.parametrize("key", ["sqlite_connection_reuse", "background_tick_cheap_checks"])
+def test_cpu6_performance_defaults_and_explicit_yaml_false(tmp_path, key):
+    import yaml
+
+    packaged = Path(__file__).parents[1] / "config" / "agent_config.yaml"
+    assert yaml.safe_load(packaged.read_text(encoding="utf-8"))[key] is True
+    path = tmp_path / "config.yaml"
+    path.write_text("model_backend: echo\n", encoding="utf-8")
+    assert getattr(load_config(path), key) is True
+    path.write_text(f"model_backend: echo\n{key}: false\n", encoding="utf-8")
+    assert getattr(load_config(path), key) is False
 
 
 def _save_record(repo, index):

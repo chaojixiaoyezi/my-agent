@@ -1712,6 +1712,8 @@ class _GatewaySchedulerDueController:
             _LoopSite("scheduler-due", "gateway_scheduler_due.tick", "scheduler-due", self.interval),
         )
 
+    # LLM: 登记表实际提供 snapshot；每次 record 前按同一身份键检查活跃状态，只抑制重复宣告不跳过登记刷新。
+    # 函数用途: 唤醒新到期 owner，已有活跃 owner 续领不再重复计数或刷屏打印。
     def tick(self, *, now: float | None = None) -> int:
         rows = self._due_index.claim_due_owners(
             now=now,
@@ -1726,8 +1728,11 @@ class _GatewaySchedulerDueController:
                 owner = OwnerIdentity.provider_group(row.provider, row.owner_id)
             else:
                 owner = OwnerIdentity.provider_user(row.provider, row.owner_id)
+            active = {(item.provider, item.owner_kind, item.owner_id) for item in self._registry.snapshot()}
+            already_active = (owner.provider, owner.owner_kind, owner.owner_id) in active
             self._registry.record(owner)
-            announced += 1
+            if not already_active:
+                announced += 1
         if announced:
             print(
                 f"[gateway-scheduler-due] due owners announced: {announced}",
