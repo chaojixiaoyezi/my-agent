@@ -3,30 +3,70 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 import uuid
+from collections import OrderedDict
+from copy import deepcopy
+from pathlib import Path
 
 from ..common.heartbeat import process_start_time
-from ..common.json_io import read_jsonl_objects_report
+from ..common.json_io import JsonlObjectsReadReport, read_jsonl_objects_report
 from .event_sources import event_run_current
 
 MAX_ACTIVE_EVENT_EFFECTS = 64
+_HISTORY_REPORT_CACHE_MAX_PATHS = 8
+_HISTORY_REPORT_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_HISTORY_REPORT_CACHE: OrderedDict[str, tuple[tuple[int, ...], tuple[dict, ...]]] = OrderedDict()
+_HISTORY_REPORT_CACHE_LOCK = threading.Lock()
+
+
+# LLM: ctime补足原四元指纹的同尺寸恢复mtime改写；stat失败禁止复用，错误仍交原JSONL报告器。
+# 函数用途: 取得历史文件的mtime、尺寸、inode、设备和ctime版本。
+def _history_file_stamp(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns)
+
+
+# LLM: 只缓存无坏行且读前后同版的原始历史投影；调用方不得修改records，公开返回必须复制，owner/schema仍逐次校验。
+# 函数用途: 为副作用、历史列表和取消查询复用最多8路径/16MiB原始字节的JSONL解析。
+def _cached_history_report(path: Path, *, context: str) -> JsonlObjectsReadReport:
+    key, stamp = str(path), _history_file_stamp(path)
+    with _HISTORY_REPORT_CACHE_LOCK:
+        cached = _HISTORY_REPORT_CACHE.get(key)
+        if stamp is not None and cached is not None and cached[0] == stamp:
+            _HISTORY_REPORT_CACHE.move_to_end(key)
+            return JsonlObjectsReadReport(list(cached[1]), [])
+        _HISTORY_REPORT_CACHE.pop(key, None)
+    report = read_jsonl_objects_report(path, context=context)
+    if (stamp is not None and not report.load_errors and stamp[1] <= _HISTORY_REPORT_CACHE_MAX_BYTES
+            and _history_file_stamp(path) == stamp):
+        with _HISTORY_REPORT_CACHE_LOCK:
+            _HISTORY_REPORT_CACHE[key] = (stamp, tuple(report.records))
+            _HISTORY_REPORT_CACHE.move_to_end(key)
+            while (len(_HISTORY_REPORT_CACHE) > _HISTORY_REPORT_CACHE_MAX_PATHS
+                   or sum(row[0][1] for row in _HISTORY_REPORT_CACHE.values()) > _HISTORY_REPORT_CACHE_MAX_BYTES):
+                _HISTORY_REPORT_CACHE.popitem(last=False)
+    return report
 
 
 # LLM: 所有方法都复用原SchedulerRepository锁与quota；在途lease只有准入/释放，不复制模型或投递结果。
 # 类用途: 提供事件运行副作用的线性化开始与结束。
 class SchedulerEventEffectOperations:
-    # LLM: 精确查询原活动run或不可变history，不限最近行数，不能因为重投已归档就新建运行。
-    # 函数用途: 为副作用边界读取准确run，普通定时run也只读返回。
+    # LLM: 精确查询原活动run或同版历史投影，不限最近行数；归属/schema逐次校验，嵌套返回与缓存隔离。
+    # 函数用途: 为副作用边界读取准确run，历史未变化时省去重复JSONL解析。
     def effect_run(self, run_id):
         run = self.get_active_run(run_id)
         if run is not None:
             return run
-        report = read_jsonl_objects_report(self.history_path, context='scheduler.effect.history')
+        report = _cached_history_report(self.history_path, context='scheduler.effect.history')
         for raw in reversed(report.records):
             if raw.get('run_id') != run_id:
                 continue
-            terminal, _error = self._parse_run(raw, terminal=True)
+            terminal, _error = self._parse_run(deepcopy(raw), terminal=True)
             return terminal
         return None
 

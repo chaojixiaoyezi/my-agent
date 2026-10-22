@@ -46,7 +46,11 @@ from ..user_space.owner_quota import (
 )
 from .delivery_policy import normalize_delivery
 from .due_index import SchedulerDueIndex
-from .event_effects import SchedulerEventEffectOperations
+from .event_effects import (
+    SchedulerEventEffectOperations,
+    _cached_history_report,
+    _history_file_stamp,
+)
 from .event_source_repository import SchedulerEventSourceOperations
 from .event_sources import sync_event_sources
 from .execution_policy import normalize_execution, normalize_precheck
@@ -80,6 +84,108 @@ _MAX_SKILL_REFS_COUNT = 32
 _MANUAL_DISPATCH_DELAY_SECONDS = 2.0
 
 _LOGGER = logging.getLogger(__name__)
+_HISTORY_RUN_IDS_CACHE_MAX_PATHS = 32
+_HISTORY_RUN_IDS_CACHE_MAX_IDS = 1_000_000
+_HISTORY_RUN_IDS_ANCHOR_BYTES = 4096
+_HISTORY_RUN_IDS_CACHE_LOCK = threading.Lock()
+
+
+# LLM: 仅为原JSONL去重派生的不可变投影，不拥有终态；offset前锚点及完整LF边界共同限制追加增量。
+# 类用途: 保存一代历史文件指纹、扫描位置、尾部摘要和已有运行ID。
+@dataclass(frozen=True)
+class _HistoryRunIdsProjection:
+    stamp: tuple[int, int, int, int, int]
+    offset: int
+    anchor_digest: str
+    complete_line: bool
+    run_ids: frozenset[str]
+
+
+_HISTORY_RUN_IDS_CACHE: OrderedDict[str, _HistoryRunIdsProjection] = OrderedDict()
+
+
+# LLM: 固定读取已扫描位置前最多4096字节；短读或IO异常必须回退，不能冒充空锚点。
+# 函数用途: 读取历史边界锚点以验证追加前缀的末尾未变。
+def _read_history_anchor(path: Path, offset: int) -> bytes:
+    start = max(0, offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
+    with path.open("rb") as handle:
+        handle.seek(start)
+        anchor = handle.read(offset - start)
+    if len(anchor) != offset - start:
+        raise OSError("history anchor short read")
+    return anchor
+
+
+# LLM: 只接受同设备/inode、增长、原完整LF边界且4096字节锚点相同的追加；任一坏行或竞态退回原全量报告器。
+# 函数用途: 验证历史追加后只解析新增字节，返回新的不可变ID投影。
+def _extend_history_run_ids(path, stamp, cached):
+    if stamp is None or stamp[2:4] != cached.stamp[2:4] or stamp[1] <= cached.offset or not cached.complete_line:
+        return None
+    try:
+        start = max(0, cached.offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
+        with path.open("rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (info.st_ino, info.st_dev) != stamp[2:4]:
+                return None
+            handle.seek(start)
+            anchor = handle.read(cached.offset - start)
+            if len(anchor) != cached.offset - start or _store_bytes_digest(anchor) != cached.anchor_digest:
+                return None
+            tail = handle.read(stamp[1] - cached.offset)
+        if len(tail) != stamp[1] - cached.offset or not tail.endswith(b"\n"):
+            return None
+        added = set()
+        for line in tail.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                return None
+            added.add(str(row.get("run_id") or ""))
+        if _history_file_stamp(path) != stamp:
+            return None
+        digest = _store_bytes_digest((anchor + tail)[-_HISTORY_RUN_IDS_ANCHOR_BYTES:])
+        return _HistoryRunIdsProjection(stamp, stamp[1], digest, True, cached.run_ids | added)
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+# LLM: 坏行仍沿原报告器跳过，去重集合语义不变；损坏/缺失/读中变化只返回本次结果，不缓存。
+# 函数用途: 冷读或异常时重建历史ID，记录稳定的尾部锚点与换行边界。
+def _full_history_run_ids(path, stamp):
+    report = read_jsonl_objects_report(path, context="scheduler.history.dedupe")
+    ids = frozenset(str(row.get("run_id") or "") for row in report.records)
+    if stamp is not None and not report.load_errors and _history_file_stamp(path) == stamp:
+        try:
+            anchor = _read_history_anchor(path, stamp[1])
+        except OSError:
+            return ids, None
+        if _history_file_stamp(path) == stamp:
+            return ids, _HistoryRunIdsProjection(
+                stamp, stamp[1], _store_bytes_digest(anchor), not anchor or anchor.endswith(b"\n"), ids,
+            )
+    return ids, None
+
+
+# LLM: 锁只保护有界派生缓存；业务调用仍持原owner事务锁，返回set是私有副本，超限只回退不改变去重。
+# 函数用途: 为历史追加去重复用最多32路径/一百万ID的线程安全增量索引。
+def _cached_history_run_ids(path: Path) -> set[str]:
+    key = str(path)
+    with _HISTORY_RUN_IDS_CACHE_LOCK:
+        stamp = _history_file_stamp(path)
+        cached = _HISTORY_RUN_IDS_CACHE.get(key)
+        if cached is not None and stamp is not None and cached.stamp == stamp:
+            _HISTORY_RUN_IDS_CACHE.move_to_end(key)
+            return set(cached.run_ids)
+        _HISTORY_RUN_IDS_CACHE.pop(key, None)
+        entry = _extend_history_run_ids(path, stamp, cached) if cached is not None else None
+        ids, entry = (entry.run_ids, entry) if entry is not None else _full_history_run_ids(path, stamp)
+        if entry is not None and len(ids) <= _HISTORY_RUN_IDS_CACHE_MAX_IDS:
+            _HISTORY_RUN_IDS_CACHE[key] = entry
+            while (len(_HISTORY_RUN_IDS_CACHE) > _HISTORY_RUN_IDS_CACHE_MAX_PATHS
+                   or sum(len(row.run_ids) for row in _HISTORY_RUN_IDS_CACHE.values()) > _HISTORY_RUN_IDS_CACHE_MAX_IDS):
+                _HISTORY_RUN_IDS_CACHE.popitem(last=False)
+        return set(ids)
 
 # LLM: ``waiting_runs`` is called once per conversation tick (runtime.prepare_tick ->
 # SchedulerService.reconcile_waiting_runs) and used to re-parse the whole owner ledger every time
@@ -360,7 +466,7 @@ class _SchedulerJobOperations:
                 return
             self._write_store_unlocked(store, admission)
 
-    # LLM: 取消范围由原 job tombstone 与 run/history ID 决定；不根据任务名或工具正文查找，坏历史保留未确认。
+    # LLM: 取消范围由原 job tombstone 与 run/history ID 决定；只复用同版历史解析，归属逐次校验，返回与缓存隔离。
     # 函数用途: 为冷启动及重复删除取回尚待取消的准确执行，包含已归档的排队运行。
     def pending_cancellation_runs(self):
         store = self._store_snapshot()
@@ -370,12 +476,12 @@ class _SchedulerJobOperations:
             for key in job.get('cancel_pending_run_ids', ())}
         if pending:
             active_ids = {row['run_id'] for row in result}
-            rows = read_jsonl_objects_report(self.history_path, context='scheduler.cancel.history').records
+            rows = _cached_history_report(self.history_path, context='scheduler.cancel.history').records
             for row in rows:
                 if row.get('run_id') in pending - active_ids and row.get('status') in _TERMINAL_RUN_STATUSES:
                     run, _error = self._parse_run(row, terminal=True)
                     if run is not None:
-                        result.append(run)
+                        result.append(deepcopy(run))
         return result
 
     # LLM: 原 job CAS 保存通知绑定；调用方已验证认证入口，本方法不接受任意 patch 或改来源，预留 run 不变。
@@ -756,13 +862,15 @@ class _SchedulerRunOperations:
         if job is not None:
             store["jobs"][job_id] = _job_after_run(job, terminal, now=now)
 
+    # LLM: 原始历史解析可缓存，owner/schema、去重排序与限量仍逐次执行；坏行诊断不缓存，公开结果保留深复制。
+    # 函数用途: 查询原owner历史，文件未变时省去重复JSONL解析。
     def history(
         self,
         *,
         job_id: str = "",
         limit: int = 50,
     ) -> tuple[list[dict[str, object]], list[str]]:
-        report = read_jsonl_objects_report(self.history_path, context="scheduler.history.read")
+        report = _cached_history_report(self.history_path, context="scheduler.history.read")
         errors = [
             str(item.get("error_type") or "SCHEDULER_HISTORY_READ_FAILED")
             for item in report.load_errors
@@ -1212,19 +1320,15 @@ class _SchedulerStoreSupport:
             store["runs"].pop(run_id, None)
         return cancelled
 
+    # LLM: 原owner锁内先查规范history的有界增量ID投影；坏行回退仍沿原过滤，不推断运行终态或改变同批去重口径。
+    # 函数用途: 剔除已经持久化的run_id，避免每次finish_run从0重解析历史。
     def _new_history_rows_unlocked(
         self,
         records: list[dict[str, object]],
     ) -> list[dict[str, object]]:
         if not records:
             return []
-        existing = {
-            str(item.get("run_id") or "")
-            for item in read_jsonl_objects_report(
-                self.history_path,
-                context="scheduler.history.dedupe",
-            ).records
-        }
+        existing = _cached_history_run_ids(self.history_path)
         return [record for record in records if str(record.get("run_id") or "") not in existing]
 
 

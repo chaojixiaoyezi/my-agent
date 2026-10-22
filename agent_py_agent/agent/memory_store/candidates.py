@@ -7,9 +7,13 @@ from __future__ import annotations
 # LLM: candidates.jsonl 是候选当前态唯一事实源；ops、task workspace 和 learning draft 不得双写。
 # 模块用途: 幂等合并观察、审核状态转换、晋升标记、过期和硬删除正文清理。
 
+import hashlib
 import json
+import threading
+from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +59,59 @@ from .candidate_source_coverage import (
 from .candidate_target_binding import TargetEvidenceVersionBindings, binding_history
 from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
+
+_CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
+_CANDIDATE_LOAD_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_CANDIDATE_LOAD_CACHE: OrderedDict[
+    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...]]
+] = OrderedDict()
+_CANDIDATE_LOAD_CACHE_LOCK = threading.Lock()
+
+
+# LLM: 四元内容身份之外以ctime检测探测/解析窗口内改写；错误不在这里吞成健康空候选。
+# 函数用途: 取得候选文件mtime、尺寸、inode、设备和ctime，不可stat则禁用缓存。
+def _candidate_load_stamp(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns)
+
+
+# LLM: 每次热读仍读取完整字节作blake2b校验，不信任同尺寸同mtime；超原始字节预算或竞态不创建投影。
+# 函数用途: 为候选解析缓存取得本轮稳定文件版本和内容摘要。
+def _candidate_load_probe(path: Path):
+    stamp = _candidate_load_stamp(path)
+    if stamp is None or stamp[1] > _CANDIDATE_LOAD_CACHE_MAX_BYTES:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) != stamp[1] or _candidate_load_stamp(path) != stamp:
+        return None
+    return stamp, hashlib.blake2b(data, digest_size=16).hexdigest()
+
+
+# LLM: 只清进程内派生解析结果，不改变任何候选、配额或业务锁；失败写入也可安全重新读取。
+# 函数用途: 使指定候选路径的模型缓存失效。
+def _drop_candidate_load_cache(path: Path) -> None:
+    with _CANDIDATE_LOAD_CACHE_LOCK:
+        _CANDIDATE_LOAD_CACHE.pop(str(path), None)
+
+
+# LLM: 保存前深复制全部嵌套字段，最多8路径和32MiB原始字节；调用方返回值不能成为缓存权威。
+# 函数用途: 记忆已通过原坏行、schema及重复ID验证的一代候选。
+def _remember_candidate_load(path, probe, records):
+    if probe is None or _candidate_load_stamp(path) != probe[0]:
+        return
+    snapshot = deepcopy(tuple(records))
+    with _CANDIDATE_LOAD_CACHE_LOCK:
+        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot)
+        _CANDIDATE_LOAD_CACHE.move_to_end(str(path))
+        while (len(_CANDIDATE_LOAD_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS
+               or sum(entry[0][1] for entry in _CANDIDATE_LOAD_CACHE.values()) > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
+            _CANDIDATE_LOAD_CACHE.popitem(last=False)
 
 
 # LLM: 损坏候选账本必须阻断写入；跳过坏行会在下一次原子写时永久丢数据。
@@ -432,9 +489,19 @@ class CandidateService:
         options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
         return locked_json_path(self.path, **options)
 
-    # LLM: 内部读取必须在 path lock 内调用，任一坏行都阻断下一次覆盖。
-    # 函数用途: 严格加载当前候选文件。
+    # LLM: 原path锁覆盖读取；缓存须匹配本轮完整字节摘要，出入均深复制；坏行/schema/重复ID仍按原错误阻断。
+    # 函数用途: 严格加载候选，只在内容未变时跳过重复JSONL解析和模型验证。
     def _load_unlocked(self) -> list[MemoryCandidate]:
+        probe = _candidate_load_probe(self.path)
+        with _CANDIDATE_LOAD_CACHE_LOCK:
+            cached = _CANDIDATE_LOAD_CACHE.get(str(self.path))
+            if probe is not None and cached is not None and cached[:2] == (probe[0][:4], probe[1]):
+                _CANDIDATE_LOAD_CACHE.move_to_end(str(self.path))
+            else:
+                _CANDIDATE_LOAD_CACHE.pop(str(self.path), None)
+                cached = None
+        if cached is not None:
+            return list(deepcopy(cached[2]))
         report = read_jsonl_objects_report(
             self.path,
             context="memory_candidates.load",
@@ -454,6 +521,7 @@ class CandidateService:
         ids = [item.candidate_id for item in records]
         if len(ids) != len(set(ids)):
             raise CandidateStoreCorruptError("candidate ledger contains duplicate candidate_id")
+        _remember_candidate_load(self.path, probe, records)
         return records
 
 
@@ -680,7 +748,7 @@ def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
 # LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。候选装记忆正文，走私有原子写（0600，目录 0700），
 #   已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # LLM: serialize/admission.check仍持原领域锁在Root外；C只把准备好的raw replace_once交原scope，默认字节/调用形状不变。
-# 函数用途: 原容量核验成功后替换同一候选文件，C末核失败保原当前态。
+# 函数用途: 原容量核验成功后使解析缓存失效并替换同一候选文件，C末核失败保原当前态。
 def _write_candidates_unlocked(
     path: Path,
     candidates: list[MemoryCandidate],
@@ -693,6 +761,7 @@ def _write_candidates_unlocked(
         for item in candidates
     )
     admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
+    _drop_candidate_load_cache(path)
     if coordinator_io:
         _coordinator_candidate_write(lambda: write_private_text_file_atomic_unlocked(path, text, replace_once=True))
     else:
