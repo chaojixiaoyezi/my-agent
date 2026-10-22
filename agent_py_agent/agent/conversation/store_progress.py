@@ -2,8 +2,11 @@
 # 模块用途: 管理进度策略的读取、到期投影、原子更新和过期归档，不维护额外调度循环。
 from __future__ import annotations
 
+import copy
 import json
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -34,6 +37,29 @@ _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
 # 调度层传入按 policy_id 确定的退避，连续失败达阈值后停用；成功报告清零。
 # 退休策略不再参与 due 扫描，原失败事实仍保留在 metadata，供应冷却另由进程内组件管理。
 _POLICY_FAILURE_RETIRE_AFTER_COUNT = 3
+_POLICY_OBJ_CACHE_MAX_ENTRIES_COUNT = 512
+
+
+# LLM: 在原ScanIndex.read之后按负载对象身份记忆，强引用防id复用；错误不记忆，metadata出入均隔离。
+# 函数用途: 复用有效进度策略对象，不改变索引统计或错误报告。
+def _memo_progress_policy(store, path, payload, *, cacheable):
+    key = str(path)
+    with store._policy_obj_cache_lock:
+        cached = store._policy_obj_cache.get(key) if cacheable else None
+        policy = cached[1] if cached is not None and cached[0] is payload else None
+        if policy is not None:
+            store._policy_obj_cache.move_to_end(key)
+    if policy is not None:
+        return replace(policy, metadata=copy.deepcopy(policy.metadata)), None
+    policy, error = _progress_policy_from_payload(path, payload)
+    if cacheable and policy is not None and error is None:
+        snapshot = replace(policy, metadata=copy.deepcopy(policy.metadata))
+        with store._policy_obj_cache_lock:
+            store._policy_obj_cache[key] = (payload, snapshot)
+            store._policy_obj_cache.move_to_end(key)
+            while len(store._policy_obj_cache) > _POLICY_OBJ_CACHE_MAX_ENTRIES_COUNT:
+                store._policy_obj_cache.popitem(last=False)
+    return (replace(policy, metadata=copy.deepcopy(policy.metadata)) if policy is not None else None), error
 
 
 # LLM: 策略解析和建模错误必须保持同一 context、path、policy_id 口径。
@@ -95,13 +121,15 @@ def _read_progress_policy_entry(
 # LLM: 依赖仅为同源目录和线程校验；策略状态不能由模型文案或索引裁决。
 # 类用途: 保存进度策略、投影到期队列并执行原更新和归档操作。
 class ProgressStore:
-    # LLM: 策略落账只依赖原存储与线程校验；调度循环、模型调用和租约均不属于本领域。
-    # 函数用途: 初始化进度策略存取能力，不创建策略或后台任务。
+    # LLM: 原存储/线程校验保持；有界对象memo只省建模，不记录调度或执行权。
+    # 函数用途: 初始化策略存取能力及线程安全的只读对象记忆。
     def __init__(
         self, storage: ConversationStorage, *, require_thread: Callable[[str], ConversationThread]
     ) -> None:
         self.storage = storage
         self._require_thread = require_thread
+        self._policy_obj_cache_lock = threading.RLock()
+        self._policy_obj_cache: OrderedDict[str, tuple[dict[str, Any], ProgressPolicy]] = OrderedDict()
 
     # LLM: 仍创建新的 policy ID，先验证线程后写入原路径，不暗中改成覆盖式 upsert。
     # 函数用途: 为现有线程保存一条新的进度策略。
@@ -135,10 +163,8 @@ class ProgressStore:
         policies, _ = self.list_report(enabled_only=enabled_only)
         return policies
 
-    # LLM: 策略目录原先每轮全量解析(即便只为了 enabled 过滤)。这里用同一份增量索引跳过
-    # 未变化文件的重复解析;enabled 过滤、按 next_due_at 排序、到期筛选仍由调用方按权威
-    # 负载判定,load_error 集合逐条不变。
-    # 函数用途: 列出策略及逐条读错误，复用同源扫描索引。
+    # LLM: 原目录/usable/read调用不变以保留全部metrics；仅有效索引负载复用对象，过滤/排序和坏账继续原口径。
+    # 函数用途: 列出独立策略对象及逐条错误，跳过未变负载的重复建模。
     def list_report(
         self, *, enabled_only: bool = False
     ) -> tuple[list[ProgressPolicy], list[dict[str, Any]]]:
@@ -160,7 +186,7 @@ class ProgressStore:
             policy: ProgressPolicy | None = None
             if payload is not None:
                 # 负载与解析错误互斥,因此这里换成"建模阶段"的同口径错误,一个文件仍只贡献一条错误。
-                policy, error = _progress_policy_from_payload(path, payload)
+                policy, error = _memo_progress_policy(self, path, payload, cacheable=_ok and use_index)
             if policy is not None:
                 policies.append(policy)
             if error is not None:

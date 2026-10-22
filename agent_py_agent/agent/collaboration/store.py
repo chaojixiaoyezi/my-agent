@@ -8,7 +8,10 @@ decisions, and agent capabilities.
 
 from __future__ import annotations
 
+import copy
 import json
+import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -56,6 +59,45 @@ from .request_status import (
 )
 from .store_common import dict_items, now, read_jsonl_report, strings
 from .store_common import now as current_time
+
+_CASE_FILE_CACHE_MAX_ENTRIES_COUNT = 512
+_CASE_FILE_CACHE_LOCK = threading.RLock()
+_CASE_FILE_CACHE: OrderedDict[tuple[str, int, int, int, int], CollaborationCase] = OrderedDict()
+
+
+# LLM: 物理版本仅用于_all_cases只读投影；status更新仍锁内load_case读canonical文件，不复用缓存授权。
+# 函数用途: 生成设备/inode/大小/mtime及路径组成的协作文件键，失败回原读取。
+def _case_file_key(path: Path):
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+# LLM: 只记忆成功且读前后稳定的case；entities/metadata均深拷贝，不把浅replace或空记录当独立快照。
+# 函数用途: 复用未变化协作JSON的建模结果，保持原空值与转换异常语义。
+def _read_cached_case(path: Path) -> CollaborationCase | None:
+    key = _case_file_key(path)
+    with _CASE_FILE_CACHE_LOCK:
+        cached = _CASE_FILE_CACHE.get(key) if key is not None else None
+        if cached is not None:
+            _CASE_FILE_CACHE.move_to_end(key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+    data = read_json_file(path)
+    if not data:
+        return None
+    case = CollaborationCase.from_dict(data)
+    if key is not None and _case_file_key(path) == key:
+        snapshot = copy.deepcopy(case)
+        with _CASE_FILE_CACHE_LOCK:
+            _CASE_FILE_CACHE[key] = snapshot
+            _CASE_FILE_CACHE.move_to_end(key)
+            while len(_CASE_FILE_CACHE) > _CASE_FILE_CACHE_MAX_ENTRIES_COUNT:
+                _CASE_FILE_CACHE.popitem(last=False)
+    return case
+
 
 # ---------------------------------------------------------------------------
 # shared layout
@@ -376,12 +418,16 @@ class CollaborationCaseStore(CollaborationCapabilityStore):
         self._append_status_decision(case_id, canonical_status, kwargs)
         return updated
 
+    # LLM: 原glob成员/排序不变，每次仍观察文件增删；只读投影缓存不参与任何状态更新锁或业务决定。
+    # 函数用途: 枚举所有协作case，复用未变化文件的独立模型快照。
     def _all_cases(self) -> list[CollaborationCase]:
         rows: list[CollaborationCase] = []
+        if not self.cases_dir.exists():
+            return rows
         for path in sorted(self.cases_dir.glob("*.json")):
-            data = read_json_file(path)
-            if data:
-                rows.append(CollaborationCase.from_dict(data))
+            case = _read_cached_case(path)
+            if case is not None:
+                rows.append(case)
         return rows
 
     def _validate_terminal_case_status(self, case_id: str, status_text: str, kwargs: dict[str, Any]) -> None:

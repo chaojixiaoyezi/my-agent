@@ -5,13 +5,17 @@
 # 模块用途: 登记准确任务的外部输入依赖，归档后让出执行，回调或到期通过原唤醒一次恢复。
 from __future__ import annotations
 
+import copy
 import json
 import math
+import threading
 import time
+from collections import OrderedDict
 from contextlib import nullcontext
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from ..common.json_io import (
     locked_json_path,
@@ -23,6 +27,40 @@ from ..user_space.owner_resolver import owner_identity_from_config
 from .input_dependency_index import update_task_input_refs
 
 _TERMINAL_INPUT_STATUSES = frozenset({'ready','cancelled','expired','revoked','failed'})
+_INPUT_DEP_RECORD_CACHE_MAX_ENTRIES_COUNT = 256
+_INPUT_DEP_RECORD_CACHE_LOCK = threading.RLock()
+_INPUT_DEP_RECORD_CACHE: OrderedDict[tuple[str, int, int, int, int], dict[str, Any]] = OrderedDict()
+
+
+# LLM: key只代表本次物理文件版本，不代表输入有效、当前任务或授权；stat失败必须回原reader。
+# 函数用途: 为输入热读取生成包含路径/设备/inode/大小/mtime的缓存键。
+def _input_dependency_record_key(path):
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+# LLM: 仅pending只读热路径复用成功稳定负载；canonical读和RMW不经过缓存，返回深拷贝且current仍逐次核验。
+# 函数用途: 省掉未变化输入文件的重复JSON读取，不缓存错误或空记录。
+def _read_pending_input(path):
+    key = _input_dependency_record_key(path)
+    with _INPUT_DEP_RECORD_CACHE_LOCK:
+        cached = _INPUT_DEP_RECORD_CACHE.get(key) if key is not None else None
+        if cached is not None:
+            _INPUT_DEP_RECORD_CACHE.move_to_end(key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+    report = read_json_object_report(path, context='task_input.pending')
+    if report.payload and not report.load_error and key is not None and _input_dependency_record_key(path) == key:
+        snapshot = copy.deepcopy(report.payload)
+        with _INPUT_DEP_RECORD_CACHE_LOCK:
+            _INPUT_DEP_RECORD_CACHE[key] = snapshot
+            _INPUT_DEP_RECORD_CACHE.move_to_end(key)
+            while len(_INPUT_DEP_RECORD_CACHE) > _INPUT_DEP_RECORD_CACHE_MAX_ENTRIES_COUNT:
+                _INPUT_DEP_RECORD_CACHE.popitem(last=False)
+    return report.payload
 
 
 # LLM: 路径只由原 owner SessionTaskStore 和拒绝式 ID 决定；调用方不能传任意文件位置。
@@ -146,8 +184,8 @@ def reconcile_input_dependencies(agent, *, task_id='', now=None, schedule=True):
     return input_dependency_access(agent).reconcile(task_id, now=now, schedule=schedule)
 
 
-# LLM: 普通输入等待不阻塞新群消息；只给同一准确任务的自动续跑提供结构化静止事实；缺Store的无任务宿主保持无依赖。
-# 函数用途: 沿任务 refs 直接查询必要输入，不扫描整个 owner 的凭据或历史。
+# LLM: 原任务refs/status/armed/current每拍核验，缓存只省输入行I/O，不缓存活动性或授信；canonical与mutate原入口不变。
+# 函数用途: 沿准确任务refs检查等待输入，复用未变文件负载但保留实时任务判据。
 def task_has_waiting_input(agent, task_id):
     store = getattr(agent, 'conversation_store', None)
     tasks = getattr(store, 'tasks', None)
@@ -157,7 +195,7 @@ def task_has_waiting_input(agent, task_id):
     if error or link is None:
         return False
     for input_id in getattr(link, 'input_dependency_refs', ()):
-        row = read_json_object_report(input_dependency_path(agent, input_id), context='task_input.pending').payload
+        row = _read_pending_input(input_dependency_path(agent, input_id))
         if row and row['status'] == 'pending' and row.get('armed') and input_dependency_current(agent, row):
             return True
     return False

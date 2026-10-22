@@ -239,6 +239,22 @@ def _sha256_fd(fd: int) -> str:
     return digest.hexdigest()
 
 
+# LLM: 每次open保留原nofollow/directory与mkdir/ELOOP口径，输入父FD由调用方拥有；本函数只返回新子FD。
+# 函数用途: 按原规则打开或创建单个父目录组件。
+def _open_parent_component(fd: int, seg: str, rel: str, *, create_dirs: bool) -> int:
+    try:
+        return os.open(seg, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+    except OSError as exc:
+        if create_dirs and exc.errno == errno.ENOENT:
+            os.mkdir(seg, dir_fd=fd)
+            return os.open(seg, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        if exc.errno == errno.ELOOP:
+            raise RuntimeConflictError(f"发布路径 {rel!r} 含 symlink 组件: {seg}") from exc
+        raise
+
+
+# LLM: 借入root永不关闭；逐段打开后立即回收上一自有FD，成功只转交末级，异常/中断回收当前自有FD；路径拒绝和nofollow不变。
+# 函数用途: 安全解析发布父目录并消除多级路径的中间FD泄漏。
 def _resolve_parent_fd(root_fd: int, rel: str, *, create_dirs: bool) -> tuple[int, str]:
     """G3 补：从根 fd 逐段 openat（O_NOFOLLOW|O_DIRECTORY）到 rel 的父目录。
 
@@ -257,17 +273,16 @@ def _resolve_parent_fd(root_fd: int, rel: str, *, create_dirs: bool) -> tuple[in
     if not parts or parts[0] == "" or any(seg in ("", ".", "..") for seg in parts):
         raise RuntimeConflictError(f"发布路径非法段: {rel!r}")
     fd = root_fd
-    for seg in parts[:-1]:
-        try:
-            fd = os.open(seg, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        except OSError as exc:
-            if create_dirs and exc.errno == errno.ENOENT:
-                os.mkdir(seg, dir_fd=fd)
-                fd = os.open(seg, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                continue
-            if exc.errno == errno.ELOOP:
-                raise RuntimeConflictError(f"发布路径 {rel!r} 含 symlink 组件: {seg}") from exc
-            raise
+    try:
+        for seg in parts[:-1]:
+            next_fd = _open_parent_component(fd, seg, rel, create_dirs=create_dirs)
+            previous_fd, fd = fd, next_fd
+            if previous_fd != root_fd:
+                os.close(previous_fd)
+    except BaseException:
+        if fd != root_fd:
+            os.close(fd)
+        raise
     name = parts[-1]
     if name in ("", ".", ".."):
         raise RuntimeConflictError(f"发布路径非法末段: {rel!r}")

@@ -449,6 +449,8 @@ def test_observation_report_matches_across_index_states(tmp_path) -> None:
     assert _tree_signature(root) == cold_before
 
 
+# LLM: 热handled文件也应按指纹命中，但坏观察分片仍逐次回读；这是更严格的零重复JSON读取合同。
+# 函数用途: 核对原handled优化升级后只重读脏分片，不削弱ScanIndex指标。
 def test_observation_hot_path_reads_handled_map_once(tmp_path, monkeypatch) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     warm = ConversationStore(root)
@@ -463,10 +465,8 @@ def test_observation_hot_path_reads_handled_map_once(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(Path, "read_text", counting)
     _observation_snapshot(warm)
-    # 旧实现每个分片都要重读一次 observation_handled.json(夹具里 5 个分片 = 5 次);
-    # 现在整轮只读 1 次,干净分片在热索引下不再读取。带脏行的 thread-dirty.jsonl 必须
-    # 每轮回权威读取(脏快照不入索引),这是"索引绝不固化解析失败"的直接证据。
-    assert reads == ["observation_handled.json", "thread-dirty.jsonl"], reads
+    # 未变化的handled映射也不再读JSON；脏快照依然不入索引，每轮回权威读取。
+    assert reads == ["thread-dirty.jsonl"], reads
 
 
 def test_progress_policy_report_matches_across_index_states(tmp_path) -> None:
@@ -1284,3 +1284,391 @@ def test_reclaim_dead_running_runs_passes_all_tasks_for_host_pid_veto(monkeypatc
     )
     capability_auto_sweep._reclaim_dead_running_runs(agent)
     assert captured_host_pids == [set()]
+
+
+# LLM: 包装真实from_dict及原转换器，只计数不模拟业务结果；ScanIndex读口保持原调用。
+# 函数用途: 为planner记忆化测试记录一次真实建模调用。
+def _planner_model_spy(monkeypatch, target, name):
+    original = getattr(target, name)
+    calls = []
+
+    # LLM: 原返回和异常不变，不把spy调用当作业务成功。
+    # 函数用途: 收集建模参数并透传真实函数。
+    def count(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, name, count)
+    return calls
+
+
+# LLM: handled变化必须立即使分片事件memo失效，零处理时间仍沿原handled_at<=0语义；返回metadata不可污染原负载。
+# 函数用途: 核对观察模型只建一次、确认即时可见及ScanIndex逐轮命中指标。
+def test_planner_memo_observations_and_handled_updates(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.models import ObservationEvent
+
+    store = ConversationStore(tmp_path / 'conversations')
+    rows = [_observation_row('live'), _observation_row('zero'), _observation_row('self-handled', handled_at=5)]
+    _seed_observations(store.storage.root, 'thread-1', rows)
+    store.storage.observation_handled_path.write_text('{"zero": 0}', encoding='utf-8')
+    calls = _planner_model_spy(monkeypatch, ObservationEvent, 'from_dict')
+    first = store.observations.unhandled_requiring_main(limit=0)
+    assert [item.observation_id for item in first] == ['live', 'zero']
+    assert len(calls) == 3
+    first[0].metadata['seed'] = 'caller'
+    assert store.observations.unhandled_requiring_main(limit=0)[0].metadata == {'seed': 'live'}
+    assert len(calls) == 3
+    assert _index_stats(store, 'observations')['hits'] == 1
+    store.observations.mark_handled(['live'], now=10)
+    assert [item.observation_id for item in store.observations.unhandled_requiring_main(limit=0)] == ['zero']
+    assert len(calls) == 6
+    assert _index_stats(store, 'observations')['hits'] == 2
+    _seed_observations(store.storage.root, 'thread-1', [*rows, _observation_row('new')])
+    assert [item.observation_id for item in store.observations.unhandled_requiring_main(limit=0)] == ['zero', 'new']
+    assert len(calls) == 10
+
+
+# LLM: 缺失/错误handled文件不得复用上次处理代次；读取窗口内变化也不可发布成稳定缓存。
+# 函数用途: 检查处理标记被删除、损坏和恢复时沿原空映射语义即时失效。
+def test_planner_memo_handled_missing_corrupt_and_restored(tmp_path):
+    store = ConversationStore(tmp_path / 'conversations')
+    _seed_observations(store.storage.root, 'thread-1', [_observation_row('event')])
+    store.observations.mark_handled(['event'], now=10)
+    assert store.observations.unhandled_requiring_main() == []
+    for text in ['{broken', '{}', '{"event": 10}']:
+        store.storage.observation_handled_path.write_text(text, encoding='utf-8')
+        expected = [] if text == '{"event": 10}' else ['event']
+        assert [item.observation_id for item in store.observations.unhandled_requiring_main()] == expected
+    store.storage.observation_handled_path.unlink()
+    assert [item.observation_id for item in store.observations.unhandled_requiring_main()] == ['event']
+
+
+# LLM: 现有wake全局模型缓存不能代替本次对象转换器memo；两类ScanIndex每拍read仍须原样计数。
+# 函数用途: 验证策略/wake转换器热拍不再调用，外部更新、错误与返回字典隔离不变。
+@pytest.mark.parametrize('kind', ['policy', 'wake'])
+def test_planner_memo_models_preserve_metrics_and_errors(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.conversation import store_progress, store_wakes
+
+    store = ConversationStore(tmp_path / 'conversations')
+    if kind == 'policy':
+        path = _seed_policy(store.storage.root, 'policy-one')
+        target, helper, index_name = store_progress, '_progress_policy_from_payload', 'progress_policies'
+        query = store.progress.list_report
+        numeric_field = 'next_due_at'
+    else:
+        path = _seed_wake(store.storage.root, 'urgent', 'wake-one')
+        target, helper, index_name = store_wakes, '_wake_signal_from_payload', 'wake:urgent'
+        query = store.wakes.pending_report
+        numeric_field = 'created_at'
+    calls = _planner_model_spy(monkeypatch, target, helper)
+    first, errors = query()
+    assert not errors and len(first) == 1 and len(calls) == 1
+    first[0].metadata['seed'] = 'caller'
+    again, errors = query()
+    assert not errors and again[0].metadata['seed'] != 'caller'
+    assert len(calls) == 1
+    assert _index_stats(store, index_name)['hits'] == 1
+    data = json.loads(path.read_text())
+    data[numeric_field] = 'not-a-number'
+    path.write_text(json.dumps(data), encoding='utf-8')
+    failures = [query()[1] for _ in range(2)]
+    assert failures[0] and failures[0] == failures[1]
+    assert len(calls) == 3
+    data[numeric_field] = 50
+    path.write_text(json.dumps(data), encoding='utf-8')
+    assert len(query()[0]) == 1
+    assert len(query()[0]) == 1
+    assert len(calls) == 4
+    _disable_index(store, index_name)
+    query()
+    query()
+    assert len(calls) == 6
+
+
+# LLM: 输入缓存只能省JSON读取，current/armed/status判据仍每次执行，不缓存任务授权或等待决定。
+# 函数用途: 构造真实输入文件及最小task refs，记录读盘次数和current检查次数。
+@pytest.fixture
+def planner_input_case(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import input_dependencies as module
+
+    store = ConversationStore(tmp_path / 'conversations')
+    link = SimpleNamespace(input_dependency_refs=('input-one',))
+    store.tasks.load_report = lambda task_id: (link, None)
+    agent = SimpleNamespace(conversation_store=store)
+    path = module.input_dependency_path(agent, 'input-one')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"status":"pending","armed":true,"metadata":{"nested":[1]}}', encoding='utf-8')
+    reads = _planner_model_spy(monkeypatch, module, 'read_json_object_report')
+    current = []
+
+    # LLM: 只替代与此缓存无关的owner/子任务核验资源，实际pending读取及其记录仍走产品入口。
+    # 函数用途: 检查每拍拿到的metadata独立，并动态模拟原任务已结束。
+    def is_current(agent, row):
+        assert row['metadata']['nested'] == [1]
+        row['metadata']['nested'].append('caller')
+        current.append(row)
+        return len(current) <= 2
+
+    monkeypatch.setattr(module, 'input_dependency_current', is_current)
+    return SimpleNamespace(module=module, agent=agent, path=path, link=link, reads=reads, current=current)
+
+
+# LLM: 连续热拍仍须核验current；缓存输入payload必须深拷贝，不让嵌套scope/metadata成为共享状态。
+# 函数用途: 核对输入只读一次但每拍重新检查任务活动性。
+def test_planner_memo_input_reads_once_but_checks_current_each_time(planner_input_case):
+    case = planner_input_case
+    assert case.module.task_has_waiting_input(case.agent, 'task-one')
+    assert case.module.task_has_waiting_input(case.agent, 'task-one')
+    assert not case.module.task_has_waiting_input(case.agent, 'task-one')
+    assert len(case.current) == 3 and len(case.reads) == 1
+
+
+# LLM: 真实改写/坏JSON/缺失文件不能由旧输入快照掩盖，不缓存空值或失败。
+# 函数用途: 核对输入完成、损坏与删除立即退出等待判定。
+def test_planner_memo_input_invalidation(planner_input_case):
+    case = planner_input_case
+    assert case.module.task_has_waiting_input(case.agent, 'task-one')
+    for text in ['{"status":"ready","armed":true}', '{broken', '{}']:
+        case.path.write_text(text, encoding='utf-8')
+        assert not case.module.task_has_waiting_input(case.agent, 'task-one')
+    case.path.unlink()
+    assert not case.module.task_has_waiting_input(case.agent, 'task-one')
+
+
+# LLM: 协作快照的entities/metadata均可变，不能只replace浅拷贝；另一个Store须共享文件命中而非状态决定。
+# 函数用途: 验证case热读不再解析JSON，状态改写及目录增删仍即时可见。
+def test_planner_memo_collaboration_case_reads_and_isolation(tmp_path, monkeypatch):
+    from agent_py_agent.agent.collaboration.store import CollaborationCaseStore
+
+    store = CollaborationCaseStore(tmp_path / 'collaboration')
+    case = store.open_case({'thread_id': 'thread-one', 'entities': {'rows': [1]}, 'metadata': {'rows': [2]}})
+    reads = []
+    original = Path.read_text
+
+    # LLM: 只计数case JSON文件，透传真实reader的锁/解析及错误。
+    # 函数用途: 记录协作目录的物理读取，不干涉其它账本。
+    def read(path, *args, **kwargs):
+        if path.parent == store.cases_dir:
+            reads.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read)
+    first = store.list_cases(status='open')[0]
+    first.entities['rows'].append('caller')
+    first.metadata['rows'].append('caller')
+    again = CollaborationCaseStore(store.root).list_cases(status='open')[0]
+    assert again.entities == {'rows': [1]} and again.metadata == {'rows': [2]}
+    assert len(reads) == 1
+    path = store._case_path(case.case_id)
+    data = json.loads(original(path))
+    data['status'] = 'closed'
+    path.write_text(json.dumps(data), encoding='utf-8')
+    assert store.list_cases(status='open') == []
+    assert len(reads) == 2
+    path.unlink()
+    assert store.list_cases() == []
+    path.write_text('{broken', encoding='utf-8')
+    assert store.list_cases() == []
+    path.write_text(json.dumps(data), encoding='utf-8')
+    assert store.list_cases()[0].status == 'closed'
+
+
+# LLM: 只追踪产品openat获得的真实FD，保留真实nofollow/dir_fd；失败的红灯测试也回收泄漏，不能污染后续用例。
+# 函数用途: 为目录FD测试记录当前仍持有的中间句柄，并在结束时清理自有资源。
+@pytest.fixture
+def planner_directory_fds(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.runtime_db import operations
+
+    root_fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    active = set()
+    original_open, original_close = os.open, os.close
+
+    # LLM: openat仍由内核执行；每段必须带nofollow和directory，不允许修泄漏时放松路径隔离。
+    # 函数用途: 记录实际打开的子目录FD。
+    def opened(path, flags, *args, **kwargs):
+        if kwargs.get('dir_fd') is not None:
+            assert flags & os.O_NOFOLLOW and flags & os.O_DIRECTORY
+        fd = original_open(path, flags, *args, **kwargs)
+        if kwargs.get('dir_fd') is not None:
+            active.add(fd)
+        return fd
+
+    # LLM: 只在真实close成功后移除记录；根FD由fixture所有，不属于产品函数。
+    # 函数用途: 跟踪产品回收过的FD。
+    def closed(fd):
+        original_close(fd)
+        active.discard(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(operations.os, 'open', opened)
+        patch.setattr(operations.os, 'close', closed)
+        try:
+            yield SimpleNamespace(module=operations, root_fd=root_fd, active=active, root=tmp_path)
+        finally:
+            for fd in list(active):
+                original_close(fd)
+            original_close(root_fd)
+
+
+# LLM: 走真实多级openat，成功只向调用方移交末级父FD，根FD必须仍有效。
+# 函数用途: 检查已有和自动创建的三层目录都不泄漏中间FD。
+@pytest.mark.parametrize('create_dirs', [False, True])
+def test_planner_memo_parent_fd_success_closes_intermediates(planner_directory_fds, create_dirs):
+    from pathlib import PurePosixPath
+
+    case = planner_directory_fds
+    if not create_dirs:
+        (case.root / 'a' / 'b' / 'c').mkdir(parents=True)
+    parent, leaf = case.module._resolve_parent_fd(
+        case.root_fd, PurePosixPath('a/b/c/file.json').as_posix(), create_dirs=create_dirs,
+    )
+    assert leaf == 'file.json' and case.active == {parent}
+    assert os.fstat(case.root_fd).st_ino == case.root.stat().st_ino
+    assert os.fstat(parent).st_ino == (case.root / 'a' / 'b' / 'c').stat().st_ino
+    os.close(parent)
+    assert case.active == set()
+    assert case.module._resolve_parent_fd(case.root_fd, 'file.json', create_dirs=False) == (case.root_fd, 'file.json')
+
+
+# LLM: 打开后续目录失败、nofollow拒绝和异步中断都不能漏掉已打开的父FD，也不能关闭借入的根。
+# 函数用途: 验证多级路径三类异常分支的FD所有权。
+@pytest.mark.parametrize('failure', ['missing', 'symlink', 'interrupt'])
+def test_planner_memo_parent_fd_failure_closes_intermediates(planner_directory_fds, monkeypatch, failure):
+    case = planner_directory_fds
+    (case.root / 'a' / 'b').mkdir(parents=True)
+    if failure == 'symlink':
+        (case.root / 'elsewhere').mkdir()
+        (case.root / 'a' / 'b' / 'c').symlink_to(case.root / 'elsewhere', target_is_directory=True)
+    if failure == 'interrupt':
+        original = case.module.os.open
+
+        # LLM: 在第三次open之前确定性中断，前两层仍由真实内核打开，不把stub计数当FD回收。
+        # 函数用途: 注入非普通Exception中断以核对资源清理。
+        def interrupted(path, *args, **kwargs):
+            if path == 'c':
+                raise KeyboardInterrupt('directory probe interrupted')
+            return original(path, *args, **kwargs)
+
+    error = KeyboardInterrupt if failure == 'interrupt' else (OSError, case.module.RuntimeConflictError)
+    with monkeypatch.context() as patch:
+        if failure == 'interrupt':
+            patch.setattr(case.module.os, 'open', interrupted)
+        with pytest.raises(error):
+            case.module._resolve_parent_fd(case.root_fd, 'a/b/c/file.json', create_dirs=False)
+    assert case.active == set()
+    assert os.fstat(case.root_fd).st_ino == case.root.stat().st_ino
+
+
+# LLM: 任务明确要求handled_fp非空才能复用；缺失不能与权限/解析失败混成一个可缓存空版本。
+# 函数用途: 锁住无处理文件时保守重建、建文件后即时失效并恢复热命中的边界。
+def test_planner_memo_missing_handled_keeps_authoritative_fallback(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.models import ObservationEvent
+
+    store = ConversationStore(tmp_path / 'conversations')
+    _seed_observations(store.storage.root, 'thread-1', [_observation_row('event')])
+    calls = _planner_model_spy(monkeypatch, ObservationEvent, 'from_dict')
+    for _ in range(2):
+        assert [item.observation_id for item in store.observations.unhandled_requiring_main()] == ['event']
+    assert len(calls) == 2
+    assert store.observations._handled_cache_fp is None
+    store.observations.mark_handled(['event'], now=10)
+    assert store.observations.unhandled_requiring_main() == []
+    assert store.observations.unhandled_requiring_main() == []
+    assert len(calls) == 3
+
+
+# LLM: 读前后版本不同时不能把旧handled映射关联到新版本，避免后续热拍错误地保留已处理事件。
+# 函数用途: 用真实原读取器加窗口内改写验证处理回执只发布稳定快照。
+def test_planner_memo_handled_changed_during_read_is_not_cached(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import store_observations as module
+
+    store = ConversationStore(tmp_path / 'conversations')
+    _seed_observations(store.storage.root, 'thread-1', [_observation_row('event')])
+    path = store.storage.observation_handled_path
+    path.write_text('{}', encoding='utf-8')
+    original = module.read_json_file_report
+    reads = []
+
+    # LLM: 在真实读取结束后、产品取第二次指纹前改写文件，保留原返回而制造真实版本窗口。
+    # 函数用途: 确定性模拟同时到来的处理确认。
+    def changing(target):
+        report = original(target)
+        reads.append(target)
+        if len(reads) == 1:
+            target.write_text('{"event":10}', encoding='utf-8')
+        return report
+
+    monkeypatch.setattr(module, 'read_json_file_report', changing)
+    assert len(store.observations.unhandled_requiring_main()) == 1
+    assert store.observations._handled_cache_fp is None
+    assert store.observations.unhandled_requiring_main() == []
+    assert store.observations.unhandled_requiring_main() == []
+    assert len(reads) == 2
+
+
+# LLM: 每种对象memo单独缩小预算验证边界，不改变生产索引预算；保留真实文件轮换和真实查询入口。
+# 函数用途: 验证观察、策略和唤醒对象memo不会随历史路径无限增长。
+@pytest.mark.parametrize('kind', ['observation', 'policy', 'wake'])
+def test_planner_memo_model_caches_are_bounded(tmp_path, monkeypatch, kind):
+    from agent_py_agent.agent.conversation import store_observations, store_progress, store_wakes
+
+    store = ConversationStore(tmp_path / 'conversations')
+    store.storage.observation_handled_path.write_text('{}', encoding='utf-8')
+    specs = {
+        'observation': (store_observations, '_SHARD_MAIN_EVENTS_CACHE_MAX_ENTRIES_COUNT', store.observations, '_shard_main_events_cache'),
+        'policy': (store_progress, '_POLICY_OBJ_CACHE_MAX_ENTRIES_COUNT', store.progress, '_policy_obj_cache'),
+        'wake': (store_wakes, '_WAKE_OBJ_CACHE_MAX_ENTRIES_COUNT', store.wakes, '_wake_obj_cache'),
+    }
+    module, limit_name, domain, cache_name = specs[kind]
+    monkeypatch.setattr(module, limit_name, 2)
+    cache = getattr(domain, cache_name)
+    previous = None
+    for position in range(4):
+        if previous is not None:
+            previous.unlink()
+        name = f'{kind}-{position}'
+        if kind == 'observation':
+            previous = _seed_observations(store.storage.root, name, [_observation_row(name, thread_id=name)])
+            assert len(domain.unhandled_requiring_main()) == 1
+        elif kind == 'policy':
+            previous = _seed_policy(store.storage.root, name)
+            assert len(domain.list_report()[0]) == 1
+        else:
+            previous = _seed_wake(store.storage.root, 'urgent', name)
+            assert len(domain.pending_report()[0]) == 1
+        assert str(previous) in cache
+        assert len(cache) <= 2
+    assert len(cache) == 2
+
+
+# LLM: 缩小输入LRU上限但不替代真实reader；refs轮换后旧key必须可淘汰，current仍由原测试探针每次检查。
+# 函数用途: 验证输入文件缓存的条目上界。
+def test_planner_memo_input_cache_is_bounded(planner_input_case, monkeypatch):
+    case = planner_input_case
+    monkeypatch.setattr(case.module, '_INPUT_DEP_RECORD_CACHE_MAX_ENTRIES_COUNT', 2)
+    text = case.path.read_text()
+    for position in range(4):
+        input_id = f'input-{position}'
+        path = case.module.input_dependency_path(case.agent, input_id)
+        path.write_text(text, encoding='utf-8')
+        case.link.input_dependency_refs = (input_id,)
+        case.module.task_has_waiting_input(case.agent, 'task-one')
+        assert len(case.module._INPUT_DEP_RECORD_CACHE) <= 2
+    assert len(case.module._INPUT_DEP_RECORD_CACHE) == 2
+
+
+# LLM: 协作缓存按全模块预算淘汰，不能因每秒重建Store累积文件版本；仍走真实open_case/list_cases。
+# 函数用途: 验证跨Store协作对象缓存的硬上界。
+def test_planner_memo_case_cache_is_bounded(tmp_path, monkeypatch):
+    from agent_py_agent.agent.collaboration import store as module
+
+    monkeypatch.setattr(module, '_CASE_FILE_CACHE_MAX_ENTRIES_COUNT', 2)
+    store = module.CollaborationCaseStore(tmp_path / 'collaboration')
+    for position in range(4):
+        store.open_case({'thread_id': 'thread-one', 'title': str(position)})
+    assert len(store.list_cases()) == 4
+    assert len(module._CASE_FILE_CACHE) == 2

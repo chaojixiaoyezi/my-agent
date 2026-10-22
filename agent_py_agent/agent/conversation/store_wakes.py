@@ -105,6 +105,7 @@ def _read_wake_signal_payload(path: Path) -> tuple[dict[str, Any] | None, dict[s
 _WAKE_SIGNAL_MODEL_CACHE_MAX_ENTRIES_COUNT = 8192
 _WAKE_SIGNAL_MODEL_CACHE_LOCK = threading.Lock()
 _WAKE_SIGNAL_MODEL_CACHE: OrderedDict[str, tuple[dict[str, Any], WakeSignal]] = OrderedDict()
+_WAKE_OBJ_CACHE_MAX_ENTRIES_COUNT = 512
 
 
 # LLM: WakeSignal 的 metadata 为可变字典；缓存保存与返回边界必须克隆该字典，防止调用方原地修改污染增量索引或模型缓存。
@@ -146,6 +147,27 @@ def _wake_signal_from_payload(
         return None, report
 
 
+# LLM: 必须在原ScanIndex.read之后按强引用payload身份命中，错误沿原转换器逐次报告；与既有全局模型缓存不共享返回字典。
+# 函数用途: 跳过热队列重复转换器调用，返回独立唤醒快照。
+def _memo_wake_signal(store, path, payload, *, cacheable):
+    key = str(path)
+    with store._wake_obj_cache_lock:
+        cached = store._wake_obj_cache.get(key) if cacheable else None
+        signal = cached[1] if cached is not None and cached[0] is payload else None
+        if signal is not None:
+            store._wake_obj_cache.move_to_end(key)
+    if signal is not None:
+        return _clone_cached_wake_signal(signal), None
+    signal, error = _wake_signal_from_payload(path, payload)
+    if cacheable and signal is not None and error is None:
+        with store._wake_obj_cache_lock:
+            store._wake_obj_cache[key] = (payload, signal)
+            store._wake_obj_cache.move_to_end(key)
+            while len(store._wake_obj_cache) > _WAKE_OBJ_CACHE_MAX_ENTRIES_COUNT:
+                store._wake_obj_cache.popitem(last=False)
+    return (_clone_cached_wake_signal(signal) if signal is not None else None), error
+
+
 # LLM: 该读取器只解析不改语义:负载就是磁盘字节的 json.loads 结果,错误就是旧
 # _read_wake_signal 的同一份结构化报告,因此增量索引缓存的正是权威读取事实。
 # 函数用途: 增量索引与全量扫描共用的读取器,统一 (ok, 负载, 错误) 形状;解析失败时 ok=False。
@@ -159,8 +181,8 @@ def _read_wake_signal_entry(
 # LLM: 显式复用 storage 与线程/观察回调；发布、去重、冻结及确认顺序必须联测。
 # 类用途: 保存唤醒和处理回执，准确原任务的认证义务与投递冻结同沿此账，不新建通知队列。
 class WakeStore:
-    # LLM: 唤醒只接收线程校验/活动更新和观察确认；发布顺序保持，不能反向访问整个 Store。
-    # 函数用途: 连接原唤醒队列及跨领域回调，并挂上毒丸尝试账子对象 attempts；不注册调度任务或发起模型请求。
+    # LLM: 原回调/发布顺序及attempts保持；对象memo有界且只读，不授予唤醒或消费权限。
+    # 函数用途: 连接原唤醒队列、回调和尝试账，初始化热拍对象记忆。
     def __init__(
         self,
         storage: ConversationStorage,
@@ -175,6 +197,8 @@ class WakeStore:
         self._require_thread = require_thread
         self._update_thread_atomic = update_thread_atomic
         self._mark_observations_handled = mark_observations_handled
+        self._wake_obj_cache_lock = threading.RLock()
+        self._wake_obj_cache: OrderedDict[str, tuple[dict[str, Any], WakeSignal]] = OrderedDict()
         # 毒丸尝试账、结案与重放挂在子对象上；pending 定位与观察结案沿用本类同一实现；
         # 读不出信封时按观察记录上的 wake_signal_id 结观察的回调由 ConversationStore 经 attempts.bind_wake_observation_settler 绑定。
         self.attempts = WakeAttemptStore(
@@ -398,11 +422,8 @@ class WakeStore:
             None,
         )
 
-    # LLM: 唤醒队列的每轮全量解析在这里收敛为增量索引:未变化文件复用上次权威读取的负载,
-    # 变化/新增文件仍按 _read_wake_signal_payload + _wake_signal_from_payload 同路解析。
-    # load_error 集合必须逐条保持原样——runtime/guidance 消费方以"有 load_error 就不消费"
-    # 作硬门,因此失败文件的结构化错误同样被索引缓存,不得被跳过。
-    # 函数用途: 读取一个队列的 pending 信号和错误，复用同源增量索引。
+    # LLM: 原索引调用/metrics和load_error硬门不变；对象memo仅省成功负载转换，异常仍沿原转换器。
+    # 函数用途: 读取原队列pending信号和错误，热拍复用独立模型快照。
     def _pending_kind_report(self, kind: str) -> tuple[list[WakeSignal], list[dict[str, Any]]]:
         signals: list[WakeSignal] = []
         load_errors: list[dict[str, Any]] = []
@@ -426,7 +447,7 @@ class WakeStore:
                 load_errors.append(error)
             if payload is None:
                 continue
-            signal, signal_error = _wake_signal_from_payload(path, payload)
+            signal, signal_error = _memo_wake_signal(self, path, payload, cacheable=_ok and use_index)
             if signal_error is not None:
                 load_errors.append(signal_error)
                 continue

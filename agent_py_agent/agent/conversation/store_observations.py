@@ -2,7 +2,10 @@
 # 模块用途: 保存观察事件、读取近期或待处理事实，并原子更新处理时间和线程活动投影。
 from __future__ import annotations
 
+import copy
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -10,7 +13,7 @@ from typing import Any
 
 from ..common.json_io import append_private_jsonl_records
 from ..gateway_parts.io import (
-    read_json_file,
+    read_json_file_report,
     update_json_file_atomic,
 )
 from ..runtime_errors import runtime_error_report
@@ -19,11 +22,42 @@ from .models import (
     ObservationEvent,
     new_id,
 )
+from .store_index import _file_fingerprint
 from .store_io import (
     now,
     read_jsonl_report,
 )
 from .store_layout import ConversationStorage
+
+_SHARD_MAIN_EVENTS_CACHE_MAX_ENTRIES_COUNT = 512
+
+
+# LLM: 事件冻结不代表metadata不可变；只复制可变成员，不重新from_dict，也不暴露索引原始负载。
+# 函数用途: 返回独立的观察对象列表，防止调用方污染分片记忆。
+def _clone_main_events(events: tuple[ObservationEvent, ...]) -> list[ObservationEvent]:
+    return [replace(event, metadata=copy.deepcopy(event.metadata) if event.metadata else {}) for event in events]
+
+
+# LLM: 原ScanIndex读口之后才可复用；强持rows并用is判同一负载，避免裸id复用；错误/未知handled版本不记忆。
+# 函数用途: 复用稳定分片的未处理主代理事件，保持原handled_at和requires过滤。
+def _memo_main_events(store, path, rows, handled, handled_fp, *, cacheable):
+    key = str(path)
+    with store._memo_lock:
+        cached = store._shard_main_events_cache.get(key) if cacheable and handled_fp is not None else None
+        snapshot = cached[2] if cached is not None and cached[0] is rows and cached[1] == handled_fp else None
+        if snapshot is not None:
+            store._shard_main_events_cache.move_to_end(key)
+    if snapshot is not None:
+        return _clone_main_events(snapshot)
+    parsed, errors = _observation_events(rows or [], handled)
+    snapshot = tuple(event for event in parsed if event.handled_at <= 0 and (event.requires_main_agent or event.requires_llm_report))
+    if cacheable and handled_fp is not None and not errors:
+        with store._memo_lock:
+            store._shard_main_events_cache[key] = (rows, handled_fp, snapshot)
+            store._shard_main_events_cache.move_to_end(key)
+            while len(store._shard_main_events_cache) > _SHARD_MAIN_EVENTS_CACHE_MAX_ENTRIES_COUNT:
+                store._shard_main_events_cache.popitem(last=False)
+    return _clone_main_events(snapshot)
 
 
 # LLM: 处理账是唯一确认源，观察行不被回写或复制。
@@ -129,8 +163,8 @@ def _read_observation_shard_entry(
 # LLM: 只拥有观察账和处理回执；线程活动修改使用注入的原子更新能力。
 # 类用途: 提供观察追加、近期读取、待处理扫描和确认接口。
 class ObservationStore:
-    # LLM: 观察与活动投影共用原文件和线程更新回调；构造不创建第二份处理状态。
-    # 函数用途: 为观察事件提供同源存储和线程存在校验、原子活动时间更新能力。
+    # LLM: 观察与活动仍沿原文件；处理和分片memo仅为有界派生投影，RLock绑定处理数据与指纹，不产生处理权威。
+    # 函数用途: 连接原观察存储与线程回调，初始化只读热拍记忆。
     def __init__(
         self,
         storage: ConversationStorage,
@@ -143,6 +177,10 @@ class ObservationStore:
         self.storage = storage
         self._require_thread = require_thread
         self._update_thread_atomic = update_thread_atomic
+        self._memo_lock = threading.RLock()
+        self._handled_cache_fp: tuple[int, int, int, int] | None = None
+        self._handled_cache_data: dict[str, float] = {}
+        self._shard_main_events_cache: OrderedDict[str, tuple[list, tuple[int, int, int, int], tuple[ObservationEvent, ...]]] = OrderedDict()
 
     # LLM: Observation append owns its ledger row and activity time only; other thread fields are
     # preserved by the atomic latest-record updater.
@@ -198,12 +236,12 @@ class ObservationStore:
         selected = events if limit <= 0 else events[-limit:]
         return selected, [*report.load_errors, *parse_errors]
 
-    # LLM: 观察事件是全 owner 级台账,轮询路径每轮都要读全部未处理项;这里把"每分片重复
-    # 读取 handled 映射"收敛为一次读取,并用增量索引跳过未变化分片的重复解析。返回集合、
-    # 顺序(先全序 stable sort 再 limit)、handled/requires_* 过滤语义与旧实现逐字一致。
-    # 函数用途: 汇总所有会话里要求主代理处理且尚未处理的观察事件,按观察时间升序取前 limit 条。
+    # LLM: 每轮仍完整调用原索引以保持metrics；处理数据与版本同锁取快照，分片memo只省建模，排序/limit不变。
+    # 函数用途: 汇总未处理主代理观察，复用未变化分片但即时反映处理标记。
     def unhandled_requiring_main(self, *, limit: int = 20) -> list[ObservationEvent]:
-        handled = self._read_handled()
+        with self._memo_lock:
+            handled = self._read_handled()
+            handled_fp = self._handled_cache_fp
         index = self.storage.indexes.get("observations")
         paths = index.ordered_paths(self.storage.observations_dir, "*.jsonl")
         use_index = self.storage.indexes.usable(
@@ -220,13 +258,8 @@ class ObservationStore:
                 _read_observation_shard_entry,
                 use_index=use_index,
             )
-            parsed, _parse_errors = _observation_events(rows or [], handled)
-            events.extend(
-                event
-                for event in parsed
-                if event.handled_at <= 0
-                and (event.requires_main_agent or event.requires_llm_report)
-            )
+            events.extend(_memo_main_events(self, target, rows, handled, handled_fp,
+                                           cacheable=_ok and use_index and rows is not None))
         events.sort(key=lambda item: item.observed_at)
         return events if limit <= 0 else events[:limit]
 
@@ -261,13 +294,23 @@ class ObservationStore:
                 lambda data: {**data, **dict.fromkeys(ids, current)},
             )
 
-    # LLM: 按原规则读取数字确认时间，不从报告或摘要推断消费状态。
-    # 函数用途: 加载已有观察处理回执，供读取投影和未处理扫描共用。
+    # LLM: 原数字时间规则不变；仅成功且读前后指纹稳定才记忆，异常/缺失先清版本，绝不复用旧处理代次。
+    # 函数用途: 读取处理回执或克隆未变映射，保持坏值忽略和读取失败空结果语义。
     def _read_handled(self) -> dict[str, float]:
-        handled: dict[str, float] = {}
-        for key, value in read_json_file(self.storage.observation_handled_path).items():
-            try:
-                handled[str(key)] = float(value or 0.0)
-            except (TypeError, ValueError):
-                continue
-        return handled
+        with self._memo_lock:
+            path = self.storage.observation_handled_path
+            fp = _file_fingerprint(path)
+            if fp is not None and fp == self._handled_cache_fp:
+                return dict(self._handled_cache_data)
+            self._handled_cache_fp = None
+            report = read_json_file_report(path)
+            handled: dict[str, float] = {}
+            for key, value in report.payload.items():
+                try:
+                    handled[str(key)] = float(value or 0.0)
+                except (TypeError, ValueError):
+                    continue
+            if not report.load_error and fp is not None and _file_fingerprint(path) == fp:
+                self._handled_cache_fp = fp
+                self._handled_cache_data = dict(handled)
+            return handled
