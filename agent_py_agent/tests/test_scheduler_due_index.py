@@ -210,9 +210,9 @@ def test_gateway_due_controller_records_only_claimed_scoped_owners(monkeypatch, 
     ]
 
 
-@pytest.mark.parametrize("replacement", ["deleted", "replaced", "empty"])
 # LLM: spy只记录真实SQLite连接；同文件热构造零连接，新inode/删除/截断必须重新初始化。
 # 函数用途: 验证schema缓存命中与数据库文件换代失效，不绕过实际建表和查询。
+@pytest.mark.parametrize("replacement", ["deleted", "replaced", "empty"])
 def test_scaling_d_schema_cache_skips_connect_and_reinitializes(tmp_path, monkeypatch, replacement):
     import sqlite3
 
@@ -312,6 +312,8 @@ def test_scaling_d_schema_replacement_during_cache_publication(tmp_path, monkeyp
     conn.close()
     swapped = False
 
+    # LLM: 包装真实 sqlite3.Connection，在 close 时注入一次性数据库文件替换，模拟跨进程并发换代。
+    # 类用途: 提供可拦截关闭时序的测试 SQLite 连接子类。
     class ReplacingConnection(sqlite3.Connection):
         # LLM: 先关闭已验证的真实连接，再替换路径；模拟另一个进程在发布窗口换文件。
         # 函数用途: 注入一次确定性的数据库文件换代。

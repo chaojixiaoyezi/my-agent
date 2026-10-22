@@ -245,9 +245,9 @@ def test_ctrlo_search_memo_preserves_navigation_and_rechecks_new_lines(monkeypat
     assert state._matches_lines is None
 
 
-@pytest.mark.parametrize('active_tail', [False, True])
 # LLM: 必须穿过真实provider失效/重渲染入口；只在同一个人工frame上测n/N会漏掉命中被重置的回归。
 # 函数用途: 验证搜索提交和导航触发重绘后仍停在选中的命中，稳定正文不被重复扫描。
+@pytest.mark.parametrize('active_tail', [False, True])
 def test_ctrlo_provider_redraw_preserves_search_navigation(monkeypatch, active_tail):
     from agent_py_agent.cli.chat_parts import tui_transcript as module
 

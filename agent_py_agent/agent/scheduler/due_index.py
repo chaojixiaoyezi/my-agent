@@ -52,6 +52,8 @@ class _LegacyOwnerLedger:
     path: Path
 
 
+# LLM: 到期唤醒全局 SQLite 索引投影，权威 job 状态仍在 owner 账本；按物理文件指纹缓存 schema 初始化，改动须同步 test_scheduler_due_index.py。
+# 类用途: 维护跨 owner 的最近到期时刻索引与监控短编号分配，供网关后台按时唤醒目标 owner。
 class SchedulerDueIndex:
     """SQLite projection used only to wake the correct owner at the right time."""
 

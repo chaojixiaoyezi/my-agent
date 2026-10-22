@@ -633,4 +633,3 @@ def test_executed_business_must_not_replay(mount_race_shell, monkeypatch, entry,
     assert result.returncode == 1 and result.stdout == '' and result.stderr == error
     assert effect.read_text(encoding='utf-8').splitlines() == ['executed']
     assert popen.call_count == 1
-

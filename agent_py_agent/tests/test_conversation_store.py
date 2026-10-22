@@ -2259,9 +2259,9 @@ def test_scaling_d_receipt_directory_cache_rotates_without_reglob(tmp_path, monk
     assert [p.name for p in delivery._reconcile_receipt_paths(paths, limit=2)] == ["c.json", "d.json"]
 
 
-@pytest.mark.parametrize("outcome", ["consumed", "uncertain"])
 # LLM: 回执和canonical文件真实落盘，仅在新helper读取guidance的边界注入消费证明或typed未知；不伪装真实端到端鉴权。
 # 函数用途: 覆盖终态queued的consumed分支，以及原typed异常同对象传播且游标/回执不推进。
+@pytest.mark.parametrize("outcome", ["consumed", "uncertain"])
 def test_scaling_d_terminal_queued_consumption_and_uncertain_cursor(tmp_path, monkeypatch, outcome):
     from agent_py_agent.agent.common.request_execution_ports import (
         RequestExecutionOutcomeUncertainError,

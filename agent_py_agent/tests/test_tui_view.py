@@ -712,9 +712,9 @@ def test_ctrlo_prefix_context_lru_is_bounded_and_refreshes_hits():
     assert len(cache._stable_prefixes) == 4
 
 
-@pytest.mark.parametrize('change', ['early', 'replace', 'remove', 'reverse', 'dynamic', 'chars', 'entries'])
 # LLM: 只有完整且有序的原前缀可增量扩展，活动屏障与预算截断不可跳过；必须等同原无缓存渲染。
 # 函数用途: 对乱序、旧块变化、动态块及两种预算核对回退和最终显示。
+@pytest.mark.parametrize('change', ['early', 'replace', 'remove', 'reverse', 'dynamic', 'chars', 'entries'])
 def test_ctrlo_prefix_extension_preserves_fallback_and_budgets(change):
     from agent_py_agent.cli.chat_parts import tui_block_renderer as module
 
