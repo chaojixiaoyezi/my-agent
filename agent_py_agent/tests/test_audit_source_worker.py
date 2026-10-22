@@ -134,6 +134,8 @@ def _agent(tmp_path: Path, *, audit_id: str = "audit-source-test", max_subagents
         ),
     )
 
+    # LLM: 仅按manager记录的parent/root查询，不从目标文字猜测归属。
+    # 函数用途: 返回临时manager中属于指定任务的运行编号。
     def related(task_id: str) -> list[str]:
         return [
             task.id for task in manager.list_runs() if task_id in {task.parent_id, task.root_id}
@@ -143,6 +145,8 @@ def _agent(tmp_path: Path, *, audit_id: str = "audit-source-test", max_subagents
     return agent, owner_home
 
 
+# LLM: 夹具经原watch持久化入口写本地来源与Audit代次，不建立网络连接。
+# 函数用途: 为指定Audit创建具有稳定检查点身份的来源watch。
 def _watch(owner_home: Path, audit_id: str, index: int, *, run_epoch: int = 0):
     url = f"http://source-{index}.example/events"
     state = new_state(
@@ -164,6 +168,8 @@ def _watch(owner_home: Path, audit_id: str, index: int, *, run_epoch: int = 0):
     return state
 
 
+# LLM: 仅在临时owner目录绑定真实Store/TaskLink，保持Audit工作区原定位规则。
+# 函数用途: 准备本地Audit工作区及会话关联，供恢复与收尾测试使用。
 def _bind_audit_workspace(
     agent: object,
     owner_home: Path,
@@ -196,9 +202,11 @@ def _bind_audit_workspace(
     return root
 
 
+# LLM: 同状态可核验补偿，但任务/线程/策略不得无变化写入；spy须透传原更新器。
+# 函数用途: 验证活动态和终态重复更新均不改写已有文件。
 @pytest.mark.parametrize("status", ["completed", "active"])
 def test_slice2_same_status_is_zero_write(tmp_path: Path, monkeypatch, status: str) -> None:
-    from agent_py_agent.agent.conversation import store_tasks
+    from agent_py_agent.agent.conversation import store_progress, store_tasks
 
     agent, owner_home = _agent(tmp_path)
     _bind_audit_workspace(agent, owner_home, "audit-source-test", tmp_path)
@@ -206,23 +214,26 @@ def test_slice2_same_status_is_zero_write(tmp_path: Path, monkeypatch, status: s
     link = tasks.update_status({"task_id": "audit-source-test", "status": status})
     paths = [tasks.storage.task_path(link.task_id), tasks.storage.thread_path(link.thread_id)]
     before = [(path.stat().st_mtime_ns, path.read_bytes()) for path in paths]
-    updates, policies = [], []
+    updates = []
     original = store_tasks.update_json_file_atomic
 
+    # LLM: 观察原JSON更新调用，不替换真实锁或写入逻辑。
+    # 函数用途: 记录任务、线程和策略是否走到写入口。
     def capture(path, updater, **kwargs):
         updates.append(path)
         return original(path, updater, **kwargs)
 
     monkeypatch.setattr(store_tasks, "update_json_file_atomic", capture)
-    monkeypatch.setattr(tasks, "_disable_task_progress_policies", lambda *a, **k: policies.append(a))
+    monkeypatch.setattr(store_progress, "update_json_file_atomic", capture)
     for _ in range(3):
         assert tasks.update_status({"task_id": link.task_id, "status": status,
                                     "expected_status": status}) == link
     assert [(path.stat().st_mtime_ns, path.read_bytes()) for path in paths] == before
     assert updates == []
-    assert policies == []
 
 
+# LLM: 索引修复不重建已一致TaskLink，保留未知字段与CAS拒门。
+# 函数用途: 验证终态重放修复活动索引但不重写任务档案。
 def test_slice2_same_status_repairs_membership_without_rewriting_task(tmp_path: Path) -> None:
     from agent_py_agent.agent.gateway_parts.io import update_json_file_atomic
 
@@ -246,6 +257,69 @@ def test_slice2_same_status_repairs_membership_without_rewriting_task(tmp_path: 
                                 "expected_status": "active"}) is None
 
 
+# LLM: 在TaskLink已提交而工作区/策略未补偿时中断；真实文件复核快/慢路径，重放不能重写已一致记录或停用其它任务策略。
+# 函数用途: 验证相同completed重试修复DONE投影与进度开关，修复后重复调用零写入。
+@pytest.mark.parametrize("broken_index", [False, True])
+def test_same_status_repairs_interrupted_terminal_side_effects(tmp_path, monkeypatch, broken_index):
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.conversation import store_progress, store_tasks
+
+    agent, owner_home = _agent(tmp_path)
+    root = _bind_audit_workspace(agent, owner_home, "audit-source-test", tmp_path)
+    store = agent.conversation_store
+    task_id = "audit-source-test"
+    link = store.tasks.load_report(task_id)[0]
+    thread_path = store.tasks.storage.thread_path(link.thread_id)
+    store_tasks.update_json_file_atomic(thread_path, lambda data: {**data, "owner_home": str(owner_home)})
+    state_path = root / "work/state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({"task_id": task_id, "status": "RUNNING", "current_step": "RUNNING"}))
+    summary = state_path.parent / "summaries/current_summary.md"
+    summary.parent.mkdir()
+    summary.write_text("- status: RUNNING\n- current_step: RUNNING\n保留正文\n")
+    policy = store.progress.create({"thread_id": link.thread_id, "task_id": task_id, "interval_seconds": 300})
+    other = store.progress.create({"thread_id": link.thread_id, "task_id": "other-task", "interval_seconds": 300})
+
+    # LLM: 只在原工作区同步边界模拟中断，不替换TaskLink/线程/策略实际持久化。
+    # 函数用途: 留下completed链接、RUNNING工作区与enabled策略的真实部分提交现场。
+    def interruption(*args, **kwargs):
+        raise RuntimeError("interrupted-terminal-sync")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(store_tasks, "sync_task_workspace_status", interruption)
+        with pytest.raises(RuntimeError, match="interrupted-terminal-sync"):
+            store.tasks.update_status({"task_id": task_id, "status": "completed"})
+    assert store.tasks.load_report(task_id)[0].status == "completed"
+    assert json.loads(state_path.read_text())["status"] == "RUNNING"
+    assert store.progress.load(policy.policy_id).enabled is True
+    if broken_index:
+        store_tasks.update_json_file_atomic(thread_path, lambda data: {**data, "active_task_ids": [task_id]})
+
+    assert store.tasks.update_status({"task_id": task_id, "status": "completed"}).status == "completed"
+    state = json.loads(state_path.read_text())
+    assert state["status"] == state["current_step"] == "DONE"
+    assert summary.read_text() == "- status: DONE\n- current_step: DONE\n保留正文\n"
+    assert store.progress.load(policy.policy_id).enabled is False
+    assert store.progress.load(other.policy_id).enabled is True
+    paths = [store.tasks.storage.task_path(task_id), thread_path, state_path, summary,
+             store.storage.policy_path(policy.policy_id), store.storage.policy_path(other.policy_id)]
+    before = [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths]
+    task_writes = Mock(wraps=store_tasks.update_json_file_atomic)
+    policy_writes = Mock(wraps=store_progress.update_json_file_atomic)
+    summary_writes = Mock(wraps=store_tasks.write_private_text_file_atomic)
+    monkeypatch.setattr(store_tasks, "update_json_file_atomic", task_writes)
+    monkeypatch.setattr(store_progress, "update_json_file_atomic", policy_writes)
+    monkeypatch.setattr(store_tasks, "write_private_text_file_atomic", summary_writes)
+    store.tasks.update_status({"task_id": task_id, "status": "completed"})
+    task_writes.assert_not_called()
+    policy_writes.assert_not_called()
+    summary_writes.assert_not_called()
+    assert [(path.read_bytes(), path.stat().st_mtime_ns) for path in paths] == before
+
+
+# LLM: 生命周期筛选消费结构化状态、核验结果与链接，不重复处理已结来源。
+# 函数用途: 对照终态、未结与旧取消组合检查巡检候选集合。
 @pytest.mark.parametrize("status,verified,link_status,legacy,expected", [
     ("DONE", "VERIFIED", "completed", False, False),
     ("DONE", "VERIFIED", None, False, False),
@@ -285,6 +359,8 @@ def test_slice2_lifecycle_only_visits_unsettled_source_workers(
     assert not any(report.values())
 
 
+# LLM: 同轮多个watch共用实际运行快照，计数不替代来源核验。
+# 函数用途: 验证来源对账只加载一次运行列表。
 def test_slice2_reconcile_reuses_one_run_snapshot(tmp_path: Path, monkeypatch) -> None:
     from agent_py_agent.agent.agent_core.orchestration import lifecycle
 
@@ -297,6 +373,8 @@ def test_slice2_reconcile_reuses_one_run_snapshot(tmp_path: Path, monkeypatch) -
     original = agent.subagents.list_runs
     reads = []
 
+    # LLM: 保留原list_runs行为，只记录实际调用。
+    # 函数用途: 计数对账取得运行快照的次数。
     def counted():
         reads.append(1)
         return original()
@@ -307,6 +385,8 @@ def test_slice2_reconcile_reuses_one_run_snapshot(tmp_path: Path, monkeypatch) -
     assert len(reads) == 1
 
 
+# LLM: 显式空快照有效，不能按真值回退重读，代次过滤仍生效。
+# 函数用途: 验证空、指定代次及缺省快照的读取口径。
 def test_slice2_explicit_empty_snapshot_does_not_reload():
     reads = []
     record = SimpleNamespace(attributes={AUDIT_SOURCE_WORKER_ATTR: True,
@@ -325,6 +405,8 @@ def test_slice2_explicit_empty_snapshot_does_not_reload():
     assert reads == [1]
 
 
+# LLM: 真实创建是快照失效事实，后续watch必须看见新worker。
+# 函数用途: 验证连续来源创建按实际新增刷新快照。
 def test_slice2_real_creation_refreshes_snapshot_for_next_watch(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core.orchestration import lifecycle
 
@@ -336,6 +418,8 @@ def test_slice2_real_creation_refreshes_snapshot_for_next_watch(tmp_path, monkey
     seen = []
     original = source_worker_module.ensure_audit_source_worker
 
+    # LLM: 透传真实创建入口，仅观察传入的运行身份。
+    # 函数用途: 记录每个watch创建前的worker集合。
     def capture(agent, state, *, runs_snapshot=None):
         seen.append([task.id for task in runs_snapshot])
         return original(agent, state, runs_snapshot=runs_snapshot)
@@ -347,6 +431,8 @@ def test_slice2_real_creation_refreshes_snapshot_for_next_watch(tmp_path, monkey
     assert len(agent.subagents.list_runs()) == 3
 
 
+# LLM: 结构化创建、派发或恢复结果决定刷新，不解析结果文案。
+# 函数用途: 验证各类对账变更后下一来源取得新快照。
 @pytest.mark.parametrize("change", ["created", "dispatched", "recovered_false_cancel", "verify_retry_scheduled"])
 def test_slice2_snapshot_refreshes_after_mutation(tmp_path, monkeypatch, change):
     agent, owner_home = _agent(tmp_path)
@@ -354,10 +440,14 @@ def test_slice2_snapshot_refreshes_after_mutation(tmp_path, monkeypatch, change)
         _watch(owner_home, "audit-source-test", i)
     records, snapshots, reads = [], [], []
 
+    # LLM: 返回独立列表暴露旧快照复用，记录真实读取次数。
+    # 函数用途: 提供随对账变化的本地运行集合。
     def listing():
         reads.append(1)
         return list(records)
 
+    # LLM: 仅首个来源制造参数指定的结构化变更，不额外扩大场景。
+    # 函数用途: 模拟一次对账变更并记录各拍快照。
     def reconcile(agent, state, *, runs_snapshot=None):
         snapshots.append(runs_snapshot)
         if len(snapshots) == 1:
@@ -374,6 +464,8 @@ def test_slice2_snapshot_refreshes_after_mutation(tmp_path, monkeypatch, change)
     assert len(reads) == 2
 
 
+# LLM: 检查点身份稳定，执行scope随代次变化，二者不共用租约含义。
+# 函数用途: 验证重启保留来源检查点但轮换执行尝试身份。
 def test_named_audit_keeps_watch_checkpoint_scope_but_rotates_worker_attempt_scope() -> None:
     audit_id = "audit-restarted"
     watch_scope_1 = audit_watch_scope_id(audit_id, 1)
@@ -388,6 +480,8 @@ def test_named_audit_keeps_watch_checkpoint_scope_but_rotates_worker_attempt_sco
     )
 
 
+# LLM: 血缘投影仅消费当前代次，不把历史叶算作当前执行。
+# 函数用途: 验证活动Audit只报告当前代次的来源worker。
 def test_active_named_audit_lineage_reports_only_current_run_epoch(tmp_path: Path) -> None:
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
@@ -447,6 +541,8 @@ def test_active_named_audit_lineage_reports_only_current_run_epoch(tmp_path: Pat
     assert old.id not in agent.subagent_run_ids_for_request(audit_id)
 
 
+# LLM: 已到期但尚有耐久积压的父任务沿原排空合同处理，期限不代表已结。
+# 函数用途: 验证积压排空期间保留原来源处理资格。
 def test_expired_active_parent_remains_authorized_while_durable_backlog_drains(
     monkeypatch,
 ) -> None:
@@ -463,6 +559,8 @@ def test_expired_active_parent_remains_authorized_while_durable_backlog_drains(
     assert audit_parent_reconcile_state(agent, link.task_id) == (True, "active")
 
 
+# LLM: 来源叶在首个模型回合前即受最小权限约束，不能先授宽权限。
+# 函数用途: 验证直接创建的Audit来源叶初始权限。
 def test_direct_audit_leaf_is_least_privilege_before_first_runner_turn(
     tmp_path: Path,
 ) -> None:
@@ -515,6 +613,8 @@ def test_direct_audit_leaf_is_least_privilege_before_first_runner_turn(
     assert "skill_snapshot_refs" not in attrs
 
 
+# LLM: 协调者并非来源叶，不能误套来源专用权限限制。
+# 函数用途: 验证Audit协调者保留普通分工范围。
 def test_audit_coordinator_keeps_ordinary_delegate_scope(
     tmp_path: Path,
 ) -> None:
@@ -536,6 +636,8 @@ def test_audit_coordinator_keeps_ordinary_delegate_scope(
     assert AUDIT_SOURCE_BINDING_PENDING_ATTR not in dict(scoped.get("attributes") or {})
 
 
+# LLM: 已发布来源逐一配准确叶，重放不产生第二个逻辑worker。
+# 函数用途: 验证来源与幂等叶任务一对一绑定。
 @pytest.mark.parametrize("source_count", [1, 3, 5, 10])
 def test_published_sources_map_to_one_idempotent_leaf_each(
     tmp_path: Path,
@@ -614,6 +716,8 @@ def test_published_sources_map_to_one_idempotent_leaf_each(
     assert len(set(first_ids)) == source_count
 
 
+# LLM: 并发同scope创建须由原manager收敛，不能仅对返回值去重。
+# 函数用途: 验证并发请求只建立一个逻辑运行。
 def test_concurrent_work_scope_creation_is_one_logical_run(tmp_path: Path) -> None:
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
@@ -635,6 +739,8 @@ def test_concurrent_work_scope_creation_is_one_logical_run(tmp_path: Path) -> No
     )
     barrier = Barrier(8)
 
+    # LLM: 并发调用相同原work scope，不绕过manager创建门。
+    # 函数用途: 发起一次受测的来源运行创建。
     def create_once():
         barrier.wait()
         return resolve_create_run(agent.subagents, params)
@@ -648,6 +754,8 @@ def test_concurrent_work_scope_creation_is_one_logical_run(tmp_path: Path) -> No
     assert sum(item.reused for item in resolutions) == 7
 
 
+# LLM: 重复活动worker沿原对账退休，不改写已有终态。
+# 函数用途: 验证来源对账收起重复活动叶。
 def test_reconcile_retires_duplicate_active_source_workers(tmp_path: Path) -> None:
     from agent_py_agent.agent.ingestion.source_worker import (
         _canonical_worker_task,
@@ -701,6 +809,8 @@ def test_reconcile_retires_duplicate_active_source_workers(tmp_path: Path) -> No
     assert sum(task.status == TaskStatus.CANCELLED.value for task in persisted) == 2
 
 
+# LLM: 根运行沿create_subagents配置来源，不另造执行入口。
+# 函数用途: 验证根Audit为每个已发布来源派出叶任务。
 @pytest.mark.parametrize("source_count", [1, 3, 5, 10])
 def test_root_runtime_provisions_each_published_source_through_create_subagents(
     tmp_path: Path,
@@ -768,6 +878,8 @@ def test_root_runtime_provisions_each_published_source_through_create_subagents(
     )
 
 
+# LLM: 新代次不能复用旧执行尝试，逻辑来源检查点仍稳定。
+# 函数用途: 验证Audit换代为原来源建立新runner任务。
 def test_next_audit_epoch_gets_a_fresh_runner_task_for_the_same_logical_source(
     tmp_path: Path,
     monkeypatch,
@@ -828,6 +940,8 @@ def test_next_audit_epoch_gets_a_fresh_runner_task_for_the_same_logical_source(
     )
 
 
+# LLM: 叶任务只接受已发布的准确source_id，不从文字补来源权限。
+# 函数用途: 验证未知来源编号在派工前被拒绝。
 def test_published_source_leaf_requires_an_exact_known_source_id(tmp_path: Path) -> None:
     from agent_py_agent.agent.agent_core.orchestration.create_policy import (
         prepare_audit_child_creation_scope,
@@ -872,6 +986,8 @@ def test_published_source_leaf_requires_an_exact_known_source_id(tmp_path: Path)
     assert agent.subagents.list_runs() == []
 
 
+# LLM: 同一watch仅绑定唯一worker，重放不扩大来源或重复创建。
+# 函数用途: 验证准确watch的创建幂等性。
 @pytest.mark.parametrize("source_count", [1, 3, 5, 7, 9, 10, 13])
 def test_one_exact_worker_per_watch_is_idempotent(
     tmp_path: Path,
@@ -930,6 +1046,8 @@ def test_one_exact_worker_per_watch_is_idempotent(
     assert len(list(state_dir(owner_home).glob("*.worker-lease.json"))) == source_count
 
 
+# LLM: 缺容量须结构化可见，不把不同来源合塞同一执行者。
+# 函数用途: 验证容量不足仍保留独立来源身份和诊断。
 def test_capacity_shortage_is_visible_and_does_not_share_a_worker(
     tmp_path: Path,
     monkeypatch,
@@ -952,6 +1070,8 @@ def test_capacity_shortage_is_visible_and_does_not_share_a_worker(
     assert all(row["state"] == "waiting_for_capacity" for row in rows[2:])
 
 
+# LLM: 到期且已结算的watch不再新增执行责任。
+# 函数用途: 验证已结来源不会被恢复逻辑重新派工。
 def test_expired_settled_watch_does_not_create_worker(tmp_path: Path) -> None:
     audit_id = "audit-expired-settled"
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
@@ -969,6 +1089,8 @@ def test_expired_settled_watch_does_not_create_worker(tmp_path: Path) -> None:
     assert agent.subagents.list_runs() == []
 
 
+# LLM: 到期不代表窗口已结，未收口来源继续原恢复合同。
+# 函数用途: 验证到期未结窗口保留worker恢复机会。
 def test_expired_unfinalized_window_keeps_worker_recoverable(
     tmp_path: Path,
     monkeypatch,
@@ -995,6 +1117,8 @@ def test_expired_unfinalized_window_keeps_worker_recoverable(
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: 缺准确来源分配时在创建前失败关闭，不能借默认目标补权限。
+# 函数用途: 验证无来源绑定不产生worker。
 def test_missing_source_assignment_fails_closed_before_worker_creation(
     tmp_path: Path,
 ) -> None:
@@ -1020,6 +1144,8 @@ def test_missing_source_assignment_fails_closed_before_worker_creation(
     assert agent.subagents.list_runs() == []
 
 
+# LLM: 替换worker消费原持久分配，不从进程对象重猜来源。
+# 函数用途: 验证来源分配重载后仍准确传给替换执行者。
 def test_source_assignment_survives_reload_and_is_used_by_replacement_worker(
     tmp_path: Path,
     monkeypatch,
@@ -1050,6 +1176,8 @@ def test_source_assignment_survives_reload_and_is_used_by_replacement_worker(
     )
 
 
+# LLM: 接纳既有叶须匹配准确来源，普通父子关系不够授权。
+# 函数用途: 验证合法旧叶被纳入对应来源worker。
 @pytest.mark.xfail(
     strict=True,
     reason=(
@@ -1138,6 +1266,8 @@ def test_existing_audit_child_is_adopted_as_the_exact_source_worker(
     assert runtime_profile[AUDIT_RUN_PROMPT_ATTR] == state.audit_run_prompt
 
 
+# LLM: 绑定切换后的摘要不能退回过期首次打开回合。
+# 函数用途: 验证来源变化不会发布陈旧开场摘要。
 def test_source_binding_transition_does_not_publish_stale_opening_turn_summary(
     tmp_path: Path,
 ) -> None:
@@ -1192,6 +1322,8 @@ def test_source_binding_transition_does_not_publish_stale_opening_turn_summary(
     assert AUDIT_SOURCE_CONTEXT_REFRESH_ATTEMPT_ATTR not in task.attributes
 
 
+# LLM: 来源绑定切换须保留更晚恢复摘要，不能被旧投影覆盖。
+# 函数用途: 验证后续恢复回合摘要在绑定更新后仍保留。
 def test_source_binding_transition_keeps_later_recovery_attempt_summary(
     tmp_path: Path,
 ) -> None:
@@ -1246,6 +1378,8 @@ def test_source_binding_transition_keeps_later_recovery_attempt_summary(
     assert AUDIT_SOURCE_CONTEXT_REFRESH_ATTEMPT_ATTR not in task.attributes
 
 
+# LLM: Audit父子关系不授来源身份，必须存在准确来源绑定。
+# 函数用途: 验证普通Audit子任务不被误接纳为来源叶。
 def test_generic_audit_child_is_not_adopted_as_a_source_worker(
     tmp_path: Path,
     monkeypatch,
@@ -1297,6 +1431,8 @@ def test_generic_audit_child_is_not_adopted_as_a_source_worker(
     assert agent.subagents.load(generic.id).attributes.get(AUDIT_SOURCE_WORKER_ATTR) is not True
 
 
+# LLM: pending来源绑定在首次打开前即拒绝广泛工具。
+# 函数用途: 验证待绑定叶的首个来源动作已受权限约束。
 def test_pending_source_binding_scope_denies_broad_tools_before_first_open(
     tmp_path: Path,
 ) -> None:
@@ -1341,6 +1477,8 @@ def test_pending_source_binding_scope_denies_broad_tools_before_first_open(
     assert denied.error_code == "TOOL_NOT_ALLOWED"
 
 
+# LLM: 接纳后运行时仍执行来源门，不保留旧广泛工具资格。
+# 函数用途: 验证已接纳worker无法继续使用原宽权限工具。
 def test_adopted_source_worker_runtime_gate_denies_the_old_broad_tools(
     tmp_path: Path,
 ) -> None:
@@ -1383,6 +1521,8 @@ def test_adopted_source_worker_runtime_gate_denies_the_old_broad_tools(
     assert denied.error_code == "TOOL_NOT_ALLOWED"
 
 
+# LLM: 残留pending watch不能在重启后复活终态父Audit。
+# 函数用途: 验证重启对账跳过终态Audit残留来源。
 def test_restart_reconcile_skips_terminal_named_audit_with_pending_watch(
     tmp_path: Path,
 ) -> None:
@@ -1424,6 +1564,8 @@ def test_restart_reconcile_skips_terminal_named_audit_with_pending_watch(
     assert persisted.close_reason == "audit_parent_inactive"
 
 
+# LLM: 父终态须关闭原watch并取消原worker，不遗留活动责任。
+# 函数用途: 验证父Audit结束后的来源收尾联动。
 def test_terminal_parent_closes_watch_and_cancels_existing_source_worker(
     tmp_path: Path,
     monkeypatch,
@@ -1473,6 +1615,8 @@ def test_terminal_parent_closes_watch_and_cancels_existing_source_worker(
     assert task.failure_type == FailureType.CANCELLED.value
 
 
+# LLM: 恢复仅消费准确活动Audit，不从历史同名对象借身份。
+# 函数用途: 验证活动命名Audit恢复对应来源worker。
 def test_restart_reconcile_creates_worker_for_exact_active_named_audit(
     tmp_path: Path,
     monkeypatch,
@@ -1516,6 +1660,8 @@ def test_restart_reconcile_creates_worker_for_exact_active_named_audit(
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: 替换执行者沿父Audit规范目录，不创建第二份上下文工作区。
+# 函数用途: 验证重启后替换worker仍位于父工作区。
 def test_restart_reconcile_keeps_replacement_in_parent_audit_workspace(
     tmp_path: Path,
     monkeypatch,
@@ -1567,6 +1713,8 @@ def test_restart_reconcile_keeps_replacement_in_parent_audit_workspace(
     assert task.agent_run_workspace_dir == str(task_root / "work" / "agents" / task.id)
 
 
+# LLM: 旧叶迁移只处理原空闲对象，目标按父Audit规范位置定位。
+# 函数用途: 验证重启对账把空闲旧叶归入父工作区。
 def test_restart_reconcile_migrates_idle_legacy_worker_to_parent_audit_workspace(
     tmp_path: Path,
     monkeypatch,
@@ -1620,6 +1768,8 @@ def test_restart_reconcile_migrates_idle_legacy_worker_to_parent_audit_workspace
     assert migrated.agent_run_workspace_dir == str(task_root / "work" / "agents" / migrated.id)
 
 
+# LLM: 创建与命名清除交错须取消迟到worker，不能重开已清任务。
+# 函数用途: 验证清除期间新建的来源叶立即退出活动状态。
 def test_worker_created_during_named_clear_is_immediately_cancelled(
     tmp_path: Path,
     monkeypatch,
@@ -1630,6 +1780,8 @@ def test_worker_created_during_named_clear_is_immediately_cancelled(
     agent, owner_home = _agent(tmp_path, audit_id=audit_id)
     state = _watch(owner_home, audit_id, 1)
 
+    # LLM: 只在启动交错窗口触发原命名清除，不伪造取消终态。
+    # 函数用途: 模拟worker创建期间父Audit被清除。
     def close_while_starting(_agent, _tasks, _params):
         state.closed = True
         persist_state(state)
@@ -1649,6 +1801,8 @@ def test_worker_created_during_named_clear_is_immediately_cancelled(
     )
 
 
+# LLM: 来源上下文只能携带准确绑定的读取范围，不能扩大到其它工作区。
+# 函数用途: 验证来源worker上下文的文件读取范围。
 def test_source_worker_context_uses_exact_read_scope(
     tmp_path: Path,
     monkeypatch,
@@ -1691,6 +1845,8 @@ def test_source_worker_context_uses_exact_read_scope(
     assert "artifact://source-profile/opaque" not in boundary["allowed_read_roots"]
 
 
+# LLM: 新叶不继承兄弟任务的goal文件提示，避免跨来源上下文污染。
+# 函数用途: 验证来源worker创建时隔离兄弟文件线索。
 def test_new_source_worker_does_not_inherit_sibling_goal_file_hints(
     tmp_path: Path,
     monkeypatch,
@@ -1724,6 +1880,8 @@ def test_new_source_worker_does_not_inherit_sibling_goal_file_hints(
     assert str(sibling_ref) not in boundary["allowed_read_roots"]
 
 
+# LLM: 来源叶使用受控共享runner提示，保留专注来源的权限和目标边界。
+# 函数用途: 验证来源worker使用专注来源的共享提示词。
 def test_source_worker_uses_focused_shared_runner_prompt(
     tmp_path: Path,
     monkeypatch,
@@ -1804,6 +1962,8 @@ def test_source_worker_uses_focused_shared_runner_prompt(
     assert "建系统/写代码类交付" not in system_prompt
 
 
+# LLM: 来源笔记投影不混入兄弟准备历史，正文不新增来源授权。
+# 函数用途: 验证来源上下文保留操作笔记且隔离兄弟历史。
 def test_source_worker_projects_operational_notes_without_sibling_prepare_history(
     tmp_path: Path,
     monkeypatch,
@@ -1853,6 +2013,8 @@ def test_source_worker_projects_operational_notes_without_sibling_prepare_histor
     assert "当前来源规则：只检查 verified。" in prompt
 
 
+# LLM: 新工作片消费活动Audit当前修订，不继续使用旧目标投影。
+# 函数用途: 验证Audit修订同步到下一来源工作片。
 def test_active_audit_revision_syncs_into_next_source_worker_slice(
     tmp_path: Path,
 ) -> None:
@@ -1891,6 +2053,8 @@ def test_active_audit_revision_syncs_into_next_source_worker_slice(
     assert persisted.audit_run_prompt == "本次运行增加复核要求。"
 
 
+# LLM: 运输修订保留已有进度，后继读取沿原片上下文追加而非覆盖历史。
+# 函数用途: 验证来源运输修订不丢进度并补充下一片读取信息。
 def test_active_audit_transport_revision_preserves_progress_and_appends_next_slice_reads(
     tmp_path: Path,
 ) -> None:
@@ -1994,6 +2158,8 @@ def test_active_audit_transport_revision_preserves_progress_and_appends_next_sli
     assert persisted.source_checkpoint == {"next_from_ms": 123456, "pending_more": False}
 
 
+# LLM: JSON转义宿主包装经原投影解包，不把兄弟历史带入来源上下文。
+# 函数用途: 验证带转义的宿主包装仍只投影本来源内容。
 def test_source_worker_projects_json_escaped_host_wrapper_without_sibling_history(
     tmp_path: Path,
     monkeypatch,
@@ -2030,6 +2196,8 @@ def test_source_worker_projects_json_escaped_host_wrapper_without_sibling_histor
     assert prompt.count("当前全局要求：逐条研判并保留引用。") == 1
 
 
+# LLM: 规范Audit笔记解包须处理嵌套残片，不能把包装标记当业务事实。
+# 函数用途: 验证嵌套不完整宿主包装的笔记提取。
 @pytest.mark.parametrize("escaped", [False, True])
 def test_canonical_audit_notes_unwraps_nested_partial_host_wrapper(
     escaped: bool,
@@ -2054,6 +2222,8 @@ def test_canonical_audit_notes_unwraps_nested_partial_host_wrapper(
     assert "用户历史" not in notes
 
 
+# LLM: 嵌套宿主尾标记后的真实笔记尾部不得静默丢失。
+# 函数用途: 验证笔记规范化保留尾标记后正文。
 @pytest.mark.parametrize("escaped", [False, True])
 def test_canonical_audit_notes_keeps_tail_after_nested_host_footer(
     escaped: bool,
@@ -2078,6 +2248,8 @@ def test_canonical_audit_notes_keeps_tail_after_nested_host_footer(
     assert "用户历史" not in notes
 
 
+# LLM: 无显式文件refs就无文件工具或读文件提示，不能从正文猜授权。
+# 函数用途: 验证缺文件引用的来源叶不获得额外读取能力。
 def test_source_worker_without_explicit_refs_has_no_file_tools_or_read_prompt(
     tmp_path: Path,
     monkeypatch,
@@ -2113,6 +2285,8 @@ def test_source_worker_without_explicit_refs_has_no_file_tools_or_read_prompt(
     assert "Tool Content Transport Protocol" not in prompt
 
 
+# LLM: 大来源档案必须完整保留或显式处理，不能静默截断关键上下文。
+# 函数用途: 验证来源档案超过常见长度时仍不丢内容。
 def test_source_worker_never_silently_truncates_large_source_profile(
     tmp_path: Path,
     monkeypatch,
@@ -2147,6 +2321,8 @@ def test_source_worker_never_silently_truncates_large_source_profile(
     assert str(profile) in prompt
 
 
+# LLM: 恢复消费耐久finding outbox且只投影一次，不重复生成发现。
+# 函数用途: 验证崩溃恢复幂等补出已保存发现。
 def test_recovery_projects_persisted_finding_outbox_once(
     tmp_path: Path,
     monkeypatch,
@@ -2248,6 +2424,8 @@ def test_recovery_projects_persisted_finding_outbox_once(
     assert replayed[0].metadata["finding_id"] == "af-recovery"
 
 
+# LLM: 证据投影保完整记录或准确引用，不能用截断摘录冒充完整证据。
+# 函数用途: 验证发现证据的完整正文与引用回退口径。
 def test_finding_evidence_projection_keeps_complete_record_or_exact_ref() -> None:
     from agent_py_agent.agent.agent_core.runtime.record_finding_tool import (
         _audit_evidence_record,
@@ -2293,6 +2471,8 @@ def test_finding_evidence_projection_keeps_complete_record_or_exact_ref() -> Non
     assert oversized["source_ref"] == source_ref
 
 
+# LLM: 发现投递回执以判定引用为准，补充证据引用不能替代该回执身份。
+# 函数用途: 验证投递去重查询使用准确verdict引用。
 def test_finding_delivery_receipt_uses_verdict_ref_not_supplementary_evidence(
     tmp_path: Path,
     monkeypatch,
@@ -2360,6 +2540,8 @@ def test_finding_delivery_receipt_uses_verdict_ref_not_supplementary_evidence(
     )
     checked: list[tuple[str, ...]] = []
 
+    # LLM: 只观察本次回执引用，不执行真实外发。
+    # 函数用途: 模拟已有投递回执并记录被查询的引用。
     def already_sent(_owner_home, refs):
         checked.append(tuple(refs))
         return tuple(refs) == (canonical,)
@@ -2377,6 +2559,8 @@ def test_finding_delivery_receipt_uses_verdict_ref_not_supplementary_evidence(
     assert store.wakes.pending() == []
 
 
+# LLM: 终态回执核验复用每个watch的本次事实，不反复读取同源记录。
+# 函数用途: 验证Audit收尾回执检查每个来源只读一次。
 def test_audit_terminal_receipt_check_reads_each_watch_once(
     tmp_path: Path,
     monkeypatch,
@@ -2426,6 +2610,8 @@ def test_audit_terminal_receipt_check_reads_each_watch_once(
     )
     checked: list[tuple[str, ...]] = []
 
+    # LLM: 本地回执替身仅记录来源引用，不授予真实外发或终态资格。
+    # 函数用途: 观察逐来源的回执查询并返回受控结果。
     def all_sent(_owner_home, source_refs):
         checked.append(tuple(source_refs))
         return True
@@ -2436,6 +2622,8 @@ def test_audit_terminal_receipt_check_reads_each_watch_once(
     assert checked == [tuple(refs)]
 
 
+# LLM: 崩溃后的内联判定发现沿原耐久事实补投影，不重复新增。
+# 函数用途: 验证内联发现的恢复幂等性。
 def test_recovery_projects_inline_verdict_finding_after_crash_once(
     tmp_path: Path,
     monkeypatch,
@@ -2537,6 +2725,8 @@ def test_recovery_projects_inline_verdict_finding_after_crash_once(
     assert signals[0].metadata["ingest_run_epoch"] == 6
 
 
+# LLM: 不需上报的发现也须耐久保存，但不得无故唤醒owner模型。
+# 函数用途: 验证内部发现保存与模型唤醒彼此分离。
 def test_nonreport_finding_is_durable_without_waking_owner_model(
     tmp_path: Path,
     monkeypatch,
@@ -2603,6 +2793,8 @@ def test_nonreport_finding_is_durable_without_waking_owner_model(
     assert observations[0].requires_llm_report is False
 
 
+# LLM: 租约接管后旧attempt必须被围栏拒绝，旧身份不能继续提交。
+# 函数用途: 验证过期来源尝试无法越过接管租约。
 def test_lease_takeover_rejects_stale_attempt(
     tmp_path: Path,
 ) -> None:
@@ -2685,6 +2877,8 @@ def test_lease_takeover_rejects_stale_attempt(
     assert denied["error_code"] == "AUDIT_SOURCE_ATTEMPT_STALE"
 
 
+# LLM: 旧片只可完成已领批次，不能借旧租约再领下一批。
+# 函数用途: 验证来源片轮换时已领批次与新领取的边界。
 def test_old_source_slice_may_finish_claimed_batch_but_cannot_claim_next_batch(
     tmp_path: Path,
 ) -> None:
@@ -2757,6 +2951,8 @@ def test_old_source_slice_may_finish_claimed_batch_but_cannot_claim_next_batch(
         assert claim_next["error_code"] == "AUDIT_SOURCE_CONTEXT_REFRESH_REQUIRED"
 
 
+# LLM: 租约授予必须锁内重验attempt，锁外检查不够授权。
+# 函数用途: 验证检查间换代时旧attempt无法取得租约。
 def test_lease_acquire_rechecks_attempt_inside_lock(
     tmp_path: Path,
     monkeypatch,
@@ -2791,6 +2987,8 @@ def test_lease_acquire_rechecks_attempt_inside_lock(
     original_validate = source_worker_module._validate_current_worker_task
     validations = 0
 
+    # LLM: 只在两次检查间换代，实际租约取得仍走原锁内入口。
+    # 函数用途: 构造旧attempt检查后被替换的交错窗口。
     def _replace_attempt_between_checks(*args, **kwargs):
         nonlocal validations
         validations += 1
@@ -2822,6 +3020,8 @@ def test_lease_acquire_rechecks_attempt_inside_lock(
     assert not (state_dir(owner_home) / f"{state.watch_id}.worker-lease.json").exists()
 
 
+# LLM: watch检查点虽稳定，旧Audit代次不能消费重开的新执行来源。
+# 函数用途: 验证历史代次无法领取新代次来源记录。
 def test_previous_named_audit_epoch_cannot_consume_reopened_stable_watch(
     tmp_path: Path,
 ) -> None:
@@ -2871,6 +3071,8 @@ def test_previous_named_audit_epoch_cannot_consume_reopened_stable_watch(
     assert not (state_dir(owner_home) / f"{state.watch_id}.worker-lease.json").exists()
 
 
+# LLM: 一批结束不代表开放watch已结，worker应保留待续状态。
+# 函数用途: 验证开放来源结束一批后仍为PENDING。
 @pytest.mark.parametrize("reported_status", ["DONE", "PENDING", "BLOCKED"])
 def test_source_worker_batch_end_stays_pending_while_watch_is_open(
     tmp_path: Path,
@@ -2945,6 +3147,8 @@ def test_source_worker_batch_end_stays_pending_while_watch_is_open(
     assert not lease_path.exists()
 
 
+# LLM: 清除后的迟到结果不能把已取消worker重新激活。
+# 函数用途: 验证watch清除后来源叶保持取消状态。
 @pytest.mark.parametrize("reported_status", ["DONE", "PENDING", "BLOCKED"])
 def test_source_worker_late_result_stays_cancelled_after_watch_clear(
     tmp_path: Path,
@@ -3016,6 +3220,8 @@ def test_source_worker_late_result_stays_cancelled_after_watch_clear(
     }
 
 
+# LLM: canonical保存是迟到runner启动的末围栏，关闭watch不能被旧启动跨越。
+# 函数用途: 验证来源关闭后旧runner无法持久化活动启动。
 def test_closed_source_watch_fences_stale_runner_start_at_canonical_save(
     tmp_path: Path,
 ) -> None:
@@ -3062,6 +3268,8 @@ def test_closed_source_watch_fences_stale_runner_start_at_canonical_save(
         agent.subagents.lifecycle.prepare_runner_attempt(task.id)
 
 
+# LLM: 批次结束仍须保留明确能力申请，不把未获能力当成普通完成。
+# 函数用途: 验证来源批片收尾不丢显式能力请求。
 def test_source_worker_batch_end_preserves_explicit_capability_request(
     tmp_path: Path,
 ) -> None:
@@ -3125,6 +3333,8 @@ def test_source_worker_batch_end_preserves_explicit_capability_request(
     assert task.blockers == []
 
 
+# LLM: 坏收尾不能被洗成成功，错误须可见并保留待处理状态。
+# 函数用途: 验证不合法批次收尾保持PENDING及错误诊断。
 def test_source_worker_malformed_batch_closeout_stays_pending_with_error_visible(
     tmp_path: Path,
 ) -> None:
@@ -3186,6 +3396,8 @@ def test_source_worker_malformed_batch_closeout_stays_pending_with_error_visible
     assert result_meta["ok"] is False
 
 
+# LLM: 已结来源不应因多余报告能力申请重新阻塞完成。
+# 函数用途: 验证已结worker沿原结算事实完成收尾。
 def test_settled_source_worker_ignores_report_capability_and_finishes(
     tmp_path: Path,
 ) -> None:
@@ -3258,6 +3470,8 @@ def test_settled_source_worker_ignores_report_capability_and_finishes(
     assert task.progress == 1.0
 
 
+# LLM: 可恢复的通用阻塞沿原对账重排，不创建重复来源任务。
+# 函数用途: 验证阻塞来源worker被重新入队。
 @pytest.mark.parametrize(
     "failure_type",
     [
@@ -3308,6 +3522,8 @@ def test_reconcile_requeues_generic_blocked_source_worker(
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: 供应失败等待后复用原worker，不把暂时不可用当作新来源。
+# 函数用途: 验证模型供应恢复后重排同一个来源运行。
 @pytest.mark.parametrize(
     "failure_type",
     [
@@ -3378,6 +3594,8 @@ def test_provider_supply_failure_waits_then_requeues_same_source_worker(
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: 不可重试失败不能被通用对账自动恢复。
+# 函数用途: 验证不可恢复来源错误保持BLOCKED。
 def test_non_retryable_source_worker_failure_remains_blocked(
     tmp_path: Path,
     monkeypatch,
@@ -3407,6 +3625,8 @@ def test_non_retryable_source_worker_failure_remains_blocked(
     assert persisted.failure_type == FailureType.PERMISSION_BLOCKED.value
 
 
+# LLM: 配额耗尽需要显式操作恢复，不能偷偷重排消耗更多资源。
+# 函数用途: 验证配额阻塞来源等待操作者恢复。
 def test_quota_exhausted_source_worker_waits_for_explicit_operator_recovery(
     tmp_path: Path,
     monkeypatch,
@@ -3452,6 +3672,8 @@ def test_quota_exhausted_source_worker_waits_for_explicit_operator_recovery(
     assert resume_quota_blocked_source_workers(agent, audit_id) == 0
 
 
+# LLM: 容量告警按状态边沿和恢复各发布一次，不按每拍重复通知。
+# 函数用途: 验证容量不足与恢复通知的幂等性。
 def test_capacity_alert_publishes_edge_and_recovery_once(
     tmp_path: Path,
     monkeypatch,
@@ -3562,6 +3784,8 @@ def test_capacity_alert_publishes_edge_and_recovery_once(
     assert recovery_wake.metadata["pending"] == 0
 
 
+# LLM: 挂起来源片沿原运行重排，不新增第二个逻辑worker。
+# 函数用途: 验证无进展来源工作片复用同一任务恢复。
 def test_hung_source_worker_slice_requeues_same_task_without_duplicate(
     tmp_path: Path,
     monkeypatch,
@@ -3609,6 +3833,8 @@ def test_hung_source_worker_slice_requeues_same_task_without_duplicate(
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: 来源绑定片挂起仍恢复同一运行，避免重复绑定执行者。
+# 函数用途: 验证挂起的绑定工作片重排原run。
 def test_hung_source_binding_slice_requeues_the_same_run(
     tmp_path: Path,
 ) -> None:
@@ -3662,6 +3888,8 @@ def test_hung_source_binding_slice_requeues_the_same_run(
     assert len(agent.subagents.list_runs()) == 1
 
 
+# LLM: 有真实进展的片结束应判轮换，不可误报挂起。
+# 函数用途: 验证有进展来源片沿正常轮换恢复。
 def test_progressing_source_worker_slice_is_rotation_not_hang(
     tmp_path: Path,
     monkeypatch,

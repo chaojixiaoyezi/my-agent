@@ -213,10 +213,8 @@ def _read_task_link(
         return None, report
 
 
-# LLM: conversation task link 是每次执行的生命周期权威；work/state.json 只是可复用
-# task_path 当前执行的 owner-local 投影。旧 link 与当前投影身份不同是正常历史关系，
-# 不能覆盖当前执行，也不应按数据损坏重复报警。
-# 函数用途: 在当前任务链接变更后同步工作区状态，避免停止或完成后目录仍永久显示 RUNNING。
+# LLM: TaskLink是生命周期权威；原路径/身份拒门不变，同状态重放须补工作区及摘要，已同步则不打开state锁、不更新时间。
+# 函数用途: 幂等同步当前任务的工作区状态和摘要，既修复部分提交，也避免覆盖复用目录中的另一任务。
 def sync_task_workspace_status(
     link: ThreadTaskLink,
     current: float,
@@ -257,13 +255,16 @@ def sync_task_workspace_status(
         str(link.status or "UNKNOWN").strip().upper(),
     )
 
-    # LLM: store_tasks 的持久化合同：只把已核验任务身份和结构化状态写入工作区状态投影；修改须同步本领域调用方与存储回归。
-    # 函数用途: 只把已核验任务身份和结构化状态写入工作区状态投影。
+    # LLM: 锁内重核身份与三字段；并发同步已满足时返回原payload，不能仅为刷新时间重复写入。
+    # 函数用途: 只在当前任务投影尚未一致时更新状态，保留其它任务和已一致记录。
     def updater(data: dict[str, Any]) -> dict[str, Any]:
         if not data:
             raise DataCorruptionError(f"task workspace state is unreadable: {link.task_id}")
         state_task_id = str(data.get("task_id") or "").strip()
         if state_task_id and state_task_id != link.task_id:
+            return data
+        if (data.get("task_id") == link.task_id and data.get("status") == projected_status
+                and data.get("current_step") == projected_status):
             return data
         updated = dict(data)
         updated["task_id"] = link.task_id
@@ -273,6 +274,20 @@ def sync_task_workspace_status(
         return updated
 
     try:
+        try:
+            existing_raw = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            existing_raw = None
+        if isinstance(existing_raw, dict):
+            state_task_id = str(existing_raw.get("task_id") or "").strip()
+            if state_task_id and state_task_id != link.task_id:
+                return
+            if (existing_raw.get("task_id") == link.task_id and existing_raw.get("status") == projected_status
+                    and existing_raw.get("current_step") == projected_status):
+                _sync_task_workspace_summary_status(
+                    task_root, state_path.parent / "summaries" / "current_summary.md", existing_raw,
+                )
+                return
         updated_state = update_json_file_atomic(state_path, updater, require_existing=True)
         _sync_task_workspace_summary_status(
             task_root,
@@ -979,8 +994,8 @@ class TaskStore:
 
 
 
-# LLM: 仅由TaskStore.update_status调用，保持原JSON锁、CAS及投影顺序；模块级实现避免TaskStore超出类体量门禁。
-# 函数用途: 在状态与索引都已满足时零写返回，否则按原入口提交变更或修复索引。
+# LLM: 仅供TaskStore.update_status，保原JSON锁/CAS；两个幂等路径也补工作区及终态策略，全部一致才零写返回。
+# 函数用途: 提交状态、修复线程成员并补偿中断的终态副作用，不把链接已完成误当作所有收尾均完成。
 def _update_task_status(store: TaskStore, request: dict) -> ThreadTaskLink | None:
     task_id = str(request.get("task_id") or "")
     path = store.storage.task_path(task_id)
@@ -996,6 +1011,9 @@ def _update_task_status(store: TaskStore, request: dict) -> ThreadTaskLink | Non
         should_be_inactive = requested_status.strip().lower() in THREAD_TASK_LINK_INACTIVE_STATUSES
         if (thread is not None and task_id in thread.task_ids
                 and should_be_inactive == (task_id not in thread.active_task_ids)):
+            sync_task_workspace_status(cached_link, current, owner_home=thread.owner_home)
+            if str(cached_link.status or "").strip().lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
+                store._disable_task_progress_policies(task_id, now=current)
             return cached_link
     updated = False
     already_satisfied = False
@@ -1026,8 +1044,6 @@ def _update_task_status(store: TaskStore, request: dict) -> ThreadTaskLink | Non
     link = ThreadTaskLink.from_dict(payload)
     # 终态保留历史身份但移出热索引；原文件锁内合并，避免并发任务索引互相覆盖。
     indexed_thread = store.update_thread_index(link.thread_id, task_id, link.status, current)
-    if already_satisfied:
-        return link
     sync_task_workspace_status(link, current, owner_home=indexed_thread.owner_home)
     if str(link.status or "").strip().lower() in THREAD_TASK_LINK_NON_RESURRECTABLE_STATUSES:
         store._disable_task_progress_policies(task_id, now=current)

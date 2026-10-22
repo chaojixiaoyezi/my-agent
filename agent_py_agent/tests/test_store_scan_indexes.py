@@ -36,11 +36,13 @@ def _wake_snapshot(
     return [item.to_dict() for item in signals], list(errors)
 
 
+# LLM: 观察快照沿真实查询转换成纯字典，作为冷/热/损坏索引的一致性基准。
 # 函数用途: 取一次观察查询的可比对快照。
 def _observation_snapshot(store: ConversationStore, *, limit: int = 0) -> list[dict]:
     return [item.to_dict() for item in store.observations.unhandled_requiring_main(limit=limit)]
 
 
+# LLM: 策略值与错误集合一同纳入基准，不因索引命中丢弃坏账诊断。
 # 函数用途: 取一次策略查询的可比对快照(策略字典 + 结构化错误列表)。
 def _policy_snapshot(
     store: ConversationStore, *, enabled_only: bool = False
@@ -49,11 +51,14 @@ def _policy_snapshot(
     return [item.to_dict() for item in policies], list(errors)
 
 
+# LLM: 到期查询沿原now参数及过滤逻辑，不用展示状态替代策略事实。
 # 函数用途: 取一次到期策略查询的可比对快照。
 def _due_snapshot(store: ConversationStore, *, now: float = 10_000.0) -> list[dict]:
     return [item.to_dict() for item in store.progress.due_report(now=now)[0]]
 
 
+# LLM: 经原线程入口构造临时账本身份，不绕过require_thread合同。
+# 函数用途: 为索引测试取得具有稳定后缀的会话线程。
 def _thread(store: ConversationStore, suffix: str = "1"):
     return store.threads.get_or_create(
         {
@@ -103,6 +108,7 @@ def _seed_wake(
     return path
 
 
+# LLM: 仅写临时JSONL夹具，允许调用方构造脏行检验诊断，不修改产品解析器。
 # 函数用途: 写一个观察分片(JSONL),行内容由调用方给出。
 def _seed_observations(root: Path, thread_id: str, rows: list[dict]) -> Path:
     path = root / "observations" / f"{thread_id}.jsonl"
@@ -114,6 +120,7 @@ def _seed_observations(root: Path, thread_id: str, rows: list[dict]) -> Path:
     return path
 
 
+# LLM: 夹具字段保持观察协议结构，待处理判据仅由显式状态参数决定。
 # 函数用途: 造一行观察事件负载。
 def _observation_row(
     observation_id: str,
@@ -144,6 +151,7 @@ def _observation_row(
     }
 
 
+# LLM: 临时策略负载允许主键错位反例，索引不得代替规范文件校验。
 # 函数用途: 写一条进度策略文件,可指定 enabled/到期时间/故意错位的负载主键。
 def _seed_policy(
     root: Path,
@@ -174,6 +182,7 @@ def _seed_policy(
     return path
 
 
+# LLM: 三类夹具包括正常、坏JSON及边界形状，必须保留负例而非只测健康索引。
 # 函数用途: 造齐三类台账的混合夹具(正常 + 脏 + 边界),返回会话根目录。
 def _seed_all_ledgers(root: Path) -> Path:
     thread = _thread(ConversationStore(root), "seed")
@@ -255,6 +264,7 @@ def _bounded_wake_store(root: Path, max_entries: int) -> ConversationStore:
     return store
 
 
+# LLM: 容量断言读原索引诊断，不以返回条数替代内部缓存有界性。
 # 函数用途: 读一个索引的 entries/records/evictions/prunes 诊断快照(有界性断言的统一入口)。
 def _index_stats(store: ConversationStore, name: str) -> dict:
     return store.storage.indexes.get(name).stats()  # noqa: SLF001 - 验收需要直接读索引统计
@@ -288,6 +298,7 @@ def _corrupt_index(store: ConversationStore, name: str, mode: str):
     raise AssertionError(f"unknown corruption mode: {mode}")
 
 
+# LLM: 只读签名用于对照历史文件，不把缓存生成物或锁文件当作业务台账。
 # 函数用途: 列出目录树里所有台账文件的名字与大小,用于证明查询不写不删历史数据。
 def _tree_signature(root: Path) -> list[tuple[str, int]]:
     return sorted(
@@ -300,6 +311,8 @@ def _tree_signature(root: Path) -> list[tuple[str, int]]:
 CORRUPTION_MODES = ("schema", "cleared", "fingerprint", "identity")
 
 
+# LLM: 冷扫、禁用、热索引及损坏索引的唤醒结果和错误须逐字相同。
+# 函数用途: 验证各索引状态不改变唤醒查询语义。
 def test_wake_report_matches_across_index_states(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     cold_before = _tree_signature(root)
@@ -355,6 +368,8 @@ def test_wake_report_matches_across_index_states(tmp_path) -> None:
     assert _tree_signature(root) == cold_before
 
 
+# LLM: 热缓存或损坏回退都不能隐藏规范记录的读取错误。
+# 函数用途: 验证唤醒坏账诊断在所有索引状态下保持一致。
 def test_wake_load_errors_survive_every_index_state(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     baseline_errors = _wake_snapshot(ConversationStore(root))[1]
@@ -371,6 +386,8 @@ def test_wake_load_errors_survive_every_index_state(tmp_path) -> None:
         assert _wake_snapshot(broken)[1] == baseline_errors, mode
 
 
+# LLM: 消费者修改错误字典不能污染索引缓存和其它读者。
+# 函数用途: 验证唤醒与策略错误返回值相互隔离。
 def test_returned_load_errors_are_private_copies(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     warm = ConversationStore(root)
@@ -391,6 +408,8 @@ def test_returned_load_errors_are_private_copies(tmp_path) -> None:
     )[1]
 
 
+# LLM: 原位改动、创建和删除均须在下一查询可见，索引不能成为旧事实权威。
+# 函数用途: 验证唤醒热索引即时反映磁盘变化。
 def test_wake_index_sees_in_place_edits_and_new_files(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     warm = ConversationStore(root)
@@ -412,6 +431,8 @@ def test_wake_index_sees_in_place_edits_and_new_files(tmp_path) -> None:
     assert any(item["wake_signal_id"] == "wake-handled-left" for item in indexed[0])
 
 
+# LLM: 观察查询的排序、过滤及坏账口径在冷/热/损坏状态一致。
+# 函数用途: 验证观察索引不改变实际待处理事件集合。
 def test_observation_report_matches_across_index_states(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     cold_before = _tree_signature(root)
@@ -459,6 +480,8 @@ def test_observation_hot_path_reads_handled_map_once(tmp_path, monkeypatch) -> N
     reads: list[str] = []
     original = Path.read_text
 
+    # LLM: 真实文件读取继续执行，计数只用于识别重复handled映射加载。
+    # 函数用途: 记录观察热查询中的实际读盘次数。
     def counting(self: Path, *args, **kwargs):
         reads.append(self.name)
         return original(self, *args, **kwargs)
@@ -469,6 +492,8 @@ def test_observation_hot_path_reads_handled_map_once(tmp_path, monkeypatch) -> N
     assert reads == ["thread-dirty.jsonl"], reads
 
 
+# LLM: 策略索引只优化读取，不能更改enabled/到期筛选或坏账诊断。
+# 函数用途: 验证进度策略在各索引状态下结果一致。
 def test_progress_policy_report_matches_across_index_states(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     cold_before = _tree_signature(root)
@@ -506,6 +531,8 @@ def test_progress_policy_report_matches_across_index_states(tmp_path) -> None:
     assert _tree_signature(root) == cold_before
 
 
+# LLM: 策略状态与到期时间由规范文件决定，不可被旧投影掩盖。
+# 函数用途: 验证热索引及时反映策略启停和到期变化。
 def test_policy_index_sees_status_and_due_changes(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     warm = ConversationStore(root)
@@ -520,6 +547,8 @@ def test_policy_index_sees_status_and_due_changes(tmp_path) -> None:
     assert _due_snapshot(warm) == _due_snapshot(ConversationStore(root))
 
 
+# LLM: 原Store写入完成后热索引必须立即可见，不要求重建Store才能读到。
+# 函数用途: 验证唤醒与策略写接口能使热读取失效刷新。
 def test_wake_and_policy_writes_are_visible_through_warm_index(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
@@ -573,6 +602,8 @@ def test_wake_and_policy_writes_are_visible_through_warm_index(tmp_path) -> None
     ]
 
 
+# LLM: 超限索引保持有界并给结构化告警，查询仍须与规范扫描一致。
+# 函数用途: 验证索引容量上限和诊断事实。
 def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     store = ConversationStore(root)
@@ -609,6 +640,8 @@ def test_scan_index_stays_bounded_and_reports_structured_warnings(tmp_path) -> N
     assert budget_index.stats()["records"] <= budget_index.stats()["max_records"]
 
 
+# LLM: 文件名轮换也消耗历史条目预算，删除不能造成缓存无限增长。
+# 函数用途: 验证持续文件轮换时索引条目仍有界。
 def test_scan_index_entries_budget_holds_under_name_rotation(tmp_path) -> None:
     """文件轮换/删除: 连续创建 N>max_entries 个不同名文件并穿插删除。"""
     root = tmp_path / "conversations"
@@ -643,6 +676,8 @@ def test_scan_index_entries_budget_holds_under_name_rotation(tmp_path) -> None:
     assert final["prunes"] > 0
 
 
+# LLM: 当前磁盘集合很小也必须限制累计缓存名字数量。
+# 函数用途: 验证少量存活文件频繁换名不会突破容量。
 def test_scan_index_entries_budget_when_live_set_stays_small(tmp_path) -> None:
     """磁盘同时存在的文件数(1) < 上限,累计出现过的名字(63) >> 上限。"""
     root = tmp_path / "conversations"
@@ -668,6 +703,8 @@ def test_scan_index_entries_budget_when_live_set_stays_small(tmp_path) -> None:
     }
 
 
+# LLM: 单轮超过容量时按原LRU淘汰，不改变最终查询结果。
+# 函数用途: 验证一次大扫描仍正确执行最旧条目淘汰。
 def test_scan_index_lru_evicts_oldest_when_one_scan_exceeds_limit(tmp_path) -> None:
     """累计名字超过上限: 单轮写入超过上限时按 LRU 淘汰,查询结果不受影响。"""
     root = tmp_path / "conversations"
@@ -734,6 +771,8 @@ def test_scan_index_lru_evicts_oldest_when_one_scan_exceeds_limit(tmp_path) -> N
     assert index.stats()["prunes"] > 0
 
 
+# LLM: 不可读目录是未知，不可把读取失败当空目录并清掉有效缓存。
+# 函数用途: 验证目录暂时不可读时保留原条目并走正确回退。
 def test_scan_index_does_not_prune_when_directory_is_unreadable(
     tmp_path, monkeypatch
 ) -> None:
@@ -754,11 +793,15 @@ def test_scan_index_does_not_prune_when_directory_is_unreadable(
     real_glob = Path.glob
     blocked = store.storage.wake_queue_dir / "urgent"
 
+    # LLM: 仅替代匹配枚举入口制造读取失败，不修改原索引剪枝算法。
+    # 函数用途: 模拟目录成员枚举不可用。
     def unreadable_match_names(directory, pattern):
         if Path(directory) == blocked:
             return None
         return real_match_names(directory, pattern)
 
+    # LLM: glob替身按原测试目标制造失败，正常路径继续透传。
+    # 函数用途: 模拟回退枚举也遇到目录读取异常。
     def broken_glob(self, pattern, *args, **kwargs):
         if self == blocked:
             raise PermissionError("模拟目录暂时不可读")
@@ -788,6 +831,8 @@ def test_scan_index_does_not_prune_when_directory_is_unreadable(
     assert _wake_snapshot(store) == _wake_snapshot(ConversationStore(root)) == baseline
 
 
+# LLM: 枚举成员口径须与Path.glob相同，非普通文件不能被静默过滤。
+# 函数用途: 验证目录、链接等形状参与相同的成员枚举。
 def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -> None:
     """枚举成员口径必须与 Path.glob 逐字相同: 非普通文件也算成员,不许被静默过滤掉。"""
     root = tmp_path / "conversations"
@@ -845,6 +890,8 @@ def test_scan_index_enumeration_matches_glob_for_non_regular_entries(tmp_path) -
     assert _wake_snapshot(store) == hot
 
 
+# LLM: 超限判断只计查询模式匹配文件，不匹配成员不得抬高规模。
+# 函数用途: 验证目录大小门使用与实际查询一致的模式。
 def test_scan_index_dir_too_large_uses_the_query_pattern(tmp_path) -> None:
     """上界口径必须与被扫描的文件集合同源: 不匹配查询模式的文件不得抬高 dir_too_large。"""
     root = tmp_path / "conversations"
@@ -871,6 +918,8 @@ def test_scan_index_dir_too_large_uses_the_query_pattern(tmp_path) -> None:
     assert [item["reason"] for item in index.warnings] == ["dir_too_large"]
 
 
+# LLM: 索引schema常量与实际持久化/诊断形状保持一致。
+# 函数用途: 验证扫描索引schema自洽。
 def test_scan_index_schema_constant_is_self_consistent(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
     index = store.storage.indexes.get("wake:urgent")  # noqa: SLF001
@@ -878,6 +927,8 @@ def test_scan_index_schema_constant_is_self_consistent(tmp_path) -> None:
     assert index.stats()["schema"] == _SCAN_INDEX_SCHEMA
 
 
+# LLM: 特殊文件名仍按原路径顺序枚举，不能因缓存顺序改变业务结果。
+# 函数用途: 验证复杂名字下有序扫描的稳定排序。
 def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
@@ -913,6 +964,8 @@ def test_ordered_scan_keeps_path_sort_order_for_tricky_names(tmp_path) -> None:
     ]
 
 
+# LLM: 并发观察写入与索引读取共存，最终规范记录不得丢失或重复。
+# 函数用途: 验证观察账本并发读写保持记录完整。
 def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
@@ -922,6 +975,8 @@ def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> No
     seen: list[list[str]] = []
     errors: list[BaseException] = []
 
+    # LLM: 通过原Store写入互不重叠的观察或策略夹具，异常收集给主线程，不吞并发失败。
+    # 函数用途: 并发提交指定编号分片的临时账本记录。
     def writer(offset: int) -> None:
         try:
             for position in range(offset, total, 4):
@@ -937,6 +992,8 @@ def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> No
         except BaseException as exc:  # pragma: no cover - 失败要在主线程里报出来
             errors.append(exc)
 
+    # LLM: 与真实写者并发查询临时账本，失败须保留到主线程断言，不自行修正结果。
+    # 函数用途: 在写入期间反复读取并检查索引查询结果。
     def reader() -> None:
         while not stop.is_set():
             ids = [
@@ -965,6 +1022,8 @@ def test_concurrent_observation_writers_do_not_lose_or_duplicate(tmp_path) -> No
     ]
 
 
+# LLM: 并发唤醒写入仍沿原Store互斥与主键，索引不授予额外状态变更。
+# 函数用途: 验证唤醒账本并发读写无丢失或重复。
 def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
@@ -974,6 +1033,8 @@ def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     seen: list[list[str]] = []
     errors: list[BaseException] = []
 
+    # LLM: 指定优先级的写者仍走原唤醒Store，分片编号避免夹具主键互相覆盖。
+    # 函数用途: 并发写入指定种类的唤醒记录并保存失败信息。
     def writer(offset: int, kind: str) -> None:
         try:
             for position in range(offset, total, 3):
@@ -990,6 +1051,8 @@ def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
         except BaseException as exc:  # pragma: no cover
             errors.append(exc)
 
+    # LLM: 与真实写者并发查询临时账本，失败须保留到主线程断言，不自行修正结果。
+    # 函数用途: 在写入期间反复读取并检查索引查询结果。
     def reader() -> None:
         while not stop.is_set():
             signals, load_errors = store.wakes.pending_report(limit=0)
@@ -1018,6 +1081,8 @@ def test_concurrent_wake_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     assert len(ids) == len(set(ids)) == total
 
 
+# LLM: 并发策略创建和索引读取须保留每个规范策略，不覆盖其它写者。
+# 函数用途: 验证进度策略并发读写结果完整。
 def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
@@ -1027,6 +1092,8 @@ def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     seen: list[int] = []
     errors: list[BaseException] = []
 
+    # LLM: 通过原Store写入互不重叠的观察或策略夹具，异常收集给主线程，不吞并发失败。
+    # 函数用途: 并发提交指定编号分片的临时账本记录。
     def writer(offset: int) -> None:
         try:
             for position in range(offset, total, 3):
@@ -1040,6 +1107,8 @@ def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
         except BaseException as exc:  # pragma: no cover
             errors.append(exc)
 
+    # LLM: 与真实写者并发查询临时账本，失败须保留到主线程断言，不自行修正结果。
+    # 函数用途: 在写入期间反复读取并检查索引查询结果。
     def reader() -> None:
         while not stop.is_set():
             policies, load_errors = store.progress.list_report()
@@ -1065,6 +1134,8 @@ def test_concurrent_policy_writers_do_not_lose_or_duplicate(tmp_path) -> None:
     assert len(ids) == len(set(ids)) == total
 
 
+# LLM: 重复热查询不得累积状态或漂移排序，返回事实仍来自原账本。
+# 函数用途: 验证连续热读取结果稳定且顺序一致。
 def test_repeated_hot_queries_are_stable_and_ordered(tmp_path) -> None:
     root = _seed_all_ledgers(tmp_path / "conversations")
     store = ConversationStore(root)
@@ -1094,6 +1165,8 @@ def test_repeated_hot_queries_are_stable_and_ordered(tmp_path) -> None:
     ]
 
 
+# LLM: 文件指纹及对象memo只省读取/建模，不能缓存新的状态授权。
+# 函数用途: 验证TaskLink和唤醒模型热读避免重复工作。
 def test_task_link_fingerprint_cache_and_wake_model_cache_avoid_repeated_reads(
     tmp_path, monkeypatch
 ) -> None:
@@ -1132,6 +1205,8 @@ def test_task_link_fingerprint_cache_and_wake_model_cache_avoid_repeated_reads(
     original_read_text = Path.read_text
     task_reads: list[str] = []
 
+    # LLM: 透传真实read_text，只观察受测文件的读取次数。
+    # 函数用途: 计数TaskLink缓存的物理读取。
     def counting_read_text(self: Path, *args, **kwargs):
         if self == task_path:
             task_reads.append(self.name)
@@ -1140,6 +1215,8 @@ def test_task_link_fingerprint_cache_and_wake_model_cache_avoid_repeated_reads(
     original_from_dict = WakeSignal.from_dict
     wake_model_calls: list[str] = []
 
+    # LLM: 原from_dict仍执行，计数不能代替模型字段核验。
+    # 函数用途: 记录唤醒负载实际建模次数。
     def counting_from_dict(data):
         wake_model_calls.append(str(data.get("wake_signal_id") or ""))
         return original_from_dict(data)
@@ -1166,6 +1243,8 @@ def test_task_link_fingerprint_cache_and_wake_model_cache_avoid_repeated_reads(
     assert not errors_third and [item.status for item in links_third] == ["completed"]
 
 
+# LLM: 返回字典的原位修改不得泄漏进TaskLink或唤醒共享缓存。
+# 函数用途: 验证两个缓存向每位调用方提供独立可变值。
 def test_task_link_and_wake_cache_isolate_in_place_dict_mutations(tmp_path) -> None:
     import json
 
@@ -1225,6 +1304,8 @@ def test_task_link_and_wake_cache_isolate_in_place_dict_mutations(tmp_path) -> N
     assert second_wakes[0].metadata == {"k": "original"}
 
 
+# LLM: 宿主PID存活否决必须看到全部任务，不能因局部缓存误回收执行者。
+# 函数用途: 验证死亡运行回收向宿主判据传入完整任务集合。
 def test_reclaim_dead_running_runs_passes_all_tasks_for_host_pid_veto(monkeypatch) -> None:
     from types import SimpleNamespace
 
@@ -1435,6 +1516,52 @@ def test_planner_memo_input_invalidation(planner_input_case):
         assert not case.module.task_has_waiting_input(case.agent, 'task-one')
     case.path.unlink()
     assert not case.module.task_has_waiting_input(case.agent, 'task-one')
+
+
+# LLM: 真实原位同尺寸改写保留inode并恢复mtime；current每次仍核，缓存必须靠ctime看见pending已退休。
+# 函数用途: 验证输入记录恢复原mtime后仍立即失效，不把旧pending当作仍在等待。
+def test_input_same_size_restored_mtime_invalidates(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation import input_dependencies as module
+
+    store = ConversationStore(tmp_path / 'conversations')
+    link = SimpleNamespace(input_dependency_refs=('input-one',))
+    monkeypatch.setattr(store.tasks, 'load_report', lambda _: (link, None))
+    agent = SimpleNamespace(conversation_store=store)
+    path = module.input_dependency_path(agent, 'input-one')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = '{"status":"pending","armed":true}'
+    path.write_text(original, encoding='utf-8')
+    monkeypatch.setattr(module, 'input_dependency_current', lambda *_: True)
+    assert module.task_has_waiting_input(agent, 'task-one')
+    before = path.stat()
+    path.write_text(original.replace('pending', 'revoked'), encoding='utf-8')
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+    assert before.st_ctime_ns != after.st_ctime_ns
+    assert not module.task_has_waiting_input(agent, 'task-one')
+
+
+# LLM: list_cases须重取同inode/大小/mtime但ctime已变的case，不能让旧模型投影掩盖真实文件修改。
+# 函数用途: 验证协作case的原位等长更新在恢复mtime后仍可被列表读取。
+def test_case_same_size_restored_mtime_invalidates(tmp_path):
+    from agent_py_agent.agent.collaboration.store import CollaborationCaseStore
+
+    store = CollaborationCaseStore(tmp_path / 'collaboration')
+    case = store.open_case({'thread_id': 'thread-one', 'entities': {'tag': 'before'}})
+    assert store.list_cases()[0].entities['tag'] == 'before'
+    path = store._case_path(case.case_id)
+    text = path.read_text(encoding='utf-8')
+    assert text.count('"before"') == 1
+    before = path.stat()
+    path.write_text(text.replace('"before"', '"after!"'), encoding='utf-8')
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+    assert before.st_ctime_ns != after.st_ctime_ns
+    assert store.list_cases()[0].entities['tag'] == 'after!'
 
 
 # LLM: 协作快照的entities/metadata均可变，不能只replace浅拷贝；另一个Store须共享文件命中而非状态决定。

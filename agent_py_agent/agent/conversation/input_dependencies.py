@@ -29,17 +29,17 @@ from .input_dependency_index import update_task_input_refs
 _TERMINAL_INPUT_STATUSES = frozenset({'ready','cancelled','expired','revoked','failed'})
 _INPUT_DEP_RECORD_CACHE_MAX_ENTRIES_COUNT = 256
 _INPUT_DEP_RECORD_CACHE_LOCK = threading.RLock()
-_INPUT_DEP_RECORD_CACHE: OrderedDict[tuple[str, int, int, int, int], dict[str, Any]] = OrderedDict()
+_INPUT_DEP_RECORD_CACHE: OrderedDict[tuple[str, int, int, int, int, int], dict[str, Any]] = OrderedDict()
 
 
-# LLM: key只代表本次物理文件版本，不代表输入有效、当前任务或授权；stat失败必须回原reader。
-# 函数用途: 为输入热读取生成包含路径/设备/inode/大小/mtime的缓存键。
+# LLM: key只代表物理版本、不代表授权；ctime识别等长修改后恢复mtime，stat失败继续回原reader，读前后稳定核验不变。
+# 函数用途: 为输入热读生成路径/设备/inode/大小/mtime/ctime缓存键，及时丢弃旧输入投影。
 def _input_dependency_record_key(path):
     try:
         info = path.stat()
     except OSError:
         return None
-    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 # LLM: 仅pending只读热路径复用成功稳定负载；canonical读和RMW不经过缓存，返回深拷贝且current仍逐次核验。

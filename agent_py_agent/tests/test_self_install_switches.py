@@ -55,6 +55,8 @@ _FEISHU_USER = SimpleNamespace(owner_provider="feishu", owner_kind="users", owne
 _KEYS = (PACK_SELF_INSTALL_KEY, PLUGIN_SELF_INSTALL_KEY)
 
 
+# LLM: 夹具仅绑定临时用户配置和可信管理员身份，不创建真实模型或外部凭据。
+# 函数用途: 为自动安装开关测试准备最小agent与配置位置。
 def _agent(tmp_path, *, home=_ADMIN):
     user_config = tmp_path / "desktop.yaml"
     if not user_config.exists():
@@ -66,6 +68,8 @@ def _agent(tmp_path, *, home=_ADMIN):
     )
 
 
+# LLM: 只改夹具的能力配置文件，运行时仍走真实加载入口核对生效。
+# 函数用途: 在临时目录写入本次测试的开关值。
 def _write(agent, text: str) -> None:
     path = os.fspath(agent.capability_config_path)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -73,6 +77,8 @@ def _write(agent, text: str) -> None:
         handle.write(text)
 
 
+# LLM: dataclass与随包YAML必须同为默认关闭，不能通过来源差异意外开启自动安装。
+# 函数用途: 核对两个自动安装开关的默认值和登记集合。
 def test_both_switches_default_off_in_dataclass_and_packaged_yaml():
     packaged = load_capability_config(bundled_capability_config_path())
     for key in _KEYS:
@@ -81,6 +87,8 @@ def test_both_switches_default_off_in_dataclass_and_packaged_yaml():
     assert frozenset(_KEYS) == SELF_INSTALL_SWITCH_KEYS
 
 
+# LLM: 自动安装属于管理员安全边界，登记口径必须与运行入口一致。
+# 函数用途: 验证开关仅管理员可写且明确标为立即生效。
 @pytest.mark.parametrize("key", _KEYS)
 def test_registry_marks_switch_admin_only_and_immediate(key):
     spec = parameter_registry()[key]
@@ -89,6 +97,8 @@ def test_registry_marks_switch_admin_only_and_immediate(key):
     assert "马上生效" in spec.description and "/settings" in spec.description
 
 
+# LLM: 模型不能修改安全开关；管理员沿原settings写入后须通过正式读口立即核验。
+# 函数用途: 验证模型写入被拒、管理员写入生效且保留私有权限位。
 @pytest.mark.parametrize("key", _KEYS)
 def test_model_is_refused_but_admin_settings_write_takes_effect_now(tmp_path, key):
     agent = _agent(tmp_path)
@@ -104,6 +114,8 @@ def test_model_is_refused_but_admin_settings_write_takes_effect_now(tmp_path, ke
     assert (switches.capability_pack, switches.plugin) == (key == PACK_SELF_INSTALL_KEY, key == PLUGIN_SELF_INSTALL_KEY)
 
 
+# LLM: Agent旧快照不能遮蔽安全开关的新磁盘值，缓存只可复用同文件版本。
+# 函数用途: 验证管理员改配置后下一次开关读取立即反映变化。
 def test_switch_is_read_fresh_even_with_a_cached_snapshot(tmp_path):
     agent = _agent(tmp_path)
     _write(agent, "capability_pack_self_install_enabled: false\n")
@@ -118,6 +130,8 @@ def test_switch_is_read_fresh_even_with_a_cached_snapshot(tmp_path):
     assert agent._capability_config_runtime_snapshot.config.capability_pack_self_install_enabled is False
 
 
+# LLM: 缺用户配置沿随包默认；已选配置不可读必须失败关闭，不借旧快照开启安装。
+# 函数用途: 验证缺文件和读取失败的开关回退语义。
 def test_missing_user_file_reads_packaged_default_and_unreadable_reads_off(tmp_path):
     agent = _agent(tmp_path)
     missing = read_self_install_switches(agent)
@@ -128,6 +142,8 @@ def test_missing_user_file_reads_packaged_default_and_unreadable_reads_off(tmp_p
     assert (broken.capability_pack, broken.plugin, broken.config_version) == (False, False, UNREADABLE_CONFIG_VERSION)
 
 
+# LLM: 回执命令必须由原控制解析器逐字接受，不能靠展示文字冒充可执行控制。
+# 函数用途: 验证开关事实中的命令能原样回放到settings解析入口。
 def test_switch_facts_commands_round_trip_through_the_settings_parser():
     facts = switch_facts(read_self_install_switches(SimpleNamespace(root="/nonexistent", capability_config_path="")))
     commands = facts["switch_commands"]
@@ -141,6 +157,8 @@ def test_switch_facts_commands_round_trip_through_the_settings_parser():
     assert facts[PACK_SELF_INSTALL_KEY] is False and facts[PLUGIN_SELF_INSTALL_KEY] is False
 
 
+# LLM: 只替换可信宿主身份，控制解析与settings服务仍用真实产品入口。
+# 函数用途: 以指定临时身份执行一条开关控制命令。
 def _settings_run(monkeypatch, agent, text, *, home):
     monkeypatch.setattr(settings_control_service, "_scoped_home", lambda _agent, _scope: home)
     command = parse_conversation_control(text, reject_unknown_slash=True)
@@ -148,6 +166,8 @@ def _settings_run(monkeypatch, agent, text, *, home):
 
 
 # TUI（本机管理员）与 IM（已用 /admin 绑定的管理员私聊，解析出的也是本机管理员身份）走同一个 Gateway /settings 服务。
+# LLM: 两种管理员来源共用同一权限门，不从渠道名自动授予管理员身份。
+# 函数用途: 验证本机与已绑定IM管理员可通过Gateway开关自动安装。
 @pytest.mark.parametrize("channel_home", [_ADMIN, SimpleNamespace(owner_provider="local", owner_kind="main",
                                                                    owner_id="main", channel="feishu")])
 def test_admin_turns_switch_on_and_off_through_gateway_settings(monkeypatch, tmp_path, channel_home):
@@ -159,6 +179,8 @@ def test_admin_turns_switch_on_and_off_through_gateway_settings(monkeypatch, tmp
     assert turned_off.ok and read_self_install_switches(agent).plugin is False
 
 
+# LLM: 普通飞书身份不能修改管理员安全开关，拒绝后不得落配置。
+# 函数用途: 验证非管理员开启自动安装会被明确拒绝。
 def test_feishu_non_admin_cannot_turn_switch_on(monkeypatch, tmp_path):
     agent = _agent(tmp_path)
     refused = _settings_run(monkeypatch, agent, "/settings set capability_pack_self_install_enabled true",
@@ -167,6 +189,8 @@ def test_feishu_non_admin_cannot_turn_switch_on(monkeypatch, tmp_path):
     assert not os.path.exists(agent.capability_config_path)
 
 
+# LLM: 模型查看只投影当前值和只读边界，不因能读而获写入权限。
+# 函数用途: 验证模型能查看开关但不能改动它。
 def test_model_can_view_switch_value_read_only(tmp_path):
     agent = _agent(tmp_path)
     _write(agent, "plugin_self_install_enabled: true\n")
@@ -419,5 +443,7 @@ def test_config_cache_detects_same_size_edit_with_restored_mtime(tmp_path, kind)
         assert runtime_guard_policy(path).values['session_pair_hourly_limit'] == 22
 
 
+# LLM: 仅省略路径时沿原随包解析器；不得把此默认入口扩成显式文件缺失的隐式回退。
+# 函数用途: 验证无路径加载与显式随包配置的结果一致。
 def test_capability_config_without_path_uses_original_bundled_resolver():
     assert load_capability_config() == load_capability_config(bundled_capability_config_path())

@@ -62,17 +62,17 @@ from .store_common import now as current_time
 
 _CASE_FILE_CACHE_MAX_ENTRIES_COUNT = 512
 _CASE_FILE_CACHE_LOCK = threading.RLock()
-_CASE_FILE_CACHE: OrderedDict[tuple[str, int, int, int, int], CollaborationCase] = OrderedDict()
+_CASE_FILE_CACHE: OrderedDict[tuple[str, int, int, int, int, int], CollaborationCase] = OrderedDict()
 
 
-# LLM: 物理版本仅用于_all_cases只读投影；status更新仍锁内load_case读canonical文件，不复用缓存授权。
-# 函数用途: 生成设备/inode/大小/mtime及路径组成的协作文件键，失败回原读取。
+# LLM: 版本仅供_all_cases只读投影；ctime识别等长恢复mtime的改写，status更新仍锁内读canonical，不复用缓存授权。
+# 函数用途: 生成路径/设备/inode/大小/mtime/ctime协作文件键，stat失败回原读取。
 def _case_file_key(path: Path):
     try:
         info = path.stat()
     except OSError:
         return None
-    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 # LLM: 只记忆成功且读前后稳定的case；entities/metadata均深拷贝，不把浅replace或空记录当独立快照。
