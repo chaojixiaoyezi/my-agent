@@ -86,7 +86,11 @@ from .process_registry import (
 )
 from .process_scope import ProcessAccessScope, ProcessExecutionScope, process_access_scope
 from .process_session_store import process_session_store_root
-from .sandbox import SandboxUnavailable, prune_transient_bwrap_sidecar_mounts
+from .sandbox import (
+    SandboxUnavailable,
+    prune_transient_bwrap_sidecar_mounts,
+    retry_bwrap_mount_race_argv,
+)
 from .shell_syntax import contains_unmanaged_background_operator
 from .write_boundary import SandboxWriteProtection
 
@@ -661,7 +665,7 @@ def _sandbox_roots(
 #   都经 AttemptExecutionSandbox 网关（Linux bwrap / macOS Seatbelt），只能
 #   返回沙箱 argv(shell=False)或抛 SandboxUnavailable，禁止恢复宿主 shell
 #   fallback（3.txt E.6/E.7）。单租户走 full_access 档：文件语义不变，网关
-#   统一 + 进程隔离 + readiness 检查仍生效（E.8 不取消 sandbox）。宿主清单已锚定真实Owner，缺失项不重复realpath；任务保护仍完整解析。
+#   统一 + 进程隔离 + readiness 检查仍生效（E.8 不取消 sandbox）。宿主清单已锚定真实Owner，缺失项不重复realpath；任务保护仍完整解析，Seatbelt正则仅macOS生成。
 # 函数用途: 为命令选择跨平台 attempt 沙箱执行参数；普通范围按最具体路径生效，精确保护最后覆盖，返回 (argv, shell=False)。
 def _sandbox_exec(
     command: str,
@@ -733,9 +737,11 @@ def _sandbox_exec(
             Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
         ) if owner_text else (),
         hidden_paths=_host_managed_hidden_paths(owner_text, persona_text),
-        protected_write_patterns=host_readonly_patterns_for(owner_text, persona_text),
-        protected_directory_write_patterns=host_readonly_patterns_for(owner_text, persona_text, directory_operation="write"),
-        protected_directory_unlink_patterns=host_readonly_patterns_for(owner_text, persona_text, directory_operation="unlink"),
+        protected_write_patterns=host_readonly_patterns_for(owner_text, persona_text) if sys.platform == "darwin" else (),
+        protected_directory_write_patterns=(host_readonly_patterns_for(owner_text, persona_text, directory_operation="write")
+                                            if sys.platform == "darwin" else ()),
+        protected_directory_unlink_patterns=(host_readonly_patterns_for(owner_text, persona_text, directory_operation="unlink")
+                                             if sys.platform == "darwin" else ()),
         # G4：拒绝模型命令连本机 Gateway 的实际绑定端口（回环）。端口由 Gateway 启动时登记在进程内注册表；
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=gateway_bound_ports(),
@@ -2095,7 +2101,7 @@ def _run_shell_command(
     )
 
 
-# LLM: 前台只吃attempt argv；仅无stdout的瞬时侧车挂载失败裁剪后最多重试三次，共用期限和原取消/回收；不回退宿主shell。
+# LLM: 前台只吃attempt argv；无stdout的侧车失败先裁剪，再识别存活源挂载竞态原参重试；共用最多三次重试、期限和原取消/回收，不回退宿主shell。
 # 函数用途: 在 attempt 沙箱内运行非交互命令并等待完成；无显式输入时得到 EOF，而不是白等宿主终端四分钟。
 def _run_attempt_sandboxed_shell_command(
     tool: ShellTool,
@@ -2129,6 +2135,8 @@ def _run_attempt_sandboxed_shell_command(
         completed = _communicate_process(proc, command=command, timeout=remaining)
         if not use_shell and isinstance(exec_arg, list) and completed.returncode != 0 and not completed.stdout and attempt < 3:
             pruned = prune_transient_bwrap_sidecar_mounts(exec_arg, completed.stderr or '')
+            if pruned is None:
+                pruned = retry_bwrap_mount_race_argv(exec_arg, completed.stderr or '')
             if pruned is not None:
                 exec_arg = pruned
                 continue

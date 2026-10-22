@@ -516,3 +516,232 @@ def test_shell_does_not_retry_shell_or_string_argv(sidecar_shell, monkeypatch, u
     communicate.return_value = subprocess.CompletedProcess('true', 1, '', _sidecar_error('/absent-wal'))
     shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None)
     assert popen.call_count == 1
+
+
+# LLM: 只截获真实Attempt规格，不执行平台沙箱；非macOS不应生成Seatbelt正则，路径保护仍完整保留。
+# 函数用途: 核验平台分支只影响正则，不丢现存、缺失或悬空链接保护。
+@pytest.mark.parametrize('platform_name', ['darwin', 'linux', 'freebsd'])
+def test_shell_seatbelt_patterns_are_darwin_only(tmp_path, monkeypatch, platform_name):
+    from agent_py_agent.agent.attempt.sandbox import AttemptExecutionSandbox
+    existing, missing, dangling = tmp_path / 'present', tmp_path / 'missing', tmp_path / 'alias'
+    existing.write_text('state')
+    dangling.symlink_to(missing)
+    patterns, captured = Mock(return_value=('seatbelt-pattern',)), []
+    monkeypatch.setattr(shell.sys, 'platform', platform_name)
+    monkeypatch.setattr(shell, 'host_readonly_paths_for', lambda *args: (existing, missing, dangling))
+    monkeypatch.setattr(shell, 'host_readonly_patterns_for', patterns)
+    monkeypatch.setattr(AttemptExecutionSandbox, 'build_argv', lambda instance, command:
+                        captured.append(instance.spec) or command)
+    shell._sandbox_exec('true', tmp_path, None)
+    spec, = captured
+    expected = ('seatbelt-pattern',) if platform_name == 'darwin' else ()
+    assert spec.protected_write_patterns == expected
+    assert spec.protected_directory_write_patterns == expected
+    assert spec.protected_directory_unlink_patterns == expected
+    assert {existing.resolve(), missing} <= set(spec.protected_write_paths)
+    assert patterns.call_count == (3 if platform_name == 'darwin' else 0)
+    if platform_name == 'darwin':
+        assert [call.kwargs for call in patterns.call_args_list] == [
+            {}, {'directory_operation': 'write'}, {'directory_operation': 'unlink'}]
+
+
+# LLM: 只有硬RO同源祖先允许省略子项；瞬时try-bind侧车的精确语义不能被新去重吞掉。
+# 函数用途: 核验父目录覆盖下的持久文件和目录去重，侧车仍保留try-bind。
+@pytest.mark.parametrize(('name', 'append'), [('runtime.db', False), ('AGENTS.md', False),
+    ('directory', False), ('runtime.db-wal', True), ('state.lock', True)])
+def test_readonly_child_uses_unbroken_same_source_parent(tmp_path, name, append):
+    parent = tmp_path.resolve()
+    child = parent / name
+    child.mkdir() if name == 'directory' else child.write_text('state')
+    argv = ['bwrap', '--ro-bind', str(parent), str(parent)]
+    before = argv.copy()
+    sandbox._append_readonly_mounts(argv, (child,))
+    assert argv == (before + ['--ro-bind-try', str(child), str(child)] if append else before)
+
+
+# LLM: RW、异源RO、try-bind、symlink和空覆盖均不能冒充未改变的同源硬RO祖先。
+# 函数用途: 保证祖先去重不跨过改变目标子树的挂载，并忽略真正无关的兄弟挂载。
+@pytest.mark.parametrize('intervening', ['parent-rw', 'child-rw', 'parent-alias', 'child-alias',
+    'parent-try', 'child-symlink', 'child-tmpfs', 'unrelated'])
+def test_readonly_child_rechecks_intervening_mount(tmp_path, intervening):
+    parent = tmp_path.resolve()
+    child = parent / 'protected'
+    child.mkdir()
+    argv = ['bwrap', '--ro-bind', str(parent), str(parent)]
+    if intervening == 'child-tmpfs':
+        argv += ['--tmpfs', str(child)]
+    else:
+        flag = {'parent-rw': '--bind', 'child-rw': '--bind', 'parent-alias': '--ro-bind',
+                'child-alias': '--ro-bind', 'parent-try': '--ro-bind-try',
+                'child-symlink': '--symlink', 'unrelated': '--bind'}[intervening]
+        target = parent if intervening.startswith('parent-') else child
+        if intervening == 'unrelated':
+            target = parent / 'sibling'
+        source = '/different-source' if 'alias' in intervening or 'symlink' in intervening else str(target)
+        argv += [flag, source, str(target)]
+    before = argv.copy()
+    sandbox._append_readonly_mounts(argv, (child,))
+    assert argv == (before if intervening == 'unrelated' else before + ['--ro-bind', str(child), str(child)])
+
+
+# LLM: 真实存活路径配合三种预exec错误；只要求原参数副本，不删除或改写任何保护。
+# 函数用途: 验证四类bind和绝对bwrap路径均能识别挂载竞态。
+@pytest.mark.parametrize('kind', range(3))
+@pytest.mark.parametrize('flag', ['--ro-bind', '--ro-bind-try', '--bind', '--bind-try'])
+@pytest.mark.parametrize('executable', ['bwrap', '/usr/bin/bwrap'])
+def test_mount_race_returns_same_argv_copy(tmp_path, kind, flag, executable):
+    leaf = tmp_path / 'runtime.db'
+    leaf.write_text('replacement')
+    argv = [executable, flag, str(leaf), str(leaf), '--', 'true']
+    before = argv.copy()
+    retry = sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(leaf, kind))
+    assert retry == before and retry is not argv and argv == before
+
+
+# LLM: 源存活判定包括目录和悬空链接；别名目的地可匹配错误，但不能因此改写源目标。
+# 函数用途: 覆盖目标匹配及exists/is_symlink的两条存在性分支。
+@pytest.mark.parametrize('source_kind', ['directory', 'dangling'])
+def test_mount_race_matches_alias_target_and_existing_source(tmp_path, source_kind):
+    source, target = tmp_path / 'source', tmp_path / 'target'
+    source.mkdir() if source_kind == 'directory' else source.symlink_to(tmp_path / 'absent')
+    argv = ['bwrap', '--ro-bind', str(source), str(target), '--', 'true']
+    retry = sandbox.retry_bwrap_mount_race_argv(argv, _sidecar_error(target, 2))
+    assert retry == argv and retry is not argv
+
+
+# LLM: 不扫描用户命令的挂载形状；载荷回显bwrap错误、非bwrap入口和缺失源均不得重试。
+# 函数用途: 锁住竞态helper的反伪造、挂载区边界及不完整三元组拒绝。
+@pytest.mark.parametrize('case', ['empty', 'other-executable', 'wrapper', 'ordinary', 'unmatched',
+    'missing', 'payload-spoof', 'payload-mount', 'incomplete', 'cross-separator', 'unsupported'])
+def test_mount_race_rejects_unconfirmed_failure(tmp_path, case):
+    leaf = tmp_path / 'runtime.db'
+    leaf.write_text('present')
+    argv = ['bwrap', '--ro-bind', str(leaf), str(leaf), '--', 'true']
+    error = _sidecar_error(leaf, 2)
+    if case == 'empty':
+        argv = []
+    elif case == 'other-executable':
+        argv[0] = 'not-bwrap'
+    elif case == 'wrapper':
+        argv = ['python', 'landlock_launcher.py', '--', *argv]
+    elif case == 'ordinary':
+        error = f'ordinary failure reading {leaf}'
+    elif case == 'unmatched':
+        error = _sidecar_error(tmp_path / 'another-file', 2)
+    elif case == 'missing':
+        leaf.unlink()
+    elif case == 'payload-spoof':
+        argv[-1:] = ['bash', '-c', f"echo '{error}' >&2; exit 1"]
+    elif case == 'payload-mount':
+        argv = ['bwrap', '--', 'echo', '--ro-bind', str(leaf), str(leaf), '--', 'end']
+    elif case == 'incomplete':
+        argv = ['bwrap', '--ro-bind', str(leaf)]
+    elif case == 'cross-separator':
+        argv = ['bwrap', '--ro-bind', str(leaf), '--', str(leaf)]
+    else:
+        argv[1] = '--dev-bind'
+    before = argv.copy()
+    assert sandbox.retry_bwrap_mount_race_argv(argv, error) is None
+    assert argv == before
+
+
+# LLM: 不启动沙箱或宿主业务进程；提供真实主文件和真实两执行入口共享的Popen/等待替身。
+# 函数用途: 把已有侧车执行夹具改为持久文件竞态输入，供集成控制流测试。
+@pytest.fixture
+def mount_race_shell(sidecar_shell, monkeypatch):
+    tool, target, _argv, popen, communicate = sidecar_shell
+    leaf = target / 'runtime.db'
+    leaf.write_text('original')
+    argv = ['bwrap', '--ro-bind', str(leaf), str(leaf), '--', 'true']
+    monkeypatch.setattr(shell, '_sandbox_exec', lambda *a, **k: (argv.copy(), False))
+    return tool, target, leaf, argv, popen, communicate
+
+
+# LLM: 第一次等待实际os.replace主文件，再返回模拟bwrap错误；两入口仍走真实外层重试和原清理。
+# 函数用途: 验证主文件替换后原argv重试成功，预算、结果事实和管道关闭均保留。
+@pytest.mark.parametrize('entry', ['shell', 'attempt'])
+@pytest.mark.parametrize('kind', range(3))
+def test_mount_race_retries_after_atomic_replace(mount_race_shell, monkeypatch, entry, kind):
+    from agent_py_agent.agent.attempt import process_run as run
+    tool, target, leaf, argv, popen, communicate = mount_race_shell
+    now, waits = [100.0], []
+    original_inode = leaf.stat().st_ino
+    success = subprocess.CompletedProcess(argv, 0, 'done', '')
+    success.capture, success.termination = {'complete': True}, object()
+    capture = Mock()
+    monkeypatch.setattr(shell.time, 'monotonic', lambda: now[0])
+    # LLM: 模拟第一次bwrap预exec失败，真实替换只作用于pytest临时文件，不执行用户载荷。
+    # 函数用途: 记录两个入口的剩余期限，在首次错误后交回同一个成功对象。
+    def finish(*args, **kwargs):
+        waits.append(kwargs['timeout'] if entry == 'shell' else args[2])
+        now[0] += 2
+        if len(waits) == 1:
+            replacement = leaf.with_suffix('.new')
+            replacement.write_text('replacement')
+            replacement.replace(leaf)
+            return subprocess.CompletedProcess(argv, 1, '', _sidecar_error(leaf, kind))
+        return success
+    if entry == 'shell':
+        communicate.side_effect = finish
+        result = shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None)
+    else:
+        monkeypatch.setattr(run, 'ProcessOutputCapture', lambda proc: capture)
+        monkeypatch.setattr(run, '_wait_for_process', finish)
+        result = run.run_sandbox_process(argv, run.SandboxProcessOptions(10, .1, True, target))
+        assert capture.finish.call_count == 2
+        assert popen.return_value.stdout.close.call_count == 2
+        assert popen.return_value.stderr.close.call_count == 2
+    assert result is success and result.args == argv and result.capture == {'complete': True}
+    assert result.termination is success.termination and waits == [10, 8]
+    assert [call.args[0] for call in popen.call_args_list] == [argv, argv]
+    assert leaf.stat().st_ino != original_inode and leaf.read_text() == 'replacement'
+    assert all(call.kwargs['stdin'] == subprocess.DEVNULL and call.kwargs['start_new_session']
+               for call in popen.call_args_list)
+
+
+# LLM: 用真实竞态helper验证两入口的四次启动及总期限，不依赖假裁剪器让循环继续。
+# 函数用途: 确保持久文件一直存活且一直挂载失败时，也不能无限重试或重置预算。
+@pytest.mark.parametrize('entry', ['shell', 'attempt'])
+@pytest.mark.parametrize(('budget', 'expected'), [(10, [10, 8, 6, 4]), (1, [1])])
+def test_mount_race_retry_limit_and_budget(mount_race_shell, monkeypatch, entry, budget, expected):
+    from agent_py_agent.agent.attempt import process_run as run
+    tool, target, leaf, argv, popen, communicate = mount_race_shell
+    now, waits = [100.0], []
+    monkeypatch.setattr(shell.time, 'monotonic', lambda: now[0])
+    # LLM: 仅模拟已清理的预exec错误并推进两秒；生产外层控制预算和启动次数。
+    # 函数用途: 为两入口提供可确定的重复挂载失败。
+    def finish(*args, **kwargs):
+        waits.append(kwargs['timeout'] if entry == 'shell' else args[2])
+        now[0] += 2
+        return subprocess.CompletedProcess(argv, 1, '', _sidecar_error(leaf, 2))
+    if entry == 'shell':
+        communicate.side_effect = finish
+        result = shell._run_attempt_sandboxed_shell_command(tool, 'true', target, budget, None, None, None)
+    else:
+        monkeypatch.setattr(run, 'ProcessOutputCapture', lambda proc: Mock())
+        monkeypatch.setattr(run, '_wait_for_process', finish)
+        result = run.run_sandbox_process(argv, run.SandboxProcessOptions(budget, .1, True, target))
+    assert result.returncode == 1 and waits == expected
+    assert [call.args[0] for call in popen.call_args_list] == [argv] * len(expected)
+
+
+# LLM: 主文件存在不等于命令没执行；有stdout、成功、普通错误或payload伪造均不重放业务。
+# 函数用途: 验证新fallback不能绕过两入口原本的执行结果拒重试边界。
+@pytest.mark.parametrize('entry', ['shell', 'attempt'])
+@pytest.mark.parametrize('case', ['success', 'stdout', 'ordinary', 'spoof'])
+def test_mount_race_entry_rejects_command_results(mount_race_shell, monkeypatch, entry, case):
+    from agent_py_agent.agent.attempt import process_run as run
+    tool, target, leaf, argv, popen, communicate = mount_race_shell
+    error = _sidecar_error(leaf, 2)
+    if case == 'spoof':
+        argv[-1:] = ['bash', '-c', f"echo '{error}' >&2; exit 1"]
+    result = subprocess.CompletedProcess(argv, 0 if case == 'success' else 1,
+        'already ran' if case == 'stdout' else '', 'ordinary failure' if case == 'ordinary' else error)
+    if entry == 'shell':
+        communicate.return_value = result
+        actual = shell._run_attempt_sandboxed_shell_command(tool, 'true', target, 10, None, None, None)
+    else:
+        monkeypatch.setattr(run, 'ProcessOutputCapture', lambda proc: Mock())
+        monkeypatch.setattr(run, '_wait_for_process', lambda *args: result)
+        actual = run.run_sandbox_process(argv, run.SandboxProcessOptions(10, .1, True, target))
+    assert actual is result and popen.call_count == 1

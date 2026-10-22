@@ -584,11 +584,35 @@ def prune_transient_bwrap_sidecar_mounts(argv: list[str], stderr: str) -> list[s
     return pruned if matched_stderr and len(pruned) < len(argv) else None
 
 
-# LLM: 缺失项快跳；瞬时侧车try-bind容忍exec前删除，持久路径仍硬RO；有效同源只读才去重，不跨调用缓存权限。
-# 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略仍生效的重复挂载。
+# LLM: 供两种同步执行入口识别原参数挂载竞态；不改变任何挂载或权限，仅返回副本供原有界重试使用。
+# 函数用途: 检查主文件替换期间的bwrap挂载错误，未确认竞态时不重试。
+def retry_bwrap_mount_race_argv(argv: list[str], stderr: str) -> list[str] | None:
+    if not argv or Path(argv[0]).name != "bwrap":
+        return None
+    if not any(marker in stderr for marker in ("bwrap: Can't bind mount ", "bwrap: Can't find source path ")):
+        return None
+    limit = _bwrap_mount_limit(argv)
+    if any("bwrap:" in str(item) for item in argv[limit:]):
+        return None
+    index = 1
+    while index + 2 < limit:
+        if argv[index] in {"--ro-bind", "--ro-bind-try", "--bind", "--bind-try"}:
+            source, target = argv[index + 1:index + 3]
+            if source in stderr or target in stderr:
+                source_path = Path(source)
+                if source_path.exists() or source_path.is_symlink():
+                    return list(argv)
+            index += 3
+        else:
+            index += 1
+    return None
+
+
+# LLM: 缺失项快跳；瞬时侧车try-bind容忍exec前删除，持久路径仍硬RO；列表追加同次投影，有效同源硬RO祖先才覆盖去重，不跨调用缓存权限。
+# 函数用途: 将存在的绝对保护路径只读覆盖到沙箱，省略精确或祖先仍生效的重复挂载。
 def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
     seen: set[Path] = set()
-    mounts = _mount_snapshot(argv)
+    mounts: list[_MountProjection] = list(_mount_snapshot(argv))
     for raw in paths:
         try:
             path = Path(raw).expanduser()
@@ -605,15 +629,22 @@ def _append_readonly_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
         if _readonly_mount_unchanged(path, arguments, mounts):
             continue
         argv.extend(arguments)
-        mounts += (_MountProjection(path, path, arguments=arguments),)
+        mounts.append(_MountProjection(path, path, arguments=arguments))
 
 
-# LLM: 父目录本身仍只读不足以去重：后发子RW、异源RO或空覆盖也改变整树，必须重施原精确保护。
-# 函数用途: 逆序核对同次挂载，确认一个精确只读覆盖及其子视图都没有后来变化。
-def _readonly_mount_unchanged(path: Path, arguments: tuple[str, ...], mounts: tuple[_MountProjection, ...]) -> bool:
+# LLM: 只去重精确原参或同源硬RO祖先；逆序遇首个交叠后停止，后发RW、异源RO、alias或空覆盖均不能证明子树未变。
+# 函数用途: 核对精确或祖先覆盖是否仍生效，避免冗余挂载又不漏掉需要重新加固的子树。
+def _readonly_mount_unchanged(path: Path, arguments: tuple[str, str, str], mounts: Sequence[_MountProjection]) -> bool:
     for mount in reversed(mounts):
         if _lexically_within(mount.target, path) or _lexically_within(path, mount.target):
-            return mount.target == path and mount.arguments == arguments
+            if mount.target == path and mount.arguments == arguments:
+                return True
+            if (arguments == ("--ro-bind", str(path), str(path))
+                    and _lexically_within(path, mount.target)
+                    and not mount.writable and not mount.alias
+                    and mount.arguments == ("--ro-bind", str(mount.target), str(mount.target))):
+                return True
+            return False
     return False
 
 
@@ -845,6 +876,7 @@ __all__ = [
     "find_bwrap",
     "probe_sandbox",
     "prune_transient_bwrap_sidecar_mounts",
+    "retry_bwrap_mount_race_argv",
     "require_sandbox_ready",
     "wrap_shell_command",
 ]
