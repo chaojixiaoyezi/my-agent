@@ -177,8 +177,8 @@ class ConversationContextUsage:
     trigger_capped: bool = False
 
 
-# LLM: 内部宿主复用原来源/projector/摘要面；tool_source只用于有完整投影的联合候选，不从JSON获取回调或权限。
-# 类用途: 统一压缩输入、停止检查与缓存面；完整请求准备不在候选间重复，未知投影不能改走粗估。
+# LLM: 内部宿主复用原来源/projector/摘要面；手动请求可显式绕过自动冷却但仍记录结果，不绕过来源/CAS校验。
+# 类用途: 统一压缩输入、停止检查与缓存面，显式手动恢复允许重试并由成功提交重置熔断。
 @dataclass(frozen=True)
 class ConversationCompactOptions:
     current_prompt: str = ""
@@ -200,6 +200,8 @@ class ConversationCompactOptions:
     calibration: CompactRequestCalibration | None = None
     # LLM: 结构化触发来源（compact_progress.COMPACT_TRIGGER_*），只进进度事件，不参与任何判定；空串表示手动或未知。
     trigger_source: str = ""
+    # 显式手动/compact绕过自动压缩的冷却，结果仍走原失败账；成功提交会重置熔断，自动调用默认不绕过。
+    bypass_circuit_breaker: bool = False
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
@@ -410,8 +412,8 @@ def _prepare_compact_source(agent, store, thread, options):
     return source, compact_context
 
 
-# LLM: 显式来源在预检时校验同线程、精确行和已提交视图；只读核对后候选不重复读链或重建宿主准备。
-# 函数用途: 复用只读来源、估算触发线并构造请求，地址重放携带原取消检查，不修改全线程游标。
+# LLM: 显式来源先核验同线程/行/视图；仅显式bypass跳过自动冷却，摘要、失败账和提交CAS仍走原链。
+# 函数用途: 复用来源并构造压缩请求，允许手动恢复绕过冷却但不绕过来源或容量检查。
 def _prepare_compact_request(
     agent: SimpleAgent,
     store: ConversationStore,
@@ -476,7 +478,7 @@ def _prepare_compact_request(
             "conversation summary alone exceeds the configured compact threshold",
             code="COMPACT_NO_SOURCE_MESSAGES",
         )
-    if compact_circuit_is_open(current, policy, now=attempted_at):
+    if not options.bypass_circuit_breaker and compact_circuit_is_open(current, policy, now=attempted_at):
         raise ConversationCompactCircuitOpenError(
             "conversation compact is cooling down after repeated failures",
             code="COMPACT_CIRCUIT_OPEN",

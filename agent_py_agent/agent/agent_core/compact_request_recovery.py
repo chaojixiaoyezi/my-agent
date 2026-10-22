@@ -2,6 +2,7 @@
 # 模块用途: 让三宿主复用一次准备与可容纳主前缀；必超容量的优化不延长旧历史驻留，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -14,6 +15,7 @@ from ..conversation.compact_calibration import (
 )
 from ..conversation.compact_guard import (
     ConversationCompactError,
+    compact_circuit_is_open,
     compact_exception_code,
     raise_if_compact_interrupted,
 )
@@ -30,6 +32,7 @@ from ..prompting_parts.cache_layout import prompt_cache_layout
 from .model.context_pressure import (
     frozen_compact_request_calibration,
     invalidate_provider_context_observation,
+    model_request_input_ceiling,
     projected_model_context_components,
     rebase_provider_context_observation,
     request_projection_surface_fingerprint,
@@ -122,14 +125,14 @@ class PreparedCompactRecovery:
             refresh_first_request_prompt(agent, prepared_params, self.resolved_input)
         return prepared_params, prepared_prompt
 
-    # LLM: 进入时领取防摘要重入；强制恢复没有消息或完整工具来源时显式拒绝，准备/投影失败不发送业务，CAS后沿同次材料发送。
+    # LLM: 进入时领取防重入；强制恢复及结构错误仍拒发业务；可选摘要失败且原请求装得下时仅从种子重建历史，不缓存旧列表。
     # 强制恢复遇 unknown 非文本内容（或媒体策略 off 且含媒体）报 COMPACT_REQUEST_NON_TEXT（preflight 此时只在窗口上限触发）；自动遇同类内容走 noop。
     # 已知媒体在策略不为 off 时进入压缩链，由 compact 按策略投影为归档引用或随图摘要。
     # 自动 noop 先原样返回原请求；决定摘要后先量一次完整旧请求（“压缩前”大小）；没有已结束历史时再为回合中归档摘要冻结一份
-# 主请求缓存前缀（_active_turn_cache_fork，摘要发送即清）；然后解绑原参数与冻结输入的完整原生历史，
-    # 失败/取消/超限收尾都不得再读它。冻结完整请求后先按其表面指纹冻结一次校准观测（同 fingerprint、同代次），自动判定、
+    # 主请求缓存前缀（_active_turn_cache_fork，摘要发送即清）；然后解绑原参数与冻结输入的完整原生历史，
+    # 强制/取消/超限收尾不得再读它，可选降级只检查字段的精确类型后重放种子。冻结校准供自动判定、
     # 压缩前与候选都按它折算；提交后用已接受候选改写本轮观测基线，让同轮下一次真实预检与接受基准一致。
-    # 函数用途: 解绑前冻结连续主前缀，按完整输入选择候选；提交后才返回同次恢复材料。
+    # 函数用途: 解绑后摘要并选择候选；可选失败在物理窗口内恢复种子请求，强制失败仍终止。
     def select(self, agent: object, params: object, prompt: str) -> tuple[object, str]:
         if self.consumed or not (agent is self.agent and self.matches_request(params)):
             return params, prompt
@@ -221,7 +224,10 @@ class PreparedCompactRecovery:
         except (InterruptedError, ToolCancelled):
             raise
         except Exception as exc:
-            # 摘要的瞬时错误不能进入普通业务模型重试，否则会跳过尚未提交的恢复。
+            raise_if_compact_interrupted(interrupted)
+            if _restore_optional_preflight(self, params, frozen, before_tokens, exc):
+                return params, prompt
+            # 强制恢复、结构错误或仍超窗不得进入普通业务模型重试。
             raise ConversationCompactError("上下文压缩未完成，原始会话记录保留不变", code=compact_exception_code(exc)) from exc
         raise_if_compact_interrupted(interrupted)
         material = result.request_projection.material if result.request_projection is not None else None
@@ -303,10 +309,10 @@ class PreparedCompactRecovery:
         )
 
 
-# LLM: 冻结投影须完整；未知模态只跳过可选自动压缩，不赋予容量证明，强制恢复在select提前拒绝。
+# LLM: 冻结投影须完整；熔断open且原输入严格低于物理窗口时跳过可选摘要，不把触发线当硬容量；强制恢复仍在select拒绝。
 #   已知图块按常量 compact_media_policy.INPUT_MEDIA_TOKEN_RESERVE_TOKENS 折进计量，与预检同口径，多图上下文不会因估算偏低而被判“容量充足”。
 #   纯投影的原始计量再按 select 冻结的校准（recovery.calibration）折算后才与上限比较（与预检同一观测）；投影本身不读宿主状态。
-# 函数用途: 容量充足、没有来源或模态计量未知时保留原请求，普通媒体仍交给原选定模型；recovery 是恢复宿主本身。
+# 函数用途: 容量充足或自动摘要冷却但仍装得下时保留原请求，未知模态和无来源仍沿原noop合同。
 def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source) -> bool:
     from ..conversation.compact import _compact_request_input_ceiling
 
@@ -316,9 +322,35 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
     if not compact_request_source_supported(frozen, media_policy=configured_media_policy(recovery.agent)):
         return True
     tokens, _ = projected_model_context_components(projection, media_token_reserve=media_token_reserve())
-    if calibrated_compact_request_tokens(tokens, recovery.calibration) < _compact_request_input_ceiling(recovery.agent, recovery.source.policy):
+    calibrated = calibrated_compact_request_tokens(tokens, recovery.calibration)
+    if calibrated < _compact_request_input_ceiling(recovery.agent, recovery.source.policy):
+        return True
+    if (recovery.source is not None and recovery.source.thread is not None
+            and compact_circuit_is_open(recovery.source.thread, recovery.source.policy, now=time.time())
+            and calibrated < model_request_input_ceiling(recovery.agent, recovery.source.policy.context_window_tokens)):
         return True
     return not recovery.source.messages and tool_source is None
+
+
+# LLM: 只供select异常分支；强制、结构错误和超窗永不降级；精确类型检查不迭代已释放/中毒历史，摘要期不留旧副本。
+# 函数用途: 可选压缩失败但原请求仍装得下时，从原种子重建原生历史并恢复本轮冻结输入。
+def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
+    if recovery.force or compact_exception_code(exc) in {
+        "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
+        "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT",
+    }:
+        return False
+    if calibrated_compact_request_tokens(before_tokens, recovery.calibration) >= model_request_input_ceiling(
+        recovery.agent, recovery.source.policy.context_window_tokens,
+    ):
+        return False
+    if (type(params.__dict__.get("provider_history_messages")) is not list
+            or getattr(params, "conversation_history_seed", None) is None):
+        return False
+    restored = _native_provider_history_messages(params)
+    object.__setattr__(params, "provider_history_messages", restored)
+    recovery.resolved_input = replace(frozen, provider_history_messages=tuple(restored))
+    return True
 
 
 # LLM: 宿主边界唯一的观测冻结点：按冻结请求的完整投影算稳定表面指纹（与预检 request_projection_surface_fingerprint

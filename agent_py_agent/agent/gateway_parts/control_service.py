@@ -1190,9 +1190,9 @@ def _execute_compact_control(
         )
 
 
-# LLM: 手动Compact只覆盖车道内冻结的全线程已完成来源；没有未来业务prompt，回执的历史估算不能冒充下一请求容量证明。
+# LLM: 手动Compact显式绕过自动熔断冷却，仍沿原失败账及成功清零；只覆盖车道内已完成来源，历史估算不证明未来容量。
 # 原摘要面仍只准备一次，取消或冲突不推进来源游标；按source.messages裁决空来源，不能凭旧全局游标猜。
-# 函数用途: 对精确空闲会话提交一次全线程摘要，并清楚区分无来源、用户停止、占用与真实失败。
+# 函数用途: 对精确空闲会话执行可恢复自动熔断的手动压缩，保留无来源、停止、占用及失败回执。
 def _execute_registered_compact_control(
     base_agent: object,
     paths: GatewayPaths,
@@ -1236,6 +1236,7 @@ def _execute_registered_compact_control(
                 refreshed,
                 options=ConversationCompactOptions(
                     force=True,
+                    bypass_circuit_breaker=True,
                     custom_instructions=command.value,
                     interrupt_check=is_interrupted,
                     source=source,
@@ -1315,16 +1316,15 @@ def _manual_compact_noop_result() -> ConversationControlResult:
     return ConversationControlResult("compact", True, "当前会话没有新的已完成历史需要压缩。")
 
 
-# LLM: The lane has a short admission deadline and also observes the registered user-interrupt
-# token; once acquired, its heartbeat covers the complete summary-model call and guarded commit.
-# 函数用途: 为手动 Compact 快速申请单会话执行权，并在排队期间响应精确 Esc 停止。
+# LLM: 车道允许五秒短暂争用并始终响应原用户停止令牌；取得后仍由原心跳覆盖摘要和受保护提交，不新增锁权威。
+# 函数用途: 为手动Compact有界等待单会话执行权，五秒到期或精确Esc停止时中断排队。
 def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
     config = getattr(owner_agent, "config", None)
     ttl_seconds = max(
         1,
         int(getattr(config, "background_claim_ttl_seconds", 90) or 90),
     )
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + 5.0
     # 续约间隔只按租约 TTL 推导，配置里没有单独的心跳键（原 background_claim_heartbeat_interval_seconds 已并入 TTL）。
     return conversation_run_lane(
         ConversationRunLaneRequest(

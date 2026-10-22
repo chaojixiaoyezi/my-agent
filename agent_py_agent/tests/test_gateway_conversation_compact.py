@@ -57,6 +57,161 @@ from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.runtime_contracts import ProviderToolCapability
 from agent_py_agent.tests._gateway_history_helpers import context_history
 
+
+# LLM: 真实Gateway/恢复宿主/来源与provider builder，仅摘要故障和完整请求估算注入；摘要期不额外保存旧历史。
+# 函数用途: 在90%触发线与扣除输出预留后的窗口之间，摘要瞬断后重建种子历史并完成业务。
+@pytest.mark.parametrize("failure", ["transient", "timeout", "circuit"])
+def test_p2a_optional_preflight_failure_restores_seed_and_completes_turn(tmp_path, monkeypatch, failure):
+    from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
+    from agent_py_agent.agent.backends.errors import ProviderTimeoutError, ProviderTransientError
+    from agent_py_agent.agent.conversation import compact
+    from agent_py_agent.agent.gateway_parts import request_execution
+    from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
+    from agent_py_agent.tests.test_gateway_model_adoption import fake_http
+
+    fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
+    fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    state, summaries = {}, []
+    original = recovery.PreparedCompactRecovery.select
+    monkeypatch.setattr(recovery, "projected_model_context_components", lambda *a, **k: (95_000, {}))
+
+    # LLM: 只持有原参数对象，不缓存或复制provider历史；进入摘要前后交给真实select裁决。
+    # 函数用途: 记录可选恢复是否解绑、是否恢复以及是否错误提交候选。
+    def select(self, agent, params, prompt):
+        state["params"] = params
+        state["before"] = len(params.provider_history_messages)
+        assert not self.force and self.source.policy.trigger_tokens == 90_000
+        value = original(self, agent, params, prompt)
+        state["after"] = len(params.provider_history_messages)
+        state["resolved"] = len(self.resolved_input.provider_history_messages)
+        state["committed"] = self.committed
+        return value
+
+    # LLM: 业务HTTP仍走真实provider builder；只让本次摘要请求瞬断，旧历史必须已释放。
+    # 函数用途: 在摘要期间验证原参数为空后抛供应商瞬时错误。
+    def summarize(*args, **kwargs):
+        assert state["params"].__dict__["provider_history_messages"] == []
+        summaries.append(True)
+        if failure == "timeout":
+            raise ProviderTimeoutError("summary timeout", stage="first_event")
+        if failure == "circuit":
+            raise ConversationCompactCircuitOpenError("summary cooldown", code="COMPACT_CIRCUIT_OPEN")
+        raise ProviderTransientError("test summary temporarily unavailable")
+
+    monkeypatch.setattr(recovery.PreparedCompactRecovery, "select", select)
+    monkeypatch.setattr(compact, "_summarize", summarize)
+    business, _ = fake_http(monkeypatch, fixture)
+    result = request_execution._run_gateway_ask(fixture.context)
+    assert result.response == "资料整理完成。" and len(business) == 1 and summaries == [True]
+    assert state["before"] > 0 and state["before"] == state["after"] == state["resolved"]
+    assert not state["committed"]
+    assert "之前核对过的原始资料" in json.dumps(business[0][0]["messages"], ensure_ascii=False)
+    thread = fixture.agent.conversation_store.threads.require(fixture.thread_id)
+    assert thread.compact_generation == 0 and thread.compact_consecutive_failures == 1
+
+
+# LLM: 仍经真实Gateway恢复入口；仅在摘要阶段注入结构错误/取消/不安全载体，不允许可选降级掩盖合同问题。
+# 函数用途: 锁住五种结构错误、精确窗口上限、强制模式、无种子和中毒历史的拒恢复边界。
+@pytest.mark.parametrize("failure", [
+    "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
+    "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT", "ceiling", "force", "no-seed", "poison", "cancel", "token",
+])
+def test_p2a_preflight_does_not_mask_hard_failures(tmp_path, monkeypatch, failure):
+    from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
+    from agent_py_agent.agent.backends.errors import ProviderTransientError
+    from agent_py_agent.agent.conversation import compact
+    from agent_py_agent.agent.gateway_parts import request_execution
+    from agent_py_agent.tests.test_compact_recovery_release import _PoisonedHistory
+    from agent_py_agent.tests.test_gateway_compact_recovery import _history_request
+    from agent_py_agent.tests.test_gateway_model_adoption import fake_http
+
+    fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
+    fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    state, reads, summaries = {}, [], []
+    original = recovery.PreparedCompactRecovery.select
+    tokens = 95_904 if failure == "ceiling" else 95_000
+    monkeypatch.setattr(recovery, "projected_model_context_components", lambda *a, **k: (tokens, {}))
+
+    # LLM: 不持有旧历史副本；强制模式覆盖发生在正式select前，其余仍为可选预压缩。
+    # 函数用途: 保存本次参数供摘要故障注入，不改变真实解绑路径。
+    def select(self, agent, params, prompt):
+        state["params"] = params
+        if failure == "force":
+            self.force = True
+        return original(self, agent, params, prompt)
+
+    # LLM: 仅在旧历史已经解绑后故障；中毒列表的任何读取都会另记reads并报错。
+    # 函数用途: 提供必须终止业务的结构错误、容量或停止边界。
+    def summarize(*args, **kwargs):
+        params = state["params"]
+        assert params.__dict__["provider_history_messages"] == []
+        summaries.append(True)
+        if failure.startswith("COMPACT_"):
+            raise ConversationCompactError("structural failure", code=failure)
+        if failure == "cancel":
+            raise InterruptedError("summary cancelled")
+        if failure == "token":
+            params.cancellation_token.cancel("summary cancelled")
+        if failure == "no-seed":
+            object.__setattr__(params, "conversation_history_seed", None)
+        if failure == "poison":
+            object.__setattr__(params, "provider_history_messages", _PoisonedHistory(reads))
+        raise ProviderTransientError("summary temporarily unavailable")
+
+    monkeypatch.setattr(recovery.PreparedCompactRecovery, "select", select)
+    monkeypatch.setattr(compact, "_summarize", summarize)
+    business, _ = fake_http(monkeypatch, fixture)
+    with pytest.raises((RuntimeError, InterruptedError)):
+        request_execution._run_gateway_ask(fixture.context)
+    assert summaries == [True] and business == [] and reads == []
+    assert fixture.agent.conversation_store.threads.require(fixture.thread_id).compact_generation == 0
+
+
+# LLM: 限定测试身份定位和外部活跃请求检查，车道、来源冻结、真实压缩及失败账仍走正式控制入口。
+# 函数用途: 确认用户手动/compact在自动熔断期间仍能成功并清零。
+def test_p2a_manual_control_bypasses_automatic_cooldown(tmp_path, monkeypatch):
+    import time
+
+    from agent_py_agent.agent.gateway_parts import control_service as control
+
+    agent = _agent(tmp_path, context_tokens=1_000_000)
+    agent.backend = _SummaryBackend()
+    context = _context(agent, _request(), "manual-create", "开始")
+    for role in ("user", "assistant"):
+        assert append_gateway_conversation_message(agent, {}, context, request_id=f"old-{role}", role=role, content="原始资料")
+    for _ in range(3):
+        agent.conversation_store.threads.record_compact_failure(
+            context.thread_id, failure_code="COMPACT_TEST_FAILURE", expected_generation=0, now=time.time())
+    thread = agent.conversation_store.threads.require(context.thread_id)
+    monkeypatch.setattr(control, "_live_window_request", lambda *a: None)
+    monkeypatch.setattr(control, "_request_agent_for_scope", lambda *a: agent)
+    monkeypatch.setattr(control, "_conversation_thread_for_scope", lambda *a: thread)
+    result = control._execute_registered_compact_control(agent, None, SimpleNamespace(value=""), SimpleNamespace())
+    assert result.ok, (result.error_code, result)
+    stored = agent.conversation_store.threads.require(context.thread_id)
+    assert stored.compact_generation == 1 and stored.compact_consecutive_failures == 0
+
+
+# LLM: 只观察真实车道请求的取消回调，用假单调时钟避免睡眠；用户停止始终优先，不触及锁实现。
+# 函数用途: 确认手动车道允许五秒短暂争用，精确五秒和用户停止都能中断排队。
+def test_p2a_manual_compact_lane_allows_five_seconds(monkeypatch):
+    from agent_py_agent.agent.gateway_parts import control_service as control
+
+    now, captured, stopped = [100.0], [], [False]
+    marker = object()
+    monkeypatch.setattr(control.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(control, "is_interrupted", lambda: stopped[0])
+    monkeypatch.setattr(control, "conversation_run_lane", lambda request: captured.append(request) or marker)
+    assert control._manual_compact_lane(SimpleNamespace(), object(), "thread") is marker
+    check = captured[0].interrupt_check
+    now[0] = 104.9
+    assert not check()
+    stopped[0] = True
+    assert check()
+    stopped[0] = False
+    now[0] = 105.0
+    assert check()
+
 # LLM: These tests intentionally use tiny policy thresholds to exercise checkpoint/tail/CAS
 # behavior, while the fake provider has no wire limit. Physical request budgeting is tested with
 # explicit small windows and complete source coverage in test_compact_request_budget.
