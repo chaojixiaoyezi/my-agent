@@ -1186,8 +1186,11 @@ class ToolRuntimeSnapshot:
     snapshot_hash: str = ""
     presentation_deferred_names: frozenset[str] | None = None
     presentation_shortlist_names: frozenset[str] | None = None
+    # 展示事实不进入权限或 snapshot_hash；撤权后旧名字在 registry 投影时取当前快照交集。
+    loaded_tool_names: tuple[str, ...] = ()
+    preloaded_tool_names: tuple[str, ...] = ()
 
-    # LLM: 仅校验名称子集、不可变类型与原发现入口，不复制配置或授权算法；展示字段不产生新注册代次。
+    # LLM: 仅校验名称子集、不可变类型与原发现入口；有序加载/预载只是展示事实，不扩权或产生新注册代次。
     # 函数用途: 在创建快照或宿主替换展示投影时拒绝越界名称和无法找回的额外折叠。
     def __post_init__(self) -> None:
         names = [runtime.model_spec.name for runtime in self.runtimes]
@@ -1201,6 +1204,10 @@ class ToolRuntimeSnapshot:
             raise ValueError("tool runtime snapshot contains duplicate unavailable names")
         if expected_available.intersection(unavailable_names):
             raise ValueError("tool runtime cannot be both available and unavailable")
+        for ordered in (self.loaded_tool_names, self.preloaded_tool_names):
+            if (type(ordered) is not tuple or any(type(name) is not str or not name.strip() for name in ordered)
+                    or len(ordered) != len(set(ordered))):
+                raise ValueError("tool discovery names must be an ordered immutable unique tuple")
         for selection in (self.presentation_deferred_names, self.presentation_shortlist_names):
             if selection is not None and (type(selection) is not frozenset or any(type(name) is not str for name in selection)
                                           or not selection.issubset(expected_available)):
@@ -1514,6 +1521,15 @@ def _truncate_rendered_tool_entry(text: str, *, max_chars: int, label: str) -> s
     return text[:max_chars].rstrip() + f"\n  ... 已按 {label} 截断"
 
 
+# 通用中文二字仍可精确命中声明的名称/关键词/类别，但不能靠散落在说明里的日常话加分。
+CHINESE_LOW_SIGNAL_TOKENS = frozenset({
+    "你好", "回复", "收到", "使用", "可以", "当前", "需要", "支持", "或者", "如果", "返回", "提供",
+    "一个", "查看", "设置", "管理", "创建", "工作", "进行", "处理", "结果", "信息",
+})
+
+
+# LLM: 保留原名称/关键词分词及首次出现顺序；中文弱信号是否计分在统一 scorer 决定。
+# 函数用途: 把查询分成去重的词和中文滑窗词，不按业务领域硬路由。
 def _tokenize(text: str) -> list[str]:
 
     lowered = (text or "").lower()
@@ -1619,6 +1635,8 @@ def _semantic_tool_hits(
     return sorted(hits, key=lambda item: (-item.score, item.name))
 
 
+# LLM: 通用二字不能仅靠描述得分；名称、显式 keywords 和类别权重不变，非通用中文二字用途命中只计0.25。
+# 函数用途: 统一工具检索的精确声明信号与低权重用途描述得分。
 def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
@@ -1631,10 +1649,10 @@ def _score_keyword_token(token: str, haystacks: dict[str, str]) -> tuple[float, 
         if _keyword_token_matches(token, haystacks[key]):
             score += weight
             reasons.append(reason)
-    if _keyword_token_matches(token, haystacks["description"]) or _keyword_token_matches(
-        token, haystacks["use_cases"]
+    if token not in CHINESE_LOW_SIGNAL_TOKENS and (
+        _keyword_token_matches(token, haystacks["description"]) or _keyword_token_matches(token, haystacks["use_cases"])
     ):
-        score += 1.5
+        score += 0.25 if re.fullmatch(r"[\u4e00-\u9fff]{2}", token) else 1.5
         reasons.append(f"命中用途描述'{token}'")
     return score, reasons
 
@@ -1646,6 +1664,8 @@ def _keyword_token_matches(token: str, haystack: str) -> bool:
     return token in haystack
 
 
+# LLM: 滑窗词保留以支持显式关键词匹配，通用词不在分词阶段删除，弱描述分由 scorer 抑制。
+# 函数用途: 生成中文二至四字子词，非中文不扩展。
 def _chinese_subtokens(token: str) -> list[str]:
     if not re.fullmatch(r"[\u4e00-\u9fff]+", token):
         return []

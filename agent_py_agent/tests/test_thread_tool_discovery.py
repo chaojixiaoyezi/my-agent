@@ -14,12 +14,14 @@ from agent_py_agent.agent.conversation.tool_discovery import (
 from agent_py_agent.tests.test_compactcall_websocket import _setup
 
 
+# LLM: 线程加载字段保持宿主隐藏；新发现序列往返保留原顺序，旧空字段仍省略。
+# 函数用途: 验证有序发现状态不会被线程反序列化按字母重排。
 def test_thread_discovery_roundtrip_hidden_and_legacy():
     old = ConversationThread(thread_id="one", canonical_user_id="local")
     assert "loaded_tool_names" not in old.to_dict()
     loaded = replace(old, loaded_tool_names=("read_file", "read_artifact"))
     restored = ConversationThread.from_dict(loaded.to_dict())
-    assert restored.loaded_tool_names == ("read_artifact", "read_file")
+    assert restored.loaded_tool_names == ("read_file", "read_artifact")
     assert "loaded_tool_names" in MODEL_HIDDEN_THREAD_FIELDS
     assert normalized_loaded_tools([None, 1, {}, "", " read_file "]) == ("read_file",)
     assert normalized_loaded_tools("read_file") == ()

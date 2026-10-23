@@ -1,4 +1,8 @@
+# LLM: 完整目录由原快照生成；live 缩短不能改变原生 Schema、身份边界或外置归档内容。
+# 模块用途: 验证工具 manifest 的完整合同、紧凑卡片及真实归档恢复。
 from __future__ import annotations
+
+import json
 
 from agent_py_agent.agent.contracts.tool_manifest_contract import tool_manifest_payload
 from agent_py_agent.agent.tooling.models import (
@@ -122,3 +126,58 @@ def _tool_manifest_payload() -> dict[str, object]:
         allowed_tools=["read_file", "write_file"],
     )
     return tool_manifest_payload(snapshot)
+
+
+# LLM: 使用真实装配和同一请求快照；完整参数及身份留在归档，live 仅删逐工具重复描述。
+# 函数用途: 固定 v4 短卡目录及正规详情入口，不把折叠误说成无权限。
+def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import AgentConfig
+
+    registry = SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "m.jsonl")), str(tmp_path)).tools
+    snapshot = registry.runtime_snapshot()
+    result = registry.tools["list_tools"]._execute_snapshot(snapshot)
+    full = json.loads(result.output)
+    live = json.loads(result.result_envelope["tool_output_policy"]["live_prompt_output"])
+    assert live["schema_name"] == "tool_runtime_manifest_live" and live["schema_version"] == 4
+    assert all("input_schema" in item for item in full["tools"])
+    assert "tool_states" in full["self_context"] and "tool_states" not in live["self_context"]
+    self_keys = {"schema_version", "run_id", "owner_type", "scope", "permissions", "identity", "filesystem", "network"}
+    assert set(live["self_context"]) == self_keys
+    assert live["self_context"] == {key: full["self_context"][key] for key in self_keys}
+    direct = {spec.name for spec in registry.model_visible_specs(runtime_snapshot=snapshot)}
+    assert live["counts"] == {"registered": len(snapshot.runtimes), "available": len(full["executable_tools"]), "direct": len(direct)}
+    assert {item["name"] for item in live["tools"]} == set(full["executable_tools"])
+    assert all(set(item) == {"name", "category", "purpose", "schema_visibility"} for item in live["tools"])
+    assert all(0 < len(item["purpose"]) <= 90 for item in live["tools"])
+    assert all(item["schema_visibility"] == ("direct" if item["name"] in direct else "discoverable") for item in live["tools"])
+    assert {"tool_search", "self_map", "read_artifact"} <= set(live["detail_policy"])
+    assert live["unavailable_tools"] == full["unavailable_tools"]
+
+
+# LLM: 使用真实外置器与临时 owner 存档，不替换 reducer 或外置策略；断言原文不是 live 短卡。
+# 函数用途: 验证两种发现工具都能从实际归档完整恢复定义。
+def test_discovery_full_output_survives_real_externalization(tmp_path):
+    from pathlib import Path
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
+        ExternalizeToolOutputRequest,
+        externalize_tool_output_record,
+    )
+    from agent_py_agent.agent.settings import AgentConfig
+
+    registry = SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "m.jsonl")), str(tmp_path)).tools
+    for name, params in (("list_tools", {}), ("tool_search", {"names": ["watch_stream"]})):
+        outcome = registry.tools[name].execute(params)
+        assert outcome.ok
+        record = externalize_tool_output_record(ExternalizeToolOutputRequest(
+            root=tmp_path, tool=name, call_id=name, output=outcome.output, ok=True,
+            result_envelope=outcome.result_envelope))
+        assert record["output_externalized"] is True
+        stored = json.loads(Path(record["output_path"]).read_text())
+        assert stored["content"] == outcome.output
+        assert all("input_schema" in item for item in json.loads(stored["content"])["tools"])
+        live = outcome.result_envelope["tool_output_policy"]["live_prompt_output"]
+        assert json.loads(live)["schema_version"] == 4
+        assert "input_schema" not in live

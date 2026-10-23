@@ -36,8 +36,7 @@ _BACKGROUND_WORK_TOOLS = (
     "resolve_capability_requests",
     "cancel_subagents",
     # learnpack（用户 2026-10-06 定方案 A）：学外部 agent 时她常把写包文件派给子代理，子代理写完后的续跑要能打包、按开关安装或
-    #   开待确认安装单（第 8 步真模型验收：续跑里没有这两个工具，连续 TOOL_UNAVAILABLE 后回合被停）。两个工具只注册给本机管理员，
-    #   装不装仍只看自动装开关和用户确认，这里只给候选目录。进了续跑必需集合就始终直出（不再默认收起），这是已知代价。
+    #   开待确认安装单。两个工具只注册给本机管理员；这里保留授权闭包，初次展示另按结构化唤醒选择，不强制前台直出。
     "package_build",
     "package_install",
 )
@@ -90,10 +89,7 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = _with_direct_child_controls(DEFAULT_BACKGRO
 GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = _with_direct_child_controls(GOAL_BACKGROUND_ALLOWED_TOOLS)
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
 
-# LLM: 后台续跑合同声明的“续跑必需工具”并集（所有后台 profile 的公共基座与各自扩展）；这些工具
-#   不受 default_deferred 的默认折叠影响、始终直出——后台回合没有用户在场，靠 tool_search 找回
-#   工具的窗口极窄。过滤处（registry._declared_deferred_names）引用本常量，不另写第二份名单。
-#   改动时同步 test_background_main_agent_runtime 的续跑目录用例与 test_tool_default_deferral 的豁免用例。
+# LLM: 后台续跑授权候选并集，不再充当前台展示豁免表；原运行循环的兼容预载仍可引用，新的展示由独立策略决定。
 BACKGROUND_CONTINUATION_REQUIRED_TOOLS = frozenset({
     *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
     *AUDIT_FINDING_ALLOWED_TOOLS,
@@ -189,6 +185,32 @@ def background_allowed_tools(
     request: BackgroundToolPolicyRequest | None = None,
 ) -> list[str]:
     return list(background_tool_policy_decision(config, request=request).allowed_tools)
+
+
+# LLM: 初次展示只在原授权闭包内做减法；只读结构化原因/目标，不解析唤醒正文，缺搜索入口时退回完整授权表。
+# 函数用途: 为后台首次模型请求选择所需工具，未展示的允许工具仍能按需发现。
+def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -> frozenset[str]:
+    allowed = frozenset(background_allowed_tools(request=request))
+    if "tool_search" not in allowed:
+        return allowed
+    heavy = {"watch_stream", "schedule", "package_build", "package_install", "remember", "update_persona"}
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    targets = set(tool_names(wake.get("tool_names"))) | set(tool_names(wake.get("required_tools")))
+    targets.update(tool_names(wake.get("tool_name")))
+    reason = str(request.reason or wake.get("reason") or "").strip().lower()
+    if reason in heavy:
+        targets.add(reason)
+    if reason in {"audit_finding", "audit_continue", "audit_source"}:
+        targets.add("watch_stream")
+    if reason in SCHEDULED_WAKE_REASONS:
+        targets.add("schedule")
+    controls = {"create_subagents", *DIRECT_CHILD_CONTROL_TOOLS}
+    deferred = heavy | controls | {"get_goal", "update_goal"}
+    if request.active_goal:
+        targets.update({"get_goal", "update_goal"})
+    if _is_subagent_lifecycle_wake(request) or request.goal_subagent_phase in {"subagents_active", "subagents_terminal"}:
+        targets.update(controls)
+    return (allowed - deferred) | (allowed & targets)
 
 
 # LLM: 后台轮工具表必须先淘汰旧子代理控制面，再套 owner/task/delivery 减法；

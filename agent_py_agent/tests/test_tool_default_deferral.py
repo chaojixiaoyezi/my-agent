@@ -1,10 +1,12 @@
+# LLM: 默认收起与后台授权闭包独立；回归只断言本快照工具，不授予额外能力或调用外部模型。
+# 模块用途: 验证前台默认折叠、后台按需发现及盲调用恢复。
 from __future__ import annotations
 
 """按工具声明的默认收起（tool_default_deferral_enabled）合同单测。
 
 又大又少用的工具在自己的 ToolModelHints 里声明 default_deferred + deferred_summary。开关打开时，前台回合不再发它们的
 原生 Schema，目录末尾留“名字：一句用途”的索引，tool_search 一步找回；开关关闭时提示词与可见工具逐字不变。
-显式 allowed_tools 的回合、tool_search 不可用的快照不收起；决策点的展示投影与它取并集。
+无 tool_search 的叶子不收起；有发现入口的 allowed_tools 也支持展示投影。
 """
 
 import json
@@ -32,9 +34,8 @@ DECLARED = {
     "user_config", "watch_stream", "workflows", "feishu_cloud", "feishu_auth", "skill_transfer", "tool_program",
 }
 
-# 实际生效的声明收起 = 声明集合 - 后台续跑必需（豁免）：后台回合没有用户在场，靠 tool_search
-# 找回工具的窗口极窄，这些工具始终直出（3a 2026-10-05 裁定，清单来自 background_tool_policy）。
-DEFERRED_EFFECTIVE = DECLARED - BACKGROUND_CONTINUATION_REQUIRED_TOOLS
+# 后台闭包不再替前台豁免工具声明，实际声明收起集合与原授权闭包相互独立。
+DEFERRED_EFFECTIVE = DECLARED
 
 
 def _agent(tmp_path, **overrides) -> SimpleAgent:
@@ -58,14 +59,15 @@ def test_switch_defaults_off_and_keeps_surface_and_catalog_unchanged(tmp_path):
     assert "默认收起的工具" not in section
 
 
+# LLM: 以本轮实际可用集合断言前台折叠；后台候选不再构成前台常驻豁免。
+# 函数用途: 验证默认折叠及每个工具仍有准确用途索引。
 def test_declared_tools_leave_the_native_surface_and_get_a_compact_index(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     visible = _visible(agent)
     assert visible.isdisjoint(DEFERRED_EFFECTIVE)
-    # 续跑必需工具里由声明豁免的都应直出；watch_stream 例外——它由 web 类别折叠（与声明收起无关），
-    # 不可用/未注册的工具（如测试环境的 send_message）按快照可用性排除。
+    # 不可用或未注册项仍按原快照排除，后台允许集合不改变前台折叠。
     available = set(agent.tools.runtime_snapshot().available_tool_names)
-    assert (DECLARED & BACKGROUND_CONTINUATION_REQUIRED_TOOLS - {"watch_stream"}) & available <= visible, "后台续跑必需工具始终直出"
+    assert not ((DECLARED & BACKGROUND_CONTINUATION_REQUIRED_TOOLS) & available & visible)
     assert TOOL_DISCOVERY_ENTRY_NAMES & set(agent.tools.tools) <= visible
     assert {"read_file", "write_file", "run_command", "create_subagents", "remember"} <= visible
     section = agent.tools.render_catalog_section()
@@ -208,11 +210,14 @@ def test_declared_deferral_backs_off_when_tool_search_is_unusable(tmp_path, brok
     assert _declared_deferred_names(replace(snapshot, runtimes=runtimes, snapshot_hash=""), [], enabled=True) == frozenset()
 
 
-def test_explicit_allowed_tools_catalog_has_no_declared_index(tmp_path):
+# LLM: 带 tool_search 的白名单仍可按需展示，执行/发现授权闭包不变。
+# 函数用途: 验证显式授权不会强制所有重工具常驻。
+def test_explicit_allowed_tools_catalog_supports_declared_index_with_search(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     section = agent.tools.render_catalog_section(allowed_tools=["user_config", "read_file", "tool_search"])
-    assert "默认收起的工具" not in section
-    assert agent.tools.search_deferred_specs("user_config", allowed_tools=["user_config", "tool_search"]) == []
+    assert "默认收起的工具" in section
+    assert [spec.name for spec in agent.tools.search_deferred_specs(
+        "user_config", allowed_tools=["user_config", "tool_search"])] == ["user_config"]
 
 
 # 函数用途: 造一条工具归档记录（只含兜底会读的结构化字段）。
@@ -275,17 +280,21 @@ def test_handler_side_argument_errors_also_reload_the_schema(tmp_path, stage, er
     assert bool(hint) is reloads
 
 
-def test_continuation_required_tools_stay_direct_and_other_declared_still_fold(tmp_path):
-    """后台续跑必需工具始终直出；不在续跑目录里的声明工具照常收起。"""
+# LLM: 闭包仅保证可执行/可发现，前台包和人格工具遵守自己的默认折叠声明。
+# 函数用途: 防止后台工具豁免表再次泄漏进前台 Schema。
+def test_continuation_required_tools_do_not_override_foreground_deferral(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     visible = _visible(agent)
-    assert {"update_persona", "remember", "skill_search", "run_command"} <= visible, "续跑必需工具直出"
-    assert {"user_config", "schedule", "manage_models"}.isdisjoint(visible), "非续跑声明工具仍收起"
+    assert {"remember", "skill_search", "run_command"} <= visible
+    assert {"update_persona", "package_build", "package_install", "user_config", "schedule", "manage_models"}.isdisjoint(visible)
+    assert {"update_persona", "package_build", "package_install"} <= BACKGROUND_CONTINUATION_REQUIRED_TOOLS
 
 
 # 本批（toolfold）新收起的工具：每个都要能被 tool_search 一步找回（各自一条断言）。
 # 未注册或当前运行条件下不可用的（memory_search 默认不注册、publish_audit_update 只在 Audit 准备回合、
 # 会话类工具看管理员开关）按快照可用性跳过；至少要求命中一部分，防止整个用例被条件静默清空。
+# LLM: 现在后台闭包中的默认折叠项也必须能精确发现，不能因为前台收起来就失去能力。
+# 函数用途: 逐个找回本批声明工具并验证加载后可见。
 def test_tool_search_finds_each_newly_declared_tool(tmp_path):
     new_names = {
         "cancel_session_task", "memory_search", "publish_audit_update",
@@ -293,9 +302,7 @@ def test_tool_search_finds_each_newly_declared_tool(tmp_path):
     }
     agent = _agent(tmp_path, tool_default_deferral_enabled=True)
     available = set(agent.tools.runtime_snapshot().available_tool_names)
-    # cancel_session_task、send_message、send_session_message 进入后台续跑目录（豁免直出），不参与找回。
-    effective = new_names - BACKGROUND_CONTINUATION_REQUIRED_TOOLS
-    registered = sorted(effective & available)
+    registered = sorted(new_names & available)
     assert registered, f"本批新工具在测试环境应至少可用一个：{sorted(new_names & set(agent.tools.tools))}"
     for name in registered:
         result = agent.tools.tools["tool_search"].execute({"query": name, "limit": 3})
