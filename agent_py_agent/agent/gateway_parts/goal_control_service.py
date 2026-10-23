@@ -370,4 +370,111 @@ def _raise_goal_wake(store: object, goal: object, scope: object) -> None:
     )
 
 
-__all__ = ["GoalControlRequest", "execute_goal_control_operation"]
+# LLM: 这是宿主内部结构化接缝，不接受JSON构造；lifecycle只提供B/C受限准入与原任务同步，不给main invoker。
+# 类用途: 携带插件Goal控制需要的原存储、鲜活授权检查和受限调度端口。
+@dataclass(frozen=True)
+class PluginGoalControlRequest:
+    store: object
+    authorized: object
+    payload: dict
+    revalidate: Callable
+    lifecycle: object
+
+
+# LLM: 原Goal转换锁内精确选ID并核revision；返回原对象而非中文展示串，pause/clear没有资源取消端口。
+# 函数用途: 在唯一原Goal状态机上受理插件的有限控制动作。
+def execute_plugin_goal_control(request: PluginGoalControlRequest):
+    from ..plugin_host.errors import HostAPIError
+
+    payload, store = request.payload, request.store
+    operation = request.authorized.call.action.removeprefix("goals.")
+    with store.goals.transition_guard(payload["thread_id"]):
+        request.revalidate(None)
+        goals, error = store.goals.list_report(payload["thread_id"])
+        if error is not None:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        if operation == "create":
+            if any(goal.status != "complete" for goal in goals):
+                raise HostAPIError("GOAL_STATE_CONFLICT", 409)
+            return _create_plugin_goal(request)
+        current = next((goal for goal in goals if goal.goal_id == payload["goal_id"]), None)
+        if current is None:
+            raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+        request.revalidate(current)
+        if current.revision != payload["expected_revision"]:
+            raise HostAPIError("REVISION_CONFLICT", 409)
+        if operation == "clear":
+            if store.goals.delete(current.thread_id, expected_goal_id=current.goal_id) is None:
+                raise HostAPIError("REVISION_CONFLICT", 409)
+            return {"goal_id": current.goal_id, "removed": True, "current_execution_cancelled": False}
+        return _change_plugin_goal(request, current, operation)
+
+
+# LLM: 新Goal无伪造用户时限；先核宿主配额与当前grant，原记录带固定reply-only来源；副作用异常不得自动重做。
+# 函数用途: 创建原Goal并交给受限调度端口绑定任务。
+def _create_plugin_goal(request):
+    from ..plugin_host.errors import HostAPIError
+
+    authorized, payload = request.authorized, request.payload
+    request.lifecycle.check(authorized, None, "create")
+    request.revalidate(None)
+    try:
+        goal = request.store.goals.create({**payload, "metadata": {
+            "transition_source": "plugin_control", "tool_policy": "none",
+            "plugin_origin": {"installation_ref": authorized.binding.installation_ref,
+                              "activation_id": authorized.binding.activation_id,
+                              "grant_revision": authorized.binding.grant_revision},
+        }})
+    except ValueError:
+        raise HostAPIError("GOAL_INVALID_REQUEST", 400) from None
+    _plugin_goal_notify(request, "created", goal)
+    return goal
+
+
+# LLM: 不提升预算、不迁移身份、不复活旧执行；状态切换仍由原GoalStore结算时钟并核预算，来源必须plugin_control。
+# 函数用途: 修改正文、暂停或恢复同一个Goal。
+def _change_plugin_goal(request, current, operation):
+    from ..plugin_host.errors import HostAPIError
+
+    if operation == "pause" and current.status == "paused":
+        return current
+    if ((operation == "pause" and current.status != "active")
+            or (operation == "resume" and current.status not in {"active", "paused", "blocked", "usage_limited"})
+            or (operation == "update" and current.status == "complete")):
+        raise HostAPIError("GOAL_STATE_CONFLICT", 409)
+    if operation == "resume":
+        if ((current.token_budget is not None and current.tokens_used >= current.token_budget)
+                or (current.duration_seconds is not None and current.time_used_seconds >= current.duration_seconds)):
+            raise HostAPIError("GOAL_BUDGET_EXHAUSTED", 409)
+        request.lifecycle.check(request.authorized, current, "resume")
+    request.revalidate(current)
+    status = {"update": current.status, "pause": "paused", "resume": "active"}.get(operation)
+    if status is None:
+        raise HostAPIError("UNSUPPORTED_ACTION", 400)
+    updated = request.store.goals.update({**request.payload, "status": status, "expected_status": current.status,
+                                         "transition_source": "plugin_control"})
+    if updated is None:
+        raise HostAPIError("REVISION_CONFLICT", 409)
+    if operation == "resume" and updated.status != "active":
+        raise HostAPIError("GOAL_BUDGET_EXHAUSTED", 409, "committed")
+    if operation in {"update", "resume"}:
+        _plugin_goal_notify(request, "updated" if operation == "update" else "resumed", updated)
+    return updated
+
+
+# LLM: lifecycle必须复用原任务注册/指导/熔断重置与B/C固定执行合同，不能投递无插件来源的通用wake；重核失败也保已写事实。
+# 函数用途: 提交后同步一次原任务，不把部分提交伪装未开始。
+def _plugin_goal_notify(request, event, goal):
+    from ..plugin_host.errors import HostAPIError
+
+    callbacks = {"created": request.lifecycle.created, "updated": request.lifecycle.updated,
+                 "resumed": request.lifecycle.resumed}
+    try:
+        request.revalidate(goal if event != "created" else None)
+        callbacks[event](request.authorized, goal)
+    except Exception:
+        raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+
+
+__all__ = ["GoalControlRequest", "execute_goal_control_operation",
+           "PluginGoalControlRequest", "execute_plugin_goal_control"]

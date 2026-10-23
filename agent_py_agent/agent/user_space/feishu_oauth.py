@@ -445,7 +445,7 @@ def cancel_oauth_card(agent,payload,body,*,actor_id):
 
 
 # LLM: 显式原owner/输入服务仅执行原cancel CAS；上游已验真实actor/MAC，不授网络或新工具权。
-# 函数用途: 让冷C与Count0复用同一OAuth取消实现。
+# 函数用途: 让冷C与Count0复用同一取消实现，插件票据可在原卡锁内末核版本。
 def cancel_oauth_card_for_owner(home, owner, inputs, payload, body, *, actor_id, audit):
     from ..common.json_io import locked_json_path
     from .interaction_actor_audit import interaction_actor_text
@@ -463,6 +463,8 @@ def cancel_oauth_card_for_owner(home, owner, inputs, payload, body, *, actor_id,
             if (not row or row.get('input_id')!=input_id or row.get('state')!=body['reference']
                     or control.get('message_id')!=body.get('message_id') or control.get('chat_id')!=body.get('chat_id')):
                 raise ValueError('卡片不是原本人授权请求')
+            from ..gateway_parts.private_interaction_service import check_plugin_input_record
+            check_plugin_input_record(row)
             if row.get('status')=='cancelled':
                 facts=row['cancelled_by']
             elif row.get('status') in {'pending','exchanging'}:

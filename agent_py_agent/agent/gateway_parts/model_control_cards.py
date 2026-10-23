@@ -233,7 +233,7 @@ def _send_model_control_card(base,host,owner,actor_id,context,listing,form_origi
 
 # LLM: 此入口的C commit只包原非网络锁链；add/edit另走同source分段dispatch，Count0虚调用形状与群HostActor门保持。
 # LLM: 宿主先验签/真实actor/解锁；非取消恢复原群 actor 并核配置 grant，最终 save 再核；cancel 不需 grant，completed 仅同摘要重放。
-# 函数用途: 将原操作者卡片回调应用到原 owner 模型目录或原会话选择。
+# 函数用途: 将原操作者回调应用到原owner，可选在原卡锁内末核插件票据版本。
 def submit_model_control(base, host, owner, payload, body, *, actor_id="", commit_transition=None, blocking=True):
     # LLM: 非网络逻辑整体先T再原群/card/catalog/thread锁；None仅保原Agent路径，不证明C权限，add/edit外发不能包在此门内。
     # 函数用途: 由真实producer同步执行一次原模型决定，保Count0虚调用缝和原部分提交事实。
@@ -260,7 +260,7 @@ def _bind_model_submission_actor(base,host,payload,actor_id,blocking=True):
 
 
 # LLM: 原群actor检查提同一小leaf供分段投递复用；原行在任何cancel/completed重放或配置提交前先核完整MAC投影；调用方若为C已先取得同一活T窗口；本体保原字段/摘要/目录代次/线程CAS，禁止在内层反向取T。
-# 函数用途: 在原锁序内提交选择、保存或取消，不能调用网络模型。
+# 函数用途: 在原锁序内末核卡版本并提交；插件票据不能借add/edit先外发新卡。
 def _submit_model_control(base, host, owner, payload, body, actor_id, blocking):
     lock_options = {} if blocking else {"blocking": False}
     from .model_control_dispatch import dispatch_model_form
@@ -273,6 +273,8 @@ def _submit_model_control(base, host, owner, payload, body, actor_id, blocking):
     with locked_json_path(path, **lock_options):
         row = read_json_object_report(path, context='model.control').payload
         _require_model_control_record(row, payload, body)
+        from .private_interaction_service import check_plugin_input_record
+        check_plugin_input_record(row)
         if body['decision']=='cancel':
             from ..user_space.interaction_cancellation import cancel_model_interaction
             return cancel_model_interaction(base,path,row,payload,actor_id,**lock_options)

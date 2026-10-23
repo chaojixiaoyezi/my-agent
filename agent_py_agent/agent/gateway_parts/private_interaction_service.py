@@ -9,6 +9,8 @@ import json
 import re
 import sqlite3
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from ..conversation.im_tool_approval import resolve_im_tool_approval
@@ -19,6 +21,27 @@ from ..user_space.owner_resolver import OwnerIdentity
 from ..user_space.task_credential_forms import CredentialFormValidationError
 from .multiprocess_global_write import GlobalWriteError
 from .request_worker import _resolve_request_agent_for_owner, admin_channel_identity_for_request
+
+_PLUGIN_INPUT_RECORD_GUARD = ContextVar("plugin_input_record_guard", default=None)
+
+
+# LLM: 只在同步原提交期间设置，ContextVar隔离并发调用；finally恢复，不改变原服务公开参数合同。
+# 函数用途: 给三类原卡锁内提交临时绑定同一次插件票据末核。
+@contextmanager
+def plugin_input_record_check(guard):
+    token = _PLUGIN_INPUT_RECORD_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _PLUGIN_INPUT_RECORD_GUARD.reset(token)
+
+
+# LLM: 仅原卡持锁叶子调用；普通IM路径没有绑定时完全无动作，不创建记录或签权。
+# 函数用途: 在原卡身份核验后执行可选插件CAS末核。
+def check_plugin_input_record(row):
+    guard = _PLUGIN_INPUT_RECORD_GUARD.get()
+    if guard is not None:
+        guard(row)
 
 
 # LLM: 只读取原个人密码库的结构化状态，不能从卡片颜色、按钮或模型正文判已解锁；告警出站不经此门。
@@ -199,3 +222,161 @@ def _report_private_interaction_failure(error):
         sys.stderr.flush()
     except BaseException:
         pass
+
+
+# LLM: 仅由宿主以既有owner资源及原已验证卡载荷调用；不认证插件、不接原始表单、不续租或解密。
+# 函数用途: 只读原凭据、模型或OAuth卡，供插件安全待办投影使用。
+def read_plugin_pending_input(home, inputs, payload, *, presentation_ref, body=None):
+    import hashlib
+    import time
+    from dataclasses import asdict
+
+    from ..common.json_io import read_json_object_report
+    from ..plugin_host.errors import HostAPIError
+    from ..plugin_host.schemas import canonical_json
+    from ..user_space.feishu_oauth import oauth_path_for_home
+    from ..user_space.task_credentials import credential_path
+    from .model_control_cards import _record_path
+
+    if payload.get("owner") != asdict(inputs.owner):
+        raise HostAPIError("TARGET_DENIED", 403)
+    kind = payload.get("kind")
+    routes = {"task_credential": (credential_path, "credential_ref", "pending"),
+              "model_configuration": (_record_path, "control_id", "active"),
+              "feishu_oauth": (oauth_path_for_home, "actor_id", "pending")}
+    if kind not in routes:
+        raise HostAPIError("UNSUPPORTED_INTERACTION", 400)
+    locate, key, status = routes[kind]
+    try:
+        report = read_json_object_report(locate(home, payload[key]), context="plugin.pending_input")
+        if report.load_error:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        row = report.payload
+        if not row:
+            return None
+        if body is not None:
+            _check_plugin_input_card_identity(row, payload, body)
+        identity = ("owner", "kind", "channel", "actor_id", "expires_at", key)
+        if any(row.get(name) != payload.get(name) for name in identity):
+            raise HostAPIError("INTERACTION_CONFLICT", 409)
+        if row.get("status") != status or row["expires_at"] <= time.time():
+            return None
+        binding = _plugin_input_binding(inputs, row)
+        if binding is None:
+            return None
+        thread_id, run_id, request_id, identity = binding
+        identifier = "input-" + hashlib.sha256(canonical_json([row["owner"], kind, identity]).encode()).hexdigest()[:40]
+        digest = hashlib.sha256(canonical_json(row).encode()).digest()
+        return {"interaction_id": identifier, "request_id": request_id, "thread_id": thread_id, "run_id": run_id,
+                "kind": kind, "revision": (int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)) or 1,
+                "expires_at": row["expires_at"], "presentation_ref": presentation_ref}
+    except HostAPIError:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from None
+
+
+# LLM: 输入任务身份取原依赖，不从旧私卡猜当前root；模型卡无任务依赖，只读取其原线程。
+# 函数用途: 核对待输入的原owner/任务/ref并提取非秘密身份。
+def _plugin_input_binding(inputs, row):
+    from ..plugin_host.errors import HostAPIError
+    from ..user_space.owner_resolver import _owner_id
+
+    if row["kind"] == "model_configuration":
+        thread, error = inputs.store.threads.load_report(row["thread_id"])
+        if error:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        if thread is None or thread.owner_id != _owner_id(inputs.owner):
+            raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+        return row["thread_id"], None, row["control_id"], row["control_id"]
+    dependency = inputs.read(row["input_id"])
+    credential = row["kind"] == "task_credential"
+    provider = "credential" if credential else "feishu_oauth"
+    reference = row["credential_ref"] if credential else row["input_id"]
+    if dependency["provider"] != provider or dependency["reference"] != reference:
+        raise HostAPIError("INTERACTION_CONFLICT", 409)
+    if dependency["status"] != "pending" or not inputs.current(dependency):
+        return None
+    scope = dependency["scope"]
+    if credential and any(scope.get(key) != value for key, value in row["scope"].items()):
+        raise HostAPIError("INTERACTION_CONFLICT", 409)
+    return scope["thread_id"], scope["run_id"], dependency["conversation_request_id"], row["input_id"]
+
+
+# LLM: 插件票据仍需原MAC/SDK身份/个人锁及管理员绑定，不能直接把插件actor当真人；不提交表单。
+# 函数用途: 用原私人卡校验器核对当前真人身份和原签名载荷。
+def validate_plugin_input(context, body, identity):
+    from dataclasses import asdict
+
+    from ..plugin_host.errors import HostAPIError
+
+    try:
+        payload, locked = validated_private_interaction_from_config(context.base.home_paths.root,
+            context.base.config, body, channel=identity["channel"], actor_id=identity["actor_id"])
+        if locked is not None:
+            raise HostAPIError(locked["error_code"], 403)
+        if payload.get("owner") != asdict(context.inputs.owner) or payload["kind"] == "tool_approval":
+            raise HostAPIError("TARGET_DENIED", 403)
+        allowed = {"task_credential": {"submit", "cancel"},
+                   "model_configuration": {"select", "set_default", "save", "cancel"}, "feishu_oauth": {"cancel"}}
+        if body["decision"] not in allowed[payload["kind"]]:
+            raise HostAPIError("UNSUPPORTED_INTERACTION", 400)
+        return payload
+    except HostAPIError:
+        raise
+    except (ValueError, TypeError, KeyError):
+        raise HostAPIError("HUMAN_TICKET_INVALID", 403) from None
+
+
+# LLM: 签票前同样核原展示卡身份；这只是只读防转发检查，提交仍必须重新进入原卡锁内CAS。
+# 函数用途: 复用原凭据/模型身份规则并核OAuth原message/chat，不把签名有效等同原卡展示有效。
+def _check_plugin_input_card_identity(row, payload, body):
+    from ..plugin_host.errors import HostAPIError
+
+    try:
+        if payload["kind"] == "task_credential":
+            from ..user_space.task_credential_replay import assert_credential_callback_identity
+            assert_credential_callback_identity(row, payload, body)
+        elif payload["kind"] == "model_configuration":
+            from .model_control_cards import _require_model_control_record
+            _require_model_control_record(row, payload, body)
+        else:
+            control = row.get("im_control") or {}
+            if row.get("state") != body["reference"] or any(control.get(k) != body.get(k) for k in ("message_id", "chat_id")):
+                raise ValueError("原卡展示不匹配")
+    except (ValueError, KeyError, TypeError):
+        raise HostAPIError("HUMAN_TICKET_INVALID", 403) from None
+
+
+# LLM: 仅原资源叶子写入；callback由原卡锁调用，禁止在锁外预读冒充CAS，不模拟OAuth官方callback。
+# 函数用途: 将已验证的真人决定送到原凭据、模型或OAuth取消事务。
+def execute_plugin_input(context, payload, body, identity, record_guard):
+    from ..plugin_host.errors import HostAPIError
+    from ..user_space.interaction_actor_audit import interaction_audit_host, record_interaction_actor
+
+    latest = validate_plugin_input(context, body, identity)
+    if latest != payload:
+        raise HostAPIError("INTERACTION_CONFLICT", 409)
+    home, inputs = context.home_paths.owner_home_dir, context.inputs
+    actor = identity["actor_id"]
+
+    # LLM: 原点击审计只能沿当前owner记录，返回不是业务成功证明。
+    # 函数用途: 复用原取消审计，不把表单或签名写进日志。
+    def audit(value):
+        host = interaction_audit_host(context.base.home_paths.root, payload["owner"])
+        return record_interaction_actor(host, payload, decision="cancel", actor=value, blocking=inputs.blocking)
+
+    with plugin_input_record_check(record_guard):
+        kind = payload["kind"]
+        if kind == "task_credential":
+            from ..user_space.task_credentials import submit_credential_card_for_owner
+            return submit_credential_card_for_owner(home, context.capability, inputs, payload, body, audit=audit)
+        if kind == "feishu_oauth":
+            from ..user_space.feishu_oauth import cancel_oauth_card_for_owner
+            return cancel_oauth_card_for_owner(home, inputs.owner, inputs, payload, body, actor_id=actor, audit=audit)
+        if body["decision"] != "cancel" and not getattr(context.capability, "im_model_cards_enabled", False):
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        from .model_control_cards import model_control_host_from_resources, submit_model_control
+        host = model_control_host_from_resources(context.base.config, context.home_paths, inputs.store)
+        return submit_model_control(context.base, host, inputs.owner, payload, body, actor_id=actor,
+                                    commit_transition=inputs.commit, blocking=inputs.blocking)

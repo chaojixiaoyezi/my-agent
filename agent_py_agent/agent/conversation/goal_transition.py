@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-_SOURCES = frozenset({"model_tool", "user_control", "budget", "no_progress_fuse", "runtime", "unknown"})
+# 插件来源只能由已授权宿主适配器传入，不能伪装成人类直接控制。
+_SOURCES = frozenset({"model_tool", "user_control", "plugin_control", "budget", "no_progress_fuse", "runtime", "unknown"})
 _IDENTITIES = ("request_id", "run_id", "attempt_id", "tool_call_id")
 
 

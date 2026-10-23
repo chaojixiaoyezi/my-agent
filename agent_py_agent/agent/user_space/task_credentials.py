@@ -498,7 +498,7 @@ def _assert_credential_unchanged(agent, observed, current, scope):
 
 
 # LLM: 显式资源叶子保原卡RMW/加密/代次/TTL/重放；inputs.perform只运输原C末门，不接受JSON角色或假Agent。
-# 函数用途: 在原卡保存后补原输入投影，失败保部分事实，Count0与C共用一份实现。
+# 函数用途: 在原卡锁内可选末核插件版本，保存后补原输入投影，Count0与C共用一份实现。
 def submit_credential_card_for_owner(home, capability, inputs, payload, body, *, audit, publish=None, retire=None):
     if body.get('decision') != 'cancel' and (capability is None or not capability.im_task_credentials_enabled):
         raise ValueError('私人凭据输入未启用')
@@ -514,6 +514,8 @@ def submit_credential_card_for_owner(home, capability, inputs, payload, body, *,
                 credential_callback_replay_for_input,
             )
             assert_credential_callback_identity(row,payload,body)
+            from ..gateway_parts.private_interaction_service import check_plugin_input_record
+            check_plugin_input_record(row)
             if (body['decision'] != 'cancel' and row.get('access_scope') == 'group'
                     and getattr(capability,'im_group_shared_credentials_enabled',False) is not True):
                 raise ValueError('本群共享凭据已关闭，请取消原卡')

@@ -809,10 +809,10 @@ def list_pending_agent_tool_approvals(
     return rows[: max(1, int(limit or 1))]
 
 
-# LLM: 同一原scope/完整请求/claim/attempt决定只能在原permission锁内提交；可选C门在锁外，默认Count0原调用缝不变。
+# LLM: 同一原scope/完整请求/claim/attempt决定只能在原permission锁内提交；可选C门在锁外，record_guard只在原锁内末核版本/授权。
 # 函数用途: 将用户决定写回原审批行；异步私卡等待方也复用同一个锁内实现。
 def resolve_agent_tool_approval(agent, *, run_id, request_value, decision_value,
-                                interaction_actor=None, commit_transition=None, blocking=True):
+                                interaction_actor=None, commit_transition=None, blocking=True, record_guard=None):
     scope = tool_approval_scope(agent, run_id)
     request, decision = _approval_request(request_value), _approval_decision(decision_value)
     selected = validate_opaque_id(run_id, kind="run_id")
@@ -825,18 +825,20 @@ def resolve_agent_tool_approval(agent, *, run_id, request_value, decision_value,
     def decide():
         with locked_json_path(_transition_path(path), **({} if blocking else {"blocking": False})):
             return _resolve_agent_tool_approval_locked(agent, path, scope, request, decision,
-                                                       interaction_actor=interaction_actor, blocking=blocking)
+                interaction_actor=interaction_actor, blocking=blocking, record_guard=record_guard)
     return decide() if commit_transition is None else commit_transition(decide)
 
 
-# LLM: 必须已持原permission transition，外层执行门/op锁先取；仅原真实scope现场校验，JSON或MAC不授执行权。
+# LLM: 必须已持原permission transition，外层执行门/op锁先取；仅原真实scope现场校验；可选record_guard不替代原首决检查。
 # 函数用途: 共用同步与原waiter的审批写入主体，保首决、期限、点击审计和完整请求比较。
-def _resolve_agent_tool_approval_locked(agent, path, scope, request, decision, *, interaction_actor=None, blocking=True):
+def _resolve_agent_tool_approval_locked(agent, path, scope, request, decision, *, interaction_actor=None, blocking=True, record_guard=None):
     if not tool_approval_scope_is_current(agent, scope):
         raise FileNotFoundError("tool approval execution is no longer active")
     report = read_json_object_report(path, context="subagent.tool_approval.resolve")
     if report.load_error is not None or not _record_matches(report.payload, scope, request):
         raise FileNotFoundError("pending subagent approval not found")
+    if record_guard is not None:
+        record_guard(report.payload)
     if time.time() >= approval_deadline(request, report.payload.get("expires_at")):
         raise FileNotFoundError("tool approval expired")
     prior = _decision_from_payload(report.payload)
@@ -851,6 +853,22 @@ def _resolve_agent_tool_approval_locked(agent, path, scope, request, decision, *
     write_json_file_atomic(path, payload, **({} if blocking else {"blocking": False}))
     return {"ok": True, "run_id": scope.run_id, "permission_id": request.permission_id, "decision": decision.decision,
             **({'clicked_by': payload['decision_by']} if payload.get('decision_by') else {})}
+
+
+# LLM: 读取原pending行并核完整scope/claim/attempt，绝不登记consumer或延长lease；不作为公开API投影。
+# 函数用途: 给宿主交互适配器提供精确原审批版本材料。
+def read_pending_approval_record(agent, *, run_id, request_value):
+    scope = tool_approval_scope(agent, run_id)
+    request = _approval_request(request_value)
+    report = read_json_object_report(_approval_path(agent, scope, request.permission_id),
+                                    context="subagent.tool_approval.plugin_read")
+    if report.load_error is not None:
+        raise OSError("approval record unavailable")
+    if (not scope.active or not _record_matches(report.payload, scope, request)
+            or report.payload.get("status") != "pending"
+            or time.time() >= approval_deadline(request, report.payload.get("expires_at"))):
+        raise FileNotFoundError("pending approval no longer current")
+    return report.payload
 
 
 # LLM: 旧Agent入口只取原ConversationStore，路径公式由同一资源leaf维护；不从工作区或正文替代审批根。

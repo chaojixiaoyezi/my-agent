@@ -244,7 +244,7 @@ class GoalStore:
             return None, report
 
     # LLM: Each canonical agent thread permits one unfinished Goal, regardless of name/task. Completed history is retained.
-    # 函数用途: 原子创建当前代理目标；名字不同不再产生隐式并行执行器，暂停目标也不能被覆盖。
+    # 函数用途: 原子创建当前代理目标；单行名称上限120与公开合同对齐，暂停目标也不能被覆盖。
     def create(self, request: dict[str, Any]) -> ThreadGoal:
         thread_id = str(request.get("thread_id") or "").strip()
         objective = str(request.get("objective") or "").strip()
@@ -252,8 +252,8 @@ class GoalStore:
         self._require_thread(thread_id)
         if not objective:
             raise ValueError("goal objective is required")
-        if len(name) > 64 or "\n" in name or "\r" in name:
-            raise ValueError("goal name must be at most 64 characters on one line")
+        if len(name) > 120 or "\n" in name or "\r" in name:
+            raise ValueError("goal name must be at most 120 characters on one line")
         if len(objective) > THREAD_GOAL_OBJECTIVE_MAX_CHARS:
             raise ValueError(f"goal objective exceeds {THREAD_GOAL_OBJECTIVE_MAX_CHARS} characters")
         token_budget_value = request.get("token_budget")
