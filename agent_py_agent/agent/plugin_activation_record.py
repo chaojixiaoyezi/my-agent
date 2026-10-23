@@ -33,8 +33,9 @@ class PluginActivation:
                 or (self.phase == "preparing" and self.catalog_sha256)
                 or (self.phase == "active" and not self.catalog_sha256)):
             raise ValueError("插件激活目录摘要无效")
-        from .plugin_permissions.records import validate_activation_permission
+        # 归一化并核验插件激活记录的 OS 与宿主 API v2 授权集合。
         from .plugin_permissions.host_grants import normalize_activation_grant
+        from .plugin_permissions.records import validate_activation_permission
 
         normalize_activation_grant(self)
         validate_activation_permission(self)

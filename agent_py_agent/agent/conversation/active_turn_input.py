@@ -17,8 +17,9 @@ Agent Core share it without either runtime layer importing the other.
 from collections.abc import Iterable
 from typing import Any
 
-# LLM: 仅处理宿主已领取的 guidance；返回跨 Compact 的原输入投影，不确认消费、不执行媒体读取。
-# 函数用途: 从原插话条目生成带稳定身份的携带包。
+
+# LLM: 仅处理宿主已领取的 guidance；返回跨 Compact 的原输入投影（含插话图片引用），不确认消费、不执行媒体读取。
+# 函数用途: 从原插话条目生成带稳定身份与附件引用的携带包。
 def packet_from_guidance(entries: Iterable[Any], text: str) -> dict[str, object] | None:
     content = str(text or "")
     entries = list(entries)

@@ -186,8 +186,8 @@ def test_key_cannot_change_target_user(tmp_path):
 # LLM: 六动作都经过真实域入口和存储；只把上游A来源签发抽象成宿主端口。
 # 函数用途: 验证管理域创建、限域读取、配额和启停完整本地链路。
 def test_local_user_domain_six_actions(tmp_path):
-    from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
     from agent_py_agent.agent.plugin_host.local_users import LocalUsersDomain
+    from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
     host = HostFixture(tmp_path)
     domain = LocalUsersDomain(host.factory, host.usage)
     created = domain.call(host.issue("users.local.create", {"user_id": "alice"}, None, "domain_create_0001"))
@@ -213,8 +213,9 @@ def test_local_user_domain_six_actions(tmp_path):
 @pytest.mark.parametrize("case", ["extra", "quota", "capability", "manageable", "creatable", "as_user", "key"])
 def test_domain_denial_has_no_side_effect(tmp_path, case):
     from dataclasses import replace
-    from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
+
     from agent_py_agent.agent.plugin_host.local_users import LocalUsersDomain
+    from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
     host = HostFixture(tmp_path)
     payload = {"user_id": "alice"}
     if case == "extra":
@@ -238,6 +239,7 @@ def test_domain_denial_has_no_side_effect(tmp_path, case):
 # 函数用途: 核验真实配额和权限文件沿原宿主schema发布。
 def test_seed_uses_original_owner_policy_schema(tmp_path):
     import json
+
     from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
     host = HostFixture(tmp_path)
     host.create_user()
@@ -249,8 +251,8 @@ def test_seed_uses_original_owner_policy_schema(tmp_path):
 # LLM: 停止失败不能回滚已提交disabled，也不能让调用方误以为账号尚未停用。
 # 函数用途: 验证取消故障作为警告返回且同键不重复触发取消。
 def test_disable_commits_even_if_cancellation_fails_and_reason_binds_key(tmp_path):
-    from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
     from agent_py_agent.agent.plugin_host.local_users import LocalUsersDomain
+    from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
     host = HostFixture(tmp_path)
     host.create_user()
     cancellations = []
@@ -276,8 +278,11 @@ def test_disable_commits_even_if_cancellation_fails_and_reason_binds_key(tmp_pat
 # LLM: 原子发布后响应丢失不能抹掉已提交回执或把enabled改成失败。
 # 函数用途: 验证发布点故障后从原文件确认提交并只重放原结果。
 def test_create_post_commit_fault_preserves_original_receipt(tmp_path, monkeypatch):
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     from agent_py_agent.tests.test_plugin_act_as_user import HostFixture
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
     host = HostFixture(tmp_path)
     store = host.factory.store
     original = store.save

@@ -154,7 +154,9 @@ def test_idempotency_selector_depth_and_body_limits():
 # 函数用途: 验证条件能力、UID和固定普通用户权限。
 def test_conditional_capabilities_and_restricted_helpers():
     from agent_py_agent.agent.plugin_host.contracts import (
-        required_capabilities, restricted_permission, validate_local_user_id,
+        required_capabilities,
+        restricted_permission,
+        validate_local_user_id,
     )
     from agent_py_agent.agent.plugin_host.errors import HostAPIError
     assert required_capabilities("host.capabilities.get", {}) == frozenset()

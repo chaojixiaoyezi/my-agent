@@ -1,5 +1,5 @@
-# LLM: HTTP分发唯一路由表；OAuth公开回调仍须原交互MAC与actor验证，不接收宿主凭据头作为本人授权。
-# 模块用途: 声明Gateway路由及有界观察档位，私人交互与本人OAuth由各自处理器验证准确身份。
+# LLM: HTTP分发唯一路由表；OAuth公开回调仍须原交互MAC与actor验证，不接收宿主凭据头作为本人授权，插件v2调用与SSE流统一经plugin_token鉴权。
+# 模块用途: 声明Gateway路由及有界观察档位，私人交互、本人OAuth与Plugin Host v2由各自处理器验证准确身份。
 from __future__ import annotations
 
 from dataclasses import dataclass

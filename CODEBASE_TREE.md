@@ -1,3 +1,56 @@
+## 2026-10-23 插件宿主 API v2（42 动作 / v9 授权 / 普通本地用户隔离）、插话带图、非阻塞设置切换与回合完成计时
+
+```text
+|-- agent_py_agent/agent/plugin_host/
+|   |-- __init__.py # Plugin Host API v2 公共导出与入口
+|   |-- action_specs.py # 42 动作目录、条件能力要求与 payload 契约规范
+|   |-- artifacts.py # D2 产物列表与元信息只读观察适配器
+|   |-- authorization.py # IngressIssuer 入站令牌核验、范围收敛与受限执行策略签发
+|   |-- composition.py # 六大领域端口装配、统一调用分发与 SSE 流事件包装
+|   |-- contracts.py # 宿主授权绑定、只读/执行上下文与领域结果结构化合同
+|   |-- conversations.py # B1/B2 会话线程生命周期、消息历史、发送、轮询、流式与取消领域入口
+|   |-- cursors.py # 带 HMAC-SHA256 签名与有效期的分页/流式游标编解码
+|   |-- errors.py # HostAPIError 标准错误码、HTTP 状态映射与公开安全文案
+|   |-- execution.py # C 受限工具/脚本/工作流执行门面与非管理员身份强制收敛
+|   |-- execution_policy.py # 非管理员执行预算、网络禁令与工具白名单裁剪
+|   |-- goals.py # D1 长期目标查询与状态跃迁领域适配器
+|   |-- history.py # B1 完整聊天历史安全扫描、内部消息过滤与 MAC 分页
+|   |-- http_transport.py # /plugin-host/v2/call 与 /plugin-host/v2/stream HTTP/SSE 传输层
+|   |-- interactions.py # D1 待决交互查询与真人票据验证提交领域适配器
+|   |-- local_users.py # C 本地普通用户创建、启停、查询与配额管理领域入口
+|   |-- memory.py # D2 正式记忆与候选记忆只读观察适配器
+|   |-- owner_context.py # A/C 授权桥接、OwnerContextFactory 与 act_as_user 非管理员冷解析
+|   |-- requests.py # B2 插件会话请求精确归属校验、状态轮询与最终回复提取
+|   |-- revocation.py # 本地用户停用时的关联运行取消与幂等警告回执
+|   |-- schemas.py # 严格 JSON 解析、重复键/非有限数拒绝与只读冻结投影
+|   |-- streams.py # B2 实时增量回复与终态事件 SSE 流及 MAC 断点重连
+|   `-- tasks.py # D1 任务状态、调用链与子代理树只读观察领域适配器
+|-- agent_py_agent/agent/plugin_manifest_host_v9.py # 插件 Manifest v9 schema 解析与 host_api_v2 权限声明校验
+|-- agent_py_agent/agent/plugin_permissions/host_grants.py # 插件安装/激活授权记录归一化与 v9 能力交集计算
+|-- agent_py_agent/agent/user_space/local_user_store.py # 本地普通账号（owners/local/<user_id>）无链接原子存储与状态投影
+|-- agent_py_agent/agent/user_space/local_user_lifecycle.py # 本地普通账号创建、幂等回执、种子初始化与启停生命周期服务
+|-- agent_py_agent/agent/gateway_parts/plugin_request_source.py # 插件会话请求来源绑定与同安装/同 Owner 校验
+|-- agent_py_agent/agent/gateway_parts/plugin_request_submission.py # 插件消息幂等提交与精确原请求取消服务
+|-- agent_py_agent/agent/gateway_parts/session_setting_control.py # 模型与思考档位运行时切换短事务控制通道
+|-- agent_py_agent/cli/chat_parts/tui_model_selection_wait.py # TUI 模型菜单异步等待与撤销提示协调器
+|-- agent_py_agent/cli/chat_parts/tui_setting_enqueue.py # TUI 独立设置短事务出站队列与非阻塞入队
+|-- agent_py_agent/cli/turn_completion.py # CLI / TUI 回合完成本地时间戳与单调时钟耗时格式化
+|-- agent_py_agent/tests/test_plugin_host_v2_contracts.py # Plugin Host v2 42 动作目录、严格 JSON 与合同单测
+|-- agent_py_agent/tests/test_plugin_host_v2_grants.py # Plugin Host v2 令牌签发、撤销、HTTP 与有界 SSE 传输单测
+|-- agent_py_agent/tests/test_plugin_manifest_v9.py # Manifest v9 解析与授权交集单测
+|-- agent_py_agent/tests/test_plugin_local_users.py # 本地普通用户创建、启停、配额与幂等故障恢复单测
+|-- agent_py_agent/tests/test_plugin_act_as_user.py # act_as_user 非管理员隔离、权限收敛与跨 Owner 拒绝单测
+|-- agent_py_agent/tests/test_plugin_host_v2_conversations.py # B1 会话线程与完整聊天历史分页单测
+|-- agent_py_agent/tests/test_plugin_host_v2_requests.py # B2 消息发送、轮询、SSE 流式回复与取消单测
+|-- agent_py_agent/tests/test_plugin_host_v2_interactions.py # D1 交互决策、任务与长期目标接口单测
+|-- agent_py_agent/tests/test_plugin_host_v2_observations.py # D2 产物与记忆只读观察接口单测
+|-- agent_py_agent/tests/test_active_turn_media_interjection.py # 活动回合带图插话全链路与多模态安全点注入单测
+|-- agent_py_agent/tests/test_nonblocking_model_switch.py # 运行时非阻塞模型/思考档位切换与单请求冻结单测
+`-- agent_py_agent/tests/test_cli_turn_completion_timing.py # CLI / TUI 回合完成时间与耗时显示单测
+```
+
+关键文件说明：`agent/plugin_host/`、`plugin_manifest_host_v9.py` 与 `user_space/local_user_*.py` 构建完整的插件宿主 API v2（42 动作、聊天历史读写、流式收发、本地普通用户管理及宿主强鉴权的 `act_as_user` 非管理员隔离）；`session_setting_control.py`、`tui_setting_enqueue.py` 与 `turn_completion.py` 解决运行时切模型卡顿、带图插话与回合完成计时显示。
+
 ## 2026-10-22 线上性能归因与网关排空/卡死治理（.7 增量）
 
 ```text

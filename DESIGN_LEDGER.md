@@ -1,3 +1,16 @@
+## 2026-10-23 插件宿主 API v2（42 动作 + 本地普通用户 + `act_as_user` 隔离）、带图插话、非阻塞切模型、完成计时与待消费输入失效复位（已实现）
+
+- **插件宿主 API v2 与本地普通用户受限执行（Batch 2，`A/B1/B2/C/D1/D2`）**：
+  - 针对插件接口缺失（读取完整聊天历史、发送消息与流式接收回复、创建/停用本地普通用户、指定普通用户执行且不继承管理员权限），新增 `agent_py_agent/agent/plugin_host/`（42 个标准动作，覆盖 `conversations.*`、`users.local.*`、`execute.*`、`interactions.*`、`tasks.*`、`goals.*`、`artifacts.*`、`memory.*`、`assets.*`、`telemetry.*`）、`plugin_manifest_host_v9.py` 与 `plugin_permissions/host_grants.py`。
+  - **宿主强鉴权与非管理员隔离（`act_as_user`）**：插件不可自称管理员或自行指定任意目录；`IngressIssuer` 与 `OwnerContextFactory` 基于宿主已激活安装令牌、Manifest v9 静态授权白名单（`target_user_ids` / `manageable_user_ids` / `creatable_user_ids`）与 `LocalUserStore`（`local_users/<uid>.json`，状态必须 `enabled`）冷解析出 `OwnerIdentity("local", "user", uid)`，强制 `is_admin=False`、网络关闭、工具集受限于静态交集，并将工作目录与数据隔离在 `owners/local/<uid>`，彻底杜绝继承 `local/main` 管理员权限。
+- **活动回合带图插话、运行时非阻塞切模型与 CLI 完成时间/用时显示（Batch 3，`c7`）**：
+  - **带图插话（P1）**：打通 CLI/TUI 活动回合插话的 `input_media` 载荷校验、跨进程 Guidance 持久化、安全点注入与多模态 Provider 图像字节读取，支持文本+图、纯图、多图插话及 Compact 恢复。
+  - **运行时丝滑切换模型与思考档位（P2）**：新增 `session_setting_control.py` 与 `tui_setting_enqueue.py` 独立设置短事务通道，绕开被长回合占用的慢控制队列；TUI 选择模型/思考档位后立即落盘并关闭弹窗，在下一模型请求安全点自动刷新且保证单次请求内 `(model_spec, reasoning_effort)` 原子冻结。
+  - **CLI / TUI 完成时间与用时显示（P3）**：新增 `cli/turn_completion.py`，在回合唯一终态渲染 `完成于 YYYY-MM-DD HH:MM:SS · 用时 <duration>` 独立系统块，不写入 canonical assistant 历史。
+- **TUI Todo 底部大白框（`⬜`）修复与长会话 `! 任务处理失败` 告警根因修复**：
+  - `tui_block_renderer.py` 将 blocked todo 图标从双宽白框 `⬜` 替换为窄字符 `⊘`，消除底部列表大白框视觉异常。
+  - `_tool_loop_service.py` 在 `inject_pending_turn_input` 成功消费待处理输入或当前无失效输入时将 `_pending_turn_input_invalidations` 归零，修复长会话累计 8 次后台命令完成通知后在第 9 次误触发 `pending_turn_input_invalidation_limit` 导致短暂报 `! 任务处理失败，请稍后重试` 的缺陷。
+
 ## 2026-10-23 CTX-09 / TOOL-04、TOOL-05、TOOL-06 / OPT-02 消费者合同对齐（ctxopt-consumer-c4-v2，未完成验收）
 
 - **来源与范围**：07 的 `ctxopt-consumer-c4.md` v2；基于 `40d3c988d6722b22f5ebd72a7344f9c46829b4b3`。本轮只调整 Chat schema 规范化、目录指引、两个记忆消费者测试和预算注释，不改变工具授权、人格写入入口或记忆预算实现。

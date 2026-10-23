@@ -25,8 +25,8 @@ def coordinator_model_server(server):
     return type(control) is GatewayControlPlane and control.worker_count > 0
 
 
-# LLM: 仅实际HTTP路由及原解析命令决定元数据接线；/ask仍取goal优先prompt，/control取command优先prompt，不接受未知operation或借文本授权限。
-# 函数用途: 让两个真实文本入口共用原view/select/set_default元数据合同，client-only与vector仍不开放到文本路径。
+# LLM: 仅实际HTTP路由及原解析命令决定元数据接线；/ask仍取goal优先prompt，/control取command优先prompt，支持model与effort set短事务，不接受未知operation或借文本授权限。
+# 函数用途: 让两个真实文本入口共用原view/select/set_default及effort set元数据合同，client-only与vector仍不开放到文本路径。
 def model_metadata_supported(handler, body):
     if urlsplit(handler.path).path == '/client/models':
         return body.get('operation') in _MODEL_OPERATIONS

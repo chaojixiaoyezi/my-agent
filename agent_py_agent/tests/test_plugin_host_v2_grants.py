@@ -9,15 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_py_agent.agent.plugin_host.errors import HostAPIError
-from agent_py_agent.agent.plugin_permissions.host_grants import validate_host_grant
 from agent_py_agent.agent.plugin_activation import PluginActivationRequest
 from agent_py_agent.agent.plugin_activation_record import PluginActivation, plugin_catalog_digest
 from agent_py_agent.agent.plugin_environment_plan import plan_plugin_environment
+from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
 from agent_py_agent.agent.plugin_installation import PluginInstallRequest
 from agent_py_agent.agent.plugin_package import inspect_plugin_package
-from agent_py_agent.agent.plugin_permissions.grants import permission_details, PermissionSelection
+from agent_py_agent.agent.plugin_permissions.grants import PermissionSelection, permission_details
+from agent_py_agent.agent.plugin_permissions.host_grants import validate_host_grant
 from agent_py_agent.agent.plugin_runtime_facts import confirmation_code
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_plugin_manifest_v8 import _bundle
@@ -146,7 +146,10 @@ def test_confirmation_covers_complete_host_grant():
 # LLM: 实际启用确认生成器必须承运新授权，不能靠测试直接组装代替产品接线。
 # 函数用途: 验证默认仍需完整确认、关闭旧沙箱默认也不能给v9降wide。
 def test_enable_previews_v9_grant_without_legacy_fallback(tmp_path):
-    from agent_py_agent.agent.plugin_permissions.enable import LegacyEnableContext, prepare_enable_authorization
+    from agent_py_agent.agent.plugin_permissions.enable import (
+        LegacyEnableContext,
+        prepare_enable_authorization,
+    )
     from agent_py_agent.agent.runtime_db.host_commands import HostCommandIdentity
     owner, _, entry, _, _, _ = installed_grant(tmp_path)
     identity = HostCommandIdentity(owner.owner_id, "main", "local", "test-thread", "preview-test")
@@ -285,7 +288,12 @@ def test_cursor_integrity_scope_and_expiry(live_issuer):
 # LLM: 空端口不是业务实现；发现接口不能因为capability存在就宣称可用。
 # 函数用途: 验证组合根未注册失败关闭及静态发现目录。
 def test_dispatch_missing_domain_and_discovery(live_issuer):
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, dispatch_call, DomainResult, HostDomainPorts
+    from agent_py_agent.agent.plugin_host.contracts import (
+        DomainResult,
+        HostDomainPorts,
+        authorize_call,
+        dispatch_call,
+    )
     issuer, token, *_ = live_issuer
     source = issuer.ingress(token)
     with pytest.raises(HostAPIError) as error:
@@ -300,7 +308,12 @@ def test_dispatch_missing_domain_and_discovery(live_issuer):
 # LLM: 领域只接收AuthorizedCall；返回后撤权仍须拒绝送出成功结果。
 # 函数用途: 验证注入端口按固定call方法执行和末核。
 def test_dispatch_revalidates_after_domain(live_issuer):
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, dispatch_call, DomainResult, HostDomainPorts
+    from agent_py_agent.agent.plugin_host.contracts import (
+        DomainResult,
+        HostDomainPorts,
+        authorize_call,
+        dispatch_call,
+    )
     issuer, token, policy, *_ = live_issuer
     authorized = authorize_call(issuer.ingress(token), api_call())
     # LLM: 注入领域在返回前改变策略，用来核对外层末核。
@@ -318,10 +331,10 @@ def test_dispatch_revalidates_after_domain(live_issuer):
 @pytest.fixture
 def http_host(tmp_path, monkeypatch):
     from agent_py_agent.agent import plugin_host_api as api
+    from agent_py_agent.agent.gateway_parts.bounded_http_server import GatewayBoundedHTTPServer
+    from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer
     from agent_py_agent.agent.plugin_host.composition import HostComposition
     from agent_py_agent.agent.plugin_host.http_transport import HostTransport
-    from agent_py_agent.agent.gateway_parts.http_service import GatewayHTTPServer
-    from agent_py_agent.agent.gateway_parts.bounded_http_server import GatewayBoundedHTTPServer
     monkeypatch.setattr(GatewayBoundedHTTPServer, "max_request_workers", 1)
     _, store, entry, ref = active_grant(tmp_path)
     server = GatewayHTTPServer(0, SimpleNamespace(state=tmp_path / "state.json"))
@@ -379,6 +392,7 @@ def test_http_rejects_mixed_identity_and_browser_origin(http_host, headers):
 def test_http_stream_does_not_occupy_normal_worker(http_host):
     import threading
     from http.client import HTTPConnection
+
     from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts
     server, token, *_ = http_host
     release = threading.Event()
@@ -438,7 +452,12 @@ def test_legacy_permission_normalization_keeps_bytes():
 # LLM: 领域可分批接入，已声明只支持部分动作时不能宣称整个领域可用。
 # 函数用途: 验证动作级就绪声明。
 def test_discovery_respects_registered_action_subset(live_issuer):
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, dispatch_call, DomainResult, HostDomainPorts
+    from agent_py_agent.agent.plugin_host.contracts import (
+        DomainResult,
+        HostDomainPorts,
+        authorize_call,
+        dispatch_call,
+    )
     issuer, token, *_ = live_issuer
     domain = SimpleNamespace(actions=frozenset({"conversations.threads.get"}), call=lambda call: DomainResult(200, {}))
     result = dispatch_call(authorize_call(issuer.ingress(token), api_call("host.capabilities.get")),
@@ -451,7 +470,8 @@ def test_discovery_respects_registered_action_subset(live_issuer):
 # 函数用途: 验证预提交失败仍是协议有效响应。
 def test_stream_revoked_before_headers_returns_http_error(live_issuer):
     import socket
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, HostDomainPorts
+
+    from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts, authorize_call
     from agent_py_agent.agent.plugin_host.http_transport import StreamSession
     issuer, token, policy, *_ = live_issuer
     call = authorize_call(issuer.ingress(token), api_call("conversations.requests.stream", {"request_id": "req-1"}))
@@ -472,7 +492,8 @@ def test_stream_revoked_before_headers_returns_http_error(live_issuer):
 # LLM: 只验证实际MCP构造环境发行，不启动进程；OS可用性独立于这条回归。
 # 函数用途: 验证不申请read的合法v9仍能得到自己的v2令牌。
 def test_runtime_issues_environment_for_chat_only_v9(tmp_path, monkeypatch):
-    from agent_py_agent.agent import plugin_runtime as runtime, plugin_host_api as api
+    from agent_py_agent.agent import plugin_host_api as api
+    from agent_py_agent.agent import plugin_runtime as runtime
     owner, _, entry, _ = active_grant(tmp_path, ["chat"])
     monkeypatch.setattr(runtime, "_launch_argv", lambda *args: ("fixture-entry", [], owner.home_dir))
     monkeypatch.setattr(runtime, "legacy_launch_policy", lambda *args: None)
@@ -502,8 +523,12 @@ def test_old_broker_rejects_v9_grant(live_issuer):
 # 函数用途: 验证交互与非交互命令都不丢弃授权选择。
 @pytest.mark.parametrize("interactive", [False, True])
 def test_management_transports_host_selection(tmp_path, monkeypatch, interactive):
-    from agent_py_agent.agent.gateway_parts import plugin_command_service as service, command_stream
-    from agent_py_agent.agent.plugin_permissions.host_grants import _selection_slot, selection_schema
+    from agent_py_agent.agent.gateway_parts import command_stream
+    from agent_py_agent.agent.gateway_parts import plugin_command_service as service
+    from agent_py_agent.agent.plugin_permissions.host_grants import (
+        _selection_slot,
+        selection_schema,
+    )
     choice = {key: grant_payload()[key] for key in selection_schema()["properties"]}
     observed = []
     # LLM: 捕获真实上下文运输值，不把替身结果宣称为批准或启用。
@@ -531,7 +556,12 @@ def test_management_transports_host_selection(tmp_path, monkeypatch, interactive
 def target_issuer(tmp_path):
     from agent_py_agent.agent import plugin_host_api as api
     from agent_py_agent.agent.plugin_host.authorization import IngressIssuer
-    from agent_py_agent.agent.plugin_host.contracts import OwnerReadContext, OwnerResolutionResult, RestrictedExecutionPolicy, RestrictedPermission
+    from agent_py_agent.agent.plugin_host.contracts import (
+        OwnerReadContext,
+        OwnerResolutionResult,
+        RestrictedExecutionPolicy,
+        RestrictedPermission,
+    )
     owner, _, entry, ref = active_grant(tmp_path, ["read", "chat", "execute", "act_as_user"])
     state = {"revision": 1, "execution_calls": 0, "extra_budget": 0, "wrong_source": False}
     # LLM: 纯解析不ensure，不创建目标目录或Agent。
@@ -563,7 +593,11 @@ def target_issuer(tmp_path):
 # LLM: 插件持execute能力不代表每个只读调用都有创建执行主体的权利。
 # 函数用途: 验证只读上下文无初始化且不能升级成执行factory。
 def test_read_call_cannot_resolve_execution(target_issuer):
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, resolve_read_context, resolve_execution_context
+    from agent_py_agent.agent.plugin_host.contracts import (
+        authorize_call,
+        resolve_execution_context,
+        resolve_read_context,
+    )
     issuer, token, state = target_issuer
     authorized = authorize_call(issuer.ingress(token), api_call(as_user="alice"))
     context = resolve_read_context(authorized)
@@ -578,7 +612,11 @@ def test_read_call_cannot_resolve_execution(target_issuer):
 # 函数用途: 验证resolver不得扩权、换源或在用户变化后继续。
 @pytest.mark.parametrize("change", ["revision", "extra_budget", "wrong_source"])
 def test_execution_resolver_live_fences(target_issuer, change):
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, decode_call, resolve_execution_context
+    from agent_py_agent.agent.plugin_host.contracts import (
+        authorize_call,
+        decode_call,
+        resolve_execution_context,
+    )
     issuer, token, state = target_issuer
     row = {"schema": "plugin_host_call.v2", "action": "conversations.messages.send", "as_user": {"user_id": "alice"},
            "idempotency_key": "a" * 16, "payload": {"thread_id": "thread-1", "text": "hello", "tool_policy": "bounded"}}
@@ -606,6 +644,7 @@ def test_http_response_limit_includes_envelope(http_host):
 def test_http_idle_stream_heartbeat_and_revocation(http_host, monkeypatch):
     import threading
     from http.client import HTTPConnection
+
     from agent_py_agent.agent.plugin_host import http_transport as transport
     from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts
     server, token, store, entry = http_host
@@ -665,7 +704,8 @@ def test_stream_failed_worker_closes_socket(live_issuer, phase):
     import io
     import socket
     from concurrent.futures import Future
-    from agent_py_agent.agent.plugin_host.contracts import authorize_call, HostDomainPorts
+
+    from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts, authorize_call
     from agent_py_agent.agent.plugin_host.http_transport import StreamPool
     issuer, token, *_ = live_issuer
     authorized = authorize_call(issuer.ingress(token), api_call("conversations.requests.stream", {"request_id": "req-1"}))

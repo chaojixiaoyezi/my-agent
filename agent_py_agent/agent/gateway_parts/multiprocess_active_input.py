@@ -279,8 +279,8 @@ class OriginalPendingTurnInput:
             raise DataCorruptionError('input receipt changed during forwarding')
 
         self._require_budget(self.agent, deadline)
-    # LLM: 同一个原T/ports窗口已持有；只允许完整等价文字/原精确目标，append后busy/失败不丢canonical回执，重放复用原guidance ID。
-    # 函数用途: 完成一条输入的原幂等追加和可修复绑定，不把追加等同模型已接受。
+    # LLM: 同一个原T/ports窗口已持有；只允许完整等价文字/原精确目标与已校验input_media，append后busy/失败不丢canonical回执，重放复用原guidance ID。
+    # 函数用途: 完成一条输入（含插话带图）的原幂等追加和可修复绑定，不把追加等同模型已接受。
     # LLM: 本次deadline显式贯穿读后与末writer；source先核，资源busy退出全部门再等待，None低层调用不刷新预算。
     # 函数用途: 保持原固定动作及部分事实，不在已过期时开始下一副作用。
     def _append(self, receipt, agent, *, deadline=None):

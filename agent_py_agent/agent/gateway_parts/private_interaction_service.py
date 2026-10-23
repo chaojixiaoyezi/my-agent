@@ -351,8 +351,12 @@ def _check_plugin_input_card_identity(row, payload, body):
 # LLM: 仅原资源叶子写入；callback由原卡锁调用，禁止在锁外预读冒充CAS，不模拟OAuth官方callback。
 # 函数用途: 将已验证的真人决定送到原凭据、模型或OAuth取消事务。
 def execute_plugin_input(context, payload, body, identity, record_guard):
+    # 局部按需加载宿主错误码与交互操作者审计辅助函数。
     from ..plugin_host.errors import HostAPIError
-    from ..user_space.interaction_actor_audit import interaction_audit_host, record_interaction_actor
+    from ..user_space.interaction_actor_audit import (
+        interaction_audit_host,
+        record_interaction_actor,
+    )
 
     latest = validate_plugin_input(context, body, identity)
     if latest != payload:

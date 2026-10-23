@@ -51,7 +51,12 @@ class HostFixture:
     # 函数用途: 建立一个封闭的测试授权签发者。
     def __init__(self, root):
         from contextlib import nullcontext
-        from agent_py_agent.agent.plugin_host.owner_context import LocalUserGrant, OwnerContextFactory, PluginSourceBinding
+
+        from agent_py_agent.agent.plugin_host.owner_context import (
+            LocalUserGrant,
+            OwnerContextFactory,
+            PluginSourceBinding,
+        )
         from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
         self.calls = {}
         self.grant = LocalUserGrant(
@@ -73,6 +78,7 @@ class HostFixture:
     # 函数用途: 生成一个测试宿主已核验的具体调用。
     def issue(self, action="chat.send", payload=None, as_user="alice", key=None):
         import json
+
         from agent_py_agent.agent.plugin_host.owner_context import AuthorizedLocalCall
         source = object()
         self.calls[source] = AuthorizedLocalCall(self.grant, action, json.dumps(payload or {}), as_user, key)
@@ -81,7 +87,10 @@ class HostFixture:
     # LLM: 调用真实生命周期种用户，不构造假的registry响应。
     # 函数用途: 为执行测试建立可核对的独立账号。
     def create_user(self, uid="alice"):
-        from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
+        from agent_py_agent.agent.user_space.local_user_lifecycle import (
+            LocalUserLifecycle,
+            LocalUserOperation,
+        )
         op = LocalUserOperation("fixture-install", "a" * 64, "fixture_create_" + uid)
         return LocalUserLifecycle(self.factory.store).create(uid, op)
 
@@ -106,6 +115,7 @@ def test_read_context_is_cold_and_missing_user_fails(tmp_path):
 def test_context_is_registered_non_admin_owner(tmp_path):
     from dataclasses import fields
     from pathlib import Path
+
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
     host = HostFixture(tmp_path)
     host.create_user()
@@ -155,7 +165,11 @@ def test_context_rejects_unapproved_scope(tmp_path, condition):
 @pytest.mark.parametrize("change", ["copy", "activation", "grant", "disable_enable"])
 def test_context_revalidation_rejects_stale_or_copied_context(tmp_path, change):
     from dataclasses import replace
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
+
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     host = HostFixture(tmp_path)
     host.create_user()
     context = host.factory.resolve_execution_context(host.issue())
@@ -178,6 +192,7 @@ def test_context_revalidation_rejects_stale_or_copied_context(tmp_path, change):
 # 函数用途: 建立批准了两个文件工具的普通用户invoker。
 def file_invoker(root):
     from dataclasses import replace
+
     from agent_py_agent.agent.plugin_host.execution import RestrictedToolInvoker
     from agent_py_agent.agent.plugin_host.execution_policy import ExecutionAllowlist
     host = HostFixture(root)
@@ -247,7 +262,12 @@ def test_restricted_invoker_uses_exact_original_schema(tmp_path):
 @pytest.mark.parametrize("change", ["none", "kind", "asset_id", "revision", "sha256"])
 def test_asset_allowlist_requires_exact_version(tmp_path, change):
     from dataclasses import replace
-    from agent_py_agent.agent.plugin_host.execution_policy import AssetGrant, ExecutionAllowlist, require_asset
+
+    from agent_py_agent.agent.plugin_host.execution_policy import (
+        AssetGrant,
+        ExecutionAllowlist,
+        require_asset,
+    )
     asset = AssetGrant("script", "script-one", 1, "c" * 64)
     policy = ExecutionAllowlist(allowed_assets=(asset,))
     if change == "none":
@@ -262,7 +282,10 @@ def test_asset_allowlist_requires_exact_version(tmp_path, change):
 # 函数用途: 验证独立fence与原invoker均阻止撤权后的下一步。
 def test_each_step_rechecks_revocation(tmp_path):
     from agent_py_agent.agent.plugin_host.revocation import UserRevocationFence
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     host, invoker = file_invoker(tmp_path)
     fence = UserRevocationFence(host.factory, invoker.context)
     service = LocalUserLifecycle(host.factory.store)
@@ -288,6 +311,7 @@ def test_context_rejects_corrupt_current_owner_policy(tmp_path, filename):
 # 函数用途: 验证原策略内容变化触发撤权，并使新快照排除目标用户禁用的工具。
 def test_policy_change_revokes_old_context_and_filters_new_snapshot(tmp_path):
     import json
+
     from agent_py_agent.agent.plugin_host.execution import RestrictedToolInvoker
     host, invoker = file_invoker(tmp_path)
     path = host.factory.store.owner_home("alice").home_dir / "tool_policy.json"
@@ -306,7 +330,11 @@ def test_policy_change_revokes_old_context_and_filters_new_snapshot(tmp_path):
 # 函数用途: 验证受限上下文保留零预算并固定无网络目的地。
 def test_context_preserves_zero_budget_and_separate_cache_identity(tmp_path):
     from dataclasses import replace
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
+
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     host = HostFixture(tmp_path)
     LocalUserLifecycle(host.factory.store).create("alice", LocalUserOperation("fixture-install", "a" * 64, "fixture_create_zero"),
         quota={"max_active_agents": 1, "max_subagents": 0, "max_depth": 0, "max_disk_mb": 10})
@@ -356,6 +384,7 @@ def test_payload_rejects_duplicates_nonfinite_and_oversized_utf8(tmp_path, raw):
 # 函数用途: 验证父快照禁用的工具不能被插件allowlist恢复。
 def test_restricted_snapshot_intersects_original_availability(tmp_path):
     from dataclasses import replace
+
     from agent_py_agent.agent.plugin_host.execution_policy import build_restricted_snapshot
     _, invoker = file_invoker(tmp_path)
     original = replace(invoker.snapshot, allowed_tools=frozenset())
@@ -368,9 +397,13 @@ def test_restricted_snapshot_intersects_original_availability(tmp_path):
 @pytest.mark.parametrize("disabled", [False, True])
 def test_legacy_owner_pool_cannot_bypass_registered_user_gate(tmp_path, disabled):
     from types import SimpleNamespace
+
     from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
     host = HostFixture(tmp_path)
     host.create_user()
     if disabled:
@@ -384,7 +417,11 @@ def test_legacy_owner_pool_cannot_bypass_registered_user_gate(tmp_path, disabled
 # LLM: 公开execute先验证完整schema及允许工具，队列依赖缺失不返回伪202。
 # 函数用途: 验证工具submit正确映射原请求并在拒绝时不调用宿主队列。
 def test_execution_submit_validates_then_delegates_to_original_queue(tmp_path):
-    from agent_py_agent.agent.plugin_host.execution import ExecutionDomain, ExecutionQueuePorts, ExecutionAccepted
+    from agent_py_agent.agent.plugin_host.execution import (
+        ExecutionAccepted,
+        ExecutionDomain,
+        ExecutionQueuePorts,
+    )
     host, _ = file_invoker(tmp_path)
     seen = []
     # LLM: 只替代B未合入的原队列端口，C身份与schema仍全真。
@@ -438,9 +475,13 @@ def test_execution_submit_denial_never_enqueues(tmp_path, case):
 @pytest.mark.parametrize("change", ["hash", "disable", "activation"])
 def test_asset_step_fence_rechecks_current_source_and_content(tmp_path, change):
     from dataclasses import replace
+
     from agent_py_agent.agent.plugin_host.execution_policy import AssetGrant, ExecutionAllowlist
     from agent_py_agent.agent.plugin_host.revocation import AssetStepFence
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     host = HostFixture(tmp_path)
     host.create_user()
     asset = AssetGrant("workflow", "workflow-one", 1, "c" * 64)
@@ -464,7 +505,12 @@ def test_asset_step_fence_rechecks_current_source_and_content(tmp_path, change):
 @pytest.mark.parametrize("action", ["execute.script", "execute.workflow", "execute.workflow_resume"])
 def test_execution_asset_plan_and_step_gate(tmp_path, action):
     from dataclasses import replace
-    from agent_py_agent.agent.plugin_host.execution import ExecutionAccepted, ExecutionDomain, ExecutionQueuePorts
+
+    from agent_py_agent.agent.plugin_host.execution import (
+        ExecutionAccepted,
+        ExecutionDomain,
+        ExecutionQueuePorts,
+    )
     from agent_py_agent.agent.plugin_host.execution_policy import AssetGrant, ExecutionAllowlist
     host = HostFixture(tmp_path)
     host.create_user()
@@ -496,6 +542,7 @@ def test_execution_asset_plan_and_step_gate(tmp_path, action):
 @pytest.mark.parametrize("case", ["revision", "hash", "identity", "extra", "inputs", "missing_backend", "checkpoint"])
 def test_execution_assets_reject_before_enqueue(tmp_path, case):
     from dataclasses import replace
+
     from agent_py_agent.agent.plugin_host.execution import ExecutionDomain, ExecutionQueuePorts
     from agent_py_agent.agent.plugin_host.execution_policy import AssetGrant, ExecutionAllowlist
     host = HostFixture(tmp_path)
@@ -532,6 +579,7 @@ def test_execution_assets_reject_before_enqueue(tmp_path, case):
 # 函数用途: 验证创建与管理范围不相同时的list不会错误拒绝。
 def test_local_user_list_supports_bounded_scope_union(tmp_path):
     from dataclasses import replace
+
     from agent_py_agent.agent.plugin_host.local_users import LocalUsersDomain
     host = HostFixture(tmp_path)
     host.create_user("alice")
@@ -634,7 +682,10 @@ def test_restricted_write_requires_real_operation_ledger(tmp_path):
 def test_revocation_during_approval_lookup_blocks_original_write(tmp_path):
     from agent_py_agent.agent.local_storage import LocalStore
     from agent_py_agent.agent.plugin_host.execution import ExecutionHostPorts, RestrictedToolInvoker
-    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle, LocalUserOperation
+    from agent_py_agent.agent.user_space.local_user_lifecycle import (
+        LocalUserLifecycle,
+        LocalUserOperation,
+    )
     host, original = file_invoker(tmp_path)
     # LLM: 此回调在用户锁外调用，停用提交完成后才返回审批结果。
     # 函数用途: 复现审批查询期间目标被停用的顺序。
