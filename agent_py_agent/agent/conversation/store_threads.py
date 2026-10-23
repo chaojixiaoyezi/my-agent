@@ -224,12 +224,15 @@ def _get_or_create_bound_thread(store, request: dict, *, blocking: bool = True) 
 # LLM: 原文件事务内校验身份与选择版本；omit_empty 的已知字段清空时移除旧键，未知扩展仍保持原样。
 #   由 ThreadStore.update_atomic 在原锁内调用；不读写独立状态，不让扩展合并复活已移除的会话方法。联测 store/commands。
 # 函数用途: 校验并合并线程更新；模型选择时间只在原选择版本提交时更新，其余更新保留旧时间。
+# LLM: updater与B1公共修订/原回执合并同在canonical文件锁内；未接入插件的线程不增加元数据或改变旧写入规则。
+# 函数用途: 合并原子线程更新并保住既有宿主CAS与插件幂等字段。
 def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> dict:
     thread = ConversationThread.from_dict(payload)
     if not thread.thread_id:
         raise DataCorruptionError(f"conversation thread is unreadable: {thread_id}")
     if thread.thread_id != thread_id:
         raise DataCorruptionError(f"conversation thread identity is invalid: {thread_id}")
+    before = copy.deepcopy(thread.to_dict()) if "plugin_host_v2" in thread.metadata else None
     updated = updater(thread)
     if updated.thread_id != thread_id:
         raise DataCorruptionError(f"conversation thread updater changed identity: {thread_id}")
@@ -237,9 +240,34 @@ def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> di
     updated = replace(updated, model_selection_selected_at=(
         now() if updated.model_selection_revision != thread.model_selection_revision else thread.model_selection_selected_at
     ))
+    updated = _preserve_plugin_thread_state(before, updated)
     serialized = updated.to_dict()
     omitted = {item.name for item in fields(updated) if item.metadata.get("omit_empty") and item.name not in serialized}
     return {**{key: value for key, value in payload.items() if key not in omitted}, **serialized}
+
+
+# LLM: 只对已登记插件状态启用且revision不得缺省；普通metadata替换保留来源/回执，实际变更单步推进原修订。
+# 函数用途: 防止原宿主入口清除幂等回执或让旧插件修订继续有效。
+def _preserve_plugin_thread_state(before: dict | None, updated: ConversationThread) -> ConversationThread:
+    if before is None:
+        return updated
+    previous = before["metadata"]["plugin_host_v2"]
+    current = updated.metadata.get("plugin_host_v2", previous)
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        raise DataCorruptionError("invalid plugin conversation state")
+    for key in ("installation_ref", "workspace_ref"):
+        if key in current and current[key] != previous.get(key):
+            raise DataCorruptionError("plugin conversation source changed")
+    old_receipts, new_receipts = previous.get("receipts", {}), current.get("receipts", {})
+    if (not isinstance(old_receipts, dict) or not isinstance(new_receipts, dict)
+            or any(key in new_receipts and new_receipts[key] != value for key, value in old_receipts.items())):
+        raise DataCorruptionError("plugin conversation receipt changed")
+    revision = previous.get("revision")
+    if type(revision) is not int or revision < 1:
+        raise DataCorruptionError("invalid plugin conversation revision")
+    state = {**previous, **current, "receipts": {**old_receipts, **new_receipts},
+             "revision": revision + (updated.to_dict() != before)}
+    return replace(updated, metadata={**updated.metadata, "plugin_host_v2": state})
 
 
 # LLM: 原线程元数据与通道绑定唯一存储；身份校验与扩展合并在类外小函数，仍在同一文件锁内守住 CAS，不建立第二状态源。
@@ -675,3 +703,22 @@ def _thread_learning_source(value: object) -> dict[str, Any]:
     from .learning_source import thread_source_projection
 
     return thread_source_projection(value) or {}
+
+
+# LLM: 只新增无通道绑定的精确线程；复用原JSON锁/私有原子写，任何既有或损坏文件均不覆盖，调用方负责授权与幂等。
+# 函数用途: 给宿主领域适配器提供不伪造channel绑定的线程创建钩子。
+def create_thread_atomic(threads: ThreadStore, thread: ConversationThread) -> ConversationThread:
+    path = threads.storage.thread_path(thread.thread_id)
+
+    # LLM: 检查与落盘在原per-path锁内，空JSON、坏JSON和链接也不是可覆盖的空槽。
+    # 函数用途: 只在路径确实不存在时返回新线程内容。
+    def create(payload: dict) -> dict:
+        if payload or path.exists() or path.is_symlink():
+            raise FileExistsError("conversation thread already exists")
+        return thread.to_dict()
+
+    try:
+        result = update_json_file_atomic(path, create)
+        return ConversationThread.from_dict(result)
+    finally:
+        _drop_cached_thread(path)
