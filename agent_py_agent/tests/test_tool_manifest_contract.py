@@ -139,6 +139,10 @@ def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path):
     result = registry.tools["list_tools"]._execute_snapshot(snapshot)
     full = json.loads(result.output)
     live = json.loads(result.result_envelope["tool_output_policy"]["live_prompt_output"])
+    policy = result.result_envelope["tool_output_policy"]
+    assert policy["preserve_prompt_output"] is False
+    assert len(policy["live_prompt_output"].encode("utf-8")) <= 12000
+    assert "tool_search" in live["detail_ref"]
     assert live["schema_name"] == "tool_runtime_manifest_live" and live["schema_version"] == 4
     assert all("input_schema" in item for item in full["tools"])
     assert "tool_states" in full["self_context"] and "tool_states" not in live["self_context"]

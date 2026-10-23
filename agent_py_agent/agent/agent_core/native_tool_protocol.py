@@ -94,7 +94,7 @@ def model_turn_tool_choice(params: object, tools: list[dict] | None) -> ToolChoi
     return candidate if isinstance(candidate, ToolChoice) else ToolChoice.auto("ordinary_tool_turn")
 
 
-# LLM: 原生工具只投影同一快照；通用授权文字由 provider_system_instruction 唯一承载，不按工具重复追加，也不改执行权限。
+# LLM: 原生工具只投影同一快照；发现名读取循环有序状态而非set排序，通用授权文字不重复追加，权限仍逐轮过滤。
 # 函数用途: 给模型生成本轮可用的原生工具和精确参数，避免每个工具再复制整段系统规则。
 def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] | None:
     """Render schemas from the immutable runtime snapshot for a native turn."""
@@ -102,14 +102,18 @@ def resolve_native_tools(agent: object, params: object) -> list[dict[str, Any]] 
     if not native_tool_use_active(params):
         return None
     from ..backends.tool_schema import tool_model_specs_to_anthropic_tools
+    from ..conversation.tool_discovery import seed_loop_discovery_order
+    from ..tooling.tool_search_state import ordered_loop_loaded_tool_names
 
     registry = getattr(agent, "tools", None)
     snapshot = getattr(params, "tool_runtime_snapshot", None)
     if registry is None or snapshot is None:
         return None
+    seed_loop_discovery_order(agent, params)
     specs = registry.model_visible_specs(
         allowed_tools=getattr(params, "allowed_tools", None),
-        loaded_tool_names=getattr(params, "loaded_tool_names", None),
+        loaded_tool_names=(ordered_loop_loaded_tool_names(params)
+                           if hasattr(params, "loaded_tool_names") else None),
         runtime_snapshot=snapshot,
     )
     tools = tool_model_specs_to_anthropic_tools(specs)

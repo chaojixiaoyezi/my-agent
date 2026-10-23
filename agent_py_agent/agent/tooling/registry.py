@@ -249,8 +249,8 @@ class ListToolsTool(BaseTool):
             json.dumps(payload, ensure_ascii=False),
             result_envelope={
                 "tool_output_policy": {
-                    "preserve_prompt_output": True,
-                    "live_prompt_output": json.dumps(live_payload, ensure_ascii=False),
+                    "preserve_prompt_output": False,
+                    "live_prompt_output": json.dumps(live_payload, ensure_ascii=False, separators=(",", ":")),
                 }
             },
         )
@@ -456,7 +456,7 @@ def _resolve_tool_search_names(registry: Any, snapshot: ToolRuntimeSnapshot, nam
     return specs, not_found, unavailable
 
 
-# LLM: 检索只消费授权快照中的可见 deferred 定义；返回真实分数，不把弱命中伪造成加载。
+# LLM: 检索只消费授权快照中的可见deferred定义；索引补原生创作的双语能力别名，不改Schema、执行身份或权限。
 # 函数用途: 提取同一 retriever 的带分候选，供搜索回执决定是否自动加载。
 def _deferred_tool_search_hits(registry: Any, query: str, snapshot: ToolRuntimeSnapshot, limit: int, category: str):
     extra, _declared = _extra_deferred_names(registry, snapshot, None)
@@ -465,8 +465,18 @@ def _deferred_tool_search_hits(registry: Any, query: str, snapshot: ToolRuntimeS
              and (runtime.model_spec.category in registry.catalog_deferred_categories or runtime.model_spec.name in extra)
              and (not category or runtime.model_spec.category == category)]
     by_name = {spec.name: spec for spec in specs}
-    return [(by_name[hit.name], hit.score) for hit in registry.retriever.search(query, specs, limit)
+    indexed = [_tool_search_index_spec(spec) for spec in specs]
+    return [(by_name[hit.name], hit.score) for hit in registry.retriever.search(query, indexed, limit)
             if hit.name in by_name] if specs else []
+
+
+# LLM: 仅生成检索投影，不热改工具实例或原生定义；能力别名不是查询路由，仍由同一retriever评分和快照过滤。
+# 函数用途: 补全原生脚本/工作流的Skill组合创作检索词。
+def _tool_search_index_spec(spec: ToolModelSpec) -> ToolModelSpec:
+    aliases = {"scripts": ("script", "脚本", "skill", "workflow", "工作流"),
+               "workflows": ("workflow", "工作流", "skill", "script", "脚本")}
+    words = aliases.get(spec.name, ())
+    return replace(spec, hints=replace(spec.hints, keywords=(*spec.keywords, *words))) if words else spec
 
 
 # LLM: 短卡与 native 定义共用同一 ToolModelSpec，哈希是正式规范 Schema 的哈希，不另生成定义。
@@ -484,13 +494,13 @@ def _compact_tool_purpose(runtime: ToolRuntime | ToolModelSpec) -> str:
     return re.split(r"(?<=[。！？.!?])\s*|\n", text.strip(), maxsplit=1)[0][:90]
 
 
-# LLM: v4 短目录保留同一快照的权限、身份、不可用事实和详情入口，删去重复 tool_states，不产生新授权。
+# LLM: v4短目录保留同一快照的权限、身份、全部工具及详情入口，短用途与紧凑JSON控制live字节，完整定义留档。
 # 函数用途: 从完整 manifest 生成工具短卡目录，全文仍由原输出归档。
 def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntimeSnapshot,
                                 direct_tool_names: set[str]) -> dict[str, object]:
     executable = set(payload.get("executable_tools") or [])
     compact_tools = [{"name": item["name"], "category": item.get("category", "general"),
-                      "purpose": _compact_tool_purpose(snapshot.runtime(item["name"])),
+                      "purpose": _compact_tool_purpose(snapshot.runtime(item["name"]))[:36],
                       "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable"}
                      for item in payload.get("tools", []) if item["name"] in executable]
     return {
@@ -504,6 +514,7 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
                          if key in {"schema_version", "run_id", "owner_type", "scope", "permissions", "identity", "filesystem", "network"}},
         "unavailable_tools": payload.get("unavailable_tools") or [],
         "tools": compact_tools,
+        "detail_ref": "tool_search(names=[需要详情的准确工具名])",
         "detail_policy": {"tool_search": {"query": "按工具名或能力搜索", "names": "按精确名字批量加载原生Schema"},
                           "self_map": {"section": "tools", "item": "需要详情的工具名"},
                           "read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},

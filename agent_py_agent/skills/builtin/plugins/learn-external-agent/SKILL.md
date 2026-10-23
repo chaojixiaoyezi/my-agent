@@ -24,7 +24,7 @@ tools_required: [skill_search, read_file, list_files, write_file, run_command, w
 6. **定形态**：
    - 默认做能力包；离线、自带就能跑的小工具放进包里（`tools/` 或 `checks/`）。
    - 只有要联网、要账号、要常驻服务的工具做成插件；插件第一期只能做文件型 v6 包，写法见内置技能 `write-my-agent-plugin`。
-   - 用户明说要“内部技能”才做内部技能，而且只总结你自己的做法和经验（让自学习“总结一下”），不搬外部原文。
+   - 用户明说要“内部技能”才做内部技能，而且只总结你自己的做法和经验（让自学习“总结一下”），不搬外部原文。若用户要项目普通 Skill，规范位置是已授权工作区的 `.agents/skills/<skill-name>/SKILL.md`，按 `writing-skills` 的对应档位写入和校验，不为普通 Skill 自动打包。
 7. **写包**（目录放在任务工作区里，结构见 [包的结构](references/pack-layout.md)）：
    - 入口文档 `CAPABILITY.md`：适合什么、不适合什么、怎么用、方法目录；
    - 写 `declaration` 时，`summary`、`capability.description`、`capability.keywords` 都用你和用户对话时用的语言写；原项目是另一种语言时两种都写（如中文说明、中英文关键词“文档翻译”“document translation”），让目录展示和关键词推荐匹配用户的说法。

@@ -16,6 +16,17 @@ def ordered_tool_names(value: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(sorted(names) if isinstance(value, (set, frozenset)) else names))
 
 
+# LLM: 只读循环有序状态及原快照；已从loaded集合移除的名字不会被历史恢复，缺序列时才稳定排序旧set。
+# 函数用途: 在冻结循环参数的原可变状态中读取发现顺序，旧set只作确定性兜底。
+def ordered_loop_loaded_tool_names(params: object) -> tuple[str, ...]:
+    current = ordered_tool_names(getattr(params, "loaded_tool_names", ()))
+    state = getattr(params, "live_archive_state", {})
+    order = ordered_tool_names(state.get("loaded_tool_order", ())) if isinstance(state, dict) else ()
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    seed = ordered_tool_names(getattr(snapshot, "loaded_tool_names", ()))
+    return tuple(name for name in ordered_tool_names([*order, *seed, *current]) if name in current)
+
+
 # LLM: 带轮号记录按原顺序累计，无轮号只读精确尾项；纯展示事实不改变工具权限或写线程。
 # 函数用途: 恢复去重但不排序的真实工具发现序列。
 def ordered_carried_loaded_tool_names(records: list[dict[str, object]]) -> tuple[str, ...]:

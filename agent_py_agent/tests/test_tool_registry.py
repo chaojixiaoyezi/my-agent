@@ -120,6 +120,9 @@ def test_chinese_requests_do_not_load_unrelated_administration(registry, query):
     assert not {"restart_gateway", "manage_models"}.intersection(loaded)
     if "skill" in query:
         assert set(loaded).intersection({"skill_search", "workflows", "scripts", "skill_transfer", "skill_summarize"})
+        if "workflow" in query:
+            assert {"workflows", "scripts"} <= set(loaded)
+            assert not {"schedule", "watch_stream"}.intersection(loaded)
     else:
         assert not loaded
     text = registry.render_recommended_tools_section(query)

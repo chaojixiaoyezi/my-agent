@@ -217,11 +217,14 @@ def _interpreter_prefixes(interpreter: PluginInterpreterPaths | None) -> tuple[P
     return (_required_directory(executable.parents[1]),)
 
 
-# LLM: Python 前缀只来自当前 Gateway 解释器报告的 sys.prefix/sys.base_prefix；保留原路径与 realpath，避免符号链接别名在家目录拒读下失效。
-# 函数用途: 返回 Python 虚拟环境和基础解释器的已存在安装目录及真实路径。
+# LLM: 复用脚本runner的解释器安装根解析，额外严格核验prefix/base_prefix并保留别名；缺失根仍失败关闭，不接受模型路径。
+# 函数用途: 让插件与脚本挂载同一Python运行时，兼容便携发行版和符号链接。
 def _python_runtime_prefixes() -> tuple[Path, ...]:
+    from .workflows.script_runner import _interpreter_runtime
+
+    _executable, runtime_roots = _interpreter_runtime("python3")
     prefixes = []
-    for value in (sys.prefix, sys.base_prefix):
+    for value in (sys.prefix, sys.base_prefix, *runtime_roots):
         prefixes.extend(_read_directory_paths(value))
     return tuple(dict.fromkeys(prefixes))
 

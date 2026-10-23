@@ -3,7 +3,11 @@
 from dataclasses import replace
 
 from ..settings.reasoning_effort import run_thread_id
-from ..tooling.tool_search_state import ordered_carried_loaded_tool_names, ordered_tool_names
+from ..tooling.tool_search_state import (
+    ordered_carried_loaded_tool_names,
+    ordered_loop_loaded_tool_names,
+    ordered_tool_names,
+)
 
 
 # LLM: 新序列保留首次发现顺序，旧集合使用统一稳定兜底；损坏字段不变成新工具，授权仍由当前快照过滤。
@@ -12,15 +16,31 @@ def normalized_loaded_tools(value: object) -> tuple[str, ...]:
     return ordered_tool_names(value)
 
 
-# LLM: 与路由身份共用子线程优先级；无线程或尚未创建时不借用其它线程、归档或Agent集合。
-# 函数用途: 为新回合读取本线程已加载工具名。
+# LLM: 兼容旧set读口；真实顺序只从同一线程的正式字段读取，不改变授权。
+# 函数用途: 为旧调用方返回本线程已加载工具名集合。
 def thread_loaded_tools(agent: object, params: object) -> set[str]:
+    return set(ordered_thread_loaded_tools(agent, params))
+
+
+# LLM: 与路由身份共用子线程优先级；无线程或尚未创建时不借用其它线程、归档或Agent集合。
+# 函数用途: 为新回合读取本线程的首次发现顺序。
+def ordered_thread_loaded_tools(agent: object, params: object) -> tuple[str, ...]:
     thread_id = run_thread_id(params)
     store = getattr(agent, "conversation_store", None)
     if not thread_id or store is None:
-        return set()
+        return ()
     thread = store.threads.load(thread_id)
-    return set(normalized_loaded_tools(getattr(thread, "loaded_tool_names", ())))
+    return normalized_loaded_tools(getattr(thread, "loaded_tool_names", ()))
+
+
+# LLM: 每个循环仅在首次渲染时取本线程顺序；只写原展示状态，名称仍由loaded set及当前授权快照过滤。
+# 函数用途: 防止跨回合重建的旧集合把持久发现顺序重新按字母排列。
+def seed_loop_discovery_order(agent: object, params: object) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict) and "loaded_tool_order" not in state:
+        state["loaded_tool_order"] = ordered_tool_names([
+            *ordered_thread_loaded_tools(agent, params), *ordered_loop_loaded_tool_names(params),
+        ])
 
 
 # LLM: typed 发现按顺序原子写所属线程；独立 metadata 历史只增不减，活跃字段可由显式边界另选，缺线程不新建。

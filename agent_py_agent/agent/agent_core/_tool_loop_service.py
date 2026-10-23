@@ -2660,12 +2660,19 @@ def _optional_result_hints(agent, record: ToolCallRecordParams, archive_record: 
     return "".join("\n" + hint for hint in hints if hint)
 
 
-# LLM: 复用线程/Compact的正式搜索与凭据信封投影，只更新当前循环展示集合；不授予权限或写线程账。
-# 函数用途: 在下一次模型调用前展示刚发现的工具及凭据消费工具 web_fetch，与跨轮持久化规则同源。
+# LLM: 复用正式搜索/凭据信封的有序投影；顺序保存在原live_archive_state中随replace续轮，旧set读口不变，不授予权限。
+# 函数用途: 在下一模型调用前按首次发现顺序追加Schema，不让集合排序改写既有前缀。
 def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[str, object]) -> None:
-    from ..tooling.tool_search_state import _carried_loaded_tool_names
+    from ..tooling.tool_search_state import (
+        ordered_carried_loaded_tool_names,
+        ordered_loop_loaded_tool_names,
+    )
 
-    params.loaded_tool_names.update(_carried_loaded_tool_names(archive_record))
+    names = ordered_carried_loaded_tool_names([archive_record])
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        state["loaded_tool_order"] = tuple(dict.fromkeys((*ordered_loop_loaded_tool_names(params), *names)))
+    params.loaded_tool_names.update(names)
 
 
 # LLM: Native history must carry the reducer output, never the raw executor projection; otherwise
