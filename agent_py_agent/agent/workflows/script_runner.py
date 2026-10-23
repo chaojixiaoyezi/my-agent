@@ -220,6 +220,31 @@ def parse_script_output(stdout, contract):
     return output, ''
 
 
+# LLM: Linux 便携式发行版 runtime 位于 /app/.my-agent/releases/.../runtime（常经 current 软链进入），不在 bwrap 默认 /usr 只读根内；
+#   必须将已解析的 prefix/base_prefix 及解释器安装根作为 public_read_roots 挂入沙箱，并对齐沙箱内可达的解释器路径。
+# 函数用途: 解析脚本解释器可执行文件路径及沙箱所需的只读运行时根目录。
+def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]]:
+    if interpreter != 'python3':
+        return shutil.which(interpreter, path=os.defpath), ()
+    if not sys.executable:
+        return None, ()
+    resolved_exec = Path(sys.executable).expanduser().resolve(strict=False)
+    prefix_dir = Path(sys.prefix).expanduser().resolve(strict=False)
+    roots: list[Path] = []
+    for raw in (prefix_dir, Path(sys.base_prefix).expanduser().resolve(strict=False), resolved_exec.parent.parent):
+        if raw.is_dir() and raw not in roots:
+            roots.append(raw)
+    candidate = prefix_dir / 'bin' / Path(sys.executable).name
+    executable = str(resolved_exec)
+    if candidate.is_file() and not candidate.is_symlink():
+        executable = str(candidate)
+    elif candidate.is_symlink():
+        target = Path(os.path.normpath(os.path.join(str(candidate.parent), os.readlink(candidate))))
+        if any(target.is_relative_to(r) for r in roots):
+            executable = str(candidate)
+    return executable, tuple(roots)
+
+
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。
 # 类用途: 按 Owner 的脚本配置执行 Python、bash 或 sh，且不调用任何模型。
 class ScriptRunner:
@@ -238,7 +263,7 @@ class ScriptRunner:
         interpreter = metadata.get('interpreter', 'python3')
         if interpreter not in ('python3', 'bash', 'sh'):
             raise ValueError('仅支持 python3、bash、sh')
-        executable = sys.executable if interpreter == 'python3' else shutil.which(interpreter, path=os.defpath)
+        executable, runtime_read_roots = _interpreter_runtime(interpreter)
         if not executable:
             raise ValueError('解释器不可用')
         timeout = float(metadata.get('timeout_seconds', 30) if timeout_seconds is None else timeout_seconds)
@@ -257,7 +282,7 @@ class ScriptRunner:
             if self.use_sandbox:
                 sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
                     attempt_view=folder, staging_root=folder, shared_workspace=self.owner_home, owner_home=self.owner_home,
-                    extra_write_roots=(folder,), implicit_attempt_write_roots=True,
+                    extra_write_roots=(folder,), public_read_roots=runtime_read_roots, implicit_attempt_write_roots=True,
                     network_access=_network_access(metadata, network_access)))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     command = sandbox.build_argv(command)

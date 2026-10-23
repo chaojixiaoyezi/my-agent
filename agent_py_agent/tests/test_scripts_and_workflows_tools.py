@@ -612,3 +612,46 @@ def test_workflow_inputs_condition_pause_and_workspace_skill_discovery(api, tmp_
     assert direct['status'] == 'succeeded'
     assert [s['status'] for s in direct['steps']] == ['skipped', 'succeeded', 'succeeded']
     assert direct['final_output'] == {'deployed': 'deepseek-r1'}
+
+
+# LLM: Linux便携式runtime不在/usr只读根内，ScriptRunner必须将解析后的prefix/base_prefix作为public_read_roots挂入AttemptSandboxSpec。
+# 函数用途: 回归Linux发行版软链runtime在bwrap沙箱内执行脚本时的只读挂载与可执行路径解析。
+def test_script_runner_mounts_portable_python_runtime_roots(api, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from agent_py_agent.agent.workflows import script_runner
+
+    releases_rt = tmp_path / 'releases' / 'v7' / 'runtime'
+    (releases_rt / 'bin').mkdir(parents=True)
+    real_bin = releases_rt / 'bin' / 'python3.11'
+    real_bin.write_text('#!/bin/sh\n')
+    real_bin.chmod(0o755)
+    (releases_rt / 'bin' / 'python3').symlink_to('python3.11')
+    current_link = tmp_path / 'current'
+    current_link.symlink_to(tmp_path / 'releases' / 'v7')
+
+    monkeypatch.setattr(script_runner.sys, 'executable', str(current_link / 'runtime' / 'bin' / 'python3'))
+    monkeypatch.setattr(script_runner.sys, 'prefix', str(releases_rt))
+    monkeypatch.setattr(script_runner.sys, 'base_prefix', str(releases_rt))
+
+    exe, roots = script_runner._interpreter_runtime('python3')
+    assert Path(exe).parent == (releases_rt / 'bin').resolve(strict=False)
+    assert releases_rt.resolve(strict=False) in roots
+
+    captured_specs = []
+    orig_sandbox = script_runner.AttemptExecutionSandbox
+
+    class _SpySandbox(orig_sandbox):
+        def __init__(self, spec):
+            captured_specs.append(spec)
+            super().__init__(spec)
+
+    monkeypatch.setattr(script_runner, 'AttemptExecutionSandbox', _SpySandbox)
+    monkeypatch.setattr(script_runner, '_can_apply_sandbox', lambda *a, **k: False)
+    owner = tmp_path / 'owner'
+    register(api[0](owner))
+    runner = script_runner.ScriptRunner(owner, use_sandbox=True)
+    with runner._prepare('collect', {}, 10, None, None):
+        pass
+    assert len(captured_specs) == 1
+    assert releases_rt.resolve(strict=False) in captured_specs[0].public_read_roots
