@@ -34,58 +34,72 @@ _JSON_OUTPUT_TYPES = {
     'string': (str,), 'integer': (int,), 'number': (int, float),
     'boolean': (bool,), 'object': (dict,), 'array': (list,), 'null': (type(None),),
 }
-_PYTHON_GUARD_CODE = """import errno, json, os, sys
-from pathlib import Path
-cfg = json.loads(os.environ.pop("MY_AGENT_SCRIPT_GUARD_JSON", "{}"))
-entrypoint = sys.argv.pop(1)
-sys.argv[0] = entrypoint
-read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
-write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
-denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
-allow_net = bool(cfg.get("network_access", False))
-block_subproc = bool(cfg.get("block_subprocess", False))
+_PYTHON_GUARD_CODE = """def _init_guard():
+    import errno, json, os, sys, types
+    from pathlib import Path
+    cfg = json.loads(os.environ.pop("MY_AGENT_SCRIPT_GUARD_JSON", "{}"))
+    entrypoint = sys.argv.pop(1)
+    sys.argv[0] = entrypoint
+    read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
+    write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
+    denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
+    allow_net = bool(cfg.get("network_access", False))
+    block_subproc = bool(cfg.get("block_subprocess", False))
+    fsdecode = os.fsdecode
+    perm_err = PermissionError
+    eacces = errno.EACCES
+    w_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 
-def _under(target, roots):
-    return any(target == r or r in target.parents for r in roots)
+    def _under(target, roots):
+        return any(target == r or r in target.parents for r in roots)
 
-def _check_read(raw):
-    target = Path(os.fsdecode(raw)).expanduser().resolve(strict=False)
-    if _under(target, denied_roots) and not _under(target, read_roots):
-        raise PermissionError(errno.EACCES, "Permission denied", str(raw))
+    def _check_read(raw):
+        target = Path(fsdecode(raw)).expanduser().resolve(strict=False)
+        if _under(target, denied_roots) and not _under(target, read_roots):
+            raise perm_err(eacces, "Permission denied", str(raw))
 
-def _check_write(raw):
-    target = Path(os.fsdecode(raw)).expanduser().resolve(strict=False)
-    if not _under(target, write_roots):
-        raise PermissionError(errno.EACCES, "Permission denied", str(raw))
+    def _check_write(raw):
+        target = Path(fsdecode(raw)).expanduser().resolve(strict=False)
+        if not _under(target, write_roots):
+            raise perm_err(eacces, "Permission denied", str(raw))
 
-def _audit(event, args):
-    if not allow_net and event in ("socket.connect", "socket.bind", "socket.sendto", "socket.getaddrinfo"):
-        raise PermissionError(errno.EACCES, "Network access denied")
-    if block_subproc and event in ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty", "os.spawn"):
-        raise PermissionError(errno.EACCES, "Subprocess execution denied without inner OS sandbox")
-    if event == "open":
-        path_arg, mode, flags = args[0], args[1], args[2]
-        if isinstance(path_arg, int):
-            return
-        is_w = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)) or any(
-            c in str(mode or "") for c in ("w", "a", "+", "x")
-        )
-        (_check_write if is_w else _check_read)(path_arg)
-    elif event in ("os.mkdir", "os.remove", "os.unlink", "os.rmdir", "os.chmod", "os.chown", "os.truncate", "os.utime"):
-        if args and not isinstance(args[0], int):
-            _check_write(args[0])
-    elif event in ("os.rename", "os.replace", "os.symlink", "os.link"):
-        for item in args[:2]:
-            if not isinstance(item, int):
-                _check_write(item)
-    elif event in ("os.listdir", "os.scandir", "os.readlink"):
-        if args and not isinstance(args[0], int):
-            _check_read(args[0])
+    def _audit(event, args):
+        if not allow_net and event in ("socket.connect", "socket.bind", "socket.sendto", "socket.getaddrinfo"):
+            raise perm_err(eacces, "Network access denied")
+        if block_subproc and event in (
+            "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn",
+            "os.fork", "os.forkpty", "os.spawn", "ctypes.dlopen", "gc.get_objects", "gc.get_referrers",
+        ):
+            raise perm_err(eacces, "Subprocess execution denied without inner OS sandbox")
+        if event == "open":
+            path_arg, mode, flags = args[0], args[1], args[2]
+            if isinstance(path_arg, int):
+                return
+            is_w = bool(flags & w_flags) or any(c in str(mode or "") for c in ("w", "a", "+", "x"))
+            (_check_write if is_w else _check_read)(path_arg)
+        elif event in ("os.mkdir", "os.remove", "os.unlink", "os.rmdir", "os.chmod", "os.chown", "os.truncate", "os.utime"):
+            if args and not isinstance(args[0], int):
+                _check_write(args[0])
+        elif event in ("os.rename", "os.replace", "os.symlink", "os.link"):
+            for item in args[:2]:
+                if not isinstance(item, int):
+                    _check_write(item)
+        elif event in ("os.listdir", "os.scandir", "os.readlink"):
+            if args and not isinstance(args[0], int):
+                _check_read(args[0])
 
-with open(entrypoint, "rb") as _f:
-    _code = compile(_f.read(), entrypoint, "exec")
-sys.addaudithook(_audit)
-exec(_code, {"__name__": "__main__", "__file__": entrypoint, "__builtins__": __builtins__})
+    with open(entrypoint, "rb") as _f:
+        code = compile(_f.read(), entrypoint, "exec")
+    main_mod = types.ModuleType("__main__")
+    main_mod.__file__ = entrypoint
+    main_mod.__builtins__ = __builtins__
+    sys.modules["__main__"] = main_mod
+    sys.addaudithook(_audit)
+    return code, main_mod.__dict__
+
+_code, _main_globals = _init_guard()
+del _init_guard
+exec(_code, _main_globals)
 """
 
 
@@ -128,7 +142,7 @@ def _outer_seatbelt_active():
         return False
     try:
         res = subprocess.run([shutil.which('sandbox-exec') or '/usr/bin/sandbox-exec', '-p',
-                              '(version 1)(allow default)', '/usr/bin/true'],
+                              '(version 1)(allow default)(deny file-write* (literal "/dev/null"))', '/usr/bin/true'],
                              capture_output=True, timeout=5, check=False)
         return res.returncode == 71 and b'sandbox_apply: Operation not permitted' in (res.stderr or b'')
     except (OSError, subprocess.SubprocessError):
