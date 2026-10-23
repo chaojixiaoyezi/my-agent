@@ -242,7 +242,7 @@ def _check_static_scope(call: Call, grant: dict) -> None:
         raise HostAPIError("CAPABILITY_DENIED", 403)
 
 
-# LLM: 只读也不能信任错误C适配器给出的另一个owner，禁止冷读取初始化目录。
+# LLM: 只读也不能信任错误C适配器；已登记普通账号以C原规范home为准，不把它重路由到旧owner目录。
 # 函数用途: 核对受信resolver结果的身份、来源、规范home和用户修订。
 def _check_owner_context(context, binding: VerifiedPluginBinding, root) -> None:
     if (not isinstance(context, (OwnerReadContext, OwnerResolutionResult))
@@ -251,8 +251,18 @@ def _check_owner_context(context, binding: VerifiedPluginBinding, root) -> None:
             or context.owner_home.identity != context.identity or context.owner_home.root != root
             or type(context.user_revision) is not int or context.user_revision < 1):
         raise HostAPIError("TARGET_DENIED", 403)
+    from ..user_space.local_user_store import LocalUserStore
     from ..user_space.owner_resolver import resolve_owner_home
-    if context.owner_home != resolve_owner_home(root, context.identity):
+
+    users = LocalUserStore(root)
+    registered = users.get(context.identity.owner_id)
+    expected = resolve_owner_home(root, context.identity)
+    if registered is not None:
+        user = users.require_enabled(context.identity.owner_id, context.user_revision)
+        if user.owner != context.identity:
+            raise HostAPIError("TARGET_DENIED", 403)
+        expected = users.owner_home(user.user_id)
+    if context.owner_home != expected:
         raise HostAPIError("TARGET_DENIED", 403)
 
 

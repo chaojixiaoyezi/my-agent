@@ -287,3 +287,61 @@ class OwnerContextFactory:
             with self.store.locked(("local_users", f"{context.identity.owner_id}.json")):
                 self.check(context)
                 yield
+
+
+# LLM: A/C只在此转换契约；鲜活A来源仍是权威，C继续检查enabled/策略，不复制管理员执行主体。
+# 类用途: 使真实IngressIssuer能使用原C普通账号冷解析器。
+class IngressOwnerResolver:
+    # LLM: 构造只登记原用户存储，不触发ensure或创建目录。
+    # 函数用途: 绑定同一个C账号库及其受限工厂。
+    def __init__(self, store):
+        self.store = store
+        self.factory = OwnerContextFactory(store, self._call)
+
+    # LLM: 只接受真实A来源、原授权及能力交集完全一致的binding；DTO副本不是执行资格。
+    # 函数用途: 将A已核验的范围转换为C受限读取/执行投影。
+    def _call(self, binding):
+        import hashlib
+
+        from . import contracts
+        from .authorization import IngressIssuer
+        from .schemas import canonical_json, thaw
+
+        if not isinstance(binding, contracts.VerifiedPluginBinding) or not isinstance(binding.source._issuer, IngressIssuer):
+            raise HostAPIError("SOURCE_INVALID", 403)
+        issuer = binding.source._issuer
+        fixed, grant, caps = issuer._live(binding.source)
+        digest = hashlib.sha256(canonical_json({"grant": grant, "capabilities": sorted(caps)}).encode()).hexdigest()
+        if (thaw(binding.grant) != grant or binding.capabilities != caps or binding.policy_digest != digest
+                or binding.actor != fixed.activation_ref.owner().identity
+                or binding.effective_owner.provider != "local" or binding.effective_owner.owner_kind != "user"):
+            raise HostAPIError("SOURCE_INVALID", 403)
+        if self.store.root != fixed.activation_ref.owner().root:
+            raise HostAPIError("TARGET_DENIED", 403)
+        source = PluginSourceBinding(binding.installation_ref, binding.package_sha256, binding.activation_id,
+                                     binding.grant_revision, binding.actor)
+        projected = LocalUserGrant(source, caps, frozenset(grant["target_user_ids"]),
+            frozenset(grant["manageable_user_ids"]), frozenset(grant["creatable_user_ids"]),
+            LocalUserQuotaLimits.parse(grant["quota_ceiling"]), ExecutionAllowlist(frozenset(grant["execution"]["tool_names"])))
+        return AuthorizedLocalCall(projected, "chat.send", as_user=binding.effective_owner.owner_id)
+
+    # LLM: 每次重新冷读C账号及策略；原A继续核对身份、home和当前user_revision。
+    # 函数用途: 返回A合同要求的同来源读取上下文。
+    def resolve_read(self, binding):
+        from .contracts import OwnerReadContext
+
+        context = self.factory.resolve_read_context(binding)
+        return OwnerReadContext(context.identity, context.owner_home, binding, context.user_revision)
+
+    # LLM: 只投影C已经收窄的根和工具；网络仍固定关闭，A预算不得放宽，模型/工具运行不在此创建。
+    # 函数用途: 返回A合同要求的普通用户受限执行上下文。
+    def resolve_execution(self, binding):
+        from . import contracts
+
+        context = self.factory.resolve_execution_context(binding)
+        source = context.execution_policy
+        budgets = {key: value for key, value in binding.grant["execution"].items() if key.startswith("max_")}
+        policy = contracts.RestrictedExecutionPolicy(source.read_roots, source.write_roots, source.allowed_tools,
+                                                      False, budgets, source.policy_digest)
+        return contracts.OwnerResolutionResult(context.identity, context.owner_home, contracts.RestrictedPermission(),
+                                                policy, context.user_revision, binding)

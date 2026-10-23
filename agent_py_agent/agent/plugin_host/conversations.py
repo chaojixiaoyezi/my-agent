@@ -16,6 +16,7 @@ from ..conversation.store_threads import create_thread_atomic
 from ..gateway_parts.io import locked_file_transition
 from . import contracts
 from .action_specs import action_spec
+from .cursors import CursorCodec
 from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, integer, text, thaw, validate_object
 
@@ -61,6 +62,7 @@ class BoundCursor:
     # 函数用途: 绑定本次调用和不含cursor的有效过滤参数。
     def __init__(self, codec, authorized, context, filters):
         self.codec = codec
+        self.authorized = authorized
         binding = authorized.binding
         self.binding = digest([context.owner_home.owner_id, binding.installation_ref, binding.activation_id,
                                binding.package_sha256, binding.grant_revision, context.user_revision,
@@ -72,7 +74,8 @@ class BoundCursor:
         if token is None:
             return None
         try:
-            row = self.codec.decode(token)
+            row = (thaw(self.codec.decode(self.authorized, token, {"binding": self.binding}).position)
+                   if isinstance(self.codec, CursorCodec) else self.codec.decode(token))
             if (not isinstance(row, dict) or row.get("binding") != self.binding or row.get("v") != 1
                     or type(row.get("expires")) not in (int, float) or row["expires"] <= time.time()
                     or type(row.get("offset")) is not int or row["offset"] < 0 or not isinstance(row.get("anchor"), dict)):
@@ -84,7 +87,9 @@ class BoundCursor:
     # LLM: 续页不滑动延长期限；返回长度须满足A0的opaque游标上限。
     # 函数用途: 生成绑定当前快照的下一页游标。
     def encode(self, anchor, offset, expires):
-        token = self.codec.encode({"v": 1, "binding": self.binding, "anchor": anchor, "offset": offset, "expires": expires})
+        row = {"v": 1, "binding": self.binding, "anchor": anchor, "offset": offset, "expires": expires}
+        token = (self.codec.encode(self.authorized, digest(anchor), row, {"binding": self.binding})
+                 if isinstance(self.codec, CursorCodec) else self.codec.encode(row))
         if not isinstance(token, str) or not 0 < len(token) <= 2048:
             raise HostAPIError("HOST_NOT_READY", 503)
         return token
@@ -156,16 +161,24 @@ def domain_payload(call):
 # LLM: 宿主组合根注入原owner Store解析器、MAC和默认会话事实；不初始化Agent，不另建会话库。
 # 类用途: 接收已授权调用的会话领域适配器。
 class ConversationDomain:
+    actions = frozenset({*("conversations.threads." + name for name in _THREAD_ACTIONS),
+                         "conversations.messages.list", "conversations.messages.send",
+                         "conversations.requests.poll", "conversations.requests.cancel", "conversations.requests.stream"})
+
     # LLM: 构造不读写业务状态；store_resolver应沿owner_conversation_store_from_config原规范路径打开。
     # 函数用途: 绑定原存储、游标与默认线程观察入口。
-    def __init__(self, store_resolver, cursor_codec, *, default_thread):
+    def __init__(self, store_resolver, cursor_codec, *, default_thread, request_ports=None):
         self.store_resolver, self.cursor_codec, self.default_thread = store_resolver, cursor_codec, default_thread
+        self.request_ports = request_ports
 
     # LLM: 读写前及返回前重核A0；分发只接受本领域固定七个动作，禁止动态执行方法。
     # 函数用途: 执行线程生命周期或完整历史查询。
     def call(self, authorized):
         context = read_context(authorized)
         action = authorized.call.action.removeprefix("conversations.")
+        if action in {"messages.send", "requests.poll", "requests.cancel"}:
+            from .requests import RequestDomain
+            return RequestDomain(self).call(authorized, context)
         caps = authorized.binding.capabilities
         if action == "messages.list":
             required = {"chat.history"}
@@ -193,6 +206,12 @@ class ConversationDomain:
             result = self.mutate(store, action, payload, authorized, context)
         read_context(authorized)
         return result
+
+    # LLM: A流泵消费RequestEvent而不是二次编码bytes；缺宿主端口时不创建后台执行。
+    # 函数用途: 将请求流交给与poll共用的B2读取适配器。
+    def stream(self, authorized):
+        from .streams import request_events
+        return request_events(self, authorized)
 
     # LLM: 不可信ID只经原路径验证；未能证明范围的坏记录也统一404，显式有权者可见损坏但不能覆盖。
     # 函数用途: 取得同owner且授权范围内的真实线程。

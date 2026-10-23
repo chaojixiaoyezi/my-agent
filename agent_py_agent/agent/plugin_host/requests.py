@@ -1,0 +1,333 @@
+# LLM: 请求域只投影原输入、claim和规范终态；不另建执行账本，不把此reader当授权入口。
+# 模块用途: 提供B2请求状态事实读取，供真实授权/游标适配器组合。
+from __future__ import annotations
+
+import json
+import math
+import re
+from datetime import datetime, timezone
+
+from ..common.nofollow_fs import read_bytes_beneath
+from ..common.opaque_id import validate_opaque_id
+from ..gateway_parts import input_delivery_service as inputs
+from ..gateway_parts.io import validated_gateway_request_fingerprint
+from ..gateway_parts.request_owner_binding import frozen_request_owner
+from ..runtime_errors import DataCorruptionError
+from .contracts import project_request_state as project_request_state
+from .errors import HostAPIError
+
+_MAX_RECORD_BYTES = 4 * 1024 * 1024
+
+
+# LLM: 同一次只读快照不建锁/索引、不跟随链接；上限不截断后冒充完整JSON。
+# 函数用途: 严格读取一份宿主原账，明确区分缺失和损坏。
+def _read_record(paths, parts):
+    try:
+        raw = read_bytes_beneath(paths.root, parts, max_bytes=_MAX_RECORD_BYTES,
+                                 require_dir_fd=True, snapshot_retries=2)
+        if raw is None:
+            return None
+        row = json.loads(raw, object_pairs_hook=_unique_fields, parse_constant=_invalid_constant)
+        if type(row) is not dict or not row:
+            raise ValueError("invalid record")
+        return row
+    except (OSError, ValueError, UnicodeError) as error:
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from error
+
+
+# LLM: 存储JSON中的重复键也不能静默覆盖原身份。
+# 函数用途: 拒绝歧义字段。
+def _unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate field")
+        result[key] = value
+    return result
+
+
+# LLM: 非有限常量不属于可信JSON账本。
+# 函数用途: 拒绝NaN/Infinity。
+def _invalid_constant(value):
+    raise ValueError("nonfinite JSON value")
+
+
+# LLM: 原完整prepared digest必须通过，owner和安装检查后才读执行内容；元数据本身不授调用权限。
+# 函数用途: 读取并核对指定scope的原输入回执。
+def _read_receipt(paths, request_id, expected_owner, installation_ref):
+    raw = _read_record(paths, ("input_receipts", request_id + ".json"))
+    if raw is None:
+        raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+    receipt = inputs.GatewayInputReceipt.from_dict(raw)
+    inputs._validate_prepared_request(receipt)
+    if receipt.request_id != request_id:
+        raise DataCorruptionError("input receipt id mismatch")
+    prepared = receipt.prepared_request
+    provenance = prepared.get("metadata", {}).get("plugin_provenance")
+    if (frozen_request_owner(prepared) != expected_owner or type(provenance) is not dict
+            or provenance.get("installation_ref") != installation_ref):
+        raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+    validate_opaque_id(provenance.get("thread_id"), kind="thread")
+    if provenance.get("kind") not in {"chat", "tool", "script", "workflow"}:
+        raise DataCorruptionError("request kind invalid")
+    return receipt, provenance
+
+
+# LLM: 只接受与原input完整摘要一致的请求，不从responses/done/failed推断执行结局。
+# 函数用途: 读取同一请求的当前claim或规范终态。
+def _read_execution(paths, receipt):
+    name = receipt.request_id + ".json"
+    for folder in ("terminal", "processing", "pending"):
+        row = _read_record(paths, ("requests", folder, name))
+        if row is None:
+            continue
+        if row.get("id") != receipt.request_id or not inputs._prepared_input_matches(receipt, row):
+            raise DataCorruptionError("request identity changed")
+        validated_gateway_request_fingerprint(row, receipt.request_id)
+        if folder == "terminal" and row.get("schema_version") != "gateway_terminal_request.v1":
+            raise DataCorruptionError("terminal schema invalid")
+        return row, folder
+    return {}, ""
+
+
+# LLM: 只有原canonical的完整response决定终态；资源停止和用量未观测保持null。
+# 函数用途: 将原终态映射成公开白名单字段。
+def _terminal_view(row):
+    response = row.get("terminal_response")
+    if type(response) is not dict or response.get("id") != row["id"]:
+        raise DataCorruptionError("terminal response missing")
+    status = {"done": "succeeded", "succeeded": "succeeded", "failed": "failed", "cancelled": "cancelled"}.get(row.get("status"))
+    stamp = row.get("completed_at")
+    if (status is None or type(stamp) not in (float, int) or not math.isfinite(stamp)
+            or status == "succeeded" and response.get("ok") is not True):
+        raise DataCorruptionError("terminal status invalid")
+    code = row.get("error_code")
+    # 原canonical writer用空字符串表示无错误；不能把其他falsey类型当成空值。
+    if type(code) is str and code == "":
+        code = None
+    if code is not None and (type(code) is not str or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code)):
+        raise DataCorruptionError("terminal error code invalid")
+    return {"terminal_id": row["id"], "status": status,
+            "completed_at": datetime.fromtimestamp(stamp, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "result_message_ids": [], "error_code": code,
+            "usage": {"input_tokens": None, "output_tokens": None}, "resources_stopped": None}
+
+
+# LLM: 原unknown观察必须匹配同一claim，不让旧attempt的运输未知覆盖新代次。
+# 函数用途: 读取与当前执行代次一致的未知结果标记。
+def _execution_unknown(row):
+    observation = row.get("execution_outcome")
+    return (type(observation) is dict and observation.get("schema_version") == "gateway_execution_outcome.v1"
+            and observation.get("status") == "unknown"
+            and all(observation.get(key) == row.get(key) for key in
+                    ("execution_attempt_id", "lease_epoch", "lease_owner"))
+            and observation.get("request_id") == row.get("id"))
+
+
+# LLM: 这里只映射原claim存在与显式阶段；空文件/丢失队列仍unknown，不制造waiting进度。
+# 函数用途: 把原输入和当前执行观察组装为最小公开状态。
+def _request_facts(receipt, provenance, row, folder):
+    terminal = _terminal_view(row) if folder == "terminal" else None
+    claim_state = "running" if folder == "processing" and row.get("execution_attempt_id") and row.get("lease_epoch") else ""
+    receipt_state = "queued" if folder == "pending" and receipt.state == "queued" else ""
+    if receipt_state and row.get("admission_wait_reason"):
+        receipt_state = "admission_wait"
+    cancel = row.get("cancel_requested") is True
+    state = project_request_state(receipt_state=receipt_state, claim_state=claim_state,
+        cancellation_requested=cancel, canonical_terminal=terminal,
+        execution_unknown=receipt.state == "terminal_unknown" or _execution_unknown(row))
+    return {"request_id": receipt.request_id, "thread_id": provenance["thread_id"], "kind": provenance["kind"],
+            "state": state, "cancel_requested": cancel, "terminal": terminal}
+
+
+# LLM: 只能由授权领域适配器提供owner/安装与原路径；这是事实reader，不是完整poll/公开读取入口。
+# 函数用途: 只读原input、队列、canonical并返回最小状态事实，不创建任何目录或锁文件。
+def read_request_facts(paths, request_id, *, expected_owner, installation_ref):
+    try:
+        validate_opaque_id(request_id, kind="plugin_request")
+    except ValueError as error:
+        raise HostAPIError("INVALID_SCHEMA") from error
+    try:
+        receipt, provenance = _read_receipt(paths, request_id, expected_owner, installation_ref)
+        row, folder = _read_execution(paths, receipt)
+        return _request_facts(receipt, provenance, row, folder)
+    except HostAPIError:
+        raise
+    except (DataCorruptionError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError) as error:
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from error
+
+
+# LLM: 宿主端口只解析已验证上下文；原input/canonical继续是唯一请求权威。
+# 类用途: 把B2公开调用接到B1线程范围及原网关记录。
+class RequestDomain:
+    # LLM: 不创建目录或执行主体，不复制main agent。
+    # 函数用途: 绑定现有会话领域与同一MAC服务。
+    def __init__(self, conversation):
+        self.conversation = conversation
+        self.ports = conversation.request_ports
+        self.codec = conversation.cursor_codec
+
+    # LLM: 每次读写入口消费真实发行对象；端口缺失先拒绝，结果仍由组合根末核。
+    # 函数用途: 分发既有send/poll/cancel动作。
+    def call(self, authorized, context):
+        from ..gateway_parts.plugin_request_source import require_plugin_source
+        from .contracts import DomainResult
+
+        require_plugin_source(authorized)
+        if self.ports is None:
+            raise HostAPIError("HOST_NOT_READY", 503)
+        paths = self.ports.paths_for(context)
+        store = self.conversation.store_resolver(context)
+        if authorized.call.action == "conversations.messages.send":
+            return self.send(authorized, context, paths, store)
+        facts = self.facts(authorized, context, paths, store)
+        if authorized.call.action == "conversations.requests.poll":
+            return DomainResult(200, self.poll(authorized, paths, store, facts))
+        if authorized.call.action == "conversations.requests.cancel":
+            from ..gateway_parts.plugin_request_submission import cancel_message
+            return cancel_message(self, authorized, context, paths, store)
+        raise HostAPIError("UNSUPPORTED_ACTION")
+
+    # LLM: 请求归属先核原回执owner/install，再核当前thread范围和kind权限；chat不包含execute。
+    # 函数用途: 获取当前调用可见的准确请求事实。
+    def facts(self, authorized, context, paths, store):
+        facts = read_request_facts(paths, authorized.call.payload["request_id"],
+            expected_owner=context.identity, installation_ref=authorized.binding.installation_ref)
+        required = "chat" if facts["kind"] == "chat" else "execute"
+        if required not in authorized.binding.capabilities:
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        self.conversation.require_thread(store, facts["thread_id"], authorized, context)
+        receipt, _ = _read_receipt(paths, facts["request_id"], context.identity, authorized.binding.installation_ref)
+        row, _ = _read_execution(paths, receipt)
+        facts["revision"] = request_revision(row)
+        return facts
+
+    # LLM: 无原执行接缝不得把reply-only裸排进main；bounded必须先拿到C当前受限上下文。
+    # 函数用途: 验证线程后沿唯一原输入回执提交消息。
+    def send(self, authorized, context, paths, store):
+        from .contracts import DomainResult, resolve_execution_context
+
+        thread = self.conversation.require_thread(store, authorized.call.payload["thread_id"], authorized, context)
+        if thread.status != "active":
+            raise HostAPIError("THREAD_ARCHIVED", 409)
+        execution = resolve_execution_context(authorized) if authorized.call.payload["tool_policy"] == "bounded" else None
+        if self.ports.prepare_request is None:
+            raise HostAPIError("HOST_NOT_READY", 503)
+        from ..gateway_parts.plugin_request_submission import submit_message
+        request_id = submit_message(authorized, context, execution, paths, self.ports.prepare_request)
+        facts = read_request_facts(paths, request_id, expected_owner=context.identity,
+                                   installation_ref=authorized.binding.installation_ref)
+        return DomainResult(202, {**facts, "event_cursor": None})
+
+    # LLM: 分页引用绑定真实发行对象及request/channel，不跨请求、安装或动作复用。
+    # 函数用途: 解码一条内部分页位置。
+    def position(self, authorized, channel):
+        from .schemas import thaw
+
+        token = authorized.call.payload.get(channel + "_cursor")
+        if token is None:
+            return {}
+        saved = self.codec.decode(authorized, token, {"channel": channel})
+        if saved.snapshot_id != authorized.call.payload["request_id"]:
+            raise HostAPIError("INVALID_SCHEMA")
+        return thaw(saved.position)
+
+    # LLM: 位置只携内部计数和锚点，不放正文或工具秘密。
+    # 函数用途: 签发当前请求的有界MAC游标。
+    def cursor(self, authorized, channel, position):
+        return self.codec.encode(authorized, authorized.call.payload["request_id"], position, {"channel": channel})
+
+    # LLM: 公开状态来自本次原账观察，不伪造历史状态转移或把空回复当成功。
+    # 函数用途: 返回请求状态及可续读的双通道页面。
+    def poll(self, authorized, paths, store, facts):
+        event_position = self.position(authorized, "event")
+        reply_position = self.position(authorized, "reply")
+        receipt, _ = _read_receipt(paths, facts["request_id"], authorized.effective_owner, authorized.binding.installation_ref)
+        rows, reply_position, more = request_replies(store, facts, reply_position)
+        signature = facts["state"]
+        events = []
+        if event_position.get("state") != signature:
+            sequence = event_position.get("sequence", 0) + 1
+            terminal = facts["terminal"]
+            events.append({"event_id": facts["request_id"] + ":" + signature,
+                "sequence": sequence, "created_at": terminal["completed_at"] if terminal else datetime.fromtimestamp(receipt.updated_at, timezone.utc).isoformat().replace("+00:00", "Z"),
+                "kind": "terminal" if terminal else "status", "data": terminal or {"state": signature}})
+            event_position = {"state": signature, "sequence": sequence}
+        return {"request": facts, "events": events, "replies": rows,
+                "event_cursor": self.cursor(authorized, "event", event_position),
+                "reply_cursor": self.cursor(authorized, "reply", reply_position),
+                "has_more_events": False, "has_more_replies": more}
+
+
+# LLM: 只读原canonical JSONL并核冻结前缀；仅自己request的assistant.final，正文按UTF8续页而非截断丢失。
+# 函数用途: 返回一个有界最终回复片段和可重建的内部位置。
+def request_replies(store, facts, position):
+    from .history import (
+        HISTORY_RECORD_MAX_BYTES,
+        _entry,
+        _open,
+        _scan,
+        _verify_current,
+        _visible_content,
+    )
+
+    tid = facts["thread_id"]
+    try:
+        if position.get("anchor"):
+            _verify_current(store, tid, position["anchor"])
+        with _open(store, tid) as handle:
+            through = handle.seek(0, 2)
+            _, _, anchor, bad = _scan(handle, through, tid, 0, {"limit": 1, "max_content_bytes": 1})
+            if bad:
+                raise HostAPIError("STORE_UNAVAILABLE", 503)
+            offset, content_offset = position.get("offset", 0), position.get("content_offset", 0)
+            if not 0 <= offset <= through:
+                raise HostAPIError("CURSOR_EXPIRED", 410)
+            handle.seek(offset)
+            rows = []
+            while handle.tell() < through:
+                start = handle.tell()
+                raw = handle.readline(HISTORY_RECORD_MAX_BYTES + 1)
+                if len(raw) > HISTORY_RECORD_MAX_BYTES:
+                    raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+                if not raw.endswith(b"\n"):
+                    raise HostAPIError("STORE_UNAVAILABLE", 503)
+                entry = _entry(raw, tid)
+                visible = _visible_content(entry)
+                linked = any(entry.metadata.get(key) == facts["request_id"] for key in
+                             ("turn_id", "gateway_request_id", "background_transcript_request_id"))
+                offset = handle.tell()
+                if not linked or visible is None or visible[:2] != ("assistant", "final"):
+                    content_offset = 0
+                    continue
+                text = visible[2].encode("utf-8")
+                if not 0 <= content_offset <= len(text):
+                    raise HostAPIError("CURSOR_EXPIRED", 410)
+                piece = text[content_offset:content_offset + 8192].decode("utf-8", errors="ignore")
+                end = content_offset + len(piece.encode("utf-8"))
+                rows.append({"request_id": facts["request_id"], "message_id": entry.message_id,
+                    "content": piece, "offset_bytes": content_offset, "complete": end == len(text)})
+                offset, content_offset = (offset, 0) if end == len(text) else (start, end)
+                break
+        _verify_current(store, tid, anchor)
+        return rows, {"anchor": anchor, "offset": offset, "content_offset": content_offset}, offset < through
+    except FileNotFoundError:
+        if position:
+            raise HostAPIError("CURSOR_EXPIRED", 410) from None
+        return [], {}, False
+    except HostAPIError:
+        raise
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from None
+
+
+# LLM: revision来自原请求当前代次及cancel/终态事实，不保存第二套可变版本。
+# 函数用途: 为精确请求控制生成有界CAS比较值。
+def request_revision(row):
+    from hashlib import sha256
+
+    from .schemas import canonical_json
+
+    fields = {key: row.get(key) for key in ("id", "execution_attempt_id", "lease_epoch", "lease_owner",
+              "cancel_requested", "schema_version", "status")}
+    return int(sha256(canonical_json(fields).encode()).hexdigest()[:15], 16) + 1
