@@ -94,14 +94,19 @@ def retirement_committed(before, after, operation_id: str) -> bool:
             and after.last_commit.operation_id == retirement_operation(operation_id))
 
 
-# LLM: 模式、路径、包、解释器与精确操作同次冻结，只纯计算，不施加 OS 规则。
+# LLM: 模式、路径、包、解释器与原操作同次冻结；v9强制restricted并将API选择加入原完整确认，不施加OS规则。
 # 函数用途: 统一生成旧代释放后的目标与新授权，兼容和新模式不得分别走旁路。
 def prepare_enable_authorization(context: LegacyEnableContext, entry, runtime):
     identity = authorization_identity(context)
     target = authorization_target(entry, identity.operation_id)
     plan = plan_plugin_environment(target, identity.operation_id,
                                    runtime_fingerprint=runtime.fingerprint if runtime else None)
-    grant = permission_details(target, plan, enable_selection(context), enable_mode(entry, context.legacy_sandbox_default))
+    mode = "restricted" if entry.manifest.host_api_v9 else enable_mode(entry, context.legacy_sandbox_default)
+    grant = permission_details(target, plan, enable_selection(context), mode)
+    if entry.manifest.host_api_v9:
+        from .host_grants import prepare_host_confirmation
+
+        grant = prepare_host_confirmation(context, target, plan, grant)
     return target, plan, grant
 
 

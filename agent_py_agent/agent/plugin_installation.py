@@ -109,7 +109,7 @@ class PluginInstallation:
     legacy_permission_json: str | None = field(default=None, repr=False)
     installation_scope: str = "private"
 
-    # LLM: 最后回执与包/版本/激活匹配；兼容标记须绑定准确旧代，损坏不能补猜授权或配置。
+    # LLM: 最后回执与包/版本/激活匹配；v9额外核固定API授权，兼容标记不能给v9豁免。
     # 函数用途: 校验完整安装事实，不从包自述生成宿主激活状态。
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, PluginManifest) or not isinstance(
@@ -154,6 +154,9 @@ class PluginInstallation:
         from .plugin_permissions.state import validate_legacy_permission
 
         validate_legacy_permission(self)
+        from .plugin_permissions.host_grants import validate_installation_grant
+
+        validate_installation_grant(self)
 
     # LLM: 激活绑定原包/配置/安装版本；内容变体无进程准备阶段，release 的资源要求由 Store 按显式类型裁决。
     # 函数用途: 拒绝拼接不同版本或缺少阶段回执的激活，允许已确认清理后的再次准备。
@@ -198,10 +201,12 @@ class PluginInstallation:
     def activation_id(self) -> str:
         return self.activation.activation_id if self.activation is not None else ""
 
-    # LLM: 引用派生自原提交身份，不新增持久代次，也不包含配置及其摘要；同包卸载重装不能复活旧目录。
+    # LLM: 旧格式保持原提交摘要；v9激活期间引用固定在确认的原安装提交，释放重装后不能复活旧令牌。
     # 函数用途: 为公开目录生成区分不同安装提交的不可逆标记，不授予执行权。
     @property
     def installation_ref(self) -> str:
+        if self.manifest.host_api_v9 and self.activation is not None and self.activation.host_api_grant_json:
+            return load_strict_json(self.activation.host_api_grant_json)["installation_ref"]
         receipt = self.last_commit
         value = (receipt.operation_id, receipt.action, receipt.plugin_id,
                  receipt.package_sha256, receipt.after_revision)

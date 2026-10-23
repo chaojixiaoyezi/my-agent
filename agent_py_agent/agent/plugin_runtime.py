@@ -227,7 +227,7 @@ def _require_legacy_policy_ready(owner, policy) -> None:
 class PluginMCPClient(MCPStdioClient):
     # LLM: 构造冻结宿主继承擦洗来源；明确插件设置/host API 原 native env 保持授权语义，包 effect 不降低危险工具门。
 #   同时 no-follow 创建插件数据目录（有副作用：可能新建目录），经 MY_AGENT_PLUGIN_DATA_DIR 传给子进程；
-#   声明了 host_api=["read"] 的包另获宿主只读 API 地址与令牌（有副作用：登记令牌）。
+#   声明旧read或显式v9的包获得对应宿主API地址与固定激活令牌（有副作用：登记令牌）。
 #   process_sandbox=True（配置 plugin_process_sandbox）时启动命令套进平台沙箱，只可写数据目录，TMPDIR 指向其中的 .tmp；
 #   v8 无视该开关强制沙箱、按清单断网、隐藏 Gateway 家目录，只放行插件目录与安装前缀；
 #   沙箱不可用时这里抛 SandboxUnavailable，调用方应先用 plugin_sandbox_problem 结构化拒绝。
@@ -271,9 +271,9 @@ class PluginMCPClient(MCPStdioClient):
                                              installation.manifest.settings_schema)
         self.installation = installation
         self.validated_tools: tuple[PluginProxyTool, ...] = ()
-        # 只有声明了宿主只读 API 的包才拿到地址和令牌；令牌绑定本激活，停用/换代后宿主侧即失效
+        # v9不要求read隐含授权；任一显式能力申请都取得自己的v2入口，令牌仍只绑定本激活。
         host_api_env = (issue_host_api_env(self.activation_ref, installation.manifest.plugin_id)
-                        if HOST_API_READ in getattr(installation.manifest, "host_api", ()) else {})
+                        if installation.manifest.host_api_v9 or HOST_API_READ in installation.manifest.host_api else {})
         super().__init__(MCPServerConfig(
             name="plugin_" + installation.manifest.plugin_id,
             command=command, args=args, cwd=str(cwd),

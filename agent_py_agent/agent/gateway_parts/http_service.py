@@ -352,10 +352,10 @@ def local_credential_data_root(agent: object) -> Path | None:
 # 类用途: 管理同一个Gateway监听器与其原资源引用，不作为owner或业务执行权限。
 class GatewayHTTPServer:
 
-    # LLM: 同次C control/runtime只保存原引用；构造不bind、不生成凭据或改全局指针，启动另核真实来源。
+    # LLM: 同次C control/runtime只保存原引用；构造只建零IO宿主API组合根，不bind、不发凭据或改全局指针。
     # LLM: Construction stores dependencies only; it must not bind a socket or mutate the global
     # server pointer before start() passes the network exposure guard.
-    # 函数用途: 保存端口、路径、鉴权和Agent依赖；正count只建零IO记忆holder，等待显式start监听。
+    # 函数用途: 保存监听依赖及零IO插件宿主服务；正count只建零IO记忆holder，等待显式start监听。
     def __init__(
         self,
         port: int,
@@ -391,6 +391,9 @@ class GatewayHTTPServer:
         # 插件展示服务与共用插件通道池都由首个面板请求惰性创建（见 plugin_panels_http），停止时一并关闭
         self.plugin_display = None
         self.plugin_channel_pool = None
+        from ..plugin_host.http_transport import HostTransport
+
+        self.plugin_host = HostTransport()
 
     def _guard_network_exposure(self) -> None:
         """fail-closed:绑非 loopback(暴露到网络)却没接鉴权中间件时拒绝启动,杜绝未认证远程入口。"""
@@ -403,7 +406,7 @@ class GatewayHTTPServer:
     # LLM: 唯一监听启动点，原认证配置/依赖、暴露及G1检查先于bind/全局指针；漏middleware自动保护，不安全部署拒绝，
     #   拒绝发生在设置全局指针与 bind 之前；停机不删凭据。
     # LLM: C设施源在认证/凭据/全局副作用前核，原controller/lease末门内保pool/listener出生；等待和关闭门外，原main鉴权/端口保护保持。
-    # 函数用途: 保留同一次真实设施来源后启动HTTP，ACK失败仍留原Runtime资源责任。
+    # 函数用途: 保留原设施来源后启动HTTP及独立宿主流池，ACK失败仍留原Runtime资源责任。
     def start(self) -> None:
         require_http_transport(self.drain_runtime, control=self.control_plane, paths=self.paths)
         self._prepare_authentication()
@@ -426,6 +429,7 @@ class GatewayHTTPServer:
                 group.bind_executor(self.server._request_executor)
             self.server.server_version = "MyAgentGateway/1.0"
             self.server.handler_class = GatewayHTTPHandler
+            self.plugin_host.start(self.drain_runtime)
             self._thread = threading.Thread(target=self._serve, daemon=True)
             listener = (self.drain_runtime.retain_thread("control", "http/listener", self._thread)
                         if self.drain_runtime is not None else None)
@@ -513,8 +517,8 @@ class GatewayHTTPServer:
                 ),
             }
 
-    # LLM: 先关同C记忆借用/末写准入，再沿原HTTP及插件关闭序；不在stop刷新pending或跨线程清理构造。
-    # 函数用途: 停止原服务，并使已有HTTP的后继记忆写失效。
+    # LLM: 先关同C记忆准入及宿主API来源/流池，再沿原HTTP关闭序；不刷新pending，不声称业务资源已停。
+    # 函数用途: 停止原服务，使已有HTTP后继写入与插件宿主调用失效。
     def stop(self, timeout: float = 5.0) -> None:
         global _server_instance
         from ..plugin_host_api import set_host_api_base
@@ -522,6 +526,7 @@ class GatewayHTTPServer:
 
         if self.coordinator_memory_resources is not None:
             self.coordinator_memory_resources.close_admission()
+        self.plugin_host.close()
         set_host_api_base(None)
         # G4：停机时注销本服务登记的 Gateway 端口（在 server_close 前取端口）。
         if self.server:

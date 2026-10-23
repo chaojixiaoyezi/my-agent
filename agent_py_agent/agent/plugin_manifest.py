@@ -27,6 +27,7 @@ from .plugin_events.declarations import (
     subscriptions_from_payload,
     validate_subscriptions,
 )
+from .plugin_manifest_host_v9 import manifest_from_v9, serialize_manifest_v9, validate_v9_manifest
 from .plugin_observation import (
     MAX_CANDIDATE_COUNT,
     PluginToolObservation,
@@ -154,8 +155,10 @@ class PluginManifest:
     events: tuple[PluginEventDeclaration, ...] = ()
     tool_gates: tuple[PluginToolGateDeclaration, ...] = ()
     permissions: PluginEventPermissions | None = None
+    # v9显式版本标记；旧清单缺省False且不改变任何旧序列化字段。
+    host_api_v9: bool = False
 
-    # LLM: 直接构造与 JSON 同源；只有显式 v8 将非空订阅计贡献，旧协议原规则不变，host_api 仍与订阅互斥。
+    # LLM: 直接构造与JSON同源；v9独立验证能力，不扩大旧read枚举；v8订阅与host_api仍互斥。
     # 函数用途: 安装前验证入口与贡献，允许纯订阅的 v8，但不授执行权或放宽旧包贡献门。
     def __post_init__(self) -> None:
         _text(self.version)
@@ -179,9 +182,7 @@ class PluginManifest:
             self._validate_python_entry()
         else:
             self._validate_file_entry()
-        if (not isinstance(self.host_api, tuple) or len(set(self.host_api)) != len(self.host_api)
-                or any(item not in PLUGIN_HOST_API_PERMISSIONS for item in self.host_api)):
-            raise ValueError("宿主 API 权限名单无效")
+        _validate_host_api_declaration(self)
         _validate_event_declarations(self)
         tool_names = {tool.name for tool in self.tools}
         panel_ids = {panel.id for panel in self.panels}
@@ -290,7 +291,7 @@ class PluginManifest:
                 "permissions": self.permissions.to_payload()} if self.permissions is not None else {}),
         }))
 
-    # LLM: 输出只包含协议声明，不含私有运行字段；JSON 形态由命令 dataclass 和原 schema 投影产生。
+    # LLM: 输出只含协议声明；显式v9由独立模块投影，旧版本JSON与字段保持不变。
     # 函数用途: 生成可复读的静态包描述。
     def to_payload(self) -> dict:
         if self.is_content_only:
@@ -299,7 +300,8 @@ class PluginManifest:
                     "capability": self.capability.to_payload(), "files": [asdict(item) for item in self.files],
                     "settings_schema": self.settings_schema}
         if self.entry is not None:
-            return self._v6_payload()
+            payload = self._v6_payload()
+            return serialize_manifest_v9(self, payload) if self.host_api_v9 else payload
         return json.loads(
             _json(
                 {
@@ -328,13 +330,15 @@ class PluginManifest:
             )
         )
 
-    # LLM: 严格版本字段阻断旧包夹带 v8 声明；保留已分类的安全冲突原因，其余错误统一脱敏，不执行插件。
+    # LLM: 严格版本字段隔离v9与旧声明；只薄分流新协议，其余错误保持原脱敏合同，不执行插件。
     # 函数用途: 从 JSON 恢复经过合同验证的包，旧 v1–v7 的读取路径保持不变。
     @classmethod
     def from_payload(cls, payload: object) -> PluginManifest:
         try:
             _json(payload)
             version = payload.get("schema_version") if isinstance(payload, dict) else None
+            if version == "plugin_package.v9":
+                return manifest_from_v9(cls, payload)
             if version == CAPABILITY_PACKAGE_SCHEMA:
                 return cls._from_content(payload)
             if version in (PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8):
@@ -388,7 +392,7 @@ class PluginManifest:
                    files=tuple(CapabilityFile(**_fields(item, "path sha256 executable"))
                                for item in declaration_list(row["files"])))
 
-    # LLM: v6/v8 共用固定文件入口字段；v8 的三项新增声明显式必填，不向旧协议注入默认字段。
+    # LLM: v6/v8/v9共用文件入口；v9已过专门能力门，只有其显式标记进入构造，不改变旧字段。
     # 函数用途: 恢复非 Python 包，并只在 v8 读取订阅与权限；错误由公共入口脱敏。
     @classmethod
     def _from_v6(cls, payload: dict) -> PluginManifest:
@@ -404,6 +408,7 @@ class PluginManifest:
             settings_schema_json=_json(row["settings_schema"]), panels=panels, skills=skills, host_api=host_api,
             entry=PluginEntry.from_payload(row["entry"]), files=files,
             platforms=tuple(declaration_list(row["platforms"])),
+            host_api_v9=row["schema_version"] == "plugin_package.v9",
             **(subscriptions_from_payload(row) if is_v8 else {}),
         )
 
@@ -431,15 +436,29 @@ _TOOL_REQUIRED_FIELDS = frozenset({"name", "description", "input_schema", "reque
 _TOOL_V5_OPTIONAL_FIELDS = frozenset({"observation", "observation_ref"})
 
 
-# LLM: v8 沿 v6 支持 v5 观察字段，旧 v1–v4 不放宽；未知字段不能静默丢弃。
+# LLM: v8/v9沿v6支持v5观察字段，旧v1–v4不放宽；未知字段不能静默丢弃。
 # 函数用途: 按显式版本检查一个工具声明项的字段集合。
 def _tool_fields(value: object, version: str) -> dict:
-    optional = (_TOOL_V5_OPTIONAL_FIELDS if version in {PLUGIN_PACKAGE_SCHEMA_V5, PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8}
-                else frozenset())
+    optional = (_TOOL_V5_OPTIONAL_FIELDS if version in {
+        PLUGIN_PACKAGE_SCHEMA_V5, PLUGIN_PACKAGE_SCHEMA_V6, PLUGIN_PACKAGE_SCHEMA_V8, "plugin_package.v9"}
+        else frozenset())
     if (not isinstance(value, dict) or not set(value) >= _TOOL_REQUIRED_FIELDS
             or set(value) - _TOOL_REQUIRED_FIELDS - optional):
         raise ValueError("包描述字段不完整或存在未知字段")
     return value
+
+
+# LLM: v9必须显式标记并使用独立验证器，旧read白名单不扩大。
+# 函数用途: 按协议版本验证宿主能力申请。
+def _validate_host_api_declaration(manifest: PluginManifest) -> None:
+    if type(manifest.host_api_v9) is not bool:
+        raise ValueError("宿主API版本标记无效")
+    if manifest.host_api_v9:
+        validate_v9_manifest(manifest)
+        return
+    if (not isinstance(manifest.host_api, tuple) or len(set(manifest.host_api)) != len(manifest.host_api)
+            or any(item not in PLUGIN_HOST_API_PERMISSIONS for item in manifest.host_api)):
+        raise ValueError("宿主 API 权限名单无效")
 
 
 # LLM: 包层唯一 v8 分类门：权限对象必须显式、必须是文件入口且有订阅；host_api 冲突以设计指定码返回。

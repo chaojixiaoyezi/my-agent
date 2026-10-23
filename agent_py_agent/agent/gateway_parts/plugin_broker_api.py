@@ -73,11 +73,13 @@ class PluginBrokerService:
         self.trusted_run_id, self.trusted_task_id = trusted_run_id, trusted_task_id
         self.trusted_parent_run_id, self.trusted_root_run_id = '', ''
 
-    # LLM: 插件 grant 不授平台管理员身份，activation require 每次请求复验；调用方仍须验证令牌。
+    # LLM: 旧grant不授管理员身份且每次复验；v9必须走A0范围门，禁止复用不理解其scope的旧Broker。
     # 函数用途: 从有效插件授权提取用户范围。
     @classmethod
     def from_grant(cls, grant, *, tool_invoker=None):
         from ..plugin_host_broker_topics import grant_asset_source
+        if getattr(grant, "host_api_grant_json", None) is not None:
+            raise ValueError("该插件须使用宿主API v2")
         grant.activation_ref.require()
         owner = grant.activation_ref.owner()
         activation = getattr(grant, 'activation', {})

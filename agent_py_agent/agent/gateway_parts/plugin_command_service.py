@@ -22,7 +22,7 @@ from .control_service import resolve_gateway_scope_owner, resolve_loaded_gateway
 from .owner_conversation_store import owner_conversation_store
 
 
-# LLM: 调用方已完成来源鉴权；管理仍独立检查管理员，只在首次授权安装时创建原线程与宿主运行，不启动模型。
+# LLM: 调用方已完成来源鉴权，管理仍独立检查管理员；API范围只承运到原启用确认码，不另建授权账或自动同意。
 # 函数用途: 为新目录接口以及 /ask、/control 的插件输入生成同一宿主回执。
 def plugin_http_response(handler, server, body: dict, *, text: str | None = None) -> dict:
     request_id = body.get("plugin_request_id", "")
@@ -48,7 +48,11 @@ def plugin_http_response(handler, server, body: dict, *, text: str | None = None
         revision = body.get("catalog_revision", "")
         if not isinstance(revision, str):
             raise ValueError("目录版本必须是字符串")
-        return _log_rejection(manager.command(text, revision=revision, request_id=request_id), text, request_id)
+        from ..plugin_permissions.host_grants import host_grant_selection
+
+        with host_grant_selection(body.get("host_api_selection")):
+            result = manager.command(text, revision=revision, request_id=request_id)
+        return _log_rejection(result, text, request_id)
     except Exception:  # noqa: BLE001 回包失败不能推断已接受命令未执行，也不能泄露私有路径
         return plugin_catalog_unavailable() if text is None else plugin_command_unknown(request_id)
 
@@ -234,13 +238,16 @@ def _interactive_command(handler, server, body: dict, text: str) -> None:
                                  "message": "插件交互请求或连接无效。"})
         return
 
-    # LLM: 原服务接收当前请求的唯一消费者与令牌；异常保持原请求可查，不重试或另建业务执行线程。
+    # LLM: 在执行线程承运显式宿主授权选择，仍由原服务确认；异常保持原请求可查，不重试或另建执行。
     # 函数用途: 在 HTTP 执行区间提交命令并保留无法确认的原结果。
     def execute(request_permission, cancellation_token) -> dict:
+        from ..plugin_permissions.host_grants import host_grant_selection
+
         try:
-            return _log_rejection(manager.command(text, revision=revision, request_id=request_id,
-                                                  request_permission=request_permission,
-                                                  cancellation_token=cancellation_token), text, request_id)
+            with host_grant_selection(body.get("host_api_selection")):
+                return _log_rejection(manager.command(text, revision=revision, request_id=request_id,
+                                                      request_permission=request_permission,
+                                                      cancellation_token=cancellation_token), text, request_id)
         except Exception:  # noqa: BLE001 已执行与清理状态只由原账本裁决
             return plugin_command_unknown(request_id)
 
