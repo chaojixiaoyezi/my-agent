@@ -306,7 +306,7 @@ class PromptBuilder:
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
-        if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
+        if (not self.home_paths and self.persona_repository is None) or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
         del user_prompt
         return _persona_home_context_chunks(self.home_paths, self.persona_repository)
@@ -863,7 +863,7 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
 # LLM: 有线程/开关/home启用时走唯一快照，无资格保持旧read_home_context；仅存安全渲染值，不存被拦原文。
 # 函数用途: 取得稳定人格与本轮行变化，task_local/control_plane 保持原隔离，不读 owner 人格。
 def _thread_persona_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> tuple[list[str], str]:
-    if isolated or not builder.home_paths or not builder.config.home_context_enabled:
+    if isolated or (not builder.home_paths and builder.persona_repository is None) or not builder.config.home_context_enabled:
         return [], ""
     scope = request.thread_persona
     repository = builder.persona_repository

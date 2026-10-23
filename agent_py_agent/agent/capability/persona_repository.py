@@ -155,7 +155,7 @@ class _PreparedPersonaMutation:
     baseline: _PreparedPersonaBaseline | None = None
 
 
-# LLM: 来源身份及原SHA不变；默认和显式预算均裁剪提示视图，不能把20000当无限哨兵。
+# LLM: 来源身份及原SHA不变；显式预算裁剪提示视图，默认保留合法全量规则并记录软预算诊断。
 # 函数用途: 将AGENTS来源转成安全提示投影，保留原件、来源授权与版本身份。
 def _load_agents_source_document(repository):
     try:
@@ -173,10 +173,13 @@ def _load_agents_source_document(repository):
     if snapshot.kind == "owner_default" and snapshot.config_version == 1 and snapshot.revision == 0 and snapshot.status == "ready":
         prompt_content = _factory_agents_prompt(repository, display, snapshot.content_sha256)
     sanitized, blocked = _sanitize_persona_text(prompt_content)
-    content, truncated = _bounded_prompt_content(sanitized, repository.prompt_max_chars)
+    explicit_max = getattr(repository, "_explicit_prompt_max_chars", repository.prompt_max_chars)
+    content, truncated = (sanitized, False) if explicit_max is None else _bounded_prompt_content(sanitized, explicit_max)
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
-    detail = f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved" if prompt_content != display else ""
-    diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked, detail)
+    details = [f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved"] if prompt_content != display else []
+    if explicit_max is None and len(sanitized) > _DEFAULT_PROMPT_MAX_CHARS:
+        details.append(f"over_soft_budget:{_DEFAULT_PROMPT_MAX_CHARS}")
+    diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked, "; ".join(details))
     return PersonaDocumentSnapshot("agents", content, diagnostic, snapshot, metadata)
 
 
@@ -203,7 +206,7 @@ class PersonaRepository:
         soul_path: str | Path,
         user_path: str | Path,
         agents_path: str | Path,
-        prompt_max_chars: int = _DEFAULT_PROMPT_MAX_CHARS,
+        prompt_max_chars: int | None = None,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
         coordinator_io: bool = False,
     ) -> None:
@@ -216,7 +219,8 @@ class PersonaRepository:
             "user": Path(user_path).absolute(),
             "agents": Path(agents_path).absolute(),
         }
-        self.prompt_max_chars = max(256, int(prompt_max_chars))
+        self._explicit_prompt_max_chars = None if prompt_max_chars is None else max(256, int(prompt_max_chars))
+        self.prompt_max_chars = _DEFAULT_PROMPT_MAX_CHARS if self._explicit_prompt_max_chars is None else self._explicit_prompt_max_chars
         self.versions_path = self.owner_home / "persona" / "versions.jsonl"
         self.backups_dir = self.owner_home / "persona" / "backups"
         self.quota_enforcer = quota_enforcer or owner_quota_enforcer_from_policy(self.owner_home)
@@ -229,7 +233,7 @@ class PersonaRepository:
         cls,
         home_paths: object,
         *,
-        prompt_max_chars: int = _DEFAULT_PROMPT_MAX_CHARS,
+        prompt_max_chars: int | None = None,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
         coordinator_io: bool = False,
     ):
@@ -261,7 +265,7 @@ class PersonaRepository:
         cls,
         owner: object,
         *,
-        prompt_max_chars: int = _DEFAULT_PROMPT_MAX_CHARS,
+        prompt_max_chars: int | None = None,
         quota_enforcer: OwnerQuotaEnforcer | None = None,
         coordinator_io: bool = False,
     ):
@@ -1054,7 +1058,7 @@ def _is_empty_persona_template_content(content: str) -> bool:
     return not value or value in _LEGACY_TEMPLATE_PLACEHOLDER_VALUES
 
 
-# LLM: 预算含标记；人格默认标记不变，Owner信封可传宿主标记复用；单行超过总正文预算才字符兜底。
+# LLM: 预算含标记；人格默认标记不变，Owner信封可传宿主标记复用；多行/规则行只选完整行，单行无规则前缀才字符兜底。
 # 函数用途: 在硬上限内保留提示首尾完整规则；极小预算宁缺正文，原文件不受影响。
 def _bounded_prompt_content(
     content: str, max_chars: int, *,
@@ -1066,36 +1070,32 @@ def _bounded_prompt_content(
     if max_chars < len(marker):
         return "", True
     budget = max_chars - len(marker)
-    head = int(budget * 0.75)
-    first_line = content.find("\n") + 1
-    last_end = len(content) - 1 if content.endswith("\n") else len(content)
-    last_line = len(content) - content.rfind("\n", 0, last_end) - 1
-    if 0 < first_line <= budget:
-        head = max(head, first_line)
-    # 首尾都能保留时先给完整末行留位；两端竞争时优先首部，不制造半条规则。
-    if last_line <= budget and (first_line > budget or first_line + last_line <= budget):
-        head = min(head, budget - last_line)
-    boundary = content.rfind("\n", 0, head)
-    prefix = content[:boundary + 1] if boundary >= 0 else ""
-    if boundary < 0 and (first_line == 0 or first_line > budget):
-        prefix = content[:head]
-    tail = budget - len(prefix)
-    suffix = _persona_tail_at_boundary(content, tail, allow_partial=last_line > budget)
-    return prefix + marker + suffix, True
-
-
-# LLM: 调用方按总正文预算决定是否允许末行片段；不因剩余配额不足自动截断可完整保留的行。
-# 函数用途: 在尾部预算内从完整行开头保留剩余人格内容。
-def _persona_tail_at_boundary(content: str, budget: int, *, allow_partial: bool = True) -> str:
-    if not budget:
-        return ""
-    start = len(content) - budget
-    if start == 0 or content[start - 1] == "\n":
-        return content[start:]
-    boundary = content.find("\n", start)
-    if 0 <= boundary < len(content) - 1:
-        return content[boundary + 1:]
-    return content[-budget:] if allow_partial else ""
+    if "\n" not in content and not content.lstrip().startswith("- "):
+        head = int(budget * 0.75)
+        tail = budget - head
+        return content[:head] + marker + (content[-tail:] if tail else ""), True
+    lines = content.splitlines(keepends=True)
+    head_limit = int(budget * 0.75)
+    if len(lines) > 1 and len(lines[-1]) <= budget and (len(lines[0]) > budget or len(lines[0]) + len(lines[-1]) <= budget):
+        head_limit = min(head_limit, budget - len(lines[-1]))
+    head_lines: list[str] = []
+    used = 0
+    for idx, line in enumerate(lines):
+        limit = budget if idx == 0 and not head_lines and len(line) <= budget else head_limit
+        if used + len(line) > limit:
+            break
+        head_lines.append(line)
+        used += len(line)
+    tail_lines: list[str] = []
+    for line in reversed(lines[len(head_lines):]):
+        if used + len(line) > budget:
+            break
+        tail_lines.append(line)
+        used += len(line)
+    tail_lines.reverse()
+    if not head_lines and not tail_lines:
+        return "", True
+    return "".join(head_lines) + marker + "".join(tail_lines), True
 
 
 # LLM: 仅默认AGENTS、精确原始字节SHA、没有任何AGENTS专属账本记录时给新工厂视图；不写原文/版本/审批记录。
@@ -1114,7 +1114,11 @@ def _factory_agents_prompt(repository, raw: str, raw_sha256: str) -> str:
         except OSError:
             return raw
         return raw
-    return candidate if _only_other_persona_history(repository.versions_path) else raw
+    try:
+        with versions_lock(repository.versions_path, **({} if not repository.coordinator_io else {"coordinator_io": True})):
+            return candidate if _only_other_persona_history(repository.versions_path) else raw
+    except OSError:
+        return raw
 
 
 # LLM: Strict ledger reads fail closed; USER/SOUL history cannot revoke unchanged factory AGENTS projection.
@@ -1142,10 +1146,12 @@ def _only_other_persona_history(path: Path) -> bool:
             if line.strip()
         ]
         return bool(rows) and all(
-            isinstance(row, dict) and row.get("target") in {"user", "soul"}
+            isinstance(row, dict)
+            and isinstance(row.get("target"), str)
+            and row.get("target") in {"user", "soul"}
             for row in rows
         )
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, UnicodeError, ValueError, TypeError):
         return False
 
 
@@ -1247,7 +1253,7 @@ def _load_persona_unlocked(self, target: str) -> PersonaDocumentSnapshot:
     except (OSError, UnicodeDecodeError) as exc:
         return _empty_persona_snapshot(target, "io", str(exc))
     projected = _factory_agents_prompt(self, raw, hashlib.sha256(data).hexdigest()) if target == "agents" else raw
-    return _loaded_persona_snapshot(target, raw, stat, self.prompt_max_chars, prompt_content=projected)
+    return _loaded_persona_snapshot(target, raw, stat, getattr(self, "_explicit_prompt_max_chars", self.prompt_max_chars), prompt_content=projected)
 
 
 # LLM: 保持缺失/拒绝/I/O诊断不返回正文，尺寸字段只在已读stat时提供。
@@ -1296,14 +1302,17 @@ def _persona_runtime_snapshot(self) -> dict[str, object]:
     }
 
 
-# LLM: 诊断/CAS绑定原文，所有目标均执行配置预算；工厂提示视图不伪造原件修订。
+# LLM: 诊断/CAS绑定原文，显式预算裁剪提示视图，默认保留合法全量规则并记录软预算诊断。
 # 函数用途: 将原件及可选工厂视图转换为有界提示与可追溯诊断。
 def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars, *, prompt_content=None):
     sha256 = _sha256_text(raw)
     projected = raw if prompt_content is None else prompt_content
     sanitized, blocked = _sanitize_persona_text(projected)
-    content, truncated = _bounded_prompt_content(sanitized, prompt_max_chars)
+    content, truncated = (sanitized, False) if prompt_max_chars is None else _bounded_prompt_content(sanitized, prompt_max_chars)
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
+    details = [f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved"] if projected != raw else []
+    if prompt_max_chars is None and len(sanitized) > _DEFAULT_PROMPT_MAX_CHARS:
+        details.append(f"over_soft_budget:{_DEFAULT_PROMPT_MAX_CHARS}")
     return PersonaDocumentSnapshot(
         target,
         content,
@@ -1315,7 +1324,7 @@ def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars, *, prompt_cont
             chars=len(raw),
             truncated=truncated,
             blocked_lines=blocked,
-            detail=f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved" if projected != raw else "",
+            detail="; ".join(details),
         ),
     )
 

@@ -177,7 +177,7 @@ def _read_snapshot(path: Path) -> dict | None:
         return None
     if not path.is_file():
         raise ValueError("PERSONA_PREFIX_INVALID")
-    if path.stat().st_size > 1024 * 1024:
+    if path.stat().st_size > 8 * 1024 * 1024:
         return _invalid_snapshot(path)
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))
@@ -226,6 +226,14 @@ def _line_changes(previous: str, current: str, additions_only: bool) -> list[str
     if additions_only:
         previous_lines = set(old)
         return ["+ " + line for line in new if line not in previous_lines]
+    start, limit = 0, min(len(old), len(new))
+    while start < limit and old[start] == new[start]:
+        start += 1
+    end_old, end_new = len(old), len(new)
+    while end_old > start and end_new > start and old[end_old - 1] == new[end_new - 1]:
+        end_old -= 1
+        end_new -= 1
+    old, new = old[start:end_old], new[start:end_new]
     result = []
     for kind, i, j, a, b in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
         if kind != "equal":
