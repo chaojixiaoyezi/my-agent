@@ -23,6 +23,19 @@ def raise_goal_continuation_wake(
         task_status = str(getattr(link, "status", "") or "")
     except Exception:  # noqa: BLE001 - missing baseline is treated as progress, never as an idle slice.
         pass
+    goal_meta = getattr(goal, "metadata", None)
+    metadata: dict[str, object] = {
+        "goal_id": str(getattr(goal, "goal_id", "") or ""),
+        "channel": str(channel or ""),
+        "conversation_id": str(conversation_id or ""),
+        WAKE_SNAPSHOT_KEY: goal_progress_snapshot(goal, task_status),
+    }
+    if isinstance(goal_meta, dict):
+        if goal_meta.get("plugin_origin"):
+            metadata["plugin_origin"] = goal_meta["plugin_origin"]
+            metadata["tool_policy"] = "none"
+        elif goal_meta.get("tool_policy") == "none":
+            metadata["tool_policy"] = "none"
     request: dict[str, object] = {
         "thread_id": str(getattr(goal, "thread_id", "") or ""),
         "root_task_id": str(getattr(goal, "task_id", "") or ""),
@@ -30,12 +43,7 @@ def raise_goal_continuation_wake(
         "reason": "thread_goal_continue",
         "summary": "Continue working toward the active thread goal.",
         "dedupe_key": f"thread-goal:{str(getattr(goal, 'goal_id', '') or '')}",
-        "metadata": {
-            "goal_id": str(getattr(goal, "goal_id", "") or ""),
-            "channel": str(channel or ""),
-            "conversation_id": str(conversation_id or ""),
-            WAKE_SNAPSHOT_KEY: goal_progress_snapshot(goal, task_status),
-        },
+        "metadata": metadata,
     }
     if now is not None:
         request["now"] = now

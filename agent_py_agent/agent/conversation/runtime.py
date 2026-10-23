@@ -2112,7 +2112,11 @@ def _run_params(
                 wake_signal=request.wake_signal,
                 config=config,
                 owner_policy=getattr(agent, "owner_policy", None),
-                policy_snapshot=_background_policy_snapshot(request, resolved_goal_context.goal),
+                policy_snapshot=_background_policy_snapshot(
+                    request,
+                    resolved_goal_context.goal,
+                    store=conversation_store,
+                ),
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
                 proactive_delivery_available=proactive_delivery_available,
@@ -2393,13 +2397,32 @@ def _session_message_run_id(request: BackgroundRunRequest) -> str:
     return str(wake.get("wake_signal_id") or "").strip()
 
 
-# LLM: 合并唤醒快照与活动Goal的插件零工具标记，防止插件目标线程被其它后台唤醒时绕过零工具边界。
-# 函数用途: 生成包含活动Goal工具限制的后台策略快照。
-def _background_policy_snapshot(request: BackgroundRunRequest, goal: object | None) -> dict[str, Any]:
+# LLM: 合并唤醒快照与目标Goal的插件零工具标记，防止插件目标线程在暂停或被其它后台唤醒时绕过零工具边界。
+# 函数用途: 生成包含关联Goal工具限制的后台策略快照。
+def _background_policy_snapshot(
+    request: BackgroundRunRequest,
+    goal: object | None,
+    *,
+    store: object | None = None,
+) -> dict[str, Any]:
     snapshot = dict(policy_snapshot_from_request(request))
-    goal_meta = getattr(goal, "metadata", None)
-    if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
-        snapshot.setdefault("tool_policy", "none")
+    candidates = [goal] if goal is not None else []
+    if not candidates and store is not None and getattr(store, "goals", None) is not None and request.thread_id:
+        try:
+            goals, _ = store.goals.list_report(request.thread_id)
+            task_id = str(request.task_id or "").strip()
+            for item in goals or ():
+                if (task_id and getattr(item, "task_id", "") == task_id) or (
+                    not task_id and getattr(item, "status", "") in {"active", "paused", "budget_limited"}
+                ):
+                    candidates.append(item)
+        except Exception:
+            pass
+    for item in candidates:
+        goal_meta = getattr(item, "metadata", None)
+        if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
+            snapshot.setdefault("tool_policy", "none")
+            break
     return snapshot
 
 

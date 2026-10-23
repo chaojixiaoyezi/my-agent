@@ -34,6 +34,56 @@ _JSON_OUTPUT_TYPES = {
     'string': (str,), 'integer': (int,), 'number': (int, float),
     'boolean': (bool,), 'object': (dict,), 'array': (list,), 'null': (type(None),),
 }
+_PYTHON_GUARD_CODE = """import errno, json, os, sys
+from pathlib import Path
+cfg = json.loads(os.environ.pop("MY_AGENT_SCRIPT_GUARD_JSON", "{}"))
+entrypoint = sys.argv.pop(1)
+sys.argv[0] = entrypoint
+read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
+write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
+denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
+allow_net = bool(cfg.get("network_access", False))
+
+def _under(target, roots):
+    return any(target == r or r in target.parents for r in roots)
+
+def _check_read(raw):
+    target = Path(os.fsdecode(raw)).expanduser().resolve(strict=False)
+    if _under(target, denied_roots) and not _under(target, read_roots):
+        raise PermissionError(errno.EACCES, "Permission denied", str(raw))
+
+def _check_write(raw):
+    target = Path(os.fsdecode(raw)).expanduser().resolve(strict=False)
+    if not _under(target, write_roots):
+        raise PermissionError(errno.EACCES, "Permission denied", str(raw))
+
+def _audit(event, args):
+    if not allow_net and event in ("socket.connect", "socket.bind", "socket.sendto", "socket.getaddrinfo"):
+        raise PermissionError(errno.EACCES, "Network access denied")
+    if event == "open":
+        path_arg, mode, flags = args[0], args[1], args[2]
+        if isinstance(path_arg, int):
+            return
+        is_w = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)) or any(
+            c in str(mode or "") for c in ("w", "a", "+", "x")
+        )
+        (_check_write if is_w else _check_read)(path_arg)
+    elif event in ("os.mkdir", "os.remove", "os.unlink", "os.rmdir", "os.chmod", "os.chown", "os.truncate", "os.utime"):
+        if args and not isinstance(args[0], int):
+            _check_write(args[0])
+    elif event in ("os.rename", "os.replace", "os.symlink", "os.link"):
+        for item in args[:2]:
+            if not isinstance(item, int):
+                _check_write(item)
+    elif event in ("os.listdir", "os.scandir", "os.readlink"):
+        if args and not isinstance(args[0], int):
+            _check_read(args[0])
+
+with open(entrypoint, "rb") as _f:
+    _code = compile(_f.read(), entrypoint, "exec")
+sys.addaudithook(_audit)
+exec(_code, {"__name__": "__main__", "__file__": entrypoint, "__builtins__": __builtins__})
+"""
 
 
 # LLM: 此异常只表示冻结代码为空或缺失，不把路径违规或坏描述符降级为旧格式。
@@ -82,8 +132,8 @@ def _outer_seatbelt_active():
         return False
 
 
-# LLM: 启用沙箱时必须先通过require_ready（未就绪直接抛SandboxUnavailableError失败关闭）；仅外层Seatbelt已锁死71且非strict时复用外层隔离。
-# 函数用途: 校验平台沙箱就绪并决定是否需要再套一层子进程沙箱包装。
+# LLM: 非strict且外层Seatbelt已锁死71时直接跳过内层sandbox_apply；其它情况必须先通过require_ready（未就绪直接抛SandboxUnavailableError失败关闭）。
+# 函数用途: 决定是否需要再套一层子进程平台沙箱包装，或在需要包装时校验平台沙箱就绪。
 def _can_apply_sandbox(sandbox: AttemptExecutionSandbox, *, strict: bool = False) -> bool:
     if not strict and _outer_seatbelt_active():
         return False
@@ -276,7 +326,7 @@ def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。
 # 类用途: 按 Owner 的脚本配置执行 Python、bash 或 sh，且不调用任何模型。
 class ScriptRunner:
-    # LLM: 初始化只绑定宿主选定目录与沙箱策略，不执行脚本；strict在启用沙箱时禁止退回。
+    # LLM: 初始化只绑定宿主选定目录与沙箱策略，不执行脚本；strict在启用沙箱时禁止退回，restrict_to_roots强制收窄业务读写根。
     # 函数用途: 保存Owner路径和默认启用的沙箱选项。
     def __init__(
         self,
@@ -286,12 +336,14 @@ class ScriptRunner:
         strict_sandbox: bool = False,
         extra_write_roots: tuple[str | Path, ...] = (),
         public_read_roots: tuple[str | Path, ...] = (),
+        restrict_to_roots: bool = False,
     ):
         self.owner_home = Path(owner_home).absolute()
         self.scripts_root = self.owner_home / 'scripts'
         self.use_sandbox, self.strict_sandbox = use_sandbox, strict_sandbox
         self.extra_write_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in extra_write_roots)
         self.public_read_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in public_read_roots)
+        self.restrict_to_roots = bool(restrict_to_roots)
 
     # LLM: 冻结文件只在独立临时目录执行；包括沙箱包装失败和中断在内的所有出口都清理，不执行原资产路径。
     # 函数用途: 冻结代码、构造环境与沙箱命令，并在执行结束后删除临时目录。
@@ -316,17 +368,37 @@ class ScriptRunner:
             entrypoint = safe_path(folder, metadata.get('entrypoint', 'main.py'))
             write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, entrypoint.name),
                                       metadata['code'], file_mode=0o700)
-            command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
+            net_allowed = _network_access(metadata, network_access)
+            env = _environment(metadata, folder, input_json, sources)
+            if self.restrict_to_roots and interpreter == 'python3':
+                guard = safe_path(folder, '_sandbox_guard.py')
+                write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, guard.name),
+                                          _PYTHON_GUARD_CODE, file_mode=0o700)
+                resolved_folder = folder.resolve(strict=False)
+                resolved_owner = self.owner_home.resolve(strict=False)
+                env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
+                    'read_roots': [str(p) for p in (resolved_folder, *runtime_read_roots, *self.public_read_roots, *self.extra_write_roots)],
+                    'write_roots': [str(p) for p in (resolved_folder, *self.extra_write_roots, Path('/dev'))],
+                    'denied_roots': [str(p) for p in (resolved_owner, resolved_owner.parent, resolved_owner.parent.parent)],
+                    'network_access': net_allowed,
+                })
+                command = [executable, '-I', '-B', str(guard), str(entrypoint)]
+            else:
+                command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
             if self.use_sandbox:
+                shared_root = folder if self.restrict_to_roots else self.owner_home
+                private_roots = (self.owner_home, self.owner_home.parent) if self.restrict_to_roots else ()
                 sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
-                    attempt_view=folder, staging_root=folder, shared_workspace=self.owner_home, owner_home=self.owner_home,
+                    attempt_view=folder, staging_root=folder, shared_workspace=shared_root, owner_home=shared_root,
                     extra_write_roots=(folder, *self.extra_write_roots),
                     public_read_roots=tuple(dict.fromkeys((*runtime_read_roots, *self.public_read_roots))),
+                    private_read_roots=private_roots,
+                    write_scope_denied_roots=private_roots,
                     implicit_attempt_write_roots=True,
-                    network_access=_network_access(metadata, network_access)))
+                    network_access=net_allowed))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     command = sandbox.build_argv(command)
-            yield metadata, sources, (command, str(folder), _environment(metadata, folder, input_json, sources), input_json, timeout)
+            yield metadata, sources, (command, str(folder), env, input_json, timeout)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 

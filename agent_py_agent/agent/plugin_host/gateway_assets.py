@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
 from ..assets.script_store import ScriptStore
 from ..assets.workflow_store import WorkflowStore
@@ -25,9 +26,11 @@ def _asset_revision(metadata: object, version: object) -> int:
     return 1
 
 
-# LLM: 仅读取目标Owner私有ScriptStore（禁用全局extra_roots），摘要由真实磁盘代码或规范记录计算。
-# 函数用途: 读取并构造当前Owner已注册脚本的AssetGrant。
-def _script_grant(home, script_id: str, allowed_assets: tuple[AssetGrant, ...] = ()) -> AssetGrant:
+# LLM: 仅读取目标Owner私有ScriptStore（禁用全局extra_roots），同时返回授权AssetGrant与完整执行配置摘要。
+# 函数用途: 读取当前Owner已注册脚本的AssetGrant与执行完整性指纹。
+def _script_fingerprint(
+    home, script_id: str, allowed_assets: tuple[AssetGrant, ...] = ()
+) -> tuple[AssetGrant, str]:
     try:
         record = ScriptStore(home, extra_roots=()).get_script(script_id)
     except (ValueError, KeyError, OSError) as exc:
@@ -39,9 +42,26 @@ def _script_grant(home, script_id: str, allowed_assets: tuple[AssetGrant, ...] =
     stable = {k: v for k, v in record.items() if k not in {"entrypoint_path", "runtime_summary"}}
     record_digest = hashlib.sha256(canonical_json(stable).encode("utf-8")).hexdigest()
     candidate = AssetGrant("script", script_id, rev, record_digest)
-    if candidate in allowed_assets:
-        return candidate
-    return AssetGrant("script", script_id, rev, code_digest)
+    grant = candidate if candidate in allowed_assets else AssetGrant("script", script_id, rev, code_digest)
+    return grant, record_digest
+
+
+# LLM: 仅读取目标Owner私有ScriptStore（禁用全局extra_roots），摘要由真实磁盘代码或规范记录计算。
+# 函数用途: 读取并构造当前Owner已注册脚本的AssetGrant。
+def _script_grant(home, script_id: str, allowed_assets: tuple[AssetGrant, ...] = ()) -> AssetGrant:
+    return _script_fingerprint(home, script_id, allowed_assets)[0]
+
+
+# LLM: 固定覆盖描述符（不含运行统计）、步骤与正文，不随兼容授权模式缩减校验范围。
+# 函数用途: 计算工作流完整执行定义的规范化SHA-256摘要。
+def _workflow_execution_digest(raw: dict) -> str:
+    descriptor = raw.get("descriptor") or {}
+    stable = {
+        "descriptor": {k: v for k, v in descriptor.items() if k != "runtime_summary"},
+        "steps": raw.get("steps"),
+        "body_markdown": raw.get("body_markdown", ""),
+    }
+    return hashlib.sha256(canonical_json(stable).encode("utf-8")).hexdigest()
 
 
 # LLM: 从规范化工作流字典计算摘要并比对已授权列表，保证Store定义与运行快照采用同一版本算法。
@@ -51,12 +71,7 @@ def _workflow_grant_from_raw(
 ) -> AssetGrant:
     descriptor = raw["descriptor"]
     rev = _asset_revision(descriptor.get("metadata"), descriptor.get("version"))
-    stable = {
-        "descriptor": {k: v for k, v in descriptor.items() if k != "runtime_summary"},
-        "steps": raw["steps"],
-        "body_markdown": raw.get("body_markdown", ""),
-    }
-    digest = hashlib.sha256(canonical_json(stable).encode("utf-8")).hexdigest()
+    digest = _workflow_execution_digest(raw)
     body_digest = hashlib.sha256(canonical_json(raw["steps"]).encode("utf-8")).hexdigest()
     candidate = AssetGrant("workflow", workflow_id, rev, body_digest)
     if candidate in allowed_assets:
@@ -76,10 +91,10 @@ def _workflow_grant(home, workflow_id: str, allowed_assets: tuple[AssetGrant, ..
     return _workflow_grant_from_raw(workflow_id, definition.to_dict(), allowed_assets)
 
 
-# LLM: 冻结工作流引用的每个脚本步骤当前版本；若策略显式声明了同ID脚本授权则必须精确命中。
-# 函数用途: 核验并冻结工作流步骤依赖的所有脚本AssetGrant。
-def _freeze_workflow_step_scripts(home, steps, policy) -> dict[str, AssetGrant]:
-    frozen: dict[str, AssetGrant] = {}
+# LLM: 冻结工作流引用的每个脚本步骤当前版本与完整执行指纹；若策略显式声明了同ID脚本授权则必须精确命中。
+# 函数用途: 核验并冻结工作流步骤依赖的所有脚本AssetGrant与完整执行记录摘要。
+def _freeze_workflow_step_scripts(home, steps, policy) -> dict[str, tuple[AssetGrant, str]]:
+    frozen: dict[str, tuple[AssetGrant, str]] = {}
     allowed = policy.allowed_assets
     for step in steps or ():
         if not isinstance(step, dict):
@@ -87,17 +102,17 @@ def _freeze_workflow_step_scripts(home, steps, policy) -> dict[str, AssetGrant]:
         script_id = str(step.get("script_id") or "").strip()
         if not script_id or script_id in frozen:
             continue
-        grant = _script_grant(home, script_id, allowed)
+        grant, record_digest = _script_fingerprint(home, script_id, allowed)
         pinned = [item for item in allowed if item.kind == "script" and item.asset_id == script_id]
         if pinned:
             if any(item.revision == grant.revision for item in pinned) and grant not in pinned:
                 raise HostAPIError("ASSET_CHANGED", 409)
             require_asset(policy, grant)
-        frozen[script_id] = grant
+        frozen[script_id] = (grant, record_digest)
     return frozen
 
 
-# LLM: 续跑必须核对同Owner运行账本与目标步骤存在性，并复核断点快照与当前注册工作流一致且未漂移。
+# LLM: 续跑必须核对同Owner运行账本与目标步骤存在性，并复核断点快照与当前注册工作流完整定义一致且未漂移。
 # 函数用途: 验证工作流断点并返回对应工作流的当前AssetGrant。
 def _resume_grant(context, payload: dict) -> AssetGrant:
     home = context.owner_home.home_dir
@@ -116,9 +131,13 @@ def _resume_grant(context, payload: dict) -> AssetGrant:
     if not any(step.step_id == from_step_id for step in record.steps):
         raise HostAPIError("CHECKPOINT_NOT_FOUND", 404)
     allowed = context.execution_policy.allowed_assets
-    current = _workflow_grant(home, record.workflow_id, allowed)
+    current_def = WorkflowStore(home, extra_roots=()).get_workflow(record.workflow_id)
+    if current_def is None:
+        raise HostAPIError("ASSET_NOT_FOUND", 404)
+    current_raw = current_def.to_dict()
+    current = _workflow_grant_from_raw(record.workflow_id, current_raw, allowed)
     snap_grant = _workflow_grant_from_raw(record.workflow_id, snapshot, allowed)
-    if current != snap_grant:
+    if current != snap_grant or _workflow_execution_digest(current_raw) != _workflow_execution_digest(snapshot):
         raise HostAPIError("ASSET_CHANGED", 409)
     _freeze_workflow_step_scripts(home, snapshot.get("steps"), context.execution_policy)
     return snap_grant
@@ -143,7 +162,7 @@ def registered_asset(context, payload: dict) -> AssetGrant:
     raise HostAPIError("ACTION_NOT_AVAILABLE", 403)
 
 
-# LLM: 每步脚本执行前均消费AssetStepFence并强制禁网与受限读写根，防止执行中途撤权或篡改步骤脚本。
+# LLM: 每步脚本执行前均消费AssetStepFence并强制禁网、受限读写根与声明时长预算，防止执行中途撤权或篡改步骤脚本。
 # 函数用途: 在目标Owner隔离目录内执行已获批脚本、工作流或工作流断点续跑。
 def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
     fence.check()
@@ -151,12 +170,19 @@ def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
     home = context.owner_home.home_dir
     policy = context.execution_policy
     budgets = getattr(getattr(context.source, "execution_policy", None), "budgets", None) or {}
-    max_wall_ms = int(budgets["max_wall_time_ms"]) if "max_wall_time_ms" in budgets else 30000
-    max_timeout = max(0.1, min(3600.0, max_wall_ms / 1000.0))
+    if "max_duration_seconds" in budgets:
+        raw_seconds = float(budgets["max_duration_seconds"])
+    elif "max_wall_time_ms" in budgets:
+        raw_seconds = float(budgets["max_wall_time_ms"]) / 1000.0
+    else:
+        raw_seconds = 30.0
+    max_timeout = max(0.1, min(3600.0, raw_seconds))
+    deadline = time.monotonic() + max_timeout
     runner = ScriptRunner(
         home,
         extra_write_roots=policy.write_roots,
         public_read_roots=policy.read_roots,
+        restrict_to_roots=True,
     )
     if plan.action == "execute.script":
         result = runner.run_script(
@@ -178,8 +204,8 @@ def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
     original_run = runner.run_script
     host_errors: list[HostAPIError] = []
 
-    # LLM: 工作流每个脚本步骤启动前后必须复核撤权与步骤脚本版本栅栏，且固定禁用网络。
-    # 函数用途: 包装工作流步骤脚本执行器以强制逐步栅栏、脚本哈希校验与禁网约束。
+    # LLM: 工作流每个脚本步骤启动前后必须复核撤权、剩余总时长与步骤脚本完整指纹栅栏，且固定禁用网络。
+    # 函数用途: 包装工作流步骤脚本执行器以强制逐步栅栏、脚本哈希校验、总预算剩余时长与禁网约束。
     def _guarded_run_script(
         script_id,
         inputs=None,
@@ -190,10 +216,13 @@ def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
     ):
         try:
             fence.check()
-            current = _script_grant(home, script_id, policy.allowed_assets)
+            current = _script_fingerprint(home, script_id, policy.allowed_assets)
             if frozen_scripts.get(script_id) != current:
                 raise HostAPIError("ASSET_CHANGED", 409)
-            eff_timeout = max_timeout if timeout_seconds is None else min(float(timeout_seconds), max_timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise HostAPIError("EXECUTION_TIMEOUT", 504)
+            eff_timeout = max(0.05, remaining if timeout_seconds is None else min(float(timeout_seconds), remaining))
             res = original_run(
                 script_id,
                 inputs=inputs,
@@ -202,7 +231,7 @@ def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
                 network_access=False,
             )
             fence.check()
-            if _script_grant(home, script_id, policy.allowed_assets) != current:
+            if _script_fingerprint(home, script_id, policy.allowed_assets) != current:
                 raise HostAPIError("ASSET_CHANGED", 409)
             return res
         except HostAPIError as exc:

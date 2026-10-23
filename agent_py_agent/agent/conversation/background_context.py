@@ -848,6 +848,25 @@ def _safe_recovery_snapshot(
         }
 
 
+# LLM: 按精确goal_id、task_id或线程未结Goal核对插件零工具元数据，不依赖Goal处于active状态。
+# 函数用途: 判断当前后台请求关联的线程Goal是否声明了插件零工具策略。
+def _has_plugin_zero_tool_goal(store: object, thread_id: str, goal_id: str, task_id: str) -> bool:
+    if store is None or not thread_id or getattr(store, "goals", None) is None:
+        return False
+    try:
+        goals, _ = store.goals.list_report(thread_id)
+    except Exception:
+        return False
+    for item in goals or ():
+        matched = (goal_id and getattr(item, "goal_id", "") == goal_id) or (
+            task_id and getattr(item, "task_id", "") == task_id
+        ) or (not goal_id and not task_id and getattr(item, "status", "") in {"active", "paused", "budget_limited"})
+        goal_meta = getattr(item, "metadata", None) if matched else None
+        if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
+            return True
+    return False
+
+
 # LLM: 从宿主请求、配置和 owner policy 构造纯策略输入；快照与执行身份保持原合同，不从提示提权。
 # 函数用途: 给上下文和历史准备统一的后台工具策略参数。
 def tool_policy_request(
@@ -859,14 +878,12 @@ def tool_policy_request(
     snapshot = policy_snapshot_from_request(request)
     store = getattr(agent, "conversation_store", None)
     thread_id = str(getattr(request, "thread_id", "") or "").strip()
-    if store is not None and thread_id and getattr(store, "goals", None) is not None:
-        try:
-            goal = store.goals.active(thread_id)
-            goal_meta = getattr(goal, "metadata", None)
-            if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
-                snapshot = {**snapshot, "tool_policy": "none"}
-        except Exception:
-            pass
+    task_id = str(getattr(request, "task_id", "") or "").strip()
+    wake = getattr(request, "wake_signal", None)
+    wake_meta = (wake.get("metadata") if isinstance(wake, dict) else getattr(wake, "metadata", None)) or {}
+    goal_id = str(wake_meta.get("goal_id") or "").strip() if isinstance(wake_meta, dict) else ""
+    if _has_plugin_zero_tool_goal(store, thread_id, goal_id, task_id):
+        snapshot = {**snapshot, "tool_policy": "none"}
     return BackgroundToolPolicyRequest(
         reason=str(getattr(request, "reason", "") or ""),
         wake_signal=getattr(request, "wake_signal", None),

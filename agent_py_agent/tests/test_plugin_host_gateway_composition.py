@@ -351,8 +351,12 @@ def test_production_goal_replay_zero_tool_wake_and_task_cancel_scope(production_
 
     resources = production_host[0].plugin_host.composition.ports.observations.services.resources
     store = resources.store_for(SimpleNamespace(owner_home=production_host[2]))
+    goal = first.get("goal", first)
+    task_id = goal["task_id"]
     wakes = [w for w in store.wakes.pending(limit=10) if w.thread_id == tid]
     assert wakes and wakes[0].metadata.get("tool_policy") == "none"
+    assert wakes[0].root_task_id == task_id
+    assert wakes[0].reason == "thread_goal_continue"
     agent = SimpleNamespace(
         config=SimpleNamespace(enable_tools=True),
         owner_policy=None,
@@ -368,10 +372,10 @@ def test_production_goal_replay_zero_tool_wake_and_task_cancel_scope(production_
     params = _run_params(tid, req, agent)
     assert params.allowed_tools == []
 
-    goal = first.get("goal", first)
-    task_id = goal["task_id"]
     task = production_call(production_host, "tasks.get", {"task_id": task_id})
     task = task.get("task", task)
+    unrelated_claim = store.claims.acquire({"thread_id": tid, "task_id": "owner-own-background-task", "reason": "audit_probe"})
+    assert unrelated_claim is not None
     paths = resources.paths_for(SimpleNamespace(owner_home=production_host[2]))
     other = {
         "id": "plugin-msg-other-installation-0001",
@@ -389,6 +393,8 @@ def test_production_goal_replay_zero_tool_wake_and_task_cancel_scope(production_
                     key="cancel_scope_act_a01", status=202)
     row = json.loads(other_path.read_text(encoding="utf-8"))
     assert row.get("cancel_requested") is not True
+    after_claim, _ = store.claims.load_report(tid)
+    assert after_claim.get("cancel_requested") is not True
 
 
 # LLM: 验证workflow_resume核对断点快照与当前注册工作流一致，且步骤脚本被篡改时拒绝执行。
@@ -438,5 +444,57 @@ def test_production_workflow_resume_snapshot_and_step_script_fence(tmp_path):
             "payload": {"thread_id": thread["thread_id"], "workflow_id": "wf-one", "expected_revision": 1},
         })
         assert status == 409 and changed["error"]["code"] == "ASSET_CHANGED"
+    finally:
+        next(fixture, None)
+
+
+# LLM: 验证已注册脚本执行严格限制在目标Owner已授权read_roots与write_roots内。
+# 函数用途: 回归execute.script对业务根外同Owner私有目录读写的强制拒绝。
+def test_production_script_enforces_business_read_and_write_roots(tmp_path):
+    import hashlib
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+
+    code = (
+        "import json, sys\nfrom pathlib import Path\nargs = json.load(sys.stdin)\n"
+        "res = {'denied_read': False, 'denied_write': False}\n"
+        "try:\n    Path(args['outside']).read_text()\nexcept PermissionError:\n    res['denied_read'] = True\n"
+        "try:\n    Path(args['outside']).write_text('x')\nexcept PermissionError:\n    res['denied_write'] = True\n"
+        "Path(args['out']).write_text(json.dumps(res))\nprint(json.dumps({'ok': True}))\n"
+    )
+    fixture = production_host.__wrapped__(tmp_path, SimpleNamespace(param={
+        "asset_refs": [{"kind": "script", "id": "script-one", "revision": 1,
+                        "sha256": hashlib.sha256(code.encode("utf-8")).hexdigest()}]
+    }))
+    host = next(fixture)
+    try:
+        production_call(host, "users.local.create", {"user_id": "alice"}, key="isolation_alice_01", status=201)
+        thread = production_call(host, "conversations.threads.create", {}, user="alice", key="isolation_thread_01", status=201)
+        home = host[2].root / "owners/local/alice"
+        outside = home / "synthetic-private" / "canary.txt"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text("secret", encoding="utf-8")
+        out_path = home / "workspace" / "iso-out.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        ScriptStore(home, extra_roots=()).save_script(
+            AssetDescriptor(id="script-one", kind="script", name="script-one", metadata={"revision": 1}),
+            code,
+        )
+        accepted = production_call(
+            host,
+            "execute.script",
+            {"thread_id": thread["thread_id"], "script_id": "script-one", "expected_revision": 1,
+             "inputs": {"outside": str(outside), "out": str(out_path)}},
+            user="alice",
+            key="isolation_execute_01",
+            status=202,
+        )
+        poll = production_call(host, "conversations.requests.poll", {"request_id": accepted["request_id"]}, user="alice")
+        assert poll["request"]["state"] == "succeeded"
+        observed = json.loads(out_path.read_text(encoding="utf-8"))
+        assert observed == {"denied_read": True, "denied_write": True}
+        assert outside.read_text(encoding="utf-8") == "secret"
     finally:
         next(fixture, None)

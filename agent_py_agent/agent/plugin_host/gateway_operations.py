@@ -50,10 +50,16 @@ class GatewayOperations:
         for task in tasks:
             self.services.revalidate(authorized)
             path = context.store.storage.background_claim_path(task.thread_id)
-            # 取消标记留在原claim，不以active TaskLink推断有可杀进程。
+            # 取消标记留在原claim，仅当当前claim属于同一task_id时写入，不以active TaskLink推断有可杀进程或误伤无关任务。
             if path.exists():
-                update_json_file_atomic(path, lambda row: {**row, "cancel_requested": True,
-                    "cancel_reason": reason, "cancel_task_id": task.task_id})
+                update_json_file_atomic(
+                    path,
+                    lambda row, tid=task.task_id: (
+                        {**row, "cancel_requested": True, "cancel_reason": reason, "cancel_task_id": tid}
+                        if row.get("task_id") == tid and bool(tid)
+                        else row
+                    ),
+                )
             _cancel_task_gateway_requests(read, paths, task, authorized.binding.installation_ref)
         return {"cancel_requested": True, "resources_stopped": None}
 
@@ -77,13 +83,23 @@ class GatewayOperations:
     def updated(self, authorized, goal):
         self.services.resolve(authorized).store.tasks.update_goal({"task_id": goal.task_id, "goal": goal.objective})
 
-    # LLM: 唤醒携原Goal和插件来源，不能把暂停/清除转换为资源取消。
+    # LLM: 唤醒携原Goal任务身份、原因与插件来源，不能把暂停/清除转换为资源取消。
     # 函数用途: 向原唤醒队列提交准确的后续调度信号。
     def resumed(self, authorized, goal):
         context = self.services.resolve(authorized)
-        context.store.wakes.raise_signal({"thread_id": goal.thread_id, "task_id": goal.task_id,
-            "kind": "goal_continue", "source": "plugin_control", "dedupe_key": f"{goal.goal_id}:{goal.revision}",
-            "metadata": {"plugin_origin": goal.metadata["plugin_origin"], "tool_policy": "none"}})
+        context.store.wakes.raise_signal({
+            "thread_id": goal.thread_id,
+            "root_task_id": goal.task_id,
+            "reason": "thread_goal_continue",
+            "source": "plugin_control",
+            "dedupe_key": f"{goal.goal_id}:{goal.revision}",
+            "metadata": {
+                "goal_id": goal.goal_id,
+                "task_id": goal.task_id,
+                "plugin_origin": goal.metadata["plugin_origin"],
+                "tool_policy": "none",
+            },
+        })
 
     # LLM: 不把插件传入字符串、dict或自己的token当真人；UI签票只走另一个宿主认证端口。
     # 函数用途: 拒绝未由宿主真人入口认证的票据签发。
