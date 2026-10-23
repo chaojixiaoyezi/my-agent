@@ -104,7 +104,7 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     ctx.job.completion_status = "completed" if response.get("ok") else "failed"
     terminal_response_streamed = terminal_response_streamed_ref[0] > 0
     _render_if_needed(ctx, response_text, terminal_response_streamed)
-    _print_local_timing(response)
+    _print_gateway_timing(response)
     return response_text, terminal_response_streamed
 
 
@@ -203,6 +203,12 @@ def _render_if_needed(
 def _print_local_timing(result) -> None:
     rounds = result.get("tool_rounds", 0) if isinstance(result, dict) else getattr(result, "tool_rounds", 0)
     _cprint(f"{GRAY}[工具轮数 {rounds}; ctx_tokens~{current_context_token_estimate(result)}]{RESET}")
+
+
+# LLM: 保持 Gateway 普通终端回合统计入口兼容，总耗时仍由 worker 单调时钟唯一输出。
+# 函数用途: 输出 Gateway 回合的工具轮数与上下文 token 估算。
+def _print_gateway_timing(response, *_args) -> None:
+    _print_local_timing(response)
 
 
 __all__ = [

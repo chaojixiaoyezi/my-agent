@@ -835,7 +835,7 @@ def _require_user_image_capability(agent, params):
     declared = getattr(getattr(agent, "config", None), "model_input_modalities", None) or ()
     modalities = tuple(str(item).strip().lower() for item in declared)
     if media and (not native_tool_use_active(params)
-            or not getattr(getattr(agent, "backend", None), "supports_native_tool_ir", False)
+            or getattr(getattr(agent, "backend", None), "supports_native_tool_ir", True) is False
             or bool(modalities) and "image" not in modalities):
         raise InputMediaError("当前模型或协议不支持图片，已拒绝丢图发送；请切换支持图片的模型。")
 

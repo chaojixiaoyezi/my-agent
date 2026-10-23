@@ -25,7 +25,7 @@ from .requests import read_request_facts
 from .schemas import canonical_json, strict_json, thaw
 
 # 每次观察最多读取1024份原记录；超过预算失败关闭，不报告不完整零占用。
-RUNTIME_OBSERVATION_MAX_RECORDS = 1024
+RUNTIME_OBSERVATION_MAX_COUNT = 1024
 # 单条原claim或输入记录的读取上限，单位字节。
 RUNTIME_RECORD_MAX_BYTES = 4 * 1024 * 1024
 
@@ -46,7 +46,7 @@ def runtime_rows(home, directory):
             for entry in entries:
                 if not entry.name.endswith(".json"):
                     continue
-                if len(rows) >= RUNTIME_OBSERVATION_MAX_RECORDS:
+                if len(rows) >= RUNTIME_OBSERVATION_MAX_COUNT:
                     raise HostAPIError("STORE_UNAVAILABLE", 503)
                 raw = read_bytes_beneath(home.root, (*relative.parts, entry.name), max_bytes=RUNTIME_RECORD_MAX_BYTES,
                                          require_dir_fd=True)

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1098,
+  "count": 1131,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5634,6 +5634,270 @@
       "unit": "",
       "category": "其它",
       "description": "插件可执行文件的权限位（八进制）；可执行脚本用 0o500（无物理单位）。"
+    },
+    {
+      "name": "ARTIFACT_HASH_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/artifacts.py",
+      "value": 67108864,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单次完整hash读取的硬预算；过大制品明确拒绝，不跳过校验回正文。"
+    },
+    {
+      "name": "ARTIFACT_IO_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/artifacts.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "每个hash读取块的字节上限，不一次性装入整个大文件。"
+    },
+    {
+      "name": "CURSOR_LIFETIME_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/conversations.py",
+      "value": 900,
+      "unit": "秒",
+      "category": "其它",
+      "description": "游标允许续读的固定窗口，单位秒；并非授权有效期，返回前仍重核A0。"
+    },
+    {
+      "name": "CURSOR_MAX_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/cursors.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个服务允许保留的游标引用数量上限。"
+    },
+    {
+      "name": "CURSOR_TTL_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/cursors.py",
+      "value": 900,
+      "unit": "秒",
+      "category": "其它",
+      "description": "游标最长寿命，单位秒。"
+    },
+    {
+      "name": "POSITION_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/cursors.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个内部位置快照的JSON字节上限。"
+    },
+    {
+      "name": "RUNTIME_OBSERVATION_MAX_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/gateway_runtime.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每次观察最多读取1024份原记录；超过预算失败关闭，不报告不完整零占用。"
+    },
+    {
+      "name": "RUNTIME_RECORD_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/gateway_runtime.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条原claim或输入记录的读取上限，单位字节。"
+    },
+    {
+      "name": "ANCHOR_SAMPLE_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/history.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "其它",
+      "description": "冻结首尾摘要各取的字节窗口（bytes）。"
+    },
+    {
+      "name": "HASH_CHUNK_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/history.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "流式复核固定前缀时的块大小（bytes）。"
+    },
+    {
+      "name": "HISTORY_RECORD_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/history.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "原消息单行的内存上限，超出明确413，不伪装损坏或空历史（bytes）。"
+    },
+    {
+      "name": "PAGE_ENVELOPE_RESERVE_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/history.py",
+      "value": 8192,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "为页信封与MAC游标预留的JSON字节预算（bytes）。"
+    },
+    {
+      "name": "HEARTBEAT_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 15.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "空闲心跳及撤权检查间隔，单位秒。"
+    },
+    {
+      "name": "INSTALL_STREAM_MAX_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 2,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每个安装最多同时保留的流数，不按目标owner分裂额度。"
+    },
+    {
+      "name": "RATE_BUCKET_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "其它",
+      "description": "限流键缓存上限，满时拒绝而不是丢弃活跃计数。"
+    },
+    {
+      "name": "RATE_WINDOW_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "限流窗口，单位秒。"
+    },
+    {
+      "name": "READ_RATE_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 10,
+      "unit": "个",
+      "category": "其它",
+      "description": "一个窗口读取调用数量上限。"
+    },
+    {
+      "name": "SOCKET_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "慢客户端写入超时，单位秒。"
+    },
+    {
+      "name": "STREAM_MAX_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 16,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "每个宿主最多同时保留的流数；每流最多占两个专用worker。"
+    },
+    {
+      "name": "STREAM_QUEUE_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 8,
+      "unit": "个",
+      "category": "其它",
+      "description": "单流事件缓冲条数上限。"
+    },
+    {
+      "name": "WRITE_RATE_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/http_transport.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "一个窗口写入调用数量上限。"
+    },
+    {
+      "name": "MAX_TICKETS_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/interactions.py",
+      "value": 1024,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单宿主实例的短期票据上限，不为插件构造无限内存账本。"
+    },
+    {
+      "name": "TICKET_TTL_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/interactions.py",
+      "value": 60,
+      "unit": "秒",
+      "category": "其它",
+      "description": "票据最多存活六十秒，原卡到期更早时采用原卡期限。"
+    },
+    {
+      "name": "MEMORY_CHUNK_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/memory.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单次原文读取UTF8字节上限。"
+    },
+    {
+      "name": "MEMORY_SNIPPET_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/memory.py",
+      "value": 2048,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条搜索片段UTF8字节上限。"
+    },
+    {
+      "name": "OBSERVATION_CURSOR_TTL_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/memory.py",
+      "value": 300,
+      "unit": "秒",
+      "category": "其它",
+      "description": "只读游标有效秒数；服务重启会换MAC密钥，旧游标自动失效。"
+    },
+    {
+      "name": "OBSERVATION_STORE_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/memory.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单次正式账读取的硬预算；超限明确失败，绝不扫描前缀后宣称完整。"
+    },
+    {
+      "name": "_MAX_RECORD_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/requests.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条插件会话请求或回执 JSON 记录的最大读取字节数（4 MiB）。"
+    },
+    {
+      "name": "JSON_DEPTH_COUNT",
+      "file": "agent_py_agent/agent/plugin_host/schemas.py",
+      "value": 12,
+      "unit": "个",
+      "category": "其它",
+      "description": "JSON嵌套层数上限，先迭代检查再做递归投影。"
+    },
+    {
+      "name": "PAGE_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/schemas.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单页公开JSON响应的字节上限。"
+    },
+    {
+      "name": "REQUEST_MAX_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/schemas.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个公共请求的UTF8字节上限。"
+    },
+    {
+      "name": "_HEARTBEAT_SECONDS",
+      "file": "agent_py_agent/agent/plugin_host/streams.py",
+      "value": 15.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "SSE 流式心跳间隔 15 秒：无新事件时定期发送注释帧保持连接活跃。"
+    },
+    {
+      "name": "_MAX_FRAME_BYTES",
+      "file": "agent_py_agent/agent/plugin_host/streams.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条 SSE 事件帧最大字节数 64 KiB：防止超大事件占用流缓冲。"
     },
     {
       "name": "MAX_THREAD_COUNT",

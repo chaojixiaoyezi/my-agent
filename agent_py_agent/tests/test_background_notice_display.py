@@ -1732,9 +1732,11 @@ def test_late_foreground_attachment_replaces_early_history_not_other_messages(tm
     runtime.complete_turn("gwreq-queued", TuiTurnSummary(response_text=final.content))
     runtime.publish_recovered_history((), display_events=events)
 
-    assert [(b.role, b.text) for b in runtime.store.snapshot().stable_blocks] == [
+    blocks = [(b.role, b.text) for b in runtime.store.snapshot().stable_blocks]
+    assert blocks[:-1] == [
         ("user", user.content), ("user", user.content), ("assistant", final.content),
     ]
+    assert blocks[-1][0] == "system" and blocks[-1][1].startswith("完成于 ")
     assert [(b.role, b.text) for b in observer.store.snapshot().stable_blocks] == [
         ("user", user.content), ("assistant", final.content),
     ]

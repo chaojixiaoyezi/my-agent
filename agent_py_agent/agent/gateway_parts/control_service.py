@@ -1402,7 +1402,13 @@ def _execute_effort_control(
     try:
         if command.operation == "set":
             from .model_profile_service import execute_model_text_control
-            return execute_model_text_control(base_agent, command, scope)
+            result = execute_model_text_control(base_agent, command, scope)
+            if not result.ok:
+                return result
+            owner_agent = _request_agent_for_scope(base_agent, scope)
+            thread_id = str((result.details or {}).get("thread_id") or "")
+            extra = effort_probe_lines(owner_agent, thread_id, command) if thread_id else []
+            return replace(result, message="\n".join([result.message, *extra])) if extra else result
         owner_agent = _request_agent_for_scope(base_agent, scope)
         thread = _settings_thread(owner_agent, scope)
         if command.operation == "set":

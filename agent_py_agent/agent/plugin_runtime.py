@@ -273,7 +273,8 @@ class PluginMCPClient(MCPStdioClient):
         self.validated_tools: tuple[PluginProxyTool, ...] = ()
         # v9不要求read隐含授权；任一显式能力申请都取得自己的v2入口，令牌仍只绑定本激活。
         host_api_env = (issue_host_api_env(self.activation_ref, installation.manifest.plugin_id)
-                        if installation.manifest.host_api_v9 or HOST_API_READ in installation.manifest.host_api else {})
+                        if getattr(installation.manifest, "host_api_v9", False)
+                        or HOST_API_READ in getattr(installation.manifest, "host_api", ()) else {})
         super().__init__(MCPServerConfig(
             name="plugin_" + installation.manifest.plugin_id,
             command=command, args=args, cwd=str(cwd),

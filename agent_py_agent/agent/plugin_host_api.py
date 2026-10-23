@@ -67,7 +67,7 @@ def issue_host_api_env(activation_ref, plugin_id: str) -> dict[str, str]:
         current = activation_ref.require(allow_preparing=True)
         if current.manifest.plugin_id != plugin_id:
             raise ValueError("令牌插件身份不一致")
-        if current.manifest.host_api_v9:
+        if getattr(current.manifest, "host_api_v9", False):
             validate_installation_grant(current)
             host_json = current.activation.host_api_grant_json
     with _LOCK:

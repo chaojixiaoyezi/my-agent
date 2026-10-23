@@ -430,6 +430,11 @@ class GatewayHTTPServer:
                 group.bind_executor(self.server._request_executor)
             self.server.server_version = "MyAgentGateway/1.0"
             self.server.handler_class = GatewayHTTPHandler
+            if getattr(getattr(self.plugin_host, "streams", None), "_closed", False):
+                from ..plugin_host.gateway_composition import build_gateway_host_composition
+                from ..plugin_host.http_transport import HostTransport
+
+                self.plugin_host = HostTransport(build_gateway_host_composition(self, self.paths))
             self.plugin_host.start(self.drain_runtime)
             self._thread = threading.Thread(target=self._serve, daemon=True)
             listener = (self.drain_runtime.retain_thread("control", "http/listener", self._thread)
@@ -527,7 +532,8 @@ class GatewayHTTPServer:
 
         if self.coordinator_memory_resources is not None:
             self.coordinator_memory_resources.close_admission()
-        self.plugin_host.close()
+        if getattr(self, "plugin_host", None) is not None:
+            self.plugin_host.close()
         set_host_api_base(None)
         # G4：停机时注销本服务登记的 Gateway 端口（在 server_close 前取端口）。
         if self.server:

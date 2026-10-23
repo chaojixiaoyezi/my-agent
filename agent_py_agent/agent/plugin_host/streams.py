@@ -12,7 +12,9 @@ from .schemas import canonical_json, closed, integer, text, validate_object
 
 _STATES = ("queued", "admission_wait", "running", "waiting_approval", "waiting_input",
            "cancelling", "succeeded", "failed", "cancelled", "unknown")
+# SSE 流式心跳间隔 15 秒：无新事件时定期发送注释帧保持连接活跃。
 _HEARTBEAT_SECONDS = 15.0
+# 单条 SSE 事件帧最大字节数 64 KiB：防止超大事件占用流缓冲。
 _MAX_FRAME_BYTES = 65536
 
 

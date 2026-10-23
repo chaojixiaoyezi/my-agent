@@ -16,6 +16,7 @@ from ..runtime_errors import DataCorruptionError
 from .contracts import project_request_state as project_request_state
 from .errors import HostAPIError
 
+# 单条插件会话请求或回执 JSON 记录的最大读取字节数（4 MiB）。
 _MAX_RECORD_BYTES = 4 * 1024 * 1024
 
 
