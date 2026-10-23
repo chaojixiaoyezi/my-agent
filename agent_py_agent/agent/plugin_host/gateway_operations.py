@@ -54,7 +54,7 @@ class GatewayOperations:
             if path.exists():
                 update_json_file_atomic(path, lambda row: {**row, "cancel_requested": True,
                     "cancel_reason": reason, "cancel_task_id": task.task_id})
-            _cancel_task_gateway_requests(read, paths, task)
+            _cancel_task_gateway_requests(read, paths, task, authorized.binding.installation_ref)
         return {"cancel_requested": True, "resources_stopped": None}
 
     # LLM: 调度准入只允许原零工具Goal合同，不能用main的工具目录执行；当前来源仍经A末核。
@@ -105,25 +105,25 @@ class GatewayOperations:
 
 # LLM: 仅扫描同owner原inbox/processing目录，匹配目标任务或线程时进入单请求转换锁标记取消。
 # 函数用途: 将任务取消请求同步到当前关联的Gateway请求记录。
-def _cancel_task_gateway_requests(read, paths, task) -> None:
+def _cancel_task_gateway_requests(read, paths, task, installation_ref: str) -> None:
     for folder in (paths.inbox, paths.processing):
         for row in runtime_rows(read.owner_home, folder):
-            _mark_request_cancelled(paths, folder, row, task)
+            _mark_request_cancelled(paths, folder, row, task, installation_ref)
 
 
 # LLM: 在gateway_input_transition锁内原子写入cancel_requested=True，不伪造进程终止。
-# 函数用途: 当请求属于目标线程或任务时写入取消请求标记。
-def _mark_request_cancelled(paths, folder: Path, row: dict, task) -> None:
+# 函数用途: 当请求属于目标任务与同一插件安装时写入取消请求标记。
+def _mark_request_cancelled(paths, folder: Path, row: dict, task, installation_ref: str) -> None:
     from ..gateway_parts import input_delivery_service as inputs
     from ..gateway_parts.io import update_json_file_atomic
 
     rid = row.get("id")
     if not isinstance(rid, str):
         return
-    tid = (row.get("conversation") or {}).get("thread_id") or (
-        ((row.get("metadata") or {}).get("plugin_provenance") or {}).get("thread_id")
-    )
-    if tid != task.thread_id and f"gateway:{rid}" != task.task_id:
+    provenance = ((row.get("metadata") or {}).get("plugin_provenance") or {})
+    if provenance.get("installation_ref") != installation_ref:
+        return
+    if f"gateway:{rid}" != task.task_id and row.get("task_id") != task.task_id:
         return
     with inputs.gateway_input_transition(paths, rid):
         req_path = folder / f"{rid}.json"

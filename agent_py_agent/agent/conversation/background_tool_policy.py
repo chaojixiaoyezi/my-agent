@@ -227,6 +227,21 @@ def background_tool_policy_decision(
 ) -> BackgroundToolPolicyDecision:
     if request is None:
         request = BackgroundToolPolicyRequest(config=config)
+    wake_meta = (request.wake_signal.get("metadata") or {}) if isinstance(request.wake_signal, dict) else {}
+    policy_meta = request.policy_snapshot if isinstance(request.policy_snapshot, dict) else {}
+    if (
+        wake_meta.get("tool_policy") == "none"
+        or wake_meta.get("plugin_origin")
+        or policy_meta.get("tool_policy") == "none"
+        or policy_meta.get("plugin_origin")
+    ):
+        return BackgroundToolPolicyDecision(
+            allowed_tools=(),
+            profile="plugin_goal_zero_tools",
+            sources=("plugin_origin:tool_policy=none",),
+            removed_tools=(),
+            extension_tools=EXTENSION_TOOLS_NONE,
+        )
     config = request.config if request.config is not None else config
     configured = tool_names(getattr(config, "background_main_agent_allowed_tools", None))
     if configured:

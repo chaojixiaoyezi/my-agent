@@ -856,12 +856,23 @@ def tool_policy_request(
     *,
     proactive_delivery_available: bool | None = None,
 ) -> BackgroundToolPolicyRequest:
+    snapshot = policy_snapshot_from_request(request)
+    store = getattr(agent, "conversation_store", None)
+    thread_id = str(getattr(request, "thread_id", "") or "").strip()
+    if store is not None and thread_id and getattr(store, "goals", None) is not None:
+        try:
+            goal = store.goals.active(thread_id)
+            goal_meta = getattr(goal, "metadata", None)
+            if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
+                snapshot = {**snapshot, "tool_policy": "none"}
+        except Exception:
+            pass
     return BackgroundToolPolicyRequest(
         reason=str(getattr(request, "reason", "") or ""),
         wake_signal=getattr(request, "wake_signal", None),
         config=getattr(agent, "config", None),
         owner_policy=getattr(agent, "owner_policy", None),
-        policy_snapshot=policy_snapshot_from_request(request),
+        policy_snapshot=snapshot,
         proactive_delivery_available=proactive_delivery_available,
     )
 

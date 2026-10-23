@@ -2112,7 +2112,7 @@ def _run_params(
                 wake_signal=request.wake_signal,
                 config=config,
                 owner_policy=getattr(agent, "owner_policy", None),
-                policy_snapshot=policy_snapshot_from_request(request),
+                policy_snapshot=_background_policy_snapshot(request, resolved_goal_context.goal),
                 active_goal=resolved_goal_context.goal is not None,
                 goal_subagent_phase=resolved_goal_context.subagent_phase,
                 proactive_delivery_available=proactive_delivery_available,
@@ -2393,6 +2393,16 @@ def _session_message_run_id(request: BackgroundRunRequest) -> str:
     return str(wake.get("wake_signal_id") or "").strip()
 
 
+# LLM: 合并唤醒快照与活动Goal的插件零工具标记，防止插件目标线程被其它后台唤醒时绕过零工具边界。
+# 函数用途: 生成包含活动Goal工具限制的后台策略快照。
+def _background_policy_snapshot(request: BackgroundRunRequest, goal: object | None) -> dict[str, Any]:
+    snapshot = dict(policy_snapshot_from_request(request))
+    goal_meta = getattr(goal, "metadata", None)
+    if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
+        snapshot.setdefault("tool_policy", "none")
+    return snapshot
+
+
 # LLM: 后台续跑白名单 = 策略决策的核心目录 + （decision.extension_tools=inherit 时）注册表当前的插件/普通 MCP
 #   代理工具名。扩展名来自 ToolRegistry.extension_tool_names 的结构化类型事实，不按名称前缀猜；显式配置或任务
 #   白名单（extension_tools=none）不并入。真实断链：子代理生命周期唤醒后的 attempt 只拿到 17 个核心工具，模型继续
@@ -2403,12 +2413,14 @@ def _background_run_allowed_tools(
     config: object | None,
     request: BackgroundToolPolicyRequest,
 ) -> list[str] | None:
+    decision = background_tool_policy_decision(config, request=request)
+    if decision.profile == "plugin_goal_zero_tools":
+        return []
     # A durable user schedule is a fresh turn of the same owner agent, not the
     # internal wait/progress lane.  通道运行时 follows the same full-agent-turn
     # model; registry owner policy still removes disabled tools fail-closed.
     if str(request.reason or "").strip().lower() == "scheduled_job_due":
         return None
-    decision = background_tool_policy_decision(config, request=request)
     tools = list(decision.allowed_tools)
     if decision.extension_tools == EXTENSION_TOOLS_INHERIT:
         tools.extend(name for name in _registry_extension_tool_names(agent) if name not in tools)

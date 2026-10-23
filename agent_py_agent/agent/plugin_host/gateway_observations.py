@@ -118,7 +118,7 @@ class GatewayObservationServices:
                 if prior.input_digest != fingerprint:
                     raise HostAPIError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", 409)
                 if prior.state == "completed":
-                    result = prior.result["plugin_domain"]
+                    result = prior.result.get("details") or prior.result["plugin_domain"]
                     return DomainResult(result["status"], result["data"])
                 raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
             import time
@@ -132,7 +132,8 @@ class GatewayObservationServices:
                     path.unlink(missing_ok=True)
                 raise
             write_json_file_atomic(path, replace(operation, state="completed", updated_at=time.time(), result={
-                "plugin_domain": {"status": result.http_status, "data": thaw(result.data)}}).to_dict())
+                "kind": "plugin_domain", "ok": True, "message": "",
+                "details": {"status": result.http_status, "data": thaw(result.data)}}).to_dict())
             return result
 
     # LLM: 只从已授权原task_path读取注册账，路径为空/跨owner不能当制品根；不扫描整个owner。

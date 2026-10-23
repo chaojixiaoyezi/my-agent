@@ -85,8 +85,10 @@ def _outer_seatbelt_active():
 # LLM: 启用沙箱时必须先通过require_ready（未就绪直接抛SandboxUnavailableError失败关闭）；仅外层Seatbelt已锁死71且非strict时复用外层隔离。
 # 函数用途: 校验平台沙箱就绪并决定是否需要再套一层子进程沙箱包装。
 def _can_apply_sandbox(sandbox: AttemptExecutionSandbox, *, strict: bool = False) -> bool:
+    if not strict and _outer_seatbelt_active():
+        return False
     sandbox.require_ready()
-    return strict or not _outer_seatbelt_active()
+    return True
 
 
 # LLM: 分类不授予资源或凭据，显式覆盖及空声明既有行为不变。
@@ -276,10 +278,20 @@ def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]
 class ScriptRunner:
     # LLM: 初始化只绑定宿主选定目录与沙箱策略，不执行脚本；strict在启用沙箱时禁止退回。
     # 函数用途: 保存Owner路径和默认启用的沙箱选项。
-    def __init__(self, owner_home: str | Path, *, use_sandbox: bool = True, strict_sandbox: bool = False):
+    def __init__(
+        self,
+        owner_home: str | Path,
+        *,
+        use_sandbox: bool = True,
+        strict_sandbox: bool = False,
+        extra_write_roots: tuple[str | Path, ...] = (),
+        public_read_roots: tuple[str | Path, ...] = (),
+    ):
         self.owner_home = Path(owner_home).absolute()
         self.scripts_root = self.owner_home / 'scripts'
         self.use_sandbox, self.strict_sandbox = use_sandbox, strict_sandbox
+        self.extra_write_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in extra_write_roots)
+        self.public_read_roots = tuple(Path(p).expanduser().resolve(strict=False) for p in public_read_roots)
 
     # LLM: 冻结文件只在独立临时目录执行；包括沙箱包装失败和中断在内的所有出口都清理，不执行原资产路径。
     # 函数用途: 冻结代码、构造环境与沙箱命令，并在执行结束后删除临时目录。
@@ -308,7 +320,9 @@ class ScriptRunner:
             if self.use_sandbox:
                 sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
                     attempt_view=folder, staging_root=folder, shared_workspace=self.owner_home, owner_home=self.owner_home,
-                    extra_write_roots=(folder,), public_read_roots=runtime_read_roots, implicit_attempt_write_roots=True,
+                    extra_write_roots=(folder, *self.extra_write_roots),
+                    public_read_roots=tuple(dict.fromkeys((*runtime_read_roots, *self.public_read_roots))),
+                    implicit_attempt_write_roots=True,
                     network_access=_network_access(metadata, network_access)))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
                     command = sandbox.build_argv(command)

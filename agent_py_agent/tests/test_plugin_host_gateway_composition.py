@@ -332,3 +332,111 @@ def test_production_worker_enforces_plugin_execution_policy_and_thread_binding(p
         bad = {**request, "metadata": {**request["metadata"], "plugin_execution_policy": {
             **request["metadata"]["plugin_execution_policy"], "tool_names": ["read_file"]}}}
         _gateway_run_params(_GatewayRunParamsRequest(bad, ctx, conversation, "check worker"))
+
+
+# LLM: 验证goals.create持久幂等重放、后台唤醒零工具继承，以及tasks.cancel精确作用范围。
+# 函数用途: 回归插件目标重放、唤醒策略快照与取消隔离合同。
+def test_production_goal_replay_zero_tool_wake_and_task_cancel_scope(production_host):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.runtime import _run_params, _run_request
+
+    thread = production_call(production_host, "conversations.threads.create", {}, key="goal_replay_thread1", status=201)
+    tid = thread["thread_id"]
+    first = production_call(production_host, "goals.create", {"thread_id": tid, "objective": "plugin goal"},
+                            key="goal_idempotent_key01", status=201)
+    replay = production_call(production_host, "goals.create", {"thread_id": tid, "objective": "plugin goal"},
+                             key="goal_idempotent_key01", status=201)
+    assert first == replay and first["goal_id"]
+
+    resources = production_host[0].plugin_host.composition.ports.observations.services.resources
+    store = resources.store_for(SimpleNamespace(owner_home=production_host[2]))
+    wakes = [w for w in store.wakes.pending(limit=10) if w.thread_id == tid]
+    assert wakes and wakes[0].metadata.get("tool_policy") == "none"
+    agent = SimpleNamespace(
+        config=SimpleNamespace(enable_tools=True),
+        owner_policy=None,
+        conversation_store=store,
+        tools=SimpleNamespace(extension_tool_names=lambda: ["ext_tool"]),
+    )
+    req = _run_request({
+        "thread_id": tid,
+        "task_id": wakes[0].root_task_id,
+        "reason": wakes[0].reason,
+        "wake_signal": wakes[0].to_dict(),
+    })
+    params = _run_params(tid, req, agent)
+    assert params.allowed_tools == []
+
+    goal = first.get("goal", first)
+    task_id = goal["task_id"]
+    task = production_call(production_host, "tasks.get", {"task_id": task_id})
+    task = task.get("task", task)
+    paths = resources.paths_for(SimpleNamespace(owner_home=production_host[2]))
+    other = {
+        "id": "plugin-msg-other-installation-0001",
+        "kind": "ask",
+        "source": "plugin",
+        "goal": "synthetic other",
+        "status": "pending",
+        "metadata": {"plugin_provenance": {"installation_ref": "other-installation", "thread_id": tid, "kind": "chat"}},
+    }
+    other_path = paths.inbox / (other["id"] + ".json")
+    other_path.parent.mkdir(parents=True, exist_ok=True)
+    other_path.write_text(json.dumps(other), encoding="utf-8")
+    production_call(production_host, "tasks.cancel",
+                    {"task_id": task_id, "expected_revision": task["revision"]},
+                    key="cancel_scope_act_a01", status=202)
+    row = json.loads(other_path.read_text(encoding="utf-8"))
+    assert row.get("cancel_requested") is not True
+
+
+# LLM: 验证workflow_resume核对断点快照与当前注册工作流一致，且步骤脚本被篡改时拒绝执行。
+# 函数用途: 回归插件宿主资产执行的工作流快照一致性与步骤脚本哈希栅栏。
+def test_production_workflow_resume_snapshot_and_step_script_fence(tmp_path):
+    import hashlib
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.assets.workflow_store import (
+        WorkflowDefinition,
+        WorkflowStepSpec,
+        WorkflowStore,
+    )
+    from agent_py_agent.agent.plugin_host.schemas import canonical_json
+    from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
+
+    code = 'import json\nprint(json.dumps({"ok": True}))\n'
+    code_sha = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    wf_def = WorkflowDefinition(
+        AssetDescriptor(id="wf-one", kind="workflow", name="wf-one", metadata={"revision": 1}),
+        (WorkflowStepSpec("step-1", "step-1", "deterministic_script", script_id="script-one"),),
+    )
+    wf_sha = hashlib.sha256(canonical_json(wf_def.to_dict()["steps"]).encode("utf-8")).hexdigest()
+    fixture = production_host.__wrapped__(tmp_path, SimpleNamespace(param={
+        "asset_refs": [
+            {"kind": "script", "id": "script-one", "revision": 1, "sha256": code_sha},
+            {"kind": "workflow", "id": "wf-one", "revision": 1, "sha256": wf_sha},
+        ]
+    }))
+    host = next(fixture)
+    try:
+        production_call(host, "users.local.create", {"user_id": "alice"}, key="wf_alice_create_01", status=201)
+        thread = production_call(host, "conversations.threads.create", {}, user="alice", key="wf_thread_create01", status=201)
+        alice_home = host[2].root / "owners/local/alice"
+        ScriptStore(alice_home, extra_roots=()).save_script(
+            AssetDescriptor(id="script-one", kind="script", name="script-one", metadata={"revision": 1}),
+            code + "# tampered\n",
+        )
+        WorkflowStore(alice_home, extra_roots=()).save_workflow(wf_def)
+        status, changed = http_request(host[0], host[1], {
+            "schema": "plugin_host_call.v2",
+            "action": "execute.workflow",
+            "as_user": {"user_id": "alice"},
+            "idempotency_key": "wf_step_script_tampered1",
+            "payload": {"thread_id": thread["thread_id"], "workflow_id": "wf-one", "expected_revision": 1},
+        })
+        assert status == 409 and changed["error"]["code"] == "ASSET_CHANGED"
+    finally:
+        next(fixture, None)

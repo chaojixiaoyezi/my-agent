@@ -95,14 +95,14 @@ class RestrictedToolInvoker:
         self.limits = context.execution_policy.quota
         self.snapshot = file_snapshot(context, self.limits, execution_run_id(context))
         budgets = getattr(getattr(context.source, "execution_policy", None), "budgets", None)
-        self.max_calls = int(budgets["max_tool_calls"]) if budgets is not None and "max_tool_calls" in budgets else 1
+        self.max_calls = int(budgets["max_tool_calls"]) if budgets is not None and "max_tool_calls" in budgets else None
         self.calls = 0
 
     # LLM: 实参不能覆盖owner或原直接工具意图，审批及原步骤操作账不变；B恢复须重进本入口。
     # 函数用途: 执行一个准确获批的目标用户工具调用。
     def invoke(self, tool_name, arguments, call_id="step-1"):
         self.fence.check()
-        if self.calls >= self.max_calls or type(tool_name) is not str or tool_name not in self.snapshot.available_tool_names:
+        if (self.max_calls is not None and self.calls >= self.max_calls) or type(tool_name) is not str or tool_name not in self.snapshot.available_tool_names:
             raise HostAPIError("TOOL_DENIED", 403)
         self.calls += 1
         runtime = self.snapshot.runtime(tool_name)

@@ -920,7 +920,7 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     owner = _receipt_owner_identity(receipt)
     if receipt.owner_ref_digest != _owner_ref_digest(owner):
         raise DataCorruptionError("gateway control operation owner digest is invalid")
-    if receipt.private_approval is None:
+    if receipt.private_approval is None and not (receipt.channel == "plugin" and receipt.command_kind == "plugin_domain"):
         parsed = parse_conversation_control(receipt.command_text, reject_unknown_slash=True)
         if parsed is None or parsed.kind != receipt.command_kind:
             raise DataCorruptionError("gateway control operation command kind is invalid")
