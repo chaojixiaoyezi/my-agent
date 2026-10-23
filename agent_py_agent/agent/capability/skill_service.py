@@ -72,8 +72,11 @@ class SkillsService:
         self.policy_provider = policy_provider
         self._extra_roots: tuple[Path, ...] = ()
         self._cache: dict[tuple[str, str], SkillSnapshot] = {}
+        self._manifest_cache: tuple | None = None
         self._lock = threading.RLock()
 
+    # LLM: 新根集合须同时清除快照与stat缓存，不能跨来源复用旧manifest。
+    # 函数用途: 设置宿主额外根并使发现缓存失效。
     def set_extra_roots(self, roots: Iterable[str | Path]) -> None:
         normalized = tuple(
             Path(root).expanduser().resolve(strict=False)
@@ -83,12 +86,16 @@ class SkillsService:
         with self._lock:
             self._extra_roots = normalized
             self._cache.clear()
+            self._manifest_cache = None
 
+    # LLM: 显式刷新必须连同轻量指纹缓存一起失效，下次调用重新读取正文与guard。
+    # 函数用途: 清空当前服务全部发现缓存。
     def clear_cache(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._manifest_cache = None
 
-    # LLM: 包摘要和激活身份共同进入指纹；Skill 总闸关闭时两种发现都为空，不读取内容包正文。
+    # LLM: 只有stat命中才复用旧快照；目录/guard资源变化即使正文hash相同也须重建，包/策略仍逐次核对。
     # 函数用途: 创建或复用当前 owner 的逐轮快照，并单独报告能力包发现错误。
     def snapshot_for(
         self,
@@ -102,13 +109,13 @@ class SkillsService:
             # 总闸关闭：空快照（来源名单是细粒度控制，总闸是 effective flag——对称 memory_policy）
             return _build_snapshot((), (), policy, workspace)
         roots = self._skill_roots(workspace, policy)
-        manifest, discovery_errors = _build_manifest(roots)
+        manifest, discovery_errors, manifest_unchanged = self._manifest_for(roots, force_reload=force_reload)
         packages, package_errors = self._packages()
         discovery_errors.extend(package_errors)
         from .skill_learning_versions import learning_state_fingerprint
         fingerprint = _snapshot_fingerprint(manifest, discovery_errors, policy, workspace, packages) + learning_state_fingerprint(self.home_paths) + str(self.learning_recommended_limit_provider())
         cache_key = (policy.owner_id, str(workspace))
-        if not force_reload:
+        if not force_reload and manifest_unchanged:
             with self._lock:
                 cached = self._cache.get(cache_key)
             if cached is not None and cached.fingerprint == fingerprint:
@@ -120,6 +127,18 @@ class SkillsService:
         with self._lock:
             self._cache[cache_key] = snapshot
         return snapshot
+
+    # LLM: 只缓存最近一组根并返回stat是否命中；错误列表复制，stat失效后调用方必须重做snapshot的guard。
+    # 函数用途: 用目录和文件stat决定是否重读Skill正文与安全检查。
+    def _manifest_for(self, roots: tuple[SkillRoot, ...], *, force_reload: bool):
+        signature = _roots_signature(roots)
+        with self._lock:
+            cached = self._manifest_cache
+            if not force_reload and cached is not None and cached[:2] == (roots, signature):
+                return cached[2], list(cached[3]), True
+            manifest, errors = _build_manifest(roots)
+            self._manifest_cache = (roots, signature, manifest, tuple(errors))
+            return manifest, errors, False
 
     # LLM: provider 错误只清空内容包集合并进入 errors；普通 Skill 与旧插件 Skill 不因包账损坏而消失。
     # 函数用途: 校验并冻结包提供者返回的元数据，防止重复包 ID 和可变伪快照混进本轮。
@@ -158,6 +177,33 @@ class SkillsService:
         if self.plugin_roots is not None:
             roots.extend(SkillRoot(Path(path), source) for path, source in self.plugin_roots())
         return _dedupe_roots(roots)
+
+
+# LLM: stat不读取正文；同根下资源/目录也参与失效，避免SKILL未变但guard依赖脚本已变化时复用旧授权。
+# 函数用途: 为当前来源集合计算轻量根目录和文件元信息指纹。
+def _roots_signature(roots: tuple[SkillRoot, ...]) -> str:
+    digest = hashlib.sha256()
+    for root in roots:
+        digest.update(repr((str(root.path), root.source)).encode())
+        paths = (root.path, *sorted(root.path.rglob('*')))
+        for path in paths:
+            if path != root.path and not _visible_skill_path(root.path, path):
+                continue
+            digest.update(repr(_path_stat_signature(path)).encode())
+    return digest.hexdigest()
+
+
+# LLM: 文件身份、权限及纳秒时间参与指纹；读不到时保留errno以便正常发现失败关闭，中断不吞掉。
+# 函数用途: 获取不读正文的文件状态，区分不存在、不可读和符号链接目标变化。
+def _path_stat_signature(path: Path) -> tuple:
+    try:
+        stat = path.stat()
+        return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns,
+                stat.st_dev, stat.st_ino, stat.st_mode)
+    except InterruptedError:
+        raise
+    except OSError as exc:
+        return str(path), type(exc).__name__, exc.errno
 
 
 def _build_manifest(roots: tuple[SkillRoot, ...]) -> tuple[list[SkillManifestItem], list[SkillLoadError]]:

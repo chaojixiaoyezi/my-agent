@@ -29,7 +29,6 @@ CLOUD_OPERATIONS = {op.action: op for op in (
     CloudOperation('wiki_resolve', 'wiki', False),
 )}
 READ_ACTIONS = frozenset(op.action for op in CLOUD_OPERATIONS.values() if not op.write)
-_READ_ACTIONS = READ_ACTIONS
 WRITE_ACTIONS = frozenset(op.action for op in CLOUD_OPERATIONS.values() if op.write)
 FEISHU_CLOUD_OPERATIONS = {op.action: ('write' if op.write else 'read') for op in CLOUD_OPERATIONS.values()}
 

@@ -283,7 +283,7 @@ class WorkflowEngine:
             record.status, record.needs_repair = 'failed', True
             record.error_code, record.error_message = 'SKILL_NOT_FOUND', str(exc)
             return
-        if self.analysis_handler is None or getattr(self.analysis_handler, '_is_default_preview', False):
+        if self.analysis_handler is None:
             record.status, record.needs_repair = 'failed', True
             record.error_code, record.error_message = 'ANALYZER_UNAVAILABLE', '未提供真实技能分析回调'
             return
