@@ -24,7 +24,7 @@ def plugin_client(protected, monkeypatch):
     environment = owner.plugins_dir / "environments/fixture"
     environment.mkdir(parents=True)
     manifest = SimpleNamespace(plugin_id="source-reconnect", permissions=SimpleNamespace(network=False),
-                               settings_schema={}, host_api=(), tools=(), is_content_only=False)
+                               settings_schema={}, host_api=(), host_api_v9=False, tools=(), is_content_only=False)
     activation = SimpleNamespace(phase="active", activation_id="fixture", plan=SimpleNamespace(
         environment_ref="fixture", interpreter_fingerprint="fixture"))
     installation = SimpleNamespace(manifest=manifest, activation=activation, settings_json="{}")

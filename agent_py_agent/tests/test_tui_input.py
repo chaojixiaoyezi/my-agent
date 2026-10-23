@@ -1063,7 +1063,7 @@ def test_gateway_manual_compact_fast_terminal_cannot_overtake_start() -> None:
     runtime = TuiRuntime("control-compact-fast-terminal")
 
     class Reconciler:
-        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+        def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
             assert on_persisted_before_dispatch is not None
             on_persisted_before_dispatch(entry)
             runtime.publish_manual_compact_terminal(entry.message_id, succeeded=True)

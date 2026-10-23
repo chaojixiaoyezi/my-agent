@@ -909,15 +909,12 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
 
     plugin_policy = (request.get("metadata") or {}).get("plugin_execution_policy")
     has_plugin_policy = isinstance(plugin_policy, dict) and plugin_policy.get("schema") == "plugin_execution_policy.v1"
-    allowed_tools = (
-        []
-        if request.get("host_im_task_ack")
-        else (
-            [str(item) for item in (plugin_policy.get("tool_names") or ()) if isinstance(item, str)]
-            if has_plugin_policy
-            else None
-        )
-    )
+    if request.get("source") == "plugin" or has_plugin_policy:
+        if not has_plugin_policy or plugin_policy.get("network") is not False:
+            raise RuntimeError("plugin request requires valid offline plugin_execution_policy.v1")
+        if plugin_policy.get("tool_names"):
+            raise RuntimeError("plugin chat request cannot enable tools on unrestricted worker")
+    allowed_tools = [] if (request.get("host_im_task_ack") or request.get("source") == "plugin" or has_plugin_policy) else None
     return RunParams(
         pending_turn_input_source=pending_turn_input_source(context.agent, request, conversation.thread_id),
         inject=request_prompt.gateway_injections(request, conversation),

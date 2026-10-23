@@ -62,7 +62,7 @@ def publish_claim_runtime_authority(binding: dict[str, str], *, gateway_binding=
     # 函数用途: 拒绝已结束/换代的后台发布，并阻止同一片偷换任务或主运行链。
     def update(current):
         if (current.get("claim_id") != claim.claim_id or current.get("thread_id") != claim.thread_id
-                or current.get("status") != "running"):
+                or current.get("status") != "running" or current.get("cancel_requested") is True):
             raise InterruptedError("后台执行租约已经结束或切换")
         task_id = current.get("task_id")
         if task_id and task_id != binding["task_id"]:

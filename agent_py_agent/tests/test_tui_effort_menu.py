@@ -25,7 +25,11 @@ class _Outbox:
     def __init__(self) -> None:
         self.entries: list[object] = []
 
-    def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+    def enqueue_setting(self, entry) -> None:
+        self.entries.append(entry)
+
+    def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
+        del on_persisted_before_dispatch
         self.entries.append(entry)
 
 

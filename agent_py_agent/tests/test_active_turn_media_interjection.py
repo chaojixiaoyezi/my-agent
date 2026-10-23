@@ -188,8 +188,7 @@ def test_i6_unsupported_model_cannot_silently_project_media(protocol):
         active_turn_user_inputs=[packet], task_attributes={},
         tool_protocol_snapshot=ToolProtocolSnapshot("run", protocol, capability), live_archive_state={})
     with pytest.raises(InputMediaError, match="图片"):
-        _native_provider_messages(SimpleNamespace(config=SimpleNamespace(model_input_modalities=["text"]),
-            backend=SimpleNamespace(supports_native_tool_ir=protocol == "native")), params)
+        _native_provider_messages(SimpleNamespace(config=SimpleNamespace(model_input_modalities=["text"])), params)
 
 
 # LLM: 空模态声明为未知而非拒绝；构造真实初始/插话 IR 后走原出站投影，不发请求或读取合成图片。
@@ -212,8 +211,7 @@ def test_i6_unknown_empty_modalities_allows_initial_and_interjected_images_on_na
             ProviderToolCapability("test", "local://test", "test", False, True, "test")))
     params.tool_ir_history = _native_initial_tool_ir_history(params, carried_handoff="",
         carried_user_inputs=[packet["text"]] if interjected else [])
-    agent = SimpleNamespace(config=SimpleNamespace(model_input_modalities=modalities),
-        backend=SimpleNamespace(supports_native_tool_ir=True))
+    agent = SimpleNamespace(config=SimpleNamespace(model_input_modalities=modalities))
     messages = _native_provider_messages(agent, params)
     assert messages is not None
     images = [part for row in messages for part in row["content"] if isinstance(part, dict) and part.get("type") == "image"]

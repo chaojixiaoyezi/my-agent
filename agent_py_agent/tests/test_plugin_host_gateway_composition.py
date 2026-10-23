@@ -277,3 +277,58 @@ def test_production_gateway_script_asset_read_and_execution(tmp_path):
         assert poll["request"]["state"] == "succeeded", poll
     finally:
         next(fixture, None)
+
+
+# LLM: 验证worker层对插件消息的零工具/断网策略、目标线程绑定，以及篡改策略或申请聊天工具时的失败即关闭。
+# 函数用途: 覆盖插件请求进入Gateway worker时的正反向执行边界合同。
+def test_production_worker_enforces_plugin_execution_policy_and_thread_binding(production_host):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayAskRunContext,
+        GatewayConversationLoadRequest,
+        gateway_conversation_context,
+    )
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        _gateway_run_params,
+        _GatewayRunParamsRequest,
+    )
+    from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
+
+    thread = production_call(production_host, "conversations.threads.create", {}, key="worker_policy_thread1", status=201)
+    tid = thread["thread_id"]
+    sent = production_call(production_host, "conversations.messages.send",
+                           {"thread_id": tid, "text": "check worker", "tool_policy": "none"},
+                           key="worker_policy_msg_001", status=202)
+    resources = production_host[0].plugin_host.composition.ports.observations.services.resources
+    paths = resources.paths_for(SimpleNamespace(owner_home=production_host[2]))
+    path = paths.inbox / f"{sent['request_id']}.json"
+    request = json.loads(path.read_text(encoding="utf-8"))
+    agent = SimpleNamespace(
+        config=SimpleNamespace(my_agent_home=str(production_host[2].root)),
+        home_paths=SimpleNamespace(root=production_host[2].root),
+        conversation_store=resources.store_for(SimpleNamespace(owner_home=production_host[2])),
+    )
+    conversation = gateway_conversation_context(
+        GatewayConversationLoadRequest(agent, request, request["id"], "check worker")
+    )
+    assert conversation.thread_id == tid
+    ctx = GatewayAskRunContext(agent, request, path, paths.responses / f"{request['id']}.json", request["id"], None)
+    params = _gateway_run_params(_GatewayRunParamsRequest(request, ctx, conversation, "check worker"))
+    assert params.allowed_tools == []
+
+    production_call(production_host, "users.local.create", {"user_id": "alice"}, key="worker_policy_alice1", status=201)
+    alice_thread = production_call(production_host, "conversations.threads.create", {}, user="alice",
+                                   key="worker_policy_athread1", status=201)
+    status, denied = http_request(production_host[0], production_host[1], {
+        "schema": "plugin_host_call.v2", "action": "conversations.messages.send",
+        "as_user": {"user_id": "alice"},
+        "idempotency_key": "worker_policy_msg_002",
+        "payload": {"thread_id": alice_thread["thread_id"], "text": "bounded tools", "tool_policy": "bounded"},
+    })
+    assert status == 503 and denied["error"]["code"] == "HOST_NOT_READY"
+
+    with pytest.raises(RuntimeError, match="plugin"):
+        bad = {**request, "metadata": {**request["metadata"], "plugin_execution_policy": {
+            **request["metadata"]["plugin_execution_policy"], "tool_names": ["read_file"]}}}
+        _gateway_run_params(_GatewayRunParamsRequest(bad, ctx, conversation, "check worker"))

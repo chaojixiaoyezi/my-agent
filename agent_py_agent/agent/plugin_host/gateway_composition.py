@@ -102,7 +102,7 @@ class GatewayHostResources:
         if not raw:
             return False
         value = strict_json(raw)
-        return thread_id in str(value)
+        return isinstance(value, dict) and thread_id in value.values()
 
     # LLM: 用量读取有界原claim/queue，不按目录数量猜active_agents；未测完整磁盘保持null/complete=false。
     # 函数用途: 观察目标owner当前真实请求与claim记录。

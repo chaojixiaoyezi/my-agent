@@ -207,7 +207,7 @@ def _print_local_timing(result) -> None:
 
 # LLM: 保持 Gateway 普通终端回合统计入口兼容，总耗时仍由 worker 单调时钟唯一输出。
 # 函数用途: 输出 Gateway 回合的工具轮数与上下文 token 估算。
-def _print_gateway_timing(response, *_args) -> None:
+def _print_gateway_timing(response) -> None:
     _print_local_timing(response)
 
 

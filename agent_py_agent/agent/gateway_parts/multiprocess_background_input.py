@@ -145,7 +145,7 @@ class BackgroundPendingInput:
         if self._terminal is not None:
             if not finishing or _identity_bytes(row) != self._terminal:
                 raise self.source.rejection('input.background.terminal')
-        elif (row.get('status') != 'running' or row.get('thread_id') != self.claim_binding.thread_id
+        elif (row.get('status') != 'running' or row.get('cancel_requested') is True or row.get('thread_id') != self.claim_binding.thread_id
                 or row.get('claim_scope_id') != self.claim_binding.claim_scope_id or row.get('claim_id') != self.claim_binding.claim_id):
             raise self.source.rejection('input.background.claim')
         transport, payload = self._transport(row)

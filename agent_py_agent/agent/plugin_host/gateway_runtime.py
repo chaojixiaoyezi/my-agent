@@ -111,11 +111,13 @@ class GatewayPluginRequests:
         revalidate_call(authorized)
         if authorized.call.payload.get("input_artifact_refs"):
             raise HostAPIError("ARTIFACT_INPUT_NOT_SUPPORTED", 403)
+        if authorized.call.payload.get("tool_policy", "none") != "none" or authorized.execution_policy.tool_names:
+            raise HostAPIError("HOST_NOT_READY", 503)
         ensure_gateway_folders(self.resources.paths_for(context))
         return {**prepared, "owner_id": context.owner_home.owner_id,
                 "conversation": {"thread_id": authorized.call.payload["thread_id"]},
                 "metadata": {**prepared["metadata"], "plugin_execution_policy": {
-                    "schema": "plugin_execution_policy.v1", "tool_names": sorted(authorized.execution_policy.tool_names),
+                    "schema": "plugin_execution_policy.v1", "tool_names": [],
                     "network": False, "budgets": thaw(authorized.execution_policy.budgets),
                     "policy_digest": authorized.execution_policy.policy_digest,
                     "thread_id": authorized.call.payload["thread_id"]}}}

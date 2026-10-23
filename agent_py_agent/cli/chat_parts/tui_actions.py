@@ -292,17 +292,12 @@ def _tui_submit_control_operation(
         reconciler = _ensure_control_operation_reconciler(params)
         from .tui_control_delivery import is_session_setting
 
-        if is_session_setting(entry) and hasattr(reconciler, "enqueue_setting"):
+        if is_session_setting(entry):
             reconciler.enqueue_setting(entry)
-        elif hasattr(reconciler, "enqueue_background"):
-            if command.kind in {"compact", "goal"}:
-                reconciler.enqueue_background(entry, on_control_persisted)
-            else:
-                reconciler.enqueue_background(entry)
         elif command.kind in {"compact", "goal"}:
-            reconciler.enqueue(entry, on_persisted_before_dispatch=on_control_persisted)
+            reconciler.enqueue_background(entry, on_control_persisted)
         else:
-            reconciler.enqueue(entry)
+            reconciler.enqueue_background(entry)
     except Exception:
         if command.kind == "steer":
             runtime.cancel_active_turn_input(message_id)

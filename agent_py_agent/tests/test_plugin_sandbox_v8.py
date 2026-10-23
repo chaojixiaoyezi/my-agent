@@ -365,7 +365,8 @@ def _fake_v8_client_case(tmp_path):
         path.mkdir(parents=True)
     plan = SimpleNamespace(environment_ref="ref", interpreter_fingerprint="fingerprint")
     activation = SimpleNamespace(phase="active", activation_id="activation", plan=plan)
-    manifest = SimpleNamespace(plugin_id="sample", permissions=object(), settings_schema={})
+    manifest = SimpleNamespace(plugin_id="sample", permissions=object(), settings_schema={},
+                               host_api=(), host_api_v9=False)
     installation = SimpleNamespace(activation=activation, manifest=manifest, settings_json="{}")
     owner = SimpleNamespace(root=root, plugins_dir=plugins, home_dir=root)
     return owner, installation, cwd, data_dir, hidden
