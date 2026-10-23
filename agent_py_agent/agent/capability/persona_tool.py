@@ -151,6 +151,8 @@ class _PersonaToolOperation:
     source_quote: str
 
 
+# LLM: full与deferred视图均表达USER可写、AGENTS只读、SOUL宿主审批；不新增模型自签确认参数。
+# 函数用途: 从现有参数与权限合同构造人格工具说明，避免收起后误导模型改写AGENTS。
 def build_update_persona_model_spec() -> ToolModelSpec:
     properties = copy.deepcopy(_PERSONA_PARAMETER_SCHEMA)
     for name, description in _PERSONA_PARAMETERS.items():
@@ -173,7 +175,7 @@ def build_update_persona_model_spec() -> ToolModelSpec:
             keywords=_PERSONA_KEYWORDS,
             examples=_PERSONA_EXAMPLES,
             default_deferred=True,
-            deferred_summary="改写每轮都生效的长期设定：用户称呼/画像/偏好、工作约定、你的性格语气",
+            deferred_summary="USER画像/称呼/长期偏好可写；AGENTS只读，修改由用户/agents预览确认；SOUL性格语气须宿主审批",
         ),
     )
 

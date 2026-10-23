@@ -1,10 +1,11 @@
 # LLM: 工具只调已登记的只读投影，不刷新服务；游标用公共来源+范围指纹校验，不另造签名或分页状态。
-# 模块用途: 以短总览、分块分页和精确条目回答关于代理自己的问题。
+# 模块用途: 以短总览、分块分页和精确条目回答自身问题；能力族沿原快照投影，不另建静态能力表。
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+from collections import Counter
 from dataclasses import replace
 from typing import Any
 
@@ -105,11 +106,14 @@ class SelfMapTool(BaseTool):
         return _outcome(True, payload)
 
     # LLM: 总览和默认页约束真实归档预算，详情保留完整公开投影；只读同一次来源，不写领域枚举。
-    # 函数用途: 分派总览、分页和详情，复用业务计数与位置元信息。
+    # 函数用途: 分派总览、分页和详情；能力族从同次原领域投影聚合，不额外读取或刷新快照。
     def _query(self, params: dict[str, Any], context: SelfMapReadContext) -> dict[str, Any]:
         section = params.get("section")
         if not section:
-            payload = {"sections": [_overview(descriptor, _read_projection(descriptor, context)) for descriptor in self.sections.descriptors()]}
+            projections = [(descriptor, _read_projection(descriptor, context)) for descriptor in self.sections.descriptors()]
+            payload = {"sections": [_overview(descriptor, projection) for descriptor, projection in projections],
+                       "capability_families": {descriptor.id: _capability_families(projection)
+                           for descriptor, projection in projections if descriptor.id in {"tools", "skills"}}}
             if not _fits_default(payload, context):
                 raise SelfMapResponseTooLarge()
             return payload
@@ -121,7 +125,8 @@ class SelfMapTool(BaseTool):
                 raise ValueError("unknown item")
             return {"section": section, "item": _item_entry(item, section, context, detail=True), "detail_complete": True,
                     "completeness": projection.completeness, "source": projection.source, "errors": projection.errors,
-                    **_summary(projection, "total"), "locations": projection.locations}
+                    **_summary(projection, "total"), "locations": projection.locations,
+                    **_family_fields(section, projection)}
         return _page(params, context, projection)
 
 
@@ -280,7 +285,7 @@ def _summary(projection: SectionProjection, count_key: str) -> dict[str, Any]:
 
 
 # LLM: 摘要与coverage同源给已全或实际剩余；共享详情模板绑定每行item参数，不复制60份调用壳或扩大阈值。
-# 函数用途: 返回紧凑目录或详情页，在位置/状态摘要中同时说明是否需要续页，不保存分页状态。
+# 函数用途: 返回目录页及全投影类别计数，不把分页条数当能力总数，不保存分页状态。
 def _page_result(params, projection, selection):
     tail = selection["offset"] + len(selection["items"])
     following = base64.urlsafe_b64encode(json.dumps({"offset": tail, "fingerprint": selection["fingerprint"]}, separators=(",", ":")).encode()).decode() if tail < len(projection.items) else None
@@ -291,7 +296,23 @@ def _page_result(params, projection, selection):
             **selection["display"],
             "returned": len(selection["items"]), "completeness": projection.completeness, "state": _projection_state(projection),
             "next_cursor": following, "next_read": next_read("self_map", arguments) if following else None,
-            "source": projection.source, "errors": projection.errors, "locations": projection.locations}
+            "source": projection.source, "errors": projection.errors, "locations": projection.locations,
+            **_family_fields(params["section"], projection)}
+
+
+# LLM: tool_projection来自ToolRuntimeSnapshot的category/group，skill_projection来自已核owner的SkillSnapshot；不回查全集。
+# 函数用途: 对完整公开投影按开放类别计数，未绑定或降级来源返回None而不是假空集。
+def _capability_families(projection: SectionProjection) -> dict[str, int] | None:
+    if projection.completeness != "complete" or not projection.count_known:
+        return None
+    categories = (str(row.get("group") or row.get("category") or "uncategorized") for row in projection.items)
+    return dict(sorted(Counter(categories).items()))
+
+
+# LLM: 仅现有工具/方法读域附加类别摘要；不能给其它领域猜类别或授予可调用性。
+# 函数用途: 为列表和详情共用能力族字段，类别计数与原完整性说明配套。
+def _family_fields(section: str, projection: SectionProjection) -> dict[str, Any]:
+    return {"capability_families": _capability_families(projection)} if section in {"tools", "skills"} else {}
 
 
 # LLM: 只裁过长非身份字段，明确列出遗漏并给地图详情；path/id/name不截，详情仍返回原完整公开字段。

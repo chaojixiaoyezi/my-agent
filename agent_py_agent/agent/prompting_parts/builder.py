@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 _BUILTIN_PROMPT_PREFIX = "builtin:"
 _LEGACY_DEFAULT_PROMPT = "prompts/default.md"
+_SKILL_CATALOG_DEGRADED = "# Available Skills\n- catalog_state: degraded (skill_search 仍可按需检索与读取)"
 # 沟通节奏只交给主模型判断；不创建计时器、额外采样或机器完成门，也不要求逐工具重复说明。
 _ASSISTANT_PROGRESS_GUIDANCE = (
     "执行中沟通：复杂执行任务开始时，用一两句说明第一步；有新发现、调整方向或重要编辑、验证前，"
@@ -181,6 +182,8 @@ class PromptBuilder:
         # root 仍只负责解析 prompt 文件；workspace_root 是模型相对路径和写入落点的唯一事实。
         self.workspace_root = workspace_root or root
 
+    # LLM: 按解析后的文件与来源身份去重；保留首次顺序及必需资源缺失错误，不按正文消重。
+    # 函数用途: 同一提示文件在配置和显式列表中只读一次，不合并不同来源的用户规则。
     def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True, scope: str = "default") -> list[str]:
         """读取动态 prompt 文件并拼接内容。
 
@@ -189,8 +192,14 @@ class PromptBuilder:
         chunks: list[str] = []
         skip_project_files = _is_isolated_scope(scope)
         configured = [] if (not include_config or skip_project_files) else self.config.prompt_files
+        seen: set[tuple[Path, str]] = set()
         for name in [*configured, *(extra_files or [])]:
-            chunk = _read_prompt_file(self.root, str(name))
+            resolved = _resolve_prompt_file(self.root, str(name))
+            identity = (resolved[0].resolve(strict=False), resolved[1])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            chunk = _read_resolved_prompt_file(*resolved)
             if chunk is not None:
                 chunks.append(chunk)
         return chunks
@@ -235,7 +244,7 @@ class PromptBuilder:
     #   self_map只追加固定入口指引，必须开关与本次实际可用资格同时成立，不读取目录；动态库存不进system。
     #   注入列表复制为元组，部署路径只采集到动态事实；纯投影只消费返回值，回合触发类型原样冻结。
     #   主会话沟通只在既有非隔离范围按配置追加固定软指导，保留override且不改变子代理/辅助表达职责或执行终态。
-    # 函数用途: 冻结材料与当前部署位置；主会话可追加沟通指导，线程人格按已提交断点保存，部署路径不进入固定前缀。
+    # 函数用途: 冻结材料与当前部署位置；task_local不采集Owner目录教程/开发说明，仍保留归属边界与工作区事实。
     def prepare_render_input(self, request: PromptBuildRequest) -> PromptRenderInput:
         _tools = request.tools or ToolSections()
         from ..tooling.query_evidence import query_zero_result_guidance
@@ -249,9 +258,10 @@ class PromptBuilder:
         task_local = _is_task_local_context(request.context_scope)
         memory_text = _memory_text([] if task_local else request.memories)
         owner_scope = _owner_scope_text(self)
-        if home_guide := _home_directory_guide(self):
+        if not task_local and (home_guide := _home_directory_guide(self)):
             owner_scope += "\n\n" + home_guide
-        if self_development := _self_development_guide(self):
+        self_development = "" if task_local else _self_development_guide(self)
+        if self_development:
             owner_scope += "\n\n" + self_development
         deployment_context = _deployment_context() if self_development else ""
         persona, updates = _thread_persona_context(self, request, task_local)
@@ -425,6 +435,8 @@ def project_runtime_workspace_context(
     return "\n".join(lines)
 
 
+# LLM: 本地来源用规范绝对路径作身份；builtin保持独立来源，兼容旧缺省别名，不改变显式项目覆盖。
+# 函数用途: 解析提示来源及必需性，路径别名可去重而不同来源不混同。
 def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
     """解析 prompt 来源；builtin: 始终指向随安装包发布的资源，不依赖服务 cwd。"""
     text = str(name or "").strip()
@@ -433,16 +445,25 @@ def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
         return _builtin_prompt_root() / relative, text, True
     path = Path(text).expanduser()
     if path.is_absolute():
-        return path, str(path), False
+        return path, str(path.resolve(strict=False)), False
     workspace_path = root / path
     # 兼容老配置：历史默认值 prompts/default.md 在部署 cwd 下找不到时，迁移到同一内置事实源。
-    if text == _LEGACY_DEFAULT_PROMPT and not workspace_path.is_file():
-        return _builtin_prompt_root() / _LEGACY_DEFAULT_PROMPT, f"builtin:{_LEGACY_DEFAULT_PROMPT}", True
-    return workspace_path, str(workspace_path), False
+    if text == _LEGACY_DEFAULT_PROMPT:
+        builtin = _builtin_prompt_root() / _LEGACY_DEFAULT_PROMPT
+        if not workspace_path.is_file() or workspace_path.resolve(strict=False) == builtin.resolve(strict=False):
+            return builtin, f"builtin:{_LEGACY_DEFAULT_PROMPT}", True
+    return workspace_path, str(workspace_path.resolve(strict=False)), False
 
 
+# LLM: 保留单文件兼容读口，错误和格式均由同一已解析读取器提供。
+# 函数用途: 解析并读取一份提示文件，供原调用者复用。
 def _read_prompt_file(root: Path, name: str) -> str | None:
-    path, source, required = _resolve_prompt_file(root, name)
+    return _read_resolved_prompt_file(*_resolve_prompt_file(root, name))
+
+
+# LLM: 调用方已完成来源解析；这里只读一次正文，缺少必需builtin资源仍抛异常，不缓存内容。
+# 函数用途: 共用去重列表和单文件入口的读取与错误处理。
+def _read_resolved_prompt_file(path: Path, source: str, required: bool) -> str | None:
     if path.is_file():
         return f"# Prompt File: {source}\n" + path.read_text(encoding="utf-8")
     if required:
@@ -511,7 +532,7 @@ def _owner_scope_text(builder: PromptBuilder) -> str:
     )
 
 
-# LLM: 目录用途与语义取名同属稳定 prefix，main/child 共用且受 home_context_enabled 控制；不扫描目录、不调用模型、不迁移旧文件。
+# LLM: 目录用途与语义取名只供主会话稳定prefix；task_local由prepare跳过，仍受home_context_enabled控制，不迁移旧文件。
 # 函数用途: 引导助手用目标摘要给业务目录起名并续作旧成果；用户可覆盖整理偏好，但名称不产生权限或任务身份。
 def _home_directory_guide(builder: PromptBuilder) -> str:
     if not bool(getattr(builder.config, "home_context_enabled", True)):
@@ -543,9 +564,8 @@ def _home_directory_guide(builder: PromptBuilder) -> str:
         "暂时没有归属的资料可按日期/主题放 inputs/。不要搬动通道的内部存储或随意清理旧成果。\n"
         "- artifacts/ 可放用户明确希望收藏的成品，skills/ 放可复用技能；需要时建立简短索引，"
         "不要为了整理重复复制整份项目。workspace/ 是已有工作空间，继续尊重里面现有结构。\n"
-        "- SOUL.md 是人格，修改须用户确认；USER.md 是用户画像，AGENTS.md 是长期约定，"
-        "均通过人格工具维护。memory.md、memory-hot.md 和 memory/ 属于记忆系统，"
-        "通过记忆工具检索/维护，不拿运行日志代替长期记忆，也不把普通任务进度写进人格。\n"
+        "- memory.md、memory-hot.md 和 memory/ 属于记忆系统，不拿运行日志代替长期记忆；"
+        "人格与记忆的维护入口见默认提示的人格分工，不通过直接写文件绕过确认。\n"
         "- runs/、agents/、compact/、data/、logs/ 及权限配置是宿主控制记录，不是项目输出目录；"
         "不要编辑它们绕过运行时。目录用途只是软纪律，实际读写仍服从当前用户权限。"
     )
@@ -611,7 +631,7 @@ def _dynamic_prompt_text(builder: PromptBuilder, request: PromptBuildRequest, pe
 #   Skill snapshot 的 name+description+stable id，正文仍须模型显式 skill_search
 #   get 后才进入上下文。在用名单已逐 run 冻结，不在这里读取线程或按自然语言推断。
 # 函数用途: 让模型看见每本可用 Skill 的短卡，匹配后再按 stable id 读取正文；
-#   选择模式只输出固定发现说明，选中名卡另进动态推荐段；没有合适技能时继续走普通任务。
+#   选择模式只输出固定发现说明，选中名卡另进动态推荐段；索引故障显式降级且不回显异常。
 def _skill_context_chunks(
     builder: PromptBuilder, user_prompt: str, *, selected_skill_ids: tuple[str, ...] | None = None,
     in_use_method_ids: tuple[str, ...] = (),
@@ -630,7 +650,7 @@ def _skill_context_chunks(
         )
         return [index] if index else []
     except Exception:
-        return []
+        return [_SKILL_CATALOG_DEGRADED]
 
 
 # LLM: 窗口留空时按 128000 兜底（与合并前默认值一致），没有配置对象时返回 0 走字符预算；只算数，不读后端。
@@ -640,7 +660,7 @@ def _skill_index_window(config: object) -> int:
 
 
 # LLM: 名卡与原 scoped Router 相交；task_local 仅接受显式投影，isolated/control_plane 不新增，None 保持旧行为。
-# 函数用途: 为当前 build 生成动态 Skill 名卡，复用必要引用与冻结在用名单，不扩权或重读线程。
+# 函数用途: 为当前build生成动态Skill名卡；故障保留发现入口，不把不可读取伪装为空库。
 def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> str:
     tools = request.tools
     router = getattr(builder, "capability_router", None)
@@ -657,7 +677,7 @@ def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest,
             in_use_method_ids=tools.in_use_method_ids,
         )
     except Exception:
-        return ""
+        return _SKILL_CATALOG_DEGRADED
 
 
 # LLM: 工作区块只提供时间/cwd 事实与交付软提示；不得强制所有诊断写文件，也不与系统的复杂任务计划纪律相反。

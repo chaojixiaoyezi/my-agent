@@ -22,6 +22,10 @@ from ..user_space.owner_quota import (
     OwnerQuotaEnforcer,
     owner_quota_enforcer_from_policy,
 )
+from ..user_space.persona_templates import (
+    FACTORY_AGENTS_SEED_VERSION,
+    factory_agents_seed_for_sha256,
+)
 from .agents_source_contract import AgentsContractError, AgentsSourceSnapshot
 from .agents_source_limits import enforce_agents_write_limit
 from .persona_storage_io import _PERSONA_NATIVE_ERRORS, persona_io, versions_lock
@@ -151,8 +155,8 @@ class _PreparedPersonaMutation:
     baseline: _PreparedPersonaBaseline | None = None
 
 
-# LLM: source正文/SHA来自同次严格加载，控制元数据只用于安全冻结、不进入提示文本；默认显示保留旧换行口径。
-# 函数用途: 将AGENTS来源交接转成原Persona清洗/预算文档，同时保留独立原文摘要。
+# LLM: source正文/SHA来自同次严格加载；仅首次owner_default可投影已知工厂种子，显式/已改来源不变，原SHA仍冻结来源。
+# 函数用途: 将AGENTS来源转成安全提示投影，保留原件、来源授权与版本身份。
 def _load_agents_source_document(repository):
     try:
         result = repository.agents_source.load()
@@ -165,10 +169,14 @@ def _load_agents_source_document(repository):
         return PersonaDocumentSnapshot("agents", "", PersonaLoadDiagnostic("agents", "security", detail=error.code))
     raw = result.content
     display = raw.replace("\r\n", "\n").replace("\r", "\n") if snapshot.kind == "owner_default" else raw
-    sanitized, blocked = _sanitize_persona_text(display)
+    prompt_content = display
+    if snapshot.kind == "owner_default" and snapshot.config_version == 1 and snapshot.revision == 0 and snapshot.status == "ready":
+        prompt_content = _factory_agents_prompt(repository, display, snapshot.content_sha256)
+    sanitized, blocked = _sanitize_persona_text(prompt_content)
     content, truncated = _bounded_prompt_content(sanitized, repository.prompt_max_chars)
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
-    diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked)
+    detail = f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved" if prompt_content != display else ""
+    diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked, detail)
     return PersonaDocumentSnapshot("agents", content, diagnostic, snapshot, metadata)
 
 
@@ -1046,14 +1054,53 @@ def _is_empty_persona_template_content(content: str) -> bool:
     return not value or value in _LEGACY_TEMPLATE_PLACEHOLDER_VALUES
 
 
+# LLM: 预算含原截断标记；优先保留完整首尾行，单行超出分配预算才退回字符切片，绝不超过max_chars。
+# 函数用途: 不在普通规则中间截断人格提示；极小预算宁缺正文，原文件不受影响。
 def _bounded_prompt_content(content: str, max_chars: int) -> tuple[str, bool]:
+    max_chars = max(0, max_chars)
     if len(content) <= max_chars:
         return content, False
     marker = "\n[... persona content truncated by configured prompt budget ...]\n"
-    budget = max(0, max_chars - len(marker))
+    if max_chars < len(marker):
+        return "", True
+    budget = max_chars - len(marker)
     head = int(budget * 0.75)
-    tail = budget - head
-    return content[:head] + marker + (content[-tail:] if tail else ""), True
+    boundary = content.rfind("\n", 0, head)
+    prefix = content[:boundary + 1] if boundary >= 0 else content[:head]
+    tail = budget - len(prefix)
+    suffix = _persona_tail_at_boundary(content, tail)
+    return prefix + marker + suffix, True
+
+
+# LLM: 只操作已清洗文本；末行过长无可用完整行时才字符兜底，不复制重叠正文。
+# 函数用途: 在尾部预算内从完整行开头保留剩余人格内容。
+def _persona_tail_at_boundary(content: str, budget: int) -> str:
+    if not budget:
+        return ""
+    start = len(content) - budget
+    if start == 0 or content[start - 1] == "\n":
+        return content[start:]
+    boundary = content.find("\n", start)
+    return content[boundary + 1:] if 0 <= boundary < len(content) - 1 else content[-budget:]
+
+
+# LLM: 仅默认AGENTS、精确原始字节SHA、没有任何人格版本账本时给新工厂视图；不写原文/版本/审批记录。
+# 函数用途: 保守识别未修改出厂种子；用户定制、历史账本或无法核实的状态均原样显示。
+def _factory_agents_prompt(repository, raw: str, raw_sha256: str) -> str:
+    candidate = factory_agents_seed_for_sha256(raw_sha256)
+    if candidate is None or repository.paths["agents"] != repository.owner_home / "AGENTS.md":
+        return raw
+    if repository.versions_path.parent.is_symlink():
+        return raw
+    for ledger in (repository.versions_path, repository.versions_path.parent / "agents_source.json"):
+        try:
+            ledger.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return raw
+        return raw
+    return candidate
 
 
 __all__ = [
@@ -1132,8 +1179,8 @@ def _restore_persona_mutation_files(path: Path, prepared: _PreparedPersonaMutati
         rollback_snapshots(state[1])
 
 
-# LLM: 普通正文的调用者须持目标锁；AGENTS来源服务沿用自己的来源同步协议，迁移锁内读取也复用此实现。
-# 函数用途: 在一致正文上做原有类型、大小、清洗和预算检查，不在内部重复取锁。
+# LLM: 调用者持目标锁；原始字节摘要只用于已知工厂投影，诊断/CAS保留旧换行口径，来源服务仍走原同步。
+# 函数用途: 在一致原件上安全加载并可选投影工厂种子，不修改文件或重复取锁。
 def _load_persona_unlocked(self, target: str) -> PersonaDocumentSnapshot:
     if target == "agents" and self.agents_source is not None:
         return _load_agents_source_document(self)
@@ -1149,10 +1196,12 @@ def _load_persona_unlocked(self, target: str) -> PersonaDocumentSnapshot:
         stat = path.stat()
         if stat.st_size > _MAX_PERSONA_FILE_BYTES:
             return _empty_persona_snapshot(target, "security", "persona source exceeds guarded file-size limit", int(stat.st_size))
-        raw = path.read_text(encoding="utf-8")
+        data = path.read_bytes()
+        raw = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except (OSError, UnicodeDecodeError) as exc:
         return _empty_persona_snapshot(target, "io", str(exc))
-    return _loaded_persona_snapshot(target, raw, stat, self.prompt_max_chars)
+    projected = _factory_agents_prompt(self, raw, hashlib.sha256(data).hexdigest()) if target == "agents" else raw
+    return _loaded_persona_snapshot(target, raw, stat, self.prompt_max_chars, prompt_content=projected)
 
 
 # LLM: 保持缺失/拒绝/I/O诊断不返回正文，尺寸字段只在已读stat时提供。
@@ -1201,11 +1250,12 @@ def _persona_runtime_snapshot(self) -> dict[str, object]:
     }
 
 
-# LLM: 输入是在目标锁内读取的同一份正文与stat；清洗和预算保持既有规则。
-# 函数用途: 将完整正文转换为提示词与诊断快照。
-def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars):
+# LLM: 诊断/CAS摘要仍绑定原文；工厂提示视图独立清洗并标版本，不伪造原文件修订。
+# 函数用途: 将原件及可选工厂视图转换为有界提示与可追溯诊断。
+def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars, *, prompt_content=None):
     sha256 = _sha256_text(raw)
-    sanitized, blocked = _sanitize_persona_text(raw)
+    projected = raw if prompt_content is None else prompt_content
+    sanitized, blocked = _sanitize_persona_text(projected)
     content, truncated = _bounded_prompt_content(sanitized, prompt_max_chars)
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
     return PersonaDocumentSnapshot(
@@ -1219,6 +1269,7 @@ def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars):
             chars=len(raw),
             truncated=truncated,
             blocked_lines=blocked,
+            detail=f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved" if projected != raw else "",
         ),
     )
 
