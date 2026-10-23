@@ -51,14 +51,8 @@ def _carried_tool_round(record: dict[str, object]) -> int | None:
     return max(0, value)
 
 
-# LLM: 只消费正式搜索加载名和dict型凭据信封；后者仅补web_fetch展示，不解析正文或授予执行权限，无副作用。
-# 函数用途: 从结构化回执取累计工具名，让单轮循环、线程持久化及Compact共用同一恢复规则。
-def _carried_loaded_tool_names(record: dict[str, object]) -> set[str]:
-    return set(_ordered_carried_names(record))
-
-
 # LLM: 只读 typed 搜索/凭据信封，保留显式加载顺序；不从正文推断工具或扩大执行能力。
-# 函数用途: 从单个正式回执提取有序名字，凭据就绪时补 web_fetch。
+# 函数用途: 从单个正式回执提取有序名字，同一信封先补凭据消费工具web_fetch再保序合并显式发现。
 def _ordered_carried_names(record: dict[str, object]) -> tuple[str, ...]:
     envelope = record.get("tool_result_envelope")
     if not isinstance(envelope, dict):
@@ -71,7 +65,7 @@ def _ordered_carried_names(record: dict[str, object]) -> tuple[str, ...]:
     return ordered_tool_names([*credential, *(names if isinstance(names, list) else [])])
 
 
-# LLM: 仅显式边界调用，历史不变；有序使用记录按旧到新选择，集合输入仅表达成员优先；固定工具不因预算撤回。
+# LLM: 仅显式边界调用；重复发现按最后出现刷新新近性，输出仍按首见相对顺序；最近使用与固定工具优先，输入不变。
 # 函数用途: 选择固定、最近使用及最近发现工具，并按原发现顺序输出活跃子集。
 def resolve_active_loaded_tool_names(
     discovered_names: Sequence[str], *, recent_used_tool_names: Collection[str] = (),
@@ -80,6 +74,7 @@ def resolve_active_loaded_tool_names(
     if type(max_active_discovered) is not int or max_active_discovered < 0:
         raise ValueError("max_active_discovered must be a non-negative integer")
     history = ordered_tool_names(discovered_names)
+    recency = tuple(reversed(ordered_tool_names(list(reversed(discovered_names)))))
     pins = ordered_tool_names(pinned_tool_names)
     selected = set(pins)
     if isinstance(recent_used_tool_names, (set, frozenset)):
@@ -87,7 +82,7 @@ def resolve_active_loaded_tool_names(
     else:
         recent = ordered_tool_names(list(reversed(tuple(recent_used_tool_names))))
         priority = [name for name in recent if name in history]
-    priority.extend(reversed(history))
+    priority.extend(reversed(recency))
     for name in priority:
         if len(selected) >= max_active_discovered:
             break

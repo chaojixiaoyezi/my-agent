@@ -12,7 +12,7 @@ from ...tooling.models import ToolFailureStage
 
 # LLM: 条件全部来自结构化字段：开关、调用失败、参数出错（失败阶段是 validation，或错误码的错误合同推荐动作是修参数——工具在
 #   执行阶段自己判参数无效也算）、工具在本快照里、且下一次请求本来不会带它的定义（显式 allowed_tools 的回合全量可见，自然不触发）。
-#   命中时兼容list/set补入工具名，并在dict型live_archive_state去重记录加载顺序；否则返回空串。
+#   命中时兼容list/set补入工具名，原顺序支持tuple/list并统一回写tuple；否则返回空串。
 # 函数用途: 收起的工具被“盲调”且参数校验失败时，让下一次请求带上它的完整定义，并给模型一句提示。
 def reload_schema_after_blind_call(agent: object, params: object, archive_record: dict[str, object]) -> str:
     registry = getattr(agent, "tools", None)
@@ -38,9 +38,10 @@ def reload_schema_after_blind_call(agent: object, params: object, archive_record
         loaded.add(tool)
     state = getattr(params, "live_archive_state", None)
     if isinstance(state, dict):
-        order = state.setdefault("loaded_tool_order", [])
-        if isinstance(order, list) and tool not in order:
+        order = list(state.get("loaded_tool_order") or ())
+        if tool not in order:
             order.append(tool)
+        state["loaded_tool_order"] = tuple(order)
     return f"\n[tool-schema-loaded] {tool} 的完整参数定义已随下一次请求提供，请按定义重新调用。"
 
 

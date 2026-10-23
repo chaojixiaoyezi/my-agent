@@ -89,7 +89,7 @@ SUBAGENT_INTEGRATION_ALLOWED_TOOLS = _with_direct_child_controls(DEFAULT_BACKGRO
 GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS = _with_direct_child_controls(GOAL_BACKGROUND_ALLOWED_TOOLS)
 GOAL_SUBAGENTS_TERMINAL_ALLOWED_TOOLS = GOAL_SUBAGENTS_ACTIVE_ALLOWED_TOOLS
 
-# LLM: 后台续跑授权候选并集，不再充当前台展示豁免表；原运行循环的兼容预载仍可引用，新的展示由独立策略决定。
+# LLM: 仅保留给旧测试/调用方的授权候选并集；生产预载不得读取它，展示唯一入口为background_initially_presented_tools。
 BACKGROUND_CONTINUATION_REQUIRED_TOOLS = frozenset({
     *DEFAULT_BACKGROUND_ALLOWED_TOOLS,
     *AUDIT_FINDING_ALLOWED_TOOLS,
@@ -150,6 +150,8 @@ class BackgroundToolPolicyRequest:
     # no provider receipt path, so send_message must not appear in schemas,
     # tool search, or final execution. None preserves standalone policy probes.
     proactive_delivery_available: bool | None = None
+    # 已冻结的运行期上界只做展示交集，None与显式空表不同，不替换后台授权策略。
+    allowed_tools: tuple[str, ...] | None = None
 
 
 # LLM: 决策只描述本次核心目录、限制来源和扩展目录处理方式（extension_tools）；allowed_tools 不含插件/MCP 名，
@@ -187,10 +189,12 @@ def background_allowed_tools(
     return list(background_tool_policy_decision(config, request=request).allowed_tools)
 
 
-# LLM: 初次展示只在原授权闭包内做减法；只读结构化原因/目标，不解析唤醒正文，缺搜索入口时退回完整授权表。
+# LLM: 初次展示取原授权闭包与显式运行上界交集；只读结构化原因/目标，生命周期含创建与直属控制，不解析正文。
 # 函数用途: 为后台首次模型请求选择所需工具，未展示的允许工具仍能按需发现。
 def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -> frozenset[str]:
     allowed = frozenset(background_allowed_tools(request=request))
+    if request.allowed_tools is not None:
+        allowed &= frozenset(request.allowed_tools)
     if "tool_search" not in allowed:
         return allowed
     heavy = {"watch_stream", "schedule", "package_build", "package_install", "remember", "update_persona"}
@@ -355,7 +359,7 @@ def _is_urgent_wake(request: BackgroundToolPolicyRequest) -> bool:
 # 定时类唤醒 reason 的权威名单:工具策略(_is_scheduled_progress)与提示词分支
 #   (background_prompt → _scheduled_continuation_prompt)共用,防两处漂移。
 SCHEDULED_WAKE_REASONS = frozenset(
-    {"scheduled_progress_report", "progress_policy_due", "due_progress_policy", "scheduled_job_due"}
+    {"scheduled_progress_report", "progress_policy_due", "due_progress_policy", "scheduled_job_due", "scheduled_task_due"}
 )
 
 

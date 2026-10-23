@@ -22,7 +22,7 @@ from .capability_selection_state import (
 
 SCHEMA_VERSION = "conversation_thread.v10"
 # 线程记录里只给界面和宿主用、不进模型上下文的字段：状态条遥测与待送达的宿主提示。拼上下文包的地方都按它剔除。
-MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods", "loaded_tool_names")
+MODEL_HIDDEN_THREAD_FIELDS = ("model_context_usage", "model_metrics", "pending_host_notices", "conversation_methods", "loaded_tool_names", "metadata")
 _MODEL_SELECTION_FIELDS = (
     "model_selection_revision", "model_selection_source", "model_selection_last_explicit_revision",
 )

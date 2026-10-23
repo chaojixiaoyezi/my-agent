@@ -23,13 +23,24 @@ _MEMORY_GUIDANCE = (
 _ALLOWED_ORIGINS = frozenset({"user_explicit", "tool_verified", "reviewed", "legacy"})
 
 
+# LLM: 仅携带本批预算遗漏数，保持list兼容性；不制造合成记忆或改变单条记录的身份/信任来源。
+# 类用途: 让最终安全渲染器明确报告被预算省略的正式记录。
+class BudgetedMemoryRecords(list):
+    # LLM: 调用者传原记录及非负预算计数；只复制容器，不写仓库，不改变记录正文。
+    # 函数用途: 将选择结果与本批遗漏数量绑定。
+    def __init__(self, records: Iterable[MemoryRecord] = (), *, omitted_count: int = 0):
+        super().__init__(records)
+        self.omitted_count = max(0, int(omitted_count))
+
+
 # LLM: 内容必须重新扫描并转义 markup；任何记录都不能闭合信封或取得指令权威。
-# 函数用途: 把当前 owner 召回结果渲染成模型可读、用户出口可统一剥离的记忆信封。
+# 函数用途: 安全渲染召回结果及预算遗漏提示；提示保留在可统一剥离的同一信封内。
 def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
     """Render safe recalled records without allowing a record to break its envelope."""
 
     rows: list[dict[str, Any]] = []
     blocked = 0
+    omitted = max(0, int(getattr(memories, "omitted_count", 0)))
     for record in memories:
         content = str(getattr(record, "content", "") or "")
         from ..memory_store.security import scan_memory_content
@@ -58,7 +69,7 @@ def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
                 "content": content,
             }
         )
-    if not rows:
+    if not rows and not omitted:
         suffix = f"；已隔离 {blocked} 条不安全记录" if blocked else ""
         return f"（无相关记忆{suffix}）"
     envelope = json.dumps(
@@ -67,6 +78,7 @@ def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
             "authority": "non_authoritative",
             "records": rows,
             "blocked_record_count": blocked,
+            **({"omitted_record_count": omitted} if omitted else {}),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -78,7 +90,9 @@ def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
-    return f"<memory-context>\n{_MEMORY_GUIDANCE}\n{envelope}\n</memory-context>"
+    notice = (f"\n[... {omitted} formal memory entries omitted by context budget; "
+              "use memory_search to inspect full memory store ...]" if omitted else "")
+    return f"<memory-context>\n{_MEMORY_GUIDANCE}\n{envelope}{notice}\n</memory-context>"
 
 
-__all__ = ["memory_context_text"]
+__all__ = ["BudgetedMemoryRecords", "memory_context_text"]

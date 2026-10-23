@@ -153,6 +153,10 @@ def test_initial_loop_loaded_tools_preserve_foreground_and_explicit_limits(
     tmp_path, monkeypatch, source, allowed_tools, background,
 ):
     from agent_py_agent.agent.agent_core.runtime import loop_support
+    from agent_py_agent.agent.conversation.background_tool_policy import (
+        BackgroundToolPolicyRequest,
+        background_initially_presented_tools,
+    )
     agent, thread, _, _ = _setup(tmp_path, monkeypatch, False)
     agent.tools.catalog_deferred_categories = ["web"]
     params = SimpleNamespace(source=source, allowed_tools=allowed_tools,
@@ -163,15 +167,16 @@ def test_initial_loop_loaded_tools_preserve_foreground_and_explicit_limits(
     initial = getattr(loop_support, "_initial_loop_loaded_tool_names", None)
     assert callable(initial), "初始加载名应由独立辅助函数统一计算"
     loaded = initial(agent, params, seed, reconstructed)
-    # CTX-13/TOOL-05改变的是初始加载，不是后台执行许可上界；普通进度唤醒无需全量web Schema。
-    focused = {"task_progress", "list_agents", "send_message", "read_file", "read_artifact", "tool_search", "list_tools"}
+    # 预载必须与唯一后台展示策略一致，不能继续锁住旧的分叉回退表。
+    focused = background_initially_presented_tools(BackgroundToolPolicyRequest(
+        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None))
     expected = focused & snapshot.available_tool_names if background else set()
     assert loaded == expected
-    assert "web_fetch" not in loaded
+    assert ("web_fetch" in loaded) == ("web_fetch" in expected)
     visible = {spec.name for spec in agent.tools.model_visible_specs(
         loaded_tool_names=loaded, allowed_tools=allowed_tools,
     )}
-    assert "web_fetch" not in visible
+    assert ("web_fetch" in visible) == ("web_fetch" in expected)
     assert params.allowed_tools is allowed_tools
     assert reconstructed.loaded_tool_names == set()
     assert agent.conversation_store.threads.load(thread.thread_id).loaded_tool_names == ()
@@ -200,20 +205,20 @@ def test_initial_loop_loaded_tools_keep_reconstruction_open_actions_and_thread(t
     {"credential": None, "credential_discovery": False},
 ])
 def test_invalid_credential_envelopes_do_not_load_tools(envelope):
-    from agent_py_agent.agent.tooling.tool_search_state import _carried_loaded_tool_names
+    from agent_py_agent.agent.tooling.tool_search_state import pending_carried_loaded_tool_names
 
-    assert _carried_loaded_tool_names({"tool_result_envelope": envelope}) == set()
-    assert _carried_loaded_tool_names({"output": str({"credential": {}})}) == set()
+    assert pending_carried_loaded_tool_names([{"tool_result_envelope": envelope}]) == set()
+    assert pending_carried_loaded_tool_names([{"output": str({"credential": {}})}]) == set()
 
 
 @pytest.mark.parametrize("search", [None, {}, {"loaded_tool_names": "read_file"},
                                          {"loaded_tool_names": [None, 1, " read_file ", ""]}])
 def test_credential_loading_preserves_tool_search_normalization(search):
-    from agent_py_agent.agent.tooling.tool_search_state import _carried_loaded_tool_names
+    from agent_py_agent.agent.tooling.tool_search_state import pending_carried_loaded_tool_names
 
     record = {"tool_result_envelope": {"credential": {}, "tool_search": search}}
     expected = {"web_fetch", "read_file"} if search and isinstance(search.get("loaded_tool_names"), list) else {"web_fetch"}
-    assert _carried_loaded_tool_names(record) == expected
+    assert pending_carried_loaded_tool_names([record]) == expected
 
 
 def test_shell_hints_direct_host_credentials_to_web_fetch():

@@ -2277,7 +2277,8 @@ def _background_lifecycle_wake_snapshot_ids(
 
 # LLM: Background wake identity has one authoritative projection into per-turn
 # attributes. Keep generic scheduler ids singular; lifecycle mail additionally
-# carries the active batch and pre-sampling queue fence used by closeout/safe points.
+# LLM: carries the active batch and pre-sampling queue fence used by closeout/safe points.
+#   有明确 wake_signal_id 的真实后台唤醒把结构化唤醒信封与原因带入 background_wake_signal，供首轮工具预载读取。
 # 函数用途: 把当前后台唤醒及其生命周期邮箱快照写入运行参数。
 def _apply_background_wake_attributes(
     attributes: dict[str, object],
@@ -2291,6 +2292,10 @@ def _apply_background_wake_attributes(
     if not wake_signal_id:
         return
     attributes["background_wake_signal_id"] = wake_signal_id
+    attributes["background_wake_signal"] = {
+        **wake,
+        "reason": lifecycle_reason or str(wake.get("reason") or ""),
+    }
     if not task_id or lifecycle_reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return
     attributes[CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR] = list(

@@ -42,7 +42,7 @@ def test_ordered_recovery_preserves_discovery_sequence():
         {"tool_round": 2, "tool_result_envelope": {"tool_search": {"loaded_tool_names": ["b", "a"]}, "credential": {}}},
         {"tool_round": 3, "output": "scripts"},
     ]
-    assert ordered(records) == ("z", "a", "b", "web_fetch")
+    assert ordered(records) == ("z", "a", "web_fetch", "b")
     assert pending_carried_loaded_tool_names(records) == {"z", "a", "b", "web_fetch"}
 
 
@@ -83,7 +83,8 @@ def test_thread_discovery_retains_ordered_history_in_metadata(tmp_path):
         persist_discovered_tools(agent, params, {"tool_round": 1, "tool_result_envelope": {"tool_search": {"loaded_tool_names": names}}})
     restored = store.threads.load(thread.thread_id)
     assert restored.loaded_tool_names == ("z", "a", "c")
-    assert restored.metadata == {"kept": 7, "discovered_tool_history": ["z", "a", "c"]}
+    assert restored.metadata == {"kept": 7, "discovered_tool_history": ["z", "c", "a"],
+                                 "discovered_tool_revisions": {"z": 1, "a": 2, "c": 2}}
 
 
 # LLM: 有序使用序列按旧到新表达真实使用时序，选择最近使用者但不重排最终发现前缀。

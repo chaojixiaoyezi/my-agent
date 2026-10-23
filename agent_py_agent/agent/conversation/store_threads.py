@@ -394,25 +394,30 @@ class ThreadStore:
             ),
         )
 
-    # LLM: 唯一CAS推进提交链、计数及活跃发现工具收敛；局部检查点不覆盖全线程摘要/游标，旧代校准与展示仍统一失效。
+    # LLM: 唯一CAS推进提交链与活跃集；可选纯selector在同锁最新线程选择，冻结基线保护新发现，局部检查点不覆盖全线程摘要/游标。
     # 函数用途: 原子提交压缩与可选活跃工具收缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
     def update_compact_state(
         self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
         active_loaded_tool_names: tuple[str, ...] | None = None, now: float | None = None,
+        baseline_loaded_tool_names: tuple[str, ...] | None = None,
+        active_tool_selector: Callable[[ConversationThread], tuple[str, ...]] | None = None,
     ) -> ConversationThread:
         """Atomically advance one validated summary/checkpoint without touching raw messages."""
         if type(commit.publish_thread_view) is not bool:
             raise ValueError("compact publication scope must be an explicit boolean")
         current = now if now is not None else time.time()
 
-        # LLM: 先检查原generation，再根据结构化publish_thread_view提交全线程投影；局部摘要不成为全局权限。
+        # LLM: 先检查generation，再以同锁最新线程合并发现差集；局部摘要不成为全局权限。
         # 函数用途: 同锁提交唯一head；局部压缩保留全线程摘要时间和游标，防止其它任务跳过未覆盖原文。
         def apply(thread: ConversationThread) -> ConversationThread:
             if thread.compact_generation != expected_generation:
                 raise RuntimeError("conversation compact generation changed while summary was being prepared")
             from .tool_discovery import compact_discovered_tools
+            # selector仅计算展示名，不允许I/O；旧tuple调用方维持原合同。
+            active = active_tool_selector(thread) if active_tool_selector is not None else active_loaded_tool_names
             return replace(
-                thread, **compact_discovered_tools(thread, active_loaded_tool_names),
+                thread, **compact_discovered_tools(thread, active,
+                                                  baseline_loaded_tool_names=baseline_loaded_tool_names),
                 summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
                 compact_operation_evidence=(dict(commit.operation_evidence) if commit.publish_thread_view
                                             else thread.compact_operation_evidence),
