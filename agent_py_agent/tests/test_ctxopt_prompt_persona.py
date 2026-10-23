@@ -203,3 +203,80 @@ def test_bound_agents_source_keeps_user_revision_and_explicit_source(tmp_path, k
     assert snapshot.content == (seeds.AGENTS_TEMPLATE if upgrade else LEGACY_AGENTS)
     assert snapshot.agents_source is source and snapshot.agents_source_metadata["content_sha256"] == sha
     assert repository.paths["agents"].read_bytes() == LEGACY_AGENTS.encode()
+
+
+# LLM: 行能放入总正文预算时必须调整首尾比例，不能因75/25固定分配走字符兜底。
+# 函数用途: 覆盖长首行与带/不带尾换行的长末行。
+@pytest.mark.parametrize("side,trailing", [("head", True), ("tail", True), ("tail", False)])
+def test_persona_rebalances_budget_for_complete_edge_line(side, trailing):
+    edge = "A" * 80 + ("\n" if trailing else "")
+    content = edge + "b\n" * 200 if side == "head" else "b\n" * 200 + edge
+    result, truncated = personas._bounded_prompt_content(content, len(MARKER) + 100)
+    head, tail = result.split(MARKER)
+    assert truncated and len(result) <= len(MARKER) + 100
+    assert (head.startswith(edge) if side == "head" else tail.endswith(edge))
+    assert all(line in content.splitlines(keepends=True) for line in (head + tail).splitlines(keepends=True))
+
+
+# LLM: 两端各自能放入但不能同时放入时宁缺一端，不截断任何本可完整保留的规则。
+# 函数用途: 核对首尾长行争用预算时仍输出完整行。
+def test_persona_does_not_fragment_competing_complete_edge_lines():
+    content = "A" * 80 + "\n" + "b\n" * 200 + "Z" * 80 + "\n"
+    result, truncated = personas._bounded_prompt_content(content, len(MARKER) + 100)
+    head, tail = result.split(MARKER)
+    assert truncated and head + tail
+    assert len(result) <= len(MARKER) + 100
+    assert all(line in content.splitlines(keepends=True) for line in (head + tail).splitlines(keepends=True))
+
+
+# LLM: 不同本地来源即使正文等于builtin也不合并，符号链接仅规范其真实本地来源身份。
+# 函数用途: 保护真实项目覆盖和显式builtin提示同时存在的行为。
+@pytest.mark.parametrize("linked", [False, True])
+def test_local_project_override_remains_distinct_from_builtin(tmp_path, linked):
+    (tmp_path / "prompts").mkdir()
+    local = tmp_path / "prompts/default.md"
+    if linked:
+        target = tmp_path / "custom.md"
+        target.write_text("CUSTOM PROJECT RULE")
+        local.symlink_to(target)
+    else:
+        local.write_text("CUSTOM PROJECT RULE")
+    builder = prompts.PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)
+    chunks = builder.read_prompt_files(["builtin:prompts/default.md"])
+    assert len(chunks) == 2
+    assert chunks[0].startswith(f"# Prompt File: {local.resolve()}\n")
+    assert chunks[0].endswith("CUSTOM PROJECT RULE")
+    assert chunks[1].startswith("# Prompt File: builtin:prompts/default.md\n")
+
+
+# LLM: 原任务要求legacy默认别名与同一builtin文件只注入一次，包括指向该文件的别名链接。
+# 函数用途: 锁住同一默认来源的路径别名消重，而不是按物理位置制造重复提示。
+def test_legacy_default_symlink_to_builtin_is_injected_once(tmp_path):
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts/default.md").symlink_to(PACKAGE / "prompts/default.md")
+    builder = prompts.PromptBuilder(AgentConfig(prompt_files=["prompts/default.md"]), tmp_path)
+    chunks = builder.read_prompt_files(["builtin:prompts/default.md"])
+    assert len(chunks) == 1 and chunks[0].startswith("# Prompt File: builtin:prompts/default.md\n")
+
+
+# LLM: 使用真实来源仓库从原始字节加载，并核对换行定制不被SHA归一化掩盖。
+# 函数用途: 验证来源服务及人格投影整条读链保持精确SHA与原件不变。
+@pytest.mark.parametrize("crlf", [False, True])
+def test_real_agents_source_hashes_original_bytes_before_factory_projection(tmp_path, crlf):
+    from agent_py_agent.agent.capability.agents_source_repository import AgentsSourceRepository
+    from agent_py_agent.agent.path_access_policy import PathAccessPolicy
+
+    root = tmp_path / "data"
+    repository = _repo(root / "owners/local/main")
+    data = (LEGACY_AGENTS.replace("\n", "\r\n") if crlf else LEGACY_AGENTS).encode()
+    repository.paths["agents"].write_bytes(data)
+    policy = PathAccessPolicy.from_values(mode="full_access", agent_home_root=root)
+    repository.agents_source = AgentsSourceRepository(owner="local/main", owner_home=repository.owner_home, path_policy=policy)
+    source = repository.agents_source.load()
+    assert source.snapshot.status == "ready"
+    assert source.snapshot.content_sha256 == hashlib.sha256(data).hexdigest()
+    assert source.content == data.decode()
+    snapshot = repository.load("agents")
+    assert snapshot.content == (LEGACY_AGENTS if crlf else seeds.AGENTS_TEMPLATE)
+    assert ("factory_seed" in snapshot.diagnostic.detail) is (not crlf)
+    assert repository.paths["agents"].read_bytes() == data

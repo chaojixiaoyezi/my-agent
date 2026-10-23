@@ -1054,7 +1054,7 @@ def _is_empty_persona_template_content(content: str) -> bool:
     return not value or value in _LEGACY_TEMPLATE_PLACEHOLDER_VALUES
 
 
-# LLM: 预算含原截断标记；优先保留完整首尾行，单行超出分配预算才退回字符切片，绝不超过max_chars。
+# LLM: 预算含原标记；首尾配额可重分配，单行超过总正文预算才字符兜底，绝不超过max_chars。
 # 函数用途: 不在普通规则中间截断人格提示；极小预算宁缺正文，原文件不受影响。
 def _bounded_prompt_content(content: str, max_chars: int) -> tuple[str, bool]:
     max_chars = max(0, max_chars)
@@ -1065,23 +1065,35 @@ def _bounded_prompt_content(content: str, max_chars: int) -> tuple[str, bool]:
         return "", True
     budget = max_chars - len(marker)
     head = int(budget * 0.75)
+    first_line = content.find("\n") + 1
+    last_end = len(content) - 1 if content.endswith("\n") else len(content)
+    last_line = len(content) - content.rfind("\n", 0, last_end) - 1
+    if 0 < first_line <= budget:
+        head = max(head, first_line)
+    # 首尾都能保留时先给完整末行留位；两端竞争时优先首部，不制造半条规则。
+    if last_line <= budget and (first_line > budget or first_line + last_line <= budget):
+        head = min(head, budget - last_line)
     boundary = content.rfind("\n", 0, head)
-    prefix = content[:boundary + 1] if boundary >= 0 else content[:head]
+    prefix = content[:boundary + 1] if boundary >= 0 else ""
+    if boundary < 0 and (first_line == 0 or first_line > budget):
+        prefix = content[:head]
     tail = budget - len(prefix)
-    suffix = _persona_tail_at_boundary(content, tail)
+    suffix = _persona_tail_at_boundary(content, tail, allow_partial=last_line > budget)
     return prefix + marker + suffix, True
 
 
-# LLM: 只操作已清洗文本；末行过长无可用完整行时才字符兜底，不复制重叠正文。
+# LLM: 调用方按总正文预算决定是否允许末行片段；不因剩余配额不足自动截断可完整保留的行。
 # 函数用途: 在尾部预算内从完整行开头保留剩余人格内容。
-def _persona_tail_at_boundary(content: str, budget: int) -> str:
+def _persona_tail_at_boundary(content: str, budget: int, *, allow_partial: bool = True) -> str:
     if not budget:
         return ""
     start = len(content) - budget
     if start == 0 or content[start - 1] == "\n":
         return content[start:]
     boundary = content.find("\n", start)
-    return content[boundary + 1:] if 0 <= boundary < len(content) - 1 else content[-budget:]
+    if 0 <= boundary < len(content) - 1:
+        return content[boundary + 1:]
+    return content[-budget:] if allow_partial else ""
 
 
 # LLM: 仅默认AGENTS、精确原始字节SHA、没有任何人格版本账本时给新工厂视图；不写原文/版本/审批记录。
