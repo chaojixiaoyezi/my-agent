@@ -1,10 +1,11 @@
-# LLM: context-pressure 的展示和阈值只来自原策略；纯计量与出站共源，可携带实际调用准备点的线程CAS绑定，本模块不为遥测另读store。
+# LLM: 展示/阈值沿原策略，新增raw/校准来源不改预算；出站诊断复用原计量，只使用已加载观测，不为诊断水合store或写运行状态。
 # 模块用途: 估算即将发送的模型输入并给出结构化压缩信号，保持输出预留、运行期校准及纯投影的边界。
 from __future__ import annotations
 
 import hashlib
 import json
 import time
+from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 
 from ...backends import ModelResponse, is_provider_context_window_error
@@ -21,7 +22,7 @@ from ...conversation.compact_progress import (
     COMPACT_TRIGGER_PREFLIGHT,
     COMPACT_TRIGGER_TOOL_CONTEXT_OVERFLOW,
 )
-from ...conversation.context_usage import ContextUsageBinding
+from ...conversation.context_usage import ContextUsageBinding, public_context_usage
 from ...memory_archive import estimate_tokens
 from ...memory_archive.tokens import _item_length_fingerprint
 from ...model_guidance import provider_system_instruction
@@ -62,7 +63,7 @@ class ModelVisibleContextBudget:
     remaining_to_compact_tokens: int
 
 
-# LLM: 本快照携带同一次 preflight 数值及内部捕获代次；组成之和仍等于总量，usage_binding 不进入公开协议或模型内容。
+# LLM: 同次preflight保留原始估算、实际校准是否生效及CAS绑定；公开来源仅数值/枚举，组成之和仍等于current，绑定不公开。
 # 类用途: 保存一次真实模型调用前的上下文总量、窗口、压缩线和各组成部分，供 TUI 实时展示。
 @dataclass(frozen=True)
 class ModelVisibleContextSnapshot:
@@ -74,7 +75,7 @@ class ModelVisibleContextSnapshot:
     runtime_guidance_tokens: int
     tool_schema_tokens: int
     protocol: str
-    # 未校准的本地保守估算只在调用边界内传递，不进入 TUI 事件。
+    # 未校准的本地保守估算与校准后总量分开公开，不冒充供应商实际usage。
     raw_estimated_tokens: int
     # 稳定 system/prompt/tool surface 只保存摘要指纹，不进入公开 TUI 事件。
     context_surface_fingerprint: str
@@ -82,12 +83,12 @@ class ModelVisibleContextSnapshot:
     model_name: str = ""
     reasoning_level: str = ""
     usage_binding: ContextUsageBinding | None = field(default=None, repr=False, compare=False)
+    measurement_kind: str = ""
 
-    # LLM: Public serialization exposes only bounded numeric facts, two short display labels (model name, reasoning
-    # level) and the frozen schema id; prompts, messages, tool definitions, and guidance content must never enter the UI event.
+    # LLM: 公开序列化与持久回读共用同一数值/枚举白名单；raw/校准与计数身份可见，指纹、CAS绑定及正文不进TUI事件。
     # 函数用途: 把上下文快照转换成可安全发送给 TUI 的结构化字典，不包含任何正文。
     def to_public_dict(self) -> dict[str, object]:
-        return {
+        return public_context_usage({
             "schema": "model_visible_context_usage.v1",
             "estimated": True,
             "model_name": self.model_name,
@@ -100,10 +101,12 @@ class ModelVisibleContextSnapshot:
             "runtime_guidance_tokens": self.runtime_guidance_tokens,
             "tool_schema_tokens": self.tool_schema_tokens,
             "protocol": self.protocol,
-        }
+            "raw_estimated_tokens": self.raw_estimated_tokens,
+            "measurement_kind": self.measurement_kind,
+        })
 
 
-# LLM: 这是实时上下文数字的唯一构造入口，沿原策略/估算器；仅携带调用准备点已捕获的版本，不为纯预算查询读store或给旧数重签。
+# LLM: 实时快照沿原策略/估算器，校准与来源共用同一次观测；等值校准也保留生效标志，不给旧CAS绑定重签。
 #   缺绑定只放弃持久遥测；触发线、计量和模型请求仍沿原合同。
 # 函数用途: 计算一次即将发给模型的上下文构成；状态条始终显示统一的自动压缩点，不受单次回合是否允许落盘影响。
 def model_visible_context_snapshot(
@@ -118,12 +121,8 @@ def model_visible_context_snapshot(
         params,
         prompt,
     )
-    current = _provider_calibrated_context_tokens(
-        agent,
-        params,
-        raw_current,
-        context_surface_fingerprint=surface_fingerprint,
-    )
+    observation = _provider_context_observation(agent, params, context_surface_fingerprint=surface_fingerprint)
+    current, calibrated = _calibrated_tokens_from_observation(raw_current, observation)
     components = _rescale_context_components(current, components)
     policy = runtime_compact_policy(
         agent,
@@ -149,7 +148,50 @@ def model_visible_context_snapshot(
         model_name=str(getattr(getattr(agent, "backend", None), "model_name", "") or "")[:80],
         reasoning_level=_display_reasoning_level(agent, params),
         usage_binding=usage_binding,
+        measurement_kind="calibrated_estimate" if calibrated else "conservative_estimate",
     )
+
+
+# LLM: 纯诊断不触发线程/owner校准水合；只借已加载观测，隔离计量memo，复用原组件与校准公式，不改变请求、阈值或原params。
+# 函数用途: 分解完整出站输入的保守估计、校准总量和各层分摊，缺已加载校准时明确保守估计。
+def outbound_request_layer_breakdown(agent: object, params: object | None, prompt: object) -> dict[str, object]:
+    isolated = _diagnostic_context_params(params)
+    _protocol, raw, components, fingerprint = _model_visible_context_components(agent, isolated, prompt)
+    observation = _loaded_context_observation(agent, isolated, fingerprint)
+    current, calibrated = _calibrated_tokens_from_observation(raw, observation)
+    public = public_context_usage({"schema": "model_visible_context_usage.v1", "current_tokens": current,
+        "raw_estimated_tokens": raw, "measurement_kind": "calibrated_estimate" if calibrated else "conservative_estimate"})
+    return {**{key: public[key] for key in ("raw_estimated_tokens", "calibrated_tokens", "measurement_kind", "counter_id", "count_scope")},
+            "components": _rescale_context_components(current, components), "context_surface_fingerprint": fingerprint,
+            "calibration_lookup": "loaded_only"}
+
+
+# LLM: 浅复制不重跑构造/__post_init__；只给副本替换顶层memo，支持frozen/init=False，原历史、工具与typed绑定只读借用。
+# 函数用途: 为诊断创建私有运行状态副本，避免计量缓存污染原调用。
+def _diagnostic_context_params(params: object | None) -> object | None:
+    if params is None:
+        return None
+    state = getattr(params, "live_archive_state", None)
+    state = dict(state) if isinstance(state, dict) else {}
+    isolated = copy(params)
+    object.__setattr__(isolated, "live_archive_state", state)
+    return isolated
+
+
+# LLM: 只读当前params中同表面观测或同模型owner比值的内存缓存；不读store/磁盘、不建缓存，不把缺失实际量当零。
+# 函数用途: 为纯诊断选择已经加载且身份匹配的校准依据。
+def _loaded_context_observation(agent: object, params: object | None, fingerprint: str) -> dict[str, object]:
+    state = getattr(params, "live_archive_state", None)
+    if not isinstance(state, dict):
+        return {}
+    observation = state.get(_PROVIDER_CONTEXT_OBSERVATION_KEY)
+    if _provider_observation_matches(observation, fingerprint):
+        return observation
+    cache = state.get(_PROVIDER_CONTEXT_OWNER_RATIO_KEY)
+    if not isinstance(cache, dict) or not _owner_ratio_carry_enabled(agent):
+        return {}
+    entry = cache.get(_tokenizer_identity_key(agent, _request_protocol(params)))
+    return {**entry, "_calibration_scope": _OWNER_RATIO_CALIBRATION_SCOPE} if isinstance(entry, dict) and entry else {}
 
 
 # LLM: 与真实请求同一解析（settings.reasoning_effort.run_reasoning_level + backends.reasoning_control.reasoning_request_values，
@@ -472,10 +514,7 @@ def rebase_provider_context_observation(
     return True
 
 
-# LLM: Current-run observations use 会话运行时 provider baseline plus append-only local growth.
-# A reconstructed background slice may have replaced raw pairs with the same-generation handoff;
-# for that durable observation use a conservative ratio (never below 50%) and charge all positive
-# raw growth at full price. Fingerprint/generation mismatches always fall back to the raw estimate.
+# LLM: 沿原观测水合与唯一纯校准公式返回预检总量；来源标志只供快照/诊断，不改追加增量、耐久/owner比例及50%保守下限。
 # 函数用途: 用服务端实际 token 校准本轮追加内容，并让后台唤醒在相同请求表面下安全复用会话级基线。
 def _provider_calibrated_context_tokens(
     agent: object,
@@ -484,33 +523,39 @@ def _provider_calibrated_context_tokens(
     *,
     context_surface_fingerprint: str,
 ) -> int:
-    raw = max(0, int(raw_tokens or 0))
     observation = _provider_context_observation(
         agent,
         params,
         context_surface_fingerprint=context_surface_fingerprint,
     )
+    return _calibrated_tokens_from_observation(raw_tokens, observation)[0]
+
+
+# LLM: 纯数值校准保留原公式及所有回退；布尔值仅标记是否真应用校准，provider恰好等于raw也必须标为已校准估计。
+# 函数用途: 为预检、公开快照与纯诊断共同计算校准总量及生效标志。
+def _calibrated_tokens_from_observation(raw_tokens: int, observation: dict[str, object]) -> tuple[int, bool]:
+    raw = max(0, int(raw_tokens or 0))
     if not observation:
-        return raw
+        return raw, False
     try:
         observed_raw = int(observation.get("raw_estimated_tokens") or 0)
         provider_input = int(observation.get("provider_input_tokens") or 0)
     except (TypeError, ValueError):
-        return raw
+        return raw, False
     if observed_raw <= 0 or provider_input <= 0:
-        return raw
+        return raw, False
     scope = str(observation.get("_calibration_scope") or "")
     if scope == _OWNER_RATIO_CALIBRATION_SCOPE:
         # 别的会话/表面的观测：两边原始量不在同一基线上，只能按比例折算，不能加减。
-        return _conservative_ratio_tokens(raw, observed_raw, provider_input)
+        return _conservative_ratio_tokens(raw, observed_raw, provider_input), True
     if scope != _DURABLE_CALIBRATION_SCOPE:
         if raw < observed_raw:
-            return raw
-        return provider_input + (raw - observed_raw)
+            return raw, False
+        return provider_input + (raw - observed_raw), True
     scaled = _conservative_ratio_tokens(raw, observed_raw, provider_input)
     if raw < observed_raw:
-        return scaled
-    return max(scaled, provider_input + (raw - observed_raw))
+        return scaled, True
+    return max(scaled, provider_input + (raw - observed_raw)), True
 
 
 # LLM: 与 compact_calibration.calibrated_compact_request_tokens 的比例口径相同：ceil(raw × max(provider, ceil(observed/2)) / observed)，
@@ -1131,6 +1176,7 @@ __all__ = [
     "is_context_window_error",
     "model_visible_context_budget",
     "model_visible_context_snapshot",
+    "outbound_request_layer_breakdown",
     "frozen_compact_request_calibration",
     "rebase_provider_context_observation",
     "request_projection_surface_fingerprint",

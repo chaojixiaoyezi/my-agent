@@ -1,5 +1,5 @@
 # LLM: 此模块独占 Chat Completions 转换；只读出站投影与真实发送共用组包；八档换算和声明过滤归 reasoning_control，
-#   本模块只传同次输出上限与冻结声明，保持历史、思考、工具、采样与用量合同。
+#   schema仅规范JSON对象键，不改数组/历史顺序、不启用未声明的增量工具能力，保持思考、采样与用量合同。
 # 模块用途: 调用 Chat 接口，转换消息并及时关闭流归还名额；网络、回调及私有诊断均在既有边界内。
 from __future__ import annotations
 
@@ -482,7 +482,20 @@ def _disable_thinking_for(payload: dict[str, Any], *, api_base: str) -> None:
         payload["thinking"] = {"type": "disabled"}
 
 
-# LLM: Chat schema 投影只转换规范工具元数据；不能增加能力，需同步工具选择及请求快照测试。
+# LLM: JSON对象键序规范化不改变值/数组顺序，不向未知端点启用任何扩展协议；异常非字符串键保持原行为，不排序掩盖wire差异。
+# 函数用途: 为同一逻辑schema产生确定的嵌套对象键顺序，返回新容器而不改原schema。
+def _stable_json_object_keys(value: object) -> object:
+    if isinstance(value, dict):
+        keys = list(value)
+        if all(isinstance(key, str) for key in keys):
+            keys.sort()
+        return {key: _stable_json_object_keys(value[key]) for key in keys}
+    if isinstance(value, list):
+        return [_stable_json_object_keys(item) for item in value]
+    return value
+
+
+# LLM: Chat只转换授权后的规范工具元数据，schema对象键稳定但工具/数组保持原序；不猜provider能力或增加工具更新字段。
 # 函数用途: 将已有工具目录转换成供应商 function tools 格式。
 def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate the canonical internal schema to OpenAI function tools."""
@@ -497,7 +510,7 @@ def _openai_tools_from_native(tools: list[dict[str, Any]]) -> list[dict[str, Any
                 "function": {
                     "name": str(tool["name"]),
                     "description": str(tool.get("description") or ""),
-                    "parameters": dict(tool.get("input_schema") or {}),
+                    "parameters": _stable_json_object_keys(dict(tool.get("input_schema") or {})),
                 },
             }
         )

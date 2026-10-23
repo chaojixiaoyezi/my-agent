@@ -1,4 +1,4 @@
-# LLM: 这里只持久/投影模型 preflight 数值；原采样绑定不重签，普通遥测故障降级，原 typed 执行未知须同对象上抛给请求收口，不代判完成或恢复。
+# LLM: 只持久/投影preflight数字与计量来源枚举，不存正文；原采样绑定不重签，typed执行未知仍交原请求收口。
 # 模块用途: 保存空闲与重连的上下文数字，压缩或模型切换后的迟到快照不得覆盖新状态。
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ _TOKEN_FIELDS = (
     "context_window_tokens", "compact_trigger_tokens", "current_tokens", "prompt_tokens",
     "messages_tokens", "runtime_guidance_tokens", "tool_schema_tokens",
 )
+_MEASUREMENT_COUNTER_IDS = {"conservative_estimate": "conservative_cjk_utf8_v1",
+                          "calibrated_estimate": "provider_calibrated_v1", "provider_actual": "provider_actual_v1"}
 
 
 # LLM: 仅由原采样入口建立并随同一次快照传递，不序列化、不授权限；store 对象身份限制归属，数字使用原线程 CAS。
@@ -83,7 +85,22 @@ def _label(value: object) -> str:
     return value.strip()[:80] if isinstance(value, str) else ""
 
 
-# LLM: 该白名单供持久化和主/子公开投影共用；原始 prompt、工具参数和未知字段不保留。model_name / reasoning_level 是状态行
+# LLM: 旧快照缺raw时按current解释；来源只收固定枚举，counter/scope由口径派生，不信任自由标签或伪造的校准总量。
+# 函数用途: 给已有计量附加清洗后的原始值、校准值及计数来源。
+def _measurement_fields(value: Mapping) -> dict[str, object]:
+    current = _count(value.get("current_tokens"))
+    raw = _count(value.get("raw_estimated_tokens", current))
+    kind = value.get("measurement_kind")
+    inferred = "calibrated_estimate" if current != raw else "conservative_estimate"
+    if (not isinstance(kind, str) or kind not in _MEASUREMENT_COUNTER_IDS
+            or (kind == "conservative_estimate" and current != raw)):
+        kind = inferred
+    return {"raw_estimated_tokens": raw, "calibrated_tokens": current, "measurement_kind": kind,
+            "counter_id": _MEASUREMENT_COUNTER_IDS[kind], "count_scope": "full_outbound_request"}
+
+
+# LLM: 同一白名单保存/回读新增来源；旧字段、准确thread与两种CAS合同不变，原始prompt、工具参数和未知字段不保留。
+#   model_name / reasoning_level 是状态行
 #   显示用的短标签（来自 agent_core.model.context_pressure 的快照），旧快照没有时为空串。
 # 函数用途: 复制已有 preflight 快照中的合法数字与两个短标签，不重新估算模型上下文。
 def public_context_usage(value: object) -> dict[str, object]:
@@ -97,6 +114,7 @@ def public_context_usage(value: object) -> dict[str, object]:
         "protocol": protocol if protocol in ("native", "text") else "unknown",
         "model_name": _label(value.get("model_name")),
         "reasoning_level": _label(value.get("reasoning_level")),
+        **_measurement_fields(value),
     }
 
 
