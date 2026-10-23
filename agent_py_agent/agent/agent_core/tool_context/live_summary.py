@@ -66,14 +66,23 @@ def _payload(result: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-# LLM: Keep both ends within a fixed character budget; no file rereads or subprocesses are allowed here.
-# 函数用途: 为标准输出、错误输出或后台日志保留有界开头和结尾。
+# LLM: Bound the final JSON encoding, including escapes and omission marker, so logs cannot crowd out network evidence.
+#   Only excerpts are shortened; identities and references never use this function. No file IO or subprocesses.
+# 函数用途: 按编码后的长度为日志保留两端，避免控制字符转义挤掉网络未验证标记和证据边界。
 def _head_tail(value: object) -> str:
     text = str(value or "")
-    if len(text) <= _EXCERPT_CHARS:
+    if _json_size(text) <= _EXCERPT_CHARS:
         return text
-    half = _EXCERPT_CHARS // 2
-    return text[:half] + f"\n...[omitted {len(text) - _EXCERPT_CHARS} chars]...\n" + text[-half:]
+    low, high, selected = 0, min(len(text) // 2, _EXCERPT_CHARS // 2), ""
+    while low <= high:
+        half = (low + high) // 2
+        marker = f"\n...[omitted {len(text) - 2 * half} chars]...\n"
+        candidate = text[:half] + marker + (text[-half:] if half else "")
+        if _json_size(candidate) <= _EXCERPT_CHARS:
+            selected, low = candidate, half + 1
+        else:
+            high = half - 1
+    return selected
 
 
 # LLM: Count the same compact JSON characters emitted by the domain renderer, not Python repr sizes.

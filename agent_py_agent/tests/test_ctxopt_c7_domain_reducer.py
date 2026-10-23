@@ -204,7 +204,8 @@ def test_process_stop_without_logs_cannot_reintroduce_cleanup_pids(log, cleanup_
 
 # LLM: Network conclusions and their evidence boundary stay exact; collection growth must be explicitly counted, not reinlined.
 # 函数用途: 为大监听列表、防火墙观察和加载错误验证固定摘要上界及省略计数。
-def test_network_and_load_errors_share_bounded_summary_budget():
+@pytest.mark.parametrize('log', ['', '\x01' * 1200, '\\"' * 3000], ids=['empty', 'control-escapes', 'quotes-and-slashes'])
+def test_network_and_load_errors_share_bounded_summary_budget(log):
     bindings = [{'host': '0.0.0.0', 'port': 8000 + i, 'scope': 'non_loopback', 'listener_pids': [321]} for i in range(500)]
     observations = [{'zone': 'public', 'port': 8000 + i, 'protocol': 'tcp',
                      'status': 'not_explicitly_allowed', 'query_return_code': 1} for i in range(500)]
@@ -215,10 +216,13 @@ def test_network_and_load_errors_share_bounded_summary_budget():
                'evidence_boundary': 'Only another target machine can verify external connectivity.'}
     payload = {'process': {'session_id': 'bg-network-owned', 'status': 'running', 'exit_code': None},
                'network': network, 'load_errors': [{'error_type': 'read_failed', 'session_id': f'bad-{i}'} for i in range(500)]}
+    payload['process']['output_tail'] = log
     before = deepcopy(payload)
     result = _result('process_session', True, json.dumps(payload), result_envelope={'tool_output_policy': {'trust': 'external_data'}})
     rendered = render_tool_result_for_live_prompt(result, _record())
     summary = next(json.loads(line) for line in rendered.splitlines() if line.startswith('{'))
+    assert {'lan_reachability', 'external_probe_required', 'evidence_boundary', 'host_firewall'} <= summary['network'].keys()
+    assert 'status' in summary['network']['host_firewall']
     assert summary['network']['lan_reachability'] == network['lan_reachability']
     assert summary['network']['external_probe_required'] is True
     assert summary['network']['evidence_boundary'] == network['evidence_boundary']
@@ -229,3 +233,15 @@ def test_network_and_load_errors_share_bounded_summary_budget():
     assert summary['output_artifact_ref'] == 'run:call'
     assert len(json.dumps(summary, ensure_ascii=False)) < 8000 and len(rendered) < 9500
     assert payload == before
+
+
+# LLM: Budget the emitted JSON, including escapes and omission text, while preserving both diagnostic endpoints.
+# 函数用途: 验证控制字符、引号、反斜线和Unicode都不会令日志摘要突破编码预算。
+@pytest.mark.parametrize('unit', ['\x01', '\t', '\\', '"', '😀'], ids=['control', 'tab', 'slash', 'quote', 'unicode'])
+def test_head_tail_budget_counts_final_json_encoding(unit):
+    from agent_py_agent.agent.agent_core.tool_context.live_summary import _head_tail
+
+    excerpt = _head_tail('FIRST-LINE\n' + unit * 5000 + '\nFINAL-ERROR')
+    assert len(json.dumps(excerpt, ensure_ascii=False)) <= 1200
+    assert excerpt.startswith('FIRST-LINE') and excerpt.endswith('FINAL-ERROR')
+    assert 'omitted' in excerpt
