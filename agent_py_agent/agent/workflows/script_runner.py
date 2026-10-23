@@ -43,6 +43,7 @@ read_roots = tuple(Path(p) for p in cfg.get("read_roots", ()))
 write_roots = tuple(Path(p) for p in cfg.get("write_roots", ()))
 denied_roots = tuple(Path(p) for p in cfg.get("denied_roots", ()))
 allow_net = bool(cfg.get("network_access", False))
+block_subproc = bool(cfg.get("block_subprocess", False))
 
 def _under(target, roots):
     return any(target == r or r in target.parents for r in roots)
@@ -60,6 +61,8 @@ def _check_write(raw):
 def _audit(event, args):
     if not allow_net and event in ("socket.connect", "socket.bind", "socket.sendto", "socket.getaddrinfo"):
         raise PermissionError(errno.EACCES, "Network access denied")
+    if block_subproc and event in ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty", "os.spawn"):
+        raise PermissionError(errno.EACCES, "Subprocess execution denied without inner OS sandbox")
     if event == "open":
         path_arg, mode, flags = args[0], args[1], args[2]
         if isinstance(path_arg, int):
@@ -370,24 +373,21 @@ class ScriptRunner:
                                       metadata['code'], file_mode=0o700)
             net_allowed = _network_access(metadata, network_access)
             env = _environment(metadata, folder, input_json, sources)
-            if self.restrict_to_roots and interpreter == 'python3':
-                guard = safe_path(folder, '_sandbox_guard.py')
-                write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, guard.name),
-                                          _PYTHON_GUARD_CODE, file_mode=0o700)
-                resolved_folder = folder.resolve(strict=False)
-                resolved_owner = self.owner_home.resolve(strict=False)
-                env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
-                    'read_roots': [str(p) for p in (resolved_folder, *runtime_read_roots, *self.public_read_roots, *self.extra_write_roots)],
-                    'write_roots': [str(p) for p in (resolved_folder, *self.extra_write_roots, Path('/dev'))],
-                    'denied_roots': [str(p) for p in (resolved_owner, resolved_owner.parent, resolved_owner.parent.parent)],
-                    'network_access': net_allowed,
-                })
-                command = [executable, '-I', '-B', str(guard), str(entrypoint)]
-            else:
-                command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
+            resolved_owner = self.owner_home.resolve(strict=False)
+            private_roots = (
+                tuple(dict.fromkeys((
+                    resolved_owner,
+                    resolved_owner.parent,
+                    resolved_owner.parent.parent,
+                    *((resolved_owner.parent.parent.parent,) if resolved_owner.parent.parent.name == 'owners' else ()),
+                )))
+                if self.restrict_to_roots
+                else ()
+            )
+            command = [executable, '-I', '-B', str(entrypoint)] if interpreter == 'python3' else [executable, str(entrypoint)]
+            applied_sandbox = False
             if self.use_sandbox:
                 shared_root = folder if self.restrict_to_roots else self.owner_home
-                private_roots = (self.owner_home, self.owner_home.parent) if self.restrict_to_roots else ()
                 sandbox = AttemptExecutionSandbox(AttemptSandboxSpec(
                     attempt_view=folder, staging_root=folder, shared_workspace=shared_root, owner_home=shared_root,
                     extra_write_roots=(folder, *self.extra_write_roots),
@@ -397,7 +397,24 @@ class ScriptRunner:
                     implicit_attempt_write_roots=True,
                     network_access=net_allowed))
                 if _can_apply_sandbox(sandbox, strict=self.strict_sandbox):
-                    command = sandbox.build_argv(command)
+                    applied_sandbox = True
+            if self.restrict_to_roots and interpreter == 'python3':
+                guard = safe_path(folder, '_sandbox_guard.py')
+                write_text_atomic_beneath(self.owner_home, (*folder.relative_to(self.owner_home).parts, guard.name),
+                                          _PYTHON_GUARD_CODE, file_mode=0o700)
+                resolved_folder = folder.resolve(strict=False)
+                env['MY_AGENT_SCRIPT_GUARD_JSON'] = json.dumps({
+                    'read_roots': [str(p) for p in (resolved_folder, *runtime_read_roots, *self.public_read_roots, *self.extra_write_roots)],
+                    'write_roots': [str(p) for p in (resolved_folder, *self.extra_write_roots, Path('/dev'))],
+                    'denied_roots': [str(p) for p in private_roots],
+                    'network_access': net_allowed,
+                    'block_subprocess': not applied_sandbox,
+                })
+                command = [executable, '-I', '-B', str(guard), str(entrypoint)]
+            elif self.restrict_to_roots and not applied_sandbox:
+                raise SandboxUnavailableError('SANDBOX_UNAVAILABLE: NESTED_SHELL_SANDBOX_UNAVAILABLE')
+            if applied_sandbox:
+                command = sandbox.build_argv(command)
             yield metadata, sources, (command, str(folder), env, input_json, timeout)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
