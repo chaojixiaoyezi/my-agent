@@ -2,6 +2,8 @@
 # 插件正常由独立 PluginCommandClient 消费；进入共享控制时保留原文，不能降成停止任务。
 # 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
 # G3：Gateway 请求在原身份头入口附凭据；读取失败按 G2b 开关——开关开返回明确未发送的原因码，开关关降级不带凭据；direct 不读取凭据。
+# LLM: 控制身份、目录及菜单 CAS 来自同一持久输入，不能在运输层丢掉条件或重建 ID。
+# 模块用途: 路由本地与 Gateway 的结构化控制请求及回执。
 from __future__ import annotations
 
 """CLI adapter for the shared ordinary-conversation control protocol.
@@ -50,6 +52,7 @@ class ChatControlState:
     request_id: str = ""
     local_run: object | None = None
     expected_execution: dict | None = None
+    model_payload: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,8 @@ def _execute_gateway_control(
     selected_control_target = str(target_control_message_id or "").strip()
     if execution.state.expected_execution is not None:
         payload["metadata"]["expected_execution"] = execution.state.expected_execution
+    if execution.state.model_payload is not None:
+        payload["metadata"]["model_payload"] = execution.state.model_payload
     from .gateway_client import _gateway_submit_workspace
 
     workspace = _gateway_submit_workspace(

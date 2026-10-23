@@ -113,6 +113,7 @@ class TuiStatus:
     mode: str = "default"
     context_usage: TuiContextUsage | None = None
     model_metrics: dict[str, object] = field(default_factory=dict)
+    completion: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: TuiDiagnostic 记录被拒绝/未知/非法事件的有界机器事实，默认不作为用户消息显示。
@@ -359,6 +360,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "turn_interrupt_requested": self._handle_turn_status,
             "turn_completed": self._handle_turn_status,
             "turn_failed": self._handle_turn_status,
+            "turn_observation_ended": self._handle_turn_status,
             "turn_interrupted": self._handle_turn_status,
             "status_updated": self._handle_status_updated,
             "history_blocks_reordered": self._handle_history_blocks_reordered,
@@ -1140,7 +1142,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # running/failed/interrupted 判断。
     # 函数用途: 收口临时展示并更新当前回合状态和事件时间。
     def _handle_turn_status(self, event: TuiEvent) -> None:
-        if event.kind in {"turn_completed", "turn_failed", "turn_interrupted"}:
+        if event.kind in {"turn_completed", "turn_failed", "turn_interrupted", "turn_observation_ended"}:
             self._clear_tool_input_blocks()
         self.status = _status_for_turn_event(self.status, event)
 
@@ -1339,6 +1341,7 @@ def _status_for_turn_event(status: TuiStatus, event: TuiEvent) -> TuiStatus:
         "turn_interrupt_requested": "interrupting",
         "turn_completed": "idle",
         "turn_failed": "failed",
+        "turn_observation_ended": "idle",
         "turn_interrupted": "interrupted",
     }[event.kind]
     started_at = event.created_at if event.kind == "turn_started" else status.started_at
@@ -1348,6 +1351,7 @@ def _status_for_turn_event(status: TuiStatus, event: TuiEvent) -> TuiStatus:
         activity=str(event.payload.get("activity") or status.activity),
         started_at=started_at,
         last_event_at=event.created_at,
+        completion=dict(event.payload.get("completion") or {}) if event.kind != "turn_started" else {},
     )
 
 

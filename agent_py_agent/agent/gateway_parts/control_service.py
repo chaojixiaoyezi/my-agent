@@ -109,6 +109,7 @@ class _SubagentStatusCounts(NamedTuple):
 #   它是纯展示依赖，不参与身份、权限或 owner 判定，缺省 None 时展示“暂无记录”。
 #   因此从相等、哈希和 repr 里排除：两个只差 hub 的 scope 必须相等、哈希相同，打印 scope 也不该带出对象地址。
 # 类用途: 保存控制的可信来源及短期人工封印；封印不序列化，恢复回执不能重建当前批准。
+# LLM: input_media 只承接 HTTP 顶层原输入，不从 metadata 猜图；落 guidance 前必须通过当前 owner 的媒体校验。
 @dataclass(frozen=True)
 class GatewayControlScope:
     user_id: str
@@ -121,6 +122,7 @@ class GatewayControlScope:
     event_hub: object | None = field(default=None, compare=False, hash=False, repr=False)
     agents_ingress: object | None = field(default=None, compare=False, hash=False, repr=False)
     memory_ingress: object | None = field(default=None, compare=False, hash=False, repr=False)
+    input_media: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1398,6 +1400,9 @@ def _execute_effort_control(
     from ..settings.reasoning_probe import effort_probe_lines
 
     try:
+        if command.operation == "set":
+            from .model_profile_service import execute_model_text_control
+            return execute_model_text_control(base_agent, command, scope)
         owner_agent = _request_agent_for_scope(base_agent, scope)
         thread = _settings_thread(owner_agent, scope)
         if command.operation == "set":
@@ -1857,6 +1862,9 @@ def _steer_active_request(
             thread_id = _control_thread_id(store, active, scope)
             if not thread_id:
                 raise ValueError("conversation thread is unavailable")
+            from .control_guidance_payload import validate_guidance_media
+
+            validate_guidance_media(owner_agent, scope, thread_id)
             with store.guidance.ledger.turn_guard(turn_id):
                 if target_type == "task":
                     with store.tasks.transition_guard(request_id), execution_scope_guard(paths, store, scope) as matches:

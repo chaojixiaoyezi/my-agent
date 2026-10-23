@@ -9,8 +9,8 @@ from .request_owner_binding import frozen_request_owner
 
 
 # LLM: metadata/client message来自原prepared，不从新header或当前owner重签；所有运输目标取已冻结同一份v3投影。
-# LLM: v1仍request；显式BG v2只投影等价纯文字task/invocation，不把媒体/files/options塞入原control payload。
-# 函数用途: 构造与原steer完全同口径的纯文字追加参数。
+# LLM: 媒体作为原输入的一部分参与同一 guidance 摘要；文件/执行选项仍不得借媒体夹带，实际写入先核 owner。
+# 函数用途: 构造与原 steer 完全同口径的带图或纯文字追加参数。
 def input_guidance_payload(receipt):
     from ..conversation.control_commands import ConversationControlCommand
 
@@ -31,7 +31,7 @@ def input_scope(receipt):
     metadata.update(message_id=receipt.client_message_id, gateway_input_request_id=receipt.request_id)
     scope = GatewayControlScope(user_id=prepared['user_id'], channel=metadata['channel'],
         conversation_id=str(conversation.get('channel_conversation_id') or conversation.get('id') or ''),
-        metadata=metadata)
+        metadata=metadata, input_media=tuple(prepared.get('input_media') or ()))
     scope = replace(scope, resolved_owner=frozen_request_owner(prepared))
     return scope
 

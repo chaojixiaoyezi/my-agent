@@ -1,3 +1,5 @@
+# LLM: 完整 C HTTP/原 claim/guidance 的临时存储验证，不访问商业模型或生产 Gateway。
+# 模块用途: 核对原活动输入运输、恢复、幂等及不等价选项排队合同。
 """完整C HTTP→原前台claim→guidance安全点；仅测试回环HTTP/真实临时Store/假模型，不是native/Count2验收。"""
 
 import json
@@ -218,10 +220,12 @@ def test_probe_then_original_safe_point_appends_and_original_provider_ack_consum
         assert not guidance.has_pending_turn_input(agent, params) and backend.calls == 0
 
 
+# LLM: 媒体本身已可插话，此处带媒体同时改 prompt_files 仍必须完整排队，不能丢图变活动纯文。
+# 函数用途: 锁定不等价执行选项的原队列行为及字段完整性。
 @pytest.mark.parametrize(
     "options",
     [
-        {"input_media": [{"kind": "image", "ref": "synthetic-ref"}]},
+        {"input_media": [{"kind": "image", "ref": "synthetic-ref"}], "prompt_files": ["a.txt"]},
         {"prompt_files": ["a.txt"]},
         {"inject": ["保持格式"]},
         {"save": False},

@@ -1,9 +1,17 @@
-## 2026-10-23 Plugin Host v2 Worker A：公共合同、v9 授权与传输
+## 2026-10-23 Plugin Host v2（A/B1/B2/C/D1/D2）：公共合同、v9 授权、本地普通用户隔离与 42 动作完整集成
 
-- 来源：`plugin-host-v2-worker-a-c6` 及 `plugin_host_api_expansion_design.md`。中央目录固定 42 动作，严格 JSON/身份注入拒绝，v9 文件清单显式版本，宿主授权绑定原安装/激活及原确认流程；B/C/D 未注册的领域明确未就绪，不返回假空数据。
-- 新增 `test_plugin_host_v2_contracts.py`、`test_plugin_host_v2_grants.py`、`test_plugin_manifest_v9.py`。覆盖闭合参数、条件能力、固定授权往返及撤销、来源副本拒绝、受限 resolver 修订/预算/来源检查、游标完整性与到期，以及真实回环 HTTP 和独立有界 SSE。resolver 为合同替身，不代表已验证 C 的真实执行主体；MCP 环境测试不启动 OS 插件进程。
-- 复现：在工作树根运行 `python3 -m pytest agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_plugin_manifest_v9.py agent_py_agent/tests/test_plugin_host_api.py agent_py_agent/tests/test_plugin_broker_api.py agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_plugin_install_store.py agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short`；再运行任务规定的 ruff 和 strict code-size 检查。
-- 已在指定原基线 `40d3c988d` 的独立归档副本复现架构门禁 `test_product_code_has_no_var_keyword_service_interfaces` 失败：`workflows_tool.py`、`skill_learning_store.py`、`skill_usage_ledger.py` 的四处既有接口；当前 offender 列表与基线逐项相等。未删除/跳过/放宽测试，也未改 Worker A 范围外业务代码。
+- 来源：`plugin-host-v2-worker-a-c6`、`B1/B2/C/D1/D2` 及 `plugin_host_api_expansion_design.md`。中央目录固定 42 动作，严格 JSON/身份注入拒绝，v9 文件清单显式版本，宿主授权绑定原安装/激活及原确认流程。
+- 新增 `test_plugin_host_v2_contracts.py`、`test_plugin_host_v2_grants.py`、`test_plugin_manifest_v9.py`、`test_plugin_local_users.py`、`test_plugin_act_as_user.py`、`test_plugin_host_v2_conversations.py`、`test_plugin_host_v2_requests.py`、`test_plugin_host_v2_interactions.py`、`test_plugin_host_v2_observations.py`。覆盖闭合参数、条件能力、固定授权往返及撤销、来源副本拒绝、本地普通用户生命周期与 `act_as_user` 非管理员隔离、游标完整性与到期、会话历史/请求流式订阅/取消、交互决策/任务/目标与产物/记忆只读观察，以及真实回环 HTTP 和独立有界 SSE。
+- 复现：在工作树根运行 `python3 -m pytest agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_plugin_manifest_v9.py agent_py_agent/tests/test_plugin_local_users.py agent_py_agent/tests/test_plugin_act_as_user.py agent_py_agent/tests/test_plugin_host_v2_conversations.py agent_py_agent/tests/test_plugin_host_v2_requests.py agent_py_agent/tests/test_plugin_host_v2_interactions.py agent_py_agent/tests/test_plugin_host_v2_observations.py -q --tb=short`。
+
+## 2026-10-23 C7：活动回合带图、设置短事务与程序完成计时
+
+- 来源：`cli-steer-modelswitch-timer-c7-v2` 及同名设计 §7。只改原媒体携带/IR/ACK、原控制 outbox/claim、原模型安全点和终端显示，不更换任务或权限账本。
+- `test_active_turn_media_interjection.py`：覆盖真实回环 HTTP → C claim → 原安全点 → 原生 provider 适配器图像字节 → ACK/transcript；同 ID 重试与换图冲突、Compact/new-loop/跨模型恢复、text/native 不支持时明确失败；真实管道 Enter 文本+图、纯图、多图与 outbox 写失败保留草稿。额外检查跨 owner、symlink、数量/引用损坏、同长度内容篡改在 guidance 追加前被拒绝。文件读取前仍经原 owner/context 校验，出站转换器保留第二次摘要核验。
+- `test_nonblocking_model_switch.py`：覆盖慢控制占用时独立设置 lane、真实 outbox 锁争用按键不阻塞、原顺序/claim、菜单实际按键自动关闭与 Esc 后继续保存、菜单复用同一本 outbox、迟到 revision/撤销提示、Count0/冷 C 短保存和 effort 不触发 probe，以及同一请求档位冻结。菜单 Future 只观察原操作，不承担副作用授权。
+- `test_cli_turn_completion_timing.py`：覆盖单调时钟/本地时区/秒分时天、排队和重复终态冻结、run 准备失败、plain 的确认失败与 silent stop、TUI 运输超时/退出观察不伪造终态、恢复旧请求缺原起点显示“未知”。完成块为程序 system 消息，不进入模型正文或 canonical assistant 历史；旧错误、思考、工具和正文顺序断言保留，并显式断言新增的独立完成块。
+- 标准回归（工作树根）：`python3 -B -m pytest -p no:cacheprovider agent_py_agent/tests/test_active_turn_media_interjection.py agent_py_agent/tests/test_nonblocking_model_switch.py agent_py_agent/tests/test_cli_turn_completion_timing.py agent_py_agent/tests/test_input_media.py agent_py_agent/tests/test_runtime_model_selection_refresh.py agent_py_agent/tests/test_tui_model_menu.py agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short`。另跑 `test_gateway_active_input_transport.py`、`test_tui_runtime.py`、`test_tui_control_delivery.py`、`test_tui_input.py`、`test_tui_prompt_toolkit_pipe.py`、`test_reasoning_effort.py`、`test_cli_manual_resume.py`、`test_cli_resume_contract.py`。
+- 尺寸检查须与 pytest **串行**执行：`python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`，结束后 `git checkout HEAD -- CODE_SIZE_REPORT.md`。曾并行执行导致架构 fixture 观察到报告被修改；该次 teardown error 是本轮验证安排错误，不是基线问题。
 
 ## 2026-10-23 C1b 审计返工：计量来源消费与工具发现顺序
 

@@ -55,6 +55,8 @@ def _approval_request_for(request_id: str, call_id: str, run_id: str):
     )
 
 
+# LLM: 确认模型内容与工具顺序不变；只在最后多一项独立程序计时，不以计时冒充 assistant。
+# 函数用途: 验证直接回合输出序列与完成摘要边界。
 def test_direct_turn_stream_tool_and_final_keep_order_and_no_duplicate() -> None:
     runtime = TuiRuntime("session-1")
     runtime.publish_session(version="0.3.0", model="fixture", workspace="/tmp")
@@ -83,13 +85,15 @@ def test_direct_turn_stream_tool_and_final_keep_order_and_no_duplicate() -> None
     )
     snapshot = runtime.store.snapshot()
     roles = [(block.role, block.text, block.detail) for block in snapshot.stable_blocks]
-    assert roles == [
+    assert roles[:-1] == [
         ("system", "", ""),
         ("user", "hello", ""),
         ("assistant", "I will check.", ""),
         ("tool", "", "ok"),
         ("assistant", "Final", ""),
     ]
+    assert roles[-1][0] == "system" and roles[-1][1].startswith("完成于 ")
+    assert snapshot.status.completion["status"] == "completed"
     assert snapshot.active_blocks == ()
     assert snapshot.status.phase == "idle"
     assert snapshot.status.context_tokens == 100
@@ -114,6 +118,8 @@ def test_unfinished_todo_does_not_keep_idle_runtime_refreshing() -> None:
     assert runtime.needs_periodic_refresh() is False
 
 
+# LLM: 原 thinking/assistant/tool 的时序不可因新摘要重排，末项仅允许程序完成块。
+# 函数用途: 核对多轮思考与正文的独立顺序。
 def test_multiple_provider_thinking_blocks_keep_chronological_order() -> None:
     """每次 provider 调用的思考都独立留在对应回复之前，不能被后一次覆盖。"""
     runtime = TuiRuntime("session-multi-thinking")
@@ -147,13 +153,14 @@ def test_multiple_provider_thinking_blocks_keep_chronological_order() -> None:
         (block.role, block.text)
         for block in runtime.store.snapshot().stable_blocks
     ]
-    assert visible == [
+    assert visible[:-1] == [
         ("thinking", "先检查"),
         ("assistant", "准备读文件。"),
         ("tool", ""),
         ("thinking", "再整合"),
         ("assistant", "最终答案"),
     ]
+    assert visible[-1][0] == "system" and visible[-1][1].startswith("完成于 ")
 
 
 def test_begin_turn_keeps_previous_todo_and_switches_plan_on_new_snapshot() -> None:
@@ -930,6 +937,8 @@ def test_queued_prompt_can_be_restored_before_worker_claim() -> None:
     assert runtime.store.snapshot().queued_inputs == ()
 
 
+# LLM: 错误和中断来自结构化 summary，程序计时不能覆盖原 error 事实。
+# 函数用途: 验证失败、中断及其完成显示都保持独立。
 def test_failed_and_interrupted_turns_are_structured() -> None:
     failed = TuiRuntime("session-failed")
     failed.enqueue_prompt("failed", "x", queued=False)
@@ -937,7 +946,9 @@ def test_failed_and_interrupted_turns_are_structured() -> None:
     failed.complete_turn("failed", TuiTurnSummary(ok=False, error="boom"))
     failed_snapshot = failed.store.snapshot()
     assert failed_snapshot.status.phase == "failed"
-    assert failed_snapshot.stable_blocks[-1].role == "error"
+    assert failed_snapshot.stable_blocks[-2].role == "error"
+    assert failed_snapshot.stable_blocks[-1].text.startswith("失败于 ")
+    assert failed_snapshot.status.completion["status"] == "failed"
 
     interrupted = TuiRuntime("session-interrupted")
     interrupted.enqueue_prompt("interrupted", "x", queued=False)
@@ -1328,6 +1339,8 @@ def test_gateway_thinking_delta_streams_into_active_block_with_timer() -> None:
     assert settled[0].metadata.get("duration_seconds") == 12.0
 
 
+# LLM: 迟到的完整思考不得把已确认正文或完成计时再复制一次。
+# 函数用途: 核对迟到 thinking 后末尾仅有一条程序计时。
 def test_late_full_thinking_after_answer_does_not_create_duplicate_bottom_block() -> None:
     runtime = TuiRuntime("session-late-thinking")
     runtime.enqueue_prompt("request-late-thinking", "verify", queued=False)
@@ -1348,9 +1361,10 @@ def test_late_full_thinking_after_answer_does_not_create_duplicate_bottom_block(
     )
 
     stable = runtime.store.snapshot().stable_blocks
-    assert [block.role for block in stable] == ["user", "thinking", "assistant"]
+    assert [block.role for block in stable] == ["user", "thinking", "assistant", "system"]
+    assert stable[-1].text.startswith("完成于 ")
     assert [block.text for block in stable if block.role == "thinking"] == ["先核对事实"]
-    assert stable[-1].role == "assistant"
+    assert stable[-2].role == "assistant"
 
 
 def test_gateway_tool_input_progress_is_transient_and_resettable() -> None:

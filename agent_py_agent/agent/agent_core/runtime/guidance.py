@@ -617,7 +617,7 @@ def _run_active_turn_transition(params: object, phase: str, operation):
     return operation()
 
 
-# LLM: 精确回合转换锁覆盖认领到注入；原 packet 的 input_ids 同时写入 UserTurn，供 Compact 按身份回收。
+# LLM: 精确回合锁覆盖认领到注入；每条输入独立写 UserTurn 和携带包，保留图片归属；批次仍只发一次回复分段事件。
 # 函数用途: 把已认领补充消息加入当前模型提示和原生历史，并登记稍后的消费确认。
 def _inject_claimed_guidance(
     params: object,
@@ -626,13 +626,19 @@ def _inject_claimed_guidance(
 ) -> None:
     if not entries:
         return
-    user_input = _render_guidance_user_input(entries)
+    for entry in entries:
+        _inject_guidance_user_turn(params, entry, tool_context)
+    _begin_active_turn_user_reply_segment(params, _guidance_client_message_ids(entries))
+    remember_injected_guidance(params, entries)
+    _queue_guidance_ack(params, entries)
+
+
+# LLM: 媒体引用与原输入身份同时进入 IR 和 Compact 携带包；出站才编码，不跨消息合并附件。
+# 函数用途: 投影单条已经认领的输入，保留原认领顺序。
+def _inject_guidance_user_turn(params, entry, tool_context):
+    user_input = _render_guidance_user_input([entry])
     if user_input:
-        packet = packet_from_guidance(entries, user_input)
-        # 会话运行时 steer is a real user turn, not a system/runtime hint.  Keep one
-        # chronological text marker for the text protocol and one provider-neutral
-        # UserTurn for native messages.  Both carry the same input ids, while only
-        # the text reaches the provider across later tool rounds.
+        packet = packet_from_guidance([entry], user_input)
         if isinstance(tool_context, list):
             tool_context.append(f"[ACTIVE_TURN_USER_INPUT]\n{user_input}")
         from ..native_tool_protocol import native_tool_use_active
@@ -643,14 +649,9 @@ def _inject_claimed_guidance(
             record_user_turn_ir(
                 params, user_input,
                 input_ids=tuple(packet["input_ids"]) if packet is not None else (),
+                media=tuple(packet.get("input_media", ())) if packet is not None else (),
             )
         append_active_turn_user_input(params, packet)
-        _begin_active_turn_user_reply_segment(
-            params,
-            _guidance_client_message_ids(entries),
-        )
-    remember_injected_guidance(params, entries)
-    _queue_guidance_ack(params, entries)
 
 
 # LLM: 插话持久操作经 guidance 领域组件； Pending checks and injection must use the same exact-agent mailboxes, including direct child guidance.

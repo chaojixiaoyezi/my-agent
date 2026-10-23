@@ -34,11 +34,15 @@ def run_thread_id(params: object) -> str:
     return str(attrs.get("agent_thread_id") or attrs.get("conversation_thread_id") or "").strip()
 
 
-# LLM: 线程读取失败或没有设置时回落全局默认，绝不因为档位读取问题阻断模型请求。
-# 函数用途: 得到本轮运行的智能程度档位（线程设置优先，其次全局默认）。
+# LLM: 已有请求冻结时只读同一快照；未冻结保持原线程/默认兼容读取，不让重试采用半途改变的档位。
+# 函数用途: 得到本请求安全点冻结的档位，非请求消费者保持原读取。
 def run_reasoning_level(agent: object, params: object) -> str:
     thread_id = run_thread_id(params)
     level = ""
+    state = getattr(params, "live_archive_state", None)
+    frozen = state.get("_request_reasoning_snapshot") if isinstance(state, dict) else None
+    if isinstance(frozen, dict) and frozen.get("thread_id") == thread_id:
+        return frozen["level"]
     if thread_id:
         try:
             thread = agent.conversation_store.threads.load(thread_id)
@@ -151,14 +155,15 @@ def request_reasoning_options(agent: object, params: object, backend: object, *,
     return reasoning_request_values(level, control, forced=forced)
 
 
-# LLM: 只改线程自己的档位字段（原子更新）；空串表示清除会话设置、回落全局默认。八档取唯一表，非法档位抛 ValueError。
+# LLM: 只改线程自己的档位字段；C 可显式非阻塞，原默认消费者仍阻塞。空串清除覆盖，非法值拒绝。
 # 函数用途: 保存或清除某个会话的智能程度档位。
-def set_thread_reasoning_level(store: object, thread_id: str, level: str) -> object:
+def set_thread_reasoning_level(store: object, thread_id: str, level: str, *, blocking: bool = True) -> object:
     normalized = normalize_reasoning_level(level) if level else ""
     if level and not normalized:
         raise ValueError(f"智能程度只接受：{'、'.join(REASONING_LEVELS)}")
     return store.threads.update_atomic(
         thread_id, lambda latest: replace(latest, **{THREAD_FIELD: normalized}),
+        **({} if blocking else {"blocking": False}),
     )
 
 

@@ -1,5 +1,7 @@
 # LLM: 原builder/codec唯一；cold/ready固定HTTP源只try原op T并准备原回执，既存全状态只读；v5/claimed/活封印及默认本地执行不变。
 # 模块用途: 原私卡action仅扩同一回执v5，旧slash和v1-v4字节不变；保存唯一控制回执并处理安全重试，目录、目标或命令变化不能借用原消息编号执行。
+# LLM: 模型菜单的条件与正文同属原收据输入；无新条件的历史输入摘要保持字节兼容。
+# 模块用途: 管理控制命令原身份、内容摘要和唯一副作用收据。
 from __future__ import annotations
 
 """LLM: Persist one authenticated slash-control operation before any side effect.
@@ -119,6 +121,7 @@ class GatewayControlOperationReceipt:
     expected_execution: object = None
     dispatch: object = None
     private_approval: object = None
+    model_payload: object = None
 
     # LLM: 保存固定身份、可选目录与摘要版本；准备后执行和对账只能读回执，不重读当前 HTTP 输入。
     # 函数用途: 保存规范控制回执及可选私卡action/分派事实，不序列化AGENTS、Memory封印、RunParams或writer。
@@ -159,6 +162,8 @@ class GatewayControlOperationReceipt:
             payload["dispatch"] = self.dispatch
         if self.private_approval is not None:
             payload["private_approval"] = self.private_approval
+        if self.model_payload is not None:
+            payload["model_payload"] = self.model_payload
         return payload
 
     # LLM: 读取时重算身份与对应版本的摘要；目录篡改或旧版未签名目录都必须当作账本损坏拒绝。
@@ -217,6 +222,7 @@ class GatewayControlOperationReceipt:
             expected_execution=data.get("expected_execution"),
             dispatch=data.get("dispatch"),
             private_approval=data.get("private_approval"),
+            model_payload=data.get("model_payload"),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -772,6 +778,7 @@ def _new_control_operation_receipt(scope, command_kind, command_text, operation_
         all_user_access=bool(scope.all_user_access),
         workspace=scope.workspace,
         expected_execution=scope.metadata.get("expected_execution"),
+        model_payload=scope.metadata.get("model_payload"),
         input_digest_version=5 if private_approval is not None else _control_input_version(scope),
         private_approval=private_approval,
         state="prepared",
@@ -840,6 +847,7 @@ def _receipt_scope(
             "channel_chat_type": receipt.channel_chat_type,
             "channel_chat_id": receipt.channel_chat_id,
             **({"expected_execution": execution} if receipt.input_digest_version >= 4 or execution is not None else {}),
+            **({"model_payload": receipt.model_payload} if receipt.model_payload is not None else {}),
         },
         all_user_access=receipt.all_user_access,
         resolved_owner=_receipt_owner_identity(receipt),
@@ -1007,6 +1015,8 @@ def _control_operation_input_digest(
         operation_input["expected_execution"] = scope.metadata.get("expected_execution")
     if version >= 5:
         operation_input['private_approval'] = private_approval
+    if "model_payload" in scope.metadata:
+        operation_input["model_payload"] = scope.metadata["model_payload"]
     return hashlib.sha256(_canonical_json(operation_input).encode("utf-8")).hexdigest()
 
 

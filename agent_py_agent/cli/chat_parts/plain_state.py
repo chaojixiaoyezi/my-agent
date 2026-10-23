@@ -175,6 +175,8 @@ class ChatJob:
         "rich_transcript",
         "inject_complete",
         "input_media",
+        "completion_clock",
+        "completion_status",
     )
 
     # LLM: display_text只显示；original_prompt保slash解析前输入而不授状态或权限，HTTP宿主仍重解析；request_id/system_task沿原执行合同。
@@ -215,3 +217,7 @@ class ChatJob:
         self.rich_transcript = bool(rich_transcript)
         self.inject_complete = bool(inject_complete)
         self.input_media = tuple(input_media)
+        from ..turn_completion import TurnClock
+
+        self.completion_clock = TurnClock(request_id)
+        self.completion_status = "completed"

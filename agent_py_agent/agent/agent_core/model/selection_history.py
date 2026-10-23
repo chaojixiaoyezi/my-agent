@@ -87,6 +87,7 @@ def _scope_selector(scope):
 
 
 # LLM: 恢复缺少的原工具事实与输入，保留已存在的完整工具对；恢复只生成上下文，不执行或重新登记工具。
+# LLM: 媒体与原输入身份一同恢复；不把原生历史中已存在的附件再次附到初始任务。
 # 函数用途: 将旧密文覆盖的活动工具结果恢复为可读事实，继续保留用户插话与可读摘要。
 def _restore_tool_history(agent: object, params: object) -> list:
     from ...backends.tool_ir import RuntimeFactsTurn, UserTurn
@@ -111,7 +112,7 @@ def _restore_tool_history(agent: object, params: object) -> list:
     for packet in merge_active_turn_user_inputs(params.active_turn_user_inputs):
         missing_ids = tuple(key for key in packet["input_ids"] if key not in carried_ids)
         if missing_ids:
-            prefix.append(UserTurn(packet["text"], input_ids=missing_ids))
+            prefix.append(UserTurn(packet["text"], input_ids=missing_ids, media=tuple(packet.get("input_media", ()))))
     return [*prefix, *history]
 
 

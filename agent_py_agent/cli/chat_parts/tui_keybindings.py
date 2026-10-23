@@ -202,6 +202,7 @@ def _register_chat_bindings(
     kb.add("c-d", filter=chat_active)(lambda e: _handle_ctrl_d_keybinding(e, params))
     kb.add("c-s", filter=chat_active)(lambda e: _handle_stash_keybinding(e, params))
     kb.add("c-r", filter=chat_active)(lambda e: _start_history_search(e, params))
+    kb.add("f8", filter=chat_active)(lambda e: _retry_control_persistence(e, params))
     kb.add(keys.BracketedPaste, filter=chat_active)(
         lambda e: _handle_bracketed_paste(e, params)
     )
@@ -420,7 +421,7 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 # LLM: 提交入口统一恢复 transcript follow-tail、保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
 # 终态 child 的拒发必须清空草稿；插件候选版本在清空前冻结，随后只交给后台命令分派。
-# 函数用途: 提交文字及已登记附件；运行中附件进入下一轮队列，避免纯文字 steer 丢失媒体，导入未完保留草稿。
+# 函数用途: 提交文字及已登记附件，活动插话与下一轮排队共用完整选项，导入未完保留草稿。
 def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
     if params.media_importing:
         _required_tui_runtime(params).set_notice("附件仍在导入，请稍候再发送。", duration_seconds=2)
@@ -475,6 +476,9 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         )
         event.app.invalidate()
         return
+    if media:
+        _submit_media_draft(event, params, text, draft, media)
+        return
     _repin_transcript_after_submit(params)
     _remember_input(params.input_area, text)
     _reset_input_after_submit(params)
@@ -506,20 +510,32 @@ def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
         return
     if _dispatch_tui_slash_input(event, params, text):
         return
-    if media:
-        from dataclasses import replace
-
-        options = replace(_tui_execution_options(params), input_media=media)
-        _tui_enqueue_job(params, text, display_text=display_text, execution_options=options)
-        _restore_stash_after_submit(params)
-        event.app.invalidate()
-        return
     if _tui_submit_active_turn_input(params, text, display_text=display_text):
         _restore_stash_after_submit(params)
         event.app.invalidate()
         return
     _tui_enqueue_job(params, text, display_text=display_text)
     _restore_stash_after_submit(params)
+
+
+# LLM: 同一媒体选项先持久投递当前回合；只有无活动目标才排新任务，outbox失败保草稿，不另造消息。
+# 函数用途: 成功保存后再清媒体草稿；磁盘忙时保留正文、附件和占位符。
+def _submit_media_draft(event, params, text, draft, media):
+    from dataclasses import replace
+
+    options = replace(_tui_execution_options(params, include_chat_style=True), input_media=media)
+    try:
+        if not _tui_submit_active_turn_input(params, text, display_text=draft.text.strip(), execution_options=options):
+            _tui_enqueue_job(params, text, display_text=draft.text.strip(), execution_options=options, inject_complete=True)
+    except Exception:
+        _required_tui_runtime(params).set_notice("附件消息无法保存，未发送；正文和附件草稿已保留。", duration_seconds=4)
+        event.app.invalidate()
+        return
+    _remember_input(params.input_area, text)
+    _reset_input_after_submit(params)
+    _reset_exit_arms(params)
+    _restore_stash_after_submit(params)
+    event.app.invalidate()
 
 
 # LLM: 模型/权限/智能程度表单和普通 slash 都经既有控制入口；只在对应命令被消费后返回，不把普通正文当控制。
@@ -534,6 +550,7 @@ def _dispatch_tui_slash_input(event, params: TuiCreateKeybindingsParams, text: s
     if text == "/model":
         from .tui_model_menu import run_model_menu
 
+        event.app._my_agent_control_params = params
         event.app.create_background_task(run_model_menu(
             event.app, params.agent, str(params.current_session_id or "default"), _required_tui_runtime(params),
         ))
@@ -827,12 +844,24 @@ def _set_input_draft(params: TuiCreateKeybindingsParams, draft: TuiDraft) -> Non
         binding.selected(draft.text, draft.plugin_revision)
 
 
-# LLM: 提交恢复只消费 interaction 单槽并写回编辑器；返回的草稿不会被自动放进 canonical job queue。
+# LLM: 失败恢复的非空草稿不能被 Ctrl-S stash 覆盖；stash 保留到下一次成功提交。
 # 函数用途: 在另一条命令或消息提交后自动恢复 Ctrl-S 保存的正文。
 def _restore_stash_after_submit(params: TuiCreateKeybindingsParams) -> None:
+    if str(params.input_area.text or ""):
+        return
     draft = _required_interaction(params).consume_stash_after_submit()
     if draft is not None:
         _set_input_draft(params, draft)
+
+
+# LLM: 恢复键只置已有暂停 worker 的内存 Event，不读磁盘、不新建 ID、不启动业务任务。
+# 函数用途: 明确恢复有限失败后暂停的原控制保存。
+def _retry_control_persistence(event, params) -> None:
+    reconciler = getattr(params, "control_operation_reconciler", None)
+    enqueuer = getattr(reconciler, "_setting_enqueuer", None)
+    resumed = enqueuer is not None and enqueuer.retry_pending()
+    _required_tui_runtime(params).set_notice("正在重试原控制保存…" if resumed else "没有暂停的控制保存。", duration_seconds=3)
+    event.app.invalidate()
 
 
 # LLM: Ctrl-S 保存精确文本/光标和原候选 revision；恢复不取新目录版本，不写历史或提交模型。

@@ -1,3 +1,5 @@
+# LLM: 使用原 outbox 和回执实现，显示回调与持久删除须分别等待真实证据。
+# 模块用途: 检验控制投递的持久化、重启和终态合同。
 from __future__ import annotations
 
 import json
@@ -98,6 +100,8 @@ def test_control_outbox_publishes_start_after_persist_and_before_dispatch(tmp_pa
     assert order == ["start", "dispatch"]
 
 
+# LLM: 完成回调先于原 outbox 删除，不能以 callback Event 冒充删除完成。
+# 函数用途: 检验快速压缩收口显示且最终删除原持久消息。
 def test_control_outbox_fast_compact_receipt_closes_started_block(tmp_path) -> None:
     runtime = TuiRuntime("control-compact-fast-worker")
     completed = threading.Event()
@@ -145,6 +149,10 @@ def test_control_outbox_fast_compact_receipt_closes_started_block(tmp_path) -> N
     assert completed.wait(1.0)
     stop_event.set()
     reconciler._wake.set()
+    # 等待原 worker 在回调之后真正退出，保留下方原始空 outbox 断言。
+    assert reconciler._worker is not None
+    reconciler._worker.join(timeout=1.0)
+    assert not reconciler._worker.is_alive()
     snapshot = runtime.store.snapshot()
     assert snapshot.active_blocks == ()
     assert all(

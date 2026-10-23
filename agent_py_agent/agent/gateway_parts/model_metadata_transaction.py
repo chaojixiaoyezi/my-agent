@@ -36,7 +36,8 @@ def model_metadata_supported(handler, body):
     from ..conversation.control_commands import parse_conversation_control
     text = body.get('goal', body.get('prompt', '')) if route == '/ask' else body.get('command', body.get('prompt', ''))
     command = parse_conversation_control(str(text or ''), reject_unknown_slash=True)
-    return command is not None and command.valid and command.kind == 'model' and command.operation in {'view', 'select', 'set_default'}
+    return command is not None and command.valid and (command.kind == 'model' and command.operation in {'view', 'select', 'set_default'}
+        or command.kind == 'effort' and command.operation == 'set')
 
 
 # LLM: scope只从原认证header/body投影，owner只走原配置解析器；不读请求root/owner字段、不冷建目录或加载pool。
@@ -159,7 +160,8 @@ def execute_coordinator_model_metadata(handler, server, body, *, command=None):
         host, thread = scoped_model_host(source, scope)
         result = model_operation(source, host, str(body['operation']), body, thread.thread_id)
         source.require_current()
-        result['model_execution'] = model_execution_snapshot(source, host, scope, thread.thread_id)
+        if body['operation'] == 'list':
+            result['model_execution'] = model_execution_snapshot(source, host, scope, thread.thread_id)
         source.require_current()
         return result
     except BaseException as error:
@@ -184,7 +186,7 @@ def require_model_control_source(source, command, scope, command_text):
     source.require_current()
     original_text = str(source.body.get('command', source.body.get('prompt', '')) or '')
     original = parse_conversation_control(original_text, reject_unknown_slash=True)
-    if (original != command or original_text != command_text or command.kind != 'model'
+    if (original != command or original_text != command_text or command.kind not in {'model', 'effort'}
             or scope != replace(source._model_scope, resolved_owner=source.owner)):
         raise GlobalWriteError('model_http_scope_changed', 'model_metadata')
 

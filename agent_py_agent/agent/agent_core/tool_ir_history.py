@@ -72,14 +72,14 @@ def native_tool_ir_history(params: object) -> list[Any]:
     return history
 
 
-# LLM: 插话身份由原 guidance packet 传入并与正文一起留在 IR；普通初始用户输入保持空身份。
+# LLM: 插话身份及媒体由原 guidance packet 传入并与正文一起留在 IR；此处不读取图片或更改授权。
 # 函数用途: 把运行中用户补充输入追加到当前 turn 的原生消息历史，不在这里按正文去重。
-def record_user_turn_ir(params: object, text: str, *, input_ids: tuple[str, ...] = ()) -> None:
+def record_user_turn_ir(params: object, text: str, *, input_ids: tuple[str, ...] = (), media: tuple = ()) -> None:
     """把运行中用户补充输入永久插入当前 turn 的原生消息历史。"""
     content = str(text or "")
     if not content.strip():
         return
-    native_tool_ir_history(params).append(UserTurn(content, input_ids=tuple(input_ids)))
+    native_tool_ir_history(params).append(UserTurn(content, input_ids=tuple(input_ids), media=tuple(media)))
 
 
 # LLM: A dynamic prompt suffix becomes an append-only typed history item before provider

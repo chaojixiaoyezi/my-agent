@@ -70,7 +70,7 @@ def handle_client_models(handler, server) -> None:
         # 向量模型是全局设置（不属于会话），管理员判定在 embedding_selection 里按已认证 owner 做。
         result = (execute_embedding_operation(config_host, operation, body) if operation in EMBEDDING_OPERATIONS
                   else execute_model_profile_operation(config_host, operation, body, thread_id=thread.thread_id))
-        if operation not in EMBEDDING_OPERATIONS:
+        if operation == "list":
             result["model_execution"] = _model_execution_snapshot(server.agent, scope, config_host, thread.thread_id)
     except (GlobalWriteError, RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
             BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable) as exc:
@@ -100,7 +100,7 @@ def _model_execution_snapshot(base_agent, scope, config_host, thread_id: str) ->
     return thread_model_execution_status(loaded or config_host, thread_id)
 
 
-# LLM: metadata_source仅原HTTP model producer传入，原scope/Store算法不变，不接受JSON许可。
+# LLM: metadata_source仅原HTTP设置producer传入；线程取得沿原完整锁链非阻塞，竞争不等待业务执行。
 # LLM: 菜单与文字 /model 共用认证 scope 解析 owner/线程，并向新冷 host 绑定原 HostChannelActor；不物化完整 Agent 或改共享身份。
 # 函数用途: 构造只带 home/config/会话库的轻量宿主和当前会话线程，供模型配置读写使用；可能新建“会话设置”线程。
 def _scoped_model_host(base_agent, scope, *, metadata_source=None) -> tuple[SimpleNamespace, object]:
@@ -118,7 +118,7 @@ def _scoped_model_host(base_agent, scope, *, metadata_source=None) -> tuple[Simp
         "owner_home": str(scoped_home.owner_home_dir), "channel": scope.channel,
         "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id,
         "title": "会话设置",
-    })
+    }, blocking=False)
     from ..user_space.group_authorization_context import bind_group_control_host
 
     return bind_group_control_host(base_agent, config_host, scope, thread.thread_id), thread
@@ -131,14 +131,18 @@ def _scoped_model_host(base_agent, scope, *, metadata_source=None) -> tuple[Simp
 def execute_model_text_control(base_agent, command: ConversationControlCommand, scope, *, metadata_source=None) -> ConversationControlResult:
     try:
         host, thread = _scoped_model_host(base_agent, scope, **({} if metadata_source is None else {"metadata_source": metadata_source}))
+        if command.kind == "effort" and command.operation == "set":
+            from .session_setting_control import save_effort
+            return save_effort(host, thread, command, source=metadata_source)
         if command.operation == "vector":
             return _vector_text_control(host, command.value)
         listing = _model_operation(host, "list", {}, thread.thread_id, metadata_source)
-        if metadata_source is None:
-            listing["model_execution"] = _model_execution_snapshot(base_agent, scope, host, thread.thread_id)
-        else:
-            from .model_metadata_transaction import model_execution_snapshot
-            listing["model_execution"] = model_execution_snapshot(metadata_source, host, scope, thread.thread_id)
+        if command.operation == "view":
+            if metadata_source is None:
+                listing["model_execution"] = _model_execution_snapshot(base_agent, scope, host, thread.thread_id)
+            else:
+                from .model_metadata_transaction import model_execution_snapshot
+                listing["model_execution"] = model_execution_snapshot(metadata_source, host, scope, thread.thread_id)
         if command.operation == "view" and _send_text_model_card(base_agent, host, scope, thread, listing, metadata_source):
             return ConversationControlResult("model", True, "请在模型卡选择本会话或新会话默认；新增、编辑将发送到本人私聊。")
         if command.operation == "view":
@@ -148,7 +152,9 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
             return ConversationControlResult(
                 "model", False, f"没有编号为 {command.value} 的可选模型。\n" + render_model_choices(listing),
             )
-        _model_operation(host, command.operation, {"profile_id": row["id"]}, thread.thread_id, metadata_source)
+        from .session_setting_control import model_selection_payload
+
+        saved = _model_operation(host, command.operation, model_selection_payload(scope, command, row), thread.thread_id, metadata_source)
     except (GlobalWriteError, RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError,
             BoundedCallExitUnconfirmedError, ToolWriteContextUnavailable):
         raise
@@ -170,6 +176,8 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
     return ConversationControlResult(
         "model", True,
         f"本会话已选择 {row['model_name']}，上下文 {row.get('model_context_window_tokens', '?')} tokens。当前响应和已开始的工具结束后，下一次模型请求采用新选择。",
+        details={"profiles": saved.get("profiles", listing.get("profiles", [])),
+                 **{key: saved[key] for key in ("thread_id", "selected", "selection_revision", "saved_at", "adoption_status", "selection_available", "warning") if key in saved}},
     )
 
 
@@ -177,7 +185,7 @@ def execute_model_text_control(base_agent, command: ConversationControlCommand, 
 # 函数用途: 让client/models与文字model共用原目录和选择CAS。
 def _model_operation(host, operation, payload, thread_id, source):
     if source is None:
-        return execute_model_profile_operation(host, operation, payload, thread_id=thread_id)
+        return execute_model_profile_operation(host, operation, payload, thread_id=thread_id, blocking=False)
     from .model_metadata_transaction import model_operation
     return model_operation(source, host, operation, payload, thread_id)
 

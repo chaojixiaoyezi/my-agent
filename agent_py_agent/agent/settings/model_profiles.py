@@ -372,7 +372,7 @@ def execute_model_profile_operation(agent: object, operation: str, payload: dict
 
 
 # LLM: 列表可能沿原线程选择懒物化；C复用原非阻塞模式，不能把展示误当无副作用。
-# LLM: 列表只含私有及管理员显式发布的公开字段；inventory_status 只标原读口完成/失败，不解析警告或扩大共享。
+# LLM: 列表只含私有及显式共享公开字段；选择编号、版本与保存时间取同一原线程快照，不能拼接不同版本。
 # 函数用途: 为菜单和只读自我目录说明会话、默认、共享及来源完整性，不显示其它用户私有模型。
 def _model_selection_projection(agent: object, data: dict, thread_id: str, *, blocking: bool = True) -> dict:
     from ..user_space.approval_mode import is_permission_admin
@@ -402,6 +402,9 @@ def _model_selection_projection(agent: object, data: dict, thread_id: str, *, bl
         from .thread_model_selection import thread_model_profile_id
 
         result["selected"] = thread_model_profile_id(agent, thread_id, **({} if blocking else {"blocking": False}))
+        thread = agent.conversation_store.threads.require(thread_id)
+        result.update(selected=thread.model_profile_id, selection_revision=thread.model_selection_revision,
+                      saved_at=thread.model_selection_selected_at, adoption_status="pending")
     result["selection_available"] = any(row["id"] == result["selected"] and row.get("available", True)
                                         for row in result["profiles"])
     if not result["selection_available"]:

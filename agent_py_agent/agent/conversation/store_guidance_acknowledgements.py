@@ -186,6 +186,7 @@ class GuidanceAcknowledgements:
                 self.project_transcript(receipt.entry)
 
     # LLM: GuidanceAcknowledgements：只由已消费回执投影消息；沿 guidance ID 幂等追加原 transcript，失败返回 False 保留恢复路径。
+    # LLM: 只投影原已校验媒体小引用，不在 transcript 存图片字节或引入第二份消费账本。
     # 函数用途: 把已消费补充消息按 guidance ID 最多写入一次对应会话记录。
     def project_transcript(self, entry: GuidanceEntry) -> bool:
         metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
@@ -215,6 +216,7 @@ class GuidanceAcknowledgements:
                         "kind": "active_turn_user_input",
                         "guidance_id": guidance_id,
                         **attribution,
+                        **({"input_media": metadata["input_media"]} if metadata.get("input_media") else {}),
                     },
                 },
                 dedupe_key=transcript_dedupe_key(guidance_id),

@@ -83,6 +83,7 @@ class TuiTurnSummary:
     context_tokens: int = 0
     output_tokens: int = 0
     tool_rounds: int = 0
+    outcome_unknown: bool = False
 
 
 # LLM: pending 对象只在 adapter 内桥接审批线程；request 是授权身份，Event/decision 仅负责唤醒同一等待者。
@@ -1356,9 +1357,26 @@ class _TuiBackgroundActivityRuntimeMixin:
         return len(active)
 
 
-# LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；两个无状态 mixin 只能借用同一 publish/store。
-# 类用途: 建立 TUI 状态容器和回合 adapter；发起页登记真实请求编号，避免同会话消息再次显示。
-class TuiRuntime(
+# LLM: 仅显示投影，不创建执行状态；共用原 runtime 的锁和 journal。
+# 类用途: 按单调选择版本更新模型显示，拒绝迟到回执。
+class _TuiSelectionProjectionMixin:
+    # LLM: 已确认选择只进显示事件，不能热改在途快照；迟到结果不能覆盖新版本。
+    # 函数用途: 刷新欢迎卡模型名，不新增聊天消息或重置会话。
+    def publish_model_selection(self, model: str, *, revision: int | None = None) -> JournalAppendResult | None:
+        with self._lock:
+            current = getattr(self, "_selected_model_revision", None)
+            if current is not None and (revision is None or revision < current):
+                return None
+            if revision is not None:
+                self._selected_model_revision = revision
+            return self._publish("session_model_selected", "updated", f"session:{self.session_id}",
+                                 {"model": model, "selection_revision": revision})
+
+
+# LLM: 会话初始化与输入接受投影使用同一 store/锁；不新建执行队列或第二本计时账，生命周期由派生 runtime 执行。
+# 类用途: 建立 TUI 会话容器，管理欢迎卡、连接和排队输入的显示事实。
+class _TuiSessionRuntimeMixin(
+    _TuiSelectionProjectionMixin,
     _TuiExecutionBindingRuntimeMixin,
     _TuiConversationBoundaryRuntimeMixin,
     _TuiBackgroundActivityRuntimeMixin,
@@ -1375,6 +1393,9 @@ class TuiRuntime(
             session_id=normalized,
         )
         self._turns: dict[str, TuiTurnEventAdapter] = {}
+        from ..turn_completion import TurnCompletionLedger
+
+        self.completions = TurnCompletionLedger()
         self._owned_gateway_requests = TuiIdentityWindow()
         self._attached_gateway_jobs = TuiIdentityWindow()
         self._execution_target = None
@@ -1416,11 +1437,6 @@ class TuiRuntime(
             {"version": version, "model": model, "workspace": workspace},
         )
 
-    # LLM: 已确认的模型选择只进显示事件；禁止携带密钥、接口或修改正在运行的模型快照。
-    # 函数用途: 刷新欢迎卡模型名，不新增聊天消息或重置会话。
-    def publish_model_selection(self, model: str) -> JournalAppendResult:
-        return self._publish("session_model_selected", "updated", f"session:{self.session_id}", {"model": model})
-
     # LLM: readiness start 是从真实 Gateway wait 发出的临时 UI 事实；它不创建 turn、请求或第二个健康状态源。
     # 函数用途: 在 TUI 中开始显示 Gateway 连接动画。
     def publish_connection_check(self) -> JournalAppendResult:
@@ -1454,10 +1470,12 @@ class TuiRuntime(
             },
         )
 
-    # LLM: enqueue_prompt 使用 request_id 作为用户块/队列身份；排队项只发 queue_added，开始执行时再原子提升为稳定用户块。
+    # LLM: 输入接受时捕获单调时钟，排队等待包含在总耗时；队列显示身份及原提升行为不改。
     # 函数用途: 立即显示空闲提交，或把运行中提交登记成可回取的用户队列预览。
-    def enqueue_prompt(self, request_id: str, text: str, *, queued: bool) -> None:
+    def enqueue_prompt(self, request_id: str, text: str, *, queued: bool, observed: bool = False) -> None:
         normalized = _required_request_id(request_id)
+        if not observed:
+            self.completions.accept(normalized)
         if queued:
             queue_id = f"queue:{normalized}"
             with self._lock:
@@ -1559,6 +1577,9 @@ class TuiRuntime(
                 )
                 self._queued_prompts.pop(queue_id, None)
 
+# LLM: TuiRuntime 统一拥有 session 事件序号与 turn adapter；mixin 共享唯一 publish/store 和初始化。
+# 类用途: 管理活动回合生命周期、临时通知和同一会话事件发布。
+class TuiRuntime(_TuiSessionRuntimeMixin):
     # LLM: legacy slash-command 输出通过这个窄入口转成 typed system block；它只携带显示文本且不解析严重级别或控制语义。
     # 函数用途: 将一条 CLI 命令结果追加到当前 TUI 对话流。
     def write_console(self, text: str) -> None:
@@ -2474,9 +2495,13 @@ class TuiTurnEventAdapter:
             )
         return True
 
-    # LLM: turn 终态仅由 summary booleans 映射，error 文案只作为 error block 内容。
-    # 函数用途: 发布回合成功、失败或中断事件。
+    # LLM: 只由 typed summary 映射确认终态；运输未知仅停止本地观察，不结算时钟或写业务失败。
+    # 函数用途: 发布确认终态及计时，或独立的观察退出提示。
     def _publish_turn_terminal(self, summary: TuiTurnSummary) -> None:
+        if summary.outcome_unknown:
+            self.runtime.write_console("最终状态待确认，请查询原请求；本地观察退出不表示任务结束。")
+            self.runtime._publish("turn_observation_ended", "updated", self.turn_block_id, {}, request_id=self.request_id)
+            return
         if summary.interrupted:
             kind, phase = "turn_interrupted", "interrupted"
         elif summary.ok:
@@ -2499,7 +2524,15 @@ class TuiTurnEventAdapter:
                 {"text": summary.error, "severity": "error"},
                 request_id=self.request_id,
             )
-        self.runtime._publish(kind, phase, self.turn_block_id, request_id=self.request_id)
+        from dataclasses import asdict
+
+        from ..turn_completion import render_completion
+
+        completion, first = self.runtime.completions.finish(self.request_id, phase)
+        if first:
+            self.runtime._publish("system_message", "completed", f"completion:{self.request_id}",
+                {"text": render_completion(completion)}, request_id=self.request_id)
+        self.runtime._publish(kind, phase, self.turn_block_id, {"completion": asdict(completion)}, request_id=self.request_id)
 
 
 # LLM: 旧model_delta仍是未提交raw，只计量；完整正文仅由原committed事件展示，不能因typed kind自证公开资格。

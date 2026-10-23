@@ -33,15 +33,18 @@ def input_owner_store(control, receipt):
     return owner_conversation_store_from_config(config, scoped, initialize=False)
 
 
-# LLM: 显式默认可等价；新媒体/引用、files、inject、workspace、system_task不进入纯文字，当前非等价选项排完整prepared，原native验证留worker。
-# 函数用途: 判定两份原请求能否沿同一前台文字安全点接续。
+# LLM: 图片是每条消息的输入而非执行选项；仅排除媒体后比较完整执行选项，文件、注入、工作区、引用仍不得混入。
+# 函数用途: 判定普通文字或图片输入能否沿原前台安全点接续，媒体验证另由宿主写入边界执行。
 def active_text_options_match(prepared, current=None):
+    from dataclasses import replace
+
     options = GatewayAskExecutionOptions.from_payload(prepared)
     if (prepared.get('kind') != 'ask' or prepared.get('system_task') or prepared.get('workspace')
-            or options.input_media or options.prompt_files or options.inject
+            or options.prompt_files or options.inject
             or (prepared.get('metadata') or {}).get('quoted_message_references') is not None):
         return False
-    return current is None or options == GatewayAskExecutionOptions.from_payload(current)
+    return current is None or replace(options, input_media=()) == replace(
+        GatewayAskExecutionOptions.from_payload(current), input_media=())
 
 
 # LLM: 非阻塞原JSON读取；锁忙/损坏不能变为空目标，原typed异常不捕获；返回原完整JSON作末CAS观察。

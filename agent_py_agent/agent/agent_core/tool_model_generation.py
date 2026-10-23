@@ -779,6 +779,7 @@ def _publish_runner_model_stream_activity(
 
 
 # LLM: 保持原引导提交时机，转换及孤儿清扫复用纯投影；来源与普通状态分开，不能重排历史或改写用户输入。
+# LLM: 每次出站按当前模型显式模态复核用户图片；换到不支持图的档案须明确失败，不能静默降为纯文。
 # 函数用途: 把新运行指引加入原 IR 后构造出站消息，与创建前容量投影保持相同协议字节和失败分类。
 def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
     """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
@@ -790,9 +791,10 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     已结束会话在 provider_history_messages，本轮 user、工具往返和动态运行事实按时间顺序
     进入 IR；本函数只拼接这两段，不能重排消息或把 prompt 中的诊断副本再次发给 provider。
     """
+    history = getattr(params, "tool_ir_history", None)
+    _require_user_image_capability(agent, params)
     if not native_tool_use_active(params):
         return None
-    history = getattr(params, "tool_ir_history", None)
     seen = _forwarded_guidance_seen(params)
     guidance = unforwarded_runtime_guidance(
         getattr(params, "tool_context", None),
@@ -814,6 +816,23 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
         params,
         agent,
     )
+
+
+# LLM: 图片存在性读取原 IR 和文本协议携带包；模态未知按不支持处理，不凭正文猜能力或删除媒体。
+# 函数用途: 阻止用户图片在不支持的协议或模型上被悄悄丢弃。
+def _require_user_image_capability(agent, params):
+    from ..backends.tool_ir import UserTurn
+    from ..conversation.input_media import InputMediaError, model_accepts_images
+
+    media = [ref for item in getattr(params, "tool_ir_history", ()) or () if isinstance(item, UserTurn)
+             for ref in item.media if str(ref.get("media_type", "")).startswith("image/")]
+    packets = getattr(params, "active_turn_user_inputs", ()) or ()
+    media.extend(ref for packet in packets for ref in packet.get("input_media", ())
+                 if str(ref.get("media_type", "")).startswith("image/"))
+    attrs = getattr(params, "task_attributes", {}) or {}
+    media.extend(ref for ref in attrs.get("input_media", ()) if str(ref.get("media_type", "")).startswith("image/"))
+    if media and (not native_tool_use_active(params) or not model_accepts_images(agent)):
+        raise InputMediaError("当前模型或协议未声明支持图片，已拒绝丢图发送；请切换支持图片的模型。")
 
 
 # 注入观察截图时给模型的固定说明：说明这是宿主补充的视觉材料，不是用户消息。

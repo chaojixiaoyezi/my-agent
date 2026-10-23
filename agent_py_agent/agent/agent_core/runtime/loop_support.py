@@ -1006,6 +1006,7 @@ def _loop_attempt_id(agent, params: object) -> str:
     return current_subagent_attempt_id(agent) or str(params.attempt_id or "").strip()
 
 
+# LLM: Compact 重建沿原包保留媒体与输入 ID，不把插话图片合并到最初用户任务；引用校验仍由原 owner/出站边界负责。
 # LLM: Current-turn IR starts at the exact user task, or — for a typed lifecycle-wake TurnTrigger — at
 # a host-event RuntimeFactsTurn (source HOST_EVENT_FACTS_SOURCE) instead of a second "# User Task".
 # Completed conversation messages are carried separately as provider_history_messages so finalization
@@ -1029,7 +1030,8 @@ def _native_initial_tool_ir_history(
     packets = merge_active_turn_user_inputs(params.carried_active_turn_user_inputs)
     if packets and len(packets) != len(carried_user_inputs):
         raise ValueError("插话携带包与原生输入数量不一致")
-    history.extend(UserTurn(text, input_ids=tuple(packets[index]["input_ids"]) if packets else ())
+    history.extend(UserTurn(text, input_ids=tuple(packets[index]["input_ids"]) if packets else (),
+                            media=tuple(packets[index].get("input_media", ())) if packets else ())
                    for index, text in enumerate(carried_user_inputs) if str(text or ""))
     return history
 

@@ -21,7 +21,7 @@ from ...settings.thread_model_selection import _require_owner
 from ..native_tool_protocol import select_tool_protocol
 
 
-# LLM: 调用者已收齐当前响应和已开始工具；提交过的同请求恢复重试不得调用。只读原选择，准备失败不发旧模型请求。
+# LLM: 原请求准备边界同时冻结模型与档位；已提交重试跳过此入口，准备失败不发旧模型。
 # 函数用途: 在下一请求装配前采用最新显式选择，保留 task/run/attempt、工具记录、权限和用户输入。
 def refresh_selected_model(agent: object, params: object):
     current = current_model_selection(agent)
@@ -39,6 +39,7 @@ def refresh_selected_model(agent: object, params: object):
             raise ModelProfileError("当前模型选择所属会话已不存在。")
         _require_owner(agent, thread)
         if thread.model_selection_last_explicit_revision <= current.explicit_revision:
+            _freeze_reasoning(agent, params, thread)
             return params
         generation = model_profile_generation(agent, thread.model_profile_id)
         config = selected_model_config(agent, profile_id=thread.model_profile_id)
@@ -64,7 +65,7 @@ def refresh_selected_model(agent: object, params: object):
         _require_owner(agent, latest)
         if model_profile_generation(agent, thread.model_profile_id) != generation:
             continue
-        if (latest.model_profile_id, latest.model_selection_revision) != (thread.model_profile_id, thread.model_selection_revision):
+        if (latest.model_profile_id, latest.model_selection_revision, latest.reasoning_effort) != (thread.model_profile_id, thread.model_selection_revision, thread.reasoning_effort):
             continue
         selection = replace(model_selection_snapshot(thread, config), thread_id=current.thread_id,
                             selection_thread_id=current.selection_thread_id, selection_source=current.selection_source,
@@ -78,6 +79,18 @@ def refresh_selected_model(agent: object, params: object):
         from ...settings.reasoning_effort import clear_next_call_reasoning_level
 
         clear_next_call_reasoning_level(params)
+        _freeze_reasoning(agent, params, latest)
         invalidate_provider_context_observation(params)
         return params
     raise ModelProfileError("模型选择连续变化，尚未形成可采用的请求快照。")
+
+
+# LLM: 与模型同一次 canonical thread 读取冻结；状态只在原 live_archive_state，重试与原 params 共享。
+# 函数用途: 保存本逻辑请求的档位，避免后续读取拼接新档位和旧模型。
+def _freeze_reasoning(agent, params, thread):
+    from ...settings.reasoning_effort import configured_reasoning_level, run_thread_id
+
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        state["_request_reasoning_snapshot"] = {"thread_id": run_thread_id(params),
+            "level": thread.reasoning_effort or configured_reasoning_level(agent.config)}

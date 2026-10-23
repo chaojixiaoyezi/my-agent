@@ -1,3 +1,5 @@
+# LLM: 键绑定替身只隔离副作用；真实非阻塞和 outbox 锁争用另由集成用例检验。
+# 模块用途: 回归输入、精确控制目标与持久化后显示的 TUI 合同。
 from __future__ import annotations
 
 import asyncio
@@ -419,13 +421,19 @@ def test_terminal_child_reject_clears_unsent_draft_before_parent_navigation() ->
     assert invalidations == [True]
 
 
+# LLM: 使用与生产一致的异步入队接口，仍核对精确 compact 控制身份。
+# 函数用途: 检验 Esc 定向停止当前手动压缩。
 def test_escape_targets_active_manual_compact_control_message() -> None:
     runtime = TuiRuntime("manual-compact-escape")
     runtime.publish_manual_compact_started("compact-control-1")
     captured: list[object] = []
 
+    # LLM: 此替身不证明磁盘或线程性能。
+    # 类用途: 收集键绑定提交的控制消息。
     class Reconciler:
-        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+        # LLM: 同生产非阻塞入口签名，保留消息与回调顺序检查。
+        # 函数用途: 接纳测试消息并模拟持久成功。
+        def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
             captured.append(entry)
             if on_persisted_before_dispatch is not None:
                 on_persisted_before_dispatch(entry)
@@ -453,14 +461,20 @@ def test_escape_targets_active_manual_compact_control_message() -> None:
     assert captured[0].target_control_message_id == "compact-control-1"
 
 
+# LLM: 不以本地 worker 空闲推断后台任务已结束。
+# 函数用途: 检验 Esc 使用服务端精确后台任务身份。
 def test_escape_stops_canonical_background_task_while_local_worker_is_idle() -> None:
     runtime = TuiRuntime("background-escape")
     _publish_execution(runtime, "task-background", kind="task")
     runtime.update_background_activity(1, {"main_activity": {"phase": "waiting"}})
     captured: list[object] = []
 
+    # LLM: 只替代接纳，不改变目标断言。
+    # 类用途: 捕获后台停止消息。
     class Reconciler:
-        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+        # LLM: 不伪造业务完成结果。
+        # 函数用途: 记录提交目标。
+        def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
             del on_persisted_before_dispatch
             captured.append(entry)
 
@@ -886,13 +900,19 @@ def test_successful_submit_repins_transcript_before_enqueue(monkeypatch) -> None
     assert params.transcript_follow_ref == [True]
 
 
+# LLM: 真实锁争用另有用例，仍保留原精确消息与显示断言。
+# 函数用途: 核对 btw 绑定精确回合并显示为待投递。
 def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     runtime = TuiRuntime("control-submit")
     _publish_execution(runtime, "gwreq-exact")
     captured: list[object] = []
 
+    # LLM: 此处只隔离持久接纳，不声称性能。
+    # 类用途: 收集精确插话控制消息。
     class Reconciler:
-        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+        # LLM: 与生产非阻塞入口同签名。
+        # 函数用途: 记录插话并模拟持久完成。
+        def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
             captured.append(entry)
             if on_persisted_before_dispatch is not None:
                 on_persisted_before_dispatch(entry)
@@ -922,12 +942,18 @@ def test_gateway_btw_enters_durable_control_outbox_with_exact_turn() -> None:
     ]
 
 
+# LLM: 界面发布仍只发生在持久回调里。
+# 函数用途: 验证 goal 命令持久后显示与去重。
 def test_gateway_goal_command_is_visible_only_after_durable_enqueue() -> None:
     runtime = TuiRuntime("control-goal-visible")
     captured: list[object] = []
 
+    # LLM: 下方原断言继续约束持久后显示。
+    # 类用途: 模拟 goal 的持久接纳。
     class Reconciler:
-        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+        # LLM: 明确要求回调，缺失时测试失败。
+        # 函数用途: 记录消息后模拟持久成功。
+        def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
             captured.append(entry)
             assert on_persisted_before_dispatch is not None
             on_persisted_before_dispatch(entry)
@@ -964,12 +990,18 @@ def test_expand_parser_accepts_documented_explicit_last() -> None:
     assert parse_expand_target("/expand unknown") is None
 
 
+# LLM: 接纳不等于持久成功；压缩动画由持久回调触发。
+# 函数用途: 回归手动压缩起始显示时序。
 def test_gateway_manual_compact_starts_visible_progress_after_durable_enqueue() -> None:
     runtime = TuiRuntime("control-compact-submit")
     captured: list[object] = []
 
+    # LLM: 真正后台持久化由独立集成用例验证。
+    # 类用途: 提供确定性的压缩持久回调。
     class Reconciler:
-        def enqueue(self, entry, *, on_persisted_before_dispatch=None) -> None:
+        # LLM: 保留原回调与进度断言。
+        # 函数用途: 接纳压缩并模拟持久成功。
+        def enqueue_background(self, entry, on_persisted_before_dispatch=None) -> None:
             captured.append(entry)
             assert on_persisted_before_dispatch is not None
             on_persisted_before_dispatch(entry)
@@ -1203,12 +1235,18 @@ def test_gateway_stop_is_not_sent_before_exact_turn_is_bound() -> None:
     assert "当前没有可精确绑定的运行回合" in runtime.notice()
 
 
+# LLM: 无前台时保留后台查找语义，不能借用其它回合。
+# 函数用途: 检验无前台的停止仍走原控制投递。
 def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
     runtime = TuiRuntime("control-background-task")
     captured: list[object] = []
 
+    # LLM: 只实现调用方需要的非阻塞接纳接口。
+    # 类用途: 收集停止控制消息。
     class Reconciler:
-        def enqueue(self, entry) -> None:
+        # LLM: 不产生业务完成回执。
+        # 函数用途: 记录停止提交。
+        def enqueue_background(self, entry) -> None:
             captured.append(entry)
 
     params = SimpleNamespace(media_importing=False,
@@ -1226,12 +1264,18 @@ def test_gateway_stop_without_foreground_turn_targets_background_task() -> None:
     assert captured[0].expected_turn_id == ""
 
 
+# LLM: 只读查询不应出现修改成功提示。
+# 函数用途: 检验异步接纳仍保持只读提示语义。
 def test_gateway_status_does_not_show_mutating_confirmation_notice() -> None:
     runtime = TuiRuntime("control-status-no-confirmation")
     captured: list[object] = []
 
+    # LLM: 同生产非阻塞接口，不假造完成通知。
+    # 类用途: 捕获状态查询提交。
     class Reconciler:
-        def enqueue(self, entry) -> None:
+        # LLM: 仅记录调用，不修改 runtime notice。
+        # 函数用途: 接纳只读状态查询。
+        def enqueue_background(self, entry) -> None:
             captured.append(entry)
 
     params = SimpleNamespace(media_importing=False,

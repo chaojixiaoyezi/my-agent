@@ -76,7 +76,7 @@ def default_model_profile_id_for_home(home_paths: object) -> str:
     return read_model_profiles(model_profiles_path(home_paths))["selected"]
 
 
-# LLM: 本地 TUI 复用 chat/local-agent 的正式通道身份；必须有真实 store，不能退回 owner 全局选择。
+# LLM: 本地 TUI 复用 chat/local-agent 正式身份；只有查看附带执行状态，保存回执不依赖该慢观察。
 #   向量模型三个操作（embedding_list/select/off）是全局设置，不属于会话，交给 settings.embedding_selection，与 Gateway 同一入口。
 # 函数用途: 用本地 session_id 进入与 Gateway 相同的会话模型管理逻辑。
 def execute_local_model_operation(agent: object, session_id: str, operation: str, payload: dict) -> dict:
@@ -99,7 +99,10 @@ def execute_local_model_operation(agent: object, session_id: str, operation: str
     from .model_scope import thread_model_execution_status
 
     result = execute_model_profile_operation(agent, operation, payload, thread_id=thread.thread_id)
-    result["model_execution"] = thread_model_execution_status(agent, thread.thread_id)
+    if operation == "list":
+        result["model_execution"] = thread_model_execution_status(agent, thread.thread_id)
+    if operation == "select":
+        result.update(adoption_status="pending")
     return result
 
 

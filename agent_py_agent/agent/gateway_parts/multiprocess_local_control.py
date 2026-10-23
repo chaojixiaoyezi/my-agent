@@ -710,7 +710,10 @@ def _require_receipt_origin(source, receipt):
     scope = replace(source._model_scope, resolved_owner=source.owner)
     text = str(source.body.get('command', source.body.get('prompt', '')) or '')
     operation, digest = ops.gateway_control_operation_identity(scope, text)
-    if (receipt.command_kind != 'model' or receipt.operation_id != operation or receipt.input_digest != digest
+    command = ops.parse_conversation_control(text, reject_unknown_slash=True)
+    if (command is None or receipt.command_kind != command.kind or receipt.command_kind not in {'model', 'effort'}
+            or command.kind == 'effort' and command.operation != 'set'
+            or receipt.operation_id != operation or receipt.input_digest != digest
             or receipt.command_text != text.strip()
             or (receipt.owner_provider, receipt.owner_kind, receipt.owner_id) !=
                (source.owner.provider, source.owner.owner_kind, source.owner.owner_id)

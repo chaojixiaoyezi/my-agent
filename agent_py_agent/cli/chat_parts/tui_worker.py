@@ -188,7 +188,7 @@ def _tui_prepare_gateway_job(cfg: TuiWorkerConfig, job: Any) -> None:
     _submit_new_gateway_job(cfg, job, turn_inject)
 
 
-# LLM: 每个 dequeue 精确 begin/finalize 一次；InterruptedError 收口为中断，其它异常才记失败，不解析错误正文。
+# LLM: 每个 dequeue 精确 begin/finalize 一次；Gateway 观察退出/运输超时只记 unknown，本地确认中断才收口。
 # show-prompt 在 begin 声明延迟回答，其余轮仍逐 token 显示。
 # 函数用途: 后台循环串行处理聊天任务，必要时保证完整 prompt 先于最终回答显示。
 def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
@@ -224,7 +224,10 @@ def _tui_worker_body(cfg: TuiWorkerConfig) -> None:
                 turn_adapter,
             )
         except InterruptedError:
-            summary = TuiTurnSummary(ok=False, interrupted=True)
+            remote = bool(getattr(cfg, "use_gateway", False))
+            summary = TuiTurnSummary(ok=False, interrupted=not remote, outcome_unknown=remote)
+        except TimeoutError as exc:
+            summary = TuiTurnSummary(ok=False, error=str(exc), outcome_unknown=bool(getattr(cfg, "use_gateway", False)))
         except Exception as exc:  # noqa: BLE001 worker 必须把任意执行异常收口为 typed failed turn
             summary = TuiTurnSummary(ok=False, error=str(exc))
         finally:

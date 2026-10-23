@@ -1,4 +1,6 @@
 
+# LLM: run 的完成摘要来自结构化结果，退出码只控制进程，不丢失取消或未知状态。
+# 模块用途: 执行本地 CLI 命令并在一次性请求外层统一收口计时。
 from __future__ import annotations
 
 """implements status, timeline, run, memory, local-search, local-doctor, and local-rebuild CLI commands.
@@ -195,7 +197,7 @@ def cmd_timeline(args) -> int:
 # LLM: Public one-shot runs must render typed provider and transcript failures without traceback;
 # the command may not continue after an authoritative user-message persistence failure.
 # 函数用途: 执行一次 CLI Agent 请求，显示最终结果，并把模型或会话落账故障转成稳定中文退出信息。
-def cmd_run(args) -> int:
+def _cmd_run(args, completion_status_ref: list[str]) -> int:
 
     agent = make_agent(args)
     spinner = ThinkingSpinner()
@@ -255,7 +257,7 @@ def cmd_run(args) -> int:
             return 2
         spinner.stop()
         print_run_result(result, show_prompt=args.show_prompt, streamed_text=str(stream_state["text"]))
-        return run_exit_code(result)
+        return _run_outcome_exit_code(result, completion_status_ref)
     # 首先生成 request/run/task 根 ID(bind 前必须有非空 request_id),
     # resume_loop 在其中贯穿续跑契约。
     base_params = run_params_with_request_id(
@@ -298,7 +300,33 @@ def cmd_run(args) -> int:
     finally:
         spinner.stop()
     print_run_result(result, show_prompt=args.show_prompt, streamed_text=str(stream_state["text"]))
+    return _run_outcome_exit_code(result, completion_status_ref)
+
+
+# LLM: 只依原结果分类；整数 RC 无法区分确认中断、失败与未知，不能作为完成状态。
+# 函数用途: 保留结构化请求结论并返回原业务退出码。
+def _run_outcome_exit_code(result, completion_status_ref: list[str]) -> int:
+    status = str(getattr(result, "runtime_status", "ok") or "ok").strip()
+    completion_status_ref[0] = ("completed" if status == "ok" else "interrupted" if status == "interrupted"
+                                else "unknown" if status in {"unknown", "blocked", "running", "paused"} else "failed")
     return run_exit_code(result)
+
+
+# LLM: 一次命令含准备、自动续跑、落账和错误收口；只在外层 finally 打印一次，不让物理重试重置时钟。
+# 函数用途: 给一次性 CLI 入口统一显示完成时间与整个逻辑请求耗时。
+def cmd_run(args) -> int:
+    from .turn_completion import TurnClock, render_completion
+
+    clock = TurnClock("cli-run")
+    status = ["failed"]
+    try:
+        return _cmd_run(args, status)
+    except (KeyboardInterrupt, InterruptedError):
+        status[0] = "interrupted"
+        raise
+    finally:
+        print("最终状态待确认；没有已确认终态，不显示完成计时。" if status[0] == "unknown"
+              else render_completion(clock.finish(status[0])), flush=True)
 
 
 def _default_run_recovery_next_actions() -> list[str]:

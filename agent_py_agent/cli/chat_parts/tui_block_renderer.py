@@ -3206,6 +3206,11 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
     if _has_running_conversation(snapshot):
         text = f"  Esc 中断本轮 · /stop 停止任务 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    if snapshot.status.completion:
+        from ..turn_completion import render_completion
+
+        text = "  " + render_completion(snapshot.status.completion)
+        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     text = f"  ? 快捷键 · F4 权限 · {history_hint}"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
 

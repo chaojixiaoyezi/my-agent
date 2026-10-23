@@ -22,9 +22,7 @@ from ...agent.gateway_parts.response_renderer import (
 from .gateway_client import (
     ChatRequestContent,
     GatewayChunkPollRequest,
-    GatewayTimingContext,
     check_gateway_alive,
-    format_gateway_timing,
     gateway_request_activity_paths,
     poll_gateway_chunks,
     submit_chat_request,
@@ -58,7 +56,6 @@ class PlainJobContext:
 def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     if not check_gateway_alive(ctx.paths):
         raise RuntimeError("gateway 已停止。请先执行 my-agent gateway start")
-    started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name,
         _next_message_id(ctx),
@@ -102,10 +99,12 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     if not response and request_id:
         raise TimeoutError(f"gateway 请求等待超时: request_id={request_id}")
     if is_silent_user_stop(response):
+        ctx.job.completion_status = "interrupted"
         return "", False
+    ctx.job.completion_status = "completed" if response.get("ok") else "failed"
     terminal_response_streamed = terminal_response_streamed_ref[0] > 0
     _render_if_needed(ctx, response_text, terminal_response_streamed)
-    _print_gateway_timing(request_id, started_at, response, ctx)
+    _print_local_timing(response)
     return response_text, terminal_response_streamed
 
 
@@ -116,7 +115,6 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
 
     if ctx.local_run is None or ctx.local_run.request_id != ctx.job.request_id:
         raise ValueError("本地聊天缺少本轮控制句柄")
-    started_at = time.perf_counter()
     on_chunk, stream_started_ref = _make_chunk_handler(
         ctx.agent.config.agent_name,
         _next_message_id(ctx),
@@ -144,9 +142,11 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
         )
     agent_response_text = result.response
     if is_silent_user_stop(result):
+        ctx.job.completion_status = "interrupted"
         return "", False
+    ctx.job.completion_status = "failed" if getattr(result, "runtime_status", "ok") in {"failed", "error", "cancelled"} else "completed"
     _render_if_needed(ctx, agent_response_text, stream_started_ref[0])
-    _print_local_timing(result, started_at)
+    _print_local_timing(result)
     return agent_response_text, stream_started_ref[0]
 
 
@@ -192,26 +192,11 @@ def _render_if_needed(
         )
 
 
-def _print_gateway_timing(
-    request_id: str,
-    started_at: float,
-    response: dict,
-    ctx: PlainJobContext,
-) -> None:
-    elapsed = time.perf_counter() - started_at
-    _cprint(
-        f"{GRAY}{format_gateway_timing(GatewayTimingContext(request_id, elapsed, response, True))}{RESET}"
-    )
-
-
-def _print_local_timing(result, started_at: float) -> None:
-    elapsed = time.perf_counter() - started_at
-    _cprint(
-        f"{GRAY}[耗时 {elapsed:.2f}s; 工具轮数 {result.tool_rounds}; "
-        f"ctx_tokens~{current_context_token_estimate(result)}; "
-        f"prompt_tokens~{result.prompt_token_estimate}; "
-        f"resume_context={1 if result.memory_resume_context_injected else 0}]{RESET}"
-    )
+# LLM: 保留调试统计，但总耗时与结束日期仅由 worker 的同一逻辑时钟输出，不重复打印。
+# 函数用途: 显示普通终端回合统计，不判断终态或重置时钟。
+def _print_local_timing(result) -> None:
+    rounds = result.get("tool_rounds", 0) if isinstance(result, dict) else getattr(result, "tool_rounds", 0)
+    _cprint(f"{GRAY}[工具轮数 {rounds}; ctx_tokens~{current_context_token_estimate(result)}]{RESET}")
 
 
 __all__ = [

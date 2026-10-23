@@ -1127,7 +1127,10 @@ def _handle_session_lifecycle_signal(
 
 
 # LLM: 活动判断只用认证scope与原prepared owner；不在首输入已冻结后重新查绑定，不读正文决定路由。
+# LLM: 顶层附件随原输入进入 scope，metadata 同名字段无效；活动写入边界继续核验 owner、文件和总量。
 # 函数用途：把同一 owner/thread 运行期间的新普通输入交给当前轮；无活跃轮时保持普通入队。
+# LLM: 沿原认证 scope 转交原输入，媒体只取顶层 input_media；不允许 metadata 冒充附件授权。
+# 函数用途: 把等价普通输入及完整附件路由到原活动回合。
 def _route_ask_to_active_turn(
     server,
     *,
@@ -1152,6 +1155,7 @@ def _route_ask_to_active_turn(
             conversation_id=_http_conversation_id(body),
             metadata=metadata,
             resolved_owner=resolved_owner,
+            input_media=tuple(body.get("input_media") or ()),
         ),
     )
 
@@ -1210,11 +1214,11 @@ def _dispatch_parsed_conversation_control(handler, server, body, command, comman
     if coordinator and not _http_conversation_id(body):
         handler._send_json(400, {'error': 'conversation_id is required'})
         return
-    model_coordinator = coordinator and command.kind == 'model'
+    model_coordinator = coordinator and (command.kind == 'model' or command.kind == 'effort' and command.operation == 'set')
     if server.agent is None and coordinator and is_owner_management_control(command.kind):
         _handle_cold_owner_management_control(handler, server, body)
         return
-    if coordinator and command.kind != 'model' and not is_owner_management_control(command.kind):
+    if coordinator and not model_coordinator and not is_owner_management_control(command.kind):
         if _handle_coordinator_control_operation(handler, server, body) is not False:
             return
     if server.agent is None or model_coordinator:

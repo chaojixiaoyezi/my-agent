@@ -71,7 +71,7 @@ def _plain_finish_job(
     cfg.jobs.task_done()
 
 
-# LLM: direct 的句柄与消息原子发布；结构化中断静默收口，不复用旧绑定或把用户中断报成执行错误。
+# LLM: direct 句柄原子发布；finally 用 job 接受时钟打印唯一完成行，准备错误和中断保留各自终态。
 # 函数用途: 消费消息队列，在模型执行前开放精确的本地控制入口。
 def _plain_worker(cfg: PlainWorkerConfig) -> None:
     while True:
@@ -88,14 +88,23 @@ def _plain_worker(cfg: PlainWorkerConfig) -> None:
                 cfg.local_run_ref[0] = LocalRunControl(job.request_id)
         agent_response_text = ""
         stream_started = False
+        status = "failed"
         try:
             agent_response_text, stream_started = _plain_process_job(cfg, job)
+            status = getattr(job, "completion_status", "completed")
         except InterruptedError:
-            pass
+            status = "interrupted"
+        except TimeoutError:
+            status = "unknown"
+            print("连接或交付状态未知，请查询原请求；这不表示任务结束。", flush=True)
         except Exception as exc:
             print(f"错误: {exc}")
         finally:
             _plain_finish_job(cfg, job, agent_response_text, stream_started)
+            from ..turn_completion import render_completion
+
+            if status != "unknown":
+                print(render_completion(job.completion_clock.finish(status)), flush=True)
 
 
 # LLM: 保持输入端与 worker 的队列、状态和 local_run_ref 同一对象，不能复制可变引用。

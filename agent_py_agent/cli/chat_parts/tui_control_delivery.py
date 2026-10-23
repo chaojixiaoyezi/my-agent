@@ -1,3 +1,5 @@
+# LLM: 原持久 outbox 与 claim 仍是唯一投递事实；普通控制和会话设置各一个线程，设置严格串行。
+# 模块用途: 对账控制命令并隔离模型/档位选择与慢控制，断线后沿原身份继续。
 from __future__ import annotations
 
 """LLM: Persist TUI slash controls until their Gateway operation receipt is resolved.
@@ -38,6 +40,8 @@ class TuiControlOperationEntry:
     attempts: int = 0
     next_attempt_at: float = 0.0
     expected_execution: dict | None = None
+    sequence: int = 0
+    model_payload: dict | None = None
 
     # LLM: Serialization is complete enough to replay the same POST or switch to read-only GET.
     # 函数用途: 把控制 outbox 行转换成持久 JSON 字典。
@@ -52,6 +56,8 @@ class TuiControlOperationEntry:
             "operation_id": self.operation_id,
             "attempts": self.attempts,
             "next_attempt_at": self.next_attempt_at,
+            "sequence": self.sequence,
+            "model_payload": self.model_payload,
         }
 
     # LLM: Missing identity/content is corruption; a partial row is never retried with defaults.
@@ -77,9 +83,17 @@ class TuiControlOperationEntry:
             operation_id=str(payload.get("operation_id") or "").strip(),
             attempts=attempts,
             next_attempt_at=next_attempt_at,
+            sequence=max(0, int(payload.get("sequence") or 0)),
+            model_payload=payload.get("model_payload"),
         )
         if not entry.message_id or not entry.command_text or not entry.command_kind:
             raise ValueError("TUI control outbox entry is invalid")
+        if entry.model_payload is not None:
+            data = entry.model_payload
+            if (not isinstance(data, dict) or set(data) - {"profile_id", "expected_revision"}
+                    or entry.command_kind != "model" or entry.command_text != f"/model {data.get('profile_id')}"
+                    or not isinstance(data.get("profile_id"), str)):
+                raise ValueError("TUI model selection input is invalid")
         if entry.expected_execution is not None:
             target = GatewayExecutionTarget.from_dict(entry.expected_execution)
             if target is None or target.turn_id != entry.expected_turn_id:
@@ -123,9 +137,14 @@ class TuiControlOperationReconciler:
         self.initial_delay = max(0.05, float(initial_delay))
         self.maximum_delay = max(self.initial_delay, float(maximum_delay))
         self._wake = threading.Event()
+        self._settings_wake = threading.Event()
         self._lock = threading.RLock()
         self._inflight_message_ids: set[str] = set()
         self._worker: threading.Thread | None = None
+        self._settings_worker: threading.Thread | None = None
+        from .tui_setting_enqueue import SettingEnqueuer
+
+        self._setting_enqueuer = SettingEnqueuer(self)
         try:
             restored = self._read_entries()
         except Exception as exc:
@@ -157,7 +176,8 @@ class TuiControlOperationReconciler:
                 entry
             ):
                 raise ValueError("TUI control message id was reused with different input")
-            entries[entry.message_id] = existing or entry
+            entries[entry.message_id] = existing or replace(entry,
+                sequence=max((row.sequence for row in entries.values()), default=0) + 1)
             self._write_entries_locked(entries)
             if on_persisted_before_dispatch is not None:
                 try:
@@ -170,10 +190,22 @@ class TuiControlOperationReconciler:
         if entry.target_control_message_id:
             self._dispatch_urgent(entry)
         self._wake.set()
+        self._settings_wake.set()
 
-    # LLM: Lazy creation keeps empty TUI sessions thread-free and guarantees one worker per
-    # reconciler instance under concurrent first enqueues.
-    # 函数用途: 在首次有未完成控制命令时启动后台对账线程。
+    # LLM: 只允许本会话设置进入后台持久化，不把所有控制扩成异步；此返回不表示已经落盘或服务器已保存。
+    # 函数用途: 把设置交给一个有界后台保存队列，立即归还输入线程。
+    def enqueue_setting(self, entry):
+        if not is_session_setting(entry):
+            raise ValueError("不是会话设置")
+        self._setting_enqueuer.submit(entry)
+
+    # LLM: 按键入口只做有界内存接纳；后台仍调用同一 enqueue，callback 只在原持久写成功后执行。
+    # 函数用途: 让其他控制也不等待设置持有的 outbox 磁盘锁。
+    def enqueue_background(self, entry, callback=None):
+        self._setting_enqueuer.submit(entry, callback)
+
+    # LLM: 同一会话最多一个普通和一个设置 worker；共享原 claim，设置不能借 urgent 扩成任意并发。
+    # 函数用途: 懒启动两个有界通道，慢控制不会阻挡模型或档位设置。
     def _ensure_worker_started(self) -> None:
         with self._lock:
             if self._worker is not None and self._worker.is_alive():
@@ -186,31 +218,35 @@ class TuiControlOperationReconciler:
                 daemon=True,
             )
             self._worker.start()
+            self._settings_worker = threading.Thread(target=self._run, kwargs={"settings": True},
+                name=f"tui-setting-reconciler-{self.path.stem[-8:]}", daemon=True)
+            self._settings_worker.start()
 
-    # LLM: Transient disk/transport failures back off without killing the sole session worker.
-    # 函数用途: 循环处理到期控制命令并等待下一次唤醒或退避时间。
-    def _run(self) -> None:
+    # LLM: 设置只处理顺序首项，包括尚待确认的旧操作；两个通道仍在原锁内领取，已知 operation_id 只读查询。
+    # 函数用途: 按原退避循环处理各自通道，设置保存确认前不放行下一个设置。
+    def _run(self, *, settings: bool = False) -> None:
+        wake = self._settings_wake if settings else self._wake
         while not self.stop_event.is_set():
             try:
-                entries = self._read_entries()
+                entries = _lane_entries(self._read_entries(), settings)
                 now = time.time()
-                due = [entry for entry in entries.values() if entry.next_attempt_at <= now]
+                due = [entry for entry in entries if entry.next_attempt_at <= now]
                 for entry in due[:32]:
                     if self.stop_event.is_set():
                         return
                     if self._claim_entry(entry.message_id):
                         self._reconcile_claimed(entry)
-                remaining = self._read_entries()
+                remaining = _lane_entries(self._read_entries(), settings)
                 next_due = min(
-                    (entry.next_attempt_at for entry in remaining.values()),
+                    (entry.next_attempt_at for entry in remaining),
                     default=now + self.maximum_delay,
                 )
                 timeout = max(0.05, min(self.maximum_delay, next_due - time.time()))
             except Exception as exc:
                 self.on_error(exc)
                 timeout = min(self.maximum_delay, max(self.initial_delay, 0.25))
-            self._wake.wait(timeout)
-            self._wake.clear()
+            wake.wait(timeout)
+            wake.clear()
 
     # LLM: The urgent lane is allowed only for a structured exact Compact target. It performs one
     # normal reconciliation attempt after the durable row exists; retry/backoff ownership remains
@@ -248,6 +284,7 @@ class TuiControlOperationReconciler:
             with self._lock:
                 self._inflight_message_ids.discard(entry.message_id)
             self._wake.set()
+            self._settings_wake.set()
 
     # LLM: A known operation id irrevocably switches the row to GET-only reconciliation. Completed,
     # terminal_unknown, conflict, and rejected are structural states, not inferred from message text.
@@ -263,6 +300,8 @@ class TuiControlOperationReconciler:
                 control_state="transport_unknown",
             )
         operation_id = str(result.operation_id or entry.operation_id).strip()
+        if result.control_state in {"completed", "terminal_unknown", "rejected", "conflict"} and not _control_result_needs_poll(result):
+            self._setting_enqueuer.results.complete(entry, result)
         if result.control_state == "completed" and not _control_result_needs_poll(result):
             if self._finish(
                 entry.message_id,
@@ -388,6 +427,7 @@ def _control_entry_identity(
         entry.message_id,
         entry.command_text,
         entry.command_kind,
+        entry.model_payload,
         entry.expected_turn_id,
         entry.target_control_message_id,
         entry.expected_execution,
@@ -407,6 +447,24 @@ def _control_result_needs_poll(result: ConversationControlResult) -> bool:
 def tui_control_operation_outbox_path(gateway_root: Path, session_id: str) -> Path:
     digest = hashlib.sha256(str(session_id or "default").encode("utf-8")).hexdigest()
     return Path(gateway_root) / "client_outbox" / f"tui-control-{digest}.json"
+
+
+# LLM: 只认原命令解析器确认的本会话 model select / effort set/reset，不按文字前缀放开其它操作。
+# 函数用途: 判定一条控制是否可以进入短设置通道。
+def is_session_setting(entry) -> bool:
+    from ...agent.conversation.control_commands import parse_conversation_control
+
+    command = parse_conversation_control(entry.command_text, reject_unknown_slash=True)
+    return bool(command and command.valid and command.kind == entry.command_kind and (
+        command.kind == "model" and command.operation == "select"
+        or command.kind == "effort" and command.operation in {"set", "reset"}))
+
+
+# LLM: sequence 在原 outbox 锁中分配，旧记录缺字段按原顺序恢复；待确认首项不允许被后项越过。
+# 函数用途: 选择当前通道可处理的原行，不写另一本队列账。
+def _lane_entries(entries, settings):
+    rows = [row for row in entries.values() if is_session_setting(row) == settings]
+    return sorted(rows, key=lambda row: row.sequence)[:1] if settings else rows
 
 
 __all__ = [

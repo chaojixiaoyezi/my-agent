@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .chat_style import CHAT_RESPONSE_STYLE_INJECT
@@ -201,7 +202,7 @@ def _tui_attach_gateway_job(
         params.pending_jobs_ref_for_enqueue[0] += 1
     try:
         runtime.register_gateway_request(request_id)
-        runtime.enqueue_prompt(request_id, display_text, queued=True)
+        runtime.enqueue_prompt(request_id, display_text, queued=True, observed=True)
         params.jobs.put(job)
     except Exception:
         with params.state_lock:
@@ -289,16 +290,20 @@ def _tui_submit_control_operation(
 
     try:
         reconciler = _ensure_control_operation_reconciler(params)
-        if command.kind in {"compact", "goal"}:
-            reconciler.enqueue(
-                entry,
-                on_persisted_before_dispatch=on_control_persisted,
-            )
+        from .tui_control_delivery import is_session_setting
+
+        if is_session_setting(entry):
+            reconciler.enqueue_setting(entry)
+        elif command.kind in {"compact", "goal"}:
+            reconciler.enqueue_background(entry, on_control_persisted)
         else:
-            reconciler.enqueue(entry)
+            reconciler.enqueue_background(entry)
     except Exception:
         if command.kind == "steer":
             runtime.cancel_active_turn_input(message_id)
+        if area := getattr(params, "input_area", None):
+            area.text = str(text)
+            area.buffer.cursor_position = len(area.text)
         runtime.set_notice(
             "控制操作无法保存，命令未发送",
             duration_seconds=2.5,
@@ -375,6 +380,13 @@ def _ensure_control_operation_reconciler(
     # LLM: Every POST rebuilds only from the persisted row and reuses its exact client message id.
     # 函数用途: 用持久控制行向 Gateway 提交或安全重放同一命令。
     def submit(entry):
+        if entry.model_payload is not None and not params.use_gateway:
+            from ...agent.conversation.control_commands import ConversationControlResult
+            from .tui_model_menu import _request_data_sync
+
+            data = _request_data_sync(params.agent, params.current_session_id, "select", entry.model_payload)
+            return ConversationControlResult("model", bool(data.get("ok")), str(data.get("message") or "模型选择已保存。"),
+                                             control_state="completed", details=data)
         command = parse_conversation_control(entry.command_text, reject_unknown_slash=True)
         if command is None or not command.valid or command.kind != entry.command_kind:
             from ...agent.conversation.control_commands import ConversationControlResult
@@ -396,6 +408,7 @@ def _ensure_control_operation_reconciler(
                 session_id=str(params.current_session_id or "default"),
                 request_id=entry.expected_turn_id,
                 expected_execution=entry.expected_execution,
+                model_payload=entry.model_payload,
             ),
         )
         return execute_chat_control(
@@ -522,14 +535,20 @@ def _ensure_control_operation_reconciler(
             )
         runtime.set_notice("Control identity conflict · not repeated", duration_seconds=3.0)
 
-    # LLM: Transient outbox errors leave canonical rows untouched and keep the sole worker alive.
-    # 函数用途: 提示控制对账暂时失败，后台继续退避。
+    # LLM: 暂停落盘与运输退避不同；暂停必须显示真实恢复动作，不谎称还在自动重试。
+    # 函数用途: 展示控制错误，有限保存尝试耗尽后提示 F8 恢复同一输入。
     def on_error(_error: BaseException) -> None:
+        from .tui_setting_enqueue import SettingPersistencePaused
+
+        if isinstance(_error, SettingPersistencePaused):
+            runtime.write_console(str(_error))
+            runtime.set_notice(str(_error), duration_seconds=30)
+            return
         runtime.set_notice("Control confirmation is retrying…", duration_seconds=2.5)
 
     reconciler = TuiControlOperationReconciler(
         path=tui_control_operation_outbox_path(
-            params.paths.root,
+            params.paths.root if params.use_gateway else Path(params.agent.config.session_workspace),
             params.current_session_id,
         ),
         submit=submit,
@@ -547,13 +566,14 @@ def _ensure_control_operation_reconciler(
     return reconciler
 
 
-# LLM: 前后台输入共用稳定消息 ID 和持久回执；目标只来自 Gateway 的实际执行绑定，job 与 activity 均无选择权。
+# LLM: 前后台输入共用稳定消息 ID 和持久回执；媒体与正文同一完整选项，目标仅来自 Gateway 实际绑定。
 # 函数用途: 普通 Enter 进入当前主代理的安全点；只在明确拒绝或已排队时回到原任务队列。
 def _tui_submit_active_turn_input(
     params: TuiCreateKeybindingsParams,
     text: str,
     *,
     display_text: str,
+    execution_options=None,
 ) -> bool:
     if not params.use_gateway:
         return False
@@ -575,7 +595,8 @@ def _tui_submit_active_turn_input(
     runtime.enqueue_active_turn_input(message_id, display_text)
     from .tui_input_delivery import TuiActiveInputOutboxEntry
 
-    execution_options = _tui_execution_options(params, include_chat_style=True)
+    if execution_options is None:
+        execution_options = _tui_execution_options(params, include_chat_style=True)
     reconciler = _ensure_active_input_reconciler(params)
     try:
         reconciler.enqueue(
@@ -590,6 +611,8 @@ def _tui_submit_active_turn_input(
         )
     except Exception:
         runtime.cancel_active_turn_input(message_id)
+        if execution_options.input_media:
+            raise
         runtime.set_notice("Delivery state needs attention · queued next", duration_seconds=2.5)
         return False
     runtime.set_notice("Confirming delivery…", duration_seconds=1.2)

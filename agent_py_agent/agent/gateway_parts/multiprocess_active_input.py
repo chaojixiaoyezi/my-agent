@@ -287,6 +287,10 @@ class OriginalPendingTurnInput:
         self._require_budget(agent, deadline)
         self._current()
         self._require_receipt(receipt, deadline=deadline)
+        from .control_guidance_payload import validate_guidance_media
+        from .input_guidance_payload import input_scope
+
+        validate_guidance_media(agent, input_scope(receipt), receipt.transport['target']['thread_id'])
         row = original_input_guidance(agent.conversation_store, receipt)
         self._require_budget(agent, deadline)
         if row is None or row.status == 'pending':
