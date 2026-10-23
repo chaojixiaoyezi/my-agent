@@ -13,6 +13,11 @@
 |   |-- errors.py # HostAPIError 标准错误码、HTTP 状态映射与公开安全文案
 |   |-- execution.py # C 受限工具/脚本/工作流执行门面与非管理员身份强制收敛
 |   |-- execution_policy.py # 非管理员执行预算、网络禁令与工具白名单裁剪
+|   |-- gateway_composition.py # Gateway 生产环境 HostComposition 四大领域装配与响应类型转换
+|   |-- gateway_observations.py # Gateway 产物与记忆只读观察端口生产适配器
+|   |-- gateway_operations.py # Gateway 受限执行、任务与长期目标端口生产适配器
+|   |-- gateway_pending.py # Gateway 待决交互查询与真人票据验证提交端口生产适配器
+|   |-- gateway_runtime.py # Gateway 线程历史、请求提交与本地用户端口生产适配器
 |   |-- goals.py # D1 长期目标查询与状态跃迁领域适配器
 |   |-- history.py # B1 完整聊天历史安全扫描、内部消息过滤与 MAC 分页
 |   |-- http_transport.py # /plugin-host/v2/call 与 /plugin-host/v2/stream HTTP/SSE 传输层
@@ -44,6 +49,7 @@
 |-- agent_py_agent/tests/test_plugin_host_v2_requests.py # B2 消息发送、轮询、SSE 流式回复与取消单测
 |-- agent_py_agent/tests/test_plugin_host_v2_interactions.py # D1 交互决策、任务与长期目标接口单测
 |-- agent_py_agent/tests/test_plugin_host_v2_observations.py # D2 产物与记忆只读观察接口单测
+|-- agent_py_agent/tests/test_plugin_host_gateway_composition.py # Gateway 生产级 Plugin Host v2 四大领域装配与 HTTP/SSE 端到端单测
 |-- agent_py_agent/tests/test_active_turn_media_interjection.py # 活动回合带图插话全链路与多模态安全点注入单测
 |-- agent_py_agent/tests/test_nonblocking_model_switch.py # 运行时非阻塞模型/思考档位切换与单请求冻结单测
 `-- agent_py_agent/tests/test_cli_turn_completion_timing.py # CLI / TUI 回合完成时间与耗时显示单测
