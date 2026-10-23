@@ -1,3 +1,5 @@
+# LLM: 以真实协议投影和纯摘要回归缓存诊断，不访问供应商、不把客户端hash称为服务端命中。
+# 模块用途: 区分工具身份、定义、系统和历史变化，并保护公开诊断不泄漏正文。
 import copy
 import json
 
@@ -313,3 +315,167 @@ def test_public_diagnostic_keeps_only_safe_tool_baseline_fields():
                                    "current_tool_count": "3", "current_tool_names_digest": "not-a-digest"})
     assert bad["current_tool_count"] == 0
     assert bad["current_tool_names_digest"] == ""
+
+
+# LLM: 真实Chat/Responses/Anthropic/custom形状只提工具身份；同数量换名必须可见，不把正文写进遥测。
+# 函数用途: 钉住不同工具协议的同数量替换诊断。
+@pytest.mark.parametrize("shape", ["chat", "flat", "custom"])
+def test_same_count_tool_replacement_changes_real_name_digest(shape):
+    # LLM: 只生成协议wrapper，不排序工具序列或修改名字。
+    # 函数用途: 在三种真实工具形状中包住相同合成身份。
+    def tool(name):
+        return {"type": "function", "function": {"name": name}} if shape == "chat" else (
+            {"type": "custom", "custom": {"name": name}} if shape == "custom" else {"name": name})
+
+    before = request_surface({"tools": [tool("read_file")]}, "endpoint")
+    after = request_surface({"tools": [tool("write_file")]}, "endpoint")
+    assert before["tool_count"] == after["tool_count"] == 1
+    assert before["tool_names_digest"] != after["tool_names_digest"]
+    compared = compare_request_surfaces(before, after)
+    assert "tools_changed" in compared["changes"]
+    assert "tools_names_changed" in compared["changes"]
+    assert "tools_names_changed" in public_cache_diagnostic(compared)["changes"]
+
+
+# LLM: 名字优先级独立于schema，非字典与未知内置类型不执行任何对象代码；测试中标识均为合成值。
+# 函数用途: 核验工具名的层级优先级及内置kind兜底。
+@pytest.mark.parametrize(("tool", "expected"), [
+    ({"name": "top", "function": {"name": "nested"}}, "top"),
+    ({"name": "", "function": {"name": "nested"}}, "nested"),
+    ({"function": "bad", "custom": {"name": "custom-name"}}, "custom-name"),
+    ({"type": "web_search_preview"}, "type:web_search_preview"),
+    (None, ""), ([], ""), ({}, ""),
+])
+def test_tool_name_extraction_precedence_and_builtin_kind(tool, expected):
+    from agent_py_agent.agent.backends import cache_diagnostics
+
+    extract = getattr(cache_diagnostics, "_extract_tool_name", None)
+    assert callable(extract), "缺少协议形状工具名提取器"
+    assert extract(tool) == expected
+
+
+# LLM: 名称摘要保留工具顺序，工具描述/schema变化仍由全量tools摘要单独解释。
+# 函数用途: 区分换名、换序与同名schema更新且不修改输入。
+def test_tool_names_distinguish_schema_changes_and_order_without_mutation():
+    payload = {"tools": [{"type": "function", "function": {"name": "a", "description": "private-marker"}},
+                         {"type": "function", "function": {"name": "b"}}]}
+    original = copy.deepcopy(payload)
+    before = request_surface(payload, "endpoint")
+    changed = copy.deepcopy(payload)
+    changed["tools"][0]["function"]["description"] = "updated-private-marker"
+    after = request_surface(changed, "endpoint")
+    assert before["tool_names_digest"] == after["tool_names_digest"]
+    assert compare_request_surfaces(before, after)["changes"] == ["tools_changed"]
+    reordered = request_surface({"tools": list(reversed(payload["tools"]))}, "endpoint")
+    assert before["tool_names_digest"] != reordered["tool_names_digest"]
+    assert payload == original and "private-marker" not in json.dumps(before)
+
+
+# LLM: 旧Chat名字摘要全为空，不能把算法升级伪报成工具替换；历史链v2合同保持不变。
+# 函数用途: 让旧工具名摘要显式不可比较，而不丢全量tools变化。
+def test_legacy_name_digest_is_not_misreported_as_tool_replacement():
+    current = request_surface({"tools": [{"type": "function", "function": {"name": "a"}}]}, "endpoint")
+    assert current.get("tool_names_schema") == "tool_names.v2"
+    legacy = {**current, "tool_names_digest": "0" * 64}
+    legacy.pop("tool_names_schema")
+    compared = compare_request_surfaces(legacy, current)
+    assert "tools_names_changed" not in compared["changes"]
+    assert compared["tool_names_comparable"] is False
+
+
+# LLM: 在既有HTTP后端上只用纯投影或假传输捕获，不改组包函数、不联网，synthetic不是用户凭据。
+# 函数用途: 创建支持真实Chat组包的本地合成后端。
+def _chat_backend():
+    from agent_py_agent.agent.backends.base import BackendOptions
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+
+    return OpenAICompatibleBackend(BackendOptions(api_base="https://unrecognized.example.invalid/v1",
+        api_key="synthetic", model_name="test-model", stream_enabled=False))
+
+
+# LLM: 只扰动对象键序，数组及标量保持原值；不能在比较端排序来掩盖真实wire差异。
+# 函数用途: 生成逻辑相同但对象插入顺序相反的输入。
+def _reverse_object_keys(value):
+    if isinstance(value, dict):
+        return {key: _reverse_object_keys(item) for key, item in reversed(list(value.items()))}
+    if isinstance(value, list):
+        return [_reverse_object_keys(item) for item in value]
+    return value
+
+
+# LLM: 使用真实project_generate_payload且按未排序JSON比较字节；send共用组包，未知端点不加扩展能力字段。
+# 函数用途: 核验schema嵌套键稳定、输入不变和实际发送边界同源。
+def test_chat_wire_schema_order_is_stable_and_shared_with_send(monkeypatch):
+    backend = _chat_backend()
+    tools = [{"name": "z_tool", "description": "原文\n\n顺序", "input_schema": {"type": "object",
+        "properties": {"z": {"type": "string", "enum": ["second", "first"]}, "a": {"type": "integer"}},
+        "required": ["z", "a"], "allOf": [{"minProperties": 1, "maxProperties": 5}]}},
+        {"name": "a_tool", "input_schema": {"type": "object"}}]
+    original = copy.deepcopy(tools)
+    first = backend.project_generate_payload("canonical", messages=[], tools=tools)
+    second = backend.project_generate_payload("canonical", messages=[], tools=_reverse_object_keys(tools))
+    assert isinstance(first, dict) and isinstance(second, dict)
+    assert json.dumps(first, ensure_ascii=False) == json.dumps(second, ensure_ascii=False)
+    assert [row["function"]["name"] for row in first["tools"]] == ["z_tool", "a_tool"]
+    assert first["tools"][0]["function"]["parameters"] == tools[0]["input_schema"]
+    assert tools == original
+    delta = compare_request_surfaces(request_surface(first, "endpoint"), request_surface(second, "endpoint"))
+    assert "tools_changed" not in delta["changes"] and "system_changed" not in delta["changes"]
+    captured = []
+
+    # LLM: 只替换运输函数，真实generate与_request_payload照常执行，响应仅为本地合成数据。
+    # 函数用途: 捕获真正发送边界的payload而不访问网络。
+    def capture(_path, payload, _headers):
+        captured.append(payload)
+        return {"choices": [{"message": {"content": "done"}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr(backend, "request_json", capture)
+    backend.generate("canonical", messages=[], tools=tools)
+    assert captured == [first]
+    assert not ({"tool_updates", "configuration_update", "thinking"} & set(first))
+
+
+# LLM: 数组顺序是已发送表面的一部分；规范对象键不能把工具换序、required/enum换序或描述改写藏掉。
+# 函数用途: 验证真实工具/数组变化继续产生tools_changed。
+@pytest.mark.parametrize("change", ["tools", "required", "enum", "description"])
+def test_chat_wire_canonicalization_does_not_hide_real_changes(change):
+    backend = _chat_backend()
+    tools = [{"name": "z", "description": "before", "input_schema": {"required": ["z", "a"],
+        "properties": {"z": {"enum": ["second", "first"]}, "a": {"type": "string"}}}}, {"name": "a"}]
+    changed = copy.deepcopy(tools)
+    if change == "tools":
+        changed.reverse()
+    elif change == "description":
+        changed[0]["description"] = "after"
+    elif change == "required":
+        changed[0]["input_schema"]["required"].reverse()
+    else:
+        changed[0]["input_schema"]["properties"]["z"]["enum"].reverse()
+    before = backend.project_generate_payload("canonical", messages=[], tools=tools)
+    after = backend.project_generate_payload("canonical", messages=[], tools=changed)
+    assert "tools_changed" in compare_request_surfaces(request_surface(before, "endpoint"), request_surface(after, "endpoint"))["changes"]
+
+
+# LLM: 普通与typed布局均保留系统/developer正文和段落次序；只扰动对象键，不按推荐或工具名重排段落。
+# 函数用途: 锁住system稳定、真实system变更可见与volatile只追加尾部的合同。
+def test_chat_system_developer_and_typed_sections_are_deterministic():
+    from agent_py_agent.agent.backends.base import ProviderRequestOptions
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    backend = _chat_backend()
+    options = ProviderRequestOptions(system_instruction="系统乙\n\n系统甲")
+    history = [{"role": "developer", "content": "开发乙\n\n开发甲"}, {"role": "user", "content": "history"}]
+    first = backend.project_generate_payload("canonical", messages=history, request_options=options)
+    second = backend.project_generate_payload("canonical", messages=_reverse_object_keys(history), request_options=options)
+    assert json.dumps(first, ensure_ascii=False) == json.dumps(second, ensure_ascii=False)
+    assert first["messages"][:2] == [{"role": "system", "content": options.system_instruction}, {"role": "user", "content": "canonical"}]
+    assert first["messages"][2:] == history
+    changed = backend.project_generate_payload("canonical", messages=history,
+        request_options=ProviderRequestOptions(system_instruction="系统甲\n\n系统乙"))
+    assert "system_changed" in compare_request_surfaces(request_surface(first, "endpoint"), request_surface(changed, "endpoint"))["changes"]
+    typed = backend.project_generate_payload(CacheStructuredPrompt("稳定乙\n\n稳定甲", "volatile-a", stable_user_prefix="canonical"),
+        messages=[], request_options=options)
+    volatile = backend.project_generate_payload(CacheStructuredPrompt("稳定乙\n\n稳定甲", "volatile-b", stable_user_prefix="canonical"),
+        messages=[], request_options=options)
+    assert typed["messages"][0]["content"] == "系统乙\n\n系统甲\n\n稳定乙\n\n稳定甲"
+    assert "system_changed" not in compare_request_surfaces(request_surface(typed, "endpoint"), request_surface(volatile, "endpoint"))["changes"]

@@ -19,14 +19,17 @@ _PARTITION_OPTION_KEYS = {"thinking": "thinking_changed", "reasoning_effort": "r
                           "reasoning": "reasoning_effort_changed"}
 # 单条选项摘要发生变化时用的通用原因码；分区选项走上面的专用码。
 _OPTIONS_CHANGED_CODE = "options_changed"
+# 工具名算法独立版本化，避免把旧Chat空名摘要的升级误报为工具替换。
+_TOOL_NAMES_SCHEMA = "tool_names.v2"
 
-# LLM: 原因码是持久化白名单的单一来源（model_metrics 的累计计数与投影都从这里取），新增/改名必须同步
+# LLM: 原因码是持久化白名单的单一来源，工具身份变化与全量定义变化分别报出；model_metrics沿本入口同步累计投影。
+#   新增/改名必须同步
 #   诊断比较与投影，避免两处名单漂移；旧历史码也收下，否则旧记录的原因会被静默丢掉。
 # 函数用途: 返回本模块对外报出的全部原因码，供持久化白名单同步（避免两处名单漂移）。
 def change_codes() -> tuple[str, ...]:
     # 含 0.0/0.1/0.2 就已报出的历史码（history_prefix_changed / history_shortened / history_appended）：
     #   它们仍可能出现在旧记录里，白名单必须收下，否则累计计数会静默丢掉这些原因。
-    return tuple(sorted({*("endpoint_changed", "model_changed", "system_changed", "tools_changed", _OPTIONS_CHANGED_CODE,
+    return tuple(sorted({*("endpoint_changed", "model_changed", "system_changed", "tools_changed", "tools_names_changed", _OPTIONS_CHANGED_CODE,
                            "history_prefix_changed", "history_shortened", "history_appended"),
                          *_PARTITION_OPTION_KEYS.values()}))
 
@@ -57,7 +60,22 @@ def _chain_checkpoints(rows: list) -> list[dict]:
     return checkpoints
 
 
-# LLM: 只保存固定数量的检查点摘要和组件摘要，链值仍扫描全部消息；快照 partial 说明检查点窗口被裁、定位有限。
+# LLM: 协议名字提取按顶层name、Chat function.name、custom.name优先；内置工具缺name时以type标记，仅参与不可逆摘要。
+# 函数用途: 取得不同供应商工具定义中的真实身份，不解析描述或参数正文。
+def _extract_tool_name(tool: object) -> str:
+    if not isinstance(tool, dict):
+        return ""
+    if tool.get("name"):
+        return str(tool["name"])
+    for key in ("function", "custom"):
+        nested = tool.get(key)
+        if isinstance(nested, dict) and nested.get("name"):
+            return str(nested["name"])
+    kind = tool.get("type")
+    return f"type:{kind}" if isinstance(kind, str) and kind else ""
+
+
+# LLM: 只保存固定数量的检查点摘要和组件摘要，链值仍扫描全部消息；工具名兼容三种协议并单独版本化。
 #   比较层还会在末块缺证据时置 partial，不能把它读成“整段历史都稳定”；旧 partial 同样保守表示证明不完整。
 #   另存工具名清单的摘要与个数：与全量 tools 摘要互补（名字集合变了还是同一集合内容变了），
 #   且 run 第一次调用也能留下自己的基线，供事后定位“第一次调用后收窄”。
@@ -71,10 +89,10 @@ def request_surface(payload: dict, endpoint: str) -> dict[str, object]:
     options = {key: value for key, value in payload.items() if key not in {"model", "messages", "input", "system", "instructions", "tools", "stream"}}
     checkpoints = _chain_checkpoints(rows)
     tools = payload.get("tools", [])
-    tool_names = [str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
+    tool_names = [_extract_tool_name(tool) for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else []
     return {"schema": "request_surface.v2", "endpoint": _digest(endpoint), "model": _digest(payload.get("model")),
             "system": _digest(system), "tools": _digest(tools), "options": _digest(options),
-            "tool_count": len(tool_names), "tool_names_digest": _digest(tool_names),
+            "tool_count": len(tool_names), "tool_names_digest": _digest(tool_names), "tool_names_schema": _TOOL_NAMES_SCHEMA,
             # 分区选项单独留摘要：只有这几个键会切换服务端缓存分区，混在 options 里看不出是换了分区。
             "partition_options": {key: _digest(options.get(key)) for key in sorted(_PARTITION_OPTION_KEYS) if key in options},
             "chain_checkpoints": checkpoints, "message_count": len(rows),
@@ -116,7 +134,8 @@ def _history_changes(previous: dict, current: dict) -> tuple[list[str], int | No
     return [], None, shared, True
 
 
-# LLM: 变化是客户端可证实事实，不是缓存失效的因果证明；首次调用没有可比的 previous，但仍附上本次自己的
+# LLM: 工具名字只在同算法版本间比较；旧空名算法不可比，不能把升级误报为换工具，完整tools摘要仍独立比较。
+#   变化是客户端可证实事实，不是缓存失效的因果证明；首次调用没有可比的 previous，但仍附上本次自己的
 #   工具名清单摘要与个数（current_tool_*），供事后对比“第一次调用后收窄”；裁剪窗口外不伪造比较基线。
 #   选项变化分成“会切换缓存分区的”与“其它”两类：thinking_changed / reasoning_effort_changed 说明整段前缀不再共享缓存，
 #   其它选项仍只报 options_changed。历史变化用链式检查点定位：不同就报 history_prefix_changed 并带上第一个不同的块，
@@ -130,11 +149,14 @@ def compare_request_surfaces(previous: dict, current: dict) -> dict[str, object]
     current_tools = {
         "current_tool_count": tool_count if type(tool_count) is int and tool_count >= 0 else 0,
         "current_tool_names_digest": str(current.get("tool_names_digest") or ""),
+        "tool_names_comparable": bool(previous) and previous.get("tool_names_schema") == current.get("tool_names_schema") == _TOOL_NAMES_SCHEMA,
     }
     if not previous:
         return {"baseline_available": False, "changes": [], "server_cache_state": "unknown", **current_tools}
     comparable = previous.get("schema") == current.get("schema")
     changes = [key + "_changed" for key in ("endpoint", "model", "system", "tools") if previous.get(key) != current.get(key)]
+    if current_tools["tool_names_comparable"] and previous.get("tool_names_digest") != current.get("tool_names_digest"):
+        changes.append("tools_names_changed")
     if comparable:
         changes.extend(_option_changes(previous, current))
         history, divergent, shared, comparable = _history_changes(previous, current)
@@ -191,7 +213,7 @@ def _public_digest(value: object) -> str:
     return ""
 
 
-# LLM: 诊断展示只保留已定义原因码和计数，不允许摘要、正文、URL 或密钥混入持久会话投影。
+# LLM: 诊断只保留已定义原因、数字、合法摘要及工具名字可比标志，不允许正文、URL或密钥进入持久投影。
 #   缺 block 键的旧记录按“没有定位信息”给 None，不猜测块号，也不让旧格式读失败；
 #   comparable=False 表示版本不兼容或缺同范围末点、历史无法确定分类（旧记录缺该键按可比较读）；partial 保留证明不完整。
 #   current_tool_* 是本次调用自己的工具名清单摘要与个数（不可逆摘要），第一次调用也有，供事后核对收窄。
@@ -212,6 +234,7 @@ def public_cache_diagnostic(value: object) -> dict[str, object]:
         "changed_block_index": block if type(block) is int and block > 0 else None,
         "current_tool_count": max(0, tool_count) if type(tool_count) is int else 0,
         "current_tool_names_digest": _public_digest(value.get("current_tool_names_digest")),
+        "tool_names_comparable": value.get("tool_names_comparable") is True,
         "partial": value.get("partial") is True,
         "server_cache_state": "unknown",
     }
