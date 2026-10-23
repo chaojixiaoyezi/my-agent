@@ -254,7 +254,7 @@ class CapabilityRouter:
 
     # LLM: 在用身份只与当前授权卡相交，按冻结的首次使用顺序优先显示；required 复用原必显，不扩权。
     #   公开 Skill 的原格式由 _render_public_skill_metadata 保持；联测目录字节、快照与提示投影。
-    # 函数用途: 渲染公开能力短卡、按需读取说明及不可用包，展示不改变快照和授权。
+    # 函数用途: 渲染公开短卡及不可用包，完整12k信封统一交给同一帮助函数，不改变快照或授权。
     def render_skill_metadata_index(
         self, *, context_window_tokens: int | None = None,
         selected_skill_ids: tuple[str, ...] | None = None,
@@ -312,26 +312,7 @@ class CapabilityRouter:
         # 完整拼接是最后观察点：分区token向上取整的几字节边界也不能把真实预算误判成合成兜底。
         if total_budget.cost(minimum_text) <= total_budget.limit < total_budget.cost(text):
             text = minimum_text
-        if len(text) > _MAX_SKILL_METADATA_ENVELOPE_CHARS:
-            char_budget = _SkillMetadataBudget(
-                max(0, _MAX_SKILL_METADATA_ENVELOPE_CHARS - (len(unavailable_text) + 2 if unavailable_text else 0)),
-                False,
-            )
-            pkg_limit = max(1, char_budget.limit // 2) if skills else char_budget.limit
-            pkg_text, pkg_cost = _render_package_metadata(
-                packages, _SkillMetadataBudget(pkg_limit, False), selected_skill_ids, required_skill_ids
-            )
-            pkg_text = "\n\n".join(item for item in (unavailable_text, pkg_text) if item)
-            rem_budget = _SkillMetadataBudget(
-                max(0, char_budget.limit - pkg_cost - (2 if pkg_cost else 0)), False
-            )
-            sk_text = ""
-            if skills and selected_skill_ids is not None:
-                sk_text = _render_selected_skill_metadata(skills, rem_budget, selected_skill_ids, required_skill_ids)
-            elif skills:
-                sk_text = _render_public_skill_metadata(skills, rem_budget, required_skill_ids)
-            text = "\n\n".join(part for part in (pkg_text, sk_text) if part)
-        return text
+        return _enforce_skill_catalog_envelope(text, skills, packages, unavailable_text, selected_skill_ids, required_skill_ids)
 
     def search(
         self,
@@ -591,6 +572,26 @@ class _SkillMetadataBudget:
                 len(text.encode("utf-8")) + _APPROX_BYTES_PER_TOKEN - 1
             ) // _APPROX_BYTES_PER_TOKEN
         return len(text)
+
+
+# LLM: 12k硬字符信封只在此复核；必要时按字符预算重渲染，省略提示/用法仍由原渲染器提供，不切断身份。
+# 函数用途: 为公开、选择及能力包混合目录共用一个最终字符限额入口。
+def _enforce_skill_catalog_envelope(text, skills, packages, unavailable_text, selected_skill_ids, required_skill_ids):
+    if len(text) <= _MAX_SKILL_METADATA_ENVELOPE_CHARS:
+        return text
+    char_budget = _SkillMetadataBudget(
+        max(0, _MAX_SKILL_METADATA_ENVELOPE_CHARS - (len(unavailable_text) + 2 if unavailable_text else 0)), False,
+    )
+    pkg_limit = max(1, char_budget.limit // 2) if skills else char_budget.limit
+    pkg_text, pkg_cost = _render_package_metadata(packages, _SkillMetadataBudget(pkg_limit, False), selected_skill_ids, required_skill_ids)
+    pkg_text = "\n\n".join(item for item in (unavailable_text, pkg_text) if item)
+    remaining = _SkillMetadataBudget(max(0, char_budget.limit - pkg_cost - (2 if pkg_cost else 0)), False)
+    skill_text = ""
+    if skills and selected_skill_ids is not None:
+        skill_text = _render_selected_skill_metadata(skills, remaining, selected_skill_ids, required_skill_ids)
+    elif skills:
+        skill_text = _render_public_skill_metadata(skills, remaining, required_skill_ids)
+    return "\n\n".join(part for part in (pkg_text, skill_text) if part)
 
 
 # LLM: 完整外壳计入原字符/token预算；放不下外壳和最低引用的合成小预算沿旧兜底，必要身份永不截断。

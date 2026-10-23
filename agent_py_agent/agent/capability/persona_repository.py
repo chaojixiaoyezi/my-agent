@@ -155,7 +155,7 @@ class _PreparedPersonaMutation:
     baseline: _PreparedPersonaBaseline | None = None
 
 
-# LLM: source正文/SHA来自同次严格加载；仅首次owner_default可投影已知工厂种子，显式/已改来源不变，原SHA仍冻结来源。
+# LLM: 来源身份及原SHA不变；默认和显式预算均裁剪提示视图，不能把20000当无限哨兵。
 # 函数用途: 将AGENTS来源转成安全提示投影，保留原件、来源授权与版本身份。
 def _load_agents_source_document(repository):
     try:
@@ -173,11 +173,7 @@ def _load_agents_source_document(repository):
     if snapshot.kind == "owner_default" and snapshot.config_version == 1 and snapshot.revision == 0 and snapshot.status == "ready":
         prompt_content = _factory_agents_prompt(repository, display, snapshot.content_sha256)
     sanitized, blocked = _sanitize_persona_text(prompt_content)
-    content, truncated = (
-        (sanitized, False)
-        if repository.prompt_max_chars == _DEFAULT_PROMPT_MAX_CHARS
-        else _bounded_prompt_content(sanitized, repository.prompt_max_chars)
-    )
+    content, truncated = _bounded_prompt_content(sanitized, repository.prompt_max_chars)
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
     detail = f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved" if prompt_content != display else ""
     diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked, detail)
@@ -1058,13 +1054,15 @@ def _is_empty_persona_template_content(content: str) -> bool:
     return not value or value in _LEGACY_TEMPLATE_PLACEHOLDER_VALUES
 
 
-# LLM: 预算含原标记；首尾配额可重分配，单行超过总正文预算才字符兜底，绝不超过max_chars。
-# 函数用途: 不在普通规则中间截断人格提示；极小预算宁缺正文，原文件不受影响。
-def _bounded_prompt_content(content: str, max_chars: int) -> tuple[str, bool]:
+# LLM: 预算含标记；人格默认标记不变，Owner信封可传宿主标记复用；单行超过总正文预算才字符兜底。
+# 函数用途: 在硬上限内保留提示首尾完整规则；极小预算宁缺正文，原文件不受影响。
+def _bounded_prompt_content(
+    content: str, max_chars: int, *,
+    marker: str = "\n[... persona content truncated by configured prompt budget ...]\n",
+) -> tuple[str, bool]:
     max_chars = max(0, max_chars)
     if len(content) <= max_chars:
         return content, False
-    marker = "\n[... persona content truncated by configured prompt budget ...]\n"
     if max_chars < len(marker):
         return "", True
     budget = max_chars - len(marker)
@@ -1298,17 +1296,13 @@ def _persona_runtime_snapshot(self) -> dict[str, object]:
     }
 
 
-# LLM: 诊断/CAS摘要仍绑定原文；工厂提示视图独立清洗并标版本，不伪造原文件修订。
+# LLM: 诊断/CAS绑定原文，所有目标均执行配置预算；工厂提示视图不伪造原件修订。
 # 函数用途: 将原件及可选工厂视图转换为有界提示与可追溯诊断。
 def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars, *, prompt_content=None):
     sha256 = _sha256_text(raw)
     projected = raw if prompt_content is None else prompt_content
     sanitized, blocked = _sanitize_persona_text(projected)
-    content, truncated = (
-        (sanitized, False)
-        if target == "agents" and prompt_max_chars == _DEFAULT_PROMPT_MAX_CHARS
-        else _bounded_prompt_content(sanitized, prompt_max_chars)
-    )
+    content, truncated = _bounded_prompt_content(sanitized, prompt_max_chars)
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
     return PersonaDocumentSnapshot(
         target,
