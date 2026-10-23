@@ -28,18 +28,21 @@ _BASE_URL: str | None = None
 _GRANTS: dict[str, _Grant] = {}
 
 
-# LLM: 令牌到固定激活引用的绑定；不保存 owner 实例或设置。
+# LLM: 令牌绑定固定激活；v9额外冻结原批准JSON，不缓存有效性或owner实例。
 # 类用途: 记录一枚宿主 API 令牌属于哪个插件激活。
 @dataclass(frozen=True)
 class _Grant:
     activation_ref: object
     plugin_id: str
+    host_api_grant_json: str | None = None
 
-    # LLM: 权限来自鲜活安装声明，不接受HTTP正文覆盖；旧安装无声明时按最小权限处理。
+    # LLM: 旧安装保留鲜活read声明；v9必须走新协议，不可借旧Broker读入口绕过范围。
     # 函数用途: 为Broker提供同一激活的只读权限视图。
     @property
     def activation(self) -> dict:
         current = self.activation_ref.require()
+        if self.host_api_grant_json is not None:
+            return {"host_api": ()}
         return {'host_api': getattr(getattr(current, 'manifest', None), 'host_api', ())}
 
 
@@ -53,18 +56,30 @@ def set_host_api_base(url: str | None) -> None:
             _GRANTS.clear()
 
 
-# LLM: 仅在构造插件客户端时调用；宿主 API 不可用时返回 None（插件应显示"宿主 API 不可用"）。副作用：登记令牌。
+# LLM: 构造插件客户端时调用；v9绑定固定授权并改用v2入口，旧地址不变；服务未开返回空，不给准备代公开调用权。
 # 函数用途: 为一个插件激活发放宿主 API 地址和令牌，返回要放进插件进程环境的变量。
 def issue_host_api_env(activation_ref, plugin_id: str) -> dict[str, str]:
+    from .plugin_activation_ref import PluginActivationRef
+    from .plugin_permissions.host_grants import validate_installation_grant
+
+    host_json = None
+    if isinstance(activation_ref, PluginActivationRef):
+        current = activation_ref.require(allow_preparing=True)
+        if current.manifest.plugin_id != plugin_id:
+            raise ValueError("令牌插件身份不一致")
+        if current.manifest.host_api_v9:
+            validate_installation_grant(current)
+            host_json = current.activation.host_api_grant_json
     with _LOCK:
         if _BASE_URL is None:
             return {}
         token = secrets.token_urlsafe(32)
-        _GRANTS[token] = _Grant(activation_ref, plugin_id)
-        return {HOST_API_URL_ENV: _BASE_URL + HOST_API_PATH, HOST_API_TOKEN_ENV: token}
+        _GRANTS[token] = _Grant(activation_ref, plugin_id, host_json)
+        path = "/plugin-host/v2/call" if host_json is not None else HOST_API_PATH
+        return {HOST_API_URL_ENV: _BASE_URL + path, HOST_API_TOKEN_ENV: token}
 
 
-# LLM: 激活失效（停用、卸载、换代或安装表不可读）时删除令牌并返回 None；不追随新代次。
+# LLM: 停用/卸载/换代/授权修订/到期即不可逆删除令牌；每次读原安装，不追随同名新授权。
 # 函数用途: 校验令牌并返回仍然有效的授权。
 def verify_host_api_token(token: str) -> _Grant | None:
     with _LOCK:
@@ -74,7 +89,17 @@ def verify_host_api_token(token: str) -> _Grant | None:
     try:
         current = grant.activation_ref.require()
         valid = getattr(current.activation, "activation_id", None) == grant.activation_ref.scope.activation_id
-    except (OSError, ValueError):
+        if grant.host_api_grant_json is not None:
+            from .plugin_permissions.host_grants import (
+                expiry_timestamp,
+                validate_installation_grant,
+            )
+
+            live = validate_installation_grant(current)
+            expiry = expiry_timestamp(live["expires_at"]) if live is not None else 0
+            valid = (valid and current.activation.host_api_grant_json == grant.host_api_grant_json
+                     and (expiry is None or expiry > time.time()))
+    except (OSError, ValueError, TypeError):
         valid = False
     if not valid:
         with _LOCK:
@@ -121,11 +146,13 @@ def _plugins(owner) -> list[dict]:
              "summary": row.manifest.summary} for row in PluginInstallStore(owner).snapshot()]
 
 
-# LLM: 主题白名单外的请求直接拒绝；支持只读公开主题及按同一 grant 分发受控 Broker 动作；owner 未加载时线程/活动为空并标注。
+# LLM: 旧只读主题保持原行为；v9拒绝进入旧入口，必须经过新协议范围检查。
 # 函数用途: 按请求的主题组装只读结果，或委托 PluginBrokerService 执行同 Owner 的资产/遥测查询。
 def query_host(base_agent, grant: _Grant, body: dict, *, gateway_status: dict | None = None) -> dict:
     from .gateway_parts.request_worker import _resolve_loaded_request_agent_for_owner
 
+    if grant.host_api_grant_json is not None:
+        raise ValueError("该插件须使用宿主API v2")
     if isinstance(body, dict) and "action" in body and "topics" not in body:
         from .gateway_parts.plugin_broker_api import PluginBrokerService
 

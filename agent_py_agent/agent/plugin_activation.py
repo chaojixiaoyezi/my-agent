@@ -94,10 +94,13 @@ def prepare_activation(request: PluginActivationRequest, entries: tuple[PluginIn
     return PluginMutationResult(updated, request.action, "committed", receipt)
 
 
-# LLM: 配置与权限固定在准备代次；发布/撤销不能换授权，全球开关变化不降级原激活，退出仍由资源账证明。
+# LLM: 配置和OS/API权限固定在准备代次；准备绑定原安装引用，发布/撤销不能换授权，退出仍由资源账证明。
 # 函数用途: 守住准备、发布、撤销的顺序和不可逆边界。
 def _validate_transition(request: PluginActivationRequest, existing: PluginInstallation) -> None:
     target, current = request.activation, existing.activation
+    from .plugin_permissions.host_grants import validate_installation_grant
+
+    validate_installation_grant(existing, target, preparing=target.phase == "preparing")
     if target.phase == "preparing":
         if current is not None:
             raise PluginInstallationError("activation_unsettled", "原激活尚未清理，不能准备新一代。")
@@ -110,7 +113,8 @@ def _validate_transition(request: PluginActivationRequest, existing: PluginInsta
         return
     if current is None or current.plan != target.plan:
         raise PluginInstallationError("activation_binding_conflict", "当前激活与请求代次不同。")
-    if current.permission_json != target.permission_json:
+    if (current.permission_json != target.permission_json
+            or current.host_api_grant_json != target.host_api_grant_json):
         raise PluginInstallationError("activation_binding_conflict", "同一代次不能更换授权。")
     if target.phase == "active":
         if current.phase != "preparing":

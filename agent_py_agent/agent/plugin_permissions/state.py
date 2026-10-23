@@ -8,19 +8,24 @@ from dataclasses import replace
 from ..common.strict_json import load_strict_json
 
 
-# LLM: 只读原安装权威；None 不是旧兼容，调用方不得补猜授权。
+# LLM: 只读原安装权威；v9先核独立API记录，不允许缺失、wide或兼容路径回退。
 # 函数用途: 取得固定安装的权限事实副本。
 def legacy_permissions(entry) -> dict | None:
+    if entry.manifest.host_api_v9:
+        from .host_grants import validate_installation_grant
+
+        validate_installation_grant(entry)
     if entry.activation is None or entry.activation.phase == "revoked":
         return None
     value = getattr(entry.activation, "permission_json", None) or entry.legacy_permission_json
     return load_strict_json(value) if value is not None else None
 
 
-# LLM: 只供严格旧版本迁移调用；未来缺字段不能调用它取得豁免。
+# LLM: 只供严格旧版本迁移调用；v9显式排除，未来缺字段不能调用它取得豁免。
 # 函数用途: 将升级前已启用的老格式激活标为一次性兼容。
 def migrate_v3_entry(entry):
-    if entry.enabled and not entry.manifest.is_content_only and entry.manifest.permissions is None:
+    if (entry.enabled and not entry.manifest.is_content_only and entry.manifest.permissions is None
+            and not entry.manifest.host_api_v9):
         grant = {"policy_version": 1, "mode": "legacy_compat", "source_schema": "plugin_installations.v3",
                  "activation_id": entry.activation_id, "package_sha256": entry.package_sha256,
                  "installation_ref": entry.installation_ref}

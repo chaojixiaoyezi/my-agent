@@ -1,3 +1,10 @@
+## 2026-10-23 Plugin Host v2 Worker A：公共合同、v9 授权与传输
+
+- 来源：`plugin-host-v2-worker-a-c6` 及 `plugin_host_api_expansion_design.md`。中央目录固定 42 动作，严格 JSON/身份注入拒绝，v9 文件清单显式版本，宿主授权绑定原安装/激活及原确认流程；B/C/D 未注册的领域明确未就绪，不返回假空数据。
+- 新增 `test_plugin_host_v2_contracts.py`、`test_plugin_host_v2_grants.py`、`test_plugin_manifest_v9.py`。覆盖闭合参数、条件能力、固定授权往返及撤销、来源副本拒绝、受限 resolver 修订/预算/来源检查、游标完整性与到期，以及真实回环 HTTP 和独立有界 SSE。resolver 为合同替身，不代表已验证 C 的真实执行主体；MCP 环境测试不启动 OS 插件进程。
+- 复现：在工作树根运行 `python3 -m pytest agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_plugin_manifest_v9.py agent_py_agent/tests/test_plugin_host_api.py agent_py_agent/tests/test_plugin_broker_api.py agent_py_agent/tests/test_plugin_manifest_v8.py agent_py_agent/tests/test_plugin_install_store.py agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short`；再运行任务规定的 ruff 和 strict code-size 检查。
+- 已在指定原基线 `40d3c988d` 的独立归档副本复现架构门禁 `test_product_code_has_no_var_keyword_service_interfaces` 失败：`workflows_tool.py`、`skill_learning_store.py`、`skill_usage_ledger.py` 的四处既有接口；当前 offender 列表与基线逐项相等。未删除/跳过/放宽测试，也未改 Worker A 范围外业务代码。
+
 ## 2026-10-23 C1b 审计返工：计量来源消费与工具发现顺序
 
 - 来源：`ctxopt-c1b-audit-remediation`（astra 审计 B1-05、B1-06、B1-01/B1-04 接线要求）。旧快照缺明确 `raw_estimated_tokens` 或合法估算标签时保持未知，不按数值差异编造来源；Gateway、TUI adapter/reducer 和 `/context` 报告共用公开白名单。
