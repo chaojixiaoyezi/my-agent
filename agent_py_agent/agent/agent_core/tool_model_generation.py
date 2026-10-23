@@ -818,11 +818,12 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     )
 
 
-# LLM: 图片存在性读取原 IR 和文本协议携带包；模态未知按不支持处理，不凭正文猜能力或删除媒体。
+# LLM: 图片存在性读取原 IR 和携带包；仅在非原生协议或显式非空模态声明不包含 image 时拒绝；
+#   未知模态（空列表）沿用原生多模态发送，与 _validate_native_input_media 保持一致。
 # 函数用途: 阻止用户图片在不支持的协议或模型上被悄悄丢弃。
 def _require_user_image_capability(agent, params):
     from ..backends.tool_ir import UserTurn
-    from ..conversation.input_media import InputMediaError, model_accepts_images
+    from ..conversation.input_media import InputMediaError
 
     media = [ref for item in getattr(params, "tool_ir_history", ()) or () if isinstance(item, UserTurn)
              for ref in item.media if str(ref.get("media_type", "")).startswith("image/")]
@@ -831,8 +832,12 @@ def _require_user_image_capability(agent, params):
                  if str(ref.get("media_type", "")).startswith("image/"))
     attrs = getattr(params, "task_attributes", {}) or {}
     media.extend(ref for ref in attrs.get("input_media", ()) if str(ref.get("media_type", "")).startswith("image/"))
-    if media and (not native_tool_use_active(params) or not model_accepts_images(agent)):
-        raise InputMediaError("当前模型或协议未声明支持图片，已拒绝丢图发送；请切换支持图片的模型。")
+    declared = getattr(getattr(agent, "config", None), "model_input_modalities", None) or ()
+    modalities = tuple(str(item).strip().lower() for item in declared)
+    if media and (not native_tool_use_active(params)
+            or not getattr(getattr(agent, "backend", None), "supports_native_tool_ir", False)
+            or bool(modalities) and "image" not in modalities):
+        raise InputMediaError("当前模型或协议不支持图片，已拒绝丢图发送；请切换支持图片的模型。")
 
 
 # 注入观察截图时给模型的固定说明：说明这是宿主补充的视觉材料，不是用户消息。

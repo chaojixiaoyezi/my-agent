@@ -408,3 +408,130 @@ def test_m4_gateway_menu_keeps_revision_and_identity(tmp_path, monkeypatch):
         changed = {**body, "metadata": {**body["metadata"], "model_payload": {"profile_id": profile, "expected_revision": 0}}}
         status, conflict = post_model(server, changed, route="/control", actor=row["actor_id"])
         assert status == 409 or conflict.get("control_state") == "conflict"
+
+
+# LLM: 仅替换运输与弹窗视图，真实 save_selection、持久 outbox、设置 worker/claim 与结果观察者均执行。
+# 函数用途: 未知终态后立即释放菜单，未知运输只阻挡原行存续期间，原行结束后新选择可成功保存。
+@pytest.mark.parametrize("unknown_state", ["terminal_unknown", "transport_unknown"])
+def test_model_menu_unknown_receipt_does_not_permanently_lock_next_selection(tmp_path, monkeypatch, unknown_state):
+    import asyncio
+
+    from agent_py_agent.cli.chat_parts import tui_actions, tui_model_menu
+    from agent_py_agent.cli.chat_parts.tui_model_selection_wait import save_selection
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+
+    calls, polls, callbacks = [], [], []
+    release = threading.Event()
+
+    # LLM: 首次模拟未知终态或观察者丢回执；后续请求返回结构化成功，不在 UI 假定远端已保存。
+    # 函数用途: 记录真实投递身份，只在已知原操作上制造运输故障。
+    def submit(entry):
+        calls.append(entry)
+        if len(calls) == 1:
+            if unknown_state == "transport_unknown":
+                reconciler._setting_enqueuer.results.watch(entry.message_id).set_exception(TimeoutError("observer disconnected"))
+            return ConversationControlResult("model", False, "原操作结果未知", operation_id="original-operation", control_state=unknown_state)
+        return ConversationControlResult("model", True, "新选择已保存", control_state="completed", details={"selected": "C"})
+
+    # LLM: 旧操作拿到 operation_id 后只能由原 status 通道结束；测试不会给原消息重新发 POST。
+    # 函数用途: 控制原行何时结束，检验菜单是否跟随真实持久行恢复。
+    def status(operation_id):
+        polls.append(operation_id)
+        return ConversationControlResult("model", release.is_set(), "原收据对账", operation_id=operation_id,
+            control_state="completed" if release.is_set() else "transport_unknown")
+
+    reconciler = _reconciler(tmp_path, submit=submit, status=status, callbacks=callbacks)
+    reconciler.stop_event.clear()
+    params = SimpleNamespace(control_operation_reconciler=reconciler)
+    app = SimpleNamespace(_my_agent_control_params=params, is_running=True, invalidate=lambda: None)
+    runtime = TuiRuntime("unknown-menu")
+    monkeypatch.setattr(tui_actions, "_ensure_control_operation_reconciler", lambda _params: reconciler)
+
+    # LLM: 只移除视觉弹窗，等待的仍是原保存任务实际完成的 Future，不代造菜单选择返回值。
+    # 函数用途: 在测试事件循环中等待原保存流程。
+    async def dialog(_app, _title, _body, _buttons, *, completion):
+        return await asyncio.shield(completion)
+
+    monkeypatch.setattr(tui_model_menu, "_dialog", dialog)
+
+    # LLM: 等待真实磁盘行消失再发新选择，不能将收到回调冒充原 outbox 已结束。
+    # 函数用途: 有界确认原收据已从对账队列移除。
+    async def wait_finished():
+        for _ in range(200):
+            if not reconciler._read_entries():
+                return
+            await asyncio.sleep(0.01)
+        pytest.fail("原 outbox 行未结束")
+
+    # LLM: 未知运输存续时新选择必须被挡；终态或原行结束后必须恢复，且新选择只能提交一次新身份。
+    # 函数用途: 操作同一 app 的连续两次保存并核对原身份与顺序。
+    async def scenario():
+        try:
+            first = await asyncio.wait_for(save_selection(app, None, "session", runtime, {"profile_id": "B"}), timeout=3)
+            assert first["control_state"] == unknown_state
+            if unknown_state == "transport_unknown":
+                assert calls[0].message_id in reconciler._read_entries()
+                blocked = await save_selection(app, None, "session", runtime, {"profile_id": "C"})
+                assert not blocked["ok"] and len(calls) == 1
+                release.set()
+            await wait_finished()
+            second = await asyncio.wait_for(save_selection(app, None, "session", runtime, {"profile_id": "C"}), timeout=3)
+            assert second["ok"] and second["selected"] == "C", second
+            await wait_finished()
+            assert len(calls) == 2 and calls[0].message_id != calls[1].message_id
+            assert calls[1].model_payload == {"profile_id": "C"}
+            assert all(operation_id == "original-operation" for operation_id in polls)
+        finally:
+            release.set()
+            reconciler.stop_event.set()
+            reconciler._wake.set()
+            reconciler._settings_wake.set()
+            if reconciler._worker:
+                reconciler._worker.join(2)
+            if reconciler._settings_worker:
+                reconciler._settings_worker.join(2)
+
+    asyncio.run(scenario())
+
+
+# LLM: 以有界线程事件固定异步读盘交错；只替代磁盘快照，两个已结束 Task 与 UI 身份变化真实发生。
+# 函数用途: 防止旧行读取返回时，漏看已经切换到的新未知保存身份。
+def test_model_menu_pending_read_rechecks_identity_after_async_io():
+    import asyncio
+
+    from agent_py_agent.cli.chat_parts.tui_model_selection_wait import _original_setting_pending
+
+    entered, release = threading.Event(), threading.Event()
+    reads = []
+
+    # LLM: 首个快照只包含已经结束的旧输入；恢复后的快照包含新的待对账行，不替代身份判断逻辑。
+    # 函数用途: 固定旧磁盘读取落后于当前保存任务的时机。
+    def read_entries():
+        reads.append(True)
+        if len(reads) == 1:
+            entered.set()
+            assert release.wait(2), "测试未释放旧 outbox 读取"
+            return {}
+        return {"new-pending": object()}
+
+    # LLM: 任务完成不代表收据已对账；旧读取被释放前将 app 切到另一个已 done 的未知任务。
+    # 函数用途: 断言异步观察必须重新核对新的原操作，而不是放行错误的新选择。
+    async def scenario():
+        previous = asyncio.create_task(asyncio.sleep(0))
+        current = asyncio.create_task(asyncio.sleep(0))
+        await asyncio.gather(previous, current)
+        app = SimpleNamespace(_my_agent_model_save_task=previous, _my_agent_model_save_pending_id="old-finished",
+            _my_agent_model_save_reconciler=SimpleNamespace(_read_entries=read_entries))
+        checking = asyncio.create_task(_original_setting_pending(app))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2), "未进入异步 outbox 读取"
+            app._my_agent_model_save_task = current
+            app._my_agent_model_save_pending_id = "new-pending"
+            release.set()
+            assert await asyncio.wait_for(checking, 2), "旧快照漏掉了新的未知待对账输入"
+            assert len(reads) == 2
+        finally:
+            release.set()
+            await asyncio.gather(checking, return_exceptions=True)
+
+    asyncio.run(scenario())

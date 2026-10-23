@@ -188,7 +188,39 @@ def test_i6_unsupported_model_cannot_silently_project_media(protocol):
         active_turn_user_inputs=[packet], task_attributes={},
         tool_protocol_snapshot=ToolProtocolSnapshot("run", protocol, capability), live_archive_state={})
     with pytest.raises(InputMediaError, match="图片"):
-        _native_provider_messages(SimpleNamespace(config=SimpleNamespace(model_input_modalities=["text"])), params)
+        _native_provider_messages(SimpleNamespace(config=SimpleNamespace(model_input_modalities=["text"]),
+            backend=SimpleNamespace(supports_native_tool_ir=protocol == "native")), params)
+
+
+# LLM: 空模态声明为未知而非拒绝；构造真实初始/插话 IR 后走原出站投影，不发请求或读取合成图片。
+# 函数用途: 默认原生协议允许初始图片与运行中插话图片，并保持各自媒体与输入身份。
+@pytest.mark.parametrize("interjected", [False, True], ids=["initial", "interjected"])
+@pytest.mark.parametrize("modalities", [[], ()], ids=["empty-list", "empty-tuple"])
+def test_i6_unknown_empty_modalities_allows_initial_and_interjected_images_on_native_protocol(interjected, modalities):
+    from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ProviderToolCapability,
+        ToolProtocolSnapshot,
+    )
+
+    packet = _media_packet()
+    params = SimpleNamespace(user_prompt="原任务图片", turn_trigger=None,
+        task_attributes={} if interjected else {"input_media": packet["input_media"]},
+        carried_active_turn_user_inputs=[packet] if interjected else [], live_archive_state={},
+        active_turn_user_inputs=[packet] if interjected else [],
+        tool_protocol_snapshot=ToolProtocolSnapshot("run", "native",
+            ProviderToolCapability("test", "local://test", "test", False, True, "test")))
+    params.tool_ir_history = _native_initial_tool_ir_history(params, carried_handoff="",
+        carried_user_inputs=[packet["text"]] if interjected else [])
+    agent = SimpleNamespace(config=SimpleNamespace(model_input_modalities=modalities),
+        backend=SimpleNamespace(supports_native_tool_ir=True))
+    messages = _native_provider_messages(agent, params)
+    assert messages is not None
+    images = [part for row in messages for part in row["content"] if isinstance(part, dict) and part.get("type") == "image"]
+    assert images == [{"type": "image", "source": {"type": "local_file", **packet["input_media"][0]}}]
+    assert params.tool_ir_history[-1].media == tuple(packet["input_media"])
+    if interjected:
+        assert params.tool_ir_history[-1].input_ids == tuple(packet["input_ids"])
 
 
 # LLM: I1/I3/I5/I6 经真实回环 HTTP、原 Store/claim/safe-point/ACK 和供应商转换器；不访问商业模型，不证明真机剪贴板。

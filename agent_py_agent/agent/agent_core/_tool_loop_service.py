@@ -304,13 +304,14 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 # LLM: Every text/native tool round passes the shared context window before provider preflight;
 # only a full-recovery request host that owns this Compact moment may defer the native fit, so the
 # same source is not summarized/CAS-committed twice before capture. Do not bypass it otherwise.
+#   注入返回 True 也可能只有 lookup 告警；须确认已无使响应失效的待处理输入，才重置原连续作废计数。
 # 函数用途: 组装本轮工具模型输入，并在真正调用模型前用统一 Compact 配置压住可见上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     # 子代理状态是当前运行事实，不属于可被 compact 摘要冻结的历史。每次 provider 安全点
     # 原位刷新一个稳定的小尾巴；状态没变时字节不变，保留前缀缓存命中。
     refresh_runtime_direct_children_snapshot(agent, params)
     if params.consume_pending_turn_input:
-        if inject_pending_turn_input(agent, params):
+        if inject_pending_turn_input(agent, params) and not _pending_turn_input_invalidates_response(agent, params):
             _reset_pending_turn_input_invalidations(params)
     window_tool_context_params(agent, params)
     prompt = _render_tool_loop_prompt(agent, params)

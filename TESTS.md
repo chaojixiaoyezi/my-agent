@@ -1,3 +1,11 @@
+## 2026-10-23 C7 B23 返工：未知模态图片、插话告警计数与模型菜单恢复
+
+- 来源：`c7-b23-remediation` 的 P1-1、P2-1/P2-2、P2-3；开发基线 `1630c606db908f663c1071ed4b8e8f3be404b009`。产品改动仅在原图片出站门禁、原提示构造安全点和原菜单保存等待，不改插件宿主或 HTTP 服务。
+- 图片门禁：原生后端/协议允许未知空模态；显式非空不含 image 或非原生仍拒绝。`test_i6_unknown_empty_modalities_allows_initial_and_interjected_images_on_native_protocol` 用空列表、空元组分别检查初始和插话图的完整原生投影；原不支持图片的负例保留。未改变观察截图的显式能力要求。
+- 插话上限：只有注入后已无待处理输入时重置原计数。双故障用例运行真实 Agent/循环/存储，持续 lookup 告警且 claim 拒绝；断言第九次调用停止、原 runtime_reason、待处理输入保留及旧公开正文不泄露。原成功消费的长会话测试保留，测试 EOF 多余空行一并移除。
+- 菜单恢复：terminal_unknown 释放菜单；transport_unknown 关联原 message_id 与原 outbox，原行仍在时阻挡，原行结束后放行；磁盘观察移出 UI 线程，返回后重新核对 Task/消息 ID/对账器身份，不重发旧操作。新增顺序恢复用例使用真实 outbox/worker/claim，仅替换运输与弹窗视图；独立评审追加的异步旧快照交错另以有界事件验证，原管道键盘/Esc 回归保留。不是部署、商业模型或 OS 剪贴板验收。
+- 复现：在工作树根运行 `python3 -B -m pytest -p no:cacheprovider agent_py_agent/tests/test_active_turn_media_interjection.py agent_py_agent/tests/test_pending_input_public_boundary.py agent_py_agent/tests/test_nonblocking_model_switch.py agent_py_agent/tests/test_cli_turn_completion_timing.py agent_py_agent/tests/test_input_media.py agent_py_agent/tests/test_runtime_guidance.py -q --tb=short`；随后 `ruff check agent_py_agent scripts`，提交后 `git diff --check a1fbb75bc8e79aba646b1a34f27f2e2d42cb7998..HEAD`。
+
 ## 2026-10-23 Plugin Host v2（A/B1/B2/C/D1/D2）：公共合同、v9 授权、本地普通用户隔离与 42 动作完整集成
 
 - 来源：`plugin-host-v2-worker-a-c6`、`B1/B2/C/D1/D2` 及 `plugin_host_api_expansion_design.md`。中央目录固定 42 动作，严格 JSON/身份注入拒绝，v9 文件清单显式版本，宿主授权绑定原安装/激活及原确认流程。

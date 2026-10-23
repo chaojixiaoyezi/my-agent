@@ -21,26 +21,30 @@ class ModelMenuDetached(Exception):
     pass
 
 
-# LLM: 原后台请求独立于对话框 Future；关闭等待不宣告失败或成功，完成后仍处理原回执。
+# LLM: 原后台请求独立于对话框 Future；未知终态释放 UI，未知运输仅在原任务或原 outbox 行存续时阻挡新选择。
 # 函数用途: 保存本会话选择，允许等待时按 Esc 回聊天。
 async def save_selection(app, agent, session_id, runtime, payload):
     from .tui_model_menu import _dialog, _publish_selection
 
-    if getattr(app, "_my_agent_model_save_pending", False):
+    if getattr(app, "_my_agent_model_save_pending", False) and await _original_setting_pending(app):
         return {"ok": False, "message": "上次选择尚待确认，请等待原回执。"}
     app._my_agent_model_save_pending = True
+    app._my_agent_model_save_pending_id = ""
     completion = asyncio.get_running_loop().create_future()
     task = asyncio.create_task(_submit_original_setting(app, payload))
     app._my_agent_model_save_task = task
 
-    # LLM: 唯一保存任务结算，已关闭的 Future 不重开浮层；发布仅接受实际成功回执中的版本。
+    # LLM: 唯一保存任务结算；终态未知不等于运输仍进行，不让旧回调改写较新保存任务的锁定状态。
     # 函数用途: 在保存结束后更新显示并给退出等待的用户确认。
     def settled(finished):
         try:
             result = finished.result()
         except (Exception, asyncio.CancelledError):
             result = {"ok": False, "control_state": "transport_unknown", "message": "选择结果未知，请重新打开列表确认。"}
-        app._my_agent_model_save_pending = result.get("control_state") in {"transport_unknown", "terminal_unknown"}
+        if getattr(app, "_my_agent_model_save_task", None) is finished:
+            app._my_agent_model_save_pending = result.get("control_state") == "transport_unknown"
+            if not app._my_agent_model_save_pending:
+                app._my_agent_model_save_pending_id = ""
         if not completion.done():
             completion.set_result(result)
         elif app.is_running:
@@ -70,6 +74,8 @@ async def _submit_original_setting(app, payload):
     params = app._my_agent_control_params
     reconciler = await asyncio.to_thread(_ensure_control_operation_reconciler, params)
     entry = TuiControlOperationEntry(new_id("control"), f"/model {payload['profile_id']}", "model", model_payload=dict(payload))
+    app._my_agent_model_save_pending_id = entry.message_id
+    app._my_agent_model_save_reconciler = reconciler
     future = reconciler._setting_enqueuer.results.watch(entry.message_id)
     try:
         reconciler.enqueue_setting(entry)
@@ -77,3 +83,26 @@ async def _submit_original_setting(app, payload):
         reconciler._setting_enqueuer.results.abandon(entry.message_id)
         return {"ok": False, "control_state": "not_submitted", "message": "控制操作无法保存，选择未发送；请稍后再试。"}
     return await asyncio.wrap_future(future)
+
+
+# LLM: 只读原任务和同一 outbox；读盘后复核任务/ID/对账器，身份已变则重新观察，不能用旧快照放行新未知请求。
+#   磁盘读取移出事件循环，读取失败保守等待，不重发或重建旧操作身份。
+# 函数用途: 放行已经结束的未知选择，同时保留仍在确认的原模型选择。
+async def _original_setting_pending(app):
+    while True:
+        task = getattr(app, "_my_agent_model_save_task", None)
+        if task is not None and not task.done():
+            return True
+        message_id = getattr(app, "_my_agent_model_save_pending_id", "")
+        reconciler = getattr(app, "_my_agent_model_save_reconciler", None)
+        if not message_id or reconciler is None:
+            return False
+        try:
+            entries = await asyncio.to_thread(reconciler._read_entries)
+        except Exception:
+            return True
+        if (task is not getattr(app, "_my_agent_model_save_task", None)
+                or message_id != getattr(app, "_my_agent_model_save_pending_id", "")
+                or reconciler is not getattr(app, "_my_agent_model_save_reconciler", None)):
+            continue
+        return message_id in entries
