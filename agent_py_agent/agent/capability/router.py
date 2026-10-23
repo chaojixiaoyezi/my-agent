@@ -93,6 +93,11 @@ _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS = """### 能力包使用规则
 - 派工：需要子代理使用包时，在创建参数 `allowed_skills` 中明确传 `capability:<package_id>`；宿主从父级快照固定并继承版本引用，不自行编造 skill_snapshot_refs。孩子须在自身授权范围读取入口和所需资源，不能仅靠任务文字获得包权限。
 - 边界：目录匹配和正文读取不增加工具、路径或网络权限。不可读时如实说明并继续可做部分；原任务失效包不能自动换用同名新版，也不能把缺失的核验说成通过。"""
 
+_SKILL_METADATA_HEADER = ["# Available Skills", "下列是本轮可用 Skill 的 name + description + stable skill_id。普通问答没有匹配项时无需调用。"]
+_SELECTED_SKILL_HEADER = ["# Selected Skills", "以下仅是本工作片展示的 Skill 名卡；使用前仍须 skill_search(action=get) 读取正文。"]
+_PACKAGE_METADATA_HEADER = ["# 能力包", "下列只展示包摘要；用 skill_search(action=get, package_id=包ID) 读取入口，再在该包内选择资源。"]
+_IN_USE_PACKAGE_GUIDANCE = "接着做同类的事，继续照在用包的方法和你走到的那一步；不相关的事照常处理。"
+
 
 @dataclass
 class CapabilityCard:
@@ -270,24 +275,42 @@ class CapabilityRouter:
             ),
         )
         budget = _skill_metadata_budget(context_window_tokens)
+        total_budget = budget
         unavailable_text = _render_unavailable_package_references(self._snapshot())
-        budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable_text)), budget.token_based)
+        budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable_text + "\n\n" if unavailable_text else "")), budget.token_based)
         packages = sorted(self.cards(kinds={"capability_package"}), key=lambda card: card.name)
         if selected_skill_ids is None:
             skills = [card for card in skills if card.metadata.get("recommended",True) or card.metadata.get("stable_id") in {*required_skill_ids,*in_use_method_ids}]
         skills = using_method_cards(skills, in_use_method_ids)
         packages = using_method_cards(packages, in_use_method_ids)
         required_skill_ids = (*required_skill_ids, *in_use_method_ids)
-        package_budget = _SkillMetadataBudget(max(1, budget.limit // 2) if skills else budget.limit, budget.token_based)
+        minimum_text = _minimum_metadata_index(skills, packages, total_budget, selected_skill_ids, required_skill_ids, unavailable_text)
+        package_limit = max(1, budget.limit // 2) if skills else budget.limit
+        if skills and packages:
+            skill_fixed = [*_SELECTED_SKILL_HEADER] if selected_skill_ids is not None else [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS]
+            package_fixed = [*_PACKAGE_METADATA_HEADER, _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS]
+            if any(card.metadata.get("conversation_in_use") for card in packages):
+                package_fixed.append(_IN_USE_PACKAGE_GUIDANCE)
+            skill_floor = _metadata_floor(skills, budget, skill_fixed, required_skill_ids)
+            package_floor = _metadata_floor(packages, budget, package_fixed, required_skill_ids)
+            separator_cost = budget.cost("\n\n")
+            # 两个完整外壳放得下时才重分配；极小合成预算仍沿原有兜底，不挤掉必要身份。
+            if skill_floor + package_floor + separator_cost <= budget.limit:
+                package_limit = min(max(package_limit, package_floor), budget.limit - skill_floor - separator_cost)
+        package_budget = _SkillMetadataBudget(package_limit, budget.token_based)
         package_text, package_cost = _render_package_metadata(packages, package_budget, selected_skill_ids, required_skill_ids)
         package_text = "\n\n".join(text for text in (unavailable_text, package_text) if text)
-        if not skills:
-            return package_text
-        budget = _SkillMetadataBudget(max(0, budget.limit - package_cost), budget.token_based)
-        if selected_skill_ids is not None:
+        budget = _SkillMetadataBudget(max(0, budget.limit - package_cost - (budget.cost("\n\n") if package_cost else 0)), budget.token_based)
+        skill_text = ""
+        if skills and selected_skill_ids is not None:
             skill_text = _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids)
-            return "\n\n".join(text for text in (package_text, skill_text) if text)
-        return "\n\n".join(text for text in (package_text, _render_public_skill_metadata(skills, budget)) if text)
+        elif skills:
+            skill_text = _render_public_skill_metadata(skills, budget, required_skill_ids)
+        text = "\n\n".join(part for part in (package_text, skill_text) if part)
+        # 完整拼接是最后观察点：分区token向上取整的几字节边界也不能把真实预算误判成合成兜底。
+        if total_budget.cost(minimum_text) <= total_budget.limit < total_budget.cost(text):
+            return minimum_text
+        return text
 
     def search(
         self,
@@ -494,10 +517,14 @@ def _declared_term_in(term: str, lowered_query: str) -> bool:
     return term in lowered_query
 
 
+# LLM: 泛中文请求词不参与软匹配；显式名称仍按原名称权重召回，不把停用词当权限或选择。
+# 函数用途: 给有效查询打可解释分数，避免问候在说明和关键词中制造伪命中。
 def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
     """用可解释的关键词规则给能力卡打分。"""
 
     tokens = tokenize(query)
+    if card.name.lower() in _ZH_REQUEST_STOPWORDS and _declared_term_in(card.name.lower(), query.lower()):
+        tokens = dedupe_strings([card.name.lower(), *tokens])
     if not tokens:
         return 0.0, []
     haystacks = {
@@ -545,28 +572,31 @@ class _SkillMetadataBudget:
         return len(text)
 
 
-# LLM: 保持未选择、无在用项时的原提示字节；有在用 skill 时仍用普通目录格式（标题和使用规则不变，3a 集成复核 10-08 改回），
-#   不切到 Selected Skills 选择模式；预算与省略说明只从原渲染结果取得，不读取线程或新增身份。联测 conversation_method_directory。
+# LLM: 完整外壳计入原字符/token预算；放不下外壳和最低引用的合成小预算沿旧兜底，必要身份永不截断。
+#   目录放得下时仍保持原字节；在用项保留普通目录格式，不读取线程或新增身份。
 # 函数用途: 装配普通 Skill 目录、预算说明与使用规则，供公开能力索引复用。
-def _render_public_skill_metadata(skills: list, budget: _SkillMetadataBudget) -> str:
-    rendered, omitted, descriptions_shortened = _render_public_skill_lines(skills, budget)
-    lines = ["# Available Skills", "下列是本轮可用 Skill 的 name + description + stable skill_id。普通问答没有匹配项时无需调用。", *rendered]
+def _render_public_skill_metadata(skills: list, budget: _SkillMetadataBudget, required: tuple[str, ...] = ()) -> str:
+    omitted_notice = f"- 2% Skill metadata 预算不足，另有 {len(skills)} 个 Skill 未显示；仍可用 skill_search(action=search) 按需求检索。"
+    short_notice = "- 部分 description 已为适配 2% Skill metadata 预算而缩短；stable id 与 Skill 正文未改变。"
+    fixed = [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS]
+    line_budget, bounded = _metadata_line_budget(skills, budget, fixed, [omitted_notice, short_notice], required)
+    rendered, omitted, descriptions_shortened = _render_public_skill_lines(skills, line_budget, required)
+    notice = ""
     if omitted:
-        lines.append(f"- 2% Skill metadata 预算不足，另有 {omitted} 个 Skill 未显示；仍可用 skill_search(action=search) 按需求检索。")
+        notice = f"- 2% Skill metadata 预算不足，另有 {omitted} 个 Skill 未显示；仍可用 skill_search(action=search) 按需求检索。"
     elif descriptions_shortened:
-        lines.append("- 部分 description 已为适配 2% Skill metadata 预算而缩短；stable id 与 Skill 正文未改变。")
-    lines.append(_SKILL_USAGE_INSTRUCTIONS)
-    return "\n".join(lines)
+        notice = short_notice
+    return _metadata_text(skills, budget, _SKILL_METADATA_HEADER, rendered, [_SKILL_USAGE_INSTRUCTIONS], notice, bounded, required)
 
 
 # LLM: 在用卡已由 using_method_cards 排在最前；先按"至少放得下名字和编号"的下限渲染在用卡，再用剩余预算渲染其余卡，
 #   没有在用卡时等同原来一次渲染全部（字节不变）。省略数只计其余卡，在用卡不会被省略。
 # 函数用途: 普通目录下保证本会话在用的 skill 一定显示，其余照原裁剪规则。
-def _render_public_skill_lines(skills: list, budget: _SkillMetadataBudget) -> tuple[list[str], int, bool]:
-    in_use = [card for card in skills if card.metadata.get("conversation_in_use")]
+def _render_public_skill_lines(skills: list, budget: _SkillMetadataBudget, required: tuple[str, ...] = ()) -> tuple[list[str], int, bool]:
+    in_use = [card for card in skills if card.metadata.get("conversation_in_use") or card.metadata.get("stable_id") in required]
     if not in_use:
         return _render_skill_metadata_lines(skills, budget)
-    others = [card for card in skills if not card.metadata.get("conversation_in_use")]
+    others = [card for card in skills if card not in in_use]
     minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in in_use)
     first, _, first_short = _render_skill_metadata_lines(in_use, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based))
     used = sum(_line_cost(budget, line) for line in first)
@@ -581,6 +611,9 @@ def _render_selected_skill_metadata(skills, budget, selected_skill_ids, required
     required = set(required_skill_ids)
     mandatory = [card for card in skills if card.metadata.get("stable_id") in required]
     optional = [card for card in skills if card.metadata.get("stable_id") in selected - required]
+    notice = f"- 另有 {len(skills)} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。"
+    original_budget = budget
+    budget, bounded = _metadata_line_budget([*mandatory, *optional], budget, _SELECTED_SKILL_HEADER, [notice], required_skill_ids)
     minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in mandatory)
     required_lines, _, _ = _render_skill_metadata_lines(
         mandatory, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based),
@@ -591,10 +624,10 @@ def _render_selected_skill_metadata(skills, budget, selected_skill_ids, required
     if not shown:
         return ""
     omitted = len(skills) - len(shown)
-    lines = ["# Selected Skills", "以下仅是本工作片展示的 Skill 名卡；使用前仍须 skill_search(action=get) 读取正文。", *shown]
+    notice = ""
     if omitted:
-        lines.append(f"- 另有 {omitted} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。")
-    return "\n".join(lines)
+        notice = f"- 另有 {omitted} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。"
+    return _metadata_text([*mandatory, *optional], original_budget, _SELECTED_SKILL_HEADER, shown, [], notice, bounded, required_skill_ids)
 
 
 def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataBudget:
@@ -638,19 +671,23 @@ def _render_package_metadata(packages, budget, selected, required) -> tuple[str,
     mandatory = [card for card in packages if card.metadata["stable_id"] in required_ids]
     optional = [card for card in packages if card not in mandatory
                 and (selected is None or card.metadata["stable_id"] in selected)]
+    original_budget = budget
+    tail = [_CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS]
+    if any(card.metadata.get("conversation_in_use") for card in packages):
+        tail.append(_IN_USE_PACKAGE_GUIDANCE)
+    notice = f"- 另有 {len(packages)} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。"
+    budget, bounded = _metadata_line_budget([*mandatory, *optional], budget, [*_PACKAGE_METADATA_HEADER, *tail], [notice], required)
     minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in mandatory)
     first, _, _ = _render_skill_metadata_lines(mandatory, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based))
     used = sum(_line_cost(budget, line) for line in first)
     remaining, _, _ = _render_skill_metadata_lines(optional, _SkillMetadataBudget(max(0, budget.limit - used), budget.token_based))
     shown = [*first, *remaining]
     omitted = len(packages) - len(shown)
-    lines = ["# 能力包", "下列只展示包摘要；用 skill_search(action=get, package_id=包ID) 读取入口，再在该包内选择资源。", *shown]
+    notice = ""
     if omitted:
-        lines.append(f"- 另有 {omitted} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。")
-    lines.append(_CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS)
-    if any(card.metadata.get("conversation_in_use") for card in packages):
-        lines.append("接着做同类的事，继续照在用包的方法和你走到的那一步；不相关的事照常处理。")
-    return "\n".join(lines), sum(_line_cost(budget, line) for line in shown)
+        notice = f"- 另有 {omitted} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。"
+    text = _metadata_text([*mandatory, *optional], original_budget, _PACKAGE_METADATA_HEADER, shown, tail, notice, bounded, required)
+    return text, original_budget.cost(text)
 
 
 # LLM: 仅渲染主任务已规范的两种包 pin 诊断；不读取错误原文、宿主路径或正文，最多八条并限制总字符。
@@ -686,6 +723,65 @@ def _bounded_skill_description(card: CapabilityCard) -> str:
 
 def _line_cost(budget: _SkillMetadataBudget, line: str) -> int:
     return budget.cost(line + "\n")
+
+
+# LLM: 必要身份保持原次序；没有必要项时取最短可选身份，不能因头部开销省略最后一张可放下的卡。
+# 函数用途: 得到公开/选中/包目录共用的完整最小行集合，不截断任何读取选择器。
+def _minimum_metadata_lines(cards, budget, required=()) -> list[str]:
+    mandatory = [card for card in cards if card.metadata.get("conversation_in_use") or card.metadata.get("stable_id") in required]
+    if mandatory:
+        return [_skill_line(card, "") for card in mandatory]
+    lines = [_skill_line(card, "") for card in cards]
+    return [min(lines, key=budget.cost)] if lines else []
+
+
+# LLM: 门槛测量完整字符串而非分项向上取整，避免把恰好够外壳加引用的真实预算误判成合成兜底。
+# 函数用途: 计算完整目录底线，供混合目录分配与小预算兼容判定共用。
+def _metadata_floor(cards, budget, fixed, required=()) -> int:
+    return budget.cost("\n".join([*fixed, *_minimum_metadata_lines(cards, budget, required)]))
+
+
+# LLM: 最小整目录仍基于当前授权卡交集；包含两个外壳、不可用引用与实际分隔，不从候选扩大选择。
+# 函数用途: 为混合目录提供真实全局底线，兜住恰好可容纳时的分区舍入误差。
+def _minimum_metadata_index(skills, packages, budget, selected, required, unavailable) -> str:
+    skill_cards = [card for card in skills if selected is None or card.metadata.get("stable_id") in (*selected, *required)]
+    package_cards = [card for card in packages if selected is None or card.metadata.get("stable_id") in (*selected, *required)]
+    sections = [unavailable] if unavailable else []
+    if packages:
+        tail = [_CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS]
+        if any(card.metadata.get("conversation_in_use") for card in packages):
+            tail.append(_IN_USE_PACKAGE_GUIDANCE)
+        sections.append("\n".join([*_PACKAGE_METADATA_HEADER, *_minimum_metadata_lines(package_cards, budget, required), *tail]))
+    if skill_cards:
+        header = _SKILL_METADATA_HEADER if selected is None else _SELECTED_SKILL_HEADER
+        tail = [_SKILL_USAGE_INSTRUCTIONS] if selected is None else []
+        sections.append("\n".join([*header, *_minimum_metadata_lines(skill_cards, budget, required), *tail]))
+    return "\n\n".join(sections)
+
+
+# LLM: 最终按完整装配测量；紧贴底线时只退到完整必要引用，不拆字符串身份，不让分项token舍入越界。
+# 函数用途: 装配目录与可选提示并复核同一预算，极小合成预算保留旧提示和必要身份兜底。
+def _metadata_text(cards, budget, header, shown, tail, notice, bounded, required=()) -> str:
+    lines = [*header, *shown]
+    if notice and (not bounded or budget.cost("\n".join([*lines, notice, *tail])) <= budget.limit):
+        lines.append(notice)
+    text = "\n".join([*lines, *tail])
+    if bounded and budget.cost(text) > budget.limit:
+        text = "\n".join([*header, *_minimum_metadata_lines(cards, budget, required), *tail])
+    return text
+
+
+# LLM: 外壳可容纳时只把扣除头部、规则及最长提示后的余量交给行渲染；极小合成预算保留旧兜底。
+#   紧贴底线时优先完整身份，无法容纳的可选提示由装配方省略，不截断身份或使用规则。
+# 函数用途: 返回真实行预算和是否启用完整外壳约束，不更改宿主选择或读取权限。
+def _metadata_line_budget(cards, budget, fixed, notices, required=()) -> tuple[_SkillMetadataBudget, bool]:
+    floor = _metadata_floor(cards, budget, fixed, required)
+    if budget.limit < floor:
+        return budget, False
+    overhead = sum(_line_cost(budget, line) for line in fixed)
+    minimum = sum(_line_cost(budget, line) for line in _minimum_metadata_lines(cards, budget, required))
+    notice_cost = max((_line_cost(budget, line) for line in notices), default=0)
+    return _SkillMetadataBudget(max(minimum, budget.limit - overhead - notice_cost), budget.token_based), True
 
 
 # LLM: 预算算法只裁剪说明；默认公开名卡格式保持，包候选复用完整 locator/next_read 渲染，放不下时省略整卡。
@@ -807,6 +903,12 @@ _EN_STOPWORDS = frozenset(
 )
 
 
+# 中文请求/寒暄二元词没有任务信息；名称精确命中在score_card单独保留，避免吞掉同名方法。
+_ZH_REQUEST_STOPWORDS = frozenset({"你好", "只回", "回复", "收到", "请问", "帮我", "一下", "可以", "什么", "怎么"})
+
+
+# LLM: 仅移除无领域信息的中文二元词；其它Unicode脚本和中文2-4gram仍走原粗检索路径。
+# 函数用途: 为能力软检索提供降噪token，不影响精确名称或正文读取选择器。
 def tokenize(text: str) -> list[str]:
     """把查询切成适合粗检索的 token。"""
 
@@ -820,7 +922,7 @@ def tokenize(text: str) -> list[str]:
         expanded.append(token)
         if re.fullmatch(r"[\u4e00-\u9fff]+", token):
             expanded.extend(_chinese_ngrams(token))
-    return dedupe_strings(expanded)
+    return dedupe_strings([token for token in expanded if token not in _ZH_REQUEST_STOPWORDS])
 
 
 def _chinese_ngrams(token: str) -> list[str]:

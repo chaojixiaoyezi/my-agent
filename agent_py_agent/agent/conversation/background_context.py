@@ -14,6 +14,7 @@ from ..contracts.subagent_completion import (
     DEFAULT_VISIBLE_SUBAGENT_COMPLETION_COUNT,
     subagent_completion_context_from_observations,
 )
+from ..memory_archive.tokens import estimate_tokens
 from ..runtime_errors import runtime_error_report
 from ..subagents.role_templates import active_model_subagent_tools
 from .background_tool_policy import (
@@ -182,13 +183,21 @@ def background_rendered_payload_keys(*, include_recent_messages: bool, narrow_au
     return frozenset(key for _title, key, _empty in _BACKGROUND_SECTIONS if include_recent_messages or key != "messages")
 
 
-# LLM: 只消费冻结材料并调用原预算器；不得读取agent/store/时间，不以展示标题裁决身份或范围。
-# 预算只估算将渲染的键（background_rendered_payload_keys），不渲染的节不再挤占总预算。
-# 函数用途: 纯渲染完整后台上下文，重复候选使用同一输入时输出一致。
+# LLM: 冻结材料经同一纯渲染器计量，包含标题、JSON格式、控制策略/动作及投影说明；不重读store或刷新权限。
+# 函数用途: 把完整后台段而非仅payload压入预算，必要事实超限时保留并明确标记。
 def render_background_context(prepared: PreparedBackgroundContext) -> str:
     keys = background_rendered_payload_keys(
         include_recent_messages=prepared.include_recent_messages, narrow_audit_event=prepared.narrow_audit_event)
-    bounded = bounded_background_context_payload(prepared.payload, rendered_keys=keys)
+    bounded = bounded_background_context_payload(
+        prepared.payload, rendered_keys=keys,
+        render_tokens=lambda payload: estimate_tokens(_render_background_projection(prepared, payload, keys)),
+    )
+    return _render_background_projection(prepared, bounded, keys)
+
+
+# LLM: 预算候选与最终发送共用此格式化入口；只读prepared及已裁副本，不触发对账、计时、加载或外发。
+# 函数用途: 用完全相同的标题和控制说明渲染候选及最终后台段，防止估算面与发送面分叉。
+def _render_background_projection(prepared: PreparedBackgroundContext, bounded: dict, keys: frozenset[str]) -> str:
     if prepared.narrow_audit_event:
         # 审计发现或容量事件只投影当前权威事实与精确审计目标，防止无关历史干扰。
         # 完整持久账仍可通过原工具读取，这里不修改它。

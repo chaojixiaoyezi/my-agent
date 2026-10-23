@@ -23,13 +23,37 @@ CONVERSATION_METHOD_LIMIT_COUNT = 5
 PACKAGE_METHOD_RESOURCE_LIMIT_COUNT = 8
 
 
-# LLM: 持久化读写都走此解析器；仅接受宿主方法身份，剔除未知键和坏记录，不从摘要补造身份。
-# 函数用途: 读取隐藏账本的结构化条目，旧线程缺字段时为空，最多保留最近五个方法。
-def methods_from(value: object) -> tuple[dict, ...]:
+# LLM: 扫描完整性与五项LRU保留策略分开；原tuple接口只投影methods，不因新增诊断改变生产扫描范围。
+# 类用途: 返回有界结构化账本扫描的结果及实际覆盖数量，避免把窗口内结果当成全量。
+@dataclass(frozen=True)
+class MethodScanResult:
+    methods: tuple[dict, ...]
+    inspected_records: int
+    total_records: int
+    complete: bool
+    truncated: bool
+
+
+# LLM: 当前版本的权威输入是会话隐藏账本，并非工具正文历史；只检查末尾窗口，坏行仍计入扫描覆盖。
+#   不设置默认新上限，以免改变原methods_from的去重/LRU语义；调用方显式封顶时必须保留此结果的标志。
+# 函数用途: 扫描方法记录并暴露窗口是否完整；scan_limit=0表示本次不扫描，None保持原全量行为。
+def scan_methods(value: object, *, scan_limit: int | None = None) -> MethodScanResult:
     rows = value if isinstance(value, (tuple, list)) else ()
-    valid = (_method_from(row) for row in rows if isinstance(row, dict))
+    if scan_limit is not None and scan_limit < 0:
+        raise ValueError("scan_limit must be non-negative or None")
+    count = len(rows) if scan_limit is None else min(len(rows), scan_limit)
+    window = rows[len(rows) - count:] if count else ()
+    valid = (_method_from(row) for row in window if isinstance(row, dict))
     unique = {row["stable_id"]: row for row in valid if row is not None}
-    return tuple(sorted(unique.values(), key=lambda row: row["last_used_at"])[-CONVERSATION_METHOD_LIMIT_COUNT:])
+    methods = tuple(sorted(unique.values(), key=lambda row: row["last_used_at"])[-CONVERSATION_METHOD_LIMIT_COUNT:])
+    truncated = count < len(rows)
+    return MethodScanResult(methods, count, len(rows), not truncated, truncated)
+
+
+# LLM: 持久化读写复用结构化扫描器但维持旧tuple接口；仅接受宿主身份，不从摘要补造方法或改变LRU。
+# 函数用途: 按原全量扫描读取隐藏账本，旧线程缺字段时为空，最多保留最近五个方法。
+def methods_from(value: object) -> tuple[dict, ...]:
+    return scan_methods(value).methods
 
 
 # LLM: 解析只保留身份、版本、代次与时间等宿主字段；坏值丢弃，不把正文或权限带入隐藏字段。
@@ -459,21 +483,45 @@ def _prepare_skill_method(request: _MethodCarryRequest, row: dict, remaining: in
         return ""
     request.authority.check()
     prefix = f"Skill 参考（skill_id: {entry.stable_id}）\n"
-    return _fit_skill_prefix(prefix, body, remaining)
+    # 截断状态属于宿主包装，不混入Skill正文；两种布尔长度不同，切换状态后重新按同一余量裁剪。
+    status = {"complete": True, "truncated": False, "next_read": {"action": "get", "skill_id": entry.stable_id}}
+    result = fit_skill_prefix_result(prefix + json.dumps(status, ensure_ascii=False, separators=(",", ":")) + "\n", body, remaining)
+    if result.truncated:
+        status.update(complete=False, truncated=True)
+        result = fit_skill_prefix_result(prefix + json.dumps(status, ensure_ascii=False, separators=(",", ":")) + "\n", body, remaining)
+    return result.text
+
+
+# LLM: 此值仅描述实际正文前缀，不把有身份或重读参数误当完整正文；旧字符串接口继续投影text。
+# 类用途: 暴露正文是否完整及准确字符覆盖，空输入和零余量也有明确边界。
+@dataclass(frozen=True)
+class SkillPrefixResult:
+    text: str
+    included_chars: int
+    total_chars: int
+    complete: bool
+    truncated: bool
+
+
+# LLM: 估算包含调用方完整包装；二分只截Unicode正文，不能截身份、状态或next_read参数。
+# 函数用途: 在剩余预算内生成正文前缀及结构化complete/truncated，不更改原估算口径。
+def fit_skill_prefix_result(prefix: str, body: str, allowance: int) -> SkillPrefixResult:
+    low, high, result, included = 1, len(body), "", 0
+    while low <= high:
+        size = (low + high) // 2
+        text = prefix + body[:size]
+        if estimate_tokens(text) <= allowance:
+            result, included, low = text, size, size + 1
+        else:
+            high = size - 1
+    complete = included == len(body)
+    return SkillPrefixResult(result, included, len(body), complete, not complete)
 
 
 # LLM: estimate_tokens 的同源估算包含头和正文；二分截取 Unicode 字符，不截身份或结构化参数。
 # 函数用途: 在剩余预算里取 skill 的非空正文开头。
 def _fit_skill_prefix(prefix: str, body: str, allowance: int) -> str:
-    low, high, result = 1, len(body), ""
-    while low <= high:
-        size = (low + high) // 2
-        text = prefix + body[:size]
-        if estimate_tokens(text) <= allowance:
-            result, low = text, size + 1
-        else:
-            high = size - 1
-    return result
+    return fit_skill_prefix_result(prefix, body, allowance).text
 
 
 # LLM: 文本只来自宿主准备的片段；排序已在读取前确定，不显示时间或解析正文决定状态。

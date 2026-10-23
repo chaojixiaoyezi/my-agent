@@ -1,12 +1,13 @@
 # LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；包候选只消费 scoped 元数据与原能力配置，展示纯值经推荐接缝/回调传递，
 # 不能写入结果、Agent共享属性或扩大原快照权限；IM媒体恢复只取原输入快照或canonical子档；禁止反向依赖Gateway。
-#   后台完整目录只补初始展示加载名，不改变 allowed_tools；前台仍沿原恢复、合同及线程并集。
-# 模块用途: 为主链准备记忆、工具和续跑输入（含后台首轮必需工具），恢复同源核验与清理事实，直接驱动唯一循环。
+#   后台按唤醒事实预加载展示名，不改变 allowed_tools；前台仍沿原恢复、合同及线程并集。
+# 模块用途: 为主链准备完整信封计费的记忆、定向工具及续跑输入，恢复同源核验与清理事实，驱动唯一循环。
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from copy import deepcopy
 from dataclasses import dataclass, fields, replace
 from types import SimpleNamespace
@@ -20,7 +21,6 @@ from ...conversation.active_turn_input import (
 from ...conversation.authority import (
     CONVERSATION_BACKGROUND_EVENT_REASON_ATTR,
 )
-from ...conversation.background_tool_policy import BACKGROUND_CONTINUATION_REQUIRED_TOOLS
 from ...conversation.tool_discovery import thread_loaded_tools
 from ...memory_archive import build_auto_resume_context
 from ...memory_archive.compact_tool_output_refs import CARRIED_RUNTIME_ONLY_FIELD
@@ -40,6 +40,7 @@ from ...memory_store import (
     runtime_long_term_scope,
 )
 from ...path_access_policy import effective_owner_scope_root
+from ...prompting_parts.memory_context import memory_context_text
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import context_window_or_default
@@ -520,7 +521,7 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
 
 
 # LLM: 原授权与预算先固定记忆集合；隔离/总闸关闭不读正式库；召回前后两点共用一次原阶段期限。
-#   召回前补充真正追加的记录编号写到 routed_context.supplement_entry_ids，只供上下文包观察。
+#   补充余量与最后选择复用完整记忆信封计量；真正追加的编号只供上下文包观察，不扩大召回范围。
 # 函数用途: 合并 HOT、已路由 lesson 和长期记忆；可选排序与补充只在原权限/预算内生效。
 def _formal_memories_for_request(
     agent,
@@ -571,7 +572,7 @@ def _formal_memories_for_request(
     queries = supplemental_query_candidates(getattr(request, "user_prompt", ""))
     top_k = max(1, int(getattr(agent.config, "memory_top_k", 1) or 1))
     slots = max(0, top_k - len(long_term_memories))
-    remaining = _FORMAL_MEMORY_BUDGET_CHARS - sum(len(str(getattr(row, "content", "") or "")) for row in memories)
+    remaining = _FORMAL_MEMORY_BUDGET_CHARS - len(memory_context_text(memories))
     post_eligible = sum(str(getattr(row, "kind", "") or "") not in {"hot", "lesson"} for row in memories) >= 2
     pre_eligible = bool(queries and slots and remaining > 0)
     operation = _operation_id(request)
@@ -586,7 +587,7 @@ def _formal_memories_for_request(
     if finding:
         routed_context.findings.append(finding)
     if pre_eligible and stage is not None:
-        remaining = _FORMAL_MEMORY_BUDGET_CHARS - sum(len(str(getattr(row, "content", "") or "")) for row in memories)
+        remaining = _FORMAL_MEMORY_BUDGET_CHARS - len(memory_context_text(memories))
         before = {getattr(row, "entry_id", "") for row in memories}
         memories, finding = supplement_recalled_memories(
             agent, request, memories, recall_scope=recall_scope, stage=stage, queries=queries,
@@ -598,7 +599,7 @@ def _formal_memories_for_request(
         if isinstance(getattr(routed_context, "supplement_entry_ids", None), list):
             routed_context.supplement_entry_ids = [str(getattr(row, "entry_id", "")) for row in memories
                                                    if getattr(row, "entry_id", "") not in before]
-    return memories
+    return _budgeted_formal_memories(memories)
 
 
 # LLM: 采用旧建议前重读原正式仓库，只投影原选中 ID 并复用原范围/预算；删除、到期或撤销不能被旧排序复活。
@@ -615,7 +616,7 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
     return _budgeted_formal_memories(_dedupe_formal_memories(selected))
 
 
-# 记忆注入总预算池(字符≈token,中文 1:1)。上下文有界第一原则:宁可丢不撑爆。
+# 记忆注入总预算池按最终信封字符计量，包含JSON转义、元数据、时效说明和公共非权威边界。
 # 各来源已自带上限(HOT 5000 硬顶/long_term top_k 检索/lessons 路由命中),这里是最后保险丝:
 # 优先级让位——HOT 全保(最后砍),lessons 次之,long_term 先砍;组内超预算截断尾部。
 _FORMAL_MEMORY_BUDGET_CHARS = 10000
@@ -623,8 +624,8 @@ _FORMAL_MEMORY_BUDGET_CHARS = 10000
 _WORKING_AGREEMENT_SUB_BUDGET_CHARS = 4000
 
 
-# LLM: 最终注入从总预算内给工作约定分配子预算；保持HOT优先级，检查首条超限与现有召回测试。
-# 函数用途: 在主上下文注入前限制正式记忆与工作约定的正文总量。
+# LLM: 复用唯一安全渲染器度量完整信封；HOT沿原合同全保，其余只整条选择，不裁身份或正文。
+# 函数用途: 在主上下文注入前限制正式记忆及工作约定的真实格式开销，不把正文预算误报为发送上限。
 def _budgeted_formal_memories(records: list) -> list:
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
     lessons = [record for record in records if str(getattr(record, "kind", "") or "") == "lesson"]
@@ -639,24 +640,21 @@ def _budgeted_formal_memories(records: list) -> list:
         if str(getattr(record, "kind", "") or "") not in {"hot", "lesson", "working_agreement"}
     ]
     kept = list(hot)
-    total = sum(len(str(getattr(record, "content", "") or "")) for record in kept)
     for group in (lessons, agreements, rest):
         group_cap = (
             _WORKING_AGREEMENT_SUB_BUDGET_CHARS
             if group is agreements
             else _FORMAL_MEMORY_BUDGET_CHARS
         )
-        group_total = 0
+        group_kept = []
         for record in group:
-            cost = len(str(getattr(record, "content", "") or ""))
             if (
-                total + cost > _FORMAL_MEMORY_BUDGET_CHARS
-                or group_total + cost > group_cap
+                len(memory_context_text([*kept, record])) > _FORMAL_MEMORY_BUDGET_CHARS
+                or len(memory_context_text([*group_kept, record])) > group_cap
             ):
                 break
             kept.append(record)
-            total += cost
-            group_total += cost
+            group_kept.append(record)
     return kept
 
 
@@ -1437,8 +1435,8 @@ def _tool_loop_execute_params(agent, seed: RuntimeToolLoopSeed) -> ToolLoopExecu
     )
 
 
-# LLM: 纯展示并集沿原恢复/未完成动作/线程事实；仅后台主代理完整目录补续跑必需名，不更改权限或持久化状态。
-# 函数用途: 为工具循环计算首轮已加载工具，让定时唤醒直见必需工具，前台及显式名单保持原行为。
+# LLM: 原恢复/合同/线程加载事实不清空；新增预载只取本轮快照及allowed交集，绝不改执行许可或持久化。
+# 函数用途: 按后台唤醒或能力创作事实准备首轮工具参数，不再无条件加载整套后台工具。
 def _initial_loop_loaded_tool_names(
     agent, params: RuntimeLoopParams, seed: RuntimeToolLoopSeed, reconstructed: _ReconstructedRuntimeState,
 ) -> set[str]:
@@ -1449,9 +1447,83 @@ def _initial_loop_loaded_tool_names(
         for name in tuple(getattr(action, "allowed_tools", ()) or ())
     }
     loaded = {*reconstructed.loaded_tool_names, *required_tool_names, *thread_loaded_tools(agent, params)}
-    if params.source == "background_main_agent" and params.allowed_tools is None:
-        loaded.update(BACKGROUND_CONTINUATION_REQUIRED_TOOLS)
+    snapshot = getattr(seed, "tool_runtime_snapshot", None)
+    available = set(getattr(snapshot, "available_tool_names", ()) or ())
+    if params.allowed_tools is not None:
+        available.intersection_update(params.allowed_tools)
+    attrs = getattr(params, "task_attributes", None) or {}
+    explicit = _task_preload_tool_names(attrs, available)
+    additions = set(explicit)
+    if params.source == "background_main_agent":
+        additions.update(_background_preload_tool_names(params, attrs))
+    if _authoring_tools_requested(agent, params, seed, snapshot, attrs):
+        additions.update({"skill_search", "scripts", "workflows"})
+    loaded.update(additions & available)
     return loaded
+
+
+# LLM: 只读任务值中准确的已注册名称，policy的允许/禁用集合不是加载请求；不解析报告正文做权限判断。
+# 函数用途: 从结构化任务参数提取需要首轮展示的工具，忽略权限上限本身。
+def _task_preload_tool_names(value: object, available: set[str]) -> set[str]:
+    if isinstance(value, str):
+        return {value} & available
+    if isinstance(value, dict):
+        values = [item for key, item in value.items() if key not in {
+            "allowed_tools", "disabled_tools", "policy_snapshot", "tool_policy",
+        }]
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        return set()
+    return set().union(*(_task_preload_tool_names(item, available) for item in values))
+
+
+# LLM: 原因来自audit宿主属性或真实TurnTrigger，Goal绑定来自thread_goal_id；不解析event_facts/提示词做权限判断。
+# 函数用途: 为后台片准备一小组能继续读取、整合和控制的工具，不把完整权限表当作加载表。
+def _background_preload_tool_names(params: object, attrs: dict) -> set[str]:
+    from ...conversation import background_tool_policy
+    from .turn_trigger import TurnTrigger
+
+    trigger = getattr(params, "turn_trigger", None)
+    reason = str(attrs.get(CONVERSATION_BACKGROUND_EVENT_REASON_ATTR) or (
+        trigger.reason if isinstance(trigger, TurnTrigger) else ""
+    ) or ("thread_goal_continue" if attrs.get("thread_goal_id") else ""))
+    wake = attrs.get("background_wake_signal", attrs.get("wake_signal"))
+    if not isinstance(wake, dict) and isinstance(trigger, TurnTrigger):
+        # 可选策略只收到宿主已投影的事实，不从自由文本还原原始信封或额外权限。
+        wake = {"reason": trigger.reason, "wake_signal_id": trigger.wake_signal_id,
+                "source_agent_id": trigger.source_agent_id, "origin_request_ids": trigger.origin_request_ids}
+    initial = getattr(background_tool_policy, "background_initial_loaded_tools", None)
+    if callable(initial):
+        return set(initial(reason=reason, wake_signal=wake, task_attributes=attrs))
+    names = {"task_progress", "list_agents", "send_message", "read_file", "read_artifact", "tool_search", "list_tools"}
+    if reason in {"subagent_runner_finished", "subagent_capability_request_open", "subagent_capability_granted"}:
+        names.update({"send_guidance", "cancel_subagents", "resolve_capability_requests"})
+    if reason == "thread_goal_continue" or attrs.get("thread_goal_id"):
+        names.update({"get_goal", "update_goal"})
+    if reason in {"audit_finding", "audit_capacity_alert"}:
+        names.add("watch_stream")
+    return names
+
+
+# LLM: 这里只做软展示选择；正文关键词永不授予权限，名称必须来自冻结快照，沿用方法ID只取原method carrier。
+# 函数用途: 让Skill、脚本、工作流任务第一轮就有原生作者工具，普通问候不额外加载。
+def _authoring_tools_requested(agent, params, seed, snapshot, attrs) -> bool:
+    from ...capability.method_carry import prompt_method_ids
+
+    if getattr(seed, "selected_skill_ids", ()) or prompt_method_ids(agent):
+        return True
+    if any(attrs.get(key) for key in ("selected_skill_ids", "in_use_method_ids", "skill_id", "workflow_id", "script_id")):
+        return True
+    if str(attrs.get("work_kind") or "").lower() in {"skill", "workflow", "script"}:
+        return True
+    prompt = str(getattr(params, "user_prompt", "") or "")
+    if re.search(r"(?<![a-z0-9_])(?:skills?|workflows?|scripts?)(?![a-z0-9_])|工作流|脚本", prompt, re.I):
+        return True
+    deferred = set(getattr(snapshot, "presentation_deferred_names", ()) or ())
+    deferred.update(runtime.model_spec.name for runtime in getattr(snapshot, "runtimes", ())
+                    if runtime.model_spec.hints.default_deferred)
+    return any(re.search(r"(?<![a-zA-Z0-9_])" + re.escape(name) + r"(?![a-zA-Z0-9_])", prompt) for name in deferred)
 
 
 def _required_action_contract_snapshot(

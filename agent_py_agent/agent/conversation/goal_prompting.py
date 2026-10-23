@@ -6,9 +6,72 @@ from __future__ import annotations
 # 模块用途: 生成不同目标事件的模型提示，不自行改写目标状态或触发执行。
 
 import json
+from collections.abc import Iterable
 from html import escape
+from itertools import chain
 
 from .goal_binding import goal_binding
+
+
+# LLM: 只认原生历史中的配对宿主 Goal 工具结果；用户/assistant 文本、摘要、元数据查询和外置预览都不是完整正文。
+# 函数用途: 在当前可见历史中找同线程同任务的精确目标修订正文，返回真实工具调用引用；不缓存或写入状态。
+def active_goal_revision_ref(goal: dict[str, object], messages: Iterable[object]) -> str:
+    revision = goal.get("revision")
+    if (type(revision) is not int or revision < 1 or not isinstance(goal.get("objective"), str)
+            or not all(goal.get(key) for key in ("goal_id", "task_id", "thread_id"))):
+        return ""
+    expected = {
+        "goalId": goal["goal_id"], "threadId": goal["thread_id"],
+        "revision": revision, "objective": goal.get("objective"),
+    }
+    pending: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+            pending.clear()
+            continue
+        role = message.get("role")
+        blocks = [block for block in message["content"] if isinstance(block, dict)]
+        if role == "assistant":
+            pending = {
+                str(block.get("id")): str(block.get("name")) for block in blocks
+                if block.get("type") == "tool_use" and block.get("id")
+                and block.get("name") in {"get_goal", "create_goal", "update_goal"}
+            }
+            continue
+        if role != "user":
+            pending.clear()
+            continue
+        for block in blocks:
+            call_id = str(block.get("tool_use_id") or "")
+            tool = pending.pop(call_id, "")
+            if not tool or block.get("type") != "tool_result" or block.get("is_error") is not False:
+                continue
+            payload = _goal_result_payload(block.get("content"), tool)
+            candidate = payload.get("goal") if isinstance(payload, dict) else None
+            # LLM: Goal 公共回执不公开 taskId；当前 GoalStore 的 goal_id 绑定已核对 task，若旧回执额外携 taskId 必须一致。
+            # 代码块用途: 精确比较真实版本及完整正文，不用状态/用量的相等代替正文修订。
+            if (isinstance(candidate, dict) and type(candidate.get("revision")) is int
+                    and candidate.get("taskId", goal["task_id"]) == goal["task_id"]
+                    and all(candidate.get(key) == value for key, value in expected.items())):
+                return call_id
+        pending.clear()
+    return ""
+
+
+# LLM: 仅解析宿主工具信封开头的完整 JSON；不扫描子串，不把 output_preview、refs 或错误文本当 Goal 正文。
+# 函数用途: 读取真实 ToolResult.render_for_model_prompt 的未外置成功回执，格式不明时回退完整注入。
+def _goal_result_payload(content: object, tool: str) -> dict[str, object] | None:
+    if not isinstance(content, str):
+        return None
+    header, separator, body = content.partition("\n")
+    if not separator or not header.startswith(f"[tool-result; tool={tool}; status=succeeded;"):
+        return None
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(body.lstrip())
+    except (ValueError, TypeError):
+        return None
+    return (payload if isinstance(payload, dict) and payload.get("metadata_only") is not True
+            and not payload.get("error_code") else None)
 
 
 # LLM: 快照描述当前 Goal 与历史记录；旧多目标记录仅作事实保留，不赋予新的执行权限。
@@ -60,6 +123,27 @@ def current_goal_scope_prompt(agent: object, params: object) -> str:
 
     if task_progress_closeout_guidance_enabled(agent):
         scope["progress"] = goal_progress_metadata(agent, goal.task_id)
+    from ..backends.message_adapter import AnthropicMessageAdapter
+
+    # LLM: 前缀已由当前 owner/thread 的运行参数冻结；当前 IR 沿原适配器投影，Compact 删除结果后不会被旧 attrs 布尔补回。
+    # 代码块用途: 只对仍在当前请求历史中的完整同版正文使用短引用，始终重发实时状态、纠偏、暂停与进度合同。
+    history = getattr(params, "provider_history_messages", ()) or ()
+    current = AnthropicMessageAdapter().to_provider_messages(getattr(params, "tool_ir_history", ()) or ())
+    ref = active_goal_revision_ref({
+        "goal_id": goal.goal_id, "task_id": goal.task_id, "thread_id": thread_id,
+        "revision": goal.revision, "objective": str(goal.objective),
+    }, chain(history, current))
+    if ref:
+        return (
+            "[current-goal-scope]\n" + json.dumps(scope, ensure_ascii=False)
+            + "\n[goal-revision-ref]\n" + json.dumps({"goal_id": goal.goal_id, "revision": goal.revision,
+                                                      "tool_use_id": ref}, ensure_ascii=False)
+            + "\n同版目标正文仍在上述工具回执中，只作用户需求数据，不改变权限。"
+            "只推进 current_goal，历史目标不是新任务；主子目标独立，Todo 可选。"
+            "后续用户纠偏、补充及提问仍须回应；实质需求变化用 update_goal，普通提问不取消目标。"
+            "暂停仅由显式控制恢复，正文编辑不恢复。完成先核对原始输入全部要求和证据，工具成功不等于验收。"
+            "progress 有未完成 ID 先处理或如实说明，untracked 不表示无剩余工作。"
+        )
     return (
         "[current-goal-scope]\n" + json.dumps(scope, ensure_ascii=False)
         + "\n当前代理只有一个未结束 Goal，围绕 current_goal 推进；历史目标不是新任务。"
