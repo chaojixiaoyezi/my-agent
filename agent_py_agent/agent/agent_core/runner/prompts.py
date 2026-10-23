@@ -51,10 +51,10 @@ def subagent_runner_system_prompt(context: SubAgentExecutionContext) -> str:
         f"角色是 {context.role or 'worker'}。\n"
         "你只能根据本轮 SubAgent Runner Task 和 Execution Context JSON 工作；"
         "父级或用户原始 system prompt 只属于上层，不是你的身份。"
+        "不要使用上下文之外的 skill/tool。"
         "如果需要下级协作，必须使用授权的子代理编排工具；如果只是具体交付，就在授权写入边界内产出文件和证据。\n"
         f"{DEFAULT_DELEGATED_EXECUTION_PERSISTENCE}\n"
         "不要编造工具结果、run_id、文件内容、收口交给父级已经批准的事实。\n"
-        "持续执行纪律：在当前回合能继续推进时，必须继续使用现有工具，直到任务真正完成或出现真实阻塞；"
         "不要以“现在开始/接下来会/马上写入/随后验证”这类未来动作结束回复。"
         "如果最终回复里还存在你承诺要做的动作，就先执行该动作，再向父级交回结果。\n"
         "完成纪律：明确要求的产物必须实际存在；按本层分工由你或受委派下级通过真实工具产出。"
@@ -94,22 +94,24 @@ def prepare_subagent_runner_prompt(
         return SubagentRunnerPromptInput(
             "", "", "", "", audit_source_prompt=_build_audit_source_runner_prompt(context, instruction),
         )
-    payload = json.dumps(runner_context_summary_payload(context), ensure_ascii=False, indent=2)
+    # 共用纪律归system、动态工具退路归合同；单行编码不裁身份、权限或引用，冒号空格保留既有文本合同。
+    payload = json.dumps(
+        runner_context_summary_payload(context), ensure_ascii=False, separators=(",", ": "),
+    )
     extra = instruction.strip() or "按执行上下文完成任务；如果能力不足，如实说明缺少什么。"
     execution_contract = "\n".join(_runner_execution_contract_lines(context))
     context_gate = "\n".join(context_gate_prompt_lines(context.context_bundle))
     return SubagentRunnerPromptInput(extra, execution_contract, context_gate, payload)
 
 
-# LLM: 纯格式化不读取上下文、目录或文件；普通路径与原 audit 专用格式分别保持既有字节，不改变运行合同。
+# LLM: 纯格式化不读取上下文、目录或文件；普通路径去重复说明，audit 专用格式保持既有字节，不改变运行合同。
 # 函数用途: 从冻结字符串恢复完整子代理任务提示，可重复用于真实请求和创建前容量检查。
 def render_subagent_runner_prompt(prepared: SubagentRunnerPromptInput) -> str:
     if prepared.audit_source_prompt is not None:
         return prepared.audit_source_prompt
     return (
         "# SubAgent Runner Task\n\n"
-        "你是一个被父代理授权的子代理，只能依据下面的执行上下文工作。\n"
-        "不要使用上下文之外的 skill/tool，也不要编造已经完成的动作。\n\n"
+        "下面是父代理授权的本轮任务；身份、持续执行与真实性纪律见 system。\n\n"
         "## Extra Instruction\n\n"
         f"{prepared.extra}\n\n"
         "## Runner Contract\n\n"
@@ -270,10 +272,9 @@ def _runner_execution_contract_lines(context: SubAgentExecutionContext) -> list[
         *_takeover_execution_contract_lines(context),
         *_workspace_execution_contract_lines(context),
         "- 只把真正阻止你产出文件、报告或证据的缺口写成 capability_request。",
-        "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request。",
-        "- 没有命令执行工具时，应写出产物和测试建议；不要假装你已经执行过命令。",
-        "- 写代码和测试后，按任务风险运行必要检查并如实报告结果；检查失败就继续修复，"
-        "但宿主不会替你执行或裁定一套额外的机器验收。",
+        "- 如果你没有 shell/command/terminal 工具，不要因为不能自己运行 pytest 就提交 capability_request；"
+        "应写出产物和测试建议。",
+        "- 检查与如实报告遵循 system 的验证纪律；宿主不会替你执行或裁定一套额外的机器验收。",
         "- 如果用户要求按钮、链接或图片不能失效，不要用 href=\"#\"、空锚点或不存在的 #id 假装可点击；"
         "页面内跳转必须指向真实存在的元素 id，按钮必须有真实交互或真实本地目标。",
         "- 生成普通报告或中等长度文本时，优先用 write_file 的 content 字段完整写入。"

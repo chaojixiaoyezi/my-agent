@@ -1,7 +1,9 @@
-# LLM: 后台上下文预算只裁展示副本；身份、可恢复引用及宿主窗口事实沿中性完成合同保留。
-# 模块用途: 控制后台模型输入的大小，不修改持久账本、重新计时或以摘要裁决任务状态。
+# LLM: 后台预算复用调用方完整渲染计量；身份、可恢复引用、读取错误及宿主窗口事实保留，超限不得伪装达标。
+# 模块用途: 控制含标题与控制说明的后台上下文大小，不改持久账、重新计时或以摘要裁决任务状态。
 from __future__ import annotations
 
+from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -59,19 +61,19 @@ def background_context_budget_from_config(config: object | None) -> BackgroundCo
     )
 
 
-# LLM: rendered_keys 是渲染方按结构化开关（include_recent_messages、narrow_audit_event）算出的将渲染键集合；
-# 只对这些键做有界投影和总预算估算，不按字段是否为空推断。None 保持原行为：全部键都参与。
-# 函数用途: 生成后台上下文的有界展示副本，并按总预算收缩；不会渲染的节不占预算。
+# LLM: rendered_keys限制候选节，render_tokens按完整冻结渲染计量；无callback沿原payload接口，不改账。
+# 函数用途: 连同渲染方标题和控制开销收缩后台展示，不会渲染的节不占预算。
 def bounded_background_context_payload(
     request: BackgroundContextPayloadRequest,
     *,
     rendered_keys: frozenset[str] | None = None,
+    render_tokens: Callable[[dict[str, Any]], int] | None = None,
 ) -> dict[str, Any]:
-    return _fit_total_budget(request, request.budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET, rendered_keys)
+    return _fit_total_budget(request, request.budget or DEFAULT_BACKGROUND_CONTEXT_BUDGET, rendered_keys, render_tokens)
 
 
-# LLM: 唯一的"payload 键 → 有界投影"表；新增后台上下文节时须同时登记到这里和渲染方的节表，合同测试核对两边一致。
-# 函数用途: 只为将渲染的键生成有界投影，其余键不计算、不进入预算。
+# LLM: 唯一payload投影表与渲染节表保持一致；读取失败保留完整错误及证据，不受普通历史正文裁剪。
+# 函数用途: 只为将渲染的键生成副本，保护当前失败事实，其余键不占预算。
 def _bounded_payload(
     request: BackgroundContextPayloadRequest,
     limits: BackgroundContextBudget,
@@ -95,24 +97,27 @@ def _bounded_payload(
         "task_runtime_state": lambda: _bounded_task_runtime_state(request.task_runtime_state, limits),
         "recovery_snapshot": lambda: _bounded_value(request.recovery_snapshot or {}, limits),
         "agent_tree": lambda: _bounded_value(request.agent_tree, limits),
-        "load_errors": lambda: _bounded_value(request.load_errors, limits),
+        "load_errors": lambda: deepcopy(request.load_errors),
     }
     return {key: build() for key, build in builders.items() if rendered_keys is None or key in rendered_keys}
 
 
-# LLM: 总预算只估算将渲染的键；逐级缩小各节上限，仍超预算时退到最小结构投影。不改持久账。
-# 函数用途: 把后台展示副本压进总 token 预算，并记录投影元数据。
+# LLM: 完整render callback包含自身投影说明；无法容纳受保护事实时保留并报超限，不抬高配置伪装达标。
+# 函数用途: 逐级缩小可裁正文，在真实发送面衡量总预算，必要引用不被截成猜测。
 def _fit_total_budget(request: BackgroundContextPayloadRequest, limits: BackgroundContextBudget,
-                      rendered_keys: frozenset[str] | None) -> dict[str, Any]:
+                      rendered_keys: frozenset[str] | None,
+                      render_tokens: Callable[[dict[str, Any]], int] | None = None) -> dict[str, Any]:
     """Fit the whole background projection while keeping durable state intact."""
 
     initial = _bounded_payload(request, limits, rendered_keys)
     configured = int(limits.max_total_tokens or 0)
     if configured <= 0:
         return initial
-    max_total_tokens = max(2048, configured)
-    payload_limit = max(1024, max_total_tokens - 256)
+    max_total_tokens = configured
+    measure = render_tokens or estimate_tokens
     initial_tokens = estimate_tokens(initial)
+    if render_tokens is not None:
+        initial_tokens = measure(initial)
     candidates = [limits, *(_scaled_budget(limits, divisor) for divisor in (2, 4, 8, 16))]
     candidates.append(BackgroundContextBudget(max_string_chars=64, max_list_items=1, max_dict_items=8, max_depth=2,
                                               max_total_tokens=max_total_tokens))
@@ -123,15 +128,15 @@ def _fit_total_budget(request: BackgroundContextPayloadRequest, limits: Backgrou
             continue
         seen.add(signature)
         payload = initial if pass_index == 0 else _bounded_payload(request, candidate, rendered_keys)
-        if estimate_tokens(payload) <= payload_limit:
-            return _with_projection_metadata(
-                payload,
-                max_total_tokens=max_total_tokens,
-                initial_tokens=initial_tokens,
-                pass_index=pass_index,
-            )
-    return _minimal_projection(request, max_total_tokens=max_total_tokens, initial_tokens=initial_tokens,
-                               rendered_keys=rendered_keys)
+        projected = _with_projection_metadata(payload, max_total_tokens=max_total_tokens,
+                                              initial_tokens=initial_tokens, pass_index=pass_index)
+        if measure(projected) <= max_total_tokens:
+            return projected
+    result = _minimal_projection(request, max_total_tokens=max_total_tokens, initial_tokens=initial_tokens,
+                                 rendered_keys=rendered_keys)
+    if measure(result) > max_total_tokens:
+        result["_projection"]["protected_facts_exceed_budget"] = True
+    return result
 
 
 def _scaled_budget(budget: BackgroundContextBudget, divisor: int) -> BackgroundContextBudget:
@@ -236,49 +241,26 @@ def _bounded_observation(value: object, budget: BackgroundContextBudget) -> dict
     return _bounded_value(row, budget)
 
 
-# LLM: The active wake is the current turn's typed input. Shape-pressure may
-# shorten strings but must not drop its metadata, evidence refs, or batch members
-# in favor of less authoritative bookkeeping fields.
-# 函数用途: 有界投影当前唤醒事件，完整保留本批事件结构并按预算缩短各段正文。
+# LLM: 当前wake的metadata、批次与全部exact refs均为续跑输入，结构不能在总预算迭代中丢失；只裁展示正文。
+# 函数用途: 保留完整唤醒结构及引用，允许批次中的自由正文缩短且标注截断。
 def _bounded_active_wake_signal(
     value: object,
     budget: BackgroundContextBudget,
 ) -> dict[str, Any]:
-    row = dict(value) if isinstance(value, dict) else {}
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    events = metadata.get("events") if isinstance(metadata.get("events"), list) else []
-    list_floor = max(
-        len(events),
-        len(row.get("evidence_refs")) if isinstance(row.get("evidence_refs"), list) else 0,
-        1,
-    )
-    active_budget = BackgroundContextBudget(
-        max_string_chars=max(1, int(budget.max_string_chars or 0)),
-        max_list_items=max(list_floor, int(budget.max_list_items or 0)),
-        max_dict_items=max(32, int(budget.max_dict_items or 0)),
-        max_depth=max(8, int(budget.max_depth or 0)),
-        max_total_tokens=budget.max_total_tokens,
-    )
-    ordered_keys = (
-        "wake_signal_id",
-        "thread_id",
-        "reason",
-        "root_task_id",
-        "source_agent_id",
-        "parent_agent_id",
-        "summary",
-        "evidence_refs",
-        "metadata",
-        "urgency",
-        "severity",
-        "created_at",
-        "handled_at",
-        "status",
-        "dedupe_key",
-    )
-    ordered = {key: row[key] for key in ordered_keys if key in row}
-    ordered.update({key: item for key, item in row.items() if key not in ordered})
-    return _bounded_observation(ordered, active_budget)
+    return _bounded_wake_value(value if isinstance(value, dict) else {}, budget)
+
+
+# LLM: 仅缩短具名展示正文，不限制事件数、字典键数或深度而丢掉批次；精确引用字段不经字符裁剪。
+# 函数用途: 遍历当前wake各层，保住所有子任务身份，同时减少重复的完成消息正文。
+def _bounded_wake_value(value: object, budget: BackgroundContextBudget) -> Any:
+    if isinstance(value, dict):
+        return {key: _bounded_value(item, budget) if key in {
+            "summary", "content", "completion_message", "message", "text",
+        } and isinstance(item, str) else _bounded_wake_value(item, budget)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_bounded_wake_value(item, budget) for item in value]
+    return deepcopy(value)
 
 
 # LLM: Child result refs are durable continuation inputs, like 会话运行时 inter-agent completion
@@ -380,6 +362,8 @@ def _safe_nonnegative_int(value: object) -> int:
         return 0
 
 
+# LLM: 审计状态沿原字段集合投影；身份和task_path必须逐字保留，不能绕开按键保护而裁成preview。
+# 函数用途: 优先显示当前任务与审计覆盖事实，同时维持可继续读取的准确任务位置。
 def _bounded_task_runtime_state(
     value: object,
     budget: BackgroundContextBudget,
@@ -421,7 +405,7 @@ def _bounded_task_runtime_state(
         "work_name",
     ):
         if key in row:
-            projected[key] = _bounded_value(row[key], fact_budget)
+            projected[key] = deepcopy(row[key]) if _exact_reference_key(key) else _bounded_value(row[key], fact_budget)
 
     # Aggregate coverage comes before per-source rows so an exceptionally large
     # source set still exposes exact task totals even when the list is clipped.
@@ -450,7 +434,7 @@ def _bounded_task_runtime_state(
         "task_path",
     ):
         if key in row:
-            projected[key] = _bounded_value(row[key], fact_budget)
+            projected[key] = deepcopy(row[key]) if _exact_reference_key(key) else _bounded_value(row[key], fact_budget)
     return projected
 
 
@@ -502,6 +486,8 @@ def _clip_observation_field(row: dict[str, Any], key: str, limit: int) -> None:
         row[f"{key}_original_chars"] = len(text)
 
 
+# LLM: 通用正文可裁，身份及引用值必须逐字保留；只复制不授权，联测wake/task/child的完整路径。
+# 函数用途: 有界投影普通结构，保护能够继续读取的准确ID和引用，避免生成失效路径。
 def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int = 0) -> Any:
     if isinstance(value, str):
         clipped = _clip(value, budget.max_string_chars)
@@ -515,6 +501,11 @@ def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if depth >= budget.max_depth:
+        required = _reference_skeleton(value)
+        if isinstance(required, dict):
+            return {**required, "_truncated_depth": True}
+        if isinstance(required, list):
+            return [*required, {"truncated": True, "reason": "max_depth"}]
         return {
             "truncated": True,
             "reason": "max_depth",
@@ -523,11 +514,12 @@ def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int
     if isinstance(value, dict):
         items = list(value.items())
         bounded = {
-            str(key): _bounded_value(item, budget, depth=depth + 1)
+            str(key): deepcopy(item) if _exact_reference_key(str(key)) else _bounded_value(item, budget, depth=depth + 1)
             for key, item in items[: budget.max_dict_items]
         }
-        if len(items) > budget.max_dict_items:
-            bounded["_truncated_dict_items"] = len(items) - budget.max_dict_items
+        bounded.update({key: item for key, item in (_reference_skeleton(value) or {}).items() if key not in bounded})
+        if len(items) > len(bounded):
+            bounded["_truncated_dict_items"] = len(items) - len(bounded)
         return bounded
     if isinstance(value, (list, tuple)):
         items = list(value)
@@ -542,6 +534,28 @@ def _bounded_value(value: object, budget: BackgroundContextBudget, *, depth: int
         return bounded
     text = str(value)
     return _bounded_value(text, budget, depth=depth)
+
+
+# LLM: 只按结构化字段名识别引用类型，不分析自然语言或推断权限；未知正文仍走普通预算。
+# 函数用途: 标识不允许字符截断的身份、路径和证据字段。
+def _exact_reference_key(key: str) -> bool:
+    return key in {"id", "ref", "path", "url"} or key.endswith(("_id", "_ids", "_ref", "_refs", "_path", "_paths", "_url", "_urls", "_root", "_roots"))
+
+
+# LLM: 引用保护先于数量/深度裁剪；只复制结构化身份/地址及其祖先容器，不从普通正文造引用或授权。
+# 函数用途: 在极小预算下找回被字段窗口挡住的任务路径、续跑引用和深层身份。
+def _reference_skeleton(value: object) -> Any:
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            required = deepcopy(item) if _exact_reference_key(str(key)) else _reference_skeleton(item)
+            if required is not None:
+                result[str(key)] = required
+        return result or None
+    if isinstance(value, (list, tuple)):
+        result = [_reference_skeleton(item) for item in value]
+        return [item for item in result if item is not None] or None
+    return None
 
 
 def _clip(text: str, max_chars: int) -> str:

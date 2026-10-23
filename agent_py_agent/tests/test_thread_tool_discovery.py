@@ -145,31 +145,31 @@ def test_credential_envelopes_load_web_fetch_for_all_consumers(tmp_path, monkeyp
 
 @pytest.mark.parametrize("source,allowed_tools,background", [
     ("background_main_agent", None, True), ("user", None, False),
-    ("background_main_agent", ["read_file"], False), ("background_main_agent", [], False),
+    ("background_main_agent", ["read_file"], True), ("background_main_agent", [], True),
 ])
 def test_initial_loop_loaded_tools_preserve_foreground_and_explicit_limits(
     tmp_path, monkeypatch, source, allowed_tools, background,
 ):
     from agent_py_agent.agent.agent_core.runtime import loop_support
-    from agent_py_agent.agent.conversation.background_tool_policy import (
-        BACKGROUND_CONTINUATION_REQUIRED_TOOLS,
-    )
-
     agent, thread, _, _ = _setup(tmp_path, monkeypatch, False)
     agent.tools.catalog_deferred_categories = ["web"]
     params = SimpleNamespace(source=source, allowed_tools=allowed_tools,
                              task_attributes={"conversation_thread_id": thread.thread_id})
-    seed = SimpleNamespace(effective_contract_snapshot=None)
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=allowed_tools)
+    seed = SimpleNamespace(effective_contract_snapshot=None, tool_runtime_snapshot=snapshot)
     reconstructed = SimpleNamespace(loaded_tool_names=set())
     initial = getattr(loop_support, "_initial_loop_loaded_tool_names", None)
     assert callable(initial), "初始加载名应由独立辅助函数统一计算"
     loaded = initial(agent, params, seed, reconstructed)
-    assert ("web_fetch" in loaded) is background
-    assert loaded == (set(BACKGROUND_CONTINUATION_REQUIRED_TOOLS) if background else set())
+    # CTX-13/TOOL-05改变的是初始加载，不是后台执行许可上界；普通进度唤醒无需全量web Schema。
+    focused = {"task_progress", "list_agents", "send_message", "read_file", "read_artifact", "tool_search", "list_tools"}
+    expected = focused & snapshot.available_tool_names if background else set()
+    assert loaded == expected
+    assert "web_fetch" not in loaded
     visible = {spec.name for spec in agent.tools.model_visible_specs(
         loaded_tool_names=loaded, allowed_tools=allowed_tools,
     )}
-    assert ("web_fetch" in visible) is background
+    assert "web_fetch" not in visible
     assert params.allowed_tools is allowed_tools
     assert reconstructed.loaded_tool_names == set()
     assert agent.conversation_store.threads.load(thread.thread_id).loaded_tool_names == ()

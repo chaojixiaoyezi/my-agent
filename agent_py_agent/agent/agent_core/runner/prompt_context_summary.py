@@ -17,35 +17,44 @@ _HOST_CLOSEOUT_FILENAMES = frozenset(
 )
 
 
-# LLM: The runner prompt is a bounded projection of canonical context. Direct
-# child rows retain structured objects for parent integration, while host-owned
-# closeout/final-report refs are filtered even when an old bundle still has them.
-# 函数用途: 生成子代理模型真正看到的精简上下文，包含直属孩子结果但不暴露宿主收口文件。
+# LLM: 精简只删除可选空节、引用完全相同的正文；身份、权限空值、负向 gate 和精确 refs 不参与裁剪。
+# 函数用途: 生成子代理真正看到的单份任务与运行事实，直属孩子保持结构化，宿主收口文件继续隐藏。
 def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[str, object]:
     bundle = context.context_bundle if isinstance(context.context_bundle, dict) else {}
-    return {
+    task = {
+        "goal": current_model_text(context.goal),
+        "thought": current_model_text(context.thought),
+        "plan": [current_model_text(item) for item in list(context.plan or [])],
+    }
+    reads = _read_refs_prompt_payload(context)
+    boundary = _write_boundary_prompt_payload(context.write_boundary)
+    refs = _runner_ref_payload(context, bundle)
+    workspace_refs = refs["workspace_refs"]
+    payload = {
         "identity": _runner_identity_payload(context),
-        "refs": _runner_ref_payload(context, bundle),
-        "task": {
-            "goal": current_model_text(context.goal),
-            "thought": current_model_text(context.thought),
-            "plan": [current_model_text(item) for item in list(context.plan or [])],
-        },
+        "refs": refs,
+        "task": task,
         "permissions": {
             "allowed_tools": list(context.allowed_tools or []),
             "allowed_skills": list(context.allowed_skills or []),
             "controlled_exec_grant_count": len(context.controlled_exec_grants or []),
         },
-        "write_boundary": _write_boundary_prompt_payload(context.write_boundary),
+        "workspace_root": boundary.get("workspace_root") or boundary.get("execution_cwd")
+        or workspace_refs.get("execution_cwd") or workspace_refs.get("owner_workspace_dir") or "",
+        "write_boundary": boundary,
+        "context_gate": _dict_prompt_subset(bundle.get("gate"), ["ok", "missing_fields", "blocking_reason"]),
+        "input_refs": _model_visible_prompt_value(bundle["input_refs"]) if "input_refs" in bundle else _unique_strings(
+            list(reads.get("resolved_read_paths") or []) + list(reads.get("resolved_hint_read_paths") or []),
+        ),
         "conversation": _conversation_prompt_payload(bundle),
         "direct_children": _direct_children_prompt_payload(bundle.get("direct_children")),
         "collaboration": _collaboration_prompt_payload(bundle.get("collaboration")),
         "takeover": _bounded_object(bundle.get("takeover")),
-        "context_packs": _context_packs_prompt_payload(context.context_packs),
-        "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope")),
+        "context_packs": _context_packs_prompt_payload(context.context_packs, task),
+        "task_envelope": _task_envelope_prompt_payload(bundle.get("task_envelope"), goal=task["goal"]),
         "tool_preflight": _tool_preflight_prompt_payload(bundle.get("tool_preflight")),
         "recovery": _recovery_prompt_payload(bundle.get("runner_recovery_preflight")),
-        "read_refs": _read_refs_prompt_payload(context),
+        "read_refs": reads,
         "output_contract": _dict_prompt_subset(
             bundle.get("output_contract"),
             [
@@ -60,6 +69,10 @@ def runner_context_summary_payload(context: SubAgentExecutionContext) -> dict[st
         "open_gaps": list(context.open_gaps or [])[:3],
         "instructions": list(context.instructions or [])[:8],
     }
+    # 显式scope/authority只透传上游事实，不从空节省略规则推断或扩展权限。
+    payload.update(_dict_prompt_subset(bundle, ["scope", "authority"]))
+    required = {"identity", "refs", "task", "permissions", "workspace_root", "write_boundary", "context_gate", "input_refs", "scope", "authority"}
+    return {key: value for key, value in payload.items() if key in required or value not in ({}, [], "", None)}
 
 
 # LLM: Preserve child rows and capability requests as bounded dictionaries;
@@ -154,9 +167,12 @@ def _read_refs_prompt_payload(context: SubAgentExecutionContext) -> dict[str, ob
     }
 
 
+# LLM: 身份只投影canonical context；task_id与真实runner参数一致取root，不以JSON别名建立权限或新身份。
+# 函数用途: 显示当前孩子及父根关系，保留旧键并提供准确的run/task字段。
 def _runner_identity_payload(context: SubAgentExecutionContext) -> dict[str, object]:
     return {
         "run_id": context.run_id,
+        "task_id": context.root_id or context.run_id,
         "agent_name": context.agent_name,
         "role": context.role,
         "status": context.status,
@@ -164,6 +180,8 @@ def _runner_identity_payload(context: SubAgentExecutionContext) -> dict[str, obj
         "runner_last_error": context.runner_last_error,
         "parent_id": context.parent_id,
         "root_id": context.root_id or context.run_id,
+        "parent_run_id": context.parent_id,
+        "root_run_id": context.root_id or context.run_id,
         "depth": context.depth,
         "subagent_session_id": context.subagent_session_id,
         "agent_thread_id": context.agent_thread_id,
@@ -177,12 +195,16 @@ def _conversation_prompt_payload(bundle: dict[str, object]) -> dict[str, object]
     return dict(conversation) if isinstance(conversation, dict) else {}
 
 
+# LLM: 非空协作请求和响应策略仍保留结构；仅无请求、无计数、无策略时省去空外壳，不代替协作账。
+# 函数用途: 为孩子显示待回应的协作材料，空集合不重复占启动上下文。
 def _collaboration_prompt_payload(collaboration: object) -> dict[str, object]:
     if not isinstance(collaboration, dict):
         return {}
     requests = collaboration.get("targeted_requests")
     if not isinstance(requests, list):
         requests = []
+    if not requests and not collaboration.get("targeted_request_count") and not collaboration.get("responder_policy"):
+        return {}
     return {
         "targeted_request_count": int(collaboration.get("targeted_request_count") or len(requests)),
         "targeted_requests": [_collaboration_request_prompt_payload(item) for item in requests[:5] if isinstance(item, dict)],
@@ -217,14 +239,26 @@ def _collaboration_request_prompt_payload(request: dict[str, object]) -> dict[st
     return {key: value for key, value in payload.items() if value not in ({}, [], "", None)}
 
 
-def _context_packs_prompt_payload(value: object) -> list[dict[str, object]]:
+# LLM: 用未截断原文做精确比较，但只登记最终投影保留的字段；引用必须可解析，不同尾部不得误合并。
+# 函数用途: 以明确的本地字段引用替代相同任务或父级说明，保留不同正文和资料来源。
+def _context_packs_prompt_payload(value: object, task: dict[str, object]) -> list[dict[str, object]]:
     if not isinstance(value, list | tuple):
         return []
+    seen = {str(task[key]): f"task.{key}" for key in ("goal", "thought") if task.get(key)}
     packs: list[dict[str, object]] = []
     for item in value:
         if not isinstance(item, dict):
             continue
         pack = _bounded_object(item)
+        for key in ("summary", "handoff_note"):
+            text = current_model_text(item.get(key) or "")
+            if not text or key not in pack:
+                continue
+            if text in seen:
+                pack.pop(key)
+                pack[f"{key}_ref"] = seen[text]
+            else:
+                seen[text] = f"context_packs[{len(packs)}].{key}"
         if pack:
             packs.append(pack)
         if len(packs) >= 5:
@@ -256,10 +290,12 @@ def _runner_ref_payload(context: SubAgentExecutionContext, bundle: dict[str, obj
     }
 
 
-def _task_envelope_prompt_payload(envelope: object) -> dict[str, object]:
+# LLM: envelope 不产生第二份目标；只有与 task.goal 完全一致时才替换为可解析的字段引用。
+# 函数用途: 保留 envelope 地址和授权合同，避免重复父级长任务，独有目标仍完整内联。
+def _task_envelope_prompt_payload(envelope: object, *, goal: str = "") -> dict[str, object]:
     if not isinstance(envelope, dict):
         return {}
-    return {
+    payload = {
         "schema_version": envelope.get("schema_version") or "",
         "address": _dict_prompt_subset(
             envelope.get("address"),
@@ -277,6 +313,10 @@ def _task_envelope_prompt_payload(envelope: object) -> dict[str, object]:
         ),
         "context_refs": _dict_prompt_subset(envelope.get("context_refs"), ["context_bundle"]),
     }
+    if goal and payload["goal"] == goal:
+        payload.pop("goal")
+        payload["goal_ref"] = "task.goal"
+    return payload
 
 
 # LLM: Tool execution keeps the full host boundary internally, but the model
@@ -287,6 +327,7 @@ def _write_boundary_prompt_payload(value: object) -> dict[str, object]:
     return _dict_prompt_subset(
         value,
         [
+            "workspace_root",
             "execution_cwd",
             "owner_workspace_dir",
             "role",
@@ -311,7 +352,7 @@ def _write_boundary_prompt_payload(value: object) -> dict[str, object]:
 # old durable bundles before they reach a resumed model prompt.
 # 函数用途: 保留真正能续跑的恢复线索，并移除宿主最终收口文件及其提示文字。
 def _recovery_prompt_payload(value: object) -> dict[str, object]:
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
         return {}
     payload = dict(value)
     refs = [str(item or "").strip() for item in payload.get("recovery_refs") or []]
@@ -360,18 +401,34 @@ def _bounded_object_list(value: object, *, limit: int) -> list[dict[str, object]
     ]
 
 
+# LLM: 普通字段维持原数量预算，显式引用额外保留；不读取路径或从描述推断新的资料授权。
+# 函数用途: 缩短可选资料说明，同时保住继续读取所需的完整引用。
 def _bounded_object(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         return {}
     result: dict[str, object] = {}
-    for key, item in list(value.items())[:12]:
-        bounded = _bounded_value(item)
+    selected = dict(list(value.items())[:12])
+    selected.update((key, item) for key, item in value.items() if _is_reference_key(str(key)))
+    for key, item in selected.items():
+        bounded = _bounded_value(item, key=str(key))
         if bounded is not None:
             result[str(key)] = bounded
     return result
 
 
-def _bounded_value(item: object) -> object:
+# LLM: 限长只适用于描述，结构化 ref 是工具的精确地址；裁短引用会改变其身份和读取目标。
+# 函数用途: 识别声明为引用的字段，让恢复和资料地址绕过有损文本摘要。
+def _is_reference_key(key: str) -> bool:
+    return key in {"id", "ref", "refs", "path", "url"} or key.endswith((
+        "_id", "_ids", "_ref", "_refs", "_path", "_paths", "_url", "_urls", "_root", "_roots",
+    ))
+
+
+# LLM: 精确引用复用原模型可见净化器，不裁地址；普通描述仍受原字符/结构预算，返回值不授权。
+# 函数用途: 把单个资料字段转成精简展示值，避免长恢复地址变成不可用前缀。
+def _bounded_value(item: object, *, key: str = "") -> object:
+    if _is_reference_key(key):
+        return _model_visible_prompt_value(item)
     if isinstance(item, str):
         return current_model_text(item)[:300]
     if isinstance(item, bool | int | float):
@@ -383,10 +440,15 @@ def _bounded_value(item: object) -> object:
     return current_model_text(item)[:160] if item is not None else None
 
 
-def _bounded_child_dict(item: dict[object, object]) -> dict[str, str]:
+# LLM: 嵌套普通值保持原字段窗口；精确引用不受位置影响并逐字净化保留，不改变执行上下文。
+# 函数用途: 显示可选资料内的小字典，保住其中的真实引用地址。
+def _bounded_child_dict(item: dict[object, object]) -> dict[str, object]:
+    selected = dict(list(item.items())[:8])
+    selected.update((key, value) for key, value in item.items() if _is_reference_key(str(key)))
     return {
-        str(child_key): current_model_text(child_value)[:160]
-        for child_key, child_value in list(item.items())[:8]
+        str(child_key): _model_visible_prompt_value(child_value) if _is_reference_key(str(child_key))
+        else current_model_text(child_value)[:160]
+        for child_key, child_value in selected.items()
     }
 
 

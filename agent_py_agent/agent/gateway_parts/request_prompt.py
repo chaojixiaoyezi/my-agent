@@ -204,15 +204,32 @@ def _conversation_prompt_section(
             ]
         )
     if conversation.thread_goal and not scoped_audit_prepare:
+        goal = conversation.thread_goal
+        from ..conversation.goal_prompting import active_goal_revision_ref
+        from ..conversation.history_seed import history_source_provider_messages
+
+        # LLM: 旧 Gateway 投影没有 revision，必须完整回退；不能借历史版本、请求 JSON 或持久标记猜当前 CAS。
+        # 代码块用途: 仅在宿主确实提供版本且 active source 仍有同版正文时省正文，保留其他实时状态与精确引用。
+        ref = ""
+        if type(goal.get("revision")) is int and conversation.history_source is not None:
+            ref = active_goal_revision_ref(
+                {**goal, "thread_id": conversation.thread_id},
+                history_source_provider_messages(conversation.history_source),
+            )
+        projected_goal = {key: value for key, value in goal.items() if key != "objective"} if ref else goal
         lines.extend(
             [
                 "## Persistent Goal",
                 "- 这是当前会话的目标状态；后续用户消息可能是纠偏、补充要求或临时提问，请结合历史理解并回应。",
                 "- 相关纠偏不必写入 Goal 才生效；需求实质变化可用 update_goal 更新正文。不要要求用户必须用 /btw 才能纠偏。",
                 "- 暂停、恢复、清除仍由显式 /goal 控制；普通聊天和目标正文编辑不改变暂停状态。",
-                f"- {json.dumps(conversation.thread_goal, ensure_ascii=False, sort_keys=True)}",
+                f"- {json.dumps(projected_goal, ensure_ascii=False, sort_keys=True)}",
             ]
         )
+        if ref:
+            lines.append("[goal-revision-ref]\n" + json.dumps({
+                "goal_id": goal["goal_id"], "revision": goal["revision"], "tool_use_id": ref,
+            }, ensure_ascii=False, sort_keys=True))
     if conversation.load_errors:
         lines.append(f"- conversation_context_load_errors: {len(conversation.load_errors)}")
     return "\n".join(lines)
