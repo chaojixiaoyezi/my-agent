@@ -1245,9 +1245,7 @@ def _commit_compact_candidate(
         if isinstance(rows, MessageSnapshotRows):
             rows.validate()
     from . import tool_discovery
-    selector = partial(tool_discovery.active_tools_for_compact,
-                       recent_used_tool_names=tool_discovery.recent_used_tool_names_from_messages(request.pending),
-                       baseline_discovery_revisions=tool_discovery.discovery_revisions(request.thread))
+    selector = tool_discovery.compact_tool_selector(request.thread, request.pending)
     updated = request.store.threads.update_compact_state(
         request.thread.thread_id,
         commit=ConversationCompactCommit(

@@ -7,7 +7,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING
 
 from ..common.cancellation import ToolCancelled
@@ -169,15 +168,10 @@ def commit_live_tool_compact(
     # Check after the durable candidate exists but before it receives live authority. An orphan
     # checkpoint is recoverable evidence; advancing generation after /stop is not.
     raise_if_compact_interrupted(request.interrupt_check)
-    from .tool_discovery import (
-        active_tools_for_compact,
-        discovery_revisions,
-        recent_used_tool_names_from_messages,
-    )
+    from .tool_discovery import compact_tool_selector
 
     recent_rows = binding.store.messages.recent(binding.thread.thread_id, limit=20)
-    selector = partial(active_tools_for_compact, recent_used_tool_names=recent_used_tool_names_from_messages(recent_rows),
-                       baseline_discovery_revisions=discovery_revisions(binding.thread))
+    selector = compact_tool_selector(binding.thread, recent_rows)
     return binding.store.threads.update_compact_state(
         binding.thread.thread_id,
         commit=ConversationCompactCommit(

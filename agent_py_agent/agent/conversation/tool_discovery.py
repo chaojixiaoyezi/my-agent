@@ -1,6 +1,6 @@
 # LLM: 加载名是线程展示事实，不是权限；只读正式搜索信封并原子并入线程，不从摘要正文反推或写Agent全局状态。
 # 模块用途: 在压缩移走搜索记录后仍让同一线程的下一回合恢复工具表。
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 
 from ..settings.reasoning_effort import run_thread_id
@@ -125,6 +125,15 @@ def active_tools_for_compact(
         *normalized_loaded_tools(metadata.get("pinned_tool_names", ())), *fresh,
     ]) if name in history)
     return resolve_active_loaded_tool_names([*loaded, *history], recent_used_tool_names=recent_used_tool_names, pinned_tool_names=pins)
+
+
+# LLM: 调用方在CAS前调用；锁外冻结消息使用序列和发现版本，返回的selector锁内只读最新线程，无I/O。
+# 函数用途: 给普通和live Compact共用并发基线，不把锁外准备散落到提交函数。
+def compact_tool_selector(thread: object, messages: Iterable[object]) -> Callable[[object], tuple[str, ...]]:
+    from functools import partial
+
+    return partial(active_tools_for_compact, recent_used_tool_names=recent_used_tool_names_from_messages(messages),
+                   baseline_discovery_revisions=discovery_revisions(thread))
 
 
 # LLM: 仅在Compact CAS边界收缩；保留基线后新发现的成员及完整新近性历史，不能凭空新增工具。
