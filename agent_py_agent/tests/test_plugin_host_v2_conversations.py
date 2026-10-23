@@ -362,8 +362,8 @@ def test_history_corrupt_jsonl_is_not_empty_success(case, bad):
 
 # LLM: 历史不能通过链接导出同用户控制文件或另一owner记录。
 # 函数用途: 验证消息文件符号链接和硬链接都拒绝。
-@pytest.mark.parametrize("link", ["symlink", "hardlink"])
-def test_history_rejects_linked_files(case, tmp_path, link):
+@pytest.mark.parametrize("link", ["symlink", "hardlink", "hardlink_denied"])
+def test_history_rejects_linked_files(case, tmp_path, link, monkeypatch):
     tid = case.create()["thread_id"]
     outside = tmp_path / "secret.jsonl"
     outside.write_text("secret", encoding="utf-8")
@@ -371,7 +371,27 @@ def test_history_rejects_linked_files(case, tmp_path, link):
     if link == "symlink":
         path.symlink_to(outside)
     else:
-        path.hardlink_to(outside)
+        try:
+            if link == "hardlink_denied":
+                raise PermissionError("forced link(2) denial")
+            path.hardlink_to(outside)
+        except PermissionError:
+            import os
+            path.write_bytes(outside.read_bytes())
+            inode = path.stat().st_ino
+            original = os.fstat
+
+            # LLM: 仅模拟被测inode的nlink，其余FD照真实结果；仍实际运行产品nofollow拒绝门。
+            # 函数用途: 在内核禁止link时保留硬链接攻击语义。
+            def linked_stat(fd):
+                info = original(fd)
+                if info.st_ino != inode:
+                    return info
+                fields = list(info)
+                fields[3] = 2
+                return os.stat_result(fields)
+
+            monkeypatch.setattr(os, "fstat", linked_stat)
     with pytest.raises(HostAPIError) as error:
         result = case.call("messages.list", {"thread_id": tid})
         assert result.data is not None

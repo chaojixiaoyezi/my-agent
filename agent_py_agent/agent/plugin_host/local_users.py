@@ -76,6 +76,11 @@ class LocalUsersDomain:
         if call.as_user is not None:
             raise HostAPIError("INVALID_SCHEMA")
         payload = call_payload(call)
+        if call.action == "users.local.create" and "quota" not in payload:
+            # 未指定配额只能取默认与批准上限交集；显式超限仍按原合同拒绝。
+            ceiling = call.grant.quota_ceiling.to_dict()
+            payload["quota"] = {key: min(value, ceiling[key])
+                                for key, value in LocalUserQuotaLimits().to_dict().items()}
         self.validate(call, payload)
         if self.usage_reader is None:
             raise HostAPIError("HOST_NOT_READY", 503)

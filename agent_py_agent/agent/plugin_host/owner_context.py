@@ -13,6 +13,7 @@ from ..user_space.owner_quota import LocalUserQuotaLimits
 from ..user_space.owner_resolver import OwnerIdentity
 from .errors import HostAPIError
 from .execution_policy import (
+    AssetGrant,
     ExecutionAllowlist,
     RestrictedExecutionPolicy,
     build_execution_policy,
@@ -37,6 +38,18 @@ def validate_local_user_id(value: str) -> str:
     if value in {"main", "admin", "root", "system", "default", "owner", "local"}:
         raise HostAPIError("INVALID_SCHEMA")
     return value
+
+
+# LLM: 公开A列表中C不支持的附加UID只从投影剔除，不清洗成另一账号；实际目标仍单独验证。
+# 函数用途: 避免一项不可执行UID污染其他合法目标的授权。
+def supported_user_ids(values):
+    supported = set()
+    for value in values:
+        try:
+            supported.add(validate_local_user_id(value))
+        except HostAPIError:
+            continue
+    return frozenset(supported)
 
 
 # LLM: 无参数固定权限入口，不继承全局认证开关或父级权限。
@@ -227,10 +240,12 @@ class OwnerContextFactory:
         call = self.verify(authorized)
         if execution and call.action not in {"chat.send", "execute.tool", "execute.script", "execute.workflow", "execute.workflow_resume"}:
             raise HostAPIError("ACTION_NOT_AVAILABLE", 403)
-        required = {"execute", "act_as_user"} if execution else {"read", "act_as_user"}
+        required = {"execute", "act_as_user"} if execution else {"act_as_user"}
         if call.grant.source_binding.owner != OwnerIdentity.local_main():
             raise HostAPIError("CAPABILITY_DENIED", 403)
         if not required <= call.grant.capabilities:
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        if not execution and not call.grant.capabilities.intersection({"read", "write", "chat", "interaction", "execute"}):
             raise HostAPIError("CAPABILITY_DENIED", 403)
         if call.as_user is None:
             raise HostAPIError("TARGET_REQUIRED", 403)
@@ -304,9 +319,13 @@ class IngressOwnerResolver:
         import hashlib
 
         from . import contracts
-        from .authorization import IngressIssuer
+        from .authorization import IngressIssuer, revalidate_call
         from .schemas import canonical_json, thaw
 
+        authorized = binding if isinstance(binding, contracts.AuthorizedCall) else None
+        if authorized is not None:
+            revalidate_call(authorized)
+            binding = authorized.binding
         if not isinstance(binding, contracts.VerifiedPluginBinding) or not isinstance(binding.source._issuer, IngressIssuer):
             raise HostAPIError("SOURCE_INVALID", 403)
         issuer = binding.source._issuer
@@ -314,16 +333,24 @@ class IngressOwnerResolver:
         digest = hashlib.sha256(canonical_json({"grant": grant, "capabilities": sorted(caps)}).encode()).hexdigest()
         if (thaw(binding.grant) != grant or binding.capabilities != caps or binding.policy_digest != digest
                 or binding.actor != fixed.activation_ref.owner().identity
-                or binding.effective_owner.provider != "local" or binding.effective_owner.owner_kind != "user"):
+                or binding.effective_owner.provider != "local"
+                or (authorized is None and binding.effective_owner.owner_kind != "user")):
             raise HostAPIError("SOURCE_INVALID", 403)
         if self.store.root != fixed.activation_ref.owner().root:
             raise HostAPIError("TARGET_DENIED", 403)
         source = PluginSourceBinding(binding.installation_ref, binding.package_sha256, binding.activation_id,
                                      binding.grant_revision, binding.actor)
-        projected = LocalUserGrant(source, caps, frozenset(grant["target_user_ids"]),
-            frozenset(grant["manageable_user_ids"]), frozenset(grant["creatable_user_ids"]),
-            LocalUserQuotaLimits.parse(grant["quota_ceiling"]), ExecutionAllowlist(frozenset(grant["execution"]["tool_names"])))
-        return AuthorizedLocalCall(projected, "chat.send", as_user=binding.effective_owner.owner_id)
+        projected = LocalUserGrant(source, caps, supported_user_ids(grant["target_user_ids"]),
+            supported_user_ids(grant["manageable_user_ids"]), supported_user_ids(grant["creatable_user_ids"]),
+            LocalUserQuotaLimits.parse(grant["quota_ceiling"]), ExecutionAllowlist(
+                frozenset(grant["execution"]["tool_names"]), tuple(AssetGrant(
+                    a["kind"], a["id"], a["revision"], a["sha256"]) for a in grant["execution"].get("asset_refs", ()))))
+        if authorized is None:
+            # A发行前binding仅供冷解析；它不是领域动作或执行票据。
+            return AuthorizedLocalCall(projected, "chat.send", as_user=binding.effective_owner.owner_id)
+        call = authorized.call
+        action = "chat.send" if call.action == "conversations.messages.send" else call.action
+        return AuthorizedLocalCall(projected, action, canonical_json(call.payload), call.as_user_id, call.idempotency_key)
 
     # LLM: 每次重新冷读C账号及策略；原A继续核对身份、home和当前user_revision。
     # 函数用途: 返回A合同要求的同来源读取上下文。

@@ -30,9 +30,9 @@ def _list_schema(item: dict, minimum: int = 0) -> dict:
 # LLM: 执行范围只接受固定工具/固定资产内容，网络不能开启。
 # 函数用途: 生成闭合的有限执行授权结构。
 def execution_schema() -> dict:
-    asset = closed({"kind": {"enum": ["script", "workflow"]}, "id": text(128, 1, r"^[A-Za-z0-9_.:-]+$"),
+    asset = closed({"kind": {"enum": ["script", "workflow"]}, "id": text(128, 1, r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"),
                     "revision": integer(2147483647, 1), "sha256": text(64, 64, r"^[0-9a-f]{64}$")})
-    return closed({"tool_names": _list_schema(text(128, 1, r"^[A-Za-z0-9_.:-]+$")),
+    return closed({"tool_names": _list_schema(text(96, 1, r"^[A-Za-z0-9_]{1,96}$")),
                    "asset_refs": _list_schema(asset), "network": {"type": "boolean", "enum": [False]},
                    "max_concurrent_requests": integer(8, 1), "max_tokens_per_request": integer(1000000, 1),
                    "max_duration_seconds": integer(86400, 1), "max_tool_calls": integer(1000)})

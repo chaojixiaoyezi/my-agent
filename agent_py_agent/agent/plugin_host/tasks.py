@@ -68,7 +68,9 @@ def require_thread(context, authorized, thread_id: str):
     thread, error = context.store.threads.load_report(thread_id)
     if error is not None:
         raise HostAPIError("STORE_UNAVAILABLE", 503)
-    if thread is None or thread.thread_id != thread_id or thread.owner_id != _owner_id(context.owner):
+    # 受管local用户使用C规范owner_id(local/alice)，不能按旧local/user/alice拒绝其真实线程。
+    owner_id = getattr(context, "owner_id", _owner_id(context.owner))
+    if thread is None or thread.thread_id != thread_id or thread.owner_id != owner_id:
         raise HostAPIError("RESOURCE_NOT_FOUND", 404)
     return thread
 

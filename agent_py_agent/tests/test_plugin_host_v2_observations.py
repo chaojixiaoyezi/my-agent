@@ -296,19 +296,37 @@ def test_artifact_changes_are_conflicts(env, change):
 
 # LLM: symlink/hardlink在实际open处拒绝；中间目录和任务根链接同样不可用。
 # 函数用途: 检查文件系统链接逃逸与文件类型。
-@pytest.mark.parametrize("attack", ["symlink", "hardlink", "parent_symlink", "root_symlink", "fifo"])
-def test_artifact_reader_rejects_unsafe_filesystem_nodes(env, attack, tmp_path):
+@pytest.mark.parametrize("attack", ["symlink", "hardlink", "hardlink_denied", "parent_symlink", "root_symlink", "fifo"])
+def test_artifact_reader_rejects_unsafe_filesystem_nodes(env, attack, tmp_path, monkeypatch):
     path, record = put_artifact(env)
     outside = tmp_path / "outside"
     outside.write_bytes(b"abcdef")
-    if attack in {"symlink", "hardlink", "fifo"}:
+    if attack in {"symlink", "hardlink", "hardlink_denied", "fifo"}:
         path.unlink()
         if attack == "symlink":
             path.symlink_to(outside)
-        elif attack == "hardlink":
+        elif attack in {"hardlink", "hardlink_denied"}:
             source = path.with_name("link-source.bin")
             source.write_bytes(b"abcdef")
-            os.link(source, path)
+            try:
+                if attack == "hardlink_denied":
+                    raise PermissionError("forced link(2) denial")
+                os.link(source, path)
+            except PermissionError:
+                path.write_bytes(source.read_bytes())
+                inode, original = path.stat().st_ino, os.fstat
+
+                # LLM: 只模拟目标inode的硬链接元数据，不能绕过或替换产品拒绝器。
+                # 函数用途: 在link被内核禁止时仍测st_nlink大于1的拒绝分支。
+                def linked_stat(fd):
+                    info = original(fd)
+                    if info.st_ino != inode:
+                        return info
+                    fields = list(info)
+                    fields[3] = 2
+                    return os.stat_result(fields)
+
+                monkeypatch.setattr(os, "fstat", linked_stat)
         else:
             os.mkfifo(path)
     else:
