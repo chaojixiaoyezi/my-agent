@@ -524,6 +524,11 @@ def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeyp
         # 2026-10-08 状态行用的两个短标签：没有后端模型名时为空串，档位按实际发送值（假后端无档位控制 → auto）
         "model_name",
         "reasoning_level",
+        "raw_estimated_tokens",
+        "calibrated_tokens",
+        "measurement_kind",
+        "counter_id",
+        "count_scope",
     }
     assert public["model_name"] == "" and public["reasoning_level"] == "auto"
     assert "private" not in repr(public)

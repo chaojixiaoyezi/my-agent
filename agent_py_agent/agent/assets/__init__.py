@@ -1,5 +1,5 @@
 # LLM: 资产写入固定于宿主给定Owner根；全局兜底只读，显式管理员工厂才把全局根设为写根，不注册或执行工具。
-# 模块用途: 共用nofollow、分层读取、Owner事务恢复及不写全局文件的只读锁。
+# 模块用途: 共用nofollow、分层读取、严格资产ID、技能逻辑引用及提交后读回错误合同。
 from __future__ import annotations
 
 import json
@@ -32,6 +32,36 @@ def safe_asset_id(value):
     return value
 
 
+# LLM: 技能来源是逻辑命名域，不能用于脚本或工作流目录名。
+# 函数用途: 校验裸技能名和准确来源引用，保留原始身份。
+def valid_skill_reference(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("技能引用必须是字符串")
+    parts = value.split(":")
+    if len(parts) == 1:
+        return safe_asset_id(value)
+    if len(parts) == 2 and parts[0] in {"owner", "workspace", "shared", "builtin", "learned"}:
+        safe_asset_id(parts[1])
+    elif len(parts) == 3 and parts[0] == "plugin":
+        safe_asset_id(parts[1])
+        safe_asset_id(parts[2])
+    else:
+        raise ValueError("技能引用来源或形状无效")
+    return value
+
+
+# LLM: 只去掉已验证来源，不能将任意路径清洗成合法ID。
+# 函数用途: 为展示引用取得安全裸技能名。
+def canonical_skill_name(value: str) -> str:
+    return valid_skill_reference(value).rsplit(":", 1)[-1]
+
+
+# LLM: 只表示_write正常返回后的读回失败，不能包装写入自身异常。
+# 类用途: 区分已提交但无法确认读回与提交前失败。
+class AssetPostCommitReadbackError(RuntimeError):
+    pass
+
+
 # LLM: 超时与运行耗时不是授权；拒绝bool、非有限数和零/负超时。
 # 函数用途: 校验脚本和工作流的正超时。
 def positive_timeout(value):
@@ -51,7 +81,7 @@ def _global_roots(owner_home, extra_roots):
                                if (path := Path(os.path.abspath(root))) != owner_home))
 
 
-# LLM: 根由宿主构造传入，payload不能重定位；锁跨Store实例，读改写都在同一集合锁下。
+# LLM: 根由宿主构造传入，payload不能重定位；锁跨Store实例，提交后读回入口仅在_write成功后使用。
 # 类用途: 复用元数据和侧文件的nofollow读取、原子替换、异常回滚与受控删除。
 class _AssetStore:
     # LLM: 宿主固定Owner写根，is_admin不重定位普通操作；全局候选只供读取，不从metadata或cwd取得权限。
@@ -152,6 +182,19 @@ class _AssetStore:
     # 函数用途: 取得一条列表投影，默认适用于工作流定义。
     def _list_entry(self, asset_id):
         return self._get(asset_id)
+
+    # LLM: 不重试或补写，保留读取故障cause；中断及BaseException继续传播。
+    # 函数用途: 为已提交资产提供类型明确的读回失败。
+    def _readback_after_commit(self, asset_id):
+        try:
+            record = self._get(asset_id)
+            if record is None:
+                raise FileNotFoundError("已提交资产读回缺失")
+            return record
+        except InterruptedError:
+            raise
+        except Exception as exc:
+            raise AssetPostCommitReadbackError(f"资产{asset_id}提交后读回失败") from exc
 
     # LLM: 排除已由高优先级根认领的ID后才读取，避免低优先级坏记录击穿Owner遮蔽。
     # 函数用途: 锁内按ID收集当前根的列表条目。

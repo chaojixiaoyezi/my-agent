@@ -67,3 +67,21 @@ def persist_discovered_tools(agent: object, params: object, record: dict[str, ob
     except FileNotFoundError:
         # 尚未创建或已经移除的线程不补造；其它存储失败仍显式传播。
         return
+
+
+# LLM: 仅在 Compact CAS 边界收缩活跃加载集合，完整发现历史保留在 metadata，不得凭空新增未发现工具。
+# 函数用途: 计算压缩提交后的线程 metadata 与活跃 loaded_tool_names 字段更新。
+def compact_discovered_tools(
+    thread: object,
+    active_loaded_tool_names: tuple[str, ...] | None,
+) -> dict[str, object]:
+    if active_loaded_tool_names is None:
+        return {}
+    metadata = dict(getattr(thread, "metadata", {}) or {})
+    loaded = getattr(thread, "loaded_tool_names", ()) or ()
+    history = normalized_loaded_tools([*metadata.get("discovered_tool_history", ()), *loaded])
+    selected = normalized_loaded_tools(active_loaded_tool_names)
+    if not set(selected) <= set(history):
+        raise ValueError("active selection must not invent discovered tools")
+    metadata["discovered_tool_history"] = list(history)
+    return {"metadata": metadata, "loaded_tool_names": selected}

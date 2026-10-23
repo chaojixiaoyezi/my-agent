@@ -1573,3 +1573,7 @@ persistence/service.py 的 task_from_payload 是原载荷规范化主体，旧�
 路径复核仍只在原两处：`capability_scope`逐墙外target复用原继承过滤，`capability_request_identity`核持久grant根未因symlink漂移而改绑；不借新账或最终工具拒绝代替grant匹配。
 
 `capability_request_identity`只读复用原`services/runner_context_service._runner_allowed_tools`，与真实runner共用canonical disabled/audit工具投影；不改runner实现。
+
+### 证据包共享序列化与子代理工具顺序（2026-10-23）
+
+`subagents/evidence_packet_serializer.py` 提供 `serialize_evidence_packet` 单一转换入口，`result_artifact_evidence.py` 与 `result_structured_evidence.py` 统一调用；`subagent/run_flow.py` 按首次发现顺序保留 `loaded_tool_names` 以稳定前缀缓存。

@@ -243,6 +243,8 @@ def _artifact_claim(item: dict[str, object], ref: str) -> str:
     return f"{kind} artifact produced: {ref}"
 
 
+# LLM: 将登记后的本地产物转为标准 EvidencePacket，并通过统一序列化器生成结果载荷。
+# 函数用途: 为子代理登记的产物生成证据包，统一复用 serialize_evidence_packet。
 def synthesize_artifact_evidence_packets(
     task: SubAgentTask,
     artifacts: list[dict[str, object]],

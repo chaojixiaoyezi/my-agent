@@ -1,16 +1,17 @@
-# LLM: Skill适配只读显式根的SKILL.md与skill_meta.json，不执行正文；更新只写侧元数据，公开字段共用AssetDescriptor过滤。
-# 模块用途: 为Owner及已加载技能提供标准提取Key、稳定发现和不改正文的元数据更新。
+# LLM: 普通发现只读明确根；有快照只投影enabled_entries，不补扫或执行正文。
+# 模块用途: 共用安全codec和根声明提供技能资产投影及准确来源匹配。
 from __future__ import annotations
 
 import json
 import re
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
+from ..capability.skills import _as_list, skill_catalog_roots, split_skill_frontmatter
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath, write_text_atomic_beneath
-from ..settings.config_io import _strip_yaml_comment
-from . import safe_asset_id
+from . import canonical_skill_name, safe_asset_id, valid_skill_reference
 from .descriptor import AssetDescriptor, clean_json
 
 
@@ -32,87 +33,10 @@ def _text(directory, filename):
     return None if raw is None else raw.decode('utf-8')
 
 
-# LLM: YAML只作数据，支持标量、缩进映射/列表、块文本与JSON流容器；不执行tag/anchor或引入未声明依赖。
-# 函数用途: 解析技能头部元数据，正文只供原解析器分隔，不作为命令或权限。
+# LLM: Card和资产提取只用一个有界安全codec。
+# 函数用途: 从唯一frontmatter入口取得头部。
 def _frontmatter(text):
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != '---':
-        return {}
-    end = next((i for i in range(1, len(lines)) if lines[i].strip() == '---'), None)
-    if end is None:
-        raise ValueError('Skill YAML头缺少结束分隔符')
-    tokens = [(len(line) - len(line.lstrip(' ')), _strip_yaml_comment(line).strip()) for line in lines[1:end]
-              if _strip_yaml_comment(line).strip()]
-    if not tokens:
-        return {}
-    meta, index = _yaml_block(tokens, 0, tokens[0][0])
-    if not isinstance(meta, dict) or index != len(tokens):
-        raise ValueError('Skill YAML头必须是完整对象')
-    return meta
-
-
-# LLM: 递归只消费缩进数据，深度有界且重复键拒绝，不解析对象tag或Python表达式。
-# 函数用途: 解析技能YAML的列表与映射，保持访问目标/数据源/IO容器结构。
-def _yaml_block(tokens, index, indent, depth=0):
-    if depth > 32:
-        raise ValueError('Skill YAML嵌套过深')
-    sequence = tokens[index][1].startswith('- ')
-    result = [] if sequence else {}
-    while index < len(tokens) and tokens[index][0] == indent:
-        raw = tokens[index][1]
-        if sequence:
-            if not raw.startswith('- '):
-                raise ValueError('Skill YAML列表格式错误')
-            value = raw[2:].strip()
-            if re.match(r'[^: ]+:(?:\s|$)', value):
-                tokens[index] = (indent + 2, value)
-                item, index = _yaml_block(tokens, index, indent + 2, depth + 1)
-            else:
-                item, index = _yaml_item(tokens, index, indent, value, depth)
-            result.append(item)
-            continue
-        key, separator, value = raw.partition(':')
-        if not separator or key in result or not key.strip():
-            raise ValueError('Skill YAML键无效或重复')
-        result[key.strip()], index = _yaml_item(tokens, index, indent, value.strip(), depth)
-    if index < len(tokens) and tokens[index][0] > indent:
-        raise ValueError('Skill YAML缩进无效')
-    return result, index
-
-
-# LLM: 块文本和子容器仅在当前键的更深缩进内消费，后续同层键不被吞掉。
-# 函数用途: 解析一个YAML值并返回下一条未消费记录。
-def _yaml_item(tokens, index, indent, value, depth):
-    following = index + 1
-    if value in ('>', '|', '>-', '|-', '>+', '|+'):
-        block = []
-        while following < len(tokens) and tokens[following][0] > indent:
-            block.append(tokens[following][1])
-            following += 1
-        return (' ' if value.startswith('>') else '\n').join(block), following
-    if value:
-        return _yaml_scalar(value), following
-    if following < len(tokens) and tokens[following][0] > indent:
-        return _yaml_block(tokens, following, tokens[following][0], depth + 1)
-    return None, following
-
-
-# LLM: 标量不eval；引号保留井号，JSON容器严格解析，无引号行内列表只接受普通标量；未知tag/anchor明确拒绝。
-# 函数用途: 规范常用YAML标量和行内容器，拒绝不能安全解释的语法。
-def _yaml_scalar(value):
-    if value.startswith("'") and value.endswith("'"):
-        return value[1:-1].replace("''", "'")
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        pass
-    if value.startswith('[') and value.endswith(']'):
-        return [_yaml_scalar(item.strip()) for item in value[1:-1].split(',')] if value[1:-1].strip() else []
-    if value in ('~', 'null'):
-        return None
-    if value.startswith(('!', '&', '*', '{', '"', "'")):
-        raise ValueError('Skill YAML值无效或使用不支持的tag/anchor')
-    return value
+    return split_skill_frontmatter(text)[0]
 
 
 # LLM: JSON侧文件缺失是合法空扩展，非法JSON/非对象明确失败；不把坏内容覆盖成新对象。
@@ -147,12 +71,15 @@ def _skill_id(name):
         return f'skill_{slug}_{sha256(name.encode("utf-8")).hexdigest()[:16]}'
 
 
-# LLM: 特殊目录身份固定从目录派生，不被metadata.id重定位；原名放name/refs.skill_dir，公共字段严格往返。
+# LLM: 特殊目录身份仍从目录派生，列表沿统一schema归一；描述仅去外层空白，保留内部换行。
 # 函数用途: 将技能元数据转成插件可显示的标准提取Key，不携带正文或磁盘路径。
 def _descriptor(directory, meta, owner_id):
     extensions = {key: meta.get(key, default) for key, default in (('when_to_use', ''), ('category', 'general'))}
     if any(not isinstance(value, str) for value in extensions.values()):
         raise ValueError('Skill适用场景和分类必须是字符串')
+    summary = meta.get('description', meta.get('summary', ''))
+    if not isinstance(summary, str):
+        raise ValueError('Skill说明必须是字符串')
     special = _skill_id(directory.name) != directory.name
     refs = meta.get('refs', {})
     if not isinstance(refs, dict):
@@ -160,11 +87,11 @@ def _descriptor(directory, meta, owner_id):
     refs = {**refs, **({'skill_dir': directory.name} if special else {})}
     descriptor = AssetDescriptor(id=_skill_id(directory.name if special else meta.get('id', directory.name)), kind='skill',
         name=directory.name if special else meta.get('name') or directory.name,
-        summary=meta.get('description', meta.get('summary', '')),
+        summary=summary.strip(),
         version=str(meta.get('version', '1.0.0')), owner_id=owner_id, metadata=extensions,
         access_targets=meta.get('access_targets', ()), data_sources=meta.get('data_sources', ()),
         credential_refs=meta.get('credential_refs', ()), io_contract=meta.get('io_contract', {}),
-        refs=refs, tags=meta.get('tags', ())).to_dict()
+        refs=refs, tags=_as_list(meta.get('tags'))).to_dict()
     return {**descriptor, **descriptor['metadata']}
 
 
@@ -187,7 +114,7 @@ def update_skill_extraction_keys(skill_dir, *, access_targets=None, data_sources
     return descriptor
 
 
-# LLM: 只遍历显式root下目录，逐层nofollow验证；可推迟顶层learned以保证普通目录优先，正文内停止扫描。
+# LLM: 只遍历显式root且逐层nofollow，坏子树隔离；中断不作为坏文件吞掉。
 # 函数用途: 收集一个根目录中的准确SKILL.md路径，不创建目录或缓存。
 def _skill_paths(root, *, skip_learned=False):
     path = Path(root).absolute()
@@ -199,51 +126,165 @@ def _skill_paths(root, *, skip_learned=False):
         parts = pending.pop()
         try:
             names = sorted(list_names_beneath(path, parts))
-        except FileNotFoundError:
+        except InterruptedError:
+            raise
+        except OSError:
             continue
         if 'SKILL.md' in names:
             yield path.joinpath(*parts, 'SKILL.md')
+            continue
+        if len(parts) >= 6:
             continue
         pending.extend((*parts, name) for name in reversed(names)
                        if not name.startswith('.') and not (skip_learned and not parts and name == 'learned')
                        and path.joinpath(*parts, name).is_dir())
 
 
-# LLM: 普通skills目录先于skills/learned；旧home/learned及工作区.agent/skills仍可读，同名Owner目录只认第一份，extra仅沿显式授权。
-# 函数用途: 按来源优先级枚举准确Skill路径，查找时不根据请求名拼接磁盘路径。
-def _owner_skill_paths(home, extra_roots):
-    seen = set()
-    for root, skip in ((home / 'skills', True), (home / 'skills/learned', False),
-                       (home / 'learned', False), (home / 'workspace/.agent/skills', False)):
-        for path in _skill_paths(root, skip_learned=skip):
-            if path.parent.name not in seen:
-                seen.add(path.parent.name)
-                yield path
-    for root in extra_roots:
-        yield from _skill_paths(root)
+# LLM: 根共用服务声明；仅同来源同目录遮蔽，显式其它来源仍可查询。
+# 函数用途: 枚举实际文件和准确来源，不拿请求ID拼路径。
+def _catalog_paths(home, extra_roots=(), workspace_root=None):
+    home, seen = Path(home).absolute(), set()
+    for root, source in skill_catalog_roots(home, workspace_root, extra_roots):
+        for path in _skill_paths(root, skip_learned=root == home / 'skills'):
+            key = (source, path.parent.name)
+            if key not in seen:
+                seen.add(key)
+                yield path, source
 
 
-# LLM: list/get共用同一发现与ID去重事实；Owner根来自调用方，不读取引用字段作为路径或身份。
-# 函数用途: 按固定来源优先级提取技能描述符和原目录名，避免详情读到已被遮蔽的副本。
-def _owner_descriptors(owner_home, extra_roots):
-    home, seen = Path(owner_home).absolute(), set()
-    for path in _owner_skill_paths(home, extra_roots):
-        descriptor = extract_skill_descriptor(path, owner_id=home.name)
-        if descriptor['id'] not in seen:
-            seen.add(descriptor['id'])
+# LLM: 保留内部路径入口，不能用它绕过已提供的授权快照。
+# 函数用途: 复用唯一根声明枚举路径。
+def _owner_skill_paths(home, extra_roots, workspace_root=None):
+    for path, _ in _catalog_paths(home, extra_roots, workspace_root):
+        yield path
+
+
+# LLM: 显式来源保留plugin包段，裸名仅在已发现别名内匹配。
+# 函数用途: 判断准确来源引用是否命中真实身份。
+def _reference_matches(reference, aliases, source):
+    if ':' not in reference:
+        return reference in aliases
+    requested_source, _, name = reference.rpartition(':')
+    return requested_source == source and name in aliases
+
+
+# LLM: 来源、稳定引用和hash只来自发现事实，头部或sidecar不能覆盖。
+# 函数用途: 为标准资产附加不可伪造的投影身份和可选正文。
+def _catalog_projection(descriptor, source, stable_id, content_hash, text, include_body):
+    descriptor = {**descriptor, 'metadata': {
+        **descriptor['metadata'], 'source': source, 'stable_id': stable_id, 'content_hash': content_hash}}
+    if include_body:
+        descriptor['body_markdown'] = text
+    return descriptor
+
+
+# LLM: 只读准确路径一次，来源和内容hash不接受正文声明。
+# 函数用途: 从发现文件生成来源固定的资产描述符。
+def _catalog_descriptor(path, source, owner_id, include_body):
+    text = _text(path.parent, 'SKILL.md')
+    if text is None:
+        raise FileNotFoundError('Skill正文不存在')
+    meta = {**_frontmatter(text), **_sidecar(path.parent)}
+    descriptor = _descriptor(path.parent, meta, owner_id)
+    name = _skill_id(meta.get('name') or path.parent.name)
+    stable_id = valid_skill_reference(f'{source}:{name}')
+    return _catalog_projection(descriptor, source, stable_id, sha256(text.encode('utf-8')).hexdigest(), text, include_body)
+
+
+# LLM: 只沿快照read_body取授权版本，不读活动sidecar或重新发现；核对正文hash。
+# 函数用途: 将已启用条目投影为资产，失效快照明确拒读。
+def _snapshot_descriptor(home, snapshot, entry, include_body):
+    stable_id = valid_skill_reference(entry.stable_id)
+    if stable_id != f'{entry.source}:{entry.name}':
+        raise ValueError('Skill快照身份不一致')
+    try:
+        text = snapshot.read_body(stable_id)
+    except InterruptedError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise ValueError('已授权Skill快照正文不可读') from exc
+    if sha256(text.encode('utf-8')).hexdigest() != entry.content_sha256:
+        raise ValueError('Skill快照正文已变化')
+    directory = Path(entry.path).parent
+    meta = {**_frontmatter(text), 'id': _skill_id(directory.name),
+            'name': entry.name, 'description': entry.description,
+            'when_to_use': entry.when_to_use, 'category': entry.category, 'tags': list(entry.tags)}
+    descriptor = _descriptor(directory, meta, home.name)
+    return _catalog_projection(descriptor, entry.source, stable_id, entry.content_sha256, text, include_body)
+
+
+# LLM: enabled_entries是唯一候选集合，空集合保持空；排序只恢复裸名优先级，不新增权限。
+# 函数用途: 投影授权快照并隔离无关损坏条目。
+def _snapshot_descriptors(home, snapshot, requested, include_body):
+    priority = {'workspace': 0, 'owner': 1, 'learned': 2, 'shared': 3, 'builtin': 4}
+    entries = sorted(enumerate(snapshot.enabled_entries()),
+                     key=lambda item: (priority.get(item[1].source, 5), item[0]))
+    for _, entry in entries:
+        if not entry.enabled:
+            continue
+        aliases = (entry.name, _skill_id(Path(entry.path).parent.name))
+        if requested is not None and not _reference_matches(requested, aliases, entry.source):
+            continue
+        try:
+            descriptor = _snapshot_descriptor(home, snapshot, entry, include_body)
+        except InterruptedError:
+            raise
+        except (ValueError, OSError) as exc:
+            if requested is not None:
+                raise ValueError('请求的Skill快照损坏或不可读') from exc
+            continue
+        yield Path(entry.path).parent.name, descriptor
+
+
+# LLM: 存在快照时只投影快照；普通发现隔离坏文件，指定坏文件则保留cause明确报错。
+# 函数用途: 为列表和详情提供同一有序授权描述符流。
+def _owner_descriptors(owner_home, extra_roots=(), *, workspace_root=None,
+                       skill_snapshot=None, requested=None, include_body=False):
+    home = Path(owner_home).absolute()
+    if skill_snapshot is not None:
+        yield from _snapshot_descriptors(home, skill_snapshot, requested, include_body)
+        return
+    for path, source in _catalog_paths(home, extra_roots, workspace_root):
+        aliases = (path.parent.name, _skill_id(path.parent.name))
+        try:
+            descriptor = _catalog_descriptor(path, source, home.name, include_body)
+        except InterruptedError:
+            raise
+        except (ValueError, OSError) as exc:
+            if requested is not None and _reference_matches(requested, aliases, source):
+                raise ValueError('请求的Skill文件损坏或不可读') from exc
+            continue
+        aliases += (descriptor['id'], descriptor['name'],
+                    canonical_skill_name(descriptor['metadata']['stable_id']))
+        if requested is None or _reference_matches(requested, aliases, source):
             yield path.parent.name, descriptor
 
 
-# LLM: Owner skills及learned先于extra，同ID首项优先；排序不改变来源资格，不物化缺失Owner。
-# 函数用途: 列出本Owner技能标准字典，支持额外已加载Skill目录或准确正文路径。
-def list_owner_skill_descriptors(owner_home, extra_roots=()):
-    return sorted((descriptor for _, descriptor in _owner_descriptors(owner_home, extra_roots)), key=lambda row: row['id'])
+# LLM: 展示排序保持首个裸ID优先，显式来源详情不受列表去重影响；空快照不补扫。
+# 函数用途: 列出当前授权技能的标准字典。
+def list_owner_skill_descriptors(owner_home, extra_roots=(), *,
+                                 workspace_root: str | Path | None = None,
+                                 skill_snapshot: Any | None = None):
+    found = {}
+    for _, descriptor in _owner_descriptors(
+        owner_home, extra_roots, workspace_root=workspace_root, skill_snapshot=skill_snapshot
+    ):
+        found.setdefault(descriptor['id'], descriptor)
+    return [found[key] for key in sorted(found)]
 
 
-# LLM: 只匹配实际发现的原名或稳定ID，不用用户输入构造路径；缺失和损坏均显式返回错误。
-# 函数用途: 按派生ID或原始目录名取得同一份Owner技能描述符。
-def get_owner_skill_descriptor(owner_home, skill_id, extra_roots=()):
-    for name, descriptor in _owner_descriptors(owner_home, extra_roots):
-        if skill_id in (name, descriptor['id']):
-            return descriptor
+# LLM: stable_id严格匹配来源，原目录名仅用于既有只读查找，不作为磁盘路径。
+# 函数用途: 读取裸ID或准确来源技能，并可附带同一授权版本的正文。
+def get_owner_skill_descriptor(owner_home, skill_id, extra_roots=(), *,
+                                workspace_root: str | Path | None = None,
+                                skill_snapshot: Any | None = None, include_body=False):
+    if not isinstance(skill_id, str) or not skill_id:
+        raise ValueError('Skill引用必须是非空字符串')
+    if ':' in skill_id:
+        valid_skill_reference(skill_id)
+    for _, descriptor in _owner_descriptors(
+        owner_home, extra_roots, workspace_root=workspace_root, skill_snapshot=skill_snapshot,
+        requested=skill_id, include_body=include_body
+    ):
+        return descriptor
     raise FileNotFoundError('Owner技能不存在')

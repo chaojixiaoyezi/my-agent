@@ -455,8 +455,8 @@ def _compact_operation_evidence_ref(agent: object, thread_id: str) -> str:
     return str(path) if path.is_file() else ""
 
 
-# LLM: 当前目标由任务执行范围决定，不以名字或后台剩余数量选取；独立 Goal 仍由精确身份续跑。
-# 函数用途: 给前台注入唯一属于前台的未结束目标，避免后台只剩一项时误占前台或导致加载失败。
+# LLM: 当前目标由任务执行范围决定並透传权威 revision，不以名字或后台剩余数量选取；独立 Goal 仍由精确身份续跑。
+# 函数用途: 给前台注入唯一属于前台的未结束目标及修订号，避免后台只剩一项时误占前台或导致加载失败。
 def _gateway_thread_goal(
     store: object, thread_id: str, load_errors: list[dict]
 ) -> dict[str, object] | None:
@@ -482,6 +482,7 @@ def _gateway_thread_goal(
     goal = unfinished[0]
     return {
         "goal_id": str(getattr(goal, "goal_id", "") or ""),
+        "revision": getattr(goal, "revision", None),
         "task_id": str(getattr(goal, "task_id", "") or ""),
         "name": str(getattr(goal, "name", "") or ""),
         "objective": str(getattr(goal, "objective", "") or ""),

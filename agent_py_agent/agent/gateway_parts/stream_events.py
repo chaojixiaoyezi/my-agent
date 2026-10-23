@@ -11,6 +11,7 @@ from ..conversation.channels import (
     project_user_reply,
     redact_structured_identifiers,
 )
+from ..conversation.context_usage import public_context_usage
 
 CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
 _CONTEXT_USAGE_TOKEN_FIELDS = (
@@ -45,21 +46,10 @@ def provider_queue_event(value: object) -> dict[str, object]:
     return {"kind": "runtime_progress", "text": text, "verbose_level": "full", "provider_queue": public}
 
 
-# LLM: Gateway stream sanitization accepts only the frozen schema, known numeric fields and two short display labels
-# (model_name / reasoning_level, strings only, trimmed to 80 chars, see conversation.context_usage); unknown keys and all
-# content-bearing values are dropped before the public event is written.
-# 函数用途: 清洗上下文用量快照，防止模型正文或工具定义意外进入 Gateway chunk；只放行给状态行看的模型名与思考档位短标签。
+# LLM: Gateway沿唯一公开白名单保留数字、短标签及有明确证据的估算来源；不推断旧来源，不放行正文或工具参数。
+# 函数用途: 让Gateway事件与持久快照使用同一上下文用量投影。
 def public_context_usage_payload(value: object) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("schema") != CONTEXT_USAGE_SCHEMA:
-        return {}
-    protocol = str(value.get("protocol") or "")
-    return {
-        "schema": CONTEXT_USAGE_SCHEMA,
-        "estimated": value.get("estimated") is True,
-        **{key: non_negative_int(value.get(key) or 0) for key in _CONTEXT_USAGE_TOKEN_FIELDS},
-        "protocol": protocol if protocol in {"native", "text"} else "unknown",
-        **{key: _short_label(value.get(key)) for key in ("model_name", "reasoning_level")},
-    }
+    return public_context_usage(value)
 
 
 # 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让长正文借这两个字段进事件流。

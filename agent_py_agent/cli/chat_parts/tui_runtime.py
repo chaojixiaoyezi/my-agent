@@ -19,6 +19,7 @@ from ...agent.contracts.tool_approval import (
     ToolApprovalRequest,
 )
 from ...agent.conversation.compact_progress import normalize_conversation_compact_progress
+from ...agent.conversation.context_usage import public_context_usage
 from ...agent.conversation.model_metrics import newer_model_metrics, public_model_metrics
 from ...agent.conversation.tool_input_progress import ToolInputProgressEventProjector
 from ...agent.conversation.turn_resume_notice import turn_resumed_notice_text
@@ -727,24 +728,10 @@ def _normalize_main_activity(value: object) -> dict[str, object]:
     return public
 
 
-# LLM: Background context uses the same frozen schema as foreground status.
-# Unknown or content-bearing fields are removed before the event reaches the reducer; the two short display labels
-# (model_name / reasoning_level) pass through _context_usage_label like every other copy of this schema.
-# 函数用途: 清洗后台 main 的上下文用量，只保留状态条需要的数字和模型名/思考档位两个短标签。
+# LLM: 后台上下文沿唯一公开投影清洗；显式估算来源原样保留，旧来源未知，不向reducer传正文或任意标签。
+# 函数用途: 保留后台main合法上下文数字和来源，避免TUI二次白名单丢字段。
 def _normalize_context_usage(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping) or value.get("schema") != _CONTEXT_USAGE_SCHEMA:
-        return {}
-    protocol = str(value.get("protocol") or "")
-    return {
-        "schema": _CONTEXT_USAGE_SCHEMA,
-        "estimated": value.get("estimated") is True,
-        **{
-            key: _nonnegative_int(value.get(key))
-            for key in _CONTEXT_USAGE_TOKEN_FIELDS
-        },
-        "protocol": protocol if protocol in {"native", "text"} else "unknown",
-        **{key: _context_usage_label(value.get(key)) for key in _CONTEXT_USAGE_LABEL_FIELDS},
-    }
+    return public_context_usage(value)
 
 
 # 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让长正文借状态行标签进 TUI 事件。
@@ -2922,31 +2909,10 @@ def _nonnegative_int(value: Any) -> int:
         return 0
 
 
-# LLM: Direct local and Gateway context events converge through this exact schema/field whitelist;
-# arbitrary nested values cannot reach reducer snapshots or renderer cache keys.
-# 函数用途: 清洗上下文状态事件，只保留 TUI 展示需要的非负数字与协议名。
+# LLM: 本地与Gateway上下文事件复用唯一公开投影；仅放行合法来源，不让任意嵌套正文进入reducer或渲染缓存。
+# 函数用途: 为前台状态保留同一份合法数字、短标签和明确估算来源。
 def _tui_context_usage_payload(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        return {}
-    if value.get("schema") != "model_visible_context_usage.v1":
-        return {}
-    token_fields = (
-        "context_window_tokens",
-        "compact_trigger_tokens",
-        "current_tokens",
-        "prompt_tokens",
-        "messages_tokens",
-        "runtime_guidance_tokens",
-        "tool_schema_tokens",
-    )
-    protocol = str(value.get("protocol") or "unknown")
-    return {
-        "schema": "model_visible_context_usage.v1",
-        "estimated": value.get("estimated") is True,
-        **{field: _nonnegative_int(value.get(field)) for field in token_fields},
-        "protocol": protocol if protocol in {"native", "text"} else "unknown",
-        **{field: _context_usage_label(value.get(field)) for field in _CONTEXT_USAGE_LABEL_FIELDS},
-    }
+    return public_context_usage(value)
 
 
 # LLM: Direct and Gateway compaction paths converge through one exact counter whitelist; this

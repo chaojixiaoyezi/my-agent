@@ -3794,3 +3794,7 @@ private_interaction_service原503 catch调用同叶_report_private_interaction_f
 ### receipt安装异常分责
 
 `process_completion_source.consume_process_completion`只在原CommitPending的直接`__cause__`是既定四actual或NoFollow/Permission/NotADirectory时抛原对象，不解析文本、不更改`process_session_commit`包装默认。其它原本地已提交redo仍返回原pending，由原request重排与Wake dedupe补齐，不伪终态。
+
+### 请求修订去重与上下文用量来源（2026-10-23）
+
+`gateway_parts/request_prompt.py` 按结构化版本指纹省略重复修订块；`gateway_parts/stream_events.py` 的 `public_context_usage_payload` 直接委托 `conversation/context_usage.py:public_context_usage`。

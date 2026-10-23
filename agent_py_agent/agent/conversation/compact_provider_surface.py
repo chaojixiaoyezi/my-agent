@@ -66,6 +66,7 @@ class ConversationCompactProviderSurface:
 # reuse ordinary helpers; original preparation may synchronize tools/probe capability. Carried
 # display is optional and read-only; this entry is not a pure capacity renderer or inspect path.
 # 包候选沿 model_surface 原范围和重验后的 selected 集合投影，不用默认范围或载体旧选择重新补回未选包。
+# 工具加载名只按首见顺序去重后交原resolver，不先转set破坏发现顺序或改变allowed_tools。
 # 函数用途: 按原链冻结压缩缓存面和实际自我目录资格，复用已提交线程人格；失败仍在摘要发送前抛出。
 def prepare_conversation_compact_provider_surface(
     agent: object,
@@ -89,23 +90,16 @@ def prepare_conversation_compact_provider_surface(
         _resolve_tool_sections,
         _tool_snapshots_for_run,
     )
+    from ..tooling.tool_search_state import ordered_tool_names
 
-    allowed_tools = (
-        list(model_surface.allowed_tools)
-        if model_surface.allowed_tools is not None
-        else None
-    )
+    allowed_tools = list(model_surface.allowed_tools) if model_surface.allowed_tools is not None else None
     runtime_request = model_surface.presentation_context
     if not isinstance(runtime_request, RuntimeContextRequest):
         runtime_request = RuntimeContextRequest(
-            user_prompt="",
-            inject=[],
-            resume_context=False,
+            user_prompt="", inject=[], resume_context=False,
             context_scope=str(model_surface.context_scope or "default"),
-            allowed_tools=allowed_tools,
-            run_id=str(run_id or ""),
-            source="conversation_compact_summary",
-            save=False,
+            allowed_tools=allowed_tools, run_id=str(run_id or ""),
+            source="conversation_compact_summary", save=False,
         )
     runtime_snapshot, protocol_snapshot = _tool_snapshots_for_run(
         agent, replace(runtime_request, allowed_tools=allowed_tools, context_scope=model_surface.context_scope),
@@ -151,16 +145,12 @@ def prepare_conversation_compact_provider_surface(
             tool_protocol_snapshot=protocol_snapshot,
             tool_runtime_snapshot=runtime_snapshot,
             allowed_tools=allowed_tools,
-            loaded_tool_names=set(model_surface.loaded_tool_names),
+            loaded_tool_names=ordered_tool_names(model_surface.loaded_tool_names),
         ),
     )
     return ConversationCompactProviderSurface(
         stable_prompt_prefix=str(layout.stable_prefix),
-        tools=(
-            tuple(deepcopy(list(native_tools)))
-            if native_tools is not None
-            else None
-        ),
+        tools=tuple(deepcopy(list(native_tools))) if native_tools is not None else None,
         system_instruction=provider_system_instruction(getattr(agent, "backend", None)),
         volatile_sections=tuple(
             section for section in layout.volatile_sections

@@ -100,7 +100,7 @@ class ScriptStore(_AssetStore):
             raise KeyError(script_id)
         return value
 
-    # LLM: 同锁继承历史后走可恢复事务；入口大小写别名和旧叶清理保持原合同。
+    # LLM: 同锁继承历史后走可恢复事务；正常提交后读回走独立异常阶段，入口别名与旧叶清理保持原合同。
     # 函数用途: 保存新脚本或替换已有脚本，返回安全读回的记录。
     def save_script(self, descriptor, code, *, entrypoint="main.py", interpreter="python3", timeout_seconds=120):
         descriptor = AssetDescriptor.from_dict(descriptor.to_dict())
@@ -117,7 +117,7 @@ class ScriptStore(_AssetStore):
             if old and old["entrypoint"] != entrypoint:
                 files[old["entrypoint"]] = None
             self._write(descriptor.to_dict() | options, files)
-            return self._get(descriptor.id)
+            return self._readback_after_commit(descriptor.id)
 
     # LLM: Owner损坏明确失败而非回退；仅真实缺失才在释放Owner锁后顺序读取全局，不跨Owner枚举。
     # 函数用途: 优先读取本Owner脚本，缺失时返回只读全局代码副本。
@@ -143,7 +143,7 @@ class ScriptStore(_AssetStore):
                 return False
             return self._delete(script_id)
 
-    # LLM: 查询范围按键合并，None删除键；单条及批量候选完整去重追加，评估不是查询授权。
+    # LLM: 查询范围按键合并且None删键；候选去重不授查询权，提交后读回错误不能降成参数错。
     # 函数用途: 锁内修改活跃数据源范围及已评估新源备忘。
     def update_data_sources(self, script_id, source_id, *, query_scope=None, candidate=None, evaluated_candidates=()):
         safe_asset_id(source_id)
@@ -167,9 +167,9 @@ class ScriptStore(_AssetStore):
             sources[index] = source
             options = {key: record[key] for key in ("entrypoint", "interpreter", "timeout_seconds")}
             self._write(replace(descriptor, data_sources=tuple(sources)).to_dict() | options)
-            return self._get(script_id)
+            return self._readback_after_commit(script_id)
 
-    # LLM: 本Owner摘要仍原锁读改写；仅全局存在时释放Owner锁后返回只读副本，绝不累计到共享文件。
+    # LLM: 本Owner摘要原锁提交后单独读回；全局存在时仅返回只读副本，绝不累计到共享文件。
     # 函数用途: 保存本地脚本运行摘要，安全跳过只读全局摘要写入。
     def record_run_summary(self, script_id, status, duration_ms, run_at=None, *, last_error=""):
         with self._locked():
@@ -178,7 +178,7 @@ class ScriptStore(_AssetStore):
                 descriptor, options = _decode_script({key: value for key, value in record.items() if key not in {"code", "entrypoint_path"}})
                 summary = next_run_summary(descriptor.runtime_summary, status, duration_ms, run_at, last_error=last_error)
                 self._write(replace(descriptor, runtime_summary=summary).to_dict() | options)
-                return self._get(script_id)
+                return self._readback_after_commit(script_id)
         record = self._global_get(script_id)
         if record is None:
             raise KeyError(script_id)

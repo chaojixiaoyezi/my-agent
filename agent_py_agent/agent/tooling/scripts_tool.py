@@ -2,13 +2,15 @@
 # 模块用途: 暴露固化脚本管理、源评估与单次运行的结构化工具，支持领域接口注入。
 from __future__ import annotations
 
-import importlib
 import json
 import os
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..assets import AssetPostCommitReadbackError, valid_skill_reference
+from ..assets.descriptor import AssetDescriptor, clean_json
+from ..assets.script_store import ScriptStore
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import open_directory_beneath
 from .input_schema import validate_tool_input
@@ -27,10 +29,10 @@ from .models import (
 REQUIRED_KEYS = {'name', 'access_targets', 'data_sources', 'credential_refs', 'io_contract'}
 
 
-# LLM: 独立动作锁包住工具层读改写；领域Store仍持原集合锁，直接Store写者不受本锁保护。
+# LLM: 独立动作锁仅包住工具层管理动作；preview与其它只读入口不建目录，原子绑定另归Store集合锁。
 # 函数用途: 串行化同Owner同类资产的管理动作，防止增量更新或Skill绑定丢失。
 def _dispatch(tool, params):
-    if params['action'] in ('list', 'get', 'run', 'resume', 'inspect_run'):
+    if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run'):
         return tool._dispatch(params)
     tool.owner_home.mkdir(parents=True, exist_ok=True)
     collection = tool.model_spec.name
@@ -46,13 +48,18 @@ def _owner(home, backend):
         raise ValueError('注入后端Owner与工具Owner不一致')
 
 
-# LLM: 本函数只校验JSON形状，不接触业务存储，可在operation claim前调用。
+# LLM: JSON及显式Skill引用在claim前纯校验，不接触存储；目录ID与Skill来源引用采用各自合同。
 # 函数用途: 共用Schema及按动作必填项，防止错误参数先创建Owner或留下未知操作。
 def _validate(tool, params):
     name = tool.model_spec.name
     valid = validate_tool_input(params, tool.model_spec.input_schema).ok
     if not valid:
         return _outcome(name, {'error': '参数不符合工具Schema'}, False, 'TOOL_INVALID_ARGUMENTS')
+    if 'skill_id' in params:
+        try:
+            valid_skill_reference(params['skill_id'])
+        except (TypeError, ValueError) as exc:
+            return _outcome(name, {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
     action = params['action']
     key = 'script_id' if name == 'scripts' else 'workflow_id'
     required = [] if action == 'list' else [key]
@@ -71,34 +78,33 @@ def _validate(tool, params):
     return None
 
 
-# LLM: 只容忍可选目标模块本身缺失；依赖损坏不降级成另一条隐式写链。
-# 函数用途: 延迟读取并行开发的领域模块，允许宿主注入同协议对象。
-def _optional(name):
-    try:
-        return importlib.import_module('agent_py_agent.agent.' + name)
-    except ModuleNotFoundError as exc:
-        if exc.name not in {'agent_py_agent.agent.' + name, 'agent_py_agent.agent.' + name.split('.')[0]}:
-            raise
-        return None
-
-
-# LLM: 转换始终复制JSON，保领域to_dict的版本字段；不序列化可执行对象。
+# LLM: 保留领域to_dict版本字段后共用有限JSON安全codec；不序列化可执行对象或非有限数。
 # 函数用途: 把领域结果、dataclass或轻量协议结果变成普通JSON值。
 def _plain(value):
     value = value.to_dict() if hasattr(value, 'to_dict') else asdict(value) if is_dataclass(value) else value
-    return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
+    return clean_json(value)
 
 
-# LLM: 两工具共用错误出口，业务结果保留；参数错标not_started、确定失败标failed，仅进程组清理未确认保留unknown。
+# LLM: 两工具共用错误出口；明确提交后读回事实优先于异常类型，进程清理未确认仍保留unknown。
 # 函数用途: 将动作结果转换为宿主结果，运行失败也附完整业务回执与精确副作用状态。
-def _outcome(name, data, ok=True, code='', *, effect_outcome=''):
+def _outcome(name, data, ok=True, code='', *, effect_outcome='', failure_stage=''):
     if not ok and not effect_outcome:
         cleanup_unverified = isinstance(data, dict) and (
             bool((data.get('escalation_context') or {}).get('cleanup_error'))
             or any(bool((s.get('escalation_result') or {}).get('cleanup_error')) for s in data.get('steps') or () if isinstance(s, dict))
         )
         effect_outcome = 'unknown' if cleanup_unverified else ('not_started' if code == 'TOOL_INVALID_ARGUMENTS' else 'failed')
-    return ToolHandlerOutcome(name, ok, json.dumps(_plain(data), ensure_ascii=False), error_code=code, effect_outcome='' if ok else effect_outcome)
+    return ToolHandlerOutcome(name, ok, json.dumps(_plain(data), ensure_ascii=False), error_code=code,
+                              effect_outcome='' if ok else effect_outcome, failure_stage=failure_stage)
+
+
+# LLM: 只接Store提交后typed异常；业务stage精确保留，宿主阶段沿既有execution枚举，不越界扩通用模型。
+# 函数用途: 给两个资产工具统一返回已提交但读回失败的unknown回执。
+def _post_commit_failure(name, error):
+    return _outcome(name, {'error': str(error), 'committed': True,
+                          'failure_stage': 'post_commit_readback', 'effect_outcome': 'unknown'},
+                    False, 'TOOL_POST_COMMIT_READBACK_FAILED', effect_outcome='unknown',
+                    failure_stage='execution')
 
 
 # LLM: 危险动作在ask模式走原审批、在auto/full-access模式沿自主决策放行；资源按当前Owner工具实例串行。
@@ -112,18 +118,19 @@ def _policy(name, reads, dangerous):
         resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=(name + ':current_owner',)))
 
 
-# LLM: Schema和目录声明同源；没有owner_home参数，调用者不能改Owner根或注入后端。
+# LLM: 普通目录ID维持严格Schema；Skill引用由preclaim的valid_skill_reference校验，不能将来源前缀误当路径。
 # 函数用途: 构造默认收起的工具描述与封闭动作集合。
 def _spec(name, description, actions, properties):
     properties = {key: {**value, **({'pattern': r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'}
-                  if key.endswith('_id') or key in ('scope_key', 'entrypoint') else {})} for key, value in properties.items()}
+                  if key.endswith('_id') and key != 'skill_id' or key in ('scope_key', 'entrypoint') else {})} for key, value in properties.items()}
     return ToolModelSpec(name, description, {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': actions}, **properties}, 'required': ['action'], 'additionalProperties': False},
-        hints=ToolModelHints(category='capability', default_deferred=True, deferred_summary=description))
+        hints=ToolModelHints(category='capability', default_deferred=True,
+                             deferred_summary=description.split('；', 1)[0][:60]))
 
 
-# LLM: 领域值对象优先；同协议注入时传独立字典，缺省补齐id/kind但仍强制标准Key与目录ID一致。
-# 函数用途: 校验脚本描述符并恢复AssetDescriptor，缺依赖时保留同形JSON。
+# LLM: 同仓唯一AssetDescriptor校验；补齐id/kind后仍强制标准Key与目录一致，注入Store同样接领域值对象。
+# 函数用途: 校验脚本描述符并恢复唯一AssetDescriptor合同。
 def _descriptor(data, asset_id, kind):
     if not isinstance(data, dict):
         raise ValueError('descriptor必须为对象')
@@ -135,8 +142,7 @@ def _descriptor(data, asset_id, kind):
         raise ValueError('name或io_contract类型无效')
     if any(not isinstance(data[key], list) for key in ('access_targets', 'data_sources', 'credential_refs')):
         raise ValueError('目标、数据源和凭据引用必须为列表')
-    module = _optional('assets.descriptor')
-    return module.AssetDescriptor.from_dict(data) if module else _plain(data)
+    return AssetDescriptor.from_dict(data)
 
 
 # LLM: Store与runner均绑定同一个可信Owner；execute入口不接收身份、路径或任意命令。
@@ -157,8 +163,8 @@ class ScriptsTool(BaseTool):
             'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600}})
     runtime_policy = _policy('scripts', ('list', 'get'), ('run', 'delete'))
 
-    # LLM: 可注入具有get/list/save/delete/update_data_sources方法的Store和run_script协议，不在构造时启动进程。
-    # 函数用途: 固定Owner，并保留尚未就绪领域模块的轻量接口接缝。
+    # LLM: 可注入同Owner的Store和固定run_script协议，不在构造时启动进程；不猜同仓模块是否尚未开发。
+    # 函数用途: 固定Owner并保存显式领域依赖。
     def __init__(self, owner_home: Path, *, store=None, runner=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
@@ -170,17 +176,14 @@ class ScriptsTool(BaseTool):
     def validate_invocation(self, params, context):
         return _validate(self, params)
 
-    # LLM: 优先正式资产Store；模块缺失且未注入时显式不可用，不另建平行账本。
+    # LLM: 显式注入优先，其余固定采用同仓ScriptStore，不猜多版本模块或另建平行账本。
     # 函数用途: 按需取得当前Owner唯一脚本存储。
     def _store(self):
         if self.store is None:
-            module = _optional('assets.script_store')
-            if module is None:
-                raise RuntimeError('资产模块未就绪，请宿主注入ScriptStore协议')
-            self.store = module.ScriptStore(self.owner_home)
+            self.store = ScriptStore(self.owner_home)
         return self.store
 
-    # LLM: 输入错误和真实运行失败分开；不吞中断，不以业务JSON文字改写成功状态。
+    # LLM: 先区分已提交读回异常，再区分预检错误和运行失败；不吞中断，不以业务JSON文字重签副作用事实。
     # 函数用途: 路由结构化脚本动作并返回JSON或原失败事实。
     def execute(self, params):
         invalid = self.validate_invocation(params, None)
@@ -190,12 +193,14 @@ class ScriptsTool(BaseTool):
             data = _dispatch(self, params)
             ok = params['action'] != 'run' or data.get('ok') is True
             return _outcome('scripts', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
+        except AssetPostCommitReadbackError as exc:
+            return _post_commit_failure('scripts', exc)
         except (ValueError, TypeError, KeyError) as exc:
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
-    # LLM: action只做精确枚举；所有ID由领域Store校验，run不接受路径替代ID。
+    # LLM: action只做精确枚举；ID归Store校验，runner显式注入优先且默认只延迟导入固定ScriptRunner。
     # 函数用途: 将公开动作交给领域存储或执行器。
     def _dispatch(self, params):
         action, store = params['action'], self._store()
@@ -218,10 +223,8 @@ class ScriptsTool(BaseTool):
         if action == 'run':
             runner = self.runner
             if runner is None:
-                module = _optional('workflows')
-                runner = module.ScriptRunner(self.owner_home) if module else None
-            if runner is None:
-                raise RuntimeError('请宿主注入run_script协议')
+                from ..workflows.script_runner import ScriptRunner
+                runner = ScriptRunner(self.owner_home)
             return _plain(runner.run_script(script_id, params.get('inputs', {}),
                 timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
         raise ValueError('未知脚本action')

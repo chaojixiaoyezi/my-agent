@@ -595,6 +595,7 @@ def _subagent_model_run_params(
 
 
 # LLM: 身份及当前输入只复制原 RunParams，不取 carrier.binding；没有实际参数的预运行准备不回传已评估，当前授权和原快照仍唯一。
+# 已加载工具仅按输入首见顺序去重，不能排序或先转set，不改变allowed_tools和身份。
 # 函数用途: 为 child/grandchild 压缩构造与实际模型轮一致的缓存面，同步携带本轮展示的原清除回调。
 def _subagent_compact_model_surface(
     context: object,
@@ -610,15 +611,9 @@ def _subagent_compact_model_surface(
         allowed_tools=tuple(allowed) if allowed is not None else None,
         system_prompt_override=subagent_runner_system_prompt(context),
         context_scope="task_local",
-        loaded_tool_names=tuple(
-            sorted(
-                {
-                    str(item).strip()
-                    for item in (loaded_tool_names or ())
-                    if str(item).strip()
-                }
-            )
-        ),
+        loaded_tool_names=tuple(dict.fromkeys(
+            str(item).strip() for item in (loaded_tool_names or ()) if str(item).strip()
+        )),
         presentation_context=(RuntimeContextRequest(
             user_prompt=run_params.root_user_prompt, inject=[], resume_context=False,
             context_scope=run_params.context_scope, allowed_tools=deepcopy(run_params.allowed_tools),
@@ -632,7 +627,7 @@ def _subagent_compact_model_surface(
     )
 
 
-# LLM: 工具发现只经原 typed archive reducer 恢复；可选展示只读当前 RunParams，不从归档正文推测选择或执行权。
+# LLM: 工具发现沿typed归档有序恢复，不能先走旧set入口丢序；展示只读当前RunParams，不从正文推测选择或执行权。
 # 函数用途: 恢复本轮一次性 schema，并把原宿主展示交给 transcript Compact 复核。
 def _pending_subagent_compact_model_surface(
     context: object,
@@ -640,11 +635,11 @@ def _pending_subagent_compact_model_surface(
     *,
     run_params: RunParams | None = None,
 ) -> object:
-    from ...tooling.tool_search_state import pending_carried_loaded_tool_names
+    from ...tooling.tool_search_state import ordered_carried_loaded_tool_names
 
     return _subagent_compact_model_surface(
         context,
-        loaded_tool_names=pending_carried_loaded_tool_names(records),
+        loaded_tool_names=ordered_carried_loaded_tool_names(records),
         run_params=run_params,
     )
 

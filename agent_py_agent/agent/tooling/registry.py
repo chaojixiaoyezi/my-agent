@@ -503,7 +503,7 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
                       "purpose": _compact_tool_purpose(snapshot.runtime(item["name"]))[:36],
                       "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable"}
                      for item in payload.get("tools", []) if item["name"] in executable]
-    return {
+    live = {
         "schema_name": "tool_runtime_manifest_live",
         "schema_version": 4,
         "counts": {"registered": len(snapshot.runtimes), "available": len(executable), "direct": len(direct_tool_names)},
@@ -518,6 +518,39 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
         "detail_policy": {"tool_search": {"query": "按工具名或能力搜索", "names": "按精确名字批量加载原生Schema"},
                           "self_map": {"section": "tools", "item": "需要详情的工具名"},
                           "read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
+    }
+    return _bounded_live_manifest(live)
+
+
+# LLM: Only the live projection is bounded; canonical manifest and execution authorization stay unchanged.
+# 函数用途: 按完整UTF-8信封计量，省略名卡时保留计数与正式详情入口。
+def _bounded_live_manifest(live: dict[str, object]) -> dict[str, object]:
+    def size(value: object) -> int:
+        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+    if size(live) <= 12000:
+        return live
+    result = dict(live)
+    result["tools"] = list(live.get("tools") or [])
+    result["unavailable_tools"] = list(live.get("unavailable_tools") or [])
+    omitted = {"tools": 0, "unavailable_tools": 0}
+    result["omitted_items"] = omitted
+    for key in ("tools", "unavailable_tools"):
+        while result[key] and size(result) > 12000:
+            result[key].pop()
+            omitted[key] += 1
+    if size(result) <= 12000:
+        return result
+    return {
+        "schema_name": "tool_runtime_manifest_live",
+        "schema_version": 4,
+        "counts": live["counts"],
+        "tools": [],
+        "unavailable_tools": [],
+        "omitted_items": omitted,
+        "details_omitted": True,
+        "detail_ref": "self_map(section='tools'); 权限与完整目录读取本次归档",
+        "detail_policy": {"read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
     }
 
 
@@ -652,12 +685,17 @@ class ToolRegistry:
                                    self.path_access_mode)
         runtimes: list[ToolRuntime] = []
         unavailable: list[tuple[str, str, str]] = []
+        catalog_specs: list[ToolModelSpec] = []
         for name, tool in self.tools.items():
-            if name in self.disabled_tool_names:
-                continue
             if allowed is None and name in self.default_hidden_tool_names:
                 continue
             if allowed is not None and name not in allowed:
+                continue
+            spec = getattr(tool, "model_spec", None)
+            exposure = getattr(tool, "exposure", None)
+            if isinstance(spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
+                catalog_specs.append(spec)
+            if name in self.disabled_tool_names:
                 continue
             availability = _safe_tool_availability(tool)
             if not availability.available:
@@ -677,6 +715,7 @@ class ToolRegistry:
             unavailable_tools=tuple(unavailable),
             allowed_tools=frozenset(allowed) if allowed is not None else None,
             owner_type=self.owner_type,
+            catalog_specs=tuple(catalog_specs),
         )
 
     def close_mcp_clients(self) -> None:

@@ -100,8 +100,8 @@ def test_watch_descriptions_are_surface_specific():
     ordinary = build_watch_stream_model_spec()
     audit_spec = build_watch_stream_model_spec(surface='audit_binding')
     adapter = ordinary.input_schema['properties']['source_adapter']['description']
-    assert '命名 Audit' not in adapter and 'sha256' in adapter
-    assert len(adapter) < 350
+    assert '命名 Audit' in adapter and 'sha256' in adapter
+    assert 'record_keys' in adapter and 'checkpoint 必须是 JSON 对象' in adapter
     assert len(ordinary.description) < 250
     assert '每条完整记录' in audit_spec.description
     assert 'verdict_token' in audit_spec.input_schema['properties']['verdicts']['description']

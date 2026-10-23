@@ -173,7 +173,11 @@ def _load_agents_source_document(repository):
     if snapshot.kind == "owner_default" and snapshot.config_version == 1 and snapshot.revision == 0 and snapshot.status == "ready":
         prompt_content = _factory_agents_prompt(repository, display, snapshot.content_sha256)
     sanitized, blocked = _sanitize_persona_text(prompt_content)
-    content, truncated = _bounded_prompt_content(sanitized, repository.prompt_max_chars)
+    content, truncated = (
+        (sanitized, False)
+        if repository.prompt_max_chars == _DEFAULT_PROMPT_MAX_CHARS
+        else _bounded_prompt_content(sanitized, repository.prompt_max_chars)
+    )
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
     detail = f"factory_seed:v{FACTORY_AGENTS_SEED_VERSION}; original_preserved" if prompt_content != display else ""
     diagnostic = PersonaLoadDiagnostic("agents", state, _sha256_text(display), len(raw.encode()), len(display), truncated, blocked, detail)
@@ -1096,15 +1100,15 @@ def _persona_tail_at_boundary(content: str, budget: int, *, allow_partial: bool 
     return content[-budget:] if allow_partial else ""
 
 
-# LLM: 仅默认AGENTS、精确原始字节SHA、没有任何人格版本账本时给新工厂视图；不写原文/版本/审批记录。
-# 函数用途: 保守识别未修改出厂种子；用户定制、历史账本或无法核实的状态均原样显示。
+# LLM: 仅默认AGENTS、精确原始字节SHA、没有任何AGENTS专属账本记录时给新工厂视图；不写原文/版本/审批记录。
+# 函数用途: 保守识别未修改出厂种子；用户定制、AGENTS历史账本或无法核实的状态均原样显示。
 def _factory_agents_prompt(repository, raw: str, raw_sha256: str) -> str:
     candidate = factory_agents_seed_for_sha256(raw_sha256)
     if candidate is None or repository.paths["agents"] != repository.owner_home / "AGENTS.md":
         return raw
     if repository.versions_path.parent.is_symlink():
         return raw
-    for ledger in (repository.versions_path, repository.versions_path.parent / "agents_source.json"):
+    for ledger in (repository.versions_path.parent / "agents_source.json",):
         try:
             ledger.lstat()
         except FileNotFoundError:
@@ -1112,7 +1116,39 @@ def _factory_agents_prompt(repository, raw: str, raw_sha256: str) -> str:
         except OSError:
             return raw
         return raw
-    return candidate
+    return candidate if _only_other_persona_history(repository.versions_path) else raw
+
+
+# LLM: Strict ledger reads fail closed; USER/SOUL history cannot revoke unchanged factory AGENTS projection.
+# 函数用途: 区分无关人格历史与AGENTS历史，不将坏账本当空账本。
+def _only_other_persona_history(path: Path) -> bool:
+    import json
+
+    from .persona_version_ledger import _ledger_image
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate ledger key")
+            result[key] = value
+        return result
+
+    try:
+        image = _ledger_image(path)
+        if image is None:
+            return True
+        rows = [
+            json.loads(line, object_pairs_hook=unique_object)
+            for line in image[1].decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        return bool(rows) and all(
+            isinstance(row, dict) and row.get("target") in {"user", "soul"}
+            for row in rows
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False
 
 
 __all__ = [
@@ -1268,7 +1304,11 @@ def _loaded_persona_snapshot(target, raw, stat, prompt_max_chars, *, prompt_cont
     sha256 = _sha256_text(raw)
     projected = raw if prompt_content is None else prompt_content
     sanitized, blocked = _sanitize_persona_text(projected)
-    content, truncated = _bounded_prompt_content(sanitized, prompt_max_chars)
+    content, truncated = (
+        (sanitized, False)
+        if target == "agents" and prompt_max_chars == _DEFAULT_PROMPT_MAX_CHARS
+        else _bounded_prompt_content(sanitized, prompt_max_chars)
+    )
     state = "blocked" if blocked else ("truncated" if truncated else "ok")
     return PersonaDocumentSnapshot(
         target,

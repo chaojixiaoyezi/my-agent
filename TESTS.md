@@ -1,3 +1,11 @@
+## 2026-10-23 C1b 审计返工：计量来源消费与工具发现顺序
+
+- 来源：`ctxopt-c1b-audit-remediation`（astra 审计 B1-05、B1-06、B1-01/B1-04 接线要求）。旧快照缺明确 `raw_estimated_tokens` 或合法估算标签时保持未知，不按数值差异编造来源；Gateway、TUI adapter/reducer 和 `/context` 报告共用公开白名单。
+- `test_context_usage.py` 覆盖缺字段、bool/负数/浮点/字符串 raw、假 actual、矛盾标签、显式校准、新旧来源往返和真实 TUI store/reducer 切换；`test_runtime_context_pressure.py` 仍以严格字段集合相等和正文/秘密不泄露断言核对新增五字段。
+- `test_context_tool_discovery_order.py` 覆盖盲调 list/set、独立加载顺序、线程优先/跨线程拒绝、Compact resolver 参数边界、Gateway 与 pending-subagent 不经过旧 set 入口，以及 typed 归档首见去重、旧无轮号只取尾项和凭据信封规则。原集合 API 保持 set 返回合同；`test_thread_tool_discovery.py` 的同线程断言按新合同改为线程已有顺序在前，跨线程断言不变。
+- 复现（在工作树根目录，绑定该目录而非 editable 安装）：`PYTHONPATH="$PWD" python3 -B -m pytest agent_py_agent/tests/test_context_usage.py agent_py_agent/tests/test_context_pressure.py agent_py_agent/tests/test_runtime_context_pressure.py agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/tests/test_context_tool_discovery_order.py agent_py_agent/tests/test_thread_tool_discovery.py agent_py_agent/tests/test_tool_search_state.py -q --tb=short`。
+- 这些是本地消费链和接线回归，不代表已验证真实供应商缓存命中、运行中 Gateway/TUI 部署或完整多轮发现/持久化链路；没有修改预算阈值、校准公式、工具授权或上游存储规范化。
+
 ## 2026-10-21 网关多进程/多用户扩展、沙箱去重、Compact 自愈与 TUI 卡顿/提示回归（0.3.0-tui-preview.20261021.5）
 
 - `test_process_registry_tools.py`、`test_audit_source_worker.py`、`test_gateway_orphan_reconciler.py`、`test_sandbox_perf.py`、`test_self_install_switches.py` 与 `test_store_scan_indexes.py`：验证 Linux `/proc` 父子与进程组单遍聚合扫描、终态幂等状态同步与中断补偿（`sync_task_workspace_status` / `_disable_task_progress_policies`）、按进程完成水位节流的孤儿收敛、祖先 `--ro-bind` 去重与无独立 pre-exec 证据禁止重放业务命令（`test_executed_business_must_not_replay`）、按文件 `stat` 缓存 `capability_config.yaml` / `runtime_guard_config.yaml`、稳定存储反序列化模型复用（含 `st_ctime_ns` 缓存键）及 `os.scandir` FD 即时释放。

@@ -943,3 +943,7 @@ F3候选中，`retention_transition.py` 只运输原维护commit回调，不建�
 ## 2026-10-17 C正式记忆recent同一只读叶子
 
 `read_memory_records_from_path`不构造会mkdir的JsonlMemory，只共用原唯一事件scanner与版本/删除/过期物化。原`all→self._read_memory_file→self._read_memory_events`虚方法链和坏行容错保持；C调用方另核认证、owner、runtime memory_path及原控制面读前后来源。只读recent不读候选、写访问/向量缓存或触发晋升，同群仍为原群owner共享；search/remember未借此开放。详见[客户端记忆只读](../../design/GATEWAY_CLIENT_MEMORY_READONLY.md)。
+
+### 有界尾行读取与归档路径规范化（2026-10-23）
+
+`memory_archive/tail_lines.py` 提供 `read_tail_lines` 反向块读取器；`agent_run_workspace.py` 与 `task_workspace/payloads.py` 共用该读取器及路径规范化 helper。

@@ -571,3 +571,7 @@ C 私卡事务21使用 TaskPersistenceService.load 与显式 load_subagent_task 
 501后继修正保原canonical根身份并逐target过滤声明墙外范围；grant根/祖先symlink漂移与声明祖先包home的foreign/宿主目标有正式负例，候选仍待独立复核。
 
 授权覆盖工具集合消费原runner纯投影，ordinary/MCP disabled撤销拒旧GRANTED；原enabled正例保持，不另建权限框架。
+
+## 2026-10-23 子代理提示去重、证据包共享序列化与加载工具保序
+
+抽离 `subagents/evidence_packet_serializer.py` 供 `result_artifact_evidence.py` 与 `result_structured_evidence.py` 共用唯一 `EvidencePacket` 序列化；`runner/prompts.py` 与 `subagent/run_flow.py` 去除重复系统与工具约束并保持 `loaded_tool_names` 首次发现顺序。

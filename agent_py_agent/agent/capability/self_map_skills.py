@@ -33,9 +33,13 @@ def skill_projection(context):
 def _skill_locations(context):
     if not context.admin:
         return ()
-    roots = context.agent.skills_service.base_roots(context.agent.tools.workspace_root)
+    service = context.agent.skills_service
+    roots = service.base_roots(context.agent.tools.workspace_root)
+    extras = set(getattr(service, "_extra_roots", ()) or ())
     paths = {}
     for index, root in enumerate(roots):
+        if root.source in paths and root.path not in extras and not root.path.exists():
+            continue
         identity = root.source if root.source not in paths else f"{root.source}:{index}"
         paths[identity] = root.path
     return location_items(context, paths)

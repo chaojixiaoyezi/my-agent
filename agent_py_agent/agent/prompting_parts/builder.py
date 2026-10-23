@@ -182,26 +182,32 @@ class PromptBuilder:
         # root 仍只负责解析 prompt 文件；workspace_root 是模型相对路径和写入落点的唯一事实。
         self.workspace_root = workspace_root or root
 
-    # LLM: 按解析后的文件与来源身份去重；保留首次顺序及必需资源缺失错误，不按正文消重。
-    # 函数用途: 同一提示文件在配置和显式列表中只读一次，不合并不同来源的用户规则。
+    # LLM: 按解析后的真实路径与原始字节 SHA-256 去重；保留首次顺序、来源标签及必需资源缺失错误。
+    # 函数用途: 同一提示文件在配置、相对/绝对路径、symlink 与 builtin 别名中只注入一次。
     def read_prompt_files(self, extra_files: list[str] | None = None, *, include_config: bool = True, scope: str = "default") -> list[str]:
         """读取动态 prompt 文件并拼接内容。
 
         scope="isolated" 时跳过项目级 prompt 文件，只读取 caller 显式传入的 extra_files。"""
 
+        from hashlib import sha256
+
         chunks: list[str] = []
         skip_project_files = _is_isolated_scope(scope)
         configured = [] if (not include_config or skip_project_files) else self.config.prompt_files
-        seen: set[tuple[Path, str]] = set()
+        seen: set[tuple[str, str]] = set()
         for name in [*configured, *(extra_files or [])]:
-            resolved = _resolve_prompt_file(self.root, str(name))
-            identity = (resolved[0].resolve(strict=False), resolved[1])
+            path, source, required = _resolve_prompt_file(self.root, str(name))
+            if not path.is_file():
+                if required:
+                    raise FileNotFoundError(f"内置 prompt 资源不存在: {source} ({path})")
+                continue
+            raw = path.read_bytes()
+            identity = (str(path.resolve(strict=False)), sha256(raw).hexdigest())
             if identity in seen:
                 continue
             seen.add(identity)
-            chunk = _read_resolved_prompt_file(*resolved)
-            if chunk is not None:
-                chunks.append(chunk)
+            text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            chunks.append(f"# Prompt File: {source}\n" + text)
         return chunks
 
     # LLM: 原调用方仍走同一准备顺序；真正格式化只在 render_prepared_prompt，容量投影不得复制此布局。
@@ -272,6 +278,10 @@ class PromptBuilder:
             if request.workspace_context_override is None
             else request.workspace_context_override
         )
+        owner_scope, workspace_context = _bounded_owner_workspace_sections(
+            owner_scope,
+            workspace_context,
+        )
         default_tools = "# Tools\n（当前未启用工具）"
         default_recommendations = "# Recommended Tools\n（当前无候选工具详情）"
         recommendations = _tools.tool_recommendations_section or default_recommendations
@@ -305,6 +315,31 @@ class PromptBuilder:
         """Freeze date/time and workspace facts for one model turn."""
 
         return _workspace_context_text(self, facts_only=facts_only)
+
+
+_OWNER_WORKSPACE_ENVELOPE_MAX_CHARS = 6_000
+
+
+# LLM: 约束 Owner Scope 与 Workspace Context 的联合完整信封不超过 6000 字符，优先保留完整 owner_scope。
+# 函数用途: 对超大工作区上下文或覆盖文本做有界截断并附明确标记，不吞掉归属边界。
+def _bounded_owner_workspace_sections(
+    owner_scope: str,
+    workspace_context: str,
+) -> tuple[str, str]:
+    header_overhead = len("# Owner Scope\n\n\n# Workspace Context\n\n\n")
+    budget = max(0, _OWNER_WORKSPACE_ENVELOPE_MAX_CHARS - header_overhead)
+    if len(owner_scope) + len(workspace_context) <= budget:
+        return owner_scope, workspace_context
+    marker = "\n[... workspace context truncated by 6000-char envelope budget ...]"
+    if len(owner_scope) > budget:
+        owner_scope = owner_scope[:budget]
+        return owner_scope, ""
+    ws_budget = max(0, budget - len(owner_scope))
+    if len(workspace_context) <= ws_budget:
+        return owner_scope, workspace_context
+    if ws_budget <= len(marker):
+        return owner_scope, workspace_context[:ws_budget]
+    return owner_scope, workspace_context[: ws_budget - len(marker)] + marker
 
 
 # LLM: 真实 build 和创建前投影必须共用此纯入口；仅格式化已冻结字符串，不能补读宿主、文件或模型状态。
@@ -442,7 +477,7 @@ def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
     text = str(name or "").strip()
     if text.startswith(_BUILTIN_PROMPT_PREFIX):
         relative = _safe_builtin_prompt_path(text.removeprefix(_BUILTIN_PROMPT_PREFIX))
-        return _builtin_prompt_root() / relative, text, True
+        return _builtin_prompt_root() / relative, f"{_BUILTIN_PROMPT_PREFIX}{relative.as_posix()}", True
     path = Path(text).expanduser()
     if path.is_absolute():
         return path, str(path.resolve(strict=False)), False

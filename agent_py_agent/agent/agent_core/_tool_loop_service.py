@@ -2673,7 +2673,7 @@ def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[s
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         state = {}
-        setattr(params, "live_archive_state", state)
+        params.live_archive_state = state
     ordered = tuple(dict.fromkeys((*existing, *names)))
     state["loaded_tool_order"] = ordered
     loaded = getattr(params, "loaded_tool_names", None)

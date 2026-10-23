@@ -382,3 +382,7 @@ Conversation thread 的 sticky workspace、task 索引、Compact 状态、通道
 ## 2026-10-15 首次认证拒绝的安全通知事实
 
 `tool_call_archive_record._compact_result_envelope` 仅从真实执行的 `ToolResult(web_fetch)` 投影首次 401→rejected 的 `required_user_action`，保留 opaque ref/严格整数代次；模型字典、HTTP正文、403/网络失败、旧代及重复拒绝不产生此事实。`conversation/required_user_action` 在原 finalization 关 TaskLink 前复核当前凭据scope并冻结原 Wake 义务；归档不成为第二份状态权威。通知复用原零工具模型表达与 owner_delivery，发送前再核 owner/actor/来源/代次和原任务，未发冷重投仍在原 claim 内，只重投、不重认证或业务。local/none 仍使普通结果静默；用户决定重填或停用，宿主不自动停计划、发卡或重试认证。详见 [通知交接](../../tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md)。
+
+### 领域感知输出摘要与共享指纹（2026-10-23）
+
+`agent_core/tool_context/live_summary.py` 在 `reducer.py` 通用头尾截断前提供命令、进程会话和代理树的领域感知有界 JSON 摘要；`agent_core/tool_context/context_fingerprint.py` 统一提供上下文指纹计算。

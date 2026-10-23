@@ -2582,3 +2582,7 @@ generation 的 published-source reader 对准确 typed 名称集冲突最多整�
 ### MP完成通知receipt安装后继
 
 原Store的CommitPending仅证明redo已发表，不能把其底层四actual/硬路径权限拒绝概括为普通pending。MP消费叶仅按原typed cause保原对象，原Store/Count0不动；普通本地I/O原pending运输和P3/Wake去重保持。原两独审红与原冻结保留，后继组件不代实际683通过。
+
+## 2026-10-23 请求提示版本指纹去重与上下文计量来源透传
+
+`gateway_parts/request_prompt.py` 对未变化的会话与任务修订注入输出单行引用；`gateway_parts/stream_events.py` 复用 `public_context_usage` 向 TUI 与网关流事件透传 `raw_estimated_tokens`、`calibrated_tokens`、`measurement_kind`、`counter_id`、`count_scope`。

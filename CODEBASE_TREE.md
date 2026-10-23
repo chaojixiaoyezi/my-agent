@@ -2446,6 +2446,26 @@ agent_py_agent/
 |   |-- test_decision_skill_projection.py # Skill名卡动态投影、原搜索可达及None旧字节等价
 |   |-- test_tool_presentation_projection.py # 工具schema收起、原搜索恢复及真实插件撤销
 |   |-- test_tool_default_deferral.py # 工具自己声明的默认收起：开关、索引、搜索找回、保护条件与决策投影并集
+|   |-- test_ctxopt_prompt_persona.py # 核心系统提示词去重、版本化AGENTS种子迁移与人格全段保护回归
+|   |-- test_ctxopt_self_map.py # 动态能力族计数、多租户隔离与未知技能目录状态回归
+|   |-- test_ctxopt_background_context.py # 后台上下文总预算与各节配额上限回归
+|   |-- test_ctxopt_goal_prompt_revisions.py # Goal与Gateway请求提示按版本指纹去重回归
+|   |-- test_ctxopt_loop_support.py # 正式记忆全信封预算与后台续跑工具按需加载回归
+|   |-- test_ctxopt_router_method_carry.py # 技能目录全信封预算与任务内方法指引跨轮去重回归
+|   |-- test_ctxopt_runner_prompts.py # 子代理提示去重与恢复提示精简回归
+|   |-- test_ctxopt_c7_domain_reducer.py # 领域感知工具输出摘要器（命令/进程/代理树）回归
+|   |-- test_ctxopt_c7_schema_contracts.py # 重型工具说明收紧与单一动作Schema合同回归
+|   |-- test_ctxopt_c7_shared_helpers.py # 跨模块共享纯函数抽取等价性回归
+|   |-- test_ctxopt_c7_tail_reader.py # 有界反向块读取器大文件尾行读取回归
+|   |-- test_ctxopt_pr11_outer.py # 便携Python根、飞书云动作单一事实源与分级创作快路径回归
+|   |-- test_ctxopt_authoring_fastpaths.py # 内置创作与评审Skill风险分级快路径文案合同回归
+|   |-- test_ctxopt_feishu_operations.py # 飞书云操作读写表与工具Schema同源回归
+|   |-- test_ctxopt_script_contracts.py # 脚本描述符必填提取键、非空输出校验与AccessTarget对齐回归
+|   |-- test_ctxopt_skill_catalog.py # 统一Skill目录根、安全Frontmatter解码与逻辑引用解析回归
+|   |-- test_ctxopt_skill_snapshot_refresh.py # 任务内新建Skill受控快照代次刷新回归
+|   |-- test_ctxopt_store_commit_contract.py # 脚本与工作流Store提交前预检与提交后读回错误分类回归
+|   |-- test_ctxopt_workflow_host.py # 工作流宿主真实分析器注入、步骤输入透传与暂停续跑回归
+|   |-- test_context_tool_discovery_order.py # 跨轮与Compact工具发现顺序稳定保持回归
 |   |-- test_tool_default_deferral_chain.py # 默认收起的真实链路：tool_search 后下一次请求带上并执行（本机与飞书 owner）
 |   |-- test_tool_description_trim.py # 工具说明只删重复：create_subagents/remember/user_config 结构不变
 |   |-- test_tool_request_projection.py # 完整冻结请求与实际原生出站等价、未知输入及无副作用

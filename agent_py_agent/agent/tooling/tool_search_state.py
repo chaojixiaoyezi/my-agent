@@ -68,7 +68,7 @@ def _ordered_carried_names(record: dict[str, object]) -> tuple[str, ...]:
     ) else []
     search = envelope.get("tool_search")
     names = search.get("loaded_tool_names") if isinstance(search, dict) else None
-    return ordered_tool_names([*(names if isinstance(names, list) else []), *credential])
+    return ordered_tool_names([*credential, *(names if isinstance(names, list) else [])])
 
 
 # LLM: 仅显式边界调用，历史不变；有序使用记录按旧到新选择，集合输入仅表达成员优先；固定工具不因预算撤回。

@@ -217,6 +217,24 @@ def _interpreter_prefixes(interpreter: PluginInterpreterPaths | None) -> tuple[P
     return (_required_directory(executable.parents[1]),)
 
 
+# LLM: 默认严格保留插件prefix/base_prefix策略与别名，仅显式executable才补真实安装根。
+# 函数用途: 共用Python根解析，允许runner保留跳过缺失目录的既有策略。
+def resolve_python_runtime_prefixes(*, executable: str | Path | None = None, strict: bool = True) -> tuple[Path, ...]:
+    values: list[str | Path] = [sys.prefix, sys.base_prefix]
+    if executable is not None:
+        values.append(Path(executable).expanduser().resolve(strict=strict).parent.parent)
+    prefixes: list[Path] = []
+    for value in values:
+        if strict:
+            prefixes.extend(_read_directory_paths(value))
+        else:
+            original = Path(value).expanduser().absolute()
+            resolved = original.resolve(strict=False)
+            if resolved.is_dir():
+                prefixes.extend((original, resolved))
+    return tuple(dict.fromkeys(prefixes))
+
+
 # LLM: 复用脚本runner的解释器安装根解析，额外严格核验prefix/base_prefix并保留别名；缺失根仍失败关闭，不接受模型路径。
 # 函数用途: 让插件与脚本挂载同一Python运行时，兼容便携发行版和符号链接。
 def _python_runtime_prefixes() -> tuple[Path, ...]:

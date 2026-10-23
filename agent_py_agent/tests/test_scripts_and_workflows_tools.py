@@ -153,9 +153,18 @@ def test_workflow_crud_refs_and_skills(api, tmp_path):
     assert call(tool, 'list')['workflows'] == []
 
 
-# LLM: 实际引擎失败后重建工具再续跑；成功前缀不得重跑，inspect只读原账本。
+# LLM: 成功引用必须有可读Skill，不让任意字符串绕过缺失校验。
+# 函数用途: 给工具回归建立真实Owner技能。
+def readable_skill(home, name):
+    path = home / 'skills' / name / 'SKILL.md'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'---\nname: {name}\ndescription: fixture\n---\n真实分析方法。\n')
+
+
+# LLM: 实际引擎失败后重建工具续跑，真实Skill存在但缺分析器时保留失败，成功前缀不得重跑。
 # 函数用途: 从工具端到端验证失败断点与恢复后的每步输出。
 def test_workflow_run_inspect_and_resume(api, tmp_path, monkeypatch):
+    readable_skill(tmp_path, 'skill-A')
     scripts, workflows = api
     module = importlib.import_module('agent_py_agent.agent.workflows')
     executions, original = [], module.ScriptRunner.run_script
@@ -243,19 +252,11 @@ def test_injected_backend_owner_must_match(api, tmp_path):
         api[1](tmp_path / 'one', engine=WorkflowEngine(tmp_path / 'two'))
 
 
-# LLM: 资产包暂缺时显式协议注入仍能工作；不改变正式领域入口或静默吞依赖损坏。
-# 函数用途: 验证没有assets模块时的JSON Store接缝与缺依赖失败出口。
-def test_lightweight_store_without_assets(api, tmp_path, monkeypatch):
-    module = importlib.import_module('agent_py_agent.agent.tooling.scripts_tool')
-    original = module.importlib.import_module
+# LLM: 固定资产协议不再猜可选模块；注入Store接收正式描述符，业务行为保持可观测。
+# 函数用途: 验证轻量Store注入遵守统一类型合同。
+def test_lightweight_store_without_assets(api, tmp_path):
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     data = {}
-
-    # LLM: 仅模拟包尚未写入，其他导入走原解释器；不吞真实产品异常。
-    # 函数用途: 制造可选模块缺失的精确观察点。
-    def missing(name):
-        if name.startswith('agent_py_agent.agent.assets'):
-            raise ModuleNotFoundError(name=name)
-        return original(name)
 
     # LLM: 小型协议后端明确持同形JSON，不执行脚本、不写真实Owner。
     # 类用途: 模拟独立实现的ScriptStore协议。
@@ -265,17 +266,18 @@ def test_lightweight_store_without_assets(api, tmp_path, monkeypatch):
         def get_script(self, script_id):
             return json.loads(json.dumps(data.get(script_id)))
 
-        # LLM: 只接工具已验证的描述符和代码，保持script.json形状。
-        # 函数用途: 接受纯JSON描述符的存储协议。
+        # LLM: 只接工具验证的正式描述符，持久化形状仍是标准JSON。
+        # 函数用途: 将统一值对象保存为独立记录。
         def save_script(self, desc, code, **options):
+            assert isinstance(desc, AssetDescriptor)
+            desc = desc.to_dict()
             data[desc['id']] = {**desc, **options, 'code': code}
             return data[desc['id']]
 
-    monkeypatch.setattr(module.importlib, 'import_module', missing)
     tool = api[0](tmp_path, store=Store())
     register(tool)
     assert call(tool, 'get', script_id='collect')['code'] == 'print(\'{"value": 1}\')'
-    assert not api[0](tmp_path).execute({'action': 'list'}).ok
+    assert call(api[0](tmp_path), 'list')['scripts'] == []
 
 
 # LLM: 从真实执行失败分类而不是日志文字得出工具失败；参数不能让退出码被掩盖。
@@ -293,6 +295,7 @@ def test_script_run_repairable_errors(api, tmp_path, code):
 # LLM: 工作流显式回退只重跑后缀，空或非法步骤不能改变原运行。
 # 函数用途: 验证from_step_id的真实续跑行为及坏目标拒绝。
 def test_workflow_explicit_resume_from_step(api, tmp_path):
+    readable_skill(tmp_path, 'skill-A')
     from agent_py_agent.agent.workflows import WorkflowEngine
     register(api[0](tmp_path))
     engine = WorkflowEngine(tmp_path, analysis_handler=lambda *args: {'done': True})
@@ -336,30 +339,28 @@ def test_preclaim_rejects_path_ids(api, tmp_path, which, params):
     assert not (tmp_path / 'must-not-be-created').exists()
 
 
-# LLM: 显式注入的执行器不能被默认模块的内部依赖绑住；模拟缺依赖仅用于验证导入顺序。
-# 函数用途: 复现并锁住独立复核指出的runner注入问题。
+# LLM: 显式注入执行器不能构造默认后端；固定导入替代旧importlib可选模块探针。
+# 函数用途: 观察默认构造故障是否错误影响注入执行器。
 def test_injected_runner_does_not_import_default_backend(api, tmp_path, monkeypatch):
     from types import SimpleNamespace
-    module = importlib.import_module('agent_py_agent.agent.tooling.scripts_tool')
-    original = module.importlib.import_module
+    module = importlib.import_module('agent_py_agent.agent.workflows.script_runner')
     tool = api[0](tmp_path)
     register(tool)
 
-    # LLM: 仅拒绝默认工作流模块导入，资产模块仍真实运行。
-    # 函数用途: 制造默认实现内部缺依赖的环境。
-    def broken(name):
-        if name == 'agent_py_agent.agent.workflows':
-            raise ModuleNotFoundError(name='synthetic_missing_dependency')
-        return original(name)
+    # LLM: 默认后端构造明确失败，不能掩盖真实依赖异常。
+    # 函数用途: 模拟默认runner依赖不可用。
+    def broken(*args, **kwargs):
+        raise ModuleNotFoundError(name='synthetic_missing_dependency')
 
     # LLM: 回调只模拟宿主已注入的执行协议，返回明确业务成功与输出。
     # 函数用途: 观察工具是否真正使用显式runner。
     def run_script(script_id, inputs, **options):
         return {'ok': True, 'duration_ms': 1, 'exit_code': 0, 'output_data': {'value': 8}, 'needs_repair': False}
 
-    monkeypatch.setattr(module.importlib, 'import_module', broken)
+    monkeypatch.setattr(module, 'ScriptRunner', broken)
     injected = api[0](tmp_path, runner=SimpleNamespace(run_script=run_script))
     assert call(injected, 'run', script_id='collect')['output_data'] == {'value': 8}
+    assert not tool.execute({'action': 'run', 'script_id': 'collect'}).ok
 
 
 # LLM: active与remove同一候选不能同时持久化；冲突请求必须保持原权威范围和评估都未变。
@@ -410,8 +411,8 @@ def test_concurrent_source_adds_preserve_both_updates(api, tmp_path):
     assert set(saved['data_sources'][0]['query_scope']['active_appnames']) == {'A', 'B', 'C', 'E', 'F'}
 
 
-# LLM: 默认工具应提供结构化分析而非真实模型推理；技能只从本Owner目录匹配。
-# 函数用途: 验证分析与混合步骤开箱即用，按ID、名称、标签发现技能。
+# LLM: 默认run失败关闭，preview只读；真实回调须取得实际Skill与完整输入。
+# 函数用途: 分别验收预览、实际分析及缺Skill硬失败。
 @pytest.mark.parametrize('mode', ['llm_skill_analysis', 'hybrid'])
 @pytest.mark.parametrize('match', ['id', 'name', 'summary', 'refs', 'fallback'])
 def test_default_workflow_skill_analysis(api, tmp_path, mode, match):
@@ -419,7 +420,8 @@ def test_default_workflow_skill_analysis(api, tmp_path, mode, match):
     root.mkdir(parents=True)
     (root / 'SKILL.md').write_text('---\nid: audit-id\nname: audit-name\ndescription: 日志异常分析\nrefs: {"skills": ["safety"]}\n---\n只读分析')
     register(api[0](tmp_path))
-    spec = {'step_id': 'judge', 'name': '分析', 'mode': mode}
+    spec = {'step_id': 'judge', 'name': '分析', 'mode': mode,
+            'inputs_map': {'mapped': {'step_id': '$inputs', 'key': 'task'}}}
     if mode == 'hybrid':
         spec['script_id'] = 'collect'
     if match in ('id', 'name', 'fallback'):
@@ -430,13 +432,33 @@ def test_default_workflow_skill_analysis(api, tmp_path, mode, match):
     data['steps'] = [spec]
     tool = api[1](tmp_path)
     call(tool, 'save', workflow_id='daily', definition=data)
-    run = call(tool, 'run', workflow_id='daily')
-    expected = ['missing-id'] if match == 'fallback' else ['audit-id']
+    refused = tool.execute({'action': 'run', 'workflow_id': 'daily', 'inputs': {'task': 'review'}})
+    failed = json.loads(refused.output)
+    assert not refused.ok and failed['status'] == 'failed'
+    assert failed['steps'][0]['error_code'] == ('SKILL_NOT_FOUND' if match == 'fallback' else 'ANALYZER_UNAVAILABLE')
+    assert failed['steps'][0]['llm_involved'] is False
+    if match == 'fallback':
+        assert not tool.execute({'action': 'preview', 'workflow_id': 'daily'}).ok
+        return
+    expected = ['audit-id'] if match == 'id' else ['audit-name'] if match == 'name' else ['owner:audit-name']
+    preview = call(tool, 'preview', workflow_id='daily')
+    assert preview['status'] == 'previewed' and preview['llm_involved'] is False
+    assert preview['skill_summaries'] == [{'id': 'audit-id', 'name': 'audit-name',
+        'summary': '日志异常分析', 'procedure_preview': '只读分析'}]
+
+    # LLM: 消费真实完整Skill详情与输入，不将预览作为业务输出。
+    # 函数用途: 验证工具到引擎的实际分析协议。
+    def analyze(step, context, references):
+        assert list(references) == expected
+        assert context.run_inputs == {'task': 'review'} and context.step_inputs['mapped'] == 'review'
+        assert '只读分析' in context.skill_details[0]['body_markdown']
+        if mode == 'hybrid':
+            assert context.prior_outputs['judge'] == {'value': 1}
+        return {'decision': 'alert'}
+    active = api[1](tmp_path, analysis_handler=analyze)
+    run = call(active, 'run', workflow_id='daily', inputs={'task': 'review'})
     assert run['steps'][0]['resolved_skill_ids'] == expected
-    assert run['steps'][0]['llm_involved'] is False
-    summaries = [] if match == 'fallback' else [{'id': 'audit-id', 'name': 'audit-name', 'summary': '日志异常分析', 'procedure_preview': '只读分析'}]
-    assert run['final_output'] == {'step_id': 'judge', 'mode': mode, 'resolved_skills': expected,
-                                   'analyzed_keys': ['judge'] if mode == 'hybrid' else [], 'status': 'analyzed', 'skill_summaries': summaries}
+    assert run['steps'][0]['llm_involved'] and run['final_output'] == {'decision': 'alert'}
 
 
 # LLM: 同形JSON字符串不是原生结构，预检拒绝时不能创建Owner或进入后端。
@@ -474,10 +496,11 @@ def test_default_resolver_does_not_match_reference_keys(api, tmp_path):
     (root / 'SKILL.md').write_text('---\nname: audit\ndescription: 日志分析\n---\n正文')
     data = definition()
     data['steps'] = [{'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis', 'skill_tags': ['scripts']}]
-    tool = api[1](tmp_path)
+    tool = api[1](tmp_path, analysis_handler=lambda *args: {'done': True})
     call(tool, 'save', workflow_id='daily', definition=data)
     run = call(tool, 'run', workflow_id='daily')
     assert run['steps'][0]['resolved_skill_ids'] == []
+    assert call(tool, 'preview', workflow_id='daily')['skill_summaries'] == []
 
 
 # LLM: 工具使用真实资产与运行账本；修复输出必须经过Schema和脚本契约而不是直接改状态。
@@ -500,8 +523,8 @@ def test_tool_patched_resume_and_workflow_summary(api, tmp_path):
     assert summary['run_count'] == 2 and summary['last_status'] == 'succeeded'
 
 
-# LLM: 真实技能正文只读取并脱敏截断，不执行其中命令；返回事实摘要不是模型推理。
-# 函数用途: 验证默认分析加载技能描述和安全procedure_preview。
+# LLM: 显式预览脱敏截断，实际分析器仍须取得完整正文和输入，不能互相冒充。
+# 函数用途: 校验静态预览与完整分析详情边界。
 def test_default_analysis_loads_real_skill_summaries(api, tmp_path):
     root = tmp_path / 'skills' / 'audit'
     root.mkdir(parents=True)
@@ -509,13 +532,22 @@ def test_default_analysis_loads_real_skill_summaries(api, tmp_path):
     tool, data = api[1](tmp_path), definition()
     data['steps'] = [{'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis', 'skill_tags': ['诊断']}]
     call(tool, 'save', workflow_id='daily', definition=data)
-    run = call(tool, 'run', workflow_id='daily')
-    assert 'skill_summaries' in run['final_output']
-    row, = run['final_output']['skill_summaries']
+    preview = call(tool, 'preview', workflow_id='daily')
+    row, = preview['skill_summaries']
     assert (row['id'], row['name'], row['summary']) == ('audit-id', 'audit', '诊断步骤')
     assert '先查错误' in row['procedure_preview'] and len(row['procedure_preview']) <= 200
     assert 'test-only-secret' not in row['procedure_preview']
-    assert not run['steps'][0]['llm_involved']
+    assert preview['llm_involved'] is False
+    assert not tool.execute({'action': 'run', 'workflow_id': 'daily'}).ok
+
+    # LLM: 合成分析器只验证完整上下文，不代表在线模型验收。
+    # 函数用途: 证明分析正文没有被截成200字预览。
+    def analyze(step, context, references):
+        assert len(context.skill_details[0]['body_markdown']) > 200
+        assert context.run_inputs == {'task': 'review'}
+        return {'diagnosis': '核验完成'}
+    run = call(api[1](tmp_path, analysis_handler=analyze), 'run', workflow_id='daily', inputs={'task': 'review'})
+    assert run['final_output'] == {'diagnosis': '核验完成'} and run['steps'][0]['llm_involved']
 
 
 # LLM: Full Access下run/resume不应反复弹审批，确定性脚本失败标failed而非unknown，仅进程清理未验证保unknown。
@@ -562,11 +594,16 @@ def test_full_access_approval_and_deterministic_effect_outcomes(api, tmp_path):
     assert unverified.effect_outcome == 'unknown' and _operation_status_for_result(unverified) == TOOL_OPERATION_UNKNOWN
 
 
-# LLM: 支持$inputs条件分支、_pause_for_resume主动无错暂停及工作区.agent/skills发现。
+# LLM: 确认值经显式fallback进入部署，原始输入不暗改；真实分析使用工作区Skill正文。
 # 函数用途: 验证工作流可按初始输入分支并在无错确认点暂停与续跑。
 def test_workflow_inputs_condition_pause_and_workspace_skill_discovery(api, tmp_path):
     scripts_cls, workflows_cls = api
-    scripts, workflows = scripts_cls(tmp_path), workflows_cls(tmp_path)
+    # LLM: 合成分析器只消费完整方法，不执行实际模型服务或部署。
+    # 函数用途: 返回业务摘要而非静态预览。
+    def analyze(step, context, references):
+        assert '生成结构化日报' in context.skill_details[0]['body_markdown']
+        return {'digest': context.skill_details[0]['name']}
+    scripts, workflows = scripts_cls(tmp_path), workflows_cls(tmp_path, analysis_handler=analyze)
     ws_skill = tmp_path / 'workspace/.agent/skills/paper-digest'
     ws_skill.mkdir(parents=True)
     (ws_skill / 'SKILL.md').write_text('---\nid: paper-digest\nname: 论文摘要\ndescription: 整理每日论文\n---\n生成结构化日报。')
@@ -588,7 +625,8 @@ def test_workflow_inputs_condition_pause_and_workspace_skill_discovery(api, tmp_
              'condition': {'step_id': '$inputs', 'key': 'model', 'equals': ''}},
             {'step_id': 'summarize', 'name': '技能分析', 'mode': 'llm_skill_analysis', 'skill_ids': ['paper-digest']},
             {'step_id': 'run_deploy', 'name': '执行部署', 'mode': 'deterministic_script', 'script_id': 'deploy',
-             'inputs_map': {'model': {'step_id': '$inputs', 'key': 'model'}}},
+             'inputs_map': {'model': {'step_id': 'ask_model', 'key': 'selected_model',
+                                       'fallback': {'step_id': '$inputs', 'key': 'model'}}}},
         ],
     }
     call(workflows, 'save', workflow_id='deploy_flow', definition=wf_def)
@@ -605,7 +643,10 @@ def test_workflow_inputs_condition_pause_and_workspace_skill_discovery(api, tmp_
     resumed = call(workflows, 'resume', workflow_run_id=paused['workflow_run_id'], patched_step_output={'selected_model': 'qwen-14b'})
     assert resumed['status'] == 'succeeded'
     assert resumed['steps'][1]['resolved_skill_ids'] == ['paper-digest']
-    assert resumed['steps'][1]['output_snapshot']['skill_summaries'][0]['name'] == '论文摘要'
+    assert resumed['steps'][1]['output_snapshot'] == {'digest': '论文摘要'}
+    assert resumed['final_output'] == {'deployed': 'qwen-14b'}
+    assert resumed['steps'][0]['llm_involved'] is False
+    assert resumed['steps'][0]['escalation_result']['resolution_origin'] == 'user'
 
     # 2) 已指定 model：跳过 ask_model，一次跑完无需暂停
     direct = call(workflows, 'run', workflow_id='deploy_flow', inputs={'model': 'deepseek-r1'})

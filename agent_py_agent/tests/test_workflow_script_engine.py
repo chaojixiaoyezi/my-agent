@@ -1,7 +1,6 @@
 # LLM: 工作流引擎公开入口回归；使用真实临时脚本与隔离账本，不访问模型或外部服务。
 # 模块用途: 验证零模型快跑、异常恢复、技能分析与重启后的断点续跑。
 import json
-import os
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -27,17 +26,25 @@ def script(home, code='print(\'{"value": 1}\')', **options):
     return folder
 
 
-# LLM: 输入是公开 JSON 步骤，不依赖并行任务的模块是否已落盘。
+# LLM: 成功fixture必须具有真实可读Skill，不能以任意ID自证存在。
+# 函数用途: 为旧升级与解析回归创建Owner技能。
+def readable_skill(home, name):
+    folder = home / 'skills' / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'SKILL.md').write_text(f'---\nname: {name}\ndescription: fixture\n---\n核对来源。\n')
+
+
+# LLM: 输入是正式资产JSON合同，不绕过统一定义校验。
 # 函数用途: 构造一个与 WorkflowDefinition 序列化后同形的工作流。
 def workflow(*steps):
-    return {'descriptor': {'id': 'daily', 'owner_id': 'alice'}, 'steps': list(steps)}
+    return {'descriptor': {'id': 'daily', 'kind': 'workflow', 'name': 'daily', 'owner_id': 'alice'}, 'steps': list(steps)}
 
 
-# LLM: 只构造确定性步，不在测试 helper 内执行脚本。
+# LLM: 不在helper执行脚本，纯分析步骤不携带虚构的脚本引用。
 # 函数用途: 减少案例中重复的步骤字段。
 def step(step_id='collect', **options):
     return {'step_id': step_id, 'name': step_id, 'mode': 'deterministic_script',
-            'script_id': 'collect', **options}
+            'script_id': '' if options.get('mode') == 'llm_skill_analysis' else 'collect', **options}
 
 
 # LLM: 测试真实 stdin、环境数据源与输出合同，防止数据源被写死。
@@ -128,19 +135,23 @@ def test_no_anomaly_skips_remaining_without_llm(tmp_path):
 # LLM: 恢复数据与修复草案只记账，不能自动改写固化脚本。
 # 函数用途: 验证脚本报错后调用兜底，并用恢复输出推进下一步。
 def test_escalated_recovery_and_dynamic_skill_merge(tmp_path):
+    readable_skill(tmp_path, 'static')
+    readable_skill(tmp_path, 'dynamic')
     folder = script(tmp_path, 'raise RuntimeError("upstream failed")')
     seen = []
     # LLM: 模拟宿主兜底，仅记录请求并返回数据，不修改脚本。
     # 函数用途: 提供应急输出与修复草案。
-    def recover(context):
+    def recover(spec, result, run):
+        context = {**result.escalation_context, 'step_id': spec.step_id}
         seen.append(context)
         return {'recovered': True, 'output_data': {'value': 9}, 'repair_patch_draft': 'draft only'}
     # LLM: 模拟技能解析器，断言传入资产配置而非硬编码来源。
     # 函数用途: 返回含重复项的动态技能列表以验证去重。
-    def resolve(ids, tags, sources):
-        assert ids == ('static',) and tags == ('security',)
+    def resolve(spec, context):
+        sources = context.data_sources
+        assert tuple(spec.skill_ids) == ('static',) and tuple(spec.skill_tags) == ('security',)
         assert sources[0]['query_scope'] == {'active_appnames': ['A', 'B']}
-        return ['dynamic', 'static']
+        return ['static', 'dynamic', 'static']
     # LLM: 只消费输入副本，校验分析器实际拿到恢复数据。
     # 函数用途: 返回结构化分析结果。
     def analyze(spec, outputs, skills):
@@ -179,7 +190,7 @@ def test_resume_reuses_outputs_and_frozen_definition(tmp_path, monkeypatch):
     definition['steps'] = []
     (tmp_path / 'scripts' / 'broken' / 'main.py').write_text('print(\'{"value": 20}\')')
     calls = []
-    engine = WorkflowEngine(tmp_path, analysis_handler=lambda spec, out, skills: calls.append(out) or {'done': True})
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda spec, out, skills: calls.append(out.prior_outputs) or {'done': True})
     resumed = engine.resume_workflow_run(run.workflow_run_id)
     assert resumed.status == 'succeeded' and resumed.resumed_from_step_id == 'broken'
     assert executions == ['collect', 'broken', 'broken']
@@ -193,7 +204,7 @@ def test_resume_reuses_outputs_and_frozen_definition(tmp_path, monkeypatch):
 # LLM: 默认未恢复时不可执行尾步；回调异常也必须落在失败步。
 # 函数用途: 验证未配置兜底、未恢复和兜底抛错的断点状态。
 @pytest.mark.parametrize(('handler', 'expected'), [(None, 'paused_for_resume'),
-    (lambda ctx: {'recovered': False}, 'paused_for_resume'), (lambda ctx: 1 / 0, 'failed')])
+    (lambda spec, result, run: {'recovered': False}, 'paused_for_resume'), (lambda spec, result, run: 1 / 0, 'failed')])
 def test_unrecovered_failures_stop_workflow(tmp_path, handler, expected):
     script(tmp_path, 'raise RuntimeError("offline")')
     run = WorkflowEngine(tmp_path, escalation_handler=handler).run_workflow(workflow(step(), step('tail')))
@@ -329,7 +340,7 @@ def test_interruption_is_persisted_and_resumable(tmp_path):
 # 函数用途: 验证无效恢复数据不被当作自愈成功。
 def test_recovered_output_must_satisfy_script_contract(tmp_path):
     script(tmp_path, 'raise RuntimeError("failed")')
-    run = WorkflowEngine(tmp_path, escalation_handler=lambda ctx: {'recovered': True, 'output_data': {}}).run_workflow(workflow(step()))
+    run = WorkflowEngine(tmp_path, escalation_handler=lambda spec, result, run: {'recovered': True, 'output_data': {}}).run_workflow(workflow(step()))
     assert run.status == 'paused_for_resume' and run.failed_step_id == 'collect'
     assert run.steps[0].error_code == 'SCRIPT_MISSING_OUTPUT_KEYS'
 
@@ -419,8 +430,8 @@ def test_deep_json_output_remains_structured_and_escalates(tmp_path):
     calls = []
     # LLM: 仅记录升级请求，返回符合输出合同的应急数据。
     # 函数用途: 证明深层 JSON 错误仍进入已允许的自愈回调。
-    def handler(ctx):
-        calls.append(ctx)
+    def handler(spec, result, run):
+        calls.append(result.escalation_context)
         return {'recovered': True, 'output_data': {'value': 2}}
     run = WorkflowEngine(tmp_path, escalation_handler=handler).run_workflow(workflow(step()))
     assert run.status == 'succeeded' and len(calls) == 1
@@ -444,8 +455,15 @@ def test_skill_sequences_reject_bare_strings(tmp_path, kind):
                 skill_ids='sales' if kind == 'ids' else ['static'],
                 skill_tags='sales' if kind == 'tags' else ['tag'])
     resolver = (lambda *args: 'sales') if kind == 'resolver' else None
-    run = WorkflowEngine(tmp_path, skill_resolver=resolver,
-                         analysis_handler=lambda *args: calls.append(args) or {}).run_workflow(workflow(spec))
+    engine = WorkflowEngine(tmp_path, skill_resolver=resolver,
+                            analysis_handler=lambda *args: calls.append(args) or {})
+    if kind in ('ids', 'tags'):
+        with pytest.raises((ValueError, TypeError)):
+            engine.run_workflow(workflow(spec))
+        assert engine.store.list_runs() == [] and calls == []
+        return
+    readable_skill(tmp_path, 'static')
+    run = engine.run_workflow(workflow(spec))
     assert run.status == 'failed' and run.failed_step_id == 'judge'
     assert calls == [] and run.steps[0].llm_involved is False
 
@@ -461,7 +479,7 @@ def test_dataclass_and_missing_store_fallback_entrypoints(tmp_path, monkeypatch)
         steps: tuple
 
     script(tmp_path, 'print(\'{"value": 1}\')')
-    definition = Definition({'id': 'daily', 'owner_id': 'alice'}, (step(),))
+    definition = Definition({'id': 'daily', 'kind': 'workflow', 'name': 'daily', 'owner_id': 'alice'}, (step(),))
     folder = tmp_path / 'workflows' / 'daily'
     folder.mkdir(parents=True)
     (folder / 'workflow.json').write_text(json.dumps(asdict(definition)))
@@ -547,7 +565,7 @@ def test_cleanup_denial_preserves_primary_failure_and_context(tmp_path, monkeypa
     assert cleanup['exception_type'] == 'PermissionError' and cleanup['errno'] == errno.EPERM
     assert cleanup['leader_exited'] is True and cleanup['group_cleanup_verified'] is False
     contexts = []
-    run = WorkflowEngine(tmp_path, escalation_handler=lambda ctx: contexts.append(ctx) or recovery).run_workflow(workflow(step()))
+    run = WorkflowEngine(tmp_path, escalation_handler=lambda spec, result, run: contexts.append(result.escalation_context) or recovery).run_workflow(workflow(step()))
     assert run.status == 'paused_for_resume' and len(contexts) == 1
     assert contexts[0]['cleanup_error']['errno'] == errno.EPERM
     assert run.steps[0].error_code == expected_error
@@ -581,7 +599,7 @@ def test_post_cleanup_io_failure_keeps_cleanup_hard_failure(tmp_path, monkeypatc
     script(tmp_path)
     monkeypatch.setattr(module, '_terminate', deny_cleanup)
     monkeypatch.setattr(module.os, 'fstat', fail_post_cleanup_stat)
-    run = WorkflowEngine(tmp_path, escalation_handler=lambda ctx: contexts.append(ctx) or {'recovered': True, 'output_data': {'value': 9}}).run_workflow(workflow(step()))
+    run = WorkflowEngine(tmp_path, escalation_handler=lambda spec, result, run: contexts.append(result.escalation_context) or {'recovered': True, 'output_data': {'value': 9}}).run_workflow(workflow(step()))
     assert run.status == 'paused_for_resume'
     assert contexts[0]['cleanup_error']['errno'] == errno.EPERM
     assert contexts[0]['execution_error']['errno'] == errno.EIO

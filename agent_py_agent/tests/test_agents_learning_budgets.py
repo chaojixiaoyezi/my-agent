@@ -212,7 +212,7 @@ def test_working_agreement_sub_budget_caps_agreements_without_crowding_rest():
 
 
 def test_working_agreement_sub_budget_keeps_agreements_within_budget():
-    per = _WORKING_AGREEMENT_SUB_BUDGET_CHARS // 2 - 100
+    per = _WORKING_AGREEMENT_SUB_BUDGET_CHARS // 2 - 300
     rows = [
         _Row("working_agreement", "约" * per, "wa-1"),
         _Row("working_agreement", "约" * per, "wa-2"),

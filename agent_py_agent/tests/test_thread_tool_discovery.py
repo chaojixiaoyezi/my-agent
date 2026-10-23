@@ -66,7 +66,7 @@ def test_compact_surface_does_not_import_other_thread_names():
     thread = SimpleNamespace(thread_id="child", loaded_tool_names=("read_file",))
     stale = ConversationCompactModelSurface(thread_id="parent", loaded_tool_names=("manage_models",))
     assert _bound_loaded_tools(stale, thread) == ("read_file",)
-    assert _bound_loaded_tools(replace(stale, thread_id="child"), thread) == ("manage_models", "read_file")
+    assert _bound_loaded_tools(replace(stale, thread_id="child"), thread) == ("read_file", "manage_models")
 
 
 def test_discovery_failure_happens_after_native_ir(tmp_path, monkeypatch):

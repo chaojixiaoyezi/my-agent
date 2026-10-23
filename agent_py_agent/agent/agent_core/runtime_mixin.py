@@ -19,6 +19,7 @@ import sys
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 from ..concurrency.interrupt import is_interrupted
@@ -149,6 +150,15 @@ def _turn_skill_snapshot(agent):
 # 类用途: 为SimpleAgent连接运行入口、工具循环及最终收口，参数变更须联测CLI/Gateway和sealed来源。
 class SimpleAgentRuntimeMixin:
     _services: _RuntimeServices | None = None
+
+    # LLM: 仅在工具轮边界更新方法目录；复用宿主scope入口保留child/hash/包版本限制，不直接扫不受限roots。
+    # 函数用途: 让本轮新写Skill在下一轮可发现，同时沿用SkillsService的目录签名缓存。
+    def refresh_current_skill_snapshot_if_needed(self):
+        workspace = (getattr(self, "_current_run_task_workspace", "")
+                     or getattr(self, "effective_workspace_root", "") or getattr(self, "root", "."))
+        snapshot = self.skill_snapshot_for_run_scope(Path(workspace))
+        self._current_skill_snapshot = snapshot
+        return snapshot
 
     def _get_services(self) -> _RuntimeServices:
         if self._services is None:

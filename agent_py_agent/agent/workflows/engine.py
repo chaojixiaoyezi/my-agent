@@ -2,7 +2,6 @@
 # 模块用途: 编排纯脚本、条件跳过、技能分析、异常兜底与 Step 级断点续跑。
 from __future__ import annotations
 
-import inspect
 import json
 import time
 import uuid
@@ -10,11 +9,14 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
-from ..assets.workflow_store import WorkflowStore
+from ..assets import canonical_skill_name
+from ..assets.skill_adapter import get_owner_skill_descriptor
+from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
 from .models import (
-    WORKFLOW_ON_ERROR_POLICIES,
+    AnalysisContext,
     StepExecutionRecord,
     WorkflowRunRecord,
     output_value,
@@ -29,24 +31,16 @@ from .script_runner import ScriptRunner, load_script, parse_script_output
 SUCCESS = ('succeeded', 'escalated_recovered', 'skipped')
 
 
-# LLM: 显式支持同形 JSON 与可序列化资产 dataclass，不依赖并行资产模块的导入时序。
-# 函数用途: 加载并校验工作流编号、模式和无重复的步骤定义。
+# LLM: 定义恢复与refs派生只走资产层权威API，路径安全仍由引擎和Store检查。
+# 函数用途: 加载并复制规范执行定义。
 def _definition(home, value):
     if isinstance(value, str):
         safe_path(home, value)
         asset = WorkflowStore(home).get_workflow(value)
         value = asset.to_dict() if asset is not None else json.loads(read_text_beneath(home, ('workflows', value, 'workflow.json')) or '{}')
-    value = payload(value)
-    descriptor = value.get('descriptor', value)
+    value = with_workflow_step_refs(WorkflowDefinition.from_any(payload(value))).to_dict()
+    descriptor = value['descriptor']
     safe_path(home, descriptor['id'])
-    ids = []
-    for step in value['steps']:
-        if step.get('on_error', 'escalate_to_agent') not in WORKFLOW_ON_ERROR_POLICIES:
-            raise ValueError(f"Unsupported on_error policy: {step['on_error']}")
-        safe_path(home, step['step_id'] + '.json')
-        if step['step_id'] in ids or step['mode'] not in ('deterministic_script', 'llm_skill_analysis', 'hybrid'):
-            raise ValueError('步骤编号重复或模式无效')
-        ids.append(step['step_id'])
     return value, descriptor
 
 
@@ -60,13 +54,14 @@ def _pending(spec):
 # LLM: 执行前须由宿主核验 Owner 与权限；回调只提供判断数据，不得自动应用脚本修复。
 # 类用途: 运行工作流并在失败或中断时保留已成功步骤。
 class WorkflowEngine:
-    # LLM: 构造不执行资产、不调用模型；每个实例绑定宿主选定的Owner。
-    # 函数用途: 注入可选兜底、分析、技能匹配回调与本地存储。
-    def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None):
+    # LLM: 构造不执行资产，宿主提供已授权正文读取器，所有回调协议固定。
+    # 函数用途: 绑定Owner存储及分析、技能解析与详情依赖。
+    def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None, skill_details_resolver=None):
         self.owner_home = Path(owner_home).absolute()
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home)
         self.escalation_handler, self.analysis_handler = escalation_handler, analysis_handler
         self.skill_resolver = skill_resolver
+        self.skill_details_resolver = skill_details_resolver
 
     # LLM: 首次执行冻结工作流定义；owner_id 只用于一致性校验，不能建立授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
@@ -82,9 +77,12 @@ class WorkflowEngine:
         with self.store.execution_lock(record.workflow_run_id):
             return self._drive(record, definition, 0)
 
-    # LLM: 复用冻结定义及成功前缀；所有补丁先校验再发表，修复输出不能替代未成功前序。
-    # 函数用途: 在独占执行锁内注入合法修复或更新数据源，从断点继续运行。
-    def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None):
+    # LLM: 冻结定义、初始输入和成功前缀保持不变；先校验恢复来源再发表补丁。
+    # 函数用途: 在独占锁内注入带来源合法输出或数据源变更并续跑。
+    def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
+                            resolution_origin: Literal['user', 'agent', 'system'] | None = None):
+        if resolution_origin is not None and resolution_origin not in ('user', 'agent', 'system'):
+            raise ValueError('resolution_origin必须为user、agent或system')
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
             definition = self.store.load_workflow_snapshot(workflow_run_id)
@@ -99,7 +97,7 @@ class WorkflowEngine:
             if patched_step_output is not None:
                 if start == len(ids):
                     raise ValueError('没有可注入修复输出的目标步骤')
-                repaired = self._patched_step(record.steps[start], definition['steps'][start], patched_step_output)
+                repaired = self._patched_step(record.steps[start], definition['steps'][start], patched_step_output, resolution_origin)
             if updated_data_sources is not None:
                 if not isinstance(updated_data_sources, (dict, list)):
                     raise ValueError('updated_data_sources必须为dict或list')
@@ -119,9 +117,12 @@ class WorkflowEngine:
 
     resume_workflow = resume_workflow_run
 
-    # LLM: 补丁只替代结构化输出，不能证明进程组清理完成；原错误合同和清理硬门禁仍生效。
-    # 函数用途: 拒绝清理未确认的补丁，并构造保留诊断和修复来源的合法恢复步骤。
-    def _patched_step(self, target, spec, patched):
+    # LLM: 补丁仅替代输出；故障修复默认agent、正常确认默认user，保留既有模型参与事实和清理门。
+    # 函数用途: 校验恢复输出并合成来源明确且输入不变的步骤。
+    def _patched_step(self, target, spec, patched, resolution_origin: Literal['user', 'agent', 'system'] | None = None):
+        origin = resolution_origin if resolution_origin is not None else ('agent' if target.needs_repair else 'user')
+        if origin not in ('user', 'agent', 'system'):
+            raise ValueError('resolution_origin必须为user、agent或system')
         if target.escalation_result.get('cleanup_error'):
             raise ValueError('进程组清理未验证，不能用输出补丁恢复')
         if not isinstance(patched, dict):
@@ -135,9 +136,9 @@ class WorkflowEngine:
             if error:
                 raise ValueError(f'修复输出不符合脚本契约: {error}')
         return replace(target, status='escalated_recovered', output_snapshot=redact_sensitive_value(output), needs_repair=False,
-                       llm_involved=True, error_code='', error_message='', ended_at=time.time(),
+                       llm_involved=bool(target.llm_involved or origin == 'agent'), error_code='', error_message='', ended_at=time.time(),
                        escalation_result=redact_sensitive_value({**payload(target.escalation_result),
-                           'recovered': True, 'repaired_via': 'patched_step_output'}))
+                           'recovered': True, 'repaired_via': 'patched_step_output', 'resolution_origin': origin}))
 
     # LLM: 调用方持运行执行锁；独立快照与Store实际读取的内嵌定义保持同源，拒绝跟随链接。
     # 函数用途: 原子保存更新后的冻结数据源，供本轮及重启后续跑复用。
@@ -147,15 +148,14 @@ class WorkflowEngine:
                                   json.dumps(safe, ensure_ascii=False, allow_nan=False) + '\n')
         self.store.save_run(record, definition)
 
-    # LLM: 运行账本先落盘，摘要写入失败不覆盖执行事实；仅内存定义可能没有正式资产。
-    # 函数用途: 尽力回写工作流最近状态、耗时和运行时间。
+    # LLM: 摘要采用固定Store协议，派生视图失败不能覆盖运行事实或中断。
+    # 函数用途: 尽力回写最近状态、耗时及错误。
     def _record_summary(self, record):
         try:
             summary = WorkflowStore(self.owner_home).record_run_summary
             error = next((f'{s.error_code}: {s.error_message}' for s in record.steps if s.step_id == record.failed_step_id), '')
-            options = {'last_error': error} if 'last_error' in inspect.signature(summary).parameters else {}
             summary(record.workflow_id, record.status, record.duration_ms,
-                    datetime.fromtimestamp(record.ended_at, timezone.utc).isoformat(), **options)
+                    datetime.fromtimestamp(record.ended_at, timezone.utc).isoformat(), last_error=error)
         except Exception:
             pass
 
@@ -205,8 +205,8 @@ class WorkflowEngine:
         self._record_summary(record)
         return record
 
-    # LLM: 映射只能引用结构化前序输出或$inputs；传入回调的对象独立复制，不能污染已成功快照。
-    # 函数用途: 运行一个脚本或技能步骤，混合步骤先采集再分析。
+    # LLM: 输入映射仅引用前步或冻结输入，分析上下文独立复制不污染账本。
+    # 函数用途: 执行脚本或技能步骤，混合步先采集再完整分析。
     def _perform(self, record, spec, outputs, definition, run):
         for key, reference in spec.get('inputs_map', {}).items():
             record.input_snapshot[key] = output_value(reference, outputs, run.inputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
@@ -215,7 +215,8 @@ class WorkflowEngine:
             if record.status not in ('succeeded', 'escalated_recovered') or record.mode == 'deterministic_script':
                 return
             outputs = {**outputs, record.step_id: payload(record.output_snapshot)}
-        self._analysis_step(record, spec, outputs, self._sources(definition))
+        context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
+        self._analysis_step(record, spec, context)
 
     # LLM: 冻结数据源只覆盖本运行；兜底须满足原合同，清理未验证硬失败不能被回调覆盖，_pause_for_resume支持无错确认暂停。
     # 函数用途: 执行脚本并记录结构化修复指引、主动暂停断点及实际恢复结果。
@@ -262,46 +263,55 @@ class WorkflowEngine:
                 return
             record.status, record.output_snapshot, record.needs_repair = 'succeeded', output, False
 
-    # LLM: 先检查签名再选择旧单参或新三参协议，绝不因回调内部TypeError重复执行。
-    # 函数用途: 兼容既有上下文回调，同时提供结构化步骤、结果和运行快照。
+    # LLM: 升级只走三参协议，内部TypeError不能触发换签名重试。
+    # 函数用途: 向兜底传入独立步骤、脚本结果和运行快照。
     def _escalate(self, spec, result, run):
-        try:
-            inspect.signature(self.escalation_handler).bind(SimpleNamespace(**spec), result, run)
-        except TypeError:
-            return self.escalation_handler({**payload(result.escalation_context), 'step_id': spec['step_id']}) or {}
         return self.escalation_handler(SimpleNamespace(**payload(spec)), replace(result, **payload(result)),
                                        WorkflowRunRecord.from_dict(run.to_dict())) or {}
 
-    # LLM: 静态技能与动态结果去重合并；未提供分析器明确失败，不伪造 LLM 成功。
-    # 函数用途: 解析所需技能并调用宿主分析回调。
-    def _analysis_step(self, record, spec, outputs, sources):
-        ids, tags = skill_sequence(spec.get('skill_ids', ())), skill_sequence(spec.get('skill_tags', ()))
-        resolved = self._resolve_skills(spec, outputs, (ids, tags, sources))
-        if not all(isinstance(item, str) for item in resolved):
-            raise ValueError('技能解析器必须返回技能编号序列')
-        record.resolved_skill_ids = resolved
-        if self.analysis_handler is None:
-            raise ValueError('未提供技能分析回调')
+    # LLM: 缺技能或分析器是硬失败，不走脚本on_error兜底或跳过；预览不能充当分析。
+    # 函数用途: 核对引用并读取正文，用完整上下文调用真实分析器。
+    def _analysis_step(self, record, spec, context):
+        try:
+            resolved = self._resolve_skills(spec, context)
+            record.resolved_skill_ids = resolved
+            details = [] if self.skill_details_resolver is None else self.skill_details_resolver(list(resolved))
+            if not isinstance(details, list) or not all(isinstance(item, dict) for item in details):
+                raise ValueError('技能正文读取器必须返回对象列表')
+            context = AnalysisContext(context.prior_outputs, context.run_inputs, context.step_inputs, details, context.data_sources)
+        except (LookupError, FileNotFoundError, ValueError) as exc:
+            record.status, record.needs_repair = 'failed', True
+            record.error_code, record.error_message = 'SKILL_NOT_FOUND', str(exc)
+            return
+        if self.analysis_handler is None or getattr(self.analysis_handler, '_is_default_preview', False):
+            record.status, record.needs_repair = 'failed', True
+            record.error_code, record.error_message = 'ANALYZER_UNAVAILABLE', '未提供真实技能分析回调'
+            return
         record.llm_involved = record.llm_involved or getattr(self.analysis_handler, 'llm_involved', True) is not False
-        output = payload(self.analysis_handler(payload(spec), payload(outputs), resolved))
+        output = payload(self.analysis_handler(payload(spec), context, resolved))
         if not isinstance(output, dict):
             raise ValueError('分析回调必须返回 JSON 对象')
         record.output_snapshot = output
         record.status = 'paused_for_resume' if output.get('_pause_for_resume') is True else 'succeeded'
         record.needs_repair = False
 
-    # LLM: 新解析器返回权威ID列表；旧三参解析器保留静态与动态合并行为，签名错误不重试执行。
-    # 函数用途: 适配步骤/上下文解析协议与既有编号/标签/来源协议。
-    def _resolve_skills(self, spec, outputs, legacy):
-        ids, tags, sources = legacy
+    # LLM: 注入解析器是宿主权威；无解析器只认真实Owner技能，准确来源不能被替换。
+    # 函数用途: 按固定step/context协议解析引用，拒绝遗漏必需Skill。
+    def _resolve_skills(self, spec, context):
+        requested = skill_sequence(spec.get('skill_ids', ()))
+        skill_sequence(spec.get('skill_tags', ()))
         if self.skill_resolver is None:
-            return ids
-        try:
-            inspect.signature(self.skill_resolver).bind(SimpleNamespace(**spec), outputs)
-        except TypeError:
-            resolved = (*ids, *skill_sequence(self.skill_resolver(ids, tags, payload(sources))))
+            for skill_id in requested:
+                get_owner_skill_descriptor(self.owner_home, skill_id)
+            resolved = requested
         else:
-            resolved = skill_sequence(self.skill_resolver(SimpleNamespace(**payload(spec)), payload(outputs)))
+            isolated = AnalysisContext(context.prior_outputs, context.run_inputs, context.step_inputs,
+                                       context.skill_details, context.data_sources)
+            resolved = skill_sequence(self.skill_resolver(SimpleNamespace(**payload(spec)), isolated))
+        missing = [item for item in requested if not any(item == actual or ':' not in item
+                   and canonical_skill_name(actual) == item for actual in resolved)]
+        if missing:
+            raise FileNotFoundError('缺少必需Skill: ' + ', '.join(missing))
         return tuple(dict.fromkeys(resolved))
 
     # LLM: 数据源来自冻结工作流显式配置或其脚本当前权威配置；禁止将不同形状悄悄覆盖。

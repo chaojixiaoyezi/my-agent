@@ -619,12 +619,12 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
 # 记忆注入总预算池按最终信封字符计量，包含JSON转义、元数据、时效说明和公共非权威边界。
 # 各来源已自带上限(HOT 5000 硬顶/long_term top_k 检索/lessons 路由命中),这里是最后保险丝:
 # 优先级让位——HOT 全保(最后砍),lessons 次之,long_term 先砍;组内超预算截断尾部。
-_FORMAL_MEMORY_BUDGET_CHARS = 10000
+_FORMAL_MEMORY_BUDGET_CHARS = 4000
 # 工作约定从总召回额度内分配子预算，不能挤占全部正式记忆。
-_WORKING_AGREEMENT_SUB_BUDGET_CHARS = 4000
+_WORKING_AGREEMENT_SUB_BUDGET_CHARS = 2400
 
 
-# LLM: 复用唯一安全渲染器度量完整信封；HOT沿原合同全保，其余只整条选择，不裁身份或正文。
+# LLM: 复用唯一安全渲染器度量完整信封；HOT优先选择但同样受4000完整信封预算限制，其余只整条选择，不裁身份或正文。
 # 函数用途: 在主上下文注入前限制正式记忆及工作约定的真实格式开销，不把正文预算误报为发送上限。
 def _budgeted_formal_memories(records: list) -> list:
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
@@ -639,8 +639,8 @@ def _budgeted_formal_memories(records: list) -> list:
         for record in records
         if str(getattr(record, "kind", "") or "") not in {"hot", "lesson", "working_agreement"}
     ]
-    kept = list(hot)
-    for group in (lessons, agreements, rest):
+    kept: list = []
+    for group in (hot, lessons, agreements, rest):
         group_cap = (
             _WORKING_AGREEMENT_SUB_BUDGET_CHARS
             if group is agreements
@@ -652,7 +652,7 @@ def _budgeted_formal_memories(records: list) -> list:
                 len(memory_context_text([*kept, record])) > _FORMAL_MEMORY_BUDGET_CHARS
                 or len(memory_context_text([*group_kept, record])) > group_cap
             ):
-                break
+                continue
             kept.append(record)
             group_kept.append(record)
     return kept

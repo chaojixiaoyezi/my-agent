@@ -968,12 +968,13 @@ def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompa
         raise
 
 
-# LLM: 旧调用可不带字段；已经绑定其它线程的加载面不能把发现状态带到目标线程。
-# 函数用途: 把线程加载事实与同身份的本轮加载名合并，不扩大授权。
+# LLM: 旧调用可不带字段；其它线程面不能带入工具，原线程已有顺序优先，同线程新名只在末尾去重追加。
+# 函数用途: 保序合并原线程与同身份本轮工具发现事实，不排序或扩大授权。
 def _bound_loaded_tools(surface, thread):
     same_thread = not surface.thread_id or surface.thread_id == thread.thread_id
-    carried = surface.loaded_tool_names if same_thread else ()
-    return tuple(sorted(set(carried) | set(getattr(thread, "loaded_tool_names", ()))))
+    carried = (surface.loaded_tool_names or ()) if same_thread else ()
+    names = (*(getattr(thread, "loaded_tool_names", ()) or ()), *carried)
+    return tuple(dict.fromkeys(str(item).strip() for item in names if str(item).strip()))
 
 
 # LLM: 只组合原 Compact 输入阈值与 core 唯一请求容量规则，不另配百分比、不把未来输出当已消耗 token。
@@ -1249,6 +1250,13 @@ def _commit_compact_candidate(
     for rows in (candidate.compact_rows, candidate.retained_tail):
         if isinstance(rows, MessageSnapshotRows):
             rows.validate()
+    from ..tooling.tool_search_state import resolve_active_loaded_tool_names
+    active_tools = resolve_active_loaded_tool_names(
+        [
+            *request.thread.metadata.get("discovered_tool_history", ()),
+            *request.thread.loaded_tool_names,
+        ],
+    )
     updated = request.store.threads.update_compact_state(
         request.thread.thread_id,
         commit=ConversationCompactCommit(
@@ -1268,6 +1276,7 @@ def _commit_compact_candidate(
                                  or request.compact_context.scope.kind == "thread"),
         ),
         expected_generation=request.thread.compact_generation,
+        active_loaded_tool_names=active_tools,
     )
     return ConversationCompactResult(
         thread=updated,

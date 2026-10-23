@@ -9,17 +9,14 @@ def register_tool_section(registry):
     registry.register(SectionDescriptor("tools", "工具", 20, tool_projection, "当前工具用途、来源、权限与按需加载状态"))
 
 
-# LLM: disabled/unavailable保留main原原因；投影仅用当前owner/run的公开tool_states，不补进其它owner或宿主隐藏工具。
-# 函数用途: 按同一来源列工具和就绪、收起、不可用、禁用数量。
+# LLM: disabled/unavailable保留main原原因；投影仅用当前owner/run的公开tool_states和冻结catalog_specs，不回退读取可变live registry。
+# 函数用途: 按同一冻结快照列工具和就绪、收起、不可用、禁用数量。
 def tool_projection(context):
     specs = {spec.name: spec for spec in public_catalog_specs(context)}
     items, missing = [], []
     for state in context.public_context.get("tool_states", ()):
         name = state["name"]
         spec = specs.get(name)
-        if spec is None and state["state"] == "disabled":
-            tool = context.agent.tools.tools.get(name)
-            spec = tool.model_spec if tool is not None else None
         if spec is None:
             missing.append(name)
             continue
@@ -62,14 +59,15 @@ def public_tool_specs(snapshot):
     return tuple(spec for spec in snapshot.specs if spec.name in visible)
 
 
-# LLM: 不可用/禁用规格仅按main同次公开状态取原registry定义，状态和授权仍以快照为准，不增加备用执行runtime。
-# 函数用途: 给工具、MCP和插件目录共用已公开名称的元数据，不维护第二份规格清单。
+# LLM: 不可用/禁用规格仅从同次冻结快照的 catalog_specs 读取，状态和授权仍以快照为准，不回退读取可变 live registry。
+# 函数用途: 给工具、MCP和插件目录共用已冻结的公开名称元数据，不维护第二份规格清单。
 def public_catalog_specs(context):
     specs = {spec.name: spec for spec in public_tool_specs(context.snapshot)}
+    frozen_catalog = {spec.name: spec for spec in getattr(context.snapshot, "catalog_specs", ())}
     for state in context.public_context.get("tool_states", ()):
         if state["state"] not in {"disabled", "unavailable"} or state["name"] in specs:
             continue
-        tool = context.agent.tools.tools.get(state["name"])
-        if tool is not None:
-            specs[state["name"]] = tool.model_spec
+        spec = frozen_catalog.get(state["name"])
+        if spec is not None:
+            specs[state["name"]] = spec
     return tuple(specs.values())

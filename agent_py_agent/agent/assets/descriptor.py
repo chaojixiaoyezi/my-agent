@@ -138,6 +138,21 @@ class AccessTarget(_Record):
         super().__post_init__()
 
 
+# LLM: type为当前字段权威，kind只回退；结果仅描述网络需求，不产生授权。
+# 函数用途: 统一分类字典或值对象中的网络目标及协议。
+def access_target_requires_network(target) -> bool:
+    if isinstance(target, dict):
+        kind = target.get('type') or target.get('kind', '')
+        endpoint = target.get('endpoint', '')
+    else:
+        kind = getattr(target, 'type', None) or getattr(target, 'kind', '')
+        endpoint = getattr(target, 'endpoint', '')
+    kinds = {'http', 'https', 'api', 'web', 'websocket', 'ws', 'wss', 'tcp', 'network'}
+    return (isinstance(kind, str) and kind.casefold() in kinds
+            or isinstance(endpoint, str) and endpoint.casefold().startswith(
+                ('http://', 'https://', 'ws://', 'wss://', 'tcp://')))
+
+
 # LLM: 评估决定仅为active/ignored/pending，供调用方避免重复试查，不直接执行源切换。
 # 类用途: 保留新数据源的评估时间、原因和样本数。
 @dataclass(frozen=True)
@@ -179,12 +194,22 @@ class CredentialBindingRef(_Record):
         super().__post_init__()
 
 
-# LLM: IO声明仅为JSON结构说明，不产生执行或完成权威。
+# LLM: IO声明不产生授权；可空和类型字段须随正式资产持久化，不能只在内部parser接受。
 # 类用途: 记录资产输入与输出契约。
 @dataclass(frozen=True)
 class IOContract(_Record):
     inputs: tuple[object, ...] = ()
     outputs: tuple[object, ...] = ()
+    nullable_outputs: tuple[str, ...] = ()
+    output_types: dict[str, str] = field(default_factory=dict)
+
+    # LLM: 仅允许JSON类型名，不接受Python别名或任意可执行schema；冻结字段仍由父类规范。
+    # 函数用途: 在保存之前拒绝无效输出类型合同。
+    def __post_init__(self):
+        super().__post_init__()
+        supported = {'string', 'integer', 'number', 'boolean', 'object', 'array', 'null'}
+        if any(value not in supported for value in self.output_types.values()):
+            raise ValueError('输出类型必须是JSON类型名')
 
 
 # LLM: 依赖引用仅为各kind安全ID；可选skill_dir只保存原目录名作展示，不能授路径权限，空值不输出。

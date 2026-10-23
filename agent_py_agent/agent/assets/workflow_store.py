@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from . import _AssetStore, next_run_summary, positive_timeout, safe_asset_id
+from . import (
+    _AssetStore,
+    canonical_skill_name,
+    next_run_summary,
+    positive_timeout,
+    safe_asset_id,
+    valid_skill_reference,
+)
 from .descriptor import AssetDescriptor, _Record
 
 WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid")
@@ -26,7 +33,7 @@ class WorkflowStepSpec(_Record):
     inputs_map: dict[str, object] = field(default_factory=dict)
     timeout_seconds: float = 120
 
-    # LLM: 资产层是步骤字段校验权威，子类继承同一检查；模式、错误策略、标识符和超时均不可静默修正。
+    # LLM: 资产层唯一校验步骤；Skill引用允许来源前缀，脚本目录ID仍严格，模式/策略/超时不静默修正。
     # 函数用途: 在构造或JSON恢复时拒绝非法工作流步骤。
     def __post_init__(self):
         super().__post_init__()
@@ -35,8 +42,10 @@ class WorkflowStepSpec(_Record):
         if self.on_error not in WORKFLOW_ON_ERROR_POLICIES:
             raise ValueError(f"Unsupported on_error policy: {self.on_error}")
         positive_timeout(self.timeout_seconds)
-        for asset_id in (*self.skill_ids, *((self.script_id,) if self.script_id else ())):
-            safe_asset_id(asset_id)
+        for skill_id in self.skill_ids:
+            valid_skill_reference(skill_id)
+        if self.script_id:
+            safe_asset_id(self.script_id)
 
 
 # LLM: 定义是纯值对象，steps只允许唯一step_id；refs的脚本/Skill权威来自保存时的实际steps。
@@ -60,12 +69,18 @@ class WorkflowDefinition(_Record):
         return {"descriptor": self.descriptor.to_dict(), "steps": [step.to_dict() for step in self.steps],
                 "body_markdown": self.body_markdown}
 
+    # LLM: 所有执行/工具入口共用严格from_dict，不另猜字段或模式；值对象也复制，阻止嵌套可变值污染。
+    # 函数用途: 从原生JSON或已验证定义恢复同一工作流合同。
+    @classmethod
+    def from_any(cls, value):
+        return cls.from_dict(value.to_dict() if isinstance(value, WorkflowDefinition) else value)
 
-# LLM: 由steps推导两个引用集合，旧派生值不沿用；其它kind引用保持原值与顺序。
+
+# LLM: steps保留来源精确引用，AssetRefs.skills只放规范裸名称；陈旧派生值不沿用且不授予权限。
 # 函数用途: 保存前去重汇总脚本和Skill引用。
-def _with_step_refs(definition):
+def with_workflow_step_refs(definition):
     scripts = tuple(dict.fromkeys(step.script_id for step in definition.steps if step.script_id))
-    skills = tuple(dict.fromkeys(skill for step in definition.steps for skill in step.skill_ids))
+    skills = tuple(dict.fromkeys(canonical_skill_name(skill) for step in definition.steps for skill in step.skill_ids))
     refs = replace(definition.descriptor.refs, scripts=scripts, skills=skills)
     return replace(definition, descriptor=replace(definition.descriptor, refs=refs))
 
@@ -84,7 +99,7 @@ class WorkflowStore(_AssetStore):
         descriptor = definition.descriptor
         return replace(definition, descriptor=replace(descriptor, metadata={**descriptor.metadata, 'asset_scope': 'global'}))
 
-    # LLM: 平铺资产Key先严格恢复，再恢复步骤；不吞掉损坏JSON或未知字段。
+    # LLM: 平铺资产Key经唯一from_any恢复；不吞掉损坏JSON或未知字段。
     # 函数用途: 锁内读取完整定义，缺失返回None。
     def _get(self, workflow_id):
         payload = self._read(workflow_id)
@@ -92,7 +107,7 @@ class WorkflowStore(_AssetStore):
             return None
         values = dict(payload)
         steps, body = values.pop("steps"), values.pop("body_markdown", "")
-        return WorkflowDefinition.from_dict({"descriptor": values, "steps": steps, "body_markdown": body})
+        return WorkflowDefinition.from_any({"descriptor": values, "steps": steps, "body_markdown": body})
 
     # LLM: 更新不隐式创建记录；缺失由调用方处理，不回退到其它Owner。
     # 函数用途: 为挂载和摘要更新取得现有定义。
@@ -102,19 +117,19 @@ class WorkflowStore(_AssetStore):
             raise KeyError(workflow_id)
         return definition
 
-    # LLM: 保存后refs与steps同源，正文与元数据锁内提交；文件写失败由基座回滚。
+    # LLM: 同锁提交refs/steps/正文后读回权威记录；提交后读失败按独立阶段抛出，不能报告未开始。
     # 函数用途: 写入已经校验的工作流，供多个写入口共用。
     def _save(self, definition):
-        definition = _with_step_refs(definition)
+        definition = with_workflow_step_refs(definition)
         payload = definition.descriptor.to_dict() | {"steps": [step.to_dict() for step in definition.steps],
                                                     "body_markdown": definition.body_markdown}
         self._write(payload, {"WORKFLOW.md": definition.body_markdown or None})
-        return definition
+        return self._readback_after_commit(definition.descriptor.id)
 
-    # LLM: 输入重新走严格恢复，防止可变metadata被事后污染；不执行正文。
+    # LLM: 输入共用严格from_any以保护可变metadata；不执行正文，写路径共享_save提交与读回阶段。
     # 函数用途: 创建或替换工作流并自动汇总步骤引用。
     def save_workflow(self, definition):
-        definition = WorkflowDefinition.from_dict(definition.to_dict())
+        definition = WorkflowDefinition.from_any(definition)
         with self._locked():
             self._get(definition.descriptor.id)
             return self._save(definition)
@@ -143,15 +158,31 @@ class WorkflowStore(_AssetStore):
                 return False
             return self._delete(workflow_id)
 
-    # LLM: 只修改目标step_id并按skill_id去重，同锁内重新推导refs；未知步骤不保存。
+    # LLM: attach/detach同用锁内命令，模式检查不可只留在工具wrapper；精确引用不去前缀。
     # 函数用途: 动态给现有工作流步骤挂载一个Skill。
     def attach_skill_to_step(self, workflow_id, step_id, skill_id):
-        safe_asset_id(skill_id)
+        return self._change_skill_binding(workflow_id, step_id, skill_id, remove=False)
+
+    # LLM: 与attach共享原子读改写，不在工具层重建定义或覆盖其它步骤。
+    # 函数用途: 从指定分析或混合步骤解绑一个精确Skill引用。
+    def detach_skill_from_step(self, workflow_id, step_id, skill_id):
+        return self._change_skill_binding(workflow_id, step_id, skill_id, remove=True)
+
+    # LLM: 在原Owner集合锁内查模式、只替目标步并重算refs；失败前不写入，不接受裸路径。
+    # 函数用途: 统一执行Skill挂载或解绑，避免两个存储权威和丢更新。
+    def _change_skill_binding(self, workflow_id, step_id, skill_id, *, remove):
+        valid_skill_reference(skill_id)
+        safe_asset_id(step_id)
         with self._locked():
             definition = self._required(workflow_id)
-            if step_id not in {step.step_id for step in definition.steps}:
+            target = next((step for step in definition.steps if step.step_id == step_id), None)
+            if target is None:
                 raise KeyError(step_id)
-            steps = tuple(replace(step, skill_ids=tuple(dict.fromkeys((*step.skill_ids, skill_id))))
+            if target.mode not in ("llm_skill_analysis", "hybrid"):
+                raise ValueError("目标必须是现有分析或混合步骤")
+            skills = (tuple(value for value in target.skill_ids if value != skill_id) if remove
+                      else tuple(dict.fromkeys((*target.skill_ids, skill_id))))
+            steps = tuple(replace(step, skill_ids=skills)
                           if step.step_id == step_id else step for step in definition.steps)
             return self._save(replace(definition, steps=steps))
 

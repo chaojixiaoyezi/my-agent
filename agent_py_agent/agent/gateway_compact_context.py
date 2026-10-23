@@ -8,10 +8,10 @@ from .agent_core.runtime.loop_models import RuntimeContextRequest
 from .agent_core.runtime.run_params import run_params_with_request_id
 from .conversation.compact_provider_surface import ConversationCompactModelSurface
 from .gateway_parts import request_binding, request_context
-from .tooling.tool_search_state import pending_carried_loaded_tool_names
+from .tooling.tool_search_state import ordered_carried_loaded_tool_names
 
 
-# LLM: 身份只读原runtime_authority及原参数默认解析，禁止从carrier借用；只复制请求事实，不持有handler或创建执行权。
+# LLM: 身份只读原runtime_authority及原参数解析；工具名沿typed归档保序恢复，不持有handler或创建执行权。
 # 函数用途: 为同turn两次Compact上下文加载冻结最新展示与当前输入；失效回调清过的值不能被第二次加载复活。
 def build_gateway_compact_load_request(context, prompt, run_params, carried_archive_tool_calls):
     authority = request_binding.gateway_runtime_authority(context.request, context.request_id)
@@ -21,7 +21,7 @@ def build_gateway_compact_load_request(context, prompt, run_params, carried_arch
         prompt_files=tuple(resolved.prompt_files or ()),
         system_prompt_override=resolved.system_prompt_override,
         context_scope=resolved.context_scope,
-        loaded_tool_names=tuple(sorted(pending_carried_loaded_tool_names(carried_archive_tool_calls))),
+        loaded_tool_names=ordered_carried_loaded_tool_names(carried_archive_tool_calls),
         presentation_context=RuntimeContextRequest(
             user_prompt=prompt, inject=[], resume_context=False, context_scope=resolved.context_scope,
             allowed_tools=deepcopy(resolved.allowed_tools), request_id=context.request_id,

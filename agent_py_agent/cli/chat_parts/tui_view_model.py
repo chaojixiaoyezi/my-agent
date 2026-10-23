@@ -7,10 +7,11 @@ import logging
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 from ...agent.conversation.compact_progress import COMPACT_CAPACITY_PROGRESS_FIELDS
+from ...agent.conversation.context_usage import public_context_usage
 from ...agent.conversation.model_metrics import newer_model_metrics
 from .tui_events import JournalAppendResult, TuiEvent, TuiEventJournal
 from .tui_identity_window import TuiIdentityWindow
@@ -74,8 +75,7 @@ class TuiPermissionOverlay:
     feedback_placeholder: str = ""
 
 
-# LLM: This is a display-only copy of model_visible_context_usage.v1. It contains numeric
-# estimates only; provider content and compact authority remain in the Agent runtime.
+# LLM: 仅保存公开数字、短标签及已验证估算来源；缺来源的旧快照保持None/空串，不持有正文或Compact权限。
 # 类用途: 保存最近一次真实模型调用前的上下文总量、窗口、压缩线和分类估算。
 @dataclass(frozen=True)
 class TuiContextUsage:
@@ -91,6 +91,11 @@ class TuiContextUsage:
     # 状态行显示用：这次调用的模型名与思考档位（"off" 关、"auto" 模型默认），旧 Gateway 事件没有时为空串。
     model_name: str = ""
     reasoning_level: str = ""
+    raw_estimated_tokens: int | None = None
+    calibrated_tokens: int | None = None
+    measurement_kind: str = ""
+    counter_id: str = ""
+    count_scope: str = ""
 
 
 # LLM: TuiStatus 是 footer/spinner/context strip 的结构化快照；elapsed 等展示值由 renderer 的 clock 计算，不写回状态机。
@@ -1389,31 +1394,16 @@ def _status_with_update(status: TuiStatus, event: TuiEvent) -> TuiStatus:
     )
 
 
-# LLM: The reducer validates the context schema locally even after Gateway sanitization so
-# replayed, duplicated, or direct local events cannot inject unknown display state.
+# LLM: reducer复用同一公开白名单并仅取dataclass字段；有效旧快照重建未知来源，畸形事件保留原对象。
 # 函数用途: 将合法的实时上下文事件转换成不可变 TUI 快照，畸形事件保留上一份数据。
 def _context_usage_from_mapping(
     value: object,
     previous: TuiContextUsage | None,
 ) -> TuiContextUsage | None:
-    if not isinstance(value, Mapping):
+    public = public_context_usage(value)
+    if not public:
         return previous
-    if value.get("schema") != "model_visible_context_usage.v1":
-        return previous
-    protocol = str(value.get("protocol") or "unknown")
-    return TuiContextUsage(
-        current_tokens=_nonnegative_int(value.get("current_tokens"), 0),
-        context_window_tokens=_nonnegative_int(value.get("context_window_tokens"), 0),
-        compact_trigger_tokens=_nonnegative_int(value.get("compact_trigger_tokens"), 0),
-        prompt_tokens=_nonnegative_int(value.get("prompt_tokens"), 0),
-        messages_tokens=_nonnegative_int(value.get("messages_tokens"), 0),
-        runtime_guidance_tokens=_nonnegative_int(value.get("runtime_guidance_tokens"), 0),
-        tool_schema_tokens=_nonnegative_int(value.get("tool_schema_tokens"), 0),
-        estimated=value.get("estimated") is True,
-        protocol=protocol if protocol in {"native", "text"} else "unknown",
-        model_name=_short_label(value.get("model_name")),
-        reasoning_level=_short_label(value.get("reasoning_level")),
-    )
+    return TuiContextUsage(**{item.name: public[item.name] for item in fields(TuiContextUsage) if item.name in public})
 
 
 # 函数用途: 只接受字符串、去首尾空白、截到 80 字符；其它类型按空串，不让事件把长正文带进状态行。

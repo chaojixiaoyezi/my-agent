@@ -4,27 +4,32 @@ import json
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
-from ..assets.workflow_store import WorkflowStepSpec as AssetWorkflowStepSpec
+from ..assets.workflow_store import WORKFLOW_ON_ERROR_POLICIES as WORKFLOW_ON_ERROR_POLICIES
+from ..assets.workflow_store import WorkflowStepSpec as WorkflowStepSpec
 from ..common.log_redaction import redact_sensitive_value
 
 _BEARER_VALUE = re.compile(r'''(?i)(\bbearer\s+)(?!<redacted\b|\[redacted\])[^\s,;"'<>]+''')
-WORKFLOW_ON_ERROR_POLICIES = ('escalate_to_agent', 'fail', 'skip')
 StepStatus = Literal['pending', 'running', 'succeeded', 'skipped', 'failed',
                      'escalated_recovered', 'paused_for_resume']
 
 
-# LLM: 继承资产步骤唯一字段合同；引擎与工具在执行前补充策略校验，不修改资产存储实现。
-# 类用途: 提供带错误策略枚举检查的工作流步骤值对象。
-@dataclass(frozen=True)
-class WorkflowStepSpec(AssetWorkflowStepSpec):
-    # LLM: 父类继续验证模式、编号和超时；非法错误策略不能进入执行账本。
-    # 函数用途: 构造或反序列化时拒绝未知on_error值。
-    def __post_init__(self):
-        super().__post_init__()
-        if self.on_error not in WORKFLOW_ON_ERROR_POLICIES:
-            raise ValueError(f'Unsupported on_error policy: {self.on_error}')
+# LLM: 属性是完整输入合同，dict仅保留前步与非碰撞输入，各视图独立深拷贝。
+# 类用途: 向宿主分析器提供兼容旧outputs的完整隔离上下文。
+class AnalysisContext(dict[str, Any]):
+    # LLM: dict中不插入skill_details等保留元字段，保持旧outputs相等合同。
+    # 函数用途: 复制前步、原始和映射输入、Skill正文及数据源。
+    def __init__(self, prior_outputs=None, run_inputs=None, step_inputs=None, skill_details=None, data_sources=None):
+        self.prior_outputs = payload({} if prior_outputs is None else prior_outputs)
+        self.run_inputs = payload({} if run_inputs is None else run_inputs)
+        self.step_inputs = payload({} if step_inputs is None else step_inputs)
+        self.skill_details = payload([] if skill_details is None else skill_details)
+        self.data_sources = payload({} if data_sources is None else data_sources)
+        super().__init__(payload(self.prior_outputs))
+        for values in (self.step_inputs, self.run_inputs):
+            for key, value in values.items():
+                self.setdefault(key, payload(value))
 
 
 # LLM: 数据容器无执行副作用，输出与兜底上下文供引擎和工具读取。
@@ -71,10 +76,12 @@ class StepExecutionRecord:
     def to_dict(self):
         return payload(self)
 
-    # LLM: 旧账本没有needs_repair时使用False，技能容器恢复为tuple。
-    # 函数用途: 从JSON对象恢复步骤记录。
+    # LLM: 状态校验集中于模型；旧账本缺needs_repair用False，技能容器恢复tuple。
+    # 函数用途: 严格恢复独立步骤记录。
     @classmethod
     def from_dict(cls, value):
+        if value['status'] not in get_args(StepStatus):
+            raise ValueError('未知步骤状态')
         return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ()))})
 
 
@@ -147,20 +154,26 @@ def safe_path(root, part, part2=None, part3=None):
     return path
 
 
-# LLM: 输入映射和条件只从明确步骤编号或$inputs取值，不解析表达式或模型自然语言。
-# 函数用途: 从此前步骤快照或工作流初始输入提取一个字段或完整输出；不存在时明确报错。
+# LLM: 仅显式fallback处理缺步、缺键或None；无fallback保留原缺失错误，不猜默认值。
+# 函数用途: 从前步或冻结初始输入取值，递归解析结构化兜底引用。
 def output_value(reference, outputs, inputs=None):
-    if not isinstance(reference, dict) or set(reference) - {'step_id', 'key', 'equals'}:
+    if not isinstance(reference, dict) or 'step_id' not in reference or set(reference) - {'step_id', 'key', 'equals', 'fallback'}:
         raise ValueError('输出引用必须是结构化 step_id/key')
     step_id = reference['step_id']
-    if step_id == '$inputs' and isinstance(inputs, dict):
-        if 'key' not in reference:
-            return payload(inputs)
-        default = '' if reference.get('equals') == '' else None
-        return payload(inputs.get(reference['key'], default))
-    value = outputs[step_id]
-    if 'key' in reference:
-        value = value[reference['key']]
+    try:
+        if step_id == '$inputs' and isinstance(inputs, dict):
+            default = '' if reference.get('equals') == '' else None
+            value = inputs.get(reference['key'], default) if 'key' in reference else inputs
+        else:
+            value = outputs[step_id]
+            if 'key' in reference and value is not None:
+                value = value[reference['key']]
+    except KeyError:
+        if 'fallback' not in reference:
+            raise
+        return output_value(reference['fallback'], outputs, inputs)
+    if value is None and 'fallback' in reference:
+        return output_value(reference['fallback'], outputs, inputs)
     return payload(value)
 
 

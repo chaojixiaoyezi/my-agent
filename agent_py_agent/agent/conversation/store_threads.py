@@ -394,15 +394,11 @@ class ThreadStore:
             ),
         )
 
-    # LLM: 唯一CAS推进提交链和计数；局部检查点不覆盖全线程摘要/游标，旧代校准与展示仍统一失效。
-    # 函数用途: 原子提交压缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
+    # LLM: 唯一CAS推进提交链、计数及活跃发现工具收敛；局部检查点不覆盖全线程摘要/游标，旧代校准与展示仍统一失效。
+    # 函数用途: 原子提交压缩与可选活跃工具收缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
     def update_compact_state(
-        self,
-        thread_id: str,
-        *,
-        commit: ConversationCompactCommit,
-        expected_generation: int,
-        now: float | None = None,
+        self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
+        active_loaded_tool_names: tuple[str, ...] | None = None, now: float | None = None,
     ) -> ConversationThread:
         """Atomically advance one validated summary/checkpoint without touching raw messages."""
         if type(commit.publish_thread_view) is not bool:
@@ -413,11 +409,10 @@ class ThreadStore:
         # 函数用途: 同锁提交唯一head；局部压缩保留全线程摘要时间和游标，防止其它任务跳过未覆盖原文。
         def apply(thread: ConversationThread) -> ConversationThread:
             if thread.compact_generation != expected_generation:
-                raise RuntimeError(
-                    "conversation compact generation changed while summary was being prepared"
-                )
+                raise RuntimeError("conversation compact generation changed while summary was being prepared")
+            from .tool_discovery import compact_discovered_tools
             return replace(
-                thread,
+                thread, **compact_discovered_tools(thread, active_loaded_tool_names),
                 summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
                 compact_operation_evidence=(dict(commit.operation_evidence) if commit.publish_thread_view
                                             else thread.compact_operation_evidence),
@@ -428,10 +423,7 @@ class ThreadStore:
                 compact_generation=thread.compact_generation + 1,
                 compact_updated_at=current if commit.publish_thread_view else thread.compact_updated_at,
                 compact_source_messages=max(0, int(commit.source_messages)),
-                compact_source_tool_pairs=max(
-                    0,
-                    int(commit.source_tool_pairs),
-                ),
+                compact_source_tool_pairs=max(0, int(commit.source_tool_pairs)),
                 compact_checkpoint_id=str(commit.checkpoint_id),
                 compact_consecutive_failures=0,
                 compact_failure_updated_at=0.0,

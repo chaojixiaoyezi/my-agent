@@ -15,7 +15,7 @@ _TOKEN_FIELDS = (
     "messages_tokens", "runtime_guidance_tokens", "tool_schema_tokens",
 )
 _MEASUREMENT_COUNTER_IDS = {"conservative_estimate": "conservative_cjk_utf8_v1",
-                          "calibrated_estimate": "provider_calibrated_v1", "provider_actual": "provider_actual_v1"}
+                          "calibrated_estimate": "provider_calibrated_v1"}
 
 
 # LLM: 仅由原采样入口建立并随同一次快照传递，不序列化、不授权限；store 对象身份限制归属，数字使用原线程 CAS。
@@ -85,18 +85,27 @@ def _label(value: object) -> str:
     return value.strip()[:80] if isinstance(value, str) else ""
 
 
-# LLM: 旧快照缺raw时按current解释；来源只收固定枚举，counter/scope由口径派生，不信任自由标签或伪造的校准总量。
-# 函数用途: 给已有计量附加清洗后的原始值、校准值及计数来源。
+# LLM: 只接受生产采样已明确给出的估算来源；旧记录缺证据保持未知，不从数值差异推导实际计量来源。
+# 函数用途: 保留可信原始估算与校准标志，拒绝为旧快照编造计数器。
 def _measurement_fields(value: Mapping) -> dict[str, object]:
     current = _count(value.get("current_tokens"))
-    raw = _count(value.get("raw_estimated_tokens", current))
+    raw = value.get("raw_estimated_tokens")
     kind = value.get("measurement_kind")
-    inferred = "calibrated_estimate" if current != raw else "conservative_estimate"
-    if (not isinstance(kind, str) or kind not in _MEASUREMENT_COUNTER_IDS
-            or (kind == "conservative_estimate" and current != raw)):
-        kind = inferred
-    return {"raw_estimated_tokens": raw, "calibrated_tokens": current, "measurement_kind": kind,
-            "counter_id": _MEASUREMENT_COUNTER_IDS[kind], "count_scope": "full_outbound_request"}
+    if type(raw) is not int or raw < 0:
+        return {}
+    if not isinstance(kind, str) or kind not in {
+        "conservative_estimate", "calibrated_estimate",
+    }:
+        return {}
+    if kind == "conservative_estimate" and current != raw:
+        return {}
+    return {
+        "raw_estimated_tokens": raw,
+        "calibrated_tokens": current,
+        "measurement_kind": kind,
+        "counter_id": _MEASUREMENT_COUNTER_IDS[kind],
+        "count_scope": "full_outbound_request",
+    }
 
 
 # LLM: 同一白名单保存/回读新增来源；旧字段、准确thread与两种CAS合同不变，原始prompt、工具参数和未知字段不保留。

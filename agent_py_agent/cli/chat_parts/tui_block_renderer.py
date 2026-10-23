@@ -2903,8 +2903,7 @@ def _context_model_suffix(model_name: str, reasoning_level: str) -> str:
     return text
 
 
-# LLM: `/context` in rich TUI must render the exact same TuiContextUsage object as the fixed
-# strip. It may explain numeric components but must not recompute history or compact policy.
+# LLM: /context沿状态栏同一对象展示分量及明确来源；缺raw/calibrated保持未知，不重算历史或压缩策略。
 # 函数用途: 把底部状态栏正在使用的上下文快照展开成普通用户看得懂的详细中文报告。
 def render_tui_context_usage_report(
     usage: TuiContextUsage | None,
@@ -2934,6 +2933,11 @@ def render_tui_context_usage_report(
             else f"总量（{accuracy}）：{current:,} tokens；模型窗口未知"
         ),
     ]
+    if usage.raw_estimated_tokens is None or usage.calibrated_tokens is None:
+        lines.append("原始估算/校准来源：未知（旧快照或未提供）")
+    else:
+        lines.append(f"原始估算：{usage.raw_estimated_tokens:,}；当前预算估算：{usage.calibrated_tokens:,} tokens")
+        lines.append(f"计量来源：{usage.measurement_kind}（{usage.counter_id}）")
     if usage.protocol == "native":
         lines.extend(
             (

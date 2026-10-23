@@ -1189,6 +1189,7 @@ class ToolRuntimeSnapshot:
     # 展示事实不进入权限或 snapshot_hash；撤权后旧名字在 registry 投影时取当前快照交集。
     loaded_tool_names: tuple[str, ...] = ()
     preloaded_tool_names: tuple[str, ...] = ()
+    catalog_specs: tuple[ToolModelSpec, ...] = ()
 
     # LLM: 仅校验名称子集、不可变类型与原发现入口；有序加载/预载只是展示事实，不扩权或产生新注册代次。
     # 函数用途: 在创建快照或宿主替换展示投影时拒绝越界名称和无法找回的额外折叠。

@@ -17,15 +17,21 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
+from ..assets.descriptor import access_target_requires_network
 from ..assets.script_store import ScriptStore
 from ..attempt.sandbox import AttemptExecutionSandbox, AttemptSandboxSpec, SandboxUnavailableError
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
+from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from .models import ScriptExecutionResult, payload, safe_path
 
 MAX_OUTPUT_BYTES = 1024 * 1024
 PREVIEW_CHARS = 4096
+_JSON_OUTPUT_TYPES = {
+    'string': (str,), 'integer': (int,), 'number': (int, float),
+    'boolean': (bool,), 'object': (dict,), 'array': (list,), 'null': (type(None),),
+}
 
 
 # LLM: 此异常只表示冻结代码为空或缺失，不把路径违规或坏描述符降级为旧格式。
@@ -81,18 +87,15 @@ def _can_apply_sandbox(sandbox: AttemptExecutionSandbox, *, strict: bool = False
     return strict or not _outer_seatbelt_active()
 
 
-# LLM: targets只决定通用联网开关，不授予宿主凭据或扩大业务授权；空声明保持旧通用脚本行为。
-# 函数用途: 根据访问目标类型和协议推导是否需要网络。
+# LLM: 分类不授予资源或凭据，显式覆盖及空声明既有行为不变。
+# 函数用途: 按共享目标type或旧kind推导网络开关。
 def _network_access(metadata, override):
     if override is not None:
         if type(override) is not bool:
             raise ValueError('network_access必须是布尔值')
         return override
     targets = metadata.get('access_targets', ())
-    kinds = {'http', 'https', 'api', 'web', 'websocket', 'ws', 'wss', 'tcp', 'network'}
-    return not targets or any(target.get('kind', '').lower() in kinds or
-                              target.get('endpoint', '').lower().startswith(('http://', 'https://', 'ws://', 'wss://'))
-                              for target in targets)
+    return not targets or any(access_target_requires_network(target) for target in targets)
 
 
 # LLM: 从宿主副本清洗凭据，仅添加引用占位符；工作目录、HOME与TMPDIR均指向本次冻结目录。
@@ -202,8 +205,28 @@ def _check_json_depth(text):
             raise ValueError('JSON 输出结构过深')
 
 
-# LLM: 输出必须为有限深度的 JSON 对象，必选键取 io_contract；正常与恢复输出共用此校验。
-# 函数用途: 解析完整标准输出并检查字段，返回输出及结构化错误码。
+# LLM: 只接受JSON类型名，可空与字段存在性分开处理，不隐式增加必选字段。
+# 函数用途: 校验输出声明并返回必选字段、可空字段和类型表。
+def _output_contract_fields(contract):
+    if not isinstance(contract, dict):
+        raise ValueError('输出合同必须为对象')
+    expected = contract.get('expected_output_keys', contract.get('outputs', ()))
+    nullable = contract.get('nullable_outputs', ())
+    output_types = contract.get('output_types', {})
+    if not isinstance(expected, (list, tuple)) or not all(isinstance(key, str) for key in expected):
+        raise ValueError('必选输出字段必须为字符串列表')
+    if not isinstance(nullable, (list, tuple)) or not all(isinstance(key, str) for key in nullable):
+        raise ValueError('可空输出字段必须为字符串列表')
+    if not isinstance(output_types, dict) or any(
+        not isinstance(key, str) or not isinstance(name, str) or name not in _JSON_OUTPUT_TYPES
+        for key, name in output_types.items()
+    ):
+        raise ValueError('输出类型必须为字段名到JSON类型名的对象')
+    return expected, nullable, output_types
+
+
+# LLM: 正常与恢复输出共用严格校验；bool不是数字，显式nullable只豁免null值。
+# 函数用途: 解析标准输出并核对字段存在性、非空和可选类型。
 def parse_script_output(stdout, contract):
     try:
         _check_json_depth(stdout)
@@ -212,17 +235,21 @@ def parse_script_output(stdout, contract):
             return {}, 'SCRIPT_INVALID_JSON'
     except (ValueError, TypeError, RecursionError):
         return {}, 'SCRIPT_INVALID_JSON'
-    expected = contract.get('expected_output_keys', contract.get('outputs', ()))
-    if not isinstance(expected, (list, tuple)) or not all(isinstance(key, str) for key in expected):
-        raise ValueError('必选输出字段必须为字符串列表')
+    expected, nullable, output_types = _output_contract_fields(contract)
     if any(key not in output for key in expected):
         return output, 'SCRIPT_MISSING_OUTPUT_KEYS'
+    if any(output[key] is None and key not in nullable for key in expected):
+        return output, 'SCRIPT_NULL_OUTPUT_VALUE'
+    for key, name in output_types.items():
+        if key not in output or output[key] is None and key in nullable:
+            continue
+        if type(output[key]) not in _JSON_OUTPUT_TYPES[name]:
+            return output, 'SCRIPT_OUTPUT_TYPE_MISMATCH'
     return output, ''
 
 
-# LLM: Linux 便携式发行版 runtime 位于 /app/.my-agent/releases/.../runtime（常经 current 软链进入），不在 bwrap 默认 /usr 只读根内；
-#   必须将已解析的 prefix/base_prefix 及解释器安装根作为 public_read_roots 挂入沙箱，并对齐沙箱内可达的解释器路径。
-# 函数用途: 解析脚本解释器可执行文件路径及沙箱所需的只读运行时根目录。
+# LLM: 共享前缀保留别名与realpath；runner跳过缺失目录，额外请求其原有解释器安装根。
+# 函数用途: 选择venv或便携Python启动路径及只读根，不改沙箱策略。
 def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]]:
     if interpreter != 'python3':
         return shutil.which(interpreter, path=os.defpath), ()
@@ -230,10 +257,7 @@ def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]
         return None, ()
     resolved_exec = Path(sys.executable).expanduser().resolve(strict=False)
     prefix_dir = Path(sys.prefix).expanduser().resolve(strict=False)
-    roots: list[Path] = []
-    for raw in (prefix_dir, Path(sys.base_prefix).expanduser().resolve(strict=False), resolved_exec.parent.parent):
-        if raw.is_dir() and raw not in roots:
-            roots.append(raw)
+    roots = resolve_python_runtime_prefixes(executable=sys.executable, strict=False)
     candidate = prefix_dir / 'bin' / Path(sys.executable).name
     executable = str(resolved_exec)
     if candidate.is_file() and not candidate.is_symlink():
@@ -242,7 +266,7 @@ def _interpreter_runtime(interpreter: str) -> tuple[str | None, tuple[Path, ...]
         target = Path(os.path.normpath(os.path.join(str(candidate.parent), os.readlink(candidate))))
         if any(target.is_relative_to(r) for r in roots):
             executable = str(candidate)
-    return executable, tuple(roots)
+    return executable, roots
 
 
 # LLM: 固化脚本仅接收 JSON；宿主必须在调用前完成 Owner、审批和工具权限检查。

@@ -181,7 +181,7 @@ class _ToolRoundProgress:
     deferred_reason: str = ""
 
 
-# LLM: 每段原位绑定实时 Compact/描述查询，不能把整轮调度事实提前冻结；实际完成顺序不影响 provider 顺序记账，联测取消与审批。
+# LLM: 每段原位绑定实时Compact/描述查询，保留provider顺序与审批；已完成工具轮末由宿主受限入口刷新方法目录。
 # 函数用途: 执行一轮 canonical 工具调用，保留只读并发段和顺序屏障，为执行、拒绝、延后与取消写入配对 ToolResult。
 def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
     before_context_count = len(getattr(request.params, "tool_context", []) or [])
@@ -232,6 +232,9 @@ def execute_tool_round(request: ToolRoundExecutionRequest) -> bool:
         reason=progress.deferred_reason,
     )
     _enforce_turn_context_budget(request.params, before_context_count)
+    refresh_fn = getattr(request.agent, "refresh_current_skill_snapshot_if_needed", None)
+    if callable(refresh_fn):
+        refresh_fn()
     return progress.subagent_output_written
 
 

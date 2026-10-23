@@ -358,13 +358,13 @@ def _upgrade_untouched_group_persona(result: OwnerHomeResult) -> None:
         return
     group_templates = persona_templates_for_owner("group")
     for path, old, new in zip(
-        (result.soul_md, result.user_md, result.agents_md),
-        (SOUL_TEMPLATE, USER_TEMPLATE, AGENTS_TEMPLATE),
-        group_templates,
+        (result.soul_md, result.user_md),
+        (SOUL_TEMPLATE, USER_TEMPLATE),
+        group_templates[:2],
         strict=True,
     ):
         try:
-            if path.read_text(encoding="utf-8") == old:
+            if path.read_bytes() == old.encode("utf-8"):
                 path.write_text(new, encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue

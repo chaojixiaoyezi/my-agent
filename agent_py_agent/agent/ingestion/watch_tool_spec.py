@@ -603,12 +603,6 @@ def _surface_parameters(
     )
     if surface == "ordinary":
         parameters["action"] = "必填；动作：" + " / ".join(_ACTION_LABELS[action] for action in actions)
-        parameters["source_adapter"] = (
-            "可选 adapter 名或内置 adapter（如 command_stdout）；仅 mode=adapter 且当前运行允许时使用，path 为已试通的受权工作区相对 Python 脚本，sha256 钉住版本。"
-            "只经 stdin/stdout 交换 JSON：phase=plan 接收 checkpoint/now_unix/page_limit/base_request，返回 request 和可选 context；"
-            "phase=accept 接收 checkpoint/context/response，返回 records/checkpoint/has_more/record_keys。"
-            "record_keys 须对应来源投递位置，不按正文哈希或业务ID合并；脚本不能联网、读密钥或写文件，宿主负责网络、安全闸、落盘和游标提交。"
-        )
     if surface == "audit_prepare":
         parameters["url"] = (
             parameters["url"]
@@ -707,7 +701,7 @@ def _watch_stream_model_spec(
     details = {
         name: f"{parameters.get(name, '')} {value}".strip()
         for name, value in _PARAMETER_DETAILS.items()
-        if name in names and not (surface == "ordinary" and name == "source_adapter")
+        if name in names
     }
     properties: dict[str, object] = {}
     for name, parameter_description in parameters.items():

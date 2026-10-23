@@ -841,3 +841,7 @@ FT-158/160 两份旧业务文件直接修改，未再出现路径回绑或改写
 ## 2026-10-15 首次认证拒绝的安全通知事实
 
 `tool_call_archive_record._compact_result_envelope` 仅从真实执行的 `ToolResult(web_fetch)` 投影首次 401→rejected 的 `required_user_action`，保留 opaque ref/严格整数代次；模型字典、HTTP正文、403/网络失败、旧代及重复拒绝不产生此事实。`conversation/required_user_action` 在原 finalization 关 TaskLink 前复核当前凭据scope并冻结原 Wake 义务；归档不成为第二份状态权威。通知复用原零工具模型表达与 owner_delivery，发送前再核 owner/actor/来源/代次和原任务，未发冷重投仍在原 claim 内，只重投、不重认证或业务。local/none 仍使普通结果静默；用户决定重填或停用，宿主不自动停计划、发卡或重试认证。详见 [通知交接](../../tasks/CREDENTIAL_REJECTION_NOTICE_HANDOFF.md)。
+
+## 2026-10-23 领域感知工具输出摘要器与共享上下文指纹
+
+新增 `agent_core/tool_context/live_summary.py` 与 `context_fingerprint.py`：`reducer.py` 对 `run_command`/`process_session`/`list_agents`/`inspect_agent_tree` 生成保留控制字段与诊断证据的有界结构化摘要，三个决策信号模块共用 `context_fingerprint`。

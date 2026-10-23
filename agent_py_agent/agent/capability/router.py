@@ -65,6 +65,8 @@ _PLAYWRIGHT_KEYWORDS = [
 _SKILL_METADATA_CONTEXT_WINDOW_PERCENT = 2
 # 技能元数据默认字符预算，控制每轮注入的技能说明总量。
 _DEFAULT_SKILL_METADATA_MAX_CHARS = 8_000
+# 技能元数据完整信封的硬字符上限，防止超大上下文窗口时膨胀。
+_MAX_SKILL_METADATA_ENVELOPE_CHARS = 12_000
 # 单条技能描述的最大字符数，超长截断。
 _MAX_SKILL_DESCRIPTION_CHARS = 1_024
 # 每 token 的近似字节数，用于估算上下文占用。
@@ -309,7 +311,26 @@ class CapabilityRouter:
         text = "\n\n".join(part for part in (package_text, skill_text) if part)
         # 完整拼接是最后观察点：分区token向上取整的几字节边界也不能把真实预算误判成合成兜底。
         if total_budget.cost(minimum_text) <= total_budget.limit < total_budget.cost(text):
-            return minimum_text
+            text = minimum_text
+        if len(text) > _MAX_SKILL_METADATA_ENVELOPE_CHARS:
+            char_budget = _SkillMetadataBudget(
+                max(0, _MAX_SKILL_METADATA_ENVELOPE_CHARS - (len(unavailable_text) + 2 if unavailable_text else 0)),
+                False,
+            )
+            pkg_limit = max(1, char_budget.limit // 2) if skills else char_budget.limit
+            pkg_text, pkg_cost = _render_package_metadata(
+                packages, _SkillMetadataBudget(pkg_limit, False), selected_skill_ids, required_skill_ids
+            )
+            pkg_text = "\n\n".join(item for item in (unavailable_text, pkg_text) if item)
+            rem_budget = _SkillMetadataBudget(
+                max(0, char_budget.limit - pkg_cost - (2 if pkg_cost else 0)), False
+            )
+            sk_text = ""
+            if skills and selected_skill_ids is not None:
+                sk_text = _render_selected_skill_metadata(skills, rem_budget, selected_skill_ids, required_skill_ids)
+            elif skills:
+                sk_text = _render_public_skill_metadata(skills, rem_budget, required_skill_ids)
+            text = "\n\n".join(part for part in (pkg_text, sk_text) if part)
         return text
 
     def search(
@@ -763,11 +784,17 @@ def _minimum_metadata_index(skills, packages, budget, selected, required, unavai
 # 函数用途: 装配目录与可选提示并复核同一预算，极小合成预算保留旧提示和必要身份兜底。
 def _metadata_text(cards, budget, header, shown, tail, notice, bounded, required=()) -> str:
     lines = [*header, *shown]
-    if notice and (not bounded or budget.cost("\n".join([*lines, notice, *tail])) <= budget.limit):
+    omitted = max(0, len(cards) - len(shown))
+    if notice and (not bounded or omitted > 0 or budget.cost("\n".join([*lines, notice, *tail])) <= budget.limit):
         lines.append(notice)
     text = "\n".join([*lines, *tail])
     if bounded and budget.cost(text) > budget.limit:
-        text = "\n".join([*header, *_minimum_metadata_lines(cards, budget, required), *tail])
+        min_lines = _minimum_metadata_lines(cards, budget, required)
+        min_omitted = max(0, len(cards) - len(min_lines))
+        fallback_lines = [*header, *min_lines]
+        if min_omitted and notice:
+            fallback_lines.append(notice)
+        text = "\n".join([*fallback_lines, *tail])
     return text
 
 

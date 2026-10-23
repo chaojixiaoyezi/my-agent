@@ -1,5 +1,5 @@
 # LLM: 只读工具归档里的结构化事实（ok、tool_execution.failure_stage）和本快照的可见性，不解析模型或工具输出正文；
-#   唯一副作用是把工具名加进 params.loaded_tool_names（与 tool_search 同一个“下一次模型调用临时可见”机制，用一次即清）。
+#   副作用仅为补入 params.loaded_tool_names 并记录live_archive_state的发现顺序，不执行工具或改变授权。
 #   只在 tool_default_deferral_enabled 打开时生效，开关关闭时行为逐字不变。改动同步 test_tool_default_deferral 与其真实链路用例。
 # 模块用途: 模型没先 tool_search 就直接调用收起的工具、在参数校验阶段失败时，把这个工具的完整参数定义加到下一次请求，
 #   让模型下一步照定义重试，而不是在没有定义的情况下反复猜参数。
@@ -12,7 +12,7 @@ from ...tooling.models import ToolFailureStage
 
 # LLM: 条件全部来自结构化字段：开关、调用失败、参数出错（失败阶段是 validation，或错误码的错误合同推荐动作是修参数——工具在
 #   执行阶段自己判参数无效也算）、工具在本快照里、且下一次请求本来不会带它的定义（显式 allowed_tools 的回合全量可见，自然不触发）。
-#   命中时改 params.loaded_tool_names 并返回一行宿主提示，否则返回空串。
+#   命中时兼容list/set补入工具名，并在dict型live_archive_state去重记录加载顺序；否则返回空串。
 # 函数用途: 收起的工具被“盲调”且参数校验失败时，让下一次请求带上它的完整定义，并给模型一句提示。
 def reload_schema_after_blind_call(agent: object, params: object, archive_record: dict[str, object]) -> str:
     registry = getattr(agent, "tools", None)
@@ -32,7 +32,15 @@ def reload_schema_after_blind_call(agent: object, params: object, archive_record
     )
     if any(spec.name == tool for spec in visible):
         return ""
-    loaded.add(tool)
+    if isinstance(loaded, list):
+        loaded.append(tool)
+    else:
+        loaded.add(tool)
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        order = state.setdefault("loaded_tool_order", [])
+        if isinstance(order, list) and tool not in order:
+            order.append(tool)
     return f"\n[tool-schema-loaded] {tool} 的完整参数定义已随下一次请求提供，请按定义重新调用。"
 
 

@@ -690,3 +690,7 @@ Curator `run/run_if_due` 先沿当前实际 Agent/原 claim 做空短准入，�
 ## 2026-10-17 C正式记忆recent同一只读叶子
 
 `read_memory_records_from_path`不构造会mkdir的JsonlMemory，只共用原唯一事件scanner与版本/删除/过期物化。原`all→self._read_memory_file→self._read_memory_events`虚方法链和坏行容错保持；C调用方另核认证、owner、runtime memory_path及原控制面读前后来源。只读recent不读候选、写访问/向量缓存或触发晋升，同群仍为原群owner共享；search/remember未借此开放。详见[客户端记忆只读](../../design/GATEWAY_CLIENT_MEMORY_READONLY.md)。
+
+## 2026-10-23 有界反向尾行读取器与归档路径共享 helper（Context Optimization）
+
+新增 `memory_archive/tail_lines.py` 从文件尾部按 64KB 块反向读取尾行，供 `agent_run_workspace.py` 与 `task_workspace/payloads.py` 复用并统一 `_safe_relative_path`，避免长日志整文件读入内存；`tool_output_externalizer.py` 精简外置归档提示。

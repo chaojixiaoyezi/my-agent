@@ -1,42 +1,48 @@
 ---
 name: learn-external-agent
-description: 学一个外部专精 agent 的做法，收成能力包（要运行的工具做成插件），按开关装上或把确认行交给用户。
-when_to_use: 用户让你学某个别的 agent 或开源项目的方法，或想把一个领域的做法长期收进来时。
-tags: 学外部agent, 能力包, 插件, learnpack, 许可证
+description: 学习外部方法，按请求交付原生 Skill、Workflow 或经授权的分发包。
+when_to_use: 用户要求学习外部 agent 或开源项目的方法时；明确的原生创作请求保持原生产物。
+tags: 学外部agent, 原生Skill, 工作流, 能力包, 插件, learnpack, 许可证
 scope: builtin
 risk_level: medium
-tools_required: [skill_search, read_file, list_files, write_file, run_command, web_fetch, package_build, package_install]
+tools_required: [skill_search, read_file, list_files]
 ---
 
 # 学外部 agent
 
-目标是把别人做得好的方法收进来，同时不让自己变重：领域方法装进**能力包**（心法：方法、模板、检查清单、离线小工具），要联网、要账号、要常驻服务的工具做成**插件**（装备）。学多少领域，你随身带着的东西都不变多。
+学习方法、创作原生对象和分发安装是不同目标。先保持用户要求的对象，再选择必要工具和验证。
 
-## 流程
+## 先确认产物
 
-1. **先开学习笔记**：在任务工作区写 `learnpack-notes.md`，记来源、许可证、学到什么、打算怎么组织、做到哪一步。每做完一步就更新。用户隔多久回来、中间重启过，都先读这份笔记接着做，不要从头学。
-2. **取来源（只读）**：克隆到任务工作区（`git clone --depth 1`）或读网页；记下仓库地址和提交号，打包时填进 `origin`（一行，如 `github.com/xx/yy@3f2a1c0`）。
-3. **核许可证**：看仓库的 LICENSE。只收宽松许可证（MIT、Apache-2.0、BSD、ISC、0BSD、Unlicense、CC0、CC-BY）。
-   - 没写许可证、GPL/AGPL/LGPL 这类、“仅供非商业”或自定义条款：停下，告诉用户情况和原因，不把原文和代码收进包；可以只用自己的话写学习笔记。
-   - 收进包的部分，LICENSE 原文一起放进包，`license` 字段照实填。
-4. **读原版**：方法、流程、提示词模板、例子、检查清单、离线检查脚本。弄清它“为什么这样做”，不只抄步骤。
-5. **查同领域（动手写包之前）**：用 `skill_search` 搜已装的能力包（结果里 `made_by_me=true` 的是你自己做的，同领域只能并进这种包）。已有同领域的（尤其是你自己做的），**先停下问用户**：“并进已有的包（加一个方向），还是单独成包？”等用户回了再写包；回答只决定做成哪种，装不装仍看开关和确认。打包回执出现 `PACKAGE_BUILD_SAME_DOMAIN` 说明你漏了这一步，也要先问再装。合并做法见 [合并](references/merge.md)。
-6. **定形态**：
-   - 默认做能力包；离线、自带就能跑的小工具放进包里（`tools/` 或 `checks/`）。
-   - 只有要联网、要账号、要常驻服务的工具做成插件；插件第一期只能做文件型 v6 包，写法见内置技能 `write-my-agent-plugin`。
-   - 用户明说要“内部技能”才做内部技能，而且只总结你自己的做法和经验（让自学习“总结一下”），不搬外部原文。若用户要项目普通 Skill，规范位置是已授权工作区的 `.agents/skills/<skill-name>/SKILL.md`，按 `writing-skills` 的对应档位写入和校验，不为普通 Skill 自动打包。
-7. **写包**（目录放在任务工作区里，结构见 [包的结构](references/pack-layout.md)）：
-   - 入口文档 `CAPABILITY.md`：适合什么、不适合什么、怎么用、方法目录；
-   - 写 `declaration` 时，`summary`、`capability.description`、`capability.keywords` 都用你和用户对话时用的语言写；原项目是另一种语言时两种都写（如中文说明、中英文关键词“文档翻译”“document translation”），让目录展示和关键词推荐匹配用户的说法。
-   - `description` 写清适用范围，`keywords` 写用户真会说的领域短词：用户的话里整个出现某个关键词或包名，宿主才会在那一轮推荐这个包，所以别写长短语，也不写“方法”“文本”“报告”“摘要”“修订”“一致性”这类各领域都会说的词，不写厂商名、模型名、产品名和脚本名（用户聊模型或别的事时也会说到它们，会被误推荐）；
-   - `PROVENANCE.md` 写来源、提交号、许可证、你改了什么；
-   - 不把密钥、口令、个人信息写进包（打包会整包拒绝）。
-8. **打包**：`package_build`，填 `kind`、`source_dir`（写包时写文件回执里的那个目录路径即可，相对路径按当前工作目录算）、`declaration`、`origin`、`license`。版本号只用字母、数字和 `.+-_`；声明里的文字、来源、许可证都写成一行，不带换行或控制字符。失败按回执改，不要绕；回执写了缺哪些、多了哪些字段就照着补删，别同时乱改别的（比如把中文关键词改成英文）。成功回执里的 `warnings` 要逐条处理：`PACKAGE_BUILD_KEYWORDS_SCRIPT` 就加上用户说话那种语言的关键词重新打包；`PACKAGE_BUILD_SAME_DOMAIN` 就先问用户并进去还是单独成包，用户回了再装。
-9. **安装**：由你自己调用 `package_install`（这是你的工具，不要把它写给用户去敲），传打包回执里的 `sha256`；回执里有 `user_notice`（已经装着同领域的包）就原样告诉用户。`host_notice_queued=true` 表示程序会在这一轮回复下面直接告诉用户装了什么、该发哪一行；确认行只用这次回执给的（`user_confirm_command`、`open_orders`），以前对话里给过的旧行可能已经执行过或作废了，不要再给。然后**照回执原文**跟用户说，按新手写：给能直接复制的命令，说清它做什么、怎么撤回。不凭记忆说开关状态，不替用户执行任何确认命令。说法见 [提醒用户](references/tell-the-user.md)。
-10. **收尾**：学习笔记写上结果；告诉用户以后怎么用（相关任务会推荐这个包，也可以点名让你用；`/plugins#` 能看到全部能力包）。
+- 用户明确要原生 Skill（如 `.agents/skills/<skill-name>/SKILL.md`）或原生 Workflow，就按 `writing-skills` 使用正式创作与加载入口，不自动打包。要求 Workflow + Skill 时交付两个对象及准确绑定，不能用一个能力包代替。
+- Skill 提供方法与必要资源；Workflow 组织输入、步骤和输出；Plugin 增加运行时工具或服务；Capability Pack 是分发容器。
+- 只要求研究、解释或诊断时做只读学习，不自行创建、安装或部署。只有用户明确要求分发或安装，才进入下方能力包流程；分发也不自动授权安装。
+- 简单任务不强制多子代理失败基线、多阶段确认或评审。高风险内容涉及权限、关键业务或长期运行行为时，保留相称验证、用户授权和适用的机器审批。
 
-## 不做的事
+按当前目录和工具回执发现普通 Skill 根、网络读取、Workflow 或打包入口，不猜创建 API，不把工具可用误认为业务授权。
 
-- 不收没许可证或强传染许可证的原文和代码。
-- 不装别处来的包（那要管理员用 `/plugins install`），不改开关（只有管理员能用 `/settings` 改）。
-- 学一个领域只出一个包，不往本体里塞一堆内部技能或工具。
+## 获取来源和核对许可
+
+在授权任务工作区只读获取来源，记录真实地址、版本或提交号。跨轮学习或用户要求保留过程时，用 `learnpack-notes.md` 记来源、许可证、学到的方法、组织方式与实际进度；续做先读已有笔记，不重复学习。不为只读短答额外写文件。
+
+复制、改编或分发外部内容前核对 LICENSE。只收符合本流程的宽松许可证：MIT、Apache-2.0、BSD、ISC、0BSD、Unlicense、CC0、CC-BY，并保留原文、署名与所需声明。
+
+未写许可证、GPL/AGPL/LGPL、“仅供非商业”或自定义条款：停止收录原文和代码，说明限制；可用自己的话写学习笔记。不要凭“开源”推断有权复制。
+
+阅读方法、流程、模板、例子和检查项，理解适用边界，不只复制步骤。原生 Skill/Workflow 按 `writing-skills` 做正式发现、稳定引用读回和代表性输入验收；preview 不是执行成功，缺分析器或必需 Skill 必须失败。
+
+## 仅在分发或安装时进入能力包流程
+
+1. **确认范围**：在此分支内，领域方法默认做能力包；离线自带的小工具可放 `tools/` 或 `checks/`。只有确需联网、账号或常驻服务的运行能力才考虑插件，并遵循 `write-my-agent-plugin` 的当前合同，不自行扩大授权。
+2. **查同领域**：写包之前用 `skill_search` 查已有包；只能并入 `made_by_me=true` 的包。发现同领域对象时，先问用户并入还是独立成包，回答不等于安装确认。出现 `PACKAGE_BUILD_SAME_DOMAIN` 也先处理该选择，见[合并](references/merge.md)。
+3. **写包**：目录在授权任务工作区，结构见[包的结构](references/pack-layout.md)。入口 `CAPABILITY.md` 写适用与不适用场景、用法和方法目录；`PROVENANCE.md` 写来源、提交号、许可证和改动。原始 LICENSE 随许可要求保留，不放密钥、口令或个人信息。
+4. **声明语言**：写 `declaration` 时，`summary`、`capability.description`、`capability.keywords` 都用你和用户对话时用的语言写；原项目是另一种语言时两种都写（如中文说明、中英文关键词），使目录展示和关键词推荐匹配用户的说法。关键词用真实领域短词，避免各领域通用词和易误推荐的厂商、模型、脚本名称。
+5. **构建**：仅在已授权分发范围内调用 `package_build`，使用真实文件回执里的 `source_dir`，填写 `kind`、`declaration`、`origin`、`license`。版本只用字母、数字和 `.+-_`；声明文字、来源、许可证用单行。按错误和 warnings 修正，不绕过校验；`PACKAGE_BUILD_KEYWORDS_SCRIPT` 要补用户语言的领域关键词。
+6. **安装**：只有请求同时授权安装时才调用 `package_install`，传本次构建回执的 `sha256`。这是工具调用，不是让用户敲的命令。`user_notice` 原样告知；`host_notice_queued=true` 表示宿主将展示安装提示。
+7. **确认**：照回执原文提醒用户，只使用本次回执给出的 `user_confirm_command`、`open_orders`，不复用旧行，不凭记忆判断开关，不替用户执行任何确认命令。说明命令用途与撤回方式，见[提醒用户](references/tell-the-user.md)。
+
+不自行安装外部现成包或改开关；外部包由管理员走 `/plugins install`，开关由管理员用 `/settings` 改。文案、包构建或安装回执均不代替原生业务链路验收。
+
+## 交付
+
+说明学到了什么、交付对象及位置或稳定引用、Workflow 绑定、实际检查和未验证部分。有学习笔记则更新实际结果；未授权安装就明确未安装。只有实际安装了包时，才说明相关任务推荐、点名使用和 `/plugins#` 查看方式。

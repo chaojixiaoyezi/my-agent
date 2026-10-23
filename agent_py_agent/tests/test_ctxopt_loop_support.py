@@ -34,12 +34,13 @@ def test_formal_memory_context_counts_serialized_envelope_and_metadata(kind):
 
 def test_formal_memory_context_preserves_hot_priority_and_one_fitting_record():
     hot = _record("hot", "hot", "高频规则" * 30)
-    lesson = _record("lesson", "lesson", "明确证据" * 1700)
+    lesson = _record("lesson", "lesson", "明确证据" * 700)
     kept = loop_support._budgeted_formal_memories([lesson, hot])
     assert kept == [hot, lesson]
     assert len(memory_context_text(kept)) <= loop_support._FORMAL_MEMORY_BUDGET_CHARS
     oversized_hot = _record("large-hot", "hot", "高频" * 6000)
-    assert loop_support._budgeted_formal_memories([_record(1), oversized_hot]) == [oversized_hot]
+    fitting = _record(1)
+    assert loop_support._budgeted_formal_memories([fitting, oversized_hot]) == [fitting]
     assert loop_support._budgeted_formal_memories([]) == []
 
 

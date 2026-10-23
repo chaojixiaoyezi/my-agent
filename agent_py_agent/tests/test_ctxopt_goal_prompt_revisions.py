@@ -147,15 +147,15 @@ def test_gateway_requires_host_revision_and_never_infers_it_from_old_history(tmp
     agent, goal, _ = _bound_goal(tmp_path)
     errors = []
     projected = _gateway_thread_goal(agent.conversation_store, goal.thread_id, errors)
-    assert not errors and "revision" not in projected  # 实证当前生产投影缺版本，不能猜 revision=1。
-    conversation = GatewayConversationContext(thread_id=goal.thread_id, thread_goal=projected,
-                                               history_source=_source(_goal_history(agent)))
-    section = gateway_injections({"inject": []}, conversation)[0]
-    assert goal.objective in section and "[goal-revision-ref]" not in section
-    versioned = replace(conversation, thread_goal={**projected, "revision": goal.revision})
+    assert not errors and projected.get("revision") == goal.revision
+    versioned = GatewayConversationContext(thread_id=goal.thread_id, thread_goal=projected,
+                                           history_source=_source(_goal_history(agent)))
     short = gateway_injections({"inject": []}, versioned)[0]
     assert "[goal-revision-ref]" in short and goal.objective not in short
     assert "纠偏" in short and "暂停" in short
+    unversioned = replace(versioned, thread_goal={k: v for k, v in projected.items() if k != "revision"})
+    section = gateway_injections({"inject": []}, unversioned)[0]
+    assert goal.objective in section and "[goal-revision-ref]" not in section
     compacted = replace(versioned, history_source=None, compact_summary=short)
     assert goal.objective in gateway_injections({"inject": []}, compacted)[0]
 

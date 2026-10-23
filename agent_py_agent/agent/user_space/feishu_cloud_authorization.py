@@ -29,7 +29,9 @@ CLOUD_OPERATIONS = {op.action: op for op in (
     CloudOperation('wiki_resolve', 'wiki', False),
 )}
 READ_ACTIONS = frozenset(op.action for op in CLOUD_OPERATIONS.values() if not op.write)
+_READ_ACTIONS = READ_ACTIONS
 WRITE_ACTIONS = frozenset(op.action for op in CLOUD_OPERATIONS.values() if op.write)
+FEISHU_CLOUD_OPERATIONS = {op.action: ('write' if op.write else 'read') for op in CLOUD_OPERATIONS.values()}
 
 
 # LLM: 映射只来自官方 get_node 返回；模型不能提供 canonical token、owner 或 ACL，原输入仅用于准确显式许可匹配。
@@ -66,6 +68,8 @@ def resolve_cloud_resource(adapter, resource_type: str, token: str, action: str)
 # LLM: 坏的 owner 策略先失败关闭；显式许可始终是准确 owner/资源/操作，自助模式只接受实时本人或群权限，不回落管理员。
 # 函数用途: 为本次调用取得许可来源；不会给用户写入或扩展资源授权。
 def authorize_cloud_resource(agent, adapter, resource: CloudResource, action: str, *, collaborator_enabled: bool) -> dict:
+    if action not in CLOUD_OPERATIONS:
+        raise ValueError('action 无效。')
     home = agent.home_paths
     mapped_action = _read_action(resource.resource_type) if action == 'wiki_resolve' else action
     if action == 'wiki_resolve' and resource_operation_allowed(home, 'feishu', 'wiki', resource.source_token, action):

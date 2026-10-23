@@ -1,5 +1,5 @@
 # LLM: 原全局 Skill 根与独立能力包分别装配到同一快照，不能把私有资源目录交给递归 Skill 扫描或名称去重。
-# 模块用途: 提供唯一Skill根声明及逐轮发现快照；目录仅读根声明，不扫描正文或吞掉无关方法。
+# 模块用途: 复用统一根声明和有界codec建立发现快照，目录元信息不执行正文。
 from __future__ import annotations
 
 """Single owner-scoped Skill discovery, policy, cache, and snapshot service."""
@@ -20,7 +20,7 @@ from .skill_snapshot import (
     SkillSnapshotEntry,
     skill_content_sha256,
 )
-from .skills import SkillCard, parse_skill_file
+from .skills import SkillCard, parse_skill_file, read_skill_text, skill_catalog_roots
 
 # 扫描技能目录的最大深度，防止递归过深。
 _MAX_SCAN_DEPTH = 6
@@ -135,15 +135,14 @@ class SkillsService:
         except (OSError, ValueError, TypeError) as exc:
             return (), [SkillLoadError("", "CAPABILITY_PACKAGE_DISCOVERY_FAILED", type(exc).__name__, "capability_package")]
 
-    # LLM: 只返回本服务的规范根声明，不发现正文、不调用插件根或策略回调；正常发现也复用同一来源。
-    # 函数用途: 提供普通方法的权威位置元信息，避免目录工具另造路径。
+    # LLM: 本地根和资产共用声明，共享/内置路径来自可信home_paths，extra不能覆盖标准根。
+    # 函数用途: 返回当前工作区、默认工作区、Owner、共享与内置的去重根。
     def base_roots(self, workspace_root: Path) -> tuple[SkillRoot, ...]:
-        roots = [SkillRoot(path, "workspace") for path in self._extra_roots]
-        roots.extend((SkillRoot(workspace_root / ".agents" / "skills", "workspace"),
-                      SkillRoot(Path(self.home_paths.owner_home_dir) / "skills", "owner"),
-                      SkillRoot(Path(self.home_paths.shared_skills_dir), "shared"),
-                      SkillRoot(Path(self.home_paths.shared_builtin_dir), "builtin")))
-        return tuple(roots)
+        extras = ((Path(self.home_paths.shared_skills_dir), "shared"),
+                  (Path(self.home_paths.shared_builtin_dir), "builtin"),
+                  *((path, "workspace") for path in self._extra_roots))
+        return _dedupe_roots([SkillRoot(path, source) for path, source in skill_catalog_roots(
+            self.home_paths.owner_home_dir, workspace_root, extras)])
 
     # LLM: 原来源过滤与优先级不变；只复用规范根声明，插件根仍最后且只在真实发现入口调用。
     # 函数用途: 给普通方法发现生成原授权根集合，不增加扫描或来源授权。
@@ -171,11 +170,15 @@ def _build_manifest(roots: tuple[SkillRoot, ...]) -> tuple[list[SkillManifestIte
     return items, errors
 
 
+# LLM: 普通skills根不提前递归learned；独立后置根保持owner来源与普通目录优先。
+# 函数用途: 在单根预算内收集确定性manifest并逐文件隔离错误。
 def _discover_root(root: SkillRoot) -> tuple[list[SkillManifestItem], list[SkillLoadError]]:
     if not root.path.is_dir():
         return [], []
     resolved_root = root.path.resolve(strict=False)
-    files = [path for path in sorted(root.path.rglob("SKILL.md")) if _visible_skill_path(root.path, path)]
+    files = [path for path in sorted(root.path.rglob("SKILL.md")) if _visible_skill_path(root.path, path)
+             and not (root.source == "owner" and root.path.name == "skills"
+                      and path.relative_to(root.path).parts[0] == "learned")]
     errors: list[SkillLoadError] = []
     if len(files) > _MAX_SKILLS_PER_ROOT_COUNT:
         errors.append(_error(root, root.path, "SKILL_ROOT_LIMIT", f"skill count exceeds {_MAX_SKILLS_PER_ROOT_COUNT}"))
@@ -190,6 +193,8 @@ def _discover_root(root: SkillRoot) -> tuple[list[SkillManifestItem], list[Skill
     return items, errors
 
 
+# LLM: 路径限制在本根，正文和Card共用字节预算；单项不可读仅形成发现错误。
+# 函数用途: 固定技能有界正文与内容hash，不执行或写回文件。
 def _manifest_item(
     root: SkillRoot,
     resolved_root: Path,
@@ -201,8 +206,10 @@ def _manifest_item(
     except (OSError, ValueError) as exc:
         return None, _error(root, path, "SKILL_PATH_ESCAPE", str(exc))
     try:
-        text = resolved.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+        text = read_skill_text(resolved)
+    except InterruptedError:
+        raise
+    except (OSError, ValueError) as exc:
         return None, _error(root, path, "SKILL_READ_FAILED", str(exc))
     return SkillManifestItem(root, resolved, text, skill_content_sha256(text)), None
 

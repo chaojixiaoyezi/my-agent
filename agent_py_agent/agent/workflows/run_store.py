@@ -13,7 +13,6 @@ from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import ensure_private_dir, read_text_beneath, write_text_atomic_beneath
 from ..common.nofollow_fs import list_names_beneath as list_dir_names_beneath
 from .models import (
-    StepExecutionRecord,
     WorkflowRunRecord,
     payload,
     redact_bearer_values,
@@ -36,21 +35,11 @@ def _write_json(root, parts, value):
     write_text_atomic_beneath(root, parts, raw + '\n')
 
 
-# LLM: 运行记录反序列化只认模型字段，步骤单独还原 tuple；不加载可执行对象。
-# 函数用途: 把 JSON 运行记录还原成强类型步骤及运行数据。
+# LLM: Store仅过滤运行外层扩展，步骤恢复一律委托模型权威合同。
+# 函数用途: 恢复强类型运行记录，不重复维护步骤字段和状态枚举。
 def _decode_run(data):
     values = {key: value for key, value in data.items() if key in WorkflowRunRecord.__dataclass_fields__}
-    values['steps'] = tuple(_decode_step(step) for step in values.get('steps', ()))
-    return WorkflowRunRecord(**values)
-
-
-# LLM: 状态和技能编号保持 JSON/内存往返一致；非法状态明确拒绝。
-# 函数用途: 还原一个步骤快照并校验状态。
-def _decode_step(data):
-    if data['status'] not in ('pending', 'running', 'succeeded', 'skipped', 'failed',
-                              'escalated_recovered', 'paused_for_resume'):
-        raise ValueError('未知步骤状态')
-    return StepExecutionRecord(**{**data, 'resolved_skill_ids': tuple(data.get('resolved_skill_ids', ()))})
+    return WorkflowRunRecord.from_dict(values)
 
 
 # LLM: 运行编号先单段验证，正文IO不能依赖safe_path预检；锁与数据分工，根路径只取宿主构造参数。
