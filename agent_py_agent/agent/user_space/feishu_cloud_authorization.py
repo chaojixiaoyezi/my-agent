@@ -9,7 +9,27 @@ from ..adapter.feishu_cloud import FeishuCloudError, request_cloud_api
 from ..capability.channel_message_target import resolve_message_target
 from .resource_grants import resource_operation_allowed
 
-_READ_ACTIONS = frozenset({'sheet_meta', 'sheet_read', 'document_read', 'wiki_resolve'})
+
+# LLM: 操作元数据是授权、Schema与副作用分类的唯一来源，不包含URL或可由模型覆盖的许可。
+# 类用途: 声明一个已实现云动作的资源类型及读写属性。
+@dataclass(frozen=True)
+class CloudOperation:
+    action: str
+    resource_type: str
+    write: bool
+
+
+CLOUD_OPERATIONS = {op.action: op for op in (
+    CloudOperation('sheet_meta', 'sheet', False),
+    CloudOperation('sheet_read', 'sheet', False),
+    CloudOperation('sheet_append', 'sheet', True),
+    CloudOperation('sheet_update', 'sheet', True),
+    CloudOperation('document_read', 'docx', False),
+    CloudOperation('document_append', 'docx', True),
+    CloudOperation('wiki_resolve', 'wiki', False),
+)}
+READ_ACTIONS = frozenset(op.action for op in CLOUD_OPERATIONS.values() if not op.write)
+WRITE_ACTIONS = frozenset(op.action for op in CLOUD_OPERATIONS.values() if op.write)
 
 
 # LLM: 映射只来自官方 get_node 返回；模型不能提供 canonical token、owner 或 ACL，原输入仅用于准确显式许可匹配。
@@ -52,7 +72,7 @@ def authorize_cloud_resource(agent, adapter, resource: CloudResource, action: st
         return {'source': 'administrator_grant', 'permission': 'view'}
     if (resource_operation_allowed(home, 'feishu', resource.resource_type, resource.resource_token, mapped_action)
             or (action == 'sheet_meta' and resource_operation_allowed(home, 'feishu', resource.resource_type, resource.resource_token, 'sheet_read'))):
-        return {'source': 'administrator_grant', 'permission': 'view' if action in _READ_ACTIONS else 'edit'}
+        return {'source': 'administrator_grant', 'permission': 'view' if action in READ_ACTIONS else 'edit'}
     if not collaborator_enabled:
         raise FeishuCloudError('CLOUD_RESOURCE_NOT_AUTHORIZED', '当前用户没有此资源的操作许可；管理员可登记准确资源和操作。')
     provider, member_id, _root, error = resolve_message_target(agent, 'feishu')
@@ -68,7 +88,7 @@ def authorize_cloud_resource(agent, adapter, resource: CloudResource, action: st
     if not permission and member_type == 'openid' and resource.source_type != 'wiki':
         permission = _owner_permission(adapter, resource, member_id)
         source = 'feishu_owner'
-    allowed = {'view', 'edit', 'full_access'} if action in _READ_ACTIONS else {'edit', 'full_access'}
+    allowed = {'view', 'edit', 'full_access'} if action in READ_ACTIONS else {'edit', 'full_access'}
     if permission not in allowed:
         raise FeishuCloudError('CLOUD_RESOURCE_NOT_AUTHORIZED',
             '无法证明当前用户或当前群拥有所需文档权限。请在飞书把资源分享给本人或当前群；隐藏/继承权限需明确分享或管理员准确授权。')

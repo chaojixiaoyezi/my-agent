@@ -3,40 +3,64 @@
 from dataclasses import replace
 
 from ..settings.reasoning_effort import run_thread_id
-from ..tooling.tool_search_state import pending_carried_loaded_tool_names
+from ..tooling.tool_search_state import (
+    ordered_carried_loaded_tool_names,
+    ordered_loop_loaded_tool_names,
+    ordered_tool_names,
+)
 
 
-# LLM: 只接受持久化名称字符串，损坏字段不转换成新工具；实际授权仍由当前注册表快照过滤。
-# 函数用途: 归一线程的工具名集合，不执行工具。
+# LLM: 新序列保留首次发现顺序，旧集合使用统一稳定兜底；损坏字段不变成新工具，授权仍由当前快照过滤。
+# 函数用途: 归一线程的有序工具名，不执行工具。
 def normalized_loaded_tools(value: object) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple, set)):
-        return ()
-    return tuple(sorted({item.strip() for item in value if isinstance(item, str) and item.strip()}))
+    return ordered_tool_names(value)
+
+
+# LLM: 兼容旧set读口；真实顺序只从同一线程的正式字段读取，不改变授权。
+# 函数用途: 为旧调用方返回本线程已加载工具名集合。
+def thread_loaded_tools(agent: object, params: object) -> set[str]:
+    return set(ordered_thread_loaded_tools(agent, params))
 
 
 # LLM: 与路由身份共用子线程优先级；无线程或尚未创建时不借用其它线程、归档或Agent集合。
-# 函数用途: 为新回合读取本线程已加载工具名。
-def thread_loaded_tools(agent: object, params: object) -> set[str]:
+# 函数用途: 为新回合读取本线程的首次发现顺序。
+def ordered_thread_loaded_tools(agent: object, params: object) -> tuple[str, ...]:
     thread_id = run_thread_id(params)
     store = getattr(agent, "conversation_store", None)
     if not thread_id or store is None:
-        return set()
+        return ()
     thread = store.threads.load(thread_id)
-    return set(normalized_loaded_tools(getattr(thread, "loaded_tool_names", ())))
+    return normalized_loaded_tools(getattr(thread, "loaded_tool_names", ()))
 
 
-# LLM: 只从同一次真实搜索的typed结果取名，update_atomic保留并发模型设置和Compact代次；缺线程不新建。
-# 函数用途: 把搜索发现原子记入所属线程，压缩或新回合不会丢失。
+# LLM: 每个循环仅在首次渲染时取本线程顺序；只写原展示状态，名称仍由loaded set及当前授权快照过滤。
+# 函数用途: 防止跨回合重建的旧集合把持久发现顺序重新按字母排列。
+def seed_loop_discovery_order(agent: object, params: object) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict) and "loaded_tool_order" not in state:
+        state["loaded_tool_order"] = ordered_tool_names([
+            *ordered_thread_loaded_tools(agent, params), *ordered_loop_loaded_tool_names(params),
+        ])
+
+
+# LLM: typed 发现按顺序原子写所属线程；独立 metadata 历史只增不减，活跃字段可由显式边界另选，缺线程不新建。
+# 函数用途: 保留完整发现历史和当前加载顺序，不覆盖并发模型设置、Compact 代次或其它 metadata。
 def persist_discovered_tools(agent: object, params: object, record: dict[str, object]) -> None:
-    names = pending_carried_loaded_tool_names([record])
+    names = ordered_carried_loaded_tool_names([record])
     thread_id = run_thread_id(params)
     store = getattr(agent, "conversation_store", None)
     if not names or not thread_id or store is None:
         return
 
+    # LLM: 回调读 update_atomic 提供的最新线程，拷贝 metadata 后合并，不热改传入对象。
+    # 函数用途: 在原线程上一起保存有序加载名与只增不减的发现历史。
     def merge(thread):
         loaded = normalized_loaded_tools((*thread.loaded_tool_names, *names))
-        return replace(thread, loaded_tool_names=loaded) if loaded != thread.loaded_tool_names else thread
+        metadata = dict(thread.metadata)
+        history = normalized_loaded_tools(metadata.get("discovered_tool_history", ()))
+        metadata["discovered_tool_history"] = list(normalized_loaded_tools((*history, *thread.loaded_tool_names, *names)))
+        return replace(thread, loaded_tool_names=loaded, metadata=metadata) if (
+            loaded != thread.loaded_tool_names or metadata != thread.metadata) else thread
 
     try:
         store.threads.update_atomic(thread_id, merge)

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -60,6 +61,7 @@ _allowed_tool_set = allowed_tool_set
 # record_lesson 只写当前 child run 的经验账本，主线程没有 child run 可归属。
 # 常量用途: 把内部执行器和子代理专属的能力申请、经验记录入口从普通主代理工具面隐藏。
 _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "capability_request", "record_lesson"})
+MIN_RECOMMENDED_TOOL_SCORE = 3.0
 
 
 def _agent_config_int(key: str) -> int:
@@ -236,15 +238,19 @@ class ListToolsTool(BaseTool):
         payload["permission_mode"] = self_context["permissions"]["mode"]
         payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
         payload["tool_retrieval"] = self.registry.retriever.status()
-        live_payload = _live_tool_manifest_payload(payload)
+        for item in payload["unavailable_tools"]:
+            tool = self.registry.tools.get(item["name"])
+            item["category"] = tool.model_spec.category if tool is not None else "general"
+        live_payload = _live_tool_manifest_payload(payload, snapshot,
+                                                   {spec.name for spec in self.registry.specs_for_snapshot(snapshot)})
         return ToolHandlerOutcome(
             "list_tools",
             True,
             json.dumps(payload, ensure_ascii=False),
             result_envelope={
                 "tool_output_policy": {
-                    "preserve_prompt_output": True,
-                    "live_prompt_output": json.dumps(live_payload, ensure_ascii=False),
+                    "preserve_prompt_output": False,
+                    "live_prompt_output": json.dumps(live_payload, ensure_ascii=False, separators=(",", ":")),
                 }
             },
         )
@@ -255,7 +261,7 @@ class ListToolsTool(BaseTool):
 class ToolSearchTool(BaseTool):
     """会话运行时 discovery for tools that are registered but not initially exposed."""
 
-    _DEFAULT_SEARCH_LIMIT = 5
+    _DEFAULT_SEARCH_LIMIT = 3
 
     model_spec = ToolModelSpec(
         name="tool_search",
@@ -267,15 +273,19 @@ class ToolSearchTool(BaseTool):
         input_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "必填。描述需要的工具能力或工具名。"},
+                "query": {"type": "string", "minLength": 1, "description": "描述需要的工具能力或工具名；与 names 至少提供一项。"},
+                "names": {"type": "array", "minItems": 1, "maxItems": 16,
+                          "items": {"type": "string", "minLength": 1},
+                          "description": "精确工具名批量加载，最多16项；只在当前授权快照内查找。"},
+                "category": {"type": "string", "description": "可选，只筛选 query 的模糊搜索类别。"},
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 20,
-                    "description": "可选。搜索时最多返回多少个精简候选，默认 5。",
+                    "description": "可选。query 搜索时最多返回多少个精简候选，默认 3。",
                 },
             },
-            "required": ["query"],
+            "anyOf": [{"required": ["query"]}, {"required": ["names"]}],
             "additionalProperties": False,
         },
         hints=ToolModelHints(
@@ -316,30 +326,40 @@ class ToolSearchTool(BaseTool):
     ) -> ToolHandlerOutcome:
         return self._execute_snapshot(params, context.runtime_snapshot)
 
-    # LLM: 搜索算法仍复用唯一 retriever；命中结果作为 typed envelope 交给下一模型回合，不得另造选择状态。
-    # 函数用途: 校验查询参数，并在指定快照中一次搜索、展开 deferred specs。
+    # LLM: query/names 至少一项且各自合法；实际名字只在当前快照解析，搜索不能授予权限。
+    # 函数用途: 校验批量名称、类别和查询上限后，生成同源加载回执。
     def _execute_snapshot(
         self,
         params: dict[str, Any],
         snapshot: ToolRuntimeSnapshot,
     ) -> ToolHandlerOutcome:
-        query = str(params.get("query") or "").strip()
-        if not query:
-            return _tool_search_invalid_arguments("query 不能为空")
-        try:
-            limit = int(params.get("limit") or self._DEFAULT_SEARCH_LIMIT)
-        except (TypeError, ValueError):
-            limit = 0
-        if limit < 1 or limit > 20:
+        query = params.get("query", "")
+        if not isinstance(query, str) or ("query" in params and not query.strip()):
+            return _tool_search_invalid_arguments("query 必须是非空字符串")
+        names = params.get("names", [])
+        if "names" in params and (not isinstance(names, list) or not 1 <= len(names) <= 16
+                                  or any(not isinstance(name, str) or not name.strip() for name in names)):
+            return _tool_search_invalid_arguments("names 必须是1-16项非空工具名列表")
+        if not query.strip() and not names:
+            return _tool_search_invalid_arguments("query 或 names 至少提供一项")
+        limit = params.get("limit", self._DEFAULT_SEARCH_LIMIT)
+        if type(limit) is not int or not 1 <= limit <= 20:
             return _tool_search_invalid_arguments("limit 必须在 1-20 之间")
+        category = params.get("category", "")
+        if not isinstance(category, str):
+            return _tool_search_invalid_arguments("category 必须是字符串")
         return _search_deferred_tool_result(
             self.registry,
-            query,
+            query.strip(),
             limit=limit,
             snapshot=snapshot,
+            names=[name.strip() for name in names],
+            category=category.strip(),
         )
 
 
+# LLM: 参数错误不产生加载信封或触发检索；所有调用入口共用此失败分类。
+# 函数用途: 返回可修正的工具发现参数错误。
 def _tool_search_invalid_arguments(message: str) -> ToolHandlerOutcome:
     return ToolHandlerOutcome(
         "tool_search",
@@ -349,21 +369,31 @@ def _tool_search_invalid_arguments(message: str) -> ToolHandlerOutcome:
     )
 
 
-# LLM: 搜索结果必须同时携带文本协议 Schema 与 typed loaded names，以便原生与文本 Provider 共享单步语义。
-# 函数用途: 按准确名称读当前工具详情或搜索最多 limit 个 deferred 工具，返回完整Schema并沿线程累计加载。
+# LLM: v3 完整定义用于归档审计，v4 live 不复制 Schema；typed 加载名仍是唯一发现事实，每轮重新授权。
+# 函数用途: 合并精确批量和高置信查询，分别输出完整归档与紧凑加载凭证。
 def _search_deferred_tool_result(
     registry: Any,
     query: str,
     *,
     limit: int,
     snapshot: ToolRuntimeSnapshot,
+    names: list[str] | None = None,
+    category: str = "",
 ) -> ToolHandlerOutcome:
-    exact = snapshot.runtime(query)
-    specs = [exact.model_spec] if exact is not None and exact.exposure.model_visible else registry.search_deferred_specs(
-        query,
-        limit=limit,
-        runtime_snapshot=snapshot,
-    )
+    requested = list(dict.fromkeys(names or []))
+    exact = snapshot.runtime(query) if query else None
+    unavailable_names = {name for name, _code, _reason in snapshot.unavailable_tools}
+    if exact is not None or query in unavailable_names:
+        requested = list(dict.fromkeys([*requested, query]))
+    specs, not_found, unavailable = _resolve_tool_search_names(registry, snapshot, requested)
+    candidates = []
+    if query and query not in requested:
+        for spec, score in _deferred_tool_search_hits(registry, query, snapshot, limit, category):
+            if score >= MIN_RECOMMENDED_TOOL_SCORE or query.lower() in {word.lower() for word in spec.keywords}:
+                if spec.name not in {item.name for item in specs}:
+                    specs.append(spec)
+            elif score > 0 and spec.name not in {item.name for item in specs}:
+                candidates.append({**_tool_search_card(spec), "score": score, "status": "candidate"})
     loaded_names = [spec.name for spec in specs]
     payload = {
         "schema_name": "tool_search_output",
@@ -383,57 +413,132 @@ def _search_deferred_tool_result(
         "loading_scope": "current_thread",
         "persists_across_compact": True,
         "authorization_rechecked_each_run": True,
+        "query": query,
+        "category": category,
+        "matched_count": len(specs) + len(candidates),
+        "candidates": candidates,
+        "not_found": not_found,
+        "unavailable": unavailable,
     }
+    if names:
+        payload["names"] = list(dict.fromkeys(names))
+    live = {**payload, "schema_version": 4,
+            "tools": [{**_tool_search_card(spec), "status": "loaded"} for spec in specs],
+            "schema_delivery": "The next model request contains complete native tools. Full definitions remain in the original archive."}
     return ToolHandlerOutcome(
         "tool_search",
         True,
         json.dumps(payload, ensure_ascii=False),
-        result_envelope={"tool_search": {"loaded_tool_names": loaded_names}},
+        result_envelope={"tool_search": {"loaded_tool_names": loaded_names},
+                         "tool_output_policy": {"preserve_prompt_output": True,
+                                                "live_prompt_output": json.dumps(live, ensure_ascii=False)}},
     )
 
 
-# LLM: 短目录与完整归档读取同一 manifest，保留用途、确认和不可用事实；详细 schema 仍按需检索。
-# 函数用途: 给模型输出有界自身能力页，不生成新授权或读取其它 owner 配置。
-def _live_tool_manifest_payload(payload: dict[str, object]) -> dict[str, object]:
-    """Keep the model-facing discovery page bounded while preserving the full manifest."""
-    tools = payload.get("tools")
-    compact_tools = []
-    for item in tools if isinstance(tools, list) else []:
-        if not isinstance(item, dict):
-            continue
-        compact_tools.append(
-            {
-                "name": str(item.get("name") or ""),
-                "category": str(item.get("category") or ""),
-                "description": str(item.get("description") or "")[:220],
-                "availability": item.get("availability") or {},
-                "schema_hash": str(item.get("schema_hash") or ""),
-                "effect_resolver": dict(
-                    (item.get("runtime_policy") or {}).get("effect_resolver") or {}
-                ),
-                "approval_policy": dict(
-                    (item.get("runtime_policy") or {}).get("approval_policy") or {}
-                ),
-                "input_fields": [
-                    str(field.get("name") or "")
-                    for field in item.get("input_fields") or []
-                    if isinstance(field, dict)
-                ],
-            }
-        )
+# LLM: 仅在当前已授权快照解析名字，不从全局注册表恢复 handler；不可用项只展示原失败原因。
+# 函数用途: 对精确批量逐项返回就绪定义、未找到名和不可用事实。
+def _resolve_tool_search_names(registry: Any, snapshot: ToolRuntimeSnapshot, names: list[str]):
+    specs, not_found, unavailable = [], [], []
+    failures = {name: (code, reason) for name, code, reason in snapshot.unavailable_tools}
+    for name in names:
+        runtime = snapshot.runtime(name)
+        if snapshot.allowed_tools is not None and name not in snapshot.allowed_tools:
+            not_found.append(name)
+        elif runtime is not None and runtime.exposure.model_visible:
+            specs.append(runtime.model_spec)
+        elif name in failures:
+            code, reason = failures[name]
+            tool = registry.tools.get(name)
+            unavailable.append({"name": name, "category": tool.model_spec.category if tool else "general",
+                                "error_code": code, "reason": reason})
+        else:
+            not_found.append(name)
+    return specs, not_found, unavailable
+
+
+# LLM: 检索只消费授权快照中的可见deferred定义；索引补原生创作的双语能力别名，不改Schema、执行身份或权限。
+# 函数用途: 提取同一 retriever 的带分候选，供搜索回执决定是否自动加载。
+def _deferred_tool_search_hits(registry: Any, query: str, snapshot: ToolRuntimeSnapshot, limit: int, category: str):
+    extra, _declared = _extra_deferred_names(registry, snapshot, None)
+    specs = [runtime.model_spec for runtime in snapshot.runtimes if runtime.exposure.model_visible
+             and (snapshot.allowed_tools is None or runtime.model_spec.name in snapshot.allowed_tools)
+             and (runtime.model_spec.category in registry.catalog_deferred_categories or runtime.model_spec.name in extra)
+             and (not category or runtime.model_spec.category == category)]
+    by_name = {spec.name: spec for spec in specs}
+    indexed = [_tool_search_index_spec(spec) for spec in specs]
+    return [(by_name[hit.name], hit.score) for hit in registry.retriever.search(query, indexed, limit)
+            if hit.name in by_name] if specs else []
+
+
+# LLM: 仅生成检索投影，不热改工具实例或原生定义；能力别名不是查询路由，仍由同一retriever评分和快照过滤。
+# 函数用途: 补全原生脚本/工作流的Skill组合创作检索词。
+def _tool_search_index_spec(spec: ToolModelSpec) -> ToolModelSpec:
+    aliases = {"scripts": ("script", "脚本", "skill", "workflow", "工作流"),
+               "workflows": ("workflow", "工作流", "skill", "script", "脚本")}
+    words = aliases.get(spec.name, ())
+    return replace(spec, hints=replace(spec.hints, keywords=(*spec.keywords, *words))) if words else spec
+
+
+# LLM: 短卡与 native 定义共用同一 ToolModelSpec，哈希是正式规范 Schema 的哈希，不另生成定义。
+# 函数用途: 生成不含参数表的工具搜索名卡。
+def _tool_search_card(spec: ToolModelSpec) -> dict[str, object]:
+    return {"name": spec.name, "category": spec.category, "purpose": _compact_tool_purpose(spec),
+            "schema_hash": spec.schema_hash}
+
+
+# LLM: 工具自带短用途优先，否则取描述首句；此截取仅用于名卡，完整合同仍在 native 与归档中。
+# 函数用途: 生成最多九十字的一句工具用途。
+def _compact_tool_purpose(runtime: ToolRuntime | ToolModelSpec) -> str:
+    spec = runtime.model_spec if isinstance(runtime, ToolRuntime) else runtime
+    text = spec.hints.deferred_summary or spec.description
+    return re.split(r"(?<=[。！？.!?])\s*|\n", text.strip(), maxsplit=1)[0][:90]
+
+
+# LLM: v4短目录保留同一快照的权限、身份、全部工具及详情入口，短用途与紧凑JSON控制live字节，完整定义留档。
+# 函数用途: 从完整 manifest 生成工具短卡目录，全文仍由原输出归档。
+def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntimeSnapshot,
+                                direct_tool_names: set[str]) -> dict[str, object]:
+    executable = set(payload.get("executable_tools") or [])
+    compact_tools = [{"name": item["name"], "category": item.get("category", "general"),
+                      "purpose": _compact_tool_purpose(snapshot.runtime(item["name"]))[:36],
+                      "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable"}
+                     for item in payload.get("tools", []) if item["name"] in executable]
     return {
-        "schema_name": "tool_manifest_live_prompt",
-        "schema_version": 3,
-        "visible_tool_count": len(compact_tools),
+        "schema_name": "tool_runtime_manifest_live",
+        "schema_version": 4,
+        "counts": {"registered": len(snapshot.runtimes), "available": len(executable), "direct": len(direct_tool_names)},
         "snapshot_hash": str(payload.get("snapshot_hash") or ""),
         "permission_mode": str(payload.get("permission_mode") or ""),
         "permission_scope": str(payload.get("permission_scope") or ""),
-        "self_context": payload.get("self_context") or {},
+        "self_context": {key: value for key, value in (payload.get("self_context") or {}).items()
+                         if key in {"schema_version", "run_id", "owner_type", "scope", "permissions", "identity", "filesystem", "network"}},
         "unavailable_tools": payload.get("unavailable_tools") or [],
         "tools": compact_tools,
-        "tool_retrieval": payload.get("tool_retrieval") or {},
-        "full_manifest": "完整参数、示例和失败合同已保存在本次工具输出归档中。",
+        "detail_ref": "tool_search(names=[需要详情的准确工具名])",
+        "detail_policy": {"tool_search": {"query": "按工具名或能力搜索", "names": "按精确名字批量加载原生Schema"},
+                          "self_map": {"section": "tools", "item": "需要详情的工具名"},
+                          "read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
     }
+
+
+# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；以最终 specs 中的搜索入口决定折叠，预载不增加权限。
+# 函数用途: 生成稳定前缀的原生工具序列，无搜索入口时完整直出原授权工具。
+def _ordered_model_visible_specs(registry: Any, snapshot: ToolRuntimeSnapshot, specs: list[ToolModelSpec],
+                                 allowed_tools: list[str] | None, loaded_tool_names: Collection[str] | None):
+    from .tool_search_state import ordered_tool_names
+
+    search = snapshot.runtime("tool_search")
+    if (search is None or not search.exposure.model_visible or not search.availability.available
+            or not any(spec.name == "tool_search" for spec in specs)):
+        return specs
+    extra_deferred, _declared = _extra_deferred_names(registry, snapshot, allowed_tools)
+    deferred = set(registry.catalog_deferred_categories)
+    loaded = ordered_tool_names(snapshot.loaded_tool_names if loaded_tool_names is None else loaded_tool_names)
+    base = [spec for spec in specs if (spec.category not in deferred and spec.name not in extra_deferred)
+            or spec.name in snapshot.preloaded_tool_names]
+    direct = {spec.name for spec in base}
+    by_name = {spec.name: spec for spec in specs}
+    return [*base, *(by_name[name] for name in loaded if name in by_name and name not in direct)]
 
 
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
@@ -615,37 +720,27 @@ class ToolRegistry:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         return specs
 
-    # LLM: 宿主额外折叠只能减当前快照；显式allowed及真实搜索loaded优先，短名单不生成loaded或改变注册身份。
-    # 函数用途: 返回原直接工具、未被本轮收起的可选工具，以及真实搜索已加载的完整Schema。
+    # LLM: 展示不改变授权；有搜索入口时 allowlist 也可折叠，缺搜索的叶子全部直出；发现项只追加到稳定基础表后。
+    # 函数用途: 按基础注册顺序与真实发现顺序交付完整原生 Schema。
     def model_visible_specs(
         self,
         *,
         allowed_tools: list[str] | None = None,
-        loaded_tool_names: set[str] | None = None,
+        loaded_tool_names: Collection[str] | None = None,
         runtime_snapshot: ToolRuntimeSnapshot | None = None,
     ) -> list[ToolModelSpec]:
-        """Return direct tools plus deferred tools loaded by a real tool_search result.
-
-        An explicit ``allowed_tools`` profile is already a structured runtime
-        selection (background/runner turns), so it remains fully visible.  Only
-        the unrestricted foreground surface uses progressive disclosure.
-        """
-
         snapshot = runtime_snapshot or self.runtime_snapshot(allowed_tools=allowed_tools)
         specs = self.specs(
             allowed_tools=allowed_tools,
             include_orchestration=True,
             runtime_snapshot=snapshot,
         )
-        if allowed_tools is not None or (snapshot.allowed_tools is not None and
-                (snapshot.presentation_deferred_names is not None or snapshot.presentation_shortlist_names is not None)):
-            return specs
-        extra_deferred, _declared = _extra_deferred_names(self, snapshot, allowed_tools)
-        if not self.catalog_deferred_categories and not extra_deferred:
-            return specs
-        deferred = set(self.catalog_deferred_categories)
-        loaded = {str(item).strip() for item in loaded_tool_names or set() if str(item).strip()}
-        return [spec for spec in specs if (spec.category not in deferred and spec.name not in extra_deferred) or spec.name in loaded]
+        return _ordered_model_visible_specs(self, snapshot, specs, allowed_tools, loaded_tool_names)
+
+    # LLM: 只读快照是唯一权限上界，别名复用现有原生展示入口，不维护第二套工具目录。
+    # 函数用途: 按快照的预载及有序已发现字段生成模型工具表。
+    def specs_for_snapshot(self, snapshot: ToolRuntimeSnapshot) -> list[ToolModelSpec]:
+        return self.model_visible_specs(runtime_snapshot=snapshot)
 
     # LLM: 原deferred类别与本轮额外收起名共同进入同一retriever；展示短名单不能裁掉搜索，命中不得扩展快照权限。
     # 函数用途: 从原授权快照找回被折叠工具的精确说明和Schema，仍由真实tool_search产生加载事实。
@@ -988,12 +1083,12 @@ def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) ->
         )
 
 
-# LLM: 仅核对原显式allowed与原tool_search是否直接可见，不推断可选类别；宿主已有类别策略是名称集合的来源。
+# LLM: allowed 是授权而不是展示豁免；只要原 tool_search 可见就应用宿主展示减法，否则放弃额外折叠。
 # 函数用途: 当原发现入口被既有目录设置收起时放弃额外折叠，避免把直接工具隐藏后无法找回。
 def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
                                  allowed_tools: list[str] | None = None) -> frozenset[str]:
     names = snapshot.presentation_deferred_names
-    if not names or allowed_tools is not None or snapshot.allowed_tools is not None:
+    if not names:
         return frozenset()
     search = snapshot.runtime("tool_search")
     if search is None or search.model_spec.category in deferred_categories:
@@ -1001,27 +1096,23 @@ def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categor
     return names
 
 
-# LLM: 工具自己声明的默认收起（ToolModelHints.default_deferred）只在开关打开、本轮没有显式 allowed_tools、且原 tool_search
+# LLM: 工具自己声明的默认收起（ToolModelHints.default_deferred）只在开关打开、且原 tool_search
 #   在本快照里可用、模型可见、没被类别收起时生效，否则返回空集——宁可多展示，也不能把工具藏到找不回来。发现入口永不收起。
-#   后台续跑合同声明的“续跑必需工具”（background_tool_policy.BACKGROUND_CONTINUATION_REQUIRED_TOOLS）不参与声明收起：
-#   后台回合没有用户在场，靠 tool_search 找回工具的窗口极窄（3a 2026-10-05 裁定，始终直出）。
+#   后台授权闭包不再决定前台展示；后台按结构化唤醒预载，其余允许工具仍能通过搜索找回。
 #   只读快照，不改注册表、授权或 snapshot_hash；改判定要同步 test_tool_default_deferral。
 # 函数用途: 算出本轮因工具声明而默认收起的工具名，供可见 Schema、收起搜索范围和目录索引共用。
 def _declared_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
                              enabled: bool, allowed_tools: list[str] | None = None) -> frozenset[str]:
-    if not enabled or allowed_tools is not None:
+    if not enabled:
         return frozenset()
     search = snapshot.runtime("tool_search")
     if (search is None or not search.availability.available or not search.exposure.model_visible
             or search.model_spec.category in deferred_categories):
         return frozenset()
-    from ..conversation.background_tool_policy import BACKGROUND_CONTINUATION_REQUIRED_TOOLS
-
     return frozenset(
         runtime.model_spec.name for runtime in snapshot.runtimes
         if runtime.model_spec.hints.default_deferred
         and runtime.model_spec.name not in TOOL_DISCOVERY_ENTRY_NAMES
-        and runtime.model_spec.name not in BACKGROUND_CONTINUATION_REQUIRED_TOOLS
     )
 
 
@@ -1089,8 +1180,8 @@ def _render_registry_catalog_section(
     )
 
 
-# LLM: 推荐只筛名卡候选，不覆盖权限或loaded；短名单为空不等于没有授权，默认None保持原检索与输出。
-# 函数用途: 用原retriever渲染相关工具名字，省略未选名卡时仍保留原发现入口。
+# LLM: 推荐只筛原授权名卡，不加载；低于三分不注入提示，避免中文日常话被当操作意图。
+# 函数用途: 用原 retriever 渲染高置信工具名，弱命中返回空文本。
 def _render_recommended_tools(
     query: str,
     specs: list[ToolModelSpec],
@@ -1110,11 +1201,9 @@ def _render_recommended_tools(
         spec for spec in specs if spec.name in presentation_shortlist_names or spec.name in TOOL_DISCOVERY_ENTRY_NAMES
     ]
     hits = retriever.search(query, candidates, retrieval_limit) if candidates else []
+    hits = [hit for hit in hits if hit.score >= MIN_RECOMMENDED_TOOL_SCORE]
     if not hits:
-        return (
-            "# Recommended Tools\n"
-            "当前没有明显高相关的工具命中。若要动手操作，请先根据 Tool Catalog 选最接近的工具。"
-        )
+        return ""
     by_name = {spec.name: spec for spec in specs}
     native = str(tool_protocol or "").strip().lower() == "native"
     blocks: list[str] = []

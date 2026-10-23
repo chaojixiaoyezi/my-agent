@@ -683,7 +683,7 @@ def _host_write_block(resolved: Path, agent_home_root: Path) -> PathAccessDecisi
         return PathAccessDecision(
             False, "PATH_HOST_STATE_WRITE_BLOCKED",
             "宿主运行状态（runtime.db 等权威账本、Owner级 skills/ 目录、能力包核验记录）只由宿主写，模型工具不能改；"
-            "项目/工作区普通 Skill 请写到 <workspace>/.agent/skills/<skill_id>/SKILL.md，固化脚本与工作流请用 scripts / workflows 工具"
+            "项目/工作区普通 Skill 请写到 <workspace>/.agents/skills/<skill_id>/SKILL.md，固化脚本与工作流请用 scripts / workflows 工具"
             f"（勿对普通 Skill/工作流调 package_build），任务与运行状态经对应宿主工具改变，读取不受影响: target={resolved}", str(state))
     return None
 

@@ -10,7 +10,13 @@ from ..capability.runtime_config_reload import (
     capability_config_for_agent,
     deployment_capability_config,
 )
-from ..user_space.feishu_cloud_authorization import authorize_cloud_resource, resolve_cloud_resource
+from ..user_space.feishu_cloud_authorization import (
+    CLOUD_OPERATIONS,
+    READ_ACTIONS,
+    WRITE_ACTIONS,
+    authorize_cloud_resource,
+    resolve_cloud_resource,
+)
 from ..user_space.feishu_sheet_authorization import authorize_sheet_write
 from ..user_space.feishu_sheet_verification import verify_sheet_write
 from ..user_space.owner_policy import resolve_effective_owner_policy
@@ -33,9 +39,7 @@ from .models import (
     TrustedParameterBinding,
 )
 
-_TYPES = {'sheet_meta': 'sheet', 'sheet_read': 'sheet', 'sheet_append': 'sheet', 'sheet_update': 'sheet',
-          'document_read': 'docx', 'document_append': 'docx', 'wiki_resolve': 'wiki'}
-_READ_ACTIONS = {'sheet_meta', 'sheet_read', 'document_read', 'wiki_resolve'}
+_TYPES = {op.action: op.resource_type for op in CLOUD_OPERATIONS.values()}
 
 
 # LLM: schema 与 API 计划共用准确动作；数据只作为供应商载荷，不能成为 owner、凭据、URL 或授权配置。
@@ -66,7 +70,7 @@ def _model_spec() -> ToolModelSpec:
             default_deferred=True, deferred_summary='使用宿主凭据读写本人或当前群已共享的飞书表格和云文档'))
 
 
-# LLM: 参数校验无网络；准确编号阻止路径替换，条件必填阻止默认误写，API 长度限制只守客观载荷上界。
+# LLM: 参数校验无网络；动作类型和写标记来自统一操作表，准确编号和条件必填阻止默认误写。
 # 函数用途: 在审批与操作 claim 前检查本次云调用的形状。
 def _validate_params(params: dict) -> None:
     action = params.get('action')
@@ -82,7 +86,7 @@ def _validate_params(params: dict) -> None:
     if action in {'sheet_read', 'sheet_append', 'sheet_update'} and (
             not isinstance(params.get('range'), str) or not params['range'].strip() or len(params['range']) > 512):
         raise ValueError('表格读写动作需要准确 range（若未知 sheet_id 请先调用 action="sheet_meta"）。')
-    if action in {'sheet_append', 'sheet_update'}:
+    if action in WRITE_ACTIONS and _TYPES[action] == 'sheet':
         rows = params.get('values')
         if not isinstance(rows, list) or not rows or len(rows) > 5000 or any(not isinstance(row, list) or not row or len(row) > 100 for row in rows):
             raise ValueError('values 需为非空二维数组，单次最多 5000 行、100 列。')
@@ -117,7 +121,7 @@ def _request_plan(params: dict) -> tuple[str, str, dict | None]:
 class FeishuCloudTool(BaseTool):
     model_spec = _model_spec()
     runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy('mutating', by_parameter=(('action', tuple((x, 'read_only') for x in sorted(_READ_ACTIONS))),)),
+        effect_resolver=EffectResolverPolicy('mutating', by_parameter=(('action', tuple((x, 'read_only') for x in sorted(READ_ACTIONS))),)),
         idempotency_policy=IdempotencyPolicy('operation'), timeout_policy=TimeoutPolicy(seconds=90),
         input_policy=ToolInputPolicy(internal_parameters=('__network_access_mode',), trusted_parameter_bindings=(
             ('__network_access_mode', TrustedParameterBinding(source_refs=('write_boundary.network_access_mode',), authority='host_authoritative')),)),

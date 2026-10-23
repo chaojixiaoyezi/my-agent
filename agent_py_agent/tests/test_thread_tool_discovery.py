@@ -14,12 +14,14 @@ from agent_py_agent.agent.conversation.tool_discovery import (
 from agent_py_agent.tests.test_compactcall_websocket import _setup
 
 
+# LLM: 线程加载字段保持宿主隐藏；新发现序列往返保留原顺序，旧空字段仍省略。
+# 函数用途: 验证有序发现状态不会被线程反序列化按字母重排。
 def test_thread_discovery_roundtrip_hidden_and_legacy():
     old = ConversationThread(thread_id="one", canonical_user_id="local")
     assert "loaded_tool_names" not in old.to_dict()
     loaded = replace(old, loaded_tool_names=("read_file", "read_artifact"))
     restored = ConversationThread.from_dict(loaded.to_dict())
-    assert restored.loaded_tool_names == ("read_artifact", "read_file")
+    assert restored.loaded_tool_names == ("read_file", "read_artifact")
     assert "loaded_tool_names" in MODEL_HIDDEN_THREAD_FIELDS
     assert normalized_loaded_tools([None, 1, {}, "", " read_file "]) == ("read_file",)
     assert normalized_loaded_tools("read_file") == ()
@@ -219,3 +221,43 @@ def test_shell_hints_direct_host_credentials_to_web_fetch():
 
     spec = _build_shell_tool_model_spec("full", 240, 16000)
     assert "需要宿主凭据（credential_ref）的 HTTP/API 请求必须使用 web_fetch，禁止用 curl/shell 拼接占位账号或探测受保护接口。" in spec.hints.avoid_when
+
+
+# LLM: 使用真实tool_search、loader、native转换与冻结参数，不能只测试registry的有序输入。
+# 函数用途: 复现连续搜索时新Schema必须追加而非按字母插入。
+def test_real_search_loader_preserves_append_only_native_wire(tmp_path, monkeypatch):
+    from agent_py_agent.agent.agent_core._runtime_params import ToolLoopExecuteParams
+    from agent_py_agent.agent.agent_core._tool_loop_service import _load_discovered_tools
+    from agent_py_agent.agent.agent_core.native_tool_protocol import resolve_native_tools
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ProviderToolCapability,
+        ToolProtocolSnapshot,
+    )
+
+    agent, thread, _, _ = _setup(tmp_path, monkeypatch, False)
+    agent.tools.catalog_default_deferral_enabled = True
+    p = ToolLoopExecuteParams(
+        user_prompt="", memories=[], runtime_injections=[], prompt_files=[], tool_catalog_section="",
+        tool_recommendations_section="", tool_context=[], effective_on_chunk=None, allowed_tools=None,
+        write_boundary=None, task_attributes={"conversation_thread_id": thread.thread_id}, request_id="", run_id="run", task_id="",
+        one_shot_tool_calls=set(), executed_tools=[], archive_tool_calls=[], loaded_tool_names=set(),
+        tool_runtime_snapshot=agent.tools.runtime_snapshot(), tool_protocol_snapshot=ToolProtocolSnapshot(
+            "run", "native", ProviderToolCapability("test", "local://test", "test", False, True, "test")),
+    )
+    base = resolve_native_tools(agent, p)
+    first = agent.tools.tools["tool_search"].execute({"names": ["workflows"]})
+    _load_discovered_tools(p, {"tool_round": 1, "tool_result_envelope": first.result_envelope})
+    a = resolve_native_tools(agent, p)
+    second = agent.tools.tools["tool_search"].execute({"names": ["package_build"]})
+    _load_discovered_tools(p, {"tool_round": 2, "tool_result_envelope": second.result_envelope})
+    b = resolve_native_tools(agent, replace(p))
+    assert a == [*base, next(tool for tool in a if tool["name"] == "workflows")]
+    assert b == [*a, next(tool for tool in b if tool["name"] == "package_build")]
+    persist_discovered_tools(agent, p, {"tool_round": 1, "tool_result_envelope": first.result_envelope})
+    persist_discovered_tools(agent, p, {"tool_round": 2, "tool_result_envelope": second.result_envelope})
+    next_turn = replace(p, live_archive_state={}, loaded_tool_names=set(p.loaded_tool_names))
+    assert resolve_native_tools(agent, next_turn) == b
+    _load_discovered_tools(p, {"tool_round": 3, "tool_result_envelope": first.result_envelope})
+    assert resolve_native_tools(agent, p) == b
+    narrowed = replace(p, allowed_tools=["tool_search", "workflows"])
+    assert {tool["name"] for tool in resolve_native_tools(agent, narrowed)} == {"tool_search", "workflows"}
