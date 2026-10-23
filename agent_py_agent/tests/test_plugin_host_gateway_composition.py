@@ -458,12 +458,13 @@ def test_production_script_enforces_business_read_and_write_roots(tmp_path):
     from agent_py_agent.agent.assets.script_store import ScriptStore
 
     code = (
-        "import __main__ as _g, json, subprocess, sys\nfrom pathlib import Path\n"
+        "import __main__ as _g, json, sqlite3, subprocess, sys\nfrom pathlib import Path\n"
         "_g.block_subproc = False\n_g.read_roots = ()\n_g.write_roots = ()\n"
         "args = json.load(sys.stdin)\n"
-        "res = {'denied_read': False, 'denied_write': False, 'denied_subproc': False}\n"
+        "res = {'denied_read': False, 'denied_write': False, 'denied_subproc': False, 'denied_sqlite': False}\n"
         "try:\n    Path(args['outside']).read_text()\nexcept PermissionError:\n    res['denied_read'] = True\n"
         "try:\n    Path(args['outside']).write_text('x')\nexcept PermissionError:\n    res['denied_write'] = True\n"
+        "try:\n    sqlite3.connect(args['outside'] + '.db').close()\nexcept PermissionError:\n    res['denied_sqlite'] = True\n"
         "try:\n"
         "    proc = subprocess.run([sys.executable, '-I', '-B', '-c', "
         "'import pathlib, sys; print(pathlib.Path(sys.argv[1]).read_text())', args['outside']], capture_output=True)\n"
@@ -501,7 +502,8 @@ def test_production_script_enforces_business_read_and_write_roots(tmp_path):
         poll = production_call(host, "conversations.requests.poll", {"request_id": accepted["request_id"]}, user="alice")
         assert poll["request"]["state"] == "succeeded"
         observed = json.loads(out_path.read_text(encoding="utf-8"))
-        assert observed == {"denied_read": True, "denied_write": True, "denied_subproc": True}
+        assert observed == {"denied_read": True, "denied_write": True, "denied_subproc": True, "denied_sqlite": True}
         assert outside.read_text(encoding="utf-8") == "secret"
+        assert not outside.with_name("canary.txt.db").exists()
     finally:
         next(fixture, None)

@@ -195,11 +195,19 @@ class GatewayPluginRequests:
         claim = claim_request(paths, paths.inbox / (request_id + ".json"))
         if claim is None:
             raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
-        fence.check()
-        ok, error_code = self._run_execution_plan(context, plan, payload, fence)
+        row = strict_json(claim.path.read_bytes(), RUNTIME_RECORD_MAX_BYTES)
+        try:
+            fence.check()
+            ok, error_code = self._run_execution_plan(context, plan, payload, fence)
+        except Exception as exc:
+            err = exc.code if isinstance(exc, HostAPIError) else "EXECUTION_ABORTED"
+            failed = _terminal_gateway_request_payload(
+                request_id, row, {"id": request_id, "status": "failed", "ok": False, "error_code": err, "ended_at": time.time()}
+            )
+            _commit_gateway_terminal_request(paths, claim.path, paths.failed, request_id, failed)
+            raise
         response = {"id": request_id, "status": "done" if ok else "failed", "ok": ok,
                     "error_code": error_code, "ended_at": time.time()}
-        row = strict_json(claim.path.read_bytes(), RUNTIME_RECORD_MAX_BYTES)
         terminal = _terminal_gateway_request_payload(request_id, row, response)
         _commit_gateway_terminal_request(paths, claim.path, paths.done if ok else paths.failed, request_id, terminal)
         return ExecutionAccepted(request_id, payload["thread_id"], False)

@@ -49,6 +49,7 @@ from .authority import (
 )
 from .background_context import (
     BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT,
+    _has_plugin_zero_tool_goal,
     is_narrow_audit_event,
     policy_snapshot_from_request,
 )
@@ -2406,23 +2407,12 @@ def _background_policy_snapshot(
     store: object | None = None,
 ) -> dict[str, Any]:
     snapshot = dict(policy_snapshot_from_request(request))
-    candidates = [goal] if goal is not None else []
-    if not candidates and store is not None and getattr(store, "goals", None) is not None and request.thread_id:
-        try:
-            goals, _ = store.goals.list_report(request.thread_id)
-            task_id = str(request.task_id or "").strip()
-            for item in goals or ():
-                if (task_id and getattr(item, "task_id", "") == task_id) or (
-                    not task_id and getattr(item, "status", "") in {"active", "paused", "budget_limited"}
-                ):
-                    candidates.append(item)
-        except Exception:
-            pass
-    for item in candidates:
-        goal_meta = getattr(item, "metadata", None)
-        if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
-            snapshot.setdefault("tool_policy", "none")
-            break
+    goal_meta = getattr(goal, "metadata", None) if goal is not None else None
+    if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
+        snapshot.setdefault("tool_policy", "none")
+        return snapshot
+    if goal is None and _has_plugin_zero_tool_goal(store, str(request.thread_id or "").strip(), "", str(request.task_id or "").strip()):
+        snapshot.setdefault("tool_policy", "none")
     return snapshot
 
 

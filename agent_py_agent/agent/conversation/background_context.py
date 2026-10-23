@@ -848,19 +848,24 @@ def _safe_recovery_snapshot(
         }
 
 
-# LLM: 按精确goal_id、task_id或线程未结Goal核对插件零工具元数据，不依赖Goal处于active状态。
+_NON_TERMINAL_GOAL_STATUSES = frozenset({"active", "paused", "blocked", "budget_limited", "usage_limited"})
+
+
+# LLM: 按精确goal_id、task_id或线程未结Goal核对插件零工具元数据，读取异常或损坏记录时按零工具失败关闭。
 # 函数用途: 判断当前后台请求关联的线程Goal是否声明了插件零工具策略。
 def _has_plugin_zero_tool_goal(store: object, thread_id: str, goal_id: str, task_id: str) -> bool:
     if store is None or not thread_id or getattr(store, "goals", None) is None:
         return False
     try:
-        goals, _ = store.goals.list_report(thread_id)
+        goals, report = store.goals.list_report(thread_id)
     except Exception:
-        return False
+        return True
+    if getattr(report, "corrupt_records", 0) > 0:
+        return True
     for item in goals or ():
         matched = (goal_id and getattr(item, "goal_id", "") == goal_id) or (
             task_id and getattr(item, "task_id", "") == task_id
-        ) or (not goal_id and not task_id and getattr(item, "status", "") in {"active", "paused", "budget_limited"})
+        ) or (not goal_id and not task_id and getattr(item, "status", "") in _NON_TERMINAL_GOAL_STATUSES)
         goal_meta = getattr(item, "metadata", None) if matched else None
         if isinstance(goal_meta, dict) and (goal_meta.get("plugin_origin") or goal_meta.get("tool_policy") == "none"):
             return True

@@ -87,6 +87,15 @@ _PYTHON_GUARD_CODE = """def _init_guard():
         elif event in ("os.listdir", "os.scandir", "os.readlink"):
             if args and not isinstance(args[0], int):
                 _check_read(args[0])
+        elif event == "sqlite3.connect":
+            raw_db = str(args[0] or "") if args else ""
+            if raw_db and raw_db != ":memory:" and not raw_db.startswith("file::memory:"):
+                if raw_db.startswith("file:"):
+                    db_path, _, query = raw_db[5:].partition("?")
+                    if db_path and db_path != ":memory:" and "mode=memory" not in query:
+                        (_check_read if "mode=ro" in query else _check_write)(db_path)
+                else:
+                    _check_write(raw_db)
 
     with open(entrypoint, "rb") as _f:
         code = compile(_f.read(), entrypoint, "exec")
@@ -373,7 +382,12 @@ class ScriptRunner:
         executable, runtime_read_roots = _interpreter_runtime(interpreter)
         if not executable:
             raise ValueError('解释器不可用')
-        timeout = float(metadata.get('timeout_seconds', 30) if timeout_seconds is None else timeout_seconds)
+        declared_timeout = float(metadata.get('timeout_seconds') or 30)
+        timeout = (
+            declared_timeout
+            if timeout_seconds is None
+            else (min(declared_timeout, float(timeout_seconds)) if self.restrict_to_roots else float(timeout_seconds))
+        )
         if not math.isfinite(timeout) or not 0 < timeout <= 3600:
             raise ValueError('脚本超时必须为 (0, 3600] 秒')
         sources = payload(metadata.get('data_sources', {}) if override_data_sources is None else override_data_sources)
@@ -388,12 +402,13 @@ class ScriptRunner:
             net_allowed = _network_access(metadata, network_access)
             env = _environment(metadata, folder, input_json, sources)
             resolved_owner = self.owner_home.resolve(strict=False)
+            owners_anc = next((p for p in resolved_owner.parents[:4] if p.name == 'owners'), None)
             private_roots = (
                 tuple(dict.fromkeys((
                     resolved_owner,
                     resolved_owner.parent,
                     resolved_owner.parent.parent,
-                    *((resolved_owner.parent.parent.parent,) if resolved_owner.parent.parent.name == 'owners' else ()),
+                    *((owners_anc, owners_anc.parent) if owners_anc is not None else ()),
                 )))
                 if self.restrict_to_roots
                 else ()

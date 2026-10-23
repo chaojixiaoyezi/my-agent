@@ -8,6 +8,7 @@ import time
 
 from ..assets.script_store import ScriptStore
 from ..assets.workflow_store import WorkflowStore
+from ..tooling.sandbox import SandboxUnavailable
 from ..workflows.engine import WorkflowEngine
 from ..workflows.run_store import WorkflowRunStore
 from ..workflows.script_runner import ScriptRunner
@@ -162,13 +163,9 @@ def registered_asset(context, payload: dict) -> AssetGrant:
     raise HostAPIError("ACTION_NOT_AVAILABLE", 403)
 
 
-# LLM: 每步脚本执行前均消费AssetStepFence并强制禁网、受限读写根与声明时长预算，防止执行中途撤权或篡改步骤脚本。
-# 函数用途: 在目标Owner隔离目录内执行已获批脚本、工作流或工作流断点续跑。
-def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
-    fence.check()
-    payload = json.loads(plan.payload_json)
-    home = context.owner_home.home_dir
-    policy = context.execution_policy
+# LLM: 优先读取授权budgets中的max_duration_seconds，兼容max_wall_time_ms，限制在[0.1, 3600]秒。
+# 函数用途: 计算单次受限资产执行的授权总时长上限。
+def _budget_timeout_seconds(context) -> float:
     budgets = getattr(getattr(context.source, "execution_policy", None), "budgets", None) or {}
     if "max_duration_seconds" in budgets:
         raw_seconds = float(budgets["max_duration_seconds"])
@@ -176,21 +173,33 @@ def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
         raw_seconds = float(budgets["max_wall_time_ms"]) / 1000.0
     else:
         raw_seconds = 30.0
-    max_timeout = max(0.1, min(3600.0, raw_seconds))
+    return max(0.1, min(3600.0, raw_seconds))
+
+
+# LLM: 每步脚本执行前均消费AssetStepFence并强制禁网、受限读写根与声明时长预算，防止执行中途撤权或篡改步骤脚本。
+# 函数用途: 在目标Owner隔离目录内执行已获批脚本、工作流或工作流断点续跑。
+def execute_registered_asset(context, plan, fence) -> tuple[bool, str]:
+    fence.check()
+    payload = json.loads(plan.payload_json)
+    home = context.owner_home.home_dir
+    policy = context.execution_policy
+    max_timeout = _budget_timeout_seconds(context)
     deadline = time.monotonic() + max_timeout
-    runner = ScriptRunner(
-        home,
-        extra_write_roots=policy.write_roots,
-        public_read_roots=policy.read_roots,
-        restrict_to_roots=True,
-    )
+    runner = ScriptRunner(home, extra_write_roots=policy.write_roots, public_read_roots=policy.read_roots, restrict_to_roots=True)
     if plan.action == "execute.script":
-        result = runner.run_script(
-            payload["script_id"],
-            inputs=payload.get("inputs") or {},
-            timeout_seconds=max_timeout,
-            network_access=False,
-        )
+        try:
+            result = runner.run_script(
+                payload["script_id"],
+                inputs=payload.get("inputs") or {},
+                timeout_seconds=max_timeout,
+                network_access=False,
+            )
+        except SandboxUnavailable as exc:
+            fence.check()
+            raise HostAPIError("HOST_NOT_READY", 503, "not_started") from exc
+        except (ValueError, KeyError, OSError, RuntimeError):
+            fence.check()
+            return False, "SCRIPT_EXECUTION_FAILED"
         fence.check()
         return bool(result.ok), "" if result.ok else (result.error_code or "SCRIPT_EXECUTION_FAILED")
     if plan.action == "execute.workflow":
