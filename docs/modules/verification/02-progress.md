@@ -1,6 +1,6 @@
-## 2026-10-23 外置工具归档前生成有界领域摘要（封板修复 FF-12）
+## 2026-10-23 外置工具归档前保留完整预览前缀（封板修复 FF-12）
 
-`agent_core/tool_call_archive_record.py` 在外置截断 `outcome.output` 为 preview 之前，先对完整原始输出调用 `build_externalized_live_summary` 生成有界 `domain_live_summary` 并写入 `archive_output_record`，供 `tool_context/live_summary.py` 直接复用，避免从已被截断的预览字符串解析 JSON 导致 `process_session` 等输出的真实尾部标记丢失。
+`agent_core/tool_call_archive_record.py` 在外置截断 `outcome.output` 为短 preview 之前，先截取有界原始输出前缀 `archive_output_preview` 并写入 `archive_output_record`，供 `tool_context/live_summary.py` 直接解码完整 JSON 输出，避免从已被截断的预览字符串解析 JSON 导致 `process_session` 等输出的真实尾部标记丢失。
 
 ## 2026-10-21 公共工具出口自动记录调用耗时遥测
 

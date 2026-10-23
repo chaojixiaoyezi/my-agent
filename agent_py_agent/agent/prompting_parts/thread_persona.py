@@ -14,6 +14,8 @@ from ..common.opaque_id import validate_path_segment
 
 # 动态人格行变化总字符预算；超出仅给数量，避免尾巴吞掉窗口。
 PERSONA_UPDATES_MAX_CHARS = 4000
+# 三个合法 2 MiB 人格文件经 JSON 转义与元数据包裹后的有界读回上限。
+_MAX_PERSONA_SNAPSHOT_BYTES = 36 * 1024 * 1024
 
 
 # LLM: 只接受已提交线程的代次/所选档案与实际协议；候选模型或候选压缩不能产生新 epoch。
@@ -177,7 +179,7 @@ def _read_snapshot(path: Path) -> dict | None:
         return None
     if not path.is_file():
         raise ValueError("PERSONA_PREFIX_INVALID")
-    if path.stat().st_size > 8 * 1024 * 1024:
+    if path.stat().st_size > _MAX_PERSONA_SNAPSHOT_BYTES:
         return _invalid_snapshot(path)
     try:
         saved = json.loads(path.read_text(encoding="utf-8"))

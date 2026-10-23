@@ -226,7 +226,7 @@ def test_invalid_snapshot_is_rebuilt_without_failing_turn_or_logging_content(sce
         "json": b'{"DO_NOT_LOG_ME":',
         "schema": json.dumps(saved | {"schema_version": 999}).encode(),
         "sections": json.dumps(saved | {"sections": {"agents": "DO_NOT_LOG_ME"}}).encode(),
-        "oversized": b"DO_NOT_LOG_ME" + b" " * (8 * 1024 * 1024),
+        "oversized": b"DO_NOT_LOG_ME" + b" " * (36 * 1024 * 1024),
         "utf8": b"DO_NOT_LOG_ME\xff",
         "value_type": json.dumps(saved | {"sections": saved["sections"] | {"agents": 7}}).encode(),
     }
