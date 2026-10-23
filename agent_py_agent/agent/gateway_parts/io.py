@@ -61,7 +61,9 @@ _JSON_FILE_LOCKS_GUARD = threading.Lock()
 _GATEWAY_HISTORY_CACHE_LOCK = threading.Lock()
 # 限制历史文件进程内快照缓存条目上限，防止多工作区长期运行无界增长。
 _MAX_GATEWAY_HISTORY_CACHE_ENTRIES = 64
+# 网关历史缓存允许缓存的单个文件最大字节数。
 _MAX_GATEWAY_HISTORY_CACHE_FILE_BYTES = 4 * 1024 * 1024
+# 网关历史文件进程内缓存允许占用的总字节数上限。
 _MAX_GATEWAY_HISTORY_CACHE_TOTAL_BYTES = 16 * 1024 * 1024
 _GATEWAY_HISTORY_CACHE: dict[
     str,

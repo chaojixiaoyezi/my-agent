@@ -36,8 +36,8 @@ class TestOrchestrationToolsSpec:
         # 2026-09-10「精简冲突提示」把工具级规则从逐参数文本挪到工具 description，
         # 所以断言要跟着搬到规则真正所在的位置，而不是继续要求参数文本里出现过这些句子。
         assert "资料线索" in spec.parameter_descriptions["input_refs"]
-        assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
-        assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
+        assert "所有items立即并发，文字中的先后顺序不生效" in spec.description
+        assert "创建后生命周期事件自动通知父级，无需轮询" in spec.description
         assert "依赖顺序" in spec.parameter_descriptions["items"]
         assert "已有 Todo 时每项必须" not in spec.parameter_descriptions["items"]
         # 同样是一句话的措辞精简：语义保留（不得拿无关 id 顶替），句子改为"不拿无关 id 顶替"。

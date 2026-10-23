@@ -60,7 +60,9 @@ from .candidate_target_binding import TargetEvidenceVersionBindings, binding_his
 from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
 
+# 记忆候选列表缓存最多跟踪的文件路径数。
 _CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
+# 记忆候选列表缓存允许占用的最大总字节数。
 _CANDIDATE_LOAD_CACHE_MAX_BYTES = 32 * 1024 * 1024
 _CANDIDATE_LOAD_CACHE: OrderedDict[
     str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...]]

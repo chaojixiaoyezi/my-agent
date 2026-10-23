@@ -1173,7 +1173,7 @@ def _validate_trusted_source_ref(tool_name: str, source_ref: object) -> None:
 TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "list_tools", "skill_search", "self_map"})
 
 
-# LLM: 该快照固定原授权/就绪绑定；可选展示名集合只属本工作片，由宿主按原配置生成，不参与权限或snapshot_hash。
+# LLM: 该快照固定原授权/就绪绑定及创建时展示策略；折叠类别、默认开关与可选展示名都不参与权限或snapshot_hash。
 # 类用途: 保存真实工具集合与不可用原因，附带可忽略的展示投影；收起工具必须仍可经原搜索找回。
 @dataclass(frozen=True)
 class ToolRuntimeSnapshot:
@@ -1190,6 +1190,8 @@ class ToolRuntimeSnapshot:
     loaded_tool_names: tuple[str, ...] = ()
     preloaded_tool_names: tuple[str, ...] = ()
     catalog_specs: tuple[ToolModelSpec, ...] = ()
+    deferred_categories: tuple[str, ...] = ()
+    default_deferral_enabled: bool = False
 
     # LLM: 仅校验名称子集、不可变类型与原发现入口；有序加载/预载只是展示事实，不扩权或产生新注册代次。
     # 函数用途: 在创建快照或宿主替换展示投影时拒绝越界名称和无法找回的额外折叠。

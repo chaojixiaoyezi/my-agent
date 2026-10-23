@@ -1360,20 +1360,23 @@ def test_todo_panel_renders_items_with_checkmarks_and_shared_spinner() -> None:
                 {"id": "b", "title": "分析模块", "status": "in_progress"},
                 {"id": "c", "title": "写报告", "status": "pending"},
                 {"id": "d", "title": "取消旧方案", "status": "skipped"},
+                {"id": "e", "title": "等待外部前置", "status": "blocked"},
             ]
         },
     )
-    first = cache.render(block, TuiRenderContext(width=80, spinner_index=0))
-    second = cache.render(block, TuiRenderContext(width=80, spinner_index=1))
+    first = cache.render(block, TuiRenderContext(width=80, spinner_index=0, todos_expanded=True))
+    second = cache.render(block, TuiRenderContext(width=80, spinner_index=1, todos_expanded=True))
     text = "\n".join(fragments_text(line) for line in first)
     second_text = "\n".join(fragments_text(line) for line in second)
     assert "任务清单" in text
-    assert "完成 1/4 · 进行中 1" in text
+    assert "完成 1/5 · 进行中 1" in text
     assert "☑ 阅读项目A" in text
     assert "✻ 分析模块" in text
     assert "✢ 分析模块" in second_text
     assert "□ 写报告" in text
     assert "➖ 取消旧方案" in text
+    assert "☒ 等待外部前置" in text
+    assert "⬜" not in text
 
 
 def test_todo_panel_collapses_to_status_window_and_ctrl_t_expands() -> None:

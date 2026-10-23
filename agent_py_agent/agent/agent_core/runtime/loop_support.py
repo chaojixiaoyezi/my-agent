@@ -620,8 +620,8 @@ def _refresh_recall_candidates(agent: object, records: list, read_paths: list[st
 
 
 # 非HOT池按安全信封计量4000字符（含遗漏提示），工作约定另受2400子预算。
-# HOT独立按正文5000字符写入上限整条保留，序列化元数据不挤占其有效正文额度。
 _FORMAL_MEMORY_BUDGET_CHARS = 4000
+# HOT独立按正文5000字符写入上限整条保留，序列化元数据不挤占其有效正文额度。
 _HOT_MEMORY_CONTENT_BUDGET_CHARS = 5000
 # 工作约定从总召回额度内分配子预算，不能挤占全部正式记忆。
 _WORKING_AGREEMENT_SUB_BUDGET_CHARS = 2400

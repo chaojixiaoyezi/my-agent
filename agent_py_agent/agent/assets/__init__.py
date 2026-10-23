@@ -21,6 +21,7 @@ from ..common.nofollow_fs import (
     write_text_atomic_beneath,
 )
 
+# 单个资产文件允许读取的最大字节数上限。
 MAX_ASSET_BYTES = 16 * 1024 * 1024
 TRANSACTION_FILE = "asset-transaction.json"
 

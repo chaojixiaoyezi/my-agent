@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from collections.abc import Sequence
+from dataclasses import MISSING
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,22 +25,30 @@ KEEP_USAGE_LEDGER_EVENTS = 1000
 _CONTEXT_DEFAULTS = {"request_id": "", "thread_id": "", "task_id": "", "chars": 0}
 
 
-# LLM: 关键字兼容且上下文白名单固定；与批量口共用原state事务，Agent上下文在进锁前冻结，所有异常只warning。
+# LLM: Store传params，旧调用方的显式关键字覆盖同名项；归一后复用批量口校验/事务，记录异常只warning。
 # 函数用途: 记录一次使用事实，不改变业务调用的结果。
-def record_skill_usage_event(agent_or_store, *, event, skill_id, source, kind="skill", **context) -> None:
+def record_skill_usage_event(
+    agent_or_store, *, params: dict | None = None,
+    event=MISSING, skill_id=MISSING, source=MISSING, kind=MISSING,
+    request_id=MISSING, thread_id=MISSING, task_id=MISSING, chars=MISSING,
+) -> None:
     try:
-        row = _usage_row(agent_or_store, event, skill_id, source, kind, **context)
+        values = dict(params or {})
+        overrides = dict(event=event, skill_id=skill_id, source=source, kind=kind,
+                         request_id=request_id, thread_id=thread_id, task_id=task_id, chars=chars)
+        values.update({key: value for key, value in overrides.items() if value is not MISSING})
+        row = _usage_row(agent_or_store, values)
         store = _usage_store(agent_or_store)
         _record_usage_rows(store, [row])
     except Exception:  # noqa: BLE001 - 附带统计不能改变原工具/宿主的成功或失败。
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
 
 
-# LLM: 整批先校验再拿原owner配额→state锁；空批次不创建目录，任何统计故障只warning，不写半批合法事件。
+# LLM: 单条与整批复用同一事件字典校验，再拿owner配额→state锁；空批不创建目录，故障只warning且不写半批。
 # 函数用途: 为一次搜索的全部命中只追加并保存一次使用台账。
 def record_skill_usage_events(store: SkillLearningStore, events: Sequence[dict[str, object]]) -> None:
     try:
-        rows = [_usage_row(store, **event) for event in events]
+        rows = [_usage_row(store, event) for event in events]
         if rows:
             _record_usage_rows(_usage_store(store), rows)
     except Exception:  # noqa: BLE001 - 附带批量统计不能改变原工具结果。
@@ -87,11 +96,14 @@ def _usage_store(value) -> SkillLearningStore:
     return SkillLearningStore(root / "data" / "skill_learning", root / "skills")
 
 
-# LLM: 只接收固定事件/种类与结构化标识，未知上下文键拒绝；不把 query、正文或异常文本抄到账本。
+# LLM: 只消费归一事件字典并拒绝未知上下文键；保留省略与显式None区别，不把query、正文或异常文本抄到账本。
 # 函数用途: 生成一行有 UTC 日期和有界关联标识的使用记录。
-def _usage_row(agent, event, skill_id, source, kind="skill", **context) -> dict:
+def _usage_row(agent, params: dict) -> dict:
+    event, skill_id, source = params["event"], params["skill_id"], params["source"]
+    kind = params.get("kind", "skill")
     if event not in USAGE_EVENTS or kind not in {"skill", "capability_package"} or not skill_id:
         raise ValueError("invalid usage identity")
+    context = {key: value for key, value in params.items() if key not in {"event", "skill_id", "source", "kind"}}
     if set(context) - set(_CONTEXT_DEFAULTS):
         raise ValueError("invalid usage context")
     params = getattr(agent, "_current_run_params", None)

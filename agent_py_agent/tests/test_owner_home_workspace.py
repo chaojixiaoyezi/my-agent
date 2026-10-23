@@ -114,8 +114,9 @@ def test_directory_guide_is_shared_cache_stable_and_can_be_disabled(tmp_path):
     config = AgentConfig(prompt_files=[], workspace_task_path_template="tasks/{date}/{task_slug}")
     builder = PromptBuilder(config, tmp_path, home_paths=home)
     first = builder.build(user_prompt="整理季度材料", tools=ToolSections(native_tool_use=True))
+    second = builder.build(user_prompt="继续上月的脚本", tools=ToolSections(native_tool_use=True))
     child = builder.build(user_prompt="继续上月的脚本", context_scope="task_local", tools=ToolSections(native_tool_use=True))
-    for rendered in (first, child):
+    for rendered in (first, second):
         assert "# 家目录与整理约定" in rendered
         assert "tasks/{date}/{task_slug}" in rendered
         assert "不用判断长期项目/短期任务状态" in rendered
@@ -125,9 +126,10 @@ def test_directory_guide_is_shared_cache_stable_and_can_be_disabled(tmp_path):
         assert "不为美化名称搬动旧项目" in rendered
         assert "保留原件与来源" in rendered
         assert "SOUL.md" in rendered and "memory-hot.md" in rendered
+    assert "# 家目录与整理约定" not in child
     first_guide = str(first).split("# 家目录与整理约定", 1)[1].split("#", 1)[0]
-    child_guide = str(child).split("# 家目录与整理约定", 1)[1].split("#", 1)[0]
-    assert first_guide == child_guide
+    second_guide = str(second).split("# 家目录与整理约定", 1)[1].split("#", 1)[0]
+    assert first_guide == second_guide
     config.home_context_enabled = False
     assert "# 家目录与整理约定" not in builder.build(user_prompt="任意任务")
 

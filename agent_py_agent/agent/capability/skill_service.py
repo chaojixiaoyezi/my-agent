@@ -289,6 +289,8 @@ def _build_snapshot(
     )
 
 
+# LLM: 目录分类只作为解析缺省值，显式frontmatter分类（包括general）优先；guard与来源授权保持原合同。
+# 函数用途: 将单个已发现技能解析、核验并转换为快照条目。
 def _entry_from_manifest(
     item: SkillManifestItem,
     policy: EffectiveOwnerPolicy,
@@ -298,6 +300,7 @@ def _entry_from_manifest(
             item.path,
             source=item.root.source,
             require_frontmatter=True,
+            default_category=_derived_category(item.root.path, item.path),
         )
         _validate_card(card)
     except (OSError, TypeError, ValueError) as exc:
@@ -308,11 +311,10 @@ def _entry_from_manifest(
     )
     if not decision.allowed:
         return None, _error(item.root, item.path, "SKILL_GUARD_DENIED", _guard_codes(decision.to_dict()))
-    category = card.category if card.category != "general" else _derived_category(item.root.path, item.path)
     enabled = card.name not in set(policy.disabled_skills)
     if item.root.source == "shared" and policy.enabled_shared_skills:
         enabled = enabled and card.name in set(policy.enabled_shared_skills)
-    return _snapshot_entry(item, card, category, enabled), None
+    return _snapshot_entry(item, card, card.category, enabled), None
 
 
 def _snapshot_entry(
@@ -391,11 +393,16 @@ def _visible_skill_path(root: Path, path: Path) -> bool:
     return not any(part.startswith(".") for part in relative.parts[:-1])
 
 
+# LLM: 只从本根内路径推导缺省分类；独立skills/learned根保留learned，普通分类树保留目录链，平铺或越界回退general。
+# 函数用途: 恢复技能根拆分前的目录分类语义，不修改元数据或来源。
 def _derived_category(root: Path, path: Path) -> str:
     try:
-        return "/".join(path.parent.relative_to(root.resolve(strict=False)).parts[:-1])
+        rel_parts = path.relative_to(root.resolve(strict=False)).parts
     except ValueError:
         return "general"
+    if root.name == "learned" and root.parent.name == "skills":
+        return "learned"
+    return "/".join(rel_parts[:-2]) or "general"
 
 
 def _dedupe_roots(roots: list[SkillRoot]) -> tuple[SkillRoot, ...]:

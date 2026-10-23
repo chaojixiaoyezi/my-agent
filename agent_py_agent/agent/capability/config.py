@@ -20,6 +20,7 @@ from ..settings.config import load_simple_yaml
 
 _CAPABILITY_CONFIG_CACHE_LOCK = threading.RLock()
 _CAPABILITY_CONFIG_CACHE: OrderedDict[tuple[str, int, int, int, int, int], CapabilityConfig] = OrderedDict()
+# 能力路由配置进程内缓存的最大条目数。
 _CAPABILITY_CONFIG_CACHE_MAX_SIZE = 64
 
 # LLM: 包准备默认关闭，方法沿用默认开；凭据期限不改变owner/任务授权；默认与YAML须保持同源。

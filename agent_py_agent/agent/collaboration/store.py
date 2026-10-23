@@ -60,6 +60,7 @@ from .request_status import (
 from .store_common import dict_items, now, read_jsonl_report, strings
 from .store_common import now as current_time
 
+# 协作单文件进程内缓存的最大条目数。
 _CASE_FILE_CACHE_MAX_ENTRIES_COUNT = 512
 _CASE_FILE_CACHE_LOCK = threading.RLock()
 _CASE_FILE_CACHE: OrderedDict[tuple[str, int, int, int, int, int], CollaborationCase] = OrderedDict()

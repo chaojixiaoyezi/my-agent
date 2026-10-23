@@ -14,18 +14,24 @@ from .models import (
 )
 
 
-# LLM: 展示只认冻结的原生默认收起标记、额外收起/预载/加载声明；本线程显式加载仍须与快照公开权限求交。
+# LLM: 展示只认冻结的类别/默认开关、额外收起及加载声明；显式授权无预载子集时直出，加载仍与公开权限求交。
 #   不读取registry的实时分类或默认开关，也不据此改变真实工具注册、Schema或执行权限。
 # 函数用途: 从同一工具快照及已有加载事实生成稳定的公开展开名称集合。
 def _snapshot_model_names(snapshot: ToolRuntimeSnapshot, loaded=()) -> set[str]:
     names = {runtime.model_spec.name for runtime in snapshot.runtimes if runtime.exposure.model_visible}
     specs = {spec.name: spec for spec in snapshot.specs if spec.name in names}
     search = snapshot.runtime('tool_search')
-    if search is None or not search.availability.available or not search.exposure.model_visible:
+    if (search is None or not search.availability.available or not search.exposure.model_visible
+            or (snapshot.allowed_tools is not None and not snapshot.preloaded_tool_names)):
         return names
-    deferred = set(snapshot.presentation_deferred_names or ())
-    deferred.update(name for name, spec in specs.items()
-                    if spec.hints.default_deferred and name not in TOOL_DISCOVERY_ENTRY_NAMES)
+    categories = set(snapshot.deferred_categories)
+    deferred = {name for name, spec in specs.items() if spec.category in categories}
+    if search.model_spec.category not in categories:
+        if snapshot.allowed_tools is None:
+            deferred.update(snapshot.presentation_deferred_names or ())
+        if snapshot.default_deferral_enabled:
+            deferred.update(name for name, spec in specs.items()
+                            if spec.hints.default_deferred and name not in TOOL_DISCOVERY_ENTRY_NAMES)
     expanded = set(loaded) | set(snapshot.loaded_tool_names) | set(snapshot.preloaded_tool_names)
     return names - deferred | names.intersection(expanded)
 
@@ -51,6 +57,8 @@ def registry_self_context(registry, snapshot: ToolRuntimeSnapshot, context: Tool
             state, (code, reason) = 'unavailable', unavailable[name]
         elif name in available:
             state, code, reason = ('ready' if name in visible else 'deferred'), '', ''
+            if state == 'deferred':
+                reason = 'Deferred until loaded by tool_search in this thread.'
         else:
             state, code, reason = 'disabled', 'TOOL_DISABLED', '当前 owner 或部署策略禁用。'
         item = {'name': name, 'state': state, 'error_code': code, 'reason': reason}
@@ -107,6 +115,7 @@ def tool_self_context(agent, snapshot: ToolRuntimeSnapshot, context: ToolInvocat
     for item in states:
         if item['name'] in snapshot.available_tool_names:
             item['state'] = 'ready' if item['name'] in model_names else 'deferred'
+            item['reason'] = '' if item['state'] == 'ready' else 'Deferred until loaded by tool_search in this thread.'
     return {'tool_states': states, 'identity': {'owner_id': str(getattr(home, 'owner_id', '') or ''),
                          'owner_provider': str(getattr(home, 'owner_provider', '') or ''),
                          'owner_kind': str(getattr(home, 'owner_kind', '') or ''),

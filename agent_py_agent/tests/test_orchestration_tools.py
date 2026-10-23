@@ -54,26 +54,25 @@ def test_create_subagents_model_spec_uses_template_index_not_full_prompt():
     item_schema = spec.input_schema["properties"]["items"]["items"]
     assert item_schema["required"] == ["goal"]
     assert list(item_schema["properties"])[:3] == ["goal", "persistent_goal", "covers"]
-    assert "凡 child 原样承接一个已存在 open 项" in spec.description
+    assert "承接现有open Todo时在covers复制exact id" in spec.description
     assert "不要因为字段可选而漏掉" in item_schema["properties"]["covers"]["description"]
     assert item_schema["properties"]["description"]["maxLength"] == 240
     assert item_schema["properties"]["output_files"]["type"] == "array"
     assert "交付身份与协调线索" in spec.parameter_descriptions["output_files"]
     assert "同批多个 item 可以声明共同 task root" in spec.parameter_descriptions["output_files"]
-    assert "派工不会永久改变你的职责" in spec.description
-    assert "不要重复下级正在执行的工作" in spec.description
-    assert "用户明确要求主代理不写功能代码" in spec.description
-    assert "goal 里写‘先 A 后 B’不会形成执行顺序" in spec.description
-    assert "等 A 的生命周期完成事件自动唤醒后" in spec.description
-    assert "并行编码任务必须拆成互不重叠的文件或模块写入范围" in spec.description
-    assert "共同目标目录和该项独占范围" in spec.description
+    assert "用户明确留给你的职责不可整体转交" in spec.description
+    assert "不重复child正在做的工作" in spec.description
+    assert "遵守用户对主代理实现范围的限制" in spec.description
+    assert "所有items立即并发，文字中的先后顺序不生效" in spec.description
+    assert "创建后生命周期事件自动通知父级，无需轮询" in spec.description
+    assert "依赖前项结果或可能修改同一文件/模块的任务须分批" in spec.description
+    assert "明确共同目录、独占范围、交付物与验收" in spec.description
     assert "互不重叠的文件或模块范围" in item_schema["properties"]["goal"]["description"]
-    assert "同批 child 可以共享父级 task root" in spec.description
-    assert "不是完整写集、权限或机器锁" in spec.description
-    assert "顶层 goal 只是可选批次说明" in spec.description
+    assert "output_files仅为协调线索，不是写集、锁或授权" in spec.description
+    assert "单派用goal，批量用items且每项goal必填" in spec.description
     assert "没有查询或推进工具" not in spec.description
     assert "不能扩到兄弟目录" not in spec.description
-    assert "业务目录不是额外隔离墙" in spec.description
+    assert "child沿原owner工作区授权" in spec.description
     assert "work/child_outputs" not in spec.parameter_descriptions["output_files"]
 
 

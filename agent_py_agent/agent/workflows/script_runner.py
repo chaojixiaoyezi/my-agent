@@ -26,7 +26,9 @@ from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling._subprocess_env_scrub import scrub_subprocess_env
 from .models import ScriptExecutionResult, payload, safe_path
 
+# 原生工作流脚本标准输出与错误流保留的最大字节数。
 MAX_OUTPUT_BYTES = 1024 * 1024
+# 原生工作流步骤回执保留的输出预览最大字符数。
 PREVIEW_CHARS = 4096
 _JSON_OUTPUT_TYPES = {
     'string': (str,), 'integer': (int,), 'number': (int, float),

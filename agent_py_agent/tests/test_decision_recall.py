@@ -7,6 +7,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_models import RuntimeContextRequest
 from agent_py_agent.agent.agent_core.runtime.loop_support import (
+    _FORMAL_MEMORY_BUDGET_CHARS,
     _formal_memories_for_request,
     _refresh_recall_candidates,
 )
@@ -21,6 +22,7 @@ from agent_py_agent.agent.conversation.decision_reach_counts import miss_reason_
 from agent_py_agent.agent.memory_store import MemoryRecord
 from agent_py_agent.agent.memory_store import decision_recall as module
 from agent_py_agent.agent.memory_store.recall import MemoryRecallScope
+from agent_py_agent.agent.prompting_parts.memory_context import memory_context_text
 from agent_py_agent.tests.test_decision_reach_counts import reach_counter
 
 
@@ -304,15 +306,26 @@ def test_formal_budgeted_recall_enters_real_service_worker_and_usage(tmp_path, p
         assert ledger[0].metadata["thread_id"] == binding.thread_id
 
 
-def test_existing_budget_selects_candidates_before_optional_ranking(tmp_path, prepared, monkeypatch):
-    records = [replace(record, content="材料" * 1999 + record.entry_id) for record in prepared[2]]
+# LLM: 保留真实预算/召回服务，只替换供应商；650倍样本仅信封超额，700倍样本保持派单原场景。
+# 函数用途: 验证完整信封在可选排序前排除第三条，且排序不改变正文或复活遗漏项。
+@pytest.mark.parametrize("material_repeats", [650, 700])
+def test_existing_budget_selects_candidates_before_optional_ranking(tmp_path, prepared, monkeypatch, material_repeats):
+    records = [replace(record, content="材料" * material_repeats + record.entry_id) for record in prepared[2]]
+    # 非HOT完整信封4000字符：两条能入选，第三条须在可选排序之前排除。
+    assert len(memory_context_text(records[:2])) <= _FORMAL_MEMORY_BUDGET_CHARS
+    assert len(memory_context_text(records)) > _FORMAL_MEMORY_BUDGET_CHARS
+    if material_repeats == 650:
+        assert sum(len(record.content) for record in records) <= _FORMAL_MEMORY_BUDGET_CHARS
     host, request = real_host(tmp_path, records, "apply")
     calls = install_backend(monkeypatch)
     routed = SimpleNamespace(receipts=[], findings=[], injected_sections=[])
     result = _formal_memories_for_request(host, request, routed, recall_scope=prepared[3], long_term_memories=host.memory.all(), skip_formal_recall=False)
-    assert len(calls[0].payload("model")["state"]["memories"]) == 2
+    assert len(calls) == 1
+    assert [row["entry_id"] for row in calls[0].payload("model")["state"]["memories"]] == ["m0", "m1"]
     assert [record.entry_id for record in result] == ["m1", "m0"]
-    assert sum(len(record.content) for record in result) == 8000
+    assert [record.content for record in result] == [records[1].content, records[0].content]
+    assert result.omitted_count == 1
+    assert len(memory_context_text(result)) <= _FORMAL_MEMORY_BUDGET_CHARS
 
 
 def test_configuration_disabled_during_source_refresh_rejects_old_order(tmp_path, prepared, monkeypatch):

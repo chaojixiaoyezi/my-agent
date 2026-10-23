@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TextIO
 
 GATEWAY_HANG_DUMP_FILENAME = "gateway_hang_dump.log"
+# 触发网关 GC 停顿诊断日志的耗时阈值。
 GC_PAUSE_LOG_SECONDS = 1.0
 _PROC_ROOT = Path("/proc")
 _STATUS_FIELDS = frozenset({"State", "VmRSS", "RssAnon", "RssFile", "VmSwap", "Threads", "SigCgt"})

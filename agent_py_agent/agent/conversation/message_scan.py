@@ -16,7 +16,9 @@ from .display_checkpoint import is_display_checkpoint
 from .models import MessageLogEntry
 from .store_io import complete_jsonl_end
 
+# 消息去重索引最多缓存的线程文件数量。
 _MAX_DEDUPE_INDEX_FILES = 64
+# 单个消息文件去重索引最多保留的幂等键数量。
 _MAX_DEDUPE_KEYS_PER_FILE = 16384
 
 

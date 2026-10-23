@@ -27,6 +27,7 @@ from ..user_space.owner_resolver import owner_identity_from_config
 from .input_dependency_index import update_task_input_refs
 
 _TERMINAL_INPUT_STATUSES = frozenset({'ready','cancelled','expired','revoked','failed'})
+# 输入依赖记录进程内缓存的最大条目数。
 _INPUT_DEP_RECORD_CACHE_MAX_ENTRIES_COUNT = 256
 _INPUT_DEP_RECORD_CACHE_LOCK = threading.RLock()
 _INPUT_DEP_RECORD_CACHE: OrderedDict[tuple[str, int, int, int, int, int], dict[str, Any]] = OrderedDict()

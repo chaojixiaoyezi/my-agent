@@ -59,15 +59,16 @@ def directory_projection(context):
                              locations=location_items(context, {"owner_home": home.owner_home_dir, "workspace": workspace}))
 
 
-# LLM: Skill根只消费本人已绑定快照的workspace_root与服务原声明，不跟随工具cwd猜目录，也不触发发现或reload。
-#   多个workspace来源不能被单条旧位置冒称唯一；缺观测只给null，不披露其它owner或父级快照路径。
-# 函数用途: 说明当前方法快照的项目来源位置；未绑定或来源不唯一时回到原skills读口。
+# LLM: Skill根只消费本人已绑定快照的workspace_root与服务原声明，不跟随工具cwd或依赖skills非空，不发现/reload。
+#   只投影该项目标准.agents/skills根，不把兼容根/默认项目/extra根冒称该项目；原路径门仍拒绝其它owner。
+# 函数用途: 说明冻结方法快照的标准项目来源位置；未绑定或原路径门拒绝时保持未观测。
 def _workspace_skill_item(context):
     snapshot = getattr(context.agent, "_current_skill_snapshot", None)
     if snapshot is not None and snapshot.owner_id == context.agent.home_paths.owner_id and snapshot.workspace_root:
         roots = [root.path for root in context.agent.skills_service.base_roots(Path(snapshot.workspace_root)) if root.source == "workspace"]
-        if len(roots) == 1 and _policy(context).check(roots[0]).allowed:
-            return _directory_item("workspace_skills", roots[0], context)
+        primary = Path(snapshot.workspace_root).absolute() / ".agents" / "skills"
+        if primary in roots and _policy(context).check(primary).allowed:
+            return _directory_item("workspace_skills", primary, context)
     return map_item("workspace_skills", "workspace_skills", state="not_observed", fields={
         "path": None, "read_access": None, "write_access": None, "summary": "项目Skill来源位置未观测或不唯一",
         "operation_entry": next_read("self_map", {"section": "skills"})})

@@ -35,11 +35,14 @@ from .skill_learning_publish import (
 from .skill_learning_store import MAX_LEDGER_EVENTS, SkillLearningEvent
 from .skill_snapshot import skill_content_sha256
 
+# 单个用户待确认经验提案队列的软上限。
 MAX_PENDING_PROPOSALS = 20
+# 单个用户待确认经验提案队列的硬上限。
 MAX_OVERFLOW_PROPOSALS = 100
 _ACTIVE = 'proposals'
 _OVERFLOW = 'proposals_overflow'
 _INTENT = ('.proposals-intent.json',)
+# 提案意图恢复记录允许读取的最大字节数。
 _INTENT_BYTES = 65536
 _META = frozenset({'revision','status','created_at_ns','archived_at_ns','superseded_by'})
 

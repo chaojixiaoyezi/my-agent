@@ -479,6 +479,7 @@ def _monitor_until_stopped(supervisor) -> None:
         consecutive_failures = _run_health_check(supervisor, consecutive_failures)
 
 
+# 网关子进程平滑运行后重置重启计数预算的观察窗口。
 RESTART_BUDGET_RESET_SECONDS = 600.0
 
 

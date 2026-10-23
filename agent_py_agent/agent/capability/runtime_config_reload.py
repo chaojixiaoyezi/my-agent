@@ -16,6 +16,7 @@ from .runtime_config_models import CapabilityConfigReloadResult, CapabilityConfi
 _BUNDLED_CAPABILITY_CONFIG_PATH = (Path(__file__).resolve().parents[2] / 'config' / 'capability_config.yaml').resolve()
 _LEGACY_WARNING_CACHE: OrderedDict[tuple, str | None] = OrderedDict()
 _LEGACY_WARNING_CACHE_LOCK = threading.RLock()
+# 旧能力配置告警去重缓存的最大条目数。
 _LEGACY_WARNING_CACHE_MAX_SIZE = 64
 
 DEPLOYMENT_CAPABILITY_KEYS = frozenset({

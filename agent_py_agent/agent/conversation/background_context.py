@@ -484,7 +484,25 @@ def task_scope_decision(
     )
 
 
-# LLM: 任务过滤由一次结构化裁决决定；延后正文在此补齐，普通任务沿原窗口，detached沿创建锚点，错误不空历史。
+# LLM: 仅用结构化事件类型、直属parent和depth排除越级观察；普通观察与缺旧字段兼容，不解析正文或修改原账。
+# 函数用途: 阻止孙代理结果经Recent Observations绕过直属完成结果过滤。
+def _observation_visible_to_task(row: dict[str, Any], task_id: str) -> bool:
+    if not str(row.get("event_type") or "").startswith("subagent_"):
+        return True
+    parent_id = str(row.get("parent_agent_id") or "").strip()
+    if parent_id and parent_id != task_id:
+        return False
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for depth in (row.get("depth"), metadata.get("depth")):
+        try:
+            if int(depth or 0) > 1:
+                return False
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return True
+
+
+# LLM: 任务过滤由一次结构化裁决决定；观察额外排除非直属/深度超过1的子代理；延后正文按原范围补齐，错误不空历史。
 # 函数用途: 把共享会话投影为本次任务视图，避免后来的无关消息串入独立任务。
 def _task_scoped_operational_context(
     state: BackgroundContextLoad,
@@ -518,6 +536,7 @@ def _task_scoped_operational_context(
         row
         for row in _dict_rows(bundle.get("observations"))
         if _context_row_matches_task_ids(row, task_ids)
+        and _observation_visible_to_task(row, decision.task_id)
     ]
     scoped["goals"] = [
         row

@@ -16,6 +16,7 @@ from .config_io import load_simple_yaml
 DEFAULT_RUNTIME_GUARD_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "runtime_guard_config.yaml"
 _RUNTIME_GUARD_RAW_CACHE: OrderedDict[tuple[str, int, int, int, int, int], dict[str, Any]] = OrderedDict()
 _RUNTIME_GUARD_RAW_CACHE_LOCK = threading.RLock()
+# 运行时防护原始配置缓存的最大条目数。
 _RUNTIME_GUARD_RAW_CACHE_MAX_SIZE = 64
 
 

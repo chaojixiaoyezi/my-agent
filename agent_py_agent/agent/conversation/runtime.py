@@ -1302,7 +1302,8 @@ def _invoke_background_main_agent_with_model(
 # objective exists, the objective stays the run's user_prompt (recall, root prompt, compaction), the
 # synthetic wake instruction stays a soft runtime injection, and a typed lifecycle TurnTrigger makes the
 # slice open with a host event instead of a second "# User Task". Other background kinds keep their
-# one-shot prompt and no trigger. Host decisions read the trigger/wake_signal fields, never this prose.
+# one-shot prompt; a generic wake trigger carries only preload identity, not lifecycle presentation.
+# Host decisions read the trigger/wake_signal fields, never this prose.
 # The third item is an agent_core.runtime.turn_trigger.TurnTrigger or None. task_origin is the Goal or scheduler run
 # source already validated by _goal_runtime_context: that id is task-origin, not a historical request, so it
 # never enters origin_request_ids and its objective travels as origin_task. With no request id at all the
@@ -1325,7 +1326,7 @@ def _background_model_inputs(
 
     objective = str(task_objective or "").strip()
     if not _is_active_turn_lifecycle_continuation(request, objective):
-        return str(wake_prompt or ""), [], None
+        return str(wake_prompt or ""), [], _background_tool_preload_trigger(request)
     origin_task_id, origin_objective = task_origin
     wake_ids = _background_active_turn_request_ids(request)
     history_ids = [item for item in wake_ids if item != origin_task_id]
@@ -2044,6 +2045,7 @@ def _run_request(kwargs: dict[str, Any]) -> BackgroundRunRequest:
 
 # LLM: 后台执行使用精确持久任务作为输入回合编号；定时任务保留自己的 run ID，attempt 仍逐次独立。
 #   生命周期续跑的携带记录读不全时，task_attributes 带结构化不完整事实（见 _active_turn_carry_records）。
+#   原因通过typed触发对象独立携带，不能为工具预载把调度正文复制进task_attributes。
 # 函数用途: 构造后台模型参数，按原任务恢复宿主发起人，让插话、归档和续跑共享真实身份。
 def _run_params(
     thread_id: str,
@@ -2082,6 +2084,7 @@ def _run_params(
     return RunParams(
         save=False,
         source="background_main_agent",
+        turn_trigger=_background_tool_preload_trigger(request),
         request_id=scheduler_run_id or request.task_id,
         run_id=scheduler_run_id or request.task_id or f"bg-main-{thread_id}",
         # A conversation thread identifies where this turn runs; it is not a
@@ -2275,10 +2278,28 @@ def _background_lifecycle_wake_snapshot_ids(
     )
 
 
+# LLM: 只取真实唤醒的编号和原因，既不复制metadata也不改变权限；background_wake不匹配生命周期/派活渲染分支。
+#   生命周期和输入恢复仍由_background_model_inputs核验任务正文后决定触发类型，缺正文时不能补造类型。
+# 函数用途: 让工具策略得到后台唤醒原因，同时保留普通后台轮原有提示与推荐行为。
+def _background_tool_preload_trigger(request: BackgroundRunRequest) -> object | None:
+    from ..agent_core.runtime.turn_trigger import TurnTrigger
+
+    wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
+    wake_id = str(wake.get("wake_signal_id") or "").strip()
+    reason = str(request.reason or wake.get("reason") or "").strip().lower()
+    if not wake_id or reason in SUBAGENT_LIFECYCLE_WAKE_REASONS or reason == "task_input_resolved":
+        return None
+    return TurnTrigger(
+        kind="background_wake",
+        reason=reason,
+        wake_signal_id=wake_id,
+    )
+
+
 # LLM: Background wake identity has one authoritative projection into per-turn
 # attributes. Keep generic scheduler ids singular; lifecycle mail additionally
-# LLM: carries the active batch and pre-sampling queue fence used by closeout/safe points.
-#   有明确 wake_signal_id 的真实后台唤醒把结构化唤醒信封与原因带入 background_wake_signal，供首轮工具预载读取。
+# carries the active batch and pre-sampling queue fence used by closeout/safe points.
+#   工具预载仅投影非空的显式工具字段，禁止把唤醒metadata/调度正文复制进DecisionBinding；原因由RunParams独立携带。
 # 函数用途: 把当前后台唤醒及其生命周期邮箱快照写入运行参数。
 def _apply_background_wake_attributes(
     attributes: dict[str, object],
@@ -2292,10 +2313,13 @@ def _apply_background_wake_attributes(
     if not wake_signal_id:
         return
     attributes["background_wake_signal_id"] = wake_signal_id
-    attributes["background_wake_signal"] = {
-        **wake,
-        "reason": lifecycle_reason or str(wake.get("reason") or ""),
+    wake_tools_only = {
+        key: wake[key]
+        for key in ("tool_names", "required_tools", "tool_name")
+        if wake.get(key)
     }
+    if wake_tools_only:
+        attributes["background_wake_signal"] = wake_tools_only
     if not task_id or lifecycle_reason not in SUBAGENT_LIFECYCLE_WAKE_REASONS:
         return
     attributes[CONVERSATION_BACKGROUND_WAKE_SIGNAL_IDS_ATTR] = list(

@@ -2093,7 +2093,7 @@ def _render_todo(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedL
     icon_map = {
         "done": "☑ ",
         "pending": "□ ",
-        "blocked": "⬜ ",
+        "blocked": "☒ ",
         "skipped": "➖ ",
     }
     style_map = {

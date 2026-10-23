@@ -10,8 +10,11 @@ from ...tooling.output_projection import project_tool_output_body
 from ..agent_tree.model_view import agent_tree_model_preview
 from ..orchestration.context.live_summary import orchestration_live_summary as _original_summary
 
+# 工具实时摘要中单段摘录保留的最大字符数。
 _EXCERPT_CHARS = 1200
+# 子代理工具实时摘要保留的最大字符数。
 _AGENT_SUMMARY_CHARS = 8000
+# 进程工具实时摘要保留的最大字符数。
 _PROCESS_SUMMARY_CHARS = 8000
 DOMAIN_TOOLS = frozenset({"run_command", "process_session", "list_agents"})
 

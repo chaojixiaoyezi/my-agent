@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# 尾部行反向分块读取时单次读取的块字节数。
 _BLOCK_BYTES = 8192
 
 

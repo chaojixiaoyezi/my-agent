@@ -15,7 +15,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field, replace
+from dataclasses import MISSING, dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -40,6 +40,7 @@ EVENT_SCHEMA_VERSION = "my-agent.skill-learning-event.v1"
 LEARNED_DIR_NAME = "learned"
 # 学习请求队列最大积压条数。
 MAX_PENDING_REQUESTS = 20
+# 自动总结学习请求队列允许积压的硬上限。
 MAX_OVERFLOW_REQUESTS = 100
 # 单条学习请求最多重试次数。
 MAX_REQUEST_ATTEMPT_COUNT = 2
@@ -536,12 +537,17 @@ class SkillLearningStore:
 
         return load_skill_usage_summary(self)
 
-    # LLM: adopted原权限与claim核验仍由feedback负责；这里只把已确认的采用事实转交统一软失败台账。
+    # LLM: feedback负责adopted权限与claim；显式字段归一为台账参数字典，保留省略值，复用统一软失败写口。
     # 函数用途: 接通现有采用反馈的可选写账钩子，不确认或发布任何Skill内容。
-    def record_skill_usage(self, **event) -> None:
+    def record_skill_usage(
+        self, *, event, skill_id, source, kind="skill",
+        request_id=MISSING, thread_id=MISSING, task_id=MISSING, chars=MISSING,
+    ) -> None:
         from .skill_usage_ledger import record_skill_usage_event
 
-        record_skill_usage_event(self, **event)
+        params = dict(event=event, skill_id=skill_id, source=source, kind=kind,
+                      request_id=request_id, thread_id=thread_id, task_id=task_id, chars=chars)
+        record_skill_usage_event(self, params={key: value for key, value in params.items() if value is not MISSING})
 
     # LLM: 每个发布修订存不可变全文供回滚和在途快照；同编号异内容拒绝，暂不清理仍可能被引用的版本。调用方必须已持 state_lock，
     #   所以用不再取 per-path 锁的原子写，版本目录里不会留下 .lock 文件。副作用：写 versions/<name>/。

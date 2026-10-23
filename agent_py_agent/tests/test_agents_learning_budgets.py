@@ -17,6 +17,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runtime.loop_support import (
     _FORMAL_MEMORY_BUDGET_CHARS,
+    _HOT_MEMORY_CONTENT_BUDGET_CHARS,
     _WORKING_AGREEMENT_SUB_BUDGET_CHARS,
     _budgeted_formal_memories,
 )
@@ -49,6 +50,10 @@ from agent_py_agent.agent.memory_store.promotion import (
     LocalStoreToolEvidenceVerifier,
     MemoryPromotionDependencies,
     MemoryPromotionService,
+)
+from agent_py_agent.agent.prompting_parts.memory_context import (
+    BudgetedMemoryRecords,
+    memory_context_text,
 )
 from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 
@@ -223,17 +228,40 @@ def test_working_agreement_sub_budget_keeps_agreements_within_budget():
     assert [row.entry_id for row in kept] == ["wa-1", "wa-2"]
 
 
+# LLM: 直接调用真实预算入口；非HOT正文能放下但信封超额，输入正文快照防止原地裁剪蒙混过关。
+# 函数用途: 验证独立双池、元数据计量、整条舍弃和输入不变。
 def test_formal_memory_total_budget_still_caps_everything():
-    hot_len = 2000
-    rest_len = _FORMAL_MEMORY_BUDGET_CHARS - hot_len + 500  # 放不下
+    # CTX-09：HOT正文独立封顶，不再与非HOT安全信封共用旧12000字符单池。
+    assert _HOT_MEMORY_CONTENT_BUDGET_CHARS == 5000
+    assert _FORMAL_MEMORY_BUDGET_CHARS == 4000
     rows = [
-        _Row("hot", "热" * hot_len, "hot-1"),
-        _Row("dialogue", "话" * rest_len, "rest-1"),
+        _Row("hot", "热" * 2000, "hot-1"),
+        _Row("hot", "热" * 3000, "hot-2"),
+        _Row("hot", "热", "hot-over"),
+        _Row("dialogue", "话" * 3200, "rest-1"),
+        _Row("dialogue", "话" * 700, "rest-over"),
     ]
+    original_contents = [row.content for row in rows]
+    regular_rows = [row for row in rows if row.kind != "hot"]
+    assert sum(len(row.content) for row in regular_rows) <= _FORMAL_MEMORY_BUDGET_CHARS
+    assert len(memory_context_text(regular_rows)) > _FORMAL_MEMORY_BUDGET_CHARS
 
     kept = _budgeted_formal_memories(rows)
 
-    assert [row.entry_id for row in kept] == ["hot-1"]
+    assert [row.content for row in rows] == original_contents
+    assert [row.entry_id for row in kept] == ["hot-1", "hot-2", "rest-1"]
+    assert sum(len(row.content) for row in kept if row.kind == "hot") == 5000
+    assert kept.omitted_count == 2
+    regular = BudgetedMemoryRecords(
+        [row for row in kept if row.kind != "hot"], omitted_count=kept.omitted_count,
+    )
+    assert len(memory_context_text(regular)) <= _FORMAL_MEMORY_BUDGET_CHARS
+    # 元数据及遗漏提示也必须渲染后计量；保留原对象，不靠截断正文过预算。
+    assert all(row is original for row, original in zip(kept, (rows[0], rows[1], rows[3])))
+    rendered = memory_context_text(kept)
+    assert len(rendered) <= 9500
+    assert len(rendered) < 12000
+    assert '"omitted_record_count":2' in rendered
 
 
 # ---------------------------------------------------------------- 层 3：索引上限

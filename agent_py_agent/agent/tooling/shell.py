@@ -523,6 +523,7 @@ _MAX_BG_LOG_BYTES = (
 _PROCESS_PIPE_DRAIN_SECONDS = 2.0
 # EOF后的退出复探从2ms指数退避到50ms，既不盲等短命令，也不忙轮询长存活父进程。
 _FOREGROUND_EXIT_PROBE_SECONDS = 0.05
+# 前台命令启动后首次探测快速退出的等待时间。
 _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS = 0.002
 
 

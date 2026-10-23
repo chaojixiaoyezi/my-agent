@@ -102,9 +102,11 @@ def _read_wake_signal_payload(path: Path) -> tuple[dict[str, Any] | None, dict[s
         return None, report
 
 
+# 唤醒信号模型进程内缓存的最大条目数。
 _WAKE_SIGNAL_MODEL_CACHE_MAX_ENTRIES_COUNT = 8192
 _WAKE_SIGNAL_MODEL_CACHE_LOCK = threading.Lock()
 _WAKE_SIGNAL_MODEL_CACHE: OrderedDict[str, tuple[dict[str, Any], WakeSignal]] = OrderedDict()
+# 唤醒记录对象进程内缓存的最大条目数。
 _WAKE_OBJ_CACHE_MAX_ENTRIES_COUNT = 512
 
 

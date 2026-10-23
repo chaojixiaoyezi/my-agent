@@ -189,7 +189,7 @@ def background_allowed_tools(
     return list(background_tool_policy_decision(config, request=request).allowed_tools)
 
 
-# LLM: 初次展示取原授权闭包与显式运行上界交集；只读结构化原因/目标，生命周期含创建与直属控制，不解析正文。
+# LLM: 初次展示取原授权闭包与显式运行上界交集；记忆/画像保留续跑可见，打包仍按结构化唤醒预载，不解析正文。
 # 函数用途: 为后台首次模型请求选择所需工具，未展示的允许工具仍能按需发现。
 def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -> frozenset[str]:
     allowed = frozenset(background_allowed_tools(request=request))
@@ -197,7 +197,7 @@ def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -
         allowed &= frozenset(request.allowed_tools)
     if "tool_search" not in allowed:
         return allowed
-    heavy = {"watch_stream", "schedule", "package_build", "package_install", "remember", "update_persona"}
+    heavy = {"watch_stream", "schedule", "package_build", "package_install"}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     targets = set(tool_names(wake.get("tool_names"))) | set(tool_names(wake.get("required_tools")))
     targets.update(tool_names(wake.get("tool_name")))

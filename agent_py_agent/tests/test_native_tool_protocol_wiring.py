@@ -257,6 +257,8 @@ def test_resolve_returns_none_when_no_specs():
     assert resolve_native_tools(agent, params) is None
 
 
+# LLM: 当前OPT-02保留基础工具前缀并有序追加发现项，调用方必须传不可变加载序列而非丢序set。
+# 函数用途: 同时核对实际原生工具顺序与传入Registry的typed发现状态。
 def test_resolve_native_tools_uses_typed_discovery_state():
     agent = _agent(native_supported=True)
     agent.tools = _ProgressiveRegistry()
@@ -273,7 +275,7 @@ def test_resolve_native_tools_uses_typed_discovery_state():
     assert agent.tools.calls == [
         {
             "allowed_tools": None,
-            "loaded_tool_names": {"create_subagents"},
+            "loaded_tool_names": ("create_subagents",),
             "runtime_snapshot": "snapshot",
         }
     ]

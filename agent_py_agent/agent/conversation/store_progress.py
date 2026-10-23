@@ -37,6 +37,7 @@ _NO_PROGRESS_MAX_BACKOFF_MULTIPLIER = 8
 # 调度层传入按 policy_id 确定的退避，连续失败达阈值后停用；成功报告清零。
 # 退休策略不再参与 due 扫描，原失败事实仍保留在 metadata，供应冷却另由进程内组件管理。
 _POLICY_FAILURE_RETIRE_AFTER_COUNT = 3
+# 进度汇报策略对象进程内缓存的最大条目数。
 _POLICY_OBJ_CACHE_MAX_ENTRIES_COUNT = 512
 
 

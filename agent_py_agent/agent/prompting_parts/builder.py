@@ -317,6 +317,7 @@ class PromptBuilder:
         return _workspace_context_text(self, facts_only=facts_only)
 
 
+# 提示词中归属边界与工作区事实共享的字符预算上限。
 _OWNER_WORKSPACE_ENVELOPE_MAX_CHARS = 6_000
 
 
@@ -565,8 +566,8 @@ def _owner_scope_text(builder: PromptBuilder) -> str:
     )
 
 
-# LLM: 目录用途与语义取名只供主会话稳定prefix；task_local由prepare跳过，仍受home_context_enabled控制，不迁移旧文件。
-# 函数用途: 引导助手用目标摘要给业务目录起名并续作旧成果；用户可覆盖整理偏好，但名称不产生权限或任务身份。
+# LLM: 目录及三份人格文件只作稳定prefix导航；task_local由prepare跳过，仍受home_context_enabled控制，不授写权。
+# 函数用途: 引导业务目录取名、续作和人格/记忆入口分工；不迁移旧文件，不绕过专用确认。
 def _home_directory_guide(builder: PromptBuilder) -> str:
     if not bool(getattr(builder.config, "home_context_enabled", True)):
         return ""
@@ -597,7 +598,8 @@ def _home_directory_guide(builder: PromptBuilder) -> str:
         "暂时没有归属的资料可按日期/主题放 inputs/。不要搬动通道的内部存储或随意清理旧成果。\n"
         "- artifacts/ 可放用户明确希望收藏的成品，skills/ 放可复用技能；需要时建立简短索引，"
         "不要为了整理重复复制整份项目。workspace/ 是已有工作空间，继续尊重里面现有结构。\n"
-        "- memory.md、memory-hot.md 和 memory/ 属于记忆系统，不拿运行日志代替长期记忆；"
+        "- SOUL.md 是人格，USER.md 是用户画像，AGENTS.md 是工作约定；"
+        "memory.md、memory-hot.md 和 memory/ 属于记忆系统，不拿运行日志代替长期记忆；"
         "人格与记忆的维护入口见默认提示的人格分工，不通过直接写文件绕过确认。\n"
         "- runs/、agents/、compact/、data/、logs/ 及权限配置是宿主控制记录，不是项目输出目录；"
         "不要编辑它们绕过运行时。目录用途只是软纪律，实际读写仍服从当前用户权限。"

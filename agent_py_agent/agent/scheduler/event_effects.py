@@ -15,7 +15,9 @@ from ..common.json_io import JsonlObjectsReadReport, read_jsonl_objects_report
 from .event_sources import event_run_current
 
 MAX_ACTIVE_EVENT_EFFECTS = 64
+# 调度事件历史报告缓存最多跟踪的文件路径数。
 _HISTORY_REPORT_CACHE_MAX_PATHS = 8
+# 调度事件历史报告缓存允许占用的最大总字节数。
 _HISTORY_REPORT_CACHE_MAX_BYTES = 16 * 1024 * 1024
 _HISTORY_REPORT_CACHE: OrderedDict[str, tuple[tuple[int, ...], tuple[dict, ...]]] = OrderedDict()
 _HISTORY_REPORT_CACHE_LOCK = threading.Lock()

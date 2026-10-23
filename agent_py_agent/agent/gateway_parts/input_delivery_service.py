@@ -52,6 +52,7 @@ from .steer_closeout_replay import (
 
 _INPUT_RECEIPT_SCHEMA = "gateway_input_receipt.v2"
 _RECEIPT_DIR_CACHE_LOCK = threading.Lock()
+# 输入回执目录扫描缓存的最大目录数量。
 _RECEIPT_DIR_CACHE_MAX_COUNT = 32
 _RECEIPT_DIR_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], tuple[str, ...], tuple[Path, ...]]] = OrderedDict()
 _INPUT_RECEIPT_STATES = {
@@ -705,7 +706,9 @@ def _settle_terminal_queued_input(paths: GatewayPaths, receipt: GatewayInputRece
     return "terminal_unknown"
 
 
+# 输入回执定期清理缓存跟踪的最大目录数量。
 _RECEIPT_SWEEP_MAX_DIRECTORY_COUNT = 32
+# 输入回执目录定期清理复查的最小间隔时间。
 _RECEIPT_SWEEP_RECHECK_SECONDS = 60.0
 _RECEIPT_SWEEP_LOCK = threading.Lock()
 
@@ -834,6 +837,7 @@ def reconcile_gateway_input_receipts(
     return summary
 
 
+# 已消费输入回执时间戳缓存的最大条目数。
 _CONSUMED_RECEIPT_STAMP_MAX_ENTRIES = 512
 _CONSUMED_RECEIPT_STAMP_CACHE: OrderedDict[str, tuple[int, int, int, int, int]] = OrderedDict()
 _CONSUMED_RECEIPT_STAMP_LOCK = threading.Lock()

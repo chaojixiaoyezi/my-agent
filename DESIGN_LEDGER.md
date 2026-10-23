@@ -1,3 +1,14 @@
+## 2026-10-23 CTX-09 / TOOL-04、TOOL-05、TOOL-06 / OPT-02 消费者合同对齐（ctxopt-consumer-c4-v2，未完成验收）
+
+- **来源与范围**：07 的 `ctxopt-consumer-c4.md` v2；基于 `40d3c988d6722b22f5ebd72a7344f9c46829b4b3`。本轮只调整 Chat schema 规范化、目录指引、两个记忆消费者测试和预算注释，不改变工具授权、人格写入入口或记忆预算实现。
+- **CTX-09：双池正式记忆**：`agent_py_agent/agent/agent_core/runtime/loop_support.py::_budgeted_formal_memories` 对 HOT 按正文累计最多 **5000 字符**，非 HOT 独立按 `memory_context_text` 渲染的完整安全信封最多 **4000 字符**；工作约定仍有 **2400 字符**子预算。按完整条目保留，不裁正文；预算遗漏数量连同提示计入非 HOT 信封。两项预算常量各自紧邻中文说明。测试覆盖 HOT 刚好填满、HOT/非 HOT 各一条超额、遗漏数量和原对象保留；本测试夹具完整输出不超过 9500 字符且低于旧 12000 单池上限，这不是所有 HOT 元数据组合的全局硬帽。
+- **召回排序消费者**：每条样本改为 `"材料" * 700 + entry_id`，先证明两条完整信封能放进 4000、三条不能，再经真实服务/worker/预算路径（仅供应商调用用合成响应）验证只有 `m0/m1` 进入可选排序、输出为 `m1/m0`，第三条不会被排序复活；遗漏计数与原正文保持。
+- **TOOL-04 / TOOL-05 / TOOL-06：前台展示与发现合同回填**：前台核心工具展示与后台授权闭包分离；工具声明的默认收起只在原 `tool_search` 已授权、可见、可用且未被类别收起时生效，发现入口不折叠，不能找回时放弃额外折叠。`agent_py_agent/agent/tooling/registry.py::ToolSearchTool` 支持 `tool_search(names=[...])` 精确批量加载（1–16 个非空工具名），或 `query` 搜索；`category` 仅约束模糊查询。结果在下一模型回合提供完整原生 schema，在线回执为短卡，原归档保留完整定义；同线程累计并跨 Compact 恢复，每轮重新检查授权，未找到/不可用逐项返回，发现不授予新权限。本轮不修改此工具链。
+- **OPT-02：确定性 schema 与工具序列**：适配器保留上游给出的工具数组顺序，不因名字或推荐另排一遍；`openai_chat.py::_stable_json_object_keys` 将 schema 对象键稳定排序，同层 `properties` 按 `required` 的声明顺序优先，其余参数按名字排序。命名参数/定义允许叫 `properties`，不能把名称当 schema 关键字；新建容器，不改原输入、描述或 `required`/`enum` 等数组。投影与真实发送共用该规范化入口，真实工具/数组换序仍应导致缓存表面变化。
+- **目录指引**：主会话稳定目录提示补齐 `SOUL.md`、`USER.md`、`AGENTS.md` 的分工，仍受既有 Owner+Workspace 6000 字符信封约束；不增加人格文件写权。保留现有 `task_local`/`control_plane` 不采集目录教程的合同，不为满足旧消费者测试而向隔离子域重新注入教程。
+- **当前验证与阻塞**：四个现有消费者文件实跑 **108 passed / 1 failed**；剩余失败是 `test_owner_home_workspace.py:119` 要求 task-local 含目录教程，与 `test_ctxopt_prompt_persona.py:86` 的相反要求冲突。补充四文件回归 **132 passed / 7 failed**，七项均是 `test_c4_batch2_probes.py` 仍要求 properties 保持插入顺序，与本次确定性排序合同冲突；该测试不在修改白名单。Ruff 与 strict code-size 已通过。`test_constants_catalog.py` 为 **9 passed / 2 failed**：目录 1040 项、源码扫描 1097 项，另有 52 个不合规常量；生成目录及其他模块不在本轮白名单，未改写它们。
+- **验收命令与后续**：按派单九文件 pytest 命令实跑，因缺少 `tests/test_context_pressure_and_cache.py` 收集失败（exit 4）；其余根 `tests/` 下的 `test_prompt_layer_budgets.py`、`test_delta_signoff_edges.py`、`test_context_opt_p1_fixes.py`、`test_context_opt_final_freeze_fixes.py` 也不存在。不得把补充回归称作这五项冻结验收通过。07 需提供准确冻结测试，并统一两组冲突断言/授权相应文件后，重跑派单矩阵、`ruff check` 和 `python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`，全部满足再提交；不合并、不推送、不部署。
+
 ## 2026-10-22 线上性能归因四项达标与网关每日重启/卡死事故治理（.7 已实现）
 
 - **每条命令沙箱与前台进程组开销收敛（目标 `< 1.0s`）**：`sandbox.py` 缓存保护目标扫描与 macOS Seatbelt / Linux `bwrap` 参数探针；新增 `sandbox_full_access_other_owner_homes`（默认 `"read_only"`），在 `full_access` 模式下不再对数十个其他 Owner Home 做全目录深度快照，仅对存在且非本 Owner 的目录挂载 `--ro-bind`；`shell.py` 前台正常退出且进程组无残留子进程时跳过固定 `150ms` 轮询等待；`managed_operation_store.py` 正常执行跳过冗余 `list_blocking_operations` 全表扫描。

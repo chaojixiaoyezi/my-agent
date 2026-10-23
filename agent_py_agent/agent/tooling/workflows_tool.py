@@ -70,12 +70,13 @@ def _skill_descriptor(owner_home, skill_id, *, workspace_root=None, skill_snapsh
                                      workspace_root=workspace_root, skill_snapshot=skill_snapshot)
 
 
-# LLM: 只用于显式只读preview，缺Skill仍抛错；正文先脱敏再截断，不把摘要当成业务分析。
+# LLM: 只用于只读preview，显式传递workspace_root与skill_snapshot范围；正文先脱敏再截断，缺Skill仍抛错。
 # 函数用途: 为一个分析步骤生成200字以内的静态技能预览。
-def _analysis_summary(step, resolved_skills, context, *, owner_home, **options):
+def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_root=None, skill_snapshot=None):
     summaries = []
     for skill_id in resolved_skills:
-        descriptor = _skill_descriptor(owner_home, skill_id, **options)
+        descriptor = _skill_descriptor(owner_home, skill_id,
+                                       workspace_root=workspace_root, skill_snapshot=skill_snapshot)
         safe = redact_bearer_values(descriptor)
         _, body = split_skill_frontmatter(safe.get('body_markdown', ''))
         summaries.append({key: safe.get(key, '') for key in ('id', 'name', 'summary')} | {

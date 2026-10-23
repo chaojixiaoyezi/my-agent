@@ -82,12 +82,17 @@ _MAX_PROMPT_CHARS = 32_000
 _MAX_SKILL_REFS_COUNT = 32
 # 手动派活默认推迟 2 秒再入队：给调用方一个可确认的窗口，避免同一时刻重复派发。
 _MANUAL_DISPATCH_DELAY_SECONDS = 2.0
+# 调度仓库单个状态文件允许缓存的最大字节数。
 _STORE_PAYLOAD_CACHE_MAX_BYTES = 4 * 1024 * 1024
+# 调度仓库状态缓存定期复核磁盘的最小间隔时间。
 _STORE_PAYLOAD_CACHE_RECHECK_SECONDS = 60.0
 
 _LOGGER = logging.getLogger(__name__)
+# 调度历史运行 ID 集合缓存最多跟踪的文件路径数。
 _HISTORY_RUN_IDS_CACHE_MAX_PATHS = 32
+# 单个调度历史文件最多缓存的运行 ID 数量上限。
 _HISTORY_RUN_IDS_CACHE_MAX_IDS = 1_000_000
+# 校验调度历史文件首尾锚点时读取的字节数。
 _HISTORY_RUN_IDS_ANCHOR_BYTES = 4096
 _HISTORY_RUN_IDS_CACHE_LOCK = threading.Lock()
 

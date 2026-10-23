@@ -50,7 +50,8 @@ _TERMINAL_PROJECTION_FULL_RESCAN_SECONDS = 3600.0
 _TERMINAL_CANDIDATES_CACHE: dict[
     Path, tuple[tuple[int, int], tuple[Path, ...], tuple[str, ...]]
 ] = {}
-_TERMINAL_CANDIDATES_CACHE_MAX = 32
+# 网关终态请求目录候选列表缓存的最大目录数。
+_TERMINAL_CANDIDATES_CACHE_MAX_COUNT = 32
 _ACTIVE_TURN_RECOVERY_SCHEMA = "gateway_active_turn_recovery.v1"
 GATEWAY_SAFE_RESTART_CAUSE = "gateway_safe_restart"
 # 续跑次数用完时请求收口的错误码（登记在 contracts.error_taxonomy，恢复动作 request_user_input）。
@@ -641,7 +642,7 @@ def _sorted_terminal_candidates(
     candidates = tuple(sorted(terminal_dir.glob("*.json"), key=lambda item: item.name))
     names = tuple(item.name for item in candidates)
     if directory_stamp is not None:
-        if len(_TERMINAL_CANDIDATES_CACHE) >= _TERMINAL_CANDIDATES_CACHE_MAX and terminal_dir not in _TERMINAL_CANDIDATES_CACHE:
+        if len(_TERMINAL_CANDIDATES_CACHE) >= _TERMINAL_CANDIDATES_CACHE_MAX_COUNT and terminal_dir not in _TERMINAL_CANDIDATES_CACHE:
             _TERMINAL_CANDIDATES_CACHE.pop(next(iter(_TERMINAL_CANDIDATES_CACHE)), None)
         _TERMINAL_CANDIDATES_CACHE[terminal_dir] = (directory_stamp, candidates, names)
     else:

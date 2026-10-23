@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 import tempfile
+from dataclasses import replace
+
+import pytest
 
 from agent_py_agent.agent.agent_core.tool_loop.model_turn import request_model_response
 from agent_py_agent.agent.backends import ModelResponse
@@ -83,12 +86,15 @@ def test_tool_search_searches_and_loads_full_specs_in_one_call(tmp_path) -> None
     assert "create_subagents" in names
 
 
-def test_tool_search_schema_has_only_query_and_limit(tmp_path) -> None:
+# LLM: 按当前原生 Schema 核对精确批量与类别筛选，不删除已存在的 query 合同。
+# 函数用途: 防止旧断言把 names/category 或二选一必填约束误判成回归。
+def test_tool_search_schema_supports_query_or_exact_names(tmp_path) -> None:
     agent = _agent(tmp_path)
     schema = agent.tools.tools["tool_search"].model_spec.input_schema
 
-    assert set(schema["properties"]) == {"query", "limit"}
-    assert schema["required"] == ["query"]
+    assert set(schema["properties"]) == {"query", "names", "category", "limit"}
+    assert schema["anyOf"] == [{"required": ["query"]}, {"required": ["names"]}]
+    assert schema["properties"]["names"]["maxItems"] == 16
     assert schema["additionalProperties"] is False
 
 
@@ -202,3 +208,88 @@ def test_native_catalog_does_not_duplicate_provider_schemas(tmp_path) -> None:
     assert "结构化 Schema 为准" in native
     # EXEC-31b: 目录不展开 "[name 分类] 参数" 形式的工具条目
     assert "[filesystem" not in native and "[api" not in native and "[web" not in native
+
+
+# LLM: 使用实际快照生产端与自身目录消费者；冻结之后改注册表不应改变原状态或授权哈希。
+# 函数用途: 区分类别折叠、默认开关关闭与开启，并守住显式授权和已加载工具。
+@pytest.mark.parametrize("categories,enabled,expected", [
+    (["filesystem"], False, "deferred"), ([], True, "deferred"), ([], False, "ready"),
+])
+@pytest.mark.parametrize("scope", [None, ["tool_search", "read_file"]])
+def test_self_context_freezes_real_deferral_policy(tmp_path, monkeypatch, categories, enabled, expected, scope):
+    from agent_py_agent.agent.tooling.self_context import registry_self_context
+
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "home"))
+    agent = _agent(tmp_path, tool_catalog_deferred_categories=categories,
+                   tool_default_deferral_enabled=enabled)
+    registry = agent.tools
+    tool = registry.tools["read_file"]
+    tool.model_spec = replace(tool.model_spec, hints=replace(
+        tool.model_spec.hints, default_deferred=True, deferred_summary="读取文件"))
+    snapshot = registry.runtime_snapshot(allowed_tools=scope)
+    before = registry_self_context(registry, snapshot)["tool_states"]
+    state = next(item["state"] for item in before if item["name"] == "read_file")
+    assert state == ("ready" if scope is not None else expected)
+    assert getattr(snapshot, "deferred_categories", None) == tuple(sorted(categories))
+    assert getattr(snapshot, "default_deferral_enabled", None) is enabled
+    registry.catalog_deferred_categories = [] if categories else ["filesystem"]
+    registry.catalog_default_deferral_enabled = not enabled
+    registry.tools.pop("read_file")
+    assert registry_self_context(registry, snapshot)["tool_states"] == before
+    for field in ("loaded_tool_names", "preloaded_tool_names"):
+        expanded = replace(snapshot, **{field: ("read_file",)})
+        states = registry_self_context(registry, expanded)["tool_states"]
+        assert next(item["state"] for item in states if item["name"] == "read_file") == "ready"
+        assert expanded.snapshot_hash == snapshot.snapshot_hash
+
+
+# LLM: 直接检查完整UTF-8 JSON而非字符数；超长非核心上下文不能挤掉状态、使用入口和发现事实。
+# 函数用途: 证明预算压缩不破坏消费者字段或原始归档对象。
+@pytest.mark.parametrize("large_context", [False, True])
+def test_bounded_manifest_preserves_consumer_facts(large_context):
+    from agent_py_agent.agent.tooling.registry import _bounded_live_manifest
+
+    facts = {"usage": {"help": "/help"}, "discovery": {"loaded_tools": ["read_file"]},
+             "tool_states": [{"name": "read_file", "state": "ready"}]}
+    live = {"schema_name": "tool_runtime_manifest_live", "schema_version": 4,
+            "counts": {"available": 80}, "visible_tool_count": 80,
+            "self_context": {**facts, "filesystem": {"path": "中" * (6000 if large_context else 3)}},
+            "tools": [{"name": f"tool_{index}", "purpose": "用" * 90, "description": "用" * 90}
+                      for index in range(80)], "unavailable_tools": [], "detail_ref": "tool_search"}
+    original = json.dumps(live, ensure_ascii=False)
+    result = _bounded_live_manifest(live)
+    assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 12_000
+    assert result["visible_tool_count"] == 80
+    for key, value in facts.items():
+        assert result["self_context"][key] == value
+    assert json.dumps(live, ensure_ascii=False) == original
+
+
+# LLM: 核心事实也可能超预算；超长原因与开放工具数量必须显式标省略，并保留完整归档入口，不改原数据。
+# 函数用途: 防止最后兜底分支在核心字段超大时重新超出UTF-8字节上限。
+@pytest.mark.parametrize("oversized", ["reason", "tool_states", "usage", "discovery"])
+def test_bounded_manifest_reports_oversized_core_facts(oversized):
+    from agent_py_agent.agent.tooling.registry import _bounded_live_manifest
+
+    context = {"tool_states": [{"name": "read_file", "state": "unavailable", "reason": "尚未配置"}],
+               "usage": {"help": "/help"}, "discovery": {"loaded_tools": ["read_file"]}}
+    if oversized == "reason":
+        context["tool_states"][0]["reason"] = "中" * 6000
+    elif oversized == "tool_states":
+        context["tool_states"] = [{"name": f"plugin_{index}", "state": "ready"} for index in range(1000)]
+    else:
+        context[oversized]["large_fact"] = "中" * 6000
+    live = {"schema_name": "tool_runtime_manifest_live", "schema_version": 4,
+            "counts": {"available": len(context["tool_states"])}, "visible_tool_count": len(context["tool_states"]),
+            "self_context": context, "tools": [], "unavailable_tools": []}
+    original = json.dumps(live, ensure_ascii=False)
+    result = _bounded_live_manifest(live)
+    assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 12_000
+    assert result["counts"] == live["counts"] and result["visible_tool_count"] == live["visible_tool_count"]
+    assert set(result["self_context"]) >= {"tool_states", "usage", "discovery"}
+    assert result["details_omitted"] and result["self_context_omitted"]
+    assert "read_artifact" in result["detail_policy"]
+    if oversized == "reason":
+        assert result["self_context"]["tool_states"][0]["name"] == "read_file"
+        assert result["self_context"]["tool_states"][0]["state"] == "unavailable"
+    assert json.dumps(live, ensure_ascii=False) == original

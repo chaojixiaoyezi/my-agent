@@ -3,8 +3,8 @@
 
 锁定：子代理整合续跑（subagent_integration）和其它后台 profile 的候选目录里都有 package_build、package_install，并带中文动作说明；
 本机管理员主代理按这份目录生成的续跑工具快照里两个工具都在（第 8 步那次的快照里没有，连续 TOOL_UNAVAILABLE 后回合被停）；
-续跑继承当前主链的发现入口；非管理员 owner 没注册这两个工具，目录里的名字不授予任何东西；进了续跑必需集合的工具不再默认收起
-（已知代价），skill_summarize 仍然收起。
+续跑继承当前主链的发现入口；非管理员 owner 没注册这两个工具，目录里的名字不授予任何东西；后台授权闭包不强制前台直出，
+打包工具和 skill_summarize 在前台仍然收起。
 """
 from __future__ import annotations
 
@@ -50,9 +50,18 @@ def test_every_background_profile_offers_them_but_other_owners_get_nothing(tmp_p
     assert all(snapshot.runtime(name) is None for name in _PACKAGE_TOOLS), "目录里的名字不授权，非管理员照旧没有"
 
 
-def test_continuation_required_tools_are_no_longer_folded(tmp_path, monkeypatch):
+# LLM: TOOL-04区分执行授权与前台展示；后台显式上界不丢工具，前台通过原发现链恢复同一Schema。
+# 函数用途: 验证打包工具保留后台授权且默认不占前台原生工具表。
+def test_continuation_required_tools_remain_authorized_but_folded_in_foreground(tmp_path, monkeypatch):
     agent = _agent(tmp_path, monkeypatch)
     assert _PACKAGE_TOOLS <= BACKGROUND_CONTINUATION_REQUIRED_TOOLS
     visible = {spec.name for spec in agent.tools.model_visible_specs()}
-    assert visible >= _PACKAGE_TOOLS, "进了续跑必需集合就始终直出（用户定的代价）"
+    assert not visible & _PACKAGE_TOOLS, "后台授权闭包不决定前台展示"
+    snapshot = agent.tools.runtime_snapshot(allowed_tools=sorted(BACKGROUND_CONTINUATION_REQUIRED_TOOLS))
+    assert snapshot.available_tool_names >= _PACKAGE_TOOLS
+    found = agent.tools.tools["tool_search"].execute({"names": sorted(_PACKAGE_TOOLS)})
+    assert found.ok
+    loaded = found.result_envelope["tool_search"]["loaded_tool_names"]
+    assert set(loaded) == _PACKAGE_TOOLS
+    assert {spec.name for spec in agent.tools.model_visible_specs(loaded_tool_names=loaded)} >= _PACKAGE_TOOLS
     assert "skill_summarize" not in visible, "总结工具不在后台目录里，照旧默认收起"

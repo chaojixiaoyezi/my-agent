@@ -31,8 +31,11 @@ from .store_io import (
 )
 from .store_layout import ConversationStorage
 
+# 会话线程元数据进程内缓存的最大条目数。
 _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT = 16384
+# 单条会话线程元数据允许进入缓存的最大字节数。
 _THREAD_RECORD_CACHE_MAX_RECORD_BYTES = 64 * 1024
+# 会话线程元数据进程内缓存允许占用的总字节数上限。
 _THREAD_CACHE_MAX_TOTAL_BYTES = 32 * 1024 * 1024
 _THREAD_RECORD_CACHE_LOCK = threading.Lock()
 

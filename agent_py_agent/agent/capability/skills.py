@@ -16,9 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+# 单个 Skill 文件允许读取的最大字节数上限。
 MAX_SKILL_BYTES = 4 * 1024 * 1024
+# 技能元数据头部允许的最大UTF-8字节数。
 MAX_FRONTMATTER_BYTES = 256 * 1024
-MAX_FRONTMATTER_DEPTH = 32
+# 技能元数据映射和列表允许的最大嵌套层数。
+MAX_FRONTMATTER_DEPTH_COUNT = 32
+# 兼容现有调用方的旧导入名，数值及生产读取点统一使用带单位的新常量。
+MAX_FRONTMATTER_DEPTH = MAX_FRONTMATTER_DEPTH_COUNT
 _LIST_FIELDS = ("tags", "platforms", "capabilities", "tools_required")
 
 
@@ -60,13 +65,14 @@ class SkillCard:
         return "\n".join(parts)
 
 
-# LLM: 卡片和资产使用同一codec，require_frontmatter仍仅校验卡片必填字段。
+# LLM: 卡片和资产使用同一codec；缺省分类由发现根传入，仅空值使用，显式general、零和布尔值仍优先。
 # 函数用途: 从明确路径有界读取Skill Card，不执行正文。
 def parse_skill_file(
     path: str | Path,
     *,
     source: str = "workspace",
     require_frontmatter: bool = False,
+    default_category: str = "general",
 ) -> SkillCard:
     """从 `SKILL.md` 解析轻量 Skill Card。"""
 
@@ -80,12 +86,13 @@ def parse_skill_file(
             raise ValueError("missing frontmatter field: description")
     name = str(meta.get("name") or skill_path.parent.name).strip()
     description = str(meta.get("description") or _first_paragraph(body) or name).strip()
+    category = meta.get("category")
     return SkillCard(
         name=name,
         description=description,
         path=skill_path,
         when_to_use=str(meta.get("when_to_use", "")).strip(),
-        category=str(meta.get("category", "")).strip() or "general",
+        category=(str(category).strip() if category is not None else "") or default_category,
         platforms=_as_list(meta.get("platforms")),
         scope=str(meta.get("scope", "workspace")).strip() or "workspace",
         tags=_as_list(meta.get("tags")),
@@ -336,7 +343,7 @@ def _yaml_folded_text(values, *, quote=""):
 # LLM: 容器递归与深度受限，键先规范再检查重复，不构造YAML对象。
 # 函数用途: 解析一个缩进层的映射或列表。
 def _yaml_block(tokens, index, indent, depth=0):
-    if depth > MAX_FRONTMATTER_DEPTH:
+    if depth > MAX_FRONTMATTER_DEPTH_COUNT:
         raise ValueError("Skill YAML嵌套过深")
     sequence = tokens[index][1] == "-" or tokens[index][1].startswith("- ")
     result = [] if sequence else {}
@@ -379,7 +386,7 @@ def _yaml_item(tokens, index, indent, value, depth):
 # LLM: 引号始终是文本，流容器有界递归；明确拒绝tag、anchor、alias及合并键。
 # 函数用途: 解析安全字符串、有限数字、布尔、空值和流容器。
 def _yaml_scalar(value, depth=0):
-    if depth > MAX_FRONTMATTER_DEPTH:
+    if depth > MAX_FRONTMATTER_DEPTH_COUNT:
         raise ValueError("Skill YAML嵌套过深")
     if value.startswith("'"):
         if not re.fullmatch(r"'(?:[^']|'')*'", value, flags=re.DOTALL):
@@ -441,7 +448,7 @@ def _yaml_flow_parts(value, depth):
             continue
         if char in "[{":
             stack.append(char)
-            if depth + len(stack) > MAX_FRONTMATTER_DEPTH:
+            if depth + len(stack) > MAX_FRONTMATTER_DEPTH_COUNT:
                 raise ValueError("Skill YAML嵌套过深")
             index += 1
             continue

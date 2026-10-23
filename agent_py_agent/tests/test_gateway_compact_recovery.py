@@ -222,6 +222,8 @@ def test_initial_compact_precedes_model_adoption_and_rejection_baseline(tmp_path
     assert thread.compact_generation == 1
 
 
+# LLM: 合成固定输入补足默认提示缩短的差额，保持原15K窗口/触发线/预留输出与全部换模断言。
+# 函数用途: 验证无可压缩来源且已过触发线时仍能采用大模型。
 def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core.model.context_pressure import (
         model_request_input_ceiling,
@@ -230,6 +232,7 @@ def test_initial_without_compactable_source_can_adopt_larger_model(tmp_path, mon
     from agent_py_agent.agent.agent_core.tool_request_projection import project_tool_loop_request
 
     fixture = actual_request(tmp_path, original_window=15_000)
+    fixture.agent.config.system_prompt += "\n" + "a" * 6_000
     fixture.agent.config.memory_compact_auto_trigger_percent = 50
     decision = install_backend(monkeypatch, fixture)
     evaluated = []

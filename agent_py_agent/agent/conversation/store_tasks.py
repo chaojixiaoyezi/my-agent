@@ -124,6 +124,7 @@ def _thread_without_task(
     )
 
 
+# 任务关联索引进程内缓存的最大条目数。
 _TASK_LINK_CACHE_MAX_ENTRIES_COUNT = 32768
 _TASK_LINK_CACHE_LOCK = threading.Lock()
 _TASK_LINK_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], ThreadTaskLink]] = OrderedDict()

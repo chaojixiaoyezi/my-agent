@@ -315,11 +315,14 @@ def test_mixed_recovery_commits_both_sources_and_sends_selected_wire(tmp_path, m
         assert "OTHER_SCOPE_SECRET" not in summary_wire
 
 
+# LLM: 只给本用例固定提示补合成填充，保留长工具原文与16K窗口；联合替换、收缩和真实发送断言不变。
+# 函数用途: 在默认提示精简后仍让仅压对话候选超过输入上限，核对联合恢复路径。
 def test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling(tmp_path, monkeypatch):
     agent, store, thread, request, execution, sink, _ = _mixed_background(
         tmp_path, backend="anthropic_compatible", detached=False, long_source=True,
     )
     agent.config.model_context_window_tokens = 16_000
+    agent.config.system_prompt += "\n" + "a" * 6_000
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     original_project = recovery_core._project_mixed_recovery_material
     original_summary = compact._summarize
@@ -387,7 +390,7 @@ def test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling(
     assert len(selected) == 1
     _transcript_only, mixed, candidate = selected[0]
     # 前提看第一次计量（原话备份收缩之前）：只压对话仍超过真实输入上限，必须同时替换工具交接。
-    # 第一次联合候选约 1.43 万 token，远高于恢复目标 9,600，所以一定按超出量缩小原话备份再计量一次，提交更小的那份。
+    # 固定填充让第一次联合候选高于恢复目标9,600，须缩小原话备份后再计量并提交更小候选；下面实测验证。
     # 以前只在收缩能改变判定时才重算，候选离上限只有约 100 token，是否重算取决于上下文里临时路径的长度（CI 必挂）。
     first_transcript_only, first_mixed, _ = measured[0]
     assert first_mixed > policy.recovery_target_tokens

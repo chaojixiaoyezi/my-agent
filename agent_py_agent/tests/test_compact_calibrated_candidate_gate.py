@@ -598,14 +598,16 @@ def _assert_failure_snapshot_is_calibrated(case, sink, expected_before, expected
 
 
 @pytest.mark.parametrize("scenario", ["calibrated_fit", "calibrated_too_large", "no_observation"])
+# LLM: 只调合成输入长度恢复阈值场景，不改生产预算或放宽校准/发送断言；继续走真实Gateway预检。
+# 函数用途: 在默认提示缩短后仍验证候选使用与预检相同的校准口径。
 def test_gateway_recovery_measures_candidates_with_the_preflight_calibration(tmp_path, monkeypatch, scenario):
     case = _gateway_case(tmp_path, monkeypatch, ratio=None if scenario == "no_observation" else _RATIO)
     calibration = _first_turn(case, observed=scenario != "no_observation")
     # 第二回合：大段新需求让完整请求越过上限；候选原始计量也越过上限，只有按观测折算后才可能放下。
-    # 探针实测（2026-09-28，窗口 90K/输出 10K）：6_500 段 → 压缩前原始 ≈ 104K、折算 ≈ 85K，候选原始 ≈ 92K、折算 ≈ 73K；
-    # 11_500 段 → 候选折算 ≈ 103K 仍超上限。两边都离 80K 上限有几千 tokens 余量。
+    # 默认工具延迟展开和提示精简后，增加合成新需求；具体压缩前/候选大小仍由_expected_sizes实测断言。
+    # 保持80K输入上限、0.7校准率，以及「仅校准后放得下/校准后仍超限/无观测」三个场景。
     sink = _ProgressSink()
-    context = _second_turn(case, "材料核对项。" * (11_500 if scenario == "calibrated_too_large" else 6_500), sink)
+    context = _second_turn(case, "材料核对项。" * (11_500 if scenario == "calibrated_too_large" else 8_000), sink)
     fits = scenario == "calibrated_fit"
     if fits:
         assert request_execution._run_gateway_ask(context).response == "资料整理完成。"

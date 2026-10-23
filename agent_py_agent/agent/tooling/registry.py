@@ -61,7 +61,10 @@ _allowed_tool_set = allowed_tool_set
 # record_lesson 只写当前 child run 的经验账本，主线程没有 child run 可归属。
 # 常量用途: 把内部执行器和子代理专属的能力申请、经验记录入口从普通主代理工具面隐藏。
 _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "capability_request", "record_lesson"})
+# 工具推荐检索纳入候选详情的最低匹配得分阈值。
 MIN_RECOMMENDED_TOOL_SCORE = 3.0
+# list_tools 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。
+_LIVE_LIST_TOOLS_MAX_BYTES = 12_000
 
 
 def _agent_config_int(key: str) -> int:
@@ -494,24 +497,35 @@ def _compact_tool_purpose(runtime: ToolRuntime | ToolModelSpec) -> str:
     return re.split(r"(?<=[。！？.!?])\s*|\n", text.strip(), maxsplit=1)[0][:90]
 
 
-# LLM: v4短目录保留同一快照的权限、身份、全部工具及详情入口，短用途与紧凑JSON控制live字节，完整定义留档。
+# LLM: v4短目录保留同一快照的权限、身份、状态/发现事实和必要审批合同；短用途兼容旧消费者，完整定义留档。
 # 函数用途: 从完整 manifest 生成工具短卡目录，全文仍由原输出归档。
 def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntimeSnapshot,
                                 direct_tool_names: set[str]) -> dict[str, object]:
     executable = set(payload.get("executable_tools") or [])
-    compact_tools = [{"name": item["name"], "category": item.get("category", "general"),
-                      "purpose": _compact_tool_purpose(snapshot.runtime(item["name"]))[:36],
-                      "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable"}
-                     for item in payload.get("tools", []) if item["name"] in executable]
+    compact_tools = []
+    for item in payload.get("tools", []):
+        if item["name"] not in executable:
+            continue
+        purpose = _compact_tool_purpose(snapshot.runtime(item["name"]))[:36]
+        compact = {"name": item["name"], "category": item.get("category", "general"),
+                   "purpose": purpose, "description": purpose,
+                   "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable"}
+        approval = (item.get("runtime_policy") or {}).get("approval_policy") or {}
+        if approval.get("always_effects") or approval.get("owner_grant_parameters"):
+            compact["approval_policy"] = {key: approval.get(key) or []
+                                           for key in ("always_effects", "owner_grant_parameters")}
+        compact_tools.append(compact)
+    context = payload.get("self_context") or {}
     live = {
         "schema_name": "tool_runtime_manifest_live",
         "schema_version": 4,
+        "visible_tool_count": len(compact_tools),
         "counts": {"registered": len(snapshot.runtimes), "available": len(executable), "direct": len(direct_tool_names)},
         "snapshot_hash": str(payload.get("snapshot_hash") or ""),
         "permission_mode": str(payload.get("permission_mode") or ""),
         "permission_scope": str(payload.get("permission_scope") or ""),
-        "self_context": {key: value for key, value in (payload.get("self_context") or {}).items()
-                         if key in {"schema_version", "run_id", "owner_type", "scope", "permissions", "identity", "filesystem", "network"}},
+        "self_context": {key: value for key, value in context.items()
+                         if key in {"schema_version", "run_id", "owner_type", "scope", "permissions", "identity", "filesystem", "network", "usage", "discovery"}},
         "unavailable_tools": payload.get("unavailable_tools") or [],
         "tools": compact_tools,
         "detail_ref": "tool_search(names=[需要详情的准确工具名])",
@@ -519,47 +533,102 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
                           "self_map": {"section": "tools", "item": "需要详情的工具名"},
                           "read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
     }
+    live["self_context"]["tool_states"] = [
+        {key: state[key] for key in ("name", "state", "reason", "error_code") if state.get(key)}
+        for state in context.get("tool_states", []) if isinstance(state, dict)]
     return _bounded_live_manifest(live)
 
 
-# LLM: Only the live projection is bounded; canonical manifest and execution authorization stay unchanged.
-# 函数用途: 按完整UTF-8信封计量，省略名卡时保留计数与正式详情入口。
+# LLM: 只压缩live副本，先短用途再省名卡；兜底保留消费者事实，不更改完整manifest或授权，省略必须显式可追溯。
+# 函数用途: 按完整UTF-8信封计量，优先保留状态、使用/发现入口、完整计数与归档引用。
 def _bounded_live_manifest(live: dict[str, object]) -> dict[str, object]:
+    # LLM: 与最终输出使用同一JSON选项，只计量字节，无副作用。
+    # 函数用途: 返回候选live信封的真实UTF-8大小。
     def size(value: object) -> int:
         return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
-    if size(live) <= 12000:
+    if size(live) <= _LIVE_LIST_TOOLS_MAX_BYTES:
         return live
     result = dict(live)
-    result["tools"] = list(live.get("tools") or [])
+    result["tools"] = [dict(item) for item in live.get("tools") or []]
     result["unavailable_tools"] = list(live.get("unavailable_tools") or [])
+    for length in (18, 8):
+        for item in result["tools"]:
+            for key in ("purpose", "description"):
+                if key in item:
+                    item[key] = item[key][:length]
+        if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
+            return result
     omitted = {"tools": 0, "unavailable_tools": 0}
     result["omitted_items"] = omitted
     for key in ("tools", "unavailable_tools"):
-        while result[key] and size(result) > 12000:
+        while result[key] and size(result) > _LIVE_LIST_TOOLS_MAX_BYTES:
             result[key].pop()
             omitted[key] += 1
-    if size(result) <= 12000:
+    if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
         return result
-    return {
+    result = {
         "schema_name": "tool_runtime_manifest_live",
         "schema_version": 4,
         "counts": live["counts"],
+        "visible_tool_count": live["visible_tool_count"],
+        "self_context": {key: value for key, value in (live.get("self_context") or {}).items()
+                         if key in {"tool_states", "usage", "discovery"}},
         "tools": [],
         "unavailable_tools": [],
         "omitted_items": omitted,
         "details_omitted": True,
-        "detail_ref": "self_map(section='tools'); 权限与完整目录读取本次归档",
+        "detail_ref": "tool_search / self_map(section='tools'); 权限与完整目录读取本次归档",
         "detail_policy": {"read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
     }
+    return _bounded_manifest_core(result, size)
 
 
-# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；以最终 specs 中的搜索入口决定折叠，预载不增加权限。
+# LLM: 仅处理仍超预算的核心副本；普通事实原样保留，极端输入显式记录省略数量，完整值仍在本次归档。
+# 函数用途: 先缩长原因、再缩异常大字典，最后限制状态行数，保证最终信封不突破字节预算。
+def _bounded_manifest_core(result: dict[str, object], size: Callable[[object], int]) -> dict[str, object]:
+    if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
+        return result
+    context = dict(result["self_context"])
+    states = [dict(state) for state in context.get("tool_states") or []]
+    context["tool_states"] = states
+    result["self_context"] = context
+    omitted = {"tool_state_details": 0, "tool_states": 0, "usage": 0, "discovery": 0}
+    result["self_context_omitted"] = omitted
+    for state in states:
+        for key in ("reason", "error_code"):
+            value = state.get(key)
+            if isinstance(value, str) and len(value) > 160:
+                state[key] = value[:160] + "…"
+                omitted["tool_state_details"] += 1
+    for key in ("usage", "discovery"):
+        value = context.get(key)
+        if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES or size(value) <= _LIVE_LIST_TOOLS_MAX_BYTES // 4:
+            continue
+        if isinstance(value, dict):
+            context[key] = dict(value)
+            for field in sorted(value, key=lambda name: size({name: value[name]}), reverse=True):
+                if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
+                    break
+                del context[key][field]
+                omitted[key] += 1
+        else:
+            context[key] = None
+            omitted[key] = 1
+    while states and size(result) > _LIVE_LIST_TOOLS_MAX_BYTES:
+        states.pop()
+        omitted["tool_states"] += 1
+    return result
+
+
+# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；无预载子集的显式授权全部直出，后台预载仍沿原折叠链。
 # 函数用途: 生成稳定前缀的原生工具序列，无搜索入口时完整直出原授权工具。
 def _ordered_model_visible_specs(registry: Any, snapshot: ToolRuntimeSnapshot, specs: list[ToolModelSpec],
                                  allowed_tools: list[str] | None, loaded_tool_names: Collection[str] | None):
     from .tool_search_state import ordered_tool_names
 
+    if (allowed_tools is not None or snapshot.allowed_tools is not None) and not snapshot.preloaded_tool_names:
+        return specs
     search = snapshot.runtime("tool_search")
     if (search is None or not search.exposure.model_visible or not search.availability.available
             or not any(spec.name == "tool_search" for spec in specs)):
@@ -572,6 +641,17 @@ def _ordered_model_visible_specs(registry: Any, snapshot: ToolRuntimeSnapshot, s
     direct = {spec.name for spec in base}
     by_name = {spec.name: spec for spec in specs}
     return [*base, *(by_name[name] for name in loaded if name in by_name and name not in direct)]
+
+
+# LLM: 目录沿write_file原配置读取内联上限；保持非法配置的既有默认回退，不写配置或触发执行。
+# 函数用途: 为目录渲染读取write_file的内联字符上限。
+def _registry_write_inline_max_chars(registry: Any) -> int:
+    tool = registry.tools.get("write_file")
+    value = getattr(tool, "max_inline_content_chars", MAX_INLINE_WRITE_CONTENT_CHARS)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return MAX_INLINE_WRITE_CONTENT_CHARS
 
 
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
@@ -672,7 +752,8 @@ class ToolRegistry:
     # LLM: 快照先做硬权限交集，再做无副作用可用性检查；检查异常按不可用 fail-closed。
     #   owner_scope_root 是本 run 的有效 owner 墙（由 path_access_policy.effective_owner_scope_root 算出）；
     #   不传时按注册表自己的墙。它只决定工具说明按哪种读取范围渲染，不改变 schema_hash、snapshot_hash 或任何授权。
-    # 函数用途: 固定一次 Agent run 可见、可搜、可调用的工具事实，供全部工具表面复用。
+    #   同时复制创建时类别/默认折叠策略，self_map不从后续可变注册表重建展示事实。
+    # 函数用途: 固定一次 Agent run 可见、可搜、可调用及展示的工具事实，供全部工具表面复用。
     def runtime_snapshot(
         self,
         *,
@@ -716,6 +797,8 @@ class ToolRegistry:
             allowed_tools=frozenset(allowed) if allowed is not None else None,
             owner_type=self.owner_type,
             catalog_specs=tuple(catalog_specs),
+            deferred_categories=tuple(sorted(self.catalog_deferred_categories)),
+            default_deferral_enabled=bool(self.catalog_default_deferral_enabled),
         )
 
     def close_mcp_clients(self) -> None:
@@ -759,7 +842,7 @@ class ToolRegistry:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         return specs
 
-    # LLM: 展示不改变授权；有搜索入口时 allowlist 也可折叠，缺搜索的叶子全部直出；发现项只追加到稳定基础表后。
+    # LLM: 展示不改变授权；显式allowlist无预载子集时全部直出，后台预载允许折叠；发现项追加到稳定基础表后。
     # 函数用途: 按基础注册顺序与真实发现顺序交付完整原生 Schema。
     def model_visible_specs(
         self,
@@ -847,13 +930,10 @@ class ToolRegistry:
             detail_max_chars=self.tool_detail_max_chars,
         )
 
+    # LLM: 保留原目录调用入口，委托同模块读取器，不改变write_file配置与默认回退。
+    # 函数用途: 读取目录中展示的内联写入上限。
     def _write_inline_max_chars(self) -> int:
-        tool = self.tools.get("write_file")
-        value = getattr(tool, "max_inline_content_chars", MAX_INLINE_WRITE_CONTENT_CHARS)
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return MAX_INLINE_WRITE_CONTENT_CHARS
+        return _registry_write_inline_max_chars(self)
 
     # LLM: 推荐检索只能消费快照 specs，不能把进程级工具重新带回提示词。
     # 函数用途: 在本轮工具范围内查找与查询相关的工具说明。
@@ -1122,12 +1202,12 @@ def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) ->
         )
 
 
-# LLM: allowed 是授权而不是展示豁免；只要原 tool_search 可见就应用宿主展示减法，否则放弃额外折叠。
+# LLM: 自适应折叠不覆盖调用方显式工具表；不改后台预载或原默认折叠策略，发现入口缺失时放弃额外折叠。
 # 函数用途: 当原发现入口被既有目录设置收起时放弃额外折叠，避免把直接工具隐藏后无法找回。
 def _presentation_deferred_names(snapshot: ToolRuntimeSnapshot, deferred_categories: list[str], *,
                                  allowed_tools: list[str] | None = None) -> frozenset[str]:
     names = snapshot.presentation_deferred_names
-    if not names:
+    if not names or allowed_tools is not None or snapshot.allowed_tools is not None:
         return frozenset()
     search = snapshot.runtime("tool_search")
     if search is None or search.model_spec.category in deferred_categories:

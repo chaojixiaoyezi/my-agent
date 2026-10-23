@@ -960,7 +960,9 @@ _TASK_STATUS_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int], str, str]]
 
 # 历史状态只复用60秒，任意手动原地改写不会永久隐形；原子链接替换由目录fp立即失效。
 _HISTORY_REVERIFY_SECONDS = 60.0
+# 平铺目录唤醒扫描在高频轮询下复核目录状态的最小间隔。
 _FLAT_REVERIFY_SECONDS = 1.0
+# 唤醒目录扫描缓存允许保留的最大目录条目数。
 _DIRECTORY_CACHE_MAX_ENTRIES = 4096
 _DIRECTORY_SCAN_LOCK = threading.RLock()
 _LEDGER_DATE_DIR_CACHE: OrderedDict[str, _DirectoryProjection] = OrderedDict()

@@ -137,7 +137,10 @@ def test_self_map_tool_inventory_is_frozen_after_registry_mutation(agent, allowe
 def test_self_map_display_ignores_live_classification(agent, surface):
     registry = agent.tools
     registry.catalog_default_deferral_enabled = True
-    snapshot = registry.runtime_snapshot(allowed_tools=['self_map', 'tool_search', 'read_file', 'workflows'])
+    snapshot = replace(
+        registry.runtime_snapshot(allowed_tools=['self_map', 'tool_search', 'read_file', 'workflows']),
+        allowed_tools=None,
+    )
     if surface != 'direct':
         snapshot = replace(snapshot, presentation_deferred_names=frozenset({'read_file'}))
     if surface == 'loaded':
