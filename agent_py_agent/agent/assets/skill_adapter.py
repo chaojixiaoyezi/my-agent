@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ from typing import Any
 from ..capability.skills import _as_list, skill_catalog_roots, split_skill_frontmatter
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath, write_text_atomic_beneath
-from . import canonical_skill_name, safe_asset_id, valid_skill_reference
+from . import canonical_skill_name, skill_asset_id, valid_skill_reference
 from .descriptor import AssetDescriptor, clean_json
 
 
@@ -59,16 +58,10 @@ def extract_skill_descriptor(skill_dir_or_md_path, owner_id=''):
     return _descriptor(directory, {**_frontmatter(text), **_sidecar(directory)}, owner_id)
 
 
-# LLM: 已合法ID保持原值；非ASCII/特殊名称只派生稳定逻辑ID，不把原名拼成未经验证的路径。
+# LLM: 共用资产键派生，已合法ID保持原值；非ASCII名称绝不直接拼成未验证路径。
 # 函数用途: 为中文、空格等技能目录名生成可供资产协议使用的确定性ID。
 def _skill_id(name):
-    try:
-        return safe_asset_id(name)
-    except ValueError:
-        if not isinstance(name, str) or not name:
-            raise ValueError('Skill名称或ID必须是非空字符串') from None
-        slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', name).strip('_.-')[:72] or 'name'
-        return f'skill_{slug}_{sha256(name.encode("utf-8")).hexdigest()[:16]}'
+    return skill_asset_id(name)
 
 
 # LLM: 特殊目录身份仍从目录派生，列表沿统一schema归一；描述仅去外层空白，保留内部换行。
@@ -178,7 +171,7 @@ def _catalog_projection(descriptor, source, stable_id, content_hash, text, inclu
     return descriptor
 
 
-# LLM: 只读准确路径一次，来源和内容hash不接受正文声明。
+# LLM: 来源和内容hash来自发现事实；稳定引用保留原生Unicode名称，安全资产ID仍从实际目录派生。
 # 函数用途: 从发现文件生成来源固定的资产描述符。
 def _catalog_descriptor(path, source, owner_id, include_body):
     text = _text(path.parent, 'SKILL.md')
@@ -186,7 +179,7 @@ def _catalog_descriptor(path, source, owner_id, include_body):
         raise FileNotFoundError('Skill正文不存在')
     meta = {**_frontmatter(text), **_sidecar(path.parent)}
     descriptor = _descriptor(path.parent, meta, owner_id)
-    name = _skill_id(meta.get('name') or path.parent.name)
+    name = meta.get('name') or path.parent.name
     stable_id = valid_skill_reference(f'{source}:{name}')
     return _catalog_projection(descriptor, source, stable_id, sha256(text.encode('utf-8')).hexdigest(), text, include_body)
 
@@ -213,7 +206,7 @@ def _snapshot_descriptor(home, snapshot, entry, include_body):
     return _catalog_projection(descriptor, entry.source, stable_id, entry.content_sha256, text, include_body)
 
 
-# LLM: enabled_entries是唯一候选集合，空集合保持空；排序只恢复裸名优先级，不新增权限。
+# LLM: enabled_entries是唯一候选集合；别名只来自冻结逻辑名和实际目录，不拿别名拼路径或扩大来源。
 # 函数用途: 投影授权快照并隔离无关损坏条目。
 def _snapshot_descriptors(home, snapshot, requested, include_body):
     priority = {'workspace': 0, 'owner': 1, 'learned': 2, 'shared': 3, 'builtin': 4}
@@ -222,7 +215,8 @@ def _snapshot_descriptors(home, snapshot, requested, include_body):
     for _, entry in entries:
         if not entry.enabled:
             continue
-        aliases = (entry.name, _skill_id(Path(entry.path).parent.name))
+        directory = Path(entry.path).parent.name
+        aliases = (entry.name, directory, _skill_id(directory), _skill_id(entry.name))
         if requested is not None and not _reference_matches(requested, aliases, entry.source):
             continue
         try:
@@ -236,7 +230,7 @@ def _snapshot_descriptors(home, snapshot, requested, include_body):
         yield Path(entry.path).parent.name, descriptor
 
 
-# LLM: 存在快照时只投影快照；普通发现隔离坏文件，指定坏文件则保留cause明确报错。
+# LLM: 有快照时不补扫；普通发现保留原稳定逻辑名、实际目录与安全键别名，来源仍精确匹配。
 # 函数用途: 为列表和详情提供同一有序授权描述符流。
 def _owner_descriptors(owner_home, extra_roots=(), *, workspace_root=None,
                        skill_snapshot=None, requested=None, include_body=False):
@@ -255,6 +249,7 @@ def _owner_descriptors(owner_home, extra_roots=(), *, workspace_root=None,
                 raise ValueError('请求的Skill文件损坏或不可读') from exc
             continue
         aliases += (descriptor['id'], descriptor['name'],
+                    descriptor['metadata']['stable_id'].rsplit(':', 1)[-1],
                     canonical_skill_name(descriptor['metadata']['stable_id']))
         if requested is None or _reference_matches(requested, aliases, source):
             yield path.parent.name, descriptor

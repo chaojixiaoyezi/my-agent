@@ -7,31 +7,55 @@ from ..conversation.tool_discovery import thread_loaded_tools
 from ..settings.reasoning_effort import run_thread_id
 from ..user_space.approval_mode import read_permission_state
 from ..user_space.owner_policy import resolve_effective_owner_policy
-from .models import ToolInvocationContext, ToolRuntimeSnapshot
+from .models import (
+    TOOL_DISCOVERY_ENTRY_NAMES,
+    ToolInvocationContext,
+    ToolRuntimeSnapshot,
+)
 
 
-# LLM: 裸 registry 只能说明实际读到的执行模式，不将 owner_type 误当 ask/auto；可见名称严格限制在本轮允许集合。
+# LLM: 展示只认冻结的原生默认收起标记、额外收起/预载/加载声明；本线程显式加载仍须与快照公开权限求交。
+#   不读取registry的实时分类或默认开关，也不据此改变真实工具注册、Schema或执行权限。
+# 函数用途: 从同一工具快照及已有加载事实生成稳定的公开展开名称集合。
+def _snapshot_model_names(snapshot: ToolRuntimeSnapshot, loaded=()) -> set[str]:
+    names = {runtime.model_spec.name for runtime in snapshot.runtimes if runtime.exposure.model_visible}
+    specs = {spec.name: spec for spec in snapshot.specs if spec.name in names}
+    search = snapshot.runtime('tool_search')
+    if search is None or not search.availability.available or not search.exposure.model_visible:
+        return names
+    deferred = set(snapshot.presentation_deferred_names or ())
+    deferred.update(name for name, spec in specs.items()
+                    if spec.hints.default_deferred and name not in TOOL_DISCOVERY_ENTRY_NAMES)
+    expanded = set(loaded) | set(snapshot.loaded_tool_names) | set(snapshot.preloaded_tool_names)
+    return names - deferred | names.intersection(expanded)
+
+
+# LLM: 工具目录、状态和描述只沿冻结catalog/runtimes；catalog中既不就绪也非不可用的项由快照合同确认为禁用。
 # 函数用途: 为工具合同探针和宿主回调生成共同的目录事实，不读取全局配置或运行工具。
 def registry_self_context(registry, snapshot: ToolRuntimeSnapshot, context: ToolInvocationContext | None = None) -> dict[str, object]:
     available = set(snapshot.available_tool_names)
-    visible = {spec.name for spec in registry.model_visible_specs(runtime_snapshot=snapshot)}
+    visible = _snapshot_model_names(snapshot)
     unavailable = {name: (code, reason) for name, code, reason in snapshot.unavailable_tools}
     scope = snapshot.allowed_tools
+    catalog = {spec.name: spec for spec in snapshot.catalog_specs}
+    for runtime in snapshot.runtimes:
+        if runtime.exposure.model_visible:
+            catalog.setdefault(runtime.model_spec.name, runtime.model_spec)
+    for name in unavailable:
+        catalog.setdefault(name, None)
     states = []
-    for name, tool in registry.tools.items():
-        if (scope is not None and name not in scope) or (scope is None and name in registry.default_hidden_tool_names):
+    for name, spec in catalog.items():
+        if scope is not None and name not in scope:
             continue
-        if name in registry.disabled_tool_names:
-            state, code, reason = 'disabled', 'TOOL_DISABLED', '当前 owner 或部署策略禁用。'
-        elif name in unavailable:
+        if name in unavailable:
             state, (code, reason) = 'unavailable', unavailable[name]
         elif name in available:
             state, code, reason = ('ready' if name in visible else 'deferred'), '', ''
         else:
-            continue
+            state, code, reason = 'disabled', 'TOOL_DISABLED', '当前 owner 或部署策略禁用。'
         item = {'name': name, 'state': state, 'error_code': code, 'reason': reason}
         if state in {'disabled', 'unavailable'}:
-            item['description'] = tool.model_spec.description[:220]
+            item['description'] = spec.description[:220] if spec is not None else ''
         states.append(item)
     try:
         execution = registry.approval_mode_reader() if registry.approval_mode_reader else 'ask'
@@ -47,7 +71,7 @@ def registry_self_context(registry, snapshot: ToolRuntimeSnapshot, context: Tool
                       'resource_authorization': '工具就绪仍须逐次核对具体文件、网络、凭据和通道资源授权。'}}
 
 
-# LLM: composition root绑定agent；文件根来自本调用上下文，read_roots明确为插件cwd范围，builtin读门只列冻结模式/数量。
+# LLM: composition root绑定agent；目录展开只沿冻结声明与本线程加载事实，文件根来自本调用上下文。
 #   不新增披露exact/墙外路径，不热读currentrun重建读权；工具可见与路径裁决仍由原执行器掌握。
 # 函数用途: 为当前本人生成可公开的身份、真实审批来源、文件与网络范围及线程加载事实。
 def tool_self_context(agent, snapshot: ToolRuntimeSnapshot, context: ToolInvocationContext | None = None) -> dict[str, object]:
@@ -76,9 +100,10 @@ def tool_self_context(agent, snapshot: ToolRuntimeSnapshot, context: ToolInvocat
     builtin_roots = (frozen or {}).get("builtin_read_roots")
     builtin_external = (frozen or {}).get("builtin_read_external_roots")
     loaded = thread_loaded_tools(agent, current) if thread_id else set()
+    loaded.update(snapshot.loaded_tool_names)
     loaded.intersection_update(snapshot.available_tool_names)
     states = registry_self_context(registry, snapshot, context)['tool_states']
-    model_names = {spec.name for spec in registry.model_visible_specs(runtime_snapshot=snapshot, loaded_tool_names=loaded)}
+    model_names = _snapshot_model_names(snapshot, loaded)
     for item in states:
         if item['name'] in snapshot.available_tool_names:
             item['state'] = 'ready' if item['name'] in model_names else 'deferred'

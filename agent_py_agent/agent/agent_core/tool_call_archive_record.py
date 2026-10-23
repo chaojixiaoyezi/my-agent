@@ -47,7 +47,7 @@ _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 
 # LLM: 原始输出先按 owner/run 及实际 ToolCall 的 attempt/turn 归档；仅真正外置且未声明保留正文的结果使用预览。
-# 读取器已分页的正文、游标及文件版本必须完整进入 canonical ToolResult；同步检查 reducer、原生历史及外置输出回归。
+# 读取器有界正文完整进入canonical结果；进程外置预览在JSON被截断前保留流头尾，原文及哈希不变。
 # 函数用途: 按本次工具调用的真实身份写入归档并生成安全的模型结果；日志预览不能代替有界正文。
 def archive_tool_output_projection(
     agent: object,
@@ -105,9 +105,12 @@ def archive_tool_output_projection(
     use_preview = bool(output_record.get("output_externalized")) and not bool(
         policy.get("preserve_prompt_output")
     )
+    from .tool_context.live_summary import archive_output_preview
+
     body = project_tool_output_body(
         tool=call.tool_name,
-        output=output_record.get("output_preview", "") if use_preview else outcome.output,
+        output=archive_output_preview(call.tool_name, outcome.output, output_record,
+                                      outcome.result_envelope) if use_preview else outcome.output,
         trust=trust,
         redaction=redaction,
     )

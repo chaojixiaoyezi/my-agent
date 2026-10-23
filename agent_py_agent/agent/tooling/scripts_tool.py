@@ -78,11 +78,16 @@ def _validate(tool, params):
     return None
 
 
-# LLM: 保留领域to_dict版本字段后共用有限JSON安全codec；不序列化可执行对象或非有限数。
-# 函数用途: 把领域结果、dataclass或轻量协议结果变成普通JSON值。
+# LLM: 仅供Store内部继承字段，不脱敏或序列化；展示必须另经_plain，避免把脱敏代码写回磁盘。
+# 函数用途: 无损取得领域对象、dataclass或原字典的数据。
+def _raw(value):
+    return value.to_dict() if hasattr(value, 'to_dict') else asdict(value) if is_dataclass(value) else value
+
+
+# LLM: 只用于模型可见投影，保留领域版本字段并共用有限JSON安全codec，不能作为更新的旧值。
+# 函数用途: 把领域结果转换为脱敏的普通JSON值。
 def _plain(value):
-    value = value.to_dict() if hasattr(value, 'to_dict') else asdict(value) if is_dataclass(value) else value
-    return clean_json(value)
+    return clean_json(_raw(value))
 
 
 # LLM: 两工具共用错误出口；明确提交后读回事实优先于异常类型，进程清理未确认仍保留unknown。
@@ -229,10 +234,10 @@ class ScriptsTool(BaseTool):
                 timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
         raise ValueError('未知脚本action')
 
-    # LLM: update继承未改描述字段与代码，register必须完整；先校验全部声明再委托原子Store。
+    # LLM: update从Store原值无损继承字段和代码，绝不从展示脱敏结果继承；register必须完整。
     # 函数用途: 创建或更新脚本，保留其代码与执行参数。
     def _save(self, params, old):
-        prior = _plain(old) if old else {}
+        prior = _raw(old) if old else {}
         defaults = {key: value for key, value in prior.items()
                     if key not in {'entrypoint', 'interpreter', 'timeout_seconds', 'code', 'entrypoint_path'}}
         descriptor = _descriptor(params.get('descriptor', defaults), params['script_id'], 'script')
@@ -245,10 +250,10 @@ class ScriptsTool(BaseTool):
             raise ValueError('代码必须为文本')
         return _plain(self._store().save_script(descriptor, code, **options))
 
-    # LLM: active候选仅加入显式scope_key，ignored/pending不激活；评估时间由宿主生成。
+    # LLM: 读改写沿Store原值，不把展示脱敏字段回写；active候选仅加入显式scope_key，评估时间由宿主生成。
     # 函数用途: 增删源范围列表并登记候选评估，不启动探测或执行代码。
     def _sources(self, params, old):
-        sources = _plain(old)['data_sources']
+        sources = _raw(old)['data_sources']
         source = next((row for row in sources if row['source_id'] == params['source_id']), None)
         if source is None:
             raise ValueError('数据源不存在')

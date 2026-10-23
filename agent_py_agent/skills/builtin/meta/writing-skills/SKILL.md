@@ -25,10 +25,10 @@ risk_level: low
 ## 按风险选择流程
 
 ### Tier 1：简单任务，普通 Skill（Fast Path）
-目标路径为工作区 `.agents/skills/<name>/SKILL.md` 或用户目录 `<owner_home>/skills/<name>/SKILL.md`。1-2 步直接编写 `frontmatter` 与正文并做一次本地代表性验收；不调用 `create_subagents`、不调用 `package_build`，不强制多子代理失败基线、多阶段确认/审查或大型计划。
+普通文件直写目标为 `<workspace>/.agents/skills/<name>/SKILL.md`，须先确认当前工作区授权。`<owner_home>/skills/<name>/SKILL.md` 是受管 owner 技能目录，不能用 `write_file` 直接写入，也不能换用其它文件工具绕过；需要写入该目录时走宿主受管入口，入口不可用就如实报告。1-2 步直接编写 `frontmatter` 与正文并做一次本地代表性验收；不调用 `create_subagents`、不调用 `package_build`，不强制多子代理失败基线、多阶段确认/审查或大型计划。
 
 ### Tier 2：含脚本、外部接口或复杂业务
-补齐资源、依赖、真实输入与结果验证（可用 `bind_skill` 绑定并先跑 `dry_run` / `preview` 核对结构，再跑真实输入）；按实际边界增加反例，不为形式制造失败实验。
+补齐资源、依赖、真实输入与结果验证（可用 workflows 的 `action="bind_skill"` 绑定并先跑 `action="preview"` 核对结构；仅当正式 schema 声明 `action="validate"` 时才使用该动作，再跑真实输入）；按实际边界增加反例，不为形式制造失败实验。
 
 ### Tier 3：高风险，涉及权限、关键业务或长期运行行为
 保留针对该风险的更强测试、必要独立评审和用户授权，不得绕过适用的机器审批。已有有效授权不重复索取，新风险不能借原授权扩张。

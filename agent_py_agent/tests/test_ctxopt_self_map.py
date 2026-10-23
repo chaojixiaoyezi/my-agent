@@ -94,3 +94,68 @@ def test_child_skill_subset_not_parent_catalog(agent):
     agent._current_skill_snapshot = snapshot.restricted(["owner:2"])
     value = _read(agent, {"section": "skills"}, ["self_map"])
     assert value["capability_families"] == {"future_family": 1}
+
+
+# LLM: FF-08反复使用同一ToolInvocationContext，live registry变化不能改写冻结库存。
+# 函数用途: 核对启停、移除、元数据和默认隐藏变化不影响快照的状态、类别与总数。
+@pytest.mark.parametrize('allowed', [None, ['self_map', 'read_file']])
+@pytest.mark.parametrize('mutation', ['enable', 'disable', 'remove', 'metadata', 'hidden'])
+def test_self_map_tool_inventory_is_frozen_after_registry_mutation(agent, allowed, mutation):
+    registry = agent.tools
+    if mutation == 'enable':
+        registry.disabled_tool_names = registry.disabled_tool_names | {'read_file'}
+    snapshot = registry.runtime_snapshot(allowed_tools=allowed)
+    invocation = ToolInvocationContext(snapshot)
+    tool = registry.tools['self_map']
+    before_result = tool.execute_scoped({'section': 'tools', 'limit': 100}, invocation)
+    assert before_result.ok, before_result.output
+    before = json.loads(before_result.output)
+    if mutation == 'enable':
+        registry.disabled_tool_names = registry.disabled_tool_names - {'read_file'}
+    elif mutation == 'disable':
+        registry.disabled_tool_names = registry.disabled_tool_names | {'read_file'}
+    elif mutation == 'remove':
+        registry.tools.pop('read_file')
+    elif mutation == 'metadata':
+        original = registry.tools['read_file'].model_spec
+        registry.tools['read_file'].model_spec = replace(original, description='changed live',
+            hints=replace(original.hints, category='drifted_live'))
+    else:
+        registry.default_hidden_tool_names = registry.default_hidden_tool_names | {'read_file'}
+    after_result = tool.execute_scoped({'section': 'tools', 'limit': 100}, invocation)
+    assert after_result.ok, after_result.output
+    after = json.loads(after_result.output)
+    assert after['total'] == before['total']
+    assert after['capability_families'] == before['capability_families']
+    assert after['counts'] == before['counts']
+    assert after['items'] == before['items']
+
+
+# LLM: FF-08审查补测固定同一快照及加载事实，只变更live分类和默认折叠开关。
+# 函数用途: 验证展示分类、展开字段及直接/收起计数也严格沿冻结声明。
+@pytest.mark.parametrize('surface', ['direct', 'deferred', 'loaded', 'preloaded'])
+def test_self_map_display_ignores_live_classification(agent, surface):
+    registry = agent.tools
+    registry.catalog_default_deferral_enabled = True
+    snapshot = registry.runtime_snapshot(allowed_tools=['self_map', 'tool_search', 'read_file', 'workflows'])
+    if surface != 'direct':
+        snapshot = replace(snapshot, presentation_deferred_names=frozenset({'read_file'}))
+    if surface == 'loaded':
+        snapshot = replace(snapshot, loaded_tool_names=('read_file',))
+    if surface == 'preloaded':
+        snapshot = replace(snapshot, preloaded_tool_names=('read_file',))
+    context = ToolInvocationContext(snapshot)
+    tool = registry.tools['self_map']
+    result = tool.execute_scoped({'section': 'tools', 'limit': 100}, context)
+    assert result.ok, result.output
+    before = json.loads(result.output)
+    registry.catalog_deferred_categories = [*registry.catalog_deferred_categories, 'filesystem']
+    registry.catalog_default_deferral_enabled = False
+    result = tool.execute_scoped({'section': 'tools', 'limit': 100}, context)
+    assert result.ok, result.output
+    after = json.loads(result.output)
+    assert after['items'] == before['items']
+    assert after['counts'] == before['counts']
+    rows = {row['id']: row for row in after['items']}
+    assert rows['read_file']['state'] == ('deferred' if surface == 'deferred' else 'ready')
+    assert rows['workflows']['state'] == 'deferred'

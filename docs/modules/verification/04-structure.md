@@ -1,3 +1,7 @@
+## 2026-10-23 外置工具归档记录的领域摘要字段
+
+`agent_core/tool_call_archive_record.py::archive_tool_output_projection` 在 `archive_output_record` 中新增可选的 `domain_live_summary`：当输出被外置时，在 `outcome.output` 被替换为 preview 之前由 `tool_context/live_summary.py::build_externalized_live_summary` 基于完整原始输出构建，下游 `tool_context/live_summary.py` 优先读取该字段，不改变归档文件或验证事件结构。
+
 ## 2026-10-21 工具出口耗时遥测接缝
 
 `verification/runtime.py::_record_tool_telemetry` 挂接在唯一工具核验出口 `record_tool_verification` 内：仅当 `agent.home_paths.owner_home_dir` 是已存在的目录时向同 Owner 的 `observability/telemetry_ledger.py::ToolTelemetryLedger` 追加单次调用耗时明细，复用同一 `VerificationContext` 的 `task_id` 与 `owner_ref`，不新增第二条工具执行切面。

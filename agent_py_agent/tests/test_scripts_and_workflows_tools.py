@@ -7,6 +7,107 @@ import json
 import pytest
 
 
+# LLM: FF-04使用真实Store读回代码，展示脱敏不能成为下次持久化的输入。
+# 函数用途: 验证更新超时、描述符或代码时，磁盘代码保持原样且展示仍脱敏。
+@pytest.mark.parametrize('field', ['timeout_seconds', 'descriptor', 'code'])
+def test_script_update_preserves_raw_code_and_redacts_display(tmp_path, api, field):
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+
+    tool = api[0](tmp_path / 'owner')
+    code = 'token = 1\nprint("{}")\n'
+    registered = tool.execute({'action': 'register', 'script_id': 'audit',
+                              'descriptor': descriptor('audit'), 'code': code})
+    assert registered.ok, registered.output
+    replacement = 'token = 2\nprint("new")\n'
+    patch = {'timeout_seconds': 30, 'descriptor': {**descriptor('audit'), 'name': '新说明'},
+             'code': replacement}
+    updated = tool.execute({'action': 'update', 'script_id': 'audit', field: patch[field]})
+    assert updated.ok, updated.output
+    expected = replacement if field == 'code' else code
+    raw = ScriptStore(tool.owner_home).get_script('audit')['code']
+    assert raw == expected
+    compile(raw, '<stored-script>', 'exec')
+    displayed = tool.execute({'action': 'get', 'script_id': 'audit'})
+    assert displayed.ok, displayed.output
+    assert json.loads(displayed.output)['code'] != expected
+    assert '<redacted>' in displayed.output
+
+
+# LLM: FF-11引用实际SkillsService快照；目录ID与逻辑中文稳定引用分别核对。
+# 函数用途: 验证英文目录别名、中文稳定引用及中文真实目录均可保存并绑定工作流。
+@pytest.mark.parametrize('directory,reference', [
+    ('paper-digest', 'paper-digest'), ('paper-digest', 'workspace:论文摘要'),
+    ('论文摘要', '论文摘要'), ('论文摘要', 'workspace:论文摘要'),
+    ('中文目录', '中文目录'), ('中文目录', '论文摘要'), ('中文目录', 'workspace:论文摘要'),
+])
+def test_native_chinese_skill_snapshot_can_save_and_bind(tmp_path, api, directory, reference):
+    from agent_py_agent.agent.assets import safe_asset_id
+    from agent_py_agent.agent.assets.skill_adapter import get_owner_skill_descriptor
+    from agent_py_agent.tests.test_ctxopt_skill_catalog import service
+
+    home, workspace = tmp_path / 'owner', tmp_path / 'workspace'
+    path = workspace / '.agents/skills' / directory / 'SKILL.md'
+    path.parent.mkdir(parents=True)
+    text = '---\nid: paper-digest\nname: 论文摘要\ndescription: 整理每日论文\n---\n生成结构化日报。'
+    path.write_text(text)
+    snapshot = service(home, workspace).snapshot_for()
+    skill = get_owner_skill_descriptor(home, reference, skill_snapshot=snapshot, include_body=True)
+    assert skill['metadata']['stable_id'] == 'workspace:论文摘要'
+    assert skill['body_markdown'] == text
+    assert safe_asset_id(skill['id']) == skill['id']
+    discovered = get_owner_skill_descriptor(home, reference, workspace_root=workspace, include_body=True)
+    assert discovered['metadata']['stable_id'] == skill['metadata']['stable_id']
+    assert discovered['body_markdown'] == text
+    tool = api[1](home, skill_snapshot_provider=lambda: snapshot)
+    definition = {'descriptor': descriptor('audit', 'workflow'), 'steps': [
+        {'step_id': 'judge', 'name': '分析', 'mode': 'llm_skill_analysis', 'skill_ids': [reference]}]}
+    saved = tool.execute({'action': 'save', 'workflow_id': 'audit', 'definition': definition})
+    assert saved.ok, saved.output
+    bound = tool.execute({'action': 'bind_skill', 'workflow_id': 'audit', 'step_id': 'judge', 'skill_id': reference})
+    assert bound.ok, bound.output
+    stored = tool._store().get_workflow('audit')
+    assert stored.steps[0].skill_ids == (reference,)
+    assert all(safe_asset_id(key) == key for key in stored.descriptor.refs.skills)
+    preview = tool.execute({'action': 'preview', 'workflow_id': 'audit'})
+    assert preview.ok, preview.output
+    assert json.loads(preview.output)['steps'][0]['resolved_skills'] == [reference]
+    assert '生成结构化日报' in preview.output
+    assert path.read_text() == text
+
+
+# LLM: 仅放宽Skill逻辑名称，不放宽脚本/工作流磁盘ID或来源命名域。
+# 函数用途: 锁住Unicode稳定引用的合法形状和严格磁盘ID的差别。
+@pytest.mark.parametrize('reference', ['论文摘要', 'workspace:论文摘要', 'owner:中文技能',
+    'shared:共享技能', 'builtin:内置技能', 'learned:历史技能', 'plugin:example:中文技能'])
+def test_unicode_logical_skill_reference_is_not_a_directory_id(reference):
+    from agent_py_agent.agent.assets import (
+        canonical_skill_name,
+        safe_asset_id,
+        valid_skill_reference,
+    )
+    from agent_py_agent.agent.assets.skill_adapter import _skill_id
+
+    assert valid_skill_reference(reference) == reference
+    canonical = canonical_skill_name(reference)
+    assert canonical == _skill_id(reference.rsplit(':', 1)[-1])
+    assert safe_asset_id(canonical) == canonical
+    with pytest.raises(ValueError):
+        safe_asset_id(reference)
+
+
+# LLM: Unicode不允许路径、点穿越、控制字符或静默strip；校验不得清洗身份。
+# 函数用途: 验证不安全Skill引用仍在进入存储前被拒绝。
+@pytest.mark.parametrize('reference', ['workspace:a..b', 'a..b', 'workspace:../x',
+    'workspace:中文/技能', 'workspace:中文\\技能', 'workspace: 中文', 'workspace:中文 ',
+    'workspace:中文\n', 'owner:中\x00文', 'workspace:中\n文', 'workspace:中\t文',
+    'workspace:中:文', 'unknown:中文', ' 论文摘要', '论文摘要 '])
+def test_unicode_skill_reference_rejects_unsafe_identity(reference):
+    from agent_py_agent.agent.assets import valid_skill_reference
+
+    with pytest.raises(ValueError):
+        valid_skill_reference(reference)
+
+
 # LLM: 未实现时用断言报红，不把导入异常当业务证据；接口构造不执行资产。
 # 函数用途: 加载两个工具公共类型供定向测试。
 @pytest.fixture

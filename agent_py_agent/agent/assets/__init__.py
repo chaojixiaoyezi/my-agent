@@ -8,6 +8,7 @@ import os
 import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 
 from ..common.json_io import _flock_descriptor, _funlock_descriptor, locked_json_path
@@ -32,28 +33,48 @@ def safe_asset_id(value):
     return value
 
 
-# LLM: 技能来源是逻辑命名域，不能用于脚本或工作流目录名。
+# LLM: Unicode只用于逻辑名称，绝不代替safe_asset_id作为磁盘路径校验；不strip或清洗身份。
+# 函数用途: 校验中文等原生Skill名称，拒绝分隔符、点穿越和控制字符。
+def _skill_reference_part(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"\w[\w.-]{0,127}", value) or ".." in value:
+        raise ValueError("技能名称必须是1至128位安全逻辑标识符")
+    return value
+
+
+# LLM: 技能来源是逻辑命名域，名称可为Unicode；脚本/工作流目录仍只认严格safe_asset_id。
 # 函数用途: 校验裸技能名和准确来源引用，保留原始身份。
 def valid_skill_reference(value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("技能引用必须是字符串")
     parts = value.split(":")
     if len(parts) == 1:
-        return safe_asset_id(value)
+        return _skill_reference_part(value)
     if len(parts) == 2 and parts[0] in {"owner", "workspace", "shared", "builtin", "learned"}:
-        safe_asset_id(parts[1])
+        _skill_reference_part(parts[1])
     elif len(parts) == 3 and parts[0] == "plugin":
-        safe_asset_id(parts[1])
-        safe_asset_id(parts[2])
+        _skill_reference_part(parts[1])
+        _skill_reference_part(parts[2])
     else:
         raise ValueError("技能引用来源或形状无效")
     return value
 
 
-# LLM: 只去掉已验证来源，不能将任意路径清洗成合法ID。
-# 函数用途: 为展示引用取得安全裸技能名。
+# LLM: 仅为已发现的名称派生安全资产键，不作为外部逻辑引用校验或磁盘路径授权。
+# 函数用途: 为Unicode等名称生成与技能目录投影一致的确定性安全ID。
+def skill_asset_id(name):
+    try:
+        return safe_asset_id(name)
+    except ValueError:
+        if not isinstance(name, str) or not name:
+            raise ValueError('Skill名称或ID必须是非空字符串') from None
+        slug = re.sub(r'[^A-Za-z0-9_.-]+', '_', name).strip('_.-')[:72] or 'name'
+        return f'skill_{slug}_{sha256(name.encode("utf-8")).hexdigest()[:16]}'
+
+
+# LLM: 先校验来源引用，再为AssetRefs派生安全键；步骤仍保留精确逻辑引用，此键不用于猜物理路径。
+# 函数用途: 为工作流依赖摘要取得严格ASCII的技能资产键。
 def canonical_skill_name(value: str) -> str:
-    return valid_skill_reference(value).rsplit(":", 1)[-1]
+    return skill_asset_id(valid_skill_reference(value).rsplit(":", 1)[-1])
 
 
 # LLM: 只表示_write正常返回后的读回失败，不能包装写入自身异常。

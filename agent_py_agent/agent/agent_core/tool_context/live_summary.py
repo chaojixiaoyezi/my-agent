@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from types import SimpleNamespace
 
 from ...tooling.output_projection import project_tool_output_body
 from ..agent_tree.model_view import agent_tree_model_preview
@@ -43,6 +44,16 @@ def orchestration_live_summary(result: object, archive_record: dict[str, object]
     if tool == "list_agents":
         return _agents_summary(result, archive_record)
     return _original_summary(result, archive_record)
+
+
+# LLM: 只对进程JSON在首次截断前做有界投影；不改原文、哈希或信任级别，调用方仍须统一脱敏封装。
+# 函数用途: 从完整回执生成保留真实流尾部的外置预览，其它工具沿原预览。
+def archive_output_preview(tool: str, output: str, record: dict[str, object], handler_details: object) -> str:
+    if tool not in {'run_command', 'process_session'}:
+        return str(record.get('output_preview') or '')
+    result = SimpleNamespace(tool_name=tool, output=output, output_trust='runtime',
+                             metadata={'handler_details': handler_details})
+    return _process_summary(result, record)
 
 
 # LLM: Decode only an exact host-generated external frame (including canonical escaped delimiters).
@@ -124,8 +135,8 @@ def _bounded_detail(value: object, limit: int) -> tuple[object, int]:
     return selected, omitted
 
 
-# LLM: Canonical process metadata outranks body claims; use actual display streams, not the combined receipt's tail.
-#   Nested network/list shapes retain their existing facts; absent process facts are never invented as null.
+# LLM: Canonical metadata outranks body claims; preserve bounded archive previews, counts and omissions on a second projection.
+#   Nested network/list shapes retain existing facts; absent process facts are never invented as null.
 # 函数用途: 归约真实命令和后台各动作，分别保留流尾部及已有网络观察。
 def _process_summary(result: object, record: dict[str, object]) -> str:
     details = getattr(result, "metadata", {}).get("handler_details", {})
@@ -133,14 +144,17 @@ def _process_summary(result: object, record: dict[str, object]) -> str:
     payload = _payload(result)
     if isinstance(payload.get("processes"), list):
         rows = [_process_projection(row) for row in payload["processes"] if isinstance(row, dict)]
-        summary = {"count": len(rows), "processes": []}
+        count = payload.get('count')
+        summary = {"count": count if type(count) is int and count >= len(rows) else len(rows), "processes": []}
         for row in rows:
             candidate = {**summary, "processes": [*summary["processes"], row]}
             if _json_size(candidate) > _PROCESS_SUMMARY_CHARS - 1024:
                 break
             summary = candidate
-        if len(summary["processes"]) < len(rows):
-            summary["omitted_processes"] = len(rows) - len(summary["processes"])
+        prior_omitted = payload.get('omitted_processes')
+        omitted = (prior_omitted if type(prior_omitted) is int and prior_omitted > 0 else 0) + len(rows) - len(summary['processes'])
+        if omitted:
+            summary['omitted_processes'] = omitted
     else:
         process = payload.get("process")
         data = {**payload, **(process if isinstance(process, dict) else {})}
@@ -151,20 +165,22 @@ def _process_summary(result: object, record: dict[str, object]) -> str:
             data.update({key: display[key] for key in ("stdout", "stderr", "capture_complete") if key in display})
         # A parsed receipt is not a log. In particular, stop receipts may contain private cleanup identities.
         summary = _process_projection(data, fallback="" if payload else getattr(result, "output", ""))
-    omissions = {}
+    prior = payload.get('detail_omissions')
+    omissions = {key: value for key, value in prior.items() if key in {'network', 'load_errors'}
+                 and type(value) is int and value > 0} if isinstance(prior, dict) else {}
     for key in ("network", "load_errors"):
         if key in payload:
             budget = max(0, min(2400, _PROCESS_SUMMARY_CHARS - _json_size(summary) - 512))
             summary[key], omitted = _bounded_detail(payload[key], budget)
             if omitted:
-                omissions[key] = omitted
+                omissions[key] = omissions.get(key, 0) + omitted
     if omissions:
         summary["detail_omissions"] = omissions
     summary["output_artifact_ref"] = archive_output_ref(record)
     return json.dumps(summary, ensure_ascii=False, separators=(",", ":"))
 
 
-# LLM: Keep existing status values and timeout distinctions verbatim; output snippets remain external data.
+# LLM: Keep status/timeout distinctions verbatim; preserve output_head_tail from a prior projection as external data.
 # 函数用途: 为一个已有进程对象保留确定字段和独立的标准/错误输出头尾。
 def _process_projection(data: dict, *, fallback: object = "") -> dict:
     summary = {key: data[key] for key in ("status", "session_id", "timed_out", "wait_timed_out",
@@ -173,7 +189,7 @@ def _process_projection(data: dict, *, fallback: object = "") -> dict:
         summary["exit_code"] = data.get("exit_code", data.get("return_code"))
     streams = {key: _head_tail(data[key]) for key in ("stdout", "stderr") if key in data}
     if not streams:
-        streams = {"output_head_tail": _head_tail(data.get("output_tail") or data.get("output")
+        streams = {"output_head_tail": _head_tail(data.get("output_tail") or data.get('output_head_tail') or data.get("output")
                                                 or fallback)}
     summary.update(streams)
     return summary
