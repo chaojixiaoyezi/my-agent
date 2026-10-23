@@ -170,7 +170,7 @@ class WorkflowEngine:
             clock = time.monotonic()
             try:
                 condition = spec.get('condition')
-                if condition and output_value(condition, outputs) != condition['equals']:
+                if condition and output_value(condition, outputs, record.inputs) != condition['equals']:
                     step.status = 'skipped'
                 else:
                     self._perform(step, spec, outputs, definition, record)
@@ -190,23 +190,26 @@ class WorkflowEngine:
             step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
             record = self.store.save_step_result(record.workflow_run_id, step)
             if step.status in ('failed', 'paused_for_resume'):
-                record = replace(record, status=step.status, needs_repair=True, failed_step_id=step.step_id)
+                if not step.needs_repair and step.output_snapshot:
+                    outputs[step.step_id] = payload(step.output_snapshot)
+                record = replace(record, status=step.status, needs_repair=step.needs_repair,
+                                 current_step_id=step.step_id, failed_step_id=step.step_id if step.needs_repair else '')
                 break
             if step.status != 'skipped':
                 outputs[step.step_id] = payload(step.output_snapshot)
         else:
-            record = replace(record, status='succeeded', needs_repair=False, failed_step_id='')
+            record = replace(record, status='succeeded', needs_repair=False, current_step_id='', failed_step_id='')
         record = replace(record, ended_at=time.time(), duration_ms=record.duration_ms + (time.monotonic() - timer) * 1000,
                          final_output=next(reversed(outputs.values()), {}))
         self.store.save_run(record)
         self._record_summary(record)
         return record
 
-    # LLM: 映射只能引用结构化前序输出；传入回调的对象独立复制，不能污染已成功快照。
+    # LLM: 映射只能引用结构化前序输出或$inputs；传入回调的对象独立复制，不能污染已成功快照。
     # 函数用途: 运行一个脚本或技能步骤，混合步骤先采集再分析。
     def _perform(self, record, spec, outputs, definition, run):
         for key, reference in spec.get('inputs_map', {}).items():
-            record.input_snapshot[key] = output_value(reference, outputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
+            record.input_snapshot[key] = output_value(reference, outputs, run.inputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
         if record.mode in ('deterministic_script', 'hybrid'):
             self._script_step(record, spec, run, definition)
             if record.status not in ('succeeded', 'escalated_recovered') or record.mode == 'deterministic_script':
@@ -214,8 +217,8 @@ class WorkflowEngine:
             outputs = {**outputs, record.step_id: payload(record.output_snapshot)}
         self._analysis_step(record, spec, outputs, self._sources(definition))
 
-    # LLM: 冻结数据源只覆盖本运行；兜底须满足原合同，清理未验证硬失败不能被回调覆盖。
-    # 函数用途: 执行脚本并记录结构化修复指引及实际恢复结果。
+    # LLM: 冻结数据源只覆盖本运行；兜底须满足原合同，清理未验证硬失败不能被回调覆盖，_pause_for_resume支持无错确认暂停。
+    # 函数用途: 执行脚本并记录结构化修复指引、主动暂停断点及实际恢复结果。
     def _script_step(self, record, spec, run, definition):
         sources = definition.get('descriptor', definition).get('data_sources')
         options = {'override_data_sources': payload(sources)} if sources or definition.get('_override_data_sources') else {}
@@ -225,6 +228,8 @@ class WorkflowEngine:
         record.status = 'succeeded' if result.ok else 'failed'
         record.needs_repair = not result.ok
         if result.ok:
+            if isinstance(record.output_snapshot, dict) and record.output_snapshot.get('_pause_for_resume') is True:
+                record.status, record.needs_repair = 'paused_for_resume', False
             return
         policy = spec.get('on_error', 'escalate_to_agent')
         record.escalation_result = redact_sensitive_value(payload(result.escalation_context or {}))
@@ -281,7 +286,9 @@ class WorkflowEngine:
         output = payload(self.analysis_handler(payload(spec), payload(outputs), resolved))
         if not isinstance(output, dict):
             raise ValueError('分析回调必须返回 JSON 对象')
-        record.status, record.output_snapshot = 'succeeded', output
+        record.output_snapshot = output
+        record.status = 'paused_for_resume' if output.get('_pause_for_resume') is True else 'succeeded'
+        record.needs_repair = False
 
     # LLM: 新解析器返回权威ID列表；旧三参解析器保留静态与动态合并行为，签名错误不重试执行。
     # 函数用途: 适配步骤/上下文解析协议与既有编号/标签/来源协议。

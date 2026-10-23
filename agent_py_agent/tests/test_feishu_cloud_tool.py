@@ -52,6 +52,10 @@ class _CloudHandler(BaseHTTPRequestHandler):
                 result = {'code': 0, 'data': {'node': {'obj_token': 'other_sheet', 'obj_type': 'sheet'}}}
             elif '/docx/' in self.path:
                 result = {'code': 0, 'data': {'items': body.get('children', []), 'has_more': False}}
+            elif '/metainfo' in self.path:
+                result = {'code': 0, 'data': {'sheets': [
+                    {'sheetId': 'sid', 'title': '资产清单', 'index': 0, 'rowCount': 100, 'columnCount': 10, 'hidden': False}
+                ]}}
             else:
                 result = {'code': 0, 'data': {'valueRange': {'values': self.server.rows}, 'echo': TOKEN + SECRET}}
             if self.server.redirect:
@@ -243,3 +247,29 @@ def test_invalid_or_forged_parameters_never_reach_http(tmp_path, cloud_server, p
     _grant(admin, admin)
     result = execute_registry_test_call(admin.tools, 'feishu_cloud', params, register_with=admin)
     assert not result.ok and not cloud_server.calls
+
+
+def test_sheet_meta_discovers_worksheets_without_range_and_wrong_sheet_lists_candidates(tmp_path, cloud_server):
+    from agent_py_agent.agent.adapter.feishu_cloud import FeishuCloudError
+    from agent_py_agent.agent.user_space.feishu_cloud_authorization import CloudResource
+    from agent_py_agent.agent.user_space.feishu_sheet_authorization import authorize_sheet_write
+
+    admin = _agent(tmp_path, OwnerIdentity.local_main())
+    user = _agent(tmp_path, OwnerIdentity.provider_user('feishu', 'ou_one'))
+    _grant(admin, user, operations=['sheet_read'])
+    meta = _call(user, 'sheet_meta')
+    assert meta.ok, (meta.error_code, meta.output)
+    payload = json.loads(meta.output)
+    assert payload['data']['sheets_summary'] == [
+        {'sheet_id': 'sid', 'title': '资产清单', 'index': 0, 'row_count': 100, 'column_count': 10, 'hidden': False}
+    ]
+    adapter = user.channel_registry.adapter_for('feishu')
+    with pytest.raises(FeishuCloudError) as exc_info:
+        authorize_sheet_write(
+            adapter,
+            CloudResource('sheet', 'sheet_one', 'sheet', 'sheet_one'),
+            {'action': 'sheet_append', 'range': 'Sheet1!A1:B2', 'values': [[1, 2]]},
+            {'source': 'feishu_collaborator', 'permission': 'edit', 'principal_type': 'openid', 'principal_id': 'ou_one'},
+        )
+    assert exc_info.value.reason == 'protection_target_missing'
+    assert 'sid(资产清单)' in str(exc_info.value)

@@ -435,8 +435,9 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         category="permission",
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
-        recovery_hint="目标是宿主运行状态（runtime.db 等权威账本、能力包核验记录），只由宿主写；任务、运行和核验状态请经对应的"
-        "宿主工具改变，不要换别的工具或命令去写。",
+        recovery_hint="目标是宿主运行状态（runtime.db、Owner级 skills/ 目录、能力包核验记录等），只由宿主写；"
+        "项目/工作区普通 Skill 请直接写到 <workspace>/.agent/skills/<skill_id>/SKILL.md（或经 skill_summarize 生成自学习候选）；"
+        "固化脚本与工作流请直接调用 scripts / workflows 工具（切勿对普通 Skill/工作流调用 package_build）；不要换别的工具或命令去写宿主目录。",
     ),
     "PATH_HOST_CREDENTIAL_BLOCKED": ErrorContract(
         code="PATH_HOST_CREDENTIAL_BLOCKED",

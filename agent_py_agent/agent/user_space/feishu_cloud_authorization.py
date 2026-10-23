@@ -9,7 +9,7 @@ from ..adapter.feishu_cloud import FeishuCloudError, request_cloud_api
 from ..capability.channel_message_target import resolve_message_target
 from .resource_grants import resource_operation_allowed
 
-_READ_ACTIONS = frozenset({'sheet_read', 'document_read', 'wiki_resolve'})
+_READ_ACTIONS = frozenset({'sheet_meta', 'sheet_read', 'document_read', 'wiki_resolve'})
 
 
 # LLM: 映射只来自官方 get_node 返回；模型不能提供 canonical token、owner 或 ACL，原输入仅用于准确显式许可匹配。
@@ -50,7 +50,8 @@ def authorize_cloud_resource(agent, adapter, resource: CloudResource, action: st
     mapped_action = _read_action(resource.resource_type) if action == 'wiki_resolve' else action
     if action == 'wiki_resolve' and resource_operation_allowed(home, 'feishu', 'wiki', resource.source_token, action):
         return {'source': 'administrator_grant', 'permission': 'view'}
-    if resource_operation_allowed(home, 'feishu', resource.resource_type, resource.resource_token, mapped_action):
+    if (resource_operation_allowed(home, 'feishu', resource.resource_type, resource.resource_token, mapped_action)
+            or (action == 'sheet_meta' and resource_operation_allowed(home, 'feishu', resource.resource_type, resource.resource_token, 'sheet_read'))):
         return {'source': 'administrator_grant', 'permission': 'view' if action in _READ_ACTIONS else 'edit'}
     if not collaborator_enabled:
         raise FeishuCloudError('CLOUD_RESOURCE_NOT_AUTHORIZED', '当前用户没有此资源的操作许可；管理员可登记准确资源和操作。')

@@ -33,16 +33,18 @@ from .models import (
     TrustedParameterBinding,
 )
 
-_TYPES = {'sheet_read': 'sheet', 'sheet_append': 'sheet', 'sheet_update': 'sheet',
+_TYPES = {'sheet_meta': 'sheet', 'sheet_read': 'sheet', 'sheet_append': 'sheet', 'sheet_update': 'sheet',
           'document_read': 'docx', 'document_append': 'docx', 'wiki_resolve': 'wiki'}
-_READ_ACTIONS = {'sheet_read', 'document_read', 'wiki_resolve'}
+_READ_ACTIONS = {'sheet_meta', 'sheet_read', 'document_read', 'wiki_resolve'}
 
 
 # LLM: schema 与 API 计划共用准确动作；数据只作为供应商载荷，不能成为 owner、凭据、URL 或授权配置。
 # 函数用途: 构造模型可见的准确资源接口，不开放配置或请求头参数。
 def _model_spec() -> ToolModelSpec:
     return ToolModelSpec(name='feishu_cloud', description=(
-        '使用宿主凭据读写本人或当前群已共享的飞书云资源，或管理员准确授权的资源。sheet_read 读范围，sheet_append 追加行，sheet_update 更新范围；'
+        '使用宿主凭据读写本人或当前群已共享的飞书云资源，或管理员准确授权的资源。'
+        'sheet_meta 查询电子表格的所有工作表标签页（返回 sheet_id、title、行列数，未知 sheet_id 时先调此动作，勿盲猜 Sheet1）；'
+        'sheet_read 读范围，sheet_append 追加行，sheet_update 更新范围（多行数据请合并为一次二维 values 批量写入，勿逐行调工具）；'
         'document_read 分页读文档块，document_append 写入文档块；wiki_resolve 返回对象 resource_id/resource_type。'
         '分页结果 next_cursor 对应下一次 page_token。'
         '用 resource_token 传准确编号；知识库链接的节点编号可设 resource_type=wiki，由宿主定位并核验实际对象权限，无需重复人工授权。'
@@ -54,8 +56,8 @@ def _model_spec() -> ToolModelSpec:
             'action': {'type': 'string', 'enum': list(_TYPES)}, 'resource_token': {'type': 'string'},
             'identity': {'type': 'string', 'enum': ['bot', 'user'], 'description': '默认bot使用应用身份；user须当前私人用户已通过feishu_auth本人授权。群资源使用bot。'},
             'resource_type': {'type': 'string', 'description': '可选：wiki 表示传入知识库节点编号；否则与动作对应的 sheet/docx 一致。'},
-            'range': {'type': 'string', 'description': '表格动作必填，sheet_id!A1:C10 或追加范围。'},
-            'values': {'type': 'array', 'items': {'type': 'array', 'items': {}}, 'description': '追加或更新的二维单元格数据。'},
+            'range': {'type': 'string', 'description': 'sheet_read/sheet_append/sheet_update 必填，格式为 sheet_id!A1:C10（未知 sheet_id 时先调 sheet_meta）。'},
+            'values': {'type': 'array', 'items': {'type': 'array', 'items': {}}, 'description': '追加或更新的二维单元格数据（支持多行一次性批量提交）。'},
             'block_id': {'type': 'string', 'description': '文档块父编号，缺省为文档根。'},
             'children': {'type': 'array', 'items': {'type': 'object'}, 'description': 'document_append 必填，飞书文档块对象。'},
             'page_token': {'type': 'string', 'description': 'document_read 分页游标。'},
@@ -77,8 +79,9 @@ def _validate_params(params: dict) -> None:
         raise ValueError('resource_type 与动作不一致。')
     normalized_resource_grant({'provider': 'feishu', 'resource_type': resource_type,
         'resource_token': params.get('resource_token'), 'operations': [action]})
-    if action.startswith('sheet_') and (not isinstance(params.get('range'), str) or not params['range'].strip() or len(params['range']) > 512):
-        raise ValueError('表格动作需要准确 range。')
+    if action in {'sheet_read', 'sheet_append', 'sheet_update'} and (
+            not isinstance(params.get('range'), str) or not params['range'].strip() or len(params['range']) > 512):
+        raise ValueError('表格读写动作需要准确 range（若未知 sheet_id 请先调用 action="sheet_meta"）。')
     if action in {'sheet_append', 'sheet_update'}:
         rows = params.get('values')
         if not isinstance(rows, list) or not rows or len(rows) > 5000 or any(not isinstance(row, list) or not row or len(row) > 100 for row in rows):
@@ -94,6 +97,8 @@ def _validate_params(params: dict) -> None:
 # 函数用途: 将合法调用转换成固定官方 API 路径与 JSON 载荷。
 def _request_plan(params: dict) -> tuple[str, str, dict | None]:
     action, token = params['action'], quote(params['resource_token'], safe='')
+    if action == 'sheet_meta':
+        return 'GET', '/sheets/v2/spreadsheets/' + token + '/metainfo', None
     if action.startswith('sheet_'):
         path = '/sheets/v2/spreadsheets/' + token + '/values'
         if action == 'sheet_read':
@@ -208,6 +213,12 @@ class FeishuCloudTool(BaseTool):
             authorize_sheet_write(adapter, resource, params, authorization)
             result = resource.wiki_data if params['action'] == 'wiki_resolve' else cloud_request(
                 adapter, *_request_plan({**params, 'resource_token': resource.resource_token}))
+            if params['action'] == 'sheet_meta' and isinstance(result, dict) and isinstance(result.get('sheets'), list):
+                result = {**result, 'sheets_summary': [
+                    {'sheet_id': row.get('sheetId'), 'title': row.get('title', ''), 'index': row.get('index'),
+                     'row_count': row.get('rowCount'), 'column_count': row.get('columnCount'), 'hidden': row.get('hidden', False)}
+                    for row in result['sheets'] if isinstance(row, dict) and 'blockInfo' not in row and row.get('sheetId')
+                ]}
             public_authorization = {key: value for key, value in authorization.items() if key != 'principal_id'}
             payload = {'action': params['action'], 'data': result, 'resource_authorization': public_authorization}
             if params['action'] in {'sheet_append', 'sheet_update'}:

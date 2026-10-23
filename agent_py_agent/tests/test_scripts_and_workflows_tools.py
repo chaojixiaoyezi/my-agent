@@ -516,3 +516,99 @@ def test_default_analysis_loads_real_skill_summaries(api, tmp_path):
     assert '先查错误' in row['procedure_preview'] and len(row['procedure_preview']) <= 200
     assert 'test-only-secret' not in row['procedure_preview']
     assert not run['steps'][0]['llm_involved']
+
+
+# LLM: Full Access下run/resume不应反复弹审批，确定性脚本失败标failed而非unknown，仅进程清理未验证保unknown。
+# 函数用途: 回归本地TUI创建脚本与工作流时的审批模式、确定性失败终态与无错暂停契约。
+def test_full_access_approval_and_deterministic_effect_outcomes(api, tmp_path):
+    from agent_py_agent.agent.local_storage import TOOL_OPERATION_FAILED, TOOL_OPERATION_UNKNOWN
+    from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
+    from agent_py_agent.agent.tooling.tool_operation_coordinator import _operation_status_for_result
+    from agent_py_agent.tests._tool_runtime_harness import (
+        canonical_test_call,
+        runtime_snapshot_for_tools,
+    )
+
+    scripts_cls, workflows_cls = api
+    scripts, workflows = scripts_cls(tmp_path), workflows_cls(tmp_path)
+    snapshot = runtime_snapshot_for_tools({'scripts': scripts, 'workflows': workflows}, run_id='r1')
+    policy = ActionPolicy()
+    for tool_name, args in (('scripts', {'action': 'run', 'script_id': 'collect'}),
+                            ('workflows', {'action': 'run', 'workflow_id': 'daily'})):
+        inv = canonical_test_call(snapshot, tool_name, args)
+        auto_decision = policy.decide(ActionPolicyRequest(
+            call=inv, runtime_snapshot=snapshot, workspace_root=tmp_path, approval_mode='auto', require_model_visibility=False))
+        assert auto_decision.status == 'allow'
+        ask_decision = policy.decide(ActionPolicyRequest(
+            call=inv, runtime_snapshot=snapshot, workspace_root=tmp_path, approval_mode='ask', require_model_visibility=False))
+        assert ask_decision.status == 'ask'
+
+    # descriptor 缺省自动补齐 id/kind，且确定性退出返回 effect_outcome='failed' 而非 unknown
+    desc_without_id_kind = {k: v for k, v in descriptor('collect', 'script').items() if k not in ('id', 'kind')}
+    assert scripts.execute({'action': 'register', 'script_id': 'collect', 'descriptor': desc_without_id_kind, 'code': 'import sys; sys.exit(9)'}).ok
+    failed = scripts.execute({'action': 'run', 'script_id': 'collect'})
+    assert not failed.ok and failed.effect_outcome == 'failed'
+    failed.handler_executed = True
+    assert _operation_status_for_result(failed) == TOOL_OPERATION_FAILED
+
+    invalid = scripts.execute({'action': 'register', 'script_id': 'bad', 'descriptor': {'name': 'x'}, 'code': 'pass'})
+    assert not invalid.ok and invalid.effect_outcome == 'not_started'
+    invalid.handler_executed = True
+    assert _operation_status_for_result(invalid) == TOOL_OPERATION_FAILED
+
+    from agent_py_agent.agent.tooling.scripts_tool import _outcome
+    unverified = _outcome('scripts', {'escalation_context': {'cleanup_error': {'errno': 1}}}, False, 'TOOL_EXECUTION_FAILED')
+    unverified.handler_executed = True
+    assert unverified.effect_outcome == 'unknown' and _operation_status_for_result(unverified) == TOOL_OPERATION_UNKNOWN
+
+
+# LLM: 支持$inputs条件分支、_pause_for_resume主动无错暂停及工作区.agent/skills发现。
+# 函数用途: 验证工作流可按初始输入分支并在无错确认点暂停与续跑。
+def test_workflow_inputs_condition_pause_and_workspace_skill_discovery(api, tmp_path):
+    scripts_cls, workflows_cls = api
+    scripts, workflows = scripts_cls(tmp_path), workflows_cls(tmp_path)
+    ws_skill = tmp_path / 'workspace/.agent/skills/paper-digest'
+    ws_skill.mkdir(parents=True)
+    (ws_skill / 'SKILL.md').write_text('---\nid: paper-digest\nname: 论文摘要\ndescription: 整理每日论文\n---\n生成结构化日报。')
+
+    call(scripts, 'register', script_id='recommend', descriptor={
+        'name': '推荐模型', 'access_targets': [], 'data_sources': [], 'credential_refs': [],
+        'io_contract': {'inputs': [], 'outputs': ['selected_model']}},
+        code='import json; print(json.dumps({"selected_model": "qwen-7b", "_pause_for_resume": True}))')
+    call(scripts, 'register', script_id='deploy', descriptor={
+        'name': '部署模型', 'access_targets': [], 'data_sources': [], 'credential_refs': [],
+        'io_contract': {'inputs': ['model'], 'outputs': ['deployed']}},
+        code='import json, sys; d=json.load(sys.stdin); print(json.dumps({"deployed": d.get("model") or d.get("selected_model")}))')
+
+    wf_def = {
+        'descriptor': {'name': '按需确认部署', 'access_targets': [], 'data_sources': [], 'credential_refs': [], 'io_contract': {}},
+        'body_markdown': '# 流程\n',
+        'steps': [
+            {'step_id': 'ask_model', 'name': '推荐并等待确认', 'mode': 'deterministic_script', 'script_id': 'recommend',
+             'condition': {'step_id': '$inputs', 'key': 'model', 'equals': ''}},
+            {'step_id': 'summarize', 'name': '技能分析', 'mode': 'llm_skill_analysis', 'skill_ids': ['paper-digest']},
+            {'step_id': 'run_deploy', 'name': '执行部署', 'mode': 'deterministic_script', 'script_id': 'deploy',
+             'inputs_map': {'model': {'step_id': '$inputs', 'key': 'model'}}},
+        ],
+    }
+    call(workflows, 'save', workflow_id='deploy_flow', definition=wf_def)
+
+    # 1) 未指定 model：在 ask_model 主动无错暂停（ok=True, status='paused_for_resume', needs_repair=False）
+    paused_outcome = workflows.execute({'action': 'run', 'workflow_id': 'deploy_flow', 'inputs': {}})
+    assert paused_outcome.ok, paused_outcome.output
+    paused = json.loads(paused_outcome.output)
+    assert paused['status'] == 'paused_for_resume' and paused['needs_repair'] is False
+    assert paused['current_step_id'] == 'ask_model' and paused['failed_step_id'] == ''
+    assert paused['final_output']['selected_model'] == 'qwen-7b'
+
+    # 确认后续跑：注入 patched_step_output 后继续执行 summarize（发现 workspace/.agent/skills）与 run_deploy
+    resumed = call(workflows, 'resume', workflow_run_id=paused['workflow_run_id'], patched_step_output={'selected_model': 'qwen-14b'})
+    assert resumed['status'] == 'succeeded'
+    assert resumed['steps'][1]['resolved_skill_ids'] == ['paper-digest']
+    assert resumed['steps'][1]['output_snapshot']['skill_summaries'][0]['name'] == '论文摘要'
+
+    # 2) 已指定 model：跳过 ask_model，一次跑完无需暂停
+    direct = call(workflows, 'run', workflow_id='deploy_flow', inputs={'model': 'deepseek-r1'})
+    assert direct['status'] == 'succeeded'
+    assert [s['status'] for s in direct['steps']] == ['skipped', 'succeeded', 'succeeded']
+    assert direct['final_output'] == {'deployed': 'deepseek-r1'}

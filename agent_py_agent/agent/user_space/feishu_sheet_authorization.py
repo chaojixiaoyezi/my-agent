@@ -51,7 +51,10 @@ def _sheet_protections(adapter, token: str, sheet_id: str) -> list[dict]:
         raise _unknown('工作表清单编号无效或重复；请核对元数据 API 响应。', reason='protection_metadata_invalid')
     matched = [row for row in sheets if row.get('sheetId') == sheet_id]
     if len(matched) != 1 or 'blockInfo' in matched[0]:
-        raise _unknown('目标工作表不在唯一清单中或不是可写表格；请核对准确工作表编号。', reason='protection_target_missing')
+        writable = [f"{r.get('sheetId')}({r.get('title')})" if r.get('title') else str(r.get('sheetId'))
+                    for r in sheets if isinstance(r, dict) and 'blockInfo' not in r and r.get('sheetId')]
+        hint = f"（当前可写工作表 sheet_id: {', '.join(writable)}）" if writable else ''
+        raise _unknown(f'目标工作表不在唯一清单中或不是可写表格；请核对准确工作表编号{hint}。', reason='protection_target_missing')
     target = matched[0]
     if 'protectedRange' not in target:
         return _omitted_protections(data, target, len(sheets))

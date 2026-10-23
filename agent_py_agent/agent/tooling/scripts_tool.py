@@ -89,19 +89,25 @@ def _plain(value):
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
 
 
-# LLM: 两工具共用错误出口，业务结果保留；未知执行异常不谎称没有副作用。
-# 函数用途: 将动作结果转换为宿主结果，运行失败也附完整业务回执。
-def _outcome(name, data, ok=True, code=''):
-    return ToolHandlerOutcome(name, ok, json.dumps(_plain(data), ensure_ascii=False), error_code=code)
+# LLM: 两工具共用错误出口，业务结果保留；参数错标not_started、确定失败标failed，仅进程组清理未确认保留unknown。
+# 函数用途: 将动作结果转换为宿主结果，运行失败也附完整业务回执与精确副作用状态。
+def _outcome(name, data, ok=True, code='', *, effect_outcome=''):
+    if not ok and not effect_outcome:
+        cleanup_unverified = isinstance(data, dict) and (
+            bool((data.get('escalation_context') or {}).get('cleanup_error'))
+            or any(bool((s.get('escalation_result') or {}).get('cleanup_error')) for s in data.get('steps') or () if isinstance(s, dict))
+        )
+        effect_outcome = 'unknown' if cleanup_unverified else ('not_started' if code == 'TOOL_INVALID_ARGUMENTS' else 'failed')
+    return ToolHandlerOutcome(name, ok, json.dumps(_plain(data), ensure_ascii=False), error_code=code, effect_outcome='' if ok else effect_outcome)
 
 
-# LLM: 危险动作必须走原审批，轻量协议或领域模块不授予额外执行权；资源按当前Owner工具实例串行。
+# LLM: 危险动作在ask模式走原审批、在auto/full-access模式沿自主决策放行；资源按当前Owner工具实例串行。
 # 函数用途: 给两工具统一声明只读、写入与危险动作的真实效果。
 def _policy(name, reads, dangerous):
     return ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy('mutating', by_parameter=(('action', tuple(
             [(action, 'read_only') for action in reads] + [(action, 'dangerous') for action in dangerous])),)),
-        approval_policy=ApprovalPolicy('always', always_effects=('dangerous',)),
+        approval_policy=ApprovalPolicy('dangerous'),
         idempotency_policy=IdempotencyPolicy('operation'),
         resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=(name + ':current_owner',)))
 
@@ -116,11 +122,15 @@ def _spec(name, description, actions, properties):
         hints=ToolModelHints(category='capability', default_deferred=True, deferred_summary=description))
 
 
-# LLM: 领域值对象优先；同协议注入时传独立字典，仍强制标准Key与目录ID一致。
+# LLM: 领域值对象优先；同协议注入时传独立字典，缺省补齐id/kind但仍强制标准Key与目录ID一致。
 # 函数用途: 校验脚本描述符并恢复AssetDescriptor，缺依赖时保留同形JSON。
 def _descriptor(data, asset_id, kind):
-    if not isinstance(data, dict) or REQUIRED_KEYS - data.keys() or data.get('id') != asset_id or data.get('kind') != kind:
-        raise ValueError('必须提供标准提取Key且id/kind与目标一致')
+    if not isinstance(data, dict):
+        raise ValueError('descriptor必须为对象')
+    data = {'id': asset_id, 'kind': kind, **data}
+    missing = REQUIRED_KEYS - data.keys()
+    if missing or data.get('id') != asset_id or data.get('kind') != kind:
+        raise ValueError(f"必须提供标准提取Key（缺少: {', '.join(sorted(missing))}）且id/kind与目标一致")
     if not isinstance(data['name'], str) or not data['name'].strip() or not isinstance(data['io_contract'], dict):
         raise ValueError('name或io_contract类型无效')
     if any(not isinstance(data[key], list) for key in ('access_targets', 'data_sources', 'credential_refs')):
@@ -132,10 +142,16 @@ def _descriptor(data, asset_id, kind):
 # LLM: Store与runner均绑定同一个可信Owner；execute入口不接收身份、路径或任意命令。
 # 类用途: 为Agent提供脚本目录、管理、源评估和受控运行工具。
 class ScriptsTool(BaseTool):
-    model_spec = _spec('scripts', '管理Owner固化脚本、标准提取Key与源评估；run仅单次覆盖数据源，执行和删除需原审批。',
+    model_spec = _spec('scripts', '管理Owner固化脚本、标准提取Key与源评估；脚本应输出单行JSON对象到stdout；run仅单次覆盖数据源。',
         ['list', 'get', 'register', 'update', 'update_sources', 'record_candidate', 'run', 'delete'], {
             **{key: {'type': 'string'} for key in ('script_id', 'code', 'entrypoint', 'interpreter', 'source_id', 'scope_key')},
-            **{key: {'type': 'object'} for key in ('descriptor', 'inputs', 'query_scope', 'candidate')},
+            'descriptor': {'type': 'object', 'description': (
+                '必填标准提取Key对象：{name: 非空字符串, access_targets: 列表(如[]), '
+                'data_sources: 列表(如[{"source_id":"s1","system":"web","query_scope":{}}]), '
+                'credential_refs: 列表(如[]), io_contract: {"inputs":[字段名],"outputs":[必选输出字段名]}，可选id/kind/summary/tags}')},
+            'inputs': {'type': 'object', 'description': '传给脚本stdin及MY_AGENT_SCRIPT_INPUT_JSON的JSON对象'},
+            'query_scope': {'type': 'object', 'description': 'update_sources时合并到指定source_id的查询范围字典'},
+            'candidate': {'type': 'object', 'description': '候选源评估：{candidate_id, decision(active|ignored|pending), reason, sample_count}'},
             **{key: {'type': 'array', 'items': {'type': 'string'}} for key in ('add', 'remove')},
             'override_data_sources': {'type': ['object', 'array'], 'description': '仅本次传给runner，绝不写回资产'},
             'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600}})

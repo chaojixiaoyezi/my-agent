@@ -109,10 +109,10 @@ class PackageBuildTool(BaseTool):
         hints=ToolModelHints(
             category="capability",
             use_cases=("学完外部 agent 后把方法做成能力包", "把自己写的离线小工具或服务做成插件包"),
-            avoid_when=("只是普通写文件或给用户交付文档",),
+            avoid_when=("只是普通写文件或给用户交付文档", "创建普通 Skill（应写到 <workspace>/.agent/skills/<id>/SKILL.md）或创建 Owner 固化脚本/工作流（应用 scripts / workflows 工具）"),
             keywords=("能力包", "插件", "打包", "learnpack"),
             default_deferred=True,
-            deferred_summary="把整理好的能力包或插件目录打成包（不安装），回执给出包指纹、开关状态和怎么装",
+            deferred_summary="把整理好的外部学习能力包或插件目录打成包（不用于普通Skill或workflows/scripts）",
         ),
     )
     # 打包只写宿主 learnpack 存储（内容寻址，重放无害）；按原操作账去重。

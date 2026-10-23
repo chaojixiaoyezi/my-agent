@@ -209,11 +209,12 @@ def _skill_paths(root, *, skip_learned=False):
                        and path.joinpath(*parts, name).is_dir())
 
 
-# LLM: 普通skills目录先于skills/learned；旧home/learned仍可读，同名Owner目录只认第一份，extra仅沿显式授权。
+# LLM: 普通skills目录先于skills/learned；旧home/learned及工作区.agent/skills仍可读，同名Owner目录只认第一份，extra仅沿显式授权。
 # 函数用途: 按来源优先级枚举准确Skill路径，查找时不根据请求名拼接磁盘路径。
 def _owner_skill_paths(home, extra_roots):
     seen = set()
-    for root, skip in ((home / 'skills', True), (home / 'skills/learned', False), (home / 'learned', False)):
+    for root, skip in ((home / 'skills', True), (home / 'skills/learned', False),
+                       (home / 'learned', False), (home / 'workspace/.agent/skills', False)):
         for path in _skill_paths(root, skip_learned=skip):
             if path.parent.name not in seen:
                 seen.add(path.parent.name)

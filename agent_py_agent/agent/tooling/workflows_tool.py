@@ -118,16 +118,20 @@ def _default_analysis_handler(step, context, resolved, *, owner_home):
 _default_analysis_handler.llm_involved = False
 
 
-# LLM: 所有路径由构造器Owner固定，model参数只含安全逻辑ID；运行/恢复/删除保持原危险审批。
+# LLM: 所有路径由构造器Owner固定，model参数只含安全逻辑ID；运行/恢复/删除保持危险动作分类。
 # 类用途: 对Agent暴露可管理和恢复的工作流工具。
 class WorkflowsTool(BaseTool):
-    model_spec = _spec('workflows', '管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与失败断点续跑；执行和删除需原审批。',
+    model_spec = _spec('workflows', '管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与断点续跑；步骤输出含_pause_for_resume=true可正常暂停等待确认，再用resume+patched_step_output续跑。',
         ['list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run'], {
             **{key: {'type': 'string'} for key in ('workflow_id', 'step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
-            'definition': {'type': 'object', 'description': 'descriptor、steps及body_markdown组成的工作流定义'},
-            'patched_step_output': {'type': 'object', 'description': '断点续跑时注入并经脚本IO契约校验的步骤修复输出'},
+            'definition': {'type': 'object', 'description': (
+                '工作流定义对象：{descriptor: {name, access_targets:[], data_sources:[], credential_refs:[], io_contract:{}}, '
+                'body_markdown: 说明文本, steps: [{step_id, name, mode(deterministic_script|llm_skill_analysis|hybrid), '
+                'script_id(可选), skill_ids(可选列表), condition(可选:{"step_id":"前步ID或$inputs","key":"字段","equals":值}), '
+                'inputs_map(可选:{"入参":{"step_id":"前步ID或$inputs","key":"字段"}}), on_error(escalate_to_agent|fail|skip)}]}')},
+            'patched_step_output': {'type': 'object', 'description': '断点续跑时注入并经脚本IO契约校验的步骤输出（用于人工确认或故障修复）'},
             'updated_data_sources': {'type': ['object', 'array'], 'description': '断点续跑时更新的数据源配置'},
-            'inputs': {'type': 'object'}})
+            'inputs': {'type': 'object', 'description': '工作流运行输入参数字典（可在step的condition或inputs_map中用step_id="$inputs"引用）'}})
     runtime_policy = _policy('workflows', ('list', 'get', 'inspect_run'), ('run', 'resume', 'delete'))
 
     # LLM: Store和Engine可用同协议替换；构造无资产执行，Owner根不接受工具实参覆盖。
@@ -167,7 +171,7 @@ class WorkflowsTool(BaseTool):
                 analysis_handler=handler)
         return self.engine
 
-    # LLM: inspect历史失败是成功读取；只有本次run/resume业务未成功才返回执行失败，快照完整保留。
+    # LLM: inspect历史失败是成功读取；正常完成或needs_repair=False的主动确认断点均返回ok=True，仅失败或需修复断点返回执行失败。
     # 函数用途: 统一工具结果与结构化错误，不吞中断。
     def execute(self, params):
         invalid = self.validate_invocation(params, None)
@@ -175,7 +179,9 @@ class WorkflowsTool(BaseTool):
             return invalid
         try:
             data = _dispatch(self, params)
-            ok = params['action'] not in ('run', 'resume') or data.get('status') == 'succeeded'
+            ok = (params['action'] not in ('run', 'resume')
+                  or data.get('status') == 'succeeded'
+                  or (data.get('status') == 'paused_for_resume' and not data.get('needs_repair')))
             return _outcome('workflows', data, ok, 'TOOL_EXECUTION_FAILED' if not ok else '')
         except (ValueError, KeyError, TypeError) as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')

@@ -147,12 +147,18 @@ def safe_path(root, part, part2=None, part3=None):
     return path
 
 
-# LLM: 输入映射和条件只从明确步骤编号取值，不解析表达式或模型自然语言。
-# 函数用途: 从此前步骤快照提取一个字段或完整输出；不存在时明确报错。
-def output_value(reference, outputs):
+# LLM: 输入映射和条件只从明确步骤编号或$inputs取值，不解析表达式或模型自然语言。
+# 函数用途: 从此前步骤快照或工作流初始输入提取一个字段或完整输出；不存在时明确报错。
+def output_value(reference, outputs, inputs=None):
     if not isinstance(reference, dict) or set(reference) - {'step_id', 'key', 'equals'}:
         raise ValueError('输出引用必须是结构化 step_id/key')
-    value = outputs[reference['step_id']]
+    step_id = reference['step_id']
+    if step_id == '$inputs' and isinstance(inputs, dict):
+        if 'key' not in reference:
+            return payload(inputs)
+        default = '' if reference.get('equals') == '' else None
+        return payload(inputs.get(reference['key'], default))
+    value = outputs[step_id]
     if 'key' in reference:
         value = value[reference['key']]
     return payload(value)
