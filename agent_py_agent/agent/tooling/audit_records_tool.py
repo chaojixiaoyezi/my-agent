@@ -183,8 +183,8 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
 def _requests_topic(agent: object, query: AuditQuery) -> dict:
     from .audit_requests_topic import requests_topic
 
-    return {**requests_topic(agent, query, max_owners=_MAX_OWNERS_COUNT),
-            "field_glossary": dict(_REQUEST_FIELD_GLOSSARY)}
+    return {"field_glossary": dict(_REQUEST_FIELD_GLOSSARY),
+            **requests_topic(agent, query, max_owners=_MAX_OWNERS_COUNT)}
 
 
 _TOPIC_COLLECTORS = {"decision": _decision_topic, "requests": _requests_topic}

@@ -83,13 +83,20 @@ def agent_tree_model_preview(payload: dict[str, object]) -> str:
     preview["details_read_policy"] = "完整节点及产物引用请使用本次工具的 read_artifact_hint；不要拼接归档路径。"
     selected: list[dict[str, object]] = []
     for node in nodes:
-        row = _pick(node, ("run_id", "parent_run_id", "status", "replaced_by", "failure_type", "current_tool",
+        row = _pick(node, ("run_id", "parent_run_id", "role", "status", "replaced_by", "failure_type", "current_tool",
                            "readiness", "recent_tool_failure", "model", "reasoning_effort"))
         row["last_progress_summary"] = str(node.get("last_progress_summary") or "")[:160]
         refs = node.get("read_order")
-        refs = refs if isinstance(refs, list) else []
-        row["read_order"] = refs[:1]
-        row["omitted_read_refs"] = max(0, len(refs) - 1)
+        refs = [item for item in refs if isinstance(item, str) and item] if isinstance(refs, list) else []
+        kept_refs: list[str] = []
+        for ref in refs:
+            trial = {**row, "read_order": [*kept_refs, ref], "omitted_read_refs": len(refs) - len(kept_refs) - 1}
+            candidate = {**preview, "nodes": [*selected, trial], "omitted_nodes": len(nodes) - len(selected) - 1}
+            if len(_json(candidate)) > _LIVE_CHARS and kept_refs:
+                break
+            kept_refs.append(ref)
+        row["read_order"] = kept_refs
+        row["omitted_read_refs"] = max(0, len(refs) - len(kept_refs))
         candidate = {**preview, "nodes": [*selected, row], "omitted_nodes": len(nodes) - len(selected) - 1}
         if len(_json(candidate)) > _LIVE_CHARS:
             break

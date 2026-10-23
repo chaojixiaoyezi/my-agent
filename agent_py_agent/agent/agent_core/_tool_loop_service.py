@@ -2669,10 +2669,18 @@ def _load_discovered_tools(params: ToolLoopExecuteParams, archive_record: dict[s
     )
 
     names = ordered_carried_loaded_tool_names([archive_record])
+    existing = ordered_loop_loaded_tool_names(params)
     state = getattr(params, "live_archive_state", None)
-    if isinstance(state, dict):
-        state["loaded_tool_order"] = tuple(dict.fromkeys((*ordered_loop_loaded_tool_names(params), *names)))
-    params.loaded_tool_names.update(names)
+    if not isinstance(state, dict):
+        state = {}
+        setattr(params, "live_archive_state", state)
+    ordered = tuple(dict.fromkeys((*existing, *names)))
+    state["loaded_tool_order"] = ordered
+    loaded = getattr(params, "loaded_tool_names", None)
+    if isinstance(loaded, list):
+        params.loaded_tool_names = list(ordered)
+    elif isinstance(loaded, set):
+        loaded.update(names)
 
 
 # LLM: Native history must carry the reducer output, never the raw executor projection; otherwise
