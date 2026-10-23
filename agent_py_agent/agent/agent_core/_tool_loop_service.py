@@ -310,7 +310,8 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
     # 原位刷新一个稳定的小尾巴；状态没变时字节不变，保留前缀缓存命中。
     refresh_runtime_direct_children_snapshot(agent, params)
     if params.consume_pending_turn_input:
-        inject_pending_turn_input(agent, params)
+        if inject_pending_turn_input(agent, params):
+            _reset_pending_turn_input_invalidations(params)
     window_tool_context_params(agent, params)
     prompt = _render_tool_loop_prompt(agent, params)
     # native 下文本 tool_context 不发往 provider（IR messages 才发）。真正决定整个请求
@@ -1750,8 +1751,18 @@ PENDING_TURN_INPUT_INVALIDATION_COUNT = 8
 PENDING_TURN_INPUT_LIMIT_REASON = "pending_turn_input_invalidation_limit"
 
 
+# LLM: 当本轮已无待处理输入，或下一轮真正成功 claim/注入了待处理输入时，说明上一轮作废已正常推进，
+#   必须清空连续作废计数，避免长会话里跨几十轮散落出现的合法插话/后台事件累计撞上连续死循环上限。
+# 函数用途: 重置同一回合内"有待处理输入但未能消费"的连续作废计数。
+def _reset_pending_turn_input_invalidations(params: ToolLoopExecuteParams) -> None:
+    state = getattr(params, "live_archive_state", None)
+    if isinstance(state, dict):
+        state.pop("_pending_turn_input_invalidations", None)
+
+
 def _pending_turn_input_invalidates_response(agent, params: ToolLoopExecuteParams) -> bool:
     if not has_pending_turn_input(agent, params):
+        _reset_pending_turn_input_invalidations(params)
         return False
     discard_pending_natural_user_reply(params)
     return True

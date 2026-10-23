@@ -55,3 +55,71 @@ def test_pending_invalidation_limit_keeps_counts_input_and_suppresses_old_public
     assert result.canonical_native_messages  # 私有native事实仍保存，不从原块复活公开正文。
     rows = agent.conversation_store.messages.recent(thread.thread_id, limit=0)
     assert not any(row.role == "assistant" and old_text in row.content for row in rows)
+
+
+def test_consumed_pending_turn_inputs_reset_invalidation_counter_across_long_session(tmp_path):
+    """长会话内多次合法插话/后台进程完成事件在各自下一轮被成功 claim 注入时，不累计触发作废上限。"""
+    agent = _agent(tmp_path)
+    total_events = loop.PENDING_TURN_INPUT_INVALIDATION_COUNT + 4
+    final_text = "长会话全部事件与插话消费完毕后的正式终答"
+    task_id = "task-long-session-1"
+
+    class ConsumingEventAndSteerBackend(_StaticBackend):
+        def generate(self, prompt, **kwargs):
+            self.calls += 1
+            thread = agent.conversation_store.threads.list()[0]
+            if self.calls <= total_events:
+                if self.calls % 2 == 1:
+                    agent.conversation_store.wakes.raise_signal(
+                        {
+                            "thread_id": thread.thread_id,
+                            "root_task_id": task_id,
+                            "reason": "managed_process_exited",
+                            "summary": f"后台命令 #{self.calls} 已退出 (exit_code=0)",
+                            "metadata": {"session_id": f"proc-{self.calls}", "exit_code": 0},
+                        }
+                    )
+                else:
+                    agent.conversation_store.guidance.append(
+                        {
+                            "target_type": "thread",
+                            "target_id": thread.thread_id,
+                            "message": f"合法运行中插话 #{self.calls}",
+                            "sender": "user",
+                            "priority": "normal",
+                            "delivery": "steer",
+                        }
+                    )
+                text = f"过期的中间候选 #{self.calls}"
+            else:
+                text = final_text
+            fields = response_fields(
+                {
+                    "status": "completed",
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": f"msg-{self.calls}",
+                            "phase": "final_answer",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    ],
+                },
+                "fake",
+            )
+            return ModelResponse(backend=self.name, **fields)
+
+    agent.backend = ConsumingEventAndSteerBackend()
+    result = agent.run(
+        "测试长会话多次合法事件注入",
+        source="cli_run",
+        save=False,
+        task_id=task_id,
+    )
+    assert agent.backend.calls == total_events + 1
+    assert result.runtime_status == "ok"
+    assert result.runtime_reason in ("", None)
+    assert result.response == final_text
+
+
