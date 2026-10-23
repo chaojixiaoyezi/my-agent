@@ -17,6 +17,7 @@ from pathlib import Path
 from ..artifacts.registry import ArtifactRegistration, register_artifact
 from ..model_visible_refs import has_placeholder_path_segment
 from ..runtime_errors import runtime_error_report
+from .evidence_packet_serializer import serialize_evidence_packet as _packet_payload
 from .models import EvidencePacket, SubAgentTask
 from .result_artifact_roots import (
     artifact_candidate_roots,
@@ -240,20 +241,6 @@ def _artifact_claim(item: dict[str, object], ref: str) -> str:
         return f"artifact produced: {summary}"
     kind = str(item.get("kind") or "artifact").strip() or "artifact"
     return f"{kind} artifact produced: {ref}"
-
-
-def _packet_payload(packet: EvidencePacket) -> dict[str, object]:
-    return {
-        "id": packet.id,
-        "claim": packet.claim,
-        "checked_scope": packet.checked_scope,
-        "evidence_refs": packet.evidence_refs,
-        "artifact_refs": packet.artifact_refs,
-        "counter_evidence_refs": packet.counter_evidence_refs,
-        "confidence": packet.confidence,
-        "unresolved_risks": packet.unresolved_risks,
-        "created_at": packet.created_at,
-    }
 
 
 def synthesize_artifact_evidence_packets(

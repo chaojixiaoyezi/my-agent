@@ -54,6 +54,26 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "AGENTS_WRITE_USER_ONLY": ErrorContract(
+        code="AGENTS_WRITE_USER_ONLY", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="AGENTS规则修改须由用户通过 /agents 显式预览确认；可只读查看，不借文件、shell或其他身份绕过确认。",
+    ),
+    "AGENTS_SOURCE_UNAVAILABLE": ErrorContract(
+        code="AGENTS_SOURCE_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="AGENTS原规则来源不可用或状态无法确认；核对来源配置与原读取回执，保留原约束，不换路径、补造内容或自动重放写入。",
+    ),
+    "AUDIT_CONSUMER_CONTEXT_UNAVAILABLE": ErrorContract(
+        code="AUDIT_CONSUMER_CONTEXT_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="缺少当前Audit来源消费者的可信上下文；由原宿主核对已发布来源绑定及工作者身份，不猜watch_id、换来源或自行补授权。",
+    ),
+    "NETWORK_DISABLED": ErrorContract(
+        code="NETWORK_DISABLED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="当前用户或父级未开放工具网络权限；保持禁网，沿原授权入口申请准确网络能力，不换工具、凭据或身份绕过。",
+    ),
     "GATEWAY_LIFECYCLE_UNAVAILABLE": ErrorContract(
         code="GATEWAY_LIFECYCLE_UNAVAILABLE", category="state", retryable=False,
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
@@ -436,7 +456,7 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="目标是宿主运行状态（runtime.db、Owner级 skills/ 目录、能力包核验记录等），只由宿主写；"
-        "项目/工作区普通 Skill 请直接写到 <workspace>/.agent/skills/<skill_id>/SKILL.md（或经 skill_summarize 生成自学习候选）；"
+        "项目/工作区普通 Skill 请直接写到 <workspace>/.agents/skills/<skill_id>/SKILL.md（或经 skill_summarize 生成自学习候选）；"
         "固化脚本与工作流请直接调用 scripts / workflows 工具（切勿对普通 Skill/工作流调用 package_build）；不要换别的工具或命令去写宿主目录。",
     ),
     "PATH_HOST_CREDENTIAL_BLOCKED": ErrorContract(

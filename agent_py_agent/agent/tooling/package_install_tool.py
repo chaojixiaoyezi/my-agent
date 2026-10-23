@@ -66,7 +66,8 @@ class PackageInstallTool(BaseTool):
     model_spec = ToolModelSpec(
         name=PACKAGE_INSTALL_TOOL,
         description=(
-            "安装用 package_build 打好的包（传它回执里的 sha256）。只能装你自己打的包。"
+            "仅在用户明确要求安装可分发能力包（CAPABILITY.md）或插件时使用；普通 Skill（SKILL.md）不走此工具，"
+            "原生工作流/脚本使用 workflows / scripts 工具。安装用 package_build 打好的包（传它回执里的 sha256）。只能装你自己打的包。"
             "对应的自动装开关开着就直接装上并启用；关着只生成一张待确认安装单，回执里有用户要原样发的那一行确认。"
             "回执还给出开关现在的状态和开/关命令原文，照回执原文像教新手一样告诉用户：装了什么、怎么停用删除退回、"
             "怎么开关自动装；不要凭记忆说开关状态，不要替用户执行确认命令。"
@@ -80,7 +81,8 @@ class PackageInstallTool(BaseTool):
         hints=ToolModelHints(
             category="capability",
             use_cases=("把刚打好的能力包或插件装上", "开关关着时给用户准备一行确认"),
-            avoid_when=("安装不是你自己打的包（那要管理员用 /plugins install）",),
+            avoid_when=("安装不是你自己打的包（那要管理员用 /plugins install）",
+                        "未取得用户明确安装可分发能力包（CAPABILITY.md）或插件的要求时不要使用；普通 Skill（SKILL.md）及 workflows / scripts 原生自动化不走包安装"),
             keywords=("安装", "能力包", "插件", "learnpack"),
             default_deferred=True,
             deferred_summary="安装你用 package_build 打好的包：开关开着直接装，关着给用户一行确认",

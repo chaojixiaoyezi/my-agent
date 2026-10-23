@@ -590,6 +590,8 @@ def build_watch_stream_model_spec(*, surface: str = "ordinary") -> ToolModelSpec
     )
 
 
+# LLM: Only ordinary prose is shortened; names/actions and all audit descriptions remain unchanged.
+# 函数用途: 按运行表面选参数说明，不变更参数集合和权限。
 def _surface_parameters(
     surface: str,
     actions: tuple[str, ...],
@@ -599,6 +601,14 @@ def _surface_parameters(
     parameters["action"] = "必填；当前运行只允许：" + " / ".join(
         _ACTION_LABELS[action] for action in actions
     )
+    if surface == "ordinary":
+        parameters["action"] = "必填；动作：" + " / ".join(_ACTION_LABELS[action] for action in actions)
+        parameters["source_adapter"] = (
+            "仅 mode=adapter 且当前运行允许时使用；path 为已试通的受权工作区相对 Python 脚本，sha256 钉住版本。"
+            "只经 stdin/stdout 交换 JSON：phase=plan 接收 checkpoint/now_unix/page_limit/base_request，返回 request 和可选 context；"
+            "phase=accept 接收 checkpoint/context/response，返回 records/checkpoint/has_more/record_keys。"
+            "record_keys 须对应来源投递位置，不按正文哈希或业务ID合并；脚本不能联网、读密钥或写文件，宿主负责网络、安全闸、落盘和游标提交。"
+        )
     if surface == "audit_prepare":
         parameters["url"] = (
             parameters["url"]
@@ -625,8 +635,15 @@ def _surface_parameters(
     return parameters
 
 
+# LLM: Ordinary watch carries transport usage only; audit surfaces retain the full guarantee contract.
+# 函数用途: 分离普通采集与命名Audit的工具级说明。
 def _surface_description(surface: str, parameters: dict[str, str]) -> str:
-    description = _DESCRIPTION
+    description = (
+        "持续采集 HTTP 游标流、poll 快照或本地文件/增长日志；按现场已验证协议打开单一来源，"
+        "保存记录边界、游标、覆盖账和原文引用。sample 只读取样，configure 配置普通宽筛，pull 领取批次，"
+        "status/list 查看状态，close 收尾；当前可用动作以 action 枚举为准。工具不负责业务定性，"
+        "不按内容或分数自动选择处理路线，open 不等于发布命名任务要求。"
+    ) if surface == "ordinary" else _DESCRIPTION
     if surface == "audit_coordinator":
         description += (
             " 当前运行是命名 Audit 协调者；公开结构只提供 list/status/inspect，"
@@ -678,6 +695,8 @@ def _surface_description(surface: str, parameters: dict[str, str]) -> str:
     return description
 
 
+# LLM: Only ordinary source_adapter drops the audit-only suffix; all schema constraints are preserved.
+# 函数用途: 将表面说明与原参数形状合成模型契约。
 def _watch_stream_model_spec(
     surface: str,
     names: set[str],
@@ -688,7 +707,7 @@ def _watch_stream_model_spec(
     details = {
         name: f"{parameters.get(name, '')} {value}".strip()
         for name, value in _PARAMETER_DETAILS.items()
-        if name in names
+        if name in names and not (surface == "ordinary" and name == "source_adapter")
     }
     properties: dict[str, object] = {}
     for name, parameter_description in parameters.items():

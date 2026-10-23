@@ -34,6 +34,7 @@ from ...settings.defaults import decision_request_max_chars
 from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
 from ...tooling.write_boundary import WRITE_TOOL_NAMES
+from .context_fingerprint import context_fingerprint as _context_revision
 
 # URL 查询串拒绝沿用外部材料首片的同一策略，不在本点另立第二份规则。
 from .external_material_order import _URL_WITH_QUERY
@@ -396,22 +397,6 @@ def _claim_review_request(record: object) -> bool:
 # 函数用途: 生成短版本值，坏类型或超出原输入上限会放弃增强。
 def _digest(value: object) -> str:
     return hashlib.sha256(decision_json(value)).hexdigest()
-
-
-# LLM: 参数/权限版本只在宿主内比较，绝不上传 task_attributes、write_boundary 或原工具参数。
-# 函数用途: 判断等待期间当前任务、问题、权限和工具快照是否变化。
-def _context_revision(params: object) -> str:
-    snapshot = getattr(params, "tool_runtime_snapshot", None)
-    return _digest({
-        "request_id": getattr(params, "request_id", ""), "run_id": getattr(params, "run_id", ""),
-        "task_id": getattr(params, "task_id", ""), "user_prompt": getattr(params, "user_prompt", ""),
-        "context_scope": getattr(params, "context_scope", ""),
-        "task_attributes": getattr(params, "task_attributes", None),
-        "allowed_tools": getattr(params, "allowed_tools", None),
-        "write_boundary": getattr(params, "write_boundary", None),
-        "snapshot_hash": getattr(snapshot, "snapshot_hash", ""),
-        "available_tools": sorted(getattr(snapshot, "available_tool_names", ())),
-    })
 
 
 # LLM: 用户取消在发送和消费边界传播，不能降级成一次可忽略的增强失败。

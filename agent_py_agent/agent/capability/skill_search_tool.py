@@ -60,16 +60,11 @@ def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="skill_search",
         description=(
-            "检索或读取当前轮可用 Skill 和能力包；任务明确匹配已列出的专业方法时，先读方法再开展工作。"
-            "action=search 按需求返回公开 Skill 或能力包摘要；结果的 next_read 可原样作为本工具参数读取。"
-            "search 用 query 检索，不能传 resource_path，即使是空串。"
-            "action=get 时，普通 Skill 使用 skill_id 读取 SKILL.md，能力包使用 package_id；两种选择器互斥。"
-            "包的 stable_id 用于授权和任务引用，不能填入 skill_id。指定 package_id 后可检索内部资源，"
-            "get 省略 resource_path 时读取包入口。错选择器仍失败；若返回 next_read，可发起新的显式调用。"
-            "已声明的包成员属于包命名空间，不是工作区文件；用 next_search 检索声明，再用匹配项 next_read 读取。"
-            "正文中的业务输入/交付路径不因此变成包成员；不要用 read_file 或 find_files 猜包安装位置。"
-            "包资源分页读取，has_more=true 时继续 continuation；读取不会执行脚本或授予工具权限。"
-            "原样落盘现有脚本或模板时，将完整 source_ref 直接传给 write_file.source_ref，不用手抄正文；落盘不会执行资源。"
+            "搜索或读取本轮授权的Skill/能力包；任务匹配专业方法时先读。search用query，不能传resource_path；"
+            "get普通Skill用skill_id、能力包用package_id，二者互斥，包stable_id不能当skill_id。"
+            "原样使用结果next_read/next_search/continuation及版本字段。包内成员按声明检索读取，get无resource_path读入口；"
+            "不要用文件工具猜安装路径，正文里的业务路径不等于包成员。has_more时继续分页；读取不执行或授权。"
+            "复制现有资源时将完整source_ref交write_file.source_ref，不手抄预览；复制不执行。"
         ),
         input_schema={
             "type": "object",

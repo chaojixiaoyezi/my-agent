@@ -49,16 +49,10 @@ def build_remember_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="remember",
         description=(
-            "管理需要正式持久化并按明确 scope 召回的具体事实、事件和项目知识。"
-            "session scope 的寿命只跟当前真实会话走，不得另填 valid_from/valid_until；"
-            "需要按时间过期时使用 temporary scope。新增先进入统一候选并核验证据；"
-            "正式保存须由用户通过 /memory candidates preview <候选ID> 完整预览再确认；真实用户或工具证据只说明来源，不等于保存批准。替换和删除必须指定 entry_id；"
-            "宿主读取目标当前版本并冻结，提交时按该版本进行并发校验。"
-            "本工具先写候选并返回待确认原因；审核通过后由原正式提交入口按目标版本生效。"
-            "模型推断不得伪装成已验证事实。用户亲口提供或明确要求保存的内容必须使用 user_explicit，即使同轮工具也验证过；"
-            "只有事实本身来自成功工具结果时才使用 tool_verified，并提交该调用的精确 evidence_refs。"
-            "个人记忆默认写入当前 owner 的 personal 范围，调用时省略 scope 即可；不要把用户 ID 当 scope_key。"
-            "用户画像、称呼和长期沟通偏好使用 update_persona；教训使用候选到 lesson 链。"
+            "提交当前owner的事实、事件或项目知识候选。正式保存须用户完整预览并确认；来源可信不等于批准，不把模型推断当已验证事实。"
+            "替换/删除须entry_id，宿主冻结目标版本并在确认时CAS。用户亲口提供或明确要求保存用user_explicit；"
+            "事实仅来自成功工具结果时用tool_verified并附精确evidence_refs。省略scope使用本人personal；"
+            "personal/session不自填身份键，session不填有效时间，需时间过期用temporary。画像/称呼/长期偏好用update_persona，教训走lesson候选链。"
         ),
         input_schema=_remember_input_schema(scope_schema, operation_schema),
         hints=ToolModelHints(
