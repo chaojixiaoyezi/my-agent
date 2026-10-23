@@ -1,0 +1,289 @@
+# LLM: 插件目标身份必须经宿主来源、账号状态与固定grant核验，不能用JSON声明权限。
+# 模块用途: 解析普通本地用户，并建立不继承管理员的只读或执行上下文。
+from __future__ import annotations
+
+import json
+import re
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from weakref import WeakValueDictionary
+
+from ..auth.models import Role
+from ..user_space.owner_quota import LocalUserQuotaLimits
+from ..user_space.owner_resolver import OwnerIdentity
+from .errors import HostAPIError
+from .execution_policy import (
+    ExecutionAllowlist,
+    RestrictedExecutionPolicy,
+    build_execution_policy,
+)
+
+
+# LLM: 固定字段不能通过构造参数覆盖，不调用终端角色推断或AuthManager。
+# 类用途: 为代用户访问提供不可变的普通用户权限上限。
+@dataclass(frozen=True)
+class RestrictedPermission:
+    role: Role = field(default=Role.USER, init=False)
+    is_admin: bool = field(default=False, init=False)
+    can_access_all_users: bool = field(default=False, init=False)
+    access_mode: str = field(default="workspace_only", init=False)
+
+
+# LLM: 仅验证选择器，不读取磁盘或修改原输入。
+# 函数用途: 在所有身份与文件操作前检查本地普通用户编号。
+def validate_local_user_id(value: str) -> str:
+    if type(value) is not str or re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,31}", value) is None:
+        raise HostAPIError("INVALID_SCHEMA")
+    if value in {"main", "admin", "root", "system", "default", "owner", "local"}:
+        raise HostAPIError("INVALID_SCHEMA")
+    return value
+
+
+# LLM: 无参数固定权限入口，不继承全局认证开关或父级权限。
+# 函数用途: 创建插件代用户执行使用的普通用户权限。
+def restricted_permission() -> RestrictedPermission:
+    return RestrictedPermission()
+
+
+# LLM: 旧池不能把已登记账号带回main配置克隆路径；未登记的原owner保持旧合同。
+# 函数用途: 在原池命中及构造前冷读账号闸门，强制已登记账号改走本域受限工厂。
+def require_unmanaged_pool_owner(config, owner):
+    if owner.provider != "local" or owner.owner_kind != "user" or owner.owner_id == "main":
+        return
+    root = getattr(config, "my_agent_home", None)
+    if not root:
+        return
+    try:
+        uid = validate_local_user_id(owner.owner_id)
+    except HostAPIError:
+        return  # 旧渠道的非插件UID不自动迁入本注册表。
+    from ..user_space.local_user_store import LocalUserStore
+
+    store = LocalUserStore(root)
+    if store.get(uid) is not None:
+        store.require_enabled(uid)
+        raise HostAPIError("HOST_NOT_READY", 503)
+
+
+# LLM: A侧核验后投影的原来源，不含token；本数据本身不是授权凭证。
+# 类用途: 固定安装、包、激活和grant修订。
+@dataclass(frozen=True)
+class PluginSourceBinding:
+    installation_ref: str
+    package_sha256: str
+    activation_id: str
+    grant_revision: int
+    owner: OwnerIdentity = field(default_factory=OwnerIdentity.local_main)
+
+
+# LLM: 管理、创建、代执行三组许可彼此独立；创建不会自动加入代执行范围。
+# 类用途: 接收宿主权威层的冻结用户授权投影。
+@dataclass(frozen=True)
+class LocalUserGrant:
+    source_binding: PluginSourceBinding
+    capabilities: frozenset[str] = field(default_factory=frozenset)
+    allowed_target_users: frozenset[str] = field(default_factory=frozenset)
+    manageable_user_ids: frozenset[str] = field(default_factory=frozenset)
+    creatable_user_ids: frozenset[str] = field(default_factory=frozenset)
+    quota_ceiling: LocalUserQuotaLimits = field(default_factory=LocalUserQuotaLimits)
+    execution_policy: ExecutionAllowlist = field(default_factory=ExecutionAllowlist)
+
+
+# LLM: 本DTO只由A的权威核验端口返回，直接传给领域入口不能取得授权。
+# 类用途: 运输已核验的准确动作、不可变JSON实参和来源许可。
+@dataclass(frozen=True)
+class AuthorizedLocalCall:
+    grant: LocalUserGrant
+    action: str
+    payload_json: str = "{}"
+    as_user: str | None = None
+    idempotency_key: str | None = None
+
+
+# LLM: 该对象只有本工厂活签发记录才有效，字段投影不构成独立能力凭据。
+# 类用途: 绑定普通用户身份、独立路径、固定权限与本次冻结许可。
+@dataclass(frozen=True)
+class OwnerResolutionResult:
+    identity: OwnerIdentity
+    owner_home: object
+    permission: RestrictedPermission
+    execution_policy: RestrictedExecutionPolicy
+    user_revision: int
+    source: object = field(repr=False, compare=False)
+    call: AuthorizedLocalCall = field(repr=False)
+    execution: bool = False
+
+    # LLM: 原绑定只取冻结call，不允许多份可变来源相互矛盾。
+    # 函数用途: 返回本执行的原安装授权来源。
+    @property
+    def source_binding(self):
+        return self.call.grant.source_binding
+
+    # LLM: 跨安装、激活、用户修订或策略摘要绝不共用同一个执行实例。
+    # 函数用途: 给B的受限执行缓存提供完整隔离键。
+    @property
+    def cache_key(self):
+        binding = self.source_binding
+        return (self.identity, binding.installation_ref, binding.activation_id, binding.grant_revision,
+                self.user_revision, self.execution_policy.policy_digest)
+
+
+# LLM: 三组UID集合必须冻结且精确；来源摘要与修订只接受显式合法值，不补默认授权。
+# 函数用途: 验证宿主投影结构，拒绝可变/畸形权限进入执行链。
+def validate_grant(grant):
+    if type(grant) is not LocalUserGrant or type(grant.source_binding) is not PluginSourceBinding:
+        raise HostAPIError("SOURCE_INVALID", 403)
+    binding = grant.source_binding
+    if type(binding.grant_revision) is not int or binding.grant_revision < 1:
+        raise HostAPIError("SOURCE_INVALID", 403)
+    if type(binding.owner) is not OwnerIdentity or not binding.installation_ref:
+        raise HostAPIError("SOURCE_INVALID", 403)
+    for value in (binding.package_sha256, binding.activation_id):
+        if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise HostAPIError("SOURCE_INVALID", 403)
+    for values in (grant.allowed_target_users, grant.manageable_user_ids, grant.creatable_user_ids):
+        if type(values) is not frozenset or len(values) > 100:
+            raise HostAPIError("SOURCE_INVALID", 403)
+        for uid in values:
+            validate_local_user_id(uid)
+    if type(grant.capabilities) is not frozenset or type(grant.quota_ceiling) is not LocalUserQuotaLimits:
+        raise HostAPIError("SOURCE_INVALID", 403)
+    if type(grant.execution_policy) is not ExecutionAllowlist:
+        raise HostAPIError("SOURCE_INVALID", 403)
+
+
+# LLM: 拒绝所有深度的重复字段，避免不同层按第一项或最后一项解读同一请求。
+# 函数用途: 从严格JSON对象键值对构建唯一映射。
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate field")
+        result[key] = value
+    return result
+
+
+# LLM: JSON不接受NaN和Infinity，不能把非有限值传到下游schema或摘要。
+# 函数用途: 拒绝非标准数值常量。
+def reject_constant(value):
+    raise ValueError("non-finite JSON")
+
+
+# LLM: 不可变JSON字符串只承载普通数据；解析失败或非对象拒绝，不采信其中任何权限字段。
+# 函数用途: 解码宿主核验过的准确动作参数。
+def call_payload(call):
+    try:
+        if type(call.payload_json) is not str or len(call.payload_json.encode("utf-8")) > 65536:
+            raise ValueError("invalid payload")
+        value = json.loads(call.payload_json, object_pairs_hook=unique_object, parse_constant=reject_constant)
+        if type(value) is not dict:
+            raise ValueError("invalid payload")
+        return value
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise HostAPIError("INVALID_SCHEMA") from exc
+
+
+# LLM: 工厂只信任宿主装配的核验端口，不接受插件dict或全局AuthManager推断身份。
+# 类用途: 生成并逐次复核普通用户的冷读取与受限执行上下文。
+class OwnerContextFactory:
+    # LLM: 空权威端口必须保持不可执行，不初始化主owner或复制其权限。
+    # 函数用途: 绑定账号存储和原授权核验入口。
+    def __init__(self, store, verify_call=None, commit_scope=None):
+        self.store = store
+        self.verify_call = verify_call
+        self.commit_scope = commit_scope
+        self._issued = WeakValueDictionary()
+
+    # LLM: 仅原宿主核验口可返回授权投影。
+    # 函数用途: 核验一份原始授权调用。
+    def verify(self, authorized):
+        if self.verify_call is None:
+            raise HostAPIError("HOST_NOT_READY", 503)
+        try:
+            call = self.verify_call(authorized)
+        except HostAPIError:
+            raise
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HostAPIError("SOURCE_INVALID", 403) from exc
+        if type(call) is not AuthorizedLocalCall or type(call.action) is not str:
+            raise HostAPIError("SOURCE_INVALID", 403)
+        validate_grant(call.grant)
+        call_payload(call)
+        return call
+
+    # LLM: 冷路径不创建owner、不初始化agent或模型。
+    # 函数用途: 解析已登记且获准访问的目标用户读取上下文。
+    def resolve_read_context(self, authorized):
+        return self.resolve(authorized, execution=False)
+
+    # LLM: 执行同时要求execute和act_as_user，不能退回安装owner。
+    # 函数用途: 解析强制普通用户执行上下文。
+    def resolve_execution_context(self, authorized):
+        return self.resolve(authorized, execution=True)
+
+    # LLM: 执行只接受闭合动作；目标须登记enabled，权限新建而非安装者或AuthManager推断。
+    # 函数用途: 冷解析并签发一份准确来源绑定的上下文。
+    def resolve(self, authorized, *, execution):
+        call = self.verify(authorized)
+        if execution and call.action not in {"chat.send", "execute.tool", "execute.script", "execute.workflow", "execute.workflow_resume"}:
+            raise HostAPIError("ACTION_NOT_AVAILABLE", 403)
+        required = {"execute", "act_as_user"} if execution else {"read", "act_as_user"}
+        if call.grant.source_binding.owner != OwnerIdentity.local_main():
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        if not required <= call.grant.capabilities:
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        if call.as_user is None:
+            raise HostAPIError("TARGET_REQUIRED", 403)
+        uid = validate_local_user_id(call.as_user)
+        if uid not in call.grant.allowed_target_users:
+            raise HostAPIError("TARGET_DENIED", 403)
+        user = self.store.require_enabled(uid)
+        policy = build_execution_policy(self.store, uid, call.grant)
+        result = OwnerResolutionResult(
+            user.owner, self.store.owner_home(uid), restricted_permission(), policy,
+            user.revision, authorized, call, execution,
+        )
+        self._issued[id(result)] = result
+        return result
+
+    # LLM: 只接受本工厂签发的准确对象，不接受复制或重建的字段投影。
+    # 函数用途: 再次检查原来源及用户revision。
+    def check(self, context):
+        if type(context) is not OwnerResolutionResult or self._issued.get(id(context)) is not context:
+            raise HostAPIError("SOURCE_INVALID", 403)
+        self.check_call(context.source, context.call)
+        user = self.store.require_enabled(context.identity.owner_id, context.user_revision)
+        current = build_execution_policy(self.store, user.user_id, context.call.grant)
+        if current != context.execution_policy:
+            raise HostAPIError("POLICY_CHANGED", 409)
+        return user
+
+    # LLM: 上游每次重验原活来源；同包重装、grant改版和调用实参变动都不能沿旧上下文执行。
+    # 函数用途: 检查原请求仍与冻结的授权投影完全一致。
+    def check_call(self, source, expected):
+        current = self.verify(source)
+        if current.grant.source_binding.activation_id != expected.grant.source_binding.activation_id:
+            raise HostAPIError("ACTIVATION_REVOKED", 409)
+        if current != expected:
+            raise HostAPIError("GRANT_REVOKED", 403)
+        return current
+
+    # LLM: 必须由A提供真实生命周期短提交锁，未装配时拒绝写；顺序为生命周期→用户→quota→JSON。
+    # 函数用途: 在同一原激活短提交窗口内检查并执行一个有界写动作。
+    @contextmanager
+    def commit_call(self, source, call):
+        if self.commit_scope is None:
+            raise HostAPIError("HOST_NOT_READY", 503)
+        with self.commit_scope(call.grant.source_binding):
+            self.check_call(source, call)
+            yield
+
+    # LLM: 用户锁阻止disable与短写跨过同一提交边界，锁内绝不执行模型/审批/长进程。
+    # 函数用途: 为一个有界工具写入提供激活和用户修订双栅栏。
+    @contextmanager
+    def commit(self, context):
+        self.check(context)
+        with self.commit_call(context.source, context.call):
+            with self.store.locked(("local_users", f"{context.identity.owner_id}.json")):
+                self.check(context)
+                yield

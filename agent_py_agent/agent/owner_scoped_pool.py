@@ -1,4 +1,4 @@
-# LLM: owner 池只管理进程内实例，唯一身份及持久工作沿既有 owner/thread 合同；空闲回收不删除用户资料。
+# LLM: 原池管理进程内实例；已登记本地账号先经C冷读闸门，不能继承main配置，空闲回收不删资料。
 # W仅运输原bootstrap并在构造/命中前后核分区及实际home，不复制池/配置/执行权；普通主线LRU、Future和凭据来源保持。
 # 模块用途: 按用户隔离资源、合并首次构建，并向 Gateway 提供带在途保护的空闲回收入口。
 """按 owner 隔离的 agent 池(多用户飞书 per-用户隔离 + 审计 #2/#13)。
@@ -82,7 +82,7 @@ def _config_with_owner(base_config: Any, owner: Any) -> Any:
     )
 
 
-# LLM: owner只由原池提供；W运输原bootstrap到最早构造门，构造后核真实home，保main secret克隆与默认自动称呼语义。
+# LLM: owner只由原池提供；已登记账号禁用通用配置克隆，W仍核原bootstrap及真实home。
 # 函数用途: 为原owner构造唯一Agent，W不能用热配置改变冻结根或返回另一owner实例。
 def build_owner_scoped_agent(
     base_config: Any,
@@ -94,6 +94,9 @@ def build_owner_scoped_agent(
     worker_bootstrap=None,
 ) -> Any:
     """按 owner 建一个作用域 SimpleAgent(独立 home/记忆/local_store)。延迟导入防循环。"""
+    from .plugin_host.owner_context import require_unmanaged_pool_owner
+
+    require_unmanaged_pool_owner(base_config, owner)
     from .core import SimpleAgent
 
     worker_options = {} if worker_bootstrap is None else {"worker_bootstrap": worker_bootstrap}
@@ -143,7 +146,7 @@ def _maybe_seed_feishu_call_name(base_config: Any, owner: Any, agent: Any) -> No
         pass  # 绝不因 auto-name 失败影响 agent 创建
 
 
-# LLM: 同owner合流、缓存/租用/持久任务寿命分离；W每次消费核原bootstrap与实际home而不从热配置换属，默认池不新增检查I/O。
+# LLM: 同owner合流及缓存寿命不变；已登记本地账号冷读闸门，W另核原bootstrap与实际home。
 # 类用途: 复用用户智能体，减少并发首次访问重复初始化和历史用户常驻。
 class OwnerScopedAgentPool:
     """按 OwnerIdentity get-or-create 作用域 agent;有界 LRU、线程安全、锁外构建。
@@ -206,9 +209,12 @@ class OwnerScopedAgentPool:
         self._require_worker_owner(owner, hit)
         return hit
 
-    # LLM: 每次消费核原C home/constructor roots，命中后核实际home与原始根而非热config或effective权限投影；不额外派生工作区权限。
+    # LLM: 命中前后冷核本地账号；已登记账号拒绝通用构造，W继续核原分区、home及constructor roots。
     # 函数用途: 阻止跨分区/管理员或已漂移对象进入worker池消费路径。
     def _require_worker_owner(self, owner, agent=None):
+        from .plugin_host.owner_context import require_unmanaged_pool_owner
+
+        require_unmanaged_pool_owner(self._base_config, owner)
         if self._worker_bootstrap is None:
             return
         from .gateway_parts.multiprocess_agent_contract import (

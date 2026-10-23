@@ -17,7 +17,7 @@ class HostAPIError(ValueError):
             raise ValueError("错误HTTP状态无效")
         if outcome not in {"not_started", "committed", "unknown"} or len(message) > 256:
             raise ValueError("错误结局或消息无效")
-        super().__init__(message)
+        super().__init__(f"{code}: {message}")
         self.code, self.status, self.outcome = code, status, outcome
         self.message = message
 

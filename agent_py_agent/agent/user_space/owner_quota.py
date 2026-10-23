@@ -3,6 +3,7 @@
 # 模块用途: 复用唯一owner配额和锁序，C只收紧实际出生来源。
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
 from ..common.json_io import locked_json_path, read_json_object_report
+from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
 from ..common.owner_write_errors import (
     LocalControlCoordinatorUnavailable,
     OwnerManagementIngressUnavailable,
@@ -48,6 +50,78 @@ class OwnerQuotaProjection:
 
 class OwnerQuotaUnavailable(RuntimeError):
     """The authoritative owner quota or current usage could not be read safely."""
+
+
+# LLM: 普通本地用户使用显式有限配额；零子代理/深度有意义，bool和遗漏字段不得被强转。
+# 类用途: 表达注册账号的四项配额，不改变旧owner的默认解析行为。
+@dataclass(frozen=True)
+class LocalUserQuotaLimits:
+    max_active_agents: int = 2
+    max_subagents: int = 2
+    max_depth: int = 1
+    max_disk_mb: int = 1024
+
+    # LLM: 所有构造路径都校验上下界，防止内部adapter绕过JSON校验。
+    # 函数用途: 拒绝无限、负数和类型混淆配额。
+    def __post_init__(self):
+        bounds = ((self.max_active_agents, 1, 1000), (self.max_subagents, 0, 50),
+                  (self.max_depth, 0, 4), (self.max_disk_mb, 1, 1048576))
+        if any(type(value) is not int or not low <= value <= high for value, low, high in bounds):
+            raise ValueError("invalid local user quota")
+
+    # LLM: 返回新字典供序列化，不能修改冻结配额本身。
+    # 函数用途: 投影与现有quota.json相同的四个字段。
+    def to_dict(self):
+        return {"max_active_agents": self.max_active_agents, "max_subagents": self.max_subagents,
+                "max_depth": self.max_depth, "max_disk_mb": self.max_disk_mb}
+
+    # LLM: 显式输入要求字段齐全且无扩展，不隐式补值或缩小超上限请求。
+    # 函数用途: 严格读取调用方指定的用户配额。
+    @classmethod
+    def parse(cls, value):
+        if value is None:
+            return cls()
+        if type(value) is not dict or set(value) != set(cls().to_dict()):
+            raise ValueError("invalid local user quota")
+        return cls(value["max_active_agents"], value["max_subagents"],
+                   value["max_depth"], value["max_disk_mb"])
+
+
+# LLM: 新账号quota仍只有一个权威文件；严格有界无链接读取，不回退为无限配额。
+# 函数用途: 返回普通用户当前配额和修订。
+def read_local_user_quota(home_root: Path, owner_root: Path):
+    parts = (owner_root / "quota.json").relative_to(home_root).parts
+    try:
+        raw = read_bytes_beneath(home_root, parts, max_bytes=16384, require_dir_fd=True)
+        payload = json.loads(raw) if raw is not None else None
+        if type(payload) is not dict or payload.get("schema_version") != "quota.v2":
+            raise ValueError("missing quota")
+        revision = payload["revision"]
+        if type(revision) is not int or revision < 1:
+            raise ValueError("invalid revision")
+        limits = LocalUserQuotaLimits.parse({key: payload[key] for key in LocalUserQuotaLimits().to_dict()})
+        return limits, revision
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise OwnerQuotaUnavailable("local user quota unavailable") from exc
+
+
+# LLM: 调用方已持用户短锁；本函数沿原owner quota→JSON锁序，仅首次种有限配额，已有值只核验不覆盖。
+# 函数用途: 在账号发布前种下并读回唯一quota文件。
+def seed_local_user_quota(home_root: Path, owner_root: Path, limits: LocalUserQuotaLimits):
+    parts = (owner_root / "quota.json").relative_to(home_root).parts
+    payload = {"schema_version": "quota.v2", "revision": 1, **limits.to_dict()}
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    enforcer = OwnerQuotaEnforcer(owner_root, max_bytes=limits.max_disk_mb * 1024 * 1024)
+    with enforcer.admission() as admission:
+        with locked_json_path(owner_root / "quota.json"):
+            existing = read_bytes_beneath(home_root, parts, max_bytes=16384, require_dir_fd=True)
+            if existing is None:
+                admission.check((OwnerQuotaChange(owner_root / "quota.json", len(encoded)),))
+                write_bytes_atomic_beneath(home_root, parts, encoded)
+            observed, revision = read_local_user_quota(home_root, owner_root)
+            if observed != limits or revision != 1:
+                raise OwnerQuotaUnavailable("local user seed differs")
+    return revision
 
 
 # LLM: 锁竞争是暂态事实，与策略/存储不可用分开表达；调用方可安全地按 busy/重试处理，
