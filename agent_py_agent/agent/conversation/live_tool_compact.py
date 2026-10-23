@@ -128,7 +128,7 @@ def resolve_live_tool_compact_binding(
     )
 
 
-# LLM: scope/base在原CAS前保持同源；回调显式取消必须透传并在CAS前复查令牌，获胜提交不回滚。
+# LLM: scope/base及工具基线在原CAS前冻结；同一活跃集策略收敛并保留并发新发现，回调取消透传，获胜提交不回滚。
 # 函数用途: 按冻结范围与摘要基础可中断地提交工具压缩，停止时最多留下孤立恢复点。
 def commit_live_tool_compact(
     agent: SimpleAgent,
@@ -168,6 +168,10 @@ def commit_live_tool_compact(
     # Check after the durable candidate exists but before it receives live authority. An orphan
     # checkpoint is recoverable evidence; advancing generation after /stop is not.
     raise_if_compact_interrupted(request.interrupt_check)
+    from .tool_discovery import compact_tool_selector
+
+    recent_rows = binding.store.messages.recent(binding.thread.thread_id, limit=20)
+    selector = compact_tool_selector(binding.thread, recent_rows)
     return binding.store.threads.update_compact_state(
         binding.thread.thread_id,
         commit=ConversationCompactCommit(
@@ -189,6 +193,9 @@ def commit_live_tool_compact(
             publish_thread_view=binding.scope.kind == "thread",
         ),
         expected_generation=binding.thread.compact_generation,
+        active_loaded_tool_names=selector(binding.thread),
+        active_tool_selector=selector,
+        baseline_loaded_tool_names=tuple(binding.thread.loaded_tool_names),
     )
 
 

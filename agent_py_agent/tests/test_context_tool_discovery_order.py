@@ -60,7 +60,7 @@ def test_blind_call_reload_accepts_list_and_set_and_tracks_order(container, stat
     assert params.loaded_tool_names == (["z", "a"] if container is list else {"z", "a"})
     assert params.allowed_tools is None
     if state is not None:
-        assert state["loaded_tool_order"] == (["q", "z", "a"] if state_kind == "existing" else ["z", "a"])
+        assert state["loaded_tool_order"] == (("q", "z", "a") if state_kind == "existing" else ("z", "a"))
 
 
 # LLM: 线程身份判定沿原规则，线程已有顺序优先；同线程新发现后追加，跨线程面不能带入。

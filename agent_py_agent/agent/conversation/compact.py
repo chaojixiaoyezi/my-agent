@@ -1188,7 +1188,7 @@ def _fit_landmarks_to_target(
     return smaller if smaller.tokens < measured.tokens else measured
 
 
-# LLM: 原checkpoint与generation CAS仍唯一；显式scope/base写入同一候选，局部提交只推进链head不发布全线程摘要/游标。
+# LLM: 原checkpoint/generation CAS仍唯一；活跃工具按真实使用、新近性和固定名选择，并以冻结基线保留摘要期间的新发现。
 # 函数用途: 复验实际覆盖及保留来源后沿原CAS提交同一候选，局部范围和原始文件不变。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
@@ -1239,24 +1239,13 @@ def _commit_compact_candidate(
         ),
     )
     raise_if_compact_interrupted(request.interrupt_check)
-    _emit_compact_progress(
-        request,
-        phase="progress",
-        stage="committing",
-        percent=92,
-        after_tokens=candidate.projected_tokens_after,
-    )
+    _emit_compact_progress(request, phase="progress", stage="committing", percent=92, after_tokens=candidate.projected_tokens_after)
     raise_if_compact_interrupted(request.interrupt_check)
     for rows in (candidate.compact_rows, candidate.retained_tail):
         if isinstance(rows, MessageSnapshotRows):
             rows.validate()
-    from ..tooling.tool_search_state import resolve_active_loaded_tool_names
-    active_tools = resolve_active_loaded_tool_names(
-        [
-            *request.thread.metadata.get("discovered_tool_history", ()),
-            *request.thread.loaded_tool_names,
-        ],
-    )
+    from . import tool_discovery
+    selector = tool_discovery.compact_tool_selector(request.thread, request.pending)
     updated = request.store.threads.update_compact_state(
         request.thread.thread_id,
         commit=ConversationCompactCommit(
@@ -1276,7 +1265,9 @@ def _commit_compact_candidate(
                                  or request.compact_context.scope.kind == "thread"),
         ),
         expected_generation=request.thread.compact_generation,
-        active_loaded_tool_names=active_tools,
+        active_loaded_tool_names=selector(request.thread),
+        active_tool_selector=selector,
+        baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
     )
     return ConversationCompactResult(
         thread=updated,

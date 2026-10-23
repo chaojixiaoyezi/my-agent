@@ -1,5 +1,6 @@
 # LLM: 加载名是线程展示事实，不是权限；只读正式搜索信封并原子并入线程，不从摘要正文反推或写Agent全局状态。
 # 模块用途: 在压缩移走搜索记录后仍让同一线程的下一回合恢复工具表。
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 
 from ..settings.reasoning_effort import run_thread_id
@@ -38,12 +39,32 @@ def ordered_thread_loaded_tools(agent: object, params: object) -> tuple[str, ...
 def seed_loop_discovery_order(agent: object, params: object) -> None:
     state = getattr(params, "live_archive_state", None)
     if isinstance(state, dict) and "loaded_tool_order" not in state:
-        state["loaded_tool_order"] = ordered_tool_names([
+        state["loaded_tool_order"] = list(ordered_tool_names([
             *ordered_thread_loaded_tools(agent, params), *ordered_loop_loaded_tool_names(params),
-        ])
+        ]))
 
 
-# LLM: typed 发现按顺序原子写所属线程；独立 metadata 历史只增不减，活跃字段可由显式边界另选，缺线程不新建。
+# LLM: 只清洗结构化名称；已有名字重现时移到尾部，成员不丢失，不改调用方输入或执行权限。
+# 函数用途: 按最后出现顺序刷新发现新近性，供下一次Compact挑选活跃集。
+def refresh_discovery_recency(existing_history: Iterable[object], newly_active: Iterable[object]) -> tuple[str, ...]:
+    existing = normalized_loaded_tools(list(existing_history))
+    # 同一批内重复调用也以末次出现为准。
+    names = tuple(reversed(normalized_loaded_tools(list(newly_active)[::-1])))
+    return (*tuple(name for name in existing if name not in names), *names)
+
+
+# LLM: 版本只来自本线程宿主metadata；坏版本忽略，旧线程为空，不从文字或时间推断，不改变授权。
+# 函数用途: 读取可跨Compact基线比较的逐工具发现版本，识别尾项重搜等顺序不变的事件。
+def discovery_revisions(thread: object) -> dict[str, int]:
+    metadata = getattr(thread, "metadata", None)
+    raw = metadata.get("discovered_tool_revisions") if isinstance(metadata, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {name: version for name, version in raw.items()
+            if isinstance(name, str) and name and name == name.strip() and type(version) is int and version > 0}
+
+
+# LLM: typed发现同锁写线程；wire顺序不变，metadata刷新新近性并递增事件版本，尾项重搜也留事实，缺线程不新建。
 # 函数用途: 保留完整发现历史和当前加载顺序，不覆盖并发模型设置、Compact 代次或其它 metadata。
 def persist_discovered_tools(agent: object, params: object, record: dict[str, object]) -> None:
     names = ordered_carried_loaded_tool_names([record])
@@ -53,12 +74,16 @@ def persist_discovered_tools(agent: object, params: object, record: dict[str, ob
         return
 
     # LLM: 回调读 update_atomic 提供的最新线程，拷贝 metadata 后合并，不热改传入对象。
-    # 函数用途: 在原线程上一起保存有序加载名与只增不减的发现历史。
+    # 函数用途: 原子保留wire追加顺序并刷新发现新近性和版本，不覆盖其它线程字段。
     def merge(thread):
         loaded = normalized_loaded_tools((*thread.loaded_tool_names, *names))
         metadata = dict(thread.metadata)
         history = normalized_loaded_tools(metadata.get("discovered_tool_history", ()))
-        metadata["discovered_tool_history"] = list(normalized_loaded_tools((*history, *thread.loaded_tool_names, *names)))
+        complete = normalized_loaded_tools([*history, *thread.loaded_tool_names])
+        metadata["discovered_tool_history"] = list(refresh_discovery_recency(complete, names))
+        revisions = discovery_revisions(thread)
+        version = max(revisions.values(), default=0) + 1
+        metadata["discovered_tool_revisions"] = {**revisions, **dict.fromkeys(names, version)}
         return replace(thread, loaded_tool_names=loaded, metadata=metadata) if (
             loaded != thread.loaded_tool_names or metadata != thread.metadata) else thread
 
@@ -69,11 +94,54 @@ def persist_discovered_tools(agent: object, params: object, record: dict[str, ob
         return
 
 
-# LLM: 仅在 Compact CAS 边界收缩活跃加载集合，完整发现历史保留在 metadata，不得凭空新增未发现工具。
+# LLM: 仅从正式原生消息抽取assistant/tool_use名；普通正文、用户块与工具结果不成为使用信号，无副作用。
+# 函数用途: 在CAS锁外冻结近期实际使用顺序，避免锁内扫描原始消息。
+def recent_used_tool_names_from_messages(messages: Iterable[object]) -> tuple[str, ...]:
+    from .native_history import iter_provider_history_messages_from_rows
+
+    recent = []
+    for message in iter_provider_history_messages_from_rows(messages):
+        content = message.get("content")
+        if message.get("role") == "assistant" and isinstance(content, list):
+            recent.extend(block.get("name") for block in content if block.get("type") == "tool_use")
+    return refresh_discovery_recency((), recent)
+
+
+# LLM: CAS内纯计算；基线后重搜临时固定，不被旧recent-use挤掉，下一Compact基线前进后解除；pins须已发现，不授新权限。
+# 函数用途: 保护压缩期间新的搜索意图，再按真实使用与新近性挑选活跃集，保留wire相对顺序。
+def active_tools_for_compact(
+    thread: object, *, recent_used_tool_names: tuple[str, ...] = (),
+    baseline_discovery_revisions: dict[str, int] | None = None,
+) -> tuple[str, ...]:
+    from ..tooling.tool_search_state import resolve_active_loaded_tool_names
+
+    loaded = normalized_loaded_tools(getattr(thread, "loaded_tool_names", ()))
+    metadata = dict(getattr(thread, "metadata", {}) or {})
+    history = normalized_loaded_tools([*metadata.get("discovered_tool_history", ()), *loaded])
+    revisions = discovery_revisions(thread)
+    fresh = () if baseline_discovery_revisions is None else tuple(
+        name for name in history if revisions.get(name, 0) > baseline_discovery_revisions.get(name, 0))
+    pins = tuple(name for name in normalized_loaded_tools([
+        *normalized_loaded_tools(metadata.get("pinned_tool_names", ())), *fresh,
+    ]) if name in history)
+    return resolve_active_loaded_tool_names([*loaded, *history], recent_used_tool_names=recent_used_tool_names, pinned_tool_names=pins)
+
+
+# LLM: 调用方在CAS前调用；锁外冻结消息使用序列和发现版本，返回的selector锁内只读最新线程，无I/O。
+# 函数用途: 给普通和live Compact共用并发基线，不把锁外准备散落到提交函数。
+def compact_tool_selector(thread: object, messages: Iterable[object]) -> Callable[[object], tuple[str, ...]]:
+    from functools import partial
+
+    return partial(active_tools_for_compact, recent_used_tool_names=recent_used_tool_names_from_messages(messages),
+                   baseline_discovery_revisions=discovery_revisions(thread))
+
+
+# LLM: 仅在Compact CAS边界收缩；保留基线后新发现的成员及完整新近性历史，不能凭空新增工具。
 # 函数用途: 计算压缩提交后的线程 metadata 与活跃 loaded_tool_names 字段更新。
 def compact_discovered_tools(
     thread: object,
     active_loaded_tool_names: tuple[str, ...] | None,
+    *, baseline_loaded_tool_names: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     if active_loaded_tool_names is None:
         return {}
@@ -84,4 +152,6 @@ def compact_discovered_tools(
     if not set(selected) <= set(history):
         raise ValueError("active selection must not invent discovered tools")
     metadata["discovered_tool_history"] = list(history)
-    return {"metadata": metadata, "loaded_tool_names": selected}
+    baseline = set(loaded if baseline_loaded_tool_names is None else baseline_loaded_tool_names)
+    concurrent = tuple(name for name in loaded if name not in baseline)
+    return {"metadata": metadata, "loaded_tool_names": normalized_loaded_tools([*selected, *concurrent])}
