@@ -25,6 +25,7 @@ from ...conversation.decision_service import (
 from ...settings.decision_settings_schema import POINT_RUNTIME_SCOPES
 from ...tooling.output_projection import project_tool_output_body
 from ...tooling.runtime_contracts import ToolCall, ToolResult
+from .context_fingerprint import context_fingerprint as _context_revision
 
 _POINT = "external_material_order"
 # 决策点提示文字的最大字符数，控制上下文占用。
@@ -146,22 +147,6 @@ def _operation_id(record: object) -> str:
 # 函数用途: 生成短版本值，坏类型或超出原输入上限会放弃增强。
 def _digest(value: object) -> str:
     return hashlib.sha256(decision_json(value)).hexdigest()
-
-
-# LLM: 参数/权限版本只在宿主内比较，绝不上传 task_attributes、write_boundary 或原工具参数。
-# 函数用途: 判断等待期间当前任务、问题、权限和工具快照是否变化。
-def _context_revision(params: object) -> str:
-    snapshot = getattr(params, "tool_runtime_snapshot", None)
-    return _digest({
-        "request_id": getattr(params, "request_id", ""), "run_id": getattr(params, "run_id", ""),
-        "task_id": getattr(params, "task_id", ""), "user_prompt": getattr(params, "user_prompt", ""),
-        "context_scope": getattr(params, "context_scope", ""),
-        "task_attributes": getattr(params, "task_attributes", None),
-        "allowed_tools": getattr(params, "allowed_tools", None),
-        "write_boundary": getattr(params, "write_boundary", None),
-        "snapshot_hash": getattr(snapshot, "snapshot_hash", ""),
-        "available_tools": sorted(getattr(snapshot, "available_tool_names", ())),
-    })
 
 
 # LLM: 页面必须携带原 artifact 与内容 hash；这些来源只参与本地版本绑定，URL/路径/调用参数不进入外部材料。

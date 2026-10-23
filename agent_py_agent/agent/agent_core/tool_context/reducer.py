@@ -19,24 +19,41 @@ from ...tooling.output_projection import (
 )
 from ...tooling.runtime_contracts import ToolContentBlock, ToolResult
 from ...tooling.runtime_facts import render_tool_runtime_facts
-from ..orchestration.context.live_summary import orchestration_live_summary
 from .action_summary import actionable_tool_result_summary
+from .live_summary import (
+    DOMAIN_TOOLS,
+    agents_live_preview,
+    compact_archive_pointer,
+    orchestration_live_summary,
+)
 
 
 # LLM: 保持外置摘要选择原样，直接展示分支才省略自归档ref；原始refs供归档与Compact使用，同一投影字符串绑定native结果。
 # 函数用途: 整理本次工具正文、逻辑恢复引用和执行事实，只修改模型临时视图，不写原始结果。
 def render_tool_result_for_live_prompt(result: ToolResult, archive_record: dict[str, object]) -> str:
     live_output = _live_prompt_output(result)
+    # Only the producer's recognizable derived tree preview is reprojected; stored/custom live text keeps priority.
+    if (live_output is not None and result.tool_name == "list_agents"
+            and archive_record.get("output_externalized") and not _preserve_prompt_output(result)
+            and archive_record.get("preserve_prompt_output") is not True):
+        live_output = agents_live_preview(result, live_output, archive_record)
+    if live_output is None:
+        stored_live = archive_record.get("live_prompt_output")
+        if isinstance(stored_live, str) and stored_live:
+            live_output = stored_live
     if live_output is not None:
-        rendered = _inline_result_with_archive_anchor(
-            replace(
+        projected = replace(
                 result,
                 content_blocks=(
                     ToolContentBlock("text", text=_project_output_body(result, live_output)),
                 ),
-            ),
-            archive_record,
         )
+        if (archive_record.get("output_externalized") and not _preserve_prompt_output(result)
+                and archive_record.get("preserve_prompt_output") is not True):
+            rendered = (_without_own_archive_refs(projected, archive_record).render_for_prompt()
+                        + "\n" + compact_archive_pointer(archive_record))
+        else:
+            rendered = _inline_result_with_archive_anchor(projected, archive_record)
     elif _preserve_prompt_output(result) or not archive_record.get(
         "output_externalized"
     ):
@@ -85,6 +102,11 @@ def _externalized_result_summary(
     stored_summary = str(archive_record.get("model_summary") or "").strip()
     if stored_summary:
         return stored_summary
+    if result.tool_name in DOMAIN_TOOLS:
+        domain_summary = orchestration_live_summary(result, archive_record)
+        if domain_summary:
+            return "\n".join((result.render_status_header(), _project_output_body(result, domain_summary),
+                              compact_archive_pointer(archive_record), result.render_execution_facts()))
     if _output_trust(result) != "external_data":
         orchestration_summary = orchestration_live_summary(result, archive_record)
         if orchestration_summary:

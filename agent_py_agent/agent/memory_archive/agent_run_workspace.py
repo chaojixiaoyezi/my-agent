@@ -19,7 +19,6 @@ from typing import Any
 
 from ..common.json_io import (
     append_private_jsonl_records,
-    jsonl_lines,
     write_private_json_file_atomic,
     write_private_jsonl_records,
     write_private_text_file_atomic,
@@ -329,23 +328,24 @@ def _append_timeline(path: Path, payload: dict[str, object]) -> None:
     append_private_jsonl_records(path, [payload])
 
 
+# LLM: Read only the final nonblank LF record; retain the run-specific signature and original IO/JSON error handling.
+# 函数用途: 有界读取agent-run时间线末条记录的去重签名，不合并task的refs规则。
 def _last_event_signature(path: Path) -> tuple[object, ...] | None:
+    from .tail_lines import read_last_nonblank_line
+
     if not path.exists():
         return None
     try:
-        # JSONL 记录边界只能是物理 LF：splitlines() 会在 U+0085/U+2028/U+2029 等合法正文字符处切开记录。
-        lines = jsonl_lines(path.read_text(encoding="utf-8"))
+        line = read_last_nonblank_line(path)
     except OSError:
         return None
-    for line in reversed(lines):
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        return _event_signature(payload) if isinstance(payload, dict) else None
-    return None
+    if line is None:
+        return None
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return _event_signature(payload) if isinstance(payload, dict) else None
 
 
 def _event_signature(payload: dict[str, object]) -> tuple[object, ...]:

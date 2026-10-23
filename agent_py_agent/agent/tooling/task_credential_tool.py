@@ -35,7 +35,14 @@ class RequestCredentialsTool(BaseTool):
     # 函数用途: 说明真实安全输入卡、认证就绪状态及凭据发现用法，避免用聊天表格代替宿主交互或对已就绪引用重复configure。
     def __init__(self,agent):
         self.agent = agent
-        self.model_spec = ToolModelSpec(name='request_credentials', description='用户要新的账号密码或秘密输入界面时，用operation=request申请真实安全输入卡，常规账号密码用collection_mode=username_password。默认authentication=collected仅收集时可不传url，目标链接由用户在卡片里填写；发卡本身不访问目标网站，无需先搜索模板或历史。聊天表格、Markdown下划线或口头描述不能替代宿主安全表单，也不能要求用户在普通聊天中填写秘密。只有工具回执request_delivery.status=confirmed才可说卡片已发出；waiting_input只表示等待填写，不表示已提交或保存。已有credential_ref需确认填写或保存状态时，用operation=status和原引用；返回安全元信息，不读取秘密。find仅按真实URL的同origin发现，不能传credential_ref或编造占位URL；空匹配不表示某个引用未填写。群内需要认证的站点先 operation=find 传准确url，或用list查看本群已授权凭据；find的selected_credential_ref由宿主按实际填写人本人账号优先、否则本群固定顺序选择，已有可用引用直接交web_fetch。本人账号401/403或失败不能静默改用他人账号；用户明确撤销自己的引用后可重新find使用本群其他可用账号。旧task群卡不会自动共享；仅用户明确要求共享本人旧群卡时，可用operation=share把shareable_credentials中的本人旧卡原位共享，再find，无须重填。只有确实缺失或用户明确新增/换账号才用operation=request发新卡；request始终明确申请，不因别人已有凭据隐式复用。群新卡默认本群共享，个人来源仅本人任务；可显式access_scope=task。无需先选认证协议；request时若已指定basic/bearer等认证方式则保存后已就绪，直接交web_fetch使用，无须再configure；仅authentication=collected只保存，使用前configure原引用与准确方案，再由web_fetch宿主注入秘密。可用job_id绑定已有本人的监控。',
+        self.model_spec = ToolModelSpec(name='request_credentials', description=(
+            '用真实安全卡收集秘密，禁止要求在普通聊天填写；发卡不访问目标。request常规账号密码用collection_mode=username_password；'
+            'authentication=collected时url可由用户在卡片填。只有request_delivery.status=confirmed可称已发卡，waiting_input不等于已填或已保存。'
+            '已有credential_ref用status查安全状态；find只接受真实同origin URL，空匹配不证明旧引用未填写。'
+            '群站点先find准确URL或list已授权凭据；selected_credential_ref由宿主按本人优先选择，可直接交web_fetch。'
+            '本人的401/403或失败不得静默换他人账号；仅用户撤销自己的引用后可重find。旧task群卡仅在用户明确要求时share本人可分享引用。'
+            '仅缺失或用户明确新增/换账号才request；群新卡默认群共享、个人来源仅本人，可显式access_scope=task。'
+            'request已指定basic/bearer等方案时保存后即可用；collected仅保存，使用前configure原引用与准确方案，由宿主注入秘密。job_id仅绑定已有本人监控。'),
             input_schema={'type':'object','properties':{'url':{'type':'string','description':'find须提供真实目标URL，按同origin发现；不得编造占位URL代查已有引用，已有ref用status。'}, 'authentication':{'type':'string','enum':['collected','basic','bearer','header','login','signature']},
             'collection_mode':{'type':'string','enum':['username_password','password'], 'description':'常规账号密码或仅密码使用本项；宿主自动生成相应秘密字段，以及缺失的目标链接、可选名称和备注。'},'header_name':{'type':'string'},'job_id':{'type':'string'},
             'fields':{'type':'array','description':'需要自定义秘密字段时才传；常规账号密码优先使用collection_mode。目标链接、可选名称和备注由宿主表单提供，不要在此重复声明。', 'items':{'type':'object','properties':{'name':{'type':'string'},'label':{'type':'string'}},'required':['name','label'],'additionalProperties':False}},

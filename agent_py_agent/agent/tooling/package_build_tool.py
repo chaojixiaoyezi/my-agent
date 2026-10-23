@@ -81,7 +81,8 @@ class PackageBuildTool(BaseTool):
     model_spec = ToolModelSpec(
         name=PACKAGE_BUILD_TOOL,
         description=(
-            "把整理好的目录打成能力包（kind=capability_pack，方法、模板、检查清单、离线小工具）或文件型插件包"
+            "仅在用户明确要求打包可分发能力包（CAPABILITY.md）或插件时使用；普通 Skill（SKILL.md）不走此工具，"
+            "原生工作流/脚本使用 workflows / scripts 工具。把整理好的目录打成能力包（kind=capability_pack，方法、模板、检查清单、离线小工具）或文件型插件包"
             "（kind=plugin，要运行的程序/工具）。只打包、不安装：成功后回执给出 sha256、两个自动装开关的当前状态、"
             "开关命令原文和下一步（用 package_install 传这个 sha256 安装）。source_dir 写目录路径：写文件回执里的相对路径"
             "按当前工作目录算，也可以写绝对路径；目录要在你读得到的地方（任务工作区即可）；"
@@ -109,7 +110,7 @@ class PackageBuildTool(BaseTool):
         hints=ToolModelHints(
             category="capability",
             use_cases=("学完外部 agent 后把方法做成能力包", "把自己写的离线小工具或服务做成插件包"),
-            avoid_when=("只是普通写文件或给用户交付文档", "创建普通 Skill（应写到 <workspace>/.agent/skills/<id>/SKILL.md）或创建 Owner 固化脚本/工作流（应用 scripts / workflows 工具）"),
+            avoid_when=("只是普通写文件或给用户交付文档", "未取得用户明确打包可分发能力包（CAPABILITY.md）或插件的要求时不要使用；创建普通 Skill（SKILL.md）或原生工作流/脚本不打包，分别用 Skill 入口及 workflows / scripts 工具"),
             keywords=("能力包", "插件", "打包", "learnpack"),
             default_deferred=True,
             deferred_summary="把整理好的外部学习能力包或插件目录打成包（不用于普通Skill或workflows/scripts）",

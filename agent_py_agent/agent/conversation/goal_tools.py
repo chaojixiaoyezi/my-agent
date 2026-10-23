@@ -271,18 +271,11 @@ class UpdateGoalTool(BaseTool):
     model_spec = ToolModelSpec(
         name="update_goal",
         description=(
-            "Update this agent's existing goal. Supply objective to revise it when the user or parent "
-            "changes the requested outcome; do not shrink the scope merely to declare success. "
-            "An objective-only edit preserves status, task identity and usage. Supply status only "
-            "to mark the goal achieved or genuinely blocked. "
-            "Set status to complete only when the objective has actually been achieved and no required work remains. "
-            "Set status to blocked only when the same blocking condition has repeated for at least three consecutive "
-            "goal turns, counting the original user-triggered turn and automatic continuations, and no meaningful "
-            "progress is possible without user input or an external-state change. If the user resumes a previously "
-            "blocked goal, start a fresh three-turn blocked audit. Do not use blocked merely because work is hard, "
-            "slow, uncertain, incomplete, or would benefit from clarification. Do not mark complete because budget "
-            "is low or work is stopping. Pause, resume and budget changes remain user/system controlled. When a "
-            "budgeted goal completes, report final token usage from the structured tool result."
+            "Revise this agent’s existing goal without shrinking scope to claim success. Objective-only changes preserve status, identity and usage. "
+            "Mark complete only after all required work is achieved. Mark blocked only when the same blocker has persisted for at least three "
+            "consecutive goal turns, including the triggering turn, and no useful progress is possible without external change or user input; "
+            "restart that count after a resumed blocked goal. Difficulty, uncertainty, low budget or stopping are not completion/blocking evidence. "
+            "Pause, resume and budgets remain user/system controlled. On budgeted completion report actual structured token usage."
         ),
         input_schema={
             "type": "object",

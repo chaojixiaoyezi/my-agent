@@ -35,6 +35,23 @@ _DEFAULT_LIMIT, _MAX_LIMIT = 20, 100
 # 跨用户审计一次最多覆盖的用户数
 _MAX_OWNERS_COUNT = 64
 
+# 指标口径随真实回执交付；每次返回副本，不让调用方污染后续查询。
+_REQUEST_FIELD_GLOSSARY = {
+    "send_intent_uncertain": "选模型已采用、只记发送意图，设计上不随请求结束结清，带 status_note；实际用了哪个模型以 usage 为准。",
+}
+_DECISION_FIELD_GLOSSARY = {
+    **_REQUEST_FIELD_GLOSSARY,
+    "jev_failures": "请求发出去之后失败或超时的次数，算 Jev 失败率只用它。",
+    "not_sent_calls": "只统计建了调用记录、却一次 HTTP 尝试都没有的调用，如 admission_busy、发送前期限用完。",
+    "input_tokens_estimated_unfinished": "未完成调用发送前的本地估算，不是供应商回报。",
+    "points.not_sent": "没发出去的结果单列在 not_sent，不计入超时率和失败率；还包括根本没建调用记录的冷却、budget_exhausted 等，通常比用量里的 not_sent_calls 大，两者范围不同，不要对比或相加。",
+    "status=skipped": "已到触发点但被条件挡下。",
+    "reason=privacy_url": "要外发的材料含带查询串的 URL。",
+    "point_diagnostics": "enabled 为是否开启，reached 为最近检查次数，called 为真正调用次数；note 是点位适用范围，如选模型只在经 Gateway 的对话里判断。",
+    "point_diagnostics.covered": "covered=false 表示还没统计未触发原因，不要说成 0 次。",
+    "not_called.label": "没调用原因的大白话标签；调用 0 次不代表没接线，直接用这些 label 说明最近为什么没触发。",
+}
+
 
 # LLM: 一次审计已校验的结构化参数：thread_id 只在 scope=current_thread 时取自宿主运行上下文，其余为空；since 为时间窗起点。
 # 类用途: 在各审计主题收集器之间传递同一份请求参数。
@@ -154,7 +171,8 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
         unreadable_threads += errors
         thread_owners.update(dict.fromkeys(ids, owner_id))
         owners.append(_decision_owner_report(owner_id, host, ids, query))
-    return {"owners": owners, "owners_truncated": truncated, "unreadable_thread_records": unreadable_threads,
+    return {"field_glossary": dict(_DECISION_FIELD_GLOSSARY),
+            "owners": owners, "owners_truncated": truncated, "unreadable_thread_records": unreadable_threads,
             "observations": _observations(agent, thread_owners, query),
             "sources": ["decision_settings", "model_usage_ledger", "decision_outcome_log", "decision_reach_counts",
                         "gateway_request_records"]}
@@ -165,7 +183,8 @@ def _decision_topic(agent: object, query: AuditQuery) -> dict:
 def _requests_topic(agent: object, query: AuditQuery) -> dict:
     from .audit_requests_topic import requests_topic
 
-    return requests_topic(agent, query, max_owners=_MAX_OWNERS_COUNT)
+    return {**requests_topic(agent, query, max_owners=_MAX_OWNERS_COUNT),
+            "field_glossary": dict(_REQUEST_FIELD_GLOSSARY)}
 
 
 _TOPIC_COLLECTORS = {"decision": _decision_topic, "requests": _requests_topic}
@@ -198,25 +217,10 @@ class AuditRecordsTool(BaseTool):
     model_spec = ToolModelSpec(
         name=TOOL_NAME,
         description=(
-            "统一审计入口：查询当前用户自己的结构化运行记录，回答'到底调没调用、成功失败几次、用了多少 token、设置是什么、为什么失败'。"
-            "topic=decision 汇总决策模型（Jev）：有效设置与各接入点模式、会话用量账本里的调用次数/成功/失败/超时/已报输入 token"
-            "（jev_failures 是请求发出去之后失败或超时的次数，算 Jev 失败率只用它；not_sent_calls 只统计建了调用记录、"
-            "却一次 HTTP 尝试都没有的调用，如 admission_busy、发送前期限用完；"
-            "input_tokens_estimated_unfinished 是未完成调用发送前的本地估算，不是供应商回报）、"
-            "各接入点的决策结果（成功/超时等次数与最近几条；没发出去的结果单列在 not_sent，不计入超时率和失败率。"
-            "points 的 not_sent 还包括根本没建调用记录的冷却、budget_exhausted 等，所以通常比用量里的 not_sent_calls 大，"
-            "两者范围不同，不要对比或相加；status=skipped 表示已到触发点但被条件挡下，"
-            "reason=privacy_url 指要外发的材料含带查询串的 URL），"
-            "以及 point_diagnostics：每个接入点是否开启（enabled）、最近检查了几次（reached）、真正调用几次（called）、"
-            "没调用的原因分布（not_called 的 label 是给用户看的大白话）。调用 0 次不代表没接线，向用户解释时请直接用这些 label"
-            "说明“最近为什么没触发”；note 是点位适用范围（如选模型只在经 Gateway 的对话里判断）；"
-            "covered=false 的点位表示还没统计未触发原因，不要说成 0 次。"
-            "Gateway 请求记录里的选模型与能力推荐观察（选模型 status=send_intent_uncertain 是已采用、只记发送意图，"
-            "设计上不随请求结束结清，带 status_note；实际用了哪个模型以 usage 为准）。topic=requests 列出 Gateway 请求结果：状态、错误码及处理建议、渠道、"
-            "私聊/群聊、耗时和归属用户；用户说'飞书/IM/TUI 发消息报错、没回复'时先用它查，管理员调用时还附带管理员密码是否已设、"
-            "哪些 IM 私聊已绑定管理员。scope=current_thread 只看当前会话，owner（默认）看本人全部会话，"
-            "all_owners 仅管理员且已明确开启跨用户审计时可用。只读权威记录，不读日志和对话正文；"
-            "回答决策是否被调用时必须以本工具结果为准，不要 grep 日志或凭文件名下结论。"
+            "只读本人结构化运行审计，不读对话/日志正文。topic=decision查决策点有效设置、调用与未触发原因、用量和结果；"
+            "解释指标须使用回执中的字段定义、label、coverage和status_note，不把未发送/未覆盖统计当失败或零次。"
+            "topic=requests查Gateway/IM/TUI请求状态、错误、建议、渠道、耗时与归属。scope默认owner，current_thread限本会话，"
+            "all_owners仅显式获跨用户审计权限的管理员。实际模型与用量以usage为准，不能据文件名或grep日志声称调用事实。"
         ),
         input_schema={
             "type": "object",

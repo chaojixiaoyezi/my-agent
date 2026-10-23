@@ -1,7 +1,10 @@
 
+# LLM: Evidence payloads reuse the explicit shared whitelist, never unknown source fields.
+# 模块用途: 登记结构化子代理结果并生成保留原字段语义的证据载荷。
 from __future__ import annotations
 
 from ..common.value_parsing import text_or_sequence_strings
+from .evidence_packet_serializer import serialize_evidence_packet as _evidence_packet_dict
 from .models import EvidencePacket, Finding, SubAgentTask, VerificationEvidence
 from .result_artifact_evidence import normalize_artifact_ref
 from .utils import _merge_list, _new_id
@@ -89,20 +92,6 @@ def _finding_from_item(item: dict[str, object], now: float) -> Finding | None:
         counter_evidence_refs=_string_refs(item.get("counter_evidence_refs", [])),
         created_at=now,
     )
-
-
-def _evidence_packet_dict(packet: EvidencePacket) -> dict[str, object]:
-    return {
-        "id": packet.id,
-        "claim": packet.claim,
-        "checked_scope": packet.checked_scope,
-        "evidence_refs": packet.evidence_refs,
-        "artifact_refs": packet.artifact_refs,
-        "counter_evidence_refs": packet.counter_evidence_refs,
-        "confidence": packet.confidence,
-        "unresolved_risks": packet.unresolved_risks,
-        "created_at": packet.created_at,
-    }
 
 
 def _finding_dict(finding: Finding) -> dict[str, object]:

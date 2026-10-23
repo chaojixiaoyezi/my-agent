@@ -7,10 +7,7 @@ from copy import deepcopy
 
 from ...subagents.role_templates import role_template_index_text
 from ...tooling.models import ToolModelHints, ToolModelSpec
-from .coordinator_policy import coordinator_tool_boundary_text
 from .tool_spec_data import (
-    _CREATE_DEPENDENCY_ORDER_RULE,
-    _CREATE_DISJOINT_WRITE_SCOPE_RULE,
     _CREATE_EXAMPLES,
     _CREATE_INPUT_MEDIA_DETAILS,
     _CREATE_INPUT_MEDIA_PARAMETERS,
@@ -113,18 +110,15 @@ def build_create_subagents_model_spec(*, input_media: bool = False) -> ToolModel
     return ToolModelSpec(
         name="create_subagents",
         description=(
-            "把独立工作交给下级代理；主、子、孙代理共用此工具。创建后立即运行，进展、阻塞和完成事件"
-            "自动通知直接父级，不需要轮询或额外推进；查看或引导已有下级使用当前工具列表中的对应能力。"
-            "回合结束后子代理完成会自动触发一个新的续跑回合：结果写入本会话（TUI/飞书用户无需操作即可看到），"
-            "但不会更新已经返回的本次响应；需要子代理结果作为本次交付时，应在结束回合前等它们完成，"
-            "或先交付阶段结果并说明后续补齐。"
-            "单派传 goal；批量传 items，每项 goal 必填，顶层 goal 只是可选批次说明。"
-            + _CREATE_DEPENDENCY_ORDER_RULE
-            + _CREATE_DISJOINT_WRITE_SCOPE_RULE
-            + "凡 child 原样承接一个已存在 open 项，在 covers 中复制 exact id，具体限制见参数说明。"
-            "普通 child 继承父级已授权的 owner 工作区；同一 owner 的业务目录不是额外隔离墙，"
-            "但 goal 和产物路径不能扩大当前权限。不要重复派工或为凑数量派工。派工后的职责边界："
-            + coordinator_tool_boundary_text()
+            "将边界清楚且能并行的独立工作交给直属下级；主、子、孙共用。单派用goal，批量用items且每项goal必填；"
+            "所有items立即并发，文字中的先后顺序不生效。依赖前项结果或可能修改同一文件/模块的任务须分批。"
+            "明确共同目录、独占范围、交付物与验收；output_files仅为协调线索，不是写集、锁或授权。"
+            "承接现有open Todo时在covers复制exact id；返工先按原id重开，不能借无关id。child沿原owner工作区授权，"
+            "goal和路径不能扩权。创建后生命周期事件自动通知父级，无需轮询；回合结束后由新续跑回合交付结果，不改已返回响应。"
+            "本次交付依赖child时，在结束前等结果或明确阶段交付。优先完成自己负责的工作，只委派可独立部分；"
+            "用户明确留给你的职责不可整体转交，不重复child正在做的工作。等待时推进已授权且不冲突的工作，"
+            "关键结果须对照原始资料核验后整合测试；无有用工作时自然等待。遵守用户对主代理实现范围的限制；"
+            "接手child范围前确认其已结束或停止冲突操作，慢不等于失败，不盲目重复派工。"
         ),
         input_schema=_create_subagents_input_schema(input_media=input_media),
         hints=_hints(
@@ -182,7 +176,11 @@ def build_task_progress_model_spec() -> ToolModelSpec:
     }
     return ToolModelSpec(
         name="task_progress",
-        description="记录或读取当前运行的进度笔记。它只是可选的软账本，不选择会话、不切换工作区、不决定当前轮或后续轮是否继续。【复杂/长任务先建 plan】开工先把任务拆成 items 建一份稳定清单；后续沿用原 id 更新，不能在每次唤醒时另建一套同义清单。每完成一项立即 update 把该项 status 标为 done（界面会逐项打钩显示，模型跨轮也能靠它续接）。把某个仍 open 项原样交给下级时，应在 create_subagents 对应 item 的 covers 中复制 exact id；只有额外工作或关系不能确定时才省略 covers。未绑定 child 完成后，父级仍要按已有 exact id 更新被证实完成的计划项。已关闭项要返工时，先对原 id 传 status=in_progress, correction=true 明确重开，不能拿无关 open id 顶替。清单仍有 open 项且当前还能推进时继续调用工具；只有目标完成或存在真实阻塞时才 final。",
+        description=(
+            "读取或更新当前run的可选进度账本，不切会话/工作区，也不负责续跑或完成判定。复杂长任务建立稳定items并沿原id更新；"
+            "每项有证据完成时标done。原样委派open项时在child.covers复制exact id；未绑定child由父级按证据更新原项。"
+            "返工用原id、status=in_progress、correction=true重开，不拿无关项顶替。仍有可推进工作时继续；目标完成或真实阻塞时交付。"
+        ),
         input_schema=_input_schema(parameters, property_schemas, details=details),
         hints=_task_progress_model_hints(),
     )

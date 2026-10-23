@@ -148,6 +148,22 @@ def validate_provider(value: object) -> dict:
     return result
 
 
+# LLM: Shared pure validation rejects bool before float conversion; callers keep their own fallback/formatting.
+# 函数用途: 统一解析0至2的有限温度，空值不发送，非法值抛模型配置错误。
+def parse_temperature(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, bool):
+            raise ValueError("boolean temperature")
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ModelProfileError("温度须留空或填写 0 至 2 的数值。") from None
+    if not math.isfinite(number) or not 0 <= number <= 2:
+        raise ModelProfileError("温度须留空或填写 0 至 2 的数值。")
+    return number
+
+
 # LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
 #   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签、输入模态和思考控制方式在此登记，决策模型都不接受。
 # 函数用途: 检查模型协议、用途、容量、适用采样和可选用途标签；型号允许透传，决策模型不接受无效的生成参数。
@@ -174,15 +190,9 @@ def validate_model(value: object) -> dict:
             **_input_modalities_field(value, capability), **_reasoning_control_field(value, capability),
             **_reasoning_levels_field(value, capability),
             **_structured_output_field(value, capability)}
-    temperature = value.get("temperature")
-    if temperature not in (None, ""):
-        try:
-            number = float(temperature)
-        except (TypeError, ValueError) as exc:
-            raise ModelProfileError("温度须留空或填写 0 至 2 的数值。") from exc
-        if isinstance(temperature, bool) or not math.isfinite(number) or not 0 <= number <= 2:
-            raise ModelProfileError("温度须留空或填写 0 至 2 的数值。")
-        result["temperature"] = str(number)
+    temperature = parse_temperature(value.get("temperature"))
+    if temperature is not None:
+        result["temperature"] = str(temperature)
     try:
         top_p = validate_top_p(value.get("top_p"))
     except ValueError as exc:

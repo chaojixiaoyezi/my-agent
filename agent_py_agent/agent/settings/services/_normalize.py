@@ -26,6 +26,7 @@ from ...backends.sampling import validate_top_p
 from ...backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ...path_access_policy import normalize_path_access_mode
 from ..defaults import default_agent_config
+from ..model_provider_schema import ModelProfileError, parse_temperature
 from ..user_config_capability import is_credential_key
 from ._coercion import CoercionService
 from .runtime_tool_field_specs import TOOL_INT_FIELDS
@@ -185,25 +186,13 @@ def _normalize_temperature(out: dict[str, object], defaults: object) -> list[str
     if raw_temp is None or raw_temp == [] or (isinstance(raw_temp, str) and not raw_temp.strip()):
         out["temperature"] = None
         return []
-    temp_val = _temperature_value(raw_temp)
-    if temp_val is not None and 0.0 <= temp_val <= 2.0:
-        out["temperature"] = raw_temp.strip() if isinstance(raw_temp, str) else str(temp_val)
-        return []
-    out["temperature"] = defaults.temperature
-    if temp_val is None:
-        return [f"temperature: expected a number or blank, got {raw_temp!r}; not sending temperature"]
-    return [f"temperature: expected 0.0-2.0, got {temp_val}; not sending temperature"]
-
-
-def _temperature_value(raw_temp: object) -> float | None:
-    if isinstance(raw_temp, str):
-        try:
-            return float(raw_temp.strip())
-        except ValueError:
-            return None
-    if isinstance(raw_temp, (int, float)):
-        return float(raw_temp)
-    return None
+    try:
+        temp_val = parse_temperature(raw_temp)
+    except ModelProfileError:
+        out["temperature"] = defaults.temperature
+        return [f"temperature: expected a number in 0.0-2.0 or blank, got {raw_temp!r}; not sending temperature"]
+    out["temperature"] = raw_temp.strip() if isinstance(raw_temp, str) else str(temp_val)
+    return []
 
 
 # ---------------------------------------------------------------------------

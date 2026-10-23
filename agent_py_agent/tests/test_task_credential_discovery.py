@@ -1,4 +1,6 @@
 """凭据发现只返回原宿主裁决；原工具schema/Registry与合成owner，不读取真实凭据。"""
+# LLM: Exercise authorized discovery and real cold-card adapters with synthetic owners; keep the parameter schema unchanged.
+# 模块用途: 验证凭据发现、真实安全卡入口及精简描述，不读取或发送真实秘密。
 import json
 import sys
 from types import ModuleType, SimpleNamespace
@@ -392,10 +394,12 @@ def test_find_reference_conflict_is_rejected_before_host_discovery(discovery_too
     assert 'status' in result.output and 'credential_ref' in result.output
 
 
+# LLM: Candidate wording changes, but reference status must stay distinct from same-origin discovery.
+# 函数用途: 核对精简文案仍明确已有凭据引用的状态查询与空匹配边界。
 def test_tool_catalog_distinguishes_reference_status_from_origin_discovery():
     spec = RequestCredentialsTool(SimpleNamespace()).model_spec
-    assert '已有credential_ref' in spec.description and 'operation=status' in spec.description
-    assert '空匹配不表示' in spec.description
+    assert '已有credential_ref用status查安全状态' in spec.description
+    assert '空匹配不证明旧引用未填写' in spec.description
     assert '占位' in spec.input_schema['properties']['url']['description']
     assert '不透明' in spec.input_schema['properties']['credential_ref']['description']
     assert any('status' in hint for hint in spec.hints.use_cases)
@@ -443,12 +447,16 @@ def _cold_card_agent(tmp_path):
     return agent
 
 
+# LLM: Align only literal prose with the reviewed candidate; keep request, safety, URL and schema assertions.
+# 函数用途: 验证精简名卡仍优先说明真实安全发卡、确认状态和无需查模板。
 def test_cold_card_metadata_explains_real_collection_before_saved_reference_lookup():
     spec = RequestCredentialsTool(SimpleNamespace()).model_spec
     lead = spec.description.split('已有credential_ref',1)[0]
-    assert 'operation=request' in lead and '账号密码' in lead and '安全输入卡' in lead
-    assert '不传url' in lead and '不访问目标网站' in lead and '模板或历史' in lead
-    assert 'confirmed' in lead and '聊天表格' in lead
+    assert 'request常规账号密码用collection_mode=username_password' in lead and '用真实安全卡收集秘密' in lead
+    assert 'authentication=collected时url可由用户在卡片填' in lead and '发卡不访问目标' in lead
+    assert 'request_delivery.status=confirmed' in lead and '禁止要求在普通聊天填写' in lead
+    assert 'waiting_input不等于已填或已保存' in lead
+    assert any('无须先找模板或历史' in case for case in spec.hints.use_cases)
     assert any('安全输入卡' in case and 'request' in case for case in spec.hints.use_cases)
     assert {'账号密码','输入卡','安全表单'} <= set(spec.hints.keywords)
     assert any('聊天表格' in note for note in spec.hints.avoid_when)
@@ -456,6 +464,8 @@ def test_cold_card_metadata_explains_real_collection_before_saved_reference_look
     assert not validate_tool_input({'operation':'find','url':'https://example.com','credential_ref':'cred_synthetic'},spec.input_schema).ok
 
 
+# LLM: Real cold search still returns exactly the currently authorized schema and candidate description.
+# 函数用途: 保留自然语言发卡检索与授权门回归，只同步候选措辞。
 @pytest.mark.parametrize('query',['新的账号密码输入卡','安全表单收集认证信息','申请凭据卡'])
 def test_cold_card_natural_search_recovers_only_current_authorized_schema(tmp_path,query):
     from dataclasses import replace
@@ -468,12 +478,14 @@ def test_cold_card_natural_search_recovers_only_current_authorized_schema(tmp_pa
     tools = json.loads(result.output)['tools']
     found = next(tool for tool in tools if tool['name']=='request_credentials')
     assert found['input_schema'] == agent.tools.tools['request_credentials'].model_spec.input_schema
-    assert 'operation=request' in found['description'] and '安全输入卡' in found['description']
+    assert 'request常规账号密码' in found['description'] and '真实安全卡' in found['description']
     loaded = set(result.result_envelope['tool_search']['loaded_tool_names'])
     assert 'request_credentials' in loaded
     assert 'request_credentials' in {s.name for s in agent.tools.model_visible_specs(runtime_snapshot=snapshot,loaded_tool_names=loaded)}
 
 
+# LLM: Both real payload projectors must retain identical schemas and the no-network/confirmed contract.
+# 函数用途: 核对候选描述经两个供应商入口原样出站，参数不变。
 @pytest.mark.parametrize('provider',['anthropic','chat'])
 def test_cold_card_metadata_reaches_original_provider_payload_without_schema_changes(provider):
     from agent_py_agent.agent.backends.anthropic import AnthropicCompatibleBackend
@@ -487,7 +499,7 @@ def test_cold_card_metadata_reaches_original_provider_payload_without_schema_cha
     tool = payload['tools'][0] if provider=='anthropic' else payload['tools'][0]['function']
     assert tool['name']==spec.name and tool['description']==spec.description
     assert tool['input_schema' if provider=='anthropic' else 'parameters']==spec.input_schema
-    assert 'confirmed' in tool['description'] and '不访问目标网站' in tool['description']
+    assert 'request_delivery.status=confirmed' in tool['description'] and '发卡不访问目标' in tool['description']
     assert not spec.hints.default_deferred
 
 
