@@ -130,12 +130,6 @@ def split_skill_frontmatter(text: str) -> tuple[dict[str, Any], str]:
     return _parse_meta(header), "\n".join(lines[end + 1:])
 
 
-# LLM: 旧名称只委托唯一codec，不维护第二份实现。
-# 函数用途: 兼容原拆分入口。
-def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    return split_skill_frontmatter(text)
-
-
 # LLM: 顶层必须为完整映射，重复键与未消费缩进拒绝；列表字段由schema归一。
 # 函数用途: 从头部生成普通JSON兼容元数据。
 def _parse_meta(text: str) -> dict[str, Any]:
@@ -151,9 +145,12 @@ def _parse_meta(text: str) -> dict[str, Any]:
     return data
 
 
-# LLM: 仅引号外且前有空白的井号开始注释，处理双引号转义与单引号双写。
+# LLM: 只有标量起点引号进入quote模式；普通标量内部引号是文本，井号注释仍要求前置空白。
 # 函数用途: 保留标量中的C#与引号文本。
-def _yaml_uncomment(line):
+def _yaml_uncomment(line, *, plain_scalar=False):
+    if plain_scalar:
+        return re.split(r"(?:^|\s)#", line, maxsplit=1)[0].rstrip()
+    starts = _yaml_quote_positions(line)
     quote, index = "", 0
     while index < len(line):
         char = line[index]
@@ -166,7 +163,7 @@ def _yaml_uncomment(line):
                     index += 2
                     continue
                 quote = ""
-        elif char in "\"'" and (index == 0 or line[index - 1] in " \t:[{,"):
+        elif char in "\"'" and index in starts:
             quote = char
         elif char == "#" and (index == 0 or line[index - 1].isspace()):
             return line[:index].rstrip()
@@ -176,16 +173,109 @@ def _yaml_uncomment(line):
     return line.rstrip()
 
 
+# LLM: 真映射冒号后须空白或行末；quoted键须先找到结束引号，值中冒号不改变标量起点。
+# 函数用途: 找到key冒号或列表短横线后的标量起点。
+def _yaml_value_offset(line):
+    offset = len(line) - len(line.lstrip())
+    if line[offset:].startswith("- "):
+        offset += 2
+    value = line[offset:]
+    if value.startswith(("'", '"')):
+        end = _yaml_quote_end(value, value[0], 1)
+        mapping = re.match(r":(?:[ \t]+|$)", value[end + 1:]) if end is not None else None
+        return offset + end + 1 + mapping.end() if mapping else offset
+    mapping = re.match(r"[^:\n]+:(?:[ \t]+|$)", value)
+    return offset + mapping.end() if mapping else offset
+
+
+# LLM: 一次预计算可能的标量起点，不为普通标量内的每个引号重复扫描整行前缀。
+# 函数用途: 为注释扫描和流容器拆分共用线性引号起点集合。
+def _yaml_quote_positions(value, *, flow=False):
+    offset = 0 if flow else _yaml_value_offset(value)
+    starts = set() if flow else {len(value) - len(value.lstrip()), offset}
+    if flow or value[offset:].lstrip().startswith(("[", "{")):
+        starts.update(offset + match.end() - 1 for match in re.finditer(r'''(?:^|[:,\[{])\s*["']''', value[offset:]))
+    return starts
+
+
+# LLM: 起始引号由调用方确认；处理反斜线和单引号双写，未闭合返回None以读取下一物理行。
+# 函数用途: 在一行内找到实际结束引号。
+def _yaml_quote_end(value, quote, start):
+    index = start
+    while index < len(value):
+        if (quote == '"' and value[index] == "\\") or (quote == "'" and value[index:index + 2] == "''"):
+            index += 2
+            continue
+        if value[index] == quote:
+            return index
+        index += 1
+    return None
+
+
+# LLM: 只拼接真正以引号开头的标量；保留物理空行交统一fold处理，每个续行仍校验缩进安全边界。
+# 函数用途: 将多行引号值恢复为可交给标量解析器的逻辑行。
+def _yaml_quoted_line(lines, index):
+    raw = lines[index]
+    offset = _yaml_value_offset(raw)
+    value = raw[offset:]
+    index += 1
+    if not value.startswith(("'", '"')):
+        return raw, index
+    quote, values, start = value[0], [], 1
+    while True:
+        end = _yaml_quote_end(value, quote, start)
+        values.append(value if end is not None else value.rstrip())
+        if end is not None:
+            return raw[:offset] + _yaml_folded_text(values, quote=quote), index
+        if index >= len(lines):
+            raise ValueError("Skill YAML引号未闭合")
+        _yaml_validate_indent(lines[index])
+        value, start = lines[index].lstrip(), 0
+        index += 1
+
+
+# LLM: 普通标量只续接更深缩进的非映射/非列表文本；注释不算空行，续行仍拒绝tab缩进。
+# 函数用途: 折叠合法普通标量续行并返回未消费位置。
+def _yaml_plain_line(lines, index, raw):
+    offset = _yaml_value_offset(raw)
+    scalar = raw[offset:].strip()
+    if not scalar or scalar.startswith(("'", '"', "[", "{", "|", ">", "!", "&", "*")):
+        return raw, index
+    indent = len(raw) - len(raw.lstrip(" "))
+    values = [scalar]
+    while index < len(lines):
+        next_line = lines[index]
+        _yaml_validate_indent(next_line)
+        if next_line.lstrip().startswith("#"):
+            index += 1
+            continue
+        if next_line.strip() and len(next_line) - len(next_line.lstrip(" ")) <= indent:
+            break
+        value = _yaml_uncomment(next_line.strip(), plain_scalar=True)
+        if re.match(r"(?:-\s|[^:]+:\s|[^:]+:$)", value):
+            break
+        values.append(value)
+        index += 1
+    return raw[:offset] + _yaml_folded_text(values), index
+
+
+# LLM: 物理行边界统一拒绝tab缩进，多行折叠不得绕过原结构token的安全检查。
+# 函数用途: 在消耗任何物理行前核验缩进。
+def _yaml_validate_indent(raw):
+    if "\t" in raw[:len(raw) - len(raw.lstrip())]:
+        raise ValueError("Skill YAML不能使用tab缩进")
+
+
 # LLM: 块内内容不去注释，编码成普通字符串；结构token禁止tab缩进。
 # 函数用途: 生成保留缩进的数据token。
 def _yaml_tokens(text):
     lines, tokens, index = text.splitlines(), [], 0
     while index < len(lines):
         raw = lines[index]
-        if "\t" in raw[:len(raw) - len(raw.lstrip())]:
-            raise ValueError("Skill YAML不能使用tab缩进")
+        _yaml_validate_indent(raw)
+        raw, index = _yaml_quoted_line(lines, index)
         line = _yaml_uncomment(raw)
-        index += 1
+        line, index = _yaml_plain_line(lines, index, line)
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(" "))
@@ -225,19 +315,21 @@ def _yaml_block_text(lines, index, indent, style):
     return content, index
 
 
-# LLM: 仅处理已去除公共缩进的块文本；保留空段和额外缩进，不改变chomping策略。
-# 函数用途: 折叠相邻普通行，避免块读取函数堆叠控制分支。
-def _yaml_folded_text(values):
+# LLM: 块文本保持原chomping；quoted空行折为换行，双引号编码为JSON转义且显式转义换行不插空格。
+# 函数用途: 共用普通行与quoted flow折叠规则，保留空段而非逐物理行加空格。
+def _yaml_folded_text(values, *, quote=""):
     pieces = []
     for position, line in enumerate(values):
-        pieces.append(line)
-        if position + 1 >= len(values):
+        last = position + 1 >= len(values)
+        escaped = quote == '"' and not last and (len(line) - len(line.rstrip("\\"))) % 2 == 1
+        pieces.append(line[:-1] if escaped else line)
+        if last or escaped:
             continue
         following = values[position + 1]
         if line and following and not line[:1].isspace() and not following[:1].isspace():
             pieces.append(" ")
         elif line or not following:
-            pieces.append("\n")
+            pieces.append("\\n" if quote == '"' else "\n")
     return "".join(pieces)
 
 
@@ -331,6 +423,7 @@ def _yaml_scalar(value, depth=0):
 def _yaml_flow_parts(value, depth):
     if not value.strip():
         return []
+    starts = _yaml_quote_positions(value, flow=True)
     parts, stack, quote, index, start = [], [], "", 0, 0
     while index < len(value):
         char = value[index]
@@ -342,7 +435,7 @@ def _yaml_flow_parts(value, depth):
                 quote = ""
             index += 1
             continue
-        if char in "\"'" and (index == 0 or value[index - 1] in " \t:[{,"):
+        if char in "\"'" and index in starts:
             quote = char
             index += 1
             continue
@@ -369,18 +462,22 @@ def _yaml_flow_parts(value, depth):
     return parts
 
 
-# LLM: 标量按逗号分隔；列表中已引用成员不二次拆分，不接受非文本或嵌套列表。
+# LLM: 标量按逗号分隔，有限数字与布尔可转文本；列表成员不二次拆分，拒绝null和嵌套容器。
 # 函数用途: 统一schema字符串列表。
 def _as_list(value: Any) -> list[str]:
     if value is None or value == "":
         return []
     if isinstance(value, str):
         values = value.split(",")
-    elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+    elif isinstance(value, (int, float, bool)):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
         values = value
     else:
         raise ValueError("Skill列表字段必须是字符串或字符串列表")
-    return [item.strip() for item in values if item.strip()]
+    if any(not isinstance(item, (str, int, float, bool)) for item in values):
+        raise ValueError("Skill列表字段不能包含null或嵌套容器")
+    return [str(item).strip() for item in values if str(item).strip()]
 
 
 # LLM: 只声明宿主给定根，不扫描或创建目录；learned保留原owner来源。

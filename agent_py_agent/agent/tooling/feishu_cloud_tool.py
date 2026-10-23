@@ -41,7 +41,6 @@ from .models import (
 )
 
 _TYPES = {op.action: op.resource_type for op in CLOUD_OPERATIONS.values()}
-_READ_ACTIONS = READ_ACTIONS
 
 
 # LLM: schema 与 API 计划共用准确动作；数据只作为供应商载荷，不能成为 owner、凭据、URL 或授权配置。

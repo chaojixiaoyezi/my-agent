@@ -8,16 +8,19 @@ from agent_py_agent.agent.user_space import feishu_cloud_authorization as author
 # LLM: schema、授权分类和工具副作用均须来自同一表；未知动作仍按写处理。
 # 函数用途: 防止sheet_meta遗漏和动作集合漂移。
 def test_single_cloud_operation_authority():
-    operations = getattr(authorization, 'FEISHU_CLOUD_OPERATIONS', None)
-    assert operations == {'sheet_meta': 'read', 'sheet_read': 'read', 'sheet_append': 'write',
-                          'sheet_update': 'write', 'document_read': 'read',
-                          'document_append': 'write', 'wiki_resolve': 'read'}
-    assert getattr(tool, 'FEISHU_CLOUD_OPERATIONS', None) is operations
-    reads = frozenset(key for key, mode in operations.items() if mode == 'read')
-    assert authorization._READ_ACTIONS == tool._READ_ACTIONS == reads
+    operations = authorization.CLOUD_OPERATIONS
+    assert {action: (operation.resource_type, operation.write) for action, operation in operations.items()} == {
+        'sheet_meta': ('sheet', False), 'sheet_read': ('sheet', False),
+        'sheet_append': ('sheet', True), 'sheet_update': ('sheet', True),
+        'document_read': ('docx', False), 'document_append': ('docx', True),
+        'wiki_resolve': ('wiki', False)}
+    assert tool.CLOUD_OPERATIONS is operations
+    reads = frozenset(key for key, operation in operations.items() if not operation.write)
+    assert authorization.READ_ACTIONS == tool.READ_ACTIONS == reads
+    assert not hasattr(authorization, '_READ_ACTIONS') and not hasattr(tool, '_READ_ACTIONS')
     assert set(tool._TYPES) == set(operations)
     assert tool.FeishuCloudTool.model_spec.input_schema['properties']['action']['enum'] == list(operations)
-    for action, mode in operations.items():
+    for action, operation in operations.items():
         assert tool_effect_for_runtime_policy(tool.FeishuCloudTool.runtime_policy, {'action': action}) == (
-            'read_only' if mode == 'read' else 'mutating')
+            'mutating' if operation.write else 'read_only')
     assert tool_effect_for_runtime_policy(tool.FeishuCloudTool.runtime_policy, {'action': 'unknown'}) == 'mutating'
