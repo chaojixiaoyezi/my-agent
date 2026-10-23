@@ -546,6 +546,43 @@ def test_public_poll_reply_pages_are_request_scoped(public_case):
     assert all(row["request_id"] == request_id for row in pieces)
 
 
+# LLM: 经真实公开授权与MAC续页，在旧锚点检查后原子替换文件；不得把新正文拼进旧回复。
+# 函数用途: 固定打开句柄与旧回复快照之间的竞态回归。
+def test_reply_cursor_rejects_replacement_after_old_anchor_check(public_case, monkeypatch):
+    import os
+
+    from agent_py_agent.agent.plugin_host import history
+    from agent_py_agent.agent.plugin_host.schemas import thaw
+
+    request_id, tid = _public_request(public_case)
+    store = public_case[2]
+    store.messages.append({"thread_id": tid, "role": "assistant", "content": "A" * 9000,
+                           "metadata": {"turn_id": request_id, "phase": "final"}})
+    first = thaw(_public_call(public_case, "requests.poll", {"request_id": request_id}).data)
+    assert first["replies"][0]["content"] == "A" * 8192
+    original, changed = history._verify_current, []
+
+    # LLM: 只在临时owner文件上注入精确TOCTOU，不替换游标或权限验证结果。
+    # 函数用途: 在旧锚点验证与消息文件打开之间换成等长新文件。
+    def swap_after_check(store_arg, thread_id, anchor):
+        original(store_arg, thread_id, anchor)
+        if not changed:
+            path = store_arg.storage.message_path(thread_id)
+            old = path.read_bytes()
+            new = old.replace(b"A" * 9000, b"B" * 9000)
+            assert old != new and len(old) == len(new)
+            replacement = path.with_suffix(".replacement")
+            replacement.write_bytes(new)
+            os.replace(replacement, path)
+            changed.append(True)
+
+    monkeypatch.setattr(history, "_verify_current", swap_after_check)
+    with pytest.raises(HostAPIError) as error:
+        _public_call(public_case, "requests.poll", {"request_id": request_id,
+                     "reply_cursor": first["reply_cursor"]})
+    assert (error.value.code, error.value.status) == ("CURSOR_EXPIRED", 409)
+
+
 # LLM: 只为Count0队列验证绑定准备回调，不表示已验证真实模型或worker执行安全。
 # 函数用途: 将本轮公开发送接到原input writer做实际幂等验证。
 def test_public_send_queues_once_and_maps_conflict(public_case):

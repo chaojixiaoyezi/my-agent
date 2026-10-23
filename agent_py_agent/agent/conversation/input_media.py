@@ -9,7 +9,10 @@ import mimetypes
 import os
 import re
 import tempfile
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 
 from ..common.nofollow_fs import ensure_private_dir
 
@@ -19,6 +22,58 @@ DEFAULT_MEDIA_BYTES = 16 * 1024 * 1024
 DEFAULT_MEDIA_FILES = 8
 # 模型可见附件清单在原生 IR 里的宿主来源标记（RuntimeFactsTurn.source）；派工解析端不读这段文字，只认 sha256。
 INPUT_MEDIA_MANIFEST_SOURCE = "input_media_manifest"
+# LLM: 每次提交独占一份小观察；worker Context只定位它，caller沿同次params引用读取，迟到worker不能覆盖新调用。
+# 类用途: 在线程间传递单次媒体投影/编码事实，不持久化、不缓存二进制。
+@dataclass
+class _InputMediaDelivery:
+    evicted: frozenset[str] = frozenset()
+    encoded: frozenset[str] | None = None
+    lock: object = field(default_factory=Lock, repr=False)
+
+    # LLM: Compact候选深复制只取锁内不可变事实并新建锁，不复制原生锁、不共享活动观察；新提交仍创建新调用句柄。
+    # 函数用途: 为候选投影生成独立媒体观察快照，不改变原调用或其Context绑定。
+    def __deepcopy__(self, memo: dict) -> _InputMediaDelivery:
+        with self.lock:
+            snapshot = _InputMediaDelivery(evicted=self.evicted, encoded=self.encoded)
+        memo[id(self)] = snapshot
+        return snapshot
+
+
+_MEDIA_DELIVERY: ContextVar[_InputMediaDelivery | None] = ContextVar("input_media_delivery", default=None)
+
+
+# LLM: 每次提交创建新对象并交给原params；ContextVar只供provider定位，不能靠重新赋值向caller回传。
+# 函数用途: 开始独立的发送观察并返回同次调用句柄，不改持久回执。
+def reset_input_media_delivery() -> _InputMediaDelivery:
+    delivery = _InputMediaDelivery()
+    _MEDIA_DELIVERY.set(delivery)
+    return delivery
+
+
+# LLM: 独立适配器调用可懒建观察；已提交worker必须复用其精确句柄，不能在投影时替换对象。
+# 函数用途: 获取本上下文的单次媒体发送观察。
+def _input_media_delivery() -> _InputMediaDelivery:
+    return _MEDIA_DELIVERY.get() or reset_input_media_delivery()
+
+
+# LLM: 显式句柄支持原调用线程读取worker事实；只返回不可变快照，None表示未编码，空集合表示编码器未读附件。
+# 函数用途: 查询最新供应商转换确实编码过的附件哈希。
+def last_encoded_input_media_hashes(delivery: _InputMediaDelivery | None = None) -> frozenset[str] | None:
+    delivery = delivery or _MEDIA_DELIVERY.get()
+    if delivery is None:
+        return None
+    with delivery.lock:
+        return delivery.encoded
+
+
+# LLM: 仅含本次预算排除且未随后编码的sha；不能据历史占位符或正文猜测是否发出。
+# 函数用途: 查询本次发送前已淘汰的媒体引用。
+def evicted_input_media_hashes(delivery: _InputMediaDelivery | None = None) -> frozenset[str]:
+    delivery = delivery or _MEDIA_DELIVERY.get()
+    if delivery is None:
+        return frozenset()
+    with delivery.lock:
+        return delivery.evicted
 
 
 # LLM: 媒体错误是确定的输入失败，不可丢掉附件继续文本请求或作为瞬时模型故障重试。
@@ -158,7 +213,7 @@ def input_media_blocks(refs: object) -> list[dict]:
              "source": {"type": "local_file", **ref}} for ref in refs or ()]
 
 
-# LLM: 仅本机结构化媒体 source 在网络边界展开；校验哈希以防落盘后被改写；不修改调用者的历史或持有进程级字节缓存。
+# LLM: 校验成功才在精确调用句柄内记编码sha并取消淘汰；锁只包小集合更新，不持有它读文件或编码。
 # 函数用途: 为一次模型请求读取附件原件，并生成标准 base64 source。
 def provider_media_block(block: dict) -> dict:
     source = block.get("source")
@@ -173,22 +228,32 @@ def provider_media_block(block: dict) -> dict:
     media_type = ref["media_type"]
     if media_type == "video/quicktime":
         media_type = "video/mov"
+    delivery = _input_media_delivery()
+    with delivery.lock:
+        delivery.encoded = (delivery.encoded or frozenset()) | {ref["sha256"]}
+        delivery.evicted -= {ref["sha256"]}
     return {"type": block["type"], "source": {"type": "base64", "media_type": media_type,
                                                "data": base64.b64encode(data).decode("ascii")}}
 
 
-# LLM: 仅 user media 块可读取文件，assistant 内容不获得文件读取权；返回新容器，不将编码结果回写 canonical messages。
+# LLM: 每次只记录本次实际编码的user媒体；保留本次预算淘汰观察，返回新容器，不回写canonical messages。
 # 函数用途: 发送 Anthropic 请求前临时展开媒体附件。
 def provider_media_messages(messages: list[dict]) -> list[dict]:
+    delivery = _input_media_delivery()
+    with delivery.lock:
+        delivery.encoded = frozenset()
     return [{**row, "content": [provider_media_block(block) if block.get("type") in {"image", "video"}
                                else block for block in row["content"]]}
             if row.get("role") == "user" and isinstance(row.get("content"), list) else row
             for row in messages]
 
 
-# LLM: 历史只在发送投影中受媒体字节预算约束，canonical refs 永远保留；当前最新媒体消息必须完整，旧媒体显式投影为归档引用。
+# LLM: 投影在同次句柄内重置小集合，不替换worker/caller共享引用；预算排除项供ACK拒绝误消费，canonical不变。
 # 函数用途: 在编码前从新到旧选择预算内附件，避免长图片/视频历史一次性展开到内存。
 def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dict] | None:
+    delivery = _input_media_delivery()
+    with delivery.lock:
+        delivery.evicted, delivery.encoded = frozenset(), None
     if messages is None:
         return None
     result = list(messages)
@@ -210,6 +275,10 @@ def project_input_media(messages: list[dict] | None, max_bytes: int) -> list[dic
         if size <= remaining:
             remaining -= size
             continue
+        with delivery.lock:
+            delivery.evicted |= frozenset(
+                block["source"]["sha256"] for block in media if isinstance(block["source"].get("sha256"), str)
+            )
         replacements = {id(block): {"type": "text", "text": (
             f"[历史附件已归档，本轮媒体预算未加载：{block['source'].get('name', '')}；"
             f"原件引用：{block['source'].get('path', '')}。需要视觉重读时请重新添加附件。]"

@@ -1,7 +1,7 @@
 # LLM: plain与TUI共用认证HTTP提交原输入/消息ID；原同ID终态观察和模型公开净化仍唯一。
 
-# LLM: 本模块执行 plain chat 的 Gateway/direct 路径；Gateway 历史只能由服务端 ConversationStore 注入，避免上下文重复。
-# 模块用途: 处理普通终端单轮聊天与历史；local正文等同call确认，Gateway沿既有公开流，原执行/控制身份不变。
+# LLM: 本模块执行 plain chat 的 Gateway/direct 路径；Gateway 历史仅由服务端注入，direct 受阻/未完成状态不能被正文显示改写成成功。
+# 模块用途: 处理普通终端单轮聊天与历史，保留结构化收口状态；local正文等同call确认，原执行/控制身份不变。
 
 from __future__ import annotations
 
@@ -108,8 +108,8 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     return response_text, terminal_response_streamed
 
 
-# LLM: direct保留原句柄/绑定和单次历史注入；显示callback明确local候选未公开，真实response提交后才显示过程。
-# 函数用途: 沿原agent调用模型及保存会话，完整终答走plain_ui公开门，候选不算已显示。
+# LLM: direct保留原句柄/绑定和单次历史注入；候选未公开，真实response提交后才显示过程，受阻/未完成不能归成完成。
+# 函数用途: 沿原agent调用模型及保存会话，保留runtime_status分类，完整终答走plain_ui公开门。
 def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     from ...agent.agent_core.runtime.loop_models import RunParams
 
@@ -144,7 +144,13 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     if is_silent_user_stop(result):
         ctx.job.completion_status = "interrupted"
         return "", False
-    ctx.job.completion_status = "failed" if getattr(result, "runtime_status", "ok") in {"failed", "error", "cancelled"} else "completed"
+    runtime_status = str(getattr(result, "runtime_status", "ok") or "ok")
+    if runtime_status in {"failed", "error", "cancelled"}:
+        ctx.job.completion_status = "failed"
+    elif runtime_status in {"blocked", "unfinished"}:
+        ctx.job.completion_status = runtime_status
+    else:
+        ctx.job.completion_status = "completed"
     _render_if_needed(ctx, agent_response_text, stream_started_ref[0])
     _print_local_timing(result)
     return agent_response_text, stream_started_ref[0]

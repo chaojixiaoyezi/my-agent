@@ -259,7 +259,7 @@ class RequestDomain:
                 "has_more_events": False, "has_more_replies": more}
 
 
-# LLM: 只读原canonical JSONL并核冻结前缀；仅自己request的assistant.final，正文按UTF8续页而非截断丢失。
+# LLM: 旧锚点必须同时匹配实际打开的句柄及返回前的canonical路径；只读本request最终正文，不拼接替换文件。
 # 函数用途: 返回一个有界最终回复片段和可重建的内部位置。
 def request_replies(store, facts, position):
     from .history import (
@@ -276,6 +276,9 @@ def request_replies(store, facts, position):
         if position.get("anchor"):
             _verify_current(store, tid, position["anchor"])
         with _open(store, tid) as handle:
+            if position.get("anchor"):
+                _verify_reply_handle(handle, position["anchor"])
+            handle.seek(0)
             through = handle.seek(0, 2)
             _, _, anchor, bad = _scan(handle, through, tid, 0, {"limit": 1, "max_content_bytes": 1})
             if bad:
@@ -309,6 +312,8 @@ def request_replies(store, facts, position):
                     "content": piece, "offset_bytes": content_offset, "complete": end == len(text)})
                 offset, content_offset = (offset, 0) if end == len(text) else (start, end)
                 break
+        if position.get("anchor"):
+            _verify_current(store, tid, position["anchor"])
         _verify_current(store, tid, anchor)
         return rows, {"anchor": anchor, "offset": offset, "content_offset": content_offset}, offset < through
     except FileNotFoundError:
@@ -319,6 +324,30 @@ def request_replies(store, facts, position):
         raise
     except (OSError, ValueError, TypeError, OverflowError, RecursionError):
         raise HostAPIError("STORE_UNAVAILABLE", 503) from None
+
+
+# LLM: 验证的是本次已打开句柄，不再开路径；分块核完整旧前缀，追加合法，换inode/截短/改写均409。
+# 函数用途: 拒绝旧锚点预检与实际打开之间发生的回复文件替换。
+def _verify_reply_handle(handle, anchor):
+    import hashlib
+    import os
+
+    info = os.fstat(handle.fileno())
+    size = anchor.get("byte_size")
+    if (type(size) is not int or not 0 <= size <= info.st_size or info.st_nlink != 1
+            or [info.st_dev, info.st_ino] != anchor.get("identity")):
+        raise HostAPIError("CURSOR_EXPIRED", 409)
+    handle.seek(0)
+    remaining, digest = size, hashlib.sha256()
+    while remaining:
+        raw = handle.read(min(remaining, 256 * 1024))
+        if not raw:
+            raise HostAPIError("CURSOR_EXPIRED", 409)
+        digest.update(raw)
+        remaining -= len(raw)
+    if digest.hexdigest() != anchor.get("sha256") or os.fstat(handle.fileno()).st_nlink != 1:
+        raise HostAPIError("CURSOR_EXPIRED", 409)
+    handle.seek(0)
 
 
 # LLM: revision来自原请求当前代次及cancel/终态事实，不保存第二套可变版本。
