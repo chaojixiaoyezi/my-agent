@@ -482,14 +482,15 @@ def _disable_thinking_for(payload: dict[str, Any], *, api_base: str) -> None:
         payload["thinking"] = {"type": "disabled"}
 
 
-# LLM: JSON对象键序规范化不改变值/数组顺序，不向未知端点启用任何扩展协议；异常非字符串键保持原行为，不排序掩盖wire差异。
-# 函数用途: 为同一逻辑schema产生确定的嵌套对象键顺序，返回新容器而不改原schema。
-def _stable_json_object_keys(value: object) -> object:
+# LLM: schema定义键稳定排序，properties参数名及数组保留插入顺序；不原地修改或启用新协议。
+# 函数用途: 规范工具定义并保留参数顺序，名为properties的参数或命名定义不污染递归上下文。
+def _stable_json_object_keys(value: Any, *, _parent_key: str = "") -> Any:
     if isinstance(value, dict):
         keys = list(value)
-        if all(isinstance(key, str) for key in keys):
+        if _parent_key != "properties" and all(isinstance(key, str) for key in keys):
             keys.sort()
-        return {key: _stable_json_object_keys(value[key]) for key in keys}
+        schema_map = _parent_key in {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas", "dependencies"}
+        return {key: _stable_json_object_keys(value[key], _parent_key="" if schema_map else str(key)) for key in keys}
     if isinstance(value, list):
         return [_stable_json_object_keys(item) for item in value]
     return value

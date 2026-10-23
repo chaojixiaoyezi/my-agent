@@ -306,7 +306,7 @@ class PromptBuilder:
         )
 
     def read_home_context(self, user_prompt: str) -> list[str]:
-        if not self.home_paths or not bool(getattr(self.config, "home_context_enabled", True)):
+        if (not self.home_paths and self.persona_repository is None) or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
         del user_prompt
         return _persona_home_context_chunks(self.home_paths, self.persona_repository)
@@ -320,8 +320,8 @@ class PromptBuilder:
 _OWNER_WORKSPACE_ENVELOPE_MAX_CHARS = 6_000
 
 
-# LLM: 约束 Owner Scope 与 Workspace Context 的联合完整信封不超过 6000 字符，优先保留完整 owner_scope。
-# 函数用途: 对超大工作区上下文或覆盖文本做有界截断并附明确标记，不吞掉归属边界。
+# LLM: 完整联合信封不超过6000字符；非空workspace先保留事实预算，Owner保留首尾及独立截断标记。
+# 函数用途: 共享有界首尾算法保留归属边界，工作区只裁尾部且保留cwd/日期等领先事实。
 def _bounded_owner_workspace_sections(
     owner_scope: str,
     workspace_context: str,
@@ -330,16 +330,20 @@ def _bounded_owner_workspace_sections(
     budget = max(0, _OWNER_WORKSPACE_ENVELOPE_MAX_CHARS - header_overhead)
     if len(owner_scope) + len(workspace_context) <= budget:
         return owner_scope, workspace_context
-    marker = "\n[... workspace context truncated by 6000-char envelope budget ...]"
-    if len(owner_scope) > budget:
-        owner_scope = owner_scope[:budget]
-        return owner_scope, ""
-    ws_budget = max(0, budget - len(owner_scope))
-    if len(workspace_context) <= ws_budget:
-        return owner_scope, workspace_context
-    if ws_budget <= len(marker):
-        return owner_scope, workspace_context[:ws_budget]
-    return owner_scope, workspace_context[: ws_budget - len(marker)] + marker
+    from ..capability.persona_repository import _bounded_prompt_content
+
+    ws_budget = min(len(workspace_context), max(600, budget // 4)) if workspace_context else 0
+    owner_budget = max(0, budget - ws_budget)
+    if len(owner_scope) <= owner_budget:
+        ws_budget = budget - len(owner_scope)
+    owner_marker = "\n[... owner scope truncated by 6000-char envelope budget ...]\n"
+    owner_scope, _ = _bounded_prompt_content(owner_scope, owner_budget, marker=owner_marker)
+    if len(workspace_context) > ws_budget:
+        marker = "\n[... workspace context truncated by 6000-char envelope budget ...]"
+        head = max(0, ws_budget - len(marker))
+        boundary = workspace_context.rfind("\n", 0, head)
+        workspace_context = workspace_context[:boundary + 1 if boundary >= 0 else head] + marker
+    return owner_scope, workspace_context
 
 
 # LLM: 真实 build 和创建前投影必须共用此纯入口；仅格式化已冻结字符串，不能补读宿主、文件或模型状态。
@@ -488,12 +492,6 @@ def _resolve_prompt_file(root: Path, name: str) -> tuple[Path, str, bool]:
         if not workspace_path.is_file() or workspace_path.resolve(strict=False) == builtin.resolve(strict=False):
             return builtin, f"builtin:{_LEGACY_DEFAULT_PROMPT}", True
     return workspace_path, str(workspace_path.resolve(strict=False)), False
-
-
-# LLM: 保留单文件兼容读口，错误和格式均由同一已解析读取器提供。
-# 函数用途: 解析并读取一份提示文件，供原调用者复用。
-def _read_prompt_file(root: Path, name: str) -> str | None:
-    return _read_resolved_prompt_file(*_resolve_prompt_file(root, name))
 
 
 # LLM: 调用方已完成来源解析；这里只读一次正文，缺少必需builtin资源仍抛异常，不缓存内容。
@@ -865,7 +863,7 @@ def _persona_context_chunks(repository: PersonaRepository | None) -> list[str]:
 # LLM: 有线程/开关/home启用时走唯一快照，无资格保持旧read_home_context；仅存安全渲染值，不存被拦原文。
 # 函数用途: 取得稳定人格与本轮行变化，task_local/control_plane 保持原隔离，不读 owner 人格。
 def _thread_persona_context(builder: PromptBuilder, request: PromptBuildRequest, isolated: bool) -> tuple[list[str], str]:
-    if isolated or not builder.home_paths or not builder.config.home_context_enabled:
+    if isolated or (not builder.home_paths and builder.persona_repository is None) or not builder.config.home_context_enabled:
         return [], ""
     scope = request.thread_persona
     repository = builder.persona_repository
