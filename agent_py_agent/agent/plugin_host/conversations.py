@@ -183,7 +183,7 @@ class ConversationDomain:
         if action == "messages.list":
             required = {"chat.history"}
         elif action in {"threads.get", "threads.list"}:
-            required = {"chat", "chat.history"}
+            required = {"read", "chat", "chat.history"}
         elif action == "threads.create":
             required = {"chat"}
         elif action.removeprefix("threads.") in _THREAD_ACTIONS and action.startswith("threads."):

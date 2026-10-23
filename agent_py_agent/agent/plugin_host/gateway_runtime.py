@@ -113,6 +113,7 @@ class GatewayPluginRequests:
             raise HostAPIError("ARTIFACT_INPUT_NOT_SUPPORTED", 403)
         ensure_gateway_folders(self.resources.paths_for(context))
         return {**prepared, "owner_id": context.owner_home.owner_id,
+                "conversation": {"thread_id": authorized.call.payload["thread_id"]},
                 "metadata": {**prepared["metadata"], "plugin_execution_policy": {
                     "schema": "plugin_execution_policy.v1", "tool_names": sorted(authorized.execution_policy.tool_names),
                     "network": False, "budgets": thaw(authorized.execution_policy.budgets),

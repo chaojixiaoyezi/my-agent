@@ -174,10 +174,27 @@ class RequestEventBuffer:
             self._pending.clear()
 
 
+# LLM: 若当前线程绑定了流订阅停止事件则可中断等待，否则普通睡眠0.25秒。
+# 函数用途: 空闲轮询等待并在订阅关闭时立即唤醒。
+def _wait_stream_idle() -> None:
+    import time
+    stop = getattr(threading.current_thread(), "_plugin_stream_stop", None)
+    if stop is not None:
+        stop.wait(0.25)
+    else:
+        time.sleep(0.25)
+
+
+# LLM: 检查当前流生产线程是否已收到订阅关闭信号。
+# 函数用途: 判断SSE流订阅是否已停止。
+def _stream_stopped() -> bool:
+    stop = getattr(threading.current_thread(), "_plugin_stream_stop", None)
+    return bool(stop is not None and stop.is_set())
+
+
 # LLM: 生产只拉一条有界原消息页；MAC保存已交付位置，重新连接仍核A和B1范围，断连不取消请求。
 # 函数用途: 从原请求/最终消息投影持续RequestEvent，交给A原SSE泵运输。
 def request_events(conversation, authorized):
-    import time
     from datetime import datetime, timezone
 
     from .conversations import read_context
@@ -192,7 +209,7 @@ def request_events(conversation, authorized):
     token = authorized.call.payload.get("event_cursor")
     filters = {"channel": "stream"}
     position = thaw(domain.codec.decode(authorized, token, filters).position) if token else {}
-    while True:
+    while not _stream_stopped():
         context = read_context(authorized)
         facts = domain.facts(authorized, context, paths, store)
         if position.get("terminal"):
@@ -213,7 +230,7 @@ def request_events(conversation, authorized):
             kind, data = "status", {"state": facts["state"]}
             position["state"] = facts["state"]
         else:
-            time.sleep(0.25)
+            _wait_stream_idle()
             continue
         position["sequence"] = sequence
         event_id = domain.codec.encode(authorized, facts["request_id"], position, filters)

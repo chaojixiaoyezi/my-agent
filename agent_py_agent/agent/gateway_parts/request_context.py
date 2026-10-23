@@ -332,6 +332,12 @@ def _load_gateway_thread(
         inputs.agent,
         inputs.request,
     )
+    explicit_tid = str(spec.get("thread_id") or "").strip()
+    if explicit_tid:
+        thread, error = store.threads.load_report(explicit_tid)
+        if error is not None or thread is None:
+            return None, error or {"error_code": "thread_unavailable"}
+        return thread, None
     try:
         thread = store.threads.get_or_create(
             {

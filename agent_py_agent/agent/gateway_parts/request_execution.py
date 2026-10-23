@@ -907,10 +907,21 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     host_input = context_for_input(context.agent, actor, references, request.get('input_media') or ()) if actor is not None else None
     from .multiprocess_active_input import pending_turn_input_source
 
+    plugin_policy = (request.get("metadata") or {}).get("plugin_execution_policy")
+    has_plugin_policy = isinstance(plugin_policy, dict) and plugin_policy.get("schema") == "plugin_execution_policy.v1"
+    allowed_tools = (
+        []
+        if request.get("host_im_task_ack")
+        else (
+            [str(item) for item in (plugin_policy.get("tool_names") or ()) if isinstance(item, str)]
+            if has_plugin_policy
+            else None
+        )
+    )
     return RunParams(
         pending_turn_input_source=pending_turn_input_source(context.agent, request, conversation.thread_id),
         inject=request_prompt.gateway_injections(request, conversation),
-        allowed_tools=[] if request.get("host_im_task_ack") else None,
+        allowed_tools=allowed_tools,
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,

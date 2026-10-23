@@ -125,7 +125,12 @@ class GatewayObservationServices:
             operation = controls._new_control_operation_receipt(scope, "plugin_domain", text, operation_id, fingerprint)
             path = controls.gateway_control_operation_path(paths, operation_id)
             write_json_file_atomic(path, replace(operation, state="executing", updated_at=time.time()).to_dict())
-            result = effect()
+            try:
+                result = effect()
+            except HostAPIError as exc:
+                if exc.outcome == "not_started":
+                    path.unlink(missing_ok=True)
+                raise
             write_json_file_atomic(path, replace(operation, state="completed", updated_at=time.time(), result={
                 "plugin_domain": {"status": result.http_status, "data": thaw(result.data)}}).to_dict())
             return result

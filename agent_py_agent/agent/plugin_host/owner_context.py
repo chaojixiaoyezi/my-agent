@@ -340,10 +340,11 @@ class IngressOwnerResolver:
             raise HostAPIError("TARGET_DENIED", 403)
         source = PluginSourceBinding(binding.installation_ref, binding.package_sha256, binding.activation_id,
                                      binding.grant_revision, binding.actor)
+        tool_names = grant["execution"]["tool_names"] if grant["execution"].get("max_tool_calls", 1) > 0 else ()
         projected = LocalUserGrant(source, caps, supported_user_ids(grant["target_user_ids"]),
             supported_user_ids(grant["manageable_user_ids"]), supported_user_ids(grant["creatable_user_ids"]),
             LocalUserQuotaLimits.parse(grant["quota_ceiling"]), ExecutionAllowlist(
-                frozenset(grant["execution"]["tool_names"]), tuple(AssetGrant(
+                frozenset(tool_names), tuple(AssetGrant(
                     a["kind"], a["id"], a["revision"], a["sha256"]) for a in grant["execution"].get("asset_refs", ()))))
         if authorized is None:
             # A发行前binding仅供冷解析；它不是领域动作或执行票据。

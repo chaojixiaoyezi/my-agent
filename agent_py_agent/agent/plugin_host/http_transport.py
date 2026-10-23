@@ -97,6 +97,7 @@ class StreamSession:
         self.ready.wait()
         if self.stop.is_set():
             return
+        threading.current_thread()._plugin_stream_stop = self.stop
         iterator = stream_events(self.authorized, self.ports)
         try:
             while not self.stop.is_set():
@@ -112,6 +113,7 @@ class StreamSession:
         except Exception:
             self.put(("error", HostAPIError("STORE_UNAVAILABLE", 503).to_payload()))
         finally:
+            threading.current_thread()._plugin_stream_stop = None
             iterator.close()
             self.put(None)
 

@@ -54,14 +54,15 @@ def production_host(tmp_path, request):
     )
     from agent_py_agent.agent.plugin_activation_ref import PluginActivationRef
     from agent_py_agent.agent.plugin_manifest_host_v9 import host_capabilities
-    from agent_py_agent.tests.test_plugin_host_v2_grants import installed_grant
+    from agent_py_agent.tests import test_plugin_host_v2_grants as _grants
 
     options = getattr(request, "param", {})
-    owner, store, entry, plan, os_grant, grant = installed_grant(tmp_path, options.get("caps", sorted(host_capabilities())))
+    owner, store, entry, plan, os_grant, grant = _grants.installed_grant(tmp_path, options.get("caps", sorted(host_capabilities())))
     if options.get("extra"):
         grant["target_user_ids"].append(options["extra"])
     grant.update(manageable_user_ids=["alice"], creatable_user_ids=["alice"])
-    grant["execution"].update(tool_names=["read_file", "write_file"], max_tool_calls=4,
+    default_calls = 4 if _grants.installed_grant.__name__ == "installed_grant" else grant["execution"]["max_tool_calls"]
+    grant["execution"].update(tool_names=["read_file", "write_file"], max_tool_calls=options.get("max_tool_calls", default_calls),
         asset_refs=options.get("asset_refs") or [{"kind": "script", "id": "script-one", "revision": 1, "sha256": "a" * 64}])
     preparing = PluginActivation(plan, "preparing", permission_json=json.dumps({**os_grant, "host_api_grant": grant}))
     prepared = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, preparing)).installation
@@ -276,4 +277,3 @@ def test_production_gateway_script_asset_read_and_execution(tmp_path):
         assert poll["request"]["state"] == "succeeded", poll
     finally:
         next(fixture, None)
-
