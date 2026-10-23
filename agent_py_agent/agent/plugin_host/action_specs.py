@@ -118,13 +118,14 @@ def _execution_specs() -> list[ActionSpec]:
     thread = {"thread_id": id_schema()}
     revision = {"expected_revision": integer(2**63 - 1, 1)}
     inputs = {"inputs": {"type": "object", "default": {}}}
+    asset_id = text(128, 1, r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
     return [
-        _spec("execute.tool", "async", "execute act_as_user", closed({**thread, "tool_name": text(96, 1),
+        _spec("execute.tool", "async", "execute act_as_user", closed({**thread, "tool_name": text(96, 1, r"^[A-Za-z0-9_]{1,96}$"),
               "arguments": {"type": "object"}}), "thread tool"),
         _spec("execute.script", "async", "execute act_as_user",
-              closed({**thread, **revision, "script_id": id_schema()}, inputs), "thread asset"),
+              closed({**thread, **revision, "script_id": asset_id}, inputs), "thread asset"),
         _spec("execute.workflow", "async", "execute act_as_user",
-              closed({**thread, **revision, "workflow_id": id_schema()}, inputs), "thread asset"),
+              closed({**thread, **revision, "workflow_id": asset_id}, inputs), "thread asset"),
         _spec("execute.workflow_resume", "async", "execute act_as_user",
               closed({**thread, **revision, "workflow_run_id": id_schema(), "from_step_id": id_schema()}), "thread task asset"),
     ]

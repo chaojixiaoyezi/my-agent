@@ -129,7 +129,10 @@ class ResponseTickets:
             entry.update(state="consuming", key=authorized.call.idempotency_key)
             try:
                 status = respond(authorized, record)
-            except HostAPIError:
+            except HostAPIError as error:
+                # 已知写前拒绝不消耗真人决定；未知或已提交必须冻结，防止重复副作用。
+                if error.outcome == "not_started":
+                    entry.update(state="pending", key=None, result=None)
                 raise
             except Exception:
                 raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None

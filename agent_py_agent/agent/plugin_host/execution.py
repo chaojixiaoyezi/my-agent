@@ -82,6 +82,10 @@ class RestrictedToolInvoker:
     # 函数用途: 为本次有效上下文建立独立执行器。
     def __init__(self, factory, context, ports=None):
         factory.check(context)
+        from .contracts import VerifiedPluginBinding
+        if isinstance(context.source, VerifiedPluginBinding):
+            # 发行期binding只供策略解析，不能绕过真实调用意图取得invoker。
+            raise HostAPIError("SOURCE_INVALID", 403)
         if not context.execution:
             raise HostAPIError("CAPABILITY_DENIED", 403)
         self.factory = factory

@@ -392,8 +392,9 @@ class GatewayHTTPServer:
         self.plugin_display = None
         self.plugin_channel_pool = None
         from ..plugin_host.http_transport import HostTransport
+        from ..plugin_host.gateway_composition import build_gateway_host_composition
 
-        self.plugin_host = HostTransport()
+        self.plugin_host = HostTransport(build_gateway_host_composition(self, paths))
 
     def _guard_network_exposure(self) -> None:
         """fail-closed:绑非 loopback(暴露到网络)却没接鉴权中间件时拒绝启动,杜绝未认证远程入口。"""

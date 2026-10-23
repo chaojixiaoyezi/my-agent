@@ -97,10 +97,19 @@ def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     if name == "conversation":
         return ports.conversation.call(authorized)
     if name == "local_users":
-        return ports.local_users.call(authorized)
+        return _c_result(ports.local_users.call(authorized))
     if name == "execution":
-        return ports.execution.submit(authorized)
+        return _c_result(ports.execution.submit(authorized))
     return ports.observations.call(authorized)
+
+
+# LLM: 只转换C的准确DTO，未知返回仍由dispatch拒绝；警告不得丢失。
+# 函数用途: 将本地用户/执行回执规范化成A0领域结果。
+def _c_result(result):
+    from .local_users import LocalUserDomainResult
+    if type(result) is LocalUserDomainResult:
+        return DomainResult(result.status, result.data, warnings=result.warnings)
+    return result
 
 
 # LLM: outcome只描述写副作用：合法写成功包括原受理回执提交，不代表202业务完成；纯读取无写入，异常中途不推断已提交。

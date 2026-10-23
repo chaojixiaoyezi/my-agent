@@ -339,6 +339,32 @@ def test_plugin_cannot_issue_ticket_or_submit_raw_fields(host):
         assert error.value.code == "INVALID_SCHEMA"
 
 
+# LLM: 只确定写前失败才允许重试，unknown不能重新消费票据。
+# 函数用途: 回归人工票据的写前回滚与未知结局冻结。
+@pytest.mark.parametrize("outcome", ["not_started", "unknown"])
+def test_response_ticket_prewrite_rejection_can_retry(host, outcome):
+    cards, tickets, _ = interaction_setup(host)
+    source = host.auth("interactions.pending_approvals.list", {"thread_id": "thread-one"})
+    token = tickets.issue(source, cards.rows[0], cards.human, {"decision": "approved"})
+    authorized = host.auth("interactions.approvals.respond", {"interaction_id": "card-0",
+        "expected_revision": 1, "response_ticket": token}, "retry_ticket_key_1")
+
+    # LLM: 不执行任何原卡副作用，明确声明写前冲突或未确定写入。
+    # 函数用途: 在首次消费时模拟精确错误分类。
+    def reject(authorized, ticket):
+        raise HostAPIError("REVISION_CONFLICT", 409, outcome)
+
+    with pytest.raises(HostAPIError, match="REVISION_CONFLICT"):
+        tickets.consume(authorized, reject)
+    if outcome == "not_started":
+        assert tickets.consume(authorized, cards.respond)["status"] == "decided"
+        assert len(cards.decisions) == 1
+    else:
+        with pytest.raises(HostAPIError, match="OUTCOME_UNKNOWN"):
+            tickets.consume(authorized, cards.respond)
+        assert cards.decisions == []
+
+
 # LLM: 调度回调是B/C接缝，测试只观察请求资格，不声称启动了真实模型。
 # 类用途: 用真实任务绑定验证Goal生命周期和资源独立。
 class GoalLifecycle:
