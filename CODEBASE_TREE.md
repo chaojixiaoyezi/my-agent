@@ -17,6 +17,7 @@
 |   |-- gateway_observations.py # Gateway 产物与记忆只读观察端口生产适配器
 |   |-- gateway_operations.py # Gateway 受限执行、任务与长期目标端口生产适配器
 |   |-- gateway_pending.py # Gateway 待决交互查询与真人票据验证提交端口生产适配器
+|   |-- gateway_assets.py # 插件宿主 v2 生产组合的注册脚本、工作流与断点执行适配器
 |   |-- gateway_runtime.py # Gateway 线程历史、请求提交与本地用户端口生产适配器
 |   |-- goals.py # D1 长期目标查询与状态跃迁领域适配器
 |   |-- history.py # B1 完整聊天历史安全扫描、内部消息过滤与 MAC 分页

@@ -62,7 +62,7 @@ def production_host(tmp_path, request):
         grant["target_user_ids"].append(options["extra"])
     grant.update(manageable_user_ids=["alice"], creatable_user_ids=["alice"])
     grant["execution"].update(tool_names=["read_file", "write_file"], max_tool_calls=4,
-        asset_refs=[{"kind": "script", "id": "script-one", "revision": 1, "sha256": "a" * 64}])
+        asset_refs=options.get("asset_refs") or [{"kind": "script", "id": "script-one", "revision": 1, "sha256": "a" * 64}])
     preparing = PluginActivation(plan, "preparing", permission_json=json.dumps({**os_grant, "host_api_grant": grant}))
     prepared = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, preparing)).installation
     active = replace(preparing, phase="active", catalog_sha256=plugin_catalog_digest(entry.manifest))
@@ -236,3 +236,44 @@ def test_cold_binding_cannot_construct_business_invoker(production_host):
     cold = factory.resolve_execution_context(authorized.binding)
     with pytest.raises(HostAPIError, match="SOURCE_INVALID"):
         RestrictedToolInvoker(factory, cold)
+
+
+# LLM: 生产组合公开的execute.script必须接入真实ScriptStore和ScriptRunner，缺失资产返回404而非503未知结局。
+# 函数用途: 验证生产HTTP下未注册脚本明确拒绝与已注册脚本真实执行闭环。
+def test_production_gateway_script_asset_read_and_execution(tmp_path):
+    import hashlib
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.tests.test_plugin_host_v2_grants import http_request
+
+    code = 'import json\nprint(json.dumps({"ok": True, "greeting": "hello-alice"}))\n'
+    code_sha = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    fixture = production_host.__wrapped__(tmp_path, SimpleNamespace(
+        param={"asset_refs": [{"kind": "script", "id": "script-one", "revision": 1, "sha256": code_sha}]}
+    ))
+    host = next(fixture)
+    try:
+        production_call(host, "users.local.create", {"user_id": "alice"}, key="script_alice_create_1", status=201)
+        thread = production_call(host, "conversations.threads.create", {"title": "script"}, user="alice",
+                                 key="script_thread_create_1", status=201)
+        status, missing = http_request(host[0], host[1], {
+            "schema": "plugin_host_call.v2", "action": "execute.script", "as_user": {"user_id": "alice"},
+            "idempotency_key": "script_missing_exec_1",
+            "payload": {"thread_id": thread["thread_id"], "script_id": "script-one", "expected_revision": 1},
+        })
+        assert status == 404 and missing["error"]["code"] == "ASSET_NOT_FOUND" and missing["error"]["outcome"] == "not_started"
+        alice_home = host[2].root / "owners/local/alice"
+        ScriptStore(alice_home, extra_roots=()).save_script(
+            AssetDescriptor(id="script-one", kind="script", name="script-one", metadata={"revision": 1}),
+            code,
+        )
+        accepted = production_call(host, "execute.script", {
+            "thread_id": thread["thread_id"], "script_id": "script-one", "expected_revision": 1,
+        }, user="alice", key="script_approved_exec_1", status=202)
+        poll = production_call(host, "conversations.requests.poll", {"request_id": accepted["request_id"]}, user="alice")
+        assert poll["request"]["state"] == "succeeded", poll
+    finally:
+        next(fixture, None)
+

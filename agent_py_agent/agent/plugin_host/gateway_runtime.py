@@ -138,10 +138,28 @@ class GatewayPluginRequests:
         from .gateway_assets import registered_asset
         return registered_asset(context, payload)
 
+    # LLM: 仅允许已审内置文件工具或已注册脚本/工作流执行，返回成功状态与安全错误码。
+    # 函数用途: 执行单次已获批工具或资产请求。
+    def _run_execution_plan(self, context, plan, payload, fence) -> tuple[bool, str]:
+        if plan.action == "execute.tool":
+            ledger = LocalStore(context.owner_home.home_dir / "data/tool-operations.db")
+            try:
+                result = RestrictedToolInvoker(
+                    self.resources.resolver.factory, context, ExecutionHostPorts(ledger)
+                ).invoke(payload["tool_name"], payload["arguments"])
+                ok = bool(result.result.ok)
+                return ok, "" if ok else "TOOL_EXECUTION_FAILED"
+            finally:
+                close = getattr(ledger, "close", None)
+                if callable(close):
+                    close()
+        from .gateway_assets import execute_registered_asset
+        return execute_registered_asset(context, plan, fence)
+
     # LLM: 原receipt/claim/canonical为唯一执行事实；同键重放不重复文件副作用，未知claim拒绝重做。
-    # 函数用途: 受理并经原执行器完成有界内置文件操作。
+    # 函数用途: 受理并经原执行器完成有界内置文件操作或已注册资产执行。
     def enqueue(self, context, plan, fence):
-        if plan.action != "execute.tool":
+        if plan.action not in {"execute.tool", "execute.script", "execute.workflow", "execute.workflow_resume"}:
             raise HostAPIError("ASSET_EXECUTION_NOT_SUPPORTED", 403)
         authorized = context.source
         read = resolve_read_context(authorized)
@@ -151,11 +169,12 @@ class GatewayPluginRequests:
         request_id = "plugin-exec-" + hashlib.sha256(canonical_json(identity).encode()).hexdigest()
         digest = hashlib.sha256(canonical_json([identity, plan.payload_json]).encode()).hexdigest()
         payload = thaw(authorized.call.payload)
-        prepared = {"id": request_id, "kind": "ask", "source": "plugin", "goal": "Restricted file tool",
+        kind = "tool" if plan.action == "execute.tool" else plan.action.split(".", 1)[1]
+        prepared = {"id": request_id, "kind": "ask", "source": "plugin", "goal": f"Restricted {kind}",
             "host_request_owner.v1": asdict(context.identity), "owner_id": context.owner_home.owner_id,
             "metadata": {"client_input_digest": digest, "plugin_provenance": {
                 "installation_ref": authorized.binding.installation_ref, "thread_id": payload["thread_id"],
-                "kind": "tool", "activation_id": authorized.binding.activation_id}}}
+                "kind": kind, "activation_id": authorized.binding.activation_id}}}
         request = inputs.GatewayInputPreparation(request_id, digest, request_id, request_id, prepared)
         with inputs.gateway_input_transition(paths, request_id):
             fence.check()
@@ -174,17 +193,10 @@ class GatewayPluginRequests:
         if claim is None:
             raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
         fence.check()
-        ledger = LocalStore(context.owner_home.home_dir / "data/tool-operations.db")
-        try:
-            result = RestrictedToolInvoker(self.resources.resolver.factory, context, ExecutionHostPorts(ledger)).invoke(
-                payload["tool_name"], payload["arguments"])
-            response = {"id": request_id, "status": "done" if result.result.ok else "failed", "ok": result.result.ok,
-                        "ended_at": time.time()}
-            row = strict_json(claim.path.read_bytes(), RUNTIME_RECORD_MAX_BYTES)
-            terminal = _terminal_gateway_request_payload(request_id, row, response)
-            _commit_gateway_terminal_request(paths, claim.path, paths.done if response["ok"] else paths.failed, request_id, terminal)
-        finally:
-            close = getattr(ledger, "close", None)
-            if callable(close):
-                close()
+        ok, error_code = self._run_execution_plan(context, plan, payload, fence)
+        response = {"id": request_id, "status": "done" if ok else "failed", "ok": ok,
+                    "error_code": error_code, "ended_at": time.time()}
+        row = strict_json(claim.path.read_bytes(), RUNTIME_RECORD_MAX_BYTES)
+        terminal = _terminal_gateway_request_payload(request_id, row, response)
+        _commit_gateway_terminal_request(paths, claim.path, paths.done if ok else paths.failed, request_id, terminal)
         return ExecutionAccepted(request_id, payload["thread_id"], False)
