@@ -1,5 +1,5 @@
-# LLM: 计时只断言程序终态及稳定显示，不根据模型正文推断完成；临时配置不访问供应商。
-# 模块用途: 验证普通 CLI、TUI 和异常路径的统一结束时间、完整耗时与去重。
+# LLM: 计时只断言程序终态及稳定显示，不根据模型正文推断完成；受阻/未完成沿真实 local handler 保真，临时配置不访问供应商。
+# 模块用途: 验证普通 CLI、TUI 和异常路径的统一结束时间、完整耗时、状态标签与去重。
 import threading
 from types import SimpleNamespace
 
@@ -181,3 +181,90 @@ def test_t1_run_confirmed_outcome_survives_exit_code(monkeypatch, capsys, resume
     output = capsys.readouterr().out
     assert "最终正文" in output and label in output
     assert output.count("用时 ") == (0 if status == "unknown" else 1)
+
+
+# LLM: 只替换模型执行和正文显示边界，真实 local handler、时钟与摘要渲染必须保留结构化状态，正文不作成功证据。
+# 函数用途: 回归 direct plain 的失败分类、受阻/未完成链路及缺省 runtime_status 兼容语义。
+@pytest.mark.parametrize("runtime_fields,status,label", [
+    ({"runtime_status": "failed"}, "failed", "失败于"),
+    ({"runtime_status": "error"}, "failed", "失败于"),
+    ({"runtime_status": "cancelled"}, "failed", "失败于"),
+    ({"runtime_status": "blocked"}, "blocked", "受阻于"),
+    ({"runtime_status": "unfinished"}, "unfinished", "未完成于"),
+    ({"runtime_status": "ok"}, "completed", "完成于"),
+    ({"runtime_status": "unknown"}, "completed", "完成于"),
+    ({"runtime_status": None}, "completed", "完成于"),
+    ({"runtime_status": ""}, "completed", "完成于"),
+    ({"runtime_status": 1}, "completed", "完成于"),
+    ({}, "completed", "完成于"),
+])
+def test_f7_plain_local_status_reaches_completion(monkeypatch, runtime_fields, status, label):
+    from agent_py_agent.cli.chat_parts import plain_handlers as handlers
+    from agent_py_agent.cli.chat_parts.plain_state import ChatJob
+    from agent_py_agent.cli.turn_completion import TurnClock, render_completion
+
+    result = SimpleNamespace(response="这是正文，不是完成证据", **runtime_fields)
+    job = ChatJob(user="input", show_prompt=False, inject=[], prompt_files=[], request_id="f7-local")
+    agent = SimpleNamespace(config=SimpleNamespace(agent_name="test"), run=lambda *args, **kwargs: result)
+    local_run = SimpleNamespace(request_id=job.request_id, check_admission=lambda: None)
+    ctx = handlers.PlainJobContext(job, agent, SimpleNamespace(no_save=True),
+        SimpleNamespace(), [], lambda: "", local_run=local_run)
+    monkeypatch.setattr(handlers, "_make_chunk_handler", lambda *args, **kwargs: (lambda *parts: None, [False]))
+    monkeypatch.setattr(handlers, "_render_if_needed", lambda *args: None)
+    monkeypatch.setattr(handlers, "_print_local_timing", lambda *args: None)
+    now = [10.0]
+    monkeypatch.setattr(handlers.time, "monotonic", lambda: now[0])
+    clock = TurnClock(job.request_id)
+    now[0] = 15.0
+
+    assert handlers._plain_local_handle(ctx) == (result.response, False)
+    assert job.completion_status == status
+    completion = clock.finish(job.completion_status)
+    assert completion.status == status and completion.elapsed_seconds == 5.0
+    rendered = render_completion(completion)
+    assert rendered.startswith(label) and "用时 5.0秒" in rendered
+    if status in {"blocked", "unfinished"}:
+        assert not rendered.startswith("完成于")
+
+
+# LLM: 明确收口可以受阻或未完成，不代表业务成功；同一时钟仍冻结首个状态与耗时。
+# 函数用途: 检查五类已确认结果均可结算，且后续完成观察不改写原结果。
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted", "blocked", "unfinished"])
+def test_f7_turn_clock_accepts_confirmed_outcomes(status):
+    from agent_py_agent.cli.turn_completion import TurnClock
+
+    clock = TurnClock("f7-clock", started_monotonic=None)
+    completion = clock.finish(status)
+    assert completion.status == status and completion.elapsed_seconds is None
+    assert clock.finish("completed") is completion
+
+
+# LLM: 新增两类确认结果不放宽未知状态，连接或业务结果未确认时不得生成计时终态。
+# 函数用途: 保留未知状态的拒绝行为，避免扩展标签后误将任意结果视为完成。
+def test_f7_turn_clock_rejects_unknown_status():
+    from agent_py_agent.cli.turn_completion import TurnClock
+
+    clock = TurnClock("f7-unknown")
+    with pytest.raises(ValueError, match="未知业务状态"):
+        clock.finish("unknown")
+    assert clock.completion is None
+
+
+# LLM: 摘要仅展示输入状态，未知值明确状态未知，不从结束时间或正文推断成功。
+# 函数用途: 独立检查五类中文标签以及未知、空值和缺失状态的保守回退。
+@pytest.mark.parametrize("fields,label", [
+    ({"status": "completed"}, "完成于"),
+    ({"status": "failed"}, "失败于"),
+    ({"status": "interrupted"}, "已中断于"),
+    ({"status": "blocked"}, "受阻于"),
+    ({"status": "unfinished"}, "未完成于"),
+    ({"status": "unknown"}, "状态未知于"),
+    ({"status": None}, "状态未知于"),
+    ({"status": ""}, "状态未知于"),
+    ({}, "状态未知于"),
+])
+def test_f7_completion_labels_preserve_status(fields, label):
+    from agent_py_agent.cli.turn_completion import render_completion
+
+    rendered = render_completion({"completed_at": 1700000000.0, "elapsed_seconds": None, **fields})
+    assert rendered.startswith(label) and "用时 未知" in rendered

@@ -1,5 +1,5 @@
-# LLM: 程序计时独立于模型正文；单调钟算耗时、墙钟只显示结束日期，未知不能变零，重复终态冻结首次事实。
-# 模块用途: 为 run、普通聊天和 TUI 共用一份结束时间、耗时及渲染合同。
+# LLM: 程序计时独立于模型正文；单调钟算耗时，受阻/未完成不等于成功，未知不能变零，重复收口冻结首次事实。
+# 模块用途: 为 run、普通聊天和 TUI 共用结束时间、耗时及区分收口状态的渲染合同。
 from __future__ import annotations
 
 import math
@@ -20,8 +20,8 @@ class TurnCompletion:
     source: str
 
 
-# LLM: 创建时捕获原接受时钟，重试不新建；finish 并发幂等，不能由墙钟回拨改写耗时。
-# 类用途: 给一个逻辑输入保留原开始点并冻结首个确认终态。
+# LLM: 创建时捕获原接受时钟，重试不新建；finish 并发幂等，受阻/未完成也冻结，不能由墙钟回拨改写耗时。
+# 类用途: 给一个逻辑输入保留原开始点并冻结首个确认收口状态。
 @dataclass
 class TurnClock:
     logical_id: str
@@ -29,10 +29,10 @@ class TurnClock:
     completion: TurnCompletion | None = None
     _lock: object = field(default_factory=threading.Lock, repr=False)
 
-    # LLM: 仅接受明确终态；未知连接只交展示 notice，不调用 finish。
-    # 函数用途: 冻结本次输入的首个结束时间与单调耗时。
+    # LLM: 仅接受五类明确收口状态，受阻/未完成不是成功；未知连接只交展示 notice，不调用 finish。
+    # 函数用途: 冻结本次输入的首个确认状态、结束时间与单调耗时。
     def finish(self, status: str) -> TurnCompletion:
-        if status not in {"completed", "failed", "interrupted"}:
+        if status not in {"completed", "failed", "interrupted", "blocked", "unfinished"}:
             raise ValueError("不能为未知业务状态生成完成计时")
         with self._lock:
             if self.completion is None:
@@ -86,10 +86,16 @@ def format_elapsed(seconds: float | None) -> str:
     return "".join(rows)
 
 
-# LLM: 输入是程序结构化事实，模型正文不参与；本地日期带时区，时间和耗时不存在时不编造。
-# 函数用途: 为所有终端入口渲染同一行程序完成摘要。
+# LLM: 输入是程序结构化事实，模型正文不参与；五类收口分别标注，未知不冒充成功，本地日期带时区。
+# 函数用途: 为所有终端入口渲染保留原状态的一行程序收口摘要。
 def render_completion(value: TurnCompletion | dict) -> str:
     data = asdict(value) if isinstance(value, TurnCompletion) else value
-    label = {"completed": "完成", "failed": "失败", "interrupted": "已中断"}.get(data.get("status"), "状态未知")
+    label = {
+        "completed": "完成",
+        "failed": "失败",
+        "interrupted": "已中断",
+        "blocked": "受阻",
+        "unfinished": "未完成",
+    }.get(data.get("status"), "状态未知")
     ended = datetime.fromtimestamp(data["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     return f"{label}于 {ended}  ·  用时 {format_elapsed(data.get('elapsed_seconds'))}"

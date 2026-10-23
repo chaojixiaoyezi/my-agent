@@ -237,6 +237,8 @@ def observed_direct_children(params: object) -> dict[str, dict[str, object]]:
     return {}
 
 
+# LLM: ACK只消费本次出站可见的精确条目；预算淘汰媒体沿原提交账本退回pending，不把替身未编码当淘汰。
+# 函数用途: 确认模型收到的插话和事件，并保留未出站图片的重领机会。
 def acknowledge_injected_turn_input(
     agent: object,
     params: object,
@@ -260,6 +262,9 @@ def acknowledge_injected_turn_input(
             if entries.get(guidance_id) is not None
         ]
         delivered_ids: list[str] = []
+        delivery = state.get("_guidance_media_delivery")
+        evicted_entries = [entry for entry in acknowledged_entries if _entry_media_not_sent(entry, delivery)]
+        consumable_entries = [entry for entry in acknowledged_entries if entry not in evicted_entries]
         if acknowledged_entries:
             turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(
                 params
@@ -267,16 +272,19 @@ def acknowledge_injected_turn_input(
             # LLM: 宿主转换锁内确认模型实际接收的精确批次；交由 acknowledgements 提交与修复回执。
             # 函数用途: 记录模型对当前插话批次的消费确认。
             def consume() -> list[str]:
-                return list(
+                consumed = list(
                     store.guidance.acknowledgements.consume_submitted(
                         turn_id,
-                        acknowledged_entries,
+                        consumable_entries,
                         provider_call_id=str(
                             state.get("_guidance_submission_id") or ""
                         ).strip(),
                         now=now,
                     )
                 )
+                if evicted_entries:
+                    _release_evicted_guidance(store, params, turn_id, evicted_entries)
+                return consumed
 
             delivered_ids = list(
                 _run_active_turn_transition(params, "acknowledge", consume)
@@ -323,6 +331,54 @@ def acknowledge_injected_turn_input(
     return acknowledged
 
 
+# LLM: 读取原params持有的精确调用句柄，不依赖worker ContextVar回传；未编码替身只排除已证实淘汰项。
+# 函数用途: 判断一条带图输入是否有附件未进入本次出站数据。
+def _entry_media_not_sent(entry, delivery) -> bool:
+    from ...conversation.input_media import (
+        evicted_input_media_hashes,
+        last_encoded_input_media_hashes,
+    )
+
+    encoded, evicted = last_encoded_input_media_hashes(delivery), evicted_input_media_hashes(delivery)
+    refs = (getattr(entry, "metadata", None) or {}).get("input_media", ())
+    return any(ref.get("sha256") in evicted or encoded is not None and ref.get("sha256") not in encoded
+               for ref in refs)
+
+
+# LLM: 调用方持原宿主转换锁；先消费已发送子集，再拒绝原提交批次并只释放淘汰条目的精确索引，不能全attempt释放。
+# 函数用途: 将未出站图片恢复为pending，并从当前提示/携带包去除以便下一安全点重新认领。
+def _release_evicted_guidance(store, params, turn_id, entries) -> None:
+    from ...conversation.active_turn_input import exclude_active_turn_user_input_ids
+    from ...runtime_errors import DataCorruptionError
+
+    state = params.live_archive_state
+    attempt_id = str(getattr(params, "attempt_id", "") or getattr(params, "run_id", "") or turn_id).strip()
+    call_id = str(state.get("_guidance_submission_id") or "").strip()
+    ids = [entry.guidance_id for entry in entries]
+    store.guidance.submissions.restore_for_retry(turn_id, entries, attempt_id=attempt_id, provider_call_id=call_id)
+    with store.guidance.ledger.turn_guard(turn_id):
+        summary = {"released": 0, "released_guidance_ids": [], "submitted": 0, "errors": 0}
+        for entry in entries:
+            key = str(entry.metadata.get("dedupe_key") or "").strip()
+            store.guidance.recovery._release_reserved_index_locked(
+                store.storage.guidance_turn_index_path(turn_id, key), turn_id=turn_id,
+                expected_attempt=attempt_id, summary=summary,
+            )
+        if summary["errors"] or set(summary["released_guidance_ids"]) != set(ids):
+            raise DataCorruptionError("evicted media guidance release incomplete")
+    for key in ("_guidance_ack_ids", "_injected_guidance_ids"):
+        if isinstance(state.get(key), set):
+            state[key].difference_update(ids)
+    _forget_guidance_ack_entries(state, ids)
+    state.pop("_guidance_submission_id", None)
+    packets = getattr(params, "active_turn_user_inputs", None)
+    if isinstance(packets, list):
+        packets[:] = exclude_active_turn_user_input_ids(packets, ids)
+    history = getattr(params, "tool_ir_history", None)
+    if isinstance(history, list):
+        history[:] = [row for row in history if not set(ids).intersection(getattr(row, "input_ids", ()))]
+
+
 # LLM: A consumed user steer creates a typed, attempt-local reply obligation.
 # The ids are canonical guidance ids; model prose and thinking text never create
 # or clear this state. Tool-loop boundaries clear it only after visible model
@@ -366,6 +422,7 @@ def _require_active_turn_user_reply(state: dict[str, Any], guidance_ids: list[st
 
 # LLM: Prompt assembly only reserves guidance. This explicit edge advances the exact batch to
 # submitted immediately before a provider call, separating safe pre-call crashes from unknown I/O.
+# 每次提交新建媒体观察并存原params，caller可读worker结果；迟到调用只改旧句柄，不污染新调用。
 # 函数用途: 在模型请求发出前，将当前尝试已注入的补充消息批量标记为开始提交。
 def mark_injected_turn_input_submitted(
     agent: object,
@@ -388,13 +445,15 @@ def mark_injected_turn_input_submitted(
     ]
     if not submitted_entries:
         return 0
+    from ...conversation.input_media import reset_input_media_delivery
+
     turn_id = str(getattr(params, "request_id", "") or "").strip() or durable_task_id(params)
     attempt_id = (
         str(getattr(params, "attempt_id", "") or "").strip()
         or str(getattr(params, "run_id", "") or "").strip()
         or turn_id
     )
-    # LLM: 运行循环在宿主转换锁内提交精确模型批次；必须沿 submissions 标记，不能把预留当消费。
+    # LLM: 原宿主转换锁内提交批次并绑定同次媒体句柄；对象不写canonical，只用于caller确认worker的出站结果。
     # 函数用途: 提交已注入消息的批次并记录本次模型调用身份。
     def submit() -> int:
         count = len(
@@ -408,6 +467,8 @@ def mark_injected_turn_input_submitted(
         )
         if count and str(provider_call_id or "").strip():
             state["_guidance_submission_id"] = str(provider_call_id).strip()
+        if count:
+            state["_guidance_media_delivery"] = reset_input_media_delivery()
         return count
 
     submitted = int(_run_active_turn_transition(params, "submit", submit))
