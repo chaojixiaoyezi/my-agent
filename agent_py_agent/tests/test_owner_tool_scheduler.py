@@ -1037,3 +1037,32 @@ def test_user_submission_does_not_lower_active_host_global_limit(tmp_path, monke
         first.result(5)
         if pending is not None:
             pending.result(5)
+
+
+# LLM: 已有深队列的owner在_drain让出全局槽时必须旋转到_GLOBAL_WAITERS队尾，避免被_wake_global_waiters再次首唤醒。
+# 函数用途: 验证Owner A排队多项且Owner B后到达时，全局槽在a1完成后优先轮转给b1。
+def test_global_waiters_rotate_fairly_when_first_owner_has_deep_backlog(tmp_path):
+    from agent_py_agent.agent.tooling import owner_tool_scheduler as module
+
+    Scheduler, Item = scheduler_api()
+    with module._DISPATCH_CONDITION:
+        assert module._DISPATCH_CONDITION.wait_for(lambda: not module._GLOBAL_ACTIVE, 5)
+    owner_a = Scheduler.for_owner(tmp_path / 'owner-a', 2)
+    owner_b = Scheduler.for_owner(tmp_path / 'owner-b', 2)
+    a1_started, release_a1 = Event(), Event()
+    order = []
+
+    def run_a1():
+        order.append('a1')
+        a1_started.set()
+        release_a1.wait(5)
+        return 'a1'
+
+    f_a1 = owner_a.submit(Item('a1', run_a1), max_parallel_global=1)
+    assert a1_started.wait(5)
+    f_a2 = owner_a.submit(Item('a2', lambda: (order.append('a2'), 'a2')[1]), max_parallel_global=1)
+    f_a3 = owner_a.submit(Item('a3', lambda: (order.append('a3'), 'a3')[1]), max_parallel_global=1)
+    f_b1 = owner_b.submit(Item('b1', lambda: (order.append('b1'), 'b1')[1]), max_parallel_global=1)
+    release_a1.set()
+    assert [f.result(5) for f in (f_a1, f_a2, f_a3, f_b1)] == ['a1', 'a2', 'a3', 'b1']
+    assert order[:2] == ['a1', 'b1']

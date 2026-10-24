@@ -263,13 +263,14 @@ class OwnerToolScheduler:
                 _GLOBAL_ACTIVE -= 1
                 _GLOBAL_CONTROL_ACTIVE -= int(reserve)
                 if self._queue:
-                    _GLOBAL_WAITERS.setdefault(self, None)
+                    _GLOBAL_WAITERS.pop(self, None)
+                    _GLOBAL_WAITERS[self] = None
                 failures = _wake_global_waiters()
                 self._condition.notify_all()
             for failure in failures:
                 _finish_start_failure(failure)
 
-    # LLM: 保留worker只取控制项，正常许可不扣预留控制槽；已完成一项且有其它owner等待全局槽时主动让出。
+    # LLM: 保留worker只取控制项，正常许可不扣预留控制槽；已完成一项且全局槽满并有其它可运行owner排队时主动让出。
     # 函数用途: 领取下一工作项并解除生产者背压。
     def _take_next(self, reserve=False, *, yield_to_waiters=False):
         with self._condition:
@@ -277,7 +278,10 @@ class OwnerToolScheduler:
                     or (not reserve and (self._active - self._control_active > self.limit
                                         or bool(_GLOBAL_LIMIT and _GLOBAL_ACTIVE - _GLOBAL_CONTROL_ACTIVE > _GLOBAL_LIMIT)
                                         or (yield_to_waiters and bool(_GLOBAL_LIMIT)
-                                            and any(waiter is not self and waiter._queue for waiter in _GLOBAL_WAITERS))))):
+                                            and _GLOBAL_ACTIVE - _GLOBAL_CONTROL_ACTIVE >= _GLOBAL_LIMIT
+                                            and any(waiter is not self and waiter._queue
+                                                    and waiter._active - waiter._control_active < waiter.limit
+                                                    for waiter in _GLOBAL_WAITERS))))):
                 return None
             work = self._queue.popleft()
             self._condition.notify_all()

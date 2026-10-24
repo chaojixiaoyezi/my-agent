@@ -112,12 +112,14 @@ class GatewayLoopHealth:
             self._tick_inflight = True
 
     # LLM: 同一tick内跨长维护段（恢复、终态补投影、输入对账、孤儿锁清扫）完成一步后只刷新在途单调钟，
-    #   保留last_dispatch_tick_started_at墙钟起点不变，避免有界维护段累计耗时误触发tick_wedged。
-    # 函数用途: 在同一派发tick的相邻维护段之间记录正常单调进展。
-    def note_dispatch_tick_progress(self) -> None:
+    #   保留last_dispatch_tick_started_at墙钟起点不变，避免相邻维护段累计耗时误触发tick_wedged；返回当前是否处于在途tick。
+    # 函数用途: 在同一派发tick的相邻维护段之间记录正常单调进展，返回是否在途。
+    def note_dispatch_tick_progress(self) -> bool:
         with self._lock:
             if self._tick_inflight:
                 self._tick_started_monotonic = time.monotonic()
+                return True
+            return False
 
     # LLM: 出错tick也要调用；起止同锁记录单调进展并清在途位，不借墙钟大小判断是否已完成。
     # 函数用途: 一次 tick 结束，记录完成时间、累计次数与本轮派发数。

@@ -679,7 +679,35 @@ def _openat_directory(parent_fd: int, name: str) -> int:
     return descriptor
 
 
+# LLM: 仅在 open 到 fstat 之间旧普通文件被同目录新单链接普通文件原子替换（旧 fd st_nlink==0 且当前路径为不同 inode 普通文件）时返回真。
+# 函数用途: 区分 open/fstat 窗口的合法原子替换与被直接删除或硬链篡改。
+def _is_transient_unlinked_open_race(
+    parent_fd: int,
+    name: str,
+    before: os.stat_result | None,
+    after: os.stat_result,
+) -> bool:
+    if (
+        before is None
+        or not stat.S_ISREG(after.st_mode)
+        or int(after.st_nlink) != 0
+        or not _same_identity(before, after)
+    ):
+        return False
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(current.st_mode)
+        and stat.S_ISREG(current.st_mode)
+        and int(current.st_nlink) == 1
+        and not _same_identity(before, current)
+    )
+
+
 # LLM: 只接受单链接普通文件；no-follow 与 inode 比较阻止替换，非阻塞打开避免预检后换成 FIFO 使线程卡住。
+#   打开与 fstat 之间若被同目录 os.replace 原子替换，原普通文件 inode 的 st_nlink 会降为 0，标记 transient_open_race=True。
 # 函数用途: 在已验证父目录中打开并复核最终文件，调用方负责关闭描述符。
 def _openat_file(parent_fd: int, name: str, flags: int, mode: int) -> int:
     before: os.stat_result | None
@@ -702,7 +730,8 @@ def _openat_file(parent_fd: int, name: str, flags: int, mode: int) -> int:
     after = os.fstat(descriptor)
     if not stat.S_ISREG(after.st_mode) or int(after.st_nlink) != 1:
         os.close(descriptor)
-        raise NoFollowPathError("managed file changed during open")
+        transient = _is_transient_unlinked_open_race(parent_fd, name, before, after)
+        raise NoFollowPathError("managed file changed during open", transient_open_race=transient)
     if before is not None and not _same_identity(before, after):
         os.close(descriptor)
         raise NoFollowPathError("managed file changed during open", transient_open_race=True)

@@ -458,8 +458,8 @@ def test_opt7_finish_run_uses_incremental_history_ids(tmp_path, monkeypatch):
         {"run_id": "srun_old"}, {"run_id": "srun_external"}, {"run_id": claim["run_id"]},
     ]) == []
     assert len(calls) == 1
-    assert reads and all(start >= end - 4096 for start, _size in reads)
-    assert sum(size for _start, size in reads) < end
+    assert reads and all((start == 0 and size <= 4096) or start >= end - 4096 for start, size in reads)
+    assert sum(size for start, size in reads if start > 0) < end
 
 
 # LLM: 替换、截断、同尺寸恢复mtime及锚点改写不能继续继承旧run_id集合。
@@ -738,3 +738,76 @@ def test_opt7_history_report_cache_limits_and_corruption(tmp_path, monkeypatch):
     for _ in range(2):
         assert effects_module._cached_history_report(path, context="test").records == [{"run_id": "srun_one"}]
     assert len(reads) == 4
+
+
+# LLM: open与fstat之间发生同目录原子replace时旧inode的st_nlink降为0，必须标transient_open_race重试；多硬链仍硬拒。
+# 函数用途: 验证read_atomic_store_bytes在open到fstat窗口遇到原子替换时可恢复，遇到硬链接则立即拒绝。
+def test_store_snapshot_open_to_fstat_atomic_replace_retries_transient_race(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs as fs
+    from agent_py_agent.agent.scheduler.store_snapshot import read_atomic_store_bytes
+
+    supported = fs._supports_dir_fd()
+    monkeypatch.setattr(fs, "_supports_dir_fd", lambda: supported)
+    store = tmp_path / "store.json"
+    store.write_bytes(b'{"v":1}')
+    original_open = os.open
+    calls = []
+
+    def race_open(name, flags, mode=0o777, **kwargs):
+        fd = original_open(name, flags, mode, **kwargs)
+        if name == "store.json" and not calls:
+            calls.append(1)
+            replacement = tmp_path / "store.json.tmp"
+            replacement.write_bytes(b'{"v":2}')
+            os.replace(replacement, store)
+        return fd
+
+    monkeypatch.setattr(os, "open", race_open)
+    assert read_atomic_store_bytes(store) == b'{"v":2}'
+    assert len(calls) == 1
+
+    hard_calls = []
+    extra = tmp_path / "extra.link"
+
+    def hardlink_open(name, flags, mode=0o777, **kwargs):
+        fd = original_open(name, flags, mode, **kwargs)
+        if name == "store.json" and not hard_calls:
+            hard_calls.append(1)
+            os.link(store, extra)
+        return fd
+
+    monkeypatch.setattr(os, "open", hardlink_open)
+    with pytest.raises(fs.NoFollowPathError) as caught:
+        read_atomic_store_bytes(store)
+    assert caught.value.transient_open_race is False and len(hard_calls) == 1
+
+
+# LLM: 小于4KiB的历史追加（包括跨过4KiB边界）后必须同步更新head_digest；大于4KiB首部改写再追加必须重读。
+# 函数用途: 验证_cached_history_run_ids在小文件增量扩展后稳定命中缓存，且大文件首部篡改加追加时回退全量读取。
+def test_history_run_ids_small_extend_updates_head_digest(tmp_path, monkeypatch):
+    history = tmp_path / "history.jsonl"
+    history.write_text('{"run_id":"r1"}\n', encoding="utf-8")
+    reads = _jsonl_read_spy(monkeypatch, repository_module)
+    assert repository_module._cached_history_run_ids(history) == {"r1"}
+    assert len(reads) == 1
+    with history.open("ab") as handle:
+        handle.write(b'{"run_id":"r2"}\n')
+    assert repository_module._cached_history_run_ids(history) == {"r1", "r2"}
+    assert repository_module._cached_history_run_ids(history) == {"r1", "r2"}
+    assert len(reads) == 1
+    with history.open("ab") as handle:
+        handle.write((json.dumps({"run_id": "r3", "pad": "x" * 5000}) + "\n").encode("utf-8"))
+    assert repository_module._cached_history_run_ids(history) == {"r1", "r2", "r3"}
+    assert repository_module._cached_history_run_ids(history) == {"r1", "r2", "r3"}
+    assert len(reads) == 1
+
+    large = tmp_path / "large.jsonl"
+    old_line = json.dumps({"run_id": "old-id", "pad": "x" * 12000}) + "\n"
+    new_line = json.dumps({"run_id": "new-id", "pad": "x" * 12000}) + "\n"
+    large.write_text(old_line, encoding="utf-8")
+    assert repository_module._cached_history_run_ids(large) == {"old-id"}
+    with large.open("r+b") as handle:
+        handle.write(new_line.encode("utf-8"))
+        handle.seek(0, 2)
+        handle.write(b'{"run_id":"append"}\n')
+    assert repository_module._cached_history_run_ids(large) == {"new-id", "append"}

@@ -380,11 +380,11 @@ class _RequestDispatcher:
         return dispatched
 
 
-    # LLM: 相邻维护段切换时同步刷新loop_health在途单调钟与faulthandler看门狗预算，避免多段耗时累加误触发。
+    # LLM: 相邻维护段切换时同步刷新loop_health在途单调钟与faulthandler看门狗预算；裸调tick不在途时不武装看门狗。
     # 函数用途: 在进入下一维护段前重置单段卡死超时预算。
     def _note_segment_progress(self) -> None:
-        loop_health.note_dispatch_tick_progress()
-        _dispatch_stall_watchdog(DISPATCHER_STALL_TIMEOUT_SECONDS)
+        if loop_health.note_dispatch_tick_progress():
+            _dispatch_stall_watchdog(DISPATCHER_STALL_TIMEOUT_SECONDS)
 
 
     # LLM: 后台修复段的统一跑法：成功清零该段退避并返回 0；失败记账（loop "dispatcher"）、按该段自己的退避限流打印，

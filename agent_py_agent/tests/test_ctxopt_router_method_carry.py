@@ -173,3 +173,10 @@ def test_real_skill_get_compact_and_carry_publish_structured_body_status(tmp_pat
     status = json.loads(next(line for line in turns[0].text.splitlines() if line.startswith('{"complete":')))
     assert status["truncated"] is long_body and status["complete"] is (not long_body)
     assert status["next_read"] == {"action": "get", "skill_id": skill.stable_id}
+
+
+def test_discovered_tool_carry_respects_explicit_false_tools_deferral(tmp_path):
+    fixture = method_fixture(tmp_path)
+    fixture.agent.tools = SimpleNamespace(catalog_default_deferral_enabled=False)
+    fixture.params.tool_runtime_snapshot = SimpleNamespace(default_deferral_enabled=True)
+    assert method_carry._prepare_discovered_tool_carry(fixture.agent, fixture.params, 1600) == 0

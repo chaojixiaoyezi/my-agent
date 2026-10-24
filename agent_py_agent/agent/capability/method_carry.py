@@ -258,9 +258,11 @@ def _prepare_discovered_tool_carry(agent: object, params: object, budget_cap: in
     from ..tooling.tool_search_state import ordered_tool_names
 
     snapshot = getattr(params, "tool_runtime_snapshot", None)
+    tools_deferral = getattr(getattr(agent, "tools", None), "catalog_default_deferral_enabled", None)
     deferral_enabled = (
-        getattr(getattr(agent, "tools", None), "catalog_default_deferral_enabled", None) is True
-        or getattr(snapshot, "default_deferral_enabled", False) is True
+        tools_deferral
+        if isinstance(tools_deferral, bool)
+        else getattr(snapshot, "default_deferral_enabled", False) is True
     )
     if (snapshot is None or not deferral_enabled
             or getattr(params, "context_scope", "") in {"isolated", "control_plane"}

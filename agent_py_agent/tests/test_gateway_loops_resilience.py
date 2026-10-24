@@ -601,3 +601,24 @@ def test_background_main_supervisor_writes_heartbeat(tmp_path) -> None:
 
     supervisor._maybe_write_heartbeat()  # 节流窗口内 → 不重写
     assert heartbeat.stat().st_mtime == first_mtime
+
+
+def test_direct_dispatcher_tick_does_not_arm_watchdog_when_not_inflight(monkeypatch) -> None:
+    """裸调 dispatcher._note_segment_progress（未进入 mark_tick_started）时不武装 faulthandler 看门狗。"""
+    from agent_py_agent.agent.gateway_parts.loop_health import loop_health
+    from agent_py_agent.cli import gateway_loops
+
+    loop_health.reset()
+    armed: list[float] = []
+    monkeypatch.setattr(gateway_loops, "_dispatch_stall_watchdog", lambda seconds: armed.append(seconds))
+    dispatcher = object.__new__(gateway_loops._RequestDispatcher)
+
+    dispatcher._note_segment_progress()
+    assert armed == []
+
+    loop_health.mark_tick_started()
+    try:
+        dispatcher._note_segment_progress()
+        assert armed == [gateway_loops.DISPATCHER_STALL_TIMEOUT_SECONDS]
+    finally:
+        loop_health.mark_tick_finished(0)

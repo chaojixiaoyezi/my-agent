@@ -135,7 +135,7 @@ def _read_history_prefix_state(handle: Any, offset: int) -> tuple[str, bool, str
     )
 
 
-# LLM: 只接受同设备/inode、增长、原完整LF边界且尾部锚点摘要相同的追加；任一坏行或竞态退回原全量报告器。
+# LLM: 只接受同设备/inode、增长、原完整LF边界且首尾锚点摘要相同的追加；小文件扩展同步更新head_digest，任一坏行或竞态退回原全量报告器。
 # 函数用途: 验证历史追加后只解析锚点与新增字节，返回新的不可变ID投影。
 def _extend_history_run_ids(path, stamp, cached):
     if stamp is None or stamp[2:4] != cached.stamp[2:4] or stamp[1] <= cached.offset or not cached.complete_line:
@@ -146,6 +146,12 @@ def _extend_history_run_ids(path, stamp, cached):
             if (info.st_ino, info.st_dev) != stamp[2:4]:
                 return None
             start = max(0, cached.offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
+            if start > 0:
+                handle.seek(0)
+                head = handle.read(_HISTORY_RUN_IDS_ANCHOR_BYTES)
+                if (len(head) != _HISTORY_RUN_IDS_ANCHOR_BYTES
+                        or hashlib.blake2b(head, digest_size=16).hexdigest() != cached.head_digest):
+                    return None
             handle.seek(start)
             anchor = handle.read(cached.offset - start)
             if (len(anchor) != cached.offset - start or not anchor.endswith(b"\n")
@@ -164,9 +170,16 @@ def _extend_history_run_ids(path, stamp, cached):
             added.add(str(row.get("run_id") or ""))
         if _history_file_stamp(path) != stamp:
             return None
-        new_anchor = (anchor + tail)[-_HISTORY_RUN_IDS_ANCHOR_BYTES:]
+        combined = anchor + tail
+        new_anchor = combined[-_HISTORY_RUN_IDS_ANCHOR_BYTES:]
         new_digest = hashlib.blake2b(new_anchor, digest_size=16).hexdigest()
-        head_digest = cached.head_digest or new_digest
+        head_digest = (
+            cached.head_digest
+            if start > 0
+            else new_digest
+            if len(combined) <= _HISTORY_RUN_IDS_ANCHOR_BYTES
+            else hashlib.blake2b(combined[:_HISTORY_RUN_IDS_ANCHOR_BYTES], digest_size=16).hexdigest()
+        )
         return _HistoryRunIdsProjection(stamp, stamp[1], new_digest, True, cached.run_ids | added, head_digest)
     except (OSError, UnicodeError, ValueError):
         return None
@@ -213,11 +226,11 @@ def _cached_history_run_ids(path: Path) -> set[str]:
     if (cached is not None and stamp is not None and cached.stamp == stamp
             and _history_anchor_matches(path, cached)):
         with _HISTORY_RUN_IDS_CACHE_LOCK:
-            if _HISTORY_RUN_IDS_CACHE.get(key) == cached:
+            if _HISTORY_RUN_IDS_CACHE.get(key) is cached:
                 _HISTORY_RUN_IDS_CACHE.move_to_end(key)
         return set(cached.run_ids)
     with _HISTORY_RUN_IDS_CACHE_LOCK:
-        if _HISTORY_RUN_IDS_CACHE.get(key) == cached:
+        if _HISTORY_RUN_IDS_CACHE.get(key) is cached:
             _HISTORY_RUN_IDS_CACHE.pop(key, None)
     entry = _extend_history_run_ids(path, stamp, cached) if cached is not None else None
     ids, entry = (entry.run_ids, entry) if entry is not None else _full_history_run_ids(path, stamp)
