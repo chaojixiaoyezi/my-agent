@@ -41,9 +41,11 @@ class _ProcessRun:
         self._stopped = False
         self._closed = False
 
-    # LLM: stop 可由取消线程或等待线程调用，必须幂等；整个 TERM/宽限/KILL 持锁，close 因此能等待在途回收。
+    # LLM: stop可由取消/等待线程调用，原锁串行TERM/KILL；先唤醒capture但不停止排空，close等待在途回收。
     # 函数用途: 回收本次命令组，避免超时和 /stop 重复杀组或只杀组长。
     def stop(self) -> None:
+        if self.capture is not None:
+            self.capture.wake()
         with self._lock:
             if self._closed or self._stopped:
                 return
@@ -141,15 +143,23 @@ def _raise_if_run_cancelled(state: _ProcessRun) -> None:
         raise_if_cancelled()
 
 
-# LLM: TimeoutExpired 只代表观察片未完成；管道 reader 是唯一读取者，wait 不读取或无限累积输出。
-# 函数用途: 有界等待组长与管道末尾，未完成时留给外层继续判断总期限和取消。
+# LLM: 有capture时先采样代次再poll，条件等待避免检查后丢通知；同步attempt仍允许reap，不复用前台清理顺序。
+# 函数用途: 有界观察组长和管道，使用事件唤醒替代输出结束后的盲sleep。
 def _wait_slice(state: _ProcessRun, seconds: float) -> bool:
+    if state.capture is None or state.capture.done():
+        return _wait_leader(state.proc, seconds)
+    generation = state.capture.generation
+    if state.proc.poll() is None or not state.capture.done():
+        state.capture.wait_changed(seconds, generation=generation)
+    return state.proc.poll() is not None and state.capture.done()
+
+
+# LLM: 同步attempt可reap；两流已结束时不再有输出通知，需保留原wait以观察片内真实退出。禁止给前台shell使用。
+# 函数用途: 用原有界wait等待组长，避免EOF后的按时退出误报超时。
+def _wait_leader(proc, seconds: float) -> bool:
     try:
-        state.proc.wait(timeout=seconds)
+        proc.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
-        return False
-    if state.capture is not None and not state.capture.done():
-        time.sleep(min(0.01, seconds))
         return False
     return True
 

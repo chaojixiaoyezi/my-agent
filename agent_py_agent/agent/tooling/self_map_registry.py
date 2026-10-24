@@ -33,6 +33,8 @@ class SectionProjection:
     count_labels: dict[str, str] = field(default_factory=dict)
     title: str = ""
     list_mode: bool = True
+    summary_count: int | None = None
+    summary_families: dict[str, int] | None = None
 
 
 # LLM: 仅注册 ID 不存在抛此类；参数类型、item 和读源损坏仍沿各自错误合同。
@@ -51,6 +53,8 @@ class SectionDescriptor:
     reader: Callable[[SelfMapReadContext], SectionProjection]
     purpose: str = ""
     list_mode: bool = True
+    summary_reader: Callable[[SelfMapReadContext], SectionProjection] | None = None
+    item_reader: Callable[[SelfMapReadContext, str], SectionProjection | None] | None = None
 
 
 # LLM: 冻结一次调用的原工具快照和实际展示投影；child 管理资格不得继承本机主 Agent 的身份。
@@ -64,6 +68,7 @@ class SelfMapReadContext:
     thread_id: str = ""
     context_scope: str = "default"
     public_context: dict[str, Any] = field(default_factory=dict)
+    memo: dict[Any, Any] = field(default_factory=dict, repr=False, compare=False)
 
     # LLM: 唯一完整本机身份判据复用原 owner_access；子代理即使共享 home 也没有管理库存资格。
     # 函数用途: 判断本次目录查询是否允许管理员库存。

@@ -1,3 +1,5 @@
+# LLM: 沿真实工具合同验证只读、完整性与窄读取；不以摘要伪造全量枚举或放宽旧断言。
+# 模块用途: 锁住开放登记、分页预算、安全恢复及新增轻量摘要的公共语义。
 """自我目录合同：只读、开放登记、完整性、分页预算及安全恢复。"""
 import json
 
@@ -114,3 +116,40 @@ def test_detail_suggestion_respects_scope_and_never_executes_or_loads(map_case, 
     _, write = _query(map_case, {'section': 'entry', 'item': 'write'})
     assert write['item']['next_read']['tool'] == 'self_map'
     assert not getattr(agent, '_current_run_params', None)
+
+
+# LLM: summary明确给出计数时不要求物化items；普通四参数注册仍沿原读口。
+# 函数用途: 总览走轻量读取且不把未枚举条目显示为空。
+def test_summary_reader_uses_proven_count_without_full_reader(map_case):
+    _, registry, _ = map_case
+    registry.register(SectionDescriptor('skills', '方法', 1, lambda _: pytest.fail('full reader'),
+        summary_reader=lambda _: SectionProjection((), summary_count=7, summary_families={'future': 7})))
+    result, value = _query(map_case, {})
+    assert result.ok
+    row = value['sections'][0]
+    assert row['count'] == 7 and row['state'] != 'empty'
+    assert '条目0' not in row['summary'] and '当前为空' not in row['summary']
+    assert value['capability_families']['skills'] == {'future': 7}
+
+
+# LLM: 不完整来源即使传了计数也不当完整库存；分类缺少证明保持null。
+# 函数用途: 防止summary空items变成假零或假空分类。
+def test_partial_summary_keeps_unknown_count_and_families(map_case):
+    _, registry, _ = map_case
+    registry.register(SectionDescriptor('skills', '方法', 1, lambda _: SectionProjection(()),
+        summary_reader=lambda _: SectionProjection((), 'partial', summary_count=8)))
+    result, value = _query(map_case, {})
+    assert result.ok and value['sections'][0]['count'] is None
+    assert value['capability_families']['skills'] is None
+
+
+# LLM: 精确详情读者结果为空不能回退到完整列表扩大范围。
+# 函数用途: 准确item只调用窄读取器，未找到保持参数错误。
+def test_item_reader_never_falls_back_to_full_projection(map_case):
+    _, registry, _ = map_case
+    registry.register(SectionDescriptor('x', '窄入口', 1, lambda _: pytest.fail('full reader'),
+        item_reader=lambda _, identity: SectionProjection((map_item(identity, identity),)) if identity == 'one' else None))
+    result, value = _query(map_case, {'section': 'x', 'item': 'one'})
+    assert result.ok and value['item']['id'] == 'one'
+    result, _ = _query(map_case, {'section': 'x', 'item': 'missing'})
+    assert not result.ok and result.error_code == 'TOOL_INVALID_ARGUMENTS'

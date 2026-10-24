@@ -110,7 +110,7 @@ class SelfMapTool(BaseTool):
     def _query(self, params: dict[str, Any], context: SelfMapReadContext) -> dict[str, Any]:
         section = params.get("section")
         if not section:
-            projections = [(descriptor, _read_projection(descriptor, context)) for descriptor in self.sections.descriptors()]
+            projections = [(descriptor, _read_projection(descriptor, context, summary=True)) for descriptor in self.sections.descriptors()]
             payload = {"sections": [_overview(descriptor, projection) for descriptor, projection in projections],
                        "capability_families": {descriptor.id: _capability_families(projection)
                            for descriptor, projection in projections if descriptor.id in {"tools", "skills"}}}
@@ -118,7 +118,7 @@ class SelfMapTool(BaseTool):
                 raise SelfMapResponseTooLarge()
             return payload
         descriptor = self.sections.get(section)
-        projection = _read_projection(descriptor, context)
+        projection = _read_projection(descriptor, context, item=params.get("item"))
         if params.get("item"):
             item = next((row for row in projection.items if row["id"] == params["item"]), None)
             if item is None:
@@ -152,9 +152,18 @@ def _validate_query(params: dict[str, Any], registry: SelfMapRegistry) -> None:
 
 # LLM: 读源失败只报安全码；显示标题和列表形态来自声明，不从领域ID或自由文本决定行为。
 # 函数用途: 取得一个领域的公共快照，区分不可用与完整空集。
-def _read_projection(descriptor: Any, context: SelfMapReadContext) -> SectionProjection:
+def _read_projection(descriptor: Any, context: SelfMapReadContext, *, summary=False, item=None) -> SectionProjection:
     try:
-        return replace(descriptor.reader(context), title=descriptor.title, list_mode=descriptor.list_mode)
+        if item and descriptor.item_reader is not None:
+            projection = descriptor.item_reader(context, item)
+            if projection is None:
+                return SectionProjection((), "partial", count_known=False)
+        elif summary and descriptor.summary_reader is not None:
+            projection = descriptor.summary_reader(context)
+            projection = replace(projection, count_known=projection.count_known and projection.summary_count is not None)
+        else:
+            projection = descriptor.reader(context)
+        return replace(projection, title=descriptor.title, list_mode=descriptor.list_mode)
     except (OSError, RuntimeError, TypeError, AttributeError, ValueError):
         return SectionProjection((), "partial", "unavailable", ("SELF_MAP_SOURCE_UNAVAILABLE",), count_known=False,
                                  title=descriptor.title, list_mode=descriptor.list_mode)
@@ -164,7 +173,7 @@ def _read_projection(descriptor: Any, context: SelfMapReadContext) -> SectionPro
 # 函数用途: 给每域一行数量、空状态和查询入口，不重复同一标题。
 def _overview(descriptor: Any, projection: SectionProjection) -> dict[str, Any]:
     return {"section": descriptor.id, **_summary(projection, "count"),
-            "summary": status_summary(projection),
+            "summary": _overview_status(projection),
             "state": _projection_state(projection),
             "completeness": projection.completeness, "next_read": next_read("self_map", {"section": descriptor.id})}
 
@@ -172,7 +181,7 @@ def _overview(descriptor: Any, projection: SectionProjection) -> dict[str, Any]:
 # LLM: 完整性与 count_known 必须同时成立；没有计数接口的空投影也不能声称已知 empty。
 # 函数用途: 总览与列表同源区分完整空集和未统计。
 def _projection_state(projection: SectionProjection) -> str:
-    empty = not projection.items and projection.count_known and projection.completeness == "complete" and projection.state == "known"
+    empty = _projection_count(projection) == 0 and projection.state == "known"
     return "empty" if empty else projection.state
 
 
@@ -215,7 +224,8 @@ def _fingerprint(context: SelfMapReadContext, params: dict[str, Any], projection
     fields = [scope, projection.items, projection.completeness, projection.errors,
               projection.source, projection.state, projection.count_known,
               projection.counts, projection.count_reasons, projection.locations, projection.count_reason,
-              projection.summary, projection.count_labels, projection.title, projection.list_mode]
+              projection.summary, projection.count_labels, projection.title, projection.list_mode,
+              projection.summary_count, projection.summary_families]
     payload = json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -234,7 +244,7 @@ def _decode_cursor(cursor: str) -> dict[str, Any]:
     return value
 
 
-# LLM: 默认列表先压成列式短行再按真实预算收页；状态卡/显式limit保留公开详情，ID和名称不截。
+# LLM: 默认列表先压成列式短行再按真实预算收页；完整性状态列不得丢失，状态卡/显式limit保留公开详情，ID和名称不截。
 # 函数用途: 常见目录一次列全并给逐条详情参数，预算不足仍有精确续页，不改变归档规则。
 def _page(params: dict[str, Any], context: SelfMapReadContext, projection: SectionProjection) -> dict[str, Any]:
     items = sorted(projection.items, key=lambda row: row["id"])
@@ -247,6 +257,8 @@ def _page(params: dict[str, Any], context: SelfMapReadContext, projection: Secti
         raise ValueError("offset out of range")
     compact = "limit" not in params and projection.list_mode
     columns = compact_columns(items)
+    if any('integrity_state' in row for row in items):
+        columns.append('integrity_state')
     selection = {"items": [compact_item(row, columns) if compact else _item_entry(row, params["section"], context)
                             for row in items[offset:offset + limit]],
                  "offset": offset, "fingerprint": fingerprint, "compact": compact,
@@ -276,12 +288,35 @@ def _shrink_default_selection(selection, section):
 # LLM: 总览/分块数量与未观测说明同源；null不被0覆盖，领域计数原因不被通用状态说明替换。
 # 函数用途: 生成公共数量摘要、逐项未知原因和投影级未观测说明。
 def _summary(projection: SectionProjection, count_key: str) -> dict[str, Any]:
-    known = projection.completeness == "complete" and projection.count_known
+    count = _projection_count(projection)
+    known = count is not None
     reason = projection.count_reason or ("来源不完整或没有无副作用的完整计数接口。" if not known else "")
-    return {count_key: len(projection.items) if known else None, "count_reason": reason,
+    return {count_key: count, "count_reason": reason,
             **unknown_observation_notice(projection.state),
             **({"counts": projection.counts} if projection.counts else {}),
             **({"count_reasons": projection.count_reasons} if projection.count_reasons else {})}
+
+
+# LLM: 计数只能来自完整投影或显式证明；bool/负数不作为数量，partial永不承诺全量。
+# 函数用途: 给轻量摘要和旧完整列表统一取得真实总数。
+def _projection_count(projection):
+    if projection.completeness != "complete" or not projection.count_known:
+        return None
+    count = projection.summary_count
+    return len(projection.items) if count is None else count if type(count) is int and count >= 0 else None
+
+
+# LLM: 原显示器按items长度计数，轻量读者不物化items；不得因此显示条目0或当前为空。
+# 函数用途: summary计数存在时准确生成状态句，旧领域沿原显示器。
+def _overview_status(projection):
+    if projection.summary_count is None:
+        return status_summary(projection)
+    count = _projection_count(projection)
+    parts = ["条目" + (str(count) if count is not None else "未统计")]
+    parts.extend(projection.count_labels.get(key, key) + (str(value) if value is not None else "未统计")
+                 for key, value in projection.counts.items())
+    state = "当前为空" if _projection_state(projection) == "empty" else projection.state
+    return projection.title + "：" + "、".join(parts) + "；" + state + "。"
 
 
 # LLM: 摘要与coverage同源给已全或实际剩余；共享详情模板绑定每行item参数，不复制60份调用壳或扩大阈值。
@@ -304,6 +339,10 @@ def _page_result(params, projection, selection):
 # 函数用途: 对完整公开投影按开放类别计数，未绑定或降级来源返回None而不是假空集。
 def _capability_families(projection: SectionProjection) -> dict[str, int] | None:
     if projection.completeness != "complete" or not projection.count_known:
+        return None
+    if projection.summary_families is not None:
+        return dict(projection.summary_families)
+    if projection.summary_count is not None and not projection.items:
         return None
     categories = (str(row.get("group") or row.get("category") or "uncategorized") for row in projection.items)
     return dict(sorted(Counter(categories).items()))

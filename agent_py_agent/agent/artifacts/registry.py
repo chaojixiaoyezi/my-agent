@@ -1,4 +1,6 @@
 
+# LLM: 解析缓存只复用本次no-follow新读完整raw的投影，不缓存IO成功或权限结论；追加/fsync顺序不变。
+# 模块用途: 保存产物唯一账本并以不可变投影消除重复JSON解析，对外返回独立记录。
 """LLM: Maintain the append-only artifact registry below one canonical task workspace.
 
 模块用途: 保存用户可见交付物的唯一账本；收口、看板和父代理都从这里解析产物，宿主读写时
@@ -11,13 +13,15 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..common.nofollow_fs import NoFollowPathError, append_text_beneath, read_text_beneath
 from ..runtime_errors import runtime_error_report
-from .registry_reader import latest_records_from_lines, lookup_record_with_errors
+from .registry_projection_cache import detached_payload, registry_projection, trusted_root_identity
+from .registry_reader import lookup_record_with_errors
 
 SCHEMA_VERSION = "artifact_registry.v1"
 REGISTRY_RELATIVE_PATH = Path("data") / "artifacts" / "registry.jsonl"
@@ -215,6 +219,8 @@ def latest_artifact_records(workspace_root: str | Path) -> dict[str, ArtifactReg
     return latest_artifact_records_report(workspace_root).records
 
 
+# LLM: 每次仍读取完整raw并验证可信根，缓存命中仅省split/loads；IO拒绝必须返回当次诊断。
+# 函数用途: 安全读取最新产物记录与坏行报告，返回独立副本。
 def latest_artifact_records_report(workspace_root: str | Path) -> ArtifactRegistryReadReport:
     """Read latest records and keep malformed rows as diagnostics."""
 
@@ -222,21 +228,48 @@ def latest_artifact_records_report(workspace_root: str | Path) -> ArtifactRegist
     path = registry_path(root)
     try:
         text = read_text_beneath(root, tuple(REGISTRY_RELATIVE_PATH.parts))
+        identity = trusted_root_identity(root) if text is not None else None
     except (NoFollowPathError, OSError, UnicodeError) as exc:
         error = runtime_error_report(exc, context="artifact_registry.read")
         error["path"] = str(path)
         return ArtifactRegistryReadReport(errors=[error])
     if text is None:
         return ArtifactRegistryReadReport()
-    latest, errors = latest_records_from_lines(
-        path,
-        text.splitlines(),
-        _record_from_payload,
-    )
+    return _projection_report(path, registry_projection(identity, text))
+
+
+# LLM: 原JSON容器上的record转换已随投影完成；只复制结果metadata，保留坏行类型/行号而不重新转换全部历史行。
+# 函数用途: 由当前raw投影组装独立的最新记录和逐行诊断。
+def _projection_report(path: Path, projection) -> ArtifactRegistryReadReport:
+    latest, errors = {}, []
+    for row in projection.records:
+        try:
+            if row.error is not None:
+                raise row.failure()
+            if row.record_error is not None:
+                kind, message = row.record_error
+                raise {"OverflowError": OverflowError, "RecursionError": RecursionError}[kind](message)
+            record = row.record
+            if record is None:
+                raise ValueError("invalid artifact registry record")
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            error = runtime_error_report(exc, context="artifact_registry.read_line")
+            errors.append({**error, "path": str(path), "line": row.line})
+            continue
+        if record.artifact_id:
+            latest[record.artifact_id] = _detached_record(record)
     return ArtifactRegistryReadReport(records=latest, errors=errors)
 
 
-# LLM: Batch recovery scans once, retains exact historical operation/ref matches, and rejects any corrupt row.
+# LLM: 标量字段已按原JSON类型转换且不可变；只复制metadata树，不重复逐字段转换或共享可变结果。
+# 函数用途: 快速创建一个调用方可以独立修改metadata的产物记录。
+def _detached_record(record: ArtifactRegistryRecord) -> ArtifactRegistryRecord:
+    values = vars(record).copy()
+    values["metadata"] = detached_payload(record.metadata)
+    return ArtifactRegistryRecord(**values)
+
+
+# LLM: 每次安全重读raw，复用JSON投影但不复用操作完成结论；保留历史匹配与原损坏拒绝口径。
 # 函数用途: 一次安全读取账本，批量找出同一 shell operation 已落账的产物编号。
 def artifact_operation_recorded_ids(
     workspace_root: str | Path,
@@ -249,23 +282,26 @@ def artifact_operation_recorded_ids(
     root = _workspace_root_path(workspace_root)
     try:
         text = read_text_beneath(root, tuple(REGISTRY_RELATIVE_PATH.parts))
+        identity = trusted_root_identity(root) if text is not None else None
     except (NoFollowPathError, OSError, UnicodeError) as exc:
         raise OSError("artifact registry cannot be scanned safely") from exc
     recorded: set[str] = set()
-    for line in (text or "").splitlines():
-        if not line.strip():
-            continue
+    if text is None:
+        return recorded
+    for row in registry_projection(identity, text or "").records:
         try:
-            payload = json.loads(line)
+            if row.error is not None:
+                raise row.failure()
         except json.JSONDecodeError as exc:
             raise OSError("artifact registry contains malformed rows") from exc
-        if not isinstance(payload, dict):
+        payload = row.payload
+        if not isinstance(payload, Mapping):
             raise OSError("artifact registry contains invalid rows")
-        artifact_id = str(payload.get("artifact_id") or "")
+        artifact_id = row.artifact_id
         metadata = payload.get("metadata")
         if (
             artifact_id in expected_backup_refs
-            and isinstance(metadata, dict)
+            and isinstance(metadata, Mapping)
             and metadata.get("protection_operation_id") == operation_key
             and metadata.get("backup_ref") == expected_backup_refs[artifact_id]
         ):
@@ -351,6 +387,8 @@ def _workspace_root_path(value: str | Path) -> Path:
     return Path(os.path.abspath(os.path.normpath(str(Path(value).expanduser()))))
 
 
+# LLM: 原JSON容器上保留唯一字段转换和非法metadata拒绝；不得先冻结list再改变str或哈希语义。
+# 函数用途: 按原合同把JSON对象转换成产物记录，供投影在冷解析时调用一次。
 def _record_from_payload(payload: object) -> ArtifactRegistryRecord | None:
     if not isinstance(payload, dict):
         return None

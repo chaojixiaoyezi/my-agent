@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 from dataclasses import replace
+from functools import partial
 
 from .concurrency import describe_tool_concurrency
 from .input_schema import normalize_tool_input
 from .models import tool_effect_for_runtime_policy
+from .owner_tool_scheduler import (
+    ToolWorkItem,
+    current_owner_scheduler,
+    current_worker_sqlite_reuse,
+    execute_work_items,
+)
 from .program_data import DataBudget
 from .runtime_contracts import ToolCall
 
@@ -36,10 +42,9 @@ class NestedToolDispatcher:
             source_protocol=self.parent.source_protocol, schema_hash=runtime.model_spec.schema_hash,
             run_id=self.parent.run_id, turn_id=self.parent.turn_id, attempt_id=self.parent.attempt_id)
 
-    # LLM: 段选择仍用原parallel_segment_end；前置与handler取消、网络和文件权限全部由原执行器判断，不调用handler捷径。
+    # LLM: 段选择沿原规划；同owner真实worker内联防自等，异owner不可借许可；每次仍重入原executor。
     # 函数用途: 执行共享累计数据预算的批次，沿原线程身份协议并按顺序保留全部已尝试调用。
     def batch(self, entries, *, budget=None):
-        from .executor import ToolExecutor
         from .segment_planning import parallel_segment_end
         if self.count + len(entries) > 32:
             raise ValueError('程序工具调用超过32项')
@@ -59,51 +64,75 @@ class NestedToolDispatcher:
             end = max(position + 1, end)
             segment = calls[position:end]
             self.groups += 1
-            # LLM: 原request保留权限/插件/输出归档，取消上下文逐线程copy，子调用不再获得编排派发器。
-            # 函数用途: 用唯一工具执行器执行段中的一条调用，返回原生结构化结果。
-            def execute(call):
-                captured = {}
-                # LLM: 数据投影读取原handler完整值并沿原脱敏规则；归档仍调用原archiver，不能从模型预览猜JSON。
-                # 函数用途: 捕获本步安全JSON供下一步机械引用，同时保留原完整证据归档。
-                def archive(child, outcome):
-                    import json
-
-                    from .executor import _project_output
-                    from .models import output_policy_for_outcome
-                    from .output_projection import redact_tool_output_text
-                    runtime = self.request.runtime_snapshot.runtime(child.tool_name)
-                    policy = output_policy_for_outcome(runtime.runtime_policy, outcome)
-                    text = redact_tool_output_text(outcome.output, redaction=policy.redaction)
-                    try:
-                        capture_budget.reserve(text, text=True)
-                        captured['json'] = json.loads(text)
-                    except ValueError:
-                        captured['budget_exceeded'] = capture_budget.remaining < 0
-                    except TypeError:
-                        pass
-                    return _project_output(self.request, child, runtime, outcome)
-                request = replace(self.request, call=call, allow_nested_dispatch=False, output_archiver=archive)
-                runner = (self.request.trusted_run_context or {}).get('nested_tool_thread_runner')
-                # LLM: 可信宿主runner负责线程身份；实际工具仍只进入原执行器。
-                # 函数用途: 执行当前子调用并返回原生结果。
-                def invoke():
-                    return ToolExecutor().execute(request).result
-                result = runner(invoke) if callable(runner) else invoke()
-                try:
-                    capture_budget.reserve({'output':result.output, 'metadata':result.metadata})
-                except (ValueError, TypeError):
-                    captured.clear()
-                    captured['budget_exceeded'] = True
-                    result = replace(result, content_blocks=(), metadata={})
-                observe = (self.request.trusted_run_context or {}).get('nested_tool_result_sink')
-                if callable(observe):
-                    observe(call, result)
-                return replace(result, metadata={**result.metadata, 'program_data':captured})
-            if len(segment) > 1:
-                with ThreadPoolExecutor(max_workers=len(segment)) as pool:
-                    futures = [pool.submit(copy_context().run, execute, call) for call in segment]
-                    results.extend(future.result() for future in futures)
-            else:
-                results.append(execute(segment[0]))
+            results.extend(self._segment(segment, capture_budget))
             position = end
         return results
+
+    # LLM: 每子调用独立Context/SQLite；只继承布尔配置，同owner许可内联，legacy仍原段池/屏障。
+    # 函数用途: 执行一段只读子调用，按原配对收集全部在途结果。
+    def _segment(self, segment, capture_budget):
+        scheduler = _nested_scheduler(self.request)
+        items = [ToolWorkItem(call.call_id, partial(self._execute, call, capture_budget),
+                              sqlite_reuse=current_worker_sqlite_reuse()) for call in segment]
+        if scheduler is not None:
+            return execute_work_items(items, scheduler.submit)
+        if len(items) == 1:
+            return [items[0].captured_context.run(items[0].run)]
+        with ThreadPoolExecutor(max_workers=len(items)) as pool:
+            return execute_work_items(items, lambda item: pool.submit(item.captured_context.run, item.run))
+
+    # LLM: 只重入原executor与宿主runner，权限/取消/完整输出归档不旁路，子项不可再编排。
+    # 函数用途: 执行一条子调用并保留原生结果与结构化程序数据。
+    def _execute(self, call, capture_budget):
+        from .executor import ToolExecutor
+        captured = {}
+        request = replace(self.request, call=call, allow_nested_dispatch=False,
+                          output_archiver=partial(self._archive, captured=captured, capture_budget=capture_budget))
+        runner = (self.request.trusted_run_context or {}).get('nested_tool_thread_runner')
+        # LLM: 原宿主runner安装线程身份，不由模型指定；返回原执行器结果。
+        # 函数用途: 执行当前子工具。
+        def invoke():
+            return ToolExecutor().execute(request).result
+        result = runner(invoke) if callable(runner) else invoke()
+        try:
+            capture_budget.reserve({'output':result.output, 'metadata':result.metadata})
+        except (ValueError, TypeError):
+            captured.clear()
+            captured['budget_exceeded'] = True
+            result = replace(result, content_blocks=(), metadata={})
+        observe = (self.request.trusted_run_context or {}).get('nested_tool_result_sink')
+        if callable(observe):
+            observe(call, result)
+        return replace(result, metadata={**result.metadata, 'program_data':captured})
+
+    # LLM: 捕获真实handler脱敏值，预算超限不保留部分JSON；完整证据仍由原archiver处理。
+    # 函数用途: 为下一步数据引用保留安全JSON并投影原始工具输出。
+    def _archive(self, child, outcome, *, captured, capture_budget):
+        import json
+
+        from .executor import _project_output
+        from .models import output_policy_for_outcome
+        from .output_projection import redact_tool_output_text
+        runtime = self.request.runtime_snapshot.runtime(child.tool_name)
+        policy = output_policy_for_outcome(runtime.runtime_policy, outcome)
+        text = redact_tool_output_text(outcome.output, redaction=policy.redaction)
+        try:
+            capture_budget.reserve(text, text=True)
+            captured['json'] = json.loads(text)
+        except ValueError:
+            captured['budget_exceeded'] = capture_budget.remaining < 0
+        except TypeError:
+            pass
+        return _project_output(self.request, child, runtime, outcome)
+
+
+# LLM: 根来自原executor宿主字段，不看模型参数；异owner显式拒绝，避免跨owner相互等待形成环。
+# 函数用途: 验证内层请求可否沿用当前worker许可。
+def _nested_scheduler(request):
+    current = current_owner_scheduler()
+    if current is None:
+        return None
+    root = (request.write_boundary or {}).get("canonical_owner_home_root") or request.owner_scope_root
+    if not root or current_owner_scheduler(root) is not current:
+        raise ValueError("嵌套工具owner与worker许可不一致")
+    return current

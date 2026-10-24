@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import platform
 import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -613,7 +614,13 @@ def task_root_containing(path: Path, owner_home: Path) -> Path | None:
 # 函数用途: 列出要对模型命令设成只读的 owner 级宿主托管路径。
 def host_readonly_paths(agent_home_root: Path, owner_home: Path | None = None) -> tuple[Path, ...]:
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
-    home_parts = () if owner_home is not None else HOST_CONFIG_HOME_PARTS
+    return _readonly_from_homes(agent_home_root, homes, include_home=owner_home is None)
+
+
+# LLM: 纯投影共享原声明，不枚举owner、不按存在性删掉尚未创建的保护路径。
+# 函数用途: 从本次owner集合生成宿主只读覆盖。
+def _readonly_from_homes(agent_home_root: Path, homes: tuple[Path, ...], *, include_home: bool) -> tuple[Path, ...]:
+    home_parts = HOST_CONFIG_HOME_PARTS if include_home else ()
     paths = [*(agent_home_root.joinpath(*parts) for parts in home_parts),
              *(home.joinpath(*parts) for home in homes for parts in (*HOST_CONFIG_OWNER_PARTS, *_owner_state_parts()))]
     return tuple(dict.fromkeys(paths))
@@ -636,6 +643,12 @@ def task_host_state_paths(task_root: Path) -> tuple[Path, ...]:
 # 函数用途: 从原任务布局生成记录拒写或目录操作保护，不把同层业务文件当作目录。
 def host_readonly_patterns(agent_home_root: Path, owner_home: Path | None = None, *, directory_operation: str = "") -> tuple[str, ...]:
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    return _patterns_from_homes(homes, directory_operation=directory_operation)
+
+
+# LLM: 复用原Seatbelt正则叶函数；只投影本次冻结的homes，不重新枚举或缓存权限结论。
+# 函数用途: 生成指定owner的原拒写/目录保护正则。
+def _patterns_from_homes(homes: tuple[Path, ...], *, directory_operation: str = "") -> tuple[str, ...]:
     return tuple(pattern for home in homes for pattern in _task_record_patterns(_ere_literal(str(home.resolve(strict=False))), directory_operation=directory_operation))
 
 
@@ -768,9 +781,40 @@ def _prefix_of(path: Path, relative: tuple[str, ...], depth: int) -> Path:
 # 函数用途: 列出要对模型进程隐藏的宿主托管存储目录。
 def host_managed_store_dirs(agent_home_root: Path, owner_home: Path | None = None) -> tuple[Path, ...]:
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    return _hidden_from_homes(homes)
+
+
+# LLM: 仅检查声明托管目录是否存在，保持旧符号链接/目录语义，不枚举owner。
+# 函数用途: 给同一批owner生成隐藏目录投影。
+def _hidden_from_homes(homes: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(
         home.joinpath(*parts) for home in homes for parts in HOST_MANAGED_OWNER_STORE_PARTS
         if home.joinpath(*parts).is_dir()
+    )
+
+
+# LLM: 仅一次命令准备内复用，冻结值不承载授权、无跨调用TTL；旧API复用同一组叶函数。
+# 类用途: 保存本次沙箱的只读、隐藏和macOS目录保护路径。
+@dataclass(frozen=True)
+class HostSandboxPaths:
+    readonly: tuple[Path, ...] = ()
+    hidden: tuple[Path, ...] = ()
+    patterns: tuple[str, ...] = ()
+    directory_write_patterns: tuple[str, ...] = ()
+    directory_unlink_patterns: tuple[str, ...] = ()
+
+
+# LLM: Full Access每次仅枚举一次owner；普通owner不枚举他人。所有字段沿原声明投影，新调用总能观察新增存储。
+# 函数用途: 为一次沙箱准备生成不可变保护集合，不持久缓存权限或目录。
+def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, system: str | None = None) -> HostSandboxPaths:
+    homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
+    mac = (system or platform.system()).casefold() == "darwin"
+    return HostSandboxPaths(
+        readonly=_readonly_from_homes(agent_home_root, homes, include_home=owner_home is None),
+        hidden=_hidden_from_homes(homes),
+        patterns=_patterns_from_homes(homes) if mac else (),
+        directory_write_patterns=_patterns_from_homes(homes, directory_operation="write") if mac else (),
+        directory_unlink_patterns=_patterns_from_homes(homes, directory_operation="unlink") if mac else (),
     )
 
 
