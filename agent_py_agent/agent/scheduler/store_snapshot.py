@@ -18,15 +18,15 @@ def snapshot_signature(path: Path) -> tuple[int, int, int, int] | None:
     return value.st_mtime_ns, value.st_size, value.st_ino, value.st_dev
 
 
-# LLM: common no-follow 读取拒绝链接与非普通文件；完整字节必须与读取前后同一签名匹配，open 期间的原子替换同样进入有界重试。
-# 函数用途: 无写锁读取一代完整账本，连续竞争达到上限时及时向调用方报告 EAGAIN。
+# LLM: common no-follow 读取拒绝链接与非普通文件；完整字节必须与读取前后同一签名匹配，open 期间触发结构化 transient_open_race 的原子替换同样进入有界重试。
+# 函数用途: 无写锁读取一代完整账本，仅对结构化标记的原子替换竞争重试，连续竞争达到上限时及时向调用方报告 EAGAIN。
 def read_atomic_store_bytes(path: Path) -> bytes | None:
     for _attempt in range(3):
         before = snapshot_signature(path)
         try:
             content = read_bytes_beneath(path.parent, (path.name,))
         except NoFollowPathError as exc:
-            if str(exc) == "managed file changed during open":
+            if getattr(exc, "transient_open_race", False):
                 continue
             raise
         after = snapshot_signature(path)

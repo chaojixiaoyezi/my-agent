@@ -883,6 +883,48 @@ def test_control_lane_classification_is_safe_for_unvalidated_arguments():
         assert rounds._is_control_lane_call(SimpleNamespace(tool_name=name, arguments={}))
     assert not rounds._is_control_lane_call(SimpleNamespace(tool_name='inspect_agent_tree', arguments={}))
     assert not rounds._is_control_lane_call(SimpleNamespace(tool_name='run_command', arguments={'priority': 'control'}))
+    from agent_py_agent.agent.tooling.models import (
+        ConcurrencyPolicy,
+        EffectResolverPolicy,
+        ToolModelSpec,
+        ToolRuntime,
+        ToolRuntimePolicy,
+        ToolRuntimeSnapshot,
+    )
+    spec = ToolModelSpec(
+        name='custom_control_probe',
+        description='probe',
+        input_schema={'type': 'object', 'properties': {'action': {'type': 'string'}}},
+    )
+    rt = ToolRuntime(
+        model_spec=spec,
+        runtime_policy=ToolRuntimePolicy(
+            effect_resolver=EffectResolverPolicy(),
+            concurrency_policy=ConcurrencyPolicy(control_lane=True, control_lane_actions=('inspect',)),
+        ),
+        handler=None,
+    )
+    real_snapshot = ToolRuntimeSnapshot(
+        run_id='run-ctrl',
+        runtimes=(rt,),
+        available_tool_names=frozenset({'custom_control_probe'}),
+        unavailable_tools=(),
+        allowed_tools=frozenset({'custom_control_probe'}),
+    )
+    assert rounds._is_control_lane_call(
+        SimpleNamespace(tool_name='custom_control_probe', arguments={'action': 'inspect'}),
+        real_snapshot,
+    ) is True
+    assert rounds._is_control_lane_call(
+        SimpleNamespace(tool_name='custom_control_probe', arguments={'action': 'mutate'}),
+        real_snapshot,
+    ) is False
+    req = SimpleNamespace(params=SimpleNamespace(tool_runtime_snapshot=real_snapshot), agent=None)
+    item = rounds._round_work_item(
+        req, 0, SimpleNamespace(call_id='c1', tool_name='custom_control_probe', arguments={'action': 'inspect'}),
+        None, False, False,
+    )
+    assert item.priority == 'control'
 
 
 # LLM: 使用真实YAML加载，默认读口仅定向到受控宿主文件；不同身份来源均不能把私有配置变整机权威。

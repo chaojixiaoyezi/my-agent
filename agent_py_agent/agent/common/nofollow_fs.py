@@ -17,7 +17,11 @@ from pathlib import Path
 # LLM: All structural failures use one typed OS error so callers can fail closed without parsing text.
 # 类用途: 表示受管相对路径包含符号链接、非目录组件或打开期间发生身份变化。
 class NoFollowPathError(OSError):
-    pass
+    # LLM: transient_open_race 仅在 before/after 均为单链接普通文件且仅 inode 发生原子替换时置真，不凭文案判断。
+    # 函数用途: 构造受管路径异常并携带结构化瞬态替换标记。
+    def __init__(self, message: str = "", *, transient_open_race: bool = False) -> None:
+        super().__init__(message)
+        self.transient_open_race = bool(transient_open_race)
 
 
 # LLM: Append is anchored at an already trusted root; relative parts are fixed application data,
@@ -696,13 +700,12 @@ def _openat_file(parent_fd: int, name: str, flags: int, mode: int) -> int:
         dir_fd=parent_fd,
     )
     after = os.fstat(descriptor)
-    if (
-        not stat.S_ISREG(after.st_mode)
-        or int(after.st_nlink) != 1
-        or (before is not None and not _same_identity(before, after))
-    ):
+    if not stat.S_ISREG(after.st_mode) or int(after.st_nlink) != 1:
         os.close(descriptor)
         raise NoFollowPathError("managed file changed during open")
+    if before is not None and not _same_identity(before, after):
+        os.close(descriptor)
+        raise NoFollowPathError("managed file changed during open", transient_open_race=True)
     return descriptor
 
 

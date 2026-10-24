@@ -97,8 +97,8 @@ _HISTORY_RUN_IDS_ANCHOR_BYTES = 4096
 _HISTORY_RUN_IDS_CACHE_LOCK = threading.Lock()
 
 
-# LLM: 仅为原JSONL去重派生的不可变投影，不拥有终态；offset前锚点及完整LF边界共同限制追加增量。
-# 类用途: 保存一代历史文件指纹、扫描位置、尾部摘要和已有运行ID。
+# LLM: 仅为原JSONL去重派生的不可变投影，不拥有终态；首尾锚点及完整LF边界共同限制同时间戳改写与追加增量。
+# 类用途: 保存一代历史文件指纹、扫描位置、首尾摘要和已有运行ID。
 @dataclass(frozen=True)
 class _HistoryRunIdsProjection:
     stamp: tuple[int, int, int, int, int]
@@ -106,22 +106,33 @@ class _HistoryRunIdsProjection:
     anchor_digest: str
     complete_line: bool
     run_ids: frozenset[str]
+    head_digest: str = ""
 
 
 _HISTORY_RUN_IDS_CACHE: OrderedDict[str, _HistoryRunIdsProjection] = OrderedDict()
 
 
-# LLM: 计算已扫描尾部锚点（最多4096字节）的blake2b摘要与末尾是否为LF；短读或IO异常必须回退，不能冒充有效前缀。
-# 函数用途: 校验历史文件已扫描边界锚点未被改写，并返回锚点摘要与换行完整标志。
-def _read_history_prefix_state(handle: Any, offset: int) -> tuple[str, bool] | None:
+# LLM: 计算已扫描首尾锚点（各最多4096字节）的blake2b摘要与末尾是否为LF；短读或IO异常必须回退，不能冒充有效前缀。
+# 函数用途: 校验历史文件首尾边界锚点未被改写，并返回尾部摘要、换行完整标志与首部摘要。
+def _read_history_prefix_state(handle: Any, offset: int) -> tuple[str, bool, str] | None:
     if offset <= 0:
-        return hashlib.blake2b(b"", digest_size=16).hexdigest(), True
+        empty = hashlib.blake2b(b"", digest_size=16).hexdigest()
+        return empty, True, empty
+    head_len = min(offset, _HISTORY_RUN_IDS_ANCHOR_BYTES)
+    handle.seek(0)
+    head = handle.read(head_len)
+    if len(head) != head_len:
+        return None
     start = max(0, offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
     handle.seek(start)
     anchor = handle.read(offset - start)
     if len(anchor) != offset - start:
         return None
-    return hashlib.blake2b(anchor, digest_size=16).hexdigest(), anchor.endswith(b"\n")
+    return (
+        hashlib.blake2b(anchor, digest_size=16).hexdigest(),
+        anchor.endswith(b"\n"),
+        hashlib.blake2b(head, digest_size=16).hexdigest(),
+    )
 
 
 # LLM: 只接受同设备/inode、增长、原完整LF边界且尾部锚点摘要相同的追加；任一坏行或竞态退回原全量报告器。
@@ -155,13 +166,14 @@ def _extend_history_run_ids(path, stamp, cached):
             return None
         new_anchor = (anchor + tail)[-_HISTORY_RUN_IDS_ANCHOR_BYTES:]
         new_digest = hashlib.blake2b(new_anchor, digest_size=16).hexdigest()
-        return _HistoryRunIdsProjection(stamp, stamp[1], new_digest, True, cached.run_ids | added)
+        head_digest = cached.head_digest or new_digest
+        return _HistoryRunIdsProjection(stamp, stamp[1], new_digest, True, cached.run_ids | added, head_digest)
     except (OSError, UnicodeError, ValueError):
         return None
 
 
 # LLM: 坏行仍沿原报告器跳过，去重集合语义不变；损坏/缺失/读中变化只返回本次结果，不缓存。
-# 函数用途: 冷读或异常时重建历史ID，记录稳定的完整前缀摘要与换行边界。
+# 函数用途: 冷读或异常时重建历史ID，记录稳定的首尾锚点摘要与换行边界。
 def _full_history_run_ids(path, stamp):
     report = read_jsonl_objects_report(path, context="scheduler.history.dedupe")
     ids = frozenset(str(row.get("run_id") or "") for row in report.records)
@@ -173,44 +185,50 @@ def _full_history_run_ids(path, stamp):
             return ids, None
         if prefix_state is not None and _history_file_stamp(path) == stamp:
             return ids, _HistoryRunIdsProjection(
-                stamp, stamp[1], prefix_state[0], prefix_state[1], ids,
+                stamp, stamp[1], prefix_state[0], prefix_state[1], ids, prefix_state[2],
             )
     return ids, None
 
 
-# LLM: 同尺寸且同粗糙ctime周期内的原地改写仍会改变尾部4KiB锚点；只读取锚点范围校验，异常保守回退。
-# 函数用途: 确认缓存命中的历史文件尾部锚点与换行边界未发生同时间戳改写。
+# LLM: 同尺寸且同粗糙ctime周期内的原地改写通过首尾4KiB锚点校验发现；锁外读取，异常保守回退。
+# 函数用途: 确认缓存命中的历史文件首尾锚点与换行边界未发生同时间戳改写。
 def _history_anchor_matches(path: Path, cached: _HistoryRunIdsProjection) -> bool:
     try:
         with path.open("rb") as handle:
             return _read_history_prefix_state(handle, cached.offset) == (
                 cached.anchor_digest,
                 cached.complete_line,
+                cached.head_digest,
             )
     except OSError:
         return False
 
 
-# LLM: 锁只保护有界派生缓存；业务调用仍持原owner事务锁，返回set是私有副本，超限只回退不改变去重。
+# LLM: 锁只保护内存字典读写，全部文件stat/锚点/增量读取均在锁外执行；业务调用仍持原owner事务锁。
 # 函数用途: 为历史追加去重复用最多32路径/一百万ID的线程安全增量索引。
 def _cached_history_run_ids(path: Path) -> set[str]:
-    key = str(path)
+    key, stamp = str(path), _history_file_stamp(path)
     with _HISTORY_RUN_IDS_CACHE_LOCK:
-        stamp = _history_file_stamp(path)
         cached = _HISTORY_RUN_IDS_CACHE.get(key)
-        if (cached is not None and stamp is not None and cached.stamp == stamp
-                and _history_anchor_matches(path, cached)):
-            _HISTORY_RUN_IDS_CACHE.move_to_end(key)
-            return set(cached.run_ids)
-        _HISTORY_RUN_IDS_CACHE.pop(key, None)
-        entry = _extend_history_run_ids(path, stamp, cached) if cached is not None else None
-        ids, entry = (entry.run_ids, entry) if entry is not None else _full_history_run_ids(path, stamp)
-        if entry is not None and len(ids) <= _HISTORY_RUN_IDS_CACHE_MAX_IDS:
+    if (cached is not None and stamp is not None and cached.stamp == stamp
+            and _history_anchor_matches(path, cached)):
+        with _HISTORY_RUN_IDS_CACHE_LOCK:
+            if _HISTORY_RUN_IDS_CACHE.get(key) == cached:
+                _HISTORY_RUN_IDS_CACHE.move_to_end(key)
+        return set(cached.run_ids)
+    with _HISTORY_RUN_IDS_CACHE_LOCK:
+        if _HISTORY_RUN_IDS_CACHE.get(key) == cached:
+            _HISTORY_RUN_IDS_CACHE.pop(key, None)
+    entry = _extend_history_run_ids(path, stamp, cached) if cached is not None else None
+    ids, entry = (entry.run_ids, entry) if entry is not None else _full_history_run_ids(path, stamp)
+    if entry is not None and len(ids) <= _HISTORY_RUN_IDS_CACHE_MAX_IDS:
+        with _HISTORY_RUN_IDS_CACHE_LOCK:
             _HISTORY_RUN_IDS_CACHE[key] = entry
+            _HISTORY_RUN_IDS_CACHE.move_to_end(key)
             while (len(_HISTORY_RUN_IDS_CACHE) > _HISTORY_RUN_IDS_CACHE_MAX_PATHS
                    or sum(len(row.run_ids) for row in _HISTORY_RUN_IDS_CACHE.values()) > _HISTORY_RUN_IDS_CACHE_MAX_IDS):
                 _HISTORY_RUN_IDS_CACHE.popitem(last=False)
-        return set(ids)
+    return set(ids)
 
 # LLM: ``waiting_runs`` is called once per conversation tick (runtime.prepare_tick ->
 # SchedulerService.reconcile_waiting_runs) and used to re-parse the whole owner ledger every time

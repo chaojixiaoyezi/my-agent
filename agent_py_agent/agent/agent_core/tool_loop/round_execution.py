@@ -842,11 +842,18 @@ def _execute_parallel_segment(
             return [future.result() for future in futures]
 
 
-# LLM: 优先读工具ConcurrencyPolicy声明，同时兼容内置轻量控制集；wait、退休名、畸形动作和模型priority不获额外槽。
+# LLM: 优先读工具ConcurrencyPolicy声明（支持ToolRuntimeSnapshot.runtime及映射表），同时兼容内置轻量控制集；wait、退休名、畸形动作和模型priority不获额外槽。
 # 函数用途: 将进程列表/状态/网络状态/停止与声明了control_lane的查询工具识别为控制调用。
 def _is_control_lane_call(call, snapshot=None):
-    bound = snapshot.get(call.tool_name) if snapshot is not None and hasattr(snapshot, 'get') else None
-    concurrency = getattr(getattr(bound, 'policy', None), 'concurrency', None)
+    bound = (
+        snapshot.runtime(call.tool_name)
+        if callable(getattr(snapshot, 'runtime', None))
+        else snapshot.get(call.tool_name)
+        if callable(getattr(snapshot, 'get', None))
+        else None
+    )
+    policy = getattr(bound, 'runtime_policy', None) or getattr(bound, 'policy', None)
+    concurrency = getattr(policy, 'concurrency_policy', None) or getattr(policy, 'concurrency', None)
     if getattr(concurrency, 'control_lane', False) is True:
         actions = getattr(concurrency, 'control_lane_actions', ())
         if not actions:
@@ -859,13 +866,22 @@ def _is_control_lane_call(call, snapshot=None):
     return call.tool_name == 'process_session' and isinstance(action, str) and action in {'list', 'status', 'network_status', 'stop'}
 
 
+# LLM: 串并行共用同一工具快照来源（请求级快照、参数级ToolRuntimeSnapshot或注册表），不新增权威状态。
+# 函数用途: 提取当前请求可见的工具运行时快照或注册字典供控制车道判定。
+def _request_tool_snapshot(request):
+    return (
+        getattr(request, 'tool_snapshot', None)
+        or getattr(getattr(request, 'params', None), 'tool_runtime_snapshot', None)
+        or getattr(getattr(getattr(request, 'agent', None), 'tools', None), 'tools', None)
+    )
+
+
 # LLM: 每项独立Context；入队取消工厂仍走原启动屏障合成配对结果，不提前报告started。
 # 函数用途: 为并行调用绑定正确优先级和取消结果。
 def _round_work_item(request, idx, call, context, queued, reuse):
     invoke = partial(_started_parallel_call, request, idx, call, context, queued)
-    snapshot = getattr(request, 'tool_snapshot', None) or getattr(getattr(request, 'params', None), 'tool_runtime_snapshot', None)
     return ToolWorkItem(call.call_id, invoke, cancelled_result=invoke, sqlite_reuse=reuse,
-                        priority='control' if _is_control_lane_call(call, snapshot) else 'normal')
+                        priority='control' if _is_control_lane_call(call, _request_tool_snapshot(request)) else 'normal')
 
 
 # LLM: 宿主令牌与能力配置只传给调度边界，任务参数不成为额度权威。
@@ -920,7 +936,7 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
     item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
                        lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), reuse,
-                       priority='control' if _is_control_lane_call(work.call) else 'normal')
+                       priority='control' if _is_control_lane_call(work.call, _request_tool_snapshot(request)) else 'normal')
     if scheduler is None:
         return item.run()
     token = getattr(request.params, "cancellation_token", None)

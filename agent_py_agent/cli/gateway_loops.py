@@ -360,24 +360,31 @@ class _RequestDispatcher:
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
         if self._recover_throttle.due():
-            loop_health.note_dispatch_tick_progress()
+            self._note_segment_progress()
             self._recover_throttle.defer(self._run_segment(_RECOVERY_SITE, self._recovery_backoff, self._recover_once))
         now = time.monotonic()
         if now >= self._next_terminal_projection_at:
-            loop_health.note_dispatch_tick_progress()
+            self._note_segment_progress()
             delay = self._run_segment(_PROJECTION_SITE, self._projection_backoff, self._project_terminals_once)
             self._next_terminal_projection_at = now + max(0.75, delay)
         if now >= self._next_input_reconcile_at:
-            loop_health.note_dispatch_tick_progress()
+            self._note_segment_progress()
             delay = self._run_segment(_RECONCILE_SITE, self._reconcile_backoff, self._reconcile_inputs_once)
             self._next_input_reconcile_at = now + max(0.75, delay)
         if now >= self._next_lock_cleanup_at:
-            loop_health.note_dispatch_tick_progress()
+            self._note_segment_progress()
             delay = self._run_segment(
                 _LOCK_SIDECAR_CLEANUP_SITE, self._lock_cleanup_backoff, self._cleanup_lock_sidecars_once
             )
             self._next_lock_cleanup_at = now + max(_LOCK_SIDECAR_CLEANUP_INTERVAL_SECONDS, delay)
         return dispatched
+
+
+    # LLM: 相邻维护段切换时同步刷新loop_health在途单调钟与faulthandler看门狗预算，避免多段耗时累加误触发。
+    # 函数用途: 在进入下一维护段前重置单段卡死超时预算。
+    def _note_segment_progress(self) -> None:
+        loop_health.note_dispatch_tick_progress()
+        _dispatch_stall_watchdog(DISPATCHER_STALL_TIMEOUT_SECONDS)
 
 
     # LLM: 后台修复段的统一跑法：成功清零该段退避并返回 0；失败记账（loop "dispatcher"）、按该段自己的退避限流打印，

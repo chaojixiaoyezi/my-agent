@@ -34,17 +34,20 @@ def _history_file_stamp(path: Path) -> tuple[int, int, int, int, int] | None:
     return (info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns)
 
 
-# LLM: 读取历史文件尾部最多4KiB计算blake2b摘要，覆盖Linux粗糙ctime时钟周期内的同尺寸改写。
-# 函数用途: 生成历史文件尾部字节锚点摘要，短读或异常返回None触发全量重读。
+# LLM: 读取历史文件首尾各最多4KiB计算blake2b摘要，覆盖Linux粗糙ctime时钟周期内的同尺寸前后端改写。
+# 函数用途: 生成历史文件首尾字节锚点摘要，短读或异常返回None触发全量重读。
 def _history_tail_digest(path: Path, size: int) -> str | None:
     try:
         with path.open("rb") as handle:
-            start = max(0, size - 4096)
-            handle.seek(start)
-            data = handle.read(size - start)
+            if size <= 8192:
+                data = handle.read(size)
+                return hashlib.blake2b(data, digest_size=16).hexdigest() if len(data) == size else None
+            head = handle.read(4096)
+            handle.seek(size - 4096)
+            tail = handle.read(4096)
     except OSError:
         return None
-    return hashlib.blake2b(data, digest_size=16).hexdigest() if len(data) == size - start else None
+    return hashlib.blake2b(head + tail, digest_size=16).hexdigest() if len(head) == 4096 and len(tail) == 4096 else None
 
 
 # LLM: 只缓存无坏行且读前后同版、同尾部摘要的原始历史投影；调用方不得修改records，公开返回必须复制，owner/schema仍逐次校验。
