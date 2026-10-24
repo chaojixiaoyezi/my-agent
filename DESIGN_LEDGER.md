@@ -1,3 +1,19 @@
+## 2026-10-24 第一波（W1-1..W1-6）安全、稳定性、工具并发、99% 缓存命中率与后台完成唤醒治理（已实现）
+
+围绕线上高并发稳定性、Windows 跨平台 CI、粗糙脚本防误伤、多模型 Prompt Cache 99% 命中率与 `claude-code` 风格非阻塞后台等待，完成第一波六项底座能力落地与合并：
+- **`W1-1`（`P1-07`，Windows CI 26 项 Supervisor 回归与跨平台终止信号修复）**：
+  - `gateway_parts/supervisor.py::kill_pid` 与 `_force_stop_gateway` 统一使用 `getattr(signal, "SIGKILL", signal.SIGTERM)`，消除 Windows 下引用 `signal.SIGKILL` 的 `AttributeError`；`tests/test_supervisor.py` 使用 `raising=False` 注入 `SIGKILL`/`killpg` 测试桩，26 项跨平台回归全绿。
+- **`W1-2`（`P1-01` + `P1-02`，工具调度器满队取消防挂死 + 全机工具总并发安全阀 + 控制面快车道）**：
+  - `tooling/owner_tool_scheduler.py` 将 `cancellation_requested()` 纳入排队 `Condition.wait_for` 谓词，取消时立即唤醒并从等待双端队列摘除节点、抛出 `ToolCancelled`；新增 `max_parallel_tool_calls_global: int = 0`（默认 `0` 不限制，支持配为 `64`/`80` 等大数防全机雪崩，且宿主级上限只从主配置读取，严禁普通用户私有配置篡改）；`round_execution.py` 为轻量控制面查询/停止动作（`process_session` 的 `list`/`status`/`network_status`/`stop` 与 `list_agents`）标记 `priority="control"` 排入同 Owner 队列前部。
+- **`W1-3`（`P0-02`，Gateway 派发器假死自检 `tick_wedged`/`pending_starved` + `hang_diagnostics` 生产接线）**：
+  - `gateway_parts/loop_health.py` 新增单调时钟字段与 `evaluate_dispatcher_stall`（检测单次 tick 卡住超 `60s` 的 `tick_wedged` 及有 `pending` 请求但超 `60s` 未完成 tick 的 `pending_starved`），在 `cli/gateway_loops.py` 心跳与 `gateway_parts/http_handlers.py` `/status` 中统一输出 `dispatcher_state = "stalled"`；`cli/gateway_process.py` 启动时安装 `install_hang_signal_handler` 与 `install_gc_pause_diagnostics`，并在首次检测到派发器假死时触发一次性全线程栈快照 `dump_all_threads_snapshot`。
+- **`W1-4`（同 `(job_id, rule_id)` 定时任务防重入单飞锁 + 沙箱子进程防糙脚本保护）**：
+  - `scheduler/repository.py::dispatchable_queued_runs` 与 `scheduler/dispatch.py` 按 `_run_lane_key = (job_id, rule_id)` 拦截同一任务/规则的重叠运行（前一次未跑完时跳过本次重入，同时保证同用户 20 个不同 `job_id` 或复合监控下不同 `rule_id` 100% 正常并发）；`tooling/sandbox.py` 新增 `ResourceLimits`（默认 `oom_score_adj=300`、`nice_increment=5`，可选 `max_memory_mb`/`max_processes`），在子进程启动前自动下调优先级与提高 OOM 回收顺位，使极端死循环脚本优先被内核回收而不伤及 Gateway 主进程。
+- **`W1-5`（99% Prompt Cache 前缀稳定 + `prompt_cache_key` + 15W 压缩工具保留对齐 + 尾部 Micro-Schema 唤醒）**：
+  - `backends/openai_chat.py` 自动注入会话级稳定 `prompt_cache_key`（对齐 Codex 粘滞路由）；`conversation/tool_discovery.py` 将 `active_tools_for_compact` 默认保留上限从 `8` 提升至 `MAX_SESSION_DISCOVERED_TOOLS = 32`，配合上下文压缩阈值从 `25W` 调优至 `15W` 时保留已激活工具 schema 不退订、不破缓存前缀；`capability/method_carry.py` 与 `deferred_schema_reload.py` 在已加载延迟工具距上次调用 `>= 8` 轮或 `>= 80,000` 字符时于本轮消息尾部追加轻量参数名片（Micro-Schema），兼顾前缀 100% 命中与远距离工具注意力。
+- **`W1-6`（`claude-code` 风格非阻塞后台等待 + `completion_wake` 自动唤醒让出）**：
+  - `tooling/background_process_host.py` 与 `process_registry.py` 将固定 `50ms`/`100ms` 轮询升级为自适应指数退避等待并保留非阻塞进程组观察；`tooling/shell.py` 与 `process_sessions.py` 在持久会话后台命令上附带结构化 `completion_wake` 事实；`agent_core/tool_loop/completion.py` 与 `natural_user_reply.py` 支持活跃唤醒后台进程下模型先向用户交代进展并立即让出回合（`background_process_active`），待后台进程退出后由网关 `reconcile_process_completions` 自动投递 `process_completed` 唤醒续跑。
+
 ## 2026-10-23 Linux 生产工具耗时四包治理（`read_artifact` 单飞、`self_map` 概览解耦、`run_command` 事件驱动管道泵、单 Owner 工具并发闸门，已实现）
 
 围绕 2C4G Linux 生产环境实测暴露的四类工具固定耗时与线程上下文切换风暴，在不改变安全边界、产物完整性和对外协议的前提下完成通用底座收敛：

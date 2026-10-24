@@ -2692,7 +2692,8 @@ agent_py_agent/
 |   |-- test_host_command_stream.py    # 临时 HTTP/MCP 与 TUI 审批往返、身份映射和取消隔离
 |   |-- test_host_command_resource_reference.py # 原操作反查、坏链拒绝及资源集合回读
 |   |-- test_gateway_admission_wait.py  # 合法排队等准入的结构化等待信号：只写等待事实、有节流与总预算、客户端持续收到且停写/取消/终态收口
-|   |-- test_gateway_dispatcher_resilience.py # 派发线程不被 tick 异常与打印失败杀死、退出事实进心跳与 /status、扫描门扫描前取样 mtime
+|   |-- test_gateway_dispatcher_resilience.py # 派发线程不被 tick 异常与打印失败杀死、退出事实与假死自检（tick_wedged/pending_starved）进心跳与 /status、扫描门扫描前取样 mtime
+|   |-- test_hang_diagnostics.py        # 网关 hang_diagnostics 启动接线、派发器假死一次性全栈快照落盘与跨平台信号注册单测
 |   |-- test_adapter_state_write_resilience.py # 适配器状态写入失败不杀进程并恢复、异常退出写 failed 且删 pid、/status 按进程存活判适配器
 |   |-- test_gateway_loop_backoff_coverage.py # 维护/调度器到期/孤儿恢复/心跳循环持续出错时退避（不快于自身间隔）、限流、按循环记账；包装异常按原因链归 io
 |   |-- test_guidance_receipt_digest_compat.py # 插话幂等回执指纹 v1/v2 钉死、旧回执可读可重试、对账自然收敛、坏账不重写并计数

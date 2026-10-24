@@ -149,9 +149,10 @@ def _wait_slice(state: _ProcessRun, seconds: float) -> bool:
     if state.capture is None or state.capture.done():
         return _wait_leader(state.proc, seconds)
     generation = state.capture.generation
-    if state.proc.poll() is None or not state.capture.done():
+    poll = getattr(state.proc, "poll", lambda: state.proc.returncode)
+    if poll() is None or not state.capture.done():
         state.capture.wait_changed(seconds, generation=generation)
-    return state.proc.poll() is not None and state.capture.done()
+    return poll() is not None and state.capture.done()
 
 
 # LLM: 同步attempt可reap；两流已结束时不再有输出通知，需保留原wait以观察片内真实退出。禁止给前台shell使用。

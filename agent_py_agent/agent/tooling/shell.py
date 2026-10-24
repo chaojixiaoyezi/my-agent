@@ -798,6 +798,23 @@ def _sandbox_exec(
 def _host_sandbox_paths_for(owner_text: str, persona_text: str):
     from ..path_access_policy import HostSandboxPaths, agent_home_root_for_owner, host_sandbox_paths
 
+    if (
+        host_readonly_paths_for is not _DEFAULT_HOST_READONLY_PATHS_FOR
+        or host_readonly_patterns_for is not _DEFAULT_HOST_READONLY_PATTERNS_FOR
+        or _host_managed_hidden_paths is not _DEFAULT_HOST_MANAGED_HIDDEN_PATHS
+    ):
+        is_darwin = sys.platform == "darwin"
+        return HostSandboxPaths(
+            hidden=_host_managed_hidden_paths(owner_text, persona_text),
+            readonly=host_readonly_paths_for(owner_text, persona_text),
+            patterns=host_readonly_patterns_for(owner_text, persona_text) if is_darwin else (),
+            directory_write_patterns=(
+                host_readonly_patterns_for(owner_text, persona_text, directory_operation="write") if is_darwin else ()
+            ),
+            directory_unlink_patterns=(
+                host_readonly_patterns_for(owner_text, persona_text, directory_operation="unlink") if is_darwin else ()
+            ),
+        )
     anchor = owner_text or persona_text
     agent_home = agent_home_root_for_owner(anchor) if anchor else None
     if agent_home is None:
@@ -852,6 +869,11 @@ def host_readonly_patterns_for(owner_text: str, persona_text: str, *, directory_
         return ()
     owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
     return host_readonly_patterns(agent_home, owner, directory_operation=directory_operation)
+
+
+_DEFAULT_HOST_MANAGED_HIDDEN_PATHS = _host_managed_hidden_paths
+_DEFAULT_HOST_READONLY_PATHS_FOR = host_readonly_paths_for
+_DEFAULT_HOST_READONLY_PATTERNS_FOR = host_readonly_patterns_for
 
 
 # LLM: 显式后台命令使用前台相同的已校验路径优先级与沙箱 argv；保留 bwrap die-with-parent，实际父进程为独立 host。
