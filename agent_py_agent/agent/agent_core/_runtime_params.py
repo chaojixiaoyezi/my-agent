@@ -9,6 +9,7 @@ from typing import Any
 from ..action_protocol import RunScope
 from ..common.cancellation import CancellationToken
 from ..concurrency.interrupt import is_interrupted
+from .model.context_estimate_cache import ContextEstimateMemo
 
 # 参数减量第 3 批 D 组（2026-09-27）：协议违规修复机会次数不再是配置项 max_protocol_repairs，这里是唯一定义；
 # ToolLoopExecuteParams.max_protocol_repairs 的字段默认值与 runtime/loop_support 装配参数都用它，response_decision 只读 params。
@@ -98,6 +99,8 @@ class ToolLoopExecuteParams:
     tool_rounds: int = 0
     save: bool | None = None
     live_archive_state: dict[str, object] = field(default_factory=dict)
+    # 请求局部纯数字缓存与同步对象不进入归档state，replace沿本轮共用；不同请求各自创建。
+    _context_estimate_memo: ContextEstimateMemo = field(default_factory=ContextEstimateMemo, repr=False, compare=False)
     # 本轮写入与 run_command 共用的决策请求去重；不持久化、不写归档、不挪用工具执行幂等集合。
     delivery_review_requested_records: set[str] = field(default_factory=set)
     # LLM: 空正文预算的进展事实：本轮「本次实际执行成功、非重放」的工具名（executed_tools 的

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -94,6 +95,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _display_timezone: str = ""
     im_approval_agent: object | None = field(default=None, repr=False)
     _committed_model_calls: set[str] = field(default_factory=set)
+    _commit_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _commentary_emitted: bool = False
     _committed_commentary: list[str] = field(default_factory=list)
     _tool_input_active: bool = False
@@ -542,22 +544,25 @@ def request_stream_permission(writer,request,cancellation_token):
         writer.interactive_approvals,writer.approval_mode_decision_provider,cancellation_token))
 
 
-# LLM: 只由原sink完整响应提交调用，保原call幂等和显示档位；无raw缓存可flush，不新增账或入口。
+# LLM: 只由原sink完整响应提交调用，保原call幂等和显示档位；并发worker同时started时用短锁消除重复提交竞态。
 # 函数用途: 将已净化的完整响应提交到原显示段，丢弃旧候选并保留原final-only/通道策略。
 def _commit_model_response(writer: BufferedChunkStreamWriter, payload: dict) -> None:
     from .stream_events import committed_model_events
 
     events = committed_model_events(payload, delivery_channel=writer.delivery_channel, identifiers=writer._identifier_redactions)
     call_id = (payload.get("source") or {}).get("call_id")
-    if not events or call_id in writer._committed_model_calls or getattr(writer, "_liveness_closed", False):
+    if not events:
         return
-    writer._committed_model_calls.add(call_id)
-    for event in events:
-        if event["kind"] == "assistant_commentary":
-            writer._committed_commentary.append(event["text"])
-            if writer._commentary_emitted and not writer.rich_transcript and writer._verbose_level != "stream":
-                continue
-            writer._commentary_emitted = True
-            writer._write_event(event)
-        elif writer.rich_transcript:
-            writer._write_event(event)
+    with writer._commit_lock:
+        if call_id in writer._committed_model_calls or getattr(writer, "_liveness_closed", False):
+            return
+        writer._committed_model_calls.add(call_id)
+        for event in events:
+            if event["kind"] == "assistant_commentary":
+                writer._committed_commentary.append(event["text"])
+                if writer._commentary_emitted and not writer.rich_transcript and writer._verbose_level != "stream":
+                    continue
+                writer._commentary_emitted = True
+                writer._write_event(event)
+            elif writer.rich_transcript:
+                writer._write_event(event)

@@ -1,3 +1,7 @@
+## 2026-10-23 工具输出归档 `read_artifact` 单次解析计划与路径系统调用收敛（已实现）
+
+`memory_archive/artifact/reader.py` 新增 `PreparedToolOutputArtifactRead` 与 `prepare_tool_output_artifact_read`：`ReadArtifactTool.execute` 在单次工具调用内最多执行一次 `index.jsonl` 发现与查找，并在调用方显式指定 `max_chars > 0` 或输出预算未开启时跳过冗余 `estimate` 路径。索引行匹配新增本次查询局部的 `_ArtifactPathCache`，对空路径 `path == ""`（`kind="tool_call"` 记录）复用单次解析结果，对规范 POSIX 绝对路径按父目录缓存一次 `realpath + stat` 并以单次叶子 `lstat` 判定普通文件，符号链接、环路（`ELOOP`）、大整数与晚到非法 UTF-8 等异常行继续沿用原错误合同；正文读取通过 `read_text_beneath` 执行锚定无跟随打开，消除双扫与数十万次冗余路径解析系统调用。详见[产物查找耗时设计](../../design/ARTIFACT_LOOKUP_LATENCY.md)。
+
 ## 2026-10-21 审计与快照 JSONL 写后尾部有界回读（长期运行性能收敛）
 
 `memory_archive/storage.py::_verify_record_exists` 在 `append_raw_event` 与 `append_snapshot` 写后校验时，优先按文件末尾有界窗口（`max(256 KiB, 2 * len(expected) + 4096)`）读取并在首个物理 LF 后解码 UTF-8 倒序核对刚追加记录；仅在小文件或尾部未命中时回退全量 `read_text`，消除单日大体积 `audit/<date>.jsonl` 每次工具调用都全量读入内存的 $O(N^2)$ 放大，同时保持完整规范化 JSON 相等性校验。

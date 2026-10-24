@@ -217,3 +217,12 @@ G2b 强制档打开后，**本机客户端没带凭据**会被 Gateway 拒绝。
 - `manager._gateway_poll_quarantine_category(status_code, denial_code)` 判定一次：401/403 → `auth`；带 `LOCAL_CREDENTIAL_REQUIRED` 的 404 → `auth`；其余（含不带码的 404、400 等）→ `config`。
 - 该类别随 `GatewayReplyQuarantineError(reason, denial_code, category)` 一起传给 `delivery`，`_terminalize_quarantine` 只比较 `category == "auth"` 决定是否发可见回复。原因串（`gateway_<endpoint>_<category>_http_<code>`）与类别由同一函数生成，只用于诊断与展示，不再被当作判据。
 - 这样 401/403 与 `/input-status`、`/result` 的**带码 404** 三种形态走同一条可见回复路径；不带码的 404 保持静默（它是"记录还没出现"，不是鉴权失败）。
+
+## 6. c3 第一阶段 shell 提速（2026-10-23）
+
+本次只合并一次命令准备中的宿主路径投影、POSIX 单 selector 管道读取/事件等待，以及安全全读之后的精确 raw 解析缓存。没有 C helper、ruleset FD 运输或新隔离 fallback。
+
+- Gateway 端口仍取宿主实际绑定集合；Full Access 同样带原按目标端口的 CONNECT_TCP 拒绝。没有缩窄成只拒 IPv4 loopback，没有减少 Landlock 补集规则。
+- 宿主保护 roots 不跨请求缓存；新 owner 或托管目录在下次准备重新发现。解析缓存不缓存权限、文件内容核验、操作提交或旧的成功读取。
+- 前台仍经原出生身份和进程树清理后才 reap；EOF/采集停止/线程退出均不能替代进程树死亡证明。同步 attempt 的有界 wait 不挪进前台清理入口。
+- 真实 Linux/bwrap 隔离及完整回归未验证，不能把本地 POSIX 管道用例或 mock syscall 用例当成目标平台的端口拒绝证据。实施文件、冷暖微测与复现命令见 [Linux shell 提速](LINUX_SHELL_LATENCY.md)。

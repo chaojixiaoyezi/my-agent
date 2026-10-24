@@ -11,7 +11,6 @@ import json
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextvars import copy_context
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import ClassVar, Literal
@@ -37,6 +36,7 @@ from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
 from ...tooling.concurrency import ToolConcurrencyDescriptor, describe_tool_concurrency
 from ...tooling.executor import ToolExecution
+from ...tooling.owner_tool_scheduler import ToolWorkItem, execute_work_items, scheduler_for_agent
 from ...tooling.plugin_gate_policy import (
     carry_gate_decisions,
     plugin_gate_approval_request,
@@ -433,7 +433,7 @@ def _execute_parallel_step(
     return parallel_end
 
 
-# LLM: 串行步骤在首次 ActionPolicy ask 时暂停同一 ToolCall，收到精确批准后才重入 executor；不得先记录 approval_required 再让模型重提。
+# LLM: 串行步骤同样遵守owner额度/单项SQLite；审批在许可外等待，精确批准后重入同一原执行器。
 # 函数用途: 执行、审批并记录一条顺序工具调用。
 def _execute_serial_step(
     request: ToolRoundExecutionRequest,
@@ -445,22 +445,22 @@ def _execute_serial_step(
     idx = position + 1
     call = calls[position]
     started_at = time.monotonic()
-    _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
     if _should_defer_orchestration(progress.stateful_orchestration_seen, call.tool_name):
+        _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
         execution = _synthetic_execution(
             call,
             _deferred_orchestration_result(call),
             "ORCHESTRATION_CALL_DEFERRED",
         )
     else:
-        execution = request.execute_one(
+        execution = _execute_owned_serial(request,
             ToolCallExecuteParams(
                 request.params,
                 request.tool_rounds,
                 idx,
                 call,
                 model_call=_model_visible_call(request, idx, call),
-            )
+            ), emit_started=True,
         )
         execution = _resolve_tool_approval(request, idx, call, execution)
     wrote_output, transition = _record_execution(request, idx, started_at, execution)
@@ -555,6 +555,19 @@ def _resolve_tool_approval(
                 repeated=True,
             ),
         )
+    decision = _consume_tool_approval(request, execution, approval_request, consumer)
+    if decision.permission_id != approval_request.permission_id:
+        decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
+    if _round_cancelled(request):
+        decision = ToolApprovalDecision(approval_request.permission_id, "cancelled")
+    elif time.time() >= approval_deadline(approval_request):
+        decision = ToolApprovalDecision(approval_request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
+    return _apply_tool_approval_decision(request, idx, original_call, execution, approval_request, decision)
+
+
+# LLM: consumer在工具许可外等待；原纯退休异常同对象穿透，其它故障沿原unavailable路径。
+# 函数用途: 等待并规范化宿主审批响应。
+def _consume_tool_approval(request, execution, approval_request, consumer):
     try:
         raw_decision = (consumer(approval_request.to_dict(), cancellation_token=request.params.cancellation_token)
                         if callable(consumer) else ToolApprovalDecision(approval_request.permission_id, "unavailable",
@@ -575,12 +588,12 @@ def _resolve_tool_approval(
         capture_approval_retirement_call(error, approval_request, execution, agent=request.agent, params=request.params)
         raise_private_approval_transport_error(error)
         decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
-    if decision.permission_id != approval_request.permission_id:
-        decision = ToolApprovalDecision(approval_request.permission_id, "unavailable", reason_code="APPROVAL_UNAVAILABLE")
-    if _round_cancelled(request):
-        decision = ToolApprovalDecision(approval_request.permission_id, "cancelled")
-    elif time.time() >= approval_deadline(approval_request):
-        decision = ToolApprovalDecision(approval_request.permission_id, "denied", reason_code="APPROVAL_TIMEOUT")
+    return decision
+
+
+# LLM: 批准后仍原绑定/actor重入唯一executor；关门不写批准，拒绝/无人审批事实不改变。
+# 函数用途: 落本轮内存审批绑定并执行或拒绝同一调用。
+def _apply_tool_approval_decision(request, idx, original_call, execution, approval_request, decision):
     if decision.approved:
         if (closed := _closed_admission_execution(request, original_call)) is not None:
             return carry_gate_decisions(execution, closed)  # 等审批期间宿主停机关门：批准了也不再执行
@@ -590,7 +603,7 @@ def _resolve_tool_approval(
         approved_actions.append(
             approval_request.approved_binding(decision)
         )
-        resumed = request.execute_one(
+        resumed = _execute_owned_serial(request,
             ToolCallExecuteParams(
                 request.params,
                 request.tool_rounds,
@@ -796,9 +809,8 @@ def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
     return resolve_parallel_batch_limit(parallel_limit, tool_batch_limit)
 
 
-# LLM: 每个并行工具都携带独立 Context 副本，继承本工作片模型/权限；线程本地 runner 身份仍走原桥，不共享可进入的 Context。
-#   段长已由 _effective_parallel_batch_limit 封顶（0 = 不限制），线程数等于段长，不能再另写一个固定上限让配置失效。
-# 函数用途: 并发执行一组工具并保持原顺序记账，避免模型切换或权限选择在工作线程里退回部署默认。
+# LLM: 段规划不变，正owner额度共享FIFO资源；0仍原段线程池，每项独立Context/SQLite，结果按provider配对。
+# 函数用途: 并发执行一段工具，保留中断回调与原线程身份桥。
 def _execute_parallel_segment(
     request: ToolRoundExecutionRequest,
     calls: list[ToolCall],
@@ -806,41 +818,45 @@ def _execute_parallel_segment(
     start_idx: int,
 ) -> list[tuple[int, ToolCall, float, ToolExecution]]:
     context = _capture_parallel_thread_context(request.agent)
-    scheduled: list[tuple[int, ToolCall, float]] = []
-    for offset, call in enumerate(calls):
-        idx = start_idx + offset
-        started_at = time.monotonic()
-        _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
-        scheduled.append((idx, call, started_at))
+    scheduler = scheduler_for_agent(request.agent)
+    reuse = bool(getattr(getattr(request.agent, "config", None), "sqlite_connection_reuse", False))
+    items = [ToolWorkItem(call.call_id, partial(_started_parallel_call, request, start_idx + offset, call, context,
+                                               scheduler is not None),
+                          sqlite_reuse=reuse) for offset, call in enumerate(calls)]
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
     callback = (lambda: cancel("interrupted")) if callable(cancel) else (lambda: None)
-    workers = len(scheduled)
     with register_interrupt_callback(callback):
+        if scheduler is not None:
+            return execute_work_items(items, scheduler.submit)
         with ThreadPoolExecutor(
-            max_workers=workers,
+            max_workers=len(items),
             thread_name_prefix="my-agent-tool",
         ) as pool:
-            futures = [
-                pool.submit(
-                    copy_context().run,
-                    _execute_parallel_call,
-                    request,
-                    idx,
-                    call,
-                    context,
-                )
-                for idx, call, _started_at in scheduled
-            ]
-            executions = [future.result() for future in futures]
-    return [
-        (idx, original_call, started_at, execution)
-        for (idx, original_call, started_at), execution in zip(
-            scheduled,
-            executions,
-            strict=True,
-        )
-    ]
+            futures = [pool.submit(item.captured_context.run, item.run) for item in items]
+            return [future.result() for future in futures]
+
+
+# LLM: 排队不算handler开始；获额度后重查关门/取消/compact，原合成结果负责后续配对落账。
+# 函数用途: 在实际worker开始点产生进度并执行或拒绝当前调用。
+def _started_parallel_call(request, idx, call, context, queued):
+    started_at = time.monotonic()
+    execution = _queued_call_gate(request, call) if queued else None
+    if execution is None:
+        _emit_tool_progress(ToolProgressEvent(request, idx, call, "started", "开始"))
+        execution = _execute_parallel_call(request, idx, call, context)
+    return idx, call, started_at, execution
+
+
+# LLM: 排队不是已启动；取得许可后仍按停机、取消、compact优先级拒绝未开始项，不调用handler。
+# 函数用途: 重新检查工具实际启动点的宿主屏障。
+def _queued_call_gate(request, call):
+    execution = _closed_admission_execution(request, call)
+    if execution is None and _round_cancelled(request):
+        execution = _synthetic_execution(call, _interrupted_result(call), "CANCELLED")
+    if execution is None and _should_defer_for_compact(request, call.tool_name):
+        execution = _synthetic_execution(call, _compact_deferred_result(call), "COMPACT_REQUIRED")
+    return execution
 
 
 # LLM: 普通并行轮与嵌套工具共用线程身份安装/恢复协议；模型可见调用仍沿原轮配对。
@@ -854,6 +870,49 @@ def _execute_parallel_call(
     return run_with_parallel_thread_context(request.agent, context, lambda: request.execute_one(
         ToolCallExecuteParams(request.params, request.tool_rounds, idx, call,
             model_call=_model_visible_call(request, idx, call))))
+
+
+# LLM: 串行与批准重试共用单工作项边界；只在正额度时转worker并同步晋升后的线程工作区，0保留当前线程。
+# 函数用途: 为一条原执行请求安装可选owner额度和独立SQLite作用域。
+def _execute_owned_serial(request, work, *, emit_started=False):
+    scheduler = scheduler_for_agent(request.agent)
+    context = _capture_parallel_thread_context(request.agent) if scheduler is not None else None
+    reuse = bool(getattr(getattr(request.agent, "config", None), "sqlite_connection_reuse", False))
+    promoted = []
+    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
+    item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
+                       lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), reuse)
+    if scheduler is None:
+        return item.run()
+    token = getattr(request.params, "cancellation_token", None)
+    cancel = getattr(token, "cancel", None)
+    with register_interrupt_callback(lambda: cancel("interrupted") if callable(cancel) else None):
+        execution = scheduler.submit(item).result()
+    if promoted and promoted[-1] is not None:
+        request.agent._current_run_task_workspace = promoted[-1]
+    return execution
+
+
+# LLM: 原execute请求含actor/model_call；正额度排队才重查屏障与切线程上下文，0直接在本线程执行不回滚晋升。
+# 函数用途: 检查串行排队后的屏障，按需安装宿主线程身份并记录工作区晋升。
+def _owned_serial_call(request, work, context, emit_started, queued, promoted):
+    execution = _queued_call_gate(request, work.call) if queued else None
+    if execution is not None:
+        return execution
+    if emit_started:
+        _emit_tool_progress(ToolProgressEvent(request, work.idx, work.call, "started", "开始"))
+    if not queued:
+        return request.execute_one(work)
+
+    # LLM: 工作线程内完成工作区晋升后先捕获最新值，外层finally再恢复worker线程原身份。
+    # 函数用途: 在worker线程执行串行工具并把晋升后的task_workspace带回主轮线程。
+    def _run_on_worker():
+        result = request.execute_one(work)
+        if hasattr(request.agent, "_current_run_task_workspace"):
+            promoted.append(getattr(request.agent, "_current_run_task_workspace", None))
+        return result
+
+    return run_with_parallel_thread_context(request.agent, context, _run_on_worker)
 
 
 # LLM: 普通轮与嵌套工具共享同一线程上下文协议；无论成功/异常均恢复接收线程原身份，禁止模型提供字段。

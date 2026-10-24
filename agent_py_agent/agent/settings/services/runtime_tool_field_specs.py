@@ -5,6 +5,7 @@ from __future__ import annotations
 TOOL_INT_FIELDS = (
     ("max_tool_rounds", 0, None),
     ("max_parallel_tool_calls", 0, None),
+    ("max_parallel_tool_calls_per_owner", 0, None),
     ("tool_agent_budget_max_calls", 0, None),
     ("tool_artifact_read_budget_max_chars", 0, None),
     ("tool_output_externalize_min_chars", 0, None),

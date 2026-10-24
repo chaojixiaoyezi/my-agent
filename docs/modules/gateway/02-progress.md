@@ -5,6 +5,7 @@
 - **非阻塞运行时模型与思考档位切换（Non-Blocking `/model` & `/effort`）**：新增 `gateway_parts/session_setting_control.py`、`cli/chat_parts/tui_setting_enqueue.py` 与 `cli/chat_parts/tui_model_selection_wait.py`，配合 `gateway_parts/model_metadata_transaction.py`、`multiprocess_local_control.py`、`agent_core/model/selection_refresh.py` 与 `settings/reasoning_effort.py` 将运行时模型/思考档位切换从慢控制队列剥离为独立短事务 lane，菜单选择后立即关闭并恢复输入，下一模型轮安全点无缝切换且单次请求内冻结 `(model_spec, reasoning_effort)`。
 - **CLI / TUI 回合完成时间与耗时显示**：新增 `cli/turn_completion.py`，在 Plain CLI 与 TUI 回合到达唯一终态时输出包含本地完成时间戳（`YYYY-MM-DD HH:MM:SS`）与单调时钟总用时的独立系统完成块，不污染 canonical assistant 历史。
 - **长会话待消费输入失效计数器复位修复**：`agent_core/_tool_loop_service.py` 在 `inject_pending_turn_input` 成功消费待处理输入或当前无失效输入时将 `_pending_turn_input_invalidations` 归零，修复长时编码会话跨数十轮累计达到 8 次后台命令完成通知后误触发 `pending_turn_input_invalidation_limit`（`! 任务处理失败，请稍后重试`）的缺陷。
+- **并发工具流式提交锁（`_commit_lock`）**：`gateway_parts/stream_writer.py::BufferedChunkStreamWriter` 新增 `_commit_lock`，将 `_commit_model_response` 的 `_committed_model_response` 检查与置位收进原子临界区，消除单轮并行工具（如 16 并发 `read_file`）同拍触发 `on_tool_start` 时重复落盘 assistant commentary 消息的竞态。
 
 ## 2026-10-22 线上性能归因四项优化与网关每日安全重启/主进程 Hang 事故治理（0.3.0-tui-preview.20261021.7）
 
