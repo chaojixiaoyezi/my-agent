@@ -1,5 +1,6 @@
 # LLM: 原审批债务及其真实outer异常链只同对象运输和严格核收；finish在原native活except内执行，普通同码不升级，物理未知优先，不以清理完成签发终态或释放资源。
 # LLM: 本模块负责 Gateway 请求入队、claim 和 worker 调度；文件 payload 的会话身份与客户端能力必须保持结构化且可审计。
+#   pending缓存仅复用原字节确认过的读取副本，不授claim/更新权；terminal等待按单调钟预算退避，不缓存时间决策。
 # 原runner Thread只凭native异常/Context原锚点观察同claim未知，无Call id；失活后只保留既存诊断，不新增终态或释放。
 #   owner 解析另认已用管理员密码绑定的 IM 私聊，判据只有结构化渠道身份与绑定表的精确匹配。
 #   SQLite复用仅在已解析owner的请求范围内启用，结束时回收，不改变独立事务和终态提交。
@@ -16,14 +17,17 @@ file queue. Any slash command that bypasses HTTP/CLI dispatch fails closed befor
 the worker creates a model turn.
 """
 
+import copy
+import json
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..concurrency.interrupt import register_interruptible
 from ..conversation.control_commands import (
@@ -72,6 +76,16 @@ from .response_renderer import read_gateway_terminal_response_file
 
 if TYPE_CHECKING:
     from ...core import SimpleAgent
+
+
+_DEFAULT_READ_JSON_FILE_REPORT = read_json_file_report
+_PENDING_SCAN_CACHE: OrderedDict[tuple[str, int, int, int, int, int, bytes], dict[str, Any]] = OrderedDict()
+_PENDING_SCAN_CACHE_LOCK = threading.Lock()
+# 同时限制条目和保留的原JSON字节，避免多个队列或文件版本使缓存无界增长。
+_PENDING_SCAN_CACHE_MAX_ENTRIES = 1024
+_PENDING_SCAN_CACHE_MAX_BYTES = 4 * 1024 * 1024
+_PENDING_SCAN_CACHE_MAX_FILE_BYTES = 65536
+_WAIT_POLL_STEPS_SECONDS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2)
 
 
 @dataclass(frozen=True)
@@ -463,13 +477,20 @@ def _write_admission_wait_field(request_path: Path, fields: dict[str, object], *
 
 
 
-# LLM: Synchronous worker callers wait on the immutable canonical terminal record. A response
-# projection may be repaired later but can never end the wait by itself.
-# 函数用途: 等待指定 Gateway 请求的唯一终态归档并返回其完整答复。
+# LLM: 一次等待只选一次时钟，优先monotonic；旧测试的SimpleNamespace缺该属性或为None时保持time回退。
+# 函数用途: 返回本次终态等待使用的时钟函数，避免循环中混用时钟。
+def _wait_clock() -> Callable[[], float]:
+    return getattr(time, "monotonic", None) or time.time
+
+
+# LLM: 只读canonical终态，projection不能结束等待；首次先读、每轮睡眠截到剩余预算，步长封顶200ms。
+# 函数用途: 按20/50/100/200ms退避等待唯一终态，读到即返回，预算耗尽返回空。
 def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: float) -> dict:
     path = paths.terminal / f"{request_id}.json"
-    deadline = time.time() + max(0.0, timeout)
-    while time.time() <= deadline:
+    clock = _wait_clock()
+    deadline = clock() + max(0.0, float(timeout))
+    step = 0
+    while True:
         payload = read_gateway_terminal_response_file(
             path,
             request_id=request_id,
@@ -477,8 +498,12 @@ def wait_for_gateway_response(paths: GatewayPaths, request_id: str, timeout: flo
         )
         if payload:
             return payload
-        time.sleep(0.2)
-    return {}
+        remaining = deadline - clock()
+        if remaining <= 0.0:
+            return {}
+        delay = _WAIT_POLL_STEPS_SECONDS[min(step, len(_WAIT_POLL_STEPS_SECONDS) - 1)]
+        step += 1
+        time.sleep(min(delay, remaining))
 
 
 def _process_gateway_requests(
@@ -508,26 +533,96 @@ def _iter_pending_request_paths(paths: GatewayPaths) -> list[Path]:
     return [entry.path for entry in _iter_pending_requests(paths)]
 
 
+# LLM: 原字节是键的一部分，stat同长原位回写/恢复mtime也不能命中旧值；探针不取文件锁，失败交原reader处理。
+# 函数用途: 对不超过64KiB的小文件取代次与精确字节，其他情况不参与缓存。
+def _pending_scan_cache_key(request_path: Path) -> tuple[str, int, int, int, int, int, bytes] | None:
+    try:
+        st = request_path.stat()
+        if not 0 < st.st_size <= _PENDING_SCAN_CACHE_MAX_FILE_BYTES:
+            return None
+        raw = request_path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) != st.st_size:
+        return None
+    return (str(request_path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, raw)
+
+
+# LLM: 原reader后确认字节与JSON值/类型；拒绝True==1和旧快照。确认的ValueError（含整数位限）/递归失败只弃缓存，深拷贝在锁外。
+# 函数用途: 尽力保存可信读取的独立副本，按LRU双预算淘汰，确认失败不影响原读取结果。
+def _cache_verified_pending_payload(request_path: Path, payload: dict[str, Any]) -> None:
+    key = _pending_scan_cache_key(request_path)
+    if key is None:
+        return
+    try:
+        verified = json.loads(key[-1].decode("utf-8"))
+        if verified != payload or json.dumps(verified, sort_keys=True) != json.dumps(payload, sort_keys=True):
+            return
+        saved = copy.deepcopy(payload)
+    except (ValueError, RecursionError):
+        return
+    with _PENDING_SCAN_CACHE_LOCK:
+        _PENDING_SCAN_CACHE[key] = saved
+        _PENDING_SCAN_CACHE.move_to_end(key)
+        cached_bytes = sum(len(entry[-1]) for entry in _PENDING_SCAN_CACHE)
+        while _PENDING_SCAN_CACHE and (len(_PENDING_SCAN_CACHE) > _PENDING_SCAN_CACHE_MAX_ENTRIES
+                                      or cached_bytes > _PENDING_SCAN_CACHE_MAX_BYTES):
+            oldest, _payload = _PENDING_SCAN_CACHE.popitem(last=False)
+            cached_bytes -= len(oldest[-1])
+
+
+# LLM: 被替换的reader完整旁路；默认仅在stat+原字节精确命中时免锁免解析，返回副本永不暴露缓存嵌套对象。
+# 函数用途: 加速扫描/排序的payload读取，未命中或探针失败仍沿原文件锁和错误报告读取。
+def _read_pending_request_payload(request_path: Path, *, context: str) -> dict[str, Any]:
+    if read_json_file_report is not _DEFAULT_READ_JSON_FILE_REPORT:
+        return read_json_file_report(request_path, context=context).payload
+    key = _pending_scan_cache_key(request_path)
+    if key is not None:
+        with _PENDING_SCAN_CACHE_LOCK:
+            cached = _PENDING_SCAN_CACHE.get(key)
+            if cached is not None:
+                _PENDING_SCAN_CACHE.move_to_end(key)
+        if cached is not None:
+            try:
+                return copy.deepcopy(cached)
+            except RecursionError:
+                pass  # 可选缓存不能让原reader支持的深层JSON变成请求错误。
+    report = read_json_file_report(request_path, context=context)
+    if report.load_error is None and not report.lock_busy and isinstance(report.payload, dict) and report.payload:
+        _cache_verified_pending_payload(request_path, report.payload)
+    return report.payload
+
+
+# LLM: 只清本inbox路径分量内未见项，不按字符串前缀误伤相邻队列；锁内删除最多1024条，不做文件IO。
+# 函数用途: 每轮扫描后移除已消失/认领/取消的缓存记录，不串工作区。
+def _prune_pending_scan_cache(inbox: Path, seen_paths: set[str]) -> None:
+    with _PENDING_SCAN_CACHE_LOCK:
+        for key in list(_PENDING_SCAN_CACHE):
+            if key[0] not in seen_paths and Path(key[0]).is_relative_to(inbox):
+                del _PENDING_SCAN_CACHE[key]
+
+
+# LLM: 缓存只加速静态payload读取，保留原排序与逐拍延迟判定；扫描完成清已消失项，claim和等待更新仍各走原锁内复读。
+# 函数用途: 返回隔离的待处理请求快照，并清本队列不再存在的缓存。
 def _iter_pending_requests(paths: GatewayPaths) -> list[_PendingGatewayRequest]:
-    entries = [
-        _PendingGatewayRequest(
-            path=request_path,
-            payload=read_json_file_report(
-                request_path,
-                context="gateway.worker.pending_scan.read",
-            ).payload,
-        )
-        for request_path in paths.inbox.glob("*.json")
-    ]
+    entries = []
+    seen_paths = set()
+    for request_path in paths.inbox.glob("*.json"):
+        seen_paths.add(str(request_path))
+        payload = _read_pending_request_payload(request_path, context="gateway.worker.pending_scan.read")
+        entries.append(_PendingGatewayRequest(request_path, payload))
+    _prune_pending_scan_cache(paths.inbox, seen_paths)
     return sorted(entries, key=_pending_request_entry_sort_key)
 
 
+# LLM: 单路径排序与批量扫描共用同一精确字节缓存，原priority context、排序字段与空payload回退保持不变。
+# 函数用途: 读取当前请求并计算原排队顺序，不缓存排序或时间决策。
 def _pending_request_sort_key(request_path: Path) -> tuple[int, float, str]:
-    payload_report = read_json_file_report(
+    payload = _read_pending_request_payload(
         request_path, context="gateway.worker.pending_priority.read"
     )
     return _pending_request_entry_sort_key(
-        _PendingGatewayRequest(request_path, payload_report.payload or {})
+        _PendingGatewayRequest(request_path, payload or {})
     )
 
 
