@@ -1,4 +1,4 @@
-# LLM: 监护沿原配置/home运输和Gateway身份读门管理进程；只写独立supervisor记录，不能覆盖Gateway状态或把监护者存活当业务ready。
+# LLM: 监护沿原配置/home及Gateway身份读门管理进程；Count0强停支持POSIX/Windows，不扩大代际权限或把监护者存活当业务ready。
 # 模块用途: 消费CLI显式装配的同Agent/路径，管理原Gateway健康与重启；不反向依赖CLI或改变责任/安全接班。
 from __future__ import annotations
 
@@ -229,13 +229,13 @@ def stop_gateway(supervisor, timeout: float = 20.0, *, expected_identity: dict |
     return _force_stop_gateway(supervisor, report.pid, identity)
 
 
-# LLM: 当前process_control/io无KILL原语，局限本模块；调用者必须先核原代及Count0，失败不吞作成功。
-# 函数用途: 向已核验的原Gateway发送一次SIGKILL。
+# LLM: 当前process_control/io无强停原语；POSIX用SIGKILL，缺失时用Windows TerminateProcess对应的SIGTERM；调用者仍须核原代及Count0。
+# 函数用途: 跨平台强制终止已核验的原Gateway，发送失败不吞作成功。
 def kill_pid(pid: int) -> None:
-    os.kill(pid, signal.SIGKILL)
+    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
 
 
-# LLM: TERM失败后重核完整旧身份；正N仍走原完整关闭门，物理退出不等于业务排空。
+# LLM: TERM失败后重核完整旧身份；Count0使用跨平台强停，正N仍走原完整关闭门，物理退出不等于业务排空。
 # 函数用途: 仅Count0同代目标升级强停，确认退出后再清旧代文件。
 def _force_stop_gateway(supervisor, pid: int, identity: dict) -> bool:
     if process_identity_is_live(identity) is not True:
@@ -245,13 +245,13 @@ def _force_stop_gateway(supervisor, pid: int, identity: dict) -> bool:
         count = int(getattr(getattr(supervisor._agent, "config", None), "gateway_worker_process_count", 0) or 0)
     except (TypeError, ValueError, OverflowError):
         return False
-    if count != 0 or not hasattr(signal, "SIGKILL"):
+    if count != 0:
         return False
-    supervisor._log_warn(f"原Gateway(pid={pid})在SIGTERM后未退出，已核验同代身份并升级SIGKILL。")
+    supervisor._log_warn(f"原Gateway(pid={pid})在SIGTERM后未退出，已核验同代身份并升级强制终止。")
     try:
         kill_pid(pid)
     except OSError as error:
-        supervisor._log_warn(f"Gateway SIGKILL发送未确认：{type(error).__name__}")
+        supervisor._log_warn(f"Gateway强制终止发送未确认：{type(error).__name__}")
         return False
     exited = bool(_wait_gateway_exit(supervisor, pid, identity, 5))
     if exited:
