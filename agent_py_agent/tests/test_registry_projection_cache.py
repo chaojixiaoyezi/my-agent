@@ -268,3 +268,15 @@ def test_incremental_append_parses_only_new_lines_and_keeps_multi_root_warm(tmp_
     records = registry.latest_artifact_records(root_a)
     assert set(records) == {"a1", "a2", "a3"}
     assert len(loads) == 1
+
+
+# LLM: 多root长路径identity与空投影容器必须计入_CACHE_BYTES，防止大量空或短账本根突破内存预算。
+# 函数用途: 验证多root键开销纳入LRU字节核算且空投影共享_EMPTY_PROXY。
+def test_multi_root_identity_cost_and_empty_proxy_reuse():
+    from agent_py_agent.agent.artifacts import registry_projection_cache as cache
+
+    empty_proj = cache.parse_registry_projection("\n")
+    assert empty_proj.records == ()
+    long_identity = ("/" + "r" * 4096, 1, 2)
+    cost = cache._memory_cost(((long_identity, cache.PARSER_VERSION), empty_proj))
+    assert cost > 4096

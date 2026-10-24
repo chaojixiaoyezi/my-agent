@@ -149,7 +149,7 @@ def parse_registry_projection(raw: str) -> RegistryProjection:
         tuple(rows),
         any(row.error for row in rows),
         PARSER_VERSION,
-        MappingProxyType(latest),
+        MappingProxyType(latest) if latest else _EMPTY_PROXY,
         tuple(diagnostics),
         len(lines),
         sum(row.estimated_bytes for row in rows),
@@ -184,7 +184,7 @@ def _append_registry_projection(base: RegistryProjection, raw: str) -> RegistryP
         base.records + tuple(new_rows),
         parse_error,
         PARSER_VERSION,
-        MappingProxyType(latest),
+        MappingProxyType(latest) if latest else _EMPTY_PROXY,
         tuple(diagnostics),
         base.line_count + len(lines),
         base.rows_memory_bytes + sum(row.estimated_bytes for row in new_rows),
@@ -264,13 +264,19 @@ def _sized_row(row: RegistryRow) -> RegistryRow:
     return replace(row, estimated_bytes=_retained_tree_bytes(row, set()))
 
 
-# LLM: All tree walks happen at row parse time; budget lookup is strictly O(1), including wide raw strings and containers.
+# LLM: All tree walks happen at row parse time; budget lookup is strictly O(1), including identity tuples and OrderedDict node overhead.
 # 函数用途: 计算缓存驻留预算，超大投影不插入而不截断解析。
 def _memory_cost(value) -> int:
     if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], RegistryProjection):
         key, projection = value
+        identity_overhead = (
+            sys.getsizeof(key[0]) + sum(sys.getsizeof(item) for item in key[0]) + 560
+            if isinstance(key, tuple) and key and isinstance(key[0], tuple)
+            else 0
+        )
         return (
             sys.getsizeof(key)
+            + identity_overhead
             + sys.getsizeof(projection)
             + sys.getsizeof(projection.raw)
             + sys.getsizeof(projection.records)

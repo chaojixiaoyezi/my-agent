@@ -218,15 +218,30 @@ def active_turn_input_event(
     }
 
 
-# LLM: 仅在非终局刷新时保留可能构成敏感标识真前缀的尾部，终局flush全量净化发出。
+# LLM: 仅在非终局刷新时保留已闭合命中之后的敏感标识真前缀尾部，防止重叠规则拆碎已完整命中的敏感ID。
 # 函数用途: 拆分待发思考与未闭合的标识前缀，防止跨chunk边界泄漏敏感ID。
 def drain_thinking_delta_text(writer: Any, raw_joined: str, *, final: bool = True) -> str:
     emit_raw = raw_joined
     if not final and raw_joined and writer._identifier_redactions:
-        needles = [src for src, _ in writer._identifier_redactions if isinstance(src, str) and len(src) > 1]
+        needles = sorted(
+            {src for src, _ in writer._identifier_redactions if isinstance(src, str) and len(src) > 1},
+            key=len,
+            reverse=True,
+        )
         if needles:
+            complete_end, pos = 0, 0
+            while pos < len(raw_joined):
+                matched = next((src for src in needles if raw_joined.startswith(src, pos)), "")
+                if not matched:
+                    pos += 1
+                    continue
+                end = pos + len(matched)
+                if end == len(raw_joined) and any(len(other) > len(matched) and other.startswith(matched) for other in needles):
+                    break
+                complete_end = end
+                pos = end
             max_len = max(len(src) for src in needles)
-            start_min = max(0, len(raw_joined) - max_len + 1)
+            start_min = max(complete_end, len(raw_joined) - max_len + 1)
             for idx in range(start_min, len(raw_joined)):
                 suffix = raw_joined[idx:]
                 if any(len(suffix) < len(src) and src.startswith(suffix) for src in needles):

@@ -958,4 +958,4 @@ F3候选中，`retention_transition.py` 只运输原维护commit回调，不建�
 
 ### 有界尾行读取与归档路径规范化（2026-10-23）
 
-`memory_archive/tail_lines.py` 提供 `read_tail_lines` 反向块读取器；`agent_run_workspace.py` 与 `task_workspace/payloads.py` 共用该读取器及路径规范化 helper。
+`memory_archive/tail_lines.py` 提供 `read_tail_lines` 反向块读取器；`agent_run_workspace.py` 与 `task_workspace/payloads.py` 共用该读取器及路径规范化 helper。`memory_archive/artifact/reader.py` 拆出 `_lookup_index_record`，在非路径 `.blob` 引用下优先保留原始 `call_id` 精确匹配，未命中再回退 `.json` sidecar 基名匹配。

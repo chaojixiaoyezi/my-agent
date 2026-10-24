@@ -127,6 +127,8 @@ class WebFetchTool(BaseTool):
             output_policy=OutputPolicy(trust="external_data"),
         )
 
+    # LLM: 动态配置由 provider 实时提供，逐调用临时授权独立保存在 _extra_private_hosts 中合并读取。
+    # 函数用途: 返回当前生效的私网白名单元组，保证撤权立即对后续请求生效。
     @property
     def allowed_private_hosts(self) -> tuple[str, ...]:
         provider = self._allowed_private_hosts_provider
@@ -135,6 +137,8 @@ class WebFetchTool(BaseTool):
         base = tuple(provider() or ())
         return tuple(dict.fromkeys([*base, *self._extra_private_hosts]))
 
+    # LLM: 直接赋值仅在无动态 provider 时更新静态白名单；有 provider 时仅由 _extra_private_hosts 承载临时授权。
+    # 函数用途: 兼容静态白名单属性写入，不将过期动态配置快照固化进临时授权字段。
     @allowed_private_hosts.setter
     def allowed_private_hosts(self, value: object) -> None:
         if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
@@ -374,6 +378,7 @@ def _execute_extract(
     failures: list[dict[str, str | None]] = []
     deadline, remaining_bytes = time.monotonic() + tool.timeout, 8 * 1024 * 1024
     remaining_urls = []
+    resolved_by_host: dict[str, tuple[str, ...]] = {}
     for url in urls:
         if cancellation_requested() or time.monotonic() >= deadline or remaining_bytes <= 0:
             remaining_urls = urls[urls.index(url):]
@@ -389,7 +394,7 @@ def _execute_extract(
                 max_bytes=min(1_000_000, remaining_bytes),
             ),
             format_http_error=tool.format_http_error,
-            resolve_pin=tool._resolve_pin,
+            resolve_pin=lambda hop_url: tool._resolve_pin(hop_url, resolved_by_host=resolved_by_host),
         )
         if isinstance(response, ToolHandlerOutcome):
             failures.append({"url": url, "error_code": response.error_code, "error": response.output})

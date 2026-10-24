@@ -528,8 +528,8 @@ def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str
             payload["next_offset"] = payload["window_end"]
     return payload
 
-# LLM: 全部索引扫描完成后才处理候选路径错误；保持晚到UTF8优先、最后匹配及重复basename拒绝，不重算匹配。
-# 函数用途: 复用查找结果，blob引用规范成同名JSON，保持原scope和唯一basename修复。
+# LLM: 全部索引扫描完成后才处理候选路径错误；优先匹配原样逻辑引用，仅在路径或无原样命中时将.blob回退为.json。
+# 函数用途: 复用查找结果，保留合法.blob逻辑call_id、原scope和唯一basename修复。
 def _find_index_record(
     root: Path,
     artifact_ref: str,
@@ -538,8 +538,34 @@ def _find_index_record(
     index_paths: tuple[Path, ...] | None = None,
     open_errors: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    if artifact_ref.endswith(".blob") and (":" not in artifact_ref or _looks_like_path(artifact_ref)):
-        artifact_ref = f"{artifact_ref[:-5]}.json"
+    if artifact_ref.endswith(".blob") and _looks_like_path(artifact_ref):
+        return _lookup_index_record(
+            root, f"{artifact_ref[:-5]}.json", request, index_paths=index_paths, open_errors=open_errors
+        )
+    if artifact_ref.endswith(".blob") and ":" not in artifact_ref:
+        matched = _lookup_index_record(
+            root, artifact_ref, request, index_paths=index_paths, open_errors=open_errors
+        )
+        if matched is not None:
+            return matched
+        return _lookup_index_record(
+            root, f"{artifact_ref[:-5]}.json", request, index_paths=index_paths, open_errors=open_errors
+        )
+    return _lookup_index_record(
+        root, artifact_ref, request, index_paths=index_paths, open_errors=open_errors
+    )
+
+
+# LLM: 单次给定引用执行索引扫描、异常上抛、scope过滤与唯一basename回退，不隐式改写.blob后缀。
+# 函数用途: 按既定优先级在索引候选里定位唯一匹配记录。
+def _lookup_index_record(
+    root: Path,
+    artifact_ref: str,
+    request: ReadToolOutputArtifactRequest,
+    *,
+    index_paths: tuple[Path, ...] | None = None,
+    open_errors: list[str] | None = None,
+) -> dict[str, Any] | None:
     try:
         ref_path = Path(artifact_ref).expanduser()
         resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None

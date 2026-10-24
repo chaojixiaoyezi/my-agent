@@ -875,3 +875,28 @@ def test_pending_confirmation_value_error_keeps_live_payload(tmp_path, monkeypat
     assert failure is None, f"optional cache confirmation escaped: {failure}"
     assert rows[0].payload["user_id"] == "owner-a"
     assert not pending_scan_cache
+
+
+# LLM: 预读探针返回后若伴随.lock被并发替换为符号链接，热命中必须失效并交由权威reader按安全门拒绝。
+# 函数用途: 验证_pending_scan_cache_key之后的伴随.lock替换不会返回陈旧缓存成功结果。
+def test_pending_lock_symlink_replacement_after_key_probe_invalidates_hit(tmp_path, monkeypatch, pending_scan_cache):
+    paths = _paths(tmp_path)
+    path = _enqueue(paths, "lock-swap", "owner-a")
+    assert rw._iter_pending_requests(paths)[0].payload["user_id"] == "owner-a"
+    lock_path = path.with_name(f"{path.name}.lock")
+    saved_lock = tmp_path / "saved.lock"
+    original_key = rw._pending_scan_cache_key
+    swapped = False
+
+    def key_then_swap(candidate):
+        nonlocal swapped
+        res = original_key(candidate)
+        if candidate == path and not swapped:
+            swapped = True
+            lock_path.rename(saved_lock)
+            lock_path.symlink_to(saved_lock.name)
+        return res
+
+    monkeypatch.setattr(rw, "_pending_scan_cache_key", key_then_swap)
+    assert rw._iter_pending_requests(paths)[0].payload == {}
+    assert not pending_scan_cache

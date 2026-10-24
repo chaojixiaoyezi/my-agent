@@ -456,3 +456,36 @@ def test_w21_projection_lru_is_bounded_and_concurrent_calls_match(projection_cac
     with ThreadPoolExecutor(max_workers=4) as pool:
         actual = list(pool.map(tool_ir_history.project_native_provider_messages, cases))
     assert actual == [original(history) for history in cases]
+
+
+# LLM: 投影缓存只存占位符不保留调用方可变prior引用，且投影途中输入变动禁止污染缓存键。
+# 函数用途: 验证borrowed prior膨胀不突破缓存字节预算、并发输入回填不写脏缓存。
+def test_w21_projection_borrowed_prior_placeholder_and_midflight_mutation_guard(projection_cache, monkeypatch):
+    _calls, original = projection_cache
+    prior = {"role": "user", "content": "small"}
+    output = tool_ir_history.project_native_provider_messages([], prior_messages=[prior], copy_prior=False)
+    assert output[0] is prior
+    prior["content"] = "x" * (3 * 1024 * 1024)
+    retained = sum(
+        tool_ir_history._projection_entry_bytes(k, v)
+        for k, v in tool_ir_history._PROJECTION_CACHE.items()
+    )
+    assert retained < 64 * 1024
+
+    turn = AssistantTurn(text="initial")
+    mutated = False
+
+    def mutating_adapter(ir_history, prior_messages=None, *, copy_prior=True):
+        nonlocal mutated
+        res = original(ir_history, prior_messages, copy_prior=copy_prior)
+        if not mutated:
+            mutated = True
+            object.__setattr__(turn, "text", "backfilled")
+        return res
+
+    monkeypatch.setattr(message_adapter, "project_native_history_messages", mutating_adapter)
+    tool_ir_history.project_native_provider_messages([turn], copy_prior=False)
+    object.__setattr__(turn, "text", "initial")
+    monkeypatch.setattr(message_adapter, "project_native_history_messages", original)
+    fresh = tool_ir_history.project_native_provider_messages([turn], copy_prior=False)
+    assert fresh[0]["content"][0]["text"] == "initial"

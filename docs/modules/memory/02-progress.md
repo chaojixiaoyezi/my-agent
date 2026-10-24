@@ -705,3 +705,4 @@ Curator `run/run_if_due` 先沿当前实际 Agent/原 claim 做空短准入，�
 ## 2026-10-23 有界反向尾行读取器与归档路径共享 helper（Context Optimization）
 
 新增 `memory_archive/tail_lines.py` 从文件尾部按 64KB 块反向读取尾行，供 `agent_run_workspace.py` 与 `task_workspace/payloads.py` 复用并统一 `_safe_relative_path`，避免长日志整文件读入内存；`tool_output_externalizer.py` 精简外置归档提示。
+`memory_archive/artifact/reader.py` 的 `_find_index_record` 先按原始引用匹配 `call_id`（支持 `.blob` 后缀 `call_id`），未命中再回退匹配 `.json` sidecar 基名；`artifacts/registry_projection_cache.py` 空投影共享不可变 `_EMPTY_PROXY` 并计入多根 `identity` 元组与容器内存开销。

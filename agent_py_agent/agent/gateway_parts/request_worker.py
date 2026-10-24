@@ -536,16 +536,22 @@ def _iter_pending_request_paths(paths: GatewayPaths) -> list[Path]:
     return [entry.path for entry in _iter_pending_requests(paths)]
 
 
+# LLM: 仅只读lstat检查伴随.lock是否为常规文件（或不存在），不创建文件、不阻塞FIFO、不跟随符号链接。
+# 函数用途: 校验请求伴随锁文件未被替换为符号链接或管道。
+def _lock_sidecar_is_safe(request_path: Path) -> bool:
+    lock_path = request_path.with_name(f"{request_path.name}.lock")
+    try:
+        return stat.S_ISREG(os.lstat(lock_path).st_mode)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
 # LLM: 单FD O_NONBLOCK|O_NOFOLLOW读取原字节与fstat并核对伴随.lock常规文件身份，不阻塞FIFO或绕过锁路径拒绝。
 # 函数用途: 对不超过64KiB的常规请求文件取代次与精确字节，其他情况交原reader处理。
 def _pending_scan_cache_key(request_path: Path) -> tuple[str, int, int, int, int, int, bytes] | None:
-    lock_path = request_path.with_name(f"{request_path.name}.lock")
-    try:
-        if not stat.S_ISREG(os.lstat(lock_path).st_mode):
-            return None
-    except FileNotFoundError:
-        pass
-    except OSError:
+    if not _lock_sidecar_is_safe(request_path):
         return None
     fd = -1
     try:
@@ -555,7 +561,12 @@ def _pending_scan_cache_key(request_path: Path) -> tuple[str, int, int, int, int
                 return None
             raw = request_path.read_bytes()
         else:
-            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
             fd = os.open(request_path, flags)
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode) or not 0 < st.st_size <= _PENDING_SCAN_CACHE_MAX_FILE_BYTES:
@@ -602,7 +613,7 @@ def _cache_verified_pending_payload(request_path: Path, payload: dict[str, Any])
             cached_bytes -= len(oldest[-1])
 
 
-# LLM: 被替换的reader完整旁路；默认仅在stat+原字节精确命中时免锁免解析，返回副本永不暴露缓存嵌套对象。
+# LLM: 被替换的reader完整旁路；热命中在锁外深拷贝且再次核对伴随.lock安全性，返回副本永不暴露缓存嵌套对象。
 # 函数用途: 加速扫描/排序的payload读取，未命中或探针失败仍沿原文件锁和错误报告读取。
 def _read_pending_request_payload(request_path: Path, *, context: str) -> dict[str, Any]:
     if read_json_file_report is not _DEFAULT_READ_JSON_FILE_REPORT:
@@ -614,10 +625,13 @@ def _read_pending_request_payload(request_path: Path, *, context: str) -> dict[s
             if cached is not None:
                 _PENDING_SCAN_CACHE.move_to_end(key)
         if cached is not None:
-            try:
-                return copy.deepcopy(cached)
-            except RecursionError:
-                pass  # 可选缓存不能让原reader支持的深层JSON变成请求错误。
+            if _lock_sidecar_is_safe(request_path):
+                try:
+                    return copy.deepcopy(cached)
+                except RecursionError:
+                    pass
+            with _PENDING_SCAN_CACHE_LOCK:
+                _PENDING_SCAN_CACHE.pop(key, None)
     report = read_json_file_report(request_path, context=context)
     if report.load_error is None and not report.lock_busy and isinstance(report.payload, dict) and report.payload:
         _cache_verified_pending_payload(request_path, report.payload)

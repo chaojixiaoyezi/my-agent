@@ -580,3 +580,28 @@ def test_w21_plain_writer_never_buffers_or_emits_thinking(thinking_writer):
         writer.write_thinking_delta("隐藏思考")
     writer.close()
     assert _thinking_rows(writer) == []
+
+
+# LLM: 非终态flush/事件边界须保留跨块敏感前缀，且完整敏感词后紧跟的新前缀同样不能提前外泄。
+# 函数用途: 验证跨块敏感会话ID在中间flush、穿插事件及最终close下均完全脱敏。
+def test_w21_cross_chunk_redaction_holds_partial_prefix_across_intermediate_flush(thinking_writer):
+    from agent_py_agent.agent.gateway_parts.stream_events import drain_thinking_delta_text
+
+    writer, _clock = thinking_writer
+    writer.delivery_channel = "feishu"
+    writer.set_identifier_redactions((("om_secret_id", "当前会话"), ("om_secret_id_long", "长会话")))
+    flushed = drain_thinking_delta_text(writer, "已见 om_secret_id 与 om_sec", final=False)
+    assert "om_secret_id" not in flushed and "当前会话" in flushed
+    assert writer._thinking_buffer == ["om_sec"]
+    writer._thinking_buffer.clear()
+    writer._thinking_buffer_chars = 0
+    writer.write_thinking_delta("首块立即发出")
+    writer.write_thinking_delta("检查 om_sec")
+    writer.flush()
+    writer.write_thinking_delta("ret_id 与 om_secret_")
+    writer._write_event({"kind": "host_notice", "text": "穿插事件"})
+    writer.write_thinking_delta("id_long 完毕")
+    writer.close()
+    full_thinking = "".join(row["text"] for row in _thinking_rows(writer) if row["kind"] == "thinking_delta")
+    assert "om_secret_id" not in full_thinking
+    assert "当前会话" in full_thinking and "长会话" in full_thinking

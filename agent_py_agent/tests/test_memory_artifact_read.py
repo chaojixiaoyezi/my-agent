@@ -966,6 +966,22 @@ def test_read_artifact_empty_path_without_source_still_not_externalized(tmp_path
     assert "read_file" in payload["message"] or "直接读取" in payload["message"]
 
 
+# LLM: 以.blob结尾的合法call_id不得在索引查找前被无条件剥离后缀，仅未命中时回退sidecar基名匹配。
+# 函数用途: 验证call_id以.blob结尾时read_tool_output_artifact仍能精确命中。
+def test_blob_suffixed_call_id_resolves_in_artifact_reader(tmp_path: Path) -> None:
+    artifact_path = _write_externalized_tool_output(
+        tmp_path,
+        content="line-from-call-dot-blob\n" * 30,
+        call_id="call.blob",
+    )
+    assert artifact_path.exists()
+    by_call_id = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(root=tmp_path, artifact_ref="call.blob", mode="head")
+    )
+    assert by_call_id["ok"] is True
+    assert "line-from-call-dot-blob" in by_call_id["content"]
+
+
 def _write_externalized_tool_output(
     root: Path,
     *,

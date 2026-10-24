@@ -2609,4 +2609,4 @@ generation 的 published-source reader 对准确 typed 名称集冲突最多整�
 
 ## 2026-10-23 请求提示版本指纹去重与上下文计量来源透传
 
-`gateway_parts/request_prompt.py` 对未变化的会话与任务修订注入输出单行引用；`gateway_parts/stream_events.py` 复用 `public_context_usage` 向 TUI 与网关流事件透传 `raw_estimated_tokens`、`calibrated_tokens`、`measurement_kind`、`counter_id`、`count_scope`。
+`gateway_parts/request_prompt.py` 对未变化的会话与任务修订注入输出单行引用；`gateway_parts/stream_events.py` 复用 `public_context_usage` 向 TUI 与网关流事件透传 `raw_estimated_tokens`、`calibrated_tokens`、`measurement_kind`、`counter_id`、`count_scope`。`gateway_parts/stream_writer.py` 与 `stream_events.py` 对 `thinking_delta` 实施跨块敏感前缀保留（`final=False`）与并发写序排队，`gateway_parts/request_worker.py` 在 `_PENDING_SCAN_CACHE` 命中时再次核对伴随 `.lock` 常规文件身份防并发替换。

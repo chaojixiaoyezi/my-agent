@@ -308,12 +308,16 @@ def _first_blocked_ip(
     return ""
 
 
+# LLM: 原生地址与转换投影任一命中回环或未指定即视为本机特殊地址，避免 ::1 被当作普通内网放行。
+# 函数用途: 判断地址或其 IPv4 投影是否属于回环或未指定地址。
 def _is_loopback_or_unspecified_ip(value: str) -> bool:
     address = ip_address_or_none(value)
     if address is None:
         return True
-    address = ipv4_projected(address) or address
-    return bool(address.is_loopback or address.is_unspecified)
+    return any(
+        candidate.is_loopback or candidate.is_unspecified
+        for candidate in _address_candidates(address)
+    )
 
 
 def _resolved_evidence(host: str, resolved: Iterable[str], previous: Iterable[str], blocked_ip: str) -> dict[str, Any]:
@@ -371,28 +375,46 @@ def _is_benchmark_proxy_ip(value: str) -> bool:
     return isinstance(projected, ipaddress.IPv4Address) and projected in _RFC2544_BENCHMARK_NETWORK
 
 
+# LLM: 同时保留原生 IPv6 属性与嵌入的 IPv4 投影，避免转换地址覆写掉原生私网或链路本地分类。
+# 函数用途: 返回原地址及其有效 IPv4 投影候选集合，供私网与永久拦截判定共用。
+def _address_candidates(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    projected = ipv4_projected(address)
+    if projected is None or projected == address:
+        return (address,)
+    return (address, projected)
+
+
+# LLM: 原生地址或嵌入投影任一落入私网、回环、链路本地、保留或 CGNAT 范围即按私网处理。
+# 函数用途: 判定字面或解析出的 IP 是否需要私网授权。
 def _is_private_ip(value: str) -> bool:
     address = ip_address_or_none(value)
     if address is None:
         return True
-    address = ipv4_projected(address) or address
-    return (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_reserved
-        or address.is_multicast
-        or address.is_unspecified
-        or (isinstance(address, ipaddress.IPv4Address) and address in _CGNAT_NETWORK)
+    return any(
+        candidate.is_private
+        or candidate.is_loopback
+        or candidate.is_link_local
+        or candidate.is_reserved
+        or candidate.is_multicast
+        or candidate.is_unspecified
+        or (isinstance(candidate, ipaddress.IPv4Address) and candidate in _CGNAT_NETWORK)
+        for candidate in _address_candidates(address)
     )
 
 
+# LLM: 永久拦截网段同时检查原生 IPv6（如 fe80::/10）与嵌入 IPv4 投影，任一命中即硬拒绝。
+# 函数用途: 判断 IP 是否属于不可被白名单放行的元数据或链路本地网段。
 def _is_always_blocked_ip(value: str) -> bool:
     address = ip_address_or_none(value)
     if address is None:
         return True
-    address = ipv4_projected(address) or address
-    return any(address in network for network in _ALWAYS_BLOCKED_NETWORKS)
+    return any(
+        candidate in network
+        for candidate in _address_candidates(address)
+        for network in _ALWAYS_BLOCKED_NETWORKS
+    )
 
 
 def _is_private_hostname(host: str) -> bool:
@@ -587,7 +609,7 @@ def embedded_ipv4_from_ipv6(address: ipaddress.IPv6Address) -> ipaddress.IPv4Add
 
 def _ipv4_projection_candidates(parts: tuple[int, ...]) -> tuple[tuple[bool, int, int], ...]:
     return (
-        (parts[:6] == (0, 0, 0, 0, 0, 0), parts[6], parts[7]),
+        (parts[:6] == (0, 0, 0, 0, 0, 0) and (parts[6], parts[7]) not in {(0, 0), (0, 1)}, parts[6], parts[7]),
         (parts[:6] == (0, 0, 0, 0, 0xFFFF, 0), parts[6], parts[7]),
         (parts[:3] == (0x0064, 0xFF9B, 0x0001) and parts[3:6] == (0, 0, 0), parts[6], parts[7]),
         (parts[0] == 0x2002, parts[1], parts[2]),

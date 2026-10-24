@@ -531,7 +531,7 @@ def _sandbox_read_roots_for_invocation(
     return tuple(roots)
 
 
-# LLM: 本次网络授权只叠加到请求副本的构造配置，finally 必须恢复原对象，不能污染共享 handler。
+# LLM: 本次网络授权只叠加到请求副本的临时字段或静态配置，finally 必须恢复原对象，不能把已撤回的动态配置重新写回。
 # 函数用途: 在回调期间临时合并工作根与内网授权，成功或异常均恢复。
 def _execute_with_temporary_tool_context(
     tool: BaseTool,
@@ -543,11 +543,16 @@ def _execute_with_temporary_tool_context(
 ) -> ToolHandlerOutcome:
     old_roots = getattr(tool, "workspace_roots", None)
     old_allowed_private_hosts = getattr(tool, "allowed_private_hosts", None)
+    has_provider = callable(getattr(tool, "_allowed_private_hosts_provider", None)) and hasattr(tool, "_extra_private_hosts")
+    old_extra_private_hosts = getattr(tool, "_extra_private_hosts", ()) if has_provider else ()
     old_allow_private_resolution = getattr(tool, "allow_private_resolution", None)
     if workspace_roots and hasattr(tool, "workspace_roots"):
         tool.workspace_roots = workspace_roots
     if allowed_private_hosts and hasattr(tool, "allowed_private_hosts"):
-        tool.allowed_private_hosts = tuple(dict.fromkeys([*(old_allowed_private_hosts or ()), *allowed_private_hosts]))
+        if has_provider:
+            tool._extra_private_hosts = tuple(dict.fromkeys([*old_extra_private_hosts, *allowed_private_hosts]))
+        else:
+            tool.allowed_private_hosts = tuple(dict.fromkeys([*(old_allowed_private_hosts or ()), *allowed_private_hosts]))
     if allow_private_resolution is not None and hasattr(tool, "allow_private_resolution"):
         tool.allow_private_resolution = allow_private_resolution
     try:
@@ -556,7 +561,10 @@ def _execute_with_temporary_tool_context(
         if workspace_roots and hasattr(tool, "workspace_roots"):
             tool.workspace_roots = old_roots
         if allowed_private_hosts and hasattr(tool, "allowed_private_hosts"):
-            tool.allowed_private_hosts = old_allowed_private_hosts
+            if has_provider:
+                tool._extra_private_hosts = old_extra_private_hosts
+            else:
+                tool.allowed_private_hosts = old_allowed_private_hosts
         if allow_private_resolution is not None and hasattr(tool, "allow_private_resolution"):
             tool.allow_private_resolution = old_allow_private_resolution
 

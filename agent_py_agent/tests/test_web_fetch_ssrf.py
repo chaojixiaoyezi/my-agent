@@ -530,3 +530,39 @@ def test_explicit_zero_port_is_rejected_before_transport(port):
     pin = watch_tool._resolve_watch_pin(watch, url, (), True)
     assert pin.error is not None and pin.error.error_code == "TOOL_INVALID_ARGUMENTS"
     assert pin.error.reported_error_code == "NETWORK_PORT_INVALID"
+
+
+# LLM: extract模式必须共享同一resolved_by_host以拦截跨URL的公网转私网DNS重绑定，且临时上下文恢复不得固化动态provider旧快照。
+# 函数用途: 锁住extract模式的DNS重绑定防护与动态私网白名单热更新恢复。
+def test_extract_pins_resolved_ips_and_preserves_dynamic_provider(server):
+    from agent_py_agent.agent.tooling.registry_invoke import _execute_with_temporary_tool_context
+
+    answers = iter([("93.184.216.34",), ("127.0.0.1",)])
+    live_hosts = ["10.0.0.0/8"]
+    tool = WebFetchTool(
+        max_chars=10000,
+        timeout=10,
+        allow_private_resolution=True,
+        allowed_private_hosts=lambda: list(live_hosts),
+        resolver=lambda _host: next(answers),
+        gateway_endpoint_config=GatewayEndpointConfig(configured_port=9000),
+    )
+    port = server.server_address[1]
+    result = _execute_with_temporary_tool_context(
+        tool,
+        workspace_roots=(),
+        allowed_private_hosts=("192.168.1.10",),
+        allow_private_resolution=None,
+        callback=lambda: tool.execute(
+            {
+                "urls": [
+                    f"http://rebind.corp.local:{port}/page",
+                    f"http://rebind.corp.local:{port}/page2",
+                ],
+                "mode": "extract",
+            }
+        ),
+    )
+    assert result.result_envelope["failures"][-1]["error_code"] == "NETWORK_DNS_REBINDING_BLOCKED"
+    live_hosts.clear()
+    assert tool.allowed_private_hosts == ()

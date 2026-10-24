@@ -431,3 +431,25 @@ def test_unavailable_gateway_local_priority_is_order_independent(answers, port):
         local_address_probe=lambda _ip: None,
     ))
     assert decision.finding_codes == ("NETWORK_GATEWAY_PORT_UNAVAILABLE",)
+
+
+# LLM: 仅识别标准IPv6嵌入IPv4前缀（::ffff:0:0/96、64:ff9b::/96、64:ff9b:1::/48、2002::/16），普通前缀不得因低32位误判回环。
+# 函数用途: 覆盖IPv6转换前缀的私网/元数据拦截与非转换前缀的回环误判防护。
+def test_ipv6_transition_prefixes_and_non_transition_low32_boundaries():
+    from agent_py_agent.agent.contracts.gates.network_safety import (
+        _ipv4_projection_candidates,
+        _is_loopback_or_unspecified_ip,
+    )
+
+    assert _is_loopback_or_unspecified_ip("2001:db8::7f00:1") is False
+    assert _ipv4_projection_candidates((0, 0, 0, 0, 0, 0, 0, 0))[-1][0] is False
+    assert _ipv4_projection_candidates((0, 0, 0, 0, 0, 0, 0, 1))[-1][0] is False
+    for addr in ("64:ff9b::a00:1", "64:ff9b:1::c0a8:101", "2002:a00:1::"):
+        blocked = evaluate_network_safety_gate(_facts(f"http://[{addr}]:8080/", FakeResolver([addr])))
+        assert not blocked.allowed
+        assert blocked.finding_codes == ("NETWORK_PRIVATE_HOST_BLOCKED",)
+        allowed = evaluate_network_safety_gate(_facts(
+            f"http://[{addr}]:8080/", FakeResolver([addr]),
+            allowed_private_hosts=("64:ff9b::/96", "64:ff9b:1::/48", "2002:a00::/24"),
+        ))
+        assert allowed.allowed is True

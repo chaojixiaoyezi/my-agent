@@ -117,6 +117,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
     thinking_flush_chars: int = 256
     thinking_flush_interval_seconds: float = 0.25
     _thinking_buffer: list[str] = field(default_factory=list, init=False, repr=False)
+    _thinking_concurrent_buffer: list[str] = field(default_factory=list, init=False, repr=False)
+    _thinking_draining: bool = field(default=False, init=False, repr=False)
+    _thinking_publishing_tid: int | None = field(default=None, init=False, repr=False)
+    _deferred_after_thinking: list[tuple[dict[str, object], Callable[[], bool] | None]] = field(default_factory=list, init=False, repr=False)
     _thinking_buffer_chars: int = field(default=0, init=False)
     _last_thinking_flush_at: float = field(default=0.0, init=False)
     _thinking_emitted: bool = field(default=False, init=False)
@@ -136,11 +140,14 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def __call__(self, text: str) -> None:
         self.write(text)
 
-    # LLM: 非thinking事件先排空原思考缓冲；thinking_delta本身不再递归flush，原净化及逐出口谓词保持。
+    # LLM: 非thinking事件先排空已闭合思考缓冲（保留未闭合脱敏前缀）并在思考发布期间排队，防止普通事件越序。
     # 函数用途: 保思考先于后续事件发布，再共用原脱敏、落盘与实时展示出口。
     def _write_event(self, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
         if event.get("kind") != "thinking_delta":
-            self.flush_thinking_delta()
+            self.flush_thinking_delta(final=False)
+            if self._thinking_publishing_tid is not None and self._thinking_publishing_tid != threading.get_ident():
+                self._deferred_after_thinking.append((dict(event), still_current))
+                return
         _publish_writer_event(self, event, still_current=still_current)
 
     # LLM: 保留原sink方法消费未提交raw，防止ToolBoundaryChunkFilter退回write后公开正文；不保存或发布，数字计量仍走原write_model_metrics。
@@ -256,33 +263,24 @@ class BufferedChunkStreamWriter(StreamLiveness):
         if _stream_flush_due(text, self._buffer_chars, self._last_flush_at, self.flush_chars, self.flush_interval_seconds):
             self.flush()
 
-    # LLM: 无宿主文本也须排空思考；正文仍由同call commit提交，flush不授raw正文公开资格。
-    # 函数用途: 先排空思考再刷新运行过程，保证close及工具/审批边界不漏尾部。
+    # LLM: 无宿主文本也须排空已闭合思考；正文仍由同call commit提交，flush不授raw正文公开资格。
+    # 函数用途: 先排空思考再刷新运行过程，保证工具/审批边界不漏已闭合思考且不提前拆碎脱敏前缀。
     def flush(self) -> None:
-        self.flush_thinking_delta()
+        self.flush_thinking_delta(final=False)
         if not self._buffer:
             return
-        text = "".join(self._buffer)
-        self._buffer.clear()
-        self._buffer_chars = 0
-        self._last_flush_at = time.monotonic()
-        self._write_event(
-            {
-                "kind": "runtime_progress",
-                "text": text,
-                "verbose_level": self._verbose_level,
-            },
-        )
+        text, _ = "".join(self._buffer), self._buffer.clear()
+        self._buffer_chars, self._last_flush_at = 0, time.monotonic()
+        self._write_event({"kind": "runtime_progress", "text": text, "verbose_level": self._verbose_level})
 
     # LLM: rich transcript 可保留已脱敏的 output/display；真实 tool start 先
     # 清 provider 参数临时行。普通客户端继续按 verbose 合同裁剪，display 一律不外发。
     # 函数用途: 在工具边界收起参数进度并发布原结构化状态，模型说明沿此前的sealed-call提交。
     def write_progress(self, event: dict[str, object], legacy_text: str) -> None:
         try:
-            observed_round = int(event.get("round") or 0)
+            self._observed_tool_rounds = max(self._observed_tool_rounds, int(event.get("round") or 0))
         except (TypeError, ValueError):
-            observed_round = 0
-        self._observed_tool_rounds = max(self._observed_tool_rounds, observed_round)
+            pass
         self.flush()
         if event.get("phase") == "started":
             self._reset_tool_input_progress()
@@ -291,14 +289,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
             progress.pop("display", None)
         if not self.rich_transcript and self._verbose_level != "full":
             progress.pop("output", None)
-        self._write_event(
-            {
-                "kind": "tool_progress",
-                "text": legacy_text,
-                "verbose_level": self._verbose_level,
-                "progress": progress,
-            },
-        )
+        self._write_event({"kind": "tool_progress", "text": legacy_text, "verbose_level": self._verbose_level, "progress": progress})
 
     # LLM: 完整思考先排空增量并重置分段首块；全量净化及owner/thread归档沿原thinking_event，不改变模型状态。
     # 函数用途: 排空流式思考后发布完整公开思考和引用，不丢尾部或改变原预览限制。
@@ -323,15 +314,17 @@ class BufferedChunkStreamWriter(StreamLiveness):
             project_host_paths_for_channel(raw, self.delivery_channel),
             self._identifier_redactions, channel=self.delivery_channel,
         )
-        if not content and not self._thinking_buffer:
+        if not content and not self._thinking_buffer and not self._thinking_concurrent_buffer:
+            return
+        if self._thinking_draining:
+            self._thinking_concurrent_buffer.append(raw)
+            self._thinking_buffer_chars += len(content)
             return
         if not self._thinking_emitted:
             combined, _ = "".join(self._thinking_buffer) + raw, self._thinking_buffer.clear()
             self._thinking_buffer_chars = 0
-            first_text = drain_thinking_delta_text(self, combined, final=False)
-            if first_text:
-                self._thinking_emitted = True
-                self._last_thinking_flush_at = time.monotonic()
+            if first_text := drain_thinking_delta_text(self, combined, final=False):
+                self._thinking_emitted, self._last_thinking_flush_at = True, time.monotonic()
                 self._write_event({"kind": "thinking_delta", "text": first_text})
             return
         self._thinking_buffer.append(raw)
@@ -344,20 +337,31 @@ class BufferedChunkStreamWriter(StreamLiveness):
                 self, lambda: _stream_flush_due("", self._thinking_buffer_chars, self._last_thinking_flush_at,
                                                 self.thinking_flush_chars, self.thinking_flush_interval_seconds))
 
-    # LLM: 发布前先更新时间并在单表达式内取走清零buffer，避免并发丢字、非thinking越序及_write_event重入。
+    # LLM: 发布前先更新时间并用draining暂存并发追加，发布期间延迟跨线程非thinking事件，避免并发丢字与越序。
     # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
     def flush_thinking_delta(self, *, final: bool = True) -> None:
         cancel_thinking_flush_timer(self)
-        if not self._thinking_buffer:
+        if not self._thinking_buffer and not self._thinking_concurrent_buffer:
             return
         self._last_thinking_flush_at = time.monotonic()
-        if not self._thinking_buffer:
+        if not self._thinking_buffer and not self._thinking_concurrent_buffer:
             return
+        self._thinking_draining = True
         raw_joined, _ = "".join(self._thinking_buffer), self._thinking_buffer.clear()
-        self._thinking_buffer_chars = 0
-        content = drain_thinking_delta_text(self, raw_joined, final=final)
-        if content:
-            self._write_event({"kind": "thinking_delta", "text": content})
+        self._thinking_draining, self._thinking_buffer_chars = False, 0
+        if self._thinking_concurrent_buffer:
+            self._thinking_buffer.extend(self._thinking_concurrent_buffer)
+            self._thinking_concurrent_buffer.clear()
+            self._thinking_buffer_chars = sum(len(part) for part in self._thinking_buffer)
+        if content := drain_thinking_delta_text(self, raw_joined, final=final):
+            self._thinking_publishing_tid = threading.get_ident()
+            try:
+                self._write_event({"kind": "thinking_delta", "text": content})
+            finally:
+                self._thinking_publishing_tid = None
+                while self._deferred_after_thinking:
+                    deferred_event, deferred_current = self._deferred_after_thinking.pop(0)
+                    _publish_writer_event(self, deferred_event, still_current=deferred_current)
 
     # LLM: 该出口只接受共享白名单后的累计字符计数；raw partial JSON、路径、
     # 命令和凭据不得写入 chunk 文件，普通非 rich 客户端保持完全不可见。
@@ -492,6 +496,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # 函数用途: 收口显示并拒绝迟到等待事件，不把流关闭当作工具或任务成功。
     def close(self) -> None:
         self._liveness_closed = True
+        self.flush_thinking_delta(final=True)
         self.flush()
         for sink in (self.main_activity_sink, self.transcript_sink):
             closer = getattr(sink, "close", None)
@@ -504,6 +509,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # LLM: 在final持久化前刷新宿主事件并准备已确认显示快照，不因收口flush确认raw；失败不改变模型结果。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替。
     def prepare_display_history(self) -> dict:
+        self.flush_thinking_delta(final=True)
         self.flush()
         prepare = getattr(self.transcript_sink, "prepare_final", None)
         if not callable(prepare):
