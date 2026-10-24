@@ -1,5 +1,5 @@
-# LLM: 归档读取以 host 身份和逻辑 ref 为权限源；预算预留与结算必须原子化。
-# 模块用途: 分页读取大工具输出，并限制同一个 run 的并发读取总量。
+# LLM: 归档读取以host身份和逻辑ref为权限源；全读有效预算只准备一次，有限读先预留，所有已预留分支finally结算。
+# 模块用途: 分页读取大工具输出，避免预算二次查找，并限制同run的并发读取总量。
 from __future__ import annotations
 
 """tool implementation for explicit externalized artifact reads."""
@@ -13,8 +13,10 @@ from typing import Any
 
 from ..memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from ..memory_archive.artifact.reader import (
+    PreparedToolOutputArtifactRead,
     ReadToolOutputArtifactRequest,
     estimate_tool_output_artifact_size,
+    prepare_tool_output_artifact_read,
     read_tool_output_artifact,
 )
 from ..settings.defaults import default_config_int
@@ -117,10 +119,8 @@ def _read_artifact_runtime_policy(default_read_chars: int) -> ToolRuntimePolicy:
     )
 
 
-# LLM: This is the sole model-facing reader for archived tool output. Host paths and run identity
-# stay inside the reader/audit layer; the model receives only a logical ref, content window, and
-# an exact continuation call when more suffix content exists.
-# 类用途: 让模型按稳定引用分段读取大工具输出，不暴露内部文件路径或运行身份。
+# LLM: 唯一模型归档读取入口；请求局部prepared只在宿主预算/read之间共享，路径和身份不进入模型投影或Schema。
+# 类用途: 按稳定引用分段读取大输出，保留预算预留/结算和安全续读合同。
 class ReadArtifactTool(BaseTool):
     model_spec = ToolModelSpec(
         name="read_artifact",
@@ -189,17 +189,19 @@ class ReadArtifactTool(BaseTool):
             ),
         )
 
-    # LLM: Execute against the host-only reader, then remove filesystem/scope fields before the
-    # output enters ToolResult. Keep the full payload available only to direct CLI/audit callers.
-    # 函数用途: 读取一段归档正文并只返回模型需要的逻辑引用、窗口、续读提示和内容。
+    # LLM: 有限读先reserve；全读仅有效预算prepare一次供估算/read复用；宿主prepared不进入Schema，finally释放pending。
+    # 函数用途: 单次查找读取归档并结算实际字符，只向模型投影逻辑引用和窗口。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         request = _read_request_from_params(
             self.root, params, default_read_chars=self.default_read_chars
         )
+        prepared = None
+        if request.max_chars <= 0 and self.read_budget.max_chars > 0 and str(request.run_id or "").strip():
+            prepared = prepare_tool_output_artifact_read(request)
         reservation, budget_error = self.read_budget.reserve(
             ArtifactReadBudgetRequest(
                 run_id=request.run_id,
-                requested_chars=_budget_requested_chars(request),
+                requested_chars=_budget_requested_chars(request, prepared=prepared),
             )
         )
         if budget_error:
@@ -208,7 +210,7 @@ class ReadArtifactTool(BaseTool):
             )
         charged = 0
         try:
-            payload = read_tool_output_artifact(request)
+            payload = read_tool_output_artifact(request, prepared=prepared) if prepared is not None else read_tool_output_artifact(request)
             ok = payload.get("ok") is True
             if ok:
                 charged = int(payload.get("content_chars") or 0)
@@ -299,6 +301,8 @@ def _read_request_from_params(
     )
 
 
+# LLM: 宿主内部根参数是认证边界，保留原路径给nofollow；规范化只在reader的定位投影中进行，不能提前resolve链接目标。
+# 函数用途: 选择宿主指定的归档根，并保留根symlink的可检测性。
 def _artifact_read_root(root: Path, params: dict[str, Any]) -> Path:
     artifact_root = str(
         params.get("__artifact_read_root") or params.get("__task_work_dir") or ""
@@ -306,7 +310,7 @@ def _artifact_read_root(root: Path, params: dict[str, Any]) -> Path:
     if not artifact_root:
         return root
     try:
-        return Path(artifact_root).expanduser().resolve(strict=False)
+        return Path(artifact_root).expanduser()
     except OSError:
         return root
 
@@ -332,11 +336,15 @@ def _config_int(key: str, value: int | None) -> int:
     return default_config_int(key, minimum=0)
 
 
-def _budget_requested_chars(request: ReadToolOutputArtifactRequest) -> int:
+# LLM: 无prepared的全读代表无有效计费预算，不能为reserve(0)额外查索引；有限读始终按指定字符预留。
+# 函数用途: 在不增加查找的前提下计算预留字符数，真正费用在finally按返回字符结算。
+def _budget_requested_chars(request: ReadToolOutputArtifactRequest, *, prepared: PreparedToolOutputArtifactRead | None = None) -> int:
     requested = max(0, int(request.max_chars or 0))
     if requested > 0:
         return requested
-    estimated = estimate_tool_output_artifact_size(request)
+    if prepared is None:
+        return 0
+    estimated = estimate_tool_output_artifact_size(request, prepared=prepared)
     return 0 if estimated is None else estimated
 
 
