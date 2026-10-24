@@ -1,3 +1,5 @@
+# LLM: 平台可选信号及诊断API只在测试内模拟；文本IO显式UTF-8，不用跳过Windows合同或向真实PID发信号。
+# 模块用途: 回归监护器健康、代际强停和跨平台诊断退化行为。
 """supervisor 模块测试。
 
 测试 supervisor.py 中的看门狗监控、自动重启、心跳检测功能。
@@ -22,11 +24,11 @@ from agent_py_agent.agent.gateway_parts import supervisor as sv
 from agent_py_agent.agent.gateway_parts.daemon_control import RunningPidReport
 
 
-# LLM: 监护状态入口现在复用正式CLI配置解析；这里显式补真实YAML，不给生产增加dummy路径兼容。
+# LLM: 监护状态入口复用正式CLI配置解析；真实YAML固定UTF-8，不给生产增加dummy路径兼容。
 # 函数用途: 给原PID/stop fake创建无网络宿主配置，原刺激及断言保持。
 def _public_supervisor_config(tmp_path):
     path = tmp_path / "agent.yaml"
-    path.write_text(f'model_backend: echo\nmy_agent_home: "{tmp_path / "home"}"\ngateway_worker_process_count: 0\n')
+    path.write_text(f'model_backend: echo\nmy_agent_home: "{tmp_path / "home"}"\ngateway_worker_process_count: 0\n', encoding="utf-8")
     return str(path)
 
 
@@ -232,17 +234,19 @@ def test_is_gateway_healthy_no_pid(mock_get_pid, supervisor_instance):
     assert result is False
 
 
+# LLM: 使用UTF-8真实状态文件与替身身份检查，不能把有心跳本身当作就绪。
+# 函数用途: 验证同代状态与新鲜dispatcher心跳同时成立时健康。
 def test_is_gateway_healthy_with_heartbeat(supervisor_instance, tmp_path):
     """测试有心跳且未过期时网关健康。"""
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
     paths = gateway_paths_from_root(tmp_path)
     now = time.time()
     identity = {"host_id": "test-host", "pid": 12345, "start_time": "12345"}
-    paths.pid.write_text(json.dumps({**identity, "kind": "my-agent-gateway"}))
+    paths.pid.write_text(json.dumps({**identity, "kind": "my-agent-gateway"}), encoding="utf-8")
     paths.state.write_text(json.dumps({"pid": 12345, "process_identity": identity,
-                                      "started_at": now - 20, "status": "running"}))
+                                      "started_at": now - 20, "status": "running"}), encoding="utf-8")
     paths.heartbeat.write_text(json.dumps({"pid": 12345, "started_at": now - 20,
-        "updated_at": now - 10, "status": "running", "dispatcher_alive": True, "dispatcher_state": "running"}))
+        "updated_at": now - 10, "status": "running", "dispatcher_alive": True, "dispatcher_state": "running"}), encoding="utf-8")
     from types import SimpleNamespace
 
     supervisor_instance._paths = paths
@@ -466,21 +470,23 @@ def test_write_pid_file(tmp_path):
     assert pid_path.read_text(encoding="utf-8") == "54321"
 
 
-# LLM: 真文件及原Supervisor执行链，所有信号/等待均替身；不操作真实Gateway或模型。
+# LLM: 真文件固定UTF-8，POSIX诊断能力仅在夹具补齐；信号/等待均替身，保留真实kill_pid供缺信号回归复用，不操作真实Gateway。
 # 函数用途: 构造绑定原代身份的停止与启动测试环境。
 @pytest.fixture
 def incident_gateway(tmp_path, monkeypatch):
     from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 
+    monkeypatch.setattr(signal, "SIGUSR1", getattr(signal, "SIGUSR1", 30), raising=False)
     paths = gateway_paths_from_root(tmp_path)
     identity = {"host_id": "test-host", "pid": 12345, "start_time": "original"}
-    paths.pid.write_text(json.dumps({**identity, "kind": "my-agent-gateway"}))
-    paths.stop_request.write_text(json.dumps({"target_process": identity}))
-    paths.state.write_text(json.dumps({"pid": 12345, "process_identity": identity}))
+    paths.pid.write_text(json.dumps({**identity, "kind": "my-agent-gateway"}), encoding="utf-8")
+    paths.stop_request.write_text(json.dumps({"target_process": identity}), encoding="utf-8")
+    paths.state.write_text(json.dumps({"pid": 12345, "process_identity": identity}), encoding="utf-8")
     agent = SimpleNamespace(config=SimpleNamespace(config_path="test.yaml", gateway_worker_process_count=0))
     supervisor = sv.GatewaySupervisor("test.yaml", agent=agent)
     supervisor._paths = paths
     events = []
+    real_kill_pid = sv.kill_pid
     monkeypatch.setattr(sv, "get_running_pid_report", lambda *a, **k: RunningPidReport(12345))
     monkeypatch.setattr(sv, "process_identity_is_live", lambda value: value == identity)
     monkeypatch.setattr(sv, "_write_supervisor_stop_request", lambda *a: {"target_process": identity})
@@ -488,7 +494,40 @@ def incident_gateway(tmp_path, monkeypatch):
     monkeypatch.setattr(sv, "kill_pid", lambda pid: events.append(("KILL", pid)), raising=False)
     monkeypatch.setattr(sv.os, "kill", lambda pid, sig: events.append((sig, pid)))
     monkeypatch.setattr(supervisor, "_log_warn", lambda text: events.append(("WARN", text)))
-    return SimpleNamespace(supervisor=supervisor, paths=paths, identity=identity, events=events)
+    return SimpleNamespace(supervisor=supervisor, paths=paths, identity=identity, events=events, real_kill_pid=real_kill_pid)
+
+
+# LLM: 删除可选POSIX能力而非跳过；恢复真实kill_pid但os.kill仍由夹具记录，不向真实PID发信号。
+# 函数用途: 验证Windows式缺信号环境能安装/恢复停止处理，并按TERM到强停后清理旧代。
+def test_incident_windows_without_sigusr1_or_faulthandler_register(incident_gateway, monkeypatch):
+    import faulthandler
+
+    from agent_py_agent.cli import gateway_process as gp
+
+    case = incident_gateway
+    for name in ("SIGUSR1", "SIGKILL"):
+        monkeypatch.delattr(signal, name, raising=False)
+    for name in ("register", "unregister"):
+        monkeypatch.delattr(faulthandler, name, raising=False)
+    handlers = []
+    monkeypatch.setattr(signal, "getsignal", lambda _: "previous")
+    monkeypatch.setattr(signal, "signal", lambda *args: handlers.append(args))
+    monkeypatch.setattr(faulthandler, "enable", lambda **kwargs: None)
+    previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
+    assert set(previous) == {signal.SIGTERM, signal.SIGINT}
+    assert not previous.diagnostic_published
+    assert json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1") is not True
+    gp._restore_gateway_signal_handlers(previous)
+    assert handlers[-2:] == [(signal.SIGTERM, "previous"), (signal.SIGINT, "previous")]
+    assert json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1") is not True
+    monkeypatch.setattr(sv, "kill_pid", case.real_kill_pid)
+    wait = MagicMock(side_effect=[False, False, True])
+    monkeypatch.setattr(sv, "_wait_gateway_exit", wait)
+    assert sv.stop_gateway(case.supervisor)
+    assert [call.args[1:] for call in wait.call_args_list] == [
+        (12345, case.identity, 20.0), (12345, case.identity, 5), (12345, case.identity, 5)]
+    assert case.events.index(("TERM", 12345)) < case.events.index((signal.SIGTERM, 12345))
+    assert not case.paths.pid.exists() and not case.paths.stop_request.exists()
 
 
 # LLM: 只在两个等待失败且原代仍活时允许Count0强停；三次等待沿同一identity。
@@ -547,14 +586,14 @@ def test_incident_stop_preserves_successor_files(incident_gateway, monkeypatch):
     def wait(*args):
         result = next(waits)
         if result:
-            case.paths.pid.write_text(json.dumps({**replacement, "kind": "my-agent-gateway"}))
-            case.paths.stop_request.write_text(json.dumps({"target_process": replacement}))
+            case.paths.pid.write_text(json.dumps({**replacement, "kind": "my-agent-gateway"}), encoding="utf-8")
+            case.paths.stop_request.write_text(json.dumps({"target_process": replacement}), encoding="utf-8")
         return result
 
     monkeypatch.setattr(sv, "_wait_gateway_exit", wait)
     assert sv.stop_gateway(case.supervisor)
-    assert json.loads(case.paths.pid.read_text())["start_time"] == "successor"
-    assert json.loads(case.paths.stop_request.read_text())["target_process"] == replacement
+    assert json.loads(case.paths.pid.read_text(encoding="utf-8"))["start_time"] == "successor"
+    assert json.loads(case.paths.stop_request.read_text(encoding="utf-8"))["target_process"] == replacement
 
 
 # LLM: 使用真实未就绪健康链；只替换时间/OS和末次ready，不启动服务。
@@ -624,18 +663,18 @@ def test_incident_gateway_registers_and_restores_diagnostic_signal(incident_gate
     monkeypatch.setattr(signal, "getsignal", lambda _: "previous")
     monkeypatch.setattr(signal, "signal", lambda *a: None)
     monkeypatch.setattr(faulthandler, "enable", lambda **k: events.append(("enable", k)))
-    monkeypatch.setattr(faulthandler, "register", lambda sig, **k: events.append(("register", sig, k)))
-    monkeypatch.setattr(faulthandler, "unregister", lambda sig: events.append(("unregister", sig)))
+    monkeypatch.setattr(faulthandler, "register", lambda sig, **k: events.append(("register", sig, k)), raising=False)
+    monkeypatch.setattr(faulthandler, "unregister", lambda sig: events.append(("unregister", sig)), raising=False)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
     assert ("enable", {"all_threads": True}) in events
     if hasattr(signal, "SIGUSR1"):
         assert any(e[0] == "register" and e[1] == signal.SIGUSR1 and e[2] == {
             "file": sys.stderr, "all_threads": True, "chain": False} for e in events)
-        assert json.loads(case.paths.state.read_text())["diagnostic_sigusr1"] is True
+        assert json.loads(case.paths.state.read_text(encoding="utf-8"))["diagnostic_sigusr1"] is True
     gp._restore_gateway_signal_handlers(previous)
     if hasattr(signal, "SIGUSR1"):
         assert ("unregister", signal.SIGUSR1) in events
-        assert json.loads(case.paths.state.read_text())["diagnostic_sigusr1"] is False
+        assert json.loads(case.paths.state.read_text(encoding="utf-8"))["diagnostic_sigusr1"] is False
 
 
 # LLM: AST覆盖本文件所有state写点，避免仅修running但终态仍截断；不把语法存在当业务通过。
@@ -645,7 +684,7 @@ def test_incident_gateway_state_never_uses_truncating_writer():
 
     from agent_py_agent.cli import gateway_process as gp
 
-    tree = ast.parse(Path(gp.__file__).read_text())
+    tree = ast.parse(Path(gp.__file__).read_text(encoding="utf-8"))
     bad = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call)
            and isinstance(node.func, ast.Name) and node.func.id == "write_json_file"
            and node.args and isinstance(node.args[0], ast.Attribute) and node.args[0].attr == "state"]
@@ -658,16 +697,16 @@ def test_incident_stop_captures_bounded_linux_diagnostics_before_term(incident_g
     case = incident_gateway
     proc = tmp_path / "proc-fixture"
     proc.mkdir()
-    (proc / "status").write_text("State:\tS\nVmRSS:\t1234 kB\nVmSwap:\t0 kB\nThreads:\t20\n")
-    (proc / "wchan").write_text("futex_wait")
+    (proc / "status").write_text("State:\tS\nVmRSS:\t1234 kB\nVmSwap:\t0 kB\nThreads:\t20\n", encoding="utf-8")
+    (proc / "wchan").write_text("futex_wait", encoding="utf-8")
     for tid in range(20):
         task = proc / "task" / str(tid)
         task.mkdir(parents=True)
-        (task / "wchan").write_text("futex_wait" * 100)
+        (task / "wchan").write_text("futex_wait" * 100, encoding="utf-8")
     real_path = Path
     monkeypatch.setattr(sv, "Path", lambda name: proc if str(name) == "/proc/12345" else real_path(name))
     monkeypatch.setattr(sv.sys, "platform", "linux")
-    case.paths.state.write_text(json.dumps({"pid": 12345, "process_identity": case.identity, "diagnostic_sigusr1": True}))
+    case.paths.state.write_text(json.dumps({"pid": 12345, "process_identity": case.identity, "diagnostic_sigusr1": True}), encoding="utf-8")
     waits = iter([False, True])
     monkeypatch.setattr(sv, "_wait_gateway_exit", lambda *a: next(waits))
     assert sv.stop_gateway(case.supervisor)
@@ -685,7 +724,7 @@ def test_incident_stop_captures_bounded_linux_diagnostics_before_term(incident_g
 @pytest.mark.parametrize("observed", [False, None])
 def test_incident_diagnostics_refuses_signal_after_identity_changes(incident_gateway, monkeypatch, observed):
     case = incident_gateway
-    case.paths.state.write_text(json.dumps({"pid": 12345, "process_identity": case.identity, "diagnostic_sigusr1": True}))
+    case.paths.state.write_text(json.dumps({"pid": 12345, "process_identity": case.identity, "diagnostic_sigusr1": True}), encoding="utf-8")
     checks = iter([True, True, observed])
     monkeypatch.setattr(sv, "process_identity_is_live", lambda _: next(checks))
     monkeypatch.setattr(sv, "_wait_gateway_exit", lambda *a: False)
@@ -704,7 +743,7 @@ def test_incident_diagnostics_never_blindly_signals_legacy_gateway(incident_gate
         state.pop("diagnostic_sigusr1")
     elif fault == "other_identity":
         state["process_identity"] = {**case.identity, "start_time": "other"}
-    case.paths.state.write_text(json.dumps(state))
+    case.paths.state.write_text(json.dumps(state), encoding="utf-8")
     waits = iter([False, True])
     monkeypatch.setattr(sv, "_wait_gateway_exit", lambda *a: next(waits))
     assert sv.stop_gateway(case.supervisor)
@@ -732,12 +771,12 @@ def test_incident_fault_handler_errors_preserve_stop_handlers(incident_gateway, 
             raise error("synthetic diagnostic failure")
 
     monkeypatch.setattr(faulthandler, "enable", lambda **k: maybe_fail("enable", **k))
-    monkeypatch.setattr(faulthandler, "register", lambda *a, **k: maybe_fail("register", *a, **k))
-    monkeypatch.setattr(faulthandler, "unregister", lambda *a: maybe_fail("unregister", *a))
+    monkeypatch.setattr(faulthandler, "register", lambda *a, **k: maybe_fail("register", *a, **k), raising=False)
+    monkeypatch.setattr(faulthandler, "unregister", lambda *a: maybe_fail("unregister", *a), raising=False)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
     assert signal.SIGTERM in previous and signal.SIGINT in previous
     if operation == "register":
-        assert json.loads(case.paths.state.read_text()).get("diagnostic_sigusr1") is not True
+        assert json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1") is not True
     gp._restore_gateway_signal_handlers(previous)
     assert any(name == operation for name, _ in calls)
 
@@ -766,15 +805,15 @@ def test_incident_termination_retains_diagnostics_until_cleanup_finishes(inciden
     monkeypatch.setattr(signal, "getsignal", lambda _: signal.SIG_DFL)
     monkeypatch.setattr(signal, "signal", lambda *a: None)
     monkeypatch.setattr(gp.faulthandler, "enable", lambda **k: None)
-    monkeypatch.setattr(gp.faulthandler, "register", lambda *a, **k: None)
-    monkeypatch.setattr(gp.faulthandler, "unregister", lambda *a: None)
+    monkeypatch.setattr(gp.faulthandler, "register", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(gp.faulthandler, "unregister", lambda *a: None, raising=False)
     monkeypatch.setattr(gp, "log_gateway_event", lambda *a: None)
     context = SimpleNamespace(process_identity=case.identity, process_started_at=1, control_plane=None)
     previous = gp._install_gateway_signal_handlers(case.paths, case.identity)
     try:
         if not same_generation:
             case.paths.state.write_text(json.dumps({"pid": 12345, "process_identity": {
-                **case.identity, "start_time": "other"}, "diagnostic_sigusr1": True}))
+                **case.identity, "start_time": "other"}, "diagnostic_sigusr1": True}), encoding="utf-8")
         if mode == "normal":
             termination = gp._GatewayServiceTermination("stopped", "stop_requested", "test", "test", 0)
             gp._record_gateway_service_termination(case.paths, object(), 12345, termination, context=context)
@@ -782,7 +821,7 @@ def test_incident_termination_retains_diagnostics_until_cleanup_finishes(inciden
             gp._record_gateway_run_interrupted(case.paths, object(), 12345, context=context)
         else:
             gp._record_gateway_run_failed(case.paths, object(), 12345, RuntimeError("test"), context=context)
-        assert bool(json.loads(case.paths.state.read_text()).get("diagnostic_sigusr1")) is same_generation
+        assert bool(json.loads(case.paths.state.read_text(encoding="utf-8")).get("diagnostic_sigusr1")) is same_generation
         sv._capture_unresponsive_gateway_diagnostics(case.supervisor, 12345, case.identity)
         assert ((signal.SIGUSR1, 12345) in case.events) is same_generation
     finally:
