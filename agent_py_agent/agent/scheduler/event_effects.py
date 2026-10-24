@@ -2,6 +2,7 @@
 # 模块用途: 让事件退代与真正开始模型、投递在同一原CAS排序，不持原store锁跨慢I/O或复活归档run。
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -19,7 +20,7 @@ MAX_ACTIVE_EVENT_EFFECTS = 64
 _HISTORY_REPORT_CACHE_MAX_PATHS = 8
 # 调度事件历史报告缓存允许占用的最大总字节数。
 _HISTORY_REPORT_CACHE_MAX_BYTES = 16 * 1024 * 1024
-_HISTORY_REPORT_CACHE: OrderedDict[str, tuple[tuple[int, ...], tuple[dict, ...]]] = OrderedDict()
+_HISTORY_REPORT_CACHE: OrderedDict[str, tuple[tuple[int, ...], str, tuple[dict, ...]]] = OrderedDict()
 _HISTORY_REPORT_CACHE_LOCK = threading.Lock()
 
 
@@ -33,21 +34,37 @@ def _history_file_stamp(path: Path) -> tuple[int, int, int, int, int] | None:
     return (info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns)
 
 
-# LLM: 只缓存无坏行且读前后同版的原始历史投影；调用方不得修改records，公开返回必须复制，owner/schema仍逐次校验。
+# LLM: 读取历史文件尾部最多4KiB计算blake2b摘要，覆盖Linux粗糙ctime时钟周期内的同尺寸改写。
+# 函数用途: 生成历史文件尾部字节锚点摘要，短读或异常返回None触发全量重读。
+def _history_tail_digest(path: Path, size: int) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            start = max(0, size - 4096)
+            handle.seek(start)
+            data = handle.read(size - start)
+    except OSError:
+        return None
+    return hashlib.blake2b(data, digest_size=16).hexdigest() if len(data) == size - start else None
+
+
+# LLM: 只缓存无坏行且读前后同版、同尾部摘要的原始历史投影；调用方不得修改records，公开返回必须复制，owner/schema仍逐次校验。
 # 函数用途: 为副作用、历史列表和取消查询复用最多8路径/16MiB原始字节的JSONL解析。
 def _cached_history_report(path: Path, *, context: str) -> JsonlObjectsReadReport:
     key, stamp = str(path), _history_file_stamp(path)
+    tail_digest = _history_tail_digest(path, stamp[1]) if stamp is not None else None
     with _HISTORY_REPORT_CACHE_LOCK:
         cached = _HISTORY_REPORT_CACHE.get(key)
-        if stamp is not None and cached is not None and cached[0] == stamp:
+        if stamp is not None and tail_digest is not None and cached is not None and cached[0] == stamp and cached[1] == tail_digest:
             _HISTORY_REPORT_CACHE.move_to_end(key)
-            return JsonlObjectsReadReport(list(cached[1]), [])
+            return JsonlObjectsReadReport(list(cached[2]), [])
         _HISTORY_REPORT_CACHE.pop(key, None)
     report = read_jsonl_objects_report(path, context=context)
-    if (stamp is not None and not report.load_errors and stamp[1] <= _HISTORY_REPORT_CACHE_MAX_BYTES
+    after_digest = _history_tail_digest(path, stamp[1]) if stamp is not None else None
+    if (stamp is not None and after_digest is not None and after_digest == tail_digest
+            and not report.load_errors and stamp[1] <= _HISTORY_REPORT_CACHE_MAX_BYTES
             and _history_file_stamp(path) == stamp):
         with _HISTORY_REPORT_CACHE_LOCK:
-            _HISTORY_REPORT_CACHE[key] = (stamp, tuple(report.records))
+            _HISTORY_REPORT_CACHE[key] = (stamp, after_digest, tuple(report.records))
             _HISTORY_REPORT_CACHE.move_to_end(key)
             while (len(_HISTORY_REPORT_CACHE) > _HISTORY_REPORT_CACHE_MAX_PATHS
                    or sum(row[0][1] for row in _HISTORY_REPORT_CACHE.values()) > _HISTORY_REPORT_CACHE_MAX_BYTES):

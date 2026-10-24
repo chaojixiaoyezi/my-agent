@@ -178,6 +178,19 @@ def _full_history_run_ids(path, stamp):
     return ids, None
 
 
+# LLM: 同尺寸且同粗糙ctime周期内的原地改写仍会改变尾部4KiB锚点；只读取锚点范围校验，异常保守回退。
+# 函数用途: 确认缓存命中的历史文件尾部锚点与换行边界未发生同时间戳改写。
+def _history_anchor_matches(path: Path, cached: _HistoryRunIdsProjection) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return _read_history_prefix_state(handle, cached.offset) == (
+                cached.anchor_digest,
+                cached.complete_line,
+            )
+    except OSError:
+        return False
+
+
 # LLM: 锁只保护有界派生缓存；业务调用仍持原owner事务锁，返回set是私有副本，超限只回退不改变去重。
 # 函数用途: 为历史追加去重复用最多32路径/一百万ID的线程安全增量索引。
 def _cached_history_run_ids(path: Path) -> set[str]:
@@ -185,7 +198,8 @@ def _cached_history_run_ids(path: Path) -> set[str]:
     with _HISTORY_RUN_IDS_CACHE_LOCK:
         stamp = _history_file_stamp(path)
         cached = _HISTORY_RUN_IDS_CACHE.get(key)
-        if cached is not None and stamp is not None and cached.stamp == stamp:
+        if (cached is not None and stamp is not None and cached.stamp == stamp
+                and _history_anchor_matches(path, cached)):
             _HISTORY_RUN_IDS_CACHE.move_to_end(key)
             return set(cached.run_ids)
         _HISTORY_RUN_IDS_CACHE.pop(key, None)
@@ -1692,11 +1706,16 @@ class SchedulerRepository(
         # 目录缺失时逐级按 0700 新建（pbfix 2026-10-04：统一走 nofollow_fs.ensure_private_dir；已存在的目录一律不动）。
         ensure_private_dir(self.root)
 
-    # LLM: 已冻结 dict 且无迁移时只读深复制；首次冻结和显式来源迁移始终委托原 mixin 的锁/CAS/证明校验。
-    # 函数用途: 避免 queued 运行每拍重复准备来源时取得原 owner 变更锁。
+    # LLM: 已冻结 dict 且无迁移时只读深复制；忙碌或首次冻结和显式来源迁移始终委托原 mixin 的锁/CAS/证明校验。
+    # 函数用途: 避免 queued 运行每拍重复准备来源时取得原 owner 变更锁，并发写繁忙时退回加锁路径。
     def prepare_run_context(self, run_id: str, context: dict, *, origin_migration: dict | None = None) -> dict:
         if origin_migration is None:
-            run, _error = self._parse_run(self._store_snapshot()["runs"].get(run_id))
+            try:
+                run, _error = self._parse_run(self._store_snapshot()["runs"].get(run_id))
+            except SchedulerStateError as exc:
+                if exc.error_code != "SCHEDULER_STORE_BUSY":
+                    raise
+                run = None
             if run is not None and isinstance(run.get("execution_context"), dict):
                 return deepcopy(run)
         return super().prepare_run_context(run_id, context, origin_migration=origin_migration)
@@ -2057,10 +2076,15 @@ def _snapshot_due_candidates_exist(repository, *, now: float) -> bool:
     return not ok or any(due_at <= now for due_at, _job_id in keys)
 
 
-# LLM: 只接受主线解析的本 owner 活跃 run；不变的 wake 深复制返回，其他情况仍交原写事务验证。
-# 函数用途: 在取锁前识别相同或空唤醒信号的幂等挂接。
+# LLM: 只接受主线解析的本 owner 活跃 run；不变的 wake 深复制返回，忙碌或其他情况仍交原写事务验证。
+# 函数用途: 在取锁前识别相同或空唤醒信号的幂等挂接，并发写繁忙时退回加锁路径。
 def _attached_wake_snapshot(repository, run_id: str, wake_signal_id: str) -> dict[str, object] | None:
-    run, _error = repository._parse_run(repository._store_snapshot()["runs"].get(str(run_id or "")))
+    try:
+        run, _error = repository._parse_run(repository._store_snapshot()["runs"].get(str(run_id or "")))
+    except SchedulerStateError as exc:
+        if exc.error_code == "SCHEDULER_STORE_BUSY":
+            return None
+        raise
     if run is not None and (not wake_signal_id or str(run.get("wake_signal_id") or "") == wake_signal_id):
         return deepcopy(run)
     return None
