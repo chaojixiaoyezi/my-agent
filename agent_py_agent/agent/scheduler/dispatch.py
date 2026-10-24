@@ -8,7 +8,7 @@ import time
 from .repository import SchedulerNotFoundError
 
 
-# LLM: 原服务唯一入口委托到此；cheap_checks不跳过取消、恢复与事件预留，持久变更与领取仍由原对象负责。
+# LLM: 原服务唯一入口委托到此；job级准入须在prepare/wake前原子提交，拒绝时延后不改活动run，cheap_checks不绕过。
 # 函数用途: 把已就绪的原运行接入同一 Wake，并对已退代事件留下取消终态。
 def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
     from .policy import queue_expired
@@ -22,7 +22,8 @@ def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
     service.repository.reserve_due_runs(now=current, limit=limit, cheap_checks=cheap_checks)
     service.repository.reserve_event_runs(now=current, limit=limit)
     wake_ids: list[str] = []
-    for run in service.repository.queued_runs(now=current, limit=max(1, limit * 2), cheap_checks=cheap_checks):
+    candidate_fn = getattr(service.repository, "dispatchable_queued_runs", service.repository.queued_runs)
+    for run in candidate_fn(now=current, limit=max(1, limit * 2), cheap_checks=cheap_checks):
         if not service.repository.event_run_is_current(run):
             service._fail_without_execution(run, 'EVENT_SOURCE_RETIRED', now=current, status='cancelled')
             continue
@@ -34,6 +35,9 @@ def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
             service._fail_without_execution(run, skill_error, now=current)
             continue
         try:
+            run = service.repository.admit_run_dispatch(str(run["run_id"]), now=current)
+            if run is None:
+                continue
             from .execution import prepare_execution
 
             run = prepare_execution(service, run, now=current)
