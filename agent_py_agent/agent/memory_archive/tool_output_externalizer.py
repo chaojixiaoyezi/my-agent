@@ -1,6 +1,6 @@
 
 # LLM: 工具输出归档保留 canonical 调用来源；attempt/turn 只取执行方传入事实，不由 request/scoped 别名推导。
-# 模块用途: 保存大小输出及恢复索引，并把执行身份完整传给后续 Compact 过滤。
+# 模块用途: 小正文兼容内联JSON，大正文先私有原子写UTF-8 blob再登记包装和唯一索引。
 
 from __future__ import annotations
 
@@ -20,13 +20,16 @@ tool-context reducer, compact and recovery.
 
 import hashlib
 import json
+import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..common.json_io import append_private_text, write_private_text_file_atomic
+from ..common.json_io import append_private_text, locked_json_path, write_private_text_file_atomic
 from ..common.log_redaction import redact_sensitive_value
+from ..common.nofollow_fs import ensure_private_dir
 from ..common.path_segments import safe_path_segment
 from ..common.tool_output_paths import tool_output_root
 from ..settings.defaults import default_agent_config
@@ -49,6 +52,9 @@ _TOOL_FAILURE_STAGE_VALUES = frozenset(item.value for item in ToolFailureStage)
 _SAFE_PARAMETER_MAX_DEPTH = 4
 # 外置化时容器参数最多保留的条目数；防止海量条目撑爆外置载荷。
 _SAFE_PARAMETER_MAX_ITEM_COUNT = 20
+# 512KiB以下保留旧包装；大正文按64KiB存块校验，均以UTF-8字节而非字符计。
+_BLOB_SIDECAR_MIN_BYTES = 512 * 1024
+_BLOB_BLOCK_SIZE = 65536
 
 
 # LLM: The request carries the executed call's exact run/attempt/turn identity and two parameter
@@ -235,10 +241,11 @@ def _base_record(request: ExternalizeToolOutputRequest, output: str, digest: str
 
 
 # LLM: Artifact bodies are owner-scoped audit evidence. Persist the actual attempt/turn and both
-# parameter views, then append the same bounded metadata to the canonical index.
-# 函数用途: 把完整大输出、真实调用身份及两套参数写入归档文件和索引。
+# parameter views; >=512KiB writes a private binary sidecar before the canonical JSON/index.
+# 函数用途: 分级保存完整输出，原始字节不重复JSON转义，索引仍只登记包装文件一次。
 def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, digest: str) -> Path:
     path = _artifact_path(request, digest)
+    encoded = output.encode("utf-8")
     created_at = datetime.now(tz=timezone.utc).isoformat()
     payload = {
         "version": TOOL_OUTPUT_ARTIFACT_SCHEMA.version,
@@ -266,14 +273,41 @@ def _write_output_artifact(request: ExternalizeToolOutputRequest, output: str, d
         **_result_envelope_index_metadata(request.result_envelope),
         "source_input": _source_input(request.parameters),
         "sha256": digest,
-        "size_bytes": len(output.encode("utf-8")),
+        "size_bytes": len(encoded),
         "created_at": created_at,
         "content": output,
     }
+    if len(encoded) >= _BLOB_SIDECAR_MIN_BYTES:
+        _write_private_blob_atomic(path.with_suffix(".blob"), encoded)
+        del payload["content"]
+        payload.update({
+            "artifact_format": "blob_v1",
+            "content_blob": f"{path.stem}.blob",
+            "total_chars": len(output),
+            "blob_block_size": _BLOB_BLOCK_SIZE,
+            "blob_block_hashes": [hashlib.sha256(encoded[i:i + _BLOB_BLOCK_SIZE]).hexdigest()
+                                  for i in range(0, len(encoded), _BLOB_BLOCK_SIZE)],
+        })
     # LLM: 外置正文装原始工具输出（可能含会话内容），落盘走私有原子写（0600/0700）；字节格式不变。
     write_private_text_file_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
     _append_index(path, payload)
     return path
+
+
+# LLM: Same private directory/lock convention as JSON; binary mode never translates CRLF, replace publishes only complete bytes.
+# 函数用途: 用0600临时二进制文件原子发布侧文件，失败清理临时文件且不追加索引。
+def _write_private_blob_atomic(path: Path, encoded: bytes) -> None:
+    ensure_private_dir(path.parent)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with locked_json_path(path):
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                os.chmod(temporary, 0o600)
+                handle.write(encoded)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 # LLM: The append-only index is the cross-process recovery source; preserve artifact identity and

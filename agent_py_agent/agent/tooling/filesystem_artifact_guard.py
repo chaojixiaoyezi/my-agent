@@ -1,4 +1,6 @@
 
+# LLM: Filesystem surfaces must redirect archived tool output to its canonical reader, including binary sidecars.
+# 模块用途: 拦普通文件入口的归档正文，并将blob恢复锚点规范为已注册JSON。
 from __future__ import annotations
 
 import json
@@ -48,7 +50,7 @@ def tool_output_artifact_typo_hint(
 
 # LLM: Tool-output wrappers have one model-facing reader. Return a logical basename ref so an
 # incorrect absolute prefix cannot be recursively rebased into the current task directory.
-# 函数用途: 把普通文件读取重定向到 read_artifact，并给出可直接照抄的结构化调用。
+# 函数用途: 重定向归档读取，blob侧文件对应唯一JSON登记项，不暴露原始二进制正文。
 def tool_output_artifact_read_redirect(
     raw_path: str,
     candidate: Path,
@@ -56,6 +58,8 @@ def tool_output_artifact_read_redirect(
     suspected_path_typo: bool = False,
 ) -> str:
     artifact_ref = candidate.name or Path(raw_path).name
+    if artifact_ref.endswith(".blob"):
+        artifact_ref = f"{artifact_ref[:-5]}.json"
     payload = {
         "ok": False,
         "error": "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT",

@@ -1,5 +1,5 @@
 # LLM: 仅缓存已经安全读取的精确raw解析；不提供文件读取、授权、操作提交或内容未变的证明。
-# 模块用途: 在8MiB进程内LRU里复用不可变登记表投影，锁不跨IO或JSON解析。
+# 模块用途: 解析时去重计量保留对象，8MiB LRU预算O(1)取总数，锁不跨IO/解析。
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from types import MappingProxyType
 
 from ..common.nofollow_fs import open_directory_beneath
@@ -22,7 +22,7 @@ _EMPTY_PROXY = MappingProxyType({})
 
 
 # LLM: 错误只存不可变构造参数，不保留异常traceback；所有payload递归冻结，无共享可变列表或字典。
-# 类用途: 表达一条非空JSONL的原行号、解析结果或解析错误。
+# 类用途: 表达非空JSONL原行号、不可变解析事实及去重后的驻留字节估算。
 @dataclass(frozen=True)
 class RegistryRow:
     line: int
@@ -31,6 +31,7 @@ class RegistryRow:
     record: object = None
     artifact_id: str = ""
     record_error: tuple | None = None
+    estimated_bytes: int = 0
 
     # LLM: 还原原JSON/ValueError类型和消息供两种业务口径分别裁决，不共享可变异常实例。
     # 函数用途: 创建本次独立的解析异常。
@@ -41,7 +42,7 @@ class RegistryRow:
 
 
 # LLM: raw是完整已验证文本，records包含全部历史行和坏行；latest_records与diagnostic_rows预聚合加速最新报告读取。
-# 类用途: 保存一个解析版本的不可变登记表投影。
+# 类用途: 保存不可变登记表投影及解析时累计的行对象字节数。
 @dataclass(frozen=True)
 class RegistryProjection:
     raw: str
@@ -51,6 +52,7 @@ class RegistryProjection:
     latest_records: Mapping[str, object] = field(default_factory=lambda: _EMPTY_PROXY)
     diagnostic_rows: tuple[RegistryRow, ...] = ()
     line_count: int = 0
+    rows_memory_bytes: int = 0
 
 
 # LLM: root由宿主调用范围传入，逐段no-follow打开验证身份；身份仅作缓存分区，不替代每次完整raw读取。
@@ -128,7 +130,7 @@ def detached_payload(value):
 
 
 # LLM: 一次splitlines和每非空行一次loads；坏行保留原异常构造参数，预聚合最新有效记录与诊断行。
-# 函数用途: 从完整raw生成不可变JSONL投影。
+# 函数用途: 从完整raw生成不可变JSONL投影，并累计每行的实际结构字节。
 def parse_registry_projection(raw: str) -> RegistryProjection:
     lines = raw.splitlines()
     rows, latest, diagnostics = [], {}, []
@@ -149,11 +151,12 @@ def parse_registry_projection(raw: str) -> RegistryProjection:
         MappingProxyType(latest),
         tuple(diagnostics),
         len(lines),
+        sum(row.estimated_bytes for row in rows),
     )
 
 
 # LLM: 仅在旧raw以换行结尾且是新raw严格前缀时增量解析新增行；结果与全量重解析完全一致。
-# 函数用途: 让追加写场景只解析新增尾部行而不重扫历史行。
+# 函数用途: 只解析新增尾行并增量累加驻留字节，不重新遍历旧metadata。
 def _append_registry_projection(base: RegistryProjection, raw: str) -> RegistryProjection:
     suffix = raw[len(base.raw):]
     lines = suffix.splitlines()
@@ -183,21 +186,22 @@ def _append_registry_projection(base: RegistryProjection, raw: str) -> RegistryP
         MappingProxyType(latest),
         tuple(diagnostics),
         base.line_count + len(lines),
+        base.rows_memory_bytes + sum(row.estimated_bytes for row in new_rows),
     )
 
 
 # LLM: 先在原JSON容器上执行唯一record转换，再只冻结metadata树；历史payload只保留不可变metadata映射供恢复扫描。
-# 函数用途: 只解析/转换一次并保存不可变历史payload与独立可复制的最新记录。
+# 函数用途: 只解析/转换一次，冻结共享metadata并为成功/错误行计算去重字节。
 def _parse_row(number: int, line: str) -> RegistryRow:
     from .registry import _record_from_payload
 
     try:
         payload = json.loads(line)
     except json.JSONDecodeError as exc:
-        return RegistryRow(number, error=("json", (exc.msg, exc.doc, exc.pos)))
+        return _sized_row(RegistryRow(number, error=("json", (exc.msg, exc.doc, exc.pos))))
     except (TypeError, ValueError) as exc:
         kind = "type" if isinstance(exc, TypeError) else "value"
-        return RegistryRow(number, error=(kind, (str(exc),)))
+        return _sized_row(RegistryRow(number, error=(kind, (str(exc),))))
     record, record_error = None, None
     try:
         record = _record_from_payload(payload)
@@ -218,10 +222,39 @@ def _parse_row(number: int, line: str) -> RegistryRow:
     else:
         artifact_id = ""
         frozen_payload = _map_tree(payload, freeze=True)
-    return RegistryRow(number, frozen_payload, record=record, artifact_id=artifact_id, record_error=record_error)
+    return _sized_row(RegistryRow(number, frozen_payload, record=record, artifact_id=artifact_id, record_error=record_error))
 
 
-# LLM: 用O(1)结构化字节估算代替逐节点对象图遍历，消除缓存未命中时的递归sizeof与临时dict分配风暴。
+# LLM: Explicit stack and identity dedup bound depth; dataclass fields and mapping keys/values share one seen set per row.
+# 函数用途: 一次遍历保留对象树，以Python对象字节计量且不重复计算共享metadata。
+def _retained_tree_bytes(value, seen: set[int]) -> int:
+    stack, total = [value], 0
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        total += sys.getsizeof(current)
+        if isinstance(current, Mapping):
+            # mappingproxy本身不含背后字典的空间；冻结映射都私有保留该字典。
+            if isinstance(current, MappingProxyType):
+                total += sys.getsizeof(dict(current))
+            stack.extend(current.keys())
+            stack.extend(current.values())
+        elif isinstance(current, (tuple, list, set, frozenset)):
+            stack.extend(current)
+        elif is_dataclass(current) and not isinstance(current, type):
+            stack.extend(getattr(current, item.name) for item in fields(current))
+    return total
+
+
+# LLM: Cost is computed once after freezing; the same seen set deduplicates payload.metadata and record.metadata.
+# 函数用途: 为不可变行附上其驻留树估值，错误行也不能漏计。
+def _sized_row(row: RegistryRow) -> RegistryRow:
+    return replace(row, estimated_bytes=_retained_tree_bytes(row, set()))
+
+
+# LLM: All tree walks happen at row parse time; budget lookup is strictly O(1), including wide raw strings and containers.
 # 函数用途: 计算缓存驻留预算，超大投影不插入而不截断解析。
 def _memory_cost(value) -> int:
     if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], RegistryProjection):
@@ -231,7 +264,9 @@ def _memory_cost(value) -> int:
             + sys.getsizeof(projection)
             + sys.getsizeof(projection.raw)
             + sys.getsizeof(projection.records)
-            + len(projection.records) * 128
+            + sys.getsizeof(projection.latest_records)
+            + sys.getsizeof(projection.diagnostic_rows)
+            + projection.rows_memory_bytes
         )
     return sys.getsizeof(value)
 

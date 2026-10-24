@@ -1,19 +1,24 @@
 # LLM: 请求内复用索引投影和路径计算，不缓存授权；保持最后匹配、异常优先级、scope及完整正文哈希，打开锚定宿主根。
-# 模块用途: 单次准备工具归档查找，并安全读取注册正文，不将发现路径变成权限源。
+# 模块用途: 每次安全打开并完整哈希，缓存已验证内联正文/UTF-8索引，只解码blob目标窗口。
 from __future__ import annotations
 
 """explicit refs-only-to-body reader for externalized tool output artifacts."""
 
+import codecs
 import hashlib
 import json
 import os
 import stat
+import threading
+from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from errno import ELOOP
 from pathlib import Path
 from typing import Any
 
+from ...artifacts.registry_projection_cache import _retained_tree_bytes
 from ...common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ...common.tool_index_stream import iter_decoded_tool_index_objects
 from ...common.tool_output_paths import (
@@ -22,8 +27,71 @@ from ...common.tool_output_paths import (
 from .read_modes import (
     ArtifactContentReadRequest,
     ArtifactContentReadResult,
+    _normalize_read_mode,
+    _read_chars_limit,
     read_artifact_content_by_mode,
 )
+
+
+# LLM: Cache only verified content/index objects; locks guard LRU mutations, never filesystem IO, hashing or parsing.
+# 类用途: 为内联正文和blob字符索引提供双上限的线程安全进程内缓存。
+class _VerifiedArtifactCache:
+    # LLM: Each cache has at most 32 keys; oversized values are returned by callers but never retained.
+    # 函数用途: 创建独立的条目数与驻留字节预算。
+    def __init__(self, max_bytes: int):
+        self.max_bytes = max_bytes
+        self.entries: OrderedDict = OrderedDict()
+        self.bytes = 0
+        self.lock = threading.Lock()
+
+    # LLM: A hit is a computation reuse hint only, not evidence that current file bytes or scope are valid.
+    # 函数用途: 取出并提升最近访问条目，不执行读取或授权。
+    def get(self, key):
+        with self.lock:
+            entry = self.entries.get(key)
+            if entry is not None:
+                self.entries.move_to_end(key)
+                return entry[0]
+        return None
+
+    # LLM: Measure trees outside the lock and replace/evict atomically; shared objects count once per entry.
+    # 函数用途: 超预算不留存，按字节及32键上限淘汰旧结果。
+    def put(self, key, value):
+        cost = _retained_tree_bytes((key, value), set())
+        with self.lock:
+            old = self.entries.pop(key, None)
+            if old is not None:
+                self.bytes -= old[1]
+            if cost > self.max_bytes:
+                return
+            while self.entries and (len(self.entries) >= 32 or self.bytes + cost > self.max_bytes):
+                _, (_, removed) = self.entries.popitem(last=False)
+                self.bytes -= removed
+            self.entries[key] = value, cost
+            self.bytes += cost
+
+
+_INLINE_ARTIFACT_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
+_BLOB_INDEX_CACHE = _VerifiedArtifactCache(8 * 1024 * 1024)
+_BLOB_BLOCK_SIZE = 65536
+_BLOB_CHECKPOINT_CHARS = 4096
+
+
+# LLM: Index contains only verified dimensions, block hashes and UTF-8 character boundaries, never a full body string.
+# 类用途: 保存可复用的blob字符到字节位置及块校验索引。
+@dataclass(frozen=True)
+class _BlobIndex:
+    total_bytes: int
+    total_chars: int
+    is_ascii: bool
+    char_checkpoints: tuple[tuple[int, int], ...]
+    block_hashes: tuple[str, ...]
+
+
+# LLM: Distinguish failed integrity verification from malformed metadata and unreadable paths/UTF-8.
+# 类用途: 在内部传播正文完整性失败，统一转成artifact_hash_mismatch。
+class _ArtifactHashMismatch(ValueError):
+    pass
 
 
 # LLM: 仅宿主构造读取身份；offset/模式是内容窗口，不授予跨run权限。
@@ -165,28 +233,47 @@ def estimate_tool_output_artifact_size(request: ReadToolOutputArtifactRequest, *
         return None
 
 
-# LLM: 从认证root逐段nofollow打开，解析与hash使用同一FD；严格能力不足不退回普通路径打开，wrapper优先sha兼容保持。
-# 函数用途: 安全读取完整包装并验证内容后，生成原模式窗口。
+# LLM: Every call safely opens and hashes raw wrapper bytes; a verified inline hit skips JSON/encoding, never scope or FD reads.
+# 函数用途: 安全读取包装并按实际字节复用内联缓存，或转入blob验证读取链。
 def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
-    path = read.path
-    record = read.record
-    request = read.request
-    artifact_ref = request.artifact_ref
+    path, artifact_ref = read.path, read.request.artifact_ref
     try:
         descriptor = open_readonly_file_beneath(read.request.root, path.relative_to(read.root).parts)
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            payload = json.loads(handle.read())
+        with os.fdopen(descriptor, "rb") as handle:
+            raw_bytes = handle.read()
+        raw_digest = hashlib.sha256(raw_bytes).hexdigest()
+        key = str(read.root), str(path), raw_digest, str(read.record.get("sha256") or "")
+        cached = _INLINE_ARTIFACT_CACHE.get(key)
+        if cached is not None:
+            return _inline_read_result(read, *cached)
+        payload = json.loads(raw_bytes)
     except FileNotFoundError:
         return _error_payload("artifact_missing", artifact_ref, "registered artifact file does not exist")
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         return _error_payload("artifact_unreadable", artifact_ref, f"{type(exc).__name__}: {exc}")
-    content = payload.get("content")
-    if payload.get("kind") != "tool_output" or not isinstance(content, str):
+    if not isinstance(payload, dict) or payload.get("kind") != "tool_output":
         return _error_payload("invalid_tool_output_artifact", artifact_ref, "artifact is not a tool_output content file")
-    digest = _sha256_text(content)
-    expected = str(payload.get("sha256") or record.get("sha256") or "")
+    content = payload.get("content")
+    if not isinstance(content, str):
+        if payload.get("artifact_format") == "blob_v1" and "content" not in payload:
+            return _read_blob_artifact(read, payload)
+        return _error_payload("invalid_tool_output_artifact", artifact_ref, "artifact is not a tool_output content file")
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    expected = str(payload.get("sha256") or read.record.get("sha256") or "")
     if expected and digest != expected:
         return _error_payload("artifact_hash_mismatch", artifact_ref, "artifact content hash does not match metadata")
+    meta = {key: value for key, value in payload.items() if key != "content"}
+    verified = meta, content, digest, len(encoded)
+    if len(encoded) <= 4 * 1024 * 1024:
+        _INLINE_ARTIFACT_CACHE.put(key, verified)
+    return _inline_read_result(read, *verified)
+
+
+# LLM: Reuse only a body verified against the current raw-wrapper digest and registry SHA; size is passed, never encoded twice.
+# 函数用途: 从已验证内联正文按原模式生成结果。
+def _inline_read_result(read, payload, content, digest, size_bytes):
+    request = read.request
     read_result = read_artifact_content_by_mode(
         ArtifactContentReadRequest(
             content=content,
@@ -196,22 +283,201 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
             query=request.query,
         )
     )
+    return _verified_read_result(read, payload, digest, size_bytes, read_result)
+
+
+# LLM: Both formats expose the same result/error contract and verified byte size independently from the sliced text.
+# 函数用途: 将内联或blob窗口统一组装为原宿主读取协议。
+def _verified_read_result(read, payload, digest, size_bytes, read_result):
     if not read_result.ok:
-        return _error_payload(read_result.error_code, artifact_ref, read_result.message)
-    base = _success_base_payload(read, payload, content, digest)
+        return _error_payload(read_result.error_code, read.request.artifact_ref, read_result.message)
+    base = _success_base_payload(read, payload, read_result.content, digest, size_bytes=size_bytes)
     base.update(_success_content_payload(read_result))
     base.update(read_result.metadata or {})
     return base
 
 
+# LLM: Sidecar names are fixed siblings, never user-selected paths; optional block manifests still require full SHA verification.
+# 函数用途: 校验blob包装元数据，拒绝穿越和无法解释的分块格式。
+def _blob_metadata(read, payload):
+    name = str(payload.get("content_blob") or "")
+    if name != f"{read.path.stem}.blob" or any(mark in name for mark in ("/", "\\", "..")):
+        raise ValueError("artifact blob must be the canonical sibling basename")
+    if type(payload.get("blob_block_size")) is not int or payload["blob_block_size"] != _BLOB_BLOCK_SIZE:
+        raise ValueError("invalid artifact blob block size")
+    hashes = payload.get("blob_block_hashes", [])
+    if not isinstance(hashes, list) or any(not isinstance(value, str) for value in hashes):
+        raise ValueError("invalid artifact blob block hashes")
+    if "blob_block_hashes" in payload and not hashes and payload.get("size_bytes") != 0:
+        raise _ArtifactHashMismatch("nonempty artifact blob has an empty block manifest")
+    expected = str(payload.get("sha256") or read.record.get("sha256") or "")
+    if not expected:
+        raise ValueError("artifact blob requires a SHA256 digest")
+    return read.path.with_name(name), expected, tuple(hashes)
+
+
+# LLM: FD identity/stat is an index hint and a race barrier, never proof of bytes; warm reads also hash the entire opened FD.
+# 函数用途: 提取blob索引缓存键和读中变化检查需要的稳定字段。
+def _blob_stat_signature(info):
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+# LLM: Strict open uses the original authenticated root; validation, hashing and window reads share one FD, not a reopened path.
+# 函数用途: 安全读取侧文件，统一处理缺失、损坏、非法UTF-8和元数据错误。
+def _read_blob_artifact(read, payload):
+    artifact_ref = read.request.artifact_ref
+    try:
+        path, expected, hashes = _blob_metadata(read, payload)
+        descriptor = open_readonly_file_beneath(read.request.root, path.relative_to(read.root).parts)
+        with os.fdopen(descriptor, "rb") as handle:
+            before = _blob_stat_signature(os.fstat(handle.fileno()))
+            key = (str(read.root), str(path), *before, expected, hashes)
+            logical_key = str(read.root), str(path), expected
+            index = _BLOB_INDEX_CACHE.get(key)
+            cold = index is None
+            if cold:
+                index = _build_blob_index(handle, expected, hashes)
+            else:
+                if _stream_blob_digest(handle) != expected:
+                    raise _ArtifactHashMismatch("artifact blob content hash does not match metadata")
+                index = _BLOB_INDEX_CACHE.get(logical_key) or index
+            if (index.total_bytes != before[2] or payload.get("size_bytes") != index.total_bytes
+                    or payload.get("total_chars") != index.total_chars
+                    or _blob_stat_signature(os.fstat(handle.fileno())) != before):
+                raise _ArtifactHashMismatch("artifact blob dimensions or opened file changed")
+            result = _blob_content_result(handle, index, read.request, expected)
+            if _blob_stat_signature(os.fstat(handle.fileno())) != before:
+                raise _ArtifactHashMismatch("artifact blob changed during read")
+            if cold:
+                _BLOB_INDEX_CACHE.put(key, index)
+                _BLOB_INDEX_CACHE.put(logical_key, index)
+        return _verified_read_result(read, payload, expected, index.total_bytes, result)
+    except FileNotFoundError:
+        return _error_payload("artifact_missing", artifact_ref, "registered artifact blob file does not exist")
+    except _ArtifactHashMismatch as exc:
+        return _error_payload("artifact_hash_mismatch", artifact_ref, str(exc))
+    except (OSError, UnicodeDecodeError) as exc:
+        return _error_payload("artifact_unreadable", artifact_ref, f"{type(exc).__name__}: {exc}")
+    except ValueError as exc:
+        return _error_payload("invalid_tool_output_artifact", artifact_ref, str(exc))
+
+
+# LLM: Use OpenSSL's bounded file digest where available; Python 3.10 keeps a 256KiB fallback, never stat-only validation.
+# 函数用途: 热读先对同一FD完整哈希，非返回窗口的篡改也必须失败。
+def _stream_blob_digest(handle):
+    handle.seek(0)
+    if hasattr(hashlib, "file_digest"):
+        return hashlib.file_digest(handle, "sha256").hexdigest()
+    digest = hashlib.sha256()
+    while block := handle.read(256 * 1024):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+# LLM: Incremental strict UTF-8 retains at most one 64KiB chunk; checkpoints point to real character starts, including split emoji.
+# 函数用途: 冷读逐块验证全文和块哈希，建立每4096字符一个字节位置的索引。
+def _build_blob_index(handle, expected, manifest):
+    handle.seek(0)
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    digest, hashes, checkpoints = hashlib.sha256(), [], [(0, 0)]
+    total_bytes, total_chars, is_ascii = 0, 0, True
+    while block := handle.read(_BLOB_BLOCK_SIZE):
+        digest.update(block)
+        block_hash = hashlib.sha256(block).hexdigest()
+        if manifest and (len(hashes) >= len(manifest) or block_hash != manifest[len(hashes)]):
+            raise _ArtifactHashMismatch("artifact blob block hash does not match metadata")
+        hashes.append(block_hash)
+        byte_start = total_bytes - len(decoder.getstate()[0])
+        text = decoder.decode(block)
+        _append_char_checkpoints(checkpoints, text, total_chars, byte_start)
+        total_bytes += len(block)
+        total_chars += len(text)
+        is_ascii = is_ascii and block.isascii()
+    decoder.decode(b"", final=True)
+    if digest.hexdigest() != expected or (manifest and len(hashes) != len(manifest)):
+        raise _ArtifactHashMismatch("artifact blob content hash does not match metadata")
+    if checkpoints[-1] != (total_chars, total_bytes):
+        checkpoints.append((total_chars, total_bytes))
+    return _BlobIndex(total_bytes, total_chars, is_ascii, tuple(checkpoints), tuple(hashes))
+
+
+# LLM: Byte starts account for decoder-carried bytes; only disjoint segments are encoded, never the whole decoded blob.
+# 函数用途: 将当前小块中的4096字符边界转换成精确UTF-8字节位置。
+def _append_char_checkpoints(checkpoints, text, char_start, byte_start):
+    target = checkpoints[-1][0] + _BLOB_CHECKPOINT_CHARS
+    cursor = 0
+    while target <= char_start + len(text):
+        position = target - char_start
+        byte_start += len(text[cursor:position].encode("utf-8"))
+        checkpoints.append((target, byte_start))
+        cursor = position
+        target += _BLOB_CHECKPOINT_CHARS
+
+
+# LLM: Search/unbounded reads verify the actual returned bytes again before decoding; bounded modes recheck target blocks.
+# 函数用途: 保持所有原模式和分页字段，对有界窗口避免生成完整多MB字符串。
+def _blob_content_result(handle, index, request, expected):
+    mode, limit = _normalize_read_mode(request.mode), _read_chars_limit(request.max_chars)
+    if mode == "search" or limit == 0:
+        handle.seek(0)
+        raw = handle.read()
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise _ArtifactHashMismatch("artifact blob changed before full decode")
+        content = raw.decode("utf-8")
+        return read_artifact_content_by_mode(ArtifactContentReadRequest(
+            content, mode, request.offset, limit, request.query,
+        ))
+    if mode not in {"slice", "head", "tail"}:
+        result = read_artifact_content_by_mode(ArtifactContentReadRequest("", mode=mode))
+        return replace(result, total_chars=index.total_chars)
+    start = max(0, int(request.offset or 0)) if mode == "slice" else 0
+    if mode == "tail":
+        start = max(0, index.total_chars - limit)
+    end = min(index.total_chars, start + limit)
+    content = _blob_window(handle, index, start, end)
+    return ArtifactContentReadResult(
+        ok=True, mode=mode, content=content, offset=start, max_chars=limit,
+        total_chars=index.total_chars, has_more_before=start > 0,
+        has_more_after=end < index.total_chars,
+        truncated=mode != "tail" and end < index.total_chars,
+    )
+
+
+# LLM: Recheck returned blocks against cold-verified hashes on the same FD; decode only complete-character checkpoint boundaries.
+# 函数用途: 按ASCII直达或UTF-8检查点定位窗口，只读目标附近的完整块。
+def _blob_window(handle, index, start, end):
+    if start >= index.total_chars or end <= start:
+        return ""
+    if index.is_ascii:
+        base_char, byte_start, byte_end = start, start, end
+    else:
+        points = index.char_checkpoints
+        base_char, byte_start = points[bisect_right(points, (start, index.total_bytes + 1)) - 1]
+        _, byte_end = points[bisect_left(points, (end, -1))]
+    first, last = byte_start // _BLOB_BLOCK_SIZE, (byte_end - 1) // _BLOB_BLOCK_SIZE
+    handle.seek(first * _BLOB_BLOCK_SIZE)
+    blocks = []
+    for number in range(first, last + 1):
+        block = handle.read(_BLOB_BLOCK_SIZE)
+        if hashlib.sha256(block).hexdigest() != index.block_hashes[number]:
+            raise _ArtifactHashMismatch("artifact blob window changed after verification")
+        blocks.append(block)
+    raw = b"".join(blocks)
+    byte_base = first * _BLOB_BLOCK_SIZE
+    text = raw[byte_start - byte_base:byte_end - byte_base].decode("utf-8")
+    return text[start - base_char:end - base_char]
+
+
 # LLM: The reader may retain host-only path/scope facts for CLI and audit, but it must also expose a
-# stable logical ref so the tool layer can project a path-free continuation contract.
+# stable logical ref; supplied verified size avoids encoding a full body for accounting again.
 # 函数用途: 组装读取成功的完整宿主事实，并附上后续模型可安全复用的逻辑引用。
 def _success_base_payload(
     read: _RegisteredArtifactRead,
     payload: dict[str, Any],
     content: str,
     digest: str,
+    *,
+    size_bytes: int | None = None,
 ) -> dict[str, Any]:
     record = read.record
     artifact_ref = read.request.artifact_ref
@@ -231,7 +497,7 @@ def _success_base_payload(
         "run_id": str(payload.get("run_id") or record.get("run_id") or ""),
         "task_id": str(payload.get("task_id") or record.get("task_id") or ""),
         "sha256": digest,
-        "size_bytes": len(content.encode("utf-8")),
+        "size_bytes": size_bytes if size_bytes is not None else len(content.encode("utf-8")),
         "content_hash_verified": True,
         "reads_artifact_body": True,
     }
@@ -260,7 +526,7 @@ def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str
     return payload
 
 # LLM: 全部索引扫描完成后才处理候选路径错误；保持晚到UTF8优先、最后匹配及重复basename拒绝，不重算匹配。
-# 函数用途: 复用单次发现和已计算的候选结果查找注册记录。
+# 函数用途: 复用查找结果，blob引用规范成同名JSON，保持原scope和唯一basename修复。
 def _find_index_record(
     root: Path,
     artifact_ref: str,
@@ -269,6 +535,8 @@ def _find_index_record(
     index_paths: tuple[Path, ...] | None = None,
     open_errors: list[str] | None = None,
 ) -> dict[str, Any] | None:
+    if artifact_ref.endswith(".blob"):
+        artifact_ref = f"{artifact_ref[:-5]}.json"
     try:
         ref_path = Path(artifact_ref).expanduser()
         resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
