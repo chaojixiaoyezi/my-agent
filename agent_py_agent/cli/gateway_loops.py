@@ -36,6 +36,7 @@ from ..agent.gateway_parts import (
     GatewayPaths,
     gateway_queue_ages,
     gateway_request_counts,
+    hang_diagnostics,
     log_gateway_event,
     recover_gateway_processing_requests,
     write_json_file,
@@ -46,7 +47,11 @@ from ..agent.gateway_parts.input_delivery_service import (
 )
 from ..agent.gateway_parts.io import cleanup_orphan_lock_files, gateway_lock_sidecar_dirs
 from ..agent.gateway_parts.lease_service import GATEWAY_HEARTBEAT_INTERVAL_SECONDS
-from ..agent.gateway_parts.loop_health import loop_health
+from ..agent.gateway_parts.loop_health import (
+    DISPATCHER_STALL_TIMEOUT_SECONDS,
+    evaluate_dispatcher_stall,
+    loop_health,
+)
 from ..agent.gateway_parts.queue_service import GatewayClaim
 from ..agent.gateway_parts.recovery import repair_gateway_terminal_projections
 from ..agent.gateway_parts.request_worker import (
@@ -106,11 +111,16 @@ def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
 #   OSError 逃出 tick 的 except 块，while 外没有兜底，派发线程静默退出，pending 堆了一下午没人处理。改动须同步
 #   test_gateway_dispatcher_resilience.py。
 # LLM: cold C只接原control/Root/P3元数据泵，保原pending盖章和规范终态释放；不造Agent或运行owner恢复/输入对账，healthy及Count0主体保持。
+#   首tick前准备无信号私有诊断；主线程后续同根安装幂等，不会撤掉首tick已挂的C看门狗。
 # 函数用途: Count0及healthy C沿原派发池，cold C仅推进元数据；起停/错误记账保持，不构造虚拟业务Agent。
 def _gateway_request_loop(context: GatewayRunContext, paths: GatewayPaths, stop_event: threading.Event) -> None:
     """请求处理循环:单派发者扫描 pending,按两层限流(每用户小坑+全局大坑)认领,
     交给按需扩张的执行线程池跑(池上限=全局大坑)。取代原「N 个 worker 线程各自扫描」
     的单层总闸——那个 N 就是旧的全局总 10。"""
+    try:
+        hang_diagnostics.install(paths.root, register_signal=False)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway.diagnostics.prepare", "dispatcher", exc)
     loop_health.mark_started()
     stage = "gateway_request_pool.initialize"
     try:
@@ -158,16 +168,20 @@ def _run_request_dispatch(dispatcher: _RequestDispatcher, stop_event: threading.
 #   （同种错误第 1 次打、之后每 10 次打 1 次），打印本身不会再抛。返回下一拍该等多久：派发到东西 0；整拍空闲且派发段没失败
 #   → 轮询间隔并清零退避；逃逸异常或派发段失败且没派发 → max(轮询间隔, 退避)。后台修复段（恢复/终态投影/输入回执调和）
 #   的失败不在这里退避，它们只推迟各自的下次到期，派发轮询保持 0.2 秒。每次 tick 起止都记账本。
+#   看门狗只包本次tick，finally撤销；不把worker里的长用户回合或退避等待误当派发挂起。
 # 函数用途: 跑一次派发 tick，返回下一拍前要等的秒数。
 def _guarded_dispatch_tick(dispatcher: _RequestDispatcher) -> float:
     loop_health.mark_tick_started()
     site = _LoopSite("dispatcher", "gateway_request_dispatch.tick", "dispatcher", GATEWAY_REQUEST_POLL_INTERVAL_SECONDS)
+    _dispatch_stall_watchdog(DISPATCHER_STALL_TIMEOUT_SECONDS)
     try:
         dispatched = dispatcher.tick()
     except Exception as exc:
         _note_loop_tick_error(site, exc, dispatcher.backoff)
         loop_health.mark_tick_finished(0)
         return _wait_after_loop_error(dispatcher.backoff, site.interval)
+    finally:
+        _dispatch_stall_watchdog(0)
     loop_health.mark_tick_finished(dispatched)
     if dispatched > 0:
         return 0.0
@@ -175,6 +189,18 @@ def _guarded_dispatch_tick(dispatcher: _RequestDispatcher) -> float:
         return _wait_after_loop_error(dispatcher.backoff, site.interval)
     dispatcher.backoff.record_success()
     return site.interval
+
+
+# LLM: 诊断故障不能改变tick、退避或原BaseException；模块持有fd时才操作C定时器。
+# 函数用途: 尽力武装或撤销派发看门狗，异常仅报告。
+def _dispatch_stall_watchdog(seconds: float) -> None:
+    try:
+        if seconds > 0:
+            hang_diagnostics.arm_stall_watchdog(seconds)
+        else:
+            hang_diagnostics.disarm_stall_watchdog()
+    except Exception as exc:
+        _print_gateway_loop_error("gateway.dispatcher.watchdog", "dispatcher", exc)
 
 
 # LLM: 一个后台循环的错误落点：loop 是 loop_health 里的计数键，context 是错误报告上下文，worker_id 是打印里的执行者，
@@ -2296,6 +2322,7 @@ def _gateway_heartbeat_loop(context: GatewayRunContext, stop_event: threading.Ev
 #   拒绝，判据只能靠 pid+running 误判就绪。锚点在写入函数内部解析（见 _heartbeat_generation_started_at），
 #   调用方签名与发布顺序都不变：心跳循环照旧只传 status/pid，终止清理心跳也不新增参数。
 #   本函数只写心跳文件，不改state；C允许无业务Agent但必须原lease末门，撤权或替换不能回落裸写。
+#   队列计数复用一次，首次卡死在发布stalled前保全现场；诊断失败不得阻止原lease门写心跳。
 # 函数用途: 写入一份 Gateway 心跳载荷（含本代 started_at），供外部判活、判就绪与诊断读取。
 def _write_gateway_heartbeat(
     paths: GatewayPaths,
@@ -2314,6 +2341,10 @@ def _write_gateway_heartbeat(
     lease = coordinator_for_root(paths.root, context=paths)
     if agent is None and lease is None:
         raise CoordinatorUnavailable("COORDINATOR_CONTEXT_REQUIRED")
+    counts = gateway_request_counts(paths, include_archives=False)
+    health = evaluate_dispatcher_stall(loop_health.snapshot(), pending_count=counts.get("pending", 0))
+    if loop_health.note_dispatcher_stall(bool(health["dispatcher_stalled"]) and status == "running"):
+        _record_dispatcher_stall(paths, agent, health)
     _commit_gateway_heartbeat(
         paths, lease,
         {
@@ -2324,14 +2355,34 @@ def _write_gateway_heartbeat(
             "gateway_workspace": str(paths.root),
             "subagent_workspace": str(agent.subagents.workspace) if agent is not None else "",
             "task_continuation": "owner_scoped_event_driven",
-            "request_counts": gateway_request_counts(paths, include_archives=False),
+            "request_counts": counts,
             "queue_ages": gateway_queue_ages(paths),
             # 两层限流在飞快照(全局 total + 每用户计数):压测/排障看"谁占着坑"。
             "inflight": admission.snapshot(),
             # 派发线程存活与最近一次 tick：有 pending 却没人派发时，先看这里而不是只看 pending 数。
-            **loop_health.snapshot(),
+            **health,
         },
     )
+
+
+# LLM: 只采集本进程且禁发信号，避免抢占原SIGUSR1；原健康结果不因磁盘/诊断异常而变成功或停止发布。
+# 函数用途: 为首次派发卡死保存私有栈、内核事实及Gateway事件和文本日志。
+def _record_dispatcher_stall(paths, agent, health):
+    reason = health["dispatcher_stall_reason"]
+    try:
+        facts = hang_diagnostics.capture_gateway_hang_facts(paths, os.getpid(), stage=reason, send_sigusr1=False)
+    except Exception as exc:
+        facts = {"capture_error": type(exc).__name__}
+    payload = {**health, **facts, "pid": os.getpid(), "reason": reason}
+    try:
+        with paths.log.open("a", encoding="utf-8") as handle:
+            handle.write("[gateway-dispatcher-stalled] " + json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        _print_gateway_loop_error("gateway.dispatcher.stall_log", "heartbeat", exc)
+    try:
+        log_gateway_event(agent, "gateway_dispatcher_stalled", payload)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway.dispatcher.stall_event", "heartbeat", exc)
 
 
 

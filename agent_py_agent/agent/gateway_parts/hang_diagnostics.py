@@ -21,6 +21,7 @@ GC_PAUSE_LOG_SECONDS = 1.0
 _PROC_ROOT = Path("/proc")
 _STATUS_FIELDS = frozenset({"State", "VmRSS", "RssAnon", "RssFile", "VmSwap", "Threads", "SigCgt"})
 _handle: TextIO | None = None
+_installed_root: Path | None = None
 _gc_started: float | None = None
 _registered_signal: int | None = None
 _lifecycle_lock = threading.RLock()
@@ -45,19 +46,26 @@ def _open_dump(gateway_root: Path) -> TextIO:
         raise
 
 
-# LLM: 锁内先撤销旧生命周期，再发布新fd；False只表示信号未启用，GC可能仍可用，不在import时安装。
-# 函数用途: 安装全线程信号导出与GC探针，重复安装不泄漏旧句柄或回调。
-def install(gateway_root: Path) -> bool:
-    global _handle, _registered_signal
+# LLM: 默认重装先撤旧C引用；无信号的同根生产安装幂等，不能清掉派发线程先挂的watchdog；不改变原信号注册语义。
+# 函数用途: 安装持久诊断，允许不抢占原SIGUSR1注册，重复安装不泄漏资源。
+def install(gateway_root: Path, *, register_signal: bool = True) -> bool:
+    global _handle, _registered_signal, _installed_root
     with _lifecycle_lock:
+        root = Path(gateway_root)
+        if (not register_signal and _handle is not None and not _handle.closed
+                and _installed_root == root and _registered_signal is None):
+            return True
         close()
         if _handle is not None:
             return False  # 旧C引用尚未成功撤销，不能换fd。
         try:
-            _handle = _open_dump(Path(gateway_root))
+            _handle = _open_dump(root)
+            _installed_root = root
         except (OSError, ValueError):
             return False
         gc.callbacks.append(_gc_probe)
+        if not register_signal:
+            return True
         signum = getattr(signal, "SIGUSR1", None) if os.name == "posix" else None
         if signum is None:
             return False
@@ -79,8 +87,8 @@ def _cancel_watchdog() -> bool:
     return True
 
 
-# LLM: 与close同锁保护C层借用fd；每次正阈值重置一次性timer，禁用值或C层拒绝(含溢出)撤销旧timer，绝不退出进程。
-# 函数用途: 让心跳每拍延后栈导出期限，心跳停摆后由C层自动记录所有线程。
+# LLM: 与close同锁保护C层借用fd；只包在途dispatch tick，不在心跳或idle拍续期；失败撤旧timer，绝不退出进程。
+# 函数用途: 为本次派发调用设置一次性全线程导出期限。
 def arm_stall_watchdog(stall_seconds: float) -> None:
     with _lifecycle_lock:
         if _handle is None:
@@ -91,6 +99,14 @@ def arm_stall_watchdog(stall_seconds: float) -> None:
         try:
             faulthandler.dump_traceback_later(stall_seconds, repeat=False, file=_handle, exit=False)
         except (OSError, OverflowError, RuntimeError, ValueError):
+            _cancel_watchdog()
+
+
+# LLM: 与arm/close同锁且只有持有句柄才取消，不能影响未安装诊断的调用进程。
+# 函数用途: 派发tick的finally撤销一次性看门狗。
+def disarm_stall_watchdog() -> None:
+    with _lifecycle_lock:
+        if _handle is not None:
             _cancel_watchdog()
 
 
@@ -125,7 +141,7 @@ def _gc_probe(phase: str, info: dict) -> None:
 # LLM: 必须先取消C定时器/注销自身信号再关fd；撤销失败保留句柄供重试，不能让旧C引用写入复用后的fd。
 # 函数用途: 幂等关闭诊断并移除全部自身GC回调，不改其他信号和业务状态。
 def close() -> None:
-    global _handle, _gc_started, _registered_signal
+    global _handle, _gc_started, _registered_signal, _installed_root
     with _lifecycle_lock:
         while _gc_probe in gc.callbacks:
             gc.callbacks.remove(_gc_probe)
@@ -139,6 +155,7 @@ def close() -> None:
                 return
             _registered_signal = None
         handle, _handle = _handle, None
+        _installed_root = None
         try:
             handle.close()
         except (OSError, ValueError):
@@ -196,8 +213,8 @@ def _caught_sigusr1(status: dict[str, str]) -> int | None:
     return int(signum) if signum is not None and mask >= 0 and (mask >> (int(signum) - 1)) & 1 else None
 
 
-# LLM: 只为准确正整数PID读/proc；先落盘flush再按SigCgt发信号，失败软降级。返回的信号/写错误是发送后回执，不追写到先前快照。
-# 函数用途: 为监护者保全结构化现场并安全请求线程栈；无/proc时写最小快照但不猜测信号处理器。
+# LLM: 只为正整数PID读/proc；先flush再请求栈。显式禁信号的自身采集直接同步dump到本次私有fd，不借内核位猜自身handler。
+# 函数用途: 保全结构化现场和线程栈；无/proc仍可记录本进程栈，不改变远端安全信号门。
 def capture_gateway_hang_facts(paths_or_root: object, pid: int, *, stage: str = "before_term", send_sigusr1: bool = True) -> dict[str, object]:
     if type(pid) is not int or pid <= 0:
         raise ValueError("hang capture requires a positive integer PID")
@@ -209,6 +226,8 @@ def capture_gateway_hang_facts(paths_or_root: object, pid: int, *, stage: str = 
     try:
         with _open_dump(root) as handle:
             _write_record(handle, facts)
+            if pid == os.getpid() and not send_sigusr1:
+                faulthandler.dump_traceback(file=handle, all_threads=True)
     except (OSError, ValueError) as error:
         return {**facts, "sigusr1_sent": False, "write_error": type(error).__name__}
     facts["sigusr1_sent"] = False

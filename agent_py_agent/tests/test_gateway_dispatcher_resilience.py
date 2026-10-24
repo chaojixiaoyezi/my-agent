@@ -20,6 +20,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from agent_py_agent.agent.gateway_parts import hang_diagnostics
+from agent_py_agent.agent.gateway_parts import loop_health as health_module
 from agent_py_agent.agent.gateway_parts import request_worker as rw
 from agent_py_agent.agent.gateway_parts.http_handlers import handle_status
 from agent_py_agent.agent.gateway_parts.loop_health import GatewayLoopHealth, loop_health
@@ -29,10 +31,13 @@ from agent_py_agent.cli.gateway_loop_backoff import LoopErrorBackoff
 from agent_py_agent.tests.test_gateway_admission_wait import _paths
 
 
+# LLM: 直接调用派发循环的测试同样会装私有诊断，清理后不能把GC/fd留给其他用例。
+# 函数用途: 隔离健康账本与生产诊断资源。
 @pytest.fixture(autouse=True)
 def _fresh_loop_health():
     loop_health.reset()
     yield
+    hang_diagnostics.close()
     loop_health.reset()
 
 
@@ -400,6 +405,186 @@ def test_disabled_error_delay_stays_zero_after_long_error_streak() -> None:
     for _ in range(4913):
         backoff.record_failure("persistent_io_error")
     assert backoff.delay() == 0.0
+
+
+# LLM: 只替换时钟和内核来源，仍执行真实账本、计数、心跳提交与日志落盘。
+# 函数用途: 建立可推进时间的派发现场，不等待真实120秒。
+def _stall_case(tmp_path, monkeypatch):
+    clock = [1000.0]
+    clock_module = SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0])
+    monkeypatch.setattr(health_module, "time", clock_module)
+    monkeypatch.setattr(gateway_loops, "time", clock_module)
+    proc = tmp_path / "proc" / str(os.getpid())
+    (proc / "task" / "1").mkdir(parents=True)
+    (proc / "status").write_text("State:\tS\nThreads:\t1\n")
+    (proc / "task" / "1" / "wchan").write_text("futex_wait\n")
+    monkeypatch.setattr(hang_diagnostics, "_PROC_ROOT", proc.parent)
+    monkeypatch.setattr(hang_diagnostics.faulthandler, "dump_traceback", lambda **kw: kw["file"].write("synthetic stack\n"))
+    events = []
+    monkeypatch.setattr(gateway_loops, "log_gateway_event", lambda agent, event, data: events.append((event, data)))
+    agent = SimpleNamespace(config=SimpleNamespace(), subagents=SimpleNamespace(workspace=str(tmp_path / "sub")))
+    loop_health.mark_started()
+    return _paths(tmp_path), agent, clock, events
+
+
+# LLM: 公开起止接口造样；不能只按alive或旧完成时间判死。
+# 函数用途: 验证卡住、饥饿、空闲、阈值和未来时间。
+@pytest.mark.parametrize("started,finished,pending,reason", [
+    (800, 790, 0, "tick_wedged"), (880, 870, 0, "tick_wedged"),
+    (881, 870, 2, ""), (100, 110, 1, "pending_starved"),
+    (100, 110, 0, ""), (0, 0, 2, ""), (0, 0, 0, ""),
+    (990, 995, 3, ""), (1100, 1090, 0, ""),
+])
+def test_dispatcher_stall_heartbeat_boundaries(tmp_path, monkeypatch, started, finished, pending, reason):
+    paths, agent, clock, events = _stall_case(tmp_path, monkeypatch)
+    actions = [(started, loop_health.mark_tick_started), (finished, lambda: loop_health.mark_tick_finished(0))]
+    for stamp, action in sorted(actions, key=lambda entry: entry[0]):
+        if stamp > 0:
+            clock[0] = stamp
+            action()
+    clock[0] = 10000 if (started, finished, pending) == (100, 110, 0) else 1000
+    for index in range(pending):
+        _enqueue(paths, f"pending-{index}", "u")
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    heartbeat = json.loads(paths.heartbeat.read_text())
+    assert heartbeat.get("dispatcher_stalled") is bool(reason)
+    assert heartbeat["dispatcher_state"] == ("stalled" if reason else "running")
+    assert heartbeat["dispatcher_alive"] is True
+    assert heartbeat.get("dispatcher_stall_reason", "") == reason
+    assert len(events) == bool(reason)
+    if reason:
+        assert events[0][1]["wchan_top"] == [{"wchan": "futex_wait", "count": 1}]
+        assert reason in paths.log.read_text()
+
+
+# LLM: Event保持真实在途，推进时钟而非sleep；恢复后下一次卡死须再次采集。
+# 函数用途: 验证阻塞tick每个episode只记录一次。
+def test_wedged_dispatcher_captures_once_per_episode(tmp_path, monkeypatch):
+    paths, agent, clock, events = _stall_case(tmp_path, monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    dispatcher = _ScriptedTick(["idle"])
+
+    # LLM: 仅阻塞测试持有的Event，finally保证释放。
+    # 函数用途: 模拟不返回的派发调用。
+    def wedged():
+        entered.set()
+        assert release.wait(5)
+        return 0
+
+    dispatcher.tick = wedged
+    worker = threading.Thread(target=gateway_loops._guarded_dispatch_tick, args=(dispatcher,))
+    worker.start()
+    try:
+        assert entered.wait(2)
+        clock[0] += 120
+        for _ in range(2):
+            gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+        assert len(events) == 1
+        assert json.loads(paths.heartbeat.read_text()).get("dispatcher_stalled") is True
+    finally:
+        release.set()
+        worker.join(2)
+    assert not worker.is_alive()
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    assert json.loads(paths.heartbeat.read_text())["dispatcher_stalled"] is False
+    clock[0] += 1
+    loop_health.mark_tick_started()
+    clock[0] += 120
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    assert len(events) == 2
+
+
+# LLM: 只包派发tick，不包worker、idle等待或退避；BaseException也须撤销。
+# 函数用途: 守住正常、异常和退出的arm/finally-disarm顺序。
+@pytest.mark.parametrize("error", [None, RuntimeError, SystemExit])
+def test_dispatch_tick_watchdog_lifetime(monkeypatch, error):
+    calls = []
+    monkeypatch.setattr(hang_diagnostics, "arm_stall_watchdog", lambda seconds: calls.append(("arm", seconds)))
+    monkeypatch.setattr(hang_diagnostics, "disarm_stall_watchdog", lambda: calls.append(("disarm",)), raising=False)
+    dispatcher = _ScriptedTick(["idle"])
+
+    # LLM: tick内部观察已武装状态，再按参数模拟结果。
+    # 函数用途: 提供受控派发结果。
+    def tick():
+        calls.append(("tick",))
+        if error:
+            raise error("test")
+        return 0
+
+    dispatcher.tick = tick
+    if error is SystemExit:
+        with pytest.raises(SystemExit):
+            gateway_loops._guarded_dispatch_tick(dispatcher)
+    else:
+        gateway_loops._guarded_dispatch_tick(dispatcher)
+    assert calls == [("arm", 120.0), ("tick",), ("disarm",)]
+
+
+# LLM: 退出态优先于旧tick；诊断失败不能杀心跳。
+# 函数用途: 检查采集失败仍发布stalled，以及退出后不误报。
+def test_dispatcher_stall_capture_failure_keeps_heartbeat(tmp_path, monkeypatch):
+    paths, agent, clock, _events = _stall_case(tmp_path, monkeypatch)
+    loop_health.mark_tick_started()
+    clock[0] += 120
+
+    # LLM: 只让诊断依赖失效，不影响原心跳writer。
+    # 函数用途: 模拟诊断读取故障。
+    def failed_capture(*args, **kwargs):
+        raise OSError("diagnostics unavailable")
+
+    monkeypatch.setattr(hang_diagnostics, "capture_gateway_hang_facts", failed_capture)
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    assert json.loads(paths.heartbeat.read_text()).get("dispatcher_stalled") is True
+    loop_health.mark_exited(None)
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    heartbeat = json.loads(paths.heartbeat.read_text())
+    assert heartbeat["dispatcher_stalled"] is False and heartbeat["dispatcher_state"] == "exited"
+
+
+# LLM: 不先安装主线程信号入口，必须由真实派发入口在首tick前准备私有fd。
+# 函数用途: 复现启动首拍未布防窗口。
+def test_first_dispatch_tick_has_watchdog_before_signal_install(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    stop, armed = threading.Event(), []
+    monkeypatch.setattr(hang_diagnostics.faulthandler, "dump_traceback_later", lambda *a, **kw: armed.append(kw["file"]))
+    monkeypatch.setattr(hang_diagnostics.faulthandler, "cancel_dump_traceback_later", lambda: None)
+    dispatcher = _ScriptedTick(["idle"])
+
+    # LLM: 第一次tick即记录是否在途，随后退出，失败不产生无限循环。
+    # 函数用途: 在真正派发循环内观察首拍资源。
+    def tick():
+        stop.set()
+        return 0
+
+    dispatcher.tick = tick
+    dispatcher.shutdown = lambda: None
+    monkeypatch.setattr(gateway_loops, "_RequestDispatcher", lambda *a: dispatcher)
+    gateway_loops._gateway_request_loop(SimpleNamespace(agent=None), paths, stop)
+    assert len(armed) == 1 and not armed[0].closed
+
+
+# LLM: 分离墙钟与单调钟，只让校时发生，不能据展示时间误报或延迟真实deadline。
+# 函数用途: 覆盖向前跳、完成后倒拨、在途倒拨三种校时。
+@pytest.mark.parametrize("case", ["forward", "completed_rollback", "wedged_rollback"])
+def test_dispatcher_stall_uses_monotonic_progress(tmp_path, monkeypatch, case):
+    paths, agent, wall, _events = _stall_case(tmp_path, monkeypatch)
+    monotonic = [500.0]
+    health_module.time.monotonic = lambda: monotonic[0]
+    loop_health.mark_tick_started()
+    if case == "forward":
+        wall[0] += 3600
+        monotonic[0] += 1
+    elif case == "completed_rollback":
+        wall[0] = 500
+        monotonic[0] += 1
+        loop_health.mark_tick_finished(0)
+        wall[0] = 1500
+        monotonic[0] += 1
+    else:
+        wall[0] = 500
+        monotonic[0] += 120
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    assert json.loads(paths.heartbeat.read_text())["dispatcher_stalled"] is (case == "wedged_rollback")
 
 
 def test_loop_health_error_records_are_redacted() -> None:
