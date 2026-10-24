@@ -1,8 +1,12 @@
+# LLM: W2-2 tests real registered sidecars/cache paths; compare legacy modes and keep scope/byte integrity independent of stat hints.
+# 模块用途: 核对分级归档的UTF-8窗口、内存边界及统一文件读取恢复协议。
 from __future__ import annotations
 
 import hashlib
 import json
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.agent_core.tool_context.reducer import (
     render_tool_result_for_live_prompt,
@@ -18,6 +22,156 @@ from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 from agent_py_agent.cli.parser import build_parser
 from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+
+# LLM: Exercise real blob bytes, not a mock wrapper, across both byte blocks and character checkpoints.
+# 函数用途: 用多MB中文/emoji/CRLF正文对照既有模式语义，分别复核冷读与热读。
+@pytest.mark.parametrize("mode,offset,limit,query", [
+    ("slice", 65534, 8197, ""), ("slice", 4094, 9, ""),
+    ("head", 99, 65538, ""), ("tail", 99, 4101, ""),
+    ("slice", 9_000_000, 12, ""), ("slice", -3, -1, ""),
+    ("tail", 9, 0, ""), ("search", 0, 120, "needle"),
+    ("unknown", 0, 12, ""), ("search", 0, 12, ""),
+])
+def test_blob_modes_match_inline_semantics(tmp_path, mode, offset, limit, query):
+    from agent_py_agent.agent.memory_archive.artifact.read_modes import (
+        ArtifactContentReadRequest,
+        read_artifact_content_by_mode,
+    )
+
+    content = "a" * 65535 + "中😀\r\n" + "汉文😀ab\r\n" * 200_000 + "needle END\r\nneedle LAST"
+    path = _write_externalized_tool_output(tmp_path, content=content)
+    assert json.loads(path.read_bytes()).get("artifact_format") == "blob_v1"
+    expected = read_artifact_content_by_mode(ArtifactContentReadRequest(content, mode, offset, limit, query))
+    request = ReadToolOutputArtifactRequest(tmp_path, str(path), offset, limit, mode, query)
+    for _ in range(2):
+        actual = read_tool_output_artifact(request)
+        assert actual["ok"] == expected.ok
+        if not expected.ok:
+            assert actual["error_code"] == expected.error_code
+            continue
+        assert actual["content"] == expected.content
+        assert actual["total_chars"] == len(content)
+        assert actual["size_bytes"] == len(content.encode("utf-8"))
+        assert actual["content_offset"] == expected.offset
+        assert actual["has_more_before"] == expected.has_more_before
+        assert actual["has_more_after"] == expected.has_more_after
+        assert actual["truncated"] == expected.truncated
+        for key, value in (expected.metadata or {}).items():
+            assert actual[key] == value
+
+
+# LLM: Both direct sidecar refs and filesystem recovery must reach the one canonical JSON registration.
+# 函数用途: 核对blob绝对路径/唯一basename/错前缀修复与read_file恢复锚点。
+def test_blob_reference_and_filesystem_redirect(tmp_path):
+    path = _write_externalized_tool_output(tmp_path, content="abcdef\r\n" * 100_000)
+    blob = path.with_suffix(".blob")
+    for ref in (str(blob), blob.name, f"/wrong/blobs/tool_outputs/{blob.name}"):
+        payload = read_tool_output_artifact(ReadToolOutputArtifactRequest(tmp_path, ref, max_chars=6))
+        assert payload["ok"] and payload["content"] == "abcdef"
+        assert payload["artifact_path"] == str(path)
+    result = _execute_tool(_registry(tmp_path), "read_file", {"path": str(blob)})
+    payload = _result_json(result)
+    assert not result.ok and result.error_code == "TOOL_OUTPUT_REQUIRES_READ_ARTIFACT"
+    assert payload["artifact_ref"] == path.name
+
+
+# LLM: A verified cache hit can skip wrapper JSON/body encoding, never the current binary file read/hash.
+# 函数用途: 统计包装解析并防止热读重复编码，同时确保调用方不能污染已缓存正文。
+def test_inline_cache_skips_reparse_and_reencode(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_archive.artifact import reader
+
+    path = _write_externalized_tool_output(tmp_path, content="中文\r\n" * 5000)
+    parsed, encodes = [], []
+    original = json.loads
+
+    # LLM: Only wrapper bodies use this str subtype; index parsing remains unchanged.
+    # 类用途: 记录真实正文编码次数而不更改UTF-8编码结果。
+    class CountedText(str):
+        # LLM: Delegate real encoding; count calls on the content object only.
+        # 函数用途: 为编码计数提供观察点。
+        def encode(self, *args, **kwargs):
+            encodes.append(True)
+            return super().encode(*args, **kwargs)
+
+    # LLM: Count actual wrapper parses and retain a content encoding spy, not fake results.
+    # 函数用途: 区分索引解析和正文包装解析。
+    def loads(raw, *args, **kwargs):
+        value = original(raw, *args, **kwargs)
+        if isinstance(value, dict) and value.get("kind") == "tool_output" and "content" in value:
+            parsed.append(True)
+            value["content"] = CountedText(value["content"])
+        return value
+
+    monkeypatch.setattr(reader.json, "loads", loads)
+    request = ReadToolOutputArtifactRequest(tmp_path, str(path), offset=3, max_chars=11)
+    first = read_tool_output_artifact(request)
+    first["content"] = "caller mutation"
+    second = read_tool_output_artifact(request)
+    assert second["ok"] and second["content"] == ("中文\r\n" * 5000)[3:14]
+    assert parsed == [True] and encodes == [True]
+
+
+# LLM: Warm bounded reads must not allocate the complete ten-MiB body as a Python string.
+# 函数用途: 用实际热读峰值内存约束防止侧文件被整体解码。
+def test_warm_blob_slice_has_bounded_allocation(tmp_path):
+    import tracemalloc
+
+    path = _write_externalized_tool_output(tmp_path, content="0123456789" * 1_000_000)
+    request = ReadToolOutputArtifactRequest(tmp_path, str(path), offset=4_000_003, max_chars=100)
+    assert read_tool_output_artifact(request)["ok"]
+    tracemalloc.start()
+    try:
+        result = read_tool_output_artifact(request)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result["ok"] and result["content"] == ("0123456789" * 11)[3:103]
+    assert peak < 4 * 1024 * 1024
+
+
+# LLM: Cache budgets retain no more than 32 keys or their actual byte cap even under concurrent replacement.
+# 函数用途: 核对真实默认预算、LRU次序、超大拒存和并发取放计数一致性。
+def test_artifact_caches_are_bounded_and_thread_safe():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.memory_archive.artifact import reader
+
+    assert reader._INLINE_ARTIFACT_CACHE.max_bytes == 16 * 1024 * 1024
+    assert reader._BLOB_INDEX_CACHE.max_bytes == 8 * 1024 * 1024
+    cache = reader._VerifiedArtifactCache(1024 * 1024)
+    for i in range(32):
+        cache.put(i, str(i))
+    assert cache.get(0) == "0"
+    cache.put(32, "32")
+    assert cache.get(1) is None and cache.get(0) == "0" and len(cache.entries) == 32
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(lambda i: cache.put(i % 40, "中" * (100 + i)), range(500)))
+    assert len(cache.entries) <= 32
+    assert cache.bytes == sum(cost for _, cost in cache.entries.values()) <= cache.max_bytes
+    cache.put("oversized", "x" * (2 * 1024 * 1024))
+    assert cache.get("oversized") is None
+
+
+# LLM: Python 3.10's streaming fallback still rehashes every byte; optional manifests do not remove full SHA verification.
+# 函数用途: 验证无file_digest和无块清单时仍可精确热读，并拒绝已缓存正文的跨run访问。
+def test_blob_warm_fallback_and_scope(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_archive.artifact import reader
+
+    path = _write_externalized_tool_output(tmp_path, content="a中😀\r\n" * 100_000)
+    payload = json.loads(path.read_bytes())
+    del payload["blob_block_hashes"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    request = ReadToolOutputArtifactRequest(tmp_path, str(path), offset=65535, max_chars=20)
+    assert read_tool_output_artifact(request)["ok"]
+    monkeypatch.delattr(reader.hashlib, "file_digest", raising=False)
+    monkeypatch.setattr(reader, "_build_blob_index", lambda *args: pytest.fail("warm read rebuilt UTF-8 index"))
+    warm = read_tool_output_artifact(request)
+    assert warm["ok"] and warm["content"] == ("a中😀\r\n" * 100_000)[65535:65555]
+    denied = read_tool_output_artifact(ReadToolOutputArtifactRequest(
+        tmp_path, str(path), run_id="sibling", scope_mode="current_run",
+    ))
+    assert not denied["ok"] and denied["error_code"] == "tool_permission_denied" and "content" not in denied
 
 
 def _execute_tool(

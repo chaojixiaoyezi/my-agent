@@ -1,3 +1,5 @@
+# LLM: W2-2 byte-threshold regressions exercise private binary publication before the canonical wrapper/index.
+# 模块用途: 验证归档恢复身份和内联兼容，锁定512KiB分级、64KiB块哈希与原始换行。
 from __future__ import annotations
 
 """LLM: regression tests for externalized runtime tool outputs.
@@ -57,6 +59,60 @@ from agent_py_agent.tests._tool_runtime_harness import (
     runtime_snapshot_for_model_specs,
     runtime_snapshot_for_tools,
 )
+
+
+# LLM: W2-2 guards the byte threshold, binary CRLF preservation and canonical single index entry.
+# 函数用途: 验证小正文兼容旧包装，大正文只存一次原始UTF-8侧文件。
+@pytest.mark.parametrize("size", [250_005, 512 * 1024 - 1, 512 * 1024, 512 * 1024 + 1])
+def test_blob_sidecar_byte_threshold(tmp_path, size):
+    import hashlib
+    import stat
+
+    output = "中😀\r\n" + "x" * (size - len("中😀\r\n".encode()))
+    record = externalize_tool_output_record(ExternalizeToolOutputRequest(
+        root=tmp_path, tool="probe", call_id="threshold", output=output, ok=True, min_chars=0,
+    ))
+    path = Path(record["artifact_ref"])
+    payload = json.loads(path.read_bytes())
+    index = [json.loads(line) for line in path.with_name("index.jsonl").read_text().splitlines()]
+    assert len(index) == 1 and index[0]["path"] == str(path)
+    if size < 512 * 1024:
+        assert payload["content"] == output
+        assert "artifact_format" not in payload and not path.with_suffix(".blob").exists()
+        return
+    assert payload.get("artifact_format") == "blob_v1"
+    assert "content" not in payload
+    blob = path.with_suffix(".blob")
+    encoded = output.encode("utf-8")
+    assert blob.read_bytes() == encoded
+    assert stat.S_IMODE(blob.stat().st_mode) == 0o600
+    assert payload["content_blob"] == blob.name
+    assert payload["total_chars"] == len(output) and payload["size_bytes"] == size
+    assert payload["blob_block_size"] == 65536
+    assert payload["blob_block_hashes"] == [
+        hashlib.sha256(encoded[i:i + 65536]).hexdigest() for i in range(0, size, 65536)
+    ]
+
+
+# LLM: A failed sidecar publication must not advertise a readable wrapper or append a registry line.
+# 函数用途: 观察真实原子替换失败，确保临时文件清理且没有发布JSON/索引。
+def test_blob_publish_failure_never_registers_wrapper(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_archive import tool_output_externalizer as externalizer
+
+    # LLM: Only fail binary sidecar replacement; the real temporary writer and cleanup still execute.
+    # 函数用途: 在原子提交点注入写入故障而不伪造已写结果。
+    def fail_replace(source, destination):
+        assert Path(source).read_bytes() == b"x" * 600_000
+        raise OSError("binary publish failed")
+
+    monkeypatch.setattr(externalizer.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="binary publish failed"):
+        externalize_tool_output_record(ExternalizeToolOutputRequest(
+            root=tmp_path, tool="probe", call_id="fail", output="x" * 600_000, ok=True, min_chars=0,
+        ))
+    # 原有跨进程锁文件允许保留；不能留下可读产物、索引或未完成临时文件。
+    remaining = list((tmp_path / "blobs/tool_outputs").iterdir())
+    assert all(path.name.endswith(".blob.lock") and path.stat().st_size == 0 for path in remaining)
 
 
 def _canonical_record(

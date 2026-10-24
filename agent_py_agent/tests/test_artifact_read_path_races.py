@@ -16,6 +16,176 @@ from agent_py_agent.agent.tooling.artifact import ReadArtifactTool
 from agent_py_agent.tests.test_memory_artifact_read import _write_externalized_tool_output
 
 
+# LLM: Tamper a non-returned middle byte in place after warmup; unchanged size/mtime is never content evidence.
+# 函数用途: 证明热缓存仍完整哈希，不能只校验返回窗口的块。
+@pytest.mark.parametrize("restore_ctime_key", [False, True])
+def test_blob_middle_tampering_is_rehashed(tmp_path, monkeypatch, restore_ctime_key):
+    path = _write_externalized_tool_output(tmp_path, content="x" * 2_000_000)
+    blob = path.with_suffix(".blob")
+    assert blob.exists()
+    request = reader.ReadToolOutputArtifactRequest(tmp_path, str(path), max_chars=8)
+    assert reader.read_tool_output_artifact(request)["ok"]
+    before = blob.stat()
+    with blob.open("r+b") as handle:
+        handle.seek(1_000_000)
+        handle.write(b"y")
+    os.utime(blob, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert blob.stat().st_size == before.st_size and blob.stat().st_mtime_ns == before.st_mtime_ns
+    if restore_ctime_key:
+        original = reader.os.fstat
+        # LLM: Keep all identity/stat facts as before only for this blob to force a warm key; bytes still come from the real FD.
+        # 函数用途: 模拟mtime/ctime缓存键均复原，强制证明热读不能跳过全文哈希。
+        def fstat(descriptor):
+            value = original(descriptor)
+            return before if value.st_ino == before.st_ino else value
+        monkeypatch.setattr(reader.os, "fstat", fstat)
+    result = reader.read_tool_output_artifact(request)
+    assert not result["ok"] and result["error_code"] == "artifact_hash_mismatch"
+    assert "content" not in result
+
+
+# LLM: Missing/symlink sidecars fail at strict root-anchored open, both before and after a verified index is cached.
+# 函数用途: 验证侧文件缺失和打开前被链接替换不会泄露正文。
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("shape", ["missing", "symlink"])
+def test_blob_missing_or_symlink_fails_closed(tmp_path, warm, shape):
+    root = tmp_path / "owner"
+    path = _write_externalized_tool_output(root, content="x" * 600_000)
+    blob = path.with_suffix(".blob")
+    assert blob.exists()
+    request = reader.ReadToolOutputArtifactRequest(root, str(path), max_chars=8)
+    if warm:
+        assert reader.read_tool_output_artifact(request)["ok"]
+    blob.unlink()
+    if shape == "symlink":
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"secret" * 100_000)
+        blob.symlink_to(outside)
+    result = reader.read_tool_output_artifact(request)
+    expected = "artifact_missing" if shape == "missing" else "artifact_unreadable"
+    assert not result["ok"] and result["error_code"] == expected and "content" not in result
+
+
+# LLM: Strict basename validation precedes every sidecar open; wrapper-injected inline content retains legacy priority.
+# 函数用途: 拒绝路径穿越、错名和非字符串content，并保持手工注入的内联正文兼容。
+@pytest.mark.parametrize("field,value,error", [
+    ("content_blob", "../escape.blob", "invalid_tool_output_artifact"),
+    ("content_blob", "sub\\escape.blob", "invalid_tool_output_artifact"),
+    ("content_blob", "other.blob", "invalid_tool_output_artifact"),
+    ("blob_block_hashes", ["0" * 64] * 10, "artifact_hash_mismatch"),
+    ("blob_block_hashes", [], "artifact_hash_mismatch"),
+    ("content", None, "invalid_tool_output_artifact"),
+    ("artifact_format", "unknown", "invalid_tool_output_artifact"),
+])
+def test_blob_metadata_validation(tmp_path, field, value, error):
+    path = _write_externalized_tool_output(tmp_path, content="x" * 600_000)
+    payload = json.loads(path.read_bytes())
+    assert payload.get("artifact_format") == "blob_v1"
+    payload[field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(tmp_path, str(path)))
+    assert not result["ok"] and result["error_code"] == error
+
+
+# LLM: Legacy tools/tests may inject an inline body plus its own SHA; prefer it even when old blob metadata remains.
+# 函数用途: 验证包装内有效content优先级不受blob_v1标记影响。
+def test_blob_wrapper_inline_override_has_priority(tmp_path):
+    import hashlib
+
+    path = _write_externalized_tool_output(tmp_path, content="x" * 600_000)
+    payload = json.loads(path.read_bytes())
+    assert payload.get("artifact_format") == "blob_v1"
+    payload.update(content="inline\r\n中文😀", sha256=hashlib.sha256("inline\r\n中文😀".encode()).hexdigest())
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.with_suffix(".blob").unlink()
+    result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(tmp_path, str(path)))
+    assert result["ok"] and result["content"] == "inline\r\n中文😀"
+
+
+# LLM: A deterministic post-hash edit with deliberately unchanged stat observations proves actual returned bytes are verified.
+# 函数用途: 复现完整解码分支的校验后修改，不把stat相同误当成内容相同。
+@pytest.mark.parametrize("mode,limit", [("slice", 0), ("search", 80)])
+def test_blob_full_decode_rechecks_returned_bytes(tmp_path, monkeypatch, mode, limit):
+    path = _write_externalized_tool_output(tmp_path, content="needle original\r\n" * 40_000)
+    blob = path.with_suffix(".blob")
+    request = reader.ReadToolOutputArtifactRequest(tmp_path, str(path), max_chars=limit, mode=mode, query="needle")
+    assert reader.read_tool_output_artifact(request)["ok"]
+    before = blob.stat()
+    digest, fstat = reader._stream_blob_digest, reader.os.fstat
+    fired = []
+
+    # LLM: Return the genuine hash then modify the real same FD's file; not a forged digest.
+    # 函数用途: 在全文验证和返回正文之间制造确定性的原位修改。
+    def after_digest(handle):
+        actual = digest(handle)
+        with blob.open("r+b") as writer:
+            writer.seek(7)
+            writer.write(b"tampered")
+        os.utime(blob, ns=(before.st_atime_ns, before.st_mtime_ns))
+        fired.append(True)
+        return actual
+
+    # LLM: Simulate coarse/unchanged stat observations, while every body byte is still read from the real file.
+    # 函数用途: 移除时间戳这一旁证，确保测试由字节校验而非stat拦住。
+    def unchanged_stat(descriptor):
+        actual = fstat(descriptor)
+        return before if actual.st_ino == before.st_ino else actual
+
+    monkeypatch.setattr(reader, "_stream_blob_digest", after_digest)
+    monkeypatch.setattr(reader.os, "fstat", unchanged_stat)
+    result = reader.read_tool_output_artifact(request)
+    assert fired == [True]
+    assert not result["ok"] and result["error_code"] == "artifact_hash_mismatch"
+    assert "content" not in result
+
+
+# LLM: Returned windows may use old FDs but never reopen an attacker-selected sibling or parent chain.
+# 函数用途: 在JSON已读后、blob打开前确定性替换根/父目录/叶，要求安全拒绝。
+@pytest.mark.parametrize("part", ["root", "parent", "leaf"])
+def test_blob_open_race_rejects_foreign_path(tmp_path, monkeypatch, part):
+    root, foreign = tmp_path / "owner", tmp_path / "foreign"
+    path = _write_externalized_tool_output(root, content="x" * 600_000)
+    outside = _write_externalized_tool_output(foreign, content="y" * 600_000).with_suffix(".blob")
+    blob = path.with_suffix(".blob")
+    original, fired = reader.open_readonly_file_beneath, []
+
+    # LLM: Intercept only the blob open, not authorization, index lookup or wrapper reading.
+    # 函数用途: 在侧文件安全打开屏障前换入外部链接。
+    def open_blob(anchor, parts):
+        if parts[-1].endswith(".blob"):
+            source, target = ((root, foreign) if part == "root" else (blob.parent, outside.parent))
+            if part == "leaf":
+                blob.unlink()
+                blob.symlink_to(outside)
+            else:
+                source.rename(source.with_name(source.name + "-old"))
+                source.symlink_to(target, target_is_directory=True)
+            fired.append(True)
+        return original(anchor, parts)
+
+    monkeypatch.setattr(reader, "open_readonly_file_beneath", open_blob)
+    result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(root, str(path)))
+    assert fired == [True]
+    assert not result["ok"] and result["error_code"] == "artifact_unreadable" and "content" not in result
+
+
+# LLM: Strict UTF-8 decoding is an independent requirement even if wrapper hashes have been changed to match invalid bytes.
+# 函数用途: 验证非法UTF-8不会缓存或暴露成成功正文。
+def test_blob_invalid_utf8_is_unreadable(tmp_path):
+    import hashlib
+
+    path = _write_externalized_tool_output(tmp_path, content="中" * 200_000)
+    blob = path.with_suffix(".blob")
+    raw = blob.read_bytes()[:-1] + b"\xff"
+    blob.write_bytes(raw)
+    payload = json.loads(path.read_bytes())
+    payload["sha256"] = hashlib.sha256(raw).hexdigest()
+    payload["blob_block_hashes"] = [hashlib.sha256(raw[i:i + 65536]).hexdigest() for i in range(0, len(raw), 65536)]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(tmp_path, str(path)))
+    assert not result["ok"] and result["error_code"] == "artifact_unreadable" and "content" not in result
+
+
 # LLM: 返回真实注册的两个owner档案，外owner的有效wrapper不能凭自身sha获得授权。
 # 函数用途: 为竞态用例创建内容不同、结构相同的本地归档。
 def _archives(tmp_path):

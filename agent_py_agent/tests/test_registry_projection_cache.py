@@ -2,10 +2,63 @@
 # 模块用途: 验证同raw共享解析、独立副本、损坏和变化不能误命中。
 import json
 import os
+import sys
 
 import pytest
 
 from agent_py_agent.agent.artifacts import registry
+from agent_py_agent.agent.artifacts import registry_projection_cache as cache
+
+
+# LLM: Exact per-row retained trees must count shared frozen metadata once, not omit or duplicate it.
+# 函数用途: 核对大中文metadata的真实字节及共享对象去重。
+def test_retained_row_bytes_deduplicate_metadata():
+    raw = json.dumps({"artifact_id": "large", "metadata": {"body": "中文😀" * 100_000}}, ensure_ascii=False) + "\n"
+    projection = cache.parse_registry_projection(raw)
+    row = projection.records[0]
+    assert getattr(row, "estimated_bytes", 0) > sys.getsizeof(row.record.metadata["body"])
+    assert projection.rows_memory_bytes == row.estimated_bytes
+    assert row.payload["metadata"] is row.record.metadata
+    seen = set()
+    combined = cache._retained_tree_bytes(row.payload, seen) + cache._retained_tree_bytes(row.record, seen)
+    separate = cache._retained_tree_bytes(row.payload, set()) + cache._retained_tree_bytes(row.record, set())
+    assert separate - combined >= sys.getsizeof(row.record.metadata["body"])
+    key = ("root", cache.PARSER_VERSION)
+    assert cache._memory_cost((key, projection)) == sum(map(sys.getsizeof, (
+        key, projection, projection.raw, projection.records, projection.latest_records, projection.diagnostic_rows,
+    ))) + projection.rows_memory_bytes
+
+
+# LLM: Incremental parsing must carry old row costs, including malformed/error rows, without rescanning them.
+# 函数用途: 验证增量与全量计量相同，预算函数不遍历对象树。
+def test_incremental_memory_cost_matches_full_parse(monkeypatch):
+    first = '{"artifact_id":"a","metadata":{"body":"中文"}}\n{bad\n'
+    raw = first + '[]\n{"updated_at":' + str(10 ** 400) + '}\n'
+    base = cache.parse_registry_projection(first)
+    incremental = cache._append_registry_projection(base, raw)
+    full = cache.parse_registry_projection(raw)
+    assert getattr(incremental, "rows_memory_bytes", 0) > 0
+    assert incremental.rows_memory_bytes == full.rows_memory_bytes
+    assert all(row.estimated_bytes > 0 for row in full.records)
+    monkeypatch.setattr(cache, "_retained_tree_bytes", lambda *args: pytest.fail("cost walked retained tree"))
+    assert cache._memory_cost((("r", 1), incremental)) == cache._memory_cost((("r", 1), full))
+
+
+# LLM: Wide retained metadata plus raw must exceed the real default 8MiB budget and evict the old version.
+# 函数用途: 验证大metadata不会因每行固定估值被错误留在缓存。
+def test_large_metadata_obeys_default_eight_mib_budget(monkeypatch):
+    from collections import OrderedDict
+
+    monkeypatch.setattr(cache, "_CACHE", OrderedDict())
+    monkeypatch.setattr(cache, "_CACHE_BYTES", 0)
+    assert cache.CACHE_MAX_BYTES == 8 * 1024 * 1024
+    identity = ("large-metadata", 1, 1)
+    cache.registry_projection(identity, '{"artifact_id":"a"}\n')
+    raw = json.dumps({"artifact_id": "a", "metadata": {"body": "中" * 2_200_000}}, ensure_ascii=False) + "\n"
+    result = cache.registry_projection(identity, raw)
+    assert cache._memory_cost(((identity, cache.PARSER_VERSION), result)) > cache.CACHE_MAX_BYTES
+    assert result.records[0].record.metadata["body"] == "中" * 2_200_000
+    assert not cache._CACHE and cache._CACHE_BYTES == 0
 
 
 # LLM: 用普通单链接账本，正文仍经产品的安全读取入口。
