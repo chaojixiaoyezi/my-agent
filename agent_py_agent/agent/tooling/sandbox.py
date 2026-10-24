@@ -15,24 +15,25 @@ bwrap 优先使用运行环境安装的兼容版本,再退到仓库内置离线�
 命令把这层视为安全硬门:bwrap 缺失或自检失败时必须拒绝执行,不允许降级宿主 shell。
 """
 
-import argparse
 import errno
 import json
 import os
 import platform
-import shlex
-import shutil
-import stat
-import subprocess
 import sys
-import tempfile
-from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-# 独立资源启动器在进入bwrap前运行，只依赖标准库；-I/-B/-S阻止用户site与字节码写入。
+# 独立资源启动器在进入bwrap前运行，只依赖最小标准库并尽早exec，避免编译完整模块与污染stderr。
 _IS_RESOURCE_LAUNCHER = __name__ == "__main__" and sys.argv[1:2] == ["--resource-launcher"]
 if not _IS_RESOURCE_LAUNCHER:
+    import argparse
+    import shlex
+    import shutil
+    import stat
+    import subprocess
+    import tempfile
+    from collections.abc import Sequence
+
     from ..path_access_policy import (
         HOST_STATE_LOCK_SUFFIX,
         SQLITE_SIDECAR_SUFFIXES,
@@ -83,11 +84,11 @@ class ResourceLimits:
                 raise ValueError(f"SANDBOX_RESOURCE_LIMIT_INVALID: {name}")
 
     # LLM: 环境仅在父进程构造spec时读取；模型命令内改env不能回头改变这份冻结配置。
-    # 函数用途: 从宿主环境读取内存、进程数与nice，未设置沿安全默认。
+    # 函数用途: 从宿主环境读取内存、进程数、nice与OOM偏置，未设置沿安全默认。
     @classmethod
     def from_environment(cls):
         names = {"max_memory_mb": "MY_AGENT_TOOL_MAX_MEMORY_MB", "max_processes": "MY_AGENT_TOOL_MAX_PIDS",
-                 "nice_increment": "MY_AGENT_TOOL_NICE"}
+                 "nice_increment": "MY_AGENT_TOOL_NICE", "oom_score_adj": "MY_AGENT_TOOL_OOM_SCORE_ADJ"}
         values = {name: int(os.environ[env]) for name, env in names.items() if env in os.environ}
         return cls(**values)
 
@@ -155,21 +156,23 @@ def _set_child_ceiling(resource, name, requested):
     return None
 
 
-# LLM: 只在独立解释器运行，配置在父进程冻结；不改Gateway限制，exec保留原PID/session与取消/回收语义。
+# LLM: 只在独立解释器运行，配置在父进程冻结；软防护不支持时不污染子命令stderr，硬上限失败拒绝执行。
 # 函数用途: 施加资源限制后原样exec原沙箱命令，失败留结构化诊断且不执行未受控命令。
 def _resource_launcher(argv: list[str]) -> int:
     try:
         if len(argv) < 2:
             raise ValueError("missing resource policy or command")
         limits = ResourceLimits(**json.loads(argv[0]))
-        unavailable = _apply_child_resources(limits)
-        if unavailable:
-            sys.stderr.write(json.dumps({"resource_guard_unavailable": unavailable}) + "\n")
+        _apply_child_resources(limits)
         os.execvp(argv[1], argv[1:])
     except (OSError, TypeError, ValueError, OverflowError) as error:
         sys.stderr.write(json.dumps({"error_code": "SANDBOX_RESOURCE_GUARD_FAILED", "error_type": type(error).__name__}) + "\n")
         return 98
     return 98
+
+
+if _IS_RESOURCE_LAUNCHER:  # pragma: no cover - 独立资源启动器快速出口
+    raise SystemExit(_resource_launcher(sys.argv[2:]))
 
 
 def _proc_mount_args() -> list[str]:

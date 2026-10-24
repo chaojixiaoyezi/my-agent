@@ -244,15 +244,17 @@ class OwnerToolScheduler:
             self._queue.clear()
             return pending, error
 
-    # LLM: 每项后恢复Context；降额度时超额worker退出；finally归还正常或保留许可并唤醒其它owner。
-    # 函数用途: 消费FIFO队列，队空即退出而不保留空闲线程。
+    # LLM: 每项后恢复Context；全局上限下若有其它owner排队则让出槽位轮转；降额度时超额worker退出。
+    # 函数用途: 消费FIFO队列，队空或需跨owner公平让槽时退出并唤醒等待者。
     def _drain(self, reserve=False):
         global _GLOBAL_ACTIVE, _GLOBAL_CONTROL_ACTIVE
+        yield_to_waiters = False
         try:
             while True:
-                work = self._take_next(reserve)
+                work = self._take_next(reserve, yield_to_waiters=yield_to_waiters)
                 if work is None:
                     return
+                yield_to_waiters = True
                 self._complete(*work)
         finally:
             with self._condition:
@@ -267,13 +269,15 @@ class OwnerToolScheduler:
             for failure in failures:
                 _finish_start_failure(failure)
 
-    # LLM: 保留worker只取控制项，正常许可不扣预留控制槽；降额后超额正常线程退出。
+    # LLM: 保留worker只取控制项，正常许可不扣预留控制槽；已完成一项且有其它owner等待全局槽时主动让出。
     # 函数用途: 领取下一工作项并解除生产者背压。
-    def _take_next(self, reserve=False):
+    def _take_next(self, reserve=False, *, yield_to_waiters=False):
         with self._condition:
             if (not self._queue or (reserve and self._queue[0][2] != 'control')
                     or (not reserve and (self._active - self._control_active > self.limit
-                                        or bool(_GLOBAL_LIMIT and _GLOBAL_ACTIVE - _GLOBAL_CONTROL_ACTIVE > _GLOBAL_LIMIT)))):
+                                        or bool(_GLOBAL_LIMIT and _GLOBAL_ACTIVE - _GLOBAL_CONTROL_ACTIVE > _GLOBAL_LIMIT)
+                                        or (yield_to_waiters and bool(_GLOBAL_LIMIT)
+                                            and any(waiter is not self and waiter._queue for waiter in _GLOBAL_WAITERS))))):
                 return None
             work = self._queue.popleft()
             self._condition.notify_all()

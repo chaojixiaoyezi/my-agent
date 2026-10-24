@@ -842,12 +842,20 @@ def _execute_parallel_segment(
             return [future.result() for future in futures]
 
 
-# LLM: 仅在役工具名及真实轻量动作可借控制槽；wait、退休名、畸形动作和模型priority不获额外槽，不改授权审批。
-# 函数用途: 将进程列表/状态/网络状态/停止与在役查询工具识别为控制调用。
-def _is_control_lane_call(call):
+# LLM: 优先读工具ConcurrencyPolicy声明，同时兼容内置轻量控制集；wait、退休名、畸形动作和模型priority不获额外槽。
+# 函数用途: 将进程列表/状态/网络状态/停止与声明了control_lane的查询工具识别为控制调用。
+def _is_control_lane_call(call, snapshot=None):
+    bound = snapshot.get(call.tool_name) if snapshot is not None and hasattr(snapshot, 'get') else None
+    concurrency = getattr(getattr(bound, 'policy', None), 'concurrency', None)
+    if getattr(concurrency, 'control_lane', False) is True:
+        actions = getattr(concurrency, 'control_lane_actions', ())
+        if not actions:
+            return True
+        action = call.arguments.get('action') if isinstance(getattr(call, 'arguments', None), dict) else None
+        return isinstance(action, str) and action in actions
     if call.tool_name in {'list_agents', 'tool_search', 'list_tools'}:
         return True
-    action = call.arguments.get('action')
+    action = call.arguments.get('action') if isinstance(getattr(call, 'arguments', None), dict) else None
     return call.tool_name == 'process_session' and isinstance(action, str) and action in {'list', 'status', 'network_status', 'stop'}
 
 
@@ -855,8 +863,9 @@ def _is_control_lane_call(call):
 # 函数用途: 为并行调用绑定正确优先级和取消结果。
 def _round_work_item(request, idx, call, context, queued, reuse):
     invoke = partial(_started_parallel_call, request, idx, call, context, queued)
+    snapshot = getattr(request, 'tool_snapshot', None) or getattr(getattr(request, 'params', None), 'tool_runtime_snapshot', None)
     return ToolWorkItem(call.call_id, invoke, cancelled_result=invoke, sqlite_reuse=reuse,
-                        priority='control' if _is_control_lane_call(call) else 'normal')
+                        priority='control' if _is_control_lane_call(call, snapshot) else 'normal')
 
 
 # LLM: 宿主令牌与能力配置只传给调度边界，任务参数不成为额度权威。

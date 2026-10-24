@@ -138,9 +138,9 @@ def _context_refresh_transition_response(
     )
 
 
-# LLM: 仅plain-final入口为原命名工作或当前任务已绑定完成唤醒的进程生成阶段回复；实际工具轮不强制让出。
-# 仍保留prepare与精确事件回复优先；后台只结束当前表达片，续接由原managed_process_exited负责，不新建Goal或轮询器。
-# 函数用途: 原任务仍有结构化后台依赖时，允许回合自然让出并如实说明还在继续。
+# LLM: 仅plain-final入口为仍有未完成采集窗口或未就绪监控源的命名Audit生成阶段回复；普通后台命令不再拦截plain-final。
+# 后台命令的完成唤醒由原managed_process_exited在当前回合正常收口后驱动下一轮，不把已回复回合标成unfinished阻断TaskLink收口。
+# 函数用途: 原命名Audit仍有结构化后台采集依赖时，允许回合自然让出并如实说明还在继续。
 def queue_interim_reply_for_active_named_work(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -162,9 +162,9 @@ def queue_interim_reply_for_active_named_work(
         # the event's authoritative facts.
         return False
     named_work = _active_named_audit_facts(agent, params)
-    wake_count = _active_wake_backed_process_count(agent, params)
-    if not named_work and not wake_count:
+    if not named_work:
         return False
+    wake_count = _active_wake_backed_process_count(agent, params)
     facts = _interim_reply_facts(
         agent,
         params,
@@ -174,11 +174,10 @@ def queue_interim_reply_for_active_named_work(
     continues = named_work.get("continues_without_more_user_input") is True or wake_count > 0
     facts["reply_is_interim"] = continues
     facts["task_continues_without_more_user_input"] = continues
-    if named_work:
-        facts["named_work"] = named_work
+    facts["named_work"] = named_work
     queue_natural_user_reply(
         params,
-        kind=("named_work_active" if continues else "named_work_incomplete") if named_work else "background_process_active",
+        kind="named_work_active" if continues else "named_work_incomplete",
         facts=facts,
     )
     return True
@@ -601,7 +600,7 @@ def _interim_reply_facts(
     return facts
 
 
-# LLM: 只在原主会话通知合同可用时读取既有Registry；无挂载属性时复用原全局实例，根目录来自可信agent路径。
+# LLM: 只在原主会话通知合同可用时读取既有Registry；list_report/get可能刷新并持久化已退出进程状态，根目录来自可信agent路径。
 # 当前任务、thread、store与owner同时相等；跨模型片沿原任务收件目标，不错拿当前run_id拒掉旧片的合法通知。
 # 只计健康记录下限；普通读取错不抹掉其它健康项，中断/两类取消先原样上抛，权威错误不降级成空计数。
 # 函数用途: 统计当前任务至少有多少运行中命令可由原完成事件接续，排除其它会话与无关前台。

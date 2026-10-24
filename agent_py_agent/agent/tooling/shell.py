@@ -555,7 +555,7 @@ def _communicate_process(
     probe_interval = _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS
     with register_cancellation_callback(lambda: _cancel_foreground_wait(proc, birth_token, capture)):
         while True:
-            generation = capture.generation
+            generation = getattr(capture, "generation", 0)
             if is_interrupted() or cancellation_requested():
                 _kill_process_group(proc, birth_token)
                 capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
@@ -583,7 +583,11 @@ def _communicate_process(
                 result.termination = termination
                 return result
             wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.1
-            capture.wait_changed(min(remaining, wait), generation=generation)
+            wait_step = min(remaining, wait, 0.02 if done else 0.1)
+            if not done and hasattr(capture, "wait_changed"):
+                capture.wait_changed(wait_step, generation=generation)
+            else:
+                time.sleep(wait_step)
 
 
 # LLM: capture初始化可能申请FD/线程失败，业务进程已存在；必须用原出生身份清理，保留首个异常对象。

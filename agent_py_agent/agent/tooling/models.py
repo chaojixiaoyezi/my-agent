@@ -426,10 +426,16 @@ class TimeoutPolicy:
 @dataclass(frozen=True)
 class ConcurrencyPolicy:
     mode: str = "serial"
+    control_lane: bool = False
+    control_lane_actions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.mode not in {"serial", "parallel_safe", "barrier"}:
             raise ValueError(f"invalid tool concurrency mode: {self.mode}")
+        if type(self.control_lane) is not bool:
+            raise ValueError("tool concurrency control_lane must be a bool")
+        actions = tuple(str(item or "").strip() for item in self.control_lane_actions if str(item or "").strip())
+        object.__setattr__(self, "control_lane_actions", actions)
 
 
 class ResourceScopeResolutionError(RuntimeError):

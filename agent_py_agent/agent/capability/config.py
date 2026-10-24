@@ -1,4 +1,5 @@
-
+# LLM: 子代理权限、凭据默认保留期限、运行投影、整机工具安全阀和包候选的唯一默认配置；新增字段同步随包YAML与测试。
+# 模块用途: 集中读取协作能力设置，同stat文件复用解析且返回隔离副本；缓存不改变路径选择、非法值拒绝或权限。
 from __future__ import annotations
 
 """能力路由与子代理运行投影配置加载工具。
@@ -14,9 +15,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..settings.config import load_simple_yaml
-
-# LLM: 子代理权限、凭据默认保留期限、运行投影和包候选的唯一默认配置；新增字段同步随包 YAML 与测试。
-# 模块用途: 集中读取协作能力设置，同stat文件复用解析且返回隔离副本；缓存不改变路径选择、非法值拒绝或权限。
 
 _CAPABILITY_CONFIG_CACHE_LOCK = threading.RLock()
 _CAPABILITY_CONFIG_CACHE: OrderedDict[tuple[str, int, int, int, int, int], CapabilityConfig] = OrderedDict()

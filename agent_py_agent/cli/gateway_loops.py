@@ -330,7 +330,7 @@ class _RequestDispatcher:
 
 
     # LLM: 原P6已停止出生则不再认领；Count0/原组件缺Root只读内存默认None，安全重启仍按原结构化等待，原T/P3/恢复与终态投影不变。
-    # 恢复、终态投影和输入回执调和照常运行。改动须同步 test_gateway_safe_restart.py。
+    # 恢复、终态投影、输入回执调和及孤儿锁清扫进入前调用note_dispatch_tick_progress刷新单调进展。改动须同步 test_gateway_safe_restart.py。
     # 函数用途: 派发一轮待处理请求并执行节流的恢复/投影/调和扫描，返回本轮派发数量。
     def tick(self) -> int:
         # New work gets the first bounded slice. Historical projection and
@@ -360,15 +360,19 @@ class _RequestDispatcher:
         # Recovery and projections are independent durability domains. One
         # damaged receipt must not starve normal jobs or another repair domain.
         if self._recover_throttle.due():
+            loop_health.note_dispatch_tick_progress()
             self._recover_throttle.defer(self._run_segment(_RECOVERY_SITE, self._recovery_backoff, self._recover_once))
         now = time.monotonic()
         if now >= self._next_terminal_projection_at:
+            loop_health.note_dispatch_tick_progress()
             delay = self._run_segment(_PROJECTION_SITE, self._projection_backoff, self._project_terminals_once)
             self._next_terminal_projection_at = now + max(0.75, delay)
         if now >= self._next_input_reconcile_at:
+            loop_health.note_dispatch_tick_progress()
             delay = self._run_segment(_RECONCILE_SITE, self._reconcile_backoff, self._reconcile_inputs_once)
             self._next_input_reconcile_at = now + max(0.75, delay)
         if now >= self._next_lock_cleanup_at:
+            loop_health.note_dispatch_tick_progress()
             delay = self._run_segment(
                 _LOCK_SIDECAR_CLEANUP_SITE, self._lock_cleanup_backoff, self._cleanup_lock_sidecars_once
             )

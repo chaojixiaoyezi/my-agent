@@ -249,13 +249,12 @@ def prepare_conversation_method_carry(agent: object, params: object, *, budget_c
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_CARRY_UNAVAILABLE")
 
 
-# LLM: 线程名只取当前params，schema只取当前授权snapshot；原IR按source去重，不新增第二持久标记。
-#   仅Compact后默认折叠开启时追加；更窄allowed_tools、取消/headroom保持；按完整行装箱，跳过放不下的行。
+# LLM: 线程名经method_thread_id校验conversation_method_carry_enabled与非subagent上下文，schema只取当前授权snapshot；
+#   原IR按source去重，不新增第二持久标记；仅Compact后默认折叠开启时追加；更窄allowed_tools、取消/headroom保持。
 # 函数用途: 将最近已发现工具的参数速查放到压缩后的上下文尾部，返回真正新增的预算占用。
 def _prepare_discovered_tool_carry(agent: object, params: object, budget_cap: int | None) -> int:
     from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
     from ..conversation.tool_discovery import build_discovered_tool_micro_schemas
-    from ..settings.reasoning_effort import run_thread_id
     from ..tooling.tool_search_state import ordered_tool_names
 
     snapshot = getattr(params, "tool_runtime_snapshot", None)
@@ -263,7 +262,7 @@ def _prepare_discovered_tool_carry(agent: object, params: object, budget_cap: in
             or getattr(params, "context_scope", "") in {"isolated", "control_plane"}
             or getattr(agent, "_current_run_params", params) is not params):
         return 0
-    thread_id = run_thread_id(params)
+    thread_id = method_thread_id(agent, params)
     store = getattr(agent, "conversation_store", None)
     thread = store.threads.load(thread_id) if store is not None and thread_id else None
     if thread is None or thread.compact_generation <= 0:

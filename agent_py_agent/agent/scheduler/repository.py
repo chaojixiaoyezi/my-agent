@@ -111,24 +111,21 @@ class _HistoryRunIdsProjection:
 _HISTORY_RUN_IDS_CACHE: OrderedDict[str, _HistoryRunIdsProjection] = OrderedDict()
 
 
-# LLM: 计算完整已扫描前缀的blake2b摘要与末尾是否为LF；短读或IO异常必须回退，不能冒充有效前缀。
-# 函数用途: 校验历史文件的完整已扫描前缀未被改写，并返回前缀摘要与换行完整标志。
+# LLM: 计算已扫描尾部锚点（最多4096字节）的blake2b摘要与末尾是否为LF；短读或IO异常必须回退，不能冒充有效前缀。
+# 函数用途: 校验历史文件已扫描边界锚点未被改写，并返回锚点摘要与换行完整标志。
 def _read_history_prefix_state(handle: Any, offset: int) -> tuple[str, bool] | None:
-    hasher = hashlib.blake2b(digest_size=16)
-    remaining = offset
-    last_byte = b"\n"
-    while remaining > 0:
-        chunk = handle.read(min(65536, remaining))
-        if not chunk:
-            return None
-        hasher.update(chunk)
-        last_byte = chunk[-1:]
-        remaining -= len(chunk)
-    return hasher.hexdigest(), last_byte == b"\n"
+    if offset <= 0:
+        return hashlib.blake2b(b"", digest_size=16).hexdigest(), True
+    start = max(0, offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
+    handle.seek(start)
+    anchor = handle.read(offset - start)
+    if len(anchor) != offset - start:
+        return None
+    return hashlib.blake2b(anchor, digest_size=16).hexdigest(), anchor.endswith(b"\n")
 
 
-# LLM: 只接受同设备/inode、增长、原完整LF边界且完整前缀摘要相同的追加；任一坏行或竞态退回原全量报告器。
-# 函数用途: 验证历史追加后只解析新增字节，返回新的不可变ID投影。
+# LLM: 只接受同设备/inode、增长、原完整LF边界且尾部锚点摘要相同的追加；任一坏行或竞态退回原全量报告器。
+# 函数用途: 验证历史追加后只解析锚点与新增字节，返回新的不可变ID投影。
 def _extend_history_run_ids(path, stamp, cached):
     if stamp is None or stamp[2:4] != cached.stamp[2:4] or stamp[1] <= cached.offset or not cached.complete_line:
         return None
@@ -137,17 +134,11 @@ def _extend_history_run_ids(path, stamp, cached):
             info = os.fstat(handle.fileno())
             if (info.st_ino, info.st_dev) != stamp[2:4]:
                 return None
-            hasher = hashlib.blake2b(digest_size=16)
-            remaining = cached.offset
-            last_byte = b"\n"
-            while remaining > 0:
-                chunk = handle.read(min(65536, remaining))
-                if not chunk:
-                    return None
-                hasher.update(chunk)
-                last_byte = chunk[-1:]
-                remaining -= len(chunk)
-            if last_byte != b"\n" or hasher.hexdigest() != cached.anchor_digest:
+            start = max(0, cached.offset - _HISTORY_RUN_IDS_ANCHOR_BYTES)
+            handle.seek(start)
+            anchor = handle.read(cached.offset - start)
+            if (len(anchor) != cached.offset - start or not anchor.endswith(b"\n")
+                    or hashlib.blake2b(anchor, digest_size=16).hexdigest() != cached.anchor_digest):
                 return None
             tail = handle.read(stamp[1] - cached.offset)
         if len(tail) != stamp[1] - cached.offset or not tail.endswith(b"\n"):
@@ -162,8 +153,9 @@ def _extend_history_run_ids(path, stamp, cached):
             added.add(str(row.get("run_id") or ""))
         if _history_file_stamp(path) != stamp:
             return None
-        hasher.update(tail)
-        return _HistoryRunIdsProjection(stamp, stamp[1], hasher.hexdigest(), True, cached.run_ids | added)
+        new_anchor = (anchor + tail)[-_HISTORY_RUN_IDS_ANCHOR_BYTES:]
+        new_digest = hashlib.blake2b(new_anchor, digest_size=16).hexdigest()
+        return _HistoryRunIdsProjection(stamp, stamp[1], new_digest, True, cached.run_ids | added)
     except (OSError, UnicodeError, ValueError):
         return None
 
@@ -678,15 +670,26 @@ class _SchedulerReservationOperations:
 class _SchedulerRunOperations:
     """Public durable run claim, completion, and history operations."""
 
-    # LLM: 便宜路径只排除仍在未来的轻量键；候选必须重读完整原运行，取消、事件代次与投递由原消费者核验。
+    # LLM: 便宜路径只排除仍在未来的轻量键；exclude_active_lanes可先排除被活动同车道阻挡的积压再限量，最终派发仍须原事务CAS。
     # 函数用途: 按当前时间列出排队运行，未到期的空轮可省去完整账本读取。
-    def queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
+    def queued_runs(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 64,
+        cheap_checks: bool = False,
+        exclude_active_lanes: bool = False,
+    ) -> list[dict[str, object]]:
         current = _now(now)
         if cheap_checks:
             hit = self._cheap_projection_hit()
             if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
                 return []
         store = self._store_snapshot()
+        if exclude_active_lanes:
+            runs, _errors = self._valid_runs(store)
+            rows = _ready_job_runs(runs, current)
+            return deepcopy(rows[: max(1, int(limit or 1))])
         rows: list[dict[str, object]] = []
         for raw in store["runs"].values():
             run, _error = self._parse_run(raw)
@@ -701,15 +704,7 @@ class _SchedulerRunOperations:
     # LLM: 只读候选每车道一条，先排除被活动同车道阻挡的积压再限量，不能挤掉别的job或规则；最终派发仍须原事务CAS。
     # 函数用途: 按当前时间选择不互相重叠的排队候选，避免同job/同rule积压造成队首阻塞。
     def dispatchable_queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
-        current = _now(now)
-        if cheap_checks:
-            hit = self._cheap_projection_hit()
-            if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
-                return []
-        store = self._store_snapshot()
-        runs, _errors = self._valid_runs(store)
-        rows = _ready_job_runs(runs, current)
-        return deepcopy(rows[: max(1, int(limit or 1))])
+        return self.queued_runs(now=now, limit=limit, cheap_checks=cheap_checks, exclude_active_lanes=True)
 
     def get_active_run(self, run_id: str) -> dict[str, object] | None:
         """Return one nonterminal run without exposing the mutable store object."""

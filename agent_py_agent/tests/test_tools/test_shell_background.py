@@ -445,8 +445,8 @@ def test_w16_interim_facts_recognize_current_wake_backed_process(tmp_path, monke
     assert "store_root" not in json.dumps(facts) and "completion_target" not in facts
 
 
-# LLM: 原普通plain-final收口入口和零工具表达阶段真实执行；后台运行记录不等于业务成功，不强制中断实际工具轮。
-# 函数用途: 没有命名Audit时也能让出当前回合，并保留完成唤醒继续的阶段事实。
+# LLM: 原普通plain-final不因无命名Audit的后台命令丢弃模型正文或阻塞TaskLink完成；工具轮上限阶段仍带完成唤醒事实。
+# 函数用途: 验证普通plain-final直接收口，而阶段回复事实仍保留后台计数与完成唤醒合同。
 def test_w16_plain_final_queues_background_interim_and_can_settle(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core.tool_loop import completion
     from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
@@ -456,13 +456,16 @@ def test_w16_plain_final_queues_background_interim_and_can_settle(tmp_path, monk
     from agent_py_agent.agent.backends import ModelResponse
 
     agent, params, _authority, _registry, _record = _w16_wake_fixture(tmp_path, monkeypatch)
-    assert completion.queue_interim_reply_for_active_named_work(agent, params, tool_rounds=2)
+    assert not completion.queue_interim_reply_for_active_named_work(agent, params, tool_rounds=2)
+    assert pending_natural_user_reply(params) is None
+    assert completion.queue_interim_reply_for_tool_round_limit(agent, params, tool_rounds=2)
     phase = pending_natural_user_reply(params)
-    assert phase["kind"] == "background_process_active"
+    assert phase["kind"] == "tool_round_limit"
     assert phase["facts"]["active_background_process_count"] == 1
+    assert phase["facts"]["completion_wake"] == {"enabled": True, "reason": "managed_process_exited", "yield_supported": True}
     result = finish_natural_user_reply(params, ModelResponse(text="已启动后台采样，完成事件到达后继续核对。", backend="test"), accepted=True)
     assert (result.runtime_status, result.runtime_reason, result.runtime_source) == (
-        "unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle")
+        "unfinished", "TOOL_ROUND_LIMIT_REACHED", "tool_loop")
     assert not result.tool_use_blocks
     assert pending_natural_user_reply(params) is None
 
@@ -508,8 +511,8 @@ def test_w16_wake_count_uses_existing_registry_when_agent_has_none(tmp_path, mon
     assert completion._interim_reply_facts(agent, params, tool_rounds=1).get("active_background_process_count") == 1
 
 
-# LLM: 真实工具循环/表达片，仅模型采样为确定性替身；不启动进程，不将此测试外推为真实完成事件E2E。
-# 函数用途: 核对普通plain-final确实进入一次零工具阶段后释放，而未绑定唤醒的前台仍只采样一次。
+# LLM: 真实工具循环对普通plain-final只采样一次并正常收口為ok，让TaskLink完成以便后续managed_process_exited投递。
+# 函数用途: 核对有无绑定唤醒的普通plain-final均只采样一次、不追加无草稿表达轮。
 @pytest.mark.parametrize("armed", [False, True])
 def test_w16_real_tool_loop_settles_once_without_polling(tmp_path, monkeypatch, armed):
     from agent_py_agent.agent.agent_core._tool_loop_service import execute_tool_loop
@@ -530,34 +533,24 @@ def test_w16_real_tool_loop_settles_once_without_polling(tmp_path, monkeypatch, 
         allowed_tools=[], live_archive_state={})
     calls = []
 
-    # LLM: 只提供两个有界模型响应，不能偷偷执行工具或把第三次忙采样当成成功。
-    # 类用途: 模拟先给plain-final草稿，再根据宿主事实写阶段回执。
+    # LLM: 只允许一次模型采样，普通plain-final不得被拦截改写或触发第二次采样。
+    # 类用途: 提供确定性单轮plain-final响应。
     class Backend:
         name = "w16-scripted-model"
 
-        # LLM: 检查表达片仍无工具，并从当前真实pending事实读取，而非从提示文字猜生命周期。
-        # 函数用途: 在限定调用次数内返回模型正文。
+        # LLM: 记录采样次数并返回首轮正文。
+        # 函数用途: 在单次调用内返回模型正文。
         def generate(self, prompt, **kwargs):
             calls.append(prompt)
-            assert len(calls) <= 2
-            if len(calls) == 1:
-                return ModelResponse(text="采样已经启动。", backend=self.name)
-            phase = pending_natural_user_reply(params)
-            assert phase["kind"] == "background_process_active"
-            assert phase["facts"]["active_background_process_count"] == 1
-            assert not kwargs.get("tools")
-            return ModelResponse(text="后台采样仍在运行，完成后继续核对。", backend=self.name)
+            assert len(calls) == 1
+            return ModelResponse(text="采样已经启动。", backend=self.name)
 
     agent.backend = Backend()
     response = execute_tool_loop(agent, params).final_response
-    assert len(calls) == (2 if armed else 1)
-    assert response.text == ("后台采样仍在运行，完成后继续核对。" if armed else "采样已经启动。")
+    assert len(calls) == 1
+    assert response.text == "采样已经启动。"
     assert not params.executed_tools and pending_natural_user_reply(params) is None
-    if armed:
-        assert (response.runtime_status, response.runtime_reason, response.runtime_source) == (
-            "unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle")
-    else:
-        assert response.runtime_status == "ok"
+    assert response.runtime_status == "ok"
 
 
 # LLM: 完成事件对比的是原record.target与signal.source_agent_id，不要求后来同任务的模型片run_id相同。
@@ -631,11 +624,14 @@ def test_w16fix_rejected_background_reply_preserves_unfinished(tmp_path, monkeyp
     from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
         finish_natural_user_reply,
         pending_natural_user_reply,
+        queue_natural_user_reply,
     )
     from agent_py_agent.agent.backends import ModelResponse
 
     agent, params, _authority, _registry, _record = _w16_wake_fixture(tmp_path, monkeypatch)
-    assert completion.queue_interim_reply_for_active_named_work(agent, params, tool_rounds=1)
+    facts = completion._interim_reply_facts(agent, params, tool_rounds=1)
+    assert facts["active_background_process_count"] == 1
+    queue_natural_user_reply(params, kind="background_process_active", facts=facts)
     calls = [{"type": "tool_use", "id": "not-executed", "name": "process_session", "input": {"action": "wait"}}]
     response = ModelResponse(text="", backend="test", tool_use_blocks=calls if rejection == "structured_tool_call" else [])
     result = finish_natural_user_reply(params, response, accepted=False, rejection_reason=rejection)
