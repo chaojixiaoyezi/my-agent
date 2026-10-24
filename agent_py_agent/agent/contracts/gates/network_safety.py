@@ -369,14 +369,14 @@ def _canonical_ip(host: object) -> str:
     return str(address)
 
 
-# LLM: 基准网段例外只适用原生 IPv4 与固定前缀转换（::ffff:0:0/96、::ffff:0:0:0/96、64:ff9b::/96、64:ff9b:1::/48），禁止 ULA/ISATAP 借低位投影绕过。
+# LLM: 基准网段例外只适用原生 IPv4 与固定前缀转换（::ffff:0:0/96、::ffff:0:0:0/96、64:ff9b::/96、64:ff9b:1::/96），禁止 ULA/ISATAP 借低位投影绕过。
 # 函数用途: 判断解析地址是否为合法 RFC2544 基准代理地址。
 def _is_benchmark_proxy_ip(value: str) -> bool:
     address = ip_address_or_none(value)
     if address is None:
         return False
     if isinstance(address, ipaddress.IPv6Address):
-        parts = tuple(int(part, 16) for part in address.exploded.split(":"))
+        parts = _ipv6_hextets(address)
         if not (
             address.ipv4_mapped is not None
             or parts[:6] == (0, 0, 0, 0, 0xFFFF, 0)
@@ -387,7 +387,7 @@ def _is_benchmark_proxy_ip(value: str) -> bool:
     return isinstance(projected, ipaddress.IPv4Address) and projected in _RFC2544_BENCHMARK_NETWORK
 
 
-# LLM: 同时保留原生 IPv6 属性与嵌入的 IPv4 投影，避免转换地址覆写掉原生私网或链路本地分类。
+# LLM: 保留原生 IPv6 属性与嵌入 IPv4 投影（Well-Known NAT64 64:ff9b::/96 按其嵌入 IPv4 分类，避免公网投影被标为私网）。
 # 函数用途: 返回原地址及其有效 IPv4 投影候选集合，供私网与永久拦截判定共用。
 def _address_candidates(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
@@ -395,6 +395,8 @@ def _address_candidates(
     projected = ipv4_projected(address)
     if projected is None or projected == address:
         return (address,)
+    if isinstance(address, ipaddress.IPv6Address) and _ipv6_hextets(address)[:6] == (0x0064, 0xFF9B, 0, 0, 0, 0):
+        return (projected,)
     return (address, projected)
 
 
@@ -614,15 +616,20 @@ def ipv4_projected(
     return address.ipv4_mapped or embedded_ipv4_from_ipv6(address)
 
 
+def _ipv6_hextets(address: ipaddress.IPv6Address) -> tuple[int, ...]:
+    packed = address.packed
+    return tuple(int.from_bytes(packed[index : index + 2], "big") for index in range(0, 16, 2))
+
+
 def embedded_ipv4_from_ipv6(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
-    parts = tuple(int(part, 16) for part in address.exploded.split(":"))
-    return _matching_ipv4_projection(_ipv4_projection_candidates(parts))
+    return _matching_ipv4_projection(_ipv4_projection_candidates(_ipv6_hextets(address)))
 
 
 def _ipv4_projection_candidates(parts: tuple[int, ...]) -> tuple[tuple[bool, int, int], ...]:
     return (
         (parts[:6] == (0, 0, 0, 0, 0, 0) and (parts[6], parts[7]) not in {(0, 0), (0, 1)}, parts[6], parts[7]),
         (parts[:6] == (0, 0, 0, 0, 0xFFFF, 0), parts[6], parts[7]),
+        (parts[:6] == (0x0064, 0xFF9B, 0, 0, 0, 0), parts[6], parts[7]),
         (parts[:3] == (0x0064, 0xFF9B, 0x0001) and parts[3:6] == (0, 0, 0), parts[6], parts[7]),
         (parts[0] == 0x2002, parts[1], parts[2]),
         (parts[0] == 0x2001 and parts[1] == 0, parts[6] ^ 0xFFFF, parts[7] ^ 0xFFFF),

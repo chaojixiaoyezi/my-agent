@@ -101,7 +101,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _display_timezone: str = ""
     im_approval_agent: object | None = field(default=None, repr=False)
     _committed_model_calls: set[str] = field(default_factory=set)
-    _commit_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _commit_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _commentary_emitted: bool = False
     _committed_commentary: list[str] = field(default_factory=list)
     _tool_input_active: bool = False
@@ -119,8 +119,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
     thinking_flush_chars: int = 256
     thinking_flush_interval_seconds: float = 0.25
     _thinking_buffer: list[str] = field(default_factory=list, init=False, repr=False)
-    _thinking_concurrent_buffer: list[str] = field(default_factory=list, init=False, repr=False)
-    _thinking_draining: bool = field(default=False, init=False, repr=False)
+    _thinking_pending_final: bool = field(default=False, init=False, repr=False)
+    _thinking_pending_nonfinal: bool = field(default=False, init=False, repr=False)
     _thinking_publishing_tid: int | None = field(default=None, init=False, repr=False)
     _deferred_after_thinking: list[tuple[dict[str, object], Callable[[], bool] | None]] = field(default_factory=list, init=False, repr=False)
     _thinking_buffer_chars: int = field(default=0, init=False)
@@ -318,7 +318,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
             self._identifier_redactions, channel=self.delivery_channel,
         )
         with self._commit_lock:
-            if not content and not self._thinking_buffer and not self._thinking_concurrent_buffer:
+            if not content and not self._thinking_buffer:
                 return
             self._thinking_buffer.append(raw)
             self._thinking_buffer_chars += len(content)
@@ -333,10 +333,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
                 self, lambda: _stream_flush_due("", self._thinking_buffer_chars, self._last_thinking_flush_at,
                                                 self.thinking_flush_chars, self.thinking_flush_interval_seconds))
 
-    # LLM: 锁内原子摘取待发批次并置发布标识，净化与发布期间延迟跨线程非thinking事件，避免并发丢字、重复或越序。
+    # LLM: 锁内原子摘取待发批次并置发布标识（在途重入仅登记待补刷标记），净化与发布期间延迟跨线程非thinking事件，避免并发丢字、重复或越序。
     # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
     def flush_thinking_delta(self, *, final: bool = True) -> None:
-        batch = begin_thinking_flush(self, time.monotonic())
+        batch = begin_thinking_flush(self, time.monotonic(), final=final)
         if not batch:
             return
         try:

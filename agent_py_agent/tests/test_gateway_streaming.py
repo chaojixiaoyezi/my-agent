@@ -637,3 +637,50 @@ def test_w21_thinking_flush_drain_orders_concurrent_notice_without_duplication(t
     worker.join(3)
     writer.close()
     assert [row.get("text") for row in _thinking_rows(writer)] == ["first|", "pending|", "notice"]
+
+
+# LLM: 在途思考发布期间新到的tail必须在后到notice之前发出、close不得丢失在途新尾，且延迟发布异常需复原未发项与tid。
+# 函数用途: 覆盖在途flush期间新尾+close、新尾+notice顺序及延迟发布异常恢复。
+def test_w21_inflight_thinking_tail_ordering_and_exception_recovery(thinking_writer, monkeypatch):
+    import pytest
+
+    from agent_py_agent.agent.gateway_parts import stream_writer as sw
+
+    writer, _clock = thinking_writer
+    writer.write_thinking_delta("first|")
+    writer.write_thinking_delta("pending|")
+    entered, release = threading.Event(), threading.Event()
+    original_write = sw.write_chunk_event
+
+    def paused_write(path, payload, **kwargs):
+        if payload.get("kind") == "thinking_delta" and payload.get("text") == "pending|":
+            entered.set()
+            assert release.wait(3)
+        return original_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(sw, "write_chunk_event", paused_write)
+    worker = threading.Thread(target=writer.flush)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        writer.write_thinking_delta("tail|")
+        writer._write_event({"kind": "host_notice", "text": "notice|"})
+    finally:
+        release.set()
+    worker.join(3)
+    writer._deferred_after_thinking.extend(
+        [({"kind": "host_notice", "text": "boom"}, None), ({"kind": "host_notice", "text": "survivor"}, None)]
+    )
+    writer._thinking_publishing_tid = threading.get_ident()
+
+    def failing_publish(w, event, **kwargs):
+        if event.get("text") == "boom":
+            raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        sw.complete_thinking_flush(writer, failing_publish)
+    assert writer._thinking_publishing_tid is None
+    assert [item[0]["text"] for item in writer._deferred_after_thinking] == ["survivor"]
+    writer._deferred_after_thinking.clear()
+    writer.close()
+    assert [row.get("text") for row in _thinking_rows(writer)] == ["first|", "pending|", "tail|", "notice|"]

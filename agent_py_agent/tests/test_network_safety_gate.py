@@ -458,3 +458,14 @@ def test_ipv6_transition_prefixes_and_non_transition_low32_boundaries():
     )
     assert not ula_benchmark.allowed
     assert ula_benchmark.finding_codes == ("NETWORK_PRIVATE_IP_BLOCKED",)
+    assert evaluate_network_safety_gate(
+        _facts("http://native.test:8080/", FakeResolver(["64:ff9b::c612:12"]))
+    ).allowed is True
+    assert evaluate_network_safety_gate(
+        _facts("http://native.test:8080/", FakeResolver(["64:ff9b::808:808"]))
+    ).allowed is True
+    wkp_meta = evaluate_network_safety_gate(
+        _facts("http://native.test:8080/", FakeResolver(["64:ff9b::a9fe:a9fe"]))
+    )
+    assert not wkp_meta.allowed
+    assert wkp_meta.finding_codes == ("NETWORK_ALWAYS_BLOCKED_IP",)

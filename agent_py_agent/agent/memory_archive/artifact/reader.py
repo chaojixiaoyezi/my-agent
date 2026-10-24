@@ -528,8 +528,17 @@ def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str
             payload["next_offset"] = payload["window_end"]
     return payload
 
-# LLM: 全部索引扫描完成后才处理候选路径错误；非绝对引用先匹配原样逻辑身份，仅在无原样命中且非scope引用时将.blob回退为.json。
-# 函数用途: 复用查找结果，保留含斜杠的合法.blob逻辑call_id、原scope和唯一basename修复，并去重open_errors。
+# LLM: 安全展开波浪号前缀；未知用户名回退原Path对象而不抛RuntimeError中断逻辑引用查询。
+# 函数用途: 兼容含~的模型引用输入，避免~unknownuser触发异常。
+def _safe_expanduser(path: Path) -> Path:
+    try:
+        return path.expanduser()
+    except RuntimeError:
+        return path
+
+
+# LLM: 全部索引扫描完成后才处理候选路径错误；非绝对引用先匹配原样逻辑身份，仅无命中时才按物理wrapper路径/唯一文件名回退.json。
+# 函数用途: 复用查找结果，保留含斜杠的合法.blob逻辑call_id、冒号目录相对sidecar、原scope和唯一basename修复，并去重open_errors。
 def _find_index_record(
     root: Path,
     artifact_ref: str,
@@ -538,25 +547,35 @@ def _find_index_record(
     index_paths: tuple[Path, ...] | None = None,
     open_errors: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    if artifact_ref.endswith(".blob") and Path(artifact_ref).expanduser().is_absolute():
+    if artifact_ref.endswith(".blob") and _safe_expanduser(Path(artifact_ref)).is_absolute():
         return _lookup_index_record(
-            root, f"{artifact_ref[:-5]}.json", request, index_paths=index_paths, open_errors=open_errors
+            root,
+            f"{artifact_ref[:-5]}.json",
+            request,
+            index_paths=index_paths,
+            open_errors=open_errors,
+            physical_only=True,
         )
     matched = _lookup_index_record(
         root, artifact_ref, request, index_paths=index_paths, open_errors=open_errors
     )
-    if matched is not None or not artifact_ref.endswith(".blob") or ":" in artifact_ref:
+    if matched is not None or not artifact_ref.endswith(".blob"):
         return matched
     fallback_errors: list[str] | None = [] if open_errors is not None else None
     matched = _lookup_index_record(
-        root, f"{artifact_ref[:-5]}.json", request, index_paths=index_paths, open_errors=fallback_errors
+        root,
+        f"{artifact_ref[:-5]}.json",
+        request,
+        index_paths=index_paths,
+        open_errors=fallback_errors,
+        physical_only=True,
     )
     if open_errors is not None and fallback_errors:
         open_errors.extend(err for err in fallback_errors if err not in open_errors)
     return matched
 
 
-# LLM: 单次给定引用执行索引扫描、异常上抛、scope过滤与唯一basename回退，不隐式改写.blob后缀。
+# LLM: 单次给定引用执行索引扫描、异常上抛、scope过滤与唯一basename回退；physical_only仅匹配物理路径或唯一wrapper文件名。
 # 函数用途: 按既定优先级在索引候选里定位唯一匹配记录。
 def _lookup_index_record(
     root: Path,
@@ -565,9 +584,10 @@ def _lookup_index_record(
     *,
     index_paths: tuple[Path, ...] | None = None,
     open_errors: list[str] | None = None,
+    physical_only: bool = False,
 ) -> dict[str, Any] | None:
     try:
-        ref_path = Path(artifact_ref).expanduser()
+        ref_path = _safe_expanduser(Path(artifact_ref))
         resolved_ref = ref_path.resolve(strict=False) if ref_path.is_absolute() or _looks_like_path(artifact_ref) else None
     except Exception:
         # 原先先读取索引再求引用路径；极端引用路径错误不能遮蔽索引的读取/解码错误。
@@ -577,13 +597,14 @@ def _lookup_index_record(
         artifact_ref,
         resolved_ref,
         open_errors=open_errors if open_errors is not None else [],
+        physical_only=physical_only,
     )
     records = _index_records_for_root(root, query, index_paths=index_paths, trusted_root=request.root)
     for candidate in records:
         if candidate.error is not None:
             raise candidate.error
     matches = [item.record for item in records if item.exact_match]
-    scoped = _scoped_matches(matches, artifact_ref, request)
+    scoped = _scoped_matches(matches, artifact_ref, request, physical_only=physical_only)
     if scoped:
         return scoped[-1]
     if matches and _request_has_scope(request):
@@ -598,21 +619,27 @@ def _lookup_index_record(
     return None
 
 
-# LLM: 原匹配仍先验证每行路径；请求内缓存只省空路径/干净父目录解析，直接调用保持原路径语义。
+# LLM: 原匹配仍先验证每行路径；physical_only模式只比较物理wrapper路径，不把.blob回退命中到同名call_id/scoped_call_id。
 # 函数用途: 计算一条记录的精确匹配，保留无关行路径错误合同。
 def _record_matches_ref(
     record: dict[str, Any],
     artifact_ref: str,
     resolved_ref: Path | None,
-    *, path_cache: _ArtifactPathCache | None = None,
+    *,
+    path_cache: _ArtifactPathCache | None = None,
+    physical_only: bool = False,
 ) -> bool:
     record_path = _resolve_index_record_path(str(record.get("path", "") or ""), cache=path_cache)
-    literal_refs = {
-        str(record.get("path", "") or ""),
-        str(record.get("sha256", "") or ""),
-        str(record.get("scoped_call_id", "") or ""),
-        str(record.get("call_id", "") or ""),
-    }
+    literal_refs = (
+        {str(record.get("path", "") or "")}
+        if physical_only
+        else {
+            str(record.get("path", "") or ""),
+            str(record.get("sha256", "") or ""),
+            str(record.get("scoped_call_id", "") or ""),
+            str(record.get("call_id", "") or ""),
+        }
+    )
     comparable_ref = str(resolved_ref) if isinstance(record_path, str) else resolved_ref
     return artifact_ref in literal_refs or bool(resolved_ref is not None and record_path == comparable_ref)
 
@@ -679,8 +706,13 @@ def _scoped_matches(
     matches: list[dict[str, Any]],
     artifact_ref: str,
     request: ReadToolOutputArtifactRequest,
+    *,
+    physical_only: bool = False,
 ) -> list[dict[str, Any]]:
-    if ":" in artifact_ref:
+    if not physical_only and (
+        any(str(record.get("scoped_call_id", "") or "") == artifact_ref for record in matches)
+        or (":" in artifact_ref and not _looks_like_path(artifact_ref))
+    ):
         return matches
     exact = [record for record in matches if _record_scope_matches_request(record, request)]
     if exact:
@@ -766,6 +798,7 @@ class _ArtifactIndexQuery:
     resolved_ref: Path | None
     paths: _ArtifactPathCache = field(default_factory=_ArtifactPathCache)
     open_errors: list[str] = field(default_factory=list)
+    physical_only: bool = False
 
 
 # LLM: 已安全打开的FD携带索引名供原读取计量识别；是整数描述符，不会再次按路径打开。
@@ -828,10 +861,16 @@ def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *
 # 函数用途: 一次计算候选的精确/同名匹配或保留待报告错误。
 def _artifact_index_candidate(record: dict[str, Any], query: _ArtifactIndexQuery) -> _ArtifactIndexCandidate | None:
     try:
-        exact = _record_matches_ref(record, query.artifact_ref, query.resolved_ref, path_cache=query.paths)
+        exact = _record_matches_ref(
+            record,
+            query.artifact_ref,
+            query.resolved_ref,
+            path_cache=query.paths,
+            physical_only=query.physical_only,
+        )
         basename = bool(
-            query.resolved_ref is not None
-            and Path(str(record.get("path", "") or "")).name == Path(query.artifact_ref).expanduser().name
+            (query.resolved_ref is not None or query.physical_only)
+            and Path(str(record.get("path", "") or "")).name == _safe_expanduser(Path(query.artifact_ref)).name
         )
         return _ArtifactIndexCandidate(record, exact, basename) if exact or basename else None
     except Exception as exc:

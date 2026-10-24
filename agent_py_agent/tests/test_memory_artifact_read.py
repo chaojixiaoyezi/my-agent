@@ -999,6 +999,10 @@ def test_blob_suffixed_call_id_resolves_in_artifact_reader(tmp_path: Path) -> No
         )
         assert resolved["ok"] is True
         assert expected in resolved["content"]
+    unknown_home = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(root=tmp_path, artifact_ref="~__no_such_user__/missing.blob", run_id="run-artifact")
+    )
+    assert unknown_home["ok"] is False
 
 
 def _write_externalized_tool_output(

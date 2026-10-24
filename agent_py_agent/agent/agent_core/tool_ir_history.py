@@ -88,11 +88,11 @@ def _freeze_projection_value(value: object, *, _depth: int = 0, _budget: list[in
     if _depth > 64:
         return None
     budget = [_MAX_SINGLE_PROJECTION_BYTES] if _budget is None else _budget
+    if value is None or type(value) in (bool, int, float, str):
+        return _strict_json_cache_key(value, _budget=budget)
     budget[0] -= sys.getsizeof(value)
     if budget[0] < 0:
         return None
-    if value is None or type(value) in (bool, int, float, str):
-        return _strict_json_cache_key(value, _budget=budget)
     if is_dataclass(value) and not isinstance(value, type):
         values = [(item.name, getattr(value, item.name)) for item in fields(value)]
         if isinstance(value, AssistantTurn):
@@ -127,8 +127,8 @@ def _projection_cache_key(history: list, prior_list: list) -> tuple | None:
 
 
 # LLM: 锁外沿唯一适配器对隔离快照投影，只缓存独立派生块并用专用槽位替代借用prior，不强引用外部可变prior字典。
-#   原位可变arguments或content_blocks必须脱离缓存；含MappingProxy等不可证明可复制值的派生块旁路缓存。
-# 函数用途: 建立隔离派生块的缓存表示；不能安全隔离时返回原投影及明确不可缓存标记。
+#   原位可变arguments或content_blocks必须脱离缓存；含MappingProxy等不可证明可复制值的派生块或超预算历史直接旁路缓存。
+# 函数用途: 建立隔离派生块的缓存表示；不能安全隔离或键为空时立即返回原投影及明确不可缓存标记。
 def _build_cached_projection(history: list, prior_list: list) -> tuple[list[Any], bool]:
     from ..backends.message_adapter import project_native_history_messages
 
@@ -149,6 +149,8 @@ def _build_cached_projection(history: list, prior_list: list) -> tuple[list[Any]
     _PROJECTION_TLS.post_key = (
         _projection_cache_key(history, prior_list) if _PROJECTION_TLS.observed_key is not None else None
     )
+    if _PROJECTION_TLS.observed_key is None or _PROJECTION_TLS.post_key != _PROJECTION_TLS.observed_key:
+        return messages, False
     prior_index_by_id = {id(item): index for index, item in enumerate(prior_list)}
     if any(id(item) not in prior_index_by_id and _strict_json_cache_key(item) is None for item in messages):
         return messages, False
