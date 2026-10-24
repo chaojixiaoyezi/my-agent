@@ -107,3 +107,40 @@ def test_non_subscription_requests_carry_no_session_affinity_header(monkeypatch)
         payload, headers = _stream_request(monkeypatch, backend)
     assert payload["prompt_cache_key"] == session
     assert "session-id" not in headers
+
+
+# LLM: Chat 实际发送和只读投影必须使用同一宿主会话键；不访问供应商。
+# 函数用途: 覆盖流式/普通请求、端点限制、跨 owner/thread 隔离和退出后清理。
+def test_openai_chat_prompt_cache_key_routing(monkeypatch):
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+
+    for stream in (False, True):
+        backend = OpenAICompatibleBackend(BackendOptions("https://api.openai.com/v1", "key", "model", stream_enabled=stream))
+        sent = []
+        monkeypatch.setattr(backend, "request_json", lambda path, payload, headers: sent.append(payload) or {
+            "choices": [{"message": {"content": "好"}, "finish_reason": "stop"}]})
+        monkeypatch.setattr(backend, "request_stream", lambda *args: sent.append(args[1]) or iter([
+            json.dumps({"choices": [{"delta": {"content": "好"}, "finish_reason": "stop"}]}), "[DONE]",
+        ]))
+        keys = []
+        for owner, thread in (("alice", "one"), ("alice", "one"), ("alice", "two"), ("bob", "one")):
+            with provider_session_scope(("local", owner), thread):
+                expected = "my-agent:" + current_provider_session()[:48]
+                projected = backend.project_generate_payload("你好")
+                backend.generate("你好")
+                assert sent[-1].get("prompt_cache_key") == expected
+                assert projected["prompt_cache_key"] == expected
+                keys.append(expected)
+        assert keys[0] == keys[1] and len(set(keys)) == 3
+        assert "prompt_cache_key" not in backend.project_generate_payload("未绑定")
+
+
+# LLM: 相似域名、其它服务商和无会话端点不得收到 Chat 扩展缓存字段。
+# 函数用途: 保持非 OpenAI Chat 请求的既有 payload 合同。
+def test_openai_chat_prompt_cache_key_omits_non_openai_endpoints():
+    from agent_py_agent.agent.backends.openai_chat import OpenAICompatibleBackend
+
+    for endpoint in ("https://api.deepseek.com/v1", "https://api.openai.com.evil.test/v1", "https://example.test/v1"):
+        backend = OpenAICompatibleBackend(BackendOptions(endpoint, "key", "model", stream_enabled=False))
+        with provider_session_scope(("local", "main"), "thread"):
+            assert "prompt_cache_key" not in backend.project_generate_payload("hello")

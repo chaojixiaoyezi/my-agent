@@ -1,10 +1,12 @@
 # LLM: 工具发现状态只从结构化搜索/凭据工具结果恢复；主、子、Gateway与Compact共用，不导入执行编排层或改变授权。
-#   发现历史按首次发现顺序只增不减；活跃集只供显式任务/Compact 边界选择，不在普通轮内自动撤回。
+#   发现历史按首次发现顺序只增不减；Compact 默认保留32项，与会话展示容量一致，显式小上限仍有效。
 # 模块用途: 找回本线程累计工具名称，并在凭据回执后展示 web_fetch，避免恢复时丢工具或工具表来回抖动。
 
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+
+MAX_SESSION_DISCOVERED_TOOLS = 32
 
 
 # LLM: 新序列保留首次发现顺序；仅旧 set 输入用稳定排序兜底，不伪称能从集合恢复发现时间。
@@ -65,11 +67,11 @@ def _ordered_carried_names(record: dict[str, object]) -> tuple[str, ...]:
     return ordered_tool_names([*credential, *(names if isinstance(names, list) else [])])
 
 
-# LLM: 仅显式边界调用；重复发现按最后出现刷新新近性，输出仍按首见相对顺序；最近使用与固定工具优先，输入不变。
-# 函数用途: 选择固定、最近使用及最近发现工具，并按原发现顺序输出活跃子集。
+# LLM: 仅显式边界调用；默认32项不意外回收普通会话的工具前缀；显式限额、pins与新近性优先级保持。
+# 函数用途: 按原发现顺序保留活跃工具，只有明确更小上限或超过会话容量才收缩。
 def resolve_active_loaded_tool_names(
     discovered_names: Sequence[str], *, recent_used_tool_names: Collection[str] = (),
-    pinned_tool_names: Collection[str] = (), max_active_discovered: int = 8,
+    pinned_tool_names: Collection[str] = (), max_active_discovered: int = MAX_SESSION_DISCOVERED_TOOLS,
 ) -> tuple[str, ...]:
     if type(max_active_discovered) is not int or max_active_discovered < 0:
         raise ValueError("max_active_discovered must be a non-negative integer")

@@ -1,5 +1,5 @@
 # LLM: 此模块独占 Chat Completions 转换；只读出站投影与真实发送共用组包；八档换算和声明过滤归 reasoning_control，
-#   schema仅规范JSON对象键，不改数组/历史顺序、不启用未声明的增量工具能力，保持思考、采样与用量合同。
+#   schema仅规范JSON对象键，不改数组/历史顺序；官方端点缓存亲和只读宿主请求级会话，不改共享backend。
 # 模块用途: 调用 Chat 接口，转换消息并及时关闭流归还名额；网络、回调及私有诊断均在既有边界内。
 from __future__ import annotations
 
@@ -103,7 +103,8 @@ def dump_provider_payload(payload: dict[str, Any], *, path: str) -> None:
 
 
 # LLM: Chat 适配器独占消息转换，能力端点使用 HTTP 同源规则；Responses 只复用稳定生成入口，联合协议及 OAuth 回归。
-# 类用途: 转换 Chat Completions 请求与规范响应，限流时提前收集结束也关闭物理流。
+#   缓存键从 provider_session_scope 读取，不把并发会话身份挂在共享实例上。
+# 类用途: 转换 Chat Completions 请求与规范响应，限流时关闭物理流，并为官方接口提供稳定会话缓存键。
 class OpenAICompatibleBackend(HttpBackend):
     """适配 OpenAI-compatible `/chat/completions` 接口。"""
 
@@ -117,6 +118,15 @@ class OpenAICompatibleBackend(HttpBackend):
     # 函数用途: 只读计算 Chat Completions 实际端点，供成功和失败探针记录来源。
     def _tool_endpoint(self) -> str:
         return "".join(endpoint_parts(self.api_base, "/chat/completions"))
+
+    # LLM: 仅官方 HTTPS Chat 端点使用宿主 owner+thread 摘要；无绑定或其它服务商不发扩展字段。
+    # 函数用途: 为同会话生成稳定且不含原始身份的缓存路由键，不改 backend 状态。
+    def _session_cache_key(self) -> str:
+        from .provider_headers import current_provider_session
+
+        endpoint = urlsplit(self.api_base)
+        session = current_provider_session()
+        return f"my-agent:{session[:48]}" if session and endpoint.scheme == "https" and endpoint.hostname == "api.openai.com" else ""
 
     # LLM: OpenAI-compatible 传输必须保持 system -> 规范会话/当前 user -> 原生工具历史的追加顺序；
     # reasoning 和工具参数计数是展示边界；请求开关与观察器必须转交组包器，不能丢失或影响执行。
@@ -233,7 +243,8 @@ class OpenAICompatibleBackend(HttpBackend):
     # LLM: 发送和预览共用唯一组包；媒体按预算读文件并校验hash后编码，不修改canonical历史或推断模态容量。
     #   历史先经 wire_contract.repair_native_messages 修整副本，转换后由 validate_chat_messages 复核，不合规在本地抛错不发送。
     #   智能程度只交唯一换算点，传冻结档位声明与本次输出上限；联合 test_reasoning_effort 和采样、工具历史测试。
-    # 函数用途: 构造Chat历史、工具和输出格式，保留原思考优先级与声明过滤；媒体输入包含有界文件读取。
+    #   缓存路由只追加顶层字段，不改变 system/tools/messages 前缀；投影与真实发送都走这里。
+    # 函数用途: 构造Chat历史、工具、缓存键和输出格式；保留原思考优先级，媒体包含有界文件读取。
     def _request_payload(self, request: _OpenAIGenerateRequest) -> dict[str, Any]:
         from .sampling import chat_sampling_fields
 
@@ -241,6 +252,8 @@ class OpenAICompatibleBackend(HttpBackend):
             "model": self.model_name,
             "max_tokens": bounded_output_tokens(self.max_tokens, request.max_output_tokens),
         }
+        if cache_key := self._session_cache_key():
+            payload["prompt_cache_key"] = cache_key
         payload.update(chat_sampling_fields(self.api_base, self.model_name, top_p=self.top_p,
             temperature=self.temperature, temperature_explicit=self.temperature_explicit,
             thinking_disabled=request.thinking_disabled))
