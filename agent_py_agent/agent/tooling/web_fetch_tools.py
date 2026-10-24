@@ -67,6 +67,7 @@ class WebRuntimeDeps:
     artifact_root: Path | None = None
     cache_ttl_seconds: int = 900
     allowed_private_hosts: tuple[str, ...] = ()
+    allowed_private_hosts_provider: Any = None
     allow_private_resolution: bool | None = None
     gateway_endpoint_config: GatewayEndpointConfig = GatewayEndpointConfig()
 
@@ -94,7 +95,9 @@ class WebFetchTool(BaseTool):
         self.format_http_error = deps.format_http_error
         self.artifact_root = deps.artifact_root or default_artifact_root()
         self.cache_ttl_seconds = max(0, int(deps.cache_ttl_seconds))
-        self.allowed_private_hosts = tuple(deps.allowed_private_hosts)
+        self._allowed_private_hosts = tuple(deps.allowed_private_hosts)
+        self._allowed_private_hosts_provider = deps.allowed_private_hosts_provider
+        self._extra_private_hosts: tuple[str, ...] = ()
         self.allow_private_resolution = deps.allow_private_resolution
         self.gateway_endpoint_config = deps.gateway_endpoint_config
         self._cache: OrderedDict[tuple[object, ...], CachedFetch] = OrderedDict()
@@ -124,6 +127,28 @@ class WebFetchTool(BaseTool):
             output_policy=OutputPolicy(trust="external_data"),
         )
 
+    @property
+    def allowed_private_hosts(self) -> tuple[str, ...]:
+        provider = self._allowed_private_hosts_provider
+        if not callable(provider):
+            return self._allowed_private_hosts
+        base = tuple(provider() or ())
+        return tuple(dict.fromkeys([*base, *self._extra_private_hosts]))
+
+    @allowed_private_hosts.setter
+    def allowed_private_hosts(self, value: object) -> None:
+        if isinstance(value, tuple) and all(isinstance(item, str) for item in value):
+            items = value
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            items = tuple(item for item in value if isinstance(item, str))
+        else:
+            items = ()
+        if callable(self._allowed_private_hosts_provider):
+            base = set(self._allowed_private_hosts_provider() or ())
+            self._extra_private_hosts = tuple(item for item in items if item not in base)
+        else:
+            self._allowed_private_hosts = items
+
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         try:
             max_chars = self.response_preview_chars(params, self.max_chars)
@@ -141,31 +166,35 @@ class WebFetchTool(BaseTool):
 
     # LLM: 每跳重查端点；字面 IP 直接 canonical，不接受 resolver 对已审计地址的替换。
     # 函数用途: 解析 URL 并读取工具副本当前授权，逐跳检查后返回固定 IP 或结构化拒绝。
-    def _resolve_pin(self, url: str) -> PinResult:
+    def _resolve_pin(self, url: str, *, resolved_by_host: dict[str, tuple[str, ...]] | None = None) -> PinResult:
         """解析一次主机 → 用这"固定 IP 列表"过网关(避免与连接层二次解析的 TOCTOU)→ 返回校验过的 IP 来 pin。
 
         每个重定向跳也调本函数重新过网关,故内网/metadata 跳转会被拒。
         """
-        host = urlsplit(url).hostname or ""
-        literal_ip = _canonical_ip(host)
         try:
+            host = (urlsplit(url).hostname or "").lower().strip("[]").rstrip(".")
+            literal_ip = _canonical_ip(host)
             resolved = (literal_ip,) if literal_ip else tuple(str(ip) for ip in self.resolver(host))
         except Exception:
-            resolved = ()
+            host, literal_ip, resolved = "", "", ()
+        previous = resolved_by_host.get(host, ()) if resolved_by_host is not None and host else ()
         err = self.network_safety_error(
-            "web_fetch", url, lambda _h: resolved, self._network_safety_settings()
+            "web_fetch", url, lambda _h: resolved, self._network_safety_settings(previous_resolved_ips=previous)
         )
         if err is not None:
             return PinResult(None, err)
+        if resolved_by_host is not None and host and not literal_ip and resolved:
+            resolved_by_host.setdefault(host, resolved)
         return PinResult(resolved[0] if resolved else None, None)
 
     # LLM: registry 会在每次调用前把授权注入到工具副本属性；检查前必须从这些当前属性重建设置。
     # 函数用途: 生成这一跳使用的私网授权快照，不复用构造时的旧授权。
-    def _network_safety_settings(self) -> NetworkSafetySettings:
+    def _network_safety_settings(self, *, previous_resolved_ips: tuple[str, ...] = ()) -> NetworkSafetySettings:
         return NetworkSafetySettings(
             allowed_private_hosts=tuple(self.allowed_private_hosts or ()),
             allow_private_resolution=self.allow_private_resolution,
             gateway_endpoint=self.gateway_endpoint_config,
+            previous_resolved_ips=previous_resolved_ips,
         )
 
     # LLM: 凭据错误保留宿主code/stage，不混成发卡等待；净化覆盖成功/失败正文且在归档前，传输仍逐跳pin。
@@ -174,10 +203,15 @@ class WebFetchTool(BaseTool):
         raw = FetchRawRequest(tool="web_fetch", url=request.url, method=request.method,
             headers={"User-Agent": "MyAgent-WebFetch/1.0", **request.headers},
             data=None if request.body_text is None else request.body_text.encode("utf-8"), timeout=self.timeout)
+        resolved_by_host: dict[str, tuple[str, ...]] = {}
         # LLM: send 固定原逐跳 pin，不接受任意脚本、库或模型提供的请求回调。
         # 函数用途: 为宿主登录和业务请求复用本工具的实际网络许可。
         def send(raw_request):
-            return fetch_raw_response(raw_request, format_http_error=self.format_http_error, resolve_pin=self._resolve_pin)
+            return fetch_raw_response(
+                raw_request,
+                format_http_error=self.format_http_error,
+                resolve_pin=lambda hop_url: self._resolve_pin(hop_url, resolved_by_host=resolved_by_host),
+            )
         try:
             if request.credential_ref and getattr(self, "credential_authenticator", None):
                 response, secrets = self.credential_authenticator(request.credential_ref, raw, send)

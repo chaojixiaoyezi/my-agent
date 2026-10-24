@@ -488,6 +488,12 @@ def _normalize_background_tool_fields(out: dict[str, object], defaults: object) 
     out["background_main_agent_allowed_tools"] = _normalize_string_list(
         out.get("background_main_agent_allowed_tools", defaults.background_main_agent_allowed_tools)
     )
+    raw_hosts = out.get("allowed_private_hosts", getattr(defaults, "allowed_private_hosts", ()))
+    out["allowed_private_hosts"] = (
+        [item.strip() for item in raw_hosts if isinstance(item, str) and item.strip()]
+        if isinstance(raw_hosts, (list, tuple, set, frozenset))
+        else []
+    )
     return []
 
 

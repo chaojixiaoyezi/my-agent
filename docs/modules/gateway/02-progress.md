@@ -1,3 +1,9 @@
+## 2026-10-24 第二波（W2-1 / W2-3 / W2-4）网关热路径 CPU 减负、Pending 请求增量索引与内网白名单治理
+
+- **网关出站序列化去重、历史投影缓存与流式 Thinking 250ms 攒批（`W2-1` / `P0-03`）**：`backends/cache_diagnostics.py` 对单条消息 canonical JSON 与 SHA256 引入基于浅结构指纹（并在写回前二次校验防并发原地突变）的 LRU 缓存；`agent_core/tool_ir_history.py` 新增 `_PROJECTION_CACHE`（同时受 `64` 条目、`2 MiB` 总字节与 `256 KiB` 单条上限约束，写回前二次复核输入指纹，并在 `copy_prior=False` 时深拷贝派生 IR 容器同时保持 `prior_messages` 引用零拷贝语义）；`gateway_parts/stream_writer.py` 与 `stream_events.py` 将 `on_thinking_delta` 合并为 `0.25s` / `512 chars` 批量写盘，配齐后台 `threading.Timer` 尾延迟兜底刷新、原子快照清空缓冲与跨分片敏感标识符前缀保留脱敏。
+- **网关 `requests/pending` 增量索引与 O(1) 准入扫描（`W2-3` / `P1-05`）**：`gateway_parts/request_worker.py` 新增 `_PendingDirectoryIndex`，按目录 `(st_ino, st_mtime_ns, st_ctime_ns, st_size)` 与单文件 `os.open(..., O_RDONLY | O_NONBLOCK | O_NOFOLLOW)` + `os.fstat(fd)` + 有界头部读取提取轻量 `_PendingEntryMeta`，通过 `os.lstat` 识别并拒绝非普通 `.lock` 侧车文件，在保持完整 FIFO 与同会话保序语义下消除每拍全目录 `glob + json.loads` 放大。
+- **受控内网白名单 `allowed_private_hosts` 与 SSRF 防重绑闭环（`W2-4` / `P1-06`）**：`contracts/gates/network_safety.py`、`path_url_command.py`、`offline_security_boundary_contract.py`、`tooling/web.py`、`web_fetch_tools.py`、`action_policy.py` 与 `ingestion/watch_tool.py` 统一支持 `allowed_private_hosts`（精确 IP、CIDR、主机名与 `*.corp.internal` 通配符），严禁 `owner`/`task`/`run` 运行时覆盖层突破宿主 `base_config` 扩权，永久封禁云元数据地址、`0.0.0.0/8`、回环（非显式回环白名单不可借普通域名解析绕过）与 `fe80::/10` 链路本地地址，并在重定向跳与 `watch` 重连全链路钉死逐跳已解析 IP（防止跨跳 DNS 重绑定）。
+
 ## 2026-10-24 第一波（W1-1..W1-6）稳定性、并发治理、缓存命中率与后台完成唤醒落地
 
 - **Windows 平台进程终止与 Supervisor 26 项跨平台回归修复（`W1-1` / `P1-07`）**：`gateway_parts/supervisor.py::kill_pid` 与 `_force_stop_gateway` 使用 `getattr(signal, "SIGKILL", signal.SIGTERM)` 消除 Windows 缺少 `signal.SIGKILL` 的 `AttributeError`；`tests/test_supervisor.py` 注入 `monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), raising=False)` 与 `monkeypatch.setattr(os, "killpg", lambda *_a, **_kw: None, raising=False)`，修复 Windows CI 26 项进程组信号单测报错。

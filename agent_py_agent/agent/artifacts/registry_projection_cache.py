@@ -2,6 +2,7 @@
 # 模块用途: 解析时去重计量保留对象，8MiB LRU预算O(1)取总数，锁不跨IO/解析。
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -225,7 +226,23 @@ def _parse_row(number: int, line: str) -> RegistryRow:
     return _sized_row(RegistryRow(number, frozen_payload, record=record, artifact_id=artifact_id, record_error=record_error))
 
 
-# LLM: Explicit stack and identity dedup bound depth; dataclass fields and mapping keys/values share one seen set per row.
+# LLM: Return immediate child objects for retained byte accounting without materializing dataclass __dict__.
+# 函数用途: 枚举单个缓存对象的直接子引用，涵盖非空mappingproxy底层dict与dataclass字段值。
+def _retained_children(current) -> tuple | list:
+    if isinstance(current, MappingProxyType):
+        if current is _EMPTY_PROXY:
+            return ()
+        return [ref for ref in gc.get_referents(current) if isinstance(ref, dict)]
+    if isinstance(current, Mapping):
+        return (*current.keys(), *current.values())
+    if isinstance(current, (tuple, list, set, frozenset)):
+        return tuple(current)
+    if is_dataclass(current) and not isinstance(current, type):
+        return tuple(getattr(current, item.name) for item in fields(current))
+    return ()
+
+
+# LLM: Explicit stack and identity dedup bound depth; dataclass inline slots and mappingproxy backing dict share one seen set.
 # 函数用途: 一次遍历保留对象树，以Python对象字节计量且不重复计算共享metadata。
 def _retained_tree_bytes(value, seen: set[int]) -> int:
     stack, total = [value], 0
@@ -235,16 +252,9 @@ def _retained_tree_bytes(value, seen: set[int]) -> int:
             continue
         seen.add(id(current))
         total += sys.getsizeof(current)
-        if isinstance(current, Mapping):
-            # mappingproxy本身不含背后字典的空间；冻结映射都私有保留该字典。
-            if isinstance(current, MappingProxyType):
-                total += sys.getsizeof(dict(current))
-            stack.extend(current.keys())
-            stack.extend(current.values())
-        elif isinstance(current, (tuple, list, set, frozenset)):
-            stack.extend(current)
-        elif is_dataclass(current) and not isinstance(current, type):
-            stack.extend(getattr(current, item.name) for item in fields(current))
+        if is_dataclass(current) and not isinstance(current, type):
+            total += len(fields(current)) * 16
+        stack.extend(_retained_children(current))
     return total
 
 

@@ -166,6 +166,12 @@ def _apply_runtime_config_layer(
     for key, value in _runtime_layer_items(layer, allowed):
         if layer.priority < _current_priority(sources.get(key)):
             continue
+        if key == "allowed_private_hosts":
+            base_allowed = set(values.get("allowed_private_hosts") or ())
+            narrowed = [item for item in (value or ()) if isinstance(item, str) and item in base_allowed]
+            if not base_allowed and value:
+                continue
+            value = narrowed
         values[key] = value
         sources[key] = {"source": layer.source, "priority": layer.priority}
 

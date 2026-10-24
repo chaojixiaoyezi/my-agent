@@ -87,9 +87,9 @@ def test_blob_metadata_validation(tmp_path, field, value, error):
     assert not result["ok"] and result["error_code"] == error
 
 
-# LLM: Legacy tools/tests may inject an inline body plus its own SHA; prefer it even when old blob metadata remains.
-# 函数用途: 验证包装内有效content优先级不受blob_v1标记影响。
-def test_blob_wrapper_inline_override_has_priority(tmp_path):
+# LLM: Declared blob_v1 format is authoritative; injecting inline content into a blob wrapper must fail closed.
+# 函数用途: 验证blob_v1包装被注入内联content时不会绕过缺失或损坏的.blob侧文件。
+def test_blob_wrapper_rejects_inline_content_override(tmp_path):
     import hashlib
 
     path = _write_externalized_tool_output(tmp_path, content="x" * 600_000)
@@ -99,7 +99,7 @@ def test_blob_wrapper_inline_override_has_priority(tmp_path):
     path.write_text(json.dumps(payload), encoding="utf-8")
     path.with_suffix(".blob").unlink()
     result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(tmp_path, str(path)))
-    assert result["ok"] and result["content"] == "inline\r\n中文😀"
+    assert not result["ok"] and result["error_code"] == "invalid_tool_output_artifact"
 
 
 # LLM: A deterministic post-hash edit with deliberately unchanged stat observations proves actual returned bytes are verified.

@@ -361,8 +361,12 @@ def _path_url_command_decision(
     from .web import _effective_allow_private_resolution
 
     private_setting = boundary.get("allow_private_resolution")
-    effective_private_hosts = (*_string_values(getattr(runtime.handler, "allowed_private_hosts", None)),
-                               *_string_values(boundary.get("allowed_private_hosts")))
+    agent_config = getattr(getattr(runtime.handler, "agent", None), "config", None)
+    effective_private_hosts = (
+        *_string_values(getattr(runtime.handler, "allowed_private_hosts", None)),
+        *_string_values(getattr(agent_config, "allowed_private_hosts", None)),
+        *_string_values(boundary.get("allowed_private_hosts")),
+    )
     payload = {"tool": request.call.tool_name, **request.call.arguments}
     decision = evaluate_path_url_command_gate(
         PathUrlCommandFacts(

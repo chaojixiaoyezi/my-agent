@@ -175,6 +175,7 @@ class ToolRegistryParams:
     self_context_provider: Callable[[ToolRuntimeSnapshot, ToolInvocationContext | None], dict[str, object]] | None = None
     gateway_port: int | None = None
     allowed_private_hosts: tuple[str, ...] = ()
+    allowed_private_hosts_provider: Callable[[], tuple[str, ...]] | None = None
     # B5 征询提供方来自组合根，权限视图共用它；模型不能传入提供方或改变来源。
     plugin_gate_reviewer: Callable | None = None
     # 原 owner 权限状态的当次只读投影；不持久权限，缺省不获得管理员 Full Access。

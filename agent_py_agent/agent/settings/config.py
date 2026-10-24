@@ -311,7 +311,11 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     def __post_init__(self):
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
         values = self.allowed_private_hosts
-        self.allowed_private_hosts = [item.strip() for item in values if isinstance(item, str) and item.strip()] if isinstance(values, list) else []
+        self.allowed_private_hosts = (
+            [item.strip() for item in values if isinstance(item, str) and item.strip()]
+            if isinstance(values, (list, tuple, set, frozenset))
+            else []
+        )
 
     allowed_private_hosts: list[str] = field(default_factory=list)
 

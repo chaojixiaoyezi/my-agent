@@ -2,7 +2,8 @@
 # 模块用途: 集中构造统计、插话、排队、退避和思考载荷；修改时同步脱敏、归档及普通客户端测试。
 from __future__ import annotations
 
-from typing import Literal
+import threading
+from typing import Any, Literal
 
 from ..backends.assistant_messages import message_projection
 from ..common.value_parsing import non_negative_int
@@ -215,3 +216,62 @@ def active_turn_input_event(
         **({"provider_call_id": str(provider_call_id or "").strip()} if kind == "active_turn_input_submitted" else {}),
         **({"messages": messages} if messages else {}),
     }
+
+
+# LLM: 仅在非终局刷新时保留可能构成敏感标识真前缀的尾部，终局flush全量净化发出。
+# 函数用途: 拆分待发思考与未闭合的标识前缀，防止跨chunk边界泄漏敏感ID。
+def drain_thinking_delta_text(writer: Any, raw_joined: str, *, final: bool = True) -> str:
+    emit_raw = raw_joined
+    if not final and raw_joined and writer._identifier_redactions:
+        needles = [src for src, _ in writer._identifier_redactions if isinstance(src, str) and len(src) > 1]
+        if needles:
+            max_len = max(len(src) for src in needles)
+            start_min = max(0, len(raw_joined) - max_len + 1)
+            for idx in range(start_min, len(raw_joined)):
+                suffix = raw_joined[idx:]
+                if any(len(suffix) < len(src) and src.startswith(suffix) for src in needles):
+                    emit_raw, hold_raw = raw_joined[:idx], suffix
+                    writer._thinking_buffer.insert(0, hold_raw)
+                    writer._thinking_buffer_chars += len(hold_raw)
+                    schedule_thinking_flush_timer(writer)
+                    break
+    if not emit_raw:
+        return ""
+    return redact_structured_identifiers(
+        project_host_paths_for_channel(emit_raw, writer.delivery_channel),
+        writer._identifier_redactions,
+        channel=writer.delivery_channel,
+    )
+
+
+# LLM: 后台守护定时器只在单调时钟真正达到间隔且流未关闭时触发合批刷新，不绕过测试时钟。
+# 函数用途: 在思考流暂停且无新delta到达时，按刷新间隔自动排空缓冲尾部。
+def schedule_thinking_flush_timer(writer: Any, due_check: Any = None) -> None:
+    if getattr(writer, "_liveness_closed", False) or not writer._thinking_buffer:
+        return
+    existing = getattr(writer, "_thinking_flush_timer", None)
+    if existing is not None:
+        return
+    delay = max(0.01, min(float(getattr(writer, "thinking_flush_interval_seconds", 0.25) or 0.25), 0.25))
+
+    def _on_timer() -> None:
+        writer._thinking_flush_timer = None
+        if getattr(writer, "_liveness_closed", False) or not writer._thinking_buffer:
+            return
+        if callable(due_check) and not due_check():
+            return
+        writer.flush_thinking_delta(final=False)
+
+    timer = threading.Timer(delay, _on_timer)
+    timer.daemon = True
+    writer._thinking_flush_timer = timer
+    timer.start()
+
+
+# LLM: 在任何显式刷新或流关闭时取消未触发的思考定时器，避免结束后残留后台线程。
+# 函数用途: 停止并清理当前writer挂起的思考尾块刷新定时器。
+def cancel_thinking_flush_timer(writer: Any) -> None:
+    timer = getattr(writer, "_thinking_flush_timer", None)
+    writer._thinking_flush_timer = None
+    if timer is not None:
+        timer.cancel()

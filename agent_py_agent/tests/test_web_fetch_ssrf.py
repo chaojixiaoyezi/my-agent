@@ -402,10 +402,10 @@ def test_web_and_watch_share_private_allowlist(monkeypatch, host, entries, allow
 
     from agent_py_agent.agent.ingestion import watch_tool
 
-    # LLM: 域名测试只用固定私网答案，不发真实 DNS 请求。
+    # LLM: 域名测试只用固定私网答案，不发真实 DNS 请求；非localhost域名解析到内网IP，localhost解析到回环IP。
     # 函数用途: 为两个真实安全入口提供同一解析事实。
-    def resolver(_host):
-        return ("127.0.0.1",)
+    def resolver(target_host):
+        return ("127.0.0.1",) if target_host == "localhost" else ("10.1.2.3",)
     tool = WebFetchTool(max_chars=1000, timeout=5, resolver=resolver,
                         allowed_private_hosts=entries, allow_private_resolution=False)
     monkeypatch.setattr(watch_tool, "_default_network_resolver", resolver)

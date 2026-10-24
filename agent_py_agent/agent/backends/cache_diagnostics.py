@@ -106,8 +106,8 @@ def _remember_row_digest(key: tuple, digest: str, size: int) -> None:
             _ROW_CACHE_BYTES -= _ROW_DIGEST_CACHE.popitem(last=False)[1][1]
 
 
-# LLM: 结构冻结、JSON、SHA256和大小估算均在锁外；不支持的值沿原_digest错误合同，不吞序列化异常。
-# 函数用途: 为未变化的消息复用摘要，超大行不占缓存。
+# LLM: 结构冻结、JSON、SHA256和大小估算均在锁外；仅当计算后结构键仍一致才入LRU，不支持的值原样报错。
+# 函数用途: 为未变化的消息复用摘要，并发原位改写或超大行不污染缓存。
 def _row_digest(message: object) -> str:
     key = _strict_json_cache_key(message)
     if key is not None:
@@ -117,7 +117,7 @@ def _row_digest(message: object) -> str:
                 _ROW_DIGEST_CACHE.move_to_end(key)
                 return cached[0]
     digest = _digest(message)
-    if key is not None:
+    if key is not None and _strict_json_cache_key(message) == key:
         size = _row_cache_size(key, digest)
         if size <= _MAX_SINGLE_ROW_CACHE_BYTES:
             _remember_row_digest(key, digest, size)

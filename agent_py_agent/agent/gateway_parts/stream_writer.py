@@ -25,9 +25,12 @@ from .approval_session import ToolApprovalSessionCache
 from .stream_approval import StreamApproval, StreamApprovalRequestOptions
 from .stream_events import (
     active_turn_input_event,
+    cancel_thinking_flush_timer,
+    drain_thinking_delta_text,
     provider_retry_event,
     public_context_compaction_payload,
     public_context_usage_payload,
+    schedule_thinking_flush_timer,
     thinking_event,
 )
 from .stream_liveness import StreamLiveness
@@ -315,37 +318,44 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def write_thinking_delta(self, text: str) -> None:
         if not self.rich_transcript:
             return
+        raw = str(text or "")
         content = redact_structured_identifiers(
-            project_host_paths_for_channel(str(text or ""), self.delivery_channel),
-            self._identifier_redactions,
-            channel=self.delivery_channel,
+            project_host_paths_for_channel(raw, self.delivery_channel),
+            self._identifier_redactions, channel=self.delivery_channel,
         )
-        if not content:
+        if not content and not self._thinking_buffer:
             return
         if not self._thinking_emitted:
-            self._thinking_emitted = True
-            self._last_thinking_flush_at = time.monotonic()
-            self._write_event({"kind": "thinking_delta", "text": content})
+            combined, _ = "".join(self._thinking_buffer) + raw, self._thinking_buffer.clear()
+            self._thinking_buffer_chars = 0
+            first_text = drain_thinking_delta_text(self, combined, final=False)
+            if first_text:
+                self._thinking_emitted = True
+                self._last_thinking_flush_at = time.monotonic()
+                self._write_event({"kind": "thinking_delta", "text": first_text})
             return
-        self._thinking_buffer.append(str(text or ""))
+        self._thinking_buffer.append(raw)
         self._thinking_buffer_chars += len(content)
         if _stream_flush_due(content, self._thinking_buffer_chars, self._last_thinking_flush_at,
                              self.thinking_flush_chars, self.thinking_flush_interval_seconds):
-            self.flush_thinking_delta()
+            self.flush_thinking_delta(final=False)
+        else:
+            schedule_thinking_flush_timer(
+                self, lambda: _stream_flush_due("", self._thinking_buffer_chars, self._last_thinking_flush_at,
+                                                self.thinking_flush_chars, self.thinking_flush_interval_seconds))
 
-    # LLM: 发布前先清原buffer/计数并更新时间，避免_write_event重入；拼接后再净化跨片段的宿主路径和标识。
+    # LLM: 发布前先更新时间并在单表达式内取走清零buffer，避免并发丢字、非thinking越序及_write_event重入。
     # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
-    def flush_thinking_delta(self) -> None:
+    def flush_thinking_delta(self, *, final: bool = True) -> None:
+        cancel_thinking_flush_timer(self)
         if not self._thinking_buffer:
             return
-        raw_joined = "".join(self._thinking_buffer)
-        self._thinking_buffer.clear()
-        self._thinking_buffer_chars = 0
         self._last_thinking_flush_at = time.monotonic()
-        content = redact_structured_identifiers(
-            project_host_paths_for_channel(raw_joined, self.delivery_channel),
-            self._identifier_redactions, channel=self.delivery_channel,
-        )
+        if not self._thinking_buffer:
+            return
+        raw_joined, _ = "".join(self._thinking_buffer), self._thinking_buffer.clear()
+        self._thinking_buffer_chars = 0
+        content = drain_thinking_delta_text(self, raw_joined, final=final)
         if content:
             self._write_event({"kind": "thinking_delta", "text": content})
 

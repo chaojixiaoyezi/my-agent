@@ -11,7 +11,11 @@ from urllib.parse import urlparse
 
 from ..common.value_parsing import text_value as _text
 from .contract_validation_recovery import recovery_for_findings
-from .gates.network_safety import always_blocked_host, private_host_or_ip_is_allowlisted
+from .gates.network_safety import (
+    always_blocked_host,
+    is_private_host_or_ip,
+    private_host_or_ip_is_allowlisted,
+)
 
 SECRET_FIELD_NAMES = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 REDACTED_VALUES = {"[redacted]", "<redacted>", "***", "redacted"}
@@ -63,7 +67,7 @@ def _validate_network_events(
         host = _host(event.get("url"))
         if always_blocked_host(host):
             findings.append(_finding("NETWORK_ALWAYS_BLOCKED_HOST", index, event, {"host": host}))
-        elif host and not private_host_or_ip_is_allowlisted(host, allowed_private_hosts) and _is_private_host(host):
+        elif host and not private_host_or_ip_is_allowlisted(host, allowed_private_hosts) and is_private_host_or_ip(host):
             findings.append(_finding("NETWORK_PRIVATE_HOST_BLOCKED", index, event, {"host": host}))
 
 
@@ -149,20 +153,6 @@ def _dict_secret_paths(
     return paths
 
 
-def _is_private_host(host: str) -> bool:
-    normalized = host.strip().lower().strip("[]")
-    if normalized in PRIVATE_HOSTS:
-        return True
-    numeric = _numeric_ipv4_host(normalized)
-    if numeric:
-        normalized = numeric
-    try:
-        address = ipaddress.ip_address(normalized)
-    except ValueError:
-        return False
-    return address.is_private or address.is_loopback or address.is_link_local
-
-
 def _host(value: object) -> str:
     parsed = urlparse(_text(value))
     return _text(parsed.hostname)
@@ -170,16 +160,6 @@ def _host(value: object) -> str:
 
 def _scheme(value: object) -> str:
     return _text(urlparse(_text(value)).scheme).lower()
-
-
-def _numeric_ipv4_host(value: str) -> str:
-    if not value.isdigit():
-        return ""
-    try:
-        address = ipaddress.ip_address(int(value))
-    except ValueError:
-        return ""
-    return str(address)
 
 
 def _posix_path(value: object) -> str:

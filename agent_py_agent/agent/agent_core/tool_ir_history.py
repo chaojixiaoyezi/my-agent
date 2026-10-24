@@ -44,6 +44,7 @@ text 协议路径一字不动。
 
 import hashlib
 import json
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -66,7 +67,11 @@ from .runtime.conversation_state import conversation_runtime_state_section
 
 _PROJECTION_LOCK = threading.Lock()
 _MAX_PROJECTION_CACHE_ENTRIES = 64
+_MAX_PROJECTION_CACHE_BYTES = 2 * 1024 * 1024
+_MAX_SINGLE_PROJECTION_BYTES = 256 * 1024
 _PROJECTION_CACHE: OrderedDict[tuple, list[dict[str, Any]]] = OrderedDict()
+_PROJECTION_CACHE_SIZES: dict[tuple, int] = {}
+_PROJECTION_CACHE_BYTES = 0
 
 
 # LLM: 冻结实际dataclass字段而非过时伪字段；包含UserTurn媒体及canonical结果所有渲染来源，未知值不缓存。
@@ -118,24 +123,54 @@ def _build_cached_projection(history: list, prior_list: list) -> tuple[list[dict
     return [item if id(item) in borrowed_ids else deepcopy(item) for item in messages], True
 
 
-# LLM: 仅LRU操作持锁，冻结/投影/复制在锁外；仅缓存能冻结且派生块可隔离的结果，64项且不写持久状态。
-# 函数用途: 复用当前真实结构的消息；未知结构或不可安全隔离结果不进入缓存。
-def _cached_native_projection(history: list, prior_list: list) -> list[dict[str, Any]]:
+# LLM: 锁外估算投影键与派生消息的保留字节，供单条上限和总字节LRU双重淘汰使用。
+# 函数用途: 计量缓存键与消息树的内存占用，避免长文本历史驻留进程缓存。
+def _projection_entry_bytes(key: tuple, messages: list[dict[str, Any]]) -> int:
+    total, seen, pending = 0, set(), [key, messages]
+    while pending:
+        item = pending.pop()
+        obj_id = id(item)
+        if obj_id in seen:
+            continue
+        seen.add(obj_id)
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend(item)
+    return total
+
+
+# LLM: 仅LRU操作持锁，冻结/投影/复制在锁外；发布前复核同快照键，按64项与2MiB双预算淘汰。
+# 函数用途: 复用当前真实结构的消息；并发改写、超大项或不可安全隔离结果不进入缓存。
+def _cached_native_projection(history: list, prior_list: list) -> tuple[list[dict[str, Any]], bool]:
+    global _PROJECTION_CACHE_BYTES
     key = _projection_cache_key(history, prior_list)
     if key is not None:
         with _PROJECTION_LOCK:
             cached = _PROJECTION_CACHE.get(key)
             if cached is not None:
                 _PROJECTION_CACHE.move_to_end(key)
-                return cached
+                return cached, True
     messages, cacheable = _build_cached_projection(history, prior_list)
-    if key is not None and cacheable:
-        with _PROJECTION_LOCK:
-            _PROJECTION_CACHE[key] = messages
-            _PROJECTION_CACHE.move_to_end(key)
-            while len(_PROJECTION_CACHE) > _MAX_PROJECTION_CACHE_ENTRIES:
-                _PROJECTION_CACHE.popitem(last=False)
-    return messages
+    if key is not None and cacheable and _projection_cache_key(history, prior_list) == key:
+        entry_bytes = _projection_entry_bytes(key, messages)
+        if entry_bytes <= _MAX_SINGLE_PROJECTION_BYTES:
+            with _PROJECTION_LOCK:
+                if not _PROJECTION_CACHE:
+                    _PROJECTION_CACHE_SIZES.clear()
+                    _PROJECTION_CACHE_BYTES = 0
+                prev_bytes = _PROJECTION_CACHE_SIZES.pop(key, 0) if _PROJECTION_CACHE.pop(key, None) is not None else 0
+                _PROJECTION_CACHE_BYTES = max(0, _PROJECTION_CACHE_BYTES - prev_bytes)
+                _PROJECTION_CACHE[key] = messages
+                _PROJECTION_CACHE_SIZES[key] = entry_bytes
+                _PROJECTION_CACHE_BYTES += entry_bytes
+                while (len(_PROJECTION_CACHE) > _MAX_PROJECTION_CACHE_ENTRIES
+                       or _PROJECTION_CACHE_BYTES > _MAX_PROJECTION_CACHE_BYTES):
+                    old_key, _ = _PROJECTION_CACHE.popitem(last=False)
+                    _PROJECTION_CACHE_BYTES = max(0, _PROJECTION_CACHE_BYTES - _PROJECTION_CACHE_SIZES.pop(old_key, 0))
+    return messages, cacheable
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -219,8 +254,13 @@ def project_native_provider_messages(
     guidance = unforwarded_runtime_guidance(list(tool_context or ()), set(forwarded_guidance or ()))
     if guidance:
         record_runtime_facts_turn_ir(projected, "\n\n".join(guidance), source="runtime.guidance")
-    messages = _cached_native_projection(projected.tool_ir_history, prior_list)
-    return [message_adapter.deepcopy(item) for item in messages] if copy_prior else list(messages)
+    messages, cacheable = _cached_native_projection(projected.tool_ir_history, prior_list)
+    if copy_prior:
+        return [message_adapter.deepcopy(item) for item in messages]
+    if not cacheable:
+        return list(messages)
+    borrowed_ids = {id(item) for item in prior_list}
+    return [item if id(item) in borrowed_ids else deepcopy(item) for item in messages]
 
 
 # LLM: 开轮与 live 候选统一 generation 标题，检查点仍存原始 summary；不写状态或发请求。

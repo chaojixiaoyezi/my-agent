@@ -75,6 +75,7 @@ def _network_safety_error(
             url=url,
             resolver=resolver,
             allowed_private_hosts=settings.allowed_private_hosts,
+            previous_resolved_ips=settings.previous_resolved_ips,
             allow_private_resolution=_effective_allow_private_resolution(
                 settings.allow_private_resolution
             ),
@@ -92,7 +93,7 @@ def _network_safety_error(
         False,
         f"网络安全检查失败: {code}{_private_host_recovery_note(code, url)}",
         result_envelope={"network_safety_gate": decision.to_dict()},
-        error_code="TOOL_INVALID_ARGUMENTS" if code == "NETWORK_PORT_INVALID" else code,
+        error_code="TOOL_INVALID_ARGUMENTS" if code in {"NETWORK_PORT_INVALID", "NETWORK_SCHEME_BLOCKED"} else code,
         reported_error_code=code,
     )
 
@@ -244,6 +245,8 @@ class WebFetchTool(_WebFetchTool):
         allow_private_resolution: bool | None = None,
         gateway_endpoint_config: GatewayEndpointConfig | None = None,
     ):
+        provider = allowed_private_hosts if callable(allowed_private_hosts) else None
+        initial_hosts = tuple(provider() or ()) if callable(provider) else allowed_private_hosts
         super().__init__(WebRuntimeDeps(
             max_chars=max_chars,
             timeout=timeout,
@@ -254,8 +257,9 @@ class WebFetchTool(_WebFetchTool):
             format_http_error=_format_http_error,
             artifact_root=artifact_root,
             cache_ttl_seconds=cache_ttl_seconds,
-            allowed_private_hosts=tuple(item for item in allowed_private_hosts if isinstance(item, str))
-            if isinstance(allowed_private_hosts, (list, tuple, set, frozenset)) else (),
+            allowed_private_hosts=tuple(item for item in initial_hosts if isinstance(item, str))
+            if isinstance(initial_hosts, (list, tuple, set, frozenset)) else (),
+            allowed_private_hosts_provider=provider,
             allow_private_resolution=allow_private_resolution,
             gateway_endpoint_config=(
                 gateway_endpoint_config

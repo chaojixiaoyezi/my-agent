@@ -22,6 +22,7 @@ _ALWAYS_BLOCKED_HOSTS = {"metadata.google.internal", "metadata.goog"}
 _ALWAYS_BLOCKED_NETWORKS = (
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("::ffff:169.254.0.0/112"),
+    ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("100.100.100.200/32"),
     ipaddress.ip_network("fd00:ec2::254/128"),
 )
@@ -44,6 +45,7 @@ class NetworkSafetySettings:
     allowed_private_hosts: Iterable[str] = ()
     allow_private_resolution: bool | None = None
     gateway_endpoint: GatewayEndpointConfig = GatewayEndpointConfig()
+    previous_resolved_ips: Iterable[str] = ()
 
 
 # LLM: G6 仅用结构化端口状态和逐目标本机探针；N/A 不查，未知端口只拒已确认本机地址。
@@ -74,6 +76,8 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
     scheme = _text(parsed.scheme).lower()
     if scheme == "file":
         return _deny("NETWORK_FILE_URL_BLOCKED", {"scheme": scheme})
+    if scheme not in {"http", "https"}:
+        return _deny("NETWORK_SCHEME_BLOCKED", {"scheme": scheme})
 
     host = _normalize_host(parsed.hostname)
     if not host:
@@ -100,7 +104,7 @@ def _resolved_host_decision(host: str, facts: NetworkSafetyFacts, private_host_a
         return resolved
 
     previous = _canonical_ip_list(facts.previous_resolved_ips)
-    code, blocked_ip = _resolved_block(resolved, previous, private_host_allowed, facts)
+    code, blocked_ip = _resolved_block(host, resolved, previous, private_host_allowed, facts)
     if blocked_ip:
         return _deny(code, _resolved_evidence(host, resolved, previous, blocked_ip))
     gateway_denial = _gateway_port_denial(facts, resolved)
@@ -112,6 +116,7 @@ def _resolved_host_decision(host: str, facts: NetworkSafetyFacts, private_host_a
 # LLM: 永久禁止先判；非显式域名的公网到私网翻转即使开启总开关或网段授权也必须拒绝。
 # 函数用途: 找出 DNS 结果中违反授权或重绑定规则的第一个地址。
 def _resolved_block(
+    host: str,
     resolved: tuple[str, ...],
     previous: tuple[str, ...],
     private_host_allowed: bool,
@@ -130,6 +135,7 @@ def _resolved_block(
         facts.allow_private_resolution,
         facts.allow_benchmark_resolution,
         _parse_private_allowlist(facts.allowed_private_hosts),
+        host=host,
     )
     code = "NETWORK_DNS_REBINDING_BLOCKED" if previous else "NETWORK_PRIVATE_IP_BLOCKED"
     return (code, blocked_ip) if blocked_ip else ("", "")
@@ -230,13 +236,15 @@ def _valid_gateway_ports(values: Iterable[object]) -> tuple[int, ...]:
     return tuple(sorted(ports))
 
 
-# LLM: 默认 HTTP/HTTPS 端口和显式 URL 端口走同一结构化值，解析异常不能转成字符串比较。
+# LLM: 默认 HTTP/HTTPS 端口和显式 URL 端口走同一结构化值，与传输层默认端口完全对齐。
 # 函数用途: 取出 URL 实际连接端口，供每一跳的 Gateway 目标判断复用。
 def _url_port(url: object) -> int | None:
     parsed = urlparse(_text(url))
     if parsed.port is not None:
         return parsed.port
-    return {"http": 80, "https": 443}.get(_text(parsed.scheme).lower())
+    if not parsed.hostname:
+        return None
+    return 443 if _text(parsed.scheme).lower() == "https" else 80
 
 
 # LLM: 回环/未指定地址由 IP 属性直接识别；其他地址必须通过调用方逐目标 bind 事实分类。
@@ -278,20 +286,34 @@ def _first_always_blocked_ip(resolved: Iterable[str]) -> str:
     return next((ip for ip in resolved if _is_always_blocked_ip(ip)), "")
 
 
-# LLM: 域名显式授权或总开关之外，逐个核对所有私网回答，不以第一个已授权地址放过整组。
-# 函数用途: 返回第一个未被 IP/网段授权或基准代理例外覆盖的私网地址。
+# LLM: 域名/通配符仅能解除内网网段拒绝，非localhost域名不得借此放行回环或未指定地址。
+# 函数用途: 返回第一个未被 IP/网段授权、非回环域名授权或基准代理例外覆盖的私网地址。
 def _first_blocked_ip(
     resolved: Iterable[str],
     private_host_allowed: bool,
     allow_private_resolution: bool,
     allow_benchmark_resolution: bool,
     parsed_allowlist: tuple[PrivateAllowlistEntry, ...] = (),
+    *,
+    host: str = "",
 ) -> str:
-    if private_host_allowed or allow_private_resolution:
+    if allow_private_resolution:
         return ""
-    return next((ip for ip in resolved if _is_private_ip(ip)
-                 and not _ip_is_allowlisted(ip, parsed_allowlist)
-                 and not _benchmark_allowed(ip, allow_benchmark_resolution)), "")
+    for ip in resolved:
+        if not _is_private_ip(ip) or _ip_is_allowlisted(ip, parsed_allowlist) or _benchmark_allowed(ip, allow_benchmark_resolution):
+            continue
+        if private_host_allowed and (host == "localhost" or not _is_loopback_or_unspecified_ip(ip)):
+            continue
+        return ip
+    return ""
+
+
+def _is_loopback_or_unspecified_ip(value: str) -> bool:
+    address = ip_address_or_none(value)
+    if address is None:
+        return True
+    address = ipv4_projected(address) or address
+    return bool(address.is_loopback or address.is_unspecified)
 
 
 def _resolved_evidence(host: str, resolved: Iterable[str], previous: Iterable[str], blocked_ip: str) -> dict[str, Any]:
@@ -515,6 +537,18 @@ def always_blocked_host(host: object) -> bool:
     return bool(ip) and _is_always_blocked_ip(ip)
 
 
+# LLM: 统一识别预检和离线合同中的私网主机或字面私网IP（含末尾点、CGNAT、简写及IPv4投影）。
+# 函数用途: 判断URL主机是否属于私网、回环、保留或永久禁止范围，供多处预检复用。
+def is_private_host_or_ip(host: object) -> bool:
+    normalized = _normalize_host(host)
+    if not normalized:
+        return False
+    if _is_private_hostname(normalized) or normalized in _ALWAYS_BLOCKED_HOSTS:
+        return True
+    ip = _canonical_ip(normalized)
+    return bool(ip) and (_is_private_ip(ip) or _is_always_blocked_ip(ip))
+
+
 __all__ = [
     "GatewayEndpointConfig",
     "NetworkResolver",
@@ -522,6 +556,7 @@ __all__ = [
     "NetworkSafetySettings",
     "always_blocked_host",
     "evaluate_network_safety_gate",
+    "is_private_host_or_ip",
     "private_host_or_ip_is_allowlisted",
 ]
 

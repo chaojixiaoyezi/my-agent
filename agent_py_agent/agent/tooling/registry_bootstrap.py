@@ -107,11 +107,16 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
 # 函数用途: 注册网络工具并传入配置端口及内网白名单；实际绑定端口每跳从统一注册表读取。
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
+    hosts_provider = getattr(params, "allowed_private_hosts_provider", None)
     registry.register(
         WebFetchTool(
             max_chars=params.web_max_chars,
             timeout=params.http_timeout,
-            allowed_private_hosts=tuple(getattr(params, "allowed_private_hosts", None) or ()),
+            allowed_private_hosts=(
+                hosts_provider
+                if callable(hosts_provider)
+                else tuple(getattr(params, "allowed_private_hosts", None) or ())
+            ),
             gateway_endpoint_config=GatewayEndpointConfig(
                 configured_port=getattr(params, "gateway_port", None),
             ),

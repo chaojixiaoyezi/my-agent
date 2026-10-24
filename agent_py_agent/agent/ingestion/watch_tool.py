@@ -503,17 +503,24 @@ class WatchStreamTool(BaseTool):
         request: SourceHttpRequest,
         hosts: tuple[str, ...],
         allow_resolution: bool | None,
+        *,
+        resolved_by_host: dict[str, tuple[str, ...]] | None = None,
     ) -> tuple[bool, object, str]:
         # LLM: Response decoding and per-redirect pinning share the module transport helper.
         # 函数用途: 在固定授权边界内抓取并解析一份 JSON 来源响应。
-        return _fetch_json_pinned(self, request, hosts, allow_resolution)
+        return _fetch_json_pinned(self, request, hosts, allow_resolution, resolved_by_host=resolved_by_host)
 
     def _resolve_pin_with(
-        self, url: str, hosts: tuple[str, ...], allow_resolution: bool | None
+        self,
+        url: str,
+        hosts: tuple[str, ...],
+        allow_resolution: bool | None,
+        *,
+        resolved_by_host: dict[str, tuple[str, ...]] | None = None,
     ) -> PinResult:
         # LLM: Redirects must pass this same network gate; never reuse an unvalidated DNS result.
         # 函数用途: 解析并校验一个来源 URL，返回可固定连接的 IP。
-        return _resolve_watch_pin(self, url, hosts, allow_resolution)
+        return _resolve_watch_pin(self, url, hosts, allow_resolution, resolved_by_host=resolved_by_host)
 
     def _owner_home(self) -> Path | None:
         raw = str(
@@ -721,9 +728,12 @@ def _harvester_fetch(tool: WatchStreamTool):
         return override
     hosts = tuple(tool.allowed_private_hosts or ())
     allow_resolution = tool.allow_private_resolution
+    resolved_by_host: dict[str, tuple[str, ...]] = {}
 
     def _fetch(request: SourceHttpRequest) -> tuple[bool, object, str]:
-        return tool._fetch_json_pinned(request, hosts, allow_resolution)
+        return tool._fetch_json_pinned(
+            request, hosts, allow_resolution, resolved_by_host=resolved_by_host
+        )
 
     return _fetch
 
@@ -735,6 +745,8 @@ def _fetch_json_pinned(
     request: SourceHttpRequest,
     hosts: tuple[str, ...],
     allow_resolution: bool | None,
+    *,
+    resolved_by_host: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[bool, object, str]:
     from .source_credentials import (
         authorize_source_request,
@@ -750,6 +762,7 @@ def _fetch_json_pinned(
         request, secrets = authorize_source_request(request, authority)
     except (ValueError, OSError, AttributeError, TypeError):
         return False, '来源秘密引用没有原授权，未发送请求；请使用本人文件或重新绑定私人任务凭据。', 'SOURCE_SECRET_UNAVAILABLE'
+    hop_history = resolved_by_host if resolved_by_host is not None else {}
 
     def resolve_pin(pin_url):
         try:
@@ -759,7 +772,9 @@ def _fetch_json_pinned(
                 authorized_source_hop(authority, original_url, pin_url)
         except (ValueError, OSError, AttributeError, TypeError):
             return PinResult(None, _err('来源秘密引用授权已失效或目标origin改变，未继续请求。', 'SOURCE_SECRET_UNAVAILABLE'))
-        return tool._resolve_pin_with(pin_url, hosts, allow_resolution)
+        return tool._resolve_pin_with(
+            pin_url, hosts, allow_resolution, resolved_by_host=hop_history
+        )
 
     response = fetch_raw_response(
         FetchRawRequest(
@@ -805,6 +820,8 @@ def _watch_network_safety_settings(
     tool: WatchStreamTool,
     hosts: tuple[str, ...],
     allow_resolution: bool | None,
+    *,
+    previous_resolved_ips: tuple[str, ...] = (),
 ) -> NetworkSafetySettings:
     config = getattr(tool.agent, "config", None)
     values = getattr(config, "allowed_private_hosts", None)
@@ -815,6 +832,7 @@ def _watch_network_safety_settings(
         gateway_endpoint=GatewayEndpointConfig(
             configured_port=getattr(config, "gateway_port", None),
         ),
+        previous_resolved_ips=previous_resolved_ips,
     )
 
 
@@ -825,23 +843,30 @@ def _resolve_watch_pin(
     url: str,
     hosts: tuple[str, ...],
     allow_resolution: bool | None,
+    *,
+    resolved_by_host: dict[str, tuple[str, ...]] | None = None,
 ) -> PinResult:
     from ..contracts.gates.network_safety import _canonical_ip
 
-    host = urlsplit(url).hostname or ""
-    literal_ip = _canonical_ip(host)
     try:
+        host = (urlsplit(url).hostname or "").lower().strip("[]").rstrip(".")
+        literal_ip = _canonical_ip(host)
         resolved = (literal_ip,) if literal_ip else tuple(str(ip) for ip in _default_network_resolver(host))
     except Exception:
-        resolved = ()
+        host, literal_ip, resolved = "", "", ()
+    previous = resolved_by_host.get(host, ()) if resolved_by_host is not None and host else ()
     error = _network_safety_error(
         _TOOL_NAME,
         url,
         lambda _host: resolved,
-        _watch_network_safety_settings(tool, hosts, allow_resolution),
+        _watch_network_safety_settings(
+            tool, hosts, allow_resolution, previous_resolved_ips=previous
+        ),
     )
     if error is not None:
         return PinResult(None, error)
+    if resolved_by_host is not None and host and not literal_ip and resolved:
+        resolved_by_host.setdefault(host, resolved)
     return PinResult(resolved[0] if resolved else None, None)
 
 

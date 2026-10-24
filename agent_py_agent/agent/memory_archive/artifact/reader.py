@@ -253,10 +253,13 @@ def _read_registered_artifact(read: _RegisteredArtifactRead) -> dict[str, Any]:
         return _error_payload("artifact_unreadable", artifact_ref, f"{type(exc).__name__}: {exc}")
     if not isinstance(payload, dict) or payload.get("kind") != "tool_output":
         return _error_payload("invalid_tool_output_artifact", artifact_ref, "artifact is not a tool_output content file")
+    # 声明为 blob_v1 的包装文件必须以侧文件为唯一正文来源，拒绝注入内联 content 覆盖侧文件校验。
+    if payload.get("artifact_format") == "blob_v1":
+        if "content" in payload:
+            return _error_payload("invalid_tool_output_artifact", artifact_ref, "artifact is not a tool_output content file")
+        return _read_blob_artifact(read, payload)
     content = payload.get("content")
     if not isinstance(content, str):
-        if payload.get("artifact_format") == "blob_v1" and "content" not in payload:
-            return _read_blob_artifact(read, payload)
         return _error_payload("invalid_tool_output_artifact", artifact_ref, "artifact is not a tool_output content file")
     encoded = content.encode("utf-8")
     digest = hashlib.sha256(encoded).hexdigest()
@@ -301,7 +304,7 @@ def _verified_read_result(read, payload, digest, size_bytes, read_result):
 # 函数用途: 校验blob包装元数据，拒绝穿越和无法解释的分块格式。
 def _blob_metadata(read, payload):
     name = str(payload.get("content_blob") or "")
-    if name != f"{read.path.stem}.blob" or any(mark in name for mark in ("/", "\\", "..")):
+    if name != f"{read.path.stem}.blob" or any(mark in name for mark in ("/", "\\", "\x00")) or name in {".", ".."}:
         raise ValueError("artifact blob must be the canonical sibling basename")
     if type(payload.get("blob_block_size")) is not int or payload["blob_block_size"] != _BLOB_BLOCK_SIZE:
         raise ValueError("invalid artifact blob block size")
@@ -535,7 +538,7 @@ def _find_index_record(
     index_paths: tuple[Path, ...] | None = None,
     open_errors: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    if artifact_ref.endswith(".blob"):
+    if artifact_ref.endswith(".blob") and (":" not in artifact_ref or _looks_like_path(artifact_ref)):
         artifact_ref = f"{artifact_ref[:-5]}.json"
     try:
         ref_path = Path(artifact_ref).expanduser()

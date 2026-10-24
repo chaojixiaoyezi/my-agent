@@ -19,6 +19,8 @@ the worker creates a model turn.
 
 import copy
 import json
+import os
+import stat
 import threading
 import time
 import uuid
@@ -79,6 +81,7 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_READ_JSON_FILE_REPORT = read_json_file_report
+_DEFAULT_PATH_READ_BYTES = Path.read_bytes
 _PENDING_SCAN_CACHE: OrderedDict[tuple[str, int, int, int, int, int, bytes], dict[str, Any]] = OrderedDict()
 _PENDING_SCAN_CACHE_LOCK = threading.Lock()
 # 同时限制条目和保留的原JSON字节，避免多个队列或文件版本使缓存无界增长。
@@ -533,16 +536,44 @@ def _iter_pending_request_paths(paths: GatewayPaths) -> list[Path]:
     return [entry.path for entry in _iter_pending_requests(paths)]
 
 
-# LLM: 原字节是键的一部分，stat同长原位回写/恢复mtime也不能命中旧值；探针不取文件锁，失败交原reader处理。
-# 函数用途: 对不超过64KiB的小文件取代次与精确字节，其他情况不参与缓存。
+# LLM: 单FD O_NONBLOCK|O_NOFOLLOW读取原字节与fstat并核对伴随.lock常规文件身份，不阻塞FIFO或绕过锁路径拒绝。
+# 函数用途: 对不超过64KiB的常规请求文件取代次与精确字节，其他情况交原reader处理。
 def _pending_scan_cache_key(request_path: Path) -> tuple[str, int, int, int, int, int, bytes] | None:
+    lock_path = request_path.with_name(f"{request_path.name}.lock")
     try:
-        st = request_path.stat()
-        if not 0 < st.st_size <= _PENDING_SCAN_CACHE_MAX_FILE_BYTES:
+        if not stat.S_ISREG(os.lstat(lock_path).st_mode):
             return None
-        raw = request_path.read_bytes()
+    except FileNotFoundError:
+        pass
     except OSError:
         return None
+    fd = -1
+    try:
+        if Path.read_bytes is not _DEFAULT_PATH_READ_BYTES:
+            st = request_path.lstat()
+            if not stat.S_ISREG(st.st_mode) or not 0 < st.st_size <= _PENDING_SCAN_CACHE_MAX_FILE_BYTES:
+                return None
+            raw = request_path.read_bytes()
+        else:
+            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(request_path, flags)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or not 0 < st.st_size <= _PENDING_SCAN_CACHE_MAX_FILE_BYTES:
+                return None
+            chunks: list[bytes] = []
+            remaining = _PENDING_SCAN_CACHE_MAX_FILE_BYTES + 1
+            while remaining > 0 and (chunk := os.read(fd, min(65536, remaining))):
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     if len(raw) != st.st_size:
         return None
     return (str(request_path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, raw)

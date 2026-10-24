@@ -1,3 +1,10 @@
+## 2026-10-24 第二波（W2-2）工具输出 `blob_v1` 二进制直写与 `read_artifact` 切片直读（已实现）
+
+`memory_archive/tool_output_externalizer.py`、`memory_archive/artifact/reader.py`、`memory_archive/artifact/page_reader.py` 与 `artifacts/registry_projection_cache.py` 落地 `W2-2`：
+- 新增 `tool_output_storage_format` 配置（`"compat"` 默认 / `"blob_v1"`）。在 `"blob_v1"` 模式下，大型工具输出正文以纯 UTF-8 流式直写 `<call_id>.blob`（`write_private_text_file_atomic_unlocked`），JSON 包装文件仅保留 `artifact_format: "blob_v1"`、`blob_filename`、`blob_size_bytes`、`blob_sha256`、`line_offsets` 与前 2000 字符预览，消除大字符串 JSON 二次转义放大。
+- `read_artifact` 对 `artifact_format == "blob_v1"` 强制以声明格式为唯一权威（忽略注入的内联 `content` 字段），校验 `blob_filename` 严格匹配 `<stem>.blob`（兼容含 `..` 的合法 `call_id` 与以 `.blob` 结尾的逻辑 `<run_id>:<call_id>` 引用），并通过 `page_reader.py::read_blob_artifact_page` 基于 `line_offsets` + `os.pread` 执行有界字节窗口切片直读，无需将整份数 MB JSON 反序列化进内存。
+- `artifacts/registry_projection_cache.py` 新增按索引四元物理指纹驱动的进程内 LRU+字节上限（`8 MiB`）只读投影缓存，并在 `_retained_tree_bytes` 中递归计入 dataclass `__dict__`、`MappingProxyType` 底层字典与 `latest_records` 视图，确保进程常驻内存严格受控。
+
 ## 2026-10-23 工具输出归档 `read_artifact` 单次解析计划与路径系统调用收敛（已实现）
 
 `memory_archive/artifact/reader.py` 新增 `PreparedToolOutputArtifactRead` 与 `prepare_tool_output_artifact_read`：`ReadArtifactTool.execute` 在单次工具调用内最多执行一次 `index.jsonl` 发现与查找，并在调用方显式指定 `max_chars > 0` 或输出预算未开启时跳过冗余 `estimate` 路径。索引行匹配新增本次查询局部的 `_ArtifactPathCache`，对空路径 `path == ""`（`kind="tool_call"` 记录）复用单次解析结果，对规范 POSIX 绝对路径按父目录缓存一次 `realpath + stat` 并以单次叶子 `lstat` 判定普通文件，符号链接、环路（`ELOOP`）、大整数与晚到非法 UTF-8 等异常行继续沿用原错误合同；正文读取通过 `read_text_beneath` 执行锚定无跟随打开，消除双扫与数十万次冗余路径解析系统调用。详见[产物查找耗时设计](../../design/ARTIFACT_LOOKUP_LATENCY.md)。

@@ -14,7 +14,11 @@ from ...path_access_policy import PathAccessPolicy
 from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from .command_policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
-from .network_safety import private_host_or_ip_is_allowlisted
+from .network_safety import (
+    always_blocked_host,
+    is_private_host_or_ip,
+    private_host_or_ip_is_allowlisted,
+)
 
 _PATH_KEYS = {"path", "file_path", "target_path", "output_path", "working_dir", "cwd", "directory"}
 _URL_KEYS = {"url", "endpoint", "webhook_url"}
@@ -178,14 +182,16 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
     return None
 
 
-# LLM: 共享 matcher 接受 CIDR 和通配符，裸字符串不产生授权；此预检不替代连接时永久禁止项。
-# 函数用途: 返回 URL 的文件协议或未授权私网问题，不连接目标。
+# LLM: 共享 matcher 接受 CIDR 和通配符，裸字符串不产生授权；永久禁止主机即使开启总开关也直接拒绝。
+# 函数用途: 返回 URL 的文件协议、永久禁止元数据或未授权私网问题，不连接目标。
 def _url_finding(field: str, raw_url: object, allowed_private_hosts: object, allow_private_resolution: bool = False) -> GateFinding | None:
     parsed = urlparse(_text(raw_url))
     if parsed.scheme == "file":
         return GateFinding("NETWORK_FILE_URL_BLOCKED", evidence={"field": field})
     host = _normalize_host(parsed.hostname)
-    if host and not allow_private_resolution and not private_host_or_ip_is_allowlisted(host, allowed_private_hosts) and _is_private_host(host):
+    if host and always_blocked_host(host):
+        return GateFinding("NETWORK_PRIVATE_HOST_BLOCKED", evidence={"field": field, "host": host})
+    if host and not allow_private_resolution and not private_host_or_ip_is_allowlisted(host, allowed_private_hosts) and is_private_host_or_ip(host):
         return GateFinding("NETWORK_PRIVATE_HOST_BLOCKED", evidence={"field": field, "host": host})
     return None
 
@@ -273,49 +279,6 @@ def _lexically_under_any_root(path: Path, roots: list[Path]) -> bool:
     return False
 
 
-def _is_private_host(host: str) -> bool:
-    normalized = _normalize_host(host)
-    if normalized in _PRIVATE_HOSTS:
-        return True
-    numeric = _numeric_ipv4_host(normalized)
-    if numeric:
-        normalized = numeric
-    shorthand = _shorthand_ipv4_host(normalized)
-    if shorthand:
-        normalized = shorthand
-    try:
-        address = ipaddress.ip_address(normalized)
-    except ValueError:
-        return False
-    return address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified
-
-
-def _numeric_ipv4_host(host: str) -> str:
-    if not host.isdigit():
-        return ""
-    try:
-        value = int(host)
-    except ValueError:
-        return ""
-    if not 0 <= value <= 0xFFFFFFFF:
-        return ""
-    return ".".join(str((value >> shift) & 0xFF) for shift in (24, 16, 8, 0))
-
-
-def _shorthand_ipv4_host(host: str) -> str:
-    parts = host.split(".")
-    if not 1 < len(parts) < 4 or not all(part.isdigit() for part in parts):
-        return ""
-    nums = [int(part) for part in parts]
-    if any(num < 0 or num > 255 for num in nums):
-        return ""
-    if len(nums) == 2:
-        nums = [nums[0], 0, 0, nums[1]]
-    elif len(nums) == 3:
-        nums = [nums[0], nums[1], 0, nums[2]]
-    return ".".join(str(num) for num in nums)
-
-
 def _checked_field_names(data: Mapping[object, object]) -> list[str]:
     keys = _PATH_KEYS | _URL_KEYS | _COMMAND_KEYS | {"urls"}
     return sorted(str(key) for key in data.keys() if str(key) in keys)
@@ -325,7 +288,7 @@ def _iter_values(value: object) -> list[object]:
     return list(value) if isinstance(value, list) else [value]
 
 def _normalize_host(value: object) -> str:
-    return _text(value).lower().strip("[]")
+    return _text(value).lower().strip("[]").rstrip(".")
 
 
 __all__ = ["PathUrlCommandFacts", "evaluate_path_url_command_gate"]

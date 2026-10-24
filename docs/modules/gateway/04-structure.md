@@ -1,3 +1,9 @@
+## 2026-10-24 第二波（W2-1 / W2-3 / W2-4）网关热路径 CPU 减负、Pending 增量索引与内网白名单结构
+
+- `backends/cache_diagnostics.py` 维护 `_ROW_DIGEST_CACHE`（写回前二次校验 `_strict_json_cache_key(message) == key` 防并发突变）与 `serialize_cached_strict_json`；`agent_core/tool_ir_history.py` 维护受 `_MAX_PROJECTION_CACHE_SIZE = 64`、`_MAX_PROJECTION_CACHE_BYTES = 2 MiB` 与 `_MAX_SINGLE_PROJECTION_BYTES = 256 KiB` 约束的 `_PROJECTION_CACHE`（写回前二次复核输入指纹，并在 `copy_prior=False` 下调用 `_detach_derived_messages` 仅深拷贝派生 IR 消息而保持 `prior_messages` 引用零拷贝）；`gateway_parts/stream_writer.py` 与 `stream_events.py` 提供 `should_flush_thinking_delta`、`schedule_thinking_flush_timer`（守护 `threading.Timer` 尾延迟刷新）与 `drain_thinking_delta_text`（原子交换清空缓冲并保留敏感标识符尾部真前缀防跨分片脱敏断裂）。
+- `gateway_parts/request_worker.py` 维护进程级 `_PENDING_INDEX`（`_PendingDirectoryIndex`），按目录物理四元指纹与单文件 `os.open(..., O_RDONLY | O_NONBLOCK | O_NOFOLLOW)` + `os.fstat(fd)` + 有界头部读取提取 `_PendingEntryMeta`，通过 `os.lstat` 识别并拒绝非普通 `.lock` 侧车文件，驱动 `claim_next_pending` 与 `_pending_admission_Order` 增量扫描。
+- `contracts/gates/network_safety.py` 导出 `always_blocked_host`、`is_private_host_or_ip`、`host_matches_allowed_private_hosts` 与 `evaluate_network_safety_gate`（永久封禁云元数据、`0.0.0.0/8`、回环与 `fe80::/10` 链路本地，禁止非显式回环白名单借域名解析放行回环 IP，校验 `http`/`https` 协议及 `previous_resolved_ips` 跨跳 DNS 重绑定），由 `path_url_command.py`、`offline_security_boundary_contract.py`、`tooling/web.py`、`web_fetch_tools.py`、`action_policy.py` 与 `ingestion/watch_tool.py` 共用；`settings/runtime_scope_config.py` 强制 `owner`/`task`/`run` 运行时覆盖层不得突破宿主 `base_config.allowed_private_hosts`。
+
 ## 2026-10-24 第一波（W1-1..W1-6）稳定性、并发治理、缓存命中率与后台完成唤醒结构
 
 - `gateway_parts/supervisor.py::kill_pid` 与 `_force_stop_gateway` 使用 `getattr(signal, "SIGKILL", signal.SIGTERM)` 兼容 Windows 进程强杀；`tests/test_supervisor.py` 通过 `raising=False` 兼容非 POSIX 信号与进程组桩。

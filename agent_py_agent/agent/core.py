@@ -1038,6 +1038,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             http_timeout=config.tool_http_timeout,
             gateway_port=config.gateway_port,
             allowed_private_hosts=tuple(getattr(config, "allowed_private_hosts", None) or ()),
+            allowed_private_hosts_provider=lambda: tuple(getattr(agent.config, "allowed_private_hosts", None) or ()),
             catalog_limit=TOOL_CATALOG_LIMIT_COUNT,
             catalog_mode=config.tool_catalog_mode,
             catalog_categories=config.tool_catalog_categories,
