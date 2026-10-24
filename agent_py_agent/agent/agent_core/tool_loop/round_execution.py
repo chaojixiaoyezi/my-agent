@@ -842,13 +842,13 @@ def _execute_parallel_segment(
             return [future.result() for future in futures]
 
 
-# LLM: 准确工具名及结构化动作决定控制通道，长等待/普通执行和模型自行填priority不能借用保留槽。
-# 函数用途: 识别轻量查询及停止调用，不改变原工具授权或审批。
+# LLM: 仅在役工具名及真实轻量动作可借控制槽；wait、退休名、畸形动作和模型priority不获额外槽，不改授权审批。
+# 函数用途: 将进程列表/状态/网络状态/停止与在役查询工具识别为控制调用。
 def _is_control_lane_call(call):
-    if call.tool_name in {'inspect_agent_tree', 'list_agents', 'tool_search', 'list_tools'}:
+    if call.tool_name in {'list_agents', 'tool_search', 'list_tools'}:
         return True
     action = call.arguments.get('action')
-    return call.tool_name == 'process_session' and isinstance(action, str) and action in {'status', 'poll', 'list', 'stop', 'kill'}
+    return call.tool_name == 'process_session' and isinstance(action, str) and action in {'list', 'status', 'network_status', 'stop'}
 
 
 # LLM: 每项独立Context；入队取消工厂仍走原启动屏障合成配对结果，不提前报告started。

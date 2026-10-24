@@ -865,11 +865,11 @@ def test_agent_bound_global_limit_applies_to_default_submit(tmp_path):
     other.result(5)
 
 
-# LLM: 调度器接触的是未验证模型参数，畸形JSON动作不应在分类阶段中断整轮或获得保留槽。
-# 函数用途: 验证控制动作精确白名单及畸形参数的保守分类。
+# LLM: 仅真实轻量动作及在役工具可借保留槽；畸形JSON、长wait和退休名不能中断整轮或借槽。
+# 函数用途: 验证控制动作精确白名单、退休入口拒绝及畸形参数的保守分类。
 def test_control_lane_classification_is_safe_for_unvalidated_arguments():
     errors = []
-    for action in ([], {}, None, 0, True, 'wait', 'start'):
+    for action in ([], {}, None, 0, True, 'wait', 'start', 'poll', 'kill'):
         try:
             actual = rounds._is_control_lane_call(SimpleNamespace(tool_name='process_session', arguments={'action': action}))
         except (TypeError, AttributeError) as error:
@@ -877,6 +877,121 @@ def test_control_lane_classification_is_safe_for_unvalidated_arguments():
             continue
         assert actual is False
     assert not errors, '畸形工具参数使调度分类抛错而非交回原参数校验'
-    for action in ('status', 'poll', 'list', 'stop', 'kill'):
+    for action in ('list', 'status', 'network_status', 'stop'):
         assert rounds._is_control_lane_call(SimpleNamespace(tool_name='process_session', arguments={'action': action}))
+    for name in ('list_agents', 'tool_search', 'list_tools'):
+        assert rounds._is_control_lane_call(SimpleNamespace(tool_name=name, arguments={}))
+    assert not rounds._is_control_lane_call(SimpleNamespace(tool_name='inspect_agent_tree', arguments={}))
     assert not rounds._is_control_lane_call(SimpleNamespace(tool_name='run_command', arguments={'priority': 'control'}))
+
+
+# LLM: 使用真实YAML加载，默认读口仅定向到受控宿主文件；不同身份来源均不能把私有配置变整机权威。
+# 函数用途: 验证user/group的私有值不能关闭、缩小或调大宿主全局额度。
+@pytest.mark.parametrize('owner_kind', ['user', 'group'])
+@pytest.mark.parametrize('identity_source', ['home', 'config', 'my_agent_config'])
+@pytest.mark.parametrize('private_limit', [0, 1, 64])
+def test_non_main_private_config_cannot_override_host_global_limit(tmp_path, monkeypatch, owner_kind, identity_source, private_limit):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    private = tmp_path / 'private'
+    (private / 'config').mkdir(parents=True)
+    (private / 'config' / 'capability_config.yaml').write_text(f'max_parallel_tool_calls_global: {private_limit}\n')
+    host = tmp_path / 'host.yaml'
+    host.write_text('max_parallel_tool_calls_global: 8\n')
+    load, reads = capability.load_capability_config, []
+
+    # LLM: 原解析器真实读取宿主文件；无参调用的签名保证不会传入普通owner的私有覆盖路径。
+    # 函数用途: 固定本次测试的宿主默认配置来源。
+    def load_host():
+        reads.append(True)
+        return load(host)
+
+    config = SimpleNamespace(max_parallel_tool_calls_global=None)
+    home = SimpleNamespace(owner_kind='', owner_home_dir=private)
+    if identity_source == 'home':
+        home.owner_kind = owner_kind
+    else:
+        setattr(config, 'owner_kind' if identity_source == 'config' else 'my_agent_owner_kind', owner_kind)
+    agent = SimpleNamespace(root=private, home_paths=home, config=config)
+    monkeypatch.setattr(capability, 'load_capability_config', load_host)
+    assert resolve_max_parallel_tool_calls_global(agent) == 8
+    assert reads == [True]
+    assert not hasattr(agent, '_capability_config_runtime_snapshot')
+
+
+# LLM: agent.config中的非None值是宿主显式注入，不可被owner文件或默认源覆盖；0须保留无限语义。
+# 函数用途: 验证宿主注入优先且不接触任何能力配置读口。
+@pytest.mark.parametrize('limit', [0, 4])
+def test_explicit_host_global_limit_precedes_all_owner_config(tmp_path, monkeypatch, limit):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.capability import runtime_config_reload as runtime
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    agent = SimpleNamespace(root=tmp_path, home_paths=SimpleNamespace(owner_kind='user'),
+                            config=SimpleNamespace(max_parallel_tool_calls_global=limit))
+    monkeypatch.setattr(capability, 'load_capability_config', lambda: pytest.fail('显式注入仍读取默认配置'))
+    monkeypatch.setattr(runtime, 'capability_config_for_agent', lambda _: pytest.fail('显式注入仍读取owner配置'))
+    assert resolve_max_parallel_tool_calls_global(agent) == limit
+
+
+# LLM: 非法宿主注入不能降级回默认0以静默关闭安全阀，bool也不能当整数额度。
+# 函数用途: 验证显式宿主额度沿用严格非负整数校验。
+@pytest.mark.parametrize('limit', [-1, True, '4', 1.5])
+def test_invalid_explicit_host_global_limit_is_rejected(tmp_path, limit):
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace(max_parallel_tool_calls_global=limit))
+    with pytest.raises(ValueError, match='nonnegative integer'):
+        resolve_max_parallel_tool_calls_global(agent)
+
+
+# LLM: main及旧宿主缺省身份仍沿原能力配置读口，显式None不是强制无限配置。
+# 函数用途: 验证修复不改变main配置及原有默认身份的取值。
+@pytest.mark.parametrize('owner_kind', ['main', '', None])
+def test_main_owner_keeps_capability_config_global_limit(tmp_path, owner_kind):
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    (tmp_path / 'config').mkdir()
+    (tmp_path / 'config' / 'capability_config.yaml').write_text('max_parallel_tool_calls_global: 5\n')
+    agent = SimpleNamespace(root=tmp_path, home_paths=SimpleNamespace(owner_kind=owner_kind),
+                            config=SimpleNamespace(max_parallel_tool_calls_global=None))
+    assert resolve_max_parallel_tool_calls_global(agent) == 5
+
+
+# LLM: 覆盖真实scheduler_for_agent到submit的整机计数，不以解析器返回值替代共享状态观察。
+# 函数用途: 验证普通owner提交不能把已生效的宿主全局上限压到私有值1。
+def test_user_submission_does_not_lower_active_host_global_limit(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.tooling import owner_tool_scheduler as module
+    Scheduler, Item = scheduler_api()
+    host_path = tmp_path / 'host.yaml'
+    host_path.write_text('max_parallel_tool_calls_global: 8\n')
+    user_root = tmp_path / 'user'
+    (user_root / 'config').mkdir(parents=True)
+    (user_root / 'config' / 'capability_config.yaml').write_text('max_parallel_tool_calls_global: 1\n')
+    load = capability.load_capability_config
+    monkeypatch.setattr(capability, 'load_capability_config', lambda: load(host_path))
+    with module._DISPATCH_CONDITION:
+        assert module._DISPATCH_CONDITION.wait_for(lambda: not module._GLOBAL_ACTIVE, 5)
+    active, release = Event(), Event()
+    host = Scheduler.for_owner(tmp_path / 'main', 1)
+    first = host.submit(Item('host', lambda: (active.set(), release.wait(5))), max_parallel_global=8)
+    assert active.wait(5)
+    pending = None
+    try:
+        user = SimpleNamespace(root=user_root, home_paths=SimpleNamespace(owner_kind='user', owner_home_dir=user_root),
+                               config=SimpleNamespace(max_parallel_tool_calls_per_owner=1))
+        scheduler = module.scheduler_for_agent(user)
+        pending = scheduler.submit(Item('user', lambda: 'ok'))
+        with module._DISPATCH_CONDITION:
+            assert module._GLOBAL_LIMIT == 8
+    finally:
+        release.set()
+        first.result(5)
+        if pending is not None:
+            pending.result(5)

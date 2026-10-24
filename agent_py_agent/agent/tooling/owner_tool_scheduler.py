@@ -90,8 +90,8 @@ def _owner_key(root):
 # LLM: 正常线程数不超过owner/global cap；额外控制槽最多2个，队列有界且不为全局等待创建线程。
 # 类用途: 按FIFO分配普通owner许可并保留控制快车道，空闲worker退出，不保留永久池。
 class OwnerToolScheduler:
-    # LLM: 构造只准备内存，不启动线程；limit只能为正整数。
-    # 函数用途: 建立一个owner的有界队列。
+    # LLM: owner额度须为正整数；全局绑定初始0，后由可信宿主解析器提供；仅初始化内存，不启动线程或读取owner配置。
+    # 函数用途: 建立owner有界队列和普通/控制计数，等待宿主绑定整机额度。
     def __init__(self, root, limit):
         if type(limit) is not int or limit < 1:
             raise ValueError("owner工具额度必须是正整数")
@@ -353,11 +353,21 @@ def scheduler_for_agent(agent):
     return OwnerToolScheduler.for_owner(root, limit, max_parallel_global=global_limit)
 
 
-# LLM: 只经能力配置唯一运行时读口取宿主上限，不读task_attributes；未声明的旧版本字段按默认0兼容。
-# 函数用途: 解析全局工具安全阀配置，不由模型或任务调大上限。
+# LLM: 宿主显式非None注入优先；仅main沿原owner读口，非main只读无参宿主默认，不信私有快照或任务参数；0不限。
+# 函数用途: 按可信身份选择整机工具安全阀来源，并严格校验非负整数。
 def resolve_max_parallel_tool_calls_global(agent):
+    from ..capability.config import load_capability_config
     from ..capability.runtime_config_reload import capability_config_for_agent
-    value = getattr(capability_config_for_agent(agent), 'max_parallel_tool_calls_global', 0)
+    config = getattr(agent, 'config', None)
+    value = getattr(config, 'max_parallel_tool_calls_global', None)
+    if value is None:
+        owner_kind = getattr(getattr(agent, 'home_paths', None), 'owner_kind', None)
+        if owner_kind in ('', None):
+            owner_kind = getattr(config, 'owner_kind', None)
+        if owner_kind in ('', None):
+            owner_kind = getattr(config, 'my_agent_owner_kind', 'main')
+        capability = capability_config_for_agent(agent) if owner_kind in ('', 'main', None) else load_capability_config()
+        value = getattr(capability, 'max_parallel_tool_calls_global', 0)
     if type(value) is not int or value < 0:
         raise ValueError('max_parallel_tool_calls_global must be a nonnegative integer')
     return value
