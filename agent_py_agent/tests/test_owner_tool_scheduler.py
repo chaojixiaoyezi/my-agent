@@ -417,8 +417,8 @@ def test_serial_rechecks_gate_after_queue(tmp_path, monkeypatch, reason, code):
 
     # LLM: 标记第二项已经真实入队，不能只靠请求线程启动推断排队。
     # 函数用途: 捕获队列观察点。
-    def submit(item):
-        future = original(item)
+    def submit(item, **kwargs):
+        future = original(item, **kwargs)
         queued.set()
         return future
 
@@ -554,3 +554,444 @@ def test_serial_workspace_promotion_and_concurrent_commit_dedupe(tmp_path, cap):
         assert sum(1 for row in rows if row.get("kind") == "assistant_commentary") == 1
     finally:
         sys.setswitchinterval(old_interval)
+
+
+# LLM: 满队列必须在取消信号后解除背压，不等待在途handler；finally总释放受控线程。
+# 函数用途: 复现submit在队满时忽略CancellationToken的挂起。
+def test_full_queue_submission_cancellation_wakes_promptly(tmp_path, monkeypatch):
+    from time import perf_counter
+
+    from agent_py_agent.agent.common.cancellation import ToolCancelled
+    Scheduler, Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    active, release, waiting, finished = Event(), Event(), Event(), Event()
+    first = scheduler.submit(Item('active', lambda: (active.set(), release.wait(5))))
+    assert active.wait(5)
+    pending = [scheduler.submit(Item(str(i), lambda: None)) for i in range(2)]
+    token, errors = CancellationToken(), []
+    original = scheduler._condition.wait_for
+
+    # LLM: 只观察真实等待，不改变predicate或完成条件。
+    # 函数用途: 固定取消发生在满队列背压之后。
+    def observe(predicate, *args, **kwargs):
+        if not predicate():
+            waiting.set()
+        return original(predicate, *args, **kwargs)
+
+    # LLM: 捕获异常供主线程断言，不把线程退出当取消成功。
+    # 函数用途: 执行一次被满队列挡住的提交。
+    def submit():
+        try:
+            scheduler.submit(Item('blocked', lambda: pytest.fail('cancelled handler')), cancellation_token=token)
+        except ToolCancelled as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(scheduler._condition, 'wait_for', observe)
+    with ThreadPoolExecutor(1) as pool:
+        producer = pool.submit(submit)
+        try:
+            assert waiting.wait(5)
+            started = perf_counter()
+            token.cancel()
+            assert finished.wait(0.1), '取消后submit仍等队列释放'
+            assert perf_counter() - started < 0.1, '取消唤醒总耗时超过100ms'
+            assert errors
+            assert not token._callbacks
+        finally:
+            release.set()
+        producer.result(5)
+    first.result(5)
+    for future in pending:
+        future.result(5)
+
+
+# LLM: Future.cancel直接入口须物理移除并唤醒生产者，重复取消不能重复释放队列容量。
+# 函数用途: 复现死项滞留队列及取消回调锁序问题。
+def test_future_cancel_removes_queued_item_and_frees_capacity(tmp_path):
+    Scheduler, Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    active, release = Event(), Event()
+    first = scheduler.submit(Item('active', lambda: (active.set(), release.wait(5))))
+    assert active.wait(5)
+    cancelled = scheduler.submit(Item('cancelled', lambda: pytest.fail('cancelled invoked')))
+    later = scheduler.submit(Item('later', lambda: 'later'))
+    callback_held_lock = []
+    # LLM: 回调真的获取调度锁；同时检查回调入口不持锁，防RLock重入掩盖锁内完成问题。
+    # 函数用途: 检查取消完成回调可以安全访问调度器状态。
+    def inspect(_future):
+        callback_held_lock.append(scheduler._condition._is_owned())
+        with scheduler._condition:
+            assert len(scheduler._queue) == 1
+
+    cancelled.add_done_callback(inspect)
+    try:
+        assert cancelled.cancel() and cancelled.cancel()
+        with scheduler._condition:
+            assert len(scheduler._queue) == 1, '取消项仍物理占据队列'
+        assert callback_held_lock == [False]
+        fresh = scheduler.submit(Item('fresh', lambda: 'fresh'))
+        with scheduler._condition:
+            assert len(scheduler._queue) == 2
+    finally:
+        release.set()
+    assert first.result(5) is not None
+    assert later.result(5) == 'later' and fresh.result(5) == 'fresh'
+
+
+# LLM: 只计真实handler并发；跨owner提交后仍须共享整机额度，0则不限制。
+# 函数用途: 验证可选全局额度限制多个owner的实际执行峰值。
+@pytest.mark.parametrize('global_cap', [0, 2])
+def test_global_cap_across_distinct_owners(tmp_path, global_cap):
+    Scheduler, Item = scheduler_api()
+    ready, overflow, release, lock = Event(), Event(), Event(), Lock()
+    active, peak = [0], [0]
+
+    # LLM: 受控handler占住许可直到主线程检查，不靠提交数冒充执行数。
+    # 函数用途: 记录跨owner实际并发峰值。
+    def invoke():
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            if active[0] >= (global_cap or 4):
+                ready.set()
+            if global_cap and active[0] > global_cap:
+                overflow.set()
+        try:
+            assert release.wait(5)
+        finally:
+            with lock:
+                active[0] -= 1
+
+    futures = []
+    try:
+        for index in range(4):
+            scheduler = Scheduler.for_owner(tmp_path / str(index), 1)
+            futures.append(scheduler.submit(Item(str(index), invoke), max_parallel_global=global_cap))
+        assert ready.wait(5)
+        assert not overflow.wait(0.05)
+        assert peak[0] == (global_cap or 4)
+    finally:
+        release.set()
+        for future in futures:
+            future.result(5)
+
+
+# LLM: 正常槽及队列均占满时控制调用仍须独立执行；不能仅在FIFO头插入却等旧handler退出。
+# 函数用途: 验证控制快车道越过满正常队列和全局上限。
+def test_control_lane_bypasses_full_queue_and_normal_slots(tmp_path):
+    Scheduler, Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    entered, release, control = Event(), Event(), Event()
+    first = scheduler.submit(Item('hold', lambda: (entered.set(), release.wait(5))), max_parallel_global=1)
+    assert entered.wait(5)
+    normal = [scheduler.submit(Item(str(i), lambda: None), max_parallel_global=1) for i in range(2)]
+    with ThreadPoolExecutor(1) as pool:
+        submitted = pool.submit(scheduler.submit, Item('status', control.set), max_parallel_global=1, priority='control')
+        try:
+            assert control.wait(0.1), '控制调用被正常满队列或运行槽饿死'
+            submitted.result(5).result(5)
+        finally:
+            release.set()
+    first.result(5)
+    for future in normal:
+        future.result(5)
+
+
+# LLM: 不借替身接口绕开执行轮；仅捕获真实submit边界的宿主token/额度/优先级。
+# 函数用途: 复现真实并行入口未传取消与控制优先级，配置字段接线以真实能力配置对象为载体。
+def test_round_submission_wires_token_global_limit_and_priority(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    Scheduler, _Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    token, seen = CancellationToken(), []
+    capability = CapabilityConfig()
+    capability.max_parallel_tool_calls_global = 2
+    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace(max_parallel_tool_calls_per_owner=1),
+                            _capability_config_runtime_snapshot=SimpleNamespace(config=capability))
+    original = scheduler.submit
+
+    # LLM: 只增加参数观察，真实队列/线程/结果沿原submit执行。
+    # 函数用途: 记录执行轮传入的调度控制参数。
+    def submit(item, **kwargs):
+        seen.append(kwargs)
+        return original(item, **kwargs)
+
+    monkeypatch.setattr(scheduler, 'submit', submit)
+    request = _round_request(agent=agent, params=SimpleNamespace(tool_context=[], cancellation_token=token), tool_rounds=1,
+        response=None, calls=[{'tool': 'list_tools'}, {'tool': 'read'}],
+        execute_one=lambda work: _success(work, 'ok'), record_one=lambda _: None)
+    rows = rounds._execute_parallel_segment(request, request.calls, start_idx=1)
+    assert all(row[3].result.ok for row in rows)
+    assert [kwargs.get('cancellation_token') for kwargs in seen] == [token, token]
+    assert [kwargs.get('max_parallel_global') for kwargs in seen] == [2, 2]
+    assert [kwargs.get('priority') for kwargs in seen] == ['control', 'normal']
+
+
+# LLM: 仅弱引用等待owner会让已接受但未启动的工作被GC丢弃；不能依赖调用方保留Future。
+# 函数用途: 保证全局背压下已接受队列拥有真实存活权威。
+def test_global_waiting_queue_survives_discarded_future(tmp_path):
+    import gc
+    import weakref
+    Scheduler, Item = scheduler_api()
+    first = Scheduler.for_owner(tmp_path / 'first', 1)
+    active, release, ran = Event(), Event(), Event()
+    held = first.submit(Item('held', lambda: (active.set(), release.wait(5))), max_parallel_global=1)
+    assert active.wait(5)
+    try:
+        other = Scheduler.for_owner(tmp_path / 'waiting', 1)
+        reference = weakref.ref(other)
+        other.submit(Item('must-run', ran.set), max_parallel_global=1)
+        del other
+        gc.collect()
+        assert reference() is not None, '全局等待队列被垃圾回收'
+    finally:
+        release.set()
+    held.result(5)
+    assert ran.wait(5)
+
+
+# LLM: 控制槽只能多2个；保留槽不能领取普通积压，否则普通上限会被间接突破。
+# 函数用途: 验证控制突发有界且不把正常调用偷偷放进额外执行槽。
+def test_control_burst_is_bounded_and_never_drains_normal_queue(tmp_path):
+    Scheduler, Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    active, normal_release, controls_release = Event(), Event(), Event()
+    controls_ready, third_ready, normal_ran = Barrier(3), Event(), Event()
+    held = scheduler.submit(Item('held', lambda: (active.set(), normal_release.wait(5))), max_parallel_global=1)
+    assert active.wait(5)
+    ordinary = scheduler.submit(Item('ordinary', normal_ran.set), max_parallel_global=1)
+
+    # LLM: 两个控制handler实际进入后仍占住保留槽，第三个只能排队。
+    # 函数用途: 建立可检查的控制突发窗口。
+    def control():
+        controls_ready.wait(5)
+        assert controls_release.wait(5)
+
+    controls = [scheduler.submit(Item(str(i), control), max_parallel_global=1, priority='control') for i in range(2)]
+    try:
+        controls_ready.wait(5)
+        third = scheduler.submit(Item('third', third_ready.set), max_parallel_global=1, priority='control')
+        assert not third_ready.wait(0.05)
+        controls_release.set()
+        for future in controls:
+            future.result(5)
+        third.result(5)
+        assert not normal_ran.is_set(), '保留槽执行了普通工作项'
+    finally:
+        controls_release.set()
+        normal_release.set()
+    held.result(5)
+    ordinary.result(5)
+
+
+# LLM: 预留控制槽不是正常额度的消费者，正常项结束后其槽必须可复用。
+# 函数用途: 复现控制worker使空闲正常槽不能启动下一项的死锁窗口。
+def test_normal_slot_reused_while_reserved_control_is_running(tmp_path):
+    Scheduler, Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    active, control_active, release, release_control, ran = (Event() for _ in range(5))
+    first = scheduler.submit(Item('first', lambda: (active.set(), release.wait(5))), max_parallel_global=1)
+    assert active.wait(5)
+    control = scheduler.submit(Item('control', lambda: (control_active.set(), release_control.wait(5))),
+                               max_parallel_global=1, priority='control')
+    assert control_active.wait(5)
+    ordinary = scheduler.submit(Item('ordinary', ran.set), max_parallel_global=1)
+    try:
+        release.set()
+        assert ran.wait(0.1), '控制预留槽占用了已经空闲的正常全局额度'
+        ordinary.result(5)
+    finally:
+        release.set()
+        release_control.set()
+    first.result(5)
+    control.result(5)
+
+
+# LLM: 同一独立并发段内后续控制项不能被前面的正常提交背压挡住，结果顺序仍与provider一致。
+# 函数用途: 在实际并行段入口复现同步提交循环的队头阻塞。
+def test_parallel_batch_submits_control_before_normal_backpressure(tmp_path):
+    Scheduler, Item = scheduler_api()
+    scheduler = Scheduler.for_owner(tmp_path, 1)
+    active, release, control_ran = Event(), Event(), Event()
+    first = scheduler.submit(Item('hold', lambda: (active.set(), release.wait(5))))
+    assert active.wait(5)
+
+    # LLM: 仅控制调用可以解除旧任务阻塞；普通调用不改变这个观察点。
+    # 函数用途: 模拟状态/停止控制调用完成并保留正常配对结果。
+    def execute(work):
+        if work.call.tool_name == 'list_tools':
+            control_ran.set()
+            release.set()
+        return _success(work, 'ok')
+
+    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace(max_parallel_tool_calls_per_owner=1))
+    request = _round_request(agent=agent, params=SimpleNamespace(tool_context=[]), tool_rounds=1,
+        response=None, calls=[{'tool': 'read'} for _ in range(3)] + [{'tool': 'list_tools'}],
+        execute_one=execute, record_one=lambda _: None)
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(rounds._execute_parallel_segment, request, request.calls, start_idx=1)
+        try:
+            assert control_ran.wait(0.1), '同批正常项背压阻止控制项进入调度器'
+        finally:
+            release.set()
+        rows = future.result(5)
+    first.result(5)
+    assert [row[1] for row in rows] == request.calls
+    assert all(row[3].result.ok for row in rows)
+
+
+# LLM: nested_dispatch等现有调用方直接用scheduler.submit，不能要求每个调用方重传全局配置才生效。
+# 函数用途: 复现原提交接口未继承宿主已绑定的全局额度。
+def test_agent_bound_global_limit_applies_to_default_submit(tmp_path):
+    from agent_py_agent.agent.capability.config import CapabilityConfig
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import scheduler_for_agent
+    _Scheduler, Item = scheduler_api()
+    capability = CapabilityConfig()
+    capability.max_parallel_tool_calls_global = 1
+    schedulers = [scheduler_for_agent(SimpleNamespace(root=tmp_path / str(i),
+        config=SimpleNamespace(max_parallel_tool_calls_per_owner=0),
+        _capability_config_runtime_snapshot=SimpleNamespace(config=capability))) for i in range(2)]
+    active, release, other_ran = Event(), Event(), Event()
+    held = schedulers[0].submit(Item('hold', lambda: (active.set(), release.wait(5))))
+    assert active.wait(5)
+    other = schedulers[1].submit(Item('other', other_ran.set))
+    try:
+        assert not other_ran.wait(0.05), '默认submit绕过了宿主已配置的全局额度'
+    finally:
+        release.set()
+    held.result(5)
+    other.result(5)
+
+
+# LLM: 仅真实轻量动作及在役工具可借保留槽；畸形JSON、长wait和退休名不能中断整轮或借槽。
+# 函数用途: 验证控制动作精确白名单、退休入口拒绝及畸形参数的保守分类。
+def test_control_lane_classification_is_safe_for_unvalidated_arguments():
+    errors = []
+    for action in ([], {}, None, 0, True, 'wait', 'start', 'poll', 'kill'):
+        try:
+            actual = rounds._is_control_lane_call(SimpleNamespace(tool_name='process_session', arguments={'action': action}))
+        except (TypeError, AttributeError) as error:
+            errors.append(error)
+            continue
+        assert actual is False
+    assert not errors, '畸形工具参数使调度分类抛错而非交回原参数校验'
+    for action in ('list', 'status', 'network_status', 'stop'):
+        assert rounds._is_control_lane_call(SimpleNamespace(tool_name='process_session', arguments={'action': action}))
+    for name in ('list_agents', 'tool_search', 'list_tools'):
+        assert rounds._is_control_lane_call(SimpleNamespace(tool_name=name, arguments={}))
+    assert not rounds._is_control_lane_call(SimpleNamespace(tool_name='inspect_agent_tree', arguments={}))
+    assert not rounds._is_control_lane_call(SimpleNamespace(tool_name='run_command', arguments={'priority': 'control'}))
+
+
+# LLM: 使用真实YAML加载，默认读口仅定向到受控宿主文件；不同身份来源均不能把私有配置变整机权威。
+# 函数用途: 验证user/group的私有值不能关闭、缩小或调大宿主全局额度。
+@pytest.mark.parametrize('owner_kind', ['user', 'group'])
+@pytest.mark.parametrize('identity_source', ['home', 'config', 'my_agent_config'])
+@pytest.mark.parametrize('private_limit', [0, 1, 64])
+def test_non_main_private_config_cannot_override_host_global_limit(tmp_path, monkeypatch, owner_kind, identity_source, private_limit):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    private = tmp_path / 'private'
+    (private / 'config').mkdir(parents=True)
+    (private / 'config' / 'capability_config.yaml').write_text(f'max_parallel_tool_calls_global: {private_limit}\n')
+    host = tmp_path / 'host.yaml'
+    host.write_text('max_parallel_tool_calls_global: 8\n')
+    load, reads = capability.load_capability_config, []
+
+    # LLM: 原解析器真实读取宿主文件；无参调用的签名保证不会传入普通owner的私有覆盖路径。
+    # 函数用途: 固定本次测试的宿主默认配置来源。
+    def load_host():
+        reads.append(True)
+        return load(host)
+
+    config = SimpleNamespace(max_parallel_tool_calls_global=None)
+    home = SimpleNamespace(owner_kind='', owner_home_dir=private)
+    if identity_source == 'home':
+        home.owner_kind = owner_kind
+    else:
+        setattr(config, 'owner_kind' if identity_source == 'config' else 'my_agent_owner_kind', owner_kind)
+    agent = SimpleNamespace(root=private, home_paths=home, config=config)
+    monkeypatch.setattr(capability, 'load_capability_config', load_host)
+    assert resolve_max_parallel_tool_calls_global(agent) == 8
+    assert reads == [True]
+    assert not hasattr(agent, '_capability_config_runtime_snapshot')
+
+
+# LLM: agent.config中的非None值是宿主显式注入，不可被owner文件或默认源覆盖；0须保留无限语义。
+# 函数用途: 验证宿主注入优先且不接触任何能力配置读口。
+@pytest.mark.parametrize('limit', [0, 4])
+def test_explicit_host_global_limit_precedes_all_owner_config(tmp_path, monkeypatch, limit):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.capability import runtime_config_reload as runtime
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    agent = SimpleNamespace(root=tmp_path, home_paths=SimpleNamespace(owner_kind='user'),
+                            config=SimpleNamespace(max_parallel_tool_calls_global=limit))
+    monkeypatch.setattr(capability, 'load_capability_config', lambda: pytest.fail('显式注入仍读取默认配置'))
+    monkeypatch.setattr(runtime, 'capability_config_for_agent', lambda _: pytest.fail('显式注入仍读取owner配置'))
+    assert resolve_max_parallel_tool_calls_global(agent) == limit
+
+
+# LLM: 非法宿主注入不能降级回默认0以静默关闭安全阀，bool也不能当整数额度。
+# 函数用途: 验证显式宿主额度沿用严格非负整数校验。
+@pytest.mark.parametrize('limit', [-1, True, '4', 1.5])
+def test_invalid_explicit_host_global_limit_is_rejected(tmp_path, limit):
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    agent = SimpleNamespace(root=tmp_path, config=SimpleNamespace(max_parallel_tool_calls_global=limit))
+    with pytest.raises(ValueError, match='nonnegative integer'):
+        resolve_max_parallel_tool_calls_global(agent)
+
+
+# LLM: main及旧宿主缺省身份仍沿原能力配置读口，显式None不是强制无限配置。
+# 函数用途: 验证修复不改变main配置及原有默认身份的取值。
+@pytest.mark.parametrize('owner_kind', ['main', '', None])
+def test_main_owner_keeps_capability_config_global_limit(tmp_path, owner_kind):
+    from agent_py_agent.agent.tooling.owner_tool_scheduler import (
+        resolve_max_parallel_tool_calls_global,
+    )
+    (tmp_path / 'config').mkdir()
+    (tmp_path / 'config' / 'capability_config.yaml').write_text('max_parallel_tool_calls_global: 5\n')
+    agent = SimpleNamespace(root=tmp_path, home_paths=SimpleNamespace(owner_kind=owner_kind),
+                            config=SimpleNamespace(max_parallel_tool_calls_global=None))
+    assert resolve_max_parallel_tool_calls_global(agent) == 5
+
+
+# LLM: 覆盖真实scheduler_for_agent到submit的整机计数，不以解析器返回值替代共享状态观察。
+# 函数用途: 验证普通owner提交不能把已生效的宿主全局上限压到私有值1。
+def test_user_submission_does_not_lower_active_host_global_limit(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import config as capability
+    from agent_py_agent.agent.tooling import owner_tool_scheduler as module
+    Scheduler, Item = scheduler_api()
+    host_path = tmp_path / 'host.yaml'
+    host_path.write_text('max_parallel_tool_calls_global: 8\n')
+    user_root = tmp_path / 'user'
+    (user_root / 'config').mkdir(parents=True)
+    (user_root / 'config' / 'capability_config.yaml').write_text('max_parallel_tool_calls_global: 1\n')
+    load = capability.load_capability_config
+    monkeypatch.setattr(capability, 'load_capability_config', lambda: load(host_path))
+    with module._DISPATCH_CONDITION:
+        assert module._DISPATCH_CONDITION.wait_for(lambda: not module._GLOBAL_ACTIVE, 5)
+    active, release = Event(), Event()
+    host = Scheduler.for_owner(tmp_path / 'main', 1)
+    first = host.submit(Item('host', lambda: (active.set(), release.wait(5))), max_parallel_global=8)
+    assert active.wait(5)
+    pending = None
+    try:
+        user = SimpleNamespace(root=user_root, home_paths=SimpleNamespace(owner_kind='user', owner_home_dir=user_root),
+                               config=SimpleNamespace(max_parallel_tool_calls_per_owner=1))
+        scheduler = module.scheduler_for_agent(user)
+        pending = scheduler.submit(Item('user', lambda: 'ok'))
+        with module._DISPATCH_CONDITION:
+            assert module._GLOBAL_LIMIT == 8
+    finally:
+        release.set()
+        first.result(5)
+        if pending is not None:
+            pending.result(5)

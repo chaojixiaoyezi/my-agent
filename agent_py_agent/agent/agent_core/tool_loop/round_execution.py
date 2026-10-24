@@ -36,7 +36,13 @@ from ...memory_archive import estimate_tokens
 from ...tooling.action_policy import ActionDecision
 from ...tooling.concurrency import ToolConcurrencyDescriptor, describe_tool_concurrency
 from ...tooling.executor import ToolExecution
-from ...tooling.owner_tool_scheduler import ToolWorkItem, execute_work_items, scheduler_for_agent
+from ...tooling.owner_tool_scheduler import (
+    ToolWorkItem,
+    execute_work_items,
+    resolve_max_parallel_tool_calls_global,
+    scheduler_for_agent,
+    submit_owner_tool_call,
+)
 from ...tooling.plugin_gate_policy import (
     carry_gate_decisions,
     plugin_gate_approval_request,
@@ -809,7 +815,7 @@ def _effective_parallel_batch_limit(request: ToolRoundExecutionRequest) -> int:
     return resolve_parallel_batch_limit(parallel_limit, tool_batch_limit)
 
 
-# LLM: 段规划不变，正owner额度共享FIFO资源；0仍原段线程池，每项独立Context/SQLite，结果按provider配对。
+# LLM: 段规划不变，正owner/global额度共享队列；双0仍原段线程池，每项独立Context/SQLite，结果按provider配对。
 # 函数用途: 并发执行一段工具，保留中断回调与原线程身份桥。
 def _execute_parallel_segment(
     request: ToolRoundExecutionRequest,
@@ -820,21 +826,44 @@ def _execute_parallel_segment(
     context = _capture_parallel_thread_context(request.agent)
     scheduler = scheduler_for_agent(request.agent)
     reuse = bool(getattr(getattr(request.agent, "config", None), "sqlite_connection_reuse", False))
-    items = [ToolWorkItem(call.call_id, partial(_started_parallel_call, request, start_idx + offset, call, context,
-                                               scheduler is not None),
-                          sqlite_reuse=reuse) for offset, call in enumerate(calls)]
+    items = [_round_work_item(request, start_idx + offset, call, context, scheduler is not None, reuse)
+             for offset, call in enumerate(calls)]
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
     callback = (lambda: cancel("interrupted")) if callable(cancel) else (lambda: None)
     with register_interrupt_callback(callback):
         if scheduler is not None:
-            return execute_work_items(items, scheduler.submit)
+            return execute_work_items(items, partial(_submit_round_item, request, scheduler))
         with ThreadPoolExecutor(
             max_workers=len(items),
             thread_name_prefix="my-agent-tool",
         ) as pool:
             futures = [pool.submit(item.captured_context.run, item.run) for item in items]
             return [future.result() for future in futures]
+
+
+# LLM: 仅在役工具名及真实轻量动作可借控制槽；wait、退休名、畸形动作和模型priority不获额外槽，不改授权审批。
+# 函数用途: 将进程列表/状态/网络状态/停止与在役查询工具识别为控制调用。
+def _is_control_lane_call(call):
+    if call.tool_name in {'list_agents', 'tool_search', 'list_tools'}:
+        return True
+    action = call.arguments.get('action')
+    return call.tool_name == 'process_session' and isinstance(action, str) and action in {'list', 'status', 'network_status', 'stop'}
+
+
+# LLM: 每项独立Context；入队取消工厂仍走原启动屏障合成配对结果，不提前报告started。
+# 函数用途: 为并行调用绑定正确优先级和取消结果。
+def _round_work_item(request, idx, call, context, queued, reuse):
+    invoke = partial(_started_parallel_call, request, idx, call, context, queued)
+    return ToolWorkItem(call.call_id, invoke, cancelled_result=invoke, sqlite_reuse=reuse,
+                        priority='control' if _is_control_lane_call(call) else 'normal')
+
+
+# LLM: 宿主令牌与能力配置只传给调度边界，任务参数不成为额度权威。
+# 函数用途: 串并行共用一个提交适配，保持逐项取消结果。
+def _submit_round_item(request, scheduler, item):
+    return submit_owner_tool_call(scheduler, item, cancellation_token=getattr(request.params, 'cancellation_token', None),
+                                  max_parallel_global=resolve_max_parallel_tool_calls_global(request.agent), priority=item.priority)
 
 
 # LLM: 排队不算handler开始；获额度后重查关门/取消/compact，原合成结果负责后续配对落账。
@@ -872,7 +901,7 @@ def _execute_parallel_call(
             model_call=_model_visible_call(request, idx, call))))
 
 
-# LLM: 串行与批准重试共用单工作项边界；只在正额度时转worker并同步晋升后的线程工作区，0保留当前线程。
+# LLM: 串行与批准重试共用单项边界及控制通道；正owner/global额度转worker并同步晋升，双0保留当前线程。
 # 函数用途: 为一条原执行请求安装可选owner额度和独立SQLite作用域。
 def _execute_owned_serial(request, work, *, emit_started=False):
     scheduler = scheduler_for_agent(request.agent)
@@ -881,13 +910,14 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     promoted = []
     invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
     item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
-                       lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), reuse)
+                       lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), reuse,
+                       priority='control' if _is_control_lane_call(work.call) else 'normal')
     if scheduler is None:
         return item.run()
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
     with register_interrupt_callback(lambda: cancel("interrupted") if callable(cancel) else None):
-        execution = scheduler.submit(item).result()
+        execution = _submit_round_item(request, scheduler, item).result()
     if promoted and promoted[-1] is not None:
         request.agent._current_run_task_workspace = promoted[-1]
     return execution

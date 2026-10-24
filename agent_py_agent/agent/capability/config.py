@@ -79,6 +79,8 @@ class CapabilityConfig:
     tool_program_enabled: bool = True
     # 后台过程等待默认30秒交回控制；0不加工作片限制，仍受工具协议600秒与取消边界约束。
     process_session_wait_slice_seconds: int = 30
+    # 整机跨owner安全阀，仅宿主注入或main配置可覆盖；普通owner私有同名键不影响整机；0不限，可设32或64。
+    max_parallel_tool_calls_global: int = 0
     # 云资源工具使用宿主凭据；准确许可或当前可信用户/群的实时协作者权限决定资源范围。
     feishu_cloud_tools_enabled: bool = True
     # 表格写入后用相同身份和后端只读核验一次，未知/不一致不自动重放写入。
@@ -162,8 +164,8 @@ def _coerce_int(value: object, default: int) -> int:
     return default
 
 
-# LLM: 部署安全开关及凭据默认期限严格校验，未知值不能扩大授权；须同步 YAML 和默认值测试。
-# 函数用途: 按唯一 dataclass 归一配置，安全边界参数非法时明确拒绝加载。
+# LLM: 安全开关、期限及整机额度严格校验；全局额度仅非负真整数，拒bool/字符串，0不限；额度来源权限由调度读口负责。
+# 函数用途: 按唯一dataclass归一配置，非法安全参数或整机额度明确拒绝加载，保持YAML默认一致。
 def _coerce_capability_value(field_name: str, value: object) -> object:
     """按 dataclass 声明类型归一配置值,不依赖 parse_scalar 的引号类型推断。
 
@@ -180,6 +182,10 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     if field_name == "process_session_wait_slice_seconds":
         if type(value) is not int or not 0 <= value <= 600:
             raise ValueError("process_session_wait_slice_seconds 必须为0到600的整数。")
+        return value
+    if field_name == "max_parallel_tool_calls_global":
+        if type(value) is not int or value < 0:
+            raise ValueError("max_parallel_tool_calls_global 必须为非负整数。")
         return value
     if field_name == "tool_approval_timeout_seconds":
         if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).isdigit() or int(value) <= 0:
