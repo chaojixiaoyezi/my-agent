@@ -7,6 +7,7 @@ import threading
 import weakref
 from collections import deque
 from concurrent.futures import Future
+from contextlib import nullcontext
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,14 @@ _SCHEDULERS = weakref.WeakValueDictionary()
 _SCHEDULER_LOCK = threading.Lock()
 _WORKER_PERMIT = ContextVar("owner_tool_worker_permit", default=None)
 _WORKER_SQLITE_REUSE = ContextVar("owner_tool_sqlite_reuse", default=False)
+# 单进程调度锁同时保护owner队列和全局执行额度，不在持一把owner锁时再等待另一把锁。
+_DISPATCH_CONDITION = threading.Condition()
+_GLOBAL_ACTIVE = 0
+_GLOBAL_CONTROL_ACTIVE = 0
+_GLOBAL_LIMIT = 0
+# 已接受的全局等待项需要强引用保活；队空立即摘除，字典保留跨owner唤醒顺序。
+_GLOBAL_WAITERS = {}
+_CONTROL_BURST = 2
 
 
 # LLM: 每个实例在提交线程独立捕获上下文；取消结果由原调用方构造，不合成成功或跳落账。
@@ -29,6 +38,7 @@ class ToolWorkItem:
     cancellation: object = None
     cancelled_result: object = None
     sqlite_reuse: bool = False
+    priority: str = 'normal'
     captured_context: object = field(default_factory=copy_context, init=False, repr=False)
 
     # LLM: SQLite scope先替换继承Context中的旧scope，绝不操作父线程连接；退出恢复且关闭本项连接。
@@ -77,8 +87,8 @@ def _owner_key(root):
     return os.getpid(), str(Path(root).resolve())
 
 
-# LLM: 线程数不超过cap，待执行队列最多2*cap；生产者在提交处背压，不为排队创建工具线程。
-# 类用途: 按FIFO分配同owner许可，空闲worker立即退出，注册表仅弱引用不保留永久池。
+# LLM: 正常线程数不超过owner/global cap；额外控制槽最多2个，队列有界且不为全局等待创建线程。
+# 类用途: 按FIFO分配普通owner许可并保留控制快车道，空闲worker退出，不保留永久池。
 class OwnerToolScheduler:
     # LLM: 构造只准备内存，不启动线程；limit只能为正整数。
     # 函数用途: 建立一个owner的有界队列。
@@ -87,55 +97,114 @@ class OwnerToolScheduler:
             raise ValueError("owner工具额度必须是正整数")
         self.key = _owner_key(root)
         self.limit = limit
-        self._condition = threading.Condition()
+        self._condition = _DISPATCH_CONDITION
         self._queue = deque()
         self._active = 0
+        self._control_active = 0
+        self._configured_global = 0
         self._submitted = 0
         self._admitted = 0
         self._abandoned = set()
 
-    # LLM: 同进程同owner共用实例；并发宿主配置不一致时取较小值，空闲后采用最新值。
+    # LLM: 同进程同owner共用实例并绑定宿主全局配置；忙时取较小正值，空闲采用新值，旧submit调用不能绕过绑定。
     # 函数用途: 从弱注册表取得规范owner调度器。
     @classmethod
-    def for_owner(cls, root, limit):
+    def for_owner(cls, root, limit, max_parallel_global=0):
         if type(limit) is not int or limit < 1:
             raise ValueError("owner工具额度必须是正整数")
+        if type(max_parallel_global) is not int or max_parallel_global < 0:
+            raise ValueError('global工具额度必须为非负整数')
         key = _owner_key(root)
         with _SCHEDULER_LOCK:
             scheduler = _SCHEDULERS.get(key)
             if scheduler is None:
                 scheduler = cls(root, limit)
                 _SCHEDULERS[key] = scheduler
-            else:
-                with scheduler._condition:
-                    busy = scheduler._active or scheduler._queue
-                    scheduler.limit = min(scheduler.limit, limit) if busy else limit
+            with scheduler._condition:
+                busy = scheduler._active or scheduler._queue
+                scheduler.limit = min(scheduler.limit, limit) if busy else limit
+                limits = [value for value in (scheduler._configured_global, max_parallel_global) if value]
+                scheduler._configured_global = min(limits, default=0) if busy else max_parallel_global
             return scheduler
 
-    # LLM: 同owner同线程重入内联；背压中异常退出必须废弃票号，后继不得永远等缺口。
+    # LLM: 同owner同线程重入内联；背压接收取消唤醒，异常退出废弃票号；Future回调始终在队列锁外完成。
     # 函数用途: 公平提交一个工作项，队满时阻塞生产者而不增worker。
-    def submit(self, item):
+    def submit(self, item, cancellation_token: object | None = None, max_parallel_global: int = 0, priority: str = 'normal'):
+        if type(max_parallel_global) is not int or max_parallel_global < 0 or priority not in {'normal', 'control'}:
+            raise ValueError('invalid global tool limit or priority')
+        _raise_queue_cancelled(cancellation_token)
         future = Future()
         if current_owner_scheduler() is self:
             self._complete(item, future)
             return future
-        with self._condition:
+        future.add_done_callback(self._discard_cancelled)
+        register = getattr(cancellation_token, 'register_callback', None)
+        wakeup = register(self._notify_waiters) if callable(register) else nullcontext()
+        with wakeup, self._condition:
+            effective = min((value for value in (max_parallel_global, self._configured_global) if value), default=0)
+            _configure_global_limit(effective)
+            self._admit(item, future, cancellation_token, priority)
+            failure = self._start_worker()
+            self._condition.notify_all()
+        _finish_start_failure(failure)
+        return future
+
+    # LLM: 控制队列有独立2项容量，不消耗普通FIFO票号；正常背压中异常退出必须废弃票号。
+    # 函数用途: 在同一调度锁内按优先级将工作项放入有界物理队列。
+    def _admit(self, item, future, token, priority):
+        if priority == 'control':
+            while sum(work[2] == 'control' for work in self._queue) >= _CONTROL_BURST:
+                _raise_queue_cancelled(token)
+                self._condition.wait(0.05 if token is not None else None)
+            _raise_queue_cancelled(token)
+            self._queue.appendleft((item, future, priority))
+        else:
             ticket = self._submitted
             self._submitted += 1
             try:
-                self._condition.wait_for(lambda: ticket == self._admitted and len(self._queue) < 2 * self.limit)
+                self._wait_admission(ticket, token)
             except BaseException:
                 self._abandoned.add(ticket)
                 self._skip_abandoned()
                 self._condition.notify_all()
                 raise
-            self._queue.append((item, future))
+            self._queue.append((item, future, priority))
             self._admitted += 1
             self._skip_abandoned()
-            failure = self._start_worker()
+
+    # LLM: 本次取消回调只通知条件，不操作Future或调用handler；注册范围退出即撤销。
+    # 函数用途: 唤醒等待入队的生产者。
+    def _notify_waiters(self):
+        with self._condition:
             self._condition.notify_all()
-        _finish_start_failure(failure)
-        return future
+
+    # LLM: 无token沿原wait_for合同；有token短片兜住外部检查式取消，显式cancel回调立即唤醒。
+    # 函数用途: 等待FIFO票号与物理队列容量，并在取消时退出。
+    def _wait_admission(self, ticket, token):
+        # LLM: 只查询锁内FIFO位置和物理容量，不调用外部执行器。
+        # 函数用途: 判断当前票号是否可以入队。
+        def ready():
+            return ticket == self._admitted and len(self._queue) < 2 * self.limit
+        if token is None:
+            self._condition.wait_for(ready)
+            return
+        while not ready():
+            _raise_queue_cancelled(token)
+            self._condition.wait_for(lambda: ready() or _queue_cancelled(token), timeout=0.05)
+        _raise_queue_cancelled(token)
+
+    # LLM: deque长度是唯一容量权威；取消只摘匹配Future一次，不另设易漂移pending计数。
+    # 函数用途: 对直接Future.cancel物理移除尚未领取的死项并释放容量。
+    def _discard_cancelled(self, future):
+        if not future.cancelled():
+            return
+        with self._condition:
+            work = next((work for work in self._queue if work[1] is future), None)
+            if work is not None:
+                self._queue.remove(work)
+                if not self._queue:
+                    _GLOBAL_WAITERS.pop(self, None)
+                self._condition.notify_all()
 
     # LLM: 调用方持condition；票号只单调前进，不回退已发出的后继序号。
     # 函数用途: 越过连续废弃票号，恢复FIFO提交。
@@ -144,45 +213,71 @@ class OwnerToolScheduler:
             self._abandoned.remove(self._admitted)
             self._admitted += 1
 
-    # LLM: 调用方持队列锁；启动失败先摘出积压，Future回调交锁外完成，不留下无人消费的项。
+    # LLM: 调用方持共享锁；正常与保留槽分别计数，启动失败归还两层许可，Future回调交锁外完成。
     # 函数用途: 为队列准备一个受额度约束的worker。
     def _start_worker(self):
-        if self._active >= self.limit:
+        global _GLOBAL_ACTIVE, _GLOBAL_CONTROL_ACTIVE
+        if not self._queue:
             return
+        normal_active = _GLOBAL_ACTIVE - _GLOBAL_CONTROL_ACTIVE
+        reserve = self._queue[0][2] == 'control' and (self._active - self._control_active >= self.limit or
+                                                    bool(_GLOBAL_LIMIT and normal_active >= _GLOBAL_LIMIT))
+        owner_full = self._control_active >= _CONTROL_BURST if reserve else self._active - self._control_active >= self.limit
+        global_full = bool(_GLOBAL_LIMIT and (_GLOBAL_CONTROL_ACTIVE >= _CONTROL_BURST if reserve
+                                             else normal_active >= _GLOBAL_LIMIT))
+        if owner_full or global_full:
+            _GLOBAL_WAITERS.setdefault(self, None)
+            return
+        _GLOBAL_WAITERS.pop(self, None)
         self._active += 1
+        self._control_active += int(reserve)
+        _GLOBAL_ACTIVE += 1
+        _GLOBAL_CONTROL_ACTIVE += int(reserve)
         try:
-            threading.Thread(target=self._drain, name="my-agent-owner-tool", daemon=True).start()
+            threading.Thread(target=self._drain, args=(reserve,), name="my-agent-owner-tool", daemon=True).start()
         except BaseException as error:
             self._active -= 1
-            pending = tuple(self._queue)
+            self._control_active -= int(reserve)
+            _GLOBAL_ACTIVE -= 1
+            _GLOBAL_CONTROL_ACTIVE -= int(reserve)
+            pending = tuple(work[:2] for work in self._queue)
             self._queue.clear()
             return pending, error
 
-    # LLM: 每项后恢复Context；降额度时超额worker退出而不领取新项，finally归还线程额度。
+    # LLM: 每项后恢复Context；降额度时超额worker退出；finally归还正常或保留许可并唤醒其它owner。
     # 函数用途: 消费FIFO队列，队空即退出而不保留空闲线程。
-    def _drain(self):
+    def _drain(self, reserve=False):
+        global _GLOBAL_ACTIVE, _GLOBAL_CONTROL_ACTIVE
         try:
             while True:
-                work = self._take_next()
+                work = self._take_next(reserve)
                 if work is None:
                     return
                 self._complete(*work)
         finally:
             with self._condition:
                 self._active -= 1
-                failure = self._start_worker() if self._queue else None
+                self._control_active -= int(reserve)
+                _GLOBAL_ACTIVE -= 1
+                _GLOBAL_CONTROL_ACTIVE -= int(reserve)
+                if self._queue:
+                    _GLOBAL_WAITERS.setdefault(self, None)
+                failures = _wake_global_waiters()
                 self._condition.notify_all()
-            _finish_start_failure(failure)
+            for failure in failures:
+                _finish_start_failure(failure)
 
-    # LLM: 条件锁只覆盖FIFO摘取；降额度时超额线程必须退场，不再领新调用。
+    # LLM: 保留worker只取控制项，正常许可不扣预留控制槽；降额后超额正常线程退出。
     # 函数用途: 领取下一工作项并解除生产者背压。
-    def _take_next(self):
+    def _take_next(self, reserve=False):
         with self._condition:
-            if not self._queue or self._active > self.limit:
+            if (not self._queue or (reserve and self._queue[0][2] != 'control')
+                    or (not reserve and (self._active - self._control_active > self.limit
+                                        or bool(_GLOBAL_LIMIT and _GLOBAL_ACTIVE - _GLOBAL_CONTROL_ACTIVE > _GLOBAL_LIMIT)))):
                 return None
             work = self._queue.popleft()
             self._condition.notify_all()
-            return work
+            return work[:2]
 
     # LLM: Future取消不调用handler；结果/异常原样交给等待方，回调不在队列锁内执行。
     # 函数用途: 在独立Context内结束一个工作项。
@@ -206,29 +301,95 @@ class OwnerToolScheduler:
             _WORKER_PERMIT.reset(token)
 
 
-# LLM: 只读agent宿主home与配置，不消费task_attributes，任务不能调大进程额度；默认0不改变旧线程池。
-# 函数用途: 为一轮工具选择可选owner调度器。
+# LLM: 调用方持唯一调度锁；活跃代次内冲突配置取更小正值，0不会拆掉其它owner正在使用的正上限。
+# 函数用途: 更新单进程共享工具额度，空闲时允许采用新配置。
+def _configure_global_limit(limit):
+    global _GLOBAL_LIMIT
+    if not _GLOBAL_ACTIVE and not _GLOBAL_WAITERS:
+        _GLOBAL_LIMIT = limit
+    elif limit:
+        _GLOBAL_LIMIT = min(_GLOBAL_LIMIT, limit) if _GLOBAL_LIMIT else limit
+
+
+# LLM: 调用方持统一调度锁，不反向获取注册表锁；仅为已有待执行队列分配释放的槽，失败回调在锁外完成。
+# 函数用途: 让全局额度释放后其它owner的队列继续前进。
+def _wake_global_waiters():
+    failures = []
+    for scheduler in tuple(_GLOBAL_WAITERS):
+        if scheduler._queue:
+            failure = scheduler._start_worker()
+            if failure is not None:
+                failures.append(failure)
+        else:
+            _GLOBAL_WAITERS.pop(scheduler, None)
+    return failures
+
+
+# LLM: 仅查询宿主取消协议，不以Future状态冒充业务取消；兼容只提供状态属性的令牌。
+# 函数用途: 判断排队提交是否收到取消信号。
+def _queue_cancelled(token):
+    state = getattr(token, 'cancelled', getattr(token, 'is_cancelled', False))
+    return bool(state() if callable(state) else state)
+
+
+# LLM: 使用原ToolCancelled类型，不能把取消写成普通成功或改变原handler结果。
+# 函数用途: 在入队前和背压等待中拒绝取消提交。
+def _raise_queue_cancelled(token):
+    if token is not None and _queue_cancelled(token):
+        raise ToolCancelled('OWNER_TOOL_QUEUE_CANCELLED')
+
+
+# LLM: 只读宿主主配置/能力配置；双0保留旧线程池，global正值在owner不限时也必须启用，任务不能调大额度。
+# 函数用途: 为工具轮和嵌套调用选择并绑定同一个owner/global调度器。
 def scheduler_for_agent(agent):
     limit = getattr(getattr(agent, "config", None), "max_parallel_tool_calls_per_owner", 0)
+    global_limit = resolve_max_parallel_tool_calls_global(agent)
+    limit = limit or global_limit
     if not limit:
         return None
     root = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None) or getattr(agent, "root", None)
     if root is None:
         raise ValueError("owner工具额度缺少宿主根")
-    return OwnerToolScheduler.for_owner(root, limit)
+    return OwnerToolScheduler.for_owner(root, limit, max_parallel_global=global_limit)
 
 
-# LLM: 只等待本批已提交项，不等其它owner轮；部分提交失败仍清理已在途调用后原样传播。
-# 函数用途: 沿原线程池语义提交一批并顺序收集结果。
-def execute_work_items(items, submit):
-    futures = []
+# LLM: 只经能力配置唯一运行时读口取宿主上限，不读task_attributes；未声明的旧版本字段按默认0兼容。
+# 函数用途: 解析全局工具安全阀配置，不由模型或任务调大上限。
+def resolve_max_parallel_tool_calls_global(agent):
+    from ..capability.runtime_config_reload import capability_config_for_agent
+    value = getattr(capability_config_for_agent(agent), 'max_parallel_tool_calls_global', 0)
+    if type(value) is not int or value < 0:
+        raise ValueError('max_parallel_tool_calls_global must be a nonnegative integer')
+    return value
+
+
+# LLM: 入队取消仍由原调用方构造逐项取消结果，不丢provider配对；无取消工厂时保留原异常。
+# 函数用途: 在真实轮次与原调度器之间传递宿主令牌、全局额度和优先级。
+def submit_owner_tool_call(scheduler, item, *, cancellation_token: object | None = None,
+                           max_parallel_global: int = 0, priority: str = 'normal'):
     try:
-        for item in items:
-            futures.append(submit(item))
+        return scheduler.submit(item, cancellation_token=cancellation_token,
+                                max_parallel_global=max_parallel_global, priority=priority)
+    except ToolCancelled:
+        if item.cancelled_result is None:
+            raise
+        future = Future()
+        future.set_result(item.cancelled_result())
+        return future
+
+
+# LLM: 只在已获准独立批次内先提交控制项，结果仍按原索引；部分失败等本批在途项后传播，不等其它轮。
+# 函数用途: 避免普通背压阻挡同批控制调用，并按provider顺序收集结果。
+def execute_work_items(items, submit):
+    futures = {}
+    ordered = sorted(enumerate(items), key=lambda pair: getattr(pair[1], 'priority', 'normal') != 'control')
+    try:
+        for index, item in ordered:
+            futures[index] = submit(item)
     except BaseException:
-        _settle_futures(futures, ignore_errors=True)
+        _settle_futures([future for _, future in sorted(futures.items())], ignore_errors=True)
         raise
-    return _settle_futures(futures)
+    return _settle_futures([future for _, future in sorted(futures.items())])
 
 
 # LLM: 必须在队列锁外执行Future回调；排队已取消项不重复完成，系统线程启动异常不得伪装成功。

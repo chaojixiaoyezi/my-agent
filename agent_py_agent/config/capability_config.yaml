@@ -44,6 +44,8 @@ skill_transfers_enabled: true
 tool_program_enabled: true
 # 后台进程wait每片最多等待30秒，保留原句柄/完成事件/停止；0不加片限制，协议仍最多600秒。
 process_session_wait_slice_seconds: 30
+# 整机跨 owner 共享的并行工具调用安全阀；0 表示不限制（默认），生产环境可按机器规格设为 32 或 64。
+max_parallel_tool_calls_global: 0
 # 飞书云资源工具开关；凭据只留在宿主，不继承管理员文档权限。
 feishu_cloud_tools_enabled: true
 # 表格写入成功后增加一次同身份只读核验；结果未知或不一致不重复写入。

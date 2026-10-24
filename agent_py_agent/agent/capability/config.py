@@ -79,6 +79,8 @@ class CapabilityConfig:
     tool_program_enabled: bool = True
     # 后台过程等待默认30秒交回控制；0不加工作片限制，仍受工具协议600秒与取消边界约束。
     process_session_wait_slice_seconds: int = 30
+    # 整机跨 owner 共享的并行工具安全阀；0 表示不限制，生产环境可按机器规格设为 32 或 64。
+    max_parallel_tool_calls_global: int = 0
     # 云资源工具使用宿主凭据；准确许可或当前可信用户/群的实时协作者权限决定资源范围。
     feishu_cloud_tools_enabled: bool = True
     # 表格写入后用相同身份和后端只读核验一次，未知/不一致不自动重放写入。
@@ -180,6 +182,10 @@ def _coerce_capability_value(field_name: str, value: object) -> object:
     if field_name == "process_session_wait_slice_seconds":
         if type(value) is not int or not 0 <= value <= 600:
             raise ValueError("process_session_wait_slice_seconds 必须为0到600的整数。")
+        return value
+    if field_name == "max_parallel_tool_calls_global":
+        if type(value) is not int or value < 0:
+            raise ValueError("max_parallel_tool_calls_global 必须为非负整数。")
         return value
     if field_name == "tool_approval_timeout_seconds":
         if isinstance(value, bool) or not isinstance(value, (str, int)) or not str(value).isdigit() or int(value) <= 0:
