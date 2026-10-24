@@ -2010,7 +2010,7 @@ def _shell_timeout_result(exc, command: str, timeout: int, max_output_chars: int
     return output, facts
 
 
-# LLM: 启动方已完成观察和交接，这里只读当前事实；缺失、未知和 killed 不冒充启动成功或自然退出。
+# LLM: 启动方已完成观察和交接，这里只读当前事实；运行态公开原绑定的唤醒能力，不将绑定冒充完成或服务就绪。
 # 函数用途: 返回稳定后台句柄、真实短命令退出码或未知结果，不把句柄等同服务就绪。
 def _background_start_outcome(
     *,
@@ -2023,6 +2023,9 @@ def _background_start_outcome(
     state = dict(settled or {})
     status = str(state.get("status") or "unknown")
     if status == "running":
+        from .process_registry import completion_wake_facts
+
+        wake = completion_wake_facts(record)
         payload = {
             "status": "started",
             "session_id": record.session_id,
@@ -2030,8 +2033,11 @@ def _background_start_outcome(
             "listen_scope": listen_scope,
             "startup_observation_seconds": BACKGROUND_START_SETTLE_SECONDS,
             "hint": _background_session_hint(running=True),
+            "completion_wake": wake,
         }
-        return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False))
+        if wake["yield_supported"]:
+            payload["hint"] += " 已绑定完成唤醒；可先推进独立工作，无其他可推进工作时结束本轮等待完成事件，无需密集查询。"
+        return ToolHandlerOutcome(tool_name, True, json.dumps(payload, ensure_ascii=False), result_envelope={"completion_wake": wake})
 
     if status not in {"exited", "killed"} or type(state.get("exit_code")) is not int:
         payload = {"status": status, "session_id": record.session_id, "output_file": str(log_path)}

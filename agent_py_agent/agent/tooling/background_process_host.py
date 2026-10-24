@@ -35,10 +35,16 @@ from .process_session_records import (
 )
 from .process_session_store import ProcessSessionStore
 
-# 后台进程宿主存活轮询间隔 50ms：足够灵敏又不烧 CPU。
+# 后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。
 _HOST_POLL_SECONDS = 0.05
 # 监听范围核对的间隔：读 socket 表有成本，不必跟 50ms 的存活轮询同频。
 _LISTEN_CHECK_SECONDS = 2.0
+
+
+# LLM: 只决定本host的睡眠间隔，不调用poll/wait，不影响出生身份、原记录投影与终止顺序。
+# 函数用途: 首秒50ms、十秒内150ms、长期250ms观察一次，保留短命令灵敏度。
+def _monitor_poll_interval(elapsed_s: float) -> float:
+    return _HOST_POLL_SECONDS if elapsed_s < 1.0 else 0.15 if elapsed_s < 10.0 else 0.25
 
 
 # LLM: 监控期只读的结构化策略，全部来自已校验的启动交接文件；不从记录正文或命令推断。
@@ -323,6 +329,7 @@ def _direct_child_exited_unreaped(child: subprocess.Popen[bytes]) -> bool | None
 # LLM: 先以WNOWAIT观察直接child，不支持时才查原出生身份；终止树验证前不得poll/wait回收组长，自然退出也核对后代。
 #   只有宿主显式要求时，handoff后仍受launcher和原期限约束，监听与终态账不变。
 #   成功记录仅在stat稳定、无redo且半秒以内复用，不缓存停止裁决或绕过终止前的原权威事务。
+#   仅睡眠按本host单调已运行时长退避；首秒仍保持原观察间隔，绝不以Popen.wait提前回收组长。
 # 函数用途: 持续检查停止、寿命和日志上限，用不回收的退出观察驱动原终止树入口及结果持久化。
 def _monitor_child(
     store: ProcessSessionStore,
@@ -334,7 +341,7 @@ def _monitor_child(
 ) -> int:
     policy = policy or _MonitorPolicy()
     projection = _HostRecordProjection()
-    next_listen_check = time.monotonic()
+    started_monotonic = next_listen_check = time.monotonic()
     while True:
         report = projection.load(store, session_id)
         if report.load_error or not report.record:
@@ -369,7 +376,7 @@ def _monitor_child(
                     }
                 )
             return receipt.return_code if receipt.return_code is not None else 1
-        time.sleep(_HOST_POLL_SECONDS)
+        time.sleep(_monitor_poll_interval(time.monotonic() - started_monotonic))
 
 
 # LLM: 用真实 socket 表核对 child 进程树（listen_scope 模块：Linux /proc、其它 POSIX lsof），越出 loopback 的监听按 enforce 决定

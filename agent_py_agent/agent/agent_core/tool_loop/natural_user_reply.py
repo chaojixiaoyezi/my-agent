@@ -354,8 +354,8 @@ def finish_natural_user_reply(
     )
 
 
-# LLM: Interim lifecycle replies must remain nonterminal in the shared turn-end protocol; presentation prose cannot turn active descendants into a completed root turn.
-# 函数用途: 将自然回执种类映射成原运行状态；输入等用户事件，子代理等待沿原续跑判据。
+# LLM: 阶段回复须保留非终态；background_process_active沿受管进程生命周期等待，表达成功或失败均不能完成仍有依赖的任务。
+# 函数用途: 将自然回执种类映射为原运行状态；输入、子代理及后台进程分别保留自己的续接身份。
 def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
     if kind == "input_wait":
         return "needs_user_input", "TASK_INPUT_WAIT", "input_dependency"
@@ -365,6 +365,8 @@ def _reply_runtime_state(kind: str) -> tuple[str, str, str]:
         return "unfinished", "TOOL_ROUND_LIMIT_REACHED", "tool_loop"
     if kind == "subagents_active":
         return "unfinished", "SUBAGENTS_ACTIVE", "subagent_lifecycle"
+    if kind == "background_process_active":
+        return "unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle"
     if kind == "delegated_failure":
         return "failed", "DELEGATED_WORK_FAILED", "im_delegation"
     if kind == "named_work_active":
