@@ -22,7 +22,8 @@ def enqueue_ready_runs(service, *, now=None, limit=32, cheap_checks=False):
     service.repository.reserve_due_runs(now=current, limit=limit, cheap_checks=cheap_checks)
     service.repository.reserve_event_runs(now=current, limit=limit)
     wake_ids: list[str] = []
-    for run in service.repository.queued_runs(now=current, limit=max(1, limit * 2), cheap_checks=cheap_checks):
+    candidate_fn = getattr(service.repository, "dispatchable_queued_runs", service.repository.queued_runs)
+    for run in candidate_fn(now=current, limit=max(1, limit * 2), cheap_checks=cheap_checks):
         if not service.repository.event_run_is_current(run):
             service._fail_without_execution(run, 'EVENT_SOURCE_RETIRED', now=current, status='cancelled')
             continue

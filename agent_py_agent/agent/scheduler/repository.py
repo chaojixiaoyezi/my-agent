@@ -678,9 +678,29 @@ class _SchedulerReservationOperations:
 class _SchedulerRunOperations:
     """Public durable run claim, completion, and history operations."""
 
-    # LLM: 只读候选每job一条，先排除被活动同job阻挡的积压再限量，不能挤掉别的job；最终派发仍须原事务CAS。
-    # 函数用途: 按当前时间选择不互相重叠的排队候选，避免同job积压造成队首阻塞。
+    # LLM: 便宜路径只排除仍在未来的轻量键；候选必须重读完整原运行，取消、事件代次与投递由原消费者核验。
+    # 函数用途: 按当前时间列出排队运行，未到期的空轮可省去完整账本读取。
     def queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
+        current = _now(now)
+        if cheap_checks:
+            hit = self._cheap_projection_hit()
+            if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
+                return []
+        store = self._store_snapshot()
+        rows: list[dict[str, object]] = []
+        for raw in store["runs"].values():
+            run, _error = self._parse_run(raw)
+            if run is None or run["status"] != "queued":
+                continue
+            if float(run.get("dispatch_after") or 0.0) > current:
+                continue
+            rows.append(run)
+        rows.sort(key=lambda run: (float(run["scheduled_for"]), str(run["run_id"])))
+        return deepcopy(rows[: max(1, int(limit or 1))])
+
+    # LLM: 只读候选每车道一条，先排除被活动同车道阻挡的积压再限量，不能挤掉别的job或规则；最终派发仍须原事务CAS。
+    # 函数用途: 按当前时间选择不互相重叠的排队候选，避免同job/同rule积压造成队首阻塞。
+    def dispatchable_queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
         current = _now(now)
         if cheap_checks:
             hit = self._cheap_projection_hit()
@@ -1352,13 +1372,12 @@ class _SchedulerStoreSupport:
             raise SchedulerConflictError("scheduler run claim changed")
         return run
 
-    # LLM: 同rule排队沿旧去重；一旦同job任意rule已派发/领取/运行/等待，后续触发均延后，别的job不受影响。
-    # 函数用途: 在原事务中阻止同job重复在途预留，同时保留尚未派发规则的排队快照。
+    # LLM: 复合规则只阻挡自身车道，旧单任务仍按原 job 车道。
+    # 函数用途: 复合规则只阻挡自身车道，旧单任务仍按原 job 车道。 修改需同步原控制、恢复或权限测试。
     def _job_has_active_run(self, store: dict[str, Any], job_id: str, rule_id: str = "") -> bool:
         for raw in store["runs"].values():
             run, _error = self._parse_run(raw)
-            if (run is not None and run["job_id"] == job_id
-                    and (not rule_id or run.get("rule_id") == rule_id or _run_holds_job(run))):
+            if run is not None and run["job_id"] == job_id and (not rule_id or run.get("rule_id") == rule_id):
                 return True
         return False
 
@@ -1716,12 +1735,19 @@ def _run_holds_job(run):
     return run["status"] != "queued" or bool(run.get("wake_signal_id") or run.get("dispatch_admitted"))
 
 
-# LLM: 只比较同job，绝不以owner串行化；旧多wake按原时间/ID选唯一候选，正在执行的记录始终优先。
+# LLM: 复合规则按(job_id, rule_id)分车道，单规则job按(job_id, "")互斥；与_job_has_active_run粒度完全一致。
+# 函数用途: 返回一条调度运行的单飞互斥车道键。
+def _run_lane_key(run):
+    return str(run["job_id"]), str(run.get("rule_id") or "")
+
+
+# LLM: 只比较同车道，绝不以owner串行化或跨独立rule误拦；旧多wake按原时间/ID选唯一候选，正在执行的记录始终优先。
 # 函数用途: 返回阻挡本次派发或领取的准确活动run；无阻挡返回None。
 def _job_run_blocker(repository, store, run):
+    lane = _run_lane_key(run)
     peers = [parsed for raw in store["runs"].values()
              if (parsed := repository._parse_run(raw)[0]) is not None
-             and parsed["job_id"] == run["job_id"] and parsed["run_id"] != run["run_id"]]
+             and _run_lane_key(parsed) == lane and parsed["run_id"] != run["run_id"]]
     active = [peer for peer in peers if peer["status"] != "queued"]
     if active:
         return min(active, key=_run_order)
@@ -1739,24 +1765,24 @@ def _run_order(run):
     return float(run["scheduled_for"]), str(run["run_id"])
 
 
-# LLM: 只读单快照按job线性建阻挡集合，排序沿原时间/ID；已准入queued优先于同job未准入旧行，不授执行权。
-# 函数用途: 限量前剔除同job重复候选，让不同job在一个轮询内都能入选。
+# LLM: 只读单快照按车道线性建阻挡集合，排序沿原时间/ID；已准入queued优先于同车道未准入旧行，不授执行权。
+# 函数用途: 限量前剔除同车道重复候选，让不同job/规则在一个轮询内都能入选。
 def _ready_job_runs(runs, current):
     ordered = sorted((run for run in runs if run["status"] == "queued"), key=_run_order)
-    busy = {run["job_id"] for run in runs if run["status"] != "queued"}
+    busy = {_run_lane_key(run) for run in runs if run["status"] != "queued"}
     dispatched = {}
     for run in ordered:
         if run["status"] == "queued" and _run_holds_job(run):
-            dispatched.setdefault(run["job_id"], run["run_id"])
+            dispatched.setdefault(_run_lane_key(run), run["run_id"])
     selected, seen = [], set()
     for run in ordered:
-        job_id = run["job_id"]
-        if (run["status"] != "queued" or job_id in busy or job_id in seen
+        lane = _run_lane_key(run)
+        if (run["status"] != "queued" or lane in busy or lane in seen
                 or float(run.get("dispatch_after") or 0) > current
-                or dispatched.get(job_id, run["run_id"]) != run["run_id"]):
+                or dispatched.get(lane, run["run_id"]) != run["run_id"]):
             continue
         selected.append(run)
-        seen.add(job_id)
+        seen.add(lane)
     return selected
 
 
