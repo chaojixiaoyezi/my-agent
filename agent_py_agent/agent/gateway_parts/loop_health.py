@@ -1,17 +1,45 @@
 # LLM: Gateway 循环健康账本，进程内唯一事实源：派发线程的起止、每次 tick 的起止时间与派发数、各后台循环（按 loop id：
 #   dispatcher/background-main/scheduler-due/owner-maintenance/orphan-reconcile/heartbeat）被守卫接住的异常次数，
 #   以及循环错误打印（cli/gateway_loops._print_gateway_loop_error）本身失败的次数。只记内存、不做 IO，所以磁盘写满时
-#   仍能记录并经 /status 直接读出；心跳写入把同一份快照落盘。dispatcher_alive 由"已登记、未记退出、登记的线程 ident
-#   仍在 threading.enumerate()"共同判定，线程没走到退出记录（vanished）也不会被误报为活。改动时同步
+#   仍能记录并经 /status 直接读出；心跳写入把同一份快照落盘。dispatcher_alive 由已登记、未记退出和原Thread.is_alive()
+#   共同判定，不借会复用的ident判活；线程消失未记退出也不误报为活。改动时同步
 #   cli/gateway_loops.py、gateway_parts/http_handlers.handle_status 与 tests/test_gateway_dispatcher_resilience.py。
 # 模块用途: 让心跳文件和 /status 能直接看出"派发线程还活着吗、上一次 tick 是什么时候"，而不是只看 pending 数。
 from __future__ import annotations
 
+import math
 import threading
 import time
 
 from ..common.log_redaction import redact_sensitive_text
 from ..runtime_errors import environment_cause_fields
+
+DISPATCHER_STALL_TIMEOUT_SECONDS = 120.0
+
+
+# LLM: 生产快照用单调钟及显式在途位，epoch只展示；显式now或旧字典仍按原epoch接口评估，不混用时钟。
+#   不改线程alive或退出态，空闲旧时间与worker执行时长不是卡死证据。
+# 函数用途: 识别在途tick超时或已有pending却长时间没有tick进展。
+def evaluate_dispatcher_stall(snapshot: dict[str, object], *, now: float | None = None,
+        stall_timeout_s: float = DISPATCHER_STALL_TIMEOUT_SECONDS, pending_count: int = 0) -> dict[str, object]:
+    monotonic = now is None and "dispatch_tick_inflight" in snapshot
+    if now is None:
+        now = time.monotonic() if monotonic else time.time()
+    started_key = "dispatch_tick_started_monotonic" if monotonic else "last_dispatch_tick_started_at"
+    finished_key = "dispatch_tick_finished_monotonic" if monotonic else "last_dispatch_tick_at"
+    started = float(snapshot.get(started_key, 0) or 0)
+    finished = float(snapshot.get(finished_key, 0) or 0)
+    inflight = bool(snapshot["dispatch_tick_inflight"]) if monotonic else started > finished
+    reason, age = "", 0.0
+    if (snapshot.get("dispatcher_state") == "running" and started > 0 and stall_timeout_s > 0
+            and all(math.isfinite(value) for value in (now, started, finished, stall_timeout_s))):
+        if inflight and now - started >= stall_timeout_s:
+            reason, age = "tick_wedged", now - started
+        elif pending_count > 0 and now - max(started, finished) >= stall_timeout_s:
+            reason, age = "pending_starved", now - max(started, finished)
+    return {**snapshot, "dispatcher_state": "stalled" if reason else snapshot.get("dispatcher_state"),
+        "dispatcher_stalled": bool(reason), "dispatcher_stall_reason": reason,
+        "dispatcher_stall_age_s": age, "dispatcher_stall_timeout_s": stall_timeout_s}
 
 
 # LLM: 只记类型名、脱敏并截断后的消息、上下文和时间，不存异常对象（避免引用链把线程栈和 agent 留在内存里）；
@@ -30,6 +58,7 @@ def _error_record(context: str, exc: BaseException) -> dict:
 # LLM: 所有写入都在同一把锁内；snapshot 返回带派生字段（dispatcher_alive/dispatcher_state）的扁平副本，键名带
 #   dispatcher_/dispatch_/loop_error_ 前缀，可直接并入心跳与 /status 载荷。存活判定保存线程对象用 is_alive()，
 #   不用 ident（macOS 上 ident 会立即复用，会把 vanished 误报成 running）。reset 只给测试隔离用。
+#   snapshot保原生命周期事实；HTTP/心跳统一用evaluate_dispatcher_stall及本次pending计算stalled，不在只读投影里领取诊断。
 # 类用途: Gateway 派发线程与循环错误打印的健康账本，一个进程一份（模块级 loop_health）。
 class GatewayLoopHealth:
     # LLM: 锁是普通 Lock（不可重入），锁内方法不得再调带锁的公开方法。
@@ -44,15 +73,19 @@ class GatewayLoopHealth:
         with self._lock:
             self._reset_locked()
 
-    # LLM: 字段的唯一定义处；新增字段要同时进 snapshot 的输出与测试。
-    # 函数用途: 锁内清零，__init__ 与 reset 共用。
+    # LLM: 初始化全部账本字段；_stall_reported是内部episode闩，不对外投影；monotonic起止与_tick_inflight供snapshot同锁读取。
+    # 函数用途: 锁内清零生命周期、双时钟tick、在途标记、诊断闩及错误统计，构造和测试reset共用。
     def _reset_locked(self) -> None:
+        self._stall_reported = False
         self._thread: threading.Thread | None = None
         self._started_at = 0.0
         self._exited_at = 0.0
         self._exit_error: dict = {}
         self._tick_started_at = 0.0
         self._tick_finished_at = 0.0
+        self._tick_started_monotonic = 0.0
+        self._tick_finished_monotonic = 0.0
+        self._tick_inflight = False
         self._tick_count = 0
         self._last_tick_dispatched = 0
         self._loop_errors: dict[str, int] = {}
@@ -60,26 +93,31 @@ class GatewayLoopHealth:
         self._print_failures = 0
         self._last_print_failure: dict = {}
 
-    # LLM: 必须由派发线程自己调用（保存的是 current_thread）；清退出记录是为了同进程重启循环时不残留旧代。
-    # 函数用途: 派发线程进入主循环时登记自己（线程对象与时间），并清掉上一代的退出记录。
+    # LLM: 派发线程自己保存current_thread；清退出与_stall_reported。含monotonic的tick起止及_tick_inflight仍由起止接口维护，登记不冒认完成。
+    # 函数用途: 登记当前派发线程与启动墙钟，清除旧退出记录并允许新一轮卡死诊断。
     def mark_started(self) -> None:
         with self._lock:
+            self._stall_reported = False
             self._thread = threading.current_thread()
             self._started_at = time.time()
             self._exited_at = 0.0
             self._exit_error = {}
 
-    # LLM: 只写时间戳；外部按 started_at > finished_at 判"卡住"，不要在这里加计数。
-    # 函数用途: 一次 tick 开始；与 mark_tick_finished 配对，卡住的 tick 表现为 started_at 晚于 finished_at。
+    # LLM: 锁内同时记展示墙钟、超时单调钟与在途位，不加计数；校时不能影响生产卡死判定。
+    # 函数用途: 标记一次tick开始，与完成接口配对。
     def mark_tick_started(self) -> None:
         with self._lock:
             self._tick_started_at = time.time()
+            self._tick_started_monotonic = time.monotonic()
+            self._tick_inflight = True
 
-    # LLM: 出错的 tick 也要调（dispatched=0），否则 tick_count 与 last_dispatch_tick_at 会在持续出错时停更。
+    # LLM: 出错tick也要调用；起止同锁记录单调进展并清在途位，不借墙钟大小判断是否已完成。
     # 函数用途: 一次 tick 结束，记录完成时间、累计次数与本轮派发数。
     def mark_tick_finished(self, dispatched: int) -> None:
         with self._lock:
             self._tick_finished_at = time.time()
+            self._tick_finished_monotonic = time.monotonic()
+            self._tick_inflight = False
             self._tick_count += 1
             self._last_tick_dispatched = int(dispatched)
 
@@ -105,7 +143,15 @@ class GatewayLoopHealth:
             self._exited_at = time.time()
             self._exit_error = {} if error is None else _error_record(stage, error)
 
-    # LLM: 键名是心跳与 /status 的对外合同，改名要同步 docs/modules/gateway 与测试；dict 字段返回副本。
+    # LLM: 仅记录是否尝试过本轮卡死诊断，不做IO；正常进展后重置，失败也不每拍放大日志故障。
+    # 函数用途: 原子领取一次卡死episode的诊断责任。
+    def note_dispatcher_stall(self, stalled: bool) -> bool:
+        with self._lock:
+            first = stalled and not self._stall_reported
+            self._stall_reported = stalled
+            return first
+
+    # LLM: 保留原epoch展示键，新增单调起止及在途位供生产判定；字段同锁取样，dict字段返回副本。
     # 函数用途: 返回可直接并入心跳/状态载荷的扁平快照（副本）。
     def snapshot(self) -> dict:
         with self._lock:
@@ -119,6 +165,9 @@ class GatewayLoopHealth:
                 "dispatcher_exit_error": dict(self._exit_error),
                 "last_dispatch_tick_started_at": self._tick_started_at,
                 "last_dispatch_tick_at": self._tick_finished_at,
+                "dispatch_tick_started_monotonic": self._tick_started_monotonic,
+                "dispatch_tick_finished_monotonic": self._tick_finished_monotonic,
+                "dispatch_tick_inflight": self._tick_inflight,
                 "last_dispatch_tick_dispatched": self._last_tick_dispatched,
                 "dispatch_tick_count": self._tick_count,
                 "dispatch_tick_errors": self._loop_errors.get("dispatcher", 0),

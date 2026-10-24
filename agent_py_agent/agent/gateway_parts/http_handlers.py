@@ -103,7 +103,7 @@ from .input_delivery_service import (
 )
 from .input_identity import http_input_identity
 from .io import gateway_request_counts, write_json_file_atomic
-from .loop_health import loop_health
+from .loop_health import evaluate_dispatcher_stall, loop_health
 from .multiprocess_global_write import GlobalWriteError
 from .paths import GatewayPaths, gateway_chunk_path, gateway_chunk_path_candidates
 from .progress_reader import read_progress_lines
@@ -221,6 +221,7 @@ def _usage_accounting_diagnostics() -> dict[str, Any]:
 
 # LLM: status 公开，只投影宿主白名单字段：本进程模型调用账本的在途数字、G4/G5 隔离事实、凭据状态码、无凭据回环计数的模板/count/last_at；
 #   不投影 owner、模型、请求身份或正文，不遍历或序列化鉴权对象和凭据内容。
+#   派发卡死使用与心跳相同的纯投影及本次pending计数，不领取诊断episode、不触发采集或写盘。
 # 函数用途: 汇总公开 Gateway 状态、在途模型调用数、本机凭据状态和本次启动以来的无凭据回环计数，不含请求编号或身份。
 def handle_status(handler, server) -> None:
     if server is None:
@@ -239,7 +240,7 @@ def handle_status(handler, server) -> None:
     response["in_flight_model_call_count"] = in_flight_count
     response["oldest_in_flight_model_call_age_seconds"] = round(oldest_in_flight_age, 3)
     # 派发线程存活与最近一次 tick 直接读进程内账本（不经磁盘）：有 pending 却没人派发时一眼能看出派发已死或卡住。
-    response.update(loop_health.snapshot())
+    response.update(evaluate_dispatcher_stall(loop_health.snapshot(), pending_count=counts.get("pending", 0)))
     # 用量账两项进程内诊断计数同样直接读内存：没绑记账范围的探测次数、用量账里读到的未知用途键。
     response["usage_accounting"] = _usage_accounting_diagnostics()
     # G4/G5：模型命令沙箱对本机 Gateway 端口的隔离事实（applied / unavailable:<原因> / not_applicable），与沙箱对象同一来源。

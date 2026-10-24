@@ -38,6 +38,7 @@ from ..agent.gateway_parts import (
     gateway_paths,
     gateway_request_counts,
     gateway_running,
+    hang_diagnostics,
     is_pid_alive,
     log_gateway_event,
     recover_gateway_processing_requests,
@@ -90,6 +91,7 @@ from .gateway_loops import (
     _gateway_background_main_loop,
     _gateway_heartbeat_loop,
     _gateway_request_loop,
+    _print_gateway_loop_error,
     _write_gateway_heartbeat,
 )
 from .gateway_restart_handover import (
@@ -815,15 +817,21 @@ def _publish_gateway_diagnostic_signal(previous: _GatewaySignalHandlers, enabled
     return True
 
 
-# LLM: TERM/INT只写绑定启动原身份的停止请求；USR1只在faulthandler注册成功后公告，不向旧版盲发。
+# LLM: TERM/INT只写绑定启动原身份的停止请求；USR1仍向stderr注册并公告，持久诊断只装文件/GC不抢信号。
 # 函数用途: 安装停止处理及全线程栈导出，返回原handler供原生命周期恢复。
 def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict[str, object]) -> dict[int, object]:
     previous = _GatewaySignalHandlers(paths, process_identity)
+    try:
+        hang_diagnostics.install(paths.root, register_signal=False)
+    except Exception as exc:
+        _print_gateway_loop_error("gateway.diagnostics.install", "gateway", exc)
     try:
         faulthandler.enable(all_threads=True)
     except (OSError, RuntimeError, ValueError):
         pass
 
+    # LLM: 仅把原启动身份交回规范停止请求入口，不直接终止业务线程。
+    # 函数用途: 保留TERM/INT的原停止语义。
     def handler(signum: int, _frame: object) -> None:
         _record_gateway_signal_stop_request(paths, signum, process_identity)
 
@@ -842,7 +850,7 @@ def _install_gateway_signal_handlers(paths: GatewayPaths, process_identity: dict
     return previous
 
 
-# LLM: 先撤同代公告再注销；公告撤销失败保留诊断handler，防止仍活的旧目标被SIGUSR1默认动作误终止。
+# LLM: cleanup结束才撤同代公告和原信号；撤公告失败仍保USR1到stderr，独立文件/GC资源的关闭不影响该handler。
 # 函数用途: 网关清理后恢复原信号处理方式，并注销本次栈导出。
 def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
     keep_usr1 = (isinstance(previous, _GatewaySignalHandlers) and previous.diagnostic_published
@@ -856,6 +864,11 @@ def _restore_gateway_signal_handlers(previous: dict[int, object]) -> None:
     for signum, handler in previous.items():
         if signum != usr1 or not keep_usr1:
             signal.signal(signum, handler)
+    if isinstance(previous, _GatewaySignalHandlers):
+        try:
+            hang_diagnostics.close()
+        except Exception as exc:
+            _print_gateway_loop_error("gateway.diagnostics.close", "gateway", exc)
 
 
 # LLM: 快照保留 signal、父进程和 systemd 环境事实；只有属于本代进程的已有停止请求
