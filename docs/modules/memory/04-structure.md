@@ -1,3 +1,9 @@
+## 2026-10-23 `memory_archive/artifact/reader.py` 单飞读取计划与查询内路径缓存结构
+
+- `PreparedToolOutputArtifactRead` 封装单次请求解析出的 `record`、`resolved_path` 与锚定读取结果；`prepare_tool_output_artifact_read(request)` 由 `ReadArtifactTool` 统一调用，`read_tool_output_artifact` 与 `estimate_tool_output_artifact_read` 作为兼容委托保留。
+- `_index_records_for_root` 与 `_find_index_record` 在单次查询内维护 `_ArtifactPathCache`：空路径求值一次，规范 POSIX 路径在 `_clean_index_parent` 确认父目录无符号链接后仅对叶子执行 `os.lstat`，遇到符号链接或 I/O 异常回退 `_resolved_posix_index_path`，不缓存跨请求可变路径或权限判定。
+- `_read_payload_and_raw` 校验归属根后优先走 `read_text_beneath(trusted_root, resolved)` 锚定 `O_NOFOLLOW` 读取并做完整 UTF-8 / SHA-256 核验。
+
 ## 2026-10-21 JSONL 归档尾部回读校验结构
 
 `memory_archive/storage.py` 拆分为 `_verify_record_exists`、`_read_tail_jsonl_text` 与 `_scan_verified_jsonl_lines`：当文件字节数超过 `min_tail_bytes` 时，`seek` 到尾部窗口并丢弃首个 `\n` 之前的半行字节再做 UTF-8 解码，避免切碎多字节字符；`_scan_verified_jsonl_lines` 继续用 `jsonl_lines` 按物理 LF 切分并倒序比对 `_normalized_json`，主键命中但内容不符立即抛 `MemoryArchiveError`。

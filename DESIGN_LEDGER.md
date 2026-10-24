@@ -1,3 +1,20 @@
+## 2026-10-23 Linux 生产工具耗时四包治理（`read_artifact` 单飞、`self_map` 概览解耦、`run_command` 事件驱动管道泵、单 Owner 工具并发闸门，已实现）
+
+围绕 2C4G Linux 生产环境实测暴露的四类工具固定耗时与线程上下文切换风暴，在不改变安全边界、产物完整性和对外协议的前提下完成通用底座收敛：
+- **工作包 A（`read_artifact` 10.7–13.8s -> 毫秒级，详见 [ARTIFACT_LOOKUP_LATENCY.md](docs/design/ARTIFACT_LOOKUP_LATENCY.md)）**：
+  - `memory_archive/artifact/reader.py` 新增 `PreparedToolOutputArtifactRead` 与 `prepare_tool_output_artifact_read`，`ReadArtifactTool.execute` 单次调用只做一次索引扫描，且在显式 `max_chars > 0` 或输出预算未开启时跳过冗余 `estimate`。
+  - 索引扫描引入单次查询局部 `_ArtifactPathCache`，消除占历史行 85%+ 的空路径 `path == ""`（`kind="tool_call"`）逐行 `Path("").resolve()` 系统调用风暴，并对规范 POSIX 绝对路径按父目录缓存一次 `realpath + stat`、叶子仅做单次 `lstat`，100% 保持符号链接环路（`ELOOP`）、大整数与晚到非法 UTF-8 错误合同；正文读取统一经 `read_text_beneath` 锚定无跟随打开。
+- **工作包 B（`self_map` 8.8s -> 毫秒级，详见 [SELF_MAP_LATENCY.md](docs/design/SELF_MAP_LATENCY.md)）**：
+  - `SectionDescriptor` 扩展可选 `summary_reader` 与 `item_reader`，`SectionProjection` 扩展 `summary_count`；`self_map` 概览模式优先调用轻量无副作用 `summary_reader`，不枚举全量会话 JSON 或触发进程注册表刷新写盘，未枚举完的分节严格保持 `completeness="partial"` 与 `count=None`（绝不伪造 `count=0`）。
+  - 新增 `learned_metadata_projection.py` 与 `learnpack_projection.py`：单次加载 `skill_learning/registry.json` 批量校验自学 Skill 展示元数据（逐条 `item` 读取仍实时校验），修复 `plugin_self_map` 对 `builds_for(None)` 的无效调用与 `open_orders` $O(N^2)$ 重复读盘。
+- **工作包 C（`run_command` 2.9–5.6s 沙箱与管道固定开销收敛，详见 [LINUX_SHELL_LATENCY.md](docs/design/LINUX_SHELL_LATENCY.md)）**：
+  - `path_access_policy.py` 新增 `HostSandboxPaths` 与 `host_sandbox_paths(...)`，单次命令准备期间只遍历一次 `owners/` 目录同时产出写拒绝与只读保护路径集合。
+  - 新增 `tooling/process_pipe_pump.py` 与 `ProcessOutputCapture.wait_changed(timeout)`：POSIX 下用单线程 `DefaultSelector` 多路复用 `stdout`、`stderr` 与唤醒管道，消除每条命令 2 个读取线程 + `10ms` 超时轮询风暴，并在进程退出且管道 EOF 时立即唤醒前台等待循环。
+  - 新增 `artifacts/registry_projection_cache.py`：在保留每次 `read_text_beneath` 安全重读与 `raw` 字节精确比对的前提下，跳过未变更 `registry.jsonl` 的重复逐行 `json.loads` 解析，返回深拷贝防调用方原地修改污染。
+- **工作包 D（单 Owner 工具并发闸门、`list_tools` 线性预算、Context 单飞与 Worker SQLite 作用域，详见 [OWNER_TOOL_LATENCY.md](docs/design/OWNER_TOOL_LATENCY.md)）**：
+  - 新增配置项 `max_parallel_tool_calls_per_owner: int = 0`（`0` 表示不限制，沿用 `max_parallel_tool_calls`；配置正整数时按 `(pid, canonical_owner_root)` 限制单 Owner 并发工具 Worker 数）与 `tooling/owner_tool_scheduler.py`，同 Owner 嵌套工具调用在已持票据的 Worker 线程内直接内联执行防死锁。
+  - 新增 `tooling/live_manifest_projection.py` 将 `list_tools` 在线清单截断从 $O(N^2)$ 循环全量 `json.dumps` 改为线性增量 UTF-8 字节核算 + 末尾一次校验；新增 `context_estimate_cache.py` 对同一回合相同 `_context_estimate_key` 实施单飞合并；并发工具 Worker 入口显式包裹独立 `sqlite_scope()`。
+
 ## 2026-10-23 插件宿主 API v2（42 动作 + 本地普通用户 + `act_as_user` 隔离）、带图插话、非阻塞切模型、完成计时与待消费输入失效复位（已实现）
 
 - **插件宿主 API v2 与本地普通用户受限执行（Batch 2，`A/B1/B2/C/D1/D2`）**：

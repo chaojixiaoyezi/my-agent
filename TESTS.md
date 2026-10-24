@@ -1,3 +1,13 @@
+## 2026-10-23 Linux 生产工具耗时四包治理（`read_artifact`、`self_map`、`run_command`、并发工具与 `list_tools`）定向回归
+
+- 新增 11 个测试文件并在 `test_self_map_contract.py` 补齐断言：
+  - `test_artifact_read_lookup_plan.py` 与 `test_artifact_read_path_races.py`：验证 `ReadArtifactTool` 单次查找计划、显式 `max_chars` 跳过冗余 `estimate`、空路径与同父目录查询内缓存、符号链接环路/大整数/晚到非法 UTF-8 错误优先级保留，以及锚定无跟随打开（`read_text_beneath`）防查找后 symlink 替换越界。
+  - `test_self_map_latency.py`、`test_self_map_metadata_batch.py` 与 `test_learnpack_projection.py`：验证 `self_map` 概览模式不枚举全量会话文件、不产生进程注册表写盘副作用、未枚举分节保持 `completeness="partial"` 与 `count=None`、150+ 自学 Skill 批量展示仅加载一次 `registry.json`、单条 `item` 仍实时复核撤回状态，以及 `packages` 订单/构建轻量投影。
+  - `test_linux_shell_latency.py` 与 `test_registry_projection_cache.py`：验证 `host_sandbox_paths` 单次目录枚举与分函数结果等价、POSIX 单线程 `process_pipe_pump` 双流并发排空/单侧关闭/4MiB 截断与无 `10ms` 空转事件唤醒，以及 `registry.jsonl` 原始字节相等缓存、写后立即失效与返回深拷贝隔离。
+  - `test_owner_tool_scheduler.py`、`test_live_manifest_linear.py`、`test_context_estimate_singleflight.py` 与 `test_worker_sqlite_scope.py`：验证 `max_parallel_tool_calls_per_owner` 单 Owner 并发限流、跨 Owner 独立并发、同 Owner `nested_dispatch` 重入不死锁、取消/超时不卡死后续批次、`list_tools` 线性字节预算与原循环 `json.dumps` 逐字节等价、并发工具 `_estimate_current_context` 单飞合并，以及 Worker 线程独立 `sqlite_scope` 连接关闭与异常隔离。
+- 复现（在工作树根运行）：
+  `python3 -m pytest agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_artifact_read_path_races.py agent_py_agent/tests/test_self_map_contract.py agent_py_agent/tests/test_self_map_latency.py agent_py_agent/tests/test_self_map_metadata_batch.py agent_py_agent/tests/test_learnpack_projection.py agent_py_agent/tests/test_linux_shell_latency.py agent_py_agent/tests/test_registry_projection_cache.py agent_py_agent/tests/test_owner_tool_scheduler.py agent_py_agent/tests/test_live_manifest_linear.py agent_py_agent/tests/test_context_estimate_singleflight.py agent_py_agent/tests/test_worker_sqlite_scope.py -q --tb=short`
+
 ## 2026-10-23 C7 B23 返工：未知模态图片、插话告警计数与模型菜单恢复
 
 - 来源：`c7-b23-remediation` 的 P1-1、P2-1/P2-2、P2-3；开发基线 `1630c606db908f663c1071ed4b8e8f3be404b009`。产品改动仅在原图片出站门禁、原提示构造安全点和原菜单保存等待，不改插件宿主或 HTTP 服务。

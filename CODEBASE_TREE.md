@@ -1,3 +1,32 @@
+## 2026-10-23 Linux 生产工具耗时治理：产物查找单飞、`self_map` 概览解耦、单线程管道泵与单 Owner 并发闸门
+
+```text
+|-- agent_py_agent/agent/agent_core/model/context_estimate_cache.py # 回合内上下文大小估算单飞合并缓存
+|-- agent_py_agent/agent/artifacts/registry_projection_cache.py # 按受信任根与原始字节一致性的产物登记解析缓存
+|-- agent_py_agent/agent/capability/learned_metadata_projection.py # 单次加载 registry.json 的自学 Skill 批量展示元数据投影
+|-- agent_py_agent/agent/capability/learnpack_projection.py # 能力包订单与构建目录只读投影辅助
+|-- agent_py_agent/agent/tooling/live_manifest_projection.py # list_tools 在线清单线性字节预算裁剪投影
+|-- agent_py_agent/agent/tooling/owner_tool_scheduler.py # 单 Owner 工具并发上限闸门与同 Owner 嵌套重入调度器
+|-- agent_py_agent/agent/tooling/process_pipe_pump.py # 单线程 POSIX selector 子进程 stdout/stderr 与唤醒管道复用泵
+|-- agent_py_agent/tests/test_artifact_read_lookup_plan.py # read_artifact 单次查找计划与查询内路径缓存回归单测
+|-- agent_py_agent/tests/test_artifact_read_path_races.py # read_artifact 锚定无跟随打开、竞争切换与异常路径合同单测
+|-- agent_py_agent/tests/test_context_estimate_singleflight.py # 并发工具上下文估算单飞合并与异常传播单测
+|-- agent_py_agent/tests/test_learnpack_projection.py # 能力包与插件 self_map 概览/列表投影单测
+|-- agent_py_agent/tests/test_linux_shell_latency.py # 宿主沙箱路径单次计算、单线程管道泵与事件唤醒单测
+|-- agent_py_agent/tests/test_live_manifest_linear.py # list_tools 在线清单线性预算与大输出预算等价单测
+|-- agent_py_agent/tests/test_owner_tool_scheduler.py # 单 Owner 工具并发闸门、跨 Owner 隔离与嵌套防死锁单测
+|-- agent_py_agent/tests/test_registry_projection_cache.py # 产物登记表原始字节一致性缓存与深拷贝隔离单测
+|-- agent_py_agent/tests/test_self_map_latency.py # self_map 概览无副作用、partial 完整性与 summary_reader 单测
+|-- agent_py_agent/tests/test_self_map_metadata_batch.py # 自学 Skill 批量元数据投影与逐项读取实时校验单测
+|-- agent_py_agent/tests/test_worker_sqlite_scope.py # 并发工具 Worker 线程独立 sqlite_scope 隔离单测
+|-- docs/design/ARTIFACT_LOOKUP_LATENCY.md # read_artifact 查找与安全读取延迟收敛设计说明
+|-- docs/design/LINUX_SHELL_LATENCY.md # run_command 宿主路径与子进程管道捕获延迟收敛设计说明
+|-- docs/design/OWNER_TOOL_LATENCY.md # 单 Owner 工具并发、list_tools 线性预算与上下文单飞设计说明
+`-- docs/design/SELF_MAP_LATENCY.md # self_map 概览解耦与批量元数据投影设计说明
+```
+
+关键文件说明：`memory_archive/artifact/reader.py`、`capability/learned_metadata_projection.py`、`capability/learnpack_projection.py`、`tooling/process_pipe_pump.py`、`artifacts/registry_projection_cache.py`、`tooling/owner_tool_scheduler.py`、`tooling/live_manifest_projection.py` 与 `agent_core/model/context_estimate_cache.py` 协同收敛 2C4G Linux 生产环境 `read_artifact`、`self_map`、`run_command`、`list_tools` 及并发工具批次的固定开销与线程切换风暴。
+
 ## 2026-10-23 插件宿主 API v2（42 动作 / v9 授权 / 普通本地用户隔离）、插话带图、非阻塞设置切换与回合完成计时
 
 ```text
