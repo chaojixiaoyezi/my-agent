@@ -1,8 +1,16 @@
+## 2026-10-24 W1-6-fix：后台阶段非终态与控制/权威异常传播
+
+- 来源：`w1-6-fix` 的 c5 astra/c1 双盲复核反馈；本轮起点 `b5d3c7ba6471bca1bc77f9e7cea915fa355a545f`。不改 host、Registry、唤醒发表或调度协议。
+- `_reply_runtime_state("background_process_active")` 明确映射为 `unfinished / BACKGROUND_PROCESS_ACTIVE / process_session_lifecycle`；成功表达、空回复和被拒绝的工具表达都保留后台非终态。原普通前台、子代理与命名工作映射保持不变，旧用例里把后台阶段当 `ok` 的断言同步纠正。
+- 后台计数器的列表与 get 两个读取边界，均先原样上抛 `InterruptedError`、`ToolCancelled`、`concurrent.futures.CancelledError`；不再捕获 `ProcessSessionAuthorityError`。普通 `OSError/TypeError/ValueError` 的既有容错保留，不把取消或权威损坏伪装为零计数或局部跳过。
+- `test_tools/test_shell_background.py` 补直接映射、表达失败路径及三种读取位置（列表、首项、已核实健康项之后）× 四种控制/权威异常的矩阵，核对异常对象不变且不继续读取。状态问题先观察到 5 个失败再转绿；异常矩阵先观察到 6 failed、6 passed，再修复。聚焦原 W1-6 与本轮用例共 46 passed。
+- 复现：工作树根执行 `python3 -m pytest agent_py_agent/tests/test_tools/test_shell_background.py agent_py_agent/tests/test_process_session_store.py -q --tb=short`；聚焦可用 `python3 -m pytest -o addopts='' agent_py_agent/tests/test_tools/test_shell_background.py -k w16 -q --tb=short`。边界仍是原存储/工具循环加有界模型与读取故障替身，不代表真实后台进程或 Gateway 部署链路已验收。
+
 ## 2026-10-24 W1-6 v2：后台退避、完成唤醒事实与阶段让出
 
 - 来源：`w1-6-bg-wait-wake-v2`；共同开发基线 `a3ac5e51c12da52973d8eac16ae29f337cdcd30b`。保留原 unreaped 组长观察、出生身份保护、stat 投影缓存和原完成事件发表/回执，不在清理前调用 `Popen.poll/wait`。
 - host 按单调运行时长采用 50/150/250ms；原 Registry 显式 wait 采用 50/100/250ms，仍按单调 deadline 剩余预算截断并走原取消等待口。运行态摘要、启动及 status/wait 机器信封共用 `completion_wake`，只表示已绑定而非已送达或命令成功。
-- 仅当前 owner/thread/task/store 的可核实运行记录进入后台阶段事实；计数标为已核实下限。原 plain-final 入口可进入一次零工具表达片并正常结束当前回合，实际工具轮不强制让出；精确后台事件回复、prepare、子代理以及无关前台任务沿原规则。
+- 仅当前 owner/thread/task/store 的可核实运行记录进入后台阶段事实；计数标为已核实下限。原 plain-final 入口可进入一次零工具表达片并让出；经 W1-6-fix 修正，任务保持 `unfinished`，不把表达片结束当任务成功。实际工具轮不强制让出；精确后台事件回复、prepare、子代理以及无关前台任务沿原规则。
 - `test_tools/test_shell_background.py` 新增 28 个参数化用例，覆盖三段真实循环选时、缓存复用与不提前 reap、原取消等待口、同源唤醒事实、无关 thread/task/store 与通知关闭隔离、真实工具循环有/无唤醒的采样次数、同任务跨模型 run 的原事件发表/回执/投递资格，以及局部坏记录不抹掉健康依赖。存储和循环使用原实现；时间、模型响应和内核存活观察有明确替身，不充当真实 spawn→退出→wake 的 E2E。
 - 独立内联复核的局部错误问题已先红后绿修正；没有把当前模型 `run_id` 加为进程计数限制，因为原投递比较的是 immutable record target 与 signal source，而非后来模型片的身份。
 - 在工作树根复现：`python3 -m pytest agent_py_agent/tests/test_tools/test_shell_background.py agent_py_agent/tests/test_process_session_store.py -q --tb=short`；聚焦新增用例可用 `python3 -m pytest agent_py_agent/tests/test_tools/test_shell_background.py -k w16 -q --tb=short`。

@@ -10,12 +10,17 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import CancelledError
 from pathlib import Path
 
 import pytest
 
+from agent_py_agent.agent.common.cancellation import ToolCancelled
 from agent_py_agent.agent.tooling.action_policy import ActionPolicy, ActionPolicyRequest
-from agent_py_agent.agent.tooling.process_registry import process_registry
+from agent_py_agent.agent.tooling.process_registry import (
+    ProcessSessionAuthorityError,
+    process_registry,
+)
 from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
 from agent_py_agent.agent.tooling.shell import (
     ShellTool,
@@ -456,7 +461,9 @@ def test_w16_plain_final_queues_background_interim_and_can_settle(tmp_path, monk
     assert phase["kind"] == "background_process_active"
     assert phase["facts"]["active_background_process_count"] == 1
     result = finish_natural_user_reply(params, ModelResponse(text="已启动后台采样，完成事件到达后继续核对。", backend="test"), accepted=True)
-    assert result.runtime_reason == "background_process_active" and not result.tool_use_blocks
+    assert (result.runtime_status, result.runtime_reason, result.runtime_source) == (
+        "unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle")
+    assert not result.tool_use_blocks
     assert pending_natural_user_reply(params) is None
 
 
@@ -547,7 +554,10 @@ def test_w16_real_tool_loop_settles_once_without_polling(tmp_path, monkeypatch, 
     assert response.text == ("后台采样仍在运行，完成后继续核对。" if armed else "采样已经启动。")
     assert not params.executed_tools and pending_natural_user_reply(params) is None
     if armed:
-        assert response.runtime_status == "ok" and response.runtime_reason == "background_process_active"
+        assert (response.runtime_status, response.runtime_reason, response.runtime_source) == (
+            "unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle")
+    else:
+        assert response.runtime_status == "ok"
 
 
 # LLM: 完成事件对比的是原record.target与signal.source_agent_id，不要求后来同任务的模型片run_id相同。
@@ -597,3 +607,83 @@ def test_w16_unrelated_record_error_preserves_verified_wake_count(tmp_path, monk
     monkeypatch.setattr(registry, "list_report", report)
     monkeypatch.setattr(registry, "get", get)
     assert completion._active_wake_backed_process_count(agent, params) == 1
+
+
+# LLM: 后台命令仍活跃时表达片不能结算任务；相邻既有kind保持原运行合同，不靠模型正文判终态。
+# 函数用途: 钉住后台阶段的三元运行状态映射及普通回执的兼容性。
+@pytest.mark.parametrize("kind,expected", [
+    ("background_process_active", ("unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle")),
+    ("subagents_active", ("unfinished", "SUBAGENTS_ACTIVE", "subagent_lifecycle")),
+    ("named_work_active", ("unfinished", "NAMED_WORK_ACTIVE", "conversation_task")),
+    ("background_update", ("ok", "background_update", "model_user_reply")),
+])
+def test_w16fix_background_reply_runtime_state(kind, expected):
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import _reply_runtime_state
+
+    assert _reply_runtime_state(kind) == expected
+
+
+# LLM: 模型表达失败或提出被拒绝的工具调用，不得把仍有后台依赖的任务改为成功/失败终态；无工具被执行。
+# 函数用途: 核对真实表达收尾的失败分支仍保留后台unfinished身份。
+@pytest.mark.parametrize("rejection", ["empty_text", "structured_tool_call"])
+def test_w16fix_rejected_background_reply_preserves_unfinished(tmp_path, monkeypatch, rejection):
+    from agent_py_agent.agent.agent_core.tool_loop import completion
+    from agent_py_agent.agent.agent_core.tool_loop.natural_user_reply import (
+        finish_natural_user_reply,
+        pending_natural_user_reply,
+    )
+    from agent_py_agent.agent.backends import ModelResponse
+
+    agent, params, _authority, _registry, _record = _w16_wake_fixture(tmp_path, monkeypatch)
+    assert completion.queue_interim_reply_for_active_named_work(agent, params, tool_rounds=1)
+    calls = [{"type": "tool_use", "id": "not-executed", "name": "process_session", "input": {"action": "wait"}}]
+    response = ModelResponse(text="", backend="test", tool_use_blocks=calls if rejection == "structured_tool_call" else [])
+    result = finish_natural_user_reply(params, response, accepted=False, rejection_reason=rejection)
+    assert (result.runtime_status, result.runtime_reason, result.runtime_source) == (
+        "unfinished", "BACKGROUND_PROCESS_ACTIVE", "process_session_lifecycle")
+    assert not result.tool_use_blocks and pending_natural_user_reply(params) is None
+
+
+# LLM: 真Registry/Store及计数器保留，只在原读取边界注入原样异常；计入健康项后也不能吞取消或权威损坏。
+# 函数用途: 核对列表、单条读取以及部分遍历后的中断/取消/权威异常立即原样上抛。
+@pytest.mark.parametrize("error_type", [InterruptedError, ToolCancelled, CancelledError, ProcessSessionAuthorityError])
+@pytest.mark.parametrize("stage", ["list", "get", "get_after_verified"])
+def test_w16fix_wake_count_propagates_control_and_authority_errors(tmp_path, monkeypatch, error_type, stage):
+    from agent_py_agent.agent.agent_core.tool_loop import completion
+
+    agent, params, _authority, registry, _record = _w16_wake_fixture(tmp_path, monkeypatch)
+    error, calls = error_type("w16fix read interrupted or authority invalid"), []
+
+    # LLM: 同一个异常对象原样抛出，使断言区分真正传播与另造错误或静默降级。
+    # 函数用途: 模拟读取口收到的控制或权威错误。
+    def fail(*args, **kwargs):
+        calls.append(stage)
+        raise error
+
+    if stage == "list":
+        monkeypatch.setattr(registry, "list_report", fail)
+    elif stage == "get":
+        monkeypatch.setattr(registry, "get", fail)
+    else:
+        original_report, original_get = registry.list_report, registry.get
+
+        # LLM: 当前健康记录仍由真Registry读取；只在尾部加一个受故障影响的摘要。
+        # 函数用途: 构造已有健康计数后还会读取另一项的原遍历。
+        def report(**kwargs):
+            rows, errors = original_report(**kwargs)
+            return [*rows, {"session_id": "bg-control-error", "status": "running"}], errors
+
+        # LLM: 先核实原健康项，再从下一项抛原异常；不得返回先前计数来掩盖中断。
+        # 函数用途: 确认部分成功不能成为吞取消或权威错误的理由。
+        def get(session_id, **kwargs):
+            if session_id == "bg-control-error":
+                return fail()
+            calls.append("verified")
+            return original_get(session_id, **kwargs)
+
+        monkeypatch.setattr(registry, "list_report", report)
+        monkeypatch.setattr(registry, "get", get)
+    with pytest.raises(error_type) as raised:
+        completion._active_wake_backed_process_count(agent, params)
+    assert raised.value is error
+    assert calls == (["verified", stage] if stage == "get_after_verified" else [stage])

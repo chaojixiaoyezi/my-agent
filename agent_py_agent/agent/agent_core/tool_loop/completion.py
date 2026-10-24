@@ -4,10 +4,12 @@ from __future__ import annotations
 # 模块用途: 处理工具轮收尾和模型阶段答复，共享安全执行事实投影，避免把派工误当成任务完成或强制等待。
 import json
 import time
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import ClassVar
 
 from ...backends import ModelResponse
+from ...common.cancellation import ToolCancelled
 from ...conversation.active_turn_input import active_turn_user_input_texts
 from ...conversation.authority import (
     CONVERSATION_AUDIT_PREPARE_ATTR,
@@ -601,11 +603,11 @@ def _interim_reply_facts(
 
 # LLM: 只在原主会话通知合同可用时读取既有Registry；无挂载属性时复用原全局实例，根目录来自可信agent路径。
 # 当前任务、thread、store与owner同时相等；跨模型片沿原任务收件目标，不错拿当前run_id拒掉旧片的合法通知。
-# 只计可核实的健康记录下限；坏项不计且不抹掉其它已核实项，全局读取失败不声明可让出，不吞取消。
+# 只计健康记录下限；普通读取错不抹掉其它健康项，中断/两类取消先原样上抛，权威错误不降级成空计数。
 # 函数用途: 统计当前任务至少有多少运行中命令可由原完成事件接续，排除其它会话与无关前台。
 def _active_wake_backed_process_count(agent: object, params: ToolLoopExecuteParams) -> int:
     from ...conversation.process_events import _agent_process_root, process_completion_target
-    from ...tooling.process_registry import ProcessSessionAuthorityError, process_registry
+    from ...tooling.process_registry import process_registry
 
     selected = _delegated_work_task_id(params)
     target = process_completion_target(agent, params)
@@ -618,7 +620,9 @@ def _active_wake_backed_process_count(agent: object, params: ToolLoopExecutePara
         return 0
     try:
         summaries, _errors = registry.list_report(store_root=root)
-    except (OSError, ProcessSessionAuthorityError, TypeError, ValueError):
+    except (InterruptedError, ToolCancelled, CancelledError):
+        raise
+    except (OSError, TypeError, ValueError):
         return 0
     count = 0
     for summary in summaries:
@@ -635,7 +639,9 @@ def _active_wake_backed_process_count(agent: object, params: ToolLoopExecutePara
                     and not snapshot.get("activation_scope") and not snapshot.get("stop_requested")
                     and all(stored.get(key) == target[key] for key in ("store_root", "thread_id", "task_id"))):
                 count += 1
-        except (OSError, ProcessSessionAuthorityError, TypeError, ValueError):
+        except (InterruptedError, ToolCancelled, CancelledError):
+            raise
+        except (OSError, TypeError, ValueError):
             continue
     return count
 
