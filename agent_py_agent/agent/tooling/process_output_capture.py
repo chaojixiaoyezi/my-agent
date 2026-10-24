@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
-import selectors
 import threading
 import time
+
+from .process_pipe_pump import ProcessPipePump
 
 # 进程输出捕获默认上限 4 MiB：防止后台进程刷屏把内存/磁盘打爆。
 DEFAULT_CAPTURE_BYTES = 4 * 1024 * 1024
@@ -20,8 +21,8 @@ def _retained_text(data: bytes | bytearray) -> tuple[str, bool]:
         return data.decode("utf-8", errors="replace"), True
 
 
-# LLM: 每个 reader 只拥有自己的流；共享状态受锁保护，超出保留上限仍排空，不把丢弃字节称为完整归档。
-# 类用途: 管理一个进程的两个输出读取线程和限额计数；取消或回收时可停止非阻塞读取。
+# LLM: POSIX单pump，Windows保留双reader；共享状态与generation受同一条件锁保护，超限仍排空。
+# 类用途: 管理进程有界输出和事实账本，提供不会丢唤醒的变化等待。
 class ProcessOutputCapture:
     # LLM: 构造时启动 reader，容量分别限制两条流；不读取 stdin，不创建输出文件或发送模型请求。
     # 函数用途: 开始读取进程管道，默认每条流最多在内存保留 4 MiB。
@@ -29,66 +30,132 @@ class ProcessOutputCapture:
         self._max = max(1, int(max_bytes))
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        self._changed = threading.Condition(self._lock)
+        self._generation = 0
         self._buffers = {"stdout": bytearray(), "stderr": bytearray()}
         self._seen = {"stdout": 0, "stderr": 0}
         self._ended: set[str] = set()
         self._eof: set[str] = set()
         self._errors: dict[str, str] = {}
         self._threads = []
+        self._pump = None
+        if os.name == "posix":
+            self._pump = ProcessPipePump(self, {name: getattr(proc, name) for name in self._buffers})
+            thread = threading.Thread(target=self._pump.run, daemon=True)
+            self._threads.append(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._pump.close()
+                raise
+            return
         for name in self._buffers:
             stream = getattr(proc, name)
             thread = threading.Thread(target=self._read, args=(name, stream), daemon=True)
             self._threads.append(thread)
             thread.start()
 
-    # LLM: 读取块固定 64 KiB；额度满后继续排空；POSIX用DefaultSelector等管道可读避免固定睡眠和select的fd上限，旧Windows沿原路径；读取/关闭失败记逐流错误。
-    # 函数用途: 持续排空一条管道，保留前缀、累计真实字节数，并报告非正常关闭。
+    # LLM: Windows保留双流读取路径；POSIX不调用此函数，计数与EOF均委托共同账本。
+    # 函数用途: 在旧平台持续排空一条输出，不改变原有限前缀语义。
     def _read(self, name: str, stream) -> None:
-        selector = None
         try:
             if stream is None:
-                with self._lock:
-                    self._eof.add(name)
+                self.record_eof(name)
                 return
             fd = stream.fileno()
             try:
                 os.set_blocking(fd, False)
             except (OSError, ValueError):
                 pass
-            if os.name == "posix":
-                selector = selectors.DefaultSelector()
-                selector.register(fd, selectors.EVENT_READ)
             while not self._stop.is_set():
                 try:
                     data = os.read(fd, 65536)
                 except BlockingIOError:
-                    if selector is not None:
-                        selector.select(0.01)
-                    else:
-                        self._stop.wait(0.01)
+                    self._stop.wait(0.01)
                     continue
                 if not data:
-                    with self._lock:
-                        self._eof.add(name)
+                    self.record_eof(name)
                     break
-                with self._lock:
-                    self._seen[name] += len(data)
-                    remaining = max(0, self._max - len(self._buffers[name]))
-                    self._buffers[name].extend(data[:remaining])
+                self.record_data(name, data)
         except (OSError, ValueError) as exc:
-            with self._lock:
-                self._errors[name] = type(exc).__name__
+            self.record_error(name, exc)
         finally:
-            if selector is not None:
-                selector.close()
             if stream is not None:
                 try:
                     stream.close()
                 except (OSError, ValueError) as exc:
-                    with self._lock:
-                        self._errors.setdefault(name, type(exc).__name__)
-            with self._lock:
-                self._ended.add(name)
+                    self.record_error(name, exc)
+            self.record_ended(name)
+
+    # LLM: 调用方必须在检查done/取消之前采样，再传给wait_changed，消除检查与等待之间的竞态。
+    # 函数用途: 读取当前输出状态代次。
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    # LLM: 同锁比较代次并进入wait，不把EOF或输出通知当作进程退出；允许显式传入检查前的代次。
+    # 函数用途: 等输出或停止状态变化，超时仍返回当前代次。
+    def wait_changed(self, timeout: float, *, generation: int | None = None) -> int:
+        with self._changed:
+            observed = self._generation if generation is None else generation
+            self._changed.wait_for(lambda: self._generation != observed, max(0.0, timeout))
+            return self._generation
+
+    # LLM: 调用方持有条件锁；只推进观察代次，不改变任何进程/EOF事实。
+    # 函数用途: 发布一次采集变化并唤醒等待者。
+    def _notify(self) -> None:
+        self._generation += 1
+        self._changed.notify_all()
+
+    # LLM: 显式取消唤醒同时覆盖父等待和reader；pump在锁下安全写self-pipe。
+    # 函数用途: 不停止采集，只打断当前等待。
+    def wake(self) -> None:
+        with self._changed:
+            self._notify()
+        if self._pump is not None:
+            self._pump.wake()
+
+    # LLM: 停止只作用于本地采集，不杀进程，也不伪造EOF；仍由reader关闭流。
+    # 函数用途: 请求采集退出并立即唤醒等待器。
+    def stop(self) -> None:
+        self._stop.set()
+        self.wake()
+
+    # LLM: pump只读取停止标志，不能改动输出账本。
+    # 函数用途: 检查采集是否被显式停止。
+    def stopping(self) -> bool:
+        return self._stop.is_set()
+
+    # LLM: 每流独立限额，超过部分丢弃但持续计数；通知消费者，不持锁做IO。
+    # 函数用途: 记下一块真实读取字节。
+    def record_data(self, name: str, data: bytes) -> None:
+        with self._changed:
+            self._seen[name] += len(data)
+            remaining = max(0, self._max - len(self._buffers[name]))
+            self._buffers[name].extend(data[:remaining])
+            self._notify()
+
+    # LLM: 仅真实零字节读取或None流可记EOF，异常/停止不可调用。
+    # 函数用途: 记录一条流的真实末尾。
+    def record_eof(self, name: str) -> None:
+        with self._changed:
+            self._eof.add(name)
+            self._notify()
+
+    # LLM: 保留首个读/关闭错误；不能把错误覆盖成正常EOF。
+    # 函数用途: 记录流失败并唤醒消费者。
+    def record_error(self, name: str, exc: Exception) -> None:
+        with self._changed:
+            self._errors.setdefault(name, type(exc).__name__)
+            self._notify()
+
+    # LLM: ended与EOF分离，失败或停止一样结束reader，但不表示完整捕获。
+    # 函数用途: 记录reader已经退出。
+    def record_ended(self, name: str) -> None:
+        with self._changed:
+            self._ended.add(name)
+            self._notify()
 
     # LLM: done 仅表示管道结束或读错，不代表命令成功；必须与 result/capture 事实一起使用。
     # 函数用途: 非阻塞检查两个输出读取器是否退出。
@@ -104,9 +171,10 @@ class ProcessOutputCapture:
             thread.join(max(0, deadline - time.monotonic()))
         with self._lock:
             drained = len(self._eof) == 2 and not self._errors
-        self._stop.set()
+        self.stop()
+        deadline = time.monotonic() + 0.05
         for thread in self._threads:
-            thread.join(0.05)
+            thread.join(max(0, deadline - time.monotonic()))
         return drained
 
     # LLM: complete 仅指两流EOF、无读错和丢弃；各流严格解码事实独立，检查程序拒绝坏stdout，Shell仍用替换字符展示。

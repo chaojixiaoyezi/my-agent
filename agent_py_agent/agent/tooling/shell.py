@@ -540,7 +540,7 @@ def _process_output_text(value: str | bytes | None) -> str:
 
 
 # LLM: 前台宿主与沙箱共用采集和终止；从启动冻结出生身份，管道 EOF 后也不能先 poll，必须先清理可验证的原组。
-# EOF后从2ms指数退避至50ms，单次休眠不超20ms；取消与deadline每轮检查，不能将EOF视为进程退出。
+# EOF后从2ms指数退避至50ms；generation在检查前采样，取消回调唤醒等待，不能将EOF视为进程退出。
 # 函数用途: 等待命令与管道完成并收回前台后代；保留原退出码、有限输出及独立清理回执，联测 foreground/orphan cleanup。
 def _communicate_process(
     proc: subprocess.Popen[str],
@@ -550,11 +550,12 @@ def _communicate_process(
 ) -> subprocess.CompletedProcess[str]:
     deadline = time.monotonic() + max(0.0, float(timeout))
     birth_token = capture_process_birth_token(proc.pid) if os.name != "nt" else None
-    capture = ProcessOutputCapture(proc)
+    capture = _start_foreground_capture(proc, birth_token)
     next_exit_probe = 0.0
     probe_interval = _FOREGROUND_EXIT_PROBE_INITIAL_SECONDS
-    with register_cancellation_callback(lambda: _kill_process_group(proc, birth_token)):
+    with register_cancellation_callback(lambda: _cancel_foreground_wait(proc, birth_token, capture)):
         while True:
+            generation = capture.generation
             if is_interrupted() or cancellation_requested():
                 _kill_process_group(proc, birth_token)
                 capture.finish(_PROCESS_PIPE_DRAIN_SECONDS)
@@ -581,8 +582,42 @@ def _communicate_process(
                 result.capture = facts
                 result.termination = termination
                 return result
-            wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.02
-            time.sleep(max(0.0, min(0.02, remaining, wait)))
+            wait = max(0.0, next_exit_probe - time.monotonic()) if done else 0.1
+            capture.wait_changed(min(remaining, wait), generation=generation)
+
+
+# LLM: capture初始化可能申请FD/线程失败，业务进程已存在；必须用原出生身份清理，保留首个异常对象。
+# 函数用途: 启动前台采集器，失败也不让命令静默脱离清理范围。
+def _start_foreground_capture(proc, birth_token: str | None) -> ProcessOutputCapture:
+    try:
+        return ProcessOutputCapture(proc)
+    except BaseException:
+        try:
+            _kill_process_group(proc, birth_token)
+        except BaseException:
+            logger.warning("foreground capture initialization cleanup failed", exc_info=True)
+        _close_foreground_pipes(proc)
+        raise
+
+
+# LLM: 只释放当前Popen的输出端；不能让关闭错误替换capture初始化主异常。
+# 函数用途: 关闭未成功交给采集线程的管道。
+def _close_foreground_pipes(proc) -> None:
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                logger.warning("foreground pipe cleanup failed", exc_info=True)
+
+
+# LLM: 取消只唤醒等待，不提前停止排空；始终转调原身份核验的终止入口，finally也能打断等待。
+# 函数用途: 取消前台进程并让等待线程立即复核结果。
+def _cancel_foreground_wait(proc, birth_token: str | None, capture: ProcessOutputCapture) -> None:
+    try:
+        _kill_process_group(proc, birth_token)
+    finally:
+        capture.wake()
 
 
 # 函数用途: 判断 run_command 是否请求后台模式(布尔或 "true"/"1"/"yes" 字符串)。
@@ -701,6 +736,7 @@ def _sandbox_exec(
     protection = write_protection or SandboxWriteProtection()
     owner_text = str(owner_home or "").strip()
     persona_text = str(protected_persona_root or "").strip()
+    host_paths = _host_sandbox_paths_for(owner_text, persona_text)
     # Full Access is the absence of an owner wall. Persona and control metadata remain more
     # specific read-only overlays; they must not silently downgrade the rest of the filesystem.
     full_access = not owner_text
@@ -732,7 +768,7 @@ def _sandbox_exec(
             Path(r).expanduser().resolve(strict=False)
             for r in protection.absolute_paths
         ) + tuple(path.resolve(strict=False) if path.exists() or path.is_symlink() else path
-                  for path in host_readonly_paths_for(owner_text, persona_text)),
+                  for path in host_paths.readonly),
         write_scope_denied_roots=protection.denied_roots,
         implicit_attempt_write_roots=write_roots is None,
         full_access=full_access,
@@ -742,12 +778,10 @@ def _sandbox_exec(
         private_read_roots=tuple(
             Path(str(root)).expanduser().resolve(strict=False) for root in host_policy.private_roots if str(root or "").strip()
         ) if owner_text else (),
-        hidden_paths=_host_managed_hidden_paths(owner_text, persona_text),
-        protected_write_patterns=host_readonly_patterns_for(owner_text, persona_text) if sys.platform == "darwin" else (),
-        protected_directory_write_patterns=(host_readonly_patterns_for(owner_text, persona_text, directory_operation="write")
-                                            if sys.platform == "darwin" else ()),
-        protected_directory_unlink_patterns=(host_readonly_patterns_for(owner_text, persona_text, directory_operation="unlink")
-                                             if sys.platform == "darwin" else ()),
+        hidden_paths=host_paths.hidden,
+        protected_write_patterns=host_paths.patterns,
+        protected_directory_write_patterns=host_paths.directory_write_patterns,
+        protected_directory_unlink_patterns=host_paths.directory_unlink_patterns,
         # G4：拒绝模型命令连本机 Gateway 的实际绑定端口（回环）。端口由 Gateway 启动时登记在进程内注册表；
         # 不在 Gateway 进程里（CLI run、测试）注册表为空，不加规则。full_access 也带（这一档只剩第 (1) 层）。
         deny_gateway_ports=gateway_bound_ports(),
@@ -757,6 +791,19 @@ def _sandbox_exec(
     # 生产既有 except SandboxUnavailable → SANDBOX_UNAVAILABLE 捕获链直接生效。
     argv = sandbox.build_argv(strict_posix_shell_argv(command))
     return argv, False
+
+
+# LLM: 只从规范owner锚点推导数据根；非规范布局沿旧语义返回空集合，不增加_sandbox_exec参数。
+# 函数用途: 一次准备获取全部宿主路径保护。
+def _host_sandbox_paths_for(owner_text: str, persona_text: str):
+    from ..path_access_policy import HostSandboxPaths, agent_home_root_for_owner, host_sandbox_paths
+
+    anchor = owner_text or persona_text
+    agent_home = agent_home_root_for_owner(anchor) if anchor else None
+    if agent_home is None:
+        return HostSandboxPaths()
+    owner = Path(owner_text).expanduser().resolve(strict=False) if owner_text else None
+    return host_sandbox_paths(agent_home, owner, system=sys.platform)
 
 
 # LLM: H2：模型命令看不到宿主托管存储（唯一声明 path_access_policy.HOST_MANAGED_OWNER_STORE_PARTS）。owner 隔离时只盖本 owner 的
