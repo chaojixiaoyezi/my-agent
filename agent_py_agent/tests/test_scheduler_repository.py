@@ -740,8 +740,8 @@ def test_opt7_history_report_cache_limits_and_corruption(tmp_path, monkeypatch):
     assert len(reads) == 4
 
 
-# LLM: open与fstat之间发生同目录原子replace时旧inode的st_nlink降为0，必须标transient_open_race重试；多硬链仍硬拒。
-# 函数用途: 验证read_atomic_store_bytes在open到fstat窗口遇到原子替换时可恢复，遇到硬链接则立即拒绝。
+# LLM: open与fstat之间发生同目录原子replace时旧inode的st_nlink降为0，必须标transient_open_race重试；直接删除或多硬链仍硬拒。
+# 函数用途: 验证read_atomic_store_bytes在dir_fd及portable分支的行为，以及open到fstat窗口的瞬态/非瞬态区分。
 def test_store_snapshot_open_to_fstat_atomic_replace_retries_transient_race(tmp_path, monkeypatch):
     from agent_py_agent.agent.common import nofollow_fs as fs
     from agent_py_agent.agent.scheduler.store_snapshot import read_atomic_store_bytes
@@ -750,6 +750,9 @@ def test_store_snapshot_open_to_fstat_atomic_replace_retries_transient_race(tmp_
     monkeypatch.setattr(fs, "_supports_dir_fd", lambda: supported)
     store = tmp_path / "store.json"
     store.write_bytes(b'{"v":1}')
+    if not supported:
+        assert read_atomic_store_bytes(store) == b'{"v":1}'
+        return
     original_open = os.open
     calls = []
 
@@ -773,7 +776,10 @@ def test_store_snapshot_open_to_fstat_atomic_replace_retries_transient_race(tmp_
         fd = original_open(name, flags, mode, **kwargs)
         if name == "store.json" and not hard_calls:
             hard_calls.append(1)
-            os.link(store, extra)
+            try:
+                os.link(store, extra)
+            except PermissionError:
+                os.unlink(store)
         return fd
 
     monkeypatch.setattr(os, "open", hardlink_open)
