@@ -605,3 +605,35 @@ def test_w21_cross_chunk_redaction_holds_partial_prefix_across_intermediate_flus
     full_thinking = "".join(row["text"] for row in _thinking_rows(writer) if row["kind"] == "thinking_delta")
     assert "om_secret_id" not in full_thinking
     assert "当前会话" in full_thinking and "长会话" in full_thinking
+
+
+# LLM: 思考摘取后、净化完成前到达的跨线程非thinking事件必须延迟到本批thinking落盘之后，且不得触发二次重复发布。
+# 函数用途: 验证思考净化窗口内并发普通事件的发布顺序与单次排空语义。
+def test_w21_thinking_flush_drain_orders_concurrent_notice_without_duplication(thinking_writer, monkeypatch):
+    import threading
+
+    from agent_py_agent.agent.gateway_parts import stream_writer as sw
+
+    writer, _clock = thinking_writer
+    writer.write_thinking_delta("first|")
+    writer.write_thinking_delta("pending|")
+    entered, release = threading.Event(), threading.Event()
+    original_drain = sw.drain_thinking_delta_text
+
+    def paused_drain(w, raw, **kwargs):
+        if raw == "pending|":
+            entered.set()
+            assert release.wait(3)
+        return original_drain(w, raw, **kwargs)
+
+    monkeypatch.setattr(sw, "drain_thinking_delta_text", paused_drain)
+    worker = threading.Thread(target=writer.flush)
+    worker.start()
+    try:
+        assert entered.wait(3)
+        writer._write_event({"kind": "host_notice", "text": "notice"})
+    finally:
+        release.set()
+    worker.join(3)
+    writer.close()
+    assert [row.get("text") for row in _thinking_rows(writer)] == ["first|", "pending|", "notice"]

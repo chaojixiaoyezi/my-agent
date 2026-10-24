@@ -966,8 +966,8 @@ def test_read_artifact_empty_path_without_source_still_not_externalized(tmp_path
     assert "read_file" in payload["message"] or "直接读取" in payload["message"]
 
 
-# LLM: 以.blob结尾的合法call_id不得在索引查找前被无条件剥离后缀，仅未命中时回退sidecar基名匹配。
-# 函数用途: 验证call_id以.blob结尾时read_tool_output_artifact仍能精确命中。
+# LLM: 以.blob结尾（含路径分隔符）的合法call_id不得在索引查找前被剥离后缀，仅未命中且非scope引用时回退sidecar匹配。
+# 函数用途: 验证call_id以.blob结尾（含斜杠/反斜杠及scoped形式）时优先精确命中而非串读同名.json记录。
 def test_blob_suffixed_call_id_resolves_in_artifact_reader(tmp_path: Path) -> None:
     artifact_path = _write_externalized_tool_output(
         tmp_path,
@@ -980,6 +980,25 @@ def test_blob_suffixed_call_id_resolves_in_artifact_reader(tmp_path: Path) -> No
     )
     assert by_call_id["ok"] is True
     assert "line-from-call-dot-blob" in by_call_id["content"]
+
+    for cid, marker in (
+        ("part/call.json", "SLASH-JSON-BODY"),
+        ("part/call.blob", "SLASH-BLOB-BODY"),
+        ("part\\call.json", "BACKSLASH-JSON-BODY"),
+        ("part\\call.blob", "BACKSLASH-BLOB-BODY"),
+    ):
+        _write_externalized_tool_output(tmp_path, content=marker * 30, call_id=cid)
+    for ref, expected in (
+        ("part/call.blob", "SLASH-BLOB-BODY"),
+        ("run-artifact:part/call.blob", "SLASH-BLOB-BODY"),
+        ("part\\call.blob", "BACKSLASH-BLOB-BODY"),
+        ("run-artifact:part\\call.blob", "BACKSLASH-BLOB-BODY"),
+    ):
+        resolved = read_tool_output_artifact(
+            ReadToolOutputArtifactRequest(root=tmp_path, artifact_ref=ref, run_id="run-artifact", mode="head")
+        )
+        assert resolved["ok"] is True
+        assert expected in resolved["content"]
 
 
 def _write_externalized_tool_output(

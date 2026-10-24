@@ -453,3 +453,8 @@ def test_ipv6_transition_prefixes_and_non_transition_low32_boundaries():
             allowed_private_hosts=("64:ff9b::/96", "64:ff9b:1::/48", "2002:a00::/24"),
         ))
         assert allowed.allowed is True
+    ula_benchmark = evaluate_network_safety_gate(
+        _facts("http://native.test:8080/", FakeResolver(["fd12:3456:789a:1:0:5efe:c612:1"]))
+    )
+    assert not ula_benchmark.allowed
+    assert ula_benchmark.finding_codes == ("NETWORK_PRIVATE_IP_BLOCKED",)

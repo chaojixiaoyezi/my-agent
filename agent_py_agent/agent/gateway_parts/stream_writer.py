@@ -25,7 +25,9 @@ from .approval_session import ToolApprovalSessionCache
 from .stream_approval import StreamApproval, StreamApprovalRequestOptions
 from .stream_events import (
     active_turn_input_event,
+    begin_thinking_flush,
     cancel_thinking_flush_timer,
+    complete_thinking_flush,
     drain_thinking_delta_text,
     provider_retry_event,
     public_context_compaction_payload,
@@ -145,9 +147,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def _write_event(self, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
         if event.get("kind") != "thinking_delta":
             self.flush_thinking_delta(final=False)
-            if self._thinking_publishing_tid is not None and self._thinking_publishing_tid != threading.get_ident():
-                self._deferred_after_thinking.append((dict(event), still_current))
-                return
+            with self._commit_lock:
+                if self._thinking_publishing_tid is not None and self._thinking_publishing_tid != threading.get_ident():
+                    self._deferred_after_thinking.append((dict(event), still_current))
+                    return
         _publish_writer_event(self, event, still_current=still_current)
 
     # LLM: 保留原sink方法消费未提交raw，防止ToolBoundaryChunkFilter退回write后公开正文；不保存或发布，数字计量仍走原write_model_metrics。
@@ -314,54 +317,35 @@ class BufferedChunkStreamWriter(StreamLiveness):
             project_host_paths_for_channel(raw, self.delivery_channel),
             self._identifier_redactions, channel=self.delivery_channel,
         )
-        if not content and not self._thinking_buffer and not self._thinking_concurrent_buffer:
-            return
-        if self._thinking_draining:
-            self._thinking_concurrent_buffer.append(raw)
+        with self._commit_lock:
+            if not content and not self._thinking_buffer and not self._thinking_concurrent_buffer:
+                return
+            self._thinking_buffer.append(raw)
             self._thinking_buffer_chars += len(content)
-            return
-        if not self._thinking_emitted:
-            combined, _ = "".join(self._thinking_buffer) + raw, self._thinking_buffer.clear()
-            self._thinking_buffer_chars = 0
-            if first_text := drain_thinking_delta_text(self, combined, final=False):
-                self._thinking_emitted, self._last_thinking_flush_at = True, time.monotonic()
-                self._write_event({"kind": "thinking_delta", "text": first_text})
-            return
-        self._thinking_buffer.append(raw)
-        self._thinking_buffer_chars += len(content)
-        if _stream_flush_due(content, self._thinking_buffer_chars, self._last_thinking_flush_at,
-                             self.thinking_flush_chars, self.thinking_flush_interval_seconds):
+            flush_now = not self._thinking_emitted or _stream_flush_due(
+                content, self._thinking_buffer_chars, self._last_thinking_flush_at,
+                self.thinking_flush_chars, self.thinking_flush_interval_seconds,
+            )
+        if flush_now:
             self.flush_thinking_delta(final=False)
         else:
             schedule_thinking_flush_timer(
                 self, lambda: _stream_flush_due("", self._thinking_buffer_chars, self._last_thinking_flush_at,
                                                 self.thinking_flush_chars, self.thinking_flush_interval_seconds))
 
-    # LLM: 发布前先更新时间并用draining暂存并发追加，发布期间延迟跨线程非thinking事件，避免并发丢字与越序。
+    # LLM: 锁内原子摘取待发批次并置发布标识，净化与发布期间延迟跨线程非thinking事件，避免并发丢字、重复或越序。
     # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
     def flush_thinking_delta(self, *, final: bool = True) -> None:
-        cancel_thinking_flush_timer(self)
-        if not self._thinking_buffer and not self._thinking_concurrent_buffer:
+        batch = begin_thinking_flush(self, time.monotonic())
+        if not batch:
             return
-        self._last_thinking_flush_at = time.monotonic()
-        if not self._thinking_buffer and not self._thinking_concurrent_buffer:
-            return
-        self._thinking_draining = True
-        raw_joined, _ = "".join(self._thinking_buffer), self._thinking_buffer.clear()
-        self._thinking_draining, self._thinking_buffer_chars = False, 0
-        if self._thinking_concurrent_buffer:
-            self._thinking_buffer.extend(self._thinking_concurrent_buffer)
-            self._thinking_concurrent_buffer.clear()
-            self._thinking_buffer_chars = sum(len(part) for part in self._thinking_buffer)
-        if content := drain_thinking_delta_text(self, raw_joined, final=final):
-            self._thinking_publishing_tid = threading.get_ident()
-            try:
+        try:
+            raw_joined, _ = "".join(batch), batch.clear()
+            if content := drain_thinking_delta_text(self, raw_joined, final=final):
+                self._thinking_emitted = True
                 self._write_event({"kind": "thinking_delta", "text": content})
-            finally:
-                self._thinking_publishing_tid = None
-                while self._deferred_after_thinking:
-                    deferred_event, deferred_current = self._deferred_after_thinking.pop(0)
-                    _publish_writer_event(self, deferred_event, still_current=deferred_current)
+        finally:
+            complete_thinking_flush(self, _publish_writer_event)
 
     # LLM: 该出口只接受共享白名单后的累计字符计数；raw partial JSON、路径、
     # 命令和凭据不得写入 chunk 文件，普通非 rich 客户端保持完全不可见。

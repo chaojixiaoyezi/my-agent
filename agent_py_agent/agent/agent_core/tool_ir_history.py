@@ -75,34 +75,47 @@ _PROJECTION_CACHE_BYTES = 0
 _PROJECTION_TLS = threading.local()
 
 
-# LLM: 冻结实际dataclass字段而非过时伪字段；包含UserTurn媒体及canonical结果所有渲染来源，未知值不缓存。
+# LLM: 借用prior占位类型与普通消息字典/元组严格区分，避免缓存解码误判真实消息内容。
+# 类用途: 标记缓存投影中借用外部prior_messages的下标槽位。
+class _BorrowedPriorSlot(int):
+    pass
+
+
+# LLM: 冻结实际dataclass字段而非过时伪字段；包含UserTurn媒体及canonical结果所有渲染来源，未知值或累计超单条预算不缓存。
 #   MappingProxyType按Mapping读取且保键序，标量沿严格JSON键保bool/数值类型、NaN及负零；递归有界。
 # 函数用途: 将IR、历史和嵌套参数转成严格结构键，不序列化、不消费状态或复制prior。
-def _freeze_projection_value(value: object, *, _depth: int = 0) -> tuple | None:
+def _freeze_projection_value(value: object, *, _depth: int = 0, _budget: list[int] | None = None) -> tuple | None:
     if _depth > 64:
         return None
-    if type(value) is str and sys.getsizeof(value) > _MAX_SINGLE_PROJECTION_BYTES:
+    budget = [_MAX_SINGLE_PROJECTION_BYTES] if _budget is None else _budget
+    budget[0] -= sys.getsizeof(value)
+    if budget[0] < 0:
         return None
     if value is None or type(value) in (bool, int, float, str):
-        return _strict_json_cache_key(value)
+        return _strict_json_cache_key(value, _budget=budget)
     if is_dataclass(value) and not isinstance(value, type):
         values = [(item.name, getattr(value, item.name)) for item in fields(value)]
         if isinstance(value, AssistantTurn):
             values.append(("round_index", getattr(value, "round_index", getattr(value, "_tool_round", None))))
-        frozen = _freeze_projection_value(dict(values), _depth=_depth + 1)
+        frozen = _freeze_projection_value(dict(values), _depth=_depth + 1, _budget=budget)
         return None if frozen is None else (type(value).__module__, type(value).__qualname__, frozen)
     if isinstance(value, Mapping):
         pairs = []
         for key, item in value.items():
-            ck = _freeze_projection_value(key, _depth=_depth + 1)
-            cv = _freeze_projection_value(item, _depth=_depth + 1)
+            ck = _freeze_projection_value(key, _depth=_depth + 1, _budget=budget)
+            cv = _freeze_projection_value(item, _depth=_depth + 1, _budget=budget)
             if ck is None or cv is None:
                 return None
             pairs.append((ck, cv))
         return ("map", tuple(pairs))
     if isinstance(value, (list, tuple)):
-        items = tuple(_freeze_projection_value(item, _depth=_depth + 1) for item in value)
-        return None if any(item is None for item in items) else ("seq", items)
+        items = []
+        for item in value:
+            ci = _freeze_projection_value(item, _depth=_depth + 1, _budget=budget)
+            if ci is None:
+                return None
+            items.append(ci)
+        return ("seq", tuple(items))
     return None
 
 
@@ -113,20 +126,34 @@ def _projection_cache_key(history: list, prior_list: list) -> tuple | None:
     return None if frozen is None else (frozen, tuple(id(item) for item in prior_list))
 
 
-# LLM: 锁外沿唯一适配器投影，只缓存独立派生块并用下标占位符替代借用prior，不强引用外部可变prior字典。
-#   原位可变arguments必须脱离缓存；含MappingProxy等不可证明可复制值的派生块旁路缓存，保原只读兼容。
+# LLM: 锁外沿唯一适配器对隔离快照投影，只缓存独立派生块并用专用槽位替代借用prior，不强引用外部可变prior字典。
+#   原位可变arguments或content_blocks必须脱离缓存；含MappingProxy等不可证明可复制值的派生块旁路缓存。
 # 函数用途: 建立隔离派生块的缓存表示；不能安全隔离时返回原投影及明确不可缓存标记。
 def _build_cached_projection(history: list, prior_list: list) -> tuple[list[Any], bool]:
     from ..backends.message_adapter import project_native_history_messages
 
-    _PROJECTION_TLS.observed_key = _projection_cache_key(history, prior_list)
-    messages = project_native_history_messages(history, prior_list, copy_prior=False)
-    _PROJECTION_TLS.post_key = _projection_cache_key(history, prior_list)
+    observed = _projection_cache_key(history, prior_list)
+    _PROJECTION_TLS.observed_key = observed
+    snapshot = history
+    if observed is not None:
+        try:
+            snapshot = deepcopy(history)
+        except TypeError:
+            _PROJECTION_TLS.observed_key = None
+            snapshot = history
+        else:
+            if _projection_cache_key(snapshot, prior_list) != observed:
+                _PROJECTION_TLS.observed_key = None
+                snapshot = history
+    messages = project_native_history_messages(snapshot, prior_list, copy_prior=False)
+    _PROJECTION_TLS.post_key = (
+        _projection_cache_key(history, prior_list) if _PROJECTION_TLS.observed_key is not None else None
+    )
     prior_index_by_id = {id(item): index for index, item in enumerate(prior_list)}
     if any(id(item) not in prior_index_by_id and _strict_json_cache_key(item) is None for item in messages):
         return messages, False
     return [
-        ("__borrowed_prior__", prior_index_by_id[id(item)]) if id(item) in prior_index_by_id else deepcopy(item)
+        _BorrowedPriorSlot(prior_index_by_id[id(item)]) if id(item) in prior_index_by_id else deepcopy(item)
         for item in messages
     ], True
 
@@ -150,10 +177,30 @@ def _projection_entry_bytes(key: tuple, messages: list[Any]) -> int:
     return total
 
 
-# LLM: 仅LRU操作持锁，冻结/投影/复制在锁外；发布前复核构造时与前后快照键，按64项与2MiB双预算淘汰。
-# 函数用途: 复用当前真实结构的消息；并发改写（含ABA）、超大项或不可安全隔离结果不进入缓存。
-def _cached_native_projection(history: list, prior_list: list) -> tuple[list[Any], bool]:
+# LLM: 锁内写入单条投影缓存并按64项与2MiB双预算淘汰旧项，不触碰外部状态。
+# 函数用途: 原子登记一条已验证的投影缓存并在超预算时按FIFO淘汰。
+def _store_projection_cache_entry(key: tuple, messages: list[Any], entry_bytes: int) -> None:
     global _PROJECTION_CACHE_BYTES
+    with _PROJECTION_LOCK:
+        if not _PROJECTION_CACHE:
+            _PROJECTION_CACHE_SIZES.clear()
+            _PROJECTION_CACHE_BYTES = 0
+        prev_bytes = _PROJECTION_CACHE_SIZES.pop(key, 0) if _PROJECTION_CACHE.pop(key, None) is not None else 0
+        _PROJECTION_CACHE_BYTES = max(0, _PROJECTION_CACHE_BYTES - prev_bytes)
+        _PROJECTION_CACHE[key] = messages
+        _PROJECTION_CACHE_SIZES[key] = entry_bytes
+        _PROJECTION_CACHE_BYTES += entry_bytes
+        while _PROJECTION_CACHE and (
+            len(_PROJECTION_CACHE) > _MAX_PROJECTION_CACHE_ENTRIES
+            or _PROJECTION_CACHE_BYTES > _MAX_PROJECTION_CACHE_BYTES
+        ):
+            old_key, _ = _PROJECTION_CACHE.popitem(last=False)
+            _PROJECTION_CACHE_BYTES = max(0, _PROJECTION_CACHE_BYTES - _PROJECTION_CACHE_SIZES.pop(old_key, 0))
+
+
+# LLM: 仅LRU操作持锁，冻结/投影/复制在锁外；发布前复核构造时与前后快照键，finally清理TLS防止驻留，按64项与2MiB双预算淘汰。
+# 函数用途: 复用当前真实结构的消息；并发改写（含内层ABA）、超大项或不可安全隔离结果不进入缓存也不滞留TLS。
+def _cached_native_projection(history: list, prior_list: list) -> tuple[list[Any], bool]:
     key = _projection_cache_key(history, prior_list)
     if key is not None:
         with _PROJECTION_LOCK:
@@ -163,32 +210,22 @@ def _cached_native_projection(history: list, prior_list: list) -> tuple[list[Any
                 return cached, True
     _PROJECTION_TLS.observed_key = None
     _PROJECTION_TLS.post_key = None
-    messages, cacheable = _build_cached_projection(history, prior_list)
-    if (
-        key is not None
-        and cacheable
-        and getattr(_PROJECTION_TLS, "observed_key", None) == key
-        and getattr(_PROJECTION_TLS, "post_key", None) == key
-        and _projection_cache_key(history, prior_list) == key
-    ):
-        entry_bytes = _projection_entry_bytes(key, messages)
-        if entry_bytes <= _MAX_SINGLE_PROJECTION_BYTES:
-            with _PROJECTION_LOCK:
-                if not _PROJECTION_CACHE:
-                    _PROJECTION_CACHE_SIZES.clear()
-                    _PROJECTION_CACHE_BYTES = 0
-                prev_bytes = _PROJECTION_CACHE_SIZES.pop(key, 0) if _PROJECTION_CACHE.pop(key, None) is not None else 0
-                _PROJECTION_CACHE_BYTES = max(0, _PROJECTION_CACHE_BYTES - prev_bytes)
-                _PROJECTION_CACHE[key] = messages
-                _PROJECTION_CACHE_SIZES[key] = entry_bytes
-                _PROJECTION_CACHE_BYTES += entry_bytes
-                while _PROJECTION_CACHE and (
-                    len(_PROJECTION_CACHE) > _MAX_PROJECTION_CACHE_ENTRIES
-                    or _PROJECTION_CACHE_BYTES > _MAX_PROJECTION_CACHE_BYTES
-                ):
-                    old_key, _ = _PROJECTION_CACHE.popitem(last=False)
-                    _PROJECTION_CACHE_BYTES = max(0, _PROJECTION_CACHE_BYTES - _PROJECTION_CACHE_SIZES.pop(old_key, 0))
-    return messages, cacheable
+    try:
+        messages, cacheable = _build_cached_projection(history, prior_list)
+        if (
+            key is not None
+            and cacheable
+            and getattr(_PROJECTION_TLS, "observed_key", None) == key
+            and getattr(_PROJECTION_TLS, "post_key", None) == key
+            and _projection_cache_key(history, prior_list) == key
+        ):
+            entry_bytes = _projection_entry_bytes(key, messages)
+            if entry_bytes <= _MAX_SINGLE_PROJECTION_BYTES:
+                _store_projection_cache_entry(key, messages, entry_bytes)
+        return messages, cacheable
+    finally:
+        _PROJECTION_TLS.observed_key = None
+        _PROJECTION_TLS.post_key = None
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -276,8 +313,11 @@ def project_native_provider_messages(
     if not cacheable:
         return [message_adapter.deepcopy(item) for item in messages] if copy_prior else list(messages)
     if copy_prior:
-        return [message_adapter.deepcopy(prior_list[item[1]] if isinstance(item, tuple) else item) for item in messages]
-    return [prior_list[item[1]] if isinstance(item, tuple) else deepcopy(item) for item in messages]
+        return [
+            message_adapter.deepcopy(prior_list[int(item)] if isinstance(item, _BorrowedPriorSlot) else item)
+            for item in messages
+        ]
+    return [prior_list[int(item)] if isinstance(item, _BorrowedPriorSlot) else deepcopy(item) for item in messages]
 
 
 # LLM: 开轮与 live 候选统一 generation 标题，检查点仍存原始 summary；不写状态或发请求。

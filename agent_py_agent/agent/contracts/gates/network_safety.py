@@ -369,9 +369,21 @@ def _canonical_ip(host: object) -> str:
     return str(address)
 
 
+# LLM: 基准网段例外只适用原生 IPv4 与固定前缀转换（::ffff:0:0/96、::ffff:0:0:0/96、64:ff9b::/96、64:ff9b:1::/48），禁止 ULA/ISATAP 借低位投影绕过。
+# 函数用途: 判断解析地址是否为合法 RFC2544 基准代理地址。
 def _is_benchmark_proxy_ip(value: str) -> bool:
     address = ip_address_or_none(value)
-    projected = ipv4_projected(address) if address is not None else None
+    if address is None:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        parts = tuple(int(part, 16) for part in address.exploded.split(":"))
+        if not (
+            address.ipv4_mapped is not None
+            or parts[:6] == (0, 0, 0, 0, 0xFFFF, 0)
+            or (parts[:2] == (0x0064, 0xFF9B) and parts[2:6] in {(0, 0, 0, 0), (1, 0, 0, 0)})
+        ):
+            return False
+    projected = ipv4_projected(address)
     return isinstance(projected, ipaddress.IPv4Address) and projected in _RFC2544_BENCHMARK_NETWORK
 
 

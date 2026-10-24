@@ -49,22 +49,33 @@ def change_codes() -> tuple[str, ...]:
                          *_PARTITION_OPTION_KEYS.values()}))
 
 
-# LLM: 缓存miss及不支持的结构仍走原始JSON/SHA256；记录实际参与序列化的结构键以拦截ABA并发改写，错误原样传播。
+# LLM: 缓存miss及不支持的结构仍走原始JSON/SHA256；仅在行缓存跟踪期核对序列化前后与JSON载荷一致，拦截内层ABA改写。
 # 函数用途: 为请求片段计算未缓存的原始摘要，供行缓存及其它诊断字段共用。
 def _digest(value: object) -> str:
-    _DIGEST_TLS.observed_key = _strict_json_cache_key(value)
-    return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    track = bool(getattr(_DIGEST_TLS, "track_key", False))
+    pre = _strict_json_cache_key(value) if track else None
+    serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if track:
+        post = _strict_json_cache_key(value) if pre is not None else None
+        try:
+            rendered = _strict_json_cache_key(json.loads(serialized)) if pre is not None and pre == post else None
+        except Exception:
+            rendered = None
+        _DIGEST_TLS.observed_key = pre if pre is not None and pre == post == rendered else None
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
-# LLM: 只接受精确内置JSON类型；保键序、标量类型和零的符号，超单行预算、递归超64层或未知类型不缓存。
+# LLM: 只接受精确内置JSON类型；保键序、标量类型和零的符号，累计超单行预算、递归超64层或未知类型立即中止不缓存。
 # 函数用途: 读取当前嵌套值生成结构键，捕获原位改写而不序列化或按对象身份猜相同。
-def _strict_json_cache_key(value: object, *, _depth: int = 0) -> tuple | None:
+def _strict_json_cache_key(value: object, *, _depth: int = 0, _budget: list[int] | None = None) -> tuple | None:
     if _depth > 64:
+        return None
+    budget = [_MAX_SINGLE_ROW_CACHE_BYTES] if _budget is None else _budget
+    budget[0] -= sys.getsizeof(value)
+    if budget[0] < 0:
         return None
     if value is None:
         return ("none",)
-    if type(value) is str and sys.getsizeof(value) > _MAX_SINGLE_ROW_CACHE_BYTES:
-        return None
     if type(value) in (bool, int, str):
         return (type(value).__name__, value)
     if type(value) is float:
@@ -72,15 +83,22 @@ def _strict_json_cache_key(value: object, *, _depth: int = 0) -> tuple | None:
     if type(value) is dict:
         pairs = []
         for key, item in value.items():
-            ck = _strict_json_cache_key(key, _depth=_depth + 1)
-            cv = _strict_json_cache_key(item, _depth=_depth + 1)
+            if type(key) is not str:
+                return None
+            ck = _strict_json_cache_key(key, _depth=_depth + 1, _budget=budget)
+            cv = _strict_json_cache_key(item, _depth=_depth + 1, _budget=budget)
             if ck is None or cv is None:
                 return None
             pairs.append((ck, cv))
         return ("dict", tuple(pairs))
     if type(value) in (list, tuple):
-        items = tuple(_strict_json_cache_key(item, _depth=_depth + 1) for item in value)
-        return None if any(item is None for item in items) else ("list", items)
+        items = []
+        for item in value:
+            ci = _strict_json_cache_key(item, _depth=_depth + 1, _budget=budget)
+            if ci is None:
+                return None
+            items.append(ci)
+        return ("list", tuple(items))
     return None
 
 
@@ -114,8 +132,8 @@ def _remember_row_digest(key: tuple, digest: str, size: int) -> None:
             _ROW_CACHE_BYTES = max(0, _ROW_CACHE_BYTES - _ROW_DIGEST_CACHE.popitem(last=False)[1][1])
 
 
-# LLM: 结构冻结、JSON、SHA256和大小估算均在锁外；仅当序列化时刻与前后结构键完全一致才入LRU，不支持的值原样报错。
-# 函数用途: 为未变化的消息复用摘要，并发原位改写（含ABA）或超大行不污染缓存。
+# LLM: 结构冻结、JSON、SHA256和大小估算均在锁外；仅当序列化载荷与前后结构键一致才入LRU，finally清理TLS防止驻留。
+# 函数用途: 为未变化的消息复用摘要，并发原位改写（含内层ABA）或超大行不污染缓存也不滞留TLS。
 def _row_digest(message: object) -> str:
     key = _strict_json_cache_key(message)
     if key is not None:
@@ -124,17 +142,22 @@ def _row_digest(message: object) -> str:
             if cached is not None:
                 _ROW_DIGEST_CACHE.move_to_end(key)
                 return cached[0]
+    _DIGEST_TLS.track_key = key is not None
     _DIGEST_TLS.observed_key = None
-    digest = _digest(message)
-    if (
-        key is not None
-        and getattr(_DIGEST_TLS, "observed_key", None) == key
-        and _strict_json_cache_key(message) == key
-    ):
-        size = _row_cache_size(key, digest)
-        if size <= _MAX_SINGLE_ROW_CACHE_BYTES:
-            _remember_row_digest(key, digest, size)
-    return digest
+    try:
+        digest = _digest(message)
+        if (
+            key is not None
+            and getattr(_DIGEST_TLS, "observed_key", None) == key
+            and _strict_json_cache_key(message) == key
+        ):
+            size = _row_cache_size(key, digest)
+            if size <= _MAX_SINGLE_ROW_CACHE_BYTES:
+                _remember_row_digest(key, digest, size)
+        return digest
+    finally:
+        _DIGEST_TLS.track_key = False
+        _DIGEST_TLS.observed_key = None
 
 
 # LLM: 链步按上一链值与严格行摘要缓存，散列在锁外；中间消息变更仍会改变它之后的每个检查点。

@@ -221,35 +221,7 @@ def active_turn_input_event(
 # LLM: 仅在非终局刷新时保留已闭合命中之后的敏感标识真前缀尾部，防止重叠规则拆碎已完整命中的敏感ID。
 # 函数用途: 拆分待发思考与未闭合的标识前缀，防止跨chunk边界泄漏敏感ID。
 def drain_thinking_delta_text(writer: Any, raw_joined: str, *, final: bool = True) -> str:
-    emit_raw = raw_joined
-    if not final and raw_joined and writer._identifier_redactions:
-        needles = sorted(
-            {src for src, _ in writer._identifier_redactions if isinstance(src, str) and len(src) > 1},
-            key=len,
-            reverse=True,
-        )
-        if needles:
-            complete_end, pos = 0, 0
-            while pos < len(raw_joined):
-                matched = next((src for src in needles if raw_joined.startswith(src, pos)), "")
-                if not matched:
-                    pos += 1
-                    continue
-                end = pos + len(matched)
-                if end == len(raw_joined) and any(len(other) > len(matched) and other.startswith(matched) for other in needles):
-                    break
-                complete_end = end
-                pos = end
-            max_len = max(len(src) for src in needles)
-            start_min = max(complete_end, len(raw_joined) - max_len + 1)
-            for idx in range(start_min, len(raw_joined)):
-                suffix = raw_joined[idx:]
-                if any(len(suffix) < len(src) and src.startswith(suffix) for src in needles):
-                    emit_raw, hold_raw = raw_joined[:idx], suffix
-                    writer._thinking_buffer.insert(0, hold_raw)
-                    writer._thinking_buffer_chars += len(hold_raw)
-                    schedule_thinking_flush_timer(writer)
-                    break
+    emit_raw = _hold_incomplete_redaction_suffix(writer, raw_joined) if not final and raw_joined else raw_joined
     if not emit_raw:
         return ""
     return redact_structured_identifiers(
@@ -257,6 +229,76 @@ def drain_thinking_delta_text(writer: Any, raw_joined: str, *, final: bool = Tru
         writer._identifier_redactions,
         channel=writer.delivery_channel,
     )
+
+
+# LLM: 扫描完整命中边界并将未闭合的敏感标识真前缀尾部锁内压回缓冲头部，不截断已闭合的短敏感ID。
+# 函数用途: 为非终局思考刷新分离可安全发送的前缀与需要继续等待后续chunk的尾部。
+def _hold_incomplete_redaction_suffix(writer: Any, raw_joined: str) -> str:
+    needles = sorted(
+        {src for src, _ in (writer._identifier_redactions or ()) if isinstance(src, str) and len(src) > 1},
+        key=len,
+        reverse=True,
+    )
+    if not needles:
+        return raw_joined
+    complete_end, pos = 0, 0
+    while pos < len(raw_joined):
+        matched = next((src for src in needles if raw_joined.startswith(src, pos)), "")
+        if not matched:
+            pos += 1
+            continue
+        end = pos + len(matched)
+        if end == len(raw_joined) and any(len(other) > len(matched) and other.startswith(matched) for other in needles):
+            break
+        complete_end = end
+        pos = end
+    max_len = max(len(src) for src in needles)
+    start_min = max(complete_end, len(raw_joined) - max_len + 1)
+    for idx in range(start_min, len(raw_joined)):
+        suffix = raw_joined[idx:]
+        if any(len(suffix) < len(src) and src.startswith(suffix) for src in needles):
+            with writer._commit_lock:
+                writer._thinking_buffer.insert(0, suffix)
+                writer._thinking_buffer_chars += len(suffix)
+            schedule_thinking_flush_timer(writer)
+            return raw_joined[:idx]
+    return raw_joined
+
+
+# LLM: 锁内原子摘取待发思考批次并设置发布线程标识，防止并发flush重复读取或普通事件在净化窗口越序。
+# 函数用途: 为单次思考刷新取出独立批次列表并标记当前发布线程。
+def begin_thinking_flush(writer: Any, now: float) -> list[str]:
+    cancel_thinking_flush_timer(writer)
+    ident = threading.get_ident()
+    with writer._commit_lock:
+        if writer._thinking_publishing_tid is not None:
+            return []
+        if not writer._thinking_buffer and not writer._thinking_concurrent_buffer:
+            return []
+        writer._last_thinking_flush_at = now
+        batch = [*writer._thinking_buffer, *writer._thinking_concurrent_buffer]
+        writer._thinking_buffer = []
+        writer._thinking_concurrent_buffer = []
+        writer._thinking_buffer_chars = 0
+        writer._thinking_publishing_tid = ident
+        return batch
+
+
+# LLM: 在保持发布线程标识的前提下循环排空延迟事件，全部发完后才锁内清除标识，防止新事件插队。
+# 函数用途: 完成思考批次发布后按到达顺序冲刷期间延迟的非thinking事件。
+def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
+    while True:
+        with writer._commit_lock:
+            if not writer._deferred_after_thinking:
+                writer._thinking_publishing_tid = None
+                has_more = bool(writer._thinking_buffer)
+                break
+            deferred_batch = list(writer._deferred_after_thinking)
+            writer._deferred_after_thinking.clear()
+        for deferred_event, deferred_current in deferred_batch:
+            publish_fn(writer, deferred_event, still_current=deferred_current)
+    if has_more:
+        schedule_thinking_flush_timer(writer)
 
 
 # LLM: 后台守护定时器只在单调时钟真正达到间隔且流未关闭时触发合批刷新，不绕过测试时钟。

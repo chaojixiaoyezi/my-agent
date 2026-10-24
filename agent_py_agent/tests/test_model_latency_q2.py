@@ -489,3 +489,42 @@ def test_w21_projection_borrowed_prior_placeholder_and_midflight_mutation_guard(
     monkeypatch.setattr(message_adapter, "project_native_history_messages", original)
     fresh = tool_ir_history.project_native_provider_messages([turn], copy_prior=False)
     assert fresh[0]["content"][0]["text"] == "initial"
+
+    from agent_py_agent.agent.backends import cache_diagnostics as cd
+
+    blocks = [{"type": "text", "text": "old"}]
+    aba_turn = AssistantTurn(text="fallback", content_blocks=blocks)
+
+    def aba_adapter(*args, **kwargs):
+        blocks[0]["text"] = "new"
+        res = original(*args, **kwargs)
+        blocks[0]["text"] = "old"
+        return res
+
+    monkeypatch.setattr(message_adapter, "project_native_history_messages", aba_adapter)
+    tool_ir_history.project_native_provider_messages([aba_turn])
+    monkeypatch.setattr(message_adapter, "project_native_history_messages", original)
+    assert tool_ir_history.project_native_provider_messages([aba_turn])[0]["content"][0]["text"] == "old"
+
+    row = {"content": "old"}
+    orig_dumps = cd.json.dumps
+
+    def aba_dumps(val, *args, **kwargs):
+        if val is not row:
+            return orig_dumps(val, *args, **kwargs)
+        row["content"] = "new"
+        res = orig_dumps(val, *args, **kwargs)
+        row["content"] = "old"
+        return res
+
+    monkeypatch.setattr(cd.json, "dumps", aba_dumps)
+    cd._chain_checkpoints([row])
+    monkeypatch.setattr(cd.json, "dumps", orig_dumps)
+    assert cd._chain_checkpoints([{"content": "old"}]) != cd._chain_checkpoints([{"content": "new"}])
+
+    large_prior = [{"role": "user", "content": f"{i}:" + ("x" * 65536)} for i in range(80)]
+    tool_ir_history.project_native_provider_messages([], prior_messages=large_prior, copy_prior=False)
+    cd._chain_checkpoints([{"content": [f"{i}:" + ("x" * 65536) for i in range(80)]}])
+    assert getattr(tool_ir_history._PROJECTION_TLS, "observed_key", None) is None
+    assert getattr(tool_ir_history._PROJECTION_TLS, "post_key", None) is None
+    assert getattr(cd._DIGEST_TLS, "observed_key", None) is None
