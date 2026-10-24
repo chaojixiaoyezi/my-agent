@@ -302,14 +302,18 @@ class _RuntimeBudgetConfigFields:
 # LLM: 用户默认同步随包配置；沟通软引导只影响主会话提示，联测builder与参数登记；host_only仅宿主冻结，媒体预算和群附件/Curator授权不变。
 # 类用途: 汇总模型和运行配置；沟通指导可关闭，图片外发有独立开关，有限正时间只提供后续请求默认，不管理阶段时钟。
 # LLM: 宿主拓扑默认0，__post_init__与YAML规范化共用严格判据，replace不得绕过。
-# 类用途: 保存同一配置权威的运行参数；部署拓扑不能由模型或用户会话改写。
+# 类用途: 保存同一配置权威的运行参数和内网白名单；部署拓扑不能由模型或用户会话改写。
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
-    # LLM: 程序构造、dataclass replace与YAML加载共用严格拓扑校验；不从bool/字符串补猜工作进程数量。
-    # 函数用途: 创建配置时拒绝非法部署数量，避免非YAML入口绕过同一规则。
+    # LLM: 构造、replace、YAML 共用拓扑校验与白名单类型规范化；裸字符串/字典不产生网络授权。
+    # 函数用途: 校验部署数量并把内网白名单规范为字符串列表。
     def __post_init__(self):
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
+        values = self.allowed_private_hosts
+        self.allowed_private_hosts = [item.strip() for item in values if isinstance(item, str) and item.strip()] if isinstance(values, list) else []
+
+    allowed_private_hosts: list[str] = field(default_factory=list)
 
     # 决策增强默认关闭；有限正秒数只作用后续请求，不重置已开始阶段的预算。
     decision_enabled: bool = False

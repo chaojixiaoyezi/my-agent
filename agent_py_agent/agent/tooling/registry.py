@@ -88,7 +88,7 @@ class CatalogRenderConfig:
     declared_deferred_names: frozenset[str] = frozenset()
 
 
-# LLM: 单一宿主装配配置；凭据环境上界与 B5 来源/审批由 core 绑定，权限视图/MCP共用，不能从模型参数推导。
+# LLM: 单一宿主装配配置；内网主机只由 core 配置注入，凭据环境上界与 B5 来源/审批仍保持原身份。
 # 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
@@ -174,6 +174,7 @@ class ToolRegistryParams:
     # 宿主只读投影：固定当前 owner/actor/运行边界；不能从模型参数指定身份或返回配置正文。
     self_context_provider: Callable[[ToolRuntimeSnapshot, ToolInvocationContext | None], dict[str, object]] | None = None
     gateway_port: int | None = None
+    allowed_private_hosts: tuple[str, ...] = ()
     # B5 征询提供方来自组合根，权限视图共用它；模型不能传入提供方或改变来源。
     plugin_gate_reviewer: Callable | None = None
     # 原 owner 权限状态的当次只读投影；不持久权限，缺省不获得管理员 Full Access。

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -16,12 +16,16 @@ LocalAddressProbe = Callable[[str], bool | None]
 GatewayPortState = Literal["known", "not_applicable", "unavailable"]
 
 _GATE = "network_safety"
+_DEFAULT_PROTECTED_GATEWAY_PORT = 8420
 _PRIVATE_HOSTS = {"localhost"}
 _ALWAYS_BLOCKED_HOSTS = {"metadata.google.internal", "metadata.goog"}
 _ALWAYS_BLOCKED_NETWORKS = (
     ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("::ffff:169.254.0.0/112"),
+    ipaddress.ip_network("100.100.100.200/32"),
+    ipaddress.ip_network("fd00:ec2::254/128"),
 )
+PrivateAllowlistEntry = str | ipaddress.IPv4Network | ipaddress.IPv6Network
 _CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 _RFC2544_BENCHMARK_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
@@ -58,10 +62,15 @@ class NetworkSafetyFacts:
     local_address_probe: LocalAddressProbe | None = None
 
 
-# LLM: 唯一网络闸入口；G6 必须在普通私网放行后仍核对解析地址、请求端口和结构化 Gateway 事实。
+# LLM: 端口先严格校验；私网匹配复用纯解析器，G6 与永久元数据禁止项不受授权影响。
 # 函数用途: 统一决定 URL 是否可访问，新增地址规则须同时覆盖字面 IP 与解析后的 DNS 地址。
 def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
-    parsed = urlparse(_text(facts.url))
+    try:
+        parsed = urlparse(_text(facts.url))
+        if parsed.port == 0:
+            return _deny("NETWORK_PORT_INVALID", {"url": _text(facts.url)})
+    except ValueError:
+        return _deny("NETWORK_PORT_INVALID", {"url": _text(facts.url)})
     scheme = _text(parsed.scheme).lower()
     if scheme == "file":
         return _deny("NETWORK_FILE_URL_BLOCKED", {"scheme": scheme})
@@ -72,15 +81,15 @@ def evaluate_network_safety_gate(facts: NetworkSafetyFacts) -> GateDecision:
     if host in _ALWAYS_BLOCKED_HOSTS:
         return _deny("NETWORK_ALWAYS_BLOCKED_HOST", {"host": host})
 
-    allowed_private_hosts = _normalized_allowlist(facts.allowed_private_hosts)
-    private_host_allowed = _host_is_allowlisted(host, allowed_private_hosts)
+    allowed_private_hosts = _parse_private_allowlist(facts.allowed_private_hosts)
+    private_host_allowed = private_host_or_ip_is_allowlisted(host, facts.allowed_private_hosts)
     literal_ip = _canonical_ip(host)
     if literal_ip:
         return _literal_host_decision(host, literal_ip, facts, private_host_allowed)
 
     if _is_private_hostname(host) and not private_host_allowed and not facts.allow_private_resolution:
         return _deny("NETWORK_PRIVATE_HOST_BLOCKED", {"host": host})
-    return _resolved_host_decision(host, facts, private_host_allowed)
+    return _resolved_host_decision(host, facts, _host_is_allowlisted(host, allowed_private_hosts))
 
 
 # LLM: 域名 DNS 结果会被 pin；永久拦截与旧私网策略先保留，之后叠加独立 Gateway 端口检查。
@@ -100,6 +109,8 @@ def _resolved_host_decision(host: str, facts: NetworkSafetyFacts, private_host_a
     return _allow_resolved_host(host, resolved, previous, facts)
 
 
+# LLM: 永久禁止先判；非显式域名的公网到私网翻转即使开启总开关或网段授权也必须拒绝。
+# 函数用途: 找出 DNS 结果中违反授权或重绑定规则的第一个地址。
 def _resolved_block(
     resolved: tuple[str, ...],
     previous: tuple[str, ...],
@@ -109,16 +120,23 @@ def _resolved_block(
     always_blocked_ip = _first_always_blocked_ip(resolved)
     if always_blocked_ip:
         return "NETWORK_ALWAYS_BLOCKED_IP", always_blocked_ip
+    if previous and not private_host_allowed and not any(_is_private_ip(ip) for ip in previous):
+        rebound = next((ip for ip in resolved if _is_private_ip(ip)), "")
+        if rebound:
+            return "NETWORK_DNS_REBINDING_BLOCKED", rebound
     blocked_ip = _first_blocked_ip(
         resolved,
         private_host_allowed,
         facts.allow_private_resolution,
         facts.allow_benchmark_resolution,
+        _parse_private_allowlist(facts.allowed_private_hosts),
     )
     code = "NETWORK_DNS_REBINDING_BLOCKED" if previous else "NETWORK_PRIVATE_IP_BLOCKED"
     return (code, blocked_ip) if blocked_ip else ("", "")
 
 
+# LLM: 回执记录域名显式授权，不把 localhost 的 IP 预检例外误记为域名总授权。
+# 函数用途: 返回本次已检查 DNS 地址与授权事实。
 def _allow_resolved_host(
     host: str,
     resolved: tuple[str, ...],
@@ -132,7 +150,7 @@ def _allow_resolved_host(
             "resolved_ips": list(resolved),
             "previous_resolved_ips": list(previous),
             "dns_rechecked": bool(previous),
-            "private_host_allowed": _host_is_allowlisted(host, _normalized_allowlist(facts.allowed_private_hosts)),
+            "private_host_allowed": _host_is_allowlisted(host, _parse_private_allowlist(facts.allowed_private_hosts)),
             "allow_private_resolution": bool(facts.allow_private_resolution),
             "allow_benchmark_resolution": bool(facts.allow_benchmark_resolution),
             "benchmark_resolution_allowed_ips": _benchmark_ips(resolved, facts.allow_benchmark_resolution),
@@ -168,7 +186,7 @@ def _literal_host_decision(
     )
 
 
-# LLM: 只在已知 Gateway 端口命中时探测本机；未知端口时只挡确认的本机目标，N/A 完全跳过。
+# LLM: 8420 永久受保护；整组已确认本机优先于未知探针，unavailable 拒绝不因地址顺序变化。
 # 函数用途: 把受保护端口、本机探针结果和解析后的 IP 组合为 G6 的结构化拒绝。
 def _gateway_port_denial(
     facts: NetworkSafetyFacts,
@@ -184,17 +202,20 @@ def _gateway_port_denial(
         "resolved_ips": list(resolved),
     }
     port_unknown = not gateway_ports and facts.gateway_port_state == "unavailable"
-    if facts.gateway_port_state == "not_applicable" and not gateway_ports:
+    if not port_unknown and endpoint_port not in gateway_ports and endpoint_port != _DEFAULT_PROTECTED_GATEWAY_PORT:
         return None
-    if not port_unknown and endpoint_port not in gateway_ports:
-        return None
+    if endpoint_port == _DEFAULT_PROTECTED_GATEWAY_PORT and not gateway_ports:
+        evidence["gateway_ports"] = [_DEFAULT_PROTECTED_GATEWAY_PORT]
+    local_unknown = False
     for ip in resolved:
         local = _local_address_status(ip, facts.local_address_probe)
         if local is True:
             code = "NETWORK_GATEWAY_PORT_UNAVAILABLE" if port_unknown else "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
             return _deny(code, {**evidence, "ip": ip})
         if local is None:
-            return _deny("NETWORK_GATEWAY_LOCAL_ADDRESS_UNAVAILABLE", evidence)
+            local_unknown = True
+    if local_unknown:
+        return _deny("NETWORK_GATEWAY_LOCAL_ADDRESS_UNAVAILABLE", evidence)
     return None
 
 
@@ -257,15 +278,20 @@ def _first_always_blocked_ip(resolved: Iterable[str]) -> str:
     return next((ip for ip in resolved if _is_always_blocked_ip(ip)), "")
 
 
+# LLM: 域名显式授权或总开关之外，逐个核对所有私网回答，不以第一个已授权地址放过整组。
+# 函数用途: 返回第一个未被 IP/网段授权或基准代理例外覆盖的私网地址。
 def _first_blocked_ip(
     resolved: Iterable[str],
     private_host_allowed: bool,
     allow_private_resolution: bool,
     allow_benchmark_resolution: bool,
+    parsed_allowlist: tuple[PrivateAllowlistEntry, ...] = (),
 ) -> str:
     if private_host_allowed or allow_private_resolution:
         return ""
-    return next((ip for ip in resolved if _is_private_ip(ip) and not _benchmark_allowed(ip, allow_benchmark_resolution)), "")
+    return next((ip for ip in resolved if _is_private_ip(ip)
+                 and not _ip_is_allowlisted(ip, parsed_allowlist)
+                 and not _benchmark_allowed(ip, allow_benchmark_resolution)), "")
 
 
 def _resolved_evidence(host: str, resolved: Iterable[str], previous: Iterable[str], blocked_ip: str) -> dict[str, Any]:
@@ -351,15 +377,84 @@ def _is_private_hostname(host: str) -> bool:
     return _normalize_host(host) in _PRIVATE_HOSTS
 
 
-def _normalized_allowlist(values: Iterable[str]) -> set[str]:
-    return {_normalize_host(value) for value in values if _normalize_host(value)}
+# LLM: 仅接受字符串序列/集合，裸字符串、字典、生成器和非字符串成员不产生授权。
+# 函数用途: 纯解析精确主机、子域通配符、IP 与非零前缀网段，忽略非法或永久禁止的条目。
+def _parse_private_allowlist(values: object) -> tuple[PrivateAllowlistEntry, ...]:
+    if isinstance(values, (str, bytes, Mapping)) or not isinstance(values, (Sequence, Set)):
+        return ()
+    entries: list[PrivateAllowlistEntry] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        entry = _normalize_host(value.strip())
+        if "/" in entry:
+            network = _private_allowlist_network(entry)
+            if network is not None:
+                entries.append(network)
+            continue
+        literal = _canonical_ip(entry)
+        if literal:
+            if not _is_always_blocked_ip(literal):
+                entries.append(literal)
+        elif _valid_allowlist_hostname(entry):
+            entries.append(entry)
+    return tuple(dict.fromkeys(entries))
 
 
-def _host_is_allowlisted(host: str, allowlist: set[str]) -> bool:
-    if host in allowlist:
-        return True
+# LLM: IPv4 映射网段投影到与字面 IP 相同的 IPv4 空间，投影后的 /0 也不能充当全放行。
+# 函数用途: 规范化 CIDR，拒绝非法与全地址空间网段。
+def _private_allowlist_network(entry: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    try:
+        network = ipaddress.ip_network(entry, strict=False)
+        if isinstance(network, ipaddress.IPv6Network) and network.network_address.ipv4_mapped and network.prefixlen >= 96:
+            network = ipaddress.ip_network((network.network_address.ipv4_mapped, network.prefixlen - 96), strict=False)
+        return network if network.prefixlen else None
+    except ValueError:
+        return None
+
+
+# LLM: 通配符只能位于开头 *.，后缀至少两级；URI 分隔符和 *.local 等不能产生域名授权。
+# 函数用途: 校验精确域名与严格子域通配符格式，永久禁止域名不产生授权。
+def _valid_allowlist_hostname(entry: str) -> bool:
+    suffix = entry[2:] if entry.startswith("*.") else entry
+    return bool(suffix and not any(char.isspace() or char in ":/*@?#\\[]" for char in suffix)
+                and all(suffix.split(".")) and suffix not in _ALWAYS_BLOCKED_HOSTS
+                and (not entry.startswith("*.") or "." in suffix))
+
+
+# LLM: 只表示显式域名授权；localhost 的网段预检例外不允许跳过实际 DNS 地址检查。
+# 函数用途: 精确或按点分隔的子域边界匹配主机名。
+def _host_is_allowlisted(host: str, allowlist: tuple[PrivateAllowlistEntry, ...]) -> bool:
+    return host in allowlist or any(isinstance(entry, str) and entry.startswith("*.")
+                                   and host.endswith(entry[1:]) for entry in allowlist)
+
+
+# LLM: IP 和网段匹配都使用 canonical 地址；元数据在此也先拒绝，调用者不能以宽网段覆盖它。
+# 函数用途: 判断地址是否落在精确 IP 或同地址族的允许网段内。
+def _ip_is_allowlisted(ip: str, parsed_allowlist: tuple[PrivateAllowlistEntry, ...]) -> bool:
+    canonical = _canonical_ip(ip)
+    if not canonical or _is_always_blocked_ip(canonical):
+        return False
+    address = ipaddress.ip_address(canonical)
+    return canonical in parsed_allowlist or any(
+        not isinstance(entry, str) and address.version == entry.version and address in entry
+        for entry in parsed_allowlist
+    )
+
+
+# LLM: 共享预检入口不解析 DNS；localhost 的回环网段例外只放过预检，DNS 门仍逐个核地址。
+# 函数用途: 对 URL 主机执行统一的域名、通配符、IP 与 CIDR 白名单匹配。
+def private_host_or_ip_is_allowlisted(host: str, allowlist: object) -> bool:
+    host = _normalize_host(host)
+    if always_blocked_host(host):
+        return False
+    parsed = _parse_private_allowlist(allowlist)
     literal = _canonical_ip(host)
-    return bool(literal and literal in allowlist)
+    if literal:
+        return _ip_is_allowlisted(literal, parsed)
+    return _host_is_allowlisted(host, parsed) or (host == "localhost" and any(
+        _ip_is_allowlisted(ip, parsed) for ip in ("127.0.0.1", "::1")
+    ))
 
 
 def _numeric_ipv4_host(host: str) -> str:
@@ -427,6 +522,7 @@ __all__ = [
     "NetworkSafetySettings",
     "always_blocked_host",
     "evaluate_network_safety_gate",
+    "private_host_or_ip_is_allowlisted",
 ]
 
 

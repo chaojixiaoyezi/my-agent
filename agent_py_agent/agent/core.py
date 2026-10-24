@@ -984,7 +984,7 @@ TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
 # LLM: ToolRegistry 唯一装配入口；凭据与自身能力来源均绑定宿主身份，审批读取器每次返回原 owner 结构化模式，不持久第二权限源。B5 owner/来源与原 B2 征询合同不变。
-# 函数用途: 按身份和工作区组合工具、只读自身状态和来源声明，主代理与同进程子代理共用权限接线。
+# 函数用途: 按身份和工作区组合工具、内网配置、只读自身状态和来源声明，主子代理共用接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
     from functools import partial
 
@@ -1037,6 +1037,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             web_max_chars=config.tool_web_max_chars,
             http_timeout=config.tool_http_timeout,
             gateway_port=config.gateway_port,
+            allowed_private_hosts=tuple(getattr(config, "allowed_private_hosts", None) or ()),
             catalog_limit=TOOL_CATALOG_LIMIT_COUNT,
             catalog_mode=config.tool_catalog_mode,
             catalog_categories=config.tool_catalog_categories,

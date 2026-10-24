@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_py_agent.agent.contracts.gates.path_url_command import (
     PathUrlCommandFacts,
     evaluate_path_url_command_gate,
@@ -178,3 +180,107 @@ def _expired_lease_snapshot() -> StateEventLedgerSnapshot:
             {"event_id": "evt-2", "run_id": "run-1", "event_type": "tool_result", "operation_id": "op-1"},
         ],
     )
+
+
+# LLM: 预检只判字面目标，不做 DNS；格式必须与真正出站门共享。
+# 函数用途: 覆盖 CIDR、回环别名与无效容器的预检行为。
+@pytest.mark.parametrize(("host", "entries", "allowed"), [
+    ("localhost", ["127.0.0.0/8"], True),
+    ("localhost", ["127.0.0.1"], True),
+    ("10.2.3.4", ["10.0.0.0/8"], True),
+    ("192.168.0.50", ["192.168.0.0/24"], True),
+    ("[::ffff:192.168.0.50]", ["192.168.0.0/24"], True),
+    ("localhost", "localhost", False),
+    ("127.0.0.1", ["0.0.0.0/0"], False),
+])
+def test_path_preflight_private_allowlist_formats(tmp_path, host, entries, allowed):
+    decision = evaluate_path_url_command_gate(PathUrlCommandFacts(
+        payload={"tool": "web_fetch", "url": f"http://{host}:8000/"},
+        workspace_root=tmp_path, allowed_private_hosts=entries,
+    ))
+    assert decision.allowed is allowed
+
+
+# LLM: 每次调用授权与构造配置取并集；异常退出也不能把临时授权留在 handler。
+# 函数用途: 覆盖调用上下文授权并集和 finally 恢复。
+@pytest.mark.parametrize("raises", [False, True])
+def test_invocation_private_grant_unions_and_restores(raises):
+    from agent_py_agent.agent.tooling.registry_invoke import _execute_with_temporary_tool_context
+    from agent_py_agent.agent.tooling.web import WebFetchTool
+
+    tool = WebFetchTool(max_chars=1000, timeout=5, allowed_private_hosts=("git.corp.local",), allow_private_resolution=False)
+    original = tool.allowed_private_hosts
+    seen = []
+
+    # LLM: 记录真正 callback 执行期间的授权，不以调用发生代替正确授权断言。
+    # 函数用途: 观察临时并集并可选模拟 handler 异常。
+    def callback():
+        seen.append(tool.allowed_private_hosts)
+        if raises:
+            raise RuntimeError("probe")
+        return "ok"
+
+    kwargs = dict(workspace_roots=None, allowed_private_hosts=("10.0.0.0/8", "git.corp.local"),
+                  allow_private_resolution=True, callback=callback)
+    if raises:
+        with pytest.raises(RuntimeError, match="probe"):
+            _execute_with_temporary_tool_context(tool, **kwargs)
+    else:
+        assert _execute_with_temporary_tool_context(tool, **kwargs) == "ok"
+    assert seen == [("git.corp.local", "10.0.0.0/8")]
+    assert tool.allowed_private_hosts is original
+    assert tool.allow_private_resolution is False
+
+
+# LLM: 配置白名单须同时进入预检和 handler，边界额外授权不能取代配置。
+# 函数用途: 测动作策略的配置与逐调用主机并集。
+@pytest.mark.parametrize("host", ["127.0.0.1", "192.168.0.50"])
+def test_action_policy_preflight_unions_configured_hosts(tmp_path, host):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.action_policy import _path_url_command_decision
+    from agent_py_agent.agent.tooling.web import WebFetchTool
+
+    tool = WebFetchTool(max_chars=1000, timeout=5, allowed_private_hosts=("127.0.0.0/8",))
+    request = SimpleNamespace(
+        call=SimpleNamespace(tool_name="web_fetch", arguments={"url": f"http://{host}:8000/"}),
+        write_boundary={"allowed_private_hosts": ["192.168.0.0/24"], "allow_private_resolution": False},
+        workspace_root=tmp_path, workspace_roots=[tmp_path], path_access_mode="full-access",
+        path_dangerous_roots=(), owner_scope_root="",
+    )
+    runtime = SimpleNamespace(handler=tool, runtime_policy=tool.runtime_policy)
+    assert _path_url_command_decision(request, runtime, "read_only") is None
+
+
+# LLM: YAML/字典或直接构造都得到字符串列表，裸字符串不拆成单字授权。
+# 函数用途: 测配置加载和直接构造的白名单类型约束与默认独立性。
+@pytest.mark.parametrize(("value", "expected"), [
+    ([" git.corp.local ", "10.0.0.0/8", 1, None], ["git.corp.local", "10.0.0.0/8"]),
+    ("localhost", []), (None, []), ({"localhost": True}, []),
+])
+def test_private_allowlist_config_normalizes_input(tmp_path, value, expected):
+    from agent_py_agent.agent.settings.config import AgentConfig, load_config
+
+    assert "allowed_private_hosts" in AgentConfig.__dataclass_fields__
+    direct = AgentConfig(allowed_private_hosts=value)
+    assert direct.allowed_private_hosts == expected
+    path = tmp_path / "agent.yaml"
+    path.write_text("allowed_private_hosts: " + repr(value) + "\n", encoding="utf-8")
+    assert load_config(path).allowed_private_hosts == expected
+    direct.allowed_private_hosts.append("not-shared.test")
+    assert AgentConfig().allowed_private_hosts == []
+
+
+# LLM: 真实 Registry 构造必须把配置交给抓取 handler；仅定义配置键不代表已接线。
+# 函数用途: 覆盖配置到 Registry bootstrap 的允许集合传递。
+def test_registry_bootstrap_preserves_private_allowlist(tmp_path):
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+
+    assert "allowed_private_hosts" in ToolRegistryParams.__dataclass_fields__
+    hosts = ("git.corp.local", "*.corp.local", "10.0.0.0/8")
+    params = ToolRegistryParams(
+        workspace_root=tmp_path, max_chars=1000, max_entries=10, max_matches=10,
+        web_max_chars=1000, http_timeout=5, catalog_limit=30, retrieval_limit=10,
+        vector_search_enabled=False, allowed_private_hosts=hosts,
+    )
+    assert ToolRegistry(params).tools["web_fetch"].allowed_private_hosts == hosts
