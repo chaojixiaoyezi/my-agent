@@ -207,7 +207,7 @@ def test_resource_environment_is_frozen_in_spec(tmp_path, monkeypatch):
     assert sandbox.SandboxSpec(spec.owner_home, spec.workspace, resource_limits=explicit).resource_limits is explicit
 
 
-# LLM: 所有OS施加边界均由替身记录，绝不在pytest进程真正nice或setrlimit；不mock被测守卫本身。
+# LLM: 私有POSIX视图隔离宿主os.name，兼容没有nice的Windows；全部资源施加由替身记录，不mock守卫本身。
 # 函数用途: 提供资源施加顺序、继承限制及失败测试所用的系统观察器。
 def _resource_os(monkeypatch, *, inherited=(-1, -1), oom="0"):
     import sys
@@ -220,10 +220,38 @@ def _resource_os(monkeypatch, *, inherited=(-1, -1), oom="0"):
         setrlimit=lambda which, values: seen.append((which, values)))
     monkeypatch.setitem(sys.modules, "resource", resource)
     monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(sandbox.os, "nice", lambda value: seen.append(("nice", value)))
+    os_view = SimpleNamespace(**vars(sandbox.os))
+    os_view.name = "posix"
+    monkeypatch.setattr(sandbox, "os", os_view)
+    monkeypatch.setattr(sandbox.os, "nice", lambda value: seen.append(("nice", value)), raising=False)
     monkeypatch.setattr(sandbox, "Path", lambda _path: SimpleNamespace(
         read_text=lambda: oom, write_text=lambda value: seen.append(("oom", value))))
     return sandbox, resource, seen
+
+
+# LLM: 仅替换sandbox持有的OS命名空间，不改宿主os.name；Linux夹具即使在缺nice的Windows入口也须记录POSIX分支。
+# 函数用途: 复现nice初始不存在时夹具失败，并验证平台模拟不依赖宿主。
+@pytest.mark.parametrize("host_name", ["nt", "posix"])
+def test_resource_os_fixture_accepts_namespace_without_nice(monkeypatch, host_name):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling import sandbox
+
+    original_os = sandbox.os
+    namespace = SimpleNamespace(name=host_name)
+    assert not hasattr(namespace, "nice")
+    failure = None
+    with monkeypatch.context() as patch:
+        patch.setattr(sandbox, "os", namespace)
+        try:
+            module, _resource, seen = _resource_os(patch)
+        except AttributeError as error:
+            failure = error
+        assert failure is None, f"missing os.nice must not break the fixture: {failure}"
+        assert module._apply_child_resources(module.ResourceLimits()) == []
+        assert seen == [("nice", 5), ("oom", "300")]
+        assert namespace.name == host_name
+    assert sandbox.os is original_os
 
 
 # LLM: 子进程软硬都只收紧原上限，原OOM偏置较高时不能调低；正配置才添加RLIMIT。
@@ -251,7 +279,7 @@ def test_child_guards_report_unsupported_capabilities(monkeypatch, missing):
         raise OSError(errno.ENOSYS, "fixture unsupported")
 
     if missing == "nice":
-        monkeypatch.setattr(sandbox.os, "nice", unavailable)
+        monkeypatch.setattr(sandbox.os, "nice", unavailable, raising=False)
     elif missing == "proc":
         monkeypatch.setattr(sandbox, "Path", unavailable)
     elif missing == "resource":
