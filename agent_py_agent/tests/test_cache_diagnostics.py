@@ -1,7 +1,10 @@
 # LLM: 以真实协议投影和纯摘要回归缓存诊断，不访问供应商、不把客户端hash称为服务端命中。
-# 模块用途: 区分工具身份、定义、系统和历史变化，并保护公开诊断不泄漏正文。
+# 模块用途: 区分请求面变化，验证严格结构LRU的等价性、命中和资源边界，保护公开诊断不泄漏正文。
 import copy
+import hashlib
 import json
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -479,3 +482,162 @@ def test_chat_system_developer_and_typed_sections_are_deterministic():
         messages=[], request_options=options)
     assert typed["messages"][0]["content"] == "系统乙\n\n系统甲\n\n稳定乙\n\n稳定甲"
     assert "system_changed" not in compare_request_surfaces(request_surface(typed, "endpoint"), request_surface(volatile, "endpoint"))["changes"]
+
+
+# LLM: 每例使用独立内存LRU，不改生产配置或持久化正文；退出后还原原缓存及字节账。
+# 函数用途: 隔离摘要缓存测试，避免顺序影响命中次数。
+@pytest.fixture
+def digest_cache(monkeypatch):
+    from agent_py_agent.agent.backends import cache_diagnostics as diagnostic
+
+    monkeypatch.setattr(diagnostic, "_ROW_DIGEST_CACHE", OrderedDict(), raising=False)
+    monkeypatch.setattr(diagnostic, "_CHAIN_STEP_CACHE", OrderedDict(), raising=False)
+    monkeypatch.setattr(diagnostic, "_ROW_CACHE_BYTES", 0, raising=False)
+    return diagnostic
+
+
+# LLM: 独立重建优化前的未排序JSON和完整链，不复用被测摘要或缓存。
+# 函数用途: 为边界值及中间改写提供逐字节等价基准。
+def _uncached_checkpoints(rows):
+    # LLM: 基准算法始终未排序序列化，不调用被测_digest或其缓存。
+    # 函数用途: 独立计算优化前的片段摘要。
+    def digest(value):
+        return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+    chain, checkpoints = digest("request_surface.v2.seed"), []
+    for index, row in enumerate(rows, 1):
+        chain = hashlib.sha256(f"{chain}\0{digest(row)}".encode()).hexdigest()
+        if index % 32 == 0 or index == len(rows):
+            checkpoints.append({"index": index, "chain": chain})
+    return checkpoints[-128:]
+
+
+# LLM: 首尾和长度不变时仍须检测中间原位改写，比较未排序wire基准而非Python宽松相等。
+# 函数用途: 验证数值类型、零符号和dict键序改变不会复用旧链。
+@pytest.mark.parametrize(("before", "after"), [
+    (1, True), (-0.0, 0.0), ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+])
+def test_w21_middle_in_place_mutation_preserves_wire_exact_digest(digest_cache, before, after):
+    rows = [{"role": "user", "content": index} for index in range(96)]
+    rows[40]["content"] = before
+    original = digest_cache._chain_checkpoints(rows)
+    assert original == _uncached_checkpoints(rows)
+    rows[40]["content"] = after
+    changed = digest_cache._chain_checkpoints(rows)
+    assert changed == _uncached_checkpoints(rows)
+    assert original[0] == changed[0] and original[1:] != changed[1:]
+
+
+# LLM: 记录真实_digest调用并保留独立链等价检查，不能仅靠假摘要证明命中。
+# 函数用途: 验证追加轮不会重复散列旧消息。
+def test_w21_repeated_append_only_hashes_new_rows(digest_cache, monkeypatch):
+    original, calls = digest_cache._digest, []
+
+    # LLM: 包裹原函数而不改变摘要结果。
+    # 函数用途: 记录每次真正进行JSON摘要的输入。
+    def counted(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(digest_cache, "_digest", counted)
+    rows = [{"content": str(index)} for index in range(80)]
+    assert digest_cache._chain_checkpoints(rows) == _uncached_checkpoints(rows)
+    assert len(calls) == 81
+    for index in range(4):
+        calls.clear()
+        rows.append({"content": f"append-{index}"})
+        assert digest_cache._chain_checkpoints(rows) == _uncached_checkpoints(rows)
+        assert len(calls) <= 2, "旧消息不能在追加轮再次执行JSON摘要"
+
+
+# LLM: 记录真实SHA并改写返回检查点，分别守住链步复用及缓存输出隔离。
+# 函数用途: 验证重复扫描不重算链步、调用方不能污染下次检查点。
+def test_w21_repeated_scan_reuses_chain_steps_and_returns_fresh_checkpoints(digest_cache, monkeypatch):
+    original, calls = hashlib.sha256, []
+
+    # LLM: 仍调用真实SHA，计数只观测而不伪造摘要。
+    # 函数用途: 统计重复扫描的实际散列次数。
+    def counted(value):
+        calls.append(1)
+        return original(value)
+
+    monkeypatch.setattr(digest_cache.hashlib, "sha256", counted)
+    rows = [{"content": str(index)} for index in range(80)]
+    first = digest_cache._chain_checkpoints(rows)
+    calls.clear()
+    second = digest_cache._chain_checkpoints(copy.deepcopy(rows))
+    assert first == second
+    assert len(calls) <= 1, "相同行及链步都应命中，不能重复SHA256"
+    second[-1]["chain"] = "caller mutation"
+    assert digest_cache._chain_checkpoints(rows) == first
+
+
+# LLM: NaN、无穷、负零、未知类型及有界循环均按明确结构规则断言。
+# 函数用途: 验证严格键不会混淆wire差异或无限递归。
+def test_w21_strict_keys_distinguish_types_order_and_signed_zero(digest_cache):
+    key = getattr(digest_cache, "_strict_json_cache_key", None)
+    assert callable(key), "缺少严格结构键"
+    assert key(1) != key(True) and key(-0.0) != key(0.0)
+    assert key({"a": 1, "b": 2}) != key({"b": 2, "a": 1})
+    assert key([None, True, "中文"]) == key((None, True, "中文"))
+    assert key(float("nan")) == key(float("nan"))
+    assert key(float("inf")) != key(float("-inf"))
+    assert key(object()) is None and key([], _depth=65) is None
+    cyclic = []
+    cyclic.append(cyclic)
+    assert key(cyclic) is None
+
+
+# LLM: 缩小测试内限额检验真实淘汰及字节账，不放宽生产限额。
+# 函数用途: 同时验证LRU条数、内存估算和最旧项回收。
+def test_w21_lru_enforces_row_count_bytes_and_chain_count(digest_cache, monkeypatch):
+    monkeypatch.setattr(digest_cache, "_MAX_ROW_CACHE_ENTRIES", 2, raising=False)
+    monkeypatch.setattr(digest_cache, "_MAX_ROW_CACHE_BYTES", 4096, raising=False)
+    monkeypatch.setattr(digest_cache, "_MAX_CHAIN_CACHE_ENTRIES", 3, raising=False)
+    rows = [{"content": str(index)} for index in range(6)]
+    digest_cache._chain_checkpoints(rows)
+    assert len(digest_cache._ROW_DIGEST_CACHE) == 2
+    assert len(digest_cache._CHAIN_STEP_CACHE) == 3
+    assert sum(size for _, size in digest_cache._ROW_DIGEST_CACHE.values()) == digest_cache._ROW_CACHE_BYTES
+    assert 0 < digest_cache._ROW_CACHE_BYTES <= 4096
+    assert digest_cache._strict_json_cache_key(rows[-1]) in digest_cache._ROW_DIGEST_CACHE
+    assert digest_cache._strict_json_cache_key(rows[0]) not in digest_cache._ROW_DIGEST_CACHE
+    monkeypatch.setattr(digest_cache, "_MAX_ROW_CACHE_BYTES", 1)
+    digest_cache._chain_checkpoints([{"content": "new"}])
+    assert not digest_cache._ROW_DIGEST_CACHE
+    assert digest_cache._ROW_CACHE_BYTES == 0
+
+
+# LLM: 超大行仍走原摘要，未知对象和循环保持JSON原错误而不缓存伪成功。
+# 函数用途: 验证旁路缓存不改变错误或链值。
+def test_w21_large_or_unsupported_rows_bypass_cache_without_changing_json_errors(digest_cache):
+    large = {"content": "x" * (256 * 1024 + 1)}
+    assert digest_cache._chain_checkpoints([large]) == _uncached_checkpoints([large])
+    assert not digest_cache._ROW_DIGEST_CACHE
+    with pytest.raises(TypeError):
+        digest_cache._chain_checkpoints([{"content": object()}])
+    with pytest.raises(ValueError, match="Circular reference"):
+        cyclic = []
+        cyclic.append(cyclic)
+        digest_cache._chain_checkpoints([cyclic])
+
+
+# LLM: 多线程只共享LRU，散列前实取同一锁验证非锁内执行，结果对照独立原算法。
+# 函数用途: 验证并发扫描的锁边界和完整输出。
+def test_w21_digest_work_is_outside_cache_lock_and_concurrent_results_match(digest_cache, monkeypatch):
+    original = digest_cache._digest
+
+    # LLM: 非阻塞尝试真实缓存锁后释放，再执行原摘要，不篡改锁或输出。
+    # 函数用途: 捕捉在LRU锁内进行JSON/SHA的错误接线。
+    def checked(value):
+        lock = getattr(digest_cache, "_CACHE_LOCK", None)
+        assert lock is not None, "缺少LRU锁"
+        assert lock.acquire(blocking=False), "不能在LRU锁内做JSON/SHA256"
+        lock.release()
+        return original(value)
+
+    monkeypatch.setattr(digest_cache, "_digest", checked)
+    cases = [[{"content": str(index % 5)} for index in range(size)] for size in range(20, 40)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        actual = list(pool.map(digest_cache._chain_checkpoints, cases))
+    assert actual == [_uncached_checkpoints(rows) for rows in cases]

@@ -1,5 +1,7 @@
 # LLM: 只在pytest临时owner测量组装、账本和遥测，不请求真实模型或修改运行配置。
-# 模块用途: 回归Q2的只读投影、计量复用、轮间延迟与M7文件消失边界。
+# 模块用途: 回归Q2计量及W2严格IR缓存的失效、借用、复制隔离和并发边界。
+import json
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from inspect import signature
@@ -11,7 +13,14 @@ import pytest
 from agent_py_agent.agent.agent_core import tool_ir_history
 from agent_py_agent.agent.agent_core.model import call_runtime, context_pressure
 from agent_py_agent.agent.backends import message_adapter
-from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall, UserTurn
+from agent_py_agent.agent.backends.tool_ir import (
+    AssistantTurn,
+    CompactionSummary,
+    RuntimeFactsTurn,
+    ToolCall,
+    ToolResult,
+    UserTurn,
+)
 from agent_py_agent.agent.contracts.model_call_ledger import ModelCallLedger, ModelCallLedgerContext
 from agent_py_agent.agent.observability.task_call_inspector import TaskCallInspector
 from agent_py_agent.agent.settings import AgentConfig
@@ -244,3 +253,206 @@ def test_q2_m7_records_skip_concurrently_removed_task(tmp_path, monkeypatch):
     monkeypatch.setattr(inspector, "_read", read_after_cleanup)
     assert inspector._records() == [live]
     assert [row["task_id"] for row in inspector.list_task_calls()] == ["live"]
+
+
+# LLM: 缓存逐例隔离，包裹真实适配器而非返回假消息；计数仅表示实际IR重投影次数。
+# 函数用途: 为W2缓存回归记录真实投影，并保留独立原函数作等价基准。
+@pytest.fixture
+def projection_cache(monkeypatch):
+    monkeypatch.setattr(tool_ir_history, "_PROJECTION_CACHE", OrderedDict(), raising=False)
+    original, calls = message_adapter.project_native_history_messages, []
+
+    # LLM: 真实适配器始终执行，缓存命中必须由上层跳过本入口。
+    # 函数用途: 记录实际发生的IR翻译次数。
+    def projected(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(message_adapter, "project_native_history_messages", projected)
+    return calls, original
+
+
+# LLM: 使用canonical ToolCall/ToolResult，嵌套参数仅合成数据，不启动工具或请求模型。
+# 函数用途: 构造能观察assistant回填、工具参数及结果投影的真实IR。
+def _w21_projection_history():
+    call = ToolCall("cache-call", "read", {"nested": {"value": 1}}, "native", "sha256:fixture",
+                    "cache-run", "cache-turn", "cache-attempt")
+    return [AssistantTurn(text="原文", tool_calls=[call]), ToolResult.succeeded(call, "原结果")]
+
+
+# LLM: 只读零适配器deepcopy且默认发送逐条复制，调用计数与真实消息及输入隔离同时断言。
+# 函数用途: 验证探测和发送共用缓存但不共享发送副本。
+def test_w21_projection_reuses_readonly_fingerprint_and_send_with_split_copy_contract(projection_cache, monkeypatch):
+    calls, original = projection_cache
+    history, prior = _w21_projection_history(), [{"role": "user", "content": [{"type": "text", "text": "旧文"}]}]
+    copies, copy_item = [], message_adapter.deepcopy
+
+    # LLM: 仍运行原deepcopy，禁止假复制隐藏嵌套污染。
+    # 函数用途: 记录默认发送复制的每条消息。
+    def counted(item):
+        copies.append(item)
+        return copy_item(item)
+
+    monkeypatch.setattr(message_adapter, "deepcopy", counted)
+    borrowed = tool_ir_history.project_native_provider_messages(history, prior_messages=prior, copy_prior=False)
+    repeated = tool_ir_history.project_native_provider_messages(list(history), prior_messages=list(prior), copy_prior=False)
+    assert borrowed == repeated and borrowed is not repeated and borrowed[0] is prior[0]
+    assert copies == []
+    sent = tool_ir_history.project_native_provider_messages(history, prior_messages=prior)
+    assert len(copies) == len(sent)
+    assert len(calls) == 1, "只读探测和发送应复用同一投影"
+    assert sent == original(history, prior, copy_prior=False)
+    sent[0]["content"][0]["text"] = "send mutation"
+    sent[1]["content"][-1]["input"]["nested"]["value"] = 99
+    assert tool_ir_history.project_native_provider_messages(history, prior_messages=prior) == repeated
+
+
+# LLM: 冻结容器内部仍可回填，缓存失效后须与真实未缓存适配器的wire相等。
+# 函数用途: 检查正文、推理块、调用、嵌套参数、旧历史及结果改写的失效。
+@pytest.mark.parametrize("change", ["assistant", "blocks", "arguments", "prior", "result", "assistant_call"])
+def test_w21_projection_invalidates_in_place_nested_inputs(projection_cache, change):
+    calls, original = projection_cache
+    history, prior = _w21_projection_history(), [{"role": "user", "content": [{"type": "text", "text": "旧文"}]}]
+    project = tool_ir_history.project_native_provider_messages
+    before = deepcopy(project(history, prior_messages=prior, copy_prior=False))
+    project(history, prior_messages=prior, copy_prior=False)
+    assert len(calls) == 1
+    if change == "assistant":
+        object.__setattr__(history[0], "text", "回填正文")
+    elif change == "blocks":
+        history[0].content_blocks.append({"type": "thinking", "thinking": "内部思考", "signature": "synthetic"})
+    elif change == "arguments":
+        history[0].tool_calls[0].arguments["nested"]["value"] = True
+    elif change == "prior":
+        prior[0]["content"][0]["text"] = "旧文嵌套改写"
+    elif change == "assistant_call":
+        history[0].tool_calls.append(ToolCall("new-call", "read", {}, "native", "sha256:fixture",
+                                             "cache-run", "cache-turn", "cache-attempt"))
+    else:
+        history[1].metadata["live_prompt_projection"] = "新的安全投影"
+    after = project(history, prior_messages=prior, copy_prior=False)
+    assert len(calls) == 2
+    assert json.dumps(after, ensure_ascii=False) != json.dumps(before, ensure_ascii=False)
+    assert after == original(history, prior, copy_prior=False)
+
+
+# LLM: 改旧嵌套对象后用新对象恢复原值，不能让旧结构键返回被别名污染的缓存。
+# 函数用途: 验证派生IR消息在存入缓存时已隔离输入。
+def test_w21_projection_does_not_retain_mutable_ir_aliases_across_key_reversion(projection_cache):
+    history = _w21_projection_history()
+    expected = tool_ir_history.project_native_provider_messages(history)
+    tool_ir_history.project_native_provider_messages(history, copy_prior=False)
+    nested = history[0].tool_calls[0].arguments["nested"]
+    nested["value"] = 2
+    history[0].tool_calls[0].arguments["nested"] = {"value": 1}
+    assert tool_ir_history.project_native_provider_messages(history) == expected
+
+
+# LLM: 仅显式改变seen才改变投影，计量/指纹不得提前登记消费或追加原历史。
+# 函数用途: 检查guidance去重副本和重复投影的无副作用性。
+def test_w21_guidance_projection_is_repeatable_and_never_consumes_seen_or_history(projection_cache):
+    calls, _ = projection_cache
+    history, seen, context = [UserTurn("用户原话")], {"已转发"}, ["已转发", "新指引", "新指引"]
+    before = deepcopy((history, seen, context))
+    kwargs = {"forwarded_guidance": seen, "tool_context": context, "copy_prior": False}
+    first = tool_ir_history.project_native_provider_messages(history, **kwargs)
+    assert first == tool_ir_history.project_native_provider_messages(history, **kwargs)
+    assert (history, seen, context) == before and len(calls) == 1
+    assert first[-1]["content"] == [{"type": "text", "text": "新指引"}]
+    seen.add("新指引")
+    assert tool_ir_history.project_native_provider_messages(history, **kwargs) != first
+    assert len(calls) == 2
+
+
+# LLM: 同值不同prior对象的只读输出必须借用对应对象，不能跨调用偷换引用。
+# 函数用途: 验证prior身份是值结构之外的必要缓存键。
+def test_w21_equal_prior_values_never_substitute_other_object_references(projection_cache):
+    prior = [{"role": "user", "content": "相同正文"}]
+    first = tool_ir_history.project_native_provider_messages([], prior_messages=prior, copy_prior=False)
+    replacement = deepcopy(prior)
+    second = tool_ir_history.project_native_provider_messages([], prior_messages=replacement, copy_prior=False)
+    assert first == second and first[0] is prior[0] and second[0] is replacement[0]
+
+
+# LLM: MappingProxy不可deepcopy；普通prior必须仍可缓存并借用原引用。
+# 函数用途: 检查只读图片历史的代理类型兼容和命中。
+def test_w21_mapping_proxy_prior_is_borrowed_without_deepcopy(projection_cache, monkeypatch):
+    proxy = MappingProxyType({"type": "url", "url": "fixture"})
+    prior = [{"role": "user", "content": [{"type": "image", "source": proxy}]}]
+    monkeypatch.setattr(message_adapter, "deepcopy", lambda _item: pytest.fail("只读投影不应深拷贝prior"))
+    for _ in range(2):
+        messages = tool_ir_history.project_native_provider_messages([], prior_messages=prior, copy_prior=False)
+        assert messages[0] is prior[0] and messages[0]["content"][0]["source"] is proxy
+    assert len(projection_cache[0]) == 1
+
+
+# LLM: 原适配器支持含代理的派生消息；缓存不能新增deepcopy错误，旁路必须保持相同输出。
+# 函数用途: 回归独审发现的孤儿清扫及IR媒体代理兼容问题。
+@pytest.mark.parametrize("source", ["orphan_prior", "ir_media"])
+def test_w21_proxy_after_projection_preserves_readonly_adapter_compatibility(projection_cache, source):
+    calls, original = projection_cache
+    proxy = MappingProxyType({"type": "url", "url": "fixture"})
+    history, prior = [], []
+    if source == "orphan_prior":
+        prior.append({"role": "user", "content": [
+            {"type": "image", "source": proxy},
+            {"type": "tool_result", "tool_use_id": "missing", "content": "orphan"},
+        ]})
+    else:
+        history.append(UserTurn("媒体", media=({"media_type": "image/png", "annotation": proxy},)))
+    expected = original(history, prior, copy_prior=False)
+    for _ in range(2):
+        actual = tool_ir_history.project_native_provider_messages(history, prior_messages=prior, copy_prior=False)
+        assert actual == expected
+    assert len(calls) == 2, "无法安全隔离的派生块应旁路缓存而非拒绝只读投影"
+    assert not tool_ir_history._PROJECTION_CACHE
+
+
+# LLM: 用户/宿主媒体和服务端压缩密文均影响真实出站，不得只冻文本字段。
+# 函数用途: 验证附件原位修改及压缩字段改变会重投影。
+@pytest.mark.parametrize("turn_type", [UserTurn, RuntimeFactsTurn])
+def test_w21_projection_media_and_compaction_fields_are_in_cache_key(projection_cache, turn_type):
+    calls, original = projection_cache
+    media = {"media_type": "image/png", "sha256": "synthetic-a", "path": "fixture-a"}
+    history = [CompactionSummary("摘要", source="applied_compact"), turn_type("带附件", media=(media,))]
+    first = tool_ir_history.project_native_provider_messages(history)
+    tool_ir_history.project_native_provider_messages(history)
+    assert len(calls) == 1
+    media["path"] = "fixture-b"
+    assert tool_ir_history.project_native_provider_messages(history) != first
+    assert len(calls) == 2
+    object.__setattr__(history[0], "provider_compaction", "synthetic-encrypted")
+    assert tool_ir_history.project_native_provider_messages(history) == original(history)
+    assert len(calls) == 3
+
+
+# LLM: 直接验证结构值键，避免prior对象id差异掩盖标量类型碰撞。
+# 函数用途: 检查投影键的bool、负零、NaN和Mapping顺序规则。
+def test_w21_projection_scalar_keys_preserve_type_sign_and_mapping_order(projection_cache):
+    key = getattr(tool_ir_history, "_projection_cache_key", None)
+    assert callable(key), "缺少投影结构键"
+    freeze = tool_ir_history._freeze_projection_value
+    assert freeze({"v": 1}) != freeze({"v": True})
+    assert freeze({"v": -0.0}) != freeze({"v": 0.0})
+    assert freeze({"a": 1, "b": 2}) != freeze({"b": 2, "a": 1})
+    assert freeze(MappingProxyType({"a": 1})) == freeze({"a": 1})
+    assert freeze(float("nan")) == freeze(float("nan"))
+
+
+# LLM: 真实适配器作为输出基准，超过64项后检查命中/淘汰及并发结果。
+# 函数用途: 守住投影缓存的容量和线程共享边界。
+def test_w21_projection_lru_is_bounded_and_concurrent_calls_match(projection_cache):
+    calls, original = projection_cache
+    for index in range(70):
+        history = [UserTurn(f"bounded-{index}")]
+        assert tool_ir_history.project_native_provider_messages(history) == original(history)
+    assert len(tool_ir_history._PROJECTION_CACHE) == 64
+    before = len(calls)
+    tool_ir_history.project_native_provider_messages([UserTurn("bounded-69")])
+    assert len(calls) == before
+    tool_ir_history.project_native_provider_messages([UserTurn("bounded-0")])
+    assert len(calls) == before + 1
+    cases = [[UserTurn(f"concurrent-{index % 5}")] for index in range(30)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        actual = list(pool.map(tool_ir_history.project_native_provider_messages, cases))
+    assert actual == [original(history) for history in cases]

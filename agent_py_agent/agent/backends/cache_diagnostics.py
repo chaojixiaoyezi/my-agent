@@ -1,11 +1,25 @@
 # LLM: 此模块仅计算出站请求的不可逆摘要；不修改请求，不记录正文/密钥，不声称能观察服务端 KV 缓存。
 #   0.3 起改用链式摘要：第 i 条的摘要把第 i−1 条的链值也算进去，所以任意位置被改写都会改变它之后所有检查点的链值；
 #   固定间隔检查点按 index 对齐；长度变化缺少同范围末点时明确不可比，不能把未核实的末块说成纯追加。
-# 模块用途: 区分模型/系统/工具/历史前缀变化，并按原因码累计次数，帮助解释缓存下降；相同前缀不等于服务端必命中。
+#   有界进程内LRU仅复用严格结构键对应的行摘要与链步，不改变wire顺序，也不持久化缓存键或正文。
+# 模块用途: 区分请求前缀变化并复用未改消息的摘要；相同前缀不等于服务端必命中。
 from __future__ import annotations
 
 import hashlib
 import json
+import math
+import sys
+import threading
+from collections import OrderedDict
+
+_CACHE_LOCK = threading.Lock()
+_MAX_ROW_CACHE_ENTRIES = 4096
+_MAX_ROW_CACHE_BYTES = 4 * 1024 * 1024
+_MAX_SINGLE_ROW_CACHE_BYTES = 256 * 1024
+_MAX_CHAIN_CACHE_ENTRIES = 8192
+_ROW_DIGEST_CACHE: OrderedDict[tuple, tuple[str, int]] = OrderedDict()
+_ROW_CACHE_BYTES = 0
+_CHAIN_STEP_CACHE: OrderedDict[tuple[str, str], str] = OrderedDict()
 
 # 链式摘要每个检查点之间的消息条数：块越小，定位越准，但保存的检查点越多。
 _CHAIN_BLOCK_SIZE_COUNT = 32
@@ -34,19 +48,102 @@ def change_codes() -> tuple[str, ...]:
                          *_PARTITION_OPTION_KEYS.values()}))
 
 
-# LLM: JSON 序列化顺序与出站数据一致，不能排序掩盖真正的顺序变化；摘要不用于权限或控制。
-# 函数用途: 为一个请求片段生成 SHA256，原内容仅在本次计算中使用。
+# LLM: 缓存miss及不支持的结构仍走原始JSON/SHA256；不得持LRU锁或排序掩盖wire差异，错误原样传播。
+# 函数用途: 为请求片段计算未缓存的原始摘要，供行缓存及其它诊断字段共用。
 def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-# LLM: 链值必须把上一条的链值算进去，否则改写中间某条只影响它自己的摘要，后面检查点看不出来。
-# 函数用途: 计算“上一条链值 + 本条消息”的链式摘要。
+# LLM: 只接受精确内置JSON类型；保键序、标量类型和零的符号，递归超64层或未知类型不缓存。
+# 函数用途: 读取当前嵌套值生成结构键，捕获原位改写而不序列化或按对象身份猜相同。
+def _strict_json_cache_key(value: object, *, _depth: int = 0) -> tuple | None:
+    if _depth > 64:
+        return None
+    if value is None:
+        return ("none",)
+    if type(value) in (bool, int, str):
+        return (type(value).__name__, value)
+    if type(value) is float:
+        return ("nan",) if math.isnan(value) else ("float", math.copysign(1.0, value), value)
+    if type(value) is dict:
+        pairs = []
+        for key, item in value.items():
+            ck = _strict_json_cache_key(key, _depth=_depth + 1)
+            cv = _strict_json_cache_key(item, _depth=_depth + 1)
+            if ck is None or cv is None:
+                return None
+            pairs.append((ck, cv))
+        return ("dict", tuple(pairs))
+    if type(value) in (list, tuple):
+        items = tuple(_strict_json_cache_key(item, _depth=_depth + 1) for item in value)
+        return None if any(item is None for item in items) else ("list", items)
+    return None
+
+
+# LLM: 仅在miss、锁外估算所保留键的内存；共享标量重复计入是保守上界，不保存第二份序列化正文。
+# 函数用途: 估算行键及摘要的占用，供单行和总字节LRU双重限额使用。
+def _row_cache_size(key: tuple, digest: str) -> int:
+    size, pending = sys.getsizeof(digest), [key]
+    while pending:
+        item = pending.pop()
+        size += sys.getsizeof(item)
+        if isinstance(item, tuple):
+            pending.extend(item)
+    return size
+
+
+# LLM: 只在锁内更新LRU和字节账；并发重复计算可替换同键，但不能重复计费或遗留超限缓存。
+# 函数用途: 保存一条可缓存摘要，按最久未使用顺序同时满足条数和字节上限。
+def _remember_row_digest(key: tuple, digest: str, size: int) -> None:
+    global _ROW_CACHE_BYTES
+    with _CACHE_LOCK:
+        previous = _ROW_DIGEST_CACHE.pop(key, None)
+        if previous is not None:
+            _ROW_CACHE_BYTES -= previous[1]
+        _ROW_DIGEST_CACHE[key] = (digest, size)
+        _ROW_CACHE_BYTES += size
+        while len(_ROW_DIGEST_CACHE) > _MAX_ROW_CACHE_ENTRIES or _ROW_CACHE_BYTES > _MAX_ROW_CACHE_BYTES:
+            _ROW_CACHE_BYTES -= _ROW_DIGEST_CACHE.popitem(last=False)[1][1]
+
+
+# LLM: 结构冻结、JSON、SHA256和大小估算均在锁外；不支持的值沿原_digest错误合同，不吞序列化异常。
+# 函数用途: 为未变化的消息复用摘要，超大行不占缓存。
+def _row_digest(message: object) -> str:
+    key = _strict_json_cache_key(message)
+    if key is not None:
+        with _CACHE_LOCK:
+            cached = _ROW_DIGEST_CACHE.get(key)
+            if cached is not None:
+                _ROW_DIGEST_CACHE.move_to_end(key)
+                return cached[0]
+    digest = _digest(message)
+    if key is not None:
+        size = _row_cache_size(key, digest)
+        if size <= _MAX_SINGLE_ROW_CACHE_BYTES:
+            _remember_row_digest(key, digest, size)
+    return digest
+
+
+# LLM: 链步按上一链值与严格行摘要缓存，散列在锁外；中间消息变更仍会改变它之后的每个检查点。
+# 函数用途: 复用未变化前缀的链步，保留原“上一链值+NUL+行摘要”字节算法。
 def _chained_digest(previous_chain: str, message: object) -> str:
-    return hashlib.sha256(f"{previous_chain}\0{_digest(message)}".encode()).hexdigest()
+    row_digest = _row_digest(message)
+    key = (previous_chain, row_digest)
+    with _CACHE_LOCK:
+        cached = _CHAIN_STEP_CACHE.get(key)
+        if cached is not None:
+            _CHAIN_STEP_CACHE.move_to_end(key)
+            return cached
+    chain = hashlib.sha256(f"{previous_chain}\0{row_digest}".encode()).hexdigest()
+    with _CACHE_LOCK:
+        _CHAIN_STEP_CACHE[key] = chain
+        _CHAIN_STEP_CACHE.move_to_end(key)
+        while len(_CHAIN_STEP_CACHE) > _MAX_CHAIN_CACHE_ENTRIES:
+            _CHAIN_STEP_CACHE.popitem(last=False)
+    return chain
 
 
-# LLM: 扫描每条消息的链值，按固定间隔抽稀并保留末点；链仍包含全历史，窗口只限制变化定位。
+# LLM: 逐条核当前结构并复用行/链LRU，按固定间隔抽稀保末点；输出字典每次新建，调用方不能污染缓存。
 #   长度变化不能直接比较两个不同范围的末链值，调用方必须按共同 index 比较并检查末块是否可证。
 # 函数用途: 对消息序列生成稀疏检查点列表（[{index, chain}]，index 是 1 起的消息序号）。
 def _chain_checkpoints(rows: list) -> list[dict]:

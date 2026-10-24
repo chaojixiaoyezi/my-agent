@@ -1,6 +1,6 @@
 
-# LLM: typed IR是唯一历史；宿主媒体不能被旧工具摘要退休，请求投影/发送同源，applied前置且调用/推理不拆对。
-# 模块用途: 保存工具与模型历史，提供出站投影及共用旧快照退休规则；须核对配对、缓存前缀和取消回滚。
+# LLM: typed IR是唯一历史；有界投影LRU冻结全部真实字段并保prior引用身份，不消费guidance；applied前置且调用/推理不拆对。
+# 模块用途: 保存工具与模型历史，复用只读投影并隔离出站副本；须核对配对、媒体、缓存和取消回滚。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -44,10 +44,15 @@ text 协议路径一字不动。
 
 import hashlib
 import json
+import threading
+from collections import OrderedDict
+from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from ..backends.cache_diagnostics import _strict_json_cache_key
 from ..backends.response_completion import has_reasoning_content, without_tool_blocks
 from ..backends.tool_ir import (
     AssistantTurn,
@@ -58,6 +63,79 @@ from ..backends.tool_ir import (
 from ..prompting_parts.cache_layout import CacheStructuredPrompt, prompt_cache_layout
 from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .runtime.conversation_state import conversation_runtime_state_section
+
+_PROJECTION_LOCK = threading.Lock()
+_MAX_PROJECTION_CACHE_ENTRIES = 64
+_PROJECTION_CACHE: OrderedDict[tuple, list[dict[str, Any]]] = OrderedDict()
+
+
+# LLM: 冻结实际dataclass字段而非过时伪字段；包含UserTurn媒体及canonical结果所有渲染来源，未知值不缓存。
+#   MappingProxyType按Mapping读取且保键序，标量沿严格JSON键保bool/数值类型、NaN及负零；递归有界。
+# 函数用途: 将IR、历史和嵌套参数转成严格结构键，不序列化、不消费状态或复制prior。
+def _freeze_projection_value(value: object, *, _depth: int = 0) -> tuple | None:
+    if _depth > 64:
+        return None
+    if value is None or type(value) in (bool, int, float, str):
+        return _strict_json_cache_key(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        values = [(item.name, getattr(value, item.name)) for item in fields(value)]
+        if isinstance(value, AssistantTurn):
+            values.append(("round_index", getattr(value, "round_index", getattr(value, "_tool_round", None))))
+        frozen = _freeze_projection_value(dict(values), _depth=_depth + 1)
+        return None if frozen is None else (type(value).__module__, type(value).__qualname__, frozen)
+    if isinstance(value, Mapping):
+        pairs = []
+        for key, item in value.items():
+            ck = _freeze_projection_value(key, _depth=_depth + 1)
+            cv = _freeze_projection_value(item, _depth=_depth + 1)
+            if ck is None or cv is None:
+                return None
+            pairs.append((ck, cv))
+        return ("map", tuple(pairs))
+    if isinstance(value, (list, tuple)):
+        items = tuple(_freeze_projection_value(item, _depth=_depth + 1) for item in value)
+        return None if any(item is None for item in items) else ("seq", items)
+    return None
+
+
+# LLM: 值键捕获原位改写；额外prior对象身份只守copy_prior=False借用合同，不能以身份代替值核对。
+# 函数用途: 同时核对真实IR、旧消息内容和借用引用，不能冻结时回到原投影而不猜相同。
+def _projection_cache_key(history: list, prior_list: list) -> tuple | None:
+    frozen = _freeze_projection_value((history, prior_list))
+    return None if frozen is None else (frozen, tuple(id(item) for item in prior_list))
+
+
+# LLM: 锁外沿唯一适配器投影，只隔离严格内置结构的派生消息；prior仍借用，不触发适配器deepcopy。
+#   原位可变arguments必须脱离缓存；含MappingProxy等不可证明可复制值的派生块旁路缓存，保原只读兼容。
+# 函数用途: 建立隔离派生块的混合快照；不能安全隔离时返回原投影及明确不可缓存标记。
+def _build_cached_projection(history: list, prior_list: list) -> tuple[list[dict[str, Any]], bool]:
+    from ..backends.message_adapter import project_native_history_messages
+
+    messages = project_native_history_messages(history, prior_list, copy_prior=False)
+    borrowed_ids = {id(item) for item in prior_list}
+    if any(id(item) not in borrowed_ids and _strict_json_cache_key(item) is None for item in messages):
+        return messages, False
+    return [item if id(item) in borrowed_ids else deepcopy(item) for item in messages], True
+
+
+# LLM: 仅LRU操作持锁，冻结/投影/复制在锁外；仅缓存能冻结且派生块可隔离的结果，64项且不写持久状态。
+# 函数用途: 复用当前真实结构的消息；未知结构或不可安全隔离结果不进入缓存。
+def _cached_native_projection(history: list, prior_list: list) -> list[dict[str, Any]]:
+    key = _projection_cache_key(history, prior_list)
+    if key is not None:
+        with _PROJECTION_LOCK:
+            cached = _PROJECTION_CACHE.get(key)
+            if cached is not None:
+                _PROJECTION_CACHE.move_to_end(key)
+                return cached
+    messages, cacheable = _build_cached_projection(history, prior_list)
+    if key is not None and cacheable:
+        with _PROJECTION_LOCK:
+            _PROJECTION_CACHE[key] = messages
+            _PROJECTION_CACHE.move_to_end(key)
+            while len(_PROJECTION_CACHE) > _MAX_PROJECTION_CACHE_ENTRIES:
+                _PROJECTION_CACHE.popitem(last=False)
+    return messages
 
 
 def native_tool_ir_history(params: object) -> list[Any]:
@@ -126,21 +204,23 @@ def project_native_prompt_history(
     return provider_prompt, history
 
 
-# LLM: 实际出站和容量投影共用唯一布局 B：applied 摘要→已结束历史→当前时间线；仅按 source 移动摘要。
-# carried handoff仍跟当前opener；默认隔离prior，copy_prior=False仅给只读消费者，不得修改共享嵌套内容。
-# 函数用途: 保留唯一出站布局及默认深拷贝，允许计量和指纹显式借用prior，不消费seen或改原IR。
+# LLM: 真实guidance先在副本投影再冻键；唯一布局及applied来源保持。只读借用返回新外列表，嵌套不得改写。
+#   默认发送逐项调用message_adapter.deepcopy，隔离prior及缓存的派生消息，不消费seen或写原IR。
+# 函数用途: 让容量、指纹及发送复用未变化的消息投影，默认发送仍是独立深副本。
 def project_native_provider_messages(
     history: object, *, prior_messages: object = (),
     tool_context: object = (), forwarded_guidance: object = (), copy_prior: bool = True,
 ) -> list[dict[str, Any]]:
-    from ..backends.message_adapter import project_native_history_messages
+    from ..backends import message_adapter
     from .tool_ir_guidance import unforwarded_runtime_guidance
 
+    prior_list = list(prior_messages or ())
     projected = SimpleNamespace(tool_ir_history=list(history or ()))
     guidance = unforwarded_runtime_guidance(list(tool_context or ()), set(forwarded_guidance or ()))
     if guidance:
         record_runtime_facts_turn_ir(projected, "\n\n".join(guidance), source="runtime.guidance")
-    return project_native_history_messages(projected.tool_ir_history, prior_messages, copy_prior=copy_prior)
+    messages = _cached_native_projection(projected.tool_ir_history, prior_list)
+    return [message_adapter.deepcopy(item) for item in messages] if copy_prior else list(messages)
 
 
 # LLM: 开轮与 live 候选统一 generation 标题，检查点仍存原始 summary；不写状态或发请求。

@@ -1,6 +1,7 @@
 # LLM: Gateway 流出口组合请求缓冲、公开投影、审批和等待 mixin；执行权及最终结果由调用方提交，等待关闭只拦展示。
 # 事件先写原chunk再投影，raw候选只消费不留存；正文唯一来自原sealed-call commit，修改时同步审批、插话和重连回归。
-# 模块用途: 将模型、工具、排队与控制过程按原顺序写给客户端，保留权限、脱敏和迟到读取边界。
+# 思考首块即时发布，其后有界字符/时间合批，跨块重新净化且在任何非思考事件前排空。
+# 模块用途: 将模型、工具、思考与控制过程有序写给客户端，合批高频思考并保留脱敏和迟到读取边界。
 from __future__ import annotations
 
 import json
@@ -77,8 +78,8 @@ def _write_provider_queue_event(writer, value: object) -> None:
 
 
 # LLM: BufferedChunkStreamWriter 是 Gateway run 的公开事件出口；审批与富 transcript 必须分别来自显式客户端能力，普通客户端不得收到思考或大段工具展示数据。
-# 公开事件先沿原 chunk 落盘，再投影 main 数字/阶段与公开过程；审批模式提供者由宿主绑定，显示故障不能中止请求。
-# 类用途: 缓冲宿主/工具事件，提交完整模型公开正文并组合IM等待接口；不发布未提交raw候选。
+# 公开事件先沿原chunk落盘再投影sink；thinking首块即时、后续合批并在原事件边界排空，显示故障不能中止请求。
+# 类用途: 缓冲宿主事件与思考增量，提交完整模型公开正文并组合IM等待接口；不发布未提交raw正文候选。
 @dataclass
 class BufferedChunkStreamWriter(StreamLiveness):
     """Persist committed model replies and typed host/tool events."""
@@ -110,6 +111,12 @@ class BufferedChunkStreamWriter(StreamLiveness):
     transcript_sink: object | None = field(default=None, repr=False)
     _approval: StreamApproval = field(init=False, repr=False)
     approval_mode_decision_provider: Callable | None = field(default=None, repr=False)
+    thinking_flush_chars: int = 256
+    thinking_flush_interval_seconds: float = 0.25
+    _thinking_buffer: list[str] = field(default_factory=list, init=False, repr=False)
+    _thinking_buffer_chars: int = field(default=0, init=False)
+    _last_thinking_flush_at: float = field(default=0.0, init=False)
+    _thinking_emitted: bool = field(default=False, init=False)
 
     # LLM: 审批组件只持有同请求的路径和同步输出回调；不会建立新线程、缓存或持久账本。
     # 函数用途: 连接审批交互与本请求的流式发布和刷新边界。
@@ -126,9 +133,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def __call__(self, text: str) -> None:
         self.write(text)
 
-    # LLM: 同一共用净化结果送 chunk 与实时 sink，annotation 不能旁路；谓词在每个出口前复核，已进入的回调不可撤销。
-    # 函数用途: 在落盘和实时展示之前清洗整个 typed 事件，关闭等待后停止后续投影，不改变工具输入。
+    # LLM: 非thinking事件先排空原思考缓冲；thinking_delta本身不再递归flush，原净化及逐出口谓词保持。
+    # 函数用途: 保思考先于后续事件发布，再共用原脱敏、落盘与实时展示出口。
     def _write_event(self, event: dict[str, object], *, still_current: Callable[[], bool] | None = None) -> None:
+        if event.get("kind") != "thinking_delta":
+            self.flush_thinking_delta()
         _publish_writer_event(self, event, still_current=still_current)
 
     # LLM: 保留原sink方法消费未提交raw，防止ToolBoundaryChunkFilter退回write后公开正文；不保存或发布，数字计量仍走原write_model_metrics。
@@ -136,9 +145,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
     def write_model(self, text: str) -> None:
         return None
 
-    # LLM: 仅原已采纳响应提交此入口；终态全文替换本次候选，幂等键来自真实call而非正文，IM档位和final-only仍由原出口守门。
-    # 函数用途: 确认流式或非流式模型说明并复用原事件，丢弃未确认增量而不重放工具。
+    # LLM: 原已采纳响应先排空本段思考并重开首块额度；call幂等、关闭门、IM档位和final-only沿原提交核心。
+    # 函数用途: 结束思考流再提交完整模型公开说明，不让缓冲尾部跑到正文后面。
     def commit_model_response(self, payload: dict) -> None:
+        self.flush_thinking_delta()
+        self._thinking_emitted = False
         _commit_model_response(self, payload)
 
     # LLM: 详细级别及字符上限消费本请求有效配置，只投影展示，不裁剪内部候选、工具正文或最终结果。
@@ -242,9 +253,10 @@ class BufferedChunkStreamWriter(StreamLiveness):
         if _stream_flush_due(text, self._buffer_chars, self._last_flush_at, self.flush_chars, self.flush_interval_seconds):
             self.flush()
 
-    # LLM: 仅原宿主缓冲落chunk，模型正文另由同call commit提交，任何flush都不授raw公开资格。
-    # 函数用途: 排空累计运行过程，保工具/审批/Compact边界原顺序。
+    # LLM: 无宿主文本也须排空思考；正文仍由同call commit提交，flush不授raw正文公开资格。
+    # 函数用途: 先排空思考再刷新运行过程，保证close及工具/审批边界不漏尾部。
     def flush(self) -> None:
+        self.flush_thinking_delta()
         if not self._buffer:
             return
         text = "".join(self._buffer)
@@ -285,10 +297,11 @@ class BufferedChunkStreamWriter(StreamLiveness):
             },
         )
 
-    # LLM: Sanitize the full thinking before preview clipping and archive through the bound
-    # owner/thread sink. Events carry only preview/ref; display failure never changes model state.
-    # 函数用途: 保留完整公开思考原文，再发送有界预览和引用；保持思考先于正文，不丢失长思考中间部分。
+    # LLM: 完整思考先排空增量并重置分段首块；全量净化及owner/thread归档沿原thinking_event，不改变模型状态。
+    # 函数用途: 排空流式思考后发布完整公开思考和引用，不丢尾部或改变原预览限制。
     def write_thinking(self, text: str, *, duration_seconds: float = 0.0) -> None:
+        self.flush_thinking_delta()
+        self._thinking_emitted = False
         if not self.rich_transcript:
             return
         payload = thinking_event(text, duration_seconds=duration_seconds, delivery_channel=self.delivery_channel,
@@ -296,10 +309,9 @@ class BufferedChunkStreamWriter(StreamLiveness):
         if payload:
             self._write_event(payload)
 
-    # LLM: thinking_delta 保原独立思考展示合同，只做路径/标识脱敏，
-    # 不做 project_user_reply——那会把未完成思考当终稿投影）；canonical assistant_thinking
-    # 始终全量脱敏并覆盖流式内容。
-    # 函数用途: 实时转发 provider 流式思考增量（rich 客户端，思考期间即可见）。
+    # LLM: rich首个非空增量立即净化发布，其后保raw片段以便跨块脱敏，按独立字符/单调时钟阈值合批。
+    #   不走终稿投影，canonical assistant_thinking仍全量净化；非rich从不保存或发布思考。
+    # 函数用途: 保首token反馈并合批后续高频思考增量，减少JSONL写入。
     def write_thinking_delta(self, text: str) -> None:
         if not self.rich_transcript:
             return
@@ -310,12 +322,32 @@ class BufferedChunkStreamWriter(StreamLiveness):
         )
         if not content:
             return
-        self._write_event(
-            {
-                "kind": "thinking_delta",
-                "text": content,
-            },
+        if not self._thinking_emitted:
+            self._thinking_emitted = True
+            self._last_thinking_flush_at = time.monotonic()
+            self._write_event({"kind": "thinking_delta", "text": content})
+            return
+        self._thinking_buffer.append(str(text or ""))
+        self._thinking_buffer_chars += len(content)
+        if _stream_flush_due(content, self._thinking_buffer_chars, self._last_thinking_flush_at,
+                             self.thinking_flush_chars, self.thinking_flush_interval_seconds):
+            self.flush_thinking_delta()
+
+    # LLM: 发布前先清原buffer/计数并更新时间，避免_write_event重入；拼接后再净化跨片段的宿主路径和标识。
+    # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
+    def flush_thinking_delta(self) -> None:
+        if not self._thinking_buffer:
+            return
+        raw_joined = "".join(self._thinking_buffer)
+        self._thinking_buffer.clear()
+        self._thinking_buffer_chars = 0
+        self._last_thinking_flush_at = time.monotonic()
+        content = redact_structured_identifiers(
+            project_host_paths_for_channel(raw_joined, self.delivery_channel),
+            self._identifier_redactions, channel=self.delivery_channel,
         )
+        if content:
+            self._write_event({"kind": "thinking_delta", "text": content})
 
     # LLM: 该出口只接受共享白名单后的累计字符计数；raw partial JSON、路径、
     # 命令和凭据不得写入 chunk 文件，普通非 rich 客户端保持完全不可见。

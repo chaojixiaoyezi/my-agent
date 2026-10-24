@@ -1,3 +1,5 @@
+# LLM: 真实writer仅向pytest临时chunk写入，思考测试用固定单调时钟，不请求模型或修改服务。
+# 模块用途: 验证Gateway事件顺序、thinking首块即时与合批脱敏，保留审批和遥测合同。
 """Gateway 流式 chunk 文件测试。"""
 
 import json
@@ -6,6 +8,8 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.contracts.tool_approval import (
     ToolApprovalDecision,
@@ -462,3 +466,117 @@ def test_interactive_gateway_permission_waits_for_exact_decision_file(tmp_path):
         "permission_requested",
         "permission_resolved",
     ]
+
+
+# LLM: 替换此模块的时钟对象而非进程全局time，真实JSONL及两个sink沿原发布函数执行。
+# 函数用途: 给thinking阈值测试提供确定时间和独立writer。
+@pytest.fixture
+def thinking_writer(tmp_path, monkeypatch):
+    from agent_py_agent.agent.gateway_parts import stream_writer
+
+    clock = [100.0]
+    monkeypatch.setattr(stream_writer, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 1.0))
+    writer = BufferedChunkStreamWriter(tmp_path / "thinking.jsonl", rich_transcript=True, delivery_channel="feishu")
+    return writer, clock
+
+
+# LLM: 观察真实落盘chunk，不把write调用次数当作已可见事件。
+# 函数用途: 读回本writer已经发布的结构化事件。
+def _thinking_rows(writer):
+    if not writer.chunk_path.exists():
+        return []
+    return [json.loads(line) for line in writer.chunk_path.read_text(encoding="utf-8").splitlines()]
+
+
+# LLM: 通过真实JSONL观察空增量不占首块及首个非空增量即时发布。
+# 函数用途: 保持TUI首token响应合同。
+def test_w21_baseline_single_thinking_delta_is_immediately_visible(thinking_writer):
+    writer, _clock = thinking_writer
+    writer.write_thinking_delta("")
+    assert _thinking_rows(writer) == []
+    writer.write_thinking_delta("首块")
+    assert [row["text"] for row in _thinking_rows(writer)] == ["首块"]
+
+
+# LLM: 固定时钟下只让字符阈值触发，close不得重放已排空缓冲。
+# 函数用途: 验证后续255字等待、第256字合成一条。
+def test_w21_subsequent_thinking_deltas_batch_at_256_characters(thinking_writer):
+    writer, _clock = thinking_writer
+    writer.write_thinking_delta("首块")
+    for _ in range(255):
+        writer.write_thinking_delta("字")
+    assert [row["text"] for row in _thinking_rows(writer)] == ["首块"]
+    writer.write_thinking_delta("末")
+    assert [row["text"] for row in _thinking_rows(writer)] == ["首块", "字" * 255 + "末"]
+    writer.close()
+    assert len(_thinking_rows(writer)) == 2
+
+
+# LLM: 单调时钟边界可复现，未到0.25秒不发，末尾换行复用原刷新公式。
+# 函数用途: 检查时间阈值和换行触发的思考合批。
+def test_w21_thinking_interval_flushes_on_next_delta_at_quarter_second(thinking_writer):
+    writer, clock = thinking_writer
+    writer.write_thinking_delta("首块")
+    writer.write_thinking_delta("a")
+    clock[0] = 100.249
+    writer.write_thinking_delta("b")
+    assert len(_thinking_rows(writer)) == 1
+    clock[0] = 100.25
+    writer.write_thinking_delta("c")
+    assert [row["text"] for row in _thinking_rows(writer)] == ["首块", "abc"]
+    writer.write_thinking_delta("换行\n")
+    assert _thinking_rows(writer)[-1]["text"] == "换行\n"
+
+
+# LLM: 第一块独立即时，后续raw片段合并后净化，外部通道不应发布完整宿主路径或原标识。
+# 函数用途: 验证同一缓冲批次跨块拆开的标识和路径仍被脱敏。
+def test_w21_buffered_thinking_redacts_identifiers_and_paths_split_across_chunks(thinking_writer):
+    writer, _clock = thinking_writer
+    writer.set_identifier_redactions((("om_private_thread", "当前会话"),))
+    writer.write_thinking_delta("分析：")
+    for text in ("om_pri", "vate_thread 文件 /Us", "ers/fixture/work/report.txt"):
+        writer.write_thinking_delta(text)
+    assert len(_thinking_rows(writer)) == 1
+    writer.close()
+    text = _thinking_rows(writer)[-1]["text"]
+    assert "om_private_thread" not in text and "/Users/" not in text
+    assert "当前会话" in text and "report.txt" in text
+
+
+# LLM: 任一非thinking边界不得越过待发增量，完整思考和提交还须重置段首额度。
+# 函数用途: 检查各收口/事件接线先排空思考且新段首块即时。
+@pytest.mark.parametrize("boundary", ["flush", "thinking", "progress", "commit", "event", "close"])
+def test_w21_pending_thinking_flushes_before_every_boundary(thinking_writer, boundary):
+    writer, _clock = thinking_writer
+    writer.write_thinking_delta("首块")
+    writer.write_thinking_delta("缓冲尾部")
+    assert len(_thinking_rows(writer)) == 1
+    if boundary == "thinking":
+        writer.write_thinking("完整思考")
+    elif boundary == "progress":
+        writer.write_progress({"phase": "started", "round": 1}, "工具启动")
+    elif boundary == "commit":
+        writer.commit_model_response({})
+    elif boundary == "event":
+        writer._write_event({"kind": "host_notice", "text": "宿主边界"})
+    else:
+        getattr(writer, boundary)()
+    rows = _thinking_rows(writer)
+    assert [row["kind"] for row in rows[:2]] == ["thinking_delta", "thinking_delta"]
+    assert rows[1]["text"] == "缓冲尾部"
+    if boundary in {"thinking", "progress", "event"}:
+        assert len(rows) == 3 and rows[-1]["kind"] != "thinking_delta"
+    if boundary in {"thinking", "commit"}:
+        writer.write_thinking_delta("新段首块")
+        assert _thinking_rows(writer)[-1]["text"] == "新段首块"
+
+
+# LLM: 非rich能力门在入缓冲前生效，不能等close才发布隐藏思考。
+# 函数用途: 验证普通客户端仍完全收不到thinking事件。
+def test_w21_plain_writer_never_buffers_or_emits_thinking(thinking_writer):
+    writer, _clock = thinking_writer
+    writer.rich_transcript = False
+    for _ in range(300):
+        writer.write_thinking_delta("隐藏思考")
+    writer.close()
+    assert _thinking_rows(writer) == []
