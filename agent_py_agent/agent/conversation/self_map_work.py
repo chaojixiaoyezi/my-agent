@@ -7,7 +7,19 @@ from .goal_binding import goal_binding
 # LLM: work自行登记固定用途，不让聚合器猜编号或任务归属。
 # 函数用途: 接入工作状态分块。
 def register_work_section(registry):
-    registry.register(SectionDescriptor("work", "工作状态", 100, work_projection, "项目工作位置、会话与受管任务状态"))
+    registry.register(SectionDescriptor("work", "工作状态", 100, work_projection, "项目工作位置、会话与受管任务状态",
+                                        summary_reader=work_summary))
+
+
+# LLM: 仅消费已绑定当前线程/任务位置，不加载历史、Goal、调度或进程；未枚举维度不报零。
+# 函数用途: 为总览提供轻量工作位置与原详情导航。
+def work_summary(context):
+    fields = {"kind": "current_binding", "thread_id": context.thread_id,
+              "workspace": str(context.agent.tools.workspace_root),
+              "tasks": str(context.agent.home_paths.owner_tasks_dir),
+              "next_read": next_read("self_map", {"section": "work"})}
+    return SectionProjection((map_item("current", "当前工作位置", fields=fields),), "partial",
+                             source="bound current workspace / thread", count_known=False)
 
 
 # LLM: 各来源失败保留安全码；项目位置取已绑定工作根及原业务tasks，不扫描项目或把元数据入口当业务数量。
@@ -93,23 +105,13 @@ def _run_scope(context):
             "run_id": getattr(params, "run_id", "")}
 
 
-# LLM: 原list_report按scope读取受管记录，不start/stop/wait；未知/坏记录只报安全码。
-# 函数用途: 读取当前代理会话的后台进程元信息。
+# LLM: 原list_report会刷新持久记录；目录不能调用它或直接越过scope读盘，也不将旧status当本次活性。
+# 函数用途: 明确后台进程未观测，并给原生命周期工具的读取入口。
 def _processes(context):
-    from ..tooling.process_registry import process_registry
-    from ..tooling.process_scope import process_access_scope
-    from ..tooling.process_session_store import process_session_store_root
-
     if "process_session" not in context.snapshot.available_tool_names:
         return [], []
-    scope = process_access_scope(_run_scope(context), str(context.agent.home_paths.owner_home_dir))
-    if not scope.is_bound():
-        return [map_item("process:current", "后台进程", state="not_observed", fields={"kind": "process"})], []
-    root = process_session_store_root(context.agent.tools.workspace_root, scope.owner_home)
-    rows, errors = process_registry.list_report(scope, root)
-    items = [map_item("process:" + row["session_id"], row["session_id"], state=str(row.get("status", "unknown")),
-             fields={"kind": "process", "next_read": next_read("process_session", {"action": "status", "session_id": row["session_id"]})}) for row in rows]
-    return items, ["SELF_MAP_PROCESS_RECORD_UNREADABLE"] if errors else []
+    return [map_item("process:current", "后台进程", state="not_observed", fields={"kind": "process", "count": None,
+            "next_read": next_read("process_session", {"action": "list"})})], ["SELF_MAP_PROCESS_LIVENESS_NOT_OBSERVED"]
 
 
 # LLM: 原终端工具才能构造完整 PTY 沙箱键；地图没有观测就给 null，并指向现有 list 入口而不伪称空集。

@@ -6,6 +6,11 @@ from dataclasses import replace
 from pathlib import Path
 
 from ..common.nofollow_fs import read_text_beneath
+from .learned_metadata_projection import (
+    learned_metadata_batch,
+    learned_store,
+    metadata_from_registry,
+)
 from .skill_learning_store import SkillLearningStore, SkillLearningStoreError
 from .skill_snapshot import skill_content_sha256
 
@@ -50,18 +55,18 @@ def freeze_learned_snapshot(snapshot, home_paths, *, recommended_limit=50):
 # LLM: 元信息和正文读取共用原托管授权判据；读取registry和路径事实但不读正文，不把在途快照当成永久授权。
 # 函数用途: 为自身发现返回自学Skill当前生命周期和是否仍可请求原固定版本。
 def frozen_learned_metadata(entry):
-    frozen = Path(entry.frozen_path)
-    store = SkillLearningStore(frozen.parents[2], frozen.parents[4]/"skills")
+    store = learned_store(entry)
     try:
         registry = store.load_registry()
     except SkillLearningStoreError as exc:
         raise OSError("learned skill registry unavailable") from exc
-    record = registry.skills.get(entry.name)
-    state = record.maintenance.get('state', 'trial') if record is not None else 'removed'
-    authorized = bool(record is not None and state not in {'disabled', 'archived'}
-                      and Path(entry.path) == store.skill_path(entry.name) and Path(entry.path).is_file())
-    return {"state": state, "authorized": authorized,
-            "revision": record.revision if record else None, "version": record.version if record else None}
+    return metadata_from_registry(entry, store, registry)
+
+
+# LLM: 仅显示批允许共享registry；原正文仍每次经上面的单项实时复核及nofollow读取。
+# 函数用途: 为目录适配批量元信息读取，不授予正文读取权限。
+def frozen_learned_metadata_batch(entries):
+    return learned_metadata_batch(entries)
 
 
 # LLM: 固定正文不固定授权；原metadata判据仍拒绝删除、停用和路径替换，不增加fallback或读取活动正文。

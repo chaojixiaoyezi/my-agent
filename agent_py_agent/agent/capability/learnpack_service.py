@@ -28,6 +28,7 @@ from .learnpack_installer import (
     run_install,
     version_label,
 )
+from .learnpack_projection import order_events, superseded_by_events
 from .learnpack_store import BuildRecord, InstallOrder, LearnpackStore
 from .package_build import KIND_CAPABILITY_PACK
 
@@ -232,14 +233,8 @@ def _management_problem(manager: object) -> tuple[str, str] | None:
 #   返回取代它的最近一次的"版本（摘要前 12 位）"，没被取代返回空串。
 # 函数用途: 判断这张单是不是已被同一个包后来的单或安装取代，并说出被哪一版取代。
 def _superseded_by(store: LearnpackStore, order: InstallOrder) -> str:
-    events = [(other.seq, other.version, other.sha256) for other in store.orders_for(order.package_id)]
-    events += [(row["seq"], str(row.get("version") or ""), str(row.get("sha256") or "")) for row in store.installs()
-               if row.get("package_id") == order.package_id and isinstance(row.get("seq"), int)]
-    later = [event for event in events if event[2] != order.sha256 and event[0] > order.seq]
-    if not later:
-        return ""
-    _seq, version, sha256 = max(later)
-    return f"{version}（{sha256[:12]}）"
+    events = order_events(store.orders_for(order.package_id), store.installs())
+    return superseded_by_events(order, events.get(order.package_id, ()))
 
 
 # LLM: 还在等用户确认的安装单：没执行过（没有 done 文件）、没被同一个包后来的单或安装取代（_superseded_by 同一判断），而且这份
@@ -247,8 +242,10 @@ def _superseded_by(store: LearnpackStore, order: InstallOrder) -> str:
 #   只读。安装回执的 open_orders 与宿主提示都用它，让给用户的确认行对得上事实（2026-10-07 生产复测：她把早已执行过的单又交给用户）。
 # 函数用途: 列出现在还有效、等用户确认的安装单。
 def open_orders(store: LearnpackStore, entries: tuple = ()) -> list[InstallOrder]:
-    rows = [order for order in store.all_orders()
-            if store.order_outcome(order.order_id) is None and not _superseded_by(store, order)
+    orders = store.all_orders()
+    events = order_events(orders, store.installs())
+    rows = [order for order in orders
+            if store.order_outcome(order.order_id) is None and not superseded_by_events(order, events.get(order.package_id, ()))
             and getattr(installed_entry(entries, order.package_id), "package_sha256", None) != order.sha256]
     return sorted(rows, key=lambda order: order.seq, reverse=True)
 
