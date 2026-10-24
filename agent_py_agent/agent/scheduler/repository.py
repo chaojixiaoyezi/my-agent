@@ -678,8 +678,8 @@ class _SchedulerReservationOperations:
 class _SchedulerRunOperations:
     """Public durable run claim, completion, and history operations."""
 
-    # LLM: 便宜路径只排除仍在未来的轻量键；候选必须重读完整原运行，取消、事件代次与投递由原消费者核验。
-    # 函数用途: 按当前时间列出排队运行，未到期的空轮可省去完整账本读取。
+    # LLM: 只读候选每job一条，先排除被活动同job阻挡的积压再限量，不能挤掉别的job；最终派发仍须原事务CAS。
+    # 函数用途: 按当前时间选择不互相重叠的排队候选，避免同job积压造成队首阻塞。
     def queued_runs(self, *, now: float | None = None, limit: int = 64, cheap_checks: bool = False) -> list[dict[str, object]]:
         current = _now(now)
         if cheap_checks:
@@ -687,15 +687,8 @@ class _SchedulerRunOperations:
             if hit is not None and not any(dispatch_after <= current for dispatch_after, _scheduled_for, _run_id in hit.queued_keys):
                 return []
         store = self._store_snapshot()
-        rows: list[dict[str, object]] = []
-        for raw in store["runs"].values():
-            run, _error = self._parse_run(raw)
-            if run is None or run["status"] != "queued":
-                continue
-            if float(run.get("dispatch_after") or 0.0) > current:
-                continue
-            rows.append(run)
-        rows.sort(key=lambda run: (float(run["scheduled_for"]), str(run["run_id"])))
+        runs, _errors = self._valid_runs(store)
+        rows = _ready_job_runs(runs, current)
         return deepcopy(rows[: max(1, int(limit or 1))])
 
     def get_active_run(self, run_id: str) -> dict[str, object] | None:
@@ -738,8 +731,8 @@ class _SchedulerRunOperations:
             }
             self._write_store_unlocked(store, admission)
 
-    # LLM: 过期仅开启 PID/指纹核验；未开工死亡须原 queued CAS，已开工死亡写 unknown 历史，活/未知不授第二份执行权。
-    # 函数用途: 领取已排队 run，并在同一原事务收口已证实死亡的旧领取者。
+    # LLM: 原owner事务内复核同job在途者；租约过期仍须PID死亡证明，不因另一rule或旧queued副本授第二份执行权。
+    # 函数用途: 原子领取job唯一执行权，并沿原恢复协议处理已证实死亡的领取者。
     def claim_run(
         self,
         run_id: str,
@@ -768,6 +761,8 @@ class _SchedulerRunOperations:
                 # 已确认未开工且旧 runner 死亡，先提交 queued，再产生新领取 epoch。
                 self._write_store_unlocked(store, admission)
             if run["status"] not in _ACTIVE_RUN_STATUSES:
+                return None
+            if _job_run_blocker(self, store, run) is not None:
                 return None
             claim_epoch = int(run.get("claim_epoch") or 0) + 1
             claim_id = f"claim_{claim_epoch}_{uuid.uuid4().hex}"
@@ -1046,8 +1041,8 @@ class _SchedulerWaitingRunOperations:
         return deepcopy(terminal)
 
 
-# LLM: 这里集中原存储解析、owner 校验和锁顺序；可选策略缺失沿默认语义，损坏字段不得参与领取。
-# 类用途: 为调度仓库提供校验与原子读写，不接触模型或工具执行。
+# LLM: 集中原解析/owner校验/配额锁顺序；损坏字段不得参与领取，不因租约超时或缓存缺失推断活动run已结束。
+# 类用途: 提供调度账本读写、恢复、身份与同job活动运行检查。
 class _SchedulerStoreSupport:
     """Private owner-store parsing, locking, quota admission, and validation support."""
 
@@ -1357,12 +1352,13 @@ class _SchedulerStoreSupport:
             raise SchedulerConflictError("scheduler run claim changed")
         return run
 
-    # LLM: 复合规则只阻挡自身车道，旧单任务仍按原 job 车道。
-    # 函数用途: 复合规则只阻挡自身车道，旧单任务仍按原 job 车道。 修改需同步原控制、恢复或权限测试。
+    # LLM: 同rule排队沿旧去重；一旦同job任意rule已派发/领取/运行/等待，后续触发均延后，别的job不受影响。
+    # 函数用途: 在原事务中阻止同job重复在途预留，同时保留尚未派发规则的排队快照。
     def _job_has_active_run(self, store: dict[str, Any], job_id: str, rule_id: str = "") -> bool:
         for raw in store["runs"].values():
             run, _error = self._parse_run(raw)
-            if run is not None and run["job_id"] == job_id and (not rule_id or run.get("rule_id") == rule_id):
+            if (run is not None and run["job_id"] == job_id
+                    and (not rule_id or run.get("rule_id") == rule_id or _run_holds_job(run))):
                 return True
         return False
 
@@ -1625,9 +1621,9 @@ class _SchedulerProjectionSupport:
         return projection
 
 
-# LLM: 组合原 job/run/store 与执行准备操作；所有状态仍归同一 owner store 和 history，不能引入平行权威文件。
+# LLM: 组合原job/run/store，job级准入沿原quota→owner事务，不建立进程内全owner执行锁或平行权威文件。
 #   开启时的有界投影仅服务读取，事件、规则、原子快照及写入准入仍使用主线原实现。
-# 类用途: 提供定时任务的持久化入口，供工具、调度服务和诊断查询共用。
+# 类用途: 组合持久调度能力并为同job派发提供可重试的原子准入。
 class SchedulerRepository(
     SchedulerEventEffectOperations,
     SchedulerEventSourceOperations,
@@ -1699,6 +1695,69 @@ class SchedulerRepository(
         if unchanged is not None:
             return unchanged
         return super().attach_wake_signal(run_id, normalized_wake_id)
+
+    # LLM: 必须在物化线程/发wake之前持久占job额度；崩溃后同run幂等重试，其它run延后且不杀当前执行。
+    # 函数用途: 原子准入一条排队运行，拒绝同job已在途的第二条。
+    def admit_run_dispatch(self, run_id: str, *, now: float | None = None) -> dict | None:
+        with self._mutation_scope() as (store, admission):
+            run = self._require_run(store, run_id)
+            if run["status"] != "queued" or _job_run_blocker(self, store, run) is not None:
+                return None
+            if not run.get("dispatch_admitted"):
+                run = {**run, "dispatch_admitted": True, "updated_at": _now(now)}
+                store["runs"][run_id] = run
+                self._write_store_unlocked(store, admission)
+            return deepcopy(run)
+
+
+# LLM: queued带原wake或派发准入标记代表dispatched；claimed/running/waiting均未终结，不能靠时间猜完成。
+# 函数用途: 判断一条原运行是否已经占用job执行额度。
+def _run_holds_job(run):
+    return run["status"] != "queued" or bool(run.get("wake_signal_id") or run.get("dispatch_admitted"))
+
+
+# LLM: 只比较同job，绝不以owner串行化；旧多wake按原时间/ID选唯一候选，正在执行的记录始终优先。
+# 函数用途: 返回阻挡本次派发或领取的准确活动run；无阻挡返回None。
+def _job_run_blocker(repository, store, run):
+    peers = [parsed for raw in store["runs"].values()
+             if (parsed := repository._parse_run(raw)[0]) is not None
+             and parsed["job_id"] == run["job_id"] and parsed["run_id"] != run["run_id"]]
+    active = [peer for peer in peers if peer["status"] != "queued"]
+    if active:
+        return min(active, key=_run_order)
+    if run["status"] != "queued":
+        return None
+    dispatched = [peer for peer in peers if _run_holds_job(peer)]
+    if _run_holds_job(run):
+        dispatched = [peer for peer in dispatched if _run_order(peer) < _run_order(run)]
+    return min(dispatched, key=_run_order) if dispatched else None
+
+
+# LLM: 仅用原冻结时间与run_id做稳定排序，不依赖字典遍历或进程本地先后。
+# 函数用途: 在升级遗留多份派发记录中选择确定的先行者。
+def _run_order(run):
+    return float(run["scheduled_for"]), str(run["run_id"])
+
+
+# LLM: 只读单快照按job线性建阻挡集合，排序沿原时间/ID；已准入queued优先于同job未准入旧行，不授执行权。
+# 函数用途: 限量前剔除同job重复候选，让不同job在一个轮询内都能入选。
+def _ready_job_runs(runs, current):
+    ordered = sorted((run for run in runs if run["status"] == "queued"), key=_run_order)
+    busy = {run["job_id"] for run in runs if run["status"] != "queued"}
+    dispatched = {}
+    for run in ordered:
+        if run["status"] == "queued" and _run_holds_job(run):
+            dispatched.setdefault(run["job_id"], run["run_id"])
+    selected, seen = [], set()
+    for run in ordered:
+        job_id = run["job_id"]
+        if (run["status"] != "queued" or job_id in busy or job_id in seen
+                or float(run.get("dispatch_after") or 0) > current
+                or dispatched.get(job_id, run["run_id"]) != run["run_id"]):
+            continue
+        selected.append(run)
+        seen.add(job_id)
+    return selected
 
 
 # LLM: One parsed ``waiting_runs`` result bound to the exact store.json bytes it was parsed from.

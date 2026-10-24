@@ -1,3 +1,5 @@
+# LLM: 测试使用隔离目录内真实owner账本/Wake/CAS，不请求模型或外发；同job互斥不扩大为owner串行。
+# 模块用途: 验证定时任务准入、恢复、并发与原任务绑定合同。
 from __future__ import annotations
 
 import json
@@ -422,3 +424,207 @@ def test_claim_releases_and_propagates_canonical_pending_read_error(tmp_path, mo
     assert active["status"] == "queued" and active["claim_id"] == ""
     assert repository.history()[0] == []
     assert path.read_bytes() == pending_before
+
+
+# LLM: 只构造旧版本可能遗留的合法queued副本；通过原owner事务落盘，不伪造领取或执行结果。
+# 函数用途: 为同job多份积压的升级场景创建第二条真实运行。
+def _legacy_peer(repository, run, *, now=1001):
+    from agent_py_agent.agent.scheduler.repository import _reserved_run
+
+    job = repository.get_job(run["job_id"])
+    duplicate = _reserved_run(job, trigger="manual", scheduled_for=now, dispatch_after=now, now=now)
+    with repository._mutation_scope() as (store, admission):
+        store["runs"][duplicate["run_id"]] = duplicate
+        repository._write_store_unlocked(store, admission)
+    return duplicate
+
+
+# LLM: 正常单规则已按job阻止预留；旧queued副本也不能在已claimed/running/waiting时被领取。
+# 函数用途: 复现只检查run自身租约而绕过job互斥的入口。
+@pytest.mark.parametrize("status", ["claimed", "running", "waiting"])
+def test_same_job_legacy_peer_cannot_claim_until_terminal(tmp_path, status):
+    store, _thread, repository, service, signal = _queued_execution(tmp_path)
+    first = service.claim_wake(signal, now=1001).claim
+    assert first is not None
+    if status in {"running", "waiting"}:
+        repository.mark_run_running(first.run_id, first.claim_id, now=1001)
+    if status == "waiting":
+        service.park_waiting(first, now=1001)
+    peer = _legacy_peer(repository, first.run)
+    assert repository.claim_run(peer["run_id"], lease_seconds=60, now=1002) is None
+    assert repository.get_active_run(first.run_id)["status"] == status
+    assert repository.get_active_run(peer["run_id"])["status"] == "queued"
+    if status == "waiting":
+        from agent_py_agent.agent.scheduler.repository import SchedulerRunFinish
+        repository.finish_waiting_run(first.run_id, SchedulerRunFinish(status="done", now=1003))
+    else:
+        assert service.finish(first, status="done", now=1003) is not None
+    assert repository.claim_run(peer["run_id"], lease_seconds=60, now=1004) is not None
+    assert store.tasks.load(first.run_id) is not None
+
+
+# LLM: queued带wake即已派发，首轮尚未claim也须占同job额度；另一个job不受影响。
+# 函数用途: 复现同job旧队列再次发wake，并验证合法不同job并发。
+def test_dispatch_defers_duplicate_job_but_allows_distinct_job(tmp_path):
+    store, thread, repository, service, signal = _queued_execution(tmp_path)
+    original = repository.get_active_run(signal.root_task_id)
+    peer = _legacy_peer(repository, original)
+    other = _create(repository, thread.thread_id, name="different")
+    wakes = service.enqueue_ready_runs(now=1002)
+    signals = store.wakes.pending()
+    assert {row.metadata["scheduler_job_id"] for row in signals} == {original["job_id"], other["job_id"]}
+    assert len(signals) == 2 and len(wakes) == 2
+    assert repository.get_active_run(peer["run_id"])["wake_signal_id"] == ""
+    assert repository.get_active_run(original["run_id"])["wake_signal_id"] == signal.wake_signal_id
+
+
+# LLM: 同owner二十个不同job全部可同时持有原claim，不引入owner级粗锁或线程池串行执行。
+# 函数用途: 锁定防重叠的准确隔离粒度。
+def test_twenty_distinct_jobs_can_all_be_claimed(tmp_path):
+    store, thread, repository = _setup(tmp_path)
+    jobs = [_create(repository, thread.thread_id, name=f"parallel-{index}") for index in range(20)]
+    service = SchedulerService(repository, conversation_store=store)
+    assert len(service.enqueue_ready_runs(now=1000)) == 20
+    claims = [service.claim_wake(signal, lease_seconds=1000, now=1001).claim for signal in store.wakes.pending()]
+    assert all(claim is not None for claim in claims)
+    assert {claim.run["job_id"] for claim in claims} == {job["job_id"] for job in jobs}
+    for claim in claims:
+        repository.mark_run_running(claim.run_id, claim.claim_id, now=1002)
+    assert all(repository.get_active_run(claim.run_id)["status"] == "running" for claim in claims)
+
+
+# LLM: due与run_now必须沿原事务观察到活动job；租约过期不等于已死亡，不允许新执行偷占。
+# 函数用途: 核对正常周期与手动触发已有防线，不能因本补丁退化。
+@pytest.mark.parametrize("status", ["queued", "claimed", "running", "waiting"])
+def test_recurring_and_manual_trigger_defer_for_same_active_job(tmp_path, status):
+    from agent_py_agent.agent.scheduler.repository import SchedulerConflictError
+
+    _store, _thread, repository, service, signal = _queued_execution(tmp_path)
+    run = repository.get_active_run(signal.root_task_id)
+    if status != "queued":
+        claim = service.claim_wake(signal, lease_seconds=6000, now=1001).claim
+        if status in {"running", "waiting"}:
+            repository.mark_run_running(claim.run_id, claim.claim_id, now=1001)
+        if status == "waiting":
+            service.park_waiting(claim, now=1001)
+    assert repository.reserve_due_runs(now=1600) == []
+    with pytest.raises(SchedulerConflictError):
+        repository.reserve_manual_run(run["job_id"], now=1600)
+    assert len(repository._valid_runs(repository._store_snapshot())[0]) == 1
+
+
+# LLM: 两个独立repository实例共享原磁盘锁，Barrier只同步起点，不用单实例内存锁伪证跨调度器互斥。
+# 函数用途: 验证旧多queued在同时claim时只能一份成功，不同run_id也不能绕过。
+def test_competing_repository_claims_are_singleflight(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    _store, _thread, repository, _service, signal = _queued_execution(tmp_path)
+    first = repository.get_active_run(signal.root_task_id)
+    second = _legacy_peer(repository, first)
+    other_repository = SchedulerRepository(repository.root, owner_provider="feishu", owner_kind="user", owner_id="user-1")
+    ready = Barrier(2)
+
+    # LLM: 两个线程只调用真实CAS入口，不替换锁、存储或状态结果。
+    # 函数用途: 同时竞争同job的两条run。
+    def claim(repo, run):
+        ready.wait(5)
+        return repo.claim_run(run["run_id"], lease_seconds=60, now=1002)
+
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(claim, repo, run) for repo, run in [(repository, first), (other_repository, second)]]
+        results = [future.result(5) for future in futures]
+    assert sum(value is not None for value in results) == 1
+    assert {run["status"] for run in repository._valid_runs(repository._store_snapshot())[0]} == {"claimed", "queued"}
+
+
+# LLM: 准入后发wake之前崩溃不能让别的run偷额度；重启沿同一原run重试，不重放或杀活动任务。
+# 函数用途: 检查持久派发标记覆盖跨store窗口和重启恢复。
+def test_dispatch_interruption_keeps_singleflight_on_restart(tmp_path, monkeypatch):
+    store, thread, repository = _setup(tmp_path)
+    _create(repository, thread.thread_id, name="restart-dispatch")
+    service = SchedulerService(repository, conversation_store=store)
+    original = store.wakes.raise_signal
+
+    # LLM: 只在真正运输wake入口前抛中断，前置准入/prepare仍是产品实现。
+    # 函数用途: 制造已占job额度但wake未提交的真实窗口。
+    def fail(_request):
+        raise RuntimeError("fixture wake not published")
+
+    monkeypatch.setattr(store.wakes, "raise_signal", fail)
+    with pytest.raises(RuntimeError, match="wake not published"):
+        service.enqueue_ready_runs(now=1000)
+    run = repository.queued_runs(now=1000)[0]
+    assert run.get("dispatch_admitted") is True and not run["wake_signal_id"]
+    peer = _legacy_peer(repository, run)
+    monkeypatch.setattr(store.wakes, "raise_signal", original)
+    restarted = SchedulerRepository(repository.root, owner_provider="feishu", owner_kind="user", owner_id="user-1")
+    assert len(SchedulerService(restarted, conversation_store=store).enqueue_ready_runs(now=1002)) == 1
+    assert store.wakes.pending()[0].root_task_id == run["run_id"]
+    assert not restarted.get_active_run(peer["run_id"])["wake_signal_id"]
+
+
+# LLM: 只替换原PID判活探针证明死亡，恢复/unknown/history与queued派发均是真实现；超时本身不解除互斥。
+# 函数用途: 验证每拍全量恢复能收回死亡peer，不必再次claim旧run才解除阻挡。
+@pytest.mark.parametrize("liveness,dispatched", [("dead", True), ("alive", False), ("unverifiable", False)])
+def test_enqueue_recovers_dead_peer_before_dispatching_queued(tmp_path, monkeypatch, liveness, dispatched):
+    from agent_py_agent.agent.scheduler import repository as module
+
+    _store, _thread, repository, service, signal = _queued_execution(tmp_path)
+    claim = service.claim_wake(signal, lease_seconds=1, now=1001).claim
+    repository.mark_run_running(claim.run_id, claim.claim_id, now=1001)
+    peer = _legacy_peer(repository, claim.run)
+    monkeypatch.setattr(module, "_process_state", lambda _pid: liveness)
+    service.enqueue_ready_runs(now=1003)
+    assert bool(repository.get_active_run(peer["run_id"])["wake_signal_id"]) is dispatched
+    if dispatched:
+        assert repository.get_active_run(claim.run_id) is None
+        history, errors = repository.history()
+        assert not errors and history[0]["status"] == "unknown"
+        assert history[0]["error_code"] == "SCHEDULER_RUNNER_DIED"
+    else:
+        assert repository.get_active_run(claim.run_id)["status"] == "running"
+
+
+# LLM: 相同run准入允许幂等重试，原Wake存储负责跨dispatcher去重；不按两个返回列表误判发了两份。
+# 函数用途: 核对两份service并发发同run仍只有一个真实wake和一次成功claim。
+def test_concurrent_same_run_dispatch_has_one_wake_and_claim(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    store, thread, repository = _setup(tmp_path)
+    _create(repository, thread.thread_id, name="same-run")
+    other_repository = SchedulerRepository(repository.root, owner_provider="feishu", owner_kind="user", owner_id="user-1")
+    services = [SchedulerService(repo, conversation_store=store) for repo in [repository, other_repository]]
+    ready = Barrier(2)
+
+    # LLM: 同步的只有入口时间，真实准入、prepare、dedupe和claim均保留。
+    # 函数用途: 让两个dispatcher竞争同一原run。
+    def dispatch(service):
+        ready.wait(5)
+        return service.enqueue_ready_runs(now=1000)
+
+    with ThreadPoolExecutor(2) as pool:
+        futures = [pool.submit(dispatch, service) for service in services]
+        results = [future.result(5) for future in futures]
+    signals = store.wakes.pending()
+    assert len(signals) == 1 and all(result == [signals[0].wake_signal_id] for result in results)
+    assert services[0].claim_wake(signals[0], now=1001).claim is not None
+    assert services[1].claim_wake(signals[0], now=1001).status == "busy"
+
+
+# LLM: 限制的是不同job候选数，不能让旧重复队列占满limit导致别的job饥饿；不跳过原状态CAS。
+# 函数用途: 复现同job积压的队首阻塞，保持其它job当拍派发。
+def test_same_job_backlog_does_not_starve_distinct_job_at_small_limit(tmp_path):
+    store, thread, repository, service, signal = _queued_execution(tmp_path)
+    claim = service.claim_wake(signal, now=1001).claim
+    repository.mark_run_running(claim.run_id, claim.claim_id, now=1001)
+    for _index in range(8):
+        _legacy_peer(repository, claim.run, now=999)
+    other = _create(repository, thread.thread_id, name="not-starved")
+    # 后到的新job仍应当拍获准，不能藏在被阻挡的旧queued之后。
+    repository.reserve_due_runs(now=1002)
+    wakes = service.enqueue_ready_runs(now=1002, limit=1)
+    assert len(wakes) == 1
+    assert store.wakes.pending_one(wakes[0]).metadata["scheduler_job_id"] == other["job_id"]
+    assert repository.get_active_run(claim.run_id)["status"] == "running"

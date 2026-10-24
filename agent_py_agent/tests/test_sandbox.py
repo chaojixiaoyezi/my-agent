@@ -37,6 +37,26 @@ def test_shares_net_not_unshare(tmp_path) -> None:
     assert "--unshare-net" not in argv
 
 
+# LLM: 在实际bwrap构造入口观察启动器，不以未接线的helper存在冒充生产生效。
+# 函数用途: 暴露工具命令尚未安装子进程资源守卫。
+def test_bwrap_command_installs_child_resource_launcher(tmp_path):
+    spec, _ = _spec(tmp_path)
+    argv = build_bwrap_argv(spec)
+    assert "--resource-launcher" in argv
+    assert argv.index("--resource-launcher") < argv.index("/fake/bwrap")
+    assert "--new-session" in argv and "--die-with-parent" in argv
+
+
+# LLM: AS/NPROC默认不设，避免破坏V8/JVM虚拟内存保留；正nice与OOM偏置是软防护不是绝对存活保证。
+# 函数用途: 锁定安全默认值及结构化资源策略。
+def test_child_resource_limits_defaults():
+    from agent_py_agent.agent.tooling import sandbox
+    limits_type = getattr(sandbox, "ResourceLimits", None)
+    assert limits_type is not None
+    limits = limits_type()
+    assert (limits.nice_increment, limits.max_memory_mb, limits.max_processes, limits.oom_score_adj) == (5, 0, 0, 300)
+
+
 def test_same_sandbox_policy_can_explicitly_remove_network(tmp_path) -> None:
     spec, _ = _spec(tmp_path)
     argv = build_bwrap_argv(
@@ -158,13 +178,155 @@ def test_dns_tls_for_outbound_https(tmp_path) -> None:
         assert "/etc/resolv.conf" in ro_src
 
 
+# LLM: 资源包装改变前缀但不能改写原bwrap/严格shell尾部，仍不使用shell=True或preexec。
+# 函数用途: 核对资源启动器与原沙箱命令的组合形状。
 def test_wrap_shell_command_shape(tmp_path) -> None:
     spec, _ = _spec(tmp_path)
     argv = wrap_shell_command("curl https://api.example.com", spec)
-    assert argv[0] == "/fake/bwrap"
+    assert argv[argv.index("--resource-launcher") + 2] == "/fake/bwrap"
     assert argv[-4:] == ["-o", "pipefail", "-c", "curl https://api.example.com"]
     assert argv[-5].endswith("bash")
     assert argv[-6] == "--"
+
+
+# LLM: 父进程只冻结env，模型后来更改环境不能解除本次策略；用真实SandboxSpec验证生产接线。
+# 函数用途: 验证资源上限的配置冻结与显式策略覆盖。
+def test_resource_environment_is_frozen_in_spec(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.tooling import sandbox
+    monkeypatch.setenv("MY_AGENT_TOOL_MAX_MEMORY_MB", "256")
+    monkeypatch.setenv("MY_AGENT_TOOL_MAX_PIDS", "64")
+    monkeypatch.setenv("MY_AGENT_TOOL_NICE", "7")
+    spec, _ = _spec(tmp_path)
+    monkeypatch.setenv("MY_AGENT_TOOL_MAX_MEMORY_MB", "0")
+    argv = build_bwrap_argv(spec)
+    policy = json.loads(argv[argv.index("--resource-launcher") + 1])
+    assert policy == {"max_memory_mb": 256, "max_processes": 64, "nice_increment": 7, "oom_score_adj": 300}
+    explicit = sandbox.ResourceLimits(nice_increment=0, oom_score_adj=500)
+    assert sandbox.SandboxSpec(spec.owner_home, spec.workspace, resource_limits=explicit).resource_limits is explicit
+
+
+# LLM: 所有OS施加边界均由替身记录，绝不在pytest进程真正nice或setrlimit；不mock被测守卫本身。
+# 函数用途: 提供资源施加顺序、继承限制及失败测试所用的系统观察器。
+def _resource_os(monkeypatch, *, inherited=(-1, -1), oom="0"):
+    import sys
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling import sandbox
+    seen = []
+    resource = SimpleNamespace(RLIMIT_AS=9, RLIMIT_NPROC=6, RLIM_INFINITY=-1,
+        getrlimit=lambda _which: inherited,
+        setrlimit=lambda which, values: seen.append((which, values)))
+    monkeypatch.setitem(sys.modules, "resource", resource)
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.os, "nice", lambda value: seen.append(("nice", value)))
+    monkeypatch.setattr(sandbox, "Path", lambda _path: SimpleNamespace(
+        read_text=lambda: oom, write_text=lambda value: seen.append(("oom", value))))
+    return sandbox, resource, seen
+
+
+# LLM: 子进程软硬都只收紧原上限，原OOM偏置较高时不能调低；正配置才添加RLIMIT。
+# 函数用途: 验证默认soft防护与显式内存/进程数上限。
+@pytest.mark.parametrize("inherited,oom,expected", [((-1, -1), "0", 128), ((80, 90), "500", 80)])
+def test_child_resource_guards_apply_and_preserve_stricter_limits(monkeypatch, inherited, oom, expected):
+    sandbox, _resource, seen = _resource_os(monkeypatch, inherited=inherited, oom=oom)
+    limits = sandbox.ResourceLimits(max_memory_mb=128, max_processes=32)
+    assert sandbox._apply_child_resources(limits) == []
+    memory = 128 * 1024**2 if expected == 128 else expected
+    assert seen == [("nice", 5), ("oom", str(max(300, int(oom)))), (9, (memory, memory)), (6, (32, 32))]
+
+
+# LLM: 默认不调用RLIMIT；OS缺nice/proc/resource能力时记录unavailable而不把其它保护或工具执行一起取消。
+# 函数用途: 核对跨平台不支持和权限拒绝的soft降级。
+@pytest.mark.parametrize("missing", ["nice", "proc", "resource", "constant", "not_implemented", "unsupported_errno"])
+def test_child_guards_report_unsupported_capabilities(monkeypatch, missing):
+    import errno
+    import sys
+    sandbox, resource, seen = _resource_os(monkeypatch)
+
+    # LLM: 抛出精确的系统失败类型，不替换守卫或直接伪造unavailable结果。
+    # 函数用途: 模拟当前OS不支持指定资源操作。
+    def unavailable(*_args):
+        raise OSError(errno.ENOSYS, "fixture unsupported")
+
+    if missing == "nice":
+        monkeypatch.setattr(sandbox.os, "nice", unavailable)
+    elif missing == "proc":
+        monkeypatch.setattr(sandbox, "Path", unavailable)
+    elif missing == "resource":
+        monkeypatch.setitem(sys.modules, "resource", None)
+    elif missing == "constant":
+        monkeypatch.delattr(resource, "RLIMIT_AS")
+    elif missing == "not_implemented":
+        monkeypatch.setattr(resource, "getrlimit", lambda _which: (_ for _ in ()).throw(NotImplementedError()))
+    else:
+        monkeypatch.setattr(resource, "getrlimit", unavailable)
+    reports = sandbox._apply_child_resources(sandbox.ResourceLimits(max_memory_mb=128))
+    assert reports and all("resource" in report and "error_type" in report for report in reports)
+    assert ("nice", 5) in seen or missing == "nice"
+
+
+# LLM: 硬上限无法施加不是成功；不能吞EPERM后执行无限额命令。所有限制系统调用均替身隔离。
+# 函数用途: 验证施加失败时结构化拒绝exec而非悄悄放开。
+def test_explicit_limit_failure_refuses_exec(monkeypatch, capsys):
+    import errno
+    import json
+    sandbox, resource, _seen = _resource_os(monkeypatch)
+    executed = []
+
+    # LLM: 模拟确有能力但本次不能施加，而非平台缺失。
+    # 函数用途: 返回硬上限权限错误。
+    def denied(*_args):
+        raise PermissionError(errno.EPERM, "fixture limit denied")
+
+    monkeypatch.setattr(resource, "setrlimit", denied)
+    monkeypatch.setattr(sandbox.os, "execvp", lambda *_: executed.append(True))
+    result = sandbox._resource_launcher([json.dumps({"max_memory_mb": 128}), "/bin/true"])
+    assert result == 98 and not executed
+    assert json.loads(capsys.readouterr().err)["error_code"] == "SANDBOX_RESOURCE_GUARD_FAILED"
+
+
+# LLM: 标准Popen新session由原调用方建立，资源启动器不可破坏它；真实限制仅在新子进程运行。
+# 函数用途: 读回子进程nice/session，确认exec保留PID且父进程值不变。
+def test_real_posix_resource_launcher_preserves_session_and_parent(tmp_path):
+    import json
+    import os
+    import sys
+
+    from agent_py_agent.agent.tooling.sandbox import ResourceLimits, wrap_resource_command
+    if os.name != "posix":
+        pytest.skip("requires POSIX nice/session")
+    before, sid = os.getpriority(os.PRIO_PROCESS, 0), os.getsid(0)
+    code = "import os,json; print(json.dumps([os.getpid(),os.getsid(0),os.getpgrp(),os.getpriority(os.PRIO_PROCESS,0)]))"
+    argv = wrap_resource_command([sys.executable, "-I", "-B", "-c", code], ResourceLimits())
+    with subprocess.Popen(argv, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, stdin=subprocess.DEVNULL, start_new_session=True) as child:
+        stdout, stderr = child.communicate(timeout=10)
+        assert child.returncode == 0, stderr
+        assert json.loads(stdout) == [child.pid, child.pid, child.pid, min(19, before + 5)]
+    assert os.getpriority(os.PRIO_PROCESS, 0) == before and os.getsid(0) == sid
+
+
+# LLM: 不制造主机OOM或fork炸弹；Linux真子进程只试受控分配，验证RLIMIT与OOM偏置的真实读回。
+# 函数用途: 在Linux验证超过显式地址空间上限时子进程得到MemoryError而父进程继续存活。
+def test_real_linux_memory_ceiling_and_oom_bias(tmp_path):
+    import os
+    import sys
+
+    from agent_py_agent.agent.tooling.sandbox import ResourceLimits, wrap_resource_command
+    if sys.platform != "linux":
+        pytest.skip("requires real Linux RLIMIT_AS and /proc")
+    from pathlib import Path
+    before = Path("/proc/self/oom_score_adj").read_text()
+    code = ("import resource; from pathlib import Path; "
+            "assert resource.getrlimit(resource.RLIMIT_AS) == (134217728,134217728); "
+            "assert int(Path('/proc/self/oom_score_adj').read_text()) >= 300; "
+            "exec('try:\\n bytearray(268435456)\\nexcept MemoryError:\\n print(\"MEMORY_GUARDED\")')")
+    result = subprocess.run(wrap_resource_command([sys.executable, "-I", "-B", "-c", code],
+        ResourceLimits(max_memory_mb=128)), cwd=tmp_path, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stdout.strip() == "MEMORY_GUARDED", result.stderr
+    assert Path("/proc/self/oom_score_adj").read_text() == before and os.getpid() > 0
 
 
 def test_unavailable_raises(tmp_path, monkeypatch) -> None:

@@ -1,5 +1,5 @@
-# LLM: 只扩展现有bwrap底图的人格拒写；最终精确限制不可被祖先bind擦除，B7合法重挂仍沿原合同。
-# 模块用途: 构造唯一进程隔离参数与readiness，不在此签发新文件、网络或owner权限。
+# LLM: 原bwrap权限底图不变；资源启动器只在独立子进程内施加限制再exec，不用多线程Gateway的preexec_fn。
+# 模块用途: 构造进程隔离与子进程软/硬资源守卫，不在此签发新文件、网络或owner权限。
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ bwrap 优先使用运行环境安装的兼容版本,再退到仓库内置离线�
 """
 
 import argparse
+import errno
 import json
 import os
 import platform
@@ -23,21 +24,25 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from ..path_access_policy import (
-    HOST_STATE_LOCK_SUFFIX,
-    SQLITE_SIDECAR_SUFFIXES,
-    AgentsSourceProtectionError,
-    persona_process_protection_snapshot,
-    persona_sandbox_root,
-    validate_persona_configuration,
-    validate_persona_source_identity,
-)
-from .write_boundary import ordered_write_scope_roots
+# 独立资源启动器在进入bwrap前运行，只依赖标准库；-I/-B/-S阻止用户site与字节码写入。
+_IS_RESOURCE_LAUNCHER = __name__ == "__main__" and sys.argv[1:2] == ["--resource-launcher"]
+if not _IS_RESOURCE_LAUNCHER:
+    from ..path_access_policy import (
+        HOST_STATE_LOCK_SUFFIX,
+        SQLITE_SIDECAR_SUFFIXES,
+        AgentsSourceProtectionError,
+        persona_process_protection_snapshot,
+        persona_sandbox_root,
+        validate_persona_configuration,
+        validate_persona_source_identity,
+    )
+    from .write_boundary import ordered_write_scope_roots
 
 # 仓库内置 bwrap(随 my-agent 分发,内网装不了包也自带)。
 _VENDOR_BWRAP = Path(__file__).resolve().parents[2] / "vendor" / "bin" / "bwrap.linux-x86_64"
@@ -56,6 +61,113 @@ SYSTEM_READ_ROOTS_BY_PLATFORM: dict[str, tuple[str, ...]] = {
 
 # /proc 挂载方式探测结果缓存: "proc"=真实 procfs 可用, "dir"=必须空目录, None=未探测。
 _PROC_MOUNT_KIND: str | None = None
+
+
+# LLM: 只接受宿主配置；默认不限制虚拟地址空间，nice/OOM只是相对优先级，不保证Gateway永不OOM。
+# 类用途: 固定本次子命令的资源上限，0表示不额外施加该硬上限。
+@dataclass(frozen=True)
+class ResourceLimits:
+    nice_increment: int = 5
+    max_memory_mb: int = 0
+    max_processes: int = 0
+    oom_score_adj: int = 300
+
+    # LLM: 不接受负nice/负OOM降低保护，也不接受bool或溢出值；错误在启动前暴露，不静默解除限制。
+    # 函数用途: 校验安全范围内的结构化资源配置。
+    def __post_init__(self):
+        bounds = {"nice_increment": 19, "max_memory_mb": (2**63 - 1) // (1024**2),
+                  "max_processes": 2**31 - 1, "oom_score_adj": 1000}
+        for name, maximum in bounds.items():
+            value = getattr(self, name)
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ValueError(f"SANDBOX_RESOURCE_LIMIT_INVALID: {name}")
+
+    # LLM: 环境仅在父进程构造spec时读取；模型命令内改env不能回头改变这份冻结配置。
+    # 函数用途: 从宿主环境读取内存、进程数与nice，未设置沿安全默认。
+    @classmethod
+    def from_environment(cls):
+        names = {"max_memory_mb": "MY_AGENT_TOOL_MAX_MEMORY_MB", "max_processes": "MY_AGENT_TOOL_MAX_PIDS",
+                 "nice_increment": "MY_AGENT_TOOL_NICE"}
+        values = {name: int(os.environ[env]) for name, env in names.items() if env in os.environ}
+        return cls(**values)
+
+
+# LLM: 包装发生在全部权限底图完成之后；不新增preexec、不创建session，原start_new_session/--new-session完整保留。
+# 函数用途: 在原命令前增加独立资源启动器，避免在fork后的Gateway解释器执行Python。
+def wrap_resource_command(argv: list[str], limits: ResourceLimits | None = None) -> list[str]:
+    selected = limits if limits is not None else ResourceLimits.from_environment()
+    return [sys.executable, "-I", "-B", "-S", str(Path(__file__).resolve()), "--resource-launcher",
+            json.dumps(asdict(selected), separators=(",", ":")), *argv]
+
+
+# LLM: 只能在独立启动器调用；不提升nice、不减小已有OOM偏置，软防护失败明确记unavailable但不拒绝普通工具。
+# 函数用途: 在子进程安装优先级并收集平台不支持的保护项。
+def _apply_child_resources(limits: ResourceLimits) -> list[dict]:
+    unavailable = []
+    if os.name == "posix" and limits.nice_increment:
+        try:
+            os.nice(limits.nice_increment)
+        except (AttributeError, OSError, NotImplementedError) as error:
+            unavailable.append({"resource": "nice", "error_type": type(error).__name__})
+    if platform.system() == "Linux":
+        try:
+            path = Path("/proc/self/oom_score_adj")
+            current = int(path.read_text())
+            path.write_text(str(max(current, limits.oom_score_adj)))
+        except (OSError, ValueError) as error:
+            unavailable.append({"resource": "oom_score_adj", "error_type": type(error).__name__})
+        unavailable.extend(_apply_linux_ceilings(limits))
+    return unavailable
+
+
+# LLM: AS是虚拟内存而非RSS，NPROC按真实UID计数且root可豁免；仅显式正配置启用，不承诺进程树聚合限额。
+# 函数用途: 在Linux子进程设置可选硬上限，缺能力明确返回而不误报已应用。
+def _apply_linux_ceilings(limits: ResourceLimits) -> list[dict]:
+    requested = {"RLIMIT_AS": limits.max_memory_mb * 1024**2, "RLIMIT_NPROC": limits.max_processes}
+    if not any(requested.values()):
+        return []
+    try:
+        import resource
+    except ImportError:
+        return [{"resource": name, "error_type": "ImportError"} for name, value in requested.items() if value]
+    return [report for name, value in requested.items() if value
+            and (report := _set_child_ceiling(resource, name, value)) is not None]
+
+
+# LLM: 软硬都只收紧继承限制，不尝试提权调高；内核不支持时报告unavailable，真正施加失败拒绝执行。
+# 函数用途: 对一个受支持资源设置子进程软硬上限。
+def _set_child_ceiling(resource, name, requested):
+    number = getattr(resource, name, None)
+    if number is None:
+        return {"resource": name, "error_type": "Unsupported"}
+    try:
+        inherited = resource.getrlimit(number)
+        ceiling = min([requested, *(value for value in inherited if value != resource.RLIM_INFINITY)])
+        resource.setrlimit(number, (ceiling, ceiling))
+    except NotImplementedError:
+        return {"resource": name, "error_type": "NotImplementedError"}
+    except OSError as error:
+        if error.errno not in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+            raise
+        return {"resource": name, "error_type": type(error).__name__}
+    return None
+
+
+# LLM: 只在独立解释器运行，配置在父进程冻结；不改Gateway限制，exec保留原PID/session与取消/回收语义。
+# 函数用途: 施加资源限制后原样exec原沙箱命令，失败留结构化诊断且不执行未受控命令。
+def _resource_launcher(argv: list[str]) -> int:
+    try:
+        if len(argv) < 2:
+            raise ValueError("missing resource policy or command")
+        limits = ResourceLimits(**json.loads(argv[0]))
+        unavailable = _apply_child_resources(limits)
+        if unavailable:
+            sys.stderr.write(json.dumps({"resource_guard_unavailable": unavailable}) + "\n")
+        os.execvp(argv[1], argv[1:])
+    except (OSError, TypeError, ValueError, OverflowError) as error:
+        sys.stderr.write(json.dumps({"error_code": "SANDBOX_RESOURCE_GUARD_FAILED", "error_type": type(error).__name__}) + "\n")
+        return 98
+    return 98
 
 
 def _proc_mount_args() -> list[str]:
@@ -173,6 +285,8 @@ class SandboxSpec:
     preserve_public_read_root_aliases: bool = False
     # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
     hidden_paths: tuple[Path, ...] = ()
+    # 父进程冻结配置；启动器只给本次命令施加限制，不改变宿主或其它owner。
+    resource_limits: ResourceLimits = field(default_factory=ResourceLimits.from_environment)
 
 
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
@@ -931,6 +1045,7 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 __all__ = [
+    "ResourceLimits",
     "SYSTEM_READ_ROOTS_BY_PLATFORM",
     "SandboxReadiness",
     "SandboxSpec",
@@ -940,6 +1055,7 @@ __all__ = [
     "probe_sandbox",
     "prune_transient_bwrap_sidecar_mounts",
     "require_sandbox_ready",
+    "wrap_resource_command",
     "wrap_shell_command",
 ]
 
@@ -1349,7 +1465,7 @@ def _append_final_mount_protections(argv: list[str], spec: SandboxSpec) -> None:
         _append_hidden_mounts(argv, spec.hidden_paths)
 
 
-# LLM: 授权只读原完整底图；加固祖先时保留子边界，最终重施main拒写/隐藏且chdir最后，不改变网络/owner/别名权限。
+# LLM: 原完整底图与人格保护完成后才套资源启动器；原网络/owner/别名/新session标志均不变，不在父进程施加限制。
 # 函数用途: 组合原沙箱与人格拒写，确保新增祖先挂载不会擦掉既有安全限制或合法B7重挂。
 def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     authority_root = _freeze_persona_root(spec)
@@ -1360,10 +1476,10 @@ def build_bwrap_argv(spec: SandboxSpec) -> list[str]:
     _defer_strict_hidden_mounts(argv, spec)
     placeholders = _append_persona_readonly_mounts(argv, authority_root, spec, mounts_snapshot=mounts)
     _append_final_mount_protections(argv, spec)
-    return [*argv, *placeholders, *chdir]
+    return wrap_resource_command([*argv, *placeholders, *chdir], spec.resource_limits)
 
 
 # LLM: CLI必须等所有argv构造器完成定义再启动；只移动启动时机，不把binary成功升级成完整隔离成功。
 # 入口用途: 让模块运行与先import后main使用同一完整探针链和原退出码。
 if __name__ == "__main__":  # pragma: no cover - 容器/K8s 真实探针入口
-    raise SystemExit(main())
+    raise SystemExit(_resource_launcher(sys.argv[2:]) if _IS_RESOURCE_LAUNCHER else main())
