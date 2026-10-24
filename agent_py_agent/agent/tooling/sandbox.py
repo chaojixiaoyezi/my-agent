@@ -96,6 +96,8 @@ class ResourceLimits:
 # 函数用途: 在原命令前增加独立资源启动器，避免在fork后的Gateway解释器执行Python。
 def wrap_resource_command(argv: list[str], limits: ResourceLimits | None = None) -> list[str]:
     selected = limits if limits is not None else ResourceLimits.from_environment()
+    if not any(asdict(selected).values()):
+        return list(argv)
     return [sys.executable, "-I", "-B", "-S", str(Path(__file__).resolve()), "--resource-launcher",
             json.dumps(asdict(selected), separators=(",", ":")), *argv]
 
@@ -286,7 +288,19 @@ class SandboxSpec:
     # H2：最后以只读空 tmpfs 隐藏宿主目录；模型命令隐藏托管存储，G1 整根只读插件形态隐藏宿主凭据 secrets 目录。
     hidden_paths: tuple[Path, ...] = ()
     # 父进程冻结配置；启动器只给本次命令施加限制，不改变宿主或其它owner。
-    resource_limits: ResourceLimits = field(default_factory=ResourceLimits.from_environment)
+    resource_limits: ResourceLimits | None = None
+
+    # LLM: 普通工具命令默认从父进程环境冻结资源守卫；整根只读插件/核验形态未显式传参时保持纯 bwrap argv。
+    # 函数用途: 初始化冻结的 ResourceLimits，兼顾工具命令默认保护与 read_only_root 形态兼容。
+    def __post_init__(self) -> None:
+        if self.resource_limits is None:
+            object.__setattr__(
+                self,
+                "resource_limits",
+                ResourceLimits(nice_increment=0, oom_score_adj=0)
+                if self.read_only_root
+                else ResourceLimits.from_environment(),
+            )
 
 
 # LLM: 这是 bwrap 文件系统/进程隔离策略的唯一 argv 构造点。owner_home 和已授权
