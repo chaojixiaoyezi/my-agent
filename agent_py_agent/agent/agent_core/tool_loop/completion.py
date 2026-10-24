@@ -136,10 +136,9 @@ def _context_refresh_transition_response(
     )
 
 
-# LLM: A named Audit turn may end its current model call while its typed duration or durable
-# source ledger remains open. Discard the model draft and enter the same presentation-only
-# phase used by other interim lifecycle states; never infer completion from prose.
-# 函数用途: 命名 Audit 尚未到期或仍有来源欠账时，用结构化事实生成阶段回复并保持任务继续。
+# LLM: 仅plain-final入口为原命名工作或当前任务已绑定完成唤醒的进程生成阶段回复；实际工具轮不强制让出。
+# 仍保留prepare与精确事件回复优先；后台只结束当前表达片，续接由原managed_process_exited负责，不新建Goal或轮询器。
+# 函数用途: 原任务仍有结构化后台依赖时，允许回合自然让出并如实说明还在继续。
 def queue_interim_reply_for_active_named_work(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -161,20 +160,23 @@ def queue_interim_reply_for_active_named_work(
         # the event's authoritative facts.
         return False
     named_work = _active_named_audit_facts(agent, params)
-    if not named_work:
+    wake_count = _active_wake_backed_process_count(agent, params)
+    if not named_work and not wake_count:
         return False
     facts = _interim_reply_facts(
         agent,
         params,
         tool_rounds=tool_rounds,
+        wake_backed_process_count=wake_count,
     )
-    continues = named_work.get("continues_without_more_user_input") is True
+    continues = named_work.get("continues_without_more_user_input") is True or wake_count > 0
     facts["reply_is_interim"] = continues
     facts["task_continues_without_more_user_input"] = continues
-    facts["named_work"] = named_work
+    if named_work:
+        facts["named_work"] = named_work
     queue_natural_user_reply(
         params,
-        kind="named_work_active" if continues else "named_work_incomplete",
+        kind=("named_work_active" if continues else "named_work_incomplete") if named_work else "background_process_active",
         facts=facts,
     )
     return True
@@ -552,7 +554,7 @@ def turn_execution_reply_facts(agent: object, params: ToolLoopExecuteParams) -> 
     return facts
 
 
-# LLM: 等待阶段只汇总当前请求和公开执行事实；新增状态须继续沿同一安全投影，不能恢复整包业务载荷。
+# LLM: 只汇总当前请求与公开事实；后台计数来自当前owner/thread/task原记录，不泄露目标地址或扩展执行权限。
 # 函数用途: 为活跃任务准备有界自然回执上下文，保留原用户指引及委派状态。
 def _interim_reply_facts(
     agent: object,
@@ -560,6 +562,7 @@ def _interim_reply_facts(
     *,
     tool_rounds: int,
     delegated: dict[str, object] | None = None,
+    wake_backed_process_count: int | None = None,
 ) -> dict[str, object]:
     current_request = str(params.root_user_prompt or params.user_prompt or "").strip()
     facts: dict[str, object] = {
@@ -588,7 +591,53 @@ def _interim_reply_facts(
     delegated = delegated or _delegated_work_facts(agent, params)
     if delegated:
         facts["delegated_work"] = delegated
+    wake_count = _active_wake_backed_process_count(agent, params) if wake_backed_process_count is None else wake_backed_process_count
+    if wake_count > 0:
+        facts["active_background_process_count"] = wake_count
+        facts["active_background_process_count_is_minimum"] = True
+        facts["completion_wake"] = {"enabled": True, "reason": "managed_process_exited", "yield_supported": True}
     return facts
+
+
+# LLM: 只在原主会话通知合同可用时读取既有Registry；无挂载属性时复用原全局实例，根目录来自可信agent路径。
+# 当前任务、thread、store与owner同时相等；跨模型片沿原任务收件目标，不错拿当前run_id拒掉旧片的合法通知。
+# 只计可核实的健康记录下限；坏项不计且不抹掉其它已核实项，全局读取失败不声明可让出，不吞取消。
+# 函数用途: 统计当前任务至少有多少运行中命令可由原完成事件接续，排除其它会话与无关前台。
+def _active_wake_backed_process_count(agent: object, params: ToolLoopExecuteParams) -> int:
+    from ...conversation.process_events import _agent_process_root, process_completion_target
+    from ...tooling.process_registry import ProcessSessionAuthorityError, process_registry
+
+    selected = _delegated_work_task_id(params)
+    target = process_completion_target(agent, params)
+    root = _agent_process_root(agent)
+    owner = str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
+    if not selected or not target or target.get("task_id") != selected or root is None or not owner:
+        return 0
+    registry = getattr(agent, "process_registry", None) or process_registry
+    if not callable(getattr(registry, "list_report", None)) or not callable(getattr(registry, "get", None)):
+        return 0
+    try:
+        summaries, _errors = registry.list_report(store_root=root)
+    except (OSError, ProcessSessionAuthorityError, TypeError, ValueError):
+        return 0
+    count = 0
+    for summary in summaries:
+        if summary.get("status") != "running":
+            continue
+        try:
+            record = registry.get(str(summary.get("session_id") or ""), store_root=root)
+            if record is None or record.status != "running":
+                continue
+            stored = record.completion_target
+            snapshot = record.persisted_snapshot
+            if (record.access_scope.owner_home == owner
+                    and record.access_scope.conversation_id == target["thread_id"]
+                    and not snapshot.get("activation_scope") and not snapshot.get("stop_requested")
+                    and all(stored.get(key) == target[key] for key in ("store_root", "thread_id", "task_id"))):
+                count += 1
+        except (OSError, ProcessSessionAuthorityError, TypeError, ValueError):
+            continue
+    return count
 
 
 # LLM: 阶段回执里的子代理事实必须来自持久化 run 的 parent/root/depth/status；

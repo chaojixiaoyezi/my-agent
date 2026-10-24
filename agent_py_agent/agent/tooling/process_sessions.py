@@ -290,10 +290,15 @@ class ProcessSessionTool(BaseTool):
             seconds = _DEFAULT_WAIT_SECONDS
         return max(0.0, min(_MAX_WAIT_SECONDS, seconds))
 
-    # LLM: 软观察指纹由宿主结果生成，只排除时长和本次等待届满；原始正文、权限和终态均不改变。
+    # LLM: 原运行记录的唤醒能力同时进入正文和机器信封；软进展指纹不以时长或本次等待届满虚报进展。
     # 函数用途: 返回完整进程结果，并为状态/等待附上稳定进展摘要，避免时钟跳动被当成工作进展。
     def _ok(self, payload: dict[str, Any], *, observe_progress: bool = False) -> ToolHandlerOutcome:
         envelope = {}
+        wake = payload.get("completion_wake")
+        if isinstance(wake, dict):
+            envelope["completion_wake"] = dict(wake)
+            if payload.get("status") == "running" and wake.get("yield_supported") is True:
+                payload = {**payload, "hint": "已绑定完成唤醒；可推进独立工作，无其他可推进工作时结束本轮等待事件，无需密集查询。"}
         if observe_progress:
             stable = {key: value for key, value in payload.items() if key not in {"uptime_seconds", "wait_timed_out"}}
             digest = hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False).encode()).hexdigest()

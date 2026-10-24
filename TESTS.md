@@ -1,3 +1,13 @@
+## 2026-10-24 W1-6 v2：后台退避、完成唤醒事实与阶段让出
+
+- 来源：`w1-6-bg-wait-wake-v2`；共同开发基线 `a3ac5e51c12da52973d8eac16ae29f337cdcd30b`。保留原 unreaped 组长观察、出生身份保护、stat 投影缓存和原完成事件发表/回执，不在清理前调用 `Popen.poll/wait`。
+- host 按单调运行时长采用 50/150/250ms；原 Registry 显式 wait 采用 50/100/250ms，仍按单调 deadline 剩余预算截断并走原取消等待口。运行态摘要、启动及 status/wait 机器信封共用 `completion_wake`，只表示已绑定而非已送达或命令成功。
+- 仅当前 owner/thread/task/store 的可核实运行记录进入后台阶段事实；计数标为已核实下限。原 plain-final 入口可进入一次零工具表达片并正常结束当前回合，实际工具轮不强制让出；精确后台事件回复、prepare、子代理以及无关前台任务沿原规则。
+- `test_tools/test_shell_background.py` 新增 28 个参数化用例，覆盖三段真实循环选时、缓存复用与不提前 reap、原取消等待口、同源唤醒事实、无关 thread/task/store 与通知关闭隔离、真实工具循环有/无唤醒的采样次数、同任务跨模型 run 的原事件发表/回执/投递资格，以及局部坏记录不抹掉健康依赖。存储和循环使用原实现；时间、模型响应和内核存活观察有明确替身，不充当真实 spawn→退出→wake 的 E2E。
+- 独立内联复核的局部错误问题已先红后绿修正；没有把当前模型 `run_id` 加为进程计数限制，因为原投递比较的是 immutable record target 与 signal source，而非后来模型片的身份。
+- 在工作树根复现：`python3 -m pytest agent_py_agent/tests/test_tools/test_shell_background.py agent_py_agent/tests/test_process_session_store.py -q --tb=short`；聚焦新增用例可用 `python3 -m pytest agent_py_agent/tests/test_tools/test_shell_background.py -k w16 -q --tb=short`。
+- 验证边界：未改动基线的指定两文件在本机已有 8 failed、95 passed、1 skipped；另独立确认 `ps` 启动抛 `PermissionError`。不将所有失败擅自归为同一原因，不删除/跳过原用例；真实进程与被原 capability guard 跳过的组长保护回归仍须集成环境复核。没有部署或真实供应商模型验收。
+
 ## 2026-10-23 Linux 生产工具耗时四包治理（`read_artifact`、`self_map`、`run_command`、并发工具与 `list_tools`）定向回归
 
 - 新增 11 个测试文件并在 `test_self_map_contract.py` 补齐断言：

@@ -55,6 +55,19 @@ _OUTPUT_TAIL_CHARS = 4000
 _MAX_FINISHED_COUNT = 128
 
 
+# LLM: 仅观察当前显式wait的单调时长；调用方仍受剩余deadline和原取消令牌约束，不缓存终态。
+# 函数用途: 前半秒50ms、三秒内100ms、之后250ms核对一次原会话。
+def _process_wait_interval(elapsed_s: float) -> float:
+    return 0.05 if elapsed_s < 0.5 else 0.1 if elapsed_s < 3.0 else 0.25
+
+
+# LLM: 只投影原受管记录是否绑定宿主收件目标，不暴露目标地址，也不声称完成事件已经送达。
+# 函数用途: 给启动、状态与等待入口同一份完成唤醒能力事实。
+def completion_wake_facts(record: object) -> dict[str, object]:
+    enabled = bool(getattr(record, "completion_target", None))
+    return {"enabled": enabled, "reason": "managed_process_exited" if enabled else "", "yield_supported": enabled}
+
+
 # LLM: 结构化错误区别权威损坏和记录不存在，不展开其它会话的记录内容。
 # 类用途: 阻止查询或停止在存储故障后继续使用旧缓存。
 class ProcessSessionAuthorityError(RuntimeError):
@@ -97,7 +110,7 @@ class BackgroundProcess:
     def is_terminal(self) -> bool:
         return self.status in PROCESS_TERMINAL_STATUSES
 
-    # LLM: 摘要保留原控制标记；日志文本/字节数/截断/读取错误同取已授权记录的一个fd，日志错误不改进程终态。
+    # LLM: 摘要保留原控制标记；运行态只公开唤醒能力而非收件身份，日志错误不改进程终态。
     # 函数用途: 生成后台进程的状态和日志观测，耗时与输出增长分开，宿主 PID 保持内部使用。
     def to_summary(self, *, include_output: bool = False, output_tail_chars: int = _OUTPUT_TAIL_CHARS) -> dict[str, Any]:
         summary: dict[str, Any] = {
@@ -113,6 +126,8 @@ class BackgroundProcess:
                            handoff_confirmed=self.persisted_snapshot["handoff_confirmed"])
         if self.exit_code is not None:
             summary["exit_code"] = self.exit_code
+        if self.status == "running":
+            summary["completion_wake"] = completion_wake_facts(self)
         # 监听范围声明、host 停止原因与越界证据都是记录里的结构化事实，原样投影给 status/list。
         for key in ("reason", "listen_scope", "listener_violation", "listener_warning"):
             if self.persisted_snapshot.get(key):
@@ -412,11 +427,12 @@ class ProcessRegistry:
             True,
         )
 
-    # LLM: 每轮观察原 Store 的阶段变化，取消仅释放等待；超时仍 pending，不能因 host 不活推断 child 结束。
+    # LLM: 每轮观察原 Store 的阶段变化，单调时长退避且截断到剩余预算；取消仅释放等待，不能推断child已结束。
     # 函数用途: 在宿主取消和超时范围内等待同一个 session 的可信终态。
     def wait(self, session_id: str, timeout_seconds: float, access_scope: ProcessAccessScope | None = None,
              store_root: str | Path | None = None) -> dict[str, Any] | None:
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
+        started_monotonic = time.monotonic()
+        deadline = started_monotonic + max(0.0, float(timeout_seconds or 0.0))
         token = current_cancellation_token()
         while True:
             raise_if_cancelled()
@@ -428,7 +444,7 @@ class ProcessRegistry:
                 summary = record.to_summary(include_output=True)
                 summary["wait_timed_out"] = not record.is_terminal()
                 return summary
-            interval = min(0.1, remaining)
+            interval = min(_process_wait_interval(time.monotonic() - started_monotonic), remaining)
             token.wait(interval) if token is not None else time.sleep(interval)
 
     # LLM: 无 root 内部查询只允许缓存唯一匹配；业务 scope 显式拒绝共享激活，不能凭已知句柄越过归属。
@@ -1025,6 +1041,7 @@ __all__ = [
     "ProcessRegistry",
     "ProcessTerminationReceipt",
     "capture_process_birth_token",
+    "completion_wake_facts",
     "finish_foreground_process",
     "process_registry",
     "terminate_process_tree",
