@@ -29,6 +29,7 @@ def compile_module(path: Path, root: Path) -> None:
 # LLM: manifest 枚举所有发行文件及内部链接；原始源码仅记录构建摘要，不进入载荷。
 # 函数用途: 生成安装器使用的逐文件 SHA256 清单，拒绝外部链接和缓存。
 def inventory(root: Path) -> dict:
+    (root / "release.json").unlink(missing_ok=True)
     members = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
