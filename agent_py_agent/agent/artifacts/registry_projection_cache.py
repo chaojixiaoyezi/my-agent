@@ -8,7 +8,7 @@ import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 from ..common.nofollow_fs import open_directory_beneath
@@ -48,7 +48,7 @@ class RegistryProjection:
     records: tuple[RegistryRow, ...]
     parse_error: bool
     parser_version: int
-    latest_records: Mapping[str, object] = _EMPTY_PROXY
+    latest_records: Mapping[str, object] = field(default_factory=lambda: _EMPTY_PROXY)
     diagnostic_rows: tuple[RegistryRow, ...] = ()
     line_count: int = 0
 
