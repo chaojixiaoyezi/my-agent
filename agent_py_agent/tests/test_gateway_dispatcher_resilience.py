@@ -416,8 +416,8 @@ def _stall_case(tmp_path, monkeypatch):
     monkeypatch.setattr(gateway_loops, "time", clock_module)
     proc = tmp_path / "proc" / str(os.getpid())
     (proc / "task" / "1").mkdir(parents=True)
-    (proc / "status").write_text("State:\tS\nThreads:\t1\n")
-    (proc / "task" / "1" / "wchan").write_text("futex_wait\n")
+    (proc / "status").write_text("State:\tS\nThreads:\t1\n", encoding="utf-8")
+    (proc / "task" / "1" / "wchan").write_text("futex_wait\n", encoding="utf-8")
     monkeypatch.setattr(hang_diagnostics, "_PROC_ROOT", proc.parent)
     monkeypatch.setattr(hang_diagnostics.faulthandler, "dump_traceback", lambda **kw: kw["file"].write("synthetic stack\n"))
     events = []
@@ -446,7 +446,7 @@ def test_dispatcher_stall_heartbeat_boundaries(tmp_path, monkeypatch, started, f
     for index in range(pending):
         _enqueue(paths, f"pending-{index}", "u")
     gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
-    heartbeat = json.loads(paths.heartbeat.read_text())
+    heartbeat = json.loads(paths.heartbeat.read_text(encoding="utf-8"))
     assert heartbeat.get("dispatcher_stalled") is bool(reason)
     assert heartbeat["dispatcher_state"] == ("stalled" if reason else "running")
     assert heartbeat["dispatcher_alive"] is True
@@ -454,7 +454,7 @@ def test_dispatcher_stall_heartbeat_boundaries(tmp_path, monkeypatch, started, f
     assert len(events) == bool(reason)
     if reason:
         assert events[0][1]["wchan_top"] == [{"wchan": "futex_wait", "count": 1}]
-        assert reason in paths.log.read_text()
+        assert reason in paths.log.read_text(encoding="utf-8")
 
 
 # LLM: Event保持真实在途，推进时钟而非sleep；恢复后下一次卡死须再次采集。
@@ -480,13 +480,13 @@ def test_wedged_dispatcher_captures_once_per_episode(tmp_path, monkeypatch):
         for _ in range(2):
             gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
         assert len(events) == 1
-        assert json.loads(paths.heartbeat.read_text()).get("dispatcher_stalled") is True
+        assert json.loads(paths.heartbeat.read_text(encoding="utf-8")).get("dispatcher_stalled") is True
     finally:
         release.set()
         worker.join(2)
     assert not worker.is_alive()
     gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
-    assert json.loads(paths.heartbeat.read_text())["dispatcher_stalled"] is False
+    assert json.loads(paths.heartbeat.read_text(encoding="utf-8"))["dispatcher_stalled"] is False
     clock[0] += 1
     loop_health.mark_tick_started()
     clock[0] += 120
@@ -534,10 +534,10 @@ def test_dispatcher_stall_capture_failure_keeps_heartbeat(tmp_path, monkeypatch)
 
     monkeypatch.setattr(hang_diagnostics, "capture_gateway_hang_facts", failed_capture)
     gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
-    assert json.loads(paths.heartbeat.read_text()).get("dispatcher_stalled") is True
+    assert json.loads(paths.heartbeat.read_text(encoding="utf-8")).get("dispatcher_stalled") is True
     loop_health.mark_exited(None)
     gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
-    heartbeat = json.loads(paths.heartbeat.read_text())
+    heartbeat = json.loads(paths.heartbeat.read_text(encoding="utf-8"))
     assert heartbeat["dispatcher_stalled"] is False and heartbeat["dispatcher_state"] == "exited"
 
 
@@ -584,7 +584,44 @@ def test_dispatcher_stall_uses_monotonic_progress(tmp_path, monkeypatch, case):
         wall[0] = 500
         monotonic[0] += 120
     gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
-    assert json.loads(paths.heartbeat.read_text())["dispatcher_stalled"] is (case == "wedged_rollback")
+    assert json.loads(paths.heartbeat.read_text(encoding="utf-8"))["dispatcher_stalled"] is (case == "wedged_rollback")
+
+
+# LLM: 两入口读取同一冻结时钟和真实pending目录；/status只能投影，不可领取诊断episode或写文件。
+# 函数用途: 验证卡死、饥饿、空闲、未启动和退出的HTTP/心跳五字段完全同口径。
+@pytest.mark.parametrize("case", ["tick_wedged", "pending_starved", "idle", "not_started", "exited"])
+def test_status_and_heartbeat_share_dispatcher_stall_projection(tmp_path, monkeypatch, case):
+    paths, agent, clock, events = _stall_case(tmp_path, monkeypatch)
+    loop_health.mark_tick_started()
+    if case in {"pending_starved", "idle"}:
+        loop_health.mark_tick_finished(0)
+    if case == "pending_starved":
+        _enqueue(paths, "starved", "u")
+    clock[0] += 121 if case != "idle" else 10800
+    if case == "not_started":
+        loop_health.reset()
+    elif case == "exited":
+        loop_health.mark_exited(None)
+    paths.root.mkdir(parents=True, exist_ok=True)
+    paths.state.write_text(json.dumps({"status": "running", "pid": os.getpid(), "started_at": 1000}), encoding="utf-8")
+    replies = []
+    handler = SimpleNamespace(_send_json=lambda code, body: replies.append((code, body)))
+    server = SimpleNamespace(paths=paths)
+    handle_status(handler, server)
+    handle_status(handler, server)
+    assert events == []
+    gateway_loops._write_gateway_heartbeat(paths, agent, status="running", pid=os.getpid())
+    heartbeat = json.loads(paths.heartbeat.read_text(encoding="utf-8"))
+    stalled = case in {"tick_wedged", "pending_starved"}
+    expected_state = "stalled" if stalled else case if case in {"not_started", "exited"} else "running"
+    keys = ("dispatcher_state", "dispatcher_stalled", "dispatcher_stall_reason",
+            "dispatcher_stall_age_s", "dispatcher_stall_timeout_s")
+    for code, body in replies:
+        assert code == 200
+        assert body.get("dispatcher_state") == heartbeat["dispatcher_state"] == expected_state
+        assert body.get("dispatcher_stalled") is heartbeat["dispatcher_stalled"] is stalled
+        assert {key: body.get(key) for key in keys} == {key: heartbeat[key] for key in keys}
+    assert len(events) == int(stalled)
 
 
 def test_loop_health_error_records_are_redacted() -> None:

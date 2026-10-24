@@ -1,4 +1,4 @@
-# LLM: 仅显式install后注册进程级faulthandler/GC探针；本模块独占dump_traceback_later，调用方负责每拍重置及退出close。
+# LLM: 仅显式install后启用进程级诊断；本模块独占dump_traceback_later，派发tick前武装、finally撤销，生命周期退出close。
 # 模块用途: 向Gateway专用私有追加日志写GC暂停、线程栈及监护快照，不读消息正文、不改变业务状态或重启进程。
 from __future__ import annotations
 
@@ -138,8 +138,8 @@ def _gc_probe(phase: str, info: dict) -> None:
             pass
 
 
-# LLM: 必须先取消C定时器/注销自身信号再关fd；撤销失败保留句柄供重试，不能让旧C引用写入复用后的fd。
-# 函数用途: 幂等关闭诊断并移除全部自身GC回调，不改其他信号和业务状态。
+# LLM: 先移自身GC回调/清_gc_started，再撤C定时器与自身信号；撤销失败保留_handle及_installed_root，安全关fd时才清安装根。
+# 函数用途: 幂等释放诊断资源；不关闭仍被C借用的fd，不改其他信号或业务状态。
 def close() -> None:
     global _handle, _gc_started, _registered_signal, _installed_root
     with _lifecycle_lock:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import signal
 import subprocess
@@ -16,7 +17,7 @@ from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
 from agent_py_agent.cli import gateway_process as gp
 
 
-# LLM: 不在pytest宿主安装真实信号或C定时器；记录参数并始终清理模块资源。
+# LLM: 不安装真实信号/C定时器；缺少POSIX注册接口的平台也能建立替身，退出总会清理本模块资源。
 # 函数用途: 隔离诊断进程级副作用。
 @pytest.fixture
 def diagnostic_calls(monkeypatch):
@@ -24,8 +25,8 @@ def diagnostic_calls(monkeypatch):
     monkeypatch.setattr(signal, "getsignal", lambda signum: signal.SIG_DFL)
     monkeypatch.setattr(signal, "signal", lambda *args: None)
     monkeypatch.setattr(hd.faulthandler, "enable", lambda **kw: None)
-    monkeypatch.setattr(hd.faulthandler, "register", lambda *a, **kw: calls.append(("register", kw)))
-    monkeypatch.setattr(hd.faulthandler, "unregister", lambda *a: calls.append(("unregister",)))
+    monkeypatch.setattr(hd.faulthandler, "register", lambda *a, **kw: calls.append(("register", kw)), raising=False)
+    monkeypatch.setattr(hd.faulthandler, "unregister", lambda *a: calls.append(("unregister",)), raising=False)
     monkeypatch.setattr(hd.faulthandler, "dump_traceback_later", lambda *a, **kw: calls.append(("arm", kw)))
     monkeypatch.setattr(hd.faulthandler, "cancel_dump_traceback_later", lambda: calls.append(("cancel",)))
     hd.close()
@@ -34,9 +35,10 @@ def diagnostic_calls(monkeypatch):
     hd.close()
 
 
-# LLM: 必须复用原信号入口，不能替换sys.stderr的SIGUSR1注册。
+# LLM: 复用原信号入口，Windows只在本用例合成SIGUSR1编号且注册/恢复均为替身，不能替换生产stderr合同。
 # 函数用途: 检查生产安装持久诊断，恢复后释放句柄和GC探针。
-def test_gateway_signal_lifecycle_installs_persistent_diagnostics(tmp_path, diagnostic_calls):
+def test_gateway_signal_lifecycle_installs_persistent_diagnostics(tmp_path, monkeypatch, diagnostic_calls):
+    monkeypatch.setattr(signal, "SIGUSR1", getattr(signal, "SIGUSR1", 30), raising=False)
     paths = gateway_paths_from_root(tmp_path)
     previous = gp._install_gateway_signal_handlers(paths, {"pid": os.getpid()})
     try:
@@ -100,7 +102,7 @@ worker.start()
 try:
     facts = hd.capture_gateway_hang_facts(paths, os.getpid(), stage="tick_wedged", send_sigusr1=False)
     assert facts["sigusr1_sent"] is False
-    text = (paths.root / hd.GATEWAY_HANG_DUMP_FILENAME).read_text()
+    text = (paths.root / hd.GATEWAY_HANG_DUMP_FILENAME).read_text(encoding="utf-8")
     assert "tick_wedged" in text and text.count("most recent call first") >= 2, text
 finally:
     stop.set()
@@ -113,3 +115,42 @@ print("production capture and cleanup verified")
         cwd=Path(__file__).resolve().parents[2], text=True, capture_output=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "production capture and cleanup verified" in result.stdout
+
+
+# LLM: 直接推进真实fixture生成器，在缺失API时把setup异常转成明确断言；不把macOS自带属性冒充Windows能力。
+# 函数用途: 复现faulthandler没有register/unregister时fixture自身无法建立。
+def test_diagnostic_fixture_accepts_absent_signal_apis(monkeypatch):
+    monkeypatch.delattr(hd.faulthandler, "register", raising=False)
+    monkeypatch.delattr(hd.faulthandler, "unregister", raising=False)
+    probe = diagnostic_calls.__wrapped__(monkeypatch)
+    error = None
+    try:
+        try:
+            next(probe)
+        except AttributeError as exc:
+            error = exc
+        assert error is None, f"fixture must accept absent Windows APIs: {error}"
+    finally:
+        probe.close()
+
+
+# LLM: 只删除Windows缺失的接口，不伪造整个os平台；C计时器用fixture隔离，信号默认动作绝不能触发。
+# 函数用途: 验证缺失SIGUSR1和注册API时诊断安装、武装、撤销、采集及关闭均可安全降级。
+def test_diagnostics_without_posix_signal_apis(tmp_path, monkeypatch, diagnostic_calls):
+    monkeypatch.delattr(hd.faulthandler, "register", raising=False)
+    monkeypatch.delattr(hd.faulthandler, "unregister", raising=False)
+    monkeypatch.delattr(hd.signal, "SIGUSR1", raising=False)
+    monkeypatch.setattr(hd, "_PROC_ROOT", tmp_path / "missing-proc")
+    assert hd.install(tmp_path) is False
+    assert hd._handle is not None and hd._gc_probe in gc.callbacks
+    hd.arm_stall_watchdog(120)
+    assert diagnostic_calls[-1][0] == "arm"
+    hd.disarm_stall_watchdog()
+    assert diagnostic_calls[-1][0] == "cancel"
+    facts = hd.capture_gateway_hang_facts(tmp_path, os.getpid())
+    assert facts["sigusr1_sent"] is False and "write_error" not in facts
+    dump = tmp_path / hd.GATEWAY_HANG_DUMP_FILENAME
+    assert json.loads(dump.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    hd.close()
+    assert hd._handle is None and hd._installed_root is None
+    assert hd._gc_probe not in gc.callbacks
