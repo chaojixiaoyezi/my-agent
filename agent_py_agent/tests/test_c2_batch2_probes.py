@@ -1,5 +1,5 @@
 # LLM: 冻结审计回归只用临时owner、真实CAS/原生投影和受控摘要响应；不访问生产记忆或供应商。
-# 模块用途: 复现后台预载、发现新近性、并发压缩、metadata隐藏和HOT预算缺陷。
+# 模块用途: 复现后台预载、发现新近性、并发压缩、metadata隐藏和HOT预算缺陷；W1-5默认32项，小限额显式传入。
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -61,12 +61,14 @@ def test_rediscovery_refreshes_history_without_reordering_wire(tmp_path):
     assert "t1" in resolve_active_loaded_tool_names(current.metadata["discovered_tool_history"])
 
 
+# LLM: 显式8项只验证旧新近性算法，不再把8误作会话默认值；默认32另有回归。
+# 函数用途: 保留有限容量下的末次发现优先与wire相对顺序保护。
 def test_active_selection_uses_last_occurrence_but_preserves_selected_wire_order():
     from agent_py_agent.agent.tooling.tool_search_state import resolve_active_loaded_tool_names
 
     history = [f"t{i}" for i in range(1, 10)]
     loaded = [*history[1:], "t1"]
-    selected = resolve_active_loaded_tool_names([*history, *loaded])
+    selected = resolve_active_loaded_tool_names([*history, *loaded], max_active_discovered=8)
     assert selected == ("t1", *history[2:])
 
 
@@ -103,6 +105,8 @@ def test_metadata_is_hidden_without_losing_persistence():
     assert "discovered_tool_history" not in str(visible)
 
 
+# LLM: 真实transcript Compact须保留9个已发现项及原近期使用事实，不调用外部供应商。
+# 函数用途: 验证新默认容量不在压缩时回收旧工具。
 def test_transcript_compact_prioritizes_real_recent_tool_use(tmp_path, monkeypatch):
     from agent_py_agent.agent.conversation.compact import (
         ConversationCompactOptions,
@@ -124,9 +128,11 @@ def test_transcript_compact_prioritizes_real_recent_tool_use(tmp_path, monkeypat
         options=ConversationCompactOptions(force=True))
     assert result.compacted
     assert "t1" in result.thread.loaded_tool_names
-    assert len(result.thread.loaded_tool_names) == 8
+    assert result.thread.loaded_tool_names == history
 
 
+# LLM: 原真实CAS注入并发发现，W1-5不改变元数据历史或代次提交条件。
+# 函数用途: 保证压缩前9项和压缩期间新发现的一项都保留。
 def test_live_compact_bounds_active_tools_and_preserves_concurrent_discovery(compact_case):
     from agent_py_agent.agent.conversation.live_tool_compact import (
         LiveToolCompactBinding,
@@ -148,8 +154,8 @@ def test_live_compact_bounds_active_tools_and_preserves_concurrent_discovery(com
             projected_tokens_before=900, projected_tokens_after=300, policy=case.policy, request_id="r", attempt_id="a",
             source_tool_refs=({"run_id": "r", "attempt_id": "a", "turn_id": "t", "call_id": "call"},),
             after_checkpoint=concurrent))
-    # CAS按最新发现重新选择，新增成员同样保留且该批仍收敛到8个。
-    assert updated.loaded_tool_names == (*history[2:], "new")
+    # W1-5：默认32项容量，保留9个原项及压缩期间新发现的成员。
+    assert updated.loaded_tool_names == (*history, "new")
     assert updated.metadata["discovered_tool_history"] == [*history, "new"]
     assert updated.compact_generation == 1
 
@@ -161,6 +167,8 @@ def _memory(kind, content, entry_id):
                         created_at=1, updated_at=1, attributes={"origin": "user_explicit"})
 
 
+# LLM: 原生tool_use才是使用信号，默认32保留9项；不以正文补造工具。
+# 函数用途: 验证live Compact后旧工具及其它已发现项不丢失。
 def test_live_compact_preserves_old_tool_used_in_recent_message(compact_case):
     from agent_py_agent.agent.conversation.live_tool_compact import (
         LiveToolCompactBinding,
@@ -182,9 +190,11 @@ def test_live_compact_preserves_old_tool_used_in_recent_message(compact_case):
             projected_tokens_before=900, projected_tokens_after=300, policy=case.policy, request_id="r", attempt_id="a",
             source_tool_refs=({"run_id": "r", "attempt_id": "a", "turn_id": "t", "call_id": "call"},)))
     assert "t1" in updated.loaded_tool_names
-    assert len(updated.loaded_tool_names) == 8
+    assert updated.loaded_tool_names == history
 
 
+# LLM: 保留全部并发时序变体及重搜版本断言，只把旧8项默认预期升级为完整9项。
+# 函数用途: 防止摘要期间的工具重搜被压缩提交覆盖。
 @pytest.mark.parametrize("requery", ["t1", "t9"])
 @pytest.mark.parametrize("full_recent", [False, True])
 @pytest.mark.parametrize("versioned_baseline", [False, True])
@@ -226,7 +236,7 @@ def test_transcript_cas_preserves_existing_tool_rediscovered_during_summary(
         options=ConversationCompactOptions(force=True))
     assert result.compacted
     assert requery in result.thread.loaded_tool_names
-    assert len(result.thread.loaded_tool_names) == 8
+    assert result.thread.loaded_tool_names == history
     assert result.thread.metadata["discovered_tool_history"][-1] == requery
 
 
@@ -256,6 +266,8 @@ def test_memory_budget_omissions_are_counted_and_stay_inside_safe_envelope():
     assert memory_context_text(_budgeted_formal_memories(kept)) == rendered
 
 
+# LLM: 显式8项保持旧算法反例，默认容量的改变不能掩盖近期使用顺序退化。
+# 函数用途: 验证实际末次调用优先，而非首次调用优先。
 def test_compact_recent_use_extraction_uses_last_call_not_first_call():
     from agent_py_agent.agent.conversation.models import MessageLogEntry
     from agent_py_agent.agent.conversation.native_history import canonical_native_messages_envelope
@@ -273,5 +285,5 @@ def test_compact_recent_use_extraction_uses_last_call_not_first_call():
     })
     recent = recent_used_tool_names_from_messages([row])
     selected = active_tools_for_compact(SimpleNamespace(loaded_tool_names=history,
-        metadata={"discovered_tool_history": list(history)}), recent_used_tool_names=recent)
+        metadata={"discovered_tool_history": list(history)}), recent_used_tool_names=recent, max_active_discovered=8)
     assert selected == ("t1", *history[2:])

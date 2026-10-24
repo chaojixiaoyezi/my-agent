@@ -1,6 +1,7 @@
 # LLM: 主会话方法沿用的唯一负责模块；账本仅在线程隐藏字段中，原子更新不改摘要、pins 或权限。
 #   只记成功 get，正文或完整重读引用均沿原 IR 投递；关闭时不写账、不改提示。联测 conversation_method_carry。
-# 模块用途: 记下本会话读过的方法，供逐 run 目录和压缩后的参考资料恢复使用，不存第二份正文。
+#   已发现工具速查独立沿当前授权快照追加到尾部RuntimeFacts，不读正文、不改native工具前缀。
+# 模块用途: 记下本会话读过的方法，并在压缩后沿原IR恢复方法参考和工具参数速查。
 from __future__ import annotations
 
 import json
@@ -229,14 +230,70 @@ def remove_conversation_method(store: object, thread_id: str, name: str) -> bool
 
 # LLM: 业务首请求与中途压缩提交后的恢复接缝；正文仍是参考，不执行资源、不增加调用或扩权。
 #   budget_cap 只由中途压缩挂点传入（距再次触发压缩的余量），只能收紧配置预算；为 0 时本次不带、不消费代次。
-# 函数用途: 压缩后按当前授权和缓存预算恢复主会话方法；中途压缩后另按剩余容量封顶。
+#   速查无需Skill登记，先占同一headroom；普通速查故障独立诊断，不跳过原方法，取消仍原样传播。
+# 函数用途: 压缩后把参数速查和方法参考追加到尾部IR，中途压缩的总余量不被两项重复使用。
 def prepare_conversation_method_carry(agent: object, params: object, *, budget_cap: int | None = None) -> None:
+    spent = 0
     try:
-        _prepare_method_carry(agent, params, budget_cap)
+        spent = _prepare_discovered_tool_carry(agent, params, budget_cap)
+    except (InterruptedError, ToolCancelled, CancelledError):
+        raise
+    except Exception:  # noqa: BLE001 - 附带参数速查不能阻断原方法恢复。
+        logging.getLogger(__name__).warning("DISCOVERED_TOOL_MICRO_SCHEMA_CARRY_UNAVAILABLE")
+    try:
+        remaining = None if budget_cap is None else max(0, budget_cap - spent)
+        _prepare_method_carry(agent, params, remaining)
     except (InterruptedError, ToolCancelled, CancelledError):
         raise
     except Exception:  # noqa: BLE001 - 增强失败只有固定码，不泄漏路径或异常正文。
         logging.getLogger(__name__).warning("CONVERSATION_METHOD_CARRY_UNAVAILABLE")
+
+
+# LLM: 线程名只取当前params，schema只取当前授权snapshot；原IR按source去重，不新增第二持久标记。
+#   仅Compact后默认折叠开启时追加；更窄allowed_tools、取消/headroom保持；按完整行装箱，跳过放不下的行。
+# 函数用途: 将最近已发现工具的参数速查放到压缩后的上下文尾部，返回真正新增的预算占用。
+def _prepare_discovered_tool_carry(agent: object, params: object, budget_cap: int | None) -> int:
+    from ..agent_core.tool_ir_history import record_runtime_facts_turn_ir
+    from ..conversation.tool_discovery import build_discovered_tool_micro_schemas
+    from ..settings.reasoning_effort import run_thread_id
+    from ..tooling.tool_search_state import ordered_tool_names
+
+    snapshot = getattr(params, "tool_runtime_snapshot", None)
+    if (snapshot is None or getattr(agent.tools, "catalog_default_deferral_enabled", False) is not True
+            or getattr(params, "context_scope", "") in {"isolated", "control_plane"}
+            or getattr(agent, "_current_run_params", params) is not params):
+        return 0
+    thread_id = run_thread_id(params)
+    store = getattr(agent, "conversation_store", None)
+    thread = store.threads.load(thread_id) if store is not None and thread_id else None
+    if thread is None or thread.compact_generation <= 0:
+        return 0
+    metadata = getattr(thread, "metadata", {}) or {}
+    names = ordered_tool_names([*ordered_tool_names(metadata.get("discovered_tool_history", ())),
+                                *ordered_tool_names(getattr(thread, "loaded_tool_names", ()))])
+    allowed = getattr(params, "allowed_tools", None)
+    names = tuple(name for name in names if allowed is None or name in allowed)
+    schemas = build_discovered_tool_micro_schemas(snapshot, list(reversed(names)))
+    allowance = 1600 if budget_cap is None else min(1600, max(0, budget_cap))
+    selected, text, cost = [], "", 0
+    for schema in schemas:
+        candidate = _discovered_tool_reference_text(thread.compact_generation, [schema, *selected])
+        size = estimate_tokens("\n\n" + candidate)
+        if size <= allowance:
+            selected, text, cost = [schema, *selected], candidate, size
+    if not selected:
+        return 0
+    token = getattr(params, "cancellation_token", None)
+    if token is not None:
+        token.raise_if_cancelled()
+    return cost if record_runtime_facts_turn_ir(params, text, source="discovered_tool_micro_schemas") else 0
+
+
+# LLM: 仅序列化宿主选出的微schema及Compact代次，不解析正文或改变原生定义；完整行用于预算和IR去重。
+# 函数用途: 生成稳定的工具参数速查块，供预算装箱和实际尾部投递共用。
+def _discovered_tool_reference_text(generation: int, schemas: list) -> str:
+    return "[本会话已解锁工具参数速查]\n仅作参数摘要，以完整原生Schema为准，不改变权限。\n" + json.dumps(
+        {"compact_generation": generation, "tools": schemas}, ensure_ascii=False, separators=(",", ":"))
 
 
 # LLM: 引用原取消、运行 scope 与 ManagedOperationStore；不创建任务，不把会话号冒充执行号。

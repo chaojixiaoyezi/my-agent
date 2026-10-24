@@ -1,14 +1,71 @@
 # LLM: 加载名是线程展示事实，不是权限；只读正式搜索信封并原子并入线程，不从摘要正文反推或写Agent全局状态。
-# 模块用途: 在压缩移走搜索记录后仍让同一线程的下一回合恢复工具表。
+# 模块用途: 压缩后恢复同线程工具表，并从当前授权快照提供不改原生定义的参数速查。
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import replace
 
 from ..settings.reasoning_effort import run_thread_id
 from ..tooling.tool_search_state import (
+    MAX_SESSION_DISCOVERED_TOOLS,
     ordered_carried_loaded_tool_names,
     ordered_loop_loaded_tool_names,
     ordered_tool_names,
 )
+
+
+# LLM: 只读当前可用、可见且在allowed_tools内的ToolRuntimeSnapshot；不读全局handler或catalog_specs兜底。
+#   名称保序去重，max_tools限制成功条目；只复制required/类型/枚举，不携描述或热改原生schema。
+# 函数用途: 为尾部速查生成已授权工具的精简参数表，未知来源不返回定义。
+def build_discovered_tool_micro_schemas(
+    tools_registry: object, tool_names: tuple[str, ...] | list[str], *, max_tools: int = 12,
+) -> list[dict[str, object]]:
+    from ..tooling.models import ToolRuntimeSnapshot
+
+    if type(max_tools) is not int or max_tools < 0:
+        raise ValueError("max_tools must be a non-negative integer")
+    snapshot = tools_registry
+    if not isinstance(snapshot, ToolRuntimeSnapshot):
+        factory = getattr(tools_registry, "runtime_snapshot", None)
+        snapshot = factory() if callable(factory) else None
+    if not isinstance(snapshot, ToolRuntimeSnapshot) or not max_tools:
+        return []
+    rows = []
+    for name in ordered_tool_names(tool_names):
+        if snapshot.allowed_tools is not None and name not in snapshot.allowed_tools:
+            continue
+        runtime = snapshot.runtime(name)
+        if runtime is None or not runtime.availability.available or not runtime.exposure.model_visible:
+            continue
+        schema = runtime.model_spec.input_schema
+        rows.append({"name": name, "required": list(schema.get("required", ())), "properties": {
+            key: _micro_property_summary(value) for key, value in schema.get("properties", {}).items()
+        }})
+        if len(rows) >= max_tools:
+            break
+    return rows
+
+
+# LLM: 摘要不是校验器；联合类型/数组/引用保留结构，递归有界；大枚举明确标省略，不伪造枚举子集。
+# 函数用途: 丢弃长描述和示例，仅小型枚举完整显示，完整参数始终以原生定义为准。
+def _micro_property_summary(value: object, depth: int = 0) -> object:
+    if not isinstance(value, dict) or depth >= 3:
+        return "schema"
+    if isinstance(value.get("enum"), list):
+        values = value["enum"]
+        if len(values) > 8 or any(isinstance(item, (dict, list)) or (isinstance(item, str) and len(item) > 64) for item in values):
+            return {"type": value.get("type", "enum"), "enum_count": len(values), "enum_omitted": True}
+        return {"enum": deepcopy(values)}
+    for key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(value.get(key), list):
+            parts = [_micro_property_summary(item, depth + 1) for item in value[key]]
+            return "|".join(parts) if key != "allOf" and all(isinstance(item, str) for item in parts) else {key: parts}
+    kind = value.get("type")
+    if isinstance(kind, list):
+        return "|".join(str(item) for item in kind)
+    if kind == "array":
+        item = _micro_property_summary(value.get("items"), depth + 1)
+        return f"array<{item}>" if isinstance(item, str) else {"type": "array", "items": item}
+    return kind if isinstance(kind, str) else {"$ref": value["$ref"]} if "$ref" in value else "schema"
 
 
 # LLM: 新序列保留首次发现顺序，旧集合使用统一稳定兜底；损坏字段不变成新工具，授权仍由当前快照过滤。
@@ -64,10 +121,22 @@ def discovery_revisions(thread: object) -> dict[str, int]:
             if isinstance(name, str) and name and name == name.strip() and type(version) is int and version > 0}
 
 
-# LLM: typed发现同锁写线程；wire顺序不变，metadata刷新新近性并递增事件版本，尾项重搜也留事实，缺线程不新建。
-# 函数用途: 保留完整发现历史和当前加载顺序，不覆盖并发模型设置、Compact 代次或其它 metadata。
+# LLM: 仅消费正式搜索信封和宿主schema_reload事实；盲调补表的持久写仍在原结果IR归档之后，失败语义不变。
+# 函数用途: 在原post-archive边界持久记录搜索或自动补表，不让辅助写入提前阻断工具结果。
 def persist_discovered_tools(agent: object, params: object, record: dict[str, object]) -> None:
     names = ordered_carried_loaded_tool_names([record])
+    reload = record.get("schema_reload")
+    if isinstance(reload, dict) and reload.get("schema_auto_activated_for_next_turn") is True:
+        schema = reload.get("loaded_micro_schema")
+        if isinstance(schema, dict) and schema.get("name") == record.get("tool"):
+            names = ordered_tool_names([*names, schema["name"]])
+    record_session_discovered_tools(agent, names, params=params)
+
+
+# LLM: 调用方已用当前快照裁决展示资格；此入口仅记录名称，不授权或执行，不伪造一次tool_search调用。
+# 函数用途: 将搜索或宿主自动补表的名称原子并入当前线程，刷新同一份新近性与版本。
+def record_session_discovered_tools(agent: object, tool_names: Iterable[str], *, params: object) -> None:
+    names = ordered_tool_names(list(tool_names))
     thread_id = run_thread_id(params)
     store = getattr(agent, "conversation_store", None)
     if not names or not thread_id or store is None:
@@ -107,11 +176,12 @@ def recent_used_tool_names_from_messages(messages: Iterable[object]) -> tuple[st
     return refresh_discovery_recency((), recent)
 
 
-# LLM: CAS内纯计算；基线后重搜临时固定，不被旧recent-use挤掉，下一Compact基线前进后解除；pins须已发现，不授新权限。
-# 函数用途: 保护压缩期间新的搜索意图，再按真实使用与新近性挑选活跃集，保留wire相对顺序。
+# LLM: CAS内纯计算；默认容量沿唯一32项常量，显式小限额和基线后重搜保护不变；pins须已发现，不扩权。
+# 函数用途: 压缩时保持会话内已发现工具的wire顺序，按明确限额才收缩。
 def active_tools_for_compact(
     thread: object, *, recent_used_tool_names: tuple[str, ...] = (),
     baseline_discovery_revisions: dict[str, int] | None = None,
+    max_active_discovered: int = MAX_SESSION_DISCOVERED_TOOLS,
 ) -> tuple[str, ...]:
     from ..tooling.tool_search_state import resolve_active_loaded_tool_names
 
@@ -124,7 +194,8 @@ def active_tools_for_compact(
     pins = tuple(name for name in normalized_loaded_tools([
         *normalized_loaded_tools(metadata.get("pinned_tool_names", ())), *fresh,
     ]) if name in history)
-    return resolve_active_loaded_tool_names([*loaded, *history], recent_used_tool_names=recent_used_tool_names, pinned_tool_names=pins)
+    return resolve_active_loaded_tool_names([*loaded, *history], recent_used_tool_names=recent_used_tool_names,
+                                          pinned_tool_names=pins, max_active_discovered=max_active_discovered)
 
 
 # LLM: 调用方在CAS前调用；锁外冻结消息使用序列和发现版本，返回的selector锁内只读最新线程，无I/O。
