@@ -539,86 +539,20 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
     return _bounded_live_manifest(live)
 
 
-# LLM: 只压缩live副本，先短用途再省名卡；兜底保留消费者事实，不更改完整manifest或授权，省略必须显式可追溯。
-# 函数用途: 按完整UTF-8信封计量，优先保留状态、使用/发现入口、完整计数与归档引用。
+# LLM: 只委托纯字节裁剪，不缓存权限或归档引用；完整manifest仍由本次调用原样归档。
+# 函数用途: 在原live预算内生成等价短投影。
 def _bounded_live_manifest(live: dict[str, object]) -> dict[str, object]:
-    # LLM: 与最终输出使用同一JSON选项，只计量字节，无副作用。
-    # 函数用途: 返回候选live信封的真实UTF-8大小。
-    def size(value: object) -> int:
-        return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    from .live_manifest_projection import bounded_live_manifest
 
-    if size(live) <= _LIVE_LIST_TOOLS_MAX_BYTES:
-        return live
-    result = dict(live)
-    result["tools"] = [dict(item) for item in live.get("tools") or []]
-    result["unavailable_tools"] = list(live.get("unavailable_tools") or [])
-    for length in (18, 8):
-        for item in result["tools"]:
-            for key in ("purpose", "description"):
-                if key in item:
-                    item[key] = item[key][:length]
-        if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
-            return result
-    omitted = {"tools": 0, "unavailable_tools": 0}
-    result["omitted_items"] = omitted
-    for key in ("tools", "unavailable_tools"):
-        while result[key] and size(result) > _LIVE_LIST_TOOLS_MAX_BYTES:
-            result[key].pop()
-            omitted[key] += 1
-    if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
-        return result
-    result = {
-        "schema_name": "tool_runtime_manifest_live",
-        "schema_version": 4,
-        "counts": live["counts"],
-        "visible_tool_count": live["visible_tool_count"],
-        "self_context": {key: value for key, value in (live.get("self_context") or {}).items()
-                         if key in {"tool_states", "usage", "discovery"}},
-        "tools": [],
-        "unavailable_tools": [],
-        "omitted_items": omitted,
-        "details_omitted": True,
-        "detail_ref": "tool_search / self_map(section='tools'); 权限与完整目录读取本次归档",
-        "detail_policy": {"read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
-    }
-    return _bounded_manifest_core(result, size)
+    return bounded_live_manifest(live, _LIVE_LIST_TOOLS_MAX_BYTES)
 
 
-# LLM: 仅处理仍超预算的核心副本；普通事实原样保留，极端输入显式记录省略数量，完整值仍在本次归档。
-# 函数用途: 先缩长原因、再缩异常大字典，最后限制状态行数，保证最终信封不突破字节预算。
+# LLM: 兼容原私有入口，实际计量与最终输出参数完全一致，不缓存目录事实。
+# 函数用途: 委托线性字节裁剪处理异常大核心字段。
 def _bounded_manifest_core(result: dict[str, object], size: Callable[[object], int]) -> dict[str, object]:
-    if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
-        return result
-    context = dict(result["self_context"])
-    states = [dict(state) for state in context.get("tool_states") or []]
-    context["tool_states"] = states
-    result["self_context"] = context
-    omitted = {"tool_state_details": 0, "tool_states": 0, "usage": 0, "discovery": 0}
-    result["self_context_omitted"] = omitted
-    for state in states:
-        for key in ("reason", "error_code"):
-            value = state.get(key)
-            if isinstance(value, str) and len(value) > 160:
-                state[key] = value[:160] + "…"
-                omitted["tool_state_details"] += 1
-    for key in ("usage", "discovery"):
-        value = context.get(key)
-        if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES or size(value) <= _LIVE_LIST_TOOLS_MAX_BYTES // 4:
-            continue
-        if isinstance(value, dict):
-            context[key] = dict(value)
-            for field in sorted(value, key=lambda name: size({name: value[name]}), reverse=True):
-                if size(result) <= _LIVE_LIST_TOOLS_MAX_BYTES:
-                    break
-                del context[key][field]
-                omitted[key] += 1
-        else:
-            context[key] = None
-            omitted[key] = 1
-    while states and size(result) > _LIVE_LIST_TOOLS_MAX_BYTES:
-        states.pop()
-        omitted["tool_states"] += 1
-    return result
+    from .live_manifest_projection import bounded_manifest_core
+
+    return bounded_manifest_core(result, _LIVE_LIST_TOOLS_MAX_BYTES)
 
 
 # LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；无预载子集的显式授权全部直出，后台预载仍沿原折叠链。

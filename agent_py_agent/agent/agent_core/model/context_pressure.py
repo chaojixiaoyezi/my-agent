@@ -724,8 +724,7 @@ def _provider_observation_matches(observation: object, fingerprint: str) -> bool
     )
 
 
-# LLM: 每个live_archive_state仅缓存一份数字快照；键覆盖内容摘要、session和工具表面，不靠list身份或首尾猜中段未变。
-#   命中不组装消息或重估token，校准/触发线仍由外层逐次计算；缓存不含消息，返回分类新字典避免调用方污染。
+# LLM: 请求私有memo绑定原完整内容键，同键冷miss合流；校准与触发裁决不缓存，同步对象不进入归档。
 # 函数用途: 共享同一轮可见输入的原始计量；内容变化或不能证明安全缓存时沿原纯计量重新计算。
 def _model_visible_context_components(
     agent: object,
@@ -736,9 +735,20 @@ def _model_visible_context_components(
     fingerprint = request_projection_surface_fingerprint(agent, projection)
     state = getattr(params, "live_archive_state", None)
     key = _context_estimate_key(params, projection, history, guidance, already_forwarded, fingerprint) if isinstance(state, dict) else None
-    cached = state.get("_last_estimate_cache") if isinstance(state, dict) else None
-    if key is not None and isinstance(cached, tuple) and len(cached) == 5 and cached[0] == key:
-        return cached[1], cached[2], dict(cached[3]), cached[4]
+    from .context_estimate_cache import estimate_memo_for
+
+    memo = estimate_memo_for(params) if key is not None else None
+    # LLM: 闭包只保留本次key的输入，等待期间不重新取可变params的消息集合。
+    # 函数用途: 延迟执行同键的昂贵组件计量。
+    def compute():
+        return _estimate_visible_components(params, (projection, history, guidance, already_forwarded), fingerprint)
+    return memo.evaluate(key, compute) if memo is not None else compute()
+
+
+# LLM: 延迟native消息投影到冷miss，计算使用生成key的同一输入；只有纯计量结果进入memo。
+# 函数用途: 沿原组件估算器计算一次可见上下文。
+def _estimate_visible_components(params, prepared, fingerprint):
+    projection, history, guidance, already_forwarded = prepared
     native = projection.messages is not None
     if native:
         from ..tool_ir_history import project_native_provider_messages
@@ -752,8 +762,6 @@ def _model_visible_context_components(
         projection, pending_runtime_guidance=guidance, media_token_reserve=media_token_reserve() if native else 0,
     )
     protocol = "native" if native else "text"
-    if key is not None:
-        state["_last_estimate_cache"] = (key, protocol, current, tuple(components.items()), fingerprint)
     return protocol, current, components, fingerprint
 
 

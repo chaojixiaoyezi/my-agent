@@ -204,6 +204,8 @@ class _ToolConfigFields:
     # 一次最多同时执行几个工具（原 max_tool_calls_per_round 已并入）：空 = 8，正数 = 上限，0 = 不限制；
     # 任务属性 max_parallel_tool_calls 可单任务覆盖，后台工作片另有 max_tool_calls_per_round 任务属性封顶。
     max_parallel_tool_calls: int | None = None
+    # 同owner在本进程内共享的工具worker额度；0保持原行为，任务属性不能覆盖。
+    max_parallel_tool_calls_per_owner: int = 0
     # 后台调度器的周期性孤儿 supervision(reconcile 兜底,零 LLM 成本):每隔此秒数巡查一次
     # "盯守死岗补建接管 + durable 复活 PENDING/PLANNING 停滞孤儿"。事件唤醒覆盖不了
     # 静默死亡(SIGKILL/断电不发 wake),靠这里捡回;0=关闭。
