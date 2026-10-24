@@ -19,14 +19,26 @@ class BuildMetadataReport:
     errors: tuple[str, ...] = ()
 
 
-# LLM: 每个事件仅来自同次已读订单/安装表；无关坏安装包名不污染正常字符串组，保留原整数seq判据。
+# LLM: 历史坏订单可能含非字符串package_id或非整数seq；过滤后再建组，防止unhashable类型破坏整表。
+# 函数用途: 校验InstallOrder核心字段类型是否可安全参与取代计算。
+def _valid_order(order) -> bool:
+    return (
+        isinstance(getattr(order, 'package_id', None), str)
+        and type(getattr(order, 'seq', None)) is int
+        and isinstance(getattr(order, 'version', None), str)
+        and isinstance(getattr(order, 'sha256', None), str)
+    )
+
+
+# LLM: 每个事件仅来自同次已读订单/安装表；无关坏安装包名或坏订单不污染正常字符串组，保留原整数seq判据。
 # 函数用途: 建立单次调用的订单取代事件分组，不读磁盘。
 def order_events(orders, installs):
     groups = {}
     for order in orders:
-        groups.setdefault(order.package_id, []).append((order.seq, order.version, order.sha256))
+        if _valid_order(order):
+            groups.setdefault(order.package_id, []).append((order.seq, order.version, order.sha256))
     for row in installs:
-        if isinstance(row.get('package_id'), str) and isinstance(row.get('seq'), int):
+        if isinstance(row.get('package_id'), str) and type(row.get('seq')) is int:
             groups.setdefault(row.get('package_id'), []).append((row['seq'], str(row.get('version') or ''), str(row.get('sha256') or '')))
     return groups
 

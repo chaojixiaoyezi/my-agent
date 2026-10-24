@@ -127,14 +127,13 @@ class ProcessOutputCapture:
     def stopping(self) -> bool:
         return self._stop.is_set()
 
-    # LLM: 每流独立限额，超过部分丢弃但持续计数；通知消费者，不持锁做IO。
+    # LLM: 每流独立限额，超过部分丢弃但持续计数；仅写缓冲不唤醒退出等待者，避免大块输出引发等待线程空转。
     # 函数用途: 记下一块真实读取字节。
     def record_data(self, name: str, data: bytes) -> None:
-        with self._changed:
+        with self._lock:
             self._seen[name] += len(data)
             remaining = max(0, self._max - len(self._buffers[name]))
             self._buffers[name].extend(data[:remaining])
-            self._notify()
 
     # LLM: 仅真实零字节读取或None流可记EOF，异常/停止不可调用。
     # 函数用途: 记录一条流的真实末尾。

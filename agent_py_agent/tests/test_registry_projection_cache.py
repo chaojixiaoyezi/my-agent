@@ -194,3 +194,24 @@ def test_record_conversion_failure_does_not_change_operation_scan(tmp_path):
     assert registry.artifact_operation_recorded_ids(tmp_path, operation_key="op", expected_backup_refs={"a": "r"}) == {"a"}
     with pytest.raises(OverflowError):
         registry.latest_artifact_records_report(tmp_path)
+
+
+# LLM: 增量追加只解析新增尾部行，多root交替访问保持驻留不驱逐。
+# 函数用途: 锁定P1-3追加写增量解析与双root热命中零重复json.loads。
+def test_incremental_append_parses_only_new_lines_and_keeps_multi_root_warm(tmp_path, monkeypatch):
+    root_a, root_b = tmp_path / "root-a", tmp_path / "root-b"
+    path_a = _ledger(root_a, '{"artifact_id":"a1","path":"p1"}\n{"artifact_id":"a2","path":"p2"}\n')
+    _ledger(root_b, '{"artifact_id":"b1","path":"pb1"}\n')
+    assert set(registry.latest_artifact_records(root_a)) == {"a1", "a2"}
+    assert set(registry.latest_artifact_records(root_b)) == {"b1"}
+    loads = []
+    original_loads = json.loads
+    monkeypatch.setattr(json, "loads", lambda text, *a, **kw: loads.append(text) or original_loads(text, *a, **kw))
+    assert set(registry.latest_artifact_records(root_a)) == {"a1", "a2"}
+    assert set(registry.latest_artifact_records(root_b)) == {"b1"}
+    assert loads == []
+    with path_a.open("a", encoding="utf-8") as handle:
+        handle.write('{"artifact_id":"a3","path":"p3"}\n')
+    records = registry.latest_artifact_records(root_a)
+    assert set(records) == {"a1", "a2", "a3"}
+    assert len(loads) == 1

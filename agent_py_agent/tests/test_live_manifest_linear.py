@@ -205,3 +205,7 @@ def test_core_non_dictionary_and_state_edges(monkeypatch, usage):
     monkeypatch.setattr(registry, "_LIVE_LIST_TOOLS_MAX_BYTES", 1200)
     actual = registry._bounded_manifest_core(copy.deepcopy(core), lambda _: pytest.fail("旧全量循环仍在调用"))
     assert encoded(actual) == encoded(legacy_bound_core(copy.deepcopy(core), 1200))
+    minimal = {"counts": {}, "visible_tool_count": 0, "self_context": {}, "tools": [{"name": "a"}], "unavailable_tools": []}
+    monkeypatch.setattr(registry, "_LIVE_LIST_TOOLS_MAX_BYTES", 15)
+    tiny = registry._bounded_live_manifest(minimal)
+    assert "usage" not in tiny["self_context"] and "discovery" not in tiny["self_context"]

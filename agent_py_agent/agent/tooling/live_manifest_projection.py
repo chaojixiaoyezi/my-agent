@@ -91,10 +91,12 @@ def _shorten_states(states, omitted):
                 omitted["tool_state_details"] += 1
 
 
-# LLM: 排序只编码每字段一次，稳定降序保留同分插入顺序；不在删除中途重查quarter门槛。
+# LLM: 排序只编码每字段一次，稳定降序保留同分插入顺序；缺失或已为None的字段不插入新键，不在删除中途重查quarter门槛。
 # 函数用途: 按原优先级削减usage或discovery字典。
 def _drop_context_field(context, key, omitted, total, limit):
     value = context.get(key)
+    if value is None:
+        return total
     size = json_size(value)
     if total <= limit or size <= limit // 4:
         return total

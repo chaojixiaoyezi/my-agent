@@ -242,7 +242,14 @@ def _superseded_by(store: LearnpackStore, order: InstallOrder) -> str:
 #   只读。安装回执的 open_orders 与宿主提示都用它，让给用户的确认行对得上事实（2026-10-07 生产复测：她把早已执行过的单又交给用户）。
 # 函数用途: 列出现在还有效、等用户确认的安装单。
 def open_orders(store: LearnpackStore, entries: tuple = ()) -> list[InstallOrder]:
-    orders = store.all_orders()
+    orders = [
+        order
+        for order in store.all_orders()
+        if isinstance(order.package_id, str)
+        and type(order.seq) is int
+        and isinstance(order.version, str)
+        and isinstance(order.sha256, str)
+    ]
     events = order_events(orders, store.installs())
     rows = [order for order in orders
             if store.order_outcome(order.order_id) is None and not superseded_by_events(order, events.get(order.package_id, ()))

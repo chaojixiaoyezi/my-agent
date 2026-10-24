@@ -46,7 +46,7 @@ def test_preexisting_root_symlink_is_not_a_new_authority(tmp_path):
     root.rename(root.with_name("owner-old"))
     root.symlink_to(foreign, target_is_directory=True)
     result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(root, "run-artifact:call-artifact"))
-    assert not result["ok"] and "content" not in result
+    assert not result["ok"] and result["error_code"] == "artifact_unreadable" and "content" not in result
 
 
 # LLM: 真实工具入口必须保留宿主认证根的原路径，不能在内部根选择阶段resolve后自授权。
@@ -62,7 +62,7 @@ def test_tool_root_selection_preserves_symlink_rejection(tmp_path, root_key):
         params[root_key] = str(root)
     outcome = tool.execute(params)
     result = json.loads(outcome.output)
-    assert not outcome.ok and "content" not in result
+    assert not outcome.ok and outcome.error_code == "ARTIFACT_UNREADABLE" and "content" not in result
 
 
 # LLM: 在路径校验完成、正文尚未打开的函数边界替换root/父目录/叶；nofollow必须锚定认证根。
@@ -142,7 +142,7 @@ def test_safe_open_compatibility_and_fail_closed(tmp_path, shape):
     else:
         with patch.object(nofollow_fs, "_supports_dir_fd", return_value=False):
             result = reader.read_tool_output_artifact(reader.ReadToolOutputArtifactRequest(root, "run-artifact:call-artifact"))
-    assert not result["ok"] and "content" not in result
+    assert not result["ok"] and result["error_code"] == "artifact_unreadable" and "content" not in result
 
 
 # LLM: 旧wrapper优先sha合同保持，但同大小同mtime不允许绕过新一轮完整content哈希。

@@ -14,7 +14,7 @@ from errno import ELOOP
 from pathlib import Path
 from typing import Any
 
-from ...common.nofollow_fs import open_readonly_file_beneath
+from ...common.nofollow_fs import open_directory_beneath, open_readonly_file_beneath
 from ...common.tool_index_stream import iter_decoded_tool_index_objects
 from ...common.tool_output_paths import (
     tool_output_index_paths_for_lookup,
@@ -51,6 +51,7 @@ class PreparedToolOutputArtifactRead:
     artifact_ref: str
     index_paths: tuple[Path, ...]
     record: Mapping[str, Any] | None
+    read_error: str = ""
 
 
 # LLM: 正文打开必须使用认证root而非候选parent；path只是已解析的读取目标。
@@ -63,7 +64,21 @@ class _RegisteredArtifactRead:
     request: ReadToolOutputArtifactRequest
 
 
-# LLM: 只发现一次索引，空ref零发现；浅复制命中记录防止后续调用方修改原候选。
+# LLM: 缺失根目录不等于不受信，仅在根本身为符号链接或平台缺少严格dir_fd能力时返回明确错误描述。
+# 函数用途: 校验宿主归档根本身是否满足严格no-follow打开前提。
+def _verify_trusted_artifact_root(trusted_root: Path) -> str:
+    try:
+        descriptor = open_directory_beneath(trusted_root, (), require_dir_fd=True)
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    else:
+        os.close(descriptor)
+        return ""
+
+
+# LLM: 只发现一次索引，空ref零发现；浅复制命中记录防止后续调用方修改原候选，并保留索引打开故障供区分未注册与不可读。
 # 函数用途: 为预算和读取生成请求局部查找计划。
 def prepare_tool_output_artifact_read(request: ReadToolOutputArtifactRequest) -> PreparedToolOutputArtifactRead:
     root = Path(request.root).expanduser().resolve(strict=False)
@@ -71,8 +86,22 @@ def prepare_tool_output_artifact_read(request: ReadToolOutputArtifactRequest) ->
     if not artifact_ref:
         return PreparedToolOutputArtifactRead(request, root, "", (), None)
     paths = tuple(tool_output_index_paths_for_lookup(root))
-    record = _find_index_record(root, artifact_ref, request, index_paths=paths)
-    return PreparedToolOutputArtifactRead(request, root, artifact_ref, paths, dict(record) if record is not None else None)
+    open_errors: list[str] = []
+    try:
+        record = _find_index_record(root, artifact_ref, request, index_paths=paths, open_errors=open_errors)
+    except TypeError:
+        record = _find_index_record(root, artifact_ref, request, index_paths=paths)
+    read_error = ""
+    if record is None:
+        read_error = open_errors[0] if open_errors else _verify_trusted_artifact_root(Path(request.root).expanduser())
+    return PreparedToolOutputArtifactRead(
+        request,
+        root,
+        artifact_ref,
+        paths,
+        dict(record) if record is not None else None,
+        read_error=read_error,
+    )
 
 
 # LLM: 只允许同root/ref及逐字段一致的宿主scope复用；内容窗口可变，不把旧scope判断当授权缓存。
@@ -95,6 +124,8 @@ def read_tool_output_artifact(request: ReadToolOutputArtifactRequest, *, prepare
     if not artifact_ref:
         return _error_payload("missing_artifact_ref", artifact_ref, "artifact_ref is required")
     if record is None:
+        if plan.read_error:
+            return _error_payload("artifact_unreadable", artifact_ref, plan.read_error)
         return _error_payload("artifact_not_registered", artifact_ref, "artifact ref was not found in tool output index")
     if not _record_allowed_for_read_scope(record, request):
         return _error_payload(
@@ -234,7 +265,9 @@ def _find_index_record(
     root: Path,
     artifact_ref: str,
     request: ReadToolOutputArtifactRequest,
-    *, index_paths: tuple[Path, ...] | None = None,
+    *,
+    index_paths: tuple[Path, ...] | None = None,
+    open_errors: list[str] | None = None,
 ) -> dict[str, Any] | None:
     try:
         ref_path = Path(artifact_ref).expanduser()
@@ -243,7 +276,12 @@ def _find_index_record(
         # 原先先读取索引再求引用路径；极端引用路径错误不能遮蔽索引的读取/解码错误。
         _index_records_for_root(root, index_paths=index_paths, trusted_root=request.root)
         raise
-    records = _index_records_for_root(root, _ArtifactIndexQuery(artifact_ref, resolved_ref), index_paths=index_paths, trusted_root=request.root)
+    query = _ArtifactIndexQuery(
+        artifact_ref,
+        resolved_ref,
+        open_errors=open_errors if open_errors is not None else [],
+    )
+    records = _index_records_for_root(root, query, index_paths=index_paths, trusted_root=request.root)
     for candidate in records:
         if candidate.error is not None:
             raise candidate.error
@@ -303,15 +341,19 @@ def _resolve_index_record_path(path: str, *, cache: _ArtifactPathCache | None = 
     return _resolved_posix_index_path(path)
 
 
-# LLM: 干净父目录仅是query内性能线索；symlink/其它IO错误回原解析，不据此跳过最终nofollow打开。
+# LLM: 干净父目录仅是query内性能线索；只缓存最多256个已证实的干净目录，防止海量缺失路径膨胀缓存。
 # 函数用途: 每次查询对相同规范父目录只做一次真实路径和目录确认。
 def _clean_index_parent(parent: str, cache: _ArtifactPathCache) -> bool:
-    if parent not in cache.clean_parents:
-        try:
-            cache.clean_parents[parent] = os.path.realpath(parent, strict=False) == parent and stat.S_ISDIR(os.stat(parent).st_mode)
-        except OSError:
-            cache.clean_parents[parent] = False
-    return cache.clean_parents[parent]
+    cached = cache.clean_parents.get(parent)
+    if cached is not None:
+        return cached
+    try:
+        clean = os.path.realpath(parent, strict=False) == parent and stat.S_ISDIR(os.stat(parent).st_mode)
+    except OSError:
+        clean = False
+    if clean and len(cache.clean_parents) < 256:
+        cache.clean_parents[parent] = True
+    return clean
 
 
 # LLM: 与Path.resolve(strict=False)相同：realpath后stat复核环链，普通缺失/权限错误不抛，ELOOP仍RuntimeError。
@@ -419,13 +461,14 @@ class _ArtifactIndexCandidate:
     error: Exception | None = None
 
 
-# LLM: query内缓存不跨请求共享，也不改变共用流式解码器的错误合同。
+# LLM: query内缓存不跨请求共享，也不改变共用流式解码器的错误合同；open_errors记录安全打开拒绝原因。
 # 类用途: 将查找条件与路径计算缓存传给索引扫描。
 @dataclass(frozen=True)
 class _ArtifactIndexQuery:
     artifact_ref: str
     resolved_ref: Path | None
     paths: _ArtifactPathCache = field(default_factory=_ArtifactPathCache)
+    open_errors: list[str] = field(default_factory=list)
 
 
 # LLM: 已安全打开的FD携带索引名供原读取计量识别；是整数描述符，不会再次按路径打开。
@@ -447,10 +490,10 @@ class _ArtifactIndexSource:
     path: Path
     relative_parts: tuple[str, ...]
 
-    # LLM: 存在检查只是保持原缺失行为，不授予读取；真正权限由open的认证根FD链核验。
-    # 函数用途: 沿共用读取器协议报告索引是否存在。
+    # LLM: 用lexists不跟随符号链接，确保悬空链接进入open被严格拒绝而非当作缺失文件跳过。
+    # 函数用途: 沿共用读取器协议报告索引路径节点是否存在。
     def exists(self) -> bool:
-        return self.path.exists()
+        return os.path.lexists(self.path)
 
     # LLM: Path.open最终把整数交给io.open，复用原索引计量；流创建失败关闭未移交FD，不按路径重开。
     # 函数用途: 安全打开索引并将同一FD包装成共用解码器所需的二进制流。
@@ -463,7 +506,7 @@ class _ArtifactIndexSource:
             raise
 
 
-# LLM: IO失败整份丢弃，严格UTF8不吞；规范root仅算相对组件，打开锚定原trusted_root，复用原计量入口。
+# LLM: IO失败整份丢弃并记录非缺失打开错误，严格UTF8不吞；规范root仅算相对组件，打开锚定原trusted_root。
 # 函数用途: 流式读取一个索引，只保留匹配事实或延迟路径错误。
 def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *, root: Path | None = None, trusted_root: Path | None = None) -> list[_ArtifactIndexCandidate]:
     source = _ArtifactIndexSource(trusted_root or root, index_path, index_path.relative_to(root).parts) if root is not None else index_path
@@ -476,7 +519,10 @@ def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *
             candidate = _artifact_index_candidate(record, query)
             if candidate is not None:
                 records.append(candidate)
-    except OSError:
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        query.open_errors.append(f"{type(exc).__name__}: {exc}")
         return []
     return records
 

@@ -128,3 +128,7 @@ def test_empty_paths_and_clean_parents_are_resolved_once_per_lookup(tmp_path):
     assert len(empty) <= 2
     assert sum(str(c.args[0]) == str(directory) for c in realpath.call_args_list) == 2
     assert not any("noise-" in str(c.args[0]) for c in realpath.call_args_list)
+    cache = reader._ArtifactPathCache()
+    for idx in range(300):
+        assert not reader._clean_index_parent(str(tmp_path / f"missing-parent-{idx}"), cache)
+    assert cache.clean_parents == {}

@@ -121,8 +121,9 @@ def test_build_metadata_bound_errors_and_whitelist(make_agent, tmp_path, monkeyp
 @pytest.mark.parametrize('package', [[], {}, None, 17])
 def test_malformed_install_package_does_not_break_valid_orders(package):
     order = InstallOrder('lp-00000001', 'a' * 64, 'capability_pack', 'one', '1', '', 1)
+    bad_order = InstallOrder('lp-00000002', 'b' * 64, 'capability_pack', package, '1', '', 2)
     rows = [{'package_id': package, 'seq': 2, 'version': 'bad', 'sha256': 'b' * 64}]
-    store = SimpleNamespace(all_orders=lambda: [order], installs=lambda: rows, orders_for=lambda _: [order], order_outcome=lambda _: None)
+    store = SimpleNamespace(all_orders=lambda: [order, bad_order], installs=lambda: rows, orders_for=lambda _: [order, bad_order], order_outcome=lambda _: None)
     assert open_orders(store) == [order]
     assert _superseded_by(store, order) == ''
 

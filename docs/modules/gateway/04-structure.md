@@ -3804,4 +3804,4 @@ private_interaction_service原503 catch调用同叶_report_private_interaction_f
 
 ### 请求修订去重与上下文用量来源（2026-10-23）
 
-`gateway_parts/request_prompt.py` 按结构化版本指纹省略重复修订块；`gateway_parts/stream_events.py` 的 `public_context_usage_payload` 直接委托 `conversation/context_usage.py:public_context_usage`。
+`gateway_parts/request_prompt.py` 按结构化版本指纹省略重复修订块；`gateway_parts/stream_events.py` 的 `public_context_usage_payload` 直接委托 `conversation/context_usage.py:public_context_usage`。`gateway_parts/stream_writer.py` 的 `_commit_model_response` 经实例级 `_commit_lock` 串行化 `_committed_model_calls` 去重与 `assistant_commentary` 落盘，消除并行工具 Worker 同时发出 `started` 事件时的说明文本重复提交竞态。

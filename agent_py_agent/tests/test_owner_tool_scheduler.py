@@ -466,3 +466,91 @@ def test_worker_start_failure_finishes_future_and_recovers(tmp_path, monkeypatch
             future.result(5)
         assert caught.value is error and scheduler._active == 0 and not scheduler._queue
     assert scheduler.submit(Item("recovered", lambda: 42)).result(5) == 42
+
+
+# LLM: 串行工具可能晋升_current_run_task_workspace；cap=0与cap>0都必须把晋升后的路径传给后继调用和轮后读取方。
+# 函数用途: 锁定P1-1串行工具工作区晋升不回滚，及P2-1并发started不重复提交模型说明。
+@pytest.mark.parametrize("cap", [0, 1])
+def test_serial_workspace_promotion_and_concurrent_commit_dedupe(tmp_path, cap):
+    import json
+    import sys
+    import threading
+
+    from agent_py_agent.agent.gateway_parts.stream_writer import BufferedChunkStreamWriter
+    from agent_py_agent.agent.runtime_context import ThreadLocalAgentAttribute
+
+    # LLM: 使用真实ThreadLocalAgentAttribute验证跨线程/本线程属性保持。
+    # 类用途: 提供带线程局部工作区属性的轻量宿主替身。
+    class HostAgent:
+        _current_run_task_workspace = ThreadLocalAgentAttribute("_current_run_task_workspace")
+
+        # LLM: 绑定owner根与并发上限配置。
+        # 函数用途: 初始化测试宿主。
+        def __init__(self):
+            self.home_paths = SimpleNamespace(owner_home_dir=tmp_path)
+            self.config = SimpleNamespace(max_parallel_tool_calls_per_owner=cap, sqlite_connection_reuse=False)
+
+    agent = HostAgent()
+    agent._current_run_task_workspace = str(tmp_path)
+    promoted_root = str(tmp_path / "runs" / "promoted-work")
+    seen_workspaces = []
+
+    # LLM: 第一条调用模拟write_file晋升工作区，第二条验证进入时即看到晋升结果。
+    # 函数用途: 记录每次串行工具进入时的线程局部工作区。
+    def execute(work):
+        seen_workspaces.append(getattr(agent, "_current_run_task_workspace", None))
+        if work.idx == 1:
+            agent._current_run_task_workspace = promoted_root
+        return _success(work, "ok")
+
+    request = _round_request(
+        agent=agent,
+        params=SimpleNamespace(tool_context=[], task_attributes={}),
+        tool_rounds=1,
+        response=None,
+        calls=[{"tool": "write_file"}, {"tool": "write_file"}],
+        execute_one=execute,
+        record_one=lambda _: None,
+    )
+    progress = rounds._ToolRoundProgress()
+    rounds._execute_serial_step(request, request.calls, 0, 0, progress)
+    rounds._execute_serial_step(request, request.calls, 1, 1, progress)
+    assert seen_workspaces == [str(tmp_path), promoted_root]
+    assert agent._current_run_task_workspace == promoted_root
+
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        chunk_path = tmp_path / "stream.jsonl"
+        writer = BufferedChunkStreamWriter(chunk_path, rich_transcript=True, flush_chars=1, delivery_channel="feishu")
+        writer.set_verbose_level("stream")
+        barrier = threading.Barrier(8)
+        payload = {
+            "schema": "assistant_messages.v1",
+            "boundary": "tools",
+            "final_text": "",
+            "source": {"call_id": "model-call-1", "purpose": "main"},
+            "messages": [
+                {
+                    "text": "并发工具启动说明",
+                    "phase": "commentary",
+                    "protocol": "responses",
+                    "message_id": "m1",
+                    "output_index": 0,
+                    "source_type": "message",
+                }
+            ],
+        }
+        threads = [
+            threading.Thread(target=lambda: (barrier.wait(5), writer.commit_model_response(payload)))
+            for _ in range(8)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        writer.close()
+        rows = [json.loads(line) for line in chunk_path.read_text(encoding="utf-8").splitlines()]
+        assert sum(1 for row in rows if row.get("kind") == "assistant_commentary") == 1
+    finally:
+        sys.setswitchinterval(old_interval)

@@ -872,13 +872,14 @@ def _execute_parallel_call(
             model_call=_model_visible_call(request, idx, call))))
 
 
-# LLM: 串行与批准重试共用单工作项边界；只在正额度时转worker，0保留当前线程。
+# LLM: 串行与批准重试共用单工作项边界；只在正额度时转worker并同步晋升后的线程工作区，0保留当前线程。
 # 函数用途: 为一条原执行请求安装可选owner额度和独立SQLite作用域。
 def _execute_owned_serial(request, work, *, emit_started=False):
     scheduler = scheduler_for_agent(request.agent)
-    context = _capture_parallel_thread_context(request.agent)
+    context = _capture_parallel_thread_context(request.agent) if scheduler is not None else None
     reuse = bool(getattr(getattr(request.agent, "config", None), "sqlite_connection_reuse", False))
-    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None)
+    promoted = []
+    invoke = partial(_owned_serial_call, request, work, context, emit_started, scheduler is not None, promoted)
     item = ToolWorkItem(work.call.call_id, invoke, getattr(request.params, "cancellation_token", None),
                        lambda: _synthetic_execution(work.call, _interrupted_result(work.call), "CANCELLED"), reuse)
     if scheduler is None:
@@ -886,18 +887,32 @@ def _execute_owned_serial(request, work, *, emit_started=False):
     token = getattr(request.params, "cancellation_token", None)
     cancel = getattr(token, "cancel", None)
     with register_interrupt_callback(lambda: cancel("interrupted") if callable(cancel) else None):
-        return scheduler.submit(item).result()
+        execution = scheduler.submit(item).result()
+    if promoted and promoted[-1] is not None:
+        request.agent._current_run_task_workspace = promoted[-1]
+    return execution
 
 
-# LLM: 原execute请求含actor/model_call；正额度排队才重查屏障，0保留原compact观察点，审批不重复started。
-# 函数用途: 检查串行排队后的屏障并安装原宿主线程身份。
-def _owned_serial_call(request, work, context, emit_started, queued):
+# LLM: 原execute请求含actor/model_call；正额度排队才重查屏障与切线程上下文，0直接在本线程执行不回滚晋升。
+# 函数用途: 检查串行排队后的屏障，按需安装宿主线程身份并记录工作区晋升。
+def _owned_serial_call(request, work, context, emit_started, queued, promoted):
     execution = _queued_call_gate(request, work.call) if queued else None
     if execution is not None:
         return execution
     if emit_started:
         _emit_tool_progress(ToolProgressEvent(request, work.idx, work.call, "started", "开始"))
-    return run_with_parallel_thread_context(request.agent, context, partial(request.execute_one, work))
+    if not queued:
+        return request.execute_one(work)
+
+    # LLM: 工作线程内完成工作区晋升后先捕获最新值，外层finally再恢复worker线程原身份。
+    # 函数用途: 在worker线程执行串行工具并把晋升后的task_workspace带回主轮线程。
+    def _run_on_worker():
+        result = request.execute_one(work)
+        if hasattr(request.agent, "_current_run_task_workspace"):
+            promoted.append(getattr(request.agent, "_current_run_task_workspace", None))
+        return result
+
+    return run_with_parallel_thread_context(request.agent, context, _run_on_worker)
 
 
 # LLM: 普通轮与嵌套工具共享同一线程上下文协议；无论成功/异常均恢复接收线程原身份，禁止模型提供字段。

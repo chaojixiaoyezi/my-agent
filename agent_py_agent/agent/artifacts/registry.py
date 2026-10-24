@@ -238,26 +238,25 @@ def latest_artifact_records_report(workspace_root: str | Path) -> ArtifactRegist
     return _projection_report(path, registry_projection(identity, text))
 
 
-# LLM: 原JSON容器上的record转换已随投影完成；只复制结果metadata，保留坏行类型/行号而不重新转换全部历史行。
+# LLM: 原JSON容器上的record转换已随投影完成；只解冻预聚合的最新记录并转换坏行诊断，不重复克隆已被覆盖的历史行。
 # 函数用途: 由当前raw投影组装独立的最新记录和逐行诊断。
 def _projection_report(path: Path, projection) -> ArtifactRegistryReadReport:
-    latest, errors = {}, []
-    for row in projection.records:
+    errors = []
+    for row in projection.diagnostic_rows:
         try:
             if row.error is not None:
                 raise row.failure()
             if row.record_error is not None:
                 kind, message = row.record_error
                 raise {"OverflowError": OverflowError, "RecursionError": RecursionError}[kind](message)
-            record = row.record
-            if record is None:
-                raise ValueError("invalid artifact registry record")
+            raise ValueError("invalid artifact registry record")
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             error = runtime_error_report(exc, context="artifact_registry.read_line")
             errors.append({**error, "path": str(path), "line": row.line})
-            continue
-        if record.artifact_id:
-            latest[record.artifact_id] = _detached_record(record)
+    latest = {
+        artifact_id: _detached_record(record)
+        for artifact_id, record in projection.latest_records.items()
+    }
     return ArtifactRegistryReadReport(records=latest, errors=errors)
 
 

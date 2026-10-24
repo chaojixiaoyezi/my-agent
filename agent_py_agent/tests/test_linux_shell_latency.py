@@ -37,6 +37,8 @@ def test_generation_prevents_lost_wakeup_and_stop_closes_pipes():
     try:
         assert callable(getattr(capture, "wait_changed", None))
         generation = capture.generation
+        capture.record_data("stdout", b"chunk")
+        assert capture.generation == generation
         capture.wake()
         start = time.monotonic()
         assert capture.wait_changed(1, generation=generation) > generation
