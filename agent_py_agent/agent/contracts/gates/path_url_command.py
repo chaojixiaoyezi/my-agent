@@ -14,6 +14,7 @@ from ...path_access_policy import PathAccessPolicy
 from ...tooling.write_boundary import WRITE_TOOL_NAMES
 from .command_policy import evaluate_command_policy
 from .models import GateDecision, GateFinding
+from .network_safety import private_host_or_ip_is_allowlisted
 
 _PATH_KEYS = {"path", "file_path", "target_path", "output_path", "working_dir", "cwd", "directory"}
 _URL_KEYS = {"url", "endpoint", "webhook_url"}
@@ -65,7 +66,7 @@ def evaluate_path_url_command_gate(facts: PathUrlCommandFacts) -> GateDecision:
     _collect_path_findings(data, roots, path_policy, findings)
     _collect_url_findings(
         {key: value for key, value in data.items() if str(key) not in set(facts.metadata_url_fields)},
-        {_normalize_host(item) for item in facts.allowed_private_hosts},
+        facts.allowed_private_hosts,
         facts.allow_private_resolution,
         facts.network_enabled,
         {_text(item).strip() for item in facts.local_file_url_fields if _text(item).strip()},
@@ -96,7 +97,7 @@ def _collect_path_findings(
 # 函数用途: 检查单个及批量 URL 参数并汇总客观拒绝。
 def _collect_url_findings(
     data: Mapping[object, object],
-    allowed_private_hosts: set[str],
+    allowed_private_hosts: object,
     allow_private_resolution: bool,
     network_enabled: bool,
     local_file_url_fields: set[str],
@@ -177,14 +178,14 @@ def _path_finding(request: PathFindingRequest) -> GateFinding | None:
     return None
 
 
-# LLM: 宿主私网授权与逐主机授权均可通过这层预检，不能用它跳过 handler 的永久禁止地址和 Gateway 检查。
+# LLM: 共享 matcher 接受 CIDR 和通配符，裸字符串不产生授权；此预检不替代连接时永久禁止项。
 # 函数用途: 返回 URL 的文件协议或未授权私网问题，不连接目标。
-def _url_finding(field: str, raw_url: object, allowed_private_hosts: set[str], allow_private_resolution: bool = False) -> GateFinding | None:
+def _url_finding(field: str, raw_url: object, allowed_private_hosts: object, allow_private_resolution: bool = False) -> GateFinding | None:
     parsed = urlparse(_text(raw_url))
     if parsed.scheme == "file":
         return GateFinding("NETWORK_FILE_URL_BLOCKED", evidence={"field": field})
     host = _normalize_host(parsed.hostname)
-    if host and not allow_private_resolution and host not in allowed_private_hosts and _is_private_host(host):
+    if host and not allow_private_resolution and not private_host_or_ip_is_allowlisted(host, allowed_private_hosts) and _is_private_host(host):
         return GateFinding("NETWORK_PRIVATE_HOST_BLOCKED", evidence={"field": field, "host": host})
     return None
 

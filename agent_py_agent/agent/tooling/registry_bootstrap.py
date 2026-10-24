@@ -104,13 +104,14 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
 
 
 # LLM: 抓取工具沿 G4 端口守门；命令工具携带宿主冻结凭据来源，不能从模型参数覆盖环境擦洗规则。
-# 函数用途: 注册网络工具并传入配置端口；实际绑定端口在每跳检查时从统一注册表读取。
+# 函数用途: 注册网络工具并传入配置端口及内网白名单；实际绑定端口每跳从统一注册表读取。
 def _register_network_tools(registry: Any, params: Any) -> None:
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     registry.register(
         WebFetchTool(
             max_chars=params.web_max_chars,
             timeout=params.http_timeout,
+            allowed_private_hosts=tuple(getattr(params, "allowed_private_hosts", None) or ()),
             gateway_endpoint_config=GatewayEndpointConfig(
                 configured_port=getattr(params, "gateway_port", None),
             ),

@@ -322,3 +322,112 @@ def test_missing_local_address_fact_only_blocks_gateway_port() -> None:
 
 def test_ipv4_mapped_loopback_address_is_recognized_without_probe() -> None:
     assert _local_address_status("::ffff:127.0.0.1", None) is True
+
+
+# LLM: 测实际安全门，域名授权与网段授权不能把混合 DNS 回答中的未授权地址放过。
+# 函数用途: 覆盖内网白名单正例及严格的子域名和网段边界。
+@pytest.mark.parametrize(("host", "entries", "answers", "allowed"), [
+    ("git.corp.local", [" GIT.CORP.LOCAL. "], ["10.1.2.3"], True),
+    ("api.corp.local", ["*.corp.local"], ["10.1.2.3"], True),
+    ("a.b.corp.local", ["*.corp.local"], ["10.1.2.3"], True),
+    ("corp.local", ["*.corp.local"], ["10.1.2.3"], False),
+    ("evilcorp.local", ["*.corp.local"], ["10.1.2.3"], False),
+    ("corp.local.evil", ["*.corp.local"], ["10.1.2.3"], False),
+    ("api.local", ["*.local"], ["10.1.2.3"], False),
+    ("192.168.0.50", ["192.168.0.0/24"], [], True),
+    ("10.2.3.4", ["10.0.0.0/8"], [], True),
+    ("[fd12::1]", ["fd00::/8"], [], True),
+    ("[::ffff:192.168.0.50]", ["::ffff:192.168.0.0/120"], [], True),
+    ("localhost", ["127.0.0.0/8"], ["127.0.0.1"], True),
+    ("localhost", ["127.0.0.1"], ["127.0.0.1"], True),
+    ("localhost", ["::1"], ["::1"], True),
+    ("internal.test", ["10.0.0.0/8"], ["10.2.3.4", "93.184.216.34"], True),
+    ("internal.test", ["10.0.0.0/8"], ["10.2.3.4", "192.168.1.5"], False),
+    ("localhost", ["127.0.0.1"], ["127.0.0.1", "::1"], False),
+    ("10.2.3.4", ["0.0.0.0/0", "::/0", "*", "*foo", "foo*"], [], False),
+    ("localhost", "localhost", ["127.0.0.1"], False),
+    ("localhost", {"localhost": True}, ["127.0.0.1"], False),
+    ("localhost", [None, 1, b"localhost"], ["127.0.0.1"], False),
+])
+def test_private_allowlist_matching(host, entries, answers, allowed):
+    decision = evaluate_network_safety_gate(_facts(
+        f"http://{host}:8000/", FakeResolver(answers), allowed_private_hosts=entries,
+    ))
+    assert decision.allowed is allowed
+
+
+# LLM: 总开关和网段授权不能把非显式域名的公网到私网翻转解释成新的授权。
+# 函数用途: 测重绑定保护，显式域名授权才允许该变化。
+@pytest.mark.parametrize("entries", [[], ["10.0.0.0/8"], ["internal.test"], ["*.internal.test"]])
+def test_public_to_private_rebinding_requires_explicit_hostname(entries):
+    decision = evaluate_network_safety_gate(_facts(
+        "http://api.internal.test:8000/", FakeResolver(["10.1.2.3"]),
+        previous_resolved_ips=("93.184.216.34",), allow_private_resolution=True,
+        allowed_private_hosts=entries,
+    ))
+    assert decision.allowed is (entries == ["*.internal.test"])
+    if not decision.allowed:
+        assert decision.finding_codes == ("NETWORK_DNS_REBINDING_BLOCKED",)
+
+
+# LLM: 默认端口在无运行端口事实时也不可绕过；未知端口仍优先 fail closed。
+# 函数用途: 测默认 Gateway 端口和私网白名单互相独立。
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "[::1]", "[::ffff:127.0.0.1]", "0.0.0.0", "nic.test"])
+@pytest.mark.parametrize("ports", [(), (9000,), (8420,)])
+def test_default_gateway_port_is_always_protected(host, ports):
+    decision = evaluate_network_safety_gate(_facts(
+        f"http://{host}:8420/", FakeResolver(["192.168.1.50"]),
+        allowed_private_hosts=("localhost", "127.0.0.0/8", "0.0.0.0/0"),
+        allow_private_resolution=True, gateway_ports=ports,
+        gateway_port_state="known" if ports else "not_applicable",
+        local_address_probe=lambda _ip: True,
+    ))
+    assert decision.finding_codes == ("NETWORK_GATEWAY_LOCAL_PORT_BLOCKED",)
+    assert decision.findings[0].evidence["gateway_ports"] == list(ports or (8420,))
+
+
+# LLM: 显式零、非数字或越界端口不得变成默认 HTTP 端口；不调用解析器。
+# 函数用途: 测安全门与实际连接端口不会分歧。
+@pytest.mark.parametrize("port", ["0", "-1", "65536", "bad"])
+def test_invalid_url_ports_fail_closed(port):
+    resolver = FakeResolver(["127.0.0.1"])
+    decision = evaluate_network_safety_gate(_facts(f"http://127.0.0.1:{port}/", resolver, allow_private_resolution=True))
+    assert decision.finding_codes == ("NETWORK_PORT_INVALID",)
+    assert resolver.calls == []
+
+
+# LLM: 元数据保留地址先于任何域名、网段或总开关，覆盖直接和 DNS 入口。
+# 函数用途: 测新增云厂商与映射地址的永久拒绝。
+@pytest.mark.parametrize("host", ["169.254.169.254", "100.100.100.200", "[fd00:ec2::254]", "[::ffff:169.254.169.254]", "metadata.google.internal", "metadata.goog"])
+@pytest.mark.parametrize("via_dns", [False, True])
+def test_metadata_never_allowlisted(host, via_dns):
+    ip = host.strip("[]") if not host.startswith("metadata") else "169.254.169.254"
+    decision = evaluate_network_safety_gate(_facts(
+        f"http://{'allowed.corp.local' if via_dns else host}/", FakeResolver([ip]),
+        allowed_private_hosts=(host, "*.corp.local", "169.254.0.0/16", "100.64.0.0/10", "fd00::/8"),
+        allow_private_resolution=True,
+    ))
+    assert not decision.allowed
+    assert decision.finding_codes[0].startswith("NETWORK_ALWAYS_BLOCKED_")
+
+
+# LLM: 独立复核发现 URI 分隔符被当主机名；校验只需忽略这些条目，不能生成无效授权。
+# 函数用途: 覆盖白名单解析器对 URI 分隔符和不合法通配符的拒绝。
+@pytest.mark.parametrize("entry", ["user@example.com", "*.bad?.example", "foo#bar.test", "foo\\bar.test", "*", "*.com", "*.corp..local", "http://corp.local", "::ffff:0.0.0.0/96"])
+def test_allowlist_rejects_uri_fragments_and_blanket_entries(entry):
+    from agent_py_agent.agent.contracts.gates.network_safety import _parse_private_allowlist
+
+    assert _parse_private_allowlist([entry]) == ()
+
+
+# LLM: 整组地址中已确认本机应优先于未知探针，不因 DNS 返回顺序改变端口不可用诊断。
+# 函数用途: 复现并固定不可用 Gateway 端口错误的顺序独立性。
+@pytest.mark.parametrize("answers", [("8.8.8.8", "127.0.0.1"), ("127.0.0.1", "8.8.8.8")])
+@pytest.mark.parametrize("port", [8420, 8000])
+def test_unavailable_gateway_local_priority_is_order_independent(answers, port):
+    decision = evaluate_network_safety_gate(_facts(
+        f"http://mixed.test:{port}/", FakeResolver(answers),
+        allow_private_resolution=True, gateway_ports=(), gateway_port_state="unavailable",
+        local_address_probe=lambda _ip: None,
+    ))
+    assert decision.finding_codes == ("NETWORK_GATEWAY_PORT_UNAVAILABLE",)

@@ -531,6 +531,8 @@ def _sandbox_read_roots_for_invocation(
     return tuple(roots)
 
 
+# LLM: 本次网络授权只叠加到请求副本的构造配置，finally 必须恢复原对象，不能污染共享 handler。
+# 函数用途: 在回调期间临时合并工作根与内网授权，成功或异常均恢复。
 def _execute_with_temporary_tool_context(
     tool: BaseTool,
     *,
@@ -545,7 +547,7 @@ def _execute_with_temporary_tool_context(
     if workspace_roots and hasattr(tool, "workspace_roots"):
         tool.workspace_roots = workspace_roots
     if allowed_private_hosts and hasattr(tool, "allowed_private_hosts"):
-        tool.allowed_private_hosts = allowed_private_hosts
+        tool.allowed_private_hosts = tuple(dict.fromkeys([*(old_allowed_private_hosts or ()), *allowed_private_hosts]))
     if allow_private_resolution is not None and hasattr(tool, "allow_private_resolution"):
         tool.allow_private_resolution = allow_private_resolution
     try:

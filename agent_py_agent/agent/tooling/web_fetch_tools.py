@@ -13,7 +13,11 @@ from typing import Any
 from urllib.parse import quote, quote_plus, urlsplit
 
 from ..common.cancellation import cancellation_requested
-from ..contracts.gates.network_safety import GatewayEndpointConfig, NetworkSafetySettings
+from ..contracts.gates.network_safety import (
+    GatewayEndpointConfig,
+    NetworkSafetySettings,
+    _canonical_ip,
+)
 from ..user_space.task_credential_storage import CredentialInputError
 from .models import (
     BaseTool,
@@ -73,6 +77,8 @@ class CachedFetch:
     response: RawResponseParts
 
 
+# LLM: 每跳审计后 pin 同一地址；共享缓存必须隔离授权且命中时仍重检端点。
+# 类用途: 统一抓取网页/API，保存响应但不缓存网络权限。
 class WebFetchTool(BaseTool):
     """Fetch URL content, extract several URLs, or call a simple HTTP API."""
 
@@ -91,7 +97,7 @@ class WebFetchTool(BaseTool):
         self.allowed_private_hosts = tuple(deps.allowed_private_hosts)
         self.allow_private_resolution = deps.allow_private_resolution
         self.gateway_endpoint_config = deps.gateway_endpoint_config
-        self._cache: OrderedDict[tuple[str, str], CachedFetch] = OrderedDict()
+        self._cache: OrderedDict[tuple[object, ...], CachedFetch] = OrderedDict()
         self._cache_lock = threading.Lock()
         self.model_spec = _web_fetch_model_spec()
         self.runtime_policy = ToolRuntimePolicy(
@@ -133,7 +139,7 @@ class WebFetchTool(BaseTool):
         # 否则一次 execute 内 pre-check 与 resolve_pin 二次解析,对 DNS 翻转的判定会不一致。
         return _execute_single_request(self, request, max_chars)
 
-    # LLM: 每个 URL（含每个重定向目标）必须重新解析、应用当前 Gateway 端点事实，再 pin 通过检查的地址。
+    # LLM: 每跳重查端点；字面 IP 直接 canonical，不接受 resolver 对已审计地址的替换。
     # 函数用途: 解析 URL 并读取工具副本当前授权，逐跳检查后返回固定 IP 或结构化拒绝。
     def _resolve_pin(self, url: str) -> PinResult:
         """解析一次主机 → 用这"固定 IP 列表"过网关(避免与连接层二次解析的 TOCTOU)→ 返回校验过的 IP 来 pin。
@@ -141,8 +147,9 @@ class WebFetchTool(BaseTool):
         每个重定向跳也调本函数重新过网关,故内网/metadata 跳转会被拒。
         """
         host = urlsplit(url).hostname or ""
+        literal_ip = _canonical_ip(host)
         try:
-            resolved = tuple(str(ip) for ip in self.resolver(host))
+            resolved = (literal_ip,) if literal_ip else tuple(str(ip) for ip in self.resolver(host))
         except Exception:
             resolved = ()
         err = self.network_safety_error(
@@ -275,7 +282,7 @@ def _redact_secret_echo(value, secrets):
     return value
 
 
-# LLM: 认证请求不缓存，宿主选择事实只附安全回执，服务端正文不改变它；锁不能覆盖网络请求。
+# LLM: 缓存按授权隔离；命中仍重查当前端点，防撤权或动态 Gateway 端口变化泄漏旧响应；锁不覆盖网络。
 # 函数用途: 处理单页抓取和格式化，并把实际凭据选择交给原工具审计。
 def _execute_single_request(
     tool: WebFetchTool,
@@ -285,6 +292,11 @@ def _execute_single_request(
     cache_key = request.method == "GET" and not request.headers and request.body_text is None and not request.credential_ref
     cached = _cache_get(tool, request.url, request.fmt) if cache_key and not request.refresh else None
     cache_hit = cached is not None
+    if cached is not None:
+        for url in dict.fromkeys((request.url, cached.url)):
+            pin = tool._resolve_pin(url)
+            if pin.error is not None:
+                return pin.error
     response = cached or tool._fetch_raw_request(request)
     if isinstance(response, ToolHandlerOutcome):
         return response
@@ -361,21 +373,28 @@ def _execute_extract(
     )
 
 
-# LLM: 过期缓存必须先清理；锁只覆盖内存字典访问，避免多个请求串行等待网络。
+# LLM: 浅拷贝共享内存缓存不能共享授权，当前主机集合和私网开关均属于缓存身份。
+# 函数用途: 构造响应缓存的权限隔离键，不保存凭据。
+def _response_cache_key(tool: WebFetchTool, url: str, fmt: str) -> tuple[object, ...]:
+    return url, fmt, tuple(tool.allowed_private_hosts or ()), tool.allow_private_resolution
+
+
+# LLM: 按当前授权查缓存并清过期项；锁只保护字典，返回后调用者仍须重查网络门。
 # 函数用途: 获取最近使用的缓存响应，并在使用时按 TTL 删除过期项。
 def _cache_get(tool: WebFetchTool, url: str, fmt: str) -> RawResponseParts | None:
     if tool.cache_ttl_seconds <= 0:
         return None
     with tool._cache_lock:
         _expire_cache(tool)
-        item = tool._cache.get((url, fmt))
+        key = _response_cache_key(tool, url, fmt)
+        item = tool._cache.get(key)
         if item is None:
             return None
-        tool._cache.move_to_end((url, fmt))
+        tool._cache.move_to_end(key)
         return item.response
 
 
-# LLM: 每工具缓存最多 64 项与 8 MiB 正文，缓存只优化已授权 GET，不改变请求权限。
+# LLM: 每工具缓存最多 64 项与 8 MiB 正文，写入时绑定当前授权，不能变为跨权限响应库。
 # 函数用途: 保存响应并按 LRU 淘汰超期或超容量内容。
 def _cache_put(
     tool: WebFetchTool,
@@ -387,8 +406,9 @@ def _cache_put(
         return
     with tool._cache_lock:
         _expire_cache(tool)
-        tool._cache[(url, fmt)] = CachedFetch(time.time() + tool.cache_ttl_seconds, response)
-        tool._cache.move_to_end((url, fmt))
+        key = _response_cache_key(tool, url, fmt)
+        tool._cache[key] = CachedFetch(time.time() + tool.cache_ttl_seconds, response)
+        tool._cache.move_to_end(key)
         while len(tool._cache) > 64 or sum(len(item.response.body) for item in tool._cache.values()) > 8 * 1024 * 1024:
             tool._cache.popitem(last=False)
 

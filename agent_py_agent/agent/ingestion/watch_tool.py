@@ -799,7 +799,7 @@ def _source_network_allowed(tool, authority):
 # LLM: Resolve once, validate the entire resolved set, and pin the accepted IP; every redirect
 # repeats this helper so DNS changes cannot bypass the network boundary.
 # 函数用途: 解析来源地址并通过 web_fetch 同款网络安全闸，返回可固定连接的 IP。
-# LLM: 每次抓取都从可信 AgentConfig 取配置后备，允许集合和访问开关仍由本次调用的结构化授权事实给出。
+# LLM: 可信配置主机与本次结构化授权取去重并集；Gateway 仍逐跳独立校验。
 # 函数用途: 为 watch_stream 构造统一网络闸设置，不从 URL 文本或工具提示推断 Gateway 身份。
 def _watch_network_safety_settings(
     tool: WatchStreamTool,
@@ -807,8 +807,10 @@ def _watch_network_safety_settings(
     allow_resolution: bool | None,
 ) -> NetworkSafetySettings:
     config = getattr(tool.agent, "config", None)
+    values = getattr(config, "allowed_private_hosts", None)
+    config_hosts = tuple(item for item in values if isinstance(item, str)) if isinstance(values, (list, tuple, set, frozenset)) else ()
     return NetworkSafetySettings(
-        allowed_private_hosts=hosts,
+        allowed_private_hosts=tuple(dict.fromkeys([*config_hosts, *(hosts or ())])),
         allow_private_resolution=allow_resolution,
         gateway_endpoint=GatewayEndpointConfig(
             configured_port=getattr(config, "gateway_port", None),
@@ -816,7 +818,7 @@ def _watch_network_safety_settings(
     )
 
 
-# LLM: 初始 URL 与每次重定向都读取工具当前的网络策略和 Gateway 端点，不复用未经校验的 host 文本。
+# LLM: 每跳复用当前授权；字面 IP 不调用 DNS，pin 必须等于网络门审计的 canonical 地址。
 # 函数用途: 解析一个 watch 来源目标，过统一闸门后返回固定 IP 或结构化错误。
 def _resolve_watch_pin(
     tool: WatchStreamTool,
@@ -824,10 +826,12 @@ def _resolve_watch_pin(
     hosts: tuple[str, ...],
     allow_resolution: bool | None,
 ) -> PinResult:
+    from ..contracts.gates.network_safety import _canonical_ip
+
+    host = urlsplit(url).hostname or ""
+    literal_ip = _canonical_ip(host)
     try:
-        resolved = tuple(
-            str(ip) for ip in _default_network_resolver(urlsplit(url).hostname or "")
-        )
+        resolved = (literal_ip,) if literal_ip else tuple(str(ip) for ip in _default_network_resolver(host))
     except Exception:
         resolved = ()
     error = _network_safety_error(

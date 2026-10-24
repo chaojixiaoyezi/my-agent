@@ -1,4 +1,6 @@
 
+# LLM: 离线合同消费事件而不发请求；私网允许语法和元数据永久禁止项与在线门保持一致。
+# 模块用途: 校验归档安全事件，域名/IP/网段白名单不能覆盖云凭据端点。
 from __future__ import annotations
 
 import ipaddress
@@ -9,6 +11,7 @@ from urllib.parse import urlparse
 
 from ..common.value_parsing import text_value as _text
 from .contract_validation_recovery import recovery_for_findings
+from .gates.network_safety import always_blocked_host, private_host_or_ip_is_allowlisted
 
 SECRET_FIELD_NAMES = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 REDACTED_VALUES = {"[redacted]", "<redacted>", "***", "redacted"}
@@ -23,6 +26,8 @@ class OfflineSecurityBoundaryValidation:
     recovery: dict[str, object] | None = None
 
 
+# LLM: 原样传递授权容器给共享解析器，不能先 set() 把裸字符串拆成字符授权。
+# 函数用途: 汇总离线路径、网络、秘密和幂等性检查结论。
 def validate_security_boundary_events(
     events: tuple[dict[str, Any], ...],
     *,
@@ -30,7 +35,7 @@ def validate_security_boundary_events(
 ) -> OfflineSecurityBoundaryValidation:
     findings: list[dict[str, object]] = []
     _validate_path_events(events, findings)
-    _validate_network_events(events, set(allowed_private_hosts), findings)
+    _validate_network_events(events, allowed_private_hosts, findings)
     _validate_external_text_events(events, findings)
     _validate_secret_redaction(events, findings)
     _validate_side_effect_idempotency(events, findings)
@@ -42,9 +47,11 @@ def validate_security_boundary_events(
     )
 
 
+# LLM: 永久禁止元数据先于任何白名单；其它私网目标共用在线 matcher，不解析 DNS。
+# 函数用途: 检查离线网络事件中的文件协议、元数据及未授权私网目标。
 def _validate_network_events(
     events: tuple[dict[str, Any], ...],
-    allowed_private_hosts: set[str],
+    allowed_private_hosts: object,
     findings: list[dict[str, object]],
 ) -> None:
     for index, event in enumerate(events):
@@ -54,7 +61,9 @@ def _validate_network_events(
             findings.append(_finding("NETWORK_FILE_URL_BLOCKED", index, event))
             continue
         host = _host(event.get("url"))
-        if host and host not in allowed_private_hosts and _is_private_host(host):
+        if always_blocked_host(host):
+            findings.append(_finding("NETWORK_ALWAYS_BLOCKED_HOST", index, event, {"host": host}))
+        elif host and not private_host_or_ip_is_allowlisted(host, allowed_private_hosts) and _is_private_host(host):
             findings.append(_finding("NETWORK_PRIVATE_HOST_BLOCKED", index, event, {"host": host}))
 
 

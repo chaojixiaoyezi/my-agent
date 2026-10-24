@@ -10,6 +10,7 @@ from __future__ import annotations
 import errno
 import socket
 import threading
+from copy import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -317,3 +318,215 @@ def test_resolve_pin_returns_validated_ip_or_error() -> None:
     assert ok.ip == "127.0.0.1" and ok.error is None  # 放行 → 返回校验过的固定 IP
     blocked = tool._resolve_pin("http://169.254.169.254/latest/meta-data/")
     assert blocked.ip is None and blocked.error is not None  # 拒 → 带错误,无 IP 可 pin
+
+
+# LLM: 字面主机不能被注入解析器替换，真正连接必须 pin 到被审计的 canonical IP。
+# 函数用途: 测 web_fetch 与 watch_stream 的字面 IP pin 一致性。
+@pytest.mark.parametrize(("host", "expected"), [("127.0.0.1", "127.0.0.1"), ("[::ffff:127.0.0.1]", "127.0.0.1"), ("2130706433", "127.0.0.1"), ("[::1]", "::1")])
+def test_literal_pin_does_not_consult_resolver(monkeypatch, host, expected):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.ingestion import watch_tool
+
+    calls = []
+
+    # LLM: 解析器故意返回与字面主机不同的地址，验证生产代码不会采用它。
+    # 函数用途: 记录不应发生的字面地址解析。
+    def resolver(value):
+        calls.append(value)
+        return ("10.20.30.40",)
+    tool = _tool(gateway_port=9000)
+    tool.resolver = resolver
+    monkeypatch.setattr(watch_tool, "_default_network_resolver", resolver)
+    watch = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(gateway_port=9000)))
+    url = f"http://{host}:8000/page"
+    for pin in (tool._resolve_pin(url), watch_tool._resolve_watch_pin(watch, url, (), True)):
+        assert pin.error is None
+        assert pin.ip == expected
+    assert calls == []
+
+
+# LLM: 复制 handler 共享缓存不能共享旧授权；两种撤权都要拒绝已有私网响应。
+# 函数用途: 用真实回环 HTTP 响应复现浅拷贝缓存越权。
+@pytest.mark.parametrize("grant", ["hosts", "toggle"])
+def test_shallow_copy_cache_cannot_reuse_revoked_private_grant(server, tmp_path, grant):
+    tool = WebFetchTool(
+        max_chars=10000, timeout=5, artifact_root=tmp_path,
+        resolver=lambda _host: ("127.0.0.1",),
+        allowed_private_hosts=("127.0.0.1",) if grant == "hosts" else (),
+        allow_private_resolution=grant == "toggle",
+        gateway_endpoint_config=GatewayEndpointConfig(configured_port=9000),
+    )
+    params = {"url": f"http://127.0.0.1:{server.server_address[1]}/page", "format": "text"}
+    assert tool.execute(params).ok
+    restricted = copy(tool)
+    restricted.allowed_private_hosts = ()
+    restricted.allow_private_resolution = False
+    result = restricted.execute(params)
+    assert not result.ok
+    assert result.error_code == "NETWORK_PRIVATE_HOST_BLOCKED"
+    assert server.request_paths == ["/page"]
+
+
+# LLM: 缓存键相同也须重查动态端口事实；不能拿撤销前的公网/私网检查代替本次授权。
+# 函数用途: 测缓存命中后新成为 Gateway 的端口会被拦下。
+def test_cache_hit_rechecks_current_gateway_port(server, tmp_path, monkeypatch):
+    from agent_py_agent.agent.attempt import sandbox
+
+    tool = _tool(gateway_port=9000)
+    tool.artifact_root = tmp_path
+    params = {"url": f"http://127.0.0.1:{server.server_address[1]}/page"}
+    monkeypatch.setattr(sandbox, "gateway_bound_ports", lambda: ())
+    assert tool.execute(params).ok
+    monkeypatch.setattr(sandbox, "gateway_bound_ports", lambda: (server.server_address[1],))
+    result = tool.execute(params)
+    assert result.error_code == "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
+    assert server.request_paths == ["/page"]
+
+
+# LLM: 配置与本次 watch 授权取并集，但 IP 网段放行不影响 Gateway 或元数据。
+# 函数用途: 覆盖两条网络入口的精确域名、通配符、IP 与 CIDR 格式。
+@pytest.mark.parametrize(("host", "entries", "allowed"), [
+    ("git.corp.local", ("git.corp.local",), True),
+    ("api.corp.local", ("*.corp.local",), True),
+    ("corp.local", ("*.corp.local",), False),
+    ("evilcorp.local", ("*.corp.local",), False),
+    ("api.local", ("*.local",), False),
+    ("127.0.0.1", ("127.0.0.1",), True),
+    ("localhost", ("127.0.0.0/8",), True),
+    ("192.168.0.50", ("192.168.0.0/24",), True),
+    ("10.2.3.4", ("10.0.0.0/8",), True),
+])
+def test_web_and_watch_share_private_allowlist(monkeypatch, host, entries, allowed):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.ingestion import watch_tool
+
+    # LLM: 域名测试只用固定私网答案，不发真实 DNS 请求。
+    # 函数用途: 为两个真实安全入口提供同一解析事实。
+    def resolver(_host):
+        return ("127.0.0.1",)
+    tool = WebFetchTool(max_chars=1000, timeout=5, resolver=resolver,
+                        allowed_private_hosts=entries, allow_private_resolution=False)
+    monkeypatch.setattr(watch_tool, "_default_network_resolver", resolver)
+    config = SimpleNamespace(allowed_private_hosts=entries, gateway_port=None)
+    watch = SimpleNamespace(agent=SimpleNamespace(config=config))
+    settings = watch_tool._watch_network_safety_settings(watch, ("other.corp.local",), False)
+    assert settings.allowed_private_hosts == (*entries, "other.corp.local")
+    url = f"http://{host}:8000/page"
+    for pin in (tool._resolve_pin(url), watch_tool._resolve_watch_pin(watch, url, (), False)):
+        assert (pin.error is None) is allowed
+
+
+# LLM: 构造接线不能先把裸字符串拆开或把整数转成授权 IP，破坏共享解析器的严格输入规则。
+# 函数用途: 测直接 web 构造及 watch 配置的无效授权输入不产生私网许可。
+@pytest.mark.parametrize("entries", ["0.0.0.0", [0], {"0.0.0.0": True}])
+def test_network_constructors_reject_malformed_private_grants(monkeypatch, entries):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.ingestion import watch_tool
+
+    tool = WebFetchTool(max_chars=1000, timeout=5, allowed_private_hosts=entries,
+                        allow_private_resolution=False)
+    watch = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(allowed_private_hosts=entries)))
+    for pin in (tool._resolve_pin("http://0.0.0.0:8000/"),
+                watch_tool._resolve_watch_pin(watch, "http://0.0.0.0:8000/", (), False)):
+        assert pin.error is not None
+        assert pin.error.error_code == "NETWORK_PRIVATE_HOST_BLOCKED"
+
+
+# LLM: 缓存重定向的实际响应地址也须重查端口；首跳仍安全不能证明最终目标仍获授权。
+# 函数用途: 测重定向后新保护端口不能从首跳缓存里读取。
+def test_cached_redirect_rechecks_response_endpoint(server, tmp_path, monkeypatch):
+    from agent_py_agent.agent.attempt import sandbox
+    from agent_py_agent.agent.tooling import web
+
+    tool = _tool(gateway_port=9000)
+    tool.artifact_root = tmp_path
+    params = {"url": f"http://app.test:{server.server_address[1]}/to-safe"}
+    monkeypatch.setattr(sandbox, "gateway_bound_ports", lambda: ())
+    assert tool.execute(params).ok
+    assert server.request_paths == ["/to-safe", "/page"]
+    original = tool.network_safety_error
+
+    # LLM: 仅用宿主端点配置变化模拟最终主机新成为 Gateway；不改缓存或响应正文。
+    # 函数用途: 让重定向目标在第二次读取时按统一网络门受保护。
+    def current_endpoint(name, url, resolver, settings):
+        if "safe.test" in url:
+            settings = NetworkSafetySettings(allow_private_resolution=True,
+                gateway_endpoint=GatewayEndpointConfig(configured_port=server.server_address[1]))
+        return original(name, url, resolver, settings)
+
+    monkeypatch.setattr(tool, "network_safety_error", current_endpoint)
+    monkeypatch.setattr(web, "_probe_local_address", lambda _ip: True)
+    result = tool.execute(params)
+    assert result.error_code == "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
+    assert server.request_paths == ["/to-safe", "/page"]
+
+
+# LLM: 无端口注册、关闭 HTTP 或改成9000均不能取消8420；两入口、总开关及白名单路径一致。
+# 函数用途: 覆盖实际设置装配后的默认 Gateway 端口保护矩阵。
+@pytest.mark.parametrize("configured", [None, 0, 9000])
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "[::1]", "[::ffff:127.0.0.1]", "0.0.0.0"])
+@pytest.mark.parametrize("allow_resolution", [False, True])
+def test_default_gateway_port_survives_all_configurations(monkeypatch, configured, host, allow_resolution):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.attempt import sandbox
+    from agent_py_agent.agent.ingestion import watch_tool
+
+    hosts = ("127.0.0.1", "localhost", "::1", "0.0.0.0", "127.0.0.0/8", "0.0.0.0/0")
+    monkeypatch.setattr(sandbox, "gateway_bound_ports", lambda: ())
+    monkeypatch.setattr(watch_tool, "_default_network_resolver", lambda _host: ("127.0.0.1",))
+    endpoint = GatewayEndpointConfig(configured_port=configured)
+    settings = NetworkSafetySettings(allowed_private_hosts=hosts, allow_private_resolution=allow_resolution,
+                                     gateway_endpoint=endpoint)
+    url = f"http://{host}:8420/"
+    error = _network_safety_error("web_fetch", url, lambda _host: ("127.0.0.1",), settings)
+    config = SimpleNamespace(allowed_private_hosts=hosts, gateway_port=configured)
+    watch = SimpleNamespace(agent=SimpleNamespace(config=config))
+    pin = watch_tool._resolve_watch_pin(watch, url, (), allow_resolution)
+    assert error is not None and error.error_code == "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
+    assert pin.error is not None and pin.error.error_code == "NETWORK_GATEWAY_LOCAL_PORT_BLOCKED"
+
+
+# LLM: 以真正配置/Agent/Registry/预检/HTTP传输验证默认授权接线，禁用环境私网总开关。
+# 函数用途: 证明 CIDR 配置不用逐调用 grant 也能经真实抓取入口读取授权内网。
+def test_configured_cidr_flows_through_agent_and_registry(server, tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings.config import AgentConfig
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    monkeypatch.delenv("MY_AGENT_ALLOW_PRIVATE_URLS", raising=False)
+    config = AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"), enable_plugins=False,
+                         gateway_port=9000, allowed_private_hosts=["127.0.0.0/8"])
+    agent = SimpleAgent(config, tmp_path / "project")
+    handler = agent.tools.tools["web_fetch"]
+    assert handler.allowed_private_hosts == ("127.0.0.0/8",)
+    result = execute_registry_test_call(agent.tools, "web_fetch", {
+        "url": f"http://127.0.0.1:{server.server_address[1]}/page", "mode": "text",
+    }, register_with=agent)
+    assert result.ok, result.output
+    assert "Hello world" in result.output
+    assert server.request_paths == ["/page"]
+
+
+# LLM: 非法端口在传输前拒绝，原始 NETWORK_PORT_INVALID 留在 reported/gate，控制流用既有参数错误分类。
+# 函数用途: 测两入口不会把 :0 偷换成 :80，也不把可修的非法端口误报为未知错误。
+@pytest.mark.parametrize("port", ["0", "-1", "65536", "bad"])
+def test_explicit_zero_port_is_rejected_before_transport(port):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.ingestion import watch_tool
+
+    url = f"http://127.0.0.1:{port}/"
+    tool = _tool(gateway_port=9000)
+    watch = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(gateway_port=9000)))
+    result = tool.execute({"url": url})
+    assert not result.ok
+    assert result.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert result.reported_error_code == "NETWORK_PORT_INVALID"
+    assert result.result_envelope["network_safety_gate"]["findings"][0]["code"] == "NETWORK_PORT_INVALID"
+    pin = watch_tool._resolve_watch_pin(watch, url, (), True)
+    assert pin.error is not None and pin.error.error_code == "TOOL_INVALID_ARGUMENTS"
+    assert pin.error.reported_error_code == "NETWORK_PORT_INVALID"

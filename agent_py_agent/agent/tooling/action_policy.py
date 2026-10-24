@@ -350,7 +350,7 @@ def _required_action_decision(
     return None
 
 
-# LLM: 预检和 web handler 共用原私网设置解析；宿主边界显式值优先于部署环境，角色不改变网络事实。
+# LLM: 预检与 handler 共用配置主机与本次授权的并集；总开关显式值优先环境，角色不改变网络事实。
 # 函数用途: 在执行前检验工具路径、URL、命令，保留文件与命令硬门并接通已生效的私网设置。
 def _path_url_command_decision(
     request: ActionPolicyRequest,
@@ -361,6 +361,8 @@ def _path_url_command_decision(
     from .web import _effective_allow_private_resolution
 
     private_setting = boundary.get("allow_private_resolution")
+    effective_private_hosts = (*_string_values(getattr(runtime.handler, "allowed_private_hosts", None)),
+                               *_string_values(boundary.get("allowed_private_hosts")))
     payload = {"tool": request.call.tool_name, **request.call.arguments}
     decision = evaluate_path_url_command_gate(
         PathUrlCommandFacts(
@@ -370,7 +372,7 @@ def _path_url_command_decision(
             path_access_mode=request.path_access_mode,
             path_dangerous_roots=request.path_dangerous_roots,
             owner_scope_root=request.owner_scope_root,
-            allowed_private_hosts=_string_values(boundary.get("allowed_private_hosts")),
+            allowed_private_hosts=effective_private_hosts,
             allow_private_resolution=_effective_allow_private_resolution(
                 private_setting if type(private_setting) is bool else None),
             network_enabled=boundary.get("network_access_mode") != "disabled",

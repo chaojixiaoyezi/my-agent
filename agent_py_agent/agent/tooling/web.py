@@ -58,8 +58,8 @@ def _default_network_resolver(host: str) -> tuple[str, ...]:
     return tuple(str(sockaddr[0]) for *_prefix, sockaddr in answers)
 
 
-# LLM: 所有抓取入口共用这一结构化闸；实际 Gateway 监听事实每跳刷新，错误码与模型可见提示必须一致。
-# 函数用途: 把 network_safety 的拒绝转成工具错误回执，不连接被拒目标。
+# LLM: 共享闸逐跳刷新 Gateway；新端口 finding 保留原始报码，控制流沿既有参数错误分类，不变 UNKNOWN_ERROR。
+# 函数用途: 把网络拒绝转成含原始 finding 和可行动分类的工具错误，不连接被拒目标。
 def _network_safety_error(
     tool: str,
     url: str,
@@ -92,7 +92,8 @@ def _network_safety_error(
         False,
         f"网络安全检查失败: {code}{_private_host_recovery_note(code, url)}",
         result_envelope={"network_safety_gate": decision.to_dict()},
-        error_code=code,
+        error_code="TOOL_INVALID_ARGUMENTS" if code == "NETWORK_PORT_INVALID" else code,
+        reported_error_code=code,
     )
 
 
@@ -229,7 +230,7 @@ def _response_preview_chars(params: dict[str, Any], configured_max: int) -> int:
 # LLM: 保持旧工具构造入口，把稳定依赖和端口配置后备交给核心实现；授权仍由每次调用快照提供。
 # 类用途: 为 registry 装配统一网页抓取实现，修改此包装时要同步 registry 与直接构造测试。
 class WebFetchTool(_WebFetchTool):
-    # LLM: 构造时只冻结 TUI Gateway 配置后备；运行时实际绑定端口由网络回调动态读取。
+    # LLM: 仅字符串容器产生白名单，不把裸字符串或整数转换成授权；实际绑定端口仍每跳读取。
     # 函数用途: 将抓取参数与 Gateway 端点后备交给统一 web_fetch 实现。
     def __init__(
         self,
@@ -253,7 +254,8 @@ class WebFetchTool(_WebFetchTool):
             format_http_error=_format_http_error,
             artifact_root=artifact_root,
             cache_ttl_seconds=cache_ttl_seconds,
-            allowed_private_hosts=tuple(str(item) for item in allowed_private_hosts),
+            allowed_private_hosts=tuple(item for item in allowed_private_hosts if isinstance(item, str))
+            if isinstance(allowed_private_hosts, (list, tuple, set, frozenset)) else (),
             allow_private_resolution=allow_private_resolution,
             gateway_endpoint_config=(
                 gateway_endpoint_config
