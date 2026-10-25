@@ -528,9 +528,11 @@ def _success_content_payload(read_result: ArtifactContentReadResult) -> dict[str
             payload["next_offset"] = payload["window_end"]
     return payload
 
-# LLM: 安全展开波浪号前缀；未知用户名回退原Path对象而不抛RuntimeError中断逻辑引用查询。
-# 函数用途: 兼容含~的模型引用输入，避免~unknownuser触发异常。
+# LLM: 安全展开波浪号前缀；非~路径保持原Path.expanduser行为，~unknownuser回退原Path对象而不抛RuntimeError中断逻辑引用查询。
+# 函数用途: 兼容含~的模型引用输入，避免~unknownuser触发异常且不吞非~路径的异常合同。
 def _safe_expanduser(path: Path) -> Path:
+    if not str(path).startswith("~"):
+        return path.expanduser()
     try:
         return path.expanduser()
     except RuntimeError:
@@ -702,6 +704,8 @@ def _raise_index_path_loop(exc: OSError) -> None:
         raise RuntimeError("Symlink loop from %r" % exc.filename)
 
 
+# LLM: 仅当引用显式包含冒号且命中scoped_call_id或非路径逻辑引用时保留跨scope候选；physical_only与短call_id始终走当前scope过滤。
+# 函数用途: 按请求scope筛选索引匹配项，防止同名无scope历史归档覆盖当前run输出。
 def _scoped_matches(
     matches: list[dict[str, Any]],
     artifact_ref: str,
@@ -709,9 +713,9 @@ def _scoped_matches(
     *,
     physical_only: bool = False,
 ) -> list[dict[str, Any]]:
-    if not physical_only and (
+    if not physical_only and ":" in artifact_ref and (
         any(str(record.get("scoped_call_id", "") or "") == artifact_ref for record in matches)
-        or (":" in artifact_ref and not _looks_like_path(artifact_ref))
+        or not _looks_like_path(artifact_ref)
     ):
         return matches
     exact = [record for record in matches if _record_scope_matches_request(record, request)]
@@ -857,7 +861,7 @@ def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *
     return records
 
 
-# LLM: 延迟异常与原二轮匹配的优先级相同；IO失败整份丢弃时本候选也丢弃，不伪造历史事务快照。
+# LLM: 延迟异常与原二轮匹配的优先级相同；physical_only模式只允许物理路径或唯一wrapper文件名匹配，IO失败整份丢弃。
 # 函数用途: 一次计算候选的精确/同名匹配或保留待报告错误。
 def _artifact_index_candidate(record: dict[str, Any], query: _ArtifactIndexQuery) -> _ArtifactIndexCandidate | None:
     try:

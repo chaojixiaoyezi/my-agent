@@ -247,8 +247,8 @@ def _url_port(url: object) -> int | None:
     return 443 if _text(parsed.scheme).lower() == "https" else 80
 
 
-# LLM: 回环/未指定地址由 IP 属性直接识别；其他地址必须通过调用方逐目标 bind 事实分类。
-# 函数用途: 返回本机、非本机或无法确认，调用异常不能被默认为公网。
+# LLM: 回环/未指定地址由 IP 属性直接识别；其他地址（含 NAT64 等 IPv4 投影候选）必须通过调用方逐目标 bind 事实分类。
+# 函数用途: 返回本机、非本机或无法确认，原地址或嵌入 IPv4 投影任一确认本机即返回 True，异常或未知返回 None。
 def _local_address_status(value: str, probe: LocalAddressProbe | None) -> bool | None:
     address = ip_address_or_none(value)
     if address is None:
@@ -260,11 +260,19 @@ def _local_address_status(value: str, probe: LocalAddressProbe | None) -> bool |
         return True
     if probe is None:
         return None
-    try:
-        result = probe(str(address))
-    except Exception:
-        return None
-    return result if isinstance(result, bool) else None
+    candidates = (address,) if projected == address else (address, projected)
+    unknown = False
+    for candidate in candidates:
+        try:
+            result = probe(str(candidate))
+        except Exception:
+            unknown = True
+            continue
+        if result is True:
+            return True
+        if not isinstance(result, bool):
+            unknown = True
+    return None if unknown else False
 
 
 def _resolve_host(resolver: NetworkResolver, host: str) -> tuple[str, ...] | GateDecision:
@@ -616,11 +624,15 @@ def ipv4_projected(
     return address.ipv4_mapped or embedded_ipv4_from_ipv6(address)
 
 
+# LLM: 直接从16字节packed二进制展开8个16位段，兼容Python 3.10-3.14的IPv4映射展示差异与带zone id的IPv6地址。
+# 函数用途: 将IPv6Address稳定拆解为8个无符号16位整数元组供前缀与嵌入IPv4规则匹配。
 def _ipv6_hextets(address: ipaddress.IPv6Address) -> tuple[int, ...]:
     packed = address.packed
     return tuple(int.from_bytes(packed[index : index + 2], "big") for index in range(0, 16, 2))
 
 
+# LLM: 按已知转换前缀（含RFC 6052 64:ff9b::/96、64:ff9b:1::/96、6to4、Teredo、ISATAP）提取嵌入IPv4地址。
+# 函数用途: 从过渡/转换机制IPv6地址中还原目标IPv4地址，供私网、元数据与基准代理门统一判定。
 def embedded_ipv4_from_ipv6(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
     return _matching_ipv4_projection(_ipv4_projection_candidates(_ipv6_hextets(address)))
 

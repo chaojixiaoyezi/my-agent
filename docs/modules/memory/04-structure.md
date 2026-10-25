@@ -1,7 +1,7 @@
 ## 2026-10-24 `blob_v1` 二进制直写与 `read_artifact` 切片直读结构（W2-2）
 
 - `memory_archive/tool_output_externalizer.py` 根据 `AgentConfig.tool_output_storage_format` 分流 `"compat"` 与 `"blob_v1"`：`"blob_v1"` 将正文原样写入同目录 `<call_id>.blob`（`0600`），JSON 包装文件记录 `artifact_format: "blob_v1"`、`blob_filename`、`blob_size_bytes`、`blob_sha256`、`line_offsets` 与前 2000 字符预览。
-- `memory_archive/artifact/reader.py::_extract_content_and_metadata` 对 `artifact_format == "blob_v1"` 强制校验侧车文件名严格等于 `f"{read.path.stem}.blob"`（忽略任何注入的内联 `content`，兼容包含 `..`、冒号目录或路径分隔符的合法 `.blob` `call_id`、相对侧车路径与 `<run_id>:<call_id>` 逻辑引用，回退 `.json` 包装文件查找时强制 `physical_only=True` 并去重 `open_errors`）；`read_tool_output_artifact` 在无 `search_pattern` 的行/字符切片读取下优先委托 `memory_archive/artifact/page_reader.py::read_blob_artifact_page`，基于 `line_offsets` 与 `os.pread` 有界字节窗口直读。
+- `memory_archive/artifact/reader.py::_extract_content_and_metadata` 对 `artifact_format == "blob_v1"` 强制校验侧车文件名严格等于 `f"{read.path.stem}.blob"`（忽略任何注入的内联 `content`，兼容包含 `..`、冒号目录或路径分隔符的合法 `.blob` `call_id`、相对侧车路径与 `<run_id>:<call_id>` 逻辑引用，`_scoped_matches` 仅对显式含 `:` 引用豁免当前 scope 筛选，回退 `.json` 包装文件查找时强制 `physical_only=True` 并去重 `open_errors`）；`read_tool_output_artifact` 在无 `search_pattern` 的行/字符切片读取下优先委托 `memory_archive/artifact/page_reader.py::read_blob_artifact_page`，基于 `line_offsets` 与 `os.pread` 有界字节窗口直读。
 - `artifacts/registry_projection_cache.py` 维护受 `_CACHE_MAX_BYTES = 8 MiB` 与条目数双重约束的只读投影缓存，`_retained_tree_bytes` 递归统计 dataclass `__dict__`、`MappingProxyType` 底层映射与 `projection.latest_records` 视图内存开销。
 
 ## 2026-10-23 `memory_archive/artifact/reader.py` 单飞读取计划与查询内路径缓存结构

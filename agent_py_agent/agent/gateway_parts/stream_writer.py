@@ -28,12 +28,14 @@ from .stream_events import (
     begin_thinking_flush,
     cancel_thinking_flush_timer,
     complete_thinking_flush,
+    drain_orphaned_deferred_events,
     drain_thinking_delta_text,
     provider_retry_event,
     public_context_compaction_payload,
     public_context_usage_payload,
     schedule_thinking_flush_timer,
     thinking_event,
+    wait_thinking_flush_idle,
 )
 from .stream_liveness import StreamLiveness
 
@@ -122,6 +124,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _thinking_pending_final: bool = field(default=False, init=False, repr=False)
     _thinking_pending_nonfinal: bool = field(default=False, init=False, repr=False)
     _thinking_publishing_tid: int | None = field(default=None, init=False, repr=False)
+    _thinking_cond: threading.Condition = field(init=False, repr=False)
     _deferred_after_thinking: list[tuple[dict[str, object], Callable[[], bool] | None]] = field(default_factory=list, init=False, repr=False)
     _thinking_buffer_chars: int = field(default=0, init=False)
     _last_thinking_flush_at: float = field(default=0.0, init=False)
@@ -130,6 +133,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
     # LLM: 审批组件只持有同请求的路径和同步输出回调；不会建立新线程、缓存或持久账本。
     # 函数用途: 连接审批交互与本请求的流式发布和刷新边界。
     def __post_init__(self) -> None:
+        self._thinking_cond = threading.Condition(self._commit_lock)
         self._approval = StreamApproval(self.chunk_path, self._write_event, self._prepare_permission_request)
 
     # LLM: 真实等待前按原次序刷新宿主进度；模型说明已由原工具准入前sealed-call hook提交，不从审批边界确认raw。
@@ -333,11 +337,12 @@ class BufferedChunkStreamWriter(StreamLiveness):
                 self, lambda: _stream_flush_due("", self._thinking_buffer_chars, self._last_thinking_flush_at,
                                                 self.thinking_flush_chars, self.thinking_flush_interval_seconds))
 
-    # LLM: 锁内原子摘取待发批次并置发布标识（在途重入仅登记待补刷标记），净化与发布期间延迟跨线程非thinking事件，避免并发丢字、重复或越序。
+    # LLM: 锁内原子摘取待发批次并置发布标识（在途重入仅登记待补刷标记，无思考缓冲时排空残留延迟事件），避免并发丢字、重复或越序。
     # 函数用途: 将待发思考合成一条安全增量，经原chunk和sink出口按序发布。
     def flush_thinking_delta(self, *, final: bool = True) -> None:
         batch = begin_thinking_flush(self, time.monotonic(), final=final)
         if not batch:
+            drain_orphaned_deferred_events(self, _publish_writer_event)
             return
         try:
             raw_joined, _ = "".join(batch), batch.clear()
@@ -476,12 +481,13 @@ class BufferedChunkStreamWriter(StreamLiveness):
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件；close不释放raw，在途外部回调仍不可撤销。
+    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；close不释放raw，在途外部回调仍不可撤销。
     # 函数用途: 收口显示并拒绝迟到等待事件，不把流关闭当作工具或任务成功。
     def close(self) -> None:
         self._liveness_closed = True
         self.flush_thinking_delta(final=True)
         self.flush()
+        wait_thinking_flush_idle(self, _publish_writer_event)
         for sink in (self.main_activity_sink, self.transcript_sink):
             closer = getattr(sink, "close", None)
             if callable(closer):
@@ -490,11 +496,12 @@ class BufferedChunkStreamWriter(StreamLiveness):
                 except (OSError, RuntimeError, TypeError, ValueError):
                     pass
 
-    # LLM: 在final持久化前刷新宿主事件并准备已确认显示快照，不因收口flush确认raw；失败不改变模型结果。
+    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照，不因收口flush确认raw；失败不改变模型结果。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替。
     def prepare_display_history(self) -> dict:
         self.flush_thinking_delta(final=True)
         self.flush()
+        wait_thinking_flush_idle(self, _publish_writer_event)
         prepare = getattr(self.transcript_sink, "prepare_final", None)
         if not callable(prepare):
             return {}

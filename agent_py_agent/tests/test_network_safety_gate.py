@@ -469,3 +469,14 @@ def test_ipv6_transition_prefixes_and_non_transition_low32_boundaries():
     )
     assert not wkp_meta.allowed
     assert wkp_meta.finding_codes == ("NETWORK_ALWAYS_BLOCKED_IP",)
+    wkp_local_gw = evaluate_network_safety_gate(
+        _facts(
+            "http://nat64.test:8420/",
+            FakeResolver(["64:ff9b::5db8:d822"]),
+            gateway_ports=(8420,),
+            gateway_port_state="known",
+            local_address_probe=lambda ip: ip == "93.184.216.34",
+        )
+    )
+    assert not wkp_local_gw.allowed
+    assert wkp_local_gw.finding_codes == ("NETWORK_GATEWAY_LOCAL_PORT_BLOCKED",)

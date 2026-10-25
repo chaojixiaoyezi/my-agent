@@ -1003,6 +1003,14 @@ def test_blob_suffixed_call_id_resolves_in_artifact_reader(tmp_path: Path) -> No
         ReadToolOutputArtifactRequest(root=tmp_path, artifact_ref="~__no_such_user__/missing.blob", run_id="run-artifact")
     )
     assert unknown_home["ok"] is False
+    unscoped_root = tmp_path / "unscoped-vs-own"
+    _write_externalized_tool_output(unscoped_root, content="OWN-RUN-CONTENT" * 2, call_id="shared.blob", run_id="run-own", task_id="", request_id="")
+    _write_externalized_tool_output(unscoped_root, content="LEGACY-UNSCOPED" * 2, call_id="shared.blob", run_id="", task_id="", request_id="")
+    own_hit = read_tool_output_artifact(
+        ReadToolOutputArtifactRequest(root=unscoped_root, artifact_ref="shared.blob", run_id="run-own", scope_mode="current_run", max_chars=0)
+    )
+    assert own_hit["ok"] is True
+    assert own_hit["content"].startswith("OWN-RUN-CONTENT")
 
 
 def _write_externalized_tool_output(

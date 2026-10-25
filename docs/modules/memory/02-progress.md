@@ -2,7 +2,7 @@
 
 `memory_archive/tool_output_externalizer.py`、`memory_archive/artifact/reader.py`、`memory_archive/artifact/page_reader.py` 与 `artifacts/registry_projection_cache.py` 落地 `W2-2`：
 - 新增 `tool_output_storage_format` 配置（`"compat"` 默认 / `"blob_v1"`）。在 `"blob_v1"` 模式下，大型工具输出正文以纯 UTF-8 流式直写 `<call_id>.blob`（`write_private_text_file_atomic_unlocked`），JSON 包装文件仅保留 `artifact_format: "blob_v1"`、`blob_filename`、`blob_size_bytes`、`blob_sha256`、`line_offsets` 与前 2000 字符预览，消除大字符串 JSON 二次转义放大。
-- `read_artifact` 对 `artifact_format == "blob_v1"` 强制以声明格式为唯一权威（忽略注入的内联 `content` 字段），校验 `blob_filename` 严格匹配 `<stem>.blob`（兼容含 `..`、冒号目录或路径分隔符的合法 `.blob` `call_id`、相对侧车路径与 `<run_id>:<call_id>` 引用，回退 `.json` 包装文件查找时强制 `physical_only=True` 并去重 `open_errors`），并通过 `page_reader.py::read_blob_artifact_page` 基于 `line_offsets` + `os.pread` 执行有界字节窗口切片直读，无需将整份数 MB JSON 反序列化进内存。
+- `read_artifact` 对 `artifact_format == "blob_v1"` 强制以声明格式为唯一权威（忽略注入的内联 `content` 字段），校验 `blob_filename` 严格匹配 `<stem>.blob`（兼容含 `..`、冒号目录或路径分隔符的合法 `.blob` `call_id`、相对侧车路径与 `<run_id>:<call_id>` 引用，短 `call_id` 严格优先匹配当前 `run_id` 避免同名无 scope 历史归档覆盖，回退 `.json` 包装文件查找时强制 `physical_only=True` 并去重 `open_errors`），并通过 `page_reader.py::read_blob_artifact_page` 基于 `line_offsets` + `os.pread` 执行有界字节窗口切片直读，无需将整份数 MB JSON 反序列化进内存。
 - `artifacts/registry_projection_cache.py` 新增按索引四元物理指纹驱动的进程内 LRU+字节上限（`8 MiB`）只读投影缓存，并在 `_retained_tree_bytes` 中递归计入 dataclass `__dict__`、`MappingProxyType` 底层字典与 `latest_records` 视图，确保进程常驻内存严格受控。
 
 ## 2026-10-23 工具输出归档 `read_artifact` 单次解析计划与路径系统调用收敛（已实现）

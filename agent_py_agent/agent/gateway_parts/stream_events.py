@@ -289,12 +289,15 @@ def begin_thinking_flush(writer: Any, now: float, *, final: bool = True) -> list
         return batch
 
 
-# LLM: 锁内按"先在途待排空思考、后延迟普通事件"顺序取下一批工作，无剩余工作时原子清除发布线程标识。
+# LLM: 锁内按"先在途待排空思考、后延迟普通事件"顺序取下一批工作，无剩余工作时原子清除发布线程标识并唤醒等待者。
 # 函数用途: 为complete_thinking_flush提供单步锁内工作提取，保证新到思考先于后到普通事件。
 def _next_completion_work(
     writer: Any,
+    ident: int,
 ) -> tuple[list[str], bool, list[tuple[dict[str, object], Any]]]:
     with writer._commit_lock:
+        if writer._thinking_publishing_tid != ident:
+            return [], False, []
         closed = bool(getattr(writer, "_liveness_closed", False))
         if writer._thinking_buffer and (
             writer._thinking_pending_final or writer._thinking_pending_nonfinal or closed
@@ -313,6 +316,9 @@ def _next_completion_work(
         writer._thinking_publishing_tid = None
         writer._thinking_pending_final = False
         writer._thinking_pending_nonfinal = False
+        cond = getattr(writer, "_thinking_cond", None)
+        if cond is not None:
+            cond.notify_all()
         return [], False, []
 
 
@@ -334,13 +340,14 @@ def _publish_deferred_batch(
             raise
 
 
-# LLM: 在保持发布线程标识的前提下先排空期间请求的思考尾块、再排空延迟事件，finally兜底清理tid防止异常卡死。
+# LLM: 在保持发布线程标识的前提下先排空期间请求的思考尾块、再排空延迟事件，finally仅在仍归属当前线程时清理tid，绝不误清接班线程。
 # 函数用途: 完成思考批次发布后按因果顺序冲刷在途思考与延迟的非thinking事件。
 def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
+    ident = threading.get_ident()
     has_more = False
     try:
         while True:
-            next_batch, batch_final, deferred_batch = _next_completion_work(writer)
+            next_batch, batch_final, deferred_batch = _next_completion_work(writer, ident)
             if next_batch:
                 if content := drain_thinking_delta_text(writer, "".join(next_batch), final=batch_final):
                     writer._thinking_emitted = True
@@ -353,11 +360,43 @@ def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
             has_more = bool(writer._thinking_buffer) and not getattr(writer, "_liveness_closed", False)
     finally:
         with writer._commit_lock:
-            writer._thinking_publishing_tid = None
-            writer._thinking_pending_final = False
-            writer._thinking_pending_nonfinal = False
+            if writer._thinking_publishing_tid == ident:
+                writer._thinking_publishing_tid = None
+                cond = getattr(writer, "_thinking_cond", None)
+                if cond is not None:
+                    cond.notify_all()
     if has_more:
         schedule_thinking_flush_timer(writer)
+
+
+# LLM: 当无新思考缓冲但延迟事件队列因前序异常残留时，认领发布线程标识并排空剩余事件，保持严格FIFO顺序。
+# 函数用途: 为close/flush/_write_event提供不依赖新思考到来的延迟事件恢复排空入口。
+def drain_orphaned_deferred_events(writer: Any, publish_fn: Any) -> None:
+    ident = threading.get_ident()
+    claimed = False
+    with writer._commit_lock:
+        if (
+            writer._thinking_publishing_tid is None
+            and not writer._thinking_buffer
+            and writer._deferred_after_thinking
+        ):
+            writer._thinking_publishing_tid = ident
+            claimed = True
+    if claimed:
+        complete_thinking_flush(writer, publish_fn)
+
+
+# LLM: 跨线程终局收口（close/prepare_display_history）在有界时间内等待在途思考发布完成，随后排空任何残留思考或延迟事件。
+# 函数用途: 防止其他线程正在落盘思考或延迟事件时提前关闭sink或冻结最终显示快照。
+def wait_thinking_flush_idle(writer: Any, publish_fn: Any, *, timeout: float = 1.0) -> None:
+    ident = threading.get_ident()
+    cond = getattr(writer, "_thinking_cond", None)
+    if cond is not None:
+        with cond:
+            if writer._thinking_publishing_tid is not None and writer._thinking_publishing_tid != ident:
+                cond.wait_for(lambda: writer._thinking_publishing_tid is None, timeout=timeout)
+    writer.flush_thinking_delta(final=True)
+    drain_orphaned_deferred_events(writer, publish_fn)
 
 
 # LLM: 后台守护定时器只在单调时钟真正达到间隔且流未关闭时触发合批刷新，不绕过测试时钟。

@@ -681,6 +681,16 @@ def test_w21_inflight_thinking_tail_ordering_and_exception_recovery(thinking_wri
         sw.complete_thinking_flush(writer, failing_publish)
     assert writer._thinking_publishing_tid is None
     assert [item[0]["text"] for item in writer._deferred_after_thinking] == ["survivor"]
-    writer._deferred_after_thinking.clear()
     writer.close()
-    assert [row.get("text") for row in _thinking_rows(writer)] == ["first|", "pending|", "tail|", "notice|"]
+    assert not writer._deferred_after_thinking
+    assert [row.get("text") for row in _thinking_rows(writer)] == [
+        "first|",
+        "pending|",
+        "tail|",
+        "notice|",
+        "survivor",
+    ]
+    writer._thinking_publishing_tid = 999999999
+    sw.complete_thinking_flush(writer, lambda *_a, **_kw: None)
+    assert writer._thinking_publishing_tid == 999999999
+    writer._thinking_publishing_tid = None
