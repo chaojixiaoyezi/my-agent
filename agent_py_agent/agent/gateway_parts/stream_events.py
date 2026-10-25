@@ -459,15 +459,20 @@ def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
         schedule_thinking_flush_timer(writer)
 
 
-# LLM: 锁内核对是否仍有其他活跃线程正在发布思考或执行延后prepare_final，若是则原子登记延后收口标记，避免向已死线程延后或提前关sink。
-# 函数用途: 为close与prepare_display_history提供统一的活跃发布线程延后判定。
+# LLM: 锁内核对是否仍有其他活跃线程正在发布思考或执行延后prepare_final，同时回收已死线程残留_closeout_running_tid，若仍存活则原子登记延后收口标记。
+# 函数用途: 为close与prepare_display_history提供统一的死线程收口tid清理与活跃发布线程延后判定。
 def claim_deferred_closeout(writer: Any, *, close_sinks: bool) -> bool:
     ident = threading.get_ident()
     with writer._commit_lock:
-        tid = writer._thinking_publishing_tid
-        if tid in (None, ident) or not _publisher_thread_alive(tid):
-            tid = getattr(writer, "_closeout_running_tid", None)
-        if tid in (None, ident) or not _publisher_thread_alive(tid):
+        pub_tid = writer._thinking_publishing_tid
+        if pub_tid in (None, ident) or not _publisher_thread_alive(pub_tid):
+            pub_tid = None
+        run_tid = getattr(writer, "_closeout_running_tid", None)
+        if run_tid is not None and run_tid != ident and not _publisher_thread_alive(run_tid):
+            writer._closeout_running_tid = None
+            run_tid = None
+        tid = pub_tid if pub_tid is not None else run_tid
+        if tid in (None, ident):
             return False
         if close_sinks:
             writer._defer_close_sinks = True

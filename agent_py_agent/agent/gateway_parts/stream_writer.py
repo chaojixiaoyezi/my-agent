@@ -500,13 +500,13 @@ class BufferedChunkStreamWriter(StreamLiveness):
             if not claim_deferred_closeout(self, close_sinks=True):
                 close_writer_sinks_now(self)
 
-    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程活跃发布仍在途则延后prepare_final并在锁外返回complete=False。
+    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程活跃发布或延后收口仍在途则延后prepare_final并在锁外返回complete=False。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替，不在在途发布未完时宣称快照complete。
     def prepare_display_history(self) -> dict:
         self.flush_thinking_delta(final=True)
         self.flush()
-        idle = wait_thinking_flush_idle(self, _publish_writer_event)
-        if not idle and claim_deferred_closeout(self, close_sinks=False):
+        wait_thinking_flush_idle(self, _publish_writer_event)
+        if claim_deferred_closeout(self, close_sinks=False):
             return incomplete_display_snapshot(self)
         prepare = getattr(self.transcript_sink, "prepare_final", None)
         if not callable(prepare):
