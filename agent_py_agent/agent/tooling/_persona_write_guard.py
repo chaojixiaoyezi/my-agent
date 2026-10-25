@@ -162,7 +162,7 @@ def _source_approval_write_error(target: Path, resolved: Path, root: Path | None
     return None
 
 
-# LLM: legacy识别必须是owner根的文件，不能因项目位于owner home的深处而误认项目AGENTS.md。
+# LLM: legacy识别含local普通用户，但必须是owner根文件，不能误认深处项目AGENTS.md。
 # 函数用途: 识别旧默认.my-agent/owners布局里的根人格文件，保持旧单层owner兼容。
 def _legacy_owner_persona_file(path: Path) -> bool:
     parts = path.parts
@@ -170,7 +170,7 @@ def _legacy_owner_persona_file(path: Path) -> bool:
         if part != ".my-agent" or parts[index + 1:index + 2] != ("owners",):
             continue
         tail = parts[index + 2:-1]
-        if len(tail) == 1 or tail == ("local", "main") or (
+        if len(tail) == 1 or (len(tail) == 2 and tail[0] == "local" and bool(tail[1])) or (
                 len(tail) == 4 and tail[0] == "providers" and tail[2] in {"users", "groups"}):
             return True
     return False

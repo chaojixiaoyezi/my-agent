@@ -155,8 +155,10 @@ memory_curator_timeout_seconds: 90
 memory_curator_workers: 2
 # 后台策展每天在 owner 当地时间的几点做每日收尾，取值 0-23。
 memory_curator_daily_finalize_hour: 23
-# 已有合法策展批次中的候选处理策略：`conservative_v1` 保留候选处理尝试及结构化回执，`manual_only` 跳过该尝试。
-# 两者都不以模型输出或宿主资格替代用户确认，不能自动写入正式长期记忆、人格、教训或 HOT；待确认候选本身不会触发新批次。
+# 已有合法策展批次中的自动晋升策略：默认 conservative_v1 对通过宿主学习来源、证据、重复门槛和安全门的候选自主审核归档。
+# 可正式写入 long_term、用户画像偏好 user，以及达到各自重复门槛的 lesson / hot；不把模型声明当宿主核验。
+# AGENTS.md 始终禁止自动写入，SOUL.md 始终需要用户显式确认；manual_only 禁用 Curator 自动晋升。
+# 原 owner、冲突、配额和目标版本CAS仍须通过；待确认候选本身不会触发新策展批次。
 memory_curator_auto_promotion_policy: "conservative_v1"
 # 普通教训晋升为长期记忆所需的最少独立观察次数。
 memory_lesson_min_occurrences: 2
@@ -574,6 +576,9 @@ input_media_max_files: 8
 input_image_max_pixels: 40000000
 # owner retention 后台扫描间隔（秒，0=关）：每拍只扫 owner_agent_pool_max_agents 个
 # 规范 owner home；每个 owner 仍由 retention.json 的 maintenance_interval_seconds 日级节流。
+# 候选年龄由各owner retention.json 的 rejected_candidate_days 控制（默认30天；不是AgentConfig同名参数）：
+# 清理超过期限的全部非promoted状态，包括pending_review、approved但未晋升、blocked_*、observed、rejected、expired、superseded；
+# 保留版本绑定墓碑，不把陈旧候选清理等同于删除正式记忆。
 # 该控制器只读结构化状态并执行清理，不创建 Agent、不调用 LLM。
 owner_maintenance_scan_interval_seconds: 60
 # CLI/TUI 等待 Gateway 就绪的最长秒数。TUI 会先显示连接状态再后台探测；默认 3 秒，

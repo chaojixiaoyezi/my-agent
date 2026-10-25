@@ -37,8 +37,8 @@ def _agent(tmp_path, source, metadata, attributes):
     (ls.subagent_projection(trigger_kind="user_dialogue", run_ids=["child"], task_ids=["parent-task"]), {}, {}, True),
 ], ids=["legacy-unknown", "dispatch-thread", "schedule-thread", "background-thread", "dispatch-message", "stale-explicit-user", "runtime-schedule", "user", "new-user-old-thread", "user-child"])
 @pytest.mark.parametrize("origin", ["user_explicit", "tool_verified"])
-# LLM: 原四元场景打包传入，保持全部原正反样例；成功工具账本也不能洗白不可学来源。
-# 函数用途: 验证来源资格在直接记忆工具中不丢失。
+# LLM: 保留全部来源及origin正反矩阵；可学来源经真实证据审核自动归档，成功工具不能洗白不可学来源。
+# 函数用途: 验证来源资格决定是否自动写正式记忆，而不是把所有候选一律挂起。
 def test_remember_keeps_host_learning_qualification(tmp_path, case, origin):
     source, metadata, attributes, allowed = case
     agent = _agent(tmp_path, source, metadata, attributes)
@@ -48,9 +48,10 @@ def test_remember_keeps_host_learning_qualification(tmp_path, case, origin):
         request["evidence_refs"] = [evidence["call_id"]]
     result = RememberTool(agent).execute(request)
     assert result.ok, result.output
-    assert json.loads(result.output)["active_memory_changed"] is False, result.output
-    assert agent.memory.all() == []
+    assert json.loads(result.output)["active_memory_changed"] is allowed, result.output
+    assert len(agent.memory.all()) == (1 if allowed else 0)
     candidate = agent.memory_candidates.list()[0]
+    assert candidate.status == ('promoted' if allowed else 'pending_review')
     assert candidate.learning_source, "真实入口不能用空来源投影跳过来源闸"
     assert ls.projection_is_learnable(candidate.learning_source) is allowed
     if allowed and source and source.get("source_kind") == "subagent":

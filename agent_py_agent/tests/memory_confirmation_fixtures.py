@@ -1,51 +1,25 @@
-"""离线测试显式用户审核流程；生产remember本身仍只创建候选。"""
-from types import SimpleNamespace
+"""离线测试的透明调用辅助器；正式审核、证据核验和提交均由生产实现负责。"""
 
-from agent_py_agent.agent.capability.memory_tool import (
-    RememberTool,
-    _promotion_result_with_scope,
-    _remember_write_result,
-)
-from agent_py_agent.cli.memory_admin_commands import (
-    _candidate_promote_payload,
-    _candidate_review_payload,
-)
+# LLM: 只转发原晋升与 remember 入口，不补审核、不重建回执、不替生产逻辑推导权限。
+# 模块用途: 让测试复用真实调用路径并原样取得生产结果。
+from agent_py_agent.agent.capability.memory_tool import RememberTool
 
 
-# LLM: 先观察真实自动拒绝，再模拟用户调用原CLI审核及正式promote确认；不改候选文件或替换任何生产验证器。
-# 函数用途: 测试正式提交/CAS时走明确的人工确认步骤，来源不合格仍返回原自动拒绝。
+# LLM: 仅单次调用原自动晋升并完整转发 confirmed；不因返回原因码补人工审核或再次提交。
+# 函数用途: 原样返回真实自动晋升结果，所有来源和确认规则由生产层负责。
 def confirm_candidate(service, candidate_id, *, confirmed=True):
-    waiting = service.promote(candidate_id, automatic=True)
-    if waiting.reason_code != 'AUTO_PROMOTION_CONFIRMATION_REQUIRED':
-        return waiting
-    host = SimpleNamespace(memory_promotion=service, memory_candidates=service.candidates)
-    _candidate_review_payload(host, SimpleNamespace(candidate_id=candidate_id, reviewer='explicit-test-user',
-        decision='approve', note='用户已检查该候选的精确内容、范围和目标版本'))
-    return service.promote(candidate_id, reviewer='explicit-test-user', automatic=False, confirmed=confirmed)
+    return service.promote(candidate_id, automatic=True, confirmed=confirmed)
 
 
-# LLM: 这是测试中的多步用户工作流，不是模型工具或生产批准器；每次先调用原Remember生成候选，再独立审核精确候选。
-# 类用途: 供删除崩溃/CAS回归复用真实remember→CLI审核→原promote确认链，避免把旧自动发布当产品行为。
+# LLM: 测试辅助器仅保存 agent 引用并转发 RememberTool，不解析输出或拼接第二次审核/晋升流程。
+# 类用途: 让原有回归复用单次真实 remember 调用及原始回执。
 class ConfirmedRememberWorkflow:
+    # LLM: 保留调用方原 agent 对象，不复制状态或构造替代验证器。
+    # 函数用途: 保存真实工具执行所需的 agent 引用。
     def __init__(self, agent):
         self.agent = agent
 
+    # LLM: 参数与工具回执直接透传，是否成功或需要补证据均由原工具判定。
+    # 函数用途: 执行一次真实 remember 并返回原结果。
     def execute(self, params):
-        original = RememberTool(self.agent).execute(params)
-        if not original.ok or str(params.get('action') or '') == 'list':
-            return original
-        import json
-        payload = json.loads(original.output)
-        results = payload.get('results', [])
-        if not results:
-            return original
-        projected = []
-        for row in results:
-            if row.get('reason_code') != 'AUTO_PROMOTION_CONFIRMATION_REQUIRED':
-                projected.append(row)
-                continue
-            candidate_id = row['candidate_id']
-            candidate = self.agent.memory_candidates.get(candidate_id)
-            result = confirm_candidate(self.agent.memory_promotion, candidate_id)
-            projected.append(_promotion_result_with_scope(result.to_dict(), candidate))
-        return _remember_write_result(payload.get('action', 'add'), projected)
+        return RememberTool(self.agent).execute(params)

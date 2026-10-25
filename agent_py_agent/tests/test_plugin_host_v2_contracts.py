@@ -8,7 +8,7 @@ import pytest
 
 
 # LLM: 示例从设计逐项编写，不从待测schema反向生成，避免错误字段互相证明。
-# 函数用途: 给出42个动作的独立合法输入及读写分类。
+# 函数用途: 给出45个动作的独立合法输入及读写分类。
 def action_cases():
     thread = {"thread_id": "thread-test"}
     goal = {**thread, "goal_id": "goal-test", "expected_revision": 1}
@@ -34,6 +34,9 @@ def action_cases():
         "users.local.disable": ({**user, "expected_revision": 1}, "write"),
         "users.local.enable": ({**user, "expected_revision": 1}, "write"),
         "users.local.quota.get": (user, "read"),
+        "users.local.password.set": ({**user, "password": "ValidPassword1", "expected_revision": 1}, "write"),
+        "users.auth.login": ({"account_source": "local", "user_id": "alice", "password": "ValidPassword1"}, "read"),
+        "users.auth.verify": ({"session_token": "session_token_valid_sample_01"}, "read"),
         "execute.tool": ({**thread, "tool_name": "read_file", "arguments": {"path": "a.txt"}}, "async"),
         "execute.script": ({**thread, "script_id": "script-test", "expected_revision": 1}, "async"),
         "execute.workflow": ({**thread, "workflow_id": "workflow-test", "expected_revision": 1}, "async"),

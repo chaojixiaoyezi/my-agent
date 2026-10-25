@@ -86,6 +86,15 @@ class GatewayControlOperationConflict(ValueError):
     pass
 
 
+# LLM: 只运输脱敏正文、最终摘要与原文SHA256，不携带密码，不改变原操作锁或签发权限。
+# 类用途: 将同一次控制输入作为不可变整体传入原准备链，避免新增散落参数。
+@dataclass(frozen=True)
+class _ControlOperationInput:
+    command_text: str
+    input_digest: str
+    secret_command_sha256: str = ""
+
+
 # LLM: This file is the sole transport-level fact for one control operation. It freezes an exact
 # turn or manual-Compact target when present; command-specific stores remain effect authority and
 # ``terminal_unknown`` never claims that an effect failed.
@@ -122,8 +131,9 @@ class GatewayControlOperationReceipt:
     dispatch: object = None
     private_approval: object = None
     model_payload: object = None
+    secret_command_sha256: str = ""
 
-    # LLM: 保存固定身份、可选目录与摘要版本；准备后执行和对账只能读回执，不重读当前 HTTP 输入。
+    # LLM: 只持久化脱敏正文及可选原命令哈希，绝不保存密码明文；旧无密码回执字节不变。
     # 函数用途: 保存规范控制回执及可选私卡action/分派事实，不序列化AGENTS、Memory封印、RunParams或writer。
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -164,9 +174,11 @@ class GatewayControlOperationReceipt:
             payload["private_approval"] = self.private_approval
         if self.model_payload is not None:
             payload["model_payload"] = self.model_payload
+        if self.secret_command_sha256:
+            payload["secret_command_sha256"] = self.secret_command_sha256
         return payload
 
-    # LLM: 读取时重算身份与对应版本的摘要；目录篡改或旧版未签名目录都必须当作账本损坏拒绝。
+    # LLM: 读回时用脱敏正文与原命令哈希重算摘要，拒绝字段篡改；无哈希的旧账仍沿原校验。
     # 函数用途: 恢复完整控制输入与可选原私卡动作、分派绑定及claimed执行者，拒绝缺来源的认领。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayControlOperationReceipt:
@@ -223,6 +235,7 @@ class GatewayControlOperationReceipt:
             dispatch=data.get("dispatch"),
             private_approval=data.get("private_approval"),
             model_payload=data.get("model_payload"),
+            secret_command_sha256=data.get("secret_command_sha256", ""),
         )
         matched_digest_version = _validate_control_operation_receipt(receipt)
         return (
@@ -287,7 +300,7 @@ def gateway_control_operation_identity(
 
 # LLM: The prepare row is committed before the executing marker and before any command-specific
 # mutation. Existing completed/unknown rows are replayed without touching the effect service.
-# /admin、/approve 的密码在写回执、算摘要之前就换成脱敏正文；明文只随内存中的 command 交给执行服务一次。
+# 密码明文仅随内存command交执行；持久化脱敏正文，以原命令SHA256绑定摘要，使不同密码不能重放旧成功。
 # 事件中心（B6 观察计数）由调用方放进 scope.event_hub 带进来；它是只读展示依赖，不落盘、不参与身份判定。
 # 函数用途: 幂等执行一条控制命令，并把崩溃边界保存为 completed 或 terminal_unknown。
 # LLM: 可选model_transaction仅来自当前真实HTTP模型producer；沿原receipt身份/状态机，原Count0和其它kind参数缺省时完全走原调用。
@@ -305,18 +318,22 @@ def execute_gateway_control_operation(
         require_model_control_source(model_transaction, command, scope, command_text)
     else:
         scope = bind_gateway_control_scope_owner(agent, scope)
-    command_text = persisted_control_command_text(command, command_text)
-    operation_id, input_digest = gateway_control_operation_identity(scope, command_text)
+    raw_command_text = command_text
+    command_text = persisted_control_command_text(command, raw_command_text)
+    secret_command_sha256 = (hashlib.sha256(raw_command_text.encode("utf-8")).hexdigest()
+                             if raw_command_text != command_text else "")
+    digest_text = _secret_bound_digest_text(command_text, secret_command_sha256)
+    operation_id, input_digest = gateway_control_operation_identity(scope, digest_text)
+    operation_input = _ControlOperationInput(command_text, input_digest, secret_command_sha256)
     with try_gateway_control_operation_transition(paths, operation_id) as acquired:
         if acquired:
             return _execute_gateway_control_operation_locked(
                 agent,
                 paths,
                 operation_id=operation_id,
-                input_digest=input_digest,
+                operation_input=operation_input,
                 command=command,
                 scope=scope,
-                command_text=command_text,
                 **({} if model_transaction is None else {"model_transaction": model_transaction}),
             )
         observed = read_gateway_control_operation(paths, operation_id)
@@ -332,34 +349,31 @@ def execute_gateway_control_operation(
             agent,
             paths,
             operation_id=operation_id,
-            input_digest=input_digest,
+            operation_input=operation_input,
             command=command,
             scope=scope,
-            command_text=command_text,
                 **({} if model_transaction is None else {"model_transaction": model_transaction}),
         )
 
 
-# LLM: 原op锁首次执行者冻结同一控制；实际local/model source仅传固定receipt叶，远端仍原分派，Count0无source保持原调用。
+# LLM: 原op锁首次执行者冻结同一控制及可选密码哈希；local/model来源与原分派生命周期不变。
 # 函数用途: 在原操作锁内准备同一控制；远端只分派，本机沿唯一副作用入口执行并记原回执。
 def _execute_gateway_control_operation_locked(
     agent: object,
     paths: GatewayPaths,
     *,
     operation_id: str,
-    input_digest: str,
+    operation_input: _ControlOperationInput,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
-    command_text: str,
     model_transaction=None,
 ) -> GatewayControlOperationReceipt:
     receipt = _load_or_prepare_control_operation_locked(
         agent, paths,
         operation_id=operation_id,
-        input_digest=input_digest,
+        operation_input=operation_input,
         command=command,
         scope=scope,
-        command_text=command_text,
         **({} if model_transaction is None else {"model_transaction": model_transaction}),
     )
     if model_transaction is not None:
@@ -710,27 +724,27 @@ def _reconcile_control_operation_locked(
     return updated
 
 
-# LLM: 原op锁内先验证同id完整输入；首次沿原factory冻结目标，正count实际local/model来源固定写prepared，不补选未来任务。
+# LLM: 原op锁内验证同id完整输入，原factory保存可重算的密码哈希而非明文，目标/准备/来源生命周期不变。
 # 函数用途: 原子准备唯一规范控制回执，原消息重试只读同输入，不新增来源或业务重投。
 def _load_or_prepare_control_operation_locked(
     agent: object,
     paths: GatewayPaths,
     *,
     operation_id: str,
-    input_digest: str,
+    operation_input: _ControlOperationInput,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
-    command_text: str,
     model_transaction=None,
 ) -> GatewayControlOperationReceipt:
     existing = read_gateway_control_operation(paths, operation_id)
     if existing is not None:
-        if existing.input_digest != input_digest:
+        if existing.input_digest != operation_input.input_digest:
             raise GatewayControlOperationConflict(
                 "gateway control message id was reused with different input"
             )
         return existing
-    receipt = _new_control_operation_receipt(scope, command.kind, command_text, operation_id, input_digest)
+    receipt = _new_control_operation_receipt(scope, command.kind, operation_input.command_text,
+        operation_id, operation_input.input_digest, secret_command_sha256=operation_input.secret_command_sha256)
     _validate_control_operation_receipt(receipt)
     if model_transaction is not None:
         _write_control_operation_json(gateway_control_operation_path(paths, operation_id), receipt.to_dict(), model_transaction=model_transaction)
@@ -751,9 +765,9 @@ def _load_or_prepare_control_operation_locked(
     return receipt
 
 
-# LLM: 普通命令与私卡决定共用原owner/identity/时间字段公式；action只选v5摘要，不从JSON恢复执行源。
+# LLM: 普通命令/私卡仍用原版本，密码命令只加原文哈希以重算输入；任何字段都不能从JSON恢复执行源。
 # 函数用途: 创建唯一原控制回执的规范初值，旧slash调用不携新字段。
-def _new_control_operation_receipt(scope, command_kind, command_text, operation_id, input_digest, *, private_approval=None):
+def _new_control_operation_receipt(scope, command_kind, command_text, operation_id, input_digest, *, private_approval=None, secret_command_sha256=""):
     return GatewayControlOperationReceipt(
         operation_id=operation_id,
         input_digest=input_digest,
@@ -781,6 +795,7 @@ def _new_control_operation_receipt(scope, command_kind, command_text, operation_
         model_payload=scope.metadata.get("model_payload"),
         input_digest_version=5 if private_approval is not None else _control_input_version(scope),
         private_approval=private_approval,
+        secret_command_sha256=secret_command_sha256,
         state="prepared",
         updated_at=time.time(),
     )
@@ -856,7 +871,7 @@ def _receipt_scope(
     )
 
 
-# LLM: Every read recomputes the versioned id/digest used at prepare time and enforces state/result
+# LLM: Every read recomputes the secret-bound versioned id/digest used at prepare time and enforces state/result
 # invariants. Rows written before exact Compact targets existed may use legacy digest v1 only when
 # the target remains empty；v3 之前不能携带未签名的 workspace，字段扩展不能削弱旧账防篡改。
 # 函数用途: 核对原身份摘要与分派/认领完整性；私卡v5完整签入点击输入，不恢复执行身份。
@@ -887,6 +902,7 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
     elif receipt.input_digest_version == 5 or receipt.command_kind == 'private_tool_approval':
         raise DataCorruptionError("private approval action is missing")
     scope = _receipt_scope(receipt)
+    digest_text = _secret_bound_digest_text(receipt.command_text, receipt.secret_command_sha256)
     identity = _control_operation_identity_payload(scope, receipt.client_message_id)
     expected_id = "gwctl-msg-" + hashlib.sha256(
         _canonical_json(identity).encode("utf-8")
@@ -909,7 +925,7 @@ def _validate_control_operation_receipt(receipt: GatewayControlOperationReceipt)
             continue
         if receipt.input_digest == _control_operation_input_digest(
             scope,
-            receipt.command_text,
+            digest_text,
             version=version,
             **({"private_approval": receipt.private_approval} if version == 5 else {}),
         ):
@@ -981,6 +997,16 @@ def _control_operation_identity_payload(
         "conversation_id": str(scope.conversation_id or "").strip(),
         "message_id": str(message_id or "").strip(),
     }
+
+
+# LLM: 只绑定64位小写SHA256而非密码；空哈希保持旧摘要字节，坏类型/格式不能被读回校验忽略。
+# 函数用途: 生成仅用于摘要的脱敏正文加原命令指纹，不把该组合当作持久化命令。
+def _secret_bound_digest_text(command_text: str, secret_command_sha256: str) -> str:
+    if type(secret_command_sha256) is not str or (
+            secret_command_sha256 and re.fullmatch(r"[0-9a-f]{64}", secret_command_sha256) is None):
+        raise DataCorruptionError("gateway control operation secret digest is invalid")
+    return (f"{command_text}\x00secret_sha256:{secret_command_sha256}"
+            if secret_command_sha256 else command_text)
 
 
 # LLM: v1 不含 Compact 目标，v2 签入目标，v3 签入 workspace，v4 签入真实执行绑定；旧版本签名不可改变。

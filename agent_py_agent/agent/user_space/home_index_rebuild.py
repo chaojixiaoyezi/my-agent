@@ -14,6 +14,7 @@ from .home_indexes import (
     replace_home_index_snapshots,
 )
 from .home_layout import MyAgentHomePaths
+from .local_user_store import LocalUserStore
 from .owner_resolver import OwnerHomeResult, OwnerIdentity, resolve_owner_home
 
 
@@ -95,14 +96,17 @@ def _owner_records(home: MyAgentHomePaths) -> list[OwnerHomeResult]:
     return records
 
 
+# LLM: 只枚举已有本地目录；普通用户用原Store的local/user路径投影，不经旧provider回退、不物化账号。
+# 函数用途: 以真实local用户目录与规范身份重建owner索引。
 def _local_owner_records(home: MyAgentHomePaths) -> list[OwnerHomeResult]:
     if not home.local_owners_dir.exists():
         return []
     records = []
     for owner_dir in sorted(path for path in home.local_owners_dir.iterdir() if path.is_dir()):
         owner_name = owner_dir.name
-        identity = OwnerIdentity.local_main() if owner_name == "main" else OwnerIdentity(provider="local", owner_kind=owner_name, owner_id=owner_name)
-        records.append(resolve_owner_home(home.root, identity))
+        owner = (resolve_owner_home(home.root, OwnerIdentity.local_main()) if owner_name == "main"
+                 else LocalUserStore(home.root).owner_home(owner_name))
+        records.append(owner)
     return records
 
 

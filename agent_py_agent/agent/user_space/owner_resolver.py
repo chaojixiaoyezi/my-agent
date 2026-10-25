@@ -28,6 +28,8 @@ from .persona_templates import (
 )
 
 
+# LLM: 普通local/user与管理员local/main分离；身份仅决定规范路径，本类型不认证或物化目录。
+# 类用途: 表示本地或通道用户的稳定归属，禁止普通用户认领管理员编号。
 @dataclass(frozen=True)
 class OwnerIdentity:
     provider: str
@@ -37,6 +39,15 @@ class OwnerIdentity:
     @classmethod
     def local_main(cls) -> OwnerIdentity:
         return cls(provider="local", owner_kind="main", owner_id="main")
+
+    # LLM: 与LocalUserStore共用owners/local布局，保留main只给管理员；纯构造不写文件。
+    # 函数用途: 生成普通本地用户的规范身份。
+    @classmethod
+    def local_user(cls, user_id: str) -> OwnerIdentity:
+        uid = safe_path_segment(user_id)
+        if uid == "main":
+            raise ValueError("local/main is reserved for admin owner")
+        return cls(provider="local", owner_kind="user", owner_id=uid)
 
     @classmethod
     def provider_user(cls, provider: str, owner_id: str) -> OwnerIdentity:
@@ -201,9 +212,13 @@ def home_paths_with_owner(paths: MyAgentHomePaths, owner: OwnerHomeResult) -> My
     )
 
 
+# LLM: local/user必须与账号库共享同一物理目录；手工构造的main/user也必须拒绝，不初始化home。
+# 函数用途: 按规范身份选择唯一用户空间路径。
 def _owner_home_dir(root: Path, identity: OwnerIdentity) -> Path:
     if identity.provider == "local" and identity.owner_kind == "main":
         return root / "owners" / "local" / "main"
+    if identity.provider == "local" and identity.owner_kind == "user":
+        return root / "owners" / "local" / OwnerIdentity.local_user(identity.owner_id).owner_id
     bucket = "users" if identity.owner_kind == "user" else "groups"
     return root / "owners" / "providers" / identity.provider / bucket / identity.owner_id
 
@@ -332,9 +347,13 @@ def _owner_seed_jsons(result: OwnerHomeResult) -> tuple[tuple[Path, dict[str, ob
     )
 
 
+# LLM: local/user编号不再落入providers/local，且不得产生冒充管理员的local/main。
+# 函数用途: 返回与规范目录一致的公开owner编号。
 def _owner_id(identity: OwnerIdentity) -> str:
     if identity.provider == "local" and identity.owner_kind == "main":
         return "local/main"
+    if identity.provider == "local" and identity.owner_kind == "user":
+        return f"local/{OwnerIdentity.local_user(identity.owner_id).owner_id}"
     bucket = "users" if identity.owner_kind == "user" else "groups"
     return f"providers/{identity.provider}/{bucket}/{identity.owner_id}"
 

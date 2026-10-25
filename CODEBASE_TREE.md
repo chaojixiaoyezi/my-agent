@@ -22,6 +22,7 @@
 |-- docs/design/ARTIFACT_LOOKUP_LATENCY.md # read_artifact 查找与安全读取延迟收敛设计说明
 |-- docs/design/LINUX_SHELL_LATENCY.md # run_command 宿主路径与子进程管道捕获延迟收敛设计说明
 |-- docs/design/OWNER_TOOL_LATENCY.md # 单 Owner 工具并发、list_tools 线性预算与上下文单飞设计说明
+|-- docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md # 五大核心底座能力（--dir 多会话、主会话分叉、对话勾选提炼、数据源钥匙串、浏览器录制）与 18 个插件接口详细设计书
 `-- docs/design/SELF_MAP_LATENCY.md # self_map 概览解耦与批量元数据投影设计说明
 ```
 
@@ -63,17 +64,23 @@
 |-- agent_py_agent/agent/plugin_manifest_host_v9.py # 插件 Manifest v9 schema 解析与 host_api_v2 权限声明校验
 |-- agent_py_agent/agent/plugin_permissions/host_grants.py # 插件安装/激活授权记录归一化与 v9 能力交集计算
 |-- agent_py_agent/agent/user_space/local_user_store.py # 本地普通账号（owners/local/<user_id>）无链接原子存储与状态投影
-|-- agent_py_agent/agent/user_space/local_user_lifecycle.py # 本地普通账号创建、幂等回执、种子初始化与启停生命周期服务
+|-- agent_py_agent/agent/user_space/local_user_lifecycle.py # 本地普通账号创建、密码哈希/改密、幂等回执、种子初始化与启停生命周期服务
+|-- agent_py_agent/agent/user_space/user_auth.py # 本地普通用户与飞书首连用户双源统一密码登录、HMAC 会话签发与实时修订验签服务
+|-- agent_py_agent/agent/gateway_parts/users_control_service.py # /users 斜杠命令与 admin_controls 工具共用的本地普通用户创建、改密、启停与查询服务
 |-- agent_py_agent/agent/gateway_parts/plugin_request_source.py # 插件会话请求来源绑定与同安装/同 Owner 校验
 |-- agent_py_agent/agent/gateway_parts/plugin_request_submission.py # 插件消息幂等提交与精确原请求取消服务
 |-- agent_py_agent/agent/gateway_parts/session_setting_control.py # 模型与思考档位运行时切换短事务控制通道
 |-- agent_py_agent/cli/chat_parts/tui_model_selection_wait.py # TUI 模型菜单异步等待与撤销提示协调器
 |-- agent_py_agent/cli/chat_parts/tui_setting_enqueue.py # TUI 独立设置短事务出站队列与非阻塞入队
 |-- agent_py_agent/cli/turn_completion.py # CLI / TUI 回合完成本地时间戳与单调时钟耗时格式化
-|-- agent_py_agent/tests/test_plugin_host_v2_contracts.py # Plugin Host v2 42 动作目录、严格 JSON 与合同单测
+|-- agent_py_agent/tests/test_plugin_host_v2_contracts.py # Plugin Host v2 45 动作目录、严格 JSON 与合同单测
 |-- agent_py_agent/tests/test_plugin_host_v2_grants.py # Plugin Host v2 令牌签发、撤销、HTTP 与有界 SSE 传输单测
 |-- agent_py_agent/tests/test_plugin_manifest_v9.py # Manifest v9 解析与授权交集单测
 |-- agent_py_agent/tests/test_plugin_local_users.py # 本地普通用户创建、启停、配额与幂等故障恢复单测
+|-- agent_py_agent/tests/test_local_user_auth_and_password_api.py # 本地用户/飞书首连双源密码认证、users.local.password.set 与会话实时撤权单测
+|-- agent_py_agent/tests/test_users_slash_and_admin_controls.py # /users 斜杠命令、密码持久化脱敏与 admin_controls 工具管理普通用户单测
+|-- agent_py_agent/tests/test_plugin_public_private_isolation.py # 公共插件与普通用户私有插件隔离契约（CT-01..CT-10）及通配授权单测
+|-- agent_py_agent/tests/test_local_user_cross_module_guards.py # 本地普通用户路径策略、人格写守卫、子代理与秘密控制收据跨模块守卫单测
 |-- agent_py_agent/tests/test_plugin_act_as_user.py # act_as_user 非管理员隔离、权限收敛与跨 Owner 拒绝单测
 |-- agent_py_agent/tests/test_plugin_host_v2_conversations.py # B1 会话线程与完整聊天历史分页单测
 |-- agent_py_agent/tests/test_plugin_host_v2_requests.py # B2 消息发送、轮询、SSE 流式回复与取消单测

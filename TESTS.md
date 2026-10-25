@@ -1,3 +1,10 @@
+## 2026-10-25 管理员三端创建/管理普通用户、双源统一密码登录与公私插件隔离（CT-01..CT-10）
+
+- 新增 `test_local_user_auth_and_password_api.py`、`test_users_slash_and_admin_controls.py`、`test_plugin_public_private_isolation.py`、`test_local_user_cross_module_guards.py`，并在 `test_plugin_host_v2_contracts.py` 扩展至 45 个闭合动作（新增 `users.local.password.set`、`users.auth.login`、`users.auth.verify`）。
+- 覆盖 `/users`（别名 `/user`）斜杠命令创建/改密/启停/查询普通用户与控制命令密码明文 `******` 脱敏、`admin_controls` 工具直接创建与管理 `local/<uid>` 普通用户、本地普通账号与飞书首连账号双源密码认证及修订/停用实时撤权、管理员公共插件与普通用户私有插件隔离契约（`CT-01..CT-10`）、UID 授权集合 `"*"` 通配，以及跨模块路径/人格/子代理/控制收据安全守卫。
+- 复现（在工作树根运行）：
+  `python3 -m pytest agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_users_slash_and_admin_controls.py agent_py_agent/tests/test_plugin_public_private_isolation.py agent_py_agent/tests/test_local_user_cross_module_guards.py agent_py_agent/tests/test_plugin_host_v2_contracts.py -q --tb=short`
+
 ## 2026-10-24 W1-6-fix：后台阶段非终态与控制/权威异常传播
 
 - 来源：`w1-6-fix` 的 c5 astra/c1 双盲复核反馈；本轮起点 `b5d3c7ba6471bca1bc77f9e7cea915fa355a545f`。不改 host、Registry、唤醒发表或调度协议。

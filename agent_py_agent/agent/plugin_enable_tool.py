@@ -1,6 +1,6 @@
 # LLM: 启用沿用原 HostCommand/ToolExecutor 与安装表；v8 仅在总开关、owner 和共用进程沙箱就绪后继续，拒绝须先于环境副作用。
 #   老格式（v1–v6）由宿主冻结的授权上下文确认 R/W/N/E，确认/启动/发布复核固定授权，旧代真实释放后换代，restricted 缺 B7 拒启动。
-# 模块用途: 在固定安装快照上安全准备并发布插件，私有值不进入回执；不将路径检查、报告存在或授权当作 OS 隔离证明。
+# 模块用途: 固定安装上安全准备发布；普通owner强制restricted和进程沙箱，不将确认或路径检查当作OS隔离证明。
 
 from __future__ import annotations
 
@@ -61,6 +61,7 @@ from .tooling.models import (
     ToolModelSpec,
     ToolRuntimePolicy,
 )
+from .user_space.owner_resolver import OwnerIdentity
 
 
 # LLM: owner/binding/installation 由宿主冻结；v8 的强制沙箱、开关与本机 owner 门均在确认和准备副作用前检查。
@@ -84,12 +85,14 @@ class PluginEnablePolicy:
 #   老格式上下文由管理员宿主冻结，预览不改旧代，确认后沿原撤销链；restricted 缺 B7 不进入候选。
 # 类用途: 校验启用门、沙箱与确认码后执行唯一的插件激活流程。
 class PluginEnableTool(BaseTool):
-    # LLM: never 仅免管理动作重复询问；只有未激活的旧版生成计划及资源声明。policy 带来 B7 的沙箱/总开关/owner 判定。
+    # LLM: never只免重复询问；普通owner不能关闭沙箱或沿旧默认wide，未确认不发布，准备仍走原链。
     #   老格式授权组装成原上下文；宿主环境来源与原准备 claim 一起传递，不给模型正文或插件 env 扩权。
     # 函数用途: 可启用的旧版包在领取前声明环境；关闭的 v8、内容包、已启用或缺失插件均不构造资源域。
     def __init__(self, owner, repository, binding, installation, catalog_revision,
                  *, policy: PluginEnablePolicy | None = None):
         policy = policy or PluginEnablePolicy()
+        if owner.identity != OwnerIdentity.local_main():
+            policy = replace(policy, legacy_sandbox_default=True)
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
         self.events_enabled, self.events_owner_allowed = policy.events_enabled, policy.events_owner_allowed
@@ -99,7 +102,7 @@ class PluginEnableTool(BaseTool):
         # v1–v6 可执行包（permissions 为空、不是内容包）：宿主冻结的授权输入在这里组装成原授权上下文。
         self._is_legacy = (installation is not None and installation.manifest.permissions is None
                            and not installation.manifest.is_content_only)
-        self.process_sandbox = policy.process_sandbox or self._is_v8
+        self.process_sandbox = policy.process_sandbox or self._is_v8 or self.owner.identity != OwnerIdentity.local_main()
         self._verifier_consent = ""
         self.previous_cleanup = None
         self.target = self.plan = self.grant = None

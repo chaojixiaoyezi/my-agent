@@ -16,7 +16,10 @@ import pytest
 
 from agent_py_agent.agent.auth.models import Permission, Role
 from agent_py_agent.agent.capability.memory_tool import RememberTool
-from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
+from agent_py_agent.agent.conversation.learning_source import (
+    dispatch_projection,
+    user_dialogue_projection,
+)
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.gateway_parts import http_handlers
 from agent_py_agent.agent.gateway_parts import memory_candidate_control as controls
@@ -29,15 +32,15 @@ from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.user_space.owner_resolver import owner_identity_from_config
 
 
-# LLM: 真实临时owner、消息证据和Promotion均不替换；HTTP只替换认证适配器结果，不伪造内部seal或签发权限。
-# 函数用途: 让普通provider用户通过原持久HTTP执行自己候选的完整生命周期。
+# LLM: 真实临时owner/证据/晋升不替换；派活来源令候选停pending供人工控制，HTTP只替换认证输入不造seal。
+# 函数用途: 保留需人工处理候选的list/preview/confirm/reject/cancel及owner隔离覆盖。
 @pytest.fixture
 def memory_control(tmp_path, monkeypatch):
     agent = SimpleAgent(AgentConfig(my_agent_home=str(tmp_path / 'home'), prompt_files=[],
         my_agent_owner_provider='feishu', my_agent_owner_kind='user', my_agent_owner_id='alice'), tmp_path / 'workspace')
     owner = owner_identity_from_config(agent.config)
     thread = agent.conversation_store.threads.get_or_create(dict(canonical_user_id='alice', owner_id=agent.home_paths.owner_id,
-        channel='feishu', channel_conversation_id='private-a', channel_user_id='alice', learning_source=user_dialogue_projection()))
+        channel='feishu', channel_conversation_id='private-a', channel_user_id='alice', learning_source=dispatch_projection()))
     agent.conversation_store.messages.append(dict(thread_id=thread.thread_id, role='user', content='项目使用 UTC 保存时间',
         metadata={'gateway_request_id': 'source-message'}))
     agent._current_run_params = SimpleNamespace(request_id='source-message', run_id='source-run', task_id='source-task',
@@ -46,6 +49,7 @@ def memory_control(tmp_path, monkeypatch):
         subject_key='memory.control'))
     assert draft.ok and not json.loads(draft.output)['saved']
     candidate = agent.memory_candidates.list()[0]
+    assert candidate.status == 'pending_review' and not candidate.learning_source['can_learn']
     sent = []
     caller = dict(user='alice', conversation='private-a', owner=owner, authenticated=True)
     handler = SimpleNamespace(_send_json=lambda code, payload: sent.append((code, payload)), _auth_middleware=object())
@@ -426,18 +430,18 @@ def test_bad_explicit_control_stays_invalid_instead_of_model_task(tail):
     assert command is not None and command.kind == 'memory' and not command.valid
 
 
-def test_fake_llm_cannot_publish_but_current_human_direct_control_can(tmp_path):
+def test_unlearnable_fake_llm_cannot_publish_but_current_human_direct_control_can(tmp_path):
     from agent_py_agent.agent.backends.base import (
         BaseBackend,
         ModelResponse,
         ProviderToolCapability,
     )
     from agent_py_agent.tests.test_remember_learning_source_review import _agent
-    agent = _agent(tmp_path, user_dialogue_projection(), {}, {})
+    agent = _agent(tmp_path, dispatch_projection(), {}, {})
     thread_id = agent._current_run_params.task_attributes['conversation_thread_id']
 
     # LLM: 后端只返回native工具请求和普通final；不替换工具、审批、候选或原promotion判断。
-    # 类用途: 验证真实模型循环只能创建候选，文字声称确认没有权限作用。
+    # 类用途: 验证不可学来源的模型循环只创建候选，文字声称确认不能提升来源资格。
     class CandidateBackend(BaseBackend):
         name = 'memory-candidate-fake'
         context_window_tokens = 100_000

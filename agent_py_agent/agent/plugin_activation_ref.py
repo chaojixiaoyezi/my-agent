@@ -56,15 +56,20 @@ class PluginActivationRef:
             raise ValueError("插件激活引用与规范用户地址不符")
         return owner
 
-    # LLM: 插件运行只供管理员；每次调用鲜活核对身份与代次，防止旧连接绕过新注册限制。公共内容 reader 不走插件运行入口。
+    # LLM: 公共插件运行只供管理员，普通本地用户只允许运行本人的私有安装；每次调用鲜活核对身份与代次，防止旧连接绕过新注册限制。
     # 函数用途: 鲜活读取唯一安装表，允许同一准备代发布后沿原连接继续使用。
     def require(self, *, allow_preparing: bool = False) -> PluginInstallation:
+        owner = self.owner()
         if self.identity != OwnerIdentity.local_main():
-            raise PermissionError("插件运行仅限管理员")
+            if self.identity.provider != "local" or self.identity.owner_kind != "user" or not owner.home_dir.is_dir():
+                raise PermissionError("插件运行仅限管理员")
         phases = frozenset({"preparing", "active"}) if allow_preparing else frozenset({"active"})
-        return PluginInstallStore(self.owner()).require_activation(
+        current = PluginInstallStore(owner).require_activation(
             self.scope.plugin_id, self.scope.activation_id, phases=phases,
         )
+        if self.identity != OwnerIdentity.local_main() and current.installation_scope != "private":
+            raise PermissionError("插件运行仅限管理员")
+        return current
 
     # LLM: 载荷只包含固定身份和可信规范地址，没有配置值或授权缓存；仅写宿主私有的一次性信封。
     # 函数用途: 将原引用交给独立 host，避免其猜测用户目录。

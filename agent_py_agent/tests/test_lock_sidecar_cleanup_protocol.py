@@ -248,3 +248,22 @@ def test_json_io_lock_retries_when_lock_file_replaced(tmp_path: Path, monkeypatc
     with json_io.locked_json_path(data_path):
         pass
     assert calls["count"] == 2
+
+
+# 函数用途: 双清理者与业务写者交错时，持旧 inode 的清理者在试锁后核对身份与数据文件存在性，绝不误删新锁。
+def test_cleaner_rechecks_inode_and_data_file_after_flock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_py_agent.agent.gateway_parts.io as gateway_io
+
+    lock_path = _orphan_lock(tmp_path, name="race.json.lock")
+    real_try_flock = gateway_io._try_flock_exclusive
+
+    def replace_inode_before_flock(handle) -> bool:
+        assert real_try_flock(handle) is True
+        # 模拟另一清理者已删旧 inode、业务写者刚建同名新锁 inode
+        lock_path.unlink()
+        lock_path.write_text("", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(gateway_io, "_try_flock_exclusive", replace_inode_before_flock)
+    assert cleanup_orphan_lock_files(tmp_path) == 0
+    assert lock_path.exists()

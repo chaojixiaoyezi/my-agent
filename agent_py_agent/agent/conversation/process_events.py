@@ -1,21 +1,27 @@
 # LLM: 任务进程终态由原 ProcessSessionStore 核实，共享激活不参与业务通知；通知只进入既有 ConversationStore wake。
 # 不重放命令、不新建任务、不靠正文判完成；同 session 的通知发布与重启补发共用去重键。
 # 便宜检查只影响初次目录内容读取，正式通知前仍核原始状态、归属与去重回执。
-# 持久unknown不再刷新；原registry轻量get不读日志，替换status的调用方仍守原接口。
+# 持久unknown不再刷新；存活旧locale实例共用registry有界等价缓存，未知回原get复核，不改磁盘token或通知去重。
 # 模块用途: 让后台命令结束后主动叫醒所属主会话，或在活动主回合安全点交接，省掉模型短轮询。
 from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from pathlib import Path
 
+from ..gateway_parts.multiprocess_executor_identity import process_birth
+from ..gateway_parts.multiprocess_native_host_observation import kernel_terminated, store_birth
 from ..tooling import process_registry as _registry_module
 from ..tooling.process_registry import (
     ProcessRegistry,
     ProcessSessionAuthorityError,
     process_registry,
 )
-from ..tooling.process_session_records import PROCESS_TERMINAL_STATUSES
+from ..tooling.process_session_records import (
+    MANAGED_PROCESS_SESSION_SCHEMAS,
+    PROCESS_TERMINAL_STATUSES,
+)
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
 
 PROCESS_COMPLETION_REASON = "managed_process_exited"
@@ -84,7 +90,7 @@ def reconcile_process_completions(agent: object) -> int:
             _LOG.error("PROCESS_COMPLETION_SCOPE_CONFLICT session=%s", payload["session_id"])
             continue
         try:
-            summary = _process_completion_status(str(payload["session_id"]), root)
+            summary = _process_completion_status(str(payload["session_id"]), root, payload=payload)
             if not summary or summary["status"] not in PROCESS_TERMINAL_STATUSES:
                 continue
             report = authority.load(str(payload["session_id"]))
@@ -102,15 +108,62 @@ def reconcile_process_completions(agent: object) -> int:
 
 
 # LLM: 仅原类、原status身份且函数确属registry模块命名空间才轻量get；导入前后替换和外部替身仍走status。
-# 函数用途: 取得通知所需的最新状态，不为后台巡检打开日志；归属校验和最终回执仍由原收割循环负责。
-def _process_completion_status(session_id: str, root: Path) -> dict[str, object] | None:
+#   对尚未终态的受管 v2/v3/v4 记录，仅在内核确认原 PID/launcher_pid 存活、非僵尸且出生标识一致时跳过每拍重读与 ps；
+#   已终态记录与失联/PID 复用记录均走 process_registry.get 完成本地句柄 poll 回收、缓存刷新或 unknown 转换。
+# 函数用途: 取得通知所需的最新状态，不为后台巡检打开日志或对存活受管进程高频拉起 ps；归属校验和最终回执仍由原收割循环负责。
+def _process_completion_status(
+    session_id: str,
+    root: Path,
+    *,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object] | None:
     status = process_registry.status
     if (type(process_registry) is ProcessRegistry
             and getattr(status, "__func__", None) is _PROCESS_REGISTRY_STATUS
             and getattr(_PROCESS_REGISTRY_STATUS, "__globals__", None) is vars(_registry_module)):
+        if (
+            isinstance(payload, dict)
+            and payload.get("schema") in MANAGED_PROCESS_SESSION_SCHEMAS
+            and "get" not in process_registry.__dict__
+            and getattr(process_registry.get, "__func__", None) is ProcessRegistry.get
+        ):
+            recorded_status = str(payload.get("status") or "running")
+            if recorded_status not in PROCESS_TERMINAL_STATUSES and _managed_instance_still_live(
+                session_id, root, payload
+            ):
+                return {"status": recorded_status}
         record = process_registry.get(session_id, store_root=root)
         return {"status": record.status} if record is not None else None
     return status(session_id, store_root=root)
+
+
+# LLM: 每拍仍核PID/非僵尸/出生观察与句柄poll；旧locale仅首次原生复核，后续三元组命中不拉ps；未知返原get。
+# 函数用途: 判断原受管实例仍存活，复用已核出生等价但不把缓存当当前存活证据。
+def _managed_instance_still_live(
+    session_id: str,
+    root: Path,
+    payload: dict[str, object],
+) -> bool:
+    normalized_root = str(root.expanduser().resolve(strict=False))
+    with process_registry._lock:
+        cached = process_registry._processes.get((normalized_root, session_id))
+        local_process = cached.process if cached is not None else None
+    if local_process is not None and local_process.poll() is not None:
+        return False
+    pid = int(payload.get("pid") or payload.get("launcher_pid") or 0)
+    birth = str(payload.get("pid_birth_token") or payload.get("launcher_birth_token") or "")
+    if pid <= 0 or not _registry_module._pid_alive(pid) or kernel_terminated(pid):
+        return False
+    if birth:
+        observed = store_birth(process_birth(pid))
+        if not observed:
+            return False
+        if observed != birth:
+            try:
+                return _registry_module._birth_token_matches(pid, birth, observed)
+            except (OSError, subprocess.TimeoutExpired, ValueError):
+                return False
+    return True
 
 
 # LLM: 单条已核终态共用原Wake reason/facts/dedupe；调用者负责原owner/target/状态与写门，不能据本函数授执行权。
@@ -142,15 +195,23 @@ def _record_completion_notice(authority: ProcessSessionStore, current: dict[str,
         transaction.write({**latest, "completion_notice_id": "explicit_stop" if latest.get("stop_requested") else notice_id})
 
 
-# LLM: 发现层只判断尚欠通知的结构化记录；权威读取失败保留待检查，不能当成没有义务。
+# LLM: 发现层只判断尚欠通知的结构化记录；持久 unknown 与共享激活永不产生会话完成通知，不纳入待处理事实；
+#   权威读取失败保留待检查，不能当成没有义务。
 # 函数用途: Gateway 重启或 owner 热缓存淘汰后，仍能发现后台命令，不让完成通知无人处理。
 def owner_has_pending_process_completions(owner_home: Path) -> bool:
     root = process_session_store_root(owner_home, owner_home)
     records, errors = ProcessSessionStore(root).list_records()
-    return bool(errors) or any(record.get("completion_target") and not record.get("completion_notice_id") for record in records)
+    return bool(errors) or any(
+        record.get("activation_scope") is None
+        and record.get("status") != "unknown"
+        and record.get("completion_target")
+        and not record.get("completion_notice_id")
+        for record in records
+    )
 
 
 # LLM: 只按记录里的结构化 completion_target（store_root + task_id）判断这个任务还欠不欠一次完成通知；
+#   持久 unknown 与共享激活不会再转终态或发完成通知，不计入待等待事实；
 #   权威读取出错时抛 ProcessSessionAuthorityError，调用方必须按"读不到"处理，不能当成没有后台命令。
 #   读到的记录里已有本任务欠通知的就直接返回 True（同类坏记录不遮住它）；否则读错误先按记录归属限定：
 #   坏记录能解析出不属于本任务（见 _record_owned_elsewhere）就不计入，
@@ -165,7 +226,9 @@ def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
     records, errors = ProcessSessionStore(root).list_records()
     store_root = str(store.storage.root)
     if any(
-        isinstance(record.get("completion_target"), dict)
+        record.get("activation_scope") is None
+        and record.get("status") != "unknown"
+        and isinstance(record.get("completion_target"), dict)
         and str(record["completion_target"].get("store_root") or "") == store_root
         and str(record["completion_target"].get("task_id") or "") == selected
         and not record.get("completion_notice_id")

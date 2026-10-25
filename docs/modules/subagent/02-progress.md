@@ -1,3 +1,7 @@
+## 2026-10-25 本地普通用户（`local/<user_id>`）子代理配额解析对齐
+
+`subagents/services/base.py::_load_user_quota_dict` 对 `owner.provider == "local"` 且 `owner.owner_kind == "user"` 的本地普通用户统一调用 `LocalUserStore(root).get_quota(owner.user_id).to_dict()` 读取用户级并发与深度配额（`max_active_agents`、`max_subagents`、`max_depth`、`max_disk_mb`），不再仅对外部 IM Provider 用户生效。
+
 ## 2026-10-22 子代理 `_run_cache` 同时校验 `canonical_state.json` 字节预算
 
 `subagents/services/persistence/service.py` 在决定是否将 `SubAgentTask` 放入进程内 `_run_cache` 时，除检查 `locator` 文件尺寸外同步检查 `canonical_state.json` 的物理文件大小是否超过 `_MAX_RUN_CACHE_ITEM_BYTES`（256 KiB），避免小体积 locator 指向超大 canonical 状态文件时绕过单条目内存预算上限。

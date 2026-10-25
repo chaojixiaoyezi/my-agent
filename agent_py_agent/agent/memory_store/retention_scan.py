@@ -14,7 +14,11 @@ from typing import Any
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
 from ..conversation.models import ConversationThread
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
-from .candidates import CandidateService
+from .candidates import (
+    RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
+    CandidateService,
+    _is_binding_tombstone,
+)
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -408,8 +412,8 @@ def _load_policy(
         )
 
 
-# LLM: 候选清理只允许 rejected/expired/superseded 且严格早于 cutoff 的精确 candidate_id。
-# 函数用途: 规划非活跃候选账本记录删除。
+# LLM: 候选清理只允许合法未晋升状态且严格早于 cutoff 的精确 ID；保留账本 fingerprint 供执行复核。
+# 函数用途: 规划超过保留期的未晋升候选账本清理。
 def _candidate_actions(
     *,
     candidates: CandidateService,
@@ -421,7 +425,7 @@ def _candidate_actions(
         return []
     cutoff = now.timestamp() - policy.rejected_candidate_days * _DAY_SECONDS
     try:
-        records = candidates.list(statuses={"rejected", "expired", "superseded"})
+        records = candidates.list(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES)
     except Exception as exc:  # noqa: BLE001 - convert repository corruption to stable plan error.
         errors.append(
             MemoryRetentionError(
@@ -434,6 +438,8 @@ def _candidate_actions(
     actions: list[MemoryRetentionAction] = []
     authority_fingerprint = file_fingerprint(candidates.path)
     for record in records:
+        if _is_binding_tombstone(record):
+            continue
         updated = _timestamp(record.updated_at)
         if updated is None:
             errors.append(

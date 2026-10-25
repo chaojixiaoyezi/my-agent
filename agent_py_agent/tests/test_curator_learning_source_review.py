@@ -21,8 +21,8 @@ from agent_py_agent.tests.test_review38_contracts import thread
 
 @pytest.mark.parametrize("reference", ["tool", "artifact", "both"])
 @pytest.mark.parametrize("source_kind", ["dispatch", "unknown", "missing-request", "user", "user-child"])
-# LLM: 建立依赖时拆平嵌套，真实消息/audit、输出校验和晋升及所有断言保持不变。
-# 函数用途: 复现引用用户消息A夹带另一回合工具B时，整体覆盖错误扩大的缺口。
+# LLM: 保留真实消息、audit和工具账本；可学来源自动归档，混入派活/未知来源仍阻断，不替换晋升器。
+# 函数用途: 验证Curator引用的逐项来源资格到正式自动归档始终生效。
 def test_curator_mixed_reference_learning_is_not_laundered(env, tmp_path, reference, source_kind):
     allowed = source_kind in {"user", "user-child"}
     good_thread = thread(env, ls.user_dialogue_projection(), "good")
@@ -61,9 +61,11 @@ def test_curator_mixed_reference_learning_is_not_laundered(env, tmp_path, refere
     if reference in {"artifact", "both"}:
         assert len(candidate.source_artifact_refs) == 1
     promoted = env.service.promote(candidate.candidate_id, automatic=True)
-    assert not promoted.promoted, (promoted, candidate.learning_source)
+    assert promoted.promoted is allowed, (promoted, candidate.learning_source)
     assert ls.projection_is_learnable(candidate.learning_source) is allowed
-    assert env.service.long_term.all() == []
+    assert (len(env.service.long_term.all()) == 1) is allowed
+    if not allowed:
+        assert env.service.long_term.all() == []
     if source_kind == "user-child":
         assert "child-run" in candidate.learning_source["source_run_ids"]
 

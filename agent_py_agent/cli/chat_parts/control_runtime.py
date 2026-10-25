@@ -3,7 +3,7 @@
 # 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
 # G3：Gateway 请求在原身份头入口附凭据；读取失败按 G2b 开关——开关开返回明确未发送的原因码，开关关降级不带凭据；direct 不读取凭据。
 # LLM: 控制身份、目录及菜单 CAS 来自同一持久输入，不能在运输层丢掉条件或重建 ID。
-# 模块用途: 路由本地与 Gateway 的结构化控制请求及回执。
+# 模块用途: 路由本地与 Gateway 控制；direct 用户管理复用原服务，不进入模型。
 from __future__ import annotations
 
 """CLI adapter for the shared ordinary-conversation control protocol.
@@ -82,7 +82,7 @@ def im_only_control_result(command: ConversationControlCommand) -> ConversationC
 
 
 # LLM: 原控制合同和 IM 专用命令拒绝不变；Gateway 凭据失败按 G2b 开关降级或拒绝，direct 完全不读本机凭据。
-# 函数用途: 按原模式执行控制；候选人工确认沿同一持久once，Gateway凭据错误不静默重试。
+# 函数用途: 分派本地/Gateway 控制及用户管理，候选确认沿原 once，凭据错误不静默重试。
 def execute_chat_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
@@ -102,6 +102,9 @@ def execute_chat_control(
             message_id=message_id,
             target_control_message_id=target_control_message_id,
         )
+    if command.kind == "users":
+        from ...agent.gateway_parts.users_control_service import execute_users_direct
+        return execute_users_direct(execution.agent, command)
     if command.kind == "memory":
         from ...agent.gateway_parts.memory_candidate_control import execute_memory_candidate_direct
         return execute_memory_candidate_direct(execution.agent, command, execution.state.session_id, message_id)
@@ -721,8 +724,10 @@ def _recover_command_text(command: ConversationControlCommand) -> str:
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 委托专用还原器保留作用域，/model 保留 default 前缀，
 #   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
-# 函数用途: 将界面控制还原为服务端共用协议，保留Memory候选准确参数，不发送给模型。
+# 函数用途: 还原服务端控制协议，保留用户管理和候选原参数，仅用于活请求运输。
 def _command_text(command: ConversationControlCommand) -> str:
+    if command.kind == "users":
+        return f"/users {command.value}".rstrip()
     if command.kind == "plugins":
         return command.value
     if command.kind == "stop" and command.operation == "interrupt":

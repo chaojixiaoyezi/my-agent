@@ -2,10 +2,11 @@
 # 模块用途: 分开子代理的精确线程中断和锁外宿主观察，保护 Gateway 与其它任务。
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 
 from ..concurrency.interrupt import interrupt_by_name
-from ..tooling.process_registry import capture_process_birth_token
+from ..tooling.process_registry import _birth_token_matches, capture_process_birth_token
 from .process_control import is_pid_alive
 from .runner_session_liveness import has_fresh_runner_session, runner_session_of
 
@@ -64,8 +65,8 @@ def freeze_runner_stop(task: object, tasks: list, closed_run_ids: set[str], *, k
     return FrozenRunnerStop({"status": "cooperative_requested", "pid": pid}, pid, birth)
 
 
-# LLM: 后台/PTY 已按执行归属独立清理；原宿主可能有新接续任务，出生标识不能授权整树强杀。
-# 函数用途: 只读核对原独立宿主是否已经退出，仍存活或身份未知保持未确认。
+# LLM: 共用原出生比较兼容旧locale，原生复核失败仍是未知；只读观察不授整树信号权限，不把未知算退出。
+# 函数用途: 核对冻结宿主是否退出或确被新实例替换，同实例与无法观察分开报告。
 def cleanup_runner_stop(stop: FrozenRunnerStop) -> dict[str, object]:
     report = dict(stop.report)
     if not stop.pid:
@@ -73,6 +74,12 @@ def cleanup_runner_stop(stop: FrozenRunnerStop) -> dict[str, object]:
     if not is_pid_alive(stop.pid):
         return {**report, "status": "exited", "host_exited": True}
     current = capture_process_birth_token(stop.pid)
-    if current and current != stop.birth_token:
+    if not current:
+        return {**report, "host_exited": False, "identity_confirmed": False}
+    try:
+        same = _birth_token_matches(stop.pid, stop.birth_token, current)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return {**report, "host_exited": False, "identity_confirmed": False}
+    if not same:
         return {**report, "status": "instance_replaced", "host_exited": True}
-    return {**report, "host_exited": False, "identity_confirmed": bool(current)}
+    return {**report, "host_exited": False, "identity_confirmed": True}

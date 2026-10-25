@@ -817,3 +817,56 @@ def test_history_run_ids_small_extend_updates_head_digest(tmp_path, monkeypatch)
         handle.seek(0, 2)
         handle.write(b'{"run_id":"append"}\n')
     assert repository_module._cached_history_run_ids(large) == {"new-id", "append"}
+
+
+# LLM: 单条查询(get/locked_snapshot)命中缓存时只复制匹配项，避免大候选账本在晋升循环中每次深拷贝全量列表。
+# 函数用途: 验证128MiB候选缓存上限，以及get/locked_snapshot只深拷贝目标候选。
+def test_candidate_get_and_locked_snapshot_single_deepcopy_on_cache_hit(tmp_path, monkeypatch):
+    assert candidates_module._CANDIDATE_LOAD_CACHE_MAX_BYTES == 128 * 1024 * 1024
+    service, _observation, _first = _opt7_candidate_case(tmp_path / "single-copy")
+    second = service.observe(
+        CandidateObservation(
+            candidate_type="long_term_fact",
+            content="第二条候选用于验证单条深拷贝。",
+            subject_key="device.editor",
+            scope=MemoryScope("personal", "personal"),
+            origin="user_explicit",
+            source_message_refs=(
+                {
+                    "message_id": "message-2",
+                    "thread_id": "thread-1",
+                    "role": "user",
+                    "content_hash": "sha256:example2",
+                    "quote": "第二条候选用于验证单条深拷贝",
+                },
+            ),
+            observed_at="2026-10-22T10:05:00+00:00",
+            confidence=0.95,
+        )
+    )
+    assert len(service.list()) == 2
+    real_deepcopy = candidates_module.deepcopy
+    copied_ids: list[str] = []
+
+    def spy_deepcopy(value, *args, **kwargs):
+        if isinstance(value, candidates_module.MemoryCandidate):
+            copied_ids.append(value.candidate_id)
+        return real_deepcopy(value, *args, **kwargs)
+
+    monkeypatch.setattr(candidates_module, "deepcopy", spy_deepcopy)
+    monkeypatch.setattr(
+        candidates_module,
+        "read_jsonl_objects_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache hit should avoid disk reload")),
+    )
+    fetched = service.get(second.candidate_id)
+    assert fetched == second
+    assert copied_ids == [second.candidate_id]
+    fetched.content = "mutated-by-caller"
+    copied_ids.clear()
+    with service.locked_snapshot(second) as current:
+        assert current == second
+        assert current.content == second.content
+    assert copied_ids == [second.candidate_id]
+    with pytest.raises(KeyError):
+        service.get("mc_missing")

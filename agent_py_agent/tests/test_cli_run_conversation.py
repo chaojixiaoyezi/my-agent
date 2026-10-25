@@ -127,9 +127,9 @@ def test_run_exception_preserves_completed_tool_history(tmp_path, error_type):
     assert rows[-1].metadata["turn_end_reason"] == ("aborted" if error_type is InterruptedError else "error")
 
 
+# LLM: 真实CLI消息在工具调用前已持久化；自动归档只消费宿主证据，不能改写AGENTS或重复提交。
+# 函数用途: 验证CLI用户明确记忆经原Remember链即时归档并正常收口。
 def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None:
-    from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
-
     agent = _agent(tmp_path)
     backend = _RememberOnceBackend()
     agent.backend = backend
@@ -147,20 +147,14 @@ def test_cli_run_user_message_is_authoritative_before_remember(tmp_path) -> None
     assert backend.calls == 2
     assert result.conversation_persist_degraded is False
     candidate = agent.memory_candidates.list()[0]
-    assert candidate.status == "pending_review"
+    assert candidate.status == "promoted"
     assert len(candidate.source_message_refs) == 1
     assert candidate.source_message_refs[0]["role"] == "user"
     assert candidate.learning_source["can_learn"] is True
-    assert agent.memory.all() == []
+    assert len(agent.memory.all()) == 1
     automatic = agent.memory_promotion.promote(candidate.candidate_id, automatic=True, confirmed=True)
-    assert not automatic.promoted
-    assert automatic.reason_code == "AUTO_PROMOTION_CONFIRMATION_REQUIRED"
-    assert agent.memory.all() == []
-    assert agent.home_paths.owner_agents_md.read_bytes() == rules_before
-
-    # CLI 用户原文只赋予候选来源；用户另行审核并确认精确候选后才允许沿原正式提交链写入。
-    approved = confirm_candidate(agent.memory_promotion, candidate.candidate_id)
-    assert approved.promoted and approved.formal_memory_changed
+    assert automatic.promoted and not automatic.formal_memory_changed
+    assert automatic.reason_code == "ALREADY_PROMOTED"
     assert agent.memory_candidates.get(candidate.candidate_id).status == "promoted"
     assert len(agent.memory.all()) == 1
     assert agent.memory.all()[0].content == candidate.content

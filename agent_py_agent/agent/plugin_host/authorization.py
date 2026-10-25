@@ -1,5 +1,5 @@
 # LLM: 每次授权/返回/写入前读取原安装；来源登记仅防DTO冒充，不是第二套执行账。
-# 模块用途: 发行真实插件来源，计算权限交集，并通过C的受限resolver核对目标。
+# 模块用途: 分别绑定真实安装和认证调用者，计算权限交集并逐次核验普通目标。
 from __future__ import annotations
 
 import hashlib
@@ -29,26 +29,57 @@ from .schemas import canonical_json, strict_json, thaw
 # LLM: 依赖均由宿主组合根注入；来源/调用按真实对象身份登记，副本不能取得写权，close立即撤销本服务来源。
 # 类用途: 连接令牌、当前授权、目标resolver和本次调用的生命周期。
 class IngressIssuer:
-    # LLM: resolver约定resolve_read(binding)/resolve_execution(binding)，均不得创建管理员主体。
+    # LLM: resolver冷读原owner；可注入原认证会话核验器，缺失时不能把会话回退成安装者。
     # 函数用途: 初始化来源登记与宿主策略依赖。
-    def __init__(self, owner_resolver=None, capability_policy=None):
+    def __init__(self, owner_resolver=None, capability_policy=None, *, session_verifier=None):
         self._resolver = owner_resolver
         self._policy = capability_policy or host_capabilities
+        self._session_verifier = session_verifier
         self._sources = WeakValueDictionary()
         self._calls = WeakValueDictionary()
         self._lock = threading.RLock()
         self._closed = False
 
-    # LLM: 先验证令牌，再登记唯一来源；不接受外部构造的source作为原对象。
-    # 函数用途: 为一条真实入站连接生成来源。
-    def ingress(self, token: str) -> PluginIngressSource:
-        self._token(token)
+    # LLM: caller_owner仅供受信宿主内调用；HTTP只传原会话令牌，核验失败不回退安装者。
+    # 函数用途: 登记固定安装与独立调用者的唯一真实来源。
+    def ingress(self, token: str, *, caller_owner: OwnerIdentity | None = None,
+                user_session_token: str | None = None) -> PluginIngressSource:
+        fixed = self._token(token)
+        if caller_owner is not None and not isinstance(caller_owner, OwnerIdentity):
+            raise HostAPIError("TARGET_DENIED", 403)
+        if user_session_token is not None:
+            resolved = self._session_owner(fixed.activation_ref.owner().root, user_session_token)
+            if caller_owner is not None and caller_owner != resolved:
+                raise HostAPIError("TARGET_DENIED", 403)
+            caller_owner = resolved
         with self._lock:
             if self._closed:
                 raise HostAPIError("HOST_NOT_READY", 503)
-            source = PluginIngressSource(self, token)
+            source = PluginIngressSource(self, token, caller_owner, user_session_token)
             self._sources[id(source)] = source
             return source
+
+    # LLM: 每次执行重新核同一原会话；默认认证模块缺失时失败关闭，不接受业务正文身份。
+    # 函数用途: 将有效会话解析为原OwnerIdentity。
+    def _session_owner(self, root, token):
+        if not isinstance(token, str) or not 1 <= len(token) <= 4096 or not token.isascii() or any(
+                ord(character) < 33 or ord(character) > 126 for character in token):
+            raise HostAPIError("USER_SESSION_INVALID", 401)
+        verifier = self._session_verifier
+        if verifier is None:
+            try:
+                from ..user_space.user_auth import verify_user_session
+                verifier = verify_user_session
+            except ImportError:
+                raise HostAPIError("USER_SESSION_INVALID", 401) from None
+        try:
+            result = verifier(root, token)
+            owner = result if isinstance(result, OwnerIdentity) else getattr(result, "owner", None)
+        except (OSError, ValueError, TypeError):
+            raise HostAPIError("USER_SESSION_INVALID", 401) from None
+        if not isinstance(owner, OwnerIdentity):
+            raise HostAPIError("USER_SESSION_INVALID", 401)
+        return owner
 
     # LLM: 清理只结束本服务资格，不声称底层任务或外部资源已停止。
     # 函数用途: 关闭发行器并使存活来源失效。
@@ -66,7 +97,7 @@ class IngressIssuer:
             raise HostAPIError("PLUGIN_TOKEN_INVALID", 401)
         return fixed
 
-    # LLM: 按对象身份核真实来源，存活资格每次读回；策略异常失败关闭。
+    # LLM: 身份、原会话和安装资格逐次读回；普通公共调用去掉治理/委托能力，私有严格本人。
     # 函数用途: 返回当前令牌、授权和批准能力交集。
     def _live(self, source: PluginIngressSource):
         with self._lock:
@@ -79,18 +110,22 @@ class IngressIssuer:
             caps = frozenset(entry.manifest.host_api) & frozenset(grant["approved_capabilities"]) & frozenset(self._policy())
         except (OSError, ValueError, TypeError):
             raise HostAPIError("ACTIVATION_REVOKED", 410) from None
+        actor = fixed.activation_ref.owner().identity
+        if source.user_session_token is not None and self._session_owner(
+                fixed.activation_ref.owner().root, source.user_session_token) != source.caller_owner:
+            raise HostAPIError("USER_SESSION_INVALID", 401)
+        caps = _caller_capabilities(actor, entry, source.caller_owner, caps)
         return fixed, grant, caps
 
-    # LLM: 身份仅从令牌与C核验结果产生；资源实际归属仍由各领域在原读写锁内再核。
+    # LLM: 主体来自原安装及已冻结caller；公共个人不借管理员权，普通私有不接受委托。
     # 函数用途: 验证闭合调用、能力与目标，发行不可伪造的调用投影。
     def authorize(self, source: PluginIngressSource, call: Call) -> AuthorizedCall:
         call = _checked_call(call)
         fixed, grant, caps = self._live(source)
-        _check_capabilities(call, caps)
         actor = fixed.activation_ref.owner().identity
-        if actor != OwnerIdentity.local_main():
-            raise HostAPIError("TARGET_DENIED", 403)
-        target = _target_identity(call, grant, actor)
+        target = _call_target(source, call, grant, actor)
+        own = target.owner_kind == "user" and (target == actor or target == source.caller_owner)
+        _check_capabilities(call, caps, own=own)
         digest = hashlib.sha256(canonical_json({"grant": grant, "capabilities": sorted(caps)}).encode()).hexdigest()
         binding = VerifiedPluginBinding(grant, actor, target, source, caps, policy_digest=digest)
         context = self._read(binding)
@@ -107,7 +142,7 @@ class IngressIssuer:
             self._calls[id(authorized)] = authorized
         return authorized
 
-    # LLM: 发行后的DTO不能免掉最新token/能力/用户修订/policy核验；禁止replace伪造。
+    # LLM: 发行后仍逐次核原会话、token、cap及用户修订；禁止replace伪造或晚换调用者。
     # 函数用途: 在领域短提交、结果输出和流事件前核对同一调用。
     def revalidate(self, authorized: AuthorizedCall) -> None:
         with self._lock:
@@ -115,7 +150,9 @@ class IngressIssuer:
                 raise HostAPIError("PLUGIN_TOKEN_INVALID", 401)
         binding = authorized.binding
         _, grant, caps = self._live(binding.source)
-        _check_capabilities(authorized.call, caps)
+        own = binding.effective_owner.owner_kind == "user" and (
+            binding.effective_owner == binding.actor or binding.effective_owner == binding.source.caller_owner)
+        _check_capabilities(authorized.call, caps, own=own)
         digest = hashlib.sha256(canonical_json({"grant": grant, "capabilities": sorted(caps)}).encode()).hexdigest()
         if digest != binding.policy_digest:
             raise HostAPIError("CAPABILITY_DENIED", 403)
@@ -125,12 +162,12 @@ class IngressIssuer:
         if _requires_execution(authorized.call) and self._execution(binding).execution_policy != authorized.execution_policy:
             raise HostAPIError("CAPABILITY_DENIED", 403)
 
-    # LLM: 无as_user时仅纯解析原owner；跨用户必须使用C的鲜活managed/enabled读取器。
+    # LLM: 普通目标即便等于安装者也必须走C的enabled/revision门；只有main可直接冷读自身。
     # 函数用途: 解析冷只读上下文并核对C返回的来源、身份和路径。
     def _read(self, binding: VerifiedPluginBinding) -> OwnerReadContext:
         fixed, _, _ = self._live(binding.source)
         owner = fixed.activation_ref.owner()
-        if binding.effective_owner == owner.identity:
+        if binding.effective_owner == owner.identity and owner.identity == OwnerIdentity.local_main():
             return OwnerReadContext(owner.identity, owner, binding)
         if self._resolver is None:
             raise HostAPIError("HOST_NOT_READY", 503)
@@ -138,12 +175,13 @@ class IngressIssuer:
         _check_owner_context(context, binding, owner.root)
         return context
 
-    # LLM: main永远不能用作执行目标；缺C的factory明确未就绪，不能借只读路径构造invoker。
+    # LLM: main不作执行目标；本人只需execute，管理员代执行仍双能力，缺factory失败关闭。
     # 函数用途: 核对受限执行factory给出的普通身份和权限上限。
     def _execution(self, binding: VerifiedPluginBinding) -> OwnerResolutionResult:
         if binding.effective_owner.owner_kind != "user" or self._resolver is None:
             raise HostAPIError("HOST_NOT_READY", 503)
-        if not {"execute", "act_as_user"} <= binding.capabilities:
+        own = binding.effective_owner in {binding.actor, binding.source.caller_owner}
+        if not ({"execute"} if own else {"execute", "act_as_user"}) <= binding.capabilities:
             raise HostAPIError("CAPABILITY_DENIED", 403)
         context = self._resolver.resolve_execution(binding)
         fixed, _, _ = self._live(binding.source)
@@ -201,27 +239,65 @@ def _checked_call(call: Call) -> Call:
     return decode_call(canonical_json(row).encode())
 
 
-# LLM: poll/stream还需领域根据原请求kind检查chat或execute，不能按此并集扩权。
+# LLM: 本人as_user只可已核自身声明；委托仍要求act_as_user，执行始终须普通目标。
 # 函数用途: 验证静态与参数相关能力。
-def _check_capabilities(call: Call, capabilities: frozenset) -> None:
+def _check_capabilities(call: Call, capabilities: frozenset, *, own=False) -> None:
     spec = action_spec(call.action)
     if (not required_capabilities(call.action, call.payload) <= capabilities
             or (spec.any_capabilities and not spec.any_capabilities & capabilities)):
         raise HostAPIError("CAPABILITY_DENIED", 403)
-    if call.as_user_id is not None and "act_as_user" not in capabilities:
+    if call.as_user_id is not None and not own and "act_as_user" not in capabilities:
         raise HostAPIError("CAPABILITY_DENIED", 403)
-    if _requires_execution(call) and call.as_user_id is None:
+    if _requires_execution(call) and call.as_user_id is None and not own:
         raise HostAPIError("TARGET_DENIED", 403)
 
 
-# LLM: 用户目标由规范UID和批准名单决定，不能由请求传路径或管理员标记。
+# LLM: 先验证规范UID，再核显式名单或星号；通配不免enabled与目标目录检查。
 # 函数用途: 选定有效数据owner。
 def _target_identity(call: Call, grant: dict, actor: OwnerIdentity) -> OwnerIdentity:
     if call.as_user_id is None:
         return actor
-    if call.as_user_id not in grant["target_user_ids"]:
+    from .owner_context import validate_local_user_id
+    uid = validate_local_user_id(call.as_user_id)
+    if uid not in grant["target_user_ids"] and "*" not in grant["target_user_ids"]:
         raise HostAPIError("TARGET_DENIED", 403)
-    return OwnerIdentity("local", "user", call.as_user_id)
+    return OwnerIdentity("local", "user", uid)
+
+
+# LLM: 安装范围来自原表，非管理员仅可私有；公共个人调用不能继承安装者治理能力。
+# 函数用途: 限定安装可访问性和本次有效能力。
+def _caller_capabilities(actor, entry, caller, caps):
+    scope = getattr(entry, "installation_scope", "private")
+    if scope not in {"private", "public"}:
+        raise HostAPIError("INVALID_SCHEMA")
+    if actor != OwnerIdentity.local_main():
+        if actor.owner_kind != "user" or scope != "private" or caller is not None and caller != actor:
+            raise HostAPIError("TARGET_DENIED", 403)
+        if {"users.manage", "act_as_user"} & caps:
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+    if caller is not None and caller != actor and scope != "public":
+        raise HostAPIError("TARGET_DENIED", 403)
+    actual = caller or actor
+    if actual != OwnerIdentity.local_main():
+        if actual.owner_kind != "user":
+            raise HostAPIError("TARGET_DENIED", 403)
+        caps = caps - {"users.manage", "act_as_user"}
+    return caps
+
+
+# LLM: 只认已核宿主caller，普通私有不能委托，公共本人断言不能选择其他用户。
+# 函数用途: 固定本次数据owner，保留管理员原代用户语义。
+def _call_target(source, call, grant, actor):
+    if actor != OwnerIdentity.local_main():
+        if call.as_user_id is not None:
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        return actor
+    caller = source.caller_owner
+    if caller is not None and caller != OwnerIdentity.local_main():
+        if call.as_user_id is not None and call.as_user_id != caller.owner_id:
+            raise HostAPIError("TARGET_DENIED", 403)
+        return caller
+    return _target_identity(call, grant, actor)
 
 
 # LLM: 只有执行动作或明确bounded消息需要独立执行factory。
@@ -231,18 +307,20 @@ def _requires_execution(call: Call) -> bool:
                                                  and call.payload.get("tool_policy") == "bounded")
 
 
-# LLM: 此处只筛明确allowlist，线程/task实际归属由领域核原账，未命中资源不泄漏存在性。
+# LLM: 账号许可支持显式星号但仍先核UID；线程/task实际归属由领域在原账上验证。
 # 函数用途: 拒绝明确不在批准范围的用户与工具。
 def _check_static_scope(call: Call, grant: dict) -> None:
     if call.action.startswith("users.local.") and "user_id" in call.payload:
+        from .owner_context import validate_local_user_id
+        uid = validate_local_user_id(call.payload["user_id"])
         key = "creatable_user_ids" if call.action == "users.local.create" else "manageable_user_ids"
-        if call.payload["user_id"] not in grant[key]:
+        if uid not in grant[key] and "*" not in grant[key]:
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
     if call.action == "execute.tool" and call.payload["tool_name"] not in grant["execution"]["tool_names"]:
         raise HostAPIError("CAPABILITY_DENIED", 403)
 
 
-# LLM: 只读也不能信任错误C适配器；已登记普通账号以C原规范home为准，不把它重路由到旧owner目录。
+# LLM: 只读也必须核原local账号或provider状态；不能用同名local UID替代非local身份。
 # 函数用途: 核对受信resolver结果的身份、来源、规范home和用户修订。
 def _check_owner_context(context, binding: VerifiedPluginBinding, root) -> None:
     if (not isinstance(context, (OwnerReadContext, OwnerResolutionResult))
@@ -252,17 +330,11 @@ def _check_owner_context(context, binding: VerifiedPluginBinding, root) -> None:
             or type(context.user_revision) is not int or context.user_revision < 1):
         raise HostAPIError("TARGET_DENIED", 403)
     from ..user_space.local_user_store import LocalUserStore
-    from ..user_space.owner_resolver import resolve_owner_home
+    from .owner_context import owner_state
 
     users = LocalUserStore(root)
-    registered = users.get(context.identity.owner_id)
-    expected = resolve_owner_home(root, context.identity)
-    if registered is not None:
-        user = users.require_enabled(context.identity.owner_id, context.user_revision)
-        if user.owner != context.identity:
-            raise HostAPIError("TARGET_DENIED", 403)
-        expected = users.owner_home(user.user_id)
-    if context.owner_home != expected:
+    expected, revision = owner_state(users, context.identity)
+    if context.owner_home != expected or revision != context.user_revision:
         raise HostAPIError("TARGET_DENIED", 403)
 
 

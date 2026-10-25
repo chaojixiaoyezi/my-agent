@@ -1,5 +1,5 @@
 # LLM: A0为B/C/D提供冻结DTO与固定导入面；DTO不构成授权，写端仍需重核真实issuer。
-# 模块用途: 定义插件宿主v2公共调用、受限身份、领域端口和纯辅助函数。
+# 模块用途: 定义插件宿主v2调用、固定安装和独立的可选宿主调用者；DTO本身不授权限。
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -35,12 +35,14 @@ class Call:
         object.__setattr__(self, "payload", freeze(self.payload))
 
 
-# LLM: lease只由宿主发行器登记，复制本DTO或JSON不成为真实来源。
-# 类用途: 连接真实令牌、服务寿命和固定入站请求。
+# LLM: lease和caller只由宿主发行器核验登记，复制DTO不成来源；会话逐次核验且不进入展示。
+# 类用途: 固定真实安装来源与独立的认证调用者，不将安装者当普通使用者。
 @dataclass(frozen=True)
 class PluginIngressSource:
     _issuer: object = field(repr=False)
     _lease: object = field(repr=False)
+    caller_owner: object = None
+    user_session_token: str | None = field(default=None, repr=False)
 
 
 # LLM: grant是当前安装权威的固定快照，来源和有效性始终由issuer末核。
@@ -201,12 +203,12 @@ def decode_call(raw: bytes) -> Call:
     spec = action_spec(row["action"])
     if spec.requires_idempotency != ("idempotency_key" in row):
         raise HostAPIError("INVALID_SCHEMA")
-    users = row["action"].startswith("users.local.")
+    users = row["action"].startswith("users.")
     if users and "as_user" in row:
         raise HostAPIError("INVALID_SCHEMA")
     reject_identity_injection(row["payload"], users)
     payload = spec.validate_payload(row["payload"])
-    if users and "user_id" in payload:
+    if row["action"].startswith("users.local.") and "user_id" in payload:
         validate_local_user_id(payload["user_id"])
     target = validate_local_user_id(row["as_user"]["user_id"]) if "as_user" in row else None
     return Call(row["schema"], row["action"], payload, row.get("idempotency_key"), target)

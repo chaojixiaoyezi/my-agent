@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1153,
+  "count": 1154,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -5230,7 +5230,7 @@
     {
       "name": "_CANDIDATE_LOAD_CACHE_MAX_BYTES",
       "file": "agent_py_agent/agent/memory_store/candidates.py",
-      "value": 33554432,
+      "value": 134217728,
       "unit": "字节",
       "category": "上限预算",
       "description": "记忆候选列表缓存允许占用的最大总字节数。"
@@ -7474,6 +7474,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "(还活着就 SIGKILL 硬杀整组),避免留下孤儿子进程。"
+    },
+    {
+      "name": "_LEGACY_BIRTH_CACHE_MAX_COUNT",
+      "file": "agent_py_agent/agent/tooling/process_registry.py",
+      "value": 256,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "缓存用途: 让升级前旧locale指纹与新观察复用已验证的等价关系，未知/不匹配不入缓存。"
     },
     {
       "name": "_MAX_FINISHED_COUNT",

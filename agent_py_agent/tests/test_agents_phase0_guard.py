@@ -313,3 +313,48 @@ def test_unreadable_exclusions_fail_closed_for_backlog(tmp_path: Path):
 
     assert curator._pending_promotable_candidate_ids(limit=32) == []
     assert service.candidates.get(candidate.candidate_id).status == "pending_review"
+
+
+def test_exclusion_sync_skips_already_marked_and_empty_thread_refs(tmp_path: Path, monkeypatch):
+    service, conversations, threads = _runtime(tmp_path)
+    candidate = _observe((service, conversations), threads[_EXCLUDED_CHAT], "派活会话沉淀的约定。")
+    first = sync_learning_exclusion_marks(
+        conversation_store=conversations,
+        candidate_service=service.candidates,
+        excluded_conversation_ids=frozenset({_EXCLUDED_CHAT}),
+    )
+    assert first["marked"] == 1
+
+    mark_calls: list[str] = []
+    monkeypatch.setattr(
+        service.candidates,
+        "mark_promotion_excluded",
+        lambda cid, reason="": mark_calls.append(cid) or [],
+    )
+    second = sync_learning_exclusion_marks(
+        conversation_store=conversations,
+        candidate_service=service.candidates,
+        excluded_conversation_ids=frozenset({_EXCLUDED_CHAT}),
+    )
+    assert second["marked"] == 0
+    assert mark_calls == []
+
+    no_thread_row = service.candidates.get(candidate.candidate_id)
+    no_thread_row.source_message_refs = [{"thread_id": ""}]
+    thread_scans: list[int] = []
+    monkeypatch.setattr(
+        conversations.threads,
+        "list_report",
+        lambda limit=0: thread_scans.append(limit) or ([], []),
+    )
+    from agent_py_agent.agent.memory_store.learning_exclusions import excluded_candidate_ids
+
+    assert (
+        excluded_candidate_ids(
+            rows=[no_thread_row],
+            conversation_store=conversations,
+            excluded_conversation_ids=frozenset({_EXCLUDED_CHAT}),
+        )
+        == set()
+    )
+    assert thread_scans == []

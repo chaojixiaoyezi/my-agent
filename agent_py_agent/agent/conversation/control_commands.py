@@ -2,7 +2,7 @@
 # /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
 # /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
 # /effort 的八档白名单取唯一换算表，TUI/IM 共用解析，不按模型名或展示文字扩大取值。
-# 模块用途: 将明确命令解释为会话控制或任务，供终端与 IM 共用，普通语言不获得控制权。
+# 模块用途: 解析显式控制及本地用户管理，敏感密码只存活命令，回执沿统一脱敏函数。
 
 from __future__ import annotations
 
@@ -58,6 +58,7 @@ ControlKind = Literal[
     "memory",
     "settings",
     "plugins",
+    "users",
     "unsupported",
 ]
 TaskCommandKind = Literal["audit_prepare", "decision_experiment"]
@@ -606,6 +607,24 @@ _ADMIN_USAGE = "用法：/admin <管理员密码> 在 IM 私聊中验证管理�
 _APPROVE_USAGE = "用法：/approve <管理员密码> 批准本会话当前唯一等待确认的操作（仅本次）；拒绝请发 /deny。"
 _DENY_USAGE = "用法：/deny（拒绝本会话当前唯一等待确认的操作，不需要密码）"
 _REDACTED_SECRET = "******"
+_USERS_USAGE = ("用法（仅管理员）：/users list；/users info <用户名>；/users create <用户名> <密码> [显示名称]；"
+                "/users password <用户名> <新密码>；/users enable <用户名>；/users disable <用户名> [原因]。密码不能含空白。")
+
+
+# LLM: 密码仅在 value 中保留；无效 create/password 也保留操作标记以确保回执脱敏，别名统一到标准动作。
+# 函数用途: 解析用户管理的六种语法，不执行或推断管理员身份。
+def _users_command(raw_arg: str | None) -> ConversationControlCommand:
+    raw = str(raw_arg or "").strip()
+    parts = raw.split()
+    head = parts[0].casefold() if parts else "list"
+    operation = {"get": "info", "show": "info", "passwd": "password", "set-password": "password",
+                 "reset-password": "password"}.get(head, head)
+    count = len(parts)
+    valid = {"list": count <= 1, "info": count == 2, "create": count >= 3, "password": count == 3,
+             "enable": count == 2, "disable": count >= 2}.get(operation, False)
+    value = " ".join([operation, *parts[1:]]) if parts else "list"
+    return ConversationControlCommand("users", value=value, operation=operation, name=parts[1] if count >= 2 else "",
+        valid=valid and "\n" not in raw and "\r" not in raw, usage=_USERS_USAGE)
 
 
 # LLM: status/logout 是精确子命令，其余整段正文都当作一次性密码放进 command.value，只在内存中供 Gateway 校验一次；
@@ -623,21 +642,28 @@ def _admin_command(trailing: object) -> ConversationControlCommand:
     )
 
 
-# LLM: 只看结构化 kind/operation；原 sessions control 内的管理员批准也沿同一解析器脱敏，不能把嵌套密码落盘。
-# 函数用途: 判断一条控制命令的参数是否是管理员密码。
+# LLM: 只看结构化 kind/operation；无效 users 无法可靠辨认参数位置，保守视为含秘密；嵌套命令沿同一解析器判断。
+# 函数用途: 判断管理员绑定、批准或用户密码设置是否含秘密，包含嵌套与无效语法。
 def control_command_carries_secret(command: ConversationControlCommand) -> bool:
     if command.kind == "sessions" and command.operation == "control":
         parts = command.value.split(maxsplit=2)
         inner = parse_conversation_control(parts[2]) if len(parts) == 3 else None
-        return bool(inner and inner.kind in {"approve", "admin"} and control_command_carries_secret(inner))
-    return command.kind == "approve" or (command.kind == "admin" and command.operation == "login")
+        return bool(inner and control_command_carries_secret(inner))
+    return (command.kind == "approve" or (command.kind == "admin" and command.operation == "login")
+            or command.kind == "users" and (not command.valid or command.operation in {"create", "password"}))
 
 
 # LLM: 管理员密码只在内存里的 command.value 中用于一次校验；控制回执、摘要和日志落盘前必须改用这里的脱敏正文。
-#   脱敏正文仍能还原同一 kind；嵌套批准保留准确 thread_id，只抹去密码，其余命令原样返回。
-# 函数用途: 生成可以安全持久化的控制命令正文，例如把 `/admin 密码` 变成 `/admin ******`。
+#   有效命令保留非秘密参数；无效 users 整体抹除，不能误把密码当作用户名保留；嵌套控制同样处理。
+# 函数用途: 对用户管理和管理员认证生成脱敏回执，错误语法也不保留可疑参数。
 def persisted_control_command_text(command: ConversationControlCommand, text: object) -> str:
     if control_command_carries_secret(command):
+        if command.kind == "users":
+            if not command.valid:
+                return f"/users {_REDACTED_SECRET}"
+            parts = command.value.split(maxsplit=3)
+            display = f" {parts[3]}" if command.valid and command.operation == "create" and len(parts) == 4 else ""
+            return f"/users {command.operation} {command.name} {_REDACTED_SECRET}".rstrip() + display
         if command.kind == "sessions":
             parts = command.value.split(maxsplit=2)
             inner = parse_conversation_control(parts[2])
@@ -1016,6 +1042,7 @@ def _short_text(value: object, limit: int) -> str:
 
 # 只把尾部参数交给专门解析函数的命令；名字互不重复，查表与原 if 链等价。新增这类命令时加在这里。
 _TRAILING_PARSERS: dict[str, Callable[[object], ConversationControlCommand | ConversationTaskCommand]] = {
+    "users": _users_command,
     "goal": _goal_command,
     "recover": _recover_command,
     "endtask": _endtask_command,

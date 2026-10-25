@@ -1,5 +1,5 @@
 # LLM: 插件执行权限只能收窄当前普通用户权限，准确工具和资产版本不能退化为通配符。
-# 模块用途: 定义并构建插件代用户执行的冻结白名单。
+# 模块用途: 按本地或provider原空间构建插件执行白名单；不物化或复制owner策略。
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +16,7 @@ from ..user_space.owner_quota import (
     OwnerQuotaUnavailable,
     read_local_user_quota,
 )
+from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 from .errors import HostAPIError
 
 
@@ -111,16 +112,23 @@ class RestrictedExecutionPolicy:
         return self.allowlist.allowed_assets
 
 
-# LLM: 已登记账号的策略缺失/损坏一律关闭，不能沿原通用owner的bootstrap默认恢复授权。
+# LLM: 策略只读原owner路径，缺失/损坏失败关闭；provider不借local同名策略恢复权限。
 # 函数用途: 冷读目标用户原策略并校验schema及列表类型。
 def _read_policy_documents(store, uid):
+    home = _policy_home(store, uid)
+    parts = home.home_dir.relative_to(store.root).parts
     documents = {}
     for name, schema in (("permissions", "permissions.v1"), ("tool_policy", "tool-policy.v1"),
                          ("skill_policy", "skill-policy.v1")):
-        value = store.read_json(("owners", "local", uid, name + ".json"))
+        value = store.read_json((*parts, name + ".json"))
         if value is None or value.get("schema_version") != schema:
             raise HostAPIError("STORE_UNAVAILABLE", 503)
         documents[name] = value
+    controls = documents["tool_policy"].get("admin_controls", {})
+    if type(controls) is not dict or type(controls.get("disabled", False)) is not bool:
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    if controls.get("disabled"):
+        raise HostAPIError("USER_DISABLED", 403)
     for name, key in (("tool_policy", "disabled_tools"), ("skill_policy", "disabled_skills")):
         value = documents[name].get(key)
         if type(value) is not list or len(value) > 1000 or any(type(item) is not str for item in value):
@@ -134,13 +142,14 @@ def _read_policy_documents(store, uid):
     return documents
 
 
-# LLM: 读取与复查使用同一算法；只派生权限，不修改原策略、复制main配置或物化目录。
+# LLM: local仍要求原严格quota；provider容原v1/v2及缺省修订，所有权限只收窄且不创建目录。
 # 函数用途: 构造目标账号和安装grant的严格权限交集。
 def build_execution_policy(store, uid, grant):
-    home = store.owner_home(uid)
+    home = _policy_home(store, uid)
+    parts = home.home_dir.relative_to(store.root).parts
     try:
-        quota, revision = read_local_user_quota(store.root, home.home_dir)
-        identities = [store.directory_identity(("owners", "local", uid, name)) for name in ("workspace", "tasks")]
+        quota, revision = _policy_quota(store, home, grant)
+        identities = [store.directory_identity((*parts, name)) for name in ("workspace", "tasks")]
     except (OwnerQuotaUnavailable, OSError, ValueError) as exc:
         raise HostAPIError("STORE_UNAVAILABLE", 503) from exc
     documents = _read_policy_documents(store, uid)
@@ -155,3 +164,37 @@ def build_execution_policy(store, uid, grant):
     digest = hashlib.sha256(encoded).hexdigest()
     allowlist = ExecutionAllowlist(frozenset(tools), grant.execution_policy.allowed_assets)
     return RestrictedExecutionPolicy(allowlist, roots, roots if writable else (), limits, revision, digest)
+
+
+# LLM: 兼容原UID调用方及新OwnerIdentity，不接受group；provider目录由原resolver与冷状态门共同核验。
+# 函数用途: 为权限文档取得准确原owner，不猜或迁移目录。
+def _policy_home(store, target):
+    if isinstance(target, str):
+        return store.owner_home(target)
+    if not isinstance(target, OwnerIdentity):
+        raise HostAPIError("TARGET_DENIED", 403)
+    if target == OwnerIdentity.local_main():
+        return resolve_owner_home(store.root, target)
+    if target.owner_kind != "user":
+        raise HostAPIError("TARGET_DENIED", 403)
+    if target.provider == "local":
+        return store.owner_home(target.owner_id)
+    from .owner_context import owner_state
+    return owner_state(store, target)[0]
+
+
+# LLM: 原provider配额0磁盘代表不限，但插件仍受grant有限上限；未知版本/负数/损坏不回退默认。
+# 函数用途: 从同一quota文件取得可相交的预算与修订，不种新文件。
+def _policy_quota(store, home, grant):
+    if home.identity.provider == "local" and home.identity.owner_kind == "user":
+        return read_local_user_quota(store.root, home.home_dir)
+    value = store.read_json((*home.home_dir.relative_to(store.root).parts, "quota.json"))
+    if value is None or value.get("schema_version") not in {"quota.v1", "quota.v2"}:
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    revision = value.get("revision", 1)
+    if type(revision) is not int or revision < 1:
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    limits = {key: value.get(key, ceiling) for key, ceiling in grant.quota_ceiling.to_dict().items()}
+    if type(limits["max_disk_mb"]) is int and limits["max_disk_mb"] == 0:
+        limits["max_disk_mb"] = grant.quota_ceiling.max_disk_mb
+    return LocalUserQuotaLimits.parse(limits), revision

@@ -18,7 +18,7 @@ def domain_name(action: str) -> str:
         return "host"
     if action.startswith("conversations."):
         return "conversation"
-    if action.startswith("users.local."):
+    if action.startswith(("users.local.", "users.auth.")):
         return "local_users"
     if action.startswith("execute."):
         return "execution"

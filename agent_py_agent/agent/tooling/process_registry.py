@@ -1,6 +1,6 @@
 
 # LLM: 访问与归属读取 process_scope；v2/v3 复用原出生标识和终止回执，共享激活不向业务会话暴露。
-# 前台自然退出也须在回收组长前按启动出生身份清理原组；联测 Store/host/shell，不用旧 PID 重建归属。
+# 前台自然退出按启动身份清理原组；旧locale仅缓存同PID/原token/当前token的原生复核成功等价，不缓存存活或改写原账。
 # 模块用途: 查询或精确停止受管进程，观测有界日志和读取故障；进程身份、退出与清理事实仍由原生命周期入口决定。
 from __future__ import annotations
 
@@ -29,6 +29,12 @@ from .process_session_store import (
 
 HOST_STATE_SCHEMA = "background_process_host.v1"  # 仅供已发布 v1 记录读取旧终态文件。
 _IS_WINDOWS = os.name == "nt"
+
+# LLM: 只存原生复核成功的精确三元组；锁内合并并发探针，FIFO最多256项，不写磁盘也不代表实例仍存活。
+# 缓存用途: 让升级前旧locale指纹与新观察复用已验证的等价关系，未知/不匹配不入缓存。
+_LEGACY_BIRTH_CACHE_MAX_COUNT = 256
+_LEGACY_BIRTH_EQUIVALENTS: dict[tuple[int, str, str], None] = {}
+_LEGACY_BIRTH_CACHE_LOCK = threading.Lock()
 
 # 杀进程时 SIGTERM 到 SIGKILL 的宽限秒数。先礼(SIGTERM 让进程自己清理)后兵
 # (还活着就 SIGKILL 硬杀整组),避免留下孤儿子进程。
@@ -258,8 +264,8 @@ def _log_tail_result(raw: bytes, *, size: int, limit: int) -> ProcessLogTail:
                           "short_read" if short_read else "")
 
 
-# LLM: 此表只缓存原 Store 记录和本进程句柄；任何冷热查询都先刷新权威，锁顺序始终 registry 到 Store。
-# 类用途: 按精确访问范围查询、等待和停止持久后台会话，不再在启动后创建另一份登记。
+# LLM: 只缓存原Store记录和本进程句柄；指纹比较共用旧locale复核门，观察未知不复用句柄，锁仍registry到Store。
+# 类用途: 按精确范围查询、等待和停止后台会话，兼容旧出生指纹但不新建权威或改写持久记录。
 class ProcessRegistry:
     # LLM: key 同时包含规范目录和 session ID；不同 owner 的同名句柄不会复用进程对象。
     # 函数用途: 初始化本进程缓存和互斥。
@@ -471,14 +477,23 @@ class ProcessRegistry:
             record.persisted_snapshot.get("activation_scope") is None and record.access_scope == access_scope
         ) else None
 
-    # LLM: 只在地址、PID 和出生标识完全相同时保留本地 Popen；所有持久字段每次整体刷新。
-    # 函数用途: 将可信当前快照装入缓存，不丢 revision、执行归属和控制标记。
+    # LLM: 同地址/PID的不同文本须将缓存和存储指纹同时绑定新内核观察；不能拿缓存token冒充当前活体，未知不复用句柄。
+    # 函数用途: 刷新可信快照并兼容旧locale，阻止把旧Popen附给复用PID的新实例，不改写存储token。
     def _cache_payload(self, payload: dict[str, object], root: Path) -> BackgroundProcess:
         key = (str(root), str(payload["session_id"]))
         cached = self._processes.get(key)
         fresh = BackgroundProcess.from_record(payload, store_root=root)
         if cached is not None:
-            if cached.pid == fresh.pid and cached.pid_birth_token == fresh.pid_birth_token:
+            try:
+                current = fresh.pid_birth_token
+                if cached.pid == fresh.pid and cached.pid_birth_token != current:
+                    current = capture_process_birth_token(fresh.pid)
+                same = (cached.pid == fresh.pid
+                        and _birth_token_matches(fresh.pid, cached.pid_birth_token, current)
+                        and _birth_token_matches(fresh.pid, fresh.pid_birth_token, current))
+            except (OSError, subprocess.TimeoutExpired, ValueError):
+                same = False
+            if same:
                 fresh.process = cached.process
             cached.__dict__.update(fresh.__dict__)
             return cached
@@ -587,8 +602,8 @@ def finish_foreground_process(
     return proc.poll(), termination
 
 
-# LLM: 前台自然退出/超时、后台停止和 runner 清理共用唯一终止入口；冻结资源可要求指定出生标识，快照不匹配时绝不发信号。
-# 函数用途: 有界发送 TERM/KILL 并回收直接子进程，返回核对回执；无法读取进程信息时不冒充确认。
+# LLM: 原唯一终止入口先核快照与启动指纹；旧locale仅经同PID复核兼容，读取未知或不匹配均不能发信号。
+# 函数用途: 确认同一实例后有界发送TERM/KILL并回收，出生观察失败返回identity_unavailable而非假冒换PID。
 def terminate_process_tree(
     pid: int,
     proc: subprocess.Popen | None,
@@ -615,8 +630,15 @@ def terminate_process_tree(
             return ProcessTerminationReceipt("identity_changed", False, None, 0, (pid,))
         return _terminate_windows_tree(pid, proc)
     snapshot, complete = _process_tree_snapshot(pid)
-    if expected_birth_token is not None and snapshot.get(pid) != expected_birth_token:
-        return ProcessTerminationReceipt("identity_changed", False, None, len(snapshot), (pid,))
+    if expected_birth_token is not None:
+        if not snapshot.get(pid):
+            return ProcessTerminationReceipt("identity_unavailable", False, None, len(snapshot), (pid,))
+        try:
+            same = _birth_token_matches(pid, expected_birth_token, snapshot[pid])
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return ProcessTerminationReceipt("identity_unavailable", False, None, len(snapshot), (pid,))
+        if not same:
+            return ProcessTerminationReceipt("identity_changed", False, None, len(snapshot), (pid,))
     method = "already_gone"
     # 已证明消失的进程实例不再重查：PID 在宽限期后被新进程复用时，os.kill 探测会重新成功，
     # 但那已经是另一个实例；只有快照里同 PID 换了出生标识（根的新后代）才重新纳入核对。
@@ -865,9 +887,8 @@ _DEFAULT_PROCESS_PARENT_MAP = _process_parent_map
 _DEFAULT_PROCESS_GROUP_MAP = _process_group_map
 
 
-# LLM: 信号失败、身份读取失败或权限不足不能证明死亡；僵尸以宿主内核状态确认，
-#   不调用 waitpid 冒领 Popen 的退出码。同步检查 shell 和无句柄的子代理停止回执。
-# 函数用途: 只读核对原进程实例已消失、已变成僵尸或 PID 已被明确复用，用于终止回执而非任务验收。
+# LLM: 只认消失/僵尸/明确复用；旧本地化指纹须同PID原生locale复核，任何观察错误均不等于死亡，不调用waitpid。
+# 函数用途: 只读核对原进程实例确已终止，避免升级后的日期语言差异或拒读伪造完成回执。
 def _process_instance_terminated(pid: int, birth_token: str) -> bool:
     try:
         os.kill(pid, 0)
@@ -878,12 +899,15 @@ def _process_instance_terminated(pid: int, birth_token: str) -> bool:
     if _process_is_zombie(pid):
         return True
     current = capture_process_birth_token(pid) if birth_token else ""
-    return bool(birth_token and current and current != birth_token)
+    try:
+        return bool(birth_token and current and not _birth_token_matches(pid, birth_token, current))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return False
 
 
-# LLM: Linux 从 proc、其它 POSIX 从 ps 读取内核进程状态；读取失败不等于已死。
-#   只读探测不回收进程，保留持有 Popen 的调用方获取真实退出码的权利。
-# 函数用途: 确认尚未回收但已不能继续写文件的进程；macOS 探测关闭 stdin，保留原父进程退出码。
+# LLM: Linux仍读proc，其它POSIX以子进程LC_ALL=C调用ps；不改父环境，读取失败不等于已死。
+#   只读探测不回收进程，保留Popen调用方的真实退出码；同步检查进程完成事件的locale回归。
+# 函数用途: 关闭探针stdin并统一ps状态输出，确认僵尸而不抢收原进程退出码。
 def _process_is_zombie(pid: int) -> bool:
     if _IS_WINDOWS:
         return False
@@ -898,15 +922,16 @@ def _process_is_zombie(pid: int) -> bool:
             ["ps", "-o", "stat=", "-p", str(pid)],
             stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=1, check=False,
+            env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and result.stdout.strip().startswith(("Z", "X"))
 
 
-# LLM: Persisted process control must pair a PID with a stable birth identity.
-# Linux uses proc start ticks; other hosts use their native start timestamp command.
-# 函数用途: 读取启动指纹防 PID 复用误杀，宿主探测关闭 stdin，不能抢读 Gateway/TUI 输入。
+# LLM: PID必须绑定出生身份；Linux proc和Windows ticks不变，其它POSIX仅为ps固定子环境LC_ALL=C。
+#   保留proc:/host:形状及失败空值，不改父locale；与原生内核身份的Store秒级投影及完成事件测试同步。
+# 函数用途: 关闭探针stdin并读取跨locale稳定的启动指纹，防止PID复用误判或抢读Gateway/TUI输入。
 def capture_process_birth_token(pid: int) -> str:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
@@ -929,6 +954,7 @@ def capture_process_birth_token(pid: int) -> str:
             text=True,
             timeout=1,
             check=False,
+            env=None if _IS_WINDOWS else {**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return ""
@@ -936,11 +962,51 @@ def capture_process_birth_token(pid: int) -> str:
     return f"host:{value}" if completed.returncode == 0 and value else ""
 
 
+# LLM: 固定C词法不借全局locale；旧host在精确三元组缓存未命中时原生复核，成功才有界FIFO缓存，错误仍抛未知。
+# 函数用途: 匹配新旧出生指纹并合并重复原生观察，关闭stdin、继承环境，不改持久token或缓存存活结论。
+def _birth_token_matches(pid: int, expected_birth_token: str, current_token: str | None = None) -> bool:
+    current = current_token if current_token is not None else capture_process_birth_token(pid)
+    if not current:
+        return False
+    if current == expected_birth_token:
+        return True
+    if not _IS_WINDOWS and expected_birth_token.startswith("host:") and current.startswith("host:"):
+        try:
+            fields = expected_birth_token[5:].split()
+            if len(fields) != 5 or fields[0].lower() not in ("mon", "tue", "wed", "thu", "fri", "sat", "sun"):
+                raise ValueError("not C locale weekday/date fields")
+            months = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+            month = months.index(fields[1].lower()) + 1
+            time.strptime(f"{month} {fields[2]} {fields[3]} {fields[4]}", "%m %d %H:%M:%S %Y")
+        except ValueError:
+            key = (pid, expected_birth_token, current)
+            with _LEGACY_BIRTH_CACHE_LOCK:
+                if key in _LEGACY_BIRTH_EQUIVALENTS:
+                    return True
+                native = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=2, check=False)
+                value = " ".join(native.stdout.split())
+                if native.returncode != 0 or not value:
+                    raise OSError("native process birth observation unavailable") from None
+                if value != " ".join(expected_birth_token[5:].split()):
+                    return False
+                _LEGACY_BIRTH_EQUIVALENTS[key] = None
+                if len(_LEGACY_BIRTH_EQUIVALENTS) > _LEGACY_BIRTH_CACHE_MAX_COUNT:
+                    _LEGACY_BIRTH_EQUIVALENTS.pop(next(iter(_LEGACY_BIRTH_EQUIVALENTS)))
+                return True
+    return False
+
+
+# LLM: 指纹仍决定发送信号资格；只允许精确或经原生locale复核匹配，未知不能借PID存活升级为同一实例。
+# 函数用途: 判断是否仍为原进程；只有未记录出生身份的旧入口继续沿原PID存活检查。
 def _same_process(pid: int, birth_token: str) -> bool:
     if pid <= 0:
         return False
     if birth_token:
-        return capture_process_birth_token(pid) == birth_token
+        try:
+            return _birth_token_matches(pid, birth_token)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return False
     return _pid_alive(pid)
 
 
@@ -997,13 +1063,15 @@ def _signal_process_snapshot(snapshot: dict[int, str], signum: int) -> bool:
     return sent
 
 
-# LLM: 此等待仅核对已观察进程，权限或身份读取失败须视为未确认；调用方仍要检查快照完整性。
-# 函数用途: 在有界时间内收割直接子进程并等待观察到的后代退出，不把信号已发送当成终止。
-# LLM: 补充后代快照时，同号 PID 换了出生标识说明是根的新后代（旧实例已死、PID 被复用），必须重新纳入核对。
-# 函数用途: 把补充快照合并进原快照，并把身份变了的 PID 从“已证明消失”集合里移出。
+# LLM: 合并先按共同匹配入口排除单纯locale变化；明确变代或观察未知都重新核对，不能保留不适用的旧退出证明。
+# 函数用途: 合并补充后代快照，兼容旧语言指纹而不把未知实例误记成已经终止。
 def _merge_tree_snapshot(snapshot: dict[int, str], current: dict[int, str], terminated: set[int]) -> None:
     for member, token in current.items():
-        if snapshot.get(member) != token:
+        try:
+            same = _birth_token_matches(member, snapshot.get(member, ""), token)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            same = False
+        if not same:
             terminated.discard(member)
         snapshot[member] = token
 

@@ -1,3 +1,18 @@
+## 2026-10-25 记忆候选自动审核归档恢复、32 条晋升队头去阻塞、30 天未晋升候选定期清理与进程 locale 对齐（已实现）
+
+`memory_store/promotion.py`、`memory_store/curator.py`、`memory_store/candidates.py`、`memory_store/retention_scan.py`、`memory_store/retention_apply.py` 与 `tooling/process_registry.py` 完成以下修复：
+- **自动审核归档恢复（`promotion.py`）**：恢复 `MemoryPromotionService` 对通过宿主学习来源（`learning_source.can_learn=True`）、结构化权威、证据核验与安全门的非 `AGENTS`/`SOUL` 候选自动审核归档（`_automatic_policy_block` 末端返回 `""`，`automatic=True` 时经 `_apply_automatic_policy` 将 `pending_review` 转为 `approved` 并完成正式库写入与候选落盘）。`AGENTS.md`（`AUTO_AGENTS_WRITE_FORBIDDEN`）与 `SOUL.md`（`host_promotion_mode == "manual_required"` -> `AUTO_POLICY_AUTHORITY_REQUIRES_REVIEW`）仍 100% 仅限用户当场显式修改/确认。
+- **32 条晋升队列去阻塞（`curator.py`）**：`MemoryCurator._pending_promotable_candidate_ids` 先全量读取缓存候选并过滤掉 `promotion_target in {"agents", "soul"}`、`promotion_exclusion != ""`、明确不可学来源（`not projection_is_learnable`）以及已处于 `approved` 但未达重复门槛（`lesson < 2`、`hot < 3`）的候选，再按“可学且已达重复门槛优先”排序后截取 `limit=32`，彻底消除队头单次 `approved` 经验堵死后续 `long_term` / `user` 晋升的问题。
+- **30 天未晋升陈旧候选定期清理（`candidates.py`, `retention_scan.py`, `retention_apply.py`）**：定义 `RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}`，将定期清理范围从仅 `rejected/expired/superseded` 扩展至全部严格早于 `rejected_candidate_days`（默认 30 天，`updated_at < cutoff`）的非 `promoted` 候选；带正式目标版本绑定（`_is_binding_tombstone`）的陈旧候选在清理时转为 `superseded` 脱敏墓碑，保留版本绑定且不再重复触发清理。
+- **进程出生时间 locale 固定（`process_registry.py`）**：`capture_process_birth_token` 与 `_process_is_zombie` 的 POSIX `ps` 分支显式传入 `env={**os.environ, "LC_ALL": "C"}`，确保中文等非英文 locale 下 `ps -o lstart=` 与原生内核出生身份（`libproc.proc_pidinfo`）的秒级投影严格一致。
+
+## 2026-10-25 `candidates.jsonl` 大账本 `128 MiB` 缓存与单条深拷贝、排除名单幂等短路（已实现）
+
+`memory_store/candidates.py` 与 `memory_store/learning_exclusions.py` 针对线上 `candidates.jsonl` 突破 `32 MiB`（`46.9 MB` / `9,880` 行）后引发 `memory-curator` 晋升阶段缓存失效与 Gen-2 GC 停顿完成优化：
+- `_CANDIDATE_LOAD_CACHE_MAX_BYTES` 从 `32 MiB` 提升至 `128 MiB`（同步 `constants_catalog.json`），保持 `_CANDIDATE_LOAD_CACHE_MAX_PATHS = 8` 路径 LRU 与 `((mtime_ns, size), blake2b)` 摘要强一致校验。
+- 新增模块函数 `_load_one_candidate_unlocked` 与 `_cached_candidate_rows`：`CandidateService.get` 与 `CandidateService.locked_snapshot` 在命中进程内缓存时按 `candidate_id` 只 `deepcopy` 匹配的单条 `MemoryCandidate`，消除每条晋升复核深拷贝与重排全量近万条候选的 $O(N)$ 内存分配。
+- `learning_exclusions.py::sync_learning_exclusion_marks` 跳过已带有 `promotion_exclusion == LEARNING_SOURCE_EXCLUDED` 的候选，避免无变更时获取候选账本写锁；`excluded_candidate_ids` 在候选集不含非空 `thread_id` 消息引用时直接返回空集，省去冗余 `conversation_store.threads.list_report(limit=0)` 全表扫描。
+
 ## 2026-10-24 第二波（W2-2）工具输出 `blob_v1` 二进制直写与 `read_artifact` 切片直读（已实现）
 
 `memory_archive/tool_output_externalizer.py`、`memory_archive/artifact/reader.py`、`memory_archive/artifact/page_reader.py` 与 `artifacts/registry_projection_cache.py` 落地 `W2-2`：

@@ -294,11 +294,13 @@ class HostTransport:
         self.composition.close()
         self.streams.close()
 
-    # LLM: 真实token只从独立header取得，先认证后读有界正文，禁止借Gateway身份。
+    # LLM: 安装token和可选原用户会话分别验证，正文不能指定caller；未知会话不可回退main。
     # 函数用途: 把一个真实HTTP请求转换为已授权调用。
     def prepare(self, handler, streaming):
         _validate_headers(handler)
-        source = self.composition.issuer.ingress(handler.headers.get("X-Plugin-Host-Token", ""))
+        source = self.composition.issuer.ingress(handler.headers.get("X-Plugin-Host-Token", ""),
+            **({"user_session_token": handler.headers.get("X-Plugin-User-Session")}
+               if handler.headers.get("X-Plugin-User-Session") is not None else {}))
         call = decode_call(_read_body(handler))
         if (action_spec(call.action).mode == "stream") is not streaming:
             raise HostAPIError("INVALID_SCHEMA")
@@ -321,8 +323,8 @@ def envelope(authorized=None, result=None, error=None):
     return {"schema": "plugin_host_result.v2", "ok": False, "error": error.to_payload(), "meta": meta}
 
 
-# LLM: 不处理Origin/Cookie/部署凭据，不信转发地址；即使本机浏览器持token也不开放CORS。
-# 函数用途: 核验回环连接及唯一插件认证头。
+# LLM: 不接受Origin/Cookie/Gateway身份；可选用户会话必须唯一ASCII，身份由issuer原认证口决定。
+# 函数用途: 核验回环连接、唯一安装头及可选会话头，不从正文或自报owner授权。
 def _validate_headers(handler):
     try:
         peer = ipaddress.ip_address(handler.client_address[0])
@@ -337,6 +339,10 @@ def _validate_headers(handler):
             raise HostAPIError("CAPABILITY_DENIED", 403)
     if len(handler.headers.get_all("X-Plugin-Host-Token", [])) != 1:
         raise HostAPIError("PLUGIN_TOKEN_INVALID", 401)
+    sessions = handler.headers.get_all("X-Plugin-User-Session", [])
+    if len(sessions) > 1 or sessions and (not 1 <= len(sessions[0]) <= 4096 or not sessions[0].isascii()
+                                        or any(ord(char) < 33 or ord(char) > 126 for char in sessions[0])):
+        raise HostAPIError("USER_SESSION_INVALID", 401)
     if handler.headers.get("Transfer-Encoding") is not None:
         raise HostAPIError("INVALID_SCHEMA")
 

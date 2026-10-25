@@ -1,6 +1,6 @@
 # LLM: 公共命令目录只拥有声明、词法边界和展示事实；调用方仍负责身份、权限、控制回执及副作用。
 #   /effort 帮助列出用户八档，实际可发送值仍归 reasoning_control 的唯一换算表。
-# 模块用途: 让 TUI 与 IM 会话解析、Gateway 守门、帮助和补全共用名称与别名，不导入 UI 或加载插件。
+# 模块用途: 统一 TUI/IM 命令目录；用户管理标记敏感且仅管理员，插件入口保留各自 owner 的服务鉴权。
 
 from __future__ import annotations
 
@@ -37,6 +37,16 @@ class CommandSpec:
 
 
 COMMAND_CATALOG = (
+    CommandSpec("users", "/users [list|info|create|password|enable|disable]",
+        "管理本地普通用户（创建用户名密码、重置密码、启停与查看，仅管理员）", aliases=("user",),
+        help_variants=(
+            ("/users list", "列出所有本地普通用户及其状态、Owner ID（管理员，TUI/IM 可用）"),
+            ("/users info <用户名>", "查看指定本地普通用户的详情、密码状态与配额控制"),
+            ("/users create <用户名> <密码> [显示名称]", "创建本地普通用户及登录密码与独立 Owner 空间"),
+            ("/users password <用户名> <新密码>", "重置本地普通用户的登录密码"),
+            ("/users disable <用户名> [原因]", "停用本地普通用户并请求终止其活动任务"),
+            ("/users enable <用户名>", "重新启用已停用的本地普通用户"),
+        ), submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$", sensitive_input=True, admin_only=True),
     CommandSpec("agents", "/agents [show|refresh|source|reset|write|confirm|receipt]", "查看规则来源或显式预览确认修改",
         submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
     CommandSpec("group", "/group", "查看当前群的监控授权", surfaces=("im",),
@@ -309,7 +319,7 @@ COMMAND_CATALOG = (
     CommandSpec(
         "plugins",
         "/plugins [管理动作]",
-        "查看插件与查询请求（TUI、IM 可用；安装、配置、启停、更新和卸载仅管理员）",
+        "查看与管理插件（TUI、IM 可用；公共插件发布仅管理员，私有插件按各自 Owner 隔离）",
         help_variants=(("/plugins@<插件ID> [动作] [参数]", "使用已启用插件的动作（TUI、IM 共用权限和纯文本回执）"),
                        ("/plugins enable <插件ID> --confirm <确认码>", "含可执行文件或外部解释器的包先预览，再按回执确认"),
                        ("/plugins#[包名] [查看|启用|停用|删除|退回|安装 <单号>]",
@@ -363,7 +373,7 @@ COMMAND_CATALOG = (
                 ArgumentSpec("source", "新版本本地包路径", required=True, path=True),
             ), available=False),
         ),
-        admin_only=True,
+        admin_only=False,
     ),
 )
 

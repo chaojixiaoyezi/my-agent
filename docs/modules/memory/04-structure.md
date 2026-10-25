@@ -1,3 +1,8 @@
+## 2026-10-25 `candidates.py` 单条快照深拷贝与 `learning_exclusions.py` 短路结构
+
+- `memory_store/candidates.py` 将 `_CANDIDATE_LOAD_CACHE_MAX_BYTES` 设为 `128 MiB`（`134217728`），保留 `_CANDIDATE_LOAD_CACHE_MAX_PATHS = 8` 与 `((mtime_ns, size), blake2b)` 摘要校验；`_load_one_candidate_unlocked(service, candidate_id)` 在未覆盖 `_load_unlocked` 或 `list` 时通过 `_cached_candidate_rows` 仅 `deepcopy` 匹配 `candidate_id` 的单条 `MemoryCandidate`，供 `get()` 与 `locked_snapshot()` 复用。
+- `memory_store/learning_exclusions.py` 新增 `_row_has_thread_ref`，在 `excluded_candidate_ids` 无任何非空 `thread_id` 消息引用时短路返回 `set()`；`sync_learning_exclusion_marks` 过滤掉已标记 `LEARNING_SOURCE_EXCLUDED` 的目标后再决定是否调用 `candidate_service.mark_promotion_excluded`。
+
 ## 2026-10-24 `blob_v1` 二进制直写与 `read_artifact` 切片直读结构（W2-2）
 
 - `memory_archive/tool_output_externalizer.py` 根据 `AgentConfig.tool_output_storage_format` 分流 `"compat"` 与 `"blob_v1"`：`"blob_v1"` 将正文原样写入同目录 `<call_id>.blob`（`0600`），JSON 包装文件记录 `artifact_format: "blob_v1"`、`blob_filename`、`blob_size_bytes`、`blob_sha256`、`line_offsets` 与前 2000 字符预览。

@@ -221,3 +221,41 @@ def test_ledger_gc_wired_into_scheduler_tick(tmp_path):
     assert store.storage.policy_path(policy.policy_id).exists(), "距上次 gc 未满 6h,不应归档"
     scheduler.tick(now=now + 7 * 3600)
     assert not store.storage.policy_path(policy.policy_id).exists(), "超过 6h 间隔应归档"
+
+
+def test_gc_stale_ledger_records_cleans_orphan_lock_sidecars(tmp_path):
+    """gc_stale_ledger_records 同步清理会话唤醒/策略/租约目录下超 24h 的孤儿 .lock 文件。"""
+    import os
+
+    agent, _thread_id = _agent_with_thread(tmp_path)
+    store = agent.conversation_store
+    now = 1_800_000_000.0
+    urgent_dir = store.storage.wake_queue_dir / "urgent"
+    handled_dir = store.storage.wake_handled_dir
+    dedupe_dir = store.storage.wake_dedupe_dir
+
+    old_orphan = urgent_dir / "wake-old.json.lock"
+    old_orphan.write_text("", encoding="utf-8")
+    os.utime(old_orphan, (now - 48 * 3600, now - 48 * 3600))
+
+    handled_orphan = handled_dir / "wake-handled-old.json.lock"
+    handled_orphan.write_text("", encoding="utf-8")
+    os.utime(handled_orphan, (now - 48 * 3600, now - 48 * 3600))
+
+    fresh_orphan = dedupe_dir / "wake-fresh.json.lock"
+    fresh_orphan.write_text("", encoding="utf-8")
+    os.utime(fresh_orphan, (now - 3600, now - 3600))
+
+    paired_json = urgent_dir / "wake-live.json"
+    paired_json.write_text("{}", encoding="utf-8")
+    paired_lock = urgent_dir / "wake-live.json.lock"
+    paired_lock.write_text("", encoding="utf-8")
+    os.utime(paired_lock, (now - 48 * 3600, now - 48 * 3600))
+
+    summary = store.gc_stale_ledger_records(now=now)
+
+    assert summary["cleaned_orphan_locks"] == 2
+    assert not old_orphan.exists()
+    assert not handled_orphan.exists()
+    assert fresh_orphan.exists(), "未满 24h 的 .lock 不应删除"
+    assert paired_lock.exists(), "原 .json 仍存在的 .lock 不应删除"

@@ -87,7 +87,7 @@ HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 # 常量用途: 列出 owner home 里对模型工具只读的宿主运行状态（文件、目录、SQLite 库）。
 HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
     ("permissions.json",), ("quota.json",), ("retention.json",), ("memory_policy.json",), ("skill_policy.json",),
-    ("tool_policy.json",), ("audit_log.jsonl",), ("memory", "ops.jsonl"), ("memory", "candidates.jsonl"),
+    ("tool_policy.json",), ("owner_status.json",), ("audit_log.jsonl",), ("memory", "ops.jsonl"), ("memory", "candidates.jsonl"),
 )
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
@@ -529,7 +529,7 @@ def data_root_from_boundary(boundary: object) -> Path | None:
     return agent_home_root_for_owner(owner_home) if owner_home else None
 
 
-# LLM: 与 user_space.owner_resolver._owner_home_dir 互为逆运算（owners/local/main 或 owners/providers/<p>/<users|groups>/<id>），
+# LLM: 识别规范 owners/local/<uid>（含 main）及 owners/providers/<p>/<users|groups>/<id>，
 #   只做路径运算、不读文件；调用方传已 resolve 的路径与数据根。改布局时两处一起改（守卫用例在 test_host_managed_store_access）。
 #   比较大小写无关（见 _relative_folded），返回值取输入路径自己的写法。
 # 函数用途: 从规范布局反推一个路径所在的 owner home；不在任何 owner home 里返回 None。
@@ -538,7 +538,7 @@ def owner_home_containing(path: Path, agent_home_root: Path) -> Path | None:
     if parts is None:
         return None
     depth = 0
-    if parts[:2] == ("local", "main"):
+    if len(parts) >= 2 and parts[0] == "local" and parts[1]:
         depth = 2
     elif len(parts) >= 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}:
         depth = 4

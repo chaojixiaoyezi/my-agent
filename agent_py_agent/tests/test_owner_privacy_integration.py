@@ -107,11 +107,12 @@ def test_group_runtime_never_loads_member_private_state_and_shared_stays_read_on
     assert "公共审阅方法" in shared_skill.read_text(encoding="utf-8")
 
 
+# LLM: 两owner的可学用户证据只自动归档到各自库；AGENTS工具仍拒绝，真人direct控制继续精确预览确认。
+# 函数用途: 验证自动记忆不串用户、不授予模型工作约定写权限。
 def test_autonomous_memory_and_agents_updates_remain_owner_isolated(tmp_path: Path) -> None:
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
     from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
     from agent_py_agent.agent.gateway_parts.agents_control_service import execute_agents_direct
-    from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
 
     home = tmp_path / "home"
     pool = OwnerScopedAgentPool(
@@ -162,6 +163,8 @@ def test_autonomous_memory_and_agents_updates_remain_owner_isolated(tmp_path: Pa
             "scope": {"scope_type": "project", "scope_key": "project:a"},
         }
     )
+    assert [item.content for item in user_a.memory.all()] == ["A 的项目代号是 alpha-only"]
+    assert user_b.memory.all() == [], "A 的自动归档不能写入 B 的正式记忆"
     result_b = RememberTool(user_b).execute(
         {
             "content": "B 的项目代号是 beta-only",
@@ -173,15 +176,13 @@ def test_autonomous_memory_and_agents_updates_remain_owner_isolated(tmp_path: Pa
     )
     for agent, result in ((user_a, result_a), (user_b, result_b)):
         payload = json.loads(result.output)
-        assert payload["active_memory_changed"] is False
-        assert payload["results"][0]["reason_code"] == "AUTO_PROMOTION_CONFIRMATION_REQUIRED"
+        assert result.ok and payload["active_memory_changed"] is True
+        assert payload["results"][0]["reason_code"] == "PROMOTED"
         [candidate] = agent.memory_candidates.list()
-        assert candidate.status == "pending_review" and candidate.learning_source["can_learn"] is True
+        assert candidate.status == "promoted" and candidate.learning_source["can_learn"] is True
         automatic = agent.memory_promotion.promote(candidate.candidate_id, automatic=True, confirmed=True)
-        assert not automatic.promoted and automatic.reason_code == "AUTO_PROMOTION_CONFIRMATION_REQUIRED"
-        unreviewed = agent.memory_promotion.promote(candidate.candidate_id, confirmed=True)
-        assert not unreviewed.promoted and unreviewed.reason_code == "REVIEW_REQUIRED"
-        assert agent.memory.all() == []
+        assert automatic.promoted and automatic.reason_code == "ALREADY_PROMOTED"
+        assert not automatic.formal_memory_changed and len(agent.memory.all()) == 1
         denied = UpdatePersonaTool(agent).execute(
             {"target": "agents", "content": "模型不能替用户确认工作约定", "confirmed": True}
         )
@@ -191,9 +192,6 @@ def test_autonomous_memory_and_agents_updates_remain_owner_isolated(tmp_path: Pa
 
     [candidate_a], [candidate_b] = user_a.memory_candidates.list(), user_b.memory_candidates.list()
     assert candidate_a.candidate_id != candidate_b.candidate_id
-    assert confirm_candidate(user_a.memory_promotion, candidate_a.candidate_id).promoted
-    assert user_b.memory.all() == [], "A 的用户确认不能写入 B 的正式记忆"
-    assert confirm_candidate(user_b.memory_promotion, candidate_b.candidate_id).promoted
 
     denied = execute_agents_direct(user_a, parse_conversation_control(
         f'/agents owner {user_b.home_paths.owner_id} write "不得跨 owner 写入"'), "privacy-a", "cross-owner")

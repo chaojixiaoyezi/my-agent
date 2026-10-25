@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..gateway_parts.io import cleanup_orphan_lock_files
 from .goal_clock import shared_goal_clocks
 from .models import MODEL_HIDDEN_THREAD_FIELDS
 from .session_pair_rate import SessionPairRateLimiter
@@ -86,8 +87,9 @@ class ConversationStore:
         )
 
     # LLM: 跨域维护只在原调度周期调用，策略与 claim 使用同一时间与保留期，保持策略后 claim 的顺序；
-    #   唤醒结案留档最后归档，用它自己的 14 天保留期（store_wake_quarantine_archive，只移不删）。
-    # 函数用途: 协调策略、租约旧账和唤醒结案留档的归档，返回各类计数，不新建后台任务。
+    #   唤醒结案留档最后归档，用它自己的 14 天保留期（store_wake_quarantine_archive，只移不删），并同步清理
+    #   已移走或已消费记录遗留的超龄未持锁 .lock sidecar（cleanup_orphan_lock_files）。
+    # 函数用途: 协调策略、租约旧账、唤醒结案留档归档与孤儿锁清理，返回各类计数，不新建后台任务。
     def gc_stale_ledger_records(
         self, *, now: float | None = None,
         retention_seconds: float = _LEDGER_GC_RETENTION_SECONDS,
@@ -100,8 +102,16 @@ class ConversationStore:
             current=current, retention_seconds=retention_seconds,
         )
         archived_wake_quarantine = archive_stale_wake_quarantine(self.storage, current=current)
-        return {"archived_policies": archived_policies, "archived_claims": archived_claims,
-                "archived_wake_quarantine": archived_wake_quarantine}
+        cleaned_orphan_locks = sum(
+            cleanup_orphan_lock_files(directory, now=current)
+            for directory in self.storage.lock_sidecar_dirs()
+        )
+        return {
+            "archived_policies": archived_policies,
+            "archived_claims": archived_claims,
+            "archived_wake_quarantine": archived_wake_quarantine,
+            "cleaned_orphan_locks": cleaned_orphan_locks,
+        }
 
     # LLM: 只组装既有领域读取结果；严格处理坏账的调用方使用 context_bundle_report，不建立第二份状态。
     # 函数用途: 为旧有正文上下文调用返回跨领域快照，不写盘或标记已消费。

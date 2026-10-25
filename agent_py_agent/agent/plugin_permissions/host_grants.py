@@ -1,5 +1,5 @@
 # LLM: 授权仅存原激活记录，本模块不创建第二套权限账。
-# 模块用途: 校验v9宿主API授权及启用确认绑定。
+# 模块用途: 校验v9宿主API授权、显式UID通配与普通私有安装的受限确认绑定。
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from ..plugin_host.errors import HostAPIError
+from ..plugin_host.owner_context import validate_local_user_id
 from ..plugin_host.schemas import (
     canonical_json,
     closed,
@@ -15,7 +16,6 @@ from ..plugin_host.schemas import (
     quota_schema,
     strict_json,
     text,
-    validate_local_user_id,
     validate_object,
 )
 from ..plugin_manifest_host_v9 import host_capabilities
@@ -38,10 +38,10 @@ def execution_schema() -> dict:
                    "max_duration_seconds": integer(86400, 1), "max_tool_calls": integer(1000)})
 
 
-# LLM: 安装绑定由宿主添加；管理员仅能选择明确作用域，不能自造安装和激活身份。
+# LLM: 三组UID允许显式星号；资源和工具仍是有限精确引用，普通用户不能使用治理或代用户范围。
 # 函数用途: 返回确认预览中可选择的API授权字段。
 def selection_schema() -> dict:
-    ids = _list_schema(text(64, 3, r"^[a-z][a-z0-9_-]{2,63}$"))
+    ids = _list_schema(text(32, 1, r"^(\*|[a-z0-9][a-z0-9_-]{1,31})$"))
     resource = closed({"created_by_installation": {"type": "boolean"},
                        "explicit_ids": _list_schema(text(128, 1, r"^[A-Za-z0-9_.:-]+$"))})
     return closed({"approved_capabilities": _list_schema({"enum": sorted(host_capabilities())}, 1),
@@ -66,13 +66,14 @@ def expiry_timestamp(value) -> float | None:
         raise HostAPIError("INVALID_SCHEMA") from None
 
 
-# LLM: 可选范围仍必须完整，保留用户ID和重复项不能通过schema旁路进入。
+# LLM: 显式星号原样保留；其余UID仍核保留账号及严格语法，不以通配免掉目标身份检查。
 # 函数用途: 校验管理员选择并生成独立副本。
 def validate_selection(value) -> dict:
     result = validate_object(value, selection_schema())
     for key in ("target_user_ids", "manageable_user_ids", "creatable_user_ids"):
         for user_id in result[key]:
-            validate_local_user_id(user_id)
+            if user_id != "*":
+                validate_local_user_id(user_id)
     expiry_timestamp(result["expires_at"])
     return result
 
@@ -168,18 +169,24 @@ def default_selection(capabilities: tuple[str, ...]) -> dict:
             "expires_at": None}
 
 
-# LLM: 仅本机管理员的原启用流程调用；返回的是待确认事实，不能当作自动批准或运行令牌。
+# LLM: 原确认流程可供普通私有安装使用，但必须restricted、无治理与代用户能力；返回值仍不是批准票据。
 # 函数用途: 将v9有限范围附到原OS权限确认，让原确认码覆盖原操作及全部API范围。
 def prepare_host_confirmation(context, entry, plan, os_grant: dict) -> dict:
     from ..user_space.owner_resolver import OwnerIdentity
 
-    if context.owner.identity != OwnerIdentity.local_main() or os_grant["mode"] != "restricted":
-        raise ValueError("v9仅允许本机管理员受限启用")
+    ordinary = context.owner.identity != OwnerIdentity.local_main()
+    if os_grant["mode"] != "restricted":
+        raise ValueError("v9只允许受限启用")
+    if ordinary and (context.owner.identity.owner_kind != "user" or entry.installation_scope != "private"):
+        raise ValueError("普通用户只能受限启用自己的私有插件")
     carried = _selection_slot().get()
     chosen = context.arguments.get("host_api_selection")
     if chosen is None:
         chosen = strict_json(carried.encode()) if carried is not None else default_selection(entry.manifest.host_api)
     selection = validate_selection(chosen)
+    if ordinary and ({"users.manage", "act_as_user"} & set(selection["approved_capabilities"])
+                     or any(selection[key] for key in ("target_user_ids", "manageable_user_ids", "creatable_user_ids"))):
+        raise ValueError("普通用户私有插件不得申请跨用户或账号治理权限")
     if not set(selection["approved_capabilities"]) <= set(entry.manifest.host_api):
         raise ValueError("批准能力不得超过清单申请")
     grant = validate_host_grant({**selection, "schema": "plugin_host_grant.v1",

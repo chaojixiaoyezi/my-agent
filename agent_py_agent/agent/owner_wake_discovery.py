@@ -1,6 +1,7 @@
 # LLM: 策展时间判断复用consumer纯判据；C调用显式可信配置，mtime仍仅候选而非消费许可。
 # LLM: owner恢复仍保pending/旧lease与真实输入/日终；待确认候选不单独成为新策展工作，修改须联测owner/curator/确认合同。
 # 模块用途: 从原owner结构事实恢复后台活跃登记，不替候选授自动执行或正式发布权。
+# LLM: 本地普通用户与provider共享发现分页及快照，local/main仍由原base tick；不跟随本地链接或创建目录。
 """磁盘级 owner 唤醒发现:治「盯守转非阻塞后睡死叫不醒」的登记表易失性。
 
 真机实锤(接手文档 §1):scoped owner 的到点唤醒(progress policy)/待处理唤醒信号
@@ -218,6 +219,7 @@ def discover_wake_pending_owner_page(
     )
 
 
+# LLM: 本地普通用户与provider共用同一有界可失效目录快照；分页仍按原排序键继续，不创建owner。
 # LLM: Pagination reads one bounded, invalidatable directory snapshot instead of
 # re-enumerating and re-sorting every owner home per page. The page contract is unchanged:
 # the resume position still comes from bisect_right over the same sort key on the same
@@ -234,7 +236,7 @@ def discover_owner_home_page(
 ) -> OwnerHomeDiscoveryPage:
     """Return one bounded canonical provider-owner page without filtering facts."""
     providers_root = Path(owners_dir) / "providers"
-    if not providers_root.is_dir():
+    if not providers_root.is_dir() and not (Path(owners_dir) / "local").is_dir():
         return OwnerHomeDiscoveryPage((), None, 0)
     snapshot = _owner_home_snapshot(providers_root)
     candidates = snapshot.candidates
@@ -301,6 +303,8 @@ def _owner_home_snapshot(providers_root: Path) -> _OwnerHomeSnapshot:
     return snapshot
 
 
+# LLM: local目录签名也参与原快照失效，新增普通用户不得等TTL；只读元数据不作为执行授权。
+# 函数用途: 对provider和本地普通用户目录计算共同的发现签名。
 def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
     """枚举所读目录的结构签名:provider 集合 + 每个 owner bucket 目录的元数据指纹。
 
@@ -312,6 +316,7 @@ def _owner_home_signature(providers_root: Path) -> tuple[Any, ...]:
     entries: list[tuple[str, str, tuple[int, int, int]]] = []
     for provider_dir, owner_kind, bucket_dir in _provider_buckets(providers_root):
         entries.append((provider_dir.name, owner_kind, _bucket_signature(bucket_dir)))
+    entries.append(("local", "user", _bucket_signature(providers_root.parent / "local")))
     return tuple(entries)
 
 
@@ -352,10 +357,25 @@ def _owner_cursor(provider: str, owner_kind: str, owner_id: str) -> OwnerWakeCur
     return provider, owner_kind, owner_id
 
 
+# LLM: 保留provider枚举原顺序，本地用户经过同一分页排序，main和链接不进入新候选。
+# 函数用途: 合并两类规范owner目录作为原发现器的候选输入。
 def _candidate_owner_homes(providers_root: Path):
     for provider_dir, owner_kind, bucket_dir in _provider_buckets(providers_root):
         for owner_home in _dirs_of(bucket_dir):
             yield provider_dir.name, owner_kind, owner_home
+    for home in _iter_owner_user_dirs(providers_root.parent.parent):
+        yield "local", "user", home
+
+
+# LLM: 只枚举已物化的owners/local直接子目录；跳过main、隐藏项及任一链接，不创建账号或执行工作。
+# 函数用途: 找出本地普通用户的真实目录供原后台发现链复用。
+def _iter_owner_user_dirs(root_home: Path):
+    local = root_home / "owners" / "local"
+    if local.is_symlink() or not local.is_dir():
+        return
+    for home in sorted(local.iterdir()):
+        if home.name != "main" and not home.name.startswith(".") and not home.is_symlink() and home.is_dir():
+            yield home
 
 
 def _provider_buckets(providers_root: Path):

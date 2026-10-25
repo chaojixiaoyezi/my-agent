@@ -1,5 +1,5 @@
 # LLM: 安装事实描述包、配置、激活与旧权限一次性迁移；授权仍在同表，不复制运行/租约/UNKNOWN 状态机。
-# 模块用途: 定义唯一安装记录和提交回执；配置/激活迁移独立计算，读写及系统锁由 Store 负责。
+# 模块用途: 定义公共或私有的唯一安装记录；公开资格由Store核管理员，不能从包类型推导。
 
 from __future__ import annotations
 
@@ -27,15 +27,14 @@ class PluginInstallRequest:
     expected_revision: int
     installation_scope: str = "private"
 
-    # LLM: JSON 或调用方不能把布尔值当版本；包描述与字节的匹配由 Store 在写入前复验。
+    # LLM: 安装范围兼容内容和程序包；本DTO不授公共发布权，Store在原锁内核安装者。
     # 函数用途: 拒绝缺失包及无效操作身份。
     def __post_init__(self) -> None:
         validate_install_identity(self.operation_id, self.expected_revision)
         if not isinstance(self.package, PluginPackageSnapshot):
             raise ValueError("安装请求缺少包快照")
-        if self.installation_scope not in {"private", "public"} or (
-                self.installation_scope == "public" and not self.package.manifest.is_content_only):
-            raise ValueError("公共范围只允许纯内容能力包")
+        if self.installation_scope not in {"private", "public"}:
+            raise ValueError("安装范围必须是private或public")
 
     # LLM: 摘要包含动作、插件、包和期望版本；源路径变化不改变同一快照的语义，摘要不是授权。
     # 函数用途: 为原请求回执生成可重复比较的输入标识。
@@ -109,15 +108,14 @@ class PluginInstallation:
     legacy_permission_json: str | None = field(default=None, repr=False)
     installation_scope: str = "private"
 
-    # LLM: 最后回执与包/版本/激活匹配；v9额外核固定API授权，兼容标记不能给v9豁免。
+    # LLM: 内容和程序均可显式公开；保留范围摘要与激活核验，公共发布权仍在原Store。
     # 函数用途: 校验完整安装事实，不从包自述生成宿主激活状态。
     def __post_init__(self) -> None:
         if not isinstance(self.manifest, PluginManifest) or not isinstance(
             self.last_commit, PluginCommitReceipt
         ):
             raise ValueError("安装记录缺少已验证声明或回执")
-        if self.installation_scope not in {"private", "public"} or (
-                self.installation_scope == "public" and not self.manifest.is_content_only):
+        if self.installation_scope not in {"private", "public"}:
             raise ValueError("安装发布范围无效")
         if self.last_commit.action == "install":
             expected = plugin_input_digest("install", self.manifest.plugin_id, self.package_sha256, self.last_commit.before_revision)

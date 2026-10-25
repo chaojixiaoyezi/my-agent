@@ -11,7 +11,7 @@ import hashlib
 import json
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -32,6 +32,7 @@ from .candidate_commit_lock import candidate_commit_lock, candidate_redaction_lo
 from .candidate_models import (
     CANDIDATE_ORIGINS,
     CANDIDATE_SCHEMA_VERSION,
+    CANDIDATE_STATUSES,
     CANDIDATE_TYPES,
     PROMOTION_MODES,
     PROMOTION_TARGETS,
@@ -60,10 +61,13 @@ from .candidate_target_binding import TargetEvidenceVersionBindings, binding_his
 from .operations import memory_content_hash
 from .scope_contract import canonical_scope_key
 
+# 保留清理只认合法的未晋升状态；扫描、执行与仓库删除共用同一集合，promoted 永不参与。
+RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
+
 # 记忆候选列表缓存最多跟踪的文件路径数。
 _CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
 # 记忆候选列表缓存允许占用的最大总字节数。
-_CANDIDATE_LOAD_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_CANDIDATE_LOAD_CACHE_MAX_BYTES = 128 * 1024 * 1024
 _CANDIDATE_LOAD_CACHE: OrderedDict[
     str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...]]
 ] = OrderedDict()
@@ -102,7 +106,7 @@ def _drop_candidate_load_cache(path: Path) -> None:
         _CANDIDATE_LOAD_CACHE.pop(str(path), None)
 
 
-# LLM: 保存前深复制全部嵌套字段，最多8路径和32MiB原始字节；调用方返回值不能成为缓存权威。
+# LLM: 保存前深复制全部嵌套字段，最多8路径和128MiB原始字节；调用方返回值不能成为缓存权威。
 # 函数用途: 记忆已通过原坏行、schema及重复ID验证的一代候选。
 def _remember_candidate_load(path, probe, records):
     if probe is None or _candidate_load_stamp(path) != probe[0]:
@@ -114,6 +118,35 @@ def _remember_candidate_load(path, probe, records):
         while (len(_CANDIDATE_LOAD_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS
                or sum(entry[0][1] for entry in _CANDIDATE_LOAD_CACHE.values()) > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
             _CANDIDATE_LOAD_CACHE.popitem(last=False)
+
+
+# LLM: 校验磁盘探针与缓存摘要完全一致才返回只读元组；不一致时可驱逐旧缓存，调用方负责深复制输出。
+# 函数用途: 探测并返回当前候选路径已验证的缓存快照元组。
+def _cached_candidate_rows(path: Path, probe, *, evict_on_miss: bool) -> tuple[MemoryCandidate, ...] | None:
+    with _CANDIDATE_LOAD_CACHE_LOCK:
+        cached = _CANDIDATE_LOAD_CACHE.get(str(path))
+        if probe is not None and cached is not None and cached[:2] == (probe[0][:4], probe[1]):
+            _CANDIDATE_LOAD_CACHE.move_to_end(str(path))
+            return cached[2]
+        if evict_on_miss:
+            _CANDIDATE_LOAD_CACHE.pop(str(path), None)
+        return None
+
+
+# LLM: 单条查询与快照复核在缓存命中时只深复制目标候选，避免万级账本每次 get/locked_snapshot 全表深拷贝；
+#   缓存未命中或 _load_unlocked 被测试替换时仍完整走 _load_unlocked 验证全表坏行、schema 与重复 ID。
+# 函数用途: 在持有候选文件锁的前提下按 candidate_id 精确读取单条候选。
+def _load_one_candidate_unlocked(service: CandidateService, candidate_id: str) -> MemoryCandidate | None:
+    if (
+        "_load_unlocked" in service.__dict__
+        or getattr(service._load_unlocked, "__func__", None) is not CandidateService._load_unlocked
+    ):
+        return next((row for row in service._load_unlocked() if row.candidate_id == candidate_id), None)
+    cached = _cached_candidate_rows(service.path, _candidate_load_probe(service.path), evict_on_miss=False)
+    if cached is not None:
+        matched = next((row for row in cached if row.candidate_id == candidate_id), None)
+        return deepcopy(matched) if matched is not None else None
+    return next((row for row in service._load_unlocked() if row.candidate_id == candidate_id), None)
 
 
 # LLM: 损坏候选账本必须阻断写入；跳过坏行会在下一次原子写时永久丢数据。
@@ -214,12 +247,19 @@ class CandidateService:
         return records if limit <= 0 else records[-limit:]
 
     # LLM: candidate_id 是唯一定位键；禁止按正文或 subject 模糊选中审核目标。
+    #   默认走锁内单条定位，命中缓存时只深拷贝目标候选而不再深拷贝和排序全表；若 list 被外部替身替换则保留原遍历。
     # 函数用途: 读取一个候选，不存在时抛出精确 KeyError。
     def get(self, candidate_id: str) -> MemoryCandidate:
         target = str(candidate_id or "").strip()
-        for item in self.list():
-            if item.candidate_id == target:
-                return item
+        if "list" in self.__dict__ or getattr(self.list, "__func__", None) is not CandidateService.list:
+            for item in self.list():
+                if item.candidate_id == target:
+                    return item
+            raise KeyError(target)
+        with self._locked_candidates():
+            current = _load_one_candidate_unlocked(self, target)
+        if current is not None:
+            return current
         raise KeyError(target)
 
     # LLM: 调用方已持quota→policy；候选锁覆盖快照核对和正式写入，期间不能合并/审核该候选。
@@ -229,8 +269,7 @@ class CandidateService:
     @contextmanager
     def locked_snapshot(self, expected: MemoryCandidate) -> Iterator[MemoryCandidate]:
         with candidate_commit_lock(self.path, **({} if not self.coordinator_io else {"coordinator_io": True})):
-            rows = self._load_unlocked()
-            current = next((row for row in rows if row.candidate_id == expected.candidate_id), None)
+            current = _load_one_candidate_unlocked(self, expected.candidate_id)
             if current != expected:
                 raise CandidateStateChangedError(current.status if current is not None else "missing")
             yield current
@@ -432,42 +471,60 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
-    # LLM: retention 只按结构化 rejected/expired/superseded 状态和 updated_at 删除。
-    # 函数用途: 规划超过截止时间的非活跃候选 ID，不执行删除。
+    # LLM: retention 只选合法未晋升状态且严格早于 updated_at cutoff；已脱敏版本墓碑不得重复规划。
+    # 函数用途: 规划超过保留期的未晋升候选 ID，不执行删除。
     def retention_candidates(self, *, before: datetime) -> list[str]:
         cutoff = before.astimezone(timezone.utc)
         result: list[str] = []
-        for item in self.list(statuses={"rejected", "expired", "superseded"}):
+        for item in self.list(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
             if _is_binding_tombstone(item):
                 continue
             if datetime.fromisoformat(item.updated_at) < cutoff:
                 result.append(item.candidate_id)
         return result
 
-    # LLM: 精确ID且仅retention终态；带版本绑定的行必须脱敏留约束，不能硬删后重新授权旧证据。
-    # 函数用途: 清理终态候选正文与引用，返回本次实际清理条数。
+    # LLM: 精确 ID 且仅合法未晋升状态；传入预期快照时在原删除锁内 CAS，变化或已成墓碑的记录只跳过。
+    #   无快照调用保留原状态检查；版本绑定仍脱敏保留，全跳过或账本未变时不重写。
+    # 函数用途: 原子复核并清理未晋升候选，将锁前变化 ID 交还调用方准确报告。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
     # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
-    def delete_terminal(self, candidate_ids: list[str] | tuple[str, ...]) -> int:
-        ids = set(normalize_string_list(candidate_ids))
+    def delete_terminal(
+        self,
+        candidate_ids: Iterable[str],
+        *,
+        expected_snapshots: dict[str, MemoryCandidate] | None = None,
+        skipped_state_changed: set[str] | None = None,
+    ) -> int:
+        ids = set(normalize_string_list(tuple(candidate_ids)))
         if not ids:
             return 0
-        with _quota_admission(self.quota_enforcer) as admission:
-            with self._locked_candidates():
-                candidates = self._load_unlocked()
-                for item in candidates:
-                    if item.candidate_id in ids and item.status not in {
-                        "rejected",
-                        "expired",
-                        "superseded",
-                    }:
-                        raise CandidateTransitionError(
-                            f"candidate {item.candidate_id} is not retention-terminal"
-                        )
-                retained, deleted = _retention_records(candidates, ids)
-                if deleted:
-                    _write_candidates_unlocked(self.path, retained, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
-                return deleted
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
+            candidates = self._load_unlocked()
+            if expected_snapshots is not None:
+                current_by_id = {item.candidate_id: item for item in candidates}
+                for cid in list(ids):
+                    current = current_by_id.get(cid)
+                    expected = expected_snapshots.get(cid)
+                    if expected is None:
+                        continue
+                    if (current is not None and current == expected
+                            and current.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
+                            and not _is_binding_tombstone(current)):
+                        continue
+                    ids.remove(cid)
+                    if skipped_state_changed is not None:
+                        skipped_state_changed.add(cid)
+            if not ids:
+                return 0
+            for item in candidates:
+                if item.candidate_id in ids and item.status not in RETENTION_ELIGIBLE_CANDIDATE_STATUSES:
+                    raise CandidateTransitionError(
+                        f"candidate {item.candidate_id} is not retention-eligible"
+                    )
+            retained, deleted = _retention_records(candidates, ids)
+            if deleted and retained != candidates:
+                _write_candidates_unlocked(self.path, retained, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return deleted
 
     # LLM: 健康统计不返回正文、路径或用户引用。
     # 函数用途: 为 doctor/CLI 输出候选数量和状态分布。
@@ -495,15 +552,9 @@ class CandidateService:
     # 函数用途: 严格加载候选，只在内容未变时跳过重复JSONL解析和模型验证。
     def _load_unlocked(self) -> list[MemoryCandidate]:
         probe = _candidate_load_probe(self.path)
-        with _CANDIDATE_LOAD_CACHE_LOCK:
-            cached = _CANDIDATE_LOAD_CACHE.get(str(self.path))
-            if probe is not None and cached is not None and cached[:2] == (probe[0][:4], probe[1]):
-                _CANDIDATE_LOAD_CACHE.move_to_end(str(self.path))
-            else:
-                _CANDIDATE_LOAD_CACHE.pop(str(self.path), None)
-                cached = None
+        cached = _cached_candidate_rows(self.path, probe, evict_on_miss=True)
         if cached is not None:
-            return list(deepcopy(cached[2]))
+            return list(deepcopy(cached))
         report = read_jsonl_objects_report(
             self.path,
             context="memory_candidates.load",
@@ -1106,13 +1157,14 @@ __all__ = [
     "CandidateStoreCorruptError",
     "CandidateIdentityConflictError",
     "CandidateTransitionError",
+    "RETENTION_ELIGIBLE_CANDIDATE_STATUSES",
     "merge_candidate_observations",
     "split_identity_conflicts",
 ]
 
 
-# LLM: retention保留版本绑定和硬删除防重放约束；无绑定add被正式删除后也必须留下不含原话的身份墓碑。
-# 函数用途: 计算终态保留清理后的候选集合与实际清理条数。
+# LLM: retention 保留版本绑定和硬删除防重放约束；草稿脱敏必须转 superseded，旧终态及版本绑定不变。
+# 函数用途: 计算未晋升候选清理后的合法账本及实际清理条数。
 def _retention_records(candidates: list[MemoryCandidate], ids: set[str]) -> tuple[list[MemoryCandidate], int]:
     retained: list[MemoryCandidate] = []
     cleaned = 0
@@ -1128,11 +1180,12 @@ def _retention_records(candidates: list[MemoryCandidate], ids: set[str]) -> tupl
             retained.append(item)
             continue
         now = utc_now_iso()
-        retained.append(replace(item, content="", content_redacted_at=now, updated_at=now,
+        status = item.status if item.status in TERMINAL_CANDIDATE_STATUSES else "superseded"
+        retained.append(replace(item, status=status, content="", content_redacted_at=now, updated_at=now,
             evidence_refs=[], source_message_refs=[], source_tool_refs=[], source_artifact_refs=[],
             source_task_ids=[], source_run_ids=[], learning_source={}, learning_source_coverage={},
             target_evidence_bindings=history, reviewer="retention", review_note="retained_version_bindings",
-            status_history=[_status_event(item.status, actor="retention", note="retained_version_bindings", at=now)]))
+            status_history=[_status_event(status, actor="retention", note="retained_version_bindings", at=now)]))
         cleaned += 1
     return retained, cleaned
 

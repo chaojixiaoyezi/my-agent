@@ -32,13 +32,17 @@ def cold_owner_host(base, owner):
     return SimpleNamespace(home_paths=home_paths_with_owner(base.home_paths, resolved), config=base.config)
 
 
-# LLM: 身份来自规范HomePaths且再经原resolver比对；不接受调用方路径替代owner命名空间。
-# 函数用途: 从已解析的冷home取得原P2使用的身份。
+# LLM: 身份来自规范HomePaths且再经原resolver比对；local/user只认owners/local，不接受路径替代命名空间。
+# 函数用途: 从已解析的冷home取得原P2身份，兼顾本地普通用户而不授管理权。
 def cold_home_identity(home):
     parts = home.owner_id.split('/')
     from ..user_space.owner_resolver import OwnerIdentity
     if parts == ['local', 'main']:
         identity = OwnerIdentity.local_main()
+    elif len(parts) == 2 and parts[0] == 'local':
+        identity = OwnerIdentity.local_user(parts[1])
+        if identity.owner_id != parts[1]:
+            raise OwnerManagementIngressUnavailable('owner')
     elif len(parts) == 4 and parts[0] == 'providers' and parts[2] in {'users', 'groups'}:
         constructor = OwnerIdentity.provider_user if parts[2] == 'users' else OwnerIdentity.provider_group
         identity = constructor(parts[1], parts[3])

@@ -622,27 +622,28 @@ def _cleanup_one_orphan_lock(lock_path: Path, *, current: float) -> bool:
     if lock_path.with_name(lock_path.name[: -len(".lock")]).exists():
         return False
     try:
-        return _remove_orphan_lock_file(lock_path)
+        return _remove_orphan_lock_file(lock_path, current=current)
     except Exception:  # noqa: BLE001 单个坏锁文件不能中断整轮清扫
         return False
 
 
 # LLM: 必须在锁文件本体上试锁：_open_lock_handle 是"数据文件路径"入口，会再加一层 .lock，
 #   用它探测会永远拿得到 <name>.lock.lock，活锁保护形同虚设（obsfix34b 实测：真实持有者持锁时照样被删）。
-#   拿不到锁说明有活进程正在用这把锁，直接放行不动文件。拿到后在持锁状态下 unlink 再 close：
-#   POSIX 下删名后新来者只能创建新 inode，不会出现"旧 inode 持有者与新 inode 持有者同时进临界区"。
-#   Windows 上打开着的文件删不掉：unlink 失败就放弃本次删除（宁可留孤儿，不回退成先 close 再删，
-#   那会重新引入竞态窗口）。
-# 函数用途: 非阻塞试锁并在持锁状态下删掉一个孤儿锁文件，真的删掉返回 True。
-def _remove_orphan_lock_file(lock_path: Path) -> bool:
+#   拿不到锁说明有活进程正在用这把锁，直接放行不动文件。拿到后还必须核对 fd 与当前 lock_path 的 (st_dev, st_ino) 一致、
+#   对应数据文件仍不存在且锁 mtime 仍超宽限，防止双清理者与业务写者交错时在旧 inode 上持锁却按路径误删新 inode。
+#   Windows 上打开着的文件删不掉：unlink 失败就放弃本次删除（宁可留孤儿，不回退成先 close 再删）。
+# 函数用途: 非阻塞试锁并在持锁状态下复核身份与孤儿条件后删掉孤儿锁文件，真的删掉返回 True。
+def _remove_orphan_lock_file(lock_path: Path, *, current: float | None = None) -> bool:
     handle = os.fdopen(_open_private_lock_descriptor(lock_path), "a+", encoding="utf-8")
     try:
-        if not _try_flock_exclusive(handle):
+        if not _try_flock_exclusive(handle) or not _lock_handle_matches_path(handle, lock_path):
+            return False
+        if lock_path.with_name(lock_path.name[: -len(".lock")]).exists():
+            return False
+        if current is not None and current - os.fstat(handle.fileno()).st_mtime < _ORPHAN_LOCK_MIN_AGE_SECONDS:
             return False
         try:
             lock_path.unlink()
-        except FileNotFoundError:
-            return False
         except OSError:
             return False
         return True

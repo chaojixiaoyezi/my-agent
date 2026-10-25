@@ -1,3 +1,31 @@
+## 2026-10-25 七大核心底座、TUI 交互增强与插件宿主接口扩展设计（`--dir` 多会话与目录资产合并、主会话分叉、对话勾选回合提炼一等公民、统一数据源钥匙串、浏览器录制转脚本、TUI 任务耗时尾标行、TUI 后台驻留彩色尾标与 `↑↓`/`Ctrl+G` 观察页，设计已定稿，待主控拆单实施）
+
+围绕日常项目目录直启、主会话分支探索、历史对话资产化提炼、数据源规范化、浏览器动作固化及 TUI 关键交互体验，完成七项核心能力与 20 个 Plugin Host API v2 / Broker 接口的详细架构设计（完整规格与 `WP-1..WP-5` 拆单见 [PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md](docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md)）：
+- **明确边界（三项不做）**：不做结束拦截审稿人接口（复用 `/goal` 与 `goals.*`）；不做远端 SSH 工作区底层抽象（复用命令/脚本 `ssh`）；**不做子代理 Fork 主代理历史（Subagent Prefix Fork）**，子代理保持现有“干净隔离上下文 + 工具自定义（`allowed_tools`/角色模板/动态申请）”，仅保留**主会话分叉（Main Session Fork）**。
+- **能力 1（`CAP-DIR`）**：新增顶层 `my-agent --dir <path>` 启动模式、按 `workspace_root` 绑定的同目录多会话列表/新建/切换，以及 `<dir>/.agent/{skills,scripts,workflows,monitors,AGENTS.md}` 与个人全局 `~/.my-agent/*` 双层资产自动合并（优先级 `workspace > owner > builtin`）与 `assets.promote_to_owner` 一键提升。
+- **能力 2（`CAP-FORK`）**：新增 `thread_fork_service.py`、`/fork` 命令与 `conversations.threads.fork` 接口，支持从当前最新轮次或指定历史消息 `up_to_message_id`（自动对齐完整 `tool_use -> tool_result` 安全回合边界）分叉主会话，继承目录绑定、模型设置与前缀缓存基线。
+- **能力 3（`CAP-EXTRACT`）**：新增 `turn_extractor.py` 与 `conversations.turns.search` / `assets.extract.{propose,get,commit}` 接口，支持按时间段（1-3-7-14-30天/全部/自选日期）勾选 $N$ 次用户提问（自动打包底下 AI 的工具调用与回复），由 Agent 提炼生成 `1 个工作流 + N 个固定脚本 + 1 个 Skill + 可选监控` 的草稿包供用户预览挑选入库。
+- **能力 4（`CAP-DATASOURCE`）**：新增 `datasource_store.py`、`datasources_tool.py` 与 `datasources.{list,save,test,schema.inspect,migrate}` 接口，所有固定脚本/工作流仅通过逻辑代号 `source_id`（`get_datasource` / `query_sql`）访问数据；支持零配置本机 SQLite 或让 Agent 本机建库先行规范化，后续改地址或一键迁移至远端库时脚本零代码改动。
+- **能力 5（`CAP-RECORDER`）**：新增 `browser_recorder.py` 与 `recorder.{sessions.start,sessions.stop,compile_to_script}` 接口，支持将受控浏览器录制或导入的 Chrome Recorder JSON 自动参数化提炼为带 `io_contract.inputs` 的标准固定脚本并挂入工作流步骤。
+- **能力 6（`CAP-TUI-TIMING`）**：由 Gateway 服务端权威记录每轮开始与收口时间并随会话历史块持久化，在每轮 Assistant 回复正文末尾、`◉ Context` 状态栏正上方固定渲染 `✻ 耗时 3分46秒 · 完成于 08:08`，并移除 `tui_block_renderer.py` 中用 `completion` 覆盖底部快捷键栏 Footer 的分支。
+- **能力 7（`CAP-TUI-BG-WATCH`）**：当存在免 `sleep` 后台驻留任务等待结束/异常唤醒时，在底部 `F6 原生模式` 后直接追加醒目彩色指示器 `· ⚡ 后台驻留 N 项`；将其接入 `TuiAgentNavigationState` 的 `↑/↓` 导航首位（先移到此处、再移到 Goal/子代理），按 `Enter` 查看各后台任务的存活状态、运行时长与实时输出尾部，按 `Ctrl+G` 退回主聊天界面（同步开放 `processes.background.{list,inspect}` 插件接口）。
+
+## 2026-10-25 管理员三端创建/管理本地普通用户、双源统一登录与公私插件隔离（已实现）
+
+围绕多用户插件宿主隔离、管理员三端创建与管理普通用户（`/users` 斜杠命令、Host v2 `users.local.*` 接口、`admin_controls` 管理员代理工具）以及本地普通账号 + 飞书首连账号双源统一登录完成闭环落地：
+- **三端创建与管理普通用户（`local/<user_id>`）**：
+  - **入口 1（`/users` 斜杠命令，别名 `/user`，`admin_only=True, sensitive_input=True`）**：支持 `/users create <user_id> <password> [display_name]`、`/users password <user_id> <new_password>`、`/users list`、`/users info <user_id>`、`/users enable <user_id>`、`/users disable <user_id> [reason]`；`persisted_control_command_text` 对直接及 `/sessions control ... /users ...` 嵌套命令中的密码参数统一脱敏为 `******`，绝不落盘明文。
+  - **入口 2（Plugin Host v2 API `users.local.*` 与 `"*"` 通配授权）**：`users.local.create` 支持可选初始 `password`（经 `validate_password_policy` 校验与 `scrypt` 慢哈希，公开视图仅返回 `has_password: bool`）；新增 `users.local.password.set`（`mode="write"`，强制 `expected_revision` CAS 与 `idempotency_key`）；`target_user_ids`、`manageable_user_ids`、`creatable_user_ids` 支持显式 `"*"` 通配，动态覆盖后续新建普通用户。
+  - **入口 3（管理员 Agent 工具 `admin_controls` 直接管理）**：`owner_admin_controls.py` 支持解析与去重枚举 `local/<uid>`（兼容 `local/users/<uid>`）；`AdminControlsTool` 新增 `create_user`、`list_users`、`get_user`、`set_user_password`、`enable_user`、`disable_user`，并可对任意 `local/<uid>` 直接读写 `decision_model_allowed`/`audit_allowed` 与资源授权。
+- **双源统一登录与会话实时验签（`users.auth.login` / `users.auth.verify`）**：
+  - `user_space/user_auth.py` 统一支持账号源 1（`account_source="local"`，`LocalUserStore` -> `owners/local/<uid>`）与账号源 2（`account_source="feishu"`，只读核验 `identity/provider_identity/feishu.jsonl` 与 `session_lock/private_chat_locks.db` -> `owners/providers/feishu/users/<id>`，绝不把飞书用户物化进 `owners/local/`）；签发绑定 `(owner, user_revision, credential_fingerprint)` 的 HMAC 会话令牌，通过 `X-Plugin-User-Session` 承运调用者身份，改密或停用后立即失效（`401`/`403`）。
+- **公共插件与普通用户私有插件隔离契约（`CT-01..CT-10`）及跨模块守卫**：
+  - 管理员发布的公共插件（`installation_scope="public"`）供多用户共享代码与能力，每次调用强绑定当前认证用户的 `effective_owner` 并剥离 `users.manage`/`act_as_user`；普通用户安装的私有插件（`installation_scope="private"`）严格绑定本人 `PluginInstallStore`、强制 `restricted` 沙箱且仅本人可见可管；同步收紧 `path_access_policy.py`、`_persona_write_guard.py`、`subagents/services/base.py`、`agents_control_service.py`、`home_index_rebuild.py` 与 `control_operation_service.py` 跨模块守卫。
+- **Gateway 高负载与闲置唤醒三项根因治理（`candidates` 大账本缓存 + 后台受管进程 `ps` 风暴消除 + 会话孤儿 `.lock` 周期清理）**：
+  - **`memory_store/candidates.py` 与 `learning_exclusions.py`**：将 `_CANDIDATE_LOAD_CACHE_MAX_BYTES` 从 `32 MiB` 提升至 `128 MiB`（同步 `constants_catalog.json`），解决 `candidates.jsonl` 超 `32 MB` 后缓存失效导致 `memory-curator` 晋升阶段反复全量 `json.loads` + `fold_key` + Gen-2 GC 停顿；新增模块函数 `_load_one_candidate_unlocked` 与 `_cached_candidate_rows`，使 `get()` 与 `locked_snapshot()` 命中缓存时仅深拷贝目标单条 `MemoryCandidate`；`sync_learning_exclusion_marks` 跳过已标记 `LEARNING_SOURCE_EXCLUDED` 的记录免写锁，无 `thread_id` 消息引用时跳过 `threads.list_report` 扫描。
+  - **`conversation/process_events.py`**：`reconcile_process_completions` 在每 `0.5s` 后台 tick 中通过 `_managed_instance_still_live` 对未终态且内核确认原 `pid`/`launcher_pid` 存活、非僵尸（`kernel_terminated`）且出生标识一致（`store_birth(process_birth(pid))`）的 `managed_process_session.v2/v3/v4` 跳过 `process_registry.get` 跨进程文件锁与 macOS `/bin/ps` 子进程派生，对终态或失联/PID 复用记录仍走 `process_registry.get` 完成本地句柄 `poll()` 回收、缓存刷新与 `unknown` 转换；`owner_has_pending_process_completions` 与 `task_has_pending_process_completion` 排除不主动发完成通知的 `status == "unknown"` 及 `activation_scope is not None` 记录。
+  - **`conversation/store_layout.py`、`store.py`、`runtime.py` 与 `gateway_parts/io.py`**：新增 `ConversationStorage.lock_sidecar_dirs()`，并在 `ConversationStore.gc_stale_ledger_records` 中联动 `cleanup_orphan_lock_files` 周期清理 `wake_queue/{urgent,normal,handled,dedupe,attempts,quarantine}`、`progress_policies` 与 `background_claims` 下超 24 小时且未持锁的孤儿 `.lock` sidecar；`_remove_orphan_lock_file` 在取得排他 `flock` 后二次核对 `_lock_handle_matches_path`、数据文件不存在与锁文件年龄，彻底消除双清理者与业务写者交错误删新锁 inode 的竞态。
+
 ## 2026-10-24 第一波（W1-1..W1-6）安全、稳定性、工具并发、99% 缓存命中率与后台完成唤醒治理（已实现）
 
 围绕线上高并发稳定性、Windows 跨平台 CI、粗糙脚本防误伤、多模型 Prompt Cache 99% 命中率与 `claude-code` 风格非阻塞后台等待，完成第一波六项底座能力落地与合并：

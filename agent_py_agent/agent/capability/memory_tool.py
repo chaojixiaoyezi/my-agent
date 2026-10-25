@@ -998,9 +998,6 @@ def _remember_result_hint(
     removal_hint = removal_result_hint(promotion_results)
     if removal_hint:
         return removal_hint
-    if any(item.get("reason_code") == "AUTO_PROMOTION_CONFIRMATION_REQUIRED" for item in promotion_results):
-        state = "部分记上了，另有候选等待用户审核确认。" if active_changed else "没记上（等待用户审核确认）：本次只保存了候选，正式记忆没有因此改变。"
-        return state + "请将 required_repairs.user_control 中的 /memory candidates preview 命令交给用户，由本人完整预览后确认；不要重复调用工具或把来源核验说成已批准。"
     unsaved = sum(str(item.get("reason_code") or "") not in _SAVED_REASON_CODES for item in promotion_results)
     if active_changed and unsaved:
         return (
@@ -1038,8 +1035,8 @@ def _remember_result_hint(
     )
 
 
-# LLM: 修复动作只从稳定原因码投影；待确认导航当前/memory候选预览，提示及模型重试都不能签权。
-# 函数用途: 将缺证据与待用户确认分成准确的结构化后续动作。
+# LLM: 修复动作只从当前证据原因码投影，不将缺证据误报为待确认；提示和模型重试都不能授予写入权限。
+# 函数用途: 为缺失或无效来源生成准确的补证据重试字段。
 def _remember_required_repairs(
     promotion_results: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -1049,13 +1046,7 @@ def _remember_required_repairs(
         reason_code = str(result.get("reason_code") or "").strip()
         if reason_code in seen:
             continue
-        if reason_code == "AUTO_PROMOTION_CONFIRMATION_REQUIRED":
-            repairs.append({"reason_code": reason_code, "action": "user_review_required",
-                            "candidate_id": str(result.get("candidate_id") or ""),
-                            "explicit_user_required": True, "model_retry_authorizes": False,
-                            "user_control": "/memory candidates preview " + str(result.get("candidate_id") or "")})
-            seen.add(reason_code)
-        elif reason_code in {"TOOL_EVIDENCE_MISSING", "TOOL_EVIDENCE_NOT_SUCCEEDED"}:
+        if reason_code in {"TOOL_EVIDENCE_MISSING", "TOOL_EVIDENCE_NOT_SUCCEEDED"}:
             repairs.append(
                 {
                     "reason_code": reason_code,

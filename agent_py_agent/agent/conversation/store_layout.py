@@ -109,6 +109,21 @@ class ConversationStorage:
             self.wake_handled_dir,
         )
 
+    # LLM: 唤醒队列、策略与租约在消费或归档移走原 JSON 后会留下同名 .lock sidecar；
+    #   仅列出权威原目录供周期孤儿锁清理，不改变任何锁协议、安装位置或文件归档边界。
+    # 函数用途: 返回会话存储中可能遗留孤儿 .lock sidecar 的目录清单。
+    def lock_sidecar_dirs(self) -> tuple[Path, ...]:
+        return (
+            self.policies_dir,
+            self.background_claims_dir,
+            self.wake_queue_dir / "urgent",
+            self.wake_queue_dir / "normal",
+            self.wake_handled_dir,
+            self.wake_dedupe_dir,
+            self.wake_attempts_dir,
+            self.wake_quarantine_dir,
+        )
+
     # LLM: 线程 ID 的原路径映射保持，权限与存在性校验仍在调用领域；路径段本身在这里拒绝式校验（_thread_stem）。
     # 函数用途: 定位 canonical 线程 JSON，供身份校验和原子更新共用。
     def thread_path(self, thread_id: str) -> Path:

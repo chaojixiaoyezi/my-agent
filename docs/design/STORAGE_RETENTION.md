@@ -44,6 +44,31 @@
     | `curator_run_days` | 90 | `cache_days` / `tmp_days` | 30 / 7 |
     | `trash_days` | 30 | `legal_hold` / `maintenance_enabled` | false / true |
 
+  - **2026-10-25 候选范围更新**：`rejected_candidate_days` 默认 30 天，适用于
+    `RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}`，即所有未晋升状态，
+    包括 `pending_review`、已 `approved` 但未晋升、`blocked_*`、`observed`、`rejected`、`expired`、`superseded`。
+    按候选 `updated_at` 严格早于截止时间规划清理，执行前重核原版本及年龄；**版本绑定墓碑仍保留**，
+    不清理已经 `promoted` 的候选，也不因此删除其正式记忆。该键属于 owner 的 `retention.json`，
+    不是 `AgentConfig` 中新增的 `memory_retention_rejected_candidate_days` 参数；`0` 仍表示关闭该类清理。
+
+- **进程会话出生身份的升级兼容（2026-10-25）**：新 POSIX `ps` 探针固定 C locale，但原记录中的
+  本地化 `host:` 指纹不能因语言变化就被当作 PID 复用。`process_registry._birth_token_matches` 先精确比较；
+  仅非 Windows、两端均为 `host:` 且旧值不能按 C 样式日期解析时，才关闭 stdin 并在继承原生 locale 的
+  有界 `ps` 探针中复核同一 PID。C 样式识别采用固定英文星期/月及纯数字日期校验，不临时切换全局 locale；
+  两端只在比较时同时归一空白，兼容旧 `strip()` 留下的单数字日期双空格。
+  存活、终止、缓存句柄、树快照、子代理取消观察（`subagents/cancellation_hosts.cleanup_runner_stop`）
+  与完成通知快路径（`conversation/process_events._managed_instance_still_live`）共用此门，
+  **不盲目改写持久 token**；不同文本的缓存/存储指纹必须同时绑定新采集的规范出生观察，不能把缓存值当作
+  当前内核事实而复用旧 Popen。原生复核成功的精确三元组 `(pid, expected_birth_token, current)` 记入
+  进程内有界 FIFO 等价缓存（`_LEGACY_BIRTH_EQUIVALENTS`，上限 `_LEGACY_BIRTH_CACHE_MAX_COUNT = 256`），
+  避免升级过渡期每拍重复派生 `ps`；失败与不匹配一律不入缓存，每拍仍先核验 PID 存活、非僵尸与当前出生观察。
+  拒读、超时、非零退出或空观察保持未知，不能证明旧实例已终止，也不能授予发送信号资格；
+  `proc:` 和 Windows ticks 保留精确比较。定向回归在 `test_process_completion_events.py`，
+  原生 macOS、Linux、Windows 的实机结果与受控测试分开报告。
+  **算法前提与未覆盖项**：原生输出比较仍假定继承的 locale 与旧捕获时一致。如果 locale 本身也改变，
+  非空但不同的日期文本不一定代表 PID 复用；当前指定算法尚未覆盖这一情形，不能宣称任意 locale 迁移安全。
+  是否将这种跨语言歧义统一保留为未知，需集成者另行裁定，不在本次盲目迁移旧存储或新增身份权威。
+
 - **写入时自带上限**（与保留服务无关）：
   - `O/data/decision/outcomes.jsonl`：1000 行（`conversation/decision_outcome_log.py:25`）；
   - `O/data/decision/reach_counts.json`：按小时分桶，保留 7 天；

@@ -53,8 +53,8 @@ CURATOR_BATCH_MESSAGE_LIMIT_COUNT = 80
 CURATOR_MAX_RETRY_COUNT = 1
 
 
-# LLM: 这是 Curator 唯一有效配置快照；模型档案编号参与修订，不保留单独覆盖协议或型号的拼接旁路。
-# 类用途: 从 AgentConfig 提取后台策展开关、批量、超时和晋升策略。
+# LLM: 这是 Curator 唯一有效配置快照；含策展预算、晋升策略与 lesson/HOT 重复门槛，不保留单独覆盖协议或型号的拼接旁路。
+# 类用途: 从 AgentConfig 提取后台策展开关、批量、超时、晋升策略与重复观察门槛。
 @dataclass(frozen=True)
 class MemoryCuratorConfig:
     enabled: bool = True
@@ -67,9 +67,11 @@ class MemoryCuratorConfig:
     max_retries: int = CURATOR_MAX_RETRY_COUNT
     daily_finalize_hour: int = 23
     auto_promotion_policy: str = "conservative_v1"
+    lesson_min_occurrences: int = 2
+    hot_min_occurrences: int = 3
 
-    # LLM: 固定引用只从已 normalize 的 AgentConfig 读取编号，不从型号猜档案，不另解析配置文件或自然语言。
-    # 函数用途: 构造一次运行不可变配置。
+    # LLM: 固定引用只从已 normalize 的 AgentConfig 读取编号与重复门槛（lesson>=2、hot>=3），不另解析配置文件或自然语言。
+    # 函数用途: 构造一次运行不可变配置，确保 Curator 队列筛选与 PromotionService 共用同一配置门槛。
     @classmethod
     def from_agent_config(cls, config: object) -> MemoryCuratorConfig:
         return cls(
@@ -90,12 +92,19 @@ class MemoryCuratorConfig:
                 )
                 or "conservative_v1"
             ).strip(),
+            lesson_min_occurrences=max(2, int(getattr(config, "memory_lesson_min_occurrences", 2) or 2)),
+            hot_min_occurrences=max(3, int(getattr(config, "memory_hot_min_occurrences", 3) or 3)),
         )
 
-    # LLM: revision 只反映影响策展语义/预算的字段，供 state 标识配置切换。
+    # LLM: revision 只反映影响策展语义/预算的字段（默认重复门槛不改变既有修订哈希），供 state 标识配置切换。
     # 函数用途: 生成短配置修订号。
     def revision(self) -> str:
-        material = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+        payload = asdict(self)
+        if payload.get("lesson_min_occurrences") == 2:
+            payload.pop("lesson_min_occurrences", None)
+        if payload.get("hot_min_occurrences") == 3:
+            payload.pop("hot_min_occurrences", None)
+        material = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return "curator-config-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 

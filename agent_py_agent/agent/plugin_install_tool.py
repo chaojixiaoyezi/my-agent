@@ -1,5 +1,5 @@
 # LLM: 安装 handler 只能由已授权宿主经原 ToolExecutor 调用；只读一次授权包字节，安装事实仍归 PluginInstallStore。
-# 模块用途: 把默认停用安装接到原工具副作用合同，不向模型开放内部管理工具。
+# 模块用途: 默认停用安装沿原工具副作用合同；内容和程序均可公开，但发布资格归原Store核验。
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class PluginInstallTool(BaseTool):
             idempotency_policy=IdempotencyPolicy("operation"), mutates_workspace=False,
         )
 
-    # LLM: 源权限与严格打开先于安装写入，bytes 固定后不再打开来源；清理/提交不确定不能由异常文案推断未执行。
+    # LLM: 源严格打开先于写入；scope只限定枚举，公共管理员门仍在原Store，不因程序格式旁路。
     # 函数用途: 读取包、检查当前安装版本并提交默认停用记录，返回可对账的领域回执。
     def execute(self, params: dict) -> ToolHandlerOutcome:
         try:
@@ -66,8 +66,8 @@ class PluginInstallTool(BaseTool):
             return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "插件包来源不可读或格式无效。",
                                       error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         scope = str(params.get("scope") or "private")
-        if scope not in {"private", "public"} or scope == "public" and not package.manifest.is_content_only:
-            return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "公共范围只允许纯内容能力包，范围必须是 private 或 public。",
+        if scope not in {"private", "public"}:
+            return ToolHandlerOutcome(PLUGIN_INSTALL_TOOL, False, "范围必须是 private 或 public。",
                                       error_code="TOOL_INVALID_ARGUMENTS", effect_outcome="not_started")
         try:
             previous = next((entry for entry in self.store.snapshot()

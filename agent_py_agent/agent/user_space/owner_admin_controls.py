@@ -1,5 +1,5 @@
 # LLM: 治理写入口在原管理员校验和目录/锁副作用前消费唯一全局拒门；读权限、原策略合并与失败关闭不变。
-# 模块用途: 仅协调者或默认单进程继续原管理员治理写入，拒门不增加任何owner权限。
+# 模块用途: 管理员治理沿原策略写入，并冷解析本地普通账号及通道用户，不改变权限。
 # LLM: 管理员对每个 owner 的控制只存于该 owner 自己的 tool_policy.json 的 admin_controls 块（owner_admin_controls.v1），
 #   与审批模式、长期授权同一文件、同一把锁；owner 自己的代理写不进（tool_policy.json 在 owner 受保护控制路径内），
 #   只有 is_permission_admin(管理员 home) 的入口（admin_controls 工具）能写。
@@ -9,6 +9,7 @@
 # 模块用途: 保存并读取管理员给每个用户开关的 Jev 决策使用权、审计工具使用权，以及管理员本人的跨用户审计许可。
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -46,8 +47,8 @@ def _policy_path(home: object) -> Path | None:
     return Path(value) if value else None
 
 
-# LLM: 块缺失→默认；块存在但 schema 不符或已知键不是布尔→None（调用方失败关闭）。未知附加键（updated_at 等）忽略。
-# 函数用途: 把策略文件里的 admin_controls 块规范成三项布尔值。
+# LLM: 块缺失沿原三项默认；已有 disabled 只作可选管理员停用投影，布尔严格校验，其余元数据忽略。
+# 函数用途: 规范原控制块及已有停用标记，坏块失败关闭。
 def _controls_from_policy(data: dict) -> dict | None:
     block = data.get(ADMIN_CONTROLS_FIELD)
     if block is None:
@@ -55,6 +56,8 @@ def _controls_from_policy(data: dict) -> dict | None:
     if not isinstance(block, dict) or block.get("schema") != ADMIN_CONTROLS_SCHEMA:
         return None
     values = {key: block.get(key, default) for key, default in CONTROL_DEFAULTS.items()}
+    if "disabled" in block:
+        values["disabled"] = block["disabled"]
     return values if all(type(value) is bool for value in values.values()) else None
 
 
@@ -97,11 +100,11 @@ def cross_owner_audit_allowed(home: object) -> bool:
 
 
 # LLM: 只接受已知键与布尔值；cross_owner_audit_allowed 只能写在管理员自己名下（按策略文件路径判断是否同一 owner）。
-# 函数用途: 在写入前校验管理员身份与改动内容，不合法时抛带原因码的错误。
+# 函数用途: 校验管理员修改原开关和可选停用标记，非法内容在写入前拒绝。
 def _validate_change(admin_home: object, target_home: object, changes: object) -> dict:
     if not is_permission_admin(admin_home):
         raise OwnerAdminControlsError("not_admin", "只有本机管理员能修改用户的 Jev 与审计开关。")
-    if (not isinstance(changes, dict) or not changes or set(changes) - set(CONTROL_DEFAULTS)
+    if (not isinstance(changes, dict) or not changes or set(changes) - (set(CONTROL_DEFAULTS) | {"disabled"})
             or any(type(value) is not bool for value in changes.values())):
         raise OwnerAdminControlsError("invalid_changes", "只能修改 decision_model_allowed、audit_allowed、"
                                                          "cross_owner_audit_allowed，值必须是 true 或 false。")
@@ -143,17 +146,27 @@ def set_owner_admin_controls(admin_home: object, target_home: object, changes: o
     return read_owner_admin_controls(target_home)
 
 
-# LLM: 只接受规范 owner 编号：local/main，或 providers/<provider>/<users|groups>/<id>，provider 与 id 段须原样等于
-#   safe_path_segment 的结果（拒绝路径分隔、.. 等）；目录不存在返回 None，不创建冷用户目录。只做路径解析、不授予权限。
+# LLM: local/<uid> 与 local/users/<uid> 共用原账号目录；其余沿 provider 解析。所有本地父链拒绝链接，缺目录返回 None，不创建用户。
 # 函数用途: 把管理员给出的 owner 编号解析成那个用户的 home 路径集合。
 def owner_home_paths_by_id(base_home: object, owner_id: object):
+    from ..common.nofollow_fs import open_directory_beneath
     from ..common.path_segments import safe_path_segment
+    from ..plugin_host.errors import HostAPIError
+    from .local_user_store import LocalUserStore
     from .owner_resolver import OwnerIdentity, home_paths_with_owner, resolve_owner_home
 
     text = owner_id.strip() if type(owner_id) is str else ""
     parts = text.split("/")
     if text == "local/main":
         identity = OwnerIdentity.local_main()
+    elif parts[:1] == ["local"] and (len(parts) == 2 or len(parts) == 3 and parts[1] == "users"):
+        try:
+            owner = LocalUserStore(base_home.root).owner_home(parts[-1])
+            descriptor = open_directory_beneath(base_home.root, ("owners", "local", parts[-1]), require_dir_fd=True)
+            os.close(descriptor)
+        except (HostAPIError, OSError, ValueError):
+            return None
+        return home_paths_with_owner(base_home, owner)
     elif (len(parts) == 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}
             and all(part and part == safe_path_segment(part) for part in (parts[1], parts[3]))):
         build = OwnerIdentity.provider_user if parts[2] == "users" else OwnerIdentity.provider_group
@@ -164,22 +177,79 @@ def owner_home_paths_by_id(base_home: object, owner_id: object):
     return home_paths_with_owner(base_home, owner) if owner.home_dir.is_dir() else None
 
 
-# LLM: local/main 在前，其余按 owner_wake_discovery 的规范排序取一页（总数不超过 limit）；只列已存在的 owner 目录，
-#   不创建、不读内容。第二个返回值表示还有更多 owner 没列出。
+# LLM: 原注册表支持 list_user_ids 时优先复用，否则只枚举 local_users 的普通 JSON 文件；不读或创建账号。
+# 函数用途: 列出旧版和 c1 用户存储中已登记的安全本地编号。
+def list_local_user_ids(base_home: object) -> list[str]:
+    from .local_user_store import LocalUserStore
+    store = LocalUserStore(base_home.root)
+    if hasattr(store, "list_user_ids"):
+        return sorted(store.list_user_ids())
+    return _local_directory_ids(base_home.root, ("local_users",), registered=True)
+
+
+# LLM: 可信根内固定深度 dir_fd 枚举，条目不跟随链接，编号不做宽松替换；坏父链抛错而非伪造空结果。
+# 函数用途: 从普通目录或账号 JSON 文件名收集合法 UID。
+def _local_directory_ids(root, parts, *, registered=False):
+    from ..common.nofollow_fs import open_directory_beneath
+    try:
+        descriptor = open_directory_beneath(root, parts, require_dir_fd=True)
+    except FileNotFoundError:
+        return []
+    ids = []
+    try:
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                uid = _local_entry_id(entry, registered)
+                if uid is not None:
+                    ids.append(uid)
+    finally:
+        os.close(descriptor)
+    return sorted(set(ids))
+
+
+# LLM: 严格 UID 验证不做字符替换；隐藏、非普通文件/目录、main 和链接均不能成为发现项。
+# 函数用途: 从单个目录项取安全本地用户编号。
+def _local_entry_id(entry, registered):
+    from ..plugin_host.errors import HostAPIError
+    from .local_user_store import validate_local_user_id
+    if registered:
+        if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+            return None
+        uid = entry.name[:-5]
+    else:
+        if not entry.is_dir(follow_symlinks=False):
+            return None
+        uid = entry.name
+    try:
+        return validate_local_user_id(uid)
+    except (ValueError, HostAPIError):
+        return None
+
+
+# LLM: local/main、本地普通用户、provider 用户依次列举；登记/目录去重，limit 与 truncated 保持原审计调用合同。
 # 函数用途: 列出本机已有的用户（owner）编号及其 home 路径集合，供管理员控制和跨用户审计使用。
 def list_owner_home_paths(base_home: object, *, limit: int) -> tuple[list[tuple[str, object]], bool]:
     from ..owner_wake_discovery import discover_owner_home_page
+    from .local_user_store import LocalUserStore
     from .owner_resolver import OwnerIdentity, home_paths_with_owner, resolve_owner_home
 
     result = []
     main = resolve_owner_home(base_home.root, OwnerIdentity.local_main())
     if main.home_dir.is_dir():
         result.append((main.owner_id, home_paths_with_owner(base_home, main)))
-    page = discover_owner_home_page(base_home.owners_dir, limit=max(1, limit - len(result)))
+    store = LocalUserStore(base_home.root)
+    ids = set(list_local_user_ids(base_home)) | set(_local_directory_ids(base_home.root, ("owners", "local")))
+    for uid in sorted(ids):
+        owner = store.owner_home(uid)
+        result.append((owner.owner_id, home_paths_with_owner(base_home, owner)))
+    seen = {owner_id for owner_id, _ in result}
+    page = discover_owner_home_page(base_home.owners_dir, limit=max(1, limit + 1 + len(seen)))
     for target in page.targets:
         owner = resolve_owner_home(base_home.root, target.identity)
-        result.append((owner.owner_id, home_paths_with_owner(base_home, owner)))
-    return result, page.next_cursor is not None
+        if owner.owner_id not in seen:
+            seen.add(owner.owner_id)
+            result.append((owner.owner_id, home_paths_with_owner(base_home, owner)))
+    return result[:limit], len(result) > limit or page.next_cursor is not None
 
 
 __all__ = [

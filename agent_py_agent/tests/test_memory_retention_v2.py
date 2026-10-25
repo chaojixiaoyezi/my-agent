@@ -3,16 +3,19 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.conversation import ConversationStore
 from agent_py_agent.agent.local_storage import LocalStore
 from agent_py_agent.agent.memory_store.candidate_models import (
+    CANDIDATE_STATUSES,
     CandidateObservation,
     MemoryScope,
 )
-from agent_py_agent.agent.memory_store.candidates import CandidateService
+from agent_py_agent.agent.memory_store.candidates import CandidateService, CandidateTransitionError
 from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 from agent_py_agent.agent.memory_store.retention import (
     RETENTION_SCHEMA_VERSION,
@@ -456,3 +459,157 @@ def test_hard_delete_scrubs_authority_indexes_candidate_and_not_conversation(tmp
     assert content not in home.owner_memory_long_term_jsonl.read_text(encoding="utf-8")
     assert content not in home.owner_memory_ops_jsonl.read_text(encoding="utf-8")
     assert conversation.read_bytes() == conversation_before
+
+
+# LLM: 只在临时账本设置测试时钟；覆盖全部合法状态、严格三十天边界及未满保留期，不接触生产候选。
+# 函数用途: 准备陈旧与活跃候选并返回按保留策略应清理的精确集合。
+def _retention_drafts(candidates):
+    specs = [(status, 31) for status in sorted(CANDIDATE_STATUSES)]
+    specs.extend((status, age) for status in sorted(CANDIDATE_STATUSES - {"promoted"}) for age in (29, 30))
+    observed = candidates.observe_many([
+        CandidateObservation(candidate_type="lesson", content=f"待保留经验 {index}", subject_key=f"retention.draft.{index}",
+            scope=MemoryScope("personal", "personal"), origin="model_inferred", promotion_target="lesson")
+        for index in range(len(specs))
+    ])
+    rows = [replace(row, status=status, updated_at=(NOW - timedelta(days=age)).isoformat(),
+                    status_history=[{**row.status_history[-1], "status": status}],
+                    promoted_at=OLD if status == "promoted" else row.promoted_at,
+                    promotion_ref="fixture:promoted" if status == "promoted" else row.promotion_ref)
+            for row, (status, age) in zip(observed, specs, strict=True)]
+    candidates.path.write_text("".join(json.dumps(row.to_record()) + "\n" for row in rows), encoding="utf-8")
+    old_ids = {row.candidate_id for row, (status, age) in zip(rows, specs, strict=True)
+               if status != "promoted" and age > 30}
+    return rows, old_ids
+
+
+# LLM: plan 必须只读，apply 只能清理严格早于 cutoff 的非 promoted 状态；新鲜、边界与已晋升记录逐字保留。
+# 函数用途: 验证长期不晋升草稿按默认三十天保留期清理。
+def test_retention_cleans_all_old_unpromoted_drafts(tmp_path):
+    _home, candidates, _memory, service = _runtime(tmp_path)
+    rows, expected = _retention_drafts(candidates)
+    before = candidates.path.read_bytes()
+    plan = service.plan(now=NOW)
+    assert plan.ok
+    assert {action.record_id for action in plan.actions if action.operation == "candidate_delete"} == expected
+    assert candidates.path.read_bytes() == before
+    applied = service.apply(now=NOW)
+    assert applied.ok and applied.applied
+    assert {action.record_id for action in applied.actions if action.status == "deleted"} == expected
+    assert {row.candidate_id: row.to_record() for row in candidates.list()} == {
+        row.candidate_id: row.to_record() for row in rows if row.candidate_id not in expected}
+
+
+# LLM: 直接仓库接口与扫描执行共享合法状态；混入 promoted 必须整批拒绝，不能发生部分删除。
+# 函数用途: 验证保留规划与原批量清理接口的一致性和晋升保护。
+def test_candidate_retention_apis_clean_old_drafts_and_protect_promoted(tmp_path):
+    _home, candidates, _memory, _service = _runtime(tmp_path)
+    rows, expected = _retention_drafts(candidates)
+    assert set(candidates.retention_candidates(before=NOW - timedelta(days=30))) == expected
+    promoted = next(row.candidate_id for row in rows if row.status == "promoted")
+    before = candidates.path.read_bytes()
+    with pytest.raises(CandidateTransitionError):
+        candidates.delete_terminal([next(iter(expected)), promoted])
+    assert candidates.path.read_bytes() == before
+    assert candidates.delete_terminal(sorted(expected)) == len(expected)
+    assert candidates.get(promoted).status == "promoted"
+
+
+# LLM: 新增可清理状态带正式目标版本约束时，只脱敏并转终态；重复清理仍保留原绑定，不能重授权旧证据。
+# 函数用途: 验证陈旧待审候选保留合法可读的证据墓碑。
+@pytest.mark.parametrize("status", ["pending_review", "approved", "blocked_missing_evidence", "blocked_conflict", "observed"])
+def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
+    from agent_py_agent.agent.memory_store.candidate_source_coverage import initial_source_coverage
+
+    _home, candidates, _memory, service = _runtime(tmp_path)
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="不能重新授权的旧证据正文",
+        subject_key="retention.bound", scope=MemoryScope("personal", "personal"), origin="model_inferred",
+        promotion_target="lesson"))
+    bindings = [{"key": ["memory-old", "message", "thread-old", "message-old"], "version": 1}]
+    old = replace(row, status=status, updated_at=OLD, target_evidence_bindings=bindings,
+                  source_message_refs=[{"thread_id": "thread-old", "message_id": "message-old"}],
+                  status_history=[{**row.status_history[-1], "status": status}])
+    old = replace(old, learning_source_coverage=initial_source_coverage(old))
+    candidates.path.write_text(json.dumps(old.to_record()) + "\n", encoding="utf-8")
+    applied = service.apply(now=NOW)
+    assert applied.ok and [action.record_id for action in applied.actions] == [row.candidate_id]
+    tombstone = candidates.get(row.candidate_id)
+    assert tombstone.status == "superseded" and tombstone.content == ""
+    assert tombstone.target_evidence_bindings == bindings
+    assert not tombstone.source_message_refs and tombstone.content_redacted_at
+    assert candidates.delete_terminal([row.candidate_id]) == 0
+    assert candidates.retention_candidates(before=NOW + timedelta(days=365)) == []
+    assert [a for a in service.plan(now=NOW + timedelta(days=365)).actions if a.operation == "candidate_delete"] == []
+    assert [a for a in service.apply(now=NOW + timedelta(days=365)).actions if a.operation == "candidate_delete"] == []
+
+
+# LLM: 即使调用者持有旧计划，账本更新也必须先被 fingerprint 拒绝；cutoff/status 守卫不因放宽状态而消失。
+# 函数用途: 验证规划后候选变新时不清理。
+def test_retention_draft_change_after_plan_is_preserved(tmp_path):
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, _memory, service = _runtime(tmp_path)
+    rows, _expected = _retention_drafts(candidates)
+    plan = service.plan(now=NOW)
+    fresh = [replace(row, updated_at=NOW.isoformat()) for row in rows]
+    candidates.path.write_text("".join(json.dumps(row.to_record()) + "\n" for row in fresh), encoding="utf-8")
+    before = candidates.path.read_bytes()
+    result = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
+    assert result.actions and all(action.status == "state_changed" for action in result.actions)
+    assert candidates.path.read_bytes() == before
+
+
+# LLM: 真实审核故意发生在 apply 已读快照、删除尚未取锁的窗口；不用假指纹掩盖真实 TOCTOU。
+# 函数用途: 证明刚获批并变新的候选不能被旧保留计划删除。
+def test_retention_skips_candidate_updated_between_unlocked_read_and_locked_delete(tmp_path, monkeypatch):
+    _home, candidates, _memory, service = _runtime(tmp_path)
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="刚获批的经验必须保留",
+        subject_key="retention.atomic", scope=MemoryScope("personal", "personal"), origin="model_inferred",
+        promotion_target="lesson"))
+    candidates.path.write_text(json.dumps(replace(row, updated_at=OLD).to_record()) + "\n", encoding="utf-8")
+    plan = service.plan(now=NOW)
+    assert [action.record_id for action in plan.actions] == [row.candidate_id]
+    original = candidates.delete_terminal
+    approved_state = []
+
+    # LLM: 包装原删除而非替代锁内算法；审核使用真实状态机，保留审核后字节及 mtime 作为无重写证据。
+    # 函数用途: 在进入删除锁之前完成一次新的用户审核。
+    def _approve_before_delete(candidate_ids, **kwargs):
+        candidates.transition(row.candidate_id, "approved", reviewer="user", review_note="approved just in time")
+        approved_state.append((candidates.path.read_bytes(), candidates.path.stat().st_mtime_ns))
+        return original(candidate_ids, **kwargs)
+
+    monkeypatch.setattr(candidates, "delete_terminal", _approve_before_delete)
+    result = service.apply(now=NOW)
+    remaining = {item.candidate_id: item for item in candidates.list()}
+    assert row.candidate_id in remaining
+    assert remaining[row.candidate_id].status == "approved"
+    assert remaining[row.candidate_id].content == row.content
+    assert datetime.fromisoformat(remaining[row.candidate_id].updated_at) >= NOW - timedelta(days=30)
+    assert [(action.record_id, action.status) for action in result.actions] == [(row.candidate_id, "state_changed")]
+    assert [error.error_code for error in result.errors] == ["MEMORY_RETENTION_STATE_CHANGED"]
+    assert (candidates.path.read_bytes(), candidates.path.stat().st_mtime_ns) == approved_state[0]
+
+
+# LLM: 同批仅跳过锁前变动的一条；未变陈旧记录照常清理，既不虚报删除也不把整批独立动作误拦。
+# 函数用途: 验证锁内 CAS 失败与成功动作能在同一份报告中准确共存。
+def test_retention_atomic_snapshot_skip_does_not_block_unchanged_candidates(tmp_path, monkeypatch):
+    _home, candidates, _memory, service = _runtime(tmp_path)
+    rows, old_ids = _retention_drafts(candidates)
+    changed = next(row for row in rows if row.status == "pending_review" and row.candidate_id in old_ids)
+    original = candidates.delete_terminal
+
+    # LLM: 在读取完成后只推进选中候选，其余行保持原字节事实，删除仍调用真实仓库。
+    # 函数用途: 构造批次内一个陈旧快照与其余有效快照的竞争。
+    def _approve_one_before_delete(candidate_ids, **kwargs):
+        candidates.transition(changed.candidate_id, "approved", reviewer="user", review_note="approved just in time")
+        return original(candidate_ids, **kwargs)
+
+    monkeypatch.setattr(candidates, "delete_terminal", _approve_one_before_delete)
+    result = service.apply(now=NOW)
+    statuses = {action.record_id: action.status for action in result.actions}
+    assert statuses == {cid: "state_changed" if cid == changed.candidate_id else "deleted" for cid in old_ids}
+    assert len(result.actions) == len(old_ids)
+    assert [error.error_code for error in result.errors] == ["MEMORY_RETENTION_STATE_CHANGED"]
+    remaining = {row.candidate_id: row for row in candidates.list()}
+    assert old_ids & remaining.keys() == {changed.candidate_id}
+    assert remaining[changed.candidate_id].content == changed.content

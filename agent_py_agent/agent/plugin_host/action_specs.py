@@ -1,5 +1,5 @@
 # LLM: 静态动作目录是v2唯一分发和能力来源，不接受插件注册方法或动态getattr。
-# 模块用途: 定义42个动作的闭合参数、条件权限与资源核验要求。
+# 模块用途: 定义宿主动作的闭合参数、条件权限与资源核验要求，用户认证不替代原执行授权。
 from __future__ import annotations
 
 import json
@@ -94,14 +94,14 @@ def _conversation_specs() -> list[ActionSpec]:
     ]
 
 
-# LLM: 管理用户与代用户访问不混用，UID仅是管理目标。
-# 函数用途: 声明本地用户生命周期动作。
+# LLM: 管理与认证沿原users.manage能力；密码重置强制CAS和幂等，登录及验会话不授代执行资格。
+# 函数用途: 声明本地用户生命周期和统一认证的闭合动作合同。
 def _user_specs() -> list[ActionSpec]:
     uid = {"user_id": text(64, 3, r"^[a-z][a-z0-9_-]{2,63}$")}
     revision = {"expected_revision": integer(2**63 - 1, 1)}
     return [
         _spec("users.local.create", "write", "users.manage", closed(uid, {
-            "display_name": {**text(80), "default": ""}, "quota": quota_schema()}), "creatable_user manageable_user"),
+            "display_name": {**text(80), "default": ""}, "quota": quota_schema(), "password": text(4096)}), "creatable_user manageable_user"),
         _spec("users.local.list", "read", "users.manage", closed({}, {
             **page_fields(), "status": {"enum": ["all", "enabled", "disabled"], "default": "all"}}), "manageable_users"),
         _spec("users.local.get", "read", "users.manage", closed(uid), "manageable_user"),
@@ -109,6 +109,12 @@ def _user_specs() -> list[ActionSpec]:
             "reason": {**text(256), "default": ""}}), "manageable_user"),
         _spec("users.local.enable", "write", "users.manage", closed({**uid, **revision}), "manageable_user"),
         _spec("users.local.quota.get", "read", "users.manage", closed(uid), "manageable_user"),
+        _spec("users.local.password.set", "write", "users.manage", closed({**uid, **revision,
+               "password": text(4096, 1)}), "manageable_user"),
+        _spec("users.auth.login", "read", "users.manage", closed({"user_id": text(256, 1), "password": text(4096, 1)}, {
+            "account_source": {"enum": ["local", "feishu"], "default": "local"},
+            "tenant_or_app_key": {**text(256), "default": ""}, "ttl_seconds": {**integer(604800, 1), "default": 86400}})),
+        _spec("users.auth.verify", "read", "users.manage", closed({"session_token": text(8192, 1)})),
     ]
 
 

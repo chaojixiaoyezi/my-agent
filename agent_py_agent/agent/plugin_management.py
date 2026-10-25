@@ -69,7 +69,7 @@ from .runtime_db.schema import runtime_db_path
 from .tooling.executor import ToolExecutorRequest
 from .tooling.models import ToolAvailability, ToolExposure, ToolRuntime, ToolRuntimeSnapshot
 from .tooling.runtime_contracts import ToolCall, tool_arguments_hash
-from .user_space.owner_resolver import OwnerHomeResult
+from .user_space.owner_resolver import OwnerHomeResult, OwnerIdentity, resolve_owner_home
 
 _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGURE_TOOL,
                      "enable": PLUGIN_ENABLE_TOOL, "disable": PLUGIN_DISABLE_TOOL, "remove": PLUGIN_REMOVE_TOOL,
@@ -117,7 +117,7 @@ class PluginManagementContext:
     approval_timeout_seconds: int = 1800
 
 
-# LLM: 冷/热入口共用原权限与唯一共享部署期限，读取失败关闭动作；环境来源从 config 提取，不借原命令 arguments 注入。
+# LLM: 冷热共用原权限；管理员标记还须完整local/main，普通owner强制进程沙箱，不借HTTP角色提权。
 # 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
@@ -158,7 +158,7 @@ def plugin_management_context(
         raise RuntimeConflictError("原会话记录不可读")
     workspace = Path(thread.cwd) if thread is not None and thread.cwd else owner.home_dir
     return PluginManagementContext(owner, actor_id, channel, conversation_id, threads, workspace,
-                                   path_policy, is_admin, config.enable_plugins,
+                                   path_policy, bool(is_admin and is_complete_local_admin_owner(home)), config.enable_plugins,
                                    allowed and PLUGIN_INSTALL_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_CONFIGURE_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_DISABLE_TOOL not in policy.disabled_tools,
@@ -166,7 +166,8 @@ def plugin_management_context(
                                    allowed and PLUGIN_REMOVE_TOOL not in policy.disabled_tools,
                                    business_allowed=allowed, disabled_tools=frozenset(policy.disabled_tools),
                                    approval_mode=approval_mode,
-                                   process_sandbox=bool(getattr(config, "plugin_process_sandbox", False)),
+                                   process_sandbox=(bool(getattr(config, "plugin_process_sandbox", False))
+                                                    or owner.identity != OwnerIdentity.local_main()),
                                    plugin_events_enabled=bool(getattr(config, "plugin_events_enabled", False)),
                                    legacy_sandbox_default=bool(getattr(config, "plugin_legacy_sandbox_default", True)),
                                    events_owner_allowed=is_complete_local_admin_owner(home),
@@ -186,19 +187,31 @@ def _enable_policy(context, arguments) -> PluginEnablePolicy:
                               legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names)
 
 
+# LLM: 普通owner强制绑定本人home墙、restricted默认与进程沙箱，不因宽配置或管理员HTTP角色提权。
+# 函数用途: 归一化插件管理上下文的owner隔离与沙箱约束。
+def _normalize_management_context(context: PluginManagementContext) -> PluginManagementContext:
+    if context.owner.identity == OwnerIdentity.local_main():
+        return context
+    policy = context.path_policy
+    workspace = context.workspace if context.workspace.is_relative_to(context.owner.home_dir) else context.owner.workspace_dir
+    return replace(context, is_admin=False, process_sandbox=True, legacy_sandbox_default=True, workspace=workspace,
+                   path_policy=PathAccessPolicy.from_values(mode=policy.mode, dangerous_roots=policy.dangerous_roots,
+                       owner_scope_root=context.owner.home_dir, agent_home_root=policy.agent_home_root))
+
+
 # LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。
 # 类用途: 承接管理和业务命令，安装默认停用、调用遵守审批、撤销精确资源，查询区分业务结束与运行收尾。
 class PluginManagement:
-    # LLM: 构造不创建目录或线程；管理写入检查管理员，业务另检查工具策略，均须遵守插件开关。
+    # LLM: 构造不创建目录；普通owner固定原owner墙和进程沙箱，不因宽配置或管理员HTTP角色提权。
     # 函数用途: 保存这次已鉴权入口的必要依赖。
     def __init__(self, context: PluginManagementContext) -> None:
-        self.context = context
-        self.installations = PluginInstallStore(context.owner)
+        self.context = _normalize_management_context(context)
+        self.installations = PluginInstallStore(self.context.owner)
 
-    # LLM: 声明只投影唯一安装表，不扫描包目录；安装版本参与摘要，值与值摘要不进入公开投影。
+    # LLM: 本人私有优先；仅冷读main公共条目，不显示其他owner私有条目或私有配置。
     # 函数用途: 为帮助与补全读取当前 owner 的公开声明。
     def catalog(self):
-        return self._catalog(self.installations.snapshot())
+        return self._catalog(_visible_entries(self))
 
     # LLM: 同次快照派生原提交引用以区分重装，避免目录/目标读取竞态；可用性和引用均不授予权限。
     #   不可用的管理动作给出结构化原因：非管理员是权限不足（admin_only），管理员仍不可用才是未开放（not_implemented）。
@@ -218,7 +231,7 @@ class PluginManagement:
                                              enabled=row.enabled, activation_id=row.activation_id)
                                      for row in entries))
 
-    # LLM: 原请求先查原账，权限文字取同次安装快照；TUI/飞书同源，普通身份不显示管理员授根。subject 只是卸载/停用说明里的
+    # LLM: 原请求先查原账，同次可见快照不含他人私有；普通私有确认仍绑定原请求，不显示管理员授根。subject 只是卸载/停用说明里的
     #   称呼（能力包命令 /plugins# 转发时传"能力包"），由调用方的结构化路由决定，不参与任何判断。
     # 函数用途: 分派明确的管理或业务命令，不进入聊天；详情说明不启动插件，业务批准只恢复同一原调用。
     def command(self, text: str, *, revision: str, request_id: str,
@@ -245,12 +258,12 @@ class PluginManagement:
             return self._reply(self._query(values["request"]), values["request"])
         if parsed.action.name in _MANAGEMENT_TOOLS:
             tool_name = _MANAGEMENT_TOOLS[parsed.action.name]
-            if tool_name == PLUGIN_ENABLE_TOOL and values.get("authorization") and self.context.is_admin:
+            if tool_name == PLUGIN_ENABLE_TOOL and values.get("authorization") and _can_manage(self.context):
                 # 下一确认请求已在完整预览冻结，运输重送不改变已确认的激活代。
                 request_id = values["authorization"]
             return self._reply(self._submit(tool_name, dict(values), revision, request_id,
                                            request_permission, cancellation_token), request_id, subject)
-        entries = self.installations.snapshot()
+        entries = _visible_entries(self)
         catalog = self._catalog(entries)
         if not revision or revision != catalog.revision:
             return execute_plugin_command(catalog, text, revision=revision)
@@ -311,10 +324,10 @@ class PluginManagement:
         return execute_plugin_invocation(self.context, repo, request, select,
                                          request_permission=request_permission, cancellation_token=cancellation_token)
 
-    # LLM: 同一快照绑定安装、目录和公共参数；仅 kind=tool 可调用本包目标，kind=display 只由客户端本地切换面板、宿主明确拒绝；包自述不降低宿主权限。
+    # LLM: 同次可见快照绑定安装与参数；本人或public可用不授管理权，包自述不降低策略。
     # 函数用途: 在建立运行和连接前处理静态帮助、目录过期、停用、面板动作与策略拒绝，并取实际工具参数。
     def _business_selection(self, text: str, revision: str) -> PluginInvocation | dict:
-        entries = self.installations.snapshot()
+        entries = _visible_entries(self)
         catalog = self._catalog(entries)
         static = execute_plugin_command(catalog, text, revision=revision)
         if static.get("reason") != "not_implemented":
@@ -331,7 +344,7 @@ class PluginManagement:
         if parsed.action.kind != "tool" or not parsed.action.available:
             return static
         name = plugin_tool_name(parsed.plugin.plugin_id, parsed.action.target)
-        if not self.context.is_admin or not self.context.business_allowed or name in self.context.disabled_tools:
+        if not _can_manage(self.context) or not self.context.business_allowed or name in self.context.disabled_tools:
             return {"ok": False, "state": "rejected", "error_code": "TOOL_DISABLED"}
         entry = next(row for row in entries if row.manifest.plugin_id == parsed.plugin.plugin_id)
         problem = self._business_sandbox_problem(entry)
@@ -388,12 +401,15 @@ class PluginManagement:
         interpreter = PluginInterpreterPaths(manifest_entry.interpreter, Path(command), Path(command))
         return interpreter, ""
 
-    # LLM: 认证和开关先于新写入，旧请求先读账；交互和取消仅属于当前提交，不能把旧动作重放到新激活。
+    # LLM: 私有生命周期仅本人、公共管理仅main；拒绝先于会话/账本物化，旧请求仍按原身份查账。
     # 函数用途: 按已见目录版本提交管理请求，将当前连接取消信号传给原执行器。
     def _submit(self, tool_name: str, values: dict, revision: str, request_id: str,
                 request_permission: Callable | None, cancellation_token: CancellationToken | None) -> dict:
-        if not self.context.is_admin:
+        if not _can_manage(self.context):
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
+        denied = _private_management_denial(self, tool_name, values)
+        if denied is not None:
+            return denied
         try:
             _validate_request_id(request_id)
         except ValueError:
@@ -426,20 +442,20 @@ class PluginManagement:
         cleanup = consume_plugin_cleanup(self.context.owner, repo, request)
         return {**result, "cleanup_consumption": cleanup} if cleanup else result
 
-    # LLM: 查询绑定原操作者，管理结果另要求当前管理员；业务用户只能读取自己原身份的请求，不创建或补齐执行。
+    # LLM: 查询绑定原操作者和owner，普通私有管理可读本人原结果，不创建或补齐执行。
     # 函数用途: 按稳定请求编号读取本会话的插件管理或调用结果。
     def _query(self, request_id: str) -> dict:
         _validate_request_id(request_id)
         thread = self._thread(create=False)
         path = runtime_db_path(self.context.owner.home_dir)
         if thread is None or not path.is_file():
-            if not self.context.is_admin:
+            if not _can_manage(self.context):
                 return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
             return {"ok": False, "state": "not_found"}
         repo = RuntimeRepository(path, read_only=True)
         identity = self._identity(thread.thread_id, request_id)
         binding = repo.find_host_command(identity)
-        if not self.context.is_admin and (binding is None or binding.request.command_name in _MANAGEMENT_TOOLS.values()):
+        if not _can_manage(self.context) and (binding is None or binding.request.command_name in _MANAGEMENT_TOOLS.values()):
             return {"ok": False, "state": "rejected", "error_code": "PLUGIN_PERMISSION_DENIED"}
         return query_host_command(repo, identity)
 
@@ -487,7 +503,7 @@ class PluginManagement:
                                   command_name=tool_name,
                                   input_digest=tool_arguments_hash(arguments).removeprefix("sha256:"))
 
-    # LLM: 原目录/安装同读；启用实际消费新默认、四维参数和宿主保护根，构造不启动程序。
+    # LLM: 目标只取本人Store，可见目录同次合公共条目用于版本校验；公共安装不能经本人管理工具修改。
     # 函数用途: 将同源管理员入口接到统一权限上下文，不从正文取管理员或 owner 身份。
     def _management_tool(self, repo: RuntimeRepository, binding, arguments: dict):
         context = self.context
@@ -501,7 +517,7 @@ class PluginManagement:
             raise RuntimeConflictError("未知插件管理工具")
         entries = self.installations.snapshot()
         existing = next((row for row in entries if row.manifest.plugin_id == arguments["plugin"]), None)
-        catalog_revision = self._catalog(entries).revision
+        catalog_revision = self._catalog(_visible_entries(self, entries)).revision
         if tool_name == PLUGIN_CONFIGURE_TOOL:
             return PluginConfigureTool(self.installations, context.path_policy, context.workspace,
                                        binding.request.operation_id, existing, catalog_revision)
@@ -536,16 +552,17 @@ class PluginManagement:
             call_origin="host_command",
         )
 
-    # LLM: 装卸与启停权限各取宿主既有 owner 策略，不由动作可用性或包自述推断；未知内部工具关闭。
+    # LLM: 装卸启停遵本人策略和开关，普通用户不因此获得公共管理；未知内部工具关闭。
     # 函数用途: 让每种管理动作分别遵守当前禁用策略。
     def _allowed(self, tool_name: str) -> bool:
-        return {PLUGIN_INSTALL_TOOL: self.context.tool_allowed,
+        return bool(self.context.enabled and _can_manage(self.context) and tool_name not in self.context.disabled_tools and
+               {PLUGIN_INSTALL_TOOL: self.context.tool_allowed,
                 # 更新是"再装一个版本"，沿安装权限；不需要另立一个 owner 策略字段。
                 PLUGIN_UPDATE_TOOL: self.context.tool_allowed,
                 PLUGIN_CONFIGURE_TOOL: self.context.configure_allowed,
                 PLUGIN_DISABLE_TOOL: self.context.disable_allowed,
                 PLUGIN_ENABLE_TOOL: self.context.enable_allowed,
-                PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False)
+                PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False))
 
     # LLM: 原 UNKNOWN 不暴露未经确认工具结果；重新启用仅附同表原撤权的有限观察，仍 UNKNOWN；成功卡需原结果确认。
     # 函数用途: 分开原结果、已观察撤权和未验证清理，保留原查询编号与授权身份。
@@ -568,30 +585,83 @@ class PluginManagement:
             result["message"] += f"\n查询：/plugins status {request_id}"
         return result
 
-    # LLM: 目录与使用卡都从同一次安装快照投影；读取或渲染失败只标 catalog_error，不改变原结果与已生成的说明。
+    # LLM: 目录和使用卡使用同次可见快照；渲染失败不改结果，公共可见不泄漏私有配置。
     # 函数用途: 给回执附上当前目录，启用确实完成时在说明末尾追加该插件的使用卡。
     def _attach_catalog(self, result: dict, payload: dict) -> None:
-        try:
-            entries = self.installations.snapshot()
-            catalog = self._catalog(entries)
-            result["catalog"] = catalog.to_payload()
-            card = _enable_use_card(catalog, entries, payload)
-        except (OSError, ValueError):
-            result["catalog_error"] = True
-            return
-        if card:
-            result["message"] += "\n" + card
+        _attach_catalog_to_result(self, result, payload)
 
     # LLM: 第四段的两个查询都在这里：runtime.db 只读投影 + 事件中心计数快照；任一不可得都降级为“暂无记录”，
     #   不能让只读展示把 /plugins info 弄失败。owner 隔离：库按 owner home 打开、计数按 owner home 取分区键。
     # 函数用途: 组装某插件四段展示里的事件与账本事实（订阅、收紧、网络、决定、计数）。
     def _event_details(self, entry) -> PluginEventDetails:
-        manifest = entry.manifest
-        decisions, unavailable = _gate_ledger(runtime_db_path(self.context.owner.home_dir), manifest.plugin_id)
-        observed = _observed_counts(self.context.event_hub, self.context.owner, manifest.plugin_id)
-        return PluginEventDetails(manifest.events, manifest.tool_gates, manifest.permissions,
-                                  tuple(decisions), unavailable, observed,
-                                  events_disabled=not bool(self.context.plugin_events_enabled))
+        return _build_event_details(self.context, entry)
+
+
+# LLM: 目录和使用卡使用同次可见快照；渲染失败不改结果，公共可见不泄漏私有配置。
+# 函数用途: 给回执附上当前目录，启用确实完成时在说明末尾追加该插件的使用卡。
+def _attach_catalog_to_result(manager: PluginManagement, result: dict, payload: dict) -> None:
+    try:
+        entries = _visible_entries(manager)
+        catalog = manager._catalog(entries)
+        result["catalog"] = catalog.to_payload()
+        card = _enable_use_card(catalog, entries, payload)
+    except (OSError, ValueError):
+        result["catalog_error"] = True
+        return
+    if card:
+        result["message"] += "\n" + card
+
+
+# LLM: runtime.db 只读投影 + 事件中心计数快照；任一不可得都降级为“暂无记录”，owner 隔离按 home 打开。
+# 函数用途: 组装某插件四段展示里的事件与账本事实。
+def _build_event_details(context: PluginManagementContext, entry) -> PluginEventDetails:
+    manifest = entry.manifest
+    decisions, unavailable = _gate_ledger(runtime_db_path(context.owner.home_dir), manifest.plugin_id)
+    observed = _observed_counts(context.event_hub, context.owner, manifest.plugin_id)
+    return PluginEventDetails(manifest.events, manifest.tool_gates, manifest.permissions,
+                              tuple(decisions), unavailable, observed,
+                              events_disabled=not bool(context.plugin_events_enabled))
+
+
+# LLM: 管理员资格仅在完整main成立，普通user只管理本人私有；group不能借管理员标记开放管理。
+# 函数用途: 判断受信入口具备本owner插件管理资格，不代表公共安装可修改。
+def _can_manage(context) -> bool:
+    return ((context.is_admin and context.owner.identity == OwnerIdentity.local_main())
+            or context.owner.identity.owner_kind == "user")
+
+
+# LLM: 原Store仍为唯一事实源，只冷读main已公开条目；本人同名私有优先，不创建目录或读他人私有配置。
+# 函数用途: 给当前普通用户合并本人私有与可见公共目录。
+def _visible_entries(manager, private_entries=None):
+    own = manager.installations.snapshot() if private_entries is None else private_entries
+    if manager.context.owner.identity == OwnerIdentity.local_main() or manager.context.owner.identity.owner_kind != "user":
+        return own
+    private = tuple(row for row in own if row.installation_scope == "private")
+    admin = resolve_owner_home(manager.context.owner.root, OwnerIdentity.local_main())
+    if not admin.plugins_dir.is_dir():
+        return private
+    ids = {row.manifest.plugin_id for row in private}
+    public = tuple(row for row in PluginInstallStore(admin).snapshot()
+                   if row.installation_scope == "public" and row.manifest.plugin_id not in ids)
+    return (*private, *public)
+
+
+# LLM: 拒绝先于原thread/HostCommand写入；scope及目标安装都来自原解析值与原Store，不由包自报权限。
+# 函数用途: 限定普通用户只能装私有或修改本人私有，不泄漏其他用户安装存在性。
+def _private_management_denial(manager, tool_name, values):
+    if manager.context.is_admin and manager.context.owner.identity == OwnerIdentity.local_main():
+        return None
+    code = ""
+    if tool_name == PLUGIN_INSTALL_TOOL:
+        code = "COMMAND_ADMIN_REQUIRED" if values.get("scope", "private") != "private" else ""
+    elif tool_name in _MANAGEMENT_TOOLS.values():
+        own = next((row for row in manager.installations.snapshot() if row.manifest.plugin_id == values.get("plugin")), None)
+        if own is None:
+            public = any(row.manifest.plugin_id == values.get("plugin") for row in _visible_entries(manager))
+            code = "COMMAND_ADMIN_REQUIRED" if public else "RESOURCE_NOT_FOUND"
+        elif own.installation_scope != "private":
+            code = "COMMAND_ADMIN_REQUIRED"
+    return {"ok": False, "state": "rejected", "error_code": code} if code else None
 
 
 # 常量用途: 插件管理请求各结构化状态的默认中文说明；不在表里的状态用通用说明。
@@ -609,13 +679,13 @@ _PLUGIN_BUSINESS_REPLY_MESSAGES = {
 }
 
 
-# LLM: 只读与查询动作人人可见；管理动作要插件功能开着、管理员身份、且该工具没被 owner 策略禁用；learnpack 的 confirm/revert 要求
+# LLM: 只读和查询人人可见；管理要开关、本人资格和工具策略，公共管理另在提交口拒绝；confirm/revert要求
 #   install/update/enable/disable 四个管理工具都可用（与 management_ready 同一口径）。纯函数。
 # 函数用途: 判断一个 /plugins 管理动作在当前身份下是否可用。
 def _action_available(context, name: str, allowed: Callable) -> bool:
     if name in {"help", "list", "info", "status"}:
         return True
-    if not (context.enabled and context.is_admin):
+    if not (context.enabled and _can_manage(context)):
         return False
     if name in {"confirm", "revert"}:
         return all(allowed(tool) for tool in _LEARNPACK_TOOLS)

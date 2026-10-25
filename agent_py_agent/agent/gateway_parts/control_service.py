@@ -3,7 +3,7 @@
 # 整任务停止在任务锁内关闭主执行权和冻结资源；实际回收在锁外，不追随恢复轮。
 # 插话的宿主owner在原控制解析点冻结进guidance，恢复不依据新绑定或sender重新选择归属。
 # LLM: 正count普通input同key追加与原queue共持input T至末append；Count0/无ordinary ID不增加input读取，queued不能迟到active追加。
-# 模块用途: 将显式控制命令应用到当前会话，保持任务、历史、权限和中断边界。
+# 模块用途: 按认证身份分派会话及用户管理控制，保持任务、历史、权限和中断边界。
 from __future__ import annotations
 
 """Conversation task controls backed by request and durable task ledgers.
@@ -462,7 +462,7 @@ def reconcile_gateway_steer_delivery(
 # 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
 # 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
 # LLM: 监控及人工配置沿原认证面分派；Memory候选只传给活封印控制，模型/子代理不得制造批准。
-# 函数用途: 按准确身份和入口分派即时命令，群能力授予不进入普通模型任务，保持原控制/恢复/权限测试一致。
+# 函数用途: 按准确身份分派即时命令及用户管理，群控制和密码不进入普通任务。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -495,6 +495,9 @@ def execute_gateway_conversation_control(
         return ConversationControlResult(command.kind, False, "当前身份或入口不能使用此命令。输入 /help 查看可用命令。", error_code=error)
     if command.kind == "help":
         return ConversationControlResult("help", True, render_command_help(access, command.value))
+    if command.kind == "users":
+        from .users_control_service import execute_users_control
+        return execute_users_control(agent, paths, command, scope)
     if command.kind == "group":
         if resolve_gateway_scope_owner(agent, scope).owner_kind != 'group':
             return ConversationControlResult('group', False, '请在群里单独 @ 助手后使用 /group。', error_code='GROUP_AUTHORIZATION_INVALID')

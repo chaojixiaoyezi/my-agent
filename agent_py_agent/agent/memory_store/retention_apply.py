@@ -27,7 +27,12 @@ from ..common.request_execution_ports import (
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..conversation.models import ConversationThread
 from ..gateway_parts.io import locked_file_transition, update_json_file_atomic
-from .candidates import CandidateService
+from .candidate_models import MemoryCandidate
+from .candidates import (
+    RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
+    CandidateService,
+    _is_binding_tombstone,
+)
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -141,8 +146,8 @@ def record_retention_report(
     _append_retention_audit(home, report=report, now=now)
 
 
-# LLM: 候选在一个 ledger snapshot 上复核状态和时间后批量删除；正文绝不进入报告。
-# 函数用途: 应用所有 rejected/expired/superseded 候选清理动作。
+# LLM: 先复核 fingerprint、合法未晋升状态和 cutoff，再把完整快照交给原删除锁内 CAS；正文不入报告。
+# 函数用途: 清理过期未晋升候选，锁前变化单列 state_changed 而不虚报删除。
 def _apply_candidate_actions(
     candidates: CandidateService,
     actions: tuple[MemoryRetentionAction, ...],
@@ -173,6 +178,7 @@ def _apply_candidate_actions(
             ],
         )
     selected: list[str] = []
+    expected_snapshots: dict[str, MemoryCandidate] = {}
     results: list[MemoryRetentionAction] = []
     for action in actions:
         record = by_id.get(action.record_id)
@@ -181,7 +187,8 @@ def _apply_candidate_actions(
             continue
         updated = _timestamp(record.updated_at)
         eligible = bool(
-            record.status in {"rejected", "expired", "superseded"}
+            record.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
+            and not _is_binding_tombstone(record)
             and updated is not None
             and action.cutoff_timestamp is not None
             and updated < action.cutoff_timestamp
@@ -197,9 +204,16 @@ def _apply_candidate_actions(
             )
             continue
         selected.append(action.record_id)
+        expected_snapshots[action.record_id] = record
+    locked_changed: set[str] = set()
     if selected:
-        candidates.delete_terminal(selected)
-    selected_ids = set(selected)
+        candidates.delete_terminal(selected, expected_snapshots=expected_snapshots, skipped_state_changed=locked_changed)
+    for action in actions:
+        if action.record_id in locked_changed:
+            results.append(replace(action, status="state_changed"))
+            errors.append(MemoryRetentionError("MEMORY_RETENTION_STATE_CHANGED", str(candidates.path),
+                f"candidate {action.record_id} changed before locked deletion"))
+    selected_ids = set(selected) - locked_changed
     results.extend(
         replace(action, status="deleted")
         for action in actions

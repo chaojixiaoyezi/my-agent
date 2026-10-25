@@ -38,8 +38,8 @@ def thread_is_excluded(thread: object, excluded_conversation_ids: frozenset[str]
     )
 
 
-# LLM: 同步只做两件结构化事：把名单映射成被排除的 thread_id 集合，再给来源命中这些 thread 的
-#   pending/approved 候选写排除标记；候选状态、人工审核路径和名单外的会话都不受影响。
+# LLM: 同步只做两件结构化事：把名单映射成被排除的 thread_id 集合，再给来源命中这些 thread 且尚未打上同原因排除标记的
+#   pending/approved 候选写排除标记；已带相同标记的候选不重复进写锁，候选状态、人工审核路径和名单外的会话都不受影响。
 # 函数用途: 把学习排除名单同步成候选账本标记，返回标记与检查计数。
 def sync_learning_exclusion_marks(
     *,
@@ -53,7 +53,12 @@ def sync_learning_exclusion_marks(
     if not thread_ids:
         return {"marked": 0, "checked": 0}
     rows = candidate_service.list(statuses={"pending_review", "approved"}, limit=0)
-    targets = [row.candidate_id for row in rows if _row_excluded(row, thread_ids)]
+    targets = [
+        row.candidate_id
+        for row in rows
+        if _row_excluded(row, thread_ids)
+        and str(getattr(row, "promotion_exclusion", "") or "").strip() != LEARNING_SOURCE_EXCLUDED
+    ]
     marked = (
         candidate_service.mark_promotion_excluded(
             targets, reason=LEARNING_SOURCE_EXCLUDED
@@ -94,7 +99,19 @@ def _row_excluded(row: object, excluded_thread_ids: set[str]) -> bool:
     )
 
 
+# LLM: 仅当候选确实携带非空消息 thread_id 引用时才需要扫描会话存储；无消息引用的候选不可能命中会话排除。
+# 函数用途: 判断一条候选是否携带可参与会话排除匹配的 thread_id 引用。
+def _row_has_thread_ref(row: object) -> bool:
+    refs = getattr(row, "source_message_refs", ()) or ()
+    return any(
+        bool(str(ref.get("thread_id") or "").strip())
+        for ref in refs
+        if isinstance(ref, dict)
+    )
+
+
 # LLM: 定向判定用于补晋升路径：只对给定候选做结构化命中检查，不扫描全账本、不写标记；
+#   给定候选均无消息 thread_id 引用时直接返回空集，省去无意义的会话全表扫描；
 #   名单不可读的 fail-closed 由调用方处理（这里只处理非空名单的纯读判定）。
 # 函数用途: 返回给定候选中来源命中排除名单的候选 ID 集合。
 def excluded_candidate_ids(
@@ -105,12 +122,15 @@ def excluded_candidate_ids(
 ) -> set[str]:
     if not excluded_conversation_ids:
         return set()
+    candidate_rows = tuple(rows or ())
+    if not candidate_rows or not any(_row_has_thread_ref(row) for row in candidate_rows):
+        return set()
     thread_ids = excluded_thread_ids(conversation_store, excluded_conversation_ids)
     if not thread_ids:
         return set()
     return {
         str(getattr(row, "candidate_id", "") or "")
-        for row in rows
+        for row in candidate_rows
         if _row_excluded(row, thread_ids)
     }
 

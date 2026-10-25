@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from ..common.json_io import locked_json_path
@@ -17,11 +17,11 @@ from ..common.nofollow_fs import (
 )
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.owner_context import reject_constant, unique_object, validate_local_user_id
-from .owner_resolver import OwnerIdentity, _owner_home_result
+from .owner_resolver import OwnerIdentity, resolve_owner_home
 
 
-# LLM: 只保存公开账号字段；配额值仍以owner quota.json为准，运行状态未知不能伪造False。
-# 类用途: 提供不可变的普通账号状态投影。
+# LLM: 密码慢散列只进入私有序列化且不进入repr/public_view；配额仍以owner quota.json为准。
+# 类用途: 保存普通账号与可选密码凭据，显式区分磁盘记录和公开状态。
 @dataclass(frozen=True)
 class LocalUser:
     user_id: str
@@ -32,23 +32,39 @@ class LocalUser:
     updated_at: str
     quota_revision: int
     has_running_work: bool | None = None
+    password_hash: str | None = field(default=None, repr=False)
+    password_updated_at: str | None = None
 
     # LLM: 账号身份总是普通local/user，不接受插件提供provider或kind。
     # 函数用途: 构造与注册编号一一对应的宿主身份。
     @property
     def owner(self):
-        return OwnerIdentity("local", "user", self.user_id)
+        return OwnerIdentity.local_user(self.user_id)
 
-    # LLM: 不输出宿主根目录、操作来源或内部回执。
-    # 函数用途: 返回用户接口允许展示的状态字段。
+    # LLM: 包含密码散列，仅供0600私有存储；公开调用方必须使用public_view。
+    # 函数用途: 序列化账号的完整私有字段。
     def to_dict(self):
         result = asdict(self)
         result["owner"] = asdict(self.owner)
         return result
 
+    # LLM: 复用原严格账号解析，不接受未知状态或坏密码字段，不物化目录。
+    # 函数用途: 从私有JSON恢复完整普通账号。
+    @classmethod
+    def from_dict(cls, payload):
+        return parse_local_user(payload, validate_local_user_id(payload.get("user_id")))
 
-# LLM: 领域层只投影已核验JSON；禁止构造参数展开未知字段。
-# 函数用途: 严格解析账号状态，损坏时由调用方转成安全领域错误。
+    # LLM: 明确剔除散列并只给是否设密及更新时间，不输出秘密或宿主路径。
+    # 函数用途: 为插件和宿主命令提供安全账号投影。
+    def public_view(self):
+        result = self.to_dict()
+        result.pop("password_hash")
+        result["has_password"] = bool(self.password_hash)
+        return result
+
+
+# LLM: 严格解析原账号及可选密码/运行字段；旧无密码记录仍可读，非字符串凭据或非布尔运行状态视为损坏。
+# 函数用途: 完整恢复私有账号的已知字段，损坏时由存储层失败关闭。
 def parse_local_user(value, expected_user_id):
     required = {"user_id", "status", "revision", "display_name", "created_at", "updated_at", "quota_revision"}
     if type(value) is not dict or not required <= set(value):
@@ -63,8 +79,15 @@ def parse_local_user(value, expected_user_id):
     for field in ("display_name", "created_at", "updated_at"):
         if type(value[field]) is not str:
             raise ValueError("invalid account text")
+    for field in ("password_hash", "password_updated_at"):
+        if value.get(field) is not None and type(value[field]) is not str:
+            raise ValueError("invalid credential field")
+    if value.get("has_running_work") is not None and type(value["has_running_work"]) is not bool:
+        raise ValueError("invalid runtime status")
     return LocalUser(value["user_id"], value["status"], value["revision"], value["display_name"],
-                     value["created_at"], value["updated_at"], value["quota_revision"])
+                     value["created_at"], value["updated_at"], value["quota_revision"],
+                     has_running_work=value.get("has_running_work"),
+                     password_hash=value.get("password_hash"), password_updated_at=value.get("password_updated_at"))
 
 
 # LLM: 固定可信宿主根，账号写入由生命周期服务持短锁完成；只读不获取会创建文件的锁。
@@ -75,13 +98,47 @@ class LocalUserStore:
     def __init__(self, root):
         self.root = Path(root).resolve()
 
-    # LLM: 与任务约定布局一致，复用完整OwnerHomeResult字段工厂，不调用ensure_owner_home。
-    # 函数用途: 冷投影普通本地用户的独立目录。
+    # LLM: 复用统一resolver而非另造local路径；不调用ensure_owner_home或物化目录。
+    # 函数用途: 冷投影普通本地用户的唯一规范目录。
     def owner_home(self, user_id):
         uid = validate_local_user_id(user_id)
-        home = self.root / "owners" / "local" / uid
-        result = _owner_home_result(self.root, OwnerIdentity("local", "user", uid), home)
-        return replace(result, owner_id=f"local/{uid}")
+        return self.owner_home_for_identity(OwnerIdentity.local_user(uid))
+
+    # LLM: 仅解析可信身份，不能用路径结果代替账号状态或权限核验。
+    # 函数用途: 给双来源认证取得同一套规范owner路径。
+    def owner_home_for_identity(self, identity):
+        return resolve_owner_home(self.root, identity)
+
+    # LLM: 只枚举local_users直接普通JSON文件，no-follow打开父目录，不把链接或非法文件名当账号。
+    # 函数用途: 列出已登记的本地普通用户编号，不创建存储。
+    def list_user_ids(self):
+        try:
+            descriptor = open_directory_beneath(self.root, ("local_users",), require_dir_fd=True)
+        except FileNotFoundError:
+            return []
+        try:
+            result = []
+            with os.scandir(descriptor) as entries:
+                for entry in entries:
+                    if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+                        continue
+                    try:
+                        result.append(validate_local_user_id(entry.name[:-5]))
+                    except HostAPIError:
+                        continue
+            return sorted(result)
+        finally:
+            os.close(descriptor)
+
+    # LLM: 通过原严格读口复核每条账号；坏记录失败关闭，不能静默隐藏治理故障。
+    # 函数用途: 返回当前已登记本地账号的完整内部对象。
+    def list_users(self):
+        return [user for uid in self.list_user_ids() if (user := self.get(uid)) is not None]
+
+    # LLM: 与get共用唯一账号JSON及原no-follow校验，不创建第二套存储。
+    # 函数用途: 为统一认证读取指定本地账号。
+    def read_user(self, user_id):
+        return self.get(user_id)
 
     # LLM: 准确编号先校验；损坏、越界、硬链接均关闭而非视为缺失。
     # 函数用途: 读取当前账号公开状态。

@@ -16,6 +16,9 @@ from ..capability.agents_write_service import (
     parse_agents_value,
 )
 from ..conversation.control_commands import ConversationControlCommand, ConversationControlResult
+from ..plugin_host.errors import HostAPIError
+from ..plugin_host.owner_context import validate_local_user_id
+from ..user_space.local_user_store import LocalUserStore
 from ..user_space.owner_access import is_complete_local_admin_owner, resolve_owner_scope_and_access
 
 _INGRESS_SEAL = object()
@@ -58,12 +61,15 @@ def bind_agents_effect_scope(original, restored, command):
     evidence.used = True
     return replace(restored, agents_ingress=evidence)
 
-# LLM: 冷宿主只绑定原规范owner、当前配置和原会话库；不构造模型、读取生产凭据或创建第二状态源。
+# LLM: 冷宿主绑定规范owner，普通local用户沿已有LocalUserStore纯路径投影；不构造模型、创建账号或目录。
 # 函数用途: 为明确管理员目标提供现有owner的来源服务依赖。
 def cold_owner_host(base, identity):
     from ..user_space.owner_resolver import home_paths_with_owner, resolve_owner_home
     from .owner_conversation_store import owner_conversation_store
-    home = home_paths_with_owner(base.home_paths, resolve_owner_home(base.home_paths.root, identity))
+    owner = (LocalUserStore(base.home_paths.root).owner_home(identity.owner_id)
+             if identity.provider == 'local' and identity.owner_kind == 'user'
+             else resolve_owner_home(base.home_paths.root, identity))
+    home = home_paths_with_owner(base.home_paths, owner)
     if not home.owner_home_dir.is_dir():
         raise AgentsContractError('AGENTS_SOURCE_OWNER_UNAVAILABLE', 'owner')
     return SimpleNamespace(home_paths=home, config=base.config,
@@ -166,7 +172,7 @@ def _target_agent(base_agent, actor, target):
     return cold_owner_host(base_agent, identity) if identity is not None else actor
 
 
-# LLM: 旧Agent和冷C共用唯一纯target解析；权限/规范owner比较算法不变，不创建目录、Store或签权。
+# LLM: 旧Agent和冷C共用纯target解析；普通local用户必须经UID校验，权限门不变，不创建账号、目录或签权。
 # 函数用途: 在原操作者上下文检查显式管理员目标，返回规范身份供实际资源组合根使用。
 def _target_owner_identity(actor, target):
     from ..user_space.owner_resolver import OwnerIdentity
@@ -179,6 +185,12 @@ def _target_owner_identity(actor, target):
     parts = target.split('/')
     if parts == ['local', 'main']:
         identity = OwnerIdentity.local_main()
+    elif len(parts) == 2 and parts[0] == 'local' and parts[1] != 'main':
+        try:
+            uid = validate_local_user_id(parts[1])
+        except HostAPIError as error:
+            raise AgentsContractError('AGENTS_WRITE_ADMIN_TARGET_REQUIRED', 'owner') from error
+        identity = OwnerIdentity('local', 'user', uid)
     elif len(parts) == 4 and parts[0] == 'providers' and parts[2] in {'users', 'groups'}:
         constructor = OwnerIdentity.provider_user if parts[2] == 'users' else OwnerIdentity.provider_group
         identity = constructor(parts[1], parts[3])
@@ -186,7 +198,9 @@ def _target_owner_identity(actor, target):
         raise AgentsContractError('AGENTS_WRITE_ADMIN_TARGET_REQUIRED', 'owner')
     # 规范比较发生在构造/安全owner解析之后；目标字符串不能跳出owner命名空间。
     from ..user_space.owner_resolver import resolve_owner_home
-    resolved = resolve_owner_home(actor.home_paths.root, identity)
+    resolved = (LocalUserStore(actor.home_paths.root).owner_home(identity.owner_id)
+                if identity.provider == 'local' and identity.owner_kind == 'user'
+                else resolve_owner_home(actor.home_paths.root, identity))
     if resolved.owner_id != target:
         raise AgentsContractError('AGENTS_WRITE_BINDING_MISMATCH', 'owner')
     return identity

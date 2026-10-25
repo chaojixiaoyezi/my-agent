@@ -1,3 +1,7 @@
+## 2026-10-25 本地普通用户（`local/<user_id>`）子代理配额结构
+
+`subagents/services/base.py::_load_user_quota_dict` 在解析非管理员用户配额时，对 `owner.provider == "local"` 且 `owner.owner_kind == "user"` 分支调用 `LocalUserStore(root).get_quota(owner.user_id).to_dict()`，与外部 Provider 用户的 `OwnerQuotaStore` 返回结构对齐。
+
 ## 2026-10-22 子代理持久化 `_run_cache` 双重字节预算结构
 
 `subagents/services/persistence/service.py::SubAgentPersistenceService._load_from_locator` 在评估 `within_budget` 时同时检查 `locator`（`task_file`）和 `canonical_state.json`（位于 `task.agent_run_workspace_dir`）的物理文件尺寸是否小于等于 `_MAX_RUN_CACHE_ITEM_BYTES`（256 KiB），超限条目仅按单次解析返回而不缓存在 `_run_cache` 中。

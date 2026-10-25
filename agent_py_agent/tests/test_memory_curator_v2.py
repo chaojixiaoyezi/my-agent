@@ -1474,6 +1474,7 @@ def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
     tmp_path: Path,
 ) -> None:
     """兜底选择正式用户事实与 lesson，自始至终排除无事实权威的模型猜测。"""
+    from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
     from agent_py_agent.agent.memory_store.candidate_models import (
         CandidateObservation,
         MemoryScope,
@@ -1491,7 +1492,7 @@ def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
             origin="user_explicit",
             promotion_target="long_term",
             promotion_mode="auto_eligible",
-            source_message_refs=({"message_id": "msg-1"},),
+            source_message_refs=({"message_id": "msg-1", "thread_id": "legacy-thread-1"},),
         )
     )
     user_legacy_manual = candidates.observe(
@@ -1502,7 +1503,7 @@ def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
             scope=MemoryScope("personal", "personal"),
             origin="user_explicit",
             promotion_target="long_term",
-            source_message_refs=({"message_id": "msg-2"},),
+            source_message_refs=({"message_id": "msg-2", "thread_id": "legacy-thread-2"},),
         )
     )
     lesson = candidates.observe(
@@ -1513,6 +1514,7 @@ def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
             scope=MemoryScope("personal", "personal"),
             origin="model_inferred",
             promotion_target="lesson",
+            learning_source=user_dialogue_projection(),
             source_run_ids=("run-1",),
         )
     )
@@ -1533,6 +1535,276 @@ def test_pending_promotable_candidate_ids_only_picks_host_authorized_auto(
     assert user_legacy_manual.candidate_id in ids
     assert lesson.candidate_id in ids
     assert inferred_fact.candidate_id not in ids  # model_inferred 事实:不捞
+
+
+# LLM: 只写临时真实账本；明确创建时间覆盖 list 的正序/末尾限额，不把队列次序隐藏在 mock 中。
+# 函数用途: 构造四十条前置记录与一条达标可学候选。
+def _promotion_queue(tmp_path, changes, *, qualified_first=False):
+    from agent_py_agent.agent.conversation.learning_source import (
+        merge_source_projections,
+        user_dialogue_projection,
+    )
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.memory_store.candidate_source_coverage import initial_source_coverage
+
+    service = _service(tmp_path, _StaticStructuredBackend({}), ConversationStore(tmp_path / "c"))
+    rows = service.candidate_service.observe_many([
+        CandidateObservation(candidate_type="lesson", content=f"队列经验 {index}", subject_key=f"queue.{index}",
+            scope=MemoryScope("personal", "personal"), origin="model_inferred", promotion_target="lesson",
+            source_run_ids=(f"run-{index}", f"independent-run-{index}"),
+            source_message_refs=({"thread_id": "legacy-thread", "message_id": f"legacy-{index}"},)) for index in range(41)
+    ])
+    qualified_index = 0 if qualified_first else 40
+    records = []
+    for index, row in enumerate(rows):
+        created = (datetime(2026, 8, 1, tzinfo=timezone.utc) + timedelta(seconds=index)).isoformat()
+        row = replace(row, status="approved", occurrence_count=2, created_at=created,
+                      learning_source=user_dialogue_projection())
+        row = row if index == qualified_index else replace(row, **changes)
+        row = replace(row, observation_keys=[f"queue-{index}-{number}" for number in range(row.occurrence_count)],
+                      learning_source=merge_source_projections((row.learning_source,)),
+                      status_history=[{**row.status_history[-1], "status": row.status}])
+        row = replace(row, learning_source_coverage=initial_source_coverage(row))
+        records.append(row)
+    service.candidate_service.path.write_text(
+        "".join(json.dumps(row.to_record(), ensure_ascii=False) + "\n" for row in records), encoding="utf-8")
+    assert len(service.candidate_service.list()) == 41
+    return service, records[qualified_index].candidate_id
+
+
+# LLM: 真实 list 当前取末尾 N 条，所以同时覆盖合格条目在最前和最后，不依赖任务描述的旧次序假设。
+# 函数用途: 证明四十条未达标、已排除或不可学记录不能挡住合格候选。
+@pytest.mark.parametrize("qualified_first", [False, True])
+@pytest.mark.parametrize("changes", [
+    {"occurrence_count": 1}, {"promotion_target": "hot", "occurrence_count": 2},
+    {"promotion_exclusion": "LEARNING_SOURCE_EXCLUDED"}, {"learning_source": {"can_learn": False}},
+])
+def test_pending_queue_filters_before_limit(tmp_path, changes, qualified_first):
+    service, qualified = _promotion_queue(tmp_path, changes, qualified_first=qualified_first)
+    assert service._pending_promotable_candidate_ids(limit=32) == [qualified]
+
+
+# LLM: 空来源旧行和待首次审核记录可保留，但不能挤掉来源合法且达重复门槛的候选；非正限额仍表示不限。
+# 函数用途: 验证达标可学候选优先且旧夹具仍可进入队列。
+@pytest.mark.parametrize("limit", [1, 32, 0, -1])
+@pytest.mark.parametrize("changes", [{"learning_source": {}}, {"status": "pending_review", "occurrence_count": 1}])
+def test_pending_queue_prioritizes_learnable_ready_rows(tmp_path, limit, changes):
+    service, qualified = _promotion_queue(tmp_path, changes, qualified_first=True)
+    ids = service._pending_promotable_candidate_ids(limit=limit)
+    assert ids[0] == qualified
+    assert len(ids) == (41 if limit <= 0 else limit)
+
+
+# LLM: 仅重建隔离样本的结构化当前态；复用正式序列化、来源覆盖和真实list校验，不替换晋升/证据门。
+# 函数用途: 保存重复次数和审核状态可控的队列测试记录。
+def _persist_promotion_queue(service, rows):
+    from agent_py_agent.agent.conversation.learning_source import merge_source_projections
+    from agent_py_agent.agent.memory_store.candidate_source_coverage import initial_source_coverage
+
+    records = []
+    for row in rows:
+        row = replace(row, observation_keys=[f"{row.candidate_id}-{i}" for i in range(row.occurrence_count)],
+            learning_source=merge_source_projections((row.learning_source,)),
+            status_history=[{**row.status_history[-1], "status": row.status}])
+        records.append(replace(row, learning_source_coverage=initial_source_coverage(row)))
+    service.candidate_service.path.write_text(
+        "".join(json.dumps(row.to_record(), ensure_ascii=False) + "\n" for row in records), encoding="utf-8")
+    assert len(service.candidate_service.list()) == len(records)
+
+
+# LLM: 复用真实Promotion及其候选库；模型仅返回合法空提炼，不伪造提交回执或工具成功。
+# 函数用途: 把Curator队列选择接到实际正式记忆仓库，验证饥饿修复而非只检查排序。
+def _real_promotion_curator(tmp_path):
+    from agent_py_agent.tests.test_memory_promotion_v2 import _runtime
+
+    promotion, store, thread = _runtime(tmp_path)
+    backend = _StaticStructuredBackend({})
+    base = _service(tmp_path / "owner", backend, store)
+    service = MemoryCuratorService(config=base.config, dependencies=replace(base.dependencies,
+        candidate_service=promotion.candidates,
+        promotion_callback=lambda cid: promotion.promote(cid, automatic=True)))
+    return service, promotion, store, thread, backend
+
+
+def test_curator_single_group_lessons_and_conflicts_cannot_starve_formal_fact(tmp_path):
+    from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.tests.test_memory_promotion_v2 import _explicit
+
+    service, promotion, store, thread, backend = _real_promotion_curator(tmp_path)
+    rows = service.candidate_service.observe_many([
+        CandidateObservation(candidate_type="lesson", content=f"独立队列经验 {i}", subject_key=f"starvation.{i}",
+            scope=MemoryScope("personal", "personal"), origin="model_inferred", promotion_target="lesson",
+            learning_source=user_dialogue_projection(), source_run_ids=("run-only-1",)) for i in range(70)
+    ])
+    rows = [replace(row, status="approved", occurrence_count=2) if i < 35 else
+            replace(row, conflicts_with=["other"]) for i, row in enumerate(rows)]
+    fact = _explicit(promotion, store, thread, content="正式项目使用 UTC 保存时间。", subject_key="starvation.valid")
+    _persist_promotion_queue(service, [*rows, fact])
+    payload = _valid_output(thread.thread_id, fact.source_message_refs[0]["message_id"], fact.content)
+    payload.update(candidates=[], daily_events=[])
+    backend.payload = payload
+    result = service.run(reason="admin")
+    assert result.status == "succeeded", result
+    assert [row.content for row in promotion.long_term.all()] == [fact.content]
+    assert service.candidate_service.get(fact.candidate_id).status == "promoted"
+    assert [service.candidate_service.get(row.candidate_id).status for row in rows] == [
+        *("approved" for _ in range(35)), *("pending_review" for _ in range(35))]
+
+
+# LLM: 结构性筛选只能读取正式候选字段，不能依赖夹具动态塞入而生产对象不存在的属性。
+# 函数用途: 守住 Curator 结构筛选与 MemoryCandidate 字段合同的一致性。
+def test_curator_structural_gate_reads_only_memory_candidate_fields():
+    import ast
+    import inspect
+    from dataclasses import fields
+
+    from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
+    from agent_py_agent.agent.memory_store.curator import _candidate_structurally_promotable
+
+    tree = ast.parse(inspect.getsource(_candidate_structurally_promotable))
+    accessed = {
+        node.args[1].value for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+        and len(node.args) >= 2 and isinstance(node.args[0], ast.Name) and node.args[0].id == "row"
+        and isinstance(node.args[1], ast.Constant)
+    }
+    assert accessed <= {field.name for field in fields(MemoryCandidate)}
+
+
+# LLM: 夹具只运输 confirmed 参数并透传原晋升对象，不补审核、不推导新权限。
+# 函数用途: 验证确认辅助入口完整转发调用且不加工失败回执。
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_memory_confirmation_fixture_forwards_confirmed_unchanged(confirmed):
+    from agent_py_agent.tests.memory_confirmation_fixtures import confirm_candidate
+
+    calls = []
+    expected = SimpleNamespace(reason_code="TOOL_EVIDENCE_MISSING")
+    service = SimpleNamespace(promote=lambda cid, **kwargs: calls.append((cid, kwargs)) or expected)
+    assert confirm_candidate(service, "candidate-one", confirmed=confirmed) is expected
+    assert calls == [("candidate-one", {"automatic": True, "confirmed": confirmed})]
+
+
+# LLM: Remember 夹具必须原样返回单次工具回执；测试不改生产验证器，只隔离工具边界检查是否二次加工。
+# 函数用途: 验证工作流辅助入口不重建已有工具结果。
+def test_memory_confirmation_workflow_returns_original_tool_result(monkeypatch):
+    from agent_py_agent.tests import memory_confirmation_fixtures as fixtures
+
+    expected = SimpleNamespace(ok=True, output=json.dumps({
+        "action": "add", "results": [{"reason_code": "TOOL_EVIDENCE_MISSING"}], "receipt": "preserve-original"}))
+    calls = []
+    tool = SimpleNamespace(execute=lambda params: calls.append(params) or expected)
+    monkeypatch.setattr(fixtures, "RememberTool", lambda agent: tool)
+    params = {"action": "add", "content": "来源尚待补齐的原始请求"}
+    assert fixtures.ConfirmedRememberWorkflow(SimpleNamespace()).execute(params) is expected
+    assert calls == [params]
+
+
+@pytest.mark.parametrize("fields,expected", [
+    ({"source_run_ids": ["one"], "source_message_refs": []}, False),
+    ({"origin": "user_explicit", "occurrence_count": 1}, True),
+    ({"conflicts_with": ["other"]}, False),
+    ({"source_run_ids": [], "source_message_refs": []}, False),
+    ({"promotion_mode": "manual_required"}, False),
+    ({"promotion_target": "agents"}, False),
+    ({"promotion_target": "soul"}, False),
+    ({"promotion_exclusion": "LEARNING_SOURCE_EXCLUDED"}, False),
+    ({"scope": {"scope_type": "temporary", "scope_key": "temporary:one"}, "valid_until": ""}, False),
+    ({"promotion_target": "user", "scope": {"scope_type": "temporary", "scope_key": "temporary:one"},
+      "valid_until": "2099-01-01T00:00:00+00:00"}, False),
+    ({"promotion_target": "user", "scope": {"scope_type": "session", "scope_key": "session:one"}}, False),
+    ({"proposed_action": "replace", "target_entry_id": ""}, False),
+    ({"proposed_action": "remove", "target_entry_id": ""}, False),
+    ({"proposed_action": "merge", "target_entry_id": ""}, False),
+    ({"promotion_target": "hot", "occurrence_count": 3, "target_entry_id": ""}, False),
+    ({"promotion_target": "hot", "occurrence_count": 3, "target_entry_id": "lesson-id", "content": "长" * 301}, False),
+    ({"promotion_target": "hot", "occurrence_count": 3, "target_entry_id": "lesson-id", "content": "短" * 300}, True),
+    ({"promotion_target": "hot", "occurrence_count": 3, "target_entry_id": "lesson-id", "source_run_ids": []}, False),
+])
+def test_curator_readiness_matches_structural_and_independent_evidence_gates(tmp_path, fields, expected):
+    from agent_py_agent.agent.memory_store.curator import _candidate_repetition_ready
+
+    service, qualified = _promotion_queue(tmp_path, {})
+    candidate = service.candidate_service.get(qualified)
+    row = SimpleNamespace(**{**candidate.__dict__, **fields})
+    assert _candidate_repetition_ready(row) is expected
+
+
+def test_curator_approved_explicit_lesson_is_ready_on_first_observation(tmp_path):
+    from agent_py_agent.tests.test_memory_promotion_v2 import _explicit
+
+    service, promotion, store, thread, backend = _real_promotion_curator(tmp_path)
+    lesson = _explicit(promotion, store, thread, content="提交前必须先核对版本。",
+        promotion_target="lesson", candidate_type="lesson")
+    promotion.review(lesson, approved=True, reviewer="explicit-user")
+    payload = _valid_output(thread.thread_id, lesson.source_message_refs[0]["message_id"], lesson.content)
+    payload.update(candidates=[], daily_events=[])
+    backend.payload = payload
+    assert service.run(reason="admin").status == "succeeded"
+    assert service.candidate_service.get(lesson.candidate_id).status == "promoted"
+    assert len(promotion.lessons.list()) == 1
+
+
+@pytest.mark.parametrize("target,threshold", [("lesson", 4), ("hot", 5)])
+def test_curator_queue_uses_injected_promotion_thresholds(tmp_path, target, threshold):
+    service, qualified = _promotion_queue(tmp_path, {})
+    service = MemoryCuratorService(
+        config=MemoryCuratorConfig.from_agent_config(
+            SimpleNamespace(memory_lesson_min_occurrences=4, memory_hot_min_occurrences=5)
+        ),
+        dependencies=service.dependencies,
+    )
+    row = service.candidate_service.get(qualified)
+    row = replace(row, candidate_type="lesson" if target == "lesson" else "hot_rule",
+        promotion_target=target, target_entry_id="lesson-id", occurrence_count=threshold - 1)
+    _persist_promotion_queue(service, [row])
+    assert service._pending_promotable_candidate_ids() == []
+    _persist_promotion_queue(service, [replace(row, occurrence_count=threshold)])
+    assert service._pending_promotable_candidate_ids() == [qualified]
+
+
+@pytest.mark.parametrize("target", ["lesson", "hot"])
+@pytest.mark.parametrize("include_ready", [False, True])
+@pytest.mark.parametrize("limit", [1, 32, 0, -1])
+def test_curator_three_tiers_put_initial_learnable_review_before_legacy(tmp_path, target, include_ready, limit):
+    from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    service = _service(tmp_path, _StaticStructuredBackend({}), ConversationStore(tmp_path / "c"))
+    legacy = service.candidate_service.observe_many([
+        CandidateObservation(candidate_type="lesson", content=f"旧来源经验 {i}", subject_key=f"legacy.{i}",
+            scope=MemoryScope("personal", "personal"), origin="model_inferred", promotion_target="lesson",
+            source_message_refs=({"thread_id": "t-missing", "message_id": "m1"},)) for i in range(35)
+    ])
+    first = service.candidate_service.observe(CandidateObservation(candidate_type="lesson" if target == "lesson" else "hot_rule",
+        content="可学来源的首次经验。", subject_key="learnable.first", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target=target, target_entry_id="lesson-id" if target == "hot" else "",
+        source_run_ids=("first-run",), learning_source=user_dialogue_projection()))
+    ready = []
+    if include_ready:
+        ready = [service.candidate_service.observe(CandidateObservation(candidate_type="long_term_fact",
+            content="项目保存时间使用UTC。", subject_key="learnable.ready", scope=MemoryScope("personal", "personal"),
+            origin="user_explicit", promotion_target="long_term", learning_source=user_dialogue_projection(),
+            source_message_refs=({"thread_id": "ready-thread", "message_id": "ready-message"},)))]
+    _persist_promotion_queue(service, [*legacy, first, *ready])
+    rows_before = service.candidate_service.list()
+    expected = [*(row.candidate_id for row in ready), first.candidate_id,
+        *(row.candidate_id for row in rows_before if not row.learning_source)]
+    assert service._pending_promotable_candidate_ids(limit=limit) == (expected[:limit] if limit > 0 else expected)
+    assert service.candidate_service.list() == rows_before, "选择队列不应审核、回填或改写候选"
+
+
+@pytest.mark.parametrize("missing", ["store", "thread", "blank-thread"])
+def test_curator_unbackfillable_empty_source_never_consumes_queue_slots(tmp_path, missing):
+    service, qualified = _promotion_queue(tmp_path, {"learning_source": {}}, qualified_first=True)
+    rows = service.candidate_service.list()
+    if missing == "store":
+        service.conversation_store = None
+    else:
+        refs = [{"message_id": "old-message", **({"thread_id": "  "} if missing == "blank-thread" else {})}]
+        rows = [row if row.candidate_id == qualified else replace(row, source_message_refs=refs) for row in rows]
+        _persist_promotion_queue(service, rows)
+    assert service._pending_promotable_candidate_ids() == [qualified]
 
 
 class _RecordingPromotion:

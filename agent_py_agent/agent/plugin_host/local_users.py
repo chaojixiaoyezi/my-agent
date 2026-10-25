@@ -1,5 +1,5 @@
 # LLM: users.local域只接受宿主核验调用，账号与quota各保留唯一权威，运行用量必须来自宿主观察口。
-# 模块用途: 将六个普通用户管理动作接到生命周期、限域分页和配额读取。
+# 模块用途: 将普通用户管理及认证动作接到原生命周期、限域分页和统一认证服务。
 from __future__ import annotations
 
 import secrets
@@ -17,6 +17,7 @@ from ..user_space.owner_quota import (
     read_local_user_quota,
 )
 from ..user_space.owner_resolver import OwnerIdentity
+from ..user_space.user_auth import authenticate_user, verify_user_session
 from .errors import HostAPIError
 from .owner_context import call_payload, validate_local_user_id
 
@@ -67,8 +68,8 @@ class LocalUsersDomain:
         self.stop_resources = stop_resources
         self._cursors = OrderedDict()
 
-    # LLM: 完整验证在首次写之前，所有管理动作都必须由获批local/main安装发起。
-    # 函数用途: 分派六个users.local动作并返回安全结果。
+    # LLM: 所有管理/认证动作先核原活来源和local/main批准安装；会话认证不授执行或代用户许可。
+    # 函数用途: 分派本地用户管理与认证动作，所有参数先验证再执行。
     def call(self, authorized):
         call = self.factory.verify(authorized)
         if "users.manage" not in call.grant.capabilities or call.grant.source_binding.owner != OwnerIdentity.local_main():
@@ -82,6 +83,10 @@ class LocalUsersDomain:
             payload["quota"] = {key: min(value, ceiling[key])
                                 for key, value in LocalUserQuotaLimits().to_dict().items()}
         self.validate(call, payload)
+        if call.action == "users.auth.login":
+            return self.auth_login(call, payload)
+        if call.action == "users.auth.verify":
+            return self.auth_verify(call, payload)
         if self.usage_reader is None:
             raise HostAPIError("HOST_NOT_READY", 503)
         if call.action == "users.local.list":
@@ -91,26 +96,29 @@ class LocalUsersDomain:
             return self.read_user(call.action, uid)
         return self.mutate(authorized, call, payload)
 
-    # LLM: 所有schema闭合；create同时要求管理和创建范围，三组许可不能互相补齐。
-    # 函数用途: 校验动作、参数、幂等键和配额上限。
+    # LLM: schema闭合；认证选择器不是管理或执行目标，密码重置仍强制原管理范围、CAS和幂等来源。
+    # 函数用途: 校验本域动作与参数，拒绝额外身份字段或管理越权。
     def validate(self, call, payload):
         schemas = {
             "users.local.list": (set(), {"status", "limit", "cursor"}),
             "users.local.get": ({"user_id"}, set()), "users.local.quota.get": ({"user_id"}, set()),
-            "users.local.create": ({"user_id"}, {"display_name", "quota"}),
+            "users.local.create": ({"user_id"}, {"display_name", "quota", "password"}),
             "users.local.disable": ({"user_id", "expected_revision"}, {"reason"}),
             "users.local.enable": ({"user_id", "expected_revision"}, set()),
+            "users.local.password.set": ({"user_id", "password", "expected_revision"}, set()),
+            "users.auth.login": ({"user_id", "password"}, {"account_source", "tenant_or_app_key", "ttl_seconds"}),
+            "users.auth.verify": ({"session_token"}, set()),
         }
         if call.action not in schemas:
             raise HostAPIError("ACTION_UNSUPPORTED", 400)
         required, optional = schemas[call.action]
         if not required <= set(payload) or set(payload) - required - optional:
             raise HostAPIError("INVALID_SCHEMA")
-        if "user_id" in payload:
+        if "user_id" in payload and not call.action.startswith("users.auth."):
             uid = validate_local_user_id(payload["user_id"])
-            if uid not in call.grant.manageable_user_ids:
+            if uid not in call.grant.manageable_user_ids and "*" not in call.grant.manageable_user_ids:
                 raise HostAPIError("TARGET_DENIED", 403)
-        writing = call.action in {"users.local.create", "users.local.disable", "users.local.enable"}
+        writing = call.action in {"users.local.create", "users.local.disable", "users.local.enable", "users.local.password.set"}
         if writing:
             source = call.grant.source_binding
             LocalUserOperation(source.installation_ref, source.activation_id, call.idempotency_key).validate()
@@ -128,7 +136,7 @@ class LocalUsersDomain:
     # LLM: 默认安全种子也受grant上限约束；超界拒绝，不悄悄缩小显式请求。
     # 函数用途: 检查创建目标和全部配额字段。
     def validate_creation(self, call, payload):
-        if payload["user_id"] not in call.grant.creatable_user_ids:
+        if payload["user_id"] not in call.grant.creatable_user_ids and "*" not in call.grant.creatable_user_ids:
             raise HostAPIError("TARGET_DENIED", 403)
         try:
             limits = LocalUserQuotaLimits.parse(payload.get("quota"))
@@ -149,7 +157,7 @@ class LocalUsersDomain:
     # LLM: 公开字段来源于原账号，运行状态来自本次观察；不向调用方暴露home路径。
     # 函数用途: 形成User响应。
     def user_data(self, user):
-        data = user.to_dict()
+        data = user.public_view()
         data["has_running_work"] = self.usage(user.user_id).has_running_work
         return data
 
@@ -172,8 +180,8 @@ class LocalUsersDomain:
                                                 "disk_bytes": usage.disk_bytes},
                                       "observed_at": now_utc(), "complete": usage.complete})
 
-    # LLM: lifecycle门由A提供，域内再取操作/用户/quota短锁；取消必须在所有锁外执行。
-    # 函数用途: 提交一次管理写操作并按实际观察返回取消状态。
+    # LLM: lifecycle门由A提供，密码重置也沿原操作/用户锁及末次授权检查；公开响应不含散列，取消在锁外。
+    # 函数用途: 提交一次管理写操作，密码与启停共用原事务而不增加旁路。
     def mutate(self, source, call, payload):
         binding = call.grant.source_binding
         operation = LocalUserOperation(binding.installation_ref, binding.activation_id, call.idempotency_key)
@@ -181,12 +189,19 @@ class LocalUsersDomain:
         usage = self.usage(payload["user_id"])
         with self.factory.commit_call(source, call):
             if call.action == "users.local.create":
-                result = service.create(payload["user_id"], operation, display_name=payload.get("display_name", ""), quota=payload.get("quota"))
+                result = service.create(payload["user_id"], operation, display_name=payload.get("display_name", ""),
+                                        quota=payload.get("quota"), password=payload.get("password"))
+            elif call.action == "users.local.password.set":
+                data, replayed = service.set_password(payload["user_id"], password=payload["password"],
+                    expected_revision=payload["expected_revision"], idempotency_key=call.idempotency_key,
+                    actor_owner=binding.owner, operation=operation)
+                data["has_running_work"] = usage.has_running_work
+                return LocalUserDomainResult(data, operation_id=operation.identifier(call.action), replayed=replayed)
             elif call.action == "users.local.disable":
                 result = service.disable(payload["user_id"], payload["expected_revision"], operation, payload.get("reason", ""))
             else:
                 result = service.enable(payload["user_id"], payload["expected_revision"], operation)
-        data = result.user.to_dict()
+        data = result.user.public_view()
         data["has_running_work"] = usage.has_running_work
         warnings = ()
         if call.action == "users.local.disable":
@@ -200,8 +215,8 @@ class LocalUsersDomain:
         status = 201 if call.action == "users.local.create" else 200
         return LocalUserDomainResult(data, status, operation_id=result.operation_id, replayed=result.replayed, warnings=warnings)
 
-    # LLM: 游标是当前实例随机句柄，绑定原安装/激活/范围/筛选；不解析客户端自报偏移或owner。
-    # 函数用途: 对固定管理集合做有界分页，all保留物化失败和未完成账号。
+    # LLM: 游标绑定原安装/激活/范围/筛选；显式通配管理集合先展开真实登记编号，不把星号传给存储。
+    # 函数用途: 对管理范围分页，保留未完成账号且支持宿主明确提供的通配范围。
     def list_users(self, call, payload):
         status, limit = payload.get("status", "all"), payload.get("limit", 50)
         if (type(status) is not str or status not in {"all", "enabled", "disabled"}
@@ -215,7 +230,8 @@ class LocalUsersDomain:
             if type(cursor) is not str or cursor not in self._cursors or self._cursors[cursor][0] != scope:
                 raise HostAPIError("CURSOR_INVALID", 400)
             last = self._cursors[cursor][1]
-        users = self.factory.store.list_registered(allowed)
+        candidate_ids = sorted((set(self.factory.store.list_user_ids()) | set(allowed)) - {"*"}) if "*" in call.grant.manageable_user_ids else sorted(allowed - {"*"})
+        users = [user for uid in candidate_ids if (user := self.factory.store.get(uid)) is not None]
         users = [user for user in users if user.user_id > last and (status == "all" or user.status == status)]
         page, next_cursor = users[:limit], None
         if len(users) > limit:
@@ -224,3 +240,16 @@ class LocalUsersDomain:
             if len(self._cursors) > 256:
                 self._cursors.popitem(last=False)
         return LocalUserDomainResult({"items": [self.user_data(user) for user in page], "next_cursor": next_cursor})
+
+    # LLM: 只能在call已经核原安装和管理能力后调用；密码交原统一服务，不进入审计正文或账号公开投影。
+    # 函数用途: 为插件用户域执行登录并返回有限期限普通用户会话。
+    def auth_login(self, call, payload):
+        session = authenticate_user(self.factory.store.root, account_source=payload.get("account_source", "local"),
+            user_id=payload["user_id"], password=payload["password"], tenant_or_app_key=payload.get("tenant_or_app_key", ""),
+            ttl_seconds=payload.get("ttl_seconds", 86400))
+        return LocalUserDomainResult(session.public_view())
+
+    # LLM: token只读验证当前账号与凭据，不绑定as_user、不初始化执行器或继承安装者权限。
+    # 函数用途: 返回仍有效的用户会话，当前禁用或改密时明确拒绝。
+    def auth_verify(self, call, payload):
+        return LocalUserDomainResult(verify_user_session(self.factory.store.root, payload["session_token"]).public_view())

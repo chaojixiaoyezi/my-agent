@@ -1,11 +1,11 @@
-# LLM: C仅添加原scope的policy锁出生与真实native透传，原quota→policy→candidate→formal/index/mark及condense不拆。
-# 模块用途: 保唯一晋升算法，C不缓存source、不将长业务或费用搬进Root。
+# LLM: 自动晋升须先核来源、权威、证据并完整快照CAS审核；原quota→policy→candidate→formal/index/mark及condense不拆。
+# 模块用途: 唯一候选晋升算法，合格候选自动归档；C不缓存source、不将长业务或费用搬进Root。
 from __future__ import annotations
 
 """统一候选证据审核、冲突裁决和正式晋升服务。"""
 
-# LLM: 正式晋升仅经本服务；自动学习只候选，人工审核提交守原quota/policy/candidate锁和证据CAS。
-# 模块用途: 核验候选证据与用户审核，正式落点成功后标promoted，并恢复已提交删除的清理。
+# LLM: 正式晋升仅经本服务；自动审核与人工审核共守原quota/policy/candidate锁、证据及精确目标CAS，AGENTS禁写。
+# 模块用途: 核验候选后沿原正式仓库归档并标promoted，保留人工审核与已提交删除恢复。
 
 import hashlib
 import json
@@ -817,8 +817,8 @@ def _promotion_precheck_code(candidate: MemoryCandidate, automatic: bool) -> str
     return str(candidate.promotion_exclusion or "").strip() if automatic else ""
 
 
-# LLM: PromotionService 不解析聊天意图；只消费已审核 Candidate 和两个 typed verifier。
-# 类用途: 唯一执行 long_term、Persona、lesson 与 HOT 正式晋升。
+# LLM: 不解析聊天意图；消费宿主来源及typed verifier，自动仅审核结构化合格快照，人工仍走原精确审核。
+# 类用途: 唯一执行候选审核及long_term、Persona、lesson与HOT归档，保原安全门和仓库。
 class MemoryPromotionService(_PromotionCommitMixin):
     # LLM: Construction accepts one authority bundle and one policy object, preventing partial
     # alternative wiring while preserving rejecting verifier defaults.
@@ -874,7 +874,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
     # 自动、积压重试、人工晋升与审核后提交都算；候选保持原状态并带结构化原因码，不丢弃、
     # 不标失败。用户直接要求写 AGENTS 走 /agents 预览确认，不经本服务。证据、精确 mutation id、
     # 冲突、门槛、临时过期与目标仓库仍照常 fail-closed。
-    #   正式提交沿原quota/policy/candidate锁序，自动学习不创建批准，删除恢复只清既有墓碑。
+    #   正式提交沿原quota/policy/candidate锁序，自动审核仅批准通过全部门的精确快照，删除恢复只清既有墓碑。
     # 函数用途: 核验证据并提交正式落点；人工预览可绑定准确审核后快照，迟到候选不得借旧批准提交。
     def promote(
         self,
@@ -891,8 +891,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
         except CandidateStateChangedError as exc:
             return MemoryPromotionResult(candidate_id, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
 
-    # LLM: 每步沿用核对快照；人工预览后的完整预期先于证据读取核验，最终提交持原候选锁；清理错误不猜成功。
-    # 函数用途: 核对预期完整快照后晋升候选；正式删除或lesson派生故障仍返回准确提交事实。
+    # LLM: 先核完整预期及证据/权威；自动策略通过才CAS审核pending，最终提交仍锁完整快照；清理错误不猜成功。
+    # 函数用途: 沿原提交链归档合格自动候选或人工已审候选，保留并发拒绝与准确提交事实。
     def _promote_snapshot(
         self,
         candidate_id: str,
@@ -924,9 +924,18 @@ class MemoryPromotionService(_PromotionCommitMixin):
             policy_code = _automatic_policy_block(candidate)
             if policy_code:
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
+            candidate = self._apply_automatic_policy(candidate, reviewer)
         if candidate.status != "approved":
             return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
         return _commit_promotion_result(self, candidate, reviewer, confirmed)
+
+    # LLM: 仅由已通过来源/证据/权威/安全门的自动分支调用；transition消费完整快照CAS，不复活拒绝或覆盖人工审核。
+    # 函数用途: 将合格待审候选记为owner_autonomous_v1批准，后续仍走唯一正式仓库提交。
+    def _apply_automatic_policy(self, candidate: MemoryCandidate, reviewer: str) -> MemoryCandidate:
+        if candidate.status != "pending_review":
+            return candidate
+        return self.candidates.transition(candidate, "approved", reviewer=reviewer,
+            review_note="owner_autonomous_v1：结构化权威与安全门通过。")
 
     # LLM: 与提交/恢复共用目标解析；持久补全使用完整快照CAS，不借用同状态transition空操作。
     # 函数用途: 为符合原默认政策的用户长期事实补上实际保存的落点。
@@ -1019,9 +1028,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
         )
 
 
-# LLM: 自动学习只产生候选；宿主核实的学习来源不是用户对精确内容的批准，末端必须拒绝正式发布。
-#   保留来源/证据/范围的诊断优先级；人工review-approved后promote(automatic=False)沿原CAS和证据提交。
-# 函数用途: 给自动学习返回结构化待确认原因，不写正式记忆、Persona、lesson或HOT。
+# LLM: 仅结构化判定自动审核资格；保AGENTS禁写、宿主来源/权威、精确目标、冲突及临时过期门和诊断优先级。
+# 函数用途: 不合格返回原阻断码，全部通过返回空串；本函数不写候选或正式库。
 def _automatic_policy_block(candidate: MemoryCandidate) -> str:
     if str(candidate.promotion_target or "").strip().lower() == "agents":
         return "AUTO_AGENTS_WRITE_FORBIDDEN"
@@ -1038,7 +1046,7 @@ def _automatic_policy_block(candidate: MemoryCandidate) -> str:
     scope = MemoryScope.from_value(candidate.scope)
     if scope.scope_type == "temporary" and not candidate.valid_until:
         return "AUTO_POLICY_TEMPORARY_REQUIRES_EXPIRY"
-    return "AUTO_PROMOTION_CONFIRMATION_REQUIRED"
+    return ""
 
 
 # LLM: 人工审核也不能把模型推断制造成正式用户事实或SOUL权威；AGENTS禁写与会话/临时范围约束不可绕过。

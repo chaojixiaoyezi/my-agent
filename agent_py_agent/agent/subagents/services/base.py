@@ -152,12 +152,12 @@ def _scope_path_key(value: object) -> str:
 
 
 # LLM: 会话运行时 child 继承当前 turn 的 cwd 和完整 permission profile。本项目仅在
-# local/unmanaged owner 下移除与已允许且已结构化继承的 workspace root 完全同路径的默认 deny；
-# 远程 owner 的 home 围栏不受影响，`.ssh` 等更窄 deny 也始终保留。
+# local/main 或无owner的旧任务下移除与已允许且已结构化继承的 workspace root 完全同路径的默认 deny；
+# 普通local用户及远程owner的home围栏不受影响，`.ssh` 等更窄deny也始终保留。
 # 函数用途: 消除“父级明确允许工作区，子代理又被同路径默认禁止”的矛盾。
 def _reconciled_forbidden_write_roots(task: SubAgentTask) -> list[str]:
     owner_id = str(task.owner or "").strip()
-    if owner_id and not owner_id.startswith("local/"):
+    if owner_id and owner_id != "local/main":
         return list(task.forbidden_write_roots)
     attrs = task.attributes if isinstance(task.attributes, dict) else {}
     workspace_values: list[object] = [attrs.get("workspace_root")]

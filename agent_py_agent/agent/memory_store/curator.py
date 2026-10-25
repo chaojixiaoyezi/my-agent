@@ -1,4 +1,4 @@
-# LLM: 时区/日终/间隔纯判据由curator_due共用，真实batch、busy/lease、not_due和消费结果保持。
+# LLM: 队列只读按可提交、可学待首次审核、可补旧来源三档选择；重复证据共用原仓库，触发/真实batch及lease不改。
 # LLM: 原策展只提交候选且正式内容仍需F4用户确认；入口空短核与文件短事务均消费原平台门，模型等待不持T，未结原对象不得失败清账。
 # 模块用途: 运行真实输入/原pending/日终触发的按组策展，落候选、游标和失败事实，不凭待审候选新增运行或扩大正式写权限。
 from __future__ import annotations
@@ -28,6 +28,7 @@ from ..common.request_execution_ports import (
     RequestExecutionOutcomeUncertainError,
     gateway_short_transaction,
 )
+from ..conversation.learning_source import projection_is_learnable
 from .candidate_models import CandidateObservation, host_promotion_mode, utc_now_iso
 from .candidates import CandidateService, split_identity_conflicts
 from .curator_backend import (
@@ -108,6 +109,7 @@ from .curator_state import (
 from .curator_validation import CuratorCursorAdvance, next_cursors, validate_extraction
 from .daily import DailyMemoryEvent, DailyMemoryStore
 from .learning_exclusions import excluded_candidate_ids, sync_learning_exclusion_marks
+from .lessons import _MAX_HOT_RULE_CHARS, _evidence_groups, _has_evidence
 
 _LOGGER = logging.getLogger(__name__)
 _RUN_STATUSES = frozenset({"succeeded", "failed", "busy", "disabled", "not_due"})
@@ -764,35 +766,96 @@ class _CuratorExclusionMixin:
             return (f"learning_exclusion_marked:{marked}",) if marked else ()
 
 
-# LLM: 自动晋升的候选选取与执行集中在这里：只消费持久账本与提交结果里的结构化字段，
-#   名单不可读时不补晋升（fail-closed），agents 目标跳过（v2 硬拦）；失败与已成功事务隔离。
-# 类用途: 提供 Curator 保守自动晋升的候选选取与执行。
+# LLM: 仅用 MemoryCandidate 正式字段做结构性否决；临时范围只认 scope/valid_until，HOT与精确目标门与Promotion一致。
+# 函数用途: 剔除结构不合格候选，不写账，不授来源、证据或 CAS 权限。
+def _candidate_structurally_promotable(row) -> bool:
+    target = str(getattr(row, "promotion_target", "") or "").strip().lower()
+    if str(getattr(row, "promotion_mode", "") or "").strip().lower() != "auto_eligible":
+        return False
+    if (target in {"agents", "soul"} or bool(getattr(row, "conflicts_with", None))
+            or bool(str(getattr(row, "promotion_exclusion", "") or "").strip())):
+        return False
+    if str(getattr(row, "proposed_action", "") or "") in {"replace", "remove", "merge"} and not str(
+            getattr(row, "target_entry_id", "") or "").strip():
+        return False
+    scope = getattr(row, "scope", None)
+    scope_type = str(scope.get("scope_type") if isinstance(scope, dict) else getattr(scope, "scope_type", "") or "")
+    if scope_type == "temporary" and (not str(getattr(row, "valid_until", "") or "").strip() or target == "user"):
+        return False
+    if target == "user" and scope_type == "session":
+        return False
+    if target in {"lesson", "hot"} and not _has_evidence(row):
+        return False
+    return target != "hot" or (bool(str(getattr(row, "target_entry_id", "") or "").strip())
+                               and len(str(getattr(row, "content", "") or "").strip()) <= _MAX_HOT_RULE_CHARS)
+
+
+# LLM: 共用原证据组/材料判据和实际晋升门槛；用户明确lesson保首次豁免，正式验证和提交仍归PromotionService。
+# 函数用途: 只读判断结构合格候选能否立即过重复门槛，供积压过滤与排序共用。
+def _candidate_repetition_ready(row, *, lesson_min_occurrences: int = 2, hot_min_occurrences: int = 3) -> bool:
+    if not _candidate_structurally_promotable(row):
+        return False
+    target = str(getattr(row, "promotion_target", "") or "").strip().lower()
+    if target == "lesson":
+        explicit = str(getattr(row, "origin", "") or "") == "user_explicit" and bool(getattr(row, "source_message_refs", None))
+        return explicit or (int(getattr(row, "occurrence_count", 0) or 0) >= max(2, int(lesson_min_occurrences or 2))
+                            and len(_evidence_groups(row)) >= 2)
+    if target == "hot":
+        return (int(getattr(row, "occurrence_count", 0) or 0) >= max(3, int(hot_min_occurrences or 3))
+                and len(_evidence_groups(row)) >= 1)
+    return True
+
+
+# LLM: 只消费持久账本和原提交结果；先结构过滤再三档稳定排序，不可补旧来源不占额，名单拒绝及正式证据/CAS门保持。
+# 类用途: 为Curator公平选择自动晋升候选并沿原回调提交，不创建第二套审核或写入路径。
 class _CuratorPromotionMixin:
-    # LLM: 只消费已提交候选的持久结构化字段（promotion_mode/status/target）；这里只做只读剔除，
-    #   不写标记（持久标记由 _execute 的全量同步负责）。
-    # 函数用途: 列出已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
+    # LLM: 只检查原消息引用是否有可回查线程；不证明消息真实或来源可学，不写来源/候选，最终晋升仍核原证据。
+    # 函数用途: 让有会话仓库且带线程引用的空来源旧候选保留最低档回查机会。
+    def _can_backfill_empty_source(self, row) -> bool:
+        if self.conversation_store is None:
+            return False
+        return any(isinstance(ref, dict) and bool(str(ref.get("thread_id") or "").strip())
+                   for ref in (getattr(row, "source_message_refs", None) or ()))
+
+    # LLM: 全量读后先结构/来源/审核状态/排除过滤；依实际门槛按可提交、首次审核、可补旧来源稳定排序再限额，不写标记。
+    # 函数用途: 避免不合格或旧来源积压饿死可学候选，保留首次自主审核和非正限额不限量语义。
     def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
         """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
 
-        LLM: Selection trusts only persisted host promotion_mode and typed status. Target-specific
-        evidence, threshold, CAS and SOUL confirmation remain PromotionService responsibilities.
+        这里只筛结构与排队次序；真实来源、证据、目标版本和最终提交仍由PromotionService复核。
         """
         try:
             rows = self.candidate_service.list(
                 statuses={"pending_review", "approved"},
-                limit=limit,
+                limit=0,
             )
+            promo = getattr(self, "promotion_service", None) or getattr(self.promotion_callback, "__self__", None)
+            lesson_min = int(getattr(promo, "lesson_min_occurrences", getattr(self.config, "lesson_min_occurrences", 2)) or 2)
+            hot_min = int(getattr(promo, "hot_min_occurrences", getattr(self.config, "hot_min_occurrences", 3)) or 3)
             eligible = [
                 row
                 for row in rows
-                if str(getattr(row, "promotion_mode", "") or "").strip().lower()
-                == "auto_eligible"
-                and str(getattr(row, "promotion_target", "") or "").strip().lower()
-                != "agents"
+                if _candidate_structurally_promotable(row)
+                and (getattr(row, "status", "") != "approved" or _candidate_repetition_ready(
+                    row, lesson_min_occurrences=lesson_min, hot_min_occurrences=hot_min))
+                and (projection_is_learnable(row.learning_source) if getattr(row, "learning_source", None)
+                     else self._can_backfill_empty_source(row))
             ]
             if not eligible:
                 return []
             eligible = self._drop_excluded_promotable(eligible)
+
+            # LLM: 使用同一次实际门槛与宿主来源；sort稳定保各档内原顺序，不把计数就绪当正式授权。
+            # 函数用途: 将可立即提交、可学首次审核和可补旧来源分为0/1/2三档。
+            def _queue_priority_tier(row):
+                if not projection_is_learnable(getattr(row, "learning_source", {})):
+                    return 2
+                return 0 if _candidate_repetition_ready(
+                    row, lesson_min_occurrences=lesson_min, hot_min_occurrences=hot_min) else 1
+
+            eligible.sort(key=_queue_priority_tier)
+            if limit > 0:
+                eligible = eligible[:limit]
             return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
         except Exception:
             return []
