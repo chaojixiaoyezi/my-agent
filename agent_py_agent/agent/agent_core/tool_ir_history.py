@@ -66,11 +66,15 @@ from ..tooling.runtime_contracts import ToolCall, ToolResult
 from .runtime.conversation_state import conversation_runtime_state_section
 
 _PROJECTION_LOCK = threading.Lock()
+# 工具IR历史消息投影进程内LRU缓存的最大条目数
 _MAX_PROJECTION_CACHE_ENTRIES = 64
+# 工具IR历史消息投影进程内LRU缓存的总字节预算上限
 _MAX_PROJECTION_CACHE_BYTES = 2 * 1024 * 1024
+# 单条工具IR历史消息投影允许进入缓存的最大字节数
 _MAX_SINGLE_PROJECTION_BYTES = 256 * 1024
 _PROJECTION_CACHE: OrderedDict[tuple, list[Any]] = OrderedDict()
 _PROJECTION_CACHE_SIZES: dict[tuple, int] = {}
+# 工具IR历史消息投影进程内LRU缓存当前已占用的总字节数
 _PROJECTION_CACHE_BYTES = 0
 _PROJECTION_TLS = threading.local()
 

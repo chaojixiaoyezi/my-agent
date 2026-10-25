@@ -15,9 +15,11 @@ from types import MappingProxyType
 from ..common.nofollow_fs import open_directory_beneath
 
 PARSER_VERSION = 3
+# 产物登记表解析投影进程内LRU缓存的总字节预算上限
 CACHE_MAX_BYTES = 8 * 1024 * 1024
 _CACHE = OrderedDict()
 _LOCK = threading.Lock()
+# 产物登记表解析投影进程内LRU缓存当前已占用的总字节数
 _CACHE_BYTES = 0
 _EMPTY_PROXY = MappingProxyType({})
 

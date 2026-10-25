@@ -24,6 +24,7 @@ from ...common.tool_index_stream import iter_decoded_tool_index_objects
 from ...common.tool_output_paths import (
     tool_output_index_paths_for_lookup,
 )
+from ..tool_output_externalizer import _BLOB_BLOCK_SIZE
 from .read_modes import (
     ArtifactContentReadRequest,
     ArtifactContentReadResult,
@@ -73,7 +74,7 @@ class _VerifiedArtifactCache:
 
 _INLINE_ARTIFACT_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
 _BLOB_INDEX_CACHE = _VerifiedArtifactCache(8 * 1024 * 1024)
-_BLOB_BLOCK_SIZE = 65536
+# 外置blob流式解码字符偏移检查点的间隔字符数
 _BLOB_CHECKPOINT_CHARS = 4096
 
 
@@ -704,8 +705,8 @@ def _raise_index_path_loop(exc: OSError) -> None:
         raise RuntimeError("Symlink loop from %r" % exc.filename)
 
 
-# LLM: 仅当引用显式包含冒号且命中scoped_call_id或非路径逻辑引用时保留跨scope候选；physical_only与短call_id始终走当前scope过滤。
-# 函数用途: 按请求scope筛选索引匹配项，防止同名无scope历史归档覆盖当前run输出。
+# LLM: 优先返回与请求scope按run_id->request_id->task_id层级精确匹配的记录；引用显式含冒号时优先保留带真实scope的scoped_call_id记录，防止裸call_id或同task兄弟run遮蔽当前run输出。
+# 函数用途: 按请求scope与显式冒号引用优先级筛选索引匹配项。
 def _scoped_matches(
     matches: list[dict[str, Any]],
     artifact_ref: str,
@@ -713,17 +714,54 @@ def _scoped_matches(
     *,
     physical_only: bool = False,
 ) -> list[dict[str, Any]]:
-    if not physical_only and ":" in artifact_ref and (
-        any(str(record.get("scoped_call_id", "") or "") == artifact_ref for record in matches)
-        or not _looks_like_path(artifact_ref)
-    ):
-        return matches
-    exact = [record for record in matches if _record_scope_matches_request(record, request)]
+    exact = _exact_scope_matches(matches, request)
+    if not physical_only and ":" in artifact_ref:
+        scoped_id_matches = [
+            record
+            for record in matches
+            if _record_has_scope(record) and str(record.get("scoped_call_id", "") or "") == artifact_ref
+        ]
+        if scoped_id_matches:
+            exact_scoped = [record for record in scoped_id_matches if record in exact]
+            return exact_scoped or scoped_id_matches
+        if exact:
+            return exact
+        if (
+            any(str(record.get("scoped_call_id", "") or "") == artifact_ref for record in matches)
+            or not _looks_like_path(artifact_ref)
+        ):
+            return matches
     if exact:
         return exact
     if _request_has_scope(request):
         return [] if any(_record_has_scope(record) for record in matches) else matches
     return [record for record in matches if _record_has_scope(record)]
+
+
+# LLM: 按run_id、request_id、task_id由强到弱匹配请求scope；当request带run_id时优先命中同run_id记录。
+# 函数用途: 为短引用与同task多run场景提供确定性的当前run优先匹配。
+def _exact_scope_matches(
+    matches: list[dict[str, Any]],
+    request: ReadToolOutputArtifactRequest,
+) -> list[dict[str, Any]]:
+    req_run = str(request.run_id or "").strip()
+    if req_run:
+        run_matches = [record for record in matches if str(record.get("run_id") or "").strip() == req_run]
+        if run_matches:
+            return run_matches
+    for key in ("request_id", "task_id"):
+        req_val = str(getattr(request, key) or "").strip()
+        if not req_val:
+            continue
+        key_matches = [
+            record
+            for record in matches
+            if str(record.get(key) or "").strip() == req_val
+            and (not req_run or not str(record.get("run_id") or "").strip())
+        ]
+        if key_matches:
+            return key_matches
+    return [record for record in matches if _record_scope_matches_request(record, request)]
 
 
 def _request_has_scope(request: ReadToolOutputArtifactRequest) -> bool:

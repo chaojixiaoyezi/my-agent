@@ -27,9 +27,11 @@ from .stream_events import (
     active_turn_input_event,
     begin_thinking_flush,
     cancel_thinking_flush_timer,
+    close_writer_sinks_now,
     complete_thinking_flush,
     drain_orphaned_deferred_events,
     drain_thinking_delta_text,
+    incomplete_display_snapshot,
     provider_retry_event,
     public_context_compaction_payload,
     public_context_usage_payload,
@@ -125,6 +127,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _thinking_pending_nonfinal: bool = field(default=False, init=False, repr=False)
     _thinking_publishing_tid: int | None = field(default=None, init=False, repr=False)
     _thinking_cond: threading.Condition = field(init=False, repr=False)
+    _defer_close_sinks: bool = field(default=False, init=False, repr=False)
+    _defer_prepare_final: bool = field(default=False, init=False, repr=False)
     _deferred_after_thinking: list[tuple[dict[str, object], Callable[[], bool] | None]] = field(default_factory=list, init=False, repr=False)
     _thinking_buffer_chars: int = field(default=0, init=False)
     _last_thinking_flush_at: float = field(default=0.0, init=False)
@@ -481,27 +485,34 @@ class BufferedChunkStreamWriter(StreamLiveness):
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；close不释放raw，在途外部回调仍不可撤销。
-    # 函数用途: 收口显示并拒绝迟到等待事件，不把流关闭当作工具或任务成功。
+    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；若跨线程发布在超时预算后仍在途则将sink关闭移交发布线程收尾。
+    # 函数用途: 收口显示并拒绝迟到等待事件，异常时仍确保关闭sink，不把流关闭当作工具或任务成功。
     def close(self) -> None:
         self._liveness_closed = True
-        self.flush_thinking_delta(final=True)
-        self.flush()
-        wait_thinking_flush_idle(self, _publish_writer_event)
-        for sink in (self.main_activity_sink, self.transcript_sink):
-            closer = getattr(sink, "close", None)
-            if callable(closer):
-                try:
-                    closer()
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    pass
+        idle = True
+        try:
+            self.flush_thinking_delta(final=True)
+            self.flush()
+            idle = wait_thinking_flush_idle(self, _publish_writer_event)
+        finally:
+            defer = False
+            with self._commit_lock:
+                if not idle and self._thinking_publishing_tid not in (None, threading.get_ident()):
+                    self._defer_close_sinks = True
+                    defer = True
+            if not defer:
+                close_writer_sinks_now(self)
 
-    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照，不因收口flush确认raw；失败不改变模型结果。
-    # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替。
+    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程发布仍在途则延后prepare_final并返回complete=False。
+    # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替，不在在途发布未完时宣称快照complete。
     def prepare_display_history(self) -> dict:
         self.flush_thinking_delta(final=True)
         self.flush()
-        wait_thinking_flush_idle(self, _publish_writer_event)
+        idle = wait_thinking_flush_idle(self, _publish_writer_event)
+        with self._commit_lock:
+            if not idle and self._thinking_publishing_tid not in (None, threading.get_ident()):
+                self._defer_prepare_final = True
+                return incomplete_display_snapshot(self)
         prepare = getattr(self.transcript_sink, "prepare_final", None)
         if not callable(prepare):
             return {}

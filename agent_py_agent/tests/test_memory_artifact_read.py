@@ -1011,6 +1011,16 @@ def test_blob_suffixed_call_id_resolves_in_artifact_reader(tmp_path: Path) -> No
     )
     assert own_hit["ok"] is True
     assert own_hit["content"].startswith("OWN-RUN-CONTENT")
+    shared_root = tmp_path / "shared-task-vs-own"
+    _write_externalized_tool_output(shared_root, content="OWN-TASK-RUN" * 2, call_id="x", run_id="run-own", task_id="shared-task", request_id="")
+    _write_externalized_tool_output(shared_root, content="OTHER-TASK-RUN" * 2, call_id="x", run_id="run-other", task_id="shared-task", request_id="")
+    _write_externalized_tool_output(shared_root, content="LEGACY-COLON" * 2, call_id="run-own:x", run_id="", task_id="", request_id="")
+    for ref in ("x", "run-own:x"):
+        for mode in ("", "current_run"):
+            res = read_tool_output_artifact(
+                ReadToolOutputArtifactRequest(root=shared_root, artifact_ref=ref, run_id="run-own", task_id="shared-task", scope_mode=mode, max_chars=0)
+            )
+            assert res["ok"] is True and res["content"].startswith("OWN-TASK-RUN")
 
 
 def _write_externalized_tool_output(

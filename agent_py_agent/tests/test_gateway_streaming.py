@@ -691,6 +691,11 @@ def test_w21_inflight_thinking_tail_ordering_and_exception_recovery(thinking_wri
         "survivor",
     ]
     writer._thinking_publishing_tid = 999999999
+    assert sw.wait_thinking_flush_idle(writer, lambda *_a, **_kw: None, timeout=0.01) is False
+    assert writer.prepare_display_history() == {}
+    assert writer._defer_prepare_final is True
+    writer.close()
+    assert writer._defer_close_sinks is True
     sw.complete_thinking_flush(writer, lambda *_a, **_kw: None)
     assert writer._thinking_publishing_tid == 999999999
     writer._thinking_publishing_tid = None

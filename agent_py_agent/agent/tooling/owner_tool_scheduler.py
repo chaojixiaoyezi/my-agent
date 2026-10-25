@@ -21,12 +21,12 @@ _WORKER_PERMIT = ContextVar("owner_tool_worker_permit", default=None)
 _WORKER_SQLITE_REUSE = ContextVar("owner_tool_sqlite_reuse", default=False)
 # 单进程调度锁同时保护owner队列和全局执行额度，不在持一把owner锁时再等待另一把锁。
 _DISPATCH_CONDITION = threading.Condition()
-_GLOBAL_ACTIVE = 0
-_GLOBAL_CONTROL_ACTIVE = 0
-_GLOBAL_LIMIT = 0
+_GLOBAL_ACTIVE, _GLOBAL_CONTROL_ACTIVE, _GLOBAL_LIMIT = 0, 0, 0
 # 已接受的全局等待项需要强引用保活；队空立即摘除，字典保留跨owner唤醒顺序。
 _GLOBAL_WAITERS = {}
-_CONTROL_BURST = 2
+# 控制通道相对普通工具队列连续优先派发的次数上限
+_CONTROL_BURST_COUNT = 2
+_CONTROL_BURST = _CONTROL_BURST_COUNT
 
 
 # LLM: 每个实例在提交线程独立捕获上下文；取消结果由原调用方构造，不合成成功或跳落账。

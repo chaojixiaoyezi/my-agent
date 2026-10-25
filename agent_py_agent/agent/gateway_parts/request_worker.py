@@ -86,7 +86,9 @@ _PENDING_SCAN_CACHE: OrderedDict[tuple[str, int, int, int, int, int, bytes], dic
 _PENDING_SCAN_CACHE_LOCK = threading.Lock()
 # 同时限制条目和保留的原JSON字节，避免多个队列或文件版本使缓存无界增长。
 _PENDING_SCAN_CACHE_MAX_ENTRIES = 1024
+# pending队列扫描缓存允许占用的最大总字节数
 _PENDING_SCAN_CACHE_MAX_BYTES = 4 * 1024 * 1024
+# 单个pending请求文件允许进入扫描缓存的最大字节数
 _PENDING_SCAN_CACHE_MAX_FILE_BYTES = 65536
 _WAIT_POLL_STEPS_SECONDS: tuple[float, ...] = (0.02, 0.05, 0.1, 0.2)
 

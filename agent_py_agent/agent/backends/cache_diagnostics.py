@@ -13,11 +13,16 @@ import threading
 from collections import OrderedDict
 
 _CACHE_LOCK = threading.Lock()
+# 缓存诊断单条消息摘要进程内LRU缓存的最大条目数
 _MAX_ROW_CACHE_ENTRIES = 4096
+# 缓存诊断单条消息摘要进程内LRU缓存的总字节预算上限
 _MAX_ROW_CACHE_BYTES = 4 * 1024 * 1024
+# 单条消息结构允许进入缓存诊断行摘要缓存的最大字节数
 _MAX_SINGLE_ROW_CACHE_BYTES = 256 * 1024
+# 缓存诊断链式步进摘要进程内LRU缓存的最大条目数
 _MAX_CHAIN_CACHE_ENTRIES = 8192
 _ROW_DIGEST_CACHE: OrderedDict[tuple, tuple[str, int]] = OrderedDict()
+# 缓存诊断单条消息摘要进程内LRU缓存当前已占用的总字节数
 _ROW_CACHE_BYTES = 0
 _CHAIN_STEP_CACHE: OrderedDict[tuple[str, str], str] = OrderedDict()
 _DIGEST_TLS = threading.local()

@@ -16,7 +16,8 @@ LocalAddressProbe = Callable[[str], bool | None]
 GatewayPortState = Literal["known", "not_applicable", "unavailable"]
 
 _GATE = "network_safety"
-_DEFAULT_PROTECTED_GATEWAY_PORT = 8420
+_DEFAULT_GATEWAY_PROTOCOL_PORT = 8420
+_DEFAULT_PROTECTED_GATEWAY_PORT = _DEFAULT_GATEWAY_PROTOCOL_PORT
 _PRIVATE_HOSTS = {"localhost"}
 _ALWAYS_BLOCKED_HOSTS = {"metadata.google.internal", "metadata.goog"}
 _ALWAYS_BLOCKED_NETWORKS = (

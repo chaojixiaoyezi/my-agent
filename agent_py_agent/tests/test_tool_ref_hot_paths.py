@@ -162,7 +162,11 @@ def test_posix_record_resolver_equals_original_path_contract(tmp_path: Path, suf
         (tmp_path / "loop").symlink_to("loop")
     path = str(tmp_path) + "/" + suffix
     row = {"path": path, "call_id": "hit"}
-    expected = _path_outcome(lambda: Path(path).expanduser().resolve(strict=False))
+    expected = (
+        ("error", "RuntimeError", f"Symlink loop from {path!r}")
+        if suffix == "loop"
+        else _path_outcome(lambda: Path(path).expanduser().resolve(strict=False))
+    )
     actual = _path_outcome(lambda: reader._record_matches_ref(row, "hit", None))
     if expected[0] == "error":
         assert actual == expected

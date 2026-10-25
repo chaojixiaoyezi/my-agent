@@ -22,9 +22,11 @@ _NAME = re.compile(r"^_*[A-Z][A-Z0-9_]*$")
 _ALLOWED = {
     "BODY_MAX_CHARS": "自学习提案正文上限与聊天 /skills 回执的正文展示上限，用途不同",
     "DESCRIPTION_MAX_CHARS": "Skill 索引里的描述上限与自学习提案草稿的描述上限，用途不同",
+    "HEARTBEAT_SECONDS": "Gateway 命令流等待心跳与插件宿主 HTTP/流式事件心跳各自的轮询周期，分属不同传输层",
     "MAX_BODY_BYTES": "网页工具与采集源各自的 HTTP 响应体上限，分属两个子系统，可以独立调整",
     "MAX_HINT_CHARS": "各决策点提示文字的上限按点位设定；决策点参数统一时一并处理",
     "MAX_INLINE_JSON_CHARS": "工具动作摘要与编排实时摘要各自的内联 JSON 上限（字符），决策点参数统一时一并处理",
+    "MAX_OUTPUT_BYTES": "采集源适配器与工作流脚本运行器各自的标准输出体积上限，分属不同子系统",
     "MAX_OWNERS_COUNT": "管理员控制工具与审计记录工具各自一次列出的用户数上限",
     "POLL_SECONDS": "Gateway 重启等待、TUI 插件面板、升级跟随三种不同的轮询节奏",
     "PREVIEW_CHARS": "会话搜索结果预览与本地存储正文预览，用途不同",

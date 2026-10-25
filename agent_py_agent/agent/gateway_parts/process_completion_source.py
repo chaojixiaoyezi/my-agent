@@ -18,7 +18,7 @@ from ..tooling.process_session_store import ProcessSessionStore, process_session
 from ..user_space.owner_resolver import _owner_home_dir, _owner_home_result
 
 # 单条进程完成记录的读取上限为 1 MiB，防止损坏记录造成无界内存占用。
-_MAX_RECORD_BYTES = 1_048_576
+_COMPLETION_RECORD_MAX_BYTES = 1_048_576
 
 
 # LLM: ref仅原session文件名，真实父目录永远从已核owner定位；完整raw摘要与原版本revision共同限制旧运输。
@@ -34,12 +34,12 @@ def validate_process_completion_ref(ref):
         raise ValueError('background_process_completion_ref_invalid')
 
 
-# LLM: C不调用Store load/list/redo；原规范地址由owner纯函数固定，no-follow完整读不接受模型路径或索引代权威。
+# LLM: C不调用Store load/list/redo；原规范地址由owner纯函数固定，no-follow完整读（上限 `_COMPLETION_RECORD_MAX_BYTES`）不接受模型路径或索引代权威。
 # 函数用途: 只读一个已存在的原会话，缺失保持缺失，坏记录原样拒绝。
 def _read_record(home, session_id):
     root = process_session_store_root(home, home)
     relative = root.relative_to(home.parent).parts + (validate_session_id(session_id) + '.json',)
-    raw = read_bytes_beneath(home.parent, relative, max_bytes=_MAX_RECORD_BYTES, require_dir_fd=True)
+    raw = read_bytes_beneath(home.parent, relative, max_bytes=_COMPLETION_RECORD_MAX_BYTES, require_dir_fd=True)
     if raw is None:
         return None, None
     record = validate_process_record(load_strict_json(raw))

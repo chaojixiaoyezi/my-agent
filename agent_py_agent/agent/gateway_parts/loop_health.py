@@ -14,6 +14,7 @@ import time
 from ..common.log_redaction import redact_sensitive_text
 from ..runtime_errors import environment_cause_fields
 
+# Gateway派发循环判定在途tick卡死或长期饥饿的默认超时阈值
 DISPATCHER_STALL_TIMEOUT_SECONDS = 120.0
 
 

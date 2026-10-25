@@ -54,6 +54,7 @@ _SAFE_PARAMETER_MAX_DEPTH = 4
 _SAFE_PARAMETER_MAX_ITEM_COUNT = 20
 # 512KiB以下保留旧包装；大正文按64KiB存块校验，均以UTF-8字节而非字符计。
 _BLOB_SIDECAR_MIN_BYTES = 512 * 1024
+# 外置大输出blob流式切块校验与按块读取的单块大小
 _BLOB_BLOCK_SIZE = 65536
 
 

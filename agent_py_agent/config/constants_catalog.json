@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1131,
+  "count": 1153,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -732,6 +732,38 @@
       "description": "属内部提示逻辑的实现参数，2026-09-28 参数减量从配置降为常量（值不变）。"
     },
     {
+      "name": "_MAX_PROJECTION_CACHE_BYTES",
+      "file": "agent_py_agent/agent/agent_core/tool_ir_history.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "工具IR历史消息投影进程内LRU缓存的总字节预算上限"
+    },
+    {
+      "name": "_MAX_PROJECTION_CACHE_ENTRIES",
+      "file": "agent_py_agent/agent/agent_core/tool_ir_history.py",
+      "value": 64,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "工具IR历史消息投影进程内LRU缓存的最大条目数"
+    },
+    {
+      "name": "_MAX_SINGLE_PROJECTION_BYTES",
+      "file": "agent_py_agent/agent/agent_core/tool_ir_history.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条工具IR历史消息投影允许进入缓存的最大字节数"
+    },
+    {
+      "name": "_PROJECTION_CACHE_BYTES",
+      "file": "agent_py_agent/agent/agent_core/tool_ir_history.py",
+      "value": 0,
+      "unit": "字节",
+      "category": "其它",
+      "description": "工具IR历史消息投影进程内LRU缓存当前已占用的总字节数"
+    },
+    {
       "name": "_MAX_WAIT_REPLY_GUIDANCE_CHARS",
       "file": "agent_py_agent/agent/agent_core/tool_loop/completion.py",
       "value": 1200,
@@ -868,6 +900,22 @@
       "description": "未闭合工具开始标记的最大个数，防流解析失配。"
     },
     {
+      "name": "CACHE_MAX_BYTES",
+      "file": "agent_py_agent/agent/artifacts/registry_projection_cache.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "产物登记表解析投影进程内LRU缓存的总字节预算上限"
+    },
+    {
+      "name": "_CACHE_BYTES",
+      "file": "agent_py_agent/agent/artifacts/registry_projection_cache.py",
+      "value": 0,
+      "unit": "字节",
+      "category": "其它",
+      "description": "产物登记表解析投影进程内LRU缓存当前已占用的总字节数"
+    },
+    {
       "name": "MAX_ASSET_BYTES",
       "file": "agent_py_agent/agent/assets/__init__.py",
       "value": 16777216,
@@ -930,6 +978,46 @@
       "unit": "个",
       "category": "上限预算",
       "description": "现在按 32 条一块、最多 128 块覆盖 4096 条消息；再长的线程只保留最后 128 块，并在 partial 上说明。"
+    },
+    {
+      "name": "_MAX_CHAIN_CACHE_ENTRIES",
+      "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
+      "value": 8192,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "缓存诊断链式步进摘要进程内LRU缓存的最大条目数"
+    },
+    {
+      "name": "_MAX_ROW_CACHE_BYTES",
+      "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "缓存诊断单条消息摘要进程内LRU缓存的总字节预算上限"
+    },
+    {
+      "name": "_MAX_ROW_CACHE_ENTRIES",
+      "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
+      "value": 4096,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "缓存诊断单条消息摘要进程内LRU缓存的最大条目数"
+    },
+    {
+      "name": "_MAX_SINGLE_ROW_CACHE_BYTES",
+      "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
+      "value": 262144,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条消息结构允许进入缓存诊断行摘要缓存的最大字节数"
+    },
+    {
+      "name": "_ROW_CACHE_BYTES",
+      "file": "agent_py_agent/agent/backends/cache_diagnostics.py",
+      "value": 0,
+      "unit": "字节",
+      "category": "其它",
+      "description": "缓存诊断单条消息摘要进程内LRU缓存当前已占用的总字节数"
     },
     {
       "name": "MAX_DECISION_INPUT_BYTES",
@@ -3772,6 +3860,14 @@
       "description": "读取凭据文件的最大字节数；避免损坏的大文件拖累宿主启动。"
     },
     {
+      "name": "DISPATCHER_STALL_TIMEOUT_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/loop_health.py",
+      "value": 120.0,
+      "unit": "秒",
+      "category": "超时",
+      "description": "Gateway派发循环判定在途tick卡死或长期饥饿的默认超时阈值"
+    },
+    {
       "name": "_DISPLAY_BYTES",
       "file": "agent_py_agent/agent/gateway_parts/memory_candidate_review.py",
       "value": 12000,
@@ -4036,7 +4132,7 @@
       "description": "审批轮询间隔 0.05 秒：及时看到用户批复，轮询成本可忽略。"
     },
     {
-      "name": "_MAX_RECORD_BYTES",
+      "name": "_COMPLETION_RECORD_MAX_BYTES",
       "file": "agent_py_agent/agent/gateway_parts/process_completion_source.py",
       "value": 1048576,
       "unit": "字节",
@@ -4164,6 +4260,30 @@
       "description": "后台照常执行同时留在系统里。"
     },
     {
+      "name": "_PENDING_SCAN_CACHE_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/request_worker.py",
+      "value": 4194304,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "pending队列扫描缓存允许占用的最大总字节数"
+    },
+    {
+      "name": "_PENDING_SCAN_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/gateway_parts/request_worker.py",
+      "value": 1024,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "同时限制条目和保留的原JSON字节，避免多个队列或文件版本使缓存无界增长。"
+    },
+    {
+      "name": "_PENDING_SCAN_CACHE_MAX_FILE_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/request_worker.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个pending请求文件允许进入扫描缓存的最大字节数"
+    },
+    {
       "name": "LOOP_GUARD_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/restart_service.py",
       "value": 3,
@@ -4250,6 +4370,22 @@
       "unit": "秒",
       "category": "其它",
       "description": "就绪状态轮询间隔 0.2 秒：重启后尽快显示新状态。"
+    },
+    {
+      "name": "_THINKING_FLUSH_IDLE_MAX_TURNS",
+      "file": "agent_py_agent/agent/gateway_parts/stream_events.py",
+      "value": 3,
+      "unit": "轮",
+      "category": "上限预算",
+      "description": "在途发布线程存活时跨线程等待排空的最大轮数"
+    },
+    {
+      "name": "_THINKING_FLUSH_IDLE_SLICE_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/stream_events.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "关闭或冻结显示快照前单次等待在途思考刷新的时间片"
     },
     {
       "name": "_CHUNK_STREAM_FLUSH_CHARS",
@@ -4852,6 +4988,14 @@
       "description": "函数用途: 调用方没给 max_chars 时，一次 artifact 正文读取默认读多少字符。"
     },
     {
+      "name": "_BLOB_CHECKPOINT_CHARS",
+      "file": "agent_py_agent/agent/memory_archive/artifact/reader.py",
+      "value": 4096,
+      "unit": "字符",
+      "category": "其它",
+      "description": "外置blob流式解码字符偏移检查点的间隔字符数"
+    },
+    {
       "name": "DEFAULT_HINT_MAX_CHARS",
       "file": "agent_py_agent/agent/memory_archive/compact_artifact_read_hints.py",
       "value": 4000,
@@ -5002,6 +5146,22 @@
       "unit": "层",
       "category": "上限预算",
       "description": "小 JSON 判定允许的最大嵌套深度；超过视为大对象，按大对象路径处理（无物理单位）。"
+    },
+    {
+      "name": "_BLOB_BLOCK_SIZE",
+      "file": "agent_py_agent/agent/memory_archive/tool_output_externalizer.py",
+      "value": 65536,
+      "unit": "个",
+      "category": "其它",
+      "description": "外置大输出blob流式切块校验与按块读取的单块大小"
+    },
+    {
+      "name": "_BLOB_SIDECAR_MIN_BYTES",
+      "file": "agent_py_agent/agent/memory_archive/tool_output_externalizer.py",
+      "value": 524288,
+      "unit": "字节",
+      "category": "其它",
+      "description": "512KiB以下保留旧包装；大正文按64KiB存块校验，均以UTF-8字节而非字符计。"
     },
     {
       "name": "_SAFE_PARAMETER_MAX_DEPTH",
@@ -6897,7 +7057,7 @@
       "value": 0.05,
       "unit": "秒",
       "category": "其它",
-      "description": "后台进程宿主存活轮询间隔 50ms：足够灵敏又不烧 CPU。"
+      "description": "后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。"
     },
     {
       "name": "_LISTEN_CHECK_SECONDS",
@@ -7202,6 +7362,14 @@
       "unit": "个",
       "category": "比例阈值",
       "description": "验证回执最多显示 12 个分组：控制回执体积。"
+    },
+    {
+      "name": "_CONTROL_BURST_COUNT",
+      "file": "agent_py_agent/agent/tooling/owner_tool_scheduler.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "控制通道相对普通工具队列连续优先派发的次数上限"
     },
     {
       "name": "_CAUSE_MAX_CHARS",
@@ -7762,6 +7930,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "工具操作租约最短 900 秒：低于此值没有并发保护意义。"
+    },
+    {
+      "name": "MAX_SESSION_DISCOVERED_TOOLS_COUNT",
+      "file": "agent_py_agent/agent/tooling/tool_search_state.py",
+      "value": 32,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单会话活跃保留的已发现工具名称数量上限"
     },
     {
       "name": "_MAX_URL_CHARS",

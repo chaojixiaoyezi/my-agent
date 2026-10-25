@@ -15,6 +15,10 @@ from ..conversation.channels import (
 from ..conversation.context_usage import public_context_usage
 
 CONTEXT_USAGE_SCHEMA = "model_visible_context_usage.v1"
+# 关闭或冻结显示快照前单次等待在途思考刷新的时间片
+_THINKING_FLUSH_IDLE_SLICE_SECONDS = 1.0
+# 在途发布线程存活时跨线程等待排空的最大轮数
+_THINKING_FLUSH_IDLE_MAX_TURNS = 3
 _CONTEXT_USAGE_TOKEN_FIELDS = (
     "context_window_tokens",
     "compact_trigger_tokens",
@@ -340,16 +344,57 @@ def _publish_deferred_batch(
             raise
 
 
-# LLM: 在保持发布线程标识的前提下先排空期间请求的思考尾块、再排空延迟事件，finally仅在仍归属当前线程时清理tid，绝不误清接班线程。
+# LLM: 容错关闭writer绑定的主活动与transcript两个sink，单个sink异常不影响另一sink收口。
+# 函数用途: 统一执行stream_writer的底层sink关闭动作。
+def close_writer_sinks_now(writer: Any) -> None:
+    for sink in (getattr(writer, "main_activity_sink", None), getattr(writer, "transcript_sink", None)):
+        closer = getattr(sink, "close", None)
+        if not callable(closer):
+            continue
+        try:
+            closer()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            pass
+
+
+# LLM: 当在途思考发布在超时后终于完成时，补跑被close或prepare_display_history延后的sink收口动作。
+# 函数用途: 在发布线程退出临界区后安全执行延后的prepare_final与sink close。
+def _run_deferred_closeout(writer: Any, *, defer_prepare: bool, defer_close: bool) -> None:
+    if defer_prepare:
+        prepare = getattr(getattr(writer, "transcript_sink", None), "prepare_final", None)
+        if callable(prepare):
+            try:
+                prepare()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                pass
+    if defer_close:
+        close_writer_sinks_now(writer)
+
+
+# LLM: 当跨线程思考发布超过收口等待预算仍在途时，返回显式标记complete=False的当前显示快照，不冻结半截历史。
+# 函数用途: 为prepare_display_history提供未完成状态的快照降级返回。
+def incomplete_display_snapshot(writer: Any) -> dict:
+    snapshot_fn = getattr(getattr(writer, "transcript_sink", None), "display_history_snapshot", None)
+    if not callable(snapshot_fn):
+        return {}
+    try:
+        snap = snapshot_fn()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return {}
+    return {**snap, "complete": False} if isinstance(snap, dict) else {}
+
+
+# LLM: 在保持发布线程标识的前提下先排空期间请求的思考尾块、再排空延迟事件，finally仅在仍归属当前线程时清理tid并补齐延后的收口动作。
 # 函数用途: 完成思考批次发布后按因果顺序冲刷在途思考与延迟的非thinking事件。
 def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
     ident = threading.get_ident()
-    has_more = False
+    has_more, defer_prepare, defer_close = False, False, False
     try:
         while True:
             next_batch, batch_final, deferred_batch = _next_completion_work(writer, ident)
             if next_batch:
-                if content := drain_thinking_delta_text(writer, "".join(next_batch), final=batch_final):
+                content = drain_thinking_delta_text(writer, "".join(next_batch), final=batch_final)
+                if content:
                     writer._thinking_emitted = True
                     publish_fn(writer, {"kind": "thinking_delta", "text": content})
                 continue
@@ -362,9 +407,14 @@ def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
         with writer._commit_lock:
             if writer._thinking_publishing_tid == ident:
                 writer._thinking_publishing_tid = None
+                defer_prepare = bool(getattr(writer, "_defer_prepare_final", False))
+                defer_close = bool(getattr(writer, "_defer_close_sinks", False))
+                writer._defer_prepare_final = False
+                writer._defer_close_sinks = False
                 cond = getattr(writer, "_thinking_cond", None)
                 if cond is not None:
                     cond.notify_all()
+        _run_deferred_closeout(writer, defer_prepare=defer_prepare, defer_close=defer_close)
     if has_more:
         schedule_thinking_flush_timer(writer)
 
@@ -386,17 +436,42 @@ def drain_orphaned_deferred_events(writer: Any, publish_fn: Any) -> None:
         complete_thinking_flush(writer, publish_fn)
 
 
-# LLM: 跨线程终局收口（close/prepare_display_history）在有界时间内等待在途思考发布完成，随后排空任何残留思考或延迟事件。
-# 函数用途: 防止其他线程正在落盘思考或延迟事件时提前关闭sink或冻结最终显示快照。
-def wait_thinking_flush_idle(writer: Any, publish_fn: Any, *, timeout: float = 1.0) -> None:
+# LLM: 判断在途思考发布线程标识是否仍对应进程内活跃线程，供有界收口等待区分慢IO与失联线程。
+# 函数用途: 识别当前持有_thinking_publishing_tid的线程是否仍在运行。
+def _publisher_thread_alive(tid: int | None) -> bool:
+    if tid is None:
+        return False
+    return any(thread.ident == tid and thread.is_alive() for thread in threading.enumerate())
+
+
+# LLM: 跨线程终局收口（close/prepare_display_history）在有界轮数内等待活跃在途思考发布完成，随后排空残留思考或延迟事件并返回真实空闲状态。
+# 函数用途: 防止其他线程正在落盘思考或延迟事件时提前关闭sink或把未完成显示快照宣称为complete。
+def wait_thinking_flush_idle(
+    writer: Any,
+    publish_fn: Any,
+    *,
+    timeout: float = _THINKING_FLUSH_IDLE_SLICE_SECONDS,
+) -> bool:
     ident = threading.get_ident()
     cond = getattr(writer, "_thinking_cond", None)
     if cond is not None:
         with cond:
-            if writer._thinking_publishing_tid is not None and writer._thinking_publishing_tid != ident:
-                cond.wait_for(lambda: writer._thinking_publishing_tid is None, timeout=timeout)
+            turns = 0
+            while (
+                writer._thinking_publishing_tid is not None
+                and writer._thinking_publishing_tid != ident
+            ):
+                if cond.wait_for(lambda: writer._thinking_publishing_tid is None, timeout=timeout):
+                    break
+                turns += 1
+                if turns >= _THINKING_FLUSH_IDLE_MAX_TURNS or not _publisher_thread_alive(
+                    writer._thinking_publishing_tid
+                ):
+                    break
     writer.flush_thinking_delta(final=True)
     drain_orphaned_deferred_events(writer, publish_fn)
+    with writer._commit_lock:
+        return writer._thinking_publishing_tid in (None, ident)
 
 
 # LLM: 后台守护定时器只在单调时钟真正达到间隔且流未关闭时触发合批刷新，不绕过测试时钟。

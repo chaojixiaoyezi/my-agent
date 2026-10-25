@@ -6,7 +6,9 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 
-MAX_SESSION_DISCOVERED_TOOLS = 32
+# 单会话活跃保留的已发现工具名称数量上限
+MAX_SESSION_DISCOVERED_TOOLS_COUNT = 32
+MAX_SESSION_DISCOVERED_TOOLS = MAX_SESSION_DISCOVERED_TOOLS_COUNT
 
 
 # LLM: 新序列保留首次发现顺序；仅旧 set 输入用稳定排序兜底，不伪称能从集合恢复发现时间。
