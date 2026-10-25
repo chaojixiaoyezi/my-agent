@@ -27,6 +27,7 @@ from .stream_events import (
     active_turn_input_event,
     begin_thinking_flush,
     cancel_thinking_flush_timer,
+    claim_deferred_closeout,
     close_writer_sinks_now,
     complete_thinking_flush,
     drain_orphaned_deferred_events,
@@ -485,7 +486,7 @@ class BufferedChunkStreamWriter(StreamLiveness):
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；若跨线程发布在超时预算后仍在途则将sink关闭移交发布线程收尾。
+    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；若跨线程活跃发布在超时预算后仍在途则将sink关闭移交发布线程收尾。
     # 函数用途: 收口显示并拒绝迟到等待事件，异常时仍确保关闭sink，不把流关闭当作工具或任务成功。
     def close(self) -> None:
         self._liveness_closed = True
@@ -495,24 +496,17 @@ class BufferedChunkStreamWriter(StreamLiveness):
             self.flush()
             idle = wait_thinking_flush_idle(self, _publish_writer_event)
         finally:
-            defer = False
-            with self._commit_lock:
-                if not idle and self._thinking_publishing_tid not in (None, threading.get_ident()):
-                    self._defer_close_sinks = True
-                    defer = True
-            if not defer:
+            if idle or not claim_deferred_closeout(self, close_sinks=True):
                 close_writer_sinks_now(self)
 
-    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程发布仍在途则延后prepare_final并返回complete=False。
+    # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程活跃发布仍在途则延后prepare_final并在锁外返回complete=False。
     # 函数用途: 给正常提交和延迟补交提供完整过程快照，候选块由最终消息按编号接替，不在在途发布未完时宣称快照complete。
     def prepare_display_history(self) -> dict:
         self.flush_thinking_delta(final=True)
         self.flush()
         idle = wait_thinking_flush_idle(self, _publish_writer_event)
-        with self._commit_lock:
-            if not idle and self._thinking_publishing_tid not in (None, threading.get_ident()):
-                self._defer_prepare_final = True
-                return incomplete_display_snapshot(self)
+        if not idle and claim_deferred_closeout(self, close_sinks=False):
+            return incomplete_display_snapshot(self)
         prepare = getattr(self.transcript_sink, "prepare_final", None)
         if not callable(prepare):
             return {}

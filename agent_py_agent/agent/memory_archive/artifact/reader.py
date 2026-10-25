@@ -705,7 +705,7 @@ def _raise_index_path_loop(exc: OSError) -> None:
         raise RuntimeError("Symlink loop from %r" % exc.filename)
 
 
-# LLM: 优先返回与请求scope按run_id->request_id->task_id层级精确匹配的记录；引用显式含冒号时优先保留带真实scope的scoped_call_id记录，防止裸call_id或同task兄弟run遮蔽当前run输出。
+# LLM: 优先返回与请求scope按run_id->request_id->task_id层级精确匹配的记录；引用显式含冒号时优先保留带真实scope且身份命中exact的scoped_call_id记录，防止裸call_id或同task兄弟run遮蔽当前run输出。
 # 函数用途: 按请求scope与显式冒号引用优先级筛选索引匹配项。
 def _scoped_matches(
     matches: list[dict[str, Any]],
@@ -722,7 +722,9 @@ def _scoped_matches(
             if _record_has_scope(record) and str(record.get("scoped_call_id", "") or "") == artifact_ref
         ]
         if scoped_id_matches:
-            exact_scoped = [record for record in scoped_id_matches if record in exact]
+            exact_scoped = [
+                record for record in scoped_id_matches if any(item is record for item in exact)
+            ]
             return exact_scoped or scoped_id_matches
         if exact:
             return exact
