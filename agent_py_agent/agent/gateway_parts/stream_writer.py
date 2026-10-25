@@ -130,6 +130,8 @@ class BufferedChunkStreamWriter(StreamLiveness):
     _thinking_cond: threading.Condition = field(init=False, repr=False)
     _defer_close_sinks: bool = field(default=False, init=False, repr=False)
     _defer_prepare_final: bool = field(default=False, init=False, repr=False)
+    # LLM: 记录当前正在锁外执行延后prepare_final收口的活跃线程tid，使并发close/prepare_display_history托管至该线程收尾。
+    _closeout_running_tid: int | None = field(default=None, init=False, repr=False)
     _deferred_after_thinking: list[tuple[dict[str, object], Callable[[], bool] | None]] = field(default_factory=list, init=False, repr=False)
     _thinking_buffer_chars: int = field(default=0, init=False)
     _last_thinking_flush_at: float = field(default=0.0, init=False)

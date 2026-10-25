@@ -293,20 +293,24 @@ def begin_thinking_flush(writer: Any, now: float, *, final: bool = True) -> list
         return batch
 
 
-# LLM: 锁内原子释放当前线程持有的思考发布标识，同时摘取并清空延后的prepare_final与sink close标记，若有延后收口则登记_closeout_running_tid。
-# 函数用途: 确保正常完成路径与异常退出路径都能精确消费一次延后收口标记，且绝不清除其他接班线程的tid。
+# LLM: 锁内原子释放当前线程持有的思考发布标识；若已有其他存活线程在执行延后收口则保留标记交由该线程统一处理，否则摘取标记并登记_closeout_running_tid。
+# 函数用途: 确保正常完成路径与异常退出路径都能精确消费延后收口标记，且不会覆盖在途收口线程或清除其他接班线程的tid。
 def _release_publishing_tid(writer: Any, ident: int) -> tuple[bool, bool]:
     if writer._thinking_publishing_tid != ident:
         return False, False
     writer._thinking_publishing_tid = None
     writer._thinking_pending_final = False
     writer._thinking_pending_nonfinal = False
-    defer_prepare = bool(getattr(writer, "_defer_prepare_final", False))
-    defer_close = bool(getattr(writer, "_defer_close_sinks", False))
-    writer._defer_prepare_final = False
-    writer._defer_close_sinks = False
-    if defer_prepare or defer_close:
-        writer._closeout_running_tid = ident
+    runner_tid = getattr(writer, "_closeout_running_tid", None)
+    if runner_tid not in (None, ident) and _publisher_thread_alive(runner_tid):
+        defer_prepare, defer_close = False, False
+    else:
+        defer_prepare = bool(getattr(writer, "_defer_prepare_final", False))
+        defer_close = bool(getattr(writer, "_defer_close_sinks", False))
+        writer._defer_prepare_final = False
+        writer._defer_close_sinks = False
+        if defer_prepare or defer_close:
+            writer._closeout_running_tid = ident
     cond = getattr(writer, "_thinking_cond", None)
     if cond is not None:
         cond.notify_all()
@@ -396,16 +400,19 @@ def _run_deferred_closeout(
     if not defer_prepare and not defer_close:
         return
     try:
-        if defer_prepare:
+        while defer_prepare:
             _call_sink_prepare_final(writer)
+            with writer._commit_lock:
+                defer_prepare = bool(getattr(writer, "_defer_prepare_final", False))
+                writer._defer_prepare_final = False
     finally:
         with writer._commit_lock:
             if getattr(writer, "_closeout_running_tid", None) == ident:
                 writer._closeout_running_tid = None
-                defer_close = defer_close or bool(getattr(writer, "_defer_close_sinks", False))
-                writer._defer_close_sinks = False
-    if defer_close:
-        close_writer_sinks_now(writer)
+            defer_close = defer_close or bool(getattr(writer, "_defer_close_sinks", False))
+            writer._defer_close_sinks = False
+        if defer_close:
+            close_writer_sinks_now(writer)
 
 
 # LLM: 当跨线程思考发布超过收口等待预算仍在途时，返回显式标记complete=False的当前显示快照，不冻结半截历史。
@@ -458,7 +465,7 @@ def claim_deferred_closeout(writer: Any, *, close_sinks: bool) -> bool:
     ident = threading.get_ident()
     with writer._commit_lock:
         tid = writer._thinking_publishing_tid
-        if tid in (None, ident) and close_sinks:
+        if tid in (None, ident) or not _publisher_thread_alive(tid):
             tid = getattr(writer, "_closeout_running_tid", None)
         if tid in (None, ident) or not _publisher_thread_alive(tid):
             return False
