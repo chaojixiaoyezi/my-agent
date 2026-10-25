@@ -699,3 +699,25 @@ def test_w21_inflight_thinking_tail_ordering_and_exception_recovery(thinking_wri
     sw.complete_thinking_flush(writer, lambda *_a, **_kw: None)
     assert writer._thinking_publishing_tid == 999999999
     writer._thinking_publishing_tid = None
+
+    order: list[str] = []
+    prep_entered, prep_release = threading.Event(), threading.Event()
+    writer.transcript_sink = SimpleNamespace(
+        prepare_final=lambda: (prep_entered.set(), prep_release.wait(3), order.append("prepare_final"), {})[-1],
+        close=lambda: order.append("close"),
+    )
+    writer._thinking_publishing_tid = threading.get_ident()
+    writer._defer_prepare_final = True
+    pub_thread = threading.Thread(
+        target=lambda: (
+            setattr(writer, "_thinking_publishing_tid", threading.get_ident()),
+            sw.complete_thinking_flush(writer, lambda *_a, **_kw: None),
+        )
+    )
+    pub_thread.start()
+    assert prep_entered.wait(3)
+    writer.close()
+    assert order == []
+    prep_release.set()
+    pub_thread.join(3)
+    assert order == ["prepare_final", "close"]

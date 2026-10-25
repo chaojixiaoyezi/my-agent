@@ -486,17 +486,16 @@ class BufferedChunkStreamWriter(StreamLiveness):
         """Return exact structured progress observed during this request."""
         return self._observed_tool_rounds
 
-    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；若跨线程活跃发布在超时预算后仍在途则将sink关闭移交发布线程收尾。
+    # LLM: 先拒绝等待新发布，再刷新非等待宿主事件并等待在途思考落盘；若跨线程活跃发布或延后prepare_final仍在途则将sink关闭移交收尾。
     # 函数用途: 收口显示并拒绝迟到等待事件，异常时仍确保关闭sink，不把流关闭当作工具或任务成功。
     def close(self) -> None:
         self._liveness_closed = True
-        idle = True
         try:
             self.flush_thinking_delta(final=True)
             self.flush()
-            idle = wait_thinking_flush_idle(self, _publish_writer_event)
+            wait_thinking_flush_idle(self, _publish_writer_event)
         finally:
-            if idle or not claim_deferred_closeout(self, close_sinks=True):
+            if not claim_deferred_closeout(self, close_sinks=True):
                 close_writer_sinks_now(self)
 
     # LLM: 在final持久化前刷新宿主事件、等待在途思考落盘并准备已确认显示快照；若跨线程活跃发布仍在途则延后prepare_final并在锁外返回complete=False。

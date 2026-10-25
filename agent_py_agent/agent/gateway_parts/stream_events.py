@@ -293,7 +293,7 @@ def begin_thinking_flush(writer: Any, now: float, *, final: bool = True) -> list
         return batch
 
 
-# LLM: 锁内原子释放当前线程持有的思考发布标识，同时摘取并清空延后的prepare_final与sink close标记并唤醒等待者。
+# LLM: 锁内原子释放当前线程持有的思考发布标识，同时摘取并清空延后的prepare_final与sink close标记，若有延后收口则登记_closeout_running_tid。
 # 函数用途: 确保正常完成路径与异常退出路径都能精确消费一次延后收口标记，且绝不清除其他接班线程的tid。
 def _release_publishing_tid(writer: Any, ident: int) -> tuple[bool, bool]:
     if writer._thinking_publishing_tid != ident:
@@ -305,6 +305,8 @@ def _release_publishing_tid(writer: Any, ident: int) -> tuple[bool, bool]:
     defer_close = bool(getattr(writer, "_defer_close_sinks", False))
     writer._defer_prepare_final = False
     writer._defer_close_sinks = False
+    if defer_prepare or defer_close:
+        writer._closeout_running_tid = ident
     cond = getattr(writer, "_thinking_cond", None)
     if cond is not None:
         cond.notify_all()
@@ -370,16 +372,38 @@ def close_writer_sinks_now(writer: Any) -> None:
             pass
 
 
-# LLM: 当在途思考发布在超时后终于完成时，补跑被close或prepare_display_history延后的sink收口动作。
-# 函数用途: 在发布线程退出临界区后安全执行延后的prepare_final与sink close。
-def _run_deferred_closeout(writer: Any, *, defer_prepare: bool, defer_close: bool) -> None:
-    if defer_prepare:
-        prepare = getattr(getattr(writer, "transcript_sink", None), "prepare_final", None)
-        if callable(prepare):
-            try:
-                prepare()
-            except (OSError, RuntimeError, TypeError, ValueError):
-                pass
+# LLM: 容错调用transcript_sink.prepare_final，异常不外抛以免阻断后续sink关闭。
+# 函数用途: 为延后收口提供隔离的prepare_final执行辅助。
+def _call_sink_prepare_final(writer: Any) -> None:
+    prepare = getattr(getattr(writer, "transcript_sink", None), "prepare_final", None)
+    if not callable(prepare):
+        return
+    try:
+        prepare()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        pass
+
+
+# LLM: 当在途思考发布在超时后终于完成时，按"先prepare_final、再锁内收敛新增defer_close、最后close_sinks"顺序补跑延后收口。
+# 函数用途: 在发布线程退出临界区后安全有序地执行延后的prepare_final与sink close，防止并发close提前关sink。
+def _run_deferred_closeout(
+    writer: Any,
+    ident: int,
+    *,
+    defer_prepare: bool,
+    defer_close: bool,
+) -> None:
+    if not defer_prepare and not defer_close:
+        return
+    try:
+        if defer_prepare:
+            _call_sink_prepare_final(writer)
+    finally:
+        with writer._commit_lock:
+            if getattr(writer, "_closeout_running_tid", None) == ident:
+                writer._closeout_running_tid = None
+                defer_close = defer_close or bool(getattr(writer, "_defer_close_sinks", False))
+                writer._defer_close_sinks = False
     if defer_close:
         close_writer_sinks_now(writer)
 
@@ -423,17 +447,19 @@ def complete_thinking_flush(writer: Any, publish_fn: Any) -> None:
             err_prepare, err_close = _release_publishing_tid(writer, ident)
             defer_prepare = defer_prepare or err_prepare
             defer_close = defer_close or err_close
-        _run_deferred_closeout(writer, defer_prepare=defer_prepare, defer_close=defer_close)
+        _run_deferred_closeout(writer, ident, defer_prepare=defer_prepare, defer_close=defer_close)
     if has_more:
         schedule_thinking_flush_timer(writer)
 
 
-# LLM: 锁内核对是否仍有其他活跃线程正在发布思考，若是则原子登记延后收口标记，避免向已死线程延后收口。
+# LLM: 锁内核对是否仍有其他活跃线程正在发布思考或执行延后prepare_final，若是则原子登记延后收口标记，避免向已死线程延后或提前关sink。
 # 函数用途: 为close与prepare_display_history提供统一的活跃发布线程延后判定。
 def claim_deferred_closeout(writer: Any, *, close_sinks: bool) -> bool:
     ident = threading.get_ident()
     with writer._commit_lock:
         tid = writer._thinking_publishing_tid
+        if tid in (None, ident) and close_sinks:
+            tid = getattr(writer, "_closeout_running_tid", None)
         if tid in (None, ident) or not _publisher_thread_alive(tid):
             return False
         if close_sinks:
