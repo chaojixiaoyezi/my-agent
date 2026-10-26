@@ -1702,12 +1702,25 @@ def _send_agent_control_error(handler, error: AgentControlError) -> None:
     )
 
 
+# LLM: 热/冷通知投影共用只读绑定解析，错误不能和正常无线程混淆；异常由调用方转成失败快照。
+# 函数用途: 读取精确会话线程，遇索引损坏明确失败，不创建线程或恢复存储。
+def _resolve_gateway_notice_thread(store: object, scope: GatewayControlScope) -> object | None:
+    thread, load_error = store.threads.resolve_report(
+        channel=str(scope.channel or "").strip(),
+        channel_conversation_id=str(scope.conversation_id or "").strip(),
+        channel_user_id=str(scope.user_id or "").strip(),
+    )
+    if load_error is not None:
+        raise LookupError("thread index unavailable")
+    return thread
+
+
 # LLM: The canonical thread owns task candidates while each typed task link
 # owns its lifecycle. The response adds a bounded direct-child display
 # projection from canonical runs; neither notices nor that projection can
 # create task state, authorize work, retry, or decide completion. Process-stream identity is
 # echoed with its event sequence, independently from the durable message byte cursor.
-# 函数用途: 按显式能力开放正文、前台流及完整检查点，并附实际执行绑定；轮询不初始化 owner。
+# 函数用途: 投影线程身份、正文与执行绑定；空闲不依赖活动claim，解析损坏不冒充正常空态，轮询不初始化owner。
 def read_gateway_client_notices(
     agent: object,
     *,
@@ -1755,11 +1768,7 @@ def read_gateway_client_notices(
             error="conversation store unavailable",
         )
     try:
-        thread, _error = store.threads.resolve_report(
-            channel=str(scope.channel or "").strip(),
-            channel_conversation_id=conversation_id,
-            channel_user_id=str(scope.user_id or "").strip(),
-        )
+        thread = _resolve_gateway_notice_thread(store, scope)
     except Exception as exc:
         return _empty_gateway_notice_response(
             after,
@@ -1794,6 +1803,7 @@ def read_gateway_client_notices(
     )
     payload = {
         "ok": notices_ok,
+        "thread_id": thread_id,
         "notices": notices,
         "cursor": cursor,
         "transcript_events": [row for row in transcript["events"] if display.foreground_transcript or not row.get("gateway_request_id")],
@@ -1815,7 +1825,7 @@ def read_gateway_client_notices(
 # layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
 # state. Volatile activity and approval state intentionally remain empty until the owner is loaded;
 # an echoed stream cursor keeps the client unchanged until a new real stream exists.
-# 函数用途: 冷用户直接读取已提交正文/完整过程，保持能力声明，不因恢复历史拉起整套Agent。
+# 函数用途: 冷用户只读恢复精确线程，全部候选解析损坏时返回失败而非空态，不拉起整套Agent。
 def _read_cold_owner_notice_projection(
     base_agent: object,
     *,
@@ -1849,17 +1859,15 @@ def _read_cold_owner_notice_projection(
         return payload
 
     candidates: list[tuple[float, str, object, object]] = []
+    resolve_failed = False
     for store_root in existing_conversation_store_roots(owner_home):
         try:
             store = ConversationStore(store_root, initialize=False)
-            thread, load_error = store.threads.resolve_report(
-                channel=str(scope.channel or "").strip(),
-                channel_conversation_id=str(scope.conversation_id or "").strip(),
-                channel_user_id=str(scope.user_id or "").strip(),
-            )
+            thread = _resolve_gateway_notice_thread(store, scope)
         except Exception:
+            resolve_failed = True
             continue
-        if thread is None or load_error is not None:
+        if thread is None:
             continue
         candidates.append(
             (
@@ -1870,10 +1878,14 @@ def _read_cold_owner_notice_projection(
             )
         )
     if not candidates:
+        if resolve_failed:
+            payload["ok"] = False
+            payload["error"] = "thread resolve failed"
         return payload
 
     _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])
     thread_id = str(getattr(thread, "thread_id", "") or "").strip()
+    payload["thread_id"] = thread_id
     notices, cursor, notices_ok = read_background_response_page(
         store, thread_id, after=after, include_foreground=display.foreground_messages,
         include_display_checkpoints=display.display_checkpoints,
@@ -1890,7 +1902,7 @@ def _read_cold_owner_notice_projection(
 # LLM: Empty/error snapshots share one stable transport shape so clients never
 # infer missing approval/activity fields. Empty projections echo the process cursor without
 # claiming a new stream or creating task state.
-# 函数用途: 构造无线程或读取失败时的空后台快照。
+# 函数用途: 构造无线程或读取失败的空快照，显式空thread_id避免客户端把空闲当成范围错误。
 def _empty_gateway_notice_response(
     after: int,
     event_after: int,
@@ -1902,6 +1914,7 @@ def _empty_gateway_notice_response(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "ok": bool(ok),
+        "thread_id": "",
         "notices": [],
         "cursor": after,
         "transcript_events": [],
