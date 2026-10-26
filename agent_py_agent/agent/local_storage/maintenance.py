@@ -39,14 +39,15 @@ STEADY_STATE_EVENTS_MAX_DELETE = 5000
 # 类用途: 管理全文索引与有界事件维护，保同库事务、恢复账本和JSONL独有记录。
 class LocalStoreMaintenanceMixin:
 
-    # LLM: pending与真实DB删除同事务；普通SQL→文件锁，C文件锁→短事务；成功后按ID清账且不丢并发新批次。
+    # LLM: 满额pending先恢复且不选新批；删除与pending同事务，原锁序及成功后按ID清账合同不变。
     # 函数用途: 裁剪一批旧事件并恢复上次未完成的JSONL清理，预演不写、失败留下准确恢复ID。
     def prune_events(self, *, before: float, keep_last: int = 1000, max_delete: int = 5000,
                      dry_run: bool = False) -> dict[str, int | bool]:
         options = (float(before), max(0, int(keep_last)), max(1, int(max_delete)))
         with self._connection() as conn:
-            selected = _select_prunable_event_ids(conn, *options)
             pending = _read_pending_event_ids(conn)
+            selected = (set() if _event_prune_pending_is_full(pending, options[2])
+                        else _select_prunable_event_ids(conn, *options))
         if dry_run or not (selected or pending):
             return _event_prune_result(len(selected), set(), 0, dry_run=bool(dry_run))
         if self.coordinator_io:
@@ -277,10 +278,18 @@ def _write_pending_event_ids(conn, pending):
         conn.execute("DELETE FROM metadata WHERE key=?", (_EVENTS_PRUNE_PENDING_KEY,))
 
 
-# LLM: 调用方已BEGIN；先读旧pending，再删并重核SQLite实际消失ID；两者与账本原子提交。
-# 函数用途: 准备一次可恢复的事件清理批次，触发器忽略的行绝不进入待擦除集。
+# LLM: max_delete已由公开入口归一为正数；小额旧账仍可合并，达到本批或5000阈值则先恢复不扩账。
+# 函数用途: 用同一只读判据限制预查与事务内的新删除批次准入。
+def _event_prune_pending_is_full(pending, max_delete):
+    return len(pending) >= min(max_delete, STEADY_STATE_EVENTS_MAX_DELETE)
+
+
+# LLM: 调用方已BEGIN；满额旧账不再删除新行，其余先删再核实际消失ID，与pending同事务提交。
+# 函数用途: 准备可恢复且不持续扩张的清理批次，触发器忽略的行不进入待擦除集。
 def _prepare_event_prune(conn, options):
     pending = _read_pending_event_ids(conn)
+    if _event_prune_pending_is_full(pending, options[2]):
+        return 0, set(), pending
     selected, deleted = _delete_prunable_events(conn, *options)
     targets = list(dict.fromkeys([*pending, *sorted(deleted)]))
     if targets:
@@ -305,12 +314,12 @@ def _clear_pending_events_transaction(store, targets):
         conn.commit()
 
 
-# LLM: 原输入按surrogateescape/newline空串读取，再按JSONL的LF边界解析；内存只随单记录及有界ID集合变化。
+# LLM: 原输入按二进制LF边界读取，只有strict UTF-8及JSON均有效的命中行可删除；内存只随单记录变化。
 # 函数用途: 将未命中的行逐字节流式复制到同目录暂存文件，不拼接整份流水。
 def _copy_retained_event_lines(path, retained, target_ids):
     removed = 0
-    with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
-        for line in _event_jsonl_lines(handle):
+    with path.open("rb") as handle:
+        for line in handle:
             if _pruned_event_line(line, target_ids):
                 removed += 1
             else:
@@ -318,26 +327,12 @@ def _copy_retained_event_lines(path, retained, target_ids):
     return removed
 
 
-# LLM: newline空串的裸CR分片不能当独立JSONL记录；仅暂存当前LF记录，不缓存其它保留行。
-# 函数用途: 拼回被通用换行拆开的坏记录，防止合法前缀被当成目标行误删。
-def _event_jsonl_lines(handle):
-    fragments = []
-    for fragment in handle:
-        fragments.append(fragment)
-        if fragment.endswith("\n"):
-            yield "".join(fragments)
-            fragments.clear()
-    if fragments:
-        yield "".join(fragments)
-
-
 # LLM: 只替换同events_path且调用者持原锁；生产路径不读回暂存正文，C仅一次replace沿原末门。
 # 函数用途: 原子发表已同步的流式文件；保留既有替换函数的monkeypatch故障注入合同。
 def _publish_pruned_event_file(store, temporary):
     if write_private_text_file_atomic_unlocked is not _DEFAULT_WRITE_ATOMIC_UNLOCKED:
-        # 测试替身兼容路径允许整份读回，默认生产路径不走这里。
-        with temporary.open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
-            content = handle.read()
+        # 仅过滤完成后的测试替身兼容发表允许surrogateescape，不能用它判断输入行是否合法。
+        content = temporary.read_bytes().decode("utf-8", errors="surrogateescape")
         operation = partial(write_private_text_file_atomic_unlocked,
             store.events_path, content, preserve_bytes=True,
             **({"replace_once": True} if store.coordinator_io else {}))
@@ -349,7 +344,7 @@ def _publish_pruned_event_file(store, temporary):
         operation()
 
 
-# LLM: 同目录mkstemp独占0600，文件fsync后替换；无新命中也补父目录fsync，覆盖上次replace后同步失败窗口。
+# LLM: 同目录mkstemp独占0600且只写原始bytes；fsync后替换，无命中仍补父目录同步以覆盖上次partial窗口。
 # 函数用途: 以不随文件行数增长的内存执行重写，无命中时不替换原文件。
 def _stream_prune_event_jsonl(store, target_ids):
     descriptor, name = tempfile.mkstemp(prefix=f".{store.events_path.name}.", suffix=".tmp",
@@ -357,7 +352,7 @@ def _stream_prune_event_jsonl(store, target_ids):
     temporary = Path(name)
     primary = None
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", errors="surrogateescape", newline="") as retained:
+        with os.fdopen(descriptor, "wb") as retained:
             removed = _copy_retained_event_lines(store.events_path, retained, target_ids)
             if removed:
                 retained.flush()
@@ -410,11 +405,13 @@ def _delete_prunable_events(conn, before: float, keep_last: int, max_delete: int
     return len(selected), deleted
 
 
-# LLM: 标量、坏JSON、递归解码超限和非字符串ID都保留；不按时间/正文猜归属，不吞其它存储或来源异常。
-# 函数用途: 只把成功解码且精确命中实际删除ID的事件行过滤掉。
-def _pruned_event_line(line: str, target_ids: set[str]) -> bool:
+# LLM: 原始CR、坏UTF-8、坏JSON、递归超限及非字符串ID都保留；ValueError涵盖UnicodeDecodeError和JSON错误。
+# 函数用途: 只删除strict UTF-8解码成功、无原始CR且精确命中目标ID的JSON对象行。
+def _pruned_event_line(line: bytes, target_ids: set[str]) -> bool:
+    if b"\r" in line.rstrip(b"\n"):
+        return False
     try:
-        row = json.loads(line)
+        row = json.loads(line.decode("utf-8", errors="strict"))
     except (ValueError, RecursionError):
         return False
     return isinstance(row, dict) and isinstance(row.get("event_id"), str) and row["event_id"] in target_ids

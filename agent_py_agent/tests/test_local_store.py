@@ -817,3 +817,108 @@ def test_b2_temp_cleanup_failure_does_not_mask_primary_publish_error(tmp_path, m
     assert caught.value is primary
     assert _b2_pending_ids(store) == [events[0].event_id]
     assert store.events_path.read_bytes() == original
+
+
+# LLM: 坏UTF-8位于JSON字符串内仍须原字节保留；替身writer只在过滤后接收surrogateescape文本。
+# 函数用途: 复现surrogateescape让坏字节行冒充可删除JSON事件的问题，覆盖普通/C及兼容发表路径。
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("patched_writer", [False, True])
+@pytest.mark.parametrize("ending", [b"\n", b""])
+def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_id_matches(
+    tmp_path, monkeypatch, coordinator, patched_writer, ending,
+):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    bad = b'{"event_id":"' + events[0].event_id.encode() + b'","payload":{"text":"\xff"}}' + ending
+    with store.events_path.open("ab") as handle:
+        handle.write(bad)
+    captured = []
+    if patched_writer:
+        writer = maintenance.write_private_text_file_atomic_unlocked
+
+        # LLM: 包装原writer保留其真实写入与C参数，不替代被测的过滤过程。
+        # 函数用途: 核对兼容text writer收到的内容仍含完整坏字节。
+        def capture(path, content, **kwargs):
+            captured.append(content.encode("utf-8", errors="surrogateescape"))
+            return writer(path, content, **kwargs)
+
+        monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", capture)
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+        assert events[0].event_id not in {row.event_id for row in store.timeline()}
+    expected = b"".join(original[1:]) + bad
+    assert result == {"ok": True, "dry_run": False, "selected": 1, "deleted_db": 1, "deleted_jsonl": 1}
+    assert store.events_path.read_bytes() == expected
+    assert captured == ([expected] if patched_writer else [])
+    assert _b2_pending_ids(store) == []
+
+
+# LLM: LF才是二进制JSONL边界；含原始CR的行即便json.loads接受为合法空白，也不得删除。
+# 函数用途: 验证裸CR、CRLF及无末尾LF的CR记录按任务约定原字节保留。
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("ending", [b"\r\n", b"\r \n", b"\r"])
+def test_b2_r2_preserves_raw_carriage_return_even_when_json_parser_accepts_it(tmp_path, coordinator, ending):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    bad = json.dumps({"event_id": events[0].event_id}).encode() + ending
+    assert json.loads(bad)["event_id"] == events[0].event_id
+    with store.events_path.open("ab") as handle:
+        handle.write(bad)
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert result["deleted_jsonl"] == 1
+    assert store.events_path.read_bytes() == b"".join(original[1:]) + bad
+
+
+# LLM: 用真实失败发表建立pending，重复失败不能追加删除；恢复后本轮只清旧账，下轮才继续新批。
+# 函数用途: 覆盖普通/C的当前批次、默认维护5000阈值及大max_delete不能绕过5000恢复闸。
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("entry", ["small_prune", "maintain", "wide_prune"])
+def test_b2_r2_full_pending_recovers_before_new_delete_batches(tmp_path, monkeypatch, coordinator, entry):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    if entry != "small_prune":
+        with scope():
+            store.reset()
+        _b2_seed_events(store, 25005 if entry == "maintain" else 5010)
+    writer = maintenance.write_private_text_file_atomic_unlocked
+    original = store.events_path.read_bytes()
+
+    # LLM: 只在最后发表注入失败，SQL删除与pending仍走真实事务。
+    # 函数用途: 保留待恢复账本及未改写的JSONL供下一次重试。
+    def fail(*args, **kwargs):
+        raise OSError("r2 publish unavailable")
+
+    # LLM: 首次裁剪与重试沿原公开入口，wide重试显式增大max_delete以检查独立5000阈值。
+    # 函数用途: 统一运行三种公开维护调用，不改被测批次逻辑。
+    def prune(*, retry=False):
+        if entry == "maintain":
+            return store.maintain_events(max_batches=2, before=50)
+        maximum = (10000 if retry else 5000) if entry == "wide_prune" else 2
+        return store.prune_events(before=50, keep_last=2, max_delete=maximum)
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    with scope(), pytest.raises(OSError, match="r2 publish"):
+        prune()
+    pending = _b2_pending_ids(store)
+    assert len(pending) == (2 if entry == "small_prune" else 5000)
+    with sqlite3.connect(store.db_path) as conn:
+        remaining = list(conn.execute("SELECT event_id FROM events ORDER BY seq"))
+    for _ in range(2):
+        with scope(), pytest.raises(OSError, match="r2 publish"):
+            prune(retry=True)
+        assert _b2_pending_ids(store) == pending
+        with sqlite3.connect(store.db_path) as conn:
+            assert list(conn.execute("SELECT event_id FROM events ORDER BY seq")) == remaining
+        assert store.events_path.read_bytes() == original
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", writer)
+    with scope():
+        recovered = prune(retry=True)
+    assert recovered == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": len(pending)}
+    assert _b2_pending_ids(store) == []
+    assert [json.loads(line)["event_id"] for line in store.events_path.read_bytes().splitlines()] == [row[0] for row in remaining]
+    with scope():
+        assert prune(retry=True)["deleted_db"] > 0
