@@ -3,6 +3,7 @@
 # 模块用途: 将精确请求接到原执行车道、运行身份和观察标记，保留原原子更新与停止裁决，不复制生命周期。
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,47 @@ MODEL_OBSERVATION_KEY = "model_selection_observation"
 CAPABILITY_OBSERVATION_KEY = "capability_presentation_observation"
 # 一条请求最多保留 8 条能力观测记录：正常每轮一次，防异常循环撑爆。
 _CAPABILITY_OBSERVATION_LIMIT_COUNT = 8
+
+
+# LLM: 只更新同 request/transport attempt/epoch 的顶层遥测，不写签名 metadata、状态或租约；T→JSON 顺序保持。
+# 函数用途: 原子记一段受理到开工时间，并同步本请求 attempt 遥测上下文。
+def record_gateway_request_stage(path: Path, request: dict, stage: str, *, at: float | None = None) -> dict:
+    from ..runtime_db.repository import current_request_stage_timing
+
+    expected = (str(request.get("id") or path.stem), str(request.get("execution_attempt_id") or ""), request.get("lease_epoch", 0))
+    observed = time.time() if at is None else float(at)
+    result = {}
+
+    # LLM: 原子更新内重核准确代次，旧 worker 不得把阶段覆盖到新 lease；遥测不授控制权。
+    # 函数用途: 合并当前代的单个时间点和已经可算的阶段耗时。
+    def update(current):
+        nonlocal result
+        identity = (str(current.get("id") or path.stem), str(current.get("execution_attempt_id") or ""), current.get("lease_epoch", 0))
+        if identity != expected:
+            return current
+        previous = current.get("request_stage_timing", {})
+        result = dict(previous) if isinstance(previous, dict) and previous.get("execution_attempt_id") == expected[1] and previous.get("lease_epoch") == expected[2] else {}
+        result.update({"request_id": expected[0], "execution_attempt_id": expected[1], "lease_epoch": expected[2]})
+        accepted = current.get("created_at") or current.get("submitted_at")
+        result.setdefault("accepted_at", float(accepted) if accepted else None)
+        result.setdefault(stage, observed)
+        for key, start, end in (("queue_wait_ms", "accepted_at", "dispatched_at"),
+                                ("agent_init_ms", "dispatched_at", "owner_agent_ready_at"),
+                                ("lock_wait_ms", "lock_wait_started_at", "lock_acquired_at")):
+            if result.get(start) is not None and result.get(end) is not None:
+                result[key] = max(0.0, (result[end] - result[start]) * 1000.0)
+        current["request_stage_timing"] = result
+        return current
+
+    paths = gateway_paths_from_root(path.parent.parent.parent)
+    with gateway_turn_transition(paths, expected[0]):
+        update_json_file_atomic(path, update, require_existing=True)
+    if result:
+        request["request_stage_timing"] = result
+        active = current_request_stage_timing()
+        if active is not None:
+            active.update(result)
+    return result
 
 
 # LLM: This writer is the only bridge from a promoted conversation task back to the exact

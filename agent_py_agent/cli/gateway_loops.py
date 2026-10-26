@@ -21,6 +21,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 
 from ..agent.concurrency import DurableDaemonThreadPoolExecutor
@@ -94,6 +95,107 @@ GATEWAY_REQUEST_POLL_INTERVAL_SECONDS = 0.2  # request worker 空闲时多久检
 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS = 30.0  # 后台普通宿主异常按 owner/thread 冷却多久再重试
 # owner 唤醒发现整轮磁盘扫描结束后休眠 120 秒再扫下一轮
 BACKGROUND_OWNER_WAKE_RESCAN_SECONDS = 120.0  # 磁盘级 owner 唤醒发现整轮扫完后休眠多久
+STARTUP_GRACE_WINDOW_SECONDS = 180.0
+_COLD_CURATOR_BUILDS_PER_TICK = 2
+
+
+# LLM: 只节流非紧急维护，不用于取消、fencing、权限撤销、租约或未知结果恢复。
+# 函数用途: 检查本 controller 是否仍在启动交互保护窗口。
+def _startup_grace_active(controller) -> bool:
+    started = getattr(controller, "_startup_started_at", None)
+    return started is not None and time.monotonic() - started < STARTUP_GRACE_WINDOW_SECONDS
+
+
+# LLM: 不构造冷 owner，复用原 repo 死亡证明和 CAS；保护期不得推迟该安全恢复，失败进入原 loop 诊断。
+# 函数用途: 维护首拍及周期清理基础和已加载 owner 的运行欠账。
+def _cleanup_loaded_runtime_safety(agent) -> None:
+    agents = [agent]
+    pool = getattr(agent, "_owner_pool", None)
+    if pool is not None:
+        agents.extend(pool.active_agents())
+    seen = set()
+    for item in agents:
+        repo = getattr(getattr(item, "subagents", None), "runtime_db", None)
+        cleanup = getattr(repo, "cleanup_stale_runtime", None)
+        if callable(cleanup) and id(repo) not in seen:
+            seen.add(id(repo))
+            cleanup()
+
+
+# LLM: 每个目录至多采样65个名字；预算用尽或IO未知不推断空目录，不创建服务或读取正文。
+# 函数用途: 三态检查一个目录是否有指定后缀的非空输入。
+def _directory_activity(root: Path, suffix: str) -> str:
+    try:
+        with os.scandir(root) as entries:
+            sample = list(islice(entries, 65))
+    except FileNotFoundError:
+        return "not_due"
+    except OSError:
+        return "unknown"
+    try:
+        if any(entry.name.endswith(suffix) and entry.is_file() and entry.stat().st_size for entry in sample[:64]):
+            return "due"
+    except OSError:
+        return "unknown"
+    return "unknown" if len(sample) > 64 else "not_due"
+
+
+# LLM: 只检查持久队列元数据，不实例化自学习服务；未知不缓存为无任务。
+# 函数用途: 对冷 owner 自学习队列作三态轻量检查。
+def _owner_home_skill_learning_state(home: Path) -> str:
+    states = [_directory_activity(home / "data" / "skill_learning" / folder, ".json")
+              for folder in ("requests", "requests_overflow")]
+    return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
+
+
+# LLM: 只读消息/候选元数据；扫描预算耗尽或不可读为 unknown，不能据此丢掉冷 owner。
+# 函数用途: 确认周期整理是否有实际非空输入，空历史 owner 不实例化。
+def _cold_curator_activity(home: Path) -> str:
+    try:
+        candidate = home / "memory" / "candidates.jsonl"
+        if candidate.exists() and candidate.stat().st_size:
+            return "due"
+    except OSError:
+        return "unknown"
+    from ..agent.owner_wake_discovery import _store_roots
+
+    states = [_directory_activity(root / "messages", ".jsonl") for root in _store_roots(home)]
+    return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
+
+
+# LLM: 三态预检不授执行权；原 curator 仍复核配置、due、失败退避和租约；损坏 state 不当空态。
+# 函数用途: 在创建完整 Agent 前判断冷 owner 是否有策展/自学习工作，并标记紧急恢复。
+def _cold_curator_precheck(supervisor, owner) -> tuple[str, bool]:
+    from ..agent.common.json_io import read_json_object_report
+    from ..agent.memory_store.curator_models import MemoryCuratorState
+    from ..agent.owner_wake_discovery import curator_work_is_due
+    from ..agent.user_space.owner_policy import effective_memory_enabled
+
+    try:
+        base = supervisor._base_agent
+        home = resolve_owner_home(base.home_paths.root, owner).home_dir
+        config = base.config
+        skill = (_owner_home_skill_learning_state(home) if getattr(config, "enable_self_learning", False)
+                 else "not_due")
+        policy = read_json_object_report(home / "memory_policy.json", context="gateway.curator.precheck")
+        if policy.load_error:
+            return ("due" if skill == "due" else "unknown"), False
+        if not getattr(config, "memory_curator_enabled", True) or not effective_memory_enabled(policy.payload):
+            return skill, False
+        report = read_json_object_report(home / "memory" / "curator" / "state.json", context="gateway.curator.state")
+        if report.load_error:
+            return ("due" if skill == "due" else "unknown"), False
+        state = MemoryCuratorState.from_dict(report.payload or {})
+        urgent = bool(state.pending_reasons or state.active_lease)
+        due = curator_work_is_due(home, state,
+            curator_config=getattr(getattr(base, "memory_curator", None), "config", None),
+            timezone_name=getattr(config, "timezone", ""))
+        if skill == "due" or (due and urgent):
+            return "due", urgent
+        activity = _cold_curator_activity(home) if due else "not_due"
+        return (activity if activity != "not_due" else skill), False
+    except (OSError, ValueError, TypeError, AttributeError):
+        return "unknown", False
 
 
 # LLM: GatewayRunContext owns the one long-lived base-agent composition root; every base-owner controller and request lane must reuse it, while owner-scoped isolation remains delegated to OwnerScopedAgentPool.
@@ -1202,6 +1304,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
     # LLM: 原context的停止观察与此supervisor一次绑定，不能用新对象替换在途责任。
     # 函数用途: 接线后台会话与维护资源，并建立可随进程退出回收的调度状态。
     def __init__(self, context: GatewayRunContext) -> None:
+        self._startup_started_at = time.monotonic()
         self._base_agent = _gateway_agent_from_context(context)
         self._shutdown_control = getattr(context, "background_shutdown", None) or BackgroundShutdown()
         self._shutdown_control.bind(self)
@@ -1636,20 +1739,31 @@ def _curator_candidates(
     return candidates
 
 
-# LLM: A soft owner identity is materialized through the one owner pool; base
-# and hard candidates are already agents. Construction failure is isolated to
-# the exact owner and never converted into a fake no-op curator result.
-# 函数用途: 把候选 owner 身份按需加载成 agent，并标记它是否需要稍后软释放。
+# LLM: 复用原 pool.peek/get；unknown 不缓存为无活，失败隔离到准确 owner，不造第二逐出器。
+# 函数用途: 先查磁盘再物化冷 owner，启动保护期仅允许紧急策展冷构建。
 def _resolve_curator_candidate(
     kind: str,
     candidate: object,
     pool: object | None,
+    *, supervisor=None,
 ) -> tuple[object | None, bool]:
     if kind != "owner":
         return candidate, False
     if pool is None:
         return None, True
     try:
+        peek = getattr(pool, "peek", None)
+        loaded = peek(candidate) if callable(peek) else None
+        if loaded is not None:
+            return loaded, True
+        if supervisor is not None:
+            state, urgent = _cold_curator_precheck(supervisor, candidate)
+            if state == "not_due" or (_startup_grace_active(supervisor) and not urgent):
+                return None, True
+            builds = getattr(supervisor, "_curator_cold_builds", 0)
+            if builds >= _COLD_CURATOR_BUILDS_PER_TICK:
+                return None, True
+            supervisor._curator_cold_builds = builds + 1
         return pool.get(candidate, hard=False), True
     except Exception as exc:
         _print_gateway_loop_error(
@@ -1750,9 +1864,8 @@ def _submit_curator_candidate(
         soft_agent_ids.add(key)
 
 
-# LLM: This loop advances the persisted rotating cursor once per examined
-# candidate and consumes capacity only after a future is actually submitted.
-# 函数用途: 公平扫描候选并提交不超过 available 的记忆策展工作，返回下一轮游标。
+# LLM: 每检查一个候选即推进游标；每拍两个冷构建，保护期仅延迟非紧急策展，不阻止 future 核收。
+# 函数用途: 公平扫描候选，限制冷实例初始化成本并保存下轮位置。
 def _submit_due_curators(
     supervisor: object,
     candidates: list[tuple[str, object]],
@@ -1762,11 +1875,17 @@ def _submit_due_curators(
 ) -> int:
     index = int(getattr(supervisor, "_curator_candidate_cursor", 0) or 0) % len(candidates)
     examined = 0
+    supervisor._curator_cold_builds = 0
     while available > 0 and examined < len(candidates):
+        if supervisor._curator_cold_builds >= _COLD_CURATOR_BUILDS_PER_TICK:
+            break
         kind, candidate = candidates[index]
         index = (index + 1) % len(candidates)
         examined += 1
-        agent, is_soft = _resolve_curator_candidate(kind, candidate, pool)
+        if (kind != "owner" and _startup_grace_active(supervisor)
+                and not supervisor._curator_has_pending_reason(candidate) and not _skill_learning_pending(candidate)):
+            continue
+        agent, is_soft = _resolve_curator_candidate(kind, candidate, pool, supervisor=supervisor)
         if agent is None:
             continue
         if not _curator_candidate_is_admitted(
@@ -1787,10 +1906,15 @@ def _submit_due_curators(
     return index
 
 
+# LLM: 只推迟非紧急 retention；安全清理在保护期内照常跑，原分页与 owner 边界保持。
+# 类用途: 分页维护 owner 磁盘保留策略与安全欠账，不创建冷 Agent。
 class _GatewayOwnerMaintenanceController:
     """Apply one bounded owner retention page per tick without creating agents."""
 
+    # LLM: 只给非紧急 retention 建启动时钟，安全恢复不经本 controller。
+    # 函数用途: 绑定基础目录、维护游标和交互保护窗口。
     def __init__(self, context: GatewayRunContext) -> None:
+        self._startup_started_at = time.monotonic()
         self._base_agent = _gateway_agent_from_context(context)
         self._base_home = self._base_agent.home_paths
         self._cursor: OwnerWakeCursor | None = None
@@ -1813,8 +1937,11 @@ class _GatewayOwnerMaintenanceController:
 
     # LLM: 每拍先跑基础 owner，再按分页游标跑一页 scoped owner，只做到期维护、不构造 owner agent；
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘。
-    # 函数用途: 跑一拍 owner 维护并打印一行 [gateway-owner-maintenance] 摘要。
+    # 函数用途: 保护期后跑原 retention 分页，不承担或推迟租约及未知结果恢复。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
+        _cleanup_loaded_runtime_safety(self._base_agent)
+        if _startup_grace_active(self):
+            return _maintenance_summary([], 0)
         current = float(now if now is not None else time.time())
         reports = [run_owner_retention_if_due(self._base_home, now=current)]
         limit = _positive_int_config(
@@ -1872,6 +1999,8 @@ def _maintenance_summary(reports: list[OwnerMaintenanceResult], scanned: int) ->
     }
 
 
+# LLM: 原 SQLite due 索引优先；legacy 全盘修复延到启动保护后，不建立第二调度权威。
+# 类用途: 立即唤醒已到期 owner，并在空闲阶段补旧索引。
 class _GatewaySchedulerDueController:
     """Wake due scoped owners from one indexed projection, then revalidate locally.
 
@@ -1881,7 +2010,11 @@ class _GatewaySchedulerDueController:
     It never executes a job or reads another owner's prompt.
     """
 
+    # LLM: 索引唤醒立即运行；只有一次性 legacy 全盘修复受保护期约束。
+    # 函数用途: 绑定原调度索引、启动时钟和修复完成标志。
     def __init__(self, context: GatewayRunContext) -> None:
+        self._startup_started_at = time.monotonic()
+        self._legacy_repair_done = False
         self._base_agent = _gateway_agent_from_context(context)
         self._registry = shared_active_owner_registry(context.agent)
         repository = getattr(self._base_agent, "scheduler_repository", None)
@@ -1898,11 +2031,24 @@ class _GatewaySchedulerDueController:
         self._claim_limit = max(1, min(pool_limit, _background_owner_workers(self._base_agent)))
         self._lease_seconds = max(30.0, self.interval * 6)
 
+    # LLM: 未索引旧表修复不得挡在已索引任务的首次 tick 前。
+    # 函数用途: 立即运行到期唤醒循环，重型修复交由后续 tick。
     def run(self, stop_event: threading.Event) -> None:
+        _run_loop_with_backoff(
+            stop_event, self.tick,
+            _LoopSite("scheduler-due", "gateway_scheduler_due.tick", "scheduler-due", self.interval),
+        )
+
+    # LLM: 失败不标完成，下一拍仍可重试；保护期不阻塞原 due 索引消费。
+    # 函数用途: 保护期后补一次旧调度表索引。
+    def _repair_legacy_once(self) -> None:
+        if getattr(self, "_legacy_repair_done", False) or _startup_grace_active(self):
+            return
         try:
             repaired = self._due_index.repair_legacy_owner_ledgers(
                 self._base_agent.home_paths.owners_dir
             )
+            self._legacy_repair_done = True
             if int(repaired.get("scanned") or 0) or int(repaired.get("errors") or 0):
                 print(
                     "[gateway-scheduler-due] legacy repair "
@@ -1911,14 +2057,9 @@ class _GatewaySchedulerDueController:
                 )
         except Exception as exc:
             _print_gateway_loop_error("gateway_scheduler_due.repair", "scheduler-due", exc)
-        # 一次性修复之后的常驻 tick 走统一节奏：出错记账、限流打印、等 max(interval, 退避)。
-        _run_loop_with_backoff(
-            stop_event, self.tick,
-            _LoopSite("scheduler-due", "gateway_scheduler_due.tick", "scheduler-due", self.interval),
-        )
 
     # LLM: 登记表实际提供 snapshot；每次 record 前按同一身份键检查活跃状态，只抑制重复宣告不跳过登记刷新。
-    # 函数用途: 唤醒新到期 owner，已有活跃 owner 续领不再重复计数或刷屏打印。
+    # 函数用途: 先唤醒已索引 owner，再于保护期后补旧索引，不重复刷屏宣告。
     def tick(self, *, now: float | None = None) -> int:
         rows = self._due_index.claim_due_owners(
             now=now,
@@ -1943,6 +2084,7 @@ class _GatewaySchedulerDueController:
                 f"[gateway-scheduler-due] due owners announced: {announced}",
                 flush=True,
             )
+        self._repair_legacy_once()
         return announced
 
 

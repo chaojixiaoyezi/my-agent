@@ -348,7 +348,7 @@ def _run_gateway_ask(context: request_context.GatewayAskRunContext):
 
 # LLM: 原模型快照覆盖排队；首次只加载Compact来源，完整准备后先压缩再选模，发送拒绝沿新上下文回退；重复执行不重新决策。
 # 没有会话来源（未绑定 thread 的请求）时不安装恢复宿主，与 overflow 入口的同一判定保持一致。
-# 函数用途: 取得准确执行权后冻结来源与可选建议，在原生成安全点完成自动压缩和选模。
+# 函数用途: 在真实会话车道获取前后记时，取得执行权后冻结来源，在原安全点压缩和选模。
 def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *, captured=None):
     from ..gateway_model_observation import GatewayModelObservation
 
@@ -365,10 +365,12 @@ def _run_gateway_ask_with_model(context: request_context.GatewayAskRunContext, *
     )
     preflight = request_context.preflight_gateway_conversation(load_request)
     _require_gateway_conversation_ready(request, preflight)
+    request_binding.record_gateway_request_stage(context.request_path, request, "lock_wait_started_at")
     with request_binding.gateway_conversation_execution_lane(
         context,
         preflight.thread_id,
     ) as claim:
+        request_binding.record_gateway_request_stage(context.request_path, request, "lock_acquired_at")
         # Reserve the thread before reading compact/history/task state.  A turn
         # queued behind another turn must see that prior turn's final transcript,
         # not the stale snapshot from the time it entered the Gateway.

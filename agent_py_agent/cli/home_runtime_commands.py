@@ -1,4 +1,5 @@
-
+# LLM: 当前 owner 的显式运维入口；结清只走原 RuntimeRepository，不授予 unknown 副作用恢复许可。
+# 模块用途: 提供家目录、保留期和运行欠账的查看与显式清理命令。
 from __future__ import annotations
 
 import argparse
@@ -68,7 +69,7 @@ def add_home_runtime_subcommands(sub: argparse._SubParsersAction) -> None:
     task_workspace_list.set_defaults(func=cmd_task_workspace_list)
 
     stale_attempts = sub.add_parser("runtime-stale-attempts", help="列出（可选结清）没有进程身份、无法自动判死的悬挂运行轮")
-    stale_attempts.add_argument("--settle", action="store_true", help="把开始时间早于阈值的悬挂运行轮记为 unknown 终态（显式结清，不是自动判死）")
+    stale_attempts.add_argument("--settle", action="store_true", help="结清无尝试孤儿、确认历史 unknown 运维欠账并回收死进程锁；不确认未知副作用")
     stale_attempts.add_argument("--older-than-days", type=float, default=1.0, help="只结清开始于多少天前的运行轮；默认 1 天，最小 0")
     stale_attempts.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     stale_attempts.set_defaults(func=cmd_runtime_stale_attempts)
@@ -149,9 +150,8 @@ def cmd_home_index_rebuild(args) -> int:
     return 0
 
 
-# LLM: 只读列出 owner 权威库里没有 runner 身份的悬挂运行轮；--settle 才写库，且只经 RuntimeRepository.settle_unidentified_attempts
-#   的 CAS 结清为 unknown（不是成功/失败），并把结清来源记进 metadata。没有权威库（无 home 上下文）时明确报错，不猜。
-# 函数用途: 让用户看到并显式结清 Gateway 启动事件里报出的"无法证实死活"的运行轮。
+# LLM: --settle 是显式控制，不加交互确认；三类结清沿原 repo CAS，unknown 不伪造 noop，不放宽业务恢复门。
+# 函数用途: 列出或清理当前 owner 运维欠账，报告死锁回收与仍未知的业务状态。
 def cmd_runtime_stale_attempts(args) -> int:
     agent = make_agent(args)
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -159,11 +159,14 @@ def cmd_runtime_stale_attempts(args) -> int:
         print(json.dumps({"ok": False, "error": "当前 home 没有权威运行库，无法列出悬挂运行轮。"}, ensure_ascii=False))
         return 1
     settled: list[str] = []
+    released_locks: list[str] = []
     if bool(getattr(args, "settle", False)):
         days = max(0.0, float(getattr(args, "older_than_days", 1.0) or 0.0))
+        repo.recover_stale_attempts()
+        released_locks = repo.cleanup_stale_resource_locks()
         settled = repo.settle_unidentified_attempts(older_than_seconds=days * 86400.0)
     remaining = repo.unidentified_stale_attempts()
-    payload = {"ok": True, "settled_agent_run_ids": settled, "remaining": remaining}
+    payload = {"ok": True, "settled_agent_run_ids": settled, "released_resource_lock_ids": released_locks, "remaining": remaining}
     if getattr(args, "json", False):
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -172,7 +175,7 @@ def cmd_runtime_stale_attempts(args) -> int:
     for item in remaining:
         print(f"- {item['run_id']} role={item['role']} attempt_status={item['attempt_status']} started_at={item['started_at']:.0f}")
     if remaining and not settled:
-        print("这些运行轮没有记录进程身份，无法自动判死；确认没有别的运行版本在用它们后，可加 --settle 结清为 unknown。")
+        print("剩余记录可能仍活跃、身份不可核验或指针损坏；运维确认不会解除 unknown 业务恢复门。")
     return 0
 
 

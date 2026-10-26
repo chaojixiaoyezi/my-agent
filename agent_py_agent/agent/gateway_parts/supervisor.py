@@ -2,6 +2,7 @@
 # 模块用途: 消费CLI显式装配的同Agent/路径，管理原Gateway健康与重启；不反向依赖CLI或改变责任/安全接班。
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -38,6 +39,83 @@ PLANNED_RESTART_HANDOVER_GRACE_SECONDS = 180.0
 PLANNED_RESTART_STARTING_GRACE_SECONDS = 120.0
 # 慢速重启发生后的退避秒数。
 SLOW_RESTART_BACKOFF_SECONDS = 300.0
+
+
+# LLM: 通知经 supervisor 已装配的独立投递服务，收件人只取原管理员绑定；不请求坏 Gateway/LLM。
+# 函数用途: 尽力直投管理员故障通知，只有 provider 成功回执才算已通知。
+def _deliver_supervisor_admin_alert(supervisor, fault: dict) -> bool:
+    from ..conversation.channels import DeliveryContext, ReplyEnvelope
+    from ..user_space.admin_channel_identity import list_admin_channel_identities
+
+    agent = supervisor._agent
+    service = getattr(agent, "delivery_service", None)
+    if service is None or not getattr(agent.config, "admin_channel_identity_enabled", True):
+        return False
+    delivered = False
+    for identity in list_admin_channel_identities(agent.home_paths.root):
+        receipt = service.deliver(DeliveryContext(identity.channel, identity.user_id,
+            idempotency_key="supervisor:" + fault["alert_key"]),
+            ReplyEnvelope(content=(f"Gateway 监护通知：{fault['fault_status']}。"
+                f"原因：{fault['last_failure_reason']}；已尝试重启 {fault['restart_attempts']} 次；"
+                f"慢探针间隔 {fault['slow_probe_interval_seconds']} 秒。")))
+        delivered = delivered or receipt.delivery_status == "sent"
+    return delivered
+
+
+# LLM: 故障代次取原 Gateway 身份；当前状态缺失沿上一故障代，不能拿 supervisor 存活当业务健康。
+# 函数用途: 为告警去重选择服务代次，不改变任何重启或维护状态。
+def _supervisor_fault_generation(supervisor, previous: dict) -> str:
+    report = read_json_file_report(supervisor._paths.state, context="supervisor.fault.generation")
+    state = report.payload or {}
+    value = state.get("c_run_id") or state.get("process_identity")
+    if not value and state.get("pid"):
+        value = {"pid": state["pid"], "started_at": state.get("started_at")}
+    return json.dumps(value, sort_keys=True) if value else str(previous.get("fault_generation") or f"supervisor-{os.getpid()}")
+
+
+# LLM: 只保存结构化诊断与持久冷却；任何读写/通知失败都不能改变重启计数、维护锁或安全停止决策。
+# 函数用途: 按服务代次和原因持久去重故障/恢复通知，失败至少冷却五分钟后重试。
+def _record_supervisor_fault(supervisor, reason: str, *, recovered: bool = False) -> None:
+    try:
+        path = supervisor._paths.supervisor_state
+        report = read_json_file_report(path, context="supervisor.fault.read")
+        previous = report.payload or {}
+        if recovered and not previous.get("fault_status"):
+            return
+        now = time.time()
+        generation = (previous.get("fault_generation") if recovered else None) or _supervisor_fault_generation(supervisor, previous)
+        phase = "recovery" if recovered else "fault"
+        key = hashlib.sha256(f"{generation}:{phase}:{reason}".encode()).hexdigest()
+        ledger = dict(previous.get("fault_alerts") or {})
+        old = ledger.get(key, {})
+        status = "recovered" if recovered else reason
+        changed_state = previous.get("fault_status") != status or previous.get("fault_generation") != generation
+        fields = {**previous, "fault_generation": generation, "fault_status": status,
+            "restart_attempts": supervisor._restart_count,
+            "slow_probe_interval_seconds": SLOW_RESTART_BACKOFF_SECONDS, "alert_key": key,
+            "alert_notified": bool(old.get("alert_notified")), "fault_alerts": ledger}
+        if recovered:
+            fields["recovered_at"] = now if changed_state else previous.get("recovered_at", now)
+        else:
+            fields["last_failure_reason"] = reason
+            fields["last_failure_at"] = now if changed_state else previous.get("last_failure_at", now)
+        if old and (old.get("alert_notified") or now - float(old.get("last_attempt_at", 0)) < SLOW_RESTART_BACKOFF_SECONDS):
+            if fields != previous:
+                write_json_file_atomic(path, fields)
+            return
+        ledger[key] = {"last_attempt_at": now, "alert_notified": False}
+        if len(ledger) > 32:
+            ledger.pop(next(iter(ledger)))
+        write_json_file_atomic(path, {**previous, **fields})
+        try:
+            notified = _deliver_supervisor_admin_alert(supervisor, fields)
+        except Exception:  # noqa: BLE001 最佳努力的独立通道失败不能改变监护
+            notified = False
+        fields["alert_notified"] = bool(notified)
+        ledger[key]["alert_notified"] = bool(notified)
+        write_json_file_atomic(path, {**previous, **fields})
+    except Exception:  # noqa: BLE001 诊断写入失败不能变成恢复失败或改变重启预算
+        return
 
 
 # LLM: 只比较结构化时间；坏值、非有限值及未来时间不能延长交接宽限，不读日志或mtime。
@@ -261,6 +339,7 @@ def _spawn_gateway_process(supervisor, cmd: list[str], creationflags: int, start
 # 函数用途: 等Gateway自己的身份、running记录和dispatcher心跳同时成立，失败只返回未就绪。
 def _wait_for_gateway_start(supervisor, process) -> int | None:
     deadline = time.monotonic() + 120.0
+    attempt = 0
     while time.monotonic() < deadline:
         if process.poll() is not None:
             supervisor._log_error("Gateway子进程在就绪前已退出。")
@@ -271,7 +350,8 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
                 from .supervisor_generation import complete_gateway_start
 
                 return complete_gateway_start(supervisor, process, report.pid)
-        time.sleep(0.5)
+        time.sleep(min(0.5, 0.05 * (2 ** min(attempt, 4))))
+        attempt += 1
     supervisor._is_gateway_healthy(quiet_unconfirmed=False)
     supervisor._log_error("Gateway在120秒内未确认就绪；保留进程与记录供原状态入口核验。")
     return None
@@ -456,7 +536,23 @@ def _write_supervisor_stop_request(supervisor, pid: int, expected_identity: dict
 
 # LLM: 计划交接先暂停干预，快预算耗尽改有界慢探针；原C/P4/config和P6双读关闭门不变，未知不启动。
 # 函数用途: 避开原安全重启交接，在原精确停止和整代关闭之后执行受节流的恢复。
+# LLM: 在原恢复链外围记录触顶/慢探针失败；通知异常不改变返回结果与原维护锁避让。
+# 函数用途: 执行原精确恢复，并记录首次预算耗尽、慢探针失败或成功恢复。
 def restart_gateway(supervisor) -> bool:
+    supervisor._slow_probe_started = False
+    result = _restart_gateway_attempt(supervisor)
+    if result:
+        _record_supervisor_fault(supervisor, "gateway_recovered", recovered=True)
+    elif supervisor._slow_probe_started:
+        _record_supervisor_fault(supervisor, "slow_probe_failed")
+    elif supervisor._restart_count >= supervisor.max_restart_attempts:
+        _record_supervisor_fault(supervisor, "restart_budget_exhausted")
+    return result
+
+
+# LLM: 原精确代次停止、整代关闭及接班检查保持，不依赖告警送达结果。
+# 函数用途: 执行一次受预算约束的原 Gateway 恢复尝试。
+def _restart_gateway_attempt(supervisor) -> bool:
     supervisor._resolve_agent_and_paths()
     if read_maintenance_lock(supervisor._paths) is not None:
         return False
@@ -516,6 +612,8 @@ def restart_gateway(supervisor) -> bool:
 # 函数用途: 保留快速恢复预算，耗尽后至多每五分钟放行一次原恢复尝试。
 def _restart_budget_allows(supervisor, now: float) -> bool:
     exhausted = supervisor._restart_count >= supervisor.max_restart_attempts
+    if exhausted:
+        _record_supervisor_fault(supervisor, "restart_budget_exhausted")
     last_at = float(getattr(supervisor, "_last_restart_at", 0.0) or 0.0)
     if exhausted and (supervisor.max_restart_attempts <= 0 or last_at <= 0.0 or not math.isfinite(last_at)
                       or now - last_at < SLOW_RESTART_BACKOFF_SECONDS):
@@ -529,6 +627,7 @@ def _restart_budget_allows(supervisor, now: float) -> bool:
         supervisor._log_warn(f"Max restart attempts ({supervisor.max_restart_attempts}) previously reached; "
                              f"attempting slow-backoff recovery probe after {int(SLOW_RESTART_BACKOFF_SECONDS)}s...")
         supervisor._last_restart_at = now
+        supervisor._slow_probe_started = True
     return True
 
 
@@ -562,7 +661,10 @@ def _prepare_supervisor_run(supervisor, supervisor_pid_path: Path) -> None:
 # LLM: 独立路径只表示监护者生命周期，不为Gateway/worker授ready或owner权；身份始终来自原进程context。
 # 函数用途: 原子写监护状态，便于状态命令区分监护进程与业务服务。
 def _write_supervisor_state(supervisor, identity: dict, status: str) -> None:
+    report = read_json_file_report(supervisor._paths.supervisor_state, context="supervisor.lifecycle.read")
+    previous = report.payload or {}
     write_json_file_atomic(supervisor._paths.supervisor_state, {
+        **previous,
         "role": "supervisor", "status": status, "pid": identity["pid"],
         "process_identity": identity, "updated_at": _utc_now_iso(),
     })
@@ -613,6 +715,7 @@ def _run_health_check(supervisor, consecutive_failures: int) -> int:
             return 0
     adapter_healthy = supervisor._check_adapter_health()
     if healthy:
+        _record_supervisor_fault(supervisor, "gateway_recovered", recovered=True)
         _reset_stable_restart_budget(supervisor, now)
         if not adapter_healthy and read_adapter_state(supervisor._paths.root / "adapter_state.json").get("state") == "running":
             supervisor._restart_adapter()
