@@ -45,6 +45,7 @@ import threading
 import time
 from bisect import bisect_right
 from collections import OrderedDict
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
@@ -54,9 +55,12 @@ from typing import Any
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from .conversation.task_state import conversation_task_link_is_terminal
 from .gateway_parts.io import update_json_file_atomic
+from .runtime_db.operations import exec_lock_scope
 from .runtime_db.repository import (
+    _QUIESCENT_ATTEMPT_STATUSES,
     AGENT_RUN_TERMINAL_STATUSES,
     RuntimeRepository,
+    _quiescent_nonterminal_agent_runs,
 )
 from .runtime_db.schema import runtime_db_path
 from .runtime_db.user_interrupt import user_interrupt_resume_until
@@ -907,6 +911,8 @@ _UNFINISHED_RUN_STATUSES = frozenset({"PLANNING", "PENDING", "RUNNING", "BLOCKED
 _SETTLED_LEDGER_STATUSES = frozenset(
     {"DONE", "FAILED", "CANCELLED", "ABANDONED", "TIMEOUT", "CHANNEL_ERROR", "COMPLETED"}
 )
+# TaskRun原生终态与历史关闭别名；closed_at仍是独立关闭事实，不能据父AgentRun终态直接推定。
+_TERMINAL_TASK_RUN_STATUSES = AGENT_RUN_TERMINAL_STATUSES | {"completed", "interrupted", "closed"}
 
 # R1-03 发现层 repo 缓存：唤醒轮每 tick 调 unfinished_task_ids，每 tick 重建
 # RuntimeRepository（schema 初始化开销）不可接受。按 db 文件 mtime_ns 失效——
@@ -942,6 +948,61 @@ def _main_run_row_for_task(repo: RuntimeRepository, task_id: str):
     return repo.main_agent_run_for_task(task_id)
 
 
+# LLM: 仅复用Runtime原静止判据；独立query_only读事务核对整份快照，不结算、取消、释放锁或改投影。
+# 函数用途: 确认BLOCKED子代理已静止且父任务已关闭或整树可结算；缺失、冲突或读错都保留唤醒。
+def _blocked_subagent_is_quiescent(owner_home: Path, run_id: str, payload: dict[str, object]) -> bool:
+    try:
+        repo = _runtime_repo_for_owner(owner_home)
+        if repo is None:
+            return False
+        selected = str(payload.get("run_id") or run_id)
+        record = repo.agent_run_for_run_id(selected) or repo.get_agent_run(selected)
+        if record is None:
+            return False
+        with closing(repo._runtime_connect()) as conn:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            run = conn.execute(
+                "SELECT ar.*, aa.status AS attempt_status, aa.agent_run_id AS attempt_run_id FROM agent_runs ar "
+                "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id WHERE ar.agent_run_id = ?",
+                (record["agent_run_id"],),
+            ).fetchone()
+            if run is None or not run["parent_agent_run_id"] or run["status"] not in {"created", *AGENT_RUN_TERMINAL_STATUSES}:
+                return False
+            if run["current_attempt_id"] and run["attempt_run_id"] != run["agent_run_id"]:
+                return False
+            if run["status"] not in AGENT_RUN_TERMINAL_STATUSES and run["attempt_status"] not in _QUIESCENT_ATTEMPT_STATUSES:
+                return False
+            attempts = conn.execute("SELECT status FROM agent_attempts WHERE agent_run_id = ?", (run["agent_run_id"],))
+            if any(row["status"] not in _QUIESCENT_ATTEMPT_STATUSES for row in attempts):
+                return False
+            if conn.execute("SELECT 1 FROM resource_locks WHERE canonical_scope = ?", (exec_lock_scope(run["agent_run_id"]),)).fetchone():
+                return False
+            task = conn.execute("SELECT * FROM task_runs WHERE task_run_id = ?", (run["task_run_id"],)).fetchone()
+            if task is None:
+                return False
+            task_ref = str(payload.get("root_task_id") or payload.get("task_id") or task["task_id"])
+            # owner投影可用根run_id作task_id；仅接受同一TaskRun的根身份，不跨树猜父任务。
+            if task_ref != task["task_id"] and conn.execute(
+                "SELECT 1 FROM agent_runs WHERE task_run_id = ? AND parent_agent_run_id = '' AND run_id = ?",
+                (run["task_run_id"], task_ref),
+            ).fetchone() is None:
+                return False
+            if float(task["closed_at"] or 0) > 0 or task["status"] in _TERMINAL_TASK_RUN_STATUSES:
+                return True
+            agents = conn.execute(
+                "SELECT ar.agent_run_id, ar.parent_agent_run_id, ar.status, aa.status AS attempt_status "
+                "FROM agent_runs ar LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
+                "WHERE ar.task_run_id = ?", (run["task_run_id"],),
+            ).fetchall()
+            return (sum(not row["parent_agent_run_id"] for row in agents) == 1
+                    and _quiescent_nonterminal_agent_runs(conn, agents) is not None)
+    except Exception:
+        return False
+
+
+# LLM: 收口重试始终优先；仅BLOCKED可由只读runtime快照排除，其他原未完成状态不受影响。
+# 函数用途: 从owner级子代理投影发现真正需要周期驱动的工作，不改静止子代理的可恢复状态。
 def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/state.json 的 status)。
 
@@ -969,7 +1030,10 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
             continue
         if bool(payload.get("runtime_closeout_pending")):
             return True
-        if str(payload.get("status") or "").strip().upper() in _UNFINISHED_RUN_STATUSES:
+        status = str(payload.get("status") or "").strip().upper()
+        if status in _UNFINISHED_RUN_STATUSES:
+            if status == "BLOCKED" and _blocked_subagent_is_quiescent(owner_home, path.parent.name, payload):
+                continue
             return True
     return False
 
