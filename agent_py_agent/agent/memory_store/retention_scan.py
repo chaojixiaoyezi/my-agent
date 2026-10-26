@@ -6,6 +6,11 @@ from __future__ import annotations
 # 模块用途: 为每个 owner 构造可重验证的 retention dry-run 计划，并在坏状态时关闭式报告错误。
 
 import hashlib
+import io
+import json
+import os
+import stat
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +19,7 @@ from typing import Any
 from ..common.json_io import read_json_object_report, read_jsonl_objects_report
 from ..conversation.models import ConversationThread
 from ..conversation.workspace_paths import canonical_task_root, durable_work_root
+from .candidate_models import MemoryCandidate
 from .candidates import (
     RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
     CandidateService,
@@ -43,7 +49,7 @@ _CONTEXT_BUNDLE_SNAPSHOT_DAYS = 30
 _CONTEXT_BUNDLE_LATEST_PREFIX = "latest_context_bundle"
 
 
-# LLM: plan 是纯读取；任一 policy/state/candidate ledger 损坏都会留 error，apply 必须拒绝该计划。
+# LLM: plan纯读取；发现源不可枚举须结构化失败，策略摘要与所有动作经过统一指纹门。
 # 函数用途: 扫描完整会话、审计、Daily、工具大输出、候选、Curator、Compact 和终态任务。
 def build_retention_plan(
     *,
@@ -56,6 +62,8 @@ def build_retention_plan(
     policy_path = Path(home.owner_retention_json)
     policy, policy_error = _load_policy(policy_path)
     fingerprint = file_fingerprint(policy_path)
+    if not valid_fingerprint(fingerprint) and policy_error is None:
+        policy_error = _state_error("MEMORY_RETENTION_POLICY_UNREADABLE", policy_path)
     if policy_error is not None or policy is None:
         return MemoryRetentionReport(
             applied=False,
@@ -70,14 +78,20 @@ def build_retention_plan(
             legal_hold=True,
             policy_fingerprint=fingerprint,
         )
+    try:
+        roots = _conversation_roots(home, conversation_roots)
+    except OSError as exc:
+        return MemoryRetentionReport(applied=False, actions=(), policy_fingerprint=fingerprint,
+            errors=(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE",
+                    str(getattr(exc, "filename", "") or ""), type(exc).__name__),))
     context = _RetentionScanContext(
         home=home,
         candidates=candidates,
         policy=policy,
-        conversation_roots=_conversation_roots(home, conversation_roots),
+        conversation_roots=roots,
         now=current,
     )
-    actions = _collect_retention_actions(context)
+    actions = _validated_actions(_collect_retention_actions(context), context.errors)
     unique = {action.action_id: action for action in actions}
     ordered = tuple(sorted(unique.values(), key=lambda item: (item.category, str(item.path))))
     return MemoryRetentionReport(
@@ -126,6 +140,7 @@ def _collect_retention_actions(context: _RetentionScanContext) -> list[MemoryRet
             days=context.policy.trash_days,
             now=context.now,
             errors=context.errors,
+            conversation_roots=context.conversation_roots,
         )
     )
     return actions
@@ -168,14 +183,15 @@ def _protected_runtime_actions(
     return actions
 
 
-# LLM: Simple age categories are still explicit policy fields; this table does not infer deletion classes from paths.
-# 函数用途: 汇总 audit、Daily、Curator、Compact、cache 和 tmp 的按龄动作。
+# LLM: 引用来源读全才规划Daily/Compact/Curator；Daily/Compact沿原trash_file合同，不直接删除。
+# 函数用途: 汇总按龄动作并保护引用和恢复材料，坏pin来源时关闭相关回收。
 def _aged_file_actions(
     context: _RetentionScanContext,
     selected_task_roots: frozenset[Path],
 ) -> list[MemoryRetentionAction]:
     home = context.home
     policy = context.policy
+    pins, complete = current_retention_pins(home, context.conversation_roots, context.errors, now=context.now)
     categories = (
         # LLM: audit 类别本次一律跳过。类别名与实际数据不符——O/audit/*.jsonl 是主代理每轮的记忆归档
         #   原始事件，Curator 要读，不是审计日志；直接删不可恢复。等存储登记表定了语义再处理
@@ -189,6 +205,8 @@ def _aged_file_actions(
     )
     actions: list[MemoryRetentionAction] = []
     for category, root, days, pattern in categories:
+        if category in {"daily", "compact", "curator_run"} and not complete:
+            continue
         actions.extend(
             _expired_file_actions(
                 category=category,
@@ -198,6 +216,7 @@ def _aged_file_actions(
                 now=context.now,
                 excluded_roots=selected_task_roots,
                 errors=context.errors,
+                protection=(pins, home) if category in {"daily", "compact", "curator_run"} else None,
             )
         )
     return actions
@@ -860,8 +879,8 @@ def _wake_file_thread(path: Path, errors: list[MemoryRetentionError]) -> str:
     return ""
 
 
-# LLM: 普通按龄文件只根据配置 cutoff 和 mtime；symlink 被记录为错误而不是跟随。
-# 函数用途: 规划 audit、Daily、Curator run、Compact、cache 和 tmp 文件清理。
+# LLM: 先mtime后pin/内容读取；stat失败记诊断，Daily/Compact引用受保护，其余沿原删除合同。
+# 函数用途: 规划过期文件，必要时使用原可恢复回收站。
 def _expired_file_actions(
     *,
     category: str,
@@ -871,6 +890,7 @@ def _expired_file_actions(
     now: datetime,
     excluded_roots: frozenset[Path],
     errors: list[MemoryRetentionError],
+    protection: tuple[_RetentionPins, object] | None = None,
 ) -> list[MemoryRetentionAction]:
     if days <= 0 or not root.exists():
         return []
@@ -888,15 +908,26 @@ def _expired_file_actions(
             continue
         if not path.is_file() or _inside_any(path, excluded_roots):
             continue
-        mtime = _mtime(path)
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        except OSError:
+            errors.append(_state_error("MEMORY_RETENTION_FINGERPRINT_INVALID", path))
+            continue
         if mtime >= cutoff:
             continue
+        if protection is not None and protection[0].protects(path, errors):
+            continue
+        trash_home = protection[1] if protection is not None and category in {"daily", "compact"} else None
         actions.append(
             _action(
                 category=category,
-                operation="delete_file",
+                operation="trash_file" if trash_home is not None else "delete_file",
                 path=path,
                 reason=f"older_than_{days}_days",
+                destination=(_trash_destination(trash_home, category=category, path=path, now=now)
+                             if trash_home is not None else None),
                 proof=_ActionProof(
                     source_fingerprint=file_fingerprint(path),
                     cutoff_timestamp=cutoff,
@@ -906,14 +937,15 @@ def _expired_file_actions(
     return actions
 
 
-# LLM: trash 永久清除只接受程序 tombstone 的 moved_at；未知散落文件继续按 mtime 清理并精确指纹。
-# 函数用途: 规划回收站中过期容器和文件的最终删除。
+# LLM: purge只接受tombstone的moved_at，且当前pin完整并不再引用原路径/回收正文时才规划。
+# 函数用途: 规划回收站最终删除，保留宽限期内重新被引用的材料。
 def _trash_actions(
     *,
     home: object,
     days: int,
     now: datetime,
     errors: list[MemoryRetentionError],
+    conversation_roots: tuple[Path, ...] = (),
 ) -> list[MemoryRetentionAction]:
     root = Path(home.owner_trash_dir)
     if days <= 0 or not root.exists():
@@ -921,6 +953,7 @@ def _trash_actions(
     cutoff = now.timestamp() - days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     retention_root = root / "retention"
+    protection = None
     for tombstone in sorted(retention_root.glob("*/*/tombstone.json")) if retention_root.exists() else ():
         report = read_json_object_report(tombstone, context="memory_retention.trash_tombstone")
         moved = _timestamp(report.payload.get("moved_at")) if report.load_error is None else None
@@ -929,6 +962,11 @@ def _trash_actions(
             continue
         if moved < cutoff:
             container = tombstone.parent
+            if protection is None:
+                protection = current_retention_pins(home, conversation_roots, errors, now=now)
+            pins, complete = protection
+            if not complete or trash_payload_pinned(pins, container, errors):
+                continue
             actions.append(
                 _action(
                     category="trash",
@@ -946,19 +984,29 @@ def _trash_actions(
     return actions
 
 
-# LLM: 默认只发现 owner runtime 下标准 ConversationStore；显式 roots 仍拒绝根目录和 symlink。
-# 函数用途: 形成去重后的会话存储根集合。
+# LLM: 使用直接目录枚举以传播权限错误，glob可能把EACCES洗为空；链接/坏类型拒绝，缺失可选源为空。
+# 函数用途: 严格发现标准ConversationStore根，保证pin发现完整性。
 def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path, ...]:
     discovered = list(explicit)
     runtime = Path(home.owner_workspace_dir) / "runtime" / "workspaces"
-    if runtime.exists():
-        discovered.extend(path for path in runtime.glob("*/conversations") if path.is_dir())
+    try:
+        runtime.stat()
+    except FileNotFoundError:
+        pass
+    else:
+        if runtime.is_symlink():
+            raise OSError("retention discovery root is a symlink")
+        discovered.extend(path / "conversations" for path in runtime.iterdir() if path.is_dir())
     result: list[Path] = []
     for raw in discovered:
-        path = Path(raw).expanduser().resolve(strict=False)
-        if path == Path(path.anchor) or path.is_symlink() or not (path / "threads").is_dir():
+        path = Path(raw).expanduser()
+        try:
+            info = (path / "threads").stat(follow_symlinks=False)
+        except FileNotFoundError:
             continue
-        result.append(path)
+        if path == Path(path.anchor) or path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+            raise OSError("retention conversation root is unsafe")
+        result.append(path.resolve(strict=False))
     return tuple(dict.fromkeys(result))
 
 
@@ -1058,41 +1106,339 @@ def _trash_destination(home: object, *, category: str, path: Path, now: datetime
     return Path(home.owner_trash_dir) / "retention" / category / f"{stamp}-{path.name}-{digest}"
 
 
-# LLM: file fingerprint 是 apply 重验证证据，missing 与真实空文件必须区分。
-# 函数用途: 计算单文件 SHA-256 或 missing 标记。
+# LLM: 只有严格小写64hex可作删除证据；missing/unreadable及任何非字符串都拒绝。
+# 函数用途: 校验指纹是否为完整SHA256摘要。
+def valid_fingerprint(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+# LLM: 同一FD读前/读后身份须相同且绑定原路径；非阻塞nofollow打开防FIFO替换挂起，不漂白读错。
+# 函数用途: 用64KiB块计算稳定普通文件的SHA256，分别返回missing或unreadable。
 def file_fingerprint(path: Path) -> str:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        with _fingerprint_source(path) as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                return "unreadable"
+            digest = hashlib.sha256()
+            while chunk := source.read(65536):
+                digest.update(chunk)
+            after = os.fstat(source.fileno())
+            current = path.stat(follow_symlinks=False)
+        if _file_identity(before) != _file_identity(after) or _file_identity(after) != _file_identity(current):
+            return "unreadable"
+        return digest.hexdigest()
+    except FileNotFoundError:
+        return "missing"
     except OSError:
-        return "missing"
+        return "unreadable"
 
 
-# LLM: tree fingerprint 组合相对路径、类型和文件 hash；symlink 以显式标记参与漂移检测但不会跟随。
-# 函数用途: 计算目录在 plan 时的稳定快照指纹。
+# LLM: 不跟随最终链接并非阻塞打开，再由调用者fstat验证普通文件；fdopen失败也关闭原FD。
+# 函数用途: 为流式指纹取得安全二进制句柄，避免FIFO使维护无限阻塞。
+def _fingerprint_source(path: Path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+# LLM: ctime补强同大小改写检测；与任务要求的dev/ino/size/mtime_ns同时核对，不授予写权限。
+# 函数用途: 提取文件快照身份供流式读取验证。
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+
+
+# LLM: 任一来源或权威摘要无效即取消动作并记录路径级诊断，目录组合也不能漂白坏成员。
+# 函数用途: 为所有扫描类别统一执行指纹准入门。
+def _validated_actions(actions, errors):
+    accepted = []
+    for action in actions:
+        checks = ([(action.path, action.source_fingerprint)] if action.operation != "candidate_delete" else [])
+        if action.authority_path is not None:
+            checks.append((action.authority_path, action.authority_fingerprint))
+        bad = [path for path, digest in checks if not valid_fingerprint(digest)]
+        if bad:
+            errors.extend(_state_error("MEMORY_RETENTION_FINGERPRINT_INVALID", path) for path in bad)
+        else:
+            accepted.append(action)
+    return accepted
+
+
+# LLM: 目录枚举/任一成员缺失或不可读都返回无效标记，成员检查集中于_tree_member_material，不漂白错误。
+# 函数用途: 计算目录快照，失败关闭并且不跟随链接。
 def tree_fingerprint(path: Path) -> str:
-    if not path.exists():
+    try:
+        info = path.stat(follow_symlinks=False)
+        if stat.S_ISREG(info.st_mode):
+            return file_fingerprint(path)
+        if not stat.S_ISDIR(info.st_mode):
+            return "unreadable"
+        material: list[str] = []
+        for item in _walk_files(path, include_dirs=True):
+            material.append(_tree_member_material(path, item))
+        return hashlib.sha256("\n".join(sorted(material)).encode("utf-8")).hexdigest()
+    except FileNotFoundError:
         return "missing"
-    if path.is_file():
-        return file_fingerprint(path)
-    material: list[str] = []
-    for item in sorted(path.rglob("*")):
-        relative = item.relative_to(path)
-        if item.is_symlink():
-            material.append(f"L:{relative}")
-        elif item.is_file():
-            material.append(f"F:{relative}:{file_fingerprint(item)}")
-        elif item.is_dir():
-            material.append(f"D:{relative}")
+    except OSError:
+        return "unreadable"
+
+
+# LLM: 仅普通目录或有效摘要普通文件可进入组合；链接/特殊文件/坏hash抛错令外层无效。
+# 函数用途: 为目录指纹生成一个成员的安全材料。
+def _tree_member_material(root: Path, item: Path) -> str:
+    relative = item.relative_to(root)
+    member = item.stat(follow_symlinks=False)
+    if stat.S_ISDIR(member.st_mode):
+        return f"D:{relative}"
+    if stat.S_ISREG(member.st_mode):
+        digest = file_fingerprint(item)
+        if valid_fingerprint(digest):
+            return f"F:{relative}:{digest}"
+    raise OSError("retention tree member is unreadable")
+
+
+# LLM: 多路径摘要仅组合真实有效文件hash；任何坏成员都使外层无效。
+# 函数用途: 安全计算一组精确文件的稳定指纹。
+def paths_fingerprint(paths: tuple[Path, ...]) -> str:
+    material = []
+    for path in sorted(paths, key=str):
+        digest = file_fingerprint(path)
+        if not valid_fingerprint(digest):
+            return "unreadable"
+        material.append(f"{path}:{digest}")
     return hashlib.sha256("\n".join(material).encode("utf-8")).hexdigest()
 
 
-# LLM: related path hash 同时绑定文件路径和正文 hash，任一新增/删除/修改会阻止旧 conversation plan。
-# 函数用途: 计算一组精确文件的稳定指纹。
-def paths_fingerprint(paths: tuple[Path, ...]) -> str:
-    material = "\n".join(
-        f"{path}:{file_fingerprint(path)}" for path in sorted(paths, key=str)
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+# LLM: os.walk错误必须显式传播；不存在的可选根为空，已存在根的权限和symlink错误不能洗成零成员。
+# 函数用途: 严格枚举目录，供指纹和pin来源扫描复用。
+def _walk_files(root: Path, *, include_dirs: bool = False):
+    try:
+        info = root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("retention root is not a regular directory")
+    # LLM: 遍历器回调不容忍权限等错误，防止静默漏文件。
+    # 函数用途: 将目录遍历错误传回扫描调用方。
+    def failed(error):
+        raise error
+    for directory, dirs, files in os.walk(root, followlinks=False, onerror=failed):
+        base = Path(directory)
+        for name in sorted(dirs):
+            child = base / name
+            if child.is_symlink():
+                raise OSError("retention never follows symbolic links")
+            if include_dirs:
+                yield child
+        for name in sorted(files):
+            child = base / name
+            if child.is_symlink():
+                raise OSError("retention never follows symbolic links")
+            yield child
+
+
+# LLM: pin为单次扫描临时投影，不是第二份权威；仅解析结构化引用字段，绝不解析正文。
+# 类用途: 保存被引用的路径和记录ID，供扫描与执行阶段统一保护文件。
+@dataclass
+class _RetentionPins:
+    home: Path
+    paths: set[Path] = field(default_factory=set)
+    ids: set[str] = field(default_factory=set)
+
+    # LLM: 只收引用元数据；相对路径同时按owner和来源目录解释，保守多保护、不扩大删除范围。
+    # 函数用途: 递归收集引用容器里的路径和ID，忽略摘要等正文。
+    def collect(self, value: object, source: Path, *, reference: bool = False) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"content", "summary", "quote", "text", "reason", "note"}:
+                    continue
+                selected = reference or key in {"source", "path", "file_path", "cold_detail_ref"} or any(
+                    part in key for part in ("_ref", "_source", "checkpoint", "legal_hold"))
+                self.collect(item, source, reference=selected)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                self.collect(item, source, reference=reference)
+        elif reference and isinstance(value, str) and value:
+            self.ids.add(value)
+            text = value.removeprefix("file://").removeprefix("file:").split("#", 1)[0]
+            if "/" in text or text.endswith((".json", ".jsonl")):
+                path = Path(text)
+                roots = (self.home, source.parent) if not path.is_absolute() else (Path("/"),)
+                self.paths.update((root / path).resolve(strict=False) for root in roots)
+
+    # LLM: 路径重叠双向保护；content_path仅供trash读取真实payload，不读取墓碑声明的外部原路径。
+    # 函数用途: 判断文件或目录是否被引用；坏记录不按零引用处理。
+    def protects(self, path: Path, errors: list[MemoryRetentionError], *, content_path: Path | None = None) -> bool:
+        resolved = path.resolve(strict=False)
+        if any(resolved == pin or pin in resolved.parents or resolved in pin.parents for pin in self.paths):
+            return True
+        if path.name in self.ids or path.stem in self.ids:
+            return True
+        if not self.ids or path.suffix not in {".json", ".jsonl"}:
+            return False
+        try:
+            with closing(_pin_rows(content_path or path, jsonl=path.suffix == ".jsonl")) as rows:
+                return any(_row_has_pinned_id(row, self.ids) for row in rows)
+        except (OSError, ValueError, TypeError):
+            errors.append(_state_error("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", path))
+            return True
+
+
+# LLM: ID只取结构化身份字段；不搜索content/summary字符串，引用不能成为语义授权。
+# 函数用途: 检查过期Daily/Compact行身份是否仍被引用。
+def _row_has_pinned_id(value: object, ids: set[str]) -> bool:
+    if isinstance(value, list):
+        return any(_row_has_pinned_id(item, ids) for item in value)
+    if not isinstance(value, dict):
+        return False
+    for key, item in value.items():
+        if (key == "id" or key.endswith("_id")) and isinstance(item, str) and item in ids:
+            return True
+        if isinstance(item, (dict, list)) and _row_has_pinned_id(item, ids):
+            return True
+    return False
+
+
+# LLM: JSONL逐行释放而不物化全账本；源须普通文件且FD/路径首末一致，完整消费后方可认定零pins。
+# 函数用途: 流式严格读取pin来源；提前停止者须close，函数不创建锁或写文件。
+def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
+    try:
+        before = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        if required:
+            raise
+        return
+    if not stat.S_ISREG(before.st_mode):
+        raise OSError("pin source is not a regular file")
+    with io.TextIOWrapper(_fingerprint_source(path), encoding="utf-8") as source:
+        if _file_identity(before) != _file_identity(os.fstat(source.fileno())):
+            raise OSError("pin source changed before reading")
+        is_jsonl = jsonl if jsonl is not None else path.suffix == ".jsonl"
+        rows = (json.loads(line) for line in source if line.strip()) if is_jsonl else (json.load(source),)
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("pin source contains non-object rows")
+            yield row
+        if _file_identity(before) != _file_identity(os.fstat(source.fileno())):
+            raise OSError("pin source changed while reading")
+    if _file_identity(before) != _file_identity(path.stat(follow_symlinks=False)):
+        raise OSError("pin source changed while reading")
+
+
+# LLM: JSON对象入口完整耗尽读取器以核对首末FD和路径，不允许未验证首行充当权威状态。
+# 函数用途: 读取唯一pin状态对象，缺失或多对象拒绝。
+def _pin_object(path: Path) -> dict[str, Any]:
+    rows = list(_pin_rows(path, required=True))
+    if len(rows) != 1:
+        raise ValueError("pin source requires exactly one object")
+    return rows[0]
+
+
+# LLM: 墓碑声明只作pin路径映射，正文只读当前容器payload；坏墓碑或坏正文关闭purge，绝不读source外部文件。
+# 函数用途: 保护回收站中仍被原路径、实际路径或记录ID引用的材料。
+def trash_payload_pinned(pins: _RetentionPins, container: Path, errors: list[MemoryRetentionError]) -> bool:
+    try:
+        row = _pin_object(container / "tombstone.json")
+        original = row.get("source_path")
+        if row.get("status") != "trashed" or not isinstance(original, str) or not original:
+            return True
+        payload = container / "payload"
+        return pins.protects(payload, errors) or pins.protects(Path(original), errors, content_path=payload)
+    except (OSError, ValueError, TypeError, IndexError):
+        errors.append(_state_error("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", container))
+        return True
+
+
+# LLM: 正式记忆复用原物化的版本/墓碑语义；坏schema拒绝，已删除记录不保留旧引用。
+# 函数用途: 收集仍有效正式记忆的来源引用。
+def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> None:
+    from .jsonl import _materialize_memory_events, _memory_record_from_obj
+
+    path = Path(home.owner_memory_long_term_jsonl)
+    events = []
+    for row in _pin_rows(path):
+        record = _memory_record_from_obj(row)
+        if record is None:
+            raise ValueError("formal pin source schema is invalid")
+        events.append(record)
+    for record in _materialize_memory_events(events, include_expired=True):
+        if not record.expires_at or record.expires_at > now.timestamp():
+            pins.collect({"source": record.source, "attributes": record.attributes}, path)
+
+
+# LLM: 活跃/未知任务和法律保留任务的引用始终保护；坏state不跳过，整组pin视图关闭。
+# 函数用途: 收集规范恢复任务状态引用与受保护恢复根。
+def _task_reference_pins(home: object, policy: MemoryRetentionPolicy, pins: _RetentionPins) -> None:
+    for root in _recovery_roots(home):
+        for path in _walk_files(root):
+            if path.name != "state.json" or path.parent.name != "work":
+                continue
+            task_root = path.parent.parent
+            if canonical_task_root(pins.home, task_root) is None:
+                continue
+            row = _pin_object(path)
+            status = str(row.get("status") or "").upper()
+            if status not in TASK_TERMINAL_STATUSES or row.get("task_id") in policy.legal_hold_task_ids:
+                pins.paths.add(task_root.resolve(strict=False))
+                pins.collect(row, path)
+
+
+# LLM: 线程head存在则整份checkpoint账本及所有来源保护；不凭mtime判断线程是否失活。
+# 函数用途: 收集线程、活跃任务以及摘要基础引用，缺失检查点按来源损坏拒绝。
+def _conversation_reference_pins(home: object, roots: tuple[Path, ...], pins: _RetentionPins) -> None:
+    for root in roots:
+        for path in _walk_files(root / "threads"):
+            if path.suffix != ".json":
+                continue
+            row = _pin_object(path)
+            thread = ConversationThread.from_dict(row)
+            if not thread.thread_id or thread.thread_id != path.stem:
+                raise ValueError("pin thread identity mismatches")
+            pins.collect(row, path)
+            if thread.compact_checkpoint_id:
+                checkpoint = Path(home.owner_compact_dir) / "conversations" / f"{thread.thread_id}.jsonl"
+                pins.paths.add(checkpoint.resolve(strict=False))
+                for item in _pin_rows(checkpoint, required=True):
+                    pins.collect(item, checkpoint)
+
+
+# LLM: 每次重建且校验候选schema/重复ID；不可读则complete=False，不按空pin删除；未知错误路径不假填owner根误伤独立类别。
+# 函数用途: 在扫描和执行前只读重核正式、候选冷引用、线程、任务、Curator基础与法律保留。
+def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[MemoryRetentionError],
+                           *, now: datetime) -> tuple[_RetentionPins, bool]:
+    pins = _RetentionPins(Path(home.owner_home_dir))
+    try:
+        policy, error = _load_policy(Path(home.owner_retention_json))
+        if error is not None or policy is None or policy.legal_hold:
+            raise ValueError("pin protection policy is unavailable or held")
+        _formal_memory_pins(home, pins, now)
+        candidate_path = Path(home.owner_memory_candidates_jsonl)
+        candidate_ids: set[str] = set()
+        for row in _pin_rows(candidate_path):
+            candidate_id = MemoryCandidate.from_record(row).candidate_id
+            if candidate_id in candidate_ids:
+                raise ValueError("duplicate candidate pin source")
+            candidate_ids.add(candidate_id)
+            pins.collect(row, candidate_path)
+        _task_reference_pins(home, policy, pins)
+        _conversation_reference_pins(home, _conversation_roots(home, roots), pins)
+        curator = Path(home.owner_memory_curator_runs_dir)
+        for path in _walk_files(curator):
+            if path.suffix in {".json", ".jsonl"}:
+                for row in _pin_rows(path, required=True):
+                    pins.collect(row, path)
+        for path in (curator.parent / "state.json",):
+            for row in _pin_rows(path):
+                pins.collect(row, path)
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+        errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(getattr(exc, "filename", "") or ""),
+                                          type(exc).__name__))
+        return pins, False
+    return pins, True
 
 
 # LLM: 时间只用于保留期 cutoff，不参与长期事实冲突或真伪判定。

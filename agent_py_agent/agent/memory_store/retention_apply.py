@@ -42,10 +42,13 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    current_retention_pins,
     current_tool_manifest_references,
     file_fingerprint,
     paths_fingerprint,
+    trash_payload_pinned,
     tree_fingerprint,
+    valid_fingerprint,
 )
 from .retention_transition import RetentionPolicyChangedError
 
@@ -151,14 +154,15 @@ def record_retention_report(
     _append_retention_audit(home, report=report, now=now)
 
 
-# LLM: 先复核 fingerprint、合法未晋升状态和 cutoff，再把完整快照交给原删除锁内 CAS；正文不入报告。
-# 函数用途: 清理过期未晋升候选，锁前变化单列 state_changed 而不虚报删除。
+# LLM: 每批只算一次账本摘要并只读借用合法状态行；摘要、cutoff与原删除锁内CAS均须通过，不复制全账本。
+# 函数用途: 清理过期未晋升候选，坏摘要或锁前变化单列state_changed。
 def _apply_candidate_actions(
     candidates: CandidateService,
     actions: tuple[MemoryRetentionAction, ...],
 ) -> tuple[list[MemoryRetentionAction], list[MemoryRetentionError]]:
     errors: list[MemoryRetentionError] = []
-    if any(action.authority_fingerprint != file_fingerprint(candidates.path) for action in actions):
+    observed_fingerprint = file_fingerprint(candidates.path)
+    if any(not _fingerprint_matches(action.authority_fingerprint, observed_fingerprint) for action in actions):
         return (
             [replace(action, status="state_changed") for action in actions],
             [
@@ -170,7 +174,8 @@ def _apply_candidate_actions(
             ],
         )
     try:
-        by_id = {record.candidate_id: record for record in candidates.list()}
+        records = getattr(candidates, "readonly_rows", candidates.list)(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES)
+        by_id = {record.candidate_id: record for record in records}
     except Exception as exc:  # noqa: BLE001 - repository corruption becomes one stable apply error.
         return (
             [replace(action, status="failed") for action in actions],
@@ -229,7 +234,8 @@ def _apply_candidate_actions(
     return results, errors
 
 
-# LLM: operation 是宿主执行枚举；未知值失败；清单回收必须复核快照阶段之后的当前引用，不能只信规划结果。
+# LLM: 所有动作先拒绝无效摘要；Daily/Compact/Curator及trash永久删除前重核引用，来源不可读直接拒绝。
+#   operation是宿主枚举；清单仍复核快照阶段后的引用，不信旧规划。
 # LLM: tmp/cache文件确已删除才按同一action cutoff清空过期祖先，沿规范根的nofollow目录句柄rmdir，不删根或跨链接。
 # 函数用途: 分派并复核保留动作，文件删除后仅尝试清理未变新且已空的父目录。
 def _apply_action(
@@ -242,6 +248,17 @@ def _apply_action(
 ) -> MemoryRetentionAction:
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
+    if not valid_fingerprint(action.source_fingerprint):
+        return replace(action, status="state_changed")
+    if action.category in {"daily", "compact", "curator_run", "trash"}:
+        pin_errors: list[MemoryRetentionError] = []
+        pins, complete = current_retention_pins(home, allowed_external_roots, pin_errors, now=now)
+        if not complete:
+            raise OSError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE")
+        protected = (trash_payload_pinned(pins, action.path, pin_errors) if action.category == "trash"
+                     else pins.protects(action.path, pin_errors))
+        if protected:
+            return replace(action, status="state_changed")
     if action.operation == "delete_file":
         result = _delete_file(action)
         if result.status == "deleted" and action.category in {"tmp", "cache"}:
@@ -263,14 +280,14 @@ def _apply_action(
     raise ValueError(f"unsupported retention operation: {action.operation}")
 
 
-# LLM: 普通文件删除前核对 hash 和 mtime cutoff；内容变化或变新都跳过。
-# 函数用途: 删除一个过期 audit/Daily/Curator/Compact/cache/tmp 文件。
+# LLM: 只有计划和当前摘要均合法且相等才允许unlink；mtime仍须早于cutoff。
+# 函数用途: 删除一个通过指纹安全门的过期文件。
 def _delete_file(action: MemoryRetentionAction) -> MemoryRetentionAction:
     if not action.path.exists():
         return replace(action, status="missing")
     if (
         action.path.is_symlink()
-        or file_fingerprint(action.path) != action.source_fingerprint
+        or not _fingerprint_matches(action.source_fingerprint, file_fingerprint(action.path))
         or action.cutoff_timestamp is None
         or action.path.stat().st_mtime >= action.cutoff_timestamp
     ):
@@ -279,7 +296,7 @@ def _delete_file(action: MemoryRetentionAction) -> MemoryRetentionAction:
     return replace(action, status="deleted")
 
 
-# LLM: task/tool/subagent 目录需要 authority state 与目录 fingerprint 同时不变，才可移入可恢复回收站。
+# LLM: task/tool/subagent的权威状态、目录及计划摘要均须合法不变，坏成员不可漂白为组合摘要。
 # 函数用途: 将一棵过期目录连同 tombstone 安全移动。
 def _trash_tree(
     *,
@@ -289,7 +306,7 @@ def _trash_tree(
 ) -> MemoryRetentionAction:
     if not action.path.exists():
         return replace(action, status="missing")
-    if not _authority_still_eligible(action) or tree_fingerprint(action.path) != action.source_fingerprint:
+    if not _authority_still_eligible(action) or not _fingerprint_matches(action.source_fingerprint, tree_fingerprint(action.path)):
         return replace(action, status="state_changed")
     destination = _validated_destination(home, action)
     destination.mkdir(parents=True, exist_ok=False)
@@ -307,7 +324,8 @@ def _trash_tree(
     return replace(action, status="trashed")
 
 
-# LLM: 单文件版 _trash_tree：没有 authority 状态文件可核对，只按"计划时的字节指纹 + 计划 cutoff"重验证；
+# LLM: 单文件摘要必须为合法小写64hex且当前值相等；原trash_file两阶段墓碑和回滚合同不变。
+#   没有authority状态文件可核对，按"计划时字节指纹 + cutoff"重验证；
 #   文件在 plan 之后被改过或变新都跳过（state_changed）。移走最后一个文件后顺手删空的父目录
 #   （仅空目录，沿用 home_layout._remove_dir_if_empty 的口径），例如快照的日期目录。
 # 函数用途: 把一个过期单文件（快照 / 工具清单）连同 tombstone 安全移入可恢复回收站。
@@ -321,7 +339,7 @@ def _trash_file(
         return replace(action, status="missing")
     if (
         action.path.is_symlink()
-        or file_fingerprint(action.path) != action.source_fingerprint
+        or not _fingerprint_matches(action.source_fingerprint, file_fingerprint(action.path))
         or action.cutoff_timestamp is None
         or action.path.stat().st_mtime >= action.cutoff_timestamp
     ):
@@ -426,18 +444,18 @@ def _prune_empty_ephemeral_dirs(root: Path, *, now: float, min_age_seconds: floa
     return removed
 
 
-# LLM: trash purge 也必须核对 tombstone 和整棵容器 fingerprint，防止 plan 后加入的新文件被一起删除。
+# LLM: trash purge须核对合法tombstone和整棵容器摘要，任何坏成员拒绝永久删除。
 # 函数用途: 永久删除超过 trash_days 的 retention 容器。
 def _delete_tree(action: MemoryRetentionAction) -> MemoryRetentionAction:
     if not action.path.exists():
         return replace(action, status="missing")
-    if not _authority_still_eligible(action) or tree_fingerprint(action.path) != action.source_fingerprint:
+    if not _authority_still_eligible(action) or not _fingerprint_matches(action.source_fingerprint, tree_fingerprint(action.path)):
         return replace(action, status="state_changed")
     shutil.rmtree(action.path)
     return replace(action, status="deleted")
 
 
-# LLM: Conversation 原文按 thread 整体移动；thread lock 内重验 active task、updated_at、相关文件和共享索引。
+# LLM: Conversation在原thread锁内重验合法单文件/组合摘要、active task、时间及索引，坏成员拒绝移动。
 # 函数用途: 将一个过期 ConversationStore thread 及附属文件移入同一回收容器。
 def _trash_conversation(
     *,
@@ -459,8 +477,8 @@ def _trash_conversation(
             or thread.active_task_ids
             or action.cutoff_timestamp is None
             or thread.updated_at >= action.cutoff_timestamp
-            or file_fingerprint(action.path) != action.authority_fingerprint
-            or paths_fingerprint(action.related_paths) != action.source_fingerprint
+            or not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(action.path))
+            or not _fingerprint_matches(action.source_fingerprint, paths_fingerprint(action.related_paths))
         ):
             return replace(action, status="state_changed")
         for path in action.related_paths:
@@ -527,13 +545,13 @@ def _trash_conversation(
     return replace(action, status="trashed")
 
 
-# LLM: authority 文件任何字节变化都保守跳过；状态仍须为原 terminal status 且时间仍早于 cutoff。
+# LLM: 权威文件必须有合法且不变摘要，状态仍须为原terminal且时间早于cutoff；不可读不等于missing。
 # 函数用途: 重验证 task/subagent/tombstone 权威状态。
 def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
     authority = action.authority_path
     if authority is None or not authority.is_file():
         return False
-    if file_fingerprint(authority) != action.authority_fingerprint:
+    if not _fingerprint_matches(action.authority_fingerprint, file_fingerprint(authority)):
         return False
     report = read_json_object_report(authority, context="memory_retention.apply_authority")
     if report.load_error is not None:
@@ -554,6 +572,12 @@ def _authority_still_eligible(action: MemoryRetentionAction) -> bool:
         and action.cutoff_timestamp is not None
         and timestamp < action.cutoff_timestamp
     )
+
+
+# LLM: 只有两个有效SHA256相等才通过，不允许哨兵值相等授权破坏操作。
+# 函数用途: 统一执行端的指纹合法性与相等检查。
+def _fingerprint_matches(expected: object, observed: object) -> bool:
+    return valid_fingerprint(expected) and valid_fingerprint(observed) and expected == observed
 
 
 # LLM: index 损坏会让 conversation apply 整体回滚，不能删除原文后留下无法解析的共享路由。
