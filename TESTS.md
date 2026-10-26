@@ -1,3 +1,26 @@
+## 2026-10-26 WT-AG2 Part 2：真实审计领域与Bot输入准备（消费端及原生门仍待协调）
+
+来源：`07-tasks/wave5-wt-ag2-part2-20261026.md`，基线 `aefb2bda2` 已合入 AG1 `656b14d89`。只修改本任务授权范围，不接管其它工作树或运行部署。
+
+- 六个审计动作接真实 `LocalUserLifecycle` / `AuditGroupObservationService` / `AuditGroupBlackboxInvokeService`；caller 不从 payload 或安装管理员冒取。账号资格沿原安装提交门、CAS和幂等账；黑盒重放仍重核成员与源启停。原 `HostAPIError` 没有 `details` 构造参数，使用本域子类保留 HTTP 状态、机器码和安全详情，不改全局合同。
+- `prepare_submit` 先持久绑定活跃代次和必要轮换；随后生产 `GatewayPluginRequests` 沿原 input receipt 入队。请求 ID 不含代次，所有线程字段取准备回执及 canonical 线程，而非旧页面 thread_id；相同键不跨代。策略取 grant、原 owner 权限/禁用表、治理 authority 与当前成员交集；只读模式禁学字段由宿主生成。新增真实 `ToolRuntimeSnapshot` 裁剪回归，保留原 handler。
+- `IsolatedScriptUnit` 始终先 `build_argv`，仅其成功且确认外层 Seatbelt 时省略内层包装；新增进程内只读/禁网/禁子进程守卫。独立 Astra 片段复核指出 bytes 路径误拒绝；已先用测试复现，再统一 fsdecode，并覆盖 str/bytes/PathLike 的内外边界。守卫是纵深补充，不替代内核隔离。
+- 生产 Host 组合回归复用真实安装、令牌、授权发行器、账号和队列；黑盒成功编排仅替代 OS 执行单元，错误映射仅替代领域报错边界，外层 Seatbelt 分支测试仅替代成功 build 和检测事实。均不能冒称完整原生 E2E、真实 Web/IM 客户端或跨机器已验证。
+- **尚未完成**：`gateway_parts/request_execution.py:910–917` 仍拒绝非空工具策略，`tooling/registry.py` 未调用 Bot 快照/操作硬门；两文件均不在本次可改清单。真实沙箱在 `attempt/sandbox.py:require_ready` 已报网络隔离不可用，未到可省包装分支。管理员飞书绑定正向断言仍被 `user_space/user_auth.py` 的 `ADMIN_OWNER_FORBIDDEN` 拒绝。另有 `plugin_host/authorization.py:_check_static_scope` 在领域入口前对未批准用户返回404、对保留/非本地选择器返回400，阻止本任务要求的 `MANAGED_USER_SCOPE_DENIED/403`；保留三类目标的真实Host契约回归以暴露此缺口。这五个文件需要集成者协调范围。保留原守卫与有效断言，不吞异常、不 skip/xfail、不用改测代替修复。
+
+最终串行六文件门：**409 项，404 passed / 5 failed / 0 error / 0 skipped**，回执在 `.pytest_cache/ag2-part2-delivery.xml`。五失败是原生就绪拒绝、管理员飞书认证拒绝，以及三类非受管选择器在原授权层返回400/404而非约定403。真实快照裁剪、生产Bot双模式入队/轮换/幂等/停用、审计组CAS/成员撤权/工具治理禁用/源停用重放及六类错误映射、新增十条进程守卫回归均通过。补充坏源文件回归，执行前故障沿AG1返回明确503而非错误的OUTCOME_UNKNOWN。ruff通过；strict尺寸门 `hard=0, blocked=False`（仍有尺寸告警，不是零告警结论）；diff检查通过，生成报告还原后不进入功能提交。曾并行尺寸门触发测试防写报告保护，已纠正为串行运行，最终无该报错。
+
+在工作树根按顺序复现本任务完整门（临时产物留在本树，不与pytest并行改写尺寸报告）：
+
+```bash
+PYTEST_ADDOPTS='--basetemp=.pytest_cache/ag2-part2-gate' python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_plugin_host_v2_conversations.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_local_users.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short --junitxml=.pytest_cache/ag2-part2-gate.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+下节及 AG1 节保留原提交的历史状态；本节记录 Part 2 的实际新增范围，不把历史缺口继续当成本轮 AG1 缺失。
+
 ## 2026-10-26 WT-AG2：双Bot独立领域切片（未完成接线，不作为完整功能交付）
 
 来源：`07-tasks/wave5-wt-ag2-20261026.md`。当前切片在 `wt-wave5-ag2` 中新增双Bot槽位、前台阈值轮换、可恢复的代次发布、只读正向工具策略和不可覆盖的禁学来源；注册十项动作的闭合参数与审计能力词汇。Bot前台归档仅改变宿主元数据，原线程保持active，任务、Goal和claim保留在旧代。

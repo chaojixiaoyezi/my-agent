@@ -17,7 +17,7 @@ from ..attempt.sandbox import (
 from ..common.cancellation import raise_if_cancelled
 from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling.process_output_capture import ProcessOutputCapture
-from ..workflows.script_runner import _cleanup_process
+from ..workflows.script_runner import _cleanup_process, _outer_seatbelt_active
 from .access_policy import AuditGroupError
 
 _BOOTSTRAP = """import io,json,os,sys
@@ -25,6 +25,33 @@ _cfg=json.load(sys.stdin)
 os.close(0)
 sys.stdin=io.StringIO(json.dumps(_cfg['inputs']))
 _code=compile(_cfg.pop('code'),'<audit-group-unit>','exec')
+# LLM: Python审计钩子仅补充已通过就绪门的原生/外层Seatbelt，不替代内核隔离。
+# 函数用途: 在源代码运行前阻止文件修改、套接字和子进程。
+def _install_guard(roots):
+    realpath, fspath, fsdecode, separator = os.path.realpath, os.fspath, os.fsdecode, os.sep
+    read_roots=tuple(realpath(root) for root in roots)
+    writes=os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_TRUNC|os.O_APPEND
+    mutations=frozenset(('os.remove','os.rename','os.rmdir','os.mkdir','os.symlink','os.link',
+        'os.truncate','os.chmod','os.chown','os.utime','os.setxattr','os.removexattr',
+        'os.system','os.exec','os.spawn','os.posix_spawn','os.fork','os.forkpty','os.kill','os.killpg'))
+    # LLM: 捕获不可变策略；stdout/stderr保留已有FD，不能为用户代码打开新的可写文件。
+    # 函数用途: 在实际Python操作发生前拒绝危险副作用。
+    def guard(event,args):
+        if event in mutations or event.startswith(('socket.','subprocess.','ctypes.','mmap.')):
+            raise PermissionError('audit-group operation denied')
+        if event=='import' and args[0] in ('_posixsubprocess','_ctypes','ctypes'):
+            raise PermissionError('audit-group native operation denied')
+        if event=='open':
+            path,mode,flags=args
+            if (isinstance(mode,str) and any(c in mode for c in 'wax+')) or (isinstance(flags,int) and flags&writes):
+                raise PermissionError('audit-group file write denied')
+            if not isinstance(path,int):
+                target=realpath(fsdecode(fspath(path)))
+                if not any(target==root or target.startswith(root.rstrip(separator)+separator) for root in read_roots):
+                    raise PermissionError('audit-group file read denied')
+    sys.addaudithook(guard)
+_install_guard(_cfg.pop('read_roots'))
+del _install_guard
 _scope={'__name__':'__main__','__file__':'<audit-group-unit>'}
 del _cfg
 exec(_code,_scope)
@@ -46,12 +73,17 @@ def execution_sandbox(workspace, staging):
 # LLM: 独立进程只看匿名代码流和明确inputs；不组装主头像Prompt、不加载source配置或凭据。
 # 类用途: 提供脚本及结构化技能共用的宿主隔离执行单元。
 class IsolatedScriptUnit:
-    # LLM: 原生沙箱必须require_ready，异常不能降级到宿主执行；code只进匿名临时FD。
-    # 函数用途: 在准确调用者目录启动一次有界脚本，返回JSON对象。
+    # LLM: 始终先build_argv/require_ready；仅其成功且识别外层Seatbelt时省内层包装，任何原生拒绝仍原样传播。
+    # 函数用途: 用原沙箱就绪门和额外Python只读守卫执行一次匿名代码流。
     def execute(self, code, inputs, *, workspace, staging, timeout_s):
         sandbox = execution_sandbox(workspace, staging)
-        argv = sandbox.build_argv([sys.executable, "-I", "-B", "-c", _BOOTSTRAP])
-        payload = json.dumps({"code": code, "inputs": inputs}, ensure_ascii=False, allow_nan=False).encode()
+        base_argv = [sys.executable, "-I", "-B", "-c", _BOOTSTRAP]
+        argv = sandbox.build_argv(base_argv)
+        if argv and os.path.basename(argv[0]) == "sandbox-exec" and _outer_seatbelt_active():
+            argv = base_argv
+        payload = json.dumps({"code": code, "inputs": inputs,
+            "read_roots": [str(root) for root in (*sandbox.spec.public_read_roots, *sandbox.spec.system_read_roots)]},
+            ensure_ascii=False, allow_nan=False).encode()
         environment = {"PATH": os.defpath, "HOME": str(workspace), "TMPDIR": str(staging),
                        "PYTHONIOENCODING": "utf-8", "MY_AGENT_SCRIPT_INPUT_JSON": json.dumps(inputs, ensure_ascii=False)}
         with tempfile.TemporaryFile(dir=staging) as stdin:

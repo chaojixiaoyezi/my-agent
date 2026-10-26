@@ -552,3 +552,65 @@ def test_t2_malformed_caller_policy_is_closed_domain_error(tmp_path):
         AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice", source_owner="local/main",
             asset_type="script", asset_id="source_script")
     assert denied.value.status_code == 503
+
+
+# LLM: 仅模拟build成功且已有外层Seatbelt这一分支，仍启动真实子进程；这不代替真实原生require_ready验收。
+# 函数用途: 验证省内层包装时，匿名bootstrap仍正常计算并阻断写入、网络与子进程。
+@pytest.mark.parametrize("operation", ["calculate", "write", "network", "subprocess"])
+def test_outer_seatbelt_successful_build_keeps_python_readonly_guard(tmp_path, monkeypatch, operation):
+    from agent_py_agent.agent.audit_group import isolated_unit as module
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+    workspace, staging = tmp_path / "workspace", tmp_path / "stage"
+    workspace.mkdir()
+    staging.mkdir()
+    builds = []
+
+    # LLM: 替代点只固定成功的包装参数；原生拒绝回归仍使用另一个独立测试，不吞异常。
+    # 函数用途: 记录执行单元必定先经过build_argv。
+    def successful_build(_sandbox, base):
+        builds.append(tuple(base))
+        return ["/usr/bin/sandbox-exec", "-p", "fixture", *base]
+
+    monkeypatch.setattr(module.AttemptExecutionSandbox, "build_argv", successful_build)
+    monkeypatch.setattr(module, "_outer_seatbelt_active", lambda: True)
+    code = {"calculate": 'import json,sys\nx=json.load(sys.stdin)\nprint(json.dumps({"value":x["n"]+1}))',
+            "write": 'open("forbidden.txt","w").write("secret")',
+            "network": 'import socket\nsocket.socket()',
+            "subprocess": 'import subprocess\nsubprocess.run(["/usr/bin/true"])'}[operation]
+    if operation == "calculate":
+        assert module.IsolatedScriptUnit().execute(code, {"n": 16}, workspace=workspace,
+                                                   staging=staging, timeout_s=10) == {"value": 17}
+    else:
+        with pytest.raises(AuditGroupError, match="AUDIT_GROUP_EXECUTION_FAILED"):
+            module.IsolatedScriptUnit().execute(code, {}, workspace=workspace, staging=staging, timeout_s=10)
+    assert len(builds) == 1
+    assert not list(workspace.iterdir()) and not list(staging.iterdir())
+
+
+# LLM: 字符串、bytes与PathLike共享同一allowlist；合法路径不能被类型差异误拒绝，越界路径仍拒绝。
+# 函数用途: 回归独立复核发现的Python审计钩子路径类型不一致。
+@pytest.mark.parametrize("path_kind", ["str", "bytes", "pathlike"])
+@pytest.mark.parametrize("inside", [True, False])
+def test_python_read_guard_keeps_path_types_and_read_boundary(tmp_path, monkeypatch, path_kind, inside):
+    from agent_py_agent.agent.audit_group import isolated_unit as module
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+    workspace, staging = tmp_path / "workspace", tmp_path / "stage"
+    workspace.mkdir()
+    staging.mkdir()
+    target = workspace / "fixture.txt" if inside else tmp_path / "fixture.txt"
+    target.write_text("abc")
+    monkeypatch.setattr(module.AttemptExecutionSandbox, "build_argv",
+                        lambda _sandbox, base: ["/usr/bin/sandbox-exec", "-p", "fixture", *base])
+    monkeypatch.setattr(module, "_outer_seatbelt_active", lambda: True)
+    path = "fixture.txt" if inside else "../fixture.txt"
+    value = repr(path.encode()) if path_kind != "str" else repr(path)
+    prefix = f"class Location:\n def __fspath__(self): return {value}\n" if path_kind == "pathlike" else ""
+    value = "Location()" if path_kind == "pathlike" else value
+    code = f'import json\n{prefix}with open({value}, "rb") as handle:\n print(json.dumps({{"size": len(handle.read())}}))'
+    if inside:
+        assert module.IsolatedScriptUnit().execute(code, {}, workspace=workspace,
+                                                   staging=staging, timeout_s=10) == {"size": 3}
+    else:
+        with pytest.raises(AuditGroupError, match="AUDIT_GROUP_EXECUTION_FAILED"):
+            module.IsolatedScriptUnit().execute(code, {}, workspace=workspace, staging=staging, timeout_s=10)
+    assert target.read_text() == "abc" and not list(staging.iterdir())

@@ -12,7 +12,7 @@ READ_TOOLS = frozenset({
     "read_file", "list_files", "find_files", "search_text", "read_artifact", "web_search",
     "memory_search", "session_search", "self_map", "list_tools", "get_goal", "list_agents",
     "get_session_task", "audit_records", "audit_group_owners_list", "audit_group_assets_summary",
-    "audit_group_alerts_list", "audit_group_posture_overview",
+    "audit_group_alerts_list", "audit_group_posture_overview", "audit_group_query",
 })
 READ_OPERATIONS = {
     "remember": ("action", frozenset({"list"}), None),
@@ -82,3 +82,13 @@ def build_bot_snapshot(snapshot, bot_mode, *, allowed_tools, in_audit_group=Fals
                    unavailable_tools=(), snapshot_hash="", presentation_deferred_names=None,
                    presentation_shortlist_names=None, loaded_tool_names=(), preloaded_tool_names=(),
                    catalog_specs=())
+
+
+# LLM: 只消费宿主已核账号/治理后的执行信封，仍与实际owner工具相交，不由元数据创造handler。
+# 函数用途: 将Bot请求策略应用到当前真实工具快照。
+def snapshot_for_bot_request(snapshot, policy):
+    if (not isinstance(policy, Mapping) or policy.get("schema") != "plugin_execution_policy.v1"
+            or type(policy.get("tool_names")) not in (list, tuple)):
+        raise HostAPIError("BOT_TOOL_DENIED", 403)
+    return build_bot_snapshot(snapshot, policy.get("bot_mode"), allowed_tools=policy["tool_names"],
+                              in_audit_group=policy.get("in_audit_group") is True)

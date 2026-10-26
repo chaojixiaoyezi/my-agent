@@ -207,9 +207,9 @@ class BotSessionStorage:
 # LLM: 公共入口先重核owner；未结事务只准原意图恢复，保存before_slots以确定性重建同一代，绝不重复生成线程。
 # 类用途: 在一个owner中为两种Bot管理可恢复的活跃线程及非打断分卷。
 class BotSessionManager(BotSessionStorage):
-    # LLM: 幂等回执按安装/动作/键隔离，模式在payload摘要内；相同键不能换内容，重放仍检查账号资格。
-    # 函数用途: 串行执行一次槽位操作并返回持久化结果。
-    def transact(self, action, payload, key, effect):
+    # LLM: 回执按安装/动作/键隔离；可选重放标记只影响返回投影，不覆盖原回执或改变已绑定代次。
+    # 函数用途: 串行执行槽位操作，并可显式标注是否使用了原幂等结果。
+    def transact(self, action, payload, key, effect, *, report_replay=False):
         if not isinstance(key, str) or not 16 <= len(key) <= 128:
             raise HostAPIError("INVALID_SCHEMA")
         self.check_access()
@@ -226,7 +226,7 @@ class BotSessionManager(BotSessionStorage):
                 if prior["fingerprint"] != _digest(payload):
                     raise HostAPIError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", 409)
                 self.check_access()
-                return prior["result"]
+                return {**prior["result"], "idempotent_replay": True} if report_replay else prior["result"]
             operation = state.get("operation")
             if operation and operation["receipt_path"] != list(receipt_path):
                 completed = self.read(tuple(operation["receipt_path"]))
@@ -255,7 +255,7 @@ class BotSessionManager(BotSessionStorage):
             self.write(receipt_path, {"fingerprint": _digest(payload), "result": result}, admission)
             state.pop("operation", None)
             self.write(_SLOTS, state, admission)
-            return result
+            return {**result, "idempotent_replay": False} if report_replay else result
 
     # LLM: 标记与禁学来源由宿主生成，不合并page_context；只读来源保留在原learning_source供现有读者消费。
     # 函数用途: 为新代构造受保护的线程与槽位。
@@ -385,9 +385,9 @@ class BotSessionManager(BotSessionStorage):
 
         return self.transact("rollover", payload, key, effect)
 
-    # LLM: submitter仅可沿原幂等Gateway输入短提交，不允许在槽位锁内跑模型；旧代pin不自动洗成新代。
-    # 函数用途: 把消息原子绑定到当前Bot代次并委托原输入队列受理。
-    def submit(self, payload, key, submitter):
+    # LLM: submitter仅可做有界准备/原输入提交，不在锁内跑模型；旧代pin仍核验，重放绑定不得迁移到新代。
+    # 函数用途: 将消息意图原子绑定到当前Bot代次，保留旧领域调用合同。
+    def submit(self, payload, key, submitter, *, report_replay=False):
         mode = normalize_bot_mode(payload.get("bot_mode"), payload.get("bot_kind"))
 
         # LLM: 短门中完成模式/CAS/阈值检查及幂等入队；消息数据不能覆盖thread的宿主管理字段。
@@ -421,4 +421,14 @@ class BotSessionManager(BotSessionStorage):
             result = submitter(slot, payload, key)
             return {**self.descriptor(slot, old, reason), **result}
 
-        return self.transact("submit", payload, key, effect)
+        return self.transact("submit", payload, key, effect, report_replay=report_replay)
+
+    # LLM: 先持久绑定代次，后由Gateway原input receipt入队；重放在轮换前返回旧绑定，不能同key入两条线程。
+    # 函数用途: 为生产Bot提交完成阈值检查、必要分卷和幂等代次预留。
+    def prepare_submit(self, payload, key):
+        # LLM: 准备回调不运行工具或队列，仅冻结用于原输入接缝的宿主线程ID。
+        # 函数用途: 将当前活跃线程投影成可复用的提交绑定。
+        def prepare(slot, _payload, _key):
+            return {"thread_id": slot["active_thread_id"]}
+
+        return self.submit(payload, key, prepare, report_replay=True)

@@ -274,6 +274,8 @@ def test_host_composition_routes_real_bot_operations_and_reports_missing_depende
     def require_enabled(store, uid, revision=None):
         if not enabled:
             raise HostAPIError("USER_DISABLED", 403)
+        from types import SimpleNamespace
+        return SimpleNamespace(user_id=uid, revision=1, in_audit_group=False)
 
     monkeypatch.setattr("agent_py_agent.agent.plugin_host.composition.revalidate_call", case.resolve)
     monkeypatch.setattr("agent_py_agent.agent.user_space.local_user_store.LocalUserStore.require_enabled", require_enabled)
@@ -300,8 +302,243 @@ def test_host_composition_routes_real_bot_operations_and_reports_missing_depende
     for action in AUDIT_BOT_ACTIONS:
         assert domain_name(action) == "audit_bots"
         assert domain_ready(action, composition.ports) is (action in {
-            "conversations.bots.ensure", "conversations.bots.rollover", "conversations.bots.history.list"})
+            "conversations.bots.ensure", "conversations.bots.rollover", "conversations.bots.history.list",
+            "audit_group.owners.list", "audit_group.assets.summary", "audit_group.alerts.list",
+            "audit_group.posture.overview"})
     enabled = False
     with pytest.raises(HostAPIError) as error:
         call("ensure", {}, "host_ensure_bot_01")
     assert error.value.code == "USER_DISABLED"
+
+
+# LLM: 重用真实生产安装、令牌和组合根；此fixture启动临时回环HTTP，不替换领域或授权发行器。
+# 函数用途: 为Part2接线测试提供完整原宿主。
+@pytest.fixture
+def wired_host(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.tests.test_plugin_host_gateway_composition import production_host
+    fixture = production_host.__wrapped__(tmp_path, SimpleNamespace(param={}))
+    host = next(fixture)
+    try:
+        yield host
+    finally:
+        try:
+            next(fixture)
+        except StopIteration:
+            pass
+
+
+# LLM: caller由测试宿主注入真实IngressIssuer，payload不携带身份；此处不替代授权或dispatch。
+# 函数用途: 执行一个经过原安装和当前账号检查的Host业务调用。
+def business_call(host, action, payload=None, *, key=None, caller=None):
+    import json
+
+    from agent_py_agent.agent.plugin_host.authorization import authorize_call
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+    composition = host[0].plugin_host.composition
+    envelope = {"schema": "plugin_host_call.v2", "action": action, "payload": payload or {}}
+    if key is not None:
+        envelope["idempotency_key"] = key
+    ingress = composition.issuer.ingress(host[1], caller_owner=caller)
+    authorized = authorize_call(ingress, decode_call(json.dumps(envelope).encode()))
+    return dispatch_call(authorized, composition.ports)
+
+
+# LLM: 账号与资格都走真实Host v2写口，返回的owner不能由页面覆盖。
+# 函数用途: 建立Part2测试中的实际审计组成员。
+def host_member(host):
+    business_call(host, "users.local.create", {"user_id": "alice"}, key="host_create_alice_001")
+    result = business_call(host, "users.local.audit_group.set", {
+        "user_id": "alice", "in_audit_group": True, "expected_revision": 1}, key="host_member_alice_001")
+    assert result.data["revision"] == 2 and result.data["owner_id"] == "local/alice"
+    return OwnerIdentity.local_user("alice")
+
+
+def test_real_host_membership_observation_and_live_revocation(wired_host):
+    host = wired_host
+    caller = host_member(host)
+    replay = business_call(host, "users.local.audit_group.set", {
+        "user_id": "alice", "in_audit_group": True, "expected_revision": 1}, key="host_member_alice_001")
+    assert replay.data["idempotent_replay"] is True
+    actions = ("audit_group.owners.list", "audit_group.assets.summary", "audit_group.alerts.list",
+               "audit_group.posture.overview")
+    for action in actions:
+        assert business_call(host, action, caller=caller).http_status == 200
+    with pytest.raises(HostAPIError) as error:
+        business_call(host, "users.local.audit_group.set", {
+            "user_id": "alice", "in_audit_group": False, "expected_revision": 2},
+            key="host_member_denied_01", caller=caller)
+    assert error.value.status == 403
+    business_call(host, "users.local.audit_group.set", {
+        "user_id": "alice", "in_audit_group": False, "expected_revision": 2}, key="host_member_revoke_01")
+    with pytest.raises(HostAPIError) as error:
+        business_call(host, "audit_group.owners.list", caller=caller)
+    assert error.value.status == 403 and error.value.code == "AUDIT_GROUP_ACCESS_DENIED"
+
+
+@pytest.mark.parametrize("mode,tools", [("query_readonly", {"read_file"}),
+                                       ("action_avatar", {"read_file", "write_file"})])
+def test_real_bot_submit_binds_rolled_generation_and_preserves_receipt(wired_host, mode, tools):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
+    host = wired_host
+    caller = host_member(host)
+    ensure = business_call(host, "conversations.bots.ensure", {"bot_mode": mode},
+                           key="production_bot_ensure01", caller=caller).data
+    home = host[2].root / "owners/local/alice"
+    slots_path = home / "data/bot_sessions/slots.json"
+    slots = json.loads(slots_path.read_text())
+    slots["slots"][mode]["last_foreground_activity_at"] = 0
+    slots_path.write_text(json.dumps(slots))
+    payload = {"bot_mode": mode, "text": "查看告警", "expected_generation": 1,
+               "auto_rollover": True, "page_context": {"alert_id": "alert-one"}}
+    result = business_call(host, "conversations.bots.submit", payload, key="production_bot_submit01", caller=caller)
+    assert result.http_status == 202 and result.data["status"] == "queued"
+    assert result.data["rolled_over"] and result.data["generation"] == 2
+    assert result.data["previous_thread_id"] == ensure["active_thread_id"]
+    assert result.data["thread_id"] != ensure["active_thread_id"]
+    service = host[0].plugin_host.composition.ports.conversation.request_ports.prepare_request.__self__
+    paths = service.resources.paths_for(SimpleNamespace(owner_home=LocalUserStore(host[2].root).owner_home("alice")))
+    receipt = json.loads((paths.root / "input_receipts" / (result.data["request_id"] + ".json")).read_text())
+    prepared = receipt["prepared_request"]
+    assert prepared["conversation"]["thread_id"] == result.data["thread_id"]
+    assert prepared["metadata"]["plugin_provenance"]["thread_id"] == result.data["thread_id"]
+    policy = prepared["metadata"]["plugin_execution_policy"]
+    assert policy["thread_id"] == result.data["thread_id"] and set(policy["tool_names"]) == tools
+    assert prepared["metadata"]["learning_excluded"] is (mode == "query_readonly")
+    replay = business_call(host, "conversations.bots.submit", payload, key="production_bot_submit01", caller=caller)
+    assert replay.data["request_id"] == result.data["request_id"] and replay.data["idempotent_replay"]
+    business_call(host, "users.local.disable", {"user_id": "alice", "expected_revision": 2},
+                  key="production_bot_disable01")
+    with pytest.raises(HostAPIError) as error:
+        business_call(host, "conversations.bots.submit", payload, key="production_bot_submit01", caller=caller)
+    assert error.value.code == "USER_DISABLED"
+
+
+@pytest.mark.parametrize("status", [403, 404, 408, 409, 429, 503])
+def test_real_host_maps_audit_error_status_and_details(wired_host, monkeypatch, status):
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+    from agent_py_agent.agent.audit_group.blackbox_invoke_service import (
+        AuditGroupBlackboxInvokeService,
+    )
+    from agent_py_agent.tests.test_audit_group_observation_and_invoke import asset
+    caller = host_member(wired_host)
+    asset(wired_host[2].root, "script", "source-one")
+
+    # LLM: 仅替代领域报错边界，原Host来源、成员和源资产预检仍执行；不作为原生执行成功证据。
+    # 函数用途: 注入每种准确HTTP分类的结构化领域拒绝。
+    def reject(*_args, **_kwargs):
+        raise AuditGroupError("TEST_AUDIT_REJECTION", status_code=status, details={"check": "safe"})
+
+    monkeypatch.setattr(AuditGroupBlackboxInvokeService, "invoke_asset", reject)
+    with pytest.raises(HostAPIError) as error:
+        business_call(wired_host, "audit_group.assets.invoke", {
+            "source_owner_id": "local/main", "kind": "script", "asset_id": "source-one"},
+            key="production_asset_invoke01", caller=caller)
+    assert error.value.code == "TEST_AUDIT_REJECTION" and error.value.status == status
+    assert error.value.to_payload()["details"] == {"check": "safe"}
+
+
+def test_real_runtime_snapshot_bot_intersection_keeps_original_handlers(tmp_path):
+    from agent_py_agent.agent.conversation.bot_tool_policy import snapshot_for_bot_request
+    from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+    from agent_py_agent.agent.tooling.models import ToolRuntime, ToolRuntimeSnapshot
+    read, write = ReadFileTool(tmp_path, max_chars=1000), WriteFileTool(tmp_path)
+    runtimes = tuple(ToolRuntime(tool.model_spec, tool.runtime_policy, tool)
+                     for tool in (read, write))
+    snapshot = ToolRuntimeSnapshot(run_id="bot-run", runtimes=runtimes,
+                                  available_tool_names=frozenset({"read_file", "write_file"}),
+                                  unavailable_tools=(), allowed_tools=None)
+    policy = {"schema": "plugin_execution_policy.v1", "bot_mode": "query_readonly",
+              "tool_names": ["read_file", "write_file", "unknown_mcp"], "in_audit_group": False}
+    readonly = snapshot_for_bot_request(snapshot, policy)
+    assert readonly.available_tool_names == readonly.allowed_tools == frozenset({"read_file"})
+    assert readonly.runtimes[0].handler is read
+    assert snapshot.available_tool_names == frozenset({"read_file", "write_file"})
+    action = snapshot_for_bot_request(snapshot, {**policy, "bot_mode": "action_avatar"})
+    assert action.allowed_tools == frozenset({"read_file", "write_file"})
+    assert {row.handler for row in action.runtimes} == {read, write}
+
+
+def test_real_host_membership_cas_and_key_conflict(wired_host):
+    host_member(wired_host)
+    for key, revision, code in [("host_member_alice_002", 1, "REVISION_CONFLICT"),
+                                 ("host_member_alice_001", 1, "IDEMPOTENCY_CONFLICT")]:
+        with pytest.raises(HostAPIError) as error:
+            business_call(wired_host, "users.local.audit_group.set", {
+                "user_id": "alice", "in_audit_group": False, "expected_revision": revision}, key=key)
+        assert error.value.status == 409 and error.value.code == code
+
+
+def test_real_host_invoke_replay_rechecks_source_and_membership(wired_host, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.audit_group.blackbox_invoke_service import (
+        IsolatedScriptUnit,
+    )
+    from agent_py_agent.tests.test_audit_group_observation_and_invoke import asset
+    caller = host_member(wired_host)
+    root = wired_host[2].root
+    asset(root, "script", "source-one")
+    calls = []
+
+    # LLM: 只替代原生执行单元，原Host/原AG1冻结/治理/配额/发表/幂等均实际执行。
+    # 函数用途: 为源启停和回执重放提供一个确定性安全结果。
+    def execute(*_args, **_kwargs):
+        calls.append(True)
+        return {"value": 17}
+
+    monkeypatch.setattr(IsolatedScriptUnit, "execute", execute)
+    payload = {"source_owner_id": "local/main", "kind": "script", "asset_id": "source-one"}
+    first = business_call(wired_host, "audit_group.assets.invoke", payload,
+                          key="source_replay_key_001", caller=caller)
+    replay = business_call(wired_host, "audit_group.assets.invoke", payload,
+                           key="source_replay_key_001", caller=caller)
+    assert first.data == replay.data and first.data["result"] == {"value": 17} and len(calls) == 1
+    policy_path = root / "owners/local/alice/tool_policy.json"
+    before = policy_path.read_bytes() if policy_path.exists() else None
+    policy = json.loads(before) if before else {"schema_version": "tool-policy.v1"}
+    policy["disabled_tools"] = [*policy.get("disabled_tools", []), "audit_group_invoke_asset"]
+    policy_path.write_text(json.dumps(policy))
+    with pytest.raises(HostAPIError) as error:
+        business_call(wired_host, "audit_group.assets.invoke", payload, key="source_replay_key_001", caller=caller)
+    assert error.value.code == "GOVERNANCE_EXECUTION_DENIED" and error.value.status == 403 and len(calls) == 1
+    if before is None:
+        policy_path.unlink()
+    else:
+        policy_path.write_bytes(before)
+    asset(root, "script", "source-one", enabled=False)
+    with pytest.raises(HostAPIError) as error:
+        business_call(wired_host, "audit_group.assets.invoke", payload, key="source_replay_key_001", caller=caller)
+    assert error.value.code == "ASSET_DISABLED_BY_OWNER" and error.value.status == 409
+    asset(root, "script", "source-one", enabled=True)
+    business_call(wired_host, "users.local.audit_group.set", {
+        "user_id": "alice", "in_audit_group": False, "expected_revision": 2}, key="source_revoke_key_01")
+    with pytest.raises(HostAPIError) as error:
+        business_call(wired_host, "audit_group.assets.invoke", payload, key="source_replay_key_001", caller=caller)
+    assert error.value.code == "AUDIT_GROUP_ACCESS_DENIED" and len(calls) == 1
+
+
+@pytest.mark.parametrize("target", ["bob", "main", "providers/feishu/users/ou_native"])
+def test_membership_nonmanaged_scope_is_exact_host_403(wired_host, target):
+    with pytest.raises(HostAPIError) as error:
+        business_call(wired_host, "users.local.audit_group.set", {
+            "user_id": target, "in_audit_group": True, "expected_revision": 1},
+            key="nonmanaged_member_key01")
+    assert (error.value.code, error.value.status) == ("MANAGED_USER_SCOPE_DENIED", 403)
+
+
+def test_real_host_corrupt_source_replay_preflight_returns_structured_unavailable(wired_host):
+    from agent_py_agent.tests.test_audit_group_observation_and_invoke import asset
+    caller = host_member(wired_host)
+    folder = asset(wired_host[2].root, "script", "corrupt-source")
+    (folder / "script.json").write_text("broken")
+    with pytest.raises(HostAPIError) as error:
+        business_call(wired_host, "audit_group.assets.invoke", {
+            "source_owner_id": "local/main", "kind": "script", "asset_id": "corrupt-source"},
+            key="corrupt_source_key_001", caller=caller)
+    assert error.value.code == "AUDIT_GROUP_EXECUTION_UNAVAILABLE" and error.value.status == 503
