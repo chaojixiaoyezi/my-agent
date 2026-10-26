@@ -1497,15 +1497,16 @@ def test_b1_corrupt_scope_classification_preserves_current_thread_errors(tmp_pat
     old = time.time() - 120
     os.utime(path, (old, old))
     result = bg.list_background_processes(home, thread_id="thread-one")
-    assert result["projection_ok"] is kind.startswith("foreign")
-    assert len(result.get("unrelated_errors", [])) == int(kind.startswith("foreign"))
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert result["unrelated_errors"] == []
 
 
-# LLM: 无法确认归属的坏文件只按文件mtime分界；恰好60秒仍按当前错误，非字典JSON同样保守。
-# 函数用途: 验证无归属坏文件的年龄边界，保留既有即时故障注入合同。
-@pytest.mark.parametrize("age,isolated", [(59.9, False), (60.0, False), (60.1, True)])
+# LLM: 无法确认归属的坏文件不能凭年龄隔离，非字典JSON同样保守。
+# 函数用途: 验证跨越60秒与长期陈旧后，无归属错误仍令观察失败。
+@pytest.mark.parametrize("age", [0.0, 59.9, 60.0, 60.1, 120.0])
 @pytest.mark.parametrize("raw", ["broken-json", "[]", '{"session_id":"bg-corrupt","schema":"invalid"}'])
-def test_b1_unscoped_corruption_uses_exact_stale_boundary(tmp_path, monkeypatch, age, isolated, raw):
+def test_b1_unscoped_corruption_never_isolated_by_age(tmp_path, monkeypatch, age, raw):
     home = tmp_path / "owner"
     root = _b1_records(home, count=1)
     clock = float(int(time.time()))
@@ -1514,14 +1515,14 @@ def test_b1_unscoped_corruption_uses_exact_stale_boundary(tmp_path, monkeypatch,
     path.write_text(raw)
     os.utime(path, (clock - age, clock - age))
     result = bg.list_background_processes(home, thread_id="thread-one")
-    assert result["projection_ok"] is isolated
-    assert len(result.get("unrelated_errors", [])) == int(isolated)
+    assert result["projection_ok"] is False
+    assert result["errors"] and result["unrelated_errors"] == []
     assert bg.list_background_processes(home)["projection_ok"] is False
 
 
-# LLM: 错误的归属分类不是缓存内容，热缓存里的新坏文件变老后也必须动态隔离。
-# 函数用途: 验证缓存不会冻结无归属错误的60秒年龄判断。
-def test_b1_cached_error_is_reclassified_when_it_becomes_stale(tmp_path, monkeypatch):
+# LLM: 热缓存中的坏文件变老不产生新的归属证据，始终按未知归属错误报告。
+# 函数用途: 验证缓存与时间推进不能把无归属错误洗白。
+def test_b1_cached_unscoped_error_stays_current_after_aging(tmp_path, monkeypatch):
     home = tmp_path / "owner"
     root = _b1_records(home, count=1)
     path = root / "bg-corrupt.json"
@@ -1533,11 +1534,11 @@ def test_b1_cached_error_is_reclassified_when_it_becomes_stale(tmp_path, monkeyp
     reads = _b1_count_reads(monkeypatch)
     assert not bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
     clock[0] += 2
-    assert bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
+    assert not bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
     assert len(reads) == 2
 
 
-# LLM: 真实TUI同步先因新坏文件报错，再因历史孤儿隔离恢复；不得清除其它kind的用户提示。
+# LLM: 真实TUI先报告未知归属坏文件，只有出现明确其它线程证据才恢复；不得清除其它kind的用户提示。
 # 函数用途: 验证观察恢复会主动清掉专用告警，而非等提示自然超时。
 def test_b1_tui_notice_recovers_after_unrelated_orphan_isolated(tmp_path):
     from types import SimpleNamespace
@@ -1555,6 +1556,9 @@ def test_b1_tui_notice_recovers_after_unrelated_orphan_isolated(tmp_path):
     assert "观察刷新失败" in runtime.notice()
     old = time.time() - 120
     os.utime(broken, (old, old))
+    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert "观察刷新失败" in runtime.notice()
+    broken.write_text(json.dumps({"session_id": broken.stem, "schema": "invalid", "thread_id": "other-thread"}))
     assert _sync_background_watch(agent, navigation, runtime=runtime)
     assert runtime.notice() == "" and navigation.snapshot().background_process_count == 0
     runtime.set_notice("其它功能的提示", notice_kind="other_feature")
@@ -1791,14 +1795,212 @@ def test_b1_deep_json_does_not_abort_other_records(tmp_path, kind):
     assert path.read_bytes() == before
 
 
-# LLM: 任务原文明确其它owner_home为最高优先级无关错误，不能因额外线程冲突反向污染当前会话。
-# 函数用途: 锁定跨owner坏记录的100%隔离合同。
-def test_b1_foreign_owner_corruption_stays_unrelated_even_with_thread_conflict(tmp_path):
+# LLM: 外owner声明不得压过当前线程或自相冲突的归属，坏记录不能猜为无关。
+# 函数用途: 锁定当前线程与外owner声明冲突时的失败关闭。
+def test_b1_foreign_owner_corruption_with_current_thread_fails_closed(tmp_path):
     home = tmp_path / "owner"
     root = _b1_records(home, count=1)
     payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "thread-one",
                "scope": {"thread_id": "other-thread", "owner_home": str(tmp_path / "other-owner")}}
     (root / "bg-corrupt.json").write_text(json.dumps(payload))
     result = bg.list_background_processes(home, thread_id="thread-one")
-    assert result["projection_ok"] is True and result["errors"] == []
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert result["unrelated_errors"] == []
+
+
+@pytest.mark.parametrize("location", [None, "metadata"])
+@pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+@pytest.mark.parametrize("value", [None, True, 23, [], {}, "", " \t"])
+def test_b1r2_invalid_attribution_never_isolated(tmp_path, location, field, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "other-thread"}
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[field] = value
+    path = root / "bg-corrupt.json"
+    path.write_text(json.dumps(payload))
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert not result["unrelated_errors"]
+
+
+@pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+def test_b1r2_conflicting_foreign_declarations_fail_closed(tmp_path, field):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "other-thread"}
+    first, second = (str(tmp_path / "foreign-one"), str(tmp_path / "foreign-two")) if field == "owner_home" else ("foreign-one", "foreign-two")
+    payload[field] = first
+    payload["scope"] = {field: second}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"]
+    assert not result["unrelated_errors"]
+
+
+@pytest.mark.parametrize("location", [None, "completion_target"])
+def test_b1r2_consistent_foreign_owner_without_current_thread_isolated(tmp_path, location):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid"}
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope["owner_home"] = str(tmp_path / "other-owner")
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is True and not result["errors"]
     assert result["unrelated_errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+
+
+def test_b1r2_error_snapshot_preserves_ids_without_copying_body():
+    scope = {"thread_id": "other", "task_id": "task-fixture", "request_id": "request-fixture"}
+    payload = {**scope, "metadata": {**scope, "body": {"ignored": [0] * 1000}}, "body": "not attribution"}
+    assert bg._error_scope_payload(payload) == {**scope, "metadata": scope}
+
+
+def test_b1r2_directory_generations_replace_one_canonical_slot(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    reads = _b1_count_reads(monkeypatch)
+    assert bg.list_background_processes(home)["total"] == 3
+    for generation in range(5):
+        (root / "unrelated.tmp").write_text(str(generation))
+        old = time.time() - 10 - generation
+        os.utime(root, (old, old))
+        assert bg.list_background_processes(home)["total"] == 3
+    assert len(reads) == 3
+    assert list(bg._DIRECTORY_CACHE) == [(str(home.resolve()), str(root.resolve()))]
+
+
+@pytest.mark.parametrize("count", [4096, 4097])
+def test_b1r2_directory_record_limit_is_explicit_not_truncation(tmp_path, monkeypatch, count):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=count)
+    before = _files(home)
+    reads = _b1_count_reads(monkeypatch)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    if count == 4096:
+        assert result["projection_ok"] is True and result["total"] == 4096
+        assert not result["errors"] and len(reads) == 4096
+        assert len(bg._DIRECTORY_CACHE) == 1
+        assert bg.list_background_processes(home, thread_id="thread-one")["total"] == 4096
+        assert len(reads) == 4096
+    else:
+        assert result["projection_ok"] is False
+        assert any(error.get("error_code") == "DIRECTORY_RECORD_LIMIT_EXCEEDED" for error in result["errors"])
+        assert result["total"] == 0 and not result["unrelated_errors"]
+        assert not reads and not bg._DIRECTORY_CACHE
+    assert getattr(bg, "_MAX_DIRECTORY_RECORDS", None) == 4096
+    assert len(bg._FILE_CACHE) <= 2048
+    assert _files(home) == before and root.exists()
+
+
+@pytest.mark.parametrize("change", ["state", "corruption"])
+def test_b1r2_hot_directory_rechecks_in_place_file_stat(tmp_path, monkeypatch, change):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    reads = _b1_count_reads(monkeypatch)
+    assert bg.list_background_processes(home)["total"] == 3
+    path = root / "bg-cache-1.json"
+    directory_mtime, inode = root.stat().st_mtime_ns, path.stat().st_ino
+    if change == "state":
+        payload = json.loads(path.read_text())
+        payload.update(status="failed", command="updated-in-place-without-directory-change")
+        path.write_text(json.dumps(payload))
+    else:
+        path.write_text("new-invalid-json")
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    assert path.stat().st_ino == inode and root.stat().st_mtime_ns == directory_mtime
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert len(reads) == 4
+    if change == "state":
+        row = next(item for item in result["items"] if item["session_id"] == path.stem)
+        assert row["status"] == "failed" and row["command"].startswith("updated-in-place")
+        assert result["projection_ok"] is True
+    else:
+        assert result["projection_ok"] is False and result["total"] == 2
+        assert result["errors"] == [{"session_id": path.stem, "error": "JSONDecodeError"}]
+    assert bg.list_background_processes(home, thread_id="thread-one") == result
+    assert len(reads) == 4
+
+
+def test_b1r2_empty_directory_hits_do_not_renew_full_scan_deadline(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=0)
+    clock, scans = [10.0], []
+    original = os.scandir
+
+    def scan(path):
+        if Path(path) == root:
+            scans.append(path)
+        return original(path)
+
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(os, "scandir", scan)
+    assert bg.list_background_processes(home)["total"] == 0
+    clock[0] = 69.9
+    assert bg.list_background_processes(home)["total"] == 0
+    assert len(scans) == 1
+    clock[0] = 70.0
+    assert bg.list_background_processes(home)["total"] == 0
+    assert len(scans) == 2
+    clock[0] = 129.9
+    assert bg.list_background_processes(home)["total"] == 0
+    assert len(scans) == 2
+
+
+def test_b1r2_refreshing_all_files_does_not_renew_directory_deadline(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    clock, scans = [10.0], []
+    original = os.scandir
+
+    def scan(path):
+        if Path(path) == root:
+            scans.append(path)
+        return original(path)
+
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(os, "scandir", scan)
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    directory_mtime = root.stat().st_mtime_ns
+    path = root / "bg-cache-0.json"
+    payload = json.loads(path.read_text())
+    payload["command"] = "changed-after-initial-scan"
+    path.write_text(json.dumps(payload))
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    assert root.stat().st_mtime_ns == directory_mtime
+    clock[0] = 50.0
+    bg.list_background_processes(home)
+    assert len(reads) == 2 and len(scans) == 1
+    clock[0] = 70.0
+    bg.list_background_processes(home)
+    assert len(scans) == 2 and len(reads) == 3
+
+
+@pytest.mark.parametrize("initial_count", [1, 2])
+def test_b1r2_directory_growth_during_scan_cannot_claim_complete(tmp_path, monkeypatch, initial_count):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=initial_count)
+    monkeypatch.setattr(bg, "_MAX_DIRECTORY_RECORDS", 2)
+    original, inserted = bg._directory_record_names, []
+
+    def names(path):
+        result = original(path)
+        if path == root and not inserted:
+            inserted.append(True)
+            (root / "bg-added.json").write_text(json.dumps({"session_id": "bg-added", "status": "exited", "thread_id": "thread-one"}))
+        return result
+
+    monkeypatch.setattr(bg, "_directory_record_names", names)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["total"] == 0
+    code = "DIRECTORY_RECORD_LIMIT_EXCEEDED" if initial_count == 2 else "DIRECTORY_CHANGED_DURING_READ"
+    assert result["errors"][0].get("error_code") == code
+    assert not result["unrelated_errors"] and not bg._DIRECTORY_CACHE

@@ -1,4 +1,4 @@
-# LLM: 只读缓存已校验静态记录及坏文件诊断；两级有界、粗时间窗与60秒全读兜底，不缓存存活/耗时/日志或消费唤醒。
+# LLM: 静态缓存按规范目录单槽、逐文件stat重验、4096条硬上限；坏记录仅凭严格一致归属隔离，不凭年龄忽略错误。
 # 模块用途: 给TUI与插件提供不写盘的进程观察，隔离无关坏文件并实时计算当前会话动态状态。
 from __future__ import annotations
 
@@ -32,12 +32,13 @@ _TERMINAL = frozenset({"exited", "failed", "killed", "completed", "not_started"}
 _TAIL_BYTES = 64 * 1024
 _DIRECTORY_CACHE_MAX_ENTRIES = 64
 _FILE_CACHE_MAX_ENTRIES = 2048
+_MAX_DIRECTORY_RECORDS = 4096
 _CACHE_RECHECK_SECONDS = 60.0
-_UNSCOPED_CORRUPT_STALE_SECONDS = 60.0
 _SCOPE_FIELDS = ("access_scope", "execution_scope", "completion_target", "metadata", "scope")
+_ATTRIBUTION_FIELDS = ("thread_id", "conversation_id", "owner_home", "task_id", "request_id")
 
 
-# LLM: 成功保存校验快照，失败仅保存原归属标量；verified_at沿文件复核传递，目录换代不能续租旧文件。
+# LLM: 保留文件名身份及实际stat代次；失败仅保留归属字符串/非法标记，目录超限用结构化错误，不保存正文。
 # 类用途: 保存静态记录、无正文错误与实际复核时间，不保存动态探活或会话过滤结论。
 @dataclass(frozen=True)
 class _SessionSnapshot:
@@ -47,14 +48,17 @@ class _SessionSnapshot:
     mtime_ns: int = 0
     cacheable: bool = False
     verified_at: float = 0.0
+    stat_key: tuple[int, ...] = ()
+    error_code: str = ""
 
 
-# LLM: verified_at固定在本轮读取开始，命中不延长TTL；缓存与返回对象必须深拷贝隔离。
+# LLM: cached_at沿最老文件复核时间传递，不因目录换代续租；目录代次放值内，键只绑定规范目录身份。
 # 类用途: 保存一次目录或单文件复核的快照与单调时钟时间。
 @dataclass(frozen=True)
 class _ViewCacheEntry:
     snapshots: tuple[_SessionSnapshot, ...]
-    verified_at: float
+    cached_at: float
+    dir_stat_key: tuple[int, ...] = ()
 
 
 _DIRECTORY_CACHE: OrderedDict[tuple, _ViewCacheEntry] = OrderedDict()
@@ -94,7 +98,7 @@ class BackgroundProcessDetail(BackgroundProcessSummary):
     log_tail: tuple[str, ...] = ()
 
 
-# LLM: 仅缓存静态快照；线程过滤先于动态探活。坏文件逐轮按原归属/年龄分类，目录错误及当前线程错误不吞。
+# LLM: 仅缓存静态快照；线程过滤先于动态探活。坏文件按严格归属证据分类，目录超限/未知归属错误不吞。
 # 函数用途: 返回当前范围的实时进程概要与分范围诊断，缺失目录不创建、不消费通知。
 def list_background_processes(owner_home: Path, *, thread_id: str | None = None, active_only: bool = False) -> dict[str, object]:
     home = Path(owner_home).expanduser().absolute()
@@ -103,7 +107,10 @@ def list_background_processes(owner_home: Path, *, thread_id: str | None = None,
     for root, snapshot in _owner_session_snapshots(home):
         if snapshot.error:
             destination = unrelated_errors if _unrelated_error(snapshot, home, thread_id, now) else errors
-            destination.append({"session_id": snapshot.session_id, "error": snapshot.error})
+            diagnostic = {"session_id": snapshot.session_id, "error": snapshot.error}
+            if snapshot.error_code:
+                diagnostic["error_code"] = snapshot.error_code
+            destination.append(diagnostic)
             continue
         try:
             payload = snapshot.payload
@@ -136,11 +143,11 @@ def _lookup_view_cache(cache, key):
         return entry
 
 
-# LLM: 发表前深拷贝；超深合法旧记录只放弃优化，不能让缓存递归错误中断原观察。锁内替换逐出且不改验证时间。
+# LLM: 发表前深拷贝，目录指纹保存在值内；锁内替换同一目录最新代并逐出，超深记录只放弃优化不改观察。
 # 函数用途: 保存有界快照并返回是否成功入缓存，缓存不能处理的对象仍走实时只读观察。
-def _store_view_cache(cache, key, snapshots, verified_at, limit):
+def _store_view_cache(cache, key, snapshots, verified_at, limit, *, dir_stat_key=()):
     try:
-        entry = _ViewCacheEntry(deepcopy(snapshots), verified_at)
+        entry = _ViewCacheEntry(deepcopy(snapshots), verified_at, dir_stat_key)
     except RecursionError:
         return False
     with _VIEW_CACHE_LOCK:
@@ -179,7 +186,41 @@ def _owner_session_snapshots(home: Path):
             yield root, snapshot
 
 
-# LLM: 目录命中须前后同代、读取前可信且未满60秒；验证时刻取最老文件，换代不续租，到期穿透文件缓存。
+# LLM: 最多收集4096个候选名；第4097个即失败关闭，避免扫描时先构造无界名字列表或超大快照。
+# 函数用途: 有界列出后台记录名，超限返回None，不解析文件或写盘。
+def _directory_record_names(root: Path):
+    names = []
+    with os.scandir(root) as entries:
+        for item in entries:
+            if not (item.name.startswith("bg-") and item.name.endswith(".json")):
+                continue
+            if len(names) == _MAX_DIRECTORY_RECORDS:
+                return None
+            names.append(item.name)
+    return sorted(names)
+
+
+# LLM: 只复用stat代次未变且仍可信的单项，所有改变/拒绝交原reader校验；返回对象已由目录调用方深拷贝隔离。
+# 函数用途: 热目录逐文件查元数据，只重新解析实际变化的文件。
+def _revalidate_cached_file(root, home, snapshot):
+    try:
+        current = _file_stat_key(root / f"{snapshot.session_id}.json")
+    except OSError:
+        current = None
+    if current == snapshot.stat_key and current is not None and cache_entry_trustworthy(current[2]):
+        return snapshot
+    return _file_snapshot(root, snapshot.session_id, home)
+
+
+# LLM: 目录级错误不得被归属隔离；锁内移除已失效投影，只返回结构化诊断，不写磁盘或恢复Store。
+# 函数用途: 丢弃此目录旧缓存并报告超限或读取期间换代。
+def _directory_projection_error(root, key, code):
+    with _VIEW_CACHE_LOCK:
+        _DIRECTORY_CACHE.pop(key, None)
+    return (_SessionSnapshot(str(root), error=code, error_code=code),)
+
+
+# LLM: 规范目录每个只占一槽；热命中逐文件stat重验，目录换代则失败关闭；所有热刷新沿原cached_at，不续租。
 # 函数用途: 按目录身份复用静态快照，变化时仅重读必要文件，仍保证原文件复核期限。
 def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]:
     try:
@@ -188,20 +229,29 @@ def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]
         return ()
     now = time.monotonic()
     trusted = cache_entry_trustworthy(before[2])
-    key = (str(home), str(root), *before)
+    key = (str(home.resolve()), str(root.resolve()))
     entry = _lookup_view_cache(_DIRECTORY_CACHE, key)
-    expired = entry is not None and not 0 <= now - entry.verified_at < _CACHE_RECHECK_SECONDS
-    if trusted and entry is not None and not expired:
-        snapshots = deepcopy(entry.snapshots)
-        if _directory_stat_key(root) == before:
-            return snapshots
-    with os.scandir(root) as entries:
-        names = sorted(item.name for item in entries if item.name.startswith("bg-") and item.name.endswith(".json"))
-    snapshots = tuple(_file_snapshot(root, name[:-5], home, force_read=expired) for name in names)
+    expired = entry is not None and not 0 <= now - entry.cached_at < _CACHE_RECHECK_SECONDS
+    if trusted and entry is not None and entry.dir_stat_key == before and not expired:
+        snapshots = tuple(_revalidate_cached_file(root, home, snapshot) for snapshot in deepcopy(entry.snapshots))
+        if _directory_stat_key(root) != before:
+            snapshots = None
+    else:
+        snapshots = None
+    observed_at = entry.cached_at if snapshots is not None else now
+    if snapshots is None:
+        names = _directory_record_names(root)
+        if names is None:
+            return _directory_projection_error(root, key, "DIRECTORY_RECORD_LIMIT_EXCEEDED")
+        snapshots = tuple(_file_snapshot(root, name[:-5], home, force_read=expired) for name in names)
     after = _directory_stat_key(root)
-    if trusted and after == before and all(item.cacheable for item in snapshots):
-        verified_at = min((item.verified_at for item in snapshots), default=now)
-        _store_view_cache(_DIRECTORY_CACHE, key, snapshots, verified_at, _DIRECTORY_CACHE_MAX_ENTRIES)
+    if after != before:
+        oversized = _directory_record_names(root) is None
+        code = "DIRECTORY_RECORD_LIMIT_EXCEEDED" if oversized else "DIRECTORY_CHANGED_DURING_READ"
+        return _directory_projection_error(root, key, code)
+    if trusted and all(item.cacheable for item in snapshots):
+        verified_at = min(observed_at, min((item.verified_at for item in snapshots), default=observed_at))
+        _store_view_cache(_DIRECTORY_CACHE, key, snapshots, verified_at, _DIRECTORY_CACHE_MAX_ENTRIES, dir_stat_key=before)
     return snapshots
 
 
@@ -214,7 +264,7 @@ def _file_stat_key(path: Path) -> tuple[int, ...]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_size, metadata.st_ctime_ns
 
 
-# LLM: 只复用读取前已可信且前后同代的单文件；错误年龄取读后代次，缺失则保持未知，防新坏文件继承旧mtime被误隔离。
+# LLM: 只复用读取前可信且前后同代的单文件；快照保存同一stat代次供目录热重验，不凭文件年龄改变错误归属。
 # 函数用途: 安全读取、校验并缓存静态元数据及无正文诊断，目录变化时只复用未变文件。
 def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool = False) -> _SessionSnapshot:
     path, now = root / f"{session_id}.json", time.monotonic()
@@ -224,7 +274,7 @@ def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool 
         trusted = cache_entry_trustworthy(before[2])
         key = (str(home), str(root), session_id, *before)
         entry = _lookup_view_cache(_FILE_CACHE, key)
-        if trusted and not force_read and entry is not None and 0 <= now - entry.verified_at < _CACHE_RECHECK_SECONDS:
+        if trusted and not force_read and entry is not None and 0 <= now - entry.cached_at < _CACHE_RECHECK_SECONDS:
             snapshot = deepcopy(entry.snapshots[0])
             if _file_stat_key(path) == before:
                 return snapshot
@@ -242,24 +292,27 @@ def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool 
     if snapshot.error:
         snapshot = replace(snapshot, mtime_ns=after[2] if after else 0)
     if trusted and after == before:
-        snapshot = replace(snapshot, cacheable=True)
+        snapshot = replace(snapshot, cacheable=True, stat_key=before)
     if snapshot.cacheable and not _store_view_cache(_FILE_CACHE, key, (snapshot,), now, _FILE_CACHE_MAX_ENTRIES):
         snapshot = replace(snapshot, cacheable=False)
     return snapshot
 
 
-# LLM: 坏JSON仅保留诊断用归属标量，不复制任意深嵌套坏正文；缺少可信标量仍按无归属年龄门处理。
+# LLM: 坏JSON仅保留归属字符串；非字符串保留None反证，坏scope也保留标记；不复制任意嵌套正文。
 # 函数用途: 从校验失败的原字典提取有界深度的线程和owner诊断信息。
 def _error_scope_payload(payload: object) -> dict | None:
     if not isinstance(payload, dict):
         return None
     result = {}
     for name in ("", *_SCOPE_FIELDS):
+        if name and name not in payload:
+            continue
         scope = payload if not name else payload.get(name)
         if not isinstance(scope, dict):
+            result[name] = None
             continue
-        fields = {key: scope[key] for key in ("thread_id", "conversation_id", "owner_home")
-                  if isinstance(scope.get(key), (str, int, float, bool))}
+        fields = {key: scope[key] if isinstance(scope[key], str) else None
+                  for key in _ATTRIBUTION_FIELDS if key in scope}
         if name:
             result[name] = fields
         else:
@@ -275,19 +328,33 @@ def _raw_record_scopes(payload: object) -> tuple[dict, ...]:
     return (payload, *(payload[key] for key in _SCOPE_FIELDS if isinstance(payload.get(key), dict)))
 
 
-# LLM: 全owner错误照常显示；明确外owner隔离，含当前线程的冲突声明仍报错，无归属仅在严格超过60秒才隔离。
+# LLM: 无字典/坏类型/空白/任意归属冲突均失败关闭；只接受明确其它线程或外owner且未声称当前线程的证据，年龄无效。
 # 函数用途: 每次观察重新判断坏文件是否与当前会话无关。
 def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | None, now: float) -> bool:
-    if not thread_id:
+    if not isinstance(thread_id, str) or not thread_id.strip() or not isinstance(snapshot.payload, dict):
+        return False
+    if any(key in snapshot.payload and not isinstance(snapshot.payload[key], dict) for key in _SCOPE_FIELDS):
         return False
     scopes = _raw_record_scopes(snapshot.payload)
-    owners = (scope.get("owner_home") for scope in scopes)
-    if any(isinstance(owner, str) and owner and Path(owner).absolute() != home for owner in owners):
-        return True
-    threads = {str(scope[key]) for scope in scopes for key in ("thread_id", "conversation_id") if scope.get(key)}
-    if threads:
-        return thread_id not in threads
-    return bool(snapshot.mtime_ns and now - snapshot.mtime_ns / 1_000_000_000 > _UNSCOPED_CORRUPT_STALE_SECONDS)
+    claims = {key: set() for key in _ATTRIBUTION_FIELDS}
+    for scope in scopes:
+        for key in _ATTRIBUTION_FIELDS:
+            if key not in scope:
+                continue
+            value = scope[key]
+            if not isinstance(value, str) or not value.strip():
+                return False
+            claims[key].add(value.strip())
+    threads = claims["thread_id"] | claims["conversation_id"]
+    try:
+        owners = {str(Path(value).expanduser().resolve()) for value in claims["owner_home"]}
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if len(threads) > 1 or len(owners) > 1 or any(len(claims[key]) > 1 for key in ("task_id", "request_id")):
+        return False
+    if thread_id.strip() in threads:
+        return False
+    return bool(threads or owners and str(home.resolve()) not in owners)
 
 
 # LLM: 先校验session与owner；显式指定thread_id时严格要求同线程匹配并在存活探针/日志读取前拒绝跨线程或无归属记录。

@@ -1,3 +1,27 @@
+## 2026-10-26 Wave 6 B1-R2：后台观察错误归属与有界缓存修复
+
+来源：`07-tasks/wave6-b1-round2-fix-20261026.md` 三审 F1/F2/F3；起点 `54c27d4a39445983442fea71babe51be57409e3f`，只在指定 `/tmp/wt-wave6-b1-r2` 工作树修改白名单文件，不部署或启停服务。
+
+- **F1**：删除凭坏文件年龄超过60秒判无关的分支。无法解析字典、缺少证据、非法/空白归属、当前线程声明或冲突声明均保留 `errors`；仅严格一致的外线程/外owner归属进入 `unrelated_errors`。错误快照保留 `task_id` / `request_id`，非法类型以有界标记保留，不复制坏正文。
+- **F2**：目录缓存键为规范化 `(home.resolve(), root.resolve())`，目录指纹和复核时刻在值内，每目录仅一槽，LRU仍最多64目录。扫描遇到第4097个候选即返回 `DIRECTORY_RECORD_LIMIT_EXCEEDED`，不读JSON、不缓存超大快照，不以截断列表冒充完整结果。
+- **F3**：热目录逐文件复核含dev/ino/mtime/size/ctime的安全指纹；未变项零重复JSON解析，仅变化项沿原nofollow reader重读。粗mtime保护窗与60秒全量复查保留；空目录热命中不续租截止时刻。元数据核对是O(n)，不宣称整体O(1)。
+- **回归**：使用真实临时文件、原reader计数及只读文件快照。覆盖所有原归属位置、非法类型与空白、声明冲突、任务/请求ID保留、TUI仅在出现明确无关证据后清告警、目录多代单槽、4096/4097真实边界、4096条热命中（FILE LRU仅2048仍零重复JSON读取）、同inode/同目录mtime原位改写/改坏即时感知、空目录60秒复查。保留原线程动态探活、日志、TTL、并发、深JSON及原生schema的回归。
+- **先红后绿**：初始聚焦105例中92例断言失败、0个执行错误；另补空目录截止时刻反例，先观察到应二次扫描却只扫描一次，再修复。不删除/跳过有效测试，不修改门禁或基线。
+- **独立复核跟进**：gpt-6-astra high仅对给定关键片段静态找错（未读仓库、未实跑），指出全部文件刷新可能推迟目录截止、扫描中增长可能仍返回旧完整列表。父级另用真实文件/原reader复现3例失败后修复：所有热刷新均保留原目录时间锚点；读后发现目录换代时仅额外做一次有界列名，确认超限返回超限码，否则返回 `DIRECTORY_CHANGED_DURING_READ`，不缓存或把旧结果称作完整。不将片段审查称为全仓或最终版本审查批准。
+- **限制**：规定两文件初版回归中，`test_opt6_real_monitor_preserves_child_until_tree_termination` 被现有夹具以 `SANDBOX_CAPABILITY_MISSING[ps,background_launcher_identity]` 跳过；真实监控子进程树终止链仍未验证，不能计为通过。没有跑全仓、线上或跨平台验收。
+
+复现（工作树根执行）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_process_session_store.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终规定两文件回归：344例中343通过、0失败、0执行错误、1例按上述既有能力夹具跳过；Ruff、doc-sync、strict code-size（`hard=0` / `blocked=False`）、diff检查均通过。统计取自 `final-review.xml`，机器汇总见 `verification-summary.json`。本轮日志和JUnit在 `.pytest_cache/b1-r2/`；code-size生成报告提交前还原，不纳入功能提交。
+
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 
 来源：`07-tasks/wave5-wt-bc-20261026.md`（包含 c8/c9 追加合同），起始提交 `95fd54f9b`，仅在 `/tmp/wt-wave5-bc` 开发。没有修改 C4 的 `tui_threading.py` / `http_handlers.py`，没有部署或启停真实服务。
