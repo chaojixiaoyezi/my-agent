@@ -16,6 +16,99 @@ from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, Workf
 
 
 @pytest.mark.parametrize('serialized', [False, True])
+@pytest.mark.parametrize('text', [
+    'api_key: ${TOKEN}\n  fixture-private-tail\n',
+    'api_key:\n- ${TOKEN}\n  fixture-private-tail\n',
+    'api_key: ${TOKEN} fixture-private-tail\n',
+    'api_key: $TOKEN fixture-private-tail\n',
+    'api_key: os.getenv("TOKEN") fixture-private-tail\n',
+    'api_key: env.TOKEN\n  fixture-private-tail\n',
+    'api_key: ${TOKEN}fixture-private-tail\n',
+    'api_key: ${TOKEN fixture-private-tail}\n',
+])
+def test_round6_variable_prefix_never_shields_literal_tail(sanitize, tmp_path, serialized, text):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    name = 'body.json' if serialized else 'fixture.yaml'
+    value = text + 'port: 8080\n'
+    raw = (json.dumps({'body': value}) if serialized else value).encode()
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({name: raw}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert 'fixture-private-tail' not in str(failure.value.to_dict())
+    output = sanitize({name: raw}, owner_home=tmp_path, allow_secret_placeholder_replace=True)[name]
+    cleaned = json.loads(output)['body'] if serialized else output.decode()
+    expected = 'api_key:\n- "***REDACTED***"\n' if text.startswith('api_key:\n-') else 'api_key: "***REDACTED***"\n'
+    assert cleaned == expected + 'port: 8080\n'
+    assert sanitize({name: output}, owner_home=tmp_path)[name] == output
+
+
+@pytest.mark.parametrize('literal', ['${TOKEN}', '$TOKEN', '<REDACTED>', 'YOUR_TOKEN', 'CHANGE_ME',
+    'os.getenv("TOKEN")', "os.environ.get('TOKEN')", 'os.environ["TOKEN"]', 'env.TOKEN', 'env.get("TOKEN")'])
+def test_round6_pure_single_line_references_remain_allowed(sanitize, tmp_path, literal):
+    raw = f'api_key: {literal}\nport: 8080\n'.encode()
+    assert sanitize({'fixture.yaml': raw}, owner_home=tmp_path)['fixture.yaml'] == raw
+
+
+@pytest.mark.parametrize('literal', ['${TOKEN}\nfixture-private-tail', '${TOKEN}\rfixture-private-tail',
+    '${TOKEN} fixture-private-tail', '${TOKEN}fixture-private-tail', '${TOKEN fixture-private-tail}',
+    'os.private_tail', 'os.environ fixture-private-tail', 'os.environ\nfixture-private-tail',
+    'env.TOKEN fixture-private-tail', 'os.getenv("TOKEN", "fixture-private-tail")'])
+def test_round6_placeholder_requires_a_complete_reference(literal):
+    from agent_py_agent.agent.assets.delivery_sanitizer import _placeholder
+
+    assert _placeholder(literal, unquoted=True) is False
+
+
+@pytest.mark.parametrize('composite', [False, True])
+@pytest.mark.parametrize('action', ['accept', 'reject'])
+@pytest.mark.parametrize('reason', ['', 'fixture_user_pause'])
+def test_round6_manual_at_run_then_pause_is_installation_drift(kit, composite, action, reason):
+    import time
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+    from agent_py_agent.agent.scheduler.monitor_state import _RUNTIME_FIELDS
+    from agent_py_agent.agent.scheduler.repository import SchedulerRunFinish
+
+    source = round2_seed_monitor(kit, composite)
+    now = time.time()
+    schedule = {'kind': 'at', 'at': datetime.fromtimestamp(now + 3600, timezone.utc).isoformat(), 'timezone': 'UTC'}
+    rule = {key: value for key, value in source['rules'][0].items() if key not in _RUNTIME_FIELDS} if composite else {}
+    patch = {'rules': [{**rule, 'schedule': schedule}]} if composite else {'schedule': schedule}
+    source = round2_repo(kit.main, 'local/main').update_job(source['job_id'], patch=patch,
+        expected_version=source['version'])
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    round3_crash(kit, sent['delivery_id'], source['job_id'], point='committed', enabled=True)
+    repo = round2_repo(kit.alice, 'local/alice')
+    installed = repo.get_job(source['job_id'])
+    run = repo.reserve_manual_run(source['job_id'], now=now)
+    assert run['trigger'] == 'manual'
+    claim = repo.claim_run(run['run_id'], lease_seconds=60, now=run['dispatch_after'] + 1)
+    repo.mark_run_running(run['run_id'], claim['claim_id'], now=run['dispatch_after'] + 2)
+    repo.finish_run(run['run_id'], claim['claim_id'], SchedulerRunFinish('done', now=run['dispatch_after'] + 3))
+    advanced = repo.get_job(source['job_id'])
+    assert advanced['status'] == 'active' and advanced['run_count'] == 1
+    assert advanced['next_run_at'] == installed['next_run_at'] > run['dispatch_after'] + 3
+    paused = repo.pause_job(source['job_id'], expected_version=advanced['version'], reason=reason)
+    assert paused['status'] == 'paused' and paused['paused_reason'] == (reason or 'manual_pause')
+    envelope_path = kit.alice / 'data/asset_delivery/inbox' / sent['delivery_id'] / 'envelope.json'
+    paths = (repo.store_path, repo.history_path, envelope_path)
+    before = {path: path.read_bytes() for path in paths}
+    method = kit.service.accept_delivery if action == 'accept' else kit.service.reject_delivery
+    with pytest.raises(AssetDeliveryError) as failure:
+        method('local/alice', sent['delivery_id'])
+    expected = 'DELIVERY_INSTALLATION_STATE_CHANGED' if action == 'accept' else 'DELIVERY_STATE_CONFLICT'
+    assert failure.value.error_code == expected
+    assert {path: path.read_bytes() for path in paths} == before
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert envelope['status'] not in {'accepted', 'rejected'}
+    assert kit.service._origin_receipt(kit.main, envelope)['status'] not in {'accepted', 'rejected'}
+
+
+@pytest.mark.parametrize('serialized', [False, True])
 @pytest.mark.parametrize('text,secrets', [
     ('password:\n- fixture-pin\n- fixture-tail\nport: 8080\n', ('fixture-pin', 'fixture-tail')),
     ('auth:\n  password:\n  - fixture-pin\n    fixture-tail\n  port: 8080\n', ('fixture-pin', 'fixture-tail')),

@@ -1,4 +1,4 @@
-# LLM: clean_json前核原字节，JSON解码正文再核YAML缩进/flow边界；复用公共redactor，不借用Skill迁移预算或执行YAML标签。
+# LLM: clean_json前核原字节，JSON解码正文再核YAML结构；只豁免完整单行占位/环境引用，不执行表达式或YAML标签。
 # 模块用途: 硬拒绝投递秘密或显式替换为占位符，移除发送方主机路径且无损处理二进制。
 from __future__ import annotations
 
@@ -25,7 +25,9 @@ _PATTERNS = (
     ('secret_assignment', re.compile(
         r'''(?i)(?<!\w)(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)(?!\w)["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote)''')),
 )
-_PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b|\*\*\*REDACTED\*\*\*', re.I)
+_PLACEHOLDER = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}|<[A-Za-z_][A-Za-z0-9_.-]*>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b|\*\*\*REDACTED\*\*\*', re.I)
+_ENV_REFERENCE = re.compile(
+    r'''\$[A-Za-z_][A-Za-z0-9_]*|env\.[A-Za-z_][A-Za-z0-9_]*|os\.environ(?:\[[ \t]*(?P<bracket>["'])[A-Za-z_][A-Za-z0-9_]*(?P=bracket)[ \t]*\])?|(?:os\.environ\.get|os\.getenv|env\.get)\([ \t]*(?P<call>["'])[A-Za-z_][A-Za-z0-9_]*(?P=call)[ \t]*\)''')
 _SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
     'updated_at', 'created_at', 'kind', 'driver'})
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -71,12 +73,14 @@ def datasource_secret_values(owner_home):
     return tuple(sorted(result))
 
 
-# LLM: 普通模板可豁免；未加引号凭据键仅允许布尔/空值/变量引用，数字PIN和带引号的真实短秘密不能放行。
-# 函数用途: 区分模板与YAML/env非秘密表达式，不访问变量或凭据来源。
+# LLM: 只豁免完整单行模板/变量引用；续行、拼接及字面量默认值不因变量前缀放行，布尔/空值仍仅限未引用值。
+# 函数用途: 区分纯占位与敏感值，不求值或读取环境，数字PIN及混合值继续拒绝。
 def _placeholder(value, *, unquoted=False):
+    if '\n' in value or '\r' in value:
+        return False
     return (_PLACEHOLDER.fullmatch(value) is not None or unquoted and (
         value.lower() in {'true', 'false', 'null', 'none', 'yes', 'no', '~'}
-        or value.startswith(('$', 'os.', 'env.'))))
+        or _ENV_REFERENCE.fullmatch(value) is not None))
 
 
 # LLM: 不构造YAML对象、不执行tag/alias；只判定已定位标量，带引号的布尔/数字仍可是真秘密。

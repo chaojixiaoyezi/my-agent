@@ -1,3 +1,26 @@
+## 2026-10-26 Wave 4 Round 6：纯占位引用与手动暂停恢复边界
+
+来源：`07-tasks/wave4-round6-fix-20261026.md`，精确基线 `2db4f1fdb258272d9cee796b664891d04a129462`，仅修改指定四个文件，不部署、不推送或接管其它工作树。
+
+- R6-F1：`_placeholder` 先拒绝 CR/LF，再完整匹配占位符和允许的环境引用，不再按 `$` / `os.` / `env.` 前缀豁免整段。`${NAME}` 与尖括号模板限制为单个标识；环境调用只接受单个变量名，不放行附加字面量默认值。保留原有效 `os.environ` 裸表达式兼容测试，但只精确匹配该表达式，任何拼接尾串或续行仍拒绝。占位判断不执行表达式或读取引用的变量。
+- `test_round6_variable_prefix_never_shields_literal_tail`：裸 YAML 与 JSON 编码正文覆盖多行 plain scalar、无缩进列表续行、单行空白/无空白拼接、`os.getenv` 和 `env.` 前缀，以及内部非法 `${TOKEN literal}`。默认拒绝，公开错误不含合成尾串；显式脱敏逐字断言整个原值替换为一个占位、相邻端口保留，清理结果再次默认扫描不变。
+- R6-F2：单次 `at` 的状态归一化需要原生自然原因、`next_run_at=0` 和安装后新运行记录；`manual_pause` 及其它显式暂停原因不能归一化。复合规则自然耗尽仍沿原恢复合同，不把时间、次数的单独增加当作用户暂停授权。
+- `test_round6_manual_at_run_then_pause_is_installation_drift`：真实子进程在整批提交后、回执前 `os._exit(79)`；未来一小时的 `at` 经原 `reserve_manual_run → claim_run → mark_run_running → finish_run` 试跑，确认 trigger 为 manual、任务仍 active、到期时间未被消耗，然后调用原 `pause_job`。单任务/复合 × accept/reject × 默认/自定义暂停原因均冲突失败；store/history/envelope 原字节及双方未结算状态保留，不补 accepted。原自然 due/every 恢复用例继续通过。
+- 初始新增组 **42 项中 28 failed / 14 passed**（`.pytest_cache/round6-red.xml`），有效复现混合值、占位判断和单次任务暂停误判；修复后聚焦加原自然完成组 **50 passed**。首次完整回归暴露两个既有 `os.environ` 兼容用例被误拒绝，已收窄成精确允许，不改或放宽原测试。
+- 最终指定测试文件 **354 passed / 0 failed / 0 error / 0 skipped**，其中 Round6 新增 **44 项**，回执 `.pytest_cache/round6-gate.xml`。独立 Astra high 只静态审查内联关键差异，未读仓库或跑测试，未确认本轮目标残留缺陷；不把片段复核当全仓批准。
+
+工作树根复现指定门禁（尺寸报告不要与 pytest 并行生成；生成物提交前还原）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py -q --tb=short
+ruff check agent_py_agent/agent/assets/delivery_sanitizer.py agent_py_agent/agent/assets/script_store_support.py agent_py_agent/tests/test_cross_owner_asset_delivery.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+范围仅临时 Owner 的脱敏和真实持久化/调度仓库链；不代表真实 worker、模型、外部通知、断电、Linux/Windows 或全仓验收。未增加依赖，未删除、skip/xfail 或放宽有效测试。
+
 ## 2026-10-26 Wave 4 Round 5：完整 YAML 值与监控自身运行后的回执恢复
 
 来源：`07-tasks/wave4-round5-fix-20261026.md`，起点 `7528eb762af053d164db3a60fb70ee18a75ab101`。仅修改任务列出的五个文件。
