@@ -193,7 +193,7 @@ class HostDomainPorts:
     observations: object = None
 
 
-# LLM: 所有信封首先严格解码，只有明确的选择器允许user_id。
+# LLM: 治理/投递选择器只表示目标，不改变effective owner；嵌套身份注入仍拒绝，授权逐次核来源。
 # 函数用途: 把原始JSON转换为冻结Call并完成动作参数校验。
 def decode_call(raw: bytes) -> Call:
     row = validate_object(strict_json(raw), closed({
@@ -203,7 +203,7 @@ def decode_call(raw: bytes) -> Call:
     spec = action_spec(row["action"])
     if spec.requires_idempotency != ("idempotency_key" in row):
         raise HostAPIError("INVALID_SCHEMA")
-    users = row["action"].startswith("users.")
+    users = row["action"].startswith(("users.", "governance.reviews.", "assets.delivery."))
     if users and "as_user" in row:
         raise HostAPIError("INVALID_SCHEMA")
     reject_identity_injection(row["payload"], users)

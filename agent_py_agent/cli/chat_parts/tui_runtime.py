@@ -863,7 +863,7 @@ class _TuiConversationBoundaryRuntimeMixin:
             self.history_before_cursor = next_before
             return inserted
 
-    # LLM: 静态事件不接管 Todo；本页前台按 exact 请求去重，后台独立工作片仍显示，不改 canonical 原记录。
+    # LLM: 静态事件不接管Todo或重启计时；完整后台片按过程→canonical final→冻结计时排列。
     # 函数用途: 恢复主/子历史卡片并保留前台来源编号，供迟到接回时替换副本；不改原始会话。
     def _publish_recovered_display_events(self, events: tuple[dict[str, object], ...]) -> None:
         background_blocks: dict[str, list[str]] = {}
@@ -907,9 +907,14 @@ class _TuiConversationBoundaryRuntimeMixin:
             if request_id.startswith("bg-main:"):
                 background_blocks.setdefault(request_id, []).append(block_id)
             if kind == "assistant_completed" and request_id.startswith("history:") and covered.startswith("bg-main:"):
+                timing_id = f"{covered}:completion"
+                blocks = [key for key in background_blocks.get(covered, []) if key != timing_id]
+                blocks.append(block_id)
+                if any(block.block_id == timing_id for block in self.store.snapshot().stable_blocks):
+                    blocks.append(timing_id)
                 self._publish(
                     "history_blocks_reordered", "completed", f"{covered}:history-order",
-                    {"block_ids": [*background_blocks.get(covered, []), block_id], "final_block_id": block_id},
+                    {"block_ids": blocks, "final_block_id": block_id},
                     request_id=covered,
                 )
                 self._recovered_background_turns.add(covered)
@@ -2495,7 +2500,7 @@ class TuiTurnEventAdapter:
             )
         return True
 
-    # LLM: 只由 typed summary 映射确认终态；计时附在原程序块元数据，不写 store_messages，运输未知不结算。
+    # LLM: typed summary确认终态；计时仅上方展示，稳定请求后缀幂等去重，运输未知不结算。
     # 函数用途: 发布确认终态和消息流计时尾标，保留旧 CLI 文本合同。
     def _publish_turn_terminal(self, summary: TuiTurnSummary) -> None:
         if summary.outcome_unknown:
@@ -2530,7 +2535,7 @@ class TuiTurnEventAdapter:
 
         completion, first = self.runtime.completions.finish(self.request_id, phase)
         if first:
-            self.runtime._publish("system_message", "completed", f"completion:{self.request_id}",
+            self.runtime._publish("system_message", "completed", f"{self.request_id}:completion",
                 {"text": render_completion(completion), "source_kind": "turn_timing", "display": asdict(completion)}, request_id=self.request_id)
         self.runtime._publish(kind, phase, self.turn_block_id, {"completion": asdict(completion)}, request_id=self.request_id)
 

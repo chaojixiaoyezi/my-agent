@@ -1,3 +1,7 @@
+## 2026-10-25 WT5：TUI完成计时与Host v2投递/治理接线（工作树候选）
+
+TUI原单调耗时与完成时刻随canonical成功回合冻结保存，历史恢复保持final/计时紧邻且无底栏重复。21个Host动作的schema、能力、public管理员及manageable名单、惰性领域与原幂等账已接通；WT1/WT2接口已对齐。下一步是集成后真实跨用户业务、通知/审核执行及真实TUI窗口验收，不以合成领域测试代替端到端，详见`TESTS.md`。
+
 ## 2026-10-20 strict snapshot 的零链接copyout（源码候选）
 
 实际原生观察证明，原子发表期间stat可返回regular且nlink0的copyout；旧首次/读前/读后拒绝会把安全观察窗口当硬错。共享nofollow reader现在只废弃本轮，不接受零链接正文：首次regular0在open前丢弃；current0保原类型、多链接及A/B身份拒绝，准确原FD须同opened inode、regular0且mode/size/mtime稳定。已观察附着阶段四字段仍稳定；仅已脱链样本容unlink本身ctime变化。current1原路径、默认reader、最多三次、初始父链、预算及清理首因不变，无配置、依赖或领域分支。

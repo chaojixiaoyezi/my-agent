@@ -384,15 +384,16 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             if block.metadata.get("foreground_gateway_request_id") != request_id
         }
 
-    # LLM: 按 canonical 块 ID 重排并沿用原 created_seq 显示槽位，防止 renderer 抵消顺序；不改 journal、内容或活动。
+    # LLM: 本片final/计时合为相邻展示单元，再复用原created_seq槽位，不能隔着其它回合，不改journal。
     # 函数用途: 实时客户端漏收较早过程后，补全快照时将同一工作片重新放回原顺序，而不是追加在 final 后。
     def _handle_history_blocks_reordered(self, event: TuiEvent) -> None:
         ids = event.payload.get("block_ids")
         final_id = event.payload.get("final_block_id")
+        timing_id = f"{event.request_id}:completion"
         if (
             not event.request_id.startswith("bg-main:") or not isinstance(ids, list)
             or not isinstance(final_id, str) or not final_id.startswith("history:")
-            or not ids or ids[-1] != final_id
+            or not ids or (ids[-1] != final_id and ids[-2:] != [final_id, timing_id])
             or not all(isinstance(key, str) and (key == final_id or key.startswith(f"{event.request_id}:")) for key in ids)
             or len(set(ids)) != len(ids)
         ):
@@ -406,6 +407,13 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             replace(next(ordered), created_seq=block.created_seq) if block.block_id in selected else block
             for block in self.stable_blocks
         ]
+        if timing_id in selected:
+            slots = sorted(block.created_seq for block in self.stable_blocks)
+            timing = next(block for block in self.stable_blocks if block.block_id == timing_id)
+            blocks = [block for block in self.stable_blocks if block.block_id != timing_id]
+            index = next(i for i, block in enumerate(blocks) if block.block_id == final_id)
+            blocks.insert(index + 1, timing)
+            self.stable_blocks = [replace(block, created_seq=slot) for block, slot in zip(blocks, slots, strict=True)]
 
     # LLM: created_seq 在显示层充当排序槽位；仅更早页取得前置槽位，原事件 journal/运行时间/活动块不改。
     # 函数用途: 把后读到的历史放回正文前部，保留欢迎卡在顶部，不让 renderer 又按到达时间排回底部。

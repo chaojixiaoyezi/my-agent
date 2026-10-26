@@ -35,6 +35,159 @@ def test_completion_line(status, expected):
     assert format_turn_completion_line(106, status=status, verb="Baked") == expected
 
 
+# LLM: 缺省时刻只供实时格式化；历史生产必须传冻结的原时刻。
+# 函数用途: 锁定任务要求的固定Worked及日期时区格式。
+@pytest.mark.parametrize("ended", [None, "", 1700000000.0])
+def test_completion_formatter_always_has_timestamp(ended):
+    from agent_py_agent.cli import turn_completion
+
+    formatter = getattr(turn_completion, "format_completion_line", None)
+    assert callable(formatter)
+    line = formatter(106, completed_at=ended)
+    assert line.startswith("✻ Worked for 1m 46s · 完成于 ")
+    assert "2023" in line if ended else len(line.split("完成于 ")[1].split()) == 3
+
+
+# LLM: 真实快照生产、Gateway元数据和历史恢复共用本测试；只替换时钟，不伪造计时事件。
+# 函数用途: 证明后台/前台完成事实冻结并在最终回复之后恢复，重复回放不新增时钟。
+@pytest.mark.parametrize("foreground", [False, True])
+def test_frozen_completion_survives_canonical_history_and_reorder(monkeypatch, foreground):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.background_history import BackgroundTurnHistory
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+    from agent_py_agent.agent.gateway_parts.request_history import GatewayAssistantTurn
+
+    clock = [10.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    request = "bg-main:thread-one:timed"
+    history = BackgroundTurnHistory("thread-one", "task-one", request)
+    history.record("tool_completed", "completed", f"{request}:tool:1", {"tool": "read_file", "output": "ok", "ok": True})
+    clock[0] = 116.0
+    history.finish()
+    frozen = history.snapshot()
+    assert frozen.get("duration_s") == 106.0
+    assert isinstance(frozen.get("completed_at"), (int, float))
+    clock[0] = 900.0
+    history.finish()
+    assert history.snapshot() == frozen
+    if foreground:
+        frozen["gateway_request_id"] = "gateway-one"
+    turn = GatewayAssistantTurn(end_reason="completed", display_snapshot=frozen)
+    metadata = {**turn.metadata(), "assistant_part_id": "final", "task_id": "task-one"}
+    metadata.update({"gateway_request_id": "gateway-one"} if foreground else {"background_delivery_reason": "continuation"})
+    row = SimpleNamespace(thread_id="thread-one", message_id="message-one", role="assistant", content="最终后台回复",
+                          metadata=metadata, channel="local", channel_message_id="", created_at=1700000000.0)
+    events = conversation_history_display_events((row,))
+    assert [item["block_id"] for item in events][-2:] == ["history:thread-one:message-one:assistant", f"{request}:completion"]
+    runtime = TuiRuntime("frozen-timing")
+    # 先收到计时，随后补完整过程；重排仍须保持正文→计时。
+    runtime.publish_recovered_history((), display_events=(events[-1],))
+    for _ in range(2):
+        runtime.publish_recovered_history((), display_events=events)
+    ids = [block.block_id for block in runtime.store.snapshot().stable_blocks]
+    assert ids[-2:] == ["history:thread-one:message-one:assistant", f"{request}:completion"]
+    frame = render_tui_snapshot(runtime.store.snapshot(), TuiRenderContext(width=180))
+    text = [fragments_text(line) for line in frame.transcript_lines]
+    assert sum("Worked for 1m 46s" in line for line in text) == 1
+    assert "完成于" not in fragments_text(frame.footer) and not runtime.completions.clocks
+
+
+# LLM: 失败与取消也可能冻结显示片，但不能以此宣称成功；旧快照没有时间不补造。
+# 函数用途: 拦住失败/取消和旧历史的假完成时间。
+@pytest.mark.parametrize("reason", ["error", "aborted", "interrupted", "max-tokens", "blocked", ""])
+def test_unsuccessful_or_legacy_snapshot_never_fabricates_completion(reason):
+    from agent_py_agent.agent.conversation.background_history import BackgroundTurnHistory
+    from agent_py_agent.agent.gateway_parts.request_history import GatewayAssistantTurn
+
+    history = BackgroundTurnHistory("t", "task", "bg-main:t:test")
+    history.finish()
+    snapshot = history.snapshot()
+    metadata = GatewayAssistantTurn(end_reason=reason, display_snapshot=snapshot).metadata()
+    assert not any(item["block_id"].endswith(":completion") for item in metadata["background_display_turn"]["events"])
+    snapshot.pop("duration_s", None)
+    snapshot.pop("completed_at", None)
+    metadata = GatewayAssistantTurn(end_reason="completed", display_snapshot=snapshot).metadata()
+    assert not any(item["block_id"].endswith(":completion") for item in metadata["background_display_turn"]["events"])
+
+
+# LLM: 受损旧计时事件不能从renderer补当前墙钟或令整个正文渲染崩溃。
+# 函数用途: 验证已有历史块缺失/非法时标时不显示假完成日期。
+@pytest.mark.parametrize("stamp", [None, "", 1e100, True, float("nan")])
+def test_invalid_frozen_timing_is_omitted_not_replaced_with_now(stamp):
+    runtime = TuiRuntime("invalid-history-time")
+    request = "history:thread-one:message-one"
+    event = {"schema": "conversation_history_display.v1", "request_id": request, "block_id": f"{request}:completion",
+             "kind": "system_message", "phase": "completed", "payload": {"source_kind": "turn_timing", "display": {
+                 "status": "completed", "completed_at": stamp, "elapsed_seconds": 1.0}}}
+    runtime.publish_recovered_history((), display_events=(event,))
+    frame = render_tui_snapshot(runtime.store.snapshot(), TuiRenderContext(width=180))
+    assert not any("完成于" in fragments_text(line) or "✻" in fragments_text(line) for line in frame.transcript_lines)
+
+
+# LLM: 有限浮点也可能超出平台datetime范围；不能因附加展示信息失败丢掉canonical正文。
+# 函数用途: 验证metadata构造安全拒绝不可表示时刻。
+def test_out_of_range_completion_timestamp_does_not_break_gateway_metadata():
+    from agent_py_agent.agent.gateway_parts.request_history import GatewayAssistantTurn
+
+    snapshot = {"request_id": "bg-main:t:test", "complete": True, "duration_s": 1.0, "completed_at": 1e100, "events": []}
+    metadata = GatewayAssistantTurn(end_reason="completed", display_snapshot=snapshot).metadata()
+    assert metadata["background_display_turn"]["events"] == []
+
+
+# LLM: 计时先到、其它回合插入、canonical后到是独立接线交错；相对排序不能代替紧邻保证。
+# 函数用途: 验证跨片补齐和重复重放都把计时放到原final正后方，不夹其它回合。
+def test_history_reorder_keeps_final_and_timing_adjacent_across_other_turn():
+    runtime = TuiRuntime("interleaved-timing")
+    request = "bg-main:thread-one:timed"
+    timing = {"schema": "conversation_history_display.v1", "request_id": request, "block_id": f"{request}:completion",
+              "kind": "system_message", "phase": "completed", "payload": {"source_kind": "turn_timing", "display": {
+                  "status": "completed", "completed_at": 1700000000.0, "elapsed_seconds": 1.0}}}
+    final = {"schema": "conversation_history_display.v1", "request_id": "history:thread-one:final",
+             "block_id": "history:thread-one:final:assistant", "kind": "assistant_completed", "phase": "completed",
+             "covered_background_request_id": request, "payload": {"text": "后台回复"}}
+    runtime.publish_recovered_history((), display_events=(timing,))
+    runtime.write_console("其它回合说明")
+    for _ in range(2):
+        runtime.publish_recovered_history((), display_events=(final,))
+    ids = [block.block_id for block in runtime.store.snapshot().stable_blocks]
+    assert ids.index(timing["block_id"]) == ids.index(final["block_id"]) + 1
+
+
+# LLM: 运行真实后台runtime与canonical存储，仅模型由现有脚本化backend提供；不发送外网通知。
+# 函数用途: 证明背景成功回合不靠手造事件即可落盘并回放计时。
+def test_background_runtime_commits_and_replays_original_completion(tmp_path):
+    from agent_py_agent.agent.conversation import BackgroundMainAgentRuntime
+    from agent_py_agent.agent.conversation.history_display import (
+        conversation_history_display_events,
+    )
+    from agent_py_agent.agent.delivery import DeliveryService, build_default_channel_registry
+    from agent_py_agent.tests.test_background_owner_delivery_commit import _agent
+
+    agent, _ = _agent(tmp_path, backend_text="后台计时原回复")
+    store = agent.conversation_store
+    thread = store.threads.get_or_create({"canonical_user_id": "owner-test", "channel": "local",
+        "channel_conversation_id": "timing-background", "channel_user_id": "owner-test"})
+    store.tasks.bind({"thread_id": thread.thread_id, "task_id": "task-timing", "goal": "后台计时回归", "status": "active"})
+    runtime = BackgroundMainAgentRuntime(agent=agent, store=store, channels=DeliveryService(build_default_channel_registry(agent.config)))
+    report = runtime.run_once({"thread_id": thread.thread_id, "task_id": "task-timing", "reason": "scheduled_progress_report",
+                               "route_channel": "local", "route_target": "timing-background"})
+    assert report.persisted if hasattr(report, "persisted") else report.message_id
+    rows = store.messages.recent(thread.thread_id, limit=0)
+    final = next(row for row in rows if row.metadata.get("assistant_part_id") == "final")
+    frozen = final.metadata["background_display_turn"]
+    assert frozen["events"][-1]["block_id"] == f"{frozen['request_id']}:completion"
+    events = conversation_history_display_events(rows)
+    ui = TuiRuntime("real-background-history")
+    ui.publish_recovered_history((), display_events=events)
+    frame = render_tui_snapshot(ui.store.snapshot(), TuiRenderContext(width=180))
+    text = [fragments_text(line) for line in frame.transcript_lines]
+    assert sum("✻ Worked for" in line and "完成于" in line for line in text) == 1
+    assert "完成于" not in fragments_text(frame.footer)
+
+
 # LLM: 只替换单调时钟；真实 runtime、去重与渲染入口共同证明尾标位置和样式。
 # 函数用途: 验证最终正文后只出现一次灰色计时，原底栏不被覆盖。
 def test_completion_is_dim_in_transcript_not_footer(monkeypatch):

@@ -20,6 +20,29 @@ Ruff 与 strict 尺寸门通过（`hard=0`、`blocked=False`）；未放宽基�
 
 未验证：与 WT5 Host v2 合并后的真实入口、目标用户 Gateway 实际消费派单、全量子代理权威记录覆盖、跨平台及 Linux 全仓验收。组件排队和静态门通过不等于这些端到端链路已通过。
 
+## 2026-10-25 WT5：TUI冻结完成计时与Host v2投递/治理21动作
+
+来源：`07-tasks/wt-wave4-c6-tui-and-host-v2.md`、WT1/WT2公共方法任务单及两位实现者的接口确认。本片仅在`wt-wave4-c6`开发，不代表已部署。
+
+- `test_tui_turn_completion_and_bg_watch.py`：实时默认日期时区、原单调耗时冻结、Gateway元数据/后台canonical提交、历史和重复回放、final后紧邻计时、跨其它回合交错；已有计时缺失/非法时标不补当前时间、超范围时间不打断正文，失败/取消及旧快照不生成成功块，底栏无重复。后台运行回归使用真实runtime/文件存储及脚本化模型，不等于真实模型或真实终端验收。
+- `test_plugin_host_v2_contracts.py`：原动作与V2扩展矩阵分别覆盖合法/额外字段/幂等键；21动作AND能力、真实issuer的公共管理员/名单/IM与main目标拒绝、领域惰性未就绪、原控制账写重放、坏DTO保留unknown、固定结构化错误映射、review决定向写口传精确目标。领域接线使用合成服务，未将其当WT1/WT2真实业务端到端。
+- `test_plugin_manifest_v9.py`：任务新增显式`write`、`assets.read`、`users.read`能力。旧`write`未知值反例已不适用，改为仍未知的`write.unknown`，未知/重复/空能力及旧版本拒绝断言保持；`write`单独不能取得资产或治理权。
+- 已执行红绿：首轮计时5F、schema/能力8F、治理名单5F、领域接线22F；独审反馈补出的9个负例及坏写结果1F、普通调用者发现能力1F均按原失败修复，未跳过或删除有效测试。
+- 协议适配：真实文件位于`cli/turn_completion.py`、`conversation/history_display.py`和`conversation/background_delivery.py`；展示事件终态沿现有`phase=completed`协议，不另造`final`运输状态。前后台共用`request_id:completion`；旧历史没有冻结时间不补造。
+
+复现（工作树根执行）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_manifest_v9.py -q --tb=short
+python3 -B -m pytest agent_py_agent/tests/test_tui_history_paging.py agent_py_agent/tests/test_tui_reading_position.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_background_owner_delivery_commit.py -q --tb=short -o addopts=''
+ruff check agent_py_agent
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+```
+
+当前版本实际验证：上述九个相关测试文件合并运行`550 passed`；全目录Ruff通过；严格尺寸门`hard=0 / blocked=False`；修改的51个生产函数/方法AST节点均查到双层注释。两名Astra独立复核仅基于内联材料静态检查，其提出的时间戳、跨片紧邻和决定目标绑定均由父级用真实入口反例核验修复；未宣称复核者独立运行测试。
+
+生成的`CODE_SIZE_REPORT.md`不得随功能提交。WT1/WT2真实实现、跨用户安装/通知/审核执行、真实CLI窗口和部署仍由集成者在合并版本上复核。原footer已无计时渲染分支，没有为凑“死代码删除”误删仍使用的CLI格式化函数；仅替换旧反向completion块名及仅final可处于末位的旧排序限制。
+
 ## 2026-10-26 底座残余性能、资源回收、沙箱安全与网关 04:00 安全重启死锁回归（7 Worktrees 集成）
 
 本轮集成覆盖 `wt-perf-a` 至 `wt-gw-g` 共 7 个隔离工作树的定向回归测试：

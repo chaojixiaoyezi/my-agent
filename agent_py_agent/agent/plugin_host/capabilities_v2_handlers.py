@@ -31,13 +31,19 @@ def _module(name):
         raise HostAPIError("HOST_NOT_READY", 503) from None
 
 
-# LLM: 真实端口和依赖都齐全才展示可用；不把登记动作、文件存在或capabilities当实现完成。
+# LLM: 投递/治理也逐项核真实公开方法；缺领域明确不可用，不因登记动作而宣称实现完成。
 # 函数用途: 核对新增动作在本组合根是否已经接齐领域。
 def capabilities_v2_ready(action, ports):
     if action not in V2_ACTIONS or not callable(getattr(ports.conversation, "store_resolver", None)):
         return False
     if action_spec(action).requires_idempotency and not callable(getattr(getattr(ports.observations, "services", None), "once", None)):
         return False
+    from .governance_delivery_v2_handlers import (
+        DELIVERY_GOVERNANCE_ACTIONS,
+        governance_delivery_ready,
+    )
+    if action in DELIVERY_GOVERNANCE_ACTIONS:
+        return governance_delivery_ready(action)
     dependencies = {
         "assets.workspace.promote": ("assets.workspace_assets", "promote_to_owner"),
         "conversations.threads.fork": ("conversation.thread_fork_service", "fork_conversation_thread"),
@@ -142,9 +148,16 @@ def _workspace(payload, authorized, context, conversation, store):
     return workspace_directory(context, raw) if raw else None
 
 
-# LLM: 仅冷读规范对象和目录；在控制锁内核当前线程交集及缓存分叉目标，禁止执行业务写入或修改范围。
+# LLM: 控制锁内重核当前治理目标和提审归属；原线程/目录交集预检保持，禁止业务写入。
 # 函数用途: 为新写与幂等重放统一执行无副作用的资源范围预检。
 def _preflight_resource_scope(action, payload, authorized, context, conversation, store, saved=None):
+    from .governance_delivery_v2_handlers import (
+        DELIVERY_GOVERNANCE_ACTIONS,
+        preflight_governance_delivery,
+    )
+    if action in DELIVERY_GOVERNANCE_ACTIONS:
+        preflight_governance_delivery(action, payload, authorized, context)
+        return
     _workspace(payload, authorized, context, conversation, store)
     if action == "conversations.threads.fork":
         conversation.require_thread(store, payload["source_thread_id"], authorized, context)
@@ -197,9 +210,15 @@ def _workspace_context(payload, authorized, context, conversation, store):
             "owner_home": str(context.owner_home.home_dir), "is_admin": False, "overlay_counts": counts}
 
 
-# LLM: 新动作固定分派；非HostAPIError由组合根按读失败或写结果未知处理，不公开底层异常和秘密。
+# LLM: 投递/治理固定适配复用同一幂等账；非HostAPIError仍沿组合根unknown，不公开原异常正文。
 # 函数用途: 将新增动作交给已有领域或目录只读投影。
 def _effect(action, payload, authorized, context, ports, store):
+    from .governance_delivery_v2_handlers import (
+        DELIVERY_GOVERNANCE_ACTIONS,
+        call_governance_delivery,
+    )
+    if action in DELIVERY_GOVERNANCE_ACTIONS:
+        return call_governance_delivery(action, payload, authorized, context)
     conversation = ports.conversation
     if action == "conversations.threads.workspace.get":
         return DomainResult(200, _workspace_context(payload, authorized, context, conversation, store))

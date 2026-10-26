@@ -69,7 +69,7 @@ class GatewayAssistantTurn:
     display_snapshot: dict | None = None
     host_notices: tuple[dict[str, str], ...] = ()
 
-    # LLM: 仅构建新的 metadata 字典；不改原生内容、不写文件、不推断缺失 reason。
+    # LLM: 成功时只消费显示片原冻结时钟；失败与repair不新计时，不改原生内容或推断缺失reason。
     # 函数用途: 为正常落账与延迟补交生成同一份元数据；显示快照复制后传出，避免调用方污染原包。
     def metadata(self) -> dict[str, object]:
         metadata: dict[str, object] = {}
@@ -78,8 +78,10 @@ class GatewayAssistantTurn:
         if reason := normalize_turn_end_reason(self.end_reason):
             metadata["turn_end_reason"] = reason
         if self.display_snapshot:
+            from ..conversation.background_history import completed_display_snapshot
+
             metadata["background_transcript_request_id"] = self.display_snapshot["request_id"]
-            metadata["background_display_turn"] = copy.deepcopy(self.display_snapshot)
+            metadata["background_display_turn"] = completed_display_snapshot(self.display_snapshot, self.end_reason)
         if self.host_notices:
             metadata["host_notices"] = [dict(row) for row in self.host_notices]
         return metadata

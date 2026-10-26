@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import copy
+import math
 import threading
+import time
 from collections.abc import Mapping
 
 BACKGROUND_DISPLAY_TURN_SCHEMA = "background_display_turn.v1"
@@ -16,12 +18,14 @@ _TERMINAL_KINDS = frozenset({
 # LLM: 按稳定 block_id 保留首次出现位置，后续终态替换同块；不从有界 transport ring 回读或按正文去重。
 # 类用途: 累积一轮公开过程的完整块；逐 token 增量不重复存储，工具缺终态时保留明确的未知说明。
 class BackgroundTurnHistory:
-    # LLM: 身份由宿主 sink 提供，锁只保护展示快照；不读写文件、不改变 owner 或 task。
+    # LLM: 身份由宿主sink提供；在原片创建时捕获单调钟，锁只保护展示快照，无业务状态副作用。
     # 函数用途: 创建本工作片的块容器，避免并发工具回调与最终快照互相覆盖。
     def __init__(self, thread_id: str, task_id: str, request_id: str) -> None:
         self.thread_id, self.task_id, self.request_id = thread_id, task_id, request_id
         self._blocks: dict[str, dict] = {}
         self._complete = False
+        self._started_monotonic = time.monotonic()
+        self._timing: dict = {}
         self._lock = threading.Lock()
 
     # LLM: 只保存展示型终态；开始事件占据原位置，消费回执和其他控制事件不进入静态历史。
@@ -50,13 +54,15 @@ class BackgroundTurnHistory:
                 },
             }
 
-    # LLM: finish 只冻结显示快照，必须在 sink 关闭最后一个 thinking 后调用；没有权限/完成判定副作用。
+    # LLM: finish只冻结首次结束时刻及单调耗时；失败也会调用，故此处不能产生成功计时事件。
     # 函数用途: 标记这份工作片展示已收齐；未调用 finish 的活动快照不能授权客户端丢弃增量。
     def finish(self) -> None:
         with self._lock:
+            if not self._complete:
+                self._timing = {"duration_s": max(0.0, time.monotonic() - self._started_monotonic), "completed_at": time.time()}
             self._complete = True
 
-    # LLM: 返回独立副本，只有 canonical final 提交成功后客户端才可依此重基缓冲。
+    # LLM: 时间随快照复制；只有canonical成功提交才可把冻结时间投影为成功事件，不重置原时钟。
     # 函数用途: 导出完整块快照供最终消息 metadata 保存，不让调用方改写 sink 内部历史。
     def snapshot(self) -> dict:
         with self._lock:
@@ -65,7 +71,30 @@ class BackgroundTurnHistory:
                 "thread_id": self.thread_id, "task_id": self.task_id,
                 "request_id": self.request_id, "complete": self._complete,
                 "events": copy.deepcopy(list(self._blocks.values())),
+                **self._timing,
             }
+
+
+# LLM: 仅成功canonical提交调用；无冻结时间、未完快照或失败不生成成功块，不从当前时间补旧历史。
+# 函数用途: 将本工作片已冻结的计时幂等加入原显示快照，供实时轮询与磁盘回放共用。
+def completed_display_snapshot(snapshot: dict, end_reason: str) -> dict:
+    value = copy.deepcopy(snapshot)
+    duration, ended = value.get("duration_s"), value.get("completed_at")
+    request = value.get("request_id")
+    if (end_reason != "completed" or value.get("complete") is not True or not isinstance(request, str)
+            or not request or type(duration) not in (int, float) or type(ended) not in (int, float)
+            or not math.isfinite(duration) or duration < 0 or not math.isfinite(ended) or ended <= 0):
+        return value
+    from ...cli.turn_completion import render_turn_timing
+
+    display = {"logical_id": request, "status": "completed", "elapsed_seconds": duration,
+               "completed_at": ended, "source": "host_monotonic"}
+    if not (text := render_turn_timing(display)):
+        return value
+    event = {"request_id": request, "block_id": f"{request}:completion", "kind": "system_message", "phase": "completed",
+             "payload": {"text": text, "source_kind": "turn_timing", "title": "回合完成", "display": display}}
+    value["events"] = [item for item in value.get("events", []) if item.get("block_id") != event["block_id"]] + [event]
+    return value
 
 
 # LLM: 完整快照必须匹配 canonical thread 和显示 request；后台校验 task，前台校验精确 Gateway 请求而非缺省 task。

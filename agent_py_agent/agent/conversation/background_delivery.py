@@ -483,7 +483,7 @@ def _background_reply_suppressed(
     return not str(projection_content or "").strip() and not has_attachments
 
 
-# LLM: canonical final 保存正文、过程和 host-owned turn-end；commentary 不携带终态，缺失原因不从文字补造。
+# LLM: canonical final保存正文、过程和冻结计时；仅typed completed生成成功计时，重放/repair不重启钟。
 # 外发结果只作为 metadata 事实，不参与“要不要给 owner 留下这条回复”的判定。
 # 函数用途: 幂等保存后台回复及长度限制原因，并返回结构化落账结果。
 def _commit_background_response(
@@ -535,6 +535,10 @@ def _commit_background_response(
     from ..turn_end import normalize_turn_end_reason
 
     end_reason = normalize_turn_end_reason((display_snapshot or {}).get("turn_end_reason"))
+    if display_snapshot:
+        from .background_history import completed_display_snapshot
+
+        display_snapshot = completed_display_snapshot(display_snapshot, end_reason)
     delivery_key = background_delivery_idempotency_key(request)
     _append_owner_commentaries(
         delivery.store,

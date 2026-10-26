@@ -803,13 +803,16 @@ def _render_foreground_activity(snapshot: TuiViewSnapshot, context: TuiRenderCon
     return ((("class:tui-spinner-highlight", prefix), ("class:tui-thinking", label)),)
 
 
-# LLM: 计时读取显式 turn_timing 元数据，不解析旧文本；其它块仍按 reducer role/kind/phase 分派。
+# LLM: 计时只读冻结元数据；非法/缺失时标整块略过而不以当前时间替代，其他正文仍原分派。
 # 函数用途: 为消息流的计时行使用次要色，保留各类正文的原渲染入口。
 def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
-    if block.metadata.get("source_kind") == "turn_timing" and isinstance(block.metadata.get("display"), dict):
+    if block.metadata.get("source_kind") == "turn_timing":
         from ..turn_completion import render_turn_timing
 
-        text = render_turn_timing(block.metadata["display"])
+        display = block.metadata.get("display")
+        text = render_turn_timing(display) if isinstance(display, dict) else ""
+        if not text:
+            return ()
         return ((('class:tui-muted', _fit_text(text, context.width, "left").rstrip()),),)
     if block.kind == "session_started":
         return _render_welcome(block, context)

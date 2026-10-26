@@ -19,7 +19,7 @@ from .native_history import canonical_native_messages_from_metadata
 HISTORY_DISPLAY_SCHEMA = "conversation_history_display.v1"
 
 
-# LLM: 同一 conversation turn 的 native 与投递快照归同一显示片，按精确ID关联；前台ID只供发起页去重。
+# LLM: 同片按精确ID关联；计时只读冻结事件并紧随canonical final，不给旧历史补当前时间。
 # 函数用途: 按canonical来源投影并恢复跨片事件顺序，插话不能被分组挤到回复后；不改变运行状态。
 def conversation_history_display_events(
     rows: Sequence[object],
@@ -47,7 +47,17 @@ def conversation_history_display_events(
             gateway_id = ""
         projected = [*_turn_events(identity, group), *_turn_end_events(group), *_host_notice_events(group)]
         events.extend({**event, **({"gateway_request_id": gateway_id} if gateway_id else {})} for event in projected)
-    return order_history_events(rows, events)
+    ordered = order_history_events(rows, events)
+    timings = {event["request_id"]: event for event in ordered if event.get("payload", {}).get("source_kind") == "turn_timing"}
+    covered = {event.get("covered_background_request_id") for event in ordered if event.get("kind") == "assistant_completed"}
+    result = []
+    for event in ordered:
+        if event.get("payload", {}).get("source_kind") == "turn_timing" and event["request_id"] in covered:
+            continue
+        result.append(event)
+        if event.get("kind") == "assistant_completed" and (timing := timings.get(event.get("covered_background_request_id"))):
+            result.append(timing)
+    return tuple(result)
 
 
 # LLM: 只读取宿主 metadata 的精确请求关联；后台续片虽可携带原编号，仍是独立应显示的工作片。

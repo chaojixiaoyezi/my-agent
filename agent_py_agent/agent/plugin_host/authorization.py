@@ -117,13 +117,14 @@ class IngressIssuer:
         caps = _caller_capabilities(actor, entry, source.caller_owner, caps)
         return fixed, grant, caps
 
-    # LLM: 主体和private/public范围只取原安装；私有不跨Owner，目录按有效owner检查，公共个人不借管理员目录权。
+    # LLM: 治理先核原安装public及真实管理员，目标selector不改变数据owner；私有和公共个人均不借安装者治理。
     # 函数用途: 验证闭合调用、能力、目标和目录，发行不可伪造的调用投影。
     def authorize(self, source: PluginIngressSource, call: Call) -> AuthorizedCall:
         call = _checked_call(call)
         fixed, grant, caps = self._live(source)
         actor = fixed.activation_ref.owner().identity
         target = _call_target(source, call, grant, actor, fixed.activation_ref.require())
+        _check_managed_ingress(call, fixed, source, target, grant)
         own = target.owner_kind == "user" and (target == actor or target == source.caller_owner)
         _check_capabilities(call, caps, own=own)
         digest = hashlib.sha256(canonical_json({"grant": grant, "capabilities": sorted(caps)}).encode()).hexdigest()
@@ -144,14 +145,15 @@ class IngressIssuer:
             self._calls[id(authorized)] = authorized
         return authorized
 
-    # LLM: 发行后仍逐次核原会话、token、cap及用户修订；禁止replace伪造或晚换调用者。
+    # LLM: 返回及重放逐次重核原public管理员身份和manageable名单，禁止已发行DTO缓存旧治理权。
     # 函数用途: 在领域短提交、结果输出和流事件前核对同一调用。
     def revalidate(self, authorized: AuthorizedCall) -> None:
         with self._lock:
             if self._calls.get(id(authorized)) is not authorized:
                 raise HostAPIError("PLUGIN_TOKEN_INVALID", 401)
         binding = authorized.binding
-        _, grant, caps = self._live(binding.source)
+        fixed, grant, caps = self._live(binding.source)
+        _check_managed_ingress(authorized.call, fixed, binding.source, binding.effective_owner, grant)
         own = binding.effective_owner.owner_kind == "user" and (
             binding.effective_owner == binding.actor or binding.effective_owner == binding.source.caller_owner)
         _check_capabilities(authorized.call, caps, own=own)
@@ -292,18 +294,18 @@ def _target_identity(call: Call, grant: dict, actor: OwnerIdentity) -> OwnerIden
     return OwnerIdentity("local", "user", uid)
 
 
-# LLM: 范围来自原表，所有private均移除治理/委托，管理员也不豁免；公共个人不继承安装者治理能力。
+# LLM: 所有private及公共普通调用者移除users.read/manage和委托；发现页不能宣称不存在的治理资格。
 # 函数用途: 限定安装可访问性和本次有效能力。
 def _caller_capabilities(actor, entry, caller, caps):
     scope = getattr(entry, "installation_scope", "private")
     if scope not in {"private", "public"}:
         raise HostAPIError("INVALID_SCHEMA")
     if scope == "private":
-        caps = caps - {"users.manage", "act_as_user"}
+        caps = caps - {"users.read", "users.manage", "act_as_user"}
     if actor != OwnerIdentity.local_main():
         if actor.owner_kind != "user" or scope != "private" or caller is not None and caller != actor:
             raise HostAPIError("TARGET_DENIED", 403)
-        if {"users.manage", "act_as_user"} & caps:
+        if {"users.read", "users.manage", "act_as_user"} & caps:
             raise HostAPIError("CAPABILITY_DENIED", 403)
     if caller is not None and caller != actor and scope != "public":
         raise HostAPIError("TARGET_DENIED", 403)
@@ -311,7 +313,7 @@ def _caller_capabilities(actor, entry, caller, caps):
     if actual != OwnerIdentity.local_main():
         if actual.owner_kind != "user":
             raise HostAPIError("TARGET_DENIED", 403)
-        caps = caps - {"users.manage", "act_as_user"}
+        caps = caps - {"users.read", "users.manage", "act_as_user"}
     return caps
 
 
@@ -341,9 +343,13 @@ def _requires_execution(call: Call) -> bool:
                                                  and call.payload.get("tool_policy") == "bounded")
 
 
-# LLM: 账号许可支持显式星号但仍先核UID；线程/task实际归属由领域在原账上验证。
+# LLM: 治理selector只按固定local别名归一化并核manageable名单；IM/main不得因通配而放行。
 # 函数用途: 拒绝明确不在批准范围的用户与工具。
 def _check_static_scope(call: Call, grant: dict) -> None:
+    if call.action.startswith(("users.managed.", "governance.reviews.")):
+        values = [managed_user_id(call.payload[key]) for key in ("user_id", "target_owner_id") if key in call.payload]
+        if len(set(values)) > 1 or any(uid not in grant["manageable_user_ids"] and "*" not in grant["manageable_user_ids"] for uid in values):
+            raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403)
     if call.action.startswith("users.local.") and "user_id" in call.payload:
         from .owner_context import validate_local_user_id
         uid = validate_local_user_id(call.payload["user_id"])
@@ -352,6 +358,33 @@ def _check_static_scope(call: Call, grant: dict) -> None:
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
     if call.action == "execute.tool" and call.payload["tool_name"] not in grant["execution"]["tool_names"]:
         raise HostAPIError("CAPABILITY_DENIED", 403)
+
+
+# LLM: 三种selector形状互斥解析，不能连续剥前缀；UID沿原保留名规则，注册由领域复验。
+# 函数用途: 将受管选择器变成准确本地普通用户ID，越域统一403。
+def managed_user_id(value):
+    from .owner_context import validate_local_user_id
+
+    if isinstance(value, str) and value.startswith("local/users/"):
+        raw = value[len("local/users/"):]
+    else:
+        raw = value.removeprefix("local/") if isinstance(value, str) else value
+    try:
+        return validate_local_user_id(raw)
+    except HostAPIError:
+        raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403) from None
+
+
+# LLM: 原激活/调用者/effective owner共同核public管理员范围；名单复核在authorise与返回、短写/重放前共用。
+# 函数用途: 防止公共插件或私有管理员安装绕过治理边界。
+def _check_managed_ingress(call, fixed, source, target, grant):
+    if not call.action.startswith(("users.managed.", "governance.reviews.")):
+        return
+    actor = fixed.activation_ref.owner().identity
+    if (actor != OwnerIdentity.local_main() or (source.caller_owner or actor) != OwnerIdentity.local_main()
+            or target != actor or getattr(fixed.activation_ref.require(), "installation_scope", "private") != "public"):
+        raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403)
+    _check_static_scope(call, grant)
 
 
 # LLM: 只读也必须核原local账号或provider状态；不能用同名local UID替代非local身份。
