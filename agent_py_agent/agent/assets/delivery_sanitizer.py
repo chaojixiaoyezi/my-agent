@@ -1,4 +1,4 @@
-# LLM: 必须在任何descriptor.clean_json前检查原字节；与Skill迁移共用redact_sensitive_text，不继承其8MiB迁移预算。
+# LLM: clean_json前核原字节，JSON解码正文再核YAML缩进/flow边界；复用公共redactor，不借用Skill迁移预算或执行YAML标签。
 # 模块用途: 硬拒绝投递秘密或显式替换为占位符，移除发送方主机路径且无损处理二进制。
 from __future__ import annotations
 
@@ -25,10 +25,14 @@ _PATTERNS = (
     ('secret_assignment', re.compile(
         r'''(?i)(?<!\w)(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)(?!\w)["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote)''')),
 )
-_PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b', re.I)
+_PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b|\*\*\*REDACTED\*\*\*', re.I)
 _SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
     'updated_at', 'created_at', 'kind', 'driver'})
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+_YAML_KEYS = r'api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer'
+_YAML_HEADER = re.compile(rf'''(?i)^(?P<indent>[ \t]*)(?P<seq>-[ \t]+)?(?P<key>["']?(?:{_YAML_KEYS})["']?)[ \t]*:[ \t]*(?P<tail>.*)$''')
+_YAML_INLINE = re.compile(rf'''(?im)(?:^|(?<=[{{,\[\s]))["']?(?:{_YAML_KEYS})["']?[ \t]*:[ \t]*''')
+_YAML_BLOCK = re.compile(r'[|>](?:[1-9][+-]?|[+-][1-9]?)?')
 
 
 # LLM: 只遍历已由本Owner凭据读口认证的内存值；元数据整支排除，任意非空字符串均作为秘密而不按长度猜测。
@@ -75,6 +79,223 @@ def _placeholder(value, *, unquoted=False):
         or value.startswith(('$', 'os.', 'env.'))))
 
 
+# LLM: 不构造YAML对象、不执行tag/alias；只判定已定位标量，带引号的布尔/数字仍可是真秘密。
+# 函数用途: 判断一个原始YAML标量是否需要替换，保留已有模板和空值。
+def _yaml_secret(value):
+    value = value.strip()
+    quoted = value[:1] in {'"', "'"}
+    if quoted and value[-1:] == value[:1]:
+        value = value[1:-1]
+    return bool(value) and not _placeholder(value, unquoted=not quoted)
+
+
+# LLM: 引用标量的转义是词法状态，不构造值；单引号双写跳过两字符，双引号反斜线只影响下一字符。
+# 函数用途: 推进一个引用字符并报告引用是否结束。
+def _yaml_quoted_step(text, cursor, quote, escaped):
+    if escaped:
+        return quote, False, cursor + 1, False
+    char = text[cursor]
+    if char == '\\' and quote == '"':
+        return quote, True, cursor + 1, False
+    if char != quote:
+        return quote, False, cursor + 1, False
+    if quote == "'" and text[cursor + 1:cursor + 2] == "'":
+        return quote, False, cursor + 2, False
+    return '', False, cursor + 1, True
+
+
+# LLM: 跨物理行追踪引号与容器，不在内嵌逗号或#截断；单引号双写按YAML转义处理，不展开tag/alias。
+# 函数用途: 找到完整flow或引用标量边界，避免半替换遗留秘密或破坏集合闭合。
+def _yaml_value_end(text, start, stop):
+    quote, depth, escaped, cursor = '', 0, False, start
+    container = text[start:start + 1] in {'[', '{'}
+    while cursor < stop:
+        char = text[cursor]
+        if quote:
+            quote, escaped, cursor, closed = _yaml_quoted_step(text, cursor, quote, escaped)
+            if closed and text[start:start + 1] in {'"', "'"} and depth == 0:
+                return cursor
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            cursor += 1
+            continue
+        if char in '[{':
+            depth += 1
+            cursor += 1
+            continue
+        if char in ']}':
+            if not depth:
+                return cursor
+            depth -= 1
+            if container and depth == 0:
+                return cursor + 1
+            cursor += 1
+            continue
+        if not depth and (char == ',' or char == '#' and (cursor == start or text[cursor - 1].isspace())):
+            return cursor
+        cursor += 1
+    return stop
+
+
+# LLM: 块体是字符串，其中括号/引号不参与外部flow层级；遮罩保留长度与换行，不改变实际待扫描原文。
+# 函数用途: 为词法上下文排除任意YAML块标量正文，避免文档代码影响后续键边界。
+def _yaml_lexical_text(text):
+    result, block_indent = [], None
+    for line in text.splitlines(keepends=True):
+        indent = len(line) - len(line.lstrip(' \t'))
+        if block_indent is not None and (not line.strip() or indent > block_indent):
+            result.append(re.sub(r'[^\r\n]', ' ', line))
+            continue
+        block_indent = None
+        header = re.match(r'^(?P<indent>[ \t]*)(?P<seq>-[ \t]+)?[^:#\r\n]+:[ \t]*[|>][1-9+-]*[ \t]*(?:#.*)?$', line.rstrip('\r\n'))
+        if header:
+            block_indent = len(header['indent']) + len(header['seq'] or '')
+        result.append(line)
+    return ''.join(result)
+
+
+# LLM: 状态仅用于flow层级，注释在换行清除，引用内括号不计层级；无I/O、无YAML对象构造。
+# 函数用途: 推进flow扫描的单字符状态，保持主扫描平坦。
+def _yaml_flow_step(state, char):
+    depth, quote, escaped, comment = state
+    if comment:
+        return depth, quote, escaped, char not in '\r\n'
+    if quote:
+        if escaped:
+            return depth, quote, False, False
+        if char == '\\' and quote == '"':
+            return depth, quote, True, False
+        return depth, '' if char == quote else quote, False, False
+    if char == '#':
+        return depth, quote, escaped, True
+    if char in {'"', "'"}:
+        return depth, char, escaped, False
+    if char in '[{':
+        return depth + 1, quote, escaped, False
+    if char in ']}':
+        return max(0, depth - 1), quote, escaped, False
+    return state
+
+
+# LLM: 一次扫描括号/引用/注释上下文，位置始终取原文；key自身的引号不泄入后续value，不解析对象或执行标签。
+# 函数用途: 为每个敏感键标注是否位于跨行flow集合内。
+def _yaml_inline_contexts(text):
+    lexical = _yaml_lexical_text(text)
+    cursor, state = 0, (0, '', False, False)
+    result = []
+    for match in _YAML_INLINE.finditer(text):
+        for char in lexical[cursor:match.start()]:
+            state = _yaml_flow_step(state, char)
+        result.append((match, state[0]))
+        cursor = match.end()
+    return result
+
+
+# LLM: 普通折行标量整体替换；标量列表按item边界合并续行，子映射不按字符串清除。
+# 函数用途: 生成多行敏感值的保形替换片段。
+def _yaml_multiline_spans(body, findings):
+    groups = []
+    for start, child in body:
+        scalar = re.match(r'(?P<prefix>[ \t]*(?P<seq>-[ \t]+)?)(?P<value>[^\r\n]*)', child)
+        value = scalar['value'].strip()
+        if not value or value.startswith('#'):
+            continue
+        if re.match(r'''["']?[^\s:]+["']?\s*:\s''', value) or value.startswith(('{', '[')):
+            return []
+        if scalar['seq'] or not groups:
+            groups.append([start + scalar.start('value'), start + scalar.end('value'), value])
+        else:
+            groups[-1][1] = start + scalar.end('value')
+            groups[-1][2] += '\n' + value
+    spans = []
+    for start, end, value in groups:
+        if _yaml_secret(value):
+            findings.add('yaml_multiline_secret')
+            spans.append((start, end, '"***REDACTED***"'))
+    return spans
+
+
+# LLM: 块体按原缩进边界整段替换，空行也移除；多行标量只改标量叶，不把子映射/list-of-mappings当秘密字符串。
+# 函数用途: 定位敏感键的块标量、多行标量和缩进标量列表。
+def _yaml_indented_spans(text, findings, flow_keys):
+    lines, spans, offset = text.splitlines(keepends=True), [], 0
+    covered_until = 0
+    for index, line in enumerate(lines):
+        match = _YAML_HEADER.match(line.rstrip('\r\n'))
+        if match is None or offset < covered_until or offset + match.start('key') in flow_keys:
+            offset += len(line)
+            continue
+        tail = match['tail'].split('#', 1)[0].strip()
+        if tail and _YAML_BLOCK.fullmatch(tail) is None:
+            offset += len(line)
+            continue
+        indent, body, end = len(match['indent']) + len(match['seq'] or ''), [], offset + len(line)
+        for child_index in range(index + 1, len(lines)):
+            child = lines[child_index]
+            if child.strip() and len(child) - len(child.lstrip(' \t')) <= indent:
+                break
+            body.append((end, child))
+            end += len(child)
+        if tail and any(child.strip() for _, child in body):
+            value = '\n'.join(child.strip() for _, child in body if child.strip())
+            if _yaml_secret(json.dumps(value)):
+                findings.add('yaml_block_secret')
+                nonempty = next(child for _, child in body if child.strip())
+                padding = nonempty[:len(nonempty) - len(nonempty.lstrip(' \t'))]
+                spans.append((offset + len(line), end, padding + '***REDACTED***\n'))
+                covered_until = end
+        elif not tail:
+            spans.extend(_yaml_multiline_spans(body, findings))
+        offset += len(line)
+    return spans
+
+
+# LLM: 跨行flow及引用值按完整词法边界替换，块体不参加flow上下文；原简单行赋值保持已有占位协议。
+# 函数用途: 扫描并保形替换YAML flow、多行及块标量秘密，不把块头符号当密码。
+def _scan_and_redact_yaml_structure(text: str, *, findings: set[str], redact: bool) -> str:
+    pairs = _yaml_inline_contexts(text)
+    spans = _yaml_indented_spans(text, findings, {match.start() for match, depth in pairs if depth})
+    covered = sorted((start, end) for start, end, _ in spans)
+    starts = [start for start, _ in covered]
+    for match, depth in pairs:
+        index = bisect_right(starts, match.start()) - 1
+        if index >= 0 and match.start() < covered[index][1]:
+            continue
+        start = match.end()
+        if depth:
+            while start < len(text) and text[start].isspace():
+                start += 1
+        stop = text.find('\n', start)
+        stop = len(text) if stop < 0 else stop
+        if depth or text[start:start + 1] in {'[', '{', '"', "'"}:
+            stop = len(text)
+        end = _yaml_value_end(text, start, stop)
+        value = text[start:end].strip()
+        if not value or _YAML_BLOCK.fullmatch(value):
+            continue
+        # 只让确实完整覆盖本值的旧行规则接管，不能将含空格/容器/引用转义的值误当作已处理。
+        line_start = text.rfind('\n', 0, match.start()) + 1
+        prefix = text[line_start:match.start()]
+        if not depth and (not prefix.strip() or prefix.strip() == '-'):
+            legacy = _UNQUOTED_ASSIGNMENT.match(text, line_start)
+            quoted = _PATTERNS[-1][1].search(text, match.start(), end)
+            if legacy and legacy.end('literal') == end or quoted and quoted.end() == end:
+                continue
+        if _yaml_secret(value):
+            findings.add('yaml_flow_secret')
+            spans.append((start, end - (len(text[start:end]) - len(text[start:end].rstrip())), '"***REDACTED***"'))
+    if not redact:
+        return text
+    result, cursor = [], 0
+    for start, end, replacement in sorted(spans):
+        if start < cursor:
+            continue
+        result.extend((text[cursor:start], replacement))
+        cursor = end
+    return ''.join((*result, text[cursor:]))
+
+
 # LLM: 环境值仅本次内存匹配，不回传变量名或原值，不持久化环境。
 # 函数用途: 取得需要额外拦截的非平凡环境秘密。
 def _environment_secrets():
@@ -82,14 +303,15 @@ def _environment_secrets():
         and len(value) >= 8 and value.strip() and not _placeholder(value)})
 
 
-# LLM: 位置属于原文本，literal只替换原引号内值；非替换扫描有界收集即足以硬拒绝，不因单字符凭据积累巨量诊断。
+# LLM: 原文位置保留；YAML块头交结构扫描，不把|/>当短秘密破坏块体；其余扫描仍有界。
 # 函数用途: 收集高危凭据键、密钥形状和当前已知秘密的原始位置。
 def _matches(text, secrets, *, limit=None):
     matches = []
     for name, pattern in _PATTERNS:
         group = 'literal' if 'literal' in pattern.groupindex else 0
         candidates = (match for match in pattern.finditer(text)
-            if not _placeholder(match.group(group), unquoted=name == 'unquoted_secret_assignment'))
+            if not (name == 'unquoted_secret_assignment' and _YAML_BLOCK.fullmatch(match.group(group)))
+            and not _placeholder(match.group(group), unquoted=name == 'unquoted_secret_assignment'))
         matches.extend((*match.span(group), name) for match in islice(candidates,
             None if limit is None else max(0, limit - len(matches))))
     for secret in secrets:
@@ -134,7 +356,7 @@ def _shared_scan(text):
     return changed, scanned
 
 
-# LLM: JSON替换只能覆盖完整字符串token；原始命中跨语法或非字符串则失败关闭，不能在Unicode转义内插入占位符。
+# LLM: JSON字符串解码后同样扫描YAML结构；只重编码完整token，跨语法或非字符串命中仍失败关闭。
 # 函数用途: 解码检查并安全重编码JSON正文，保留拒绝诊断的原token位置。
 def _json_string_scan(text, secrets, *, replace=False, raw_matches=()):
     matches, pieces, cursor = [], [], 0
@@ -152,12 +374,14 @@ def _json_string_scan(text, secrets, *, replace=False, raw_matches=()):
             continue
         found = _matches(decoded, secrets, limit=None if replace else 1)
         shared, _ = _shared_scan(decoded)
-        if not found and not shared and not raw_hit:
+        yaml_findings = set()
+        yaml_cleaned = _scan_and_redact_yaml_structure(decoded, findings=yaml_findings, redact=replace)
+        if not found and not shared and not raw_hit and not yaml_findings:
             continue
         matches.append((*token.span(), 'json_encoded_secret'))
         if not replace:
             return matches, text
-        cleaned = '${REDACTED_SECRET}' if raw_hit else _replace_matches(decoded, found)
+        cleaned = '${REDACTED_SECRET}' if raw_hit else _replace_matches(yaml_cleaned, _matches(yaml_cleaned, secrets))
         if shared:
             _, cleaned = _shared_scan(cleaned)
         pieces.extend((text[cursor:token.start()], json.dumps(cleaned, ensure_ascii=False)))
@@ -175,7 +399,7 @@ def _paths(text, owner_home):
     return re.sub(r'/(?:Users/[^/\s"\'<>]+|home/[^/\s"\'<>]+|root)(?=/|\b)', '${OWNER_HOME}', text)
 
 
-# LLM: 原字节及输出文件名都先核秘密；文件名命中始终拒绝以免改名破坏依赖，正文才允许显式替换，不回显明文。
+# LLM: 原字节先核秘密，JSON正文解码后亦扫描结构；块/flow先保形替换再做行扫描，路径秘密始终拒绝。
 # 函数用途: 在清洗和暂存前扫描整包，防止秘密经正文或资源清单流出。
 def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace=False, extra_secrets=()):
     if type(allow_secret_placeholder_replace) is not bool:
@@ -192,17 +416,22 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
                     'line_number': 1, 'pattern_name': 'secret_resource_path', 'masked_snippet': '<redacted>'}])
         text = raw.decode('utf-8', errors='surrogateescape')
         preserve_json = False
-        if name.lower().endswith('.json') and allow_secret_placeholder_replace:
+        valid_json = False
+        if name.lower().endswith('.json'):
             try:
                 json.loads(text)
-                preserve_json = True
+                valid_json = True
+                preserve_json = allow_secret_placeholder_replace
             except (ValueError, RecursionError):
                 pass
+        yaml_findings = set()
+        if not valid_json:
+            text = _scan_and_redact_yaml_structure(text, findings=yaml_findings, redact=allow_secret_placeholder_replace)
         matches = _matches(text, secrets, limit=None if allow_secret_placeholder_replace else 100)
         encoded = (_json_string_scan(text, secrets)[0]
             if name.lower().endswith('.json') and not allow_secret_placeholder_replace else [])
         shared, _ = _shared_scan(text)
-        if (matches or encoded or shared) and not allow_secret_placeholder_replace:
+        if (matches or encoded or shared or yaml_findings) and not allow_secret_placeholder_replace:
             newlines = [index for index, char in enumerate(text) if char == '\n']
             safe_name = _replace_matches(_paths(name, owner_home), _matches(_paths(name, owner_home), secrets))
             safe_name = redact_sensitive_text(safe_name, code_file=True)

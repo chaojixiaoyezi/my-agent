@@ -24,6 +24,30 @@ git diff --check
 
 最终当前源码验收：指定五文件 **191 passed / 0 failed / 0 error / 0 skipped**，其中新增 Wave5 **30 项**；额外 supervisor/curator/retention/request 七文件 **370 passed / 0 failed / 0 error / 0 skipped**。统计来自 `.pytest_cache/wave5-bc-gate.xml` 和 `wave5-bc-extra.xml` 的实际 testcase 结果。全范围 Ruff 与 `git diff --check` 通过，strict 尺寸门 **hard=0 / blocked=False**。补充 scoped_locks 直接授权读口回归后，已重跑上述全部验收。早期额外 `test_gateway_host_identity.py` 出现两项失败（一项 fixture 缺 state，一项真实 ps 返回 EPERM），未做基线复核，不宣称既有失败或该 host_identity 套件全绿。真实管理员IM投递、真实进程跨代/跨平台、上线启动及生产吞吐改善未验证；本轮没有跑全仓 pytest。生成的 `CODE_SIZE_REPORT.md` 不随功能提交。
 
+## 2026-10-26 Wave 4 Round 4：单任务调度恢复、结构化 YAML 与冷通知失败关闭
+
+来源：`07-tasks/wave4-r4-fix-20261026.md`，起点 `a07c68ab1109b0993edc1d020eaf267d8522374c`，仅修改任务列出的文件。
+
+- `test_cross_owner_asset_delivery.py`：真实子进程 `os._exit(79)` 覆盖监控绑定发表后、单 job/store/due 发表后但提交决定前、整批提交后但回执前，以及取消已提交但历史追加前。下一次原 `SchedulerRepository` 创建任务/预约运行或查询自动恢复；其它任务和已确认运行保留。提交后其它任务改变 `store.json` 不再使接受重装或拒绝已安装包裹。
+- 日志只保存受影响 job/run 的 before/after。R2/R3 的整库条目和整库字节相等断言更新为“禁止整库 undo/hash、恢复具体 job/run 事实”；旧资产、默认禁用、回滚、重命名幂等与 due 断言保留。未通过删测、跳过或放宽有效业务断言制造通过。
+- YAML 覆盖 flow/跨行 flow、下一行标量、折行标量和标量列表、六种块头、数字/短秘密、块中的布尔样字符串、序列项内块体边界；裸文本和 JSON 编码正文均检查拒绝/替换，块正文完整移除、相邻 `port`/`timeout` 保留。另用当前环境已有 `PyYAML.safe_load` 对 17 组原文及替换结果实际解析通过；只作独立语法核验，不新增生产或测试套件依赖，不声称覆盖所有 YAML tag/alias 语义。
+- `test_tui_turn_completion_and_bg_watch.py`：两个真实规范会话库，任一个真实通道索引损坏均 `ok=False`、无线程和通知回放，文件原样。当前真实索引为 `channel_bindings.json`，不是任务描述中的 `threads.json`。
+- 两个独立 `gpt-6-astra max` 仅静态检查提供的完整关键片段，未访问仓库或执行测试；提出的跨行 flow、块布尔豁免、折行标量语法、序列块缩进、读锁前 pending 竞态与取消历史窗口，均由执行者补失败复现后修复。不能把片段复核写成全仓批准。
+
+在工作树根复现指定门禁：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_gateway_foreground_transcript.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+指定四文件最终 **575 tests / 0 failures / 0 errors / 0 skipped**，JUnit 为 `.pytest_cache/round4/gate-final.xml`。追加七个调度文件的扩展组为 **877 tests / 10 failures / 0 errors / 0 skipped**，失败都属于 `test_scheduler_waiting_deadlock.py::TestPendingProcessCompletion`：九例进程夹具部分绑定被拒绝，一例不可读进程权威未抛错。已在上述真正起点的独立 detached worktree 实跑该文件，得到 **101 tests / 同样 10 failures**，已确认 Python 导入指向基线树，失败节点集合完全一致；没有修改范围外夹具或权威代码。对照及原日志保存在 `.pytest_cache/round4/{final,baseline,verification-summary}.*`。这些基线失败仍需集成者另行处理，不能称扩展组全绿。
+
+本地源码/合成 Owner 证据不替代 Linux/Windows、真实 Gateway/TUI、在线模型或全仓验收。上线前须核对是否存在旧的 whole-store v1 `.asset-batch.json`；本版对这种日志失败关闭而不盲目回放陈旧整库快照，普通只含资产叶的 v1 日志仍可恢复。
+
 ## 2026-10-26 Stage 3 Round 2：有界 Git 指针扫描与 artifact 生产读口（c2）
 
 来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，工作树 `wt-wave4-c3`，起始提交 `8e96fbbf10357dce3ed20470c0e4eeab5fecc5d7`。本轮只修改任务授权的两份生产模块、两份测试和两份文档，不改部署包。

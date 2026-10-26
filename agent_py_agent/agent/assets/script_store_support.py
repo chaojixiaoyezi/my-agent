@@ -1,5 +1,5 @@
-# LLM: 投递只冻结发送方canonical资产的原始字节，先扫描再调用任何描述符clean_json；不执行代码、不物化存储或复制凭据库。
-# 模块用途: 为跨用户投递提供同根只读冻结、原始依赖发现和规范化负载，不建立平行资产存储。
+# LLM: 发送方canonical原字节先扫描再clean_json；接收方只沿原资产/Scheduler事务安装，单job事实不成为第二调度权威。
+# 模块用途: 冻结依赖闭包及负载，按原锁和quota安装或恢复精确调度变更，不复制凭据库或执行包裹代码。
 from __future__ import annotations
 
 import base64
@@ -496,7 +496,7 @@ def add_delivery_script_resources(plans, extras):
             plan['updates'][parts] = _batch_content(raw)
 
 
-# LLM: 调用方持Owner quota与投递锁；Scheduler和资产共享原root/集合锁、expected清单及持久undo，成功后才同步due投影。
+# LLM: 外层持quota/投递锁，按root→canonical取锁；监控只冻结单job前后事实，不把整store字节当资产或安装hash。
 # 函数用途: 原子安装整个包裹，在任何正式资产写前冻结可复核的安装清单。
 def commit_delivery_items(home, drafts, extras, admission, prepared):
     from ..user_space.owner_quota import OwnerQuotaChange
@@ -522,24 +522,25 @@ def commit_delivery_items(home, drafts, extras, admission, prepared):
             _finalize_plans(home, plans)
             add_delivery_script_resources(plans, extras)
             repo, store = _delivery_monitor_plan(home, plans, extras)
-            batch_plans = plans if repo is None else [*plans, {
-                'updates': {('data', 'scheduler', 'store.json'): delivery_json(store).decode('utf-8')}}]
-            _validate_final_delivery_plans(batch_plans)
-            entries, journal = _batch_entries(home, batch_plans)
+            _validate_final_delivery_plans(plans)
+            entries, journal = _batch_entries(home, plans)
+            scheduler_changes = []
+            if repo is not None:
+                add_scheduler_batch(journal, repo._load_store_unlocked(), store,
+                    [plan['descriptor'].id for plan in plans if plan['descriptor'].kind == 'monitor'])
+                scheduler_changes = [OwnerQuotaChange(repo.store_path, len(delivery_json(store)))]
             stages = [OwnerQuotaChange(home.joinpath(*entry['parts'][:-1], entry['stage']),
                 len(_content_bytes(entry['content']))) for entry in entries if entry['content'] is not None]
             undo = OwnerQuotaChange(home / _BATCH_FILE, len(delivery_json(journal)))
             finals = [OwnerQuotaChange(home.joinpath(*entry['parts']),
                 None if entry['content'] is None else len(_content_bytes(entry['content']))) for entry in entries]
             admission.check([undo, *stages])
-            admission.check([undo, *stages, *finals])
+            admission.check([undo, *stages, *finals, *scheduler_changes])
             expected = [{'parts': entry['parts'], 'sha256': _delivery_content_hash(entry['content']),
                 'previous_sha256': _delivery_content_hash(entry['previous'])} for entry in entries]
-            prepared(expected)
-            admission.check([undo, *stages, *finals])
-            _commit_staged(home, entries, journal)
-            if repo is not None:
-                repo._sync_due_index_unlocked(store)
+            prepared(expected, journal.get('scheduler_jobs', {}))
+            admission.check([undo, *stages, *finals, *scheduler_changes])
+            _commit_staged(home, entries, journal, admission=admission)
     return [plan['descriptor'].to_dict() for plan in plans]
 
 
@@ -669,3 +670,134 @@ def _delivery_content_hash(content):
     from .workspace_assets import _content_bytes
 
     return None if content is None else sha256(_content_bytes(content)).hexdigest()
+
+
+# LLM: journal保存原资产undo及受影响job/run前后字典，不复制全store，不拥有其它任务的调度或历史。
+# 函数用途: 给同一持久事务增加精确Scheduler变更集。
+def add_scheduler_batch(journal, before, after, identifiers):
+    jobs = {identifier: {'before': deepcopy(before['jobs'].get(identifier)),
+        'after': deepcopy(after['jobs'].get(identifier))} for identifier in identifiers}
+    runs = {identifier: {'before': deepcopy(before['runs'].get(identifier)),
+        'after': deepcopy(after['runs'].get(identifier))}
+        for identifier in before['runs'].keys() | after['runs'].keys()
+        if (before['runs'].get(identifier) or after['runs'][identifier]).get('job_id') in jobs
+        and before['runs'].get(identifier) != after['runs'].get(identifier)}
+    journal.update(schema_version='asset_batch.v2', scheduler_jobs=jobs, scheduler_runs=runs,
+        committed=False, scheduler_history=[])
+    validate_scheduler_batch(journal)
+
+
+# LLM: 纯结构核验；恢复前验证全部job/run身份、预算与前后形状，不能从日志字段选择Owner或任意文件路径。
+# 函数用途: 拒绝损坏、错绑或过大的单任务恢复记录。
+def validate_scheduler_batch(journal):
+    from .workspace_assets import _BATCH_LIMIT
+
+    if len(delivery_json(journal)) > _BATCH_LIMIT:
+        raise ValueError('调度批量恢复记录超过预算')
+    if type(journal['committed']) is not bool or not isinstance(journal['scheduler_history'], list):
+        raise ValueError('调度提交决定或历史意图无效')
+    for collection, identity in (('scheduler_jobs', 'job_id'), ('scheduler_runs', 'run_id')):
+        rows = journal[collection]
+        if not isinstance(rows, dict):
+            raise ValueError('调度恢复变更集必须为对象')
+        for identifier, change in rows.items():
+            safe_asset_id(identifier)
+            if not isinstance(change, dict) or set(change) != {'before', 'after'}:
+                raise ValueError('调度恢复前后事实无效')
+            for row in change.values():
+                if row is not None and (not isinstance(row, dict) or row.get(identity) != identifier):
+                    raise ValueError('调度恢复身份不匹配')
+                if row is not None and collection == 'scheduler_runs' and row.get('job_id') not in journal['scheduler_jobs']:
+                    raise ValueError('调度恢复运行不属于本事务任务')
+    for row in journal['scheduler_history']:
+        if not isinstance(row, dict) or row.get('job_id') not in journal['scheduler_jobs']:
+            raise ValueError('调度历史不属于本事务任务')
+        safe_asset_id(row.get('run_id'))
+
+
+# LLM: root是已锁定的规范Owner家目录，不信journal自报Owner；提交和恢复共用原Scheduler与DueIndex。
+# 函数用途: 为单任务提交或恢复打开准确Owner的原调度器。
+def scheduler_batch_repository(root):
+    from ..scheduler import SchedulerDueIndex, SchedulerRepository
+    from ..user_space.home_layout import home_paths
+
+    parts = root.parts
+    if parts[-3:-1] == ('owners', 'local'):
+        host, provider, identifier = root.parents[2], 'local', safe_asset_id(root.name)
+        kind, owner_id = ('main' if identifier == 'main' else 'user'), 'local/' + identifier
+    elif parts[-5:-3] == ('owners', 'providers') and parts[-2] in {'users', 'groups'}:
+        host, provider, identifier = root.parents[4], safe_asset_id(parts[-3]), safe_asset_id(root.name)
+        kind, owner_id = ('user' if parts[-2] == 'users' else 'group'), '/'.join(parts[-4:])
+    else:
+        raise ValueError('Scheduler批量恢复必须位于规范Owner根')
+    os.close(open_directory_beneath(root, ('data', 'scheduler'), create=True, require_dir_fd=True))
+    return SchedulerRepository(root / 'data/scheduler', owner_provider=provider, owner_kind=kind,
+        owner_id=owner_id, due_owner_id=identifier,
+        due_index=SchedulerDueIndex(home_paths(host).global_index_dir / 'scheduler_due.sqlite3'))
+
+
+# LLM: 持root/store锁合并本job/run；实际新store及取消历史按当前准入复核，undo不重新准入，due成功前不清日志。
+# 函数用途: 将单任务变更的前态或后态应用到当前调度账本。
+def apply_scheduler_batch(root, jobs, runs, *, previous=False, admission=None, history=()):
+    from ..common.nofollow_fs import write_bytes_atomic_beneath
+    from ..user_space.owner_quota import OwnerQuotaChange
+
+    if not jobs:
+        return
+    repo = scheduler_batch_repository(root)
+    store = repo._load_store_unlocked()
+    key = 'before' if previous else 'after'
+    for identifier, change in jobs.items():
+        row = change[key]
+        if row is not None and row.get('owner') != repo.owner:
+            raise ValueError('调度恢复Owner不匹配')
+        if row is None:
+            store['jobs'].pop(identifier, None)
+            for run_id, run in list(store['runs'].items()):
+                if run.get('job_id') == identifier and run.get('status') in {'queued', 'claimed'}:
+                    store['runs'].pop(run_id)
+        else:
+            store['jobs'][identifier] = deepcopy(row)
+    for identifier, change in runs.items():
+        current = store['runs'].get(identifier)
+        if previous and current is not None and current.get('status') == 'running':
+            continue
+        if change[key] is None:
+            store['runs'].pop(identifier, None)
+        else:
+            store['runs'][identifier] = deepcopy(change[key])
+    store['updated_at'] = time.time()
+    raw = delivery_json(store)
+    if len(raw) > MAX_BUNDLE_BYTES:
+        raise ValueError('调度账本超过恢复预算')
+    if admission is not None and not previous:
+        pending = repo._new_history_rows_unlocked(history)
+        history_size = len(''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in pending).encode())
+        admission.check([OwnerQuotaChange(repo.store_path, len(raw)),
+            *([OwnerQuotaChange(repo.history_path, history_size, append=True)] if pending else [])])
+    write_bytes_atomic_beneath(root, ('data', 'scheduler', 'store.json'), raw)
+    repo._sync_due_index_unlocked(store)
+
+
+# LLM: 比较安装定义而非store时间、其它job/run或执行统计；显式启停及定义变化仍不匹配。
+# 函数用途: 投影可用于投递提交辨认的稳定单任务事实。
+def scheduler_job_fact(job):
+    if job is None:
+        return None
+    return {key: job.get(key) for key in ('job_id', 'enabled', 'status', 'schedule', 'prompt', 'name',
+        'owner', 'source', 'metadata', 'thread_id', 'precheck', 'policy', 'skill_refs', 'rules')}
+
+
+# LLM: 调用方持root/store锁且已核资产hash；只核本job定义，匹配后用同一读取结果同步due，不写store。
+# 函数用途: 辨认单任务安装前后事实并补齐已安装任务的原唤醒投影。
+def scheduler_installation_matches(home, changes, *, previous=False):
+    if not changes:
+        return True
+    repo = scheduler_batch_repository(home)
+    store = repo._load_store_unlocked()
+    if any(scheduler_job_fact(store['jobs'].get(identifier)) != scheduler_job_fact(change['before' if previous else 'after'])
+            for identifier, change in changes.items()):
+        return False
+    if not previous:
+        repo._sync_due_index_unlocked(store)
+    return True

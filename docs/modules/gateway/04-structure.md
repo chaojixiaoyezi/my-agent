@@ -1,3 +1,11 @@
+## 2026-10-26 Wave 4 Round 4 单任务资产事务与冷通知结构
+
+- `assets/__init__.py::asset_root_lock` 复用原跨进程根锁，以线程本地持锁标记阻止调度恢复递归；标记不是权限。`scheduler/repository.py` 将规范 `data/scheduler` 的写 scope 纳入 quota→root→store，snapshot/投影先恢复 pending；读锁窗口中新出现的事务先释放读锁，再恢复并有限重读。正常冷查询不新建根锁文件。
+- `workspace_assets.py` 保留原资产叶的 stage/undo 机制；v2 增加 `scheduler_jobs`、`scheduler_runs`、`scheduler_history` 和布尔 `committed`。`_recover_batch` 在同一 canonical 锁集合内分流：未提交恢复资产及准确任务，已提交补 due/原历史再清日志。禁止把 `store.json` 作为文件 undo 叶；只含原资产叶的 v1 保留，旧 whole-store 日志拒绝回放。
+- `script_store_support.py` 在原 Scheduler store 中合并变化，保留其它 job/run；Owner 由可信根布局推导，实际写入字节沿当前 quota 准入核验。`delivery_service.py` 的接收预提交信封保存资产 hash 与 `expected_scheduler_jobs`，安装辨识沿原 root/store 锁读取单任务定义，不比较整库 SHA。
+- `delivery_sanitizer.py::_scan_and_redact_yaml_structure` 使用缩进及引用/flow 词法状态，在行匹配前定位完整块和多行标量。替换保留块头及集合闭合；`_json_string_scan` 对 JSON token 解码、扫描并整 token 重编码，无新增解析器依赖。
+- `gateway_parts/http_handlers.py::_read_cold_owner_notice_projection` 在选择候选线程前检查 `resolve_failed`；任一真实库损坏都返回失败，而非从其它旧库构造正常成功。
+
 ## 2026-10-26 网关安全重启交接、看门狗双日志分离、管理员日志只读策略、维护事件裁剪与 TUI 后台观察线程绑定结构
 
 - `gateway_parts/http_handlers.py` 新增 `_resolve_gateway_notice_thread`，在 `read_gateway_client_notices` 与 `_read_cold_owner_notice_projection` 响应中输出 canonical `thread_id` 并在候选存储解析异常时标记 `ok=False`；`cli/chat_parts/tui_threading.py` 新增 `_record_gateway_watch_thread_binding` 与 `_clear_background_watch`，由 `_consume_gateway_background_snapshot`、`_background_watch_thread_id` 与 `_sync_background_watch` 协同区分未建线程正常空态、空闲已建线程观察与真实通信/解析故障。

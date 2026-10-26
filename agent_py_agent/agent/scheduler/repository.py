@@ -1,4 +1,4 @@
-# LLM: scheduler 原 owner store 是唯一任务权威；只读完整快照不取写锁，变更仍经 quota→原锁→版本/claim CAS。
+# LLM: 原owner store是唯一任务权威；规范调度写按quota→资产root→store/CAS，pending先恢复；正常冷快照只复用已有读锁。
 #   便宜检查只缓存有界内容投影，时间条件每拍重算；关闭时保留原完整字节复核和waiting缓存。
 # 模块用途: 持久化监控、运行与历史，确保并发查询、崩溃恢复和正常收尾共用原 owner 账本。
 from __future__ import annotations
@@ -998,23 +998,24 @@ class _SchedulerRunOperations:
     def _runtime_snapshot_summary(self) -> tuple[int, int, int, list[str], list[str]]:
         return self._runtime_summary_from_store(self._store_snapshot())
 
-    # LLM: 只读入口不获取写锁；可信同代时复制有界缓存，冷读仍走原no-follow探针，CAS/quota保持原入口。
-    # 函数用途: 获取完整账本快照，稳定文件省去重复读取和解析，损坏仍报告原错误。
+    # LLM: 原快照和缓存保持；规范Owner先恢复残留资产事务，并以原根读锁排除半提交，正常冷读不创建锁或文件。
+    # 函数用途: 读取一致的调度快照，不让未提交监控状态进入查询或缓存。
     def _store_snapshot(self) -> dict[str, Any]:
-        stamp = _store_payload_stamp(self.store_path)
-        hit = self._store_payload_cache_hit(stamp)
-        if hit is not None:
-            return hit
-        probe = _probe_store_bytes(self.store_path, digest=False)
-        if probe is not None:
-            try:
-                store = self._load_store_from_bytes_unlocked(probe.data)
-            except SchedulerStateError:
-                store = None
-            if store is not None and _store_stat_key(self.store_path) == probe.stat_key:
-                self._remember_store_payload(stamp, store, len(probe.data))
-                return store
-        return self._load_store_unlocked()
+        with self._asset_read_scope():
+            stamp = _store_payload_stamp(self.store_path)
+            hit = self._store_payload_cache_hit(stamp)
+            if hit is not None:
+                return hit
+            probe = _probe_store_bytes(self.store_path, digest=False)
+            if probe is not None:
+                try:
+                    store = self._load_store_from_bytes_unlocked(probe.data)
+                except SchedulerStateError:
+                    store = None
+                if store is not None and _store_stat_key(self.store_path) == probe.stat_key:
+                    self._remember_store_payload(stamp, store, len(probe.data))
+                    return store
+            return self._load_store_unlocked()
 
     # LLM: 纯函数式的账本投影(不做 I/O、不读共享状态),因此锁内锁外调用都不改变语义:
     # jobs 侧与 list_jobs(include_deleted=False) 同源同过滤,schedule 种类只看未删除 job;
@@ -1146,17 +1147,63 @@ class _SchedulerStoreSupport:
                 self._cached_store_payload = None
                 self._cached_store_stamp = None
 
+    # LLM: 只对原data/scheduler规范路径生效；恢复先quota→root→store，已持root的事务不递归恢复或重入quota。
+    # 函数用途: 调度器独立入口自动恢复未提交资产批量，并丢弃旧内存投影。
+    def _recover_pending_asset_batch(self) -> bool:
+        from ..assets import asset_root_lock, asset_root_lock_held
+        from ..assets.workspace_assets import _BATCH_FILE
+
+        home = self.root.parent.parent
+        if self.root.parts[-2:] != ('data', 'scheduler') or asset_root_lock_held(home):
+            return False
+        if not regular_file_exists_beneath(home, (_BATCH_FILE,)):
+            return False
+        with self.quota_enforcer.admission(), asset_root_lock(home):
+            pass
+        self._invalidate_store_payload()
+        _drop_store_projection(self.waiting_projection_cache_key())
+        _drop_waiting_projection(self.waiting_projection_cache_key())
+        return True
+
+    # LLM: 只读锁内新发现pending须先释放读锁，再按quota→root→store恢复并有限重读，不能读锁内升级取写锁。
+    # 函数用途: 为调度只读快照提供与资产发表互斥的原根锁。
+    @contextmanager
+    def _asset_read_scope(self):
+        from ..assets import asset_root_lock_held
+        from ..assets.workspace_assets import _BATCH_FILE, _read_lock
+
+        home = self.root.parent.parent
+        if self.root.parts[-2:] != ('data', 'scheduler') or asset_root_lock_held(home):
+            yield
+            return
+        for _attempt in range(2):
+            self._recover_pending_asset_batch()
+            with _read_lock(home, ('.asset-batch.lock',)):
+                if not regular_file_exists_beneath(home, (_BATCH_FILE,)):
+                    yield
+                    return
+        raise SchedulerStateError('asset transaction kept changing', error_code='SCHEDULER_ASSET_RECOVERY_REQUIRED')
+
+    # LLM: 规范调度写共享资产root锁，固定quota→root→store序；旧独立scheduler路径仍维持原锁，恢复回调不重入root。
+    # 函数用途: 在读取和修改调度账本前先恢复监控事务，保护已确认的普通调度写入。
     @contextmanager
     def _mutation_scope(self) -> Iterator[tuple[dict[str, Any], OwnerQuotaAdmission]]:
         """Lock quota before the scheduler authority to keep one lock order."""
+        from contextlib import nullcontext
+
+        from ..assets import asset_root_lock, asset_root_lock_held
 
         with self.quota_enforcer.admission() as admission:
-            with locked_json_path(self.store_path):
+            home = self.root.parent.parent
+            scope = (asset_root_lock(home) if self.root.parts[-2:] == ('data', 'scheduler')
+                and not asset_root_lock_held(home) else nullcontext())
+            with scope, locked_json_path(self.store_path):
                 yield self._load_store_unlocked(), admission
 
-    # LLM: 写方已持原锁，读方无锁；可信未变副本可复用，否则沿原no-follow完整读取，不吞权限或文件系统错误。
+    # LLM: 写方已持root/store锁，独立读取先恢复pending；仍沿原缓存/no-follow，不吞损坏或权限错误。
     # 函数用途: 读取校验原账本并缓存稳定代次，缺失与坏内容保留原语义。
     def _load_store_unlocked(self) -> dict[str, Any]:
+        self._recover_pending_asset_batch()
         stamp = _store_payload_stamp(self.store_path)
         hit = self._store_payload_cache_hit(stamp)
         if hit is not None:
@@ -1208,9 +1255,11 @@ class _SchedulerStoreSupport:
             raise SchedulerStateError("owner scheduler store jobs/runs must be objects", error_code="SCHEDULER_STORE_INVALID_CONTENT")
         return store
 
-    # LLM: 投影同时匹配现读 stat、该代完整字节和摘要；无写锁，只缓存解析结果，不成为写 CAS 或授权事实。
+    # LLM: 投影前恢复pending时弃用旧probe；其它stat/摘要及缓存判定保持，投影不授予写权。
     # 函数用途: 查找 waiting 的有界缓存，文件变化或内容变化时现读解析，错误不留脏缓存。
     def _waiting_runs_projection_unlocked(self, probe: _StoreBytesProbe | None) -> _WaitingRunsProjection:
+        if self._recover_pending_asset_batch():
+            probe = None
         cache_key = self.waiting_projection_cache_key()
         stat_key = _store_stat_key(self.store_path)
         if stat_key is None:
@@ -1561,8 +1610,12 @@ class _SchedulerProjectionSupport:
 
     # LLM: 投影只绑定原子快照字节与现读身份；不可恢复来源旧写锁，异常仍走原读取错误。
     # 函数用途: 复核完整投影或解析本次账本，供开关开启的三处读取共用。
+    # LLM: 恢复单任务事务后不再使用恢复前probe；正常只读投影的校验和预算保持。
+    # 函数用途: 从一致账本建立调度/等待投影，避免沿用半提交代次。
     def _store_projection_unlocked(self, probe: _StoreBytesProbe | None) -> _StoreProjection:
         """只读复核原子快照内容投影，保留当前主线的错误与无写锁读取语义。"""
+        if self._recover_pending_asset_batch():
+            probe = None
         cache_key = self.waiting_projection_cache_key()
         stat_key = _store_stat_key(self.store_path)
         if stat_key is None:
@@ -1591,9 +1644,10 @@ class _SchedulerProjectionSupport:
                 _drop_store_projection(cache_key)
         return self._parse_store_projection_unlocked(usable_probe)
 
-    # LLM: 不读正文/摘要，但仍复用主线no-follow普通文件校验；身份一致、读取已可信且不足60秒才命中，异常回原读取。
+    # LLM: 先恢复pending再用原廉价投影，不能因缓存判断为空而漏掉恢复；其它nofollow/身份/时限不变。
     # 函数用途: 用文件身份和原访问边界复用有界内容投影，命中只记录诊断计数。
     def _cheap_projection_hit(self) -> _StoreProjection | None:
+        self._recover_pending_asset_batch()
         try:
             stat_key = _store_stat_key(self.store_path)
             if stat_key is None:
