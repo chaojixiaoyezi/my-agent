@@ -494,11 +494,13 @@ def _prepare_batch(items, scope, workspace):
     return plans
 
 
-# LLM: journal只能指向四类canonical资产，不接受AGENTS、锁、其它账本或任意宿主文件；恢复不扩大原写入边界。
+# LLM: journal只接受四类canonical资产及精确Scheduler store叶；不接受AGENTS、锁、其它账本或任意宿主文件。
 # 函数用途: 校验计划与恢复记录中的资产相对路径。
 def _validate_batch_path(parts):
     if not isinstance(parts, (tuple, list)) or not parts:
         raise ValueError('批量恢复路径无效')
+    if tuple(parts) == ('data', 'scheduler', 'store.json'):
+        return
     if parts[0] in {'scripts', 'workflows', 'skills'} and len(parts) >= 3:
         safe_asset_id(parts[1])
         if parts[0] != 'skills' and len(parts) != 3:
@@ -512,14 +514,16 @@ def _validate_batch_path(parts):
         raise ValueError('批量恢复目标不属于canonical资产')
 
 
-# LLM: root锁之后按词法顺序取得所有原集合锁及技能/监控的原单项锁，不引入平行canonical存储。
+# LLM: root锁后按词法顺序取得原集合/单项锁，Scheduler叶与原Repository共用store.json.lock，禁止另取可重入锁。
 # 函数用途: 为批量发表或恢复建立和普通Store/适配器相同的写锁集合。
 @contextmanager
 def _canonical_locks(root, paths):
     targets = set()
     for parts in paths:
         _validate_batch_path(parts)
-        if parts[0] in {'scripts', 'workflows'}:
+        if tuple(parts) == ('data', 'scheduler', 'store.json'):
+            targets.add(tuple(parts))
+        elif parts[0] in {'scripts', 'workflows'}:
             targets.add((parts[0], '.assets'))
         elif parts[0] == 'skills':
             targets.update({('skills', '.assets'), ('skills', parts[1], 'skill_meta.json')})
@@ -644,13 +648,38 @@ def _clean_stages(root, entries):
         unlink_file_beneath(root, parts)
 
 
-# LLM: 全部旧叶恢复后才清undo；恢复再失败保留日志，下次显式可写操作继续，不把混合状态返回为成功。
+# LLM: 调用方持root和canonical全锁；旧叶及Scheduler唤醒投影恢复后才清undo，任一步失败均留日志重试。
 # 函数用途: 在同一根锁和canonical锁集合内恢复失败批量。
 def _restore_batch(root, entries):
     for entry in reversed(entries):
         _put_text(root, tuple(entry['parts']), entry['previous'])
+    if any(tuple(entry['parts']) == ('data', 'scheduler', 'store.json') for entry in entries):
+        _sync_batch_scheduler(root)
     _clean_stages(root, entries)
     unlink_file_beneath(root, (_BATCH_FILE,))
+
+
+# LLM: 只在已持store锁的恢复分支使用；身份从可信root规范布局推导，不信journal/store自报Owner，缺失store同步空投影。
+# 函数用途: 将恢复后的Owner调度权威重新投影到原共享DueIndex。
+def _sync_batch_scheduler(root):
+    from ..scheduler import SchedulerDueIndex, SchedulerRepository
+    from ..user_space.home_layout import home_paths
+
+    parts = root.parts
+    if parts[-3:-1] == ('owners', 'local'):
+        host, provider, identifier = root.parents[2], 'local', root.name
+        kind = 'main' if identifier == 'main' else 'user'
+        owner_id = 'local/' + safe_asset_id(identifier)
+    elif parts[-5:-3] == ('owners', 'providers') and parts[-2] in {'users', 'groups'}:
+        host, provider, identifier = root.parents[4], safe_asset_id(parts[-3]), safe_asset_id(root.name)
+        kind = 'user' if parts[-2] == 'users' else 'group'
+        owner_id = '/'.join(parts[-4:])
+    else:
+        raise ValueError('Scheduler批量恢复必须位于规范Owner根')
+    repo = SchedulerRepository(root / 'data/scheduler', owner_provider=provider, owner_kind=kind,
+        owner_id=owner_id, due_owner_id=identifier,
+        due_index=SchedulerDueIndex(home_paths(host).global_index_dir / 'scheduler_due.sqlite3'))
+    repo._sync_due_index_unlocked(repo._load_store_unlocked())
 
 
 # LLM: 恢复日志严格校验完整结构及所有路径后才写；来源投影和普通文案不参与恢复决策。

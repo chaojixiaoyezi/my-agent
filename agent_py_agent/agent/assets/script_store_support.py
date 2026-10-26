@@ -7,7 +7,6 @@ import json
 import os
 import stat
 import time
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
@@ -497,7 +496,7 @@ def add_delivery_script_resources(plans, extras):
             plan['updates'][parts] = _batch_content(raw)
 
 
-# LLM: 调用方已持Owner quota与投递锁，本函数继续取原资产根/集合锁；两阶段写及恢复只复用现有canonical journal。
+# LLM: 调用方持Owner quota与投递锁；Scheduler和资产共享原root/集合锁、expected清单及持久undo，成功后才同步due投影。
 # 函数用途: 原子安装整个包裹，在任何正式资产写前冻结可复核的安装清单。
 def commit_delivery_items(home, drafts, extras, admission, prepared):
     from ..user_space.owner_quota import OwnerQuotaChange
@@ -515,12 +514,18 @@ def commit_delivery_items(home, drafts, extras, admission, prepared):
     plans = _prepare_batch(drafts, 'owner', None)
     add_delivery_script_resources(plans, extras)
     _validate_final_delivery_plans(plans)
+    paths = [parts for plan in plans for parts in plan['updates']]
+    if any(plan['descriptor'].kind == 'monitor' for plan in plans):
+        paths.append(('data', 'scheduler', 'store.json'))
     with asset_root_lock(home):
-        with _canonical_locks(home, [parts for plan in plans for parts in plan['updates']]):
+        with _canonical_locks(home, paths):
             _finalize_plans(home, plans)
             add_delivery_script_resources(plans, extras)
-            _validate_final_delivery_plans(plans)
-            entries, journal = _batch_entries(home, plans)
+            repo, store = _delivery_monitor_plan(home, plans, extras)
+            batch_plans = plans if repo is None else [*plans, {
+                'updates': {('data', 'scheduler', 'store.json'): delivery_json(store).decode('utf-8')}}]
+            _validate_final_delivery_plans(batch_plans)
+            entries, journal = _batch_entries(home, batch_plans)
             stages = [OwnerQuotaChange(home.joinpath(*entry['parts'][:-1], entry['stage']),
                 len(_content_bytes(entry['content']))) for entry in entries if entry['content'] is not None]
             undo = OwnerQuotaChange(home / _BATCH_FILE, len(delivery_json(journal)))
@@ -530,10 +535,11 @@ def commit_delivery_items(home, drafts, extras, admission, prepared):
             admission.check([undo, *stages, *finals])
             expected = [{'parts': entry['parts'], 'sha256': _delivery_content_hash(entry['content']),
                 'previous_sha256': _delivery_content_hash(entry['previous'])} for entry in entries]
-            with _delivery_monitor_commit(home, plans, extras, admission):
-                admission.check([undo, *stages, *finals])
-                prepared(expected)
-                _commit_staged(home, entries, journal)
+            prepared(expected)
+            admission.check([undo, *stages, *finals])
+            _commit_staged(home, entries, journal)
+            if repo is not None:
+                repo._sync_due_index_unlocked(store)
     return [plan['descriptor'].to_dict() for plan in plans]
 
 
@@ -602,30 +608,22 @@ def new_delivery_monitor_job(repo, descriptor, meta, store):
     return job
 
 
-# LLM: 外层已持quota→资产锁，只取得原scheduler锁；失败恢复完整旧store及due投影，不调用不可重入mutation_scope。
-# 函数用途: 将真实监控登记包围原资产提交，原batch异常时回滚Scheduler。
-@contextmanager
-def _delivery_monitor_commit(home, plans, extras, admission):
+# LLM: 调用方持quota→root→canonical含store锁；只构造新store，不在expected/undo持久化前写权威或due索引。
+# 函数用途: 为监控生成与绑定同批发表的Scheduler账本内容。
+def _delivery_monitor_plan(home, plans, extras):
     monitors = [plan for plan in plans if plan['descriptor'].kind == 'monitor']
     if not monitors:
-        yield
-        return
+        return None, None
     repo = delivery_scheduler(home, monitors[0]['descriptor'].owner_id)
-    with locked_json_path(repo.store_path):
-        store = repo._load_store_unlocked()
-        previous = deepcopy(store)
-        try:
-            for plan in monitors:
-                descriptor = plan['descriptor']
-                meta = deepcopy(extras[(descriptor.kind, descriptor.id)]['scheduler_job'])
-                meta.setdefault('schedule_spec', plan['payload']['schedule_spec'])
-                _bind_delivery_monitor_skills(home, meta, plans)
-                store['jobs'][descriptor.id] = new_delivery_monitor_job(repo, descriptor, meta, store)
-            repo._write_store_unlocked(store, admission)
-            yield
-        except BaseException:
-            repo._write_store_unlocked(previous, admission)
-            raise
+    store = repo._load_store_unlocked()
+    for plan in monitors:
+        descriptor = plan['descriptor']
+        meta = deepcopy(extras[(descriptor.kind, descriptor.id)]['scheduler_job'])
+        meta.setdefault('schedule_spec', plan['payload']['schedule_spec'])
+        _bind_delivery_monitor_skills(home, meta, plans)
+        store['jobs'][descriptor.id] = new_delivery_monitor_job(repo, descriptor, meta, store)
+    store['updated_at'] = time.time()
+    return repo, store
 
 
 # LLM: 版本摘要取最终计划字节或skip复用的接收方原文，不保留源hash冒充改名/禁用后的版本；包和builtin不重绑定。

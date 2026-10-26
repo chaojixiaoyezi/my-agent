@@ -3,6 +3,7 @@
 # Stage3来源: Argon/c7缺依赖、Vault扫描、通知持久化，及c5 B03短字面量漏检；增加服务/工具真实临时Owner回归。
 # 独审补证: 资源文件名秘密、目录FD释放，以及子进程在入箱前后直接退出的通知恢复；不以异常finally模拟进程中断。
 # Round2来源: 真实Scheduler安装/启停、通知终态/消费、根缺失404及未加引号短秘密；全部在临时Owner验证，不代表外部通道已送达。
+# Round3来源: R3-2/R3-3；真实子进程os._exit覆盖双存储undo、提交后回执重试及due索引，扩充YAML列表/数字PIN扫描；不代表断电或真实worker验收。
 from dataclasses import replace
 
 import pytest
@@ -650,7 +651,7 @@ def test_round2_monitor_export_install_toggle_real_scheduler(kit, composite):
 
 
 # LLM: 原batch真正提交点失败后，监控调度器和同包依赖均不允许残留新任务。
-# 函数用途: 覆盖Scheduler已写、资产提交失败的异常回滚。
+# 函数用途: 覆盖正式batch未提交前Scheduler不抢先发表、故障不残留资产。
 def test_round2_monitor_scheduler_rolls_back_with_asset_batch(kit, monkeypatch):
     from agent_py_agent.agent.assets import workspace_assets
 
@@ -658,9 +659,10 @@ def test_round2_monitor_scheduler_rolls_back_with_asset_batch(kit, monkeypatch):
     sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
 
     # LLM: 只在原事务发表点注入IO故障，不替换Scheduler或整个接收服务。
-    # 函数用途: 检查真实监控已进入账本后触发回滚。
+    # 函数用途: 检查真实监控仅在待提交清单而未进入账本时触发失败。
     def fail_commit(*args):
-        assert round2_repo(kit.alice, 'local/alice').get_job(source['job_id'])['status'] == 'paused'
+        assert round2_repo(kit.alice, 'local/alice').list_jobs()[0] == []
+        assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in args[1]]
         raise OSError('synthetic batch failure')
 
     monkeypatch.setattr(workspace_assets, '_commit_staged', fail_commit)
@@ -673,7 +675,9 @@ def test_round2_monitor_scheduler_rolls_back_with_asset_batch(kit, monkeypatch):
 
 # LLM: 未引号字面量必须在任何clean前被拦截；显式替换仅改值，不泄漏诊断。
 # 函数用途: 钉住短YAML/env秘密以及安全非秘密表达式。
-@pytest.mark.parametrize('literal', ['password: abc123', 'API_KEY=short1', 'export token=x'])
+@pytest.mark.parametrize('literal', ['password: abc123', 'API_KEY=short1', 'export token=x',
+    '- password: abc', '  - api_key: 12345', 'PASSWORD=123456', '- password: 888888',
+    'api_key: 987654321', 'password: +123', 'password: -123'])
 def test_round2_unquoted_short_secrets(sanitize, tmp_path, literal):
     from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
 
@@ -685,7 +689,7 @@ def test_round2_unquoted_short_secrets(sanitize, tmp_path, literal):
     assert b'${REDACTED_SECRET}' in result['script/a/main.py'] and literal.encode() not in result['script/a/main.py']
 
 
-@pytest.mark.parametrize('value', ['true', 'false', 'null', 'none', 'yes', 'no', '123', '$PASSWORD',
+@pytest.mark.parametrize('value', ['true', 'false', 'null', 'none', 'yes', 'no', '~', '$PASSWORD',
     'os.environ', 'env.PASSWORD', '${PASSWORD}', '<PASSWORD>', 'YOUR_PASSWORD', 'CHANGE_ME'])
 @pytest.mark.parametrize('serialized', [False, True])
 def test_round2_unquoted_nonsecrets_preserved(sanitize, tmp_path, value, serialized):
@@ -695,6 +699,202 @@ def test_round2_unquoted_nonsecrets_preserved(sanitize, tmp_path, value, seriali
     name = 'workflow/a/workflow.json' if serialized else 'skill/a/SKILL.md'
     raw = (json.dumps({'body_markdown': text}) if serialized else text).encode()
     assert sanitize({name: raw}, owner_home=tmp_path)[name] == raw
+
+
+# LLM: 数字仅在高危凭据键下作为PIN，不把普通业务配置数字都判成秘密。
+# 函数用途: 保留正常数字配置，覆盖JSON内编码的列表凭据拒绝与安全替换。
+@pytest.mark.parametrize('serialized', [False, True])
+def test_round3_yaml_numeric_secret_and_ordinary_numbers(sanitize, tmp_path, serialized):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    safe = 'timeout: 30\nretries=3\n- timeout: 60\n'
+    text = safe + '- password: abc\n- api_key: 12345\nPASSWORD=123456\n'
+    name = 'fixture.json' if serialized else 'fixture.yaml'
+    # LLM: 序列化只是输入格式，原业务文本不得先过clean_json。
+    # 函数用途: 编码裸文本或含原始正文的JSON。
+    def encode(body):
+        return (json.dumps({'body': body}) if serialized else body).encode()
+    assert sanitize({name: encode(safe)}, owner_home=tmp_path)[name] == encode(safe)
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({name: encode(text)}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    raw = sanitize({name: encode(text)}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)[name]
+    cleaned = json.loads(raw)['body'] if serialized else raw.decode()
+    assert cleaned == safe + '- password: ${REDACTED_SECRET}\n- api_key: ${REDACTED_SECRET}\nPASSWORD=${REDACTED_SECRET}\n'
+
+
+# LLM: 只用临时Owner的原SchedulerDueIndex读取真实行，不领取lease或运行监控。
+# 函数用途: 观察alice的唤醒投影，避免通过mock声称双存储和索引一致。
+def round3_due_rows(kit):
+    import sqlite3
+
+    from agent_py_agent.agent.assets.script_store_support import delivery_scheduler
+
+    repo = delivery_scheduler(kit.alice, 'local/alice')
+    with sqlite3.connect(f'file:{repo.due_index.path}?mode=ro', uri=True) as connection:
+        return connection.execute("SELECT next_due_at FROM scheduler_due_owners WHERE provider='local' AND owner_kind='user' AND owner_id='alice'").fetchall()
+
+
+# LLM: 故障只注入原文件发表叶或原batch返回点；os._exit不经过Python except/finally，子进程从当前工作树导入。
+# 函数用途: 在临时接收方制造真实持久半提交，保留原undo给另一个进程恢复。
+def round3_crash(kit, delivery_id, monitor_id, *, point, strategy='keep_both_rename', enabled=True):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = '''
+import json, os, sys
+from pathlib import Path
+from agent_py_agent.agent.assets import workspace_assets as assets
+from agent_py_agent.agent.assets import delivery_service
+from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+root, delivery_id, identifier, point, strategy, enabled = json.loads(sys.argv[1])
+home = Path(root) / 'owners/local/alice'
+service = AssetDeliveryService(root)
+put = assets._put_text
+direct_put = delivery_service.write_bytes_atomic_beneath
+def interrupt_direct(target, parts, content, **kwargs):
+    result = direct_put(target, parts, content, **kwargs)
+    if Path(target) == home and tuple(parts) == ('data', 'monitors', identifier + '.json'):
+        os._exit(79)
+    return result
+def interrupt_leaf(target, parts, content):
+    put(target, parts, content)
+    if Path(target) == home and tuple(parts) == ('data', 'monitors', identifier + '.json'):
+        os._exit(79)
+commit = assets._commit_staged
+def interrupt_committed(target, entries, journal):
+    commit(target, entries, journal)
+    os._exit(79)
+if point == 'committed':
+    assets._commit_staged = interrupt_committed
+else:
+    assets._put_text = interrupt_leaf
+    delivery_service.write_bytes_atomic_beneath = interrupt_direct
+if point == 'toggle':
+    service.toggle_asset('local/alice', 'monitor', identifier, enabled)
+else:
+    service.accept_delivery('local/alice', delivery_id, conflict_strategy=strategy, initial_enabled=enabled)
+'''
+    args = [str(kit.root), delivery_id, monitor_id, point, strategy, enabled]
+    result = subprocess.run([sys.executable, '-c', code, json.dumps(args)],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, timeout=30)
+    assert result.returncode == 79, result.stderr.decode()
+
+
+# LLM: 允许崩溃现场是半写状态，但prepared必须已含两个原账本；重试自动undo后仅安装一次，不产生第二次rename。
+# 函数用途: 覆盖首次/重名/覆盖接收在监控绑定发表后的硬退出及自动恢复。
+@pytest.mark.parametrize('collision,strategy', [(False, 'keep_both_rename'), (True, 'keep_both_rename'), (True, 'overwrite')])
+def test_round3_accept_hard_exit_restores_dual_store_and_retries(kit, monkeypatch, collision, strategy):
+    import json
+
+    from agent_py_agent.agent.assets import workspace_assets
+
+    source = round2_seed_monitor(kit, False)
+    if collision:
+        first = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+        kit.service.accept_delivery('local/alice', first['delivery_id'], initial_enabled=True)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    # 首次冲突改名由现有规则确定；在子进程prepared后再从清单取得真实目标，不推断随机ID。
+    # 取现有命名实现的实际映射，不安装或更改正式资产。
+    from agent_py_agent.agent.assets.script_store_support import prepare_delivery_items
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    _, _, installed = prepare_delivery_items(kit.alice, envelope, kit.service._payloads(kit.alice, envelope), strategy, True, 'fixture')
+    target = next(row['id'] for row in installed if row['kind'] == 'monitor')
+    binding = kit.alice / 'data/monitors' / (target + '.json')
+    store_path = kit.alice / 'data/scheduler/store.json'
+    previous = (binding.read_bytes() if binding.exists() else None,
+        store_path.read_bytes() if store_path.exists() else None)
+    round3_crash(kit, sent['delivery_id'], target, point='partial', strategy=strategy)
+    journal = json.loads((kit.alice / '.asset-batch.json').read_text())
+    assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in journal['entries']]
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in envelope['resolution']['expected_files']]
+    restored, restore = [], workspace_assets._restore_batch
+
+    # LLM: 仅观察真实恢复结果，不替代恢复；在接收重试的根锁内核对旧字节。
+    # 函数用途: 证明安装重试确实先恢复两份存储而不是覆盖半写现场。
+    def observe_restore(root, entries):
+        restore(root, entries)
+        restored.append(True)
+        assert (binding.read_bytes() if binding.exists() else None) == previous[0]
+        assert (store_path.read_bytes() if store_path.exists() else None) == previous[1]
+
+    monkeypatch.setattr(workspace_assets, '_restore_batch', observe_restore)
+    result = kit.service.accept_delivery('local/alice', sent['delivery_id'], conflict_strategy=strategy, initial_enabled=True)
+    assert restored == [True] and result['status'] == 'accepted'
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['installed_assets'] == result['installed_assets']
+    jobs = round2_repo(kit.alice, 'local/alice').list_jobs()[0]
+    assert {row['job_id'] for row in jobs} == ({source['job_id'], target} if collision else {target})
+    assert json.loads(binding.read_text())['enabled'] is True
+    assert round2_repo(kit.alice, 'local/alice').get_job(target)['enabled'] is True
+    assert round3_due_rows(kit) and not (kit.alice / '.asset-batch.json').exists()
+    assert not list(kit.alice.rglob('*.stage-*'))
+
+
+# LLM: batch已提交但尚未结算时重试必须只补索引及回执，不能再次重命名或重写store。
+# 函数用途: 覆盖提交后、due索引和accepted回执前的真实硬退出。
+def test_round3_committed_accept_retry_resyncs_due_without_reinstall(kit):
+    import json
+
+    from agent_py_agent.agent.assets.script_store_support import delivery_scheduler
+
+    source = round2_seed_monitor(kit, False)
+    first = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    kit.service.accept_delivery('local/alice', first['delivery_id'])
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    round3_crash(kit, sent['delivery_id'], source['job_id'], point='committed')
+    assert not (kit.alice / '.asset-batch.json').exists()
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert envelope['status'] == 'pending'
+    assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in envelope['resolution']['expected_files']]
+    repo = delivery_scheduler(kit.alice, 'local/alice')
+    before = repo.store_path.read_bytes()
+    repo._sync_due_index_unlocked({'jobs': {}, 'runs': {}})
+    assert round3_due_rows(kit) == []
+    result = kit.service.accept_delivery('local/alice', sent['delivery_id'])
+    assert result['status'] == 'accepted' and round3_due_rows(kit)
+    assert repo.store_path.read_bytes() == before
+    installed = next(row['id'] for row in result['installed_assets'] if row['kind'] == 'monitor')
+    assert installed != source['job_id']
+    assert {row['job_id'] for row in repo.list_jobs()[0]} == {source['job_id'], installed}
+    assert json.loads((kit.alice / 'data/monitors' / (installed + '.json')).read_text())['enabled'] is True
+
+
+# LLM: 启停不能仅用内存except撤回；硬退出后显式根锁恢复旧字节及被污染的唤醒投影。
+# 函数用途: 覆盖启用/停用两方向的双存储耐久undo。
+@pytest.mark.parametrize('enabled', [False, True])
+def test_round3_toggle_hard_exit_recovers_both_files_and_due_index(kit, enabled):
+    import json
+
+    from agent_py_agent.agent.assets import asset_root_lock
+    from agent_py_agent.agent.assets.script_store_support import delivery_scheduler
+
+    source = round2_seed_monitor(kit, False)
+    identifier = source['job_id']
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', identifier)
+    kit.service.accept_delivery('local/alice', sent['delivery_id'], initial_enabled=not enabled)
+    repo = delivery_scheduler(kit.alice, 'local/alice')
+    binding = kit.alice / 'data/monitors' / (identifier + '.json')
+    before = (binding.read_bytes(), repo.store_path.read_bytes())
+    round3_crash(kit, sent['delivery_id'], identifier, point='toggle', enabled=enabled)
+    assert json.loads(binding.read_text())['enabled'] is enabled
+    assert (kit.alice / '.asset-batch.json').exists()
+    dirty = json.loads(before[1])
+    dirty['jobs'][identifier].update(enabled=enabled, status='active' if enabled else 'paused')
+    repo._sync_due_index_unlocked(dirty)
+    assert bool(round3_due_rows(kit)) is enabled
+    with asset_root_lock(kit.alice):
+        assert (binding.read_bytes(), repo.store_path.read_bytes()) == before
+        assert bool(round3_due_rows(kit)) is not enabled
+    assert not (kit.alice / '.asset-batch.json').exists()
+    assert not list(kit.alice.rglob('*.stage-*'))
+    assert kit.service.toggle_asset('local/alice', 'monitor', identifier, enabled)['enabled'] is enabled
+    assert repo.get_job(identifier)['enabled'] is enabled
 
 
 # LLM: 人为回退通知模拟已结算后写失败，幂等重试应修复而非重装。
@@ -842,7 +1042,8 @@ def test_round2_monitor_overwrite_rollback_and_retry(kit, monkeypatch):
     # LLM: 原事务前最后一刻抛错，观测点仍是当前真实Scheduler与绑定。
     # 函数用途: 让覆盖在正式资产发表之前失败。
     def fail_commit(*args):
-        assert repo.get_job(source['job_id'])['status'] == 'paused'
+        assert repo.get_job(source['job_id']) == previous_job
+        assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in args[1]]
         raise OSError('synthetic overwrite failure')
 
     monkeypatch.setattr(workspace_assets, '_commit_staged', fail_commit)

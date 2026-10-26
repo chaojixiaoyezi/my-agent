@@ -100,9 +100,10 @@ def _delivery_notification(envelope):
     return event
 
 
-# LLM: quota由外层持有，继续取原资产根/绑定/scheduler锁；启停原账本并沿原事件退代、等待运行取消，不新建平行调度器。
-# 函数用途: 同时启停监控绑定与真实Scheduler任务，写失败恢复旧绑定和旧调度状态。
+# LLM: 外层持quota；原root/集合/store锁内先冻结两份旧字节，再沿原batch持久undo发表，保留原事件退代和取消语义。
+# 函数用途: 耐久启停监控绑定和真实Scheduler，硬退出由下一次根写锁恢复两份权威及due投影。
 def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
+    from ..common.json_io import append_private_jsonl_records
     from ..scheduler.event_source_lifecycle import cancel_retired_event_runs
     from ..scheduler.event_sources import sync_event_sources
     from ..scheduler.monitor_state import resume_monitor
@@ -111,9 +112,17 @@ def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
     from .descriptor import AssetDescriptor
     from .monitor_adapter import get_monitor_descriptor
     from .script_store_support import _raw_object
-    from .workspace_assets import _DESCRIPTOR_FIELDS
+    from .workspace_assets import (
+        _BATCH_FILE,
+        _DESCRIPTOR_FIELDS,
+        _batch_entries,
+        _canonical_locks,
+        _commit_staged,
+        _content_bytes,
+    )
 
     parts = ('data', 'monitors', identifier + '.json')
+    scheduler_parts = ('data', 'scheduler', 'store.json')
     with asset_root_lock(home):
         binding = _raw_object(home, parts)
         raw_store = _raw_object(home, ('data', 'scheduler', 'store.json')) or {}
@@ -121,9 +130,8 @@ def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
             raise AssetDeliveryError('ASSET_NOT_FOUND', '目标资产不存在')
         os.close(open_directory_beneath(home, parts[:-1], create=True, require_dir_fd=True))
         repo = delivery_scheduler(home, owner_id)
-        with locked_json_path(home.joinpath(*parts)), locked_json_path(repo.store_path):
+        with _canonical_locks(home, [parts, scheduler_parts]):
             store, now = repo._load_store_unlocked(), time.time()
-            previous = deepcopy(store)
             job = store['jobs'].get(identifier)
             if job is not None and job['status'] == 'deleted':
                 raise AssetDeliveryError('ASSET_NOT_FOUND', '目标资产不存在')
@@ -141,20 +149,27 @@ def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
             updated = sync_event_sources(updated, job, retire=True)
             store['jobs'][identifier] = cancel_retired_event_runs(store, updated, now=now)
             cancelled = repo._cancel_waiting_runs_unlocked(store, identifier, now, 'job_paused') if not enabled else []
-            old_binding = read_bytes_beneath(home, parts, max_bytes=MAX_BUNDLE_BYTES, require_dir_fd=True)
-            try:
-                if binding is not None:
-                    binding = {**binding, 'enabled': enabled, 'revision': int(binding.get('revision', 0)) + 1,
-                        'schedule_spec': {**binding.get('schedule_spec', {}), 'enabled': enabled}}
-                    raw = delivery_json(binding)
-                    admission.check((OwnerQuotaChange(home.joinpath(*parts), len(raw)),))
-                    write_bytes_atomic_beneath(home, parts, raw)
-                repo._write_store_unlocked(store, admission, history_records=cancelled)
-            except BaseException:
-                if old_binding is not None:
-                    write_bytes_atomic_beneath(home, parts, old_binding)
-                repo._write_store_unlocked(previous, admission)
-                raise
+            updates = {}
+            if binding is not None:
+                binding = {**binding, 'enabled': enabled, 'revision': int(binding.get('revision', 0)) + 1,
+                    'schedule_spec': {**binding.get('schedule_spec', {}), 'enabled': enabled}}
+                updates[parts] = delivery_json(binding).decode('utf-8')
+            store['updated_at'] = now
+            updates[scheduler_parts] = delivery_json(store).decode('utf-8')
+            entries, journal = _batch_entries(home, [{'updates': updates}])
+            history = repo._new_history_rows_unlocked(cancelled)
+            history_blob = ''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in history)
+            stages = [OwnerQuotaChange(home.joinpath(*entry['parts'][:-1], entry['stage']),
+                len(_content_bytes(entry['content']))) for entry in entries]
+            undo = OwnerQuotaChange(home / _BATCH_FILE, len(delivery_json(journal)))
+            finals = [OwnerQuotaChange(home.joinpath(*entry['parts']), len(_content_bytes(entry['content']))) for entry in entries]
+            history_change = [OwnerQuotaChange(repo.history_path, len(history_blob.encode('utf-8')), append=True)] if history else []
+            admission.check([undo, *stages])
+            admission.check([undo, *stages, *finals, *history_change])
+            _commit_staged(home, entries, journal)
+            if history:
+                append_private_jsonl_records(repo.history_path, history)
+            repo._sync_due_index_unlocked(store)
             return {**get_monitor_descriptor(home, identifier), 'enabled': enabled}
 
 
@@ -650,22 +665,23 @@ class AssetDeliveryService(_DeliveryStorage):
                 result[key][file['path']] = raw
         return result
 
-    # LLM: 已准备安装清单只引用原canonical路径，实际字节须完全一致才可补记已提交结果；不以provenance或文件存在冒充完成。
+    # LLM: root及canonical全锁内核完整expected字节，匹配新代后重建Scheduler due投影才补回执；旧代检查不改索引。
     # 函数用途: 辨识资产已原子提交但后续回执写失败的重试，防重复重命名安装。
     def _installation_matches(self, home, envelope, *, previous=False):
         from . import asset_root_lock
-        from .workspace_assets import _validate_batch_path
+        from .workspace_assets import _canonical_locks, _sync_batch_scheduler
 
         expected = envelope.get('resolution', {}).get('expected_files')
         if not expected:
             return False
-        with asset_root_lock(home):
+        with asset_root_lock(home), _canonical_locks(home, [entry['parts'] for entry in expected]):
             for entry in expected:
-                _validate_batch_path(entry['parts'])
                 raw = read_bytes_beneath(self.root_dir, (*home.relative_to(self.root_dir).parts, *entry['parts']), max_bytes=MAX_BUNDLE_BYTES, require_dir_fd=True)
                 key = 'previous_sha256' if previous else 'sha256'
                 if key not in entry or (None if raw is None else sha256(raw).hexdigest()) != entry[key]:
                     return False
+            if not previous and any(tuple(entry['parts']) == ('data', 'scheduler', 'store.json') for entry in expected):
+                _sync_batch_scheduler(home)
         return True
 
     # LLM: 原hash不变，终态重试保留updated_at并补通知；逐叶原子写，失败不得伪称无副作用，原安装清单负责辨识重试。
