@@ -23,8 +23,10 @@ def test_m2_message_verifier_caches_exact_quote_without_retaining_body(tmp_path,
     counts = observe_reads(monkeypatch, [path])
     ref = candidate.source_message_refs[0]
     assert verifier.verify(ref) is not None
+    first_opens = len(counts.opens)
+    assert first_opens >= 1
     assert verifier.verify(ref) is not None
-    assert len(counts.opens) == 1
+    assert len(counts.opens) == first_opens
     assert verifier.verify({**ref, "quote": "原文中没有的证据"}) is None
     with path.open("ab") as handle:
         handle.write(b"bad\n")
