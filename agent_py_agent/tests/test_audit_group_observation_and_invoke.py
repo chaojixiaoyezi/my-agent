@@ -950,3 +950,204 @@ def test_r2b_invalid_artifact_batch_never_publishes_partial_files(tmp_path, monk
         module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice",
             source_owner="local/main", asset_type="script", asset_id="source_script")
     assert not list((home / "data/audit_group_exec").rglob("artifact-*.txt"))
+
+
+# LLM: 秘密均为合成字面值；必须保留非敏感字段默认值，不能靠删除整个schema造绿。
+# 函数用途: 为R3各种子schema和描述器位置构造可区分的脱敏输入。
+def r3_schema():
+    return {"type": "object", "properties": {
+        "api-key": {"type": "string", "default": "plain-literal", "enum": ["plain-1"]},
+        "count": {"type": "integer", "default": 3}}}
+
+
+# LLM: 短token只按归一化后的完整词段命中，禁止把monkey等正常业务字段误判为key。
+# 函数用途: 验证连字符、点号、新秘密名称与短token的字段语义脱敏。
+@pytest.mark.parametrize("field", ["api-key", "api.key", "passphrase", "pw", "passwd", "encrypt_key",
+    "encryption.key", "signing-key", "client_secret", "access-key", "private.key", "webhook-secret",
+    "session_key", "auth.key", "jwt", "pat", "pin", "ak", "sk", "key", "db-pw", "db.key", "db_pin"])
+def test_r3_sensitive_key_variants_preserve_safe_defaults(tmp_path, field):
+    from agent_py_agent.agent.audit_group.observation_service import AuditGroupObservationService
+
+    member(tmp_path)
+    schema = r3_schema()
+    secret = schema["properties"].pop("api-key")
+    schema["properties"].update({field: secret, "monkey": {"default": 4}, "sketch": {"default": 5}})
+    asset(tmp_path, "script", "r3-schema", parameters_schema=schema)
+    row, = AuditGroupObservationService(tmp_path).summarize_assets("local/alice", target_owner="local/main")["items"]
+    projected = row["parameters_schema"]["properties"]
+    assert field in projected
+    assert "plain-literal" not in json.dumps(projected) and "plain-1" not in json.dumps(projected)
+    assert projected["count"]["default"] == 3
+    assert projected["monkey"]["default"] == 4 and projected["sketch"]["default"] == 5
+
+
+# LLM: 列表形式items/prefixItems与组合/条件子节点必须继承秘密上下文，不得落到通用值投影。
+# 函数用途: 逐一验证JSON Schema子节点的上下文传播，保留其结构但去掉秘密字面值。
+@pytest.mark.parametrize("key", ["items", "prefixItems", "additionalItems", "contains", "additionalProperties",
+    "propertyNames", "not", "if", "then", "else", "allOf", "anyOf", "oneOf"])
+def test_r3_sensitive_context_survives_every_subschema_node(key):
+    from agent_py_agent.agent.audit_group.safe_projection import parameters_schema
+
+    literal = {"type": "string", "default": "plain-literal", "enum": ["plain-1"], "const": "plain-2",
+               "examples": ["plain-3"]}
+    value = [literal] if key in {"items", "prefixItems", "allOf", "anyOf", "oneOf"} else literal
+    projected = parameters_schema({"properties": {"api_key": {key: value}}})
+    assert key in projected["properties"]["api_key"]
+    assert all(secret not in json.dumps(projected) for secret in ("plain-literal", "plain-1", "plain-2", "plain-3"))
+
+
+# LLM: 各种命名子schema映射既识别子字段敏感性，也继承父节点敏感性。
+# 函数用途: 防止defs、条件依赖和正则属性映射成为秘密默认值出口。
+@pytest.mark.parametrize("key", ["properties", "patternProperties", "$defs", "defs", "dependencies", "dependentSchemas"])
+def test_r3_sensitive_context_survives_named_subschema_maps(key):
+    from agent_py_agent.agent.audit_group.safe_projection import parameters_schema
+
+    projected = parameters_schema({key: r3_schema()["properties"], "properties": {
+        "password": {key: {"nested": {"default": "plain-nested"}}}}} if key != "properties" else r3_schema())
+    assert key in projected
+    assert "plain-literal" not in json.dumps(projected) and "plain-1" not in json.dumps(projected)
+    assert "plain-nested" not in json.dumps(projected)
+    assert projected[key]["count"]["default"] == 3
+
+
+# LLM: 资产记录/metadata/descriptor上的所有公开schema共用净化入口，不把缺字段当脱敏成功。
+# 函数用途: 验证输入、输出及配置schema都保留安全说明且不泄露秘密默认值。
+@pytest.mark.parametrize("field", ["parameters_schema", "input_schema", "output_schema", "config_schema"])
+@pytest.mark.parametrize("location", ["record", "metadata", "descriptor"])
+def test_r3_all_asset_schema_locations_are_sanitized(tmp_path, field, location):
+    from agent_py_agent.agent.audit_group.observation_service import AuditGroupObservationService
+
+    member(tmp_path)
+    patch = {field: r3_schema()} if location == "record" else {location: {field: r3_schema()}}
+    asset(tmp_path, "script", "r3-schema", **patch)
+    row, = AuditGroupObservationService(tmp_path).summarize_assets("local/alice", target_owner="local/main")["items"]
+    assert field in row and row[field]["properties"]["count"]["default"] == 3
+    assert "plain-literal" not in json.dumps(row) and "plain-1" not in json.dumps(row)
+
+
+# LLM: 非目标规则故意使用LLM或缺失脚本，只能冻结选定rule_b的依赖，不能隐式降级执行另一个规则。
+# 函数用途: 构造混合规则的真实来源监控与唯一合法脚本。
+def r3_monitor(root, *, bad="llm", enabled=True):
+    asset(root, "script", "source_script")
+    rule_a = {"id": "rule_a", "enabled": True, "use_llm": bad == "llm",
+              "tool": {"name": "scripts", "arguments": {"action": "run", "script_id": "missing-script"}}}
+    rule_b = {"id": "rule_b", "enabled": enabled, "use_llm": False,
+              "tool": {"name": "scripts", "arguments": {"action": "run", "script_id": "source_script", "inputs": {"fixed": 1}}}}
+    path = root / "owners/local/main/data/scheduler/store.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"jobs": {"multi": {"job_id": "multi", "status": "active", "version": 1,
+                                                "rules": [rule_a, rule_b]}}, "runs": {}}))
+    return path
+
+
+# LLM: 工具/服务真实执行冻结、每单元复查与最终复查，仅用替身隔离OS执行，来源目录必须无写。
+# 函数用途: 验证别名和明确rule_id都不被其它规则的LLM或坏依赖拦截。
+@pytest.mark.parametrize("entry", ["service", "tool"])
+@pytest.mark.parametrize("kind,identifier,rule", [("monitor", "multi", "rule_b"),
+    ("monitor_rule", "multi", "rule_b"), ("monitor_rule", "multi:rule_b", "")])
+@pytest.mark.parametrize("bad", ["llm", "missing"])
+def test_r3_target_monitor_rule_freezes_only_its_own_dependencies(tmp_path, monkeypatch, entry, kind, identifier, rule, bad):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    from agent_py_agent.agent.tooling.audit_group_tools import AuditGroupInvokeAssetTool
+
+    member(tmp_path)
+    r3_monitor(tmp_path, bad=bad)
+    source = tmp_path / "owners/local/main"
+    before, calls = inventory(source), []
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", lambda _unit, _code, inputs, **_kwargs:
+                        calls.append(inputs) or {"value": 17})
+    params = {"source_owner": "local/main", "asset_type": kind, "asset_id": identifier,
+              "rule_id": rule, "inputs": {"n": 3}}
+    if entry == "service":
+        result = module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice", **params)
+    else:
+        outcome = AuditGroupInvokeAssetTool(tmp_path, "local/alice").execute(params)
+        assert outcome.ok, outcome.reported_error_code
+        result = json.loads(outcome.output)
+    assert result["result"] == {"value": 17} and result["status"] == "succeeded"
+    assert calls == [{"fixed": 1, "n": 3}]
+    assert inventory(source) == before
+
+
+# LLM: 选择失败先于无关规则验证和caller执行暂存，不返回其它错误来掩盖明确规则的不存在或禁用。
+# 函数用途: 钉住缺规则404及禁用规则409的公开错误和零执行。
+@pytest.mark.parametrize("rule,enabled,code,status", [("missing", True, "RULE_NOT_FOUND", 404),
+                                                    ("rule_b", False, "ASSET_DISABLED", 409)])
+def test_r3_target_monitor_rule_selection_errors_precede_unrelated_rules(tmp_path, monkeypatch, rule, enabled, code, status):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+
+    member(tmp_path)
+    r3_monitor(tmp_path, enabled=enabled)
+    calls = []
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", lambda *_a, **_k: calls.append(True) or {"value": 17})
+    with pytest.raises(AuditGroupError) as denied:
+        module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice", source_owner="local/main",
+            asset_type="monitor", asset_id="multi", rule_id=rule)
+    assert (denied.value.code, denied.value.status_code) == (code, status)
+    assert not calls
+
+
+# LLM: 不跳过Host静态schema、身份、原幂等preflight；必须与工具入口同样先选规则再冻结。
+# 函数用途: 通过真实Host组合根调用monitor_rule，包括监控ID中的规则简写。
+@pytest.mark.parametrize("kind,identifier,rule", [("monitor", "multi", "rule_b"),
+    ("monitor_rule", "multi", "rule_b"), ("monitor_rule", "multi:rule_b", "")])
+def test_r3_host_monitor_rule_alias_and_targeted_preflight(wired_host, monkeypatch, kind, identifier, rule):
+    from agent_py_agent.agent.audit_group.blackbox_invoke_service import IsolatedScriptUnit
+
+    caller = host_member(wired_host)
+    r3_monitor(wired_host[2].root)
+    monkeypatch.setattr(IsolatedScriptUnit, "execute", lambda *_a, **_k: {"value": 17})
+    result = business_call(wired_host, "audit_group.assets.invoke", {"source_owner_id": "local/main",
+        "kind": kind, "asset_id": identifier, "rule_id": rule}, key="r3_monitor_host_0001", caller=caller)
+    assert result.http_status == 200 and result.data["result"] == {"value": 17}
+
+
+# LLM: config_rw只是action_avatar的输入别名，不能改变成员资格或工具许可交集，也不能与只读模式混用。
+# 函数用途: 验证模式归一化及原工具权限边界。
+def test_r3_config_rw_alias_preserves_bot_permission_intersection():
+    from agent_py_agent.agent.conversation.bot_tool_policy import (
+        bot_tool_allowed,
+        normalize_bot_mode,
+    )
+
+    assert normalize_bot_mode("config_rw") == normalize_bot_mode(bot_kind="config_rw") == "action_avatar"
+    assert normalize_bot_mode("config_rw", "ops_config") == "action_avatar"
+    with pytest.raises(HostAPIError, match="BOT_MODE_MISMATCH"):
+        normalize_bot_mode("config_rw", "query_readonly")
+    assert bot_tool_allowed("config_rw", "scripts", {"action": "run"}, allowed_tools={"scripts"})
+    assert not bot_tool_allowed("config_rw", "scripts", {"action": "run"}, allowed_tools=set())
+    assert not bot_tool_allowed("config_rw", "audit_group_invoke_asset", {}, allowed_tools={"audit_group_invoke_asset"})
+
+
+# LLM: Host目录和实际Bot槽位归一化共用别名，不创建第三种Bot或扩大只读槽位权限。
+# 函数用途: 经真实Host ensure/history验证config_rw绑定action_avatar同一槽位。
+def test_r3_host_config_rw_alias_uses_existing_avatar_slot(wired_host):
+    caller = host_member(wired_host)
+    alias = business_call(wired_host, "conversations.bots.ensure", {"bot_mode": "config_rw"},
+                          key="r3_config_rw_ensure", caller=caller).data
+    canonical = business_call(wired_host, "conversations.bots.ensure", {"bot_mode": "action_avatar"},
+                              key="r3_avatar_ensure_001", caller=caller).data
+    assert alias["bot_mode"] == "action_avatar" and alias["active_thread_id"] == canonical["active_thread_id"]
+    history = business_call(wired_host, "conversations.bots.history.list", {"mode": "config_rw"}, caller=caller)
+    assert history.http_status == 200
+
+
+# LLM: 目标规则修复不能把未提供rule_id的复合监控隐式降级为唯一启用项；原有明确选择合同必须保留。
+# 函数用途: 验证即使其它规则已禁用，复合监控仍要求调用方明确指定规则。
+def test_r3_compound_monitor_without_rule_id_keeps_explicit_selection_required(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+
+    member(tmp_path)
+    path = r3_monitor(tmp_path)
+    store = json.loads(path.read_text())
+    store["jobs"]["multi"]["rules"][0]["enabled"] = False
+    path.write_text(json.dumps(store))
+    calls = []
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", lambda *_a, **_k: calls.append(True) or {"value": 17})
+    with pytest.raises(AuditGroupError) as denied:
+        module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice", source_owner="local/main",
+            asset_type="monitor", asset_id="multi")
+    assert (denied.value.code, denied.value.status_code) == ("AUDIT_GROUP_RULE_REQUIRED", 400)
+    assert not calls

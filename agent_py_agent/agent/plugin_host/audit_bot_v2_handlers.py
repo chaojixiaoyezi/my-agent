@@ -1,7 +1,10 @@
 # LLM: 审计动作只接真实AG1领域；来源、enabled、成员和管理范围每次现查，回执不能成为永久权限。
 # 模块用途: 将审计组观察/黑盒调用、账号资格与双Bot会话接入Host v2。
 from ..audit_group.access_policy import AuditGroupError, require_audit_group_member
-from ..audit_group.blackbox_invoke_service import AuditGroupBlackboxInvokeService
+from ..audit_group.blackbox_invoke_service import (
+    AuditGroupBlackboxInvokeService,
+    normalize_asset_reference,
+)
 from ..audit_group.observation_service import AuditGroupObservationService, alert_timestamp
 from ..audit_group.source_snapshot import SourceAssetSnapshot
 from ..conversation.bot_sessions import BotSessionManager
@@ -137,19 +140,20 @@ def _set_membership(authorized, context, ports, payload):
                               "idempotent_replay": result["replayed"]})
 
 
-# LLM: 复用原幂等账，首次/重放都重核成员、治理和源启停；准备失败尚未执行，不误报unknown结局。
+# LLM: 复用原幂等账，首次/重放先归一规则引用并冻结目标依赖；成员/治理/源启停重核及未执行错误分类不变。
 # 函数用途: 调用原AG1黑盒服务，并完整保留执行前拒绝分类。
 def _invoke_asset(authorized, context, ports, payload):
     from ..audit_group.caller_controls import caller_policy
     from .capabilities_v2_handlers import _once
 
-    # LLM: 回执不绕过治理禁用；源坏JSON/IO沿AG1同类503映射，不泄露正文或凭空标执行未知。
+    # LLM: 预检与执行共用规则引用归一，选定规则后才冻结；回执不绕过治理禁用，源坏账仍沿AG1安全503映射。
     # 函数用途: 在发表executing之前复核当前执行资格和安全源快照。
     def preflight(_saved):
         _check_caller(authorized, context)
         try:
-            caller_policy(context.owner_home.root, context.identity, payload["kind"])
-            SourceAssetSnapshot.freeze(context.owner_home.root, payload["source_owner_id"], payload["kind"], payload["asset_id"])
+            kind, identifier, rule_id = normalize_asset_reference(payload["kind"], payload["asset_id"], payload.get("rule_id"))
+            caller_policy(context.owner_home.root, context.identity, kind)
+            SourceAssetSnapshot.freeze(context.owner_home.root, payload["source_owner_id"], kind, identifier, rule_id=rule_id)
         except AuditGroupError:
             raise
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
@@ -169,16 +173,15 @@ def _invoke_asset(authorized, context, ports, payload):
     return _once(authorized, context, ports.observations.services, effect, preflight)
 
 
-# LLM: 原服务游标封装进Host MAC，绑定当前owner/action/完整筛选；until只过滤当前页，续页仍保留原位置和覆盖。
+# LLM: 态势筛选原样交领域共用选择器；分页游标绑定owner/action/完整筛选，until只过滤当前页且不丢原位置/覆盖。
 # 函数用途: 将四个只读审计动作的参数翻译为AG1接口，并保留来源错误。
 def _observe(authorized, context, ports, payload):
     import time
     service = AuditGroupObservationService(context.owner_home.root)
     action = authorized.call.action
     if action == "audit_group.posture.overview":
-        if payload.get("owner_ids") is not None:
-            return _selected_posture(service, context.identity, payload["owner_ids"])
-        return service.posture_overview(context.identity)
+        return service.posture_overview(context.identity, owner_ids=payload.get("owner_ids"),
+                                        target_owner=payload.get("target_owner"))
     codec = getattr(ports.conversation, "cursor_codec", None)
     if codec is None:
         raise HostAPIError("HOST_NOT_READY", 503)

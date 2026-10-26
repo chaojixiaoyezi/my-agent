@@ -19,7 +19,7 @@ from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from
 from ..workflows.script_runner import parse_script_output
 from .access_policy import AuditGroupError
 from .safe_projection import scrub_private_text
-from .source_snapshot import local_skill_id, monitor_action, skill_script
+from .source_snapshot import local_skill_id, monitor_action, monitor_rules, skill_script
 
 
 # LLM: outputs为明确字段白名单，未声明字段即使执行成功也不得返回；不传stdout/stderr/上下文。
@@ -96,12 +96,12 @@ class SnapshotExecutor:
             results[identifier] = last
         return contract_output(raw, last)
 
-    # LLM: 不创建job/run/通知，不写checkpoint；复合规则需准确选中且依赖条件沿冻结值判断。
+    # LLM: 不创建job/run/通知或checkpoint；明确目标与冻结共用选择，复合监控仍须rule_id，条件沿完整job判断。
     # 函数用途: 脱离调度账本单次验证一条启用规则。
     def monitor(self, raw, inputs, rule_id):
         from ..scheduler.monitor_state import condition_matches
         job = raw["job"]
-        candidates = [rule for rule in job.get("rules") or [job] if not rule_id or rule.get("id", "") == rule_id]
+        candidates = monitor_rules(raw, rule_id) if rule_id else job.get("rules") or [job]
         if len(candidates) != 1:
             raise AuditGroupError("AUDIT_GROUP_RULE_REQUIRED", status_code=400)
         rule = {"depends_on": [], "condition": None, **candidates[0]}

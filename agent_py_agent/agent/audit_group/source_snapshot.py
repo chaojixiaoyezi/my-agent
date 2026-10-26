@@ -34,6 +34,23 @@ def monitor_action(rule):
     return kind, asset_identifier(arguments.get(kind + "_id")), arguments.get("inputs", {})
 
 
+# LLM: 明确规则先按ID唯一定位并核启停，不触碰其它规则的LLM或资产依赖；不明确时保持原启用规则集合。
+# 函数用途: 为冻结与执行共用准确的监控规则选择及缺失/禁用错误。
+def monitor_rules(raw, rule_id=None):
+    job = raw["job"]
+    rules = job.get("rules") or [job]
+    if not rule_id:
+        return [rule for rule in rules if rule.get("enabled", True)]
+    selected = [rule for rule in rules if rule.get("id", "") == rule_id]
+    if not selected:
+        raise AuditGroupError("RULE_NOT_FOUND", status_code=404)
+    if len(selected) != 1:
+        raise AuditGroupError("ASSET_DEPENDENCY_INVALID", status_code=409)
+    if selected[0].get("enabled", True) is not True:
+        raise AuditGroupError("ASSET_DISABLED", status_code=409)
+    return selected
+
+
 # LLM: 只允许准确owner:技能引用；其它来源无法在source闭包内证明，不能删前缀猜同名。
 # 函数用途: 解析工作流里的同来源技能引用。
 def local_skill_id(value):
@@ -52,23 +69,24 @@ class SourceAssetSnapshot:
     revision: str | int
     _records: dict = field(repr=False)
     fingerprint: str = ""
+    rule_id: str = ""
 
-    # LLM: 先核来源状态，再无写入读取依赖闭包；节点数与深度限制不能放宽为部分执行。
+    # LLM: 先核来源状态，再读取选定规则的依赖闭包；规则选择绑定指纹，后续复核不得退回全部规则。
     # 函数用途: 构造一个同源冻结执行单元。
     @classmethod
-    def freeze(cls, root, source_owner, kind, identifier):
+    def freeze(cls, root, source_owner, kind, identifier, *, rule_id=None):
         home = require_source_enabled(root, source_owner)
         reader = ReadonlyAssetStore(root, home.identity)
         records, checked = {}, {}
         with source_snapshot_guard(reader):
-            _freeze_node(reader, kind, identifier, records, set())
-            _freeze_node(reader, kind, identifier, checked, set())
+            _freeze_node(reader, kind, identifier, records, set(), rule_id=rule_id)
+            _freeze_node(reader, kind, identifier, checked, set(), rule_id=rule_id)
             if records != checked:
                 raise AuditGroupError("REVISION_CONFLICT", status_code=409)
         primary = records[(kind, identifier)]
-        signature = sha256(json.dumps(sorted((key, value) for key, value in records.items()),
+        signature = sha256(json.dumps([rule_id or "", sorted((key, value) for key, value in records.items())],
                                       sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        return cls(home.owner_id, kind, identifier, primary.get("revision", 0), records, signature)
+        return cls(home.owner_id, kind, identifier, primary.get("revision", 0), records, signature, rule_id or "")
 
     # LLM: 只返回宿主内部冻结值，调用方必须继续做输出白名单投影。
     # 函数用途: 查找已冻结的一个准确依赖。
@@ -76,9 +94,9 @@ class SourceAssetSnapshot:
         return self._records[(kind, identifier)]
 
 
-# LLM: 循环和缺失依赖均拒绝；脚本code只在内存，metadata中的路径从不用于读文件。
+# LLM: 循环和缺失依赖均拒绝；仅首层监控使用明确规则选择，递归依赖仍完整冻结，脚本code只在内存。
 # 函数用途: 递归冻结一个节点和它的同源启用依赖。
-def _freeze_node(reader, kind, identifier, records, pending):
+def _freeze_node(reader, kind, identifier, records, pending, *, rule_id=None):
     key = (kind, asset_identifier(identifier))
     if key in pending or len(pending) > 24 or len(records) >= 128:
         raise AuditGroupError("ASSET_DEPENDENCY_INVALID", status_code=409)
@@ -94,15 +112,15 @@ def _freeze_node(reader, kind, identifier, records, pending):
     if kind == "script":
         entrypoint = asset_identifier(raw.get("entrypoint", "main.py"))
         raw = {**raw, "code": reader.text("scripts", identifier, entrypoint)}
-    for child_kind, child_id in _dependencies(kind, raw):
+    for child_kind, child_id in _dependencies(kind, raw, rule_id=rule_id):
         _freeze_node(reader, child_kind, child_id, records, pending)
     records[key] = raw
     pending.remove(key)
 
 
-# LLM: 闭包来自明确refs、步骤及监控动作；不解析Prompt/正文找依赖，不从凭据引用推断执行权。
+# LLM: 闭包来自明确refs、步骤及已选监控动作；规则先选中才校验LLM/依赖，不解析Prompt找执行权。
 # 函数用途: 列出需要一起冻结和校验enabled的同源资产。
-def _dependencies(kind, raw):
+def _dependencies(kind, raw, *, rule_id=None):
     result = []
     if kind == "skill":
         result.append(("script", skill_script(raw)))
@@ -112,11 +130,9 @@ def _dependencies(kind, raw):
                 result.append(("script", asset_identifier(step["script_id"])))
             result.extend(("skill", local_skill_id(value)) for value in step.get("skill_ids", []))
     if kind == "monitor":
-        job = raw["job"]
-        for rule in job.get("rules") or [job]:
-            if rule.get("enabled", True):
-                child_kind, child_id, _inputs = monitor_action(rule)
-                result.append((child_kind, child_id))
+        for rule in monitor_rules(raw, rule_id):
+            child_kind, child_id, _inputs = monitor_action(rule)
+            result.append((child_kind, child_id))
     for collection, ids in raw.get("refs", {}).items():
         child_kind = {"scripts": "script", "workflows": "workflow", "skills": "skill", "datasources": "datasource"}.get(collection)
         if child_kind is not None:

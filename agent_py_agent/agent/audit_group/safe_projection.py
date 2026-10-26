@@ -9,13 +9,17 @@ from ..common.log_redaction import redact_sensitive_value
 
 FORBIDDEN = frozenset({"code", "source_code", "body_markdown", "steps", "prompt", "credential_refs",
                        "data_sources", "datasource", "workflow_snapshot", "owner_home", "path", "entrypoint_path"})
+_SCHEMA_CHILDREN = frozenset({"items", "prefixItems", "additionalItems", "contains", "additionalProperties",
+                            "propertyNames", "not", "if", "then", "else", "allOf", "anyOf", "oneOf"})
+_SCHEMA_MAPS = frozenset({"properties", "patternProperties", "$defs", "defs", "dependencies", "dependentSchemas"})
 _SCHEMA_KEYS = frozenset({"type", "title", "description", "default", "examples", "enum", "const", "required",
     "properties", "items", "additionalProperties", "minimum", "maximum", "minLength", "maxLength",
-    "minItems", "maxItems", "format", "oneOf", "anyOf", "allOf", "nullable"})
+    "minItems", "maxItems", "format", "oneOf", "anyOf", "allOf", "nullable"}) | _SCHEMA_CHILDREN | _SCHEMA_MAPS
 _PATH = re.compile(r"(?<![\w:])(?:[A-Za-z]:[\\/]|~[/\\]|/)[^\s\"'<>;,\]\)}]*")
-_SENSITIVE_FIELD = re.compile(
-    r"password|passwd|pwd|secret|token|api_?key|access_?key|private_?key|credential|cookie|session|"
-    r"authorization|bearer|webhook|(?:^|[_.-])(?:ak|sk)(?:$|[_.-])", re.IGNORECASE)
+_SENSITIVE_PARTS = ("api_key", "apikey", "passphrase", "password", "passwd", "secret", "token", "credential",
+    "private_key", "access_key", "client_secret", "encrypt_key", "encryption_key", "signing_key", "webhook_secret",
+    "session_key", "auth_key", "bearer", "pwd", "cookie", "session", "authorization", "webhook")
+_SENSITIVE_TOKENS = frozenset({"pw", "key", "pin", "jwt", "pat", "ak", "sk"})
 _SCHEMA_LITERALS = frozenset({"default", "examples", "enum", "const"})
 
 
@@ -47,27 +51,46 @@ def public_value(value, *, depth=0, budget=None):
     return None
 
 
-# LLM: 敏感属性上下文穿透所有schema子节点；字面值省略，不用值的秘密正则代替属性语义。
+# LLM: 长秘密名称按子串命中，短词仅按分隔后的整词命中；保留既有cookie/session等秘密分类。
+# 函数用途: 统一识别点号、连字符和下划线形式的敏感属性名。
+def _is_sensitive_key(key):
+    normalized = key.lower().replace("-", "_").replace(".", "_")
+    return any(part in normalized for part in _SENSITIVE_PARTS) or bool(_SENSITIVE_TOKENS.intersection(normalized.split("_")))
+
+
+# LLM: 命名schema继承父敏感性并核子名称，不把映射值交给普通数据投影；仍限制名称长度和私有字段。
+# 函数用途: 安全投影properties、defs及依赖schema映射。
+def _schema_mapping(value, *, depth, budget, sensitive):
+    if type(value) is not dict:
+        return {}
+    return {name: parameters_schema(schema, depth=depth + 1, budget=budget,
+                                    sensitive=sensitive or _is_sensitive_key(name))
+            for name, schema in list(value.items())[:64] if type(name) is str and 0 < len(name) <= 64
+            and name.lower() not in FORBIDDEN and safe_text(name) == name}
+
+
+# LLM: 敏感属性上下文穿透列表、组合/条件及命名schema；沿原节点/深度预算裁剪，字面值省略。
 # 函数用途: 为跨owner概况保留有界入参说明，敏感字段不暴露默认值、示例或候选值。
 def parameters_schema(value, *, depth=0, budget=None, sensitive=False):
     budget = [256] if budget is None else budget
     budget[0] -= 1
-    if type(value) is not dict or depth > 6 or budget[0] < 0:
+    if depth > 6 or budget[0] < 0:
+        return {}
+    if type(value) is list:
+        return [parameters_schema(item, depth=depth + 1, budget=budget, sensitive=sensitive) for item in value[:64]]
+    if type(value) is bool:
+        return value
+    if type(value) is not dict:
         return {}
     result = {}
     for key, item in list(value.items())[:64]:
         if key not in _SCHEMA_KEYS or sensitive and key in _SCHEMA_LITERALS:
             continue
-        if key == "properties" and type(item) is dict:
-            result[key] = {name: parameters_schema(schema, depth=depth + 1, budget=budget,
-                              sensitive=sensitive or bool(_SENSITIVE_FIELD.search(name)))
-                           for name, schema in list(item.items())[:64] if type(name) is str
-                           and name.lower() not in FORBIDDEN and re.fullmatch(r"[\w.-]{1,64}", name)
-                           and safe_text(name) == name}
-        elif key in {"items", "additionalProperties"} and type(item) is dict:
-            result[key] = parameters_schema(item, depth=depth + 1, budget=budget, sensitive=sensitive)
-        elif key in {"oneOf", "anyOf", "allOf"} and type(item) is list:
-            result[key] = [parameters_schema(schema, depth=depth + 1, budget=budget, sensitive=sensitive) for schema in item[:8]]
+        if key in _SCHEMA_MAPS:
+            result[key] = _schema_mapping(item, depth=depth, budget=budget, sensitive=sensitive)
+        elif key in _SCHEMA_CHILDREN:
+            child = item[:8] if key in {"oneOf", "anyOf", "allOf"} and type(item) is list else item
+            result[key] = parameters_schema(child, depth=depth + 1, budget=budget, sensitive=sensitive)
         else:
             result[key] = public_value(item)
     return result

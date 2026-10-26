@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..capability.skills import split_skill_frontmatter
 from ..common.nofollow_fs import list_names_beneath, open_directory_beneath, read_bytes_beneath
+from ..plugin_host.errors import HostAPIError
 from ..plugin_host.owner_context import reject_constant, unique_object
 from ..user_space.owner_resolver import resolve_owner_home
 from .access_policy import AuditGroupError, owner_identity
@@ -69,6 +70,27 @@ def asset_identifier(value):
     return value
 
 
+# LLM: 规范根政策先读，再合并旧data政策；两份任一坏账都拒绝，路径/缺失与原字节共同进入冻结修订。
+# 函数用途: 无写入读取来源技能禁用并集及两份政策的内容指纹。
+def _skill_policy_state(reader):
+    disabled, revisions = set(), []
+    try:
+        for parts in (("skill_policy.json",), ("data", "skill_policy.json")):
+            raw = read_bytes_beneath(reader.root, (*reader.parts, *parts),
+                                     max_bytes=4 * 1024 * 1024, require_dir_fd=True)
+            policy = {} if raw is None else json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
+            if type(policy) is not dict or policy.get("schema_version", "skill-policy.v1") != "skill-policy.v1":
+                raise ValueError("invalid skill policy")
+            values = policy.get("disabled_skills", [])
+            if type(values) is not list or any(type(item) is not str for item in values):
+                raise ValueError("invalid skill policy")
+            disabled.update(values)
+            revisions.append((parts, sha256(raw).hexdigest() if raw is not None else None))
+    except (OSError, ValueError, RecursionError, HostAPIError):
+        raise _SkillPolicyUnavailable("SOURCE_UNAVAILABLE", status_code=503) from None
+    return disabled, json.dumps(revisions, sort_keys=True)
+
+
 # LLM: home只由owner_resolver产生，metadata不授路径；技能策略只能从source_home冷读，不创建目录或锁。
 # 类用途: 对一个准确owner读取资产定义、运行状态和依赖。
 class ReadonlyAssetStore:
@@ -123,7 +145,7 @@ class ReadonlyAssetStore:
                 raise ValueError("source listing limit")
         return sorted(result)
 
-    # LLM: 同owner技能禁用策略与定义共同决定enabled和修订；monitor合并binding/job，正文只在宿主内存。
+    # LLM: 同owner规范/旧技能策略与定义共同决定enabled和修订；monitor合并binding/job，正文只在宿主内存。
     # 函数用途: 冻结定义、启停和内部正文，调用方只能公开白名单投影，坏策略不得按启用处理。
     def get(self, kind, identifier, *, skill_parts=None):
         identifier = asset_identifier(identifier)
@@ -148,16 +170,10 @@ class ReadonlyAssetStore:
             self.check_transaction(*parts)
             body = self.text(*parts, "SKILL.md")
             meta = self.object(*parts, "skill_meta.json") or {}
-            try:
-                policy = self.object("data", "skill_policy.json") or {}
-                disabled = policy.get("disabled_skills", [])
-                if type(disabled) is not list or any(type(item) is not str for item in disabled):
-                    raise ValueError("invalid skill policy")
-            except (OSError, ValueError, RecursionError):
-                raise _SkillPolicyUnavailable("SOURCE_UNAVAILABLE", status_code=503) from None
+            disabled, policy_revision = _skill_policy_state(self)
             data = {**split_skill_frontmatter(body)[0], **meta, "body_markdown": body}
             enabled = data.get("enabled", True) is True and identifier not in disabled and f"owner:{identifier}" not in disabled
-            revision = sha256((body + json.dumps(meta, sort_keys=True) + json.dumps(sorted(set(disabled)))).encode()).hexdigest()
+            revision = sha256((body + json.dumps(meta, sort_keys=True) + policy_revision).encode()).hexdigest()
             data.update(id=identifier, kind="skill", enabled=enabled, revision=revision)
             return data
         collection = {"script": "scripts", "workflow": "workflows", "datasource": "datasources"}[kind]

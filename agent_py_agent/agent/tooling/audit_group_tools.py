@@ -30,7 +30,7 @@ _QUERY_SCHEMA = {"type": "object", "required": ["action"], "additionalProperties
     "severity": {"type": "string"}, "status": {"type": "string"}, "since": {"type": "string"}}}
 _INVOKE_SCHEMA = {"type": "object", "required": ["source_owner", "asset_type", "asset_id"],
     "additionalProperties": False, "properties": {"source_owner": {"type": "string", "maxLength": 530},
-    "asset_type": {"type": "string", "enum": ["script", "skill", "workflow", "monitor"]},
+    "asset_type": {"type": "string", "enum": ["script", "skill", "workflow", "monitor", "monitor_rule"]},
     "asset_id": {"type": "string", "maxLength": 128}, "expected_revision": {"type": ["string", "integer", "null"]},
     "inputs": {"type": "object"}, "rule_id": {"type": "string"},
     "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}}}

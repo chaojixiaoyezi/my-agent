@@ -25,11 +25,23 @@ def run_count(value):
     return value
 
 
-# LLM: schema和描述文本分别清洗，不复制metadata或任意源字段。
+# LLM: 所有显式schema字段共用同一净化器，记录优先于metadata/descriptor；其它私有字段不能跟随复制。
+# 函数用途: 收集并净化资产实际提供的输入、输出、配置及参数schema。
+def _asset_schemas(raw):
+    sources = [source for source in (raw, raw.get("metadata"), raw.get("descriptor")) if type(source) is dict]
+    schemas = {"parameters_schema": {}}
+    for field in ("parameters_schema", "input_schema", "output_schema", "config_schema"):
+        for source in sources:
+            if field in source:
+                schemas[field] = parameters_schema(source[field])
+                break
+    return schemas
+
+
+# LLM: 四种schema和描述文本分别清洗，不复制metadata/descriptor或任意源字段。
 # 函数用途: 生成严格AssetSummary白名单DTO。
 def asset_summary(owner, kind, raw):
     runtime = raw.get("runtime_summary", {})
-    schema = raw.get("parameters_schema", raw.get("metadata", {}).get("parameters_schema", {}))
     enabled = raw.get("enabled", True)
     if type(enabled) is not bool or type(runtime) is not dict:
         raise ValueError("invalid asset summary")
@@ -40,7 +52,7 @@ def asset_summary(owner, kind, raw):
     return {"owner_id": owner, "kind": kind, "id": safe_text(raw["id"], 128),
             "name": safe_text(raw.get("name", raw["id"])),
             "summary": safe_text(raw.get("summary", raw.get("description", ""))),
-            "parameters_schema": parameters_schema(schema), "enabled": enabled,
+            **_asset_schemas(raw), "enabled": enabled,
             "revision": revision, "updated_at": safe_text(raw.get("updated_at", "")),
             "run_count": run_count(runtime.get("run_count", 0)), "last_run_at": timestamp(runtime.get("last_run_at")),
             "last_status": safe_text(runtime.get("last_status", ""), 128),

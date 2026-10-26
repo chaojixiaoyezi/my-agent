@@ -9,12 +9,13 @@ AUDIT_BOT_ACTIONS = frozenset({
     "conversations.bots.ensure", "conversations.bots.submit", "conversations.bots.rollover",
     "conversations.bots.history.list",
 })
+_BOT_MODES = ("query_readonly", "action_avatar", "ops_config", "execution", "config_rw")
 
 
-# LLM: 模式别名仅接受显式execution/ops_config；冲突仍由领域归一化拒绝。
+# LLM: 模式别名仅接受显式execution/ops_config/config_rw；冲突仍由领域归一化拒绝。
 # 函数用途: 声明双Bot模式选择字段。
 def bot_mode_fields():
-    mode = {"enum": ["query_readonly", "action_avatar", "ops_config", "execution"]}
+    mode = {"enum": list(_BOT_MODES)}
     return {"bot_mode": mode, "bot_kind": mode}
 
 
@@ -26,7 +27,7 @@ def page_context_schema():
                        "page": text(256)})
 
 
-# LLM: invoke的rule_id只传给原监控规则选择器；目录不授予跨owner文件读取或隐式选择复合规则。
+# LLM: invoke支持monitor_rule引用且rule_id用于先选规则再冻结；target_owner只限定态势集合，目录不授执行权。
 # 函数用途: 构造六个审计组标准动作。
 def audit_specs():
     owners = {"owner_ids": {"type": "array", "items": text(128, 1), "maxItems": 100}}
@@ -40,15 +41,15 @@ def audit_specs():
             **owners, **page_fields(), "kind": {"enum": ["monitor", "workflow", "script", "skill"]}}), "audit_group"),
         _spec("audit_group.alerts.list", "read", "audit_group.read", closed({}, {
             **filters, "severity": text(32, 1)}), "audit_group"),
-        _spec("audit_group.posture.overview", "read", "audit_group.read", closed({}, owners), "audit_group"),
+        _spec("audit_group.posture.overview", "read", "audit_group.read", closed({}, {**owners, "target_owner": text(128)}), "audit_group"),
         _spec("audit_group.assets.invoke", "async", "audit_group.invoke execute", closed({
-            "source_owner_id": text(128, 1), "kind": {"enum": ["monitor", "workflow", "script", "skill"]},
+            "source_owner_id": text(128, 1), "kind": {"enum": ["monitor", "monitor_rule", "workflow", "script", "skill"]},
             "asset_id": id_schema()}, {"input_params": {"type": "object", "default": {}},
                                       "rule_id": {"type": "string"}}), "audit_group asset"),
     ]
 
 
-# LLM: history保留归档cursor，另有消息before_cursor；消息页上限15，别名不改变模式权威。
+# LLM: history保留归档cursor，消息页上限15；config_rw等显式别名不创建新模式权威。
 # 函数用途: 构造四个双Bot标准动作并合入六个审计动作。
 def audit_bot_specs():
     mode = bot_mode_fields()
@@ -64,7 +65,7 @@ def audit_bot_specs():
             "expected_generation": generation, "expected_revision": generation}, mode), "owner bot_slot"),
         _spec("conversations.bots.history.list", "read", "chat.history", closed({}, {
             **mode, **page_fields(), "limit": {**integer(15, 1), "default": 15}, "before_cursor": text(2048, 1),
-            "mode": {"enum": ["query_readonly", "action_avatar", "ops_config", "execution"]},
+            "mode": {"enum": list(_BOT_MODES)},
             "since": integer(2**63 - 1), "until": integer(2**63 - 1),
             "alert_id": id_schema(), "query": text(256), "thread_id": id_schema()}), "owner bot_history"),
     ]

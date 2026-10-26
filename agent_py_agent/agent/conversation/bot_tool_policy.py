@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from ..plugin_host.errors import HostAPIError
 
 BOT_MODES = frozenset({"query_readonly", "action_avatar"})
+_BOT_MODE_ALIASES = {"ops_config": "action_avatar", "execution": "action_avatar", "config_rw": "action_avatar"}
 READ_TOOLS = frozenset({
     "read_file", "list_files", "find_files", "search_text", "read_artifact", "web_search",
     "memory_search", "session_search", "self_map", "list_tools", "get_goal", "list_agents",
@@ -29,10 +30,10 @@ READ_OPERATIONS = {
 AUDIT_TOOLS = frozenset(name for name in READ_TOOLS if name.startswith("audit_group_"))
 
 
-# LLM: 别名只限任务明确的ops_config/execution；两个参数同时存在必须一致，不掩盖模式冲突。
+# LLM: 别名仅限ops_config/execution/config_rw；两个参数归一后必须一致，不掩盖只读/执行模式冲突。
 # 函数用途: 将页面模式变为宿主唯一Bot模式，缺省为只读查询。
 def normalize_bot_mode(bot_mode=None, bot_kind=None):
-    values = ["action_avatar" if value in ("ops_config", "execution") else value
+    values = [_BOT_MODE_ALIASES.get(value, value)
               for value in (bot_mode, bot_kind) if value is not None]
     if any(value not in BOT_MODES for value in values) or len(set(values)) > 1:
         raise HostAPIError("BOT_MODE_MISMATCH", 409)

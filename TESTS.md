@@ -1,3 +1,30 @@
+## 2026-10-26 AG2-R3：规范技能策略、Schema脱敏与规则选择（Host接线已验证）
+
+来源：`07-tasks/wave5-ag2-round3-fix-20261026.md` 及补充授权 `07-tasks/wave5-ag2-round3-whitelist-20261026.md`；工作树 `/tmp/wt-wave5-ag2`，基线 `2d5362925c2703d942bac32f344baf5e8cce9ed5`。沿原任务禁止派子代理；修改范围为原12个文件加明确授权的实际Host分派文件，共13个文件，不推送或部署。
+
+- P1-01：来源根目录 `skill_policy.json` 优先读取，同时合并旧 `data/skill_policy.json` 的禁用项；两路径的缺失状态、路径标签与原字节摘要共同进入技能修订。任一已有政策的坏JSON/schema、重复键、NaN、符号链接或不可读叶子返回 `SOURCE_UNAVAILABLE/503`，观察保持partial；读取沿原nofollow FD接口，无政策写入。旧测试中“禁用列表等价重排不改变修订”的断言按本轮原字节要求改为修订变化，保留相同启停语义断言。
+- P1-02：现有净化入口实际名为 `parameters_schema`，按任务语义扩展，不另造未接线的同义入口。点号/连字符归一，长秘密名称按子串、短token按整词匹配，并保留原cookie/session等保护。列表items/prefixItems、组合/条件及命名子schema共用敏感上下文，保留原深度/节点预算、组合数量上限及非敏感默认值。记录、metadata、descriptor中的参数/输入/输出/配置schema均走相同净化器。
+- P2-01：实际冻结入口为 `SourceAssetSnapshot.freeze`。`monitor_rule`及`monitor:rule`简写先归一；冻结前准确选规则，缺失404、禁用409，只有选中动作的资产依赖进入闭包。选择绑定快照，并贯穿每执行单元及最终复核，不能在复核阶段退回冻结全部规则。完整job保留用于原依赖结果条件判断，不运行调度或发布通知。Agent工具/schema及Host preflight均已接通；Host与服务共用同一引用归一函数，并在预检冻结时传准确rule_id，原资格/治理/启停与幂等重放检查不变。
+- P2-02：`config_rw`仅映射到原 `action_avatar`，Host模式目录含ensure/history别名；不新增Bot模式、不扩大工具许可或成员资格。Host态势schema声明 `target_owner`，实际分派将其与owner_ids原样交领域共用筛选器，保留目标参数优先、空集合及非法owner拒绝合同。
+- 原范围冲突已解除：任务列出的 `agent_py_agent/host/domains/audit_group.py` 不存在；补充任务明确授权实际分派文件 `agent_py_agent/agent/plugin_host/audit_bot_v2_handlers.py` 后才修改，不创建未接线的同名空壳模块。
+
+先红后绿：规范政策文件回归 **24 failed / 23 passed → 47 passed**；Schema新增矩阵 **44 failed / 10 passed → 与原敏感字段回归合计74 passed**；监控/模式新增16项先全部失败，现有服务/工具与模式相关项已被下方组合覆盖。
+
+初轮原样四文件命令因不存在的 `test_local_user_audit_group.py` 退出4且没有执行测试；补充任务提及的 `test_audit_group_bots_and_host.py` 在此基线同样不存在。有界目录核对确认实际第三份是 `test_dual_bot_sessions_and_rollover.py`，使用下列真实三文件组合覆盖审计组、双Bot和Host，不虚报不存在文件已运行。串行执行，pytest期间不另开尺寸报告写入者：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_audit_group_policy_and_posture.py agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py -q --tb=short -k 'not test_t4_actual_native_isolated_process' -o addopts='' --junitxml=.pytest_cache/ag2-r3-delivery.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+最终串行三文件组合：**288 passed / 0 failed / 1 deselected / 0 errors**。原阶段的6个Host失败已由补充授权后的实际接线修复，先单独回归 **6 passed**，再由此完整组合覆盖。原生隔离项按原任务明确允许在TUI worker中排除，未改、skip或xfail该测试，仍须由宿主验证。成功执行单元使用替身，只证明真实宿主授权、schema、冻结及分派/归属编排，不外推为原生隔离、HTTP运输或真实Web/IM E2E。
+
+补充：自查发现共享规则选择器会把“未指定rule_id、两规则但仅一启用”隐式当作单规则执行；新增回归先红后修，恢复原复合监控必须明确选择的合同。最终串行组合覆盖该修正。一次误把尺寸门禁与pytest并行，导致全仓测试钩子检测报告被改写，产生额外1项teardown错误；已停止并行、还原报告并完整串行重跑，当前0 errors，不将该并行干扰解释成业务故障或环境权限问题。Ruff、doc sync及strict code-size均有退出0证据，尺寸门 `hard=0 / blocked=False`（仍有历史告警），生成报告还原。完整原生隔离及真实Web/IM、多进程链路未验证。
+
 ## 2026-10-26 WT-AG2-R2：Stage 3 源码修正（原生执行门未通过）
 
 来源：`07-tasks/wave5-ag2-round2-fix-20261026.md`；仅在本轮指定新工作树修复，准确基线 `4289922d083c94446d4eb23b65718b45c849b40a`，不改旧工作树、不部署、不推送。下方Part 2/AG1小节保留历史原结果，不作为本轮状态。

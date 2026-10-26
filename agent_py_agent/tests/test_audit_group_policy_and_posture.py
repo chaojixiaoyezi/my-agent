@@ -18,12 +18,14 @@ from agent_py_agent.tests.test_audit_group_observation_and_invoke import (
     invocation_assets,
     member,
 )
+from agent_py_agent.tests.test_dual_bot_sessions_and_rollover import business_call
+from agent_py_agent.tests.test_dual_bot_sessions_and_rollover import wired_host as wired_host
 
 
 # LLM: 只在临时来源owner里构造政策，不改变caller；库存核对在夹具写完之后开始。
 # 函数用途: 写入一次测试用技能启停策略并返回准确路径。
 def write_skill_policy(root, payload):
-    path = root / "owners/local/main/data/skill_policy.json"
+    path = root / "owners/local/main/skill_policy.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(payload, encoding="utf-8")
     return path
@@ -92,6 +94,8 @@ def test_corrupt_skill_policy_invoke_returns_source_unavailable(tmp_path, monkey
     assert calls == [] and inventory(source) == before
 
 
+# LLM: 修订绑定规范政策原字节，不以禁用集合等价掩盖来源版本变化；元数据禁用仍优先。
+# 函数用途: 验证政策内容变化改变修订且不意外重启已禁用技能。
 def test_skill_revision_includes_canonical_policy_and_metadata_disable_still_wins(tmp_path):
     invocation_assets(tmp_path)
     reader = ReadonlyAssetStore(tmp_path, "local/main")
@@ -101,17 +105,20 @@ def test_skill_revision_includes_canonical_policy_and_metadata_disable_still_win
     first = reader.get("skill", "source_skill")
     assert first["revision"] != original["revision"] and first["enabled"] is True
     write_skill_policy(tmp_path, '{"disabled_skills":["other-a","other-b"]}')
-    assert reader.get("skill", "source_skill")["revision"] == first["revision"]
+    assert reader.get("skill", "source_skill")["revision"] != first["revision"]
+    assert reader.get("skill", "source_skill")["enabled"] is True
     write_skill_policy(tmp_path, '{"disabled_skills":[]}')
     asset(tmp_path, "skill", "source_skill", enabled=False)
     assert reader.get("skill", "source_skill")["enabled"] is False
 
 
+# LLM: caller规范技能政策不能冒充source政策，冻结必须始终读取准确来源owner。
+# 函数用途: 验证改用根政策后仍保留来源隔离。
 def test_caller_skill_policy_does_not_override_source_owner(tmp_path):
     from agent_py_agent.agent.audit_group.source_snapshot import SourceAssetSnapshot
 
     invocation_assets(tmp_path)
-    caller_policy = tmp_path / "owners/local/alice/data/skill_policy.json"
+    caller_policy = tmp_path / "owners/local/alice/skill_policy.json"
     caller_policy.write_text('{"disabled_skills":["owner:source_skill"]}')
     before = inventory(tmp_path / "owners/local/main")
     snapshot = SourceAssetSnapshot.freeze(tmp_path, "local/main", "skill", "source_skill")
@@ -203,3 +210,77 @@ def test_filtered_posture_does_not_bypass_membership_revocation(tmp_path):
     with pytest.raises(AuditGroupError, match="AUDIT_GROUP_ACCESS_DENIED"):
         service.posture_overview("local/alice", target_owner="local/main")
     assert tool.execute({"action": "posture", "target_owner": "local/main"}).reported_error_code == "AUDIT_GROUP_ACCESS_DENIED"
+
+
+# LLM: 原始策略字节与来源路径都属于冻结修订，两个路径必须分别贡献禁用项，不能只合并已去重的禁用列表。
+# 函数用途: 覆盖规范/旧路径的并集、空白变化及非禁用字段变化的修订失效。
+def test_r3_skill_policy_paths_union_and_both_revision_inputs(tmp_path):
+    invocation_assets(tmp_path)
+    source = tmp_path / "owners/local/main"
+    canonical = write_skill_policy(tmp_path, '{"disabled_skills":["canonical-only"]}')
+    legacy = source / "data/skill_policy.json"
+    legacy.write_text('{"disabled_skills":["owner:source_skill"]}')
+    reader = ReadonlyAssetStore(tmp_path, "local/main")
+    both = reader.get("skill", "source_skill")
+    assert both["enabled"] is False
+    legacy.write_text('{"disabled_skills":[]}')
+    only_canonical = reader.get("skill", "source_skill")
+    assert only_canonical["enabled"] is True and only_canonical["revision"] != both["revision"]
+    canonical.write_text('{"disabled_skills":["source_skill"]}')
+    assert reader.get("skill", "source_skill")["enabled"] is False
+    original = reader.get("skill", "source_skill")["revision"]
+    canonical.write_text('{ "disabled_skills" : ["source_skill"] }')
+    spaced = reader.get("skill", "source_skill")["revision"]
+    assert spaced != original
+    legacy.write_text('{"disabled_skills":[],"updated_by":"policy-revision"}')
+    assert reader.get("skill", "source_skill")["revision"] != spaced
+
+
+# LLM: 任一已存在路径损坏均拒绝，另一个有效策略不能覆盖它；观察和冻结不能改变原件。
+# 函数用途: 验证两来源的坏JSON、坏schema、链接及不可读路径均封闭拒绝。
+@pytest.mark.parametrize("layout", ["canonical", "legacy"])
+@pytest.mark.parametrize("damage", ["json", "schema", "duplicate", "nan", "symlink", "unreadable"])
+def test_r3_either_skill_policy_path_fail_closes(tmp_path, layout, damage):
+    invocation_assets(tmp_path)
+    source = tmp_path / "owners/local/main"
+    canonical = write_skill_policy(tmp_path, '{"disabled_skills":[]}')
+    legacy = source / "data/skill_policy.json"
+    legacy.write_text('{"disabled_skills":[]}')
+    path = canonical if layout == "canonical" else legacy
+    if damage == "symlink":
+        path.unlink()
+        path.symlink_to(legacy if layout == "canonical" else canonical)
+    elif damage == "unreadable":
+        path.unlink()
+        path.mkdir()
+    else:
+        path.write_text({"json": "broken", "schema": '{"disabled_skills":[false]}',
+                         "duplicate": '{"disabled_skills":[],"disabled_skills":[]}',
+                         "nan": '{"disabled_skills":[],"version":NaN}'}[damage])
+    before = inventory(source)
+    result = AuditGroupObservationService(tmp_path).summarize_assets("local/alice", target_owner="local/main", kinds=["skill"])
+    assert result["coverage"] == "partial" and not result["items"]
+    with pytest.raises(AuditGroupError) as denied:
+        AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice", source_owner="local/main",
+                                                               asset_type="skill", asset_id="source_skill")
+    assert (denied.value.code, denied.value.status_code) == ("SOURCE_UNAVAILABLE", 503)
+    assert inventory(source) == before
+
+
+# LLM: 使用真实Host授权、schema与领域转发，不能只验证服务已支持target_owner而忽略Host漏传。
+# 函数用途: 验证Host的指定目标与双参数优先级，不把单目标查询扩大成全局态势。
+@pytest.mark.parametrize("filters,counts", [
+    ({"target_owner": "local/alice"}, {"script": 0, "skill": 1, "workflow": 0, "monitor": 0}),
+    ({"owner_ids": ["local/main"], "target_owner": "local/bob"}, {"script": 0, "skill": 0, "workflow": 1, "monitor": 0}),
+    ({"owner_ids": [], "target_owner": "local/main"}, {"script": 1, "skill": 0, "workflow": 0, "monitor": 0}),
+])
+def test_r3_host_posture_forwards_target_owner(wired_host, filters, counts):
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    root = wired_host[2].root
+    posture_assets(root)
+    before = inventory(root / "owners")
+    result = business_call(wired_host, "audit_group.posture.overview", filters, caller=OwnerIdentity.local_user("alice"))
+    assert result.http_status == 200
+    assert result.data["owners_total"] == 1 and result.data["assets_by_kind"] == counts
+    assert inventory(root / "owners") == before
