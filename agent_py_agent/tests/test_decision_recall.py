@@ -379,6 +379,44 @@ def test_prepare_context_reuses_sorted_records_in_original_loop_without_second_c
     assert params.memories is context.memories and seen == [context.memories] and len(calls) == 1
 
 
+@pytest.mark.parametrize("caller", ["runtime", "fragment"])
+def test_r2_foreground_recall_uses_latency_safe_without_live_embeddings(tmp_path, prepared, monkeypatch, caller):
+    from agent_py_agent.agent.agent_core.runtime import loop_support
+    from agent_py_agent.agent.memory_store import jsonl
+
+    host, request = real_host(tmp_path, prepared[2], "off")
+    request = replace(request, user_prompt="记忆正文")
+    host.config.memory_top_k = 5
+    embeds, flags, queued = [], [], []
+
+    def embed(texts):
+        embeds.append(texts)
+        return [[1.0, 0.0] for _ in texts]
+
+    host.memory._embedder = SimpleNamespace(model="r2-uncached", dim=2, embed=embed)
+    monkeypatch.setattr(jsonl, "_queue_vector_backfill", lambda *args: queued.append(args))
+    method = "search_scoped" if caller == "runtime" else "search_scoped_candidates"
+    original = getattr(host.memory, method)
+
+    def search(*args, **kwargs):
+        flags.append(kwargs.get("latency_safe"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(host.memory, method, search)
+    if caller == "fragment":
+        result = module.FragmentSearch(host, prepared[3], frozenset(), (3, 5, 4000)).additions(request.user_prompt)
+    else:
+        routed = SimpleNamespace(receipts=[], findings=[], injected_sections=[])
+        monkeypatch.setattr(loop_support, "_tool_snapshots_for_run", lambda *_args: (None, None))
+        monkeypatch.setattr(loop_support, "_routed_memory_context_for_request", lambda *_args, **_kwargs: routed)
+        monkeypatch.setattr(loop_support, "_resume_context_for_request", lambda *_args, **_kwargs: (SimpleNamespace(injected=False), ""))
+        monkeypatch.setattr(loop_support, "build_runtime_main_context_bundle", lambda *_args, **_kwargs: None)
+        result = loop_support._prepare_runtime_context(host, request).memories
+    assert {row.entry_id for row in result} == {row.entry_id for row in prepared[2]}
+    assert flags == [True]
+    assert embeds == [] and queued
+
+
 def test_child_uses_exact_child_thread_not_parent_conversation(tmp_path, prepared, monkeypatch):
     from agent_py_agent.agent.runtime_context import (
         restore_current_subagent_context,

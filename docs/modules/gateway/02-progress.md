@@ -1,3 +1,8 @@
+## 2026-10-26 Wave 5 Track A Round 2：audit-only 冷 Curator 预检
+
+- `cli/gateway_loops.py::_cold_curator_activity` 将 `home/audit` 非空 `.jsonl` 纳入原有界三态预检，只有审计输入的 owner 不再被误判为空；不创建 Agent、不读正文，不改变原 due/配置/租约与启动保护门。
+- 回归覆盖空目录、无关后缀、空 JSONL、新增记录与原地更新。扩大组合结果 579 通过/5 失败，五项均在真实任务起点基线复现，详见 [TESTS](../../../TESTS.md)。未部署或验收真实 Gateway 唤醒链路。
+
 ## 2026-10-26 Wave 4 Round 4 资产与冷通知修复（源码及指定组件验收，未部署）
 
 - 监控安装/启停将 `.asset-batch.json` 改为单 job/run before/after，禁止将整 `store.json` 放入文件 undo 或安装 hash。原调度器写口按 quota→asset root→store 先恢复残留事务，查询及投影也先核 pending；恢复仅合并受影响任务，保留其它任务和运行。资产及 job/due 成功后耐久记录提交决定，再幂等补原取消历史；未决定回滚、已决定仅收口，不把已提交取消恢复成运行。

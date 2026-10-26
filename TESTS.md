@@ -1,3 +1,33 @@
+## 2026-10-26 Wave 5 Track A Round 2：六项接线与恢复修复
+
+来源：`07-tasks/wave5-tracka-round2-fix-20261026.md`，基线 `287d94b59`，仅在指定返工工作树实现、测试和提交，不部署或启停服务。
+
+- 两个前台召回入口显式 `latency_safe=True`；真实 `JsonlMemory` + 空向量缓存验证返回词面命中、后台回填排队且无实时 `embed()`。
+- 冷 Curator 预检包含 audit-only JSONL；冷归档写后 SHA256 以 64 KiB 分块读回，删除 `hashlib.file_digest` 属性后实际归档可完成。
+- 已 promoted 候选冷详情仍保护证据文件和归档自身；详情坏行关闭相关清理。跨日 checkpoint/delta 所在旧分片保留，不相关过期分片仍可回收，审计完整读取保持成功。
+- 首次/已有版本游标链的 >32 线程真实提交成功、报告失败后，失败账沿已提交游标；覆盖 `list()`、`recent_finished()` 和损坏 state 的审计恢复。
+- 中断 replace/merge 恢复严格拒绝 formal/tombstone 尾部的坏 JSON、非对象和非法 UTF-8，候选保持 approved，损坏原件及候选账本不改。
+
+新增 21 项先在未修生产代码上全部失败，再在修复后全部通过（无 skip/xfail）；测试位于现有六个文件，定位入口为 `-k r2_`。严格尺寸门首次发现 retention 嵌套超限，随后按职责抽出只读 Curator pin helper，不改基线或阈值。独立 Astra high 仅取得实现摘要，差异引用读取失败，不能称完整代码审查。
+
+任务原 pytest 命令中的 `test_memory_retention.py`、`test_memory_store.py`、`test_hybrid_retriever.py` 在本基线不存在；原命令实际退出 4。复跑使用现存 `test_memory_retention_{v2,wave5,runs,isolation}.py`、`test_memory_store_{jsonl,jsonl_class,models,index_errors}.py` 与 `test_memory_jsonl_and_hybrid_wave5.py`，并连同 candidates、curator、promotion、decision_recall、gateway_loops_resilience 及相关 v2 文件执行。曾在扩展命令误写不存在的 `test_memory_candidates_v2.py`，未运行测试，纠正文件清单后再验，不作为通过证据。
+
+最终扩大定向回归 **579 passed / 5 failed / 0 error / 0 skipped**（40.13 秒），新增 21 项全部包含在通过集合中；原始结果保留在 `.pytest_cache/wave5-tracka-r2.xml`。没有跳过失败或调整既有断言：
+
+- `test_memory_curator_v2.py::test_curator_enriches_large_tool_output_ref_without_copying_body`：`asdict(candidate)` 包含缓存原行，序列化长度 `12550 < 10000` 断言失败。
+- `test_memory_promotion_v2.py` 的 `test_user_profile_requires_explicit_message_and_rejects_temporary_scope`、`test_persona_promotion_adopts_exact_prior_update_persona_entry`、`test_soul_requires_explicit_confirmation`：人格前像快照 `os.link(..., follow_symlinks=False)` 报 `PermissionError: [Errno 1] Operation not permitted`，不据此猜测具体隔离来源。
+- `test_memory_retention_v2.py::test_retention_cleans_all_old_unpromoted_drafts`：旧断言预期完整终态行，但本基线已生成冷引用 stub。
+
+在返工树内 `.pytest_cache/wave5-r2-baseline` 创建真正的 detached 干净 worktree，精确起点 **`287d94b59892b4b7366f6139751b884b4a8cf77e`**；确认 `importlib` 指向该基线，定向复跑上述五项，结果 **5 failed**、相同节点及失败形状（3.62 秒）。JUnit 保存到 `.pytest_cache/wave5-r2-baseline.xml`，脚本核对两边失败集合相等。这证明五项在本环境的任务起点已可复现，不代表整个基线套件已全跑；本轮不顺手修改范围外实现/旧断言，整体门禁不能报全绿。
+
+最终定向命令（工作树根；通配符对应当前真实测试分片）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_memory_candidates.py agent_py_agent/tests/test_memory_candidate_services.py agent_py_agent/tests/test_memory_curator.py agent_py_agent/tests/test_memory_curator_v2.py agent_py_agent/tests/test_memory_promotion.py agent_py_agent/tests/test_memory_promotion_v2.py agent_py_agent/tests/test_memory_retention_*.py agent_py_agent/tests/test_memory_store_*.py agent_py_agent/tests/test_memory_jsonl_and_hybrid_wave5.py agent_py_agent/tests/test_decision_recall.py agent_py_agent/tests/test_gateway_loops_resilience.py -q --tb=short -o addopts='' --junitxml=.pytest_cache/wave5-tracka-r2.xml
+```
+
+Python 3.10 解释器实跑、真实模型/用户链路、线上 CI、部署及生产性能未验证；删除新 API 属性的兼容性回归不能替代跨版本运行。
+
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 
 来源：`07-tasks/wave5-wt-bc-20261026.md`（包含 c8/c9 追加合同），起始提交 `95fd54f9b`，仅在 `/tmp/wt-wave5-bc` 开发。没有修改 C4 的 `tui_threading.py` / `http_handlers.py`，没有部署或启停真实服务。

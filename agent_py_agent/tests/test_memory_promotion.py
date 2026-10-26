@@ -10,6 +10,25 @@ import pytest
 from agent_py_agent.tests.test_memory_promotion_v2 import _explicit, _runtime
 
 
+@pytest.mark.parametrize("source", ["formal", "tombstones"])
+@pytest.mark.parametrize("action", ["replace", "merge"])
+@pytest.mark.parametrize("bad", [b"{broken\n", b"[]\n", b"\xff\n"])
+def test_r2_interrupted_update_rejects_corrupt_authority(tmp_path, monkeypatch, source, action, bad):
+    from agent_py_agent.agent.memory_store.jsonl import MemoryAuthorityCorruptError, _tombstone_path
+    from agent_py_agent.agent.memory_store.promotion_remove_recovery import recover_committed_update
+
+    service, candidate, _target = _interrupted_update(tmp_path, monkeypatch, action)
+    candidate = service.candidates.get(candidate.candidate_id)
+    path = service.long_term.path if source == "formal" else _tombstone_path(service.long_term.path)
+    with path.open("ab") as stream:
+        stream.write(bad)
+    before = path.read_bytes(), service.candidates.path.read_bytes()
+    with pytest.raises(MemoryAuthorityCorruptError, match="MEMORY_AUTHORITY_UNREADABLE"):
+        recover_committed_update(service, candidate, "test-recovery")
+    assert service.candidates.get(candidate.candidate_id).status == "approved"
+    assert (path.read_bytes(), service.candidates.path.read_bytes()) == before
+
+
 # LLM: 隔离真实仓库上的定向回归，不改变权限、原断言或生产输入。
 # 函数用途: 精确引用命中缓存且文件变更会失效。
 def test_m2_message_verifier_caches_exact_quote_without_retaining_body(tmp_path, monkeypatch):

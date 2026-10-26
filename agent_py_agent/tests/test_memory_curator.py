@@ -310,6 +310,38 @@ def _m2_cursor_runs(tmp_path):
     return service, thread, message, second, path
 
 
+@pytest.mark.parametrize("existing_chain", [False, True])
+def test_r2_post_commit_report_failure_keeps_committed_cursor_chain(tmp_path, monkeypatch, existing_chain):
+    import json
+
+    if existing_chain:
+        service, thread, _, _, _ = _m2_cursor_runs(tmp_path)
+        message = service.conversation_store.messages.append(dict(thread_id=thread.thread_id, role="user", content="提交后回执失败的新事实"))
+        service.backend.payload = _valid_output(thread.thread_id, message.message_id, message.content)
+    else:
+        service, thread, message = _m2_service(tmp_path)
+        state = replace(service.state_store.load(), per_thread_cursors={f"cold-{i}": f"message-{i}" for i in range(45)})
+        service.state_store.path.write_text(json.dumps(state.to_dict()))
+
+    def fail_report(**_kwargs):
+        raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED")
+
+    monkeypatch.setattr(service, "_pending_promotable_candidate_ids", fail_report)
+    assert service.run(reason="admin").status == "failed"
+    committed = service.state_store.load().per_thread_cursors
+    assert committed[thread.thread_id] == message.message_id and len(committed) > 32
+    rows = service.run_log.list()
+    assert [row.status for row in rows[-2:]] == ["succeeded", "failed"]
+    assert rows[-1].cursor_before == rows[-2].cursor_after
+    assert rows[-1].cursor_before["per_thread_cursors"] == committed
+    recent = service.run_log.recent_finished(2)
+    assert {row.record_id for row in recent} == {row.record_id for row in rows[-2:]}
+    service.state_store.path.write_text("{broken-state")
+    assert service.run(reason="admin").failure_code == "CURATOR_STATE_CORRUPT"
+    assert service.recover()["status"] == "recovered"
+    assert service.state_store.load().per_thread_cursors == committed
+
+
 # LLM: 隔离真实仓库上的定向回归，不改变权限、原断言或生产输入。
 # 函数用途: 增量运行账仍能恢复全部冷游标。
 def test_m2_cursor_delta_has_checkpoint_and_recovers_all_cold_cursors(tmp_path):

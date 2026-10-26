@@ -249,6 +249,13 @@ def test_terminal_archive_slims_only_old_rows_and_hydrates_details(tmp_path):
     assert service.compact_terminal_candidates() == 0
 
 
+def test_r2_cold_archive_verification_without_python311_file_digest(tmp_path, monkeypatch):
+    service, aged, _ = terminal_case(tmp_path)
+    monkeypatch.delattr(module.hashlib, "file_digest", raising=False)
+    assert service.compact_terminal_candidates() == 1
+    assert service.get(aged.candidate_id).source_message_refs == aged.source_message_refs
+
+
 # LLM: 冷引用不是任意路径读权；归档不存在、内容篡改或目录链接都必须明确损坏而非返回残缺详情。
 # 函数用途: 验证冷详情校验与no-follow边界。
 @pytest.mark.parametrize("damage", ["missing", "tamper", "symlink"])

@@ -23,8 +23,11 @@ from .candidate_models import MemoryCandidate
 from .candidates import (
     RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
     CandidateService,
+    CandidateStoreCorruptError,
+    _hydrate_candidate,
     _is_binding_tombstone,
 )
+from .curator_run_log import _CURSOR_CHECKPOINT, _CURSOR_DELTA
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -1406,8 +1409,24 @@ def _conversation_reference_pins(home: object, roots: tuple[Path, ...], pins: _R
                     pins.collect(item, checkpoint)
 
 
-# LLM: 每次重建且校验候选schema/重复ID；不可读则complete=False，不按空pin删除；未知错误路径不假填owner根误伤独立类别。
-# 函数用途: 在扫描和执行前只读重核正式、候选冷引用、线程、任务、Curator基础与法律保留。
+# LLM: 只读原curator审计和结构化warnings；版本标记整片pin保跨日prior_id链，坏源交外层关闭清理。
+# 函数用途: 收集策展运行引用，同时保护检查点和增量所在的完整日分片。
+def _curator_reference_pins(curator: Path, pins: _RetentionPins) -> None:
+    for path in _walk_files(curator):
+        if path.suffix not in {".json", ".jsonl"}:
+            continue
+        for row in _pin_rows(path, required=True):
+            pins.collect(row, path)
+            warnings = row.get("warnings", ())
+            if isinstance(warnings, (list, tuple)) and any(
+                isinstance(value, str) and value.startswith((_CURSOR_CHECKPOINT, _CURSOR_DELTA))
+                for value in warnings
+            ):
+                pins.paths.add(path.resolve(strict=False))
+
+
+# LLM: 每次重建并核候选schema/重复ID和同owner冷详情；坏冷源complete=False；版本游标整片pin保跨日链，不按年龄裁断。
+# 函数用途: 扫描和执行前重核完整证据引用与游标链，冷归档损坏时关闭相关清理而非当作没有引用。
 def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[MemoryRetentionError],
                            *, now: datetime) -> tuple[_RetentionPins, bool]:
     pins = _RetentionPins(Path(home.owner_home_dir))
@@ -1419,22 +1438,23 @@ def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[M
         candidate_path = Path(home.owner_memory_candidates_jsonl)
         candidate_ids: set[str] = set()
         for row in _pin_rows(candidate_path):
-            candidate_id = MemoryCandidate.from_record(row).candidate_id
+            candidate = MemoryCandidate.from_record(row)
+            candidate_id = candidate.candidate_id
             if candidate_id in candidate_ids:
                 raise ValueError("duplicate candidate pin source")
             candidate_ids.add(candidate_id)
+            if candidate.cold_detail_ref:
+                candidate = _hydrate_candidate(candidate_path, candidate)
+                row = candidate.to_record()
             pins.collect(row, candidate_path)
         _task_reference_pins(home, policy, pins)
         _conversation_reference_pins(home, _conversation_roots(home, roots), pins)
         curator = Path(home.owner_memory_curator_runs_dir)
-        for path in _walk_files(curator):
-            if path.suffix in {".json", ".jsonl"}:
-                for row in _pin_rows(path, required=True):
-                    pins.collect(row, path)
+        _curator_reference_pins(curator, pins)
         for path in (curator.parent / "state.json",):
             for row in _pin_rows(path):
                 pins.collect(row, path)
-    except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+    except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError, IndexError) as exc:
         errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(getattr(exc, "filename", "") or ""),
                                           type(exc).__name__))
         return pins, False

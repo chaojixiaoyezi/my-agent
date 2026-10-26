@@ -148,8 +148,8 @@ def _owner_home_skill_learning_state(home: Path) -> str:
     return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
 
 
-# LLM: 只读消息/候选元数据；扫描预算耗尽或不可读为 unknown，不能据此丢掉冷 owner。
-# 函数用途: 确认周期整理是否有实际非空输入，空历史 owner 不实例化。
+# LLM: 只读消息/候选/audit元数据；沿原有界三态扫描，不读正文，预算耗尽或不可读不能丢掉冷owner。
+# 函数用途: 确认周期整理是否有非空输入，只有审计记录的冷owner也能唤醒。
 def _cold_curator_activity(home: Path) -> str:
     try:
         candidate = home / "memory" / "candidates.jsonl"
@@ -160,6 +160,7 @@ def _cold_curator_activity(home: Path) -> str:
     from ..agent.owner_wake_discovery import _store_roots
 
     states = [_directory_activity(root / "messages", ".jsonl") for root in _store_roots(home)]
+    states.append(_directory_activity(home / "audit", ".jsonl"))
     return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
 
 

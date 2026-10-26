@@ -299,12 +299,12 @@ class FragmentSearch:
 
         return long_term_record_matches_scope(row, self.recall_scope)
 
-    # LLM: 调 search_scoped_candidates（语义召回时有一次查询嵌入，不记访问）；按检索顺序取不在基线里、放得下的记录。
-    # 函数用途: 返回某个查询文本选中后会追加的正式事实（还没确认，不能直接当已注入）。
+    # LLM: 前台候选检索显式latency_safe，不记访问、不实时embed；scope/去重/预算和后续确认仍由原链执行。
+    # 函数用途: 仅用就绪向量或词面召回挑出可追加事实，缺向量交后台补，尚不能当作已注入。
     def additions(self, query: str) -> list:
         slots, top_k, remaining = self.budget
         chosen, seen = [], set(self.seen_ids)
-        for candidate in self.agent.memory.search_scoped_candidates(query, top_k, self.predicate):
+        for candidate in self.agent.memory.search_scoped_candidates(query, top_k, self.predicate, latency_safe=True):
             cost = len(candidate.content)
             if candidate.entry_id not in seen and cost <= remaining and len(chosen) < slots:
                 chosen.append(candidate)

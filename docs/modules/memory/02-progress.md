@@ -1,3 +1,9 @@
+## 2026-10-26 Wave 5 Track A Round 2（分支修复，待集成）
+
+- 前台基础召回和补充候选召回启用缓存向量/词面低延迟模式；audit-only 冷 owner 不再被判空。冷归档写后校验不依赖 Python 3.11 API。
+- Retention 补齐冷候选完整引用及版本游标分片 pin；坏冷详情关闭相关清理。提交后报告失败沿实际已提交游标记账；中断更新恢复严格读取正式/墓碑全部行，不跳坏行补 promoted。
+- 21 项新增回归先红后绿；完整定向门禁、旧测试路径适配及独立复核限制见 [TESTS](../../../TESTS.md)。源码候选不代表已合入、部署或通过 Python 3.10 实机验收。
+
 ## Wave4 A1 产物索引纯解析复用（分支已实现，待三方集成验收）
 
 - `memory_archive/artifact/reader.py` 的逻辑引用先匹配字面ID，不解析无关path；完整scoped ID在主根命中后不枚举历史目录。路径ref、短ID的scope优先级与basename歧义继续走原规则。

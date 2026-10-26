@@ -1,3 +1,10 @@
+## 2026-10-26 Wave 5 Track A Round 2 接线结构
+
+- `agent_core/runtime/loop_support.py::_prepare_runtime_context` 与 `memory_store/decision_recall.py::FragmentSearch.additions` 在原 scope/预算调用上传 `latency_safe=True`；不新增召回入口、授权或访问计数旁路。
+- `candidates.py::_write_cold_changes` 保持 no-follow 写入与读回 FD，以 64 KiB 块 SHA256 核验；`retention_scan.py::current_retention_pins` 通过原 `_hydrate_candidate` 还原完整冷引用，`_curator_reference_pins` 收集引用并 pin 版本游标日分片，坏详情返回原不完整视图。
+- `curator.py::_commit_batch` 在真实提交后将完整 cursor 冻结到本轮 route；`_commit_failure` 在原未知异常门之后使用该游标作为失败基线。`promotion_remove_recovery.py::recover_committed_update` 在原锁内复用 `_strict_memory_events(require_source=True)`，正式/墓碑任一坏行拒绝恢复。
+- 测试结果和五项任务起点已复现的失败见 [TESTS](../../../TESTS.md)，本节不是部署或全绿验收声明。
+
 ## Wave4 A1 索引快照与主根优先结构
 
 - `reader.py::_primary_index_has_scoped_ref` 只对可证明的完整scoped主根命中提前选择当前索引；否则原历史发现路径保持。既有`PreparedToolOutputArtifactRead`仍是工具读取与预算估计的共享计划，不新增第二个工具入口。

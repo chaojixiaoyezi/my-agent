@@ -276,7 +276,8 @@ def _package_recommendations(request: ToolSectionsRequest) -> str:
 
 # LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
 # task-local and explicit owner memory-off never read the formal repositories or project index.
-# 函数用途: 为一轮主代理请求准备 owner 隔离的 Memory、路由收据、恢复上下文与运行注入，隔离/总闸关闭时跳过正式记忆读取。
+# LLM: 前台检索显式latency_safe，缺缓存向量只排队回填、不实时embed；scope、访问计数及隔离开关不变。
+# 函数用途: 准备本轮隔离记忆和恢复上下文；向量未就绪时词面召回，不让请求等待嵌入网络。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     tool_runtime_snapshot, tool_protocol_snapshot = _tool_snapshots_for_run(
         agent,
@@ -306,6 +307,7 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
             request.user_prompt,
             memory_top_k,
             lambda record: long_term_record_matches_scope(record, recall_scope),
+            latency_safe=True,
         )
     )
 

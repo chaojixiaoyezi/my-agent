@@ -1555,8 +1555,8 @@ def _cold_redaction_plan(path: Path, options: dict, staged: dict[str, str] | Non
     return changes
 
 
-# LLM: 私有no-follow原子写包含文件/目录fsync；每月先完成耐久替换与完整hash读回，才能继续热行提交。
-# 函数用途: 按固定月份顺序写入已过quota的冷文件，并复用coordinator原末门。
+# LLM: 私有no-follow原子写/fsync后以64KiB块完整SHA256读回；兼容Python3.10，验证失败不继续提交热行。
+# 函数用途: 沿原quota和coordinator末门写冷归档，读回核对字节后才能替换热记录。
 def _write_cold_changes(path: Path, changes: dict[str, str], *, coordinator_io: bool) -> None:
     for name, text in sorted(changes.items()):
         if not _COLD_MONTH.fullmatch(name):
@@ -1570,9 +1570,11 @@ def _write_cold_changes(path: Path, changes: dict[str, str], *, coordinator_io: 
         else:
             operation()
         descriptor = open_readonly_file_beneath(path.parent, ("candidates_archive", name))
+        digest = hashlib.sha256()
         with os.fdopen(descriptor, "rb") as stream:
-            actual = hashlib.file_digest(stream, "sha256").hexdigest()
-        if actual != hashlib.sha256(text.encode()).hexdigest():
+            while chunk := stream.read(65536):
+                digest.update(chunk)
+        if digest.hexdigest() != hashlib.sha256(text.encode()).hexdigest():
             raise CandidateStoreCorruptError("candidate cold archive write verification failed")
 
 

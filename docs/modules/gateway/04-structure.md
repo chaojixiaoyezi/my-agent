@@ -1,3 +1,8 @@
+## 2026-10-26 Wave 5 Track A Round 2 冷 Curator 输入结构
+
+- `_cold_curator_activity(home)` 继续先检查原候选非空事实，再对消息与 `home/audit` 调用同一 `_directory_activity(..., ".jsonl")`；至多采样 65 个名字，非空为 due、预算/读取未知为 unknown，两者都不当空输入。
+- 该入口只读元数据，不承担执行授权、游标推进或记忆晋升；原 `_cold_curator_precheck` 和 Curator 主链仍独立复核。回归与未验证边界见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-26 Wave 4 Round 4 单任务资产事务与冷通知结构
 
 - `assets/__init__.py::asset_root_lock` 复用原跨进程根锁，以线程本地持锁标记阻止调度恢复递归；标记不是权限。`scheduler/repository.py` 将规范 `data/scheduler` 的写 scope 纳入 quota→root→store，snapshot/投影先恢复 pending；读锁窗口中新出现的事务先释放读锁，再恢复并有限重读。正常冷查询不新建根锁文件。

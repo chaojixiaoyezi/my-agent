@@ -286,9 +286,8 @@ class _CuratorLifecycleMixin:
             return self._result(status="not_due", reason=pending)
         return self.run(reason=pending, now=current)
 
-    # LLM: Failure audit is appended before releasing the lease; old cursors and pending reasons
-    # remain, making a later retry safe.
-    # 函数用途: 记录一次持 lease 运行失败并返回稳定结果。
+    # LLM: 提交后报告失败沿route冻结的已提交游标记账；提交前仍保原游标。执行未知先原样透传，不写失败账。
+    # 函数用途: 记录普通失败但不倒退已经成功的游标，保证后续增量审计和恢复不断链。
     # LLM: 仅文件短操作持原T/P3/P5再业务锁；未结typed原样越过best-effort，不写失败账或补默认模型，main F4确认/分组/原pending保持。
     # 函数用途: 在当前原执行权可核实的短窗口内更新既有策展文件，不把未知当普通失败。
     def _commit_failure(
@@ -298,6 +297,13 @@ class _CuratorLifecycleMixin:
     ) -> CuratorRunResult:
         if isinstance(exc, (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError)):
             raise exc
+        committed_cursor = context.route.get("committed_cursor")
+        if committed_cursor is not None:
+            context = replace(context, state_before=replace(
+                context.state_before,
+                per_thread_cursors=dict(committed_cursor["per_thread_cursors"]),
+                last_processed_audit_event_id=committed_cursor["last_audit_event_id"],
+            ))
         with gateway_short_transaction("_commit_failure"):
             failure_code = _failure_code(exc)
             finished_at = utc_now_iso()
@@ -624,8 +630,8 @@ class _CuratorExecutionMixin:
         except Exception as exc:
             return (), ({"code": _failure_code(exc), "detail": str(exc)[:200]},)
 
-    # LLM: 合法候选及拒绝版本约束共用事务；原执行未知必须原样透传，不能包装后落普通失败并释放租约。
-    # 函数用途: 提交规范批次并完成晋升尾段；只有确认收尾后才允许外层释放租约。
+    # LLM: 候选及版本约束共用事务；成功返回立即冻结已提交游标供报告失败使用，执行未知透传且不释放租约。
+    # 函数用途: 提交批次后记住真正推进的位置，再做晋升与报告，避免尾段失败把运行链接回旧游标。
     def _commit_batch(
         self,
         context: _RunContext,
@@ -675,6 +681,10 @@ class _CuratorExecutionMixin:
             raise
         except Exception as exc:
             raise CuratorBatchCommitError("curator batch commit failed") from exc
+        context.route["committed_cursor"] = _cursor_payload(
+            prepared.cursor.per_thread_cursors,
+            prepared.cursor.last_audit_event_id,
+        )
         return self._post_commit_report(context, batch, prepared, committed, extra_warnings)
 
     # LLM: 提交后仍持同一租约；新候选与积压去重晋升，回执分开计正式提交、旧清理恢复和待办，不回滚已成功事务。
