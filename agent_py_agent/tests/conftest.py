@@ -187,16 +187,21 @@ def _patch_test_launch_aliases(state, original, start) -> None:
                 state.installed[(id(loaded), attr)] = start
 
 
-# LLM: 默认 pytest 顶层 test_* 没有包前缀；路径规则只接受测试目录内来源，未知或无法规范化时拒绝。
-# 函数用途: 选择可能保存启动别名的已加载测试模块，不扩大到无关库。
+# LLM: 无文件时接受显式合成测试名；有文件的包别名必须来自本仓库，不能凭 tests/agent 前缀触及第三方。
+# 函数用途: 覆盖 tests.dynamic 等合成模块，同时保留真实仓库入口、顶层测试与 conftest 别名捕获。
 def _is_test_launch_alias_module(name, module) -> bool:
-    if name.startswith(("agent_py_agent.", "agent.", "test_")) or name.endswith("_test"):
-        return True
     filename = getattr(module, "__file__", None)
+    if not filename:
+        return (name in ("tests", "conftest") or name.startswith(("tests.", "agent_py_agent.", "agent.", "test_"))
+                or name.endswith("_test") or ".test_" in name)
     if not isinstance(filename, str):
         return False
+    if name == "conftest" or name.startswith("test_") or name.endswith("_test"):
+        return True
     try:
-        return Path(filename).resolve().is_relative_to(_TESTS_SOURCE_ROOT)
+        source = Path(filename).resolve()
+        return source.is_relative_to(_TESTS_SOURCE_ROOT) or (
+            name.startswith(("agent_py_agent.", "agent.")) and source.is_relative_to(_TESTS_SOURCE_ROOT.parent))
     except (OSError, RuntimeError, ValueError):
         return False
 

@@ -1,5 +1,5 @@
 # LLM: B5 创建归属与精确回收回归；假 PID 只进入替身，真实进程测试须持有自己的句柄和出生身份。
-# 模块用途: 默认 pytest 收集旧 B5 用例及 R2 别名、child 身份、共享缓存和未确认诊断回归。
+# 模块用途: 默认收集 B5/R2/R3 的创建身份、别名、共享缓存、僵尸组长后代清理和未确认诊断回归。
 from __future__ import annotations
 
 import os
@@ -446,8 +446,8 @@ def test_b5_setup_rescans_late_alias(b5_setup_imported_alias):
     assert b5_setup_imported_alias.start is launch.start_background_process
 
 
-# LLM: Store 丢失后，child 仍逐项守 init/自身/原组/出生未知与复用边界；假信号出口不得被误调用。
-# 函数用途: 验证 child 回退的拒绝路径和旧实例已消失的确认语义。
+# LLM: host 已消失则其 birth 也不再匹配；child 独立守保护 PID/原组/出生未知与复用边界，不把 gone 假成僵尸。
+# 函数用途: 保留 child 回退零信号断言，同时为原实例消失、复用及探针异常提供一致的观察替身。
 @pytest.mark.parametrize("unsafe", ["one", "self", "same_group", "no_birth", "changed_birth", "reused", "probe_error"])
 def test_b5_child_fallback_birth_and_group_guards(b5_reap_probe, monkeypatch, unsafe):
     probe = b5_reap_probe
@@ -460,8 +460,8 @@ def test_b5_child_fallback_birth_and_group_guards(b5_reap_probe, monkeypatch, un
             raise PermissionError("test probe denied")
         return pid == probe.entry["pid"] or unsafe == "reused"
     monkeypatch.setattr(probe.module, "_process_instance_terminated", terminated)
-    if unsafe == "changed_birth":
-        monkeypatch.setattr(probe.module, "_same_process", lambda *_: False)
+    monkeypatch.setattr(probe.module, "_same_process",
+                        lambda pid, _: pid == child and unsafe not in {"changed_birth", "reused", "probe_error"})
     if unsafe == "same_group":
         monkeypatch.setattr(probe.module.os, "getpgid", lambda pid: 777 if pid == child else pid)
     result = probe.module.reap_test_registered_process(probe.entry)
@@ -524,3 +524,97 @@ def test_b5_empty_child_snapshot_rejects_current_store_child(b5_reap_probe, monk
     monkeypatch.setattr(cleanup, "stop_process_session", stop)
     assert not probe.module._stop_test_registered_session(probe.entry, probe.entry["pid"], probe.entry["pid_birth_token"])
     assert not probe.calls
+
+
+# LLM: 构造 Store 不存在、组长 birth 仍匹配但已僵尸、同组后代仍活的虚拟树；信号出口完全替身。
+# 函数用途: 用事件顺序证明必须先拿原组长身份清树，不能先 poll 回收组长。
+def _b5_zombie_tree_probe(monkeypatch, tmp_path, leader_kind, confirmed):
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    host, child = 987654341, 987654342
+    leader = host if leader_kind == "host" else child
+    birth = "host-birth" if leader_kind == "host" else "child-birth"
+    events, tree = [], SimpleNamespace(descendant_alive=True, pgid=leader)
+    # LLM: 仅模拟 Popen.poll；在后代仍活时调用即明确失败，不回收任何真实进程。
+    # 函数用途: 捕捉错误的提前回收组长顺序。
+    def poll():
+        assert not tree.descendant_alive, "leader polled before same-group descendant cleanup"
+        events.append("poll")
+        return 0
+    handle = SimpleNamespace(pid=host, poll=poll)
+    entry = {"session_id": "bg-r3-zombie", "pid": host, "pid_birth_token": "host-birth",
+             "child_pid": child if leader_kind == "child" else 0, "child_pid_birth_token": "child-birth",
+             "store_root": str(tmp_path / "missing-store"), "popen": handle if leader_kind == "host" else None}
+    assert not Path(entry["store_root"]).exists()
+    # LLM: 树快照和终止均为替身，回执确认值原样传播，不把未确认伪装成成功。
+    # 函数用途: 模拟先处理原同组后代再允许回收组长的唯一终止出口。
+    def terminate(pid, proc, *, expected_birth_token):
+        assert (pid, expected_birth_token) == (leader, birth)
+        assert tree.pgid == leader and tree.descendant_alive and "poll" not in events
+        events.append("snapshot_and_terminate_tree")
+        tree.descendant_alive = not confirmed
+        if confirmed and proc is not None:
+            proc.poll()
+        return module.ProcessTerminationReceipt("test_tree", confirmed, 0, 2, () if confirmed else (987654343,))
+    monkeypatch.setattr(module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(module.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(module.os, "getpgrp", lambda: 777)
+    monkeypatch.setattr(module, "_same_process", lambda pid, token: (pid, token) == (leader, birth))
+    monkeypatch.setattr(module, "_process_instance_terminated", lambda *_: True)
+    monkeypatch.setattr(module, "terminate_process_tree", terminate)
+    return SimpleNamespace(module=module, entry=entry, events=events, tree=tree)
+
+
+# LLM: 僵尸组长与旧实例消失不同；保留 birth 的 host/child 都必须走树快照，真实回执不能被 already_gone 覆盖。
+# 函数用途: 覆盖缺 Store 的两类僵尸组长，含同组后代已确认/未确认终止。
+@pytest.mark.parametrize("leader_kind", ["host", "child"])
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_b5_missing_store_zombie_leader_reaps_tree_first(monkeypatch, tmp_path, leader_kind, confirmed):
+    probe = _b5_zombie_tree_probe(monkeypatch, tmp_path, leader_kind, confirmed)
+    result = probe.module.reap_test_registered_process(probe.entry)
+    assert probe.events == ["snapshot_and_terminate_tree"] + (["poll"] if confirmed and leader_kind == "host" else [])
+    assert probe.tree.descendant_alive is not confirmed
+    assert result["confirmed"] is confirmed
+    assert result["instances"][-1]["method"] == "test_tree"
+
+
+# LLM: tests.dynamic 无 __file__，保存真实启动入口的直接别名；只验证捕获和条件恢复，不启动 OS 进程。
+# 函数用途: 钉住合成 tests 包模块不能被筛掉，恢复时必须返回原函数对象。
+def test_b5_synthetic_tests_dynamic_alias_is_patched_and_restored(monkeypatch):
+    from types import ModuleType
+
+    from agent_py_agent.agent.tooling import background_process_launch as launch
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    alias = ModuleType("tests.dynamic")
+    original = launch.start_background_process
+    alias.start_background_process = original
+    assert getattr(alias, "__file__", None) is None
+    monkeypatch.setitem(sys.modules, alias.__name__, alias)
+    replacement = support._test_background_launch_wrapper(original, module)
+    state = SimpleNamespace(patch=pytest.MonkeyPatch(), installed={})
+    try:
+        support._patch_test_launch_aliases(state, original, replacement)
+        assert alias.start_background_process is replacement
+        assert state.installed[(id(alias), "start_background_process")] is replacement
+    finally:
+        support._undo_test_process_capture(state)
+    assert alias.start_background_process is original
+
+
+# LLM: 无来源合成测试模块可入范围；有来源时不凭 tests/agent 包名改写外部第三方模块。
+# 函数用途: 验证缺文件名称规则及已知外部来源的排除边界。
+@pytest.mark.parametrize("name,filename,expected", [
+    ("tests", None, True), ("tests.dynamic", "", True), ("agent_py_agent.tests", None, True),
+    ("agent_py_agent.tests.dynamic", None, True), ("conftest", None, True), ("test_dynamic", None, True),
+    ("vendor.test_dynamic", None, True), ("unrelated_dynamic", None, False),
+    ("tests.dynamic", "external.py", False), ("vendor.test_dynamic", "external.py", False),
+    ("agent_py_agent.tests.dynamic", "external.py", False), ("agent.dynamic", "external.py", False),
+])
+def test_b5_synthetic_alias_source_boundaries(tmp_path, name, filename, expected):
+    from types import ModuleType
+
+    alias = ModuleType(name)
+    if filename is not None:
+        alias.__file__ = str(tmp_path / filename) if filename else ""
+    assert support._is_test_launch_alias_module(name, alias) is expected

@@ -273,20 +273,20 @@ def reap_test_registered_process(entry: dict[str, Any]) -> dict[str, Any]:
             "managed_confirmed": bool(managed), "instances": instances, "errors": errors}
 
 
-# LLM: 每个实例独立拒绝 init/自身/原组与缺失出生；PID 复用仅证明旧实例消失，不授予新实例信号权。
-# 函数用途: 在当前出生身份一致时调用唯一树终止原语，并保留真实退出回执。
+# LLM: 独立拒绝保护 PID/原组/缺失出生；匹配 birth 的僵尸组长须先走树快照，不能先 poll 丢失同组后代身份。
+# 函数用途: 先精确清理仍有原身份的进程树，再确认已消失或复用的旧实例，真实回执原样返回。
 def _reap_test_process_instance(pid: int, birth: str, proc) -> dict[str, Any]:
     if not birth or not _test_process_target_allowed(pid):
         return {"pid": pid, "confirmed": False, "reason": "protected_or_unidentified"}
     if proc is not None and getattr(proc, "pid", None) != pid:
         proc = None
+    if _same_process(pid, birth):
+        return {"pid": pid, **asdict(terminate_process_tree(pid, proc, expected_birth_token=birth))}
     if _process_instance_terminated(pid, birth):
         if proc is not None:
             proc.poll()
         return {"pid": pid, "confirmed": True, "method": "already_gone"}
-    if not _same_process(pid, birth):
-        return {"pid": pid, "confirmed": False, "reason": "identity_unavailable"}
-    return {"pid": pid, **asdict(terminate_process_tree(pid, proc, expected_birth_token=birth))}
+    return {"pid": pid, "confirmed": False, "reason": "identity_unavailable"}
 
 
 # LLM: 只核对明确 PID 的进程组；不存在允许后续受管入口清理原 child，未知组拒绝，不做 PID 差集。
