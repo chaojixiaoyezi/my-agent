@@ -1,7 +1,11 @@
-## 2026-10-26 Wave 6 B3 网关派生全文准入结构
+## 2026-10-26 Wave 6 B3 / B3-R2 网关派生全文准入与维护结构
 
 - `gateway_parts/logging.py::_index_gateway_payload` 在 `log_record` 前执行归档 TTL 准入；`local_storage/records.py::derived_terminal_expired` 持有共享状态与时间语义，避免重建路径自己复制状态表。归档文件只提供缺省时间兜底，原请求/响应仍是事实源。
 - `local_storage/schema.py` 声明 `(source_type, updated_at DESC, id DESC)` 复合索引并进入原指纹迁移；`search.py::list_recent` 使用同样的稳定时间/ID 降序。裁剪在原事务中同步 records 与 FTS，正文删除在提交后按欠账重试；不是将网关事实源移到 SQLite。
+- `logging.py::log_gateway_event` 将 `_gateway_event_status` 的明确 payload 状态或精确宿主终态事件映射及 `recorded_at` 写进原事件元数据。共享 `derived_terminal_expired` 不再把 `created_at` 当完成证据，缺省完成/更新时间才允许 mtime 兜底；状态未知或时间无可信依据则保留。
+- `user_space/owner_maintenance.py::run_owner_retention_if_due` 在原允许的 retention 分支调用 `_prune_local_store_derived_records`，后者仅为已有普通数据库构造 `LocalStore(enable_fts=False)`。结果放入原 effects 的 `derived_records_pruned`，普通故障记结构化未执行原因；原四类执行上下文/结果未知异常透传，C/W transition 仍从原入口提前返回。
+- `records.py::_records_fts_table_exists` 在同一连接每批探测物理 table/view；关闭检索开关不跳过已有 FTS 删除。`_derived_delete_row` 以 SAVEPOINT 隔离单行失败并保留 records/正文；`_derived_file_hash` 在原 FD 上按至多 65536 字节流式核验，首个大文件可超过 8 MiB 软预算，后续超预算欠账留待下一批。
+- `cli/gateway_loops.py::_GatewayOwnerMaintenanceController` 的 `_startup_started_at` / `_startup_grace_active` 使用 `time.monotonic()`，与 retention 的墙钟 `now` 分离。本轮仅修测试时钟夹具与同步说明，不修改控制器、启动保护或安全恢复路径。
 
 ## 2026-10-26 Wave 4 Round 4 单任务资产事务与冷通知结构
 

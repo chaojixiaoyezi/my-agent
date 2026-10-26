@@ -1,3 +1,28 @@
+## 2026-10-26 Wave 6 B3-R2-docsync：授权补齐文档与维护启动时钟
+
+来源：`07-tasks/wave6-b3-round2-docsync-20261026.md`。本轮前置为 `61a98ae1d543cb2557303ecefbf15d0d1ca644a5`，仍在 `/tmp/wt-wave6-b3` / `wt-wave6-b3` 续做。只修改本节、gateway/subagent 各自的 `02-progress.md` 与 `04-structure.md`、以及新增授权的 `test_gateway_owner_maintenance.py`；不改生产代码、检查器或门禁基线。
+
+四份模块文档按现有 R2 源码同步：明确状态的事件投影、收口 bool（含空字典）、三层身份和 best-effort 当前 owner 引用保护、关闭开关时物理 FTS 同步、流式正文软预算及默认单进程到期维护接入。旧“仅显式 API、尚未接入维护”的当前行为描述已更新；C/W transition、冷库不创建、法律保留与错误分支不旁路等边界明确保留。
+
+维护测试先原样运行，实际文件仅 4 项且全部断言失败（0 设置错误）：`tick(now=200_000)` 只设置 retention 墙钟，控制器新建后的单调时钟仍在 180 秒保护期，摘要全零。只给 `gateway_loops` 安装可推进的时间代理，不改全局 time、不 mock 保护判定/retention/扫描结果、不改原断言；原 4 项移到保护期结束后执行。新增第 5 项验证起点及 180 秒前不扫描/不删缓存/不写维护标记，恰到 180 秒才执行真实维护。新增边界夹具首次遗漏 `cache_days=1`（默认 30 天，墙钟只到第 3 天）导致 1 项失败；已补正确策略，未放宽生产规则或断言。
+
+最终本轮定向组合 **35 passed / 0 failed / 0 errors / 0 skipped**，其中维护 5 项、原 Wave5 基础层 30 项，JUnit 为 `tmp/b3-r2-docsync-green.xml`；初始 4 红为 `tmp/b3-r2-docsync-red.xml`，边界夹具首次失败记录为 `tmp/b3-r2-docsync-clock.xml`。从工作树根导入 `agent_py_agent` 已核对落在本工作树内。下方上轮 R2 的 166 项生产回归未变版本，复用原有效结果，不当作本轮重跑。
+
+复现（cwd 为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_gateway_owner_maintenance.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/b3-r2-docsync-green --junitxml=tmp/b3-r2-docsync-green.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_doc_sync.py --base c73586c533bc5a766299cc3c7d179d8acb6e2824
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git restore --source=HEAD -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+四门禁最终结果：全范围 Ruff 为 `All checks passed!`；默认及固定基线两次文档检查均为 `DOC_SYNC_PASS`；strict 尺寸门为 `hard=0 / blocked=False`；`git diff --check` 通过。组合 doc-sync 固定 R2 原基线 `c73586c533bc5a766299cc3c7d179d8acb6e2824`，覆盖原生产代码加本次文档，不把仅文档相对 HEAD 的通过冒充 R2 代码同步完成。生成报告按要求还原、不提交，并在还原后再核组合文档门与 diff，不借报告豁免注释检查。
+
+本节更新下方上轮的当前限制：四模块文档白名单阻塞已获授权处理；原 gateway 4 项失败已由上述真实时钟夹具修正并重跑通过。另一个 `test_owner_maintenance.py::test_applied_run_with_isolated_errors_is_not_masked` 的指定基线失败没有在本轮授权中，保持不动，既有基线证据仍见下节；不宣称全仓 pytest 全绿。未派子代理、未推送/合 main/部署/启停服务，未清理真实用户数据库；大库性能、跨平台及真实端到端未验证。下方历史失败与上轮交付状态保留，不覆盖为成功。
+
 ## 2026-10-26 Wave 6 B3-R2：收口元数据、完整引用保护与日常维护接入
 
 来源：`07-tasks/wave6-b3-round2-fix-20261026.md`，本轮基线 `c73586c533bc5a766299cc3c7d179d8acb6e2824`，仅修改任务列出的六文件；未派子代理，未触碰main、推送、部署、启停服务或清理真实用户数据库。

@@ -8,9 +8,32 @@ from types import SimpleNamespace
 import pytest
 
 
+# LLM: 只替换 gateway_loops 的时间代理，不改全局 time 模块或生产保护期；墙钟 now 仍由各维护调用显式传入。
+# 函数用途: 给维护测试提供可推进的单调时钟，避免把刚启动误当成已到期。
+@pytest.fixture
+def maintenance_clock(monkeypatch):
+    from agent_py_agent.cli import gateway_loops
+
+    clock = SimpleNamespace(now=1000.0)
+    gateway_time = SimpleNamespace(**vars(gateway_loops.time))
+    gateway_time.monotonic = lambda: clock.now
+    monkeypatch.setattr(gateway_loops, "time", gateway_time)
+    return clock
+
+
+# LLM: 原维护行为断言只在真实保护期之后执行，不 mock 保护判定、retention 或扫描结果。
+# 函数用途: 推进测试单调时钟越过启动保护，再用原墙钟跑维护。
+def _tick_after_startup_grace(controller, clock):
+    from agent_py_agent.cli import gateway_loops
+
+    clock.now += gateway_loops.STARTUP_GRACE_WINDOW_SECONDS + 1
+    return controller.tick(now=200_000)
+
+
 def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
     tmp_path: Path,
     monkeypatch,
+    maintenance_clock,
 ) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import (
@@ -44,7 +67,7 @@ def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
     )
 
     controller = gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace())
-    summary = controller.tick(now=200_000)
+    summary = _tick_after_startup_grace(controller, maintenance_clock)
 
     assert summary == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 0}
     assert not old_cache.exists()
@@ -52,7 +75,9 @@ def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
     assert marker["status"] == "success"
 
 
-def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(
+    tmp_path: Path, monkeypatch, capsys, maintenance_clock,
+) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
     from agent_py_agent.cli import gateway_loops
@@ -70,7 +95,8 @@ def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(tmp_p
     )
     monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _context: base_agent)
 
-    summary = gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace()).tick(now=200_000)
+    controller = gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace())
+    summary = _tick_after_startup_grace(controller, maintenance_clock)
 
     # failed 只算整次被拒与执行期失败；「执行了、只有隔离错误」只进 isolated（3a 补充裁定）。
     assert summary == {"scanned": 2, "ran": 3, "failed": 1, "refused": 1, "isolated": 1}
@@ -89,7 +115,7 @@ def _controller_for(base_home, monkeypatch):
     return gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace())
 
 
-def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, monkeypatch) -> None:
+def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, monkeypatch, maintenance_clock) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
 
@@ -99,7 +125,7 @@ def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, m
     work.mkdir(parents=True)
     (work / "state.json").write_text("{broken", encoding="utf-8")
 
-    summary = _controller_for(base_home, monkeypatch).tick(now=200_000)
+    summary = _tick_after_startup_grace(_controller_for(base_home, monkeypatch), maintenance_clock)
 
     assert summary == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 1}
     # 持久化的 status 仍按旧口径记 policy_unavailable，摘要不影响它。
@@ -108,7 +134,7 @@ def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, m
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root 可以删只读目录里的文件，造不出执行期失败")
-def test_gateway_owner_maintenance_counts_execution_failures_as_failed(tmp_path: Path, monkeypatch) -> None:
+def test_gateway_owner_maintenance_counts_execution_failures_as_failed(tmp_path: Path, monkeypatch, maintenance_clock) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
 
@@ -122,7 +148,7 @@ def test_gateway_owner_maintenance_counts_execution_failures_as_failed(tmp_path:
     owner.retention_json.write_text(json.dumps(policy), encoding="utf-8")
     owner.cache_dir.chmod(0o500)
     try:
-        summary = _controller_for(base_home, monkeypatch).tick(now=200_000)
+        summary = _tick_after_startup_grace(_controller_for(base_home, monkeypatch), maintenance_clock)
     finally:
         owner.cache_dir.chmod(0o700)
 
@@ -130,3 +156,32 @@ def test_gateway_owner_maintenance_counts_execution_failures_as_failed(tmp_path:
     assert summary == {"scanned": 1, "ran": 2, "failed": 1, "refused": 0, "isolated": 0}
     marker = json.loads((owner.data_dir / "maintenance.json").read_text(encoding="utf-8"))
     assert (marker["apply_outcome"], marker["failed_action_count"], marker["isolated_error_count"]) == ("applied", 1, 0)
+
+
+def test_gateway_owner_maintenance_waits_for_monotonic_startup_grace(tmp_path: Path, monkeypatch, maintenance_clock) -> None:
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
+    from agent_py_agent.cli import gateway_loops
+
+    base_home = ensure_my_agent_home(tmp_path)
+    owner = ensure_owner_home(base_home.root, OwnerIdentity.provider_user("feishu", "ou-grace-boundary"))
+    old_cache = owner.cache_dir / "old.tmp"
+    old_cache.write_text("old", encoding="utf-8")
+    os.utime(old_cache, (1, 1))
+    policy = json.loads(owner.retention_json.read_text(encoding="utf-8"))
+    policy.update({"cache_days": 1})
+    owner.retention_json.write_text(json.dumps(policy), encoding="utf-8")
+    controller = _controller_for(base_home, monkeypatch)
+    started = maintenance_clock.now
+
+    for elapsed in (0.0, gateway_loops.STARTUP_GRACE_WINDOW_SECONDS - 0.001):
+        maintenance_clock.now = started + elapsed
+        assert controller.tick(now=200_000) == {"scanned": 0, "ran": 0, "failed": 0, "refused": 0, "isolated": 0}
+        assert old_cache.exists()
+        assert not (owner.data_dir / "maintenance.json").exists()
+
+    maintenance_clock.now = started + gateway_loops.STARTUP_GRACE_WINDOW_SECONDS
+    assert controller.tick(now=200_000) == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 0}
+    assert not old_cache.exists()
+    marker = json.loads((owner.data_dir / "maintenance.json").read_text(encoding="utf-8"))
+    assert marker["status"] == "success"
