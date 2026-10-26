@@ -1,5 +1,5 @@
 # LLM: 只组合原owner维护写者与原claim短门；长扫描门外，每写T→原state锁→业务锁，最终原state完整bytes CAS。
-# 模块用途: 逐步运行私有保留/缓存/归档/rcb并写原maintenance.json，不创建维护lease/schema/FIFO。
+# 模块用途: 逐步运行私有保留/缓存/归档/rcb及LocalStore事件裁剪，写原maintenance.json，不创建新维护账。
 from __future__ import annotations
 
 import hashlib
@@ -25,11 +25,14 @@ def _state_bytes(home):
 
 # LLM: callback来自原C/W执行门；不改source快照，逐写同时重核原policy/state，已有局部副作用不回滚或伪造未进入。
 # LLM: 新增owner孤儿伴生锁逐文件沿同一commit核policy/state；目录扫描不占T，逻辑锁不回收。
+# LLM: 事件维护在T外调用，只将逐SQL/发表叶沿同一commit运输；不延长短写窗口来读JSONL或等事件锁。
+# LLM: 原保留拒绝或legal_hold时不启动新的事件删除；最终写状态仍沿原CAS。
 # 函数用途: 在门外扫描并沿原活scope逐步提交保留、孤儿锁及其它维护，最后写原状态。
 def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
         _backfill_hung_runs,
+        _maintain_local_store_events,
         _maintenance_state_path,
         _reclaim_text_vector_cache_orphans,
         _tighten_archive_permissions,
@@ -69,9 +72,13 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     reclaimed, error = _reclaim_text_vector_cache_orphans(home, commit_transition=commit)
     permissions = _tighten_archive_permissions(home, commit_transition=commit)
     backfill = _backfill_hung_runs(home, now=now, commit_transition=commit)
+    local_events = (_maintain_local_store_events(home, now=now, commit_transition=commit)
+                    if retention.applied and not retention.legal_hold else
+                    {"executed": False, "reason": "legal_hold" if retention.legal_hold else "retention_refused"})
     effects = {"text_vector_cache_reclaimed": reclaimed, "text_vector_cache_reclaim_error": error,
                "indexes_compacted": [], "indexes_compact_failed": [],
-               "memory_archive_permissions": permissions, "run_closeout_backfill": backfill}
+               "memory_archive_permissions": permissions, "run_closeout_backfill": backfill,
+               "local_store_events_maintenance": local_events}
 
     # LLM: 外层commit已持原state锁且完成字节CAS；仍写唯一原文件，不制造已确认物理退出或新调度事实。
     # 函数用途: 用实际执行结果提交本轮原维护状态。

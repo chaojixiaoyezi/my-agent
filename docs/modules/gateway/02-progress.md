@@ -1,3 +1,10 @@
+## 2026-10-26 Wave 6 B2 Round 3：owner后台LocalStore事件稳态维护（源码及指定组件验收，未部署）
+
+- `run_owner_retention_if_due` 与 `run_with_transition` 在原维护周期内调用事件辅助维护，将回执加到同一 `maintenance.json` 的 `local_store_events_maintenance`，不改变retention状态口径；法律保留或原保留拒绝时不删除事件。
+- 兼容owner data库及当前真实的workspace runtime库，只维护已有库；每库每周期一批，默认保留20000条、最多删除5000条，不在事件热路径扫描，不自动VACUUM。协调路径只在SQL/发表叶借原commit，JSONL读取和事件锁等待不占短门。
+- 普通错误显式区分完成失败、可能已有副作用和不完整计数；发现IO错误按来源隔离。四类实际执行未知原样上抛，R2坏字节和pending恢复算法不变。
+- 原任务验收的旧测试失配已在精确起点独立复现；追加白名单授权后，只将Gateway业务测试观测时钟置于原180秒保护期之后，不修改生产保护或原业务断言。指定四套157项全部通过；详细证据、复现和验收边界见 [TESTS](../../../TESTS.md)。未做生产、跨平台或全仓验收。
+
 ## 2026-10-26 Wave 4 Round 4 资产与冷通知修复（源码及指定组件验收，未部署）
 
 - 监控安装/启停将 `.asset-batch.json` 改为单 job/run before/after，禁止将整 `store.json` 放入文件 undo 或安装 hash。原调度器写口按 quota→asset root→store 先恢复残留事务，查询及投影也先核 pending；恢复仅合并受影响任务，保留其它任务和运行。资产及 job/due 成功后耐久记录提交决定，再幂等补原取消历史；未决定回滚、已决定仅收口，不把已提交取消恢复成运行。

@@ -922,3 +922,244 @@ def test_b2_r2_full_pending_recovers_before_new_delete_batches(tmp_path, monkeyp
     assert [json.loads(line)["event_id"] for line in store.events_path.read_bytes().splitlines()] == [row[0] for row in remaining]
     with scope():
         assert prune(retry=True)["deleted_db"] > 0
+
+
+# LLM: 只在临时owner的规范data/兼容workspace布局准备真库；不让后台扫描凭空建库。
+# 函数用途: 为后台接线回归生成超过稳态保留上限的真实事件流水。
+def _r3_owner_store(tmp_path, layout):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    directory = (home.owner_data_dir / "local_store" if layout == "data" else
+                 home.owner_workspace_dir / "runtime" / "workspaces" / "project-scope" / "local_store")
+    store = LocalStore(directory / "local.db")
+    _b2_seed_events(store, 25005)
+    return home, store
+
+
+# LLM: 通过真实owner维护入口而非直接helper调用，核同一状态文件、新批至多5000及原not_due节流。
+# 函数用途: 验证普通和transition两种维护周期确实裁剪已存在的owner事件库。
+@pytest.mark.parametrize("layout", ["data", "workspace"])
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, layout, transition):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, layout)
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    result = run_owner_retention_if_due(home, now=200_000, **options)
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert result.status == marker["status"] == "success" and result.apply_outcome == "applied"
+    effect = marker.get("local_store_events_maintenance", {})
+    assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5000
+    assert len(store.events_path.read_bytes().splitlines()) == 20005
+    assert run_owner_retention_if_due(home, now=200_001, **options).status == "not_due"
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+
+
+# LLM: owner初始化不等于LocalStore初始化；只记录跳过原因，不创建空local.db或事件流水。
+# 函数用途: 验证两种后台维护路径对未初始化的owner保持无库状态。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_maintenance_does_not_initialize_missing_local_store(tmp_path, transition):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    assert run_owner_retention_if_due(home, now=200_000, **options).ran
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker.get("local_store_events_maintenance") == {"executed": False, "reason": "no_local_store"}
+    assert not list(home.owner_home_dir.rglob("local.db"))
+    assert not list(home.owner_home_dir.rglob("events.jsonl"))
+
+
+# LLM: 已有独立events.jsonl属于初始化证据；建缺失SQL库后也不能凭JSONL猜可删除ID。
+# 函数用途: 验证仅有流水时允许维护但原始流水内容不丢失。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_events_only_store_keeps_original_bytes(tmp_path, transition):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    directory = home.owner_data_dir / "local_store"
+    directory.mkdir()
+    source = b'{"event_id":"jsonl-only","body":"\xff"}\n'
+    (directory / "events.jsonl").write_bytes(source)
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    run_owner_retention_if_due(home, now=200_000, **options)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker.get("local_store_events_maintenance", {}).get("executed") is True
+    assert (directory / "local.db").is_file() and (directory / "events.jsonl").read_bytes() == source
+
+
+# LLM: 两种规范布局可能同时存在；每库只推进一个有界批次，汇总数字来自实际删除而非库数量。
+# 函数用途: 验证不会只维护兼容旧库而遗漏owner的workspace库。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_maintenance_covers_multiple_existing_stores(tmp_path, transition):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, first = _r3_owner_store(tmp_path, "data")
+    second = LocalStore(home.owner_workspace_dir / "runtime" / "workspaces" / "other-scope" / "local_store" / "local.db")
+    _b2_seed_events(second, 20001)
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    run_owner_retention_if_due(home, now=200_000, **options)
+    counts = []
+    for store in (first, second):
+        with sqlite3.connect(store.db_path) as conn:
+            counts.append(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+    assert counts == [20005, 20000]
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    effect = marker.get("local_store_events_maintenance", {})
+    assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5001
+    assert len(effect["stores"]) == 2 and all(row["executed"] for row in effect["stores"])
+
+
+# LLM: 只维护已登记的真实owner目录；不沿workspace/库目录/DB/JSONL符号链接进入其它位置。
+# 函数用途: 验证后台发现库时不裁剪符号链接指向的外部事件库。
+@pytest.mark.parametrize("link", ["workspace", "store", "db", "events"])
+def test_b2_r3_owner_event_discovery_does_not_follow_symlinks(tmp_path, link):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    external = LocalStore(tmp_path / "external" / "project" / "local_store" / "local.db")
+    _b2_seed_events(external, 25005)
+    directory = home.owner_data_dir / "local_store"
+    if link == "workspace":
+        (home.owner_workspace_dir / "runtime").mkdir()
+        (home.owner_workspace_dir / "runtime" / "workspaces").symlink_to(tmp_path / "external", target_is_directory=True)
+    elif link == "store":
+        directory.symlink_to(external.root, target_is_directory=True)
+    else:
+        directory.mkdir()
+        name = "local.db" if link == "db" else "events.jsonl"
+        (directory / name).symlink_to(external.root / name)
+    run_owner_retention_if_due(home, now=200_000, include_global_indexes=False)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker.get("local_store_events_maintenance", {}).get("executed") is False
+    with sqlite3.connect(external.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25005
+    assert len(external.events_path.read_bytes().splitlines()) == 25005
+
+
+# LLM: 使用早于所有事件的当前时刻来约束before参数，不以默认墙钟代替这轮owner维护的now。
+# 函数用途: 验证两种入口均将本轮截止时刻传给稳态维护。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_event_maintenance_uses_supplied_now(tmp_path, transition):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    run_owner_retention_if_due(home, now=0, **options)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    effect = marker.get("local_store_events_maintenance", {})
+    assert effect.get("executed") is True and effect["selected"] == effect["deleted_db"] == 0
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25005
+
+
+# LLM: retention拒绝或法律保留时不应新增事件删除副作用；旧status/apply_outcome语义保持。
+# 函数用途: 验证新接入的后台事件裁剪服从原owner的停止删除判定。
+@pytest.mark.parametrize("transition", [False, True])
+@pytest.mark.parametrize("refusal", ["legal_hold", "policy_error"])
+def test_b2_r3_event_maintenance_respects_retention_refusal(tmp_path, transition, refusal):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    policy = json.loads(home.owner_retention_json.read_text())
+    home.owner_retention_json.write_text(json.dumps({**policy, "legal_hold": True}) if refusal == "legal_hold" else "{broken")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    result = run_owner_retention_if_due(home, now=200_000, **options)
+    assert result.status == ("legal_hold" if refusal == "legal_hold" else "policy_unavailable")
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25005
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker["local_store_events_maintenance"] == {
+        "executed": False, "reason": "legal_hold" if refusal == "legal_hold" else "retention_refused"}
+
+
+# LLM: 真库先提交删除再注入JSONL发表失败；故障后pending仍真实存在，effects不能暗示肯定没写过。
+# 函数用途: 验证部分执行诊断及下一维护周期沿R2恢复原pending。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, monkeypatch, transition):
+    from agent_py_agent.agent.local_storage import maintenance
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    # LLM: 仅在JSONL发表叶注入普通故障，保留此前实际SQL提交和pending状态用于断言。
+    # 函数用途: 模拟文件发表失败，不代写或回滚任何数据。
+    def refuse(*_args):
+        raise OSError("failed after committed SQLite deletion")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    with monkeypatch.context() as patch:
+        patch.setattr(maintenance, "_publish_pruned_event_file", refuse)
+        run_owner_retention_if_due(home, now=200_000, **options)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+        assert len(json.loads(conn.execute("SELECT value FROM metadata WHERE key='events_prune_pending_ids'").fetchone()[0])) == 5000
+    effect = marker["local_store_events_maintenance"]
+    assert effect.get("side_effects_unknown") is True and effect.get("counts_complete") is False
+    assert effect["executed"] is False and "deleted_db" not in effect
+    run_owner_retention_if_due(home, now=286_400, **options)
+    recovered = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
+    assert recovered["executed"] is True and recovered["deleted_db"] == 0 and recovered["deleted_jsonl"] == 5000
+    assert len(store.events_path.read_bytes().splitlines()) == 20005
+
+
+# LLM: 只注入一个发现来源的普通IO故障；其余真实库仍可维护，并单列覆盖不完整，不能造全量计数。
+# 函数用途: 验证workspace枚举或单个候选故障不会阻止正常兼容库维护。
+@pytest.mark.parametrize("fault", ["workspace", "candidate"])
+def test_b2_r3_event_discovery_fault_is_isolated(tmp_path, monkeypatch, fault):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    workspaces = home.owner_workspace_dir / "runtime" / "workspaces"
+    bad = workspaces / "bad" / "local_store" / "local.db"
+    bad.parent.mkdir(parents=True)
+    bad.touch()
+    original_iter, original_file = Path.iterdir, Path.is_file
+    # LLM: 只拒一个规范扫描目录，其它真实目录枚举保持原调用。
+    # 函数用途: 模拟workspace枚举时的权限错误。
+    def iterate(path):
+        if path == workspaces and fault == "workspace":
+            raise PermissionError("synthetic directory failure")
+        return original_iter(path)
+    # LLM: 只拒一个候选库的普通文件检查，不影响正常兼容库。
+    # 函数用途: 模拟单个候选的读取权限错误。
+    def is_file(path):
+        if path == bad and fault == "candidate":
+            raise PermissionError("synthetic candidate failure")
+        return original_file(path)
+    monkeypatch.setattr(Path, "iterdir", iterate)
+    monkeypatch.setattr(Path, "is_file", is_file)
+    run_owner_retention_if_due(home, now=200_000, include_global_indexes=False)
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+    effect = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
+    assert effect["executed"] is True and effect["deleted_db"] == 5000 and effect["counts_complete"] is False
+    assert effect.get("ok") is False
+    assert len(effect["discovery_errors"]) == 1 and effect["discovery_errors"][0]["error_type"] == "PermissionError"

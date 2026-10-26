@@ -1,3 +1,10 @@
+## 2026-10-26 Wave 6 B2 Round 3：owner后台事件维护接线
+
+- `owner_maintenance.py::_maintain_local_store_events` 只读发现显式/兼容data位置与固定深度workspace runtime已有库；`_maintain_event_store` 调用原 `LocalStore.maintain_events(max_batches=1, before=now)`，多库结果保留逐库执行事实及累计成功计数。空owner不初始化数据库，发现阶段拒绝静态目录/文件符号链接，普通IO故障单列而不阻止其它来源。
+- 普通入口保持原owner状态锁和due复核；`owner_maintenance_transition.py::run_with_transition` 保持原claim、原policy/state完整字节CAS与最终状态写口，辅助调用位于短门外。临时 `global_write_commit_scope(commit)` 只运输原来源，不持续持T或保存回调到Store；LocalStore原C策略负责SQL/发表逐叶入门，文件读取/事件锁等待仍门外。
+- 回执新增 `local_store_events_maintenance`。`reason=error` 不是零副作用证明；库失败的 `side_effects_unknown` 与 `counts_complete=False` 标识无法取得的阶段结果，多库不推算失败库计数。发现缺口记 `discovery_errors` 并令辅助 `ok=False`；retention的旧status/apply_outcome不因此重定义。法律保留/原保留拒绝不新增事件删除。
+- 不新增持久维护租约、线程或全库VACUUM，不修改LocalStore R2流式坏字节保留与pending算法；外置自定义路径、生产启动、多机及检查后并发路径替换不作验收保证。状态和门禁证据见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-26 Wave 4 Round 4 单任务资产事务与冷通知结构
 
 - `assets/__init__.py::asset_root_lock` 复用原跨进程根锁，以线程本地持锁标记阻止调度恢复递归；标记不是权限。`scheduler/repository.py` 将规范 `data/scheduler` 的写 scope 纳入 quota→root→store，snapshot/投影先恢复 pending；读锁窗口中新出现的事务先释放读锁，再恢复并有限重读。正常冷查询不新建根锁文件。
