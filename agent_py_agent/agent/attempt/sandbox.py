@@ -2,6 +2,7 @@
 #   同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
 #   独立 Landlock 启动器按 Python 导入器的真实 origin 定位；隔离解释器显式 -B，不能改写发行 runtime。
 #   Darwin固定owner保护压成规范布局regex；动态人格来源、现有路径别名每次复核，缓存仅复用最终字符串。
+#   SBPL出口执行768B硬门，Git控制文件/真实gitdir别名在所有写allow之后拒写；未知保护事实失败关闭。
 # 模块用途: 为不同平台构造执行隔离，批处理等待可被本 run 取消，不消费 Gateway 输入、不绕过隔离。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
@@ -28,6 +29,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import stat
@@ -69,6 +71,9 @@ from . import landlock_launcher
 from .process_run import SandboxProcessOptions, run_sandbox_process
 
 SandboxReadMode = Literal["hide_home", "allowlist"]
+
+# 单条 macOS Seatbelt 字符串字面量允许的最大 UTF-8 字节数（低于 TinyScheme 1024B 缓冲上限）。
+_SEATBELT_LITERAL_MAX_BYTES = 768
 
 
 # LLM: 宿主隐私、网络与环境来源上界沿原请求传递，不是授权存储；凭据来源不能由模型参数覆盖。
@@ -744,11 +749,11 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 # LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、上级目录写拒绝、隐藏路径、断网、Gateway 端口拒绝；
 #   隐藏路径排在读放行之后，断网与端口拒绝排最后（Seatbelt 后写覆盖先写；两条 deny 先后不影响结果）。上级目录规则只拒写，
 #   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
-# 函数用途: 按读边界、owner墙、绝对拒写、祖先保护、隐藏和网络顺序汇总macOS规则，来源投影只复用本次值。
+# 函数用途: 按读边界、owner墙、绝对拒写、Git保护、祖先、隐藏和网络顺序汇总规则；Git拒绝不得被宽写allow覆盖。
 def _spec_rules(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | None = None,
                 write_denies: tuple[str, ...] = ()) -> list[str]:
     read_rules = _allowlist_read_rules(spec) if spec.read_mode == "allowlist" else _private_read_rules(spec)
-    return [*read_rules, *_macos_cross_owner_rules(spec), *write_denies,
+    return [*read_rules, *_macos_cross_owner_rules(spec), *write_denies, *_macos_git_write_denies(spec),
             *_ancestor_write_denies(spec, persona_paths=persona_paths), *_pattern_write_denies(spec.protected_write_patterns),
             *_pattern_write_denies(spec.protected_directory_write_patterns, directories=True),
             *_pattern_write_denies(spec.protected_directory_unlink_patterns, directories=True, unlink_only=True),
@@ -758,13 +763,140 @@ def _spec_rules(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | N
 
 # LLM: 正则拒写（H3）：模式是 POSIX ERE，按 JSON 字符串写进规则（本机实测 SBPL 的 regex 认普通字符串）。只拒写，排在写根放行
 #   之后才能盖过它（Seatbelt 后写覆盖先写）；目录规则必须限制 vnode 类型，业务祖先只保护删除/改名。没有模式时返回空列表。
-# 函数用途: 用保留Unicode的字符串编码生成正则拒写，目录vnode和unlink操作边界保持不变。
+# 函数用途: 按顶层分支拆分超长正则并逐条验证字节硬门；目录vnode和unlink操作边界保持不变。
 def _pattern_write_denies(patterns: tuple[str, ...], *, directories: bool = False, unlink_only: bool = False) -> list[str]:
-    filters=[f'(regex {_seatbelt_string_literal(pattern)})' for pattern in dict.fromkeys(patterns)]
+    filters=[f'(regex {_seatbelt_string_literal(chunk)})' for pattern in dict.fromkeys(patterns)
+             for chunk in _seatbelt_regex_chunks(pattern)]
     if directories:
         filters=[f'(require-all (vnode-type DIRECTORY) {value})' for value in filters]
     operation='file-write-unlink' if unlink_only else 'file-write*'
     return [f'(deny {operation} {value})' for value in filters]
+
+
+# LLM: 只拆括号/字符类之外且未转义的|，保留各完整分支的锚点；组内表达式不能安全拆时由字面量出口失败关闭。
+# 函数用途: 将等价顶层正则分支按最终SBPL字节装箱，不截断路径或误拆字符类。
+def _seatbelt_regex_chunks(pattern: str) -> tuple[str, ...]:
+    if len(json.dumps(pattern, ensure_ascii=False).encode("utf-8")) < _SEATBELT_LITERAL_MAX_BYTES:
+        return (pattern,)
+    chunks, chunk = [], ""
+    for branch in _regex_top_level_branches(pattern):
+        _seatbelt_string_literal(branch)
+        candidate = f"{chunk}|{branch}" if chunk else branch
+        if chunk and len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) >= _SEATBELT_LITERAL_MAX_BYTES:
+            chunks.append(chunk)
+            chunk = branch
+        else:
+            chunk = candidate
+    return (*chunks, chunk)
+
+
+# LLM: POSIX ERE的字符类可含首位]与[:class:]/[.collation.]/[=equivalence=]，类内|永远不是分支。
+# 函数用途: 跳过一个完整字符类，返回其后的索引，不把内嵌类的]错当外层结束。
+def _regex_class_end(pattern: str, start: int) -> int:
+    index = start + 1
+    if pattern[index:index + 1] == "^":
+        index += 1
+    if pattern[index:index + 1] == "]":
+        index += 1
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if pattern[index:index + 2] in {"[:", "[.", "[="}:
+            end = pattern.find(pattern[index + 1] + "]", index + 2)
+            index = len(pattern) if end < 0 else end + 2
+            continue
+        if char == "]":
+            return index + 1
+        index += 1
+    return index
+
+
+# LLM: 仅返回顶层|的原始切片，保留转义、组和POSIX字符类；语法错误仍交原生编译拒绝，不猜等价改写。
+# 函数用途: 找到可以独立装箱的正则分支，不修改分支正文。
+def _regex_top_level_branches(pattern: str) -> list[str]:
+    branches, start, depth, index = [], 0, 0, 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            index = _regex_class_end(pattern, index)
+            continue
+        if char in "()":
+            depth += 1 if char == "(" else -1
+        if char == "|" and depth == 0:
+            branches.append(pattern[start:index])
+            start = index + 1
+        index += 1
+    return [*branches, pattern[start:]]
+
+
+# LLM: 仅读取Git指针元数据，不执行git或写文件；异常/超限/空目标失败关闭，不能把未知gitdir当作无保护。
+# 函数用途: 安全读取.git或commondir里相对于其父目录的真实控制目录。
+def _git_pointer_path(path: Path, *, gitfile: bool = False) -> Path | None:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            text = stream.read(65537)
+    except FileNotFoundError:
+        return None
+    if len(text) > 65536 or (gitfile and not text.startswith("gitdir: ")):
+        raise ValueError("invalid Git control pointer")
+    value = text[len("gitdir: "):] if gitfile else text
+    if not value.strip() or "\n" in value.rstrip("\r\n"):
+        raise ValueError("invalid Git control pointer")
+    return (path.parent / value.strip()).resolve(strict=False)
+
+
+# LLM: 每次生成profile重查显式写根及cwd祖先的.git，不缓存目录/链接；不跟随普通目录链接或进入.git对象库。
+# 函数用途: 找到写根内嵌仓库以及写根所属仓库的控制入口，扫描失败由调用方关闭执行。
+def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
+    roots = {Path(path).resolve(strict=False) for path in (spec.attempt_view, *spec.extra_write_roots,
+             *((spec.staging_root,) if spec.implicit_attempt_write_roots else ()))}
+    markers = {parent / ".git" for root in roots for parent in (root, *root.parents)
+               if (parent / ".git").exists() or (parent / ".git").is_symlink()}
+    # os.walk默认吞掉权限错误；保护发现必须把错误交还，不可静默漏掉worktree。
+    def failed(error: OSError) -> None:
+        raise error
+    for root in roots:
+        for directory, dirs, files in os.walk(root, onerror=failed):
+            if ".git" in dirs or ".git" in files:
+                markers.add(Path(directory) / ".git")
+            dirs[:] = [name for name in dirs if name != ".git"]
+    return tuple(sorted(markers))
+
+
+# LLM: 所有模式/full access共用Git拒写；通配保护未来仓库，具体路径补真实gitdir/commondir/链接别名。
+#   仅拒绝控制文件和目录改名，objects/index/refs正常可写；指针或发现失败沿SANDBOX_UNAVAILABLE，绝不退回宿主。
+# 函数用途: 防止命令修改hooks/config或移动其祖先绕过保护，不把整个.git树设为只读。
+def _macos_git_write_denies(spec: AttemptSandboxSpec) -> list[str]:
+    rules = _pattern_write_denies((r"(^|/)\.git/(hooks|config)(/|$)",))
+    rules.extend(_pattern_write_denies((r"(^|/)\.git$",), directories=True, unlink_only=True))
+    rules.append(r'(deny file-write* (require-all (require-not (vnode-type DIRECTORY)) (regex "(^|/)\\.git$")))')
+    paths: set[Path] = set()
+    directories: set[Path] = set()
+    try:
+        for marker in _macos_git_markers(spec):
+            gitdir = _git_pointer_path(marker, gitfile=True) if marker.is_file() else marker.resolve(strict=False)
+            if gitdir is None:
+                raise ValueError("Git control pointer disappeared")
+            common = _git_pointer_path(gitdir / "commondir") or gitdir
+            if marker.is_file() or marker.is_symlink():
+                paths.add(marker)
+            for directory in {gitdir, common}:
+                directories.add(directory)
+                for name in ("hooks", "config", "commondir"):
+                    path = directory / name
+                    paths.update((path, path.resolve(strict=False)))
+        directories.update(parent for path in paths for parent in path.parents)
+        directories.update(parent for path in tuple(directories) for parent in path.parents)
+        rules.extend(f'(deny file-write* (subpath {_seatbelt_string_literal(str(path))}))' for path in sorted(paths))
+        rules.extend(f'(deny file-write-unlink (literal {_seatbelt_string_literal(str(path))}))' for path in sorted(directories))
+    except (OSError, RuntimeError, ValueError) as error:
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: GIT_CONTROL_PROTECTION_INVALID") from error
+    return rules
 
 
 # LLM: 沙箱通用规则含任意来源的所有祖先；Seatbelt 的 subpath/literal 拒绝只认当前路径，命令先把上级目录改名
@@ -958,6 +1090,9 @@ def _sandbox_persona_paths(root: Path, *, all_owners: bool = False) -> tuple[Pat
 
 
 # LLM: SBPL不是JSON解码器；只复用引号/反斜杠转义，Unicode必须保持真实字符。路径与regex调用者共用此出口，不能改权限集合。
-# 函数用途: 将原路径或正则模式编码为Seatbelt字符串，让非ASCII目录的授权与拒绝均匹配真实对象。
+# 函数用途: 编码真实Unicode路径/regex并执行严格768B出口硬门，超长不可拆字面量在启动前失败关闭。
 def _seatbelt_string_literal(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    encoded = json.dumps(value, ensure_ascii=False)
+    if len(encoded.encode("utf-8")) >= _SEATBELT_LITERAL_MAX_BYTES:
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: SBPL_LITERAL_TOO_LONG")
+    return encoded

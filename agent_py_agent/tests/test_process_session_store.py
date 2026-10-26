@@ -77,7 +77,10 @@ def test_pending_query_preserves_load_errors_on_every_read_mode(tmp_path):
         assert not report.records and len(report.load_errors) == 1
 
 
-def test_ttl_prune_keeps_pending_wakes_and_invalid_or_young_finished_times(tmp_path):
+# LLM: 同一真实Store分别覆盖年龄裁剪与数量裁剪，保留字段不能在TTL路径失效。
+# 函数用途: 验证旧记录的保留、激活和pending义务优先于任何历史清理。
+@pytest.mark.parametrize("max_finished", [None, 0])
+def test_ttl_prune_keeps_pending_wakes_and_invalid_or_young_finished_times(tmp_path, max_finished):
     store = ProcessSessionStore(tmp_path)
     target = {"store_root": "/conversations", "thread_id": "thread-a", "task_id": "task-a", "run_id": "run-a"}
     for name, changes in {
@@ -85,6 +88,9 @@ def test_ttl_prune_keeps_pending_wakes_and_invalid_or_young_finished_times(tmp_p
         "young": {"finished_at": 199999.0, "retain_until_consumed": True},
         "small": {"finished_at": 3.0, "retain_until_consumed": True},
         "pending": {"completion_target": target, "completion_notice_id": "notice-pending"},
+        "notification-pending": {"completion_notification_status": "pending"},
+        "notification-target": {"completion_target": target, "completion_notice_id": "notice-consumed",
+                                "completion_notification_status": "pending"},
         "unreported": {"completion_target": target},
         "consumed": {"completion_target": target, "completion_notice_id": "notice-consumed"},
         "stopped": {"completion_target": target, "completion_notice_id": "explicit_stop"},
@@ -96,9 +102,25 @@ def test_ttl_prune_keeps_pending_wakes_and_invalid_or_young_finished_times(tmp_p
         execution_scope={key: value if key == "owner_home" else "" for key, value in asdict(SCOPE).items()}))
     method = store.prune_finished
     assert "max_age_seconds" in inspect.signature(method).parameters
-    removed = method(max_age_seconds=86400.0, now=200000.0, is_notice_consumed=lambda nid: nid == "notice-consumed")
-    assert set(removed) == {"bg-old", "bg-retained", "bg-consumed", "bg-stopped", "bg-activation"}
-    assert {row["session_id"] for row in store.list_records()[0]} == {"bg-young", "bg-small", "bg-pending", "bg-unreported"}
+    removed = method(max_finished, max_age_seconds=86400.0, now=200000.0,
+                     is_notice_consumed=lambda nid: nid in {"notice-consumed", "explicit_stop"})
+    assert set(removed) == {"bg-old", "bg-consumed", "bg-stopped"}
+    assert {row["session_id"] for row in store.list_records()[0]} == {
+        "bg-young", "bg-small", "bg-pending", "bg-unreported", "bg-retained", "bg-activation",
+        "bg-notification-pending", "bg-notification-target"}
+
+
+# LLM: 有目标的历史记录必须得到消费读口证明；explicit_stop标记本身不能替代本轮消费核验。
+# 函数用途: 确保缺少resolver时年龄与数量两条路径均保留通知依赖。
+@pytest.mark.parametrize("max_finished", [None, 0])
+def test_prune_without_notice_resolver_preserves_all_target_records(tmp_path, max_finished):
+    store = ProcessSessionStore(tmp_path)
+    target = {"store_root": "/conversations", "thread_id": "thread-a", "task_id": "task-a", "run_id": "run-a"}
+    for index, notice in enumerate(("", "notice-consumed", "explicit_stop")):
+        store.write(_running(f"bg-target-{index}", status="exited", exit_code=0, finished_at=100000.0,
+                             completion_target=target, completion_notice_id=notice))
+    assert store.prune_finished(max_finished, max_age_seconds=86400.0, now=200000.0) == []
+    assert len(store.list_records()[0]) == 3
 
 
 def test_ttl_prune_rechecks_revision_and_removes_sidecar_only_for_deleted_record(tmp_path, monkeypatch):

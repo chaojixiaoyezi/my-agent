@@ -120,11 +120,11 @@ def test_compact_patterns_cover_future_owners_and_escape_root(owners):
 def test_local_users_namespace_is_not_an_owner(owners, name):
     root, _ = owners
     home = root / "owners/local/users" / name
-    readonly = policy.macos_readonly_pattern(root)
+    readonly = policy.macos_readonly_patterns(root)
     persona = f"^{policy.macos_owner_prefix(root)}/(SOUL\\.md|USER\\.md|AGENTS\\.md|persona)(/|$)"
-    assert not re.search(readonly, str(home / "workspace/probe.txt"))
+    assert not any(re.search(pattern, str(home / "workspace/probe.txt")) for pattern in readonly)
     assert not re.search(persona, str(home / "workspace/probe.txt"))
-    assert re.search(readonly, str(home / "config/settings.json"))
+    assert any(re.search(pattern, str(home / "config/settings.json")) for pattern in readonly)
     assert re.search(persona, str(home / "persona/agents_source.json"))
 
 
@@ -275,8 +275,8 @@ def test_every_sbpl_literal_stays_below_tinyscheme_limit(tmp_path, scoped, depth
     literals = re.findall(r'"(?:\\.|[^"\\])*"', profile)
     assert literals
     for literal in literals:
-        assert len(literal.encode()) < 950, literal
-        assert len(json.loads(literal).encode()) < 950, literal
+        assert len(literal.encode("utf-8")) < 768, literal
+        assert len(json.loads(literal).encode("utf-8")) < 768, literal
 
 
 # LLM: 用常量逐项验证等价覆盖；不能为缩短字符串省掉memory前缀、锁或SQLite sidecar。
@@ -288,8 +288,8 @@ def test_readonly_patterns_preserve_paths_and_quote_budget(tmp_path):
     patterns = builder(root, max_pattern_bytes=510)
     assert len(patterns) > 1
     for pattern in patterns:
-        assert len(pattern.encode()) <= 510
-        assert len(json.dumps(pattern, ensure_ascii=False).encode()) <= 510
+        assert len(pattern.encode()) < 510
+        assert len(json.dumps(pattern, ensure_ascii=False).encode()) < 510
     for layout in ("local/u", "local/users/persona", "providers/p/users/u", "providers/p/groups/g"):
         home = root / "owners" / layout
         for parts in (*policy.HOST_CONFIG_OWNER_PARTS, *policy._owner_state_parts()):
@@ -309,6 +309,141 @@ def native_seatbelt():
         pytest.skip("原生Seatbelt未验证：最小profile被sandbox_apply拒绝（exit71）")
     assert result.returncode == 0, result.stderr
     return "/usr/bin/sandbox-exec"
+
+
+@pytest.mark.parametrize("size", [767, 768])
+@pytest.mark.parametrize("prefix", ["", '引号"与反斜线\\'])
+def test_literal_budget_checks_encoded_utf8_boundary(size, prefix):
+    value = prefix + "a" * (size - len(json.dumps(prefix, ensure_ascii=False).encode()))
+    assert len(json.dumps(value, ensure_ascii=False).encode()) == size
+    if size < 768:
+        assert json.loads(module._seatbelt_string_literal(value)) == value
+    else:
+        with pytest.raises(module.SandboxUnavailableError, match="SBPL_LITERAL_TOO_LONG"):
+            module._seatbelt_string_literal(value)
+
+
+def test_pattern_denies_split_only_top_level_alternatives():
+    branches = [rf'^/根/引号"与反斜线\\/item{i}/(a|b|\|)[^|]+$' for i in range(30)]
+    combined = "|".join(branches)
+    assert len(json.dumps(combined, ensure_ascii=False).encode()) >= 768
+    for directories, unlink in ((False, False), (True, False), (True, True)):
+        rules = module._pattern_write_denies((combined,), directories=directories, unlink_only=unlink)
+        assert len(rules) > 1
+        literals = [json.loads(value) for line in rules for value in re.findall(r'"(?:\\.|[^"\\])*"', line)]
+        assert all(len(json.dumps(value, ensure_ascii=False).encode()) < 768 for value in literals)
+        assert "|".join(literals) == combined
+        assert all(("vnode-type DIRECTORY" in line) == directories for line in rules)
+        assert all(line.startswith("(deny file-write-unlink " if unlink else "(deny file-write* ") for line in rules)
+
+
+@pytest.mark.parametrize("pattern", ["^/" + "x" * 768, "^(" + "|".join("x" * 50 for _ in range(20)) + ")$",
+    "^/" + "x" * 400 + r"/[]|]" + "x" * 400 + "$",
+    "^/" + "x" * 400 + r"/[[:alpha:]|]" + "x" * 400 + "$"])
+def test_unsplittable_regex_fails_closed(pattern):
+    with pytest.raises(module.SandboxUnavailableError, match="SBPL_LITERAL_TOO_LONG"):
+        module._pattern_write_denies((pattern,))
+
+
+def test_readonly_default_budget_is_strict_even_when_requested_wider(tmp_path):
+    root = tmp_path / ('引号"反斜\\' + "x" * 25)
+    for budget in (700, 768, 4096):
+        patterns = policy.macos_readonly_patterns(root, max_pattern_bytes=budget)
+        assert all(len(json.dumps(pattern, ensure_ascii=False).encode()) < min(budget, 768) for pattern in patterns)
+    with pytest.raises(ValueError, match="SBPL literal budget"):
+        policy.macos_readonly_patterns(Path("/") / ("很" * 250))
+
+
+# LLM: 只创建临时Git布局，含外置worktree gitdir、commondir及真实链接，不调用用户仓库。
+# 函数用途: 供字符串和原生沙箱共同核对Git控制文件及旁路别名。
+def _git_layout(tmp_path, kind):
+    root = tmp_path / "writable"
+    repo = root / "nested/repo"
+    repo.mkdir(parents=True)
+    gitdir = repo / ".git"
+    if kind == "worktree":
+        gitdir = root / "metadata/worktrees/tree"
+        gitdir.mkdir(parents=True)
+        (repo / ".git").write_text("gitdir: ../../metadata/worktrees/tree\n")
+        (gitdir / "commondir").write_text("../..\n")
+        common = gitdir.parent.parent
+    elif kind == "symlink":
+        gitdir = root / "metadata"
+        gitdir.mkdir()
+        (repo / ".git").symlink_to(gitdir, target_is_directory=True)
+        common = gitdir
+    else:
+        gitdir.mkdir()
+        common = gitdir
+    for directory in {gitdir, common}:
+        (directory / "hooks").mkdir(exist_ok=True)
+        (directory / "config").write_text("ORIGINAL")
+    alias = root / "config-alias"
+    alias.write_text("ALIAS")
+    (common / "config").unlink()
+    (common / "config").symlink_to(alias)
+    spec = AttemptSandboxSpec(root, root, root, root, full_access=True,
+        protected_persona_root=None, implicit_attempt_write_roots=False, extra_write_roots=(root,))
+    return spec, repo, gitdir, common, alias
+
+
+@pytest.mark.parametrize("kind", ["ordinary", "worktree", "symlink"])
+def test_git_protection_covers_nested_gitdir_common_and_alias(tmp_path, kind):
+    spec, repo, gitdir, common, alias = _git_layout(tmp_path, kind)
+    profile = _profile(spec)
+    regexes = [json.loads(value) for value in re.findall(r'\(regex ("(?:\\.|[^"\\])*")\)', profile)]
+    for relative in (".git/hooks/pre-commit", ".git/config", ".git", "future/.git/config"):
+        assert any(re.search(pattern, str(repo / relative)) for pattern in regexes), relative
+    for path in {gitdir / "hooks", gitdir / "config", common / "hooks", common / "config", alias}:
+        assert module._seatbelt_string_literal(str(path.resolve())) in profile, path
+    for relative in (".git/index", ".git/objects/ab/cdef", ".git/refs/heads/main", "notes.txt"):
+        assert not any(re.search(pattern, str(repo / relative)) for pattern in regexes), relative
+
+
+@pytest.mark.parametrize("key,value,wanted", [
+    ("tool_output_preview_chars", 4000, 1200), ("tool_output_preview_chars", 800, 800),
+    ("tool_output_externalize_min_chars", 32000, 32000),
+])
+def test_stage3_preview_limit_is_real_archive_budget(key, value, wanted):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core import tool_call_archive_record as archive
+
+    assert getattr(archive, "TOOL_PREVIEW_CHAR_LIMIT", None) == 1200
+    agent = SimpleNamespace(config=SimpleNamespace(**{key: value}))
+    assert archive._config_int(agent, key) == wanted
+
+
+@pytest.mark.parametrize("kind", ["ordinary", "worktree", "symlink"])
+def test_native_git_control_paths_block_write_create_replace_and_rename(tmp_path, native_seatbelt, kind):
+    spec, repo, gitdir, common, alias = _git_layout(tmp_path, kind)
+    profile = _profile(spec)
+    paths = {repo / ".git/hooks/pre-commit", repo / ".git/config", gitdir / "config", common / "config", alias}
+    for path in paths:
+        before = path.read_bytes() if path.exists() else None
+        for command in ('printf bad > "$1"', 'printf bad > "$2"; mv "$2" "$1"', 'mv "$1" "$2"'):
+            result = subprocess.run([native_seatbelt, "-p", profile, "/bin/sh", "-c", command, "test", str(path), str(spec.attempt_view / "replacement")],
+                capture_output=True, timeout=10)
+            assert result.returncode != 0, (kind, path, command, result.stderr)
+            assert (path.read_bytes() if path.exists() else None) == before
+    marker = repo / ".git"
+    assert subprocess.run([native_seatbelt, "-p", profile, "/bin/mv", str(marker), str(repo / ".git-moved")],
+        capture_output=True, timeout=10).returncode != 0
+
+
+def test_native_normal_git_status_add_commit_still_work(tmp_path, native_seatbelt):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    spec = AttemptSandboxSpec(repo, repo, repo, repo, full_access=True, protected_persona_root=None,
+        extra_write_roots=(repo,), implicit_attempt_write_roots=False)
+    profile = _profile(spec)
+    (repo / "notes.txt").write_text("business")
+    for args in (("status", "--short"), ("add", "notes.txt"),
+                 ("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "test")):
+        result = subprocess.run([native_seatbelt, "-p", profile, "git", "-C", str(repo), *args],
+            capture_output=True, timeout=10)
+        assert result.returncode == 0, result.stderr
 
 
 # LLM: 必须先确认真实入口可用；非零启动不能算快，拒写同时核对原字节。
