@@ -2,7 +2,7 @@
 # 模块用途: 验证投递安全边界、依赖闭包、默认禁用及真实执行入口。
 # Stage3来源: Argon/c7缺依赖、Vault扫描、通知持久化，及c5 B03短字面量漏检；增加服务/工具真实临时Owner回归。
 # 独审补证: 资源文件名秘密、目录FD释放，以及子进程在入箱前后直接退出的通知恢复；不以异常finally模拟进程中断。
-# 验证边界: monitor仍保留原失败关闭测试；真实Scheduler安装与通道消费者未验，不能把本文件全绿当作四项全部完成。
+# Round2来源: 真实Scheduler安装/启停、通知终态/消费、根缺失404及未加引号短秘密；全部在临时Owner验证，不代表外部通道已送达。
 from dataclasses import replace
 
 import pytest
@@ -569,22 +569,352 @@ def test_reference_rewrite_preserves_unrelated_business_values():
     assert result['steps'][0]['inputs_map'] == value['steps'][0]['inputs_map']
 
 
-# LLM: 此用例是范围限制的失败关闭证据，不是监控安装成功验收；不允许只保存绑定就返回accepted。
-# 函数用途: 验证缺少真实Scheduler事务时整包保持pending且不安装其脚本依赖。
-def test_monitor_without_scheduler_transaction_fails_before_any_install(kit):
-    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+# LLM: 原失败关闭用例随明确授权改为真实Scheduler正向验收，不允许只保存绑定就返回accepted。
+# 函数用途: 验证独立绑定模板可安装为真实暂停任务，依赖仍默认关闭。
+def test_monitor_template_installs_real_paused_scheduler(kit):
     from agent_py_agent.agent.assets.monitor_adapter import save_monitor_binding
 
     ScriptStore(kit.main).save_script(AssetDescriptor('collect', 'script', '依赖'), 'print("{}")')
     save_monitor_binding(kit.main, 'job_fixture', name='监控模板', script_ids=['collect'],
         schedule_spec={'kind': 'every', 'every_seconds': 60, 'enabled': False})
     sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', 'job_fixture')
-    with pytest.raises(AssetDeliveryError) as error:
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    job = round2_repo(kit.alice, 'local/alice').get_job('job_fixture')
+    assert job['status'] == 'paused' and job['enabled'] is False
+    assert job['paused_reason'] == 'asset_delivery_disabled_by_default'
+    assert ScriptStore(kit.alice).get_script('collect')['enabled'] is False
+
+
+# LLM: 采用实际Core的Owner身份字段和canonical目录，不绕过原仓库解析。
+# 函数用途: 为Round2验收打开真实调度器。
+def round2_repo(home, owner_id):
+    from agent_py_agent.agent.scheduler.repository import SchedulerRepository
+
+    return SchedulerRepository(home / 'data/scheduler', owner_provider='local',
+        owner_kind='main' if owner_id == 'local/main' else 'user', owner_id=owner_id)
+
+
+# LLM: 复合定义经过原create_job；运行统计及线程均由真实仓库产生。
+# 函数用途: 创建含脚本和工作流依赖的源监控。
+def round2_seed_monitor(kit, composite):
+    from hashlib import sha256
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
+
+    seed_delivery_bundle(kit)
+    thread = ConversationStore(kit.main / 'data/conversations').threads.create(
+        owner_id='local/main', owner_home=str(kit.main), workspace_root=str(kit.main))
+    schedule = {'kind': 'every', 'every_seconds': 60, 'anchor_at': 0}
+    action = {'tool_name': 'scripts', 'arguments': {'script_id': 'collect'}}
+    rules = [{'id': 'first', 'name': '执行流程', 'use_llm': False, 'schedule': schedule,
+        'tool': {'name': 'workflows', 'arguments': {'workflow_id': 'flow'}}, 'precheck': action}] if composite else None
+    job, _ = round2_repo(kit.main, 'local/main').create_job(SchedulerJobCreateRequest(
+        name='监控合成定义', prompt='仅用于测试', thread_id=thread.thread_id,
+        schedule=schedule, precheck=action, rules=rules, skill_refs=[{'stable_id': 'owner:guide',
+            'content_sha256': sha256((kit.main / 'skills/guide/SKILL.md').read_bytes()).hexdigest()}]))
+    return job
+
+
+# LLM: 真实Scheduler-only源也须进入闭包；重名后仅引用接收方新ID，不沿用发送方线程。
+# 函数用途: 覆盖单任务与复合规则的默认暂停、依赖重写、启用和停用。
+@pytest.mark.parametrize('composite', [False, True])
+def test_round2_monitor_export_install_toggle_real_scheduler(kit, composite):
+    import json
+    from hashlib import sha256
+
+    source = round2_seed_monitor(kit, composite)
+    ScriptStore(kit.alice).save_script(AssetDescriptor('collect', 'script', '旧脚本'), 'print("old")')
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    result = kit.service.accept_delivery('local/alice', sent['delivery_id'])
+    installed = {row['source_id']: row['id'] for row in result['installed_assets']}
+    repo = round2_repo(kit.alice, 'local/alice')
+    job = repo.get_job(source['job_id'])
+    assert job['status'] == 'paused' and job['enabled'] is False
+    assert job['owner']['id'] == 'local/alice' and job['thread_id'] != source['thread_id']
+    assert job['skill_refs'][0]['content_sha256'] == sha256((kit.alice / 'skills/guide/SKILL.md').read_bytes()).hexdigest()
+    action = job['rules'][0]['precheck'] if composite else job['precheck']
+    assert action['arguments']['script_id'] == installed['collect'] != 'collect'
+    if composite:
+        assert job['rules'][0]['tool']['arguments']['workflow_id'] == installed['flow']
+    binding_path = kit.alice / 'data/monitors' / (job['job_id'] + '.json')
+    before = json.loads(binding_path.read_text())
+    for enabled in (True, False):
+        result = kit.service.toggle_asset('local/alice', 'monitor', job['job_id'], enabled)
+        current = repo.get_job(job['job_id'])
+        binding = json.loads(binding_path.read_text())
+        assert result['asset']['enabled'] is enabled
+        assert binding['enabled'] is enabled and binding['schedule_spec']['enabled'] is enabled
+        assert binding['revision'] > before['revision']
+        assert current['enabled'] is enabled and current['status'] == ('active' if enabled else 'paused')
+
+
+# LLM: 原batch真正提交点失败后，监控调度器和同包依赖均不允许残留新任务。
+# 函数用途: 覆盖Scheduler已写、资产提交失败的异常回滚。
+def test_round2_monitor_scheduler_rolls_back_with_asset_batch(kit, monkeypatch):
+    from agent_py_agent.agent.assets import workspace_assets
+
+    source = round2_seed_monitor(kit, False)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+
+    # LLM: 只在原事务发表点注入IO故障，不替换Scheduler或整个接收服务。
+    # 函数用途: 检查真实监控已进入账本后触发回滚。
+    def fail_commit(*args):
+        assert round2_repo(kit.alice, 'local/alice').get_job(source['job_id'])['status'] == 'paused'
+        raise OSError('synthetic batch failure')
+
+    monkeypatch.setattr(workspace_assets, '_commit_staged', fail_commit)
+    with pytest.raises(OSError, match='synthetic batch failure'):
         kit.service.accept_delivery('local/alice', sent['delivery_id'])
-    assert error.value.error_code == 'ASSET_DELIVERY_MONITOR_REBIND_REQUIRED'
-    assert not (kit.alice / 'data/monitors/job_fixture.json').exists()
+    assert round2_repo(kit.alice, 'local/alice').list_jobs()[0] == []
+    assert not (kit.alice / 'data/monitors' / (source['job_id'] + '.json')).exists()
     assert not (kit.alice / 'scripts/collect/script.json').exists()
-    assert kit.service.list_inbox('local/alice')['deliveries'][0]['status'] == 'pending'
+
+
+# LLM: 未引号字面量必须在任何clean前被拦截；显式替换仅改值，不泄漏诊断。
+# 函数用途: 钉住短YAML/env秘密以及安全非秘密表达式。
+@pytest.mark.parametrize('literal', ['password: abc123', 'API_KEY=short1', 'export token=x'])
+def test_round2_unquoted_short_secrets(sanitize, tmp_path, literal):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({'skill/a/SKILL.md': (literal + '\n').encode()}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    result = sanitize({'script/a/main.py': (literal + '\n').encode()}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)
+    assert b'${REDACTED_SECRET}' in result['script/a/main.py'] and literal.encode() not in result['script/a/main.py']
+
+
+@pytest.mark.parametrize('value', ['true', 'false', 'null', 'none', 'yes', 'no', '123', '$PASSWORD',
+    'os.environ', 'env.PASSWORD', '${PASSWORD}', '<PASSWORD>', 'YOUR_PASSWORD', 'CHANGE_ME'])
+@pytest.mark.parametrize('serialized', [False, True])
+def test_round2_unquoted_nonsecrets_preserved(sanitize, tmp_path, value, serialized):
+    import json
+
+    text = 'password: ' + value + '\n'
+    name = 'workflow/a/workflow.json' if serialized else 'skill/a/SKILL.md'
+    raw = (json.dumps({'body_markdown': text}) if serialized else text).encode()
+    assert sanitize({name: raw}, owner_home=tmp_path)[name] == raw
+
+
+# LLM: 人为回退通知模拟已结算后写失败，幂等重试应修复而非重装。
+# 函数用途: 覆盖初次结算及终态早返的通知恢复。
+@pytest.mark.parametrize('status', ['accepted', 'rejected'])
+def test_round2_notification_final_state_and_retry(kit, status):
+    import json
+
+    seed_delivery_bundle(kit)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 'collect')
+    path = kit.alice / 'data/asset_delivery/notifications' / (sent['delivery_id'] + '.json')
+    resolve = kit.service.accept_delivery if status == 'accepted' else kit.service.reject_delivery
+    for _ in range(2):
+        assert resolve('local/alice', sent['delivery_id'])['status'] == status
+        event = json.loads(path.read_text())
+        assert event['status'] == status and event['resolved_at']
+        path.write_text(json.dumps({**event, 'status': 'queued'}))
+    path.unlink()
+    assert resolve('local/alice', sent['delivery_id'])['status'] == status
+    assert json.loads(path.read_text())['status'] == status
+
+
+# LLM: 消费只持久领取队列，不冒充外部通道送达；终态投递不得再次出队。
+# 函数用途: 验证通道/数量过滤、幂等消费和prepared中断对账。
+def test_round2_notification_consumer_is_durable_and_filtered(kit):
+    import json
+
+    seed_delivery_bundle(kit)
+    sent = [kit.service.send_bundle('local/main', 'local/alice', 'script', 'collect') for _ in range(3)]
+    kit.service.reject_delivery('local/alice', sent[0]['delivery_id'])
+    path = kit.alice / 'data/asset_delivery/notifications' / (sent[1]['delivery_id'] + '.json')
+    path.write_text(json.dumps({**json.loads(path.read_text()), 'status': 'prepared'}))
+    consume = getattr(kit.service, 'consume_notifications', None)
+    assert callable(consume), '缺少生产队列消费入口'
+    assert consume('local/alice', channel='feishu')['notifications'] == []
+    rows = consume('local/alice', channel='local', limit=1)['notifications']
+    assert len(rows) == 1 and rows[0]['status'] == 'dispatched' and rows[0]['dispatched_at']
+    assert len(consume('local/alice')['notifications']) == 1
+    assert consume('local/alice')['notifications'] == []
+
+
+# LLM: 队列只能取发送时冻结的接收通道，不能消费被改写路由的记录并交给外部发送器。
+# 函数用途: 钉住通知通道、接收人及幂等键的消费完整性。
+@pytest.mark.parametrize('key,value', [('channel', 'feishu'), ('recipient_open_id', 'ou_other'),
+    ('idempotency_key', 'other')])
+def test_round2_consumer_rejects_modified_routing(kit, key, value):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    seed_delivery_bundle(kit)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 'collect')
+    path = kit.alice / 'data/asset_delivery/notifications' / (sent['delivery_id'] + '.json')
+    path.write_text(json.dumps({**json.loads(path.read_text()), key: value}))
+    with pytest.raises(AssetDeliveryError) as failure:
+        kit.service.consume_notifications('local/alice')
+    assert failure.value.error_code == 'DELIVERY_STORE_CORRUPT'
+
+
+# LLM: 使用原due索引和真实queued运行，不执行脚本/模型；停用应撤下唤醒并取消已有未开工预留。
+# 函数用途: 验证默认暂停的运行闸、启用唤醒、停用取消及历史保存。
+def test_round2_monitor_due_index_and_queued_cancellation(kit):
+    import json
+    import time
+
+    from agent_py_agent.agent.scheduler import SchedulerDueIndex
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+
+    source = round2_seed_monitor(kit, False)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    kit.service.accept_delivery('local/alice', sent['delivery_id'])
+    repo = round2_repo(kit.alice, 'local/alice')
+    index = SchedulerDueIndex(home_paths(kit.root).global_index_dir / 'scheduler_due.sqlite3')
+    future = time.time() + 600
+    assert repo.reserve_due_runs(now=future) == []
+    assert index.claim_due_owners(now=future) == []
+    kit.service.toggle_asset('local/alice', 'monitor', source['job_id'], True)
+    owners = index.claim_due_owners(now=future)
+    assert [(row.provider, row.owner_kind, row.owner_id) for row in owners] == [('local', 'user', 'alice')]
+    run = repo.reserve_manual_run(source['job_id'])
+    assert run['status'] == 'queued'
+    kit.service.toggle_asset('local/alice', 'monitor', source['job_id'], False)
+    store = json.loads(repo.store_path.read_text())
+    assert run['run_id'] not in store['runs']
+    assert any(json.loads(line)['run_id'] == run['run_id'] for line in repo.history_path.read_text().splitlines())
+    assert index.claim_due_owners(now=future + 1000) == []
+
+
+# LLM: 有限配额仍走原锁和计量；guard仅将会死锁的重复准入变成断言，不替换实际安装/启停。
+# 函数用途: 验证监控接收和启停不重入Owner配额锁。
+def test_round2_monitor_install_and_toggle_share_finite_quota(kit, monkeypatch):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.assets import delivery_service
+    from agent_py_agent.agent.user_space import owner_quota
+
+    source = round2_seed_monitor(kit, False)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    original, active = owner_quota.OwnerQuotaEnforcer.admission, set()
+
+    # LLM: 不同Owner可按排序同时持锁，同一Owner禁止再次取得不可重入锁。
+    # 函数用途: 在真实准入之外检测每个Owner的重复进入。
+    @contextmanager
+    def guarded(enforcer, **kwargs):
+        key = enforcer.owner_root
+        assert key not in active, 'nested owner quota admission'
+        active.add(key)
+        try:
+            with original(enforcer, **kwargs) as admission:
+                yield admission
+        finally:
+            active.remove(key)
+
+    # LLM: 只选择合成100MiB上限，计量、文件锁及写入路径均沿产品实现。
+    # 函数用途: 为两个测试Owner提供真实有限准入。
+    def limited(home):
+        return owner_quota.OwnerQuotaEnforcer(home, max_bytes=100 * 1024 * 1024)
+
+    monkeypatch.setattr(owner_quota.OwnerQuotaEnforcer, 'admission', guarded)
+    monkeypatch.setattr(owner_quota, 'owner_quota_enforcer_from_policy', limited)
+    monkeypatch.setattr(delivery_service, 'owner_quota_enforcer_from_policy', limited)
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    assert kit.service.toggle_asset('local/alice', 'monitor', source['job_id'], True)['enabled'] is True
+    assert kit.service.toggle_asset('local/alice', 'monitor', source['job_id'], False)['enabled'] is False
+
+
+# LLM: 原有监控与依赖的覆盖失败必须恢复旧值，随后按同一投递重试，不靠空store掩盖回滚错误。
+# 函数用途: 验证真实已有任务的覆盖回滚、会话复用和正常重试。
+def test_round2_monitor_overwrite_rollback_and_retry(kit, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.assets import workspace_assets
+
+    source = round2_seed_monitor(kit, False)
+    first = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    kit.service.accept_delivery('local/alice', first['delivery_id'])
+    kit.service.toggle_asset('local/alice', 'monitor', source['job_id'], True)
+    repo = round2_repo(kit.alice, 'local/alice')
+    previous_job = repo.get_job(source['job_id'])
+    binding_path = kit.alice / 'data/monitors' / (source['job_id'] + '.json')
+    previous_binding = binding_path.read_bytes()
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    original = workspace_assets._commit_staged
+
+    # LLM: 原事务前最后一刻抛错，观测点仍是当前真实Scheduler与绑定。
+    # 函数用途: 让覆盖在正式资产发表之前失败。
+    def fail_commit(*args):
+        assert repo.get_job(source['job_id'])['status'] == 'paused'
+        raise OSError('synthetic overwrite failure')
+
+    monkeypatch.setattr(workspace_assets, '_commit_staged', fail_commit)
+    with pytest.raises(OSError, match='synthetic overwrite failure'):
+        kit.service.accept_delivery('local/alice', sent['delivery_id'], conflict_strategy='overwrite')
+    assert repo.get_job(source['job_id']) == previous_job
+    assert binding_path.read_bytes() == previous_binding
+    monkeypatch.setattr(workspace_assets, '_commit_staged', original)
+    result = kit.service.accept_delivery('local/alice', sent['delivery_id'], conflict_strategy='overwrite')
+    assert result['status'] == 'accepted' and repo.get_job(source['job_id'])['status'] == 'paused'
+    assert json.loads(binding_path.read_text())['enabled'] is False
+
+
+# LLM: 走真实发送与冻结payload，不把对裸文本的检测通过外推JSON编码后的工作流正文也已替换。
+# 函数用途: 验证三类资产里的未引号短秘密既能拒绝，也能在显式替换后完整移除。
+@pytest.mark.parametrize('kind', ['script', 'skill', 'workflow'])
+@pytest.mark.parametrize('literal', ['password: abc123', 'API_KEY=short1'])
+def test_round2_unquoted_secret_service_payload_has_no_original(kit, kind, literal):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    identifier = 'fixture'
+    if kind == 'script':
+        ScriptStore(kit.main).save_script(AssetDescriptor(identifier, kind, '合成脚本'), literal + '\n')
+    elif kind == 'skill':
+        path = kit.main / 'skills/fixture/SKILL.md'
+        path.parent.mkdir(parents=True)
+        path.write_text('---\nname: fixture\ndescription: fixture\n---\n' + literal + '\n')
+    else:
+        WorkflowStore(kit.main).save_workflow(WorkflowDefinition(AssetDescriptor(identifier, kind, '合成流程'),
+            (), body_markdown=literal + '\n'))
+        path = kit.main / 'workflows/fixture/workflow.json'
+        metadata = json.loads(path.read_text())
+        # 真实Store会先clean正文；将合成原始字节写回临时副本，才能验投递是否在clean前硬拒绝。
+        metadata['body_markdown'] = literal + '\n'
+        path.write_text(json.dumps(metadata, ensure_ascii=False))
+        assert literal in json.loads(path.read_text())['body_markdown']
+    with pytest.raises(AssetDeliveryError) as failure:
+        kit.service.send_bundle('local/main', 'local/alice', kind, identifier)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    sent = kit.service.send_bundle('local/main', 'local/alice', kind, identifier,
+        allow_secret_placeholder_replace=True)
+    payload = kit.alice / 'data/asset_delivery/inbox' / sent['delivery_id'] / 'payload'
+    files = [path.read_bytes() for path in payload.rglob('*') if path.is_file()]
+    assert files and any(b'${REDACTED_SECRET}' in raw for raw in files)
+    assert all(literal.encode() not in raw for raw in files)
+
+
+# LLM: 独审给出的原始字节命中跨Unicode转义，必须在真实扫描器复现，替换后仍可解析JSON且无原字节秘密。
+# 函数用途: 防止JSON原始文本先替换导致无效转义。
+def test_round2_json_replacement_preserves_unicode_escape_validity(sanitize, tmp_path):
+    import json
+
+    raw = br'{"body":"\uabcd1234"}'
+    assert json.loads(raw)['body']
+    output = sanitize({'payload.json': raw}, owner_home=tmp_path, extra_secrets=('abcd1234',),
+        allow_secret_placeholder_replace=True)['payload.json']
+    assert json.loads(output)['body'] == '${REDACTED_SECRET}'
+    assert b'abcd1234' not in output
+
+
+# LLM: 非字符串值或JSON语法本身若命中秘密，不能用未引号占位符破坏JSON后返回成功。
+# 函数用途: 验证无法安全替换的JSON原始位置失败关闭。
+@pytest.mark.parametrize('raw,secret', [(b'{"n":123}', '123'), (b'{"field":"data"}', ':')])
+def test_round2_json_replacement_rejects_nonstring_secret(sanitize, tmp_path, raw, secret):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({'payload.json': raw}, owner_home=tmp_path, extra_secrets=(secret,),
+            allow_secret_placeholder_replace=True)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
 
 
 # LLM: 六个可选参数继续接受旧位置及命名调用，值对象必须严格拒绝未知或重复赋值；不修改管理员可信调用边界。

@@ -6,13 +6,17 @@ import base64
 import json
 import os
 import stat
+import time
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..capability.skills import split_skill_frontmatter
-from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
+from ..common.json_io import locked_json_path
+from ..common.nofollow_fs import list_names_beneath, open_directory_beneath, read_bytes_beneath
 from . import canonical_skill_name, safe_asset_id, skill_asset_id
 from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
 from .delivery_sanitizer import datasource_secret_values, sanitize_bundle_files
@@ -71,7 +75,33 @@ def _raw_catalog(home):
                 raise AssetDeliveryError('ASSET_SOURCE_INVALID', '监控身份不匹配')
             records[f'monitor:{identifier}'] = {'kind': 'monitor', 'id': identifier,
                 'parts': ('data', 'monitors'), 'filename': name, 'meta': meta}
+    _merge_scheduler_monitors(home, records)
     return records
+
+
+# LLM: 调度器原始JSON只读不clean；与绑定按准确ID合并，deleted不复活；引用来自明确动作字段而非prompt。
+# 函数用途: 把仅存Scheduler及双存的监控纳入同一个投递索引。
+def _merge_scheduler_monitors(home, records):
+    from .monitor_adapter import _scheduler_skill_ids, _scheduler_tool_asset_ids
+
+    jobs = (_raw_object(home, ('data', 'scheduler', 'store.json')) or {}).get('jobs', {})
+    for identifier, job in jobs.items():
+        safe_asset_id(identifier)
+        if job.get('job_id') != identifier:
+            raise AssetDeliveryError('ASSET_SOURCE_INVALID', 'Scheduler监控身份不匹配')
+        key = f'monitor:{identifier}'
+        if job.get('status') == 'deleted':
+            records.pop(key, None)
+            continue
+        binding = records.get(key, {}).get('meta', {})
+        refs = dict(binding.get('refs', {}))
+        for kind, values in _scheduler_tool_asset_ids(job).items():
+            refs[kind] = list(dict.fromkeys([*refs.get(kind, ()), *values]))
+        refs['skills'] = list(dict.fromkeys([*refs.get('skills', ()), *_scheduler_skill_ids(job.get('skill_refs', ()))]))
+        schedule = job.get('schedule') or next((rule['schedule'] for rule in job.get('rules', ())), None)
+        meta = {'id': identifier, 'kind': 'monitor', 'name': job.get('name') or identifier, **binding,
+            'refs': refs, 'scheduler_job': job, 'schedule_spec': schedule or binding.get('schedule_spec', {})}
+        records[key] = {'kind': 'monitor', 'id': identifier, 'meta': meta, 'parts': ('data', 'monitors')}
 
 
 # LLM: 仅读结构化refs/steps，不解释正文或运行工具；工作流脚本和Skill边与原with_workflow_step_refs一致。
@@ -89,6 +119,8 @@ def _raw_refs(record):
 # LLM: 仅原始元数据遍历，先确定精确可达集合才扫描；缺依赖用投递领域码及missing_refs贯通服务和工具。
 # 函数用途: 在不调用clean_json的前提下求取待冻结源集合，缺依赖时给出准确诊断。
 def _raw_reachable(records, root_key, include_dependencies):
+    if root_key not in records:
+        raise AssetDeliveryError('ASSET_NOT_FOUND', f'根资产不存在: {root_key}', missing_refs=[root_key])
     seen, pending, missing = set(), [root_key], []
     while pending:
         key = pending.pop()
@@ -109,7 +141,7 @@ def _raw_reachable(records, root_key, include_dependencies):
 # 函数用途: 冻结一份资产的所有允许资源，包括未知扩展的二进制附件。
 def _raw_files(home, record):
     if record['kind'] == 'monitor':
-        return {'monitor.json': read_bytes_beneath(home, (*record['parts'], record['filename']), max_bytes=MAX_BUNDLE_BYTES)}
+        return {'monitor.json': delivery_json(record['meta'])}
     files, pending, size = {}, [()], 0
     while pending:
         relative = pending.pop()
@@ -177,12 +209,26 @@ def _normalize_export(record, files):
     elif kind == 'script':
         meta = descriptor.to_dict() | {key: meta[key] for key in ('entrypoint', 'interpreter', 'timeout_seconds')}
     elif kind == 'monitor':
-        meta = descriptor.to_dict() | {'schedule_spec': meta.get('schedule_spec', {})}
+        meta = descriptor.to_dict() | {'schedule_spec': meta.get('schedule_spec', {}),
+            'scheduler_job': _portable_monitor_job(meta.get('scheduler_job', {}))}
     else:
         meta = descriptor.to_dict()
     files = dict(files)
     files[filename] = delivery_json(_without_private_bindings(meta))
     return {'descriptor': descriptor, 'files': files, 'required_grants': required_grants}
+
+
+# LLM: 已扫描原始job才筛选静态定义；不携带owner、creator、来源线程、运行游标或通知目标，规则也剔除运行态。
+# 函数用途: 保留可重建的监控定义，而非复制发送方执行身份。
+def _portable_monitor_job(job):
+    from ..scheduler.rules import _RULE_FIELDS
+
+    result = {key: deepcopy(job[key]) for key in
+        ('schedule', 'prompt', 'rules', 'precheck', 'policy', 'skill_refs', 'name') if key in job}
+    if 'rules' in result:
+        result['rules'] = [{key: value for key, value in rule.items() if key in _RULE_FIELDS}
+            for rule in result['rules']]
+    return _without_private_bindings(result)
 
 
 # LLM: 持原根只读锁；原字节及本Owner已配置秘密先扫描再建描述符，不创建存储；拓扑缺依赖转换为投递领域码。
@@ -260,6 +306,32 @@ def rewrite_delivery_refs(value, mapping, skill_names):
             if ref_kind in plural else identifiers for ref_kind, identifiers in refs.items()}
     if isinstance(value.get('steps'), list):
         result['steps'] = [_rewrite_delivery_step(step, mapping, skill_names) for step in value['steps']]
+    for key in ('scheduler_job', 'schedule_spec', 'rules', 'precheck', 'skill_refs'):
+        if key in value:
+            result[key] = _rewrite_monitor_refs(value[key], mapping, skill_names,
+                skill_refs=key == 'skill_refs')
+    return result
+
+
+# LLM: 仅监控结构化定义递归映射明确引用键，prompt/正文不替换；版本Skill引用保留对象形状。
+# 函数用途: 重写Scheduler动作和规则依赖，让冲突重命名保持闭包一致。
+def _rewrite_monitor_refs(value, mapping, skill_names, *, skill_refs=False):
+    if isinstance(value, list):
+        return [_rewrite_monitor_refs(item, mapping, skill_names, skill_refs=skill_refs) for item in value]
+    if skill_refs and isinstance(value, str):
+        return _mapped_reference('skill', value, mapping, skill_names)
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if key in {'script_id', 'workflow_id'} and isinstance(item, str):
+            result[key] = _mapped_reference(key[:-3], item, mapping, skill_names)
+        elif key == 'skill_ids':
+            result[key] = [_mapped_reference('skill', ref, mapping, skill_names) for ref in item]
+        elif skill_refs and key == 'stable_id':
+            result[key] = _mapped_reference('skill', item, mapping, skill_names)
+        else:
+            result[key] = _rewrite_monitor_refs(item, mapping, skill_names, skill_refs=key == 'skill_refs')
     return result
 
 
@@ -377,7 +449,7 @@ def prepare_delivery_items(home, envelope, payloads, strategy, enabled, accepted
     return items, extras, installed
 
 
-# LLM: 脚本/Skill资源全部留在同一原batch，工作流仍用原schema；监控不能用仅绑定元数据冒充真实paused调度任务。
+# LLM: 脚本/Skill资源全部留在原batch；监控定义只作为Scheduler事务附加输入，不能当脚本资源发表。
 # 函数用途: 将核验负载转成单项canonical草稿，不进行正式写入。
 def _delivery_draft_content(item, files, mapping, skill_names, enabled):
     kind = item['kind']
@@ -393,8 +465,21 @@ def _delivery_draft_content(item, files, mapping, skill_names, enabled):
         name = skill_names[f"skill:{item['id']}"]
         return {'body_markdown': _received_skill_body(files['SKILL.md'], name, enabled),
             'files': {name: _batch_content(raw) for name, raw in files.items() if name not in {'SKILL.md', 'skill_meta.json'}}}, {}
-    raise AssetDeliveryError('ASSET_DELIVERY_MONITOR_REBIND_REQUIRED',
-        '原canonical批量事务尚不能原子创建真实paused Scheduler任务，监控包保持待确认')
+    meta = rewrite_delivery_refs(json.loads(files['monitor.json']), mapping, skill_names)
+    spec = _delivery_monitor_schedule(meta.get('schedule_spec'))
+    spec['enabled'] = enabled
+    return {'schedule_spec': spec}, {'scheduler_job': meta.get('scheduler_job') or meta}
+
+
+# LLM: 兼容原绑定适配器的展示expression，只对准确kind还原原Schedule字段；所有值仍交原schema严格校验。
+# 函数用途: 将历史监控绑定的调度摘要恢复为可登记的计划。
+def _delivery_monitor_schedule(spec):
+    result = dict(spec or {'kind': 'every', 'every_seconds': 3600})
+    if result.get('kind') == 'every' and 'every_seconds' not in result and result.get('expression'):
+        result['every_seconds'] = int(result['expression'])
+    if result.get('kind') == 'at' and 'at' not in result and result.get('expression'):
+        result['at'] = result['expression']
+    return result
 
 
 # LLM: 复用原计划校验和通用资源路径门，不在投递层绕过canonical journal恢复允许的路径集合。
@@ -404,6 +489,8 @@ def add_delivery_script_resources(plans, extras):
 
     for plan in plans:
         descriptor = plan['descriptor']
+        if descriptor.kind != 'script':
+            continue
         for name, raw in extras.get((descriptor.kind, descriptor.id), {}).items():
             parts = ('scripts', descriptor.id, *_resource_parts(name))
             _validate_batch_path(parts)
@@ -443,9 +530,122 @@ def commit_delivery_items(home, drafts, extras, admission, prepared):
             admission.check([undo, *stages, *finals])
             expected = [{'parts': entry['parts'], 'sha256': _delivery_content_hash(entry['content']),
                 'previous_sha256': _delivery_content_hash(entry['previous'])} for entry in entries]
-            prepared(expected)
-            _commit_staged(home, entries, journal)
+            with _delivery_monitor_commit(home, plans, extras, admission):
+                admission.check([undo, *stages, *finals])
+                prepared(expected)
+                _commit_staged(home, entries, journal)
     return [plan['descriptor'].to_dict() for plan in plans]
+
+
+# LLM: Owner来自已验证目标描述符；先nofollow核目录，再构造原Scheduler和宿主due索引，不重复取得quota准入。
+# 函数用途: 按接收方真实身份打开canonical调度器及原唤醒投影。
+def delivery_scheduler(home, owner_id):
+    from ..scheduler import SchedulerDueIndex, SchedulerRepository
+    from ..user_space.home_layout import home_paths
+    from ..user_space.owner_quota import owner_quota_enforcer_from_policy
+
+    parts = owner_id.split('/')
+    host = home.parents[len(parts)]
+    provider = 'local' if parts[0] == 'local' else parts[1]
+    os.close(open_directory_beneath(home, ('data', 'scheduler'), create=True, require_dir_fd=True))
+    return SchedulerRepository(home / 'data/scheduler', owner_provider=provider,
+        owner_kind='main' if owner_id == 'local/main' else 'user', owner_id=owner_id,
+        due_owner_id=parts[-1], quota_enforcer=owner_quota_enforcer_from_policy(home),
+        due_index=SchedulerDueIndex(home_paths(host).global_index_dir / 'scheduler_due.sqlite3'))
+
+
+# LLM: 使用原runtime路径解析器，以接收方home为默认执行工作区；不沿用源线程或任意其它Owner线程。
+# 函数用途: 复用或创建一个接收方自己的真实会话供监控执行绑定。
+def _delivery_monitor_thread(home, owner_id):
+    from types import SimpleNamespace
+
+    from ..conversation.store import ConversationStore
+    from ..user_space.runtime_paths import runtime_paths_for_agent
+
+    path = runtime_paths_for_agent(SimpleNamespace(), home, SimpleNamespace(owner_home_dir=home))['conversation_workspace']
+    os.close(open_directory_beneath(home, path.relative_to(home).parts, create=True, require_dir_fd=True))
+    threads = ConversationStore(path).threads
+    for thread in threads.list_threads(limit=100):
+        if (thread.owner_id == owner_id and thread.owner_home == str(home)
+                and thread.workspace_root == str(home) and not thread.channel_bindings):
+            return thread.thread_id
+    return threads.create(owner_id=owner_id, owner_home=str(home), workspace_root=str(home),
+        title='接收的资产监控').thread_id
+
+
+# LLM: 新建载荷沿原校验器；只接收静态定义，强制目标ID/Owner/新线程/启停/代次，不复制源运行状态或通知目标。
+# 函数用途: 构造真实可解析的接收方Scheduler任务。
+def new_delivery_monitor_job(repo, descriptor, meta, store):
+    from ..scheduler.event_source_lifecycle import validate_event_job
+    from ..scheduler.event_sources import sync_event_sources
+    from ..scheduler.monitor_state import next_alias
+    from ..scheduler.repository import SchedulerJobCreateRequest, _new_job_payload
+
+    home, now = repo.root.parent.parent, time.time()
+    spec = _delivery_monitor_schedule(meta.get('schedule') or meta.get('schedule_spec'))
+    if spec.get('kind') == 'every':
+        spec.setdefault('anchor_at', 0)
+    request = SchedulerJobCreateRequest(name=meta.get('name') or descriptor.name,
+        prompt=meta.get('prompt') or descriptor.summary or descriptor.name,
+        thread_id=_delivery_monitor_thread(home, descriptor.owner_id), schedule=spec,
+        rules=meta.get('rules'), precheck=meta.get('precheck'), policy=meta.get('policy'),
+        skill_refs=meta.get('skill_refs', []))
+    job = _new_job_payload(owner=repo.owner, request=request, now=now)
+    previous = store['jobs'].get(descriptor.id, {})
+    job.update(job_id=descriptor.id, enabled=descriptor.enabled,
+        status='active' if descriptor.enabled else 'paused',
+        paused_reason='' if descriptor.enabled else 'asset_delivery_disabled_by_default',
+        paused_at=0.0 if descriptor.enabled else now,
+        alias=previous.get('alias') or next_alias(store), version=int(previous.get('version', 0)) + 1)
+    job = sync_event_sources(job)
+    validate_event_job(job)
+    return job
+
+
+# LLM: 外层已持quota→资产锁，只取得原scheduler锁；失败恢复完整旧store及due投影，不调用不可重入mutation_scope。
+# 函数用途: 将真实监控登记包围原资产提交，原batch异常时回滚Scheduler。
+@contextmanager
+def _delivery_monitor_commit(home, plans, extras, admission):
+    monitors = [plan for plan in plans if plan['descriptor'].kind == 'monitor']
+    if not monitors:
+        yield
+        return
+    repo = delivery_scheduler(home, monitors[0]['descriptor'].owner_id)
+    with locked_json_path(repo.store_path):
+        store = repo._load_store_unlocked()
+        previous = deepcopy(store)
+        try:
+            for plan in monitors:
+                descriptor = plan['descriptor']
+                meta = deepcopy(extras[(descriptor.kind, descriptor.id)]['scheduler_job'])
+                meta.setdefault('schedule_spec', plan['payload']['schedule_spec'])
+                _bind_delivery_monitor_skills(home, meta, plans)
+                store['jobs'][descriptor.id] = new_delivery_monitor_job(repo, descriptor, meta, store)
+            repo._write_store_unlocked(store, admission)
+            yield
+        except BaseException:
+            repo._write_store_unlocked(previous, admission)
+            raise
+
+
+# LLM: 版本摘要取最终计划字节或skip复用的接收方原文，不保留源hash冒充改名/禁用后的版本；包和builtin不重绑定。
+# 函数用途: 将监控Skill版本引用绑定到本次实际安装的接收方正文。
+def _bind_delivery_monitor_skills(home, meta, plans):
+    from .workspace_assets import _content_bytes
+
+    planned = {f"owner:{plan['descriptor'].name}": _content_bytes(
+        plan['updates'][('skills', plan['descriptor'].id, 'SKILL.md')])
+        for plan in plans if plan['descriptor'].kind == 'skill'}
+    for reference in meta.get('skill_refs', ()):
+        stable_id = reference['stable_id']
+        if not stable_id.startswith('owner:'):
+            continue
+        raw = planned.get(stable_id)
+        if raw is None:
+            raw = read_bytes_beneath(home, ('skills', canonical_skill_name(stable_id), 'SKILL.md'),
+                max_bytes=MAX_BUNDLE_BYTES, require_dir_fd=True)
+        if raw is not None:
+            reference['content_sha256'] = sha256(raw).hexdigest()
 
 
 # LLM: 附件与旧入口整理后再次执行原batch同等目标/文件限制，保证发表与恢复接受同一journal路径集合。
