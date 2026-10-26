@@ -8,10 +8,13 @@ import os
 import stat
 import subprocess
 import sys
+import time
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
@@ -25,6 +28,11 @@ from ..common.owner_write_errors import (
 _QUOTA_LOCK_BASENAME = ".owner-quota"
 # 原生用量扫描最多 15 秒：扫描挂起不应拖住配额判定，超时按不可用处理。
 _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
+# 仅用量展示可短期复用碎片目录统计；权威写入准入绝不读取这个缓存。
+_DISPLAY_USAGE_TTL_SECONDS = 5.0
+_DISPLAY_USAGE_CACHE_LIMIT = 256
+_DISPLAY_USAGE_CACHE: OrderedDict[Path, tuple[tuple[int, ...], float, int]] = OrderedDict()
+_DISPLAY_USAGE_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -265,7 +273,10 @@ def owner_quota_enforcer_from_policy(
     )
 
 
-def owner_logical_usage_bytes(root: str | Path) -> int:
+# LLM: 默认展示扫描只缓存display_archives各目录直接文件字节，5秒/256项有界；exact供权威准入禁用缓存。
+#   trash与冷归档始终计费，硬链接逐路径计数；目录mtime不证明文件没原地扩写，不能用于授权。
+# 函数用途: 统计owner普通文件逻辑用量，减少展示档案重复逐文件stat，不跟随符号链接。
+def owner_logical_usage_bytes(root: str | Path, *, exact: bool = False) -> int:
     """Count regular-file bytes below an owner root without following symlinks.
 
     Hard links are intentionally counted per visible path.  A logical quota
@@ -283,6 +294,8 @@ def owner_logical_usage_bytes(root: str | Path) -> int:
         raise OwnerQuotaUnavailable("owner disk usage root is not a directory")
     total = 0
 
+    # LLM: 同时删除目录不计费，其余错误继续关闭式拒绝统计，不返回不完整用量。
+    # 函数用途: 处理用量遍历期间的目录消失或读取故障。
     def handle_walk_error(exc: OSError) -> None:
         # A concurrently removed runtime directory no longer consumes quota.
         # Other traversal failures (for example EACCES) remain fail-closed.
@@ -298,27 +311,15 @@ def owner_logical_usage_bytes(root: str | Path) -> int:
         ):
             base = Path(directory)
             dirnames[:] = [name for name in dirnames if not (base / name).is_symlink()]
-            for name in filenames:
-                path = base / name
-                if path == owner_root / f"{_QUOTA_LOCK_BASENAME}.lock":
-                    continue
-                try:
-                    info = path.stat(follow_symlinks=False)
-                except FileNotFoundError:
-                    # Atomic writers and SQLite may remove a temp/WAL file
-                    # after scandir returned it.  Missing entries consume no
-                    # current bytes, so skip only ENOENT and keep every other
-                    # stat failure fail-closed.
-                    continue
-                if stat.S_ISLNK(info.st_mode):
-                    continue
-                if stat.S_ISREG(info.st_mode):
-                    total += max(0, int(info.st_size))
+            cached = not exact and "display_archives" in base.relative_to(owner_root).parts
+            total += _directory_usage_bytes(owner_root, base, filenames, cached=cached)
     except OSError as exc:
         raise OwnerQuotaUnavailable("owner disk usage scan failed") from exc
     return total
 
 
+# LLM: 配额准入保持精确；Linux原native扫描保留，portable路径显式exact，不借展示TTL放宽写入权限。
+# 函数用途: 为持锁配额准入返回准确用量，包括回收站和冷归档。
 def _owner_usage_bytes_for_admission(root: str | Path) -> int:
     """Return exact regular-file usage without monopolising the Python runtime.
 
@@ -336,7 +337,48 @@ def _owner_usage_bytes_for_admission(root: str | Path) -> int:
     native = _native_regular_file_usage_bytes(owner_root)
     if native is not None:
         return native
-    return owner_logical_usage_bytes(owner_root)
+    return owner_logical_usage_bytes(owner_root, exact=True)
+
+
+# LLM: 只缓存单目录直接文件总数；目录身份/mtime/ctime或TTL失效即重算，权限错误不回旧值。
+# 函数用途: 为展示档案目录复用短期统计；exact调用方不使用缓存。
+def _directory_usage_bytes(owner_root: Path, base: Path, names: list[str], *, cached: bool) -> int:
+    if not cached:
+        return _directory_regular_bytes(owner_root, base, names)
+    info = base.stat(follow_symlinks=False)
+    key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+    now = time.monotonic()
+    with _DISPLAY_USAGE_LOCK:
+        entry = _DISPLAY_USAGE_CACHE.get(base)
+        if entry is not None and entry[0] == key and now - entry[1] < _DISPLAY_USAGE_TTL_SECONDS:
+            _DISPLAY_USAGE_CACHE.move_to_end(base)
+            return entry[2]
+    total = _directory_regular_bytes(owner_root, base, names)
+    after = base.stat(follow_symlinks=False)
+    if key == (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
+        with _DISPLAY_USAGE_LOCK:
+            _DISPLAY_USAGE_CACHE[base] = (key, now, total)
+            _DISPLAY_USAGE_CACHE.move_to_end(base)
+            while len(_DISPLAY_USAGE_CACHE) > _DISPLAY_USAGE_CACHE_LIMIT:
+                _DISPLAY_USAGE_CACHE.popitem(last=False)
+    return total
+
+
+# LLM: 硬链接逐路径计数，不跟随符号链接；只容忍并发消失，其他stat错误必须上抛。
+# 函数用途: 统计一个目录的直接普通文件字节，不排除trash或冷归档。
+def _directory_regular_bytes(owner_root: Path, base: Path, names: list[str]) -> int:
+    total = 0
+    for name in names:
+        path = base / name
+        if path == owner_root / f"{_QUOTA_LOCK_BASENAME}.lock":
+            continue
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            total += max(0, int(info.st_size))
+    return total
 
 
 def _native_regular_file_usage_bytes(owner_root: Path) -> int | None:
