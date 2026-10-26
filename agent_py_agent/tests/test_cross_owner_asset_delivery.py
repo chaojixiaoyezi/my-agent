@@ -663,3 +663,238 @@ def test_casefold_ambiguous_target_without_exact_match_is_rejected(kit, monkeypa
     with pytest.raises(AssetDeliveryError) as error:
         support.delivery_conflict_mapping(kit.alice, envelope, strategy)
     assert error.value.error_code == 'ASSET_DELIVERY_CONFLICT_AMBIGUOUS'
+
+
+@pytest.mark.parametrize('action', ['preview', 'send'])
+def test_missing_dependency_service_and_tool_preserve_domain_details(kit, action):
+    import json
+
+    from agent_py_agent.agent.assets.workflow_store import WorkflowStepSpec
+    from agent_py_agent.agent.tooling.asset_delivery_tool import AssetDeliveryTool
+
+    definition = WorkflowDefinition(AssetDescriptor('incomplete', 'workflow', '缺依赖'),
+        (WorkflowStepSpec('s', '缺失脚本', 'deterministic_script', script_id='absent'),))
+    WorkflowStore(kit.main).save_workflow(definition)
+    invoke = kit.service.preview_bundle if action == 'preview' else kit.service.send_bundle
+    args = ('local/main', 'workflow', 'incomplete') if action == 'preview' else (
+        'local/main', 'local/alice', 'workflow', 'incomplete')
+    with pytest.raises(ValueError) as error:
+        invoke(*args)
+    assert error.value.error_code == 'ASSET_DELIVERY_DEPENDENCY_MISSING'
+    assert error.value.details['missing_refs'] == ['script:absent']
+    params = {'action': action, 'asset_kind': 'workflow', 'asset_id': 'incomplete'}
+    if action == 'send':
+        params['recipient_owner_id'] = 'local/alice'
+    result = AssetDeliveryTool(kit.root, 'local/main').execute(params)
+    assert result.ok is False and result.reported_error_code == 'ASSET_DELIVERY_DEPENDENCY_MISSING'
+    payload = json.loads(result.output)
+    assert payload['error_code'] == 'ASSET_DELIVERY_DEPENDENCY_MISSING'
+    assert payload['missing_refs'] == ['script:absent']
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+
+
+def test_tool_preserves_closure_error_from_downstream_adapter(kit, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.tooling.asset_delivery_tool import AssetDeliveryTool
+
+    tool = AssetDeliveryTool(kit.root, 'local/main')
+
+    def missing(*args, **kwargs):
+        raise topology.AssetClosureError(['script:absent'])
+
+    monkeypatch.setattr(tool.service, 'preview_bundle', missing)
+    result = tool.execute({'action': 'preview', 'asset_kind': 'workflow', 'asset_id': 'incomplete'})
+    assert result.reported_error_code == 'ASSET_DELIVERY_DEPENDENCY_MISSING'
+    payload = json.loads(result.output)
+    assert payload['error_code'] == 'ASSET_DELIVERY_DEPENDENCY_MISSING'
+    assert payload['missing_refs'] == ['script:absent']
+
+
+@pytest.mark.parametrize('secret', ['CustomDbPass_998877', 'q9Z!', 'z'])
+def test_datasource_secret_raw_scan_precedes_cleaning_and_never_echoes(kit, monkeypatch, secret):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    monkeypatch.delenv('FIXTURE_DELIVERY_TOKEN', raising=False)
+    secret_file = kit.main / 'data/datasource_secrets/cred-1.json'
+    secret_file.parent.mkdir(parents=True)
+    secret_file.write_text(json.dumps({'schema_version': 'v1', 'credential_ref': 'cred-1',
+        'fields': {'nested': ['ignore', {'custom_field': secret}]}}))
+    ScriptStore(kit.main).save_script(AssetDescriptor('custom_secret', 'script', '合成脚本'),
+        'value = ' + repr(secret) + '\nprint("{}")')
+    with pytest.raises(AssetDeliveryError) as error:
+        kit.service.send_bundle('local/main', 'local/alice', 'script', 'custom_secret')
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert secret not in str(error.value.to_dict())
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+    assert not (kit.main / 'data/asset_delivery/outbox').exists()
+
+
+def test_datasource_secret_metadata_does_not_block_safe_script(kit):
+    import json
+
+    secret_file = kit.main / 'data/datasource_secrets/cred-1.json'
+    secret_file.parent.mkdir(parents=True)
+    secret_file.write_text(json.dumps({'schema_version': 'metadata_marker', 'credential_ref': 'cred-1',
+        'datasource_id': 'source-1', 'updated_at': '2026-10-26', 'created_at': 'fixture-created'}))
+    ScriptStore(kit.main).save_script(AssetDescriptor('safe', 'script', '安全'),
+        'value = "metadata_marker cred-1 source-1 2026-10-26 fixture-created"\nprint("{}")')
+    assert kit.service.send_bundle('local/main', 'local/alice', 'script', 'safe')['ok'] is True
+
+
+@pytest.mark.parametrize('recipient,home_name,channel', [
+    ('local/alice', 'alice', 'local'), ('providers/feishu/users/ou_fixture', 'feishu', 'feishu')])
+def test_notification_is_durable_queued_and_visible_to_inbox(kit, recipient, home_name, channel):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+
+    seed_delivery_bundle(kit)
+    sent = kit.service.send_bundle('local/main', recipient, 'workflow', 'flow')
+    assert sent['notification_status'] == 'queued'
+    path = getattr(kit, home_name) / 'data/asset_delivery/notifications' / (sent['delivery_id'] + '.json')
+    event = json.loads(path.read_bytes())
+    assert event == sent['notification_event']
+    assert event['schema_version'] == 'asset_delivery_notification.v1'
+    assert event['delivery_id'] == sent['delivery_id']
+    assert event['sender_owner_id'] == 'local/main' and event['recipient_owner_id'] == recipient
+    assert event['status'] == 'queued' and event['channel'] == channel
+    assert event['created_at'] and event['idempotency_key']
+    result = AssetDeliveryService(kit.root).list_inbox(recipient)
+    assert result['deliveries'][0]['notification_status'] == 'queued'
+    assert result['deliveries'][0]['notification_event'] == event
+
+
+def test_notification_write_failure_does_not_report_send_success(kit, monkeypatch):
+    seed_delivery_bundle(kit)
+    original = kit.service._put_json
+
+    def fail_notification(home, parts, value, admission):
+        if tuple(parts[:3]) == ('data', 'asset_delivery', 'notifications'):
+            raise OSError('synthetic notification fault')
+        return original(home, parts, value, admission)
+
+    monkeypatch.setattr(kit.service, '_put_json', fail_notification)
+    with pytest.raises(OSError, match='synthetic notification fault'):
+        kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow')
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+    assert not list((kit.main / 'data/asset_delivery/outbox').glob('*.json'))
+
+
+def test_configured_encrypted_datasource_secret_is_also_scanned(kit):
+    from agent_py_agent.agent.assets.datasource_store import DatasourceStore
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    secret = 'FixtureVaultPrivateValue_77336'
+    DatasourceStore(kit.main)._save_secret({'custom_field': secret})
+    ScriptStore(kit.main).save_script(AssetDescriptor('vault', 'script', '合成密文凭据'),
+        'value = ' + repr(secret) + '\nprint("{}")')
+    with pytest.raises(AssetDeliveryError) as error:
+        kit.service.preview_bundle('local/main', 'script', 'vault')
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert secret not in str(error.value.to_dict())
+
+
+def test_configured_secret_explicit_replacement_cleans_payload_and_note(kit):
+    import json
+
+    secret = 'FixturePrivateDbValue_998877'
+    path = kit.main / 'data/datasource_secrets/cred-1.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'fields': {'custom_field': secret}}))
+    ScriptStore(kit.main).save_script(AssetDescriptor('s', 'script', '合成'),
+        'value = ' + repr(secret) + '\nprint("{}")')
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 's', note=secret,
+        allow_secret_placeholder_replace=True)
+    kit.service.accept_delivery('local/alice', sent['delivery_id'])
+    assert secret not in ScriptStore(kit.alice).get_script('s')['code']
+    envelope = kit.service.list_inbox('local/alice')['deliveries'][0]
+    assert secret not in str(envelope) and envelope['note'] == '${REDACTED_SECRET}'
+
+
+def test_datasource_secret_symlink_is_rejected_without_reading_target(kit):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    seed_delivery_bundle(kit)
+    directory = kit.main / 'data/datasource_secrets'
+    directory.mkdir(parents=True)
+    (directory / 'bad.json').symlink_to(kit.alice / 'unreadable-fixture.json')
+    with pytest.raises(AssetDeliveryError) as error:
+        kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow')
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_SCAN_FAILED'
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+
+
+@pytest.mark.parametrize('key', ['api_key', 'secret', 'token', 'password', 'passwd',
+    'private_key', 'access_key', 'client_secret'])
+@pytest.mark.parametrize('literal', ['x', 'four', 'a1b2c3d', '[REDACTED]', '秘密'])
+@pytest.mark.parametrize('json_key', [False, True])
+def test_short_literal_secret_assignments_are_rejected(sanitize, tmp_path, key, literal, json_key):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    text = f'"{key}": "{literal}"' if json_key else f'{key} = "{literal}"'
+    with pytest.raises(AssetDeliveryError) as error:
+        sanitize({'script/s/main.py': text.encode()}, owner_home=tmp_path)
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert error.value.details['redacted_matches'][0]['masked_snippet'] == '<redacted>'
+    assert 'text' not in error.value.to_dict() and 'value' not in error.value.to_dict()
+
+
+@pytest.mark.parametrize('literal', ['', '${PASSWORD}', '<PASSWORD>', 'YOUR_PASSWORD', 'CHANGE_ME'])
+def test_short_literal_secret_templates_remain_allowed(sanitize, tmp_path, literal):
+    raw = f'password = "{literal}"'.encode()
+    assert sanitize({'script/s/main.py': raw}, owner_home=tmp_path)['script/s/main.py'] == raw
+
+
+def test_secret_after_many_templates_is_not_hidden_by_diagnostic_limit(sanitize, tmp_path):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    raw = ('password = "${PASSWORD}"\n' * 101 + 'password = "x"\n').encode()
+    with pytest.raises(AssetDeliveryError) as error:
+        sanitize({'script/s/main.py': raw}, owner_home=tmp_path)
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert error.value.details['redacted_matches'][0]['line_number'] == 102
+
+
+def test_preparation_preserves_adapter_dependency_errors(kit, monkeypatch):
+    from agent_py_agent.agent.assets import script_store_support as support
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    def missing(*args, **kwargs):
+        raise topology.AssetClosureError(['script:absent'])
+
+    monkeypatch.setattr(support, 'delivery_conflict_mapping', missing)
+    with pytest.raises(AssetDeliveryError) as error:
+        support.prepare_delivery_items(kit.alice, {}, {}, 'skip', False, 'fixture')
+    assert error.value.error_code == 'ASSET_DELIVERY_DEPENDENCY_MISSING'
+    assert error.value.details['missing_refs'] == error.value.missing_refs == ['script:absent']
+
+
+def test_inbox_rename_failure_removes_queued_notification(kit, monkeypatch):
+    seed_delivery_bundle(kit)
+
+    def fail_publish(*args):
+        raise OSError('synthetic inbox publication failure')
+
+    monkeypatch.setattr(kit.service, '_publish_stage', fail_publish)
+    with pytest.raises(OSError, match='synthetic inbox publication failure'):
+        kit.service.send_bundle('local/main', 'providers/feishu/users/ou_fixture', 'workflow', 'flow')
+    assert kit.service.list_inbox('providers/feishu/users/ou_fixture')['deliveries'] == []
+    assert not list((kit.feishu / 'data/asset_delivery/notifications').glob('*.json'))
+
+
+def test_inbox_notification_tracks_consumed_status_without_writes(kit):
+    import json
+
+    seed_delivery_bundle(kit)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow')
+    path = kit.alice / 'data/asset_delivery/notifications' / (sent['delivery_id'] + '.json')
+    event = json.loads(path.read_bytes())
+    event['status'] = 'delivered'
+    path.write_text(json.dumps(event))
+    before = path.read_bytes()
+    row = kit.service.list_inbox('local/alice')['deliveries'][0]
+    assert row['notification_status'] == 'delivered'
+    assert row['notification_event'] == event and path.read_bytes() == before

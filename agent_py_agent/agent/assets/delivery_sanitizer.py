@@ -2,13 +2,16 @@
 # 模块用途: 硬拒绝投递秘密或显式替换为占位符，移除发送方主机路径且无损处理二进制。
 from __future__ import annotations
 
+import json
 import os
 import re
 from bisect import bisect_right
+from itertools import islice
 from pathlib import Path
 
 from ..common.log_redaction import redact_sensitive_text
-from .delivery_contracts import AssetDeliveryError
+from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
+from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
 
 _PATTERNS = (
     ('openai_key', re.compile(r'sk-[A-Za-z0-9_-]{20,}')),
@@ -17,9 +20,47 @@ _PATTERNS = (
     ('slack_token', re.compile(r'xox[baprs]-[A-Za-z0-9-]{10,}')),
     ('jwt', re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')),
     ('secret_assignment', re.compile(
-        r'''(?i)(?:password|secret|api_key|token|bearer)["']?\s*[:=]\s*["'](?P<literal>[^"'\s]{8,})["']''')),
+        r'''(?i)(?<!\w)(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)(?!\w)["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote)''')),
 )
-_PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bexample[A-Za-z0-9_]*|\*{3,}', re.I)
+_PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b', re.I)
+_SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
+    'updated_at', 'created_at', 'kind', 'driver'})
+
+
+# LLM: 只遍历已由本Owner凭据读口认证的内存值；元数据整支排除，任意非空字符串均作为秘密而不按长度猜测。
+# 函数用途: 从嵌套凭据字典和列表提取待拦截字面值，不记录键名或明文。
+def _secret_strings(value):
+    pending, result = [value], set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            pending.extend(child for key, child in item.items() if key not in _SECRET_METADATA)
+        elif isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, str) and item:
+            result.add(item)
+    return result
+
+
+# LLM: 本Owner目录逐叶nofollow有界读取；原Vault解密只读且须先认证，不创建主密钥；坏库失败关闭且不暴露异常正文。
+# 函数用途: 将已配置明文或认证密文中的真实秘密留在本次内存扫描，不复制凭据库到包裹。
+def datasource_secret_values(owner_home):
+    from .datasource_store import _unseal_secret
+
+    home, result = Path(owner_home).absolute(), set()
+    parts = ('data', 'datasource_secrets')
+    try:
+        for name in list_names_beneath(home, parts):
+            if not name.endswith('.json'):
+                continue
+            raw = read_bytes_beneath(home, (*parts, name), max_bytes=MAX_BUNDLE_BYTES, require_dir_fd=True)
+            if raw is None:
+                raise ValueError('credential changed during scan')
+            data = json.loads(raw)
+            result.update(_secret_strings(_unseal_secret(home, data) if isinstance(data, dict) else data))
+    except (OSError, ValueError, TypeError, RecursionError):
+        raise AssetDeliveryError('ASSET_DELIVERY_SECRET_SCAN_FAILED', '已配置秘密无法安全读取，投递已停止') from None
+    return tuple(sorted(result))
 
 
 # LLM: 只识别声明的模板占位形状，不据内容猜凭据有效性或访问任何秘密来源。
@@ -35,17 +76,18 @@ def _environment_secrets():
         and len(value) >= 8 and value.strip() and not _placeholder(value)})
 
 
-# LLM: 位置始终属于原文本，literal只替换引号中的值；环境按精确原值匹配，所有诊断在外层屏蔽。
-# 函数用途: 收集要求的密钥形状和环境秘密位置。
-def _matches(text, secrets):
+# LLM: 位置属于原文本，literal只替换原引号内值；非替换扫描有界收集即足以硬拒绝，不因单字符凭据积累巨量诊断。
+# 函数用途: 收集高危凭据键、密钥形状和当前已知秘密的原始位置。
+def _matches(text, secrets, *, limit=None):
     matches = []
     for name, pattern in _PATTERNS:
-        for match in pattern.finditer(text):
-            group = 'literal' if 'literal' in match.re.groupindex else 0
-            if not _placeholder(match.group(group)):
-                matches.append((*match.span(group), name))
+        group = 'literal' if 'literal' in pattern.groupindex else 0
+        candidates = (match for match in pattern.finditer(text) if not _placeholder(match.group(group)))
+        matches.extend((*match.span(group), name) for match in islice(candidates,
+            None if limit is None else max(0, limit - len(matches))))
     for secret in secrets:
-        matches.extend((*match.span(), 'environment_secret') for match in re.finditer(re.escape(secret), text))
+        iterator = islice(re.finditer(re.escape(secret), text), None if limit is None else max(0, limit - len(matches)))
+        matches.extend((*match.span(), 'known_secret') for match in iterator)
     return matches
 
 
@@ -91,17 +133,18 @@ def _paths(text, owner_home):
     return re.sub(r'/(?:Users/[^/\s"\'<>]+|home/[^/\s"\'<>]+|root)(?=/|\b)', '${OWNER_HOME}', text)
 
 
-# LLM: 所有文件先按原字节扫描才返回结果，默认命中即拒绝且无IO；允许替换也不回显原秘密，surrogateescape保持非UTF8原字节。
-# 函数用途: 在任何暂存或发送前完成整包秘密检查、可选占位替换和宿主路径清理。
-def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace=False):
+# LLM: 原字节先比对环境及调用方内存秘密再做替换；任何非空高危键字面量均硬拒绝，诊断不回显原值，无文件写入。
+# 函数用途: 在清洗和暂存前扫描整包，保护短秘密、显式模板及二进制原字节。
+def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace=False, extra_secrets=()):
     if type(allow_secret_placeholder_replace) is not bool:
         raise ValueError('allow_secret_placeholder_replace必须是布尔值')
-    secrets, result = _environment_secrets(), {}
+    secrets = tuple(set(_environment_secrets()) | {value for value in extra_secrets if isinstance(value, str) and value})
+    result = {}
     for name, raw in files.items():
         if not isinstance(name, str) or not isinstance(raw, bytes):
             raise ValueError('投递文件必须是相对文件名到原始bytes的映射')
         text = raw.decode('utf-8', errors='surrogateescape')
-        matches = _matches(text, secrets)
+        matches = _matches(text, secrets, limit=None if allow_secret_placeholder_replace else 100)
         shared, _ = _shared_scan(text)
         if (matches or shared) and not allow_secret_placeholder_replace:
             newlines = [index for index, char in enumerate(text) if char == '\n']

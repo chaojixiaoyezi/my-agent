@@ -1,5 +1,5 @@
 # LLM: 可信宿主根与调用方绑定Owner是权限上界；跨Owner只写投递箱/回执，正式资产仅本人accept写原canonical事务。
-# 模块用途: 提供四类资产闭包投递、屏蔽、回执与默认关闭安装的统一领域服务，不发送真实通道消息。
+# 模块用途: 提供资产闭包投递、屏蔽、回执和持久待消费通知；队列入箱不代表真实通道已经送达。
 from __future__ import annotations
 
 import json
@@ -34,7 +34,7 @@ from .delivery_contracts import (
     AssetDeliveryError,
     DeliverySendOptions,
 )
-from .delivery_sanitizer import sanitize_bundle_files
+from .delivery_sanitizer import datasource_secret_values, sanitize_bundle_files
 from .script_store_support import (
     commit_delivery_items,
     delivery_item_manifest,
@@ -79,9 +79,38 @@ def _bundle_summary(items):
         'total_bytes': sum(len(raw) for item in items for raw in item['files'].values())}
 
 
+# LLM: 纯读取宿主构造的包裹身份，不从备注取得通道或目标；幂等键只依赖投递及接收方，queued不是外部送达证据。
+# 函数用途: 为本地或通道用户构造统一的持久待消费通知，不发请求或新建会话。
+def _delivery_notification(envelope):
+    identifier, sender, recipient = (envelope[key] for key in ('delivery_id', 'sender_owner_id', 'recipient_owner_id'))
+    root = envelope['root_asset']
+    identity = _identity(recipient)
+    event = {'schema_version': 'asset_delivery_notification.v1', 'delivery_id': identifier,
+        'sender_owner_id': sender, 'recipient_owner_id': recipient, 'channel': identity.provider,
+        'idempotency_key': f'asset_delivery:{identifier}:{recipient}', 'status': 'queued',
+        'created_at': envelope['created_at'],
+        'text': f'收到来自{sender}的资产投递：{root["kind"]}:{root["id"]}。回复 /delivery accept {identifier} 接收（默认关闭），或 /delivery reject {identifier} 拒绝。'}
+    if identity.provider == 'feishu':
+        event['recipient_open_id'] = recipient.rsplit('/', 1)[-1]
+    return event
+
+
 # LLM: 所有读写仍沿同一可信root、nofollow及原quota锁；拆分存储职责不增加身份、路径或第二账本。
 # 类用途: 为投递领域动作集中提供受限JSON读写与两端写入准入。
 class _DeliveryStorage:
+    # LLM: 只投影已持久化队列，不以包裹内旧事件冒充已入队；记录身份必须与已核包裹一致，冷读不补写。
+    # 函数用途: 让收件箱消费者看到当前真实通知状态，缺记录时明确标成missing。
+    def _inbox_notification(self, home, envelope):
+        event = self._read_json(home, (*_BASE, 'notifications', envelope['delivery_id'] + '.json'))
+        if event is None:
+            return {**envelope, 'notification_status': 'missing'}
+        keys = ('delivery_id', 'sender_owner_id', 'recipient_owner_id')
+        if (event.get('schema_version') != 'asset_delivery_notification.v1'
+                or any(event.get(key) != envelope.get(key) for key in keys)
+                or not isinstance(event.get('status'), str) or not event['status']):
+            raise AssetDeliveryError('DELIVERY_STORE_CORRUPT', '通知记录身份或格式不匹配')
+        return {**envelope, 'notification_status': event['status'], 'notification_event': event}
+
     # LLM: 只从规范root-relative文件读取JSON，不把坏记录降为缺失；错误不包含原正文。
     # 函数用途: 为箱、名单和回执统一读取受限JSON。
     def _read_json(self, home, parts):
@@ -152,8 +181,8 @@ class AssetDeliveryService(_DeliveryStorage):
             'bundled_assets': [delivery_item_manifest(item, f'{root_asset_kind}:{root_asset_id}') for item in items],
             'closure_summary': _bundle_summary(items), 'required_capabilities_summary': required_delivery_capabilities(items)}
 
-    # LLM: 原可选参数名称、位置和默认值沿DeliverySendOptions，未知/重复参数仍拒绝；普通工具不开放管理预置。
-    # 函数用途: 冻结并原子发布跨用户包裹及发件回执，管理预置可显式接受。
+    # LLM: 原发送参数及管理员边界保持；备注和原文件先核已配置秘密，完成持久入队才报告queued，不声称外部送达。
+    # 函数用途: 发布包裹、发件回执及接收方可消费通知，管理预置仍可显式接受。
     def send_bundle(self, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, *positional, **options):
         note, include_dependencies, allow_secret_placeholder_replace, auto_accept, auto_enable, sender_role = astuple(
             DeliverySendOptions.from_call(positional, options))
@@ -171,6 +200,7 @@ class AssetDeliveryService(_DeliveryStorage):
         if not isinstance(note, str) or len(note) > 4000:
             raise ValueError('note必须是最多4000字符的文本')
         safe_note = sanitize_bundle_files({'note.txt': note.encode()}, owner_home=sender,
+            extra_secrets=datasource_secret_values(sender),
             allow_secret_placeholder_replace=allow_secret_placeholder_replace)['note.txt'].decode()
         items = snapshot_delivery_bundle(sender, root_asset_kind, root_asset_id,
             include_dependencies=include_dependencies, allow_secret_placeholder_replace=allow_secret_placeholder_replace)
@@ -184,9 +214,8 @@ class AssetDeliveryService(_DeliveryStorage):
             if len(pending) >= MAX_PENDING_DELIVERY_COUNT:
                 raise AssetDeliveryError('ASSET_DELIVERY_QUOTA_EXCEEDED', '待确认投递已达上限')
             self._publish(sender, recipient, envelope, items, admissions)
-        result = {'ok': True, 'delivery_id': identifier, 'status': 'pending'}
-        if 'notification_event' in envelope:
-            result['notification_event'] = envelope['notification_event']
+        result = {'ok': True, 'delivery_id': identifier, 'status': 'pending',
+            'notification_status': 'queued', 'notification_event': envelope['notification_event']}
         if auto_accept:
             try:
                 result['accept_result'] = self.accept_delivery(recipient_owner_id, identifier, initial_enabled=auto_enable)
@@ -195,8 +224,8 @@ class AssetDeliveryService(_DeliveryStorage):
                 result.update(ok=False, error_code=getattr(exc, 'error_code', 'DELIVERY_AUTO_ACCEPT_FAILED'), committed=True)
         return result
 
-    # LLM: 有界nofollow读包裹，不打开可创建文件的写锁；坏schema/身份不得被隐藏成空箱。
-    # 函数用途: 按状态读取本人收件箱，仅返回清单与摘要。
+    # LLM: 有界nofollow读包裹及当前耐久通知，不取写锁或补写队列；坏schema/身份不隐藏成空箱。
+    # 函数用途: 按状态读取本人收件箱并向通知消费者暴露真实待处理状态。
     def list_inbox(self, recipient_owner_id, status_filter=None):
         home = self._home(recipient_owner_id)
         if status_filter not in {None, 'all', 'pending', 'accepted', 'rejected'}:
@@ -205,7 +234,7 @@ class AssetDeliveryService(_DeliveryStorage):
         for identifier in sorted(list_names_beneath(home, (*_BASE, 'inbox'))):
             envelope = self._envelope(home, recipient_owner_id, identifier)
             if status_filter in {None, 'all'} or envelope['status'] == status_filter:
-                deliveries.append(envelope)
+                deliveries.append(self._inbox_notification(home, envelope))
         return {'ok': True, 'deliveries': deliveries}
 
     # LLM: 首个Owner仅由可信调用方绑定；每文件和发件清单hash先验，再沿原quota/资产事务安装，正常接受默认全关闭。
@@ -357,21 +386,19 @@ class AssetDeliveryService(_DeliveryStorage):
             raise AssetDeliveryError('DELIVERY_INTEGRITY_FAILED', '包裹身份或格式不匹配')
         return value
 
-    # LLM: 通知仅记录结构化待发送事件，不声称飞书已投递；包裹摘要与冻结字节清单同源。
-    # 函数用途: 生成新包裹及可供通道消费的通知事件。
+    # LLM: 通知绑定包裹及两端Owner，幂等键稳定；queued仅表示待消费，不新建会话或声称外部已送达。
+    # 函数用途: 为本地和通道接收方生成包裹及耐久通知事件。
     def _new_envelope(self, identifier, sender, recipient, kind, asset_id, note, items):
         value = {'schema_version': ENVELOPE_SCHEMA, 'delivery_id': identifier, 'sender_owner_id': sender,
             'recipient_owner_id': recipient, 'root_asset': {'kind': kind, 'id': asset_id}, 'note': note,
             'created_at': _timestamp(), 'updated_at': _timestamp(), 'status': 'pending',
             'closure_summary': _bundle_summary(items), 'required_capabilities_summary': required_delivery_capabilities(items),
             'bundled_assets': [delivery_item_manifest(item, f'{kind}:{asset_id}') for item in items]}
-        if recipient.startswith('providers/feishu/users/'):
-            value['notification_event'] = {'channel': 'feishu', 'recipient_open_id': recipient.rsplit('/', 1)[-1],
-                'status': 'pending', 'text': f'收到来自{sender}的资产投递：{kind}:{asset_id}。回复 /delivery accept {identifier} 接收（默认关闭），或 /delivery reject {identifier} 拒绝。'}
+        value['notification_event'] = _delivery_notification(value)
         return value
 
-    # LLM: 先在接收方同文件系统暂存全部冻结字节，fsync后dir_fd原子发布；发件回执绑定清单hash供接收时复核来源。
-    # 函数用途: 在持两端领域锁与配额准入时发表一个待确认投递。
+    # LLM: 同锁先耐久写通知、再原子发布箱；未入箱故障清通知/回执/暂存，入箱后fsync异常仍保留可核记录。
+    # 函数用途: 同时发表待确认投递和通知信号，不让成功入箱缺少耐久通知。
     def _publish(self, sender, recipient, envelope, items, admissions):
         identifier = envelope['delivery_id']
         size = len(delivery_json(envelope)) + envelope['closure_summary']['total_bytes']
@@ -382,6 +409,7 @@ class AssetDeliveryService(_DeliveryStorage):
         receipt = {key: value for key, value in envelope.items() if key not in {'bundled_assets', 'notification_event'}}
         receipt.update(schema_version=RECEIPT_SCHEMA, bundle_sha256=sha256(delivery_json(envelope['bundled_assets'])).hexdigest())
         receipt_parts = (*_BASE, 'outbox', identifier + '.json')
+        notification_parts = (*_BASE, 'notifications', identifier + '.json')
         admissions[sender].check((OwnerQuotaChange(sender.joinpath(*receipt_parts), len(delivery_json(receipt))),))
         self._clean_staging(recipient)
         changes = [OwnerQuotaChange(recipient.joinpath(*stage, 'quota-projection'), size * 3)]
@@ -393,6 +421,7 @@ class AssetDeliveryService(_DeliveryStorage):
             self._stage_payload(prefix, stage, items)
             self._put_json(recipient, (*stage, 'envelope.json'), envelope, admissions[recipient])
             self._put_json(sender, receipt_parts, receipt, admissions[sender])
+            self._put_json(recipient, notification_parts, envelope['notification_event'], admissions[recipient])
             self._publish_stage(prefix, stage, inbox, identifier)
             published = True
         finally:
@@ -402,6 +431,7 @@ class AssetDeliveryService(_DeliveryStorage):
                 if installed is None:
                     self._clean_staging(recipient)
                     unlink_file_beneath(self.root_dir, (*sender.relative_to(self.root_dir).parts, *receipt_parts))
+                    unlink_file_beneath(self.root_dir, (*prefix, *notification_parts))
 
     # LLM: 全部内容已经扫描冻结，路径只从安全kind/id/资源组件形成；不在写入中重读发送方文件。
     # 函数用途: 写完本次同文件系统暂存中的所有负载。

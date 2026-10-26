@@ -15,7 +15,7 @@ from ..capability.skills import split_skill_frontmatter
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
 from . import canonical_skill_name, safe_asset_id, skill_asset_id
 from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
-from .delivery_sanitizer import sanitize_bundle_files
+from .delivery_sanitizer import datasource_secret_values, sanitize_bundle_files
 from .descriptor import AssetDescriptor, AssetRefs, RuntimeSummary
 from .topology import AssetClosureError, extract_asset_closure
 from .workflow_store import WorkflowDefinition, with_workflow_step_refs
@@ -86,8 +86,8 @@ def _raw_refs(record):
         for identifier in refs.get(kind + 's', ())]
 
 
-# LLM: 仅原始元数据遍历，先确定精确可达集合才扫描，不能因无关资产含秘密而错误阻止安全根资产。
-# 函数用途: 在不调用clean_json的前提下求取待冻结源集合。
+# LLM: 仅原始元数据遍历，先确定精确可达集合才扫描；缺依赖用投递领域码及missing_refs贯通服务和工具。
+# 函数用途: 在不调用clean_json的前提下求取待冻结源集合，缺依赖时给出准确诊断。
 def _raw_reachable(records, root_key, include_dependencies):
     seen, pending, missing = set(), [root_key], []
     while pending:
@@ -100,7 +100,8 @@ def _raw_reachable(records, root_key, include_dependencies):
         elif include_dependencies:
             pending.extend(_raw_refs(records[key]))
     if missing:
-        raise AssetClosureError(sorted(missing))
+        raise AssetDeliveryError('ASSET_DELIVERY_DEPENDENCY_MISSING',
+            'Asset dependency closure is incomplete', missing_refs=sorted(missing))
     return [records[key] for key in sorted(seen)]
 
 
@@ -184,8 +185,8 @@ def _normalize_export(record, files):
     return {'descriptor': descriptor, 'files': files, 'required_grants': required_grants}
 
 
-# LLM: 持原根既有只读锁并拒未提交批量；全部原字节扫描后才创建AssetDescriptor，导出不创建任何锁/目录。
-# 函数用途: 为预览和发送冻结同一安全闭包及依赖先行顺序。
+# LLM: 持原根只读锁；原字节及本Owner已配置秘密先扫描再建描述符，不创建存储；拓扑缺依赖转换为投递领域码。
+# 函数用途: 为预览和发送冻结同一安全闭包，凭据只在扫描内存中使用而不导出。
 def snapshot_delivery_bundle(home, root_kind, root_id, *, include_dependencies=True, allow_secret_placeholder_replace=False):
     safe_asset_id(root_id)
     if root_kind not in {'script', 'workflow', 'monitor', 'skill'} or type(include_dependencies) is not bool:
@@ -199,13 +200,18 @@ def snapshot_delivery_bundle(home, root_kind, root_id, *, include_dependencies=T
             for name, content in _raw_files(home, record).items()}
         if sum(map(len, raw.values())) > MAX_BUNDLE_BYTES:
             raise AssetDeliveryError('ASSET_DELIVERY_QUOTA_EXCEEDED', '投递包超过字节上限')
-        safe = sanitize_bundle_files(raw, owner_home=home, allow_secret_placeholder_replace=allow_secret_placeholder_replace)
+        safe = sanitize_bundle_files(raw, owner_home=home, extra_secrets=datasource_secret_values(home),
+            allow_secret_placeholder_replace=allow_secret_placeholder_replace)
         exports = {}
         for record in selected:
             prefix = f"{record['kind']}/{record['id']}/"
             exports[f"{record['kind']}:{record['id']}"] = _normalize_export(record,
                 {name[len(prefix):]: content for name, content in safe.items() if name.startswith(prefix)})
-    closure = extract_asset_closure((item['descriptor'] for item in exports.values()), root_key) if include_dependencies else (exports[root_key]['descriptor'],)
+    try:
+        closure = extract_asset_closure((item['descriptor'] for item in exports.values()), root_key) if include_dependencies else (exports[root_key]['descriptor'],)
+    except AssetClosureError as exc:
+        raise AssetDeliveryError('ASSET_DELIVERY_DEPENDENCY_MISSING',
+            'Asset dependency closure is incomplete', missing_refs=list(exc.missing_refs)) from None
     return [exports[f'{descriptor.kind}:{descriptor.id}'] for descriptor in closure]
 
 
@@ -338,10 +344,14 @@ def _received_skill_body(raw, name, enabled):
         + '\n' for key, value in header.items()) + '---\n' + body + '\n'
 
 
-# LLM: 只使用已验hash的负载和锁内冲突映射；provenance存metadata，所有新资产的enabled由接收参数显式给出。
-# 函数用途: 生成原canonical批量事务可直接执行的四类资产草稿和脚本附件。
+# LLM: 只消费已验hash负载和冲突映射；适配器缺依赖错误转投递领域码；provenance/禁用状态不赋予执行权限。
+# 函数用途: 生成canonical事务草稿与附件，安装准备阶段也保留缺依赖的准确诊断。
 def prepare_delivery_items(home, envelope, payloads, strategy, enabled, accepted_at):
-    mapping, skipped, existing = delivery_conflict_mapping(home, envelope, strategy)
+    try:
+        mapping, skipped, existing = delivery_conflict_mapping(home, envelope, strategy)
+    except AssetClosureError as exc:
+        raise AssetDeliveryError('ASSET_DELIVERY_DEPENDENCY_MISSING',
+            'Asset dependency closure is incomplete', missing_refs=list(exc.missing_refs)) from None
     skill_names = {f"skill:{item['id']}": mapping[f"skill:{item['id']}"] if mapping[f"skill:{item['id']}"] != item['id']
         else item['name'] for item in envelope['bundled_assets'] if item['kind'] == 'skill'}
     items, extras, installed = [], {}, []
