@@ -8,7 +8,10 @@
 - **脚本执行沙箱与网络/环境边界强化（`S1–S4` / `sec-fix-f`）**：`script_runner.py` 剔除宽泛祖先目录避免 `bwrap --ro-bind / /` 遮蔽只读重挂，拦截 `os.stat`/`os.lstat`/`os.access`/`os.open`（含 `dir_fd` 内核路径还原与前置参数类型归一化）及本机 Gateway 监听端口连接；`_subprocess_env_scrub.py` 默认剥离 `SSH_AUTH_SOCK`、云凭据与代理环境变量。
 - **网关 04:00 安全重启死锁修复与管理员服务日志只读自诊（`Issue 4A + 4B` / `gw-fix-g`）**：`supervisor.py` 默认 `max_restart_attempts=20`、看门狗日志默认独立写入 `logs/supervisor.log`，感知 `planned_restart` 交接窗口（含 180 秒陈旧上限与残存旧进程有序 `SIGTERM -> SIGKILL` 清理）并按连续 600 秒健康窗口重置计数；`standalone_lifecycle.py` 在 `coordinator.lock` 写入持锁者诊断 JSON；`path_access_policy.py` 允许主管理员（`local/main`）在 `full`/`auto`/`ask` 模式下通过文件工具只读自身 `logs/gateway.log` 与 `logs/supervisor.log`，且 `gateway_status` 新增结构化脱敏日志尾段查询参数。
 
-## 2026-10-25 主管理员 Agent 统管自建普通用户全量信息与通用审核流（需求与接口契约定稿，待底座实现）
+## 2026-10-25 主管理员 Agent 统管自建普通用户全量信息与通用审核流（WT2 领域源码已提供，待合并及端到端验收）
+
+- **2026-10-26 WT2 收尾**：新增 `ManagedUserGovernanceService` / `GovernanceReviewStore`，限定已登记普通本地用户；权威控制在宿主 `data/managed_user_governance/<uid>/`，owner 副本仅投影。接通两个人格仓库的受管门与管理员工具十二动作，保留原记忆晋升和资产存储。人格写使用同锁快照、CAS、可恢复 applying 栅栏和同意图幂等回执。四项尺寸 hard 已用职责拆分和删除未使用参数解决，不改 public Host 签名或尺寸基线；验证及补充回归失败对照见 [TESTS.md](TESTS.md)。
+- **集成未完事项**：WT5 的 Host v2 文件不由本工作树修改，合并入口尚未实测；派单组件已证明目标 owner 的消息/任务/wake 记录归属，但未证明目标 Gateway 消费。`list_tasks` 当前子代理扫描仍是 `agents/*/state.json` 展示记录，不能作为 `canonical_state.json` 权威记录全覆盖证明；候选晋升未验证 tool-verified 及非 personal scope 正向链路。上述事项须在 Stage 3 复核，不以本轮静态门或定向绿测替代产品全量验收。
 
 - **权属边界严格限定为「主 Admin（`local/main`）自建本地普通用户（`local/<user_id>`）」**：
   - 仅对登记在 `<host_root>/local_users/<user_id>.json`（`LocalUserStore`）中的自建本地普通用户开放全量统管；外部 IM 接入的普通用户（如 `providers/feishu/users/<open_id>`）完全维持原有隐私与自治规则不变。
