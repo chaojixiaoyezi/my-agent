@@ -1,5 +1,5 @@
-# LLM: 请求内复用索引投影和路径计算，不缓存授权；保持最后匹配、异常优先级、scope及完整正文哈希，打开锚定宿主根。
-# 模块用途: 每次安全打开并完整哈希，缓存已验证内联正文/UTF-8索引，只解码blob目标窗口。
+# LLM: 索引缓存只复用同FD元数据下的解析/字面索引，不缓存授权；匹配路径、scope与正文仍逐次严格验证。
+# 模块用途: 缓存索引及已验证正文计算，避免逻辑引用触发历史路径解析风暴。
 from __future__ import annotations
 
 """explicit refs-only-to-body reader for externalized tool output artifacts."""
@@ -13,6 +13,8 @@ import threading
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from collections.abc import Mapping
+from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from errno import ELOOP
 from pathlib import Path
@@ -74,6 +76,8 @@ class _VerifiedArtifactCache:
 
 _INLINE_ARTIFACT_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
 _BLOB_INDEX_CACHE = _VerifiedArtifactCache(8 * 1024 * 1024)
+_ARTIFACT_INDEX_CACHE = _VerifiedArtifactCache(16 * 1024 * 1024)
+_INDEX_LITERAL_FIELDS = ("path", "sha256", "scoped_call_id", "call_id", "artifact_id", "file_path", "archive_path", "source_ref", "uri")
 # 外置blob流式解码字符偏移检查点的间隔字符数
 _BLOB_CHECKPOINT_CHARS = 4096
 
@@ -147,14 +151,15 @@ def _verify_trusted_artifact_root(trusted_root: Path) -> str:
         return ""
 
 
-# LLM: 只发现一次索引，空ref零发现；浅复制命中记录防止后续调用方修改原候选，并保留索引打开故障供区分未注册与不可读。
-# 函数用途: 为预算和读取生成请求局部查找计划。
+# LLM: 主根完整scoped引用先查；短引用、物理路径及未匹配仍发现全部索引，保留scope、同名歧义和读取故障。
+# 函数用途: 为预算和读取生成同一次计划，主根精确命中时不展开历史目录。
 def prepare_tool_output_artifact_read(request: ReadToolOutputArtifactRequest) -> PreparedToolOutputArtifactRead:
     root = Path(request.root).expanduser().resolve(strict=False)
     artifact_ref = str(request.artifact_ref or "").strip()
     if not artifact_ref:
         return PreparedToolOutputArtifactRead(request, root, "", (), None)
-    paths = tuple(tool_output_index_paths_for_lookup(root))
+    primary = root / "blobs" / "tool_outputs" / "index.jsonl"
+    paths = (primary,) if _primary_index_has_scoped_ref(root, artifact_ref, request) else tuple(tool_output_index_paths_for_lookup(root))
     open_errors: list[str] = []
     try:
         record = _find_index_record(root, artifact_ref, request, index_paths=paths, open_errors=open_errors)
@@ -578,8 +583,8 @@ def _find_index_record(
     return matched
 
 
-# LLM: 单次给定引用执行索引扫描、异常上抛、scope过滤与唯一basename回退；physical_only仅匹配物理路径或唯一wrapper文件名。
-# 函数用途: 按既定优先级在索引候选里定位唯一匹配记录。
+# LLM: 缓存记录离开查找层前深复制，不能让调用方改写下一次scope事实；物理别名仍按原优先级扫描。
+# 函数用途: 按既定作用域优先级定位记录并隔离缓存对象。
 def _lookup_index_record(
     root: Path,
     artifact_ref: str,
@@ -609,21 +614,21 @@ def _lookup_index_record(
     matches = [item.record for item in records if item.exact_match]
     scoped = _scoped_matches(matches, artifact_ref, request, physical_only=physical_only)
     if scoped:
-        return scoped[-1]
+        return deepcopy(scoped[-1])
     if matches and _request_has_scope(request):
         if resolved_ref is not None and not _request_has_strong_scope(request):
-            return matches[-1]
+            return deepcopy(matches[-1])
         return None
     if matches:
-        return matches[-1]
+        return deepcopy(matches[-1])
     if resolved_ref is not None:
         basename = [item.record for item in records if item.basename_match]
-        return basename[0] if ref_path.name.endswith(".json") and len(basename) == 1 else None
+        return deepcopy(basename[0]) if ref_path.name.endswith(".json") and len(basename) == 1 else None
     return None
 
 
-# LLM: 原匹配仍先验证每行路径；physical_only模式只比较物理wrapper路径，不把.blob回退命中到同名call_id/scoped_call_id。
-# 函数用途: 计算一条记录的精确匹配，保留无关行路径错误合同。
+# LLM: 字面匹配先于IO；无物理目标时绝不解析无关路径，命中后的验证由候选层负责。
+# 函数用途: 先用纯内存字段判断逻辑引用，再按需比较物理路径。
 def _record_matches_ref(
     record: dict[str, Any],
     artifact_ref: str,
@@ -632,19 +637,18 @@ def _record_matches_ref(
     path_cache: _ArtifactPathCache | None = None,
     physical_only: bool = False,
 ) -> bool:
-    record_path = _resolve_index_record_path(str(record.get("path", "") or ""), cache=path_cache)
     literal_refs = (
         {str(record.get("path", "") or "")}
         if physical_only
-        else {
-            str(record.get("path", "") or ""),
-            str(record.get("sha256", "") or ""),
-            str(record.get("scoped_call_id", "") or ""),
-            str(record.get("call_id", "") or ""),
-        }
+        else {str(record.get(key, "") or "") for key in _INDEX_LITERAL_FIELDS}
     )
+    if artifact_ref in literal_refs:
+        return True
+    if resolved_ref is None:
+        return False
+    record_path = _resolve_index_record_path(str(record.get("path", "") or ""), cache=path_cache)
     comparable_ref = str(resolved_ref) if isinstance(record_path, str) else resolved_ref
-    return artifact_ref in literal_refs or bool(resolved_ref is not None and record_path == comparable_ref)
+    return record_path == comparable_ref
 
 
 # LLM: cache仅活在本次query；空路径精确求值一次，规范POSIX父目录只缓存解析线索，所有异常路径仍回原实现。
@@ -880,8 +884,8 @@ class _ArtifactIndexSource:
             raise
 
 
-# LLM: IO失败整份丢弃并记录非缺失打开错误，严格UTF8不吞；规范root仅算相对组件，打开锚定原trusted_root。
-# 函数用途: 流式读取一个索引，只保留匹配事实或延迟路径错误。
+# LLM: 每次先安全打开索引，再复用解析；字面索引保留全部同名记录供scope裁决，物理别名仍扫描。
+# 函数用途: 从缓存索引定位候选，保留打开与严格解码错误合同。
 def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *, root: Path | None = None, trusted_root: Path | None = None) -> list[_ArtifactIndexCandidate]:
     source = _ArtifactIndexSource(trusted_root or root, index_path, index_path.relative_to(root).parts) if root is not None else index_path
     if query is None:
@@ -889,7 +893,9 @@ def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *
         return []
     records: list[_ArtifactIndexCandidate] = []
     try:
-        for _, record in iter_decoded_tool_index_objects(source):
+        rows, by_literal = _parsed_artifact_index(source)
+        selected = by_literal.get(query.artifact_ref, ()) if query.resolved_ref is None and not query.physical_only else rows
+        for record in selected:
             candidate = _artifact_index_candidate(record, query)
             if candidate is not None:
                 records.append(candidate)
@@ -901,8 +907,8 @@ def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *
     return records
 
 
-# LLM: 延迟异常与原二轮匹配的优先级相同；physical_only模式只允许物理路径或唯一wrapper文件名匹配，IO失败整份丢弃。
-# 函数用途: 一次计算候选的精确/同名匹配或保留待报告错误。
+# LLM: 逻辑命中才验证注册路径，坏的命中不能被缓存藏掉；物理查找仍保留别名及延迟路径错误。
+# 函数用途: 一次计算候选并验证命中路径，保留待报告错误。
 def _artifact_index_candidate(record: dict[str, Any], query: _ArtifactIndexQuery) -> _ArtifactIndexCandidate | None:
     try:
         exact = _record_matches_ref(
@@ -912,6 +918,8 @@ def _artifact_index_candidate(record: dict[str, Any], query: _ArtifactIndexQuery
             path_cache=query.paths,
             physical_only=query.physical_only,
         )
+        if exact:
+            _resolve_index_record_path(str(record.get("path", "") or ""), cache=query.paths)
         basename = bool(
             (query.resolved_ref is not None or query.physical_only)
             and Path(str(record.get("path", "") or "")).name == _safe_expanduser(Path(query.artifact_ref)).name
@@ -929,6 +937,61 @@ def _validate_artifact_index_file(path: Path) -> None:
             pass
     except OSError:
         pass
+
+
+# LLM: 只借用外层已打开FD，不重新打开路径；原共享解码器仍负责通用换行和晚解码异常。
+# 类用途: 让索引缓存从同一个严格打开的流建立解析投影。
+@dataclass(frozen=True)
+class _OpenArtifactIndex:
+    handle: Any
+
+    # LLM: 外层with已经打开，存在性不再查询磁盘。
+    # 函数用途: 向共享解码器报告当前流存在。
+    def exists(self):
+        return True
+
+    # LLM: nullcontext不接管关闭责任，唯一外层with负责关闭FD。
+    # 函数用途: 将已经打开的二进制流借给共享解码器。
+    def open(self, mode):
+        return nullcontext(self.handle)
+
+
+# LLM: 32键/16MiB有界缓存以路径和FD完整stat失效；开盘与解析不持缓存锁，不缓存权限和失败。
+# 函数用途: 安全打开索引并建立字面引用到有序记录列表的常数时间查找表。
+def _parsed_artifact_index(source):
+    with source.open("rb") as handle:
+        before = _blob_stat_signature(os.fstat(handle.fileno()))
+        key = str(getattr(source, "root", "")), str(getattr(source, "path", source)), *before
+        cached = _ARTIFACT_INDEX_CACHE.get(key)
+        if cached is not None:
+            return cached
+        rows = tuple(row for _, row in iter_decoded_tool_index_objects(_OpenArtifactIndex(handle)))
+        by_literal: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
+                by_literal.setdefault(ref, []).append(row)
+        result = rows, by_literal
+        if _blob_stat_signature(os.fstat(handle.fileno())) == before:
+            _ARTIFACT_INDEX_CACHE.put(key, result)
+        return result
+
+
+# LLM: 仅完整scoped身份可绕过历史发现；真实查找仍执行一次，保留安全打开、命中路径和scope验证。
+# 函数用途: 用已解析主根字面表判断能否只查主根，不额外调用记录查找入口。
+def _primary_index_has_scoped_ref(root, artifact_ref, request):
+    if ":" not in artifact_ref or Path(artifact_ref).is_absolute():
+        return False
+    index = root / "blobs" / "tool_outputs" / "index.jsonl"
+    source = _ArtifactIndexSource(Path(request.root).expanduser(), index, index.relative_to(root).parts)
+    try:
+        _rows, literals = _parsed_artifact_index(source)
+    except OSError:
+        return False
+    matches = list(literals.get(artifact_ref, ()))
+    if _request_has_scope(request):
+        matches = _exact_scope_matches(matches, request)
+    return any(str(row.get("scoped_call_id") or "") == artifact_ref
+               and _record_has_scope(row) and _record_allowed_for_read_scope(row, request) for row in matches)
 
 
 def _record_source_hint(record: dict[str, Any]) -> str:
@@ -977,7 +1040,3 @@ def _is_under_allowed_root(path: Path, root: Path) -> bool:
 
 def _looks_like_path(value: str) -> bool:
     return any(mark in value for mark in ("/", "\\")) or value.endswith(".json")
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()

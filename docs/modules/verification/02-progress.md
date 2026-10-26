@@ -1,3 +1,11 @@
+## Wave4 A5 软Compact线与硬输入窗口分离（分支已实现，待三方集成验收）
+
+`agent_core/tool_call_archive_record.py` 两个归档出口均按实际ToolCall的turn/call身份预留内联结果，强制外置只使用`model_request_input_ceiling`的真实硬输入余量；软触发继续由统一preflight判断。保留已有输出上限预留、配置阈值、开关、预览、未知窗口和预算错误回退，不从软线猜新的容量。
+
+请求私有`ContextEstimateMemo`在锁内记录当前批次未提交结果；预算变化不丢预留，新turn重置。已进入canonical IR的typed ToolResult还须经配对AssistantTurn中的原ToolCall核对turn/run/attempt后按call_id结算，旧turn同裸ID不能提前结算，同call重试不扣两次。`tool_context_window_overflow`新增`remaining_hard_headroom_tokens`，原`remaining_to_compact_tokens`仍表示软余量，真实结果、归档正文、核验与审批事实不改。
+
+独立静态审阅提出的预算变化/批次复用/余量混淆反例已用产品入口先复现再修复；测试和证据范围见根[TESTS](../../../TESTS.md) Wave4节。尚无线上延迟或部署验收，不以局部回归代替全链路。
+
 ## 2026-10-23 外置工具归档前保留完整预览前缀（封板修复 FF-12）
 
 `agent_core/tool_call_archive_record.py` 在外置截断 `outcome.output` 为短 preview 之前，先截取有界原始输出前缀 `archive_output_preview` 并写入 `archive_output_record`，供 `tool_context/live_summary.py` 直接解码完整 JSON 输出，避免从已被截断的预览字符串解析 JSON 导致 `process_session` 等输出的真实尾部标记丢失。

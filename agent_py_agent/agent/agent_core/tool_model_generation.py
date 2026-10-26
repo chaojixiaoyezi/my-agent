@@ -69,7 +69,6 @@ from .runtime.guidance import (
 from .tool_ir_guidance import unforwarded_runtime_guidance
 from .tool_ir_history import (
     native_tool_ir_history,
-    project_native_prompt_history,
     project_native_provider_messages,
     record_runtime_facts_turn_ir,
 )
@@ -113,6 +112,8 @@ _ASSISTANT_DELIVERY_STATE_KEY = "_assistant_delivery_segments"
 _RESUMABLE_PROVIDER_FAILURE_TIMEOUT = "provider_timeout_retried"
 
 
+# LLM: 只携同一次请求的单调时钟起点，不以账本可注入时钟计算组装或准备时长。
+# 类用途: 固定模型生成输入及纯组装/总准备计时边界。
 @dataclass(frozen=True)
 class ModelGenerateParams:
     agent: object
@@ -120,6 +121,9 @@ class ModelGenerateParams:
     prompt: str
     tool_rounds: int
     context_assembly_started_at: float = 0.0
+    request_prepare_started_at: float = 0.0
+    pre_call_housekeeping_ms: float | None = None
+    supervision_sweep_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -224,13 +228,12 @@ class _ModelGenerationState:
 
 
 # LLM: 工具模型轮先按可选真实 child 范围冻结输入，再沿原 IR/preflight/调用/用量路径；冻结未知不改变有效模型。
-# 函数用途: 在上下文预检后调用模型，记录真实 native 工具使用和成本，再完成本轮响应归档。
+# 函数用途: 用单调时钟补齐缺省组装起点，再沿原native预检、用量和响应链调用模型。
 def generate_model_response(request: ModelGenerateParams):
-    from .model.call_runtime import model_call_ledger
     from .subagent.model_selection import capture_first_request_input
 
     if request.context_assembly_started_at <= 0.0:
-        request = replace(request, context_assembly_started_at=float(model_call_ledger(request.agent).context.now()))
+        request = replace(request, context_assembly_started_at=time.monotonic())
     capture_first_request_input(request.agent, request.params, request.prompt)
     request = _materialize_native_prompt_facts(request)
     if preflight := preflight_context_pressure_response(request):
@@ -253,11 +256,13 @@ def generate_model_response(request: ModelGenerateParams):
 
 # LLM: Native dynamic sections enter IR by host source before submission; compare only each
 # source's surviving latest value. Use the same pure projection as preflight before committing IR.
-# 函数用途: 提交预检查所用的同一原生状态投影，去掉 prompt 中重复尾部，保持旧消息前缀。
+# 函数用途: 提交预检查同一内容键缓存的原生投影，去掉重复尾部并保持旧消息前缀。
 def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGenerateParams:
     if not native_tool_use_active(request.params):
         return request
-    provider_prompt, history = project_native_prompt_history(request.params, request.prompt)
+    from .model.context_pressure import project_request_prompt_history
+
+    provider_prompt, history = project_request_prompt_history(request.params, request.prompt)
     native_tool_ir_history(request.params)[:] = history
     return replace(request, prompt=provider_prompt)
 

@@ -48,7 +48,7 @@ _MODEL_SUMMARY_MAX_CHARS = 12_000
 
 # LLM: 原始输出先按 owner/run 及实际 ToolCall 的 attempt/turn 归档；仅真正外置且未声明保留正文的结果使用预览。
 # 读取器有界正文完整进入canonical结果；进程外置预览在JSON被截断前保留流头尾，原文及哈希不变。
-# 函数用途: 按本次工具调用的真实身份写入归档并生成安全的模型结果；日志预览不能代替有界正文。
+# 函数用途: 按真实调用身份归档并预留同批内联预算，日志预览不能代替有界正文。
 def archive_tool_output_projection(
     agent: object,
     params: object,
@@ -92,7 +92,7 @@ def archive_tool_output_projection(
         turn_id=call.turn_id,
         task_id=str(getattr(params, "task_id", "") or ""),
         min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
-        force_externalize=_headroom_forces_externalize(agent, params, outcome.output),
+        force_externalize=_headroom_forces_externalize(agent, params, outcome.output, call=call),
         preview_chars=_config_int(agent, "tool_output_preview_chars"),
         parameters=dict(call.arguments),
         model_parameters=dict((model_call or call).arguments),
@@ -229,7 +229,7 @@ def _projection_refs(
 
 # LLM: The canonical archive row must reuse output already externalized with the executed call's
 # identity; direct callers must persist that same identity before index creation.
-# 函数用途: 汇总一次工具调用的耐久记录；未缓存输出也按实际调用身份写入产物与索引。
+# 函数用途: 汇总一次工具调用记录；未缓存输出沿同一真实turn/call身份预留并归档。
 def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dict[str, object]:
     call_id = record.call.call_id
     cached = record.result.metadata.get("archive_output_record")
@@ -251,7 +251,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
             turn_id=record.call.turn_id,
             task_id=record.params.task_id,
             min_chars=_config_int(agent, "tool_output_externalize_min_chars"),
-            force_externalize=_headroom_forces_externalize(agent, record.params, record.result.output),
+            force_externalize=_headroom_forces_externalize(agent, record.params, record.result.output, call=record.call),
             preview_chars=_config_int(agent, "tool_output_preview_chars"),
             parameters=dict(record.call.arguments),
             model_parameters=dict(record.model_visible_call.arguments),
@@ -345,14 +345,10 @@ def _config_bool(agent: object, key: str, default: bool) -> bool:
 _HEADROOM_OVERFLOW_REASON = "tool_result_headroom"
 
 
-# LLM: 低余量外置（用户第 5 项"单回合超窗"的通用修法）：本条输出的估算 token 不小于距自动压缩点的剩余余量时，给归档请求
-#   打 force_externalize（read_file 分页也外置，正文照常落 artifact，模型只看预览+恢复锚点），并在 live_archive_state 登记
-#   tool_context_window_overflow(reason=tool_result_headroom)，让下一次预检必走统一 Compact 链；这样同一轮多条大结果不会把
-#   上下文冲过窗口再撞 COMPACT_CANDIDATE_TOO_LARGE。余量与 preflight 同一口径（model_visible_context_budget）。
-#   不介入的情况：开关 tool_output_externalize_on_low_headroom 关、配置阈值为 0（本来全外置）、已达配置阈值、输出不长于预览、
-#   窗口未知，或预算计算本身出错（软策略，失败即回到配置阈值，不能挡工具结果）。
-# 函数用途: 判断这条工具输出是否因为上下文余量不足而必须立刻外置。
-def _headroom_forces_externalize(agent: object, params: object, output: object) -> bool:
+# LLM: 硬输入上限复用model_request_input_ceiling并累计未提交IR；软Compact线交给统一预检，不另建策略。
+#   关闭开关、全外置/已达配置阈值、短预览、未知或预算错误仍沿原返回；真实硬溢出才登记并归档正文。
+# 函数用途: 仅在硬输入容量不足时强制外置，软线仍交给下一轮统一Compact预检。
+def _headroom_forces_externalize(agent: object, params: object, output: object, *, call: ToolCall | None = None) -> bool:
     configured = _config_int(agent, "tool_output_externalize_min_chars")
     text = str(output or "")
     if not text or configured == 0 or not _config_bool(agent, "tool_output_externalize_on_low_headroom", True):
@@ -361,7 +357,10 @@ def _headroom_forces_externalize(agent: object, params: object, output: object) 
     if (configured > 0 and size >= configured) or len(text) <= max(0, _config_int(agent, "tool_output_preview_chars")):
         return False
     try:
-        from .model.context_pressure import model_visible_context_budget
+        from .model.context_pressure import (
+            model_request_input_ceiling,
+            model_visible_context_budget,
+        )
 
         budget = model_visible_context_budget(agent, params)
     except Exception:  # noqa: BLE001 - 余量未知时回到配置阈值，归档不能因预算计算失败而中断
@@ -369,16 +368,52 @@ def _headroom_forces_externalize(agent: object, params: object, output: object) 
     if budget.context_window_tokens <= 0:
         return False
     tokens = estimate_tokens(text)
-    if tokens < budget.remaining_to_compact_tokens:
+    ceiling = model_request_input_ceiling(agent, budget.context_window_tokens)
+    remaining = _inline_headroom_remaining(params, call, budget.current_tokens, ceiling, tokens)
+    if tokens < remaining:
         return False
-    _record_headroom_overflow(params, chars=len(text), tokens=tokens, remaining=budget.remaining_to_compact_tokens)
+    _record_headroom_overflow(params, chars=len(text), tokens=tokens, remaining=remaining,
+                              soft_remaining=budget.remaining_to_compact_tokens)
     return True
+
+
+# LLM: 只用原ToolCall/模型turn及typed ToolResult结算；不从预算数值猜批次，不从正文或metadata声称已提交。
+# 函数用途: 在请求私有memo中按真实批次预留未提交IR的结果，已提交的调用不重复计费。
+def _inline_headroom_remaining(params, call, current, ceiling, tokens):
+    from .model.context_estimate_cache import estimate_memo_for
+
+    memo = estimate_memo_for(params)
+    if memo is None:
+        return max(0, ceiling - current)
+    state = getattr(params, "live_archive_state", None)
+    state = state if isinstance(state, dict) else {}
+    turn = getattr(call, "turn_id", "") or state.get("_current_model_turn_id") or ("round", getattr(params, "tool_rounds", 0))
+    scope = tuple(str(getattr(params, name, "") or "") for name in ("run_id", "request_id", "attempt_id"))
+    committed = _committed_inline_call_ids(getattr(params, "tool_ir_history", None) or [], turn, call)
+    return memo.reserve_inline_headroom(current, ceiling, tokens, batch_key=(scope, turn),
+                                       call_id=getattr(call, "call_id", None), committed_ids=committed)
+
+
+# LLM: ToolResult不携turn，须按当前AssistantTurn的原ToolCall配对；旧turn同裸ID不得结算新预留，metadata不作证明。
+# 函数用途: 从canonical IR中提取本批真正提交的调用ID。
+def _committed_inline_call_ids(history, turn, call):
+    from ..backends.tool_ir import AssistantTurn, ToolResult
+
+    active, committed = set(), set()
+    for item in history:
+        if isinstance(item, AssistantTurn):
+            active = {entry.call_id for entry in item.tool_calls if isinstance(entry, ToolCall)
+                      and entry.turn_id == turn and (call is None or
+                      (entry.run_id, entry.attempt_id) == (call.run_id, call.attempt_id))}
+        elif isinstance(item, ToolResult) and item.call_id in active:
+            committed.add(item.call_id)
+    return committed
 
 
 # LLM: 与 tool_context_window 的溢出登记同键同形（omitted_count/original_chars/preserved_count），preflight 按
 #   allow_persistent_apply 单次消费；同一轮多条累加，reason 固定 tool_result_headroom，不写任何正文。
-# 函数用途: 记下"这条结果因余量不足被外置"，让下一次模型请求前先压缩。
-def _record_headroom_overflow(params: object, *, chars: int, tokens: int, remaining: int) -> None:
+# 函数用途: 记录实际硬余量并保留独立软线字段，供下一请求统一压缩和诊断。
+def _record_headroom_overflow(params: object, *, chars: int, tokens: int, remaining: int, soft_remaining: int | None = None) -> None:
     state = getattr(params, "live_archive_state", None)
     if not isinstance(state, dict):
         return
@@ -390,7 +425,8 @@ def _record_headroom_overflow(params: object, *, chars: int, tokens: int, remain
         "preserved_count": int(prior.get("preserved_count") or 0),
         "reason": _HEADROOM_OVERFLOW_REASON,
         "estimated_tokens": int(tokens),
-        "remaining_to_compact_tokens": int(remaining),
+        "remaining_hard_headroom_tokens": int(remaining),
+        "remaining_to_compact_tokens": int(remaining if soft_remaining is None else soft_remaining),
     }
 
 

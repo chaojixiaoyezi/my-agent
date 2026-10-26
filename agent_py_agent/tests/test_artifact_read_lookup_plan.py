@@ -24,7 +24,7 @@ def _prepare(request):
 
 
 # LLM: 三类预算分支共走真实工具和正文校验；没有run时不可为无效预算预扫描。
-# 函数用途: 验证全读在预算开关及缺run下都只查找一次、枚举一次。
+# 函数用途: 验证全读只查找一次，主根完整scoped命中无需枚举历史目录。
 @pytest.mark.parametrize("budget,run_id", [(0, "run-artifact"), (100_000, "run-artifact"), (100_000, "")])
 def test_full_read_uses_one_lookup_and_discovery(tmp_path, budget, run_id):
     _write_externalized_tool_output(tmp_path, content="abcdef" * 100)
@@ -35,7 +35,8 @@ def test_full_read_uses_one_lookup_and_discovery(tmp_path, budget, run_id):
         result = tool.execute({"artifact_ref": "run-artifact:call-artifact", "run_id": run_id, "max_chars": 0})
     assert result.ok, result.output
     assert json.loads(result.output)["content"] == "abcdef" * 100
-    assert lookup.call_count == discover.call_count == 1
+    assert lookup.call_count == 1
+    assert discover.call_count == 0
     assert estimate.call_count == int(budget > 0 and bool(run_id))
     assert tool.read_budget._pending == {}
 
@@ -95,18 +96,18 @@ def test_prepared_mismatch_is_reprepared(tmp_path, field, value, entry):
 
 
 # LLM: 每行匹配一次，异常不提前吞掉；对重复basename不去重，以保留旧拒绝语义。
-# 函数用途: 验证流式候选保留原命中结果但不二次解析候选路径。
+# 函数用途: 验证字面查找只匹配命中行，不再遍历无关记录。
 def test_candidate_match_is_computed_only_once(tmp_path):
     rows = [{"call_id": "hit", "path": ""}, {"call_id": "other", "path": ""}]
     write_index(tmp_path, b"\n".join(json.dumps(row).encode() for row in rows))
     request = reader.ReadToolOutputArtifactRequest(tmp_path, "hit")
     with patch.object(reader, "_record_matches_ref", wraps=reader._record_matches_ref) as match:
         assert reader._find_index_record(tmp_path, "hit", request) == rows[0]
-    assert match.call_count == len(rows)
+    assert match.call_count == 1
 
 
 # LLM: 空path和规范父目录缓存只属于本次查询，不能存到全局或缓存授权结果。
-# 函数用途: 用确定性系统调用计数验证空path与普通叶路径去重，并复查下一查询重新解析。
+# 函数用途: 验证逻辑查找完全不解析无关父目录，保留空path及有界父目录缓存检查。
 def test_empty_paths_and_clean_parents_are_resolved_once_per_lookup(tmp_path):
     directory = tmp_path / "normal"
     directory.mkdir()
@@ -126,7 +127,7 @@ def test_empty_paths_and_clean_parents_are_resolved_once_per_lookup(tmp_path):
         for _ in range(2):
             assert reader._find_index_record(tmp_path, "hit", reader.ReadToolOutputArtifactRequest(tmp_path, "hit")) == rows[-1]
     assert len(empty) <= 2
-    assert sum(str(c.args[0]) == str(directory) for c in realpath.call_args_list) == 2
+    assert sum(str(c.args[0]) == str(directory) for c in realpath.call_args_list) == 0
     assert not any("noise-" in str(c.args[0]) for c in realpath.call_args_list)
     cache = reader._ArtifactPathCache()
     for idx in range(300):

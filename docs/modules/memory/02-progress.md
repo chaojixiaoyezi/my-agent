@@ -1,3 +1,10 @@
+## Wave4 A1 产物索引纯解析复用（分支已实现，待三方集成验收）
+
+- `memory_archive/artifact/reader.py` 的逻辑引用先匹配字面ID，不解析无关path；完整scoped ID在主根命中后不枚举历史目录。路径ref、短ID的scope优先级与basename歧义继续走原规则。
+- 索引先安全打开，再以root/path和该FD的dev/ino/size/mtime/ctime复用有界解析快照；命中记录深复制，缓存不承担路径授权。正文仍须重新通过原nofollow、安全范围与摘要校验，更新或替换索引失效。
+- c5的新分层合同取代旧eager筛选：纯字面筛选不触发路径错误，真正命中坏路径仍抛原错误；索引解码、晚到UTF8和大整数错误不隐藏。相关热路径测试增加最终命中坏目标的断言，而非删除异常验证。
+- 回归、命名差异、死代码清理与未验证的生产耗时见根[TESTS](../../../TESTS.md) Wave4节；不把调用次数改善写成线上绝对加速倍数。
+
 ## 2026-10-26 记忆候选只读行借用、$O(1)$ 索引合并与空临时目录按年龄回收（已实现）
 
 - `memory_store/candidates.py` 新增 `CandidateService.readonly_rows` 供 `retention_scan.py` 与 `learning_exclusions.py` 在锁内构造只读扫描元组，并将 `_merge_existing_candidates` 升级为基于 `candidate_id` 与 `(dedupe_key, target, scope)` 的字典索引查找，将合并复杂度从 $O(N \times M)$ 降至 $O(N + M)$。

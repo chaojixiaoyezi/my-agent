@@ -6,7 +6,7 @@ from __future__ import annotations
 #   用户配置在哪，也没有任何入口，于是凭空断言。这里给出结构化事实：生效值、来源（用户配置 vs 随包默认）、
 #   白名单可改项、安全边界不可改项及原因、保存位置与生效时机。
 #   决策覆盖沿原设置服务；模型只读/撤销实验许可，建立许可必须是宿主显式用户控制，身份不取模型参数。
-# 模块用途: 让原获授权主代理读取/修改配置、列出决策模型或按用户要求测试连接，保留统一权限与失败事实。
+# 模块用途: 给获授权主代理提供紧凑的配置事实和写后回读，决策模型权限与失败事实保持原合同。
 import json
 
 from ..settings.parameter_changes import (
@@ -72,7 +72,8 @@ def _is_main_owner(agent: object | None) -> bool:
 # LLM: 普通 owner 的模型 schema 只保留决策字段，action 必填；运行时仍须二次拒绝 legacy，不能只依赖展示。
 # 函数用途: 从原工具声明裁剪出同名 decision-only 视图，不复制设置服务或模型目录逻辑。
 def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
-    properties = {key: value for key, value in full_spec.input_schema["properties"].items() if key not in {"key", "value"}}
+    properties = {key: value for key, value in full_spec.input_schema["properties"].items()
+                  if key not in {"key", "value", "include_constants", "include_full_config"}}
     properties["action"] = {**properties["action"],
         "enum": ["decision_read", "decision_patch", "decision_reset", "decision_models", "decision_probe", "decision_experiment_revoke"],
         "description": "仅管理当前可信 owner 的决策设置；读取后携完整 revision 修改。连接测试须用户明确要求。"}
@@ -194,7 +195,7 @@ def _with_experiment_evaluation(agent: object, report: dict, thread_id: str) -> 
 
 
 # LLM: main_agent 保留完整配置能力，普通 owner 仅得 decision-only 视图；目录只读，探测只接受已存引用和显式预算。
-# 类用途: 按可信 owner 身份展示配置工具，读取、保存与显式联网测试仍复用原服务。
+# 类用途: 按可信owner展示配置工具，单键回执优先展示结果，读取和修改仍复用原服务。
 class UserConfigTool(BaseTool):
     model_spec = ToolModelSpec(
         name="user_config",
@@ -236,6 +237,8 @@ class UserConfigTool(BaseTool):
                     "description": "action=set 时的目标值（数字、布尔也用字符串传，服务端按类型校验）。",
                 },
                 "query": {"type": "string", "description": "action=search 的关键词，匹配参数名与中文说明。"},
+                "include_constants": {"type": "boolean", "description": "search时显式附加只读源码常数；默认仅参数命中少于5项时附加。"},
+                "include_full_config": {"type": "boolean", "description": "set/reset/revert成功时显式附完整脱敏配置；默认仅回显修改键。"},
                 "change_id": {"type": "string", "description": "action=revert 要回滚的修改记录编号（history 返回的 id，至少 6 位）。"},
                 "reason": {"type": "string", "description": "set/reset/revert 可选：这次修改的原因，记入修改记录；decision_patch/decision_reset 也可带，记入决策设置修改记录并展示（截断 200 字）。"},
                 "scope": {"type": "string", "enum": ["owner", "thread"], "description": "决策设置范围，默认 owner；thread 只指当前可信运行会话。"},
@@ -309,7 +312,7 @@ class UserConfigTool(BaseTool):
 
     # LLM: 用户配置路径取当前进程实际加载的配置文件（见 user_config_path）；参数事实来自参数中心登记表。
     #   capability 键的读取（read_config_fact）与运行值（_spec_view）都按运行时实际路径走，不拿用户配置同目录猜。
-    # 函数用途: 组装读取结果：单键给说明、默认值、当前运行值、来源与能否修改，未给键则给可改范围摘要。
+    # 函数用途: 单键先给事实与参数，只有无键读取才附全量能力目录，避免有界预览丢失结果。
     def _view(self, key: str) -> ToolHandlerOutcome:
         user_path = user_config_path(getattr(self._agent, "config", None))
         packaged = packaged_config_path()
@@ -318,7 +321,6 @@ class UserConfigTool(BaseTool):
             "user_config_path": str(user_path) if user_path is not None else "",
             "user_config_configured": user_path is not None,
             "packaged_config_path": str(packaged),
-            "capability": capability_summary(),
         }
         if key:
             payload["fact"] = read_config_fact(key, user_path=user_path, default_path=packaged,
@@ -327,8 +329,11 @@ class UserConfigTool(BaseTool):
             if spec is not None:
                 payload["parameter"] = _spec_view(spec, getattr(self._agent, "config", None),
                                                   capability_path=capability_path)
+        else:
+            payload["capability"] = capability_summary()
+        payload = {**{name: payload[name] for name in ("fact", "parameter") if name in payload}, **payload}
         return ToolHandlerOutcome(
-            "user_config", True, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+            "user_config", True, json.dumps(payload, ensure_ascii=False, sort_keys=False, default=str)
         )
 
 
@@ -426,7 +431,7 @@ def _decision_model_operation(agent: object | None, operation: str, params: dict
 # LLM: 只有主 owner 能走到这里（execute 已拦普通 owner）；写入统一交给参数中心，actor 记为 model。有写文件副作用。
 #   set/reset/revert 回执对登记了派生规则的参数附上新值在本片会话模型上的实际效果（_with_applied_effect）。
 #   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard 会被写入口拒绝。
-# 函数用途: 执行参数中心的查找、修改、恢复默认、查看记录与回滚。
+# 函数用途: 执行参数中心动作，搜索省重复说明，成功写入直接带单键回读及紧凑摘要。
 def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     action = str(params.get("action") or "").strip().lower()
     key = str(params.get("key") or "").strip()
@@ -440,7 +445,8 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
                                              for spec in found]}
         from ..settings.constants_catalog import entry_with_line, search_constants
 
-        constants = [entry_with_line(entry) for entry in search_constants(str(params.get("query") or key), limit=10)]
+        constants = ([entry_with_line(entry) for entry in search_constants(str(params.get("query") or key), limit=10)]
+                     if params.get("include_constants") is True or len(found) < 5 else [])
         if constants:
             report["constants"] = [{"name": entry["name"], "file": entry["file"], "line": entry.get("line"),
                                     "value": entry.get("value"), "unit": entry.get("unit", ""),
@@ -458,7 +464,27 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
         report = reset_parameter(key, paths=paths, origin=origin)
     else:
         report = set_parameter(key, params.get("value"), paths=paths, origin=origin)
-    return _with_applied_effect(report, getattr(agent, "config", None))
+    report = _with_applied_effect(report, getattr(agent, "config", None))
+    if report.get("ok"):
+        changed_key = str(report.get("key") or key)
+        fact = read_config_fact(changed_key, user_path=user_path, default_path=packaged_config_path(),
+                                capability_path=paths.capability_path, config=getattr(agent, "config", None))
+        report = {"ok": True, "action": action, "config_scope": "current_user", "changed_keys": [changed_key],
+                  "applied_values": {changed_key: report.get("applied_value", fact.get("effective"))},
+                  "config_path": str(report.get("saved_to") or user_path or ""), **report, "fact": fact,
+                  "config": _full_config_receipt(user_path, paths.capability_path) if params.get("include_full_config") is True
+                  else {changed_key: fact.get("effective")}}
+    return report
+
+
+# LLM: 仅显式完整回执使用，正式加载磁盘配置一次，仍沿原running_value及mask_value，不返回原始秘密。
+# 函数用途: 构造用户明确要求的完整脱敏配置，默认修改回执不执行此扫描。
+def _full_config_receipt(user_path, capability_path):
+    from ..settings.config import load_config
+
+    config = load_config(user_path)
+    return {key: mask_value(key, running_value(spec, config, capability_path=capability_path))
+            for key, spec in parameter_registry().items()}
 
 
 # LLM: 只在写入成功且该参数登记了派生规则时附加（parameter_changes.applied_after_change）；按新值与本片会话模型计算
@@ -484,7 +510,7 @@ def _spec_metadata(spec: object) -> dict[str, object]:
 #   （按传入 config 即本片会话模型计算，等于后端实际发送值的同一公式）。capability 键运行值按运行时路径读；
 #   runtime_guard 只读随包并标 source_readonly。只读。
 # LLM: 部署字段标明唯一宿主来源与只读边界，运行值不读取 owner capability_path，也不因展示授予修改权限。
-# 函数用途: 把一条参数登记信息投影成给模型看的结构化事实。
+# 函数用途: 投影参数事实，搜索列表只带派生值，单键查看再给完整派生规则。
 def _spec_view(spec: object, config: object, *, brief: bool = False,
                capability_path: object | None = None) -> dict[str, object]:
     from ..capability.runtime_config_reload import DEPLOYMENT_CAPABILITY_KEYS
@@ -508,7 +534,9 @@ def _spec_view(spec: object, config: object, *, brief: bool = False,
         view.update({"safety": spec.safety, "effect_when": spec.effect, **_spec_metadata(spec)})
     applied = applied_value(spec.key, config)
     if applied is not None:
-        view["applied_value"], view["applied_rule"] = applied
+        view["applied_value"] = applied[0]
+        if not brief:
+            view["applied_rule"] = applied[1]
     return view
 
 
@@ -527,10 +555,10 @@ def _capability_path(agent: object) -> object | None:
 
 
 # LLM: 保留原通用权限/参数大类，同时将参数中心精确结构化码写进 reported_error_code，不能只剩自然语言说明。
-# 函数用途: 把参数中心回执投影成工具结果，让模型明确看到 PARAMETER_BOUNDARY 等原拒绝事实。
+# 函数用途: 按自然顺序输出核心摘要，保留原权限和参数拒绝分类。
 def _outcome(report: dict[str, object]) -> ToolHandlerOutcome:
     if report.get("ok"):
-        return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=True, default=str))
+        return ToolHandlerOutcome("user_config", True, json.dumps(report, ensure_ascii=False, sort_keys=False, default=str))
     code = ("TOOL_PERMISSION_DENIED" if report.get("code") in {"PARAMETER_BOUNDARY", "PARAMETER_SOURCE_READ_ONLY"}
             else "TOOL_INVALID_ARGUMENTS")
     return ToolHandlerOutcome("user_config", False, str(report.get("error") or "配置修改被拒绝"), error_code=code,

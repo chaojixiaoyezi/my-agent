@@ -1,3 +1,9 @@
+## Wave4 A5 按模型turn结算内联结果结构
+
+`archive_tool_output_projection`与`archive_tool_call_record`向`_headroom_forces_externalize`传实际ToolCall。`_inline_headroom_remaining`以原run/request/attempt和ToolCall.turn_id（旧调用方回退当前模型turn）构造批次身份。`_committed_inline_call_ids`按canonical IR的AssistantTurn→ToolResult配对核对原ToolCall的turn/run/attempt，再委托既有请求私有memo的`reserve_inline_headroom`原子结算；不以旧turn裸call_id、预算数值、正文或metadata猜已提交状态。内存预留不进入归档state或持久账本。
+
+`_record_headroom_overflow`独立保存参与硬裁决的余量和原软Compact余量。软线、已知输出cap与硬输入容量仍来自同一context_pressure权威；没有第二条Compact、授权或工具成功判定链。
+
 ## 2026-10-23 外置工具归档记录的完整预览前缀字段
 
 `agent_core/tool_call_archive_record.py::archive_tool_output_projection` 在 `archive_output_record` 中新增可选的 `archive_output_preview`：当输出被外置时，在 `outcome.output` 被替换为短 preview 之前保留有界原始输出前缀（上限 `_ARCHIVE_SUMMARY_PREVIEW_MAX_CHARS`），下游 `tool_context/live_summary.py` 优先读取该字段，不改变归档文件或验证事件结构。
@@ -113,7 +119,7 @@ tool_call_runtime由effective_on_chunk的宿主request_permission能力给原执
 
 `tool_call_archive_record.archive_tool_output_projection` 先归档原始结果，再按明确的
 `output_externalized` 与 `preserve_prompt_output` 选择模型正文；仅外置结果使用归档预览。
-两个外置入口还经 `_headroom_forces_externalize` 判断余量：本条输出估算 token 不小于距自动压缩点的剩余余量时置
+两个外置入口还经 `_headroom_forces_externalize` 判断余量：本条输出估算 token 不小于扣除未提交结果后的硬输入剩余容量时置
 `force_externalize`（`read_file` 分页也外置）并登记 `tool_context_window_overflow(reason=tool_result_headroom)`，
 由预检消费触发统一 Compact；开关 `tool_output_externalize_on_low_headroom`。
 内联和已分页读取保留整页及继续参数，之后共用脱敏/信任投影、canonical ToolResult 与 native IR。

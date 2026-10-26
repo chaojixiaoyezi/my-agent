@@ -773,7 +773,7 @@ def _model_visible_surface_fingerprint(agent: object, params: object | None, pro
 
 
 # LLM: 仅冻结轻量提示/工具事实和浅IR列表；真实消息清扫延迟到memo未命中，和发送共用原引导、ToolChoice及动态状态来源。
-# 函数用途: 为纯指纹和计量准备同源请求表面，空messages标记native但不是已完成的出站请求。
+# 函数用途: 复用同轮prompt/IR纯投影后准备请求表面，工具选择与动态引导仍每次获取。
 def _model_visible_request_projection(agent: object, params: object | None, prompt: object):
     system_instruction = provider_system_instruction(getattr(agent, "backend", None))
     if not native_tool_use_active(params):
@@ -783,9 +783,8 @@ def _model_visible_request_projection(agent: object, params: object | None, prom
         return projection, [], [], set()
 
     from ..tool_ir_guidance import unforwarded_runtime_guidance
-    from ..tool_ir_history import project_native_prompt_history
 
-    projected_prompt, history = project_native_prompt_history(params, prompt)
+    projected_prompt, history = project_request_prompt_history(params, prompt)
     state = getattr(params, "live_archive_state", None)
     already_forwarded = (
         set(state.get("_forwarded_runtime_guidance", set()))
@@ -804,6 +803,51 @@ def _model_visible_request_projection(agent: object, params: object | None, prom
         messages=[], tools=tools or None, tool_choice=choice,
     )
     return projection, history, guidance, already_forwarded
+
+
+# LLM: 冷计算只复制一份IR快照并核对键；投影不能重读可变params导致H键绑定H+X，热命中不再深复制。
+# 函数用途: 为预检和物化复用同一内容快照投影，提交后等价输入命中且原位变化失效。
+def project_request_prompt_history(params, prompt):
+    from copy import copy, deepcopy
+
+    from ..runtime.conversation_state import conversation_runtime_state_section
+    from ..tool_ir_history import project_native_prompt_history
+    from .context_estimate_cache import estimate_memo_for
+
+    history = list(getattr(params, "tool_ir_history", None) or [])
+    conversation = conversation_runtime_state_section(params)
+    key = _prompt_history_projection_key(params, prompt, history, conversation, project_native_prompt_history)
+    memo = estimate_memo_for(params)
+    cached = memo.prompt_projection() if memo is not None else None
+    if key is not None and cached is not None and key in cached[:2]:
+        if cached[1] == _prompt_history_projection_key(params, cached[2], cached[3], conversation, project_native_prompt_history):
+            return cached[2], list(cached[3])
+    projection_params = params
+    if memo is not None and key is not None:
+        try:
+            projection_params = copy(params)
+            snapshot = deepcopy(history)
+            object.__setattr__(projection_params, "tool_ir_history", snapshot)
+            if key != _prompt_history_projection_key(params, prompt, snapshot, conversation, project_native_prompt_history):
+                key, projection_params = None, params
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            key, projection_params = None, params
+    projected, result = project_native_prompt_history(projection_params, prompt, conversation_state=conversation)
+    output_key = _prompt_history_projection_key(params, projected, result, conversation, project_native_prompt_history)
+    if memo is not None and key is not None and output_key is not None and key == _prompt_history_projection_key(params, prompt, getattr(params, "tool_ir_history", None) or [], conversation, project_native_prompt_history):
+        memo.remember_prompt_projection((key, output_key, projected, tuple(result)))
+    return projected, result
+
+
+# LLM: 复用估算器原内容摘要；未知对象/递归保守不缓存，scope和替代投影器变化也失效。
+# 函数用途: 为同轮纯投影构造覆盖完整可见输入的内容键。
+def _prompt_history_projection_key(params, prompt, history, conversation, projector):
+    try:
+        content = _context_value_fingerprint((str(prompt), prompt_cache_layout(prompt), tuple(history), conversation))
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        return None
+    scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))
+    return (scope, content, id(projector)) if content is not None else None
 
 
 # LLM: 不序列化历史；递归折叠容器节点及typed IR字段，字符串沿用估算器的缓存hash。仅存64位摘要，不保留正文或嵌套树副本。
