@@ -193,8 +193,8 @@ class HostDomainPorts:
     observations: object = None
 
 
-# LLM: 治理/投递选择器只表示目标，不改变effective owner；嵌套身份注入仍拒绝，授权逐次核来源。
-# 函数用途: 把原始JSON转换为冻结Call并完成动作参数校验。
+# LLM: 治理固定管理员且拒as_user；投递仅解码现有as_user合同，effective owner仍由原issuer逐次鉴权，payload选择器不授权。
+# 函数用途: 校验并冻结调用，区分管理员治理目标与可授权代用户的资产投递。
 def decode_call(raw: bytes) -> Call:
     row = validate_object(strict_json(raw), closed({
         "schema": {"const": "plugin_host_call.v2"}, "action": text(96, 1), "payload": {"type": "object"}}, {
@@ -204,7 +204,7 @@ def decode_call(raw: bytes) -> Call:
     if spec.requires_idempotency != ("idempotency_key" in row):
         raise HostAPIError("INVALID_SCHEMA")
     users = row["action"].startswith(("users.", "governance.reviews.", "assets.delivery."))
-    if users and "as_user" in row:
+    if row["action"].startswith(("users.", "governance.reviews.")) and "as_user" in row:
         raise HostAPIError("INVALID_SCHEMA")
     reject_identity_injection(row["payload"], users)
     payload = spec.validate_payload(row["payload"])

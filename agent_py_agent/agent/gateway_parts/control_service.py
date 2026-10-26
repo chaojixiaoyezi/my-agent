@@ -3,7 +3,7 @@
 # 整任务停止在任务锁内关闭主执行权和冻结资源；实际回收在锁外，不追随恢复轮。
 # 插话的宿主owner在原控制解析点冻结进guidance，恢复不依据新绑定或sender重新选择归属。
 # LLM: 正count普通input同key追加与原queue共持input T至末append；Count0/无ordinary ID不增加input读取，queued不能迟到active追加。
-# 模块用途: 按认证身份分派会话、目录和分叉及用户管理控制，保持任务、历史、权限和中断边界。
+# 模块用途: 按认证身份分派会话、目录、分叉、用户管理及资产投递控制，保持任务、历史、权限和中断边界。
 from __future__ import annotations
 
 """Conversation task controls backed by request and durable task ledgers.
@@ -461,8 +461,8 @@ def reconcile_gateway_steer_delivery(
 #   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
 # 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
 # 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
-# LLM: 各控制共用命令目录鉴权；dir/fork在鉴权后只交认证owner的Store，Memory人工确认仍须原活封印。
-# 函数用途: 按准确身份分派即时命令、工作目录及分叉，不把控制输入交给普通任务。
+# LLM: 各控制共用目录鉴权；delivery在活动任务路径前只交可信root/owner，不构造Agent；Memory人工确认仍须原活封印。
+# 函数用途: 按准确身份分派即时命令和资产投递，不把控制输入交给普通任务。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -498,6 +498,8 @@ def execute_gateway_conversation_control(
     if command.kind == "users":
         from .users_control_service import execute_users_control
         return execute_users_control(agent, paths, command, scope)
+    if command.kind == "delivery":
+        return _execute_gateway_delivery_control(agent, command, scope)
     if command.kind == "group":
         if resolve_gateway_scope_owner(agent, scope).owner_kind != 'group':
             return ConversationControlResult('group', False, '请在群里单独 @ 助手后使用 /group。', error_code='GROUP_AUTHORIZATION_INVALID')
@@ -3259,6 +3261,20 @@ def resolve_gateway_scope_owner(
     if scope.resolved_owner is not None:
         return scope.resolved_owner
     return _resolve_request_owner_identity(base_agent, _scope_request_payload(scope))
+
+
+# LLM: root仅取原宿主home_paths/config，owner只取认证scope；缺根失败关闭，不从正文、cwd或owner队列反推宿主根。
+# 函数用途: 把Gateway即时投递交给共用工具和原资产事务，不创建模型Agent。
+def _execute_gateway_delivery_control(agent, command, scope):
+    from ..conversation.control_delivery_command import execute_delivery_control
+    from ..user_space.owner_resolver import resolve_owner_home
+
+    root = (getattr(getattr(agent, "home_paths", None), "root", None)
+            or getattr(getattr(agent, "config", None), "my_agent_home", None))
+    if not root:
+        return ConversationControlResult("delivery", False, "宿主根目录尚未就绪。", error_code="HOST_NOT_READY")
+    owner = resolve_owner_home(root, resolve_gateway_scope_owner(agent, scope))
+    return execute_delivery_control(owner.root, owner.owner_id, command)
 
 
 # LLM: TUI/Web passive status reads follow 会话运行时 residency: loaded owners

@@ -1,7 +1,9 @@
-# LLM: 固定适配WT1/WT2领域，身份只来自原Host绑定；缺模块503，写幂等仍归原control账，不创建影子状态。
+# LLM: 固定适配WT1/WT2领域，身份只来自Host绑定；确定领域拒绝保留not_started以释放原幂等账，未知副作用仍失败关闭。
 # 模块用途: 接通九个跨Owner投递与十二个受管本地用户治理动作。
 from __future__ import annotations
 
+from ..assets.delivery_contracts import AssetDeliveryError
+from ..assets.topology import AssetClosureError
 from ..user_space.local_user_store import LocalUserStore
 from ..user_space.owner_resolver import OwnerIdentity
 from .action_specs import action_spec
@@ -30,7 +32,45 @@ DOMAIN_ERRORS = {
     "DELIVERY_BLOCKED_BY_RECIPIENT": 403, "ASSET_DISABLED_BY_OWNER": 403,
     "REVISION_CONFLICT": 409, "DELIVERY_STATE_CONFLICT": 409,
     "DELIVERY_NOT_FOUND": 404, "DELIVERY_TARGET_NOT_FOUND": 404,
+    "ASSET_DELIVERY_DEPENDENCY_MISSING": 422, "ASSET_DEPENDENCY_MISSING": 422,
+    "ASSET_DELIVERY_QUOTA_EXCEEDED": 429, "ASSET_NOT_FOUND": 404,
+    "DELIVERY_SELF_TARGET_FORBIDDEN": 400, "DELIVERY_TARGET_INVALID": 400,
+    "ASSET_CLOSURE_INVALID": 422, "ASSET_BUNDLE_CORRUPTED": 422,
+    "ASSET_DELIVERY_PAYLOAD_INVALID": 400, "PERSONA_LOCKED_BY_ADMIN": 403,
+    "PERSONA_CHANGE_PENDING_ADMIN_REVIEW": 409, "GOVERNANCE_OPERATION_INCOMPLETE": 409,
+    "REVIEW_FEEDBACK_REQUIRED": 400, "MEMORY_LOCKED_BY_ADMIN": 403,
 }
+
+
+# LLM: 保持原HostAPIError构造合同；仅附带领域声明的安全details，HTTP仍沿原to_payload，不修改全局错误协议。
+# 类用途: 将投递缺失依赖等结构化诊断带到Host错误回执。
+class DeliveryDomainRejection(HostAPIError):
+    # LLM: 只复制结构化诊断，不复制异常链、原文件或任意异常文字，不产生业务写入。
+    # 函数用途: 保存可确定尚未开始的投递领域拒绝及安全细节。
+    def __init__(self, code, status, details):
+        super().__init__(code, status, outcome="not_started")
+        self.details = details
+
+    # LLM: 公共HTTP入口消费本投影；保留原code/status/outcome语义，缺失依赖可被调用方机器读取。
+    # 函数用途: 在原错误信封中附加结构化领域诊断。
+    def to_payload(self):
+        return {**super().to_payload(), "details": self.details}
+
+
+# LLM: 只按明确类型/机器码分类；未来AssetDeliveryError子码固定422，原HostAPIError及未知异常不降级副作用状态。
+# 函数用途: 把已知领域拒绝变成可释放executing回执的Host错误。
+def _domain_rejection(error):
+    if isinstance(error, HostAPIError):
+        return error
+    if isinstance(error, AssetClosureError):
+        return DeliveryDomainRejection("ASSET_DELIVERY_DEPENDENCY_MISSING", 422, {"missing_refs": list(error.missing_refs)})
+    code = getattr(error, "error_code", None) or getattr(error, "code", None)
+    if isinstance(error, AssetDeliveryError):
+        code = "ASSET_DELIVERY_DEPENDENCY_MISSING" if code == "ASSET_DEPENDENCY_MISSING" else code
+        return DeliveryDomainRejection(code, DOMAIN_ERRORS.get(code, 422), dict(error.details))
+    if code in DOMAIN_ERRORS:
+        return HostAPIError(code, DOMAIN_ERRORS[code], getattr(error, "outcome", "not_started"))
+    return None
 
 
 # LLM: 惰性import只来自固定产品模块，不接受插件地址；准确缺模块明确未就绪，内部依赖故障不洗成成功。
@@ -95,8 +135,8 @@ def preflight_governance_delivery(action, payload, authorized, context):
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
 
 
-# LLM: 固定错误码不泄露原异常；已调用写领域但坏DTO保持unknown账，不能改成未执行后允许重试。
-# 函数用途: 将领域拒绝转换为Host v2统一HTTP错误。
+# LLM: 确定领域拒绝须在原幂等门内转HostAPIError；未知异常/坏DTO仍保留unknown，不能清账后重复副作用。
+# 函数用途: 调用真实领域并投影含缺依赖明细的稳定Host v2错误。
 def call_governance_delivery(action, payload, authorized, context):
     preflight_governance_delivery(action, payload, authorized, context)
     try:
@@ -115,9 +155,9 @@ def call_governance_delivery(action, payload, authorized, context):
             raise HostAPIError("HOST_NOT_READY", 503)
         return DomainResult(200, result)
     except Exception as error:
-        code = getattr(error, "error_code", None) or getattr(error, "code", None)
-        if code in DOMAIN_ERRORS:
-            raise HostAPIError(code, DOMAIN_ERRORS[code], getattr(error, "outcome", "not_started")) from None
+        rejection = _domain_rejection(error)
+        if rejection is not None:
+            raise rejection from None
         raise
 
 

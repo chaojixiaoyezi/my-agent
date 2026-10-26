@@ -116,11 +116,11 @@ def delivery_action_specs():
     ]
 
 
-# LLM: selector保留完整Owner字符串以让IM/main目标得到领域403；别名只选一个，Handler复核实际注册与名单。
+# LLM: selector保留完整Owner字符串供领域核范围；治理初始修订为0，CAS不改变Handler的注册与名单复核。
 # 函数用途: 为受管用户动作提供目标、修订和分页字段。
 def managed_fields():
     return ({"target_owner_id": text(128, 1), "user_id": text(128, 1)},
-            {"expected_revision": integer(2**63 - 1, 1)},
+            {"expected_revision": integer(2**63 - 1, 0)},
             {"limit": {**integer(100, 1), "default": 50}})
 
 

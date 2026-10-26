@@ -537,3 +537,226 @@ def test_domain_error_codes_have_fixed_http_mapping(governed_host, wired_domains
         dispatch_call(authorized, ports)
     assert (failure.value.code, failure.value.status) == (code, status)
     assert "private domain detail" not in str(failure.value)
+
+
+# LLM: 真实Gateway组合、安装令牌和普通账号均取原fixture；不替换领域仓库或构造模型Agent。
+# 函数用途: 为Stage3回归连接实际Host解析器、治理服务和投递事务。
+@pytest.fixture
+def stage3_host(governed_host):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.plugin_host.gateway_composition import build_gateway_host_composition
+
+    _, source, owner, *_ = governed_host
+    server = SimpleNamespace(agent=SimpleNamespace(config=SimpleNamespace(my_agent_home=owner.root)), control_plane=None)
+    composition = build_gateway_host_composition(server, None)
+    try:
+        yield composition, composition.issuer.ingress(source._lease), owner
+    finally:
+        composition.close()
+
+
+# LLM: 必须经过正式decode/issuer/dispatch及原幂等账，不用直接领域调用替代Host入口验收。
+# 函数用途: 对临时真实Host执行一个固定协议请求。
+def stage3_call(host, action, payload=None, mode="read", as_user=None):
+    from agent_py_agent.agent.plugin_host.composition import dispatch_call
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+
+    composition, source, _ = host
+    call = decode_call(wire(action, payload, mode, as_user))
+    return dispatch_call(composition.issuer.authorize(source, call), composition.ports)
+
+
+@pytest.mark.parametrize("action,payload,field,value", [
+    ("users.managed.policy.set", {"policy_patch": {"role_title": "合成角色"}}, "role_title", "合成角色"),
+    ("users.managed.persona.set", {"user_md": "合成用户说明"}, "USER.md", "合成用户说明"),
+])
+def test_stage3_zero_revision_reaches_real_governance_write(stage3_host, action, payload, field, value):
+    from agent_py_agent.agent.user_space.managed_user_governance import ManagedUserGovernanceService
+
+    _, _, owner = stage3_host
+    result = stage3_call(stage3_host, action, {"target_owner_id": "local/alice", "expected_revision": 0, **payload}, "write")
+    assert result.http_status == 200 and result.data["revision"] == 1
+    service = ManagedUserGovernanceService(owner.root)
+    saved = (service.get_persona("local/alice") if action.endswith("persona.set")
+             else service.get_overview("local/alice")["governance_policy"])
+    assert saved[field] == value
+
+
+def test_stage3_zero_revision_memory_add_schema():
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+
+    call = decode_call(wire("users.managed.memories.mutate", {
+        "target_owner_id": "local/alice", "operation": "add_memory", "content": "合成事实", "expected_revision": 0}, "write"))
+    assert call.payload["expected_revision"] == 0
+
+
+@pytest.mark.parametrize("action,mode", [("assets.delivery.preview_bundle", "read"), ("assets.delivery.send", "write")])
+def test_stage3_real_missing_closure_is_retryable_domain_rejection(stage3_host, action, mode):
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.assets.workflow_store import (
+        WorkflowDefinition,
+        WorkflowStepSpec,
+        WorkflowStore,
+    )
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    _, _, owner = stage3_host
+    WorkflowStore(owner.home_dir).save_workflow(WorkflowDefinition(AssetDescriptor("broken", "workflow", "缺依赖"),
+        (WorkflowStepSpec("step", "步骤", "deterministic_script", script_id="absent"),)))
+    payload = {"root_asset_kind": "workflow", "root_asset_id": "broken"}
+    if mode == "write":
+        payload["recipient_owner_id"] = "local/alice"
+    for _ in range(2):
+        with pytest.raises(HostAPIError) as failure:
+            stage3_call(stage3_host, action, payload, mode)
+        assert (failure.value.status, failure.value.code, failure.value.outcome) == (
+            422, "ASSET_DELIVERY_DEPENDENCY_MISSING", "not_started")
+        assert failure.value.to_payload()["details"]["missing_refs"] == ["script:absent"]
+    ScriptStore(owner.home_dir).save_script(AssetDescriptor("absent", "script", "补齐依赖"), 'print("{}")')
+    assert stage3_call(stage3_host, action, payload, mode).http_status == 200
+
+
+@pytest.mark.parametrize("action", ["assets.delivery.inbox.list", "assets.delivery.send", "assets.delivery.accept"])
+def test_stage3_public_delivery_as_user_uses_real_alice_context(stage3_host, action):
+    from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+    _, _, owner = stage3_host
+    alice = resolve_owner_home(owner.root, OwnerIdentity.local_user("alice"))
+    ScriptStore(owner.home_dir).save_script(AssetDescriptor("incoming", "script", "来包"), 'print("{}")')
+    service = AssetDeliveryService(owner.root)
+    sent = service.send_bundle("local/main", "local/alice", "script", "incoming")
+    payload, mode = {}, "read"
+    if action.endswith(".send"):
+        ScriptStore(alice.home_dir).save_script(AssetDescriptor("outgoing", "script", "发件"), 'print("{}")')
+        payload = {"recipient_owner_id": "local/main", "root_asset_kind": "script", "root_asset_id": "outgoing"}
+        mode = "write"
+    elif action.endswith(".accept"):
+        payload, mode = {"delivery_id": sent["delivery_id"]}, "write"
+    result = stage3_call(stage3_host, action, payload, mode, "alice")
+    assert result.http_status == 200
+    if action.endswith("inbox.list"):
+        assert [row["delivery_id"] for row in result.data["deliveries"]] == [sent["delivery_id"]]
+    elif action.endswith(".accept"):
+        assert ScriptStore(alice.home_dir).get_script("incoming")["enabled"] is False
+    else:
+        inbox = service.list_inbox("local/main")["deliveries"]
+        assert inbox[-1]["sender_owner_id"] == "local/alice"
+
+
+@pytest.mark.parametrize("scope,uid", [("private", "alice"), ("public", "bobby")])
+def test_stage3_delivery_as_user_rejected_by_authorization(tmp_path, scope, uid):
+    from agent_py_agent.agent import plugin_host_api as api
+    from agent_py_agent.agent.plugin_host.authorization import IngressIssuer
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.plugin_manifest_host_v9 import host_capabilities
+    from agent_py_agent.tests.test_plugin_host_v2_grants import active_grant
+
+    _, _, entry, ref = active_grant(tmp_path, sorted(host_capabilities()), scope)
+    api.set_host_api_base("http://127.0.0.1:8420")
+    issuer = IngressIssuer()
+    try:
+        source = issuer.ingress(api.issue_host_api_env(ref, entry.manifest.plugin_id)[api.HOST_API_TOKEN_ENV])
+        call = decode_call(wire("assets.delivery.inbox.list", as_user=uid))
+        with pytest.raises(HostAPIError) as failure:
+            issuer.authorize(source, call)
+        assert failure.value.status == 403
+    finally:
+        issuer.close()
+        api.set_host_api_base(None)
+
+
+@pytest.mark.parametrize("action,payload,mode", [
+    ("users.managed.persona.get", {"target_owner_id": "local/alice"}, "read"),
+    ("governance.reviews.list", {"target_owner_id": "local/alice"}, "read"),
+])
+def test_stage3_governance_still_rejects_as_user_at_decode(action, payload, mode):
+    from agent_py_agent.agent.plugin_host.contracts import decode_call
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    with pytest.raises(HostAPIError) as failure:
+        decode_call(wire(action, payload, mode, "alice"))
+    assert failure.value.code == "INVALID_SCHEMA"
+
+
+@pytest.mark.parametrize("code,status", [
+    ("ASSET_DELIVERY_DEPENDENCY_MISSING", 422), ("ASSET_DEPENDENCY_MISSING", 422),
+    ("ASSET_DELIVERY_QUOTA_EXCEEDED", 429), ("ASSET_NOT_FOUND", 404), ("DELIVERY_SELF_TARGET_FORBIDDEN", 400),
+    ("ASSET_CLOSURE_INVALID", 422), ("ASSET_BUNDLE_CORRUPTED", 422), ("ASSET_DELIVERY_PAYLOAD_INVALID", 400),
+    ("PERSONA_LOCKED_BY_ADMIN", 403), ("PERSONA_CHANGE_PENDING_ADMIN_REVIEW", 409),
+    ("GOVERNANCE_OPERATION_INCOMPLETE", 409), ("REVIEW_FEEDBACK_REQUIRED", 400), ("MEMORY_LOCKED_BY_ADMIN", 403),
+    ("ASSET_DELIVERY_FUTURE_REJECTION", 422),
+])
+def test_stage3_deterministic_errors_clear_executing_receipt(stage3_host, monkeypatch, code, status):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+    from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    attempts = []
+
+    def rejected(self, *args, **kwargs):
+        attempts.append(True)
+        raise AssetDeliveryError(code, "合成领域拒绝", missing_refs=["script:absent"])
+
+    monkeypatch.setattr(AssetDeliveryService, "send_bundle", rejected)
+    payload = {"recipient_owner_id": "local/alice", "root_asset_kind": "script", "root_asset_id": "fixture"}
+    for _ in range(2):
+        with pytest.raises(HostAPIError) as failure:
+            stage3_call(stage3_host, "assets.delivery.send", payload, "write")
+        expected = "ASSET_DELIVERY_DEPENDENCY_MISSING" if code == "ASSET_DEPENDENCY_MISSING" else code
+        assert (failure.value.code, failure.value.status, failure.value.outcome) == (expected, status, "not_started")
+        assert failure.value.details == {"missing_refs": ["script:absent"]}
+        assert failure.value.to_payload()["details"] == failure.value.details
+    assert attempts == [True, True]
+
+
+# LLM: 同一真实Gateway入口执行解析、身份解析、工具和仓库；只禁止无关活动任务路径，绝不替换投递服务。
+# 函数用途: 验证生产控制入口冷启动可用，且scope身份不受metadata冒充影响。
+def test_stage3_gateway_delivery_send_inbox_accept_real_entry(stage3_host, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
+    from agent_py_agent.agent.gateway_parts import control_service
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        OwnerIdentity,
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    _, _, owner = stage3_host
+    agent = SimpleNamespace(home_paths=home_paths_with_owner(home_paths(owner.root), owner))
+    paths = gateway_paths_from_root(owner.root / "gateway")
+    ScriptStore(owner.home_dir).save_script(AssetDescriptor("gateway-script", "script", "命令投递"), 'print("{}")')
+
+    def no_live_turn(*args, **kwargs):
+        pytest.fail("delivery fell through to active-turn controls")
+
+    monkeypatch.setattr(control_service, "_active_control_target", no_live_turn)
+
+    def run(text, identity):
+        scope = control_service.GatewayControlScope("untrusted-display", "feishu", "fixture-session",
+            metadata={"owner_id": "local/main", "user_id": "main"}, resolved_owner=identity)
+        command = parse_conversation_control(text)
+        assert command is not None and command.valid
+        result = control_service.execute_gateway_conversation_control(agent, paths, command, scope)
+        assert result.kind == "delivery" and result.ok, result
+        return result.details
+
+    main, alice = OwnerIdentity.local_main(), OwnerIdentity.local_user("alice")
+    sent = run("/delivery send local/alice script:gateway-script 合成备注", main)
+    inbox = run("/delivery inbox", alice)
+    assert [item["delivery_id"] for item in inbox["deliveries"]] == [sent["delivery_id"]]
+    accepted = run("/delivery accept " + sent["delivery_id"], alice)
+    assert accepted["status"] == "accepted"
+    target = resolve_owner_home(owner.root, alice)
+    assert ScriptStore(target.home_dir).get_script("gateway-script")["enabled"] is False
+    assert ScriptStore(owner.home_dir).get_script("gateway-script")["enabled"] is True
