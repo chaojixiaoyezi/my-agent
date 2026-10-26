@@ -40,11 +40,13 @@ class DeliverySendOptions:
 # LLM: error_code及details是唯一机器读口；调用方只传已脱敏说明或安全ID，不得放入原始文件、令牌或异常正文。
 # 类用途: 给投递和运行禁用门提供可统一转换成工具回执的错误。
 class AssetDeliveryError(ValueError):
-    # LLM: 不读写文件、不根据文案分类；details由抛出点构造且保持结构化。
-    # 函数用途: 保存机器错误码及安全诊断字段。
+    # LLM: 不读写文件、不根据文案分类；缺依赖诊断同时保留属性及details，工具必须完整传递安全字段。
+    # 函数用途: 保存机器错误码和结构化诊断，避免缺依赖引用在跨层转换时丢失。
     def __init__(self, error_code: str, message: str = '资产操作未完成', **details):
         self.error_code = error_code
         self.details = details
+        if 'missing_refs' in details:
+            self.missing_refs = self.details['missing_refs'] = list(details['missing_refs'])
         super().__init__(message)
 
     # LLM: 仅返回显式错误字段，不包含异常链或调用栈中的秘密。

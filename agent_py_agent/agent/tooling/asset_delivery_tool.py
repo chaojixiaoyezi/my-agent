@@ -6,6 +6,7 @@ from pathlib import Path
 
 from ..assets.delivery_contracts import AssetDeliveryError
 from ..assets.delivery_service import AssetDeliveryService, _identity
+from ..assets.topology import AssetClosureError
 from .input_schema import validate_tool_input
 from .models import (
     ApprovalPolicy,
@@ -113,8 +114,8 @@ class AssetDeliveryTool(BaseTool):
             return _outcome('asset_delivery', {'error': '缺少条件必填参数', 'required': list(required)}, False, 'TOOL_INVALID_ARGUMENTS')
         return None
 
-    # LLM: 领域报码保留于JSON和reported_error_code；handler开始后的故障可能已有副作用，不伪称未写入或自动重试。
-    # 函数用途: 执行固定Owner动作并返回原生结构化回执。
+    # LLM: 完整保留领域details；适配器旧ClosureError统一为投递缺依赖码，handler异常不伪称未写入或重试。
+    # 函数用途: 执行固定Owner动作并保留缺依赖等结构化诊断。
     def execute(self, params):
         invalid = self.validate_invocation(params, None)
         if invalid is not None:
@@ -124,8 +125,11 @@ class AssetDeliveryTool(BaseTool):
             ok = data.get('ok') is True
             return _outcome('asset_delivery', data, ok, data.get('error_code', '') if not ok else '',
                 effect_outcome='' if ok else 'unknown')
-        except AssetDeliveryError as exc:
-            return _outcome('asset_delivery', exc.to_dict(), False, exc.error_code, effect_outcome='unknown')
+        except (AssetDeliveryError, AssetClosureError) as exc:
+            error = exc if isinstance(exc, AssetDeliveryError) else AssetDeliveryError(
+                'ASSET_DELIVERY_DEPENDENCY_MISSING', 'Asset dependency closure is incomplete',
+                missing_refs=list(exc.missing_refs))
+            return _outcome('asset_delivery', error.to_dict(), False, error.error_code, effect_outcome='unknown')
         except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
             return _outcome('asset_delivery', {'ok': False, 'error_code': 'ASSET_DELIVERY_FAILED',
                 'message': type(exc).__name__}, False, 'TOOL_EXECUTION_FAILED', effect_outcome='unknown')
