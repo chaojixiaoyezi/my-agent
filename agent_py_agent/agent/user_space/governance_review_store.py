@@ -166,7 +166,7 @@ class GovernanceReviewStore:
                        "patch_override": copy.deepcopy(patch_override)}
             return _decide_review_locked(control, home, item, request, expected_revision)
 
-    # LLM: 消费者必须同owner/类型/动作摘要；只消费已应用票据，原review锁内一次性发表，不执行命令。
+    # LLM: 消费者必须同owner/类型且提供非空完整动作或SHA摘要；省略匹配不得消费，原review锁内一次性发表。
     # 函数用途: 核验并消费管理员签发的精确动作票据，拒绝跨用户和重复消费。
     def consume_approved_action(self, review_id: str, *, target_user: str, review_type: str,
                                 action_match: dict[str, Any] | str | None = None) -> dict[str, Any]:
@@ -181,8 +181,13 @@ class GovernanceReviewStore:
                     or item["review_type"] != review_type or not record or record.get("target_owner_id") != f"local/{uid}"
                     or record.get("review_type") != review_type or not record.get("approval_ticket")):
                 raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
-            expected = _action_digest(action_match) if isinstance(action_match, dict) else action_match
-            if expected is not None and expected != record["action_sha256"]:
+            if type(action_match) not in {dict, str} or not action_match:
+                raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
+            try:
+                expected = _action_digest(action_match) if type(action_match) is dict else action_match
+            except (ValueError, TypeError):
+                raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409) from None
+            if expected != record["action_sha256"]:
                 raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
             if record.get("consumed_at"):
                 raise HostAPIError("APPROVAL_ALREADY_CONSUMED", 409)
@@ -312,28 +317,33 @@ def _execute_review(root: Path, home, item: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("unsupported review effect")
 
 
-# LLM: 只冻结原正文/修订上的变更，不写人格；后续沿原set_persona幂等回执恢复同一计划。
+# LLM: 两种请求的显式修订与单目标SHA均核对同一current快照；冻结后不透传SHA，沿原set_persona幂等恢复。
 # 函数用途: 为审核人格请求计算绑定快照的持久写入参数。
 def _prepare_review_persona_action(service, home, action: dict[str, Any]) -> dict[str, Any]:
     from hashlib import sha256
 
     from ..capability.persona_repository import _apply_operation_to_text
 
-    if any(key in action for key in ("soul_md", "agents_md", "user_md")):
+    current = service.get_persona(home.owner_id)
+    _require_revision(action.get("expected_revision"), current["revision"])
+    targets = [key for key in ("soul_md", "agents_md", "user_md") if key in action]
+    if targets:
         allowed = {"soul_md", "agents_md", "user_md", "persona_mode", "expected_revision"}
+        if len(targets) == 1:
+            allowed.add("expected_sha256")
         if set(action) - allowed:
             raise ValueError("unsupported persona set fields")
-        return {**action, "expected_revision": action.get("expected_revision", service.get_persona(home.owner_id)["revision"])}
+        if "expected_sha256" in action and action["expected_sha256"] != sha256(current[targets[0].removesuffix("_md").upper() + ".md"].encode()).hexdigest():
+            raise HostAPIError("REVISION_CONFLICT", 409)
+        return {**{key: value for key, value in action.items() if key != "expected_sha256"}, "expected_revision": current["revision"]}
     target = action.get("target", "soul")
     if target not in {"soul", "agents", "user"}:
         raise ValueError("invalid persona target")
     operation = action.get("operation", "mutate")
     if operation not in {"mutate", "mutate_batch", "write_text"}:
         raise ValueError("source changes must be resubmitted through the original source authorization")
-    current = service.get_persona(home.owner_id)
     previous = current[target.upper() + ".md"]
-    expected = action.get("expected_sha256", "")
-    if expected and expected != sha256(previous.encode()).hexdigest():
+    if "expected_sha256" in action and action["expected_sha256"] != sha256(previous.encode()).hexdigest():
         raise HostAPIError("REVISION_CONFLICT", 409)
     if operation == "write_text":
         next_text = action["content"]

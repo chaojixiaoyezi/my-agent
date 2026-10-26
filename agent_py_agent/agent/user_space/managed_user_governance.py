@@ -273,15 +273,15 @@ class ManagedUserGovernanceService:
         _uid, _identity, home = self._target(target_owner_id)
         return _list_managed_memories(home, category, include_candidates, status_filter)
 
-    # LLM: actor先核验再建立精确目标活栈；锁定默认开启，旧locked显式参数保留优先级，不信任source文字。
+    # LLM: actor先核验再建立精确目标活栈；反射可见的锁参数保留旧locked优先级；options不授身份。
     # 函数用途: 注入、修正、删除或审核受管用户记忆。
     def mutate_memories(self, target_owner_id: str, operation: str, *, entry_id: str = "", candidate_id: str = "",
-                        content: str = "", category: str = "long_term", expected_revision: int | None = None,
-                        **options: Any) -> dict[str, Any]:
+                        content: str = "", category: str = "long_term", locked: bool | None = None,
+                        expected_revision: int | None = None, lock_memory: bool = True,
+                        options: dict[str, Any] | None = None) -> dict[str, Any]:
         _uid, _identity, home = self._target(target_owner_id)
-        if set(options) - {"locked", "lock_memory"}:
-            raise TypeError(f"unexpected keyword arguments: {sorted(set(options) - {'locked', 'lock_memory'})}")
-        locked, lock_memory = options.get("locked"), options.get("lock_memory", True)
+        if options is not None and (type(options) is not dict or options):
+            raise ValueError("unsupported memory options")
         if type(lock_memory) is not bool or locked is not None and type(locked) is not bool:
             raise ValueError("memory lock flags must be boolean")
         request = _ManagedMemoryMutation(operation, entry_id, candidate_id, content, category,
@@ -292,7 +292,7 @@ class ManagedUserGovernanceService:
         finally:
             _ADMIN_MEMORY_WRITE.reset(token)
 
-    # LLM: 闭包沿原资产仓库安装；身份只取已解析home，不向安装层重复传未使用UID；不执行代码。
+    # LLM: 闭包在安装前读取并校验依赖；缺源/目标在读取阶段转ASSET_NOT_FOUND，不把部分安装错误洗成未开始。
     # 函数用途: 给受管用户配发工作流、脚本、技能及其依赖。
     def provision_assets(self, target_owner_id: str, asset_kind: str, asset_id: str, auto_enable: bool = False,
                          conflict_strategy: str = "overwrite", note: str = "", payload_override: dict | None = None) -> dict[str, Any]:
@@ -323,6 +323,16 @@ class ManagedUserGovernanceService:
     def list_tasks(self, target_owner_id: str, status_filter: str | None = None, limit: int = 50) -> dict[str, Any]:
         _uid, _identity, home = self._target(target_owner_id)
         return _list_managed_tasks(home, status_filter, limit)
+
+    # LLM: 目标与管理员身份由原resolver核验；票据仅按完整动作消费一次，不在此执行命令或扩权。
+    # 函数用途: 为宿主调用方及管理员工具接通原审核票据消费门。
+    def consume_approved_review_ticket(self, target_owner_id: str, review_id: str, review_type: str,
+                                      action_match: dict[str, Any]) -> dict[str, Any]:
+        from .governance_review_store import GovernanceReviewStore
+
+        _uid, _identity, home = self._target(target_owner_id)
+        return GovernanceReviewStore(self.root_dir, actor_owner=self.actor_owner).consume_approved_action(
+            review_id, target_user=home.owner_id, review_type=review_type, action_match=action_match)
 
 
 # LLM: 聚合原控制、配额统计和领域仓库；源错误不能当零，近期任务数量必须携带扫描上限。
@@ -634,7 +644,7 @@ def _list_managed_memories(home, category, include_candidates, status_filter):
         rows.extend({**asdict(row), "category": "lesson"} for row in LessonRepository(home.lessons_memory_dir, home.routing_index_md).list())
     if category in {None, "hot"}:
         rows.extend({**asdict(row), "category": "hot"} for row in HotRuleRepository(home.memory_hot_md).list())
-    pending = [row.to_dict() for row in candidates.list(statuses={status_filter} if status_filter else None)] if include_candidates else []
+    pending = [row.to_record() for row in candidates.list(statuses={status_filter} if status_filter else None)] if include_candidates else []
     return {"target_owner_id": home.owner_id, "memories": rows, "candidates": pending,
             "query_evidence": {"category": category, "include_candidates": include_candidates,
                                "status_filter": status_filter, "memories_returned": len(rows), "candidates_returned": len(pending)}}
@@ -658,7 +668,7 @@ def require_managed_memory_write(agent_home, owner_home, memory_id=None) -> None
         raise HostAPIError("MEMORY_LOCKED_BY_ADMIN", 403)
 
 
-# LLM: 只认规范正式JSONL；普通写持policy锁跨正式提交，与管理员写采用同一policy→quota→memory锁序。
+# LLM: 只认规范正式JSONL；调用方先领quota，普通写持policy锁跨正式提交，统一quota→policy→memory锁序。
 # 函数用途: 为JSONL唯一批量写口提供不授权的受管锁保护。
 @contextmanager
 def managed_memory_batch_guard(memory_path: Path, operations):
@@ -680,6 +690,16 @@ def managed_memory_batch_guard(memory_path: Path, operations):
         yield
 
 
+# LLM: 只读取规范受管正式JSONL对应的宿主策略；非受管目录不新增策略或写入，不把镜像当权威。
+# 函数用途: 给浓缩选择器返回管理员锁定的精确正式记忆ID。
+def managed_locked_memory_ids(memory_path: Path) -> set[str]:
+    path = Path(memory_path).absolute()
+    if tuple(path.parts[-3:]) != ("memory", "long_term", "memory.jsonl"):
+        return set()
+    context = _persona_governance(path.parents[2])
+    return set(context[0].policy()["memory_governance"]["admin_locked_memory_ids"]) if context else set()
+
+
 # LLM: 晋升必须核原消息/工具证据及完整候选快照；缺工具verifier拒绝晋升，不采信候选自报success。
 # 函数用途: 以目标真实仓库装配唯一MemoryPromotionService。
 def _managed_promotion(home, memory, candidates):
@@ -698,12 +718,13 @@ def _managed_promotion(home, memory, candidates):
         message_verifier=ConversationMessageEvidenceVerifier(store), exclusion_store=store))
 
 
-# LLM: 每个动作进入原正式库/候选流水；参数由不可变请求传递，UID仅取已解析home，不增加身份来源。
+# LLM: 每个动作进入原正式库/候选流水；已晋升approve在同目标scope核验后只返原快照，不重审或重复写事实。
 # 函数用途: 完成管理员记忆增改删、候选批准/驳回或陈旧候选清理。
 def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutation):
     from datetime import datetime, timedelta, timezone
 
     from ..capability.persona_repository import PersonaMutationRequest, PersonaRepository
+    from ..memory_store.candidate_models import MemoryScope
 
     uid = home.identity.owner_id
     operation, entry_id, candidate_id = request.operation, request.entry_id, request.candidate_id
@@ -717,14 +738,16 @@ def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutatio
         if expected_revision is not None:
             raise ValueError("candidate operations use the original complete-snapshot CAS, not a numeric revision")
         candidate = candidates.get(candidate_id)
-        if candidate.scope.scope_key != home.owner_id:
+        if MemoryScope.from_value(candidate.scope).scope_key != home.owner_id:
             raise ManagedUserScopeDeniedError()
+        if operation == "approve_candidate" and candidate.status == "promoted":
+            return {"ok": True, "already_promoted": True, "candidate": candidate.to_record()}
         promotion = _managed_promotion(home, memory, candidates)
         reviewed = promotion.review(candidate, approved=operation == "approve_candidate", reviewer="local/main")
         if operation == "reject_candidate":
-            return {"ok": True, "candidate": reviewed.to_dict()}
+            return {"ok": True, "candidate": reviewed.to_record()}
         result = promotion.promote(candidate_id, reviewer="local/main", confirmed=True, expected_candidate=reviewed)
-        return {"ok": result.promoted, "promotion": result.to_dict(), "candidate": candidates.get(candidate_id).to_dict()}
+        return {"ok": result.promoted, "promotion": result.to_dict(), "candidate": candidates.get(candidate_id).to_record()}
     if operation == "clear_stale_candidates":
         policy = LocalUserStore(home.root).read_json(("owners", "local", uid, "retention.json")) or {}
         if policy.get("legal_hold"):
@@ -750,19 +773,26 @@ def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutatio
     return _write_managed_formal_memory(home, memory, request)
 
 
-# LLM: 同policy锁覆盖正式写和锁ID增删；管理员权只来自服务活栈，旧source字段不能用于绕过。
+# LLM: quota→policy覆盖正式写和锁ID增删；批量提交复用原准入，不再policy→quota或重复领取不可重入锁。
 # 函数用途: 写正式记忆并同步管理员锁定或解锁状态。
 def _write_managed_formal_memory(home, memory, request: _ManagedMemoryMutation):
     control = _GovernanceControl(home.root, home.identity.owner_id)
-    with control.locked():
+    with memory.quota_enforcer.admission() as admission, control.locked():
         if request.operation == "add_memory":
             _require_revision(request.expected_revision, 0)
-            entry = memory.add("system", request.content, kind="fact", source="admin_managed_governance",
-                               attributes={"admin_injected": True, "updated_by": "local/main"})
-        elif request.operation == "edit_memory":
-            entry = memory.replace(request.entry_id, request.content, expected_version=request.expected_revision, source="admin_managed_governance")
+            operation = {"action": "add", "role": "system", "content": request.content, "kind": "fact",
+                         "source": "admin_managed_governance", "attributes": {"admin_injected": True, "updated_by": "local/main"}}
         else:
-            entry = memory.remove(request.entry_id, expected_version=request.expected_revision, source="admin_managed_governance")
+            operation = {"action": "replace" if request.operation == "edit_memory" else "remove", "entry_id": request.entry_id,
+                         "content": request.content, "expected_version": request.expected_revision, "source": "admin_managed_governance"}
+        entries = memory.apply_batch([operation], _admission=admission)
+        if entries:
+            entry = entries[0]
+        else:
+            from ..memory_store.jsonl import MemoryRecord, _memory_identity_key
+
+            identity = _memory_identity_key(MemoryRecord("system", request.content.strip(), kind="fact"))
+            entry = next(record for record in memory.all() if _memory_identity_key(record) == identity)
         policy = control.policy()
         ids = set(policy["memory_governance"]["admin_locked_memory_ids"])
         next_ids = ids | {entry.entry_id} if request.locked and request.operation != "delete_memory" else ids - {entry.entry_id}
@@ -863,7 +893,7 @@ class _ManagedAssetClosure:
         if key in self.seen:
             return
         self.visiting.add(key)
-        value = copy.deepcopy(payload) if payload is not None else _managed_asset_payload(self.source, kind, asset_id)
+        value = copy.deepcopy(payload) if payload is not None else _require_managed_asset_payload(self.source, kind, asset_id)
         descriptor = value.get("descriptor", value)
         if kind in {"script", "workflow"}:
             if descriptor.get("id") != asset_id or descriptor.get("kind") != kind:
@@ -1091,16 +1121,14 @@ def _toggle_managed_monitor(home: OwnerHomeResult, asset_id: str, enabled: bool)
         repo._write_store_unlocked(store, admission, history_records=cancelled)
 
 
-# LLM: script/workflow三层运行闸同事务同步；skill写原侧开关，monitor同步正式enabled/status，不执行资产。
+# LLM: 缺资产在无副作用预读阶段拒绝；script/workflow三层闸同事务同步，skill/monitor写原开关，不执行资产。
 # 函数用途: 更新受管资产的原存储启停状态并返回当前值。
 def _toggle_managed_asset(home, kind, asset_id, enabled):
     from ..assets import safe_asset_id
-    from ..assets.script_store import ScriptStore
-    from ..assets.workflow_store import WorkflowStore
 
     safe_asset_id(asset_id)
+    payload = _require_managed_asset_payload(home, kind, asset_id)
     if kind in {"script", "workflow"}:
-        payload = _managed_asset_payload(home, kind, asset_id)
         mapping = {}
         _install_managed_asset(home, home, kind, asset_id, payload, mapping, {"enabled": enabled})
     elif kind == "monitor":
@@ -1112,25 +1140,38 @@ def _toggle_managed_asset(home, kind, asset_id, enabled):
     return {"ok": True, "target_owner_id": home.owner_id, "asset_kind": kind, "asset_id": asset_id, "enabled": enabled}
 
 
+# LLM: 只在读取源/目标资产的无副作用阶段转换缺失；安装后存储错误不得误标not_started。
+# 函数用途: 将资产或依赖缺失投影为可重试的确定领域拒绝。
+def _require_managed_asset_payload(home, kind, asset_id):
+    from ..scheduler.repository import SchedulerNotFoundError
+
+    try:
+        return _managed_asset_payload(home, kind, asset_id)
+    except (KeyError, FileNotFoundError, SchedulerNotFoundError):
+        raise HostAPIError("ASSET_NOT_FOUND", 404, outcome="not_started") from None
+
+
 GOVERNANCE_TOOL_ACTIONS = {
     "user_overview": "get_overview", "set_governance_policy": "set_policy", "get_user_persona": "get_persona",
     "set_user_persona": "set_persona", "list_user_memories": "list_memories", "mutate_user_memory": "mutate_memories",
     "provision_user_assets": "provision_assets", "toggle_user_asset": "toggle_asset", "dispatch_user_task": "dispatch_task",
     "list_user_tasks": "list_tasks", "list_governance_reviews": "list_reviews", "decide_governance_review": "decide_review",
+    "consume_governance_review_ticket": "consume_approved_review_ticket",
 }
 GOVERNANCE_READ_ACTIONS = ("user_overview", "get_user_persona", "list_user_memories", "list_user_tasks", "list_governance_reviews")
 
 
 # LLM: 模型只拿领域参数，actor/root/updated_by由宿主固定；不允许通过JSON建立管理员身份。
-# 函数用途: 为管理员工具声明12个治理动作的具体输入字段。
+# 函数用途: 为管理员工具声明治理与一次性票据消费的具体输入字段。
 def governance_tool_schema() -> dict[str, Any]:
     text = {"type": "string"}
     fields = {name: dict(text) for name in (
         "target_owner_id", "soul_md", "agents_md", "user_md", "category", "status_filter", "entry_id", "candidate_id",
         "content", "asset_id", "conflict_strategy", "note", "prompt", "title", "thread_id", "priority", "review_id",
-        "feedback", "review_type_filter", "idempotency_key")}
+        "feedback", "review_type_filter", "review_type", "idempotency_key")}
     fields.update({name: {"type": "boolean"} for name in ("include_candidates", "locked", "lock_memory", "auto_enable", "enabled")})
     fields.update({name: {"type": "object"} for name in ("policy_patch", "patch_override", "payload_override")})
+    fields["action_match"] = {"type": "object", "minProperties": 1}
     fields["expected_revision"] = {"type": "integer", "minimum": 0}
     fields["persona_mode"] = {"type": "string", "enum": sorted(_PERSONA_MODES)}
     fields["operation"] = {"type": "string", "enum": ["add_memory", "edit_memory", "delete_memory", "approve_candidate", "reject_candidate", "clear_stale_candidates"]}

@@ -658,3 +658,290 @@ def test_stage3_admin_only_curate_policy_blocks_owner_add_and_edit(managed):
     with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
         memory.replace(entry["entry_id"], "owner should not edit")
     assert service.mutate_memories("alice", "edit_memory", entry_id=entry["entry_id"], content="admin permitted")["entry"]["content"] == "admin permitted"
+
+
+# LLM: 真实准入和policy锁外加顺序断言；错误顺序立即失败，不用死锁超时当修复证据。
+# 函数用途: 同时验证普通批量、复用准入及管理员增改删的锁顺序。
+@pytest.mark.parametrize("operation", ["batch", "admitted_batch", "add_memory", "edit_memory", "delete_memory"])
+def test_r2_memory_mutations_acquire_quota_before_policy(managed, monkeypatch, operation):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        _GovernanceControl,
+        _managed_memory_stores,
+    )
+    from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+
+    _root, service, home = managed
+    entry = service.mutate_memories("alice", "add_memory", content="before", lock_memory=False)["entry"]
+    quota, policy, depth, seen = OwnerQuotaEnforcer.admission, _GovernanceControl.locked, [0], []
+
+    @contextmanager
+    def checked_quota(enforcer, **kwargs):
+        assert depth[0] == 0, "quota admission must be shared, not reacquired"
+        with quota(enforcer, **kwargs) as admission:
+            depth[0] += 1
+            try:
+                yield admission
+            finally:
+                depth[0] -= 1
+
+    @contextmanager
+    def checked_policy(control, name="policy"):
+        if name == "policy":
+            assert depth[0] == 1, "policy acquired before quota"
+            seen.append(name)
+        with policy(control, name):
+            yield
+
+    monkeypatch.setattr(OwnerQuotaEnforcer, "admission", checked_quota)
+    monkeypatch.setattr(_GovernanceControl, "locked", checked_policy)
+    if operation in {"batch", "admitted_batch"}:
+        memory, _candidates = _managed_memory_stores(home)
+        operations = [{"action": "replace", "entry_id": entry["entry_id"], "content": "after"}]
+        if operation == "admitted_batch":
+            with memory.quota_enforcer.admission() as admission:
+                memory.apply_batch(operations, _admission=admission)
+        else:
+            memory.apply_batch(operations)
+    else:
+        service.mutate_memories("alice", operation, entry_id=entry["entry_id"], content="after")
+    assert seen == ["policy"]
+
+
+# LLM: 归档不是授权旁路；锁定条目从选择集排除，管理员整理模式应在归档写前拒绝。
+# 函数用途: 复现浓缩绕过锁与先写archive再拒绝造成的副作用。
+@pytest.mark.parametrize("mode", ["locked", "admin_only", "autonomous"])
+def test_r2_condense_respects_governance_before_archive(managed, mode):
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_memory_stores
+
+    _root, service, home = managed
+    locked = service.mutate_memories("alice", "add_memory", content="old locked fact")["entry"]
+    unlocked = service.mutate_memories("alice", "add_memory", content="unlocked fact", lock_memory=False)["entry"]
+    memory, _ = _managed_memory_stores(home)
+    if mode == "admin_only":
+        service.set_policy("alice", {"memory_curate_mode": "admin_only"})
+    before = home.long_term_jsonl.read_bytes()
+    archive = home.long_term_jsonl.with_name("memory.jsonl.archive.jsonl")
+    if mode == "admin_only":
+        with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
+            memory.condense(max_records=1, target_records=0, max_ratio=1)
+        assert home.long_term_jsonl.read_bytes() == before and not archive.exists()
+    else:
+        removed = memory.condense(max_records=1, target_records=0, max_ratio=1)
+        assert [record.entry_id for record in removed] == [unlocked["entry_id"]]
+        assert [record.entry_id for record in memory.all()] == [locked["entry_id"]]
+        assert locked["content"] not in archive.read_text()
+
+
+# LLM: 原迁移接口只按精确版本/hash清除；管理员锁不因备份引用存在而失效。
+# 函数用途: 验证迁移删除也经过正式记忆锁，拒绝时原文件不变。
+@pytest.mark.parametrize("mode", ["locked", "admin_only"])
+def test_r2_migration_cannot_remove_governed_memories(managed, mode):
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_memory_stores
+
+    _root, service, home = managed
+    service.mutate_memories("alice", "add_memory", content="migration fact", lock_memory=mode == "locked")
+    if mode == "admin_only":
+        service.set_policy("alice", {"memory_curate_mode": "admin_only"})
+    memory, _ = _managed_memory_stores(home)
+    before = home.long_term_jsonl.read_bytes()
+    with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
+        memory.remove_migrated_legacy(memory.all(), source="memory-migration-test", backup_ref="durable-backup")
+    assert home.long_term_jsonl.read_bytes() == before
+
+
+# LLM: 两种请求都必须对计算前同一快照做版本和SHA校验，不能到提交时才换成新版本。
+# 函数用途: 验证人格审核陈旧CAS失败且不更改正文。
+@pytest.mark.parametrize("style", ["fields", "operation"])
+@pytest.mark.parametrize("precondition", ["revision", "sha256", "empty_sha256"])
+def test_r2_persona_review_rejects_stale_preconditions(managed, style, precondition):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    root, service, home = managed
+    service.set_persona("alice", soul_md="current text", expected_revision=0)
+    action = {"soul_md": "replacement"} if style == "fields" else {"target": "soul", "operation": "write_text", "content": "replacement"}
+    action.update({"expected_revision": 0} if precondition == "revision" else {"expected_sha256": "0" * 64 if precondition == "sha256" else ""})
+    reviews = GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", "persona_change", action)
+    result = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    assert result["status"] == "failed" and result["result"]["error_code"] == "REVISION_CONFLICT"
+    assert home.soul_md.read_text() == "current text" and service.get_persona("alice")["revision"] == 1
+
+
+@pytest.mark.parametrize("style", ["fields", "operation"])
+def test_r2_persona_review_freezes_valid_revision_and_hash(managed, style):
+    from hashlib import sha256
+
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    root, service, home = managed
+    service.set_persona("alice", soul_md="current text", expected_revision=0)
+    action = {"soul_md": "replacement"} if style == "fields" else {"target": "soul", "operation": "write_text", "content": "replacement"}
+    action.update(expected_revision=1, expected_sha256=sha256(b"current text").hexdigest())
+    reviews = GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", "persona_change", action)
+    result = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    assert result["status"] == "applied" and home.soul_md.read_text() == "replacement"
+    assert result["effect_action"] == {"soul_md": "replacement", "expected_revision": 1}
+
+
+@pytest.mark.parametrize("action_match", [None, {}, "", "x" * 64, 12, []])
+def test_r2_ticket_cannot_be_consumed_without_exact_action_match(managed, action_match):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    root, _service, _home = managed
+    reviews = GovernanceReviewStore(root)
+    action = {"command": "echo local"}
+    item = reviews.submit_review("alice", "high_risk_command", action)
+    reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    with pytest.raises(HostAPIError, match="APPROVAL_ACTION_MISMATCH"):
+        reviews.consume_approved_action(item.review_id, target_user="alice", review_type="high_risk_command", action_match=action_match)
+    assert reviews.consume_approved_action(item.review_id, target_user="alice", review_type="high_risk_command", action_match=action)["consumed_at"]
+
+
+# LLM: 原消息事实、候选和晋升器均真实使用；测试分别准备中间态和已提交候选，不伪装新候选治理E2E。
+# 函数用途: 为晋升恢复反例创建可通过原证据门的目标用户候选。
+def _r2_explicit_candidate(home):
+    from hashlib import sha256
+
+    from agent_py_agent.agent.conversation import learning_source as ls
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        _managed_conversations,
+        _managed_memory_stores,
+    )
+
+    store = _managed_conversations(home, initialize=True)
+    thread = store.threads.get_or_create({"canonical_user_id": home.owner_id, "channel": "internal",
+        "channel_conversation_id": "recovery-thread", "channel_user_id": home.owner_id,
+        "owner_id": home.owner_id, "owner_home": str(home.home_dir), "learning_source": ls.user_dialogue_projection()})
+    content = "恢复测试的明确事实"
+    message = store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": content})
+    ref = {"message_id": message.message_id, "thread_id": thread.thread_id, "role": "user",
+           "content_hash": "sha256:" + sha256(content.encode()).hexdigest(), "quote": content}
+    memory, candidates = _managed_memory_stores(home)
+    candidate = candidates.observe(CandidateObservation(candidate_type="long_term_fact", content=content,
+        subject_key="recovery.fact", scope=MemoryScope("personal", "personal"), origin="user_explicit",
+        source_message_refs=(ref,), learning_source=ls.merge_message_sources([ls.facts_for_message(
+            message.metadata, owner=home.owner_id, thread_id=thread.thread_id, thread_source=thread.learning_source)]),
+        promotion_target="long_term", promotion_mode="auto_eligible"))
+    return memory, candidates, candidate
+
+
+def test_r2_memory_promotion_recovers_executing_with_already_promoted_candidate(managed, monkeypatch):
+    import agent_py_agent.agent.user_space.governance_review_store as module
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_promotion
+
+    root, service, home = managed
+    memory, candidates, candidate = _r2_explicit_candidate(home)
+    reviews = module.GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", "memory_promotion", {"candidate_id": candidate.candidate_id})
+    original = module._execute_review
+
+    def crash(*args):
+        raise _Stage3Crash()
+
+    monkeypatch.setattr(module, "_execute_review", crash)
+    with pytest.raises(_Stage3Crash):
+        reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    monkeypatch.setattr(module, "_execute_review", original)
+    promotion = _managed_promotion(home, memory, candidates)
+    reviewed = promotion.review(candidate, approved=True, reviewer="local/main")
+    assert promotion.promote(candidate.candidate_id, reviewer="local/main", confirmed=True, expected_candidate=reviewed).promoted
+    # 构造本任务要求的旧owner-scoped已晋升恢复快照；新personal键不能等于owner，本测试不声称覆盖新候选治理E2E。
+    rows = [json.loads(line) for line in home.memory_candidates_jsonl.read_text().splitlines()]
+    for row in rows:
+        row["scope"]["scope_key"] = home.owner_id
+    home.memory_candidates_jsonl.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
+    assert candidates.get(candidate.candidate_id).status == "promoted"
+    before = home.long_term_jsonl.read_bytes(), home.memory_candidates_jsonl.read_bytes()
+    recovered = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    assert recovered["status"] == "applied" and recovered["result"]["already_promoted"] is True
+    assert (home.long_term_jsonl.read_bytes(), home.memory_candidates_jsonl.read_bytes()) == before
+    assert len(memory.all()) == 1
+    assert service.mutate_memories("alice", "approve_candidate", candidate_id=candidate.candidate_id)["already_promoted"] is True
+
+
+@pytest.mark.parametrize("flags,locked", [({"locked": True}, True), ({"lock_memory": False}, False), ({"locked": False, "lock_memory": True}, False)])
+def test_r2_admin_tool_accepts_explicit_memory_lock_parameters(managed, flags, locked):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.admin_controls_tool import AdminControlsTool
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    root, service, _home = managed
+    tool = AdminControlsTool(SimpleNamespace(home_paths=home_paths_with_owner(home_paths(root), resolve_owner_home(root, OwnerIdentity.local_main()))))
+    result = tool.execute({"action": "mutate_user_memory", "target_owner_id": "alice", "operation": "add_memory", "content": "tool lock fact", **flags})
+    assert result.ok, result.output
+    entry = json.loads(result.output)["entry"]
+    ids = service.get_overview("alice")["governance_policy"]["memory_governance"]["admin_locked_memory_ids"]
+    assert (entry["entry_id"] in ids) is locked
+
+
+def test_r2_admin_tool_consumes_exact_review_ticket_once(managed):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.admin_controls_tool import AdminControlsTool
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+    from agent_py_agent.agent.user_space.home_layout import home_paths
+    from agent_py_agent.agent.user_space.owner_resolver import (
+        home_paths_with_owner,
+        resolve_owner_home,
+    )
+
+    root, _service, _home = managed
+    reviews = GovernanceReviewStore(root)
+    action = {"tools": ["read_file"]}
+    item = reviews.submit_review("alice", "capability_elevation", action)
+    reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    tool = AdminControlsTool(SimpleNamespace(home_paths=home_paths_with_owner(home_paths(root), resolve_owner_home(root, OwnerIdentity.local_main()))))
+    assert "consume_governance_review_ticket" in tool.model_spec.input_schema["properties"]["action"]["enum"]
+    assert {"review_type", "action_match"} <= tool.model_spec.input_schema["properties"].keys()
+    params = {"action": "consume_governance_review_ticket", "target_owner_id": "alice", "review_id": item.review_id,
+              "review_type": "capability_elevation", "action_match": action}
+    first = tool.execute(params)
+    assert first.ok and json.loads(first.output)["consumed_at"]
+    again = tool.execute(params)
+    assert not again.ok and again.reported_error_code == "APPROVAL_ALREADY_CONSUMED"
+
+
+@pytest.mark.parametrize("operation", ["provision_assets", "toggle_asset"])
+@pytest.mark.parametrize("kind,asset_id", [("script", "absent"), ("workflow", "absent"), ("skill", "absent"), ("monitor", "job_absent")])
+def test_r2_missing_assets_return_not_started_domain_error(managed, operation, kind, asset_id):
+    _root, service, _home = managed
+    kwargs = {"enabled": True} if operation == "toggle_asset" else {}
+    with pytest.raises(HostAPIError) as caught:
+        getattr(service, operation)("alice", kind, asset_id, **kwargs)
+    assert (caught.value.code, caught.value.status, caught.value.outcome) == ("ASSET_NOT_FOUND", 404, "not_started")
+
+
+# LLM: 使用真实authority和跨线程review锁，摘要形式也不能令同一票据多次通过。
+# 函数用途: 覆盖动作JSON与SHA两种匹配方式的并发单次消费。
+@pytest.mark.parametrize("match_kind", ["action", "digest"])
+def test_r2_ticket_concurrent_consumers_have_exactly_one_winner(managed, match_kind):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    root, _service, _home = managed
+    reviews = GovernanceReviewStore(root)
+    action = {"command": "echo local", "cwd": "workspace"}
+    item = reviews.submit_review("alice", "high_risk_command", action)
+    result = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    match = action if match_kind == "action" else result["result"]["action_sha256"]
+
+    def consume(_index):
+        try:
+            receipt = reviews.consume_approved_action(item.review_id, target_user="alice", review_type="high_risk_command", action_match=match)
+            assert receipt["consumed_at"]
+            return "consumed"
+        except HostAPIError as error:
+            return error.code
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = list(pool.map(consume, range(4)))
+    assert outcomes.count("consumed") == 1
+    assert outcomes.count("APPROVAL_ALREADY_CONSUMED") == 3
