@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from queue import Empty, Queue
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 
 from ..backends import ModelResponse, ProviderRequestOptions
 from ..backends.errors import ProviderTimeoutError
@@ -19,6 +19,7 @@ from ..backends.tool_ir import AssistantTurn, ToolResult
 from ..concurrency.interrupt import (
     is_interrupted,
     register_interrupt_callback,
+    register_interrupt_wakeup,
     set_interrupt,
 )
 from ..conversation.context_usage import capture_context_usage_binding
@@ -82,8 +83,11 @@ from .tool_stream import (
     malformed_tool_protocol_abort_response,
 )
 
-# 工具流轮询间隔秒数。
-_TOOL_STREAM_POLL_SECONDS = 0.05
+# 队列结果与即时取消通知是主路径，2秒轮询仅兜底丢失的通知。
+_TOOL_STREAM_POLL_SECONDS = 2.0
+_INTERRUPT_WAKE_SENTINEL = object()
+# 用户取消只给快清理50ms；超时路径仍保留原1秒排空，慢worker由原后台shutdown登记继续持有。
+_MODEL_CANCEL_DRAIN_SECONDS = 0.05
 # 模型中断后排空等待的秒数。
 _MODEL_INTERRUPT_DRAIN_SECONDS = 1.0
 # 请求前缀诊断开关：只对出站请求算不可逆摘要（backends/cache_diagnostics.py），不修改请求、
@@ -1187,8 +1191,28 @@ def _restore_failed_call_turn_input(state: _ModelGenerationState) -> None:
         return
 
 
+# LLM: Event在原中断锁下先set，向无界结果队列只放一次哨兵；不做socket清理，不反向获取中断锁。
+# 类用途: 把原即时中断唤醒连接到正在阻塞的模型结果队列。
+class _GenerationInterruptWake(Event):
+    # LLM: 每次guard独占队列与去重锁，注册生命期由guard的上下文负责。
+    # 函数用途: 绑定本次调用的轻量唤醒出口。
+    def __init__(self, results: Queue) -> None:
+        super().__init__()
+        self._results = results
+        self._send_lock = Lock()
+
+    # LLM: 任意重复取消只入队一次，队列无界保证晚结果不会因哨兵占槽卡住。
+    # 函数用途: 先通知结果等待者，不等待底层连接关闭。
+    def set(self) -> None:
+        with self._send_lock:
+            if not self.is_set():
+                super().set()
+                self._results.put_nowait(_INTERRUPT_WAKE_SENTINEL)
+
+
 # LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
 # LLM: 当前后台片如有原宿主观察，出生前保同一Thread真实退出；默认无观察者仍原start，不改超时或模型请求。
+#   即时唤醒先于慢取消回调，两个注册均在退出时注销；队列无界，不阻塞迟到的原worker。
 # 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
 def _generate_through_wall_guard(
     request: ModelGenerateParams,
@@ -1199,7 +1223,7 @@ def _generate_through_wall_guard(
     if timeout <= 0:
         return _invoke_backend_generate(request.agent.backend, request.prompt, state)
 
-    results: Queue[_BackendGenerateResult] = Queue(maxsize=1)
+    results: Queue[_BackendGenerateResult | object] = Queue()
 
     def _target() -> None:
         try:
@@ -1216,17 +1240,16 @@ def _generate_through_wall_guard(
     from ..conversation.background_shutdown import start_background_model_worker
 
     start_background_model_worker(worker)
-    with register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
+    with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
         return _wait_for_generation_result(request, state, results, worker, timeout)
 
 
-# LLM: Poll the guard result at short safe points so an outer stop or wall-clock timeout fences late results,
-#   signals the provider thread to close its transport, and waits only the existing bounded drain interval.
-# 函数用途: 等待模型线程返回；停止或墙钟到期时中断并短暂排空底层连接，避免调用线程被丢下。
+# LLM: 结果/异常采纳前再检查中断；无效哨兵只重查原期限。取消已由guard注册异步转交，不在等待线程重复慢close。
+# 函数用途: 以队列即时唤醒及两秒兜底等待结果，保留短请求原墙钟超时。
 def _wait_for_generation_result(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
-    results: Queue[_BackendGenerateResult],
+    results: Queue[_BackendGenerateResult | object],
     worker: Thread,
     timeout: float,
 ):
@@ -1234,10 +1257,7 @@ def _wait_for_generation_result(
     transport_owns_timeout = _transport_owns_stream_idle_timeout(request.agent)
     while True:
         if is_interrupted():
-            _abandon_call(state)
-            _interrupt_generation_worker(worker)
-            worker.join(timeout=_MODEL_INTERRUPT_DRAIN_SECONDS)
-            raise InterruptedError("模型接口请求已被用户停止")
+            _raise_generation_interrupted(state, worker)
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0 and not transport_owns_timeout:
             _abandon_call(state)
@@ -1252,9 +1272,22 @@ def _wait_for_generation_result(
             _TOOL_STREAM_POLL_SECONDS if transport_owns_timeout else remaining,
         )
         if result is not None:
+            if is_interrupted():
+                _raise_generation_interrupted(state, worker)
+            if result is _INTERRUPT_WAKE_SENTINEL:
+                continue
             if result.exc is not None:
                 raise result.exc
             return result.response
+
+
+# LLM: 调用者已注册原worker取消回调；先封住迟到采纳，快清理短等，慢物理退出仍归原shutdown跟踪。
+# 函数用途: 让用户取消及时抛出，同时给正常连接关闭一个有界收尾窗口。
+def _raise_generation_interrupted(state: _ModelGenerationState, worker: Thread) -> None:
+    _abandon_call(state)
+    if worker.ident is not None:
+        worker.join(timeout=_MODEL_CANCEL_DRAIN_SECONDS)
+    raise InterruptedError("模型接口请求已被用户停止")
 
 
 def _transport_owns_stream_idle_timeout(agent: object) -> bool:
@@ -1280,10 +1313,12 @@ def _interrupt_generation_worker(worker: Thread) -> None:
         set_interrupt(True, worker.ident)
 
 
+# LLM: 每次最多等剩余请求预算或两秒，队列哨兵与正常结果均原样返回，不重置期限。
+# 函数用途: 阻塞读取结果或即时取消字条，空超时返回None供原安全点复查。
 def _poll_generation_result(
-    results: Queue[_BackendGenerateResult],
+    results: Queue[_BackendGenerateResult | object],
     remaining: float,
-) -> _BackendGenerateResult | None:
+) -> _BackendGenerateResult | object | None:
     try:
         return results.get(timeout=min(_TOOL_STREAM_POLL_SECONDS, remaining))
     except Empty:

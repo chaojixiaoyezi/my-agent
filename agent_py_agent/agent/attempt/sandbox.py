@@ -49,7 +49,7 @@ from ..path_access_policy import (
     macos_hidden_pattern,
     macos_host_alias_paths,
     macos_owner_prefix,
-    macos_readonly_pattern,
+    macos_readonly_patterns,
     owner_home_containing,
     persona_process_protected_paths,
     persona_sandbox_root,
@@ -516,7 +516,7 @@ def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
     if agent is not None and not spec.full_access and spec.protected_write_patterns:
         declared = set(host_readonly_paths(agent, root))
         readonly = tuple(path for path in readonly if path not in declared or path.resolve(strict=False) != path)
-        persona_rules.extend(_pattern_write_denies((macos_readonly_pattern(agent, root),)))
+        persona_rules.extend(_pattern_write_denies(macos_readonly_patterns(agent, root)))
     write_denies = [*_readonly_path_denies((*readonly, *readonly_aliases)), *_readonly_path_denies(paths), *persona_rules]
     if (root is not None and any(path.is_file() for path in paths)) or compact:
         write_denies.append("(deny file-link)")

@@ -263,6 +263,40 @@ def test_unicode_paths_are_not_json_ascii_escapes_in_sbpl(owners):
     assert "\\u6839" not in profile
 
 
+# LLM: TinyScheme限制的是单个源字符串和解码字符串，不以整份profile大小替代字面量预算。
+# 函数用途: 验证长根路径、转义及两种执行形态均没有超长SBPL字面量。
+@pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize("depth", [0, 250])
+def test_every_sbpl_literal_stays_below_tinyscheme_limit(tmp_path, scoped, depth):
+    root = tmp_path.joinpath(*(["q+quote\"back\\" + "x" * 35] * (depth // 50))) / "agent"
+    home = root / "owners/local/main"
+    home.mkdir(parents=True)
+    profile = _profile(_spec(root, home, scoped=scoped))
+    literals = re.findall(r'"(?:\\.|[^"\\])*"', profile)
+    assert literals
+    for literal in literals:
+        assert len(literal.encode()) < 950, literal
+        assert len(json.loads(literal).encode()) < 950, literal
+
+
+# LLM: 用常量逐项验证等价覆盖；不能为缩短字符串省掉memory前缀、锁或SQLite sidecar。
+# 函数用途: 核对动态切分的字节预算与全部既有保护项。
+def test_readonly_patterns_preserve_paths_and_quote_budget(tmp_path):
+    builder = getattr(policy, "macos_readonly_patterns", None)
+    assert callable(builder), "需要按最终SBPL字节动态拆分的接口"
+    root = tmp_path / "root.with+meta"
+    patterns = builder(root, max_pattern_bytes=510)
+    assert len(patterns) > 1
+    for pattern in patterns:
+        assert len(pattern.encode()) <= 510
+        assert len(json.dumps(pattern, ensure_ascii=False).encode()) <= 510
+    for layout in ("local/u", "local/users/persona", "providers/p/users/u", "providers/p/groups/g"):
+        home = root / "owners" / layout
+        for parts in (*policy.HOST_CONFIG_OWNER_PARTS, *policy._owner_state_parts()):
+            assert any(re.search(pattern, str(home.joinpath(*parts))) for pattern in patterns), parts
+        assert not any(re.search(pattern, str(home / "workspace/user.txt")) for pattern in patterns)
+
+
 # LLM: 只探测本进程能否真实施加Seatbelt，拒绝时保留明确skip理由；不改变宿主权限或换环境绕过。
 # 函数用途: 为原生编译/隔离验收确认准确入口可用。
 @pytest.fixture

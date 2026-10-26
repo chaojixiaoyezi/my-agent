@@ -865,12 +865,53 @@ def macos_hidden_pattern(agent_home_root: Path, owner_home: Path | None = None) 
     return f"^{prefix}/({parts})(/|$)"
 
 
-# LLM: 只复用H3的原声明，不混入读拒绝；此正则只能替代同一owner的具体拒写路径，调用方保留额外自定义保护。
-# 函数用途: 生成当前owner或全owner的宿主只读正则，避免反复写长路径前缀。
+# LLM: 兼容旧字符串检查接口；生产Seatbelt必须用复数接口按最终字面量字节切分，保护项仍来自原H3常量。
+# 函数用途: 返回完整等价正则供旧调用核对，不把它作为单条SBPL直接执行。
 def macos_readonly_pattern(root: Path, owner_home: Path | None = None) -> str:
     prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(root)
-    parts = "|".join(re.escape("/".join(item)) for item in (*HOST_CONFIG_OWNER_PARTS, *_owner_state_parts()))
-    return f"^{prefix}/({parts})(/|$)"
+    return _macos_readonly_chunk(prefix, _macos_readonly_atoms())
+
+
+# LLM: 每个原子保留完整相对路径；同类锁/SQLite尾缀共用组，不重复展开，禁止删保护项换取字节达标。
+# 函数用途: 从唯一H3声明生成可独立拆分的保护分支。
+def _macos_readonly_atoms() -> list[tuple[str, str]]:
+    plain = [(re.escape("/".join(item)), "") for item in (*HOST_CONFIG_OWNER_PARTS, *HOST_STATE_OWNER_DIRS)]
+    files = [(re.escape("/".join(item)), f"({re.escape(HOST_STATE_LOCK_SUFFIX)})?") for item in HOST_STATE_OWNER_FILES]
+    suffix = "(" + "|".join(re.escape(item) for item in SQLITE_SIDECAR_SUFFIXES) + ")?"
+    return [*plain, *files, *((re.escape(name), suffix) for name in HOST_STATE_OWNER_SQLITE)]
+
+
+# LLM: 只在同一deny内合并后缀；使用POSIX ERE普通组，保持开头与目录/文件边界，不引入前瞻或非捕获组。
+# 函数用途: 为一个分支批次构造完整的只读模式。
+def _macos_readonly_chunk(prefix: str, atoms: list[tuple[str, str]]) -> str:
+    groups: dict[str, list[str]] = {}
+    for name, suffix in atoms:
+        groups.setdefault(suffix, []).append(name)
+    parts = [f"({'|'.join(names)}){suffix}" if suffix else "|".join(names) for suffix, names in groups.items()]
+    return f"^{prefix}/({'|'.join(parts)})(/|$)"
+
+
+# LLM: 同时限制原始UTF-8与JSON/SBPL转义后的完整字面量；根须显式，单原子不可表示时失败关闭，不能跳过保护。
+# 函数用途: 按TinyScheme安全预算动态切分H3拒写正则，不枚举owner。
+def macos_readonly_patterns(root: Path | None = None, owner_home: Path | None = None, *, max_pattern_bytes: int = 768) -> tuple[str, ...]:
+    if root is None and owner_home is None:
+        raise ValueError("macOS protection requires an explicit root")
+    prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(root)
+    patterns, chunk = [], []
+    for atom in _macos_readonly_atoms():
+        candidate = _macos_readonly_chunk(prefix, [*chunk, atom])
+        if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > max_pattern_bytes:
+            if chunk:
+                patterns.append(_macos_readonly_chunk(prefix, chunk))
+            chunk = [atom]
+            candidate = _macos_readonly_chunk(prefix, chunk)
+            if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > max_pattern_bytes:
+                raise ValueError("macOS protection root exceeds SBPL literal budget")
+        else:
+            chunk.append(atom)
+    if chunk:
+        patterns.append(_macos_readonly_chunk(prefix, chunk))
+    return tuple(patterns)
 
 
 # LLM: 仅压缩Darwin投影；声明仍留在H2/H3原常量，任务目录保持vnode类型及unlink/write分界。
@@ -882,7 +923,7 @@ def _macos_all_owner_paths(root: Path) -> HostSandboxPaths:
                  f"^{prefix}(/(memory|workspace|\\.agents))?$")
     return HostSandboxPaths(
         readonly=_readonly_from_homes(root, (), include_home=True),
-        patterns=(macos_readonly_pattern(root), *_task_record_patterns(prefix)),
+        patterns=(*macos_readonly_patterns(root), *_task_record_patterns(prefix)),
         directory_write_patterns=(*_task_record_patterns(prefix, directory_operation="write"), *ancestors),
         directory_unlink_patterns=tuple(_task_record_patterns(prefix, directory_operation="unlink")),
     )

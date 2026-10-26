@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import stat
 import threading
 import time
@@ -17,7 +18,7 @@ from pathlib import Path
 from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.directory_lock import locked_private_directory
 from ..common.json_io import locked_json_path, write_json_file_atomic_unlocked
-from ..common.nofollow_fs import unlink_file_beneath
+from ..common.nofollow_fs import read_bytes_beneath, unlink_file_beneath
 from ..runtime_errors import runtime_error_report
 from .process_cleanup_evidence import confirm_cleanup_reference, validate_cleanup_reference
 from .process_scope import ProcessActivationScope, ProcessExecutionScope
@@ -101,20 +102,22 @@ def _lookup_process_records_projection(root: Path) -> _ProcessRecordsProjection 
 #   变成可信缓存)。
 #   MC4-903 返工: 入缓存前 deepcopy,缓存与调用方拿到的返回值不共享可变对象(防调用方原地修改
 #   污染缓存)。
+#   私有loader可显式移交刚从事务新读出的对象；所有公开返回仍逐条深拷贝，不能把过滤子集交给缓存。
 # 函数用途: 把一次完整目录读取的结果绑定到目录身份写入有界缓存(信任判断由调用方读取前冻结)。
 def _store_process_records_projection(
     root: Path,
     before: tuple[int, int, int] | None,
     records: list[dict[str, object]],
     errors: list[dict[str, object]],
+    *, take_ownership: bool = False,
 ) -> None:
     after = _process_dir_stat_key(root)
     if before is None or after is None or after != before:
         return
     entry = _ProcessRecordsProjection(
         stat_key=after,
-        records=tuple(deepcopy(record) for record in records),
-        errors=tuple(deepcopy(error) for error in errors),
+        records=tuple(records) if take_ownership else tuple(deepcopy(record) for record in records),
+        errors=tuple(errors) if take_ownership else tuple(deepcopy(error) for error in errors),
         verified_at=time.time(),
     )
     key = str(root)
@@ -131,6 +134,14 @@ def _store_process_records_projection(
 class ProcessSessionLoadReport:
     record: dict[str, object]
     load_error: dict[str, object] | None = None
+
+
+# LLM: records与load_errors均为调用者独占副本，不能泄漏投影缓存可变对象或把读失败解释成无候选。
+# 类用途: 承载候选完成记录及完整读取错误。
+@dataclass(frozen=True)
+class ProcessSessionListReport:
+    records: list[dict[str, object]]
+    load_errors: list[dict[str, object]]
 
 
 # LLM: 过期 v2/v3/v4 写入不得通过生命周期合并绕过 CAS；调用方应重读原句柄而不是启动新进程。
@@ -276,9 +287,11 @@ class ProcessSessionTransaction:
         for session_id in selected:
             unlink_file_beneath(self.root, (f"{session_id}.json",))
 
-    # LLM: 普通任务原裁剪保持；共享激活和宿主显式保留的准备记录只由原操作结果接管后消费，终态不是提前删证据的许可。
-    # 函数用途: 限制普通后台历史数量，不裁掉后续释放仍需核验的管理资源。
-    def prune_finished(self, max_finished: int) -> None:
+    # LLM: 数量裁剪保持原终态集合与排序；TTL只用可信finished_at，pending或未登记通知绝不删除。
+    #   调用方需先完成共享资源清理；TTL只回收已终态历史记录，不关闭进程或替代资源释放。
+    # 函数用途: 在原目录锁内清理数量超额或安全超龄记录，并返回实际删除的句柄。
+    def prune_finished(self, max_finished: int | None = None, *, max_age_seconds: float | None = None,
+                       now: float | None = None, is_notice_consumed: Callable[[str], bool] | None = None) -> list[str]:
         records, _errors = self.list_records()
         finished = [
             record
@@ -286,18 +299,52 @@ class ProcessSessionTransaction:
             if record["status"] in PROCESS_TERMINAL_STATUSES
             and not record.get("retain_until_consumed", False)
             and record.get("activation_scope") is None
-            and (not record.get("completion_target") or record.get("completion_notice_id"))
+            and _completion_obligation_finished(record, is_notice_consumed)
         ]
         finished.sort(
             key=lambda item: float(item.get("finished_at") or item.get("started_at") or 0),
             reverse=True,
         )
-        for record in finished[max(0, int(max_finished)) :]:
-            path = self.root / f"{record['session_id']}.json"
-            with locked_json_path(path):
-                current = self.load(record["session_id"])
-                if current == record:
-                    path.unlink(missing_ok=True)
+        selected = {record["session_id"]: record for record in finished[max(0, int(max_finished)) :]} if max_finished is not None else {}
+        current_now = time.time() if now is None else float(now)
+        for record in records:
+            if _record_ttl_expired(record, max_age_seconds, current_now) and _completion_obligation_finished(record, is_notice_consumed):
+                selected[record["session_id"]] = record
+        return [session_id for session_id, record in selected.items() if _unlink_session_if_unchanged(self.root, record)]
+
+
+# LLM: 规范空目标{}表示无收件人；有目标必须有回执且显式停止或消费读口证明已不pending，缺读口即保留。
+# 函数用途: 判断历史完成通知义务是否已经结清，不缓存或猜测wake状态。
+def _completion_obligation_finished(record: dict[str, object], consumed: Callable[[str], bool] | None) -> bool:
+    if not record.get("completion_target"):
+        return True
+    notice = str(record.get("completion_notice_id") or "").strip()
+    return bool(notice) and (notice == "explicit_stop" or (consumed is not None and consumed(notice) is True))
+
+
+# LLM: TTL仅清理exited/killed，不能用started_at兜底；小合成时间、缺失、非有限数均不按年龄删。
+# 函数用途: 对可信完成时间执行保守的历史过期判断。
+def _record_ttl_expired(record: dict[str, object], max_age_seconds: float | None, now: float) -> bool:
+    finished = record.get("finished_at")
+    if record.get("status") not in {"exited", "killed"} or type(finished) not in (int, float) or max_age_seconds is None:
+        return False
+    age = float(max_age_seconds)
+    return (math.isfinite(finished) and math.isfinite(age) and math.isfinite(now)
+            and float(finished) >= 86400.0 and 0 < age <= now - float(finished))
+
+
+# LLM: 调用者持目录锁；叶锁内同时比较原记录和两次nofollow字节，版本或字节漂移就不删，侧车只随成功删除清理。
+# 函数用途: 删除未并发更新的准确session及其锁文件，不跟随链接、不清理日志或其他资源。
+def _unlink_session_if_unchanged(root: Path, record: dict[str, object]) -> bool:
+    session_id = validate_session_id(record["session_id"])
+    name = f"{session_id}.json"
+    with locked_json_path(root / name):
+        before = read_bytes_beneath(root, (name,))
+        if before is None or read_process_record(root, session_id) != record or read_bytes_beneath(root, (name,)) != before:
+            return False
+        unlink_file_beneath(root, (name,))
+    unlink_file_beneath(root, (name + ".lock",))
+    return True
 
 
 # LLM: 公共入口共用原目录锁和恢复；v2/v3/v4 原版本更新，v1 不参与按任务控制，共享激活另按完整归属冻结。
@@ -348,22 +395,47 @@ class ProcessSessionStore:
                 {}, process_session_error_report(exc, "process_session_store.load", path=self.root)
             )
 
-    # LLM: 只有普通 session 损坏可返回健康子集；事务日志损坏影响整个视图，必须返回空集及错误。
-    #   cheap_checks（background_tick_cheap_checks 开时）先试目录身份门：目录未变且过了保护
-    #   窗口 → 直接复用上次读取的记录（deepcopy 返回）；否则走原路径（事务 + glob + 逐文件读）。
-    #   关闭时（默认）走原路径，与改动前逐字相同。
-    # 函数用途: 读取同一目录中的后台会话，并保留结构化错误。
+    # LLM: 保持原二元组API；公开全量读取始终复制全部记录，私有底座不得缓存过滤后的子集。
+    # 函数用途: 返回独占的完整记录与错误，调用者修改不会污染冷热缓存。
     def list_records(
         self, *, cheap_checks: bool = False
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        records, errors = self._load_records_projection_cached(cheap_checks=cheap_checks)
+        return [deepcopy(record) for record in records], [deepcopy(error) for error in errors]
+
+    # LLM: 先取完整未过滤快照，再在存储层筛选并只复制命中；空规范目标{}不欠通知，错误不被过滤。
+    # 函数用途: 提供完成协调专用查询，避免每tick深拷贝全部历史记录。
+    def list_pending_completion_records_report(
+        self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = False
+    ) -> ProcessSessionListReport:
+        records, errors = self._load_records_projection_cached(cheap_checks=cheap_checks)
+        owner, task = str(owner_key or "").strip(), str(task_id or "").strip()
+        matched = []
+        for record in records:
+            target = record.get("completion_target")
+            if not isinstance(target, dict) or not target or str(record.get("completion_notice_id") or "").strip():
+                continue
+            if owner and str(target.get("owner_key") or "").strip() != owner:
+                continue
+            if task and str(target.get("task_id") or "").strip() != task:
+                continue
+            matched.append(deepcopy(record))
+        return ProcessSessionListReport(matched, [deepcopy(error) for error in errors])
+
+    # LLM: 便捷查询沿同一report实现，不能独立过滤或回写缓存；需读错误的调用方用report入口。
+    # 函数用途: 返回已深拷贝的待通知候选列表。
+    def list_pending_completion_records(self, *, owner_key: str = "", task_id: str = "", cheap_checks: bool = False) -> list[dict[str, object]]:
+        return self.list_pending_completion_records_report(owner_key=owner_key, task_id=task_id, cheap_checks=cheap_checks).records
+
+    # LLM: 私有只读底座永远是全量记录和错误，冷读直接移交新对象；公开API负责复制，False仍强制事务重读。
+    #   信任在读前冻结，发布时只核目录身份；不因慢读跨过保护窗口而将旧视图变可信。
+    # 函数用途: 复用目录内容投影，不缓存通知结论或暴露可变对象给外部。
+    def _load_records_projection_cached(self, *, cheap_checks: bool = False):
         if cheap_checks:
             hit = _lookup_process_records_projection(self.root)
             if hit is not None:
-                return (
-                    [deepcopy(record) for record in hit.records],
-                    [deepcopy(error) for error in hit.errors],
-                )
-        before = _process_dir_stat_key(self.root) if cheap_checks else None
+                return hit.records, hit.errors
+        before = _process_dir_stat_key(self.root)
         # MC4-1201: 在读取这一刻冻结"本次读取是否可信"——读取前目录 mtime 已离开 2 秒窗口才允许
         #   把结果写进缓存;发布处只认这个事实,不用发布时的目录年龄(跨窗口延迟发布时旧结果不得
         #   变成可信缓存)。
@@ -375,11 +447,8 @@ class ProcessSessionStore:
                 records, errors = transaction.list_records()
         except (OSError, TypeError, ValueError, RuntimeError) as exc:
             return [], [process_session_error_report(exc, "process_session_store.list", path=self.root)]
-        if cheap_checks and read_trusted:
-            _store_process_records_projection(self.root, before, records, errors)
-        # MC4-903 返工: 冷读返回值同样 deepcopy, 调用方原地修改不会污染缓存或事务内部对象。
-        if cheap_checks:
-            return [deepcopy(record) for record in records], [deepcopy(error) for error in errors]
+        if read_trusted:
+            _store_process_records_projection(self.root, before, records, errors, take_ownership=True)
         return records, errors
 
     # LLM: 与预留和交接共用锁；调用方先关闭旧执行轮准入；include_terminal 只扩展同一精确身份的退出证据。
@@ -400,12 +469,14 @@ class ProcessSessionStore:
         with self.transaction() as transaction:
             return transaction.request_stop_activation(scope)
 
-    # LLM: 裁剪前必须恢复，错误不能被忽略后继续删除可能属于未完成事务的记录。
-    # 函数用途: 删除超出保留数的旧终态 session，启动中和未知资源持续可见。
-    def prune_finished(self, max_finished: int) -> None:
+    # LLM: 原目录锁先恢复redo；省略数量只做TTL，旧数量调用保持原裁剪，通知未消费无证明时保留。
+    # 函数用途: 回收安全的历史终态档案，返回实际删除列表；缺失目录无副作用。
+    def prune_finished(self, max_finished: int | None = None, *, max_age_seconds: float | None = 86400.0,
+                       now: float | None = None, is_notice_consumed: Callable[[str], bool] | None = None) -> list[str]:
         if self.root.exists():
             with self.transaction() as transaction:
-                transaction.prune_finished(max_finished)
+                return transaction.prune_finished(max_finished, max_age_seconds=max_age_seconds, now=now, is_notice_consumed=is_notice_consumed)
+        return []
 
 
 # LLM: 诊断只公开错误分类、路径与已提交身份，不包含记录正文；调用者可以辨别提交后故障。

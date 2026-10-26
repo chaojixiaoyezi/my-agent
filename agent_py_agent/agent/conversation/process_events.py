@@ -8,6 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 
 from ..gateway_parts.multiprocess_executor_identity import process_birth
@@ -22,11 +25,73 @@ from ..tooling.process_session_records import (
     MANAGED_PROCESS_SESSION_SCHEMAS,
     PROCESS_TERMINAL_STATUSES,
 )
-from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
+from ..tooling.process_session_store import (
+    ProcessSessionListReport,
+    ProcessSessionStore,
+    process_session_store_root,
+)
 
 PROCESS_COMPLETION_REASON = "managed_process_exited"
 _LOG = logging.getLogger(__name__)
 _PROCESS_REGISTRY_STATUS = ProcessRegistry.status
+# 每个会话存储根执行历史清理的最短间隔秒数。
+_PROCESS_COMPLETION_PRUNE_INTERVAL_SECONDS = 300.0
+# 已结清通知义务的终态记录保留秒数。
+_PROCESS_COMPLETION_RETENTION_SECONDS = 86400.0
+# 历史清理节流最多记住的会话存储根数量。
+_PROCESS_COMPLETION_PRUNE_MAX_ROOTS_COUNT = 256
+_PROCESS_COMPLETION_PRUNE_TIMES: OrderedDict[str, float] = OrderedDict()
+_PROCESS_COMPLETION_PRUNE_LOCK = threading.Lock()
+
+
+# LLM: 固定report读口存在时直接调用，内部异常原样传播；旧替身沿原二元组接口，不靠TypeError猜版本。
+# 函数用途: 为协调循环读取候选副本和完整错误，兼容旧authority替身。
+def _pending_completion_report(authority, *, cheap_checks: bool = False, task_id: str = "") -> ProcessSessionListReport:
+    query = getattr(authority, "list_pending_completion_records_report", None)
+    if callable(query):
+        return query(cheap_checks=cheap_checks, task_id=task_id)
+    records, errors = authority.list_records(cheap_checks=cheap_checks)
+    return ProcessSessionListReport(records, errors)
+
+
+# LLM: owner隔离由原权威目录承担，当前target无owner_key；task过滤保留原store_root复核，空cheap结果必须全读再裁定。
+# 函数用途: 为待通知发现提供便宜检查后严格复核，旧替身维持无参数调用。
+def _pending_completion_reports(authority, *, task_id: str = ""):
+    query = getattr(authority, "list_pending_completion_records_report", None)
+    if not callable(query):
+        records, errors = authority.list_records()
+        yield ProcessSessionListReport(records, errors)
+        return
+    for cheap in (True, False):
+        yield query(cheap_checks=cheap, task_id=task_id)
+
+
+# LLM: 每个conversation根最多五分钟一次，锁只保护有界节流表；磁盘清理仍在原Store事务中，pending与未知读取均保留。
+# 函数用途: 无新attach也周期回收超龄已消费记录，不删除仍欠投递的wake依赖。
+def _prune_consumed_process_records(store, authority) -> None:
+    prune = getattr(authority, "prune_finished", None)
+    if not callable(prune):
+        return
+    key, now = str(store.storage.root), time.monotonic()
+    with _PROCESS_COMPLETION_PRUNE_LOCK:
+        previous = _PROCESS_COMPLETION_PRUNE_TIMES.get(key)
+        if previous is not None and now - previous < _PROCESS_COMPLETION_PRUNE_INTERVAL_SECONDS:
+            return
+        _PROCESS_COMPLETION_PRUNE_TIMES[key] = now
+        _PROCESS_COMPLETION_PRUNE_TIMES.move_to_end(key)
+        while len(_PROCESS_COMPLETION_PRUNE_TIMES) > _PROCESS_COMPLETION_PRUNE_MAX_ROOTS_COUNT:
+            _PROCESS_COMPLETION_PRUNE_TIMES.popitem(last=False)
+
+    # LLM: 只用原Wake权威状态证明消费；读失败抛给外层日志，不会被解释成wake不存在。
+    # 函数用途: 允许清理明确不再pending的通知依赖。
+    def consumed(notice_id: str) -> bool:
+        wake = store.wakes.get(notice_id)
+        return wake is None or wake.status != "pending"
+
+    try:
+        prune(max_age_seconds=_PROCESS_COMPLETION_RETENTION_SECONDS, is_notice_consumed=consumed)
+    except Exception:
+        _LOG.exception("PROCESS_COMPLETION_PRUNE_RETRY")
 
 
 # LLM: 目标由宿主当前主会话身份冻结，子代理生命周期仍由直属父级协议负责，不额外启动影子主代理。
@@ -61,19 +126,22 @@ def _agent_process_root(agent: object) -> Path | None:
 
 # LLM: Count0保原循环/锁顺序，MP仅共用单会话发表叶；宿主周期tick与前台安全点共用；配置仅控制初步目录内容读取，发通知前仍核原status/target并持久去重，不缓存通知结论。
 # 仅任务的自然exited可唤醒；持久unknown不可再转终态，直接跳过；其余轻量刷新后重读原ID与收件身份。
+# 查询仅拷贝候选，末尾有界TTL不影响仍pending的wake读取；通知关闭时仍可做安全历史维护。
 # 函数用途: 不读日志地收割后台命令并通知所属主会话；保留坏记录重试与通知去重，不反复查询历史未知项。
 def reconcile_process_completions(agent: object) -> int:
     store = getattr(agent, "conversation_store", None)
     root = _agent_process_root(agent)
     if store is None or root is None:
         return 0
-    if not getattr(getattr(agent, "config", None), "background_process_notifications", True):
-        return 0
     authority = ProcessSessionStore(root)
+    if not getattr(getattr(agent, "config", None), "background_process_notifications", True):
+        _prune_consumed_process_records(store, authority)
+        return 0
     cheap_checks = bool(
         getattr(getattr(agent, "config", None), "background_tick_cheap_checks", False)
     )
-    records, errors = authority.list_records(cheap_checks=cheap_checks)
+    report = _pending_completion_report(authority, cheap_checks=cheap_checks)
+    records, errors = report.records, report.load_errors
     if errors:
         _LOG.warning("PROCESS_COMPLETION_STORE_ERRORS count=%s", len(errors))
     sent = 0
@@ -104,6 +172,7 @@ def reconcile_process_completions(agent: object) -> int:
             _record_completion_notice(authority, current, notice_id)
         except Exception:
             _LOG.exception("PROCESS_COMPLETION_RETRY session=%s", payload["session_id"])
+    _prune_consumed_process_records(store, authority)
     return sent
 
 
@@ -197,17 +266,17 @@ def _record_completion_notice(authority: ProcessSessionStore, current: dict[str,
 
 # LLM: 发现层只判断尚欠通知的结构化记录；持久 unknown 与共享激活永不产生会话完成通知，不纳入待处理事实；
 #   权威读取失败保留待检查，不能当成没有义务。
+#   有固定候选读口时先cheap再full，原owner目录是隔离边界，不从缺失的owner_key补造身份。
 # 函数用途: Gateway 重启或 owner 热缓存淘汰后，仍能发现后台命令，不让完成通知无人处理。
 def owner_has_pending_process_completions(owner_home: Path) -> bool:
     root = process_session_store_root(owner_home, owner_home)
-    records, errors = ProcessSessionStore(root).list_records()
-    return bool(errors) or any(
-        record.get("activation_scope") is None
-        and record.get("status") != "unknown"
-        and record.get("completion_target")
-        and not record.get("completion_notice_id")
-        for record in records
-    )
+    errors = []
+    for report in _pending_completion_reports(ProcessSessionStore(root)):
+        errors = report.load_errors
+        if any(record.get("activation_scope") is None and record.get("status") != "unknown"
+               and record.get("completion_target") and not record.get("completion_notice_id") for record in report.records):
+            return True
+    return bool(errors)
 
 
 # LLM: 只按记录里的结构化 completion_target（store_root + task_id）判断这个任务还欠不欠一次完成通知；
@@ -216,6 +285,7 @@ def owner_has_pending_process_completions(owner_home: Path) -> bool:
 #   读到的记录里已有本任务欠通知的就直接返回 True（同类坏记录不遮住它）；否则读错误先按记录归属限定：
 #   坏记录能解析出不属于本任务（见 _record_owned_elsewhere）就不计入，
 #   避免别的会话一条坏记录让所有定时收口都读不到。
+#   固定查询仅复制task候选，cheap未命中后仍全读；错误归属裁决与store_root匹配保持原义。
 # 函数用途: 判断某个会话任务是否还有尚未发出完成通知的受管后台命令（命令仍在跑或刚结束待通知）。
 def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
     store = getattr(agent, "conversation_store", None)
@@ -223,18 +293,16 @@ def task_has_pending_process_completion(agent: object, task_id: str) -> bool:
     selected = str(task_id or "").strip()
     if store is None or root is None or not selected:
         return False
-    records, errors = ProcessSessionStore(root).list_records()
     store_root = str(store.storage.root)
-    if any(
-        record.get("activation_scope") is None
-        and record.get("status") != "unknown"
-        and isinstance(record.get("completion_target"), dict)
-        and str(record["completion_target"].get("store_root") or "") == store_root
-        and str(record["completion_target"].get("task_id") or "") == selected
-        and not record.get("completion_notice_id")
-        for record in records
-    ):
-        return True
+    errors = []
+    for report in _pending_completion_reports(ProcessSessionStore(root), task_id=selected):
+        errors = report.load_errors
+        if any(record.get("activation_scope") is None and record.get("status") != "unknown"
+               and isinstance(record.get("completion_target"), dict)
+               and str(record["completion_target"].get("store_root") or "") == store_root
+               and str(record["completion_target"].get("task_id") or "") == selected
+               and not record.get("completion_notice_id") for record in report.records):
+            return True
     unscoped = [error for error in errors if not _record_owned_elsewhere(error, selected, store_root)]
     if unscoped:
         raise ProcessSessionAuthorityError(unscoped[0])

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1159,
+  "count": 1167,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -876,6 +876,14 @@
       "description": "截口落在换行处,并注明恢复路径(重新调用工具/读档案)。纯框架层,模型无感。"
     },
     {
+      "name": "_MODEL_CANCEL_DRAIN_SECONDS",
+      "file": "agent_py_agent/agent/agent_core/tool_model_generation.py",
+      "value": 0.05,
+      "unit": "秒",
+      "category": "其它",
+      "description": "用户取消只给快清理50ms；超时路径仍保留原1秒排空，慢worker由原后台shutdown登记继续持有。"
+    },
+    {
       "name": "_MODEL_INTERRUPT_DRAIN_SECONDS",
       "file": "agent_py_agent/agent/agent_core/tool_model_generation.py",
       "value": 1.0,
@@ -886,10 +894,10 @@
     {
       "name": "_TOOL_STREAM_POLL_SECONDS",
       "file": "agent_py_agent/agent/agent_core/tool_model_generation.py",
-      "value": 0.05,
+      "value": 2.0,
       "unit": "秒",
       "category": "其它",
-      "description": "工具流轮询间隔秒数。"
+      "description": "队列结果与即时取消通知是主路径，2秒轮询仅兜底丢失的通知。"
     },
     {
       "name": "_MAX_UNCLOSED_TOOL_START_MARKER_COUNT",
@@ -1206,7 +1214,7 @@
     {
       "name": "_STOP_CHECK_SECONDS",
       "file": "agent_py_agent/agent/backends/responses_websocket.py",
-      "value": 1.0,
+      "value": 2.0,
       "unit": "秒",
       "category": "其它",
       "description": "等待消息时每隔这么久醒来一次检查用户停止；连接关闭回调才是主停止路径，这里只是兜底检查点。"
@@ -2641,7 +2649,7 @@
       "value": 65536,
       "unit": "字节",
       "category": "其它",
-      "description": ""
+      "description": "只读后台进程投影最多读取的日志尾部字节数。"
     },
     {
       "name": "_FAILURE_BASE_BACKOFF_SECONDS",
@@ -3266,6 +3274,30 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "会话目标正文最多 4000 字符：限制单目标描述长度。"
+    },
+    {
+      "name": "_PROCESS_COMPLETION_PRUNE_INTERVAL_SECONDS",
+      "file": "agent_py_agent/agent/conversation/process_events.py",
+      "value": 300.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "每个会话存储根执行历史清理的最短间隔秒数。"
+    },
+    {
+      "name": "_PROCESS_COMPLETION_PRUNE_MAX_ROOTS_COUNT",
+      "file": "agent_py_agent/agent/conversation/process_events.py",
+      "value": 256,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "历史清理节流最多记住的会话存储根数量。"
+    },
+    {
+      "name": "_PROCESS_COMPLETION_RETENTION_SECONDS",
+      "file": "agent_py_agent/agent/conversation/process_events.py",
+      "value": 86400.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "已结清通知义务的终态记录保留秒数。"
     },
     {
       "name": "COMPLETION_COALESCE_WINDOW_SECONDS",
@@ -4380,6 +4412,14 @@
       "description": "日志采样最多 64 KiB：状态面板预览够用，避免整份日志进渲染。"
     },
     {
+      "name": "_GATEWAY_LOG_TAIL_MAX_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/status_rendering.py",
+      "value": 32768,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "Gateway权威状态回执中单份日志尾部最多采样的字节数。"
+    },
+    {
       "name": "_GATEWAY_READY_POLL_SECONDS",
       "file": "agent_py_agent/agent/gateway_parts/status_rendering.py",
       "value": 0.2,
@@ -4420,6 +4460,22 @@
       "description": "分块流刷新间隔 0.08 秒：输出攒够 128 字符或超时即推给对端。"
     },
     {
+      "name": "PLANNED_RESTART_HANDOVER_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/supervisor.py",
+      "value": 180.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "计划重启等待旧实例交接的宽限秒数。"
+    },
+    {
+      "name": "PLANNED_RESTART_STARTING_GRACE_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/supervisor.py",
+      "value": 120.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "计划重启等待新实例启动就绪的宽限秒数。"
+    },
+    {
       "name": "RESTART_BUDGET_RESET_SECONDS",
       "file": "agent_py_agent/agent/gateway_parts/supervisor.py",
       "value": 600.0,
@@ -4428,12 +4484,28 @@
       "description": "网关子进程平滑运行后重置重启计数预算的观察窗口。"
     },
     {
+      "name": "SLOW_RESTART_BACKOFF_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/supervisor.py",
+      "value": 300.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "慢速重启发生后的退避秒数。"
+    },
+    {
       "name": "_QUARANTINED_LIST_LIMIT_COUNT",
       "file": "agent_py_agent/agent/gateway_parts/wake_ops_control.py",
       "value": 30,
       "unit": "个",
       "category": "上限预算",
       "description": "隔离唤醒列表最多列 30 条：列表有界，防止一次拉全量。"
+    },
+    {
+      "name": "_HEAD_DIGEST_BYTES",
+      "file": "agent_py_agent/agent/ingestion/continuous_monitor.py",
+      "value": 4096,
+      "unit": "字节",
+      "category": "其它",
+      "description": "校验增长文件增量游标时读取的头部摘要字节数。"
     },
     {
       "name": "_CENSUS_CAP_COUNT",
@@ -7082,14 +7154,6 @@
       "unit": "秒",
       "category": "其它",
       "description": "后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。"
-    },
-    {
-      "name": "_LISTEN_CHECK_SECONDS",
-      "file": "agent_py_agent/agent/tooling/background_process_host.py",
-      "value": 2.0,
-      "unit": "秒",
-      "category": "其它",
-      "description": "监听范围核对的间隔：读 socket 表有成本，不必跟 50ms 的存活轮询同频。"
     },
     {
       "name": "BACKGROUND_START_SETTLE_SECONDS",
