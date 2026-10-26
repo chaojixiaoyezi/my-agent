@@ -414,6 +414,40 @@ def test_stage3_preview_limit_is_real_archive_budget(key, value, wanted):
     assert archive._config_int(agent, key) == wanted
 
 
+@pytest.mark.parametrize("name", ["meta ", " meta"])
+def test_git_pointer_keeps_spaces_accepted_by_real_git(tmp_path, name):
+    repo, metadata = tmp_path / "repo", tmp_path / name
+    subprocess.run(["git", "init", "--separate-git-dir", str(metadata), str(repo)], check=True, capture_output=True)
+    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--absolute-git-dir"], check=True, capture_output=True, text=True)
+    assert result.stdout.rstrip("\n") == str(metadata)
+    assert module._git_pointer_path(repo / ".git", gitfile=True) == metadata
+
+
+def test_git_discovery_follows_directory_aliases_without_looping(tmp_path):
+    root, external = tmp_path / "writable", tmp_path / "external"
+    root.mkdir()
+    external.mkdir()
+    metadata = root / "metadata"
+    metadata.mkdir()
+    (external / ".git").write_text("gitdir: ../writable/metadata\n")
+    (root / "alias").symlink_to(external, target_is_directory=True)
+    (external / "cycle").symlink_to(root, target_is_directory=True)
+    spec = AttemptSandboxSpec(root, root, root, root, extra_write_roots=(root,))
+    assert any(path.resolve() == (external / ".git").resolve() for path in module._macos_git_markers(spec))
+    assert module._seatbelt_string_literal(str(metadata / "config")) in _profile(spec)
+
+
+def test_absent_write_root_keeps_future_git_regex_protection(tmp_path):
+    root = tmp_path / "future"
+    spec = AttemptSandboxSpec(root, root, root, root, extra_write_roots=(root,))
+    assert module._macos_git_write_denies(spec)
+
+
+def test_git_worktree_configuration_is_protected(tmp_path):
+    spec, _repo, gitdir, _common, _alias = _git_layout(tmp_path, "worktree")
+    assert module._seatbelt_string_literal(str(gitdir / "config.worktree")) in _profile(spec)
+
+
 @pytest.mark.parametrize("kind", ["ordinary", "worktree", "symlink"])
 def test_native_git_control_paths_block_write_create_replace_and_rename(tmp_path, native_seatbelt, kind):
     spec, repo, gitdir, common, alias = _git_layout(tmp_path, kind)

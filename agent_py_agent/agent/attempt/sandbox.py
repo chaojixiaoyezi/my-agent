@@ -844,24 +844,33 @@ def _git_pointer_path(path: Path, *, gitfile: bool = False) -> Path | None:
         return None
     if len(text) > 65536 or (gitfile and not text.startswith("gitdir: ")):
         raise ValueError("invalid Git control pointer")
-    value = text[len("gitdir: "):] if gitfile else text
-    if not value.strip() or "\n" in value.rstrip("\r\n"):
+    value = (text[len("gitdir: "):] if gitfile else text).rstrip("\r\n")
+    if not value or "\n" in value:
         raise ValueError("invalid Git control pointer")
-    return (path.parent / value.strip()).resolve(strict=False)
+    return (path.parent / value).resolve(strict=False)
 
 
-# LLM: 每次生成profile重查显式写根及cwd祖先的.git，不缓存目录/链接；不跟随普通目录链接或进入.git对象库。
-# 函数用途: 找到写根内嵌仓库以及写根所属仓库的控制入口，扫描失败由调用方关闭执行。
+# LLM: 每次重查写根及cwd祖先，不缓存目录/链接；跟随目录别名但按realpath去环，不进入.git对象库。
+# 函数用途: 找齐内嵌和链接worktree入口；尚不存在的根由通配规则保护，其他扫描错误关闭执行。
 def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
     roots = {Path(path).resolve(strict=False) for path in (spec.attempt_view, *spec.extra_write_roots,
              *((spec.staging_root,) if spec.implicit_attempt_write_roots else ()))}
     markers = {parent / ".git" for root in roots for parent in (root, *root.parents)
                if (parent / ".git").exists() or (parent / ".git").is_symlink()}
     # os.walk默认吞掉权限错误；保护发现必须把错误交还，不可静默漏掉worktree。
+    # LLM: 仅不存在表示没有本轮可发现的控制入口；权限/IO错误不能当空目录。
+    # 函数用途: 将扫描错误交回失败关闭链，但允许尚未创建的写根。
     def failed(error: OSError) -> None:
-        raise error
+        if not isinstance(error, FileNotFoundError):
+            raise error
+    visited: set[Path] = set()
     for root in roots:
-        for directory, dirs, files in os.walk(root, onerror=failed):
+        for directory, dirs, files in os.walk(root, onerror=failed, followlinks=True):
+            actual = Path(directory).resolve(strict=False)
+            if actual in visited:
+                dirs.clear()
+                continue
+            visited.add(actual)
             if ".git" in dirs or ".git" in files:
                 markers.add(Path(directory) / ".git")
             dirs[:] = [name for name in dirs if name != ".git"]
@@ -872,7 +881,7 @@ def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
 #   仅拒绝控制文件和目录改名，objects/index/refs正常可写；指针或发现失败沿SANDBOX_UNAVAILABLE，绝不退回宿主。
 # 函数用途: 防止命令修改hooks/config或移动其祖先绕过保护，不把整个.git树设为只读。
 def _macos_git_write_denies(spec: AttemptSandboxSpec) -> list[str]:
-    rules = _pattern_write_denies((r"(^|/)\.git/(hooks|config)(/|$)",))
+    rules = _pattern_write_denies((r"(^|/)\.git/(hooks|config(\.worktree)?)(/|$)",))
     rules.extend(_pattern_write_denies((r"(^|/)\.git$",), directories=True, unlink_only=True))
     rules.append(r'(deny file-write* (require-all (require-not (vnode-type DIRECTORY)) (regex "(^|/)\\.git$")))')
     paths: set[Path] = set()
@@ -887,7 +896,7 @@ def _macos_git_write_denies(spec: AttemptSandboxSpec) -> list[str]:
                 paths.add(marker)
             for directory in {gitdir, common}:
                 directories.add(directory)
-                for name in ("hooks", "config", "commondir"):
+                for name in ("hooks", "config", "config.worktree", "commondir"):
                     path = directory / name
                     paths.update((path, path.resolve(strict=False)))
         directories.update(parent for path in paths for parent in path.parents)

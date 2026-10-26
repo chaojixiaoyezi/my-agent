@@ -548,10 +548,10 @@
       "description": "参数减量第 3 批：没给 count 时默认创建的子代理数不再是配置项；cli/_board.py 的 spawn 命令共用同一常量。"
     },
     {
-      "name": "TOOL_PREVIEW_CHAR_LIMIT",
+      "name": "TOOL_PREVIEW_CHAR_LIMIT_CHARS",
       "file": "agent_py_agent/agent/agent_core/tool_call_archive_record.py",
       "value": 1200,
-      "unit": "",
+      "unit": "字符",
       "category": "上限预算",
       "description": "工具外置回执预览的最大字符数；完整正文与哈希仍保存在原归档中。"
     },
