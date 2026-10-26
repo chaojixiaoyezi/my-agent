@@ -1,8 +1,11 @@
-"""后台服务监听范围：默认只允许本机回环，开放局域网要结构化声明并由用户长期授权；host 按真实 socket 表回收越界服务。"""
+# LLM: 保留原PID身份/整树回收/告警一次合同；监听自动观察仅启动一分钟，虚拟时钟不替代真实host测试。
+# 模块用途: 验证监听授权与60秒硬截止；区分模拟观察和真实服务入口。
+"""后台服务监听范围：前一分钟核对实际绑定，开放局域网需结构化授权。"""
 from __future__ import annotations
 
 import io
 import json
+import math
 import stat
 import subprocess
 import time
@@ -196,12 +199,14 @@ def test_host_recycles_a_loopback_declared_service_that_binds_all_interfaces(tmp
         _cleanup(hosted)
 
 
+# LLM: 真实host必须创建成功，短期存活不代表一分钟之后仍有自动监听保护。
+# 函数用途: 验证授权服务不被启动期错误回收，并总是清理本测试进程。
 @pytest.mark.parametrize("code,scope", [(BIND_LOOP, "loopback"), (BIND_ANY, "lan")])
 def test_allowed_listeners_keep_running(tmp_path, code, scope):
     hosted = launch.start_background_process(managed_request(tmp_path, code, listen_scope=scope))
     try:
         store = ProcessSessionStore(hosted.store_root)
-        time.sleep(4.5)  # 覆盖两次监听核对
+        time.sleep(4.5)  # 覆盖启动后的首次监听核对；持续运行不等于已验证长期监听。
         record = store.load(hosted.record["session_id"]).record
         assert record["status"] == "running" and record["listen_scope"] == scope
         assert "listener_violation" not in record and "listener_warning" not in record
@@ -221,11 +226,12 @@ def test_enforcement_off_only_records_a_warning(tmp_path):
         _cleanup(hosted)
 
 
-@pytest.mark.parametrize("elapsed,expected", [(0, 2), (9.99, 2), (10, 10), (59.99, 10), (60, 30), (600, 30)])
-@pytest.mark.parametrize("enforce", [True, False])
-def test_listen_check_interval_keeps_enforcement_fast(elapsed, expected, enforce):
-    assert hasattr(host, "_listen_check_interval"), "监听检查缺少独立的分级退避策略"
-    assert host._listen_check_interval(elapsed, enforce=enforce) == (2 if enforce else expected)
+# LLM: 沿原enforce接口检查两种模式共同窗口，不以无穷调度代替monitor硬截止。
+# 函数用途: 钉住一分钟前10秒、从60秒起无穷间隔的边界。
+@pytest.mark.parametrize("elapsed,expected", [(0, 10), (9.99, 10), (10, 10), (59.99, 10), (60, math.inf), (600, math.inf)])
+def test_listen_check_interval_adaptive_backoff(elapsed, expected):
+    assert host._listen_check_interval(elapsed, enforce=True) == expected
+    assert host._listen_check_interval(elapsed, enforce=False) == expected
 
 
 # LLM: 运行原monitor和监听告警事务，仅替换时钟、内核观察和最终整树清理；直接child禁止poll/wait。
@@ -272,25 +278,52 @@ def test_monitor_warning_stops_all_further_listener_checks(monitor_probe, preexi
     assert len(state.writes) == (1 if preexisting else 2), "只写一次告警和最终终态"
 
 
-def test_monitor_warning_only_checks_back_off_without_a_violation(monitor_probe):
+# LLM: 用原monitor和虚拟时钟记录真实观察调用，不改PID身份或reap入口。
+# 函数用途: 验证两种模式到60秒停止监听观察，进程存活监控仍继续。
+@pytest.mark.parametrize("enforce", [True, False])
+def test_monitor_never_observes_listeners_at_or_after_sixty_seconds(monitor_probe, enforce):
     state = monitor_probe
     host._monitor_child(state.store, "bg-probe", state.child, "birth", 0,
-                        host._MonitorPolicy(listen_scope_enforce=False))
-    assert state.checks[0] == 0 and state.checks[-1] >= 90
+                        host._MonitorPolicy(listen_scope_enforce=enforce))
+    assert state.checks[0] == 0 and 50 <= state.checks[-1] < 60
+    assert state.now >= 100 and all(instant < 60 for instant in state.checks)
     for previous, current in zip(state.checks, state.checks[1:]):
-        expected = 2 if previous < 10 else 10 if previous < 60 else 30
-        assert expected <= current - previous <= expected + 0.251
+        assert 10 <= current - previous <= 10.251
 
 
-def test_monitor_enforces_a_late_listener_even_after_an_old_warning(monitor_probe):
+# LLM: 旧告警不关闭强制模式的一分钟启动保护，仍保留原证据与回收事务。
+# 函数用途: 验证窗口内晚绑定仍会按新10秒节奏拦截。
+def test_monitor_enforces_a_listener_within_first_minute_even_after_an_old_warning(monitor_probe):
     state = monitor_probe
-    state.violation_at = 61
+    state.violation_at = 41
     state.record["listener_warning"] = {"enforced": False}
     host._monitor_child(state.store, "bg-probe", state.child, "birth", 0, host._MonitorPolicy())
-    assert 61 <= state.now <= 63.25
+    assert 41 <= state.now <= 51.25
     assert state.record["reason"] == "listen_scope_violation"
     assert state.record["listener_violation"]["enforced"] is True
-    assert all(current - previous <= 2.251 for previous, current in zip(state.checks, state.checks[1:]))
+    assert all(current - previous <= 10.251 for previous, current in zip(state.checks, state.checks[1:]))
+
+
+# LLM: 用户已批准一分钟后停止自动观察；不把未观察到的晚绑定当成安全或越界。
+# 函数用途: 确认60秒后新绑定不会触发自动监听回收。
+def test_monitor_does_not_recycle_a_listener_first_bound_after_cutoff(monitor_probe):
+    state = monitor_probe
+    state.violation_at = 60
+    host._monitor_child(state.store, "bg-probe", state.child, "birth", 0, host._MonitorPolicy())
+    assert all(instant < 60 for instant in state.checks)
+    assert state.record["reason"] == "test_done" and "listener_violation" not in state.record
+
+
+# LLM: 非零起点和正好60秒的时钟跳变可区分硬截止与仅靠inf间隔的晚到一次探测。
+# 函数用途: 验证睡眠跨到60秒边界时不补跑到期的监听检查。
+@pytest.mark.parametrize("enforce", [True, False])
+def test_monitor_exact_sixty_second_jump_never_observes_again(monitor_probe, monkeypatch, enforce):
+    state = monitor_probe
+    state.now, state.duration = 37.0, 120.0
+    monkeypatch.setattr(host.time, "sleep", lambda seconds: setattr(state, "now", max(97.0, state.now + seconds)))
+    host._monitor_child(state.store, "bg-probe", state.child, "birth", 0,
+                        host._MonitorPolicy(listen_scope_enforce=enforce))
+    assert state.checks == [37.0]
 
 
 # LLM: 同时替换run身份哨兵才模拟原生缓存分支；普通monkeypatch测试另核旧kwargs，无真实ps/lsof。

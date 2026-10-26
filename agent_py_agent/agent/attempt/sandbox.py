@@ -1,6 +1,7 @@
 # LLM: attempt 沙箱负责平台执行边界；Seatbelt 读规则含根一级最低启动读取和链节点精确 metadata，不据规则形状宣称真进程成功。
 #   同步 run 复用 process_run 的取消/超时组回收且不继承 stdin，PTY 仍由 build_argv 构造独立终端。
 #   独立 Landlock 启动器按 Python 导入器的真实 origin 定位；隔离解释器显式 -B，不能改写发行 runtime。
+#   Darwin固定owner保护压成规范布局regex；动态人格来源、现有路径别名每次复核，缓存仅复用最终字符串。
 # 模块用途: 为不同平台构造执行隔离，批处理等待可被本 run 取消，不消费 Gateway 输入、不绕过隔离。
 """AttemptExecutionSandbox（3.txt E.4-E.8）：attempt 级平台执行网关。
 
@@ -36,12 +37,20 @@ import tempfile
 import threading
 from collections import deque
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 from ..common.cancellation import raise_if_cancelled
 from ..path_access_policy import (
     AgentsSourceProtectionError,
+    agent_home_root_for_owner,
+    host_readonly_paths,
+    macos_hidden_pattern,
+    macos_host_alias_paths,
+    macos_owner_prefix,
+    macos_readonly_pattern,
+    owner_home_containing,
     persona_process_protected_paths,
     persona_sandbox_root,
 )
@@ -380,23 +389,14 @@ class AttemptExecutionSandbox:
 
     # LLM: macOS与Linux共用显式写根和保护投影；权限已明确时不能从cwd或attempt_view推断写许可。
     # Linux; never infer write permission from attempt_view/cwd when the boundary is explicit.
-    # 函数用途: 为 macOS 命令生成 Seatbelt 包装参数。
+    # 函数用途: 为 macOS 命令生成压缩并有界复用的Seatbelt参数；动态人格来源仍每次复核。
     def _macos_argv(self, command_argv: list[str]) -> list[str]:
         sandbox_exec = self.spec.macos_sandbox_exec or shutil.which("sandbox-exec")
         if not sandbox_exec:
             raise SandboxUnavailableError(
                 "SANDBOX_UNAVAILABLE: SEATBELT_NOT_FOUND: 缺少 sandbox-exec"
             )
-        profile = "\n".join([self._macos_profile(
-            attempt_view=self.spec.attempt_view,
-            staging=self.spec.staging_root,
-            shared=self.spec.shared_workspace,
-            protected_persona_root=persona_sandbox_root(self.spec.owner_home, self.spec.protected_persona_root),
-            write_roots=self.spec.extra_write_roots,
-            write_protection=SandboxWriteProtection(self.spec.protected_write_paths, self.spec.write_scope_denied_roots),
-            implicit_attempt_write_roots=self.spec.implicit_attempt_write_roots,
-            full_access=self.spec.full_access,
-        ), *_spec_rules(self.spec)])
+        profile = build_macos_sandbox_profile(self.spec)
         return [sandbox_exec, "-p", profile, "--", *command_argv]
 
     # LLM: 就绪/argv 仍走唯一平台边界；allowlist cwd 复用插件工厂的同一根覆盖判定，未获准则 Popen 前结构化拒绝。
@@ -422,7 +422,7 @@ class AttemptExecutionSandbox:
     # LLM: 规则只投影结构化沙箱事实；Full Access保留精确人格/控制路径拒写，不能放宽宿主私有根或禁网。
     # broad write deny but still applies precise persona/control-path denies.
     # LLM: 普通允许/禁止按共享路径优先级编译；精确锁与宿主保护最后覆盖，不能由窄写根穿透。同步文件门与 Linux 同文件测试。
-    # 函数用途: 生成 Seatbelt 规则，让自身授权目录可写且保持绝对保护路径只读。
+    # 函数用途: 用真实Unicode路径生成基础Seatbelt规则，让授权目录可写且绝对保护仍只读。
     @staticmethod
     def _macos_profile(
         *,
@@ -464,7 +464,7 @@ class AttemptExecutionSandbox:
             "(allow default)",
             "(deny file-write*)",
             '(allow file-write* (subpath "/dev") (literal "/dev/null")'
-            + "".join(f' (subpath {json.dumps(root)})' for root in effective_write_roots)
+            + "".join(f' (subpath {_seatbelt_string_literal(root)})' for root in effective_write_roots)
             + ")",
         ]
         lines.extend(_macos_write_scope_rules(tuple(Path(path) for path in effective_write_roots), write_scope_denied_roots))
@@ -482,14 +482,102 @@ class AttemptExecutionSandbox:
         return {"platform": platform.system()}
 
 
+# LLM: 只缓存已格式化的不可变规则，键含规范cwd/owner/写根/网络以及全部额外边界；不缓存来源、目录或就绪裁决。
+# 函数用途: 有界复用完整profile字符串，最多保留128个不同边界。
+@lru_cache(maxsize=128)
+def _cached_macos_profile(key: tuple, rules: tuple[str, ...]) -> str:
+    return "\n".join(rules)
+
+
+# LLM: 生成前和返回前核验人格/任意本地来源，异常或保护集合变化失败关闭；默认名称通配，自定义来源保留精确路径和祖先。
+#   只复用最终字符串；符号链接、来源配置、显式保护与所有spec边界的当前投影均参与cache输入。
+# 函数用途: 生成生产完整Seatbelt配置，不让规则数量随普通owner数量线性增长。
+def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
+    root = persona_sandbox_root(spec.owner_home, spec.protected_persona_root)
+    paths = _sandbox_persona_paths(root, all_owners=spec.full_access) if root is not None else ()
+    source_paths = frozenset(paths)
+    agent = agent_home_root_for_owner(root) if root is not None else None
+    compact = spec.full_access and agent is not None and bool(spec.protected_write_patterns)
+    persona_rules: list[str] = []
+    readonly_aliases: tuple[Path, ...] = ()
+    hidden_aliases: tuple[Path, ...] = ()
+    if compact:
+        homes = {owner_home_containing(path, agent) for path in paths}
+        readonly_aliases, hidden_aliases = macos_host_alias_paths(tuple(home for home in homes if home is not None))
+        paths = tuple(path for path in paths if not _default_owner_persona_path(path, agent))
+        pattern = f"^{macos_owner_prefix(agent)}/(SOUL\\.md|USER\\.md|AGENTS\\.md|persona)(/|$)"
+        persona_rules = _pattern_write_denies((pattern,))
+    base = AttemptExecutionSandbox._macos_profile(
+        attempt_view=spec.attempt_view, staging=spec.staging_root, shared=spec.shared_workspace,
+        write_roots=spec.extra_write_roots, full_access=spec.full_access,
+        implicit_attempt_write_roots=spec.implicit_attempt_write_roots,
+        write_protection=SandboxWriteProtection((), spec.write_scope_denied_roots))
+    readonly = spec.protected_write_paths
+    if agent is not None and not spec.full_access and spec.protected_write_patterns:
+        declared = set(host_readonly_paths(agent, root))
+        readonly = tuple(path for path in readonly if path not in declared or path.resolve(strict=False) != path)
+        persona_rules.extend(_pattern_write_denies((macos_readonly_pattern(agent, root),)))
+    write_denies = [*_readonly_path_denies((*readonly, *readonly_aliases)), *_readonly_path_denies(paths), *persona_rules]
+    if (root is not None and any(path.is_file() for path in paths)) or compact:
+        write_denies.append("(deny file-link)")
+    rules = (base, *_spec_rules(spec, persona_paths=(*paths, *readonly_aliases, *hidden_aliases),
+                               write_denies=tuple(write_denies)), *_hidden_path_rules(hidden_aliases))
+    key = (spec.attempt_view.resolve(strict=False), root.resolve(strict=False) if root is not None else None,
+           tuple(path.resolve(strict=False) for path in spec.extra_write_roots), spec.network_access)
+    profile = _cached_macos_profile(key, rules)
+    if root is not None and source_paths != frozenset(_sandbox_persona_paths(root, all_owners=spec.full_access)):
+        raise SandboxUnavailableError("SANDBOX_UNAVAILABLE: PATH_AGENTS_SOURCE_PROTECTION_INVALID: changed protection")
+    return profile
+
+
+# LLM: 只识别可由固定regex覆盖的规范owner默认名称；任意名来源不得据前缀丢弃。
+# 函数用途: 判断一个已经安全核验的路径能否由统一人格规则替代。
+def _default_owner_persona_path(path: Path, agent: Path) -> bool:
+    home = owner_home_containing(path, agent)
+    return home is not None and path in tuple(home / name for name in ("SOUL.md", "USER.md", "AGENTS.md", "persona"))
+
+
+# LLM: 只给带宿主保护投影的普通owner加跨owner墙；allowlist绝不重新开放整个owner。显式写根只重开当前owner以内。
+# 函数用途: 用owners根拒绝与本owner放行替代逐owner拒绝，随后恢复普通拒写优先级，绝对保护再覆盖。
+def _macos_cross_owner_rules(spec: AttemptSandboxSpec) -> list[str]:
+    if spec.full_access or spec.read_mode is not None or not spec.protected_write_patterns:
+        return []
+    home = persona_sandbox_root(spec.owner_home, spec.protected_persona_root)
+    agent = agent_home_root_for_owner(home) if home is not None else None
+    if agent is None:
+        return []
+    roots = {path.resolve(strict=False) for path in (*spec.extra_write_roots, *((spec.attempt_view, spec.staging_root) if spec.implicit_attempt_write_roots else ()))}
+    writable = {path for path in roots if home == path or home in path.parents}
+    owners = agent / "owners"
+    # 宿主外的显式写根可重放，兄弟owner与覆盖owners的宽祖先不可在墙之后重新放行。
+    replay = writable | {path for path in roots if path != owners and owners not in path.parents and path not in owners.parents}
+    return [f"(deny file-read* file-write* (subpath {_seatbelt_string_literal(str(owners))}))",
+            f"(allow file-read* (subpath {_seatbelt_string_literal(str(home))}))",
+            *(f"(allow file-write* (subpath {_seatbelt_string_literal(str(path))}))" for path in sorted(writable)),
+            *_macos_write_scope_rules(tuple(sorted(replay)), spec.write_scope_denied_roots)]
+
+
+# LLM: H2正则只用本次规范owner锚点及原声明，不取环境变量；在读放行之后拒绝，覆盖尚未创建的托管位置。
+# 函数用途: 为压缩宿主投影补齐当前owner或全owner存储的读写隐藏。
+def _macos_host_hidden_rules(spec: AttemptSandboxSpec) -> list[str]:
+    if not spec.protected_write_patterns:
+        return []
+    home = persona_sandbox_root(spec.owner_home, spec.protected_persona_root)
+    agent = agent_home_root_for_owner(home) if home is not None else None
+    if agent is None:
+        return []
+    pattern = macos_hidden_pattern(agent, None if spec.full_access else home)
+    return [f"(deny file-read* file-write* (regex {_seatbelt_string_literal(pattern)}))"]
+
+
 # LLM: Full Access 和普通形态共用同一条目顺序；绝对保护由调用方最后追加，不能在这里被写授权覆盖。
-# 函数用途: 编译普通祖先禁止与正式窄授权，空禁止列表保持原规则。
+# 函数用途: 按原优先级和真实Unicode路径编译普通禁止与窄授权，空禁止列表保持原规则。
 def _macos_write_scope_rules(allowed: tuple[Path, ...], denied: tuple[Path, ...]) -> list[str]:
     if not denied:
         return []
     lines = []
     for root, writable in ordered_write_scope_roots(allowed, denied):
-        encoded = json.dumps(str(root))
+        encoded = _seatbelt_string_literal(str(root))
         lines.append(f'({"allow" if writable else "deny"} file-write* (literal {encoded}) (subpath {encoded}))')
     return lines
 
@@ -516,7 +604,7 @@ def sandbox_hides_host_paths(platform_name: str | None = None) -> bool:
 #   公开解释器根可能有 symlink 别名；拒读范围按真实路径裁决，但显式授权的原路径和 realpath 都必须放行。
 #   所以先写全部拒读根（my-agent 根，开关打开时还有用户家目录），再逐个放行本 owner 的可见范围，最后放行上层目录的元数据；
 #   与 Linux 挂载视图对齐；途中软链接仅补 literal metadata，不授予别名父目录读取。写规则保持原样。
-# 函数用途: 生成 owner 隔离形态下宿主私有目录的读拒绝与放行规则；Full Access 或没有拒读根时返回空列表。
+# 函数用途: 按真实Unicode路径生成owner隔离的读拒绝与放行；Full Access或无拒读根时返回空列表。
 def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     if spec.full_access or not spec.private_read_roots:
         return []
@@ -526,8 +614,8 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
         *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)}
     visible.update(Path(path).expanduser().absolute() for path in spec.public_read_roots)
     visible.update(Path(path).expanduser().absolute() for path in spec.extra_write_roots)
-    allowed = sorted(json.dumps(str(path)) for path in visible)
-    return [*(f"(deny file-read* (subpath {json.dumps(str(root))}))" for root in hidden),
+    allowed = sorted(_seatbelt_string_literal(str(path)) for path in visible)
+    return [*(f"(deny file-read* (subpath {_seatbelt_string_literal(str(root))}))" for root in hidden),
             *(f"(allow file-read* (subpath {path}))" for path in allowed),
             *_symlink_metadata_rules((*visible, *spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots)),
             *_ancestor_metadata_rules(hidden, visible)]
@@ -535,7 +623,7 @@ def _private_read_rules(spec: AttemptSandboxSpec) -> list[str]:
 
 # LLM: allowlist 先拒读再放授权根；3a 在 macOS 26.4 沙箱外实测仅 metadata 的 / 导致 SIGABRT，根一级 read-data 才能启动。
 #   / 只用 literal，风险是可见顶层目录名，不可读其子目录；路径链节点只补 metadata，不能给 subpath/data。
-# 函数用途: 生成有限读 Seatbelt 规则，保留最小启动读取与软链接链解析，不递归开放宿主根。
+# 函数用途: 按真实Unicode路径生成有限读规则，保留最小启动读取与链接解析，不递归开放宿主根。
 def _allowlist_read_rules(spec: AttemptSandboxSpec) -> list[str]:
     visible: set[Path] = set()
     for raw in (*spec.system_read_roots, *spec.public_read_roots, *spec.extra_write_roots):
@@ -544,7 +632,7 @@ def _allowlist_read_rules(spec: AttemptSandboxSpec) -> list[str]:
             visible.update((path, path.resolve(strict=False)))
         except (OSError, RuntimeError, TypeError, ValueError):
             continue
-    allowed = sorted(json.dumps(str(path)) for path in visible)
+    allowed = sorted(_seatbelt_string_literal(str(path)) for path in visible)
     return ["(deny file-read*)",
             '(allow file-read-data (literal "/"))',
             *(f"(allow file-read* (subpath {path}))" for path in allowed),
@@ -594,18 +682,18 @@ def _symlink_path_nodes(raw: Path) -> tuple[Path, ...]:
 
 
 # LLM: 两种 Seatbelt 读模式复用同一链事实；每个链接只获 file-read-metadata literal，不能变成 subpath 或 read-data。
-# 函数用途: 将所有放行根解析途中的软链接名称转为精确元数据规则。
+# 函数用途: 用真实Unicode链接名称生成精确元数据规则，不借编码扩大数据读取。
 def _symlink_metadata_rules(roots: tuple[Path, ...]) -> list[str]:
-    paths = sorted({json.dumps(str(node)) for root in roots for node in _symlink_path_nodes(root)})
+    paths = sorted({_seatbelt_string_literal(str(node)) for root in roots for node in _symlink_path_nodes(root)})
     return [f"(allow file-read-metadata (literal {path}))" for path in paths]
 
 
 # LLM: 拒读根按 subpath 连同根目录本身一起拒绝；放行子目录之后，根与放行目录之间的上层目录仍拿不到元数据。git、node 的
 #   realpath、python -m venv 规范化路径时要逐级 lstat，会报 Operation not permitted 退出（2026-09-26 本机复现，owner 工作区
 #   在 ~/.my-agent 之下）。所以只对这些上层目录按 literal 放行 file-read-metadata：能 stat 目录本身，仍不能列目录、不能读同级。
-# 函数用途: 生成拒读根内、放行目录上层各级目录的元数据放行规则；没有这类目录时返回空列表。
+# 函数用途: 用真实Unicode名称生成放行目录祖先的精确元数据规则；没有这类目录时返回空列表。
 def _ancestor_metadata_rules(hidden_roots: tuple[Path, ...], visible: set[Path]) -> list[str]:
-    ancestors = sorted({json.dumps(str(parent)) for path in visible for parent in path.parents
+    ancestors = sorted({_seatbelt_string_literal(str(parent)) for path in visible for parent in path.parents
                         if any(parent == root or root in parent.parents for root in hidden_roots)})
     if not ancestors:
         return []
@@ -614,9 +702,9 @@ def _ancestor_metadata_rules(hidden_roots: tuple[Path, ...], visible: set[Path])
 
 # LLM: H2：宿主托管存储对模型命令既不可读也不可写。Seatbelt 后写覆盖先写，所以这些拒绝必须排在整份规则最后，压过 owner home 的读放行；
 #   存储在 owner home 内，上层目录本来就可读，不需要额外的元数据放行。改动须同步 test_host_managed_store_access.py 的真实 sandbox-exec 用例。
-# 函数用途: 把要隐藏的宿主托管存储目录转成 Seatbelt 的读写拒绝规则。
+# 函数用途: 将实际托管存储目录按真实Unicode路径转成Seatbelt读写拒绝，覆盖所有读放行。
 def _hidden_path_rules(paths: tuple[Path, ...]) -> list[str]:
-    roots = sorted({json.dumps(str(Path(path).resolve(strict=False))) for path in paths})
+    roots = sorted({_seatbelt_string_literal(str(Path(path).resolve(strict=False))) for path in paths})
     return [f"(deny file-read* file-write* (subpath {root}))" for root in roots]
 
 
@@ -656,21 +744,23 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
 # LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、上级目录写拒绝、隐藏路径、断网、Gateway 端口拒绝；
 #   隐藏路径排在读放行之后，断网与端口拒绝排最后（Seatbelt 后写覆盖先写；两条 deny 先后不影响结果）。上级目录规则只拒写，
 #   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
-# 函数用途: 汇总按 spec 生成的 macOS 附加规则。
-def _spec_rules(spec: AttemptSandboxSpec) -> list[str]:
+# 函数用途: 按读边界、owner墙、绝对拒写、祖先保护、隐藏和网络顺序汇总macOS规则，来源投影只复用本次值。
+def _spec_rules(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | None = None,
+                write_denies: tuple[str, ...] = ()) -> list[str]:
     read_rules = _allowlist_read_rules(spec) if spec.read_mode == "allowlist" else _private_read_rules(spec)
-    return [*read_rules, *_ancestor_write_denies(spec), *_pattern_write_denies(spec.protected_write_patterns),
+    return [*read_rules, *_macos_cross_owner_rules(spec), *write_denies,
+            *_ancestor_write_denies(spec, persona_paths=persona_paths), *_pattern_write_denies(spec.protected_write_patterns),
             *_pattern_write_denies(spec.protected_directory_write_patterns, directories=True),
             *_pattern_write_denies(spec.protected_directory_unlink_patterns, directories=True, unlink_only=True),
-            *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access),
+            *_macos_host_hidden_rules(spec), *_hidden_path_rules(spec.hidden_paths), *_network_rules(spec.network_access),
             *_gateway_port_denies(spec.deny_gateway_ports)]
 
 
 # LLM: 正则拒写（H3）：模式是 POSIX ERE，按 JSON 字符串写进规则（本机实测 SBPL 的 regex 认普通字符串）。只拒写，排在写根放行
 #   之后才能盖过它（Seatbelt 后写覆盖先写）；目录规则必须限制 vnode 类型，业务祖先只保护删除/改名。没有模式时返回空列表。
-# 函数用途: 把按正则声明的只读位置转成 Seatbelt 写拒绝。
+# 函数用途: 用保留Unicode的字符串编码生成正则拒写，目录vnode和unlink操作边界保持不变。
 def _pattern_write_denies(patterns: tuple[str, ...], *, directories: bool = False, unlink_only: bool = False) -> list[str]:
-    filters=[f'(regex {json.dumps(pattern)})' for pattern in dict.fromkeys(patterns)]
+    filters=[f'(regex {_seatbelt_string_literal(pattern)})' for pattern in dict.fromkeys(patterns)]
     if directories:
         filters=[f'(require-all (vnode-type DIRECTORY) {value})' for value in filters]
     operation='file-write-unlink' if unlink_only else 'file-write*'
@@ -682,15 +772,16 @@ def _pattern_write_denies(patterns: tuple[str, ...], *, directories: bool = Fals
 #   （直到/）各加Unicode原名literal拒绝：只拦改名/删除/chmod/touch祖先节点，普通子路径写仍沿原授权（本机实测
 #   mkdir -p、git、cp、tar 均正常）。只拒写，所以排在私有读规则之后、隐藏路径之前都不改变读裁决。Linux 只读挂载跟着
 #   目录项走，不需要这条。改动须同步 test_host_files_access.py 的真实 sandbox-exec 用例。
-# 函数用途: 生成保护路径、来源及控制域所有上级目录的节点写拒绝，不把业务目录整树只读。
-def _ancestor_write_denies(spec: AttemptSandboxSpec) -> list[str]:
+# 函数用途: 复用本次来源与别名投影保护所有祖先和目录节点，不把业务目录整树只读或再次枚举owner。
+def _ancestor_write_denies(spec: AttemptSandboxSpec, *, persona_paths: tuple[Path, ...] | None = None) -> list[str]:
     protected = [*spec.protected_write_paths, *spec.hidden_paths]
     root = persona_sandbox_root(spec.owner_home, spec.protected_persona_root)
     persona = [root] if root is not None else []
     if root is not None:
-        protected.extend(_sandbox_persona_paths(root, all_owners=spec.full_access))
+        protected.extend(persona_paths if persona_paths is not None else _sandbox_persona_paths(root, all_owners=spec.full_access))
     ancestors = {parent for path in (*protected, *persona) for parent in Path(path).resolve(strict=False).parents}
     ancestors.update(Path(path).resolve(strict=False) for path in persona)
+    ancestors.update(Path(path).resolve(strict=False) for path in protected if Path(path).is_dir())
     if not ancestors:
         return []
     literals = sorted(_seatbelt_string_literal(str(path)) for path in ancestors)
@@ -813,27 +904,28 @@ def gateway_isolation_status(ports: tuple[int, ...], *, system: str | None = Non
     return "unavailable:unsupported_platform"
 
 
-# LLM: Seatbelt needs explicit deny rules for host control metadata because broader owner-home
-# write grants are allowed. Directories use subpath+literal; files use literal.
-#   还不存在的路径也写规则（literal+subpath，H3）：Seatbelt 按路径匹配，不需要目标存在，这样命令也建不出它（本机实测）。
-#   Linux 的只读挂载做不到，由 tooling/sandbox._append_readonly_mounts 只挂已存在的。
-# 函数用途: 把 forbidden_write_roots 转成比宽泛写入白名单更具体的 macOS 只读规则。
+# LLM: 同一批deny之间没有allow，subpath已含目录本身，父前缀可覆盖子项；文件仍literal，不把/A误当/AB的父目录。
+#   不存在的路径继续用subpath禁止未来创建；不改变Linux具体挂载集合，不缓存文件类型或符号链接观察。
+# 函数用途: 合并重复的只读前缀，生成宽授权之后生效的最小Seatbelt拒写集合。
 def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
     denies: list[str] = []
-    seen: set[Path] = set()
+    resolved: set[Path] = set()
     for raw in paths:
         try:
             path = Path(raw).expanduser().resolve(strict=False)
         except (OSError, RuntimeError):
             continue
-        if path in seen:
+        resolved.add(path)
+    parents: set[Path] = set()
+    for path in sorted(resolved, key=lambda item: (len(item.parts), str(item))):
+        if any(parent in parents for parent in path.parents):
             continue
-        seen.add(path)
-        encoded = json.dumps(str(path))
+        encoded = _seatbelt_string_literal(str(path))
         if path.is_file():
             denies.append(f"(deny file-write* (literal {encoded}))")
         else:
-            denies.append(f"(deny file-write* (literal {encoded}) (subpath {encoded}))")
+            parents.add(path)
+            denies.append(f"(deny file-write* (subpath {encoded}))")
     return denies
 
 

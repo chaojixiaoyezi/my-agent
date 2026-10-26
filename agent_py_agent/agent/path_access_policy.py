@@ -1,4 +1,4 @@
-# LLM: 路径裁决只有这一份实现；每个策略在构造时冻结宿主根，跨进程运输不得重新猜测。核心墙外复核保留显式新策略构造，联查 owner、文件工具与读取上下文测试。
+# LLM: 路径裁决只有这一份实现；每个策略在构造时冻结宿主根，跨进程运输不得重新猜测。Darwin压缩投影不减少Python/Linux具体保护，动态来源不缓存。
 # 模块用途: 判断目标是否处于当前 owner、已授权工作根或普通路径策略允许的范围，不读取文件内容。
 
 from __future__ import annotations
@@ -7,6 +7,7 @@ import json
 import math
 import os
 import platform
+import re
 import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -93,6 +94,8 @@ HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 HOST_STATE_OWNER_FILES: tuple[tuple[str, ...], ...] = (
     ("permissions.json",), ("quota.json",), ("retention.json",), ("memory_policy.json",), ("skill_policy.json",),
     ("tool_policy.json",), ("owner_status.json",), ("audit_log.jsonl",), ("memory", "ops.jsonl"), ("memory", "candidates.jsonl"),
+    # 治理基线只能由宿主更新；governance_policy.json和governance_reviews已分别由config/、data/整根保护。
+    ("memory", "SOUL_ADMIN_BASE.md"), ("memory", "AGENTS_ADMIN_BASE.md"),
 )
 HOST_STATE_OWNER_DIRS: tuple[tuple[str, ...], ...] = (
     ("capability_requests",), ("temporary_grants",), ("compact",), ("logs",), ("audit",), ("workspace", "runtime"),
@@ -552,7 +555,7 @@ def data_root_from_boundary(boundary: object) -> Path | None:
     return agent_home_root_for_owner(owner_home) if owner_home else None
 
 
-# LLM: 识别规范 owners/local/<uid>（含 main）及 owners/providers/<p>/<users|groups>/<id>，
+# LLM: 识别规范 owners/local/<uid>（含 main）、local/users/<uid>及 providers/<p>/<users|groups>/<id>，
 #   只做路径运算、不读文件；调用方传已 resolve 的路径与数据根。改布局时两处一起改（守卫用例在 test_host_managed_store_access）。
 #   比较大小写无关（见 _relative_folded），返回值取输入路径自己的写法。
 # 函数用途: 从规范布局反推一个路径所在的 owner home；不在任何 owner home 里返回 None。
@@ -561,7 +564,9 @@ def owner_home_containing(path: Path, agent_home_root: Path) -> Path | None:
     if parts is None:
         return None
     depth = 0
-    if len(parts) >= 2 and parts[0] == "local" and parts[1]:
+    if len(parts) >= 3 and parts[:2] == ("local", "users"):
+        depth = 3
+    elif len(parts) >= 2 and parts[0] == "local" and parts[1]:
         depth = 2
     elif len(parts) >= 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}:
         depth = 4
@@ -827,11 +832,14 @@ class HostSandboxPaths:
     directory_unlink_patterns: tuple[str, ...] = ()
 
 
-# LLM: Full Access每次仅枚举一次owner；普通owner不枚举他人。所有字段沿原声明投影，新调用总能观察新增存储。
-# 函数用途: 为一次沙箱准备生成不可变保护集合，不持久缓存权限或目录。
+# LLM: Linux/通用调用保留完整具体路径；Darwin无owner时改用规范布局正则，覆盖未来owner且不枚举目录。
+#   已知owner仍仅投影本owner。Python H2/H3、Linux挂载和人格来源的独立复核不依赖此压缩结果。
+# 函数用途: 按平台生成保护集合，避免Seatbelt随历史owner数量膨胀，不缓存权限或目录。
 def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, system: str | None = None) -> HostSandboxPaths:
-    homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
     mac = (system or platform.system()).casefold() == "darwin"
+    if mac and owner_home is None:
+        return _macos_all_owner_paths(agent_home_root)
+    homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
     return HostSandboxPaths(
         readonly=_readonly_from_homes(agent_home_root, homes, include_home=owner_home is None),
         hidden=_hidden_from_homes(homes),
@@ -841,19 +849,90 @@ def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, sy
     )
 
 
-# LLM: 按规范布局列出数据根下已存在的 owner home；列目录出错时只返回已确认的本机主用户，不猜路径。
-# 函数用途: 给 Full Access 沙箱枚举所有 owner home。
+# LLM: 只按规范布局生成POSIX ERE，不枚举或读取owner；root按字面转义，local/users必须先于短布局匹配。
+# 函数用途: 返回可覆盖已有及未来四种owner布局的锚定前缀。
+def macos_owner_prefix(agent_home_root: Path) -> str:
+    # POSIX ERE没有前瞻；逐前缀分支排除完整的users容器名，仍允许u/us/user/users2等owner ID。
+    local_id = r"([^u/][^/]*|u|u[^s/][^/]*|us|us[^e/][^/]*|use|use[^r/][^/]*|user|user[^s/][^/]*|users[^/]+)"
+    return re.escape(str(agent_home_root.resolve(strict=False) / "owners")) + rf"/(local/users/[^/]+|local/{local_id}|providers/[^/]+/(users|groups)/[^/]+)"
+
+
+# LLM: H2声明的regex投影只增加隐藏，不代替Python裁决或Linux具体挂载；调用者必须放在读allow之后。
+# 函数用途: 生成当前owner或全owner托管存储的拒读写模式，不检查存在性。
+def macos_hidden_pattern(agent_home_root: Path, owner_home: Path | None = None) -> str:
+    prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(agent_home_root)
+    parts = "|".join(re.escape("/".join(item)) for item in HOST_MANAGED_OWNER_STORE_PARTS)
+    return f"^{prefix}/({parts})(/|$)"
+
+
+# LLM: 只复用H3的原声明，不混入读拒绝；此正则只能替代同一owner的具体拒写路径，调用方保留额外自定义保护。
+# 函数用途: 生成当前owner或全owner的宿主只读正则，避免反复写长路径前缀。
+def macos_readonly_pattern(root: Path, owner_home: Path | None = None) -> str:
+    prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(root)
+    parts = "|".join(re.escape("/".join(item)) for item in (*HOST_CONFIG_OWNER_PARTS, *_owner_state_parts()))
+    return f"^{prefix}/({parts})(/|$)"
+
+
+# LLM: 仅压缩Darwin投影；声明仍留在H2/H3原常量，任务目录保持vnode类型及unlink/write分界。
+# 函数用途: 用固定数量规则保护全owner宿主状态、人格默认名称和祖先，Linux具体路径不受影响。
+def _macos_all_owner_paths(root: Path) -> HostSandboxPaths:
+    prefix = macos_owner_prefix(root)
+    owners = re.escape(str(root.resolve(strict=False) / "owners"))
+    ancestors = (f"^{owners}(/local(/users)?|/providers(/[^/]+(/(users|groups))?)?)?$",
+                 f"^{prefix}(/(memory|workspace|\\.agents))?$")
+    return HostSandboxPaths(
+        readonly=_readonly_from_homes(root, (), include_home=True),
+        patterns=(macos_readonly_pattern(root), *_task_record_patterns(prefix)),
+        directory_write_patterns=(*_task_record_patterns(prefix, directory_operation="write"), *ancestors),
+        directory_unlink_patterns=tuple(_task_record_patterns(prefix, directory_operation="unlink")),
+    )
+
+
+# LLM: 输入复用本次人格快照的owner，不另扫owners；缓存只限本次父节点解析，不能跨调用缓存权限或链接目标。
+#   普通路径交给regex，只有偏离规范路径的符号链接目标保留精确覆盖，否则压缩会丢掉原H2/H3的realpath保护。
+# 函数用途: 找出宿主保护位置的实际别名，分别返回只读和完全隐藏的目标。
+def macos_host_alias_paths(homes: tuple[Path, ...]) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    readonly, hidden = set(), set()
+    for home in homes:
+        resolved = {home: home.resolve(strict=False)}
+        groups = ((*HOST_CONFIG_OWNER_PARTS, *_owner_state_parts()), HOST_MANAGED_OWNER_STORE_PARTS)
+        for parts, output in ((groups[0], readonly), (groups[1], hidden)):
+            for item in parts:
+                original = home.joinpath(*item)
+                actual = _macos_resolve_owner_path(home, item, resolved)
+                if actual != original:
+                    output.add(actual)
+    return tuple(sorted(readonly)), tuple(sorted(hidden))
+
+
+# LLM: 每个中间节点仅本次检查一次链接；链接用原resolve语义，普通节点不从根逐层反复lstat。
+# 函数用途: 用本次父路径缓存解析一个保护位置，保留中间目录的符号链接目标。
+def _macos_resolve_owner_path(home: Path, parts: tuple[str, ...], resolved: dict[Path, Path]) -> Path:
+    path = home
+    for part in parts:
+        original = path / part
+        if original not in resolved:
+            candidate = resolved[path] / part
+            resolved[original] = candidate.resolve(strict=False) if candidate.is_symlink() else candidate
+        path = original
+    return resolved[path]
+
+
+# LLM: 通用/Linux具体覆盖保留原main和providers，并包含local用户及local/users布局；Darwin固定投影不调用它。
+# 函数用途: 为需要具体路径的调用枚举四种已存在owner，目录异常时保留已确认main，不猜路径。
 def _existing_owner_homes(agent_home_root: Path) -> tuple[Path, ...]:
     owners = agent_home_root / "owners"
     main = owners / "local" / "main"
     try:
+        local = sorted(path for path in owners.glob("local/*") if path.name != "users" and path.is_dir())
+        local.extend(sorted(path for path in owners.glob("local/users/*") if path.is_dir()))
         providers = sorted(
             path for path in owners.glob("providers/*/*/*")
             if path.parent.name in {"users", "groups"} and path.is_dir()
         )
     except OSError:
-        providers = []
-    return ((main,) if main.is_dir() else ()) + tuple(providers)
+        local, providers = [], []
+    return tuple(dict.fromkeys((*((main,) if main.is_dir() else ()), *local, *providers)))
 
 
 # LLM: 用户显式声明的工作目录（宿主写入 conversation_execution_cwd /
@@ -1195,11 +1274,13 @@ def persona_process_protection_snapshot(owner_home: Path, *, all_owners: bool = 
     return tuple(dict.fromkeys(item for owner in homes for item in _persona_protection_snapshot(owner)))
 
 
-# LLM: 规范owner列表与文件门一致；直接列目录而不使用会吞IO错误的glob，无法完整枚举时不猜空集合。
-# 函数用途: 严格列出本机main及providers下实际存在的用户和群目录。
+# LLM: 与四种规范布局一致，local/users容器不能误当owner；沿原严格目录枚举拒绝symlink/IO错误，不能猜空集合。
+# 函数用途: 为动态来源与实际别名严格枚举全部本地、用户和群owner，不缓存配置或身份。
 def _persona_owner_homes(root: Path) -> tuple[Path, ...]:
     main = root / "owners/local/main"
     homes = [main] if main.is_dir() else []
+    homes.extend(path for path in _persona_owner_directories(root / "owners/local") if path.name not in {"main", "users"})
+    homes.extend(_persona_owner_directories(root / "owners/local/users"))
     for provider in _persona_owner_directories(root / "owners/providers"):
         for scope in ("users", "groups"):
             homes.extend(_persona_owner_directories(provider / scope))
