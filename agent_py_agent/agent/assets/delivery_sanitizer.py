@@ -14,7 +14,7 @@ from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
 from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
 
 _UNQUOTED_ASSIGNMENT = re.compile(
-    r'''(?im)^[ \t]*(?:export[ \t]+)?(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{}()\[\]]+)[ \t]*(?:\#.*)?$''')
+    r'''(?im)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{}()\[\]]+)[ \t]*(?:\#.*)?$''')
 _PATTERNS = (
     ('openai_key', re.compile(r'sk-[A-Za-z0-9_-]{20,}')),
     ('aws_access_key', re.compile(r'AKIA[0-9A-Z]{16}')),
@@ -67,12 +67,12 @@ def datasource_secret_values(owner_home):
     return tuple(sorted(result))
 
 
-# LLM: 普通模板可豁免；仅未加引号赋值允许布尔/整数/变量引用，不能把带引号的真实短秘密放行。
+# LLM: 普通模板可豁免；未加引号凭据键仅允许布尔/空值/变量引用，数字PIN和带引号的真实短秘密不能放行。
 # 函数用途: 区分模板与YAML/env非秘密表达式，不访问变量或凭据来源。
 def _placeholder(value, *, unquoted=False):
     return (_PLACEHOLDER.fullmatch(value) is not None or unquoted and (
-        value.lower() in {'true', 'false', 'null', 'none', 'yes', 'no'}
-        or re.fullmatch(r'[+-]?\d+', value) is not None or value.startswith(('$', 'os.', 'env.'))))
+        value.lower() in {'true', 'false', 'null', 'none', 'yes', 'no', '~'}
+        or value.startswith(('$', 'os.', 'env.'))))
 
 
 # LLM: 环境值仅本次内存匹配，不回传变量名或原值，不持久化环境。
