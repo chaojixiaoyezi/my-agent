@@ -205,7 +205,7 @@ def _background_notice_loop(
             debounce.last_success_at = time.monotonic()
 
 
-# LLM: 先消费canonical快照；异常也必须暂停观察并保留原异常退避语义，禁止借旧执行目标扩大范围。
+# LLM: 先消费canonical快照；解析异常显式传给观察同步，不能因finally重读成功变成正常空态，原异常继续退避。
 # 函数用途: 同步原通知后刷新同会话进程投影；消费抛错仍清旧观察，不借显示session_id猜线程。
 def _consume_background_notices(
     agent: object,
@@ -221,6 +221,7 @@ def _consume_background_notices(
     event_cursor = event_cursor_ref if event_cursor_ref is not None else [0]
     store = getattr(agent, "conversation_store", None)
     snapshot_ok = False
+    scope_error = False
     try:
         if store is None:
             snapshot_ok = _consume_gateway_background_snapshot(
@@ -243,9 +244,12 @@ def _consume_background_notices(
                 event_cursor,
                 agent_navigation,
             )
+    except Exception:
+        scope_error = True
+        raise
     finally:
         # 通知消费可能在解析本地绑定时抛错；仍清观察，原异常继续交给外层退避。
-        if _sync_background_watch(agent, agent_navigation, session_id=session_id, runtime=tui_runtime, snapshot_ok=snapshot_ok) and app_ref and app_ref[0] is not None:
+        if _sync_background_watch(agent, agent_navigation, session_id=session_id, runtime=tui_runtime, snapshot_ok=snapshot_ok, scope_error=scope_error) and app_ref and app_ref[0] is not None:
             app_ref[0].invalidate()
     return snapshot_ok
 
@@ -254,7 +258,7 @@ def _consume_background_notices(
 # process-event cursor paired with its stream identity. Only a new stream can reset the event
 # sequence; canonical message offsets never rewind. Typed activity controls poll cadence.
 # Invalid responses enter the existing exponential backoff without clearing display state.
-# 函数用途: 同步实际执行绑定，再按 canonical 顺序收消息与易失过程；请求回执不改变控制目标。
+# 函数用途: 同步当前会话线程和执行绑定，再按canonical顺序收消息；线程投影只供观察、不改变控制目标。
 def _consume_gateway_background_snapshot(
     agent: object,
     session_id: str,
@@ -267,6 +271,9 @@ def _consume_gateway_background_snapshot(
     fetcher = getattr(agent, "request_background_notices", None)
     if not callable(fetcher):
         return True
+    binding = getattr(tui_runtime, "_background_watch_gateway_binding", None)
+    if binding is None or binding[0] != session_id:
+        tui_runtime._background_watch_gateway_binding = (session_id, "")
     message_after = max(0, int(getattr(tui_runtime, "background_message_cursor", 0)))
     try:
         payload = fetcher(
@@ -282,6 +289,8 @@ def _consume_gateway_background_snapshot(
     target_publisher = getattr(tui_runtime, "publish_execution_target", None)
     if callable(target_publisher):
         target_publisher(payload.get("execution_target"))
+    if not _publish_gateway_background_watch_binding(tui_runtime, session_id, payload):
+        return False
     permission_changed = _sync_gateway_agent_permissions(
         agent,
         session_id,
@@ -337,6 +346,24 @@ def _consume_gateway_background_snapshot(
     ) and app_ref[0] is not None:
         app_ref[0].invalidate()
     return True
+
+
+# LLM: /notices线程只绑定本次session；旧响应只取当轮已校验DTO，不能在切会话取数失败后回退旧DTO。
+# 函数用途: 保存观察专用线程投影，区分合法空串与损坏身份；不授予控制权、不触发存储读取。
+def _publish_gateway_background_watch_binding(runtime: object, session_id: str, payload: dict) -> bool:
+    thread_id = payload.get("thread_id", "")
+    target = payload.get("execution_target")
+    if "thread_id" not in payload:
+        reader = getattr(runtime, "execution_target", None)
+        current = reader() if callable(reader) else None
+        thread_id = current.get("thread_id", "") if isinstance(current, Mapping) else ""
+    valid = isinstance(thread_id, str)
+    if valid:
+        thread_id = thread_id.strip()
+        if "thread_id" in payload and isinstance(target, Mapping) and target.get("thread_id"):
+            valid = target["thread_id"] == thread_id
+    runtime._background_watch_gateway_binding = (session_id, thread_id if valid else None)
+    return valid
 
 
 # LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
@@ -715,22 +742,34 @@ def _refresh_loop(
 __all__ = ["_refresh_loop", "_start_worker_threads"]
 
 
-# LLM: 本地沿原只读线程解析器，Gateway沿根runtime已校验执行DTO；不能从选中后台项或显示session猜线程。
-# 函数用途: 获取进程观察的当前会话；无真实上下文的测试和旧入口保留None兼容。
+# LLM: 本地读错必须抛出而正常无线程返回None；Gateway只用本session的通知投影或当轮执行DTO，不猜线程。
+# 函数用途: 解析只读观察范围；空会话不等于存储损坏，活动claim消失也不等于线程消失。
 def _background_watch_thread_id(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None) -> str | None:
     store = getattr(agent, "conversation_store", None)
     resolver = getattr(getattr(store, "threads", None), "resolve_report", None)
     if session_id and callable(resolver):
         from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
-        thread, _error = resolver(channel=LOCAL_CHAT_CHANNEL, channel_conversation_id=session_id, channel_user_id=LOCAL_AGENT_USER_ID)
+        thread, load_error = resolver(channel=LOCAL_CHAT_CHANNEL, channel_conversation_id=session_id, channel_user_id=LOCAL_AGENT_USER_ID)
+        if load_error is not None:
+            raise LookupError("background process conversation scope unavailable")
         value = getattr(thread, "thread_id", None)
         return value if isinstance(value, str) and value else None
     root = getattr(navigation, "root_runtime", None) or runtime
+    gateway = callable(getattr(agent, "request_background_notices", None))
+    if gateway and session_id:
+        binding = getattr(root, "_background_watch_gateway_binding", None)
+        if binding is None or binding[0] != session_id:
+            return None
+        if binding[1] is None:
+            raise LookupError("background process conversation scope invalid")
+        return binding[1] or None
     reader = getattr(root, "execution_target", None)
     target = reader() if callable(reader) else None
     if isinstance(target, Mapping) and isinstance(target.get("thread_id"), str) and target["thread_id"]:
         return target["thread_id"]
+    if gateway:
+        return None
     for source in (navigation, root, agent):
         value = getattr(source, "thread_id", None)
         if isinstance(value, str) and value:
@@ -772,22 +811,29 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
     return bool(update(rows, active_count=result["active_count"])) or changed
 
 
-# LLM: 通知失败、范围解析抛错或未知时清旧帧；范围确认后的普通投影读错才允许保留同范围展示。
-# 函数用途: 按canonical线程更新易失展示，严格区分范围失信与同会话读错，不改消息和完成wake链路。
-def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True) -> bool:
+# LLM: 正常空会话清帧不告警；解析失败始终告警，运输失败仅在已观察/已绑定时告警，同范围读错可保留。
+# 函数用途: 按canonical线程更新展示并清理误报；不改消息、进程控制或完成wake链路。
+def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
     if not callable(runtime_reader):
         return False
     display_runtime = runtime_reader()
     scope_confirmed = False
     try:
+        if scope_error:
+            raise LookupError("background process snapshot parse failed")
         gateway = callable(getattr(agent, "request_background_notices", None))
         resolver = getattr(getattr(getattr(agent, "conversation_store", None), "threads", None), "resolve_report", None)
-        if not snapshot_ok:
-            raise LookupError("background process snapshot unavailable")
         thread_id = _background_watch_thread_id(agent, navigation, session_id=session_id, runtime=runtime)
+        if not snapshot_ok:
+            root = getattr(navigation, "root_runtime", None) or runtime
+            binding = getattr(root, "_background_watch_gateway_binding", None)
+            known_gateway = gateway and binding is not None and binding[0] == session_id and bool(binding[1])
+            if not known_gateway and not navigation.snapshot().background_watch_active and not getattr(navigation, "_background_watch_scope", None):
+                return _clear_background_watch(navigation, display_runtime)
+            raise LookupError("background process snapshot unavailable")
         if thread_id is None and (gateway or session_id and callable(resolver)):
-            raise LookupError("background process conversation scope unavailable")
+            return _clear_background_watch(navigation, display_runtime)
         scope_confirmed = True
         changed = _refresh_background_watch(agent, navigation, thread_id=thread_id)
     except Exception as exc:
@@ -799,4 +845,12 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
             message = "后台进程观察刷新失败；仅保留同会话上次结果"
         display_runtime.set_notice(message, duration_seconds=6, notice_kind="background_watch_error")
         return True
+    return display_runtime.clear_notice(expected_kind="background_watch_error") or changed
+
+
+# LLM: 只清观察专用易失状态与同kind提示，不能清掉其它错误或读取全owner进程作为空态回退。
+# 函数用途: 统一处理新会话及主页面尚未确认范围时的静默空列表。
+def _clear_background_watch(navigation: object, display_runtime: object) -> bool:
+    changed = bool(navigation.update_background_watch_rows([], active_count=0))
+    navigation._background_watch_scope = None
     return display_runtime.clear_notice(expected_kind="background_watch_error") or changed

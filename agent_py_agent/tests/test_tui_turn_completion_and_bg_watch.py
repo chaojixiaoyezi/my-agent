@@ -398,10 +398,10 @@ def test_bad_process_record_does_not_block_original_notice_fetch(tmp_path):
     fetched = []
 
     # LLM: 记录真实同步接缝是否被调用，不模拟观察器的异常处理。
-    # 函数用途: 提供无通知的成功响应并保留调用证据。
+    # 函数用途: 提供已确认线程的成功响应，确保告警来自坏进程记录而不是缺失范围的旧误报。
     def fetch(*args, **kwargs):
         fetched.append(True)
-        return {"ok": True, "notices": [], "cursor": 0, "transcript_events": [], "event_cursor": 0, "event_stream_id": ""}
+        return {"ok": True, "thread_id": "thread-one", "notices": [], "cursor": 0, "transcript_events": [], "event_cursor": 0, "event_stream_id": ""}
 
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), request_background_notices=fetch)
     runtime = TuiRuntime("read-failure")
@@ -1005,3 +1005,262 @@ def test_confirmed_local_scope_projection_failure_keeps_same_thread_frame(tmp_pa
     assert "仅保留同会话上次结果" in nav.active_runtime().notice()
     assert nav._background_watch_scope == (str(home), "thread-one")
     assert _files(tmp_path) == before
+
+
+# LLM: 空会话测试不允许触达全owner reader；真实线程存储与导航负责空态和旧提示清理。
+# 函数用途: 锁定刚开窗口和/new后的静默空会话边界。
+@pytest.mark.parametrize("session_id", ["new-window", "after-new"])
+def test_c4_local_empty_session_is_quiet_and_never_reads_owner_records(tmp_path, monkeypatch, session_id):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    home = tmp_path / "owner"
+    _session(home, thread_id="foreign-thread")
+    store = ConversationStore(home / "conversations")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), conversation_store=store)
+    runtime = TuiRuntime(session_id)
+    nav = TuiAgentNavigationState(runtime)
+    nav.update_background_watch_rows([{"session_id": "bg-stale", "alive": True}])
+    nav._background_watch_scope = (str(home), "old-thread")
+    runtime.set_notice("旧范围错误", notice_kind="background_watch_error")
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("空会话不得读owner记录"))
+    before = _files(tmp_path)
+    assert _consume_background_notices(agent, session_id, runtime, [None], set(), [0], nav)
+    assert nav.snapshot().background_process_count == 0
+    assert nav._background_watch_scope is None and runtime.notice() == ""
+    assert _files(tmp_path) == before
+
+
+# LLM: load_error以非None为准，不能因thread为空或错误字符串为空而吞掉损坏索引。
+# 函数用途: 验证正常空态修复不会隐藏真正的解析失败。
+@pytest.mark.parametrize("load_error", ["corrupt", ""])
+@pytest.mark.parametrize("thread_id", [None, "thread-one"])
+def test_c4_local_load_error_still_clears_and_warns(tmp_path, monkeypatch, load_error, thread_id):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _sync_background_watch
+
+    thread = SimpleNamespace(thread_id=thread_id) if thread_id else None
+    store = SimpleNamespace(threads=SimpleNamespace(resolve_report=lambda **kw: (thread, load_error)))
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path), conversation_store=store)
+    runtime = TuiRuntime("corrupt-scope")
+    nav = TuiAgentNavigationState(runtime)
+    nav.update_background_watch_rows([{"session_id": "bg-stale", "alive": True}])
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("损坏范围不得读进程"))
+    assert _sync_background_watch(agent, nav, session_id="display", runtime=runtime)
+    assert nav.snapshot().background_process_count == 0 and nav._background_watch_scope is None
+    assert "会话范围未确认" in runtime.notice()
+
+
+# LLM: Gateway旧响应、显式无线程和初次运输失败均不能在未打开观察的主页面刷假告警。
+# 函数用途: 验证主页面空态静默，并且不会借空thread_id扩大到全owner。
+@pytest.mark.parametrize("extra", [{}, {"thread_id": ""}, {"ok": False}])
+def test_c4_gateway_empty_main_poll_is_quiet(tmp_path, monkeypatch, extra):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    response = {"ok": True, "notices": [], "cursor": 0, "transcript_events": [],
+                "event_cursor": 0, "event_stream_id": "", "execution_target": None, **extra}
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path),
+                            request_background_notices=lambda *a, **kw: response)
+    runtime = TuiRuntime("gateway-empty")
+    nav = TuiAgentNavigationState(runtime)
+    runtime.set_notice("旧范围错误", notice_kind="background_watch_error")
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("无线程不得读owner记录"))
+    assert _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav) is response["ok"]
+    assert nav.snapshot().background_process_count == 0
+    assert nav._background_watch_scope is None and runtime.notice() == ""
+
+
+# LLM: 无活动claim的合法thread投影仍必须精确过滤；切会话后旧绑定不得重新生效。
+# 函数用途: 验证Gateway空闲线程保持可观察，而新会话清除前会话缓存与提示。
+def test_c4_gateway_idle_thread_projection_and_session_reset(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    home = tmp_path / "owner"
+    _session(home, session_id="bg-one", thread_id="thread-one")
+    _session(home, session_id="bg-two", thread_id="thread-two")
+    response = {"ok": True, "notices": [], "cursor": 0, "transcript_events": [],
+                "event_cursor": 0, "event_stream_id": "", "execution_target": None, "thread_id": "thread-one"}
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home),
+                            request_background_notices=lambda *a, **kw: dict(response))
+    runtime = TuiRuntime("gateway-idle")
+    nav = TuiAgentNavigationState(runtime)
+    before = _files(tmp_path)
+    for _ in range(2):
+        assert _consume_background_notices(agent, "display-one", runtime, [None], set(), [0], nav)
+        assert nav.snapshot().background_process_count == 1
+        assert nav._background_watch_scope == (str(home), "thread-one")
+        assert runtime.notice() == ""
+    response.pop("thread_id")
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("切会话不得复用旧thread"))
+    assert _consume_background_notices(agent, "display-two", runtime, [None], set(), [0], nav)
+    assert nav.snapshot().background_process_count == 0
+    assert nav._background_watch_scope is None and runtime.notice() == ""
+    assert _files(tmp_path) == before
+
+
+# LLM: 线程字段损坏或与活动claim冲突属于解析失败，不能以正常空态静默吞掉。
+# 函数用途: 验证Gateway范围冲突保持失败关闭且提示用户。
+@pytest.mark.parametrize("thread_id", [None, 42, "other-thread", ""])
+def test_c4_gateway_invalid_thread_projection_warns_without_read(tmp_path, monkeypatch, thread_id):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.execution_target import GatewayExecutionTarget
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    response = {"ok": True, "notices": [], "cursor": 0, "transcript_events": [],
+                "event_cursor": 0, "event_stream_id": "", "thread_id": thread_id,
+                "execution_target": GatewayExecutionTarget("thread-one", "request", "turn", "claim").to_dict()}
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path),
+                            request_background_notices=lambda *a, **kw: response)
+    runtime = TuiRuntime("gateway-conflict")
+    nav = TuiAgentNavigationState(runtime)
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("冲突范围不得读取进程"))
+    assert not _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav)
+    assert nav.snapshot().background_process_count == 0 and nav._background_watch_scope is None
+    assert "会话范围未确认" in runtime.notice()
+
+
+# LLM: 已加载与冷owner使用同一真实存储和精确绑定，不启动HTTP、模型或写回恢复状态。
+# 函数用途: 验证/notices三类响应都显式携带线程身份，包括无活动任务的空闲线程。
+@pytest.mark.parametrize("cold", [False, True])
+@pytest.mark.parametrize("created", [False, True])
+def test_c4_gateway_notice_response_has_explicit_thread_id(tmp_path, monkeypatch, cold, created):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+    owner = OwnerIdentity.provider_user("tui-test", "c4-user")
+    home = resolve_owner_home(tmp_path, owner).home_dir
+    store = ConversationStore(home / "workspace/runtime/workspaces/workspace-c4/conversations")
+    thread = store.threads.get_or_create({"canonical_user_id": "c4-user", "channel": "tui-test",
+        "channel_conversation_id": "display", "channel_user_id": "c4-user"}) if created else None
+    agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path, owner_home_dir=home), conversation_store=store)
+    monkeypatch.setattr(http_handlers, "resolve_loaded_gateway_scope_agent", lambda *a: None if cold else agent)
+    before = _files(tmp_path)
+    payload = http_handlers.read_gateway_client_notices(agent,
+        scope=GatewayControlScope("c4-user", "tui-test", "display", resolved_owner=owner), after=0)
+    assert payload["ok"] is True and payload["execution_target"] is None
+    assert "thread_id" in payload
+    assert payload["thread_id"] == (thread.thread_id if thread else "")
+    assert _files(tmp_path) == before
+
+
+# LLM: 损坏绑定不能由Gateway标成ok=True空快照，否则客户端无法区分正常无线程与解析失败。
+# 函数用途: 验证热/冷线程索引损坏仍通过传输状态显式报告失败。
+@pytest.mark.parametrize("cold", [False, True])
+def test_c4_gateway_corrupt_binding_is_not_a_successful_empty_snapshot(tmp_path, monkeypatch, cold):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts import http_handlers
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+
+    owner = OwnerIdentity.provider_user("tui-test", "c4-user")
+    home = resolve_owner_home(tmp_path, owner).home_dir
+    store = ConversationStore(home / "workspace/runtime/workspaces/workspace-c4/conversations")
+    store.storage.bindings_path.write_text("corrupt-index", encoding="utf-8")
+    agent = SimpleNamespace(home_paths=SimpleNamespace(root=tmp_path, owner_home_dir=home), conversation_store=store)
+    monkeypatch.setattr(http_handlers, "resolve_loaded_gateway_scope_agent", lambda *a: None if cold else agent)
+    before = _files(tmp_path)
+    payload = http_handlers.read_gateway_client_notices(agent,
+        scope=GatewayControlScope("c4-user", "tui-test", "display", resolved_owner=owner), after=0)
+    assert payload["ok"] is False and payload["thread_id"] == ""
+    assert payload.get("error") and _files(tmp_path) == before
+
+
+# LLM: 首次失败会清掉导航范围，但最近已确认的Gateway线程仍是本会话事实，不能下一轮静默吞错。
+# 函数用途: 验证已绑定主页面连续运输失败仍保持范围失信提示，而不读取任何进程。
+def test_c4_gateway_bound_scope_failures_keep_warning(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    _session(tmp_path, thread_id="thread-one")
+    payload = {"ok": True, "thread_id": "thread-one", "notices": [], "cursor": 0,
+               "transcript_events": [], "event_cursor": 0, "event_stream_id": "", "execution_target": None}
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=tmp_path),
+                            request_background_notices=lambda *a, **kw: dict(payload))
+    runtime = TuiRuntime("bound-failure")
+    nav = TuiAgentNavigationState(runtime)
+    assert _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav)
+    payload["ok"] = False
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("失败快照不得读取进程"))
+    for _ in range(2):
+        assert not _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav)
+        assert nav.snapshot().background_process_count == 0
+        assert "会话范围未确认" in runtime.notice()
+
+
+# LLM: 通知阶段的一次性解析异常不能被finally第二次成功解析成正常空会话；保留原异常与明确提示。
+# 函数用途: 验证新会话的瞬时OSError/ValueError仍被归为真实失败。
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+def test_c4_transient_local_resolution_error_still_warns(tmp_path, error_type):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
+
+    calls = []
+
+    def resolve(**kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise error_type("transient index error")
+        return None, None
+
+    store = SimpleNamespace(storage=SimpleNamespace(root=tmp_path), threads=SimpleNamespace(resolve_report=resolve))
+    agent = SimpleNamespace(conversation_store=store)
+    runtime = TuiRuntime("transient-local")
+    nav = TuiAgentNavigationState(runtime)
+    with pytest.raises(error_type):
+        _consume_background_notices(agent, "display", runtime, [None], set(), [0], nav)
+    assert nav.snapshot().background_process_count == 0
+    assert "会话范围未确认" in runtime.notice()
+
+
+# LLM: 当前可解析到线程不代表曾建立观察范围；普通通知快照首轮失败仍交由原通知去抖处理。
+# 函数用途: 验证未观察、未绑定时不会因本地存在历史线程就刷范围黄字。
+def test_c4_first_local_snapshot_failure_with_thread_is_quiet(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _sync_background_watch
+
+    store = SimpleNamespace(threads=SimpleNamespace(resolve_report=lambda **kw: (SimpleNamespace(thread_id="thread-one"), None)))
+    agent = SimpleNamespace(conversation_store=store)
+    runtime = TuiRuntime("first-local-failure")
+    nav = TuiAgentNavigationState(runtime)
+    monkeypatch.setattr(bg, "list_background_processes", lambda *a, **kw: pytest.fail("失败快照不得读进程"))
+    _sync_background_watch(agent, nav, session_id="display", runtime=runtime, snapshot_ok=False)
+    assert nav.snapshot().background_process_count == 0 and runtime.notice() == ""
+
+
+# LLM: 切session后第一次fetch失败时，旧控制DTO不能成为新session的观察身份；本测试不改变控制目标。
+# 函数用途: 验证空绑定不借用旧execution_target，即便后续同步已阻止跨会话列表读取。
+def test_c4_gateway_failed_session_switch_does_not_resolve_old_target(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.execution_target import GatewayExecutionTarget
+    from agent_py_agent.cli.chat_parts.tui_threading import (
+        _background_watch_thread_id,
+        _consume_background_notices,
+    )
+
+    payload = {"ok": True, "notices": [], "cursor": 0, "transcript_events": [], "event_cursor": 0,
+               "event_stream_id": "", "execution_target": GatewayExecutionTarget("thread-one", "request", "turn", "claim").to_dict()}
+    agent = SimpleNamespace(request_background_notices=lambda *a, **kw: dict(payload))
+    runtime = TuiRuntime("session-switch-failure")
+    nav = TuiAgentNavigationState(runtime)
+    assert _consume_background_notices(agent, "display-one", runtime, [None], set(), [0], nav)
+    payload["ok"] = False
+    assert not _consume_background_notices(agent, "display-two", runtime, [None], set(), [0], nav)
+    assert _background_watch_thread_id(agent, nav, session_id="display-two", runtime=runtime) is None
