@@ -7,7 +7,9 @@ from dataclasses import dataclass, fields
 ENVELOPE_SCHEMA = 'asset_delivery_envelope.v1'
 RECEIPT_SCHEMA = 'asset_delivery_receipt.v1'
 BLOCKLIST_SCHEMA = 'asset_delivery_blocklist.v1'
-MAX_PENDING_DELIVERIES = 50
+# 单个接收方收件箱允许暂存的最大待处理投递包数量上限。
+MAX_PENDING_DELIVERY_COUNT = 50
+# 单次跨用户资产投递包裹允许的最大总字节数（10 MiB）。
 MAX_BUNDLE_BYTES = 10 * 1024 * 1024
 
 

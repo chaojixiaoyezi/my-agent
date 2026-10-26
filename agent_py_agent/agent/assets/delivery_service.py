@@ -29,7 +29,7 @@ from .delivery_contracts import (
     BLOCKLIST_SCHEMA,
     ENVELOPE_SCHEMA,
     MAX_BUNDLE_BYTES,
-    MAX_PENDING_DELIVERIES,
+    MAX_PENDING_DELIVERY_COUNT,
     RECEIPT_SCHEMA,
     AssetDeliveryError,
     DeliverySendOptions,
@@ -181,7 +181,7 @@ class AssetDeliveryService(_DeliveryStorage):
             self._home(recipient_owner_id)
             self._check_blocked(recipient_owner_id, sender_owner_id, provision)
             pending = self.list_inbox(recipient_owner_id, 'pending')['deliveries']
-            if len(pending) >= MAX_PENDING_DELIVERIES:
+            if len(pending) >= MAX_PENDING_DELIVERY_COUNT:
                 raise AssetDeliveryError('ASSET_DELIVERY_QUOTA_EXCEEDED', '待确认投递已达上限')
             self._publish(sender, recipient, envelope, items, admissions)
         result = {'ok': True, 'delivery_id': identifier, 'status': 'pending'}

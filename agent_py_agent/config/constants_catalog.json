@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1167,
+  "count": 1169,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -930,6 +930,22 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "单个资产文件允许读取的最大字节数上限。"
+    },
+    {
+      "name": "MAX_BUNDLE_BYTES",
+      "file": "agent_py_agent/agent/assets/delivery_contracts.py",
+      "value": 10485760,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单次跨用户资产投递包裹允许的最大总字节数（10 MiB）。"
+    },
+    {
+      "name": "MAX_PENDING_DELIVERY_COUNT",
+      "file": "agent_py_agent/agent/assets/delivery_contracts.py",
+      "value": 50,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个接收方收件箱允许暂存的最大待处理投递包数量上限。"
     },
     {
       "name": "_CANCELLATION_POLL_SECONDS",

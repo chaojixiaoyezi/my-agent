@@ -8,10 +8,29 @@
 - **脚本执行沙箱与网络/环境边界强化（`S1–S4` / `sec-fix-f`）**：`script_runner.py` 剔除宽泛祖先目录避免 `bwrap --ro-bind / /` 遮蔽只读重挂，拦截 `os.stat`/`os.lstat`/`os.access`/`os.open`（含 `dir_fd` 内核路径还原与前置参数类型归一化）及本机 Gateway 监听端口连接；`_subprocess_env_scrub.py` 默认剥离 `SSH_AUTH_SOCK`、云凭据与代理环境变量。
 - **网关 04:00 安全重启死锁修复与管理员服务日志只读自诊（`Issue 4A + 4B` / `gw-fix-g`）**：`supervisor.py` 默认 `max_restart_attempts=20`、看门狗日志默认独立写入 `logs/supervisor.log`，感知 `planned_restart` 交接窗口（含 180 秒陈旧上限与残存旧进程有序 `SIGTERM -> SIGKILL` 清理）并按连续 600 秒健康窗口重置计数；`standalone_lifecycle.py` 在 `coordinator.lock` 写入持锁者诊断 JSON；`path_access_policy.py` 允许主管理员（`local/main`）在 `full`/`auto`/`ask` 模式下通过文件工具只读自身 `logs/gateway.log` 与 `logs/supervisor.log`，且 `gateway_status` 新增结构化脱敏日志尾段查询参数。
 
-## 2026-10-25 主管理员 Agent 统管自建普通用户全量信息与通用审核流（WT2 领域源码已提供，待合并及端到端验收）
+## 2026-10-26 跨用户资产投递、受管本地用户治理、Plugin Host v2 21 动作与底座耗时/CPU 深度优化（已落地）
 
-- **2026-10-26 WT2 收尾**：新增 `ManagedUserGovernanceService` / `GovernanceReviewStore`，限定已登记普通本地用户；权威控制在宿主 `data/managed_user_governance/<uid>/`，owner 副本仅投影。接通两个人格仓库的受管门与管理员工具十二动作，保留原记忆晋升和资产存储。人格写使用同锁快照、CAS、可恢复 applying 栅栏和同意图幂等回执。四项尺寸 hard 已用职责拆分和删除未使用参数解决，不改 public Host 签名或尺寸基线；验证及补充回归失败对照见 [TESTS.md](TESTS.md)。
-- **集成未完事项**：WT5 的 Host v2 文件不由本工作树修改，合并入口尚未实测；派单组件已证明目标 owner 的消息/任务/wake 记录归属，但未证明目标 Gateway 消费。`list_tasks` 当前子代理扫描仍是 `agents/*/state.json` 展示记录，不能作为 `canonical_state.json` 权威记录全覆盖证明；候选晋升未验证 tool-verified 及非 personal scope 正向链路。上述事项须在 Stage 3 复核，不以本轮静态门或定向绿测替代产品全量验收。
+- **跨用户一等公民拓扑闭包投递（`CROSS_OWNER_ASSET_DELIVERY` / `wt-wave4-c4`）**：`assets/delivery_service.py`、`delivery_sanitizer.py`、`delivery_contracts.py`、`script_store_support.py`、`control_delivery_command.py`（`/delivery`）与 `tooling/asset_delivery_tool.py` 实现四类一等公民（`workflow`/`monitor`/`script`/`skill`）前向可达依赖闭包打包、原始字节秘密硬拦截（`ASSET_DELIVERY_SECRET_DETECTED`）、宿主路径脱敏、接收方屏蔽名单（`DELIVERY_BLOCKED_BY_RECIPIENT`）、两阶段原子安装（初始 `enabled=False`）与 `keep_both_rename` 冲突时包内依赖 ID 自动重写，并在 `WorkflowEngine`、`ScriptRunner`、`SkillSnapshot`/`SkillsService` 接通真实 `ASSET_DISABLED_BY_OWNER` 执行闸门。
+- **主管理员统管自建普通用户与通用提审流（`ADMIN_MANAGED_USERS_GOVERNANCE` / `wt-wave4-c1`）**：`user_space/managed_user_governance.py` 与 `governance_review_store.py` 严格限定已登记本地普通用户（`local/<uid>`），硬拒 `providers/*` 与 `local/main`（`MANAGED_USER_SCOPE_DENIED`）；权威策略保存在宿主 `data/managed_user_governance/<uid>/`，在 `persona_repository.py` 与 `agents_source_repository.py` 接通 `admin_locked` / `admin_base_plus_user` / `user_autonomous` 三档锁定与底线拼装，打通记忆/候选治理、资产免确认直配、跨账号派单（`OwnerIdentity("local", uid)`）与 `pending_admin_review` 通用提审状态机（`approve` / `reject_with_feedback`）。
+- **Plugin Host API v2 新增 21 个标准动作与 TUI 回合完成时间统一呈现（`wt-wave4-c6`）**：`plugin_manifest_host_v9.py`、`action_specs_v2_ext.py`、`authorization.py`、`composition.py`、`gateway_composition.py` 与 `governance_delivery_v2_handlers.py` 接通 9 个 `assets.delivery.*` 与 12 个 `users.managed.*` / `governance.reviews.*` 动作（Host v2 动作总数扩充至 86 个）；`tui_runtime.py`、`tui_view_model.py`、`tui_block_renderer.py` 与 `background_history.py` 使前台回合、Gateway 观察回合及 `bg-main:` 后台续跑回合统一在消息区末尾、`Context ...` 上方展示 `✻ Worked for ... · 完成于 ...`，底部状态栏不再重复渲染。
+- **底座全链路耗时与 CPU 轮询深度优化（`A1..A5` & `B1..B4` / `wt-wave4-c2` + `wt-wave4-c3`）**：
+  - `A1`：`memory_archive/artifact/reader.py` 按 query 类型收缩查找计划并在单次调用内缓存路径解析，消除 39.3s 重复磁盘扫描。
+  - `A2`：`user_config_tool.py` 将 `set` 回执精简为变更项，并在 `tool_call_archive_record.py` 对 >4KB JSON 禁用 `sort_keys`、将 `TOOL_PREVIEW_CHAR_LIMIT` 调至 `1200`。
+  - `A3` & `A4` & `A5`：`_tool_loop_service.py` 与 `call_runtime.py` 拆分 `request_prepare_ms` 与纯组装 `context_assembly_ms`；`tool_model_generation.py`、`context_pressure.py`、`context_estimate_cache.py` 与 `guidance.py` 消除单轮 250k 上下文 4 次重复组装与 0 子代理时的磁盘扫描；分离大工具输出软归档阈值与硬窗口预算。
+  - `B1` & `B2` & `B3` & `B4`：`path_access_policy.py` 与 `sandbox.py` 将 macOS Seatbelt 规则收敛至 ~60 行且保证每条正则字面量 `< 768` 字节（避开 TinyScheme 1024B `STRBUFFSIZE` 截断）；`background_process_host.py` 在 60 秒后停止 `lsof` 轮询；`tool_model_generation.py` 与 `responses_websocket.py` 将轮询放宽至 `2.0s` 并接通无界队列中断即时唤醒；`process_session_store.py` 与 `process_events.py` 实现先按元数据过滤再按需 `deepcopy` 及 24h 终态记录自动清理。
+
+## 2026-10-25 Web 安全大脑：审计组（`audit_group`）只读汇总、一等公民「只给用不给拿」与页面左右双机器人自动归档（整合并一版，待底座实现）
+
+- **Admin 创建的本地普通账号一律为纯 Web 账号（不绑定飞书）**：`LocalUser`（`local/<user_id>`）硬性固定 `allowed_channels = ["web"]`、`im_binding_allowed = false`，仅开放 Web 接口访问。
+- **「审计组（`audit_group`）」只读视野与一等公民「只给用、不给拿（Use-Only Invoke）」**：
+  - 组内账号的**日常写权限 100% 保持普通用户边界**（只能在自己家目录处理事务或自建少量资产，不可修改他人资产或读取他人家目录文件与凭据）。
+  - 加入 `audit_group` 后获得：① 勾选合并查看其他账号（含 `admin`）**四大一等公民概况**（硬性屏蔽源码、SKILL 正文与内部参数细节）；② 勾选合并查看监控与一等公民跑出的**告警记录流水**；③ 查看**安全大脑大屏、园区态势与接入设备情况**；④ **四大一等公民「只给用、不给拿」受控调用权**（`audit_group.assets.invoke`），允许在调查告警时传参调用他人已启用的固定脚本、Skill、Workflow 或单次复核监控，**执行结果与调查产物强制落入调用者自己家目录**，不复制原资产、不暴露内部源码。
+- **Web 页面「左右双机器人」与全自动无感滚动归档（Auto-Rollover）**：
+  - **左边机器人（`bot_mode = "query_readonly"`）**：在 `ToolRuntimeSnapshot` 层硬性剥离所有调查执行工具与写工具；当用户属于 `audit_group` 时自动挂载审计组只读查询工具箱（查跨用户告警、查一等公民概况、查园区/接入设备态势、查本人历史与记忆），固定 `learning_excluded = true`。
+  - **右下角机器人（`bot_mode = "action_avatar"`）**：挂载本用户完整调查与任务布置工具及 `audit_group_invoke_asset`；底座内置**全自动无感滚动归档**（关网页闲置超 30 分钟重进或单会话满 30 轮自动归档换新，后台任务继续运行不断连，打开页面默认只返回最新 15 条消息保证秒开，历史归档会话随时可搜可查）。
+- 完整架构、权限矩阵与待开放的 10 个 Plugin Host v2 接口（`users.local.audit_group.set`、`audit_group.*`、`conversations.bots.*`）见 [审计组与页面左右双机器人完整设计规范](docs/design/AUDIT_GROUP_CROSS_OWNER_OBSERVATION.md)。
+
+## 2026-10-25 主管理员 Agent 统管自建普通用户全量信息与通用审核流（已落地）
 
 - **权属边界严格限定为「主 Admin（`local/main`）自建本地普通用户（`local/<user_id>`）」**：
   - 仅对登记在 `<host_root>/local_users/<user_id>.json`（`LocalUserStore`）中的自建本地普通用户开放全量统管；外部 IM 接入的普通用户（如 `providers/feishu/users/<open_id>`）完全维持原有隐私与自治规则不变。

@@ -1,12 +1,22 @@
-## 2026-10-26 受管本地用户治理领域（WT2 / c1 源码，待集成验收）
+## 2026-10-26 跨用户资产投递、受管本地用户治理、Plugin Host v2 21 动作与底座耗时/CPU 深度优化（已落地）
 
 ```text
+|-- agent_py_agent/agent/assets/delivery_contracts.py # 跨用户资产投递信封/回执/屏蔽名单结构化契约与错误定义
+|-- agent_py_agent/agent/assets/delivery_sanitizer.py # 投递前原始字节秘密硬拦截与宿主路径确定性脱敏
+|-- agent_py_agent/agent/assets/delivery_service.py # 四类一等公民依赖闭包打包、收发箱、两阶段默认禁用落盘与冲突重命名服务
+|-- agent_py_agent/agent/assets/script_store_support.py # 固化脚本存储读写、投递冲突映射与依赖重写辅助
+|-- agent_py_agent/agent/conversation/control_delivery_command.py # /delivery 斜杠命令解析与收件箱/屏蔽名单控制执行
+|-- agent_py_agent/agent/plugin_host/governance_delivery_v2_handlers.py # 9 个资产投递与 12 个受管用户治理 Host v2 动作接线与目标预检
+|-- agent_py_agent/agent/tooling/asset_delivery_tool.py # Agent 跨用户资产投递、收件箱管理与资产启停工具
 |-- agent_py_agent/agent/user_space/managed_user_governance.py # 登记目标、宿主权威策略、人格/记忆/资产/任务领域及工具分派
 |-- agent_py_agent/agent/user_space/governance_review_store.py # 权威提审记录、目标绑定CAS、批复执行及通知
-`-- agent_py_agent/tests/test_admin_managed_users_governance.py # 受管边界、原仓库接线、人格并发及管理员工具回归
+|-- agent_py_agent/tests/test_admin_managed_users_governance.py # 受管边界、原仓库接线、人格并发及管理员工具回归
+|-- agent_py_agent/tests/test_cross_owner_asset_delivery.py # 跨用户资产投递、秘密拦截、屏蔽名单与默认禁用门端到端单测
+|-- agent_py_agent/tests/test_perf_a1_a5_optimizations.py # A1-A5 产物查找、user_config 瘦身、计时拆分与上下文去重单测
+`-- agent_py_agent/tests/test_sandbox_profile_perf.py # B1 macOS Seatbelt 规则收敛与 TinyScheme 1024B 字面量上限编译单测
 ```
 
-关键文件说明：治理服务复用原 `LocalUserStore`、记忆晋升、资产、会话和 scheduler 仓库；`capability/persona_repository.py` 与 `capability/agents_source_repository.py` 接受管锁和底线加载，`tooling/admin_controls_tool.py` 只鉴权并委派十二个动作。权威控制在宿主 `data/managed_user_governance/<uid>/`，目标用户目录中的副本只供可见性，不是权限来源。参见 [本轮验证边界](TESTS.md)；此索引不代表 Host/Gateway 已完成端到端验收。
+关键文件说明：`assets/delivery_*.py` 实现跨用户四类一等公民拓扑闭包投递、秘密阻断与两阶段默认禁用安装；`user_space/managed_user_governance.py` 与 `governance_review_store.py` 实现主管理员对自建本地普通用户的六大治理域与通用提审流；`plugin_host/governance_delivery_v2_handlers.py` 将新增 21 个动作接入 Plugin Host API v2（总计 86 动作）；`A1..A5` 与 `B1..B4` 完成全链路延迟与 CPU 轮询收敛。
 
 ## 2026-10-23 Linux 生产工具耗时治理：产物查找单飞、`self_map` 概览解耦、单线程管道泵与单 Owner 并发闸门
 
@@ -163,7 +173,10 @@
 |-- agent_py_agent/tests/test_scripts_and_workflows_tools.py # scripts 与 workflows 工具合同单测
 |-- agent_py_agent/tests/test_telemetry_ledger_and_inspector.py # 工具耗时账本与任务调用检查器单测
 |-- agent_py_agent/tests/test_plugin_broker_api.py # 插件 Broker 资产/遥测/受控执行与 Owner 隔离单测
-`-- docs/design/COMPOSABLE_WORKFLOW_SCRIPT_PLUGIN_BROKER.md # 可组合工作流、固化脚本一等公民与插件遥测接口设计文档
+|-- docs/design/COMPOSABLE_WORKFLOW_SCRIPT_PLUGIN_BROKER.md # 可组合工作流、固化脚本一等公民与插件遥测接口设计文档
+|-- docs/design/CROSS_OWNER_ASSET_DELIVERY.md # 四大一等公民跨用户依赖闭包投递、飞书确认与屏蔽名单设计规范
+|-- docs/design/ADMIN_MANAGED_USERS_GOVERNANCE.md # 主管理员 Agent 统管自建普通用户全量信息、人设锁定、派单与通用提审设计规范
+`-- docs/design/AUDIT_GROUP_CROSS_OWNER_OBSERVATION.md # 审计组（audit_group）纯 Web 跨用户一等公民概况、监控告警汇总与大屏态势只读规范
 ```
 
 关键文件说明：`assets/` 与 `workflows/` 将 `Script` 和 `Workflow` 提升为与 `Skill`、`Monitor` 同级的 Owner 一等公民；`observability/` 与 `plugin_broker_api.py` 为后续外部插件暴露资产拓扑、每次任务调用树、每个工具调用时间明细与受控执行接口。
