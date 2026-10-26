@@ -776,7 +776,9 @@ def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutatio
         if days == 0:
             return {"ok": True, "cleared": 0}
         stale = candidates.retention_candidates(before=datetime.now(timezone.utc) - timedelta(days=days))
-        deleted = candidates.delete_terminal([row.candidate_id for row in stale], expected_snapshots={row.candidate_id: row for row in stale})
+        stale_ids = [row if isinstance(row, str) else row.candidate_id for row in stale]
+        snapshots = {row.candidate_id: row for row in stale if not isinstance(row, str)} or None
+        deleted = candidates.delete_terminal(stale_ids, expected_snapshots=snapshots)
         return {"ok": True, "cleared": deleted}
     if category == "user":
         request = PersonaMutationRequest(target="user", action={"add_memory": "add", "edit_memory": "replace", "delete_memory": "remove"}[operation],

@@ -99,7 +99,8 @@ def test_live_and_canonical_final_converge_without_duplicate_or_active_candidate
     after = runtime.store.snapshot()
     assert not after.active_blocks
     assert [block.text for block in after.stable_blocks if block.role == "assistant"] == ["我来读取文件。", "这是完整的最终回复。"]
-    assert len(after.stable_blocks) == 5
+    assert len(after.stable_blocks) == 6
+    assert after.stable_blocks[-1].metadata.get("source_kind") == "turn_timing"
     runtime.publish_background_transcript_events(events)
     for notice in notices:
         _publish_background_notice_row(runtime, notice, set())

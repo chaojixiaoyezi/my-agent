@@ -1,5 +1,6 @@
-## 2026-10-26 网关 04:00 安全重启死锁修复、看门狗日志分离、管理员日志自诊与维护账本裁剪（已实现）
+## 2026-10-26 网关 04:00 安全重启死锁修复、看门狗日志分离、管理员日志自诊、维护账本裁剪与 TUI 后台观察空闲线程解析修复（已实现）
 
+- **TUI 后台进程观察空闲线程解析与冷启动静默空态（`gateway_parts/http_handlers.py`、`cli/chat_parts/tui_threading.py`）**：`read_gateway_client_notices` 与 `_read_cold_owner_notice_projection` 在通知投影回包中显式携带当前 `session_id` 解析出的 canonical `thread_id`（不存在线程时返回 `""`，底层索引加载报错时返回 `ok=False` 防止损坏冒充正常空会话）；`tui_threading.py` 缓存 `(session_id, thread_id)` 绑定，使空闲会话无在途 `execution_target` 时仍能按准确 `thread_id` 刷新后台进程列表，未建线程的新会话静默清空观察列表而不误报 `后台进程观察刷新失败：会话范围未确认，已暂停显示`，仅在响应损坏或已建会话范围失联时告警。
 - **网关 04:00 安全重启死锁修复（`supervisor.py`、`standalone_stop.py`、`standalone_lifecycle.py`）**：`SupervisorConfig.max_restart_attempts` 默认提升至 `20`，看门狗自身日志默认写入独立 `logs/supervisor.log`；看门狗感知 `gateway_state.json` 的 `planned_restart` 交接期（带 180 秒陈旧上限或真实存活进程核验），在交接期内等待原进程退出而不消耗崩溃重启配额，若旧进程逾时未退则基于 `pid + birth_token` 执行 `SIGTERM -> SIGKILL` 有序回收；`coordinator.lock` 写入持锁者诊断 JSON 并在冲突日志中输出持锁方身份；连续健康运行满 600 秒才重置重启计数。
 - **主管理员服务日志只读自诊（`path_access_policy.py`、`gateway_status.py`、`status_rendering.py`）**：允许主管理员（`local/main`）在 `full`/`auto`/`ask` 模式下通过文件工具只读自身 `logs/gateway.log` 与 `logs/supervisor.log`（保持禁止写入、禁止符号链接越界、禁止普通用户读取）；`gateway_status` 新增 `include_log_tail`、`log_source`、`log_scope`、`log_tail_lines`、`log_query` 参数返回有界脱敏日志尾段。
 - **锁侧车清理与维护事件有界裁剪（`gateway_parts/io.py`、`owner_maintenance.py`）**：`gateway_parts/io.py` 在幂等记录删除或过期清理后同步回收孤立 `.lock` 侧车文件；`owner_maintenance.py` 在每次追加后将 `events.jsonl` 原子裁剪在 `2 MiB` / `2000` 行以内。

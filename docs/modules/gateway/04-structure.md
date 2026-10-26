@@ -1,5 +1,6 @@
-## 2026-10-26 网关安全重启交接、看门狗双日志分离、管理员日志只读策略与维护事件裁剪结构
+## 2026-10-26 网关安全重启交接、看门狗双日志分离、管理员日志只读策略、维护事件裁剪与 TUI 后台观察线程绑定结构
 
+- `gateway_parts/http_handlers.py` 新增 `_resolve_gateway_notice_thread`，在 `read_gateway_client_notices` 与 `_read_cold_owner_notice_projection` 响应中输出 canonical `thread_id` 并在候选存储解析异常时标记 `ok=False`；`cli/chat_parts/tui_threading.py` 新增 `_record_gateway_watch_thread_binding` 与 `_clear_background_watch`，由 `_consume_gateway_background_snapshot`、`_background_watch_thread_id` 与 `_sync_background_watch` 协同区分未建线程正常空态、空闲已建线程观察与真实通信/解析故障。
 - `gateway_parts/supervisor.py` 新增 `_restart_drain_handover_active`、`_standalone_state_identity_status`、`_reap_wedged_predecessor` 与连续健康计时字段 `_healthy_since_at`，并将看门狗默认日志路径指向 `GatewayPaths.supervisor_log`（`logs/supervisor.log`）；`gateway_parts/standalone_lifecycle.py` 在 `coordinator.lock` 文件描述符上写入与读取有界持锁者诊断元数据；`gateway_parts/standalone_stop.py` 在 `planned_restart` 停机收尾阶段跳过重复阻塞清单扫描以缩短持锁时间。
 - `path_access_policy.py::PathAccessPolicy._is_admin_readable_service_log` 对 `local/main` 主管理员（含显式 `active_owner_home` 与单工作区根 `workspace_root`）放行 `logs/gateway.log` 与 `logs/supervisor.log` 的单链接普通文件只读访问；`tooling/gateway_status.py` 与 `gateway_parts/status_rendering.py` 提供 `_gateway_log_tails` 有界尾读、生命周期过滤与凭据脱敏。
 - `gateway_parts/io.py` 在清理幂等记录后调用 `try_unlink_idle_lockfile` 回收孤立 `.lock` 文件；`user_space/owner_maintenance.py` 与 `owner_maintenance_transition.py` 对 `events.jsonl` 执行有界尾窗保留与原子替换。
