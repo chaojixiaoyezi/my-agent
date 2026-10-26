@@ -1,3 +1,11 @@
+## 2026-10-26 正式记忆压实、写安全与显式低延迟检索回归
+
+```text
+`-- agent_py_agent/tests/test_memory_jsonl_and_hybrid_wave5.py # 墓碑归档恢复、touch折叠、严格前像、未知字段、刷盘/Windows锁、Daily查重及缓存检索回归
+```
+
+关键文件说明：新增回归保留旧同步检索断言，额外覆盖显式 `latency_safe` 模式及后台版本/正文 CAS；不代表前台装配或协调来源后台补齐已接线。
+
 ## 2026-10-26 跨用户资产投递、受管本地用户治理、Plugin Host v2 21 动作与底座耗时/CPU 深度优化（已落地）
 
 ```text

@@ -230,11 +230,17 @@ class JsonlMemoryIndexMixin:
         )
 
     # LLM: 权威提交后只能同步派生层；remove 必须同时清向量、FTS 和外置正文。
-    # 函数用途: 把一批已提交记忆同步到搜索索引，或清除被删除条目。
+    # LLM: 删除ID合并清理，孤儿文本向量全库扫描每批至多一次；失败保正式已提交回执。
+    # 函数用途: 批量同步投影并一次清理删除后的孤儿向量。
     def _after_commit_indexes(self, records: list[MemoryRecord]) -> None:
+        removed = {record.entry_id for record in records if record.action == "remove"}
+        if removed:
+            try:
+                _purge_removed_indexes(self, removed)
+            except RemovalCleanupError as exc:
+                raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
         for record in records:
             if record.action == "remove":
-                self._purge_committed_indexes(record.entry_id)
                 continue
             self._try_index_record(record)
             self._index_vector(record)
@@ -289,8 +295,9 @@ def _purge_text_vector_orphans(memory) -> int:
 # LLM: 同一删除清理流程供正式提交和恢复复用；禁用embedder仍清磁盘派生层，异常一律保留待重试事实。
 # 函数用途: 按记忆身份清除向量、孤儿文本缓存、SQLite/FTS及其外置正文。
 # LLM: C无embedder回退也复用原向量缓存字段/73策略；真实native优先，原vector→cache→SQLite正文删除顺序和普通pending保持。
-# 函数用途: 清除原精确记录的全部派生正文，不禁旧源或造恢复库。
-def _purge_removed_indexes(memory, entry_id: str) -> None:
+# LLM: 单ID恢复与批量正式删除共用；先清每个ID，再只扫描一次孤儿缓存。
+# 函数用途: 清除精确记录集合的派生正文，不重复全库扫描。
+def _purge_removed_indexes(memory, entry_id: str | set[str]) -> None:
     from ..retrieval.vector_store import VectorStore
 
     try:
@@ -303,10 +310,12 @@ def _purge_removed_indexes(memory, entry_id: str) -> None:
                     memory._vector_store_cache = store
             else:
                 store = VectorStore(memory._vector_store_path())
-        store.remove(entry_id)
+        removed_ids = {entry_id} if isinstance(entry_id, str) else entry_id
+        for removed_id in removed_ids:
+            store.remove(removed_id)
+            if memory.local_store is not None:
+                memory.local_store.delete_record(memory.local_store.make_record_id("memory", removed_id))
         _purge_text_vector_orphans(memory)
-        if memory.local_store is not None:
-            memory.local_store.delete_record(memory.local_store.make_record_id("memory", entry_id))
     except Exception as exc:
         if getattr(memory, "coordinator_io", False) and isinstance(exc, _NATIVE_MEMORY_ERRORS):
             raise

@@ -170,19 +170,21 @@ def stable_daily_event_id(event: DailyMemoryEvent) -> str:
 
 # LLM: Curator transactions and single append share one pure ordering/idempotency function;
 # failed replay therefore cannot generate a new ID or skip sequence values.
-# 函数用途: 将同一天的一批事件合并到已验证账本并分配连续 previous/sequence。
+# LLM: ID字典只建一次并随追加更新，显式ID不同payload仍拒绝；整批合并为O(D+N)。
+# 函数用途: 用线性时间合并当天事件，保留幂等和连续顺序。
 def merge_daily_events(
     existing: list[DailyMemoryEvent],
     events: list[DailyMemoryEvent] | tuple[DailyMemoryEvent, ...],
 ) -> tuple[list[DailyMemoryEvent], list[DailyMemoryEvent]]:
     rows = list(existing)
+    by_id = {item.event_id: item for item in rows}
     committed: list[DailyMemoryEvent] = []
     for event in events:
         normalized = normalize_daily_event(event)
         explicit_event_id = bool(normalized.event_id)
         event_id = normalized.event_id or stable_daily_event_id(normalized)
         normalized = replace(normalized, event_id=event_id)
-        prior = next((item for item in rows if item.event_id == event_id), None)
+        prior = by_id.get(event_id)
         if prior is not None:
             same_source = _daily_event_source_identity(normalized) == _daily_event_source_identity(
                 prior
@@ -199,6 +201,7 @@ def merge_daily_events(
             sequence=(rows[-1].sequence + 1 if rows else 1),
         )
         rows.append(committed_event)
+        by_id[event_id] = committed_event
         committed.append(committed_event)
     return rows, committed
 
@@ -329,7 +332,8 @@ def _bounded_text_list(value: object, field_name: str) -> list[str]:
 
 
 # LLM: 读取后逐项验证 ID 唯一、sequence 连续和 previous 链完整。
-# 函数用途: 严格加载一个 daily 分片。
+# LLM: seen_ids提供O(1)查重；重复ID及断裂链仍fail closed，不跳过坏行。
+# 函数用途: 在线性时间内严格加载并验证一个daily分片。
 def _load_daily_unlocked(path: Path) -> list[DailyMemoryEvent]:
     report = read_jsonl_objects_report(path, context="daily_memory.load")
     if report.load_errors:
@@ -337,6 +341,7 @@ def _load_daily_unlocked(path: Path) -> list[DailyMemoryEvent]:
             f"daily ledger contains {len(report.load_errors)} unreadable row(s)"
         )
     events: list[DailyMemoryEvent] = []
+    seen_ids: set[str] = set()
     for index, payload in enumerate(report.records, start=1):
         try:
             event = DailyMemoryEvent.from_record(payload)
@@ -347,8 +352,9 @@ def _load_daily_unlocked(path: Path) -> list[DailyMemoryEvent]:
         expected_previous = events[-1].event_id if events else ""
         if event.sequence != index or event.previous_event_id != expected_previous:
             raise DailyMemoryStoreCorruptError("daily ledger ordering chain is invalid")
-        if any(current.event_id == event.event_id for current in events):
+        if event.event_id in seen_ids:
             raise DailyMemoryStoreCorruptError("daily ledger contains duplicate event_id")
+        seen_ids.add(event.event_id)
         events.append(event)
     return events
 

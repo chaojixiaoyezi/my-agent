@@ -19,6 +19,7 @@ P14 快照格式(my-agent.memory-vectors.v2):空间身份、实际维度、代�
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import uuid
@@ -56,17 +57,28 @@ class VectorIdentityError(VectorStoreError):
     pass
 
 
+# LLM: 向量在装载/插入时已经转换并校验为有限float元组；查询阶段只核长度，不反复转换全库。
+# 函数用途: 对已验证向量计算相似度，坏向量或维度不符直接跳过。
 def _safe_cosine(query_vector: list[float], qlen: int, vec: object) -> float | None:
     """对一条存储向量算 cosine;不可比则返回 None(不是 list / 维度不一致 / 含非数值都跳过)。
 
     维度守卫是关键:换 embedding 模型后维度会变(如本地 256 → MiniMax embo-01 的 1536),
     旧维度向量若参与比较会被 cosine 截断成垃圾分,静默错召回——宁可跳过。
     """
-    if not isinstance(vec, list) or len(vec) != qlen:
+    if not isinstance(vec, tuple) or len(vec) != qlen:
+        return None
+    return cosine(query_vector, vec)
+
+
+# LLM: 数值转换只在读/写边界发生；非有限值或坏形状不进入打分，坏旧条目原载荷仍保留以免重写丢数据。
+# 函数用途: 把可用向量转换为不可变浮点元组。
+def _validated_vector(vector: object) -> tuple[float, ...] | None:
+    if not isinstance(vector, (list, tuple)):
         return None
     try:
-        return cosine(query_vector, [float(x) for x in vec])
-    except (TypeError, ValueError):
+        values = tuple(float(value) for value in vector)
+        return values if values and all(math.isfinite(value) for value in values) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -123,9 +135,13 @@ def _rows_dim(rows: list[tuple[str, list[float], str, dict[str, object]]]) -> in
 
 
 # LLM: 条目形状固定为 {vector, text, metadata}，读侧 search 与 jsonl 二次核验都按这三个键取值；改形状要同步两边。
-# 函数用途: 把一行写入数据变成落盘条目（向量、正文、元数据各自复制，不与调用方共享可变对象）。
+# LLM: 插入前验证有限数值，内存只存不可变float元组；JSON仍自然编码为数组。
+# 函数用途: 校验并复制一行向量数据，拒绝坏向量。
 def _item(vector: list[float], text: str, metadata: dict[str, object] | None) -> dict[str, object]:
-    return {"vector": list(vector), "text": text, "metadata": dict(metadata or {})}
+    validated = _validated_vector(vector)
+    if validated is None:
+        raise VectorIdentityError("VECTOR_DIMENSION_MISMATCH")
+    return {"vector": validated, "text": text, "metadata": dict(metadata or {})}
 
 
 # LLM: 向量库只是可重建的派生投影。身份、维度、代次与全部向量同在一个快照文件里；写入一律在 locked_json_path 内
@@ -171,7 +187,8 @@ class VectorStore:
         return locked_json_path(self._path)
 
     # LLM: 同一个文件句柄取指纹和内容，二者必然同代；文件不存在是确定的空库，其它读错误记为读不了。
-    # 函数用途: 从磁盘重新加载快照到实例缓存。
+    # LLM: 装载边界把合法向量转换成float元组，坏向量留原值供兼容跳过，避免查询重复数值转换。
+    # 函数用途: 从同一FD装载向量快照并预校验向量。
     def _reload(self) -> None:
         try:
             with self._path.open("rb") as handle:
@@ -184,6 +201,9 @@ class VectorStore:
             self._header, self._items, self._readable, self._stamp = None, {}, False, None
             return
         self._header, self._items, self._readable = _parse_snapshot(raw)
+        for item in self._items.values():
+            if isinstance(item, dict) and (vector := _validated_vector(item.get("vector"))) is not None:
+                item["vector"] = vector
         self._stamp = stamp
 
     # LLM: 每次读写前先比文件指纹，别的实例或进程换代后立即重载；没变就用缓存（只花一次 stat）。调用方须持 self._lock。
@@ -371,7 +391,8 @@ class VectorStore:
     # LLM: 召回复用入口（S3，用户 10-02 拍板）：带身份且身份可用（档案、协议、模型、端点摘要都对上）才返回，否则空字典；
     #   不管理身份的通用模式（identity=None）无从核对是不是同一个向量空间，一律不复用。
     #   只交出向量和“嵌入时用的文本”，能否复用由调用方按文本完全一致裁决，维度再由检索器按本轮 query 长度核一次。只读。
-    # 函数用途: 按 id 取出当前快照里的向量和对应文本，供召回跳过重复嵌入。
+    # LLM: 内部元组不外泄可变引用；对外仍给list以保持HybridRetriever及既有调用合同。
+    # 函数用途: 返回已验证向量的列表副本及对应文本。
     def stored_vectors(self, ids: Iterable[str]) -> dict[str, tuple[list[float], str]]:
         wanted = set(ids)
         with self._lock:
@@ -380,7 +401,7 @@ class VectorStore:
                 return {}
             snapshot = {key: self._items[key] for key in wanted if key in self._items}
         return {key: (list(item["vector"]), str(item.get("text", ""))) for key, item in snapshot.items()
-                if isinstance(item.get("vector"), list)}
+                if isinstance(item, dict) and isinstance(item.get("vector"), tuple)}
 
     # LLM: 先刷新再列 id；保留期与硬删除核对靠它确认向量是否真被清掉，只读。
     # 函数用途: 返回当前快照的全部向量 id。
