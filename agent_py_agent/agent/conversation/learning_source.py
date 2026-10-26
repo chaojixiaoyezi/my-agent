@@ -197,8 +197,8 @@ def all_sources_learnable(facts_list: Sequence[AgentsLearningSourceFacts]) -> bo
     return bool(facts_list) and all(facts.can_learn for facts in facts_list)
 
 
-# LLM: 线程级投影只是默认；自动化痕迹优先于显式投影，防旧user投影覆盖同消息的派活/后台事实。
-# 函数用途: 从消息 metadata 与线程来源推导当次有效来源事实。
+# LLM: Bot线程禁学先于任何消息投影；自动化痕迹仍收紧显式可学来源，不能由page_context或消息false覆盖。
+# 函数用途: 从宿主线程与消息推导来源，只读Bot即使携带显式user来源也不可学。
 def facts_for_message(
     metadata: Mapping[str, object],
     *,
@@ -208,6 +208,9 @@ def facts_for_message(
 ) -> AgentsLearningSourceFacts:
     meta = metadata if isinstance(metadata, Mapping) else {}
     turn_id = str(meta.get("conversation_request_id") or "")
+    if bot_learning_excluded(thread_source) or bot_learning_excluded(meta):
+        return projection_to_facts(bot_excluded_projection(), owner=owner, thread_id=thread_id,
+                                   refs=LearningSourceRefs(turn_id=turn_id, request_id=turn_id))
     derived = _derived_projection(meta)
     explicit = meta.get(LEARNING_SOURCE_KEY)
     if explicit is not None:
@@ -259,11 +262,13 @@ def _derived_projection(meta: Mapping[str, object]) -> dict[str, object] | None:
     return None
 
 
-# LLM: 线程记录里的投影是默认来源；缺字段或坏投影返回 None，由调用方按未知（不可学）处理。
-# 函数用途: 解码线程来源投影；不合法时返回 None。
+# LLM: 保留宿主管理的Bot禁学投影供现有thread.learning_source读者消费；坏普通投影仍返回None。
+# 函数用途: 解码线程来源，不在规范化过程中丢掉Bot硬禁学标记。
 def thread_source_projection(thread_source: object) -> dict[str, object] | None:
     if not isinstance(thread_source, Mapping):
         return None
+    if bot_learning_excluded(thread_source):
+        return bot_excluded_projection()
     try:
         facts = projection_to_facts(
             thread_source, owner=_PLACEHOLDER_OWNER, thread_id=_PLACEHOLDER_TEXT
@@ -374,11 +379,12 @@ def child_projection_from_parent(
     )
 
 
-# LLM: 结构化字段里的来源判定只有这一处实现：自动化痕迹（定时/派活/后台）优先于
-#   显式投影，两者都无时返回 None（fail-closed），不把未知猜成用户对话；坏显式投影同样返回 None。
-# 函数用途: 从唤醒信封或运行参数推导当次来源投影；不读正文。
+# LLM: Bot禁学优先于自动化痕迹和显式投影，后代沿既有来源继承；普通未知来源仍失败关闭。
+# 函数用途: 从唤醒信封或运行参数推导来源，禁止只读Bot恢复学习资格。
 def derive_source_projection(fields: object) -> dict[str, object] | None:
     attrs = fields if isinstance(fields, Mapping) else {}
+    if bot_learning_excluded(attrs):
+        return bot_excluded_projection()
     derived = _derived_projection(attrs)
     if derived is not None:
         return derived
@@ -386,6 +392,24 @@ def derive_source_projection(fields: object) -> dict[str, object] | None:
     if explicit is None:
         return None
     return thread_source_projection(explicit)
+
+
+# LLM: 只读结构化宿主字段；嵌套仅限线程metadata/learning_source，不解析正文或page_context。
+# 函数用途: 判断线程或来源投影是否具有不可覆盖的Bot禁学标记。
+def bot_learning_excluded(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    sources = [value, *(item for key in ("metadata", "learning_source")
+                        if isinstance(item := value.get(key), Mapping))]
+    return any(item.get("bot_mode") == "query_readonly" or item.get("learning_excluded") is True
+               or item.get("reason") == "bot_query_readonly_excluded" for item in sources)
+
+
+# LLM: 原冻结facts没有reason字段，使用明确不可学source_kind并在来源投影附reason，不修改共享合同。
+# 函数用途: 构造只读Bot的固定禁学来源，保留可机器核对的原因。
+def bot_excluded_projection() -> dict[str, object]:
+    return {**_projection("bot_query_readonly_excluded", "bot_query_readonly_excluded", False, None),
+            "reason": "bot_query_readonly_excluded", "bot_mode": "query_readonly", "learning_excluded": True}
 
 
 # LLM: spawn 边界复用同一推导（痕迹优先>显式投影>None），保证父级来源判定与消息级一致。

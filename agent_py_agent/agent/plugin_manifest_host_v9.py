@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 
-# LLM: assets.read/users.read单独批准，不由write/manage推导；执行与代用户能力继续独立。
-# 函数用途: 列出v9明确认识的全部能力，供安装确认和动作授权共用。
+# LLM: 审计read/invoke各自批准，不由管理员安装或write自动推导；仍逐调用核对当前成员资格。
+# 函数用途: 列出v9能力词汇，包含审计组只读与受控调用。
 def host_capabilities() -> frozenset[str]:
     return frozenset({"read", "write", "chat.history", "chat", "threads.manage", "requests.cancel", "execute",
                       "users.read", "users.manage", "act_as_user", "interactions.read", "interactions.respond",
                       "tasks.read", "tasks.control", "goals.read", "goals.control", "memory.read", "artifacts.read",
-                      "assets.read", "assets.write", "datasources.read", "datasources.write", "recorder.control"})
+                      "assets.read", "assets.write", "datasources.read", "datasources.write", "recorder.control",
+                      "audit_group.read", "audit_group.invoke"})
 
 
 # LLM: list/tuple入口由调用者指定，不做字符串拆分或去重清洗。

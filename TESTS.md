@@ -1,3 +1,22 @@
+## 2026-10-26 WT-AG2：双Bot独立领域切片（未完成接线，不作为完整功能交付）
+
+来源：`07-tasks/wave5-wt-ag2-20261026.md`。当前切片在 `wt-wave5-ag2` 中新增双Bot槽位、前台阈值轮换、可恢复的代次发布、只读正向工具策略和不可覆盖的禁学来源；注册十项动作的闭合参数与审计能力词汇。Bot前台归档仅改变宿主元数据，原线程保持active，任务、Goal和claim保留在旧代。
+
+新增 `test_dual_bot_sessions_and_rollover.py`，使用真实临时ConversationStore验证1800秒严格闲置阈值、30轮、32768 UTF-8字节、后台/工具内容不充当前台轮数、旧代后台结果落账、正常及崩溃窗口幂等、版本冲突、停用重放、模式隔离、尾15条公开消息和闭合Schema。`submitter`是领域测试接缝，**不是**生产Gateway入队、工具策略接通或真实Bot业务链路的证据。
+
+HostComposition已实际接入ensure、rollover和history.list三个动作。新增组合根测试逐项检查十动作路由与真实就绪状态，验证历史分页、游标409、越域404和停用重放。缺依赖动作明确显示不可用，不因目录登记而冒充业务就绪。
+
+待协调的硬接线边界：当前树无AG1审计组领域接口；真实 `plugin_host/gateway_runtime.py:GatewayPluginRequests.prepare` 拒绝有工具聊天，并固定从原调用payload取thread_id。它不在任务独占文件清单内。未越界修改，也未添加替身领域或伪造成功回执。六个审计组动作、Bot submit生产绑定及真实工具快照硬门接线仍未实现；不能据定向测试绿宣称WT-AG2完成。
+
+复现独立领域及原会话回归（工作树根，临时文件留在树内）：
+
+```bash
+PYTEST_ADDOPTS='--basetemp=.pytest_cache/ag2-temp' python3 -m pytest agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_plugin_host_v2_conversations.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
 ## 2026-10-26 Stage 3 Round 2：有界 Git 指针扫描与 artifact 生产读口（c2）
 
 来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，工作树 `wt-wave4-c3`，起始提交 `8e96fbbf10357dce3ed20470c0e4eeab5fecc5d7`。本轮只修改任务授权的两份生产模块、两份测试和两份文档，不改部署包。

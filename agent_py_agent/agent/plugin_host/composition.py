@@ -10,11 +10,14 @@ from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, thaw, validate_tree
 
 
-# LLM: 扩展仅按静态动作集合分组，不扩大未知前缀；动作存在性先由ActionSpec保证。
-# 函数用途: 选择原四域或WP-4固定适配领域。
+# LLM: Bot/审计扩展也只按静态集合分组，缺后端的动作由ready明确不可用，不借observations或main兜底。
+# 函数用途: 选择原四域、V2扩展或双Bot适配领域。
 def domain_name(action: str) -> str:
     action_spec(action)
+    from .action_specs_audit_bots import AUDIT_BOT_ACTIONS
     from .action_specs_v2_ext import V2_ACTIONS
+    if action in AUDIT_BOT_ACTIONS:
+        return "audit_bots"
     if action in V2_ACTIONS:
         return "capabilities_v2"
     if action == "host.capabilities.get":
@@ -28,10 +31,13 @@ def domain_name(action: str) -> str:
     return "observations"
 
 
-# LLM: 扩展还须检查真实后端，原stream与call独立；不能将目录登记视为业务就绪。
-# 函数用途: 核验当前组合根及领域依赖是否接入指定动作。
+# LLM: 双Bot动作逐项核真实依赖，未接AG1或执行接缝保持不可用；原stream和call合同不变。
+# 函数用途: 核验当前组合根能否真正处理指定动作。
 def domain_ready(action: str, ports: HostDomainPorts) -> bool:
     name = domain_name(action)
+    if name == "audit_bots":
+        from .audit_bot_v2_handlers import audit_bots_ready
+        return audit_bots_ready(action, ports)
     if name == "capabilities_v2":
         from .capabilities_v2_handlers import capabilities_v2_ready
         return capabilities_v2_ready(action, ports)
@@ -94,10 +100,13 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     return result
 
 
-# LLM: 分派不反射插件选择的属性；扩展适配器仍只拿到原已授权对象和宿主四端口。
-# 函数用途: 执行原领域或WP-4的固定调用。
+# LLM: 双Bot分派沿原四端口和已授权对象，缺依赖直接拒绝，不能在组合根构造临时替身业务。
+# 函数用途: 执行原领域、V2扩展或已就绪Bot动作。
 def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     name = domain_name(authorized.call.action)
+    if name == "audit_bots":
+        from .audit_bot_v2_handlers import call_audit_bots
+        return call_audit_bots(authorized, ports)
     if name == "capabilities_v2":
         from .capabilities_v2_handlers import call_capabilities_v2
         return call_capabilities_v2(authorized, ports)

@@ -192,13 +192,14 @@ def _read_specs() -> list[ActionSpec]:
     ]
 
 
-# LLM: 扩展只在原类型定义完成后惰性载入；缓存仅含静态声明，重名拒绝以免覆盖原权限。
-# 函数用途: 组合原45项与新增20项，返回不能被插件覆盖的唯一动作目录。
+# LLM: 双Bot/审计声明同样惰性合入唯一目录，重名拒绝；缓存不含动态成员资格或任何执行许可。
+# 函数用途: 合并原动作、V2扩展及十项双Bot审计动作。
 @lru_cache(maxsize=1)
 def action_specs():
+    from .action_specs_audit_bots import audit_bot_specs
     from .action_specs_v2_ext import v2_action_specs
     rows = (_conversation_specs() + _user_specs() + _execution_specs() + _interaction_specs()
-            + _task_goal_specs() + _read_specs() + v2_action_specs())
+            + _task_goal_specs() + _read_specs() + v2_action_specs() + audit_bot_specs())
     if len({row.name for row in rows}) != len(rows):
         raise ValueError("宿主动作重名")
     return MappingProxyType({row.name: row for row in rows})
@@ -212,11 +213,11 @@ def action_spec(action: str) -> ActionSpec:
     return action_specs()[action]
 
 
-# LLM: 返回AND集合；poll/stream的OR准入在any_capabilities，最终kind必须由领域核验。
-# 函数用途: 计算动作的静态及参数条件权限。
+# LLM: Bot bounded提交同样需要execute；模式专属工具裁剪仍由原执行接缝落实，静态能力不代替运行权限。
+# 函数用途: 计算原消息和Bot消息等动作的参数相关能力。
 def required_capabilities(action: str, payload: dict) -> frozenset[str]:
     required = set(action_spec(action).capabilities)
-    if action == "conversations.messages.send":
+    if action in {"conversations.messages.send", "conversations.bots.submit"}:
         if payload.get("tool_policy") == "bounded":
             required.add("execute")
         if payload.get("input_artifact_refs"):
