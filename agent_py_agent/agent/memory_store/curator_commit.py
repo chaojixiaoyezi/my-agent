@@ -12,6 +12,7 @@ import hashlib
 import json
 import shutil
 from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,7 +33,13 @@ from ..common.request_execution_ports import (
 )
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaLockContention
 from .candidate_models import CandidateObservation, MemoryCandidate, utc_now_iso
-from .candidates import CandidateService, merge_candidate_observations
+from .candidates import (
+    CandidateService,
+    _drop_candidate_load_cache,
+    _hydrate_observation_targets,
+    _serialize_candidates,
+    merge_candidate_observations,
+)
 from .curator_rejected_bindings import retain_rejected_target_bindings
 from .curator_run_log import (
     CuratorRunLog,
@@ -208,7 +215,7 @@ class CuratorBatchCommitter:
             key=lambda item: str(item.resolve(strict=False)),
         )
 
-    # LLM: 独立和策展模式共用纯合并；锁内先合拒绝目标约束再接受候选，不能改变次数、身份或观察版本。
+    # LLM: 原锁集合保持不变；归一化合并后候选逻辑未变则不备份/替换，state仍最后提交。
     # silently change occurrence/sequence; rejected constraints join under the same locks before accepted candidates.
     # 函数用途: 读取锁内当前态并构造每个目标文件的完整下一文本。
     def _build_changes(
@@ -217,22 +224,28 @@ class CuratorBatchCommitter:
     ) -> tuple[dict[Path, str], list[DailyMemoryEvent], list[MemoryCandidate]]:
         current_state = self.state._load_unlocked()
         next_state = build_success_state(current_state, request.state_commit)
-        candidate_rows = retain_rejected_target_bindings(
-            self.candidates._load_unlocked(), request.rejected_target_bindings)
-        if request.candidate_observations:
-            candidate_rows, committed_candidates = merge_candidate_observations(
-                candidate_rows,
-                request.candidate_observations,
-            )
-        else:
-            committed_candidates = []
-        changes = {self.candidates.path: _candidate_text(candidate_rows)}
+        changes, committed_candidates = self._candidate_changes(request)
         committed_daily = self._daily_changes(request.daily_events, changes)
         run_path = run_log_path(self.run_log.runs_dir, request.run_record.finished_at)
         run_rows = merge_run_record(load_run_records_unlocked(run_path), request.run_record)
         changes[run_path] = run_records_text(run_rows)
         changes[self.state.path] = _state_text(next_state.to_dict())
         return changes, committed_daily, committed_candidates
+
+    # LLM: 无观察/拒绝绑定且文件存在时零加载；其它情况按全部归一字段相等判断，不按观察条数猜变化。
+    # 函数用途: 只为真正改变或缺失的候选账本生成事务目标，保留原返回候选列表。
+    def _candidate_changes(self, request: CuratorBatchCommit) -> tuple[dict[Path, str], list[MemoryCandidate]]:
+        exists = self.candidates.path.exists()
+        if exists and not request.rejected_target_bindings and not request.candidate_observations:
+            return {}, []
+        before = self.candidates._load_unlocked()
+        rows = retain_rejected_target_bindings(before, request.rejected_target_bindings)
+        committed = []
+        if request.candidate_observations:
+            rows = _hydrate_observation_targets(self.candidates.path, rows, request.candidate_observations)
+            rows, committed = merge_candidate_observations(rows, request.candidate_observations)
+        changes = {self.candidates.path: _candidate_text(rows)} if rows != before or not exists else {}
+        return changes, committed
 
     # LLM: Each date shard receives its entire sub-batch in model order while sequence remains
     # based on the existing authoritative chain.
@@ -321,7 +334,13 @@ class CuratorBatchCommitter:
     # 函数用途: 在原窗口内写事务材料或规范目标，丢失当前窗口时原样拒绝。
     def _write_target(self, path: Path, content: str) -> None:
         with gateway_transaction_writer("_write_target"):
-            write_private_text_file_atomic_unlocked(path, content)
+            if path == self.candidates.path:
+                _drop_candidate_load_cache(path)
+            try:
+                write_private_text_file_atomic_unlocked(path, content)
+            finally:
+                if path == self.candidates.path:
+                    _drop_candidate_load_cache(path)
 
     # LLM: Restore verifies every backup/hash and never follows a manifest target outside the
     # owner memory root. 恢复写回同样走私有原子写（0600），不把旧文件的 0644 带回来。
@@ -341,6 +360,8 @@ class CuratorBatchCommitter:
             directory = manifest_path.parent
             for item in manifest["targets"]:
                 path = Path(str(item["path"]))
+                if path == self.candidates.path:
+                    _drop_candidate_load_cache(path)
                 _assert_target(path, self.memory_root)
                 backup = directory / str(item["backup"])
                 if not backup.is_file():
@@ -622,14 +643,10 @@ def _check_admissions(
         )
 
 
-# LLM: Candidate serialization reuses strict to_record output and creates no separate candidate
-# audit or compatibility format.
+# LLM: 复用候选共用原行编码器；owned副本防to_record归一化或缓存字段污染事务返回值。
 # 函数用途: 序列化候选当前态完整 JSONL。
 def _candidate_text(records: list[MemoryCandidate]) -> str:
-    return "".join(
-        json.dumps(item.to_record(), ensure_ascii=False, sort_keys=True) + "\n"
-        for item in records
-    )
+    return _serialize_candidates(deepcopy(records))
 
 
 # LLM: Daily serialization preserves authoritative sequence order already assigned by the pure

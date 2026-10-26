@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -214,7 +215,7 @@ class CandidateObservation:
     target_entry_version: int | None = None
 
 
-# LLM: MemoryCandidate 是 candidates.jsonl 的唯一当前态记录；状态历史留在同一记录内。
+# LLM: 候选当前态唯一事实源；冷详情为同owner受校验归档，raw缓存不参与构造、比较或持久协议。
 # 类用途: 保存候选正文、证据、范围、审核、晋升位置和幂等观察次数。
 @dataclass
 class MemoryCandidate:
@@ -269,12 +270,25 @@ class MemoryCandidate:
     learning_source_coverage: dict[str, object] = field(default_factory=dict)
     # Host-only immutable historical bindings; no body/quote, retained inside this authority only.
     target_evidence_bindings: list[dict[str, object]] = field(default_factory=list)
+    cold_detail_ref: str = ""
+    _raw_json_line: str = field(default="", init=False, repr=False, compare=False)
+    _raw_state_digest: str = field(default="", init=False, repr=False, compare=False)
 
-    # LLM: 持久化前完整验证；未知观察版本及空覆盖字段省略，保持旧v2记录的可读兼容。
+    # LLM: 字段赋值即时失效原行；嵌套变更由序列化器的完整状态摘要再次校验，不能依赖调用方自觉。
+    # 函数用途: 避免状态、版本绑定或隐私字段改写后复用旧JSON。
+    def __setattr__(self, name: str, value: object) -> None:
+        if not name.startswith("_") and name in self.__dict__ and self.__dict__[name] != value:
+            object.__setattr__(self, "_raw_json_line", "")
+            object.__setattr__(self, "_raw_state_digest", "")
+        object.__setattr__(self, name, value)
+
+    # LLM: 持久化前完整验证；只构造正式init字段，原行/摘要绝不复制到记录，空新增字段兼容旧v2。
     # 函数用途: 将候选转换为 JSONL 记录。
     def to_record(self) -> dict[str, object]:
         validate_candidate(self)
-        payload = asdict(self)
+        payload = {name: deepcopy(getattr(self, name)) for name, descriptor in self.__dataclass_fields__.items() if descriptor.init}
+        if not self.cold_detail_ref:
+            payload.pop("cold_detail_ref", None)
         if not self.learning_source:
             payload.pop("learning_source", None)
         if self.target_entry_version is None:
@@ -285,13 +299,13 @@ class MemoryCandidate:
             payload.pop("target_evidence_bindings", None)
         return payload
 
-    # LLM: 未知字段可忽略以便增量升级，但已知必填字段缺失或非法必须 fail closed。
+    # LLM: 未知字段及私有非init缓存不进入构造；已知必填字段缺失或非法必须fail closed。
     # 函数用途: 从 candidates.jsonl 行恢复当前候选对象。
     @classmethod
     def from_record(cls, payload: dict[str, object]) -> MemoryCandidate:
         known = cls.__dataclass_fields__
         try:
-            candidate = cls(**{key: value for key, value in payload.items() if key in known})
+            candidate = cls(**{key: value for key, value in payload.items() if key in known and known[key].init})
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid memory candidate record") from exc
         validate_candidate(candidate)
@@ -583,9 +597,14 @@ def host_promotion_mode(candidate: object) -> str:
     return "manual_required"
 
 
-# LLM: 每次读写校验Schema、观察版本和来源覆盖一致性；旧缺字段可读，但不因此补猜权威。
+# LLM: 每次读写校验Schema、观察版本、冷ref固定路径及来源覆盖；旧缺字段可读但不补猜权威。
 # 函数用途: 验证持久候选的所有枚举、引用、范围、时间和状态历史。
 def validate_candidate(candidate: MemoryCandidate) -> None:
+    if not isinstance(candidate.cold_detail_ref, str) or (candidate.cold_detail_ref and (
+        candidate.status not in {"promoted", "superseded", "rejected"} or not re.fullmatch(
+            r"candidates_archive/[0-9]{4}-(?:0[1-9]|1[0-2])\.jsonl#memory-candidate-[A-Za-z0-9_-]+:[0-9a-f]{64}",
+            candidate.cold_detail_ref))):
+        raise ValueError("invalid candidate cold_detail_ref")
     if candidate.schema_version != CANDIDATE_SCHEMA_VERSION:
         raise ValueError(f"unsupported candidate schema: {candidate.schema_version}")
     if not str(candidate.candidate_id or "").startswith("memory-candidate-"):
