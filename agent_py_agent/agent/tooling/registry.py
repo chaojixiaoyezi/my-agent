@@ -25,6 +25,7 @@ from ..memory_archive.artifact.read_modes import ARTIFACT_DEFAULT_READ_CHARS
 from ..path_access_policy import effective_owner_scope_root, path_scope_regime
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
+from .asset_delivery_tool import register_asset_delivery_tool
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     FileSourceContent,
@@ -643,6 +644,7 @@ class ToolRegistry:
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
         register_base_tools(self, params)
+        register_asset_delivery_tool(self, params)
         self.register(ToolSearchTool(self))
         self.register(ListToolsTool(self))
         if not params.defer_mcp_connect:

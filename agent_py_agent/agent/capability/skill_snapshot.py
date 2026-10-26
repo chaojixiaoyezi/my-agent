@@ -13,7 +13,7 @@ from pathlib import Path
 from ..contracts.gates.skill_guard import SkillGuardRequest, evaluate_skill_guard_gate
 from ..runtime_errors import is_structured_error_code
 from .package_snapshot import CapabilityPackageSnapshot
-from .skills import SkillCard
+from .skills import SkillCard, skill_enabled
 
 # 抛出点传入的码形状不合格时 SkillSnapshotError 回落到这个固定码；出现它说明抛出点本身有缺陷。
 SKILL_SNAPSHOT_ERROR_CODE_INVALID = "SKILL_SNAPSHOT_ERROR_CODE_INVALID"
@@ -89,6 +89,8 @@ class SkillSnapshotEntry:
         return {"stable_id": self.stable_id, "name": self.name,
                 "source": self.source, "content_sha256": self.content_sha256}
 
+    # LLM: Card继承同一冻结开关，不让禁用条目因默认True被投影复活。
+    # 函数用途: 将快照条目转换成兼容旧接口的技能名卡。
     def to_card(self) -> SkillCard:
         return SkillCard(
             name=self.name,
@@ -103,6 +105,7 @@ class SkillSnapshotEntry:
             tools_required=list(self.tools_required),
             risk_level=self.risk_level,
             source=self.source,
+            enabled=self.enabled,
         )
 
     def to_dict(self, *, include_path: bool = False) -> dict[str, object]:
@@ -204,19 +207,23 @@ class SkillSnapshot:
         fingerprint = _content_sha256(self.fingerprint + "\0" + json.dumps(material, sort_keys=True, ensure_ascii=False))
         return replace(self, packages=packages, errors=errors, fingerprint=fingerprint)
 
-    # LLM: 自学条目读宿主固定不可变版本，其它条目仍核当前文件hash；原路径guard继续约束授权，不从公开ref选任意历史路径。
+    # LLM: 显式禁用保留ASSET_DISABLED_BY_OWNER；同时复核当前canonical侧开关，不能用旧启用快照越过停用；原hash/pin/guard不变。
     # 函数用途: 读取本轮已授权正文，跨自学更新保留旧版，不写文件或扩大Skill范围。
     def read_body(self, reference: str, *, max_chars: int = 0) -> str:
-        entry = self.resolve(reference)
+        entry = self.resolve(reference, enabled_only=False)
         if entry is None:
             raise SkillSnapshotError("SKILL_NOT_AVAILABLE", f"reference={reference}")
+        if not entry.enabled:
+            raise SkillSnapshotError('ASSET_DISABLED_BY_OWNER', f'skill={entry.stable_id}')
         path = Path(entry.frozen_path or entry.path)
         try:
+            if not skill_enabled(Path(entry.path)):
+                raise SkillSnapshotError('ASSET_DISABLED_BY_OWNER', f'skill={entry.stable_id}')
             from .skill_learning_versions import read_frozen_learned_body
             body = read_frozen_learned_body(entry) if entry.frozen_path else path.read_text(encoding="utf-8")
             if body is None:
                 raise FileNotFoundError("pinned skill version unavailable")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise SkillSnapshotError("SKILL_READ_FAILED", f"skill={entry.stable_id}: {exc}") from exc
         if _content_sha256(body) != entry.content_sha256:
             raise SkillSnapshotError("SKILL_SNAPSHOT_STALE", f"skill={entry.stable_id}")

@@ -27,6 +27,8 @@ MAX_FRONTMATTER_DEPTH = MAX_FRONTMATTER_DEPTH_COUNT
 _LIST_FIELDS = ("tags", "platforms", "capabilities", "tools_required")
 
 
+# LLM: Card仅携带发现元数据及Owner运行闸，不把发现视为授权；disabled卡不能进入active snapshot。
+# 类用途: 表示按需读取正文前的轻量技能索引。
 @dataclass
 class SkillCard:
     """一个 skill 的轻量索引卡。
@@ -48,6 +50,7 @@ class SkillCard:
     tools_required: list[str] = field(default_factory=list)
     risk_level: str = "low"
     source: str = "workspace"
+    enabled: bool = True
 
     def render_compact(self) -> str:
         """渲染给模型看的短卡片。"""
@@ -65,7 +68,7 @@ class SkillCard:
         return "\n".join(parts)
 
 
-# LLM: 卡片和资产使用同一codec；缺省分类由发现根传入，仅空值使用，显式general、零和布尔值仍优先。
+# LLM: Card共用codec与canonical skill_meta.json运行闸；侧文件显式enabled优先，缺省沿frontmatter/default True。
 # 函数用途: 从明确路径有界读取Skill Card，不执行正文。
 def parse_skill_file(
     path: str | Path,
@@ -100,7 +103,23 @@ def parse_skill_file(
         tools_required=_as_list(meta.get("tools_required")),
         risk_level=str(meta.get("risk_level", "low")).strip() or "low",
         source=source,
+        enabled=skill_enabled(skill_path, meta),
     )
+
+
+# LLM: 原skill_meta.json是唯一侧元数据权威；不创建目录/锁，严格bool，缺失保留头部值；可只复核当前侧开关。
+# 函数用途: 为Card、快照和运行门读取技能启停状态，避免另建.delivery_meta影子状态。
+def skill_enabled(path: str | Path, meta: dict | None = None) -> bool:
+    from ..common.nofollow_fs import read_bytes_beneath
+
+    raw = read_bytes_beneath(Path(path).parent, ('skill_meta.json',), max_bytes=MAX_SKILL_BYTES)
+    side = json.loads(raw) if raw is not None else {}
+    if not isinstance(side, dict):
+        raise ValueError('skill_meta.json必须是对象')
+    enabled = side.get('enabled', (meta or {}).get('enabled', True))
+    if type(enabled) is not bool:
+        raise ValueError('Skill enabled必须是布尔值')
+    return enabled
 
 
 def _has_frontmatter(text: str) -> bool:

@@ -10,7 +10,14 @@ from typing import Any
 from ..capability.skills import _as_list, skill_catalog_roots, split_skill_frontmatter
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath, write_text_atomic_beneath
-from . import canonical_skill_name, skill_asset_id, valid_skill_reference
+from . import (
+    asset_root_lock,
+    canonical_skill_name,
+    next_asset_revision,
+    safe_asset_id,
+    skill_asset_id,
+    valid_skill_reference,
+)
 from .descriptor import AssetDescriptor, clean_json
 
 
@@ -64,7 +71,7 @@ def _skill_id(name):
     return skill_asset_id(name)
 
 
-# LLM: 特殊目录身份仍从目录派生，列表沿统一schema归一；描述仅去外层空白，保留内部换行。
+# LLM: 特殊目录身份仍从目录派生；enabled沿已合并头部/原侧文件的严格bool，出处保留在metadata，不授执行权。
 # 函数用途: 将技能元数据转成插件可显示的标准提取Key，不携带正文或磁盘路径。
 def _descriptor(directory, meta, owner_id):
     extensions = {key: meta.get(key, default) for key, default in (('when_to_use', ''), ('category', 'general'))}
@@ -81,7 +88,8 @@ def _descriptor(directory, meta, owner_id):
     descriptor = AssetDescriptor(id=_skill_id(directory.name if special else meta.get('id', directory.name)), kind='skill',
         name=directory.name if special else meta.get('name') or directory.name,
         summary=summary.strip(),
-        version=str(meta.get('version', '1.0.0')), owner_id=owner_id, metadata=extensions,
+        version=str(meta.get('version', '1.0.0')), owner_id=owner_id,
+        metadata={**meta.get('metadata', {}), **extensions}, enabled=meta.get('enabled', True),
         access_targets=meta.get('access_targets', ()), data_sources=meta.get('data_sources', ()),
         credential_refs=meta.get('credential_refs', ()), io_contract=meta.get('io_contract', {}),
         refs=refs, tags=_as_list(meta.get('tags'))).to_dict()
@@ -283,3 +291,43 @@ def get_owner_skill_descriptor(owner_home, skill_id, extra_roots=(), *,
     ):
         return descriptor
     raise FileNotFoundError('Owner技能不存在')
+
+
+# LLM: 仅当前Owner原生skills目录可修改，builtin/shared/workspace不借裸ID扩权；正文与授权快照不重写。
+# 类用途: 为跨用户投递提供原生技能启停入口，沿原侧元数据与资产恢复锁持久化。
+class SkillAdapter:
+    # LLM: 可信Owner根由调用方给出，构造不建目录、不扫描其它来源。
+    # 函数用途: 绑定可管理的原生技能目录。
+    def __init__(self, owner_home):
+        self.owner_home = Path(owner_home).absolute()
+
+    # LLM: 配额先于原资产根/侧文件锁；侧文件布尔值为唯一运行开关覆盖，旧快照读取仍复核此文件。
+    # 函数用途: 切换本人的一个既有技能，保留正文、来源和未知侧元数据。
+    def set_enabled(self, skill_id, enabled, *, admission=None):
+        from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
+        from .workspace_assets import _strict_skill_paths
+
+        safe_asset_id(skill_id)
+        if type(enabled) is not bool:
+            raise ValueError('enabled必须是布尔值')
+        home = self.owner_home
+        if admission is None:
+            with owner_quota_enforcer_from_policy(home).admission() as quota:
+                return self.set_enabled(skill_id, enabled, admission=quota)
+        with asset_root_lock(home):
+            matches = [path.parent for path in _strict_skill_paths(home)
+                if extract_skill_descriptor(path)['id'] == skill_id]
+            if len(matches) != 1:
+                raise ValueError('Owner技能不存在或身份不唯一')
+            directory = matches[0]
+            with locked_json_path(directory / 'skill_meta.json'):
+                meta = _sidecar(directory)
+                text = _text(directory, 'SKILL.md')
+                if text is None:
+                    raise FileNotFoundError('Skill正文不存在')
+                meta.update(enabled=enabled, revision=next_asset_revision(meta))
+                descriptor = _descriptor(directory, {**_frontmatter(text), **meta}, meta.get('owner_id', ''))
+                raw = json.dumps(clean_json(meta), ensure_ascii=False, allow_nan=False) + '\n'
+                admission.check((OwnerQuotaChange(directory / 'skill_meta.json', len(raw.encode())),))
+                write_text_atomic_beneath(home, (*directory.relative_to(home).parts, 'skill_meta.json'), raw)
+        return descriptor

@@ -235,7 +235,7 @@ class RuntimeSummary(_Record):
     last_error: str = ""
 
 
-# LLM: scope_layer/source_scope/workspace_root只描述来源，不能指定存储写根或扩大权限；旧记录revision默认为0。
+# LLM: 来源字段不授写权；enabled是Owner运行闸且旧记录缺省True，投递出处只放metadata；序列化沿严格_Record。
 # 类用途: 统一描述名称、来源层、版本、访问源、凭据引用、IO、依赖与运行摘要。
 @dataclass(frozen=True)
 class AssetDescriptor(_Record):
@@ -258,6 +258,7 @@ class AssetDescriptor(_Record):
     source_scope: str = 'owner'
     workspace_root: str = ''
     revision: int = 0
+    enabled: bool = True
 
     # LLM: 展示来源只做值域校验，路径授权属于宿主；严格整数版本不能用bool或语义版本字符串冒充。
     # 函数用途: 在构造和JSON恢复时校验来源字段与非负CAS版本。

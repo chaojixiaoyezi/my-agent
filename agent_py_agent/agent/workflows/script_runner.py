@@ -18,6 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..assets.datasource_store import redact_datasource_values
+from ..assets.delivery_contracts import AssetDisabledError
 from ..assets.descriptor import access_target_requires_network
 from ..assets.script_store import ScriptStore
 from ..attempt.sandbox import (
@@ -599,11 +600,13 @@ class ScriptRunner:
         self.restrict_to_roots = bool(restrict_to_roots)
         self.workspace_root = Path(workspace_root).absolute() if workspace_root is not None else None
 
-    # LLM: 冻结目录及manifest所有出口清理；私有根不含宽容器，Gateway端口同次快照投影到OS与Python守卫，不从输入授予权限。
+    # LLM: 禁用闸先于解释器、临时目录和数据源绑定；其余冻结/清理与原沙箱权限合同不变。
     # 函数用途: 冻结代码、绑定声明连接、构造沙箱命令并清理临时秘密。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
         _, metadata = load_script(self.owner_home, script_id)
+        if metadata.get('enabled', True) is False:
+            raise AssetDisabledError('script', script_id)
         interpreter = metadata.get('interpreter', 'python3')
         if interpreter not in ('python3', 'bash', 'sh'):
             raise ValueError('仅支持 python3、bash、sh')
@@ -675,7 +678,7 @@ class ScriptRunner:
             finally:
                 shutil.rmtree(folder, ignore_errors=True)
 
-    # LLM: 单次覆盖不写资产也不扩数据源权限；秘密在截断预览、异常上下文与摘要持久化前精确脱敏。
+    # LLM: 禁用错误按原结构化码返回且绝不执行，单次覆盖和秘密清洗不变；摘要不得把禁用变成成功。
     # 函数用途: 执行脚本，保留失败与清理事实并返回不含解析秘密的完整回执。
     def run_script(self, script_id, inputs=None, *, timeout_seconds: int | float | None = None,
                    override_data_sources=None, network_access: bool | None = None):
@@ -704,6 +707,8 @@ class ScriptRunner:
             error = capture.get('error_code') or ('SCRIPT_CLEANUP_ERROR' if cleanup else 'SCRIPT_CONFIGURATION_ERROR')
             if isinstance(exc, _EntrypointMissing):
                 error = 'ENTRYPOINT_MISSING'
+            if isinstance(exc, AssetDisabledError):
+                error = exc.error_code
             stderr = str(exc)
             execution_error = {'exception_type': type(exc).__name__, 'errno': getattr(exc, 'errno', None), 'message': str(exc)}
         if cleanup:

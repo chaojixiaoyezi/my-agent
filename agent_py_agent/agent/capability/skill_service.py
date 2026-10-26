@@ -20,7 +20,14 @@ from .skill_snapshot import (
     SkillSnapshotEntry,
     skill_content_sha256,
 )
-from .skills import SkillCard, parse_skill_file, read_skill_text, skill_catalog_roots
+from .skills import (
+    SkillCard,
+    parse_skill_file,
+    read_skill_text,
+    skill_catalog_roots,
+    skill_enabled,
+    split_skill_frontmatter,
+)
 
 # 扫描技能目录的最大深度，防止递归过深。
 _MAX_SCAN_DEPTH = 6
@@ -38,12 +45,15 @@ class SkillRoot:
     source: str
 
 
+# LLM: manifest同时冻结正文hash与原侧文件/头部运行闸，旧位置构造默认True；不保存正文外秘密或权限。
+# 类用途: 保存一次技能发现的字节版本及启停事实，供快照指纹和条目共用。
 @dataclass(frozen=True)
 class SkillManifestItem:
     root: SkillRoot
     path: Path
     text: str
     content_sha256: str
+    enabled: bool = True
 
 
 # LLM: 一个服务是 prompt、工具与子代理的唯一快照来源；能力包提供者只给原安装事实的投影，不给私有扫描根。
@@ -239,7 +249,7 @@ def _discover_root(root: SkillRoot) -> tuple[list[SkillManifestItem], list[Skill
     return items, errors
 
 
-# LLM: 路径限制在本根，正文和Card共用字节预算；单项不可读仅形成发现错误。
+# LLM: 路径限制在本根，正文及原侧文件运行闸在发现时冻结；不可读/坏bool形成发现错误，不能默认启用。
 # 函数用途: 固定技能有界正文与内容hash，不执行或写回文件。
 def _manifest_item(
     root: SkillRoot,
@@ -253,11 +263,12 @@ def _manifest_item(
         return None, _error(root, path, "SKILL_PATH_ESCAPE", str(exc))
     try:
         text = read_skill_text(resolved)
+        enabled = skill_enabled(resolved, split_skill_frontmatter(text)[0])
     except InterruptedError:
         raise
     except (OSError, ValueError) as exc:
         return None, _error(root, path, "SKILL_READ_FAILED", str(exc))
-    return SkillManifestItem(root, resolved, text, skill_content_sha256(text)), None
+    return SkillManifestItem(root, resolved, text, skill_content_sha256(text), enabled), None
 
 
 # LLM: 全局按名称优先级去重仅处理 Skill manifest；包集合独立按包 ID 固定，不参与该循环。
@@ -289,7 +300,7 @@ def _build_snapshot(
     )
 
 
-# LLM: 目录分类只作为解析缺省值，显式frontmatter分类（包括general）优先；guard与来源授权保持原合同。
+# LLM: enabled必须同时满足磁盘运行闸和原Owner策略；目录分类、guard、来源授权保持原合同，不让侧文件绕过策略。
 # 函数用途: 将单个已发现技能解析、核验并转换为快照条目。
 def _entry_from_manifest(
     item: SkillManifestItem,
@@ -311,7 +322,7 @@ def _entry_from_manifest(
     )
     if not decision.allowed:
         return None, _error(item.root, item.path, "SKILL_GUARD_DENIED", _guard_codes(decision.to_dict()))
-    enabled = card.name not in set(policy.disabled_skills)
+    enabled = item.enabled and card.enabled and card.name not in set(policy.disabled_skills)
     if item.root.source == "shared" and policy.enabled_shared_skills:
         enabled = enabled and card.name in set(policy.enabled_shared_skills)
     return _snapshot_entry(item, card, card.category, enabled), None
@@ -342,7 +353,7 @@ def _snapshot_entry(
     )
 
 
-# LLM: 无包时保持原指纹字节；包摘要覆盖全部私有资源，激活 ID 区分同字节卸载重装，不编码读取回调。
+# LLM: 全启用无包时保原指纹；明确禁用加入指纹防侧文件改动复用旧授权，包摘要/代次仍完整，不编码读取回调。
 # 函数用途: 为缓存与在途决策比较生成 owner、策略、公开方法及能力包版本摘要。
 def _snapshot_fingerprint(
     manifest: list[SkillManifestItem],
@@ -365,6 +376,8 @@ def _snapshot_fingerprint(
     )
     for item in manifest:
         digest.update(f"{item.root.source}\0{item.path}\0{item.content_sha256}".encode())
+        if not item.enabled:
+            digest.update(b'\0ASSET_DISABLED_BY_OWNER')
     for error in errors:
         digest.update(repr(error).encode())
     for package in packages:

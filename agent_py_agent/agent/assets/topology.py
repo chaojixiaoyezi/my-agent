@@ -18,10 +18,10 @@ def _index_nodes(descriptors):
     return nodes
 
 
-# LLM: 只枚举原输入节点的refs；缺失目标显式标记missing，边去重且反向引用只依据实际引用者kind。
+# LLM: 仅枚举实际refs且集合去重；展示默认排序，闭包stable_order=False保持线性，不改变既有图返回顺序。
 # 函数用途: 生成确定性边表并把引用来源填入每个目标节点。
-def _connect(nodes):
-    edges = {}
+def _connect(nodes, *, stable_order=True):
+    edges, incoming = {}, set()
     for key, node in tuple(nodes.items()):
         for kind in ASSET_KINDS:
             for asset_id in node["refs"][kind + "s"]:
@@ -31,12 +31,15 @@ def _connect(nodes):
                 relation = "triggers" if node["kind"] == "monitor" and kind == "workflow" else "uses_" + kind
                 edges[key, target, relation] = {"from": key, "to": target, "relation": relation}
                 used_by = nodes[target]["used_by"][node["kind"] + "s"]
-                if node["id"] not in used_by:
+                reference = (target, node['kind'], node['id'])
+                if reference not in incoming:
                     used_by.append(node["id"])
-    for node in nodes.values():
-        for ids in node["used_by"].values():
-            ids.sort()
-    return [edges[key] for key in sorted(edges)]
+                    incoming.add(reference)
+    if stable_order:
+        for node in nodes.values():
+            for ids in node["used_by"].values():
+                ids.sort()
+    return [edges[key] for key in sorted(edges)] if stable_order else list(edges.values())
 
 
 # LLM: 迭代式遍历对循环安全；root只能是图中确实存在的kind:id，不按文本猜测根。
@@ -151,3 +154,33 @@ def build_asset_topology(descriptors, root_key=None):
     return {"nodes": [nodes[key] for key in sorted(selected)],
             "edges": [edge for edge in edges if edge["from"] in selected and edge["to"] in selected],
             "cycles": cycles, "has_cycles": bool(cycles)}
+
+
+# LLM: 仅携带缺失kind:id及机器码，调用者不得按错误文案决定是否漏装依赖。
+# 类用途: 为投递闭包提供结构化缺依赖错误。
+class AssetClosureError(ValueError):
+    # LLM: 引用来自校验过的图键，不带资产正文或凭据；不进行IO。
+    # 函数用途: 保存明确的缺失依赖清单。
+    def __init__(self, missing_refs):
+        self.error_code = 'ASSET_DEPENDENCY_MISSING'
+        self.missing_refs = list(missing_refs)
+        super().__init__('资产依赖缺失')
+
+
+# LLM: 仅用索引、无排序连边及迭代可达/完成序，O(V+E)，绝不调用简单环枚举；循环仅遍历一次，原子安装保障同包引用。
+# 函数用途: 取得根资产的完整依赖先行闭包，根最后，缺失可达依赖明确失败，不含授权或数据源实体。
+def extract_asset_closure(descriptors, root_key: str) -> tuple[AssetDescriptor, ...]:
+    nodes = _index_nodes(descriptors)
+    if root_key not in nodes:
+        raise AssetClosureError([root_key])
+    edges = _connect(nodes, stable_order=False)
+    selected = _reachable(nodes, edges, root_key)
+    missing = [key for key, node in nodes.items() if key in selected and node.get('missing')]
+    if missing:
+        raise AssetClosureError(missing)
+    adjacency = {key: [] for key in (root_key, *nodes) if key in selected}
+    for edge in edges:
+        if edge['from'] in selected:
+            adjacency[edge['from']].append(edge['to'])
+    return tuple(AssetDescriptor.from_dict({key: value for key, value in nodes[name].items() if key != 'key'})
+        for name in _finish_order(adjacency))

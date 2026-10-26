@@ -49,26 +49,30 @@ class WorkflowStepSpec(_Record):
             safe_asset_id(self.script_id)
 
 
-# LLM: 定义是纯值对象，steps只允许唯一step_id；refs的脚本/Skill权威来自保存时的实际steps。
+# LLM: 定义是纯值对象，steps保持唯一；enabled与原descriptor同步，任一False均拒绝隐式复活，旧记录默认True。
 # 类用途: 组合工作流描述符、步骤序列与可选Markdown说明。
 @dataclass(frozen=True)
 class WorkflowDefinition(_Record):
     descriptor: AssetDescriptor
     steps: tuple[WorkflowStepSpec, ...]
     body_markdown: str = ""
+    enabled: bool = True
 
-    # LLM: 不允许非workflow描述符或重复步骤，避免后续挂载与断点定位歧义。
+    # LLM: 严格类型后同步定义/描述符运行闸；显式set_enabled须同时替换两字段，不允许缺省True覆盖已禁用描述符。
     # 函数用途: 校验工作流定义，不读写Owner状态。
     def __post_init__(self):
         super().__post_init__()
+        enabled = self.enabled and self.descriptor.enabled
+        object.__setattr__(self, 'enabled', enabled)
+        object.__setattr__(self, 'descriptor', replace(self.descriptor, enabled=enabled))
         if self.descriptor.kind != "workflow" or len({step.step_id for step in self.steps}) != len(self.steps):
             raise ValueError("工作流kind错误或step_id重复")
 
-    # LLM: 嵌套descriptor保留自身schema_version，不把定义层当成另一份资产协议。
+    # LLM: 嵌套descriptor保留自身schema_version；外层enabled与描述符值一致，不创建第二份运行状态。
     # 函数用途: 提供完整工作流的JSON传输结构。
     def to_dict(self):
         return {"descriptor": self.descriptor.to_dict(), "steps": [step.to_dict() for step in self.steps],
-                "body_markdown": self.body_markdown}
+                "body_markdown": self.body_markdown, "enabled": self.enabled}
 
     # LLM: 所有执行/工具入口共用严格from_dict，不另猜字段或模式；值对象也复制，阻止嵌套可变值污染。
     # 函数用途: 从原生JSON或已验证定义恢复同一工作流合同。
@@ -173,6 +177,16 @@ class WorkflowStore(_AssetStore):
             if self._get(workflow_id) is None:
                 return False
             return self._delete(workflow_id)
+
+    # LLM: 仅本Owner原根锁/集合锁内改变运行闸；两层enabled同步，不修改步骤、凭据或运行快照。
+    # 函数用途: 显式开启或停用已存在工作流，返回正式存储读回值。
+    def set_enabled(self, workflow_id: str, enabled: bool) -> WorkflowDefinition:
+        if type(enabled) is not bool:
+            raise ValueError('enabled必须是布尔值')
+        with self._locked():
+            definition = self._required(workflow_id)
+            return self._save(replace(definition, enabled=enabled,
+                descriptor=replace(definition.descriptor, enabled=enabled)))
 
     # LLM: attach/detach同用锁内命令，模式检查不可只留在工具wrapper；精确引用不去前缀。
     # 函数用途: 动态给现有工作流步骤挂载一个Skill。

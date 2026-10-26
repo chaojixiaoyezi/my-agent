@@ -33,6 +33,7 @@ from .authority import (
 from .channels import redact_host_absolute_paths
 
 ControlKind = Literal[
+    "delivery",
     "dir",
     "fork",
     "help",
@@ -231,7 +232,7 @@ def _personal_storage_command(name, trailing):
     return parser(trailing)
 
 
-# LLM: 新增目录/分叉命令仅解析固定语法；其它名称和正文读取公共声明，插件不改写控制参数或退入模型。
+# LLM: 投递/目录/分叉仅解析显式固定语法；投递处理器另绑定宿主身份，不从command.value取得发送身份。
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
@@ -243,6 +244,11 @@ def parse_conversation_command(
     reject_unknown_slash: bool = False,
 ) -> ConversationCommand | None:
     raw = str(text or "").strip()
+    from .control_delivery_command import parse_delivery_command
+
+    delivery = parse_delivery_command(raw)
+    if delivery is not None:
+        return delivery
     workspace_command = _workspace_control_command(raw)
     if workspace_command is not None:
         return workspace_command

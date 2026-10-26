@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Literal
 
 from ..assets import canonical_skill_name
+from ..assets.delivery_contracts import AssetDisabledError
+from ..assets.script_store import ScriptStore
 from ..assets.skill_adapter import get_owner_skill_descriptor
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
@@ -63,10 +65,11 @@ class WorkflowEngine:
         self.skill_resolver = skill_resolver
         self.skill_details_resolver = skill_details_resolver
 
-    # LLM: 首次执行冻结工作流定义；owner_id 只用于一致性校验，不能建立授权。
+    # LLM: 首次执行冻结定义，先核传入及当前canonical运行闸；owner_id只校验一致性，不能建立授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
     def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id=''):
         definition, descriptor = _definition(self.owner_home, workflow)
+        self._require_workflow_enabled(definition)
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
             raise ValueError('工作流 Owner 不匹配')
         record = WorkflowRunRecord(uuid.uuid4().hex, descriptor['id'], owner_id or descriptor.get('owner_id', ''),
@@ -77,7 +80,7 @@ class WorkflowEngine:
         with self.store.execution_lock(record.workflow_run_id):
             return self._drive(record, definition, 0)
 
-    # LLM: 冻结定义、初始输入和成功前缀保持不变；先校验恢复来源再发表补丁。
+    # LLM: 恢复前重核当前Owner开关，旧启用快照不能复活停用资产；冻结输入/成功前缀及补丁来源合同不变。
     # 函数用途: 在独占锁内注入带来源合法输出或数据源变更并续跑。
     def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
                             resolution_origin: Literal['user', 'agent', 'system'] | None = None):
@@ -86,6 +89,7 @@ class WorkflowEngine:
         with self.store.execution_lock(workflow_run_id):
             record = self.store.load_run(workflow_run_id)
             definition = self.store.load_workflow_snapshot(workflow_run_id)
+            self._require_workflow_enabled(definition)
             ids = [s.step_id for s in record.steps]
             if from_step_id is not None and from_step_id not in ids:
                 raise ValueError('恢复步骤不存在')
@@ -159,7 +163,7 @@ class WorkflowEngine:
         except Exception:
             pass
 
-    # LLM: 每步条件独立判断；暂停和失败停止后缀，跳过不影响无关步骤。
+    # LLM: 禁用异常保留机器码且硬失败，不走on_error兜底；原条件、暂停、账本与中断收口保持。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
         timer = time.monotonic()
@@ -185,7 +189,7 @@ class WorkflowEngine:
                 self._record_summary(record)
                 raise
             except Exception as exc:
-                step.status, step.error_code, step.error_message = 'failed', step.error_code or 'STEP_EXECUTION_ERROR', str(exc)
+                step.status, step.error_code, step.error_message = 'failed', step.error_code or getattr(exc, 'error_code', 'STEP_EXECUTION_ERROR'), str(exc)
                 step.needs_repair = True
             step.ended_at, step.duration_ms = time.time(), (time.monotonic() - clock) * 1000
             record = self.store.save_step_result(record.workflow_run_id, step)
@@ -205,9 +209,10 @@ class WorkflowEngine:
         self._record_summary(record)
         return record
 
-    # LLM: 输入映射仅引用前步或冻结输入，分析上下文独立复制不污染账本。
+    # LLM: 步骤引用先核运行闸，禁用依赖不能执行hybrid前半步或on_error=skip；输入映射与独立上下文不变。
     # 函数用途: 执行脚本或技能步骤，混合步先采集再完整分析。
     def _perform(self, record, spec, outputs, definition, run):
+        self._require_step_enabled(spec)
         for key, reference in spec.get('inputs_map', {}).items():
             record.input_snapshot[key] = output_value(reference, outputs, run.inputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
         if record.mode in ('deterministic_script', 'hybrid'):
@@ -217,6 +222,35 @@ class WorkflowEngine:
             outputs = {**outputs, record.step_id: payload(record.output_snapshot)}
         context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
         self._analysis_step(record, spec, context)
+
+    # LLM: 当前canonical定义是Owner开关权威；临时内联定义仍受同ID当前禁用约束，不改冻结步骤。
+    # 函数用途: 在新建、恢复前拒绝已关闭工作流。
+    def _require_workflow_enabled(self, definition):
+        descriptor = definition['descriptor']
+        current = WorkflowStore(self.owner_home).get_workflow(descriptor['id'])
+        if (definition.get('enabled', True) is False or descriptor.get('enabled', True) is False
+                or current is not None and not current.enabled):
+            raise AssetDisabledError('workflow', descriptor['id'])
+
+    # LLM: 缺失资产继续由原执行/解析器分类，不能把未发现冒充授权；发现的明确False始终硬拒绝。
+    # 函数用途: 在运行任一步前核对脚本和显式技能是否停用。
+    def _require_step_enabled(self, spec):
+        if spec.get('script_id'):
+            script = ScriptStore(self.owner_home).get_script(spec['script_id'])
+            if script is not None and script.get('enabled', True) is False:
+                raise AssetDisabledError('script', spec['script_id'])
+        self._require_skills_enabled(spec.get('skill_ids', ()))
+
+    # LLM: 精确来源缺失交原宿主resolver处理，已发现Owner技能的关闭不能被外部分析回调绕过。
+    # 函数用途: 核对声明或动态解析出来的Skill运行闸。
+    def _require_skills_enabled(self, references):
+        for reference in references:
+            try:
+                descriptor = get_owner_skill_descriptor(self.owner_home, reference)
+            except FileNotFoundError:
+                continue
+            if descriptor.get('enabled', True) is False:
+                raise AssetDisabledError('skill', reference)
 
     # LLM: 冻结数据源只覆盖本运行；兜底须满足原合同，清理未验证硬失败不能被回调覆盖，_pause_for_resume支持无错确认暂停。
     # 函数用途: 执行脚本并记录结构化修复指引、主动暂停断点及实际恢复结果。
@@ -269,19 +303,23 @@ class WorkflowEngine:
         return self.escalation_handler(SimpleNamespace(**payload(spec)), replace(result, **payload(result)),
                                        WorkflowRunRecord.from_dict(run.to_dict())) or {}
 
-    # LLM: 缺技能或分析器是硬失败，不走脚本on_error兜底或跳过；预览不能充当分析。
+    # LLM: 动态解析和宿主详情中的禁用同样硬拒绝，保留原机器码；缺技能/分析器仍不走脚本兜底。
     # 函数用途: 核对引用并读取正文，用完整上下文调用真实分析器。
     def _analysis_step(self, record, spec, context):
         try:
             resolved = self._resolve_skills(spec, context)
+            self._require_skills_enabled(resolved)
             record.resolved_skill_ids = resolved
             details = [] if self.skill_details_resolver is None else self.skill_details_resolver(list(resolved))
             if not isinstance(details, list) or not all(isinstance(item, dict) for item in details):
                 raise ValueError('技能正文读取器必须返回对象列表')
+            for item in details:
+                if item.get('enabled', True) is False:
+                    raise AssetDisabledError('skill', str(item.get('id', '')))
             context = AnalysisContext(context.prior_outputs, context.run_inputs, context.step_inputs, details, context.data_sources)
         except (LookupError, FileNotFoundError, ValueError) as exc:
             record.status, record.needs_repair = 'failed', True
-            record.error_code, record.error_message = 'SKILL_NOT_FOUND', str(exc)
+            record.error_code, record.error_message = getattr(exc, 'error_code', 'SKILL_NOT_FOUND'), str(exc)
             return
         if self.analysis_handler is None:
             record.status, record.needs_repair = 'failed', True

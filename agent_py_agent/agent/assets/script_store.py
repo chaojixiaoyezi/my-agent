@@ -165,6 +165,18 @@ class ScriptStore(_AssetStore):
                 return False
             return self._delete(script_id)
 
+    # LLM: 沿本Owner原锁和元数据事务更新运行闸，不读取其他Owner或执行代码，保留代码、声明及历史。
+    # 函数用途: 开启或停用已有固化脚本并返回持久化描述符。
+    def set_enabled(self, script_id: str, enabled: bool) -> AssetDescriptor:
+        if type(enabled) is not bool:
+            raise ValueError('enabled必须是布尔值')
+        with self._locked():
+            record = self._required(script_id)
+            descriptor = replace(_record_descriptor(record), enabled=enabled)
+            self._write(descriptor.to_dict() | {key: record[key]
+                for key in ('entrypoint', 'interpreter', 'timeout_seconds')})
+            return _record_descriptor(self._readback_after_commit(script_id))
+
     # LLM: 查询范围按键合并且None删键；候选去重不授查询权，提交后读回错误不能降成参数错。
     # 函数用途: 锁内修改活跃数据源范围及已评估新源备忘。
     def update_data_sources(self, script_id, source_id, *, query_scope=None, candidate=None, evaluated_candidates=()):
