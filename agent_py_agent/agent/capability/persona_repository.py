@@ -309,17 +309,19 @@ class PersonaRepository:
     def runtime_snapshot(self) -> dict[str, object]:
         return _persona_runtime_snapshot(self)
 
-    # LLM: C只运输bool并复用同原quota，目标/版本锁出生消费当前scope，实际native先透传不补偿；版本CAS/权限/默认False合同不变。
-    # 函数用途: 让原USER/SOUL版本事务选用受当前来源约束的本地写叶，默认算法和调用形状保持。
+    # LLM: 安全加载和原IO拒绝不变；受管用户再从宿主权威前置管理员底线，不读取可篡改镜像。
+    # 函数用途: 加载当前人格并合并受管用户的管理员基础约束。
     def load(self, target: str) -> PersonaDocumentSnapshot:
+        from ..user_space.managed_user_governance import prepend_managed_persona_base
+
         if target == "agents" and self.agents_source is not None:
-            return _load_agents_source_document(self)
+            return prepend_managed_persona_base(self, target, _load_agents_source_document(self))
         try:
             path = self.path_for(target)
             if not path.exists():
-                return _empty_persona_snapshot(target, "missing")
+                return prepend_managed_persona_base(self, target, _empty_persona_snapshot(target, "missing"))
             with locked_json_path(path, **({} if not self.coordinator_io else {"birth_commit": _persona_birth_commit})):
-                return _load_persona_unlocked(self, target)
+                return prepend_managed_persona_base(self, target, _load_persona_unlocked(self, target))
         except (PersonaSecurityError, OSError) as exc:
             if self.coordinator_io and isinstance(exc, _PERSONA_NATIVE_ERRORS):
                 raise
@@ -375,20 +377,24 @@ class PersonaRepository:
             raw = path.read_text(encoding="utf-8") if path.exists() else ""
         return _sha256_text(raw)
 
-    # LLM: 群人格变更继续消费main原活主体能力；来源或批量API不能绕过群租约。
-    # 函数用途: 核对原群权限后按同一配额和版本事务修改人格。
-    def mutate(self, request: PersonaMutationRequest) -> dict[str, object]:
+    # LLM: 群租约与受管用户锁同时复核；admin_override只在宿主治理活栈生效，不由布尔参数授管理员权。
+    # 函数用途: 先核人格治理和原群权限，再执行配额及版本事务。
+    def mutate(self, request: PersonaMutationRequest, *, admin_override: bool = False) -> dict[str, object]:
         from ..user_space.group_authorization_context import require_group_persona_lease
+        from ..user_space.managed_user_governance import require_managed_persona_write
 
+        require_managed_persona_write(self.owner_home, request.target, asdict(request), admin_override=admin_override)
         require_group_persona_lease(self.path_for(request.target))
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_document(self, admission, request)
 
-    # LLM: 批量与单项共用main原群能力门；锁内仍按完整CAS一次提交，不放宽owner边界。
+    # LLM: 批量与单项共守受管锁及原群门；锁内CAS一次提交，不以批量API绕过人格治理。
     # 函数用途: 核对原群权限后原子提交一组人格变更。
     def mutate_batch(self, request: PersonaBatchMutationRequest) -> dict[str, object]:
         from ..user_space.group_authorization_context import require_group_persona_lease
+        from ..user_space.managed_user_governance import require_managed_persona_write
 
+        require_managed_persona_write(self.owner_home, request.target, {"operation": "mutate_batch", **asdict(request)})
         require_group_persona_lease(self.path_for(request.target))
         with self.quota_enforcer.admission() as admission:
             return _mutate_persona_batch_document(self, admission, request)
@@ -600,13 +606,16 @@ def _prepare_persona_batch_mutation(
     )
 
 
-# LLM: Preparation derives the next authority bytes and audit record without writing any file.
-# 函数用途: 在配额检查前完成 CAS、操作应用、版本号和备份位置计算。
+# LLM: 直接调用准备口也必须复核受管锁；之后才按原CAS计算前像/后像，治理禁止时不写人格。
+# 函数用途: 核对治理边界后完成CAS、版本和备份准备，防止绕过公开mutate。
 def _prepare_persona_mutation(
     repository: PersonaRepository,
     request: PersonaMutationRequest,
     previous: str,
 ) -> _PreparedPersonaMutation | dict[str, object]:
+    from ..user_space.managed_user_governance import require_managed_persona_write
+
+    require_managed_persona_write(repository.owner_home, request.target, asdict(request))
     previous_sha = _sha256_text(previous)
     if request.expected_sha256 and request.expected_sha256 != previous_sha:
         raise PersonaConflictError(

@@ -1,3 +1,13 @@
+## 2026-10-26 受管本地用户治理领域（WT2 / c1 源码，待集成验收）
+
+```text
+|-- agent_py_agent/agent/user_space/managed_user_governance.py # 登记目标、宿主权威策略、人格/记忆/资产/任务领域及工具分派
+|-- agent_py_agent/agent/user_space/governance_review_store.py # 权威提审记录、目标绑定CAS、批复执行及通知
+`-- agent_py_agent/tests/test_admin_managed_users_governance.py # 受管边界、原仓库接线、人格并发及管理员工具回归
+```
+
+关键文件说明：治理服务复用原 `LocalUserStore`、记忆晋升、资产、会话和 scheduler 仓库；`capability/persona_repository.py` 与 `capability/agents_source_repository.py` 接受管锁和底线加载，`tooling/admin_controls_tool.py` 只鉴权并委派十二个动作。权威控制在宿主 `data/managed_user_governance/<uid>/`，目标用户目录中的副本只供可见性，不是权限来源。参见 [本轮验证边界](TESTS.md)；此索引不代表 Host/Gateway 已完成端到端验收。
+
 ## 2026-10-23 Linux 生产工具耗时治理：产物查找单飞、`self_map` 概览解耦、单线程管道泵与单 Owner 并发闸门
 
 ```text

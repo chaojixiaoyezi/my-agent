@@ -141,10 +141,12 @@ class AgentsSourceRepository:
         else:
             self._require_local_permission(Path(snapshot.locator))
 
-    # LLM: C持原授权/nonce事务，A先核完整CAS/意图/许可再退役本进程已登记资源；未确认不提交配置。
-    # 函数用途: 串行切源与资源启动，停止旧资源后重核原正文和新路径，不提前激活前缀。
+    # LLM: 受管锁先于切源；原nonce/CAS/意图及资源退役不变，管理员底线不能被换来源绕过。
+    # 函数用途: 核对受管治理后串行切源与资源启动，保持原来源授权。
     def set_source(self, kind: str, locator: str, *, authorization, context) -> AgentsSourceSnapshot:
         from ..user_space.group_authorization_context import require_group_persona_lease
+        from ..user_space.managed_user_governance import require_managed_persona_write
+        require_managed_persona_write(self.owner_home, "agents", {"operation": "set_source", "kind": kind, "locator": locator})
         require_group_persona_lease(self.default_path)
         intent = write_intent_digest("set_source", {"kind": kind, "locator": locator})
         validate_write_authorization(authorization, context)
@@ -155,10 +157,12 @@ class AgentsSourceRepository:
             from .agents_source_switch import set_source_locked
             return set_source_locked(self, kind, locator, context)
 
-    # LLM: URL正文永远只读；已持来源锁内重读配置/同FD正文，重核CAS、owner、SHA、意图、权限及最终硬帽后写。
-    # 函数用途: 只把用户本人授权的新正文写入当前安全本地文件，保持原inode。
+    # LLM: 原生写同样守受管锁；URL只读、nonce及来源CAS不放宽，不能借write_text绕过人格治理。
+    # 函数用途: 先核受管用户治理，再把原授权的新正文写入当前本地来源。
     def write_text(self, content: str, *, authorization, context) -> AgentsSourceLoadResult:
         from ..user_space.group_authorization_context import require_group_persona_lease
+        from ..user_space.managed_user_governance import require_managed_persona_write
+        require_managed_persona_write(self.owner_home, "agents", {"operation": "write_text", "content": content})
         require_group_persona_lease(self.default_path)
         intent = write_intent_digest("write", content)
         validate_write_authorization(authorization, context)

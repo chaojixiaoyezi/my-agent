@@ -1,3 +1,25 @@
+## 2026-10-26 受管本地用户治理与尺寸门收尾（WT2 / c1）
+
+来源：受管用户治理派工及最后收尾要求。新增 `test_admin_managed_users_governance.py`，覆盖登记身份边界、权威策略与镜像隔离、CAS、人格底线/锁、原生 AGENTS 写入门、记忆增改删、资产闭包、目标用户排队、审核状态机/通知、工具接线，以及独审发现的丢失更新、半提交恢复和混合快照回归。
+
+收尾把策略子字段及元字段校验、技能策略锁事务拆成独立函数；记忆内部参数收成不可变请求，配发内部函数删除未使用 UID，公开领域签名不变。补齐已有红测要求的概览计数；工具测试使用宿主 owner resolver 构造真实管理员投影，领域错误按原 `reported_error_code` 及结构化正文核对，不改变错误分类器或权限门。
+
+本地定向结果：下面两份测试 **77 passed，0 failed / error / skipped**。任务书的 `test_local_user_lifecycle.py` 在此基线不存在，实际生命周期测试为 `test_plugin_local_users.py`；未创建空文件冒充运行。
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_plugin_local_users.py -q --tb=short
+ruff check --fix agent_py_agent
+ruff check agent_py_agent
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+Ruff 与 strict 尺寸门通过（`hard=0`、`blocked=False`）；未放宽基线，生成的 `CODE_SIZE_REPORT.md` 不提交。JUnit 和基线比对保留在本地忽略目录 `tmp/managed-users/`。
+
+补充回归并非全绿：`test_persona_repository.py`、`test_agents_source_repository.py`、`test_users_slash_and_admin_controls.py`、`test_decision_audit_controls.py` 共 **139 passed / 11 failed**。在原始基线 `2231e5abda61994c0d8ec2a07e01527e586e0755` 的独立临时工作树重跑，失败测试集合和规范化错误信息完全相同；观察到人格快照及 hardlink 用例的 `PermissionError: [Errno 1]`，没有据此归因于沙箱，也未跳过或改弱测试。此结果不能写成补充回归通过。
+
+未验证：与 WT5 Host v2 合并后的真实入口、目标用户 Gateway 实际消费派单、全量子代理权威记录覆盖、跨平台及 Linux 全仓验收。组件排队和静态门通过不等于这些端到端链路已通过。
+
 ## 2026-10-26 底座残余性能、资源回收、沙箱安全与网关 04:00 安全重启死锁回归（7 Worktrees 集成）
 
 本轮集成覆盖 `wt-perf-a` 至 `wt-gw-g` 共 7 个隔离工作树的定向回归测试：

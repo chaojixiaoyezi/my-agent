@@ -2,12 +2,19 @@
 #   账号沿原 LocalUserLifecycle/Store；控制与资源仍写目标原 tool_policy.json，密码只进原账号散列字段。
 #   本地用户名和规范 owner 引用只用于定位目标，不从模型参数或自然语言取得管理员身份。
 #   改动须同步 owner_admin_controls、audit_records 工具、错误码块与 test_decision_audit_controls。
+# LLM: 受管用户十二治理动作委托统一领域服务；仍先核真实local/main主代理，模型参数不能改actor或宿主根。
 # 模块用途: 管理员代理直接管理普通账号、控制和精确资源许可，只返回公开用户状态。
 from __future__ import annotations
 
 import json
 
 from ..runtime_context import current_subagent_run_id
+from ..user_space.managed_user_governance import (
+    GOVERNANCE_READ_ACTIONS,
+    GOVERNANCE_TOOL_ACTIONS,
+    dispatch_governance_tool,
+    governance_tool_schema,
+)
 from ..user_space.owner_admin_controls import (
     CONTROL_DEFAULTS,
     OwnerAdminControlsError,
@@ -70,6 +77,9 @@ class AdminControlsTool(BaseTool):
             "以及是否允许 my-agent 跨用户审计（cross_owner_audit_allowed，只能写在 owner_id=local/main 名下）。"
             "list_owners/get 查询；set_controls 修改 controls，旧 list/set/changes 仍可用。"
             "create_user/list_users/get_user/set_user_password/enable_user/disable_user 管理本地账号。"
+            "user_overview/set_governance_policy/get_user_persona/set_user_persona/list_user_memories/mutate_user_memory、"
+            "provision_user_assets/toggle_user_asset/dispatch_user_task/list_user_tasks/list_governance_reviews/decide_governance_review"
+            "只管理已登记的普通本地用户，支持人格锁、记忆审核、资产配发、任务派单和带CAS批复。"
             "user_id 是准确用户名，owner_id 支持 local/alice、local/users/alice 或 alice；输出不含密码或散列。"
             "resources 查看指定 owner 的云资源许可；resource_grant/resource_revoke 按 resource 精确登记/撤销。"
             "resource 含 provider、resource_type、resource_token、operations；飞书 sheet 操作为 sheet_read/sheet_append/sheet_update，"
@@ -81,7 +91,8 @@ class AdminControlsTool(BaseTool):
             "properties": {
                 "action": {"type": "string", "enum": ["get", "list_owners", "set_controls", "grant_resource", "revoke_resource",
                     "create_user", "list_users", "get_user", "set_user_password", "enable_user", "disable_user",
-                    "list", "set", "resources", "resource_grant", "resource_revoke"], "description": "管理账号、控制和准确资源许可，兼容旧动作。"},
+                    "list", "set", "resources", "resource_grant", "resource_revoke", *GOVERNANCE_TOOL_ACTIONS], "description": "管理账号、控制、受管治理和准确资源许可，兼容旧动作。"},
+                **governance_tool_schema(),
                 "owner_id": {"type": "string", "description": "set 必填：list 返回的规范 owner_id，例如 local/main 或 providers/feishu/users/<id>。"},
                 "user_id": {"type": "string", "description": "本地普通用户名，可由 owner_id 推导。"},
                 "password": {"type": "string", "description": "初始或新密码，至少8位且含大小写字母与数字，不回显。"},
@@ -115,7 +126,7 @@ class AdminControlsTool(BaseTool):
     )
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy("mutating", by_parameter=(("action", tuple((action, "read_only") for action in
-            ("list", "resources", "get", "list_owners", "list_users", "get_user"))),)),
+            ("list", "resources", "get", "list_owners", "list_users", "get_user", *GOVERNANCE_READ_ACTIONS))),)),
         approval_policy=ApprovalPolicy("never"),
         sandbox_policy=SandboxPolicy("none"),
         concurrency_policy=ConcurrencyPolicy("serial"),
@@ -156,6 +167,8 @@ class AdminControlsTool(BaseTool):
             return _refuse("not_admin", "用户授权只能由管理员主会话管理。")
         if action in _USER_ACTIONS:
             return _user_control(self._agent, params)
+        if action in GOVERNANCE_TOOL_ACTIONS:
+            return _managed_control(home, params)
         params = dict(params, action=_ACTION_ALIASES.get(action, action))
         action = params["action"]
         if "controls" in params:
@@ -192,6 +205,27 @@ class AdminControlsTool(BaseTool):
         report = {"action": "set", "owner": _owner_row(target.owner_id, target),
                   "effective": "下一次决策调用或审计调用即按新值生效，不需要重启。"}
         return ToolHandlerOutcome(TOOL_NAME, True, json.dumps(report, ensure_ascii=False))
+
+
+# LLM: execute已核真实管理员主代理；领域服务再核登记目标/CAS，不能从参数传actor/root。
+# 函数用途: 委托受管治理动作，保留结构化拒绝、待审ID及持久化不确定结果。
+def _managed_control(home, params):
+    from ..plugin_host.errors import HostAPIError
+
+    try:
+        report = dispatch_governance_tool(home.root, params["action"], params)
+    except HostAPIError as error:
+        report = {"ok": False, "error_code": error.code, "message": error.message}
+        if getattr(error, "review_id", ""):
+            report["review_id"] = error.review_id
+        return ToolHandlerOutcome(TOOL_NAME, False, json.dumps(report, ensure_ascii=False), error_code=error.code,
+                                  effect_outcome="unknown" if error.status >= 500 else "not_started")
+    except (ValueError, TypeError, KeyError) as error:
+        return _refuse("invalid_changes", f"治理参数无效：{type(error).__name__}。")
+    except OSError:
+        return ToolHandlerOutcome(TOOL_NAME, False, "治理持久化未完成，请查询原目标当前状态。",
+                                  error_code="TOOL_PERSISTENCE_FAILED", effect_outcome="unknown")
+    return ToolHandlerOutcome(TOOL_NAME, report.get("ok", True), json.dumps(report, ensure_ascii=False))
 
 
 # LLM: 目标沿原 owner_admin_controls resolver，不创建冷用户；资源写入仍是目标原 tool_policy 的单事务。
