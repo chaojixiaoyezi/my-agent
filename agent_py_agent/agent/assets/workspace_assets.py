@@ -1,4 +1,4 @@
-# LLM: 目录覆盖是只读发现投影，不授执行或写权；批量提交沿原canonical路径、nofollow和集合锁，不另建资产库。
+# LLM: 目录覆盖不授执行或写权；批量沿原canonical/nofollow/锁，调度按单job恢复，已提交决定仅补历史，不建第二资产库。
 # 模块用途: 合并项目、Owner和内置资产/规则，提供带CAS与持久化回滚的两阶段批量保存和晋升。
 import base64
 import json
@@ -494,13 +494,11 @@ def _prepare_batch(items, scope, workspace):
     return plans
 
 
-# LLM: journal只接受四类canonical资产及精确Scheduler store叶；不接受AGENTS、锁、其它账本或任意宿主文件。
+# LLM: journal文件undo只接受四类canonical资产；Scheduler必须用单job变更，禁止原整store快照回滚覆盖正常tick。
 # 函数用途: 校验计划与恢复记录中的资产相对路径。
 def _validate_batch_path(parts):
     if not isinstance(parts, (tuple, list)) or not parts:
         raise ValueError('批量恢复路径无效')
-    if tuple(parts) == ('data', 'scheduler', 'store.json'):
-        return
     if parts[0] in {'scripts', 'workflows', 'skills'} and len(parts) >= 3:
         safe_asset_id(parts[1])
         if parts[0] != 'skills' and len(parts) != 3:
@@ -520,10 +518,11 @@ def _validate_batch_path(parts):
 def _canonical_locks(root, paths):
     targets = set()
     for parts in paths:
-        _validate_batch_path(parts)
         if tuple(parts) == ('data', 'scheduler', 'store.json'):
             targets.add(tuple(parts))
-        elif parts[0] in {'scripts', 'workflows'}:
+            continue
+        _validate_batch_path(parts)
+        if parts[0] in {'scripts', 'workflows'}:
             targets.add((parts[0], '.assets'))
         elif parts[0] == 'skills':
             targets.update({('skills', '.assets'), ('skills', parts[1], 'skill_meta.json')})
@@ -617,9 +616,12 @@ def _put_text(root, parts, content):
         write_text_atomic_beneath(root, parts, content)
 
 
-# LLM: 所有目标先暂存，阶段二才发表；任意BaseException均恢复全部旧叶，回滚失败必须留下完整undo并拒读。
+# LLM: 先undo再发表资产/job/due，v2耐久提交决定后只补原历史，不回滚已提交任务；任何收口失败均保留日志。
 # 函数用途: 执行两阶段批量提交，成功时删除暂存和undo才返回。
-def _commit_staged(root, entries, journal):
+def _commit_staged(root, entries, journal, *, admission=None):
+    from .script_store_support import apply_scheduler_batch
+
+    _decode_journal(_json(journal))
     write_text_atomic_beneath(root, (_BATCH_FILE,), _json(journal))
     try:
         for entry in entries:
@@ -632,11 +634,38 @@ def _commit_staged(root, entries, journal):
                 if _content_bytes(staged) != _content_bytes(entry['content']):
                     raise ValueError('资产暂存内容已变化')
             _put_text(root, parts, entry['content'])
-        _clean_stages(root, entries)
-        unlink_file_beneath(root, (_BATCH_FILE,))
+        apply_scheduler_batch(root, journal.get('scheduler_jobs', {}), journal.get('scheduler_runs', {}),
+            admission=admission, history=journal.get('scheduler_history', ()))
+        if journal['schema_version'] == 'asset_batch.v2':
+            journal = {**journal, 'committed': True}
+            write_text_atomic_beneath(root, (_BATCH_FILE,), _json(journal))
+        _finish_batch(root, journal, admission=admission)
     except BaseException:
-        _restore_batch(root, journal['entries'])
+        current = _text(root, (_BATCH_FILE,), limit=_BATCH_LIMIT)
+        decided = _decode_journal(current) if current is not None else journal
+        if not decided.get('committed'):
+            _restore_batch(root, journal['entries'], journal.get('scheduler_jobs'), journal.get('scheduler_runs'))
         raise
+
+
+# LLM: 已提交决定不可undo；原history去重后追加，失败保留同一journal供下次修复，不引入第二恢复账本。
+# 函数用途: 幂等补齐已提交批量的取消历史，再清阶段文件和事务记录。
+def _finish_batch(root, journal, *, admission=None):
+    from ..common.json_io import append_private_jsonl_records
+    from ..user_space.owner_quota import OwnerQuotaChange
+    from .script_store_support import scheduler_batch_repository
+
+    records = journal.get('scheduler_history', [])
+    if records:
+        repo = scheduler_batch_repository(root)
+        history = repo._new_history_rows_unlocked(records)
+        if admission is not None and history:
+            size = len(''.join(json.dumps(row, ensure_ascii=False, sort_keys=True) + '\n' for row in history).encode())
+            admission.check([OwnerQuotaChange(repo.history_path, size, append=True)])
+        if history:
+            append_private_jsonl_records(repo.history_path, history)
+    _clean_stages(root, journal['entries'])
+    unlink_file_beneath(root, (_BATCH_FILE,))
 
 
 # LLM: 仅清理本事务记录中的安全暂存叶，既有文件也须为单链接普通文件；不递归删除用户资源。
@@ -648,46 +677,43 @@ def _clean_stages(root, entries):
         unlink_file_beneath(root, parts)
 
 
-# LLM: 调用方持root和canonical全锁；旧叶及Scheduler唤醒投影恢复后才清undo，任一步失败均留日志重试。
+# LLM: 持root/canonical全锁恢复旧资产及精确job/run，保留其它调度写入，store及due修复成功后才清undo。
 # 函数用途: 在同一根锁和canonical锁集合内恢复失败批量。
-def _restore_batch(root, entries):
+def _restore_batch(root, entries, scheduler_jobs=None, scheduler_runs=None):
+    from .script_store_support import apply_scheduler_batch
+
     for entry in reversed(entries):
         _put_text(root, tuple(entry['parts']), entry['previous'])
-    if any(tuple(entry['parts']) == ('data', 'scheduler', 'store.json') for entry in entries):
-        _sync_batch_scheduler(root)
+    apply_scheduler_batch(root, scheduler_jobs or {}, scheduler_runs or {}, previous=True)
     _clean_stages(root, entries)
     unlink_file_beneath(root, (_BATCH_FILE,))
 
 
-# LLM: 只在已持store锁的恢复分支使用；身份从可信root规范布局推导，不信journal/store自报Owner，缺失store同步空投影。
+# LLM: 已持root/store锁的已提交恢复调用；沿共享规范根构造器打开原Scheduler，不信journal自报Owner，复核后同步due。
 # 函数用途: 将恢复后的Owner调度权威重新投影到原共享DueIndex。
 def _sync_batch_scheduler(root):
-    from ..scheduler import SchedulerDueIndex, SchedulerRepository
-    from ..user_space.home_layout import home_paths
+    from .script_store_support import scheduler_batch_repository
 
-    parts = root.parts
-    if parts[-3:-1] == ('owners', 'local'):
-        host, provider, identifier = root.parents[2], 'local', root.name
-        kind = 'main' if identifier == 'main' else 'user'
-        owner_id = 'local/' + safe_asset_id(identifier)
-    elif parts[-5:-3] == ('owners', 'providers') and parts[-2] in {'users', 'groups'}:
-        host, provider, identifier = root.parents[4], safe_asset_id(parts[-3]), safe_asset_id(root.name)
-        kind = 'user' if parts[-2] == 'users' else 'group'
-        owner_id = '/'.join(parts[-4:])
-    else:
-        raise ValueError('Scheduler批量恢复必须位于规范Owner根')
-    repo = SchedulerRepository(root / 'data/scheduler', owner_provider=provider, owner_kind=kind,
-        owner_id=owner_id, due_owner_id=identifier,
-        due_index=SchedulerDueIndex(home_paths(host).global_index_dir / 'scheduler_due.sqlite3'))
+    repo = scheduler_batch_repository(root)
     repo._sync_due_index_unlocked(repo._load_store_unlocked())
 
 
-# LLM: 恢复日志严格校验完整结构及所有路径后才写；来源投影和普通文案不参与恢复决策。
+# LLM: v1仅恢复原资产叶；v2显式增加单job/run前后事实，旧整库undo失败关闭，完整结构核验后才恢复。
 # 函数用途: 解码一个可由进程重启继续恢复的批量undo记录。
 def _decode_journal(text):
     journal = json.loads(text)
-    if not isinstance(journal, dict) or set(journal) != {'schema_version', 'entries'} or journal['schema_version'] != 'asset_batch.v1':
+    if not isinstance(journal, dict) or journal.get('schema_version') not in {'asset_batch.v1', 'asset_batch.v2'}:
         raise ValueError('批量恢复记录损坏')
+    keys = {'schema_version', 'entries'}
+    if journal['schema_version'] == 'asset_batch.v2':
+        from .script_store_support import validate_scheduler_batch
+
+        keys.update({'scheduler_jobs', 'scheduler_runs', 'committed', 'scheduler_history'})
+        if set(journal) != keys:
+            raise ValueError('调度批量恢复结构损坏')
+        validate_scheduler_batch(journal)
+    elif set(journal) != keys:
+        raise ValueError('批量恢复结构损坏')
     if not isinstance(journal['entries'], list):
         raise ValueError('批量恢复entries必须为列表')
     seen = set()
@@ -707,15 +733,23 @@ def _decode_journal(text):
     return journal
 
 
-# LLM: 仅由已持根写锁的入口调用；复用原资产集合/单项锁，冷读不会进入此恢复分支。
+# LLM: 原资产写与Scheduler入口均先持root锁；单job恢复共用store锁，恢复阶段不再次取quota/root锁。
 # 函数用途: 在下一个显式可写操作前恢复进程中断的整个批量。
 def _recover_batch(root):
     text = _text(root, (_BATCH_FILE,), limit=_BATCH_LIMIT)
     if text is None:
         return
-    entries = _decode_journal(text)['entries']
-    with _canonical_locks(root, [entry['parts'] for entry in entries]):
-        _restore_batch(root, entries)
+    journal = _decode_journal(text)
+    entries = journal['entries']
+    paths = [entry['parts'] for entry in entries]
+    if journal.get('scheduler_jobs'):
+        paths.append(('data', 'scheduler', 'store.json'))
+    with _canonical_locks(root, paths):
+        if journal.get('committed'):
+            _sync_batch_scheduler(root)
+            _finish_batch(root, journal)
+        else:
+            _restore_batch(root, entries, journal.get('scheduler_jobs'), journal.get('scheduler_runs'))
 
 
 # LLM: scope须显式且不能由描述符推导；纯验证在任何写前，CAS及两阶段发表共享根/原canonical锁，不执行资产。

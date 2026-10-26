@@ -1,3 +1,11 @@
+## 2026-10-26 Wave 4 Round 4 资产与冷通知修复（源码及指定组件验收，未部署）
+
+- 监控安装/启停将 `.asset-batch.json` 改为单 job/run before/after，禁止将整 `store.json` 放入文件 undo 或安装 hash。原调度器写口按 quota→asset root→store 先恢复残留事务，查询及投影也先核 pending；恢复仅合并受影响任务，保留其它任务和运行。资产及 job/due 成功后耐久记录提交决定，再幂等补原取消历史；未决定回滚、已决定仅收口，不把已提交取消恢复成运行。
+- 回执保存 `expected_scheduler_jobs`；资产仍核 SHA，监控核本任务安装定义。其它任务的正常 tick/运行和顶层时间变化不导致二次重命名或把已安装投递拒绝。
+- 秘密扫描增加 YAML flow/跨行 flow、缩进标量/列表及块体边界；块头保留、块正文整体替换，块字符串不沿布尔/空值类型豁免，JSON 内嵌正文解码后同样扫描。生产未引入 YAML 依赖。
+- `_read_cold_owner_notice_projection` 对任一规范候选库解析失败立即 `ok=False`，即使另一旧库有线程也不回放；仍只读，不初始化 Agent。当前真实通道索引是 `channel_bindings.json`。
+- 指定四文件最终 575 项通过；追加调度组的 10 项失败已在真正起点独立复核，详见 [TESTS](../../../TESTS.md)。未做全仓、跨平台或部署验收。旧含整库快照的 v1 日志失败关闭，上线前需单独核对，不自动覆盖调度数据。
+
 ## 2026-10-26 网关 04:00 安全重启死锁修复、看门狗日志分离、管理员日志自诊、维护账本裁剪与 TUI 后台观察空闲线程解析修复（已实现）
 
 - **TUI 后台进程观察空闲线程解析与冷启动静默空态（`gateway_parts/http_handlers.py`、`cli/chat_parts/tui_threading.py`）**：`read_gateway_client_notices` 与 `_read_cold_owner_notice_projection` 在通知投影回包中显式携带当前 `session_id` 解析出的 canonical `thread_id`（不存在线程时返回 `""`，底层索引加载报错时返回 `ok=False` 防止损坏冒充正常空会话）；`tui_threading.py` 缓存 `(session_id, thread_id)` 绑定，使空闲会话无在途 `execution_target` 时仍能按准确 `thread_id` 刷新后台进程列表，未建线程的新会话静默清空观察列表而不误报 `后台进程观察刷新失败：会话范围未确认，已暂停显示`，仅在响应损坏或已建会话范围失联时告警。

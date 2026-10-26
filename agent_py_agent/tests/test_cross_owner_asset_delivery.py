@@ -1,5 +1,6 @@
 # LLM: 仅在pytest临时Owner执行跨用户资产合同；不用真实账号、凭据、通道或运行服务。
 # 模块用途: 验证投递安全边界、依赖闭包、默认禁用及真实执行入口。
+# Round4: 单job恢复不得覆盖其他调度写入；提交事实不得依赖整个store hash；补充结构化YAML保形拒绝/替换。
 # Stage3来源: Argon/c7缺依赖、Vault扫描、通知持久化，及c5 B03短字面量漏检；增加服务/工具真实临时Owner回归。
 # 独审补证: 资源文件名秘密、目录FD释放，以及子进程在入箱前后直接退出的通知恢复；不以异常finally模拟进程中断。
 # Round2来源: 真实Scheduler安装/启停、通知终态/消费、根缺失404及未加引号短秘密；全部在临时Owner验证，不代表外部通道已送达。
@@ -660,9 +661,10 @@ def test_round2_monitor_scheduler_rolls_back_with_asset_batch(kit, monkeypatch):
 
     # LLM: 只在原事务发表点注入IO故障，不替换Scheduler或整个接收服务。
     # 函数用途: 检查真实监控仅在待提交清单而未进入账本时触发失败。
-    def fail_commit(*args):
+    def fail_commit(*args, **kwargs):
         assert round2_repo(kit.alice, 'local/alice').list_jobs()[0] == []
-        assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in args[1]]
+        assert ['data', 'scheduler', 'store.json'] not in [entry['parts'] for entry in args[1]]
+        assert args[2]['scheduler_jobs'][source['job_id']]['after']['status'] == 'paused'
         raise OSError('synthetic batch failure')
 
     monkeypatch.setattr(workspace_assets, '_commit_staged', fail_commit)
@@ -738,6 +740,195 @@ def round3_due_rows(kit):
         return connection.execute("SELECT next_due_at FROM scheduler_due_owners WHERE provider='local' AND owner_kind='user' AND owner_id='alice'").fetchall()
 
 
+# LLM: 使用真实Scheduler API创建无外部动作的另一任务和queued预留，不实际运行脚本/模型。
+# 函数用途: 提供不能被投递undo抹掉的正常调度事实。
+def round4_other_job(kit):
+    from agent_py_agent.agent.scheduler.repository import SchedulerJobCreateRequest
+
+    repo = round2_repo(kit.alice, 'local/alice')
+    job, _ = repo.create_job(SchedulerJobCreateRequest(name='正常任务', prompt='合成正常任务',
+        thread_id='thread_unrelated', schedule={'kind': 'every', 'every_seconds': 60, 'anchor_at': 0}))
+    return repo, job
+
+
+@pytest.mark.parametrize('operation', ['install', 'toggle'])
+@pytest.mark.parametrize('point', ['partial', 'scheduler'])
+def test_round4_scheduler_recovers_before_normal_tick_and_keeps_other_run(kit, operation, point):
+    import json
+
+    from agent_py_agent.agent.assets import asset_root_lock
+
+    source = round2_seed_monitor(kit, False)
+    repo, other = round4_other_job(kit)
+    old_run = repo.reserve_manual_run(other['job_id'])
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    if operation == 'toggle':
+        kit.service.accept_delivery('local/alice', sent['delivery_id'], initial_enabled=True)
+    crash_point = ('toggle_scheduler' if point == 'scheduler' else 'toggle') if operation == 'toggle' else point
+    round3_crash(kit, sent['delivery_id'], source['job_id'], point=crash_point, enabled=False)
+    assert (kit.alice / '.asset-batch.json').exists()
+    # 使用原仓库正常写口，不能由测试先调用资产恢复替它补救。
+    _, second = round4_other_job(kit)
+    new_run = repo.reserve_manual_run(second['job_id'])
+    assert not (kit.alice / '.asset-batch.json').exists()
+    with asset_root_lock(kit.alice):
+        store = json.loads(repo.store_path.read_text())
+        assert store['jobs'][other['job_id']]['name'] == '正常任务'
+        assert store['runs'][old_run['run_id']]['job_id'] == other['job_id']
+        assert store['runs'][new_run['run_id']]['job_id'] == second['job_id']
+        assert (source['job_id'] in store['jobs']) is (operation == 'toggle')
+        if operation == 'toggle':
+            assert store['jobs'][source['job_id']]['enabled'] is True
+
+
+@pytest.mark.parametrize('action', ['accept', 'reject'])
+def test_round4_committed_monitor_survives_other_scheduler_ticks(kit, action):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    source = round2_seed_monitor(kit, False)
+    repo, other = round4_other_job(kit)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    round3_crash(kit, sent['delivery_id'], source['job_id'], point='committed')
+    run = repo.reserve_manual_run(other['job_id'])
+    if action == 'accept':
+        result = kit.service.accept_delivery('local/alice', sent['delivery_id'])
+        assert result['status'] == 'accepted'
+    else:
+        with pytest.raises(AssetDeliveryError) as failure:
+            kit.service.reject_delivery('local/alice', sent['delivery_id'])
+        assert failure.value.error_code == 'DELIVERY_STATE_CONFLICT'
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert envelope['status'] == 'accepted'
+    assert repo.get_job(source['job_id'])['enabled'] is True
+    assert repo._store_snapshot()['runs'][run['run_id']]['job_id'] == other['job_id']
+
+
+@pytest.mark.parametrize('text,values', [
+    ('auth: {password: 123456, timeout: 30}\n', ('123456',)),
+    ('items: [{api_key: 999999}]\n', ('999999',)),
+    ('password:\n  123456\ntimeout: 30\n', ('123456',)),
+    ('password:\n  - 123456\n  - short-pin\ntimeout: 30\n', ('123456', 'short-pin')),
+    *[(f'secret: {style}\n  line1\n\n  line2\ntimeout: 30\n', ('line1', 'line2'))
+      for style in ('|', '>', '|-', '|+', '>-', '>+')],
+])
+@pytest.mark.parametrize('serialized', [False, True])
+def test_round4_structured_yaml_secret_reject_and_redact(sanitize, tmp_path, text, values, serialized):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    name = 'workflow.json' if serialized else 'fixture.yaml'
+    raw = (json.dumps({'body': text}) if serialized else text).encode()
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({name: raw}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    output = sanitize({name: raw}, owner_home=tmp_path, allow_secret_placeholder_replace=True)[name]
+    cleaned = json.loads(output)['body'] if serialized else output.decode()
+    assert all(value not in cleaned for value in values)
+    assert '***REDACTED***' in cleaned
+    if 'secret: ' in text:
+        assert cleaned.splitlines()[0] == text.splitlines()[0]
+        assert cleaned.splitlines()[1] == '  ***REDACTED***'
+    assert sanitize({name: output}, owner_home=tmp_path)[name] == output
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('password: [123456, abc]\n', 'password: "***REDACTED***"\n'),
+    ('"password": 123456\n', '"password": "***REDACTED***"\n'),
+    ('password: short secret\n', 'password: "***REDACTED***"\n'),
+    ('secret: |\n  false\n', 'secret: |\n  ***REDACTED***\n'),
+    ('password:\n  first-line\n  second-line\ntimeout: 30\n',
+        'password:\n  "***REDACTED***"\ntimeout: 30\n'),
+    ('{password:\n  1}\n', '{password:\n  "***REDACTED***"}\n'),
+    ('- password: |\n    abc\n  port: 80\n', '- password: |\n    ***REDACTED***\n  port: 80\n'),
+])
+def test_round4_yaml_scalar_shape_is_preserved(sanitize, tmp_path, text, expected):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    with pytest.raises(AssetDeliveryError):
+        sanitize({'fixture.yaml': text.encode()}, owner_home=tmp_path)
+    output = sanitize({'fixture.yaml': text.encode()}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)['fixture.yaml']
+    assert output.decode() == expected
+
+
+def test_round4_snapshot_recovers_journal_created_before_read_lock(kit, monkeypatch):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.assets import workspace_assets
+
+    source = round2_seed_monitor(kit, False)
+    repo, other = round4_other_job(kit)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    original, injected = workspace_assets._read_lock, []
+
+    @contextmanager
+    def crash_before_read_lock(root, parts):
+        if root == kit.alice and tuple(parts) == ('.asset-batch.lock',) and not injected:
+            injected.append(True)
+            round3_crash(kit, sent['delivery_id'], source['job_id'], point='partial')
+        with original(root, parts):
+            yield
+
+    monkeypatch.setattr(workspace_assets, '_read_lock', crash_before_read_lock)
+    try:
+        jobs, errors = repo.list_jobs()
+    except Exception as error:
+        pytest.fail(f'普通读取应当恢复pending，而非抛出{type(error).__name__}')
+    assert not errors and {row['job_id'] for row in jobs} == {other['job_id']}
+    assert injected and not (kit.alice / '.asset-batch.json').exists()
+
+
+def test_round4_toggle_commit_history_failure_is_replayed_without_rollback(kit, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.common import json_io
+
+    source = round2_seed_monitor(kit, False)
+    identifier = source['job_id']
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', identifier)
+    kit.service.accept_delivery('local/alice', sent['delivery_id'], initial_enabled=True)
+    repo = round2_repo(kit.alice, 'local/alice')
+    run = repo.reserve_manual_run(identifier)
+    append = json_io.append_private_jsonl_records
+
+    def fail_history(path, records):
+        if path == repo.history_path:
+            raise OSError('synthetic history append failure')
+        return append(path, records)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json_io, 'append_private_jsonl_records', fail_history)
+        with pytest.raises(OSError, match='synthetic history'):
+            kit.service.toggle_asset('local/alice', 'monitor', identifier, False)
+    assert (kit.alice / '.asset-batch.json').exists()
+    assert repo.get_job(identifier)['enabled'] is False
+    history = [json.loads(line) for line in repo.history_path.read_text().splitlines()]
+    assert len([row for row in history if row['run_id'] == run['run_id']]) == 1
+    assert run['run_id'] not in repo._store_snapshot()['runs']
+    assert not (kit.alice / '.asset-batch.json').exists()
+
+
+def test_round4_toggle_hard_exit_after_commit_decision_replays_history(kit):
+    import json
+
+    source = round2_seed_monitor(kit, False)
+    identifier = source['job_id']
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', identifier)
+    kit.service.accept_delivery('local/alice', sent['delivery_id'], initial_enabled=True)
+    repo = round2_repo(kit.alice, 'local/alice')
+    run = repo.reserve_manual_run(identifier)
+    round3_crash(kit, sent['delivery_id'], identifier, point='history', enabled=False)
+    journal = json.loads((kit.alice / '.asset-batch.json').read_text())
+    assert journal['committed'] is True and journal['scheduler_history']
+    assert json.loads(repo.store_path.read_text())['jobs'][identifier]['enabled'] is False
+    assert repo.get_job(identifier)['enabled'] is False
+    rows = [json.loads(line) for line in repo.history_path.read_text().splitlines()]
+    assert len([row for row in rows if row['run_id'] == run['run_id']]) == 1
+    assert run['run_id'] not in repo._store_snapshot()['runs']
+    assert not (kit.alice / '.asset-batch.json').exists()
+
+
 # LLM: 故障只注入原文件发表叶或原batch返回点；os._exit不经过Python except/finally，子进程从当前工作树导入。
 # 函数用途: 在临时接收方制造真实持久半提交，保留原undo给另一个进程恢复。
 def round3_crash(kit, delivery_id, monitor_id, *, point, strategy='keep_both_rename', enabled=True):
@@ -751,6 +942,8 @@ import json, os, sys
 from pathlib import Path
 from agent_py_agent.agent.assets import workspace_assets as assets
 from agent_py_agent.agent.assets import delivery_service
+from agent_py_agent.agent.assets import script_store_support as support
+from agent_py_agent.agent.common import json_io
 from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
 root, delivery_id, identifier, point, strategy, enabled = json.loads(sys.argv[1])
 home = Path(root) / 'owners/local/alice'
@@ -767,15 +960,29 @@ def interrupt_leaf(target, parts, content):
     if Path(target) == home and tuple(parts) == ('data', 'monitors', identifier + '.json'):
         os._exit(79)
 commit = assets._commit_staged
-def interrupt_committed(target, entries, journal):
-    commit(target, entries, journal)
+def interrupt_committed(target, entries, journal, **kwargs):
+    commit(target, entries, journal, **kwargs)
     os._exit(79)
+apply_jobs = support.apply_scheduler_batch
+def interrupt_scheduler(target, jobs, runs, **kwargs):
+    apply_jobs(target, jobs, runs, **kwargs)
+    if Path(target) == home and not kwargs.get('previous'):
+        os._exit(79)
+append = json_io.append_private_jsonl_records
+def interrupt_history(path, records):
+    if Path(path) == home / 'data/scheduler/history.jsonl':
+        os._exit(79)
+    return append(path, records)
 if point == 'committed':
     assets._commit_staged = interrupt_committed
+elif point in {'scheduler', 'toggle_scheduler'}:
+    support.apply_scheduler_batch = interrupt_scheduler
+elif point == 'history':
+    json_io.append_private_jsonl_records = interrupt_history
 else:
     assets._put_text = interrupt_leaf
     delivery_service.write_bytes_atomic_beneath = interrupt_direct
-if point == 'toggle':
+if point in {'toggle', 'toggle_scheduler', 'history'}:
     service.toggle_asset('local/alice', 'monitor', identifier, enabled)
 else:
     service.accept_delivery('local/alice', delivery_id, conflict_strategy=strategy, initial_enabled=enabled)
@@ -786,7 +993,7 @@ else:
     assert result.returncode == 79, result.stderr.decode()
 
 
-# LLM: 允许崩溃现场是半写状态，但prepared必须已含两个原账本；重试自动undo后仅安装一次，不产生第二次rename。
+# LLM: prepared及undo必须含精确job前后事实而非整库字节；恢复旧资产及本job后仅安装一次，不产生第二次rename。
 # 函数用途: 覆盖首次/重名/覆盖接收在监控绑定发表后的硬退出及自动恢复。
 @pytest.mark.parametrize('collision,strategy', [(False, 'keep_both_rename'), (True, 'keep_both_rename'), (True, 'overwrite')])
 def test_round3_accept_hard_exit_restores_dual_store_and_retries(kit, monkeypatch, collision, strategy):
@@ -811,18 +1018,21 @@ def test_round3_accept_hard_exit_restores_dual_store_and_retries(kit, monkeypatc
         store_path.read_bytes() if store_path.exists() else None)
     round3_crash(kit, sent['delivery_id'], target, point='partial', strategy=strategy)
     journal = json.loads((kit.alice / '.asset-batch.json').read_text())
-    assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in journal['entries']]
+    assert ['data', 'scheduler', 'store.json'] not in [entry['parts'] for entry in journal['entries']]
+    assert journal['scheduler_jobs'][target]['after']['enabled'] is True
     envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
-    assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in envelope['resolution']['expected_files']]
+    assert ['data', 'scheduler', 'store.json'] not in [entry['parts'] for entry in envelope['resolution']['expected_files']]
+    assert envelope['resolution']['expected_scheduler_jobs']
     restored, restore = [], workspace_assets._restore_batch
 
     # LLM: 仅观察真实恢复结果，不替代恢复；在接收重试的根锁内核对旧字节。
     # 函数用途: 证明安装重试确实先恢复两份存储而不是覆盖半写现场。
-    def observe_restore(root, entries):
-        restore(root, entries)
+    def observe_restore(root, entries, scheduler_jobs=None, scheduler_runs=None):
+        restore(root, entries, scheduler_jobs, scheduler_runs)
         restored.append(True)
         assert (binding.read_bytes() if binding.exists() else None) == previous[0]
-        assert (store_path.read_bytes() if store_path.exists() else None) == previous[1]
+        before_jobs = json.loads(previous[1])['jobs'] if previous[1] is not None else {}
+        assert json.loads(store_path.read_bytes())['jobs'] == before_jobs
 
     monkeypatch.setattr(workspace_assets, '_restore_batch', observe_restore)
     result = kit.service.accept_delivery('local/alice', sent['delivery_id'], conflict_strategy=strategy, initial_enabled=True)
@@ -851,7 +1061,8 @@ def test_round3_committed_accept_retry_resyncs_due_without_reinstall(kit):
     assert not (kit.alice / '.asset-batch.json').exists()
     envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
     assert envelope['status'] == 'pending'
-    assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in envelope['resolution']['expected_files']]
+    assert ['data', 'scheduler', 'store.json'] not in [entry['parts'] for entry in envelope['resolution']['expected_files']]
+    assert envelope['resolution']['expected_scheduler_jobs']
     repo = delivery_scheduler(kit.alice, 'local/alice')
     before = repo.store_path.read_bytes()
     repo._sync_due_index_unlocked({'jobs': {}, 'runs': {}})
@@ -865,7 +1076,7 @@ def test_round3_committed_accept_retry_resyncs_due_without_reinstall(kit):
     assert json.loads((kit.alice / 'data/monitors' / (installed + '.json')).read_text())['enabled'] is True
 
 
-# LLM: 启停不能仅用内存except撤回；硬退出后显式根锁恢复旧字节及被污染的唤醒投影。
+# LLM: 硬退出恢复绑定原字节、本job/run原事实及唤醒投影；不要求回滚store时间或整库格式。
 # 函数用途: 覆盖启用/停用两方向的双存储耐久undo。
 @pytest.mark.parametrize('enabled', [False, True])
 def test_round3_toggle_hard_exit_recovers_both_files_and_due_index(kit, enabled):
@@ -889,7 +1100,9 @@ def test_round3_toggle_hard_exit_recovers_both_files_and_due_index(kit, enabled)
     repo._sync_due_index_unlocked(dirty)
     assert bool(round3_due_rows(kit)) is enabled
     with asset_root_lock(kit.alice):
-        assert (binding.read_bytes(), repo.store_path.read_bytes()) == before
+        assert binding.read_bytes() == before[0]
+        current, old = json.loads(repo.store_path.read_bytes()), json.loads(before[1])
+        assert current['jobs'] == old['jobs'] and current['runs'] == old['runs']
         assert bool(round3_due_rows(kit)) is not enabled
     assert not (kit.alice / '.asset-batch.json').exists()
     assert not list(kit.alice.rglob('*.stage-*'))
@@ -1041,9 +1254,10 @@ def test_round2_monitor_overwrite_rollback_and_retry(kit, monkeypatch):
 
     # LLM: 原事务前最后一刻抛错，观测点仍是当前真实Scheduler与绑定。
     # 函数用途: 让覆盖在正式资产发表之前失败。
-    def fail_commit(*args):
+    def fail_commit(*args, **kwargs):
         assert repo.get_job(source['job_id']) == previous_job
-        assert ['data', 'scheduler', 'store.json'] in [entry['parts'] for entry in args[1]]
+        assert ['data', 'scheduler', 'store.json'] not in [entry['parts'] for entry in args[1]]
+        assert args[2]['scheduler_jobs'][source['job_id']]['after']['status'] == 'paused'
         raise OSError('synthetic overwrite failure')
 
     monkeypatch.setattr(workspace_assets, '_commit_staged', fail_commit)

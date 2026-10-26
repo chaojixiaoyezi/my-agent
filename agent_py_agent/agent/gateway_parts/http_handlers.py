@@ -1,4 +1,4 @@
-# LLM: 普通输入的auto/queue意图仅选择原活跃路由或排队；认证、C准备及内容摘要共原入口。
+# LLM: auto/queue仅选原活跃路由；认证/C准备/摘要保持；冷通知任一规范库解析损坏即失败，不能用旧库回放掩盖错误。
 # LLM: /ask与/control合法控制共用唯一领域分派，模型元数据/管理/普通远端各守原HTTP来源；正文各取原词法权威，Count0及G1拒绝保持。
 # LLM: HTTP handlers preserve authenticated owner/thread boundaries and raw HTTPMessage header copies before identity checks;
 # process stream identity affects only display cursors, never model requests or authorization.
@@ -1825,7 +1825,7 @@ def read_gateway_client_notices(
 # layouts, and replay the newest exact channel binding without constructing Agent/backend/tool
 # state. Volatile activity and approval state intentionally remain empty until the owner is loaded;
 # an echoed stream cursor keeps the client unchanged until a new real stream exists.
-# 函数用途: 冷用户只读恢复精确线程，全部候选解析损坏时返回失败而非空态，不拉起整套Agent。
+# 函数用途: 冷用户只读恢复精确线程；任一候选解析损坏即失败，不能用旧库掩盖损坏，不拉起Agent。
 def _read_cold_owner_notice_projection(
     base_agent: object,
     *,
@@ -1877,10 +1877,11 @@ def _read_cold_owner_notice_projection(
                 thread,
             )
         )
+    if resolve_failed:
+        payload["ok"] = False
+        payload["error"] = "thread resolve failed"
+        return payload
     if not candidates:
-        if resolve_failed:
-            payload["ok"] = False
-            payload["error"] = "thread resolve failed"
         return payload
 
     _updated_at, _root_key, store, thread = max(candidates, key=lambda item: item[:2])

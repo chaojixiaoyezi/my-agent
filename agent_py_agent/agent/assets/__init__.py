@@ -1,4 +1,4 @@
-# LLM: 资产写根只来自宿主构造与显式target_scope；根事务锁协调批量及普通写入，投影字段不能授权。
+# LLM: 资产写根只来自宿主构造与显式target_scope；根事务锁协调资产及原Scheduler，持锁标记和投影字段不能授权。
 # 模块用途: 共用nofollow、分层读取、CAS版本、批量恢复协调及提交后读回错误合同。
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -110,7 +111,16 @@ def workspace_asset_home(workspace_root, *, create=False):
     return root / '.agent'
 
 
-# LLM: 普通写与批量写共用同一根锁；先恢复旧批量再取集合锁，避免跨集合CAS或恢复锁环。
+# LLM: 仅线程本地记录已持锁根，防止Scheduler恢复递归取同一flock；它不是身份、权限或跨线程锁。
+# 函数用途: 判断当前同步调用栈是否已持有此资产根锁。
+def asset_root_lock_held(home):
+    return str(Path(home).absolute()) in getattr(_ASSET_LOCK_CONTEXT, 'roots', ())
+
+
+_ASSET_LOCK_CONTEXT = threading.local()
+
+
+# LLM: 普通写、Scheduler写和批量写共用根锁；恢复前标记当前线程，退出复原，保持root→canonical锁序。
 # 函数用途: 为一次可写资产操作取得跨进程事务协调权。
 @contextmanager
 def asset_root_lock(home):
@@ -118,8 +128,13 @@ def asset_root_lock(home):
 
     os.close(open_directory_beneath(home, ()))
     with locked_json_path(home / '.asset-batch'):
-        _recover_batch(home)
-        yield
+        previous = getattr(_ASSET_LOCK_CONTEXT, 'roots', ())
+        _ASSET_LOCK_CONTEXT.roots = (*previous, str(Path(home).absolute()))
+        try:
+            _recover_batch(home)
+            yield
+        finally:
+            _ASSET_LOCK_CONTEXT.roots = previous
 
 
 # LLM: 超时与运行耗时不是授权；拒绝bool、非有限数和零/负超时。

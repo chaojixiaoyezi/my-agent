@@ -21,6 +21,36 @@ from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime, TuiTurnSummary
 from agent_py_agent.cli.turn_completion import format_turn_completion_line, format_turn_duration
 
 
+@pytest.mark.parametrize('corrupt_index', [0, 1])
+def test_round4_cold_notice_any_corrupt_store_fails_closed(tmp_path, corrupt_index):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.message_stream import NoticeDisplayCapabilities
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.control_service import GatewayControlScope
+    from agent_py_agent.agent.gateway_parts.http_handlers import _read_cold_owner_notice_projection
+    from agent_py_agent.agent.owner_wake_discovery import existing_conversation_store_roots
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    host = tmp_path / 'host'
+    home = host / 'owners/local/alice'
+    stores = [ConversationStore(home / name) for name in ('conversations', 'data/conversations')]
+    for store in stores:
+        store.threads.get_or_create({'channel': 'chat', 'channel_conversation_id': 'session-fixture',
+            'channel_user_id': 'alice', 'canonical_user_id': 'alice', 'owner_id': 'local/alice',
+            'owner_home': str(home), 'workspace_root': str(home)})
+    assert len(existing_conversation_store_roots(home)) == 2
+    # 本版真实通道线程索引是channel_bindings.json，而非任务描述中的threads.json。
+    stores[corrupt_index].threads.storage.bindings_path.write_text('{broken')
+    before = {str(path): path.read_bytes() for path in home.rglob('*') if path.is_file()}
+    payload = _read_cold_owner_notice_projection(SimpleNamespace(home_paths=SimpleNamespace(root=host)),
+        scope=GatewayControlScope('alice', 'chat', 'session-fixture', resolved_owner=OwnerIdentity.local_user('alice')),
+        after=0, event_after=0, event_stream_id='fixture-stream', display=NoticeDisplayCapabilities())
+    assert payload['ok'] is False and payload['error'] == 'thread resolve failed'
+    assert payload['thread_id'] == '' and payload['notices'] == []
+    assert {str(path): path.read_bytes() for path in home.rglob('*') if path.is_file()} == before
+
+
 # LLM: 参数覆盖秒、分钟、小时和进位边界，不调用任何时钟或外部进程。
 # 函数用途: 核对时长格式合同。
 @pytest.mark.parametrize("seconds,expected", [(0, "0s"), (0.2, "1s"), (12, "12s"), (106, "1m 46s"), (120, "2m 0s"), (3725, "1h 2m 5s"), (59.9, "1m 0s")])
