@@ -583,8 +583,8 @@ def _find_index_record(
     return matched
 
 
-# LLM: 缓存记录离开查找层前深复制，不能让调用方改写下一次scope事实；物理别名仍按原优先级扫描。
-# 函数用途: 按既定作用域优先级定位记录并隔离缓存对象。
+# LLM: 缓存记录离开查找层前深复制；物理回退复用唯一basename裁决，不新增路径解析或绕过scope。
+# 函数用途: 按既定作用域/物理别名优先级定位记录并隔离缓存对象。
 def _lookup_index_record(
     root: Path,
     artifact_ref: str,
@@ -623,7 +623,8 @@ def _lookup_index_record(
         return deepcopy(matches[-1])
     if resolved_ref is not None:
         basename = [item.record for item in records if item.basename_match]
-        return deepcopy(basename[0]) if ref_path.name.endswith(".json") and len(basename) == 1 else None
+        matched = _unique_record_by_basename(basename, ref_path.name)
+        return deepcopy(matched) if matched is not None else None
     return None
 
 
@@ -809,6 +810,8 @@ def _record_allowed_for_read_scope(
     )
 
 
+# LLM: 生产物理路径回退的纯内存唯一性裁决；不打开文件、不解析路径或缓存scope许可，歧义一律拒绝。
+# 函数用途: 从候选注册记录中选出唯一同名JSON包装，供后续读口继续核对scope与hash。
 def _unique_record_by_basename(records: list[dict[str, Any]], filename: str) -> dict[str, Any] | None:
     if not filename.endswith(".json"):
         return None

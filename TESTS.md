@@ -1,3 +1,42 @@
+## 2026-10-26 Stage 3 Round 2：有界 Git 指针扫描与 artifact 生产读口（c2）
+
+来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，工作树 `wt-wave4-c3`，起始提交 `8e96fbbf10357dce3ed20470c0e4eeab5fecc5d7`。本轮只修改任务授权的两份生产模块、两份测试和两份文档，不改部署包。
+
+- `_macos_git_markers` 每次先检查每个 root 及全部祖先的 `.git`；下行改为 `scandir` 广度优先、每根独立 realpath 去环，最多 3 层（根为第 0 层）、128 个扫描目录。剪去 `node_modules`、`.venv`、`venv`、`__pycache__`、`.tox`、`.mypy_cache`、`.pytest_cache`、`.ruff_cache`、`target`、`build`、`dist`，不进入 `.git` 对象库。root 本身即使同名也照查。缺失/非目录保留旧语义；真正的目录打开或链接分类 IO 错误失败关闭。
+- 新扫描回归用真实 `scandir` 计数验证深度、两个宽根各自的上限及重目录剪枝；保留近根 worktree/gitfile/symlink、commondir、config 别名、指针空格与 FIFO 用例。独审指出的“先深后浅别名”和重叠写根漏扫、链接目标 EACCES 三项均先复现失败再修复。
+- 完整 profile 计时调用真实生产入口 `build_macos_sandbox_profile`（本基线没有任务书所称的 `build_macos_seatbelt_profile`），夹具含 300 个跨 6 层业务目录和文件、重目录、根及近根 worktree 指针；分别测冷/热字符串缓存，要求各 `<50ms`。这不是只给 `macos_readonly_patterns` 计时，也不把 profile 生成当作原生编译耗时。
+- 任意深度**规范名称** `.git/hooks`、`.git/config`、`.git/config.worktree` 及 `.git` 自身继续受最后追加的 regex 拒写保护；有界发现只补预算内的外置 gitdir/commondir 别名。超深、被剪重目录或预算外的外置别名发现不作保证；不能写成“全树所有外置 Git 控制目标均已发现”。
+- `reader._unique_record_by_basename` 采用任务允许的“接入生产”方案：由 `_lookup_index_record` 的物理路径 fallback 实际调用，返回仍深复制，scope/nofollow/hash 门保持。它不再只服务测试，且不为接入扫描历史全集。新增 `test_a1_production_read_uses_unique_basename_fallback` 从 `read_tool_output_artifact` 真读口验证唯一成功、歧义拒绝和跨 run 拒绝；测试 spy 仅包原 helper，不代替读盘或完整性检查。本模块没有任务书所称的 `_resolve_requested_path` / `ArtifactReadService.read`。
+
+### Wave 4 验证套件位置核对
+
+| 任务书套件名 | 当前树中的实际位置与验证范围 |
+| --- | --- |
+| `test_cross_owner_asset_delivery.py` | 已存在：资产依赖闭包、秘密拒绝、冲突安装、屏蔽与通知恢复；本轮只登记，不重跑、不冒充跨端 E2E。 |
+| `test_admin_managed_users_governance.py` | 已存在：登记身份、治理 CAS/锁与底线、资产配发、排队和提审；本轮只登记，其既有验证见后节。 |
+| `test_perf_a1_a5_optimizations.py` | 已存在且本轮扩展：逻辑查找、缓存失效、生产 basename fallback、配置回执、计时、投影及硬窗口预留。 |
+| `test_sandbox_profile_perf.py` | 已存在且本轮扩展：完整 profile 构建计时、有界扫描、链接/重叠根/EACCES、SBPL 字节预算与原生隔离。 |
+| `test_process_host_lsof_cap.py` | 当前树不存在；60 秒硬截止实际回归在 `test_background_listen_scope.py` 的 `test_monitor_never_observes_listeners_at_or_after_sixty_seconds`、`test_monitor_exact_sixty_second_jump_never_observes_again` 等；生产在 `background_process_host._monitor_child`。未创建空占位或声称运行了这个缺失文件。 |
+| `test_stream_waiter_poll_wakeup.py` | 当前树不存在；实际回归在 `test_tool_model_generation.py`（`test_stream_poll_constants`、慢取消前队列唤醒、竞态、假唤醒和去重）及 `test_responses_websocket.py`。它们使用受控后端/本地传输，不等同在线模型验收。 |
+
+任务书的 `test_artifact_Externalize.py` 同样不存在：原样执行指定 pytest 命令实际 exit 4（file not found），不是测试通过。使用真实存在的 `test_tool_output_externalizer.py` 补验，并扩展相关 reader 合同测试；没有改名、删测或扩大可写文件范围。
+
+复现（工作树根执行，不跑全仓）：
+
+```bash
+python3 -m pytest -o addopts='' agent_py_agent/tests/test_sandbox_profile_perf.py agent_py_agent/tests/test_perf_a1_a5_optimizations.py agent_py_agent/tests/test_tool_output_externalizer.py -q --tb=short -ra
+python3 -m pytest -o addopts='' agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_artifact_read_path_races.py -q --tb=short -ra
+ruff check agent_py_agent/agent/attempt/sandbox.py agent_py_agent/agent/memory_archive/artifact/reader.py agent_py_agent/tests/test_sandbox_profile_perf.py agent_py_agent/tests/test_perf_a1_a5_optimizations.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+实际结果：相关八文件为 **401 passed / 7 skipped / 0 failed / 0 error**；末次仅整理 scanner 嵌套后，受影响的上述三文件重新验证为 **129 passed / 6 skipped / 0 failed / 0 error**，其它五文件输入及源码未变，复用有效结果。当前 300 目录夹具的完整 profile 冷/热构建分别为 **11.84ms / 9.67ms**（JUnit 原始值保留），不是生产延迟承诺。Ruff 通过；strict 尺寸门最终 `hard=0 / blocked=False`（首次暴露 scanner 嵌套后已扁平化修正，不放宽基线）；`CODE_SIZE_REPORT.md` 已还原，不提交生成物。
+
+证据：`.pytest_cache/r2-c2-red.xml`（初轮 6 failed / 1 passed）、`r2-c2-review-red.xml`（独审反例 3 failed）、`r2-c2-final.log` / `.xml`（相关八文件）、`r2-c2-current.log` / `.xml`（当前三文件）、`r2-c2-size.log`。独立 Astra high 只做内联静态审阅，其别名/权限意见由执行者用真实文件系统红绿测试核实；“全调用共享 128”意见与任务原文的“每个 root”口径不符，未采用，并用两个宽根各扫描 128 的用例锁定口径。未声称审阅者独立跑过测试或批准了原生行为。
+
+原生 Git 写入/创建/替换/改名拒绝、正常 `git status/add/commit` 及原生启动 `<50ms` 测试全部保留；本轮最小 `sandbox-exec` 被 `sandbox_apply` 以 exit 71 明确拒绝，六项原生测试跳过，隔离效果**未验证**，不得用字符串测试或普通 Git 运行替代。另有一项真实硬链接测试因观察到 EPERM 跳过，不归因于未经证实的环境原因。无全仓、跨平台、在线模型、部署或外部可达性结论。
+
 ## 2026-10-26 受管本地用户治理与尺寸门收尾（WT2 / c1）
 
 来源：受管用户治理派工及最后收尾要求。新增 `test_admin_managed_users_governance.py`，覆盖登记身份边界、权威策略与镜像隔离、CAS、人格底线/锁、原生 AGENTS 写入门、记忆增改删、资产闭包、目标用户排队、审核状态机/通知、工具接线，以及独审发现的丢失更新、半提交恢复和混合快照回归。
@@ -69,7 +108,7 @@ python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.j
 
 任务单与此基线有名称差异：不存在test_artifact_tools.py/test_user_config_tool.py，实际使用test_memory_artifact_read.py、test_artifact_read_lookup_plan.py、test_tool_ref_scope_stream.py、test_user_config_capability.py、test_parameters.py和test_parameter_changes.py替代扩展。也不存在TOOL_PREVIEW_CHAR_LIMIT及指定旧函数/round_model_call_completed事件；真实AgentConfig.tool_output_preview_chars实测为**4000**，已高于1200，未降低默认值、伪造常数或新增无读取点目录项。
 
-删除的确认死代码：reader._sha256_text，以及迁移共享投影后tool_model_generation中不再使用的project_native_prompt_history导入。_unique_record_by_basename仍被历史oracle测试调用，因此保留。
+删除的确认死代码：reader._sha256_text，以及迁移共享投影后tool_model_generation中不再使用的project_native_prompt_history导入。_unique_record_by_basename 当时仅被历史 oracle 测试调用；Stage 3 Round 2 已将其接入真实物理 fallback 并从生产读口回归，不再以“测试使用”作为留存死代码的理由。
 
 复现（工作树根，限定相关文件；不运行全仓pytest）：
 
@@ -87,7 +126,7 @@ git diff --check
 
 来源：`wt-wave4-b3-b4.md` 的 B1/B3/B4 及终审工程约束，在 `c9693a5b2` 后继续实现，未修改部署包。
 
-- B1：原 H3 常量按完整相对路径生成分支，锁与 SQLite 伴随文件共用后缀；按 UTF-8 和最终 SBPL 转义后的 768 字节预算动态切分，保留旧单模式检查接口。新增普通/Full Access、带引号与反斜线的 250 字符深根、逐字面量 `<950` 字节与逐保护项等价覆盖回归。不可拆分原子超预算时失败关闭，不丢保护项；原生 TinyScheme/Seatbelt 是否通过须由可施加沙箱的主机实测。
+- B1：原 H3 常量按完整相对路径生成分支，锁与 SQLite 伴随文件共用后缀；按 UTF-8 和最终 SBPL 转义后的 768 字节预算动态切分。Stage 3 已迁移并删除旧单模式检查接口，当前普通/Full Access、带引号与反斜线的 250 字符深根测试严格要求逐字面量 `<768` 字节，并逐保护项核对等价覆盖。不可拆分原子超预算时失败关闭，不丢保护项；原生 TinyScheme/Seatbelt 是否通过须由可施加沙箱的主机实测。
 - B3：模型队列和 WebSocket 兜底均为 2 秒；独立 `register_interrupt_wakeup` 先向无界队列放一次字条，再沿原取消回调关闭连接，退出注销两个注册。无效字条不重置期限，正常结果/异常采纳前再检查取消。用户取消仅短等 50ms，原慢 worker 仍由后台 shutdown 持有；墙钟超时仍保留原 1 秒排空。新增慢清理 `<0.2s` 退出、迟到结果不阻塞、结果/异常竞态、假唤醒及去重回归；原 `0.01s` 请求超时断言保持。
 - B4：私有全量缓存底座向公开查询提供深拷贝，固定待通知 report 先筛选后只复制候选，冷热路径都保留读取错误；规范空目标 `{}` 不欠通知。原二元组 `list_records()` 接口不变。owner 继续由权威目录隔离，当前 target 没有 `owner_key`，不补造持久身份。发现层空 cheap 查询后仍全读核对，旧替身显式按接口兼容，不吞内部 `TypeError`。
 - B4 TTL：仅按有限且 `>=86400` 的 `finished_at` 清理已超 24 小时的 `exited/killed`；pending wake、未登记通知均保留，缺消费证明时不删除目标记录。小合成时间只避开 TTL，不影响原数量裁剪。目录/叶锁内重核原记录与 nofollow 字节，成功删除后清理对应锁侧车；不停止进程、不删日志。协调循环按会话存储根每 300 秒维护，节流表有界为 256 根，无新 attach 也可运行。

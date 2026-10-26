@@ -432,6 +432,82 @@ def test_git_pointer_keeps_spaces_accepted_by_real_git(tmp_path, name):
     assert module._git_pointer_path(repo / ".git", gitfile=True) == metadata
 
 
+# LLM: 真实scandir探针只记录实际打开；不伪造目录结果，分别守住深度、总数及重目录剪枝。
+# 函数用途: 验证每个写根最多扫描128个目录且不越过第3层，祖先Git仍直接检查。
+@pytest.mark.parametrize("shape", ["deep", "wide", "heavy"])
+def test_git_discovery_walk_is_bounded_per_root(tmp_path, monkeypatch, shape):
+    root = tmp_path / "repo/workspace"
+    root.mkdir(parents=True)
+    ancestor_marker = root.parent / ".git"
+    ancestor_marker.mkdir()
+    heavy = {"node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache",
+             ".pytest_cache", ".ruff_cache", "target", "build", "dist"}
+    if shape == "deep":
+        (root / "one/two/three/four/five/six").mkdir(parents=True)
+        (root / "one/two/three/.git").mkdir()
+    elif shape == "wide":
+        for index in range(180):
+            (root / f"child-{index:03}").mkdir()
+    else:
+        for name in heavy:
+            (root / name / "nested/deeper").mkdir(parents=True)
+    extra = tmp_path / "second"
+    extra.mkdir()
+    if shape == "wide":
+        for index in range(180):
+            (extra / f"other-{index:03}").mkdir()
+    visited, scandir = {}, module.os.scandir
+
+    # LLM: 转调真实scandir并记录每根实际进入的目录，不把只检查返回值当作有界遍历证据。
+    # 函数用途: 捕获生产扫描器的真实访问范围。
+    def observed(directory):
+        path = Path(directory)
+        base = root if path == root or root in path.parents else extra
+        visited.setdefault(base, []).append(path.relative_to(base))
+        return scandir(directory)
+
+    monkeypatch.setattr(module.os, "scandir", observed)
+    spec = AttemptSandboxSpec(root, root, root, root, implicit_attempt_write_roots=False,
+                              extra_write_roots=(root, extra))
+    markers = module._macos_git_markers(spec)
+    assert ancestor_marker in markers
+    assert set(visited) == {root, extra}
+    assert all(len(paths) <= 128 for paths in visited.values()), visited
+    assert all(len(path.parts) <= 3 for paths in visited.values() for path in paths), visited
+    assert all(not (set(path.parts) & heavy) for paths in visited.values() for path in paths), visited
+    if shape == "deep":
+        assert root / "one/two/three/.git" in markers
+    if shape == "wide":
+        assert len(visited[root]) == len(visited[extra]) == 128
+
+
+# LLM: 计时覆盖真实完整profile入口及冷/热字符串缓存；夹具构造在计时外，仍解析根和近根Git指针。
+# 函数用途: 用300个六层业务目录及重目录验证profile构建低于50ms且保留具体/通配Git拒写。
+def test_complete_profile_build_below_fifty_ms_with_large_workspace(tmp_path, request):
+    spec, repo, gitdir, common, alias = _git_layout(tmp_path, "worktree")
+    root = spec.attempt_view
+    for index in range(50):
+        directory = root / f"tree-{index:03}"
+        for depth in range(6):
+            directory.mkdir()
+            (directory / "business.txt").write_text("business")
+            directory /= f"level-{depth}"
+    (root / ".git").write_text(f"gitdir: {gitdir}\n")
+    (root / "node_modules/a/b/c/d/e").mkdir(parents=True)
+    module._cached_macos_profile.cache_clear()
+    for cache_state in ("cold", "warm"):
+        started = time.perf_counter()
+        profile = module.build_macos_sandbox_profile(spec)
+        elapsed = time.perf_counter() - started
+        request.node.user_properties.append((f"{cache_state}_profile_build_ms", elapsed * 1000))
+        assert elapsed < .05, (cache_state, elapsed)
+        for path in {gitdir / "hooks", gitdir / "config.worktree", common / "config", alias}:
+            assert module._seatbelt_string_literal(str(path.resolve())) in profile
+        regexes = [json.loads(value) for value in re.findall(r'\(regex ("(?:\\.|[^"\\])*")\)', profile)]
+        for relative in ("deep/a/b/c/d/.git/hooks/new", "deep/a/b/c/d/.git/config.worktree", "deep/a/b/c/d/.git"):
+            assert any(re.search(pattern, str(repo / relative)) for pattern in regexes)
+
+
 def test_git_discovery_follows_directory_aliases_without_looping(tmp_path):
     root, external = tmp_path / "writable", tmp_path / "external"
     root.mkdir()
@@ -446,10 +522,57 @@ def test_git_discovery_follows_directory_aliases_without_looping(tmp_path):
     assert module._seatbelt_string_literal(str(metadata / "config")) in _profile(spec)
 
 
+# LLM: 同一真实目录可能先经第3层别名到达；随后浅入口或独立写根必须仍能用足自己的剩余深度。
+# 函数用途: 防止全局visited把范围内的外置gitdir入口误剪掉。
+@pytest.mark.parametrize("overlapping_root", [False, True])
+def test_git_discovery_shallower_visit_keeps_remaining_depth(tmp_path, overlapping_root):
+    root = tmp_path / "root"
+    shallow = root / "z"
+    repo = shallow / "child"
+    repo.mkdir(parents=True)
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    marker = repo / ".git"
+    marker.write_text(f"gitdir: {metadata}\n")
+    deep = root / "a/b"
+    deep.mkdir(parents=True)
+    (deep / "link").symlink_to(shallow, target_is_directory=True)
+    if overlapping_root:
+        # 第二根曾在第一根扫描中到达上限，独立根的预算不能被旧visited吃掉。
+        marker.unlink()
+        repo = shallow / "child/deeper"
+        repo.mkdir()
+        marker = repo / ".git"
+        marker.write_text(f"gitdir: {metadata}\n")
+    spec = AttemptSandboxSpec(root, root, root, root, implicit_attempt_write_roots=False,
+                              extra_write_roots=(root, shallow) if overlapping_root else (root,))
+    assert any(path.resolve() == marker.resolve() for path in module._macos_git_markers(spec))
+    assert module._seatbelt_string_literal(str(metadata / "hooks")) in _profile(spec)
+
+
 def test_absent_write_root_keeps_future_git_regex_protection(tmp_path):
     root = tmp_path / "future"
     spec = AttemptSandboxSpec(root, root, root, root, extra_write_roots=(root,))
     assert module._macos_git_write_denies(spec)
+
+
+# LLM: 真权限错误可能在os.walk的DirEntry.is_dir内部被吞；不能把不可核验目录链接当普通业务文件。
+# 函数用途: 验证目录别名目标不可搜索时profile构造失败关闭，测试后恢复临时目录权限。
+def test_git_discovery_inaccessible_directory_alias_fails_closed(tmp_path):
+    root, blocked = tmp_path / "root", tmp_path / "blocked"
+    root.mkdir()
+    (blocked / "repo/.git").mkdir(parents=True)
+    (root / "alias").symlink_to(blocked / "repo", target_is_directory=True)
+    blocked.chmod(0)
+    try:
+        import os
+        if os.access(blocked, os.X_OK):
+            pytest.skip("当前身份忽略目录权限位，无法构造真实EACCES")
+        spec = AttemptSandboxSpec(root, root, root, root, implicit_attempt_write_roots=False, extra_write_roots=(root,))
+        with pytest.raises(module.SandboxUnavailableError, match="GIT_CONTROL_PROTECTION_INVALID"):
+            module.build_macos_sandbox_profile(spec)
+    finally:
+        blocked.chmod(0o700)
 
 
 def test_file_write_root_does_not_require_directory_scan(tmp_path):

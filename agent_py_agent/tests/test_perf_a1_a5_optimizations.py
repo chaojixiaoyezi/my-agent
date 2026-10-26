@@ -63,6 +63,27 @@ def test_a1_logical_lookup_resolves_only_matching_row(tmp_path):
     assert resolve.call_count <= 1
 
 
+# LLM: 走真实归档读口、索引、安全打开和hash；helper只负责无IO的唯一basename裁决，不取代scope门。
+# 函数用途: 验证生产basename回退实际复用唯一裁决，同名歧义和跨run仍拒绝。
+@pytest.mark.parametrize("case", ["unique", "ambiguous", "other_run"])
+def test_a1_production_read_uses_unique_basename_fallback(tmp_path, case):
+    path = _write_externalized_tool_output(tmp_path, content="basename-body")
+    if case == "ambiguous":
+        index = path.parent / "index.jsonl"
+        with index.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"call_id": "duplicate", "path": str(path.parent / "nested" / path.name)}) + "\n")
+    request = reader.ReadToolOutputArtifactRequest(tmp_path, f"stale/{path.name}",
+        run_id="other" if case == "other_run" else "run-artifact", scope_mode="current_run")
+    with patch.object(reader, "_unique_record_by_basename", wraps=reader._unique_record_by_basename) as unique:
+        result = reader.read_tool_output_artifact(request)
+    assert unique.call_count == 1
+    if case == "unique":
+        assert result["ok"] and result["content"] == "basename-body" and result["content_hash_verified"]
+    else:
+        assert not result["ok"]
+        assert result["error_code"] == ("artifact_not_registered" if case == "ambiguous" else "tool_permission_denied")
+
+
 # LLM: 使用临时真实参数中心文件；检查回执自然顺序和保存后的结构化事实，不修改本机设置。
 # 函数用途: 验证配置写后无需再次view便能核对，并能在有界预览看到关键字段。
 def test_a2_write_receipt_has_summary_and_readback_fact(tmp_path):

@@ -852,31 +852,54 @@ def _git_pointer_path(path: Path, *, gitfile: bool = False) -> Path | None:
     return (path.parent / value).resolve(strict=False)
 
 
-# LLM: 每次重查写根及cwd祖先，不缓存目录/链接；跟随目录别名但按realpath去环，不进入.git对象库。
-# 函数用途: 找齐内嵌和链接worktree入口；尚不存在的根由通配规则保护，其他扫描错误关闭执行。
+# LLM: 每根及全部祖先始终查.git；向下仅查3层/128目录并剪重目录，广度优先按realpath去环，不缓存发现事实。
+#   任意深度的规范.git仍由regex拒写；有界扫描只补近根gitfile/symlink的真实gitdir/commondir别名。
+# 函数用途: 有界发现近根worktree入口；缺失根由通配保护，实际扫描IO错误仍失败关闭。
 def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
     roots = {Path(path).resolve(strict=False) for path in (spec.attempt_view, *spec.extra_write_roots,
              *((spec.staging_root,) if spec.implicit_attempt_write_roots else ()))}
     markers = {parent / ".git" for root in roots for parent in (root, *root.parents)
                if (parent / ".git").exists() or (parent / ".git").is_symlink()}
-    # os.walk默认吞掉权限错误；保护发现必须把错误交还，不可静默漏掉worktree。
-    # LLM: 仅不存在表示没有本轮可发现的控制入口；权限/IO错误不能当空目录。
-    # 函数用途: 将扫描错误交回失败关闭链，但允许尚未创建的写根。
-    def failed(error: OSError) -> None:
-        if not isinstance(error, (FileNotFoundError, NotADirectoryError)):
-            raise error
-    visited: set[Path] = set()
-    for root in roots:
-        for directory, dirs, files in os.walk(root, onerror=failed, followlinks=True):
-            actual = Path(directory).resolve(strict=False)
+    for root in sorted(roots):
+        pending = deque([(root, 0)])
+        visited: set[Path] = set()
+        while pending and len(visited) < 128:
+            directory, depth = pending.popleft()
+            actual = directory.resolve(strict=False)
             if actual in visited:
-                dirs.clear()
                 continue
             visited.add(actual)
-            if ".git" in dirs or ".git" in files:
-                markers.add(Path(directory) / ".git")
-            dirs[:] = [name for name in dirs if name != ".git"]
+            marker, children = _macos_git_scan_directory(directory, descend=depth < 3)
+            if marker is not None:
+                markers.add(marker)
+            pending.extend((child, depth + 1) for child in children)
     return tuple(sorted(markers))
+
+
+# LLM: scandir分类错误不能像os.walk那样静默吞掉；仅缺失/非目录可略过，.git自身不跟入对象库。
+# 函数用途: 列出一层近根仓库候选，剪去重目录；实际IO错误交给Git保护失败关闭链。
+def _macos_git_scan_directory(directory: Path, *, descend: bool) -> tuple[Path | None, list[Path]]:
+    pruned = {"node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache",
+              ".pytest_cache", ".ruff_cache", "target", "build", "dist"}
+    marker, children = None, []
+    try:
+        entries = os.scandir(directory)
+    except (FileNotFoundError, NotADirectoryError):
+        return marker, children
+    with entries:
+        for entry in entries:
+            if entry.name == ".git":
+                marker = directory / ".git"
+                continue
+            if not descend or entry.name in pruned:
+                continue
+            try:
+                is_directory = entry.is_dir(follow_symlinks=True)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            if is_directory:
+                children.append(directory / entry.name)
+    return marker, sorted(children)
 
 
 # LLM: 所有模式/full access共用Git拒写；通配保护未来仓库，具体路径补真实gitdir/commondir/链接别名。
