@@ -7,8 +7,8 @@ import json
 import pytest
 
 
-# LLM: 示例从设计逐项编写，不从待测schema反向生成，避免错误字段互相证明。
-# 函数用途: 给出45个动作的独立合法输入及读写分类。
+# LLM: 基础及审计/双Bot样例从设计独立编写，不从待测schema反向生成；新增动作也须通过原闭合字段/幂等断言。
+# 函数用途: 给出原动作和审计组扩展的独立合法输入及读写分类。
 def action_cases():
     thread = {"thread_id": "thread-test"}
     goal = {**thread, "goal_id": "goal-test", "expected_revision": 1}
@@ -37,6 +37,16 @@ def action_cases():
         "users.local.password.set": ({**user, "password": "ValidPassword1", "expected_revision": 1}, "write"),
         "users.auth.login": ({"account_source": "local", "user_id": "alice", "password": "ValidPassword1"}, "read"),
         "users.auth.verify": ({"session_token": "session_token_valid_sample_01"}, "read"),
+        "users.local.audit_group.set": ({**user, "in_audit_group": True, "expected_revision": 1}, "write"),
+        "audit_group.owners.list": ({}, "read"),
+        "audit_group.assets.summary": ({}, "read"),
+        "audit_group.alerts.list": ({}, "read"),
+        "audit_group.posture.overview": ({}, "read"),
+        "audit_group.assets.invoke": ({"source_owner_id": "local/main", "kind": "script", "asset_id": "script-test"}, "async"),
+        "conversations.bots.ensure": ({}, "write"),
+        "conversations.bots.submit": ({"text": "你好"}, "async"),
+        "conversations.bots.rollover": ({"expected_generation": 1, "expected_revision": 1}, "write"),
+        "conversations.bots.history.list": ({}, "read"),
         "execute.tool": ({**thread, "tool_name": "read_file", "arguments": {"path": "a.txt"}}, "async"),
         "execute.script": ({**thread, "script_id": "script-test", "expected_revision": 1}, "async"),
         "execute.workflow": ({**thread, "workflow_id": "workflow-test", "expected_revision": 1}, "async"),
@@ -100,8 +110,8 @@ def test_decode_rejects_invalid_json_and_envelopes(raw):
     assert error.value.code == "INVALID_SCHEMA"
 
 
-# LLM: 原动作与扩展矩阵分别独立校验，不能把新增动作误判为原目录变更。
-# 函数用途: 验证原45个闭合动作及各自幂等要求。
+# LLM: 原矩阵加入独立编写的审计/双Bot案例，全集等式和逐动作extra拒绝断言保留；WP-4仍由独立矩阵校验。
+# 函数用途: 验证基础与审计扩展的目录完整性、闭合字段及各自幂等要求。
 @pytest.mark.parametrize("action", tuple(action_cases()))
 def test_each_action_has_closed_payload_and_exact_mode(action):
     from agent_py_agent.agent.plugin_host.action_specs import action_specs

@@ -1,5 +1,5 @@
-# LLM: 生命周期沿操作→用户→owner quota→JSON短锁发布，未完成物化不得标成enabled。
-# 模块用途: 实现普通本地账号创建、密码管理、启停和与原来源绑定的耐久幂等。
+# LLM: 生命周期沿原锁和CAS发布，入组/初始资格复核旧IM绑定；未完成物化或准入失败不得发布enabled。
+# 模块用途: 实现普通本地账号与审计资格管理，保留原密码、启停、幂等及半成品恢复。
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +15,7 @@ from ..common.nofollow_fs import ensure_private_dir, open_directory_beneath
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.owner_context import validate_local_user_id
 from ..session_lock.passwords import hash_password, validate_password_policy, verify_password
+from .local_user_channel_policy import reject_if_local_user_has_im_binding
 from .local_user_store import LocalUser, parse_local_user
 from .owner_quota import LocalUserQuotaLimits, OwnerQuotaUnavailable, seed_local_user_quota
 from .owner_resolver import OwnerIdentity
@@ -120,8 +121,8 @@ class LocalUserLifecycle:
         if self.revalidate is not None:
             self.revalidate()
 
-    # LLM: 仅local/main，沿原操作→用户锁、绑定摘要、CAS和同文件回执；重放先于CAS，不触及其它owner。
-    # 函数用途: 管理员加入或撤销普通用户的审计组资格并记录修改人和时间。
+    # LLM: 仅local/main，沿原操作→用户锁/CAS/回执；入组含重放先核历史IM绑定，发表前再核，撤组不受此门阻断。
+    # 函数用途: 管理员为纯Web普通用户加入或撤销审计组资格，保留原幂等和审计记录。
     def set_audit_group_membership(self, user_id: str, *, in_audit_group: bool, actor_owner="local/main",
                                    expected_revision: int | None = None, reason: str = "",
                                    idempotency_key: str = "") -> dict:
@@ -148,6 +149,8 @@ class LocalUserLifecycle:
                 record = self.store.read_record(uid)
                 if record is None:
                     raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403)
+                if in_audit_group:
+                    reject_if_local_user_has_im_binding(self.store.root, uid)
                 replay = self.replay(record, op_id)
                 if replay is not None:
                     return replay.user.public_view() | {"replayed": True, "operation_id": op_id}
@@ -163,12 +166,13 @@ class LocalUserLifecycle:
                 record.setdefault("audit_events", []).append({"event": action, "actor_owner": "local/main",
                     "operation_id": op_id, "reason": reason, "revision": user.revision + 1, "at": stamp})
                 self.check_authority()
+                if in_audit_group:
+                    reject_if_local_user_has_im_binding(self.store.root, uid)
                 self.store.save(uid, record)
                 return parse_local_user(record["user"], uid).public_view() | {"replayed": False, "operation_id": op_id}
 
-    # LLM: 初始审计组只接受主管理员；host_options只保留旧quotas别名及actor_owner上下文，未知键先拒绝。
-    #   False沿旧幂等摘要，密码慢散列和权限校验先于写入；外部调用仍须由宿主核验管理员来源。
-    # 函数用途: 在原创建事务里一并设置密码和资格，集中处理宿主上下文/兼容别名，避免业务参数继续膨胀。
+    # LLM: 初始审计组仅管理员，创建/重放同样先核历史IM绑定；False沿旧幂等摘要，原密码/配额/actor合同不变。
+    # 函数用途: 在原创建事务里设置密码和初始资格，阻止借新账号或创建回执绕过入组检查。
     def create(self, user_id, operation=None, *, display_name="", quota=None, password=None,
                idempotency_key=None, in_audit_group=False, **host_options):
         if host_options.keys() - {"actor_owner", "quotas"}:
@@ -205,6 +209,8 @@ class LocalUserLifecycle:
             self.bind_operation(operation, "users.local.create", intent)
             with self.store.locked(("local_users", f"{uid}.json")):
                 record = self.store.read_record(uid)
+                if in_audit_group:
+                    reject_if_local_user_has_im_binding(self.store.root, uid)
                 replay = self.replay(record, op_id)
                 if replay is not None:
                     return replay
@@ -263,8 +269,8 @@ class LocalUserLifecycle:
         self.store.save(uid, record)
         return record
 
-    # LLM: 逐项物化并读回后才发布enabled；失败保留原操作和半成品，不删除用户目录。
-    # 函数用途: 完成同一账号的目录、策略、有限配额和成功回执。
+    # LLM: 逐项物化/读回后且初始审计资格再次通过IM门才发布enabled；失败保留原操作和半成品，不删除目录。
+    # 函数用途: 发布已完成目录、策略和配额的账号；晚到历史绑定保留原失败恢复语义。
     def provision(self, record, limits, op_id):
         uid = record["user"]["user_id"]
         try:
@@ -276,6 +282,8 @@ class LocalUserLifecycle:
             if self.store.directory_identity(("owners", "local", uid)) != record["provision"]["home_identity"]:
                 raise HostAPIError("STORE_UNAVAILABLE", 503)
             self.check_authority()
+            if record["user"].get("in_audit_group") is True:
+                reject_if_local_user_has_im_binding(self.store.root, uid)
             record["user"].update(status="enabled", updated_at=now_utc())
             record["provision"].update(phase="committed", quota_digest=digest(limits.to_dict()))
             record["operations"][op_id] = dict(record["user"])

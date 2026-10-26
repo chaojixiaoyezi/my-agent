@@ -17,6 +17,13 @@ from agent_py_agent.agent.user_space.identity_store import (
 from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
 from agent_py_agent.agent.user_space.local_user_store import LocalUser, LocalUserStore
 from agent_py_agent.agent.user_space.user_auth import _feishu_owner
+from agent_py_agent.tests.test_dual_bot_sessions_and_rollover import (
+    business_call,
+    host_member,
+)
+from agent_py_agent.tests.test_dual_bot_sessions_and_rollover import (
+    wired_host as wired_host,
+)
 
 
 # LLM: 只物化临时受管账号；生产域事务及配额种子不mock。
@@ -58,6 +65,209 @@ def test_t2_membership_admin_cas_and_durable_idempotency(tmp_path):
     for scope in ("local/main", "providers/feishu/users/alice"):
         with pytest.raises(HostAPIError, match="MANAGED_USER_SCOPE_DENIED"):
             setter(scope, in_audit_group=True)
+
+
+@pytest.mark.parametrize("index,target", [
+    ("provider_identity/feishu.jsonl", "alice"),
+    ("provider_identity/feishu.jsonl", "local/alice"),
+    ("linked_identities.jsonl", "alice"),
+    ("linked_identities.jsonl", "local/alice"),
+])
+def test_t2_membership_rejects_active_historical_im_binding(tmp_path, index, target):
+    service = account(tmp_path)
+    path = tmp_path / "identity" / index
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"provider": "local" if index.startswith("provider_identity/") else "feishu",
+           "provider_subject_id": "ou_legacy", "canonical_user_id": "canonical_alice",
+           "owner_kind": "user", "owner_id": target, "status": "active"}
+    path.write_text(json.dumps(row) + "\n")
+    before, bindings = service.store.read_record("alice"), path.read_bytes()
+    with pytest.raises(HostAPIError) as denied:
+        service.set_audit_group_membership("alice", in_audit_group=True,
+            expected_revision=1, idempotency_key="historical_im_join_01")
+    assert (denied.value.code, denied.value.status) == ("MANAGED_USER_WEB_ONLY_CHANNEL_RESTRICTED", 409)
+    assert service.store.read_record("alice") == before
+    assert path.read_bytes() == bindings
+
+
+@pytest.mark.parametrize("index", ["provider_identity/feishu.jsonl", "linked_identities.jsonl"])
+def test_t2_membership_follows_each_binding_index_current_record(tmp_path, index):
+    service = account(tmp_path)
+    path = tmp_path / "identity" / index
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {"provider": "local" if index.startswith("provider_identity/") else "feishu",
+           "provider_subject_id": "ou_legacy", "canonical_user_id": "canonical_alice",
+           "owner_kind": "user", "owner_id": "alice", "status": "active"}
+    # provider模型没有status撤销字段；它必须实际改绑，linked账才使用revoked。
+    current = row | ({"provider": "feishu"} if index.startswith("provider_identity/") else {"status": "revoked"})
+    path.write_text(json.dumps(row) + "\n" + json.dumps(current) + "\n")
+    result = service.set_audit_group_membership("alice", in_audit_group=True)
+    assert result["in_audit_group"] is True
+
+
+@pytest.mark.parametrize("status", ["revoked", "disabled", "actve", "", None, 1])
+def test_t2_provider_binding_extra_status_cannot_revoke_identity(tmp_path, status):
+    service = account(tmp_path)
+    path = tmp_path / "identity/provider_identity/feishu.jsonl"
+    path.parent.mkdir(parents=True)
+    row = ProviderIdentityRecord("local", "ou_legacy", "user", "alice").to_dict() | {"status": status}
+    path.write_text(json.dumps(row) + "\n")
+    with pytest.raises(HostAPIError) as denied:
+        service.set_audit_group_membership("alice", in_audit_group=True)
+    assert (denied.value.code, denied.value.status) == ("MANAGED_USER_WEB_ONLY_CHANNEL_RESTRICTED", 409)
+
+
+@pytest.mark.parametrize("index", ["provider_identity/feishu.jsonl", "linked_identities.jsonl"])
+@pytest.mark.parametrize("damage", ["missing_owner", "bad_owner", "missing_subject", "empty_subject", "owner_space"])
+def test_t2_membership_semantically_corrupt_binding_fails_closed(tmp_path, index, damage):
+    service = account(tmp_path)
+    path = tmp_path / "identity" / index
+    path.parent.mkdir(parents=True)
+    row = {"provider": "local" if index.startswith("provider_identity/") else "feishu",
+           "provider_subject_id": "ou_legacy", "canonical_user_id": "canonical_alice",
+           "owner_kind": "user", "owner_id": "alice", "status": "active"}
+    damaged = dict(row)
+    if damage == "missing_owner":
+        damaged.pop("owner_id")
+    elif damage == "bad_owner":
+        damaged["owner_id"] = None
+    elif damage == "missing_subject":
+        damaged.pop("provider_subject_id")
+    elif damage == "empty_subject":
+        damaged["provider_subject_id"] = ""
+    else:
+        damaged["owner_id"] = "alice "
+    path.write_text(json.dumps(row) + "\n" + json.dumps(damaged) + "\n")
+    before = service.store.read_record("alice")
+    with pytest.raises(HostAPIError) as denied:
+        service.set_audit_group_membership("alice", in_audit_group=True)
+    assert (denied.value.code, denied.value.status) == ("STORE_UNAVAILABLE", 503)
+    assert service.store.read_record("alice") == before
+
+
+@pytest.mark.parametrize("status", ["actve", "", None, 1])
+def test_t2_linked_binding_unknown_status_fails_closed(tmp_path, status):
+    service = account(tmp_path)
+    path = tmp_path / "identity/linked_identities.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"provider": "feishu", "provider_subject_id": "ou_legacy",
+        "canonical_user_id": "canonical_alice", "owner_id": "local/alice", "status": status}) + "\n")
+    with pytest.raises(HostAPIError) as denied:
+        service.set_audit_group_membership("alice", in_audit_group=True)
+    assert (denied.value.code, denied.value.status) == ("STORE_UNAVAILABLE", 503)
+
+
+@pytest.mark.parametrize("index", ["provider_identity/feishu.jsonl", "linked_identities.jsonl"])
+@pytest.mark.parametrize("replay", [False, True])
+def test_t2_creation_initial_membership_obeys_historical_binding_guard(tmp_path, index, replay):
+    service = LocalUserLifecycle(LocalUserStore(tmp_path))
+    if replay:
+        service.create("alice", in_audit_group=True, idempotency_key="initial_group_im_0001")
+    path = tmp_path / "identity" / index
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"provider": "local" if index.startswith("provider_identity/") else "feishu",
+        "provider_subject_id": "ou_legacy", "canonical_user_id": "canonical_alice",
+        "owner_kind": "user", "owner_id": "local/alice", "status": "active"}) + "\n")
+    before = service.store.read_record("alice")
+    with pytest.raises(HostAPIError) as denied:
+        service.create("alice", in_audit_group=True, idempotency_key="initial_group_im_0001")
+    assert (denied.value.code, denied.value.status) == ("MANAGED_USER_WEB_ONLY_CHANNEL_RESTRICTED", 409)
+    assert service.store.read_record("alice") == before
+
+
+def test_t2_initial_membership_rechecks_before_enabled_publication(tmp_path, monkeypatch):
+    service = LocalUserLifecycle(LocalUserStore(tmp_path))
+    seed = service.seed_policies
+
+    def seed_then_bind(uid):
+        seed(uid)
+        path = tmp_path / "identity/linked_identities.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"provider": "feishu", "provider_subject_id": "ou_legacy",
+            "canonical_user_id": "canonical_alice", "owner_id": "local/alice", "status": "active"}) + "\n")
+
+    monkeypatch.setattr(service, "seed_policies", seed_then_bind)
+    with pytest.raises(HostAPIError) as denied:
+        service.create("alice", in_audit_group=True, idempotency_key="initial_group_late_01")
+    assert (denied.value.code, denied.value.status) == ("MANAGED_USER_WEB_ONLY_CHANNEL_RESTRICTED", 409)
+    record = service.store.read_record("alice")
+    assert record["user"]["status"] == "provision_failed" and not record["operations"]
+
+
+@pytest.mark.parametrize("limit", ["files", "bytes"])
+def test_t2_membership_im_index_budget_is_fail_closed(tmp_path, monkeypatch, limit):
+    from agent_py_agent.agent.user_space import local_user_channel_policy as module
+
+    service = account(tmp_path)
+    path = tmp_path / "identity/provider_identity/feishu.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(ProviderIdentityRecord("feishu", "ou_native", "user", "ou_native").to_dict()) + "\n")
+    monkeypatch.setattr(module, "_MAX_BINDING_FILES" if limit == "files" else "_MAX_BINDING_BYTES", 0)
+    with pytest.raises(HostAPIError) as denied:
+        service.set_audit_group_membership("alice", in_audit_group=True)
+    assert (denied.value.code, denied.value.status) == ("STORE_UNAVAILABLE", 503)
+
+
+def test_t2_membership_native_provider_same_name_does_not_block(tmp_path):
+    service = account(tmp_path)
+    link_provider_identity(home_paths(tmp_path), ProviderIdentityRecord("feishu", "ou_native", "user", "alice"))
+    link_provider_identity(home_paths(tmp_path), ProviderIdentityRecord("local", "ou_admin", "main", "main"))
+    assert service.set_audit_group_membership("alice", in_audit_group=True)["in_audit_group"] is True
+
+
+def test_t2_membership_rechecks_im_binding_on_replay_but_allows_revocation(tmp_path):
+    service = member(tmp_path)
+    service.set_audit_group_membership("alice", in_audit_group=True, idempotency_key="legacy_replay_00001")
+    path = tmp_path / "identity/linked_identities.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"provider": "feishu", "provider_subject_id": "ou_legacy",
+        "canonical_user_id": "canonical_alice", "owner_id": "local/alice", "status": "active"}) + "\n")
+    before = service.store.read_record("alice")
+    with pytest.raises(HostAPIError, match="MANAGED_USER_WEB_ONLY_CHANNEL_RESTRICTED"):
+        service.set_audit_group_membership("alice", in_audit_group=True, idempotency_key="legacy_replay_00001")
+    assert service.store.read_record("alice") == before
+    assert service.set_audit_group_membership("alice", in_audit_group=False)["in_audit_group"] is False
+
+
+@pytest.mark.parametrize("invalid", ["corrupt", "symlink"])
+def test_t2_membership_unreadable_im_index_fails_closed(tmp_path, invalid):
+    service = account(tmp_path)
+    path = tmp_path / "identity/linked_identities.jsonl"
+    path.parent.mkdir(parents=True)
+    if invalid == "symlink":
+        target = tmp_path / "untrusted_index"
+        target.write_text("")
+        path.symlink_to(target)
+    else:
+        path.write_text("broken\n")
+    before = service.store.read_record("alice")
+    with pytest.raises(HostAPIError) as denied:
+        service.set_audit_group_membership("alice", in_audit_group=True)
+    assert (denied.value.code, denied.value.status) == ("STORE_UNAVAILABLE", 503)
+    assert service.store.read_record("alice") == before
+
+
+def test_t4_shared_interpreter_and_readiness_contract(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import isolated_unit as module
+    executable, roots = str(tmp_path / "runtime/bin/python3"), (tmp_path / "runtime",)
+    monkeypatch.setattr(module, "_interpreter_runtime", lambda interpreter: (executable, roots), raising=False)
+    sandbox = module.execution_sandbox(tmp_path / "workspace", tmp_path / "stage")
+    assert roots[0] in sandbox.spec.public_read_roots
+    assert sandbox.spec.read_mode == "allowlist" and sandbox.spec.network_access is False
+    seen = []
+    error = RuntimeError("native-readiness-refused")
+
+    def refuse(_sandbox, argv):
+        seen.append(argv)
+        raise error
+
+    monkeypatch.setattr(type(sandbox), "build_argv", refuse)
+    monkeypatch.setattr(module, "_outer_seatbelt_active", lambda: True)
+    with pytest.raises(RuntimeError) as denied:
+        module.IsolatedScriptUnit().execute('print("{}")', {}, workspace=tmp_path / "workspace",
+                                             staging=tmp_path / "stage", timeout_s=1)
+    assert seen[0][0] == executable
+    assert denied.value is error
 
 
 def test_t1_new_binding_denied_before_any_write(tmp_path):
@@ -252,7 +462,8 @@ def test_t4_four_kind_orchestration_source_unchanged_and_private_receipt(tmp_pat
     assert result is not None
     assert result["status"] == "succeeded" and result["result"] == {"value": 17}
     assert result["caller_owner_id"] == result["output_workspace_owner"] == "local/alice"
-    assert calls and calls[0][2] == tmp_path / "owners/local/alice/workspace"
+    # R2B的隔离workspace归本次调用，不再借普通项目目录判断文件归属。
+    assert calls and calls[0][2].parent == calls[0][3] and calls[0][2].name.startswith("workspace-")
     assert calls[0][3].is_relative_to(tmp_path / "owners/local/alice/data/audit_group_exec")
     assert inventory(source) == before
     receipts = list((tmp_path / "owners/local/alice/data/audit_group_exec").rglob("*.json"))
@@ -614,3 +825,128 @@ def test_python_read_guard_keeps_path_types_and_read_boundary(tmp_path, monkeypa
         with pytest.raises(AuditGroupError, match="AUDIT_GROUP_EXECUTION_FAILED"):
             module.IsolatedScriptUnit().execute(code, {}, workspace=workspace, staging=staging, timeout_s=10)
     assert target.read_text() == "abc" and not list(staging.iterdir())
+
+
+@pytest.mark.parametrize("field", ["password", "passwd", "pwd", "secret", "token", "api_key", "apikey",
+    "access_key", "secret_key", "private_key", "credential", "cookie", "session", "authorization",
+    "bearer", "webhook", "ak", "sk", "clientSecret", "refresh_token"])
+def test_r2b_summary_redacts_sensitive_schema_literals_through_nested_nodes(tmp_path, field):
+    from agent_py_agent.agent.audit_group.observation_service import AuditGroupObservationService
+    member(tmp_path)
+    secret_node = {"type": "string", "default": "PlainPass1", "examples": ["Short2"],
+                   "enum": ["Short3"], "const": "Short4"}
+    schema = {"type": "object", "properties": {
+        field: {**secret_node, "items": secret_node, "anyOf": [secret_node],
+                "additionalProperties": secret_node, "properties": {"nested": secret_node}},
+        "count": {"type": "integer", "default": 3, "enum": [1, 3]}}}
+    asset(tmp_path, "script", "sensitive-schema", parameters_schema=schema)
+    page = AuditGroupObservationService(tmp_path).summarize_assets("local/alice", owner_ids=["local/main"])
+    assert page["coverage"] == "complete"
+    projected = page["items"][0]["parameters_schema"]
+    assert projected["properties"]["count"]["default"] == 3
+    assert all(value not in json.dumps(projected) for value in ("PlainPass1", "Short2", "Short3", "Short4"))
+
+
+def test_r2b_host_invoke_selects_monitor_rule(wired_host, monkeypatch):
+    from agent_py_agent.agent.audit_group.blackbox_invoke_service import IsolatedScriptUnit
+    caller = host_member(wired_host)
+    root = wired_host[2].root
+    asset(root, "script", "source_script")
+    scheduler = root / "owners/local/main/data/scheduler"
+    scheduler.mkdir(parents=True, exist_ok=True)
+    rules = [{"id": name, "enabled": True, "use_llm": False,
+              "tool": {"name": "scripts", "arguments": {"action": "run", "script_id": "source_script"}}}
+             for name in ("r1", "r2")]
+    (scheduler / "store.json").write_text(json.dumps({"jobs": {"multi": {
+        "job_id": "multi", "status": "active", "version": 1, "rules": rules}}, "runs": {}}))
+    monkeypatch.setattr(IsolatedScriptUnit, "execute", lambda *_a, **_k: {"value": 17})
+    result = business_call(wired_host, "audit_group.assets.invoke", {
+        "source_owner_id": "local/main", "kind": "monitor", "asset_id": "multi", "rule_id": "r2"},
+        key="r2b_monitor_invoke01", caller=caller)
+    assert result.http_status == 200 and result.data["result"] == {"value": 17}
+
+
+def test_r2b_generated_artifacts_are_sanitized_caller_owned_and_hashed(tmp_path, monkeypatch):
+    from hashlib import sha256
+
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    invocation_assets(tmp_path)
+    home = tmp_path / "owners/local/alice"
+    workspace = home / "workspace"
+    (workspace / "output").mkdir(parents=True)
+    (workspace / "output/old.txt").write_text("not generated by this call")
+
+    def execute(_unit, _code, _inputs, *, workspace, **_kwargs):
+        (workspace / "output").mkdir(exist_ok=True)
+        (workspace / "output/PRIVATE SKILL BODY.txt").write_text("PRIVATE SKILL BODY api_key=synthetic-secret")
+        (workspace / "output/escape").symlink_to(tmp_path / "owners/local/main/scripts/source_script/main.py")
+        return {"value": 17}
+
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", execute)
+    result = module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice",
+        source_owner="local/main", asset_type="skill", asset_id="source_skill")
+    artifacts = result["generated_artifacts"]
+    assert len(artifacts) == 1
+    row = artifacts[0]
+    assert row["relative_path"].startswith("data/audit_group_exec/" + result["invocation_id"] + "/")
+    published = home / row["relative_path"]
+    assert published.is_file() and row["size_bytes"] == published.stat().st_size
+    assert row["sha256"] == sha256(published.read_bytes()).hexdigest()
+    assert "PRIVATE SKILL BODY" not in published.read_text() + json.dumps(result)
+    assert "synthetic-secret" not in published.read_text() + json.dumps(result)
+    assert "old.txt" not in json.dumps(artifacts) and "escape" not in json.dumps(artifacts)
+
+
+def test_r2b_generated_artifact_quota_is_rechecked_after_execution(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+    invocation_assets(tmp_path)
+    home = tmp_path / "owners/local/alice"
+
+    def execute(_unit, _code, _inputs, *, workspace, **_kwargs):
+        (workspace / "result.txt").write_text("output")
+        quota = json.loads((home / "quota.json").read_text())
+        quota["max_disk_mb"] = 1
+        (home / "quota.json").write_text(json.dumps(quota))
+        return {"value": 17}
+
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", execute)
+    with pytest.raises(AuditGroupError, match="AUDIT_GROUP_QUOTA_DENIED"):
+        module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice",
+            source_owner="local/main", asset_type="script", asset_id="source_script")
+    assert not list((home / "data/audit_group_exec").rglob("result.json"))
+
+
+def test_r2b_concurrent_caller_workspace_changes_are_not_invocation_artifacts(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    invocation_assets(tmp_path)
+    workspace = tmp_path / "owners/local/alice/workspace"
+    workspace.mkdir(exist_ok=True)
+
+    def execute(*_args, **_kwargs):
+        (workspace / "private-note.txt").write_text("personal business notes")
+        return {"value": 17}
+
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", execute)
+    result = module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice",
+        source_owner="local/main", asset_type="script", asset_id="source_script")
+    assert result["generated_artifacts"] == []
+    assert (workspace / "private-note.txt").read_text() == "personal business notes"
+
+
+def test_r2b_invalid_artifact_batch_never_publishes_partial_files(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+    invocation_assets(tmp_path)
+    home = tmp_path / "owners/local/alice"
+
+    def execute(_unit, _code, _inputs, *, workspace, **_kwargs):
+        (workspace / "a.txt").write_text("safe first file")
+        (workspace / "z.bin").write_bytes(b"\xff\xfe")
+        return {"value": 17}
+
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", execute)
+    with pytest.raises(AuditGroupError, match="AUDIT_GROUP_ARTIFACT_FORMAT_UNSUPPORTED"):
+        module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset("local/alice",
+            source_owner="local/main", asset_type="script", asset_id="source_script")
+    assert not list((home / "data/audit_group_exec").rglob("artifact-*.txt"))

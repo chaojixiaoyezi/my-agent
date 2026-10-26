@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import time
+from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from ..common.nofollow_fs import (
+    open_directory_beneath,
+    read_bytes_beneath,
+    write_bytes_atomic_beneath,
+)
+from ..user_space.owner_quota import OwnerQuotaChange, owner_quota_enforcer_from_policy
 from ..workflows.script_runner import parse_script_output
 from .access_policy import AuditGroupError
+from .safe_projection import scrub_private_text
 from .source_snapshot import local_skill_id, monitor_action, skill_script
 
 
@@ -123,3 +135,57 @@ def step_inputs(mapping, inputs, results):
         else:
             values[key] = reference
     return values or dict(inputs)
+
+
+# LLM: 仅扫描本次独占workspace元数据，最多4096项，跳过链接/特殊文件；不扫描普通项目或授沙箱写权。
+# 函数用途: 在调用前后记录普通单链接文件身份，区分本次新增与修改的输出。
+def workspace_inventory(workspace):
+    result, count = {}, 0
+    for directory, folders, files, fd in os.fwalk(workspace, follow_symlinks=False):
+        count += len(folders) + len(files)
+        if count > 4096:
+            raise AuditGroupError("AUDIT_GROUP_OUTPUT_LIMIT", status_code=409)
+        for name in files:
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                path = os.path.relpath(os.path.join(directory, name), workspace)
+                result[path] = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return result
+
+
+# LLM: 独占输出先全批有界校验/净化；原配额锁内暂存后同父FD目录原子发表，失败不留部分正式产物。
+# 函数用途: 将本次安全文本产物一次发表到caller自己的执行目录，并返回实际字节元数据。
+def generated_artifacts(home, parts, before, records, *, workspace):
+    after, rows, payloads, total = workspace_inventory(workspace), [], [], 0
+    for path, identity in sorted(after.items()):
+        if before.get(path) == identity:
+            continue
+        if len(rows) >= 32:
+            raise AuditGroupError("AUDIT_GROUP_OUTPUT_LIMIT", status_code=409)
+        raw = read_bytes_beneath(workspace, tuple(path.split(os.sep)), max_bytes=1024 * 1024, require_dir_fd=True)
+        if raw is None or workspace_inventory(workspace).get(path) != identity:
+            raise AuditGroupError("AUDIT_GROUP_ARTIFACT_CHANGED", status_code=409)
+        try:
+            data = scrub_private_text(raw.decode("utf-8"), records).encode("utf-8")
+        except UnicodeError:
+            raise AuditGroupError("AUDIT_GROUP_ARTIFACT_FORMAT_UNSUPPORTED", status_code=409) from None
+        total += len(data)
+        if total > 4 * 1024 * 1024:
+            raise AuditGroupError("AUDIT_GROUP_OUTPUT_LIMIT", status_code=409)
+        target = (*parts, "artifacts", f"artifact-{len(rows) + 1:04d}.txt")
+        payloads.append((target, data))
+        rows.append({"name": scrub_private_text(os.path.basename(path), records)[:128],
+                     "size_bytes": len(data), "sha256": sha256(data).hexdigest(), "relative_path": "/".join(target)})
+    if payloads:
+        quota = owner_quota_enforcer_from_policy(home.home_dir)
+        changes = tuple(OwnerQuotaChange(home.home_dir.joinpath(*target), len(data)) for target, data in payloads)
+        with quota.reserve(changes), TemporaryDirectory(prefix="publish-", dir=home.home_dir.joinpath(*parts)) as temporary:
+            temporary = Path(temporary)
+            for target, data in payloads:
+                write_bytes_atomic_beneath(home.home_dir, (*temporary.relative_to(home.home_dir).parts, target[-1]), data)
+            fd = open_directory_beneath(home.home_dir, parts)
+            try:
+                os.rename(temporary.name, "artifacts", src_dir_fd=fd, dst_dir_fd=fd)
+            finally:
+                os.close(fd)
+    return rows

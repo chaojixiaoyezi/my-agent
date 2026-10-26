@@ -1,3 +1,35 @@
+## 2026-10-26 Wave 5 Track B：审计组只读观察、黑盒调用与双 Bot（源码候选）
+
+```text
+|-- agent_py_agent/agent/audit_group/
+|   |-- __init__.py # 审计组错误、资格校验、观察与黑盒调用公共导出
+|   |-- access_policy.py # 本地审计组成员、实时启停与跨用户范围校验
+|   |-- blackbox_execution.py # 四类同源资产的冻结定义编排与隔离执行
+|   |-- blackbox_invoke_service.py # 宿主黑盒调用、预算、输出净化和私有结果回执
+|   |-- caller_controls.py # 调用者原工具禁用、治理策略与配额复核
+|   |-- isolated_unit.py # 共享规范解释器、只读允许根和禁网原生沙箱执行单元
+|   |-- observation_projection.py # 资产概况、告警筛选和态势汇总安全投影
+|   |-- observation_service.py # 审计组用户、资产、告警和态势的有界只读服务
+|   |-- owner_catalog.py # 已登记用户及来源目录的只读清单和覆盖范围
+|   |-- readonly_store.py # 原身份根下无写入、无链接的资产读取
+|   |-- safe_projection.py # 白名单参数结构、秘密和路径的公开净化
+|   |-- snapshot_guard.py # 原来源锁与双读快照一致性保护
+|   |-- source_snapshot.py # 同源依赖冻结、启停修订复核和禁止跨来源回退
+|   `-- README.md # 审计组领域支持范围、隔离边界及未验证项说明
+|-- agent_py_agent/agent/conversation/bot_sessions.py # 独立双Bot槽位、非打断轮换与耐久提交代次绑定
+|-- agent_py_agent/agent/conversation/bot_tool_policy.py # 只读操作正向白名单、原工具快照交集与当前成员资格
+|-- agent_py_agent/agent/plugin_host/action_specs_audit_bots.py # 审计组及双Bot闭合动作目录和参数规范
+|-- agent_py_agent/agent/plugin_host/audit_bot_v2_handlers.py # 原审计领域与Bot生产入队准备的Host适配
+|-- agent_py_agent/agent/tooling/audit_group_tools.py # 审计组观察与四类黑盒调用工具注册
+|-- agent_py_agent/agent/user_space/local_user_channel_policy.py # 普通本地用户纯Web通道与历史IM绑定入组守卫
+|-- agent_py_agent/tests/test_audit_group_observation_and_invoke.py # 资格、历史绑定、只读观察、隔离及四类调用回归
+`-- agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py # 双Bot轮换、禁学、策略、生产入队与Host范围回归
+```
+
+关键文件说明：`audit_group/observation_service.py` 与 `blackbox_invoke_service.py` 分别守只读公开概况和宿主内存冻结执行；`readonly_store.py`、`snapshot_guard.py` 保留原来源无写入读取边界。`isolated_unit.py` 沿共享解释器选择及原生就绪门执行，不能把Python守卫或外层Seatbelt检测当作原生验收通过。
+
+`bot_sessions.py` 与 `audit_bot_v2_handlers.py` 提供槽位、代次及原队列受理准备；Bot工具消费端完整接线不是本轮修复交付。`local_user_channel_policy.py` 在入组、初始创建、重放及发表前只读复核两类原身份账本：provider额外status不作解绑依据，linked仅接受可解释的活跃/撤销状态；既有活跃IM绑定拒绝409，坏字段或不可安全读取则503，撤组不被此门阻断。当前验收事实见 `TESTS.md` 本轮小节，不将源码候选等同部署完成。
+
 ## 2026-10-26 跨用户资产投递、受管本地用户治理、Plugin Host v2 21 动作与底座耗时/CPU 深度优化（已落地）
 
 ```text

@@ -11,10 +11,10 @@ AUDIT_BOT_ACTIONS = frozenset({
 })
 
 
-# LLM: 只接受两个明确参数名及ops_config别名；一致性由领域归一化验证，不默认覆盖另一参数。
+# LLM: 模式别名仅接受显式execution/ops_config；冲突仍由领域归一化拒绝。
 # 函数用途: 声明双Bot模式选择字段。
 def bot_mode_fields():
-    mode = {"enum": ["query_readonly", "action_avatar", "ops_config"]}
+    mode = {"enum": ["query_readonly", "action_avatar", "ops_config", "execution"]}
     return {"bot_mode": mode, "bot_kind": mode}
 
 
@@ -26,7 +26,7 @@ def page_context_schema():
                        "page": text(256)})
 
 
-# LLM: 目录共用原chat/history/manage/execute/users能力，审计只新增read/invoke两项，不授予跨owner文件读取。
+# LLM: invoke的rule_id只传给原监控规则选择器；目录不授予跨owner文件读取或隐式选择复合规则。
 # 函数用途: 构造六个审计组标准动作。
 def audit_specs():
     owners = {"owner_ids": {"type": "array", "items": text(128, 1), "maxItems": 100}}
@@ -43,11 +43,12 @@ def audit_specs():
         _spec("audit_group.posture.overview", "read", "audit_group.read", closed({}, owners), "audit_group"),
         _spec("audit_group.assets.invoke", "async", "audit_group.invoke execute", closed({
             "source_owner_id": text(128, 1), "kind": {"enum": ["monitor", "workflow", "script", "skill"]},
-            "asset_id": id_schema()}, {"input_params": {"type": "object", "default": {}}}), "audit_group asset"),
+            "asset_id": id_schema()}, {"input_params": {"type": "object", "default": {}},
+                                      "rule_id": {"type": "string"}}), "audit_group asset"),
     ]
 
 
-# LLM: ensure/submit/rollover复用原幂等协议，history仅当前登录owner；线程ID可选但不得替代槽位定位。
+# LLM: history保留归档cursor，另有消息before_cursor；消息页上限15，别名不改变模式权威。
 # 函数用途: 构造四个双Bot标准动作并合入六个审计动作。
 def audit_bot_specs():
     mode = bot_mode_fields()
@@ -62,7 +63,8 @@ def audit_bot_specs():
         _spec("conversations.bots.rollover", "write", "threads.manage", closed({
             "expected_generation": generation, "expected_revision": generation}, mode), "owner bot_slot"),
         _spec("conversations.bots.history.list", "read", "chat.history", closed({}, {
-            **mode, **page_fields(), "mode": {"enum": ["query_readonly", "action_avatar", "ops_config"]},
+            **mode, **page_fields(), "limit": {**integer(15, 1), "default": 15}, "before_cursor": text(2048, 1),
+            "mode": {"enum": ["query_readonly", "action_avatar", "ops_config", "execution"]},
             "since": integer(2**63 - 1), "until": integer(2**63 - 1),
             "alert_id": id_schema(), "query": text(256), "thread_id": id_schema()}), "owner bot_history"),
     ]

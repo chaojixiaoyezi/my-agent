@@ -1,3 +1,9 @@
+## 2026-10-26 WT-AG2-R2B Bot worker工具策略接线（源码候选）
+
+- `request_execution._gateway_run_params` 不再一律拒绝Bot非空工具列表。只有同一owner规范ConversationStore中的受保护Bot线程、代次、禁学字段及原input receipt冻结策略全部一致时，才把 `bot_request_allowed_tools` 生成的真实快照交集交给原RunParams；普通插件非空策略仍拒绝。
+- 执行前现查账号enabled、治理版本、owner权限/禁用工具和所需审计组成员资格；没有凭排队时的成员布尔值扩权。`execution`与`ops_config`归一为`action_avatar`。不新增handler、配置开关或第二执行队列，不修改隔离单元和授权模块。
+- 新增37项R2B回归通过；指定双文件123通过、4失败，四项同节点在准确起点`4289922d083c94446d4eb23b65718b45c849b40a`独立worktree同现。原生网络隔离和三类授权状态码失败仍须对应负责人协调；临时文件产物仅替身边界验证，真实隔离单元仍禁写。未部署，详细证据与命令见[TESTS.md](../../../TESTS.md)。
+
 ## 2026-10-26 网关 04:00 安全重启死锁修复、看门狗日志分离、管理员日志自诊与维护账本裁剪（已实现）
 
 - **网关 04:00 安全重启死锁修复（`supervisor.py`、`standalone_stop.py`、`standalone_lifecycle.py`）**：`SupervisorConfig.max_restart_attempts` 默认提升至 `20`，看门狗自身日志默认写入独立 `logs/supervisor.log`；看门狗感知 `gateway_state.json` 的 `planned_restart` 交接期（带 180 秒陈旧上限或真实存活进程核验），在交接期内等待原进程退出而不消耗崩溃重启配额，若旧进程逾时未退则基于 `pid + birth_token` 执行 `SIGTERM -> SIGKILL` 有序回收；`coordinator.lock` 写入持锁者诊断 JSON 并在冲突日志中输出持锁方身份；连续健康运行满 600 秒才重置重启计数。

@@ -1,4 +1,4 @@
-# LLM: 只沿可信root的nofollow文件链读，拒绝未完成资产事务；不调用会mkdir/恢复/建锁的资产Store。
+# LLM: 只沿可信root的nofollow链读，技能合并来源启停策略且绑定修订；拒绝未完成事务，不调用有写副作用的Store。
 # 模块用途: 为观察和冻结执行提供单一无写入文件读取器。
 from __future__ import annotations
 
@@ -14,6 +14,12 @@ from ..user_space.owner_resolver import resolve_owner_home
 from .access_policy import AuditGroupError, owner_identity
 
 KINDS = ("script", "skill", "workflow", "monitor", "datasource")
+
+
+# LLM: 同时属于原ValueError读取失败合同与审计领域错误；观察端保partial，黑盒端保SOURCE_UNAVAILABLE/503。
+# 类用途: 在不改调用方catch链的前提下标识损坏或不可读的来源技能策略，不公开原异常正文。
+class _SkillPolicyUnavailable(AuditGroupError, ValueError):
+    pass
 
 
 # LLM: 每份JSON最多4MiB，重复字段与NaN拒绝；不存在与损坏分开。
@@ -63,7 +69,7 @@ def asset_identifier(value):
     return value
 
 
-# LLM: home只由owner_resolver产生，metadata不授路径；不创建source_home或锁。
+# LLM: home只由owner_resolver产生，metadata不授路径；技能策略只能从source_home冷读，不创建目录或锁。
 # 类用途: 对一个准确owner读取资产定义、运行状态和依赖。
 class ReadonlyAssetStore:
     # LLM: 冷构造无IO；root规范化仅针对宿主输入。
@@ -117,8 +123,8 @@ class ReadonlyAssetStore:
                 raise ValueError("source listing limit")
         return sorted(result)
 
-    # LLM: 读取同owner元数据，monitor修订合并binding和job；绝不从job.prompt生成summary。
-    # 函数用途: 冻结资产定义及内部正文，调用方只能公开白名单投影。
+    # LLM: 同owner技能禁用策略与定义共同决定enabled和修订；monitor合并binding/job，正文只在宿主内存。
+    # 函数用途: 冻结定义、启停和内部正文，调用方只能公开白名单投影，坏策略不得按启用处理。
     def get(self, kind, identifier, *, skill_parts=None):
         identifier = asset_identifier(identifier)
         if kind == "monitor":
@@ -142,8 +148,17 @@ class ReadonlyAssetStore:
             self.check_transaction(*parts)
             body = self.text(*parts, "SKILL.md")
             meta = self.object(*parts, "skill_meta.json") or {}
+            try:
+                policy = self.object("data", "skill_policy.json") or {}
+                disabled = policy.get("disabled_skills", [])
+                if type(disabled) is not list or any(type(item) is not str for item in disabled):
+                    raise ValueError("invalid skill policy")
+            except (OSError, ValueError, RecursionError):
+                raise _SkillPolicyUnavailable("SOURCE_UNAVAILABLE", status_code=503) from None
             data = {**split_skill_frontmatter(body)[0], **meta, "body_markdown": body}
-            data.update(id=identifier, kind="skill", revision=sha256((body + json.dumps(meta, sort_keys=True)).encode()).hexdigest())
+            enabled = data.get("enabled", True) is True and identifier not in disabled and f"owner:{identifier}" not in disabled
+            revision = sha256((body + json.dumps(meta, sort_keys=True) + json.dumps(sorted(set(disabled)))).encode()).hexdigest()
+            data.update(id=identifier, kind="skill", enabled=enabled, revision=revision)
             return data
         collection = {"script": "scripts", "workflow": "workflows", "datasource": "datasources"}[kind]
         self.check_transaction(collection, identifier)

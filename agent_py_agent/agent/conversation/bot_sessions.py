@@ -43,33 +43,108 @@ def bot_thread_fields(thread):
     return {key: thread.metadata[key] for key in PROTECTED_BOT_FIELDS if key in thread.metadata}
 
 
-# LLM: 打开消息尾窗口而非调用会全扫前缀的history_page；只返回公开投影，截断首行不解析为完整记录。
-# 函数用途: 从canonical日志尾部返回最多15条且正文总量有界的公开消息。
-def recent_bot_messages(store, thread_id, *, max_messages=15, byte_budget=16384):
-    from ..plugin_host.history import _entry, _message, _open, _visible_content
+# LLM: 固定块逆读且拼齐完整JSONL行；单行超过原历史上限明确拒绝，不把64KiB首片丢失当空历史。
+# 函数用途: 从给定字节边界向前生成完整行及其起点，不扫描无关前缀。
+def _reverse_bot_lines(handle, through):
+    from ..plugin_host.history import HISTORY_RECORD_MAX_BYTES
+    position, pending, end = through, b"", through
+    while position:
+        start = max(0, position - TAIL_BYTES)
+        handle.seek(start)
+        chunk = handle.read(position - start)
+        if len(chunk) != position - start:
+            raise HostAPIError("CURSOR_EXPIRED", 409)
+        pending, position = chunk + pending, start
+        while (separator := pending.rfind(b"\n", 0, len(pending) - 1)) >= 0:
+            raw, pending = pending[separator + 1:], pending[:separator + 1]
+            if len(raw) > HISTORY_RECORD_MAX_BYTES:
+                raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+            end -= len(raw)
+            yield raw, end
+        if len(pending) > HISTORY_RECORD_MAX_BYTES:
+            raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+    if pending:
+        yield pending, 0
 
-    try:
-        with _open(store, thread_id) as handle:
-            size = handle.seek(0, 2)
-            offset = max(0, size - TAIL_BYTES)
-            handle.seek(offset)
-            data = handle.read(TAIL_BYTES)
-    except FileNotFoundError:
-        return []
-    if offset:
-        data = data.partition(b"\n")[2]
-    rows, used = [], 0
-    for raw in reversed(data.splitlines(keepends=True)):
-        entry = _entry(raw, thread_id)
-        visible = _visible_content(entry)
-        if visible is None:
+
+# LLM: thread_ids只能由已核owner/模式的canonical代次构造；before绑定逻辑线程/FD身份/行边界，内部工具行不公开。
+# 函数用途: 逆序跨代读取一页至多15条可见user/assistant消息，输出按时间正序及下页边界。
+def bot_message_page(store, thread_ids, *, limit=15, byte_budget=16384, before=None):
+    from ..plugin_host.history import _entry, _message, _open, _visible_content
+    if type(limit) is not int or not 1 <= limit <= 15:
+        raise HostAPIError("INVALID_SCHEMA", 400)
+    if before and before.get("thread_id") not in thread_ids:
+        raise HostAPIError("CURSOR_EXPIRED", 409)
+    start = thread_ids.index(before["thread_id"]) if before else 0
+    rows, used, next_position = [], 0, None
+    for tid in thread_ids[start:]:
+        try:
+            handle = _open(store, tid)
+        except FileNotFoundError:
+            if before and tid == before["thread_id"]:
+                raise HostAPIError("CURSOR_EXPIRED", 409) from None
             continue
-        row = _message(entry, visible, 0, max(0, byte_budget - used))
-        rows.append(row)
-        used += len(row["content"].encode())
-        if len(rows) >= min(15, max_messages) or used >= byte_budget:
-            break
-    return list(reversed(rows))
+        with handle:
+            info = os.fstat(handle.fileno())
+            identity = [info.st_dev, info.st_ino]
+            through = before["offset"] if before and tid == before["thread_id"] else info.st_size
+            if (type(through) is not int or not 0 <= through <= info.st_size
+                    or before and tid == before["thread_id"] and before.get("identity") != identity):
+                raise HostAPIError("CURSOR_EXPIRED", 409)
+            for raw, offset in _reverse_bot_lines(handle, through):
+                entry = _entry(raw, tid)
+                visible = _visible_content(entry) if entry.role in {"user", "assistant"} else None
+                if visible is None:
+                    continue
+                if len(rows) >= limit or used >= byte_budget:
+                    return {"messages": list(reversed(rows)), "before": next_position, "has_more": True}
+                row = _message(entry, visible, offset, byte_budget - used)
+                rows.append(row)
+                used += len(row["content"].encode())
+                next_position = {"thread_id": tid, "offset": offset, "identity": identity}
+    return {"messages": list(reversed(rows)), "before": None, "has_more": False}
+
+
+# LLM: 只扩展同owner/home/slot/mode的已归档代次，最多4096条；不从索引摘要获取正文或跨到更晚代次。
+# 函数用途: 从canonical归档账找到当前Bot线程之前的同槽位线程。
+def _recent_bot_threads(store, thread_id):
+    thread = store.threads.require(thread_id)
+    fields = bot_thread_fields(thread)
+    if not fields or fields.get("bot_generation", 1) <= 1:
+        return [thread_id]
+    try:
+        fd = open_directory_beneath(thread.owner_home, (*_PREFIX, "history"))
+    except FileNotFoundError:
+        return [thread_id]
+    rows = []
+    try:
+        with os.scandir(fd) as entries:
+            for index, item in enumerate(entries):
+                if index >= 4096:
+                    raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+                if not item.name.endswith(".json"):
+                    continue
+                validate_opaque_id(item.name[:-5], kind="thread")
+                raw = read_bytes_beneath(thread.owner_home, (*_PREFIX, "history", item.name), max_bytes=_MAX_STATE)
+                row = json.loads(raw)
+                if row["bot_mode"] != fields["bot_mode"] or row["generation"] >= fields["bot_generation"]:
+                    continue
+                previous = store.threads.require(row["thread_id"])
+                if (previous.owner_id != thread.owner_id or previous.owner_home != thread.owner_home
+                        or previous.metadata.get("bot_slot_id") != fields["bot_slot_id"]
+                        or previous.metadata.get("bot_mode") != fields["bot_mode"]):
+                    raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+                rows.append(row)
+    finally:
+        os.close(fd)
+    return [thread_id, *(row["thread_id"] for row in sorted(rows, key=lambda row: row["generation"], reverse=True))]
+
+
+# LLM: 缺消息时从canonical同槽位旧代补齐；before只在已核线程集合中定位，正文仍限可见角色及字节预算。
+# 函数用途: 返回最近消息列表，跨代分页元数据由bot_message_page统一生成。
+def recent_bot_messages(store, thread_id, *, max_messages=15, byte_budget=16384, thread_ids=None, before_cursor=None):
+    return bot_message_page(store, thread_ids if thread_ids is not None else _recent_bot_threads(store, thread_id), limit=min(15, max_messages),
+                            byte_budget=byte_budget, before=before_cursor)["messages"]
 
 
 # LLM: 文件路径仅由可信home和固定组件构造；回执独立小文件避免槽位JSON随调用历史无限增长。
@@ -169,22 +244,24 @@ class BotSessionStorage:
             os.close(descriptor)
         return sorted(rows, key=lambda row: (row["archived_at"], row["thread_id"]), reverse=True)
 
-    # LLM: MAC游标共用Host原绑定，owner/安装/过滤/快照变化均过期；显示摘要不替代线程归属与鲜活授权。
-    # 函数用途: 按模式、时间、告警与关键词分页返回本人的归档代次。
+    # LLM: 摘要与消息各自使用原Host MAC游标；只同owner/模式跨代，before不会更换摘要筛选或授予线程权限。
+    # 函数用途: 保留归档摘要合同，同时返回至多15条跨代可见消息与独立向前游标。
     def history(self, payload, authorized, context, codec):
         from ..plugin_host.conversations import BoundCursor
 
         self.check_access()
         if context.owner_home.home_dir != self.home.home_dir or context.identity != self.home.identity:
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
-        filters = {key: value for key, value in payload.items() if key != "cursor"}
+        filters = {key: value for key, value in payload.items() if key not in {"cursor", "before_cursor"}}
         mode = payload.get("mode") or payload.get("bot_mode") or payload.get("bot_kind")
         mode = normalize_bot_mode(mode) if mode else None
         cursor = BoundCursor(codec, authorized, context, filters)
         saved = cursor.decode(payload.get("cursor"))
         rows = self.archived_generations()
         tid = payload.get("thread_id")
-        if tid and not any(row["thread_id"] == tid for row in rows):
+        state = self.read(_SLOTS) or {"slots": {}}
+        active = [slot["active_thread_id"] for slot in state["slots"].values()]
+        if tid and tid not in active and not any(row["thread_id"] == tid for row in rows):
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
         query = payload.get("query", "").casefold()
         rows = [row for row in rows if (not tid or row["thread_id"] == tid)
@@ -197,11 +274,36 @@ class BotSessionStorage:
         if saved and (saved["anchor"] != anchor or saved["offset"] > len(rows)):
             raise HostAPIError("CURSOR_EXPIRED", 409)
         offset = saved["offset"] if saved else 0
-        selected = rows[offset:offset + payload.get("limit", 50)]
+        selected = rows[offset:offset + payload.get("limit", 15)]
         end = offset + len(selected)
         token = cursor.encode(anchor, end, saved["expires"] if saved else time.time() + 900) if end < len(rows) else None
+        messages = self.message_history(payload, rows, mode or "query_readonly", authorized, context, codec)
         self.check_access()
-        return {"items": selected, "next_cursor": token, "complete": token is None, "snapshot_id": _digest(anchor)}
+        return {"items": selected, "archived_generations": selected, "next_cursor": token,
+                "complete": token is None, "snapshot_id": _digest(anchor), **messages}
+
+    # LLM: 历史集合来自slots及原归档摘要；每代冷核owner/home/模式，MAC绑定完整筛选，不能用另一模式游标读消息。
+    # 函数用途: 读取当前及归档Bot代次的可见消息并签发向前分页游标。
+    def message_history(self, payload, archives, mode, authorized, context, codec):
+        from ..plugin_host.conversations import BoundCursor
+        filters = {key: value for key, value in payload.items() if key not in {"cursor", "before_cursor"}}
+        cursor = BoundCursor(codec, authorized, context, {**filters, "projection": "bot_messages"})
+        saved = cursor.decode(payload.get("before_cursor"))
+        state = self.read(_SLOTS) or {"slots": {}}
+        slot = state["slots"].get(mode)
+        tids = ([slot["active_thread_id"]] if slot else []) + [row["thread_id"] for row in
+            sorted(archives, key=lambda row: row["generation"], reverse=True) if row["bot_mode"] == mode]
+        tids = list(dict.fromkeys(tids))
+        if payload.get("thread_id"):
+            tids = [tid for tid in tids if tid == payload["thread_id"]]
+        for tid in tids:
+            thread = self.store.threads.require(tid)
+            if (thread.owner_id != self.home.owner_id or thread.owner_home != str(self.home.home_dir)
+                    or thread.metadata.get("bot_mode") != mode):
+                raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+        page = bot_message_page(self.store, tids, limit=payload.get("limit", 15), before=saved["anchor"] if saved else None)
+        token = cursor.encode(page["before"], 0, saved["expires"] if saved else time.time() + 900) if page["has_more"] else None
+        return {"messages": page["messages"], "next_before_cursor": token, "has_more": page["has_more"]}
 
 
 # LLM: 公共入口先重核owner；未结事务只准原意图恢复，保存before_slots以确定性重建同一代，绝不重复生成线程。

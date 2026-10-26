@@ -163,7 +163,8 @@ def test_rollover_keeps_claim_goal_and_old_task_writes(bot):
     assert bot.store.goals.list_report(tid)[0][0].goal_id == goal.goal_id
     bot.append(tid, "assistant", "旧代后台结果", {"background_transcript_request_id": "old-request"})
     assert recent_bot_messages(bot.store, tid)[0]["content"] == "旧代后台结果"
-    assert not recent_bot_messages(bot.store, result["active_thread_id"])
+    # R2B改为同槽位跨代展示，旧代后台写入仍留在原线程而可在最近消息中读取。
+    assert [row["content"] for row in recent_bot_messages(bot.store, result["active_thread_id"])] == ["旧代后台结果"]
 
 
 def test_replays_conflicts_and_live_disabled_status(bot):
@@ -542,3 +543,140 @@ def test_real_host_corrupt_source_replay_preflight_returns_structured_unavailabl
             "source_owner_id": "local/main", "kind": "script", "asset_id": "corrupt-source"},
             key="corrupt_source_key_001", caller=caller)
     assert error.value.code == "AUDIT_GROUP_EXECUTION_UNAVAILABLE" and error.value.status == 503
+
+
+def test_r2b_recent_messages_walk_complete_lines_and_exclude_internal_roles(bot):
+    tid = bot.manager.ensure({}, "r2b_ensure_recent01")["active_thread_id"]
+    for index in range(16):
+        bot.append(tid, "user", f"visible-{index}")
+    bot.append(tid, "system", "private system")
+    bot.append(tid, "tool", "x" * 70000)
+    bot.append(tid, "assistant", "private reasoning", {"phase": "analysis"})
+    rows = recent_bot_messages(bot.store, tid)
+    assert [row["content"] for row in rows] == [f"visible-{index}" for index in range(1, 16)]
+    assert all(row["role"] in {"user", "assistant"} for row in rows)
+
+
+def test_r2b_host_cross_generation_message_history_and_before_cursor(wired_host):
+    from types import SimpleNamespace
+    host = wired_host
+    caller = host_member(host)
+    resources = host[0].plugin_host.composition.ports.observations.services.resources
+    home = resources.users.owner_home("alice")
+    store = resources.store_for(SimpleNamespace(owner_home=home))
+    first = business_call(host, "conversations.bots.ensure", {}, key="r2b_history_ensure01", caller=caller).data
+    for index in range(20):
+        store.messages.append({"thread_id": first["active_thread_id"], "role": "user", "content": f"old-{index}"})
+    second = business_call(host, "conversations.bots.rollover", {
+        "expected_generation": 1, "expected_revision": 1}, key="r2b_history_rotate01", caller=caller).data
+    for index in range(5):
+        store.messages.append({"thread_id": second["active_thread_id"], "role": "assistant", "content": f"new-{index}"})
+    page = thaw(business_call(host, "conversations.bots.history.list", {}, caller=caller).data)
+    assert "archived_generations" in page and page["items"] == page["archived_generations"]
+    assert [row["content"] for row in page["messages"]] == [f"old-{i}" for i in range(10, 20)] + [f"new-{i}" for i in range(5)]
+    assert page["has_more"] and page["next_before_cursor"]
+    tail = thaw(business_call(host, "conversations.bots.history.list", {
+        "before_cursor": page["next_before_cursor"]}, caller=caller).data)
+    assert [row["content"] for row in tail["messages"]] == [f"old-{i}" for i in range(10)]
+    assert not tail["has_more"] and tail["next_before_cursor"] is None
+    with pytest.raises(HostAPIError, match="CURSOR_EXPIRED"):
+        business_call(host, "conversations.bots.history.list", {
+            "before_cursor": page["next_before_cursor"], "bot_mode": "execution"}, caller=caller)
+
+
+def test_r2b_execution_alias_is_host_compatible():
+    assert normalize_bot_mode("execution", "ops_config") == "action_avatar"
+    assert action_spec("conversations.bots.ensure").validate_payload({"bot_mode": "execution"})["bot_mode"] == "execution"
+
+
+def test_r2b_recent_messages_fill_from_same_owner_mode_archived_generations(bot):
+    first = bot.manager.ensure({}, "r2b_recent_cross01")
+    bot.append(first["active_thread_id"], "user", "old readonly")
+    action = bot.manager.ensure({"bot_mode": "execution"}, "r2b_other_mode_001")
+    bot.append(action["active_thread_id"], "user", "not this mode")
+    current = bot.manager.rollover({"expected_generation": 1, "expected_revision": 1}, "r2b_recent_rotate01")
+    bot.append(current["active_thread_id"], "assistant", "new readonly")
+    assert [row["content"] for row in recent_bot_messages(bot.store, current["active_thread_id"])] == [
+        "old readonly", "new readonly"]
+
+
+def test_r2b_queued_audit_query_rechecks_membership_after_queue(wired_host, monkeypatch):
+    from agent_py_agent.agent.audit_group.access_policy import AuditGroupError
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_run_params
+    from agent_py_agent.agent.plugin_host import gateway_runtime
+    original = gateway_runtime.bot_execution_policy
+
+    # 仅替代宿主已核工具集合边界；原入队回执、worker复验和实时撤权均运行真实实现。
+    def issued_policy(*args):
+        policy = original(*args)
+        return {**policy, "tool_names": [*policy["tool_names"], "audit_group_query"]}
+
+    monkeypatch.setattr(gateway_runtime, "bot_execution_policy", issued_policy)
+    inputs = queued_bot_params(wired_host)
+    business_call(wired_host, "users.local.audit_group.set", {
+        "user_id": "alice", "in_audit_group": False, "expected_revision": 2}, key="r2b_queue_revoke01")
+    with pytest.raises(AuditGroupError, match="AUDIT_GROUP_ACCESS_DENIED"):
+        _gateway_run_params(inputs)
+
+
+# LLM: 使用真正Host排队信封与canonical线程；只为参数构造器注入无模型的Agent上界，不代替完整worker运行。
+# 函数用途: 把一条真实queued Bot请求交到原worker参数入口，供正反权限测试复用。
+def queued_bot_params(host, *, mode="query_readonly"):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_context import (
+        GatewayAskRunContext,
+        GatewayConversationLoadRequest,
+        gateway_conversation_context,
+    )
+    from agent_py_agent.agent.gateway_parts.request_execution import _GatewayRunParamsRequest
+    from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+    from agent_py_agent.agent.tooling._filesystem_write import WriteFileTool
+    from agent_py_agent.agent.tooling.models import ToolRuntime, ToolRuntimeSnapshot
+
+    caller = host_member(host)
+    sent = business_call(host, "conversations.bots.submit", {"text": "查当前告警", "bot_mode": mode},
+                         key="r2b_worker_submit01", caller=caller).data
+    resources = host[0].plugin_host.composition.ports.observations.services.resources
+    home = resources.users.owner_home("alice")
+    paths = resources.paths_for(SimpleNamespace(owner_home=home))
+    path = paths.inbox / (sent["request_id"] + ".json")
+    request = json.loads(path.read_text())
+    tools = (ReadFileTool(home.workspace_dir, max_chars=1000), WriteFileTool(home.workspace_dir))
+    runtimes = tuple(ToolRuntime(tool.model_spec, tool.runtime_policy, tool) for tool in tools)
+    snapshot = ToolRuntimeSnapshot(run_id="worker-bot", runtimes=runtimes,
+        available_tool_names=frozenset({"read_file", "write_file"}), unavailable_tools=(), allowed_tools=None)
+    agent = SimpleNamespace(config=SimpleNamespace(my_agent_home=str(home.root)), home_paths=home,
+        conversation_store=resources.store_for(SimpleNamespace(owner_home=home)),
+        tools=SimpleNamespace(runtime_snapshot=lambda **_kwargs: snapshot))
+    conversation = gateway_conversation_context(GatewayConversationLoadRequest(agent, request, request["id"], "查当前告警"))
+    ctx = GatewayAskRunContext(agent, request, path, paths.responses / (request["id"] + ".json"), request["id"], None)
+    return _GatewayRunParamsRequest(request, ctx, conversation, "查当前告警")
+
+
+@pytest.mark.parametrize("mode,expected", [("query_readonly", {"read_file"}),
+                                           ("action_avatar", {"read_file", "write_file"})])
+def test_r2b_queued_bot_worker_accepts_only_bot_owner_intersection(wired_host, mode, expected):
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_run_params
+    inputs = queued_bot_params(wired_host, mode=mode)
+    params = _gateway_run_params(inputs)
+    assert set(params.allowed_tools) == expected
+
+
+@pytest.mark.parametrize("field,value", [("bot_generation", 999), ("learning_excluded", False),
+                                         ("thread_id", "thread-other"), ("bot_mode", "action_avatar")])
+def test_r2b_queued_bot_rejects_forged_policy(wired_host, field, value):
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_run_params
+    inputs = queued_bot_params(wired_host)
+    inputs.request["metadata"]["plugin_execution_policy"][field] = value
+    with pytest.raises((RuntimeError, HostAPIError)):
+        _gateway_run_params(inputs)
+
+
+def test_r2b_queued_bot_cannot_expand_the_host_issued_tool_names(wired_host):
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_run_params
+    inputs = queued_bot_params(wired_host)
+    inputs.request["metadata"]["plugin_execution_policy"]["tool_names"].append("write_file")
+    with pytest.raises(HostAPIError, match="BOT_TOOL_DENIED"):
+        _gateway_run_params(inputs)

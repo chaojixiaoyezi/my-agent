@@ -1,5 +1,5 @@
-# LLM: A0为B/C/D提供冻结DTO与固定导入面；DTO不构成授权，写端仍需重核真实issuer。
-# 模块用途: 定义插件宿主v2调用、固定安装和独立的可选宿主调用者；DTO本身不授权限。
+# LLM: A0提供冻结DTO；审计selector与普通local UID分责校验，DTO不授权，后续范围及写端仍重核真实issuer。
+# 模块用途: 定义插件宿主v2调用与独立调用者，将闭合参数解码和身份范围授权分开。
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -193,8 +193,8 @@ class HostDomainPorts:
     observations: object = None
 
 
-# LLM: 治理固定管理员且拒as_user；投递仅解码现有as_user合同，effective owner仍由原issuer逐次鉴权，payload选择器不授权。
-# 函数用途: 校验并冻结调用，区分管理员治理目标与可授权代用户的资产投递。
+# LLM: 治理和审计组拒as_user；审计组selector交原managed范围门统一403，其余local动作保留严格UID校验，DTO不授权。
+# 函数用途: 校验冻结调用并区分受管选择器、普通本地账号和资产投递的身份边界。
 def decode_call(raw: bytes) -> Call:
     row = validate_object(strict_json(raw), closed({
         "schema": {"const": "plugin_host_call.v2"}, "action": text(96, 1), "payload": {"type": "object"}}, {
@@ -208,7 +208,8 @@ def decode_call(raw: bytes) -> Call:
         raise HostAPIError("INVALID_SCHEMA")
     reject_identity_injection(row["payload"], users)
     payload = spec.validate_payload(row["payload"])
-    if row["action"].startswith("users.local.") and "user_id" in payload:
+    if (row["action"].startswith("users.local.") and row["action"] != "users.local.audit_group.set"
+            and "user_id" in payload):
         validate_local_user_id(payload["user_id"])
     target = validate_local_user_id(row["as_user"]["user_id"]) if "as_user" in row else None
     return Call(row["schema"], row["action"], payload, row.get("idempotency_key"), target)

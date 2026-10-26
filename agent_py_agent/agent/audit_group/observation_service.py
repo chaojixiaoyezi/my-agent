@@ -1,4 +1,4 @@
-# LLM: 所有跨owner查询只投影白名单字段，不执行资产存储构造器。
+# LLM: 所有跨owner查询只投影白名单，态势筛选复用已登记owner校验；不执行资产存储构造器。
 # 模块用途: 聚合成员可见的账号、资产、告警与态势。
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def filter_alerts(rows, severity, status, since, errors):
     return selected
 
 
-# LLM: 冷绑定宿主root，不初始化任何source目录。
+# LLM: 冷绑定宿主root，态势过滤与资产/告警共用选择器，不初始化任何source目录或缓存成员资格。
 # 类用途: 提供跨用户的只读安全摘要。
 class AuditGroupObservationService:
     # LLM: root只能来自宿主构造，不从请求替换。
@@ -101,11 +101,16 @@ class AuditGroupObservationService:
         require_audit_group_member(self.root_dir, caller_owner)
         return page(rows, cursor, limit, [*errors, *failures], query=[owners, severity, status, since])
 
-    # LLM: 聚合只读来源并保留partial事实。
-    # 函数用途: 汇总全局计数。
-    def posture_overview(self, caller_owner):
+    # LLM: 未传筛选沿原全局统计，显式空集合不扩大为全量；仅选已登记owner，重复来源错误只记一次。
+    # 函数用途: 汇总全局或指定用户的态势计数，首末重核成员并保留partial事实。
+    def posture_overview(self, caller_owner, *, owner_ids=None, target_owner=""):
         require_audit_group_member(self.root_dir, caller_owner)
         owners, errors = registered_owners(self.root_dir)
+        if owner_ids is not None or target_owner:
+            selected, selection_errors = selected_owners(self.root_dir, owner_ids, target_owner)
+            selected = set(selected)
+            owners = [row for row in owners if row["owner_id"] in selected]
+            errors.extend(error for error in selection_errors if error not in errors)
         ids = [row["owner_id"] for row in owners]
         assets, asset_errors = collect_assets(self.root_dir, ids, KINDS[:4])
         alerts, alert_errors = collect_alerts(self.root_dir, ids)

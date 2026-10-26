@@ -1,5 +1,5 @@
-# LLM: 每次授权/返回/写入前读取原安装；目录权限取effective_owner而非管理员安装者，来源登记不另建执行账。
-# 模块用途: 绑定真实安装与认证调用者，核对能力、普通目标及显式工作目录边界。
+# LLM: 每次授权/返回/写入前读取原安装；审计资格共用managed范围门，目录仍取effective_owner，来源不另建执行账。
+# 模块用途: 绑定真实调用者与安装，核对受管选择器、普通目标、能力及工作目录边界。
 from __future__ import annotations
 
 import hashlib
@@ -343,14 +343,14 @@ def _requires_execution(call: Call) -> bool:
                                                  and call.payload.get("tool_policy") == "bounded")
 
 
-# LLM: 治理selector只按固定local别名归一化并核manageable名单；IM/main不得因通配而放行。
-# 函数用途: 拒绝明确不在批准范围的用户与工具。
+# LLM: 治理及审计组资格共用managed selector门，普通local动作保留原404；IM/main即使通配仍403。
+# 函数用途: 先区分受管身份范围，再核对普通账号和工具授权，避免审计组动作落错错误码。
 def _check_static_scope(call: Call, grant: dict) -> None:
-    if call.action.startswith(("users.managed.", "governance.reviews.")):
+    if call.action.startswith(("users.managed.", "governance.reviews.")) or call.action == "users.local.audit_group.set":
         values = [managed_user_id(call.payload[key]) for key in ("user_id", "target_owner_id") if key in call.payload]
         if len(set(values)) > 1 or any(uid not in grant["manageable_user_ids"] and "*" not in grant["manageable_user_ids"] for uid in values):
             raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403)
-    if call.action.startswith("users.local.") and "user_id" in call.payload:
+    elif call.action.startswith("users.local.") and "user_id" in call.payload:
         from .owner_context import validate_local_user_id
         uid = validate_local_user_id(call.payload["user_id"])
         key = "creatable_user_ids" if call.action == "users.local.create" else "manageable_user_ids"

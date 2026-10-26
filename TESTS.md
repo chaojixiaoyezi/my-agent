@@ -1,3 +1,78 @@
+## 2026-10-26 WT-AG2-R2：Stage 3 源码修正（原生执行门未通过）
+
+来源：`07-tasks/wave5-ag2-round2-fix-20261026.md`；仅在本轮指定新工作树修复，准确基线 `4289922d083c94446d4eb23b65718b45c849b40a`，不改旧工作树、不部署、不推送。下方Part 2/AG1小节保留历史原结果，不作为本轮状态。
+
+- P0-1：`isolated_unit.py` 复用 `script_runner._interpreter_runtime("python3")` 的规范解释器和只读根，保留 `build_argv/require_ready`、allowlist、禁网和只读策略。新增根/argv一致性及就绪拒绝原样透传的合同测试，不把该替身测试当原生执行证明。
+- P0-2：`authorization._check_static_scope` 将审计组资格动作归入 `managed_user_id` 门；另同步 `contracts.decode_call` 的前置通用local UID校验，将此动作交同一范围门返回403，避免合法形状的保留名/非本地选择器先被误归400。其余local动作保留原校验和404合同。
+- P0-3：飞书显式绑定正例改为规范provider用户 `ou_canonical`，核对原空间、登录与会话；保留普通本地用户IM拒绝403及原管理员认证禁止测试，不通过改生产认证门来迁就测试。
+- P1-1：入审计组及其重放核两类原JSONL身份账本；先校验全部记录，再按原绑定键取末条。provider记录没有status撤销语义，额外status不能解除绑定，必须实际改绑；linked账本缺省active，明确revoked/inactive/disabled才视为非活跃，未知或错误类型状态503。缺目标、缺/空键、错误类型、会被规范化的身份值均503，不能覆盖旧绑定后洗成无绑定。同名native provider不误伤，短ID/规范local ID均检查，False撤组不受门阻断。
+- 独立Astra片段评审指出上述语义坏账与provider状态问题，均先补红例再修；另外实测确认创建时直接 `in_audit_group=True`（含原键重放）可绕过仅在setter的检查，因此创建入口及enabled发表前共用同一守卫。晚到旧绑定保留原provision_failed恢复合同，不发表成功回执。读取不创建身份目录/锁、不修改身份原件；文件数及总字节有上限。409领域错误在ValueError归类前透传，不能被误洗成503。两次读取不宣称跨账本原子快照；依赖当前宿主写入口已禁止新增普通local IM绑定的约束，未知旧版本并发写者仍须集成者核实。
+- P2-1：`CODEBASE_TREE.md` 补齐Track B审计组模块、双Bot、Host动作/适配、工具、通道守卫与两份回归文件的中文职责。
+- 因同步修改调用解码入口，额外运行 `test_plugin_host_v2_contracts.py` 和 `test_plugin_local_users.py`。首轮暴露通用目录全集断言没有审计/双Bot案例；补齐十项独立合法输入与模式，原全集等式、逐动作extra字段拒绝及幂等断言全部保留，不以删断言或直接照待测schema生成样例过门。
+
+复现原始失败：基线五个节点 **5 failed / 0 errors / 0 skipped**；原生用例在 `require_ready` 报 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`，其余是三类范围400/404及错误管理员绑定正例。新增11项先测得 **8 failed / 3 passed / 0 errors / 0 skipped**，原件见 `.pytest_cache/r2-before-ready.xml` 与 `r2-guard-red.xml`。首轮曾因basetemp父目录缺失在fixture阶段报错，补目录后再复现，不把fixture错误计作业务缺陷。
+
+在工作树根串行执行，不与pytest并行改写尺寸报告：
+
+```bash
+mkdir -p .pytest_cache
+PYTEST_ADDOPTS='--basetemp=.pytest_cache/r2-focused' python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_manifest_v9.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short --junitxml=.pytest_cache/r2-focused.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+python3 scripts/check_clean_package.py .
+```
+
+最终当前源码七文件组合（任务指定五文件加上述两份补充）：**578项，577 passed / 1 failed / 0 errors / 0 skipped**，完整结果在 `.pytest_cache/r2-delivery.xml`。唯一失败为 `test_t4_actual_native_isolated_process`，仍在 `attempt/sandbox.py:require_ready` 返回网络隔离不可用，尚未执行黑盒脚本。此前指定五文件381项为380通过/1失败，补充两文件197项全部通过；当前七文件组合已一并重跑，不拿前一版本替代交付版本。
+
+最后只读定位原就绪探测：它实际使用独立 `sandbox-exec` 加 `(allow default)/(deny network*)` 运行 `python -I -B -S -c pass`，未套本单元的allowlist。原路径与规范解释器的两次同形探测均返回 **rc=71、`sandbox-exec: sandbox_apply: Operation not permitted`**，外层Seatbelt检测为True。这是当前实际失败点，不能将其写成已经验证了任务所述的execvp符号链接修复。保留 `build_argv/require_ready` 硬门，不通过跳门、改探测、skip或xfail造绿；还须在允许原生沙箱创建的宿主复验此准确提交。
+
+Ruff、doc sync、strict code-size、diff和clean-package五项静态/发布门均退出0；尺寸门 **hard=0 / blocked=False**，仍有high-risk=2604、soft=1049、test_advisory=2146告警，非零告警结论。首次尺寸门指出新目录扫描函数嵌套过深，已按早退展平且保留全部预算拒绝；调整后重跑上述七文件组合和五项门。`CODE_SIZE_REPORT.md` 为生成物，提交前恢复HEAD，不纳入功能改动。
+
+两次独立评审均只覆盖消息内的准确片段，未读仓库或运行测试。首次提出的语义坏账、provider状态和创建初始资格问题，新增24项在修正前 **22 failed / 2 passed**（`.pytest_cache/r2-review-red.xml`）；修正后均由最终组合覆盖，另覆盖晚到绑定及两类预算拒绝。复审在片段层未发现原三项残留，不能外推为全仓或原生安全证明。当前不满足“所有验收全绿”，不据此合入或部署；未知旧进程并发写账、原生执行、跨平台和真实Web/IM链路仍未验证。
+
+## 2026-10-26 Wave 5 AG2 Round 2C：技能禁用策略与态势owner筛选修复
+
+来源：`07-tasks/wave5-ag2-round2c-fix-20261026.md`，精确基线 `4289922d083c94446d4eb23b65718b45c849b40a`。仅修改两处领域实现、本节和新增 `test_audit_group_policy_and_posture.py`；不修改黑盒执行器、原生沙箱或其它工作树，不推送或部署。
+
+- `ReadonlyAssetStore.get(kind="skill")` 通过原nofollow只读入口读取来源owner的 `data/skill_policy.json`，严格校验 `disabled_skills` 为字符串数组；裸技能名和原生 `owner:` 作用域ID均可禁用，技能自身禁用优先。规范化去重排序后的禁用表进入SHA256修订，等价重排不改变修订，真实策略变化会影响冻结与执行前后重核。
+- 原实现的普通 `ValueError` 在黑盒入口会被映射为通用执行失败，并非任务要求的 `SOURCE_UNAVAILABLE`。新增同时继承领域错误与 `ValueError` 的内部类型，只包装技能策略读取/校验失败：观察端沿原捕获链返回 `coverage="partial"` 与安全来源错误，执行端原样返回 `SOURCE_UNAVAILABLE/503`；无私有路径或异常正文外泄，不改全局异常映射。
+- `posture_overview` 接收 `owner_ids` / `target_owner` 并复用 `selected_owners`；不传参数保留全局统计，显式空列表不扩大为全量，目标参数保持原优先级，首末成员检查保留，重复账号来源错误去重。
+- 新测试覆盖两种禁用ID的摘要/调用拒绝、坏JSON/非对象/坏字段的partial与503、修订规范化、元数据禁用优先、caller策略不冒充source、执行期间来源撤权不发表结果，以及真实service/tool的全量、单目标、重复、空选择、双参、非法选择、错误去重与成员撤权。仅成功执行单元用替身，不把这些测试称为原生隔离或真实Web/IM E2E。
+- Astra high内联片段独立复核未运行文件或测试。其建议将字面 `owner:` 换为来源用户名未采纳：任务明确要求原生 `owner:<skill_id>`，`source_snapshot.local_skill_id` 和原技能反馈引用也沿该作用域，不能改成 `alice:<skill_id>`。登记表两次读取的并发一致性风险保留：本轮按任务复用原只读选择器，不宣称跨owner原子快照。
+
+验证：新增文件 **34 passed**；指定组合首次 **73 passed / 1 failed**（当时新增32项）。同一实现追加两条边界回归后，按精确测试节点合并有效证据为 **75 passed / 1 failed / 0 error / 0 skipped**，不是另一次完整全绿运行。证据分别为 `.pytest_cache/ag2-r2c-gate.xml` 与 `.pytest_cache/ag2-r2c-focused.xml`。Ruff通过；strict尺寸门 `hard=0, blocked=False`（仍有历史告警）；`git diff --check`通过，生成尺寸报告还原，不随功能提交。
+
+唯一未通过项是原有 `test_t4_actual_native_isolated_process`，在 `AttemptExecutionSandbox.require_ready` 明确返回 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`。已在本工作树内临时还原两份实现到精确基线并逐字节核对后重跑同一节点，复现同一失败，记录在 `.pytest_cache/ag2-r2c-baseline-native.xml`；随后恢复补丁并验证工作字节完全一致。未删除、skip/xfail或放宽原测试，也未把隔离替身当作真实可用。**指定组合门禁未全绿**；原生隔离与最终组合验收仍由集成者在有能力的车道复核。
+
+在工作树根复现（尺寸报告不要与pytest并行生成）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_audit_group_policy_and_posture.py agent_py_agent/tests/test_audit_group_observation_and_invoke.py -q --tb=short
+ruff check agent_py_agent/agent/audit_group/readonly_store.py agent_py_agent/agent/audit_group/observation_service.py agent_py_agent/tests/test_audit_group_policy_and_posture.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+## 2026-10-26 WT-AG2-R2B：四项返修与原生边界（源码候选，完整门未全绿）
+
+来源：`07-tasks/wave5-ag2-round2b-fix-20261026.md`；准确起点 `4289922d083c94446d4eb23b65718b45c849b40a`。只在指定 R2B 工作树实施，不改 c15 的隔离单元、授权或账号生命周期文件。
+
+- `parameters_schema` 继承敏感属性上下文，穿透 properties/items/additionalProperties/组合节点，省略 default/examples/enum/const。20种字段名含短明文的红反例转绿，非敏感字段默认值仍保留；原 `asset_summary` 读口自动使用同一投影。
+- Host v2 invoke 声明并透传 `rule_id`，用真实安装/认证发行器/组合根选择复合监控规则；仅 OS 执行单元用替身。产物只扫描本次 invocation 私有临时 workspace，不扫普通项目；文本先整批有界读取、精确抹源私文及通用脱敏，quota 预留后同父 FD 原子发表目录，返回实际净化字节的 name/size_bytes/sha256/relative_path。成功和失败都清理临时原输出。普通工作区并发私人文件混入、坏编码留下半批文件，两条独审反例先红后绿。
+- 文件产物目前仅接受 UTF-8 文本（单件1MiB、合计4MiB、最多32件；扫描4096项），二进制明确拒绝。**真实 IsolatedScriptUnit 仍禁止文件写入**，本轮不放宽；因此产物收集只验证了执行边界替身，真实脚本生成文件尚未打通，需隔离单元负责人协调，不能把替身写文件当原生 E2E。
+- Bot消息按完整行逆读，跳过 system/tool/display 与 assistant analysis；最近消息补同 owner/home/slot/mode 旧代。Host history保留原 items/next_cursor/complete/snapshot_id，增加 archived_generations/messages/next_before_cursor/has_more，默认及最大消息页15条。before_cursor加入原MAC codec的游标自身排除集合，不能跨owner/模式/过滤续用。execution/ops_config明确归一化为action_avatar。
+- worker仅放行canonical Bot绑定：核原owner、存储规范路径、线程、代次、禁学与原input receipt冻结策略；队列不能自行扩充工具名。再现查enabled/治理版本/权限/禁用表/审计组成员，与真实工具快照父上界求交，送原RunParams.allowed_tools；普通插件非空工具策略仍拒绝，原handler不改。撤权测试仅替代宿主签发工具集合边界，其余入队回执及worker复验均真实执行。
+- 因明确改变了跨代最近消息及执行workspace合同，原两处断言同步改为验证旧代可读和invocation专属目录；未删用例、放宽有效失败断言或增加skip/xfail。独审仅为Astra high对准确片段的纯文本检查，不冒称全仓复核。
+
+验证：新增 **37 passed**，记录 `.pytest_cache/r2b-regressions.xml`；任务指定双文件共 **127项，123 passed / 4 failed / 0 error / 0 skipped**，记录 `.pytest_cache/r2b-gate.xml`。四失败为原生 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`，以及 bob/main/provider 三类非受管选择器返回404/400而非403。使用准确起点另建本树内临时 detached worktree，四个相同节点均复现同类失败（`.pytest_cache/r2b-baseline-focused.xml`，临时树已移除）；不据此宣称其他失败均是基线问题。首轮基线驱动因basetemp父目录缺失出现90项setup error，修正驱动后才取得上述四节点证据，不将那次报错当产品基线结论。
+
+复现新增回归：
+```bash
+python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py -k r2b -q --tb=short -o addopts=''
+```
+完整门使用任务指定的两个文件及六项命令，不排除原生或授权失败。全仓、真实部署、跨机器/真实用户客户端、同inode历史原地改写冻结语义和原生文件产物链路未验证；不推送或部署。下节是前一提交的历史状态，worker接线缺口已由本节修复，原生/授权欠账仍保留。
+
 ## 2026-10-26 WT-AG2 Part 2：真实审计领域与Bot输入准备（消费端及原生门仍待协调）
 
 来源：`07-tasks/wave5-wt-ag2-part2-20261026.md`，基线 `aefb2bda2` 已合入 AG1 `656b14d89`。只修改本任务授权范围，不接管其它工作树或运行部署。

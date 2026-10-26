@@ -1,4 +1,4 @@
-# LLM: 源码只经匿名stdin送给独立沙箱进程，不落caller可读文件/argv/env；无沙箱必须拒绝执行。
+# LLM: 共享脚本runner的规范解释器和只读根；源码仅经匿名stdin传入，无沙箱仍拒绝。
 # 模块用途: 在调用者workspace执行冻结脚本并只接收有界JSON，不泄露stderr和源码。
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ from ..attempt.sandbox import (
     system_read_roots_for_platform,
 )
 from ..common.cancellation import raise_if_cancelled
-from ..plugin_sandbox import resolve_python_runtime_prefixes
 from ..tooling.process_output_capture import ProcessOutputCapture
-from ..workflows.script_runner import _cleanup_process, _outer_seatbelt_active
+from ..workflows.script_runner import _cleanup_process, _interpreter_runtime, _outer_seatbelt_active
 from .access_policy import AuditGroupError
 
 _BOOTSTRAP = """import io,json,os,sys
@@ -59,10 +58,10 @@ exec(_code,_scope)
 MAX_RESULT_BYTES = 1024 * 1024
 
 
-# LLM: 整个进程无文件写根，只读系统/解释器/caller工作区；结果仅经匿名管道交宿主审核发表。
-# 函数用途: 构造强制allowlist平台沙箱，网络固定关闭。
+# LLM: 解释器及根与原runner同源，避免Homebrew bin别名逃出Framework允许根；不增加写根或网络。
+# 函数用途: 为规范Python解释器构造强制allowlist只读沙箱。
 def execution_sandbox(workspace, staging):
-    roots = resolve_python_runtime_prefixes(executable=sys.executable, strict=False)
+    _executable, roots = _interpreter_runtime("python3")
     return AttemptExecutionSandbox(AttemptSandboxSpec(attempt_view=workspace, staging_root=staging,
         shared_workspace=workspace, owner_home=workspace, network_access=False,
         read_only_root=True, read_mode="allowlist", implicit_attempt_write_roots=False,
@@ -73,11 +72,12 @@ def execution_sandbox(workspace, staging):
 # LLM: 独立进程只看匿名代码流和明确inputs；不组装主头像Prompt、不加载source配置或凭据。
 # 类用途: 提供脚本及结构化技能共用的宿主隔离执行单元。
 class IsolatedScriptUnit:
-    # LLM: 始终先build_argv/require_ready；仅其成功且识别外层Seatbelt时省内层包装，任何原生拒绝仍原样传播。
-    # 函数用途: 用原沙箱就绪门和额外Python只读守卫执行一次匿名代码流。
+    # LLM: 使用共享规范解释器，始终先build_argv/require_ready；其成功前不能借外层Seatbelt绕过原生拒绝。
+    # 函数用途: 用相同解释器允许根、原生就绪门和额外只读守卫执行匿名代码流。
     def execute(self, code, inputs, *, workspace, staging, timeout_s):
         sandbox = execution_sandbox(workspace, staging)
-        base_argv = [sys.executable, "-I", "-B", "-c", _BOOTSTRAP]
+        executable, _roots = _interpreter_runtime("python3")
+        base_argv = [executable or sys.executable, "-I", "-B", "-c", _BOOTSTRAP]
         argv = sandbox.build_argv(base_argv)
         if argv and os.path.basename(argv[0]) == "sandbox-exec" and _outer_seatbelt_active():
             argv = base_argv

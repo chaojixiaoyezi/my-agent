@@ -155,13 +155,13 @@ def _invoke_asset(authorized, context, ports, payload):
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
             raise AuditGroupError("AUDIT_GROUP_EXECUTION_UNAVAILABLE", status_code=503) from None
 
-    # LLM: 准确参数名翻译为AG1合同；执行与产物仍由原领域绑定caller home。
+    # LLM: rule_id与inputs原样送AG1规则选择器；caller、执行及产物仍由原领域绑定。
     # 函数用途: 调用真正的跨Owner黑盒服务而不复制源码。
     def effect():
         try:
             data = AuditGroupBlackboxInvokeService(context.owner_home.root).invoke_asset(context.identity,
                 source_owner=payload["source_owner_id"], asset_type=payload["kind"],
-                asset_id=payload["asset_id"], inputs=payload["input_params"])
+                asset_id=payload["asset_id"], inputs=payload["input_params"], rule_id=payload.get("rule_id", ""))
             return DomainResult(200, data)
         except AuditGroupError as error:
             raise AuditBotDomainRejection(error) from None

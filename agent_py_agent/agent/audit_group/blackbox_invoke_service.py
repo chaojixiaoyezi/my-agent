@@ -6,13 +6,13 @@ import json
 import math
 import uuid
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from ..attempt.sandbox import SandboxUnavailableError
-from ..common.nofollow_fs import ensure_private_dir
 from ..plugin_host.errors import HostAPIError
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
 from .access_policy import AuditGroupError, owner_identity
-from .blackbox_execution import SnapshotExecutor
+from .blackbox_execution import SnapshotExecutor, generated_artifacts, workspace_inventory
 from .caller_controls import caller_policy, release_buffer, reserve_buffer, save_public_result
 from .isolated_unit import IsolatedScriptUnit
 from .safe_projection import scrub_private_result
@@ -56,31 +56,33 @@ class AuditGroupBlackboxInvokeService:
         except (OSError, ValueError, TypeError, KeyError, HostAPIError, RecursionError):
             raise AuditGroupError("AUDIT_GROUP_EXECUTION_UNAVAILABLE", status_code=503) from None
 
-    # LLM: 代码仅在内存/匿名FD；pre/post成员、治理、源闭包与caller配额四道检查后才发表安全结果。
-    # 函数用途: 执行冻结依赖并只向调用者保存脱敏JSON回执。
+    # LLM: 代码仅驻内存；本次独占临时workspace不扫描caller普通项目，清理原输出后才保存安全回执。
+    # 函数用途: 执行冻结依赖，整批发表脱敏产物，不扩大隔离单元写权限或混入并发私人文件。
     def _execute(self, home, caller, policy, snapshot, inputs, rule_id, timeout_s):
         identifier = "inv_" + uuid.uuid4().hex
         parts = ("data", "audit_group_exec", identifier)
         staging = home.home_dir.joinpath(*parts)
-        workspace = home.workspace_dir
         size = sum(len(raw.get("code", "").encode()) for raw in snapshot._records.values())
         reserve_buffer(home, parts, min(16 * 1024 * 1024, size + 2 * 1024 * 1024))
         try:
-            ensure_private_dir(workspace, canonical_root=self.root_dir)
-            self._revalidate(caller, policy, snapshot, snapshot.kind)
-            executor = SnapshotExecutor(snapshot, IsolatedScriptUnit(), workspace, staging, timeout_s,
-                authorize=lambda kind: self._revalidate(caller, policy, snapshot, kind))
-            result = executor.run(snapshot.kind, snapshot.identifier, inputs, rule_id=rule_id)
-            _home, current_policy = caller_policy(self.root_dir, caller, snapshot.kind)
-            if current_policy != policy:
-                raise AuditGroupError("GOVERNANCE_POLICY_CHANGED", status_code=409)
-            current = SourceAssetSnapshot.freeze(self.root_dir, snapshot.owner_id, snapshot.kind, snapshot.identifier)
-            if current.fingerprint != snapshot.fingerprint:
-                raise AuditGroupError("REVISION_CONFLICT", status_code=409)
-            public = {"invocation_id": identifier, "source_asset": {"owner_id": snapshot.owner_id,
-                "kind": snapshot.kind, "id": snapshot.identifier, "source_code_exposed": False},
-                "caller_owner_id": home.owner_id, "output_workspace_owner": home.owner_id,
-                "status": "succeeded", "result": scrub_private_result(result, snapshot._records), "generated_artifacts": []}
+            with TemporaryDirectory(prefix="workspace-", dir=staging) as directory:
+                workspace = Path(directory)
+                before = workspace_inventory(workspace)
+                self._revalidate(caller, policy, snapshot, snapshot.kind)
+                executor = SnapshotExecutor(snapshot, IsolatedScriptUnit(), workspace, staging, timeout_s,
+                    authorize=lambda kind: self._revalidate(caller, policy, snapshot, kind))
+                result = executor.run(snapshot.kind, snapshot.identifier, inputs, rule_id=rule_id)
+                _home, current_policy = caller_policy(self.root_dir, caller, snapshot.kind)
+                if current_policy != policy:
+                    raise AuditGroupError("GOVERNANCE_POLICY_CHANGED", status_code=409)
+                current = SourceAssetSnapshot.freeze(self.root_dir, snapshot.owner_id, snapshot.kind, snapshot.identifier)
+                if current.fingerprint != snapshot.fingerprint:
+                    raise AuditGroupError("REVISION_CONFLICT", status_code=409)
+                public = {"invocation_id": identifier, "source_asset": {"owner_id": snapshot.owner_id,
+                    "kind": snapshot.kind, "id": snapshot.identifier, "source_code_exposed": False},
+                    "caller_owner_id": home.owner_id, "output_workspace_owner": home.owner_id,
+                    "status": "succeeded", "result": scrub_private_result(result, snapshot._records),
+                    "generated_artifacts": generated_artifacts(home, parts, before, snapshot._records, workspace=workspace)}
             save_public_result(home, parts, public)
             return public
         finally:
