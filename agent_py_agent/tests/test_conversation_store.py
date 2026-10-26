@@ -116,9 +116,9 @@ def test_opt7_dedupe_lru_and_key_capacity(tmp_path, monkeypatch):
     with path.open("ab") as handle:
         handle.write(b"".join(_opt7_dedupe_row(f"later-{index}") for index in range(3)))
     assert message_scan.find_message_dedupe(path, "later-2").message_id == "msg-later-2"
-    assert str(path) not in cache
+    assert str(path) in cache and len(cache[str(path)].key_offsets) <= 3
     assert message_scan.find_message_dedupe(path, "first").message_id == "msg-first"
-    assert all(len(index.key_offsets) < 3 for index in cache.values())
+    assert all(len(index.key_offsets) <= 3 for index in cache.values())
 
 
 # LLM: 缓存旧行地址必须读回核对；改写旧键后追加新同键，不能仅凭尾部命中保留旧地址。

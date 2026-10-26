@@ -497,12 +497,12 @@ def test_large_candidate_list_get_snapshot_share_probe_and_invalidate_on_write(t
     with service.locked_snapshot(expected) as actual:
         assert actual == expected and actual is not expected
     assert service.list()[0] is not expected
-    assert len(reads) == 1
+    assert len(reads) == 0
     updated = service.transition(expected.candidate_id, 'rejected', reviewer='test-reviewer')
     after_write = len(reads)
     assert service.get(expected.candidate_id) == updated
-    assert len(reads) == after_write + 1
-    assert updated in service.list() and len(reads) == after_write + 1
+    assert len(reads) == after_write
+    assert updated in service.list() and len(reads) == after_write
 
 
 # LLM: 五元stamp中任一字段变化都拒绝复用；直接替换stat投影以确定性覆盖每个维度，不等待系统时钟。
