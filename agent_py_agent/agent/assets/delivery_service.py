@@ -6,12 +6,15 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from contextlib import ExitStack, contextmanager
-from dataclasses import astuple
+from copy import deepcopy
+from dataclasses import astuple, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
@@ -39,6 +42,8 @@ from .script_store_support import (
     commit_delivery_items,
     delivery_item_manifest,
     delivery_json,
+    delivery_scheduler,
+    new_delivery_monitor_job,
     prepare_delivery_items,
     required_delivery_capabilities,
     snapshot_delivery_bundle,
@@ -95,11 +100,88 @@ def _delivery_notification(envelope):
     return event
 
 
+# LLM: quota由外层持有，继续取原资产根/绑定/scheduler锁；启停原账本并沿原事件退代、等待运行取消，不新建平行调度器。
+# 函数用途: 同时启停监控绑定与真实Scheduler任务，写失败恢复旧绑定和旧调度状态。
+def _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission):
+    from ..scheduler.event_source_lifecycle import cancel_retired_event_runs
+    from ..scheduler.event_sources import sync_event_sources
+    from ..scheduler.monitor_state import resume_monitor
+    from ..scheduler.repository import _resume_next_run
+    from . import asset_root_lock
+    from .descriptor import AssetDescriptor
+    from .monitor_adapter import get_monitor_descriptor
+    from .script_store_support import _raw_object
+    from .workspace_assets import _DESCRIPTOR_FIELDS
+
+    parts = ('data', 'monitors', identifier + '.json')
+    with asset_root_lock(home):
+        binding = _raw_object(home, parts)
+        raw_store = _raw_object(home, ('data', 'scheduler', 'store.json')) or {}
+        if binding is None and identifier not in raw_store.get('jobs', {}):
+            raise AssetDeliveryError('ASSET_NOT_FOUND', '目标资产不存在')
+        os.close(open_directory_beneath(home, parts[:-1], create=True, require_dir_fd=True))
+        repo = delivery_scheduler(home, owner_id)
+        with locked_json_path(home.joinpath(*parts)), locked_json_path(repo.store_path):
+            store, now = repo._load_store_unlocked(), time.time()
+            previous = deepcopy(store)
+            job = store['jobs'].get(identifier)
+            if job is not None and job['status'] == 'deleted':
+                raise AssetDeliveryError('ASSET_NOT_FOUND', '目标资产不存在')
+            if job is None:
+                descriptor = AssetDescriptor.from_dict({key: value for key, value in binding.items() if key in _DESCRIPTOR_FIELDS})
+                descriptor = replace(descriptor, owner_id=owner_id, enabled=enabled)
+                job = new_delivery_monitor_job(repo, descriptor, binding, store)
+            elif enabled and job.get('rules'):
+                job = resume_monitor(job, now)
+            updated = {**job, 'enabled': enabled, 'status': 'active' if enabled else 'paused',
+                'paused_reason': '' if enabled else 'asset_disabled_by_owner',
+                'paused_at': 0.0 if enabled else now, 'updated_at': now, 'version': int(job['version']) + 1}
+            if enabled and not job.get('rules'):
+                updated['next_run_at'] = _resume_next_run(job, now)
+            updated = sync_event_sources(updated, job, retire=True)
+            store['jobs'][identifier] = cancel_retired_event_runs(store, updated, now=now)
+            cancelled = repo._cancel_waiting_runs_unlocked(store, identifier, now, 'job_paused') if not enabled else []
+            old_binding = read_bytes_beneath(home, parts, max_bytes=MAX_BUNDLE_BYTES, require_dir_fd=True)
+            try:
+                if binding is not None:
+                    binding = {**binding, 'enabled': enabled, 'revision': int(binding.get('revision', 0)) + 1,
+                        'schedule_spec': {**binding.get('schedule_spec', {}), 'enabled': enabled}}
+                    raw = delivery_json(binding)
+                    admission.check((OwnerQuotaChange(home.joinpath(*parts), len(raw)),))
+                    write_bytes_atomic_beneath(home, parts, raw)
+                repo._write_store_unlocked(store, admission, history_records=cancelled)
+            except BaseException:
+                if old_binding is not None:
+                    write_bytes_atomic_beneath(home, parts, old_binding)
+                repo._write_store_unlocked(previous, admission)
+                raise
+            return {**get_monitor_descriptor(home, identifier), 'enabled': enabled}
+
+
 # LLM: 所有读写仍沿同一可信root、nofollow及原quota锁；拆分存储职责不增加身份、路径或第二账本。
 # 类用途: 为投递领域动作集中提供受限JSON读写与两端写入准入。
 class _DeliveryStorage:
+    # LLM: 调用方必须持接收方delivery锁；仅回收未发表UUID暂存，FD安全rmtree不可用时失败关闭，不触碰正式箱。
+    # 函数用途: 在显式发送时清理崩溃留下的暂存目录。
+    def _clean_staging(self, home):
+        parts = (*home.relative_to(self.root_dir).parts, *_BASE, 'staging')
+        names = list_names_beneath(self.root_dir, parts)
+        if not names:
+            return
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise AssetDeliveryError('DELIVERY_RECOVERY_REQUIRED', '当前平台不能安全清理投递暂存')
+        parent = open_directory_beneath(self.root_dir, parts, require_dir_fd=True)
+        try:
+            for name in names:
+                if re.fullmatch('[0-9a-f]{32}', name) is None:
+                    raise AssetDeliveryError('DELIVERY_STORE_CORRUPT', '投递暂存目录包含非协议成员')
+                shutil.rmtree(name, dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+
     # LLM: 调用方已持接收方配额/投递锁；queued只对已发表inbox可消费，崩溃prepared由同一箱事实决定补发或回收。
-    # 函数用途: 在下次显式发送时对账中断通知，不在只读查询里写盘或触碰其他发送者回执。
+    # 函数用途: 在显式发送或消费时对账中断/终态通知，不在只读查询写盘或触碰其他发送者回执。
     def _recover_notifications(self, home, owner_id, admission):
         for name in list_names_beneath(home, (*_BASE, 'notifications')):
             if not name.endswith('.json'):
@@ -114,20 +196,58 @@ class _DeliveryStorage:
             if stored is None:
                 if event.get('status') in {'prepared', 'queued'}:
                     unlink_file_beneath(self.root_dir, (*home.relative_to(self.root_dir).parts, *parts))
+            elif stored.get('status') in {'accepted', 'rejected'}:
+                self._resolve_notification(home, self._envelope(home, owner_id, identifier), admission)
             elif event.get('status') == 'prepared':
                 envelope = self._envelope(home, owner_id, identifier)
                 event = self._inbox_notification(home, envelope)['notification_event']
                 self._put_json(home, parts, {**event, 'status': 'queued'}, admission)
 
-    # LLM: 只投影已持久化队列，不以包裹内旧事件冒充已入队；记录身份必须与已核包裹一致，冷读不补写。
+    # LLM: 终态只能取已核包裹；保留既有dispatch时间，缺记录从可信身份重建，不把queued留在已结算包上。
+    # 函数用途: 将接受或拒绝结果持久同步到接收方通知。
+    def _resolve_notification(self, home, envelope, admission):
+        view = self._inbox_notification(home, envelope)
+        event = (_delivery_notification(envelope) if view['notification_status'] == 'missing'
+            else view['notification_event'])
+        event = {**event, 'status': envelope['status'], 'resolved_at': envelope['updated_at']}
+        self._put_json(home, (*_BASE, 'notifications', envelope['delivery_id'] + '.json'), event, admission)
+
+    # LLM: 仅当前接收方quota→delivery锁下领取queued；返回dispatched是耐久消费凭据，不代表实际IM发送或用户可见。
+    # 函数用途: 对账中断后按通道和有界数量消费生产通知队列，同条记录不重复领取。
+    def consume_notifications(self, recipient_owner_id: str, *, channel: str | None = None,
+                              limit: int = 50) -> dict[str, Any]:
+        if channel is not None and (not isinstance(channel, str) or not channel):
+            raise ValueError('channel必须是非空字符串或None')
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError('limit必须是1到500的整数')
+        home, dispatched = self._home(recipient_owner_id), []
+        with self._write_scope((home,)) as admissions:
+            self._recover_notifications(home, recipient_owner_id, admissions[home])
+            for name in sorted(list_names_beneath(home, (*_BASE, 'notifications'))):
+                if not name.endswith('.json'):
+                    continue
+                identifier = safe_asset_id(name[:-5])
+                envelope = self._envelope(home, recipient_owner_id, identifier)
+                event = self._inbox_notification(home, envelope)['notification_event']
+                if event['status'] != 'queued' or channel is not None and event.get('channel') != channel:
+                    continue
+                event = {**event, 'status': 'dispatched', 'dispatched_at': _timestamp()}
+                self._put_json(home, (*_BASE, 'notifications', name), event, admissions[home])
+                dispatched.append(event)
+                if len(dispatched) >= limit:
+                    break
+        return {'ok': True, 'notifications': dispatched}
+
+    # LLM: 队列身份、接收通道和幂等键必须与已核包裹重建值一致；不以旧内嵌事件冒充入队，冷读不补写。
     # 函数用途: 让收件箱消费者看到当前真实通知状态，缺记录时明确标成missing。
     def _inbox_notification(self, home, envelope):
         event = self._read_json(home, (*_BASE, 'notifications', envelope['delivery_id'] + '.json'))
         if event is None:
             return {**envelope, 'notification_status': 'missing'}
-        keys = ('delivery_id', 'sender_owner_id', 'recipient_owner_id')
+        expected = _delivery_notification(envelope)
+        keys = ('delivery_id', 'sender_owner_id', 'recipient_owner_id', 'channel', 'idempotency_key', 'recipient_open_id')
         if (event.get('schema_version') != 'asset_delivery_notification.v1'
-                or any(event.get(key) != envelope.get(key) for key in keys)
+                or any(event.get(key) != expected.get(key) for key in keys)
                 or not isinstance(event.get('status'), str) or not event['status']):
             raise AssetDeliveryError('DELIVERY_STORE_CORRUPT', '通知记录身份或格式不匹配')
         return {**envelope, 'notification_status': event['status'], 'notification_event': event}
@@ -270,7 +390,7 @@ class AssetDeliveryService(_DeliveryStorage):
             envelope = self._envelope(recipient, recipient_owner_id, delivery_id)
             receipt = self._origin_receipt(sender, envelope)
             if envelope['status'] == 'accepted':
-                return {'ok': True, 'delivery_id': delivery_id, 'status': 'accepted', **envelope.get('resolution', {})}
+                return self._resolve_delivery(sender, recipient, envelope, receipt, 'accepted', admissions)
             if receipt['status'] == 'rejected':
                 envelope['resolution'] = receipt.get('resolution', {})
                 self._resolve_delivery(sender, recipient, envelope, receipt, 'rejected', admissions)
@@ -279,6 +399,7 @@ class AssetDeliveryService(_DeliveryStorage):
                 envelope['resolution'] = receipt.get('resolution', {})
                 return self._resolve_delivery(sender, recipient, envelope, receipt, 'accepted', admissions)
             if envelope['status'] != 'pending':
+                self._resolve_notification(recipient, envelope, admissions[recipient])
                 raise AssetDeliveryError('DELIVERY_STATE_CONFLICT', '投递已拒绝，不能接收')
             payloads = self._payloads(recipient, envelope)
             if self._installation_matches(recipient, envelope):
@@ -313,11 +434,16 @@ class AssetDeliveryService(_DeliveryStorage):
             envelope = self._envelope(recipient, recipient_owner_id, delivery_id)
             receipt = self._origin_receipt(sender, envelope)
             if receipt['status'] == 'accepted' or envelope['status'] == 'accepted' or self._installation_matches(recipient, envelope):
+                envelope['resolution'] = receipt.get('resolution') or envelope.get('resolution', {})
+                self._resolve_delivery(sender, recipient, envelope, receipt, 'accepted', admissions)
                 raise AssetDeliveryError('DELIVERY_STATE_CONFLICT', '资产已安装，不能再拒绝')
+            if receipt['status'] == 'rejected' or envelope['status'] == 'rejected':
+                envelope['resolution'] = receipt.get('resolution') or envelope.get('resolution', {})
+                return self._resolve_delivery(sender, recipient, envelope, receipt, 'rejected', admissions)
             envelope['resolution'] = {'reason': safe_reason}
             return self._resolve_delivery(sender, recipient, envelope, receipt, 'rejected', admissions)
 
-    # LLM: 只切换当前本人原canonical资产，不从provenance借权；启用可使监控运行，工具层必须沿原危险动作审批。
+    # LLM: 只切换当前本人原canonical资产；原Store缺失转换领域404，不把KeyError当未知副作用，工具层仍负责启用审批。
     # 函数用途: 开启或关闭本人已经接收的某一资产。
     def toggle_asset(self, owner_id, asset_kind, asset_id, enabled):
         home = self._home(owner_id)
@@ -325,14 +451,17 @@ class AssetDeliveryService(_DeliveryStorage):
         if type(enabled) is not bool:
             raise ValueError('enabled必须是布尔值')
         with self._write_scope((home,)) as admissions:
-            descriptor = self._toggle_canonical(home, asset_kind, asset_id, enabled, admissions[home])
+            try:
+                descriptor = self._toggle_canonical(home, asset_kind, asset_id, enabled, admissions[home])
+            except (KeyError, FileNotFoundError):
+                raise AssetDeliveryError('ASSET_NOT_FOUND', f'资产不存在: {asset_kind}:{asset_id}') from None
         return {'ok': True, 'asset': descriptor, 'enabled': enabled}
 
-    # LLM: 领域方法共享外层准入，不重复取不可重入quota锁；监控缺少真实调度重绑定时失败关闭而非只改展示标签。
+    # LLM: 领域方法共享外层准入，不重复取不可重入quota锁；监控必须同步原绑定和真实Scheduler，不能只改展示标签。
     # 函数用途: 在当前Owner原canonical存储上执行启停。
     def _toggle_canonical(self, home, kind, identifier, enabled, admission):
         from .script_store import ScriptStore
-        from .skill_adapter import SkillAdapter
+        from .skill_adapter import SkillAdapter, get_owner_skill_descriptor
         from .workflow_store import WorkflowStore
 
         if kind == 'script':
@@ -340,9 +469,11 @@ class AssetDeliveryService(_DeliveryStorage):
         if kind == 'workflow':
             return WorkflowStore(home).set_enabled(identifier, enabled).descriptor.to_dict()
         if kind == 'skill':
+            get_owner_skill_descriptor(home, identifier)
             return SkillAdapter(home).set_enabled(identifier, enabled, admission=admission)
         if kind == 'monitor':
-            raise AssetDeliveryError('ASSET_DELIVERY_MONITOR_REBIND_REQUIRED', '监控必须通过真实Scheduler事务重绑定后启停')
+            owner_id = home.relative_to(self.root_dir / 'owners').as_posix()
+            return _toggle_delivery_monitor(home, owner_id, identifier, enabled, admission)
         raise ValueError('未知资产kind')
 
     # LLM: 缺失名单返回协议空值，不物化目录或锁；既有坏记录失败关闭，不能默认为未屏蔽。
@@ -476,25 +607,6 @@ class AssetDeliveryService(_DeliveryStorage):
             os.replace(stage[-1], identifier, src_dir_fd=source, dst_dir_fd=target)
             os.fsync(target)
 
-    # LLM: 调用方必须持接收方delivery锁；原子发表会移走stage，此处只回收未发表UUID目录，rmtree必须具备FD防链接攻击能力。
-    # 函数用途: 在下一次显式发送时回收崩溃暂存，失败发送也不把孤儿负载留给对方。
-    def _clean_staging(self, home):
-        parts = (*home.relative_to(self.root_dir).parts, *_BASE, 'staging')
-        names = list_names_beneath(self.root_dir, parts)
-        if not names:
-            return
-        if not shutil.rmtree.avoids_symlink_attacks:
-            raise AssetDeliveryError('DELIVERY_RECOVERY_REQUIRED', '当前平台不能安全清理投递暂存')
-        parent = open_directory_beneath(self.root_dir, parts, require_dir_fd=True)
-        try:
-            for name in names:
-                if re.fullmatch('[0-9a-f]{32}', name) is None:
-                    raise AssetDeliveryError('DELIVERY_STORE_CORRUPT', '投递暂存目录包含非协议成员')
-                shutil.rmtree(name, dir_fd=parent)
-            os.fsync(parent)
-        finally:
-            os.close(parent)
-
     # LLM: 发件人回执是发送时冻结的来源证据，接收方可改箱不能伪造另一个Owner的来源或清单，状态更新不改原hash。
     # 函数用途: 将本人包裹与真实发送方原回执逐项绑定。
     def _origin_receipt(self, sender, envelope):
@@ -556,13 +668,15 @@ class AssetDeliveryService(_DeliveryStorage):
                     return False
         return True
 
-    # LLM: 原清单hash不变，接收方状态与发送方回执分开原子写；提交后失败由expected_files辨识，不假装未安装。
-    # 函数用途: 结算接受或拒绝结果并同步两端状态。
+    # LLM: 原hash不变，终态重试保留updated_at并补通知；逐叶原子写，失败不得伪称无副作用，原安装清单负责辨识重试。
+    # 函数用途: 结算接受或拒绝结果并同步两端状态与通知终态。
     def _resolve_delivery(self, sender, recipient, envelope, receipt, status, admissions):
-        envelope.update(status=status, updated_at=_timestamp())
+        if envelope['status'] != status:
+            envelope.update(status=status, updated_at=_timestamp())
         envelope.setdefault('resolution', {})['phase'] = 'resolved'
         receipt.update(status=status, updated_at=envelope['updated_at'], resolution=envelope['resolution'])
         self._put_json(sender, (*_BASE, 'outbox', envelope['delivery_id'] + '.json'), receipt, admissions[sender])
         self._put_json(recipient, (*_BASE, 'inbox', envelope['delivery_id'], 'envelope.json'), envelope, admissions[recipient])
+        self._resolve_notification(recipient, envelope, admissions[recipient])
         return {'ok': True, 'delivery_id': envelope['delivery_id'], 'status': status,
             'installed_assets': envelope['resolution'].get('installed_assets', [])}

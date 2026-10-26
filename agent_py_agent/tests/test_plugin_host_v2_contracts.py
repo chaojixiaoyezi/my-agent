@@ -715,6 +715,25 @@ def test_stage3_deterministic_errors_clear_executing_receipt(stage3_host, monkey
     assert attempts == [True, True]
 
 
+# LLM: 不替换领域服务或仓库；真实空Store保持稳定404及not_started，不能降成unknown。
+# 函数用途: 覆盖四类根预览、发送和启停缺失的HTTP错误合同。
+@pytest.mark.parametrize('kind', ['script', 'workflow', 'skill', 'monitor'])
+@pytest.mark.parametrize('action,mode', [('assets.delivery.preview_bundle', 'read'),
+    ('assets.delivery.send', 'write'), ('assets.delivery.toggle_asset', 'write')])
+def test_round2_real_missing_asset_maps_to_404(stage3_host, kind, action, mode):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    payload = {'root_asset_kind': kind, 'root_asset_id': 'absent'}
+    if action.endswith('.toggle_asset'):
+        payload = {'asset_kind': kind, 'asset_id': 'absent', 'enabled': False}
+    elif action.endswith('.send'):
+        payload['recipient_owner_id'] = 'local/alice'
+    for _ in range(2):
+        with pytest.raises(HostAPIError) as failure:
+            stage3_call(stage3_host, action, payload, mode)
+        assert (failure.value.status, failure.value.code, failure.value.outcome) == (404, 'ASSET_NOT_FOUND', 'not_started')
+
+
 # LLM: 同一真实Gateway入口执行解析、身份解析、工具和仓库；只禁止无关活动任务路径，绝不替换投递服务。
 # 函数用途: 验证生产控制入口冷启动可用，且scope身份不受metadata冒充影响。
 def test_stage3_gateway_delivery_send_inbox_accept_real_entry(stage3_host, monkeypatch):

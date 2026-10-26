@@ -13,18 +13,22 @@ from ..common.log_redaction import redact_sensitive_text
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
 from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
 
+_UNQUOTED_ASSIGNMENT = re.compile(
+    r'''(?im)^[ \t]*(?:export[ \t]+)?(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{}()\[\]]+)[ \t]*(?:\#.*)?$''')
 _PATTERNS = (
     ('openai_key', re.compile(r'sk-[A-Za-z0-9_-]{20,}')),
     ('aws_access_key', re.compile(r'AKIA[0-9A-Z]{16}')),
     ('github_token', re.compile(r'ghp_[A-Za-z0-9]{20,}')),
     ('slack_token', re.compile(r'xox[baprs]-[A-Za-z0-9-]{10,}')),
     ('jwt', re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')),
+    ('unquoted_secret_assignment', _UNQUOTED_ASSIGNMENT),
     ('secret_assignment', re.compile(
         r'''(?i)(?<!\w)(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)(?!\w)["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote)''')),
 )
 _PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b', re.I)
 _SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
     'updated_at', 'created_at', 'kind', 'driver'})
+_JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
 # LLM: 只遍历已由本Owner凭据读口认证的内存值；元数据整支排除，任意非空字符串均作为秘密而不按长度猜测。
@@ -63,10 +67,12 @@ def datasource_secret_values(owner_home):
     return tuple(sorted(result))
 
 
-# LLM: 只识别声明的模板占位形状，不据内容猜凭据有效性或访问任何秘密来源。
-# 函数用途: 避免把待配置模板和星号掩码当成真实秘密。
-def _placeholder(value):
-    return _PLACEHOLDER.fullmatch(value) is not None
+# LLM: 普通模板可豁免；仅未加引号赋值允许布尔/整数/变量引用，不能把带引号的真实短秘密放行。
+# 函数用途: 区分模板与YAML/env非秘密表达式，不访问变量或凭据来源。
+def _placeholder(value, *, unquoted=False):
+    return (_PLACEHOLDER.fullmatch(value) is not None or unquoted and (
+        value.lower() in {'true', 'false', 'null', 'none', 'yes', 'no'}
+        or re.fullmatch(r'[+-]?\d+', value) is not None or value.startswith(('$', 'os.', 'env.'))))
 
 
 # LLM: 环境值仅本次内存匹配，不回传变量名或原值，不持久化环境。
@@ -82,7 +88,8 @@ def _matches(text, secrets, *, limit=None):
     matches = []
     for name, pattern in _PATTERNS:
         group = 'literal' if 'literal' in pattern.groupindex else 0
-        candidates = (match for match in pattern.finditer(text) if not _placeholder(match.group(group)))
+        candidates = (match for match in pattern.finditer(text)
+            if not _placeholder(match.group(group), unquoted=name == 'unquoted_secret_assignment'))
         matches.extend((*match.span(group), name) for match in islice(candidates,
             None if limit is None else max(0, limit - len(matches))))
     for secret in secrets:
@@ -117,12 +124,47 @@ def _shared_scan(text):
         return marker
 
     protected = _PLACEHOLDER.sub(shield, text)
+    protected = _UNQUOTED_ASSIGNMENT.sub(lambda match: shield(match)
+        if _placeholder(match.group('literal'), unquoted=True) else match.group(), protected)
     scanned = redact_sensitive_text(protected, code_file=True)
     changed = scanned != protected
     scanned = re.sub(r'<redacted[^>]*>|\[redacted\]', '${REDACTED_SECRET}', scanned, flags=re.I)
     for marker, original in placeholders.items():
         scanned = scanned.replace(marker, original)
     return changed, scanned
+
+
+# LLM: JSON替换只能覆盖完整字符串token；原始命中跨语法或非字符串则失败关闭，不能在Unicode转义内插入占位符。
+# 函数用途: 解码检查并安全重编码JSON正文，保留拒绝诊断的原token位置。
+def _json_string_scan(text, secrets, *, replace=False, raw_matches=()):
+    matches, pieces, cursor = [], [], 0
+    spans, index = sorted((start, end) for start, end, _ in raw_matches), 0
+    for token in _JSON_STRING.finditer(text):
+        raw_hit = False
+        while index < len(spans) and spans[index][0] < token.end():
+            start, end = spans[index]
+            if start < token.start() or end > token.end():
+                raise AssetDeliveryError('ASSET_DELIVERY_SECRET_DETECTED', 'JSON秘密位置不能安全替换')
+            raw_hit, index = True, index + 1
+        try:
+            decoded = json.loads(token.group())
+        except ValueError:
+            continue
+        found = _matches(decoded, secrets, limit=None if replace else 1)
+        shared, _ = _shared_scan(decoded)
+        if not found and not shared and not raw_hit:
+            continue
+        matches.append((*token.span(), 'json_encoded_secret'))
+        if not replace:
+            return matches, text
+        cleaned = '${REDACTED_SECRET}' if raw_hit else _replace_matches(decoded, found)
+        if shared:
+            _, cleaned = _shared_scan(cleaned)
+        pieces.extend((text[cursor:token.start()], json.dumps(cleaned, ensure_ascii=False)))
+        cursor = token.end()
+    if index < len(spans):
+        raise AssetDeliveryError('ASSET_DELIVERY_SECRET_DETECTED', 'JSON秘密位置不能安全替换')
+    return matches, ''.join((*pieces, text[cursor:])) if replace else text
 
 
 # LLM: 指定Owner前缀先替换，再移除其他系统账号目录；只替换home前缀，保留资源相对后缀以便接收方重绑定。
@@ -149,20 +191,40 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
                 redacted_matches=[{'file_path': redact_sensitive_text(safe_name, code_file=True),
                     'line_number': 1, 'pattern_name': 'secret_resource_path', 'masked_snippet': '<redacted>'}])
         text = raw.decode('utf-8', errors='surrogateescape')
+        preserve_json = False
+        if name.lower().endswith('.json') and allow_secret_placeholder_replace:
+            try:
+                json.loads(text)
+                preserve_json = True
+            except (ValueError, RecursionError):
+                pass
         matches = _matches(text, secrets, limit=None if allow_secret_placeholder_replace else 100)
+        encoded = (_json_string_scan(text, secrets)[0]
+            if name.lower().endswith('.json') and not allow_secret_placeholder_replace else [])
         shared, _ = _shared_scan(text)
-        if (matches or shared) and not allow_secret_placeholder_replace:
+        if (matches or encoded or shared) and not allow_secret_placeholder_replace:
             newlines = [index for index, char in enumerate(text) if char == '\n']
             safe_name = _replace_matches(_paths(name, owner_home), _matches(_paths(name, owner_home), secrets))
             safe_name = redact_sensitive_text(safe_name, code_file=True)
             diagnostics = [{'file_path': safe_name, 'line_number': bisect_right(newlines, start) + 1,
-                'pattern_name': pattern, 'masked_snippet': '<redacted>'} for start, _, pattern in matches[:100]]
+                'pattern_name': pattern, 'masked_snippet': '<redacted>'} for start, _, pattern in (matches + encoded)[:100]]
             if not diagnostics:
                 diagnostics = [{'file_path': safe_name, 'line_number': 1, 'pattern_name': 'shared_secret',
                     'masked_snippet': '<redacted>'}]
             raise AssetDeliveryError('ASSET_DELIVERY_SECRET_DETECTED', '投递文件包含疑似秘密', redacted_matches=diagnostics)
-        text = _replace_matches(text, matches)
+        if preserve_json:
+            _, text = _json_string_scan(text, secrets, replace=True, raw_matches=matches)
+        else:
+            text = _replace_matches(text, matches)
+            if name.lower().endswith('.json') and allow_secret_placeholder_replace:
+                _, text = _json_string_scan(text, secrets, replace=True)
         if shared:
             _, text = _shared_scan(text)
-        result[name] = _paths(text, owner_home).encode('utf-8', errors='surrogateescape')
+        text = _paths(text, owner_home)
+        if preserve_json:
+            try:
+                json.loads(text)
+            except (ValueError, RecursionError):
+                raise AssetDeliveryError('ASSET_DELIVERY_SECRET_DETECTED', 'JSON秘密不能在保留格式时替换') from None
+        result[name] = text.encode('utf-8', errors='surrogateescape')
     return result
