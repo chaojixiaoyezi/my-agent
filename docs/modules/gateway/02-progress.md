@@ -1,3 +1,13 @@
+## 2026-10-25 七项底座控制接入、20 项 v2 动作与后台稳定性（工作区源码已落地，待组合验收）
+
+- `/dir` 与 `/fork` 沿 Gateway 原控制服务接入 `conversation/workspace_context.py`，复核当前 owner、管理员权限、目录与线程修订；换目录不换 `owner_home`，分叉不复制源任务/运行授权。项目四类资产覆盖/晋升及全部准确动作名见 [设计台账本轮条目](../../../DESIGN_LEDGER.md)。
+- `plugin_host/action_specs_v2_ext.py` 声明 20 个新增闭合动作，`capabilities_v2_handlers.py` 分发目录/资产、主会话分叉、数据源、回合检索/提炼、录制及后台观察。`PluginBrokerAPI.dispatch` 只向已绑定的 v2 ingress 转发；旧入口不能直调新增动作，写入幂等、原安装/当前 owner/线程/task 范围和秘密脱敏均保留。此处是新增集合，不把原 45 动作历史数字当当前总数。
+- 连续后台唤醒修复：`task_promotion.py::_terminal_successor_task_id` 在同路径终态根下推进正常终态前代，活跃后继幂等；原跨目录/未知状态拒绝不放宽。`background_execution.py::_promoted_task_binding_attrs` 只把已发表的任务 ID、路径和来源绑定带到同片 Compact 重试，避免重试丢失新一代绑定。
+- `hang_diagnostics.py` 的原生长 tick 延迟 1 秒晋升 C `faulthandler`，由单一常驻 Condition 线程管理；普通短 tick 不建毁 C 计时线程，晋升、disarm、close 共锁并核代次，防关闭后沿用旧 FD。短期限/替身仍走原同步合同，未测实际生产 CPU 降幅。
+- `process_registry.py` 复用 macOS 原生内核存活/出生观察，按 `(pid, kernel_birth)` 缓存成功出生 token 并合并并发探针；未知或 PID 换代不复用，POSIX fallback 保留 `LC_ALL=C` 与关闭 stdin。
+- TUI 完成计时行不覆盖 Footer；后台彩色尾标与只读观察页支持 `↑↓`、Enter、`Ctrl+G` / Esc。当前 TUI 是本用户全部会话聚合，不是当前会话专属；Host 接口另外按安装线程/task 收敛。`F6` / `F14` / `Esc+M` 兼容绑定已存在，真实 macOS Terminal 按键与界面验收未验证。
+- [详细设计](../../design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md) 是目标规格；实现差异（私有明文凭据、SQLite SDK、提炼 DRAFT 落盘、录制不启动真实浏览器）以设计台账和当前源码为准，不能把组件或本地 HTTP 测试写成部署、门户或真实多用户验收通过。
+
 ## 2026-10-25 管理员三面用户管理（`/users` / Host v2 `users.local.*` & `users.auth.*` / `admin_controls`）与公私插件隔离（`CT-01..CT-10`）
 
 - **管理员 `/users`（别名 `/user`）斜杠命令与控制操作分流**：新增 `gateway_parts/users_control_service.py` 并在 `gateway_parts/control_service.py`、`cli/chat_parts/control_runtime.py`、`conversation/control_commands.py`、`settings/command_catalog.py` 接入 `/users create|password|list|info|get|enable|disable`（`admin_only=True, sensitive_input=True`），在 `persisted_control_command_text` 中自动将口令参数脱敏为 `******`（含嵌套 `/sessions control ... /users ...`）；`gateway_parts/control_operation_service.py` 在执行网关级控制动作前强制校验 `_is_admin_owner`，并将 `plugins` 控制路由按管理员（`local/main`）与本地普通用户（`owners/local/<uid>`）分流；`gateway_parts/agents_control_service.py` 在 `/agents` 写入前对本地普通用户执行与外部 Provider 用户一致的 `read_user_admin_controls` / `max_disk_mb` 校验。

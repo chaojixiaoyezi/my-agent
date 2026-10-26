@@ -1,10 +1,8 @@
 """Typed navigation state for entering and controlling delegated-agent views."""
 
-# LLM: This module owns only TUI selection, view stack, per-view display runtimes,
-# and event cursors. Canonical run status, messages, guidance, cancellation, and
-# authorization remain on Gateway/domain services and are never inferred here.
+# LLM: 本模块只拥有 TUI 选择、视图栈、各页展示 runtime 与游标；运行/消息/取消权威始终留在 Gateway 领域层。
 # 结束页正文必须保留原 thread/message ID，不能以正文哈希或 legacy 文案创建身份。
-# 模块用途: 支持空输入时方向键选择 Goal/子代理、Enter 查看、Ctrl+G 返回，并缓存每个代理的独立展示页面。
+# 模块用途: 空输入方向键先选后台观察、再选 Goal/子代理；观察页面只读，返回不控制生命周期。
 
 from __future__ import annotations
 
@@ -12,6 +10,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from ...agent.conversation.background_process_view import background_watch_rows
 from ...agent.conversation.background_transcript import BACKGROUND_TRANSCRIPT_SCHEMA
 from .tui_runtime import TuiRuntime
 
@@ -72,9 +71,8 @@ _GOAL_ROW_SCALAR_FIELDS = frozenset(
 )
 
 
-# LLM: The snapshot is the renderer/keybinding boundary. It contains only exact
-# run ids and bounded display scalars, never task objects or control authority.
-# 类用途: 告诉界面当前看的是谁、选中了谁、能否继续输入或停止。
+# LLM: 快照是渲染与按键的只读边界，只含准确 run 身份和展示标量；后台页面没有代理控制身份。
+# 类用途: 告诉界面当前看的是谁、选中了谁，以及是否处于不能输入的后台观察页。
 @dataclass(frozen=True)
 class TuiAgentNavigationSnapshot:
     active_run_id: str = ""
@@ -88,6 +86,9 @@ class TuiAgentNavigationSnapshot:
     active_replaced_by_run_id: str = ""
     # 当前子代理的失败类型专属标签（来自行里的 failure_label），头部徽标优先显示它。
     active_failure_label: str = ""
+    background_process_count: int = 0
+    background_watch_active: bool = False
+    can_send_input: bool = True
 
 
 # LLM: This immutable projection is the only normalized input accepted by the child
@@ -110,13 +111,11 @@ class _AgentViewProjection:
     lifecycle_phase: str
 
 
-# LLM: One navigation instance belongs to one TUI application and one root
-# runtime. Child runtimes are display stores only and cannot execute model work.
-# 类用途: 管理当前代理视图栈、每层子代理名册、方向键选中项和独立正文页面。
+# LLM: 每个 TUI 共用一个导航实例和根 runtime；子页与进程页只保存显示状态，不能执行模型或控制进程。
+# 类用途: 管理代理视图栈及只读进程观察页，进程句柄永不成为子代理控制身份。
 class TuiAgentNavigationState:
-    # LLM: Construction fixes the root runtime for the application lifetime;
-    # changing sessions requires a new navigation instance.
-    # 函数用途: 创建一个从主代理开始的空导航栈。
+    # LLM: 初始化固定根 runtime 和有界进程投影；换会话必须新建导航，不携带旧会话控制身份。
+    # 函数用途: 创建主代理导航栈和仅用于展示的后台行缓存。
     def __init__(self, root_runtime: TuiRuntime) -> None:
         if not isinstance(root_runtime, TuiRuntime):
             raise TypeError("root_runtime must be TuiRuntime")
@@ -129,12 +128,45 @@ class TuiAgentNavigationState:
         self._selected_by_parent: dict[str, str] = {}
         self._expanded_goal_id = ""
         self._path: list[str] = []
+        self._background_rows: tuple[dict, ...] = ()
+        self._background_count = 0
         self._event_cursors: dict[str, int] = {}
         self._goal_published: set[str] = set()
         self._final_response_keys: dict[str, str] = {}
         self._typed_final_response_request_ids: set[str] = set()
         self._view_change: Callable[[TuiRuntime], None] | None = None
         self._lock = threading.RLock()
+
+    # LLM: 只更新有界显示行，不发信号、不改变运行；旧选择按准确 session 身份保留。
+    # 函数用途: 刷新后台驻留徽标和已经打开的实时观察页。
+    def update_background_watch_rows(self, value: object, *, active_count: int | None = None) -> bool:
+        rows = background_watch_rows(value)
+        count = sum(row.get("alive") is True or row.get("wake_pending") is True for row in rows) if active_count is None else max(0, int(active_count))
+        with self._lock:
+            if rows == self._background_rows and count == self._background_count:
+                return False
+            self._background_rows = rows
+            self._background_count = count
+            if self._selected_by_parent.get("") == "bg:watch" and not count:
+                self._selected_by_parent.pop("", None)
+            if self._path and self._path[-1] == "bg:watch":
+                self._publish_watch_locked()
+        self.root_runtime.store.invalidate()
+        return True
+
+    # LLM: 只写独立 TUI runtime 的可移除 display 块，不写 ConversationStore 或后台事件游标。
+    # 函数用途: 更新观察页内容；上下键只切换哪一项日志展开。
+    def _publish_watch_locked(self) -> None:
+        runtime = self._runtime_for_locked("bg:watch")
+        ids = [f"bg:{row['session_id']}" for row in self._background_rows]
+        selected = self._selected_by_parent.get("bg:watch", "")
+        if selected not in ids:
+            selected = ids[0] if ids else ""
+            self._selected_by_parent["bg:watch"] = selected
+        block_id = "background:watch"
+        exists = any(block.block_id == block_id for block in runtime.store.snapshot().active_blocks)
+        runtime._publish("background_activity_updated" if exists else "background_activity_started", "updated" if exists else "started", block_id,
+            {"source_kind": "background_watch", "display": {"rows": self._background_rows, "selected": selected, "active_count": self._background_count}})
 
     # LLM: The callback swaps only the visible state store/provider. It is
     # invoked outside the navigation lock to avoid UI re-entry deadlocks.
@@ -203,42 +235,50 @@ class TuiAgentNavigationState:
             row = rows.get(self._selected_by_parent.get(parent, ""))
             return dict(row) if row is not None else None
 
-    # LLM: Direction movement is active only when the input controller explicitly
-    # calls it. It never consumes history or changes the current view itself.
-    # 函数用途: 在当前层的 Goal/子代理行之间移动选择；首次向下选第一行，首次向上选最后一行。
+    # LLM: 方向键仅在输入控制器调用时改变显示选择，进程页仅切日志；不消费历史或发执行控制。
+    # 函数用途: 移动选择；有后台入口时上下键都先选它，观察页内部只切日志。
     def move_selection(self, delta: int) -> bool:
         step = int(delta or 0)
         if not step:
             return False
         with self._lock:
-            parent = self._active_run_id_locked()
+            watching = bool(self._path and self._path[-1] == "bg:watch")
+            parent = "bg:watch" if watching else self._active_run_id_locked()
             ids = self._selection_ids_locked(parent)
             if not ids:
                 return False
             selected = self._selected_by_parent.get(parent, "")
             if selected not in ids:
-                index = 0 if step > 0 else len(ids) - 1
+                index = 0 if step > 0 or ids[0].startswith("bg:") else len(ids) - 1
             else:
                 index = max(0, min(len(ids) - 1, ids.index(selected) + step))
             self._selected_by_parent[parent] = ids[index]
             if not parent and self._expanded_goal_id != ids[index]:
                 self._expanded_goal_id = ""
             runtime = self._active_runtime_locked()
+            if watching:
+                self._publish_watch_locked()
         runtime.store.invalidate()
         return True
 
-    # LLM: Enter follows an exact typed selection from the authenticated Goal
-    # or child row set. Goal toggles read-only detail in root; a child opens its
-    # display runtime. Neither action trusts an id supplied from input text.
-    # 函数用途: 展开当前 Goal 或进入选中的子代理详情页；子代理快照到达前显示载入提示。
+    # LLM: Enter 只接受已登记的准确选择，bg:watch 始终走独立展示分支，不把输入正文或进程 ID 当 run_id。
+    # 函数用途: 展开 Goal、只读后台观察或子代理；后台页不请求代理详情。
     def enter_selected(self) -> bool:
         with self._lock:
+            if self._path and self._path[-1] == "bg:watch":
+                self._publish_watch_locked()
+                return True
             parent = self._active_run_id_locked()
             selected = self._selected_by_parent.get(parent, "")
             if not selected or selected not in self._selection_ids_locked(parent):
                 return False
             goals = self._child_goal_rows.get(parent, {}) if parent else self._goal_rows
-            if selected in goals:
+            if selected == "bg:watch":
+                self._path.append(selected)
+                self._publish_watch_locked()
+                runtime, callback = self._active_runtime_locked(), self._view_change
+                has_snapshot, lifecycle_phase = True, ""
+            elif selected in goals:
                 self._expanded_goal_id = "" if self._expanded_goal_id == selected else selected
                 runtime = self._active_runtime_locked()
                 callback = None
@@ -312,24 +352,27 @@ class TuiAgentNavigationState:
         runtime.store.invalidate()
         return True
 
-    # LLM: Snapshot reads one immutable display boundary and derives terminal
-    # only from the canonical status scalar supplied by the backend.
-    # 函数用途: 返回渲染器和按键层需要的当前代理导航状态。
+    # LLM: 快照只投影后端终态和独立的完整活动计数；展示行截断不能改变后台总数。
+    # 函数用途: 返回当前代理或只读后台页面的显示状态，不把进程 ID 当 run_id。
     def snapshot(self) -> TuiAgentNavigationSnapshot:
         with self._lock:
             active = self._active_run_id_locked()
             row = dict(self._rows_by_run.get(active, {})) if active else {}
             status = str(row.get("status") or "").strip().upper()
+            watching = bool(self._path and self._path[-1] == "bg:watch")
             return TuiAgentNavigationSnapshot(
                 active_run_id=active,
                 active_name=str(row.get("name") or row.get("role") or active or "main"),
                 active_status=status,
-                selected_run_id=self._selected_by_parent.get(active, ""),
+                selected_run_id=self._selected_by_parent.get("bg:watch" if watching else active, ""),
                 expanded_goal_id=self._expanded_goal_id,
                 depth=len(self._path),
                 terminal=bool(active and status in _TERMINAL_AGENT_STATUSES),
                 active_replaced_by_run_id=str(row.get("replaced_by_run_id") or "").strip(),
                 active_failure_label=str(row.get("failure_label") or "").strip(),
+                background_process_count=self._background_count,
+                background_watch_active=watching,
+                can_send_input=not watching,
             )
 
     # LLM: The active runtime is a display store selected by the view stack; it
@@ -431,18 +474,20 @@ class TuiAgentNavigationState:
             )
         return runtime, first_goal, prior_final_key, typed_final_already_visible
 
-    # LLM: Internal active identity comes only from the view stack.
-    # 函数用途: 在持锁状态下返回当前代理 run id，空串表示主代理。
+    # LLM: 活动代理身份仅来自视图栈；后台观察页必须返回空值，防止误请求代理控制接口。
+    # 函数用途: 返回当前真实代理身份；后台观察页没有代理控制目标。
     def _active_run_id_locked(self) -> str:
-        return self._path[-1] if self._path else ""
+        return self._path[-1] if self._path and self._path[-1] != "bg:watch" else ""
 
-    # LLM: Root selection is Goal rows followed by direct children; nested
-    # pages contain children only. This is a visual ordering contract and never
-    # changes either lifecycle.
-    # 函数用途: 返回当前页面方向键可以选择的准确行 ID。
+    # LLM: 根页面按后台入口、Goal、直属子代理排序；后台页只有进程选择，这一顺序不改变生命周期。
+    # 函数用途: 后台入口优先于 Goal/子代理，后台页内部只选择各进程。
     def _selection_ids_locked(self, parent_run_id: str) -> list[str]:
         parent = str(parent_run_id or "").strip()
+        if parent == "bg:watch":
+            return [f"bg:{row['session_id']}" for row in self._background_rows]
         ids = list(self._goal_rows) if not parent else list(self._child_goal_rows.get(parent, {}))
+        if not parent and self._background_count:
+            ids.insert(0, "bg:watch")
         ids.extend(
             str(row["run_id"])
             for row in self._rows_by_parent.get(parent, ())
@@ -460,11 +505,10 @@ class TuiAgentNavigationState:
             self._runtimes[run_id] = runtime
         return runtime
 
-    # LLM: Active runtime lookup mirrors the current stack and always retains
-    # the root runtime as the empty-stack target.
-    # 函数用途: 在持锁状态下返回当前页面的展示 runtime。
+    # LLM: 展示 runtime 按真实栈顶查找，保留独立后台页；不能复用空代理控制身份来决定页面。
+    # 函数用途: 返回当前页面展示 runtime，后台页使用独立且无执行权的页面。
     def _active_runtime_locked(self) -> TuiRuntime:
-        active = self._active_run_id_locked()
+        active = self._path[-1] if self._path else ""
         return self._runtime_for_locked(active) if active else self.root_runtime
 
 

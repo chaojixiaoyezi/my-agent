@@ -907,12 +907,15 @@ def test_goal_lifecycle_is_persistent_and_conversation_scoped(tmp_path) -> None:
     )
 
 
+# LLM: 目录拒绝按真实owner身份与CAP-DIR规则验证，不把管理员外部项目权限当成普通用户权限。
+# 函数用途: 断言无效目录在创建会话及Goal之前被拒绝。
 @pytest.mark.parametrize("kind", ["external", "relative", "missing", "not_object", "remote"])
 def test_goal_workspace_rejects_invalid_scope_before_creating_goal(tmp_path, kind) -> None:
     agent = SimpleAgent(AgentConfig(model_backend="echo", gateway_per_user_owner_scoping=False), tmp_path)
     home = agent.home_paths.owner_home_dir
     workspace = {"cwd": str(home), "roots": [str(home)]}
     if kind == "external":
+        agent.config.my_agent_owner_kind = "user"
         workspace = {"cwd": str(tmp_path), "roots": [str(tmp_path)]}
     elif kind == "relative":
         workspace["cwd"] = "relative"
@@ -2513,6 +2516,40 @@ def test_workspace_reentry_does_not_skip_other_terminal_or_unknown_successor(sta
     assert _terminal_successor_task_id(
         store, "thread", base_id="req-reentry", source_id="old-a", task_path="/owner/tasks/a",
     ) == ""
+
+
+# LLM: 仅同路径终态根允许跨completed/interrupted/superseded代；其它路径与原A→B→A状态门保持。
+# 函数用途: 验证后继槽位推进与幂等复用的结构化边界。
+@pytest.mark.parametrize('base_status', ['completed', 'interrupted', 'superseded'])
+@pytest.mark.parametrize('prior_status', ['completed', 'interrupted', 'superseded'])
+def test_terminal_root_reuses_active_visit_after_prior_finished(base_status, prior_status):
+    import hashlib
+
+    from agent_py_agent.agent.conversation.task_promotion import _terminal_successor_task_id
+
+    derived = 'root-continue-' + hashlib.sha256(b'root').hexdigest()[:8]
+    rows = [SimpleNamespace(task_id='root', task_path='/owner/tasks/a', status=base_status),
+            SimpleNamespace(task_id=derived, task_path='/owner/tasks/a', status=prior_status),
+            SimpleNamespace(task_id=derived + '-visit-2', task_path='/owner/tasks/a', status='active')]
+    store = SimpleNamespace(tasks=SimpleNamespace(list_report=lambda _thread: (rows, [])))
+    assert _terminal_successor_task_id(store, 'thread', base_id='root', source_id='root',
+                                      task_path='/owner/tasks/a') == derived + '-visit-2'
+
+
+# LLM: 后继failed/cancelled/未知/大写别名均非可跳过前代，跨路径也必须拒绝；不放宽原测试。
+# 函数用途: 为同路径终态根保留失败关闭和路径隔离。
+@pytest.mark.parametrize('status', ['failed', 'cancelled', 'mystery_state', 'SUPERSEDED'])
+@pytest.mark.parametrize('same_path', [True, False])
+def test_terminal_root_still_rejects_unsafe_successor(status, same_path):
+    import hashlib
+
+    from agent_py_agent.agent.conversation.task_promotion import _terminal_successor_task_id
+
+    derived = 'root-continue-' + hashlib.sha256(b'root').hexdigest()[:8]
+    rows = [SimpleNamespace(task_id='root', task_path='/owner/tasks/a', status='completed'),
+            SimpleNamespace(task_id=derived, task_path='/owner/tasks/a' if same_path else '/other', status=status)]
+    store = SimpleNamespace(tasks=SimpleNamespace(list_report=lambda _thread: (rows, [])))
+    assert _terminal_successor_task_id(store, 'thread', base_id='root', source_id='root', task_path='/owner/tasks/a') == ''
 
 
 def test_selected_task_reuses_the_single_thread_history_without_guidance_copy(tmp_path) -> None:

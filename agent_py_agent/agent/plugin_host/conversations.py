@@ -1,5 +1,5 @@
-# LLM: B1仅接收A0发行的调用；Store/default-thread/MAC端口由宿主注入，无缺省高权限回退，不解析HTTP身份。
-# 模块用途: 在原线程文件内管理生命周期、修订和幂等回执，并分发完整历史读取。
+# LLM: B1仅接收A0调用，显式目录限有效管理员；默认摘要不公开路径，绑定事实及回执共原线程原子提交。
+# 模块用途: 管理线程生命周期、目录绑定和完整历史，不因管理员安装或目录参数改变数据owner。
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +16,7 @@ from ..conversation.store_threads import create_thread_atomic
 from ..gateway_parts.io import locked_file_transition
 from . import contracts
 from .action_specs import action_spec
+from .authorization import workspace_directory
 from .cursors import CursorCodec
 from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, integer, text, thaw, validate_object
@@ -135,16 +136,41 @@ def thread_visible(thread, authorized, context):
             and thread_scoped(thread.thread_id, thread.metadata.get(_STATE_KEY), authorized))
 
 
-# LLM: 投影使用白名单；旧线程没有workspace返回null，持久化异常引用失败关闭，不把cwd路径当逻辑ref。
-# 函数用途: 生成无宿主控制字段的线程摘要。
-def thread_summary(thread, authorized):
+# LLM: 默认按持久绑定/分叉事实选择摘要；目录过滤可显式展开，旧默认线程不因cwd存在而公开路径。
+# 函数用途: 为创建、查询、列表和回执生成一致的线程摘要。
+def thread_summary(thread, authorized, *, include_workspace=None):
     state = thread_state(thread)
     if state.get("workspace_ref") not in (None, "default"):
         raise HostAPIError("CORRUPT_THREAD", 500)
-    return {"thread_id": thread.thread_id, "title": thread.title, "status": thread.status,
+    result = {"thread_id": thread.thread_id, "title": thread.title, "status": thread.status,
             "revision": thread_revision(thread), "workspace_ref": state.get("workspace_ref"),
             "created_by_installation": state.get("installation_ref") == authorized.binding.installation_ref,
             "created_at": public_time(thread.created_at), "updated_at": public_time(thread.updated_at)}
+    if include_workspace is None:
+        include_workspace = state.get("has_workspace_binding") is True or bool(getattr(thread, "forked_from_thread_id", ""))
+    if include_workspace:
+        result.update(workspace_root=thread_workspace(thread), cwd=thread.cwd,
+                      forked_from_thread_id=getattr(thread, "forked_from_thread_id", ""),
+                      forked_from_message_id=getattr(thread, "forked_from_message_id", ""),
+                      fork_lineage_depth=getattr(thread, "fork_lineage_depth", 0))
+    return result
+
+
+# LLM: 新模型字段是权威，旧记录只沿原metadata/cwd兼容，不创建第二份工作区账。
+# 函数用途: 取得线程已经持久化的工作目录。
+def thread_workspace(thread):
+    return getattr(thread, "workspace_root", "") or thread.metadata.get("workspace_root") or thread.cwd
+
+
+# LLM: 字段存在时更新原模型；旧模型只在原metadata保存兼容信息，不修改owner_home或runtime身份。
+# 函数用途: 构造目录绑定所需的线程替换字段。
+def workspace_changes(thread, directory):
+    changes = {"cwd": str(directory), "runtime_workspace_roots": (str(directory),)}
+    if "workspace_root" in thread.__dataclass_fields__:
+        changes["workspace_root"] = str(directory)
+    else:
+        changes["metadata"] = {**thread.metadata, "workspace_root": str(directory)}
+    return changes
 
 
 # LLM: B1细化字段仍位于A0调用之后，不代替或放宽入站授权；A0须同步workspace_ref/max_content_bytes才能HTTP使用。
@@ -237,15 +263,18 @@ class ConversationDomain:
             raise HostAPIError("CORRUPT_THREAD", 500)
         return threads
 
-    # LLM: 稳定排序与公共投影共同构成快照，目录变化明确过期，不把变更页拼成完整结果。
-    # 函数用途: 按owner和安装范围分页列出线程。
+    # LLM: 显式过滤限管理员且展开目录；无过滤沿绑定/谱系选择摘要，所有公开字段共绑原MAC快照。
+    # 函数用途: 按owner和安装范围列线程，保留旧默认摘要及完整项目摘要。
     def list_page(self, store, payload, authorized, context):
         filters = {key: value for key, value in payload.items() if key != "cursor"}
         cursor = BoundCursor(self.cursor_codec, authorized, context, filters)
         saved = cursor.decode(payload.get("cursor"))
         threads = sorted(self.all_threads(store), key=lambda row: (row.created_at, row.thread_id))
-        rows = [thread_summary(row, authorized) for row in threads if thread_visible(row, authorized, context)
-                and (payload["status"] == "all" or row.status == payload["status"])]
+        directory = workspace_directory(context, payload["workspace_dir"]) if "workspace_dir" in payload else None
+        rows = [thread_summary(row, authorized, include_workspace=True if directory is not None else None) for row in threads
+                if thread_visible(row, authorized, context)
+                and (payload["status"] == "all" or row.status == payload["status"])
+                and (directory is None or thread_workspace(row) == str(directory))]
         anchor = {"sha256": digest(rows), "record_count": len(rows)}
         if saved and (saved["anchor"] != anchor or saved["offset"] > len(rows)):
             raise HostAPIError("CURSOR_EXPIRED", 409)
@@ -258,8 +287,8 @@ class ConversationDomain:
             raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
         return page
 
-    # LLM: receipt和线程变更存同一原子JSON；同owner/install/action/key串行，重新激活须重核当前授权但不作游标过期。
-    # 函数用途: 在原文件锁内完成幂等重放、冲突检测和生命周期修改。
+    # LLM: receipt、目录和生命周期共原子JSON；同owner/install/action/key串行，目录写在短提交中重新核验。
+    # 函数用途: 在原线程锁中完成幂等、CAS、生命周期修改或目录切换。
     def mutate(self, store, action, payload, authorized, context):
         key = authorized.call.idempotency_key
         if not isinstance(key, str) or re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key) is None:
@@ -285,8 +314,8 @@ class ConversationDomain:
                 create_thread_atomic(store.threads, row)
                 return result
 
-            # LLM: CAS与receipt共用线程锁；归档再按goal→claim取得原写锁，保持到线程提交后，阻止检查后抢写。
-            # 函数用途: 防止两次同修订修改同时成功。
+            # LLM: CAS、显式绑定标记及receipt共原线程锁；切换仍核管理员且递增版本，归档沿原goal→claim锁序。
+            # 函数用途: 在线程原子提交内复验权限并应用目录或生命周期变更。
             def update(row):
                 read_context(authorized)
                 if not thread_visible(row, authorized, context):
@@ -295,19 +324,24 @@ class ConversationDomain:
                     self.check_archive(store, row, context, activity_locks)
                 state = thread_state(row)
                 revision = thread_revision(row)
-                if revision != payload["expected_revision"]:
+                if revision != payload.get("expected_revision", revision):
                     raise HostAPIError("REVISION_CONFLICT", 409)
                 state = {**state, "revision": revision + 1}
-                changes = {"title": payload["title"]} if action == "threads.rename" else {"status": "archived" if action == "threads.archive" else "active"}
-                updated = replace(row, **changes, metadata={**row.metadata, _STATE_KEY: state}, updated_at=time.time())
+                if action == "threads.workspace.switch":
+                    changes = workspace_changes(row, workspace_directory(context, payload["workspace_dir"]))
+                    state["has_workspace_binding"] = True
+                else:
+                    changes = {"title": payload["title"]} if action == "threads.rename" else {"status": "archived" if action == "threads.archive" else "active"}
+                metadata = {**changes.pop("metadata", row.metadata), _STATE_KEY: state}
+                updated = replace(row, **changes, metadata=metadata, updated_at=time.time())
                 return self.receipted(updated, authorized, receipt_key, fingerprint, 200)[1]
 
             updated = store.threads.update_atomic(payload["thread_id"], update)
             receipt = thread_state(updated)["receipts"][receipt_key]
             return contracts.DomainResult(200, receipt["data"])
 
-    # LLM: 创建必须在授权的创建来源范围内；首版仅提供宿主默认逻辑工作区，不接受客户端文件路径。
-    # 函数用途: 构造未绑定通道的插件线程。
+    # LLM: 创建仍须本安装有权；显式管理员目录与绑定标记同次提交，默认不借daemon cwd，owner home不变。
+    # 函数用途: 构造绑定默认家目录或已核项目目录的未绑定通道线程。
     def new_thread(self, payload, authorized, context):
         if payload["workspace_ref"] != "default":
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
@@ -317,13 +351,18 @@ class ConversationDomain:
             raise HostAPIError("CAPABILITY_DENIED", 403)
         current = time.time()
         state = {"installation_ref": authorized.binding.installation_ref, "revision": 1, "workspace_ref": "default"}
-        return ConversationThread(thread_id="thread-" + uuid4().hex, canonical_user_id=context.owner_home.owner_id,
+        if "workspace_dir" in payload:
+            state["has_workspace_binding"] = True
+        directory = (workspace_directory(context, payload["workspace_dir"]) if "workspace_dir" in payload
+                     else context.owner_home.home_dir)
+        row = ConversationThread(thread_id="thread-" + uuid4().hex, canonical_user_id=context.owner_home.owner_id,
                                   owner_id=context.owner_home.owner_id, owner_home=str(context.owner_home.home_dir),
-                                  title=payload["title"], cwd=str(context.owner_home.workspace_dir),
+                                  title=payload["title"], cwd=str(directory),
                                   created_at=current, updated_at=current, metadata={_STATE_KEY: state})
+        return replace(row, **workspace_changes(row, directory))
 
-    # LLM: 成功回执和领域变更同次持久化，重放返回原始摘要而不是当前状态。
-    # 函数用途: 把本次幂等结果附加到唯一线程元数据。
+    # LLM: 回执与绑定事实同次提交且共用查询摘要；默认仍隐藏路径，绑定/分叉回执保留完整目录与谱系。
+    # 函数用途: 保存生命周期或目录操作的准确原始结果。
     def receipted(self, row, authorized, key, fingerprint, status):
         data = thread_summary(row, authorized)
         state = thread_state(row)

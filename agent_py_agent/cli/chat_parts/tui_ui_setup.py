@@ -1,5 +1,5 @@
 # LLM: 本模块只把 TuiRuntime 的 typed snapshot 接入 prompt_toolkit 布局；不得恢复字符串 transcript、前缀 lexer 或第二状态 store。
-# 模块用途: 创建行内对话、权限、输入和底部提示；每个代理视图都显示当前客户端的真实刷新健康。
+# 模块用途: 创建对话、输入和底部提示；后台观察禁输，所有页面显示客户端真实刷新健康。
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ CHAT_TRANSCRIPT_SCROLL_LINE_COUNT = 10
 
 
 # LLM: 输入保留原 history 与补全；插件客户端只在显式 Tab/提交读取，候选原 revision 跟随输入框，不增加启动请求。
-# 函数用途: 创建底部可增长到八行的聊天输入框。
+# 函数用途: 创建聊天输入框；后台观察页通过 typed 导航状态只读，切回立即恢复编辑。
 def _make_input_area(
     history_file_path: str,
     runtime: TuiRuntime,
@@ -62,7 +62,9 @@ def _make_input_area(
     *, plugin_client: PluginCommandClient | None = None,
     plugin_panels: PluginPanelBoard | None = None,
     access_context=None,
+    agent_navigation: object | None = None,
 ) -> Any:
+    from prompt_toolkit.filters import Condition
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.widgets import TextArea
@@ -72,6 +74,7 @@ def _make_input_area(
         dont_extend_height=True,
         style="class:tui-input",
         multiline=True,
+        read_only=Condition(lambda: bool(agent_navigation and not agent_navigation.snapshot().can_send_input)),
         wrap_lines=True,
         history=FileHistory(history_file_path),
         auto_suggest=TuiHistoryAutoSuggest(),
@@ -113,7 +116,7 @@ def _make_render_context_factory(
     navigation = params.agent_navigation
 
     # LLM: 子页面内容来自其独立 runtime，连接健康只读取 root runtime，避免产生多份相互矛盾的健康状态。
-    # 函数用途: 按页面和宽度读取展示数据；已确认模型名跟随实时选择，展开历史也不会冻结旧标签。
+    # 函数用途: 读取当前页面、后台徽标与模型显示；所有字段只用于渲染。
     def make_context(width: int) -> TuiRenderContext:
         interaction_snapshot = interaction.snapshot()
         transcript_snapshot = transcript_state.snapshot()
@@ -183,6 +186,8 @@ def _make_render_context_factory(
                 0,
                 int(getattr(navigation_snapshot, "depth", 0) or 0),
             ),
+            background_process_count=getattr(navigation_snapshot, "background_process_count", 0),
+            background_watch_active=getattr(navigation_snapshot, "background_watch_active", False),
         )
 
     return make_context
@@ -530,7 +535,7 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     from ...agent.user_space.owner_resolver import OwnerIdentity, owner_identity_from_config
     access_context = CommandAccessContext(surface="local", is_admin=owner_identity_from_config(params.agent.config) == OwnerIdentity.local_main())
     input_area = _make_input_area(str(history_file), runtime, Path(params.agent.root), plugin_client=plugin_client,
-                                  plugin_panels=plugin_panels, access_context=access_context)
+                                  plugin_panels=plugin_panels, access_context=access_context, agent_navigation=params.agent_navigation)
     _wire_help_dismiss_on_input(input_area, interaction, params.agent_navigation)
     history_search_area = _make_history_search_area(interaction)
     _wire_history_search_area(history_search_area, input_area, interaction)
@@ -555,10 +560,8 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
     if callable(set_view_change):
         view_depth_ref = [0]
 
-        # LLM: A navigation switch delegates atomic store/viewport restoration to
-        # the transcript view. A never-seen child opens at its delegated prompt;
-        # returning restores its saved viewport and may surface one native-scroll hint.
-        # 函数用途: 首次进入子代理从任务提示词开始看，返回或重进时恢复各页面原滚动位置。
+        # LLM: 切页沿原 store/viewport 合同；后台观察直接跟随实时尾部，不能套用子代理任务提示词的首屏锚点。
+        # 函数用途: 切换正文来源并保存每页位置；后台观察第一页立即显示实时日志。
         def switch_agent_view(selected_runtime: TuiRuntime) -> None:
             snapshotter = getattr(params.agent_navigation, "snapshot", None)
             navigation_snapshot = snapshotter() if callable(snapshotter) else None
@@ -571,7 +574,7 @@ def _prepare_tui_app_parts(params: MakeTuiAppParams) -> _TuiAppParts:
             view_depth_ref[0] = next_depth
             transcript_view.set_state_store(
                 selected_runtime.store,
-                start_at_top_if_new=entering,
+                start_at_top_if_new=entering and not getattr(navigation_snapshot, "background_watch_active", False),
             )
             if (
                 returning
@@ -1064,7 +1067,7 @@ def _before_tui_render(
 
 
 # LLM: style role 名必须与 block/Markdown renderer 一一对应；颜色是显示主题，不参与状态判断。
-# 函数用途: 定义 终端交互 参考主题的 prompt_toolkit 样式表。
+# 函数用途: 定义 TUI 样式表，后台驻留指示器使用亮青色独立强调。
 def _make_tui_style():
     from prompt_toolkit.styles import Style
 
@@ -1085,6 +1088,7 @@ def _make_tui_style():
             "tui-assistant-marker": "#ffffff",
             "tui-accent": "#d7d7af",
             "tui-muted": "#949494",
+            "tui-bg-watch": "#5fd7d7 bold",
             "tui-strong": "#ffffff bold",
             "tui-heading": "#ffffff bold",
             "tui-em": "italic",

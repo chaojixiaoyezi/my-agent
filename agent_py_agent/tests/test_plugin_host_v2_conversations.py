@@ -712,3 +712,26 @@ def test_archive_rejects_unsettled_detached_claim(case):
         case.call("threads.archive", {"thread_id": tid, "expected_revision": revision}, key="archive_detached_01")
     assert (error.value.code, error.value.status) == ("THREAD_BUSY", 409)
     assert store.threads.require(tid).status == "active"
+
+
+# LLM: 摘要形状取显式绑定/分叉事实，不靠cwd自动公开home；只在pytest目录建立项目。
+# 函数用途: 核对默认与显式项目线程的创建、查询、列表及绑定标记。
+@pytest.mark.parametrize("bound", [False, True])
+def test_thread_summary_tracks_explicit_workspace_binding(case, bound):
+    home = resolve_owner_home(case.homes["alice"].root, OwnerIdentity.local_main())
+    case.homes["main"] = home
+    case.stores["main"] = ConversationStore(home.data_dir / "conversations")
+    project = home.home_dir / "project"
+    project.mkdir(parents=True)
+    payload = {"title": "项目"}
+    if bound:
+        payload["workspace_dir"] = str(project)
+    created = thaw(case.call("threads.create", payload, owner="main", key="summary_binding_01").data)
+    assert thaw(case.call("threads.list", {}, owner="main").data)["items"] == [created]
+    assert thaw(case.call("threads.get", {"thread_id": created["thread_id"]}, owner="main").data) == created
+    fields = {"workspace_root", "cwd", "forked_from_thread_id", "forked_from_message_id", "fork_lineage_depth"}
+    assert fields <= created.keys() if bound else not fields.intersection(created)
+    state = case.stores["main"].threads.require(created["thread_id"]).metadata["plugin_host_v2"]
+    assert state.get("has_workspace_binding", False) is bound
+    filtered = thaw(case.call("threads.list", {"workspace_dir": str(project if bound else home.home_dir)}, owner="main").data)["items"]
+    assert len(filtered) == 1 and fields <= filtered[0].keys()

@@ -6,10 +6,16 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from agent_py_agent.agent.core import SimpleAgent
 from agent_py_agent.agent.settings import AgentConfig
@@ -174,3 +180,197 @@ def test_list_runs_for_root_uses_index_then_exact_canonical_reads(
     assert report.load_errors == []
     assert selected.id in agent.subagents.persistence._run_cache
     assert ignored.id not in agent.subagents.persistence._run_cache
+
+
+# LLM: 固定任务要求的独立条数预算及单项字节预算，不能用无界缓存代替容量修复。
+# 函数用途: 防止正负缓存容量退回导致历史任务循环扫描抖动。
+def test_wp8_cache_default_budgets() -> None:
+    from agent_py_agent.agent.subagents.services.persistence.service import (
+        SubAgentPersistenceService,
+    )
+
+    assert SubAgentPersistenceService._MAX_RUN_CACHE_ENTRIES == 4096
+    assert SubAgentPersistenceService._MAX_NEGATIVE_RUN_CACHE_ENTRIES == 4096
+    assert SubAgentPersistenceService._MAX_RUN_CACHE_ITEM_BYTES == 256 * 1024
+
+
+# LLM: 只在临时目录写合法直达locator，路径、原解析器和缺失错误都真实，不创建运行中的Agent。
+# 函数用途: 为失效历史记录的读盘计数和恢复测试准备文件。
+def _missing_locator(workspace: Path, run_id: str) -> tuple[Path, Path]:
+    task_file = workspace / run_id / "task.json"
+    task_file.parent.mkdir(parents=True)
+    canonical = workspace.parent / "work" / "agents" / run_id / "canonical_state.json"
+    task_file.write_text(json.dumps({
+        "schema_version": "subagent-state-locator.v1",
+        "run_id": run_id,
+        "task_workspace_dir": str(workspace.parent),
+        "agent_run_workspace_dir": str(canonical.parent),
+    }), encoding="utf-8")
+    old = time.time_ns() - 10_000_000_000
+    os.utime(task_file, ns=(old, old))
+    return task_file, canonical
+
+
+# LLM: 640条真实缺失locator超过旧512容量；分别记录冷/热扫描读数，错误不许被优化成无记录。
+# 函数用途: 验证首扫每文件只读一次，第二扫零正文读取且全部负缓存保留。
+def test_wp8_large_missing_locator_scan_reads_once_then_hits_cache(tmp_path, monkeypatch) -> None:
+    from agent_py_agent.agent.subagents.services.persistence.service import (
+        SubAgentPersistenceService,
+    )
+
+    service = SubAgentPersistenceService(SimpleNamespace(workspace=tmp_path / "locators"))
+    run_ids = {f"missing-{number:04d}" for number in range(640)}
+    paths = {_missing_locator(service.workspace, run_id)[0] for run_id in sorted(run_ids)}
+    reads: list[Path] = []
+    original = Path.read_text
+
+    # LLM: 透传真实Path读取，只对本轮locator记数，不伪造JSON或文件存在性。
+    # 函数用途: 统计两轮扫描各自的正文读取次数。
+    def counted_read(path, *args, **kwargs):
+        if path in paths:
+            reads.append(path)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    first = service.list_runs_report()
+    cold_reads = len(reads)
+    cold_cache_size = len(service._missing_canonical_cache)
+    second = service.list_runs_report()
+
+    for report in (first, second):
+        assert report.runs == []
+        assert len(report.load_errors) == len(run_ids)
+        assert {error["run_id"] for error in report.load_errors} == run_ids
+    assert (cold_reads, len(reads) - cold_reads, cold_cache_size) == (640, 0, 640)
+    assert set(reads) == paths
+    assert set(service._missing_canonical_cache) == run_ids
+
+
+# LLM: 用另一个真实线程非阻塞获取RLock，而非同线程重入；冷/热两条返回路径均须保深副本。
+# 函数用途: 验证深拷贝期间其它读者可拿缓存锁，返回对象仍与快照隔离。
+@pytest.mark.parametrize("warm_cache", [False, True])
+def test_wp8_deepcopy_does_not_hold_cache_lock(tmp_path, monkeypatch, warm_cache) -> None:
+    from agent_py_agent.agent.subagents.services.persistence import service as module
+
+    agent = _agent(tmp_path)
+    run_id = agent.subagents.create_run(goal="锁外复制", agent_name="worker").id
+    _age_task_file(agent, run_id)
+    service = agent.subagents.persistence
+    if warm_cache:
+        assert len(service.list_runs_report().runs) == 1
+    original = copy.deepcopy
+    unlocked: list[bool] = []
+
+    # LLM: 非阻塞获取实际缓存锁，拿到后同线程归还，不用时延推断持锁状态。
+    # 函数用途: 由竞争线程观测深拷贝时锁是否已释放。
+    def probe_lock():
+        acquired = service._run_cache_lock.acquire(blocking=False)
+        if acquired:
+            service._run_cache_lock.release()
+        return acquired
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        # LLM: 原deepcopy仍执行，探针只观察该run的根对象，不截断递归复制。
+        # 函数用途: 在复制发生时让竞争线程试锁并记录结果。
+        def observed_copy(value, memo=None):
+            if getattr(value, "id", None) == run_id:
+                unlocked.append(executor.submit(probe_lock).result(timeout=5))
+            return original(value, memo)
+
+        monkeypatch.setattr(module.copy, "deepcopy", observed_copy)
+        report = service.list_runs_report()
+
+    assert report.load_errors == []
+    assert unlocked == [True]
+    snapshot = service._run_cache[run_id][1]
+    assert report.runs[0] is not snapshot
+    report.runs[0].attributes["caller_mutation"] = True
+    assert "caller_mutation" not in snapshot.attributes
+
+
+# LLM: 只给真实缺失且原始声明等于已解析父路径的locator附加优化提示；其它缺失仍沿原异常类型。
+# 函数用途: 验证reader传出可信canonical路径，使缓存不用重读locator。
+def test_wp8_missing_locator_error_carries_canonical_path(tmp_path) -> None:
+    from agent_py_agent.agent.subagents.services.agent_run_state import read_agent_state_payload
+
+    task_file, canonical = _missing_locator(tmp_path / "locators", "missing")
+    with pytest.raises(FileNotFoundError) as error:
+        read_agent_state_payload(task_file)
+    assert getattr(error.value, "canonical_path", None) == canonical
+
+
+# LLM: 快捷参数已由reader核验，缓存仍须重核实际存在性；直接调用不允许发生任何locator正文读取。
+# 函数用途: 验证免重读路径以及reader报缺失后目标重现时不误建负缓存。
+@pytest.mark.parametrize("reappeared", [False, True])
+def test_wp8_missing_cache_hint_rechecks_existence_without_reading(tmp_path, monkeypatch, reappeared):
+    from agent_py_agent.agent.common.cache_freshness import cache_stat_signature
+    from agent_py_agent.agent.subagents.services.persistence.service import (
+        SubAgentPersistenceService,
+    )
+
+    workspace = tmp_path / "locators"
+    service = SubAgentPersistenceService(SimpleNamespace(workspace=workspace))
+    task_file, canonical = _missing_locator(workspace, "missing")
+    if reappeared:
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("{}", encoding="utf-8")
+
+    # LLM: 本测试只调用缓存快捷口，任何read_text都说明偷偷退回二次解析。
+    # 函数用途: 让快捷口的非预期读盘成为显式失败。
+    def forbidden_read(*args, **kwargs):
+        raise AssertionError("canonical hint must avoid reading locator")
+
+    monkeypatch.setattr(Path, "read_text", forbidden_read)
+    service._cache_missing_canonical(
+        "missing", task_file, cache_stat_signature(task_file.stat()), canonical_path=canonical,
+    )
+    assert ("missing" in service._missing_canonical_cache) is not reappeared
+
+
+# LLM: 负缓存命中仍须核真实canonical是否重现，恢复后沿原reader加载，不能永远记作丢失。
+# 函数用途: 验证已缓存的缺失状态可被真实权威文件恢复打破。
+def test_wp8_missing_cache_invalidates_when_canonical_returns(tmp_path):
+    agent = _agent(tmp_path)
+    task = agent.subagents.create_run(goal="恢复权威文件", agent_name="worker")
+    _age_task_file(agent, task.id)
+    canonical = Path(task.agent_run_workspace_dir) / "canonical_state.json"
+    original = canonical.read_text(encoding="utf-8")
+    canonical.unlink()
+    service = agent.subagents.persistence
+
+    missing = service.list_runs_report()
+    assert missing.runs == [] and len(missing.load_errors) == 1
+    assert task.id in service._missing_canonical_cache
+    canonical.write_text(original, encoding="utf-8")
+    restored = service.list_runs_report()
+
+    assert restored.load_errors == []
+    assert [item.id for item in restored.runs] == [task.id]
+    assert task.id not in service._missing_canonical_cache
+
+
+# LLM: 非缺失错误和未满足原始路径等式的locator不得携带快捷提示，不改变原FileNotFoundError合同。
+# 函数用途: 防止优化把存在但坏格式、非法路径或解析后不等的声明当可信缺失。
+@pytest.mark.parametrize("case", ["present_non_object", "parent_traversal", "symlink_declared"])
+def test_wp8_reader_does_not_hint_unverified_missing_paths(tmp_path, case):
+    from agent_py_agent.agent.subagents.services.agent_run_state import read_agent_state_payload
+
+    task_file, canonical = _missing_locator(tmp_path / "locators", "missing")
+    if case == "present_non_object":
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("[]", encoding="utf-8")
+    else:
+        payload = json.loads(task_file.read_text(encoding="utf-8"))
+        if case == "parent_traversal":
+            payload["agent_run_workspace_dir"] = str(canonical.parent / ".." / "missing")
+        else:
+            target = tmp_path / "physical"
+            target.mkdir()
+            alias = tmp_path / "alias"
+            alias.symlink_to(target, target_is_directory=True)
+            payload["agent_run_workspace_dir"] = str(alias)
+        task_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError) as error:
+        read_agent_state_payload(task_file)
+    assert not hasattr(error.value, "canonical_path")

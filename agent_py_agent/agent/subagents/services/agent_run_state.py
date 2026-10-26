@@ -153,6 +153,8 @@ def _bounded_workspace_path(path: Path, workspace: Path | None) -> Path | None:
         return None
 
 
+# LLM: 沿原canonical解析与locator拒绝规则读取；缺失异常仅在原声明与解析路径一致且目标确实缺失时携Path，供负缓存免重读。
+# 函数用途: 读取子代理权威载荷，缺失locator仍抛原异常，并把已核缺失路径交给持久化缓存复用。
 def read_agent_state_payload(path: Path, workspace: Path | None = None) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -163,7 +165,16 @@ def read_agent_state_payload(path: Path, workspace: Path | None = None) -> dict[
         if isinstance(canonical, dict):
             return canonical
     if is_agent_state_locator(data):
-        raise FileNotFoundError(f"canonical subagent state missing for locator: {canonical_path}")
+        err = FileNotFoundError(f"canonical subagent state missing for locator: {canonical_path}")
+        declared_raw = str(data.get("agent_run_workspace_dir") or "").strip()
+        if (
+            canonical_path is not None
+            and not canonical_path.exists()
+            and declared_raw
+            and Path(declared_raw) == canonical_path.parent
+        ):
+            err.canonical_path = canonical_path  # type: ignore[attr-defined]
+        raise err
     return data
 
 

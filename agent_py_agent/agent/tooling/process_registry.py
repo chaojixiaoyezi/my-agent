@@ -1,5 +1,5 @@
 
-# LLM: 访问与归属读取 process_scope；v2/v3 复用原出生标识和终止回执，共享激活不向业务会话暴露。
+# LLM: 归属仍读process_scope；只读探针合并ps与微秒birth投影，终止选取强制新鲜关系，未知不冒充死亡或授权。
 # 前台自然退出按启动身份清理原组；旧locale仅缓存同PID/原token/当前token的原生复核成功等价，不缓存存活或改写原账。
 # 模块用途: 查询或精确停止受管进程，观测有界日志和读取故障；进程身份、退出与清理事实仍由原生命周期入口决定。
 from __future__ import annotations
@@ -10,6 +10,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,12 +30,21 @@ from .process_session_store import (
 
 HOST_STATE_SCHEMA = "background_process_host.v1"  # 仅供已发布 v1 记录读取旧终态文件。
 _IS_WINDOWS = os.name == "nt"
+_DEFAULT_SUBPROCESS_RUN = subprocess.run
 
 # LLM: 只存原生复核成功的精确三元组；锁内合并并发探针，FIFO最多256项，不写磁盘也不代表实例仍存活。
 # 缓存用途: 让升级前旧locale指纹与新观察复用已验证的等价关系，未知/不匹配不入缓存。
 _LEGACY_BIRTH_CACHE_MAX_COUNT = 256
 _LEGACY_BIRTH_EQUIVALENTS: dict[tuple[int, str, str], None] = {}
 _LEGACY_BIRTH_CACHE_LOCK = threading.Lock()
+
+# 只缓存内核微秒出生身份到旧host文本的投影，不缓存存活；与旧locale等价证明共用锁合并miss。
+_PID_BIRTH_TOKEN_CACHE: OrderedDict[tuple[int, str], str] = OrderedDict()
+_PID_BIRTH_TOKEN_CACHE_MAX_COUNT = 2048
+_PS_RELATION_CACHE: dict[str, tuple[float, dict[int, int], bool]] = {}
+_PS_RELATION_CACHE_LOCK = threading.Lock()
+_PS_RELATION_CACHE_SECONDS = 0.25
+_FRESH_RELATION_MAPS = threading.local()
 
 # 杀进程时 SIGTERM 到 SIGKILL 的宽限秒数。先礼(SIGTERM 让进程自己清理)后兵
 # (还活着就 SIGKILL 硬杀整组),避免留下孤儿子进程。
@@ -602,7 +612,7 @@ def finish_foreground_process(
     return proc.poll(), termination
 
 
-# LLM: 原唯一终止入口先核快照与启动指纹；旧locale仅经同PID复核兼容，读取未知或不匹配均不能发信号。
+# LLM: 原唯一终止入口强制本次新鲜关系再核启动指纹；不消费只读TTL缓存选信号目标，未知/不匹配均不能发信号。
 # 函数用途: 确认同一实例后有界发送TERM/KILL并回收，出生观察失败返回identity_unavailable而非假冒换PID。
 def terminate_process_tree(
     pid: int,
@@ -629,7 +639,7 @@ def terminate_process_tree(
         if expected_birth_token is not None and not _same_process(pid, expected_birth_token):
             return ProcessTerminationReceipt("identity_changed", False, None, 0, (pid,))
         return _terminate_windows_tree(pid, proc)
-    snapshot, complete = _process_tree_snapshot(pid)
+    snapshot, complete = _fresh_process_tree_snapshot(pid)
     if expected_birth_token is not None:
         if not snapshot.get(pid):
             return ProcessTerminationReceipt("identity_unavailable", False, None, len(snapshot), (pid,))
@@ -650,7 +660,7 @@ def terminate_process_tree(
         if not _wait_process_snapshot_gone(snapshot, proc, grace, terminated):
             # 根进程已回收时 PID 可能复用；只能对仍是原实例的根补充后代，不能杀到另一棵新树。
             if snapshot.get(pid) and _same_process(pid, snapshot[pid]):
-                current, current_complete = _process_tree_snapshot(pid)
+                current, current_complete = _fresh_process_tree_snapshot(pid)
                 _merge_tree_snapshot(snapshot, current, terminated)
                 complete = complete and current_complete
             _signal_process_snapshot(snapshot, getattr(signal, "SIGKILL", signal.SIGTERM))
@@ -701,7 +711,7 @@ def _safe_popen_kill(proc: subprocess.Popen | None) -> None:
         pass
 
 
-# LLM: 默认Linux父/组表共享一次proc扫描；任一map被替换则保留旧调用路径，完整性与出生身份守卫不变。
+# LLM: Linux默认单遍proc；普通POSIX观察可共享缓存，终止须经fresh包装；map替身调用形状与完整性不变。
 # 函数用途: 只读采集原进程树及已换父进程的同组后代出生标识，供本次终止和退出核对共用。
 def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     if root_pid <= 0:
@@ -737,6 +747,17 @@ def _process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
     return snapshot, complete
 
 
+# LLM: 仅此线程临时禁用关系TTL缓存，finally恢复；仍调用原snapshot以保替身/身份守卫，不改外部观察者的默认缓存。
+# 函数用途: 终止及升级KILL前重新采集关系，避免旧关系配上复用PID的新出生身份。
+def _fresh_process_tree_snapshot(root_pid: int) -> tuple[dict[int, str], bool]:
+    previous = getattr(_FRESH_RELATION_MAPS, "required", False)
+    _FRESH_RELATION_MAPS.required = True
+    try:
+        return _process_tree_snapshot(root_pid)
+    finally:
+        _FRESH_RELATION_MAPS.required = previous
+
+
 # LLM: 可共享同次扫描的groups，但仍须核对组长出生身份、独立组与宿主组；不得用不完整映射证明清理完成。
 # 函数用途: Linux用procfs、其它平台用关闭stdin的ps找原组成员，仍核对组长出生身份与宿主组边界。
 def _exclusive_group_members(root_pid: int, *, groups: dict[int, int] | None = None) -> tuple[list[int], bool]:
@@ -757,8 +778,8 @@ def _exclusive_group_members(root_pid: int, *, groups: dict[int, int] | None = N
     return [pid for pid, pgid in groups.items() if pgid == root_pid], complete
 
 
-# LLM: 只读PID/pgrp，不fork Linux Gateway；消失项跳过，拒读/坏stat/枚举失败保留不完整；无proc保留原ps入口。
-# 函数用途: 从proc stat或系统ps获取进程组表，供精确组长身份核对后使用。
+# LLM: Linux仍读proc；无proc原生POSIX共享250ms的ps观察，替换run时不缓存；完整性不得被命中升级。
+# 函数用途: 从proc或有界ps缓存获取进程组表副本，供精确组长身份核对后使用。
 def _process_group_map() -> tuple[dict[int, int], bool]:
     proc_root = Path('/proc')
     groups: dict[int, int] = {}
@@ -779,21 +800,50 @@ def _process_group_map() -> tuple[dict[int, int], bool]:
             except (OSError, IndexError, TypeError, ValueError):
                 complete = False
         return groups, complete and bool(groups)
+    return _ps_relation_map("pgid")
+
+
+# LLM: 仅默认run、无proc、非Windows启用新缓存，测试替换run时保留原ps可见调用。
+# 函数用途: 统一限定原生POSIX优化范围，不改变Linux与Windows的探测入口。
+def _native_posix_probe_enabled() -> bool:
+    return subprocess.run is _DEFAULT_SUBPROCESS_RUN and not _IS_WINDOWS and not Path("/proc").is_dir()
+
+
+# LLM: 锁覆盖检查和ps采集以合并并发miss；终止线程强制原采集，普通观察保留False缺口、完成起算TTL和副本。
+# 函数用途: 在原生无proc平台为父/组表分别共享250ms只读观察，其它入口不使用新缓存。
+def _ps_relation_map(relation: str) -> tuple[dict[int, int], bool]:
+    if getattr(_FRESH_RELATION_MAPS, "required", False) or not _native_posix_probe_enabled():
+        return _read_ps_relation_map(relation)
+    with _PS_RELATION_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _PS_RELATION_CACHE.get(relation)
+        if cached is not None and 0 <= now - cached[0] < _PS_RELATION_CACHE_SECONDS:
+            return dict(cached[1]), cached[2]
+        result, complete = _read_ps_relation_map(relation)
+        _PS_RELATION_CACHE[relation] = (time.monotonic(), dict(result), complete)
+        return dict(result), complete
+
+
+# LLM: 采集失败与坏行保留不完整，不把旧缓存补成成功；关闭stdin并仅为子进程固定C环境。
+# 函数用途: 保留原ps父/组表命令和各自空表完整性合同，集中解析一次观察。
+def _read_ps_relation_map(relation: str) -> tuple[dict[int, int], bool]:
     try:
-        result = subprocess.run(
-            ['ps', '-axo', 'pid=,pgid='], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=1, check=False,
+        completed = subprocess.run(
+            ["ps", "-axo", f"pid=,{relation}="], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=1, check=False,
+            env={**os.environ, "LC_ALL": "C"},
         )
     except (OSError, subprocess.TimeoutExpired):
         return {}, False
-    complete = result.returncode == 0
-    for line in result.stdout.splitlines():
+    result: dict[int, int] = {}
+    complete = completed.returncode == 0
+    for line in completed.stdout.splitlines():
         try:
-            pid, pgid = map(int, line.split())
-            groups[pid] = pgid
+            pid, related = map(int, line.split())
+            result[pid] = related
         except (TypeError, ValueError):
             complete = False
-    return groups, complete
+    return result, complete and (bool(result) if relation == "ppid" else True)
 
 
 # LLM: dict内容仍是PID到父/组号；complete只承载原枚举缺口，不是另一份进程权威或跨调用缓存。
@@ -853,33 +903,14 @@ def _linux_proc_status_parent(entry: Path) -> tuple[int | None, bool]:
         return None, False
 
 
-# LLM: Linux复用stat优先的单遍映射，保留status回退与父表完整性；无proc平台仍走原ps合同。
-# 函数用途: 读取宿主机父子关系，探测命令关闭 stdin；进程消失不算错误，其余读取失败保留核对缺口。
+# LLM: Linux仍单遍proc扫描；无proc默认POSIX共享250ms观察，monkeypatch绕过缓存且不丢完整性缺口。
+# 函数用途: 读取父子关系独立副本，保持关闭stdin的ps回退与原完整性合同。
 def _process_parent_map() -> tuple[dict[int, int], bool]:
     proc_root = Path("/proc")
     if proc_root.is_dir():
         result, _groups = _linux_proc_parent_and_group_maps(proc_root)
         return result, bool(result) and getattr(result, "complete", True)
-    try:
-        completed = subprocess.run(
-            ["ps", "-axo", "pid=,ppid="],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=1,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {}, False
-    result = {}
-    complete = completed.returncode == 0
-    for line in completed.stdout.splitlines():
-        try:
-            child_text, parent_text = line.split()
-            result[int(child_text)] = int(parent_text)
-        except (TypeError, ValueError):
-            complete = False
-    return result, complete and bool(result)
+    return _ps_relation_map("ppid")
 
 
 # 函数身份引用仅用于保留既有monkeypatch边界，不缓存任何进程或出生信息。
@@ -905,9 +936,8 @@ def _process_instance_terminated(pid: int, birth_token: str) -> bool:
         return False
 
 
-# LLM: Linux仍读proc，其它POSIX以子进程LC_ALL=C调用ps；不改父环境，读取失败不等于已死。
-#   只读探测不回收进程，保留Popen调用方的真实退出码；同步检查进程完成事件的locale回归。
-# 函数用途: 关闭探针stdin并统一ps状态输出，确认僵尸而不抢收原进程退出码。
+# LLM: Linux仍读proc；原生Darwin先核内核观察，False须确认非错误折叠；未知/异常/不支持回退ps，替身绕过。
+# 函数用途: 不回收进程地观察终止状态，保留LC_ALL=C、关闭stdin和未知不等于死亡的安全门。
 def _process_is_zombie(pid: int) -> bool:
     if _IS_WINDOWS:
         return False
@@ -917,6 +947,13 @@ def _process_is_zombie(pid: int) -> bool:
             return stat.rsplit(")", 1)[1].split()[0] in {"Z", "X"}
         except (OSError, IndexError):
             return False
+    if _native_posix_probe_enabled():
+        try:
+            terminated = _native_kernel_terminated(int(pid))
+            if isinstance(terminated, bool):
+                return terminated
+        except (ImportError, OSError, TypeError, ValueError, AttributeError):
+            pass
     try:
         result = subprocess.run(
             ["ps", "-o", "stat=", "-p", str(pid)],
@@ -929,15 +966,63 @@ def _process_is_zombie(pid: int) -> bool:
     return result.returncode == 0 and result.stdout.strip().startswith(("Z", "X"))
 
 
-# LLM: PID必须绑定出生身份；Linux proc和Windows ticks不变，其它POSIX仅为ps固定子环境LC_ALL=C。
-#   保留proc:/host:形状及失败空值，不改父locale；与原生内核身份的Store秒级投影及完成事件测试同步。
-# 函数用途: 关闭探针stdin并读取跨locale稳定的启动指纹，防止PID复用误判或抢读Gateway/TUI输入。
+# LLM: 原False可能折叠EPERM/EIO；复核成功必须采用本次状态，复核未知/不支持走ps，不能沿用旧False。
+# 函数用途: 保留内核终止快路径，同时让实际观察故障仍能走旧ps回退。
+def _native_kernel_terminated(pid: int) -> bool | None:
+    from ..gateway_parts import multiprocess_native_host_observation as native
+
+    if native.sys.platform != "darwin":
+        return None
+    terminated = native.kernel_terminated(pid)
+    if terminated is False:
+        info, error = native._darwin_info(pid)
+        if info is None or error:
+            return None
+        return info.prefix[1] == 5
+    return terminated if isinstance(terminated, bool) else None
+
+
+# LLM: Linux/Windows保留原入口；默认无proc路径将完整内核birth贯穿缓存键和host后缀，替换run绕过。
+# 函数用途: 读取出生指纹，同秒复用也返回不同身份；ps不可用时仅权威内核观察可补全身份。
 def capture_process_birth_token(pid: int) -> str:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
         return f"proc:{stat.rsplit(')', 1)[1].split()[19]}"
     except (IndexError, OSError):
         pass
+    if _native_posix_probe_enabled():
+        try:
+            from ..gateway_parts.multiprocess_native_host_observation import process_birth
+
+            # store_birth在Darwin只投影到秒；必须保留原pbi_start_tvsec:pbi_start_tvusec作为键。
+            kernel_birth = process_birth(int(pid))
+        except (ImportError, OSError, TypeError, ValueError, AttributeError):
+            kernel_birth = None
+        if kernel_birth is not None and str(kernel_birth):
+            return _cached_host_birth_token(pid, str(kernel_birth))
+    return _read_host_birth_token(pid)
+
+
+# LLM: 锁覆盖命中与ps采集；完整内核birth同时进入键和返回值，只缓存成功身份，不缓存存活判断。
+# 函数用途: 合并相同PID出生实例的并发采集，保留微秒身份供最终信号资格比对。
+def _cached_host_birth_token(pid: int, kernel_birth: str) -> str:
+    key = (int(pid), kernel_birth)
+    with _LEGACY_BIRTH_CACHE_LOCK:
+        cached = _PID_BIRTH_TOKEN_CACHE.get(key)
+        if cached is not None:
+            return cached
+        value = _read_host_birth_token(pid, kernel_birth=kernel_birth)
+        if not value:
+            return value
+        _PID_BIRTH_TOKEN_CACHE[key] = value
+        if len(_PID_BIRTH_TOKEN_CACHE) > _PID_BIRTH_TOKEN_CACHE_MAX_COUNT:
+            _PID_BIRTH_TOKEN_CACHE.popitem(last=False)
+        return value
+
+
+# LLM: ps抛OSError或超时/空响应/失败退出时一律保守返回空串，不污染缓存，不制造第二种token格式。
+# 函数用途: 保留原Windows及ps命令和子进程环境；已知内核身份附加微秒后缀，不改父环境。
+def _read_host_birth_token(pid: int, *, kernel_birth: str | None = None) -> str:
     if _IS_WINDOWS:
         command = (
             f"(Get-Process -Id {int(pid)} -ErrorAction Stop)."
@@ -959,17 +1044,37 @@ def capture_process_birth_token(pid: int) -> str:
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return ""
     value = completed.stdout.strip()
-    return f"host:{value}" if completed.returncode == 0 and value else ""
+    if completed.returncode != 0 or not value:
+        return ""
+    return f"host:{value}" + (f"#kb={kernel_birth}" if kernel_birth else "")
 
 
-# LLM: 固定C词法不借全局locale；旧host在精确三元组缓存未命中时原生复核，成功才有界FIFO缓存，错误仍抛未知。
-# 函数用途: 匹配新旧出生指纹并合并重复原生观察，关闭stdin、继承环境，不改持久token或缓存存活结论。
+# LLM: 纯比较不探测进程；双内核后缀必须整串相等，只有一方无后缀时兼容原基础token，空身份拒绝。
+# 函数用途: 区分同秒内不同微秒的进程，同时让既有落盘身份可平滑升级。
+def _birth_tokens_match(expected: str | None, current: str | None) -> bool:
+    if not expected or not current or not expected.strip() or not current.strip():
+        return False
+    if "#kb=" in expected and "#kb=" in current:
+        return expected.strip() == current.strip()
+    return expected.split("#kb=", 1)[0].strip() == current.split("#kb=", 1)[0].strip()
+
+
+# LLM: 双新格式不等不得落入旧locale；旧投影须重采完整身份，丢失微秒时抛观察错误，不能以False伪造死亡。
+# 函数用途: 为实例/信号资格和旧投影调用方共用身份匹配；未知由原调用方保守处理，旧locale复核保持。
 def _birth_token_matches(pid: int, expected_birth_token: str, current_token: str | None = None) -> bool:
     current = current_token if current_token is not None else capture_process_birth_token(pid)
-    if not current:
+    if not expected_birth_token or not current:
         return False
-    if current == expected_birth_token:
+    if "#kb=" in expected_birth_token and "#kb=" not in current and _native_posix_probe_enabled():
+        # Store投影可能丢微秒或使用不同基础文本；不能让它掩盖同秒PID复用。
+        observed = capture_process_birth_token(pid)
+        if not observed or "#kb=" not in observed:
+            raise OSError("native process birth observation unavailable")
+        return _birth_tokens_match(expected_birth_token, observed)
+    if _birth_tokens_match(expected_birth_token, current):
         return True
+    if "#kb=" in expected_birth_token and "#kb=" in current:
+        return False
     if not _IS_WINDOWS and expected_birth_token.startswith("host:") and current.startswith("host:"):
         try:
             fields = expected_birth_token[5:].split()

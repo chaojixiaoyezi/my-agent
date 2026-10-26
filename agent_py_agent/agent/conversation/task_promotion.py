@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: 运行状态只由结构化结果、task link 与子代理事件改变；文件路径不再触发任务选择或参数重写。
 
-模块用途: 普通会话工作时建立可恢复的运行身份；运行归档与用户目录权限相互独立。
+模块用途: 建立可恢复运行身份并有界解析持久继任链；运行归档与用户目录权限相互独立。
 """
 
 import hashlib
@@ -43,7 +43,7 @@ def promote_conversation_task_for_run(agent: object, params: object):
 
 # LLM: A thread's latest workspace projection is not a live-task capability. The first work tool
 # binds a fresh request unless exact request/Goal/active authority already selected a workspace.
-# 函数用途: 本轮真正工作时自动建立运行身份；只有结构化授权才复用旧目录，不让旧清单控制新一轮。
+# 函数用途: 本轮工作时建立运行身份；精确旧根沿继任链续接，坏链失败关闭，不回落新任务。
 def promote_current_conversation_task(
     agent: object,
     *,
@@ -111,6 +111,8 @@ def promote_current_conversation_task(
                     return bound
                 # 精确 task 续接失败时不另建影子目录。active 任务由
                 # execution blocker 收口；terminal 任务则由新执行代 successor 原子换代。
+                return None
+            if _superseded_workspace_selection_failed(store, candidate):
                 return None
             if not str(
                 goal
@@ -282,7 +284,7 @@ def _sticky_workspace_task_id(store: object, thread_id: str) -> str:
     return str(getattr(thread, "workspace_task_id", "") or "").strip()
 
 
-# LLM: 精确绑定以激活后的 link.task_id 判断是否换代；重复绑定当前 successor 不得自我 supersede，旧终态不复活。
+# LLM: 先沿有界继任链解析当前link再核其执行权；换代编号锚定原选择ID，重复绑定不自我supersede，旧终态不复活。
 # 函数用途: 按同 owner/thread 的明确运行身份恢复归档引用；不因访问旧文件而调用。
 def bind_current_conversation_workspace(agent: object, task_id: str):
     """由结构化会话身份绑定既有运行归档，不读取工具文件路径，也不作为模型工具暴露。"""
@@ -309,7 +311,7 @@ def bind_current_conversation_workspace(agent: object, task_id: str):
     prior_current_id = _sticky_workspace_task_id(store, thread_id) or str(
         attrs.get("conversation_task_id") or ""
     ).strip()
-    link = _activate_reusable_workspace_link(agent, store, link)
+    link = _activate_reusable_workspace_link(agent, store, link, preferred_id=selected_id)
     if link is None or not _supersede_prior_current(store, thread_id, prior_current_id, link.task_id):
         return None
     attrs["conversation_task_id"] = link.task_id
@@ -483,9 +485,9 @@ def _set_current_task_workspace(
     agent._current_run_task_workspace = str(workspace)
 
 
-# LLM: active Goal 才可原位续接；暂停/阻塞/预算状态须由显式控制恢复，工作工具不能偷偷激活目标。
+# LLM: active Goal才可原位续接；普通终态沿原选择ID分配新代次，暂停/阻塞目标不能借工作工具激活。
 # 函数用途: 激活有执行授权的既有目录；普通已结束工作建立新代次，暂停目标不变。
-def _activate_reusable_workspace_link(agent: object, store: object, link: object):
+def _activate_reusable_workspace_link(agent: object, store: object, link: object, *, preferred_id: str = ""):
     prior_status = str(getattr(link, "status", "") or "").strip().lower()
     if prior_status not in {
         "completed",
@@ -496,7 +498,7 @@ def _activate_reusable_workspace_link(agent: object, store: object, link: object
     if goal_resume is None:
         return None
     if not goal_resume:
-        return _continue_terminal_link_as_new_execution(agent, store, link)
+        return _continue_terminal_link_as_new_execution(agent, store, link, preferred_id=preferred_id)
     try:
         reopened = store.tasks.update_status({"task_id": link.task_id, "status": "active"})
     except Exception:
@@ -534,9 +536,9 @@ def _bound_goal_requires_in_place_resume(store: object, link: object) -> bool | 
     return False if status == "complete" else None
 
 
-# LLM: 原终态链接只贡献精确cwd，新执行代仍由原选择器分配；新链接可初始化选包pending，旧链接和原Goal不得被补写或复活。
-# 函数用途: 为明确续作建立幂等的新执行代，保持旧任务终态和原工作目录。
-def _continue_terminal_link_as_new_execution(agent: object, store: object, link: object):
+# LLM: 后继transition锁覆盖存在性快照、bind和指针发布；失败先核幂等提交，再回收本次新建且未变化的孤儿。
+# 函数用途: 为同目录续作建立稳定新执行代，发布失败时不留下未挂接的活动任务。
+def _continue_terminal_link_as_new_execution(agent: object, store: object, link: object, *, preferred_id: str = ""):
     """Create one idempotent successor task over the bound terminal workspace."""
     current = getattr(agent, "_current_run_params", None)
     attrs = getattr(current, "task_attributes", None) if current is not None else None
@@ -556,7 +558,7 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
         store,
         thread_id,
         base_id=base_id,
-        source_id=source_id,
+        source_id=preferred_id or source_id,
         task_path=str(getattr(link, "task_path", "") or ""),
     )
     if not successor_id:
@@ -564,38 +566,167 @@ def _continue_terminal_link_as_new_execution(agent: object, store: object, link:
     # A terminal link selected by exact authority contributes its canonical cwd. The successor
     # is a new 会话运行时 active turn, so its objective must come from this turn's exact
     # user input rather than the historical execution that previously occupied
-    # the directory.  Copying the old goal here makes foreground execution look
-    # correct while a later background wake resumes unrelated historical work.
-    current_goal = str(
-        getattr(current, "root_user_prompt", "")
-        or getattr(current, "user_prompt", "")
-        or getattr(current, "prompt", "")
-        or ""
-    ).strip()
+    # the directory. 后台无新输入时才继承精确旧目标，普通前台仍不能借空提示续接旧工作。
+    current_goal = next((text for key in ('root_user_prompt', 'user_prompt', 'prompt')
+                         if (text := str(getattr(current, key, '') or '').strip())), '')
+    if not current_goal and getattr(current, 'source', '') == 'background_main_agent':
+        current_goal = str(getattr(link, 'goal', '') or '').strip()
     if not current_goal:
         return None
     from ..capability.package_selection_scope import new_task_capability_selection
 
     selection = new_task_capability_selection(agent, current)
     try:
-        successor = store.tasks.bind(
-            {
-                "thread_id": thread_id,
-                "task_id": successor_id,
-                "goal": current_goal,
-                "status": "active",
-                "task_path": str(getattr(link, "task_path", "") or ""),
-            },
-            **({"capability_selection": selection} if selection is not None else {}),
-        )
+        successor = _bind_and_publish_successor(store, link, {
+            'thread_id': thread_id, 'task_id': successor_id, 'goal': current_goal,
+            'status': 'active', 'task_path': str(getattr(link, 'task_path', '') or ''),
+        }, selection=selection)
     except Exception:
         return None
-    attrs["conversation_continued_from_task_id"] = source_id
+    if successor is None:
+        return None
+    attrs["conversation_continued_from_task_id"] = preferred_id or source_id
     return successor
 
 
-# LLM: 同一 request/source/path 的活跃 successor 幂等复用；superseded 槽位只能分配下一代，不复活旧代或覆盖其他路径。
-# 函数用途: 为一次请求往返历史目录选择稳定运行编号；失败和未知状态仍拒绝，所有编号从结构化任务账派生。
+# LLM: 后继transition锁覆盖创建与发布；canonical文件内先原子确认创建归属，bind部分提交异常也有准确初始快照可补偿。
+# 函数用途: 绑定新执行代并发布继任边，防止存在性检查竞态误删他人任务。
+def _bind_and_publish_successor(store, previous, request, *, selection):
+    with store.tasks.transition_guard(request['task_id']):
+        initial = store.tasks.load(request['task_id'])
+        created_new = initial is None
+        prior_workspace_id = store.threads.require(request['thread_id']).workspace_task_id
+        if created_new:
+            initial, created_new = _reserve_successor_creation(store, request, selection=selection)
+        try:
+            successor = store.tasks.bind(request,
+                **({'capability_selection': selection} if selection is not None else {}))
+        except Exception:
+            _publish_or_rollback_successor(store, previous, initial, created_new=created_new,
+                prior_workspace_id=prior_workspace_id, publish=False)
+            return None
+        published = _publish_or_rollback_successor(store, previous, successor,
+            created_new=created_new, prior_workspace_id=prior_workspace_id)
+        return successor if published else None
+
+
+# LLM: 复用TaskStore原合并函数和canonical JSON更新器，不另造schema；只有锁内原文件不存在才取得本次创建资格。
+# 函数用途: 原子保存可补偿的初始任务快照，并区分并发抢先创建的既有记录。
+def _reserve_successor_creation(store, request, *, selection):
+    from ..gateway_parts.io import update_json_file_atomic
+    from .models import ThreadTaskLink
+    from .store_tasks import _merged_task_link
+
+    path, created = store.storage.task_path(request['task_id']), False
+
+    # LLM: 已有记录原样保留；空但存在的坏文件沿原合并器报错，不能覆盖成新任务。
+    # 函数用途: 在原JSON锁内建立本次新任务，冻结创建归属而不是依赖锁外load快照。
+    def reserve(data):
+        nonlocal created
+        if data:
+            return data
+        initial = _merged_task_link(data, request=request, thread_id=request['thread_id'],
+            task_id=request['task_id'], current=time.time(), path_exists=path.exists(), capability_selection=selection)
+        created = True
+        return initial.to_dict()
+
+    payload = update_json_file_atomic(path, reserve)
+    return ThreadTaskLink.from_dict(payload), created
+
+
+# LLM: 调用方已持后继transition锁；失败后在前代锁内重读有效继任边，提交已发生即幂等成功，不误删并发成功任务。
+# 函数用途: 区分指针未发表和回执丢失，仅未挂接且本次新建的任务进入回滚。
+def _publish_or_rollback_successor(store, previous, successor, *, created_new, prior_workspace_id, publish=True):
+    try:
+        if publish and _persist_superseded_successor(store, previous, successor):
+            return True
+    except Exception:
+        pass
+    with store.tasks.transition_guard(previous.task_id):
+        latest = store.tasks.load(previous.task_id)
+        if (latest is not None and latest.task_id == previous.task_id
+                and latest.thread_id == successor.thread_id and latest.status == 'superseded'
+                and latest.superseded_by_task_id == successor.task_id
+                and _selected_task_workspace(latest.task_path) == _selected_task_workspace(successor.task_path)):
+            # 指针先落盘而索引修复失败时，仍由原TaskStore收尾，不能把已提交继任当孤儿删除。
+            try:
+                store.tasks.update_status({'task_id': latest.task_id, 'status': 'superseded',
+                    'expected_status': 'superseded'})
+            except Exception:
+                pass
+            return True
+        if created_new:
+            _rollback_unpublished_successor(store, successor, prior_workspace_id=prior_workspace_id)
+    return False
+
+
+# LLM: 前代/后继transition锁由调用方持有；canonical任务JSON锁覆盖全值比较和删除；删除失败先退役并保留可重试历史。
+# 函数用途: 回收本次新建且仍为初始active的未挂接任务，删除自身失败也不得留下活动孤儿。
+def _rollback_unpublished_successor(store, successor, *, prior_workspace_id):
+    import json
+    from dataclasses import replace
+
+    from ..common.json_io import locked_json_path, write_private_text_file_atomic_unlocked
+    from ..common.nofollow_fs import read_bytes_beneath, unlink_file_beneath
+
+    path = store.storage.task_path(successor.task_id)
+    parts = path.relative_to(store.storage.root).parts
+
+    # LLM: 仅移除本次任务的索引；其它任务和并发工作区选择均保留，只有仍指向待删任务时恢复原显示指针。
+    # 函数用途: 在原线程锁内合并回滚成员关系，避免用旧线程快照覆盖并发更新。
+    def restore_thread(thread):
+        return replace(thread,
+            task_ids=tuple(item for item in thread.task_ids if item != successor.task_id),
+            active_task_ids=tuple(item for item in thread.active_task_ids if item != successor.task_id),
+            workspace_task_id=prior_workspace_id if thread.workspace_task_id == successor.task_id else thread.workspace_task_id)
+
+    with locked_json_path(path):
+        raw = read_bytes_beneath(store.storage.root, parts, max_bytes=16 * 1024 * 1024)
+        if successor.status != 'active' or raw is None:
+            return
+        if json.loads(raw) != json.loads(json.dumps(successor.to_dict(), ensure_ascii=False)):
+            return
+        store.threads.update_atomic(successor.thread_id, restore_thread)
+        try:
+            unlink_file_beneath(store.storage.root, parts)
+        except OSError:
+            # 文件删除失败时保留原任务的终态历史，下一次稳定编号可跳过它，不能留下未索引的active记录。
+            retired = {**json.loads(raw), 'status': 'superseded'}
+            write_private_text_file_atomic_unlocked(path, json.dumps(retired, ensure_ascii=False, sort_keys=True))
+            store.tasks.update_thread_index(successor.thread_id, successor.task_id, 'superseded', time.time())
+
+
+# LLM: 使用同一canonical任务文件与原transition/JSON锁，复核线程、路径、终态及既有指针，禁止迟到覆写新继任。
+# 函数用途: 原子保存前代的superseded状态和继任ID，再由TaskStore修复索引及终态副作用。
+def _persist_superseded_successor(store, previous, successor) -> bool:
+    from ..gateway_parts.io import update_json_file_atomic
+    from .models import ThreadTaskLink
+
+    # LLM: JSON锁内校验最新记录而非用旧快照覆盖；幂等重试保留原JSON和全部未知字段。
+    # 函数用途: 为这次同线程同路径换代发布唯一继任边。
+    def update(data):
+        latest = ThreadTaskLink.from_dict(data)
+        if (latest.task_id != previous.task_id or latest.thread_id != successor.thread_id
+                or _selected_task_workspace(latest.task_path) != _selected_task_workspace(successor.task_path)):
+            raise ValueError('TASK_SUCCESSOR_BINDING_INVALID')
+        if latest.status == 'superseded' and latest.superseded_by_task_id == successor.task_id:
+            return data
+        if latest.status not in {'completed', 'interrupted'} or latest.superseded_by_task_id:
+            raise ValueError('TASK_SUCCESSOR_CONFLICT')
+        return {**data, 'status': 'superseded', 'superseded_by_task_id': successor.task_id}
+
+    try:
+        with store.tasks.transition_guard(previous.task_id):
+            update_json_file_atomic(store.storage.task_path(previous.task_id), update, require_existing=True)
+            retired = store.tasks.update_status({'task_id': previous.task_id, 'status': 'superseded',
+                                                 'expected_status': 'superseded'})
+        return retired is not None
+    except Exception:
+        return False
+
+
+# LLM: 同路径终态base可跳过completed/interrupted/superseded前代，活跃后继幂等；跨路径只跳superseded，原大写/未知状态拒绝不变。
+# 函数用途: 为多次后台唤醒分配后继编号，同时保留同请求目录往返和失败关闭边界。
 def _terminal_successor_task_id(
     store: object,
     thread_id: str,
@@ -616,18 +747,20 @@ def _terminal_successor_task_id(
         for item in links
         if str(getattr(item, "task_id", "") or "")
     }
-    existing = by_id.get(base_id)
-    if existing is None:
+    base_existing = by_id.get(base_id)
+    if base_existing is None:
         return base_id
-    if (
-        str(getattr(existing, "status", "") or "").strip().lower() == "active"
-        and str(getattr(existing, "task_path", "") or "") == task_path
-    ):
+    base_status = str(getattr(base_existing, 'status', '') or '').strip().lower()
+    base_same_path = str(getattr(base_existing, 'task_path', '') or '') == task_path
+    if base_same_path and base_status == 'active':
         return base_id
+    allowed_prior_statuses = ({'superseded', 'completed', 'interrupted'}
+                             if base_same_path and base_status in {'superseded', 'completed', 'interrupted'}
+                             else {'superseded'})
     suffix = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
     derived = f"{base_id}-continue-{suffix}"
     # 已占用编号数不超过任务数，因此这段有界扫描必能发现空槽或明确的状态/路径冲突。
-    # 同一请求 A→B→A 需要新代；第一次 A 的 superseded 记录仍是历史事实，不能重新激活。
+    # 同一请求A→B→A仍只跳过superseded；终态同路径根的后续wake才允许越过正常完成的前代。
     for visit in range(len(by_id) + 1):
         candidate = derived if visit == 0 else f"{derived}-visit-{visit + 1}"
         existing = by_id.get(candidate)
@@ -638,7 +771,7 @@ def _terminal_successor_task_id(
         status = str(getattr(existing, "status", "") or "").strip()
         if status == "active":
             return candidate
-        if status != "superseded":
+        if status not in allowed_prior_statuses:
             return ""
     return ""
 
@@ -661,6 +794,8 @@ def _supersede_prior_current(
         return False
 
 
+# LLM: 精确选择优先，在同线程快照内识别原根；superseded只可沿持久指针解析，不能按命名或最新任务猜继任。
+# 函数用途: 从认证会话的任务关联中解析可复用当前代次。
 def _reusable_conversation_workspace_link(store: object, thread_id: str, task_id: str):
     try:
         links, errors = store.tasks.list_report(thread_id)
@@ -668,15 +803,44 @@ def _reusable_conversation_workspace_link(store: object, thread_id: str, task_id
         return None
     if errors:
         return None
-    return next(
-        (
-            item
-            for item in links
-            if item.task_id == task_id
-            and is_reusable_conversation_workspace(item)
-        ),
-        None,
-    )
+    link = next((item for item in links if item.task_id == task_id and item.thread_id == thread_id), None)
+    if link is not None and link.status == 'superseded':
+        return _resolve_superseded_successor_link(store, links, link, thread_id=thread_id)
+    return link if link is not None and is_reusable_conversation_workspace(link) else None
+
+
+# LLM: 最多16跳，每条边均须存在于同线程快照且重新读取权威记录；环、缺边、跨路径和不安全状态立即拒绝。
+# 函数用途: 沿持久继任链恢复原根当前代次，不授予新工作区或新执行权。
+def _resolve_superseded_successor_link(store, links, link, *, thread_id):
+    workspace = _selected_task_workspace(link.task_path)
+    if workspace is None or not workspace.is_dir() or link.task_id.lower().startswith(('subagent-', 'bg-main-')):
+        return None
+    by_id, visited = {item.task_id: item for item in links}, {link.task_id}
+    for _ in range(16):
+        next_id = getattr(link, 'superseded_by_task_id', '')
+        if not isinstance(next_id, str) or not next_id or next_id in visited or next_id not in by_id:
+            return None
+        visited.add(next_id)
+        try:
+            link = store.tasks.load(next_id)
+        except Exception:
+            return None
+        if (link is None or link.task_id != next_id or link.thread_id != thread_id
+                or _selected_task_workspace(link.task_path) != workspace):
+            return None
+        if link.status != 'superseded':
+            return link if is_reusable_conversation_workspace(link) else None
+    return None
+
+
+# LLM: 只有原选择确属superseded或读取失效时阻止新任务回落；不改变普通新提示的原有选择规则。
+# 函数用途: 防止坏继任链被非空提示绕过为影子执行。
+def _superseded_workspace_selection_failed(store, task_id) -> bool:
+    try:
+        link = store.tasks.load(task_id)
+        return link is not None and link.status == 'superseded'
+    except Exception:
+        return True
 
 
 def is_reusable_conversation_workspace(link: object) -> bool:
@@ -687,6 +851,8 @@ def is_reusable_conversation_workspace(link: object) -> bool:
     )
 
 
+# LLM: 原根选择可能已换代；执行状态必须按解析出的当前代次检查，不能漏掉继任代的活跃策略或claim。
+# 函数用途: 阻止对正在执行的精确任务或其当前继任代创建第二执行者。
 def conversation_task_execution_blocker(agent: object, task_id: str) -> dict[str, object] | None:
     """Block a second executor while an exact active task already has durable execution."""
     current = getattr(agent, "_current_run_params", None)
@@ -699,7 +865,7 @@ def conversation_task_execution_blocker(agent: object, task_id: str) -> dict[str
     link = _reusable_conversation_workspace_link(store, thread_id, selected_id)
     if link is None or str(getattr(link, "status", "") or "").strip().lower() != "active":
         return None
-    state = conversation_task_execution_state(store, thread_id, selected_id)
+    state = conversation_task_execution_state(store, thread_id, link.task_id)
     if state["state_available"] is True and state["running"] is not True:
         return None
     return state

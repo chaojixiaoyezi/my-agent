@@ -1,14 +1,42 @@
-## 2026-10-25 七大核心底座、TUI 交互增强与插件宿主接口扩展设计（`--dir` 多会话与目录资产合并、主会话分叉、对话勾选回合提炼一等公民、统一数据源钥匙串、浏览器录制转脚本、TUI 任务耗时尾标行、TUI 后台驻留彩色尾标与 `↑↓`/`Ctrl+G` 观察页，设计已定稿，待主控拆单实施）
+## 2026-10-25 七项核心底座与稳定性修复（当前工作区源码已落地，待统一验收与发布）
 
-围绕日常项目目录直启、主会话分支探索、历史对话资产化提炼、数据源规范化、浏览器动作固化及 TUI 关键交互体验，完成七项核心能力与 20 个 Plugin Host API v2 / Broker 接口的详细架构设计（完整规格与 `WP-1..WP-5` 拆单见 [PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md](docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md)）：
-- **明确边界（三项不做）**：不做结束拦截审稿人接口（复用 `/goal` 与 `goals.*`）；不做远端 SSH 工作区底层抽象（复用命令/脚本 `ssh`）；**不做子代理 Fork 主代理历史（Subagent Prefix Fork）**，子代理保持现有“干净隔离上下文 + 工具自定义（`allowed_tools`/角色模板/动态申请）”，仅保留**主会话分叉（Main Session Fork）**。
-- **能力 1（`CAP-DIR`）**：新增顶层 `my-agent --dir <path>` 启动模式、按 `workspace_root` 绑定的同目录多会话列表/新建/切换，以及 `<dir>/.agent/{skills,scripts,workflows,monitors,AGENTS.md}` 与个人全局 `~/.my-agent/*` 双层资产自动合并（优先级 `workspace > owner > builtin`）与 `assets.promote_to_owner` 一键提升。
-- **能力 2（`CAP-FORK`）**：新增 `thread_fork_service.py`、`/fork` 命令与 `conversations.threads.fork` 接口，支持从当前最新轮次或指定历史消息 `up_to_message_id`（自动对齐完整 `tool_use -> tool_result` 安全回合边界）分叉主会话，继承目录绑定、模型设置与前缀缓存基线。
-- **能力 3（`CAP-EXTRACT`）**：新增 `turn_extractor.py` 与 `conversations.turns.search` / `assets.extract.{propose,get,commit}` 接口，支持按时间段（1-3-7-14-30天/全部/自选日期）勾选 $N$ 次用户提问（自动打包底下 AI 的工具调用与回复），由 Agent 提炼生成 `1 个工作流 + N 个固定脚本 + 1 个 Skill + 可选监控` 的草稿包供用户预览挑选入库。
-- **能力 4（`CAP-DATASOURCE`）**：新增 `datasource_store.py`、`datasources_tool.py` 与 `datasources.{list,save,test,schema.inspect,migrate}` 接口，所有固定脚本/工作流仅通过逻辑代号 `source_id`（`get_datasource` / `query_sql`）访问数据；支持零配置本机 SQLite 或让 Agent 本机建库先行规范化，后续改地址或一键迁移至远端库时脚本零代码改动。
-- **能力 5（`CAP-RECORDER`）**：新增 `browser_recorder.py` 与 `recorder.{sessions.start,sessions.stop,compile_to_script}` 接口，支持将受控浏览器录制或导入的 Chrome Recorder JSON 自动参数化提炼为带 `io_contract.inputs` 的标准固定脚本并挂入工作流步骤。
-- **能力 6（`CAP-TUI-TIMING`）**：由 Gateway 服务端权威记录每轮开始与收口时间并随会话历史块持久化，在每轮 Assistant 回复正文末尾、`◉ Context` 状态栏正上方固定渲染 `✻ 耗时 3分46秒 · 完成于 08:08`，并移除 `tui_block_renderer.py` 中用 `completion` 覆盖底部快捷键栏 Footer 的分支。
-- **能力 7（`CAP-TUI-BG-WATCH`）**：当存在免 `sleep` 后台驻留任务等待结束/异常唤醒时，在底部 `F6 原生模式` 后直接追加醒目彩色指示器 `· ⚡ 后台驻留 N 项`；将其接入 `TuiAgentNavigationState` 的 `↑/↓` 导航首位（先移到此处、再移到 Goal/子代理），按 `Enter` 查看各后台任务的存活状态、运行时长与实时输出尾部，按 `Ctrl+G` 退回主聊天界面（同步开放 `processes.background.{list,inspect}` 插件接口）。
+设计来源：[七项能力详细设计](docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md)。本节按当前工作区实现核对，不把设计稿中的目标接口、预期收益或文件存在当成完整验收。核对基线为 `61bab6ab98fdd4d3b94ccabe2dda1aed1e9fa0b8`（当次 `HEAD == origin/main`）；以下新增能力及性能补丁尚为未提交改动，不表示已经合入或部署。
+
+### 七项能力与实现边界
+
+- **`CAP-DIR`**：`--dir` / `--cwd` / `--workspace` 与 `/dir` 共用显式目录校验；管理员可绑定具体项目目录，同时保留自己的 `owner_home`，非管理员仅限自己的家目录，宿主控制面与其它 owner 不因目录参数开放。`workspace_assets.py` 提供 `.agent/{skills,scripts,workflows,monitors}` 四类资产只读覆盖（`workspace > owner > builtin`）、显式 CAS 晋升与两阶段批量保存；发现资产不等于批准执行或创建监控。
+- **`CAP-FORK`**：`/fork [up_to_message_id] [--title 标题]` 与 `conversations.threads.fork` 只分叉主会话。`thread_fork_service.py` 回退到完整工具回合边界，重建安全前缀内的 Compact 检查点并复制冻结人格；新建消息、线程和谱系，不修改源会话，不继承任务、运行授权或插件回执。缓存实际命中率未验证，不承诺分叉必然命中供应商缓存。
+- **`CAP-DATASOURCE`**：`DatasourceStore` 保存 owner/workspace 连接规格、私有凭据引用、SQLite 建库及受校验迁移。当前秘密实际位于 `data/datasource_secrets/<credential_ref>.json`，文件 0600、私有目录隔离，**是私有明文 JSON，不是密文 `vault.json`**；公开摘要为脱敏规格和 `has_secret`，不是仅暴露 `credential_keys`。正式导入为 `agent_py_agent.runtime_sdk` 的 `get_datasource` / `query_sql`；仅可用脚本合同声明的受控句柄，运行输出按真实秘密值脱敏。SDK SQL 当前仅支持 SQLite；外部 MySQL/PostgreSQL 迁移仅导出 SQL 并本地回放校验，不作远端导入或切换，迁移前须停外部写者。
+- **`CAP-EXTRACT`**：`turn_extractor.py` 从选定用户回合聚合真实命令、工具与回复，脱敏后生成参数化 script/workflow/skill 草稿，默认脚本为干跑；读取预览不发布正式资产。`propose_assets_from_turns` **会持久化脱敏 DRAFT**，不是零落盘提案；默认确定性合成、可显式提供 analyzer，当前不生成 monitor，也不等同于在线 AI 提炼或门户完整体验已验收。
+- **`CAP-RECORDER`**：`browser_recorder.py` 接收、规范化并持久化动作序列，确定性编译参数化脚本及可选 workflow/skill。秘密字段不进入默认值，编译/干跑不执行浏览器；生成代码含受控 URL/网络边界。Host 单批动作数组上限为 1000，不应写成整个录制累计步数上限；创建录制记录不代表已启动真实浏览器或实时采集链已接通。
+- **`CAP-TUI-TIMING`**：回合完成信息形成独立、可回放的耗时/完成时间记录行，在消息流尾部呈现而不覆盖 Footer；缺原始时间的旧记录保持未知，不用新时钟冒充历史耗时。
+- **`CAP-TUI-BG-WATCH`**：后台驻留彩色尾标接入 `↑↓` 导航与 Enter 只读观察页，`Ctrl+G` / Esc 返回，不消费完成唤醒、不发送进程控制。当前 TUI 聚合**本用户全部会话**的后台记录；领域接口可按 `thread_id` 过滤，Host 再核安装线程/task 范围，不能写成 TUI 已限定当前会话。原生选择键兼容 `F6`、`Shift+F6`（`F14`）、`Esc+M`；真实 macOS 终端验收另做。
+
+### Plugin Host API v2 与 Broker：本轮新增 20 个标准动作
+
+唯一声明源为 `agent_py_agent/agent/plugin_host/action_specs_v2_ext.py::v2_action_specs`，处理器为 `capabilities_v2_handlers.py`。以下是准确动作名，不使用设计阶段简称替代实际 API：
+
+| 领域 | 动作 |
+| --- | --- |
+| 目录与资产覆盖 | `conversations.threads.workspace.get`、`conversations.threads.workspace.switch`、`assets.workspace.list`、`assets.workspace.promote` |
+| 主会话分叉 | `conversations.threads.fork` |
+| 数据源 | `datasources.list`、`datasources.save`、`datasources.test`、`datasources.schema.inspect`、`datasources.migrate` |
+| 回合检索 | `conversations.turns.search` |
+| 提炼草稿 | `assets.extract.from_turns.propose`、`assets.extract.from_turns.get`、`assets.extract.from_turns.commit` |
+| 浏览器动作 | `recorder.sessions.start`、`recorder.sessions.stop`、`recorder.sessions.get`、`recorder.sessions.compile` |
+| 后台观察 | `processes.background.list`、`processes.background.inspect` |
+
+Broker 只在已绑定原 v2 ingress 时转发新增动作；旧入口返回 `HOST_V2_REQUIRED`，不通过转发扩大权限。闭合 schema、显式能力、当前 owner/安装/线程范围及写动作幂等仍走原链。`assets.batch_save`、`observations.recent` 不在本轮新增目录中；批量保存属于资产领域服务，`observations.py` 当前提供工作区/资产/后台可见性投影，不据文件名宣称存在“最近回执”新动作。
+
+### 同日稳定性与高负载根因修复
+
+- **连续后台唤醒任务绑定**：`conversation/task_promotion.py` 仅对同路径终态根推进 completed/interrupted/superseded 前代并幂等复用活跃后继，保持同请求跨目录重入拒绝；`background_execution.py` 将已发表的任务 ID/路径/来源绑定带入同片 Compact 重试，不重用旧任务执行权。
+- **子代理持久化缓存（WP8）**：`SubAgentPersistenceService` 正/负条数预算各 4096、单项 256 KiB；`read_agent_state_payload` 在可信缺失路径异常中携带 canonical Path，避免冷扫描二读 locator；命中及新加载均锁外 deepcopy，返回仍为独立深副本。640 失效记录的组件回归为首扫 640 次、次扫零次 `task.json` 正文读取；仍有 stat 与错误报告开销，超过 4096 仍可能抖动，不代表整机 CPU 已验收。
+- **延迟 C 看门狗晋升（WP9）**：`gateway_parts/hang_diagnostics.py` 用一个常驻 Condition 线程，在原生长 tick 持续超过 1 秒后才按剩余 deadline 启用 C 级 `faulthandler`；短 tick 仅更新/清除内存状态，close/disarm 与晋升共锁和代次，避免常态逐 tick 建毁 C 线程。短期限及替身接口保留同步语义。
+- **macOS 进程探测（WP10）**：`tooling/process_registry.py` 复用原生内核状态/出生身份观察（macOS `libproc`），按 `(pid, kernel_birth)` 缓存既有出生 token 并合并并发探针；PID 复用、未知及失败不作为健康命中，原 POSIX fallback 继续固定 `LC_ALL=C` 并关闭 stdin。
+- **候选大账本（WP11，当前源码已接入）**：`memory_store/candidates.py::_candidate_load_probe` 对大文件用五元 stat 复用有界摘要缓存，写入同时失效解析与摘要两层。`_borrow_candidate_readonly_rows` 让 `CandidateService.list()` 命中缓存时先过滤/排序/切片再深拷贝实际返回行；`stats()` 直接按只读元组计数、不深拷贝候选。冷读、坏行校验及覆盖原加载器/列表的兼容分支仍走原合同；不限量列表仍须复制返回的全量结果，不宣称消除了全部 O(N) 扫描或生产 Gen2 GC 停顿。此接线在文档同步期间并行补齐，已按最新源码复核。
+
+不做结束拦截审稿人接口、远端 SSH 工作区 Provider 或子代理历史分叉。测试入口和未验边界见 [TESTS.md](TESTS.md)；最终组合、真实 CLI/TUI/插件及生产 CPU 效果由集成者按最终版本另验。
 
 ## 2026-10-25 管理员三端创建/管理本地普通用户、双源统一登录与公私插件隔离（已实现）
 

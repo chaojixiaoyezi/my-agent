@@ -2,7 +2,7 @@
 # LLM: 本模块把 prompt_toolkit 按键转换为输入、队列、滚动、显示模式和结构化控制动作；不得直接改 transcript 文本。
 #   Gateway 请求、后台线程、控制/补充消息对账等副作用动作在 tui_actions，复制子进程 helper 在 tui_clipboard；
 #   这里只显式导入并调用，不在本模块新增网络或子进程副作用。
-# 模块用途: 定义 chat TUI 的提交、多行编辑、中断、退出、鼠标切换、历史视图和模式快捷键。
+# 模块用途: 定义聊天编辑与控制快捷键，兼容 F6/F14/Esc+M 切换鼠标模式；后台观察不发送输入或中断任务。
 
 from __future__ import annotations
 
@@ -149,8 +149,8 @@ def _make_binding_filters(params: TuiCreateKeybindingsParams, condition_type: An
     )
 
 
-# LLM: permission bindings 只能发送 typed approval/cancel 事件；y/n 匹配 decision、数字键冻结 index，均不能解析 label 或落入隐藏聊天输入。
-# 函数用途: 注册权限选择、补充说明、y/n/数字确认与取消快捷键。
+# LLM: 权限键只发送 typed 决策；Esc 等待 Meta 组合消歧后才走原取消入口，不能让 Esc+M 误拒绝审批。
+# 函数用途: 注册权限选择、补充说明、确认与取消键，保留鼠标模式组合键。
 def _register_permission_bindings(
     kb: Any,
     params: TuiCreateKeybindingsParams,
@@ -169,7 +169,7 @@ def _register_permission_bindings(
     kb.add("n", filter=filters.permission_select_active)(
         lambda e: _resolve_permission_decision(e, params, ("denied", "cancelled"))
     )
-    kb.add("escape", filter=active, eager=True)(lambda e: _cancel_permission(e, params))
+    kb.add("escape", filter=active)(lambda e: _cancel_permission(e, params))
     kb.add("c-c", filter=active)(lambda e: _cancel_permission(e, params))
     for option_number in range(1, 10):
         kb.add(str(option_number), filter=filters.permission_select_active)(
@@ -181,8 +181,8 @@ def _register_permission_bindings(
         )
 
 
-# LLM: chat/history bindings 共用 typed draft 与 canonical queue；普通编辑仍由 TextArea 默认 key map 负责。
-# 函数用途: 注册发送、多行、补全、粘贴、草稿、退出与历史搜索快捷键。
+# LLM: 聊天/历史键共用 typed 草稿和规范队列；单独 Esc 在组合键消歧后仍走原动作，普通编辑仍归 TextArea。
+# 函数用途: 注册聊天与历史快捷键，避免历史接受动作抢走 Esc+M。
 def _register_chat_bindings(
     kb: Any,
     params: TuiCreateKeybindingsParams,
@@ -207,7 +207,7 @@ def _register_chat_bindings(
         lambda e: _handle_bracketed_paste(e, params)
     )
     kb.add("c-r", filter=history_active)(lambda e: _next_history_search_match(e, params))
-    kb.add("escape", filter=history_active, eager=True)(
+    kb.add("escape", filter=history_active)(
         lambda e: _accept_history_search(e, params)
     )
     kb.add("c-i", filter=history_active)(lambda e: _accept_history_search(e, params))
@@ -232,8 +232,8 @@ def _register_chat_bindings(
     kb.add("c-n", filter=chat_active)(lambda e: _handle_completion_or_history(e, params, 1))
 
 
-# LLM: `?` 帮助只在空编辑器切换且不写 history；面板打开后 Enter/Esc/空删除键优先关闭，普通字符仍交给 Buffer。
-# 函数用途: 注册 终端交互 输入框底部帮助面板的打开与关闭习惯。
+# LLM: 问号帮助不写历史；单独 Esc、Enter、空删除键关闭，Esc+M 留给全局模式切换，普通字符仍归 Buffer。
+# 函数用途: 注册帮助开关，同时让面板展示的鼠标模式兼容键确实可用。
 def _register_help_bindings(
     kb: Any,
     params: TuiCreateKeybindingsParams,
@@ -245,7 +245,7 @@ def _register_help_bindings(
         lambda e: _toggle_help(e, params)
     )
     kb.add("enter", filter=filters.help_open)(lambda e: _close_help(e, params))
-    kb.add("escape", filter=filters.help_open, eager=True)(
+    kb.add("escape", filter=filters.help_open)(
         lambda e: _close_help(e, params)
     )
     kb.add("backspace", filter=filters.help_open & empty_input)(
@@ -256,8 +256,8 @@ def _register_help_bindings(
     )
 
 
-# LLM: transcript bindings 只操作 typed modal/search state 和 view scroll；退出模式不提交输入或修改持久历史。
-# 函数用途: 注册 transcript 模式的退出、搜索、跳转和逐行滚动快捷键。
+# LLM: 正文键只操作 typed 模态/搜索和视口；单 Esc 消歧后退出，Esc+M 不应退出或取消搜索，更不提交输入。
+# 函数用途: 注册正文退出、搜索与滚动键，并保留全局原生复制组合键。
 def _register_transcript_bindings(
     kb: Any,
     params: TuiCreateKeybindingsParams,
@@ -274,7 +274,7 @@ def _register_transcript_bindings(
     kb.add("R", filter=full_navigation)(lambda _e: _required_transcript_state(params).retry_complete_page())
     kb.add("c-a", filter=navigation)(lambda e: _handle_transcript_select_all(e, params))
     kb.add("q", filter=navigation)(lambda e: _exit_transcript_mode(e, params))
-    kb.add("escape", filter=navigation, eager=True)(lambda e: _exit_transcript_mode(e, params))
+    kb.add("escape", filter=navigation)(lambda e: _exit_transcript_mode(e, params))
     kb.add("c-c", filter=navigation)(lambda e: _handle_transcript_ctrl_c(e, params))
     kb.add("c-g", filter=navigation)(
         lambda e: _handle_agent_back_keybinding(e, params)
@@ -298,7 +298,7 @@ def _register_transcript_bindings(
     kb.add("home", filter=navigation)(lambda e: _scroll_transcript_home(params))
     kb.add("end", filter=navigation)(lambda e: _jump_latest_keybinding(e, params))
     kb.add("enter", filter=search_active)(lambda e: _commit_transcript_search(e, params))
-    kb.add("escape", filter=search_active, eager=True)(
+    kb.add("escape", filter=search_active)(
         lambda e: _cancel_transcript_search(e, params)
     )
     kb.add("c-c", filter=search_active)(lambda e: _cancel_transcript_search(e, params))
@@ -329,12 +329,12 @@ def _register_scroll_bindings(
     kb.add(keys.ScrollDown, filter=scroll_active)(lambda e: _scroll_transcript(params, 1))
 
 
-# LLM: 全局 bindings 只接管已接通的 会话运行时/终端交互 映射；普通 Emacs 编辑键继续交给 TextArea 默认 key map。
-# 函数用途: 创建聊天快捷键；Goal 编辑期间整体让位给草稿控件，避免 Enter、方向键和 Ctrl+E 操作到背后的聊天。
+# LLM: 鼠标切换独立于聊天过滤，Goal模态也可用；其余聊天动作仍整体让位，不能操作背后的草稿或发送请求。
+# 函数用途: 合并全局鼠标兼容键与有Goal隔离的聊天快捷键，不改模态自己的Esc动作。
 def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     from prompt_toolkit.application import get_app
     from prompt_toolkit.filters import Condition
-    from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings
+    from prompt_toolkit.key_binding import ConditionalKeyBindings, KeyBindings, merge_key_bindings
     from prompt_toolkit.keys import Keys
 
     kb = KeyBindings()
@@ -348,7 +348,10 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     _register_chat_bindings(kb, params, filters, Keys, Condition)
     _register_help_bindings(kb, params, filters, Condition)
     kb.add("c-l")(lambda e: _handle_ctrl_l_keybinding(e, params))
-    kb.add("f6")(lambda e: _handle_f6_mouse_keybinding(e, params))
+    mouse = KeyBindings()
+    mouse.add("f6")(lambda e: _handle_f6_mouse_keybinding(e, params))
+    mouse.add("f14")(lambda e: _handle_f6_mouse_keybinding(e, params))
+    mouse.add("escape", "m")(lambda e: _handle_f6_mouse_keybinding(e, params))
     from .tui_permissions_menu import open_permissions_menu
 
     kb.add("f4")(lambda e: open_permissions_menu(e, params))
@@ -365,9 +368,10 @@ def _tui_create_keybindings(params: TuiCreateKeybindingsParams):
     )
     _register_transcript_bindings(kb, params, filters)
     _register_scroll_bindings(kb, params, filters, Keys, Condition)
-    return ConditionalKeyBindings(kb, filter=Condition(
+    chat = ConditionalKeyBindings(kb, filter=Condition(
         lambda: not bool(getattr(get_app(), "_my_agent_goal_editor_open", False))
     ))
+    return merge_key_bindings([chat, mouse])
 
 
 # LLM: help toggle 只修改 TuiInteractionState 并请求重绘；`?` 不得成为 prompt、slash command 或历史正文。
@@ -421,8 +425,12 @@ def _handle_enter_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
 
 # LLM: 提交入口统一恢复 transcript follow-tail、保存历史、执行 typed command 或进入 canonical queue；补全 Enter 也必须复用它。
 # 终态 child 的拒发必须清空草稿；插件候选版本在清空前冻结，随后只交给后台命令分派。
-# 函数用途: 提交文字及已登记附件，活动插话与下一轮排队共用完整选项，导入未完保留草稿。
+# 函数用途: 提交文字及附件；只读观察页先拒绝提交，不进入命令、媒体或消息写路径。
 def _submit_input_area(event, params: TuiCreateKeybindingsParams) -> None:
+    if getattr(_agent_navigation_snapshot(params), "can_send_input", True) is False:
+        _active_tui_runtime(params).set_notice("后台进程只读观察；Ctrl+G / Esc 返回主对话", duration_seconds=2)
+        event.app.invalidate()
+        return
     if params.media_importing:
         _required_tui_runtime(params).set_notice("附件仍在导入，请稍候再发送。", duration_seconds=2)
         return
@@ -1061,11 +1069,14 @@ def _navigate_agent_back(params: TuiCreateKeybindingsParams) -> bool:
 
 
 # LLM: Ctrl-C 先复制当前输入选区，再复制 typed transcript 选区；两者都为空时才停止回合或进入双击退出状态。
-# 函数用途: 实现输入/正文复制、活动中断和防误触双击退出的明确优先级。
+# 函数用途: 优先复制；后台观察空选区只返回主界面，不能中断主任务。
 def _handle_ctrl_c_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     if _copy_input_selection(event, params):
         return
     if _copy_transcript_selection(event, params):
+        return
+    if getattr(_agent_navigation_snapshot(params), "background_watch_active", False):
+        _handle_agent_back_keybinding(event, params)
         return
     with params.state_lock:
         running = bool(params.is_running_ref[0])
@@ -1289,8 +1300,11 @@ def _handle_ctrl_d_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 
 
 # LLM: 主代理 Esc 发送本轮中断，子代理沿原停止入口；空闲双 Esc 才清空草稿，均不按正文改变 Goal。
-# 函数用途: 处理中断当前回合，或以双 Esc 防误触方式保存历史并清空草稿。
+# 函数用途: 后台观察 Esc 仅返回；其它页面保持原中断与草稿清空行为。
 def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
+    if getattr(_agent_navigation_snapshot(params), "background_watch_active", False):
+        _handle_agent_back_keybinding(event, params)
+        return
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
         buffer.cancel_completion()
@@ -1355,7 +1369,7 @@ def _handle_escape_keybinding(event, params: TuiCreateKeybindingsParams) -> None
 
 
 # LLM: Up 必须先按当前渲染宽度走软折视觉行；只有到视觉顶边才允许恢复 queue，再由 Buffer 处理逻辑行/history。
-# 函数用途: 在屏幕折行、真实换行、排队消息和历史之间按 终端交互 顺序向上移动。
+# 函数用途: 空输入时后台入口优先，否则保持原折行、队列和历史导航顺序。
 def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
@@ -1365,7 +1379,7 @@ def _handle_up_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     navigation = _agent_navigation_snapshot(params)
     if (
         not str(buffer.text or "")
-        and str(getattr(navigation, "selected_run_id", "") or "")
+        and (str(getattr(navigation, "selected_run_id", "") or "") or getattr(navigation, "background_process_count", 0) > 0)
     ):
         mover = getattr(
             getattr(params, "agent_navigation", None),
@@ -1423,14 +1437,15 @@ def _restore_editable_queue(params: TuiCreateKeybindingsParams) -> bool:
 
 
 # LLM: Down 保留编辑器导航；但输入框为空且正文已离尾时，必须先回到实时尾部，再处理子代理选择或历史。
-# 函数用途: 输入有字时逐视觉行向下；输入为空且正在看旧消息时，先回到最新消息，再允许选择子代理。
+# 函数用途: 后台观察直接切换日志；主对话仍先回到最新消息再选择子代理。
 def _handle_down_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     buffer = params.input_area.buffer
     if buffer.complete_state is not None:
         move_completion_selection(buffer, event.arg)
         event.app.invalidate()
         return
-    if not str(buffer.text or "") and _return_detached_transcript_to_live(params):
+    if (not str(buffer.text or "") and not getattr(_agent_navigation_snapshot(params), "background_watch_active", False)
+            and _return_detached_transcript_to_live(params)):
         _reset_exit_arms(params)
         event.app.invalidate()
         return
@@ -1518,19 +1533,19 @@ def _handle_ctrl_l_keybinding(event, params: TuiCreateKeybindingsParams) -> None
     event.app.invalidate()
 
 
-# LLM: F6 只切换 process-local mouse-support filter；终端交互 式默认滚轮、配置、剪贴板投影、选区和会话状态都不得被它改写。
-# 函数用途: 在默认 TUI 滚轮/应用内复制与备用终端原生拖选之间即时切换，并明确两种模式的历史查看方式。
+# LLM: F6/F14/Esc+M 只切换进程内 mouse-support filter 并发显示通知；配置、剪贴板、选区与会话不变，旧通知前缀须保持。
+# 函数用途: 切换应用滚轮与终端原生复制，提示历史浏览方式以及 macOS 可用的兼容按键。
 def _handle_f6_mouse_keybinding(event, params: TuiCreateKeybindingsParams) -> None:
     enabled = _required_interaction(params).toggle_mouse_capture()
     runtime = _active_tui_runtime(params)
     if enabled:
         runtime.set_notice(
-            "滚轮模式：滚轮浏览，拖选松手/右键复制；F6 切原生复制",
+            "滚轮模式：滚轮浏览，拖选松手/右键复制；F6 切原生复制（macOS Terminal 可用 Shift+F6 或 Esc+M）",
             duration_seconds=4.0,
         )
     else:
         runtime.set_notice(
-            "原生复制模式：终端拖选/右键；历史用 PgUp/Ctrl+Home，F6 恢复滚轮",
+            "原生复制模式：终端拖选/右键；历史用 PgUp/Ctrl+Home，F6 恢复滚轮（或 Shift+F6 / Esc+M）",
             duration_seconds=4.0,
         )
     _reset_exit_arms(params)

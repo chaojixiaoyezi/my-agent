@@ -12,6 +12,7 @@ import pytest
 from agent_py_agent.agent.plugin_activation import PluginActivationRequest
 from agent_py_agent.agent.plugin_activation_record import PluginActivation, plugin_catalog_digest
 from agent_py_agent.agent.plugin_environment_plan import plan_plugin_environment
+from agent_py_agent.agent.plugin_host.action_specs import action_specs
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_install_store import PluginInstallStore
 from agent_py_agent.agent.plugin_installation import PluginInstallRequest
@@ -19,6 +20,7 @@ from agent_py_agent.agent.plugin_package import inspect_plugin_package
 from agent_py_agent.agent.plugin_permissions.grants import PermissionSelection, permission_details
 from agent_py_agent.agent.plugin_permissions.host_grants import validate_host_grant
 from agent_py_agent.agent.plugin_runtime_facts import confirmation_code
+from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
 from agent_py_agent.agent.user_space.owner_resolver import resolve_owner_home
 from agent_py_agent.tests.test_plugin_manifest_v8 import _bundle
 from agent_py_agent.tests.test_plugin_manifest_v9 import v9_payload
@@ -57,7 +59,7 @@ def test_grant_accepts_complete_scope():
     ("package_sha256", "bad"), ("activation_id", "x" * 64), ("installation_ref", ""),
     ("approved_capabilities", []), ("approved_capabilities", ["read", "read"]),
     ("approved_capabilities", ["admin"]), ("target_user_ids", ["main"]),
-    ("target_user_ids", ["alice", "alice"]), ("creatable_user_ids", ["*"]),
+    ("target_user_ids", ["alice", "alice"]), ("creatable_user_ids", ["main"]),
     ("manageable_user_ids", ["Alice"]), ("threads.explicit_ids", ["*"]),
     ("threads.created_by_installation", 1), ("execution.network", True),
     ("execution.max_tokens_per_request", 1000001), ("execution.max_concurrent_requests", 9),
@@ -85,11 +87,11 @@ def test_grant_missing_fields_rejected(field):
 
 # LLM: 临时真实安装表、不启动包内容，激活CAS和序列化走产品链。
 # 函数用途: 提供本机管理员下的未启用v9安装与绑定授权。
-def installed_grant(tmp_path, capabilities=None):
+def installed_grant(tmp_path, capabilities=None, scope="public"):
     owner = resolve_owner_home(tmp_path)
     store = PluginInstallStore(owner)
     package = inspect_plugin_package(_bundle(v9_payload(capabilities)))
-    entry = store.install(PluginInstallRequest(package, "install-test", 0)).installation
+    entry = store.install(PluginInstallRequest(package, "install-test", 0, installation_scope=scope)).installation
     plan = plan_plugin_environment(entry, "enable-test")
     os_grant = json.loads(json.dumps(permission_details(entry, plan, PermissionSelection(), "restricted")))
     grant = grant_payload()
@@ -166,9 +168,9 @@ def test_enable_previews_v9_grant_without_legacy_fallback(tmp_path):
 
 # LLM: 走真实安装prepare/activate流程，测试只不启动外部插件进程。
 # 函数用途: 为令牌及授权测试创建实际可读取的固定激活。
-def active_grant(tmp_path, capabilities=None):
+def active_grant(tmp_path, capabilities=None, scope="public"):
     from agent_py_agent.agent.plugin_activation_ref import PluginActivationRef
-    owner, store, entry, plan, os_grant, grant = installed_grant(tmp_path, capabilities)
+    owner, store, entry, plan, os_grant, grant = installed_grant(tmp_path, capabilities, scope=scope)
     preparing = PluginActivation(plan, "preparing", permission_json=json.dumps({**os_grant, "host_api_grant": grant}))
     prepared = store.change_activation(PluginActivationRequest(plan.operation_id, entry.revision, preparing)).installation
     active = replace(preparing, phase="active", catalog_sha256=plugin_catalog_digest(entry.manifest))
@@ -301,7 +303,7 @@ def test_dispatch_missing_domain_and_discovery(live_issuer):
     assert error.value.code == "HOST_NOT_READY"
     result = dispatch_call(authorize_call(source, api_call("host.capabilities.get")), HostDomainPorts())
     assert isinstance(result, DomainResult)
-    assert len(result.data["actions"]) == 42
+    assert len(result.data["actions"]) == len(action_specs())
     assert [row["action"] for row in result.data["actions"] if row["available"]] == ["host.capabilities.get"]
 
 
@@ -366,7 +368,7 @@ def test_http_real_route_and_strict_envelope(http_host):
     status, result = http_request(server, token, row)
     assert status == 200
     assert result["schema"] == "plugin_host_result.v2" and result["ok"] is True
-    assert len(result["data"]["actions"]) == 42
+    assert len(result["data"]["actions"]) == len(action_specs())
     assert result["meta"]["effective_owner"] == {"provider": "local", "owner_kind": "main", "owner_id": "main"}
     assert set(result["meta"]) == {"trace_id", "action", "observed_at", "effective_owner", "provenance", "warnings"}
     row["action"] = "conversations.threads.list"
@@ -550,8 +552,8 @@ def test_management_transports_host_selection(tmp_path, monkeypatch, interactive
     assert _selection_slot().get() is None
 
 
-# LLM: 使用真实安装和令牌；C的业务实现未在本任务内，仅通过规定DTO模拟resolver合同。
-# 函数用途: 提供冷用户、修订及可收紧策略的受信factory替身。
+# LLM: 真实安装/令牌和原生命周期物化的账号，保留现行home身份核验；resolver替身不放宽enabled/revision门。
+# 函数用途: 提供合法账号及未初始化Agent的受信factory，并记录只读前的目录状态。
 @pytest.fixture
 def target_issuer(tmp_path):
     from agent_py_agent.agent import plugin_host_api as api
@@ -562,8 +564,13 @@ def target_issuer(tmp_path):
         RestrictedExecutionPolicy,
         RestrictedPermission,
     )
+    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
     owner, _, entry, ref = active_grant(tmp_path, ["read", "chat", "execute", "act_as_user"])
+    users = LocalUserStore(owner.root)
+    LocalUserLifecycle(users).create("alice", idempotency_key="target_fixture_create_01")
     state = {"revision": 1, "execution_calls": 0, "extra_budget": 0, "wrong_source": False}
+    state["home_before"] = {str(path.relative_to(users.owner_home("alice").home_dir)): path.read_bytes()
+                            for path in users.owner_home("alice").home_dir.rglob("*") if path.is_file()}
     # LLM: 纯解析不ensure，不创建目标目录或Agent。
     # 函数用途: 投影同一普通用户的当前修订。
     def read(binding):
@@ -590,8 +597,8 @@ def target_issuer(tmp_path):
         api.set_host_api_base(None)
 
 
-# LLM: 插件持execute能力不代表每个只读调用都有创建执行主体的权利。
-# 函数用途: 验证只读上下文无初始化且不能升级成执行factory。
+# LLM: 现行账号门要求物化home；只读前后全文件字节不变，持execute也不授本次读调用执行主体。
+# 函数用途: 验证只读无目录写入、无Agent初始化且不能升级成执行factory。
 def test_read_call_cannot_resolve_execution(target_issuer):
     from agent_py_agent.agent.plugin_host.contracts import (
         authorize_call,
@@ -601,7 +608,8 @@ def test_read_call_cannot_resolve_execution(target_issuer):
     issuer, token, state = target_issuer
     authorized = authorize_call(issuer.ingress(token), api_call(as_user="alice"))
     context = resolve_read_context(authorized)
-    assert not context.owner_home.home_dir.exists()
+    assert {str(path.relative_to(context.owner_home.home_dir)): path.read_bytes()
+            for path in context.owner_home.home_dir.rglob("*") if path.is_file()} == state["home_before"]
     assert state["execution_calls"] == 0
     with pytest.raises(HostAPIError) as denied:
         resolve_execution_context(authorized)

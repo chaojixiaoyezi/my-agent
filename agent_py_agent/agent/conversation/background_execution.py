@@ -231,7 +231,8 @@ def invoke_background_turn(
 
 # LLM: 本片冻结摘要范围、覆盖和首次解析的请求身份；仅最终非溢出尝试将原RunParams交宿主回调，run/attempt仍由原绑定。
 #   回合触发类型每次尝试都写进新准备的 RunParams，压缩续跑与首次尝试用同一个；携带记录及其是否读全按首次尝试冻结。
-# 函数用途: 用同一适用摘要准备后台模型片，压缩续跑沿用展示和拒绝记录，成功提交计入公平让出预算。
+#   同片仅携带三个非空已晋升会话绑定字段，不复制权限、模型身份、其他属性或跨片状态。
+# 函数用途: 运行后台模型片，压缩续跑保留精确任务绑定与原展示记录，成功提交计入公平让出预算。
 def run_background_turn_with_compact(
     execution: BackgroundExecutionDependencies,
     thread: ConversationThread,
@@ -256,6 +257,7 @@ def run_background_turn_with_compact(
     recovering, compact_trigger_source = False, COMPACT_TRIGGER_PREFLIGHT
     committed_generations = 0
     slice_request_id = ""
+    promoted_task_attrs: dict[str, str] = {}
 
     # LLM: 同步回调只写当前调用的局部状态及原参数，失效 None 不清已评估事实，绝不落盘或回写请求。
     # 函数用途: 让 Compact 和后续模型尝试都读取本后台 turn 的最新展示。
@@ -282,13 +284,10 @@ def run_background_turn_with_compact(
         configure_background_public_receipt(execution.agent, request, run_params)
         run_params.request_id = slice_request_id or run_params.request_id
         run_params.compact_context = history.compact_context
-        if carried_archive_tool_calls is None:
-            carried_archive_tool_calls = list(run_params.carried_archive_tool_calls or [])
-        else:
-            run_params.carried_archive_tool_calls = list(carried_archive_tool_calls)
-        carry_incomplete = _freeze_carry_completeness(run_params, carry_incomplete)
-        run_params.carried_active_turn_user_inputs = list(carried_active_turn_user_inputs)
-        run_params.native_compact_carry = native_compact_carry
+        carried_archive_tool_calls, carry_incomplete = _prepare_background_attempt_carry(
+            run_params, carried_archive_tool_calls, carry_incomplete,
+            carried_active_turn_user_inputs, native_compact_carry, promoted_task_attrs,
+        )
         run_params.conversation_turn_id = request.conversation_turn_id
         run_params.turn_trigger = turn_trigger
         if runtime_rejected_actions is None:
@@ -310,6 +309,7 @@ def run_background_turn_with_compact(
             execution, user_prompt, run_params, history, prepared_context,
             recovering=recovering, activity_sink=activity_sink, trigger_source=compact_trigger_source,
         )
+        promoted_task_attrs.update(_promoted_task_binding_attrs(run_params))
         slice_request_id = slice_request_id or run_params.request_id
         if recovering and (recovery is None or not recovery.committed):
             raise RuntimeError("background compact recovery did not commit")
@@ -334,6 +334,32 @@ def run_background_turn_with_compact(
                                              and native_compact_carry is None):
             raise RuntimeError("background compact has no recoverable source")
         recovering, compact_trigger_source = True, str(getattr(result, "runtime_source", "") or "")
+
+
+# LLM: 原archive/输入/完整性携带算法原样执行，只向新参数恢复同片已确认任务三字段，不复制权限或run/attempt。
+# 函数用途: 准备一次Compact模型尝试的携带投影，返回首轮冻结的归档工具和完整性结论。
+def _prepare_background_attempt_carry(params, archive, incomplete, active_inputs, native, promoted):
+    if archive is None:
+        archive = list(params.carried_archive_tool_calls or [])
+    else:
+        params.carried_archive_tool_calls = list(archive)
+    incomplete = _freeze_carry_completeness(params, incomplete)
+    params.carried_active_turn_user_inputs = list(active_inputs)
+    params.native_compact_carry = native
+    if promoted and isinstance(params.task_attributes, dict):
+        params.task_attributes.update(promoted)
+    return archive, incomplete
+
+
+# LLM: 只读模型尝试返回参数中的三个非空字符串，不推断任务、恢复执行权或修改其它属性。
+# 函数用途: 提取本片下一次Compact重试需要沿用的精确会话任务绑定。
+def _promoted_task_binding_attrs(params: RunParams) -> dict[str, str]:
+    attrs = params.task_attributes
+    if not isinstance(attrs, dict):
+        return {}
+    return {key: value for key in (
+        'conversation_task_id', 'conversation_task_path', 'conversation_continued_from_task_id',
+    ) if isinstance(value := attrs.get(key), str) and value.strip()}
 
 
 # LLM: 每次尝试都按本次线程和已冻结的历史重新准备后台上下文（含本次适用的压缩视图），不跨尝试复用渲染结果；

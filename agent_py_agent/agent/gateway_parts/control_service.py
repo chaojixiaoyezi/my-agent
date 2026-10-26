@@ -3,7 +3,7 @@
 # 整任务停止在任务锁内关闭主执行权和冻结资源；实际回收在锁外，不追随恢复轮。
 # 插话的宿主owner在原控制解析点冻结进guidance，恢复不依据新绑定或sender重新选择归属。
 # LLM: 正count普通input同key追加与原queue共持input T至末append；Count0/无ordinary ID不增加input读取，queued不能迟到active追加。
-# 模块用途: 按认证身份分派会话及用户管理控制，保持任务、历史、权限和中断边界。
+# 模块用途: 按认证身份分派会话、目录和分叉及用户管理控制，保持任务、历史、权限和中断边界。
 from __future__ import annotations
 
 """Conversation task controls backed by request and durable task ledgers.
@@ -461,8 +461,8 @@ def reconcile_gateway_steer_delivery(
 #   用 scope 承载而不新增形参：本函数已有四个位置参数，再加会触发尺寸守卫的参数告警。
 # 原管理员绑定/审批服务自己裁决私聊、密码和角色；不能被目录的通用拒绝替换成不可行动的提示。
 # 函数用途: 从已认证 owner 投影命令权限/帮助后分派原控制，保留原管理员批准的精确安全门和恢复提示。
-# LLM: 监控及人工配置沿原认证面分派；Memory候选只传给活封印控制，模型/子代理不得制造批准。
-# 函数用途: 按准确身份分派即时命令及用户管理，群控制和密码不进入普通任务。
+# LLM: 各控制共用命令目录鉴权；dir/fork在鉴权后只交认证owner的Store，Memory人工确认仍须原活封印。
+# 函数用途: 按准确身份分派即时命令、工作目录及分叉，不把控制输入交给普通任务。
 def execute_gateway_conversation_control(
     agent: object,
     paths: GatewayPaths,
@@ -558,6 +558,8 @@ def execute_gateway_conversation_control(
         from .plugin_command_service import execute_plugin_control
 
         return execute_plugin_control(agent, command, scope, event_hub=scope.event_hub)
+    if command.kind in {"dir", "fork"}:
+        return _execute_gateway_workspace_control(agent, command, scope, is_admin=access.is_admin)
     steer_receipt: _SteerReceiptState | None = None
     if command.kind == "steer":
         try:
@@ -670,6 +672,24 @@ def execute_gateway_conversation_control(
     if command.kind == "steer":
         return _steer_active_request(agent, paths, active, command, scope)
     return ConversationControlResult(command.kind, False, "不支持的会话控制命令。", error_code="UNKNOWN_CONVERSATION_CONTROL")
+
+
+# LLM: 调用方已完成命令鉴权；只从认证scope取owner及通道线程，缺HomePaths时用canonical storage.root，不猜基础Agent或最新线程。
+# 函数用途: 接通目录及分叉领域服务；仅首次dir创建会话，空fork明确拒绝。
+def _execute_gateway_workspace_control(base_agent, command, scope, *, is_admin: bool):
+    from ..conversation.workspace_context import execute_workspace_control
+
+    owner_agent = _request_agent_for_scope(base_agent, scope)
+    store = owner_agent.conversation_store
+    owner_home = Path(getattr(getattr(owner_agent, "home_paths", None), "owner_home_dir", "") or store.storage.root.parent)
+    thread = store.threads.resolve(channel=scope.channel, channel_conversation_id=scope.conversation_id,
+                                   channel_user_id=scope.user_id)
+    if thread is None:
+        if command.kind == "fork":
+            return ConversationControlResult("fork", False, "当前还没有可分叉的会话。", error_code="WORKSPACE_CONTROL_INVALID")
+        thread = store.threads.get_or_create({"canonical_user_id": scope.user_id, "channel": scope.channel,
+            "channel_conversation_id": scope.conversation_id, "channel_user_id": scope.user_id, "owner_home": str(owner_home)})
+    return execute_workspace_control(store, command, thread_id=thread.thread_id, owner_home=owner_home, is_admin=is_admin)
 
 
 # LLM: Gateway 只解析已认证的 typed session event 并解析 owner；真正 durable reason 仍由 Memory Service 持有。

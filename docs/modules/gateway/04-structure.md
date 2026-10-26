@@ -1,3 +1,8 @@
+## 2026-10-25 五大核心底座能力、Host v2 20 项扩展动作与网关看门狗延迟晋升结构
+
+- `gateway_parts/workspace_scope.py` 与 `control_service.py` 协同 `conversation/workspace_context.py`、`thread_fork_service.py` 及 `cli/workspace_resolution.py` 承载管理员专属显式项目目录（`--dir` / `/dir`，普通模式下保留显式项目与 `owner_home` 双根，非管理员严格限制在 `owner_home`）与主会话安全分叉（`/fork`）；`gateway_parts/plugin_broker_api.py`、`plugin_host_broker_topics.py` 与 `agent/plugin_host/`（`action_specs_v2_ext.py`、`capabilities_v2_handlers.py`、`observations.py`）扩展 20 项 Host API v2 与 Broker 动作。
+- `gateway_parts/hang_diagnostics.py` 在保留测试替身与短超时同步 `faulthandler` 语义的前提下，对生产长超时（`>= 1.0s`）采用常驻延迟晋升器，仅当 dispatch tick 持续在途满延迟阈值后才注册底层 C `faulthandler.dump_traceback_later`，消除常态 `<1ms` tick 高频建毁内核线程。
+
 ## 2026-10-25 管理员三面用户管理、双源认证与公私插件隔离结构
 
 - `gateway_parts/users_control_service.py` 提供 `manage_local_users` 与 `execute_users_direct`，承载 `/users create|password|list|info|get|enable|disable` 控制动作；`gateway_parts/control_service.py`、`cli/chat_parts/control_runtime.py`、`conversation/control_commands.py`（`persisted_control_command_text` 口令脱敏）与 `settings/command_catalog.py` 构成 `/users`（别名 `/user`）斜杠命令完整控制链路；`gateway_parts/control_operation_service.py` 通过 `_is_admin_owner` 守卫网关级控制动作并将 `plugins` 控制分流至管理员或本地普通用户私有插件存储；`gateway_parts/agents_control_service.py` 在 `/agents` 写入前对本地普通用户校验 `read_user_admin_controls` 与 `max_disk_mb`。

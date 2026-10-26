@@ -1,5 +1,5 @@
 # LLM: 监控仅读Scheduler事实及显式资产ID，保存独立绑定，不执行引用动作或读取凭据；公开值统一过AssetDescriptor。
-# 模块用途: 提供监控标准Key，自动合并规则/预检的工作流脚本拓扑边，扩展绑定仍存data/monitors/<id>.json。
+# 模块用途: 提供监控标准Key及引用拓扑；绑定写入共用资产根恢复锁和CAS版本，仍存data/monitors/<id>.json。
 from __future__ import annotations
 
 import json
@@ -14,7 +14,7 @@ from ..common.nofollow_fs import (
     read_bytes_beneath,
     write_text_atomic_beneath,
 )
-from . import safe_asset_id
+from . import asset_root_lock, next_asset_revision, safe_asset_id
 from .descriptor import AssetDescriptor
 
 
@@ -30,24 +30,26 @@ def _read_object(home, parts):
     return value
 
 
-# LLM: 显式参数集合保留任务给定的全部关键词；用bindings聚合以守住六参数门，未知键写前拒绝。
-# 函数用途: 原子保存监控绑定；此入口不修改Scheduler，未给出的绑定按空值保存。
+# LLM: 未知键写前拒绝；先持资产根锁恢复旧批量，再取监控单项锁核CAS和递增版本，锁内原子发表，不修改Scheduler。
+# 函数用途: 保存独立监控绑定，避免重置revision或被旧批量恢复覆盖；未给出的绑定仍按空值保存。
 def save_monitor_binding(owner_home, monitor_id, *, name='', summary='', schedule_spec=None, **bindings):
     home, identifier = Path(owner_home).absolute(), safe_asset_id(monitor_id)
-    allowed = {'workflow_ids', 'script_ids', 'skill_ids', 'access_targets', 'data_sources', 'credential_refs'}
+    allowed = {'workflow_ids', 'script_ids', 'skill_ids', 'access_targets', 'data_sources', 'credential_refs', 'expected_revision'}
     if bindings.keys() - allowed:
         raise TypeError('监控绑定包含未知字段')
     refs = {kind: list(dict.fromkeys(bindings.get(key, ()))) for kind, key in
             (('workflows', 'workflow_ids'), ('scripts', 'script_ids'), ('skills', 'skill_ids'))}
     payload = {'name': name, 'summary': summary, 'schedule_spec': schedule_spec or {}, 'refs': refs,
                **{key: bindings.get(key, ()) for key in ('access_targets', 'data_sources', 'credential_refs')}}
-    descriptor = _monitor_dict(home, identifier, payload, {})
     parts = ('data', 'monitors', identifier + '.json')
     home.mkdir(parents=True, exist_ok=True)
-    os.close(open_directory_beneath(home, ('data', 'monitors'), create=True))
-    with locked_json_path(home / 'data' / 'monitors' / (identifier + '.json')):
-        _read_object(home, parts)
-        write_text_atomic_beneath(home, parts, json.dumps(descriptor, ensure_ascii=False, allow_nan=False) + '\n')
+    with asset_root_lock(home):
+        os.close(open_directory_beneath(home, ('data', 'monitors'), create=True))
+        with locked_json_path(home / 'data' / 'monitors' / (identifier + '.json')):
+            previous = _read_object(home, parts)
+            payload['revision'] = next_asset_revision(previous, bindings.get('expected_revision'))
+            descriptor = _monitor_dict(home, identifier, payload, {})
+            write_text_atomic_beneath(home, parts, json.dumps(descriptor, ensure_ascii=False, allow_nan=False) + '\n')
     return descriptor
 
 
@@ -130,8 +132,8 @@ def _schedule(job, binding):
     return result
 
 
-# LLM: AssetDescriptor仍负责类型/秘密过滤；引用按绑定优先再原规则顺序去重，规则只提供边而不授予执行权。
-# 函数用途: 合并监控绑定和Scheduler自动引用，保留调度/运行摘要的唯一权威与展示扩展。
+# LLM: AssetDescriptor负责类型及脱敏，revision来自绑定而非Scheduler；引用按绑定优先去重，仅提供拓扑不授执行权。
+# 函数用途: 合并监控调度和引用摘要，保留已持久化的资产版本。
 def _monitor_dict(home, identifier, binding, job):
     schedule = _schedule(job, binding)
     refs = dict(binding.get('refs', {}))
@@ -143,7 +145,7 @@ def _monitor_dict(home, identifier, binding, job):
                'consecutive_failures': job.get('consecutive_failures', 0), 'last_error': job.get('last_error') or ''}
     descriptor = AssetDescriptor(id=identifier, kind='monitor', name=binding.get('name') or job.get('name') or identifier,
         summary=binding.get('summary') or job.get('prompt', ''), version=str(job.get('version', binding.get('version', '1.0.0'))),
-        owner_id=job.get('owner', {}).get('id', home.name), refs=refs, runtime_summary=runtime,
+        owner_id=job.get('owner', {}).get('id', home.name), refs=refs, runtime_summary=runtime, revision=binding.get('revision', 0),
         metadata={'schedule_spec': schedule, 'scheduler_skill_refs': job.get('skill_refs', [])}, **{key: binding.get(key, ()) for key in
             ('access_targets', 'data_sources', 'credential_refs')}).to_dict()
     return {**descriptor, 'schedule_spec': descriptor['metadata']['schedule_spec']}

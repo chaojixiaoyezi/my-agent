@@ -1,4 +1,4 @@
-# LLM: 公开只读主题适配；owner 由调用方从认证 grant 提取，不接受 body 中的 owner 或控制参数。
+# LLM: 公开只读主题；旧owner来自认证grant，新主题须绑定真实v2服务，body不能改变身份或注入控制。
 # 模块用途: 为插件批量返回资产摘要、拓扑和遥测投影，并在同一 owner 中适配资产管理。
 from dataclasses import fields, replace
 from os.path import abspath
@@ -6,12 +6,15 @@ from pathlib import Path
 
 TOPIC_ACTIONS = {'assets_summary': 'assets.list', 'topology': 'assets.topology',
     'recent_tasks': 'telemetry.tasks.list', 'recent_tool_calls': 'telemetry.tool_calls.list',
-    'tool_stats': 'telemetry.tool_stats', 'workflow_runs': 'telemetry.workflows.runs.list'}
+    'tool_stats': 'telemetry.tool_stats', 'workflow_runs': 'telemetry.workflows.runs.list',
+    'workspace_context': 'conversations.threads.workspace.get', 'workspace_assets': 'assets.workspace.list',
+    'datasources': 'datasources.list', 'recordings': 'recorder.sessions.get',
+    'background_processes': 'processes.background.list', 'turns': 'conversations.turns.search'}
 
 
-# LLM: 在任何查询之前校验全部主题；错误信封保留，不将失败当作空数据。
+# LLM: 查询前核全部主题；v2服务由宿主传入且每次复验发行器，grant不能与v2混用，不将失败当空数据。
 # 函数用途: 查询当前可信 owner 的公开主题，不提供写入或执行能力。
-def query_broker_topics(owner_home, owner_id, body, *, grant=None):
+def query_broker_topics(owner_home, owner_id, body, *, grant=None, host_v2_service=None):
     from .gateway_parts.plugin_broker_api import PluginBrokerService
     topics = body.get('topics') if isinstance(body, dict) else None
     if (not isinstance(topics, list) or not topics
@@ -19,8 +22,14 @@ def query_broker_topics(owner_home, owner_id, body, *, grant=None):
         raise ValueError('topics 必须是非空的公开主题数组')
     if any(key in body for key in ('owner_id', 'owner_home', 'is_admin', 'admin')):
         raise ValueError('主题查询不接受身份字段')
-    service = (PluginBrokerService.from_grant(grant) if grant is not None
-               else PluginBrokerService(owner_home, owner_id=owner_id))
+    if host_v2_service is not None:
+        if (grant is not None or not isinstance(host_v2_service, PluginBrokerService)
+                or getattr(host_v2_service, '_host_v2_ingress', None) is None):
+            raise ValueError('主题查询需要独立的真实v2来源')
+        service = host_v2_service
+    else:
+        service = (PluginBrokerService.from_grant(grant) if grant is not None
+                   else PluginBrokerService(owner_home, owner_id=owner_id))
     return {topic: service.dispatch(TOPIC_ACTIONS[topic]) for topic in dict.fromkeys(topics)}
 
 

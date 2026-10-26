@@ -1,5 +1,5 @@
 # LLM: 键绑定替身只隔离副作用；真实非阻塞和 outbox 锁争用另由集成用例检验。
-# 模块用途: 回归输入、精确控制目标与持久化后显示的 TUI 合同。
+# 模块用途: 回归输入、精确控制目标、鼠标模式兼容键与持久化后显示的 TUI 合同。
 from __future__ import annotations
 
 import asyncio
@@ -1888,6 +1888,8 @@ def test_ctrl_o_freezes_current_child_runtime_instead_of_root() -> None:
     assert focused == [transcript_area.modal_window]
 
 
+# LLM: 调用真实鼠标模式处理器，验证两个方向的通知保留旧前缀并提示兼容键；输入和会话不能被切换动作改写。
+# 函数用途: 核对模式切换、反馈和原输入保护。
 def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:
     redraws: list[bool] = []
     interaction = TuiInteractionState()
@@ -1909,7 +1911,8 @@ def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:
     tui_keybindings._handle_f6_mouse_keybinding(event, params)
 
     assert interaction.snapshot().mouse_capture_enabled is False
-    assert "原生复制模式" in runtime.notice()
+    assert "原生复制模式：终端拖选/右键；历史用 PgUp/Ctrl+Home，F6 恢复滚轮" in runtime.notice()
+    assert "Shift+F6" in runtime.notice() and "Esc+M" in runtime.notice()
     assert input_area.text == "保留输入"
     assert params.exit_armed_at_ref == [0.0]
     assert redraws == [True]
@@ -1917,8 +1920,216 @@ def test_f6_toggles_native_copy_and_tui_mouse_without_touching_input() -> None:
     tui_keybindings._handle_f6_mouse_keybinding(event, params)
 
     assert interaction.snapshot().mouse_capture_enabled is True
-    assert "滚轮模式" in runtime.notice()
+    assert "滚轮模式：滚轮浏览，拖选松手/右键复制；F6 切原生复制" in runtime.notice()
+    assert "Shift+F6" in runtime.notice() and "Esc+M" in runtime.notice()
+    assert input_area.text == "保留输入"
     assert redraws == [True, True]
+
+
+# LLM: 查真实快捷键表并包装而不替换模式处理器，证明三个入口都执行同一切换且不修改输入。
+# 函数用途: 回归 F6、macOS Shift+F6 的 F14 和 Esc+M 的双向切换。
+@pytest.mark.parametrize("keys", [("f6",), ("f14",), ("escape", "m")])
+def test_native_mode_alias_bindings_share_toggle_handler(monkeypatch, keys) -> None:
+    runtime = TuiRuntime("mouse-mode-alias")
+    input_area = TextArea(text="保留输入", multiline=True)
+    params = SimpleNamespace(input_area=input_area, transcript_area=None, use_gateway=False,
+                             interaction_state=TuiInteractionState(), tui_runtime=runtime, agent_navigation=None,
+                             exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+                             escape_armed_at_ref=[0.0], escape_armed_text_ref=[""])
+    handler = MagicMock(wraps=tui_keybindings._handle_f6_mouse_keybinding)
+    monkeypatch.setattr(tui_keybindings, "_handle_f6_mouse_keybinding", handler)
+    bindings = tui_keybindings._tui_create_keybindings(params).get_bindings_for_keys(keys)
+    assert len(bindings) == 1, f"兼容按键未绑定到统一入口：{keys}"
+    event = SimpleNamespace(app=SimpleNamespace(invalidate=MagicMock()))
+    for enabled in (False, True):
+        bindings[0].handler(event)
+        assert params.interaction_state.snapshot().mouse_capture_enabled is enabled
+        assert input_area.text == "保留输入"
+    assert handler.call_count == 2
+    handler.assert_called_with(event, params)
+    assert event.app.invalidate.call_count == 2
+
+
+# LLM: 通过真实 parser、Application 与鼠标 filter 观察终端字节；同时覆盖帮助的 Esc 优先级，不模拟物理键或系统拦截。
+# 函数用途: 验证三种终端序列在聊天与帮助中都能切换，不吞草稿或提交请求。
+@pytest.mark.parametrize("help_open", [False, True], ids=["chat", "help"])
+@pytest.mark.parametrize("sequence", [b"\x1b[17~", b"\x1b[26~", b"\x1bm"], ids=["F6", "Shift-F6-F14", "Esc-M"])
+def test_native_mode_terminal_sequences_toggle_mouse_filter(tmp_path, monkeypatch, sequence, help_open) -> None:
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from agent_py_agent.cli.chat_parts import rendering
+    from agent_py_agent.cli.chat_parts.tui_ui_setup import make_tui_app
+    from agent_py_agent.tests.test_tui_decision_menu import visible, wait_app
+    from agent_py_agent.tests.test_tui_prompt_toolkit_pipe import _app_params
+
+    monkeypatch.setattr(rendering, "_TUI_OUTPUT_SINK", rendering._TUI_OUTPUT_SINK)
+
+    # LLM: 按状态而非固定睡眠等待，每个终端序列都跑完整 parser/filter 往返并等待 Application 退出。
+    # 函数用途: 执行保留草稿的实际输入管道场景。
+    async def scenario():
+        runtime = TuiRuntime("mouse-mode-wire")
+        params = _app_params(tmp_path, runtime)
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            app = make_tui_app(params)
+            runner = asyncio.create_task(app.run_async())
+            try:
+                await wait_app(app, lambda: app.is_running and app.render_counter > 0, "原生模式测试首帧")
+                draft = "" if help_open else "保留草稿"
+                pipe.send_text("?" if help_open else draft)
+                await wait_app(app, lambda: "F6 切换原生复制/滚轮" in visible(app) if help_open else
+                               app.current_buffer.text == draft, "帮助打开或回读原始草稿")
+                for enabled in (False, True):
+                    pipe.send_bytes(sequence)
+                    await wait_app(app, lambda: app.mouse_support() is enabled, "鼠标模式实际切换")
+                    assert ("滚轮模式" if enabled else "原生复制模式") in runtime.notice()
+                    assert app.current_buffer.text == draft
+                    assert params.jobs.empty()
+                if help_open:
+                    assert "F6 切换原生复制/滚轮" in visible(app)
+                    pipe.send_bytes(b"\x1b")
+                    await wait_app(app, lambda: "F6 切换原生复制/滚轮" not in visible(app), "单独 Esc 仍关闭帮助")
+            finally:
+                app.exit()
+                await runner
+
+    asyncio.run(scenario())
+
+
+# LLM: 读取真实帮助渲染结果而非常量；保留旧 F6 文案，兼容说明在宽窄布局都必须可发现。
+# 函数用途: 回归帮助面板中两个替代按键的可见性。
+@pytest.mark.parametrize("width", [60, 100, 180])
+def test_native_mode_help_shows_terminal_fallbacks(width) -> None:
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import fragments_text, render_tui_snapshot
+
+    frame = render_tui_snapshot(TuiRuntime("mouse-help").store.snapshot(), TuiRenderContext(width=width, help_open=True))
+    text = fragments_text(frame.footer)
+    assert "F6 切换原生复制/滚轮" in text
+    assert "Shift+F6" in text and "Esc+M" in text
+
+
+# LLM: 走真实 KeyProcessor 验证前缀消歧；只隔离原 Esc 取消副作用，模式切换仍调用真实处理器。
+# 函数用途: 防止权限、历史、帮助和正文浏览中的单 Esc 抢走 Esc+M。
+@pytest.mark.parametrize("registration,active,escape_handler", [
+    ("_register_permission_bindings", "permission_active", "_cancel_permission"),
+    ("_register_chat_bindings", "history_search_active", "_accept_history_search"),
+    ("_register_help_bindings", "help_open", "_close_help"),
+    ("_register_transcript_bindings", "transcript_navigation", "_exit_transcript_mode"),
+    ("_register_transcript_bindings", "transcript_search_active", "_cancel_transcript_search"),
+])
+def test_native_mode_meta_prefix_does_not_dispatch_modal_escape(monkeypatch, registration, active, escape_handler) -> None:
+    from prompt_toolkit.filters import Always, Condition, Never
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.key_binding.key_processor import KeyPress, KeyProcessor
+    from prompt_toolkit.keys import Keys
+
+    params = SimpleNamespace(input_area=TextArea(), interaction_state=TuiInteractionState(),
+                             tui_runtime=TuiRuntime("mouse-modal"), agent_navigation=None,
+                             exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0],
+                             escape_armed_at_ref=[0.0], escape_armed_text_ref=[""])
+    values = {name: Never() for name in tui_keybindings._TuiBindingFilters.__dataclass_fields__}
+    values[active] = Always()
+    filters = tui_keybindings._TuiBindingFilters(**values)
+    escape_seen = asyncio.Event()
+    cancelled = MagicMock(side_effect=lambda *_args: escape_seen.set())
+    monkeypatch.setattr(tui_keybindings, escape_handler, cancelled)
+    kb = KeyBindings()
+    args = [kb, params, filters]
+    if registration == "_register_chat_bindings":
+        args.extend((Keys, Condition))
+    elif registration == "_register_help_bindings":
+        args.append(Condition)
+    getattr(tui_keybindings, registration)(*args)
+    kb.add("escape", "m")(lambda event: tui_keybindings._handle_f6_mouse_keybinding(event, params))
+
+    # LLM: 在事件循环中运行原处理器以支持其前缀超时机制，不创建或调用真实审批客户端。
+    # 函数用途: 验证组合键不误取消，单独 Esc 在消歧后仍派发原动作。
+    async def scenario():
+        processor = KeyProcessor(kb)
+        for enabled in (False, True):
+            processor.feed_multiple([KeyPress(Keys.Escape), KeyPress("m")])
+            processor.process_keys()
+            assert params.interaction_state.snapshot().mouse_capture_enabled is enabled
+        cancelled.assert_not_called()
+        processor.feed(KeyPress(Keys.Escape))
+        processor.process_keys()
+        await asyncio.wait_for(escape_seen.wait(), timeout=3.0)
+        cancelled.assert_called_once()
+
+    asyncio.run(scenario())
+
+
+# LLM: 打开真实Goal浮层并使用Application的真实合并KeyProcessor；只隔离Goal HTTP读取和停止副作用，不替换按键注册。
+# 函数用途: 验证Goal模态中鼠标快捷键不误停、不吞草稿，单Esc消歧后仍派发原动作。
+@pytest.mark.parametrize('keys', [('f6',), ('f14',), ('escape', 'm')])
+def test_wp15_goal_modal_mouse_keys_and_single_escape(monkeypatch, keys) -> None:
+    from prompt_toolkit.application import Application, create_app_session
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.layout import FloatContainer, HSplit, Layout
+    from prompt_toolkit.output import DummyOutput
+
+    from agent_py_agent.cli.chat_parts import tui_goal_editor
+    from agent_py_agent.tests.test_tui_decision_menu import wait_app
+
+    stopped = MagicMock()
+    monkeypatch.setattr(tui_keybindings, '_handle_escape_keybinding', stopped)
+    monkeypatch.setattr(tui_goal_editor, '_request_goal', lambda *_args: {
+        'ok': True, 'goal': {'revision': 1, 'objective': '保留Goal草稿'}})
+
+    # LLM: 必须启动真实Application，否则is_done会让KeyProcessor跳过输入；异常时取消编辑协程并回收应用，不掩盖断言。
+    # 函数用途: 运行带消歧超时的Goal键盘往返场景。
+    async def scenario():
+        params = SimpleNamespace(input_area=TextArea(text='保留聊天草稿'), transcript_area=None, use_gateway=False,
+            interaction_state=TuiInteractionState(), tui_runtime=TuiRuntime('goal-mouse'),
+            agent=object(), current_session_id='session', agent_navigation=SimpleNamespace(
+                selected_goal=lambda: {'goal_id': 'goal-1'}, snapshot=lambda: SimpleNamespace(active_run_id='', active_name='主代理')),
+            exit_armed_at_ref=[0.0], eof_armed_at_ref=[0.0], escape_armed_at_ref=[0.0], escape_armed_text_ref=[''])
+        host = FloatContainer(content=HSplit([params.input_area]), floats=[])
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+            app = Application(layout=Layout(host), key_bindings=tui_keybindings._tui_create_keybindings(params))
+            app._my_agent_model_float_container = host
+            app.timeoutlen = 0.03
+            with set_app(app):
+                await wp15_goal_keys_in_app(app, params)
+
+    # LLM: 真实运行事件循环后再输入；只检查原Esc动作派发，不把隔离后的停止spy当真实Goal生命周期结果。
+    # 函数用途: 操作Goal模态并保证失败时完整回收编辑任务和Application。
+    async def wp15_goal_keys_in_app(app, params):
+        runner = asyncio.create_task(app.run_async())
+        with set_app(app):
+            await wait_app(app, lambda: app.is_running and app.render_counter > 0, '应用首帧')
+            editor = asyncio.create_task(tui_goal_editor.open_goal_editor(app, params))
+            try:
+                await wait_app(app, lambda: getattr(app, '_my_agent_goal_editor_open', False)
+                               and app.current_buffer.text == '保留Goal草稿', 'Goal编辑器就绪')
+                processor = app.key_processor
+                for enabled in (False, True):
+                    codes = {'escape': Keys.Escape, 'f6': Keys.F6, 'f14': Keys.F14}
+                    sequence = [KeyPress(codes.get(key, key)) for key in keys]
+                    processor.feed_multiple(sequence)
+                    processor.process_keys()
+                    assert params.interaction_state.snapshot().mouse_capture_enabled is enabled
+                    stopped.assert_not_called()
+                    assert app.current_buffer.text == '保留Goal草稿'
+                    assert params.input_area.text == '保留聊天草稿'
+                processor.feed(KeyPress(Keys.Escape))
+                processor.process_keys()
+                stopped.assert_not_called()
+                await wait_app(app, lambda: stopped.call_count == 1, '单Esc消歧后执行原动作')
+            finally:
+                editor.cancel()
+                try:
+                    await editor
+                except asyncio.CancelledError:
+                    pass
+                app.exit()
+                await runner
+
+    asyncio.run(scenario())
 
 
 def test_input_mouse_up_auto_copies_settled_selection() -> None:

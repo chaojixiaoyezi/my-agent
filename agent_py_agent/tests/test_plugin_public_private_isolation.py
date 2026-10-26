@@ -269,7 +269,7 @@ def test_ct10_original_authorized_call_is_revoked(tmp_path, kind, change):
 # 函数用途: 验证管理员可以访问通配许可下的新账号。
 def test_ct06_real_issuer_delegates_with_wildcard(tmp_path):
     users = local_users(tmp_path)
-    _, _, _, token = active_install(tmp_path, caps=("read", "act_as_user"), selection={"target_user_ids": ["*"]})
+    _, _, _, token = active_install(tmp_path, scope="public", caps=("read", "act_as_user"), selection={"target_user_ids": ["*"]})
     composition = composition_for(tmp_path)
     try:
         authorized, _ = call_domain(composition, composition.issuer.ingress(token), "conversations.threads.list", as_user="bob")
@@ -282,7 +282,7 @@ def test_ct06_real_issuer_delegates_with_wildcard(tmp_path):
 # LLM: CT-06账号创建/读取经原LocalUsersDomain，不用直接生命周期调用冒充通配接口贯通。
 # 函数用途: 验证获批三类星号的管理员能创建并管理未硬编码的新账号。
 def test_ct06_wildcard_admin_creates_and_manages_new_account(tmp_path):
-    _, _, _, token = active_install(tmp_path, caps=("read", "users.manage", "act_as_user"), selection={
+    _, _, _, token = active_install(tmp_path, scope="public", caps=("read", "users.manage", "act_as_user"), selection={
         "target_user_ids": ["*"], "manageable_user_ids": ["*"], "creatable_user_ids": ["*"]})
     composition = composition_for(tmp_path)
     source = composition.issuer.ingress(token)

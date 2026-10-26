@@ -1,3 +1,53 @@
+## 2026-10-25 七项核心底座、Host v2 扩展与稳定性回归（WP12 文档同步）
+
+来源：[详细设计](docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md) 与 [当前实现台账](DESIGN_LEDGER.md)。核对起点为 `61bab6ab98fdd4d3b94ccabe2dda1aed1e9fa0b8`（当次 `HEAD == origin/main`），对应代码为未提交工作区增量。本轮只改六份 Markdown，**没有重跑 pytest，也不声称下列测试的当前组合已经通过**；文件与测试定义已静态核对，命令供集成者在最终源码上复现。
+
+### 新增七份直接测试
+
+| 文件（均位于 `agent_py_agent/tests/`） | 覆盖对象与关键边界 |
+| --- | --- |
+| `test_cli_dir_and_workspace_assets.py` | `--dir` / `--cwd` / `--workspace` 各入口，管理员显式项目目录与 owner home 双根、普通用户/危险路径拒绝，四类 `.agent/` 资产只读覆盖、CAS 晋升、批量保存与回滚。 |
+| `test_conversation_thread_fork.py` | 主会话前缀分叉、并行工具回合闭合、消息身份重建、Compact/冻结人格继承、目录修订竞争、源线程/消息不变及非主线程拒绝。 |
+| `test_datasource_keyring_and_script_binding.py` | 私有凭据分离/实际值脱敏、owner/workspace 隔离、SQLite 建库/查询/探测、声明与只读/表范围、子进程绑定清单清理、迁移漂移/CAS/恢复。当前存储是 0600 私有明文 JSON，SDK SQL 只支持 SQLite；不证明密文保险箱、远端 SQL 适配或实际远端迁移已经完成。 |
+| `test_turn_asset_extractor.py` | 按时间/关键词检索、勾选回合的真实调用打包、分析前后脱敏、持久化 DRAFT 不发布正式资产、选择性提交/幂等、编辑依赖重绑、半发布失败回滚及生成脚本入口。 |
+| `test_browser_recorder_compiler.py` | 动作生命周期、输入/URL 参数化与秘密默认值移除、非法导航/回放 URL/网络声明、编译转义、真实 ScriptStore 保存及脚本入口；fake Playwright 的 live 分支不代替真实浏览器验收。 |
+| `test_plugin_host_v2_five_capabilities.py` | 本轮新增 20 个动作的准确集合、闭合 schema、能力要求、写入幂等、Broker 原 v2 ingress、安装撤权及跨 owner/线程资源拒绝；不将 20 当 Host 全部动作总数。 |
+| `test_tui_turn_completion_and_bg_watch.py` | 完成耗时行与历史时间回放、Footer 不被覆盖、彩色驻留尾标与导航首项、真实 prompt_toolkit 按键进入/返回、owner 聚合只读观察、有界日志与路径/坏记录隔离；终态缺时间保持未知。 |
+
+复现（工作树根，最终固定版本上执行；本轮未运行）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cli_dir_and_workspace_assets.py agent_py_agent/tests/test_conversation_thread_fork.py agent_py_agent/tests/test_datasource_keyring_and_script_binding.py agent_py_agent/tests/test_turn_asset_extractor.py agent_py_agent/tests/test_browser_recorder_compiler.py agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+```
+
+### 既有文件中的新增回归与 WP8 已有证据
+
+- `test_repro_binding_failed.py`：连续后台唤醒在同路径正常终态后分配后继、活跃后继复用、原目录往返/冲突拒绝，以及同片 Compact 重试保留已发表任务绑定；结合 `test_gateway_conversation_control.py` 核对原控制链，不将普通终态统一放开为新授权。
+- `test_subagent_listruns_cache.py`：正负各 4096 条独立预算、640 条失效 locator 首扫单读/次扫免正文读取、冷/热 deepcopy 锁外竞争线程探针与嵌套副本、缺失目标恢复、无可信路径提示和原坏记录/粗 mtime 规则。
+- `test_tui_input.py`：原生选择模式保留 `F6`，补 `F14`（常见 Shift+F6 编码）与 `Esc+M`，并检查帮助提示和录入冲突；工具或组件按键通过不代表真实 macOS Terminal 硬件功能键/输入法透传已验收。
+- WP8 在本会话此前已经实际完成的指定三文件组合为 **113 passed、0 failed、0 errors、0 skipped**（列表缓存 19、owner 池 51、孤儿巡检 43）；640 条缺失 locator 的 `task.json` 读取次数从首扫/次扫各 1280 次变为首扫 640 次、次扫零次。此结果仅属于当时 WP8 版本，不外推本轮所有并行改动、完整 Gateway 或生产 CPU；本轮未重复该运行。
+
+复现入口（本轮未运行）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_repro_binding_failed.py agent_py_agent/tests/test_gateway_conversation_control.py agent_py_agent/tests/test_subagent_listruns_cache.py agent_py_agent/tests/test_owner_scoped_pool.py agent_py_agent/tests/test_gateway_orphan_reconciler.py agent_py_agent/tests/test_tui_input.py -q --tb=short
+```
+
+### 稳定性核对和文档门禁边界
+
+- 已核对源码：子代理缺失路径单读/锁外复制；`hang_diagnostics.py` 原生长 tick 延迟 1 秒晋升 C 看门狗；`process_registry.py` 原生实例观察与 `(pid, kernel_birth)` 出生 token 缓存；`candidates.py` 大文件五元 stat 摘要缓存。
+- 并行补齐后已复核 `CandidateService.list()` / `stats()` 的只读缓存接线：列表过滤/排序/切片后只复制返回行，统计热缓存零 deepcopy；冷读、加载器/列表覆盖及完整坏行校验仍保留。此为源码观察，本片没有运行该快路径测试或测量 Gen2 GC/生产 CPU，不把代码存在当性能验收。
+- 门禁脚本实际成功输出为 `DOC_SYNC_PASS`、失败输出为 `DOC_SYNC_FAIL`，不是任务描述中的 `DOC_SYNC_OK`。脚本同时要求 subagent/memory/gateway 的 `02-progress.md` 和 `04-structure.md`；WP12 白名单只有前者，本片没有越界修改三个 `04-structure.md`，也没有修改检查器。早期检查因缺结构文档返回 `DOC_SYNC_FAIL`（退出码 1）；并行整合补齐三个 `04-structure.md` 后，固定基线复核已实际输出 `DOC_SYNC_PASS`（退出码 0）。早期失败不是当前最终状态，也不把文档门禁通过外推为功能或部署验收。
+- 文档检查命令（首条是任务要求，第二条固定核对基线，避免把漂移的 HEAD 当完整整合验证）：
+
+```bash
+python3 scripts/check_doc_sync.py
+python3 scripts/check_doc_sync.py --base 61bab6ab98fdd4d3b94ccabe2dda1aed1e9fa0b8
+git diff --check DESIGN_LEDGER.md CODEBASE_TREE.md TESTS.md docs/modules/
+```
+
+未验证：最终整合源码的完整测试/严格门、真实 CLI/TUI/插件门户、多用户实际操作、远端数据库、macOS Terminal 原生按键、Gateway CPU/唤醒次数及 Gen2 GC 收益。本片不启动/停止服务，不修改任何 `.py` 或测试文件，不提交或部署。
+
 ## 2026-10-25 管理员三端创建/管理普通用户、双源统一密码登录与公私插件隔离（CT-01..CT-10）
 
 - 新增 `test_local_user_auth_and_password_api.py`、`test_users_slash_and_admin_controls.py`、`test_plugin_public_private_isolation.py`、`test_local_user_cross_module_guards.py`，并在 `test_plugin_host_v2_contracts.py` 扩展至 45 个闭合动作（新增 `users.local.password.set`、`users.auth.login`、`users.auth.verify`）。

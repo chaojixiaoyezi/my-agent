@@ -40,19 +40,13 @@ def add_chat_subcommands(
     resume.set_defaults(func=resume_handler)
 
 
-# LLM: Shared options are defined once so chat and resume cannot silently diverge. The
-# explicit session positional remains owned by add_chat_subcommands because its semantics differ.
+# LLM: chat/resume共用目录别名；子解析器不写默认值，防止覆盖顶层--dir，解析本身不授予权限。
 # 函数用途: 添加共用参数；Gateway 超时只限制观察窗口，TUI 页面存活时继续接收原请求结果。
 def _add_shared_chat_arguments(parser: argparse.ArgumentParser) -> None:
     # LLM: 工作目录只接受用户显式声明——不把进程 cwd 自动当权限来源（那会重开"从 /root 启动
     # 就把 /root 当任务目录"的洞）。多个目录用逗号分隔，仍逐个过硬门校验。
     # 函数用途: 让用户显式指定本次会话的工作目录（可多个），据此派生派工与第二层写作用域。
-    parser.add_argument(
-        "--workspace",
-        dest="workspace_root",
-        default=None,
-        help="显式指定本次会话的工作目录；多个目录用逗号分隔。不传则沿用 owner home",
-    )
+    add_workspace_arguments(parser)
     parser.add_argument("--inject", action="append", help="启动时注入 prompt，可多次传入")
     parser.add_argument("--prompt-file", action="append", help="启动时加载额外 prompt 文件，可多次传入")
     parser.add_argument("--memory-limit", type=int, default=None, help="交互中 /memory 默认显示条数；默认读配置")
@@ -84,6 +78,14 @@ def _add_shared_chat_arguments(parser: argparse.ArgumentParser) -> None:
         help="Gateway 连续无活动的等待窗口（秒）；TUI 超时后继续观察原请求，plain 停止等待",
     )
     add_resume_context_switches(parser)
+
+
+# LLM: 顶层、chat、resume和run共用同一个dest；SUPPRESS保留前级显式值，解析本身不授予目录访问权。
+# 函数用途: 注册三个等价的工作目录参数，路径存在性和身份授权交给统一解析链。
+def add_workspace_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--dir", "--workspace", "--workspace-root", dest="workspace_root",
+        default=argparse.SUPPRESS,
+        help="显式工作目录（多个用逗号分隔）；不传则使用自己的家目录")
 
 
 # LLM: Lazy import is the startup contract: never move chat.py back to module scope. Tests may

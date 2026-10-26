@@ -2,6 +2,7 @@
 # /experiment 与 /audit 准备轮同为任务命令：参数冻结进 system_task，只有任务正文进入模型。
 # /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
 # /effort 的八档白名单取唯一换算表，TUI/IM 共用解析，不按模型名或展示文字扩大取值。
+# /dir和/fork只解析结构化参数，执行必须另由已认证owner调用工作区领域服务，不从路径授予管理员身份。
 # 模块用途: 解析显式控制及本地用户管理，敏感密码只存活命令，回执沿统一脱敏函数。
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Literal
@@ -31,6 +33,8 @@ from .authority import (
 from .channels import redact_host_absolute_paths
 
 ControlKind = Literal[
+    "dir",
+    "fork",
     "help",
     "group",
     "delegate",
@@ -95,6 +99,8 @@ class ConversationControlCommand:
     usage: str = ""
     target_id: str = ""
     confirmation_code: str = ""
+    # 仅表示消息ID参数是否显式出现；不保存第二份ID，不能把显式空值当作最新位置。
+    message_id_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -225,7 +231,7 @@ def _personal_storage_command(name, trailing):
     return parser(trailing)
 
 
-# LLM: 名称和正文读取公共声明；插件仅以原文本进入专用控制分派，不能在这里重写参数、执行 stop 或退入模型。
+# LLM: 新增目录/分叉命令仅解析固定语法；其它名称和正文读取公共声明，插件不改写控制参数或退入模型。
 #   /admin、/approve 的参数是密码，只进 command.value，调用方持久化前必须经 persisted_control_command_text 脱敏。
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
@@ -237,28 +243,14 @@ def parse_conversation_command(
     reject_unknown_slash: bool = False,
 ) -> ConversationCommand | None:
     raw = str(text or "").strip()
+    workspace_command = _workspace_control_command(raw)
+    if workspace_command is not None:
+        return workspace_command
     if plugin_namespace(raw) is not None:
         return ConversationControlCommand("plugins", value=raw)
     name, trailing = match_conversation_command(raw) or ("", None)
-    if name == "help":
-        topic = str(trailing or "").strip().lstrip("/")
-        return ConversationControlCommand("help", value=topic, valid=not any(ch.isspace() for ch in topic),
-                                          usage="用法：/help 或 /help <命令>。")
-    if name == "delegate":
-        value = str(trailing or "status").strip()
-        return ConversationControlCommand("delegate", value=value, valid=value in {"enable", "disable", "status"},
-                                          usage="用法：/delegate enable、disable 或 status（IM，当天有效）。")
-    if name == "schedule":
-        return ConversationControlCommand("schedule", value=str(trailing or "").strip())
-    if name in {"memory", "agents"}:
-        return _personal_storage_command(name, trailing)
-    if name == "group":
-        return ConversationControlCommand("group", value=str(trailing or "").strip())
-    if name == "sessions":
-        value=str(trailing or '').strip()
-        operation=value.partition(' ')[0] or 'threads'
-        return ConversationControlCommand('sessions',value=value,operation=operation,
-            valid=operation in {'threads','control'},usage='用法：/sessions threads 或 /sessions control <thread_id> <原控制命令>。')
+    if name in {"help", "delegate", "schedule", "memory", "agents", "group", "sessions"}:
+        return _catalog_front_command(name, trailing)
     if name == "status":
         return _argumentless_command("status", trailing, "/status")
     if name == "context":
@@ -1038,6 +1030,64 @@ def _duration_text(seconds: float) -> str:
 def _short_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
+
+
+# LLM: 从原主解析器搬出互斥的前置命令，不改其参数或有效性语义；不读写会话状态，身份授权仍归执行端。
+# 函数用途: 解析帮助、个人存储和会话目录等短命令，保持主解析器在尺寸预算内。
+def _catalog_front_command(name, trailing):
+    if name == "help":
+        topic = str(trailing or "").strip().lstrip("/")
+        return ConversationControlCommand("help", value=topic, valid=not any(ch.isspace() for ch in topic),
+                                          usage="用法：/help 或 /help <命令>。")
+    if name == "delegate":
+        value = str(trailing or "status").strip()
+        return ConversationControlCommand("delegate", value=value, valid=value in {"enable", "disable", "status"},
+                                          usage="用法：/delegate enable、disable 或 status（IM，当天有效）。")
+    if name in {"schedule", "group"}:
+        return ConversationControlCommand(name, value=str(trailing or "").strip())
+    if name in {"memory", "agents"}:
+        return _personal_storage_command(name, trailing)
+    value = str(trailing or '').strip()
+    operation = value.partition(' ')[0] or 'threads'
+    return ConversationControlCommand('sessions', value=value, operation=operation,
+        valid=operation in {'threads', 'control'},
+        usage='用法：/sessions threads 或 /sessions control <thread_id> <原控制命令>。')
+
+
+# LLM: shlex保留显式空参数并拒绝；消息ID只存value，presence另行记录供领域层复核，不做目录访问或写入。
+# 函数用途: 解析目录和分叉，区分省略截止点与显式空ID，错误不进入模型任务。
+def _workspace_control_command(raw: str) -> ConversationControlCommand | None:
+    match = re.fullmatch(r"/(dir|fork)(?:\s+(.*))?", raw, flags=re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return None
+    kind, trailing = match.group(1).lower(), match.group(2) or ""
+    usage = "用法：/dir [目录]" if kind == "dir" else "用法：/fork [消息ID] [--title 标题]"
+    try:
+        parts = shlex.split(trailing)
+        if kind == "dir":
+            # 未加引号的含空格目录仍按一个完整目录解释；引号错误则由shlex拒绝。
+            value = parts[0] if len(parts) == 1 else trailing.strip()
+            return ConversationControlCommand("dir", value=value,
+                operation="switch" if value else "show", usage=usage)
+        title = ""
+        if "--title" in parts:
+            index = parts.index("--title")
+            if index != len(parts) - 2:
+                raise ValueError("标题需要一个参数且位于末尾")
+            title = parts[index + 1]
+            parts = parts[:index]
+        if parts[:1] == ['--from-message']:
+            parts = parts[1:]
+            if not parts:
+                raise ValueError('缺少消息ID')
+        if len(parts) > 1 or any(part.startswith("--") for part in parts):
+            raise ValueError("分叉只接受一个消息ID")
+        if parts and not parts[0].strip():
+            raise ValueError('FORK_MESSAGE_NOT_FOUND')
+        return ConversationControlCommand("fork", value=parts[0] if parts else "", name=title,
+            operation="fork", usage=usage, message_id_explicit=bool(parts))
+    except ValueError:
+        return ConversationControlCommand(kind, valid=False, usage=usage, message_id_explicit=kind == 'fork')
 
 
 # 只把尾部参数交给专门解析函数的命令；名字互不重复，查表与原 if 链等价。新增这类命令时加在这里。

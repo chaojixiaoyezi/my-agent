@@ -1,5 +1,5 @@
-# LLM: 静态动作目录是v2唯一分发和能力来源，不接受插件注册方法或动态getattr。
-# 模块用途: 定义宿主动作的闭合参数、条件权限与资源核验要求，用户认证不替代原执行授权。
+# LLM: 静态动作目录统一原动作与WP-4扩展，不接受插件注册；目录声明不能替代领域范围及实时授权。
+# 模块用途: 定义宿主闭合参数与能力要求，扩展合同分文件维护而不增加第二套分发权威。
 from __future__ import annotations
 
 import json
@@ -65,18 +65,20 @@ def _spec(name: str, mode: str, caps: str, schema: dict, scopes: str = "", alter
                       tuple(scopes.split()), frozenset(alternatives.split()))
 
 
-# LLM: 会话与请求共享线程授权；poll/stream的实际kind权限由原请求元数据二次核对。
-# 函数用途: 声明发现、线程、历史及请求动作。
+# LLM: workspace_dir只声明输入，领域另核有效owner与规范路径；请求kind权限仍需原元数据二次核对。
+# 函数用途: 声明发现、支持目录绑定的线程、历史及请求动作。
 def _conversation_specs() -> list[ActionSpec]:
     thread, request = {"thread_id": id_schema()}, {"request_id": id_schema()}
     revision = {"expected_revision": integer(2**63 - 1, 1)}
     reason = {"reason": {**text(256), "default": ""}}
     return [
         _spec("host.capabilities.get", "read", "", closed({})),
-        _spec("conversations.threads.create", "write", "chat", closed({}, {"title": {**text(120), "default": ""}})),
+        _spec("conversations.threads.create", "write", "chat", closed({}, {
+            "title": {**text(120), "default": ""}, "workspace_dir": text(4096, 1)})),
         _spec("conversations.threads.get", "read", "read", closed(thread), "thread"),
         _spec("conversations.threads.list", "read", "read", closed({}, {
-            **page_fields(), "status": {"enum": ["active", "archived", "all"], "default": "active"}}), "threads"),
+            **page_fields(), "workspace_dir": text(4096, 1),
+            "status": {"enum": ["active", "archived", "all"], "default": "active"}}), "threads"),
         _spec("conversations.threads.rename", "write", "threads.manage",
               closed({**thread, **revision, "title": text(120, 1)}), "thread"),
         _spec("conversations.threads.archive", "write", "threads.manage", closed({**thread, **revision}), "thread"),
@@ -190,11 +192,15 @@ def _read_specs() -> list[ActionSpec]:
     ]
 
 
-# LLM: 缓存只含不可变声明，不含调用者、令牌或owner状态。
-# 函数用途: 返回不能被运行方覆盖的中央目录。
+# LLM: 扩展只在原类型定义完成后惰性载入；缓存仅含静态声明，重名拒绝以免覆盖原权限。
+# 函数用途: 组合原45项与新增20项，返回不能被插件覆盖的唯一动作目录。
 @lru_cache(maxsize=1)
 def action_specs():
-    rows = _conversation_specs() + _user_specs() + _execution_specs() + _interaction_specs() + _task_goal_specs() + _read_specs()
+    from .action_specs_v2_ext import v2_action_specs
+    rows = (_conversation_specs() + _user_specs() + _execution_specs() + _interaction_specs()
+            + _task_goal_specs() + _read_specs() + v2_action_specs())
+    if len({row.name for row in rows}) != len(rows):
+        raise ValueError("宿主动作重名")
     return MappingProxyType({row.name: row for row in rows})
 
 

@@ -44,7 +44,7 @@ CHAT_PROMPT = "你> "
 PLAIN_CHAT_PROMPT = "user> "
 
 
-# LLM: 这是 CLI 与 C 唯一配置/constructor roots 解析；内部冻结副本不重读 YAML/环境，但仍沿原 owner 权限校验，不创建 Agent、目录或业务账。
+# LLM: CLI与C共用一次目录解析及原owner校验；显式配置冻结为规范根供后续运行消费，无声明仍为空，不创建Agent或目录。
 # 函数用途: 解析真实构造参数，让控制面与稍后的 Agent 使用相同配置来源及工作区规则。
 def agent_configuration(args):
     frozen = getattr(args, "_gateway_frozen_config", None)
@@ -61,6 +61,8 @@ def agent_configuration(args):
         current_dir=owner_home_workspace_root(config),
     )
     validate_requested_workspace_roots(config, roots)
+    if config.workspace_root:
+        config.workspace_root = [str(root) for root in roots]
     return config, roots
 
 

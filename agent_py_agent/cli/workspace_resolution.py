@@ -15,10 +15,13 @@ def explicit_workspace_root(args) -> Path | None:
     return roots[0] if roots else None
 
 
-# LLM: 一次声明多个目录是显式意图，必须逐项解析而不是把整个字符串当一条路径
+# LLM: 显式路径先严格解析现存目录并拒根级目录；身份校验仍在validate_requested_workspace_roots，不从声明授予权限。
+# 一次声明多个目录是显式意图，必须逐项解析而不是把整个字符串当一条路径
 # （"a,b" 被当成一条路径会得到一个不存在的目录名）。逗号分隔与列表配置共用这条解析。
 # 函数用途: 返回命令行显式声明的全部工作目录，保持声明顺序并去重。
 def explicit_workspace_roots(args) -> list[Path]:
+    from ..agent.conversation.workspace_context import existing_workspace_directory
+
     raw = getattr(args, "workspace_root", None)
     if raw is None:
         # --workspace 与既有 --workspace-root 共用同一条解析路径，避免两套语义。
@@ -34,7 +37,7 @@ def explicit_workspace_roots(args) -> list[Path]:
         text = value.strip()
         if not text:
             continue
-        resolved = Path(text).expanduser().resolve()
+        resolved = existing_workspace_directory(text)
         if resolved not in roots:
             roots.append(resolved)
     return roots
@@ -72,26 +75,20 @@ def runtime_paths_for_config(config) -> dict[str, Path]:
     return runtime_paths_for_agent(config, owner.home_dir, scoped)
 
 
-# LLM: CLI/config paths are requests, not authority. WorkspaceOnly accepts only owner-home roots;
-# an external root requires the structured local/main identity and access_mode=full-access.
+# LLM: CLI/config声明本身不授予权限；本机管理员可在普通模式显式绑定项目，普通owner仍只用自己家，控制面不可绑定。
 # 函数用途: 在创建 Agent 前检查显式工作区，避免命令行静默忽略外部目录而 Gateway 却报错。
 def validate_requested_workspace_roots(config, roots: list[Path]) -> None:
+    from ..agent.conversation.workspace_context import validate_workspace_directory
+
     owner_home = owner_home_workspace_root(config)
-    if all(_is_relative_to(root, owner_home) for root in roots):
-        return
     provider = str(getattr(config, "my_agent_owner_provider", "") or "local").strip().lower()
     owner_kind = str(getattr(config, "my_agent_owner_kind", "") or "main").strip().lower()
-    access_mode = (
-        str(getattr(config, "access_mode", "workspace-write") or "workspace-write")
-        .strip()
-        .lower()
-        .replace("_", "-")
-    )
-    if provider in {"", "local"} and owner_kind in {"", "main"} and access_mode == "full-access":
-        return
-    raise ValueError(
-        "当前身份处于 WorkspaceOnly；外部工作区只有本机管理员开启 Full Access 后才能使用"
-    )
+    for root in roots:
+        # 首次启动的默认owner home可尚未创建，由原Agent初始化负责；不替外部显式目录补建。
+        if root.resolve(strict=False) == owner_home and not owner_home.exists():
+            continue
+        validate_workspace_directory(root, owner_home=owner_home,
+            is_admin=provider in {"", "local"} and owner_kind in {"", "main"})
 
 
 # LLM: The first normalized root is the canonical primary workspace; callers needing all roots

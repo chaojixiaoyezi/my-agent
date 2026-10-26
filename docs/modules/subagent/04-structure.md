@@ -1,3 +1,7 @@
+## 2026-10-25 子代理持久化 4096 缓存扩容、缺失单次读取与锁外深拷贝结构
+
+`subagents/services/persistence/service.py::SubAgentPersistenceService` 将 `_MAX_RUN_CACHE_ENTRIES` 与 `_MAX_NEGATIVE_RUN_CACHE_ENTRIES` 提升至 `4096`，`_load_from_locator` 在锁内仅读取或发布不可变快照引用并在 `_run_cache_lock` 锁外执行 `copy.deepcopy`；`subagents/services/agent_run_state.py::read_agent_state_payload` 在声明路径与解析路径一致且目标 `canonical_state.json` 缺失时通过原 `FileNotFoundError.canonical_path` 直接携带已核验路径，由 `_cache_missing_canonical`（兼容旧 3 位置参数与可选 `canonical_path`）免除二次解析 `task.json`。
+
 ## 2026-10-25 本地普通用户（`local/<user_id>`）子代理配额结构
 
 `subagents/services/base.py::_load_user_quota_dict` 在解析非管理员用户配额时，对 `owner.provider == "local"` 且 `owner.owner_kind == "user"` 分支调用 `LocalUserStore(root).get_quota(owner.user_id).to_dict()`，与外部 Provider 用户的 `OwnerQuotaStore` 返回结构对齐。

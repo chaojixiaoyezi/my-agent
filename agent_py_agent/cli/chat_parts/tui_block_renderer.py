@@ -1,5 +1,5 @@
 # LLM: 本模块是 TuiViewSnapshot 到 prompt_toolkit formatted lines 的唯一 block renderer；不得读取原始模型文本猜工具、权限或生命周期。
-# 模块用途: 生成消息与typed活动提示，复用有界稳定前缀及已净化行组；活动行和动画缓存保持一致，不用缓存掩盖状态变化。
+# 模块用途: 生成消息、计时尾标和只读观察提示；帮助列出鼠标模式兼容键，缓存保持真实状态变化可见。
 
 from __future__ import annotations
 
@@ -133,6 +133,7 @@ HELP_SHORTCUT_GROUPS = (
     (
         "ctrl + s to stash prompt",
         "F6 切换原生复制/滚轮",
+        "Shift+F6 / Esc+M 同样切换",
         "page up/down to scroll",
         "ctrl + l to redraw",
         "ctrl + c/d twice to exit",
@@ -209,7 +210,7 @@ TERMINAL_BUNNY_AVATAR_COMPACT = (
 
 
 # LLM: TuiRenderContext 固定所有会影响 golden 的显示输入，时钟/尺寸/品牌都不能从全局隐式读取。
-# 类用途: 指定一次 TUI 渲染的宽度、模式、动画帧和后台刷新健康，不授予任务状态变更权。
+# 类用途: 指定渲染宽度、模式、动画与后台驻留计数，不授予任务状态变更权。
 @dataclass(frozen=True)
 class TuiRenderContext:
     width: int
@@ -246,9 +247,11 @@ class TuiRenderContext:
     focused_agent_replaced_by: str = ""
     # 当前查看的子代理的失败类型专属标签（Gateway 算好的 failure_label）；放在末尾保留位置参数兼容性。
     focused_agent_failure_label: str = ""
+    background_process_count: int = 0
+    background_watch_active: bool = False
 
     # LLM: width 最小一列，名称字段只做展示字符串规范，不获得路径或配置控制权。
-    # 函数用途: 规范渲染上下文，保证动画索引非负和刷新健康使用布尔标记。
+    # 函数用途: 规范渲染上下文及后台观察计数，保证动画与刷新使用明确类型。
     def __post_init__(self) -> None:
         object.__setattr__(self, "width", max(1, int(self.width or 1)))
         object.__setattr__(self, "background_sync_failed", bool(self.background_sync_failed))
@@ -316,10 +319,12 @@ class TuiRenderContext:
         )
         object.__setattr__(self, "focused_agent_replaced_by", str(self.focused_agent_replaced_by or "").strip())
         object.__setattr__(self, "focused_agent_failure_label", str(self.focused_agent_failure_label or "").strip())
+        object.__setattr__(self, "background_process_count", max(0, int(self.background_process_count or 0)))
+        object.__setattr__(self, "background_watch_active", bool(self.background_watch_active))
 
 
 # LLM: frame provider 必须复用renderer的可见活动规则；所有可见思考和前台补位行的动画时钟进入key，终态不引入周期刷新。
-# 函数用途: 生成完整画面的缓存键，既刷新活动动画，也避免恢复连接后仍显示旧警告。
+# 函数用途: 生成包含后台徽标和观察页的缓存键，避免进程数变化后仍显示旧帧。
 def tui_render_context_key(
     snapshot: TuiViewSnapshot,
     context: TuiRenderContext,
@@ -404,6 +409,8 @@ def tui_render_context_key(
         context.selected_agent_run_id,
         context.expanded_goal_id,
         context.agent_view_depth,
+        context.background_process_count,
+        context.background_watch_active,
         connection_animation,
         thinking_animation,
         foreground_animation,
@@ -796,9 +803,14 @@ def _render_foreground_activity(snapshot: TuiViewSnapshot, context: TuiRenderCon
     return ((("class:tui-spinner-highlight", prefix), ("class:tui-thinking", label)),)
 
 
-# LLM: block dispatch 只读取 reducer role/kind/phase，未知角色显式降为 system 样式而不透传 payload。
-# 函数用途: 选择欢迎、用户、助手、思考、工具或系统块 renderer。
+# LLM: 计时读取显式 turn_timing 元数据，不解析旧文本；其它块仍按 reducer role/kind/phase 分派。
+# 函数用途: 为消息流的计时行使用次要色，保留各类正文的原渲染入口。
 def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
+    if block.metadata.get("source_kind") == "turn_timing" and isinstance(block.metadata.get("display"), dict):
+        from ..turn_completion import render_turn_timing
+
+        text = render_turn_timing(block.metadata["display"])
+        return ((('class:tui-muted', _fit_text(text, context.width, "left").rstrip()),),)
     if block.kind == "session_started":
         return _render_welcome(block, context)
     if block.role == "connection":
@@ -838,15 +850,18 @@ def _render_connection(
     ),)
 
 
-# LLM: The main row comes only from the canonical conversation activity
-# projection and mirrors 终端交互's animated SpinnerWithVerb at transcript tail.
-# Fixed prefix/suffix reserve their columns before the activity is truncated, so
-# arbitrary thinking text can never wrap this removable display state.
-# 函数用途: 在正文与 Context/Todo 之间显示主行；真实审批等待使用静态提示，失联保留上次状态，不推断任务已结束。
+# LLM: 原主活动仍来自规范快照；明确 background_watch 展示投影独立排版并净化日志，不反推执行状态。
+# 函数用途: 渲染消息尾部活动或后台只读观察页，保留原状态与日志安全出口。
 def _render_background_activity(
     block: TuiBlock,
     context: TuiRenderContext,
 ) -> tuple[FormattedLine, ...]:
+    if block.metadata.get("source_kind") == "background_watch":
+        from ...agent.conversation.background_process_view import background_watch_text
+
+        display = block.metadata.get("display") or {}
+        texts = background_watch_text(display.get("rows", ()), str(display.get("selected") or ""), active_count=display.get("active_count"))
+        return tuple(line for text in texts for line in wrap_fragments((("class:tui-muted", sanitize_terminal_text(text)),), width=context.width))
     main_activity = (
         dict(block.metadata.get("main_activity"))
         if isinstance(block.metadata.get("main_activity"), dict)
@@ -3145,9 +3160,28 @@ def _render_pending_input_message(
     return tuple(visible)
 
 
-# LLM: footer 只读状态；主代理 Esc 中断本轮，/stop 是任务停止，Goal 暂停只管理续跑。
-# 函数用途: 按当前页面展示控制范围；子代理的明确停止保留原有授权边界。
+# LLM: 只给正常底栏追加独立颜色的进程徽标；预留宽度避免挤掉 F6，观察页本身从不提示停止进程。
+# 函数用途: 在常驻快捷键后显示后台驻留数，选中时反显。
 def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
+    if context.background_watch_active:
+        text = "  Ctrl+G / Esc 返回 · 后台进程只读观察 · ↑↓ 切换输出"
+        if context.notice:
+            text += " · " + context.notice
+        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
+    count = context.background_process_count
+    if count <= 0 or snapshot.permission is not None:
+        return _render_footer_base(snapshot, context)
+    selected = context.selected_agent_run_id == "bg:watch"
+    badge = f" · {'› ' if selected else ''}⚡ 后台驻留 {count} 项"
+    badge = _fit_text(badge, context.width, "left").rstrip()
+    base = replace(context, width=max(1, context.width - display_width_text(badge)),
+                   selected_agent_run_id="" if selected else context.selected_agent_run_id)
+    return (*_render_footer_base(snapshot, base), ("class:tui-agent-selected" if selected else "class:tui-bg-watch", badge))
+
+
+# LLM: 完成计时只在消息流；主代理 Esc、/stop 与 Goal 暂停仍各守原控制范围，不解析文案授控制权。
+# 函数用途: 保留结束后的常驻快捷键，以及原权限/通知/子代理底栏。
+def _render_footer_base(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> FormattedLine:
     if snapshot.permission is not None:
         return ()
     if any(block.role == "connection" for block in snapshot.active_blocks):
@@ -3206,19 +3240,16 @@ def _render_footer(snapshot: TuiViewSnapshot, context: TuiRenderContext) -> Form
     if _has_running_conversation(snapshot):
         text = f"  Esc 中断本轮 · /stop 停止任务 · {history_hint}"
         return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
-    if snapshot.status.completion:
-        from ..turn_completion import render_completion
-
-        text = "  " + render_completion(snapshot.status.completion)
-        return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
     text = f"  ? 快捷键 · F4 权限 · {history_hint}"
     return (("class:tui-muted", _fit_text(text, context.width, "left").rstrip()),)
 
 
 # LLM: footer 必须从 typed mouse mode 说明当前真实交互；不得固定显示 F6 滚轮而在默认已开启时误导用户。
-# 函数用途: 生成当前鼠标模式下的历史浏览与 F6 备用模式提示。
+# 函数用途: 生成鼠标及 F6 提示；窄屏为后台徽标留空间但保留 F6 入口。
 def _history_mouse_hint(context: TuiRenderContext) -> str:
     if context.mouse_capture_enabled:
+        if context.width < 90:
+            return "PgUp 历史 · F6 原生模式"
         return "滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式"
     return "PgUp/Ctrl+Home 历史 · F6 恢复滚轮"
 

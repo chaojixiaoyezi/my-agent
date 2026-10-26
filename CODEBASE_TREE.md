@@ -627,6 +627,42 @@
 
 ## Tree
 
+### 2026-10-25 七项核心底座与 Host v2 扩展（工作区源码增量，未发布）
+
+以下为本轮新增生产文件和直接测试，源码存在不等于真实入口、完整验收或部署已完成；实现边界见 [设计台账](DESIGN_LEDGER.md)。
+
+```text
+|-- agent_py_agent/
+|   |-- runtime_sdk.py # 固定脚本数据源SDK公开导出；唯一实现位于agent/workflows/runtime_sdk.py
+|   |-- agent/
+|   |   |-- assets/
+|   |   |   |-- browser_recorder.py # 动作记录规范化、秘密剥离与参数化脚本/工作流/Skill草稿编译，不启动浏览器
+|   |   |   |-- datasource_store.py # 数据源规格、0600私有明文凭据引用与受校验SQLite迁移
+|   |   |   |-- turn_extractor.py # 用户回合真实轨迹聚合、脱敏提炼及DRAFT/选择性发布
+|   |   |   `-- workspace_assets.py # 四类项目资产只读覆盖、CAS晋升与两阶段批量保存
+|   |   |-- conversation/
+|   |   |   |-- background_process_view.py # 本owner后台进程与有界日志只读投影，可按线程过滤，不消费唤醒
+|   |   |   |-- thread_fork_service.py # 主会话安全前缀分叉及Compact/人格重建，源会话零修改
+|   |   |   `-- workspace_context.py # 显式目录与owner权限校验、目录/分叉控制及项目上下文
+|   |   |-- plugin_host/
+|   |   |   |-- action_specs_v2_ext.py # 本轮20个准确Host v2动作的闭合schema、能力与幂等规格
+|   |   |   |-- capabilities_v2_handlers.py # 原授权链下新增动作领域分发，不另建权限或幂等账
+|   |   |   `-- observations.py # 工作区/资产冷读投影与后台进程线程/task可见性过滤
+|   |   |-- tooling/
+|   |   |   `-- datasources_tool.py # 当前owner数据源列表、保存、连接测试、探测与迁移工具
+|   |   `-- workflows/
+|   |       |-- datasource_runtime.py # 脚本合同冻结绑定、临时私有清单与真实秘密值输出脱敏
+|   |       `-- runtime_sdk.py # 脚本进程逻辑代号句柄及受只读/表范围约束的SQLite查询实现
+|   `-- tests/
+|       |-- test_browser_recorder_compiler.py # 动作编译、秘密剥离、URL/网络边界与真实ScriptStore入口
+|       |-- test_cli_dir_and_workspace_assets.py # 三目录别名、管理员双根、普通用户边界与资产覆盖/晋升/批量保存
+|       |-- test_conversation_thread_fork.py # 主线程安全工具边界、Compact/人格继承、源不变及目录CAS
+|       |-- test_datasource_keyring_and_script_binding.py # 私有凭据、SQLite、脚本绑定/脱敏及迁移状态边界
+|       |-- test_plugin_host_v2_five_capabilities.py # 20个新增Host动作、闭合参数、能力/幂等与owner隔离
+|       |-- test_tui_turn_completion_and_bg_watch.py # 完成行/历史回放、Footer、后台只读观察、导航和日志边界
+|       `-- test_turn_asset_extractor.py # 回合检索、真实轨迹、脱敏DRAFT、选择发布、依赖及失败回滚
+```
+
 ```text
 |-- agent_py_agent/tests/test_native_refusal_lease_pin_ownership.py # 原独审同owner pin反例
 `-- agent_py_agent/tests/test_native_refusal_lease_pin_guard.py # 完整lease pin来源增量合同
@@ -1056,6 +1092,30 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### 2026-10-25 七项能力的新增入口与直接测试
+
+- `agent_py_agent/runtime_sdk.py`：公开 `get_datasource` / `query_sql` / `DatasourceHandle`，只重导出唯一工作流SDK；不据设计简称宣称存在 `my_agent_runtime` 兼容模块。
+- `agent_py_agent/agent/assets/browser_recorder.py`：持久化安全动作序列并编译参数化脚本及可选工作流/Skill；创建记录不启动浏览器，真实采集/回放和部署另验。
+- `agent_py_agent/agent/assets/datasource_store.py`：owner/workspace 规格与 owner 私有秘密分离、公开摘要脱敏、SQLite 建库/探测/迁移及版本 CAS；秘密是 `data/datasource_secrets/<ref>.json` 0600 私有明文，不是加密 `vault.json`。
+- `agent_py_agent/agent/assets/turn_extractor.py`：聚合选定回合中的实际工具证据，生成脱敏持久化 DRAFT，并按选择与依赖发布 script/workflow/skill；不自动重放历史命令，不将草稿生成说成零落盘。
+- `agent_py_agent/agent/assets/workspace_assets.py`：`.agent/` 四类资产按 `workspace > owner > builtin` 合并，只读发现不创建目录；显式晋升与批量保存沿 CAS 和两阶段事务。
+- `agent_py_agent/agent/conversation/background_process_view.py`：只读原受管记录和有限日志，保留 unknown；默认 owner 聚合、可显式按线程过滤，不恢复事务或消费通知。
+- `agent_py_agent/agent/conversation/thread_fork_service.py`：只分叉主会话，按完整工具边界选前缀，重建检查点身份及复制冻结人格，最后发表新线程；不改源或继承运行授权。
+- `agent_py_agent/agent/conversation/workspace_context.py`：统一目录存在性、管理员/普通用户及宿主控制面边界，提供 `/dir` / `/fork` 领域控制和只读项目上下文；工作目录不替代 owner home。
+- `agent_py_agent/agent/plugin_host/action_specs_v2_ext.py`：本轮 20 个新动作的唯一静态规格来源，准确名称见 [设计台账](DESIGN_LEDGER.md)，不是整个 Host API 动作总量。
+- `agent_py_agent/agent/plugin_host/capabilities_v2_handlers.py`：授权后调用目录/分叉/数据源/提炼/录制/后台领域，复用原控制回执和写幂等，不把 payload 身份当可信 owner。
+- `agent_py_agent/agent/plugin_host/observations.py`：工作区资产与上下文只读投影、后台进程安装线程及 task 范围过滤；不代表新暴露了 `observations.recent` 动作。
+- `agent_py_agent/agent/tooling/datasources_tool.py`：受信 owner/workspace 下的数据源管理工具，公开结果和错误不暴露秘密；连接测试不是 SDK 已支持全部驱动的证明。
+- `agent_py_agent/agent/workflows/datasource_runtime.py`：将脚本声明解析为 run 级冻结绑定，生成有界私有清单并清理，按真实秘密值清洗输出；不能用输入覆盖扩展数据源授权。
+- `agent_py_agent/agent/workflows/runtime_sdk.py`：只允许合同声明的逻辑代号，SQLite 查询使用参数绑定及原生 authorizer 限制只读/表范围；非 SQLite SQL 当前明确不支持。
+- `agent_py_agent/tests/test_browser_recorder_compiler.py`：动作生命周期、参数化/秘密默认值、非法导航、生成脚本与真实存储入口；fake Playwright 不代表真实浏览器验收。
+- `agent_py_agent/tests/test_cli_dir_and_workspace_assets.py`：目录参数、显式路径安全、owner 双根、四类覆盖/晋升与批量保存回滚边界。
+- `agent_py_agent/tests/test_conversation_thread_fork.py`：目录绑定/CAS、工具回合安全前缀、Compact/冻结人格继承、消息新身份及源文件不变。
+- `agent_py_agent/tests/test_datasource_keyring_and_script_binding.py`：凭据分离/脱敏、SQL 声明门、只读/表范围、子进程清单清理、真实 SQLite 及迁移恢复；不证明远端迁移已完成。
+- `agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py`：新增 20 动作矩阵、闭合参数、能力 AND 门、写入幂等、安装撤销及 owner/线程隔离。
+- `agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py`：完成记录不替换 Footer、历史回放、后台聚合/导航/按键、只读日志路径和坏记录隔离。
+- `agent_py_agent/tests/test_turn_asset_extractor.py`：检索与回合打包、分析前后脱敏、DRAFT 不发布、选择性提交/重放、依赖重绑与部分发布回滚。
 
 - `docs/design/GATEWAY_ROLE_INCIDENT_ACCEPTANCE_2026-10-20.md`：区分报告线索与本机证据，记录启动、身份、状态出口、去重、故障恢复和真实长跑验收；不授权清除未知责任或绕过owner权限。
 

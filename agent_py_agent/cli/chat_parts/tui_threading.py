@@ -1,6 +1,6 @@
 # LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
 # 过程轮询按流身份与序号一起确认；换进程只重基易失游标，不重置 canonical 消息位置。
-# 模块用途: 组装后台参数，以低频动画刷新降低等待中的 CPU；后台读取失败仍显式显示。
+# 模块用途: 低频刷新后台通知与当前会话只读进程观察；同范围读取失败保留旧帧，换范围先清空。
 
 from __future__ import annotations
 
@@ -138,12 +138,8 @@ class _NoticeWarnDebounce:
         )
 
 
-# LLM: The first snapshot is immediate. Foreground/background-active sessions poll at one second;
-# inactive sessions poll at five seconds. Transport failures use a separate exponential backoff
-# that resets after the next valid snapshot, so detached TUIs cannot storm the single Gateway.
-# "Unsynced" is debounced by _NoticeWarnDebounce: a single over-deadline round must not flash a
-# warning, and any success clears it immediately. Only healthy scheduled waits refresh the failure time base.
-# 函数用途: 按游标读取会话更新，健康休眠不计故障时长；失败退避并标记未同步，不终止后台任务。
+# LLM: 首拍立即读取；前后台任务/进程活动或观察页打开时一秒刷新，空闲五秒；原连接退避与提示去抖不变。
+# 函数用途: 按游标同步会话，进程仍在跑或观察页打开时保持一秒节奏，失败只退避不终止任务。
 def _background_notice_loop(
     stop_event: threading.Event,
     agent: object,
@@ -186,6 +182,11 @@ def _background_notice_loop(
                 None,
             )
             background_active = bool(activity_reader()) if callable(activity_reader) else False
+            navigation_reader = getattr(agent_navigation, "snapshot", None)
+            navigation_view = navigation_reader() if callable(navigation_reader) else None
+            background_active = background_active or bool(
+                getattr(navigation_view, "background_process_count", 0) or getattr(navigation_view, "background_watch_active", False)
+            )
             delay = (
                 TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS
                 if foreground_running or background_active
@@ -204,10 +205,8 @@ def _background_notice_loop(
             debounce.last_success_at = time.monotonic()
 
 
-# LLM: Each poll reads one canonical thread snapshot. The boolean result distinguishes transport
-# health; the runtime-owned typed activity controller separately exposes the healthy idle cadence.
-# Failures preserve the previous projection; a valid zero remains authoritative display state.
-# 函数用途: 消费一次后台快照并返回连接状态；已发布的活动计数供下一轮调速。
+# LLM: 先消费canonical快照；异常也必须暂停观察并保留原异常退避语义，禁止借旧执行目标扩大范围。
+# 函数用途: 同步原通知后刷新同会话进程投影；消费抛错仍清旧观察，不借显示session_id猜线程。
 def _consume_background_notices(
     agent: object,
     session_id: str,
@@ -221,26 +220,34 @@ def _consume_background_notices(
         return True
     event_cursor = event_cursor_ref if event_cursor_ref is not None else [0]
     store = getattr(agent, "conversation_store", None)
-    if store is None:
-        return _consume_gateway_background_snapshot(
-            agent,
-            session_id,
-            tui_runtime,
-            app_ref,
-            seen,
-            event_cursor,
-            agent_navigation,
-        )
-    return _consume_local_background_snapshot(
-        agent,
-        store,
-        session_id,
-        tui_runtime,
-        app_ref,
-        seen,
-        event_cursor,
-        agent_navigation,
-    )
+    snapshot_ok = False
+    try:
+        if store is None:
+            snapshot_ok = _consume_gateway_background_snapshot(
+                agent,
+                session_id,
+                tui_runtime,
+                app_ref,
+                seen,
+                event_cursor,
+                agent_navigation,
+            )
+        else:
+            snapshot_ok = _consume_local_background_snapshot(
+                agent,
+                store,
+                session_id,
+                tui_runtime,
+                app_ref,
+                seen,
+                event_cursor,
+                agent_navigation,
+            )
+    finally:
+        # 通知消费可能在解析本地绑定时抛错；仍清观察，原异常继续交给外层退避。
+        if _sync_background_watch(agent, agent_navigation, session_id=session_id, runtime=tui_runtime, snapshot_ok=snapshot_ok) and app_ref and app_ref[0] is not None:
+            app_ref[0].invalidate()
+    return snapshot_ok
 
 
 # LLM: Thin clients consume the authenticated canonical message page plus an independent
@@ -706,3 +713,90 @@ def _refresh_loop(
 
 
 __all__ = ["_refresh_loop", "_start_worker_threads"]
+
+
+# LLM: 本地沿原只读线程解析器，Gateway沿根runtime已校验执行DTO；不能从选中后台项或显示session猜线程。
+# 函数用途: 获取进程观察的当前会话；无真实上下文的测试和旧入口保留None兼容。
+def _background_watch_thread_id(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None) -> str | None:
+    store = getattr(agent, "conversation_store", None)
+    resolver = getattr(getattr(store, "threads", None), "resolve_report", None)
+    if session_id and callable(resolver):
+        from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
+
+        thread, _error = resolver(channel=LOCAL_CHAT_CHANNEL, channel_conversation_id=session_id, channel_user_id=LOCAL_AGENT_USER_ID)
+        value = getattr(thread, "thread_id", None)
+        return value if isinstance(value, str) and value else None
+    root = getattr(navigation, "root_runtime", None) or runtime
+    reader = getattr(root, "execution_target", None)
+    target = reader() if callable(reader) else None
+    if isinstance(target, Mapping) and isinstance(target.get("thread_id"), str) and target["thread_id"]:
+        return target["thread_id"]
+    for source in (navigation, root, agent):
+        value = getattr(source, "thread_id", None)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+# LLM: 只从已绑定owner读取；线程/owner改变先清旧展示，列表和详情同传thread_id，观察不创建或控制进程。
+# 函数用途: 刷新当前会话及未绑定旧记录的概要，打开观察页时才读取该范围选中日志。
+def _refresh_background_watch(agent: object, navigation: object | None, *, thread_id: str | None = None) -> bool:
+    from ...agent.conversation.background_process_view import (
+        inspect_background_process,
+        list_background_processes,
+    )
+
+    update = getattr(navigation, "update_background_watch_rows", None)
+    home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+    if not home or not callable(update):
+        return False
+    if thread_id is None:
+        thread_id = _background_watch_thread_id(agent, navigation)
+    scope = (str(Path(home)), thread_id)
+    changed = False
+    if getattr(navigation, "_background_watch_scope", None) != scope:
+        changed = bool(update([], active_count=0))
+        navigation._background_watch_scope = scope
+    if thread_id is None and callable(getattr(agent, "request_background_notices", None)):
+        raise LookupError("background process conversation scope unavailable")
+    result = list_background_processes(Path(home), thread_id=thread_id)
+    if not result["projection_ok"]:
+        raise OSError("background process projection unavailable")
+    rows = sorted(result["items"], key=lambda row: not (row["alive"] or row["wake_pending"]))[:128]
+    view = navigation.snapshot()
+    if view.background_watch_active:
+        selected = view.selected_run_id.removeprefix("bg:")
+        for index, row in enumerate(rows):
+            if row["session_id"] == selected:
+                rows[index] = inspect_background_process(Path(home), selected, thread_id=thread_id)
+    return bool(update(rows, active_count=result["active_count"])) or changed
+
+
+# LLM: 通知失败、范围解析抛错或未知时清旧帧；范围确认后的普通投影读错才允许保留同范围展示。
+# 函数用途: 按canonical线程更新易失展示，严格区分范围失信与同会话读错，不改消息和完成wake链路。
+def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True) -> bool:
+    runtime_reader = getattr(navigation, "active_runtime", None)
+    if not callable(runtime_reader):
+        return False
+    display_runtime = runtime_reader()
+    scope_confirmed = False
+    try:
+        gateway = callable(getattr(agent, "request_background_notices", None))
+        resolver = getattr(getattr(getattr(agent, "conversation_store", None), "threads", None), "resolve_report", None)
+        if not snapshot_ok:
+            raise LookupError("background process snapshot unavailable")
+        thread_id = _background_watch_thread_id(agent, navigation, session_id=session_id, runtime=runtime)
+        if thread_id is None and (gateway or session_id and callable(resolver)):
+            raise LookupError("background process conversation scope unavailable")
+        scope_confirmed = True
+        changed = _refresh_background_watch(agent, navigation, thread_id=thread_id)
+    except Exception as exc:
+        if not scope_confirmed or isinstance(exc, LookupError):
+            navigation.update_background_watch_rows([], active_count=0)
+            navigation._background_watch_scope = None
+            message = "后台进程观察刷新失败；会话范围未确认，已暂停显示"
+        else:
+            message = "后台进程观察刷新失败；仅保留同会话上次结果"
+        display_runtime.set_notice(message, duration_seconds=6, notice_kind="background_watch_error")
+        return True
+    return display_runtime.clear_notice(expected_kind="background_watch_error") or changed

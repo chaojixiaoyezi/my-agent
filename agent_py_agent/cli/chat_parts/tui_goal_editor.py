@@ -136,7 +136,7 @@ async def open_goal_editor(app, params) -> None:
 
     bindings.add("c-s", eager=True)(submit)
     bindings.add("c-g", eager=True)(discard)
-    bindings.add("escape", eager=True)(stop)
+    bindings.add("escape")(stop)
     dialog = Dialog(title=f"Goal · {params.agent_navigation.snapshot().active_name}",
                     body=HSplit([text_area, Label(help_text), feedback, latest_area]),
                     buttons=[Button("保存", handler=submit), Button("读取最新", handler=lambda: app.create_background_task(reload_latest())),

@@ -3,7 +3,7 @@
 # 历史工具卡不再驱动实时 Todo；当前计划只由实时工具/活动快照发布，恢复和向前翻页都遵守这一边界。
 # Gateway 续跑边界 turn_resumed 只收口同一回合上一执行代次的显示，不结束回合、不写回审批。
 # local和旧Gateway raw均只计量；已验完整响应沿原committed入口展示，不能把batch净化误当prefix-safe。
-# 模块用途: 发布会话、输入、回合和工具有序事件；保留公开原文及缺失字段，不重复标题或改变执行配置。
+# 模块用途: 发布会话、输入、回合和工具有序事件；计时是独立 UI 元数据，不进入模型历史。
 
 from __future__ import annotations
 
@@ -2495,8 +2495,8 @@ class TuiTurnEventAdapter:
             )
         return True
 
-    # LLM: 只由 typed summary 映射确认终态；运输未知仅停止本地观察，不结算时钟或写业务失败。
-    # 函数用途: 发布确认终态及计时，或独立的观察退出提示。
+    # LLM: 只由 typed summary 映射确认终态；计时附在原程序块元数据，不写 store_messages，运输未知不结算。
+    # 函数用途: 发布确认终态和消息流计时尾标，保留旧 CLI 文本合同。
     def _publish_turn_terminal(self, summary: TuiTurnSummary) -> None:
         if summary.outcome_unknown:
             self.runtime.write_console("最终状态待确认，请查询原请求；本地观察退出不表示任务结束。")
@@ -2531,7 +2531,7 @@ class TuiTurnEventAdapter:
         completion, first = self.runtime.completions.finish(self.request_id, phase)
         if first:
             self.runtime._publish("system_message", "completed", f"completion:{self.request_id}",
-                {"text": render_completion(completion)}, request_id=self.request_id)
+                {"text": render_completion(completion), "source_kind": "turn_timing", "display": asdict(completion)}, request_id=self.request_id)
         self.runtime._publish(kind, phase, self.turn_block_id, {"completion": asdict(completion)}, request_id=self.request_id)
 
 

@@ -751,3 +751,505 @@ def test_live_managed_process_skips_registry_probe_and_unknown_not_pending(tmp_p
     unknown_agent, unknown_params, _ = _fixture(tmp_path / "unknown", status="unknown", managed=True)
     assert not owner_has_pending_process_completions(unknown_agent.home_paths.owner_home_dir)
     assert not task_has_pending_process_completion(unknown_agent, unknown_params.task_id)
+
+
+# LLM: 同时替换run身份哨兵才模拟原生路径；普通monkeypatch仍必须走原ps合同。
+# 函数用途: 隔离无proc的内核观察、ps次数和内存缓存，不启动真实进程。
+@pytest.fixture
+def native_process_probe(monkeypatch):
+    from collections import OrderedDict
+
+    from agent_py_agent.agent.gateway_parts import multiprocess_native_host_observation as native
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    probe = SimpleNamespace(module=module, native=native, calls=[], birth="1792929600:1",
+                            state=False, output="Sun Oct 25 05:00:00 2026", code=0, failure=None,
+                            original_kernel_terminated=native.kernel_terminated)
+    original_read, original_dir = Path.read_text, Path.is_dir
+
+    # LLM: 仅遮蔽proc探针，其它文本读取沿原实现。
+    # 函数用途: 模拟无proc平台。
+    def read(path, *args, **kwargs):
+        if str(path).startswith("/proc/"):
+            raise FileNotFoundError("no proc in this test")
+        return original_read(path, *args, **kwargs)
+
+    # LLM: 所有模拟ps仍须关闭stdin，保留原argv与env供断言。
+    # 函数用途: 统计原生探针替身并注入结果。
+    def run(argv, **kwargs):
+        probe.calls.append((argv, kwargs))
+        assert kwargs["stdin"] == module.subprocess.DEVNULL
+        if probe.failure:
+            raise probe.failure
+        return SimpleNamespace(returncode=probe.code, stdout=probe.output)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(Path, "is_dir", lambda p: False if p == Path("/proc") else original_dir(p))
+    monkeypatch.setattr(module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(module.subprocess, "run", run)
+    monkeypatch.setattr(module, "_DEFAULT_SUBPROCESS_RUN", run, raising=False)
+    monkeypatch.setattr(module, "_PID_BIRTH_TOKEN_CACHE", OrderedDict(), raising=False)
+    monkeypatch.setattr(module, "_PS_RELATION_CACHE", {}, raising=False)
+    monkeypatch.setattr(native, "process_birth", lambda pid: probe.birth)
+    monkeypatch.setattr(native, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(native, "_darwin_info", lambda pid: (SimpleNamespace(prefix=[0, 2]), 0))
+    # Store投影故意丢微秒：测试必须能识别同秒内的PID复用。
+    monkeypatch.setattr(native, "store_birth", lambda birth: "host:Sun Oct 25 05:00:00 2026" if birth else "")
+    monkeypatch.setattr(native, "kernel_terminated", lambda pid: probe.state)
+    return probe
+
+
+# LLM: 预热旧关系后模拟子PID转属无关进程，真实信号函数只接替身OS出口，禁止触达真实进程。
+# 函数用途: 验证终止入口不能用TTL缓存扩大信号范围。
+def test_native_relation_cache_never_authorizes_recycled_child_signals(native_process_probe, monkeypatch):
+    probe, current, signals = native_process_probe, [False], []
+    module = probe.module
+
+    # LLM: 父/组表独立反映切换前后关系，birth为当前PID持有者。
+    # 函数用途: 构造旧关系与新身份反例。
+    def ps(argv, **kwargs):
+        if "-axo" in argv:
+            root_relation = 1 if "ppid" in argv[-1] else 321
+            child_relation = 999 if current[0] else 321
+            output = f"321 {root_relation}\n654 {child_relation}\n"
+        else:
+            output = "root birth" if argv[-1] == "321" else "unrelated birth"
+        return SimpleNamespace(returncode=0, stdout=output)
+
+    # LLM: 仅模拟信号后的确认以免真实等待，不参与目标成员选取。
+    # 函数用途: 完成测试进程快照的退出回执。
+    def waited(snapshot, proc, seconds, terminated):
+        terminated.update(snapshot)
+        return True
+
+    monkeypatch.setattr(module.subprocess, "run", ps)
+    monkeypatch.setattr(module, "_DEFAULT_SUBPROCESS_RUN", ps)
+    monkeypatch.setattr(module.time, "monotonic", lambda: 10.0)
+    assert module._process_parent_map()[0][654] == 321
+    assert module._process_group_map()[0][654] == 321
+    current[0] = True
+    monkeypatch.setattr(module.os, "getpgrp", lambda: 9999)
+    monkeypatch.setattr(module.os, "getpgid", lambda pid: 321 if pid == 321 else 999)
+    monkeypatch.setattr(module.os, "killpg", lambda pgid, sig: signals.append(("group", pgid)))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: signals.append(("pid", pid)) if sig else None)
+    monkeypatch.setattr(module, "_wait_process_snapshot_gone", waited)
+    module.terminate_process_tree(321, None, grace_seconds=0)
+    assert ("group", 321) in signals
+    assert ("group", 999) not in signals and ("pid", 654) not in signals
+
+
+# LLM: 保留真正kernel helper，在底层注入持续EPERM；不能把观察错误当活进程跳过旧ps。
+# 函数用途: 验证原生故障回退仍能识别僵尸。
+def test_native_kernel_real_error_does_not_hide_ps_zombie(native_process_probe, monkeypatch):
+    import errno
+
+    probe = native_process_probe
+    monkeypatch.setattr(probe.native.sys, "platform", "darwin")
+    monkeypatch.setattr(probe.native, "kernel_terminated", probe.original_kernel_terminated)
+    monkeypatch.setattr(probe.native, "_darwin_info", lambda pid: (None, errno.EPERM))
+    probe.output = "Z"
+    assert probe.module._process_is_zombie(321) is True
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.parametrize("first_error", [1, 5])
+@pytest.mark.parametrize("status", [2, 5])
+# LLM: 真kernel先遇EPERM/EIO，再从同一底层读取恢复；复核结果必须覆盖被折叠的旧False，不能多跑ps。
+# 函数用途: 验证瞬时故障后按新的活进程或僵尸状态返回。
+def test_native_kernel_recovered_read_uses_its_actual_state(native_process_probe, monkeypatch, first_error, status):
+    probe = native_process_probe
+    reads = iter([(None, first_error), (SimpleNamespace(prefix=[0, status]), 0)])
+    monkeypatch.setattr(probe.native, "kernel_terminated", probe.original_kernel_terminated)
+    monkeypatch.setattr(probe.native, "_darwin_info", lambda pid: next(reads))
+    assert probe.module._process_is_zombie(321) is (status == 5)
+    assert not probe.calls
+
+
+@pytest.mark.parametrize("state", [True, False])
+# LLM: 原生确定状态必须避开ps，False复核使用一致的完整内核观察。
+# 函数用途: 验证内核活进程和僵尸快路径。
+def test_native_zombie_bool_avoids_ps(native_process_probe, state):
+    probe = native_process_probe
+    probe.state = state
+    probe.output = "Z"
+    assert probe.module._process_is_zombie(321) is state
+    assert probe.calls == []
+
+
+@pytest.mark.parametrize("state", [None, "unknown"])
+# LLM: 非bool是未知，不允许按真值推断状态，回退必须保持C locale。
+# 函数用途: 验证未知内核结果走原ps。
+def test_native_zombie_unknown_falls_back_to_c_locale_ps(native_process_probe, state):
+    probe = native_process_probe
+    probe.state, probe.output = state, "Z+\n"
+    assert probe.module._process_is_zombie(321)
+    assert len(probe.calls) == 1
+    assert probe.calls[0][1]["env"]["LC_ALL"] == "C"
+
+
+# LLM: 同秒复用须贯穿缓存、返回token和最终实例检查；信号出口替身不得触达真实PID。
+# 函数用途: 验证相同ps秒级文本不能覆盖不同微秒出生身份。
+def test_native_birth_cache_rechecks_kernel_and_rejects_same_second_pid_reuse(native_process_probe, monkeypatch):
+    probe = native_process_probe
+    monkeypatch.setattr(probe.module.os, "kill", lambda pid, sig: None)
+    token = probe.module.capture_process_birth_token(321)
+    assert token == "host:" + probe.output + "#kb=1792929600:1"
+    assert probe.module.capture_process_birth_token(321) == token
+    assert len(probe.calls) == 1
+    probe.birth = "1792929600:2"
+    current = probe.module.capture_process_birth_token(321)
+    assert current == "host:" + probe.output + "#kb=1792929600:2"
+    assert current != token
+    assert probe.module._birth_tokens_match(token, current) is False
+    assert probe.module._birth_token_matches(321, token, current) is False
+    assert probe.module._same_process(321, token) is False
+    assert probe.module._process_instance_terminated(321, token) is True
+    assert len(probe.calls) == 2
+    assert set(probe.module._PID_BIRTH_TOKEN_CACHE) == {(321, "1792929600:1"), (321, "1792929600:2")}
+    assert probe.module.capture_process_birth_token(322) == current
+    assert len(probe.calls) == 3
+
+
+# LLM: 新旧格式只在缺少一方微秒身份时兼容；双微秒不等必须短路，不能借旧locale探针放宽。
+# 函数用途: 覆盖真实信号资格入口的精确匹配、旧记录过渡和空身份拒绝。
+@pytest.mark.parametrize("expected,current,match", [
+    ("host:Sun Oct 25 05:00:00 2026", "host:Sun Oct 25 05:00:00 2026#kb=1792929600:1", True),
+    ("host:Sun Oct 25 05:00:00 2026#kb=1792929600:1", "host:Sun Oct 25 05:00:00 2026", True),
+    (" host:date#kb=1:1 ", "host:date#kb=1:1", True),
+    ("host:date#kb=1:1", "host:date#kb=1:2", False),
+    ("host:date#kb=1:1", "host:other#kb=1:1", False),
+    ("host:date", "host:other#kb=1:1", False),
+    ("", "host:date#kb=1:1", False),
+    ("host:date#kb=1:1", "", False),
+])
+def test_birth_identity_comparison_preserves_microseconds_and_legacy_tokens(native_process_probe, expected, current, match):
+    probe = native_process_probe
+    assert probe.module._birth_token_matches(321, expected, current) is match
+    if "#kb=" in expected and "#kb=" in current:
+        assert probe.calls == []
+
+
+# LLM: ps抛OSError时必须保守返回空串且不污染出生缓存；待ps恢复后同一进程仍能采到一致格式并与落盘token匹配。
+# 函数用途: 验证ps故障期间不制造第二种缓存格式、不将存活进程误判为已退出。
+@pytest.mark.parametrize("failure", [PermissionError("ps denied"), OSError("ps unavailable")])
+def test_native_birth_oserror_uses_kernel_identity(native_process_probe, monkeypatch, failure):
+    probe = native_process_probe
+    monkeypatch.setattr(probe.module.os, "kill", lambda pid, sig: None)
+    expected_token = probe.module.capture_process_birth_token(321)
+    assert expected_token == f"host:{probe.output}#kb=1792929600:1"
+    probe.module._PID_BIRTH_TOKEN_CACHE.clear()
+    probe.failure = failure
+    assert probe.module.capture_process_birth_token(321) == ""
+    assert (321, "1792929600:1") not in probe.module._PID_BIRTH_TOKEN_CACHE
+    assert probe.module._process_instance_terminated(321, expected_token) is False
+    probe.failure = None
+    recovered_token = probe.module.capture_process_birth_token(321)
+    assert recovered_token == expected_token
+    assert probe.module._same_process(321, expected_token) is True
+    assert probe.module._process_instance_terminated(321, expected_token) is False
+    probe.birth = "1792929600:2"
+    assert probe.module._same_process(321, expected_token) is False
+    assert probe.module._process_instance_terminated(321, expected_token) is True
+
+
+# LLM: 原通知活性入口仍传入store_birth秒级投影；基础文本不同时只能重采完整身份，ps不可用时抛观察错误而非判死。
+# 函数用途: 验证微秒token兼容旧投影调用方，同时拒绝该投影掩盖的同秒复用。
+@pytest.mark.parametrize("ps_denied", [False, True])
+def test_native_microsecond_identity_rechecks_legacy_kernel_projection(native_process_probe, ps_denied):
+    probe = native_process_probe
+    token = probe.module.capture_process_birth_token(321)
+    legacy = "host:" + probe.output
+    assert probe.module._birth_tokens_match(token, legacy) is True
+    probe.module._PID_BIRTH_TOKEN_CACHE.clear()
+    probe.failure = PermissionError("ps denied") if ps_denied else None
+    if ps_denied:
+        with pytest.raises(OSError, match="native process birth observation unavailable"):
+            probe.module._birth_token_matches(321, token, "host:1792929600")
+        return
+    assert probe.module._birth_token_matches(321, token, "host:1792929600") is True
+    probe.birth = "1792929600:2"
+    assert probe.module._birth_token_matches(321, token, "host:1792929600") is False
+
+
+# LLM: 已记录微秒身份后内核拒读是观察缺口；不得发送信号，也不得把不确定匹配取反成死亡。
+# 函数用途: 保留PID存活且ps正常时，微秒读取丢失的两条安全边界。
+@pytest.mark.parametrize("failure", ["unknown", "error"])
+def test_native_microsecond_observation_loss_does_not_prove_exit(native_process_probe, monkeypatch, failure):
+    probe = native_process_probe
+    token = probe.module.capture_process_birth_token(321)
+    monkeypatch.setattr(probe.module.os, "kill", lambda pid, sig: None)
+    if failure == "unknown":
+        probe.birth = None
+    else:
+        # LLM: 只让出生探针抛观察错误，保留ps成功与内核非僵尸事实。
+        # 函数用途: 注入微秒身份查询失败。
+        def unavailable(pid):
+            raise OSError("kernel birth unavailable")
+
+        monkeypatch.setattr(probe.native, "process_birth", unavailable)
+    assert probe.module._same_process(321, token) is False
+    assert probe.module._process_instance_terminated(321, token) is False
+    with pytest.raises(OSError):
+        probe.module._birth_token_matches(321, token, "host:" + probe.output)
+
+
+# LLM: 没有完整内核出生身份或run已被替换时，ps失败仍是未知，不能伪造权威身份。
+# 函数用途: 守住原生回退启用条件和monkeypatch边界。
+@pytest.mark.parametrize("unavailable", ["kernel", "patched_run"])
+def test_native_birth_oserror_without_authority_stays_unknown(native_process_probe, monkeypatch, unavailable):
+    probe = native_process_probe
+    probe.failure = PermissionError("ps denied")
+    if unavailable == "kernel":
+        probe.birth = None
+    else:
+        monkeypatch.setattr(probe.module, "_DEFAULT_SUBPROCESS_RUN", object())
+    assert probe.module.capture_process_birth_token(321) == ""
+    assert probe.module._PID_BIRTH_TOKEN_CACHE == {}
+    assert len(probe.calls) == 1
+
+
+# LLM: 覆盖容量外新实例与被淘汰实例重查，不用空缓存数量假定淘汰正确。
+# 函数用途: 验证缓存上限和FIFO淘汰。
+def test_native_birth_cache_capacity_is_2048(native_process_probe):
+    probe = native_process_probe
+    for pid in range(1, 2050):
+        assert probe.module.capture_process_birth_token(pid).startswith("host:")
+    assert len(probe.module._PID_BIRTH_TOKEN_CACHE) == 2048
+    assert (1, probe.birth) not in probe.module._PID_BIRTH_TOKEN_CACHE
+    assert probe.module.capture_process_birth_token(2049)
+    assert len(probe.calls) == 2049
+    assert probe.module.capture_process_birth_token(1)
+    assert len(probe.calls) == 2050
+
+
+# LLM: 内核未知不缓存；ps超时/空响应/非零退出仍保留未知，与有权威kernel的OSError回退分开验证。
+# 函数用途: 核对未知结果不入birth缓存及恢复后重试。
+@pytest.mark.parametrize("failure", ["kernel_unknown", "kernel_error", "timeout", "empty", "exit"])
+def test_native_birth_unknown_not_cached_and_recovery_retries(native_process_probe, monkeypatch, failure):
+    probe = native_process_probe
+    if failure == "kernel_unknown":
+        probe.birth = None
+    elif failure == "kernel_error":
+        # LLM: 故障发生在内核出生查询，不能误写空出生缓存。
+        # 函数用途: 注入内核探针异常。
+        def unavailable(pid):
+            raise OSError("kernel unavailable")
+        monkeypatch.setattr(probe.native, "process_birth", unavailable)
+    elif failure == "timeout":
+        probe.failure = probe.module.subprocess.TimeoutExpired("ps", 1)
+    elif failure == "empty":
+        probe.output = ""
+    else:
+        probe.code = 1
+    for _ in range(2):
+        result = probe.module.capture_process_birth_token(321)
+        assert bool(result) is (failure in {"kernel_unknown", "kernel_error"})
+    assert len(probe.calls) == 2
+    assert not probe.module._PID_BIRTH_TOKEN_CACHE
+    probe.birth, probe.failure, probe.output, probe.code = "1792929600:1", None, "recovered", 0
+    monkeypatch.setattr(probe.native, "process_birth", lambda pid: probe.birth)
+    assert probe.module.capture_process_birth_token(321) == "host:recovered#kb=1792929600:1"
+    assert probe.module.capture_process_birth_token(321) == "host:recovered#kb=1792929600:1"
+    assert len(probe.calls) == 3
+
+
+# LLM: 八个真实线程共享事件屏障，观察相同miss的采集次数而非顺序调用假并发。
+# 函数用途: 验证并发探针合并一次ps。
+@pytest.mark.parametrize("entry,output,expected", [
+    ("capture_process_birth_token", "birth", "host:birth#kb=1792929600:1"),
+    ("_process_parent_map", "321 1\n", ({321: 1}, True)),
+    ("_process_group_map", "321 321\n", ({321: 321}, True)),
+])
+def test_native_probe_concurrent_misses_share_one_ps(native_process_probe, monkeypatch, entry, output, expected):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    probe = native_process_probe
+    probe.output = output
+    run = probe.module.subprocess.run
+    entered, release = threading.Event(), threading.Event()
+
+    # LLM: 保留ps替身结果，在可控制的采集窗口阻塞并发请求。
+    # 函数用途: 打开并发miss竞争窗口。
+    def slow_run(argv, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(probe.module.subprocess, "run", slow_run)
+    monkeypatch.setattr(probe.module, "_DEFAULT_SUBPROCESS_RUN", slow_run)
+    operation = getattr(probe.module, entry)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(operation, 321) if entry == "capture_process_birth_token" else pool.submit(operation)
+                   for _ in range(8)]
+        try:
+            assert entered.wait(3)
+        finally:
+            release.set()
+        assert [f.result(timeout=3) for f in futures] == [expected] * 8
+    assert len(probe.calls) == 1
+
+
+@pytest.mark.parametrize("entry", ["_process_parent_map", "_process_group_map"])
+# LLM: 精确观察249ms命中和250ms过期；调用者改副本不能改共享缓存，False完整性不得升级。
+# 函数用途: 验证关系缓存期限、隔离与缺口保留。
+def test_native_relation_cache_ttl_copy_and_incomplete(native_process_probe, monkeypatch, entry):
+    probe = native_process_probe
+    now = [10.0]
+    monkeypatch.setattr(probe.module.time, "monotonic", lambda: now[0])
+    probe.output = "321 1\nbad row\n"
+    operation = getattr(probe.module, entry)
+    first, complete = operation()
+    assert first == {321: 1} and complete is False
+    first[999] = 123
+    now[0] = 10.249
+    assert operation() == ({321: 1}, False)
+    assert len(probe.calls) == 1
+    probe.output = "321 2\n"
+    now[0] = 10.25
+    assert operation() == ({321: 2}, True)
+    assert len(probe.calls) == 2
+
+
+@pytest.mark.parametrize("entry", ["_process_parent_map", "_process_group_map"])
+# LLM: 失败观察可在短窗口合并，但到期必须重试且不能伪造完整性。
+# 函数用途: 验证失败关系表到期后可恢复。
+def test_native_relation_cache_failure_expires(native_process_probe, monkeypatch, entry):
+    probe = native_process_probe
+    now = [10.0]
+    monkeypatch.setattr(probe.module.time, "monotonic", lambda: now[0])
+    operation = getattr(probe.module, entry)
+    probe.failure = PermissionError("ps denied")
+    assert operation() == ({}, False)
+    assert operation() == ({}, False)
+    assert len(probe.calls) == 1
+    probe.failure, probe.output, now[0] = None, "321 2\n", 10.25
+    assert operation() == ({321: 2}, True)
+
+
+# LLM: 即使原生缓存已预热，替换run后仍需看到所有旧ps调用与结果。
+# 函数用途: 保持现有monkeypatch观察合同。
+def test_monkeypatched_run_bypasses_warm_native_caches(native_process_probe, monkeypatch):
+    probe = native_process_probe
+    assert probe.module.capture_process_birth_token(321)
+    probe.output = "321 1\n"
+    assert probe.module._process_parent_map() == ({321: 1}, True)
+    assert probe.module._process_group_map() == ({321: 1}, True)
+    calls = []
+
+    # LLM: 不同步更改身份哨兵，确保优化门真实识别替身。
+    # 函数用途: 记录应绕过缓存的旧探针调用。
+    def patched(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="Z" if "stat=" in argv else
+                               "321 2\n" if "-axo" in argv else "fresh birth")
+
+    monkeypatch.setattr(probe.module.subprocess, "run", patched)
+    assert probe.module.capture_process_birth_token(321) == "host:fresh birth"
+    assert probe.module._process_is_zombie(321) is True
+    assert probe.module._process_parent_map() == ({321: 2}, True)
+    assert probe.module._process_group_map() == ({321: 2}, True)
+    assert len(calls) == 4
+
+
+# LLM: 内核与ps均失败只能得到未知，不能因此发布退出或清理成功。
+# 函数用途: 验证观察失败保守返回未终止。
+def test_native_zombie_kernel_error_falls_back_and_unknown_does_not_prove_exit(native_process_probe, monkeypatch):
+    probe = native_process_probe
+
+    # LLM: 直接抛出原生观察错误，测试必须继续进入ps回退。
+    # 函数用途: 注入终止探针故障。
+    def unavailable(pid):
+        raise OSError("native observation unavailable")
+
+    monkeypatch.setattr(probe.native, "kernel_terminated", unavailable)
+    monkeypatch.setattr(probe.module.os, "kill", lambda pid, signum: None)
+    # 终止状态和出生身份均未知；有效birth的ps拒绝回退由独立正反例覆盖。
+    probe.birth = None
+    probe.failure = PermissionError("ps denied")
+    assert probe.module._process_instance_terminated(321, "host:original") is False
+    assert not probe.module._PID_BIRTH_TOKEN_CACHE
+    assert len(probe.calls) == 2
+
+
+@pytest.mark.parametrize("platform", ["proc", "windows"])
+# LLM: Linux和Windows不得调用新原生观察或使用新缓存，替身失败能暴露入口越界。
+# 函数用途: 保护原有平台分支。
+def test_native_optimizations_do_not_expand_platform_scope(native_process_probe, monkeypatch, platform):
+    probe = native_process_probe
+
+    # LLM: 此入口在被测平台必须完全不可达。
+    # 函数用途: 将平台分支越界转为明确失败。
+    def forbidden(pid):
+        pytest.fail("Linux/Windows must not use the new native observer")
+
+    monkeypatch.setattr(probe.native, "process_birth", forbidden)
+    monkeypatch.setattr(probe.native, "kernel_terminated", forbidden)
+    if platform == "proc":
+        old_dir = Path.is_dir
+        monkeypatch.setattr(Path, "is_dir", lambda p: True if p == Path("/proc") else old_dir(p))
+    else:
+        monkeypatch.setattr(probe.module, "_IS_WINDOWS", True)
+    assert probe.module._native_posix_probe_enabled() is False
+    assert probe.module.capture_process_birth_token(321)
+    assert probe.module.capture_process_birth_token(321)
+    assert len(probe.calls) == 2
+    assert not probe.module._PID_BIRTH_TOKEN_CACHE
+    assert probe.module._process_is_zombie(321) is False
+    if platform == "windows":
+        probe.output = "321 1\n"
+        for operation in (probe.module._process_parent_map, probe.module._process_group_map):
+            assert operation() == ({321: 1}, True)
+            assert operation() == ({321: 1}, True)
+        assert not probe.module._PS_RELATION_CACHE
+        assert len(probe.calls) == 6
+
+
+# LLM: 只复用birth文本，内核状态每轮重新观察，转为终止后必须立即可见。
+# 函数用途: 防止把身份缓存变成存活缓存。
+def test_native_instance_completion_path_reuses_identity_without_caching_liveness(native_process_probe, monkeypatch):
+    probe = native_process_probe
+    monkeypatch.setattr(probe.module.os, "kill", lambda pid, signum: None)
+    token = probe.module.capture_process_birth_token(321)
+    for _ in range(10):
+        assert probe.module._process_instance_terminated(321, token) is False
+    assert len(probe.calls) == 1
+    probe.state = True
+    assert probe.module._process_instance_terminated(321, token) is True
+    assert len(probe.calls) == 1
+
+
+# LLM: 父表和组表不共享错误的键或内容，相邻读取不得相互覆盖。
+# 函数用途: 验证两种关系表独立缓存。
+def test_native_relation_parent_group_caches_are_independent(native_process_probe):
+    probe = native_process_probe
+    probe.output = "321 1\n"
+    assert probe.module._process_parent_map() == ({321: 1}, True)
+    probe.output = "321 321\n"
+    assert probe.module._process_group_map() == ({321: 321}, True)
+    assert probe.module._process_parent_map() == ({321: 1}, True)
+    assert len(probe.calls) == 2
+
+
+@pytest.mark.parametrize("entry", ["_process_parent_map", "_process_group_map"])
+# LLM: 慢采集完成后才计250ms，否则并发等待者会立即再次fork。
+# 函数用途: 验证缓存期限从采集结束起算。
+def test_native_relation_cache_window_starts_when_ps_finishes(native_process_probe, monkeypatch, entry):
+    probe = native_process_probe
+    now = [10.0]
+    monkeypatch.setattr(probe.module.time, "monotonic", lambda: now[0])
+    run = probe.module.subprocess.run
+    probe.output = "321 1\n"
+
+    # LLM: 仅推进受控时钟，不做真实sleep或改变采集结果。
+    # 函数用途: 模拟耗时超过缓存窗口的ps。
+    def slow_run(argv, **kwargs):
+        now[0] += 1.0
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(probe.module.subprocess, "run", slow_run)
+    monkeypatch.setattr(probe.module, "_DEFAULT_SUBPROCESS_RUN", slow_run)
+    operation = getattr(probe.module, entry)
+    assert operation() == ({321: 1}, True)
+    assert operation() == ({321: 1}, True)
+    assert len(probe.calls) == 1

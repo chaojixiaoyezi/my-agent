@@ -1,5 +1,5 @@
 # LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；模型选择变化必须逐次前进且保留显式覆盖版本，不增加状态源。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
-# 模块用途: 保存会话元数据与通道绑定，原子更新保留并发状态；新默认绑定记录真实初始化事实。
+# 模块用途: 保存会话元数据、目录与通道绑定；目录切换在原锁内CAS，同目录筛选不创建独立索引。
 from __future__ import annotations
 
 import copy
@@ -223,7 +223,7 @@ def _get_or_create_bound_thread(store, request: dict, *, blocking: bool = True) 
 
 # LLM: 原文件事务内校验身份与选择版本；omit_empty 的已知字段清空时移除旧键，未知扩展仍保持原样。
 #   由 ThreadStore.update_atomic 在原锁内调用；不读写独立状态，不让扩展合并复活已移除的会话方法。联测 store/commands。
-# 函数用途: 校验并合并线程更新；模型选择时间只在原选择版本提交时更新，其余更新保留旧时间。
+# 函数用途: 校验并合并线程更新；拒绝迟到目录版本，模型选择时间仅随原选择版本提交。
 # LLM: updater与B1公共修订/原回执合并同在canonical文件锁内；未接入插件的线程不增加元数据或改变旧写入规则。
 # 函数用途: 合并原子线程更新并保住既有宿主CAS与插件幂等字段。
 def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> dict:
@@ -237,6 +237,7 @@ def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> di
     if updated.thread_id != thread_id:
         raise DataCorruptionError(f"conversation thread updater changed identity: {thread_id}")
     _validate_model_selection_update(thread, updated)
+    updated = _validate_workspace_update(thread, updated)
     updated = replace(updated, model_selection_selected_at=(
         now() if updated.model_selection_revision != thread.model_selection_revision else thread.model_selection_selected_at
     ))
@@ -244,6 +245,17 @@ def _apply_thread_update(payload: dict, thread_id: str, updater: Callable) -> di
     serialized = updated.to_dict()
     omitted = {item.name for item in fields(updated) if item.metadata.get("omit_empty") and item.name not in serialized}
     return {**{key: value for key, value in payload.items() if key not in omitted}, **serialized}
+
+
+# LLM: 在原线程文件锁中统一守住目录CAS，兼容旧入口不显式递增的最新状态更新；不授权路径或新建索引。
+# 函数用途: 拒绝回退/跳跃的目录修订，并为实际目录变化递增版本。
+def _validate_workspace_update(previous: ConversationThread, updated: ConversationThread) -> ConversationThread:
+    if updated.revision < previous.revision or updated.revision > previous.revision + 1:
+        raise RuntimeError("WORKSPACE_REVISION_CONFLICT")
+    fields = ("cwd", "workspace_root", "runtime_workspace_roots")
+    if updated.revision == previous.revision and any(getattr(previous, name) != getattr(updated, name) for name in fields):
+        return replace(updated, revision=previous.revision + 1)
+    return updated
 
 
 # LLM: 只对已登记插件状态启用且revision不得缺省；普通metadata替换保留来源/回执，实际变更单步推进原修订。
@@ -271,7 +283,7 @@ def _preserve_plugin_thread_state(before: dict | None, updated: ConversationThre
 
 
 # LLM: 原线程元数据与通道绑定唯一存储；身份校验与扩展合并在类外小函数，仍在同一文件锁内守住 CAS，不建立第二状态源。
-# 类用途: 保存线程和通道绑定，防止迟到更新回退模型选择；默认模型只初始化新线程。
+# 类用途: 保存线程、目录与通道绑定，防止迟到更新回退模型/目录；默认模型只初始化新线程。
 class ThreadStore:
     # LLM: 同一 ConversationStorage 与默认解析器由组装入口注入；构造不读写线程或通道索引。
     # 函数用途: 绑定线程文件目录和新会话模型来源，已有会话不会因构造重新选择模型。
@@ -280,6 +292,21 @@ class ThreadStore:
     ) -> None:
         self.storage = storage
         self.model_default = model_default
+
+    # LLM: 创建无通道绑定的主线程，沿原原子创建钩子；上层负责授权，索引不会切走源会话。
+    # 函数用途: 创建目录独立线程并冻结默认模型，不创建项目文件。
+    def create(self, *, canonical_user_id: str = "", title: str = "", workspace_root: str = "",
+               cwd: str = "", owner_id: str = "", owner_home: str = "",
+               runtime_workspace_roots: tuple[str, ...] = ()) -> ConversationThread:
+        return _create_workspace_thread(self, canonical_user_id=canonical_user_id, title=title,
+            workspace_root=workspace_root, cwd=cwd, owner_id=owner_id, owner_home=owner_home,
+            runtime_workspace_roots=runtime_workspace_roots)
+
+    # LLM: 上层负责owner授权；此入口检查现存目录，在原锁内核目录revision，不修改其它线程或索引。
+    # 函数用途: 同时切换cwd、workspace_root与运行根，迟到目录更新明确报冲突。
+    def switch_workspace(self, thread_id: str, workspace_dir: str, *,
+                         expected_revision: int | None = None) -> ConversationThread:
+        return _switch_thread_workspace(self, thread_id, workspace_dir, expected_revision=expected_revision)
 
     # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: 通道绑定的查找与创建共用短事务锁；不能与单文件索引锁同路径，不锁模型执行或串行不同会话。
@@ -349,7 +376,7 @@ class ThreadStore:
     # LLM: Channel binding updates must merge into the latest durable thread atomically so a
     # delayed adapter request cannot revert compact, task indexes, or the sticky workspace.
     # initialize_workspace 仅补齐空目录，必须在同一原子更新中判断，不能覆盖并发绑定或既有执行目录。
-    # 函数用途: 为同一会话增加或刷新通道绑定，同时保留其他并发更新的会话状态。
+    # 函数用途: 刷新通道与目录绑定并保留并发状态，只在实际改目录时前进目录修订。
     def bind_channel(self, request: dict, *, blocking: bool = True) -> ConversationThread:
         thread_id = str(request.get("thread_id") or "")
         self.require(thread_id)
@@ -375,6 +402,10 @@ class ThreadStore:
                     if request.get("initialize_workspace") and latest.cwd
                     else requested_cwd or latest.cwd
                 ),
+                workspace_root=(latest.workspace_root if request.get("initialize_workspace") and latest.cwd
+                                else str(request.get("workspace_root") or requested_cwd or latest.workspace_root)),
+                revision=latest.revision + bool(requested_cwd and requested_cwd != latest.cwd
+                                               and not (request.get("initialize_workspace") and latest.cwd)),
                 runtime_workspace_roots=(
                     latest.runtime_workspace_roots
                     if request.get("initialize_workspace") and latest.cwd
@@ -388,27 +419,22 @@ class ThreadStore:
         return updated
 
     # LLM: store_threads 的持久化合同：返回按活动时间排序的线程列表，需要坏账信息时调用 list_report；修改须同步本领域调用方与存储回归。
-    # 函数用途: 返回按活动时间排序的线程列表，需要坏账信息时调用 list_report。
-    def list(self, *, limit: int = 100) -> list[ConversationThread]:
-        threads, _load_errors = self.list_report(limit=limit)
+    # 函数用途: 返回活动时间排序的线程，目录过滤先于limit；读取错误仍交list_report。
+    def list(self, *, limit: int = 100, workspace_dir: str | None = None) -> list[ConversationThread]:
+        threads, _load_errors = self.list_report(limit=limit, workspace_dir=workspace_dir)
         return threads
 
+    # LLM: 公开名称与原list共享只读扫描，不产生另一套索引。
+    # 函数用途: 为目录会话调用方按工作区列出线程。
+    def list_threads(self, *, limit: int = 100, workspace_dir: str | None = None) -> list[ConversationThread]:
+        return self.list(limit=limit, workspace_dir=workspace_dir)
+
     # LLM: store_threads 的持久化合同：扫描原线程目录并汇总读取错误，只排序投影，不修复或写盘；修改须同步本领域调用方与存储回归。
-    # 函数用途: 扫描原线程目录并汇总读取错误，只排序投影，不修复或写盘。
+    # 函数用途: 扫描原线程，在limit前按规范目录筛选并保留全部坏账，不修复或写盘。
     def list_report(
-        self, *, limit: int = 100
+        self, *, limit: int = 100, workspace_dir: str | None = None
     ) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
-        threads: list[ConversationThread] = []
-        load_errors: list[dict[str, Any]] = []
-        for path in sorted(self.storage.threads_dir.glob("*.json")):
-            thread, error = self._load_path_report(path)
-            if thread is not None:
-                threads.append(thread)
-            if error is not None:
-                load_errors.append(error)
-        threads.sort(key=lambda item: item.updated_at)
-        limited = threads if limit <= 0 else threads[-limit:]
-        return limited, load_errors
+        return _workspace_thread_report(self, limit=limit, workspace_dir=workspace_dir)
 
     # LLM: A summary owns only summary and activity time; it must never replace a stale full thread.
     # 函数用途: 原子更新会话摘要，不覆盖同时发生的任务目录、压缩游标或通道变化。
@@ -620,6 +646,7 @@ class ThreadStore:
                 "channel_conversation_id": kwargs.get("channel_conversation_id", ""),
                 "channel_user_id": kwargs.get("channel_user_id", ""),
                 "cwd": kwargs.get("cwd", ""),
+                "workspace_root": kwargs.get("workspace_root", ""),
                 "runtime_workspace_roots": kwargs.get("runtime_workspace_roots", ()),
                 "now": kwargs.get("now"),
             },
@@ -628,7 +655,7 @@ class ThreadStore:
 
     # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
     # LLM: 新 thread 同次保存真实默认绑定事件；没有默认引用仍为未知，既有线程不补造初始化或手动事件。
-    # 函数用途: 创建会话并记录初始模型版本，再登记原通道索引；后续默认变化只影响新会话。
+    # 函数用途: 创建会话并冻结初始模型和目录，再登记通道索引；既有线程不重新选择。
     def _create(self, kwargs: dict, *, blocking: bool = True) -> ConversationThread:
         current = now(kwargs.get("now"))
         initial_model = self.model_default() if self.model_default is not None else ""
@@ -642,6 +669,10 @@ class ThreadStore:
             model_selection_revision=1 if initial_model else 0,
             model_selection_source="default" if initial_model else "unknown",
             title=kwargs.get("title", ""),
+            cwd=str(kwargs.get("cwd") or kwargs.get("workspace_root") or ""),
+            workspace_root=str(kwargs.get("workspace_root") or kwargs.get("cwd") or ""),
+            runtime_workspace_roots=normalized_runtime_workspace_roots(kwargs.get("runtime_workspace_roots"))
+            or ((str(kwargs.get("workspace_root") or kwargs.get("cwd")),) if kwargs.get("workspace_root") or kwargs.get("cwd") else ()),
             created_at=current,
             updated_at=current,
         )
@@ -674,6 +705,62 @@ class ThreadStore:
         thread_id: str = "",
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         return _read_thread_record_report(path, thread_id=thread_id)
+
+
+# LLM: 复用原目录扫描及错误合同，工作区归一化只用于匹配；不生成索引、锁或迁移记录。
+# 函数用途: 先筛选同目录线程再按活动时间截取列表，同时保留全部读取错误。
+def _workspace_thread_report(threads: ThreadStore, *, limit: int,
+                             workspace_dir: str | None) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
+    selected: list[ConversationThread] = []
+    load_errors: list[dict[str, Any]] = []
+    root = str(Path(workspace_dir).expanduser().resolve(strict=False)) if workspace_dir is not None else None
+    for path in sorted(threads.storage.threads_dir.glob("*.json")):
+        thread, error = threads._load_path_report(path)
+        if thread is not None and (root is None or (thread.workspace_root
+                and str(Path(thread.workspace_root).expanduser().resolve(strict=False)) == root)):
+            selected.append(thread)
+        if error is not None:
+            load_errors.append(error)
+    selected.sort(key=lambda item: item.updated_at)
+    return (selected if limit <= 0 else selected[-limit:]), load_errors
+
+
+# LLM: 无通道创建仍用原原子写钩子；实现移到类外以保持ThreadStore尺寸，不增加状态源。
+# 函数用途: 验证目录并保存独立主会话，不更新通道或最近用户索引。
+def _create_workspace_thread(threads: ThreadStore, *, canonical_user_id: str, title: str,
+                             workspace_root: str, cwd: str, owner_id: str, owner_home: str,
+                             runtime_workspace_roots: tuple[str, ...]) -> ConversationThread:
+    from .workspace_context import existing_workspace_directory
+
+    root = str(existing_workspace_directory(workspace_root or cwd)) if workspace_root or cwd else ""
+    model = threads.model_default() if threads.model_default is not None else ""
+    current = now(None)
+    return create_thread_atomic(threads, ConversationThread(
+        thread_id=new_id("thread"), canonical_user_id=canonical_user_id, title=title,
+        owner_id=owner_id, owner_home=owner_home, cwd=root, workspace_root=root,
+        runtime_workspace_roots=runtime_workspace_roots or ((root,) if root else ()),
+        model_profile_id=model, model_selection_revision=1 if model else 0,
+        model_selection_source="default" if model else "unknown", created_at=current, updated_at=current,
+    ))
+
+
+# LLM: 授权归上层workspace_context；原锁内读取最新目录版本，避免两个切换都持旧版本成功。
+# 函数用途: 检查目录并用原线程事务提交目录修订，不修改其他线程和运行绑定。
+def _switch_thread_workspace(threads: ThreadStore, thread_id: str, workspace_dir: str, *,
+                             expected_revision: int | None) -> ConversationThread:
+    from .workspace_context import existing_workspace_directory
+
+    root = str(existing_workspace_directory(workspace_dir))
+
+    # LLM: 只更新目录字段与目录修订，其它并发字段沿原记录保留。
+    # 函数用途: 在同一文件锁内核对CAS并替换目录。
+    def apply(thread: ConversationThread) -> ConversationThread:
+        if expected_revision is not None and (type(expected_revision) is not int or thread.revision != expected_revision):
+            raise RuntimeError("WORKSPACE_REVISION_CONFLICT")
+        return replace(thread, cwd=root, workspace_root=root, runtime_workspace_roots=(root,),
+                       revision=thread.revision + 1, updated_at=max(thread.updated_at, now(None)))
+
+    return threads.update_atomic(thread_id, apply)
 
 
 # LLM: 只在代次未推进时写 compact_vision_failed_generation=当前代次；不碰 consecutive_failures/failure_code，因此不进熔断。

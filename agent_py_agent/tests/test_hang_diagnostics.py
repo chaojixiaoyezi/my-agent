@@ -8,6 +8,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -154,3 +156,185 @@ def test_diagnostics_without_posix_signal_apis(tmp_path, monkeypatch, diagnostic
     hd.close()
     assert hd._handle is None and hd._installed_root is None
     assert hd._gc_probe not in gc.callbacks
+
+
+# LLM: 只替代C计时器出口并明确强制原生分支，晋升线程、Condition和真实单调时钟照常运行。
+# 函数用途: 在不向pytest进程导出栈的前提下观察延迟晋升。
+@pytest.fixture
+def deferred_watchdog(tmp_path, monkeypatch, diagnostic_calls):
+    hd.install(tmp_path, register_signal=False)
+    calls, armed = diagnostic_calls, threading.Event()
+    calls.clear()
+
+    # LLM: 只观察替身C出口的参数和代次，不创建真实C定时器。
+    # 函数用途: 记录一次晋升并唤醒测试等待者。
+    def record_arm(seconds, **kwargs):
+        calls.append(("arm", seconds, kwargs))
+        armed.set()
+
+    monkeypatch.setattr(hd.faulthandler, "dump_traceback_later", record_arm)
+    monkeypatch.setattr(hd, "_is_native_faulthandler", lambda: True, raising=False)
+    monkeypatch.setattr(hd, "_DEFERRED_C_WATCHDOG_PROMOTE_SECONDS", 0.03, raising=False)
+    yield calls, armed
+    hd.close()
+
+
+# LLM: 紧密快速tick仅观察C出口零调用，真实线程路径另由独立子进程覆盖。
+# 函数用途: 防止快速派发重新创建或取消C定时器。
+def test_deferred_fast_ticks_never_create_or_cancel_c_watchdog(deferred_watchdog):
+    calls, _armed = deferred_watchdog
+    for _ in range(500):
+        hd.arm_stall_watchdog(120)
+        hd.disarm_stall_watchdog()
+    hd.close()
+    assert calls == []
+    promoter = hd._stall_promoter
+    assert promoter is not None and promoter.is_alive() and promoter.daemon
+
+
+# LLM: 观察实际promoter异步晋升，C替身必须收到剩余期限而非原全长超时。
+# 函数用途: 验证慢tick仅晋升一次并正确取消。
+def test_deferred_tick_promotes_remaining_deadline_once(deferred_watchdog):
+    calls, armed = deferred_watchdog
+    hd.arm_stall_watchdog(2)
+    assert not armed.wait(0.005)
+    assert armed.wait(1)
+    assert len(calls) == 1 and calls[0][0] == "arm"
+    assert 0 < calls[0][1] <= 1.98
+    assert calls[0][2] == {"repeat": False, "file": hd._handle, "exit": False}
+    hd.disarm_stall_watchdog()
+    hd.disarm_stall_watchdog()
+    hd.close()
+    assert [call[0] for call in calls] == ["arm", "cancel"]
+
+
+# LLM: 以事件确认晋升，旧代期限不能覆盖重新arm的当前代。
+# 函数用途: 验证重设看门狗丢弃旧任务。
+def test_deferred_rearm_cannot_promote_stale_generation(deferred_watchdog):
+    calls, armed = deferred_watchdog
+    with hd._lifecycle_lock:
+        hd.arm_stall_watchdog(2)
+        hd.disarm_stall_watchdog()
+        hd.arm_stall_watchdog(5)
+        assert calls == []
+    assert armed.wait(1)
+    assert len(calls) == 1 and 4 < calls[0][1] < 5
+
+
+# LLM: 同锁确认idle并安装探针后撤销，防止把安装前的空闲wait误认成被测唤醒；仍断言下次有限合并窗口。
+# 函数用途: 验证通知已消耗也保留合并窗口。
+def test_deferred_cancel_before_wakeup_retains_coalescing_window(monkeypatch, deferred_watchdog):
+    _calls, _armed = deferred_watchdog
+    hd.arm_stall_watchdog(120)
+    hd.disarm_stall_watchdog()
+    promoter = hd._stall_promoter
+    deadline, ready = time.monotonic() + 1, threading.Event()
+    waits, reentered = [], threading.Event()
+    original = promoter.condition.wait
+
+    # LLM: 记录同一Condition的下一次等待，不替换实际释放锁和阻塞行为。
+    # 函数用途: 提供可确定的等待窗口观察点。
+    def observe_wait(timeout=None):
+        waits.append(timeout)
+        reentered.set()
+        return original(timeout)
+
+    while True:
+        with hd._lifecycle_lock:
+            if promoter.idle:
+                monkeypatch.setattr(promoter.condition, "wait", observe_wait)
+                hd.arm_stall_watchdog(120)
+                hd.disarm_stall_watchdog()
+                break
+        assert time.monotonic() < deadline
+        ready.wait(0.001)
+    assert reentered.wait(1)
+    assert waits[0] == hd._DEFERRED_C_WATCHDOG_PROMOTE_SECONDS
+
+
+# LLM: 重新安装使用新fd但复用唯一daemon，旧句柄不能被晚到晋升引用。
+# 函数用途: 验证关闭和重装的句柄生命周期。
+def test_deferred_close_reinstall_reuses_thread_and_new_handle(tmp_path, deferred_watchdog):
+    calls, armed = deferred_watchdog
+    hd.arm_stall_watchdog(120)
+    old, promoter = hd._handle, hd._stall_promoter
+    hd.close()
+    assert calls == [] and old.closed
+    assert hd.install(tmp_path / "new", register_signal=False)
+    hd.arm_stall_watchdog(2)
+    assert armed.wait(1)
+    assert hd._stall_promoter is promoter
+    assert calls[0][2]["file"] is hd._handle and hd._handle is not old
+
+
+# LLM: 取消失败时C仍可能借用fd，必须保留句柄而不是为了关闭成功强行释放。
+# 函数用途: 验证取消失败保持借用句柄安全。
+def test_deferred_failed_cancel_keeps_c_borrowed_handle(monkeypatch, deferred_watchdog):
+    calls, armed = deferred_watchdog
+    hd.arm_stall_watchdog(2)
+    assert armed.wait(1)
+    handle = hd._handle
+
+    # LLM: 精确模拟C取消抛错，不改变其仍持有句柄的前提。
+    # 函数用途: 注入取消失败。
+    def failed_cancel():
+        raise RuntimeError("cannot release C timer")
+
+    monkeypatch.setattr(hd.faulthandler, "cancel_dump_traceback_later", failed_cancel)
+    hd.close()
+    assert hd._handle is handle and not handle.closed
+    monkeypatch.setattr(hd.faulthandler, "cancel_dump_traceback_later", lambda: calls.append(("cancel",)))
+    hd.close()
+    assert handle.closed and hd._handle is None
+
+
+# LLM: 子进程保留真实faulthandler身份，用profile观察C调用而非替换出口；只在临时日志导出本子进程线程。
+# 函数用途: 真正验证快速tick零C线程调用，以及默认一秒窗口后的C栈导出。
+def test_real_child_deferred_native_watchdog(tmp_path):
+    source = '''
+import faulthandler, json, sys, threading, time
+from pathlib import Path
+from agent_py_agent.agent.gateway_parts import hang_diagnostics as hd
+root = Path(sys.argv[1])
+assert hd.install(root, register_signal=False)
+native_arm, native_cancel = faulthandler.dump_traceback_later, faulthandler.cancel_dump_traceback_later
+calls = []
+def profile(frame, event, function):
+    if event == "c_call":
+        if function is native_arm:
+            calls.append("arm")
+        elif function is native_cancel:
+            calls.append("cancel")
+sys.setprofile(profile)
+threading.setprofile(profile)
+try:
+    for _ in range(500):
+        hd.arm_stall_watchdog(120)
+        hd.disarm_stall_watchdog()
+    hd.close()
+    assert calls == [], calls
+    promoter = hd._stall_promoter
+    assert promoter.is_alive() and promoter.daemon
+    assert hd.install(root, register_signal=False)
+    hd.arm_stall_watchdog(1.1)
+    assert hd._stall_promoter is promoter
+    dump, deadline = root / hd.GATEWAY_HANG_DUMP_FILENAME, time.monotonic() + 4
+    while True:
+        text = dump.read_text()
+        if "Timeout (" in text and "most recent call first" in text and "in <module>" in text:
+            break
+        assert time.monotonic() < deadline, text
+        time.sleep(0.01)
+    hd.close()
+    assert calls == ["arm", "cancel"], calls
+    assert len([t for t in threading.enumerate() if t.name == "gateway-stall-promoter"]) == 1
+    print(json.dumps({"fast_ticks": 500, "native_calls": calls, "promoters": 1}))
+finally:
+    hd.close()
+    sys.setprofile(None)
+    threading.setprofile(None)
+'''
+    result = subprocess.run([sys.executable, "-c", source, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == {"fast_ticks": 500, "native_calls": ["arm", "cancel"], "promoters": 1}

@@ -19,13 +19,14 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from .bootstrap import configure_stdio, default_config_path
-from .chat_command_parser import add_chat_subcommands
+from .chat_command_parser import add_chat_subcommands, add_workspace_arguments
 
 if TYPE_CHECKING:
     from ..agent.extensions import ExtensionRegistry
 
 
-# LLM: Full parser compatibility remains the authority for every non-interactive command. Keep
+# LLM: 全量解析器在原run注册后补共用目录参数，顶层与子命令均走同一工作区字段，不改其它命令处理器。
+# Full parser compatibility remains the authority for every non-interactive command. Keep
 # registrations unchanged and pass an already loaded extension registry from main().
 # `skills` is the only user entry that may confirm self-learning Skill proposals.
 # `admin-password` / `admin-identities` are the only CLI entries for the IM admin password and bindings.
@@ -65,6 +66,7 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     parser.set_defaults(func=cmd_default)
 
     add_basic_subcommands(subparsers)
+    add_workspace_arguments(subparsers.choices["run"])
     add_bench_model_command(subparsers)
     add_contracts_subcommand(subparsers)
     add_memory_subcommands(subparsers)
@@ -100,7 +102,7 @@ def build_interactive_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# LLM: Root global options are shared by fast and full parsers. Do not add runtime imports here.
+# LLM: 顶层参数和显式目录由完整/轻量解析器复用；不得在注册期导入Agent或初始化状态。
 # 函数用途: 创建两种解析器共用的顶层参数，保证配置路径和普通终端开关语义一致。
 def _build_root_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -117,10 +119,12 @@ def _build_root_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="使用普通终端聊天模式，不进入应用内滚动历史界面",
     )
+    add_workspace_arguments(parser)
     return parser
 
 
-# LLM: This pre-parser only recognizes the default fresh-chat route or explicit built-in
+# LLM: 预解析目录别名只为定位命令，不解释路径或签权；裸--dir启动仍走chat。
+# This pre-parser only recognizes the default fresh-chat route or explicit built-in
 # chat/resume structure. A bare invocation is the same fresh-session contract as `chat`; unknown
 # commands still fall through to the full parser without inspecting natural-language content.
 # 函数用途: 识别“直接运行 my-agent”以及显式 chat/resume，让普通 TUI 启动不加载全部管理命令。
@@ -128,19 +132,22 @@ def _interactive_command(argv: Sequence[str]) -> str:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
     bootstrap.add_argument("--plain", action="store_true")
+    add_workspace_arguments(bootstrap)
     _, remaining = bootstrap.parse_known_args(list(argv))
     if not remaining:
         return "chat"
     return remaining[0] if remaining[0] in {"chat", "resume"} else ""
 
 
-# LLM: The interactive parser requires an explicit subcommand. Inject `chat` only when the
+# LLM: 与路由预解析共用目录别名；只给无命令启动补chat，保留顶层显式目录字段与位置。
+# The interactive parser requires an explicit subcommand. Inject `chat` only when the
 # pre-parser proved that no command remains after root options; never rewrite an unknown route.
 # 函数用途: 给裸启动补上内部 chat 子命令，同时保留 --config/--plain 等顶层参数的位置和含义。
 def _interactive_argv(argv: Sequence[str], command: str) -> list[str]:
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
     bootstrap.add_argument("--plain", action="store_true")
+    add_workspace_arguments(bootstrap)
     _, remaining = bootstrap.parse_known_args(list(argv))
     if remaining or command != "chat":
         return list(argv)

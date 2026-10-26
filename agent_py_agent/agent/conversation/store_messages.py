@@ -1,7 +1,8 @@
 # LLM: 消息追加、幂等提交和游标读取；只显式调用线程校验与活动更新，保留原 JSONL 和 display 边界；保持 canonical 文件、锁和错误报告合同。
-# 模块用途: 消息追加、幂等提交和游标读取；只显式调用线程校验与活动更新，保留原 JSONL 和 display 边界。
+# 模块用途: 消息追加、幂等提交、游标读取与纯分叉复制；分叉只生成新ID，不改原JSONL、时间或活动状态。
 from __future__ import annotations
 
+import copy
 import json
 import os
 from collections.abc import Callable, Iterator
@@ -39,6 +40,15 @@ from .store_layout import ConversationStorage
 _Projected = TypeVar("_Projected")
 _READ_CONTEXT = "conversation.messages.read"
 _PARSE_CONTEXT = "conversation.messages.parse"
+
+
+# LLM: 只在内存克隆已验证的前缀，源消息及嵌套metadata零修改；新消息ID映射交Compact重建引用。
+# 函数用途: 为主会话分叉生成独立消息对象，不追加文件或更新源线程活动时间。
+def fork_message_prefix(entries: list[MessageLogEntry], thread_id: str) -> tuple[MessageLogEntry, ...]:
+    if len({row.message_id for row in entries}) != len(entries) or any(not row.message_id for row in entries):
+        raise ValueError("FORK_TRANSCRIPT_INVALID: 消息身份缺失或重复")
+    return tuple(replace(row, message_id=new_id("msg"), thread_id=thread_id, metadata=copy.deepcopy(row.metadata))
+                 for row in entries)
 
 
 # LLM: 一个尾部窗口的扫描状态：只含投影值、错误和两个计数，不含正文；计数与 recent_report 的停止条件逐项对应。

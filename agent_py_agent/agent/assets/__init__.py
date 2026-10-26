@@ -1,5 +1,5 @@
-# LLM: 资产写入固定于宿主给定Owner根；全局兜底只读，显式管理员工厂才把全局根设为写根，不注册或执行工具。
-# 模块用途: 共用nofollow、分层读取、严格资产ID、技能逻辑引用及提交后读回错误合同。
+# LLM: 资产写根只来自宿主构造与显式target_scope；根事务锁协调批量及普通写入，投影字段不能授权。
+# 模块用途: 共用nofollow、分层读取、CAS版本、批量恢复协调及提交后读回错误合同。
 from __future__ import annotations
 
 import json
@@ -84,6 +84,44 @@ class AssetPostCommitReadbackError(RuntimeError):
     pass
 
 
+# LLM: 缺失目标版本为0，旧记录缺revision也为0；只能在同一资产写锁内调用，调用者身份另行校验。
+# 函数用途: 校验目标CAS，返回下一次持久化版本。
+def next_asset_revision(previous, expected_revision=None):
+    current = previous.get('revision', 0) if previous is not None else 0
+    if type(current) is not int or current < 0:
+        raise ValueError('资产revision损坏')
+    if expected_revision is not None:
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError('expected_revision必须是非负整数')
+        if expected_revision != current:
+            raise ValueError(f'ASSET_REVISION_CONFLICT: expected={expected_revision}, actual={current}')
+    return current + 1
+
+
+# LLM: 只有显式写操作可调用create=True；逐段从授权workspace打开.agent，不resolve内部链接。
+# 函数用途: 校验或创建项目资产根，冷读缺失时仅返回词法位置。
+def workspace_asset_home(workspace_root, *, create=False):
+    root = Path(os.path.abspath(workspace_root))
+    try:
+        os.close(open_directory_beneath(root, ('.agent',), create=create))
+    except FileNotFoundError:
+        if create:
+            raise
+    return root / '.agent'
+
+
+# LLM: 普通写与批量写共用同一根锁；先恢复旧批量再取集合锁，避免跨集合CAS或恢复锁环。
+# 函数用途: 为一次可写资产操作取得跨进程事务协调权。
+@contextmanager
+def asset_root_lock(home):
+    from .workspace_assets import _recover_batch
+
+    os.close(open_directory_beneath(home, ()))
+    with locked_json_path(home / '.asset-batch'):
+        _recover_batch(home)
+        yield
+
+
 # LLM: 超时与运行耗时不是授权；拒绝bool、非有限数和零/负超时。
 # 函数用途: 校验脚本和工作流的正超时。
 def positive_timeout(value):
@@ -103,13 +141,14 @@ def _global_roots(owner_home, extra_roots):
                                if (path := Path(os.path.abspath(root))) != owner_home))
 
 
-# LLM: 根由宿主构造传入，payload不能重定位；锁跨Store实例，提交后读回入口仅在_write成功后使用。
+# LLM: 根由宿主构造传入，payload不能重定位；根锁加集合锁协调批量事务，显式workspace写仍复用canonical格式。
 # 类用途: 复用元数据和侧文件的nofollow读取、原子替换、异常回滚与受控删除。
 class _AssetStore:
-    # LLM: 宿主固定Owner写根，is_admin不重定位普通操作；全局候选只供读取，不从metadata或cwd取得权限。
-    # 函数用途: 准备Owner根并登记额外只读来源。
-    def __init__(self, owner_home, collection, filename, *, extra_roots=(), is_admin=False):
+    # LLM: workspace仅登记读取来源，构造器绝不创建.agent；Owner根沿原初始化，来源字段不参与授权。
+    # 函数用途: 准备Owner根并登记项目覆盖和额外只读来源。
+    def __init__(self, owner_home, collection, filename, *, extra_roots=(), is_admin=False, workspace_root=None):
         self.owner_home = Path(owner_home).absolute()
+        self.workspace_root = Path(workspace_root).absolute() if workspace_root is not None else None
         self._global_roots = _global_roots(self.owner_home, extra_roots)
         self._read_only, self.is_admin = False, is_admin is True
         self.owner_home.mkdir(parents=True, exist_ok=True)
@@ -132,6 +171,19 @@ class _AssetStore:
         view = object.__new__(type(self))
         view.owner_home, view.collection, view.filename = root, self.collection, self.filename
         view._read_only, view.is_admin, view._global_roots = True, False, ()
+        view.workspace_root = None
+        return view
+
+    # LLM: 只接受显式target_scope，忽略描述符中的来源路径；返回写视图不回退到其它来源。
+    # 函数用途: 为保存和删除选择实际Owner或项目写根。
+    def _target_store(self, target_scope):
+        if target_scope == 'owner':
+            return self
+        if target_scope != 'workspace' or self.workspace_root is None or self._read_only:
+            raise ValueError('workspace写入必须显式提供workspace_root与target_scope')
+        view = self._global_view(workspace_asset_home(self.workspace_root, create=True))
+        view._read_only = False
+        view._scope_workspace = str(self.workspace_root)
         return view
 
     # LLM: 只读打开同一OS锁，正常或异常退出都核身份；锁变优先报重试、未变保留原读取错误，不创建或chmod。
@@ -177,17 +229,20 @@ class _AssetStore:
         finally:
             os.close(current)
 
-    # LLM: Owner沿原nofollow创建与双层锁；内部全局视图只打开已有锁，不能创建或收紧共享文件。
+    # LLM: 写者先取跨资产根锁再取原集合锁；全局只读视图只打开已有锁且拒绝未完成批量，不创建或chmod。
     # 函数用途: 为领域存储提供与实际来源匹配的读写临界区。
     @contextmanager
     def _locked(self):
         if self._read_only:
             with self._readonly_locked():
+                if read_bytes_beneath(self.owner_home, ('.asset-batch.json',), max_bytes=MAX_ASSET_BYTES * 16) is not None:
+                    raise ValueError('资产批量事务未提交，请显式写操作恢复')
                 yield
             return
         os.close(open_directory_beneath(self.owner_home, (self.collection,), create=True))
-        with locked_json_path(self.owner_home / self.collection / ".assets"):
-            yield
+        with asset_root_lock(self.owner_home):
+            with locked_json_path(self.owner_home / self.collection / ".assets"):
+                yield
 
     # LLM: 只在Owner确认缺失并释放其锁后调用；顺序查根且首命中返回，坏记录明确失败，不使用真假值判缺失。
     # 函数用途: 读取只读全局资产并标记真实来源。
@@ -269,10 +324,14 @@ class _AssetStore:
         else:
             write_text_atomic_beneath(self.owner_home, parts, content)
 
-    # LLM: undo先原子持久化，元数据最后替换，删除undo才提交；异常或重启读取都恢复一致旧版。
-    # 函数用途: 在集合锁下发布元数据及侧文件，拒绝不可读的大内容，保留失败恢复材料。
+    # LLM: undo先持久化，元数据最后替换；版本只从锁内canonical旧记录递增，投影不能改变写入作用域。
+    # 函数用途: 在根锁及集合锁下发布元数据和侧文件，失败或重启恢复一致旧版。
     def _write(self, payload, side_files=None):
         asset_id = safe_asset_id(payload["id"])
+        workspace = getattr(self, '_scope_workspace', '')
+        payload = {**payload, 'revision': next_asset_revision(self._read(asset_id)),
+                   'scope_layer': 'workspace' if workspace else 'owner',
+                   'source_scope': 'workspace' if workspace else 'owner', 'workspace_root': workspace}
         updates = dict(side_files or {})
         updates[self.filename] = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         for content in updates.values():
@@ -359,3 +418,13 @@ def next_run_summary(summary, status, duration_ms, run_at=None, last_error=""):
         failures = 0
         resolved_error = clean_json(str(last_error or ""))
     return RuntimeSummary(run_at, status, duration_ms, summary.run_count + 1, failures, resolved_error)
+
+
+# LLM: 延迟导出避免descriptor与Store初始化环；只暴露资产服务，不执行发现、写盘或权限检查。
+# 函数用途: 为原assets包提供项目覆盖、晋升和批量保存的公共导入口。
+def __getattr__(name):
+    if name in {'WorkspaceAssetOverlay', 'promote_to_owner', 'commit_asset_batch'}:
+        from . import workspace_assets
+
+        return getattr(workspace_assets, name)
+    raise AttributeError(name)

@@ -194,10 +194,10 @@ class SubAgentPersistenceService:
     # LLM: 粗 mtime 保护窗口与指纹判定的唯一实现在 common/cache_freshness；本类不再自带第二套阈值。
     # 类用途: 管理子代理任务的持久化与列表读取；缓存规则改变时同步检查 list_runs 和 create_subagents 的状态复用测试。
     _RUN_CACHE_COARSE_MTIME_GUARD_SECONDS = CACHE_TRUST_AGE_SECONDS
-    # 限制进程内子代理状态与缺失 canonical 缓存上限，避免只走按 ID 查询时缓存无界累积。
-    _MAX_RUN_CACHE_ENTRIES = 512
+    # 保留有界容量，同时覆盖常见历史扫描规模，避免超过512条就发生FIFO循环抖动。
+    _MAX_RUN_CACHE_ENTRIES = 4096
     _MAX_RUN_CACHE_ITEM_BYTES = 256 * 1024
-    _MAX_NEGATIVE_RUN_CACHE_ENTRIES = 512
+    _MAX_NEGATIVE_RUN_CACHE_ENTRIES = 4096
 
     # LLM: The persistence service owns one process-local parsed-state cache. Every list/read
     # projection may share it, but callers always receive deep copies and canonical files remain
@@ -301,9 +301,9 @@ class SubAgentPersistenceService:
     ) -> SubAgentListRunsReport:
         return _list_runs_for_root_report(self, root_task_id)
 
-    # LLM: 锁内复用稳定文件，256KiB按公共五元指纹size位置[2]判断；超限只解析返回并删除旧缓存，不改变深拷贝及粗mtime合同。
-    # 缺失缓存每次核locator指纹和canonical存在性；近期、损坏及权限错误不作负缓存，错误仍交原报告口。
-    # 函数用途: 复用稳定解析结果或缺失目标事实；文件重现或locator换代立即重读，不把缓存当权威。
+    # LLM: 锁内核五元指纹并固定私有快照引用，锁外deepcopy；快照只整体替换、不原地修改，调用方永远拿副本。
+    # 256KiB单项及粗mtime合同保持；缺失分支复用reader已核路径，每次仍核目标存在性，错误交原报告口。
+    # 函数用途: 复用解析或缺失事实，并在释放缓存锁后复制任务，避免其它列表线程等待深拷贝。
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
             stat = task_file.stat()
@@ -313,50 +313,61 @@ class SubAgentPersistenceService:
                 self._run_cache.pop(run_id, None)
             cached = self._run_cache.get(run_id)
             if cached is not None and cached[0] == signature:
-                return copy.deepcopy(cached[1])
-            missing = self._missing_canonical_cache.get(run_id)
-            if missing is not None:
-                if missing[0] == signature and not missing[1].exists():
-                    raise FileNotFoundError(f"子代理记录不存在: {run_id}")
-                self._missing_canonical_cache.pop(run_id, None)
-            mtime_age_seconds = _now() - stat.st_mtime_ns / 1e9
-            try:
-                task = self.load(run_id)
-            except FileNotFoundError:
-                if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
-                    self._cache_missing_canonical(run_id, task_file, signature)
-                raise
-            # 同时核对 canonical_state.json 的物理字节大小，避免通过小体积 locator 把超大 canonical 任务对象常驻缓存在内存里。
-            canonical_workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
-            if canonical_workspace:
-                try:
-                    canonical_size = (Path(canonical_workspace) / "canonical_state.json").stat().st_size
-                except OSError:
-                    canonical_size = 0
-                if canonical_size > self._MAX_RUN_CACHE_ITEM_BYTES:
-                    within_budget = False
-            if within_budget and mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
-                if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
-                    self._run_cache.pop(next(iter(self._run_cache)), None)
-                self._run_cache[run_id] = (signature, task)
+                task = cached[1]
             else:
-                self._run_cache.pop(run_id, None)
-            return copy.deepcopy(task)
+                missing = self._missing_canonical_cache.get(run_id)
+                if missing is not None:
+                    if missing[0] == signature and not missing[1].exists():
+                        raise FileNotFoundError(f"子代理记录不存在: {run_id}")
+                    self._missing_canonical_cache.pop(run_id, None)
+                mtime_age_seconds = _now() - stat.st_mtime_ns / 1e9
+                try:
+                    task = self.load(run_id)
+                except FileNotFoundError as exc:
+                    if mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                        self._cache_missing_canonical(
+                            run_id, task_file, signature,
+                            canonical_path=getattr(exc, "canonical_path", None),
+                        )
+                    raise
+                # 同时检查canonical物理大小，不能通过小locator常驻超大任务对象。
+                canonical_workspace = str(getattr(task, "agent_run_workspace_dir", "") or "").strip()
+                if canonical_workspace:
+                    try:
+                        canonical_size = (Path(canonical_workspace) / "canonical_state.json").stat().st_size
+                    except OSError:
+                        canonical_size = 0
+                    if canonical_size > self._MAX_RUN_CACHE_ITEM_BYTES:
+                        within_budget = False
+                if within_budget and mtime_age_seconds >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
+                    if run_id not in self._run_cache and len(self._run_cache) >= self._MAX_RUN_CACHE_ENTRIES:
+                        self._run_cache.pop(next(iter(self._run_cache)), None)
+                    self._run_cache[run_id] = (signature, task)
+                else:
+                    self._run_cache.pop(run_id, None)
+        return copy.deepcopy(task)
 
-    # LLM: 仅由持_run_cache_lock且已核旧mtime的缺失分支调用；负缓存独立上限512，沿原解析器与nofollow边界。
-    # 函数用途: 为稳定、直达且确实缺失的canonical建负缓存；探测失败只放弃优化，保留调用方原始缺失错误。
+    # LLM: 生产调用已持缓存锁并核旧mtime；仅复用reader核验的Path，旧三参数调用仍沿原解析器，独立预算可缩小。
+    # 函数用途: 为稳定直达的缺失canonical建有界负缓存；传入已解析路径时不重读locator，探测失败不掩盖原错误。
     def _cache_missing_canonical(
         self, run_id: str, task_file: Path, signature: tuple[int, int, int, int, int],
+        *,
+        canonical_path: Path | None = None,
     ) -> None:
         try:
-            payload = json.loads(task_file.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                return
-            canonical = canonical_state_path_from_payload(payload)
-            if canonical is None:
-                return
-            declared = Path(str(payload.get("agent_run_workspace_dir") or "").strip())
-            if declared != canonical.parent or canonical.exists():
+            if isinstance(canonical_path, Path):
+                canonical = canonical_path
+            else:
+                payload = json.loads(task_file.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    return
+                canonical = canonical_state_path_from_payload(payload)
+                if canonical is None:
+                    return
+                declared = Path(str(payload.get("agent_run_workspace_dir") or "").strip())
+                if declared != canonical.parent:
+                    return
+            if canonical.exists():
                 return
             if (
                 run_id not in self._missing_canonical_cache
@@ -367,8 +378,7 @@ class SubAgentPersistenceService:
         except (OSError, TypeError, ValueError):
             return
 
-    # LLM: Eviction shares the cache lock with exact-id reads so a concurrent full scan cannot
-    # remove an entry between lookup and deepcopy. Both caches are process-local optimizations.
+    # LLM: 淘汰与精确ID读取共锁；锁外复制持有已取快照的强引用，移除缓存条目不会破坏该次返回。
     # 函数用途: 同步清理已删除locator的正负缓存；其它run仍存在时也不能留下陈旧缺失项。
     def _evict_run_cache(self, seen: set[str]) -> None:
         with self._run_cache_lock:

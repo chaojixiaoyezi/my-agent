@@ -1,3 +1,5 @@
+# LLM: 回归结构化身份与第二层工作根；普通用户夹具显式提供合法ID，不能用身份解析失败替代目录权限拒绝。
+# 模块用途: 验证管理员工作根继承与普通用户外部目录隔离。
 """LLM: 管理员第二层写作用域的合同单测。
 
 规则（用户 2026-09-11 确认）：管理员 full-access 解除 owner 墙后，子代理只继承
@@ -131,6 +133,8 @@ def test_explicit_workspace_accepts_multiple_directories_for_full_access(tmp_pat
     assert [str(r) for r in roots] == [str(a.resolve()), str(b.resolve())]
 
 
+# LLM: 普通身份必须先正常解析出目录，再由真正目录权限门拒绝；测试根完全隔离在tmp_path。
+# 函数用途: 验证普通用户声明现存外部工作目录仍被拒绝。
 def test_explicit_workspace_outside_home_is_rejected_for_normal_user(tmp_path):
     from types import SimpleNamespace
 
@@ -139,14 +143,17 @@ def test_explicit_workspace_outside_home_is_rejected_for_normal_user(tmp_path):
         validate_requested_workspace_roots,
     )
 
+    (tmp_path / "outside").mkdir(exist_ok=True)
     config = SimpleNamespace(
+        my_agent_home=str(tmp_path / "agent-home"),
         workspace_root=str(tmp_path / "outside"),
         my_agent_owner_provider="local",
         my_agent_owner_kind="user",
+        my_agent_owner_id="alice",
         access_mode="workspace-write",
     )
     roots = resolve_workspace_roots(config, str(tmp_path / "x.yaml"))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="普通用户"):
         validate_requested_workspace_roots(config, roots)
 
 

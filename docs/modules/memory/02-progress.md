@@ -1,3 +1,11 @@
+## 2026-10-25 WP11：候选大文件五元 stat 摘要缓存与只读预过滤（工作区已实现，待组合验收）
+
+- `candidates.py::_candidate_load_probe` 以 `(mtime_ns, size, ino, dev, ctime_ns)` 为版本事实；大于等于 1 MiB 且五元组未变时复用有界 `_CANDIDATE_STAMP_DIGEST_CACHE` 摘要，小文件仍读取全文并计算摘要。冷读核对尺寸与读后 stat，竞态或超出 128 MiB 缓存预算时不发表该探针。
+- `_drop_candidate_load_cache` 在原写边界同时使摘要与解析快照失效；保留最多 8 路径和原候选完整坏行/schema/重复 ID 校验，不靠缓存生成新的审核或晋升资格。
+- `CandidateService.list()` 在原候选锁内经 `_borrow_candidate_readonly_rows` 借用已完整验证的缓存元组，先按 `statuses` 过滤、按创建时间/ID 排序和 `limit` 切片，最后只 deepcopy 实际返回结果；不把内部候选引用交给调用方。不限量返回全表时仍复制全表，不宣称零拷贝或无 O(N) 遍历。
+- `stats()` 热缓存直接把只读行交给 `_candidate_stats_from_rows` 聚合数量、状态和类型，不复制或排序候选。`_load_unlocked` 被实例/子类覆盖时不绕过原加载器，`list` 被覆盖时统计仍尊重原列表；缓存未命中继续完整账本校验。该接线在本轮文档同步期间并行补齐，已按新版本源码复核。
+- 下方 128 MiB、`get()`/`locked_snapshot()` 单条深拷贝是此前已有优化。列表/统计的最新源码变化不等于真实 Gen2 GC 与生产 CPU 收益已验证；本轮只改文档，不跑性能测试、不改候选数据。设计范围见 [设计台账](../../../DESIGN_LEDGER.md)，测试复现入口见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-25 记忆候选自动审核归档恢复、32 条晋升队头去阻塞、30 天未晋升候选定期清理与进程 locale 对齐（已实现）
 
 `memory_store/promotion.py`、`memory_store/curator.py`、`memory_store/candidates.py`、`memory_store/retention_scan.py`、`memory_store/retention_apply.py` 与 `tooling/process_registry.py` 完成以下修复：

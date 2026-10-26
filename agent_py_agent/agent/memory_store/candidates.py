@@ -1,5 +1,5 @@
-# LLM: C显式IO只收紧原目录/锁出生/raw末写，默认False保持原身份/状态/字节；联验原promotion/quota/候选回归。
-# 模块用途: 为唯一候选服务保原算法并接当前C同步末门。
+# LLM: C显式IO保持原身份/状态/字节；大文件摘要仅按五元stat复用的有界内存投影，小文件仍逐次强摘要，业务锁与CAS不变。
+# 模块用途: 管理唯一候选源及可失效的解析/摘要缓存，避免后台热查询重复读取多MiB账本。
 from __future__ import annotations
 
 """Owner 级唯一记忆候选仓库和状态机。"""
@@ -68,6 +68,11 @@ RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
 _CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
 # 记忆候选列表缓存允许占用的最大总字节数。
 _CANDIDATE_LOAD_CACHE_MAX_BYTES = 128 * 1024 * 1024
+# 达到1MiB才允许热读复用相同五元stat的摘要，小文件维持每次完整摘要校验。
+_CANDIDATE_FAST_STAT_PROBE_MIN_BYTES = 1024 * 1024
+_CANDIDATE_STAMP_DIGEST_CACHE: OrderedDict[
+    str, tuple[tuple[int, int, int, int, int], str]
+] = OrderedDict()
 _CANDIDATE_LOAD_CACHE: OrderedDict[
     str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...]]
 ] = OrderedDict()
@@ -84,26 +89,40 @@ def _candidate_load_stamp(path: Path) -> tuple[int, int, int, int, int] | None:
     return (info.st_mtime_ns, info.st_size, info.st_ino, info.st_dev, info.st_ctime_ns)
 
 
-# LLM: 每次热读仍读取完整字节作blake2b校验，不信任同尺寸同mtime；超原始字节预算或竞态不创建投影。
-# 函数用途: 为候选解析缓存取得本轮稳定文件版本和内容摘要。
+# LLM: 大文件五元stat相同时复用有界摘要LRU，小文件始终读全；冷读核尺寸及读后stat，竞态/超预算不发表摘要。
+# 函数用途: 为候选解析缓存取得稳定版本，减少多MiB热账本的重复整文件读取。
 def _candidate_load_probe(path: Path):
     stamp = _candidate_load_stamp(path)
     if stamp is None or stamp[1] > _CANDIDATE_LOAD_CACHE_MAX_BYTES:
         return None
+    key = str(path)
+    if stamp[1] >= _CANDIDATE_FAST_STAT_PROBE_MIN_BYTES:
+        with _CANDIDATE_LOAD_CACHE_LOCK:
+            cached = _CANDIDATE_STAMP_DIGEST_CACHE.get(key)
+            if cached is not None and cached[0] == stamp:
+                _CANDIDATE_STAMP_DIGEST_CACHE.move_to_end(key)
+                return stamp, cached[1]
     try:
         data = path.read_bytes()
     except OSError:
         return None
     if len(data) != stamp[1] or _candidate_load_stamp(path) != stamp:
         return None
-    return stamp, hashlib.blake2b(data, digest_size=16).hexdigest()
+    digest = hashlib.blake2b(data, digest_size=16).hexdigest()
+    with _CANDIDATE_LOAD_CACHE_LOCK:
+        _CANDIDATE_STAMP_DIGEST_CACHE[key] = (stamp, digest)
+        _CANDIDATE_STAMP_DIGEST_CACHE.move_to_end(key)
+        while len(_CANDIDATE_STAMP_DIGEST_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS:
+            _CANDIDATE_STAMP_DIGEST_CACHE.popitem(last=False)
+    return stamp, digest
 
 
-# LLM: 只清进程内派生解析结果，不改变任何候选、配额或业务锁；失败写入也可安全重新读取。
-# 函数用途: 使指定候选路径的模型缓存失效。
+# LLM: 同一内存锁内清解析投影及stat摘要，不改变候选、配额或业务锁；失败写入也强制下次重读。
+# 函数用途: 使指定候选路径的两层缓存同时失效。
 def _drop_candidate_load_cache(path: Path) -> None:
     with _CANDIDATE_LOAD_CACHE_LOCK:
         _CANDIDATE_LOAD_CACHE.pop(str(path), None)
+        _CANDIDATE_STAMP_DIGEST_CACHE.pop(str(path), None)
 
 
 # LLM: 保存前深复制全部嵌套字段，最多8路径和128MiB原始字节；调用方返回值不能成为缓存权威。
@@ -147,6 +166,29 @@ def _load_one_candidate_unlocked(service: CandidateService, candidate_id: str) -
         matched = next((row for row in cached if row.candidate_id == candidate_id), None)
         return deepcopy(matched) if matched is not None else None
     return next((row for row in service._load_unlocked() if row.candidate_id == candidate_id), None)
+
+
+# LLM: 调用方必须持原候选文件锁；实例/子类覆盖加载时不绕过其语义，仅借用已验证缓存且不修改记录。
+# 函数用途: 为只读列表和统计取得当前稳定的候选快照，未命中交回原加载器。
+def _borrow_candidate_readonly_rows(service: CandidateService) -> tuple[MemoryCandidate, ...] | None:
+    if ('_load_unlocked' in service.__dict__
+            or getattr(service._load_unlocked, '__func__', None) is not CandidateService._load_unlocked):
+        return None
+    return _cached_candidate_rows(service.path, _candidate_load_probe(service.path), evict_on_miss=True)
+
+
+# LLM: 仅遍历已验证候选的标量字段，既不复制、排序、修改候选，也不泄露任何记录引用；兼容一次性Iterable。
+# 函数用途: 纯计算候选数量、状态和类型分布。
+def _candidate_stats_from_rows(candidates: Iterable[MemoryCandidate]) -> dict[str, object]:
+    statuses: dict[str, int] = {}
+    types: dict[str, int] = {}
+    total = 0
+    for item in candidates:
+        total += 1
+        statuses[item.status] = statuses.get(item.status, 0) + 1
+        types[item.candidate_type] = types.get(item.candidate_type, 0) + 1
+    return {'schema_version': CANDIDATE_SCHEMA_VERSION, 'total': total,
+            'by_status': dict(sorted(statuses.items())), 'by_type': dict(sorted(types.items()))}
 
 
 # LLM: 损坏候选账本必须阻断写入；跳过坏行会在下一次原子写时永久丢数据。
@@ -229,10 +271,8 @@ class CandidateService:
             _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return results
 
-    # LLM: 读取同样严格解析全部行；状态/内容过滤只在完整事实集验证后执行。
-    # 函数用途: 列出候选，可按状态过滤并保留确定性创建顺序。
-    # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
-    # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
+    # LLM: 原path锁内仅借用已完整验证的缓存元组；先过滤排序切片再深拷贝结果，未命中或覆盖加载仍走原严格验证。
+    # 函数用途: 只复制实际返回的候选，保持排序、limit及嵌套返回值隔离，不改变原锁和写侧状态机。
     def list(
         self,
         *,
@@ -240,11 +280,18 @@ class CandidateService:
         limit: int = 0,
     ) -> list[MemoryCandidate]:
         with self._locked_candidates():
-            records = self._load_unlocked()
+            borrowed = _borrow_candidate_readonly_rows(self)
+            if borrowed is None:
+                loaded = self._load_unlocked()
+        source_rows = borrowed if borrowed is not None else loaded
         if statuses is not None:
-            records = [item for item in records if item.status in statuses]
+            records = [item for item in source_rows if item.status in statuses]
+        else:
+            records = list(source_rows)
         records.sort(key=lambda item: (item.created_at, item.candidate_id))
-        return records if limit <= 0 else records[-limit:]
+        if limit > 0:
+            records = records[-limit:]
+        return deepcopy(records) if borrowed is not None else records
 
     # LLM: candidate_id 是唯一定位键；禁止按正文或 subject 模糊选中审核目标。
     #   默认走锁内单条定位，命中缓存时只深拷贝目标候选而不再深拷贝和排序全表；若 list 被外部替身替换则保留原遍历。
@@ -526,21 +573,16 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, retained, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return deleted
 
-    # LLM: 健康统计不返回正文、路径或用户引用。
-    # 函数用途: 为 doctor/CLI 输出候选数量和状态分布。
+    # LLM: 原锁内借用已验证快照只读计数，热缓存零深拷贝；保留list及_load_unlocked覆盖入口，冷读仍完整验证账本。
+    # 函数用途: 为doctor/CLI统计数量、状态和类型，不复制候选或暴露正文、路径及缓存引用。
     def stats(self) -> dict[str, object]:
-        candidates = self.list()
-        statuses: dict[str, int] = {}
-        types: dict[str, int] = {}
-        for item in candidates:
-            statuses[item.status] = statuses.get(item.status, 0) + 1
-            types[item.candidate_type] = types.get(item.candidate_type, 0) + 1
-        return {
-            "schema_version": CANDIDATE_SCHEMA_VERSION,
-            "total": len(candidates),
-            "by_status": dict(sorted(statuses.items())),
-            "by_type": dict(sorted(types.items())),
-        }
+        if 'list' in self.__dict__ or getattr(self.list, '__func__', None) is not CandidateService.list:
+            candidates: Iterable[MemoryCandidate] = self.list()
+        else:
+            with self._locked_candidates():
+                borrowed = _borrow_candidate_readonly_rows(self)
+                candidates = borrowed if borrowed is not None else self._load_unlocked()
+        return _candidate_stats_from_rows(candidates)
 
     # LLM: 只返回原同path锁，C透传准确FD出生，不缓存活来源或缩短锁内业务；默认调用形状不加False。
     # 函数用途: 给候选原读写算法取得相同双层锁，等待与全文件读取都门外。
@@ -548,7 +590,7 @@ class CandidateService:
         options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
         return locked_json_path(self.path, **options)
 
-    # LLM: 原path锁覆盖读取；缓存须匹配本轮完整字节摘要，出入均深复制；坏行/schema/重复ID仍按原错误阻断。
+    # LLM: 原path锁覆盖读取；小文件每次强摘要，大文件按完整五元stat复用摘要；缓存出入深复制，坏行/schema/重复ID仍阻断。
     # 函数用途: 严格加载候选，只在内容未变时跳过重复JSONL解析和模型验证。
     def _load_unlocked(self) -> list[MemoryCandidate]:
         probe = _candidate_load_probe(self.path)

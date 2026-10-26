@@ -476,9 +476,10 @@ def _deferred_tool_search_hits(registry: Any, query: str, snapshot: ToolRuntimeS
 
 
 # LLM: 仅生成检索投影，不热改工具实例或原生定义；能力别名不是查询路由，仍由同一retriever评分和快照过滤。
-# 函数用途: 补全原生脚本/工作流的Skill组合创作检索词。
+# 函数用途: 补全原生脚本/数据源/工作流的Skill组合创作检索词。
 def _tool_search_index_spec(spec: ToolModelSpec) -> ToolModelSpec:
     aliases = {"scripts": ("script", "脚本", "skill", "workflow", "工作流"),
+               "datasources": ("datasource", "数据源", "sqlite", "database", "数据库", "credential"),
                "workflows": ("workflow", "工作流", "skill", "script", "脚本")}
     words = aliases.get(spec.name, ())
     return replace(spec, hints=replace(spec.hints, keywords=(*spec.keywords, *words))) if words else spec

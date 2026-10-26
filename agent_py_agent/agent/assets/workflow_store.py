@@ -1,5 +1,5 @@
-# LLM: 工作流只描述不执行，普通写入固定于Owner/workflows/id；全局兜底只读，管理员显式工厂绑定全局写根。
-# 模块用途: 分层读取并管理工作流定义、说明、Skill绑定、自动引用及安全运行摘要。
+# LLM: 工作流只描述不执行；workspace读取优先，写入看显式target_scope并在根锁/集合锁内检查CAS。
+# 模块用途: 分层管理工作流定义、项目覆盖、说明、Skill绑定、自动引用及运行摘要。
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from . import (
     _AssetStore,
     canonical_skill_name,
+    next_asset_revision,
     next_run_summary,
     positive_timeout,
     safe_asset_id,
@@ -85,19 +86,21 @@ def with_workflow_step_refs(definition):
     return replace(definition, descriptor=replace(definition.descriptor, refs=refs))
 
 
-# LLM: 所有读改写共用Owner集合锁，不执行步骤、Skill或正文；WORKFLOW.md只是JSON正文的同步展示副本。
+# LLM: 所有写共用根锁及集合锁，来源投影不授写权；WORKFLOW.md只是JSON正文的同步展示副本，不执行步骤。
 # 类用途: 为工具、执行引擎与Broker提供工作流唯一存储入口。
 class WorkflowStore(_AssetStore):
-    # LLM: 普通实例只写宿主给定Owner；extra仅可读，is_admin不自动开放兜底写入，也不执行工作流。
-    # 函数用途: 绑定工作流写根及有序全局只读候选。
-    def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False):
-        super().__init__(owner_home, "workflows", "workflow.json", extra_roots=extra_roots, is_admin=is_admin)
+    # LLM: workspace只登记读取来源，构造时不创建.agent；extra仍只读且不执行任何工作流。
+    # 函数用途: 绑定工作流Owner根、项目读取覆盖及全局只读候选。
+    def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False, workspace_root=None):
+        super().__init__(owner_home, "workflows", "workflow.json", extra_roots=extra_roots, is_admin=is_admin,
+                         workspace_root=workspace_root)
 
     # LLM: 描述符经冻结值对象复制；全局作用域只加在返回投影，不持久化或改变步骤引用。
     # 函数用途: 标记只读全局工作流的来源。
     def _mark_global(self, definition):
         descriptor = definition.descriptor
-        return replace(definition, descriptor=replace(descriptor, metadata={**descriptor.metadata, 'asset_scope': 'global'}))
+        return replace(definition, descriptor=replace(descriptor, scope_layer='global', source_scope='builtin',
+            workspace_root='', metadata={**descriptor.metadata, 'asset_scope': 'global'}))
 
     # LLM: 平铺资产Key经唯一from_any恢复；不吞掉损坏JSON或未知字段。
     # 函数用途: 锁内读取完整定义，缺失返回None。
@@ -126,25 +129,38 @@ class WorkflowStore(_AssetStore):
         self._write(payload, {"WORKFLOW.md": definition.body_markdown or None})
         return self._readback_after_commit(definition.descriptor.id)
 
-    # LLM: 输入共用严格from_any以保护可变metadata；不执行正文，写路径共享_save提交与读回阶段。
-    # 函数用途: 创建或替换工作流并自动汇总步骤引用。
-    def save_workflow(self, definition):
+    # LLM: 输入共用严格from_any，显式scope选写根，CAS在锁内读取实际目标，投影路径不产生权限。
+    # 函数用途: 创建或替换Owner/项目工作流，汇总引用并返回递增revision。
+    def save_workflow(self, definition, *, target_scope='owner', expected_revision=None):
         definition = WorkflowDefinition.from_any(definition)
-        with self._locked():
-            self._get(definition.descriptor.id)
-            return self._save(definition)
+        target = self._target_store(target_scope)
+        with target._locked():
+            old = target._get(definition.descriptor.id)
+            next_asset_revision(old.descriptor.to_dict() if old else None, expected_revision)
+            return target._save(definition)
 
-    # LLM: Owner坏记录不得触发回退；真实缺失才释放Owner锁后读取全局，不能把兜底对象交给本地更新入口。
-    # 函数用途: 优先读取Owner工作流，缺失时只读全局定义。
+    # LLM: 项目冷读只用readonly视图，坏记录不回退；返回值不能决定后续更新写根。
+    # 函数用途: 依项目、Owner、全局优先级读取工作流定义。
     def get_workflow(self, workflow_id):
         safe_asset_id(workflow_id)
+        if self.workspace_root is not None:
+            from .workspace_assets import WorkspaceAssetOverlay, _workflow_definition
+
+            record = WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
+                builtin_roots=self._global_roots).get_asset('workflow', workflow_id)
+            return _workflow_definition(record) if record is not None else None
         with self._locked():
             definition = self._get(workflow_id)
         return definition if definition is not None else self._global_get(workflow_id)
 
-    # LLM: Owner先认领ID，释放其锁后逐个全局根取锁，不读取已被遮蔽的低优先级定义。
-    # 函数用途: 合并Owner及全局工作流，按ID稳定返回去重结果。
+    # LLM: 有workspace复用只读覆盖入口，不创建.agent；同ID只读取首个实际来源。
+    # 函数用途: 合并项目、Owner及全局工作流，按ID稳定返回定义。
     def list_workflows(self):
+        if self.workspace_root is not None:
+            from .workspace_assets import WorkspaceAssetOverlay, _workflow_definition
+
+            return [_workflow_definition(row) for row in WorkspaceAssetOverlay(self.workspace_root,
+                owner_home=self.owner_home, builtin_roots=self._global_roots).list_assets('workflow')]
         with self._locked():
             records = self._local_records()
         return self._merge_globals(records)
@@ -168,8 +184,8 @@ class WorkflowStore(_AssetStore):
     def detach_skill_from_step(self, workflow_id, step_id, skill_id):
         return self._change_skill_binding(workflow_id, step_id, skill_id, remove=True)
 
-    # LLM: 在原Owner集合锁内查模式、只替目标步并重算refs；失败前不写入，不接受裸路径。
-    # 函数用途: 统一执行Skill挂载或解绑，避免两个存储权威和丢更新。
+    # LLM: 在原根/集合锁内查模式、只替目标步重算refs；完全相同的绑定不写盘或推进revision，不接受裸路径。
+    # 函数用途: 幂等执行Skill挂载或解绑，避免两个存储权威和丢更新。
     def _change_skill_binding(self, workflow_id, step_id, skill_id, *, remove):
         valid_skill_reference(skill_id)
         safe_asset_id(step_id)
@@ -182,6 +198,8 @@ class WorkflowStore(_AssetStore):
                 raise ValueError("目标必须是现有分析或混合步骤")
             skills = (tuple(value for value in target.skill_ids if value != skill_id) if remove
                       else tuple(dict.fromkeys((*target.skill_ids, skill_id))))
+            if skills == target.skill_ids:
+                return definition
             steps = tuple(replace(step, skill_ids=skills)
                           if step.step_id == step_id else step for step in definition.steps)
             return self._save(replace(definition, steps=steps))

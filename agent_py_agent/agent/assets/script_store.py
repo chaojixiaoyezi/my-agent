@@ -1,10 +1,17 @@
-# LLM: 普通写入固定于Owner/scripts/id，全局兜底仅nofollow只读；管理员显式工厂绑定全局写根，不执行脚本。
-# 模块用途: 分层发现与管理固化脚本、动态查询范围、候选评估和安全运行摘要。
+# LLM: 读取workspace优先再Owner和全局；写入只看显式target_scope，版本CAS在原根锁/集合锁内，不执行代码。
+# 模块用途: 分层管理固化脚本、项目覆盖、动态查询范围、候选评估和运行摘要。
 from __future__ import annotations
 
 from dataclasses import replace
 
-from . import TRANSACTION_FILE, _AssetStore, next_run_summary, positive_timeout, safe_asset_id
+from . import (
+    TRANSACTION_FILE,
+    _AssetStore,
+    next_asset_revision,
+    next_run_summary,
+    positive_timeout,
+    safe_asset_id,
+)
 from .descriptor import AssetDescriptor, EvaluatedCandidate, RuntimeSummary, clean_json
 
 
@@ -56,18 +63,20 @@ def _preserve_history(descriptor, old):
     return replace(descriptor, data_sources=sources, runtime_summary=summary)
 
 
-# LLM: 每个public操作共用原集合锁；调用方只传安全ID，根路径不从输入记录恢复。
+# LLM: 每个写操作共用根锁及原集合锁；workspace仅用于读取覆盖，写入必须显式指定，路径不从投影恢复。
 # 类用途: 在Owner空间管理固化脚本，供工具、工作流和Broker共用。
 class ScriptStore(_AssetStore):
-    # LLM: 普通实例只写宿主给定Owner；额外根仅可读，is_admin不自动重定位或开放兜底写入。
-    # 函数用途: 绑定脚本写根和有序全局只读候选。
-    def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False):
-        super().__init__(owner_home, "scripts", "script.json", extra_roots=extra_roots, is_admin=is_admin)
+    # LLM: 项目根只登记且冷读不创建.agent；额外根仍只读，is_admin不自动开放任何覆盖写入。
+    # 函数用途: 绑定脚本Owner写根、项目读取覆盖及全局只读来源。
+    def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False, workspace_root=None):
+        super().__init__(owner_home, "scripts", "script.json", extra_roots=extra_roots, is_admin=is_admin,
+                         workspace_root=workspace_root)
 
     # LLM: 标记只存在于返回副本，不写共享元数据，不从元数据取得路径或写入权。
     # 函数用途: 给全局脚本的详情或列表补充真实来源标记。
     def _mark_global(self, record):
-        return {**record, 'metadata': {**record['metadata'], 'asset_scope': 'global'}}
+        return {**record, 'scope_layer': 'global', 'source_scope': 'builtin', 'workspace_root': '',
+                'metadata': {**record['metadata'], 'asset_scope': 'global'}}
 
     # LLM: 全局和Owner列表均只读元数据；继承基座事务校验，不加载代码或返回执行路径。
     # 函数用途: 严格解码一条脚本列表投影。
@@ -100,15 +109,18 @@ class ScriptStore(_AssetStore):
             raise KeyError(script_id)
         return value
 
-    # LLM: 同锁继承历史后走可恢复事务；正常提交后读回走独立异常阶段，入口别名与旧叶清理保持原合同。
-    # 函数用途: 保存新脚本或替换已有脚本，返回安全读回的记录。
-    def save_script(self, descriptor, code, *, entrypoint="main.py", interpreter="python3", timeout_seconds=120):
+    # LLM: scope只由显式参数决定，目标CAS在锁内检查；保留旧历史、入口别名及提交后读回阶段，不执行代码。
+    # 函数用途: 保存Owner或项目脚本，返回包含递增revision的完整记录。
+    def save_script(self, descriptor, code, *, entrypoint="main.py", interpreter="python3", timeout_seconds=120,
+                    target_scope='owner', expected_revision=None):
         descriptor = AssetDescriptor.from_dict(descriptor.to_dict())
         options = _script_options(entrypoint, interpreter, timeout_seconds)
         if descriptor.kind != "script" or not isinstance(code, str):
             raise ValueError("必须提供script描述符与文本代码")
-        with self._locked():
-            old = self._get(descriptor.id)
+        target = self._target_store(target_scope)
+        with target._locked():
+            old = target._get(descriptor.id)
+            next_asset_revision(old, expected_revision)
             if old:
                 descriptor = _preserve_history(descriptor, _record_descriptor(old))
             if old and old["entrypoint"].casefold() == entrypoint.casefold():
@@ -116,20 +128,30 @@ class ScriptStore(_AssetStore):
             files = {entrypoint: code}
             if old and old["entrypoint"] != entrypoint:
                 files[old["entrypoint"]] = None
-            self._write(descriptor.to_dict() | options, files)
-            return self._readback_after_commit(descriptor.id)
+            target._write(descriptor.to_dict() | options, files)
+            return target._readback_after_commit(descriptor.id)
 
-    # LLM: Owner损坏明确失败而非回退；仅真实缺失才在释放Owner锁后顺序读取全局，不跨Owner枚举。
-    # 函数用途: 优先读取本Owner脚本，缺失时返回只读全局代码副本。
+    # LLM: 项目冷读沿readonly视图，坏记录不回退；低优先级损坏不击穿已命中覆盖，不跨Owner枚举。
+    # 函数用途: 优先读取项目、再Owner、最后全局脚本的安全代码副本。
     def get_script(self, script_id):
         safe_asset_id(script_id)
+        if self.workspace_root is not None:
+            from .workspace_assets import WorkspaceAssetOverlay
+
+            return WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
+                                         builtin_roots=self._global_roots).get_asset('script', script_id)
         with self._locked():
             record = self._get(script_id)
         return record if record is not None else self._global_get(script_id)
 
-    # LLM: 列表不读取代码；Owner先认领ID，释放锁后合并全局同ID首项，不吞当前来源损坏。
-    # 函数用途: 按ID稳定列出Owner和全局脚本的去重元数据。
+    # LLM: 有workspace走同一只读覆盖入口，不创建.agent；列表仅元数据且同ID首来源认领。
+    # 函数用途: 按ID稳定列出项目、Owner和全局脚本的去重元数据。
     def list_scripts(self):
+        if self.workspace_root is not None:
+            from .workspace_assets import WorkspaceAssetOverlay
+
+            return WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
+                                         builtin_roots=self._global_roots).list_assets('script')
         with self._locked():
             records = self._local_records()
         return self._merge_globals(records)

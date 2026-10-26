@@ -1,3 +1,7 @@
+## 2026-10-25 `candidates.py` 大文件五元 stat 摘要缓存与只读预过滤结构
+
+- `memory_store/candidates.py::_candidate_load_probe` 对尺寸达到 `_CANDIDATE_FAST_STAT_PROBE_MIN_BYTES`（`1 MiB`）的 `candidates.jsonl` 维护有界 `_CANDIDATE_STAMP_DIGEST_CACHE`（按 `st_mtime_ns, st_size, st_ino, st_dev, st_ctime_ns` 五元 stat 复用 `blake2b` 摘要，写入失效时通过 `_drop_candidate_load_cache` 同时清理摘要与解析缓存）；`CandidateService.list()` 与 `stats()` 在未覆盖 `_load_unlocked` 且命中 `_CANDIDATE_LOAD_CACHE` 时先在只读缓存元组上执行 `statuses` 过滤、排序与 `limit` 切片，最后仅对返回结果集执行 `deepcopy`（`stats()` 零深拷贝）。
+
 ## 2026-10-25 `candidates.py` 单条快照深拷贝与 `learning_exclusions.py` 短路结构
 
 - `memory_store/candidates.py` 将 `_CANDIDATE_LOAD_CACHE_MAX_BYTES` 设为 `128 MiB`（`134217728`），保留 `_CANDIDATE_LOAD_CACHE_MAX_PATHS = 8` 与 `((mtime_ns, size), blake2b)` 摘要校验；`_load_one_candidate_unlocked(service, candidate_id)` 在未覆盖 `_load_unlocked` 或 `list` 时通过 `_cached_candidate_rows` 仅 `deepcopy` 匹配 `candidate_id` 的单条 `MemoryCandidate`，供 `get()` 与 `locked_snapshot()` 复用。

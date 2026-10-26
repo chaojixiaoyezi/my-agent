@@ -2,7 +2,7 @@
 # LLM: 本模块定义 canonical 会话状态；v10 模型选择三字段全缺时迁移为未知，部分或坏事实拒绝，不能伪造旧手动事件。
 # Compact提交命令可只推进原检查点head；局部摘要不成为ConversationThread的全线程投影，不新增持久任务摘要表。
 # 可选一次能力选择仅由 TaskLink.to_dict/from_dict 保存；缺失不回填，坏 marker 不阻断主任务，其它身份/pins仍严格校验。
-# 模块用途: 保存会话、消息、模型版本与任务选择标记；选择来源不代表采用授权或永久固定。
+# 模块用途: 保存会话、消息、任务继任、目录绑定及分叉谱系；旧记录不推导继任或执行授权。
 from __future__ import annotations
 
 import math
@@ -263,10 +263,12 @@ class ThreadTaskLink:
     host_message_context: dict[str, Any] | None = None
     # 输入依赖只存准确 ID 投影；状态、期限和结果仍由 SessionTaskStore 原输入记录负责。
     input_dependency_refs: tuple[str, ...] = ()
+    # 宿主只在同线程、同工作区换代时填写；旧记录缺失时为空，不根据任务ID形状猜测。
+    superseded_by_task_id: str = ""
 
     # LLM: None 完全省略选择键，保持旧序列化字节；损坏 marker 原值保留，不能因更新状态/pins 丢弃证据或重建 pending。
     #   续跑字段同理：空集合完全省略键，旧档案经普通状态更新重写后字节不变。
-    # 函数用途: 生成原任务JSON，缺失宿主身份/原输入位置省略，保留已有绑定供恢复校验。
+    # 函数用途: 生成任务JSON，空继任及缺失宿主字段省略，保留已有继任和输入绑定供恢复校验。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         selection = payload.pop("capability_selection")
@@ -274,6 +276,8 @@ class ThreadTaskLink:
         refs = payload.pop("continuation_refs")
         diagnostics = payload.pop("continuation_diagnostics")
         input_refs = payload.pop("input_dependency_refs")
+        if not self.superseded_by_task_id:
+            payload.pop("superseded_by_task_id")
         if input_refs:
             payload["input_dependency_refs"] = list(input_refs)
         if payload.get("host_channel_actor") is None:
@@ -297,7 +301,7 @@ class ThreadTaskLink:
         return (CAPABILITY_SELECTION_INVALID,) if self.capability_selection_corruption is not None else ()
 
     # LLM: pins 损坏仍严格拒绝；选择 marker 单独降为只跳过增强的诊断，旧缺键绝不补 pending，其余未知字段沿旧行为忽略。
-    # 函数用途: 恢复任务和原输入位置；引用形状由专门解析器严格核验，不从模型属性补值。
+    # 函数用途: 恢复任务、继任及原输入位置；旧记录继任为空，不从模型属性补值。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ThreadTaskLink:
         selection, corruption = decode_capability_selection(data)
@@ -324,6 +328,7 @@ class ThreadTaskLink:
             host_channel_actor=data.get("host_channel_actor"),
             host_message_context=data.get("host_message_context"),
             input_dependency_refs=tuple(str(item) for item in data.get("input_dependency_refs", []) if isinstance(item, str) and item),
+            superseded_by_task_id=data.get("superseded_by_task_id", ""),
             context_anchor_message_id=str(
                 data.get("context_anchor_message_id") or ""
             ),
@@ -457,7 +462,7 @@ def _thread_provider_fields(data):
 
 # LLM: ConversationThread 是历史、压缩点、模型引用与选择版本、决策覆盖及上下文投影的唯一持久权威；
 # 选择版本不能代替连接版本或授权；方法账本只经 capability.method_carry 使用，不进入摘要与模型线程投影。
-# 类用途: 保存会话模型引用与选择版本、临时决策覆盖和压缩点；选择来源不替代任务状态或自动采用权限。
+# 类用途: 保存模型设置、压缩点、目录与分叉来源；工作区修订只约束目录切换，不替代授权。
 @dataclass(frozen=True)
 class ConversationThread:
     thread_id: str
@@ -535,6 +540,13 @@ class ConversationThread:
     # The trusted client cwd is thread state. workspace_task_id is the latest task projection for
     # status/navigation; only an exact bound request, Goal, or active link may turn it into cwd.
     cwd: str = ""
+    # LLM: 缺省继承原cwd，fork字段仅描述来源，不绑定原运行；目录CAS独立于模型/Compact代次。
+    # 字段用途: 让目录多会话可筛选，并记录主会话分支来源。
+    workspace_root: str = field(default="", kw_only=True)
+    forked_from_thread_id: str = field(default="", kw_only=True)
+    forked_from_message_id: str = field(default="", kw_only=True)
+    fork_lineage_depth: int = field(default=0, kw_only=True)
+    revision: int = field(default=1, kw_only=True)
     runtime_workspace_roots: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     # LLM: 宿主来源投影（learning_source 模块的 8 字段格式）：线程创建时写入；旧记录缺省为空
@@ -545,8 +557,14 @@ class ConversationThread:
     )
 
     # LLM: 构造与 replace 同源验证选择事实；选择时间缺失保持未知，非有限数或错误类型不得混入诊断。
-    # 函数用途: 在持久化前拒绝坏模型选择字段，旧线程缺少时间仍可读取。
+    # 函数用途: 拒绝坏模型/目录版本，旧线程目录从cwd补齐；不读写文件或推断授权。
     def __post_init__(self) -> None:
+        if not self.workspace_root and self.cwd:
+            object.__setattr__(self, "workspace_root", self.cwd)
+        if type(self.revision) is not int or self.revision < 1:
+            raise ValueError("会话工作区修订无效")
+        if type(self.fork_lineage_depth) is not int or self.fork_lineage_depth < 0:
+            raise ValueError("会话分叉深度无效")
         _validate_model_selection_fields(
             self.model_selection_revision, self.model_selection_source, self.model_selection_last_explicit_revision,
         )
@@ -557,7 +575,7 @@ class ConversationThread:
             raise ValueError("会话模型选择时间无效，原记录未修改。")
 
     # LLM: 原 v10 同次序列化选择事实、设置和历史/Compact/校准投影；不另写事件账或模型秘密，须同步旧记录迁移测试。
-    # 函数用途: 将线程写成 JSON；方法账本为空时省略新增键，不改旧摘要或指纹字段。
+    # 函数用途: 将线程和目录/分叉来源写成JSON；空方法账本省略，不改旧摘要或指纹字段。
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["schema_version"] = SCHEMA_VERSION
@@ -570,7 +588,7 @@ class ConversationThread:
         return payload
 
     # LLM: 原 v10 及更早记录三选择字段全缺才归一为未知；坏/部分字段和未知 thread 版本拒绝，不补造手动事件。
-    # 函数用途: 读取旧会话；方法账本缺栏正常，校验仍经唯一负责模块，不反推摘要。
+    # 函数用途: 读取新旧会话，目录缺栏只继承原cwd，分叉缺栏保持未分叉；方法仍经原模块校验。
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ConversationThread:
         from ..capability.method_carry import methods_from
@@ -656,6 +674,11 @@ class ConversationThread:
             ),
             workspace_task_id=str(data.get("workspace_task_id") or ""),
             cwd=str(data.get("cwd") or ""),
+            workspace_root=str(data.get("workspace_root") or data.get("cwd") or ""),
+            forked_from_thread_id=str(data.get("forked_from_thread_id") or ""),
+            forked_from_message_id=str(data.get("forked_from_message_id") or ""),
+            fork_lineage_depth=data.get("fork_lineage_depth", 0),
+            revision=data.get("revision", 1),
             runtime_workspace_roots=_runtime_workspace_roots(
                 data.get("runtime_workspace_roots")
             ),

@@ -1,5 +1,5 @@
-# LLM: 每次授权/返回/写入前读取原安装；来源登记仅防DTO冒充，不是第二套执行账。
-# 模块用途: 分别绑定真实安装和认证调用者，计算权限交集并逐次核验普通目标。
+# LLM: 每次授权/返回/写入前读取原安装；目录权限取effective_owner而非管理员安装者，来源登记不另建执行账。
+# 模块用途: 绑定真实安装与认证调用者，核对能力、普通目标及显式工作目录边界。
 from __future__ import annotations
 
 import hashlib
@@ -117,18 +117,20 @@ class IngressIssuer:
         caps = _caller_capabilities(actor, entry, source.caller_owner, caps)
         return fixed, grant, caps
 
-    # LLM: 主体来自原安装及已冻结caller；公共个人不借管理员权，普通私有不接受委托。
-    # 函数用途: 验证闭合调用、能力与目标，发行不可伪造的调用投影。
+    # LLM: 主体和private/public范围只取原安装；私有不跨Owner，目录按有效owner检查，公共个人不借管理员目录权。
+    # 函数用途: 验证闭合调用、能力、目标和目录，发行不可伪造的调用投影。
     def authorize(self, source: PluginIngressSource, call: Call) -> AuthorizedCall:
         call = _checked_call(call)
         fixed, grant, caps = self._live(source)
         actor = fixed.activation_ref.owner().identity
-        target = _call_target(source, call, grant, actor)
+        target = _call_target(source, call, grant, actor, fixed.activation_ref.require())
         own = target.owner_kind == "user" and (target == actor or target == source.caller_owner)
         _check_capabilities(call, caps, own=own)
         digest = hashlib.sha256(canonical_json({"grant": grant, "capabilities": sorted(caps)}).encode()).hexdigest()
         binding = VerifiedPluginBinding(grant, actor, target, source, caps, policy_digest=digest)
         context = self._read(binding)
+        if "workspace_dir" in call.payload:
+            workspace_directory(context, call.payload["workspace_dir"])
         binding = replace(binding, user_revision=context.user_revision)
         _check_static_scope(call, grant)
         policy = _reply_policy(grant)
@@ -226,6 +228,32 @@ def revalidate_call(authorized: AuthorizedCall) -> None:
     source._issuer.revalidate(authorized)
 
 
+# LLM: 显式目录只认effective_owner=local/main；普通用户在解析路径前403，管理员沿原目录/控制面校验且不创建目录。
+# 函数用途: 规范管理员项目目录，禁止普通用户用目录参数绑定家目录或任意子目录。
+def workspace_directory(context: OwnerReadContext, value):
+    from pathlib import Path
+
+    from ..conversation.workspace_context import (
+        WorkspaceDirectoryError,
+        validate_workspace_directory,
+    )
+
+    home = context.owner_home.home_dir
+    is_admin = context.identity == OwnerIdentity.local_main()
+    if not is_admin:
+        raise HostAPIError("WORKSPACE_DIR_FORBIDDEN_FOR_NON_ADMIN", 403)
+    try:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = home / path
+        path = path.resolve(strict=False)
+        return validate_workspace_directory(path, owner_home=home, is_admin=is_admin, home_root=context.owner_home.root)
+    except HostAPIError:
+        raise
+    except (WorkspaceDirectoryError, OSError, RuntimeError, TypeError, ValueError):
+        raise HostAPIError("WORKSPACE_DIR_INVALID") from None
+
+
 # LLM: 直接构造Call也必须重过相同严格解码合同。
 # 函数用途: 防止非HTTP调用绕开参数约束。
 def _checked_call(call: Call) -> Call:
@@ -264,12 +292,14 @@ def _target_identity(call: Call, grant: dict, actor: OwnerIdentity) -> OwnerIden
     return OwnerIdentity("local", "user", uid)
 
 
-# LLM: 安装范围来自原表，非管理员仅可私有；公共个人调用不能继承安装者治理能力。
+# LLM: 范围来自原表，所有private均移除治理/委托，管理员也不豁免；公共个人不继承安装者治理能力。
 # 函数用途: 限定安装可访问性和本次有效能力。
 def _caller_capabilities(actor, entry, caller, caps):
     scope = getattr(entry, "installation_scope", "private")
     if scope not in {"private", "public"}:
         raise HostAPIError("INVALID_SCHEMA")
+    if scope == "private":
+        caps = caps - {"users.manage", "act_as_user"}
     if actor != OwnerIdentity.local_main():
         if actor.owner_kind != "user" or scope != "private" or caller is not None and caller != actor:
             raise HostAPIError("TARGET_DENIED", 403)
@@ -285,12 +315,16 @@ def _caller_capabilities(actor, entry, caller, caps):
     return caps
 
 
-# LLM: 只认已核宿主caller，普通私有不能委托，公共本人断言不能选择其他用户。
-# 函数用途: 固定本次数据owner，保留管理员原代用户语义。
-def _call_target(source, call, grant, actor):
+# LLM: private及旧缺省记录仅自身Owner；只有公共管理员可沿原目标名单代操作，公共个人不能换人。
+# 函数用途: 固定本次数据Owner并在私有跨用户请求进入resolver前拒绝。
+def _call_target(source, call, grant, actor, entry=None):
     if actor != OwnerIdentity.local_main():
         if call.as_user_id is not None:
             raise HostAPIError("CAPABILITY_DENIED", 403)
+        return actor
+    if getattr(entry, "installation_scope", "private") == "private":
+        if call.as_user_id is not None and call.as_user_id != actor.owner_id:
+            raise HostAPIError("TARGET_DENIED", 403)
         return actor
     caller = source.caller_owner
     if caller is not None and caller != OwnerIdentity.local_main():

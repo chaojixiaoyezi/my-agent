@@ -33,7 +33,7 @@
    - 当用户直接运行 `my-agent --dir /path/to/proj` 时，无需再写子命令 `chat`，直接进入绑定 `/path/to/proj` 的交互式 TUI / 会话界面。
 2. **同一目录下的多会话（Directory-Scoped Multi-Sessions）**：
    - 每个主会话（`ConversationThread`）在 `metadata` 中持久化结构化字段：
-     - `workspace_root: str`（规范化绝对路径，如 `/Users/xiaoyezi/my-agent-dsh`）
+     - `workspace_root: str`（规范化绝对路径，如 `/path/to/project`）
      - `workspace_roots: list[str]`
    - 在 `--dir <path>` 下启动或使用 `/sessions`（及插件接口）时：
      - 默认优先列出绑定到当前 `workspace_root == <path>` 的会话列表（按最近活跃时间倒序），支持 **【➕ 在当前目录新建会话】**、**【🔄 切换同目录历史会话】**，也支持加 `--all` 查看全机所有目录的会话。
@@ -47,9 +47,9 @@
    - 每个资产描述符 `AssetDescriptor` 新增结构化字段 `scope_layer: "workspace" | "owner" | "global"` 与 `workspace_root: str`，让 Web 门户、TUI 和插件一眼分清“这是当前项目专属的脚本/工作流，还是我个人的全局资产”，并支持将目录级资产一键提升（Promote）到个人全局资产库。
 
 #### 1.2 核心代码落点
-- [`agent_py_agent/cli/parser.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/parser.py)：在 `_build_root_parser()` 中注册顶层 `--dir`（别名兼容 `--workspace`），并在 `build_interactive_parser` / `cmd_default` 中把 `--dir` 透传给会话启动流程。
-- [`agent_py_agent/cli/workspace_resolution.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/workspace_resolution.py)：统一 `resolve_cli_workspace_dir(args)`，校验目录存在性、软链接规范化及路径访问策略（`path_access_policy.py`）。
-- [`agent_py_agent/agent/assets/script_store.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/assets/script_store.py) 与 [`workflow_store.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/assets/workflow_store.py)：扩展可选 `workspace_root: Path | None = None` 参数；读取时合并 `<workspace_root>/.agent/{scripts,workflows}` 与 `<owner_home>/{scripts,workflows}`，写入时支持指定 `target_scope="workspace" | "owner"`（默认 `"owner"`，在项目内显式指定时写 `"workspace"`）。
+- [`agent_py_agent/cli/parser.py`](agent_py_agent/cli/parser.py)：在 `_build_root_parser()` 中注册顶层 `--dir`（别名兼容 `--workspace`），并在 `build_interactive_parser` / `cmd_default` 中把 `--dir` 透传给会话启动流程。
+- [`agent_py_agent/cli/workspace_resolution.py`](agent_py_agent/cli/workspace_resolution.py)：统一 `resolve_cli_workspace_dir(args)`，校验目录存在性、软链接规范化及路径访问策略（`path_access_policy.py`）。
+- [`agent_py_agent/agent/assets/script_store.py`](agent_py_agent/agent/assets/script_store.py) 与 [`workflow_store.py`](agent_py_agent/agent/assets/workflow_store.py)：扩展可选 `workspace_root: Path | None = None` 参数；读取时合并 `<workspace_root>/.agent/{scripts,workflows}` 与 `<owner_home>/{scripts,workflows}`，写入时支持指定 `target_scope="workspace" | "owner"`（默认 `"owner"`，在项目内显式指定时写 `"workspace"`）。
 
 ---
 
@@ -83,7 +83,7 @@
 
 #### 2.3 核心代码落点
 - 新增 `agent_py_agent/agent/conversation/thread_fork_service.py`：实现 `fork_conversation_thread(store, *, source_thread_id, up_to_message_id="", title="", fork_note="", actor_owner="") -> ConversationThread`。
-- 在 [`agent_py_agent/agent/plugin_host/conversations.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/plugin_host/conversations.py) 与 [`action_specs.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/plugin_host/action_specs.py) 暴露标准动作 `conversations.threads.fork`。
+- 在 [`agent_py_agent/agent/plugin_host/conversations.py`](agent_py_agent/agent/plugin_host/conversations.py) 与 [`action_specs.py`](agent_py_agent/agent/plugin_host/action_specs.py) 暴露标准动作 `conversations.threads.fork`。
 
 ---
 
@@ -155,7 +155,7 @@
 #### 4.3 核心代码落点
 - 新增 `agent_py_agent/agent/assets/datasource_store.py`：管理 `DatasourceSpec` 的增删改查、本机 SQLite 自动初始化、连通性测试（`test_connection`）、表结构探测（`inspect_schema`）与绑定关系反查。
 - 新增 `agent_py_agent/agent/tooling/datasources_tool.py`：给主代理提供 `datasources` 工具（支持 `list / get / create_local_sqlite / register / update_connection / test / inspect_schema / migrate`）。
-- 增强 [`agent_py_agent/agent/workflows/script_runner.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/workflows/script_runner.py)：在执行脚本前按 `script.data_sources` 解析钥匙串连接并注入运行时上下文，同时对 `stdout/stderr` 实施连接串与密码脱敏。
+- 增强 [`agent_py_agent/agent/workflows/script_runner.py`](agent_py_agent/agent/workflows/script_runner.py)：在执行脚本前按 `script.data_sources` 解析钥匙串连接并注入运行时上下文，同时对 `stdout/stderr` 实施连接串与密码脱敏。
 
 ---
 
@@ -183,10 +183,10 @@
 ### 能力 6（`CAP-TUI-TIMING`）：TUI 每轮任务结束后的“耗时 + 完成时间”消息流尾标行（对齐图 1）
 
 #### 6.1 现状根因分析与用户痛点
-- 参考截图：`/Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/refs/fig1-claude-code-turn-completion.png`（Claude Code 在每轮回复正文下方固定显示 `✻ Cogitated for 3m 46s · done 8:08 AM`）与 `fig2-my-agent-tui-bg-watch.png`。
+- 参考截图：`refs/fig1-claude-code-turn-completion.png`（Claude Code 在每轮回复正文下方固定显示 `✻ Cogitated for 3m 46s · done 8:08 AM`）与 `fig2-my-agent-tui-bg-watch.png`。
 - **现有实现的两个缺陷**：
-  1. **服务端未下发权威耗时，导致恢复会话/后台唤醒回合漏显示**：现有 [`turn_completion.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/turn_completion.py) 仅在客户端本地内存 `TurnCompletionLedger.accept()` 中记录起点；当遇到 `W1-6` 后台进程完成自动唤醒回合、观察模式回合（`observed=True`）或 `resume` 恢复的历史会话时，没有起点时钟导致不显示或显示“未知”。
-  2. **错误覆盖了底部快捷键栏 Footer**：现有 [`tui_block_renderer.py:3209`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/chat_parts/tui_block_renderer.py#L3209-L3214) 在 `snapshot.status.completion` 存在时，直接把底部 Footer 的 `? 快捷键 · F4 权限 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式` 整行顶替掉了！这既不符合图 1“显示在每轮消息正文末尾、上下文栏上方”的视觉习惯，又会破坏底部 `F6 原生模式` 常驻状态栏。
+  1. **服务端未下发权威耗时，导致恢复会话/后台唤醒回合漏显示**：现有 [`turn_completion.py`](agent_py_agent/cli/turn_completion.py) 仅在客户端本地内存 `TurnCompletionLedger.accept()` 中记录起点；当遇到 `W1-6` 后台进程完成自动唤醒回合、观察模式回合（`observed=True`）或 `resume` 恢复的历史会话时，没有起点时钟导致不显示或显示“未知”。
+  2. **错误覆盖了底部快捷键栏 Footer**：现有 [`tui_block_renderer.py:3209`](agent_py_agent/cli/chat_parts/tui_block_renderer.py#L3209-L3214) 在 `snapshot.status.completion` 存在时，直接把底部 Footer 的 `? 快捷键 · F4 权限 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式` 整行顶替掉了！这既不符合图 1“显示在每轮消息正文末尾、上下文栏上方”的视觉习惯，又会破坏底部 `F6 原生模式` 常驻状态栏。
 
 #### 6.2 目标设计与渲染规范
 1. **显示位置（紧贴每轮消息正文末尾、`◉ Context` 状态栏正上方）**：
@@ -199,14 +199,14 @@
    - Gateway 在回合真正启动时记录 `turn_started_at`（墙钟）与 `turn_started_monotonic`（单调时钟），在回合终态收口时计算精确的 `elapsed_seconds` 与 `completed_at`，随 `turn_completed` / `turn_failed` / `turn_interrupted` 事件及会话历史块一并持久化。
    - 无论是前台直接提问、后台唤醒续跑，还是退出重进 `resume` 历史会话，每一轮底下都能 100% 稳定看到该轮跑了多久、什么时候结束。
 3. **恢复底部 Footer 常驻快捷键显示**：
-   - 删除 [`tui_block_renderer.py:3209`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/chat_parts/tui_block_renderer.py#L3209-L3214) 中用 `snapshot.status.completion` 覆盖底部 Footer 的分支，保证底部 Footer 始终显示 `? 快捷键 · F4 权限 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式`。
+   - 删除 [`tui_block_renderer.py:3209`](agent_py_agent/cli/chat_parts/tui_block_renderer.py#L3209-L3214) 中用 `snapshot.status.completion` 覆盖底部 Footer 的分支，保证底部 Footer 始终显示 `? 快捷键 · F4 权限 · 滚轮/PgUp/Ctrl+Home 历史 · 拖选/右键复制 · F6 原生模式`。
 
 ---
 
 ### 能力 7（`CAP-TUI-BG-WATCH`）：TUI `F6 原生模式` 后置彩色【⚡ 后台驻留 N 项】指示器 + `↑↓` 移动查看 + `Ctrl+G` 退出（解决图 2 痛点）
 
 #### 7.1 现状痛点分析（图 2 场景）
-- 参考截图：`/Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/refs/fig2-my-agent-tui-bg-watch.png`。
+- 参考截图：`refs/fig2-my-agent-tui-bg-watch.png`。
 - 自从上线 `W1-6`（免 `sleep` 非阻塞后台等待 + `completion_wake` 自动唤醒）后，主代理启动长耗时后台命令/脚本后，会跟用户交代一句*“后台结束或异常退出，系统都会自动通知我，不用你一直催”*，然后**立即结束当前前台回合**。
 - **核心痛点**：前台回合一结束，TUI 画面完全静止，没有任何动画或提示告诉用户“后台其实还有 2 个任务正在跑、系统正在盯着它们”。用户看着静止的界面，根本无法判断**“它是还在后台正常跑，还是已经死掉了？”**
 
@@ -223,7 +223,7 @@
      ... · F6 原生模式 · › ⚡ 后台驻留 2 项 (Enter 查看)
      ```
 2. **无缝接入现有的 `↑ / ↓` 方向键导航链 + `Enter` 进入 + `Ctrl+G` 退出返回**：
-   - 扩展 [`TuiAgentNavigationState`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/chat_parts/tui_agent_navigation.py#L116-L250) 的 `_selection_ids_locked` 选择序列，把后台驻留入口 `"bg:watch"` 排在导航序列**第一位**：
+   - 扩展 [`TuiAgentNavigationState`](agent_py_agent/cli/chat_parts/tui_agent_navigation.py#L116-L250) 的 `_selection_ids_locked` 选择序列，把后台驻留入口 `"bg:watch"` 排在导航序列**第一位**：
      **`["bg:watch" (若有活跃后台驻留任务), *goal_ids, *subagent_run_ids]`**。
    - **上下键移动顺序**：
      - 当输入框为空时，用户按 `↑` 或 `↓` 键：**第一步先移动到 `F6 原生模式` 后面的 `⚡ 后台驻留 N 项`**；
@@ -237,15 +237,15 @@
      - 与从子代理详情页退出完全一致，按 `Ctrl+G` 立即弹出 `"bg:watch"` 视图，回到主聊天窗口！
 
 #### 7.3 核心代码落点
-- [`agent_py_agent/cli/chat_parts/tui_agent_navigation.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/chat_parts/tui_agent_navigation.py)：新增 `update_background_watch_rows(value)`，将 `"bg:watch"` 纳入 `_selection_ids_locked` 首位，并支持 `enter_selected()` 进入后台驻留详情 Runtime、`leave_current_view()`（`Ctrl+G`）返回。
-- [`agent_py_agent/cli/chat_parts/tui_block_renderer.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/cli/chat_parts/tui_block_renderer.py)：在 `_render_footer` 的 `F6 原生模式` 后面拼接彩色 Fragment `("class:tui-bg-watch", f" · ⚡ 后台驻留 {count} 项")`（选中时切换为 `class:tui-agent-selected`），并实现后台驻留详情页渲染。
-- [`agent_py_agent/agent/conversation/process_events.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/conversation/process_events.py) 与 Gateway 状态轮询接口：在会话状态快照中附带当前活跃受管后台进程摘要列表（`session_id`、`command_preview`、`pid`、`alive`、`started_at`、`elapsed_seconds`、`wake_on_completion`、`recent_output_tail`）。
+- [`agent_py_agent/cli/chat_parts/tui_agent_navigation.py`](agent_py_agent/cli/chat_parts/tui_agent_navigation.py)：新增 `update_background_watch_rows(value)`，将 `"bg:watch"` 纳入 `_selection_ids_locked` 首位，并支持 `enter_selected()` 进入后台驻留详情 Runtime、`leave_current_view()`（`Ctrl+G`）返回。
+- [`agent_py_agent/cli/chat_parts/tui_block_renderer.py`](agent_py_agent/cli/chat_parts/tui_block_renderer.py)：在 `_render_footer` 的 `F6 原生模式` 后面拼接彩色 Fragment `("class:tui-bg-watch", f" · ⚡ 后台驻留 {count} 项")`（选中时切换为 `class:tui-agent-selected`），并实现后台驻留详情页渲染。
+- [`agent_py_agent/agent/conversation/process_events.py`](agent_py_agent/agent/conversation/process_events.py) 与 Gateway 状态轮询接口：在会话状态快照中附带当前活跃受管后台进程摘要列表（`session_id`、`command_preview`、`pid`、`alive`、`started_at`、`elapsed_seconds`、`wake_on_completion`、`recent_output_tail`）。
 
 ---
 
 ## 三、全量开放的插件接口清单（Plugin Host API v2 + Plugin Broker API，共 20 个标准 Action）
 
-为了确保我们后续做任何 Web 插件、桌面端插件、多用户工作台插件都能 **100% 调标准宿主接口完成上述所有操作**，在 [`agent_py_agent/agent/plugin_host/action_specs.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/plugin_host/action_specs.py)（`/plugin-host/v2/call` 与 `/plugin-host/v2/stream`）及 [`plugin_broker_api.py`](file:///Users/xiaoyezi/my-agent-dsh/agent_py_agent/agent/gateway_parts/plugin_broker_api.py) 中统一新增并暴露以下 **20 个标准 Action 接口**：
+为了确保我们后续做任何 Web 插件、桌面端插件、多用户工作台插件都能 **100% 调标准宿主接口完成上述所有操作**，在 [`agent_py_agent/agent/plugin_host/action_specs.py`](agent_py_agent/agent/plugin_host/action_specs.py)（`/plugin-host/v2/call` 与 `/plugin-host/v2/stream`）及 [`plugin_broker_api.py`](agent_py_agent/agent/gateway_parts/plugin_broker_api.py) 中统一新增并暴露以下 **20 个标准 Action 接口**：
 
 ### 3.1 目录工作区与主会话分叉接口（`conversations.*` & `workspaces.*`）
 
@@ -342,3 +342,20 @@
     1. 验证每轮任务结束（含普通前台回合、后台唤醒续跑回合、恢复历史会话）均在消息流尾部、`◉ Context` 上方渲染 `✻ 耗时 ... · 完成于 ...`，且**绝不覆盖**底部 Footer 的 `? 快捷键 · F4 权限 · ... · F6 原生模式`；
     2. 验证存在免 Sleep 后台驻留任务时，在 `F6 原生模式` 后渲染彩色 `· ⚡ 后台驻留 N 项`；
     3. 验证空输入框下按 `↑ / ↓` 键先选中 `⚡ 后台驻留 N 项`、再移动到 Goal / 子代理行，按 `Enter` 打开后台任务实时日志观察页，按 `Ctrl+G` 退回主聊天界面。
+
+### 📦 工作包 WP-6（安全 AI 大脑总控扩展）：多园区/多事业部/多飞书成员安全事件汇聚账本、全链路铁证审计、人员绩效考评（`CAP-SECOPS-LEDGER`）与五维细粒度权限管控（`CAP-ADMIN-RBAC`）
+- **核心业务场景**：
+  - `1 个 Admin (local/main)` + `N 个飞书接入成员 (providers/feishu/users/<id>)`，底座连接多个园区的安全设备（防火墙、EDR、WAF）与日志源（态势感知、SLS、NDR、SIEM）。
+  - 定时监控或安全设备触发告警后推送飞书，分析员直接在飞书与专属 Agent 对话排查处置。
+- **结构化归并与汇总机制**：
+  1. **数据源自动继承标签**：每个安全设备/日志源在钥匙串（`datasources.json`）中绑定 `campus_id`（所属园区）与 `bu_id`（所属事业部）。
+  2. **三档统计视角**：支持 `scope="global"`（Admin + 全部飞书成员联邦汇总）、`scope="admin"`（仅统计 Admin 自身）、`scope="feishu/<uid>"`（单成员个人视角，普通成员登录仅允许查看自身）。
+  3. **多角度聚合统计**：
+     - **按园区（Campus）与事业部（Business Unit）交叉汇总**事件总数、P0/P1 高危数、闭环率与平均 MTTR；
+     - **按安全设备/日志源防线归并**：自动合并同一数据源（如态势感知）上 `Admin 配置的规则数 + 各飞书成员配置的规则数` 及各自触发的事件数；
+     - **跨分析员同源威胁实体（IOC）自动碰撞**：不同成员或不同园区的事件命中同一可疑 IP/域名/哈希时，自动聚合成跨分析员关联事件簇。
+  4. **人员与 Agent 作战单元绩效考评（Performance & SLA Scorecard）**：
+     - 按时间窗口量化考核每位飞书成员的：① 应急闭环事件数与高危攻坚数、② 接警 MTTA 与闭环 MTTR（秒）及 SLA 达标率、③ 自建四大件（监控/Workflow/固定脚本/Skill）沉淀贡献度、④ 审计合规率（零越权记录）。
+  5. **全链路铁证审计（Immutable Audit Trail）与五维 RBAC 权限矩阵**：
+     - 每一笔飞书指令、日志源查询、设备封禁动作与越权拦截均记入审计账本（含 SHA-256 证据摘要）；
+     - 管理员可通过 `users.local.permissions.{get,set,effective}` 控制普通用户的 5 层权限：① 插件准入、② 页面功能动作锁（如禁用会话分叉 `conversations.threads.fork`、禁用修改代码 `assets.write`、禁用提炼资产 `assets.extract.*`）、③ 管辖园区与 `source_id` 数据源白名单、④ 底层工具（`run_command` / `write_file`）与 Jev 决策模型开关、⑤ 每日 Token 与并发配额，同步落盘至对应用户的 `tool_policy.json`。

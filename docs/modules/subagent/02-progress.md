@@ -1,3 +1,11 @@
+## 2026-10-25 WP8：4096 条有界缓存、缺失 locator 单次读取与锁外复制（工作区已实现）
+
+- `SubAgentPersistenceService` 的 `_MAX_RUN_CACHE_ENTRIES` 与 `_MAX_NEGATIVE_RUN_CACHE_ENTRIES` 分别为 4096，`_MAX_RUN_CACHE_ITEM_BYTES` 仍为 256 KiB；正负预算独立，不改成无界缓存。下方 2026-10-21 的 512 条说明是历史状态，当前容量以本节为准。
+- `services/agent_run_state.py::read_agent_state_payload` 仅在 canonical 真正缺失、原声明与解析后父路径一致时给原 `FileNotFoundError` 附加 `canonical_path`。`_cache_missing_canonical` 保留原三个位置参数及无路径时的解析逻辑，新增 keyword-only 快捷路径免二次读取；插入前和命中时仍检查 canonical 是否重现，缩小独立负预算的既有测试保持有效。
+- `_cached_run_copy` 锁内固定私有快照强引用，退出 `_run_cache_lock` 后才 deepcopy，冷热两条返回路径均保持嵌套副本隔离。五元文件指纹、粗 mtime 保护、canonical/locator 字节预算、删除清理及坏记录错误报告不变。
+- 定向证据：640 条失效 locator 首扫从 1280 次降为 640 次正文读取，次扫从 1280 次降为零，错误条目未丢失；冷热复制期间另一真实线程均可拿锁。WP8 指定三文件组合 113 项通过的既有本会话结果见 [测试记录](../../../TESTS.md)；本次仅同步文档，没有重跑 pytest。
+- 当前源码尚待统一提交/发布；真实 Gateway CPU 降幅、超过 4096 的规模与完整巡检负载未验证，未在本片修改重复巡检调用。
+
 ## 2026-10-25 本地普通用户（`local/<user_id>`）子代理配额解析对齐
 
 `subagents/services/base.py::_load_user_quota_dict` 对 `owner.provider == "local"` 且 `owner.owner_kind == "user"` 的本地普通用户统一调用 `LocalUserStore(root).get_quota(owner.user_id).to_dict()` 读取用户级并发与深度配额（`max_active_agents`、`max_subagents`、`max_depth`、`max_disk_mb`），不再仅对外部 IM Provider 用户生效。

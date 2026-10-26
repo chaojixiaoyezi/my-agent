@@ -1,5 +1,6 @@
 # LLM: 组合工具和宿主受控分析回调；目录reader归领域所有，模型请求复用统一准入、账本和供应商边界。
 # 模块用途: 装配Owner一等公民工具、本机管理员运行治理和只读目录；注册不创建服务、不触发运行维护。
+import functools
 import json
 
 from ..capability.self_map_memory import register_memory_section
@@ -14,6 +15,7 @@ from ..conversation.self_map_context import register_context_section
 from ..conversation.self_map_work import register_work_section
 from ..plugin_self_map import register_install_sections
 from ..settings.self_map_settings import register_setting_sections
+from ..tooling.datasources_tool import DatasourcesTool
 from ..tooling.runtime_governance_tool import RuntimeGovernanceTool
 from ..tooling.scripts_tool import ScriptsTool
 from ..tooling.self_map_mcp import register_mcp_section
@@ -75,15 +77,29 @@ def _workflow_analysis_handler(agent):
     return analyze
 
 
-# LLM: main/user脚本工具保持，工作流动态读取当前目录和受限快照；治理仍只给可信管理员，目录开关不扩授权。
-# 函数用途: 登记Owner脚本/工作流、管理员治理与目录入口，不刷新或启动领域服务。
+# LLM: 活动回合走统一工具账本边界裁决execution_cwd，无活动回合退回构造期有效工作区，不绕过安全门。
+# 函数用途: 取得当前Agent回合经宿主校验的实际工作区根目录。
+def _active_agent_workspace_root(agent):
+    params = getattr(agent, '_current_run_params', None)
+    if params is not None:
+        from .tool_runtime_ledger import write_boundary_with_runtime_ledger
+        cwd = str(write_boundary_with_runtime_ledger(agent, params).get('execution_cwd') or '').strip()
+        if cwd:
+            return cwd
+    return getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None))
+
+
+# LLM: main/user脚本保持，数据源与工作流动态读取当前目录和受限快照；治理仍只给可信管理员，目录开关不扩授权。
+# 函数用途: 登记Owner脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
 def register_self_map(agent):
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
         if owner_home is not None:
+            ws_provider = functools.partial(_active_agent_workspace_root, agent)
             agent.tools.register(ScriptsTool(owner_home))
+            agent.tools.register(DatasourcesTool(owner_home, workspace_root_provider=ws_provider))
             agent.tools.register(WorkflowsTool(owner_home,
-                workspace_root_provider=lambda: getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None)),
+                workspace_root_provider=ws_provider,
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
                 analysis_handler=_workflow_analysis_handler(agent)))
             if is_permission_admin(getattr(agent, 'home_paths', None)):

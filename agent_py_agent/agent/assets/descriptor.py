@@ -1,5 +1,5 @@
-# LLM: 四类资产共用纯值契约；统一脱敏保留数字预算，访问目标和凭据引用先硬拒绝原始秘密，无IO。
-# 模块用途: 定义可冻结、可JSON往返的标准提取Key，供存储、适配器和拓扑共用。
+# LLM: 四类资产共用纯值契约；来源字段仅为展示，真实读写根由存储构造参数决定；统一脱敏且无IO。
+# 模块用途: 定义可冻结、可JSON往返的资产描述符、来源投影及目标CAS版本。
 from __future__ import annotations
 
 import math
@@ -235,8 +235,8 @@ class RuntimeSummary(_Record):
     last_error: str = ""
 
 
-# LLM: 标准提取Key是四类资产共同投影；不携带owner_home或授权，不写入任何状态。
-# 类用途: 统一描述名称、访问源、凭据引用、IO、依赖与运行摘要。
+# LLM: scope_layer/source_scope/workspace_root只描述来源，不能指定存储写根或扩大权限；旧记录revision默认为0。
+# 类用途: 统一描述名称、来源层、版本、访问源、凭据引用、IO、依赖与运行摘要。
 @dataclass(frozen=True)
 class AssetDescriptor(_Record):
     id: str
@@ -254,3 +254,17 @@ class AssetDescriptor(_Record):
     runtime_summary: RuntimeSummary = field(default_factory=RuntimeSummary)
     tags: tuple[str, ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
+    scope_layer: str = 'owner'
+    source_scope: str = 'owner'
+    workspace_root: str = ''
+    revision: int = 0
+
+    # LLM: 展示来源只做值域校验，路径授权属于宿主；严格整数版本不能用bool或语义版本字符串冒充。
+    # 函数用途: 在构造和JSON恢复时校验来源字段与非负CAS版本。
+    def __post_init__(self):
+        super().__post_init__()
+        scopes = {'workspace', 'owner', 'global', 'builtin'}
+        if self.scope_layer not in scopes or self.source_scope not in scopes:
+            raise ValueError('资产来源层无效')
+        if self.revision < 0:
+            raise ValueError('资产revision必须是非负整数')

@@ -1,4 +1,4 @@
-# LLM: 宿主内 Broker；owner 参数须来自已认证 Gateway scope 或 from_grant，绝不可解包请求体作为宿主参数。
+# LLM: 宿主内Broker；旧owner参数须来自认证scope，新增动作只走from_host_v2的真实发行器，禁止v9降级。
 # 模块用途: 在固定用户范围包装资产、遥测和受控执行；不安装 HTTP 路由，不自行授予插件执行权。
 import json
 import time
@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from ..plugin_host.action_specs_v2_ext import V2_ACTIONS as HOST_V2_ACTIONS
 from ..workflows.models import redact_bearer_values
 
 READ_ACTIONS = frozenset(('assets.list', 'assets.get', 'assets.topology',
@@ -58,7 +59,7 @@ def _request_scope(home, owner_id, is_admin, action, payload):
     return owner.home_dir, owner.owner_id
 
 
-# LLM: 仅宿主构造服务；普通构造参数必须是已认证 scope，from_grant 每次调用重验激活，invoker 必须绑定同一 owner 权限。
+# LLM: 仅宿主构造；旧grant复验激活，v2来源每次重新decode/authorize/dispatch，不从构造参数或payload推导新权限。
 # 类用途: 固定一次插件会话的身份与受控执行入口。
 class PluginBrokerService:
     # LLM: 所有参数均来自宿主认证上下文，不得解包外部payload；空run/task也绑定为空，不从请求补全。
@@ -93,6 +94,36 @@ class PluginBrokerService:
         service.grant = grant
         return service
 
+    # LLM: 只收原DTO；此实例全部调用进入v2，不初始化或回退旧owner/执行路径，真伪登记仍由原发行器核验。
+    # 函数用途: 将已认证v2来源和宿主领域端口接到Broker传输。
+    @classmethod
+    def from_host_v2(cls, ingress, ports):
+        from ..plugin_host.contracts import HostDomainPorts, PluginIngressSource
+        if not isinstance(ingress, PluginIngressSource) or not isinstance(ports, HostDomainPorts):
+            raise ValueError('需要真实Host v2来源和领域端口')
+        service = cls.__new__(cls)
+        service._host_v2_ingress, service._host_v2_ports = ingress, ports
+        return service
+
+    # LLM: 复用完整原授权与幂等门；闭合schema拒绝身份字段，异常只公开结构化代码，不打印payload或秘密。
+    # 函数用途: 将Broker动作转换成原Host v2调用并返回公共结果。
+    def _dispatch_host_v2(self, action, payload, idempotency_key):
+        from ..plugin_host.contracts import authorize_call, decode_call, dispatch_call
+        from ..plugin_host.errors import HostAPIError
+        from ..plugin_host.schemas import canonical_json, thaw
+        envelope = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': {} if payload is None else payload}
+        if idempotency_key is not None:
+            envelope['idempotency_key'] = idempotency_key
+        try:
+            call = decode_call(canonical_json(envelope).encode('utf-8'))
+            authorized = authorize_call(self._host_v2_ingress, call)
+            result = dispatch_call(authorized, self._host_v2_ports)
+            return {'ok': True, 'data': public_payload(thaw(result.data)), 'http_status': result.http_status}
+        except HostAPIError as error:
+            return {'ok': False, 'error_code': error.code, 'http_status': error.status, 'outcome': error.outcome}
+        except (TypeError, ValueError):
+            return {'ok': False, 'error_code': 'BROKER_INVALID_REQUEST', 'http_status': 400}
+
     # LLM: 只覆盖身份字段，不向通用工具凭空添加未声明参数；可信invoker仍必须绑定同一上下文。
     # 函数用途: 裁决执行请求顶层与工具参数身份，并返回结构化冲突事实。
     def _execution_scope(self, payload):
@@ -112,10 +143,16 @@ class PluginBrokerService:
                     values[key] = trusted
         return {'scope_resolution': scope, 'scope_warnings': warnings}
 
-    # LLM: 先校验身份再加载依赖；异常只给固定代码，避免数据库路径或秘密进入公开结果。
+    # LLM: v2实例只走原发行器；旧实例绝不执行新动作，其他行为保留原范围门，异常不回显秘密。
     # 函数用途: 分发插件请求，返回统一成功或失败信封。
-    def dispatch(self, action, payload=None):
+    def dispatch(self, action, payload=None, *, idempotency_key=None):
+        if getattr(self, '_host_v2_ingress', None) is not None:
+            return self._dispatch_host_v2(action, payload, idempotency_key)
+        if isinstance(action, str) and action in HOST_V2_ACTIONS:
+            return {'ok': False, 'error_code': 'HOST_V2_REQUIRED', 'http_status': 403}
         try:
+            if idempotency_key is not None:
+                raise ValueError
             if payload is None:
                 payload = {}
             if not isinstance(payload, dict) or not isinstance(action, str):

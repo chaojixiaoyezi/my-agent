@@ -1,5 +1,5 @@
-# LLM: 组合根只接宿主注册的四域对象；没有领域时明确未就绪，不用旧Broker或main invoker代替。
-# 模块用途: 提供静态分发、真实可用性发现与返回前撤权复验。
+# LLM: 组合根保持四个原端口，WP-4通过固定适配器复用它们；缺领域不借旧Broker或main invoker兜底。
+# 模块用途: 提供原动作及20项扩展的静态分发、真实可用性发现与返回前撤权复验。
 from __future__ import annotations
 
 from .action_specs import action_spec, action_specs
@@ -10,10 +10,13 @@ from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, thaw, validate_tree
 
 
-# LLM: 纯静态前缀分组，不接受用户方法名；动作存在性先由ActionSpec保证。
-# 函数用途: 选择一个动作所属的固定领域。
+# LLM: 扩展仅按静态动作集合分组，不扩大未知前缀；动作存在性先由ActionSpec保证。
+# 函数用途: 选择原四域或WP-4固定适配领域。
 def domain_name(action: str) -> str:
     action_spec(action)
+    from .action_specs_v2_ext import V2_ACTIONS
+    if action in V2_ACTIONS:
+        return "capabilities_v2"
     if action == "host.capabilities.get":
         return "host"
     if action.startswith("conversations."):
@@ -25,10 +28,13 @@ def domain_name(action: str) -> str:
     return "observations"
 
 
-# LLM: 没有端口或对应方法就不可用；stream独立于call，不能用同步方法冒充。
-# 函数用途: 核验当前组合根是否接入指定动作。
+# LLM: 扩展还须检查真实后端，原stream与call独立；不能将目录登记视为业务就绪。
+# 函数用途: 核验当前组合根及领域依赖是否接入指定动作。
 def domain_ready(action: str, ports: HostDomainPorts) -> bool:
     name = domain_name(action)
+    if name == "capabilities_v2":
+        from .capabilities_v2_handlers import capabilities_v2_ready
+        return capabilities_v2_ready(action, ports)
     if name == "host":
         return True
     port = {"conversation": ports.conversation, "local_users": ports.local_users,
@@ -88,10 +94,13 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     return result
 
 
-# LLM: 分派没有动态调用插件选择的属性；每个端口只能拿到已授权对象。
-# 函数用途: 执行一个固定领域调用。
+# LLM: 分派不反射插件选择的属性；扩展适配器仍只拿到原已授权对象和宿主四端口。
+# 函数用途: 执行原领域或WP-4的固定调用。
 def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     name = domain_name(authorized.call.action)
+    if name == "capabilities_v2":
+        from .capabilities_v2_handlers import call_capabilities_v2
+        return call_capabilities_v2(authorized, ports)
     if name == "host":
         return discover(authorized, ports)
     if name == "conversation":

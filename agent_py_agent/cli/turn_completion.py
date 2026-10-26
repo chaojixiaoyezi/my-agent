@@ -2,6 +2,7 @@
 # 模块用途: 为 run、普通聊天和 TUI 共用结束时间、耗时及区分收口状态的渲染合同。
 from __future__ import annotations
 
+import hashlib
 import math
 import threading
 import time
@@ -99,3 +100,47 @@ def render_completion(value: TurnCompletion | dict) -> str:
     }.get(data.get("status"), "状态未知")
     ended = datetime.fromtimestamp(data["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     return f"{label}于 {ended}  ·  用时 {format_elapsed(data.get('elapsed_seconds'))}"
+
+
+# LLM: 纯展示接口，独立于旧中文 format_elapsed 合同；不得根据格式化文案推断运行终态。
+# 函数用途: 将耗时显示为秒、分钟或小时的简短英文单位。
+def format_turn_duration(elapsed_seconds: float) -> str:
+    if not math.isfinite(elapsed_seconds):
+        return "未知"
+    seconds = max(0, int(round(elapsed_seconds)))
+    if 0 < elapsed_seconds < 1:
+        seconds = 1
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+# LLM: 纯格式化给定终态和种子，不能用 Python 随机 hash 破坏跨进程回放。
+# 函数用途: 生成 Claude 风格的单行回合耗时。
+def format_turn_completion_line(elapsed_seconds: float, *, status: str = "done", seed_key: str = "", verb: str | None = None) -> str:
+    duration = format_turn_duration(elapsed_seconds)
+    if status in {"cancelled", "interrupted"}:
+        return f"✻ Interrupted after {duration}"
+    if status in {"failed", "error"}:
+        return f"✻ Failed after {duration}"
+    if status not in {"done", "succeeded", "completed"}:
+        return f"✻ {status} after {duration}"
+    verbs = ("Baked", "Brewed", "Churned", "Cogitated", "Cooked", "Crafted", "Crunched", "Sautéed", "Worked")
+    index = int.from_bytes(hashlib.sha256(seed_key.encode("utf-8")).digest()[:8], "big") % len(verbs)
+    return f"✻ {verb or verbs[index]} for {duration}"
+
+
+# LLM: 仅格式化已确认的程序计时，不补造未知耗时；旧 render_completion 保持原样兼容 CLI。
+# 函数用途: 在 TUI 消息尾标显示稳定动词、耗时与原完成时刻。
+def render_turn_timing(data: dict) -> str:
+    seconds = data.get("elapsed_seconds")
+    line = format_turn_completion_line(seconds if seconds is not None else float("nan"),
+        status=str(data.get("status") or "unknown"), seed_key=str(data.get("logical_id") or ""))
+    label = {"completed": "完成于", "failed": "失败于", "interrupted": "已中断于",
+             "blocked": "受阻于", "unfinished": "未完成于"}.get(data.get("status"), "记录于")
+    ended = datetime.fromtimestamp(data["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    return f"{line} · {label} {ended}"

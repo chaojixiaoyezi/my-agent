@@ -373,73 +373,74 @@ def _attach_task_workspace_roots(boundary: dict[str, object], params: object) ->
             boundary["allowed_write_roots"] = [work_dir, output_dir]
 
 
-# LLM: 会话 cwd 与运行归档分离；始终使用宿主验证的 cwd，默认用户 home。权限根不随任务晋升收窄。
-# 函数用途: 为主会话提供真实执行位置和完整家目录读范围，防止继承 Gateway 的启动目录。
-def _attach_main_conversation_execution_cwd(
-    boundary: dict[str, object],
-    agent: object,
-    params: object,
-) -> None:
-    context_scope = _text(getattr(params, "context_scope", "default")).lower() or "default"
-    if context_scope in {"task_local", "control_plane"}:
-        # 子代理 cwd 已由 runner_context 的结构化项目写合同给出。这里若再用内部
-        # run_workspace.task_root 覆盖，就会把用户项目相对路径错误写进状态目录。
+# LLM: 主会话只使用宿主typed目录或CLI显式配置；管理员普通模式保留安全墙外项目及自己的家，不改变子代理上界。
+# 函数用途: 把当前主会话显式目录落实为执行位置和窄写根；无声明仍用owner home，不继承daemon cwd。
+def _attach_main_conversation_execution_cwd(boundary: dict[str, object], agent: object, params: object) -> None:
+    if _text(getattr(params, "context_scope", "default")).lower() in {"task_local", "control_plane"}:
         return
     attrs = getattr(params, "task_attributes", None)
-    has_typed_client_cwd = bool(
-        isinstance(attrs, dict)
-        and _text(attrs.get("conversation_thread_id"))
-        and _text(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR))
-    )
-    if (
-        not (_is_main_conversation_task_run(params) or has_typed_client_cwd)
-        or str(getattr(params, "source", "") or "").strip().lower() == "cli_run"
-        or not isinstance(attrs, dict)
-        or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True
-    ):
+    if not isinstance(attrs, dict) or attrs.get(CONVERSATION_TRANSIENT_WORKSPACE_ATTR) is True:
+        return
+    cli_roots = (_string_list(getattr(getattr(agent, "config", None), "workspace_root", ()))
+        if _text(getattr(params, "source", "")).lower() == "cli_run" else [])
+    typed_cwd = bool(_text(attrs.get("conversation_thread_id")) and _text(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR)))
+    if not (_is_main_conversation_task_run(params) or typed_cwd or cli_roots):
         return
     tools = getattr(agent, "tools", None)
-    project_cwd = _resolved_path(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR))
-    if project_cwd is None:
-        project_cwd = _resolved_path(boundary.get("canonical_owner_home_root"))
-    if project_cwd is None:
-        project_cwd = _resolved_path(getattr(tools, "workspace_root", None))
-    if project_cwd is None:
-        project_cwd = _resolved_path(
-            getattr(agent, "effective_workspace_root", getattr(agent, "root", None))
-        )
-    if project_cwd is None:
+    project = (_resolved_path(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR) or (cli_roots[0] if cli_roots else ""))
+        or _resolved_path(boundary.get("canonical_owner_home_root"))
+        or _resolved_path(getattr(tools, "workspace_root", None))
+        or _resolved_path(getattr(agent, "effective_workspace_root", getattr(agent, "root", None))))
+    if project is None:
         return
+    requested = [_text(attrs.get(CONVERSATION_EXECUTION_CWD_ATTR)) or str(project),
+        *_string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR)), *cli_roots]
+    declared = bool(typed_cwd or cli_roots)
+    validated = _validated_main_workspace_roots(agent, requested) if declared else []
     owner_scope = _resolved_path(getattr(tools, "owner_scope_root", None))
-    if owner_scope is not None and not _is_relative_to(project_cwd, owner_scope):
-        # 升级前落盘的旧 thread 可能仍带 Gateway daemon cwd。WorkspaceOnly 下只能
-        # 回到当前 owner home；不能让一条历史属性重新授予 /root 或源码树权限。
-        tool_workspace = _resolved_path(getattr(tools, "workspace_root", None))
-        project_cwd = (
-            tool_workspace
-            if tool_workspace is not None and _is_relative_to(tool_workspace, owner_scope)
-            else owner_scope
-        )
-    cwd_text = str(project_cwd)
-    boundary["execution_cwd"] = cwd_text
-    requested_roots = [
-        *_string_list(attrs.get(CONVERSATION_RUNTIME_WORKSPACE_ROOTS_ATTR)),
-        _text(boundary.get("canonical_owner_home_root")),
-    ]
-    execution_roots: list[str] = []
-    for value in [cwd_text, *requested_roots]:
-        root = _resolved_path(value)
-        if root is None:
-            continue
-        if owner_scope is not None and not _is_relative_to(root, owner_scope):
-            continue
-        if str(root) not in execution_roots:
-            execution_roots.append(str(root))
-    boundary["execution_workspace_roots"] = execution_roots
-    if owner_scope is not None:
+    binding_home = owner_scope or _resolved_path(boundary.get("canonical_owner_home_root"))
+    if declared and str(project) not in validated or (
+            binding_home is not None and not _is_relative_to(project, binding_home) and str(project) not in validated):
+        # 只修正执行位置，不收窄Full Access工具权限；坏历史目录不能成为本轮隐式工作根。
+        project = binding_home
+    if project is None:
         return
-    roots = _string_list(boundary.get("allowed_write_roots"))
-    boundary["allowed_write_roots"] = list(dict.fromkeys([*roots, *execution_roots]))
+    boundary["execution_cwd"] = str(project)
+    roots = []
+    for value in [str(project), *requested[1:], _text(boundary.get("canonical_owner_home_root"))]:
+        root = _resolved_path(value)
+        if root is None or (root != binding_home and declared and str(root) not in validated):
+            continue
+        if binding_home is not None and not _is_relative_to(root, binding_home) and str(root) not in validated:
+            continue
+        if str(root) not in roots:
+            roots.append(str(root))
+    boundary["execution_workspace_roots"] = roots
+    if owner_scope is None or any(not _is_relative_to(Path(root), owner_scope) for root in validated):
+        boundary["allowed_write_roots"] = list(dict.fromkeys([*_string_list(boundary.get("allowed_write_roots")), *roots]))
+
+
+# LLM: 每次工具调用重验所有typed规范目录；普通owner仅家内，管理员允许安全墙外，符号链接替换不能重定向授权。
+# 函数用途: 从主会话声明中挑出可实际授权的项目目录，坏目录不恢复为更宽路径。
+def _validated_main_workspace_roots(agent: object, roots: list[str]) -> list[str]:
+    from ..conversation.workspace_context import validate_workspace_directory
+    from ..user_space.owner_access import is_local_admin_owner
+
+    home = getattr(agent, "home_paths", None)
+    owner = _resolved_path(getattr(home, "owner_home_dir", None))
+    if home is None or owner is None:
+        return []
+    result: list[str] = []
+    for root in roots:
+        try:
+            resolved = validate_workspace_directory(root, owner_home=owner, is_admin=is_local_admin_owner(home),
+                home_root=getattr(home, "root", None))
+            if Path(root).expanduser() != resolved:
+                continue
+        except ValueError:
+            continue
+        result.append(str(resolved))
+    return result
 
 
 # LLM: 子代理的产品写根在创建时就由宿主写进 allowed_write_roots；工具执行根必须从同一权威派生，
