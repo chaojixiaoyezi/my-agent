@@ -19,7 +19,9 @@ import time
 import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..common.json_io import (
@@ -53,9 +55,24 @@ def derived_record_terminal(metadata: dict[str, Any]) -> bool:
             and not _derived_notification_pending(metadata))
 
 
-# LLM: 未完成标志或不认识的通知状态均保留；无通知字段表示没有这类挂起事实。
+# LLM: 顶层及两个结构化容器共用同一收口语义；未知通知状态保留，不从正文推断。
 # 函数用途: 保住待收口、唤醒和未送达的完成通知。
 def _derived_notification_pending(metadata):
+    return any(_derived_scope_pending(scope) for scope in _derived_metadata_scopes(metadata))
+
+
+# LLM: 只枚举协议声明的元数据容器，不递归任意JSON或复制正文。
+# 函数用途: 共用顶层、attributes与conversation_runtime的保护字段读取点。
+def _derived_metadata_scopes(metadata):
+    return (metadata, *(value for key in ("attributes", "conversation_runtime")
+                        if isinstance(value := metadata.get(key), dict)))
+
+
+# LLM: 原顶层标志规则集中保留；供嵌套容器复用，不赋予缺失状态终态资格。
+# 函数用途: 判断一层结构化元数据是否仍有通知或收口欠账。
+def _derived_scope_pending(metadata):
+    if isinstance(metadata.get("runtime_closeout_pending"), dict):
+        return True
     flags = ("runtime_closeout_pending", "completion_notice_pending", "notification_pending",
              "wake_pending", "completion_delivery_pending", "pending_completion_notification")
     if any(metadata.get(key) for key in flags):
@@ -77,12 +94,13 @@ def _derived_timestamp(value):
     return number if math.isfinite(number) and number > 0 else None
 
 
-# LLM: 请求/任务重建共用30天口径；采用所有有效时间的最新者，文件mtime仅在载荷没有有效时间时兜底。
+# LLM: 创建时间不是终态证明；只取完成/更新字段最新者，缺可信时间才用mtime，坏时间保守保留。
 # 函数用途: 判断可信终态是否已离开重建保留窗，不改变归档本身。
 def derived_terminal_expired(metadata, cutoff, fallback_timestamp=None):
     if not derived_record_terminal(metadata):
         return False
-    values = [metadata.get(key) for key in ("ended_at", "updated_at", "completed_at", "created_at")]
+    values = [metadata.get(key) for key in ("completed_at", "finished_at", "ended_at", "terminated_at", "settled_at",
+                                          "closed_at", "updated_at", "recorded_at", "timestamp")]
     if any(isinstance(value, bool) or (value not in (None, 0, "") and _derived_timestamp(value) is None) for value in values):
         return False
     stamps = [stamp for value in values if (stamp := _derived_timestamp(value)) is not None]
@@ -534,24 +552,73 @@ class _LocalStoreRecordLogger:
 class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
     """LocalStore record write, lookup, and log APIs."""
 
-    # LLM: 仅白名单的无引用可信终态可删；调用方须传入当前Compact/恢复/记忆证据引用，不在热路径自动执行。
+    # LLM: 仅白名单无引用可信终态可删；旧关键词保持兼容，新保留上下文只接受now/protected_refs，未知键仍拒绝。
     # 函数用途: 分批移除30天外的派生归档；dry_run纯查询，正文只在提交后安全清理。
     def prune_derived_records(
         self, *, before: float | None = None, ttl_seconds: float = DERIVED_RECORD_TTL_SECONDS,
         source_types: Collection[str] | None = None, protected_record_ids: Collection[str] = (),
         protected_source_ids: Collection[str] = (), max_delete: int = 1000, dry_run: bool = False,
+        **retention_context: Any,
     ) -> dict[str, Any]:
+        """retention_context接受now(datetime/float)与protected_refs；后者缺省时只读收集当前owner的pins。"""
+        for key in retention_context:
+            if key not in {"now", "protected_refs"}:
+                raise TypeError(f"prune_derived_records() got an unexpected keyword argument {key!r}")
+        now = retention_context.get("now")
+        protected_refs = retention_context.get("protected_refs")
         sources = DERIVED_PRUNABLE_SOURCE_TYPES if source_types is None else frozenset(source_types)
         if not sources <= DERIVED_PRUNABLE_SOURCE_TYPES:
             raise ValueError("derived pruning accepts only explicit derived source types")
         if not isinstance(max_delete, int) or isinstance(max_delete, bool) or max_delete < 0:
             raise ValueError("max_delete must be a nonnegative integer")
         ttl = float(ttl_seconds)
-        cutoff = float(before) if before is not None else time.time() - ttl
-        if not math.isfinite(ttl) or ttl < 0 or not math.isfinite(cutoff):
+        current = now.timestamp() if isinstance(now, datetime) else time.time() if now is None else float(now)
+        cutoff = float(before) if before is not None else current - ttl
+        if not math.isfinite(ttl) or ttl < 0 or not math.isfinite(cutoff) or not math.isfinite(current):
             raise ValueError("derived TTL and cutoff must be finite")
-        plan = _DerivedPrunePlan(cutoff, sources, frozenset(protected_record_ids), frozenset(protected_source_ids), max_delete)
+        refs = _derived_owner_ref_ids(self, current) if protected_refs is None else set(protected_refs)
+        plan = _DerivedPrunePlan(cutoff, sources, frozenset(protected_record_ids) | refs,
+                                 frozenset(protected_source_ids) | refs, max_delete)
         return _prune_derived_records(self, plan, dry_run)
+
+
+# LLM: 不初始化owner、不建文件；复用规范路径投影及现存只读pin扫描，未知来源/导入IO失败按best-effort返回空集。
+# 函数用途: 从当前数据库所属owner收集正式记忆、候选、恢复与Compact的有效引用ID。
+def _derived_owner_ref_ids(store, current):
+    if store.db_path.parent.name != "data":
+        return set()
+    try:
+        from ..memory_store.retention_scan import current_retention_pins
+        from ..user_space.home_layout_v2 import (
+            _owner_memory_path_fields,
+            _owner_workspace_path_fields,
+        )
+
+        owner = store.db_path.parent.parent.resolve()
+        home = SimpleNamespace(owner_home_dir=owner, owner_retention_json=owner / "retention.json",
+            **_owner_memory_path_fields(owner / "memory"), **_owner_workspace_path_fields(owner))
+        pins, _complete = current_retention_pins(home, (), [], now=datetime.fromtimestamp(current, timezone.utc))
+        return _derived_owner_pin_ids(home, pins)
+    except Exception:
+        return set()
+
+
+# LLM: 只补当前owner内已被原pin扫描保护的恢复根身份，不读pin声明的任意外部文件，不从目录名猜ID。
+# 函数用途: 合并显式来源引用及活跃/受引用恢复任务的结构化ID。
+def _derived_owner_pin_ids(home, pins):
+    from ..memory_store.retention_scan import _pin_object
+
+    ids = set(pins.ids)
+    for root in pins.paths:
+        if not root.is_relative_to(home.owner_home_dir):
+            continue
+        state = root / "work" / "state.json"
+        try:
+            payload = _pin_object(state)
+        except (OSError, ValueError, TypeError):
+            continue
+        ids.update(_derived_run_keys({"source_id": ""}, payload))
+    return ids
 
 
 # LLM: 只携带本批不可变条件，不保存正文、连接或当前提交门的来源。
@@ -609,32 +676,29 @@ def _derived_metadata(row):
     return metadata if isinstance(metadata, dict) else None
 
 
-# LLM: 运行关联只认source_id/run_id，不把root task的所有兄弟混成一条运行；task/request仅用于明确引用保护。
-# 函数用途: 提取同一派生运行的稳定关联键。
+# LLM: 根/父运行、任务与请求也参与保守关联；同根活跃项可以保护旧兄弟，不把保护扩大为删除权。
+# 函数用途: 从各层结构化元数据提取运行/任务/请求关联键。
 def _derived_run_keys(row, metadata):
-    values = [row["source_id"], (metadata or {}).get("run_id")]
-    return {value for value in values if isinstance(value, str) and value}
+    keys = ("source_id", "run_id", "task_id", "request_id", "root_id", "parent_id", "root_run_id", "parent_run_id")
+    values = [row["source_id"], *(scope.get(key) for scope in _derived_metadata_scopes(metadata or {}) for key in keys)]
+    return {value.strip() for value in values if isinstance(value, str) and value.strip()}
 
 
-# LLM: 显式记录和源引用永远优先；不从标题、正文或路径推断证据引用。
+# LLM: 显式记录和源引用永远优先，使用与活跃组相同的结构化ID全集；不搜索正文。
 # 函数用途: 判断Compact、恢复或记忆候选是否保护这条派生记录。
 def _derived_referenced(row, metadata, plan):
-    values = [row["source_id"], *((metadata or {}).get(key) for key in ("run_id", "task_id", "request_id"))]
-    return row["id"] in plan.protected_records or any(
-        isinstance(value, str) and value in plan.protected_sources for value in values)
+    return row["id"] in plan.protected_records or bool(_derived_run_keys(row, metadata) & plan.protected_sources)
 
 
-# LLM: 纯Gateway事件可无状态但必须有真实旧时间；其它缺状态快照不可假定结束，挂起标志始终阻止删除。
+# LLM: 九类来源一律要求明确终态，包括gateway_event；缺状态与挂起事实都保留。
 # 函数用途: 判断记录状态是否可信，不在这里应用年龄条件。
 def _derived_state_safe(row, metadata):
     if metadata is None or _derived_notification_pending(metadata):
         return False
-    if row["source_type"] == "gateway_event" and not metadata.get("status"):
-        return True
     return derived_record_terminal(metadata)
 
 
-# LLM: 路径压缩只合并同source/run关联；遍历用游标不水合正文，近期非终态也必须保护整组旧记录。
+# LLM: 路径压缩合并结构化运行/根/父/任务/请求关联；近期非终态也保护整组，不水合正文。
 # 函数用途: 取得运行关联图中的最终组键。
 def _derived_group_root(parents, key):
     parents.setdefault(key, key)
@@ -664,15 +728,13 @@ def _derived_protected_groups(conn, plan):
     return parents, blocked
 
 
-# LLM: 时间取行和载荷中全部有效时间的最新者；坏时间失败保留，cutoff边界严格小于。
+# LLM: 行updated_at提供数据库更新时间兜底；created_at只限制行本身年龄，不能代替终态时间或状态。
 # 函数用途: 检查数据库记录和事件本身均已老于截止时间。
 def _derived_row_expired(row, metadata, cutoff):
     row_times = [_derived_timestamp(row[key]) for key in ("created_at", "updated_at")]
     if any(stamp is None or stamp >= cutoff for stamp in row_times):
         return False
-    payload = dict(metadata)
-    payload["status"] = "done"
-    return derived_terminal_expired(payload, cutoff, row["updated_at"])
+    return derived_terminal_expired(metadata, cutoff, row["updated_at"])
 
 
 # LLM: 按(updated_at,id)递增，只有合格候选占max_delete配额；全部过滤用正式字段，不依赖正文。
@@ -731,18 +793,27 @@ def _derived_write_pending(conn, entries):
         conn.execute("DELETE FROM metadata WHERE key=?", (_DERIVED_PENDING_FILES_KEY,))
 
 
-# LLM: FTS先删但以SAVEPOINT包住；触发器忽略records删除时必须恢复FTS，只有实际消失的行可进文件清单。
+# LLM: 检索开关不决定物理表存在；同一连接检查table/view，不通过异常猜测FTS能力。
+# 函数用途: 检测已存在但本实例禁用检索的FTS表。
+def _records_fts_table_exists(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name='records_fts' LIMIT 1").fetchone() is not None
+
+
+# LLM: 物理FTS与records同SAVEPOINT删除；任一SQL失败保留两边，不因检索开关关闭而留下全文孤儿。
 # 函数用途: 复核精确版本并在一笔事务删除记录和全文索引。
-def _derived_delete_row(store, conn, row):
+def _derived_delete_row(conn, row, has_fts_table):
     current = conn.execute("SELECT * FROM records WHERE id=?", (row["id"],)).fetchone()
     if current is None or any(current[key] != row[key] for key in row):
         return False
     conn.execute("SAVEPOINT derived_prune_record")
-    if store.fts_available:
-        conn.execute("DELETE FROM records_fts WHERE id=?", (row["id"],))
-    conn.execute("DELETE FROM records WHERE id=? AND updated_at=? AND content_hash=? AND content_path=?",
-                 (row["id"], row["updated_at"], row["content_hash"], row["content_path"]))
-    removed = conn.execute("SELECT 1 FROM records WHERE id=?", (row["id"],)).fetchone() is None
+    try:
+        if has_fts_table:
+            conn.execute("DELETE FROM records_fts WHERE id=?", (row["id"],))
+        conn.execute("DELETE FROM records WHERE id=? AND updated_at=? AND content_hash=? AND content_path=?",
+                     (row["id"], row["updated_at"], row["content_hash"], row["content_path"]))
+        removed = conn.execute("SELECT 1 FROM records WHERE id=?", (row["id"],)).fetchone() is None
+    except sqlite3.Error:
+        removed = False
     if not removed:
         conn.execute("ROLLBACK TO derived_prune_record")
     conn.execute("RELEASE derived_prune_record")
@@ -752,14 +823,15 @@ def _derived_delete_row(store, conn, row):
 # LLM: 重新查询候选状态后仍只删原候选且版本未变；新活跃/引用关联出现时整组保护，不扩大本批配额。
 # 函数用途: 在事务内重新核验并持久登记本批真正删除的文件。
 def _derived_delete_batch(store, conn, plan, snapshots):
+    has_fts_table = store.fts_available or _records_fts_table_exists(conn)
     current_ids = {row["id"] for row in _derived_candidates(conn, plan)}
     pending, deleted = _derived_pending_files(conn), []
     for row in snapshots:
-        if row["id"] not in current_ids or not _derived_delete_row(store, conn, row):
+        if row["id"] not in current_ids or not _derived_delete_row(conn, row, has_fts_table):
             continue
         metadata = _derived_metadata(row) or {}
         pending.append({"id": row["id"], "content_path": row["content_path"], "content_hash": row["content_hash"],
-                        "source_ids": [row["source_id"], *(metadata.get(key) for key in ("run_id", "task_id", "request_id"))]})
+                        "source_ids": sorted(_derived_run_keys(row, metadata))})
         deleted.append(row["id"])
     _derived_write_pending(conn, pending)
     return deleted
@@ -774,19 +846,22 @@ def _derived_file_parts(store, entry):
     return (path.parent.resolve() / path.name).relative_to(root).parts
 
 
-# LLM: 正文只流式核对hash，不水合进内存；共享命名空间锁保证产品upsert不能在核对与unlink之间替换正文。
+# LLM: 正文流式hash，8MiB为软预算；本批尚未读正文时允许一个超大文件，之后无预算则保留欠账。
 # 函数用途: 确认待删文件仍是已删记录的旧内容，变更后的文件保留。
 def _derived_file_hash(root, parts, state):
     digest = hashlib.sha256()
     descriptor = open_readonly_file_beneath(root, parts)
     with os.fdopen(descriptor, "rb") as handle:
-        if os.fstat(handle.fileno()).st_size > state.remaining_bytes:
+        size = os.fstat(handle.fileno()).st_size
+        if size > state.remaining_bytes and state.remaining_bytes != _DERIVED_FILE_CLEANUP_MAX_BYTES:
             raise ValueError("derived cleanup byte budget exceeded")
         read_bytes = 0
-        while chunk := handle.read(min(65536, state.remaining_bytes)):
+        while chunk := handle.read(min(65536, size - read_bytes + 1)):
             state.remaining_bytes -= len(chunk)
             read_bytes += len(chunk)
             digest.update(chunk)
+            if read_bytes > size:
+                raise ValueError("derived cleanup file grew during read")
         if os.fstat(handle.fileno()).st_size != read_bytes:
             raise ValueError("derived cleanup file changed during bounded read")
     return digest.hexdigest()
@@ -826,7 +901,7 @@ def _derived_cleanup_file(store, entry, state, plan):
         return False
 
 
-# LLM: 文件IO在SQL提交后且共持upsert锁；每批最多1000文件/8MiB读取，未处理与失败项轮转保留，避免坏前缀饿死后续文件。
+# LLM: SQL提交后共持upsert锁；每批最多1000文件、8MiB软预算且允许首个超大文件，失败欠账轮转保留。
 # 函数用途: 幂等清理待删正文并提交剩余欠账。
 def _derived_cleanup_files(store, plan):
     with store._connection() as conn:
@@ -846,10 +921,12 @@ def _prune_derived_records(store, plan, dry_run):
     with store._connection() as conn:
         snapshots = _derived_candidates(conn, plan)
     result = {"cutoff": plan.cutoff, "dry_run": dry_run,
-              "candidate_ids": [row["id"] for row in snapshots], "deleted_ids": [], "pending_files": 0}
+              "candidate_ids": [row["id"] for row in snapshots], "deleted_ids": [], "pending_files": 0,
+              "skipped_protected_or_active": 0}
     if dry_run:
         return result
     with _derived_mutation_lock(store):
         result["deleted_ids"] = _derived_transaction(store, lambda conn: _derived_delete_batch(store, conn, plan, snapshots))
+        result["skipped_protected_or_active"] = len(snapshots) - len(result["deleted_ids"])
         result["pending_files"] = _derived_cleanup_files(store, plan)
     return result

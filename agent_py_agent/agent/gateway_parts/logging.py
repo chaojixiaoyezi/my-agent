@@ -160,6 +160,8 @@ def _gateway_conversation_runtime(
     return result
 
 
+# LLM: 明确payload状态优先，缺失时仅认宿主终态事件名；未知事件不合成done，实时日志仍沿原写入口。
+# 函数用途: 保存网关事件及可供TTL验证的明确状态和记录时间。
 def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:
 
     try:
@@ -172,14 +174,23 @@ def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> Non
             content=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
             metadata={
                 "event_type": event_type,
-                "status": str(payload.get("status", "")),
+                "status": _gateway_event_status(event_type, payload),
                 "pid": int(payload.get("pid", 0) or 0),
                 "created_at": created_at,
+                "recorded_at": created_at,
             },
             event_type=event_type,
         )
     except Exception as exc:
         _report_gateway_side_effect_error("log_gateway_event", str(payload.get("id", event_type)), exc)
+
+
+# LLM: 精确事件名映射而非子串匹配，ok或无错误不是终态证明，冲突时保留payload原状态。
+# 函数用途: 给已确认的完成/失败事件补齐状态，保留其它事件未知状态。
+def _gateway_event_status(event_type, payload):
+    known = {"gateway_request_completed": "completed", "gateway_request_failed": "failed",
+             "gateway_request_cancelled": "cancelled", "gateway_stopped": "stopped"}
+    return str(payload.get("status") or known.get(event_type, ""))
 
 
 # LLM: 重建只更新派生索引；老于30天的可信终态不回填，不碰canonical归档或正常实时日志。

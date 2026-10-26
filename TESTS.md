@@ -1,3 +1,38 @@
+## 2026-10-26 Wave 6 B3-R2：收口元数据、完整引用保护与日常维护接入
+
+来源：`07-tasks/wave6-b3-round2-fix-20261026.md`，本轮基线 `c73586c533bc5a766299cc3c7d179d8acb6e2824`，仅修改任务列出的六文件；未派子代理，未触碰main、推送、部署、启停服务或清理真实用户数据库。
+
+本节取代下方B3首轮的当前行为说明：派生TTL已接入默认owner维护，引用默认自动收集，8MiB改为软字节预算。首轮记录仍保留作历史证据。
+
+- **反馈1**：索引器把canonical `attributes.runtime_closeout_pending` 投影为顶层bool，空字典沿原协议仍视为待收口；TTL同时检查顶层、attributes与conversation_runtime中的收口、唤醒及通知欠账。
+- **反馈2**：根/父run、task/request和嵌套ID共用关联与显式保护读取点，正文欠账也保存同一ID全集。自动收集复用实际存在的 `current_retention_pins`（任务单所写 `_collect_protected_ids` 在当前代码不存在），并从本owner内被保护的恢复根补充真实state身份；不初始化owner、不从目录名猜ID，导入/IO失败按best-effort处理，调用方原记录/来源保护集继续合并。
+- **反馈3**：同一连接每批探测物理FTS table/view，关闭检索开关也同步删除已有FTS行；单条SQL失败回滚SAVEPOINT、保留records和正文并计跳过，不宣称删除成功。
+- **反馈4**：created_at不再是终态完成依据；只认九种明确完成/更新时间，缺省才使用mtime，无可信时间保留，坏时间沿原保守规则处理。
+- **反馈5**：九类来源一律需要明确终态，删除gateway_event缺状态可删及合成done的分支。事件writer只由明确payload状态或精确宿主终态事件名补充状态，并记录recorded_at；未知事件不猜终态。旧测试中的可删事件改成明确done，另测缺失/空状态必须保留。
+- **反馈6**：保留原nofollow FD上的流式SHA-256，每块至多65536字节；本批尚未读正文时允许首个超过8MiB的文件，后续无预算则留欠账，仍检查文件增长/hash与共享引用。到期、允许且无来源错误的原保留分支顺带清理已有普通LocalStore；冷库、data/db/files链接、法律保留、坏策略及未到期不旁路，普通DB错误返回未执行，执行上下文未知等原异常透传。C/W transition分支保持原入口，不新增绕过调用。
+
+接口兼容整理：保留原有显式关键词，新增 `now` 与 `protected_refs` 作为受限 `retention_context` 关键字上下文传入；仍支持 `prune_derived_records(now=..., protected_refs=...)`，缺省refs自动收集，未知关键词抛TypeError而不是静默忽略。未修改尺寸检查器、基线或门禁规则。
+
+最终实际三文件组合166项通过，0失败/错误/跳过（专属124、LocalStore23、持久化service19），证据 `tmp/b3-r2-delivery.xml`。所列范围Ruff通过，原命令strict尺寸检查通过（hard=0、blocked=False）；生成报告已按要求还原，git diff --check通过。文档门禁及附加基线失败另列如下，不把这些结论扩成全仓或全部门禁通过。
+
+测试方法与证据：首批39个R2场景先运行得到35个真实断言失败、4个已有通过、0设置错误；自查补出的空字典收口及仅有活跃task_id场景另先得到4个真实断言失败、1个已有通过。新增冷库/链接、法律保留/策略拒绝/未到期及损坏DB验证。流式大文件测试阻止Path.read_bytes读取正文，真实FTS覆盖关闭开关及不可删除view错误回滚；没有用mock成功冒充真实删除。
+
+复现（cwd必须为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_subagent_persistence_service.py -q --tb=short
+ruff check agent_py_agent/agent/local_storage/records.py agent_py_agent/agent/subagents/services/indexing/service.py agent_py_agent/agent/gateway_parts/logging.py agent_py_agent/agent/user_space/owner_maintenance.py agent_py_agent/tests/test_local_store_derived_ttl_wave6.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+任务原pytest命令的 `test_subagent_Local_store_indexing.py` 不存在，原样执行以exit 4终止；改用真实的 `test_subagent_persistence_service.py`，真实索引器的收口投影和嵌套保护另由本轮专属测试直接覆盖。未创建占位文件或修改原有相关测试文件。
+
+附加回归及限制：C/LocalStore四文件与owner维护execution_ports共98项通过；另有5项失败（owner维护隔离错误数1项，gateway维护4项），均在上述指定基线的独立干净工作树复现相同断言，最终基线5失败、0设置错误。早先基线探针的临时目录缺失属于设置错误，不计入此结论；改用绝对basetemp后的证据为 `tmp/b3-r2-baseline-proof.xml`，临时基线工作树已移除。没有跳过、删改或放宽这5项测试。
+
+文档门禁实际失败：当前六文件白名单没有允许更新gateway与subagent各自的 `02-progress.md`、`04-structure.md`，因此本轮未更新这四文件，也未改变检查基线来制造通过。全仓、真实大库时延/内存、跨平台和部署效果未验证；自动pins仍为best-effort，不宣称所有外部引用已完整覆盖。本轮按要求保存六文件修复提交，但不据此宣称全部门禁通过或可直接合入。
+
 ## 2026-10-26 Wave 6 B3：派生索引30天TTL协议、FTS同步与重建准入
 
 来源：`07-tasks/wave6-wt-b3-20261026.md` 及扩围收口单 `07-tasks/wave6-b3-finish-commit-20261026.md`，基线 `287d94b59892b4b7366f6139751b884b4a8cf77e`，仅在 `/tmp/wt-wave6-b3` 修改扩展后的任务白名单。新增专属测试 `agent_py_agent/tests/test_local_store_derived_ttl_wave6.py`，未修改 `maintenance.py`、`events.py`、`test_local_store.py` 或正式用户数据。

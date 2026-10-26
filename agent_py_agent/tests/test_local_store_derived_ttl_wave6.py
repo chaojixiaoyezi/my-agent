@@ -115,7 +115,7 @@ def test_missing_or_malformed_status_is_retained_but_old_event_can_expire(tmp_pa
     broken = record(store, "broken")
     with sqlite3.connect(store.db_path) as conn:
         conn.execute("UPDATE records SET metadata_json='not-json' WHERE id=?", (broken.id,))
-    event = record(store, "event", source="gateway_event", metadata={"created_at": CUTOFF - 100})
+    event = record(store, "event", source="gateway_event", metadata={"created_at": CUTOFF - 100, "status": "done"})
     assert prune(store, before=CUTOFF)["deleted_ids"] == [event.id]
     assert ids(store) == {missing.id, broken.id}
 
@@ -311,6 +311,8 @@ def test_reactivated_group_protects_pending_file_debt(tmp_path, monkeypatch):
     assert (store.root / old.content_path).is_file()
 
 
+# LLM: R2软字节预算允许首个超额文件前进，文件数上限仍严格生效，不保留旧的永久饥饿断言。
+# 函数用途: 验证软字节预算不会取消独立的文件数量上限。
 def test_cleanup_count_and_bytes_have_independent_resource_budget(tmp_path, monkeypatch):
     from agent_py_agent.agent.local_storage import records
 
@@ -319,10 +321,10 @@ def test_cleanup_count_and_bytes_have_independent_resource_budget(tmp_path, monk
     monkeypatch.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_FILES", 1, raising=False)
     monkeypatch.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_BYTES", 1, raising=False)
     result = prune(store, before=CUTOFF)
-    assert result["pending_files"] == 3
-    assert all((store.root / item.content_path).is_file() for item in entries)
+    assert result["pending_files"] == 2
+    assert sum((store.root / item.content_path).is_file() for item in entries) == 2
     monkeypatch.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_BYTES", 10000, raising=False)
-    assert prune(store, before=CUTOFF)["pending_files"] == 2
+    assert prune(store, before=CUTOFF)["pending_files"] == 1
 
 
 def test_actual_subagent_closeout_attribute_prevents_expiry(tmp_path, monkeypatch):
@@ -473,3 +475,249 @@ def test_cli_rebuild_does_not_resurrect_pruned_derived_fulltext(tmp_path, monkey
         expected.update({"subagent_run", "subagent_work_log", "subagent_execution_context", "subagent_runner_result"})
     assert actual == expected and permanent.id in ids(manager.local_store)
     assert all(path.read_bytes() == data for path, data in original.items())
+
+
+# LLM: 真实索引器必须把canonical收口欠账带入SQL，随后裁剪不得丢掉该运行。
+# 函数用途: 捕获任务仍待收口、派生索引却漏标的删除漏洞。
+def test_r2_indexed_task_projects_pending_closeout(tmp_path):
+    manager, task = projection_case(tmp_path, "DONE", CUTOFF - 1)
+    task.attributes["runtime_closeout_pending"] = {"stage": "notify"}
+    manager.indexing.index_task(task)
+    with sqlite3.connect(manager.local_store.db_path) as conn:
+        conn.execute("UPDATE records SET created_at=?,updated_at=?", (CUTOFF - 1, CUTOFF - 1))
+    item = manager.local_store.list_recent()[0]
+    assert item.metadata.get("runtime_closeout_pending") is True
+    assert prune(manager.local_store, before=CUTOFF)["deleted_ids"] == []
+
+
+# LLM: 两个真实嵌套容器都不能丢失已有的四种收口标志。
+# 函数用途: 防止嵌套未完成工作被顶层done遮住。
+@pytest.mark.parametrize("container", ["attributes", "conversation_runtime"])
+@pytest.mark.parametrize("flag", ["runtime_closeout_pending", "wake_pending", "notification_pending", "completion_notice_pending"])
+def test_r2_nested_pending_flags_keep_record(tmp_path, container, flag):
+    store = LocalStore(tmp_path / "local.db")
+    item = record(store, "pending", metadata={"status": "done", container: {flag: True}})
+    assert prune(store, before=CUTOFF)["deleted_ids"] == []
+    assert ids(store) == {item.id}
+
+
+# LLM: 各层结构化ID同时用于显式引用和活跃关联；不从正文推断。
+# 函数用途: 覆盖根/父运行以及会话和attributes里的ID保护。
+@pytest.mark.parametrize(("container", "key"), [(None, "root_id"), (None, "parent_id"),
+    (None, "root_run_id"), (None, "parent_run_id"), ("conversation_runtime", "task_id"),
+    ("conversation_runtime", "run_id"), ("conversation_runtime", "request_id"),
+    ("attributes", "task_id"), ("attributes", "run_id")])
+def test_r2_nested_identity_protects_explicit_refs_and_active_groups(tmp_path, container, key):
+    store = LocalStore(tmp_path / "local.db")
+    data = {key: "protected-root"} if container is None else {container: {key: "protected-root"}}
+    held = record(store, "held", metadata={"status": "done", **data})
+    assert prune(store, before=CUTOFF, protected_source_ids=["protected-root"])["deleted_ids"] == []
+    active = record(store, "active", metadata={"status": "running", **data}, stamp=NOW)
+    assert prune(store, before=CUTOFF)["deleted_ids"] == []
+    assert ids(store) == {held.id, active.id}
+
+
+# LLM: 数据库的物理FTS存在与当前检索开关无关，真实重开后验证两边同步。
+# 函数用途: 防止禁用FTS时TTL遗留全文孤儿。
+def test_r2_disabled_fts_still_deletes_existing_fts_rows(tmp_path):
+    store = LocalStore(tmp_path / "local.db")
+    item = record(store, "fts-disabled")
+    reopened = LocalStore(store.db_path, enable_fts=False)
+    assert not reopened.fts_available
+    assert prune(reopened, before=CUTOFF)["deleted_ids"] == [item.id]
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM records_fts WHERE id=?", (item.id,)).fetchone() == (0,)
+
+
+# LLM: 用真实只读view制造FTS删除错误，不mock数据库事务或跳过故障。
+# 函数用途: FTS删不动时必须保留records与正文，并在回执反映跳过。
+def test_r2_fts_delete_failure_rolls_back_savepoint_and_keeps_body(tmp_path):
+    store = LocalStore(tmp_path / "local.db")
+    item = record(store, "fts-failure")
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("ALTER TABLE records_fts RENAME TO archived_fts")
+        conn.execute("CREATE VIEW records_fts AS SELECT * FROM archived_fts")
+    reopened = LocalStore(store.db_path, enable_fts=False)
+    result = prune(reopened, before=CUTOFF)
+    assert result["deleted_ids"] == [] and ids(store) == {item.id}
+    assert result["skipped_protected_or_active"] >= 1
+    assert (store.root / item.content_path).is_file()
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM records_fts WHERE id=?", (item.id,)).fetchone() == (1,)
+
+
+# LLM: 创建时间不是终态时间，文件mtime只在缺少有效终态/更新时间时兜底。
+# 函数用途: 防止长寿任务被创建时间误判为过期。
+@pytest.mark.parametrize("fallback", [None, NOW])
+def test_r2_created_at_alone_does_not_expire_terminal_metadata(fallback):
+    from agent_py_agent.agent.local_storage.records import derived_terminal_expired
+
+    assert not derived_terminal_expired({"status": "done", "created_at": CUTOFF - 1}, CUTOFF, fallback)
+
+
+# LLM: 明确终态时间的所有兼容键都应优先于更旧的创建时间和文件mtime。
+# 函数用途: 保护刚结束或刚更新的老任务。
+@pytest.mark.parametrize("key", ["finished_at", "terminated_at", "settled_at", "closed_at", "recorded_at", "timestamp"])
+def test_r2_recent_terminal_time_alias_overrides_old_creation(key):
+    from agent_py_agent.agent.local_storage.records import derived_terminal_expired
+
+    assert not derived_terminal_expired({"status": "done", "created_at": 1, key: NOW}, CUTOFF, CUTOFF - 1)
+
+
+# LLM: 未知事件状态永不合成done；明确终态事件仍按正常TTL裁剪。
+# 函数用途: 让gateway_event遵守与其它来源相同的终态证明门。
+@pytest.mark.parametrize("status", [None, "", "done", "completed"])
+def test_r2_gateway_event_requires_explicit_terminal_status(tmp_path, status):
+    store = LocalStore(tmp_path / "local.db")
+    metadata = {} if status is None else {"status": status}
+    item = record(store, "event", source="gateway_event", metadata=metadata)
+    assert prune(store, before=CUTOFF)["deleted_ids"] == ([item.id] if status else [])
+
+
+# LLM: 事件名只能来自显式宿主终态集合，不能把任意包含completed的字符串当完成。
+# 函数用途: 在事件写入时保存可用于TTL判定的明确终态。
+@pytest.mark.parametrize(("event", "expected"), [("gateway_request_completed", "completed"),
+    ("gateway_request_failed", "failed"), ("gateway_start", ""), ("not_completed", "")])
+def test_r2_gateway_event_writer_projects_known_terminal_event(tmp_path, event, expected):
+    from agent_py_agent.agent.gateway_parts.logging import log_gateway_event
+
+    store = LocalStore(tmp_path / "local.db")
+    log_gateway_event(SimpleNamespace(local_store=store), event, {})
+    assert store.list_recent()[0].metadata["status"] == expected
+
+
+# LLM: 用真实大于默认软预算的正文测试流式hash；禁止read_bytes以免偷读整文件。
+# 函数用途: 保证超大单文件每轮仍能前进，同时不放开后续文件预算。
+def test_r2_oversized_blob_is_streamed_and_one_blob_makes_progress(tmp_path, monkeypatch):
+    import hashlib
+
+    from agent_py_agent.agent.local_storage import records
+
+    store = LocalStore(tmp_path / "local.db")
+    entries = [record(store, f"huge-{i}") for i in range(2)]
+    body = b"x" * (8 * 1024 * 1024 + 1)
+    for item in entries:
+        (store.root / item.content_path).write_bytes(body)
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute("UPDATE records SET content_hash=? WHERE id=?", (hashlib.sha256(body).hexdigest(), item.id))
+    monkeypatch.setattr(Path, "read_bytes", lambda *args: pytest.fail("must stream, not materialize blobs"))
+    result = prune(store, before=CUTOFF)
+    assert set(result["deleted_ids"]) == {item.id for item in entries}
+    assert result["pending_files"] == 1
+    assert sum((store.root / item.content_path).is_file() for item in entries) == 1
+    assert prune(store, before=CUTOFF)["pending_files"] == 0
+    assert records._DERIVED_FILE_CLEANUP_MAX_BYTES == 8 * 1024 * 1024
+
+
+# LLM: 默认保护集必须来自当前owner规范只读pin扫描，不创建home或只信调用方列表。
+# 函数用途: 用真实恢复state引用验证自动保护与显式引用合并。
+@pytest.mark.parametrize("direct_reference", [False, True])
+def test_r2_default_owner_pins_protect_derived_record(tmp_path, direct_reference):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    store = LocalStore(home.owner_data_dir / "local_store.sqlite3")
+    held = record(store, "held-auto", metadata={"status": "done", "conversation_runtime": {"task_id": "active-task"}})
+    explicit = record(store, "held-explicit")
+    state = home.owner_tasks_dir / "2026-10-26" / "active-task" / "work" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"task_id": "active-task", "status": "RUNNING",
+                                 "source_refs": [held.id] if direct_reference else []}))
+    prune(store, before=CUTOFF, protected_record_ids=[explicit.id])
+    assert ids(store) == {held.id, explicit.id}
+
+
+# LLM: 仅已有DB且保留主链允许执行时触发，拒绝/法律保留/未到期都不能旁路清理。
+# 函数用途: 验证真正owner维护入口会调用派生TTL且不触及永久来源。
+def test_r2_owner_maintenance_runs_derived_ttl_cleanup(tmp_path):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    store = LocalStore(home.owner_data_dir / "local_store.sqlite3")
+    old, permanent = record(store, "maint-old"), record(store, "maint-memory", source="memory")
+    assert run_owner_retention_if_due(home, now=NOW).ran
+    assert ids(store) == {permanent.id} and not (store.root / old.content_path).exists()
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker["derived_records_pruned"]["deleted_ids"] == [old.id]
+
+
+# LLM: 新增维护只能使用已有库；冷owner和越界链接不触发LocalStore初始化。
+# 函数用途: 核实维护不会创建冷数据库或跟随不安全数据库路径。
+@pytest.mark.parametrize("linked", [False, True])
+def test_r2_maintenance_does_not_create_cold_or_follow_linked_database(tmp_path, linked):
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.user_space.owner_maintenance import _prune_local_store_derived_records
+
+    home = tmp_path / "cold"
+    db = home / "data" / "local_store.sqlite3"
+    if linked:
+        other = LocalStore(tmp_path / "external.db")
+        item = record(other, "external")
+        db.parent.mkdir(parents=True)
+        db.symlink_to(other.db_path)
+    result = _prune_local_store_derived_records(home, now=datetime.fromtimestamp(NOW, timezone.utc))
+    assert result["executed"] is False
+    if linked:
+        assert ids(other) == {item.id}
+    else:
+        assert not home.exists()
+
+
+# LLM: 原主链拒绝、法律保留或未到期时，新增维护也必须完全停在原门后。
+# 函数用途: 防止辅助TTL绕过保留策略或到期条件。
+@pytest.mark.parametrize("reason", ["legal_hold", "invalid_policy", "not_due"])
+def test_r2_owner_retention_gates_also_protect_derived_ttl(tmp_path, reason):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    store = LocalStore(home.owner_data_dir / "local_store.sqlite3")
+    item = record(store, "must-stay")
+    policy = json.loads(home.owner_retention_json.read_text())
+    if reason == "legal_hold":
+        policy["legal_hold"] = True
+        home.owner_retention_json.write_text(json.dumps(policy))
+    elif reason == "invalid_policy":
+        home.owner_retention_json.write_text("{broken")
+    else:
+        (home.owner_data_dir / "maintenance.json").write_text(json.dumps({"last_attempt_at": NOW}))
+    run_owner_retention_if_due(home, now=NOW)
+    assert ids(store) == {item.id} and (store.root / item.content_path).is_file()
+
+
+# LLM: 普通数据库损坏只报告未执行，不能把失败写成裁剪成功或影响原维护。
+# 函数用途: 验证best-effort故障回执不破坏坏库原始字节。
+def test_r2_owner_prune_reports_corrupt_database_without_raising(tmp_path):
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.user_space.owner_maintenance import _prune_local_store_derived_records
+
+    db = tmp_path / "data" / "local_store.sqlite3"
+    db.parent.mkdir()
+    db.write_bytes(b"not sqlite")
+    result = _prune_local_store_derived_records(tmp_path, now=datetime.fromtimestamp(NOW, timezone.utc))
+    assert result["executed"] is False and result["reason"] == "error"
+    assert db.read_bytes() == b"not sqlite"
+
+
+# LLM: 空字典在canonical协议里仍表示待收口，历史嵌套元数据也必须保持这条语义。
+# 函数用途: 防止未携带内容的收口标记被按假值删掉。
+@pytest.mark.parametrize("container", [None, "attributes", "conversation_runtime"])
+def test_r2_empty_closeout_dictionary_still_protects_record(tmp_path, container):
+    store = LocalStore(tmp_path / "local.db")
+    pending = {"runtime_closeout_pending": {}}
+    item = record(store, "empty-pending", metadata={"status": "done", **({container: pending} if container else pending)})
+    assert prune(store, before=CUTOFF)["deleted_ids"] == []
+    assert ids(store) == {item.id}
+
+
+# LLM: 新保留上下文保持原关键词调用兼容，但不能令未知字段被静默忽略。
+# 函数用途: 验证接口整理不会把拼错的保护字段当成成功保护。
+def test_r2_retention_context_rejects_unknown_keyword(tmp_path):
+    store = LocalStore(tmp_path / "local.db")
+    item = record(store, "must-stay-on-typo")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'protected_ref'"):
+        store.prune_derived_records(before=CUTOFF, protected_ref={item.id})
+    assert ids(store) == {item.id}

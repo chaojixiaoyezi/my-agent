@@ -134,6 +134,7 @@ def owner_maintenance_due(
 #   维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
 #   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
 # LLM: 单进程保留执行后回收已登记孤儿伴生锁，逻辑锁和原request门不变；C/W仍用transition路径。
+# LLM: 原保留允许且无来源错误时才顺带裁剪已有LocalStore；法律保留/拒绝/未到期及transition分支不旁路。
 # 函数用途: owner到期执行保留及辅助维护，写原结构化状态；未到期返回not_due。
 def run_owner_retention_if_due(
     home: MyAgentHomePaths,
@@ -169,6 +170,10 @@ def run_owner_retention_if_due(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
         )
+        derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
+                            now=datetime.fromtimestamp(current, timezone.utc))
+                         if retention.applied and not retention.legal_hold and not retention.load_errors
+                         else {"executed": False, "reason": "retention_not_safe"})
         reclaim_owner_orphan_lock_files(home)
         # 正文哈希缓存只是派生索引，孤儿键（换模型/迁移/绕过写入路径的改动留下）只有 index_all
         # 会回收，那是手动命令；挂进这里让它在 owner 维护（默认每天一次）里自动收口。
@@ -188,10 +193,31 @@ def run_owner_retention_if_due(
             context="owner_maintenance.state",
         ).payload
         effects = {"text_vector_cache_reclaimed": dropped_cache_keys,
+                   "derived_records_pruned": derived_prune,
                    "text_vector_cache_reclaim_error": reclaim_error,
                    "indexes_compacted": compacted, "indexes_compact_failed": compact_failed,
                    "memory_archive_permissions": permissions, "run_closeout_backfill": run_closeout_backfill}
         return _write_maintenance_result(state_path, retention, previous, current, effects)
+
+
+# LLM: 仅已有本owner普通数据库才构造Store，不建冷库、不跟随data/db/files链接；普通故障隔离，原执行未知异常仍透传。
+# 函数用途: 在到期维护内尽力清理派生记录并返回真实结果，不影响原保留主链。
+def _prune_local_store_derived_records(home: Path, *, now: datetime) -> dict[str, Any]:
+    try:
+        from ..local_storage import LocalStore
+
+        db_path = Path(home) / "data" / "local_store.sqlite3"
+        if not db_path.is_file():
+            return {"executed": False, "reason": "no_local_store"}
+        if db_path.is_symlink() or db_path.parent.is_symlink() or (db_path.parent / "files").is_symlink():
+            return {"executed": False, "reason": "unsafe_local_store"}
+        result = LocalStore(db_path, enable_fts=False).prune_derived_records(now=now)
+        return {"executed": True, **result}
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
+    except Exception as exc:
+        return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
 
 
 # LLM: caller已持原maintenance锁；仍写原唯一schema/状态口径，不把局部成功变成新许可或第二账。
