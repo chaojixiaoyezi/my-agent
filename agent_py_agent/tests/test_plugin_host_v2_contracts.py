@@ -760,3 +760,19 @@ def test_stage3_gateway_delivery_send_inbox_accept_real_entry(stage3_host, monke
     target = resolve_owner_home(owner.root, alice)
     assert ScriptStore(target.home_dir).get_script("gateway-script")["enabled"] is False
     assert ScriptStore(owner.home_dir).get_script("gateway-script")["enabled"] is True
+
+
+# LLM: 真实Host写入不能将源/目标不存在洗成unknown；修复缺失后原key必须可重试。
+# 函数用途: 验证治理资产缺失的领域拒绝经过完整解析、鉴权和幂等门。
+@pytest.mark.parametrize("action", ["users.managed.assets.provision", "users.managed.assets.toggle"])
+@pytest.mark.parametrize("kind", ["script", "workflow", "skill", "monitor"])
+def test_r2_governance_missing_asset_is_retryable_not_started(stage3_host, action, kind):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    payload = {"target_owner_id": "local/alice", "asset_kind": kind, "asset_id": "job_absent" if kind == "monitor" else "absent"}
+    if action.endswith("toggle"):
+        payload["enabled"] = True
+    for _ in range(2):
+        with pytest.raises(HostAPIError) as caught:
+            stage3_call(stage3_host, action, payload, "write")
+        assert (caught.value.code, caught.value.status, caught.value.outcome) == ("ASSET_NOT_FOUND", 404, "not_started")

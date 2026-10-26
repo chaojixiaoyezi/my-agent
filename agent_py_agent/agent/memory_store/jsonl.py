@@ -489,7 +489,7 @@ class _JsonlMemoryMutationMixin:
     # LLM: 锁内全量验证并原子替换；同一准入内脱敏，正式删除提交后的必要清理失败单独报告且保留墓碑。
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
     # LLM: C原扫描/配额/编码/脱敏门外，formal准确一次末写成功才compare-delete本次pending；ops/清理仍原顺序且native不洗成功。
-    # LLM: 受管policy锁先于原quota/formal锁；普通调用和批量均不能靠source字段越过管理员记忆锁。
+    # LLM: 统一quota→受管policy→formal锁；已有准入显式复用，普通调用不能靠source字段越过管理员记忆锁。
     # 函数用途: 沿唯一原批量算法落正式事实，失败保真实已写与待落访问信号。
     def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
@@ -504,7 +504,7 @@ class _JsonlMemoryMutationMixin:
         from ..user_space.managed_user_governance import managed_memory_batch_guard
 
         committed: list[MemoryRecord]
-        with managed_memory_batch_guard(self.path, operations), _quota_admission(self.quota_enforcer, _admission) as admission:
+        with _quota_admission(self.quota_enforcer, _admission) as admission, managed_memory_batch_guard(self.path, operations):
             with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
                 current_events = self._read_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)
@@ -602,6 +602,7 @@ class _JsonlMemoryMutationMixin:
     # LLM: 此入口仅供显式 Memory schema migration 在已持久备份后清除 legacy active 正文；
     #   它留下 hash tombstone 并清派生索引，但刻意不清 Candidate/工具账本，因为旧正文已迁入新事实链。
     # 函数用途: 按精确 entry_id、version 和 content hash 原子移除一批旧长期记忆，供可回滚迁移使用。
+    # LLM: 迁移同样先quota再policy最后formal；备份引用或source命名不能绕过管理员锁。
     def remove_migrated_legacy(
         self,
         records: Iterable[MemoryRecord],
@@ -626,7 +627,11 @@ class _JsonlMemoryMutationMixin:
                 int(record.version or 1),
                 memory_content_hash(record.content),
             )
-        with _quota_admission(self.quota_enforcer) as admission:
+        from ..user_space.managed_user_governance import managed_memory_batch_guard
+
+        with _quota_admission(self.quota_enforcer) as admission, managed_memory_batch_guard(
+            self.path, [{"entry_id": entry_id} for entry_id in sorted(expected)]
+        ):
             with locked_json_path(self.path):
                 current_events = [
                     _with_legacy_identity(record)
@@ -1126,6 +1131,7 @@ class _JsonlMemoryLifecycleMixin:
     # 是硬事实),且单次最多移除 25%——冷启动后仍有渐进收缩空间,不一次性清空。
     # 函数用途: 超总量上限时,把最久未被访问的非 user_explicit 条目移入 archive 并移除。
     # LLM: C仅archive锁FD出生及现成raw末写入Root，原选择/比例/顺序不变；archive成功后formal失败保真实partial。
+    # LLM: 浓缩排除管理员锁ID；quota→policy先核授权再写archive，正式删除重入原guard并复用同一准入。
     # 函数用途: 保原归档后删除治理，不跳过旧非explicit条目。
     def condense(
         self,
@@ -1134,13 +1140,19 @@ class _JsonlMemoryLifecycleMixin:
         target_records: int = 1200,
         max_ratio: float = 0.25,
     ) -> list[MemoryRecord]:
+        from ..user_space.managed_user_governance import (
+            managed_locked_memory_ids,
+            managed_memory_batch_guard,
+        )
+
         active = self.all()
         if len(active) <= max_records:
             return []
+        locked_ids = managed_locked_memory_ids(self.path)
         removable = [
             record
             for record in active
-            if str((record.attributes or {}).get("origin") or "") != "user_explicit"
+            if str((record.attributes or {}).get("origin") or "") != "user_explicit" and record.entry_id not in locked_ids
         ]
         if not removable:
             return []
@@ -1159,28 +1171,20 @@ class _JsonlMemoryLifecycleMixin:
             return []
         # 先入 archive 账本,再在主文件移除——archive 多写一次无害,主文件移除失败可下次重试。
         archive_path = self.path.with_name(self.path.name + ".archive.jsonl")
-        with locked_json_path(archive_path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
-            archived_text = "".join(
-                json.dumps(_record_payload(record), ensure_ascii=False) + "\n"
-                for record in to_remove
-            )
-            if archive_path.exists():
-                archived_text = archive_path.read_text(encoding="utf-8") + archived_text
-            if self.coordinator_io:
-                _write_coordinator_memory_raw(archive_path, archived_text)
-            else:
-                write_private_text_file_atomic_unlocked(archive_path, archived_text)
-        self.apply_batch(
-            [
-                {
-                    "action": "remove",
-                    "entry_id": record.entry_id,
-                    "source": "condense:quota",
-                    "expected_version": record.version,
-                }
-                for record in to_remove
-            ]
-        )
+        operations = [{"action": "remove", "entry_id": record.entry_id, "source": "condense:quota",
+                       "expected_version": record.version} for record in to_remove]
+        with _quota_admission(self.quota_enforcer) as admission:
+            with managed_memory_batch_guard(self.path, operations):
+                with locked_json_path(archive_path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
+                    archived_text = "".join(json.dumps(_record_payload(record), ensure_ascii=False) + "\n" for record in to_remove)
+                    if archive_path.exists():
+                        archived_text = archive_path.read_text(encoding="utf-8") + archived_text
+                    if self.coordinator_io:
+                        _write_coordinator_memory_raw(archive_path, archived_text)
+                    else:
+                        write_private_text_file_atomic_unlocked(archive_path, archived_text)
+            # guard不是可重入锁；释放后由原apply_batch重核当前策略，quota准入始终复用。
+            self.apply_batch(operations, _admission=admission)
         return to_remove
 
     # LLM: 过期 active 记录仍可能含需迁移/清除的正文；此入口只供 retention、migration 和 doctor，召回不得使用。
