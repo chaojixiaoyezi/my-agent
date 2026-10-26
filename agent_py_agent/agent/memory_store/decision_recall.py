@@ -232,11 +232,13 @@ def _pre_recall_miss_reason(queries: tuple, slots: int, remaining_chars: int, st
 
 # LLM: 原完整查询与已选正式材料先成立；此点只给不足的 long-term 槽位追加同 scope 的候选，不能删除/替换原记忆。
 #   每次到达都在 decision_reach_counts 记一次结果（没调用的原因码或 called，节流写盘的诊断计数副作用）。
-# 函数用途: 在同一召回阶段内消费有限查询建议，最终有效且能注入的补充记录才确认访问。
+# LLM: 独立调用默认沿原严格确认；外层仍有预算时显式defer_access，仅返候选，必须由最终准入点重核并记访问。
+# 函数用途: 消费有限补充查询；直接调用保持原访问合同，运行时组合由最终预算后的统一入口确认。
 def supplement_recalled_memories(
     agent: object, request: object, records: list, *, recall_scope: object, stage: object,
     queries: tuple[tuple[str, str], ...], slots: int, search_top_k: int, remaining_chars: int,
     refresh: Callable[[], list],
+    defer_access: bool = False,
 ) -> tuple[list, str]:
     reason = _pre_recall_miss_reason(queries, slots, remaining_chars, stage)
     if reason:
@@ -266,7 +268,7 @@ def supplement_recalled_memories(
         _check_interrupted()
         if reason := _pre_recall_stale(agent, stage, outcome, (baseline, bound, state)):
             return drop_and_return(agent, (stage, outcome), reason, (baseline, "memory_pre_recall_decision:apply:stale"))
-        # 开了预检就用决策模型看到的那份新增事实（基线已核对未变）；最终仍由 confirm_scoped_access 重读正式源确认。
+        # 预检仍用决策看到的同份候选；独立调用在此重核，延后模式由外层最终预算准入后重核。
         chosen = previews[answer.value] if previews is not None else search.additions(selected)
         baseline = latest = refresh()
         _check_interrupted()
@@ -274,7 +276,7 @@ def supplement_recalled_memories(
             return drop_and_return(agent, (stage, outcome), reason, (latest, "memory_pre_recall_decision:apply:stale"))
         if not decision_outcome_is_current(agent, request, stage, outcome):
             return latest, "memory_pre_recall_decision:apply:stale"
-        confirmed = agent.memory.confirm_scoped_access(chosen, search.predicate) if chosen else []
+        confirmed = chosen if defer_access else (agent.memory.confirm_scoped_access(chosen, search.predicate) if chosen else [])
         return [*latest, *confirmed], finding if confirmed else f"{finding}:no_addition"
     except (InterruptedError, ToolCancelled):
         raise

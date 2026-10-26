@@ -276,8 +276,8 @@ def _package_recommendations(request: ToolSectionsRequest) -> str:
 
 # LLM: Runtime recall uses only active long-term plus formal lesson/HOT under structured scope;
 # task-local and explicit owner memory-off never read the formal repositories or project index.
-# LLM: 前台检索显式latency_safe，缺缓存向量只排队回填、不实时embed；scope、访问计数及隔离开关不变。
-# 函数用途: 准备本轮隔离记忆和恢复上下文；向量未就绪时词面召回，不让请求等待嵌入网络。
+# LLM: 前台只取latency_safe候选，不提前记访问；最终正式准入统一确认，原scope、低延迟和隔离开关不变。
+# 函数用途: 准备本轮记忆候选及恢复上下文，不让预算淘汰项留下访问或等待嵌入网络。
 def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     tool_runtime_snapshot, tool_protocol_snapshot = _tool_snapshots_for_run(
         agent,
@@ -303,7 +303,7 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     long_term_memories = (
         []
         if recall_suppressed
-        else agent.memory.search_scoped(
+        else agent.memory.search_scoped_candidates(
             request.user_prompt,
             memory_top_k,
             lambda record: long_term_record_matches_scope(record, recall_scope),
@@ -524,7 +524,8 @@ def _routed_memory_context_for_request(agent, request: RuntimeContextRequest, *,
 
 # LLM: 原授权与预算先固定记忆集合；隔离/总闸关闭不读正式库；召回前后两点共用一次原阶段期限。
 #   补充余量与最后选择复用安全信封计量；预算遗漏数跨排序/补充保留，真正追加编号只供观察，不扩大召回范围。
-# 函数用途: 合并 HOT、已路由 lesson 和长期记忆；可选排序与补充只在原权限/预算内生效。
+# LLM: 基础与补充均不提前记访问；去重和最终信封预算完成后，统一重核JSONL候选并仅确认实际注入项。
+# 函数用途: 合并正式来源并完成最后预算准入，再为仍有效的长期记忆登记一次访问。
 def _formal_memories_for_request(
     agent,
     request: RuntimeContextRequest,
@@ -562,6 +563,7 @@ def _formal_memories_for_request(
             routed_context.findings.append(finding)
         hot, lessons = [], []
     routed_context.injected_sections = []
+    fixed_source_ids = {record.entry_id for record in [*hot, *lessons]}
     memories = _budgeted_formal_memories(_dedupe_formal_memories([*hot, *lessons, *long_term_memories]))
     omitted_count = memories.omitted_count
     from ...conversation.decision_service import begin_decision_stage
@@ -584,7 +586,8 @@ def _formal_memories_for_request(
 
     memories, finding = rerank_recalled_memories(
         agent, request, memories, recall_scope=recall_scope,
-        refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope),
+        refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope,
+                                                    fixed_source_ids=fixed_source_ids),
         stage=stage,
     )
     if finding:
@@ -595,30 +598,63 @@ def _formal_memories_for_request(
         memories, finding = supplement_recalled_memories(
             agent, request, memories, recall_scope=recall_scope, stage=stage, queries=queries,
             slots=slots, search_top_k=top_k, remaining_chars=remaining,
-            refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope),
+            refresh=lambda: _refresh_recall_candidates(agent, memories, read_paths, recall_scope,
+                                                        fixed_source_ids=fixed_source_ids),
+            defer_access=True,
         )
         if finding:
             routed_context.findings.append(finding)
         if isinstance(getattr(routed_context, "supplement_entry_ids", None), list):
             routed_context.supplement_entry_ids = [str(getattr(row, "entry_id", "")) for row in memories
                                                    if getattr(row, "entry_id", "") not in before]
-    return _budgeted_formal_memories(BudgetedMemoryRecords(
-        memories, omitted_count=max(omitted_count, getattr(memories, "omitted_count", 0))))
+    memories = _budgeted_formal_memories(BudgetedMemoryRecords(
+        _dedupe_formal_memories(memories), omitted_count=max(omitted_count, getattr(memories, "omitted_count", 0))))
+    return _confirm_final_memory_access(agent, memories, recall_scope, fixed_source_ids, routed_context)
 
 
-# LLM: 采用旧建议前重读原正式仓库，只投影原选中ID并复用原范围/预算及遗漏计数；删除、到期或撤销不能被旧排序复活。
-# 函数用途: 刷新本批合法候选版本并保留预算遗漏提示，不重新检索、不增加访问信号或新记忆。
-def _refresh_recall_candidates(agent: object, records: list, read_paths: list[str], scope: MemoryRecallScope) -> list:
-    available = [
+# LLM: 调用方已完成全部预算与去重；固定源ID必须随成功refresh更新，不能凭初始来源或kind豁免回落JSONL。
+#   失效候选只丢弃不补位，不再裁剪确认集合；保留既有pending和预算遗漏数，补充来源只观察最终入选ID。
+# 函数用途: 只为最终注入且仍合法的长期记录登记访问，保留HOT/lesson原来源，不复活撤销项。
+def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, routed_context):
+    candidates = [record for record in memories if record.entry_id not in fixed_ids]
+    confirmed = agent.memory.confirm_scoped_access(
+        candidates, lambda record: long_term_record_matches_scope(record, recall_scope),
+    ) if candidates else []
+    current = {record.entry_id: record for record in confirmed}
+    selected = BudgetedMemoryRecords(
+        (record if record.entry_id in fixed_ids else current[record.entry_id] for record in memories
+         if record.entry_id in fixed_ids or record.entry_id in current),
+        omitted_count=memories.omitted_count,
+    )
+    if isinstance(getattr(routed_context, "supplement_entry_ids", None), list):
+        admitted = {record.entry_id for record in selected}
+        routed_context.supplement_entry_ids = [entry_id for entry_id in routed_context.supplement_entry_ids
+                                               if entry_id in admitted]
+    return selected
+
+
+# LLM: 原只读scope/ID/预算刷新不变；成功时只发布本次返回中实际固定来源ID，不能把未入选固定ID豁免补充JSONL。
+# 函数用途: 刷新合法候选及其实际来源，避免HOT撤销后同ID回落JSONL却漏过最终确认。
+def _refresh_recall_candidates(agent: object, records: list, read_paths: list[str], scope: MemoryRecallScope,
+                               *, fixed_source_ids: set[str] | None = None) -> list:
+    fixed = [
         *hot_memory_records(agent.memory_hot, agent.memory_lessons, scope=scope),
         *routed_lesson_records(agent.memory_lessons, read_paths=read_paths, scope=scope,
                                stale_days=float(getattr(agent.config, "home_lesson_stale_caveat_days", 7.0) or 0.0)),
+    ]
+    available = [
+        *fixed,
         *(record for record in agent.memory.all() if long_term_record_matches_scope(record, scope)),
     ]
     current = {record.entry_id: record for record in _dedupe_formal_memories(available)}
     selected = [current[record.entry_id] for record in records if record.entry_id in current]
-    return _budgeted_formal_memories(BudgetedMemoryRecords(
+    result = _budgeted_formal_memories(BudgetedMemoryRecords(
         _dedupe_formal_memories(selected), omitted_count=getattr(records, "omitted_count", 0)))
+    if fixed_source_ids is not None:
+        admitted = {record.entry_id for record in result}
+        fixed_source_ids.clear()
+        fixed_source_ids.update(record.entry_id for record in fixed if record.entry_id in admitted)
+    return result
 
 
 # 非HOT池按安全信封计量4000字符（含遗漏提示），工作约定另受2400子预算。

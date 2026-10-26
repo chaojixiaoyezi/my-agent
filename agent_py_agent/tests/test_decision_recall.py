@@ -379,6 +379,8 @@ def test_prepare_context_reuses_sorted_records_in_original_loop_without_second_c
     assert params.memories is context.memories and seen == [context.memories] and len(calls) == 1
 
 
+# LLM: 两前台入口均只取候选且显式latency_safe；计数确认不触发嵌入，仍验证真实词面结果及回填排队。
+# 函数用途: 守住基础与补充召回的非阻塞检索合同。
 @pytest.mark.parametrize("caller", ["runtime", "fragment"])
 def test_r2_foreground_recall_uses_latency_safe_without_live_embeddings(tmp_path, prepared, monkeypatch, caller):
     from agent_py_agent.agent.agent_core.runtime import loop_support
@@ -395,7 +397,7 @@ def test_r2_foreground_recall_uses_latency_safe_without_live_embeddings(tmp_path
 
     host.memory._embedder = SimpleNamespace(model="r2-uncached", dim=2, embed=embed)
     monkeypatch.setattr(jsonl, "_queue_vector_backfill", lambda *args: queued.append(args))
-    method = "search_scoped" if caller == "runtime" else "search_scoped_candidates"
+    method = "search_scoped_candidates"
     original = getattr(host.memory, method)
 
     def search(*args, **kwargs):

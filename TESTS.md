@@ -1,3 +1,33 @@
+## 2026-10-26 Wave 5 Track A Round 4：最终准入后确认记忆访问
+
+来源：`07-tasks/wave5-tracka-round4-fix-20261026.md` 更新后的实际路径白名单，起点 `57c9689ca2034599efed8d10433795329be4a431`。只在指定返工树修改和提交，不部署或启停服务。
+
+- 基础运行时检索改用原 `search_scoped_candidates(..., latency_safe=True)`，不在 top-k 初选时登记访问；缺向量仍只排队后台回填。
+- `supplement_recalled_memories` 新增宿主可选参数 `defer_access=False`，独立调用默认保留原严格确认；运行时组合显式延后至外层最后预算之后。
+- `_formal_memories_for_request` 最终去重/完整信封预算后由 `_confirm_final_memory_access` 一次确认仍合法的长期候选。复用原 `confirm_scoped_access` 重读 scope、版本、正文和来源，不清空/回滚已有 pending，不给失效候选补位；确认后没有第二次裁剪。
+- HOT/lesson 按实际仓库来源 ID 保持原优先级，不凭 kind 猜来源；本 run 的来源集合随成功 `_refresh_recall_candidates` 同步，且只发布本次预算返回的固定源 ID，不豁免回落 JSONL，也不把未入选固定源扩入名单。补充来源元数据只保留最终入选 ID。JSONL 原有候选/确认接口已足够，`jsonl.py` 无需修改。
+- 新增 `test_wave5_tracka_r2_review_fixes.py` 的 28 项真实 JSONL 回归：21 个缺陷反例先红后绿、7 个直接调用/隔离/材料模式控制保持。覆盖基础 top-k 仅保留 0/1/2 条、两种补充材料模式在完整信封预算中仅保留 0/1/2 条、已有访问不被擦除、重复来源、最终撤销/换范围/换版本、JSONL 同名 kind，以及 owner-off/task_local/control_plane 不读正式源。审查补充的同 ID 来源撤销与新增竞态均覆盖合法访问及最终撤销。
+- 每个访问断言均观察原 `_note_access`、真实 `_pending_access`，并刷盘后重新打开 JSONL 核对 `last_accessed_at`；不以 spy 调用成功代替持久结果。原 R2 低延迟用例仅把观测点改到新候选入口，原词面结果、`latency_safe=True`、零实时嵌入和后台队列断言不变。
+
+独立源码首审指出“HOT 撤销后同 ID 回落到 JSONL 仍沿初始固定来源 ID 豁免”的缺陷，两例真实 rerank/refresh 回归先失败后修正；复审再指出“刷新扩入未入选固定源 ID，误豁免随后同 ID JSONL 补充”，两种材料模式下四例均先失败后修正。来源分类只在完整刷新与预算成功后发布本次实际返回的固定源交集，不新增仓库读取。审查建议的 `with_new_facts` 组合亦已补测。
+
+最终 Astra high 定向源码复核确认上述两条 finding 已在审查范围闭合，未发现最后交集修正引入的确定新 bug；复核仅只读源码，未独立运行测试或真实模型，不能替代下面的实际测试回执或部署验收。
+
+任务指定六文件最终 **307 passed / 0 failed / 0 error / 0 skipped**（12.77 秒，包含全部 28 项新增回归）；Ruff 与严格尺寸门通过。原始先红证据为 `.pytest_cache/wave5-tracka-r4-red.xml`、`wave5-tracka-r4-red-edges.xml`、`wave5-tracka-r4-review-red.xml` 和 `wave5-tracka-r4-review2-red.xml`；组合结果为 `.pytest_cache/wave5-tracka-r4.xml`。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave5_tracka_r2_review_fixes.py agent_py_agent/tests/test_decision_recall.py agent_py_agent/tests/test_memory_jsonl_and_hybrid_wave5.py agent_py_agent/tests/test_memory_candidates.py agent_py_agent/tests/test_memory_curator_v2.py agent_py_agent/tests/test_memory_retention_v2.py -q --tb=short -o addopts='' --junitxml=.pytest_cache/wave5-tracka-r4.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout HEAD -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+测试只操作临时账本，外部决策服务/工具发现/恢复设施用离线边界替代；未运行全仓、真实付费模型或线上用户链路，不把这里的访问集合正确性外推为部署验收。
+
 ## 2026-10-26 Wave 5 Track A Round 2 + Round 3：接线、缓存投影与回收时钟
 
 来源：`07-tasks/wave5-tracka-round2-fix-20261026.md` 与 `07-tasks/wave5-tracka-round3-fix-20261026.md`。R3 起点 `39ed42185afa905ad423da4b258ef9ab0370ad3b`，继续在指定返工工作树实现、测试和提交，不部署或启停服务。

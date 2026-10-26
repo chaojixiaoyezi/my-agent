@@ -1,3 +1,11 @@
+## 2026-10-26 Wave 5 Track A Round 4 最终访问确认结构
+
+- `loop_support.py::_prepare_runtime_context` 改取 `search_scoped_candidates(..., latency_safe=True)`；候选阶段没有访问副作用。
+- `memory_store/decision_recall.py::supplement_recalled_memories` 默认 `defer_access=False`，独立调用仍沿原严格确认；组合运行时显式传 `True`，把确认交还外层最终准入点。
+- `_formal_memories_for_request` 在最后去重和完整信封预算后调用 `_confirm_final_memory_access`，以真实 HOT/lesson 来源 ID 区分固定项，其余通过原 `JsonlMemory.confirm_scoped_access` 重核后一次登记。失效项移除但不补位，不擦除既有 pending，确认后无再次预算淘汰；补充 ID 清单交集最终集合。
+- 固定来源 ID 为本 run 局部集合；两处 refresh 回调均沿 `_refresh_recall_candidates` 在完整原刷新/预算成功后同步“当前固定源 ID ∩ 本次返回 ID”，失败不发布半套分类。HOT/lesson 撤销后同 ID 回落 JSONL 必须重核，新出现但未入选的固定源也不能豁免补充 JSONL；原四参数独立刷新调用保持兼容。
+- `jsonl.py` 候选检索和严格确认实现保持不变；新回归以真实刷盘及重新打开核对访问时间，不以返回列表替代副作用验收。
+
 ## 2026-10-26 Wave 5 Track A Round 2 + Round 3 接线结构
 
 - `agent_core/runtime/loop_support.py::_prepare_runtime_context` 与 `memory_store/decision_recall.py::FragmentSearch.additions` 在原 scope/预算调用上传 `latency_safe=True`；不新增召回入口、授权或访问计数旁路。
