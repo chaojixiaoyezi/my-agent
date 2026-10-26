@@ -97,6 +97,7 @@ from .curator_run_log import (
     RUN_WARNINGS_MAX_COUNT,
     CuratorRunLog,
     CuratorRunRecord,
+    project_cursor_payload,
 )
 from .curator_state import (
     CuratorLeaseLostError,
@@ -192,6 +193,17 @@ class _RunContext:
     route: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: 锁前输入仅是可丢弃快照；取得租约后重核游标、配置与排除名单，不能把快照当运行权威。
+# 类用途: 携带到期检查已经读到的批次，避免同一次运行重复扫描会话和审计。
+@dataclass(frozen=True)
+class _PrecollectedBatch:
+    batch: CuratorInputBatch
+    state: MemoryCuratorState
+    config_revision: str
+    exclusions: frozenset[str]
+    exclusions_revision: int
+
+
 # LLM: 触发/调度/失败结果与执行链分离:Lifecycle 只做持久化触发、lease 获取与结果构造,
 # 不直接读写 Daily/Candidate。
 # 类用途: 提供 Curator 触发登记、到期调度与失败结果构造。
@@ -211,7 +223,7 @@ class _CuratorLifecycleMixin:
     # LLM: 到期运行只依据配置、租约和真实输入/日终；待确认候选不单独触发空run，普通维护遇前台延后，pre_compact仍守原屏障。
     # 函数用途: 按原pending、输入和时间事实调度到期批次，不以候选来源资格替代当前工作或用户确认。
     # LLM: 正MP只消费当前实际Agent/原claim准入，Count0纯内存早返；仅空短核而不持T等待模型，原分组/F4候选与用户确认合同不变。
-    # 函数用途: 在原请求仍开放时开始策展，保留既有到期调度、按组提取和用户正式确认。
+    # 函数用途: 在原请求仍开放时调度策展；轮次采集只做一次，租约内复核后复用。
     def run_if_due(self, *, now: datetime | None = None) -> CuratorRunResult:
 
         from ..gateway_parts.request_entry_admission import require_request_execution
@@ -231,25 +243,26 @@ class _CuratorLifecycleMixin:
             return self._result(status="busy", reason=pending or "interval")
         if pending:
             return self._run_pending_when_due(state, pending, current)
+        if _daily_finalize_due(state, current, self.config.daily_finalize_hour):
+            return self.run(reason="daily_finalize", now=current)
         # due 判定也遵守学习排除名单：名单不可读时按 fail-closed 不收集任何消息（不会因名单
-        # 会话的旧消息误触发一次运行）；真正的收集在 _execute 里再做一次。不可读的诊断要随
+        # 会话的旧消息误触发一次运行）；快照进入 _execute 后复核再复用。不可读的诊断要随
         # not_due 一起返回，不能显示成没有原因的普通 not_due（mc4-3106）。
         excluded_ids, exclusion_warnings = self._learning_exclusions_for_run()
         if excluded_ids is None:
             return self._result(
                 status="not_due", reason="interval", warnings=exclusion_warnings
             )
-        batch = self._collect(
-            state, include_formal=False, excluded_conversation_ids=excluded_ids
-        )
+        config_revision = self.config.revision()
+        exclusions_revision = self._read_exclusions_revision()
+        batch = self._collect(state, include_formal=False, excluded_conversation_ids=excluded_ids)
+        precollected = _PrecollectedBatch(batch, state, config_revision, excluded_ids, exclusions_revision)
         if batch.load_errors:
-            return self.run(reason="interval", now=current)
+            return self.run(reason="interval", now=current, precollected_batch=precollected)
         if batch.user_turns() >= self.config.turn_threshold:
-            return self.run(reason="turn_threshold", now=current)
+            return self.run(reason="turn_threshold", now=current, precollected_batch=precollected)
         if _interval_due(batch, state, current, self.config.interval_seconds):
-            return self.run(reason="interval", now=current)
-        if _daily_finalize_due(state, current, self.config.daily_finalize_hour):
-            return self.run(reason="daily_finalize", now=current)
+            return self.run(reason="interval", now=current, precollected_batch=precollected)
         return self._result(status="not_due", reason="interval")
 
     # LLM: Cooldown applies only to a durable failed pending request; it bounds provider retries
@@ -305,7 +318,9 @@ class _CuratorLifecycleMixin:
                         # 路由警告（默认模型来源、档案退回原因）也进失败记录，总数给失败诊断留一个位置。
                         attempt_warnings=(*breaker_warnings, *context.route.get("warnings", ()), *context.route.get("failure_warnings", ()),
                                           *_attempt_shape_warnings(last_model_attempts()))[: RUN_WARNINGS_MAX_COUNT - 1],
-                    )
+                    ),
+                    **({"relevant_thread_ids": tuple(context.route["batch_thread_ids"])}
+                       if context.route.get("batch_thread_ids") else {}),
                 )
             except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
                 raise
@@ -487,17 +502,13 @@ class _CuratorExecutionMixin:
     # LLM: 可选前置标注只能附于临时输入；提取/证据验证在任何权威提交前完成，材料及游标仍由原链持有。
     # 后台提取自带宿主会话:按 owner_id + run_id 走与前台同一原语 provider_session_scope,不冒用前台线程会话;
     # 同一 run 的同输入重试/缩批共享同一会话值,退出即复位。改动时同步 test_memory_curator_v2 的会话头用例。
-    # 函数用途: 执行一个已持 lease 的提取、整批提交与提交后晋升。
-    def _execute(self, context: _RunContext) -> CuratorRunResult:
+    # 函数用途: 持租约后复核并复用预采集输入，补一次正式记忆快照，再按最终预算提取与提交。
+    def _execute(self, context: _RunContext, *, precollected_batch: _PrecollectedBatch | None = None) -> CuratorRunResult:
         preflight_warnings = self._preflight_migration()
         # 学习排除名单先于收集与晋升生效：不可读时 fail-closed，非空先标记历史待定候选再收集。
         excluded_ids, exclusion_warnings = self._prepare_exclusion_context()
         preflight_warnings = (*preflight_warnings, *exclusion_warnings)
-        batch = self._collect(
-            context.state_before,
-            include_formal=True,
-            excluded_conversation_ids=excluded_ids,
-        )
+        batch = self._execution_batch(context, precollected_batch, excluded_ids)
         if batch.load_errors:
             raise CuratorInputError(_load_error_code(batch.load_errors))
         if not batch.messages and not batch.audit_events:
@@ -506,6 +517,7 @@ class _CuratorExecutionMixin:
             )
         # 按会话的主代理模型挑出这一次处理的那组会话；没有路由时全批照旧。
         batch = _apply_route(context, batch, self.dependencies.model_router)
+        context.route["batch_thread_ids"] = tuple(dict.fromkeys(item.thread_id for item in batch.messages))
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)
         preflight_warnings = (*preflight_warnings, *fit_warnings)
@@ -522,6 +534,20 @@ class _CuratorExecutionMixin:
         return self._commit_batch(
             context, attempt.batch, validated, extra_warnings=preflight_warnings
         )
+
+    # LLM: 仅完整匹配锁内游标、实际配置及排除集合/修订号才复用；任何变化沿原入口重读。
+    # 函数用途: 给已领取的运行选择安全输入；正式快照只读一次，最终fit会连正式内容一起重裁预算。
+    def _execution_batch(self, context, precollected, excluded_ids) -> CuratorInputBatch:
+        state = context.state_before
+        if (precollected is not None
+                and precollected.state.per_thread_cursors == state.per_thread_cursors
+                and precollected.state.last_processed_audit_event_id == state.last_processed_audit_event_id
+                and precollected.config_revision == self.config.revision()
+                and precollected.exclusions == excluded_ids
+                and precollected.exclusions_revision == self._read_exclusions_revision()):
+            formal, errors = self._formal_snapshot()
+            return replace(precollected.batch, formal_memories=formal, formal_memory_errors=errors)
+        return self._collect(state, include_formal=True, excluded_conversation_ids=excluded_ids)
 
     # LLM: 升级自愈:每次持 lease 提炼前幂等应用 Memory v2 迁移,失败只记 warning 不阻断。
     # 函数用途: 每次执行前应用 Memory v2 迁移,返回可展示的迁移 warning。
@@ -554,19 +580,7 @@ class _CuratorExecutionMixin:
         include_formal: bool,
         excluded_conversation_ids: frozenset[str] | None = frozenset(),
     ) -> CuratorInputBatch:
-        formal = ()
-        formal_memory_errors: list[dict[str, object]] = []
-        if include_formal and self.formal_memory_source is not None:
-            try:
-                formal = self.formal_memory_source.read(
-                    max_items=32,
-                    max_chars=min(6_000, max(1_000, self.config.max_input_chars // 4)),
-                )
-            except Exception as exc:
-                # 正式记忆是增强输入非主链依赖:读取失败降级为空并记入错误,不阻断提炼。
-                formal_memory_errors.append(
-                    {"code": _failure_code(exc), "detail": str(exc)[:200]}
-                )
+        formal, formal_memory_errors = self._formal_snapshot() if include_formal else ((), ())
         formal_chars = len(
             json.dumps([item.to_model() for item in formal], ensure_ascii=False)
         )
@@ -595,8 +609,23 @@ class _CuratorExecutionMixin:
             batch = replace(batch, formal_memory_errors=tuple(formal_memory_errors))
         return batch
 
-    # LLM: 合法候选及拒绝版本约束共用事务；committer最后写state并保留租约，晋升完成才释放。
-    # 函数用途: 提交规范批次并完成晋升尾段，租约由整轮生命周期在心跳停止后释放。
+    # LLM: 正式记忆只作为预算内增强输入，普通读错保持原降级诊断；执行未结不得被降级吞掉。
+    # 函数用途: 为实际执行补一次正式记忆快照，不重新读取会话或审计材料。
+    def _formal_snapshot(self) -> tuple[tuple, tuple[dict, ...]]:
+        if self.formal_memory_source is None:
+            return (), ()
+        try:
+            formal = self.formal_memory_source.read(
+                max_items=32, max_chars=min(6_000, max(1_000, self.config.max_input_chars // 4)),
+            )
+            return tuple(formal), ()
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            return (), ({"code": _failure_code(exc), "detail": str(exc)[:200]},)
+
+    # LLM: 合法候选及拒绝版本约束共用事务；原执行未知必须原样透传，不能包装后落普通失败并释放租约。
+    # 函数用途: 提交规范批次并完成晋升尾段；只有确认收尾后才允许外层释放租约。
     def _commit_batch(
         self,
         context: _RunContext,
@@ -619,6 +648,7 @@ class _CuratorExecutionMixin:
             finished_at=finished_at,
             extra_warnings=extra_warnings,
         )
+        run_record = self.run_log.cursor_record(run_record, relevant_thread_ids=tuple(dict.fromkeys(item.thread_id for item in batch.messages)))
         state_commit = _success_commit(
             context,
             prepared,
@@ -639,6 +669,8 @@ class _CuratorExecutionMixin:
                     rejected_target_bindings=prepared.rejected_target_bindings,
                 )
             )
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
         except CuratorCommitRecoveryError:
             raise
         except Exception as exc:
@@ -817,15 +849,15 @@ class _CuratorPromotionMixin:
         return any(isinstance(ref, dict) and bool(str(ref.get("thread_id") or "").strip())
                    for ref in (getattr(row, "source_message_refs", None) or ()))
 
-    # LLM: 全量读后先结构/来源/审核状态/排除过滤；依实际门槛按可提交、首次审核、可补旧来源稳定排序再限额，不写标记。
-    # 函数用途: 避免不合格或旧来源积压饿死可学候选，保留首次自主审核和非正限额不限量语义。
+    # LLM: 读取失败必须以稳定诊断阻止成功收尾，未结执行原样透传；筛选与正式写入的权限边界保持不变。
+    # 函数用途: 为积压晋升排序，不把候选账本损坏伪装成没有待办。
     def _pending_promotable_candidate_ids(self, *, limit: int = 32) -> list[str]:
-        """已落库、待自主晋升或待门槛重试的候选 ID；失败时静默返空。
+        """已落库、待自主晋升或待门槛重试的候选 ID；读取失败显式报错。
 
         这里只筛结构与排队次序；真实来源、证据、目标版本和最终提交仍由PromotionService复核。
         """
         try:
-            rows = self.candidate_service.list(
+            rows = self.candidate_service.readonly_rows(
                 statuses={"pending_review", "approved"},
                 limit=0,
             )
@@ -857,35 +889,43 @@ class _CuratorPromotionMixin:
             if limit > 0:
                 eligible = eligible[:limit]
             return [str(getattr(row, "candidate_id", "") or "") for row in eligible]
-        except Exception:
-            return []
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except Exception as exc:
+            raise CuratorInputError("CURATOR_CANDIDATE_READ_FAILED") from exc
 
     # LLM: 晋升在同一租约内逐条重查排除；原短提交门的typed未知必须透传保欠账，不能变普通晋升警告。
-    # 函数用途: 返回本轮成功晋升数、稳定警告和无正文的逐条提交/恢复结果。
+    # 函数用途: 在显式批次上下文内逐条晋升，成功后一次治理；未知执行原样透传并保留治理欠账。
     def _promote_eligible(self, candidate_ids: list[str]) -> tuple[int, tuple[str, ...], tuple[dict, ...]]:
         from .curator_promotion_receipts import promotion_receipt
+        from .promotion import promotion_batch
 
         if self.config.auto_promotion_policy == "manual_only" or self.promotion_callback is None:
             return 0, (), ()
         promoted = 0
         warnings: list[str] = []
         receipts: list[dict] = []
-        for candidate_id in candidate_ids:
-            skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
-            warnings.extend(skip_warnings)
-            if skipped:
-                continue
-            try:
-                result = self.promotion_callback(candidate_id)
-            except Exception:
-                warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
-                continue
-            receipt = promotion_receipt(candidate_id, result)
-            receipts.append(receipt)
-            if receipt['reason_code'] == 'REMOVE_CLEANUP_PENDING':
-                warnings.append('REMOVE_CLEANUP_PENDING')
-            if receipt['promoted'] and receipt['formal_memory_changed']:
-                promoted += 1
+        with promotion_batch(long_term=getattr(self.formal_memory_source, "long_term", None),
+                             candidates=self.candidate_service,
+                             coordinator_io=bool(getattr(self.candidate_service, "coordinator_io", False))):
+            for candidate_id in candidate_ids:
+                skipped, skip_warnings = self._recheck_exclusion_before_promotion(candidate_id)
+                warnings.extend(skip_warnings)
+                if skipped:
+                    continue
+                try:
+                    result = self.promotion_callback(candidate_id)
+                except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+                    raise
+                except Exception:
+                    warnings.append("CURATOR_AUTO_PROMOTION_FAILED")
+                    continue
+                receipt = promotion_receipt(candidate_id, result)
+                receipts.append(receipt)
+                if receipt['reason_code'] == 'REMOVE_CLEANUP_PENDING':
+                    warnings.append('REMOVE_CLEANUP_PENDING')
+                if receipt['promoted'] and receipt['formal_memory_changed']:
+                    promoted += 1
         return promoted, tuple(dict.fromkeys(warnings)), tuple(receipts)
 
     # LLM: 名单不可读时不晋升（fail-closed）；命中候选补一次标记同步，让后续人工路径也看到排除；
@@ -945,6 +985,7 @@ class _CuratorRunMixin:
         reason: str,
         force: bool = False,
         now: datetime | None = None,
+        precollected_batch: _PrecollectedBatch | None = None,
     ) -> CuratorRunResult:
 
         from ..gateway_parts.request_entry_admission import require_request_execution
@@ -953,26 +994,30 @@ class _CuratorRunMixin:
         results: list[CuratorRunResult] = []
         remaining = 1
         while remaining and len(results) < CURATOR_MODEL_GROUP_MAX_COUNT:
-            result, remaining = self._run_once(reason=reason, force=force, now=now)
+            options = {"precollected_batch": precollected_batch} if precollected_batch is not None else {}
+            result, remaining = self._run_once(reason=reason, force=force, now=now, **options)
+            precollected_batch = None
             results.append(result)
             if result.status != "succeeded":
                 break
         return combined_run_result(results)
 
     # LLM: 恢复/领取同锁，普通失败保持原分类；原端口缺失/运输或物理退出未结必须原样上抛，不补无租约失败审计。
-    # 函数用途: 领取并维持同一策展租约，未结来源交原宿主处理，不推进 pending 或游标。
+    # 函数用途: 原子领取后复核配置；变更则无业务写地释放旧预算租约，否则交待复核批次执行。
     def _run_once(
         self,
         *,
         reason: str,
         force: bool = False,
         now: datetime | None = None,
+        precollected_batch: _PrecollectedBatch | None = None,
     ) -> tuple[CuratorRunResult, int]:
         if not self.config.enabled and not force:
             return self._result(status="disabled", reason=reason), 0
+        config_revision = self.config.revision()
         try:
             acquired = self.committer.recover_and_acquire(CuratorLeaseRequest(
-                reason, self.config.revision(), _lease_seconds(self.config), now,
+                reason, config_revision, _lease_seconds(self.config), now,
             ))
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
             raise
@@ -984,14 +1029,20 @@ class _CuratorRunMixin:
         if acquired is None:
             return self._result(status="busy", reason=reason), 0
         context = _run_context(reason, *acquired)
+        if config_revision != self.config.revision():
+            from .curator_lease import release_curator_lease
+
+            release_curator_lease(self.state_store, context.lease_id)
+            return self._result(status="not_due", reason=reason), 0
         from .curator_lease import curator_lease_interruption_guard
 
         with curator_lease_interruption_guard(self.state_store, context.lease_id):
-            return self._run_leased(context)
+            options = {"precollected_batch": precollected_batch} if precollected_batch is not None else {}
+            return self._run_leased(context, **options)
 
     # LLM: 原运输和独立物理退出未结先于普通失败处理；心跳 stop 标记仍读原异常字典，任何未确认都不能经 commit_failure 清租约。
-    # 函数用途: 执行已领取的一轮，正常收尾才释放；未结时保原对象、pending 与游标交宿主对账。
-    def _run_leased(self, context: _RunContext) -> tuple[CuratorRunResult, int]:
+    # 函数用途: 持心跳执行并转交可复用快照；正常收尾才释放，未结时保原对象和持久责任。
+    def _run_leased(self, context: _RunContext, *, precollected_batch: _PrecollectedBatch | None = None) -> tuple[CuratorRunResult, int]:
         from .curator_lease import (
             curator_lease_heartbeat,
             lease_exception_metadata,
@@ -1000,7 +1051,8 @@ class _CuratorRunMixin:
 
         try:
             with curator_lease_heartbeat(self.state_store, context.lease_id, _lease_seconds(self.config)):
-                result = self._execute(context)
+                options = {"precollected_batch": precollected_batch} if precollected_batch is not None else {}
+                result = self._execute(context, **options)
             release_curator_lease(self.state_store, context.lease_id)
             return result, int(context.route.get("remaining", 0) or 0)
         except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
@@ -1160,7 +1212,12 @@ class MemoryCuratorService(
                 "evidence": _recover_evidence_summary(evidence),
             }
         # 2. 权威审计链: 成功记录按时间升序, 恢复点 = 最后一条 cursor_after
-        succeeded = [r for r in self.run_log.list() if r.status == "succeeded"]
+        try:
+            succeeded = [r for r in self.run_log.list() if r.status == "succeeded"]
+        except (RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError):
+            raise
+        except (RuntimeError, ValueError, OSError):
+            return {"status": "refused", "reason": "cursor_audit_chain_invalid", "evidence": _recover_evidence_summary(evidence)}
         if not succeeded:
             return {
                 "status": "refused",
@@ -1298,7 +1355,7 @@ class _PreparedOutputs:
 def _without_identity_conflicts(candidate_service: CandidateService, prepared: _PreparedOutputs) -> _PreparedOutputs:
     if not prepared.candidates:
         return prepared
-    rows = retain_rejected_target_bindings(candidate_service.list(), prepared.rejected_target_bindings)
+    rows = retain_rejected_target_bindings(candidate_service.readonly_rows(), prepared.rejected_target_bindings)
     kept, dropped = split_identity_conflicts(rows, prepared.candidates)
     if not dropped:
         return prepared
@@ -1748,13 +1805,10 @@ def _success_commit(
     )
 
 
-# LLM: Cursor payload is a no-content audit projection and not a second cursor authority.
-# 函数用途: 构造 run audit 的前后游标字段。
-def _cursor_payload(cursors: dict[str, str], audit_event_id: str) -> dict[str, object]:
-    return {
-        "per_thread_cursors": dict(cursors),
-        "last_audit_event_id": str(audit_event_id or ""),
-    }
+# LLM: 默认仍给运行逻辑完整视图；真实日志投影共用run_log的32线程阈值，版本链负责展开，不构造第二权威。
+# 函数用途: 构造严格两字段的前后游标，小规模完整保留，大规模可按本批线程投影。
+def _cursor_payload(cursors: dict[str, str], audit_event_id: str, relevant_thread_ids: set[str] | None = None) -> dict[str, object]:
+    return project_cursor_payload(cursors, audit_event_id, relevant_thread_ids)
 
 
 # LLM: Failure taxonomy contains stable codes only; classification reads exception types, never text.

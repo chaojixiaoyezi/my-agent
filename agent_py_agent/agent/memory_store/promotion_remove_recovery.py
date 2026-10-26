@@ -125,3 +125,57 @@ def recover_promotion_result(service, candidate, reviewer):
     if ref:
         return MemoryPromotionResult(candidate.candidate_id, True, 'promoted', 'REMOVE_CLEANUP_RECOVERED', ref)
     return None
+
+
+# LLM: 只恢复approved的精确replace/merge，quota→policy→candidate→formal锁内核全身份并补回执，不重放正式写入。
+# 函数用途: 正式更新已成功但候选终态写失败时，认出同一已提交版本而非误报观察版本过期。
+def recover_committed_update(service, candidate, reviewer):
+    from ..common.json_io import locked_json_path
+    from .promotion import (
+        MemoryPromotionResult,
+        _coordinator_policy_birth,
+        _learning_exclusion_block,
+        _learning_exclusion_scope,
+    )
+
+    if (candidate.status != "approved" or candidate.proposed_action not in {"replace", "merge"}
+            or effective_promotion_target(candidate.promotion_target, candidate.origin, candidate.candidate_type) != "long_term"
+            or type(candidate.target_entry_version) is not int or candidate.target_entry_version < 1):
+        return None
+    # 服务依赖必须仍在同一owner根；候选本身还会由原locked_snapshot做完整CAS。
+    owner = service.persona.owner_home.resolve()
+    try:
+        service.candidates.path.resolve().relative_to(owner)
+        service.long_term.path.resolve().relative_to(owner)
+    except ValueError:
+        return None
+    enforcer = service.long_term.quota_enforcer or service.persona.quota_enforcer
+    options = {"birth_commit": _coordinator_policy_birth} if service.coordinator_io else {}
+    with enforcer.admission() as admission, _learning_exclusion_scope(service), service.candidates.locked_snapshot(candidate):
+        with locked_json_path(service.long_term.path, **options):
+            events = service.long_term._read_memory_events(service.long_term.path)
+            latest = next((row for row in reversed(events) if row.entry_id == candidate.target_entry_id and row.action != "touch"), None)
+            if not _same_committed_update(latest, candidate):
+                return None
+            blocked = _learning_exclusion_block(service, candidate)
+            if blocked:
+                return MemoryPromotionResult(candidate.candidate_id, False, candidate.status, blocked)
+            ref = "memory/long_term/memory.jsonl#" + candidate.target_entry_id
+            service.candidates.mark_promoted_admitted(candidate.candidate_id, admission, (reviewer, ref, "update_commit_recovered"))
+    return MemoryPromotionResult(candidate.candidate_id, True, "promoted", "UPDATE_COMMIT_RECOVERED", ref)
+
+
+# LLM: 比较最新非touch事件的全部写入身份；merge在唯一正式库中按replace存储，旧source/更高版本或任一元数据漂移均拒绝。
+# 函数用途: 严格确认目标确由本候选、同一前序版本和规范化内容提交，不用同文相似性代替归属。
+def _same_committed_update(record, candidate) -> bool:
+    from .operations import memory_content_hash
+    from .promotion import _expiry_epoch, _long_term_attributes, _long_term_kind
+
+    return (record is not None and record.entry_id == candidate.target_entry_id
+            and record.source == f"candidate:{candidate.candidate_id}"
+            and record.version == candidate.target_entry_version + 1 and record.action == "replace"
+            and memory_content_hash(record.content) == memory_content_hash(candidate.content)
+            and record.kind == _long_term_kind(candidate.candidate_type)
+            and record.tags == [candidate.candidate_type, candidate.origin]
+            and record.attributes == _long_term_attributes(candidate)
+            and record.expires_at == _expiry_epoch(candidate.valid_until))

@@ -2,10 +2,11 @@
 # 模块用途: 为稳定分片提供有界定位缓存；近期写入、冷启动和失效均走原扫描，防止同tick改写被旧EOF或前缀吞掉。
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from ..common.cache_freshness import cache_entry_trustworthy
@@ -13,7 +14,7 @@ from ..io.cursor_cache import CursorCache, FileStamp, cursor_key, file_stamp, no
 
 # 128个近期审计游标兼顾多owner和80条批次，淘汰仅重扫；不缓存事件正文或历史异常。
 _AUDIT_CURSOR_CACHE_MAX_COUNT = 128
-# 每条最多记录512个旧分片指纹，覆盖约100个生产分片且把多年目录的缓存内存封顶。
+# 最近512份旧分片保明细，更早分片折叠为前缀摘要；复用时仍逐份重新stat核验。
 _AUDIT_CURSOR_PREFIX_MAX_COUNT = 512
 # 128KiB有界首ID过滤器使约十万事件仍能保守提升新游标；误报仅变慢，极端128份为16MiB。
 _AUDIT_CURSOR_FILTER_BYTES = 128 * 1024
@@ -41,6 +42,9 @@ class AuditCursor:
     line: int
     prefix: tuple[tuple[str, FileStamp], ...]
     seen: bytes
+    prefix_digest: str = ""
+    prefix_last: str = ""
+    prefix_count: int = 0
 
 
 # LLM: 这些对象只在本批驻留，绝不进入缓存或Curator持久状态。
@@ -62,6 +66,7 @@ class AuditSlice:
     stamp: FileStamp | None = None
     fatal: bool = False
     path: Path | None = None
+    stopped: bool = False
 
 
 # LLM: 局部状态只控制当前选取前缀；所有持久游标仍由原Curator提交链推进。
@@ -78,6 +83,9 @@ class AuditWindow:
     prefix: list = field(default_factory=list)
     used_chars: int = 0
     cacheable: bool = True
+    prefix_digest: str = ""
+    prefix_last: str = ""
+    prefix_count: int = 0
 
 
 # LLM: 缓存锚文件后半发生整读失败时，原路径不会找到该锚；内部信号只要求同算法从头重扫。
@@ -86,18 +94,31 @@ class _AuditRescan(Exception):
     pass
 
 
-# LLM: 旧分片除列表/stamp相同还须离开共享粗时间窗口；同tick等长改写不能凭stat跳过前缀损坏，不缓存历史异常。
-# 函数用途: 校验稳定审计前缀及锚行；近期写入或校验失败沿原冷扫描报告错误。
+# LLM: 压缩前缀仍逐份stat重算累积摘要；近期文件、删除、替换或改写均退回原冷扫描。
+# 函数用途: 校验全部旧分片及锚行，不因历史超过512份永久放弃缓存。
 def _reuse_cursor(request: AuditRead, paths: list[Path]) -> AuditCursor | None:
     cached = _AUDIT_CURSORS.get(cursor_key(request.root, request.target))
     if cached is None:
         return None
     index = next((i for i, path in enumerate(paths) if path.name == cached.name), -1)
-    if index < 0 or tuple(path.name for path in paths[:index]) != tuple(name for name, _ in cached.prefix):
+    if index < 0 or index != cached.prefix_count + len(cached.prefix):
         return None
     try:
+        prefix_paths = paths[:cached.prefix_count]
+        digest = ""
+        for path in prefix_paths:
+            stamp = file_stamp(path.stat())
+            if not cache_entry_trustworthy(stamp.mtime_ns):
+                return None
+            digest = _prefix_digest(digest, path.name, stamp)
+        if (digest != cached.prefix_digest
+                or (prefix_paths[-1].name if prefix_paths else "") != cached.prefix_last):
+            return None
+        paths_before = paths[cached.prefix_count:index]
+        if tuple(path.name for path in paths_before) != tuple(name for name, _ in cached.prefix):
+            return None
         if any(not cache_entry_trustworthy(stamp.mtime_ns) or file_stamp(path.stat()) != stamp
-               for path, (_, stamp) in zip(paths[:index], cached.prefix)):
+               for path, (_, stamp) in zip(paths_before, cached.prefix)):
             return None
         return _validate_anchor(paths[index], request.target, cached)
     except (OSError, ValueError, UnicodeError):
@@ -133,20 +154,20 @@ def _read_error(path: Path, exc: BaseException, line: int) -> dict:
 
 
 # LLM: 二进制LF逐行严格解码与原整读等价；当前锚文件整读失败要求重定位，不能凭缓存认定cursor存在。
-# 函数用途: 读取一份分片的尾部或全量，并保留所有原诊断。
-def _read_slice(path: Path, cursor: AuditCursor | None) -> AuditSlice:
+# 函数用途: 读取一份分片并保留全部原诊断，可直接交给有界窗口而不累积整文件。
+def _read_slice(path: Path, cursor: AuditCursor | None, window: AuditWindow | None = None) -> AuditSlice:
     if not path.is_file():
         return AuditSlice()
     try:
         with path.open("rb") as handle:
-            return _read_open(handle, path, cursor)
+            return _read_open(handle, path, cursor, window)
     except (OSError, UnicodeDecodeError) as exc:
         return AuditSlice(errors=[_read_error(path, exc, 0)], fatal=True)
 
 
-# LLM: 从缓存偏移开始时核对真实描述符；物理行号沿原分片起点，不因跳前缀而重编号。
-# 函数用途: 在已打开分片收齐记录和错误，读取中改写则不缓存。
-def _read_open(handle, path: Path, cursor: AuditCursor | None) -> AuditSlice:
+# LLM: 预算达到后不再构造AuditRow或业务投影，仍流式校验全分片，保错误顺序、物理行号及FD核验。
+# 函数用途: 有界构造审计输入并收齐尾部损坏，读取中改写则不缓存。
+def _read_open(handle, path: Path, cursor: AuditCursor | None, window: AuditWindow | None = None) -> AuditSlice:
     stamp = file_stamp(os.fstat(handle.fileno()))
     if cursor is not None and cursor.stamp != stamp:
         raise _AuditRescan
@@ -156,7 +177,14 @@ def _read_open(handle, path: Path, cursor: AuditCursor | None) -> AuditSlice:
     line_number = cursor.line if cursor else 0
     for start, raw, end in _raw_lines(handle):
         line_number += 1
-        _parse_row(result, missing_errors, raw.decode("utf-8"), AuditRow({}, start, end, line_number))
+        payload = _parse_row(result, missing_errors, raw.decode("utf-8"), line_number)
+        if payload is None or result.stopped:
+            continue
+        row = AuditRow(payload, start, end, line_number)
+        if window is None:
+            result.rows.append(row)
+        else:
+            result.stopped = _consume_row(window, row, (path.name, stamp))
     result.errors.extend(missing_errors)
     if file_stamp(os.fstat(handle.fileno())) != stamp:
         result.stamp = None
@@ -175,33 +203,34 @@ def _raw_lines(handle):
 
 
 # LLM: 保持旧顺序：所有JSON/非对象错误在前，缺event_id错误在后；空白LF/CRLF/NEL语义不变。
-# 函数用途: 解析一个审计物理行，记录原行号和可选游标位置。
-def _parse_row(result: AuditSlice, missing: list, text: str, row: AuditRow) -> None:
+# 函数用途: 校验一个物理行并返回临时JSON对象，预算外不再累积AuditRow或正式业务输入。
+def _parse_row(result: AuditSlice, missing: list, text: str, line: int) -> dict | None:
     if not text.strip():
         return
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        result.errors.append(_read_error(result.path, exc, row.line))
+        result.errors.append(_read_error(result.path, exc, line))
         return
     if not isinstance(payload, dict):
-        result.errors.append(_read_error(result.path, ValueError("JSONL row is not an object"), row.line))
+        result.errors.append(_read_error(result.path, ValueError("JSONL row is not an object"), line))
         return
     if not str(payload.get("event_id") or "").strip():
         missing.append(_read_error(result.path, ValueError("audit row lacks event_id"), 0))
         return
-    result.rows.append(replace(row, payload=payload))
+    return payload
 
 
 # LLM: 锚只来自原顺序首次发现或有界过滤器可证明的新ID；正文不进入pending/cache。
-# 函数用途: 暂存一条可复核的审计游标，批次结束统一冻结过滤器。
+# 函数用途: 暂存精确物理行边界及有界历史前缀，批次结束统一冻结过滤器。
 def _queue_cursor(window: AuditWindow, row: AuditRow, scope: tuple[str, FileStamp]) -> None:
     if not window.cacheable:
         return
     target = str(row.payload.get("event_id") or "").strip()
     if len(target) <= 256:
         name, stamp = scope
-        position = AuditCursor(name, stamp, row.start, row.end, row.line, tuple(window.prefix), b"")
+        position = AuditCursor(name, stamp, row.start, row.end, row.line, tuple(window.prefix), b"",
+                               window.prefix_digest, window.prefix_last, window.prefix_count)
         window.pending.append((target, position))
 
 
@@ -226,30 +255,45 @@ def _consume_row(window: AuditWindow, row: AuditRow, scope: tuple[str, FileStamp
     return len(window.selected) >= window.request.limit
 
 
-# LLM: 先收齐分片错误再按预算截尾；只有共享窗口外的稳定stamp可保存本批hint，fresh前缀不得在日后留下陈旧缓存。
-# 函数用途: 读取分片并记录可复用的干净稳定位置；整读失败仍要求原全量重定位。
+# LLM: 局部选择只在全分片读成功后发布；UTF-8/IO失败丢弃本分片选择，Bloom多置位只能降低命中率。
+# 函数用途: 限额构造对象但完整检测当前分片损坏，稳定干净位置才可以进入缓存。
 def _consume_file(window: AuditWindow, path: Path, cursor: AuditCursor | None) -> bool:
     empty = cursor and cursor.end == cursor.stamp.size
-    result = AuditSlice(stamp=cursor.stamp) if empty else _read_slice(path, cursor)
+    local = replace(window, selected=list(window.selected), pending=list(window.pending))
+    result = AuditSlice(stamp=cursor.stamp) if empty else _read_slice(path, cursor, local)
     if cursor is not None and result.fatal:
         raise _AuditRescan
     window.errors.extend(result.errors)
     window.cacheable = (window.cacheable and not result.errors and result.stamp is not None
                         and cache_entry_trustworthy(result.stamp.mtime_ns))
-    for row in result.rows:
-        if _consume_row(window, row, (path.name, result.stamp)):
-            return True
+    if not result.fatal:
+        window.found, window.selected, window.pending = local.found, local.selected, local.pending
+        window.used_chars = local.used_chars
+    if result.stopped:
+        return True
     _append_prefix(window, path.name, result.stamp)
     return False
 
 
-# LLM: 前缀指纹超过上界即停止缓存，不改变完整扫描或错误返回，避免多年目录造成永久驻留增长。
-# 函数用途: 为可能位于下一日的游标保留干净分片的有界定位事实。
+# LLM: 旧前缀仅压缩内存表达，不跳过后续stat复核；摘要绑定名字和五字段stamp，删除或变更均失效。
+# 函数用途: 保留最近512份明细，更早干净分片滚动进入固定长度摘要。
 def _append_prefix(window: AuditWindow, name: str, stamp: FileStamp | None) -> None:
-    if len(window.prefix) >= _AUDIT_CURSOR_PREFIX_MAX_COUNT or stamp is None:
+    if stamp is None:
         window.cacheable = False
         return
+    if len(window.prefix) >= _AUDIT_CURSOR_PREFIX_MAX_COUNT:
+        old_name, old_stamp = window.prefix.pop(0)
+        window.prefix_digest = _prefix_digest(window.prefix_digest, old_name, old_stamp)
+        window.prefix_last = old_name
+        window.prefix_count += 1
     window.prefix.append((name, stamp))
+
+
+# LLM: 固定编码只含文件名和stat，不含审计正文；同一序列可从当前目录重新计算核验。
+# 函数用途: 将一份已消费分片折叠到累积前缀摘要。
+def _prefix_digest(previous: str, name: str, stamp: FileStamp) -> str:
+    material = json.dumps([previous, name, asdict(stamp)], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 # LLM: 同一批的位置共享不可变seen；坏分片/缺游标/过大前缀不缓存，仅退回同算法重扫。
@@ -277,11 +321,13 @@ def _scan_window(window: AuditWindow, paths: list[Path], cursor: AuditCursor | N
 
 
 # LLM: 每次尝试新建局部状态，回退不能继承上次部分选择或错误；只复制有界元数据。
-# 函数用途: 为冷扫描或已验证游标创建独立读取窗口。
+# 函数用途: 为冷扫描或已验证游标创建独立窗口，继承有界明细与累积摘要。
 def _new_window(request: AuditRead, project: Callable, cursor: AuditCursor | None) -> AuditWindow:
     seen = bytearray(cursor.seen if cursor else bytes(_AUDIT_CURSOR_FILTER_BYTES))
     window = AuditWindow(request, project, bool(cursor) or not request.target, seen)
     window.prefix = list(cursor.prefix) if cursor else []
+    if cursor:
+        window.prefix_digest, window.prefix_last, window.prefix_count = cursor.prefix_digest, cursor.prefix_last, cursor.prefix_count
     return window
 
 

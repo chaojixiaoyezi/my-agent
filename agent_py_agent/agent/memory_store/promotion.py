@@ -9,27 +9,40 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol
 
+from ..backends.bounded_call import BoundedCallExitUnconfirmedError
 from ..capability.persona_repository import (
     PersonaMutationRequest,
     PersonaRepository,
     _mutate_persona_document,
     persona_entry_id,
 )
+from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.global_write_commit import GlobalWriteCommitUnavailable, execute_global_write
 from ..common.global_write_guard import GlobalWriteInWorkerError
-from ..common.json_io import locked_json_path
+from ..common.json_io import (
+    locked_json_path,
+    read_json_object_report,
+    write_json_file_atomic_unlocked,
+)
 from ..common.owner_write_errors import (
     LocalControlCoordinatorUnavailable,
     OwnerManagementIngressUnavailable,
+)
+from ..common.request_execution_ports import (
+    RequestExecutionContextUnavailable,
+    RequestExecutionOutcomeUncertainError,
 )
 from ..common.tool_index_stream import (
     InvalidToolIndexObject,
@@ -38,6 +51,7 @@ from ..common.tool_index_stream import (
 )
 from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from ..conversation.learning_source import projection_is_learnable
+from ..io.cursor_cache import CursorCache, file_stamp
 from ..user_space.owner_policy import read_learning_exclusions
 from ..user_space.owner_quota import OwnerQuotaAdmission
 from .candidate_models import (
@@ -335,33 +349,42 @@ def _archive_record_matches(row: dict[str, object], query: _ToolArchiveMatch) ->
 # LLM: verifier 流式查一条真实消息并核验 thread/role/hash/quote，不把整段原话返回调用方。
 # 类用途: 将 ConversationStore 接到 PromotionService 的 typed evidence contract。
 class ConversationMessageEvidenceVerifier:
-    # LLM: 构造器只保存 ConversationStore 只读接口，不复制其文件布局或消息状态机。
-    # 函数用途: 初始化当前 owner 消息证据核验器。
+    # LLM: 缓存只保存最多256个文件/消息键、每键8份已核验短quote证明，不保留完整消息对象或正文。
+    # 函数用途: 初始化当前owner只读消息核验器及可随时丢弃的有界证明缓存。
     def __init__(self, conversation_store: object) -> None:
         self.conversation_store = conversation_store
+        self._proof_cache = CursorCache(256)
 
-    # LLM: 通过同一 Store 的 messages.by_id_report 核对权威消息的 thread/role/hash/quote，且只返回最小证据字段。
-    # 不回退到旧 Store 方法或展示投影；领域拆分不能改变正式记忆的证据来源。
-    # 函数用途: 核验一条 user_explicit 引用并返回规范证据。
+    # LLM: 命中仍逐次核对hash/role/quote；新quote、文件变更或无真实路径时回原Store，缓存不能授权另一消息。
+    # 函数用途: 核验消息证据，稳定文件重复引用复用最小证明，不复制或缓存历史正文。
     def verify(self, ref: dict[str, object]) -> dict[str, object] | None:
         thread_id = str(ref.get("thread_id") or "").strip()
         message_id = str(ref.get("message_id") or "").strip()
-        reader = getattr(getattr(self.conversation_store, 'messages', None), 'by_id_report', None)
+        messages = getattr(self.conversation_store, 'messages', None)
+        reader = getattr(messages, 'by_id_report', None)
         if not thread_id or not message_id or not callable(reader):
             return None
+        key = self._file_key(thread_id, message_id)
+        quote = str(ref.get("quote") or "").strip()
+        cached = self._proof_cache.get(key) if key is not None else None
+        reader_identity = getattr(reader, "__func__", reader)
+        proofs = cached[1] if cached is not None and cached[0] is reader_identity else {}
+        proof = proofs.get(quote)
+        if proof is not None:
+            return dict(proof) if _proof_matches(ref, proof) else None
         message, errors = reader(thread_id, message_id)
-        if errors or message is None:
+        if (errors or message is None or str(getattr(message, "thread_id", "")) != thread_id
+                or str(getattr(message, "message_id", "")) != message_id):
             return None
         content = str(message.content or "")
         content_hash = "sha256:" + hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()
         claimed_hash = str(ref.get("content_hash") or "")
-        quote = str(ref.get("quote") or "").strip()
         if claimed_hash != content_hash or not quote or len(quote) > 300 or quote not in content:
             return None
         claimed_role = str(ref.get("role") or message.role)
         if claimed_role != str(message.role):
             return None
-        return {
+        proof = {
             "message_id": message_id,
             "thread_id": thread_id,
             "role": str(message.role),
@@ -370,6 +393,35 @@ class ConversationMessageEvidenceVerifier:
             "quote": quote,
             "created_at": float(message.created_at),
         }
+        if key is not None:
+            if key != self._file_key(thread_id, message_id):
+                return None
+            proofs = {**proofs, quote: dict(proof)}
+            if len(proofs) > 8:
+                proofs.pop(next(iter(proofs)))
+            self._proof_cache.put(key, (reader_identity, proofs))
+        return proof
+
+    # LLM: 只用当前Store canonical路径和五字段stamp；近期文件与没有真实文件路径的替身不缓存。
+    # 函数用途: 按Store实例、根目录、线程和消息隔离证据证明，文件改写/替换后自然失效。
+    def _file_key(self, thread_id: str, message_id: str):
+        try:
+            storage = self.conversation_store.storage
+            path = storage.message_path(thread_id)
+            stamp = file_stamp(path.stat())
+            if cache_entry_trustworthy(stamp.mtime_ns):
+                return id(self.conversation_store), str(storage.root), thread_id, message_id, stamp
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+        return None
+
+
+# LLM: 只复用已由原消息核验的短标量证明，调用方当前声明仍须逐项匹配；不读正文、不写任何账本。
+# 函数用途: 判断重复引用是否与缓存的同一hash、角色和短引文完全一致。
+def _proof_matches(ref: dict, proof: dict) -> bool:
+    return (str(ref.get("content_hash") or "") == proof["content_hash"]
+            and str(ref.get("role") or proof["role"]) == proof["role"]
+            and str(ref.get("quote") or "").strip() == proof["quote"])
 
 
 # LLM: result 只说明机器决策和正式 ref，不包含候选或历史记忆正文。
@@ -875,7 +927,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
     # 不标失败。用户直接要求写 AGENTS 走 /agents 预览确认，不经本服务。证据、精确 mutation id、
     # 冲突、门槛、临时过期与目标仓库仍照常 fail-closed。
     #   正式提交沿原quota/policy/candidate锁序，自动审核仅批准通过全部门的精确快照，删除恢复只清既有墓碑。
-    # 函数用途: 核验证据并提交正式落点；人工预览可绑定准确审核后快照，迟到候选不得借旧批准提交。
+    # 函数用途: 核验证据后提交；批次上下文延后治理，单条调用也在释放业务锁后收尾。
     def promote(
         self,
         candidate_id: str,
@@ -885,14 +937,22 @@ class MemoryPromotionService(_PromotionCommitMixin):
         confirmed: bool = False,
         expected_candidate: MemoryCandidate | None = None,
     ) -> MemoryPromotionResult:
-        try:
-            return self._promote_snapshot(candidate_id, reviewer=reviewer, automatic=automatic, confirmed=confirmed,
-                                          expected_candidate=expected_candidate)
-        except CandidateStateChangedError as exc:
-            return MemoryPromotionResult(candidate_id, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+        with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
+            try:
+                return self._promote_snapshot(candidate_id, reviewer=reviewer, automatic=automatic, confirmed=confirmed,
+                                              expected_candidate=expected_candidate)
+            except CandidateStateChangedError as exc:
+                return MemoryPromotionResult(candidate_id, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+
+    # LLM: 各条仍走原完整审核/CAS；空批也偿还持久治理欠账，condense不持有policy/candidate或配额锁。
+    # 函数用途: 成批自动晋升只读筛出的候选，整批只做一次总量治理。
+    def promote_ready(self, *, limit: int = 32) -> tuple[MemoryPromotionResult, ...]:
+        with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
+            rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=limit)
+            return tuple(self.promote(row.candidate_id, automatic=True) for row in rows)
 
     # LLM: 先核完整预期及证据/权威；自动策略通过才CAS审核pending，最终提交仍锁完整快照；清理错误不猜成功。
-    # 函数用途: 沿原提交链归档合格自动候选或人工已审候选，保留并发拒绝与准确提交事实。
+    # 函数用途: 合并默认落点与自动批准的预提交写入；精确恢复旧提交，正式写前登记耐久治理责任。
     def _promote_snapshot(
         self,
         candidate_id: str,
@@ -902,12 +962,14 @@ class MemoryPromotionService(_PromotionCommitMixin):
         confirmed: bool,
         expected_candidate: MemoryCandidate | None = None,
     ) -> MemoryPromotionResult:
-        from .promotion_remove_recovery import recover_promotion_result
+        from .promotion_remove_recovery import recover_committed_update, recover_promotion_result
 
         candidate = self.candidates.get(candidate_id)
         if expected_candidate is not None and candidate != expected_candidate:
             return MemoryPromotionResult(candidate_id, False, candidate.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
         recovery = recover_promotion_result(self, candidate, reviewer)
+        if recovery is None:
+            recovery = recover_committed_update(self, candidate, reviewer)
         if recovery is not None:
             return recovery
         early_result = _promotion_precheck(candidate, automatic)
@@ -916,26 +978,30 @@ class MemoryPromotionService(_PromotionCommitMixin):
         evidence_code = self._verify_evidence(candidate)
         if evidence_code:
             return self._block_missing_evidence(candidate, reviewer, evidence_code)
-        candidate = self._fill_default_target(candidate, reviewer)
-        authority_code = _absolute_authority_block(candidate)
+        if not automatic or candidate.status != "pending_review":
+            candidate = self._fill_default_target(candidate, reviewer)
+        effective = replace(candidate, promotion_target=_promotion_target(candidate))
+        authority_code = _absolute_authority_block(effective)
         if authority_code:
             return MemoryPromotionResult(candidate_id, False, candidate.status, authority_code)
         if automatic:
-            policy_code = _automatic_policy_block(candidate)
+            policy_code = _automatic_policy_block(effective)
             if policy_code:
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
             candidate = self._apply_automatic_policy(candidate, reviewer)
         if candidate.status != "approved":
             return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
+        if _promotion_target(candidate) == "long_term":
+            _register_condense_debt(self.long_term, self.candidates, self.coordinator_io)
         return _commit_promotion_result(self, candidate, reviewer, confirmed)
 
     # LLM: 仅由已通过来源/证据/权威/安全门的自动分支调用；transition消费完整快照CAS，不复活拒绝或覆盖人工审核。
-    # 函数用途: 将合格待审候选记为owner_autonomous_v1批准，后续仍走唯一正式仓库提交。
+    # 函数用途: 在同一次耐久批准中补齐默认目标，批准必须先于任何正式写入。
     def _apply_automatic_policy(self, candidate: MemoryCandidate, reviewer: str) -> MemoryCandidate:
         if candidate.status != "pending_review":
             return candidate
         return self.candidates.transition(candidate, "approved", reviewer=reviewer,
-            review_note="owner_autonomous_v1：结构化权威与安全门通过。")
+            review_note="owner_autonomous_v1：结构化权威与安全门通过。", promotion_target=_promotion_target(candidate))
 
     # LLM: 与提交/恢复共用目标解析；持久补全使用完整快照CAS，不借用同状态transition空操作。
     # 函数用途: 为符合原默认政策的用户长期事实补上实际保存的落点。
@@ -962,24 +1028,14 @@ class MemoryPromotionService(_PromotionCommitMixin):
             self, candidate, reviewer=reviewer, confirmed=confirmed
         )
 
-    # LLM: 总量闸:long_term 写成功后顺带治理(超上限按访问信号浓缩,user_explicit 不淘汰)。
-    # 放在 promote 成功路径,任何写入口(remember/curator)都自动触发,无需单独 cron。
-    # LLM: C只让真实末写native同对象越过旧宽catch，普通condense失败仍原诊断；不禁治理或洗partial成功。
-    # 函数用途: 沿原condense后返回真实晋升结果，C来源失效不可变成成功。
+    # LLM: 回执只描述本条已提交事实；治理统一交批次末尾，不在这里逐条重扫或嵌套业务锁。
+    # 函数用途: 返回准确晋升结果，condense欠账由外层原批次完成或耐久保留。
     def _finalize_promotion(
         self,
         candidate: MemoryCandidate,
         reviewer: str,
         outcome: _TargetCommit,
     ) -> MemoryPromotionResult:
-        try:
-            if str(candidate.promotion_target or "").strip().lower() in {"", "none", "long_term"}:
-                self.long_term.condense()
-        except Exception as exc:
-            if self.coordinator_io and isinstance(exc, (GlobalWriteCommitUnavailable, GlobalWriteInWorkerError,
-                                                 LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable)):
-                raise
-            pass  # 治理失败不影响本次晋升本身
         return MemoryPromotionResult(
             candidate.candidate_id,
             True,
@@ -1326,3 +1382,160 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
 # 函数用途: 为C名单锁出生调用原同步末门，等待仍门外。
 def _coordinator_policy_birth(operation):
     return execute_global_write(operation, require_scope=True)
+
+
+# LLM: 上下文只聚合本批现有仓库和欠账代次，不授运行权、不缓存quota或来源；退出未知时必须保留全部标记。
+# 类用途: 保存一份正式库的待治理责任，condense只在全部候选业务锁释放后执行。
+@dataclass(frozen=True)
+class _CondenseDebt:
+    memory: object
+    marker: Path
+    generation: str
+    coordinator_io: bool
+
+
+# LLM: 未知标记属于共享批次而非某层try；捕获内层异常不能恢复外层的治理资格。
+# 类用途: 聚合本批欠账，并记住任何嵌套层出现过的执行未知。
+@dataclass
+class _PromotionBatchState:
+    debts: dict = field(default_factory=dict)
+    uncertain: bool = False
+
+
+_PROMOTION_BATCH: ContextVar[_PromotionBatchState | None] = ContextVar("memory_promotion_batch", default=None)
+_UNCERTAIN_PROMOTION_ERRORS = (
+    RequestExecutionContextUnavailable, RequestExecutionOutcomeUncertainError, BoundedCallExitUnconfirmedError,
+    GlobalWriteCommitUnavailable, GlobalWriteInWorkerError, LocalControlCoordinatorUnavailable, OwnerManagementIngressUnavailable,
+)
+
+
+# LLM: 显式上下文跨lambda保留原批次，嵌套不提前收尾；未知/取消不condense，普通失败仍保留原异常与耐久欠账。
+# 函数用途: 嵌套共享不可逆未知状态；最外层在全部业务锁退出后才每库治理一次。
+@contextmanager
+def promotion_batch(*, long_term=None, candidates=None, coordinator_io: bool = False):
+    active = _PROMOTION_BATCH.get()
+    batch = active if active is not None else _PromotionBatchState()
+    token = _PROMOTION_BATCH.set(batch) if active is None else None
+    try:
+        _resume_condense_debt(long_term, candidates, coordinator_io)
+        yield
+    except _UNCERTAIN_PROMOTION_ERRORS:
+        batch.uncertain = True
+        raise
+    except BaseException as exc:
+        if not isinstance(exc, Exception):
+            batch.uncertain = True
+        raise
+    finally:
+        if token is not None:
+            _PROMOTION_BATCH.reset(token)
+            if not batch.uncertain:
+                _finish_condense_debts(batch.debts)
+
+
+# LLM: 标记只绑定候选仓库同一memory根内的正式文件；任意路径或跨owner别名不能借此获得condense权限。
+# 函数用途: 定位唯一pending_condense标记并返回可验证的相对正式路径。
+def _condense_scope(memory, candidates) -> tuple[Path, str]:
+    root = candidates.path.parent.resolve()
+    formal = memory.path.resolve()
+    relative = str(formal.relative_to(root))
+    return root / "curator" / "pending_condense.json", relative
+
+
+# LLM: 读取保持严格schema与formal身份；坏标记不能被当作空欠账覆盖，不从正文推断治理授权。
+# 函数用途: 读取可跨重启恢复的治理责任，损坏时显式报错。
+def _read_condense_marker(path: Path, formal: str) -> dict:
+    report = read_json_object_report(path, context="memory.promotion.pending_condense")
+    if report.load_error:
+        raise RuntimeError("PROMOTION_PENDING_CONDENSE_CORRUPT")
+    payload = report.payload
+    through = payload.get("through")
+    if payload and (set(payload) != {"schema", "formal", "pending", "generation", "through"}
+                    or payload.get("schema") != "memory.pending_condense.v1"
+                    or payload.get("formal") != formal or type(payload.get("pending")) is not bool
+                    or not isinstance(payload.get("generation"), str) or not payload["generation"]
+                    or (through is not None and (not isinstance(through, list) or len(through) != 5
+                                                 or any(type(value) is not int for value in through)))):
+        raise RuntimeError("PROMOTION_PENDING_CONDENSE_CORRUPT")
+    return payload
+
+
+# LLM: 标记写入沿原native末门，不持候选/政策/配额锁；每代正式写前落盘，未确认写入会阻断正式提交。
+# 函数用途: 写入或完成同一份治理标记，不发出任何模型或网络请求。
+def _write_condense_marker(path: Path, payload: dict, coordinator_io: bool) -> None:
+    if coordinator_io:
+        execute_global_write(lambda: write_json_file_atomic_unlocked(path, payload, sort_keys=True), require_scope=True)
+    else:
+        write_json_file_atomic_unlocked(path, payload, sort_keys=True)
+
+
+# LLM: 本批同一原memory根只登记一次；新代先落耐久标记，旧批完成时不能清掉并发新代的欠账。
+# 函数用途: 在第一条正式写入前登记批次condense责任，批准仍由原候选事务先行持久化。
+def _register_condense_debt(memory, candidates, coordinator_io: bool) -> None:
+    batch = _PROMOTION_BATCH.get()
+    if batch is None:
+        raise RuntimeError("promotion batch context is missing")
+    debts = batch.debts
+    path, formal = _condense_scope(memory, candidates)
+    if str(path) in debts:
+        _check_condense_formal(debts[str(path)], memory)
+        return
+    generation = uuid.uuid4().hex
+    options = {"birth_commit": _coordinator_policy_birth} if coordinator_io else {}
+    with locked_json_path(path, **options):
+        current = _read_condense_marker(path, formal)
+        _write_condense_marker(path, {"schema": "memory.pending_condense.v1", "formal": formal,
+                                     "pending": True, "generation": generation, "through": current.get("through")}, coordinator_io)
+    debts[str(path)] = _CondenseDebt(memory, path, generation, coordinator_io)
+
+
+# LLM: 空批也检查当前owner唯一欠账；只恢复已声明的原仓库，缺正式依赖的测试替身不猜仓库或构造新服务。
+# 函数用途: pending或正式版本晚于上次治理起点都要补跑，避免并发空批提前清账后丢掉迟到提交。
+def _resume_condense_debt(memory, candidates, coordinator_io: bool) -> None:
+    if memory is None or candidates is None:
+        return
+    path, formal = _condense_scope(memory, candidates)
+    batch = _PROMOTION_BATCH.get()
+    debts = batch.debts if batch is not None else {}
+    if debts is not None and str(path) in debts:
+        _check_condense_formal(debts[str(path)], memory)
+        return
+    current = _read_condense_marker(path, formal)
+    if current and (current.get("pending") or current.get("through") != _condense_file_version(memory)):
+        _register_condense_debt(memory, candidates, coordinator_io)
+
+
+# LLM: 只确认condense开始前的原正式版本，绝不把收尾时的更晚提交宣称已覆盖；治理自身改写可多补一轮，不能少治理。
+# 函数用途: 锁外每批每库治理一次，同代CAS记起点版本；失败或晚到正式写保留可恢复的版本欠账。
+def _finish_condense_debts(debts: dict) -> None:
+    for debt in debts.values():
+        try:
+            through = _condense_file_version(debt.memory)
+            debt.memory.condense()
+            options = {"birth_commit": _coordinator_policy_birth} if debt.coordinator_io else {}
+            with locked_json_path(debt.marker, **options):
+                formal = str(debt.memory.path.resolve().relative_to(debt.marker.parent.parent))
+                current = _read_condense_marker(debt.marker, formal)
+                if current.get("generation") == debt.generation and current.get("pending"):
+                    _write_condense_marker(debt.marker, {**current, "pending": False, "through": through}, debt.coordinator_io)
+        except _UNCERTAIN_PROMOTION_ERRORS:
+            raise
+        except Exception:
+            logging.getLogger(__name__).warning("memory promotion pending_condense retained")
+
+
+# LLM: 版本来自原正式文件五字段stat而非候选内容或另建权威；缺文件用None，权限和其它I/O错误不能伪装成空。
+# 函数用途: 给耐久欠账绑定已覆盖版本的保守下界，检测旧批清账后的迟到正式提交。
+def _condense_file_version(memory) -> list[int] | None:
+    try:
+        info = memory.path.stat()
+    except FileNotFoundError:
+        return None
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+# LLM: 一个原候选根只绑定唯一正式库；批内命中也须核规范路径，禁止跳过formal身份检查静默漏治理。
+# 函数用途: 拒绝同一欠账标记混用不同正式文件的错误依赖绑定。
+def _check_condense_formal(debt: _CondenseDebt, memory) -> None:
+    if debt.memory.path.resolve() != memory.path.resolve():
+        raise RuntimeError("PROMOTION_PENDING_CONDENSE_FORMAL_MISMATCH")
