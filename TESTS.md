@@ -17,6 +17,29 @@ python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.j
 git diff --check
 ```
 
+## 2026-10-26 Wave 5 AG1：审计组观察、Web-only 与受限黑盒调用（候选，组合门未全绿）
+
+来源：`07-tasks/wave5-wt-ag1-20261026.md` 更新版，工作树 `wt-wave5-ag1`，基线 `6b3e593b2cbc7f86dd0d4bbee8134781fbf55e44`。领域边界、支持子集和未验证项见 `agent_py_agent/agent/audit_group/README.md`；不修改 Plugin Host 或 conversation 模块，不部署、不推送。
+
+- 新增 `test_audit_group_observation_and_invoke.py` 覆盖 T1–T7：账号字段/创建初始资格、管理员 CAS 幂等、新旧 provider 绑定拒绝、动态撤权、白名单 DTO/schema/修订类型净化、原监控双修订与暂停优先、坏来源 partial、带时区告警筛选、四类编排、只解同源依赖、禁用/旧版本/无合同拒绝、原治理 authority、调用者配额、正文净化、源目录内容/权限/mtime 与文件集合不变、撕裂读取拒绝、下一单元撤权及旧工具快照撤权。
+- 四类编排测试只替换 `IsolatedScriptUnit.execute`，其余源读取、配额与回执 IO 为真实临时文件；不把它们称为原生沙箱 E2E。新增真实 `test_t4_actual_native_isolated_process` 不替换执行单元，当前在原 `require_ready` 返回 `SANDBOX_NETWORK_ISOLATION_UNAVAILABLE`，仍为失败；另有沙箱拒绝时 503、安全关闭和零源写入合同用例。
+- 独立 Astra 评审限定为所给准确片段，未读全仓或运行复现。已按意见收紧为进程无文件写根、宿主审核后发表结果、严格修订类型、输入描述符关闭、精确私密原文净化、已有源锁协调和双读、逐单元撤权；不将这次片段审查说成全仓独审或原生安全证明。
+- 任务指定四文件组合：**292 项，290 passed / 2 failed / 0 skipped / 0 error**。新增审计组文件为 **31 passed / 1 failed**。两失败分别是上述真实沙箱拒绝，以及 `test_feishu_materialized_identity_without_index_and_explicit_local_binding` 仍期望普通本地用户绑定飞书成功，与本轮硬性 Web-only 需求冲突。没有改旧断言、删测、skip 或 xfail。
+- 补充 `test_tool_registry.py` 与 `test_local_user_cross_module_guards.py`：**121 项，120 passed / 1 failed**。失败是 `test_allowed_snapshot_can_defer_but_leaf_without_search_stays_direct`，可见列表多出 `scripts`。已在准确基线 `6b3e593b2cbc7f86dd0d4bbee8134781fbf55e44` 的独立 detached worktree 单独运行该节点，同样 1 failed，且先确认 Python 导入来自该基线树；临时 worktree 已移除。因此只有这一项有本轮基线复现证据，不把其它失败称为既有失败。
+- JUnit 原始结果留在工作树 `tmp/ag1-focused.xml`、`tmp/ag1-registry.xml`、`tmp/ag1-baseline-registry.xml`，不作为产品文件提交。严格尺寸最终 `hard=0 / blocked=False`；首次增量暴露注册表类尺寸和创建接口参数数量后，按职责提取装配与集中宿主兼容上下文处理修正，未更改尺寸基线。
+
+复现（工作树根执行，不跑全仓）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_plugin_local_users.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short --junitxml=tmp/ag1-focused.xml
+python3 -m pytest agent_py_agent/tests/test_tool_registry.py agent_py_agent/tests/test_local_user_cross_module_guards.py -q --tb=short --junitxml=tmp/ag1-registry.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+集成前仍需在禁网自检通过的原生宿主复验隔离执行/进程清理/并发配额和发表，并由集成者协调旧认证测试合同及 AG2/M4 运输接线。当前不是完整功能或生产上线验收通过。
+
 ## 2026-10-26 Stage 3 Round 2：有界 Git 指针扫描与 artifact 生产读口（c2）
 
 来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，工作树 `wt-wave4-c3`，起始提交 `8e96fbbf10357dce3ed20470c0e4eeab5fecc5d7`。本轮只修改任务授权的两份生产模块、两份测试和两份文档，不改部署包。
