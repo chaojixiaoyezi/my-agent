@@ -28,6 +28,7 @@ from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
 from ..common.json_io import jsonl_lines
 from ..common.nofollow_fs import open_readonly_file_beneath
 
+# 校验增长文件增量游标时读取的头部摘要字节数。
 _HEAD_DIGEST_BYTES = 4096
 
 

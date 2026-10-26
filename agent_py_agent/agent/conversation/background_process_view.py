@@ -18,6 +18,7 @@ from ..tooling.process_session_store import process_session_store_root
 from .process_events import _managed_instance_still_live
 
 _TERMINAL = frozenset({"exited", "failed", "killed", "completed", "not_started"})
+# 只读后台进程投影最多读取的日志尾部字节数。
 _TAIL_BYTES = 64 * 1024
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ import pytest
 from agent_py_agent.agent.common import directory_lock as lock_module
 from agent_py_agent.agent.tooling import background_process_host as host
 from agent_py_agent.agent.tooling import process_session_commit as commit_module
+from agent_py_agent.agent.tooling import process_session_store as store_module
 from agent_py_agent.agent.tooling.process_registry import ProcessTerminationReceipt
 from agent_py_agent.agent.tooling.process_scope import ProcessExecutionScope
 from agent_py_agent.agent.tooling.process_session_commit import ProcessSessionCommitPendingError
@@ -30,6 +32,96 @@ from agent_py_agent.agent.tooling.process_session_store import (
 )
 
 SCOPE = ProcessExecutionScope("/owners/example", "thread-a", "task-a", "run-a", "attempt-a")
+
+
+def test_pending_query_copies_only_matches_and_keeps_full_cache(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import process_session_store as module
+
+    store = ProcessSessionStore(tmp_path)
+    for index in range(200):
+        store.write(_running(f"bg-old-{index}", status="exited", finished_at=100000.0, exit_code=0))
+    target = {"store_root": "/conversations", "thread_id": "thread-a", "task_id": "task-a", "run_id": "run-a"}
+    for index in range(2):
+        store.write(_running(f"bg-pending-{index}", completion_target=target))
+    old = time.time() - 5
+    os.utime(store.root, (old, old))
+    method = getattr(store, "list_pending_completion_records_report", None)
+    assert callable(method), "需要存储层内部过滤的固定查询入口"
+    copied, original = [], module.deepcopy
+
+    def counted(value):
+        if isinstance(value, dict) and "session_id" in value:
+            copied.append(value["session_id"])
+        return original(value)
+
+    monkeypatch.setattr(module, "deepcopy", counted)
+    for cheap in (False, True):
+        copied.clear()
+        report = method(cheap_checks=cheap)
+        assert len(report.records) == 2 and not report.load_errors
+        assert sorted(copied) == ["bg-pending-0", "bg-pending-1"]
+        report.records[0]["completion_target"]["task_id"] = "mutated"
+        assert len(store.list_records()[0]) == 202
+        assert len(method(task_id="task-a", cheap_checks=cheap).records) == 2
+        assert not method(task_id="other", cheap_checks=cheap).records
+        assert not method(owner_key="other", cheap_checks=cheap).records
+
+
+def test_pending_query_preserves_load_errors_on_every_read_mode(tmp_path):
+    store = ProcessSessionStore(tmp_path)
+    store.record_path("bg-broken").write_text("broken JSON")
+    method = getattr(store, "list_pending_completion_records_report", None)
+    assert callable(method)
+    for cheap in (False, True):
+        report = method(cheap_checks=cheap)
+        assert not report.records and len(report.load_errors) == 1
+
+
+def test_ttl_prune_keeps_pending_wakes_and_invalid_or_young_finished_times(tmp_path):
+    store = ProcessSessionStore(tmp_path)
+    target = {"store_root": "/conversations", "thread_id": "thread-a", "task_id": "task-a", "run_id": "run-a"}
+    for name, changes in {
+        "old": {}, "retained": {"retain_until_consumed": True},
+        "young": {"finished_at": 199999.0, "retain_until_consumed": True},
+        "small": {"finished_at": 3.0, "retain_until_consumed": True},
+        "pending": {"completion_target": target, "completion_notice_id": "notice-pending"},
+        "unreported": {"completion_target": target},
+        "consumed": {"completion_target": target, "completion_notice_id": "notice-consumed"},
+        "stopped": {"completion_target": target, "completion_notice_id": "explicit_stop"},
+    }.items():
+        store.write(_running(f"bg-{name}", **{"status": "exited", "exit_code": 0, "finished_at": 100000.0, **changes}))
+    activation = {"owner_id": "owner-a", "owner_home": SCOPE.owner_home, "plugin_id": "plugin-a", "activation_id": "a" * 64}
+    store.write(_running("bg-activation", status="killed", finished_at=100000.0, exit_code=-9,
+        activation_scope=activation, access_scope={"owner_id": "owner-a", "owner_home": SCOPE.owner_home, "conversation_id": ""},
+        execution_scope={key: value if key == "owner_home" else "" for key, value in asdict(SCOPE).items()}))
+    method = store.prune_finished
+    assert "max_age_seconds" in inspect.signature(method).parameters
+    removed = method(max_age_seconds=86400.0, now=200000.0, is_notice_consumed=lambda nid: nid == "notice-consumed")
+    assert set(removed) == {"bg-old", "bg-retained", "bg-consumed", "bg-stopped", "bg-activation"}
+    assert {row["session_id"] for row in store.list_records()[0]} == {"bg-young", "bg-small", "bg-pending", "bg-unreported"}
+
+
+def test_ttl_prune_rechecks_revision_and_removes_sidecar_only_for_deleted_record(tmp_path, monkeypatch):
+    store = ProcessSessionStore(tmp_path)
+    store.write(_running(status="exited", exit_code=0, finished_at=100000.0))
+    transaction_type = store_module.ProcessSessionTransaction
+    original = transaction_type.list_records
+
+    def changed(transaction):
+        records, errors = original(transaction)
+        if records:
+            transaction.write(records[0])
+        return records, errors
+
+    assert "max_age_seconds" in inspect.signature(store.prune_finished).parameters
+    with monkeypatch.context() as patch:
+        patch.setattr(transaction_type, "list_records", changed)
+        assert store.prune_finished(max_age_seconds=86400.0, now=200000.0) == []
+    assert store.load("bg-a").record
+    sidecar = tmp_path / "bg-a.json.lock"
+    sidecar.touch()
+    assert store.prune_finished(max_age_seconds=86400.0, now=200000.0) == ["bg-a"]
+    assert not sidecar.exists()
 
 
 # LLM: PID 是纯存储测试数据，不作为系统进程身份使用；每个测试显式选择启动阶段。

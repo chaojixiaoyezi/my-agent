@@ -11,6 +11,7 @@
 #   实验发送许可不支持（拒绝发送）。
 #   与官方 Codex 一致不主动发心跳 ping，只自动回应服务端 ping（09-30 审计：49 次里 2 次在 23–24 秒中途断开，紧跟客户端
 #   第 20 秒的 ping）。改动须同步 test_responses_websocket。
+#   recv的2秒超时只作兜底，取消仍由当前物理连接close_socket即时唤醒。
 # 模块用途: 通过 WebSocket 运输订阅模型长回复；每次连接独占物理名额，关闭或失败立即归还。
 from __future__ import annotations
 
@@ -53,7 +54,7 @@ _DEFAULT_USER_AGENT = "my-agent/1.0 (anthropic-compatible client)"
 # 终态事件会带回整份请求配置（含 instructions、tools），单条消息可能很大；只防失控，不截断正常回复。
 _MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 # 等待消息时每隔这么久醒来一次检查用户停止；连接关闭回调才是主停止路径，这里只是兜底检查点。
-_STOP_CHECK_SECONDS = 1.0
+_STOP_CHECK_SECONDS = 2.0
 _STOPPED_MESSAGE = "模型接口流式请求已被用户停止"
 # 这些事件之后服务端不会再发本次回复的内容；产出后即结束，不再等下一条（错误事件由 collect_response 报错）。
 _TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed", "error"})

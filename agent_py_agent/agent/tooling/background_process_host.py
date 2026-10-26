@@ -1,5 +1,5 @@
 # LLM: host 仅执行已批准 argv；stdio 直接继承管道并绑定 launcher，日志后台沿旧默认寿命，原进程账仍唯一。
-#   强制监听检查保持2秒，仅告警模式按运行时长退避，已有告警后不再读取socket表或写告警事务。
+#   监听仅在启动一分钟内每10秒核对；60秒起永久停探测，已有告警仍只记录一次，不以此承诺长期监听安全。
 # 模块用途: 独立托管命令并记录真实终态，分开日志与协议字节，不转发数据或伪造退出成功。
 from __future__ import annotations
 
@@ -38,8 +38,6 @@ from .process_session_store import ProcessSessionStore
 
 # 后台进程启动首秒保持50ms观察；之后由退避函数降低空闲唤醒，仍不提前回收组长。
 _HOST_POLL_SECONDS = 0.05
-# 监听范围核对的间隔：读 socket 表有成本，不必跟 50ms 的存活轮询同频。
-_LISTEN_CHECK_SECONDS = 2.0
 
 
 # LLM: 只决定本host的睡眠间隔，不调用poll/wait，不影响出生身份、原记录投影与终止顺序。
@@ -48,12 +46,10 @@ def _monitor_poll_interval(elapsed_s: float) -> float:
     return _HOST_POLL_SECONDS if elapsed_s < 1.0 else 0.15 if elapsed_s < 10.0 else 0.25
 
 
-# LLM: 强制拦截保持_LISTEN_CHECK_SECONDS，避免延迟终止晚绑定的越界监听；仅告警模式启动后分级退避。
-# 函数用途: 计算下一次监听范围检查的间隔秒数，不改变存活检查或业务组长回收顺序。
+# LLM: enforce保留既有调用接口，但不改变用户批准的共同观察窗口；60秒起无穷间隔，不再覆盖晚绑定行为。
+# 函数用途: 前一分钟每10秒检查监听，之后永久停查；不改变存活、停止或整树回收。
 def _listen_check_interval(elapsed_s: float, *, enforce: bool) -> float:
-    if enforce or elapsed_s < 10.0:
-        return _LISTEN_CHECK_SECONDS
-    return 10.0 if elapsed_s < 60.0 else 30.0
+    return 10.0 if elapsed_s < 60.0 else math.inf
 
 
 # LLM: 监控期只读的结构化策略，全部来自已校验的启动交接文件；不从记录正文或命令推断。
@@ -339,7 +335,7 @@ def _direct_child_exited_unreaped(child: subprocess.Popen[bytes]) -> bool | None
 #   只有宿主显式要求时，handoff后仍受launcher和原期限约束，监听与终态账不变。
 #   成功记录仅在stat稳定、无redo且半秒以内复用，不缓存停止裁决或绕过终止前的原权威事务。
 #   仅睡眠按本host单调已运行时长退避；首秒仍保持原观察间隔，绝不以Popen.wait提前回收组长。
-#   强制监听检查始终2秒；仅告警模式已有listener_warning后零socket探测、零告警事务，未告警时分级退避。
+#   两种enforce模式均只在前60秒每10秒核对；硬截止优先于下一次调度，已告警后仍零探测/零重复告警。
 # 函数用途: 持续检查停止、寿命和日志上限，用不回收的退出观察驱动原终止树入口及结果持久化。
 def _monitor_child(
     store: ProcessSessionStore,
@@ -359,12 +355,15 @@ def _monitor_child(
         record = report.record
         reason = _stop_reason(record, max_log_bytes, deadline_monotonic=policy.deadline_monotonic,
                               stop_on_launcher_exit=policy.stop_on_launcher_exit)
-        if (not reason and policy.listen_scope != "lan"
+        now = time.monotonic()
+        elapsed = now - started_monotonic
+        if elapsed >= 60.0:
+            next_listen_check = math.inf
+        if (not reason and elapsed < 60.0 and policy.listen_scope != "lan"
                 and (policy.listen_scope_enforce or not record.get("listener_warning"))
-                and time.monotonic() >= next_listen_check):
-            now = time.monotonic()
+                and now >= next_listen_check):
             next_listen_check = now + _listen_check_interval(
-                now - started_monotonic, enforce=policy.listen_scope_enforce)
+                elapsed, enforce=policy.listen_scope_enforce)
             reason = _listen_scope_check(store, session_id, child.pid, policy.listen_scope, policy.listen_scope_enforce)
         ended = _direct_child_exited_unreaped(child)
         if ended is None:

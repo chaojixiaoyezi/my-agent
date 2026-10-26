@@ -14,6 +14,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,131 @@ from agent_py_agent.agent.backends.errors import ProviderContextWindowError, Pro
 from agent_py_agent.agent.conversation.store import ConversationStore
 from agent_py_agent.agent.tooling.content_transport_policy import RECOVERY_WRITE_CHUNK_CHARS
 from agent_py_agent.tests._tool_runtime_harness import make_test_protocol_snapshot
+
+
+# LLM: 仅在原等待入口制造队列交错；不调用真实服务商，不替换中断事实判断。
+# 函数用途: 保护两处2秒兜底常数及中断与结果同时到达的优先级。
+def test_stream_poll_constants():
+    from agent_py_agent.agent.backends import responses_websocket
+
+    assert generation_module._TOOL_STREAM_POLL_SECONDS == 2.0
+    assert responses_websocket._STOP_CHECK_SECONDS == 2.0
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_interrupt_wins_queued_generation_result(failed):
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+
+    abandoned = []
+    state = SimpleNamespace(liveness=SimpleNamespace(abandon=lambda: abandoned.append(True)))
+    request = SimpleNamespace(agent=SimpleNamespace(backend=None))
+    worker = threading.Thread()
+
+    # LLM: get返回正常结果的同一个安全点置取消旗，不能被已排队response或exc吞掉。
+    # 类用途: 模拟结果与真实线程中断并发到达。
+    class ResultRace(Queue):
+        def get(self, **kwargs):
+            set_interrupt(True)
+            return generation_module._BackendGenerateResult(response="late", exc=RuntimeError("late failure") if failed else None)
+
+    try:
+        with pytest.raises(InterruptedError):
+            generation_module._wait_for_generation_result(request, state, ResultRace(), worker, 3.0)
+        assert abandoned == [True]
+    finally:
+        set_interrupt(False)
+
+
+def test_spurious_generation_wake_preserves_original_deadline(monkeypatch):
+    results = Queue()
+    results.put(generation_module._INTERRUPT_WAKE_SENTINEL)
+    clock = iter([0.0, .006, .012])
+    monkeypatch.setattr(generation_module, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    worker = SimpleNamespace(ident=None, is_alive=lambda: False, join=lambda **kwargs: None)
+    request = SimpleNamespace(agent=SimpleNamespace(backend=None))
+    abandoned = []
+    state = SimpleNamespace(liveness=SimpleNamespace(abandon=lambda: abandoned.append(True)))
+    with pytest.raises(ProviderTimeoutError):
+        generation_module._wait_for_generation_result(request, state, results, worker, .01)
+    assert abandoned == [True]
+
+
+def test_generation_wake_is_deduplicated_without_blocking_late_results():
+    results = Queue()
+    wake = generation_module._GenerationInterruptWake(results)
+    for _ in range(10):
+        wake.set()
+    assert results.qsize() == 1
+    results.put_nowait(generation_module._BackendGenerateResult(response="late"))
+    assert results.qsize() == 2
+
+
+# LLM: 真实阻塞Queue.get必须在慢取消之前被唤醒；迟到worker结果也必须能入无界队列并退出。
+# 函数用途: 在不联网的模型线程上验证取消延迟与迟到结果收尾。
+def test_generation_queue_wakes_before_slow_cancel_and_accepts_late_result(monkeypatch):
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+
+    entered, release, waiting, stopped, worker_done = (threading.Event() for _ in range(5))
+    worker_refs, queues, outcome = [], [], {}
+    original_poll = generation_module._poll_generation_result
+
+    # LLM: 仅观察真实队列和等待时刻，超时参数照原样送入实际get。
+    # 函数用途: 证明调用方已进入阻塞等待并捕获队列容量。
+    def poll(results, remaining):
+        queues.append(results)
+        waiting.set()
+        return original_poll(results, remaining)
+
+    # LLM: 用本测试Event控制慢传输清理，始终在finally放开，不丢弃真实worker。
+    # 函数用途: 模拟晚返回的模型调用。
+    def generate(*args):
+        worker_refs.append(threading.current_thread())
+        entered.set()
+        release.wait(3)
+        worker_done.set()
+        return "late"
+
+    # LLM: 取消回调故意阻塞，观察队列通知不能排在此动作之后。
+    # 函数用途: 制造慢清理与即时唤醒的顺序反例。
+    def slow_cancel(worker):
+        release.wait(3)
+
+    # LLM: caller保持真实线程取消旗，清理后必须撤旗，避免复用污染。
+    # 函数用途: 调用生产guard并记录真实中断结果。
+    def call():
+        try:
+            generation_module._generate_through_wall_guard(request, state)
+        except BaseException as exc:
+            outcome["error"] = exc
+        finally:
+            set_interrupt(False)
+            stopped.set()
+
+    monkeypatch.setattr(generation_module, "_poll_generation_result", poll)
+    monkeypatch.setattr(generation_module, "_generate_backend_response", generate)
+    monkeypatch.setattr(generation_module, "_interrupt_generation_worker", slow_cancel)
+    monkeypatch.setattr(generation_module, "_effective_model_request_timeout_seconds", lambda *args: 5.0)
+    request = SimpleNamespace(agent=SimpleNamespace(backend=None))
+    state = SimpleNamespace(liveness=SimpleNamespace(abandon=lambda: None))
+    caller = threading.Thread(target=call)
+    caller.start()
+    try:
+        assert entered.wait(1) and waiting.wait(1)
+        started = time.monotonic()
+        cancel = threading.Thread(target=set_interrupt, args=(True, caller.ident))
+        cancel.start()
+        assert stopped.wait(.2), "慢关闭不能阻塞用户取消退出"
+        assert time.monotonic() - started < .2
+        assert isinstance(outcome.get("error"), InterruptedError)
+        assert queues and queues[0].maxsize == 0
+    finally:
+        release.set()
+        caller.join(4)
+        if "cancel" in locals():
+            cancel.join(4)
+        for worker in worker_refs:
+            worker.join(4)
+    assert worker_done.is_set() and all(not worker.is_alive() for worker in worker_refs)
 
 
 def test_transport_retry_projection_uses_structured_attempt_event() -> None:

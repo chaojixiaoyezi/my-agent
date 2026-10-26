@@ -147,6 +147,7 @@ class _GatewayRecordFacts:
 
 # 日志采样最多 64 KiB：状态面板预览够用，避免整份日志进渲染。
 _GATEWAY_LOG_SAMPLE_MAX_BYTES = 64 * 1024
+# Gateway权威状态回执中单份日志尾部最多采样的字节数。
 _GATEWAY_LOG_TAIL_MAX_BYTES = 32768
 _EXCEPTION_SIGNATURE_RE = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_.]*\.)?([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt)):\s*"

@@ -32,8 +32,11 @@ from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
 from .restart_service import restart_completed_path, restart_request_path, restart_state_path
 from .status_rendering import _iso_timestamp, gateway_readiness
 
+# 计划重启等待旧实例交接的宽限秒数。
 PLANNED_RESTART_HANDOVER_GRACE_SECONDS = 180.0
+# 计划重启等待新实例启动就绪的宽限秒数。
 PLANNED_RESTART_STARTING_GRACE_SECONDS = 120.0
+# 慢速重启发生后的退避秒数。
 SLOW_RESTART_BACKOFF_SECONDS = 300.0
 
 

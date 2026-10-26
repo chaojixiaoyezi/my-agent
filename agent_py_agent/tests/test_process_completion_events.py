@@ -24,10 +24,88 @@ from agent_py_agent.agent.tooling.process_session_records import (
     PROCESS_SESSION_SCHEMA,
 )
 from agent_py_agent.agent.tooling.process_session_store import (
+    ProcessSessionListReport,
     ProcessSessionStore,
     ProcessSessionTransaction,
     process_session_store_root,
 )
+
+
+@pytest.mark.parametrize("entry", ["reconcile", "owner", "task"])
+def test_completion_discovery_uses_fixed_query_and_strict_second_pass(tmp_path, monkeypatch, entry):
+    from agent_py_agent.agent.conversation import process_events as module
+
+    agent, params, authority = _fixture(tmp_path)
+    calls = []
+    record = authority.load("bg-test-notice").record
+
+    class Authority:
+        def list_pending_completion_records_report(self, **options):
+            calls.append(options)
+            rows = [record] if entry != "reconcile" and not options.get("cheap_checks") else []
+            return ProcessSessionListReport(rows, [])
+
+        def list_records(self, **kwargs):
+            pytest.fail("新读口存在时不得全量deepcopy")
+
+    monkeypatch.setattr(module, "ProcessSessionStore", lambda root: Authority())
+    if entry == "reconcile":
+        assert reconcile_process_completions(agent) == 0
+    elif entry == "owner":
+        assert owner_has_pending_process_completions(agent.home_paths.owner_home_dir)
+    else:
+        assert task_has_pending_process_completion(agent, params.task_id)
+    assert calls
+    if entry != "reconcile":
+        assert [item["cheap_checks"] for item in calls] == [True, False]
+
+
+def test_completion_query_internal_typeerror_is_not_hidden_by_compatibility(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import process_events as module
+
+    agent, _params, _authority = _fixture(tmp_path)
+
+    class Authority:
+        def list_pending_completion_records_report(self, **options):
+            raise TypeError("real query failure")
+
+        def list_records(self, **options):
+            pytest.fail("不能把内部TypeError误判为旧接口")
+
+    monkeypatch.setattr(module, "ProcessSessionStore", lambda root: Authority())
+    with pytest.raises(TypeError, match="real query failure"):
+        reconcile_process_completions(agent)
+
+
+def test_completion_ttl_runs_without_candidates_and_is_throttled_per_root(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation import process_events as module
+
+    calls, clock = [], [1000.0]
+    owner = tmp_path / "owner"
+    wakes = {"pending": SimpleNamespace(status="pending"), "done": SimpleNamespace(status="consumed")}
+    store = SimpleNamespace(storage=SimpleNamespace(root=owner / "conversations"), wakes=SimpleNamespace(get=wakes.get))
+    agent = SimpleNamespace(conversation_store=store, home_paths=SimpleNamespace(owner_home_dir=owner), config=SimpleNamespace())
+
+    class Authority:
+        def list_pending_completion_records_report(self, **options):
+            return ProcessSessionListReport([], [])
+
+        def list_records(self, **kwargs):
+            return [], []
+
+        def prune_finished(self, **options):
+            calls.append(options)
+            consumed = options["is_notice_consumed"]
+            assert not consumed("pending")
+            assert consumed("done") and consumed("missing")
+            return []
+
+    monkeypatch.setattr(module, "ProcessSessionStore", lambda root: Authority())
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]), raising=False)
+    for delta in (0, 1, 299, 300):
+        clock[0] = 1000.0 + delta
+        reconcile_process_completions(agent)
+    assert len(calls) == 2 and all(item["max_age_seconds"] == 86400.0 for item in calls)
 
 
 # LLM: 测试使用真实持久存储与伪终态进程记录，不启动或杀宿主进程。

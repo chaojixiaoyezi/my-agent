@@ -83,6 +83,18 @@ git diff --check
 
 **未验证**：真实在线模型端到端耗时、生产大索引的绝对加速倍数、部署后的250k上下文和39.3s场景。调用次数与边界测试不是生产延迟收益。CODE_SIZE_REPORT.md为生成物，交付前还原，不随提交。
 
+## 2026-10-26 WT4 后续：SBPL 单字面量预算、模型即时中断及完成记录维护
+
+来源：`wt-wave4-b3-b4.md` 的 B1/B3/B4 及终审工程约束，在 `c9693a5b2` 后继续实现，未修改部署包。
+
+- B1：原 H3 常量按完整相对路径生成分支，锁与 SQLite 伴随文件共用后缀；按 UTF-8 和最终 SBPL 转义后的 768 字节预算动态切分，保留旧单模式检查接口。新增普通/Full Access、带引号与反斜线的 250 字符深根、逐字面量 `<950` 字节与逐保护项等价覆盖回归。不可拆分原子超预算时失败关闭，不丢保护项；原生 TinyScheme/Seatbelt 是否通过须由可施加沙箱的主机实测。
+- B3：模型队列和 WebSocket 兜底均为 2 秒；独立 `register_interrupt_wakeup` 先向无界队列放一次字条，再沿原取消回调关闭连接，退出注销两个注册。无效字条不重置期限，正常结果/异常采纳前再检查取消。用户取消仅短等 50ms，原慢 worker 仍由后台 shutdown 持有；墙钟超时仍保留原 1 秒排空。新增慢清理 `<0.2s` 退出、迟到结果不阻塞、结果/异常竞态、假唤醒及去重回归；原 `0.01s` 请求超时断言保持。
+- B4：私有全量缓存底座向公开查询提供深拷贝，固定待通知 report 先筛选后只复制候选，冷热路径都保留读取错误；规范空目标 `{}` 不欠通知。原二元组 `list_records()` 接口不变。owner 继续由权威目录隔离，当前 target 没有 `owner_key`，不补造持久身份。发现层空 cheap 查询后仍全读核对，旧替身显式按接口兼容，不吞内部 `TypeError`。
+- B4 TTL：仅按有限且 `>=86400` 的 `finished_at` 清理已超 24 小时的 `exited/killed`；pending wake、未登记通知均保留，缺消费证明时不删除目标记录。小合成时间只避开 TTL，不影响原数量裁剪。目录/叶锁内重核原记录与 nofollow 字节，成功删除后清理对应锁侧车；不停止进程、不删日志。协调循环按会话存储根每 300 秒维护，节流表有界为 256 根，无新 attach 也可运行。
+- 常数目录仍由 AST 生成；补齐生成时暴露的六个原有常数中文说明，不修改数值或扩大整改白名单。
+
+复现：在该工作树根执行 `python3 scripts/build_constants_catalog.py`，随后运行 `test_sandbox_profile_perf.py`、`test_constants_catalog.py`、`test_process_completion_events.py`、`test_tool_model_generation.py`、`test_responses_websocket.py`；额外用 `test_process_session_store.py` 和 `test_background_tick_cheap_checks.py` 守住投影隔离、数量裁剪与信任窗口。实际结果、原生限制与基线对比见本轮交接；静态通过不代替真实 Seatbelt 或服务端到端验收。
+
 ## 2026-10-26 底座残余性能、资源回收、沙箱安全与网关 04:00 安全重启死锁回归（7 Worktrees 集成）
 
 本轮集成覆盖 `wt-perf-a` 至 `wt-gw-g` 共 7 个隔离工作树的定向回归测试：
