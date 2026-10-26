@@ -13,7 +13,9 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, field
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -223,6 +225,89 @@ class BackgroundProcess:
         )
 
 
+_TEST_PROCESS_SPAWN_HOOK: Callable[[BackgroundProcess], None] | None = None
+
+
+# LLM: 仅供 pytest 注入创建观察者；默认关闭，不改变生产启动与出生探针。
+# 函数用途: 安装或撤销测试派生进程登记回调。
+def set_test_process_spawn_hook(hook: Callable[[BackgroundProcess], None] | None) -> None:
+    global _TEST_PROCESS_SPAWN_HOOK
+    _TEST_PROCESS_SPAWN_HOOK = hook
+
+
+# LLM: 只在显式接管创建的进程后通知，不在探针、读取或缓存恢复时触发。
+# 函数用途: 向当前测试发送新受管进程的独立快照。
+def _notify_test_process_spawn(proc: BackgroundProcess) -> None:
+    hook = _TEST_PROCESS_SPAWN_HOOK
+    if hook is not None:
+        hook(replace(proc, completion_target=dict(proc.completion_target),
+                     persisted_snapshot=deepcopy(proc.persisted_snapshot)))
+
+
+# LLM: 仅回收创建时绑定的 PID/出生身份；拒绝自身和当前组，不扫描全机选择目标。
+# 函数用途: 精确结束本测试登记的残留进程，优先原受管停止入口。
+def reap_test_registered_process(entry: dict[str, Any]) -> None:
+    try:
+        pid = int(entry.get("pid") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return
+    birth = str(entry.get("pid_birth_token") or "")
+    if not birth or not _test_process_target_allowed(pid):
+        return
+    with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+        _stop_test_registered_session(entry, pid, birth)
+    proc = entry.get("popen")
+    if proc is not None and getattr(proc, "pid", None) != pid:
+        proc = None
+    if not _same_process(pid, birth):
+        if proc is not None:
+            proc.poll()
+        return
+    if not _process_instance_terminated(pid, birth) or (proc is not None and proc.poll() is None):
+        terminate_process_tree(pid, proc, expected_birth_token=birth)
+    elif proc is not None:
+        proc.poll()
+
+
+# LLM: 只核对明确 PID 的进程组；不存在允许后续受管入口清理原 child，未知组拒绝，不做 PID 差集。
+# 函数用途: 排除 init、pytest 自身和 pytest 进程组，跨平台保留保守边界。
+def _test_process_target_allowed(pid: int) -> bool:
+    if pid <= 1 or pid == os.getpid():
+        return False
+    if _IS_WINDOWS:
+        return True
+    try:
+        return os.getpgid(pid) != os.getpgrp()
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+
+
+# LLM: 原 Store 必须仍绑定登记时 host 的 ID/PID/出生身份；停止原冻结快照，CAS 拒绝同名替换，不重选新资源。
+# 函数用途: 优先用原受管停止事务清理 host/child，任何保护目标都不能借磁盘记录绕过。
+def _stop_test_registered_session(entry: dict[str, Any], pid: int, birth: str) -> None:
+    from .process_session_cleanup import stop_process_session
+
+    session, root = entry.get("session_id"), entry.get("store_root")
+    if not session or not root:
+        return
+    store = ProcessSessionStore(root)
+    report = store.load(str(session))
+    payload = report.record
+    if (report.load_error or payload.get("schema") not in MANAGED_PROCESS_SESSION_SCHEMAS
+            or payload.get("pid") != pid or payload.get("pid_birth_token") != birth):
+        return
+    for key in ("pid", "child_pid"):
+        target = int(payload.get(key) or 0)
+        if target and not _test_process_target_allowed(target):
+            return
+    proc = entry.get("popen")
+    if proc is not None and getattr(proc, "pid", None) != pid:
+        proc = None
+    stop_process_session(store, payload, host_process=proc)
+
+
 # LLM: 日志观测只携读取事实，不能决定进程状态或扩大路径权限；正文与元数据分开，避免再造输出归档。
 # 类用途: 保存一次限量日志尾读的文本、同fd文件长度、截断、编码和读取失败事实。
 @dataclass(frozen=True)
@@ -320,7 +405,7 @@ class ProcessRegistry:
         return old
 
     # LLM: 原记录必须已经提交；附加 Popen 不新建 ID 或重写生命周期，实例不符明确拒绝。
-    # 函数用途: 接管启动方已经交接的同一个会话，保留可回收的本地 host 句柄。
+    # 函数用途: 接管已交接的同一会话并通知可选测试观察者，保留可回收的本地 host 句柄。
     def attach(self, payload: dict[str, object], process: subprocess.Popen, store_root: Path) -> BackgroundProcess:
         from .process_session_records import merge_process_record
 
@@ -333,6 +418,7 @@ class ProcessRegistry:
                 raise ValueError("managed process handle conflict")
             record.process = process
             self._prune_finished_locked(store_root)
+            _notify_test_process_spawn(record)
             return record
 
     # LLM: 越界和缺失统一为空，损坏权威必须报错而不是拿缓存补成功；日志只能在范围校验后读取。
@@ -1268,5 +1354,7 @@ __all__ = [
     "completion_wake_facts",
     "finish_foreground_process",
     "process_registry",
+    "reap_test_registered_process",
+    "set_test_process_spawn_hook",
     "terminate_process_tree",
 ]

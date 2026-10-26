@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os
+import sys
+import threading
 import webbrowser
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,6 +47,220 @@ from agent_py_agent.tests._screen_capture_guard import (
 _DESKTOP_GUARD: DesktopOpenGuard | None = None
 # 会话级 fixture 在最后一条测试收尾时就结束了，会话结束检查要用这份不清空的引用。
 _FINISHED_DESKTOP_GUARD: DesktopOpenGuard | None = None
+_TEST_PROCESS_FIXTURE_SCOPE = threading.local()
+_SHARED_TEST_PROCESS_ENTRIES: dict[tuple[str, int], dict[str, Any]] = {}
+_ACTIVE_TEST_PROCESS_OWNER: tuple[Any, str] | None = None
+_ACTIVE_TEST_FIXTURE_SCOPE: tuple[Any, ...] | None = None
+_TEST_PROCESS_ENTRIES_LOCK = threading.RLock()
+_TEST_PROCESS_SUITE_CLOSING = False
+
+
+# LLM: 归属只来自当前测试的显式创建回调，读状态/出生探针不产生清理权限。
+# 函数用途: 将创建快照去重写入本测试的进程账本。
+def _record_test_process_spawn(state, nodeid: str, proc, scope_context=None) -> None:
+    key = (proc.session_id, proc.pid)
+    scope, owner, *lifetime = scope_context or _current_test_process_scope(nodeid)
+    entry = {"test_node_id": nodeid, "session_id": proc.session_id, "pid": proc.pid,
+             "pid_birth_token": proc.pid_birth_token, "store_root": proc.store_root,
+             "popen": proc.process, "scope_level": scope, "scope_owner": owner,
+             "scope_lifetime": lifetime[0] if lifetime else None}
+    reap_late = False
+    with _TEST_PROCESS_ENTRIES_LOCK:
+        previous = state.entries.get(key) or _SHARED_TEST_PROCESS_ENTRIES.get(key)
+        if (previous and previous["pid_birth_token"] == proc.pid_birth_token
+                and previous["store_root"] == proc.store_root):
+            entry["popen"] = proc.process or previous["popen"]
+            entry["scope_level"], entry["scope_owner"] = previous["scope_level"], previous["scope_owner"]
+            entry["scope_lifetime"] = previous.get("scope_lifetime")
+        closed = getattr(state, "closed", False)
+        defer = not _TEST_PROCESS_SUITE_CLOSING and _test_process_scope_still_live(entry, SimpleNamespace(nodeid=nodeid))
+        reap_late = closed and not defer
+        if not reap_late:
+            target = _SHARED_TEST_PROCESS_ENTRIES if closed else state.entries
+            target[key] = entry
+    if reap_late:
+        from agent_py_agent.agent.tooling.process_registry import reap_test_registered_process
+
+        with suppress(Exception):
+            reap_test_registered_process(entry)
+
+
+# LLM: 启动线程优先使用显式冻结上下文；fixture 等待工作线程时，共享当前真实 setup 实例的寿命。
+# 函数用途: 给主线程和 setup 工作线程返回同一份作用域，不从线程名猜归属。
+def _current_test_process_scope(nodeid):
+    return getattr(_TEST_PROCESS_FIXTURE_SCOPE, "current", None) or _ACTIVE_TEST_FIXTURE_SCOPE or ("function", nodeid)
+
+
+# LLM: 回调不捕获旧测试 state；旧导入别名也经本次 ownership 绑定，不重入 registry。
+# 函数用途: 将即时 attach 快照交给当前测试账本。
+def _capture_active_test_process_spawn(proc) -> None:
+    owner = _ACTIVE_TEST_PROCESS_OWNER
+    if owner is not None:
+        _record_test_process_spawn(owner[0], owner[1], proc)
+
+
+# LLM: 包装器只保留原启动函数；调用时冻结当前测试归属，晚导入别名不会永久持有旧 state。
+# 函数用途: 原样启动并返回受管进程，把成功交接的身份交给启动时的测试。
+def _test_background_launch_wrapper(original, module):
+    # LLM: 异常及失败清理由原入口负责，捕获器不重复启动，不消费原 Popen。
+    # 函数用途: 为没有 attach 的直接启动补登记。
+    @wraps(original)
+    def start(*args, **kwargs):
+        owner = _ACTIVE_TEST_PROCESS_OWNER
+        scope = _current_test_process_scope(owner[1]) if owner is not None else None
+        hosted = original(*args, **kwargs)
+        if owner is not None:
+            proc = module.BackgroundProcess.from_record(hosted.record, store_root=hosted.store_root)
+            proc.process = hosted.process
+            _record_test_process_spawn(owner[0], owner[1], proc, scope)
+        return hosted
+    return start
+
+
+# LLM: 不强行创造未配置的 import root；两个 root 已独立加载时按真实模块对象分别安装。
+# 函数用途: 枚举本测试解释器里实际可用的进程模块，避免只按函数同一性漏掉另一 root。
+def _test_process_module_pairs():
+    import importlib
+
+    pairs = []
+    for root in ("agent_py_agent.agent", "agent"):
+        registry = sys.modules.get(f"{root}.tooling.process_registry")
+        launch = sys.modules.get(f"{root}.tooling.background_process_launch")
+        if root == "agent_py_agent.agent":
+            registry = importlib.import_module(f"{root}.tooling.process_registry")
+            launch = importlib.import_module(f"{root}.tooling.background_process_launch")
+        if registry is not None and launch is not None and not any(registry is pair[0] for pair in pairs):
+            pairs.append((registry, launch))
+    return pairs
+
+
+# LLM: 包装真实启动入口及已导入别名，返回值和异常原样传播；不替换 subprocess 或探针。
+# 函数用途: 在测试期间记录受管接管与未接管的直接启动结果。
+def _install_test_process_capture(state, nodeid: str) -> None:
+    global _ACTIVE_TEST_PROCESS_OWNER
+    _ACTIVE_TEST_PROCESS_OWNER = (state, nodeid)
+    state.installed = {}
+    for module, launch in _test_process_module_pairs():
+        original = launch.start_background_process
+        start = _test_background_launch_wrapper(original, module)
+        module.set_test_process_spawn_hook(_capture_active_test_process_spawn)
+        _patch_test_launch_aliases(state, original, start)
+
+
+# LLM: 只按同一函数对象替换当前解释器内的别名，不扫描 OS 进程或按名称选择 PID。
+# 函数用途: 覆盖测试收集时提前导入的启动函数，同时记录撤销需要的精确后像。
+def _patch_test_launch_aliases(state, original, start) -> None:
+    for name, loaded in list(sys.modules.items()):
+        if loaded is None or not name.startswith(("agent_py_agent.", "agent.")):
+            continue
+        for attr, value in list(vars(loaded).items()):
+            if value is original:
+                state.patch.setattr(loaded, attr, start)
+                state.installed[(id(loaded), attr)] = start
+
+
+# LLM: 此独立 MonkeyPatch 只含启动函数 setattr；仅撤销后像仍相同的项，保留高 scope fixture 的后续写入。
+# 函数用途: 条件恢复 pytest setattr 栈，避免无条件 undo 提前盖掉模块/会话替身。
+def _undo_test_process_capture(state) -> None:
+    installed = getattr(state, "installed", {})
+    state.patch._setattr[:] = [
+        (target, name, previous) for target, name, previous in state.patch._setattr
+        if (id(target), name) not in installed or getattr(target, name, None) is installed[(id(target), name)]
+    ]
+    state.patch.undo()
+
+
+# LLM: 只能在最外层 teardown、其它 monkeypatch 撤销后调用；清理失败不得盖掉测试失败。
+# 函数用途: 撤销捕获器，精确回收登记项，最后丢弃 registry 缓存。
+def _cleanup_test_process_entries(item, nextitem=None) -> None:
+    global _ACTIVE_TEST_PROCESS_OWNER, _TEST_PROCESS_SUITE_CLOSING
+    state = getattr(item, "_test_process_ownership", None)
+    if state is None:
+        return
+    _ACTIVE_TEST_PROCESS_OWNER = None
+    pairs = _test_process_module_pairs()
+    for module, _launch in pairs:
+        module.set_test_process_spawn_hook(None)
+    with suppress(Exception):
+        _undo_test_process_capture(state)
+    with _TEST_PROCESS_ENTRIES_LOCK:
+        _TEST_PROCESS_SUITE_CLOSING = nextitem is None
+        state.closed = True
+        entries = {**_SHARED_TEST_PROCESS_ENTRIES, **state.entries}
+        _SHARED_TEST_PROCESS_ENTRIES.clear()
+        state.entries.clear()
+    try:
+        for key, entry in entries.items():
+            if _test_process_scope_still_live(entry, nextitem):
+                with _TEST_PROCESS_ENTRIES_LOCK:
+                    _SHARED_TEST_PROCESS_ENTRIES[key] = entry
+                continue
+            with suppress(Exception):
+                pairs[0][0].reap_test_registered_process(entry)
+    finally:
+        for module, _launch in pairs:
+            with suppress(Exception):
+                module.process_registry.clear()
+
+
+# LLM: scope 必须来自真实 fixture 上下文或显式账本字段；函数结束不清理仍有效的共享资源。
+# 函数用途: 按下一个测试项判断 module/session 共享进程的作用域是否到期。
+def _test_process_scope_still_live(entry, nextitem) -> bool:
+    if nextitem is None or entry.get("scope_expired"):
+        return False
+    lifetime = entry.get("scope_lifetime")
+    if lifetime is not None:
+        return not lifetime["expired"]
+    scope = entry.get("scope_level", "function")
+    if scope == "session":
+        return True
+    owner = entry.get("scope_owner") or str(entry.get("test_node_id", "")).split("::")[0]
+    return scope == "module" and owner == nextitem.nodeid.split("::")[0]
+
+
+# LLM: setup 包装钩子在所有 fixture 创建前安装捕获，含 module/session setup；最外层 teardown 负责撤销。
+# 函数用途: 建立当前测试的并发安全进程账本与独立 MonkeyPatch。
+def _begin_test_process_ownership(item) -> None:
+    global _TEST_PROCESS_SUITE_CLOSING
+    _TEST_PROCESS_SUITE_CLOSING = False
+    state = SimpleNamespace(entries={}, lock=threading.Lock(), patch=pytest.MonkeyPatch(), closed=False)
+    item._test_process_ownership = state
+    _install_test_process_capture(state, item.nodeid)
+
+
+# LLM: 用实际 pytest fixture scope 标记创建资源，不按函数名、PID 或测试名字猜共享寿命。
+# 函数用途: 让创建回调分清函数、模块和会话级 fixture 的进程归属。
+@pytest.hookimpl(wrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    global _ACTIVE_TEST_FIXTURE_SCOPE
+    previous = getattr(_TEST_PROCESS_FIXTURE_SCOPE, "current", None)
+    active_previous = _ACTIVE_TEST_FIXTURE_SCOPE
+    lifetime = {"expired": False}
+    request.addfinalizer(partial(_expire_test_process_fixture, lifetime))
+    _TEST_PROCESS_FIXTURE_SCOPE.current = (fixturedef.scope, request.node.nodeid, lifetime)
+    _ACTIVE_TEST_FIXTURE_SCOPE = _TEST_PROCESS_FIXTURE_SCOPE.current
+    try:
+        return (yield)
+    finally:
+        _TEST_PROCESS_FIXTURE_SCOPE.current = previous
+        _ACTIVE_TEST_FIXTURE_SCOPE = active_previous
+
+
+# LLM: 在 fixture 其它 finalizer 后标记本实例到期；不在仍有测试替身的环境里发信号。
+# 函数用途: 让 class/package/module/session 参数实例的进程在外层收尾时准确回收。
+def _expire_test_process_fixture(lifetime) -> None:
+    lifetime["expired"] = True
+
+
+# LLM: 账本在 setup 最外层已创建；finally 保留捕获到其它 fixture 收尾后，原外层钩子再统一关闭。
+# 函数用途: 为每条测试提供自己的派生进程账本，不借用测试的 monkeypatch 清理顺序。
+@pytest.fixture(autouse=True)
+def _background_process_ownership(request):
+    state = request.node._test_process_ownership
+    try:
+        yield state.entries
+    finally:
+        pass  # 捕获器不能在本 fixture 结束时先撤销，否则会漏掉其它 finalizer 派生的进程。
 
 
 @pytest.fixture
@@ -167,12 +384,13 @@ def _desktop_open_guard_per_test(request, _desktop_open_guard):
         yield
 
 
-# LLM: 保持桌面守卫先记录游标；先委托给 pytest 内层 setup hook 处理 skipif，
+# LLM: 创建捕获先于所有 fixture；保持桌面守卫游标；先委托给 pytest 内层 setup hook 处理 skipif，
 #   再用同一个包装钩子应用能力门，防止平台不适用的测试被能力失败覆盖。
 # 函数用途: 记录桌面守卫游标，并在 pytest 平台跳过检查之后按 marker skip 或 fail。
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_setup(item):
     """先留存桌面防线游标，再在内层 pytest skipif 返回后执行能力门。"""
+    _begin_test_process_ownership(item)
     if _DESKTOP_GUARD is not None:
         item._desktop_guard_mark = _DESKTOP_GUARD.mark()
     result = yield
@@ -187,6 +405,8 @@ def pytest_runtest_setup(item):
     return result
 
 
+# LLM: 回收必须在全部正常 fixture/monkeypatch finalizer 之后；finally 保留原测试及 teardown 异常。
+# 函数用途: 最外层精确回收本测试登记资源，再按原合同检查桌面防线。
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtest_teardown(item, nextitem):
     """本测试完整收尾之后（它的 fixture 与 monkeypatch 都已撤销）再检查期间的拦截记录，有就让这条测试报错。
@@ -195,7 +415,10 @@ def pytest_runtest_teardown(item, nextitem):
     """
     guard = _DESKTOP_GUARD
     mark = getattr(item, "_desktop_guard_mark", None)
-    result = yield
+    try:
+        result = yield
+    finally:
+        _cleanup_test_process_entries(item, nextitem)
     if guard is None or mark is None:
         return result
     records = guard.take_since(mark)
@@ -562,3 +785,265 @@ def db_conn_with_records(records: list[dict[str, Any]]) -> MagicMock:
     mock_result.fetchone.return_value = (len(records),)
     mock_conn.execute.return_value = mock_result
     return mock_conn
+
+
+# B5 专属回归受两文件白名单约束，显式运行：pytest agent_py_agent/tests/conftest.py -k test_b5 -q。
+# LLM: 替换全部信号/受管停止出口；伪 PID 只作为数据，测试绝不调用实际进程终止。
+# 函数用途: 提供精确回收的可观测替身，验证安全拒绝和调用顺序。
+@pytest.fixture
+def b5_reap_probe(monkeypatch):
+    from agent_py_agent.agent.tooling import process_registry as module
+    from agent_py_agent.agent.tooling import process_session_cleanup as cleanup
+
+    calls = []
+    pid = 987654321
+    entry = {"session_id": "bg-test", "pid": pid, "pid_birth_token": "birth-test",
+             "store_root": "", "popen": None, "scope_level": "function"}
+    monkeypatch.setattr(module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(module.os, "getpgid", lambda target: target)
+    monkeypatch.setattr(module.os, "getpgrp", lambda: 777)
+    monkeypatch.setattr(module, "_same_process", lambda *_: True)
+    monkeypatch.setattr(module, "_process_instance_terminated", lambda *_: False)
+    monkeypatch.setattr(module, "terminate_process_tree", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(cleanup, "stop_process_session", lambda *args, **kwargs: calls.append("managed"))
+    return SimpleNamespace(module=module, entry=entry, calls=calls)
+
+
+# LLM: 只用合成记录接管，merge 保持真实；probe 的 PID=1 永远不得进入登记回调。
+# 函数用途: 验证真正接管会通知，而普通出生观察不会通知，回调快照不污染缓存。
+def test_b5_spawn_hook_is_creation_only_and_copies_snapshot(monkeypatch, tmp_path):
+    from agent_py_agent.agent.tooling import process_registry as module
+    from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
+
+    observed = []
+    proc = module.BackgroundProcess("bg-test", "test", 987654321, 1.0,
+                                    access_scope=module.ProcessAccessScope("test-owner", "test-thread"),
+                                    pid_birth_token="birth-test",
+                                    persisted_snapshot={"schema": LEGACY_PROCESS_SESSION_SCHEMA})
+    registry = module.ProcessRegistry()
+    monkeypatch.setattr(registry, "_visible_record_locked", lambda *_: proc)
+    monkeypatch.setattr(registry, "_prune_finished_locked", lambda *_: None)
+    monkeypatch.setattr(module, "_read_host_birth_token", lambda *_: "observed")
+    monkeypatch.setattr(module, "_native_posix_probe_enabled", lambda: False)
+    module.set_test_process_spawn_hook(observed.append)
+    try:
+        module.capture_process_birth_token(1)
+        assert not observed
+        registry.attach(proc.to_record(), SimpleNamespace(pid=proc.pid), tmp_path)
+        assert len(observed) == 1
+        assert observed[0] is not proc
+        observed[0].persisted_snapshot["changed"] = True
+        assert "changed" not in proc.persisted_snapshot
+    finally:
+        module.set_test_process_spawn_hook(None)
+
+
+# LLM: 危险 PID、未知出生和 pytest 原组都必须在任何停止入口之前拒绝。
+# 函数用途: 守住 PID=1、自身、出生不符和同组的零信号边界。
+@pytest.mark.parametrize("unsafe", ["zero", "one", "self", "same_group", "no_birth", "changed_birth"])
+def test_b5_reaper_rejects_unowned_targets(b5_reap_probe, monkeypatch, unsafe):
+    probe = b5_reap_probe
+    if unsafe in {"zero", "one", "self"}:
+        probe.entry["pid"] = {"zero": 0, "one": 1, "self": os.getpid()}[unsafe]
+    if unsafe == "same_group":
+        monkeypatch.setattr(probe.module.os, "getpgid", lambda _: 777)
+    if unsafe == "no_birth":
+        probe.entry["pid_birth_token"] = ""
+    if unsafe == "changed_birth":
+        monkeypatch.setattr(probe.module, "_same_process", lambda *_: False)
+    probe.module.reap_test_registered_process(probe.entry)
+    assert probe.calls == []
+
+
+# LLM: 模拟出口只记录调用；必须携带创建时出生身份，不能仅凭 PID 终止。
+# 函数用途: 验证存活登记项确实触发精确树回收。
+def test_b5_reaper_terminates_registered_live_tree(b5_reap_probe):
+    probe = b5_reap_probe
+    probe.module.reap_test_registered_process(probe.entry)
+    assert probe.calls == [((probe.entry["pid"], None), {"expected_birth_token": "birth-test"})]
+
+
+# LLM: 只登记合成快照，不执行 OS 操作；重复的启动/attach 通知只能保留一份句柄与归属。
+# 函数用途: 验证账本独立保存创建身份，包含测试 nodeid 和函数作用域。
+def test_b5_ledger_deduplicates_without_losing_ownership():
+    from agent_py_agent.agent.tooling.process_registry import BackgroundProcess
+
+    state = SimpleNamespace(entries={}, lock=threading.Lock())
+    proc = BackgroundProcess("bg-test", "test", 987654321, 1.0,
+                             pid_birth_token="birth-test", store_root="/test/store")
+    _record_test_process_spawn(state, "module.py::test_example", proc)
+    _record_test_process_spawn(state, "module.py::test_example", proc)
+    assert len(state.entries) == 1
+    entry = state.entries[("bg-test", proc.pid)]
+    assert entry["test_node_id"] == "module.py::test_example"
+    assert entry["pid_birth_token"] == "birth-test" and entry["store_root"] == "/test/store"
+    assert entry["scope_level"] == "function"
+    proc.pid_birth_token = "changed"
+    assert entry["pid_birth_token"] == "birth-test"
+
+
+# LLM: 所有伪进程只经替身启动；外部别名与模块入口都必须透明返回原对象，清理不发信号。
+# 函数用途: 验证不经 attach 的直接启动及其提前导入别名也会进账。
+def test_b5_capture_wraps_direct_launch_and_imported_alias(monkeypatch):
+    from types import ModuleType
+
+    from agent_py_agent.agent.tooling import background_process_launch as launch
+    from agent_py_agent.agent.tooling import process_registry as module
+    from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
+
+    proc = module.BackgroundProcess("bg-test", "test", 987654321, 1.0,
+                                    pid_birth_token="birth-test",
+                                    persisted_snapshot={"schema": LEGACY_PROCESS_SESSION_SCHEMA})
+    hosted = SimpleNamespace(record=proc.to_record(), store_root=Path("/test/store"), process=None)
+    # LLM: 返回合成启动结果，绝不调用 OS 或创建真实进程。
+    # 函数用途: 为直接启动和导入别名提供同一可识别结果。
+    def original(*args, **kwargs):
+        return hosted
+    alias = ModuleType("agent_py_agent.tests._b5_alias_probe")
+    alias.start = original
+    monkeypatch.setitem(sys.modules, alias.__name__, alias)
+    monkeypatch.setattr(launch, "start_background_process", original)
+    state = SimpleNamespace(entries={}, lock=threading.Lock(), patch=pytest.MonkeyPatch())
+    try:
+        _install_test_process_capture(state, "module.py::test_example")
+        assert launch.start_background_process(object()) is hosted
+        assert alias.start(object()) is hosted
+        assert len(state.entries) == 1
+    finally:
+        module.set_test_process_spawn_hook(None)
+        state.patch.undo()
+
+
+# LLM: 用替身使一条清理报错，第二条仍必须执行，原断言异常由最外层 hook 保留。
+# 函数用途: 验证清理隔离、先撤销捕获和最终清空缓存。
+def test_b5_cleanup_continues_after_one_reap_error(monkeypatch):
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    calls = []
+    # LLM: 只模拟回收失败，不触发真实停止或系统信号。
+    # 函数用途: 注入第一条 OSError，记录第二条仍被处理。
+    def reap(entry):
+        assert module._TEST_PROCESS_SPAWN_HOOK is None
+        calls.append(entry["pid"])
+        if entry["pid"] == 2:
+            raise OSError("gone")
+    entries = {(str(pid), pid): {"pid": pid, "scope_level": "function"} for pid in (2, 3)}
+    state = SimpleNamespace(entries=entries, patch=pytest.MonkeyPatch())
+    item = SimpleNamespace(_test_process_ownership=state, nodeid="module.py::test_example")
+    monkeypatch.setattr(module, "reap_test_registered_process", reap)
+    monkeypatch.setattr(module.process_registry, "clear", lambda: calls.append("clear"))
+    _cleanup_test_process_entries(item)
+    assert calls == [2, 3, "clear"]
+
+
+# LLM: 下一个函数重新接管同一个共享进程不能降级寿命或覆盖最初作用域。
+# 函数用途: 防止 module/session 进程在下一条测试 attach 后被过早回收。
+def test_b5_reattach_preserves_shared_process_scope(monkeypatch):
+    from agent_py_agent.agent.tooling.process_registry import BackgroundProcess
+
+    key = ("bg-shared", 987654321)
+    shared = {key: {"pid_birth_token": "birth-test", "popen": None,
+                    "scope_level": "module", "scope_owner": "module.py", "store_root": "/test/store"}}
+    monkeypatch.setattr(sys.modules[__name__], "_SHARED_TEST_PROCESS_ENTRIES", shared)
+    state = SimpleNamespace(entries={}, lock=threading.Lock())
+    proc = BackgroundProcess(*key[:1], "test", key[1], 1.0, pid_birth_token="birth-test", store_root="/test/store")
+    _record_test_process_spawn(state, "module.py::next_test", proc)
+    assert state.entries[key]["scope_level"] == "module"
+
+
+# LLM: 参数化高作用域 fixture 由实际实例寿命裁决，不仅看下条测试 nodeid 是否相同。
+# 函数用途: 覆盖 class/package 共享，以及 module/session 参数实例的到期回收。
+@pytest.mark.parametrize("scope,expired,expected", [
+    ("class", False, True), ("package", False, True), ("module", True, False), ("session", True, False),
+])
+def test_b5_scope_follows_fixture_instance(scope, expired, expected):
+    entry = {"scope_level": scope, "scope_owner": "module.py", "scope_lifetime": {"expired": expired}}
+    assert _test_process_scope_still_live(entry, SimpleNamespace(nodeid="module.py::test_next")) is expected
+
+
+# LLM: 模拟晚导入模块保留旧包装器；它的启动不能再写上一条测试账本。
+# 函数用途: 验证撤销后遗留别名会绑定当前测试，而不是永久捕获旧 state。
+def test_b5_old_launch_alias_binds_current_test(monkeypatch):
+    from agent_py_agent.agent.tooling import background_process_launch as launch
+    from agent_py_agent.agent.tooling import process_registry as module
+    from agent_py_agent.agent.tooling.process_session_records import LEGACY_PROCESS_SESSION_SCHEMA
+
+    proc = module.BackgroundProcess("bg-test", "test", 987654321, 1.0, pid_birth_token="birth-test",
+                                    persisted_snapshot={"schema": LEGACY_PROCESS_SESSION_SCHEMA})
+    hosted = SimpleNamespace(record=proc.to_record(), store_root=Path("/test/store"), process=None)
+    monkeypatch.setattr(launch, "start_background_process", lambda *args, **kwargs: hosted)
+    first = SimpleNamespace(entries={}, lock=threading.Lock(), patch=pytest.MonkeyPatch())
+    second = SimpleNamespace(entries={}, lock=threading.Lock(), patch=pytest.MonkeyPatch())
+    try:
+        _install_test_process_capture(first, "module.py::test_first")
+        old_alias = launch.start_background_process
+        first.patch.undo()
+        _install_test_process_capture(second, "module.py::test_second")
+        assert old_alias(object()) is hosted
+        assert not first.entries
+        assert second.entries[(proc.session_id, proc.pid)]["test_node_id"] == "module.py::test_second"
+    finally:
+        module.set_test_process_spawn_hook(None)
+        second.patch.undo()
+        first.patch.undo()
+
+
+# LLM: 高 scope MonkeyPatch 是后写入者，函数级观察器撤销不能覆盖其仍有效的替身。
+# 函数用途: 验证外层清理保留模块/会话 fixture 后来安装的启动替身。
+def test_b5_cleanup_preserves_later_scoped_patch(monkeypatch):
+    from agent_py_agent.agent.tooling import background_process_launch as launch
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    state = SimpleNamespace(entries={}, lock=threading.Lock(), patch=pytest.MonkeyPatch())
+    item = SimpleNamespace(_test_process_ownership=state, nodeid="module.py::test_example")
+    monkeypatch.setattr(module.process_registry, "clear", lambda: None)
+    original = launch.start_background_process
+    _install_test_process_capture(state, item.nodeid)
+    later = object()
+    try:
+        launch.start_background_process = later
+        _cleanup_test_process_entries(item)
+        assert launch.start_background_process is later
+    finally:
+        launch.start_background_process = original
+        state.patch.undo()
+
+
+# LLM: 最后一条测试关闭后返回的启动仍有原创建归属，不能只入一个永无消费者的共享表。
+# 函数用途: 验证迟到的函数级派生进程立即走精确回收。
+def test_b5_late_spawn_after_cleanup_is_reaped(monkeypatch):
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    reaped = []
+    monkeypatch.setattr(module, "reap_test_registered_process", reaped.append)
+    monkeypatch.setattr(sys.modules[__name__], "_SHARED_TEST_PROCESS_ENTRIES", {})
+    state = SimpleNamespace(entries={}, lock=threading.Lock(), closed=True)
+    proc = module.BackgroundProcess("bg-late", "test", 987654321, 1.0, pid_birth_token="birth-test")
+    _record_test_process_spawn(state, "module.py::test_finished", proc)
+    assert len(reaped) == 1
+    assert reaped[0]["test_node_id"] == "module.py::test_finished"
+    assert not _SHARED_TEST_PROCESS_ENTRIES
+
+
+# LLM: 高作用域 fixture 等待工作线程完成启动时，其真实实例寿命仍须贯穿该次登记。
+# 函数用途: 验证线程池式创建不会被错误降级成 function scope。
+def test_b5_fixture_scope_reaches_spawn_worker():
+    from agent_py_agent.agent.tooling.process_registry import BackgroundProcess
+
+    finalizers = []
+    request = SimpleNamespace(node=SimpleNamespace(nodeid="module.py"), addfinalizer=finalizers.append)
+    hook = pytest_fixture_setup(SimpleNamespace(scope="module"), request)
+    state = SimpleNamespace(entries={}, lock=threading.Lock())
+    proc = BackgroundProcess("bg-thread", "test", 987654321, 1.0, pid_birth_token="birth-test")
+    next(hook)
+    try:
+        worker = threading.Thread(target=_record_test_process_spawn, args=(state, "module.py::test_worker", proc))
+        worker.start()
+        worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert state.entries[(proc.session_id, proc.pid)]["scope_level"] == "module"
+    finally:
+        with suppress(StopIteration):
+            next(hook)
+        for finalize in reversed(finalizers):
+            finalize()
