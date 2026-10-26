@@ -1,5 +1,8 @@
 # LLM: 仅在pytest临时Owner执行跨用户资产合同；不用真实账号、凭据、通道或运行服务。
 # 模块用途: 验证投递安全边界、依赖闭包、默认禁用及真实执行入口。
+# Stage3来源: Argon/c7缺依赖、Vault扫描、通知持久化，及c5 B03短字面量漏检；增加服务/工具真实临时Owner回归。
+# 独审补证: 资源文件名秘密、目录FD释放，以及子进程在入箱前后直接退出的通知恢复；不以异常finally模拟进程中断。
+# 验证边界: monitor仍保留原失败关闭测试；真实Scheduler安装与通道消费者未验，不能把本文件全绿当作四项全部完成。
 from dataclasses import replace
 
 import pytest
@@ -898,3 +901,97 @@ def test_inbox_notification_tracks_consumed_status_without_writes(kit):
     row = kit.service.list_inbox('local/alice')['deliveries'][0]
     assert row['notification_status'] == 'delivered'
     assert row['notification_event'] == event and path.read_bytes() == before
+
+
+@pytest.mark.parametrize('replace_secrets', [False, True])
+def test_known_secret_resource_filename_never_leaves_sender(kit, replace_secrets):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    secret = 'FixturePathPrivateValue_7753'
+    vault = kit.main / 'data/datasource_secrets/cred.json'
+    vault.parent.mkdir(parents=True)
+    vault.write_text(json.dumps({'custom_field': secret}))
+    ScriptStore(kit.main).save_script(AssetDescriptor('safe', 'script', '安全正文'), 'print("{}")')
+    (kit.main / 'scripts/safe' / (secret + '.txt')).write_text('harmless fixture')
+    with pytest.raises(AssetDeliveryError) as error:
+        kit.service.send_bundle('local/main', 'local/alice', 'script', 'safe',
+            allow_secret_placeholder_replace=replace_secrets)
+    assert error.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert secret not in str(error.value.to_dict())
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+
+
+@pytest.mark.parametrize('after_inbox', [False, True])
+def test_notification_crash_is_not_consumable_and_reconciles_from_inbox(kit, after_inbox):
+    import json
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    seed_delivery_bundle(kit)
+    code = '''
+import os, sys
+from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
+service = AssetDeliveryService(sys.argv[1])
+if sys.argv[2] == 'before':
+    service._publish_stage = lambda *args: os._exit(73)
+else:
+    put = service._put_json
+    def interrupt_promotion(home, parts, value, admission):
+        if tuple(parts[:3]) == ('data', 'asset_delivery', 'notifications') and value.get('status') == 'queued':
+            os._exit(73)
+        return put(home, parts, value, admission)
+    service._put_json = interrupt_promotion
+service.send_bundle('local/main', 'local/alice', 'workflow', 'flow')
+'''
+    result = subprocess.run([sys.executable, '-c', code, str(kit.root), 'after' if after_inbox else 'before'],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, timeout=30)
+    assert result.returncode == 73
+    queue = kit.alice / 'data/asset_delivery/notifications'
+    orphan = next(queue.glob('*.json'))
+    assert json.loads(orphan.read_bytes())['status'] == 'prepared'
+    rows = kit.service.list_inbox('local/alice')['deliveries']
+    if after_inbox:
+        assert len(rows) == 1 and rows[0]['notification_status'] == 'prepared'
+    else:
+        assert rows == []
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'workflow', 'flow')
+    assert sent['notification_status'] == 'queued'
+    if after_inbox:
+        assert json.loads(orphan.read_bytes())['status'] == 'queued'
+        assert len(list(queue.glob('*.json'))) == 2
+    else:
+        assert not orphan.exists() and len(list(queue.glob('*.json'))) == 1
+
+
+def test_publish_target_open_failure_closes_source_directory_fd(kit, monkeypatch):
+    import errno
+    import os
+
+    from agent_py_agent.agent.assets import delivery_service
+
+    original = delivery_service.open_directory_beneath
+    opened = []
+
+    def fail_target(*args, **kwargs):
+        if opened:
+            raise OSError('synthetic target open failure')
+        descriptor = original(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(delivery_service, 'open_directory_beneath', fail_target)
+    try:
+        with pytest.raises(OSError, match='synthetic target open failure'):
+            kit.service._publish_stage(kit.alice.relative_to(kit.root).parts, ('fixture-stage',), ('fixture-inbox',), 'fixture')
+        with pytest.raises(OSError) as error:
+            os.fstat(opened[0])
+        assert error.value.errno == errno.EBADF
+    finally:
+        if opened:
+            try:
+                os.close(opened[0])
+            except OSError:
+                pass

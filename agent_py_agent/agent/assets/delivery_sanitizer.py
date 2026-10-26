@@ -133,8 +133,8 @@ def _paths(text, owner_home):
     return re.sub(r'/(?:Users/[^/\s"\'<>]+|home/[^/\s"\'<>]+|root)(?=/|\b)', '${OWNER_HOME}', text)
 
 
-# LLM: 原字节先比对环境及调用方内存秘密再做替换；任何非空高危键字面量均硬拒绝，诊断不回显原值，无文件写入。
-# 函数用途: 在清洗和暂存前扫描整包，保护短秘密、显式模板及二进制原字节。
+# LLM: 原字节及输出文件名都先核秘密；文件名命中始终拒绝以免改名破坏依赖，正文才允许显式替换，不回显明文。
+# 函数用途: 在清洗和暂存前扫描整包，防止秘密经正文或资源清单流出。
 def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace=False, extra_secrets=()):
     if type(allow_secret_placeholder_replace) is not bool:
         raise ValueError('allow_secret_placeholder_replace必须是布尔值')
@@ -143,6 +143,11 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
     for name, raw in files.items():
         if not isinstance(name, str) or not isinstance(raw, bytes):
             raise ValueError('投递文件必须是相对文件名到原始bytes的映射')
+        if _matches(name, secrets, limit=1) or _shared_scan(name)[0]:
+            safe_name = _replace_matches(_paths(name, owner_home), _matches(_paths(name, owner_home), secrets))
+            raise AssetDeliveryError('ASSET_DELIVERY_SECRET_DETECTED', '投递资源路径包含疑似秘密，不能安全改名',
+                redacted_matches=[{'file_path': redact_sensitive_text(safe_name, code_file=True),
+                    'line_number': 1, 'pattern_name': 'secret_resource_path', 'masked_snippet': '<redacted>'}])
         text = raw.decode('utf-8', errors='surrogateescape')
         matches = _matches(text, secrets, limit=None if allow_secret_placeholder_replace else 100)
         shared, _ = _shared_scan(text)
