@@ -41,11 +41,13 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 from bisect import bisect_right
 from collections import OrderedDict
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
@@ -948,24 +950,51 @@ def _main_run_row_for_task(repo: RuntimeRepository, task_id: str):
     return repo.main_agent_run_for_task(task_id)
 
 
-# LLM: 仅复用Runtime原静止判据；独立query_only读事务核对整份快照，不结算、取消、释放锁或改投影。
+# LLM: 现行根目录权威优先，兼容data布局；不经写repo。冷WAL库用immutable禁建sidecar，DELETE库保持读锁。
+# 函数用途: 为静止探针提供短时只读连接，读取期间权威变化或缺失时放弃静止证明。
+@contextmanager
+def _quiescent_probe_connection(owner_home: Path) -> Iterator[sqlite3.Connection | None]:
+    primary = db_path = runtime_db_path(owner_home)
+    if not db_path.exists() and not db_path.is_symlink():
+        db_path = owner_home / "data" / "runtime.db"
+    if owner_home.is_symlink() or db_path.is_symlink() or db_path.parent.is_symlink() or not db_path.is_file():
+        yield None
+        return
+    wal, shm = Path(f"{db_path}-wal"), Path(f"{db_path}-shm")
+    has_wal = wal.exists()
+    if wal.is_symlink() or shm.is_symlink() or (has_wal and (not wal.is_file() or not shm.is_file())):
+        yield None
+        return
+    paths = (primary, db_path, wal)
+    before = tuple(_file_signature(path) for path in paths)
+    if db_path != primary and before[0] != ("missing",):
+        yield None
+        return
+    with db_path.open("rb") as source:
+        immutable = not has_wal and source.read(20)[18:20] == b"\x02\x02"
+    address = db_path.absolute().as_uri() + "?mode=ro" + ("&immutable=1" if immutable else "")
+    with closing(sqlite3.connect(address, uri=True, timeout=0.05)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        yield conn
+        if before != tuple(_file_signature(path) for path in paths):
+            raise sqlite3.DatabaseError("runtime authority changed during quiescent probe")
+
+
+# LLM: 仅复用Runtime原静止判据；身份解析和全树查询在同一只读事务，不初始化schema或借用可写repo缓存。
 # 函数用途: 确认BLOCKED子代理已静止且父任务已关闭或整树可结算；缺失、冲突或读错都保留唤醒。
 def _blocked_subagent_is_quiescent(owner_home: Path, run_id: str, payload: dict[str, object]) -> bool:
     try:
-        repo = _runtime_repo_for_owner(owner_home)
-        if repo is None:
-            return False
         selected = str(payload.get("run_id") or run_id)
-        record = repo.agent_run_for_run_id(selected) or repo.get_agent_run(selected)
-        if record is None:
-            return False
-        with closing(repo._runtime_connect()) as conn:
-            conn.execute("PRAGMA query_only=ON")
+        with _quiescent_probe_connection(owner_home) as conn:
+            if conn is None:
+                return False
             conn.execute("BEGIN")
             run = conn.execute(
                 "SELECT ar.*, aa.status AS attempt_status, aa.agent_run_id AS attempt_run_id FROM agent_runs ar "
-                "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id WHERE ar.agent_run_id = ?",
-                (record["agent_run_id"],),
+                "LEFT JOIN agent_attempts aa ON aa.attempt_id = ar.current_attempt_id "
+                "WHERE ar.run_id = ? OR ar.agent_run_id = ? ORDER BY (ar.run_id = ?) DESC LIMIT 1",
+                (selected, selected, selected),
             ).fetchone()
             if run is None or not run["parent_agent_run_id"] or run["status"] not in {"created", *AGENT_RUN_TERMINAL_STATUSES}:
                 return False

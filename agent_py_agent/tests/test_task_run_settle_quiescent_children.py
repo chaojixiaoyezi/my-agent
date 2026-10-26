@@ -261,10 +261,10 @@ def test_pending_activation_started_events_report_their_own_columns(repo):
 
 # LLM: 使用真实RuntimeRepository收口路径，投影只表达BLOCKED，不把它改为终态来掩盖发现缺陷。
 # 函数用途: 准备一个可恢复但已静止的群owner及其权威运行树。
-def _b4_quiet_owner(tmp_path, *, closed=True, history=0):
+def _b4_quiet_owner(tmp_path, *, closed=True, history=0, data_layout=False):
     owners = tmp_path / "owners"
     home = owners / "providers" / "feishu" / "groups" / "quiet-group"
-    runtime = RuntimeRepository(home / "runtime.db")
+    runtime = RuntimeRepository(home / ("data/runtime.db" if data_layout else "runtime.db"))
     tree = _tree(runtime, task_id="b4-recoverable-task")
     _block_child(runtime, tree)
     if closed:
@@ -464,3 +464,192 @@ def test_b4_quiet_owner_is_woken_by_external_wake_signal(tmp_path, monkeypatch, 
     assert _has_unfinished_subagent_run(home) is False
     assert [owner.owner_id for owner in discover_wake_pending_owners(owners)] == ["quiet-group"]
     assert path.read_bytes() == state_bytes
+
+
+# LLM: 同时覆盖任务指定data布局与仓库现行根目录布局，防只测未被真实探针打开的路径而掩盖冷缓存初始化。
+# 函数用途: 验证旧库冷读不迁移、不切journal、不新建sidecar，无法证明静止时仍唤醒。
+@pytest.mark.parametrize("layout", ["data", "root"])
+def test_b4_cold_probe_does_not_initialize_or_migrate_legacy_db(tmp_path, layout):
+    import sqlite3
+    from contextlib import closing
+
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    state = home / "agents" / "legacy-child" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text('{"run_id":"legacy-child","status":"BLOCKED"}', encoding="utf-8")
+    db = home / "data/runtime.db" if layout == "data" else home / "runtime.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+        conn.execute("CREATE TABLE legacy_probe(value TEXT)")
+        conn.execute("INSERT INTO legacy_probe VALUES ('untouched')")
+        conn.commit()
+    discovery._RUNTIME_REPO_CACHE.clear()
+    before = db.read_bytes(), db.stat().st_mtime_ns, sorted(str(p.relative_to(home)) for p in home.rglob("*"))
+    assert _has_unfinished_subagent_run(home) is True
+    after = db.read_bytes(), db.stat().st_mtime_ns, sorted(str(p.relative_to(home)) for p in home.rglob("*"))
+    assert after == before
+    with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    assert not discovery._RUNTIME_REPO_CACHE
+
+
+# LLM: 同时测字母顺序与实际倒序扫描；静止项必须continue，不得提前把owner整体判静止。
+# 函数用途: 验证一个静止子代理不屏蔽同owner下另一棵树的活跃子代理。
+@pytest.mark.parametrize("quiet_name,active_name", [("a_quiescent", "z_active"), ("z_quiescent", "a_active")])
+def test_b4_quiescent_child_before_active_sibling_still_discovers_owner(tmp_path, monkeypatch, quiet_name, active_name):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    owners, home, runtime, _tree_row, path = _b4_quiet_owner(tmp_path)
+    quiet = home / "agents" / quiet_name / "state.json"
+    quiet.parent.mkdir(parents=True)
+    path.rename(quiet)
+    runtime.record_run_creation(owner_id="local/main", goal="active parent", run_id="active-root", role="main")
+    runtime.record_run_creation(owner_id="local/main", goal="active sibling", run_id=active_name,
+                                role="worker", parent_run_id="active-root")
+    active = home / "agents" / active_name / "state.json"
+    active.parent.mkdir(parents=True)
+    active.write_text(json.dumps({"run_id": active_name, "status": "RUNNING"}), encoding="utf-8")
+    original, visited = discovery._blocked_subagent_is_quiescent, []
+
+    # LLM: 保留原SQL判据，只记录静止项是否在活跃兄弟之前被真正读取。
+    # 函数用途: 核对倒序扫描确实穿过静止子代理。
+    def observed(owner_home, run_id, payload):
+        result = original(owner_home, run_id, payload)
+        visited.append(result)
+        return result
+
+    monkeypatch.setattr(discovery, "_blocked_subagent_is_quiescent", observed)
+    assert _has_unfinished_subagent_run(home) is True
+    assert [owner.owner_id for owner in discover_wake_pending_owners(owners)] == ["quiet-group"]
+    if quiet_name.startswith("z_"):
+        assert visited and all(visited)
+
+
+# LLM: 原发现入口在账本检查内直接补关TaskRun；已收口无需额外唤醒，不能为满足预期新增第二条结算链。
+# 函数用途: 验证静止子代理让出发现顺序后，父TaskRun经原账本入口收口且下轮保持安静。
+def test_b4_quiescent_child_with_open_task_run_falls_through_to_task_settle(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    owners, home, runtime, tree, path = _b4_quiet_owner(tmp_path, closed=False)
+    assert _task_run(runtime, tree["task_run_id"])["closed_at"] == 0
+    assert _has_unfinished_subagent_run(home) is False
+    original, observed = discovery._has_unfinished_task_ledger, []
+    state_bytes = path.read_bytes()
+
+    # LLM: 不替换账本返回值或收口协议，必须执行真实unfinished_task_ids及TaskRun CAS。
+    # 函数用途: 记录发现扫描确实落到该owner的未完结任务账本。
+    def ledger(owner_home, **kwargs):
+        observed.append((owner_home, _task_run(runtime, tree["task_run_id"])["closed_at"]))
+        return original(owner_home, **kwargs)
+
+    monkeypatch.setattr(discovery, "_has_unfinished_task_ledger", ledger)
+    assert discover_wake_pending_owners(owners) == []
+    assert observed and observed[0] == (home, 0)
+    assert unfinished_task_ids(home) == []
+    assert _task_run(runtime, tree["task_run_id"])["closed_at"] > 0
+    closed, = _events(runtime, tree["task_run_id"], "task_run.closed")
+    assert closed["payload"]["operator"] == "wake-discovery-task-run-reconcile"
+    assert closed["payload"]["quiescent_agent_run_ids"] == [tree["child"]["agent_run_id"]]
+    assert discover_wake_pending_owners(owners) == []
+    assert path.read_bytes() == state_bytes
+
+
+# LLM: 现代WAL模式库即使没有sidecar也不能因只读观察重新创建wal/shm；观察每条SQL之间的目录，防短暂创建后删除掩盖副作用。
+# 函数用途: 验证冷现代库不经repo初始化，并支持任务data布局与原权威根布局。
+@pytest.mark.parametrize("layout", ["root", "data"])
+def test_b4_cold_wal_probe_does_not_create_sidecars_or_use_writable_repo(tmp_path, monkeypatch, layout):
+    import sqlite3
+    from contextlib import closing
+
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    _owners, _home, runtime, _tree_row, state = _b4_quiet_owner(tmp_path / "source")
+    home = tmp_path / "probe"
+    path = home / "agents" / "child-1" / "state.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(state.read_bytes())
+    db = home / "data/runtime.db" if layout == "data" else home / "runtime.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with closing(runtime._runtime_connect()) as source, closing(sqlite3.connect(db)) as target:
+        source.backup(target)
+        assert target.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    assert not db.with_name(db.name + "-wal").exists()
+    assert not db.with_name(db.name + "-shm").exists()
+    before = db.read_bytes(), db.stat().st_mtime_ns, sorted(p.name for p in db.parent.iterdir())
+    original, seen = sqlite3.connect, []
+
+    # LLM: 真实sqlite连接保留SQL行为，连接参数和执行期间目录均要证明只读。
+    # 函数用途: 捕获连接模式与短暂sidecar创建。
+    def connect(address, *args, **kwargs):
+        assert kwargs.get("uri") is True and "mode=ro" in str(address)
+        conn = original(address, *args, **kwargs)
+        conn.set_trace_callback(lambda sql: seen.append((sql, sorted(p.name for p in db.parent.iterdir()))))
+        return conn
+
+    # LLM: 该探针不能借用写仓库缓存，哪怕初始化在schema相同情况下看似不改业务表。
+    # 函数用途: 拦截被禁止的可写repo入口。
+    def writable_repo(_home):
+        pytest.fail("quiescent observation must not call writable repository")
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    monkeypatch.setattr(discovery, "_runtime_repo_for_owner", writable_repo)
+    assert _has_unfinished_subagent_run(home) is False
+    assert seen and all(not name.endswith(("-wal", "-shm")) for _sql, names in seen for name in names)
+    assert (db.read_bytes(), db.stat().st_mtime_ns, sorted(p.name for p in db.parent.iterdir())) == before
+
+
+# LLM: DELETE模式必须遵守SQLite读锁，不能为禁建WAL而对全部旧库使用immutable绕开活跃写事务。
+# 函数用途: 验证旧布局权威被独占锁定时保守继续唤醒，不拿可能变化的无锁快照证明静止。
+def test_b4_locked_delete_journal_database_keeps_waking(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    _owners, _home, runtime, _tree_row, state = _b4_quiet_owner(tmp_path / "source")
+    home = tmp_path / "probe"
+    path = home / "agents" / "child-1" / "state.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(state.read_bytes())
+    db = home / "runtime.db"
+    with closing(runtime._runtime_connect()) as source, closing(sqlite3.connect(db)) as target:
+        source.backup(target)
+        assert target.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+    with closing(sqlite3.connect(db)) as locker:
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            assert _has_unfinished_subagent_run(home) is True
+        finally:
+            locker.rollback()
+
+
+# LLM: data兼容分支也必须拒绝owner本身的符号链接，不得通过普通data父目录绕过直接父目录检查。
+# 函数用途: 复现独立审查指出的兼容布局链接隔离缺口。
+def test_b4_data_probe_rejects_symlinked_owner_home(tmp_path):
+    _owners, home, _runtime, _tree_row, _path = _b4_quiet_owner(tmp_path, data_layout=True)
+    alias = tmp_path / "owner-alias"
+    alias.symlink_to(home, target_is_directory=True)
+    assert _has_unfinished_subagent_run(alias) is True
+
+
+# LLM: 已选data兼容库之后若现行根权威出现，就不能继续用旧兼容库压掉唤醒。
+# 函数用途: 在确定的快照边界安装新的根权威，复现独立审查指出的权威切换窗口。
+def test_b4_data_probe_keeps_waking_if_primary_authority_appears(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    _owners, home, runtime, _tree_row, _path = _b4_quiet_owner(tmp_path, data_layout=True)
+    primary, original = home / "runtime.db", discovery._file_signature
+    wal = runtime.db_path.with_name(runtime.db_path.name + "-wal")
+
+    # LLM: 外部写模拟只发生一次，原签名与探针查询均真实执行，不伪造查询结果。
+    # 函数用途: 在读兼容库时模拟根权威安装。
+    def signature(path):
+        result = original(path)
+        if path == wal and not primary.exists():
+            primary.write_bytes(b"new primary authority requires recovery")
+        return result
+
+    monkeypatch.setattr(discovery, "_file_signature", signature)
+    assert _has_unfinished_subagent_run(home) is True
+    assert primary.is_file()
