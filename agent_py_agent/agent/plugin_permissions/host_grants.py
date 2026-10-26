@@ -38,7 +38,7 @@ def execution_schema() -> dict:
                    "max_duration_seconds": integer(86400, 1), "max_tool_calls": integer(1000)})
 
 
-# LLM: 三组UID允许显式星号；资源和工具仍是有限精确引用，普通用户不能使用治理或代用户范围。
+# LLM: 能力枚举动态取唯一host_capabilities（含assets.read/users.read）；批准不免除public管理员和目标名单复验。
 # 函数用途: 返回确认预览中可选择的API授权字段。
 def selection_schema() -> dict:
     ids = _list_schema(text(32, 1, r"^(\*|[a-z0-9][a-z0-9_-]{1,31})$"))

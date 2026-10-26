@@ -134,13 +134,36 @@ def format_turn_completion_line(elapsed_seconds: float, *, status: str = "done",
     return f"✻ {verb or verbs[index]} for {duration}"
 
 
-# LLM: 仅格式化已确认的程序计时，不补造未知耗时；旧 render_completion 保持原样兼容 CLI。
+# LLM: 默认墙钟只供实时调用；恢复必须传冻结时刻，不能用本函数给旧历史补造事实。
+# 函数用途: 为成功回合统一输出Worked、耗时与带时区的完成日期。
+def format_completion_line(elapsed_s: float, completed_at: object = None) -> str:
+    if completed_at is None or completed_at == "":
+        ended = datetime.now().astimezone()
+    elif isinstance(completed_at, datetime):
+        ended = completed_at.astimezone()
+    elif isinstance(completed_at, str):
+        ended = datetime.fromisoformat(completed_at.replace("Z", "+00:00")).astimezone()
+    else:
+        ended = datetime.fromtimestamp(completed_at).astimezone()
+    return f"✻ Worked for {format_turn_duration(elapsed_s)} · 完成于 {ended:%Y-%m-%d %H:%M:%S %Z}"
+
+
+# LLM: 结构化展示必须有可转换的冻结时标；非法历史返回空串而非补now，纯实时formatter仍支持默认墙钟。
 # 函数用途: 在 TUI 消息尾标显示稳定动词、耗时与原完成时刻。
 def render_turn_timing(data: dict) -> str:
+    ended = data.get("completed_at")
+    if type(ended) not in (int, float):
+        return ""
+    try:
+        datetime.fromtimestamp(ended).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return ""
     seconds = data.get("elapsed_seconds")
+    if data.get("status") == "completed":
+        return format_completion_line(seconds if seconds is not None else float("nan"), data["completed_at"])
     line = format_turn_completion_line(seconds if seconds is not None else float("nan"),
         status=str(data.get("status") or "unknown"), seed_key=str(data.get("logical_id") or ""))
     label = {"completed": "完成于", "failed": "失败于", "interrupted": "已中断于",
              "blocked": "受阻于", "unfinished": "未完成于"}.get(data.get("status"), "记录于")
-    ended = datetime.fromtimestamp(data["completed_at"]).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-    return f"{line} · {label} {ended}"
+    ended_text = datetime.fromtimestamp(ended).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    return f"{line} · {label} {ended_text}"

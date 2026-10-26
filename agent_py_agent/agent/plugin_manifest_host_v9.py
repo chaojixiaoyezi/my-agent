@@ -1,15 +1,15 @@
-# LLM: v9显式扩展资产/数据源/录制能力，旧协议read枚举不变；声明仅申请，批准及实时范围仍独立核验。
+# LLM: v9显式区分资产/治理读写能力；旧协议不扩权，声明仅申请，批准及实时范围仍独立核验。
 # 模块用途: 校验插件宿主v2能力清单，不让新接口借旧插件或管理员安装身份提权。
 from __future__ import annotations
 
 
-# LLM: 新能力逐项申请，不把assets.write或recorder.control当execute/act_as_user，不扩大旧版本协议。
+# LLM: assets.read/users.read单独批准，不由write/manage推导；执行与代用户能力继续独立。
 # 函数用途: 列出v9明确认识的全部能力，供安装确认和动作授权共用。
 def host_capabilities() -> frozenset[str]:
-    return frozenset({"read", "chat.history", "chat", "threads.manage", "requests.cancel", "execute",
-                      "users.manage", "act_as_user", "interactions.read", "interactions.respond",
+    return frozenset({"read", "write", "chat.history", "chat", "threads.manage", "requests.cancel", "execute",
+                      "users.read", "users.manage", "act_as_user", "interactions.read", "interactions.respond",
                       "tasks.read", "tasks.control", "goals.read", "goals.control", "memory.read", "artifacts.read",
-                      "assets.write", "datasources.read", "datasources.write", "recorder.control"})
+                      "assets.read", "assets.write", "datasources.read", "datasources.write", "recorder.control"})
 
 
 # LLM: list/tuple入口由调用者指定，不做字符串拆分或去重清洗。

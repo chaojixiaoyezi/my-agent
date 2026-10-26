@@ -1,5 +1,5 @@
 # LLM: WP-4扩展目录只声明静态合同；由action_specs在原类型定义完成后加载，不接受插件动态注册。
-# 模块用途: 集中声明20个新宿主动作，保留原有闭合参数、显式能力及写入幂等门。
+# 模块用途: 集中声明目录扩展及21个投递/治理动作，保留闭合参数、显式能力及写入幂等门。
 from __future__ import annotations
 
 from .action_specs import _spec, id_schema
@@ -26,7 +26,7 @@ def turn_refs_schema():
             "minItems": 1, "maxItems": 100, "uniqueItems": True}
 
 
-# LLM: 需求矩阵逐项测试；提炼草稿含历史须read与chat.history双能力，复杂字典由领域schema二次验证。
+# LLM: 原扩展与投递/治理独立分组但只返回一个目录；提炼权限和写入幂等合同不变。
 # 函数用途: 返回目录、分叉、数据源、提炼、录制及后台观察的全部新增动作。
 def v2_action_specs():
     workspace = workspace_fields()
@@ -87,6 +87,74 @@ def v2_action_specs():
               closed({}, {**thread, "active_only": {"type": "boolean", "default": False}}), "thread_if_present process"),
         _spec("processes.background.inspect", "read", "tasks.read", closed({"session_id": id_schema()},
               {"tail_lines": {**integer(1000, 1), "default": 80}}), "process"),
+    ] + delivery_action_specs() + managed_action_specs()
+
+
+# LLM: Owner字段是待核选择器而非权限；发送身份只能由Host绑定，接受不开放自动开启。
+# 函数用途: 声明九个投递动作及有界闭合参数。
+def delivery_action_specs():
+    kind = {"enum": ["workflow", "monitor", "script", "skill"]}
+    root = {"root_asset_kind": kind, "root_asset_id": id_schema()}
+    asset = {"asset_kind": kind, "asset_id": id_schema()}
+    delivery = {"delivery_id": id_schema()}
+    dependencies = {"include_dependencies": {"type": "boolean", "default": True}}
+    return [
+        _spec("assets.delivery.targets.list", "read", "read assets.read", closed({})),
+        _spec("assets.delivery.preview_bundle", "read", "read assets.read", closed(root, dependencies)),
+        _spec("assets.delivery.send", "write", "write assets.write", closed({**root, "recipient_owner_id": text(128, 1)},
+              {**dependencies, "note": {**text(2000), "default": ""}})),
+        _spec("assets.delivery.inbox.list", "read", "read assets.read", closed({}, {
+              "status_filter": {"enum": ["pending", "accepted", "rejected", "all"]}})),
+        _spec("assets.delivery.accept", "write", "write assets.write", closed(delivery, {
+              "conflict_strategy": {"enum": ["keep_both_rename", "overwrite", "skip"], "default": "keep_both_rename"},
+              "auto_enable": {"type": "boolean", "enum": [False], "default": False}})),
+        _spec("assets.delivery.reject", "write", "write assets.write", closed(delivery, {"reason": text(2000)})),
+        _spec("assets.delivery.toggle_asset", "write", "write assets.write", closed({**asset, "enabled": {"type": "boolean"}})),
+        _spec("assets.delivery.blocklist.list", "read", "read assets.read", closed({})),
+        _spec("assets.delivery.blocklist.update", "write", "write assets.write", closed({
+              "target_owner_id": text(128, 1), "mode": {"enum": ["block", "unblock"]}})),
+    ]
+
+
+# LLM: selector保留完整Owner字符串以让IM/main目标得到领域403；别名只选一个，Handler复核实际注册与名单。
+# 函数用途: 为受管用户动作提供目标、修订和分页字段。
+def managed_fields():
+    return ({"target_owner_id": text(128, 1), "user_id": text(128, 1)},
+            {"expected_revision": integer(2**63 - 1, 1)},
+            {"limit": {**integer(100, 1), "default": 50}})
+
+
+# LLM: 治理动作均要求public_only/admin_owned，读写能力精确分离；复杂策略/记忆内容由领域再核。
+# 函数用途: 声明十二个管理员受管用户动作，与WT2方法签名逐项对应。
+def managed_action_specs():
+    target, revision, paging = managed_fields()
+    scope = "public_only admin_owned"
+    kind = {"enum": ["workflow", "monitor", "script", "skill"]}
+    asset = {"asset_kind": kind, "asset_id": id_schema()}
+    return [
+        _spec("users.managed.overview.get", "read", "read users.read", closed({}, target), scope),
+        _spec("users.managed.policy.set", "write", "write users.manage", closed({"policy_patch": {"type": "object"}}, {**target, **revision}), scope),
+        _spec("users.managed.persona.get", "read", "read users.read", closed({}, target), scope),
+        _spec("users.managed.persona.set", "write", "write users.manage", closed({}, {**target, **revision,
+              "soul_md": text(24000), "agents_md": text(24000), "user_md": text(24000),
+              "persona_mode": {"enum": ["admin_locked", "admin_base_plus_user", "user_autonomous"]}}), scope),
+        _spec("users.managed.memories.list", "read", "read users.read", closed({}, {**target, "category": text(64, 1),
+              "include_candidates": {"type": "boolean", "default": True}, "status_filter": text(64, 1)}), scope),
+        _spec("users.managed.memories.mutate", "write", "write users.manage", closed({"operation": {"enum": [
+              "add_memory", "edit_memory", "delete_memory", "approve_candidate", "reject_candidate", "clear_stale_candidates"]}},
+              {**target, **revision, "entry_id": id_schema(), "candidate_id": id_schema(), "content": text(24000),
+               "category": text(64, 1), "locked": {"type": "boolean"}}), scope),
+        _spec("users.managed.assets.provision", "write", "write users.manage", closed(asset, {**target,
+              "auto_enable": {"type": "boolean", "default": False}, "conflict_strategy": {"enum": ["overwrite", "keep_both_rename", "skip"], "default": "overwrite"},
+              "note": text(2000)}), scope),
+        _spec("users.managed.assets.toggle", "write", "write users.manage", closed({**asset, "enabled": {"type": "boolean"}}, target), scope),
+        _spec("users.managed.tasks.dispatch", "write", "write users.manage", closed({"prompt": text(16384, 1)}, {**target,
+              "title": text(120), "thread_id": id_schema(), "priority": {"enum": ["normal", "urgent"]}}), scope),
+        _spec("users.managed.tasks.list", "read", "read users.read", closed({}, {**target, **paging, "status_filter": text(64, 1)}), scope),
+        _spec("governance.reviews.list", "read", "read users.read", closed({}, {**target,
+              "status_filter": text(64, 1), "review_type_filter": text(64, 1)}), scope),
+        _spec("governance.reviews.decide", "write", "write users.manage", closed({"review_id": id_schema(),
+              "decision": {"enum": ["approve", "reject_with_feedback"]}, **revision}, {**target, "feedback": text(2000)}), scope),
     ]
 
 

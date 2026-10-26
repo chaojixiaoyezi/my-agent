@@ -44,9 +44,9 @@ def test_read_only_v9_keeps_explicit_version_and_legacy_stays_legacy():
     assert legacy.to_payload() == legacy_payload(6)
 
 
-# LLM: 角色不能隐式展开，未知/重复/空申请一律拒绝。
+# LLM: 本轮显式write能力已登记；未知write命名空间、角色、重复与空申请继续拒绝。
 # 函数用途: 验证v9能力枚举和类型边界。
-@pytest.mark.parametrize("capabilities", [[], ["read", "read"], ["admin"], ["write"], ["*"],
+@pytest.mark.parametrize("capabilities", [[], ["read", "read"], ["admin"], ["write.unknown"], ["*"],
                                           [True], "read", ["assets.source"], ["execute", None]])
 def test_invalid_capabilities_rejected(capabilities):
     payload = v9_payload()

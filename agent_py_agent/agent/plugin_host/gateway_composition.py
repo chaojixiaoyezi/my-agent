@@ -1,4 +1,4 @@
-# LLM: 生产组合仅由Gateway构造；不初始化Agent、不复制main执行器，直接HostComposition仍为空。
+# LLM: 生产组合沿原四端口接入V2静态扩展；21个投递/治理动作惰性适配领域，不初始化Agent或复制main执行器。
 # 模块用途: 为真实HTTP入口组装四域和普通用户工厂。
 from __future__ import annotations
 

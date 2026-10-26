@@ -1,5 +1,5 @@
 # LLM: 组合根保持四个原端口，WP-4通过固定适配器复用它们；缺领域不借旧Broker或main invoker兜底。
-# 模块用途: 提供原动作及20项扩展的静态分发、真实可用性发现与返回前撤权复验。
+# 模块用途: 提供原动作与V2扩展（含21个投递/治理动作）的静态分发、真实依赖发现与返回前撤权复验。
 from __future__ import annotations
 
 from .action_specs import action_spec, action_specs

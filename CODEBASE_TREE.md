@@ -50,6 +50,7 @@
 |   |-- gateway_assets.py # 插件宿主 v2 生产组合的注册脚本、工作流与断点执行适配器
 |   |-- gateway_runtime.py # Gateway 线程历史、请求提交与本地用户端口生产适配器
 |   |-- goals.py # D1 长期目标查询与状态跃迁领域适配器
+|   |-- governance_delivery_v2_handlers.py # WT5九个资产投递与十二个受管用户治理动作的惰性领域接线及目标预检
 |   |-- history.py # B1 完整聊天历史安全扫描、内部消息过滤与 MAC 分页
 |   |-- http_transport.py # /plugin-host/v2/call 与 /plugin-host/v2/stream HTTP/SSE 传输层
 |   |-- interactions.py # D1 待决交互查询与真人票据验证提交领域适配器
