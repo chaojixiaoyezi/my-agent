@@ -718,13 +718,33 @@ def _managed_promotion(home, memory, candidates):
         message_verifier=ConversationMessageEvidenceVerifier(store), exclusion_store=store))
 
 
-# LLM: 每个动作进入原正式库/候选流水；已晋升approve在同目标scope核验后只返原快照，不重审或重复写事实。
+# LLM: 只读目标用户候选库；scope是适用范围而非owner，兼容同owner个人旧键；坏scope/外来来源在任何写入前拒绝。
+# 函数用途: 读取候选并分开核验记忆范围合同与学习来源归属。
+def _managed_candidate_for_owner(home, candidates, candidate_id):
+    from ..memory_store.candidate_models import MemoryScope
+    from ..memory_store.candidates import CandidateStoreCorruptError
+
+    try:
+        candidate = candidates.get(candidate_id)
+        scope = MemoryScope.from_value(candidate.scope)
+        if not (scope.scope_type == "personal" and scope.scope_key == home.owner_id):
+            MemoryScope.for_new_observation(scope)
+    except (ValueError, CandidateStoreCorruptError) as error:
+        raise ManagedUserScopeDeniedError() from error
+    source = candidate.learning_source
+    for field in ("owner", "owner_id"):
+        owner = source.get(field) if isinstance(source, dict) else getattr(source, field, None)
+        if owner and owner != home.owner_id:
+            raise ManagedUserScopeDeniedError()
+    return candidate
+
+
+# LLM: 每个动作进入原正式库/候选流水；已晋升approve在目标库、合法scope和来源owner核验后只返快照，不重复写事实。
 # 函数用途: 完成管理员记忆增改删、候选批准/驳回或陈旧候选清理。
 def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutation):
     from datetime import datetime, timedelta, timezone
 
     from ..capability.persona_repository import PersonaMutationRequest, PersonaRepository
-    from ..memory_store.candidate_models import MemoryScope
 
     uid = home.identity.owner_id
     operation, entry_id, candidate_id = request.operation, request.entry_id, request.candidate_id
@@ -737,9 +757,7 @@ def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutatio
     if operation in {"approve_candidate", "reject_candidate"}:
         if expected_revision is not None:
             raise ValueError("candidate operations use the original complete-snapshot CAS, not a numeric revision")
-        candidate = candidates.get(candidate_id)
-        if MemoryScope.from_value(candidate.scope).scope_key != home.owner_id:
-            raise ManagedUserScopeDeniedError()
+        candidate = _managed_candidate_for_owner(home, candidates, candidate_id)
         if operation == "approve_candidate" and candidate.status == "promoted":
             return {"ok": True, "already_promoted": True, "candidate": candidate.to_record()}
         promotion = _managed_promotion(home, memory, candidates)

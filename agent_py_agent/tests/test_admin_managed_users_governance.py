@@ -800,9 +800,9 @@ def test_r2_ticket_cannot_be_consumed_without_exact_action_match(managed, action
     assert reviews.consume_approved_action(item.review_id, target_user="alice", review_type="high_risk_command", action_match=action)["consumed_at"]
 
 
-# LLM: 原消息事实、候选和晋升器均真实使用；测试分别准备中间态和已提交候选，不伪装新候选治理E2E。
+# LLM: 原消息事实、候选和晋升器均真实使用；默认生成规范personal/personal，调用方可指定合法typed范围。
 # 函数用途: 为晋升恢复反例创建可通过原证据门的目标用户候选。
-def _r2_explicit_candidate(home):
+def _r2_explicit_candidate(home, *, scope=None):
     from hashlib import sha256
 
     from agent_py_agent.agent.conversation import learning_source as ls
@@ -822,13 +822,15 @@ def _r2_explicit_candidate(home):
            "content_hash": "sha256:" + sha256(content.encode()).hexdigest(), "quote": content}
     memory, candidates = _managed_memory_stores(home)
     candidate = candidates.observe(CandidateObservation(candidate_type="long_term_fact", content=content,
-        subject_key="recovery.fact", scope=MemoryScope("personal", "personal"), origin="user_explicit",
+        subject_key="recovery.fact", scope=scope or MemoryScope("personal", "personal"), origin="user_explicit",
         source_message_refs=(ref,), learning_source=ls.merge_message_sources([ls.facts_for_message(
             message.metadata, owner=home.owner_id, thread_id=thread.thread_id, thread_source=thread.learning_source)]),
         promotion_target="long_term", promotion_mode="auto_eligible"))
     return memory, candidates, candidate
 
 
+# LLM: 规范候选经真实晋升后恢复执行中审核；不得改写候选scope来绕过治理校验，两条重入均不重写事实。
+# 函数用途: 验证personal/personal候选在审核和直接批准两入口幂等恢复。
 def test_r2_memory_promotion_recovers_executing_with_already_promoted_candidate(managed, monkeypatch):
     import agent_py_agent.agent.user_space.governance_review_store as module
     from agent_py_agent.agent.user_space.managed_user_governance import _managed_promotion
@@ -849,18 +851,111 @@ def test_r2_memory_promotion_recovers_executing_with_already_promoted_candidate(
     promotion = _managed_promotion(home, memory, candidates)
     reviewed = promotion.review(candidate, approved=True, reviewer="local/main")
     assert promotion.promote(candidate.candidate_id, reviewer="local/main", confirmed=True, expected_candidate=reviewed).promoted
-    # 构造本任务要求的旧owner-scoped已晋升恢复快照；新personal键不能等于owner，本测试不声称覆盖新候选治理E2E。
-    rows = [json.loads(line) for line in home.memory_candidates_jsonl.read_text().splitlines()]
-    for row in rows:
-        row["scope"]["scope_key"] = home.owner_id
-    home.memory_candidates_jsonl.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
     assert candidates.get(candidate.candidate_id).status == "promoted"
+    assert candidates.get(candidate.candidate_id).scope == {"scope_type": "personal", "scope_key": "personal", "applies_when": "", "excludes_when": ""}
     before = home.long_term_jsonl.read_bytes(), home.memory_candidates_jsonl.read_bytes()
     recovered = reviews.decide_review(item.review_id, "approve", expected_revision=1)
     assert recovered["status"] == "applied" and recovered["result"]["already_promoted"] is True
     assert (home.long_term_jsonl.read_bytes(), home.memory_candidates_jsonl.read_bytes()) == before
     assert len(memory.all()) == 1
     assert service.mutate_memories("alice", "approve_candidate", candidate_id=candidate.candidate_id)["already_promoted"] is True
+    assert (home.long_term_jsonl.read_bytes(), home.memory_candidates_jsonl.read_bytes()) == before
+
+
+@pytest.mark.parametrize("operation", ["approve_candidate", "reject_candidate"])
+@pytest.mark.parametrize("scope_type,scope_key", [("personal", "personal"), ("global", "global"), ("project", "project:demo")])
+def test_r3_canonical_candidate_scope_uses_target_owner_store(managed, operation, scope_type, scope_key):
+    from agent_py_agent.agent.memory_store.candidate_models import MemoryScope
+
+    _root, service, home = managed
+    memory, candidates, candidate = _r2_explicit_candidate(home, scope=MemoryScope(scope_type, scope_key))
+    result = service.mutate_memories("alice", operation, candidate_id=candidate.candidate_id)
+    assert result["ok"] is True
+    assert candidates.get(candidate.candidate_id).status == ("promoted" if operation == "approve_candidate" else "rejected")
+    assert len(memory.all()) == (1 if operation == "approve_candidate" else 0)
+
+
+# LLM: 仅污染/历史兼容用例调用；正常创建与恢复测试必须始终走规范候选，不以改盘制造通过。
+# 函数用途: 在真实候选文件中注入明确标注的历史或跨owner坏快照。
+def _r3_write_candidate_snapshot(home, candidate, *, scope_key=None, source_field=None):
+    row = candidate.to_record()
+    if scope_key is not None:
+        row["scope"]["scope_key"] = scope_key
+    if source_field is not None:
+        row["learning_source"][source_field] = "local/bob"
+        # 模拟携带owner字段的旧来源快照，不让新覆盖投影的一致性检查提前遮住owner门。
+        row.pop("learning_source_coverage", None)
+    home.memory_candidates_jsonl.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def test_r3_legacy_same_owner_candidate_scope_remains_readable(managed):
+    _root, service, home = managed
+    _memory, candidates, candidate = _r2_explicit_candidate(home)
+    _r3_write_candidate_snapshot(home, candidate, scope_key=home.owner_id)
+    result = service.mutate_memories("alice", "reject_candidate", candidate_id=candidate.candidate_id)
+    assert result["ok"] is True
+    assert candidates.get(candidate.candidate_id).status == "rejected"
+
+
+@pytest.mark.parametrize("entrypoint", ["approve_candidate", "reject_candidate", "decide_review"])
+@pytest.mark.parametrize("already_promoted", [False, True])
+@pytest.mark.parametrize("scope_type,scope_key,source_field", [
+    ("personal", None, "owner"), ("personal", None, "owner_id"),
+    ("personal", "local/alice", "owner"), ("personal", "local/alice", "owner_id"),
+    ("personal", "local/bob", None), ("personal", "providers/feishu/users/ou_bob", None),
+    ("global", "local/bob", None), ("global", "providers/feishu/users/ou_bob", None),
+])
+def test_r3_foreign_owner_candidate_is_denied_before_memory_changes(managed, entrypoint, already_promoted, scope_type, scope_key, source_field):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_promotion
+
+    root, service, home = managed
+    memory, candidates, candidate = _r2_explicit_candidate(home)
+    if already_promoted:
+        promotion = _managed_promotion(home, memory, candidates)
+        reviewed = promotion.review(candidate, approved=True, reviewer="local/main")
+        assert promotion.promote(candidate.candidate_id, reviewer="local/main", confirmed=True, expected_candidate=reviewed).promoted
+        candidate = candidates.get(candidate.candidate_id)
+    candidate.scope["scope_type"] = scope_type
+    candidate.scope["scope_key"] = scope_type
+    _r3_write_candidate_snapshot(home, candidate, scope_key=scope_key, source_field=source_field)
+    before = home.long_term_jsonl.read_bytes() if home.long_term_jsonl.exists() else None, home.memory_candidates_jsonl.read_bytes()
+    if entrypoint == "decide_review":
+        reviews = GovernanceReviewStore(root)
+        item = reviews.submit_review("alice", "memory_promotion", {"candidate_id": candidate.candidate_id})
+        result = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+        assert result["status"] == "failed"
+        assert result["result"]["error_code"] == "MANAGED_USER_SCOPE_DENIED"
+        assert result["result"]["error_type"] == "ManagedUserScopeDeniedError"
+    else:
+        with pytest.raises(ManagedUserScopeDeniedError):
+            service.mutate_memories("alice", entrypoint, candidate_id=candidate.candidate_id)
+    after = home.long_term_jsonl.read_bytes() if home.long_term_jsonl.exists() else None, home.memory_candidates_jsonl.read_bytes()
+    assert after == before
+
+
+@pytest.mark.parametrize("object_source", [False, True])
+@pytest.mark.parametrize("fields,denied", [
+    ({}, False), ({"owner": "local/alice"}, False), ({"owner_id": "local/alice"}, False),
+    ({"owner": "", "owner_id": "local/alice"}, False),
+    ({"owner": "local/bob"}, True), ({"owner_id": "local/bob"}, True),
+    ({"owner": "local/alice", "owner_id": "local/bob"}, True),
+    ({"owner": "local/bob", "owner_id": "local/alice"}, True),
+])
+def test_r3_candidate_source_owner_gate_handles_dict_and_object(managed, object_source, fields, denied):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_candidate_for_owner
+
+    _root, _service, home = managed
+    source = SimpleNamespace(**fields) if object_source else fields
+    candidate = SimpleNamespace(scope={"scope_type": "personal", "scope_key": "personal"}, learning_source=source)
+    candidates = SimpleNamespace(get=lambda candidate_id: candidate)
+    if denied:
+        with pytest.raises(ManagedUserScopeDeniedError):
+            _managed_candidate_for_owner(home, candidates, "candidate-id")
+    else:
+        assert _managed_candidate_for_owner(home, candidates, "candidate-id") is candidate
 
 
 @pytest.mark.parametrize("flags,locked", [({"locked": True}, True), ({"lock_memory": False}, False), ({"locked": False, "lock_memory": True}, False)])
