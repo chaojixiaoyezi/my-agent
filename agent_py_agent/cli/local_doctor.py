@@ -20,6 +20,8 @@ from ..agent.gateway_parts import (
     gateway_stale_processing,
     rebuild_gateway_index,
 )
+from ..agent.local_storage.records import DERIVED_PRUNABLE_SOURCE_TYPES
+from ..agent.subagents.services.persistence.projections import _task_projection_expired
 from .common import _memory_record_count
 
 
@@ -225,12 +227,16 @@ def build_local_doctor_report(
 
 
 
+# LLM: CLI与持久化投影共用可信终态/时间/待收口准入；过期只跳白名单派生全文，不删除canonical或阻断非白名单回填。
+# 函数用途: 重建子代理索引，避免把30天外已裁剪的运行与日志重新塞回LocalStore。
 def rebuild_subagent_index(agent: SimpleAgent) -> int:
 
     count = 0
     for task in agent.subagents.list_runs():
-        agent.subagents.indexing.index_task(task)
-        count += 1
+        expired = _task_projection_expired(task)
+        if not expired:
+            agent.subagents.indexing.index_task(task)
+            count += 1
         task_dir = Path(task.task_dir)
         for rel_path, source_type in {
             "WORK_LOG.md": "subagent_work_log",
@@ -238,6 +244,8 @@ def rebuild_subagent_index(agent: SimpleAgent) -> int:
             "reports/runner_result.json": "subagent_runner_result",
             "reports/patch_review.json": "subagent_patch_review",
         }.items():
+            if expired and source_type in DERIVED_PRUNABLE_SOURCE_TYPES:
+                continue
             count += _log_task_fact_source(TaskFactSourceRequest(agent, task, task_dir, rel_path, source_type))
     return count
 

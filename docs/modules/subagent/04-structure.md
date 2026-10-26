@@ -1,3 +1,9 @@
+## 2026-10-26 Wave 6 B3 子代理重建准入与账本结构
+
+- `services/persistence/projections.py::_task_projection_expired` 将可信 task 状态、生命周期时间和规范 attributes 收口标记交给 LocalStore 公共终态判定。持久化全文投影与 CLI 重建复用该入口；CLI 对文件源另外检查 `DERIVED_PRUNABLE_SOURCE_TYPES`，不把 30 天策略扩到非白名单回填。
+- `manager_index` 与 LocalStore 全文投影在过期时跳过，轻量 task registry 继续登记。`cli/local_doctor.py` 的返回计数只累加实际执行的索引调用，不代表新插入行数；文件内容仍由原 `_log_task_fact_source` 读取，TTL 跳过发生在读取之前。
+- 投影账本通过 `locked_json_path` 串行化读取/追加/替换，以 `deque(maxlen=2000)` 保留尾窗、nofollow 读取并私有原子写回，不修改 canonical 状态、不把账本提升成事实源。
+
 ## 2026-10-26 子代理持久化按需筛选接口与 OPEN 能力延迟目录同步结构
 
 `subagents/services/persistence/service.py::SubAgentPersistenceService` 提供 `list_runs_selected` 与 `list_runs_selected_report`，在未覆盖 `_cached_run_copy` 时先以 `_cached_run_ref` 执行只读 `predicate` 过滤，仅对命中条目执行锁外 `copy.deepcopy`；`subagents/manager.py::select_manager_runs` 在检测到 `list_runs` / `list_runs_report` 被测试替身或子类覆盖时自动回退旧读口，否则委托 `list_runs_selected`，由 `direct_parent_lifecycle.py` 与 `agent_core/orchestration/dispatch/capability_auto_sweep.py` 共用。`subagents/services/capability_service.py` 在执行 `OPEN` 能力检索前调用宿主 `ensure_mcp_catalog_ready` 同步延迟连接的普通 MCP 目录。

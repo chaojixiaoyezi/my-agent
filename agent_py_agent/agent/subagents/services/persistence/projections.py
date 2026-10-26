@@ -9,18 +9,23 @@ blocking the canonical save.
 from __future__ import annotations
 
 import json
+import os
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from ....common.json_io import (
-    append_private_text,
+    locked_json_path,
     write_private_json_file_atomic,
     write_private_text_file_atomic,
+    write_private_text_file_atomic_unlocked,
 )
+from ....common.nofollow_fs import open_readonly_file_beneath
 from ....contracts.protocol_status import TOOL_STATUS_FAILED
+from ....local_storage.records import DERIVED_RECORD_TTL_SECONDS, derived_terminal_expired
 from ....user_space.home_indexes import (
     AgentIndexRef,
     RunIndexRef,
@@ -32,6 +37,8 @@ from ....user_space.home_indexes import (
 from ...models import SubAgentTask
 from ..agent_run_state import build_agent_run_state, build_owner_agent_projection
 from ..control_plane_projection import sync_subagent_control_plane_projection
+
+MAX_PROJECTION_LEDGER_LINES = 2000
 
 
 @dataclass(frozen=True)
@@ -56,6 +63,8 @@ class ProjectionRecord:
         return payload
 
 
+# LLM: canonical保存早于本入口；过期终态不再回填全文，轻量注册和非索引人类投影仍可重建，异常保原warnings。
+# 函数用途: 同步可重建投影，但不让30天外派生全文重新长回数据库。
 def sync_derived_projections(
     manager: Any,
     task: SubAgentTask,
@@ -87,7 +96,10 @@ def sync_derived_projections(
     )
     run_step("owner_agent_projection", lambda: _write_owner_agent_projection(manager, task, owner_projection))
     run_step("owner_runtime_indexes", lambda: register_owner_runtime_indexes(manager, task))
-    run_step("manager_index", lambda: manager.indexing.index_task(task))
+    if not _task_projection_expired(task):
+        run_step("manager_index", lambda: manager.indexing.index_task(task))
+    else:
+        records.append(ProjectionRecord("manager_index", "skipped", time.time()))
     run_step("local_store_projection", lambda: _sync_local_store_projection(manager, task))
     _append_projection_ledger(projection_dir, records)
     _write_projection_warnings(projection_dir, records)
@@ -148,17 +160,17 @@ def render_thought_markdown(task: SubAgentTask) -> str:
     )
 
 
-# LLM: Projection sync joins the manager's owner ConversationStore only for read-model fields;
-# task and thread files remain the two canonical authorities for their separate domains.
-# 函数用途: 保存子代理时刷新 SQLite 查询投影，并带上该代理正式 Compact 次数。
+# LLM: task/thread仍为权威，过期终态只保留轻量task_registry，不刷新全文或控制面派生快照时间。
+# 函数用途: 在30天准入内刷新子代理SQLite投影，始终保留任务注册。
 def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:
     if not manager.local_store:
         return
-    sync_subagent_control_plane_projection(
-        manager.local_store,
-        task,
-        getattr(manager, "conversation_store", None),
-    )
+    if not _task_projection_expired(task):
+        sync_subagent_control_plane_projection(
+            manager.local_store,
+            task,
+            getattr(manager, "conversation_store", None),
+        )
     manager.local_store.task_registry.register_task(
         task_id=task.id,
         session_id=task.root_id,
@@ -166,6 +178,18 @@ def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:
         status=task.status,
         goal=task.goal,
     )
+
+
+# LLM: 只认原task的结构化状态/时间，缺可信时间、活跃、BLOCKED和有收口欠账者不按TTL跳过。
+# 函数用途: 判断子代理全文是否已经离开30天索引保留窗。
+def _task_projection_expired(task):
+    names = ("status", "ended_at", "updated_at", "completed_at", "created_at", "runtime_closeout_pending",
+             "completion_notice_pending", "notification_pending", "wake_pending")
+    payload = {name: getattr(task, name, None) for name in names}
+    attributes = getattr(task, "attributes", None)
+    if isinstance(attributes, dict) and isinstance(attributes.get("runtime_closeout_pending"), dict):
+        payload["runtime_closeout_pending"] = True
+    return derived_terminal_expired(payload, time.time() - DERIVED_RECORD_TTL_SECONDS)
 
 
 def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: dict[str, Any]) -> None:
@@ -251,12 +275,27 @@ def _projection_ledger_lines(records: list[ProjectionRecord]) -> list[str]:
     return [json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) for record in records]
 
 
+# LLM: 双层同路径锁覆盖读取/合并/原子替换，deque有界；nofollow读取与0600私有替换保留原权限边界。
+# 函数用途: 滚动保留投影台账最后2000行，超大旧文件也不全量载入内存。
 def _append_jsonl_lines(path: Path, lines: list[str]) -> None:
     try:
-        # 投影台账含运行状态与错误信息，追加走私有原语：新文件出生 0600、缺失目录 0700。
-        append_private_text(path, "".join(f"{line}\n" for line in lines))
+        with locked_json_path(path):
+            retained = _projection_ledger_tail(path)
+            retained.extend(f"{line}\n" for line in lines)
+            write_private_text_file_atomic_unlocked(path, "".join(retained))
     except OSError:
         return
+
+
+# LLM: 只保留尾部行，缺文件为空；拒绝链接，不让旧坏UTF8阻断可重建诊断投影。
+# 函数用途: 流式读取有界投影台账尾部。
+def _projection_ledger_tail(path):
+    try:
+        descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+    except FileNotFoundError:
+        return deque(maxlen=MAX_PROJECTION_LEDGER_LINES)
+    with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
+        return deque(handle, maxlen=MAX_PROJECTION_LEDGER_LINES)
 
 
 def _write_projection_warnings(task_dir: Path, records: list[ProjectionRecord]) -> None:

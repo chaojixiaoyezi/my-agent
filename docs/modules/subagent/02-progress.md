@@ -1,3 +1,9 @@
+## 2026-10-26 Wave 6 B3 子代理全文 TTL 与有界投影账本（源码实现，未部署）
+
+- `services/persistence/projections.py` 的全文投影及 `cli/local_doctor.py::rebuild_subagent_index` 共用同一 30 天终态准入。CLI 在调用运行索引器与读取白名单事实文件之前跳过过期派生项，避免裁剪后重建再次引入旧全文；非白名单 `subagent_patch_review` 仍按原逻辑回填。
+- 活跃、BLOCKED、PAUSED、未知时间及待通知/待收口任务不按 TTL 跳过；规范 `task.attributes.runtime_closeout_pending` 即使为空字典也保留。canonical 状态和原始工单文件不因 TTL 删除；轻量任务登记保持。
+- `projection_ledger.jsonl` 在原路径锁内追加后原子保留最近 2000 行，保持私有文件权限。新增 CLI 回归先复现旧 DONE/FAILED 重建复活，再验证修复和永久 memory/canonical 字节保留；复现命令见 [TESTS](../../../TESTS.md)。真实大库性能、部署和全仓回归未验证。
+
 ## 2026-10-26 子代理外层控制面 MCP 延迟连接与巡检按需筛选（已实现）
 
 - `subagents/services/capability_service.py` 在处理 `OPEN` 能力请求时调用 `ensure_mcp_catalog_ready`，配合 `cli/_dispatch.py`（非 `planner` 派工与 `execute` 外层实例 `defer_mcp_connect=True` + `finally` `close()`）消除外层控制面实例无谓拉起重复 `computer_use_server` 子进程。

@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import sqlite3
 import time
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +27,67 @@ from ..common.json_io import (
     write_private_text_file_atomic,
     write_private_text_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import open_readonly_file_beneath, unlink_file_beneath
 from .models import PREVIEW_CHARS, LocalSearchResult
+
+DERIVED_PRUNABLE_SOURCE_TYPES: frozenset[str] = frozenset({
+    "subagent_dispatch", "subagent_work_log", "subagent_channel_probe",
+    "subagent_runner_result", "subagent_run", "subagent_execution_context",
+    "subagent_capability_route", "gateway_event", "gateway_request",
+})
+DERIVED_RECORD_TTL_SECONDS: float = 30.0 * 86400.0
+_DERIVED_TERMINAL_STATUSES = frozenset({
+    "done", "completed", "succeeded", "failed", "cancelled", "abandoned", "timeout",
+    "timed_out", "channel_error", "stopped", "dead_lettered", "ok", "error", "taken_over",
+})
+_DERIVED_PENDING_FILES_KEY = "derived_prune_pending_files"
+_DERIVED_FILE_CLEANUP_MAX_FILES = 1000
+_DERIVED_FILE_CLEANUP_MAX_BYTES = 8 * 1024 * 1024
+
+
+# LLM: 只认结构化终态与通知事实；未知/缺状态不推断结束，BLOCKED明确不在终态集合。
+# 函数用途: 判断派生快照已结束且没有待收口、待通知工作。
+def derived_record_terminal(metadata: dict[str, Any]) -> bool:
+    status = metadata.get("status")
+    return (isinstance(status, str) and status.strip().casefold() in _DERIVED_TERMINAL_STATUSES
+            and not _derived_notification_pending(metadata))
+
+
+# LLM: 未完成标志或不认识的通知状态均保留；无通知字段表示没有这类挂起事实。
+# 函数用途: 保住待收口、唤醒和未送达的完成通知。
+def _derived_notification_pending(metadata):
+    flags = ("runtime_closeout_pending", "completion_notice_pending", "notification_pending",
+             "wake_pending", "completion_delivery_pending", "pending_completion_notification")
+    if any(metadata.get(key) for key in flags):
+        return True
+    for key in ("notification_status", "completion_notification_status", "completion_delivery_status"):
+        if key in metadata and (not isinstance(metadata[key], str) or metadata[key] not in
+                                {"sent", "delivered", "consumed", "done", "completed", "acknowledged"}):
+            return True
+    return metadata.get("completion_notified") is False
+
+
+# LLM: 0是旧结构的缺省时间而非1970年终态；bool、非有限数和坏时间不能赋予清理资格。
+# 函数用途: 读取可信的正数Unix时间。
+def _derived_timestamp(value):
+    try:
+        number = float(value) if not isinstance(value, bool) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+# LLM: 请求/任务重建共用30天口径；采用所有有效时间的最新者，文件mtime仅在载荷没有有效时间时兜底。
+# 函数用途: 判断可信终态是否已离开重建保留窗，不改变归档本身。
+def derived_terminal_expired(metadata, cutoff, fallback_timestamp=None):
+    if not derived_record_terminal(metadata):
+        return False
+    values = [metadata.get(key) for key in ("ended_at", "updated_at", "completed_at", "created_at")]
+    if any(isinstance(value, bool) or (value not in (None, 0, "") and _derived_timestamp(value) is None) for value in values):
+        return False
+    stamps = [stamp for value in values if (stamp := _derived_timestamp(value)) is not None]
+    latest = max(stamps) if stamps else _derived_timestamp(fallback_timestamp)
+    return latest is not None and latest < cutoff
 
 
 @dataclass(frozen=True)
@@ -146,6 +209,7 @@ class _LocalStoreRecordHelpers:
 # 类用途: 写入或擦除原派生记录，保留正文先写的真实partial。
 class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
     # LLM: 默认仍原正文→SQL/FTS/event→commit，C只走明确本地事务端口；结果与identity同步回归。
+    # LLM: 正文先写的upsert与TTL提交后unlink共持数据库级派生文件锁，避免删掉尚未提交的新正文；锁等待不进入C末门。
     # 函数用途: 新增或更新同一原记录，C每个末写须当前原scope。
     def upsert_record(
         self,
@@ -169,19 +233,7 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             visibility=visibility,
             record_id=record_id,
         )
-        if self.coordinator_io:
-            return self._upsert_record_coordinator(params)
-        prepared = self._prepare_record(params)
-
-        with self._connection() as conn:
-            created_at = self._existing_created_at(conn, prepared.record_id, prepared.now)
-            self._upsert_record_row(conn, prepared, created_at)
-            if self.fts_available:
-                self._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
-            self._record_upsert_event(conn, prepared)
-            conn.commit()
-
-        return self._prepared_record_result(prepared, created_at)
+        return _upsert_record_serialized(self, params)
 
     # LLM: 默认write_content=True保原先写body时点；C仅将原字段计算提前，在固定叶写同body，不改hash/ID。
     # 函数用途: 准备原记录参数，默认同时原子写正文，C明确分开准备与落盘。
@@ -359,11 +411,12 @@ class _LocalStoreRecordWriter(_LocalStoreRecordHelpers):
             self._local_write(lambda: write_private_text_file_atomic_unlocked(
                 path, content, replace_once=True))
 
-    # LLM: 先原正文再单库事务，原event锁预持于门外；参数/哈希门外，原identity/FTS/event/commit不复制到其它服务。
+    # LLM: 调用方已持派生命名空间锁，替代upsert原单正文锁；同样一次FD出生、正文、event锁、SQL、读回的原scope相序不变。
     # 函数用途: 按C零等待IO策略执行同一upsert算法，失败保原body先写partial。
     def _upsert_record_coordinator(self, params):
         prepared = self._prepare_record(params, write_content=False)
-        self._write_coordinator_content(self._content_file(prepared.record_id), prepared.content)
+        self._local_write(lambda: write_private_text_file_atomic_unlocked(
+            self._content_file(prepared.record_id), prepared.content, replace_once=True))
 
         # LLM: 仅在已持事件锁的原短window内调用原SQL叶，不含正文读、网络或等待。
         # 函数用途: 完成原记录/FTS/事件的单库事务内容。
@@ -480,3 +533,323 @@ class _LocalStoreRecordLogger:
 
 class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
     """LocalStore record write, lookup, and log APIs."""
+
+    # LLM: 仅白名单的无引用可信终态可删；调用方须传入当前Compact/恢复/记忆证据引用，不在热路径自动执行。
+    # 函数用途: 分批移除30天外的派生归档；dry_run纯查询，正文只在提交后安全清理。
+    def prune_derived_records(
+        self, *, before: float | None = None, ttl_seconds: float = DERIVED_RECORD_TTL_SECONDS,
+        source_types: Collection[str] | None = None, protected_record_ids: Collection[str] = (),
+        protected_source_ids: Collection[str] = (), max_delete: int = 1000, dry_run: bool = False,
+    ) -> dict[str, Any]:
+        sources = DERIVED_PRUNABLE_SOURCE_TYPES if source_types is None else frozenset(source_types)
+        if not sources <= DERIVED_PRUNABLE_SOURCE_TYPES:
+            raise ValueError("derived pruning accepts only explicit derived source types")
+        if not isinstance(max_delete, int) or isinstance(max_delete, bool) or max_delete < 0:
+            raise ValueError("max_delete must be a nonnegative integer")
+        ttl = float(ttl_seconds)
+        cutoff = float(before) if before is not None else time.time() - ttl
+        if not math.isfinite(ttl) or ttl < 0 or not math.isfinite(cutoff):
+            raise ValueError("derived TTL and cutoff must be finite")
+        plan = _DerivedPrunePlan(cutoff, sources, frozenset(protected_record_ids), frozenset(protected_source_ids), max_delete)
+        return _prune_derived_records(self, plan, dry_run)
+
+
+# LLM: 只携带本批不可变条件，不保存正文、连接或当前提交门的来源。
+# 类用途: 打包TTL批次的白名单、引用保护和资源上限。
+@dataclass(frozen=True)
+class _DerivedPrunePlan:
+    cutoff: float
+    sources: frozenset[str]
+    protected_records: frozenset[str]
+    protected_sources: frozenset[str]
+    limit: int
+
+
+# LLM: 只活在一次持锁清理内；预算限制本批文件数和hash读取字节，不决定业务状态或丢弃欠账。
+# 类用途: 合并本批路径引用、活跃组和剩余文件IO预算。
+@dataclass
+class _DerivedFileCleanupState:
+    live_paths: set[Path]
+    parents: dict[str, str]
+    blocked: set[str]
+    remaining_bytes: int
+
+
+# LLM: 所有upsert与TTL共用同一个真实DB旁锁；C只把锁FD出生交原末门，flock等待仍在门外且零等待。
+# 函数用途: 防止正文先写、SQLite尚未发表的记录被TTL当孤立文件删除。
+def _derived_mutation_lock(store):
+    options = {"blocking": False, "birth_commit": store._local_write} if store.coordinator_io else {}
+    return locked_json_path(store.db_path.with_name(store.db_path.name + ".derived-records"), **options)
+
+
+# LLM: 保持原body→records/FTS/event→commit算法和C固定事务，只额外与TTL清理互斥，不复制写入权威。
+# 函数用途: 在正文发表全程保护同一命名空间，防止并发文件丢失。
+def _upsert_record_serialized(store, params):
+    with _derived_mutation_lock(store):
+        if store.coordinator_io:
+            return store._upsert_record_coordinator(params)
+        prepared = store._prepare_record(params)
+        with store._connection() as conn:
+            created_at = store._existing_created_at(conn, prepared.record_id, prepared.now)
+            store._upsert_record_row(conn, prepared, created_at)
+            if store.fts_available:
+                store._replace_fts_row(conn, prepared.record_id, prepared.title, prepared.content)
+            store._record_upsert_event(conn, prepared)
+            conn.commit()
+        return store._prepared_record_result(prepared, created_at)
+
+
+# LLM: 坏JSON、非对象和超递归数据均不具备清理资格，不把解析失败洗成空终态。
+# 函数用途: 安全解析派生元数据，失败返回None以保留该记录。
+def _derived_metadata(row):
+    try:
+        metadata = json.loads(row["metadata_json"] or "{}")
+    except (ValueError, TypeError, RecursionError):
+        return None
+    return metadata if isinstance(metadata, dict) else None
+
+
+# LLM: 运行关联只认source_id/run_id，不把root task的所有兄弟混成一条运行；task/request仅用于明确引用保护。
+# 函数用途: 提取同一派生运行的稳定关联键。
+def _derived_run_keys(row, metadata):
+    values = [row["source_id"], (metadata or {}).get("run_id")]
+    return {value for value in values if isinstance(value, str) and value}
+
+
+# LLM: 显式记录和源引用永远优先；不从标题、正文或路径推断证据引用。
+# 函数用途: 判断Compact、恢复或记忆候选是否保护这条派生记录。
+def _derived_referenced(row, metadata, plan):
+    values = [row["source_id"], *((metadata or {}).get(key) for key in ("run_id", "task_id", "request_id"))]
+    return row["id"] in plan.protected_records or any(
+        isinstance(value, str) and value in plan.protected_sources for value in values)
+
+
+# LLM: 纯Gateway事件可无状态但必须有真实旧时间；其它缺状态快照不可假定结束，挂起标志始终阻止删除。
+# 函数用途: 判断记录状态是否可信，不在这里应用年龄条件。
+def _derived_state_safe(row, metadata):
+    if metadata is None or _derived_notification_pending(metadata):
+        return False
+    if row["source_type"] == "gateway_event" and not metadata.get("status"):
+        return True
+    return derived_record_terminal(metadata)
+
+
+# LLM: 路径压缩只合并同source/run关联；遍历用游标不水合正文，近期非终态也必须保护整组旧记录。
+# 函数用途: 取得运行关联图中的最终组键。
+def _derived_group_root(parents, key):
+    parents.setdefault(key, key)
+    while parents[key] != key:
+        parents[key] = parents[parents[key]]
+        key = parents[key]
+    return key
+
+
+# LLM: 始终扫描完整白名单而非仅本批source_types；另一类或30天内的活跃关联记录也能阻止本批删除。
+# 函数用途: 用轻量关联键建立活跃/被引用运行保护伞，不读取正文。
+def _derived_protected_groups(conn, plan):
+    parents, unsafe = {}, set()
+    sources = sorted(DERIVED_PRUNABLE_SOURCE_TYPES)
+    sql = "SELECT id,source_id,source_type,metadata_json FROM records WHERE source_type IN (" + ",".join("?" for _ in sources) + ")"
+    for row in conn.execute(sql, sources):
+        metadata = _derived_metadata(row)
+        keys = _derived_run_keys(row, metadata)
+        if not keys:
+            continue
+        root = _derived_group_root(parents, next(iter(keys)))
+        for key in keys:
+            parents[_derived_group_root(parents, key)] = root
+        if not _derived_state_safe(row, metadata) or _derived_referenced(row, metadata, plan):
+            unsafe.update(keys)
+    blocked = {_derived_group_root(parents, key) for key in unsafe}
+    return parents, blocked
+
+
+# LLM: 时间取行和载荷中全部有效时间的最新者；坏时间失败保留，cutoff边界严格小于。
+# 函数用途: 检查数据库记录和事件本身均已老于截止时间。
+def _derived_row_expired(row, metadata, cutoff):
+    row_times = [_derived_timestamp(row[key]) for key in ("created_at", "updated_at")]
+    if any(stamp is None or stamp >= cutoff for stamp in row_times):
+        return False
+    payload = dict(metadata)
+    payload["status"] = "done"
+    return derived_terminal_expired(payload, cutoff, row["updated_at"])
+
+
+# LLM: 按(updated_at,id)递增，只有合格候选占max_delete配额；全部过滤用正式字段，不依赖正文。
+# 函数用途: 选择有界的可删快照，支持dry-run与提交前重选。
+def _derived_candidates(conn, plan):
+    if not plan.sources or not plan.limit:
+        return []
+    parents, blocked = _derived_protected_groups(conn, plan)
+    sources = sorted(plan.sources)
+    sql = ("SELECT * FROM records WHERE source_type IN (" + ",".join("?" for _ in sources)
+           + ") AND updated_at < ? ORDER BY updated_at ASC,id ASC")
+    selected = []
+    for row in conn.execute(sql, [*sources, plan.cutoff]):
+        metadata = _derived_metadata(row)
+        keys = _derived_run_keys(row, metadata)
+        if any(_derived_group_root(parents, key) in blocked for key in keys):
+            continue
+        if not _derived_state_safe(row, metadata) or _derived_referenced(row, metadata, plan):
+            continue
+        if _derived_row_expired(row, metadata, plan.cutoff):
+            selected.append(dict(row))
+        if len(selected) >= plan.limit:
+            break
+    return selected
+
+
+# LLM: C必须使用原固定事务入口；默认BEGIN IMMEDIATE同连接提交，异常由原连接出口回滚，不含文件IO。
+# 函数用途: 执行TTL数据库短事务，不绕过现有提交门。
+def _derived_transaction(store, operation):
+    if store.coordinator_io:
+        return store._coordinator_transaction(operation)
+    with store._connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        result = operation(conn)
+        conn.commit()
+        return result
+
+
+# LLM: 待删文件与records/FTS删除同事务落账；坏账本不能静默覆盖导致失去中断恢复事实。
+# 函数用途: 读取尚未完成的正文文件清理清单。
+def _derived_pending_files(conn):
+    row = conn.execute("SELECT value FROM metadata WHERE key=?", (_DERIVED_PENDING_FILES_KEY,)).fetchone()
+    entries = json.loads(row[0]) if row else []
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+        raise ValueError("invalid derived prune pending files")
+    return entries
+
+
+# LLM: 清单只含路径/hash/结构化引用，不复制正文；必须由调用方持事务并提交。
+# 函数用途: 原子更新或清空待删文件账本。
+def _derived_write_pending(conn, entries):
+    if entries:
+        conn.execute("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                     (_DERIVED_PENDING_FILES_KEY, json.dumps(entries, ensure_ascii=False, sort_keys=True)))
+    else:
+        conn.execute("DELETE FROM metadata WHERE key=?", (_DERIVED_PENDING_FILES_KEY,))
+
+
+# LLM: FTS先删但以SAVEPOINT包住；触发器忽略records删除时必须恢复FTS，只有实际消失的行可进文件清单。
+# 函数用途: 复核精确版本并在一笔事务删除记录和全文索引。
+def _derived_delete_row(store, conn, row):
+    current = conn.execute("SELECT * FROM records WHERE id=?", (row["id"],)).fetchone()
+    if current is None or any(current[key] != row[key] for key in row):
+        return False
+    conn.execute("SAVEPOINT derived_prune_record")
+    if store.fts_available:
+        conn.execute("DELETE FROM records_fts WHERE id=?", (row["id"],))
+    conn.execute("DELETE FROM records WHERE id=? AND updated_at=? AND content_hash=? AND content_path=?",
+                 (row["id"], row["updated_at"], row["content_hash"], row["content_path"]))
+    removed = conn.execute("SELECT 1 FROM records WHERE id=?", (row["id"],)).fetchone() is None
+    if not removed:
+        conn.execute("ROLLBACK TO derived_prune_record")
+    conn.execute("RELEASE derived_prune_record")
+    return removed
+
+
+# LLM: 重新查询候选状态后仍只删原候选且版本未变；新活跃/引用关联出现时整组保护，不扩大本批配额。
+# 函数用途: 在事务内重新核验并持久登记本批真正删除的文件。
+def _derived_delete_batch(store, conn, plan, snapshots):
+    current_ids = {row["id"] for row in _derived_candidates(conn, plan)}
+    pending, deleted = _derived_pending_files(conn), []
+    for row in snapshots:
+        if row["id"] not in current_ids or not _derived_delete_row(store, conn, row):
+            continue
+        metadata = _derived_metadata(row) or {}
+        pending.append({"id": row["id"], "content_path": row["content_path"], "content_hash": row["content_hash"],
+                        "source_ids": [row["source_id"], *(metadata.get(key) for key in ("run_id", "task_id", "request_id"))]})
+        deleted.append(row["id"])
+    _derived_write_pending(conn, pending)
+    return deleted
+
+
+# LLM: 先验证解析后的边界，但保留原叶名由nofollow原语拒绝符号链接；不能把链接的目标当待删正文。
+# 函数用途: 将旧正文路径约束到本Store的files目录内。
+def _derived_file_parts(store, entry):
+    path = store._resolve_content_path(entry["content_path"])
+    root = store.files_dir.resolve()
+    path.resolve().relative_to(root)
+    return (path.parent.resolve() / path.name).relative_to(root).parts
+
+
+# LLM: 正文只流式核对hash，不水合进内存；共享命名空间锁保证产品upsert不能在核对与unlink之间替换正文。
+# 函数用途: 确认待删文件仍是已删记录的旧内容，变更后的文件保留。
+def _derived_file_hash(root, parts, state):
+    digest = hashlib.sha256()
+    descriptor = open_readonly_file_beneath(root, parts)
+    with os.fdopen(descriptor, "rb") as handle:
+        if os.fstat(handle.fileno()).st_size > state.remaining_bytes:
+            raise ValueError("derived cleanup byte budget exceeded")
+        read_bytes = 0
+        while chunk := handle.read(min(65536, state.remaining_bytes)):
+            state.remaining_bytes -= len(chunk)
+            read_bytes += len(chunk)
+            digest.update(chunk)
+        if os.fstat(handle.fileno()).st_size != read_bytes:
+            raise ValueError("derived cleanup file changed during bounded read")
+    return digest.hexdigest()
+
+
+# LLM: 引用比较规范化实际路径，兼容绝对/相对别名；解析失败不得推导为无引用。
+# 函数用途: 在提交之后核实所有仍被数据库引用的正文路径。
+def _derived_live_paths(store, conn):
+    return {store._resolve_content_path(row[0]).resolve()
+            for row in conn.execute("SELECT DISTINCT content_path FROM records")}
+
+
+# LLM: 只有无引用且hash未变的受管普通文件才删；复用、内容变化、活跃组、坏条目、超预算和IO失败都保留恢复账。
+# 函数用途: 安全处理一个已提交删除的正文，返回清理是否已经结算。
+def _derived_cleanup_file(store, entry, state, plan):
+    try:
+        sources = entry.get("source_ids", [])
+        keys = [value for value in sources if isinstance(value, str)]
+        if entry["id"] in plan.protected_records or any(value in plan.protected_sources for value in keys):
+            return False
+        if any(_derived_group_root(state.parents, key) in state.blocked for key in keys):
+            return False
+        parts = _derived_file_parts(store, entry)
+        root = store.files_dir.resolve()
+        if root.joinpath(*parts).resolve() in state.live_paths:
+            return False
+        if _derived_file_hash(root, parts, state) != entry["content_hash"]:
+            return False
+        if store.coordinator_io:
+            store._local_write(lambda: unlink_file_beneath(root, parts))
+        else:
+            unlink_file_beneath(root, parts)
+        return True
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+# LLM: 文件IO在SQL提交后且共持upsert锁；每批最多1000文件/8MiB读取，未处理与失败项轮转保留，避免坏前缀饿死后续文件。
+# 函数用途: 幂等清理待删正文并提交剩余欠账。
+def _derived_cleanup_files(store, plan):
+    with store._connection() as conn:
+        pending = _derived_pending_files(conn)
+        live_paths = _derived_live_paths(store, conn) if pending else set()
+        parents, blocked = _derived_protected_groups(conn, plan) if pending else ({}, set())
+    state = _DerivedFileCleanupState(live_paths, parents, blocked, _DERIVED_FILE_CLEANUP_MAX_BYTES)
+    batch = pending[:_DERIVED_FILE_CLEANUP_MAX_FILES]
+    remaining = [*pending[len(batch):], *(entry for entry in batch if not _derived_cleanup_file(store, entry, state, plan))]
+    _derived_transaction(store, lambda conn: _derived_write_pending(conn, remaining))
+    return len(remaining)
+
+
+# LLM: dry-run不取出生锁、不改账、不删文件；真实批次只删除原候选快照且文件始终在SQL提交后处理。
+# 函数用途: 编排有界TTL批次与中断恢复，返回真实已删ID和剩余文件欠账。
+def _prune_derived_records(store, plan, dry_run):
+    with store._connection() as conn:
+        snapshots = _derived_candidates(conn, plan)
+    result = {"cutoff": plan.cutoff, "dry_run": dry_run,
+              "candidate_ids": [row["id"] for row in snapshots], "deleted_ids": [], "pending_files": 0}
+    if dry_run:
+        return result
+    with _derived_mutation_lock(store):
+        result["deleted_ids"] = _derived_transaction(store, lambda conn: _derived_delete_batch(store, conn, plan, snapshots))
+        result["pending_files"] = _derived_cleanup_files(store, plan)
+    return result

@@ -1,3 +1,27 @@
+## 2026-10-26 Wave 6 B3：派生索引30天TTL协议、FTS同步与重建准入
+
+来源：`07-tasks/wave6-wt-b3-20261026.md` 及扩围收口单 `07-tasks/wave6-b3-finish-commit-20261026.md`，基线 `287d94b59892b4b7366f6139751b884b4a8cf77e`，仅在 `/tmp/wt-wave6-b3` 修改扩展后的任务白名单。新增专属测试 `agent_py_agent/tests/test_local_store_derived_ttl_wave6.py`，未修改 `maintenance.py`、`events.py`、`test_local_store.py` 或正式用户数据。
+
+- 只允许九类明确派生来源进入TTL；`memory`、`conversation_message`、`task_progress`、工具/运行证据及未来未知来源均豁免，非法来源过滤立即拒绝。坏元数据、缺可信状态/时间、活跃状态、待收口/通知、显式记录/源引用以及跨来源关联的活跃运行均保留。
+- `(source_type, updated_at DESC, id DESC)` 索引纳入原schema指纹与迁移，最近列表用同一时间/id稳定序。SQL短事务内重新校验完整行版本，FTS先删但由SAVEPOINT保证触发器忽略records删除时同步回滚；只有实际删除成功的ID进入正文欠账。
+- 正文在提交后经nofollow边界、全库路径引用与旧hash复核再删。upsert正文发表和TTL共用命名空间锁；C替代原单正文锁而不增加原提交门时序。文件失败可重开恢复，坏欠账条目隔离、不丢共享或hash冲突欠账；恢复时再次保护活跃组。每次最多检查1000个文件并读取8MiB正文，失败条目轮转；超预算仍留欠账，不宣称文件已删完。
+- Gateway归档回填与子代理`rebuild_derived_projections`/保存投影遵守可信终态30天窗，未知/活跃/BLOCKED不按TTL跳过，轻量task_registry继续保存。子代理canonical `attributes.runtime_closeout_pending` 的真实结构也参与准入。
+- 扩围后 `cli/local_doctor.py::rebuild_subagent_index` 在 `index_task` 及白名单文件读取前复用同一准入。过期的 `subagent_run`、work_log、execution_context、runner_result 不会因CLI重建复活；非白名单 `subagent_patch_review` 不受TTL过滤。真实SQLite先裁剪再重建，断言永久memory和全部canonical文件字节保留。
+- `projection_ledger.jsonl` 在同路径双层锁内流式保留末尾2000行并以0600原子替换，不丢并发新增记录。
+
+专属测试覆盖：白名单及永久数据、FTS开关、严格cutoff、干跑/空过滤/批量序、跨来源活跃保护、四类证据引用、坏状态/JSON、触发器、共享正文、文件欠账恢复/异常/活跃恢复/资源预算、索引迁移、旧/新/未知时间重建、mtime兜底、真实收口属性、账本滚动和并发追加、版本CAS、越界/链接正文以及并发memory写入。
+
+复现命令：
+```bash
+python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_gateway_logging.py agent_py_agent/tests/test_subagent_persistence_service.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_cold_recovery_optional_index.py agent_py_agent/tests/test_gateway_compact_deferred_source.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_local_store_coordinator_io.py agent_py_agent/tests/test_local_store_common_ports.py agent_py_agent/tests/test_local_store_coordinator_review_outer.py agent_py_agent/tests/test_local_store_basics.py -q --tb=short
+```
+
+收口实测：CLI新增回归修复前旧DONE/FAILED两个场景均有效失败（重建计数5而非预期1）；修复后上方第一条四文件组合125项通过，0失败/错误/跳过（专属文件74项）。收口单原命令中的 `test_subagent_persistence_projections.py` 在本工作树不存在，原样执行以exit 4终止；通过定位并阅读实际包含投影保存/重建/账本断言的 `test_subagent_persistence_service.py`，改跑上方真实四文件组合，没有创建占位测试或削弱既有断言。新进程从本工作树直接导入CLI成功。独立Astra high对CLI增量仅做内联静态复核，未发现阻断项，不替代实际测试；此前原四文件96项及C/LocalStore补充58项通过的证据仍适用于未改动的对应路径。
+
+边界/未完成：本切片提供维护API，不修改另片维护调度；调用方须传入当前Compact/恢复/记忆候选的有效引用集合，API不扫描其它权威存储来猜引用。关联图检查仍随派生元数据量增长，真实大库持锁耗时及完整ABA代次保护未验证。Gateway/subagent的02-progress与04-structure四份文档已在扩围内同步，CLI回填绕过缺口已由真实临时夹具回归封闭。未运行真实用户数据清理、全仓测试或部署。
+
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 
 来源：`07-tasks/wave5-wt-bc-20261026.md`（包含 c8/c9 追加合同），起始提交 `95fd54f9b`，仅在 `/tmp/wt-wave5-bc` 开发。没有修改 C4 的 `tui_threading.py` / `http_handlers.py`，没有部署或启停真实服务。

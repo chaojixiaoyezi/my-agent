@@ -1,3 +1,8 @@
+## 2026-10-26 Wave 6 B3 网关派生全文准入结构
+
+- `gateway_parts/logging.py::_index_gateway_payload` 在 `log_record` 前执行归档 TTL 准入；`local_storage/records.py::derived_terminal_expired` 持有共享状态与时间语义，避免重建路径自己复制状态表。归档文件只提供缺省时间兜底，原请求/响应仍是事实源。
+- `local_storage/schema.py` 声明 `(source_type, updated_at DESC, id DESC)` 复合索引并进入原指纹迁移；`search.py::list_recent` 使用同样的稳定时间/ID 降序。裁剪在原事务中同步 records 与 FTS，正文删除在提交后按欠账重试；不是将网关事实源移到 SQLite。
+
 ## 2026-10-26 Wave 4 Round 4 单任务资产事务与冷通知结构
 
 - `assets/__init__.py::asset_root_lock` 复用原跨进程根锁，以线程本地持锁标记阻止调度恢复递归；标记不是权限。`scheduler/repository.py` 将规范 `data/scheduler` 的写 scope 纳入 quota→root→store，snapshot/投影先恢复 pending；读锁窗口中新出现的事务先释放读锁，再恢复并有限重读。正常冷查询不新建根锁文件。

@@ -1,3 +1,9 @@
+## 2026-10-26 Wave 6 B3 派生全文 30 天重建准入（源码实现，未部署）
+
+- `gateway_parts/logging.py::_index_gateway_payload` 在归档回填前复用 LocalStore 的终态/时间/待通知判定，跳过 30 天外且无未完成通知的终态请求；活跃、未知状态、缺可信时间及待收口请求继续保留。仅时间字段缺省时允许从归档文件 mtime 兜底，不以坏时间作过期证据。
+- 实时 `log_gateway_payload` 写入行为不变；不删除请求/响应事实源，也不改变维护事件切片。TTL 删除仅由 `prune_derived_records` 显式维护 API 触发，不代表已接入定时调度或在真实用户数据库执行。
+- 专属回归与网关日志测试的复现命令见 [TESTS](../../../TESTS.md)；当前结果不等于部署验收、真实大库性能或端到端恢复已验证。
+
 ## 2026-10-26 Wave 4 Round 4 资产与冷通知修复（源码及指定组件验收，未部署）
 
 - 监控安装/启停将 `.asset-batch.json` 改为单 job/run before/after，禁止将整 `store.json` 放入文件 undo 或安装 hash。原调度器写口按 quota→asset root→store 先恢复残留事务，查询及投影也先核 pending；恢复仅合并受影响任务，保留其它任务和运行。资产及 job/due 成功后耐久记录提交决定，再幂等补原取消历史；未决定回滚、已决定仅收口，不把已提交取消恢复成运行。
