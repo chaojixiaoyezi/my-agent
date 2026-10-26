@@ -244,29 +244,49 @@ def _notify_test_process_spawn(proc: BackgroundProcess) -> None:
                      persisted_snapshot=deepcopy(proc.persisted_snapshot)))
 
 
-# LLM: 仅回收创建时绑定的 PID/出生身份；拒绝自身和当前组，不扫描全机选择目标。
-# 函数用途: 精确结束本测试登记的残留进程，优先原受管停止入口。
-def reap_test_registered_process(entry: dict[str, Any]) -> None:
+# LLM: host/child 各自校验创建出生身份；Store 丢失或 host 退出不丢 child，返回未确认事实供 pytest 诊断。
+# 函数用途: 先尝试原受管停止，再依次精确回收创建时冻结的 host 与 child，绝不盲发旧 PGID 信号。
+def reap_test_registered_process(entry: dict[str, Any]) -> dict[str, Any]:
     try:
         pid = int(entry.get("pid") or 0)
     except (TypeError, ValueError, OverflowError):
-        return
+        return {"confirmed": False, "reason": "invalid_pid"}
     birth = str(entry.get("pid_birth_token") or "")
+    if pid <= 1 or pid == os.getpid():
+        return {"confirmed": False, "reason": "protected_pid"}
+    managed, errors, instances = False, [], []
+    try:
+        if birth and _test_process_target_allowed(pid):
+            managed = _stop_test_registered_session(entry, pid, birth)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        errors.append({"stage": "managed_stop", "error_type": type(exc).__name__})
+    targets = [(pid, birth, entry.get("popen"))]
+    child = int(entry.get("child_pid") or 0)
+    if child > 0 and child != pid:
+        targets.append((child, str(entry.get("child_pid_birth_token") or ""), None))
+    for target, token, handle in targets:
+        try:
+            instances.append(_reap_test_process_instance(target, token, handle))
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            instances.append({"pid": target, "confirmed": False, "error_type": type(exc).__name__})
+    return {"confirmed": bool(managed or instances and all(row["confirmed"] for row in instances)),
+            "managed_confirmed": bool(managed), "instances": instances, "errors": errors}
+
+
+# LLM: 每个实例独立拒绝 init/自身/原组与缺失出生；PID 复用仅证明旧实例消失，不授予新实例信号权。
+# 函数用途: 在当前出生身份一致时调用唯一树终止原语，并保留真实退出回执。
+def _reap_test_process_instance(pid: int, birth: str, proc) -> dict[str, Any]:
     if not birth or not _test_process_target_allowed(pid):
-        return
-    with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
-        _stop_test_registered_session(entry, pid, birth)
-    proc = entry.get("popen")
+        return {"pid": pid, "confirmed": False, "reason": "protected_or_unidentified"}
     if proc is not None and getattr(proc, "pid", None) != pid:
         proc = None
-    if not _same_process(pid, birth):
+    if _process_instance_terminated(pid, birth):
         if proc is not None:
             proc.poll()
-        return
-    if not _process_instance_terminated(pid, birth) or (proc is not None and proc.poll() is None):
-        terminate_process_tree(pid, proc, expected_birth_token=birth)
-    elif proc is not None:
-        proc.poll()
+        return {"pid": pid, "confirmed": True, "method": "already_gone"}
+    if not _same_process(pid, birth):
+        return {"pid": pid, "confirmed": False, "reason": "identity_unavailable"}
+    return {"pid": pid, **asdict(terminate_process_tree(pid, proc, expected_birth_token=birth))}
 
 
 # LLM: 只核对明确 PID 的进程组；不存在允许后续受管入口清理原 child，未知组拒绝，不做 PID 差集。
@@ -284,28 +304,53 @@ def _test_process_target_allowed(pid: int) -> bool:
         return False
 
 
-# LLM: 原 Store 必须仍绑定登记时 host 的 ID/PID/出生身份；停止原冻结快照，CAS 拒绝同名替换，不重选新资源。
-# 函数用途: 优先用原受管停止事务清理 host/child，任何保护目标都不能借磁盘记录绕过。
-def _stop_test_registered_session(entry: dict[str, Any], pid: int, birth: str) -> None:
+# LLM: Store 必须匹配登记的 host/child、owner/task 身份；原停止事务 CAS 拒绝同名替换，不重选新资源。
+# 函数用途: 优先清理原受管绑定并返回真实确认，失败后仍可沿原创建快照精确回收。
+def _stop_test_registered_session(entry: dict[str, Any], pid: int, birth: str) -> bool:
     from .process_session_cleanup import stop_process_session
 
     session, root = entry.get("session_id"), entry.get("store_root")
     if not session or not root:
-        return
+        return False
     store = ProcessSessionStore(root)
     report = store.load(str(session))
     payload = report.record
     if (report.load_error or payload.get("schema") not in MANAGED_PROCESS_SESSION_SCHEMAS
-            or payload.get("pid") != pid or payload.get("pid_birth_token") != birth):
-        return
+            or payload.get("pid") != pid or payload.get("pid_birth_token") != birth
+            or not _test_session_identity_matches(entry, payload)):
+        return False
     for key in ("pid", "child_pid"):
         target = int(payload.get(key) or 0)
         if target and not _test_process_target_allowed(target):
-            return
+            return False
     proc = entry.get("popen")
     if proc is not None and getattr(proc, "pid", None) != pid:
         proc = None
-    stop_process_session(store, payload, host_process=proc)
+    return stop_process_session(store, payload, host_process=proc).confirmed
+
+
+# LLM: 创建期完整 child 对必须与 Store 相同（含空值），未知不能充当当前 child 的通配符；执行身份不猜补。
+# 函数用途: 阻止同名 Store 或后续补写 child 将测试的停止权限转移到另一出生实例。
+def _test_session_identity_matches(entry, payload) -> bool:
+    expected_child = (int(entry.get("child_pid") or 0), str(entry.get("child_pid_birth_token") or ""))
+    stored_child = (int(payload.get("child_pid") or 0), str(payload.get("child_pid_birth_token") or ""))
+    if expected_child != stored_child:
+        return False
+    return (not entry.get("owner_id") or entry["owner_id"] == (payload.get("access_scope") or {}).get("owner_id")) and (
+        not entry.get("task_id") or entry["task_id"] == (payload.get("execution_scope") or {}).get("root_task_id"))
+
+
+# LLM: 只移除指定规范目录和 session 缓存；无目录时只接受唯一匹配，保留原 host 句柄回收责任，不写 Store 或发信号。
+# 函数用途: 让测试仅清掉已到期会话，不破坏其它 owner 或仍有效的共享 fixture 查找索引。
+def _forget_cached_process_session(registry, session_id: str, store_root) -> None:
+    root = str(Path(store_root).expanduser().resolve(strict=False)) if store_root else None
+    with registry._lock:
+        keys = [key for key in registry._processes if key[1] == session_id and (root is None or key[0] == root)]
+        if root is None and len(keys) != 1:
+            return
+        registry._drain_pending_reap_locked()
+        for key in keys:
+            registry._discard_cached_locked(key)
 
 
 # LLM: 日志观测只携读取事实，不能决定进程状态或扩大路径权限；正文与元数据分开，避免再造输出归档。
@@ -671,6 +716,11 @@ class ProcessRegistry:
         for key, _record in finished[:max(0, len(finished) - _MAX_FINISHED_COUNT)]:
             self._discard_cached_locked(key)
         ProcessSessionStore(store_root).prune_finished(_MAX_FINISHED_COUNT)
+
+    # LLM: 精确 session/目录或唯一同名缓存才可撤下；沿原有界句柄回收，不写权威或发信号。
+    # 函数用途: 忘记已到期测试会话，保留其它共享资源的无 root 查询能力。
+    def forget(self, session_id: str, store_root: str | Path | None = None) -> None:
+        _forget_cached_process_session(self, session_id, store_root)
 
     # LLM: 只丢本进程记录缓存；持有的host句柄只非阻塞poll并留待回收，不改持久记录或发信号。
     # 函数用途: 清除会话缓存，仍保留host的有界回收责任；测试负责显式结束自己创建的活资源。

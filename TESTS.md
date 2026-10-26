@@ -1,3 +1,31 @@
+## 2026-10-26 Wave 6 B5-R2：测试进程别名、child 身份与共享缓存返修
+
+来源：`07-tasks/wave6-b5-round2-fix-20261026.md`，起点 `986da1c86e6c17cacab9a3bdf41da727b8da8a75`，仅在指定 `wt-wave6-b5-r2` 工作树修改三份代码与本节、文件树。
+
+- **P1-01**：默认 pytest 的顶层 `test_*`、`*_test` 及来源位于测试目录的模块纳入精确函数身份替换；setup 前安装、完成后增量扫描，保留后写 MonkeyPatch 的条件撤销。
+- **P1-02**：账本冻结 host/child 的 PID 与出生标识、PGID 观察、owner 与真实 root task 身份；Store 丢失或 host 已退出后，child 按自己的原出生标识核验并回收。PGID 仅作诊断，不发未经出生核验的旧组信号。缺身份、PID 复用、权限/观察未知不能升级为发信号许可。
+- **P2-01**：新增 `ProcessRegistry.forget(session_id, store_root)`，仅移除本次已到期的原目录缓存；共享 fixture 的 class/package/module/session 实例仍按真实 lifetime 保留，无 root 的 `get(session_id)` 跨两条测试继续可查。不同 owner 同名 ID 不被串删。
+- **P2-02**：异常与非明确确认的回收保存在 `conftest._UNCONFIRMED_PROCESS_REAPS`，仅投影创建身份与回执，不存命令、环境或 Popen；会话结束只报告诊断数量，不掩盖原测试失败。
+- 原 B5 的 20 项回归从 `conftest.py` 迁入默认可收集的 `test_b5_process_reap.py`，保留原安全断言；只把“全 clear”断言改为新合同的逐项 forget。新增顶层提前导入、setup 晚到别名、目录删除/host 消失后的 child、共享 module fixture 跨两条查询、同名 owner 缓存隔离及诊断回归。
+
+测试先行证据：旧 20 项迁移后先通过；新增核心反例在实现前为 **6 failed / 21 passed**，分别复现别名、child 快照/回收、两种未确认诊断和共享缓存丢失，再逐项修复。独立内联静态复核又指出首次空 child 可能被后续通知或当前 Store 补绑；两个新增回归先实测 **2 failed**，随后改为连空 PID/birth 对也严格冻结匹配。该合成反例不冒充真实 OS 可达误杀。
+
+假 PID 的信号出口均替身；共享缓存用真实 Store 和可控 Popen，不能当作真实 OS 树回收端到端或原生 Windows 验收。
+
+在工作树根运行指定门禁：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/tests/test_process_session_store.py -q --tb=short
+ruff check agent_py_agent/tests/conftest.py agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/agent/tooling/process_registry.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终当前源码验收：指定两文件 **131 passed / 1 skipped / 0 failed**。跳过由原能力 marker 报告 `ps,background_launcher_identity` 缺失，本轮未添加 skip/xfail。Ruff、doc sync、diff 检查通过；strict 尺寸门 **hard=0 / blocked=False**，仍保留既有 high-risk/soft 告警，不宣称零告警。空 child 修正经独立内联静态复评未发现该 delta 内遗漏；复评未读仓库或独立运行测试，不能外推为全仓批准。
+
+不放宽生产身份校验；真实 OS 树回收、原生 Windows 与上线行为仍未验证。生成的 `CODE_SIZE_REPORT.md` 不随功能提交。
+
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 
 来源：`07-tasks/wave5-wt-bc-20261026.md`（包含 c8/c9 追加合同），起始提交 `95fd54f9b`，仅在 `/tmp/wt-wave5-bc` 开发。没有修改 C4 的 `tui_threading.py` / `http_handlers.py`，没有部署或启停真实服务。
