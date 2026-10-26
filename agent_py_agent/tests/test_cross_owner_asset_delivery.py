@@ -15,6 +15,174 @@ from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStore
 
 
+@pytest.mark.parametrize('serialized', [False, True])
+@pytest.mark.parametrize('text,secrets', [
+    ('password:\n- fixture-pin\n- fixture-tail\nport: 8080\n', ('fixture-pin', 'fixture-tail')),
+    ('auth:\n  password:\n  - fixture-pin\n    fixture-tail\n  port: 8080\n', ('fixture-pin', 'fixture-tail')),
+    ('- password:\n  - fixture-pin\n  - fixture-tail\n  port: 8080\n', ('fixture-pin', 'fixture-tail')),
+    ('password: alpha beta\n  gamma delta\nport: 8080\n', ('alpha beta', 'gamma delta')),
+    ('password: alpha,beta\nport: 8080\n', ('alpha', 'beta')),
+    ('password: alpha,beta\n  gamma delta # comment\nport: 8080\n', ('alpha', 'beta', 'gamma delta')),
+    ('password: null\n  fixture-tail\nport: 8080\n', ('null', 'fixture-tail')),
+])
+def test_round5_yaml_complete_values(sanitize, tmp_path, serialized, text, secrets):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    name = 'body.json' if serialized else 'fixture.yaml'
+    raw = (json.dumps({'body': text}) if serialized else text).encode()
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({name: raw}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    output = sanitize({name: raw}, owner_home=tmp_path, allow_secret_placeholder_replace=True)[name]
+    cleaned = json.loads(output)['body'] if serialized else output.decode()
+    assert all(secret not in cleaned for secret in secrets), cleaned
+    assert 'port: 8080' in cleaned
+    assert cleaned.count('REDACTED') == (2 if text.count('- fixture') == 2 else 1)
+    assert 'gamma delta' not in cleaned and ',beta' not in cleaned
+
+
+@pytest.mark.parametrize('composite', [False, True])
+@pytest.mark.parametrize('one_shot', [False, True])
+@pytest.mark.parametrize('action', ['accept', 'reject'])
+def test_round5_installed_monitor_own_tick_recovers_receipt(kit, composite, one_shot, action):
+    import time
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+    from agent_py_agent.agent.scheduler.monitor_state import _RUNTIME_FIELDS
+    from agent_py_agent.agent.scheduler.repository import SchedulerRunFinish
+
+    source = round2_seed_monitor(kit, composite)
+    if one_shot:
+        at = datetime.fromtimestamp(time.time() + 3600, timezone.utc).isoformat()
+        schedule = {'kind': 'at', 'at': at, 'timezone': 'UTC'}
+        rule = {key: value for key, value in source['rules'][0].items() if key not in _RUNTIME_FIELDS} if composite else {}
+        patch = {'rules': [{**rule, 'schedule': schedule}]} if composite else {'schedule': schedule}
+        source = round2_repo(kit.main, 'local/main').update_job(source['job_id'], patch=patch,
+            expected_version=source['version'])
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    round3_crash(kit, sent['delivery_id'], source['job_id'], point='committed', enabled=True)
+    repo = round2_repo(kit.alice, 'local/alice')
+    installed = repo.get_job(source['job_id'])
+    before_envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert before_envelope['status'] != 'accepted'
+    assert not kit.service._installation_matches(kit.alice, before_envelope, previous=True)
+    now = installed['next_run_at'] + 1
+    run, = repo.reserve_due_runs(now=now)
+    claim = repo.claim_run(run['run_id'], lease_seconds=60, now=now)
+    repo.mark_run_running(run['run_id'], claim['claim_id'], now=now + 1)
+    repo.finish_run(run['run_id'], claim['claim_id'], SchedulerRunFinish('done', now=now + 2))
+    advanced = repo.get_job(source['job_id'])
+    assert advanced['run_count'] == 1 and advanced['last_run_status'] == 'done'
+    assert advanced['status'] == ('paused' if one_shot else 'active')
+    if composite:
+        assert advanced['rules'][0]['run_count'] == 1
+        assert advanced['rules'][0]['enabled'] is not one_shot
+    store_before = repo.store_path.read_bytes()
+    history_before = repo.history_path.read_bytes()
+    if action == 'accept':
+        assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    else:
+        with pytest.raises(AssetDeliveryError) as failure:
+            kit.service.reject_delivery('local/alice', sent['delivery_id'])
+        assert failure.value.error_code == 'DELIVERY_STATE_CONFLICT'
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert envelope['status'] == 'accepted'
+    assert kit.service._origin_receipt(kit.main, envelope)['status'] == 'accepted'
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    assert repo.store_path.read_bytes() == store_before
+    assert repo.history_path.read_bytes() == history_before
+
+
+@pytest.mark.parametrize('change', ['job_definition', 'asset_file', 'manual_pause'])
+def test_round5_reject_drifted_installation_fails_closed(kit, change):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    source = round2_seed_monitor(kit, False)
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'monitor', source['job_id'])
+    round3_crash(kit, sent['delivery_id'], source['job_id'], point='committed', enabled=True)
+    repo = round2_repo(kit.alice, 'local/alice')
+    if change == 'job_definition':
+        repo.update_job(source['job_id'], patch={'name': '本人修改后的监控'},
+            expected_version=repo.get_job(source['job_id'])['version'])
+    elif change == 'manual_pause':
+        repo.pause_job(source['job_id'], expected_version=repo.get_job(source['job_id'])['version'])
+    else:
+        path = kit.alice / 'data/monitors' / (source['job_id'] + '.json')
+        path.write_bytes(path.read_bytes() + b'\n')
+    paths = (repo.store_path, kit.alice / 'data/asset_delivery/inbox' / sent['delivery_id'] / 'envelope.json')
+    before = {path: path.read_bytes() for path in paths}
+    with pytest.raises(AssetDeliveryError) as failure:
+        kit.service.reject_delivery('local/alice', sent['delivery_id'])
+    assert failure.value.error_code == 'DELIVERY_STATE_CONFLICT'
+    assert {path: path.read_bytes() for path in paths} == before
+    envelope = kit.service._envelope(kit.alice, 'local/alice', sent['delivery_id'])
+    assert envelope['status'] not in {'accepted', 'rejected'}
+    assert kit.service._origin_receipt(kit.main, envelope)['status'] not in {'accepted', 'rejected'}
+    with pytest.raises(AssetDeliveryError) as failure:
+        kit.service.accept_delivery('local/alice', sent['delivery_id'])
+    assert failure.value.error_code == 'DELIVERY_INSTALLATION_STATE_CHANGED'
+
+
+@pytest.mark.parametrize('field', ['result', 'run_count', 'updated_at', 'last_error'])
+@pytest.mark.parametrize('location', ['tool_arguments', 'metadata'])
+def test_round5_runtime_names_in_static_configuration_remain_identity(kit, field, location):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.assets.script_store_support import _scheduler_job_matches
+
+    expected = round2_seed_monitor(kit, True)
+    node = expected.setdefault('metadata', {}) if location == 'metadata' else expected['rules'][0]['tool']['arguments']
+    node[field] = 'static-input-before'
+    current = deepcopy(expected)
+    changed = current['metadata'] if location == 'metadata' else current['rules'][0]['tool']['arguments']
+    changed[field] = 'static-input-after'
+    assert not _scheduler_job_matches(current, expected)
+
+
+@pytest.mark.parametrize('serialized', [False, True])
+@pytest.mark.parametrize('text,expected', [
+    ('password:\n# note\n- fixture-pin\n- fixture-tail\n',
+        'password:\n# note\n- "***REDACTED***"\n- "***REDACTED***"\n'),
+    ('password:\n- fixture-pin\n# note\n- fixture-tail\n',
+        'password:\n- "***REDACTED***"\n# note\n- "***REDACTED***"\n'),
+    ('password:\n-\n  fixture-pin\n-\n  fixture-tail\n',
+        'password:\n-\n  "***REDACTED***"\n-\n  "***REDACTED***"\n'),
+    ('password:\n- # note\n  fixture-pin\n', 'password:\n- # note\n  "***REDACTED***"\n'),
+    ('password: null\n  - gamma delta\n', 'password: "***REDACTED***"\n'),
+])
+def test_round5_yaml_review_boundaries(sanitize, tmp_path, serialized, text, expected):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    name = 'body.json' if serialized else 'fixture.yaml'
+    value = text + 'port: 8080\n'
+    raw = (json.dumps({'body': value}) if serialized else value).encode()
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({name: raw}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    output = sanitize({name: raw}, owner_home=tmp_path, allow_secret_placeholder_replace=True)[name]
+    cleaned = json.loads(output)['body'] if serialized else output.decode()
+    assert cleaned == expected + 'port: 8080\n'
+    assert sanitize({name: output}, owner_home=tmp_path)[name] == output
+
+
+def test_round5_old_one_shot_run_is_not_new_completion(kit):
+    from copy import deepcopy
+
+    from agent_py_agent.agent.assets.script_store_support import _scheduler_job_matches
+
+    expected = round2_seed_monitor(kit, True)
+    expected['rules'][0].update(schedule={'kind': 'at', 'at': '2099-01-01T00:00:00+00:00', 'timezone': 'UTC'},
+        last_run_at=100, run_count=1, last_run_status='done')
+    current = deepcopy(expected)
+    current['rules'][0]['enabled'] = False
+    assert not _scheduler_job_matches(current, expected)
+
+
 # LLM: descriptor的未知字段仍严格；新enabled省略兼容旧资产，布尔类型不得宽松转换。
 # 函数用途: 钉住启停状态的JSON往返与旧数据默认启用。
 def test_descriptor_enabled_roundtrip_and_legacy_default():

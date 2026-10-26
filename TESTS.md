@@ -1,3 +1,29 @@
+## 2026-10-26 Wave 4 Round 5：完整 YAML 值与监控自身运行后的回执恢复
+
+来源：`07-tasks/wave4-round5-fix-20261026.md`，起点 `7528eb762af053d164db3a60fb70ee18a75ab101`。仅修改任务列出的五个文件。
+
+- `test_round5_yaml_complete_values`：裸文及 JSON 正文同时覆盖根/嵌套/序列映射下的同级无缩进序列、序列项续行、首行有值的折行普通标量、零深度逗号、逗号加注释续行、`null` 开头的实际多行字符串。默认必须拒绝，显式替换无原值/续行尾部残留且保留相邻端口。原 flow/引用/块体与占位符测试保留。
+- `test_round5_installed_monitor_own_tick_recovers_receipt`：真实子进程 `os._exit(79)` 在整批提交但回执前退出；随后刚安装的监控自己走原 `reserve_due_runs → claim_run → mark_run_running → finish_run`，覆盖单任务/复合 × every/at × accept/reject。重试接受和拒绝自愈均补 accepted，不重装、不复活已完成任务，store/history 原字节不变；`before=None` 不允许匹配现存 job。
+- `test_round5_reject_drifted_installation_fails_closed`：安装后原生修改 job 定义或变动绑定文件时，接受与拒绝均失败关闭，不改任务、不写伪 accepted/rejected。
+- `test_round5_runtime_names_in_static_configuration_remain_identity`：运行字段过滤仅沿 job→rules 节点递归；工具参数和 metadata 中同名的 `result/run_count/updated_at/last_error` 仍是静态输入，不可忽略其修改。此反例先暴露了泛化递归过滤的错误，再收窄实现。
+- 独立 `gpt-6-astra max` 仅静态审查给定关键片段，未读仓库或运行测试；新增 `test_round5_yaml_review_boundaries` 覆盖注释穿插、独占行的 `-`、带注释的空 item 头及 plain 的 dash 续行，检查完整精确输出和重扫幂等。人工暂停及旧 at 运行状态误授权的反例也先在 `.pytest_cache/round5/red-review.log` 复现，再要求新增运行时间/计数及耗尽事实后才归一化。
+- 使用当前环境已有 `PyYAML.safe_load` 对本轮 **24 组**裸文/JSON 原文与脱敏后正文实际解析，全部合法且映射/序列/标量类型结构不变（`.pytest_cache/round5/yaml-parse.json`）；未新增 CI/生产依赖。初版一个“首行注释后再续行”的额外夹具实测非法，已改为合法的末行注释，保留原秘密残留和相邻端口断言，不拿非法输入充当合法 YAML 覆盖。
+- 新 YAML 及实际调度推进失败均先在未修复代码上实跑；记录在 `.pytest_cache/round5/{red,red-native,red-static2}.log`。首轮夹具的 basetemp 父目录缺失、错误 API 参数不计为缺陷复现；修正夹具后才取得有效失败。
+
+任务单的 `test_managed_user_governance.py` 不存在；对应仓库现有治理文件是 `test_admin_managed_users_governance.py`。在工作树根按此真实路径复现组合门禁：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short --basetemp=.pytest_cache/round5/gate-tmp --junitxml=.pytest_cache/round5/gate.xml
+ruff check agent_py_agent/agent/assets/delivery_sanitizer.py agent_py_agent/agent/assets/script_store_support.py agent_py_agent/agent/assets/delivery_service.py agent_py_agent/tests/test_cross_owner_asset_delivery.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终组合 **602 tests / 0 failures / 0 errors / 0 skipped**（`.pytest_cache/round5/final.xml`），本轮聚焦组 **44 / 0 / 0 / 0**（`green-review.xml`）。Ruff、`DOC_SYNC_PASS`、严格体积门禁和 `git diff --check` 均通过；体积门禁为 `hard=0, blocked=False`，未改基线。服务类原本贴近硬上限，拒绝状态检查已等价提取为本模块函数；生成的 `CODE_SIZE_REPORT.md` 已还原到 HEAD，不随功能提交。
+
+本轮仅验证临时 Owner 的原生持久化与调度仓库链，不代表真实 worker/模型/通知通道、Linux/Windows 或全仓验收。未增加生产依赖、不修改生成物基线、不删除或跳过原有有效测试。
+
 ## 2026-10-26 Wave 4 Round 4：单任务调度恢复、结构化 YAML 与冷通知失败关闭
 
 来源：`07-tasks/wave4-r4-fix-20261026.md`，起点 `a07c68ab1109b0993edc1d020eaf267d8522374c`，仅修改任务列出的文件。
