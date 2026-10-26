@@ -2,6 +2,7 @@
 # 模块用途: 把 CLI 调度和执行请求接入正式运行链，拒绝缺失或冲突的后台启动参数。
 from __future__ import annotations
 
+import copy
 import json
 import sys
 
@@ -187,52 +188,79 @@ def _print_dispatch_report(agent, report, options: SubagentsDispatchOptions) -> 
         print(f"planner: {ws / 'PARENT_PLANNER.md'}")
 
 
-# LLM: 内部参数先纯校验再创建依赖；条件 marker 失败不进入 dispatch，最终 worker 仍须独立精确激活。
-# 函数用途: 执行 CLI 调度，在启动身份无效时明确报错而不推进任务。
+# LLM: 仅在可独立浅拷贝时设置实例构造提示，失败保留原args与原eager行为；不改调用方或配置。
+# 函数用途: 给控制面构造一份延迟MCP连接的CLI参数副本。
+def _deferred_mcp_arguments(args):
+    try:
+        deferred = copy.copy(args)
+        if deferred is args:
+            return args
+        deferred._defer_mcp_connect = True
+        return deferred
+    except Exception:
+        return args
+
+
+# LLM: CLI退出只回收外层agent持有的MCP；假agent无tools时跳过，清理异常不得覆盖原业务结果。
+# 函数用途: 关闭外层控制面可能按需启动的MCP客户端。
+def _close_agent_mcp_clients(agent) -> None:
+    close = getattr(getattr(agent, 'tools', None), 'close_mcp_clients', None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+# LLM: 身份和选项先校验；非planner只透传延迟构造标记，所有已构造agent退出均关闭，原marker及worker准入不变。
+# 函数用途: 执行CLI调度并确定性回收外层连接，不为没有OPEN申请的控制轮询提前启动MCP。
 def cmd_subagents_dispatch(args) -> int:
     try:
         _expected_attempt_ids(args)
+        options = _subagents_dispatch_options(args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    agent = make_agent(args)
-    options = _subagents_dispatch_options(args)
     if options.start_runners and not options.mutate_state:
         print("--start-runners 必须和 --apply 一起使用。", file=sys.stderr)
         return 2
+    dispatch_args = args if options.planner else _deferred_mcp_arguments(args)
+    agent = make_agent(dispatch_args)
+    try:
+        capability_config = load_capability_config(args.capability_config)
+        agent.capability_config_path = args.capability_config
+        router = make_capability_router(agent, capability_config, args.skill_dir)
+        if options.watch:
+            if not options.advance and (options.start_runners or options.planner):
+                print("--watch 下 planner/runner 推进需要显式加 --advance。", file=sys.stderr)
+                return 2
+            try:
+                report = agent.watch_subagents(router, capability_config, params=_watch_params(options))
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            _print_watch_report(agent, report, options)
+            return 0
 
-    capability_config = load_capability_config(args.capability_config)
-    agent.capability_config_path = args.capability_config
-    router = make_capability_router(agent, capability_config, args.skill_dir)
-    if options.watch:
-        if not options.advance and (options.start_runners or options.planner):
-            print("--watch 下 planner/runner 推进需要显式加 --advance。", file=sys.stderr)
+        launch_report = mark_background_launch(agent, options, BackgroundLaunchUpdate("running"))
+        _print_background_launch_report(launch_report)
+        if not launch_report.ok:
+            _print_background_launch_report(mark_background_launch(
+                agent, options, BackgroundLaunchUpdate("failed", "启动标记未全部确认，派工未执行"),
+            ))
             return 2
         try:
-            report = agent.watch_subagents(router, capability_config, params=_watch_params(options))
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
-        _print_watch_report(agent, report, options)
+            report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
+        except Exception as exc:
+            _print_background_launch_report(
+                mark_background_launch(agent, options, BackgroundLaunchUpdate("failed", f"{type(exc).__name__}: {exc}"))
+            )
+            raise
+        _print_background_launch_report(mark_background_launch(agent, options, BackgroundLaunchUpdate("finished")))
+        _print_dispatch_report(agent, report, options)
         return 0
-
-    launch_report = mark_background_launch(agent, options, BackgroundLaunchUpdate("running"))
-    _print_background_launch_report(launch_report)
-    if not launch_report.ok:
-        _print_background_launch_report(mark_background_launch(
-            agent, options, BackgroundLaunchUpdate("failed", "启动标记未全部确认，派工未执行"),
-        ))
-        return 2
-    try:
-        report = agent.dispatch_subagents(router, capability_config, params=_dispatch_params(options))
-    except Exception as exc:
-        _print_background_launch_report(
-            mark_background_launch(agent, options, BackgroundLaunchUpdate("failed", f"{type(exc).__name__}: {exc}"))
-        )
-        raise
-    _print_background_launch_report(mark_background_launch(agent, options, BackgroundLaunchUpdate("finished")))
-    _print_dispatch_report(agent, report, options)
-    return 0
+    finally:
+        _close_agent_mcp_clients(agent)
 
 
 def _print_background_launch_report(report) -> None:
@@ -247,26 +275,31 @@ def _print_background_launch_report(report) -> None:
         )
 
 
+# LLM: execute的外层仅为worker读取配置和timeout，延后其MCP但不改变实际worker构造；全部退出路径回收外层连接。
+# 函数用途: 执行或预览单个子代理，并关闭本CLI控制面独立持有的MCP。
 def cmd_subagent_run(args) -> int:
-
-    agent = make_agent(args)
-    result = _execute_subagent_run_cli(agent, args)
-    mode = "execute" if args.execute else "dry-run"
-    status = "OK" if result.ok else "FAIL"
-    print("SUBAGENT RUNNER")
-    print(
-        f"mode={mode} ok={status} run_id={result.run_id} "
-        f"status={result.status} verify={result.verification_status}"
-    )
-    print(f"message={result.message}")
-    print(f"已写入: {result.execution_context_json}")
-    print(f"已写入: {result.result_json}")
-    print(f"已写入: {result.result_file}")
-    if result.prompt_file:
-        print(f"prompt: {result.prompt_file}")
-    if result.response_file:
-        print(f"response: {result.response_file}")
-    return 0 if result.ok else 1
+    run_args = _deferred_mcp_arguments(args) if bool(getattr(args, 'execute', False)) else args
+    agent = make_agent(run_args)
+    try:
+        result = _execute_subagent_run_cli(agent, args)
+        mode = "execute" if args.execute else "dry-run"
+        status = "OK" if result.ok else "FAIL"
+        print("SUBAGENT RUNNER")
+        print(
+            f"mode={mode} ok={status} run_id={result.run_id} "
+            f"status={result.status} verify={result.verification_status}"
+        )
+        print(f"message={result.message}")
+        print(f"已写入: {result.execution_context_json}")
+        print(f"已写入: {result.result_json}")
+        print(f"已写入: {result.result_file}")
+        if result.prompt_file:
+            print(f"prompt: {result.prompt_file}")
+        if result.response_file:
+            print(f"response: {result.response_file}")
+        return 0 if result.ok else 1
+    finally:
+        _close_agent_mcp_clients(agent)
 
 
 def _execute_subagent_run_cli(agent, args):

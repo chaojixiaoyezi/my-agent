@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1154,
+  "count": 1159,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -2636,6 +2636,14 @@
       "description": "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT 也被 runtime.py 的唤醒合批选择读取，只在这里定义。"
     },
     {
+      "name": "_TAIL_BYTES",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": ""
+    },
+    {
       "name": "_FAILURE_BASE_BACKOFF_SECONDS",
       "file": "agent_py_agent/agent/conversation/background_progress_policy.py",
       "value": 300,
@@ -3754,6 +3762,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "触发网关 GC 停顿诊断日志的耗时阈值。"
+    },
+    {
+      "name": "_DEFERRED_C_WATCHDOG_PROMOTE_SECONDS",
+      "file": "agent_py_agent/agent/gateway_parts/hang_diagnostics.py",
+      "value": 1.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "延迟升级到原生C看门狗的最小卡死观察窗口（秒）。"
     },
     {
       "name": "_CONSUMED_RECEIPT_STAMP_MAX_ENTRIES",
@@ -5226,6 +5242,14 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "候选证据引用最多 4096 字节：ref 过长视为异常，防止坏快照入库。"
+    },
+    {
+      "name": "_CANDIDATE_FAST_STAT_PROBE_MIN_BYTES",
+      "file": "agent_py_agent/agent/memory_store/candidates.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "其它",
+      "description": "达到1MiB才允许热读复用相同五元stat的摘要，小文件维持每次完整摘要校验。"
     },
     {
       "name": "_CANDIDATE_LOAD_CACHE_MAX_BYTES",
@@ -7498,6 +7522,22 @@
       "unit": "字符",
       "category": "其它",
       "description": "滚动输出缓冲:查询时从日志文件尾部最多读这么多字符,够看进度/结论又不撑爆 prompt。"
+    },
+    {
+      "name": "_PID_BIRTH_TOKEN_CACHE_MAX_COUNT",
+      "file": "agent_py_agent/agent/tooling/process_registry.py",
+      "value": 2048,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "出生身份投影缓存最多保留2048项，不代表实例仍存活。"
+    },
+    {
+      "name": "_PS_RELATION_CACHE_SECONDS",
+      "file": "agent_py_agent/agent/tooling/process_registry.py",
+      "value": 0.25,
+      "unit": "秒",
+      "category": "其它",
+      "description": "只读ps关系表最多复用0.25秒；终止选取仍强制新鲜观察。"
     },
     {
       "name": "_PROCESS_RECORDS_PROJECTION_FULL_READ_INTERVAL_SECONDS",

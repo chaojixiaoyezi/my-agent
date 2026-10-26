@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from agent_py_agent.agent.agent_core.models import AgentRunResult
 from agent_py_agent.agent.core import SimpleAgent
@@ -365,3 +368,130 @@ def test_local_rebuild_indexes_memory_gateway_and_subagents():
         doctor = build_local_doctor_report(agent)
         assert doctor["memory_count"] == 1
         assert any(item["name"] == "memory_index" for item in doctor["checks"])
+
+
+def _perf_e_event_store(tmp_path, coordinator):
+    from agent_py_agent.agent.common.global_write_commit import global_write_commit_scope
+    from agent_py_agent.tests.test_local_store_coordinator_io import make_store
+
+    store = LocalStore(tmp_path / "index.db")
+    events = [store.record_event("retention", payload={"index": index}) for index in range(6)]
+    with sqlite3.connect(store.db_path) as conn:
+        conn.executemany("UPDATE events SET created_at=? WHERE event_id=?",
+            [(created, event.event_id) for created, event in zip((1, 2, 3, 50, 50, 50), events, strict=True)])
+    if coordinator:
+        store, door = make_store(tmp_path)
+        return store, events, lambda: global_write_commit_scope(door)
+    from contextlib import nullcontext
+    return store, events, nullcontext
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_perf_e_prune_events_is_bounded_and_preserves_jsonl_only_bytes(tmp_path, coordinator):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    prune = getattr(store, "prune_events", None)
+    assert callable(prune), "missing bounded event retention"
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    extra = b' { "event_id" : "jsonl-only", "created_at" : 0 }\r\n[1]\nnot-json\xff\n{"unfinished"'
+    with store.events_path.open("ab") as handle:
+        handle.write(extra)
+    with scope():
+        dry = prune(before=100, keep_last=2, max_delete=2, dry_run=True)
+        assert dry == {"ok": True, "dry_run": True, "selected": 2, "deleted_db": 0, "deleted_jsonl": 0}
+        assert store.stats()["event_count"] == 6
+        assert store.events_path.read_bytes() == b"".join(original) + extra
+        first = prune(before=50, keep_last=2, max_delete=2)
+        assert first == {"ok": True, "dry_run": False, "selected": 2, "deleted_db": 2, "deleted_jsonl": 2}
+        assert store.events_path.read_bytes() == b"".join(original[2:]) + extra
+        assert prune(before=50, keep_last=2, max_delete=2)["deleted_db"] == 1  # cutoff严格小于。
+        assert prune(before=100, keep_last=2)["deleted_db"] == 1
+        assert {item.event_id for item in store.timeline()} == {event.event_id for event in events[-2:]}
+        assert store.events_path.read_bytes() == b"".join(original[-2:]) + extra
+        assert prune(before=100, keep_last=2)["selected"] == 0
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_perf_e_prune_events_only_filters_rows_actually_deleted_by_sqlite(tmp_path, coordinator):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    prune = getattr(store, "prune_events", None)
+    assert callable(prune), "missing bounded event retention"
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute(f"CREATE TRIGGER keep_first BEFORE DELETE ON events WHEN OLD.event_id='{events[0].event_id}' "
+                     "BEGIN SELECT RAISE(IGNORE); END")
+    with scope():
+        result = prune(before=50, keep_last=0, max_delete=2)
+        assert result == {"ok": True, "dry_run": False, "selected": 2, "deleted_db": 1, "deleted_jsonl": 1}
+        assert store.stats()["event_count"] == 5
+    assert store.events_path.read_bytes() == b"".join([original[0], *original[2:]])
+
+
+def test_perf_e_prune_events_normalizes_limits_and_chunks_sql_parameters(tmp_path):
+    store = LocalStore(tmp_path / "index.db")
+    prune = getattr(store, "prune_events", None)
+    assert callable(prune), "missing bounded event retention"
+    with sqlite3.connect(store.db_path) as conn:
+        conn.executemany("INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES(?, 'old', '{}', 1)",
+            [(f"id-{index}",) for index in range(1005)])
+    assert prune(before=2, keep_last=-1, max_delete=0)["deleted_db"] == 1
+    assert prune(before=2, keep_last=2, max_delete=1005)["deleted_db"] == 1002
+    assert store.stats()["event_count"] == 2
+    assert not store.events_path.exists()
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_perf_e_prune_events_rewrite_failure_reports_partial_without_dropping_jsonl(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    prune = getattr(store, "prune_events", None)
+    assert callable(prune), "missing bounded event retention"
+    before = store.events_path.read_bytes()
+    error = OSError("atomic rewrite unavailable")
+
+    def refuse(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", refuse, raising=False)
+    with scope(), pytest.raises(OSError) as caught:
+        prune(before=50, keep_last=2, max_delete=1)
+    assert caught.value is error
+    assert store.events_path.read_bytes() == before
+    with scope():
+        assert store.stats()["event_count"] == 5
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_perf_e_prune_events_keeps_json_beyond_parser_recursion_limit(tmp_path, coordinator):
+    import sys
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    lines = store.events_path.read_bytes().splitlines(keepends=True)
+    nested = b"[" * (sys.getrecursionlimit() * 2) + b"0" + b"]" * (sys.getrecursionlimit() * 2) + b"\r\n"
+    with store.events_path.open("ab") as handle:
+        handle.write(nested)
+    with scope():
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+    assert store.events_path.read_bytes() == b"".join(lines[1:]) + nested
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_perf_e_prune_events_keeps_row_when_decoder_reports_recursion_limit(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    lines = store.events_path.read_bytes().splitlines(keepends=True)
+    unmatched = "[[[[0]]]]\n"
+    with store.events_path.open("a") as handle:
+        handle.write(unmatched)
+    actual = maintenance.json.loads
+
+    def decode(line, *args, **kwargs):
+        if line == unmatched:
+            raise RecursionError("JSON nesting exceeds this decoder's limit")
+        return actual(line, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance.json, "loads", decode)
+    with scope():
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+    assert store.events_path.read_bytes() == b"".join(lines[1:]) + unmatched.encode()

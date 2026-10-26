@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 # LLM: 维护操作只改可重建投影与显式调用的本库事实；FTS 回填完成键须与实际回填同事务提交。
-# LLM: C重建只消费原scope固定本地事务，不存source或恢复账；联验原schema migration、CAS交错/partial。
-# 模块用途: 提供原索引维护与C完整重建，不决定owner权限或新增批次状态。
+# LLM: C重建/显式事件裁剪只消费原scope固定事务及末写，不存source或恢复账；联验schema、事件锁序与partial。
+# 模块用途: 提供索引维护、C完整重建与有界事件裁剪，不决定owner权限或新增批次状态。
 
 """implements LocalStore maintenance, statistics, reset, FTS rebuild, and integrity checks.
 
@@ -12,17 +12,69 @@ from __future__ import annotations
 """
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.json_io import locked_json_path, write_private_text_file_atomic_unlocked
 from ..common.nofollow_fs import ensure_private_dir
 
 
 # LLM: 维护器通过 schema 提供的连接访问当前库，不缓存其它用户数据；显式 reset 保持旧契约。
-# LLM: C仅rebuild固定叶已闭合，其它维护writer另按真实链接线，不将任意SQL标为已授权。
-# 类用途: 管理原全文索引维护，重建保同库原子事务和原恢复标记。
+# LLM: C仅rebuild与prune_events固定叶闭合，其它维护writer仍各守原真实链；事件只删本批实际DB删除的ID。
+# 类用途: 管理全文索引与显式有界事件维护，保同库事务、原恢复标记和JSONL独有记录。
 class LocalStoreMaintenanceMixin:
+
+    # LLM: 显式有界维护；保护最新keep_last并严格早于before，仅删除本事务真正消失的ID对应JSONL行。
+    #   默认SQL→事件锁保持原writer锁序；C沿事件锁→原短事务→短原子写，JSONL独有/坏行逐字节保留，失败保真实partial。
+    # 函数用途: 裁剪一批过期事件，支持无写预演，不改schema或把JSONL当数据库投影重建。
+    def prune_events(self, *, before: float, keep_last: int = 1000, max_delete: int = 5000,
+                     dry_run: bool = False) -> dict[str, int | bool]:
+        options = (float(before), max(0, int(keep_last)), max(1, int(max_delete)))
+        with self._connection() as conn:
+            selected = _select_prunable_event_ids(conn, *options)
+        if dry_run or not selected:
+            return _event_prune_result(len(selected), set(), 0, dry_run=bool(dry_run))
+        if self.coordinator_io:
+            with self._coordinator_events_lock():
+                selected_count, deleted = self._coordinator_transaction(
+                    lambda conn: _delete_prunable_events(conn, *options))
+                removed = self._prune_event_jsonl(deleted)
+        else:
+            with self._connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                # 普通writer先取得SQLite写锁，再取JSONL锁，不能反向拿锁造成相互等待。
+                with locked_json_path(self.events_path):
+                    selected_count, deleted = _delete_prunable_events(conn, *options)
+                    conn.commit()
+                    removed = self._prune_event_jsonl(deleted)
+        return _event_prune_result(selected_count, deleted, removed)
+
+    # LLM: 调用方已持原事件文件锁且SQL已提交；仅滤本批真实删除ID，读/解析门外，C只有最后replace沿原_local_write。
+    # 函数用途: 流式读取事件流水，保留无关、JSONL独有及不可解析行的原始字节后原子写回。
+    def _prune_event_jsonl(self, target_ids: set[str]) -> int:
+        if not target_ids or not self.events_path.exists():
+            return 0
+        retained, removed = [], 0
+        with self.events_path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+            for line in handle:
+                if _pruned_event_line(line, target_ids):
+                    removed += 1
+                else:
+                    retained.append(line)
+        if removed:
+            content = "".join(retained)
+            # LLM: 只写原events_path已准备正文；原锁仍持有，C只允许一次replace。
+            # 函数用途: 私有原子替换过滤后的事件流水，保留所有未删除行字节。
+            def operation():
+                write_private_text_file_atomic_unlocked(self.events_path, content, preserve_bytes=True,
+                    **({"replace_once": True} if self.coordinator_io else {}))
+            if self.coordinator_io:
+                self._local_write(operation)
+            else:
+                operation()
+        return removed
 
     # LLM: 读取正文权威回填投影，开始即持写锁；完成键与回填同提交，中途失败不谎报已完成。
     # LLM: C门外准备全行/正文，BEGIN后精确CAS再原完整事务；默认原算法不变，O(N)本地门不假称恒短。
@@ -193,6 +245,49 @@ class LocalStoreMaintenanceMixin:
             "record_count": record_count,
             "event_count": event_count,
         }
+
+
+# LLM: 只读当前事务中的events；时间相等时沿原timeline的seq定序，不以JSONL、显示时间或条数猜删除集合。
+# 函数用途: 选出不在最新保护窗口内、严格过期且至多max_delete条的事件ID。
+def _select_prunable_event_ids(conn, before: float, keep_last: int, max_delete: int) -> set[str]:
+    total = int(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+    if total <= keep_last:
+        return set()
+    return {row[0] for row in conn.execute(
+        "SELECT event_id FROM events WHERE created_at < ? AND seq NOT IN "
+        "(SELECT seq FROM events ORDER BY created_at DESC, seq DESC LIMIT ?) "
+        "ORDER BY created_at ASC, seq ASC LIMIT ?", (before, keep_last, max_delete))}
+
+
+# LLM: 调用方已BEGIN IMMEDIATE；每批900参数兼容SQLite变量上限，删除后重查避免触发器忽略的行被误清JSONL。
+# 函数用途: 重核本批选择并删除，返回实际选择数量和真正从数据库消失的精确ID集合。
+def _delete_prunable_events(conn, before: float, keep_last: int, max_delete: int) -> tuple[int, set[str]]:
+    selected = _select_prunable_event_ids(conn, before, keep_last, max_delete)
+    identifiers, deleted = sorted(selected), set()
+    for offset in range(0, len(identifiers), 900):
+        batch = identifiers[offset:offset + 900]
+        placeholders = ",".join("?" for _ in batch)
+        conn.execute(f"DELETE FROM events WHERE event_id IN ({placeholders})", batch)
+        remaining = {row[0] for row in conn.execute(
+            f"SELECT event_id FROM events WHERE event_id IN ({placeholders})", batch)}
+        deleted.update(set(batch) - remaining)
+    return len(selected), deleted
+
+
+# LLM: 标量、坏JSON、递归解码超限和非字符串ID都保留；不按时间/正文猜归属，不吞其它存储或来源异常。
+# 函数用途: 只把成功解码且精确命中实际删除ID的事件行过滤掉。
+def _pruned_event_line(line: str, target_ids: set[str]) -> bool:
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return False
+    return isinstance(row, dict) and isinstance(row.get("event_id"), str) and row["event_id"] in target_ids
+
+
+# LLM: 只汇报实际选择、提交删除与JSONL过滤数量，不把跨介质partial伪装成全事务回滚。
+# 函数用途: 生成有界事件裁剪的稳定公开回执。
+def _event_prune_result(selected: int, deleted: set[str], removed: int, *, dry_run: bool = False) -> dict[str, int | bool]:
+    return {"ok": True, "dry_run": dry_run, "selected": selected, "deleted_db": len(deleted), "deleted_jsonl": removed}
 
 
 # LLM: 只保存本次准确原表/正文输入，不是缓存、恢复表或权限；完成后随调用栈释放，不保存source。

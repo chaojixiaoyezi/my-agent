@@ -18,7 +18,8 @@ from ....common.request_execution_ports import (
 #   正常工作片次数不构成存活上限；续跑与故障重试统一复用 runner candidate，UNKNOWN 仍由运行账裁决。
 #   失联重排在原 creation guard 内复核 attempt/session；不能拿巡检旧快照覆盖新执行者。
 #   收口恢复的 repo/load/save/list/notify 在本模块原调用点装配，不把整个 manager 交给恢复扫描。
-# 模块用途: 在唤醒和监督阶段装配能力与生命周期巡查；允许长期父子协作接续，不把工作片数量当失败次数。
+# LLM: 各巡检阶段各自实时扫描并先筛选再复制；不得整轮冻结，RUNNING宿主否决仍核全部任务。
+# 模块用途: 装配唤醒与监督巡查，按需复制候选但不改变状态、来源或跨阶段新鲜度。
 """Mechanism-level capability sweep before subagent-lifecycle wake turns."""
 
 import logging
@@ -29,6 +30,7 @@ from typing import Any
 
 from ....subagents import runner_completion_wake
 from ....subagents.capability_auto_grant import auto_grant_open_requests
+from ....subagents.manager import select_manager_runs
 from ....subagents.models import (
     SUBAGENT_ENDED_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
@@ -101,8 +103,8 @@ def _audit_source_lifecycle_signal(signal: Any) -> bool:
 #   _redispatch 拉 PLANNING 不稳,auto_start 可靠。非阻塞(不占唤醒 tick 线程),
 #   防重靠 background_start=launching + 候选判定的 launch_in_progress/心跳排除。
 # 函数用途: 把"没人管的可派孤儿"用可靠的后台派工路一次性拉起来,返回动作摘要(started 只算真派出去的,复用现存启动记 launch_reused)。
-# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
-# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
+# LLM: 候选先按结构化可派状态筛选，逐文件新鲜度、原MP来源和typed未知传播保持，不用TTL或整轮快照。
+# 函数用途: 只复制可派任务后沿原孤儿复活流程恢复，未命中历史任务不复制。
 def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -110,11 +112,8 @@ def auto_start_stalled_orphans(agent: Any) -> dict[str, object]:
     try:
         from ....contracts.state_machine import DISPATCHABLE_STATES, normalize_status
 
-        tasks = [
-            task
-            for task in manager.list_runs()
-            if normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES
-        ]
+        tasks = select_manager_runs(manager, lambda task:
+            normalize_status(str(getattr(task, "status", "") or "")) in DISPATCHABLE_STATES)
         if not tasks:
             return {
                 "started": 0,
@@ -517,21 +516,18 @@ def _takeover_hint_enabled(agent: Any) -> bool:
 # 函数用途: 网关重启/进程被杀后,把"看着在跑其实早死了"的 run 放回队列续命。
 # LLM: 优先处理 exact 执行器退出，再走既有来源岗位回收；无 session 不再意味着无法检查执行权。
 # 函数用途: 修复实际退出后的假运行，保留慢模型和来源岗位的既有独立生命周期。
-# LLM: 原MP只读真实原进程/claim来源，typed未知原样越过普通catch；保main Count0及原恢复顺序，不以TTL/PID猜退出或补权限。
-# 函数用途: 继续原子代理监督或收口，来源未核实时保留责任而不自动重跑。
+# LLM: 先实时筛选RUNNING，无候选不复制历史；有候选再全读以保PENDING兄弟的宿主否决，原回收权限不变。
+# 函数用途: 按需读取死亡运行候选后沿原执行权恢复流程回收，不漏掉健康兄弟任务。
 def _reclaim_dead_running_runs(agent: Any) -> list[dict[str, object]]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
         return []
     reclaimed: list[dict[str, object]] = []
-    all_tasks = list(manager.list_runs())
-    tasks = [
-        task
-        for task in all_tasks
-        if str(getattr(task, "status", "") or "").strip().upper() == "RUNNING"
-    ]
+    tasks = select_manager_runs(manager, lambda task:
+        str(getattr(task, "status", "") or "").strip().upper() == "RUNNING")
     if not tasks:
         return []
+    all_tasks = list(manager.list_runs())
     fully_stalled_host_pids = _fully_stalled_source_host_pids(all_tasks)
     # A suspended host can retain task/watch file locks indefinitely.  Fence
     # the host process before rewriting its durable attempts; doing this in
@@ -1032,8 +1028,8 @@ def _source_worker_needs_lifecycle_reconcile(store: Any, record: Any) -> bool:
     return True
 
 
-# LLM: 只对未终态子代理或未结算Audit来源计算父会话裁决；已完成来源只读TaskLink，不触发重复收尾。
-# 函数用途: 巡查并关闭失去父级执行权的活跃子代理，或把自然结算的来源岗位投影为完成。
+# LLM: 在复制前只读筛选未终态或待结算来源，每阶段重核locator；TaskLink与原父级权限裁决不变。
+# 函数用途: 按需复制待处理任务后沿原父会话收口和来源完成投影流程执行。
 def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     manager = getattr(agent, "subagents", None)
     if manager is None:
@@ -1046,13 +1042,10 @@ def _reconcile_conversation_parent_lifecycle(agent: Any) -> dict[str, int]:
     from ....common.audit_activation import structured_audit_source_worker_attributes
 
     store = getattr(agent, "conversation_store", None)
-    tasks = [
-        task
-        for task in manager.list_runs()
-        if not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
+    tasks = select_manager_runs(manager, lambda task:
+        not task_status_in(getattr(task, "status", ""), SUBAGENT_ENDED_STATUSES)
         or (structured_audit_source_worker_attributes(getattr(task, "attributes", {}) or {})
-            and _source_worker_needs_lifecycle_reconcile(store, task))
-    ]
+            and _source_worker_needs_lifecycle_reconcile(store, task)))
     if not tasks:
         return {
             "parent_closed_cancelled": 0,

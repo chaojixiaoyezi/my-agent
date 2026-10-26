@@ -412,8 +412,8 @@ def _load_policy(
         )
 
 
-# LLM: 候选清理只允许合法未晋升状态且严格早于 cutoff 的精确 ID；保留账本 fingerprint 供执行复核。
-# 函数用途: 规划超过保留期的未晋升候选账本清理。
+# LLM: 内部只读借用不修改模型，保留list/load覆盖；仍只选合法未晋升且严格早于cutoff，指纹供执行CAS。
+# 函数用途: 不复制全账本地规划过期候选动作，仓库损坏仍阻断。
 def _candidate_actions(
     *,
     candidates: CandidateService,
@@ -425,7 +425,7 @@ def _candidate_actions(
         return []
     cutoff = now.timestamp() - policy.rejected_candidate_days * _DAY_SECONDS
     try:
-        records = candidates.list(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES)
+        records = getattr(candidates, "readonly_rows", candidates.list)(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES)
     except Exception as exc:  # noqa: BLE001 - convert repository corruption to stable plan error.
         errors.append(
             MemoryRetentionError(

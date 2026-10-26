@@ -32,11 +32,16 @@ _SELF_MANAGED_CREDENTIAL_ENV = frozenset(
         "AUDIT_TOKEN",
         "GITHUB_PERSONAL_ACCESS_TOKEN",
         "GH_TOKEN",
+        "SSH_AUTH_SOCK",
+        "SSH_AGENT_PID",
     }
 )
 
 # 通用密钥名子串:名字含这些的一律剥(兜住上面没枚举到的第三方密钥进子进程默认不给)。
-_SECRET_NAME_SUBSTRINGS = ("API_KEY", "SECRET", "_TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE_KEY")
+_SECRET_NAME_SUBSTRINGS = (
+    "API_KEY", "SECRET", "_TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE_KEY",
+    "ACCESS_KEY", "AUTH_SOCK", "DATABASE_URL", "CONNECTION_URI", "CONNECTION_STRING",
+)
 
 # LLM: 名称检查统一不区分大小写；普通 PATH/HOME 无密钥片段自然保留，不引入前缀通行证。
 # 函数用途: 判断变量名是否属于默认需要擦除的凭据。

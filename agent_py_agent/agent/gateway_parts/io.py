@@ -596,16 +596,77 @@ _ORPHAN_LOCK_MIN_AGE_SECONDS = 24 * 3600
 #   文件归档/删除后 sidecar 没有任何删除路径，会长期累积（真机 3000+ 空锁文件）。清理只删同时满足三条的：
 #   对应数据文件已不存在、mtime 早于宽限（见上）、且能非阻塞拿到 flock（拿不到=有人正持锁）。
 #   数据文件还在、宽限内、拿不到锁的一律不动；单文件失败只跳过，绝不把异常抛给维护巡。
-# 函数用途: 清扫一个目录里的孤儿锁 sidecar，返回删掉的数量。
-def cleanup_orphan_lock_files(directory: Path, *, now: float | None = None) -> int:
-    if not directory.is_dir():
+# LLM: owner显式过滤逻辑锁并传固定目录FD，扫描/复核/删除不重走可被替换的路径；transition逐锁调用，默认Gateway不变。
+# 函数用途: 清扫已登记目录的孤儿伴生锁，可由owner根固定目录句柄后安全回收。
+def cleanup_orphan_lock_files(directory: Path, *, now: float | None = None,
+                              data_sidecars_only: bool = False, commit_transition=None,
+                              directory_fd: int | None = None) -> int:
+    if directory_fd is None and not directory.is_dir():
         return 0
     current = time.time() if now is None else now
     try:
-        candidates = sorted(directory.glob("*.lock"))
+        candidates = (sorted(directory.glob("*.lock")) if directory_fd is None else
+                      [directory / name for name in sorted(os.listdir(directory_fd)) if name.endswith(".lock")])
     except OSError:
         return 0
-    return sum(1 for lock_path in candidates if _cleanup_one_orphan_lock(lock_path, current=current))
+    removed = 0
+    for lock_path in candidates:
+        if data_sidecars_only and not lock_path.with_suffix("").suffix:
+            continue
+        # 每个候选的原试锁/复核/删除作为单独步骤，授权撤回不能被清扫器吞掉。
+        # LLM: 同步transition只执行这一个已枚举锁；绑定路径防延迟闭包取到后续循环项。
+        # 函数用途: 沿原试锁与身份核验尝试删除一个孤儿伴生文件。
+        def operation(lock_path=lock_path):
+            if directory_fd is not None:
+                return _cleanup_orphan_lock_at(directory_fd, lock_path.name, current=current)
+            return _cleanup_one_orphan_lock(lock_path, current=current)
+        removed += bool(operation() if commit_transition is None else commit_transition(operation))
+    return removed
+
+
+# LLM: owner固定目录FD内只开现存单链接普通锁；fdopen接管失败关闭raw FD，try-flock后重核inode/年龄/数据缺失，unlink仍dirfd。
+# 函数用途: 安全回收一个owner孤儿伴生锁，祖先路径被换成外部链接也不会改扫外部目录。
+def _cleanup_orphan_lock_at(directory_fd: int, name: str, *, current: float) -> bool:
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or current - info.st_mtime < _ORPHAN_LOCK_MIN_AGE_SECONDS
+                or _lock_data_exists_at(directory_fd, name)):
+            return False
+        descriptor = os.open(name, os.O_RDWR | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            handle = os.fdopen(descriptor, "a+", encoding="utf-8")
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        with handle:
+            if not _try_flock_exclusive(handle):
+                return False
+            opened = os.fstat(handle.fileno())
+            latest = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            identity = (info.st_dev, info.st_ino)
+            if ((opened.st_dev, opened.st_ino) != identity or (latest.st_dev, latest.st_ino) != identity
+                    or opened.st_nlink != 1 or not stat.S_ISREG(latest.st_mode)
+                    or current - opened.st_mtime < _ORPHAN_LOCK_MIN_AGE_SECONDS
+                    or _lock_data_exists_at(directory_fd, name)):
+                return False
+            os.unlink(name, dir_fd=directory_fd)
+            return True
+    except OSError:
+        return False
+
+
+# LLM: 仅在同一固定目录下查伴生数据名，软链接也视为有数据而保留锁，不能跟随到外部路径。
+# 函数用途: 判断owner锁对应的数据名是否仍存在。
+def _lock_data_exists_at(directory_fd: int, name: str) -> bool:
+    try:
+        os.stat(name[:-len(".lock")], dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 # LLM: 三条判据（孤儿、超宽限、非活锁）逐条早返回，单文件失败只跳过；拆出来同时压平整轮清扫的嵌套。

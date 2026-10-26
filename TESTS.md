@@ -1,3 +1,20 @@
+## 2026-10-26 底座残余性能、资源回收、沙箱安全与网关 04:00 安全重启死锁回归（7 Worktrees 集成）
+
+本轮集成覆盖 `wt-perf-a` 至 `wt-gw-g` 共 7 个隔离工作树的定向回归测试：
+- `test_runner_start_admission.py`、`test_mcp_lifecycle.py`：验证 `defer_mcp_connect` 外层控制面零连接、按需 `ensure_mcp_catalog_ready` 与 macOS 僵尸态进程树清理。
+- `test_continuous_monitor.py`：验证 `ContinuousProofFileEvaluator` 增量追加读取、`4 KiB` SHA-256 头部摘要原地覆写检测与乱序回退。
+- `test_background_listen_scope.py`、`test_process_completion_events.py`、`test_tools/test_filesystem_tools.py`：验证监听端口巡检指数退避、`ps` 250ms 缓存及函数替身失效、超时子进程回收。
+- `test_subagent_listruns_cache.py`：验证 `list_runs_selected` / `select_manager_runs` 仅深拷贝命中任务与空 `audit_watches.json` 短路。
+- `test_memory_retention_v2.py`、`test_local_store.py`、`test_local_store_coordinator_io.py`、`test_owner_maintenance.py`、`test_owner_maintenance_execution_ports.py`：验证 `readonly_rows`、$O(1)$ 候选合并、`.lock` 侧车清理、空临时目录按年龄回收与 `events.jsonl` 有界裁剪。
+- `test_sandbox.py`、`test_scripts_and_workflows_tools.py`、`test_subprocess_env_scrub.py`、`test_datasource_keyring_and_script_binding.py`：验证宽路径剔除、`stat`/`lstat`/`access`/`open`（含 `dir_fd` 还原与受限数据源读取）守卫、环境变量清洗与本机 Gateway 端口拦截。
+- `test_supervisor.py`、`test_gateway_safe_restart.py`、`test_admin_self_gateway_diagnostics.py`：验证 `supervisor.log` 分离、计划内安全重启交接宽限与残存进程回收、连续 600 秒健康窗口、`coordinator.lock` 持锁者诊断、主管理员只读 `gateway.log`/`supervisor.log` 与 `gateway_status` 脱敏日志尾段。
+
+复现命令：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_runner_start_admission.py agent_py_agent/tests/test_mcp_lifecycle.py agent_py_agent/tests/test_continuous_monitor.py agent_py_agent/tests/test_background_listen_scope.py agent_py_agent/tests/test_process_completion_events.py agent_py_agent/tests/test_tools/test_filesystem_tools.py agent_py_agent/tests/test_subagent_listruns_cache.py agent_py_agent/tests/test_memory_retention_v2.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_local_store_coordinator_io.py agent_py_agent/tests/test_owner_maintenance.py agent_py_agent/tests/test_owner_maintenance_execution_ports.py agent_py_agent/tests/test_sandbox.py agent_py_agent/tests/test_scripts_and_workflows_tools.py agent_py_agent/tests/test_subprocess_env_scrub.py agent_py_agent/tests/test_datasource_keyring_and_script_binding.py agent_py_agent/tests/test_supervisor.py agent_py_agent/tests/test_gateway_safe_restart.py agent_py_agent/tests/test_admin_self_gateway_diagnostics.py -q --tb=short
+```
+
 ## 2026-10-25 七项核心底座、Host v2 扩展与稳定性回归（WP12 文档同步）
 
 来源：[详细设计](docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md) 与 [当前实现台账](DESIGN_LEDGER.md)。核对起点为 `61bab6ab98fdd4d3b94ccabe2dda1aed1e9fa0b8`（当次 `HEAD == origin/main`），对应代码为未提交工作区增量。本轮只改六份 Markdown，**没有重跑 pytest，也不声称下列测试的当前组合已经通过**；文件与测试定义已静态核对，命令供集成者在最终源码上复现。

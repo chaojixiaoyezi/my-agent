@@ -73,8 +73,9 @@ _CANDIDATE_FAST_STAT_PROBE_MIN_BYTES = 1024 * 1024
 _CANDIDATE_STAMP_DIGEST_CACHE: OrderedDict[
     str, tuple[tuple[int, int, int, int, int], str]
 ] = OrderedDict()
+_CandidateStatStamp = tuple[int, int, int, int, int]
 _CANDIDATE_LOAD_CACHE: OrderedDict[
-    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...]]
+    str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...], dict[str, MemoryCandidate]]
 ] = OrderedDict()
 _CANDIDATE_LOAD_CACHE_LOCK = threading.Lock()
 
@@ -125,14 +126,15 @@ def _drop_candidate_load_cache(path: Path) -> None:
         _CANDIDATE_STAMP_DIGEST_CACHE.pop(str(path), None)
 
 
-# LLM: 保存前深复制全部嵌套字段，最多8路径和128MiB原始字节；调用方返回值不能成为缓存权威。
-# 函数用途: 记忆已通过原坏行、schema及重复ID验证的一代候选。
-def _remember_candidate_load(path, probe, records):
+# LLM: 写侧快照深复制；只读解析独占新模型可直接借用。同代ID索引与元组原子发表/驱逐，最多8路径128MiB。
+# 函数用途: 缓存严格验证过的一代候选及其单条查找索引，不缓存写后未重读的模型。
+def _remember_candidate_load(path, probe, records, *, copy_records: bool = True):
     if probe is None or _candidate_load_stamp(path) != probe[0]:
         return
-    snapshot = deepcopy(tuple(records))
+    snapshot = deepcopy(tuple(records)) if copy_records else tuple(records)
+    by_id = {row.candidate_id: row for row in snapshot}
     with _CANDIDATE_LOAD_CACHE_LOCK:
-        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot)
+        _CANDIDATE_LOAD_CACHE[str(path)] = (probe[0][:4], probe[1], snapshot, by_id)
         _CANDIDATE_LOAD_CACHE.move_to_end(str(path))
         while (len(_CANDIDATE_LOAD_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS
                or sum(entry[0][1] for entry in _CANDIDATE_LOAD_CACHE.values()) > _CANDIDATE_LOAD_CACHE_MAX_BYTES):
@@ -152,29 +154,42 @@ def _cached_candidate_rows(path: Path, probe, *, evict_on_miss: bool) -> tuple[M
         return None
 
 
-# LLM: 单条查询与快照复核在缓存命中时只深复制目标候选，避免万级账本每次 get/locked_snapshot 全表深拷贝；
-#   缓存未命中或 _load_unlocked 被测试替换时仍完整走 _load_unlocked 验证全表坏行、schema 与重复 ID。
-# 函数用途: 在持有候选文件锁的前提下按 candidate_id 精确读取单条候选。
+# LLM: 借用入口保持全表校验和加载覆盖；仅复用同一元组代次的ID索引，返回值深复制，不向外泄漏缓存模型。
+# 函数用途: 持候选文件锁按ID常数时间查询，缓存超预算时保留完整加载后的遍历。
 def _load_one_candidate_unlocked(service: CandidateService, candidate_id: str) -> MemoryCandidate | None:
-    if (
-        "_load_unlocked" in service.__dict__
-        or getattr(service._load_unlocked, "__func__", None) is not CandidateService._load_unlocked
-    ):
+    rows = _borrow_candidate_readonly_rows(service)
+    if rows is None:
         return next((row for row in service._load_unlocked() if row.candidate_id == candidate_id), None)
-    cached = _cached_candidate_rows(service.path, _candidate_load_probe(service.path), evict_on_miss=False)
-    if cached is not None:
-        matched = next((row for row in cached if row.candidate_id == candidate_id), None)
-        return deepcopy(matched) if matched is not None else None
-    return next((row for row in service._load_unlocked() if row.candidate_id == candidate_id), None)
+    with _CANDIDATE_LOAD_CACHE_LOCK:
+        cached = _CANDIDATE_LOAD_CACHE.get(str(service.path))
+        indexed = cached is not None and cached[2] is rows
+        matched = cached[3].get(candidate_id) if indexed else None
+    if not indexed:
+        matched = next((row for row in rows if row.candidate_id == candidate_id), None)
+    return deepcopy(matched) if matched is not None else None
 
 
-# LLM: 调用方必须持原候选文件锁；实例/子类覆盖加载时不绕过其语义，仅借用已验证缓存且不修改记录。
-# 函数用途: 为只读列表和统计取得当前稳定的候选快照，未命中交回原加载器。
+# LLM: 调用方持原文件锁且只读模型；加载覆盖返回None，冷读严格解析后独占交缓存，不复制全账本。
+# 函数用途: 为列表、统计、单条与内部扫描借用当前已验证候选元组。
 def _borrow_candidate_readonly_rows(service: CandidateService) -> tuple[MemoryCandidate, ...] | None:
     if ('_load_unlocked' in service.__dict__
             or getattr(service._load_unlocked, '__func__', None) is not CandidateService._load_unlocked):
         return None
-    return _cached_candidate_rows(service.path, _candidate_load_probe(service.path), evict_on_miss=True)
+    cached = _cached_candidate_rows(service.path, _candidate_load_probe(service.path), evict_on_miss=True)
+    if cached is not None:
+        return cached
+    probe, records = service._parse_candidate_ledger_unlocked()
+    snapshot = tuple(records)
+    _remember_candidate_load(service.path, probe, snapshot, copy_records=False)
+    return snapshot
+
+
+# LLM: 只复制容器不复制模型；状态过滤、稳定排序与正limit取末尾的规则供公开列表和内部借用共用。
+# 函数用途: 计算候选扫描的实际返回切片，不修改原候选元组。
+def _candidate_read_slice(rows, statuses, limit):
+    records = [row for row in rows if statuses is None or row.status in statuses]
+    records.sort(key=lambda row: (row.created_at, row.candidate_id))
+    return records[-limit:] if limit > 0 else records
 
 
 # LLM: 仅遍历已验证候选的标量字段，既不复制、排序、修改候选，也不泄露任何记录引用；兼容一次性Iterable。
@@ -215,7 +230,8 @@ class CandidateStateChangedError(RuntimeError):
 
 # LLM: Service 只接收结构化 observation/review；不解析聊天正文或相似文本。
 # LLM: C只给原目录/锁FD/raw末写接当前scope；所有状态机/merge/CAS/配额原算法保持，同步锁不缩短。
-# 类用途: 管理原owner唯一候选源，不创建第二状态或保存活来源。
+# LLM: 写后继续失效缓存；readonly_rows只供内部只读提取，公开list/get与写侧模型仍深复制隔离。
+# 类用途: 管理owner唯一候选源及同代只读索引，不创建第二事实源或保存活来源。
 class CandidateService:
     # LLM: 构造器只绑定 owner 规范路径和可选 quota；创建目录不读取或迁移旧候选源。
     # LLM: coordinator_io只存策略，目录出生消费原scope；quota与唯一候选身份不变，不存source/callback。
@@ -271,8 +287,8 @@ class CandidateService:
             _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return results
 
-    # LLM: 原path锁内仅借用已完整验证的缓存元组；先过滤排序切片再深拷贝结果，未命中或覆盖加载仍走原严格验证。
-    # 函数用途: 只复制实际返回的候选，保持排序、limit及嵌套返回值隔离，不改变原锁和写侧状态机。
+    # LLM: 冷热均先严格验证/借用、过滤排序切片，再且仅深复制实际结果；覆盖加载仍由原方法提供。
+    # 函数用途: 返回可由调用方安全修改的独立候选列表，保持原筛选与排序规则。
     def list(
         self,
         *,
@@ -284,14 +300,19 @@ class CandidateService:
             if borrowed is None:
                 loaded = self._load_unlocked()
         source_rows = borrowed if borrowed is not None else loaded
-        if statuses is not None:
-            records = [item for item in source_rows if item.status in statuses]
-        else:
-            records = list(source_rows)
-        records.sort(key=lambda item: (item.created_at, item.candidate_id))
-        if limit > 0:
-            records = records[-limit:]
-        return deepcopy(records) if borrowed is not None else records
+        records = _candidate_read_slice(source_rows, statuses, limit)
+        return deepcopy(records)
+
+    # LLM: 仅内部消费者只读提取字段，不得修改候选或嵌套字段；实例/子类覆盖list或load时调用原覆盖入口。
+    # 函数用途: 在原文件锁内生成只读扫描元组，避免保留规划和学习排除复制全账本。
+    def readonly_rows(self, *, statuses: set[str] | frozenset[str] | None = None,
+                      limit: int = 0) -> tuple[MemoryCandidate, ...]:
+        if ("list" in self.__dict__ or getattr(self.list, "__func__", None) is not CandidateService.list
+                or "_load_unlocked" in self.__dict__
+                or getattr(self._load_unlocked, "__func__", None) is not CandidateService._load_unlocked):
+            return tuple(self.list(statuses=statuses, limit=limit))
+        with self._locked_candidates():
+            return tuple(_candidate_read_slice(_borrow_candidate_readonly_rows(self), statuses, limit))
 
     # LLM: candidate_id 是唯一定位键；禁止按正文或 subject 模糊选中审核目标。
     #   默认走锁内单条定位，命中缓存时只深拷贝目标候选而不再深拷贝和排序全表；若 list 被外部替身替换则保留原遍历。
@@ -518,12 +539,12 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
-    # LLM: retention 只选合法未晋升状态且严格早于 updated_at cutoff；已脱敏版本墓碑不得重复规划。
-    # 函数用途: 规划超过保留期的未晋升候选 ID，不执行删除。
+    # LLM: 内部只读扫描仍保留list/load覆盖；仅选合法未晋升且严格早于cutoff，墓碑不重复规划。
+    # 函数用途: 不复制全账本地规划过期候选ID，不执行删除。
     def retention_candidates(self, *, before: datetime) -> list[str]:
         cutoff = before.astimezone(timezone.utc)
         result: list[str] = []
-        for item in self.list(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
+        for item in self.readonly_rows(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
             if _is_binding_tombstone(item):
                 continue
             if datetime.fromisoformat(item.updated_at) < cutoff:
@@ -590,13 +611,21 @@ class CandidateService:
         options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
         return locked_json_path(self.path, **options)
 
-    # LLM: 原path锁覆盖读取；小文件每次强摘要，大文件按完整五元stat复用摘要；缓存出入深复制，坏行/schema/重复ID仍阻断。
-    # 函数用途: 严格加载候选，只在内容未变时跳过重复JSONL解析和模型验证。
+    # LLM: 写侧取得可修改的独立模型；热快照深复制，冷解析以copy_records=True隔离缓存，写后失效协议不变。
+    # 函数用途: 在原文件锁内加载可安全修改的候选列表。
     def _load_unlocked(self) -> list[MemoryCandidate]:
         probe = _candidate_load_probe(self.path)
         cached = _cached_candidate_rows(self.path, probe, evict_on_miss=True)
         if cached is not None:
             return list(deepcopy(cached))
+        probe, records = self._parse_candidate_ledger_unlocked()
+        _remember_candidate_load(self.path, probe, records, copy_records=True)
+        return records
+
+    # LLM: 调用方持原文件锁；所有坏行、schema和重复ID仍阻断，只有完整验证成功才可交缓存。
+    # 函数用途: 单次解析候选账本并构造模型，供只读和写入加载路径分别选择复制策略。
+    def _parse_candidate_ledger_unlocked(self) -> tuple[tuple[_CandidateStatStamp, str] | None, list[MemoryCandidate]]:
+        probe = _candidate_load_probe(self.path)
         report = read_jsonl_objects_report(
             self.path,
             context="memory_candidates.load",
@@ -616,8 +645,7 @@ class CandidateService:
         ids = [item.candidate_id for item in records]
         if len(ids) != len(set(ids)):
             raise CandidateStoreCorruptError("candidate ledger contains duplicate candidate_id")
-        _remember_candidate_load(self.path, probe, records)
-        return records
+        return probe, records
 
 
 # LLM: 同一宿主观察身份被拿去对应另一个类型化主题时抛出；仍是 ValueError（原调用方的全有或全无语义不变），
@@ -629,8 +657,8 @@ class CandidateIdentityConflictError(ValueError):
 
 # LLM: 两个提交入口共用纯合并；先按规范证据及精确目标校验版本，再按候选/观察身份合并。
 #   正文、动作、入口和引用并集不刷新旧绑定；首拒草稿只保留版本责任，不赋予其范围条件/观察键占据合法身份的权力。
-#   同批观察依次累积；已晋升或脱敏行不属于首拒草稿，失败仍不写任何账本。
-# 函数用途: 将一批 observation 合并进已验证账本，先核对既有观察权威再返回完整新账本。
+#   ID/观察键→位置索引一次构建、逐条更新，不改变typed identity、首拒草稿或目标版本权威，不按正文hash越界去重。
+# 函数用途: 以索引合并观察，消除每条观察重建全表字典、扫描观察键和查找列表位置。
 def merge_candidate_observations(
     candidates: list[MemoryCandidate],
     observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
@@ -638,28 +666,38 @@ def merge_candidate_observations(
     prepared = _prepare_observations(observations)
     result = list(candidates)
     bindings = TargetEvidenceVersionBindings(result)
+    by_id = {item.candidate_id: index for index, item in enumerate(result)}
+    by_observation: dict[str, set[int]] = {}
+    for index, item in enumerate(result):
+        if not _rejected_draft(item):
+            for key in item.observation_keys:
+                by_observation.setdefault(key, set()).add(index)
     committed: list[MemoryCandidate] = []
     for normalized, candidate_id, observation_key in prepared:
         if bindings.conflicts(normalized):
             raise CandidateIdentityConflictError("candidate evidence cannot refresh target observation version")
-        matches = [item for item in result
-                   if observation_key in item.observation_keys and not _rejected_draft(item)]
+        positions = sorted(by_observation.get(observation_key, ()))
+        matches = [result[index] for index in positions]
         if any(not _same_candidate_identity(item, normalized) for item in matches):
             raise CandidateIdentityConflictError(
                 "candidate observation identity was reused for a different typed subject"
             )
-        by_id = {item.candidate_id: item for item in result}
-        existing = by_id.get(candidate_id) or next(iter(matches), None)
-        if existing is None:
+        index = by_id.get(candidate_id, positions[0] if positions else None)
+        if index is None:
             candidate = _new_candidate(normalized, candidate_id, observation_key)
+            index = len(result)
             result.append(candidate)
         else:
+            existing = result[index]
             if not _rejected_draft(existing) and not _same_candidate_identity(existing, normalized):
                 raise CandidateIdentityConflictError(
                     "candidate observation identity was reused for a different typed subject"
                 )
             candidate = _merge_candidate(existing, normalized, observation_key)
-            result[result.index(existing)] = candidate
+            result[index] = candidate
+        by_id[candidate.candidate_id] = index
+        if not _rejected_draft(candidate) and observation_key in candidate.observation_keys:
+            by_observation.setdefault(observation_key, set()).add(index)
         bindings.add(normalized)
         committed.append(candidate)
     return result, committed

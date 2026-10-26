@@ -1,3 +1,5 @@
+# LLM: 父等待补偿独立实时扫描并只复制匹配者；保留原列表异常及best-effort坏行合同，不跨阶段冻结。
+# 模块用途: 管理直属父子等待与唤醒，减少空闲巡检复制但不改变canonical裁决。
 from __future__ import annotations
 
 """LLM: Own the recursive parent-child wait contract for every subagent depth.
@@ -199,13 +201,15 @@ def _host_stopping() -> bool:
     return model_call_admission_closure() is not None
 
 
-# LLM: 等待账不可读时返回 unavailable 和错误类型，不把未知伪装为 checked=0 的健康快照。
-# 函数用途: 补偿父子唤醒事件，并向监督层明确报告本次是否真的完成扫描。
+# LLM: 先筛选等待标记再复制；逐文件load_errors仍best-effort，列表自身抛错才返回原unavailable合同。
+# 函数用途: 按需补偿父子唤醒，保留扫描失败与健康无等待的区别。
 def reconcile_all_parent_waits(manager: Any) -> dict[str, object]:
+    from .manager import select_manager_runs
+
     checked = 0
     released: list[str] = []
     try:
-        tasks = manager.list_runs()
+        tasks = select_manager_runs(manager, parent_wait_blocks_dispatch)
     except Exception as exc:
         return {"ok": False, "state": "unavailable", "checked": None, "released": 0,
                 "released_run_ids": [], "error_code": "PARENT_WAIT_LOAD_ERROR", "error_type": type(exc).__name__}

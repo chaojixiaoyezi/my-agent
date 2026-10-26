@@ -1,6 +1,7 @@
 # LLM: 原owner维护实消费合同；只使用临时真实C/P3/claim及main保留服务，不替代实际权限或重建维护来源。
 # 模块用途: 复现已冻结maintenance来源到现main叶子签名缺口，并约束W不压shared索引。
 import json
+import os
 from contextlib import contextmanager
 
 import pytest
@@ -12,6 +13,16 @@ from agent_py_agent.tests.test_gateway_background_curator_transactions import (
 )
 from agent_py_agent.tests.test_gateway_claim_transition_scope import actual as actual
 from agent_py_agent.tests.test_owner_maintenance import _home_with_old_cache
+
+
+def test_perf_e_actual_c_reclaims_orphan_sidecar_along_original_transition(tmp_path, monkeypatch):
+    with curator_case(tmp_path, monkeypatch, source_kind='maintenance') as (agent, _, _, gate, claim, _):
+        orphan = agent.home_paths.owner_memory_dir / 'retired.json.lock'
+        orphan.write_text('')
+        os.utime(orphan, (1, 1))
+        response = run_original(agent, gate, claim)
+        assert response['ok'] is True
+        assert not orphan.exists()
 
 
 def test_count0_original_leaf_can_skip_shared_indexes_without_changing_retention(tmp_path, monkeypatch):

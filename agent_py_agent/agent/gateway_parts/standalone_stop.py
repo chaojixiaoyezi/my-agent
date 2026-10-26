@@ -42,8 +42,8 @@ def _stop_sources(context, home):
         return None, [{"reason": "stop_sources_unreadable", "ref": "canonical_sources"}]
 
 
-# LLM: root/home/原context身份由同scope实际持锁对象核定；本函数不创建旧MP角色、P4或closure。
-# 函数用途: 正常cleanup之后原子追加停止来源，阻断事实保留供后继给出行动错误。
+# LLM: 仅NORMAL_STOP_KINDS采集迁移来源；planned_restart沿原持锁交接，不扫描库存或签MP/closure；原state CAS保持。
+# 函数用途: 正常cleanup后保存停止事实，计划重启仅记原交接阻断，避免锁内无用的全home双扫描。
 def record_standalone_stop(context, lifecycle, cleanup):
     lifecycle.require_held()
     if (context.control_plane is not None or type(context.coordinator_worker_count) is not int
@@ -56,16 +56,17 @@ def record_standalone_stop(context, lifecycle, cleanup):
             or state.get("process_identity") != context.process_identity):
         raise ValueError("standalone_normal_stop_source_required")
     home = home_paths(configured_home_root(context.config)).root
-    sources, blockers = _stop_sources(context, home)
+    if state["termination_kind"] in NORMAL_STOP_KINDS:
+        sources, blockers = _stop_sources(context, home)
+    else:
+        sources = None
+        blockers = [{"reason": "planned_restart_requires_original_handover", "ref": "termination_kind"}]
     fact = {"schema_version": STANDALONE_STOP_SCHEMA, "root": str(context.paths.root), "home": str(home),
             "config_path": str(context.config_path.resolve()), "process_identity": dict(context.process_identity),
             "started_at": context.process_started_at, "status": "stopped", "termination_kind": state["termination_kind"],
             "cleanup": {key: cleanup[key] for key in ("drain_complete", "alive_threads", "interrupted_model_calls",
                 "host_shutdown_executors", "surviving_background_sessions")},
             "sources": sources, "blockers": blockers}
-    if fact["termination_kind"] not in NORMAL_STOP_KINDS:
-        fact["blockers"].append({"reason": "planned_restart_requires_original_handover", "ref": "termination_kind"})
-
     # LLM: 原state事务内重核完整raw与实际原锁，任何漂移不覆盖；只追加本次fact，不宣称physicalquiet。
     # 函数用途: 保存同一正常终止投影中的版本化来源。
     def update(current):

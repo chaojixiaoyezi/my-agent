@@ -1,9 +1,13 @@
+# LLM: 连续证据共用折叠算法；文件评估以有界头摘要守护增量游标，不写证据、不认证并发写者。
+# 模块用途: 监督生产 watch 并评估连续证明，不生成模拟证据。
 """生产 watch 长守监督与连续证据，不生成模拟事件、不读取专项 harness answer-key。"""
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from itertools import chain
@@ -22,6 +26,9 @@ from agent_py_agent.agent.ingestion.watch_state import (
 from agent_py_agent.agent.ingestion.watch_tool import WatchStreamTool
 
 from ..common.json_io import jsonl_lines
+from ..common.nofollow_fs import open_readonly_file_beneath
+
+_HEAD_DIGEST_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,180 @@ class ProofMetrics:
     healthy_sources: int = 0
     signatures: int = 0
     maximum_gap: float = 0.0
+
+
+# LLM: 全量和流式评估共用唯一连续区间算法，只保留七个标量，不驻留历史样本或watches。
+# 类用途: 以O(1)空间维护最新连续合格证据区间。
+@dataclass
+class _ProofAccumulator:
+    has_rows: bool = False
+    previous_at: float | None = None
+    latest_at: float = 0.0
+    segment_start: float | None = None
+    segment_maximum_gap: float = 0.0
+    latest_healthy: int = 0
+    latest_signatures: int = 0
+
+    # LLM: 样本按单调非递减时间折叠；不合格、负间隙和超大间隙保持原全量重置规则。
+    # 函数用途: 更新区间起点、最大间隙及最新源计数。
+    def push(self, observed_at: float, healthy: int, signatures: int, policy: ContinuousProofPolicy) -> None:
+        self.has_rows = True
+        self.latest_at = observed_at
+        self.latest_healthy = healthy
+        self.latest_signatures = signatures
+        gap = observed_at - self.previous_at if self.previous_at is not None else 0.0
+        qualifies = healthy >= policy.minimum_sources and signatures >= policy.minimum_signatures
+        if not qualifies or gap < 0 or gap > policy.maximum_sample_gap_seconds:
+            self.segment_start = observed_at if qualifies else None
+            self.segment_maximum_gap = 0.0
+        elif self.segment_start is None:
+            self.segment_start = observed_at
+        else:
+            self.segment_maximum_gap = max(self.segment_maximum_gap, gap)
+        self.previous_at = observed_at
+
+    # LLM: 导出不可变统计，不修改折叠状态，持续时长的截断及负值处理与原实现一致。
+    # 函数用途: 计算当前连续合格秒数与统计结果。
+    def metrics(self) -> ProofMetrics:
+        duration = max(0, int(self.latest_at - self.segment_start)) if self.segment_start is not None else 0
+        return ProofMetrics(duration, self.latest_healthy, self.latest_signatures, self.segment_maximum_gap)
+
+
+# LLM: 单调追加只解析新增LF字节，以最多4KiB头摘要探测增长覆写；乱序临时保留标量投影。
+# 类用途: 长期以固定常驻状态增量评估一个证据文件。
+class ContinuousProofFileEvaluator:
+    # LLM: 每个实例独占自己的游标和累积器，构造时不访问文件、不写入或启动服务。
+    # 函数用途: 创建证据文件评估器并初始化固定大小状态。
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._reset()
+
+    # LLM: stat变化时摘要未知/不匹配均重读；跨4KiB补齐摘要，数据读取异常清缓存、语义异常继续传播。
+    # 函数用途: 从新增证据或安全重算结果生成本轮公开报告。
+    def evaluate(self, policy: ContinuousProofPolicy | None = None) -> dict[str, Any]:
+        cfg = policy or ContinuousProofPolicy()
+        try:
+            stat = self.path.stat()
+            identity = (stat.st_dev, stat.st_ino)
+            stamp = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            reset = self._needs_reset(identity, stamp, cfg)
+            if not reset and self._committed_offset > 0 and stamp != self._last_stat_stamp:
+                reset = not self._head_digest or _file_head_digest(self.path, self._committed_offset) != self._head_digest
+            if reset:
+                self._reset()
+                self._file_identity, self._policy = identity, cfg
+            previous_offset = self._committed_offset
+            effective_acc = self._read_incremental(cfg)
+            if effective_acc is None:
+                effective_acc = self._evaluate_non_monotonic_stream(cfg)
+            if self._committed_offset > 0 and (
+                not self._head_digest
+                or previous_offset < _HEAD_DIGEST_BYTES and self._committed_offset != previous_offset
+            ):
+                # 旧前缀未满4KiB时，追加跨越上限也必须将摘要覆盖范围补齐。
+                self._head_digest = _file_head_digest(self.path, self._committed_offset)
+        except OSError:
+            self._reset()
+            return _proof("no_evidence", ProofMetrics())
+        except Exception:
+            self._reset()
+            raise
+        self._last_stat_stamp = stamp
+        if not effective_acc.has_rows:
+            return _proof("no_evidence", ProofMetrics())
+        metrics = effective_acc.metrics()
+        return _proof(_proof_reason(metrics, cfg), metrics)
+
+    # LLM: 原路径不变，清空旧文件/policy/游标/证明及字符串摘要，避免轮转后复用陈旧成功。
+    # 函数用途: 初始化或丢弃文件评估缓存。
+    def _reset(self) -> None:
+        self._file_identity: tuple[int, int] | None = None
+        self._committed_offset: int = 0
+        self._last_stat_stamp: tuple[int, int, int] | None = None
+        self._head_digest: str = ""
+        self._policy: ContinuousProofPolicy | None = None
+        self._accumulator = _ProofAccumulator()
+        self._non_monotonic = False
+
+    # LLM: 比较上次完整文件大小，补足未提交尾行存在时的同尺寸覆写/截断；正常增长不回扫历史。
+    # 函数用途: 判断当前文件与策略能否继续复用提交前缀。
+    def _needs_reset(self, identity, stamp, cfg: ContinuousProofPolicy) -> bool:
+        changed = self._last_stat_stamp is not None and stamp != self._last_stat_stamp
+        rewritten = changed and (stamp[0] == self._committed_offset or stamp[0] <= self._last_stat_stamp[0])
+        return (
+            identity != self._file_identity or self._policy != cfg
+            or stamp[0] < self._committed_offset or rewritten or self._non_monotonic
+        )
+
+    # LLM: LF才推进游标；无LF尾行在浅副本折叠后立即结束本轮，避免同时追加把尾行续片误当新行。
+    # 函数用途: 流式消费新行并返回本轮有效折叠状态。
+    def _read_incremental(self, cfg: ContinuousProofPolicy) -> _ProofAccumulator | None:
+        effective_acc = self._accumulator
+        with self.path.open("rb") as handle:
+            handle.seek(self._committed_offset)
+            while raw_line := handle.readline():
+                committed = raw_line.endswith(b"\n")
+                if committed:
+                    self._committed_offset += len(raw_line)
+                row = _evidence_row(raw_line)
+                if row is None and not committed:
+                    return effective_acc
+                if row is None:
+                    continue
+                observed_at = float(row.get("observed_at") or 0.0)
+                if self._accumulator.previous_at is not None and observed_at < self._accumulator.previous_at:
+                    self._non_monotonic = True
+                    return None
+                if not committed:
+                    effective_acc = copy.copy(self._accumulator)
+                healthy, signatures = _snapshot_health(row, cfg)
+                effective_acc.push(observed_at, healthy, signatures, cfg)
+                if not committed:
+                    return effective_acc
+        return effective_acc
+
+    # LLM: 乱序仅在本轮保存时间/索引/两个计数，稳定排序保持相等时间的文件顺序；不驻留原始watches。
+    # 函数用途: 流式重读并重算不满足单调追加假设的证据。
+    def _evaluate_non_monotonic_stream(self, cfg: ContinuousProofPolicy) -> _ProofAccumulator:
+        points: list[tuple[float, int, int, int]] = []
+        with self.path.open("rb") as handle:
+            for index, raw_line in enumerate(iter(handle.readline, b"")):
+                row = _evidence_row(raw_line)
+                if row is not None:
+                    healthy, signatures = _snapshot_health(row, cfg)
+                    points.append((float(row.get("observed_at") or 0.0), index, healthy, signatures))
+        points.sort(key=lambda point: (point[0], point[1]))
+        accumulator = _ProofAccumulator()
+        for observed_at, _index, healthy, signatures in points:
+            accumulator.push(observed_at, healthy, signatures, cfg)
+        return accumulator
+
+
+# LLM: 只按调用方给出的物理LF行解析；坏JSON/UTF8及非dict跳过，合法无LF尾行同样可用。
+# 函数用途: 将一条证据字节行解码为快照对象。
+def _evidence_row(raw_line: bytes) -> dict[str, Any] | None:
+    try:
+        text = (raw_line[:-1] if raw_line.endswith(b"\n") else raw_line).rstrip(b"\r").decode("utf-8")
+        row = json.loads(text)
+    except ValueError:
+        return None
+    return row if isinstance(row, dict) else None
+
+
+# LLM: 复用严格nofollow只读FD，每次实际read最多4KiB；关闭自有FD，OSError/空前缀返回空串。
+# 函数用途: 为已提交文件头计算固定大小SHA-256字符串，不读取整份历史。
+def _file_head_digest(path: Path, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    try:
+        descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+        try:
+            head_bytes = os.read(descriptor, min(limit, _HEAD_DIGEST_BYTES))
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return ""
+    return hashlib.sha256(head_bytes).hexdigest() if head_bytes else ""
 
 
 def discover_owner_homes(my_agent_home: Path) -> list[Path]:
@@ -200,30 +381,15 @@ def evaluate_continuous_proof(
     return _proof(reason, metrics)
 
 
+# LLM: 原全量排序后的样本只投影到共用折叠器，避免与增量路径出现两套重置/间隙算法。
+# 函数用途: 计算已排序样本的最后连续合格区间统计。
 def _proof_metrics(ordered: list[dict[str, Any]], policy: ContinuousProofPolicy) -> ProofMetrics:
-    segment_start: float | None = None
-    previous_at: float | None = None
-    segment_maximum_gap = 0.0
-    latest_healthy = 0
-    latest_signatures = 0
+    accumulator = _ProofAccumulator()
     for snapshot in ordered:
         observed_at = float(snapshot.get("observed_at") or 0.0)
         healthy, signatures = _snapshot_health(snapshot, policy)
-        latest_healthy = healthy
-        latest_signatures = signatures
-        gap = observed_at - previous_at if previous_at is not None else 0.0
-        qualifies = healthy >= policy.minimum_sources and signatures >= policy.minimum_signatures
-        if not qualifies or gap < 0 or gap > policy.maximum_sample_gap_seconds:
-            segment_start = observed_at if qualifies else None
-            segment_maximum_gap = 0.0
-        elif segment_start is None:
-            segment_start = observed_at
-        else:
-            segment_maximum_gap = max(segment_maximum_gap, gap)
-        previous_at = observed_at
-    latest_at = float(ordered[-1].get("observed_at") or 0.0)
-    duration = max(0, int(latest_at - segment_start)) if segment_start is not None else 0
-    return ProofMetrics(duration, latest_healthy, latest_signatures, segment_maximum_gap)
+        accumulator.push(observed_at, healthy, signatures, policy)
+    return accumulator.metrics()
 
 
 def _snapshot_health(snapshot: dict[str, Any], policy: ContinuousProofPolicy) -> tuple[int, int]:
@@ -282,6 +448,7 @@ def _proof(reason: str, metrics: ProofMetrics) -> dict[str, Any]:
 
 
 __all__ = [
+    "ContinuousProofFileEvaluator",
     "ContinuousProofPolicy",
     "append_snapshot",
     "build_snapshot",

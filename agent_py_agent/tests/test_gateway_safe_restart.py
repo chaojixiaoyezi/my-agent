@@ -60,6 +60,82 @@ def _agent(root: Path, **overrides) -> SimpleAgent:
     return SimpleAgent(config, root)
 
 
+# LLM: 仅临时规范state和真实生命周期锁；库存读口替身只用于断言调用次数，不签发迁移或进程死亡。
+# 函数用途: 对比计划重启零库存扫描与正常停止仍采集原责任摘要。
+@pytest.mark.parametrize("kind", ["planned_restart", "planned_stop", "signal_shutdown", "planned_update_stop"])
+def test_batch4_stop_scans_only_migration_eligible_termination(tmp_path, monkeypatch, kind):
+    from unittest.mock import Mock
+
+    from agent_py_agent.agent.gateway_parts import standalone_stop as stop
+    from agent_py_agent.agent.gateway_parts.standalone_lifecycle import standalone_lifecycle_guard
+
+    paths = _paths(tmp_path)
+    identity = {"host_id": "fixture-host", "pid": os.getpid(), "start_time": "fixture-birth"}
+    state = {"status": "stopped", "exit_code": 0, "termination_kind": kind, "process_identity": identity}
+    paths.state.write_text(json.dumps(state), encoding="utf-8")
+    context = SimpleNamespace(paths=paths, config=AgentConfig(my_agent_home=str(tmp_path / "home")),
+        config_path=tmp_path / "agent.yaml", process_identity=identity, process_started_at=1.0,
+        coordinator_worker_count=0, control_plane=None)
+    cleanup = dict(drain_complete=True, alive_threads=[], interrupted_model_calls=0,
+        host_shutdown_executors=0, surviving_background_sessions=[])
+    scan = Mock(return_value=({"digest": "synthetic-inventory"}, []))
+    monkeypatch.setattr(stop, "_stop_sources", scan)
+    with standalone_lifecycle_guard(paths.root) as lifecycle:
+        result = stop.record_standalone_stop(context, lifecycle, cleanup)
+        lifecycle.require_held()
+    fact = result["standalone_stop"]
+    assert scan.call_count == (0 if kind == "planned_restart" else 1)
+    assert fact["process_identity"] == identity and fact["cleanup"] == cleanup
+    assert fact["sources"] == (None if kind == "planned_restart" else {"digest": "synthetic-inventory"})
+    assert fact["blockers"] == ([{"reason": "planned_restart_requires_original_handover", "ref": "termination_kind"}]
+                                if kind == "planned_restart" else [])
+
+
+# LLM: 真实guard检查原FD与inode；POSIX诊断不成为锁权威，Windows仍保原首字节锁语义。
+# 函数用途: 验证锁内记录实际持锁PID、争用提示及释放后的重新取锁。
+def test_batch4_lifecycle_lock_records_holder_without_replacing_inode(tmp_path):
+    from agent_py_agent.agent.gateway_parts.standalone_lifecycle import (
+        StandaloneLifecycleUnavailable,
+        standalone_lifecycle_guard,
+    )
+
+    with standalone_lifecycle_guard(tmp_path) as lifecycle:
+        signature = lifecycle.signature
+        if os.name != "nt":
+            raw = lifecycle.path.read_text(encoding="utf-8")
+            assert raw.startswith("{"), "POSIX持锁成功后应写入有界诊断记录"
+            payload = json.loads(raw)
+            assert payload["pid"] == os.getpid() and payload["role"] == "standalone_gateway"
+            assert isinstance(payload["acquired_at"], (int, float)) and payload["acquired_at"] > 0
+        with pytest.raises(StandaloneLifecycleUnavailable) as error:
+            with standalone_lifecycle_guard(tmp_path):
+                pytest.fail("同一canonical锁不能重叠持有")
+        if os.name != "nt":
+            assert f"lock_record_pid={os.getpid()}" in str(error.value)
+        lifecycle.require_held()
+        info = lifecycle.path.stat()
+        assert (info.st_dev, info.st_ino) == signature
+    with standalone_lifecycle_guard(tmp_path) as successor:
+        successor.require_held()
+        assert successor.signature == signature
+
+
+# LLM: 只替换取锁结果，读取真实有界JSON；坏记录不能造成新异常或给出伪PID提示。
+# 函数用途: 检查争用诊断对合法、损坏、非字典和非法PID的退化。
+@pytest.mark.parametrize("raw,pid", [("{\"pid\":321}", 321), ("{", None), ("[]", None),
+    ("{\"pid\":true}", None), ("{\"pid\":-1}", None), ("{\"pid\":\"321\"}", None),
+    ('{"pid":321,"padding":"' + "x" * 600 + '"}', None)])
+def test_batch4_lifecycle_contention_reads_only_valid_bounded_holder_record(tmp_path, monkeypatch, raw, pid):
+    from agent_py_agent.agent.gateway_parts import standalone_lifecycle as lifecycle
+
+    (tmp_path / "coordinator.lock").write_text(raw, encoding="utf-8")
+    monkeypatch.setattr(lifecycle, "_try_flock_exclusive", lambda handle: False)
+    with pytest.raises(lifecycle.StandaloneLifecycleUnavailable) as error:
+        with lifecycle.standalone_lifecycle_guard(tmp_path):
+            pytest.fail("争用必须拒绝进入")
+    assert (f"lock_record_pid={pid}" in str(error.value)) if pid else "lock_record_pid=" not in str(error.value)
+
+
 def test_submit_schedules_then_coalesces_additional_requesters(tmp_path):
     paths = _paths(tmp_path)
     first = service.submit_restart_request(

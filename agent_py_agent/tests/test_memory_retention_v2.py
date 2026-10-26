@@ -613,3 +613,228 @@ def test_retention_atomic_snapshot_skip_does_not_block_unchanged_candidates(tmp_
     remaining = {row.candidate_id: row for row in candidates.list()}
     assert old_ids & remaining.keys() == {changed.candidate_id}
     assert remaining[changed.candidate_id].content == changed.content
+
+
+@pytest.mark.parametrize("operation", ["stats", "get", "list", "readonly", "retention", "plan", "exclusions"])
+def test_perf_e_cold_candidate_readers_do_not_copy_ledger(tmp_path, monkeypatch, operation):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.memory_store import candidates as module
+    from agent_py_agent.agent.memory_store.learning_exclusions import sync_learning_exclusion_marks
+
+    _home, candidates, _memory, service = _runtime(tmp_path)
+    rows, old_ids = _retention_drafts(candidates)
+    copies = []
+
+    def copy_spy(value):
+        copies.append(len(value) if isinstance(value, (list, tuple)) else 1)
+        return deepcopy(value)
+
+    module._drop_candidate_load_cache(candidates.path)
+    monkeypatch.setattr(module, "deepcopy", copy_spy)
+    for _ in range(2):  # 同一入口先冷后热，不能靠预热隐藏首次全表复制。
+        if operation == "stats":
+            assert candidates.stats()["total"] == len(rows)
+        elif operation == "get":
+            assert candidates.get(rows[-1].candidate_id) == rows[-1]
+        elif operation == "list":
+            assert len(candidates.list(limit=1)) == 1
+        elif operation == "readonly":
+            reader = getattr(candidates, "readonly_rows", None)
+            assert callable(reader), "missing readonly candidate scan"
+            assert len(reader(limit=1)) == 1
+        elif operation == "retention":
+            assert set(candidates.retention_candidates(before=NOW - timedelta(days=30))) == old_ids
+        elif operation == "plan":
+            assert service.plan(now=NOW).ok
+        else:
+            thread = SimpleNamespace(thread_id="excluded-thread", channel_bindings=[
+                SimpleNamespace(channel_conversation_id="excluded-chat")])
+            conversations = SimpleNamespace(threads=SimpleNamespace(list_report=lambda **kw: ([thread], [])))
+            assert sync_learning_exclusion_marks(conversation_store=conversations,
+                candidate_service=candidates, excluded_conversation_ids=frozenset({"excluded-chat"}))["marked"] == 0
+    assert all(size <= 1 for size in copies), copies
+    if operation not in {"list", "get"}:
+        assert copies == []
+
+
+def test_perf_e_candidate_get_uses_same_generation_id_index(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
+
+    _home, candidates, _memory, _service = _runtime(tmp_path)
+    rows, _ = _retention_drafts(candidates)
+    target = rows[-1].candidate_id
+    candidates.get(target)
+    original, lookups = MemoryCandidate.__getattribute__, []
+
+    def tracked(row, name):
+        if name == "candidate_id":
+            lookups.append(True)
+        return original(row, name)
+
+    monkeypatch.setattr(MemoryCandidate, "__getattribute__", tracked)
+    assert candidates.get(target).content == rows[-1].content
+    assert len(lookups) <= 2, len(lookups)
+
+
+@pytest.mark.parametrize("override", ["load_instance", "load_subclass", "list_instance", "list_subclass"])
+def test_perf_e_readonly_rows_preserves_override(tmp_path, monkeypatch, override):
+    _home, candidates, _memory, _service = _runtime(tmp_path)
+    rows, _ = _retention_drafts(candidates)
+    expected, calls = rows[:1], []
+
+    def load():
+        calls.append("load")
+        return expected
+
+    def listed(**kwargs):
+        calls.append(kwargs)
+        return expected
+
+    class Loaded(CandidateService):
+        def _load_unlocked(self):
+            return load()
+
+    class Listed(CandidateService):
+        def list(self, **kwargs):
+            return listed(**kwargs)
+
+    if override.endswith("subclass"):
+        candidates = (Loaded if override.startswith("load") else Listed)(candidates.path)
+    else:
+        monkeypatch.setattr(candidates, "_load_unlocked" if override.startswith("load") else "list",
+            load if override.startswith("load") else listed)
+    reader = getattr(candidates, "readonly_rows", None)
+    assert callable(reader), "missing readonly candidate scan"
+    assert reader(statuses={expected[0].status}, limit=1) == tuple(expected)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("bad_kind", ["json", "schema", "duplicate"])
+def test_perf_e_readonly_rows_rejects_corruption(tmp_path, bad_kind):
+    from agent_py_agent.agent.memory_store.candidates import CandidateStoreCorruptError
+
+    _home, candidates, _memory, _service = _runtime(tmp_path)
+    row = _reject_old_candidate(candidates)
+    payload = {"json": "{broken\n", "schema": "{}\n",
+        "duplicate": (json.dumps(row.to_record()) + "\n") * 2}[bad_kind]
+    candidates.path.write_text(payload)
+    reader = getattr(candidates, "readonly_rows", None)
+    assert callable(reader), "missing readonly candidate scan"
+    with pytest.raises(CandidateStoreCorruptError):
+        reader(statuses=set())
+
+
+def test_perf_e_observe_batch_builds_lookup_indexes_once(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.candidate_models import MemoryCandidate
+    from agent_py_agent.agent.memory_store.candidates import merge_candidate_observations
+
+    _home, candidates, _memory, _service = _runtime(tmp_path)
+    seeds = [CandidateObservation(candidate_type="long_term_fact", content=f"索引记录{index}",
+        subject_key=f"perf.lookup.{index}", scope=MemoryScope("personal", "personal"), origin="reviewed")
+        for index in range(100)]
+    rows = candidates.observe_many(seeds)
+    original, reads = MemoryCandidate.__getattribute__, []
+
+    def tracked(row, name):
+        if name == "candidate_id":
+            reads.append(True)
+        return original(row, name)
+
+    monkeypatch.setattr(MemoryCandidate, "__getattribute__", tracked)
+    merged, committed = merge_candidate_observations(rows, seeds[-12:])
+    assert len(merged) == 100 and len(committed) == 12
+    assert len(reads) < 600, len(reads)
+    assert all(row.occurrence_count == 1 for row in committed)
+
+
+@pytest.mark.parametrize("category", ["tmp", "cache"])
+def test_perf_e_retention_preserves_fresh_deleted_file_ancestors(tmp_path, category):
+    home, _candidates, _memory, service = _runtime(tmp_path)
+    root = home.owner_tmp_dir if category == "tmp" else home.owner_cache_dir
+    old = _old_file(root / "old-parent" / "child" / "old.tmp")
+    _set_policy(home, tmp_days=1, cache_days=1)
+    assert service.apply(now=NOW).applied
+    assert not old.exists()
+    assert old.parent.is_dir() and list(old.parent.iterdir()) == []
+    assert (root / "old-parent").is_dir()
+    assert root.is_dir()
+
+
+@pytest.mark.parametrize("category", ["tmp", "cache"])
+@pytest.mark.parametrize("fresh_depth", [0, 1])
+def test_perf_e_sweep_preserves_old_empty_dirs_beneath_fresh_ancestor(tmp_path, category, fresh_depth):
+    home, _candidates, _memory, service = _runtime(tmp_path)
+    root = home.owner_tmp_dir if category == "tmp" else home.owner_cache_dir
+    outer = root / "outer"
+    middle = outer / "middle"
+    target = middle / "old-empty"
+    target.mkdir(parents=True)
+    sibling = root / "old-unprotected"
+    sibling.mkdir()
+    for directory in (outer, middle, target, sibling):
+        os.utime(directory, (1, 1))
+    fresh = (outer, middle)[fresh_depth]
+    os.utime(fresh, (NOW.timestamp(), NOW.timestamp()))
+    report = service.apply(now=NOW)
+    assert report.applied and report.ok
+    assert all(directory.is_dir() for directory in (root, outer, middle, target))
+    assert not sibling.exists()
+
+
+def test_perf_e_empty_directory_cutoff_is_inclusive(tmp_path):
+    from agent_py_agent.agent.memory_store.retention_apply import _remove_empty_ephemeral_dir
+
+    root = tmp_path / "tmp"
+    target = root / "boundary"
+    target.mkdir(parents=True)
+    cutoff = NOW.timestamp() - 3600
+    os.utime(target, (cutoff, cutoff))
+    assert _remove_empty_ephemeral_dir(root, ("boundary",), before=cutoff)
+    assert root.is_dir() and not target.exists()
+
+
+@pytest.mark.parametrize("category", ["tmp", "cache"])
+def test_perf_e_retention_prunes_only_aged_empty_dirs_without_following_links(tmp_path, category):
+    home, _candidates, _memory, service = _runtime(tmp_path)
+    root = home.owner_tmp_dir if category == "tmp" else home.owner_cache_dir
+    stale, fresh, occupied = (root / name for name in ("stale", "fresh", "occupied"))
+    for path in (stale, fresh, occupied):
+        path.mkdir()
+    (occupied / "keep").write_text("new")
+    for path in (stale, occupied):
+        os.utime(path, (1, 1))
+    os.utime(fresh, (NOW.timestamp(), NOW.timestamp()))
+    external = tmp_path / "outside"
+    (external / "old-empty").mkdir(parents=True)
+    os.utime(external / "old-empty", (1, 1))
+    (root / "link").symlink_to(external, target_is_directory=True)
+    assert service.apply(now=NOW).applied
+    assert not stale.exists()
+    assert all(path.exists() for path in (root, fresh, occupied, external / "old-empty", root / "link"))
+
+
+def test_perf_e_legal_hold_does_not_prune_empty_directories(tmp_path):
+    home, _candidates, _memory, service = _runtime(tmp_path)
+    stale = home.owner_tmp_dir / "held"
+    stale.mkdir()
+    os.utime(stale, (1, 1))
+    _set_policy(home, legal_hold=True)
+    assert not service.apply(now=NOW).applied
+    assert stale.is_dir()
+
+
+def test_perf_e_redacted_candidate_does_not_occupy_unaccepted_observation_key(tmp_path):
+    from agent_py_agent.agent.memory_store.candidates import merge_candidate_observations
+
+    _home, candidates, _memory, _service = _runtime(tmp_path)
+    first = CandidateObservation(candidate_type="long_term_fact", content="旧主题正文", subject_key="old.subject",
+        scope=MemoryScope("personal", "personal"), origin="reviewed", observation_id="old-observation")
+    original = candidates.observe(first)
+    redacted = replace(original, content="", content_redacted_at=OLD, status="superseded")
+    replay = replace(first, observation_id="new-observation")
+    independent = replace(first, content="独立主题正文", subject_key="another.subject", observation_id="new-observation")
+    rows, committed = merge_candidate_observations([redacted], [replay, independent])
+    assert len(rows) == 2 and committed[0] is redacted
+    assert committed[1].subject_key == "another.subject"

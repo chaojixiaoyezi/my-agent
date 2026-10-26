@@ -1,10 +1,11 @@
-# LLM: manager 组合原 canonical 服务；原创建入口透传同一待提交对象，创建、换轮和控制使用同一 owner guard，不另立身份或生命周期入口。
-# 模块用途: 组装子代理状态、准备对象提交和执行服务，提供统一的短事务协调入口。
+# LLM: manager组合原canonical服务；选择读口只优化复制，旧列表覆盖仍优先，创建和控制保留原owner guard。
+# 模块用途: 组装子代理服务并转发实时按需列表，不另立状态快照或生命周期入口。
 """Subagent orchestration manager."""
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -40,6 +41,7 @@ from .services.indexing.records import LocalRecordParams
 from .services.lifecycle import SubAgentLifecycleService
 from .services.memory_candidates import SubAgentMemoryCandidateService
 from .services.persistence import SubAgentPersistenceService
+from .services.persistence.service import SubAgentListRunsReport
 from .services.runner_context_service import SubAgentRunnerContextService
 from .services.runner_result_service import SubAgentRunnerResultService
 from .services.takeover.run import SubAgentTakeoverRunService
@@ -75,8 +77,8 @@ class SubAgentManagerInitParams:
     owner_scope_root: str = ""
     owner_policy_snapshot: dict[str, object] | None = None
 
-# LLM: 服务共享同一 owner 路径、RuntimeDB 与 canonical 状态，协调锁只包短事务，不替代各领域权威。
-# 类用途: 提供子代理创建、执行和管理入口，组装各服务而不维护第二份运行状态。
+# LLM: 服务共享原owner/RuntimeDB/canonical；选择API每次委托新鲜扫描，协调锁仍只包短事务。
+# 类用途: 提供子代理创建、执行和实时列表入口，不维护第二份状态或整轮快照。
 class SubAgentManager(SubagentKernelMixin):
     """Coordinate focused subagent services behind one manager."""
 
@@ -237,6 +239,16 @@ class SubAgentManager(SubagentKernelMixin):
     def list_runs_report(self):
         return self.persistence.list_runs_report()
 
+    # LLM: 只转发原持久化选择扫描；回调只读私有任务，返回命中副本，不缓存跨阶段结果。
+    # 函数用途: 为巡检返回满足条件的实时任务副本。
+    def list_runs_selected(self, predicate: Callable[[SubAgentTask], bool] | None = None) -> list[SubAgentTask]:
+        return self.persistence.list_runs_selected(predicate)
+
+    # LLM: 结构化坏行仍由持久化扫描报告；不把load_errors改为列表异常或健康空结果。
+    # 函数用途: 转发按条件读取的任务副本与全部加载错误。
+    def list_runs_selected_report(self, predicate: Callable[[SubAgentTask], bool] | None = None) -> SubAgentListRunsReport:
+        return self.persistence.list_runs_selected_report(predicate)
+
     # LLM: Exact-id batch reads delegate to the persistence cache and never treat the selection
     # index as lifecycle authority. Callers receive canonical task copies plus structured errors.
     # 函数用途: 按一组明确 run_id 批量读取子代理，供状态界面避免扫描全部历史任务。
@@ -325,6 +337,27 @@ class SubAgentManager(SubagentKernelMixin):
 
     def _new_id(self, prefix: str) -> str:
         return _new_id(prefix)
+
+
+_DEFAULT_RUN_LIST_READERS = (
+    ("list_runs", SubAgentManager.list_runs, SubAgentPersistenceService.list_runs),
+    ("list_runs_report", SubAgentManager.list_runs_report, SubAgentPersistenceService.list_runs_report),
+)
+
+
+# LLM: 只对标准且旧读口未覆盖的manager提前筛选；实例/类替身仍沿原list_runs，异常不被吞掉。
+# 函数用途: 为各巡检阶段选择实时任务，保留旧测试与业务适配器的列表合同。
+def select_manager_runs(manager: Any, predicate: Callable[[Any], bool]) -> list[Any]:
+    if isinstance(manager, SubAgentManager) and callable(getattr(manager, "list_runs_selected", None)):
+        persistence = getattr(manager, "persistence", None)
+        if all(
+            name not in getattr(owner, "__dict__", {})
+            and getattr(getattr(owner, name, None), "__func__", None) is expected
+            for name, manager_reader, persistence_reader in _DEFAULT_RUN_LIST_READERS
+            for owner, expected in ((manager, manager_reader), (persistence, persistence_reader))
+        ):
+            return manager.list_runs_selected(predicate)
+    return [task for task in manager.list_runs() if predicate(task)]
 
 
 # LLM: 只有 status=TAKEN_OVER 且 task_replacement_successor 判为 taken_over 才算“已被接替”（已关闭来源只记 superseded_by 的不算）；

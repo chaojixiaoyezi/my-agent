@@ -1,3 +1,9 @@
+## 2026-10-26 网关 04:00 安全重启死锁修复、看门狗日志分离、管理员日志自诊与维护账本裁剪（已实现）
+
+- **网关 04:00 安全重启死锁修复（`supervisor.py`、`standalone_stop.py`、`standalone_lifecycle.py`）**：`SupervisorConfig.max_restart_attempts` 默认提升至 `20`，看门狗自身日志默认写入独立 `logs/supervisor.log`；看门狗感知 `gateway_state.json` 的 `planned_restart` 交接期（带 180 秒陈旧上限或真实存活进程核验），在交接期内等待原进程退出而不消耗崩溃重启配额，若旧进程逾时未退则基于 `pid + birth_token` 执行 `SIGTERM -> SIGKILL` 有序回收；`coordinator.lock` 写入持锁者诊断 JSON 并在冲突日志中输出持锁方身份；连续健康运行满 600 秒才重置重启计数。
+- **主管理员服务日志只读自诊（`path_access_policy.py`、`gateway_status.py`、`status_rendering.py`）**：允许主管理员（`local/main`）在 `full`/`auto`/`ask` 模式下通过文件工具只读自身 `logs/gateway.log` 与 `logs/supervisor.log`（保持禁止写入、禁止符号链接越界、禁止普通用户读取）；`gateway_status` 新增 `include_log_tail`、`log_source`、`log_scope`、`log_tail_lines`、`log_query` 参数返回有界脱敏日志尾段。
+- **锁侧车清理与维护事件有界裁剪（`gateway_parts/io.py`、`owner_maintenance.py`）**：`gateway_parts/io.py` 在幂等记录删除或过期清理后同步回收孤立 `.lock` 侧车文件；`owner_maintenance.py` 在每次追加后将 `events.jsonl` 原子裁剪在 `2 MiB` / `2000` 行以内。
+
 ## 2026-10-25 七项底座控制接入、20 项 v2 动作与后台稳定性（工作区源码已落地，待组合验收）
 
 - `/dir` 与 `/fork` 沿 Gateway 原控制服务接入 `conversation/workspace_context.py`，复核当前 owner、管理员权限、目录与线程修订；换目录不换 `owner_home`，分叉不复制源任务/运行授权。项目四类资产覆盖/晋升及全部准确动作名见 [设计台账本轮条目](../../../DESIGN_LEDGER.md)。

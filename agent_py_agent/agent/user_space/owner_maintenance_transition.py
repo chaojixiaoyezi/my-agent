@@ -24,7 +24,8 @@ def _state_bytes(home):
 
 
 # LLM: callback来自原C/W执行门；不改source快照，逐写同时重核原policy/state，已有局部副作用不回滚或伪造未进入。
-# 函数用途: 长扫描在门外，原维护动作和最终状态按同一活scope分步提交。
+# LLM: 新增owner孤儿伴生锁逐文件沿同一commit核policy/state；目录扫描不占T，逻辑锁不回收。
+# 函数用途: 在门外扫描并沿原活scope逐步提交保留、孤儿锁及其它维护，最后写原状态。
 def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
@@ -34,6 +35,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
         _tighten_archive_permissions,
         _write_maintenance_result,
         owner_maintenance_due,
+        reclaim_owner_orphan_lock_files,
     )
 
     before = _state_bytes(home)
@@ -63,6 +65,7 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
 
     retention = apply_owner_retention(home, now=datetime.fromtimestamp(now, timezone.utc),
         commit_transition=commit, expected_policy_fingerprint=policy)
+    reclaim_owner_orphan_lock_files(home, commit_transition=commit)
     reclaimed, error = _reclaim_text_vector_cache_orphans(home, commit_transition=commit)
     permissions = _tighten_archive_permissions(home, commit_transition=commit)
     backfill = _backfill_hung_runs(home, now=now, commit_transition=commit)

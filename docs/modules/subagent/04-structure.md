@@ -1,3 +1,7 @@
+## 2026-10-26 子代理持久化按需筛选接口与 OPEN 能力延迟目录同步结构
+
+`subagents/services/persistence/service.py::SubAgentPersistenceService` 提供 `list_runs_selected` 与 `list_runs_selected_report`，在未覆盖 `_cached_run_copy` 时先以 `_cached_run_ref` 执行只读 `predicate` 过滤，仅对命中条目执行锁外 `copy.deepcopy`；`subagents/manager.py::select_manager_runs` 在检测到 `list_runs` / `list_runs_report` 被测试替身或子类覆盖时自动回退旧读口，否则委托 `list_runs_selected`，由 `direct_parent_lifecycle.py` 与 `agent_core/orchestration/dispatch/capability_auto_sweep.py` 共用。`subagents/services/capability_service.py` 在执行 `OPEN` 能力检索前调用宿主 `ensure_mcp_catalog_ready` 同步延迟连接的普通 MCP 目录。
+
 ## 2026-10-25 子代理持久化 4096 缓存扩容、缺失单次读取与锁外深拷贝结构
 
 `subagents/services/persistence/service.py::SubAgentPersistenceService` 将 `_MAX_RUN_CACHE_ENTRIES` 与 `_MAX_NEGATIVE_RUN_CACHE_ENTRIES` 提升至 `4096`，`_load_from_locator` 在锁内仅读取或发布不可变快照引用并在 `_run_cache_lock` 锁外执行 `copy.deepcopy`；`subagents/services/agent_run_state.py::read_agent_state_payload` 在声明路径与解析路径一致且目标 `canonical_state.json` 缺失时通过原 `FileNotFoundError.canonical_path` 直接携带已核验路径，由 `_cache_missing_canonical`（兼容旧 3 位置参数与可选 `canonical_path`）免除二次解析 `task.json`。

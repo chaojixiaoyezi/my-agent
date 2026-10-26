@@ -1,4 +1,5 @@
 # LLM: host 仅执行已批准 argv；stdio 直接继承管道并绑定 launcher，日志后台沿旧默认寿命，原进程账仍唯一。
+#   强制监听检查保持2秒，仅告警模式按运行时长退避，已有告警后不再读取socket表或写告警事务。
 # 模块用途: 独立托管命令并记录真实终态，分开日志与协议字节，不转发数据或伪造退出成功。
 from __future__ import annotations
 
@@ -45,6 +46,14 @@ _LISTEN_CHECK_SECONDS = 2.0
 # 函数用途: 首秒50ms、十秒内150ms、长期250ms观察一次，保留短命令灵敏度。
 def _monitor_poll_interval(elapsed_s: float) -> float:
     return _HOST_POLL_SECONDS if elapsed_s < 1.0 else 0.15 if elapsed_s < 10.0 else 0.25
+
+
+# LLM: 强制拦截保持_LISTEN_CHECK_SECONDS，避免延迟终止晚绑定的越界监听；仅告警模式启动后分级退避。
+# 函数用途: 计算下一次监听范围检查的间隔秒数，不改变存活检查或业务组长回收顺序。
+def _listen_check_interval(elapsed_s: float, *, enforce: bool) -> float:
+    if enforce or elapsed_s < 10.0:
+        return _LISTEN_CHECK_SECONDS
+    return 10.0 if elapsed_s < 60.0 else 30.0
 
 
 # LLM: 监控期只读的结构化策略，全部来自已校验的启动交接文件；不从记录正文或命令推断。
@@ -330,6 +339,7 @@ def _direct_child_exited_unreaped(child: subprocess.Popen[bytes]) -> bool | None
 #   只有宿主显式要求时，handoff后仍受launcher和原期限约束，监听与终态账不变。
 #   成功记录仅在stat稳定、无redo且半秒以内复用，不缓存停止裁决或绕过终止前的原权威事务。
 #   仅睡眠按本host单调已运行时长退避；首秒仍保持原观察间隔，绝不以Popen.wait提前回收组长。
+#   强制监听检查始终2秒；仅告警模式已有listener_warning后零socket探测、零告警事务，未告警时分级退避。
 # 函数用途: 持续检查停止、寿命和日志上限，用不回收的退出观察驱动原终止树入口及结果持久化。
 def _monitor_child(
     store: ProcessSessionStore,
@@ -349,8 +359,12 @@ def _monitor_child(
         record = report.record
         reason = _stop_reason(record, max_log_bytes, deadline_monotonic=policy.deadline_monotonic,
                               stop_on_launcher_exit=policy.stop_on_launcher_exit)
-        if not reason and policy.listen_scope != "lan" and time.monotonic() >= next_listen_check:
-            next_listen_check = time.monotonic() + _LISTEN_CHECK_SECONDS
+        if (not reason and policy.listen_scope != "lan"
+                and (policy.listen_scope_enforce or not record.get("listener_warning"))
+                and time.monotonic() >= next_listen_check):
+            now = time.monotonic()
+            next_listen_check = now + _listen_check_interval(
+                now - started_monotonic, enforce=policy.listen_scope_enforce)
             reason = _listen_scope_check(store, session_id, child.pid, policy.listen_scope, policy.listen_scope_enforce)
         ended = _direct_child_exited_unreaped(child)
         if ended is None:

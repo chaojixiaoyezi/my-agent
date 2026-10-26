@@ -1,5 +1,5 @@
-# LLM: 本片只经工具公开入口验证行为；所有资产和进程均在pytest临时Owner内，不接网络或模型。
-# 模块用途: 守住脚本CRUD、源评估、工作流引用、Skill绑定、失败续跑和工具副作用声明。
+# LLM: 工具入口与真实受限子进程分开验证；网络仅用测试自建回环socket或无IO替身，不访问在线Gateway或模型。
+# 模块用途: 守住脚本/工作流合同以及S1–S4的路径、metadata、环境和网络边界。
 import importlib
 import importlib.util
 import json
@@ -797,3 +797,428 @@ def test_script_runner_mounts_portable_python_runtime_roots(api, tmp_path, monke
         pass
     assert len(captured_specs) == 1
     assert releases_rt.resolve(strict=False) in captured_specs[0].public_read_roots
+
+
+# LLM: 真实Store、冻结代码和独立Python子进程，不启平台沙箱，结果只能证明Python守卫而非内核隔离。
+# 函数用途: 执行仅访问合成临时数据的受限脚本。
+def _sec_f_guard_run(api, tmp_path, code, *, allowed=(), network=True):
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+
+    owner = tmp_path / 'owner'
+    register(api[0](owner), code=code)
+    result = ScriptRunner(owner, use_sandbox=False, restrict_to_roots=True,
+        public_read_roots=allowed, extra_write_roots=allowed).run_script('collect', network_access=network)
+    assert result.ok, result.stderr_preview
+    return result.output_data['value']
+
+
+# LLM: 包含/tmp到/private/tmp的宿主别名；仅解析路径，不在这些真实目录创建文件。
+# 函数用途: 验证容器、home父目录及严格祖先被识别，具体私有目录不被误删。
+@pytest.mark.parametrize('path,home,broad', [
+    ('/', '/deep/my/home', True), ('/tmp', '/deep/my/home', True),
+    ('/private/tmp', '/deep/my/home', True), ('/private/var', '/deep/my/home', True),
+    ('/Users', '/deep/my/home', True), ('/home', '/deep/my/home', True),
+    ('/deep/my', '/deep/my/home', True), ('/deep/my', '/deep/my/folder/home', True),
+    ('/deep/my/home', '/deep/my/home', False), ('/deep/other', '/deep/my/home', False),
+])
+def test_sec_f_broad_container_root_classification(path, home, broad):
+    from pathlib import Path
+
+    from agent_py_agent.agent.workflows import script_runner
+
+    assert script_runner._is_broad_container_root(Path(path), Path(home)) is broad
+
+
+# LLM: 不调用网络，只捕获真实_prepare构造的Attempt规格与守卫载荷，网络关闭也须保留守卫端口列表。
+# 函数用途: 验证Gateway端口在普通与受限脚本两种规格中接通。
+@pytest.mark.parametrize('restricted', [False, True])
+@pytest.mark.parametrize('network', [False, True])
+def test_sec_f_prepare_projects_gateway_ports(api, tmp_path, monkeypatch, restricted, network):
+    from agent_py_agent.agent.attempt import sandbox as attempt
+    from agent_py_agent.agent.workflows import script_runner
+
+    monkeypatch.setattr(attempt, '_LOCAL_GATEWAY_PORTS', {65431})
+    captured = []
+    original = script_runner.AttemptExecutionSandbox
+
+    # LLM: 只记录传入实际沙箱类的不可变规格，不替换规格或假造构造结果。
+    # 类用途: 观察真实runner传递的安全策略。
+    class Observer(original):
+        # LLM: 保留真正构造器，只把规格交给断言观察。
+        # 函数用途: 捕获本次沙箱合同。
+        def __init__(self, spec):
+            captured.append(spec)
+            super().__init__(spec)
+
+    monkeypatch.setattr(script_runner, 'AttemptExecutionSandbox', Observer)
+    monkeypatch.setattr(script_runner, '_can_apply_sandbox', lambda *a, **k: False)
+    owner = tmp_path / 'owner'
+    register(api[0](owner))
+    runner = script_runner.ScriptRunner(owner, restrict_to_roots=restricted, workspace_root=tmp_path)
+    with runner._prepare('collect', {}, 10, None, network) as prepared:
+        assert captured[0].deny_gateway_ports == ((65431,) if network else ())
+        if restricted:
+            cfg = json.loads(prepared[2][2]['MY_AGENT_SCRIPT_GUARD_JSON'])
+            assert cfg.get('denied_ports') == [65431]
+
+
+# LLM: 宽workspace的祖先不能成为私有写禁止根；临时资产全在本测试树内。
+# 函数用途: 验证_prepare不会把workspace自身或祖先传成普通写禁止挂载。
+def test_sec_f_prepare_excludes_workspace_ancestors(api, tmp_path, monkeypatch):
+    from agent_py_agent.agent.workflows import script_runner
+
+    captured = []
+    original = script_runner.AttemptExecutionSandbox
+
+    # LLM: 观察真实规格，不更改私有根计算或路径解析。
+    # 类用途: 捕获私有根与普通写禁止根。
+    class Observer(original):
+        # LLM: 保持真实规格类的初始化行为。
+        # 函数用途: 记录生产runner交来的规格。
+        def __init__(self, spec):
+            captured.append(spec)
+            super().__init__(spec)
+
+    monkeypatch.setattr(script_runner, 'AttemptExecutionSandbox', Observer)
+    monkeypatch.setattr(script_runner, '_can_apply_sandbox', lambda *a, **k: False)
+    owner = tmp_path / 'owner'
+    register(api[0](owner))
+    runner = script_runner.ScriptRunner(owner, restrict_to_roots=True, workspace_root=tmp_path)
+    with runner._prepare('collect', {}, 10, None, False):
+        assert owner.resolve() in captured[0].write_scope_denied_roots
+        assert all(not tmp_path.resolve().is_relative_to(root) for root in captured[0].write_scope_denied_roots)
+    canonical_owner = tmp_path / 'agent_home' / 'owners' / 'local' / 'main'
+    (canonical_owner / 'workspace').mkdir(parents=True)
+    register(api[0](canonical_owner))
+    canonical_runner = script_runner.ScriptRunner(
+        canonical_owner, restrict_to_roots=True, workspace_root=canonical_owner / 'workspace'
+    )
+    with canonical_runner._prepare('collect', {}, 10, None, False):
+        assert canonical_owner.resolve() in captured[1].private_read_roots
+        assert (tmp_path / 'agent_home' / 'owners').resolve() in captured[1].private_read_roots
+
+
+# LLM: 真实子进程调用所有公开metadata入口及原生posix别名，只看拒绝而不读取任何真实秘密。
+# 函数用途: 防止stat、lstat、access与pathlib通过元数据旁路暴露私有文件。
+@pytest.mark.parametrize('operation', ['os.stat', 'os.lstat', 'os.access', 'posix.stat', 'posix.lstat',
+    'posix.access', 'pathlib.Path.stat', 'pathlib.Path.exists', 'pathlib.Path.is_file'])
+def test_sec_f_guard_denies_private_metadata(api, tmp_path, operation):
+    private = tmp_path / 'owner' / 'private-marker'
+    private.parent.mkdir()
+    private.write_text('synthetic-marker')
+    if operation.startswith('pathlib'):
+        method = operation.rsplit('.', 1)[-1]
+        expression = f'pathlib.Path({str(private)!r}).{method}()'
+    else:
+        expression = f'{operation}({str(private)!r}' + (', os.F_OK)' if operation.endswith('access') else ')')
+    boolean = operation.endswith(('exists', 'is_file', 'access'))
+    code = f'''import json, os, pathlib, posix
+try:
+    observed = {expression}
+except PermissionError:
+    denied = True
+else:
+    denied = not observed if {boolean!r} else False
+print(json.dumps({{"value": denied}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code) is True
+
+
+# LLM: dir_fd可让相对名绕开绝对路径检查；打开的目录本身合法，拒绝必须发生在metadata调用。
+# 函数用途: 覆盖三个OS入口及其原生别名的dir_fd旁路。
+@pytest.mark.parametrize('operation', ['os.stat', 'os.lstat', 'os.access', 'posix.stat', 'posix.lstat', 'posix.access'])
+def test_sec_f_guard_rejects_metadata_dir_fd(api, tmp_path, operation):
+    allowed = tmp_path / 'owner' / 'allowed'
+    allowed.mkdir(parents=True)
+    (allowed.parent / 'private-marker').write_text('synthetic-marker')
+    extra = ', os.F_OK' if operation.endswith('access') else ''
+    code = f'''import json, os, posix
+fd = os.open({str(allowed)!r}, os.O_RDONLY)
+try:
+    try:
+        {operation}('../private-marker'{extra}, dir_fd=fd)
+    except PermissionError:
+        denied = True
+    else:
+        denied = False
+finally:
+    os.close(fd)
+print(json.dumps({{"value": denied}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code, allowed=(allowed,)) is True
+
+
+# LLM: 祖先metadata、文件描述符、重入解析、tempfile与标准库导入都须继续工作，不能通过一律拒绝修复。
+# 函数用途: 验证合法metadata路径与受限脚本的正常运行。
+def test_sec_f_guard_allows_ancestor_metadata_and_resolve(api, tmp_path):
+    allowed = tmp_path / 'owner' / 'allowed'
+    allowed.mkdir(parents=True)
+    marker = allowed / 'marker'
+    marker.write_text('synthetic-marker')
+    code = f'''import json, os, pathlib, tempfile
+path = pathlib.Path({str(marker)!r})
+for parent in path.parents:
+    os.stat(parent)
+    os.lstat(parent)
+    assert os.access(parent, os.F_OK)
+assert path.resolve().is_file()
+fd = os.open(path, os.O_RDONLY)
+try:
+    assert os.stat(fd).st_size == len('synthetic-marker')
+finally:
+    os.close(fd)
+with tempfile.TemporaryFile() as temporary:
+    temporary.write(b'ok')
+print(json.dumps({{"value": True}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code, allowed=(allowed,)) is True
+
+
+# LLM: 只准检查获准根内的symlink本身；跟随叶链接或经过父目录链接都不能泄露私有目标metadata。
+# 函数用途: 验证lstat、不跟随stat/access与祖先symlink的边界。
+@pytest.mark.parametrize('operation,relative,denied', [
+    ('os.lstat', 'leaf', False), ('os.stat', 'leaf', True),
+    ('os.stat', 'leaf', False), ('os.access', 'leaf', False),
+    ('os.lstat', 'parent/private-marker', True),
+    ('os.lstat', 'parent/../private/private-marker', True),
+    ('os.lstat', 'parent/.', True), ('os.lstat', 'parent/', True),
+])
+def test_sec_f_guard_metadata_symlink_policy(api, tmp_path, operation, relative, denied):
+    allowed, private = tmp_path / 'owner/allowed', tmp_path / 'owner/private'
+    allowed.mkdir(parents=True)
+    private.mkdir()
+    (private / 'private-marker').write_text('synthetic-marker')
+    (allowed / 'leaf').symlink_to(private / 'private-marker')
+    (allowed / 'parent').symlink_to(private, target_is_directory=True)
+    extra = ', os.F_OK' if operation == 'os.access' else ''
+    extra += ', follow_symlinks=False' if not denied and operation != 'os.lstat' else ''
+    code = f'''import json, os
+try:
+    {operation}({(str(allowed) + '/' + relative)!r}{extra})
+except PermissionError:
+    denied = True
+else:
+    denied = False
+print(json.dumps({{"value": denied}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code, allowed=(allowed,)) is denied
+
+
+# LLM: os.stat不展开用户目录；守卫不能把字面~root错误验证成真实root家目录后访问另一个目标。
+# 函数用途: 验证原生OS路径的字面波浪号与符号链接目标一致。
+def test_sec_f_guard_literal_tilde_path_is_not_expanded(api, tmp_path):
+    allowed = tmp_path / 'owner/allowed'
+    allowed.mkdir(parents=True)
+    private = allowed.parent / 'private-marker'
+    private.write_text('synthetic-marker')
+    (allowed / '~root').symlink_to(private)
+    code = f'''import json, os
+os.chdir({str(allowed)!r})
+try:
+    os.stat('~root')
+except PermissionError:
+    denied = True
+else:
+    denied = False
+print(json.dumps({{"value": denied}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code, allowed=(allowed,)) is True
+
+
+# LLM: 所有网络只到本测试自建回环socket；注册当前真实临时端口，不触碰正在运行的Gateway或外部网络。
+# 函数用途: 通过真实TCP/UDP证明四个socket出口在开关两态下均守住Gateway端口。
+@pytest.mark.parametrize('operation', ['connect', 'connect_ex', 'sendto', 'create_connection'])
+@pytest.mark.parametrize('network', [False, True])
+def test_sec_f_guard_blocks_registered_gateway_endpoint(api, tmp_path, operation, network):
+    import socket
+
+    from agent_py_agent.agent.attempt import sandbox as attempt
+
+    kind = socket.SOCK_DGRAM if operation == 'sendto' else socket.SOCK_STREAM
+    with socket.socket(socket.AF_INET, kind) as server:
+        server.bind(('127.0.0.1', 0))
+        if kind == socket.SOCK_STREAM:
+            server.listen(1)
+        port = server.getsockname()[1]
+        attempt.register_gateway_bound_port(port)
+        call = ('socket.create_connection(address, timeout=0.2)' if operation == 'create_connection' else
+                "client.sendto(b'synthetic-marker', address)" if operation == 'sendto' else f'client.{operation}(address)')
+        code = f'''import json, socket
+address = ('127.0.0.1', {port})
+with socket.socket(socket.AF_INET, {int(kind)}) as client:
+    client.settimeout(0.2)
+    try:
+        result = {call}
+        if {operation!r} == 'create_connection':
+            result.close()
+    except PermissionError:
+        denied = True
+    else:
+        denied = False
+print(json.dumps({{"value": denied}}))
+'''
+        try:
+            assert _sec_f_guard_run(api, tmp_path, code, network=network) is True
+            server.settimeout(0.02)
+            with pytest.raises(TimeoutError):
+                server.recvfrom(1) if kind == socket.SOCK_DGRAM else server.accept()
+        finally:
+            attempt.unregister_gateway_bound_port(port)
+
+
+# LLM: 网络授权不能被修复成一律断网；只连接本测试未登记的回环TCP/UDP端口。
+# 函数用途: 验证四种正常网络调用仍保留原返回语义。
+@pytest.mark.parametrize('operation', ['connect', 'connect_ex', 'sendto', 'create_connection'])
+def test_sec_f_guard_allows_unregistered_endpoint(api, tmp_path, operation):
+    import socket
+
+    kind = socket.SOCK_DGRAM if operation == 'sendto' else socket.SOCK_STREAM
+    with socket.socket(socket.AF_INET, kind) as server:
+        server.bind(('127.0.0.1', 0))
+        if kind == socket.SOCK_STREAM:
+            server.listen(1)
+        port = server.getsockname()[1]
+        call = ('socket.create_connection(address, timeout=0.2)' if operation == 'create_connection' else
+                "client.sendto(b'synthetic-marker', 0, address)" if operation == 'sendto' else f'client.{operation}(address)')
+        code = f'''import json, socket
+address = ('127.0.0.1', {port})
+with socket.socket(socket.AF_INET, {int(kind)}) as client:
+    client.settimeout(0.2)
+    result = {call}
+    if {operation!r} == 'create_connection':
+        result.close()
+    elif {operation!r} == 'connect_ex':
+        assert result == 0
+print(json.dumps({{"value": True}}))
+'''
+        assert _sec_f_guard_run(api, tmp_path, code) is True
+        server.settimeout(0.2)
+        if kind == socket.SOCK_DGRAM:
+            assert server.recvfrom(100)[0] == b'synthetic-marker'
+        else:
+            accepted, _ = server.accept()
+            accepted.close()
+
+
+# LLM: 内层在一次用户PathLike转换中探测私有metadata；TLS只能豁免内部Path解析，不能豁免此用户回调。
+# 函数用途: 防止重入保护意外放行__fspath__回调，并确保路径只转换一次。
+def test_sec_f_guard_checks_user_pathlike_before_tls_exemption(api, tmp_path):
+    allowed = tmp_path / 'owner/allowed'
+    allowed.mkdir(parents=True)
+    marker, private = allowed / 'marker', allowed.parent / 'private-marker'
+    marker.write_text('allowed')
+    private.write_text('private')
+    code = f'''import json, os
+calls = []
+class PathLike:
+    def __fspath__(self):
+        try:
+            os.stat({str(private)!r})
+        except PermissionError:
+            calls.append(True)
+        else:
+            calls.append(False)
+        return {str(marker)!r}
+assert os.stat(PathLike()).st_size == len('allowed')
+print(json.dumps({{"value": calls == [True]}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code, allowed=(allowed,)) is True
+
+
+# LLM: 真正启动线程，检查TLS不是跨线程的全局豁免，合法stat与私有拒绝同时保持。
+# 函数用途: 验证并发脚本线程中的metadata边界。
+def test_sec_f_guard_metadata_checks_are_thread_local(api, tmp_path):
+    allowed = tmp_path / 'owner/allowed'
+    allowed.mkdir(parents=True)
+    marker, private = allowed / 'marker', allowed.parent / 'private-marker'
+    marker.write_text('allowed')
+    private.write_text('private')
+    code = f'''import json, os
+from concurrent.futures import ThreadPoolExecutor
+def check(_):
+    assert os.stat({str(marker)!r}).st_size == len('allowed')
+    try:
+        os.stat({str(private)!r})
+    except PermissionError:
+        return True
+    return False
+with ThreadPoolExecutor(max_workers=4) as pool:
+    passed = all(pool.map(check, range(12)))
+print(json.dumps({{"value": passed}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code, allowed=(allowed,)) is True
+
+
+# LLM: os的公开能力集合也保存原生函数引用，不能只替换os/posix属性却留下可直接调用的旧stat。
+# 函数用途: 验证能力探测集合中的metadata入口同样执行守卫。
+@pytest.mark.parametrize('capability', ['supports_dir_fd', 'supports_fd', 'supports_follow_symlinks', 'supports_effective_ids'])
+def test_sec_f_guard_metadata_capability_aliases_are_checked(api, tmp_path, capability):
+    private = tmp_path / 'owner/private-marker'
+    private.parent.mkdir()
+    private.write_text('synthetic-marker')
+    code = f'''import json, os
+outcomes = []
+for function in getattr(os, {capability!r}):
+    name = function.__name__.removeprefix('_guarded_')
+    if name not in ('stat', 'lstat', 'access'):
+        continue
+    try:
+        if name == 'access':
+            function({str(private)!r}, os.F_OK)
+        else:
+            function({str(private)!r})
+    except PermissionError:
+        outcomes.append(True)
+    else:
+        outcomes.append(False)
+print(json.dumps({{"value": bool(outcomes) and all(outcomes)}}))
+'''
+    assert _sec_f_guard_run(api, tmp_path, code) is True
+
+
+# LLM: 仅替换底层四种原始网络调用；真实守卫在独立解释器初始化，因此不会向任何本机或外部服务探测。
+# 函数用途: 按地址矩阵验证所有网络包装均在委派前阻断回环Gateway，同时保留非本机或其它端口。
+@pytest.mark.parametrize('operation', ['connect', 'connect_ex', 'sendto', 'create_connection'])
+@pytest.mark.parametrize('host,port,denied', [
+    ('', 65431, True), ('0.0.0.0', 65431, True), ('::', 65431, True), ('::1', 65431, True),
+    ('localhost', 65431, True), ('LOCALHOST.', 65431, True), ('127.4.5.6', 65431, True),
+    ('::ffff:127.0.0.1', 65431, True), ('::ffff:7f00:1', 65431, True), ('0:0:0:0:0:0:0:1', 65431, True),
+    ('2130706433', 65431, True), ('0x7f000001', 65431, True), ('127.0.0.1', 65432, False),
+    ('192.0.2.1', 65431, False), ('2001:db8::1', 65431, False),
+])
+def test_sec_f_guard_network_address_matrix(tmp_path, operation, host, port, denied):
+    import os
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.workflows import script_runner
+
+    entry = tmp_path / 'entry.py'
+    expression = ('socket.create_connection(address)' if operation == 'create_connection' else
+        "client.sendto(b'synthetic', 0, address)" if operation == 'sendto' else f'client.{operation}(address)')
+    entry.write_text(f'''import json, socket
+address = ({host!r}, {port}, 0, 0) if ':' in {host!r} else ({host!r}, {port})
+with socket.socket() as client:
+    try:
+        {expression}
+    except PermissionError:
+        denied = True
+    else:
+        denied = False
+print(json.dumps([denied, socket._sec_f_native_calls]))
+''')
+    bootstrap = '''import socket,sys
+socket._sec_f_native_calls=[]
+def record(*args, **kwargs):
+    socket._sec_f_native_calls.append(True)
+    return 0
+socket.socket.connect=socket.socket.connect_ex=socket.socket.sendto=socket.create_connection=record
+exec(sys.stdin.read())
+'''
+    cfg = {'read_roots': [str(tmp_path)], 'write_roots': [str(tmp_path)],
+        'network_access': True, 'denied_ports': [65431]}
+    env = {'PATH': os.defpath, 'MY_AGENT_SCRIPT_GUARD_JSON': json.dumps(cfg)}
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', bootstrap, str(entry)], cwd=tmp_path,
+        env=env, input=script_runner._PYTHON_GUARD_CODE, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [denied, [] if denied else [True]]

@@ -57,6 +57,8 @@ class SubAgentCapabilityService:
     def __init__(self, manager):
         self.manager = manager
 
+    # LLM: 只在首条真实OPEN申请的search前准备MCP目录；空集/已结申请零连接，路由授权与原apply分支不变。
+    # 函数用途: 为开放申请按需补目录并匹配能力，不因外层轮询提前启动MCP。
     def route_capability_requests(
         self,
         router: CapabilityRouter,
@@ -71,7 +73,13 @@ class SubAgentCapabilityService:
         cfg = config or CapabilityConfig()
         records: list[CapabilityRouteRecord] = []
         selected_runs = self.manager.indexing.select_runs(options.run_ids)
+        catalog_prepared = False
         for task, request in _iter_open_capability_requests(selected_runs):
+            if not catalog_prepared:
+                preparer = getattr(router, '_ensure_mcp_catalog', None)
+                if callable(preparer):
+                    preparer()
+                catalog_prepared = True
             query = _capability_request_query(task, request)
             hits = router.search(query, limit=cfg.capability_candidate_limit)
             selected_hits = _select_capability_hits(hits, cfg)

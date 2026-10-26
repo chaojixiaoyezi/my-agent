@@ -5,6 +5,7 @@
 # 模块用途: 保留Count0原维护；真实后台按原claim逐写私有状态，W不压shared索引，不新增维护账。
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_json_file_atomic_unlocked,
 )
+from ..common.nofollow_fs import NoFollowPathError, open_directory_beneath
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -27,6 +29,55 @@ from .home_retention import OwnerRetentionPlan, apply_owner_retention
 
 # 维护任务默认每天跑一次：过期内容清理按天为粒度足够，又不会频繁打扰 owner 目录。
 _DEFAULT_INTERVAL_SECONDS = 86_400
+
+
+# LLM: 只登记本owner使用<数据扩展名>.lock协议的私有目录；不递归、不包含local_users/operations或逻辑锁目录。
+# 函数用途: 列出owner维护可回收伴生锁的固定目录，不创建目录。
+def owner_lock_sidecar_dirs(home: MyAgentHomePaths) -> tuple[Path, ...]:
+    return (home.owner_memory_dir, home.owner_memory_daily_dir, home.owner_memory_curator_runs_dir,
+        home.owner_compact_dir, home.owner_cache_dir, home.owner_tmp_dir, home.owner_scheduler_dir,
+        *(home.owner_data_dir / name for name in ("decision", "context", "skill_learning", "skill_proposals")))
+
+
+# LLM: 从可信owner根逐段nofollow固定已登记目录FD；通用清扫器全程dirfd并排除逻辑锁，原transition逐文件核权。
+# 函数用途: 回收owner陈旧孤儿伴生锁，防目录祖先替换越界，保留活锁、数据锁及逻辑锁。
+def reclaim_owner_orphan_lock_files(home: MyAgentHomePaths, *, commit_transition=None) -> int:
+    from ..gateway_parts.io import cleanup_orphan_lock_files
+
+    removed = 0
+    for directory in owner_lock_sidecar_dirs(home):
+        try:
+            relative = directory.relative_to(home.owner_home_dir)
+            descriptor = open_directory_beneath(home.owner_home_dir, relative.parts, require_dir_fd=True)
+            try:
+                removed += cleanup_orphan_lock_files(directory, data_sidecars_only=True,
+                    commit_transition=commit_transition, directory_fd=descriptor)
+            finally:
+                os.close(descriptor)
+        except (OSError, NoFollowPathError):
+            continue
+    return removed
+
+
+# LLM: 只给单进程本地主聊天收尾用；真实home、runner身份和原request门均检查，受限C/W即使有合法执行scope也不旁路维护。
+# 函数用途: 到期才轻量触发CLI维护，子代理、受限环境或缺少准入时安静跳过。
+def maybe_run_cli_owner_maintenance(agent: object, *, now: float | None = None) -> OwnerMaintenanceResult | None:
+    from ..gateway_parts.request_entry_admission import (
+        request_execution_required,
+        require_request_execution,
+    )
+    from ..runtime_context import current_subagent_run_id
+
+    home = getattr(agent, "home_paths", None)
+    if not isinstance(home, MyAgentHomePaths) or current_subagent_run_id(agent) or request_execution_required():
+        return None
+    try:
+        require_request_execution(agent=agent, home=home)
+    except Exception:
+        return None
+    if not owner_maintenance_due(home.owner_home_dir, now=now):
+        return None
+    return run_owner_retention_if_due(home, now=now)
 
 
 # LLM: status 保持旧口径；apply_outcome（applied / refused / legal_hold）、isolated_error_count 与 failed_action_count
@@ -82,7 +133,8 @@ def owner_maintenance_due(
 # LLM: 最早核原请求/owner；Count0 None保原维护成本，正W不写shared；callback逐写T→业务锁，扫描门外。
 #   维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
 #   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
-# 函数用途: owner 到期时跑一轮维护并写结构化状态；没到期直接返回 not_due。
+# LLM: 单进程保留执行后回收已登记孤儿伴生锁，逻辑锁和原request门不变；C/W仍用transition路径。
+# 函数用途: owner到期执行保留及辅助维护，写原结构化状态；未到期返回not_due。
 def run_owner_retention_if_due(
     home: MyAgentHomePaths,
     *,
@@ -117,6 +169,7 @@ def run_owner_retention_if_due(
             home,
             now=datetime.fromtimestamp(current, timezone.utc),
         )
+        reclaim_owner_orphan_lock_files(home)
         # 正文哈希缓存只是派生索引，孤儿键（换模型/迁移/绕过写入路径的改动留下）只有 index_all
         # 会回收，那是手动命令；挂进这里让它在 owner 维护（默认每天一次）里自动收口。
         dropped_cache_keys, reclaim_error = _reclaim_text_vector_cache_orphans(home)
@@ -328,4 +381,7 @@ __all__ = [
     "OwnerMaintenanceResult",
     "owner_maintenance_due",
     "run_owner_retention_if_due",
+    "owner_lock_sidecar_dirs",
+    "reclaim_owner_orphan_lock_files",
+    "maybe_run_cli_owner_maintenance",
 ]

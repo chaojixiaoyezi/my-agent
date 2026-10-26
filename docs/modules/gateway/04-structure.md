@@ -1,3 +1,9 @@
+## 2026-10-26 网关安全重启交接、看门狗双日志分离、管理员日志只读策略与维护事件裁剪结构
+
+- `gateway_parts/supervisor.py` 新增 `_restart_drain_handover_active`、`_standalone_state_identity_status`、`_reap_wedged_predecessor` 与连续健康计时字段 `_healthy_since_at`，并将看门狗默认日志路径指向 `GatewayPaths.supervisor_log`（`logs/supervisor.log`）；`gateway_parts/standalone_lifecycle.py` 在 `coordinator.lock` 文件描述符上写入与读取有界持锁者诊断元数据；`gateway_parts/standalone_stop.py` 在 `planned_restart` 停机收尾阶段跳过重复阻塞清单扫描以缩短持锁时间。
+- `path_access_policy.py::PathAccessPolicy._is_admin_readable_service_log` 对 `local/main` 主管理员（含显式 `active_owner_home` 与单工作区根 `workspace_root`）放行 `logs/gateway.log` 与 `logs/supervisor.log` 的单链接普通文件只读访问；`tooling/gateway_status.py` 与 `gateway_parts/status_rendering.py` 提供 `_gateway_log_tails` 有界尾读、生命周期过滤与凭据脱敏。
+- `gateway_parts/io.py` 在清理幂等记录后调用 `try_unlink_idle_lockfile` 回收孤立 `.lock` 文件；`user_space/owner_maintenance.py` 与 `owner_maintenance_transition.py` 对 `events.jsonl` 执行有界尾窗保留与原子替换。
+
 ## 2026-10-25 五大核心底座能力、Host v2 20 项扩展动作与网关看门狗延迟晋升结构
 
 - `gateway_parts/workspace_scope.py` 与 `control_service.py` 协同 `conversation/workspace_context.py`、`thread_fork_service.py` 及 `cli/workspace_resolution.py` 承载管理员专属显式项目目录（`--dir` / `/dir`，普通模式下保留显式项目与 `owner_home` 双根，非管理员严格限制在 `owner_home`）与主会话安全分叉（`/fork`）；`gateway_parts/plugin_broker_api.py`、`plugin_host_broker_topics.py` 与 `agent/plugin_host/`（`action_specs_v2_ext.py`、`capabilities_v2_handlers.py`、`observations.py`）扩展 20 项 Host API v2 与 Broker 动作。

@@ -1,3 +1,8 @@
+## 2026-10-26 记忆候选只读行借用、$O(1)$ 索引合并与空临时目录按年龄回收（已实现）
+
+- `memory_store/candidates.py` 新增 `CandidateService.readonly_rows` 供 `retention_scan.py` 与 `learning_exclusions.py` 在锁内构造只读扫描元组，并将 `_merge_existing_candidates` 升级为基于 `candidate_id` 与 `(dedupe_key, target, scope)` 的字典索引查找，将合并复杂度从 $O(N \times M)$ 降至 $O(N + M)$。
+- `memory_store/retention_apply.py` 在完成过期文件清理后，通过 `_prune_empty_ephemeral_dirs` 对 `cache`/`tmp`/`staging` 树下严格早于 `cutoff` 且无新建祖先的空目录执行 `O_NOFOLLOW` 安全回收。
+
 ## 2026-10-25 WP11：候选大文件五元 stat 摘要缓存与只读预过滤（工作区已实现，待组合验收）
 
 - `candidates.py::_candidate_load_probe` 以 `(mtime_ns, size, ino, dev, ctime_ns)` 为版本事实；大于等于 1 MiB 且五元组未变时复用有界 `_CANDIDATE_STAMP_DIGEST_CACHE` 摘要，小文件仍读取全文并计算摘要。冷读核对尺寸与读后 stat，竞态或超出 128 MiB 缓存预算时不发表该探针。

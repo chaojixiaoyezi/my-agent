@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -109,7 +110,8 @@ def _plain_gateway_handle(ctx: PlainJobContext) -> tuple[str, bool]:
 
 
 # LLM: direct保留原句柄/绑定和单次历史注入；候选未公开，真实response提交后才显示过程，受阻/未完成不能归成完成。
-# 函数用途: 沿原agent调用模型及保存会话，保留runtime_status分类，完整终答走plain_ui公开门。
+# LLM: 本地agent.run结束后轻量尝试单进程owner维护，异常不影响原回复；不在构造器或Gateway客户端触发。
+# 函数用途: 执行本地聊天、保留真实终态，收尾时尝试安全维护后显示公开回复。
 def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
     from ...agent.agent_core.runtime.loop_models import RunParams
 
@@ -141,6 +143,10 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             task_attributes=attrs,
         )
     agent_response_text = result.response
+    from ...agent.user_space.owner_maintenance import maybe_run_cli_owner_maintenance
+
+    with contextlib.suppress(Exception):
+        maybe_run_cli_owner_maintenance(ctx.agent)
     if is_silent_user_stop(result):
         ctx.job.completion_status = "interrupted"
         return "", False

@@ -2,8 +2,8 @@
 # 模块用途: 给无Agent的已认证领域读取原子任务，原写入和投影流程保持。
 # LLM: 正MP沿原请求短事务限制既有写者，不改变main canonical/RuntimeDB/F4和Count0逻辑，检查所有原调用方锁序。
 # 模块用途: 维护原子代理写入与收口，原执行撤权后拒绝迟到副作用。
-# LLM: canonical始终先于投影；正负缓存都只信窗口外的locator指纹，缺失目标须每次核存在性，错误仍保留。
-# 模块用途: 保存子代理任务与派生视图，在粗粒度风险窗口外复用解析或缺失事实，减少历史任务巡检读盘。
+# LLM: 正负缓存每次核locator指纹和目标存在性；只读predicate锁外筛选私有引用，只有命中项复制，错误仍保留。
+# 模块用途: 保存子代理任务与派生视图，在保持实时逐文件核验时减少历史巡检解析和复制。
 """Persistence service for SubAgentManager task records.
 
 Saves are split into two phases. The canonical task-local state is written first
@@ -186,8 +186,8 @@ def _list_runs_for_root_report(
     return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
 
 
-# LLM: canonical task 文件是子代理状态权威；缓存仅作读取优化，mtime 粗粒度窗口内必须重读，所有返回仍是深拷贝。
-# 类用途: 管理子代理任务的持久化与列表读取；缓存规则改变时同步检查 list_runs 和 create_subagents 的状态复用测试。
+# LLM: canonical文件仍是权威；公开列表只返回副本，私有引用仅供只读predicate，原指纹/负缓存/粗mtime门保持。
+# 类用途: 管理子代理持久化与实时列表筛选；复制优化不跨轮冻结任务集合。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
 
@@ -233,28 +233,51 @@ class SubAgentPersistenceService:
 
         return self.list_runs_report().runs
 
+    # LLM: 默认列表复用同一逐文件扫描器且不筛选，保持每条返回深副本和原load_errors合同。
+    # 函数用途: 读取全部任务及逐文件错误，不引入跨阶段快照或TTL。
     def list_runs_report(self) -> SubAgentListRunsReport:
-        """Scan task records and preserve per-record load failures.
+        return self.list_runs_selected_report()
 
-        文件指纹(dev/inode/size/mtime/ctime)未变就复用解析对象、只 stat 不重读重解析，
-        原子替换即使复用低精度 mtime 也会因 inode/ctime 变化失效。返回 deepcopy 副本，
-        保证缓存对象不被任何调用方修改污染。
-        """
+    # LLM: predicate限可信只读调用方，不得修改task或嵌套字段；返回锁外副本，筛选自身错误须原样传播。
+    # 函数用途: 仅复制命中任务的列表，未命中项仍核新鲜度，筛选失败不伪装为空结果。
+    def list_runs_selected(self, predicate: Callable[[SubAgentTask], bool] | None = None) -> list[SubAgentTask]:
+        return self.list_runs_selected_report(predicate).runs
+
+    # LLM: 仅接受可信无副作用predicate；逐文件核验和复制错误仍报load_errors，筛选错误在扫描淘汰后原样抛出。
+    # 函数用途: 按条件返回独立副本和坏行报告，保留实时性、复制替身与筛选异常合同。
+    def list_runs_selected_report(self, predicate: Callable[[SubAgentTask], bool] | None = None) -> SubAgentListRunsReport:
+        copy_before_filter = (
+            predicate is None or "_cached_run_copy" in self.__dict__
+            or getattr(self._cached_run_copy, "__func__", None) is not SubAgentPersistenceService._DEFAULT_CACHED_RUN_COPY
+        )
 
         runs: list[SubAgentTask] = []
         load_errors: list[dict[str, Any]] = []
         seen: set[str] = set()
+        predicate_error: Exception | None = None
         for task_file in sorted(self.workspace.glob("*/task.json")):
             run_id = task_file.parent.name
             seen.add(run_id)
             try:
-                runs.append(self._cached_run_copy(run_id, task_file))
+                task = self._cached_run_copy(run_id, task_file) if copy_before_filter else self._cached_run_ref(run_id, task_file)
+                # 筛选故障不属于文件坏账；停用后续回调，但仍完成其余locator核验和缓存淘汰。
+                if predicate_error is not None:
+                    continue
+                try:
+                    matched = predicate is None or bool(predicate(task))
+                except Exception as exc:
+                    predicate_error = exc
+                    continue
+                if matched:
+                    runs.append(task if copy_before_filter else copy.deepcopy(task))
             except Exception as exc:
                 report = runtime_error_report(exc, context="subagents.load")
                 report["run_id"] = run_id
                 report["path"] = str(task_file)
                 load_errors.append(report)
         self._evict_run_cache(seen)
+        if predicate_error is not None:
+            raise predicate_error
         runs.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
         return SubAgentListRunsReport(runs=runs, load_errors=load_errors)
 
@@ -301,10 +324,16 @@ class SubAgentPersistenceService:
     ) -> SubAgentListRunsReport:
         return _list_runs_for_root_report(self, root_task_id)
 
-    # LLM: 锁内核五元指纹并固定私有快照引用，锁外deepcopy；快照只整体替换、不原地修改，调用方永远拿副本。
-    # 256KiB单项及粗mtime合同保持；缺失分支复用reader已核路径，每次仍核目标存在性，错误交原报告口。
-    # 函数用途: 复用解析或缺失事实，并在释放缓存锁后复制任务，避免其它列表线程等待深拷贝。
+    # LLM: 兼容原复制接缝；私有引用在锁内取出且不原地修改，deepcopy严格发生在缓存锁外。
+    # 函数用途: 返回独立任务副本，保留既有测试与精确ID读取的复制合同。
     def _cached_run_copy(self, run_id: str, task_file: Path) -> SubAgentTask:
+        return copy.deepcopy(self._cached_run_ref(run_id, task_file))
+
+    _DEFAULT_CACHED_RUN_COPY = _cached_run_copy
+
+    # LLM: 锁内核五元指纹、负缓存、粗mtime窗口和容量预算；引用仅可只读，不对外返回或原地修改。
+    # 函数用途: 取得本次新鲜度核验后的私有任务快照，让筛选和复制都能移到锁外。
+    def _cached_run_ref(self, run_id: str, task_file: Path) -> SubAgentTask:
         with self._run_cache_lock:
             stat = task_file.stat()
             signature = cache_stat_signature(stat)
@@ -345,7 +374,7 @@ class SubAgentPersistenceService:
                     self._run_cache[run_id] = (signature, task)
                 else:
                     self._run_cache.pop(run_id, None)
-        return copy.deepcopy(task)
+        return task
 
     # LLM: 生产调用已持缓存锁并核旧mtime；仅复用reader核验的Path，旧三参数调用仍沿原解析器，独立预算可缩小。
     # 函数用途: 为稳定直达的缺失canonical建有界负缓存；传入已解析路径时不重读locator，探测失败不掩盖原错误。

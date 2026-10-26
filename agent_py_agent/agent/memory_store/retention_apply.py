@@ -7,7 +7,9 @@ from __future__ import annotations
 # 模块用途: 安全删除文件、清理终态候选和快照清单；执行前重核引用与指纹，并记录可恢复回收及无正文审计。
 
 import json
+import os
 import shutil
+import stat
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +21,7 @@ from ..common.json_io import (
     read_json_object_report,
     write_private_json_file_atomic,
 )
-from ..common.nofollow_fs import ensure_private_dir
+from ..common.nofollow_fs import NoFollowPathError, ensure_private_dir, open_directory_beneath
 from ..common.request_execution_ports import (
     RequestExecutionContextUnavailable,
     RequestExecutionOutcomeUncertainError,
@@ -51,7 +53,8 @@ from .retention_transition import RetentionPolicyChangedError
 # LLM: None保原executor；callback按原候选批次/单动作/审计短提交，扫描引用门外，四实际类型优先。
 #   candidate 必须一次批量删除；清单阶段只扫描一次当前引用，快照动作失败或变化时保护仍被引用的清单。
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
-# 函数用途: 执行一份已验证计划，并返回每条动作状态及结构化错误。
+# LLM: 仅已通过策略/法律保留的executor追加tmp/cache空目录清扫；扫描门外，每次rmdir仍沿原transition核权。
+# 函数用途: 执行已验证计划并清扫过期空临时目录，返回原动作状态及错误合同。
 def execute_retention_plan(
     *,
     home: object,
@@ -102,6 +105,8 @@ def execute_retention_plan(
                 )
             )
         results.append(result)
+    for root in (home.owner_tmp_dir, home.owner_cache_dir):
+        _prune_empty_ephemeral_dirs(Path(root), now=now.timestamp(), commit_transition=commit_transition)
     report = MemoryRetentionReport(
         applied=True,
         actions=tuple(results),
@@ -225,7 +230,8 @@ def _apply_candidate_actions(
 
 
 # LLM: operation 是宿主执行枚举；未知值失败；清单回收必须复核快照阶段之后的当前引用，不能只信规划结果。
-# 函数用途: 分派一条非候选 retention 动作。
+# LLM: tmp/cache文件确已删除才按同一action cutoff清空过期祖先，沿规范根的nofollow目录句柄rmdir，不删根或跨链接。
+# 函数用途: 分派并复核保留动作，文件删除后仅尝试清理未变新且已空的父目录。
 def _apply_action(
     *,
     home: object,
@@ -237,7 +243,11 @@ def _apply_action(
     allowed_roots = (Path(home.owner_home_dir), *allowed_external_roots)
     _assert_safe_target(action.path, allowed_roots)
     if action.operation == "delete_file":
-        return _delete_file(action)
+        result = _delete_file(action)
+        if result.status == "deleted" and action.category in {"tmp", "cache"}:
+            root = Path(home.owner_tmp_dir if action.category == "tmp" else home.owner_cache_dir)
+            _prune_ephemeral_parents(root, action.path.parent, cutoff=action.cutoff_timestamp)
+        return result
     if action.operation == "trash_tree":
         return _trash_tree(home=home, action=action, now=now)
     if action.operation == "trash_file":
@@ -340,6 +350,80 @@ def _prune_empty_directory(directory: Path) -> None:
         directory.rmdir()
     except OSError:
         pass
+
+
+# LLM: 调用方负责捕获OSError/NoFollowPathError；仅打开root以下祖先FD作年龄观察，每个FD原栈关闭，不执行删除。
+# 函数用途: 核对目标的所有中间祖先都不新于cutoff，根目录不参与年龄判断。
+def _ephemeral_ancestors_expired(root: Path, parts: tuple[str, ...], cutoff: float) -> bool:
+    for depth in range(1, len(parts)):
+        ancestor = open_directory_beneath(root, parts[:depth], require_dir_fd=True)
+        try:
+            if os.fstat(ancestor).st_mtime > cutoff:
+                return False
+        finally:
+            os.close(ancestor)
+    return True
+
+
+# LLM: 只接受根以下相对目录；有cutoff时逐段nofollow打开并核验所有祖先FD的mtime，根不参与年龄判断且始终不删。
+#   目标也核验mtime<=cutoff；dirfd rmdir原子拒绝非空，链接和文件系统竞争只跳过，不声称mtime是原子CAS。
+# 函数用途: 删除一个过期空临时目录；任何新鲜祖先都保护整条分支，不跨链接或删根。
+def _remove_empty_ephemeral_dir(root: Path, parts: tuple[str, ...], *, before: float | None = None) -> bool:
+    if not parts:
+        return False
+    try:
+        if before is not None and not _ephemeral_ancestors_expired(root, parts, before):
+            return False
+        descriptor = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
+        try:
+            info = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode) or (before is not None and info.st_mtime > before):
+                return False
+            os.rmdir(parts[-1], dir_fd=descriptor)
+            return True
+        finally:
+            os.close(descriptor)
+    except (OSError, NoFollowPathError):
+        return False
+
+
+# LLM: 文件删除收尾传入action cutoff；无cutoff保持原内部调用口径，非空/新鲜/链接/越界即停，不删除规范根。
+# 函数用途: 向上清理过期且已空的祖先；unlink刷新mtime后保守保留父目录，失败不影响已完成的文件删除。
+def _prune_ephemeral_parents(root: Path, directory: Path, *, cutoff: float | None = None) -> None:
+    try:
+        parts = directory.relative_to(root).parts
+    except ValueError:
+        return
+    while parts and _remove_empty_ephemeral_dir(root, parts, before=cutoff):
+        parts = parts[:-1]
+
+
+# LLM: 只扫描既有普通根，自底向上不跟随链接；每个目录共用同一cutoff并由删除函数重核整条祖先链。
+#   扫描在门外、rmdir逐次入原短门；不额外回溯删除，以保留逐目录removed计数及短门边界。
+# 函数用途: 回收至少闲置一小时且祖先也过期的空子目录，不创建或删除根目录。
+def _prune_empty_ephemeral_dirs(root: Path, *, now: float, min_age_seconds: float = 3600.0,
+                                 commit_transition=None) -> int:
+    try:
+        descriptor = open_directory_beneath(root, (), require_dir_fd=True)
+    except (OSError, NoFollowPathError):
+        return 0
+    removed = 0
+    cutoff = now - min_age_seconds
+    try:
+        for directory, _dirs, _files, _fd in os.fwalk(".", topdown=False, follow_symlinks=False, dir_fd=descriptor):
+            parts = Path(directory).parts
+            if not parts:
+                continue
+            # LLM: 绑定本次相对目录，真实年龄和空目录仍由原写步骤重新验证。
+            # 函数用途: 对本次枚举目录执行一个有界rmdir步骤。
+            def operation(parts=parts):
+                return _remove_empty_ephemeral_dir(root, parts, before=cutoff)
+            removed += bool(_commit_step(operation, commit_transition))
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+    return removed
 
 
 # LLM: trash purge 也必须核对 tombstone 和整棵容器 fingerprint，防止 plan 后加入的新文件被一起删除。

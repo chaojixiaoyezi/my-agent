@@ -88,7 +88,7 @@ class CatalogRenderConfig:
     declared_deferred_names: frozenset[str] = frozenset()
 
 
-# LLM: 单一宿主装配配置；内网主机只由 core 配置注入，凭据环境上界与 B5 来源/审批仍保持原身份。
+# LLM: 单一宿主装配配置；defer仅延后实例连接，不清配置、不改变权限；凭据环境上界与 B5 来源/审批仍保持原身份。
 # 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
 @dataclass(frozen=True)
 class ToolRegistryParams:
@@ -153,6 +153,8 @@ class ToolRegistryParams:
     runtime_guard_policy: object | None = None
     # MCP 客户端(短板6)：要连接的外部 MCP server 声明。默认空 = 不连、不起子进程(零开销)。
     mcp_servers: dict[str, Any] | None = None
+    # CLI外层控制面可延后普通MCP首次连接；默认False保持原构造期连接行为。
+    defer_mcp_connect: bool = False
     # 只有宿主显式启用插件时注入规范 owner；不从工作目录或权限墙反推身份，构造不启动插件。
     plugin_owner: OwnerHomeResult | None = None
     # owner 权威运行库（agent.subagents.runtime_db）的只读引用：插件与 MCP 的动作工具按候选 ID 发送前复核观察新鲜度用；None 时复核一律不通过
@@ -594,13 +596,19 @@ def _registry_write_inline_max_chars(registry: Any) -> int:
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
 # 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
-    # LLM: 保存唯一构造配置与宿主 B5 提供方，权限视图共用共用池接线；不从模型参数赋予来源或另建连接。
-    # 函数用途: 初始化一个 owner 的工具表、检索和审批读取器；权限状态读取器只读同一 owner 事实，运行时按同一注册表完成授权与调用。
+    # LLM: 生命周期锁、关闭标记、连接状态与客户端池先建立且由权限视图共享；默认eager不变，defer不启动普通MCP。
+    # 函数用途: 初始化owner工具表和唯一连接生命周期，按宿主参数决定何时首次连接。
     def __init__(
         self,
         params: ToolRegistryParams,
     ):
         self._construction_params = params
+        self._mcp_prepare_lock = threading.Lock()
+        self._mcp_closed = threading.Event()
+        self._mcp_retry_state: dict[int, tuple[int, float]] = {}
+        self._mcp_clients: list[Any] = []
+        self._mcp_connected_state: list[bool] = [False]
+        self._mcp_catalog_owner = self
         self.workspace_root = params.workspace_root.resolve()
         self.workspace_roots = params.workspace_roots or [self.workspace_root]
         self.path_access_mode = params.path_access_mode
@@ -637,18 +645,13 @@ class ToolRegistry:
         register_base_tools(self, params)
         self.register(ToolSearchTool(self))
         self.register(ListToolsTool(self))
-        # MCP 客户端(短板6)：连接配置的外部 MCP server，把其工具动态注册成 mcp__* 前缀工具。
-        # mcp_servers 为空时此调用零开销返回(不起任何子进程)；启动失败的配置仍保留 client，
-        # 后续只在新 run 边界重试，不让一次瞬时故障永久删掉工具。
-        self._mcp_clients = _connect_mcp_servers(self, params.mcp_servers)
-        self._mcp_prepare_lock = threading.Lock()
-        self._mcp_closed = threading.Event()
-        initial_retry_at = time.monotonic() + 1.0
-        self._mcp_retry_state: dict[int, tuple[int, float]] = {
-            id(client): (1, initial_retry_at)
-            for client in self._mcp_clients
-            if not client.is_running()
-        }
+        if not params.defer_mcp_connect:
+            self.ensure_mcp_connected()
+
+    # LLM: 权限视图共享状态/锁/池和原目录owner；已开始标记不代表已完成，后继调用须等锁内发现结束再投影。
+    # 函数用途: 只执行一次普通MCP初连并同步当前视图目录，关闭后不复活，返回本次是否首次连接。
+    def ensure_mcp_connected(self) -> bool:
+        return _ensure_registry_mcp_connected(self)
 
     # LLM: 权限视图只重建基础文件/进程工具；其他 handler、存储、MCP 连接仍共享原权威，不启动第二套服务。
     # 函数用途: 给一个工作片生成独立权限视图，避免切 Full Access 热改同用户其他正在执行的会话。
@@ -1048,6 +1051,28 @@ def _execution_workspace_roots(
     return tuple(roots or (invocation_root,))
 
 
+# LLM: 初连与运行准备共用原锁/池/关闭事件；初连只向原owner发表目录，后继调用等发现完成后投影，不另建连接。
+# 函数用途: 为公开ensure入口完成唯一首次MCP连接，保留默认eager、失败退避和关闭不复活语义。
+def _ensure_registry_mcp_connected(registry: ToolRegistry) -> bool:
+    if registry._mcp_closed.is_set():
+        return False
+    with registry._mcp_prepare_lock:
+        if registry._mcp_closed.is_set():
+            return False
+        if registry._mcp_connected_state[0]:
+            _project_shared_mcp_tools(registry)
+            return False
+        registry._mcp_connected_state[0] = True
+        clients = _connect_mcp_servers(registry._mcp_catalog_owner, registry._construction_params.mcp_servers)
+        registry._mcp_clients.extend(clients)
+        initial_retry_at = time.monotonic() + 1.0
+        for client in clients:
+            if not client.is_running():
+                registry._mcp_retry_state[id(client)] = (1, initial_retry_at)
+        _project_shared_mcp_tools(registry)
+        return True
+
+
 # LLM: 先置共享关闭标记再冻结客户端并锁外 stop；迟到登记方复查标记，之后取得 prepare 锁清引用，不等发现后才撤销。
 # 函数用途: 关闭本注册表及其权限视图共用的 MCP 连接，避免旧视图再次重连。
 def _close_registry_clients(registry: ToolRegistry) -> None:
@@ -1068,11 +1093,12 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
         registry._mcp_retry_state.clear()
 
 
-# LLM: 插件同步及各视图投影在原 prepare 锁内，安装权威只读；永久关闭不重连，旧快照保留原 handler。
-# 函数用途: 为新运行接入当前插件并恢复普通 MCP，核心工具及其他视图不被原位改写。
+# LLM: 首次连接先经幂等入口；普通MCP目录以原owner为权威并投影各视图，插件仍走原同步，关闭不重连。
+# 函数用途: 为新运行完成首次MCP连接或后续恢复，并投影本视图目录，基础权限工具保持独立。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if registry._mcp_closed.is_set():
         return
+    registry.ensure_mcp_connected()
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
     plugin_owner = registry._construction_params.plugin_owner
     if plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
@@ -1092,12 +1118,32 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
                 registry._mcp_retry_state.pop(id(client), None)
                 continue
             _reconnect_registry_client_if_due(registry, client)
+        _project_shared_mcp_tools(registry)
         if plugin_owner is not None:
             project_plugin_tools(registry)
 
 
-# LLM: 恢复与发布固定同一 transport；失败只能清理已收到的句柄，不能 stop 整个可恢复客户端或猜 current。
-# 函数用途: 按退避连接暂时不可用的 MCP 服务，永久关闭时撤销恢复队列。
+# LLM: 调用者持共享prepare锁；只投影原owner发布的普通MCP代理，不按名字猜类型，不复制基础权限工具或插件目录。
+# 函数用途: 为独立权限视图补齐同一连接的工具，避免按需连接后其它视图只有空目录。
+def _project_shared_mcp_tools(registry: ToolRegistry) -> None:
+    owner = registry._mcp_catalog_owner
+    if owner is registry:
+        return
+    from ..plugin_runtime import PluginMCPClient
+    from .mcp_registration import MCPProxyTool
+
+    # LLM: 插件代理仍由原插件按代投影路径维护；仅以结构类型区分，不以工具名前缀授予来源。
+    # 函数用途: 筛选共享普通MCP代理，保留本视图基础工具及插件工具。
+    def ordinary(tool):
+        return isinstance(tool, MCPProxyTool) and not isinstance(tool.client, PluginMCPClient)
+
+    current = {name: tool for name, tool in registry.tools.items() if not ordinary(tool)}
+    shared = {name: tool for name, tool in owner.tools.items() if ordinary(tool)}
+    registry.tools = {**current, **shared}
+
+
+# LLM: 恢复与发布固定同一transport；普通目录发布给原owner后投影视图，插件沿原路径，失败只清理收到的句柄。
+# 函数用途: 按原退避恢复MCP服务并更新唯一目录，永久关闭时撤销恢复队列。
 def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) -> None:
     if client.is_closed():
         registry._mcp_retry_state.pop(id(client), None)
@@ -1117,7 +1163,7 @@ def _reconnect_registry_client_if_due(registry: ToolRegistry, client: object) ->
 
             refresh_plugin_client(registry, client, transport)
         else:
-            refresh_registered_mcp_client(registry, client, transport=transport)
+            refresh_registered_mcp_client(registry._mcp_catalog_owner, client, transport=transport)
         registry._mcp_retry_state.pop(id(client), None)
     except Exception as exc:
         if transport is not None:

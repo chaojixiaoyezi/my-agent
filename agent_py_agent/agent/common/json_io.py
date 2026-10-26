@@ -315,20 +315,23 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
 # LLM: 默认确保直接父目录存在（缺失按 0700 逐级新建、已存在一律不动，见 nofollow_fs.ensure_private_dir）；
 #   若调用方已完成目录链准备或要保留符号链接目标权限，可关闭该步，临时文件仍出生即 0600；路径锁仍由调用方持有。
 #   replace_once仅供固定C写叶显式限制替换次数，不证明来源或权限；联验test_common_single_replace与私有写回归。
-# 函数用途: 在既有锁内以0600临时文件原子替换正文，可跳过父目录确保或在首次替换失败后立即返回原异常。
+# LLM: preserve_bytes显式用于原流水裁剪，surrogateescape及禁换行翻译使坏UTF8/CRLF可原样往返；默认编码/换行不变。
+# 函数用途: 在既有锁内以0600临时文件原子替换正文，可显式保留流水原字节或限制为一次替换。
 def write_private_text_file_atomic_unlocked(
     path: Path,
     content: str,
     *,
     ensure_parent_private: bool = True,
     replace_once: bool = False,
+    preserve_bytes: bool = False,
 ) -> None:
     if ensure_parent_private:
         ensure_private_dir(path.parent)
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        options = {"errors": "surrogateescape", "newline": ""} if preserve_bytes else {}
+        with os.fdopen(fd, "w", encoding="utf-8", **options) as handle:
             os.chmod(tmp, 0o600)
             handle.write(content)
         if replace_once:

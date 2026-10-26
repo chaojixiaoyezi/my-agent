@@ -40,7 +40,8 @@ def thread_is_excluded(thread: object, excluded_conversation_ids: frozenset[str]
 
 # LLM: 同步只做两件结构化事：把名单映射成被排除的 thread_id 集合，再给来源命中这些 thread 且尚未打上同原因排除标记的
 #   pending/approved 候选写排除标记；已带相同标记的候选不重复进写锁，候选状态、人工审核路径和名单外的会话都不受影响。
-# 函数用途: 把学习排除名单同步成候选账本标记，返回标记与检查计数。
+# LLM: 只读扫描优先借候选元组，覆盖list/load仍由仓库回退；这里只提取标量ID，修改仍走原批量写锁。
+# 函数用途: 不复制全账本地同步学习排除标记，返回标记与检查计数。
 def sync_learning_exclusion_marks(
     *,
     conversation_store: object,
@@ -52,7 +53,7 @@ def sync_learning_exclusion_marks(
     thread_ids = excluded_thread_ids(conversation_store, excluded_conversation_ids)
     if not thread_ids:
         return {"marked": 0, "checked": 0}
-    rows = candidate_service.list(statuses={"pending_review", "approved"}, limit=0)
+    rows = getattr(candidate_service, "readonly_rows", candidate_service.list)(statuses={"pending_review", "approved"}, limit=0)
     targets = [
         row.candidate_id
         for row in rows

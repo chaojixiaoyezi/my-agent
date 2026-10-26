@@ -473,8 +473,8 @@ class SimpleAgent(
     prompts = ModelScopedAttribute("prompts")
     tools = ModelScopedAttribute("tools")
 
-    # LLM: W在root/home写入和凭据环境冻结前核原bootstrap及C原constructor roots，仅消费C已有共享/owner资源；普通入口先经唯一Home/owner初始化，再创建请求工作区，避免默认root的普通mkdir抢先造宽权限父链。
-    # 函数用途: 按真实owner装配代理并接原孤儿消费者；新受管目录由原私有初始化负责，显式用户工作区仍沿原mkdir，W不补建。
+    # LLM: 保持W原bootstrap及owner初始化顺序；defer仅透传实例MCP构造策略，默认eager、不修改配置或子worker策略。
+    # 函数用途: 按真实owner装配代理，可为外层控制面延后普通MCP连接，原工作区与孤儿消费者接线保持。
     def __init__(
         self,
         config: AgentConfig,
@@ -483,6 +483,7 @@ class SimpleAgent(
         *,
         channel_runtime_health_provider: RuntimeHealthProvider | None = None,
         worker_bootstrap=None,
+        defer_mcp_connect: bool = False,
     ):
         """initialize all SimpleAgent collaborators and register orchestration tools.
 
@@ -584,12 +585,27 @@ class SimpleAgent(
             runtime_health_provider=self._channel_runtime_health_provider,
         )
         self.delivery_service = DeliveryService(self.channel_registry)
-        self.tools = _build_tool_registry(self, config)
+        self.tools = _build_tool_registry(self, config, defer_mcp_connect=defer_mcp_connect)
         self.extensions = load_extension_registry(config.extension_plugins)
         self.extensions.activate_agent(self)
         _register_orchestration_tools(self)
         for spec in self.tools.specs():
             self.capability_router.register(from_tool_model_spec(spec))
+
+    # LLM: 只在需要动态目录时触发实例连接；即使其他调用方已连接仍同步specs，目录登记不授予工具执行权限。
+    # 函数用途: 将按需发现的工具补齐到代理自身及调用方提供的能力路由器。
+    def ensure_mcp_catalog_ready(self, router: CapabilityRouter | None = None) -> None:
+        ensure = getattr(getattr(self, 'tools', None), 'ensure_mcp_connected', None)
+        if not callable(ensure):
+            return
+        ensure()
+        routers = [self.capability_router]
+        if router is not None and router is not self.capability_router:
+            routers.append(router)
+        for spec in self.tools.specs():
+            card = from_tool_model_spec(spec)
+            for target in routers:
+                target.register(card)
 
     # LLM: 与插件工具注册同一 owner 解析与同一开关（enable_plugins 且 enable_tools）；只读安装表，不启动插件进程。
     # 函数用途: 给 Skill 目录提供本 owner 已启用插件自带的 Skill 目录，插件关闭时返回空。
@@ -896,6 +912,7 @@ def _scheduler_follow_up_policy(agent: SimpleAgent) -> SchedulerFollowUpPolicy:
     return SchedulerFollowUpPolicy(partial(task_follow_up_facts, agent, recent_seconds=grace), grace)
 
 
+# LLM: 挂接的目录准备回调只在真实OPEN路由前执行，不在manager构造期连接MCP；子权限边界保持。
 # LLM: Child agents inherit the parent's effective project roots but never inherit an absent
 # owner wall from an administrator's Full Access session. Child permissions are independently
 # capped to WorkspaceWrite and stay inside the structured owner/task scope.
@@ -926,6 +943,7 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
     )
     manager.home_paths = agent.home_paths
     manager.skill_proposals = _skill_proposal_service(agent)
+    agent.capability_router._ensure_mcp_catalog = partial(agent.ensure_mcp_catalog_ready, agent.capability_router)
     return manager
 
 
@@ -983,9 +1001,9 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
-# LLM: ToolRegistry 唯一装配入口；凭据与自身能力来源均绑定宿主身份，审批读取器每次返回原 owner 结构化模式，不持久第二权限源。B5 owner/来源与原 B2 征询合同不变。
+# LLM: ToolRegistry唯一装配入口；实例defer原样透传且不修改mcp_servers，B5 owner/凭据来源与原审批合同保持。
 # 函数用途: 按身份和工作区组合工具、内网配置、只读自身状态和来源声明，主子代理共用接线。
-def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistry:
+def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_connect: bool = False) -> ToolRegistry:
     from functools import partial
 
     from .settings.secret_ref import managed_secret_environment_names
@@ -1067,6 +1085,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig) -> ToolRegistr
             artifact_backup_root=agent.home_paths.owner_artifact_backups_dir,
             runtime_guard_policy=getattr(agent, "runtime_guard_policy", None),
             mcp_servers=mcp_servers,
+            defer_mcp_connect=defer_mcp_connect,
             plugin_owner=(resolve_owner_home(agent.home_paths.root, owner_identity_from_config(config))
                           if config.enable_plugins and config.enable_tools else None),
             runtime_repo=getattr(getattr(agent, "subagents", None), "runtime_db", None),

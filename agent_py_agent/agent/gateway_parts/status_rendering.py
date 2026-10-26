@@ -17,7 +17,10 @@ from __future__ import annotations
 """Gateway status and liveness rendering helpers."""
 
 import json
+import math
+import os
 import re
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -25,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.log_redaction import redact_sensitive_text
 from ..runtime_errors import runtime_error_report
 from .daemon_control import (
     get_running_pid_report,
@@ -143,19 +147,24 @@ class _GatewayRecordFacts:
 
 # 日志采样最多 64 KiB：状态面板预览够用，避免整份日志进渲染。
 _GATEWAY_LOG_SAMPLE_MAX_BYTES = 64 * 1024
+_GATEWAY_LOG_TAIL_MAX_BYTES = 32768
 _EXCEPTION_SIGNATURE_RE = re.compile(
     r"^(?:[A-Za-z_][A-Za-z0-9_.]*\.)?([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Interrupt)):\s*"
 )
 
 
-# LLM: 这是 CLI、HTTP 和模型只读工具可共同消费的 Gateway 运行事实投影；健康结论只读
-#   PID/state/heartbeat/queue，日志仅作观测诊断，绝不能反向改变运行状态或任务终态。
-# 函数用途: 从唯一 Gateway 状态目录生成结构化健康、端点、配置与本生命周期日志摘要。
+# LLM: 健康只读原PID/state/heartbeat/queue；默认日志摘要不变，显式tail才附有界脱敏文本，不能授ready/权限/终态。
+# 函数用途: 从规范Gateway生成健康事实、默认安全摘要及可选双日志尾采样，不遍历全日志。
 def gateway_runtime_snapshot(
     agent: SimpleAgent,
     paths: GatewayPaths,
     *,
     include_log_diagnostics: bool = False,
+    include_log_tail: bool = False,
+    log_tail_lines: int = 80,
+    log_source: str = "gateway",
+    log_scope: str = "current_lifecycle",
+    log_query: str = "",
 ) -> dict[str, object]:
     running = gateway_running_report(paths)
     state_report = read_json_file_report(paths.state, context="gateway.runtime_snapshot.state.read")
@@ -202,11 +211,16 @@ def gateway_runtime_snapshot(
             paths.log,
             start_offset_bytes=_int_value(state.get("log_start_offset_bytes")),
         )
+    if include_log_tail:
+        diagnostics = snapshot.setdefault("log_diagnostics", {})
+        diagnostics["raw_log_included"] = True
+        diagnostics["log_tail"] = _gateway_log_tails(paths, state, log_source=log_source,
+            log_scope=log_scope, log_tail_lines=log_tail_lines, log_query=log_query)
     return snapshot
 
 
-# LLM: Gateway 服务多个 owner/会话；进程健康快照不提供启动模型，调用者模型由执行快照单独补充。
-# 函数用途: 组装网关健康事实，移除可能误导模型身份回答的启动默认值，不新增 I/O。
+# LLM: Gateway服务多owner；只增加规范supervisor日志定位，不添读取或模型权威，caller模型仍由执行快照提供。
+# 函数用途: 组装原健康事实及两个服务日志位置，不新增I/O或推断实际外部可达性。
 def _gateway_runtime_base_snapshot(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -271,6 +285,7 @@ def _gateway_runtime_base_snapshot(
         "runtime": {
             "gateway_workspace": str(paths.root),
             "log_path": str(paths.log),
+            "supervisor_log_path": str(paths.root / "supervisor.log"),
         },
         "authority": {
             "process": "validated_gateway_pid_record",
@@ -279,6 +294,135 @@ def _gateway_runtime_base_snapshot(
             "log_diagnostics": "observational_only",
         },
     }
+
+
+# LLM: 仅原规范两日志名；来源共用32KiB采样/返文字节，行数每源1..200，查询只覆盖有界尾窗，不修改状态。
+# 函数用途: 为显式请求生成gateway/supervisor脱敏日志尾，不把full_file误当整文件遍历。
+def _gateway_log_tails(paths: GatewayPaths, state: dict, *, log_source: str, log_scope: str,
+                       log_tail_lines: int, log_query: str) -> dict:
+    if log_source not in ("gateway", "supervisor", "both") or log_scope not in ("current_lifecycle", "full_file"):
+        raise ValueError("日志来源或范围无效")
+    sources = ("gateway", "supervisor") if log_source == "both" else (log_source,)
+    limit = max(1, min(200, int(log_tail_lines)))
+    byte_limit = _GATEWAY_LOG_TAIL_MAX_BYTES // len(sources)
+    return {source: _service_log_tail(paths.log if source == "gateway" else paths.root / "supervisor.log",
+        source, state, scope=log_scope, line_limit=limit, byte_limit=byte_limit, query=log_query) for source in sources}
+
+
+# LLM: 原FD前后核单链接regular叶；截窗时从同一预算预留1字节确认行界，不额外超读，也不以叶检查冒充祖先全链保护。
+# 函数用途: 有界读原日志，保留已确认完整的首行，丢弃失去凭据标签的首段；不创建或替换文件。
+def _read_log_tail_sample(path: Path, offset: int, limit: int) -> tuple[bytes, dict]:
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise OSError("service_log_not_single_regular_file")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _require_same_log_file(before, opened, path.lstat())
+        size = opened.st_size
+        lifecycle_start = offset if offset <= size else 0
+        probe_bytes = int(size - lifecycle_start > limit)
+        sample_start = max(lifecycle_start, size - limit + probe_bytes)
+        read_start = sample_start - probe_bytes
+        os.lseek(descriptor, read_start, os.SEEK_SET)
+        raw = os.read(descriptor, min(limit, max(0, size - read_start)))
+        _require_same_log_file(opened, os.fstat(descriptor), path.lstat())
+    finally:
+        os.close(descriptor)
+    metadata = {"current_size_bytes": size, "lifecycle_start_offset_bytes": lifecycle_start,
+        "sample_start_offset_bytes": sample_start, "sampled_bytes": len(raw), "boundary_probe_bytes": probe_bytes,
+        "sample_truncated": sample_start > lifecycle_start, "rotation_detected": offset > size}
+    if probe_bytes:
+        boundary, raw = raw[:1], raw[1:]
+        if boundary != b"\n":
+            newline = raw.find(b"\n")
+            raw = raw[newline + 1:] if newline >= 0 else b""
+    return raw, metadata
+
+
+# LLM: 只核设备/inode及类型/链接数，正常追加允许；读内容前后均复核，任何替换不输出已读文本。
+# 函数用途: 拒绝将符号链接、硬链接或并发换叶冒充原日志。
+def _require_same_log_file(original, opened, current) -> None:
+    for info in (original, opened, current):
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (info.st_dev, info.st_ino) != (original.st_dev, original.st_ino)):
+            raise OSError("service_log_identity_changed")
+
+
+# LLM: 共用原脱敏器；截窗PEM和无标签长Base64整行均保守遮蔽，可能同时隐藏opaque ID/hash；查询只看脱敏结果。
+# 函数用途: 隐藏明确凭据及失去PEM边界的高熵正文，不把采样中部的私钥行当普通日志返出。
+def _scrub_log_tail(raw: bytes) -> list[str]:
+    text = redact_sensitive_text(raw.decode("utf-8", "replace"))
+    text = re.sub(r"\A.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", "<redacted-private-key>", text, flags=re.DOTALL)
+    text = re.sub(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*\Z", "<redacted-private-key>", text, flags=re.DOTALL)
+    text = re.sub(r"^[ \t]*[A-Za-z0-9+/]{32,}={0,2}[ \t\r]*$", "<redacted-opaque-line>", text, flags=re.MULTILINE)
+    return [redact_sensitive_text(line) for line in text.splitlines()]
+
+
+# LLM: 只按原本地秒级时间观察；启动当秒先后不可证，保守排除并计歧义，调用方须标部分，不以取整混入上一代。
+# 函数用途: 保留确认属于本代的监护事件及续行，同时暴露时间精度造成的缺口。
+def _supervisor_lifecycle_lines(lines: list[str], started_at: float) -> tuple[list[str], int]:
+    result, current, ambiguous = [], False, False
+    ambiguous_lines = 0
+    for line in lines:
+        match = re.match(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
+        if match:
+            try:
+                stamp = datetime.fromisoformat(match[1]).timestamp()
+                current = stamp >= started_at
+                ambiguous = 0 < started_at - stamp < 1
+            except (ValueError, OverflowError, OSError):
+                current, ambiguous = False, False
+        if current:
+            result.append(line)
+        elif ambiguous:
+            ambiguous_lines += 1
+    return result, ambiguous_lines
+
+
+# LLM: 以完整已脱敏行取尾，不能靠截掉凭据标签满足字节预算；统计仅限采样窗，不声称全文件匹配数。
+# 函数用途: 在关键词过滤之后同时收紧行数和UTF-8返文字节。
+def _bounded_log_lines(lines: list[str], query: str, line_limit: int, byte_limit: int) -> tuple[list[str], int]:
+    needle = query.casefold()
+    matched = [line for line in lines if not needle or needle in line.casefold()]
+    selected, used = [], 0
+    for line in reversed(matched):
+        size = len(line.encode("utf-8")) + bool(selected)
+        if size + used <= byte_limit:
+            selected.append(line)
+            used += size
+        if len(selected) >= line_limit:
+            break
+    return list(reversed(selected)), len(matched)
+
+
+# LLM: 缺本代锚点或秒级边界歧义须明确报告；错误分源呈现，不降级跟随链接、扫历史或回显查询凭据。
+# 函数用途: 组装单份日志的有界脱敏观察及明确不可读/代次未知信息。
+def _service_log_tail(path: Path, source: str, state: dict, *, scope: str, line_limit: int,
+                      byte_limit: int, query: str) -> dict:
+    result = {"path": str(path), "scope": scope, "lines": [], "line_limit": line_limit,
+              "byte_limit": byte_limit, "query_applied": bool(query),
+              "evidence_scope": "bounded_file_tail_not_full_file_search"}
+    offset, started_at = 0, _float_value(state.get("started_at"))
+    if scope == "current_lifecycle":
+        offset = state.get("log_start_offset_bytes", 0) if source == "gateway" else 0
+        if ((source == "gateway" and ("log_start_offset_bytes" not in state or type(offset) is not int or offset < 0))
+                or (source == "supervisor" and (not math.isfinite(started_at) or started_at <= 0))):
+            return {**result, "status": "lifecycle_unconfirmed"}
+    try:
+        raw, metadata = _read_log_tail_sample(path, offset, byte_limit)
+    except OSError as error:
+        return {**result, "status": "unavailable", "load_error": runtime_error_report(
+            error, context="gateway.runtime_snapshot.log_tail.read")}
+    lines, status = _scrub_log_tail(raw), "ok"
+    if source == "supervisor" and scope == "current_lifecycle":
+        lines, ambiguous = _supervisor_lifecycle_lines(lines, started_at)
+        result.update({"lifecycle_timestamp_precision": "seconds", "lifecycle_boundary_ambiguous_lines": ambiguous})
+        if ambiguous:
+            status = "lifecycle_boundary_ambiguous"
+    selected, matched = _bounded_log_lines(lines, query, line_limit, byte_limit)
+    return {**result, **metadata, "status": status, "lines": selected,
+            "matched_lines_in_sample": matched, "lines_omitted_in_sample": matched - len(selected)}
 
 
 # LLM: 原生命周期与64KiB尾读不扩大；native仅展示严格schema六项有限字段，最多末8条，不返回raw/ID/owner或授予跨owner权限。

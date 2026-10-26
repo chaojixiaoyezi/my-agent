@@ -837,9 +837,275 @@ def test_incident_restart_budget_resets_after_stable_healthy_window(incident_gat
     sup._last_restart_at = 1000.0
     monkeypatch.setattr(sup, "_is_gateway_healthy", lambda **k: True)
     monkeypatch.setattr(sup, "_check_adapter_health", lambda: True)
+    # 新合同须真实记录窗口首个健康观察，不能把未监测的重启后时间当作连续健康。
+    monkeypatch.setattr(sv.time, "time", lambda: 1000.0)
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 5
     monkeypatch.setattr(sv.time, "time", lambda: 1599.0)
     assert sv._run_health_check(sup, 2) == 0
     assert sup._restart_count == 5
     monkeypatch.setattr(sv.time, "time", lambda: 1600.0)
     assert sv._run_health_check(sup, 0) == 0
     assert sup._restart_count == 0
+
+
+# LLM: 原incident夹具的OS边界仍替身；以真实文件为计划交接证据，不启动Gateway或修改生产Home。
+# 函数用途: 验证三处自动干预入口都让原计划重启完成交接，不消耗重启预算。
+@pytest.mark.parametrize("source", ["request", "completed", "turn_wait", "tool_drain", "exiting", "stopped", "stopped_fallback", "starting"])
+@pytest.mark.parametrize("entry", ["health", "restart", "initial"])
+def test_batch4_planned_handover_suppresses_automatic_intervention(incident_gateway, monkeypatch, source, entry):
+    from agent_py_agent.agent.gateway_parts import restart_service as restart
+
+    case, now = incident_gateway, 2000.0
+    sup = case.supervisor
+    monkeypatch.setattr(sv.time, "time", lambda: now)
+    if source == "request":
+        path, payload = restart.restart_request_path(case.paths), {"status": "pending", "requested_at": now - 10}
+    elif source == "completed":
+        path, payload = restart.restart_completed_path(case.paths), {"drained_at": now - 10}
+    else:
+        path, payload = case.paths.state, {"restart_drain": {"phase": source, "updated_at": now - 10}}
+        if source in {"stopped", "stopped_fallback"}:
+            payload = {"status": "stopped", "termination_kind": "planned_restart"}
+            if source == "stopped":
+                payload["stopped_at"] = now - 10
+        if source in {"starting", "stopped_fallback"}:
+            payload.update({"status": "starting" if source == "starting" else "stopped", "started_at": now - 5})
+            restart.restart_state_path(case.paths).write_text(json.dumps({"last_drained_at": now - 10}), encoding="utf-8")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    healthy, adapter = MagicMock(return_value=False), MagicMock(return_value=False)
+    monkeypatch.setattr(sup, "_is_gateway_healthy", healthy)
+    monkeypatch.setattr(sup, "_check_adapter_health", adapter)
+    start, stop, recover = MagicMock(return_value=12345), MagicMock(return_value=True), MagicMock(return_value=True)
+    monkeypatch.setattr(sup, "_start_gateway", start)
+    monkeypatch.setattr(sup, "_stop_gateway", stop)
+    monkeypatch.setattr(sup, "_restart_gateway", recover)
+    if entry == "health":
+        assert sv._run_health_check(sup, 2) == 0
+        recover.assert_not_called()
+        adapter.assert_not_called()
+    elif entry == "restart":
+        assert sv.restart_gateway(sup) is False
+    else:
+        for name in ("_prepare_supervisor_run", "_monitor_until_stopped", "_finish_supervisor_run"):
+            monkeypatch.setattr(sv, name, MagicMock())
+        assert sv.run_supervisor_loop(sup) == 0
+        healthy.assert_not_called()
+    start.assert_not_called()
+    stop.assert_not_called()
+    assert sup._restart_count == 0
+
+
+# LLM: 原文件读口和健康检查真实运行；坏时间及未来记录不能抑制非计划故障，边界含180秒。
+# 函数用途: 检查计划交接时间窗口与坏记录的安全退化。
+@pytest.mark.parametrize("age,active", [(0, True), (180, True), (180.01, False), (-1, False),
+    ("bad", False), ({"bad": 1}, False), (float("nan"), False), (float("inf"), False)])
+def test_batch4_handover_window_is_bounded_and_bad_timestamps_do_not_crash(incident_gateway, monkeypatch, age, active):
+    from agent_py_agent.agent.gateway_parts.restart_service import restart_request_path
+
+    case, now = incident_gateway, 2000.0
+    timestamp = now - age if isinstance(age, (int, float)) else age
+    restart_request_path(case.paths).write_text(json.dumps({"status": "pending", "requested_at": timestamp}), encoding="utf-8")
+    monkeypatch.setattr(sv.time, "time", lambda: now)
+    monkeypatch.setattr(case.supervisor, "_is_gateway_healthy", lambda: False)
+    monkeypatch.setattr(case.supervisor, "_check_adapter_health", lambda: True)
+    assert sv._run_health_check(case.supervisor, 0) == (0 if active else 1)
+
+
+# LLM: 假PID不发真实信号；early unlink后消费原Count0完整出生身份，None不能视为已退出。
+# 函数用途: 验证PID文件先移除时仍等待旧进程，未知观察明确拒绝停止成功。
+@pytest.mark.parametrize("live", [True, False, None])
+def test_batch4_unlinked_pid_uses_three_valued_standalone_identity(incident_gateway, monkeypatch, live):
+    case = incident_gateway
+    case.paths.pid.unlink()
+    monkeypatch.setattr(sv, "get_running_pid_report", lambda *a, **k: RunningPidReport(None))
+    monkeypatch.setattr(sv, "process_identity_is_live", lambda identity: live)
+    wait = MagicMock(return_value=True)
+    monkeypatch.setattr(sv, "_wait_gateway_exit", wait)
+    assert sv.stop_gateway(case.supervisor, timeout=9) is (live is not None)
+    assert wait.call_count == (1 if live is True else 0)
+    if live is True:
+        assert wait.call_args.args == (case.supervisor, 12345, case.identity, 9)
+    assert not [event for event in case.events if event[0] in {"TERM", "KILL"}]
+
+
+# LLM: 同一原Count0身份在等待后必须重新核验，复用既有强停函数和退出确认；不走MP代际旁路。
+# 函数用途: 验证残留旧进程的TERM/KILL顺序和未知/换代时零信号。
+@pytest.mark.parametrize("after_wait", [True, False, None])
+def test_batch4_unlinked_pid_rechecks_before_escalation(incident_gateway, monkeypatch, after_wait):
+    case = incident_gateway
+    case.paths.pid.unlink()
+    monkeypatch.setattr(sv, "get_running_pid_report", lambda *a, **k: RunningPidReport(None))
+    checks = iter([True, after_wait, after_wait])
+    monkeypatch.setattr(sv, "process_identity_is_live", lambda identity: next(checks))
+    wait = MagicMock(side_effect=[False, False, True])
+    monkeypatch.setattr(sv, "_wait_gateway_exit", wait)
+    assert sv.stop_gateway(case.supervisor, timeout=9) is (after_wait is True)
+    signals = [event for event in case.events if event[0] in {"TERM", "KILL"}]
+    assert signals == ([("TERM", 12345), ("KILL", 12345)] if after_wait is True else [])
+
+
+# LLM: 无PID时不从正count、C标记或畸形出生资料恢复信号权；保持原expected_identity分支。
+# 函数用途: 验证新残留身份读口不能误接MP或非法PID。
+@pytest.mark.parametrize("damage", ["workers", "coordinator", "boolean_pid", "missing_host", "missing_birth", "expected"])
+def test_batch4_unlinked_pid_rejects_non_standalone_or_invalid_identity(incident_gateway, monkeypatch, damage):
+    case = incident_gateway
+    case.paths.pid.unlink()
+    state = {"pid": 12345, "process_identity": dict(case.identity), "worker_count": 0}
+    if damage == "workers":
+        state["worker_count"] = 2
+    elif damage == "coordinator":
+        state["c_run_id"] = ""
+    elif damage == "boolean_pid":
+        state["process_identity"]["pid"] = True
+    elif damage == "missing_host":
+        state["process_identity"].pop("host_id")
+    elif damage == "missing_birth":
+        state["process_identity"].pop("start_time")
+    case.paths.state.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(sv, "get_running_pid_report", lambda *a, **k: RunningPidReport(None))
+    live, wait = MagicMock(return_value=None), MagicMock(return_value=True)
+    monkeypatch.setattr(sv, "process_identity_is_live", live)
+    monkeypatch.setattr(sv, "_wait_gateway_exit", wait)
+    options = {"expected_identity": case.identity} if damage == "expected" else {}
+    assert sv.stop_gateway(case.supervisor, **options) is False
+    wait.assert_not_called()
+    assert live.call_count == (1 if damage == "expected" else 0)
+
+
+# LLM: 假停止/启动边界保原代际捕获与预算；仅有真实上次尝试且过300秒才发慢探针。
+# 函数用途: 验证预算耗尽后的节流恢复，以及max<=0/last=0原红线。
+@pytest.mark.parametrize("limit,last,now,allowed", [(3, 1000, 1299, False), (3, 1000, 1300, True),
+    (3, 0, 2000, False), (0, 1000, 2000, False), (-1, 1000, 2000, False)])
+def test_batch4_slow_backoff_preserves_fast_budget_redlines(incident_gateway, monkeypatch, limit, last, now, allowed):
+    case = incident_gateway
+    sup = case.supervisor
+    sup.max_restart_attempts, sup._restart_count, sup._last_restart_at = limit, max(0, limit), last
+    monkeypatch.setattr(sv.time, "time", lambda: now)
+    stop, start = MagicMock(return_value=True), MagicMock(return_value=23456)
+    monkeypatch.setattr(sup, "_stop_gateway", stop)
+    monkeypatch.setattr(sup, "_start_gateway", start)
+    assert sv.restart_gateway(sup) is allowed
+    assert stop.call_count == int(allowed) and start.call_count == int(allowed)
+    assert sup._restart_count == max(0, limit) + int(allowed)
+    if allowed:
+        assert sup._last_restart_at == now
+        assert sv.restart_gateway(sup) is False
+        assert stop.call_count == 1
+
+
+# LLM: 只改假墙钟和健康观察，不等待600秒；不健康必须中断连续窗口，旧稳定窗口回归仍保留。
+# 函数用途: 复现“距上次重启已久但刚恢复就清预算”，并检查第二次不健康会重新计时。
+def test_batch4_restart_budget_requires_continuous_healthy_observations(incident_gateway, monkeypatch):
+    sup = incident_gateway.supervisor
+    sup._restart_count, sup._last_restart_at = 5, 1000.0
+    healthy, clock = [False], [1700.0]
+    monkeypatch.setattr(sv.time, "time", lambda: clock[0])
+    monkeypatch.setattr(sup, "_is_gateway_healthy", lambda: healthy[0])
+    monkeypatch.setattr(sup, "_check_adapter_health", lambda: True)
+    assert sv._run_health_check(sup, 0) == 1
+    healthy[0], clock[0] = True, 1800.0
+    assert sv._run_health_check(sup, 1) == 0
+    assert sup._restart_count == 5, "刚恢复不能把距上次重启的时间误当作连续健康"
+    healthy[0], clock[0] = False, 2300.0
+    assert sv._run_health_check(sup, 0) == 1
+    healthy[0], clock[0] = True, 2400.0
+    assert sv._run_health_check(sup, 1) == 0
+    clock[0] = 2999.0
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 5
+    clock[0] = 3000.0
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 0
+    assert sup._last_unhealthy_at == 0.0 and sup._healthy_since_at == 0.0
+
+
+# LLM: 真实state文件及mtime，只替换身份观察；已过期的phase不能永久压住恢复，活身份仍保护正在排空的原进程。
+# 函数用途: 覆盖新插话的排空阶段时限、ISO/mtime锚点和三值存活分支。
+@pytest.mark.parametrize('phase', ['turn_wait', 'tool_drain', 'exiting'])
+@pytest.mark.parametrize('source,live,active', [('fresh', False, True), ('stale', False, False),
+    ('stale', None, False), ('stale', True, True), ('mtime', False, True), ('iso', False, True)])
+def test_steer_drain_phase_is_fresh_or_original_process_is_live(incident_gateway, monkeypatch, phase, source, live, active):
+    from datetime import datetime, timezone
+
+    case, now = incident_gateway, 2000.0
+    drain = {'phase': phase}
+    if source in {'fresh', 'stale'}:
+        drain['updated_at'] = now - (10 if source == 'fresh' else 1000)
+    elif source == 'iso':
+        drain['started_at'] = datetime.fromtimestamp(now - 10, timezone.utc).isoformat()
+    case.paths.state.write_text(json.dumps({'pid': 12345, 'process_identity': case.identity,
+        'worker_count': 0, 'restart_drain': drain}), encoding='utf-8')
+    os.utime(case.paths.state, (now - 10 if source == 'mtime' else now - 1000,) * 2)
+    monkeypatch.setattr(sv, 'process_identity_is_live', lambda identity: live)
+    assert sv._planned_restart_handover_active(case.supervisor, now=now) is active
+
+
+# LLM: 缺PID/state或坏JSON不是死亡证明；stopped且缺身份才可用原终态退化，完整活身份即使stopped也必须等待。
+# 函数用途: 复现状态损坏被说成已停止，以及坏身份/CountN不能获得信号权。
+@pytest.mark.parametrize('damage,stopped', [('missing_file', False), ('corrupt', False), ('missing_identity', False),
+    ('missing_pid', False), ('mismatched_pid', False), ('boolean_pid', False), ('missing_birth', False),
+    ('boolean_count', False), ('stopped_without_identity', True)])
+def test_steer_unlinked_pid_preserves_unknown_state(incident_gateway, monkeypatch, damage, stopped):
+    case = incident_gateway
+    case.paths.pid.unlink()
+    state = {'pid': 12345, 'worker_count': 0, 'status': 'running', 'process_identity': dict(case.identity)}
+    if damage == 'missing_identity':
+        state.pop('process_identity')
+    elif damage == 'missing_pid':
+        state.pop('pid')
+    elif damage == 'mismatched_pid':
+        state['pid'] = 67890
+    elif damage == 'boolean_pid':
+        state['pid'] = True
+    elif damage == 'missing_birth':
+        state['process_identity'].pop('start_time')
+    elif damage == 'boolean_count':
+        state['worker_count'] = False
+    elif damage == 'stopped_without_identity':
+        state = {'status': 'stopped'}
+    case.paths.state.write_text('{' if damage == 'corrupt' else json.dumps(state), encoding='utf-8')
+    if damage == 'missing_file':
+        case.paths.state.unlink()
+    monkeypatch.setattr(sv, 'get_running_pid_report', lambda *a, **k: RunningPidReport(None))
+    live, wait = MagicMock(return_value=True), MagicMock(return_value=True)
+    monkeypatch.setattr(sv, 'process_identity_is_live', live)
+    monkeypatch.setattr(sv, '_wait_gateway_exit', wait)
+    assert sv.stop_gateway(case.supervisor) is stopped
+    live.assert_not_called()
+    wait.assert_not_called()
+    assert not [event for event in case.events if event[0] in {'TERM', 'KILL'}]
+
+
+# LLM: 维护期没有健康采样，不得计入600秒；原维护读口和真实有限文件由产品处理，不直接调用预算reset helper。
+# 函数用途: 验证维护暂停会截断窗口，恢复后首次健康重新从now起算。
+def test_steer_maintenance_pause_restarts_healthy_window(incident_gateway, monkeypatch):
+    sup, clock = incident_gateway.supervisor, [1000.0]
+    sup._restart_count, sup._last_restart_at = 3, 1000.0
+    monkeypatch.setattr(sv.time, 'time', lambda: clock[0])
+    monkeypatch.setattr(sup, '_is_gateway_healthy', lambda: True)
+    monkeypatch.setattr(sup, '_check_adapter_health', lambda: True)
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 3
+    clock[0] = 1500.0
+    sv.write_maintenance_lock(sup._paths, reason='synthetic maintenance', ttl_seconds=200)
+    assert sv._run_health_check(sup, 2) == 0
+    assert sup._healthy_since_at == 0.0
+    clock[0] = 1800.0
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 3
+    clock[0] = 2399.0
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 3
+    clock[0] = 2400.0
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 0
+
+
+# LLM: 旧健康起点不能越过更晚的实际重启或不健康锚点；max合同用真实health入口核验。
+# 函数用途: 锁住最新重启后的600秒，以及首个健康采样不回填未监测的旧时间。
+@pytest.mark.parametrize('old_since', [0.0, 500.0])
+def test_steer_healthy_anchor_does_not_reuse_unmonitored_or_pre_restart_time(incident_gateway, monkeypatch, old_since):
+    sup, clock = incident_gateway.supervisor, [2000.0]
+    sup._restart_count, sup._last_restart_at, sup._healthy_since_at = 3, 1900.0, old_since
+    monkeypatch.setattr(sv.time, 'time', lambda: clock[0])
+    monkeypatch.setattr(sup, '_is_gateway_healthy', lambda: True)
+    monkeypatch.setattr(sup, '_check_adapter_health', lambda: True)
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 3
+    clock[0] = 2599.0 if old_since == 0.0 else 2499.0
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 3
+    clock[0] += 1
+    assert sv._run_health_check(sup, 0) == 0 and sup._restart_count == 0

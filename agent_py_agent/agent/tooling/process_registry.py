@@ -1,9 +1,11 @@
 
 # LLM: 归属仍读process_scope；只读探针合并ps与微秒birth投影，终止选取强制新鲜关系，未知不冒充死亡或授权。
 # 前台自然退出按启动身份清理原组；旧locale仅缓存同PID/原token/当前token的原生复核成功等价，不缓存存活或改写原账。
+#   只reap本Registry持有的外层host Popen；终态先写后退的窗口保留待回收句柄，不发信号也不替代整树终止证明。
 # 模块用途: 查询或精确停止受管进程，观测有界日志和读取故障；进程身份、退出与清理事实仍由原生命周期入口决定。
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -40,9 +42,11 @@ _LEGACY_BIRTH_CACHE_LOCK = threading.Lock()
 
 # 只缓存内核微秒出生身份到旧host文本的投影，不缓存存活；与旧locale等价证明共用锁合并miss。
 _PID_BIRTH_TOKEN_CACHE: OrderedDict[tuple[int, str], str] = OrderedDict()
+# 出生身份投影缓存最多保留2048项，不代表实例仍存活。
 _PID_BIRTH_TOKEN_CACHE_MAX_COUNT = 2048
 _PS_RELATION_CACHE: dict[str, tuple[float, dict[int, int], bool]] = {}
 _PS_RELATION_CACHE_LOCK = threading.Lock()
+# 只读ps关系表最多复用0.25秒；终止选取仍强制新鲜观察。
 _PS_RELATION_CACHE_SECONDS = 0.25
 _FRESH_RELATION_MAPS = threading.local()
 
@@ -275,13 +279,45 @@ def _log_tail_result(raw: bytes, *, size: int, limit: int) -> ProcessLogTail:
 
 
 # LLM: 只缓存原Store记录和本进程句柄；指纹比较共用旧locale复核门，观察未知不复用句柄，锁仍registry到Store。
+#   移除缓存不放弃host回收责任；最多64个未退出Popen等后续操作非阻塞poll，不改变业务终态或发送信号。
 # 类用途: 按精确范围查询、等待和停止后台会话，兼容旧出生指纹但不新建权威或改写持久记录。
 class ProcessRegistry:
     # LLM: key 同时包含规范目录和 session ID；不同 owner 的同名句柄不会复用进程对象。
-    # 函数用途: 初始化本进程缓存和互斥。
+    # 函数用途: 初始化本进程缓存、互斥和仅保存外层host句柄的待回收列表。
     def __init__(self) -> None:
         self._processes: dict[tuple[str, str], BackgroundProcess] = {}
         self._lock = threading.Lock()
+        self._pending_reap: list[subprocess.Popen[str]] = []
+
+    # LLM: 必须持registry锁；只poll已有本地Popen，最多64项，不按PID重建句柄或操作业务child组长。
+    # 函数用途: 顺带回收已经物理退出的host，仍活着的句柄继续留在内存列表。
+    def _drain_pending_reap_locked(self) -> None:
+        self._pending_reap[:] = [proc for proc in self._pending_reap if proc.poll() is None]
+
+    # LLM: 只reap本Registry持有的外层host；终态最多等50ms，移除只poll；去重上限64，满额明确报错由调用方保留原记录，不发信号。
+    # 函数用途: 等待host在写终态后真正退出，暂未退出时把回收责任留给下次Registry操作。
+    def _reap_popen_or_retain_locked(self, proc: subprocess.Popen[str] | None, *, wait_seconds: float = 0.05) -> None:
+        if proc is None:
+            return
+        if proc.poll() is None and wait_seconds > 0:
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError, ValueError):
+                proc.wait(timeout=wait_seconds)
+        if proc.poll() is not None:
+            self._pending_reap[:] = [pending for pending in self._pending_reap if pending is not proc]
+        elif all(pending is not proc for pending in self._pending_reap):
+            self._drain_pending_reap_locked()
+            if len(self._pending_reap) >= 64:
+                raise RuntimeError("managed host reap capacity exhausted")
+            self._pending_reap.append(proc)
+
+    # LLM: 必须持registry锁；先移交本地host句柄再撤缓存，满额异常时原记录不动；未终态也仅poll，不更新存储或发信号。
+    # 函数用途: 安全移除一条内存记录，避免权威缺失、裁剪或枚举刷新时漏掉host回收。
+    def _discard_cached_locked(self, key: tuple[str, str]) -> BackgroundProcess | None:
+        old = self._processes.get(key)
+        if old is not None:
+            self._reap_popen_or_retain_locked(old.process, wait_seconds=0.0)
+            self._processes.pop(key, None)
+        return old
 
     # LLM: 原记录必须已经提交；附加 Popen 不新建 ID 或重写生命周期，实例不符明确拒绝。
     # 函数用途: 接管启动方已经交接的同一个会话，保留可回收的本地 host 句柄。
@@ -310,11 +346,12 @@ class ProcessRegistry:
             return record
 
     # LLM: v2/v3 只信原 Store 终态，host 丢失不是 child 退出；v1 保留原终态读取，旧 v2 不得误走该分支。
+    #   业务终态只对持有的外层host做有界reap；未退出则保留待回收，不改WNOWAIT或业务树清理顺序。
     # 函数用途: 更新失去托管的未知状态，或读取旧版本已经退出的命令结果。
     def _refresh_locked(self, record: BackgroundProcess) -> None:
+        self._drain_pending_reap_locked()
         if record.is_terminal():
-            if record.process is not None:
-                record.process.poll()
+            self._reap_popen_or_retain_locked(record.process, wait_seconds=0.05)
             return
         if record.persisted_snapshot.get("schema") in MANAGED_PROCESS_SESSION_SCHEMAS:
             pid = record.pid or record.persisted_snapshot["launcher_pid"]
@@ -331,7 +368,7 @@ class ProcessRegistry:
                         current = transaction.write({**current, "status": "unknown"})
                     self._cache_payload(current, Path(record.store_root))
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                self._processes.pop((record.store_root, record.session_id), None)
+                self._discard_cached_locked((record.store_root, record.session_id))
                 raise ProcessSessionAuthorityError(process_session_error_report(exc, "process_registry.refresh")) from exc
             return
         return_code = record.process.poll() if record.process is not None else None
@@ -357,10 +394,12 @@ class ProcessRegistry:
         return rows
 
     # LLM: 枚举先刷新权威；业务范围显式排除共享激活，redo 故障不能回退到旧成功视图。
+    #   每次枚举顺带非阻塞reap待退出host，即使原会话已经被移除或已发完成通知。
     # 函数用途: 列出当前范围的后台会话，并单列损坏或恢复错误。
     def list_report(self, access_scope: ProcessAccessScope | None = None,
                     store_root: str | Path | None = None) -> tuple[list[dict[str, Any]], list[dict[str, object]]]:
         with self._lock:
+            self._drain_pending_reap_locked()
             roots = {str(Path(store_root).resolve())} if store_root else {rec.store_root for rec in self._processes.values()}
             errors = []
             for root in roots:
@@ -464,6 +503,7 @@ class ProcessRegistry:
             token.wait(interval) if token is not None else time.sleep(interval)
 
     # LLM: 无 root 内部查询只允许缓存唯一匹配；业务 scope 显式拒绝共享激活，不能凭已知句柄越过归属。
+    #   正常容量下权威损坏/缺失沿原错误；移交host回收责任满额时先报容量异常并保留缓存，不授权发信号。
     # 函数用途: 从权威目录读当前记录，再做访问身份比较。
     def _visible_record_locked(self, session_id: str, access_scope: ProcessAccessScope | None,
                                store_root: str | Path | None) -> BackgroundProcess | None:
@@ -475,10 +515,10 @@ class ProcessRegistry:
         root = Path(store_root).expanduser().resolve(strict=False)
         report = ProcessSessionStore(root).load(session_id)
         if report.load_error:
-            self._processes.pop((str(root), session_id), None)
+            self._discard_cached_locked((str(root), session_id))
             raise ProcessSessionAuthorityError(report.load_error)
         if not report.record:
-            cached = self._processes.pop((str(root), session_id), None)
+            cached = self._discard_cached_locked((str(root), session_id))
             if cached is not None and not cached.is_terminal():
                 raise ProcessSessionAuthorityError({"error_type": "active_authority_missing"})
             return None
@@ -488,6 +528,7 @@ class ProcessRegistry:
         ) else None
 
     # LLM: 同地址/PID的不同文本须将缓存和存储指纹同时绑定新内核观察；不能拿缓存token冒充当前活体，未知不复用句柄。
+    #   旧句柄无法复用时仅poll并留待回收，绝不将它附给不同实例或以退出码推断业务终态。
     # 函数用途: 刷新可信快照并兼容旧locale，阻止把旧Popen附给复用PID的新实例，不改写存储token。
     def _cache_payload(self, payload: dict[str, object], root: Path) -> BackgroundProcess:
         key = (str(root), str(payload["session_id"]))
@@ -505,12 +546,15 @@ class ProcessRegistry:
                 same = False
             if same:
                 fresh.process = cached.process
+            else:
+                self._reap_popen_or_retain_locked(cached.process, wait_seconds=0.0)
             cached.__dict__.update(fresh.__dict__)
             return cached
         self._processes[key] = fresh
         return fresh
 
     # LLM: 读取错误的记录从缓存撤下，健康子集来自同一次枚举；不可拿原缓存绕过恢复错误。
+    #   枚举中消失的记录仅非阻塞移交本地host句柄，不因记录缺失就终止仍活着的进程。
     # 函数用途: 刷新一个规范目录的完整可读记录，并返回独立错误。
     def _hydrate_store_locked(self, store_root: str | Path) -> list[dict[str, object]]:
         root = Path(store_root).expanduser().resolve(strict=False)
@@ -518,7 +562,7 @@ class ProcessRegistry:
         present = {str(payload["session_id"]) for payload in records}
         for key in list(self._processes):
             if key[0] == str(root) and key[1] not in present:
-                del self._processes[key]
+                self._discard_cached_locked(key)
         for payload in records:
             self._cache_payload(payload, root)
         return errors
@@ -532,18 +576,23 @@ class ProcessRegistry:
         self._cache_payload(effective, Path(record.store_root))
 
     # LLM: 只裁剪确认终态；磁盘仅操作当前调用目录，不能因其它 owner 的损坏影响本次交接。
+    #   先poll原待回收句柄，裁剪记录前将未退出host留待回收；不能改变业务终态或发信号。
     # 函数用途: 限制已完成缓存数量，并在本次启动所属的原目录裁剪历史。
     def _prune_finished_locked(self, store_root: Path) -> None:
+        self._drain_pending_reap_locked()
         finished = [(key, rec) for key, rec in self._processes.items() if rec.is_terminal()]
         finished.sort(key=lambda item: item[1].finished_at or item[1].started_at)
         for key, _record in finished[:max(0, len(finished) - _MAX_FINISHED_COUNT)]:
-            self._processes.pop(key, None)
+            self._discard_cached_locked(key)
         ProcessSessionStore(store_root).prune_finished(_MAX_FINISHED_COUNT)
 
-    # LLM: 只丢本进程缓存，不修改持久记录或杀资源；测试负责精确回收自己创建的资源。
-    # 函数用途: 清除缓存以验证跨进程恢复或隔离测试。
+    # LLM: 只丢本进程记录缓存；持有的host句柄只非阻塞poll并留待回收，不改持久记录或发信号。
+    # 函数用途: 清除会话缓存，仍保留host的有界回收责任；测试负责显式结束自己创建的活资源。
     def clear(self) -> None:
         with self._lock:
+            self._drain_pending_reap_locked()
+            for record in self._processes.values():
+                self._reap_popen_or_retain_locked(record.process, wait_seconds=0.0)
             self._processes.clear()
 
 
@@ -1069,6 +1118,8 @@ def _birth_token_matches(pid: int, expected_birth_token: str, current_token: str
         # Store投影可能丢微秒或使用不同基础文本；不能让它掩盖同秒PID复用。
         observed = capture_process_birth_token(pid)
         if not observed or "#kb=" not in observed:
+            if observed and _process_is_zombie(pid):
+                return _birth_tokens_match(expected_birth_token, observed)
             raise OSError("native process birth observation unavailable")
         return _birth_tokens_match(expected_birth_token, observed)
     if _birth_tokens_match(expected_birth_token, current):

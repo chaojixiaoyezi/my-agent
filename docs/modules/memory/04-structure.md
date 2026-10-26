@@ -1,3 +1,8 @@
+## 2026-10-26 `candidates.py` 只读扫描接口、$O(1)$ 合并索引与 `retention_apply.py` 空目录回收结构
+
+- `memory_store/candidates.py::CandidateService.readonly_rows` 在未覆盖 `list` 或 `_load_unlocked` 时直接从 `_borrow_candidate_readonly_rows` 过滤并切片返回只读元组；`_merge_existing_candidates` 构建 `by_id` 与 `by_key` 哈希索引以 $O(1)$ 定位活跃与历史同键候选。
+- `memory_store/retention_apply.py` 新增 `_prune_empty_ephemeral_dirs`、`_prune_ephemeral_parents` 与 `_remove_empty_ephemeral_dir`，结合 `open_directory_beneath`、`os.fstat` 与 `before=cutoff` 年龄阈值由底向上安全清理空临时/缓存目录。
+
 ## 2026-10-25 `candidates.py` 大文件五元 stat 摘要缓存与只读预过滤结构
 
 - `memory_store/candidates.py::_candidate_load_probe` 对尺寸达到 `_CANDIDATE_FAST_STAT_PROBE_MIN_BYTES`（`1 MiB`）的 `candidates.jsonl` 维护有界 `_CANDIDATE_STAMP_DIGEST_CACHE`（按 `st_mtime_ns, st_size, st_ino, st_dev, st_ctime_ns` 五元 stat 复用 `blake2b` 摘要，写入失效时通过 `_drop_candidate_load_cache` 同时清理摘要与解析缓存）；`CandidateService.list()` 与 `stats()` 在未覆盖 `_load_unlocked` 且命中 `_CANDIDATE_LOAD_CACHE` 时先在只读缓存元组上执行 `statuses` 过滤、排序与 `limit` 切片，最后仅对返回结果集执行 `deepcopy`（`stats()` 零深拷贝）。

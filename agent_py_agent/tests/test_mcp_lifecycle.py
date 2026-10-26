@@ -180,6 +180,9 @@ def test_discovery_cleanup_failure_does_not_break_other_servers(monkeypatch, ini
     registry._mcp_prepare_lock = threading.Lock()
     registry._mcp_closed = threading.Event()
     registry._construction_params = SimpleNamespace(plugin_owner=None)
+    # 这个故障夹具已经手工装入初连后的client，须显式表示已完成初连，避免被误当延迟新实例。
+    registry._mcp_connected_state = [True]
+    registry._mcp_catalog_owner = registry
     if initial:
         real_client = mcp_registration.MCPStdioClient
         monkeypatch.setattr(mcp_registration, "MCPStdioClient", lambda config: broken if config.name == "broken" else real_client(config))

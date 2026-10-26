@@ -1226,6 +1226,7 @@ def test_search_text_rg_reader_stops_when_tool_token_is_cancelled(
     tool = SearchTextTool(workspace, max_matches=5)
     process_started = threading.Event()
     process_stopped = threading.Event()
+    stdout_closed = threading.Event()
 
     class BlockingStdout:
         def __iter__(self):
@@ -1235,6 +1236,12 @@ def test_search_text_rg_reader_stops_when_tool_token_is_cancelled(
             process_started.set()
             process_stopped.wait(2.0)
             raise StopIteration
+
+        # LLM: 模拟真实Popen.stdout的关闭接口，取消回调所在主线程不得关闭读线程的流。
+        # 函数用途: 记录读线程finally确已关闭管道，同时抓住跨线程关闭回归。
+        def close(self):
+            assert threading.current_thread() is thread
+            stdout_closed.set()
 
     class FakePopen:
         def __init__(self, *_args, **_kwargs):
@@ -1285,6 +1292,7 @@ def test_search_text_rg_reader_stops_when_tool_token_is_cancelled(
 
     assert not thread.is_alive()
     assert process_stopped.is_set()
+    assert stdout_closed.is_set()
     assert len(errors) == 1
     assert isinstance(errors[0], ToolCancelled)
 

@@ -60,6 +60,11 @@ PRIVATE_INTERACTIONS_OWNER_PARTS: tuple[str, ...] = ("data", "private_interactio
 HOST_MANAGED_OWNER_STORE_PARTS: tuple[tuple[str, ...], ...] = (
     ("data", "plugins"), PRIVATE_INTERACTIONS_OWNER_PARTS, ("workspace", "runtime", "services"),
 )
+# 只读例外不拆整机服务隐藏根；Shell挂载体积及队列保护保持原声明。
+ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS: frozenset[tuple[str, ...]] = frozenset({
+    ("workspace", "runtime", "services", "gateway", "gateway.log"),
+    ("workspace", "runtime", "services", "gateway", "supervisor.log"),
+})
 
 # H3（2026-10-02）宿主配置的唯一声明：改配置只有参数中心（user_config、/settings）和 manage_models（/model）两个权威入口，
 #   模型的文件工具和命令直接写这些目录会绕过边界键、修改账本、撤销和模型目录检查（be 复审语义记忆时发现）。读取照常，只拒写。
@@ -363,12 +368,30 @@ class PathAccessPolicy:
             return None
         return self._host_managed_store_of(resolved)
 
-    # LLM: 调用方已 resolve；只做路径运算。本模块会被原样打进插件 SDK（scripts/build_plugin_api.SDK_SOURCES），必须只依赖标准库。
-    # 函数用途: 用冻结的数据根判断已解析路径是否落在宿主托管存储里。
+    # LLM: 管理员身份及regular日志形状由同一helper核验；只豁免H2，H3写门及services整体隐藏不变。
+    # 函数用途: 为Full/Auto/Ask管理员开放规范日志只读，其他owner仍由原托管存储门拒绝。
     def _host_managed_store_of(self, resolved: Path) -> Path | None:
         if self.agent_home_root is None:
             return None
+        if self._is_admin_readable_service_log(resolved):
+            return None
         return host_managed_store_for_path(resolved, self.agent_home_root)
+
+    # LLM: 冻结owner墙必须为空或casefold精确等于local/main；再核home白名单及单链接regular元数据，不授跨租户或写权。
+    # 函数用途: 在唯一读例外中识别Full/Auto/Ask管理员，排除其他本地/Provider用户及所有队列、目录、链接别名。
+    def _is_admin_readable_service_log(self, resolved: Path) -> bool:
+        if self.agent_home_root is None:
+            return False
+        main = self.agent_home_root / "owners" / "local" / "main"
+        if self.owner_scope_root is not None and _relative_folded(self.owner_scope_root, main) != ():
+            return False
+        if _relative_folded(resolved, main) not in ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS:
+            return False
+        try:
+            info = resolved.stat()
+        except OSError:
+            return False
+        return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
 
     # LLM: 只有 owner 普通墙拒绝允许原明确授权根复核，跨 owner/控制面等拒绝不能覆盖；插件须传宿主冻结的 external_policy。
     # 函数用途: 为核心文件工具和隔离插件统一检查已授权的墙外工作路径。

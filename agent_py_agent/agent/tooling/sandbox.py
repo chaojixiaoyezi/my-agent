@@ -690,14 +690,27 @@ def _canonical_read_roots(raw_roots: tuple[Path, ...]) -> tuple[Path, ...]:
 
 
 
-# LLM: 共享规则排序与文件工具一致，普通祖先只读后可以重挂正式窄写根；绝对保护由调用方随后追加。只投影已有路径，不创建宿主文件。
+# LLM: 普通拒写只收紧已可见的同源挂载，不能增加读权；祖先RO重挂保留已有效的隐藏与窄授权，不创建宿主文件。
 # 函数用途: 把本次允许与禁止范围按路径具体程度编译成 Linux 挂载顺序。
 def _append_write_scope_mounts(
     argv: list[str], allowed: tuple[Path, ...], forbidden: tuple[Path, ...],
 ) -> None:
     for root, writable in ordered_write_scope_roots(allowed, forbidden):
-        if root.exists():
-            argv += ["--bind" if writable else "--ro-bind", str(root), str(root)]
+        if not root.exists():
+            continue
+        if writable:
+            argv += ["--bind", str(root), str(root)]
+        elif _scope_readonly_mount_visible(root, argv):
+            _append_mount_preserving_children(argv, ("--ro-bind", str(root), str(root)))
+
+
+# LLM: 只消费本次已发mount的最终覆盖；空根、tmpfs、异源和symlink不能授权真实宿主源，根目录不能由禁止规则重挂。
+# 函数用途: 判断普通只读限制是否会保持既有可见范围，而非重露隐藏或未挂载目录。
+def _scope_readonly_mount_visible(path: Path, argv: list[str]) -> bool:
+    if path == Path(path.anchor):
+        return False
+    mount = _effective_mount(path, _mount_snapshot(argv))
+    return mount is not None and not mount.alias and mount.source == mount.target
 
 
 # LLM: 只按宿主策略的瞬时后缀判定；try-bind仅容忍源在exec前消失，存在时仍必须只读，不扩大持久路径例外。
@@ -1470,12 +1483,12 @@ def _defer_strict_hidden_mounts(argv: list[str], spec: SandboxSpec) -> None:
             del argv[index:index + 4]
 
 
-# LLM: 原普通deny允许更窄明确授权，绝对readonly不允许例外；严格隐藏最后盖住全部绑定。B7整根只读不重复隐藏private根。
+# LLM: 末尾普通deny与首次挂载共用可见性闸，不重露根或tmpfs；更窄明确授权仍保留，绝对readonly与最终严格隐藏不变。
 # 函数用途: 在人格加固后收束原写边界和隐藏范围，所有恢复仅消费同次已挂视图。
 def _append_final_mount_protections(argv: list[str], spec: SandboxSpec) -> None:
     allowed = _normalized_write_roots(spec.write_roots, preserve_nested=True)
     for path, writable in ordered_write_scope_roots(allowed, spec.write_scope_denied_roots):
-        if not writable and path.exists():
+        if not writable and path.exists() and _scope_readonly_mount_visible(path, argv):
             _append_mount_preserving_children(argv, ("--ro-bind", str(path), str(path)))
     _append_readonly_mounts(argv, spec.read_only_paths)
     if not spec.read_only_root or spec.read_mode == "allowlist":

@@ -8,12 +8,11 @@ import time
 from pathlib import Path
 
 from agent_py_agent.agent.ingestion.continuous_monitor import (
+    ContinuousProofFileEvaluator,
     ContinuousProofPolicy,
     append_snapshot,
     build_snapshot,
     discover_owner_homes,
-    evaluate_continuous_proof,
-    read_snapshots,
 )
 from agent_py_agent.agent.llm_scale import redis_client_from_url
 from agent_py_agent.agent.observability.otel import configure_otel_from_env
@@ -23,6 +22,8 @@ from agent_py_agent.agent.scale_runtime import ScaleRole, ScaleRuntimeConfig
 from agent_py_agent.agent.storage_backend import StorageBackend
 
 
+# LLM: 每个长跑进程在循环外持有一个文件评估器，正常追加只消费新增字节；原初始化、采样、summary保持。
+# 函数用途: 周期采集生产来源并增量更新连续运行证明。
 def serve() -> None:  # pragma: no cover - 真长跑进程
     config = ScaleRuntimeConfig.from_env(ScaleRole.MONITOR, os.environ)
     if config.is_scale:
@@ -47,11 +48,12 @@ def serve() -> None:  # pragma: no cover - 真长跑进程
             int(os.environ.get("CONTINUOUS_MONITOR_MAX_SOURCE_STALE_SECONDS", "900")),
         ),
     )
+    evaluator = ContinuousProofFileEvaluator(evidence)
     while True:
         owners = discover_owner_homes(home)
         snapshot = build_snapshot(owners)
         append_snapshot(evidence, snapshot)
-        report = evaluate_continuous_proof(read_snapshots(evidence), policy)
+        report = evaluator.evaluate(policy)
         summary = evidence.with_suffix(".summary.json")
         summary.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         time.sleep(interval)

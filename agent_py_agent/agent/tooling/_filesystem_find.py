@@ -1,6 +1,9 @@
 
+# LLM: 文件枚举沿原rg/有界Python后备；rg的取消只发信号和有界wait，stdout统一归读线程finally关闭。
+# 模块用途: 按glob分页查找文件，保持访问策略、覆盖信封与子进程资源回收边界。
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import logging
 import os
@@ -361,6 +364,7 @@ def _start_rg_find_process(
 
 # LLM: Output is consumed only to offset+limit+1 and every path is resolved
 # through the canonical access policy before it can reach the model.
+#   读线程finally负责有界回收与关闭stdout，包括BaseException；异步取消不得关闭正在迭代的流。
 # 函数用途: 读取 rg 的一页文件结果；看到下一页哨兵后立刻结束进程，并保持路径权限校验。
 def _read_rg_find_process(
     tool: FindFilesTool,
@@ -402,8 +406,14 @@ def _read_rg_find_process(
         return_code = process.wait(timeout=2)
     except Exception:
         _LOGGER.debug("rg file discovery failed while reading; using Python fallback", exc_info=True)
-        _stop_find_process(process)
         return None
+    finally:
+        try:
+            _stop_find_process(process)
+        finally:
+            if process.stdout is not None:
+                with contextlib.suppress(OSError):
+                    process.stdout.close()
     if not stopped_early and return_code not in {0, 1}:
         return None
     return _FindMatchBatch(
@@ -417,9 +427,8 @@ def _read_rg_find_process(
     )
 
 
-# LLM: Termination is idempotent and bounded so /stop cannot wait behind a
-# blocked rg stdout reader.
-# 函数用途: 结束当前文件查找子进程；普通完成时不做事，超时后再强制结束。
+# LLM: TERM/KILL后wait均有界；kill后再次wait回收僵尸，不关闭主读线程正在迭代的stdout。
+# 函数用途: 结束当前文件查找子进程并回收，普通完成时仅poll，不让取消回调争抢读管道。
 def _stop_find_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -437,6 +446,8 @@ def _stop_find_process(process: subprocess.Popen[str]) -> None:
             process.kill()
     except OSError:
         return
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        process.wait(timeout=1)
 
 
 def _find_directory_result(result: _FindDirectoryResultRequest) -> ToolHandlerOutcome:

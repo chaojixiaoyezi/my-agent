@@ -1,3 +1,13 @@
+## 2026-10-25 探测节流与外层 host 回收（perf-fix-c-c3 候选）
+
+强制监听拦截仍按 2 秒调度；仅告警模式在 10 秒、60 秒处分级退避，已有 listener_warning 后停止重复 socket 探测与告警事务。listen_scope 自持独立 250ms 原生 ps 父子表缓存，不反向依赖 Registry；测试 run 不复用缓存或接收新增参数，原生 ps/lsof 则使用 DEVNULL stdin 与 C locale。缓存只供观测，不构成整树死亡或外部可达证明。
+
+Registry 只 reap 原本持有的外层 host Popen，不改变业务 child 的 WNOWAIT 顺序。业务终态先落盘、host 尚未退出时最多等 50ms；句柄随后可转入去重、上限 64 的待回收列表。刷新、裁剪、枚举和 clear 顺带非阻塞 poll；移除或身份替换先移交回收责任再丢记录，不因权威缺失或 clear 向活进程发信号。本版本实际枚举口为 list_report，不新增 list_records 包装入口。
+
+满额时显式报 RuntimeError 并保留尚未移交的记录，位置释放后可重试；此前已 poll 或入队的句柄不回滚。最后一次 Registry 操作后若没有新调用，不保证自动及时回收，当前不新增常驻回收线程。两个 rg stop 入口在成功 kill 后补有界 wait；stdout 归三个读入口 finally 关闭，异步取消回调不得关闭正在迭代的流。
+
+定向与基线差异见 [测试记录](../../TESTS.md)。本片只为源码候选；组合仍有初始基线失败，真实 host 晚绑定/全树生命周期、跨平台、容量异常的上层映射与生产性能均未验证，不据局部 Popen 回收或静态独审宣布发行通过。
+
 ## 2026-10-16 F1 输出与尾读有界（组合验收中）
 
 同步沙箱复用原 ProcessOutputCapture，每流仅保留4MiB但持续排空，真实退出码/超时/取消不由截断改写。POSIX等待采用同一采集器的DefaultSelector，不受select高fd上限；Windows原等待分路保留，须另验工件。

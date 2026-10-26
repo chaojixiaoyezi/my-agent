@@ -227,6 +227,8 @@ def test_different_native_birth_still_proves_pid_reuse(monkeypatch, legacy_birth
     ("host:Fri Oct 24 04:12:00 2026", False),
 ])
 def test_legacy_birth_keeps_cached_handle_without_rewriting_stored_token(tmp_path, legacy_birth_probe, cached_token, same_instance):
+    from unittest.mock import Mock
+
     probe = legacy_birth_probe
     _, _, authority = _fixture(tmp_path)
     payload = authority.load("bg-test-notice").record
@@ -234,10 +236,16 @@ def test_legacy_birth_keeps_cached_handle_without_rewriting_stored_token(tmp_pat
     registry = probe.module.ProcessRegistry()
     cached = registry._cache_payload(payload, authority.root)
     cached.pid_birth_token = cached_token
-    handle = cached.process = object()
+    handle = cached.process = Mock()
+    handle.poll.return_value = None
     refreshed = registry._cache_payload(payload, authority.root)
     assert refreshed.process is (handle if same_instance else None)
     assert refreshed.pid_birth_token == payload["pid_birth_token"] == probe.legacy
+    assert registry._pending_reap == ([] if same_instance else [handle])
+    assert handle.poll.called is not same_instance
+    handle.wait.assert_not_called()
+    handle.terminate.assert_not_called()
+    handle.kill.assert_not_called()
 
 
 def test_legacy_birth_tree_stop_guard_uses_compatible_identity(monkeypatch, legacy_birth_probe):

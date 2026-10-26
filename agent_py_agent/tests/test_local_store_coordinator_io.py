@@ -24,6 +24,44 @@ from agent_py_agent.agent.local_storage.maintenance import _typed_rebuild_rows_e
 from agent_py_agent.agent.local_storage.store import LocalStore
 
 
+def test_perf_e_prune_events_sql_inside_but_file_reads_and_lock_wait_outside(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    store, door = make_store(tmp_path)
+    with global_write_commit_scope(door):
+        run_operation(store, 'upsert')
+    actual_connect, actual_flock, actual_open = sqlite3.connect, json_io._flock_descriptor, Path.open
+    violations = []
+
+    def connect(*args, **kwargs):
+        assert door.inside
+        conn = actual_connect(*args, **kwargs)
+
+        def trace(sql):
+            if sql.split()[0].upper() in {'BEGIN', 'DELETE', 'COMMIT'} and not door.inside:
+                violations.append(sql)
+        conn.set_trace_callback(trace)
+        return conn
+
+    def flock(*args, **kwargs):
+        assert not door.inside
+        return actual_flock(*args, **kwargs)
+
+    def opened(path, *args, **kwargs):
+        if path == store.events_path:
+            assert not door.inside
+        return actual_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(schema_module.sqlite3, 'connect', connect)
+    monkeypatch.setattr(json_io, '_flock_descriptor', flock)
+    monkeypatch.setattr(Path, 'open', opened)
+    prune = getattr(store, 'prune_events', None)
+    assert callable(prune), 'missing event retention'
+    with global_write_commit_scope(door):
+        assert prune(before=time.time() + 100, keep_last=0)['deleted_db'] == 1
+    assert violations == []
+
+
 # LLM: 仅测试替代外层同步末门，真实global scope/SQLite/文件算法不替换；记录门内耗时，不声称HTTP来源已接通。
 # 类用途: 注入同对象来源拒绝并测真实本地提交门持时。
 class Door:

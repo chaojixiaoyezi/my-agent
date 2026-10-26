@@ -1,3 +1,30 @@
+## 2026-10-26 底座残余性能、资源回收、脚本沙箱强化、网关 04:00 安全重启死锁与管理员日志自诊闭环（已落地）
+
+- **子代理外层控制面 MCP 延迟连接（`三.5` / `perf-fix-a`）**：`ToolRegistryParams.defer_mcp_connect` 与 `SimpleAgent(defer_mcp_connect=...)` 默认 `False`；CLI `subagents dispatch`（非 `planner`）与 `subagents execute` 外层控制面实例显式启用延迟连接并在 `finally` 中 `close()`，仅在实际进入 `prepare_for_run()` 或发生需要 MCP 目录的 `OPEN` 能力检索（`ensure_mcp_catalog_ready`）时按需建立连接，消除外层调度壳提前拉起重复 `computer_use_server` 子进程。
+- **`continuous-watch` 增量流式证明（`三.6` / `perf-fix-b`）**：`ingestion/continuous_monitor.py` 新增 `ContinuousProofFileEvaluator`，维护文件 `(dev, ino)`、五元 stat、`_committed_offset`、`4 KiB` SHA-256 头部摘要与流式 `_ProofAccumulator`，每 30 秒采样仅读取新追加字节并保持 $O(1)$ 内存开销，消除 `141 MiB` 历史文件每轮全量重读。
+- **后台进程监听自适应退避、`ps` 250ms 缓存与超时子进程回收（`三.7` + `D2` / `perf-fix-c`）**：`background_process_host.py` 监听端口巡检自 `2.0s` 指数退避至 `30.0s`；`listen_scope.py` 对 POSIX `ps -axo pid=,ppid=` 增加 `250ms` 进程内缓存并绑定底层 `subprocess.run` 身份；`process_registry.py` 兼容 macOS 僵尸进程（`SZOMB`）在 `proc_pidinfo` 返回 `ESRCH` 时的秒级出生指纹核验；`_filesystem_find.py` 与 `_filesystem_search.py` 在 `TimeoutExpired` 后显式 `wait` 回收子进程。
+- **孤儿巡检按需筛选与空 Audit Watch 短路（`三.1 后半` / `perf-fix-d`）**：`SubAgentPersistenceService` 新增 `list_runs_selected` / `list_runs_selected_report`（配合 `select_manager_runs`），仅对命中的活跃任务执行锁外 `deepcopy`；`ingestion/source_worker.py` 在 `audit_watches.json` 为空时短路跳过 `discover_all()` 扫描。
+- **记忆候选与维护资源收敛（`D1/D3/D4/G1/G2` / `perf-fix-e`）**：`memory_store/candidates.py` 提供 `readonly_rows()` 只读扫描接口并升级 `_merge_existing_candidates` 为 $O(1)$ 字典索引合并；`json_io.py`、`gateway_parts/io.py` 与 `local_storage/maintenance.py` 对有界锁与临时 `.lock` 侧车文件执行安全清理；`retention_apply.py` 在清理后按 `cutoff` 年龄守卫递归回收 `cache`/`tmp`/`staging` 空目录；`owner_maintenance.py` 对 `events.jsonl` 实施 `2 MiB` / `2000` 行原子裁剪。
+- **脚本执行沙箱与网络/环境边界强化（`S1–S4` / `sec-fix-f`）**：`script_runner.py` 剔除宽泛祖先目录避免 `bwrap --ro-bind / /` 遮蔽只读重挂，拦截 `os.stat`/`os.lstat`/`os.access`/`os.open`（含 `dir_fd` 内核路径还原与前置参数类型归一化）及本机 Gateway 监听端口连接；`_subprocess_env_scrub.py` 默认剥离 `SSH_AUTH_SOCK`、云凭据与代理环境变量。
+- **网关 04:00 安全重启死锁修复与管理员服务日志只读自诊（`Issue 4A + 4B` / `gw-fix-g`）**：`supervisor.py` 默认 `max_restart_attempts=20`、看门狗日志默认独立写入 `logs/supervisor.log`，感知 `planned_restart` 交接窗口（含 180 秒陈旧上限与残存旧进程有序 `SIGTERM -> SIGKILL` 清理）并按连续 600 秒健康窗口重置计数；`standalone_lifecycle.py` 在 `coordinator.lock` 写入持锁者诊断 JSON；`path_access_policy.py` 允许主管理员（`local/main`）在 `full`/`auto`/`ask` 模式下通过文件工具只读自身 `logs/gateway.log` 与 `logs/supervisor.log`，且 `gateway_status` 新增结构化脱敏日志尾段查询参数。
+
+## 2026-10-25 主管理员 Agent 统管自建普通用户全量信息与通用审核流（需求与接口契约定稿，待底座实现）
+
+- **权属边界严格限定为「主 Admin（`local/main`）自建本地普通用户（`local/<user_id>`）」**：
+  - 仅对登记在 `<host_root>/local_users/<user_id>.json`（`LocalUserStore`）中的自建本地普通用户开放全量统管；外部 IM 接入的普通用户（如 `providers/feishu/users/<open_id>`）完全维持原有隐私与自治规则不变。
+- **6 大全量信息统管与通用提审闭环**：
+  - 支持主 Admin 及主 Admin Agent 对自建普通用户执行：① 账号职责标签与配额管理；② 人设与纪律（`SOUL.md` / `AGENTS.md` / `USER.md`）全量读写及三种锁定模式（`admin_locked` / `admin_base_plus_user` / `user_autonomous`）；③ 正式记忆与候选记忆跨账号查看、注入、修正与清理；④ 四大资产（`workflow`/`monitor`/`script`/`skill`）含依赖闭包的免确认直接配发与启停控制；⑤ 跨账号任务派单（`dispatch_task`）与结果产物汇总；⑥ 不限具体业务场景的**通用提审与批复门（Universal Admin Review Gate）**，支持产物、脚本、工作流步骤挂起提审，由主 Admin Agent 自动初审或人类管理员终审（`approve` 放行续跑 / `reject_with_feedback` 打回重做）。
+- 详细架构、存储路径、主 Admin Agent 工具定义与待开放的 12 个 Plugin Host v2 接口（`users.managed.*` 与 `governance.reviews.*`）见 [主管理员 Agent 统管自建普通用户设计规范](docs/design/ADMIN_MANAGED_USERS_GOVERNANCE.md)。
+
+## 2026-10-25 四大一等公民跨用户依赖闭包投递、飞书联动确认与防骚扰屏蔽（需求与接口契约定稿，待底座实现）
+
+- 支持在工作流（`workflow`）、定时监控（`monitor`）、固定脚本（`script`）、技能（`skill`）页面及飞书/TUI 中向其他指定用户发起跨用户投递：
+  - **依赖闭包自动連带打包**：复用 `topology.py::build_asset_topology` 求取起点资产的完整前向可达依赖闭包（如投递 1 个工作流时，自动把其关联引用的 3 个 Skill、3 个固定脚本及相互引用的子工作流/监控一起打包），剥离发送方私有凭据并经敏感信息扫描硬门。
+  - **接收确认后分目录独立落盘 + 默认关闭待手动开启**：接收方确认接受后，包裹内各项资产原子落盘到接收方各自的 `workflows/`、`scripts/`、`skills/`、`schedules/jobs.json` 权威目录，支持后续单独使用其中任意固定脚本或 Skill；落盘初始状态统一为 `enabled=False`（待手动开启），防止未经接收方开启即自动触发定时监控或工作流。
+  - **Web 页面 + 飞书 Agent 主动通知与 `/delivery` 命令双端闭环**：接收方飞书 Agent 主动推送投递通知卡片/消息，支持在飞书或 Web 页面直接确认接受、拒绝、手动开启。
+  - **防污染投递屏蔽名单（Blocklist）**：接收方在 `<owner_home>/data/asset_deliveries/blocklist.json` 维护已屏蔽发送方名单，前置硬拦截被屏蔽用户的投递，并支持随时查看屏蔽名单与解除屏蔽。
+- 详细架构、存储 Schema 与待开放的 9 个 Plugin Host v2 接口（`assets.delivery.*`）见 [跨用户资产投递设计规范](docs/design/CROSS_OWNER_ASSET_DELIVERY.md)。
+
 ## 2026-10-25 七项核心底座与稳定性修复（当前工作区源码已落地，待统一验收与发布）
 
 设计来源：[七项能力详细设计](docs/design/PORTAL_AND_CORE_FIVE_CAPABILITIES_2026_10_25.md)。本节按当前工作区实现核对，不把设计稿中的目标接口、预期收益或文件存在当成完整验收。核对基线为 `61bab6ab98fdd4d3b94ccabe2dda1aed1e9fa0b8`（当次 `HEAD == origin/main`）；以下新增能力及性能补丁尚为未提交改动，不表示已经合入或部署。

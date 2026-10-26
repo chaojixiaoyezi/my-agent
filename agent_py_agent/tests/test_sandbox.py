@@ -1,3 +1,5 @@
+# LLM: 命令构造与真实Linux观察点分开；S1必须同时核对首次和最终保护，不把argv正确等同内核隔离成功。
+# 模块用途: 回归工具沙箱、资源策略及只读限制不新增读取面的安全边界。
 """run_command 沙箱(1 层 bwrap)命令构造单测。
 
 重点:① **放行外网**(--share-net 在、--unshare-net 不在)——硬约束,沙箱只隔离文件/进程不断网;
@@ -885,3 +887,86 @@ def test_linux_missing_persona_command_keeps_host_paths_and_modes(tmp_path):
     result = subprocess.run([*build_bwrap_argv(spec), "--", "/bin/true"], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     assert {path.relative_to(tmp_path): path.lstat().st_mode for path in tmp_path.rglob("*")} == before
+
+
+# LLM: 真实build_bwrap_argv会执行末尾保护复施，不能只检查内部第一次挂载函数。
+# 函数用途: 生成有系统、授权读、写与未授权根的有限视图规格。
+def _sec_f_restricted_spec(tmp_path, mode):
+    from pathlib import Path
+
+    from agent_py_agent.agent.tooling import sandbox
+
+    home, work, read, system = (tmp_path / name for name in ('home', 'work', 'read', 'system'))
+    for root in (home, work, read, system):
+        root.mkdir()
+    return sandbox.SandboxSpec(owner_home=home, workspace=work, write_roots=(work,),
+        public_ro_roots=(read,), system_read_roots=(system,), read_only_root=True,
+        read_mode=mode, hidden_paths=(home,) if mode == 'hide_home' else (),
+        write_scope_denied_roots=(Path('/'), home, tmp_path / 'unlisted'), bwrap_path='/fake/bwrap')
+
+
+# LLM: allowlist初始是空根，禁止规则不能借ro-bind新增宿主视图，尤其不能恢复整个根。
+# 函数用途: 复现普通拒写根在末尾挂载时重新暴露未授权目录。
+def test_sec_f_allowlist_forbidden_roots_never_expose_unmounted_paths(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import sandbox
+
+    spec = _sec_f_restricted_spec(tmp_path, 'allowlist')
+    (tmp_path / 'unlisted').mkdir()
+    monkeypatch.setattr(sandbox, '_PROC_MOUNT_KIND', 'dir')
+    argv = build_bwrap_argv(spec)
+    ro = {(argv[i + 1], argv[i + 2]) for i, flag in enumerate(argv) if flag == '--ro-bind'}
+    assert ('/', '/') not in ro
+    assert (str(spec.owner_home), str(spec.owner_home)) not in ro
+    assert (str(tmp_path / 'unlisted'), str(tmp_path / 'unlisted')) not in ro
+
+
+# LLM: hide_home允许初始整根RO底图，但不允许拒写根在tmpfs之后把宿主家目录挂回来。
+# 函数用途: 防止普通禁止规则覆盖已经隐藏的home。
+def test_sec_f_hidden_home_is_not_reexposed_by_forbidden_scope(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import sandbox
+
+    spec = _sec_f_restricted_spec(tmp_path, 'hide_home')
+    monkeypatch.setattr(sandbox, '_PROC_MOUNT_KIND', 'dir')
+    argv = build_bwrap_argv(spec)
+    home = str(spec.owner_home)
+    hidden_at = next(i for i, flag in enumerate(argv) if flag == '--tmpfs' and argv[i + 1] == home)
+    assert not any(argv[i:i + 3] == ['--ro-bind', home, home] for i in range(hidden_at + 2, len(argv) - 2))
+    assert sum(argv[i:i + 3] == ['--ro-bind', '/', '/'] for i in range(len(argv) - 2)) == 1
+
+
+# LLM: 拒写规则仍须收紧已挂写根、读根与系统根中的子目录，不能通过直接丢掉所有禁止规则修复。
+# 函数用途: 验证有限视图中合法只读子挂载仍然生效。
+@pytest.mark.parametrize('kind', ['write', 'read', 'system'])
+def test_sec_f_readonly_scope_inside_mounted_root_is_retained(tmp_path, monkeypatch, kind):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.tooling import sandbox
+
+    spec = _sec_f_restricted_spec(tmp_path, 'allowlist')
+    root = {'write': spec.workspace, 'read': spec.public_ro_roots[0], 'system': spec.system_read_roots[0]}[kind]
+    protected = root / 'protected'
+    protected.mkdir()
+    monkeypatch.setattr(sandbox, '_PROC_MOUNT_KIND', 'dir')
+    argv = build_bwrap_argv(replace(spec, write_scope_denied_roots=(protected,)))
+    assert ['--ro-bind', str(protected), str(protected)] in [argv[i:i + 3] for i in range(len(argv) - 2)]
+
+
+# LLM: 只允许重挂home内明确授权的窄子树，不能由home祖先或兄弟推导权限。
+# 函数用途: 验证隐藏home中的显式读写子目录仍可收紧而兄弟保持隐藏。
+def test_sec_f_hidden_home_allows_only_explicit_submount_restrictions(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.tooling import sandbox
+
+    spec = _sec_f_restricted_spec(tmp_path, 'hide_home')
+    allowed = spec.owner_home / 'public'
+    protected = allowed / 'protected'
+    sibling = spec.owner_home / 'private'
+    protected.mkdir(parents=True)
+    sibling.mkdir()
+    monkeypatch.setattr(sandbox, '_PROC_MOUNT_KIND', 'dir')
+    argv = build_bwrap_argv(replace(spec, public_ro_roots=(allowed,), write_scope_denied_roots=(spec.owner_home, sibling, protected)))
+    triples = [argv[i:i + 3] for i in range(len(argv) - 2)]
+    assert ['--ro-bind', str(protected), str(protected)] in triples
+    assert ['--ro-bind', str(sibling), str(sibling)] not in triples
+    assert ['--ro-bind', str(spec.owner_home), str(spec.owner_home)] not in triples

@@ -1,7 +1,10 @@
+# LLM: 仅合成环境值，不读取真实凭据；SSH代理能力不能被透传声明重新授予。
+# 模块用途: 回归宿主凭据、SSH代理与连接串剥离以及普通变量保留。
 """子进程凭据擦洗(选项1-C):owner-scoped 命令看不到自管密钥,普通变量留着,放行盖不掉自管凭据。"""
 
 from __future__ import annotations
 
+import pytest
 from agent.tooling._subprocess_env_scrub import scrub_subprocess_env
 
 
@@ -69,3 +72,24 @@ def test_all_shell_modes_scrub_host_declared_environment_sources(monkeypatch):
         env = _subprocess_text_env(owner, sandboxed=True, host_credential_env_names=frozenset({'CHANNEL_SOURCE'}))
         assert 'CHANNEL_SOURCE' not in env and 'MINIMAX_API_KEY' not in env
     assert 'CHANNEL_SOURCE' in __import__('os').environ
+
+
+# LLM: SSH代理是宿主权限能力，显式passthrough也不能把它带入子进程；只用合成值。
+# 函数用途: 验证SSH代理变量大小写及透传覆盖均被拒绝。
+@pytest.mark.parametrize('name', ['SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'ssh_auth_sock', 'ssh_agent_pid'])
+def test_sec_f_ssh_agent_environment_cannot_be_passed_through(name):
+    env = {name: 'synthetic-agent-marker', 'PATH': '/usr/bin', 'LANG': 'C'}
+    expected = {'PATH': '/usr/bin', 'LANG': 'C'}
+    assert scrub_subprocess_env(env) == expected
+    assert scrub_subprocess_env(env, passthrough=frozenset({name})) == expected
+    assert env[name] == 'synthetic-agent-marker'
+
+
+# LLM: 新增模式默认剥离，不破坏非自管第三方凭据的准确名称透传；安全变量和宿主输入保持。
+# 函数用途: 验证连接串、访问键及代理套接字秘密识别。
+@pytest.mark.parametrize('name', ['AWS_ACCESS_KEY_ID', 'OTHER_AUTH_SOCK', 'MY_DATABASE_URL',
+    'MY_CONNECTION_URI', 'MY_CONNECTION_STRING', 'my_database_url'])
+def test_sec_f_additional_secret_name_patterns(name):
+    env = {name: 'synthetic-private-value', 'NORMAL_VAR': 'keep'}
+    assert scrub_subprocess_env(env) == {'NORMAL_VAR': 'keep'}
+    assert scrub_subprocess_env(env, passthrough=frozenset({name})) == env

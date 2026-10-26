@@ -3,9 +3,9 @@ from __future__ import annotations
 """Expose the current local Gateway's canonical runtime facts to the main agent."""
 
 # LLM: 当前模型只读调用者冻结的 config/backend，不能读 Gateway 启动默认值或后来切换的 owner 选择。This surface reuses Gateway state,
-# heartbeat, validated PID records and lifecycle-bounded diagnostics; never fall back to ps/ss,
-# guessed ports, raw logs, request bodies, or credentials.
-# 模块用途: 让本机管理员主代理直接读唯一Gateway健康事实与本代有限安全诊断，日志受保护时仍可自查而不开放原文。
+# heartbeat, validated PID records and lifecycle-bounded diagnostics; never fall back to ps/ss
+# or guessed ports. Only explicit log-tail requests add bounded, scrubbed observational text.
+# 模块用途: 让本机管理员读唯一Gateway权威健康；默认有限安全摘要，显式诊断可取脱敏有界日志尾。
 
 import json
 from typing import Any
@@ -28,7 +28,7 @@ from .models import (
 
 # LLM: Register this handler only for a main_agent ToolRegistry. Its output deliberately includes
 # admin diagnostics and host paths, so owner-scoped user/group agents must never receive it.
-# 类用途: 为本机管理员返回当前唯一 Gateway 的进程、端点、队列、配置和本次日志摘要。
+# 类用途: 返回管理员的Gateway权威事实及默认无原文摘要，显式tail参数只增加有界脱敏观察。
 class GatewayStatusTool(BaseTool):
     model_spec = ToolModelSpec(
         name="gateway_status",
@@ -38,6 +38,7 @@ class GatewayStatusTool(BaseTool):
             "也不要把 /health 当作状态端点，HTTP 状态端点由结果中的 status_path 给出。"
             "诊断日志读取被保护、native物化或执行异常时仍用本工具：返回本代最多8条安全阶段、错误码和有限资源分类，"
             "不读出原始正文；具体用户请求归属用audit_records及原跨用户审计授权核验，不从全局日志猜归属。"
+            "明确需要排查日志时可include_log_tail=true读取脱敏有界片段；full_file仅解除本代边界，不代表遍历全文件。"
             "本次模型只看 caller_model.model_name，不使用训练记忆或旧历史回答当前模型名称。"
             "模型名是请求配置，不是供应商内部模型身份的独立鉴定；不要改写版本号。"
         ),
@@ -52,6 +53,11 @@ class GatewayStatusTool(BaseTool):
                     ),
                 },
                 "metadata_only": {"type": "boolean", "description": "仅返回进程、队列、模型选择和状态元数据；不读日志诊断，不返回路径、地址或原始错误。"},
+                "include_log_tail": {"type": "boolean", "description": "显式读取脱敏日志尾，默认false；metadata_only=true时始终不读。"},
+                "log_tail_lines": {"type": "integer", "description": "每个日志最多返回多少行，默认80，夹取到1..200；所有来源共用32768字节采样及返文上限。"},
+                "log_source": {"type": "string", "enum": ["gateway", "supervisor", "both"], "description": "日志来源，默认gateway；不能传文件路径。"},
+                "log_scope": {"type": "string", "enum": ["current_lifecycle", "full_file"], "description": "默认current_lifecycle；full_file可回看跨重启记录，仍只检索有界尾窗，不是全文件搜索。"},
+                "log_query": {"type": "string", "description": "可选不区分大小写的关键词，只在脱敏后的有界采样行中过滤，默认空。"},
             },
             "additionalProperties": False,
         },
@@ -66,7 +72,7 @@ class GatewayStatusTool(BaseTool):
             avoid_when=(
                 "检查模型自己启动的业务服务时使用 process_session",
                 "不要用 shell 的 ps/ss/lsof 替代本工具提供的权威事实",
-                "不要读取或展示原始 Gateway 日志、请求正文或密钥",
+                "不要把有界日志当全文件搜索或用户请求归属证明，不展示凭据；原文观察须显式include_log_tail",
             ),
             keywords=(
                 "gateway status",
@@ -81,7 +87,7 @@ class GatewayStatusTool(BaseTool):
                 '{"tool":"gateway_status","include_log_diagnostics":false}',
             ),
             default_deferred=True,
-            deferred_summary="查Gateway健康、日志/native阶段错误码与资源缺失诊断（不读raw；不用ps/ss猜）",
+            deferred_summary="查Gateway权威健康与native摘要；显式可读脱敏有界双日志尾，不用ps/ss猜",
         ),
     )
     runtime_policy = ToolRuntimePolicy(
@@ -103,11 +109,11 @@ class GatewayStatusTool(BaseTool):
     def __init__(self, agent: object) -> None:
         self.agent = agent
 
-    # LLM: caller_model 共用请求依赖；metadata_only 关闭日志读取并从入口白名单投影，绑定与实际 HTTP 事实不混同。
-    # 函数用途: 返回网关健康及模型选择状态，诊断可排除路径、地址和原始错误。
+    # LLM: 新tail参数直接调用也须类型/枚举校验；metadata_only关闭全部日志读取，错误不回显参数或私有路径。
+    # 函数用途: 只读返回健康及模型选择，默认无原文，显式日志请求仍有界脱敏。
     def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
         metadata_only = params.get("metadata_only", False)
-        if not isinstance(metadata_only, bool):
+        if not isinstance(metadata_only, bool) or not _valid_log_tail_parameters(params):
             return ToolHandlerOutcome("gateway_status", False, '{"error_code":"TOOL_INVALID_ARGUMENTS"}', error_code="TOOL_INVALID_ARGUMENTS")
         try:
             snapshot = self._snapshot(params, metadata_only=metadata_only)
@@ -117,14 +123,20 @@ class GatewayStatusTool(BaseTool):
             return ToolHandlerOutcome("gateway_status", False, '{"error_code":"TOOL_EXECUTION_FAILED"}', error_code="TOOL_EXECUTION_FAILED")
         return ToolHandlerOutcome(self.model_spec.name, True, json.dumps(snapshot, ensure_ascii=False))
 
-    # LLM: 只读现有 Gateway 快照和精确当前 thread 选择；错误保持未知，不猜测其他会话或启动默认模型。
-    # 函数用途: 组装完整状态或纯元数据状态，不修改模型、Goal 或后台运行。
+    # LLM: 只读规范Gateway及当前thread；仅显式且非metadata请求透传tail选项，旧默认kwargs与模型选择保持。
+    # 函数用途: 组装状态与可选脱敏日志，不修改模型、Goal、后台运行或权限。
     def _snapshot(self, params: dict, *, metadata_only: bool) -> dict:
         include_diagnostics = params.get("include_log_diagnostics", True)
+        log_options = {}
+        if params.get("include_log_tail", False) and not metadata_only:
+            log_options = {"include_log_tail": True, "log_tail_lines": params.get("log_tail_lines", 80),
+                           "log_source": params.get("log_source", "gateway"),
+                           "log_scope": params.get("log_scope", "current_lifecycle"), "log_query": params.get("log_query", "")}
         snapshot = gateway_runtime_snapshot(
             self.agent,
             gateway_paths(self.agent),
             include_log_diagnostics=bool(include_diagnostics) and not metadata_only,
+            **log_options,
         )
         config = getattr(self.agent, "config", None)
         backend = getattr(self.agent, "backend", None)
@@ -143,6 +155,16 @@ class GatewayStatusTool(BaseTool):
 
             snapshot["model_selection"] = thread_model_execution_status(self.agent, thread_id)
         return _metadata_projection(snapshot) if metadata_only else snapshot
+
+
+# LLM: 纯参数检查，不读日志；整数不接受bool，行数范围由原渲染入口夹取，新增参数不改变旧诊断默认值。
+# 函数用途: 防止直接handler调用绕过新日志参数的schema边界。
+def _valid_log_tail_parameters(params: dict) -> bool:
+    return (isinstance(params.get("include_log_tail", False), bool)
+            and type(params.get("log_tail_lines", 80)) is int
+            and params.get("log_source", "gateway") in ("gateway", "supervisor", "both")
+            and params.get("log_scope", "current_lifecycle") in ("current_lifecycle", "full_file")
+            and isinstance(params.get("log_query", ""), str))
 
 
 # LLM: 嵌套对象逐字段白名单；只透传已有数值用量及组装/轮间耗时，新增正文、地址、错误或日志不会自动泄漏。

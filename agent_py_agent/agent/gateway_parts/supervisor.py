@@ -29,7 +29,88 @@ from .daemon_metadata import _flocked_sidecar, build_process_identity, process_i
 from .io import read_json_file_report, write_json_file_atomic
 from .paths import GatewayPaths, gateway_paths
 from .process_control import is_pid_alive, terminate_pid, wait_for_pid_exit
-from .status_rendering import gateway_readiness
+from .restart_service import restart_completed_path, restart_request_path, restart_state_path
+from .status_rendering import _iso_timestamp, gateway_readiness
+
+PLANNED_RESTART_HANDOVER_GRACE_SECONDS = 180.0
+PLANNED_RESTART_STARTING_GRACE_SECONDS = 120.0
+SLOW_RESTART_BACKOFF_SECONDS = 300.0
+
+
+# LLM: 只比较结构化时间；坏值、非有限值及未来时间不能延长交接宽限，不读日志或mtime。
+# 函数用途: 检查一个交接时间是否落在给定的最近窗口内。
+def _recent_handover_timestamp(value: object, now: float, grace: float) -> bool:
+    try:
+        timestamp = float(value or 0.0)
+        return math.isfinite(timestamp) and 0.0 <= now - timestamp <= grace
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+# LLM: 原四个事实源不变；排空phase须180秒内新鲜记录或原Count0身份实证存活，不以残留阶段永久暂停监护。
+# 函数用途: 只在仍可信的排空、原子交接或接班启动窗口避让，不授ready/死亡/迁移。
+def _planned_restart_handover_active(supervisor: GatewaySupervisor, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    paths = supervisor._paths
+    for path, field, pending in ((restart_request_path(paths), "requested_at", True),
+                                 (restart_completed_path(paths), "drained_at", False)):
+        report = read_json_file_report(path, context="gateway.supervisor.restart_handover.read")
+        payload = report.payload
+        if (report.load_error is None and isinstance(payload, dict)
+                and (not pending or payload.get("status") == "pending")
+                and _recent_handover_timestamp(payload.get(field), now, PLANNED_RESTART_HANDOVER_GRACE_SECONDS)):
+            return True
+    report = read_json_file_report(paths.state, context="gateway.supervisor.handover_state.read")
+    state = report.payload if report.load_error is None and isinstance(report.payload, dict) else {}
+    phase = state.get("restart_drain")
+    if isinstance(phase, dict) and phase.get("phase") in {"turn_wait", "tool_drain", "exiting"}:
+        if _restart_drain_handover_active(supervisor, state, phase, now):
+            return True
+    report = read_json_file_report(restart_state_path(paths), context="gateway.supervisor.restart_state.read")
+    restart_state = report.payload if report.load_error is None and isinstance(report.payload, dict) else {}
+    drained_at = restart_state.get("last_drained_at")
+    if state.get("termination_kind") == "planned_restart" and _recent_handover_timestamp(
+            state.get("stopped_at") or drained_at or state.get("started_at"), now, PLANNED_RESTART_HANDOVER_GRACE_SECONDS):
+        return True
+    return (state.get("status") == "starting"
+            and _recent_handover_timestamp(state.get("started_at"), now, PLANNED_RESTART_STARTING_GRACE_SECONDS)
+            and _recent_handover_timestamp(drained_at, now, PLANNED_RESTART_HANDOVER_GRACE_SECONDS))
+
+
+# LLM: 时间优先取原drain/state字段，缺字段才用原state mtime；ISO沿共享解析，过期/未知仅原Count0身份True可继续避让。
+# 函数用途: 给磁盘残留排空阶段加时限，不让崩溃时的phase永久阻止自动恢复。
+def _restart_drain_handover_active(supervisor, state: dict, drain: dict, now: float) -> bool:
+    stamp = drain.get("updated_at") or drain.get("started_at") or state.get("updated_at")
+    if not stamp:
+        try:
+            stamp = supervisor._paths.state.stat().st_mtime
+        except OSError:
+            stamp = None
+    if isinstance(stamp, str):
+        try:
+            stamp = float(stamp)
+        except ValueError:
+            stamp = _iso_timestamp(stamp)
+    return (_recent_handover_timestamp(stamp, now, PLANNED_RESTART_HANDOVER_GRACE_SECONDS)
+            or _standalone_state_identity_status(supervisor)[0] is True)
+
+
+# LLM: 原Count0无C标记且state.pid与完整出生同绑才观察；坏/缺state非stopped保留None，仅死亡实证或stopped退化为False。
+# 函数用途: PID先移除后仍分清存活、死亡及身份未知，缺字段或布尔数值不能取得信号资格。
+def _standalone_state_identity_status(supervisor: GatewaySupervisor) -> tuple[bool | None, int | None, dict[str, object] | None]:
+    report = read_json_file_report(supervisor._paths.state, context="gateway.supervisor.residual_identity.read")
+    state = report.payload
+    if report.load_error is not None or not isinstance(state, dict):
+        return None, None, None
+    count = state.get("worker_count", 0)
+    if type(count) is int and count == 0 and "c_run_id" not in state:
+        pid = state.get("pid")
+        identity = state.get("process_identity")
+        if (type(pid) is int and pid > 0 and isinstance(identity, dict)
+                and type(identity.get("pid")) is int and identity["pid"] == pid
+                and identity.get("host_id") and identity.get("start_time") is not None):
+            return process_identity_is_live(identity), pid, identity
+    return (False if state.get("status") == "stopped" else None), None, None
 
 
 # LLM: CLI维护意图原子发布；有限TTL最少一秒，不授予停止进程或绕过身份检查的权限。
@@ -193,15 +274,27 @@ def _wait_for_gateway_start(supervisor, process) -> int | None:
     return None
 
 
-# LLM: 仅原角色/生年代可停止；请求超时先诊断再TERM，仍未退出仅Count0重核后KILL；不授P6关闭。
-# 函数用途: 关停准确旧Gateway，保留TERM成功短路与未知身份拒止。
+# LLM: 原角色/出生门保持；PID先移除时仅Count0原state补充三值等待，末核后才TERM/KILL，未知拒止，不授P6关闭。
+# 函数用途: 关停准确旧Gateway，包括先清PID但尚未退出的单进程，保留TERM成功短路与原强停门。
 def stop_gateway(supervisor, timeout: float = 20.0, *, expected_identity: dict | None = None) -> bool:
     supervisor._resolve_agent_and_paths()
     report = get_running_pid_report(supervisor._paths.pid, cleanup_stale=False)
     if report.load_error is not None:
         return False
     if report.pid is None:
-        return expected_identity is None or process_identity_is_live(expected_identity) is False
+        if expected_identity is not None:
+            return process_identity_is_live(expected_identity) is False
+        live, residual_pid, residual_identity = _standalone_state_identity_status(supervisor)
+        if live is not True:
+            return live is False
+        if _wait_gateway_exit(supervisor, residual_pid, residual_identity, timeout):
+            return True
+        if process_identity_is_live(residual_identity) is not True:
+            return False
+        terminate_pid(residual_pid)
+        if _wait_gateway_exit(supervisor, residual_pid, residual_identity, 5):
+            return True
+        return _force_stop_gateway(supervisor, residual_pid, residual_identity)
     record = read_pid_record_report(supervisor._paths.pid)
     value = record.payload or {}
     identity = {key: value.get(key) for key in ("host_id", "pid", "start_time")}
@@ -358,20 +451,17 @@ def _write_supervisor_stop_request(supervisor, pid: int, expected_identity: dict
     )
 
 
-# LLM: 保留原次数/冷却预算；正N先冻结原C/P4/config，停止须同birth且完整P6双读结清才走公开新C，不走R01或同C换slot。
-# 函数用途: 在原有界策略内完成整代恢复；未知责任/配置漂移不新启动、不重放。
+# LLM: 计划交接先暂停干预，快预算耗尽改有界慢探针；原C/P4/config和P6双读关闭门不变，未知不启动。
+# 函数用途: 避开原安全重启交接，在原精确停止和整代关闭之后执行受节流的恢复。
 def restart_gateway(supervisor) -> bool:
     supervisor._resolve_agent_and_paths()
     if read_maintenance_lock(supervisor._paths) is not None:
         return False
-    if supervisor._restart_count >= supervisor.max_restart_attempts:
-        supervisor._log_error(
-            f"Max restart attempts ({supervisor.max_restart_attempts}) reached. "
-            "Supervisor will continue monitoring but not restart."
-        )
+    now = time.time()
+    if _planned_restart_handover_active(supervisor, now):
+        supervisor._log_info("检测到计划内安全重启交接正在进行，跳过Supervisor重启。")
         return False
-    if time.time() - supervisor._last_restart_at < supervisor.restart_cooldown:
-        supervisor._log_info(f"Restart cooldown active ({supervisor.restart_cooldown}s). Skipping.")
+    if not _restart_budget_allows(supervisor, now):
         return False
     from .supervisor_generation import (
         capture_generation,
@@ -419,8 +509,28 @@ def restart_gateway(supervisor) -> bool:
     return False
 
 
-# LLM: 监护运行仅发布自己的身份与状态，Gateway原PID/state由Gateway唯一写者维护；重试策略保持原值。
-# 函数用途: 启动原监护循环，退出时沿原停止入口收尾。
+# LLM: max<=0/last=0仍拒绝；300秒慢探针先核原cooldown再更新时间，失败的身份捕获也节流；不调用停止/启动。
+# 函数用途: 保留快速恢复预算，耗尽后至多每五分钟放行一次原恢复尝试。
+def _restart_budget_allows(supervisor, now: float) -> bool:
+    exhausted = supervisor._restart_count >= supervisor.max_restart_attempts
+    last_at = float(getattr(supervisor, "_last_restart_at", 0.0) or 0.0)
+    if exhausted and (supervisor.max_restart_attempts <= 0 or last_at <= 0.0 or not math.isfinite(last_at)
+                      or now - last_at < SLOW_RESTART_BACKOFF_SECONDS):
+        supervisor._log_error(f"Max restart attempts ({supervisor.max_restart_attempts}) reached. "
+                              "Supervisor will continue monitoring but not restart.")
+        return False
+    if now - last_at < supervisor.restart_cooldown:
+        supervisor._log_info(f"Restart cooldown active ({supervisor.restart_cooldown}s). Skipping.")
+        return False
+    if exhausted:
+        supervisor._log_warn(f"Max restart attempts ({supervisor.max_restart_attempts}) previously reached; "
+                             f"attempting slow-backoff recovery probe after {int(SLOW_RESTART_BACKOFF_SECONDS)}s...")
+        supervisor._last_restart_at = now
+    return True
+
+
+# LLM: 监护只发布自身身份；初始启动也尊重原计划交接，不能在旧进程持锁时创建竞争Gateway。
+# 函数用途: 以维护锁和安全重启事实守住冷启动，再运行原监护与停止循环。
 def run_supervisor_loop(supervisor) -> int:
     supervisor._log_info("Gateway supervisor starting")
     supervisor._resolve_agent_and_paths()
@@ -428,7 +538,7 @@ def run_supervisor_loop(supervisor) -> int:
     _prepare_supervisor_run(supervisor, supervisor_pid_path)
     if read_maintenance_lock(supervisor._paths) is not None:
         supervisor._log_info("Supervisor paused: maintenance lock active")
-    elif not supervisor._is_gateway_healthy():
+    elif not _planned_restart_handover_active(supervisor, time.time()) and not supervisor._is_gateway_healthy():
         supervisor._start_gateway()
     _log_supervisor_active(supervisor)
     _monitor_until_stopped(supervisor)
@@ -483,20 +593,24 @@ def _monitor_until_stopped(supervisor) -> None:
 RESTART_BUDGET_RESET_SECONDS = 600.0
 
 
-# LLM: 维护先于所有健康检查和自动恢复；清锁/到期后复用原Gateway三次失败门及Adapter意图，持续健康满窗口清零重启计数。
-# 函数用途: 维护时清零失败次数，正常时分别监护Gateway和有启动意图的适配器。
+# LLM: 维护早退及不健康均清连续起点；计划交接优先，原三次失败门/Adapter意图不变，未观察时间不回填为健康。
+# 函数用途: 不干扰安全重启或维护，在重新开始的实际健康窗口满600秒后才回收预算。
 def _run_health_check(supervisor, consecutive_failures: int) -> int:
     supervisor._resolve_agent_and_paths()
     if read_maintenance_lock(supervisor._paths) is not None:
+        supervisor._healthy_since_at = 0.0
         return 0
     healthy = supervisor._is_gateway_healthy()
+    now = time.time()
+    if not healthy:
+        supervisor._last_unhealthy_at = now
+        supervisor._healthy_since_at = 0.0
+        if _planned_restart_handover_active(supervisor, now):
+            supervisor._log_info("检测到Gateway正在执行计划内安全重启交接，跳过本次不健康计数与干预。")
+            return 0
     adapter_healthy = supervisor._check_adapter_health()
     if healthy:
-        restart_count = int(getattr(supervisor, "_restart_count", 0) or 0)
-        last_restart_at = float(getattr(supervisor, "_last_restart_at", 0.0) or 0.0)
-        if restart_count > 0 and time.time() - last_restart_at >= RESTART_BUDGET_RESET_SECONDS:
-            supervisor._restart_count = 0
-            supervisor._log_info("Gateway已稳定健康运行满600秒，重置监护重启计数。")
+        _reset_stable_restart_budget(supervisor, now)
         if not adapter_healthy and read_adapter_state(supervisor._paths.root / "adapter_state.json").get("state") == "running":
             supervisor._restart_adapter()
         return 0
@@ -511,6 +625,24 @@ def _run_health_check(supervisor, consecutive_failures: int) -> int:
         supervisor._restart_gateway()
         return 0
     return consecutive_failures
+
+
+# LLM: 首个健康采样以now起算，锚点取restart/unhealthy/since最大值；暂停前或更早重启的起点不能越过最新事实。
+# 函数用途: 满600秒实际健康观察窗口后才清预算，不把维护间隔或未监测的重启后时间充数。
+def _reset_stable_restart_budget(supervisor, now: float) -> None:
+    restart_count = int(getattr(supervisor, "_restart_count", 0) or 0)
+    last_restart_at = float(getattr(supervisor, "_last_restart_at", 0.0) or 0.0)
+    last_unhealthy_at = float(getattr(supervisor, "_last_unhealthy_at", 0.0) or 0.0)
+    healthy_since = float(getattr(supervisor, "_healthy_since_at", 0.0) or 0.0)
+    if healthy_since <= 0.0:
+        healthy_since = now
+        supervisor._healthy_since_at = healthy_since
+    healthy_anchor = max(last_restart_at, last_unhealthy_at, healthy_since)
+    if restart_count > 0 and healthy_anchor > 0.0 and now - healthy_anchor >= RESTART_BUDGET_RESET_SECONDS:
+        supervisor._restart_count = 0
+        supervisor._last_unhealthy_at = 0.0
+        supervisor._healthy_since_at = 0.0
+        supervisor._log_info("Gateway已稳定健康运行满600秒，重置监护重启计数。")
 
 
 # LLM: 仅恢复明确running且PID已死/缺失的Adapter；未知PID读错误拒绝，单调时钟确保失败尝试也至少间隔30秒。
@@ -587,8 +719,8 @@ class SupervisorConfig:
 # 类用途: 维护原健康检查与有界重启状态，不替代Gateway生命周期身份。
 class GatewaySupervisor:
 
-    # LLM: agent/config_path须同一CLI选择，缺失/冲突直接拒绝；不创建业务状态，随后仅持本实例原进程引用。
-    # 函数用途: 绑定已解析Agent与监护参数，不启动进程或构造第二Agent。
+    # LLM: 绑定同一CLI Agent/config；本实例保留重启及连续健康观察时钟，不创建持久第二权威或进程。
+    # 函数用途: 初始化原监护参数、进程引用和健康窗口，避免重启预算永久耗尽或过早清零。
     def __init__(
         self,
         config_path: str,
@@ -612,6 +744,8 @@ class GatewaySupervisor:
         self._gateway_child = self._gateway_child_origin = None
         self._restart_count: int = 0
         self._last_restart_at: float = 0.0
+        self._last_unhealthy_at: float = 0.0
+        self._healthy_since_at: float = 0.0
         self._last_adapter_restart_at: float = float("-inf")
         self._stop_requested: bool = False
         self._agent = agent

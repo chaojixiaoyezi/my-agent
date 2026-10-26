@@ -17,6 +17,7 @@ from __future__ import annotations
 import copy
 import sys
 import time
+from functools import partial
 from pathlib import Path
 
 from ..agent.capability import CapabilityRouter
@@ -66,10 +67,12 @@ def agent_configuration(args):
     return config, roots
 
 
-# LLM: 普通 CLI 保持原配置/权限/根顺序；C factory 只消费组合根冻结的同源参数，真实 SimpleAgent 仍负责全部业务初始化与权限门。
+# LLM: 单位置args签名不变，只有宿主私有标记严格为True才延后MCP；普通CLI及truthy替身仍保持原eager调用形状。
 # 函数用途: 按共享解析结果创建实际 Agent；目录、存储和后端副作用仍只由原构造函数执行。
 def make_agent(args) -> SimpleAgent:
     config, roots = agent_configuration(args)
+    if getattr(args, '_defer_mcp_connect', None) is True:
+        return SimpleAgent(config, roots[0], workspace_roots=roots, defer_mcp_connect=True)
     return SimpleAgent(config, roots[0], workspace_roots=roots)
 
 
@@ -90,6 +93,8 @@ def frozen_gateway_arguments(args):
     return frozen
 
 
+# LLM: 原技能目录和路由配置保持；仅挂接宿主准备回调，首次OPEN检索才连接，不在此处触发MCP。
+# 函数用途: 取得代理能力路由器并为CLI接通按需目录准备。
 def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: list[str] | None):
     service = getattr(agent, "skills_service", None)
     router = getattr(agent, "capability_router", None)
@@ -97,6 +102,9 @@ def make_capability_router(agent: SimpleAgent, capability_config, skill_dirs: li
         raise RuntimeError("SimpleAgent SkillsService 未装配")
     service.set_extra_roots(skill_dirs or ())
     router.config = capability_config
+    preparer = getattr(agent, 'ensure_mcp_catalog_ready', None)
+    if callable(preparer):
+        router._ensure_mcp_catalog = partial(preparer, router)
     return router
 
 

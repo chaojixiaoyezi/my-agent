@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from ..common.nofollow_fs import read_bytes_beneath
@@ -55,8 +56,8 @@ class StandaloneLifecycle:
             raise StandaloneLifecycleUnavailable("单进程生命周期锁路径已变化。")
 
 
-# LLM: 与coordinator_guard共用canonical锁，原handle/FD只由此scope捕获；finally只释放该原资源，已close不再unlock，替换FD仍归调用方。
-# 函数用途: 在创建Agent之前独占单进程生命周期；异常或属性替换都不能妨碍原锁释放或误关其它句柄。
+# LLM: 共用原canonical锁/FD，POSIX只在原inode写诊断；512字节holder记录不授锁权，finally仍只释放原资源；联查生命周期测试。
+# 函数用途: 独占单进程生命周期并为争用报告持锁PID；诊断失败不妨碍实际锁的获取与释放。
 @contextmanager
 def standalone_lifecycle_guard(root: Path):
     path = Path(os.path.abspath(root)) / "coordinator.lock"
@@ -68,9 +69,22 @@ def standalone_lifecycle_guard(root: Path):
     try:
         acquired = _try_flock_exclusive(handle)
         if not acquired:
-            raise StandaloneLifecycleUnavailable("同一Gateway已有生命周期持锁者。")
+            holder_pid = None
+            with suppress(Exception):
+                handle.seek(0)
+                payload = json.loads(handle.buffer.read(512))
+                if isinstance(payload, dict) and type(payload.get("pid")) is int and payload["pid"] > 0:
+                    holder_pid = payload["pid"]
+            suffix = f"(lock_record_pid={holder_pid})" if holder_pid is not None else ""
+            raise StandaloneLifecycleUnavailable(f"同一Gateway已有生命周期持锁者。{suffix}")
         _HELD[lifecycle] = (handle, descriptor)
         lifecycle.require_held()
+        if os.name != "nt":
+            with suppress(OSError):
+                handle.seek(0)
+                handle.truncate()
+                handle.write(json.dumps({"pid": os.getpid(), "role": "standalone_gateway", "acquired_at": time.time()}) + "\n")
+                handle.flush()
         yield lifecycle
     finally:
         _HELD.pop(lifecycle, None)

@@ -1172,8 +1172,8 @@ def _cancel_if_watch_closed_during_create(
 
 # LLM: Periodic reconciliation scans persisted watch facts and invokes the same
 # idempotent ensure function; it is not a separate scheduler or model loop.
-# LLM: 同轮复用manager原run快照；创建、接替及状态变化后刷新，不跨轮缓存执行权。
-# 函数用途: 在现有孤儿巡检节拍中补齐来源子代理，避免每条watch重扫全部run。
+# LLM: 首个打开的Audit Watch才取本轮run快照，显式空列表仍有效；原结构化变更刷新与来源核验保持。
+# 函数用途: 按需补齐来源子代理，无打开Watch时不扫run，有变更时仍及时刷新。
 def reconcile_audit_source_workers(agent: object) -> dict[str, object]:
     owner_home = _agent_owner_home(agent)
     if owner_home is None:
@@ -1181,12 +1181,15 @@ def reconcile_audit_source_workers(agent: object) -> dict[str, object]:
     summary = _source_reconcile_summary()
     workers: list[dict[str, object]] = []
     capacity_groups: dict[str, list[tuple[WatchState, str]]] = {}
-    runs_snapshot = _worker_runs_snapshot(agent)
-    statuses = {str(getattr(task, "id", "")): str(getattr(task, "status", "")) for task in runs_snapshot}
+    runs_snapshot = None
+    statuses: dict[str, str] = {}
     for row in list_states(owner_home):
         state = _open_audit_watch(owner_home, row)
         if state is None:
             continue
+        if runs_snapshot is None:
+            runs_snapshot = _worker_runs_snapshot(agent)
+            statuses = {str(getattr(task, "id", "")): str(getattr(task, "status", "")) for task in runs_snapshot}
         result = _reconcile_one_audit_source_worker(agent, state, runs_snapshot=runs_snapshot)
         if _source_worker_snapshot_changed(result, statuses):
             runs_snapshot = _worker_runs_snapshot(agent)

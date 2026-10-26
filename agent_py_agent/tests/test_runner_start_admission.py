@@ -639,3 +639,352 @@ def test_mixed_batch_keeps_existing_launch_and_only_admits_new_child(state, monk
     assert result["reused_run_ids"] == [old.id]
     assert started == ([] if fail_new_marker else [new.id])
     assert _pending_start_tasks([old, new], {}, result) == ([new] if fail_new_marker else [])
+
+
+# LLM: 外部连接边界用确定性替身，注册表/锁/权限视图和关闭路径仍运行正式代码；不启动真实服务。
+# 函数用途: 构造可计数的MCP发现边界和真实工具注册表。
+def _perf_a_registry(tmp_path, monkeypatch, *, deferred=True, running=True):
+    from agent_py_agent.agent.tooling import registry as module
+    from agent_py_agent.agent.tooling.mcp_registration import MCPProxyTool
+    from agent_py_agent.agent.tooling.models import (
+        EffectResolverPolicy,
+        ToolModelSpec,
+        ToolRuntimePolicy,
+    )
+
+    assert 'defer_mcp_connect' in module.ToolRegistryParams.__dataclass_fields__, 'DEFER_MCP_CONNECT_NOT_IMPLEMENTED'
+
+    client = SimpleNamespace(tools_changed=False)
+    stopped, connected = [], []
+    transport = object()
+    client.is_running = lambda: running and not stopped
+    client.is_closed = lambda: bool(stopped)
+    client.stop = lambda: stopped.append(True)
+    client.connection = lambda: transport
+
+    def connect(registry, servers):
+        connected.append(servers)
+        if running:
+            registry.register(MCPProxyTool(client, 'lookup',
+                ToolModelSpec(name='mcp__unit__lookup', description='unit lookup',
+                              input_schema={'type': 'object', 'properties': {}}),
+                ToolRuntimePolicy(effect_resolver=EffectResolverPolicy('read_only')), transport=transport))
+        return [client]
+
+    monkeypatch.setattr(module, '_connect_mcp_servers', connect)
+    options = {} if deferred is None else {'defer_mcp_connect': deferred}
+    params = module.ToolRegistryParams(workspace_root=tmp_path, max_chars=1000, max_entries=10,
+        max_matches=10, web_max_chars=1000, http_timeout=10, catalog_limit=10, retrieval_limit=3,
+        vector_search_enabled=False, mcp_servers={'unit': {'command': 'not-executed'}}, **options)
+    return module.ToolRegistry(params), connected, stopped
+
+
+@pytest.mark.parametrize('entry', ['ensure', 'prepare'])
+def test_perf_a_registry_defers_initial_connection_and_never_revives(tmp_path, monkeypatch, entry):
+    registry, connected, stopped = _perf_a_registry(tmp_path, monkeypatch)
+    assert connected == [] and registry._mcp_clients == []
+    assert 'mcp__unit__lookup' not in registry.tools
+    if entry == 'ensure':
+        assert registry.ensure_mcp_connected() is True
+    else:
+        registry.prepare_for_run()
+    assert len(connected) == 1 and len(registry._mcp_clients) == 1
+    assert 'mcp__unit__lookup' in registry.tools
+    assert registry.ensure_mcp_connected() is False
+    registry.close_mcp_clients()
+    assert stopped and not registry._mcp_clients
+    assert registry.ensure_mcp_connected() is False
+    registry.prepare_for_run()
+    assert len(connected) == 1
+
+
+def test_perf_a_default_registry_still_connects_eagerly(tmp_path, monkeypatch):
+    registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch, deferred=None, running=False)
+    try:
+        assert len(connected) == 1 and registry._mcp_connected_state == [True]
+        assert next(iter(registry._mcp_retry_state.values()))[0] == 1
+        assert registry.ensure_mcp_connected() is False
+    finally:
+        registry.close_mcp_clients()
+
+
+def test_perf_a_permission_views_share_one_initialization_and_close(tmp_path, monkeypatch):
+    registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch)
+    view = registry.with_access_policy(access_mode='full-access', path_access_mode='full', owner_scope_root='')
+    assert view is not registry
+    for attribute in ('_mcp_clients', '_mcp_prepare_lock', '_mcp_closed', '_mcp_connected_state'):
+        assert getattr(view, attribute) is getattr(registry, attribute)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(lambda item: item.ensure_mcp_connected(), [registry, view, view, registry]))
+        assert results.count(True) == 1 and len(connected) == 1
+    finally:
+        view.close_mcp_clients()
+    assert registry.ensure_mcp_connected() is False
+
+
+def test_perf_a_agent_catalog_syncs_even_if_another_caller_already_connected(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import CapabilityRouter
+    from agent_py_agent.agent.core import SimpleAgent
+
+    method = getattr(SimpleAgent, 'ensure_mcp_catalog_ready', None)
+    assert callable(method), 'MCP_CATALOG_PREPARER_NOT_IMPLEMENTED'
+    registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch)
+    own, other = CapabilityRouter(), CapabilityRouter()
+    agent = SimpleNamespace(tools=registry, capability_router=own)
+    try:
+        assert registry.ensure_mcp_connected() is True
+        method(agent, other)
+        for router in (own, other):
+            assert any(card.name == 'mcp__unit__lookup' for card in router.cards())
+        method(agent, other)
+        assert len(connected) == 1
+    finally:
+        registry.close_mcp_clients()
+
+
+@pytest.mark.parametrize('statuses', [[], ['CLOSED'], ['OPEN', 'OPEN']])
+def test_perf_a_capability_catalog_prepares_once_only_for_real_open_requests(monkeypatch, statuses):
+    from agent_py_agent.agent.subagents.services import capability_service as module
+
+    events = []
+    tasks = [SimpleNamespace(capability_requests=[SimpleNamespace(status=status) for status in statuses])]
+    service = module.SubAgentCapabilityService(SimpleNamespace(indexing=SimpleNamespace(select_runs=lambda _: tasks)))
+    router = SimpleNamespace(_ensure_mcp_catalog=lambda: events.append('prepare'),
+        search=lambda *_a, **_k: events.append('search') or [])
+    monkeypatch.setattr(module, '_capability_request_query', lambda *_: 'unit lookup')
+    monkeypatch.setattr(module, 'build_capability_route_report', lambda records, **_: records)
+    monkeypatch.setattr(service, '_route_capability_request', lambda *_a, **_k: object())
+    report = service.route_capability_requests(router)
+    expected = ['prepare', 'search', 'search'] if 'OPEN' in statuses else []
+    assert events == expected and len(report) == statuses.count('OPEN')
+
+
+@pytest.mark.parametrize('flag', [None, False, True, 'yes'])
+def test_perf_a_make_agent_keeps_single_argument_and_strict_boolean_opt_in(tmp_path, monkeypatch, flag):
+    from agent_py_agent.cli import common
+
+    calls, config = [], object()
+    args = SimpleNamespace(_defer_mcp_connect=flag)
+    monkeypatch.setattr(common, 'agent_configuration', lambda received: (config, [tmp_path]))
+    monkeypatch.setattr(common, 'SimpleAgent', lambda *a, **kw: calls.append((a, kw)) or object())
+    common.make_agent(args)
+    assert calls[0][0] == (config, tmp_path)
+    expected = {'workspace_roots': [tmp_path]}
+    if flag is True:
+        expected['defer_mcp_connect'] = True
+    assert calls[0][1] == expected
+
+
+# LLM: 单位置make_agent替身只模拟外部构造开销；CLI正式校验、派工及finally仍执行，原args不可被污染。
+# 函数用途: 提供可观察构造和关闭次数的CLI控制面。
+def _perf_a_cli_agent(tmp_path, monkeypatch):
+    from agent_py_agent.cli import _dispatch
+
+    received, connected, closed = [], [], []
+    report = SimpleNamespace(summary={'total': 0}, records=[])
+    agent = SimpleNamespace(subagents=SimpleNamespace(workspace=tmp_path),
+        tools=SimpleNamespace(close_mcp_clients=lambda: closed.append(True)),
+        dispatch_subagents=lambda *_a, **_k: report)
+
+    def make(args):
+        received.append(args)
+        if getattr(args, '_defer_mcp_connect', None) is not True:
+            connected.append(True)
+        return agent
+
+    monkeypatch.setattr(_dispatch, 'make_agent', make)
+    monkeypatch.setattr(_dispatch, 'load_capability_config', lambda *_: None)
+    monkeypatch.setattr(_dispatch, 'make_capability_router', lambda *_: None)
+    return _dispatch, agent, received, connected, closed
+
+
+@pytest.mark.parametrize('planner', [False, True])
+def test_perf_a_dispatch_uses_deferred_copy_only_outside_planner_and_closes(tmp_path, monkeypatch, planner):
+    module, _, received, connected, closed = _perf_a_cli_agent(tmp_path, monkeypatch)
+    args = _parser().parse_args(['subagents-dispatch', *(['--planner'] if planner else [])])
+    assert module.cmd_subagents_dispatch(args) == 0
+    assert len(received) == 1
+    assert getattr(received[0], '_defer_mcp_connect', None) is (None if planner else True)
+    assert connected == ([True] if planner else [])
+    assert closed == [True] and not hasattr(args, '_defer_mcp_connect')
+
+
+@pytest.mark.parametrize('fault', ['config', 'dispatch', 'watch', 'close'])
+def test_perf_a_cli_dispatch_closes_on_failure_without_masking_business(tmp_path, monkeypatch, fault):
+    module, agent, _, _, closed = _perf_a_cli_agent(tmp_path, monkeypatch)
+    args = _parser().parse_args(['subagents-dispatch', *(['--watch'] if fault == 'watch' else [])])
+
+    def fail(*_a, **_kw):
+        raise RuntimeError('unit failure')
+
+    if fault == 'close':
+        agent.tools.close_mcp_clients = fail
+        assert module.cmd_subagents_dispatch(args) == 0
+        return
+    if fault == 'config':
+        monkeypatch.setattr(module, 'load_capability_config', fail)
+    else:
+        setattr(agent, 'watch_subagents' if fault == 'watch' else 'dispatch_subagents', fail)
+    if fault == 'watch':
+        assert module.cmd_subagents_dispatch(args) == 2
+    else:
+        with pytest.raises(RuntimeError, match='unit failure'):
+            module.cmd_subagents_dispatch(args)
+    assert closed == [True]
+
+
+@pytest.mark.parametrize('execute', [False, True])
+def test_perf_a_cli_run_defers_only_execute_outer_agent_and_always_closes(tmp_path, monkeypatch, execute):
+    module, _, received, connected, closed = _perf_a_cli_agent(tmp_path, monkeypatch)
+    result = SimpleNamespace(ok=True, run_id='unit', status='DONE', verification_status='passed', message='',
+        execution_context_json='', result_json='', result_file='', prompt_file='', response_file='')
+    monkeypatch.setattr(module, '_execute_subagent_run_cli', lambda *_: result)
+    args = SimpleNamespace(execute=execute)
+    assert module.cmd_subagent_run(args) == 0
+    assert getattr(received[0], '_defer_mcp_connect', None) is (True if execute else None)
+    assert connected == ([] if execute else [True])
+    assert closed == [True] and not hasattr(args, '_defer_mcp_connect')
+
+
+@pytest.mark.parametrize('view_first', [False, True])
+def test_perf_a_deferred_initial_catalog_is_available_in_every_permission_view(tmp_path, monkeypatch, view_first):
+    registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch)
+    view = registry.with_access_policy(access_mode='full-access', path_access_mode='full', owner_scope_root='')
+    first, second = (view, registry) if view_first else (registry, view)
+    try:
+        assert first.ensure_mcp_connected() is True
+        assert second.ensure_mcp_connected() is False
+        assert 'mcp__unit__lookup' in {spec.name for spec in first.specs()}
+        assert 'mcp__unit__lookup' in {spec.name for spec in second.specs()}
+        assert len(connected) == 1
+    finally:
+        registry.close_mcp_clients()
+
+
+def test_perf_a_concurrent_initialization_waits_for_complete_catalog(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling import registry as module
+
+    registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch)
+    entered, release, second_started = threading.Event(), threading.Event(), threading.Event()
+    connect = module._connect_mcp_servers
+
+    def delayed(*args):
+        entered.set()
+        assert release.wait(5)
+        return connect(*args)
+
+    def ensure_again():
+        second_started.set()
+        return registry.ensure_mcp_connected()
+
+    monkeypatch.setattr(module, '_connect_mcp_servers', delayed)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(registry.ensure_mcp_connected)
+            try:
+                assert entered.wait(3)
+                second = executor.submit(ensure_again)
+                assert second_started.wait(3)
+                with pytest.raises(TimeoutError):
+                    second.result(timeout=0.1)
+            finally:
+                release.set()
+            assert first.result(timeout=3) is True
+            assert second.result(timeout=3) is False
+        assert 'mcp__unit__lookup' in registry.tools and len(connected) == 1
+    finally:
+        registry.close_mcp_clients()
+
+
+@pytest.mark.parametrize('deferred', [False, True])
+def test_perf_a_real_agent_forwards_instance_policy_without_changing_server_config(tmp_path, monkeypatch, deferred):
+    from agent_py_agent.agent import core
+    from agent_py_agent.agent.settings import AgentConfig
+
+    prototype, connected, _ = _perf_a_registry(tmp_path, monkeypatch)
+    config = AgentConfig(my_agent_home=str(tmp_path / 'home'), enable_plugins=False,
+                         mcp_servers={'unit': {'command': 'not-executed'}})
+    monkeypatch.setattr(core, 'get_backend', lambda *_: SimpleNamespace())
+    agent = None
+    try:
+        agent = core.SimpleAgent(config, tmp_path / 'project', defer_mcp_connect=deferred)
+        assert agent.tools._construction_params.defer_mcp_connect is deferred
+        assert len(connected) == (0 if deferred else 1)
+        assert config.mcp_servers == {'unit': {'command': 'not-executed'}}
+        agent.ensure_mcp_catalog_ready()
+        assert len(connected) == 1
+        assert any(card.name == 'mcp__unit__lookup' for card in agent.capability_router.cards())
+        assert callable(agent.capability_router._ensure_mcp_catalog)
+    finally:
+        if agent is not None:
+            agent.tools.close_mcp_clients()
+        prototype.close_mcp_clients()
+
+
+def test_perf_a_make_agent_does_not_treat_mock_attribute_as_true(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from agent_py_agent.cli import common
+
+    calls = []
+    monkeypatch.setattr(common, 'agent_configuration', lambda _: (object(), [tmp_path]))
+    monkeypatch.setattr(common, 'SimpleAgent', lambda *a, **kw: calls.append(kw))
+    common.make_agent(MagicMock())
+    assert calls == [{'workspace_roots': [tmp_path]}]
+
+
+def test_perf_a_cli_router_callback_is_lazy_and_targets_the_given_router():
+    from agent_py_agent.agent.capability import CapabilityRouter
+    from agent_py_agent.cli.common import make_capability_router
+
+    prepared, roots = [], []
+    router = CapabilityRouter()
+    agent = SimpleNamespace(capability_router=router, skills_service=SimpleNamespace(set_extra_roots=roots.append),
+                            ensure_mcp_catalog_ready=prepared.append)
+    assert make_capability_router(agent, object(), ['unit-skills']) is router
+    assert roots == [['unit-skills']] and prepared == []
+    router._ensure_mcp_catalog()
+    assert prepared == [router]
+
+
+def test_perf_a_close_before_initialization_never_connects(tmp_path, monkeypatch):
+    registry, connected, _ = _perf_a_registry(tmp_path, monkeypatch)
+    registry.close_mcp_clients()
+    assert registry.ensure_mcp_connected() is False
+    registry.prepare_for_run()
+    assert not connected
+
+
+def test_perf_a_copy_failure_keeps_original_args_and_still_closes(tmp_path, monkeypatch):
+    module, _, received, connected, closed = _perf_a_cli_agent(tmp_path, monkeypatch)
+
+    class Uncopyable(argparse.Namespace):
+        def __copy__(self):
+            raise TypeError('unit copy refusal')
+
+    args = Uncopyable(**vars(_parser().parse_args(['subagents-dispatch'])))
+    assert module.cmd_subagents_dispatch(args) == 0
+    assert received == [args] and connected == [True] and closed == [True]
+    assert not hasattr(args, '_defer_mcp_connect')
+
+
+def test_perf_a_run_worker_stays_separate_and_outer_closes_after_worker(tmp_path, monkeypatch):
+    module, agent, _, connected, closed = _perf_a_cli_agent(tmp_path, monkeypatch)
+    agent.config, agent.root = object(), tmp_path
+    args = SimpleNamespace(execute=True, run_id='unit', instruction='', max_cards=0, no_probe=False)
+    result = SimpleNamespace(ok=True, run_id='unit', status='DONE', verification_status='passed', message='',
+        execution_context_json='', result_json='', result_file='', prompt_file='', response_file='')
+    workers = []
+
+    def work(params):
+        assert closed == []
+        workers.append(params)
+        return result
+
+    monkeypatch.setattr(module, '_cli_subagent_run_timeout', lambda *_: 1.25)
+    monkeypatch.setattr(module, '_run_subagent_worker', work)
+    assert module.cmd_subagent_run(args) == 0
+    assert len(workers) == 1 and workers[0].config is agent.config
+    assert workers[0].timeout_seconds == 1.25
+    assert connected == [] and closed == [True]

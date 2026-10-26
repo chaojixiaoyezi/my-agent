@@ -323,7 +323,24 @@ def _sqlite_directory_state(path):
     return tuple(result)
 
 
-# LLM: 原nofollow FD跨connect存活，立即核路径dev/ino，再核FD的ctime及父链变化以拒绝ABA；非原生VFS身份绑定。
+# LLM: Linux通过/proc/self/fd快照读取存活常规文件FD的(dev,ino)，补足粗粒度ctime下的同毫秒ABA替换检测。
+# 函数用途: 采集当前进程存活常规文件FD的身份映射。
+def _live_regular_fds():
+    if not Path('/proc/self/fd').is_dir():
+        return None
+    mapping = {}
+    for entry in os.listdir('/proc/self/fd'):
+        try:
+            fd = int(entry)
+            info = os.stat(f'/proc/self/fd/{fd}')
+            if stat.S_ISREG(info.st_mode):
+                mapping[fd] = (info.st_dev, info.st_ino)
+        except OSError:
+            continue
+    return mapping
+
+
+# LLM: 原nofollow FD跨connect存活，立即核路径dev/ino，再核FD的ctime、/proc/self/fd真实打开inode及父链变化以拒绝ABA。
 # 函数用途: 按ro/rw打开SQLite，连接窗口身份/元数据不稳定一律关闭并拒绝，成功连接由调用方关闭。
 def open_sqlite(spec, *, read_only=False):
     if spec.database_path == ':memory:':
@@ -337,8 +354,14 @@ def open_sqlite(spec, *, read_only=False):
     try:
         expected = os.fstat(descriptor)
         parents = _sqlite_directory_state(path)
+        fds_before = _live_regular_fds()
         conn = sqlite3.connect(uri, uri=True, timeout=5)
         try:
+            fds_after = _live_regular_fds()
+            if fds_before is not None and fds_after is not None:
+                opened_inodes = {ino for fd, ino in fds_after.items() if fds_before.get(fd) != ino}
+                if opened_inodes and (expected.st_dev, expected.st_ino) not in opened_inodes:
+                    raise ValueError('fd inode mismatch')
             actual = os.stat(path, follow_symlinks=False)
             if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
                 raise ValueError('replaced')

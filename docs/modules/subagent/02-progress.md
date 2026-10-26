@@ -1,3 +1,8 @@
+## 2026-10-26 子代理外层控制面 MCP 延迟连接与巡检按需筛选（已实现）
+
+- `subagents/services/capability_service.py` 在处理 `OPEN` 能力请求时调用 `ensure_mcp_catalog_ready`，配合 `cli/_dispatch.py`（非 `planner` 派工与 `execute` 外层实例 `defer_mcp_connect=True` + `finally` `close()`）消除外层控制面实例无谓拉起重复 `computer_use_server` 子进程。
+- `subagents/services/persistence/service.py` 新增 `list_runs_selected` / `list_runs_selected_report`，`subagents/manager.py` 新增 `select_manager_runs` 并接入 `direct_parent_lifecycle.py` 与 `capability_auto_sweep.py`，在单轮孤儿巡检中避免对数千条已终结历史任务重复执行 `copy.deepcopy`。
+
 ## 2026-10-25 WP8：4096 条有界缓存、缺失 locator 单次读取与锁外复制（工作区已实现）
 
 - `SubAgentPersistenceService` 的 `_MAX_RUN_CACHE_ENTRIES` 与 `_MAX_NEGATIVE_RUN_CACHE_ENTRIES` 分别为 4096，`_MAX_RUN_CACHE_ITEM_BYTES` 仍为 256 KiB；正负预算独立，不改成无界缓存。下方 2026-10-21 的 512 条说明是历史状态，当前容量以本节为准。

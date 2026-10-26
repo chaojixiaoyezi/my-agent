@@ -1,9 +1,11 @@
 
 # LLM: This module owns the model-visible local text-search contract and its
 # bounded rg/Python execution paths; keep matching semantics aligned across both.
+#   rg回收有界且kill后必须wait；stdout只由读线程finally关闭，取消回调不得跨线程关闭迭代流。
 # 模块用途: 提供工作区内文本搜索，统一参数说明、ripgrep 快速路径和 Python 后备扫描。
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import json
 import logging
@@ -769,6 +771,8 @@ def _start_rg_process(
         return None
 
 
+# LLM: 保留rg返回码和原Python后备语义；正常、异常及BaseException退出都在读线程finally回收进程并关闭stdout。
+# 函数用途: 收集rg命中并保证流和子进程收口，取消回调不碰读线程持有的stdout。
 def _rg_hits_from_process(
     tool: SearchTextTool,
     process: subprocess.Popen[str],
@@ -779,8 +783,14 @@ def _rg_hits_from_process(
         return_code = process.wait(timeout=2)
     except Exception:
         _LOGGER.debug("rg hits read failed; falling back to python search", exc_info=True)
-        _stop_process(process)
         return None
+    finally:
+        try:
+            _stop_process(process)
+        finally:
+            if process.stdout is not None:
+                with contextlib.suppress(OSError):
+                    process.stdout.close()
     if stopped_early or return_code == 1:
         return hits
     return hits if return_code == 0 else None
@@ -820,6 +830,8 @@ def _read_rg_hits(
     return hits, False
 
 
+# LLM: 命中统计返回值与原后备路径不变；读线程负责finally清理stdout，异常也执行有界进程回收。
+# 函数用途: 读取rg计数并释放对应进程和管道，不让取消线程关闭正在读取的流。
 def _rg_counts_from_process(
     tool: SearchTextTool,
     process: subprocess.Popen[str],
@@ -830,8 +842,14 @@ def _rg_counts_from_process(
         return_code = process.wait(timeout=2)
     except Exception:
         _LOGGER.debug("rg counts read failed; falling back to python search", exc_info=True)
-        _stop_process(process)
         return None
+    finally:
+        try:
+            _stop_process(process)
+        finally:
+            if process.stdout is not None:
+                with contextlib.suppress(OSError):
+                    process.stdout.close()
     if return_code == 1:
         return counts
     return counts if return_code == 0 else None
@@ -931,6 +949,8 @@ def _line_window_rows(path: Path, start: int, end: int) -> tuple[tuple[int, str]
         )
 
 
+# LLM: 仅终止本调用创建的rg；TERM/KILL后wait均有界，kill成功后补wait以reap，不从取消回调关闭stdout。
+# 函数用途: 尽快结束搜索子进程并回收僵尸；管道留给主读线程finally关闭。
 def _stop_process(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -948,3 +968,5 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
             process.kill()
     except OSError:
         return
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
+        process.wait(timeout=1)
