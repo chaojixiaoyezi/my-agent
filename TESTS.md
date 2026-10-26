@@ -1,3 +1,29 @@
+## 2026-10-26 Wave 6 B1-R3：正常解析路径严格归属校验
+
+来源：`07-tasks/wave6-b1-round3-fix-20261026.md`，单项 `B1-R2-F1`，基线 `f039c639da8ab66db7296bb601f240cca6aad38d`。仅修改原工作树三文件，遵守不派子代理、不切分支、不碰main、不推送的要求。
+
+- 正常解析不再依赖schema是否存在才校验归属。顶层及五类scope统一校验：scope只允许字典/None；五类归属只允许非空字符串/None；线程别名同组，owner/task/request各自同组，多位置的原始字符串不一致即拒绝。
+- 在原生schema验证之前先验原始声明，避免v1将非法值先转字符串；schema处理后复验输出。错误码文字分别为 `invalid_session_scope`、`invalid_session_attribution`、`conflicting_session_attribution`，原owner边界保持。
+- `_record_thread_id`只取非空字符串，不再用str转换身份；错误分类保留原字符串差异，防trim/路径规范化合并冲突后将错误忽略为外线程。
+- 新增真实文件矩阵覆盖无schema及合法v1/v4（污染前先调用真实schema验证器确认有效），验证非法类型/空白、五个scope容器、跨位置冲突及尾随空白差异、有效外线程仍可正常过滤、None可选字段及直接线程读取不转型。初始281例中273例断言失败、0执行错误，其余有效控制用例通过。
+- 旧“全局未绑定”夹具曾用空字符串表示无归属，与本轮明确规则冲突；仅将这些输入改为允许的None，保留原全owner展示、线程隔离、KeyError早于日志读取、Gateway首轮过滤及只读断言。空字符串本身仍由新增矩阵明确验证为拒绝，不放宽生产规则或既有断言。
+- 开工时仅 `CODE_SIZE_REPORT.md` 有既存生成差异，已备份至 `.pytest_cache/b1-r3/preexisting-code-size.patch`，按任务要求在门禁后还原生成报告；不提交报告或基线改动。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+最终指定测试文件538例全部通过，0失败、0执行错误、0跳过；Ruff、文档同步、strict code-size（`hard=0`、`blocked=False`）与diff检查通过，生成报告已还原。统计取自 `final.xml`，机器汇总见 `verification-summary.json`。
+
+本轮输出位于 `.pytest_cache/b1-r3/`。不声称全仓、跨平台、运行TUI或真实监控进程树链已经验证；本轮按明确要求由主代理自查，没有独立子代理审查。
+
 ## 2026-10-26 Wave 6 B1-R2：后台观察错误归属与有界缓存修复
 
 来源：`07-tasks/wave6-b1-round2-fix-20261026.md` 三审 F1/F2/F3；起点 `54c27d4a39445983442fea71babe51be57409e3f`，只在指定 `/tmp/wt-wave6-b1-r2` 工作树修改白名单文件，不部署或启停服务。

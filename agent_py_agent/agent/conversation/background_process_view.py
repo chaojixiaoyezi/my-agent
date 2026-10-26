@@ -1,5 +1,5 @@
 # LLM: 静态缓存按规范目录单槽、逐文件stat重验、4096条硬上限；坏记录仅凭严格一致归属隔离，不凭年龄忽略错误。
-# 模块用途: 给TUI与插件提供不写盘的进程观察，隔离无关坏文件并实时计算当前会话动态状态。
+# 模块用途: 给TUI与插件提供严格归属校验的只读进程观察，隔离明确无关坏文件并实时计算当前会话动态状态。
 from __future__ import annotations
 
 import json
@@ -320,15 +320,15 @@ def _error_scope_payload(payload: object) -> dict | None:
     return result
 
 
-# LLM: 归属取原JSON中所有可用字典，不因schema/其它scope损坏丢掉明确线程或owner信息；不从正文推断。
-# 函数用途: 提取顶层与五类scope供坏记录诊断使用。
+# LLM: 正常校验与错误诊断共用原JSON字典位置；只枚举字典，不在此转换归属类型或丢弃原字符串差异。
+# 函数用途: 提取顶层与五类scope，供严格验证和只读线程提取使用。
 def _raw_record_scopes(payload: object) -> tuple[dict, ...]:
     if not isinstance(payload, dict):
         return ()
     return (payload, *(payload[key] for key in _SCOPE_FIELDS if isinstance(payload.get(key), dict)))
 
 
-# LLM: 无字典/坏类型/空白/任意归属冲突均失败关闭；只接受明确其它线程或外owner且未声称当前线程的证据，年龄无效。
+# LLM: 坏类型/空白/原字符串冲突均失败关闭，不能靠trim或路径规范化合并不同声明；年龄无效。
 # 函数用途: 每次观察重新判断坏文件是否与当前会话无关。
 def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | None, now: float) -> bool:
     if not isinstance(thread_id, str) or not thread_id.strip() or not isinstance(snapshot.payload, dict):
@@ -344,15 +344,15 @@ def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | No
             value = scope[key]
             if not isinstance(value, str) or not value.strip():
                 return False
-            claims[key].add(value.strip())
+            claims[key].add(value)
     threads = claims["thread_id"] | claims["conversation_id"]
     try:
         owners = {str(Path(value).expanduser().resolve()) for value in claims["owner_home"]}
     except (OSError, ValueError, RuntimeError):
         return False
-    if len(threads) > 1 or len(owners) > 1 or any(len(claims[key]) > 1 for key in ("task_id", "request_id")):
+    if len(threads) > 1 or len(owners) > 1 or any(len(claims[key]) > 1 for key in ("owner_home", "task_id", "request_id")):
         return False
-    if thread_id.strip() in threads:
+    if thread_id.strip() in {value.strip() for value in threads}:
         return False
     return bool(threads or owners and str(home.resolve()) not in owners)
 
@@ -404,30 +404,47 @@ def _read_session_payload(root: Path, session_id: str) -> object:
     return json.loads(raw)
 
 
-# LLM: 静态快照共用原schema/身份/线程校验；顶层与嵌套owner同等核验，坏记录不得因缓存变成可信正文。
+# LLM: 所有schema及无schema均要求scope为字典或None、归属为非空字符串或None；原声明逐字一致，线程别名同组。
+# 函数用途: 在任何schema转换或会话过滤之前拒绝非法、冲突的原始归属，纯校验不写盘。
+def _validate_session_attribution(payload: dict) -> None:
+    if any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in _SCOPE_FIELDS):
+        raise ValueError("invalid_session_scope")
+    claims = {key: set() for key in _ATTRIBUTION_FIELDS}
+    for scope in _raw_record_scopes(payload):
+        for key in _ATTRIBUTION_FIELDS:
+            value = scope.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("invalid_session_attribution")
+            claims[key].add(value)
+    threads = claims["thread_id"] | claims["conversation_id"]
+    if len(threads) > 1 or any(len(claims[key]) > 1 for key in ("owner_home", "task_id", "request_id")):
+        raise ValueError("conflicting_session_attribution")
+
+
+# LLM: schema前先验证原归属，防旧schema将非法类型转字符串；规范化后再验，列表/详情同链，owner边界不放宽。
 # 函数用途: 验证新读取或待缓存的进程元数据，保持详情与列表解释一致。
 def _validate_session_payload(payload: object, selected: str, home: Path) -> dict:
     if not isinstance(payload, dict) or payload.get("session_id") != selected:
         raise ValueError("process session identity mismatch")
+    _validate_session_attribution(payload)
     if payload.get("schema"):
         payload = validate_process_record(payload)
-    scopes = [payload.get(key) or {} for key in _SCOPE_FIELDS]
-    if any(not isinstance(scope, dict) for scope in scopes):
-        raise ValueError("invalid process display scope")
-    owners = [scope["owner_home"] for scope in (payload, *scopes) if scope.get("owner_home")]
+        _validate_session_attribution(payload)
+    owners = [scope["owner_home"] for scope in _raw_record_scopes(payload) if scope.get("owner_home")]
     if any(not isinstance(owner, str) or Path(owner).absolute() != home for owner in owners):
         raise ValueError("process owner mismatch")
-    _record_thread_id(payload)
     return payload
 
 
-# LLM: 输入已经过scope映射类型校验；所有原支持的线程位置共用唯一解释，冲突继续拒绝而不猜归属。
-# 函数用途: 为记录验证、过滤和概要提取同一个线程身份；无绑定返回空串。
+# LLM: 列表/详情输入已严格验证；直接调用也只取非空str，永不将非字符串转换为线程身份，冲突不猜归属。
+# 函数用途: 为会话过滤和概要提取原始字符串线程身份，无有效绑定返回空串。
 def _record_thread_id(payload: dict) -> str:
-    scopes = [payload, *(payload.get(key) or {} for key in ("access_scope", "execution_scope", "completion_target", "metadata", "scope"))]
-    threads = {str(scope[key]) for scope in scopes for key in ("thread_id", "conversation_id") if scope.get(key)}
+    threads = {scope[key] for scope in _raw_record_scopes(payload) for key in ("thread_id", "conversation_id")
+               if isinstance(scope.get(key), str) and scope[key].strip()}
     if len(threads) > 1:
-        raise ValueError("process thread mismatch")
+        raise ValueError("conflicting_session_attribution")
     return next(iter(threads), "")
 
 
