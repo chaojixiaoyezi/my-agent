@@ -1,3 +1,29 @@
+## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
+
+来源：`07-tasks/wave5-wt-bc-20261026.md`（包含 c8/c9 追加合同），起始提交 `95fd54f9b`，仅在 `/tmp/wt-wave5-bc` 开发。没有修改 C4 的 `tui_threading.py` / `http_handlers.py`，没有部署或启停真实服务。
+
+- **B5**：Darwin 自身 lstart 成功值按 PID/source 缓存；外部进程用本模块 libproc birth token 作 LRU 版本键，ESRCH 不 spawn ps。出生观察前后复核，250ms 降级 TTL 只允许显式只读观察 scope；直接读口还被 scoped_locks 用于授权，因此默认强制新观察，native token 缺失时保守回查 ps，本片没有为旧消费者打开 TTL 直读快路。缓存有界，查询互斥量 fork 后重建。Count0 不调用 MP process_birth，Linux `/proc` 与原 ps 注入点/旧 lstart 格式保持。
+- **B6 插件**：安装表按 stat 版本复用原 Store 解码；缺环境负缓存绑定 owner/revision/activation/安装戳/环境戳，30 秒可重试且告警按代一次。同步的撤销、stop 确认、权限视图重建不被跳过。
+- **B6/C2 后台**：冷 owner 配置/state/实际输入/自学习队列三态预检，损坏或预算不确定为 unknown，不缓存成 not_due。单拍最多两次冷构建，候选游标每检查即前进；复用原 pin/idle evictor。180 秒保护期延迟非紧急冷构建、retention 与 legacy scheduler 索引修复；已索引 due 唤醒、安全恢复、取消/fencing/权限与租约路径不因保护期等待。终态投影原有每拍16条保持，没有伪造不存在的新分页优化。
+- **C1**：故障与恢复结构状态独立于发送去重；按服务代次/阶段/原因持久冷却，只有成功投递回执标记已通知。收件人取原管理员绑定，supervisor 进程的 DeliveryService 直接调用通道，不依赖坏 Gateway 或模型；失败不改预算/维护锁。恢复保留最后失败信息，启动轮询按50/100/200ms递进至500ms。
+- **C2 阶段账**：worker 在 owner 初始化前落受理/dispatch 观察，成功后记 owner ready；真实会话锁前后记 wait/acquired，仓储创建/激活真实 attempt 时绑定 request/transport attempt/lease epoch/实际 attempt。仅写顶层遥测及 attempt metadata，不写 fingerprint 的业务 metadata；旧 worker 不能覆盖新 lease。缺旧受理时标记 null，不拿当前时刻造零排队。
+- **C3**：LEFT JOIN 保留空指针孤儿与非空损坏指针两类；只有事务内复核从未有 attempt/op/锁/在途子运行的孤儿可 cancelled，并记 `orphan_created_no_attempt`。历史 unknown 只写运维确认与事件，不改既有 run 终态、attempt 结束事实或副作用审计，不解除原恢复门。清锁须可靠死亡证明及完整锁版本 CAS，到期活/未知 holder 保留；MUTATING/DIRTY/op 审计不重写。后台稳定游标分页，显式 CLI 列表/结清不截断首批256条；`--settle` 不额外提示确认。
+
+新增 `agent_py_agent/tests/test_foundation_bc_wave5.py`：缓存/fork/PID复用/ESRCH/TTL非授权、安装快照/环境恢复/撤销确认、冷预检/预算/公平游标、启动期安全清理、指纹不变/lease CAS/真实attempt阶段账、持久告警/失败重试/恢复/递进轮询、孤儿/损坏指针/unknown恢复禁重放/CLI无提示/锁死亡CAS/脏资源保留/扫描饥饿回归。
+
+独立 Astra max 仅做内联静态复核，不冒充读取全仓或独立运行测试。其指出的既有终态覆盖、状态与通知去重混淆、首批扫描饥饿先用三条新回归复现为 **3 failed**，再按产品契约修复；另补 MUTATING/DIRTY 和锁游标实库用例。首次新增夹具使用不合法 curator reason `manual`，修正为模型允许的 `admin`，没有削弱生产校验。尺寸门最初发现两处过深嵌套，拆成有界目录预检 helper 后修正，没有放宽基线。
+
+复现（工作树根；只跑定向测试）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_foundation_bc_wave5.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_gateway_service_role_identity.py agent_py_agent/tests/test_scoped_lock_private_permissions.py agent_py_agent/tests/test_runtime_db_recover_stale.py -q --tb=short --junitxml=.pytest_cache/wave5-bc-gate.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终当前源码验收：指定五文件 **191 passed / 0 failed / 0 error / 0 skipped**，其中新增 Wave5 **30 项**；额外 supervisor/curator/retention/request 七文件 **370 passed / 0 failed / 0 error / 0 skipped**。统计来自 `.pytest_cache/wave5-bc-gate.xml` 和 `wave5-bc-extra.xml` 的实际 testcase 结果。全范围 Ruff 与 `git diff --check` 通过，strict 尺寸门 **hard=0 / blocked=False**。补充 scoped_locks 直接授权读口回归后，已重跑上述全部验收。早期额外 `test_gateway_host_identity.py` 出现两项失败（一项 fixture 缺 state，一项真实 ps 返回 EPERM），未做基线复核，不宣称既有失败或该 host_identity 套件全绿。真实管理员IM投递、真实进程跨代/跨平台、上线启动及生产吞吐改善未验证；本轮没有跑全仓 pytest。生成的 `CODE_SIZE_REPORT.md` 不随功能提交。
+
 ## 2026-10-26 Stage 3 Round 2：有界 Git 指针扫描与 artifact 生产读口（c2）
 
 来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，工作树 `wt-wave4-c3`，起始提交 `8e96fbbf10357dce3ed20470c0e4eeab5fecc5d7`。本轮只修改任务授权的两份生产模块、两份测试和两份文档，不改部署包。

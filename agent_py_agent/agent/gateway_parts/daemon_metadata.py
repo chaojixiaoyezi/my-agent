@@ -14,9 +14,12 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,12 +39,124 @@ _MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 # macOS gethostuuid 的等待上限秒数（timespec.tv_sec）；等不到按“取不到”处理，退回主机名。
 _HOST_UUID_WAIT_SECONDS = 5
 
+_SELF_PROCESS_START_TIME: dict[tuple[int, str], str] = {}
+_PROCESS_START_TIME_CACHE: OrderedDict[tuple[int, str], str] = OrderedDict()
+_PROCESS_START_TIME_TTL: OrderedDict[int, tuple[float, str]] = OrderedDict()
+# 原直接读口也被 scoped_locks 用于接管授权，默认必须新观察；TTL 仅供显式只读观察作用域。
+_FRESH_PROCESS_OBSERVATION = ContextVar("fresh_process_observation", default=True)
+_PROCESS_START_CACHE_LIMIT = 512
+_PROCESS_START_CACHE_LOCK = threading.RLock()
+
+
+# LLM: fork 子进程不能继承由父线程持有的查询锁；重建纯缓存锁不改变进程身份权限。
+# 函数用途: 在 fork 子进程重置缓存互斥量，防止继承锁死锁。
+def _reset_process_start_lock_after_fork() -> None:
+    global _PROCESS_START_CACHE_LOCK
+    _PROCESS_START_CACHE_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_process_start_lock_after_fork)
+
+
+# LLM: 显式测试/查询边界可清理纯观察缓存；不检测 monkeypatch，不写 PID 或租约。
+# 函数用途: 清空进程出生查询缓存，测试换观察源时调用。
+def clear_process_start_time_cache() -> None:
+    _SELF_PROCESS_START_TIME.clear()
+    _PROCESS_START_TIME_CACHE.clear()
+    _PROCESS_START_TIME_TTL.clear()
+
+
+# LLM: libproc 固定136字节结构；只用出生秒/微秒给旧 ps 字符串缓存分代，不替换其磁盘格式。
+# 类用途: 接收 Darwin 内核进程资料的固定布局。
+class _DarwinProcBSDInfo(ctypes.Structure):
+    _fields_ = [("prefix", ctypes.c_uint32 * 12), ("comm", ctypes.c_char * 16),
+                ("name", ctypes.c_char * 32), ("scope", ctypes.c_uint32 * 6),
+                ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
+
+
+# LLM: ESRCH 必须与不可观察分开；不调用 MP process_birth，避免改变 Count0 producer。
+# 函数用途: 原生读取 Darwin 出生代次，已消失抛 ProcessLookupError，其余失败返回未知。
+def _darwin_proc_birth_token(pid: int) -> str | None:
+    try:
+        query = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True).proc_pidinfo
+        query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int]
+        query.restype = ctypes.c_int
+        info = _DarwinProcBSDInfo()
+        ctypes.set_errno(0)
+        count = query(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if count <= 0 and ctypes.get_errno() == errno.ESRCH:
+            raise ProcessLookupError(errno.ESRCH, "process disappeared")
+        if count != ctypes.sizeof(info) or not info.start_sec:
+            return None
+        return f"{info.start_sec}:{info.start_usec:06d}"
+    except ProcessLookupError:
+        raise
+    except (OSError, AttributeError, OverflowError):
+        return None
+
+
+# LLM: ps 仍是旧 lstart 格式唯一 producer；失败/空值不缓存，保留原 subprocess 注入签名。
+# 函数用途: 在没有可复用出生观察时查询一次 ps。
+def _query_ps_start_time(pid: int) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(int(pid))],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return value or None
+
+
+# LLM: 自身键含 PID/source，fork 后不命中父代；外部每次重读内核出生，TTL 仅供非授权观察。
+# 函数用途: 为 Darwin 旧格式出生值提供有界缓存，不让 PID 重用命中旧代。
+def _darwin_start_time(pid: int) -> str | None:
+    key = (pid, "ps_lstart")
+    if pid == os.getpid():
+        if key not in _SELF_PROCESS_START_TIME:
+            value = _query_ps_start_time(pid)
+            if value:
+                _SELF_PROCESS_START_TIME.clear()
+                _SELF_PROCESS_START_TIME[key] = value
+            return value
+        return _SELF_PROCESS_START_TIME[key]
+    try:
+        birth = _darwin_proc_birth_token(pid)
+    except ProcessLookupError:
+        return None
+    now = time.monotonic()
+    cache_key = (pid, birth) if birth is not None else None
+    if cache_key in _PROCESS_START_TIME_CACHE:
+        _PROCESS_START_TIME_CACHE.move_to_end(cache_key)
+        return _PROCESS_START_TIME_CACHE[cache_key]
+    recent = _PROCESS_START_TIME_TTL.get(pid)
+    if birth is None and not _FRESH_PROCESS_OBSERVATION.get() and recent and now - recent[0] < 0.25:
+        return recent[1]
+    value = _query_ps_start_time(pid)
+    if value and cache_key is not None:
+        # ps 查询跨越 PID 重用时不能把新值记到旧内核代次。
+        try:
+            if _darwin_proc_birth_token(pid) != birth:
+                return None
+        except ProcessLookupError:
+            return None
+        _PROCESS_START_TIME_CACHE[cache_key] = value
+        while len(_PROCESS_START_TIME_CACHE) > _PROCESS_START_CACHE_LIMIT:
+            _PROCESS_START_TIME_CACHE.popitem(last=False)
+    elif value:
+        _PROCESS_START_TIME_TTL[pid] = (now, value)
+        while len(_PROCESS_START_TIME_TTL) > _PROCESS_START_CACHE_LIMIT:
+            _PROCESS_START_TIME_TTL.popitem(last=False)
+    return value
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# LLM: comm可含空格和左右括号，只从最后右括号后定位出生字段；无可靠proc观测时沿原ps回退，不猜代际。
+# LLM: Darwin 缓存只保留原 lstart 格式；Linux comm 从最后右括号定位，保持原 proc/ps 注入边界。
 # 函数用途: 读取进程出生标识供同代比较，无法观察时返回未知。
 def _get_process_start_time(pid: int) -> int | str | None:
     """返回进程出生时间；只用于**同一进程的前后比较**（相等即同代），不是可换算的时间戳。
@@ -51,6 +166,9 @@ def _get_process_start_time(pid: int) -> int | str | None:
     """
     if sys.platform == "win32":
         return None
+    if sys.platform == "darwin":
+        with _PROCESS_START_CACHE_LOCK:
+            return _darwin_start_time(int(pid))
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         raw = stat_path.read_text()
@@ -62,18 +180,7 @@ def _get_process_start_time(pid: int) -> int | str | None:
         return int(fields[19])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
         pass
-    # 非 Linux：用 ps 拿同一进程稳定的出生时间字符串（不解析成时间戳，只做相等比较）。
-    try:
-        completed = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(int(pid))],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    value = completed.stdout.strip()
-    return value or None
+    return _query_ps_start_time(pid)
 
 
 # LLM: 后台租约只能在“同一进程域且旧 PID 身份已死”时提前接管；machine-id 还要叠加
@@ -172,7 +279,7 @@ def build_process_identity(pid: int | None = None) -> dict[str, object]:
     }
 
 
-# LLM: 仅同来源ESRCH/精确出生不同可判死；EPERM/字段不足/PS-kernel异来源均未知，未知不授TTL接手，Count0原生产来源保留。
+# LLM: 仅同源精确观察判死；身份验证禁止 TTL 命中，EPERM/异来源/不可见保持未知，Count0 注入入口保留。
 # 函数用途: 只读核验原进程身份，不发停止信号、启动进程或补执行许可。
 def process_identity_is_live(identity: object) -> bool | None:
     if not isinstance(identity, dict):
@@ -188,7 +295,11 @@ def process_identity_is_live(identity: object) -> bool | None:
         os.kill(pid, 0)
     except OSError as error:
         return False if error.errno == errno.ESRCH else None
-    current_start = _process_start_observation(pid, recorded_start)
+    token = _FRESH_PROCESS_OBSERVATION.set(True)
+    try:
+        current_start = _process_start_observation(pid, recorded_start)
+    finally:
+        _FRESH_PROCESS_OBSERVATION.reset(token)
     if current_start is None:
         return None
     if type(recorded_start) is not type(current_start):

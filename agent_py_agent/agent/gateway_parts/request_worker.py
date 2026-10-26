@@ -1132,6 +1132,10 @@ def _process_claimed_gateway_request_path(
             expected_lease_epoch=expected_lease_epoch,
         )
         return True
+    from .request_binding import record_gateway_request_stage
+
+    timing = record_gateway_request_stage(processing_path, request_payload, "dispatched_at",
+        at=float(request_payload.get("lease_started_at") or time.time()))
     try:
         request_agent = _resolve_request_agent(agent, request_payload)
     except OwnerScopeUnavailableError as exc:
@@ -1150,6 +1154,7 @@ def _process_claimed_gateway_request_path(
             expected_lease_epoch=expected_lease_epoch,
         )
         return True
+    timing.update(record_gateway_request_stage(processing_path, request_payload, "owner_agent_ready_at"))
     pool = getattr(agent, "_owner_pool", None)
     lease = pool.pin(request_agent) if pool is not None and request_agent is not agent else nullcontext()
     from ..conversation.agent_tool_approval import (
@@ -1157,9 +1162,10 @@ def _process_claimed_gateway_request_path(
         accept_approval_retirement_terminal,
         approval_retirement_request_observation,
     )
+    from ..runtime_db.repository import request_stage_timing_scope
     from .io import gateway_request_fingerprint
 
-    with (lease, register_interruptible(conversation_request_interrupt_name(request_id)),
+    with (request_stage_timing_scope(timing), lease, register_interruptible(conversation_request_interrupt_name(request_id)),
           request_transaction_ports_scope(request_agent),
           sqlite_connection_scope(bool(getattr(agent.config, "sqlite_connection_reuse", False))),
           approval_retirement_request_observation(request_agent, processing_path, request_payload,
