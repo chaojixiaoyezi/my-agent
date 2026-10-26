@@ -411,7 +411,16 @@ def test_stage3_preview_limit_is_real_archive_budget(key, value, wanted):
 
     assert getattr(archive, "TOOL_PREVIEW_CHAR_LIMIT", None) == 1200
     agent = SimpleNamespace(config=SimpleNamespace(**{key: value}))
-    assert archive._config_int(agent, key) == wanted
+    # 配置读口和硬余量判断仍取原用户值；只有外置后的两处预览消费新上限。
+    assert archive._config_int(agent, key) == value
+    if key == "tool_output_preview_chars":
+        assert archive._tool_preview_chars(agent) == wanted
+        cap = getattr(archive, "_cap_output_preview", None)
+        assert callable(cap), "预览缩短必须与外置策略解耦"
+        record = {"output_preview": "x" * 5000, "output_externalized": False, "output_hash": "unchanged"}
+        cap(agent, record)
+        assert len(record["output_preview"]) <= wanted
+        assert record["output_externalized"] is False and record["output_hash"] == "unchanged"
 
 
 @pytest.mark.parametrize("name", ["meta ", " meta"])
@@ -443,9 +452,33 @@ def test_absent_write_root_keeps_future_git_regex_protection(tmp_path):
     assert module._macos_git_write_denies(spec)
 
 
+def test_file_write_root_does_not_require_directory_scan(tmp_path):
+    root = tmp_path / "file"
+    root.write_text("business")
+    spec = AttemptSandboxSpec(tmp_path, tmp_path, tmp_path, tmp_path, extra_write_roots=(root,))
+    assert module._macos_git_write_denies(spec)
+
+
 def test_git_worktree_configuration_is_protected(tmp_path):
     spec, _repo, gitdir, _common, _alias = _git_layout(tmp_path, "worktree")
     assert module._seatbelt_string_literal(str(gitdir / "config.worktree")) in _profile(spec)
+
+
+def test_git_pointer_special_file_fails_instead_of_waiting(tmp_path):
+    import os
+    import sys
+
+    pointer = tmp_path / "commondir"
+    os.mkfifo(pointer)
+    code = (
+        "import sys; from pathlib import Path; "
+        "from agent_py_agent.agent.attempt.sandbox import _git_pointer_path\n"
+        "try: _git_pointer_path(Path(sys.argv[1]))\n"
+        "except ValueError: sys.exit(0)\n"
+        "sys.exit(2)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code, str(pointer)], capture_output=True, timeout=3)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("kind", ["ordinary", "worktree", "symlink"])

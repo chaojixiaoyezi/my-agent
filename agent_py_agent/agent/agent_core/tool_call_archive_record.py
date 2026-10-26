@@ -104,6 +104,7 @@ def archive_tool_output_projection(
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
+    _cap_output_preview(agent, output_record)
     # 读取工具已限制单页大小，output_externalized=false 是归档层的明确内联裁决。
     # 日志 output_preview 无论是否外置都会缩短，不能用它作为所有模型回执的正文。
     use_preview = bool(output_record.get("output_externalized")) and not bool(
@@ -266,6 +267,7 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
         )
         output_record = externalize_tool_output_record(request)
         output_record.update(write_tool_output_fail_safe_checkpoint(request))
+    _cap_output_preview(agent, output_record)
     output_record["parameters"] = dict(record.call.arguments)
     output_record["model_parameters"] = dict(record.model_visible_call.arguments)
     # The round/index pair is runtime authority for ephemeral tool discovery:
@@ -332,14 +334,30 @@ def _bounded_model_summary(value: str) -> str:
     return f"{value[:head]}{marker}{value[-tail:]}"
 
 
-# LLM: 两个归档出口共用此配置读取；仅外置预览受1200字符硬上界，保留更小用户值，不更改外置阈值或完整正文。
-# 函数用途: 读取整数配置与原默认值，给归档预览套上统一上限。
+# LLM: 两个归档返回出口共用1200字符上界，保留更小用户值；原归档请求仍用真实配置，保持外置策略不变。
+# 函数用途: 计算模型/日志回执的预览上限，不把展示限制反向变成强制外置条件。
+def _tool_preview_chars(agent: object) -> int:
+    return min(_config_int(agent, "tool_output_preview_chars"), TOOL_PREVIEW_CHAR_LIMIT)
+
+
+# LLM: 仅缩短已脱敏的返回预览；不写原文、哈希、索引或output_externalized，内联正文和归档可恢复性不变。
+# 函数用途: 给新建与缓存归档回执施加预览上限，保留截断提示而不改变完整输出的传递决策。
+def _cap_output_preview(agent: object, record: dict[str, object]) -> None:
+    preview = str(record.get("output_preview") or "")
+    limit = max(0, _tool_preview_chars(agent))
+    if len(preview) <= limit:
+        return
+    marker = "\n...[preview truncated]"
+    record["output_preview"] = (preview[:limit - len(marker)] + marker) if limit >= len(marker) else preview[:limit]
+
+
+# LLM: 原用户配置与默认值保持原样，余量短正文判断仍使用实际配置而非展示上限；预览出口另行套硬门。
+# 函数用途: 读取整数配置，缺失/错误时沿原默认值，不更改其它策略的配置语义。
 def _config_int(agent: object, key: str) -> int:
     try:
-        value = int(getattr(agent.config, key))
+        return int(getattr(agent.config, key))
     except (AttributeError, TypeError, ValueError):
-        value = default_config_int(key)
-    return min(value, TOOL_PREVIEW_CHAR_LIMIT) if key == "tool_output_preview_chars" else value
+        return default_config_int(key)
 
 
 # LLM: 布尔配置读取；agent/config 缺字段时用调用方给的默认值，不抛错（归档层不能因配置形状中断工具结果）。

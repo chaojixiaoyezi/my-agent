@@ -746,7 +746,7 @@ def _network_checked(report: SandboxReadiness, platform_name: str, spec: Attempt
     return SandboxReadiness(True, "SANDBOX_READY", "沙箱可用且能切断网络")
 
 
-# LLM: 由 spec 派生的附加 Seatbelt 规则按固定顺序拼接：私有读拒绝、上级目录写拒绝、隐藏路径、断网、Gateway 端口拒绝；
+# LLM: spec附加规则按固定顺序拼接；所有写allow之后复核Git指针/别名并拒写控制文件，随后祖先、隐藏、断网与端口拒绝；
 #   隐藏路径排在读放行之后，断网与端口拒绝排最后（Seatbelt 后写覆盖先写；两条 deny 先后不影响结果）。上级目录规则只拒写，
 #   不影响前面的读规则。G4 的端口拒绝只在 deny_gateway_ports 非空时出现，空时逐字节不变。
 # 函数用途: 按读边界、owner墙、绝对拒写、Git保护、祖先、隐藏和网络顺序汇总规则；Git拒绝不得被宽写allow覆盖。
@@ -834,11 +834,13 @@ def _regex_top_level_branches(pattern: str) -> list[str]:
     return [*branches, pattern[start:]]
 
 
-# LLM: 仅读取Git指针元数据，不执行git或写文件；异常/超限/空目标失败关闭，不能把未知gitdir当作无保护。
-# 函数用途: 安全读取.git或commondir里相对于其父目录的真实控制目录。
+# LLM: 仅从本次打开FD读取普通Git指针；非阻塞open防FIFO卡死，类型/超限/空目标失败关闭，不执行git或写文件。
+# 函数用途: 安全读取.git或commondir的真实目录，保留合法路径空格，不把特殊文件当文本。
 def _git_pointer_path(path: Path, *, gitfile: bool = False) -> Path | None:
     try:
-        with path.open(encoding="utf-8") as stream:
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), encoding="utf-8") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("invalid Git control pointer type")
             text = stream.read(65537)
     except FileNotFoundError:
         return None
@@ -861,7 +863,7 @@ def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
     # LLM: 仅不存在表示没有本轮可发现的控制入口；权限/IO错误不能当空目录。
     # 函数用途: 将扫描错误交回失败关闭链，但允许尚未创建的写根。
     def failed(error: OSError) -> None:
-        if not isinstance(error, FileNotFoundError):
+        if not isinstance(error, (FileNotFoundError, NotADirectoryError)):
             raise error
     visited: set[Path] = set()
     for root in roots:
@@ -1098,7 +1100,7 @@ def _sandbox_persona_paths(root: Path, *, all_owners: bool = False) -> tuple[Pat
 
 
 
-# LLM: SBPL不是JSON解码器；只复用引号/反斜杠转义，Unicode必须保持真实字符。路径与regex调用者共用此出口，不能改权限集合。
+# LLM: SBPL只复用JSON的引号/反斜杠转义并保留Unicode；所有路径/regex共用768B严格出口，超限抛结构化不可用而不截路径。
 # 函数用途: 编码真实Unicode路径/regex并执行严格768B出口硬门，超长不可拆字面量在启动前失败关闭。
 def _seatbelt_string_literal(value: str) -> str:
     encoded = json.dumps(value, ensure_ascii=False)
