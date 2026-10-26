@@ -9,23 +9,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import pickle
+import re
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from ..common.global_write_commit import execute_global_write
 from ..common.json_io import (
     locked_json_path,
-    read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
-from ..common.nofollow_fs import ensure_private_dir
+from ..common.nofollow_fs import (
+    ensure_private_dir,
+    open_directory_beneath,
+    open_readonly_file_beneath,
+    write_text_atomic_beneath,
+)
 from ..common.text_norm import fold_key
 from ..user_space.owner_quota import OwnerQuotaAdmission, OwnerQuotaChange, OwnerQuotaEnforcer
 from .candidate_commit_lock import candidate_commit_lock, candidate_redaction_lock
@@ -126,8 +133,8 @@ def _drop_candidate_load_cache(path: Path) -> None:
         _CANDIDATE_STAMP_DIGEST_CACHE.pop(str(path), None)
 
 
-# LLM: 写侧快照深复制；只读解析独占新模型可直接借用。同代ID索引与元组原子发表/驱逐，最多8路径128MiB。
-# 函数用途: 缓存严格验证过的一代候选及其单条查找索引，不缓存写后未重读的模型。
+# LLM: 写侧先归一化owned副本，只读解析独占模型可接管；同代ID索引与元组原子发表/驱逐，最多8路径128MiB。
+# 函数用途: 缓存严格验证且磁盘代次稳定的候选及其ID索引，含成功写后的独占快照。
 def _remember_candidate_load(path, probe, records, *, copy_records: bool = True):
     if probe is None or _candidate_load_stamp(path) != probe[0]:
         return
@@ -166,7 +173,7 @@ def _load_one_candidate_unlocked(service: CandidateService, candidate_id: str) -
         matched = cached[3].get(candidate_id) if indexed else None
     if not indexed:
         matched = next((row for row in rows if row.candidate_id == candidate_id), None)
-    return deepcopy(matched) if matched is not None else None
+    return _hydrate_candidate(service.path, deepcopy(matched)) if matched is not None else None
 
 
 # LLM: 调用方持原文件锁且只读模型；加载覆盖返回None，冷读严格解析后独占交缓存，不复制全账本。
@@ -230,7 +237,7 @@ class CandidateStateChangedError(RuntimeError):
 
 # LLM: Service 只接收结构化 observation/review；不解析聊天正文或相似文本。
 # LLM: C只给原目录/锁FD/raw末写接当前scope；所有状态机/merge/CAS/配额原算法保持，同步锁不缩短。
-# LLM: 写后继续失效缓存；readonly_rows只供内部只读提取，公开list/get与写侧模型仍深复制隔离。
+# LLM: 写前失效、成功后发表owned缓存；readonly_rows仅内部借用，公开list/get与写侧模型深复制隔离。
 # 类用途: 管理owner唯一候选源及同代只读索引，不创建第二事实源或保存活来源。
 class CandidateService:
     # LLM: 构造器只绑定 owner 规范路径和可选 quota；创建目录不读取或迁移旧候选源。
@@ -267,7 +274,7 @@ class CandidateService:
     ) -> list[MemoryCandidate]:
         with _quota_admission(self.quota_enforcer) as admission:
             with self._locked_candidates():
-                candidates = self._load_unlocked()
+                candidates = _hydrate_observation_targets(self.path, self._load_unlocked(), observations)
                 candidates, committed = merge_candidate_observations(
                     candidates,
                     observations,
@@ -283,7 +290,8 @@ class CandidateService:
         from .evidence_admission import assemble_evidence_batch
 
         with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
-            rows, results = assemble_evidence_batch(self._load_unlocked(), observations, failures)
+            rows = _hydrate_observation_targets(self.path, self._load_unlocked(), observations)
+            rows, results = assemble_evidence_batch(rows, observations, failures)
             _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return results
 
@@ -366,7 +374,7 @@ class CandidateService:
             _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return rows[index]
 
-    # LLM: 字符串保持旧审核入口；传完整候选则锁内CAS后转换，改目标ID仍清除旧版本，不新增授权来源。
+    # LLM: 字符串保持旧审核入口；快照锁内CAS，仅放行已批准用户长期候选补默认目标，其它同状态仍幂等。
     # 函数用途: 推进候选状态并可补充替换目标、冲突和晋升落点。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
     # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
@@ -392,18 +400,23 @@ class CandidateService:
             with self._locked_candidates():
                 candidates = self._load_unlocked()
                 index = _candidate_index(candidates, candidate_id)
-                current = candidates[index]
+                current = _hydrate_candidate(self.path, candidates[index])
                 if expected is not None and current != expected:
                     raise CandidateStateChangedError(current.status)
-                if target == current.status:
+                default_repair = (expected is not None and current.status == "approved"
+                    and current.promotion_target in {"", "none"} and promotion_target == "long_term"
+                    and current.origin == "user_explicit" and current.candidate_type in {"long_term_fact", "event", "project", "working_agreement"}
+                    and proposed_action is None and target_entry_id is None and conflicts_with is None)
+                if target == current.status and not default_repair:
                     return current
-                if not candidate_transition_allowed(current.status, target):
+                if target != current.status and not candidate_transition_allowed(current.status, target):
                     raise CandidateTransitionError(
                         f"candidate transition {current.status} -> {target} is not allowed"
                     )
                 now = utc_now_iso()
                 updated = replace(
                     current,
+                    cold_detail_ref="",
                     target_evidence_bindings=binding_history(current),
                     status=target,
                     reviewer=actor,
@@ -443,6 +456,16 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
                 return updated
 
+    # LLM: 仅合并候选批准与默认落点，不授予正式发布权限；snapshot CAS及原状态机/配额/锁仍由transition执行。
+    # 函数用途: 给自动晋升调用者提供一次写盘的准备入口，代替补落点后再次批准。
+    def prepare_automatic_promotion(self, candidate_id: str | MemoryCandidate, *, reviewer: str,
+                                    reason: str = "") -> MemoryCandidate:
+        from .candidate_models import effective_promotion_target
+
+        expected = candidate_id if isinstance(candidate_id, MemoryCandidate) else self.get(candidate_id)
+        target = effective_promotion_target(expected.promotion_target, expected.origin, expected.candidate_type)
+        return self.transition(expected, "approved", reviewer=reviewer, review_note=reason, promotion_target=target)
+
     # LLM: 正式落点提交成功后才能标 promoted；失败时保留 approved 供安全重试。
     # 函数用途: 记录唯一 PromotionService 已完成的正式引用。
     def mark_promoted(
@@ -457,7 +480,7 @@ class CandidateService:
             return self.mark_promoted_admitted(candidate_id, admission,
                 (reviewer, promotion_ref, review_note))
 
-    # LLM: 晋升提交复用准入/候选锁；remove终态与同hash正文脱敏必须在同一次原子替换中落盘。
+    # LLM: 晋升复用原锁；remove显式携带hash清理意图，终态幂等重试也必须清冷孤儿，不依赖热行变化。
     # 函数用途: 提交不会留下“已晋升但未脱敏”中间状态的候选终态。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
     # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
@@ -473,7 +496,10 @@ class CandidateService:
             if current.status == "promoted" and current.proposed_action != "remove":
                 return current
             rows = _promoted_rows(candidates, index, review)
-            _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
+            cold = {"cold_redaction": {"hashes": {current.content_hash}, "excluded": set(),
+                "reviewer": review[0], "now": utc_now_iso()}} if current.proposed_action == "remove" else {}
+            _write_candidates_unlocked(self.path, rows, admission=admission, **cold,
+                **({} if not self.coordinator_io else {"coordinator_io": True}))
             return rows[index]
 
     # LLM: Hard delete 清正文但保留 hash/id/status 审计，不得改写 ConversationStore 原话。
@@ -512,9 +538,11 @@ class CandidateService:
                 for item in candidates
             ]
             changed = sum(item is not None for item in replacements)
-            if changed:
+            if changed or _cold_archive_names(self.path):
                 rows = [new if new is not None else old for old, new in zip(candidates, replacements, strict=True)]
-                _write_candidates_unlocked(self.path, rows, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
+                _write_candidates_unlocked(self.path, rows, admission=admission,
+                    cold_redaction={"hashes": hashes, "excluded": excluded, "reviewer": options.get("reviewer"), "now": now},
+                    **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
     # LLM: 排除标记只按精确 candidate_id 写结构化原因码，不改状态、不写状态历史、不看正文；
@@ -539,7 +567,7 @@ class CandidateService:
                 _write_candidates_unlocked(self.path, candidates, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
             return changed
 
-    # LLM: 内部只读扫描仍保留list/load覆盖；仅选合法未晋升且严格早于cutoff，墓碑不重复规划。
+    # LLM: 此入口仅规划合法未晋升候选，禁止为归档暗中写盘；终态维护由执行delete_terminal负责。
     # 函数用途: 不复制全账本地规划过期候选ID，不执行删除。
     def retention_candidates(self, *, before: datetime) -> list[str]:
         cutoff = before.astimezone(timezone.utc)
@@ -551,7 +579,13 @@ class CandidateService:
                 result.append(item.candidate_id)
         return result
 
-    # LLM: 精确 ID 且仅合法未晋升状态；传入预期快照时在原删除锁内 CAS，变化或已成墓碑的记录只跳过。
+    # LLM: 原quota→候选锁下先耐久归档完整详情再换热行；至少一天冷却，失败无成功回执且缓存失效。
+    # 函数用途: 维护老终态的冷热分离，默认30天或超过1000条且已冷却的终态进入冷归档。
+    def compact_terminal_candidates(self, *, before: datetime | None = None, max_hot_terminal: int = 1000,
+                                    now: datetime | None = None) -> int:
+        return _compact_terminal_candidates(self, before, max_hot_terminal, now)
+
+    # LLM: 精确ID且仅合法未晋升状态；同锁CAS后执行删除及其余老终态归档，规划读口不写。
     #   无快照调用保留原状态检查；版本绑定仍脱敏保留，全跳过或账本未变时不重写。
     # 函数用途: 原子复核并清理未晋升候选，将锁前变化 ID 交还调用方准确报告。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
@@ -575,7 +609,7 @@ class CandidateService:
                     expected = expected_snapshots.get(cid)
                     if expected is None:
                         continue
-                    if (current is not None and current == expected
+                    if (current is not None and _candidate_snapshot_matches(self.path, current, expected)
                             and current.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
                             and not _is_binding_tombstone(current)):
                         continue
@@ -589,10 +623,7 @@ class CandidateService:
                     raise CandidateTransitionError(
                         f"candidate {item.candidate_id} is not retention-eligible"
                     )
-            retained, deleted = _retention_records(candidates, ids)
-            if deleted and retained != candidates:
-                _write_candidates_unlocked(self.path, retained, admission=admission, **({} if not self.coordinator_io else {"coordinator_io": True}))
-            return deleted
+            return _commit_retention_rows(self, candidates, ids, admission)
 
     # LLM: 原锁内借用已验证快照只读计数，热缓存零深拷贝；保留list及_load_unlocked覆盖入口，冷读仍完整验证账本。
     # 函数用途: 为doctor/CLI统计数量、状态和类型，不复制候选或暴露正文、路径及缓存引用。
@@ -611,7 +642,7 @@ class CandidateService:
         options = {} if not self.coordinator_io else {"birth_commit": _coordinator_candidate_write}
         return locked_json_path(self.path, **options)
 
-    # LLM: 写侧取得可修改的独立模型；热快照深复制，冷解析以copy_records=True隔离缓存，写后失效协议不变。
+    # LLM: 写侧始终取得可修改的独立模型；热快照深复制，冷解析以copy_records=True隔离缓存，不向写方借缓存对象。
     # 函数用途: 在原文件锁内加载可安全修改的候选列表。
     def _load_unlocked(self) -> list[MemoryCandidate]:
         probe = _candidate_load_probe(self.path)
@@ -622,30 +653,10 @@ class CandidateService:
         _remember_candidate_load(self.path, probe, records, copy_records=True)
         return records
 
-    # LLM: 调用方持原文件锁；所有坏行、schema和重复ID仍阻断，只有完整验证成功才可交缓存。
-    # 函数用途: 单次解析候选账本并构造模型，供只读和写入加载路径分别选择复制策略。
+    # LLM: 持原锁逐行严格解析；同FD流式摘要不保留整表原文/字典，归一化改变时不复用旧原行。
+    # 函数用途: 流式构造候选并保留未改行，坏行、schema或重复ID仍阻断写入。
     def _parse_candidate_ledger_unlocked(self) -> tuple[tuple[_CandidateStatStamp, str] | None, list[MemoryCandidate]]:
-        probe = _candidate_load_probe(self.path)
-        report = read_jsonl_objects_report(
-            self.path,
-            context="memory_candidates.load",
-        )
-        if report.load_errors:
-            raise CandidateStoreCorruptError(
-                f"candidate ledger contains {len(report.load_errors)} unreadable row(s)"
-            )
-        records: list[MemoryCandidate] = []
-        for index, payload in enumerate(report.records, start=1):
-            try:
-                records.append(MemoryCandidate.from_record(payload))
-            except ValueError as exc:
-                raise CandidateStoreCorruptError(
-                    f"candidate ledger row {index} failed schema validation"
-                ) from exc
-        ids = [item.candidate_id for item in records]
-        if len(ids) != len(set(ids)):
-            raise CandidateStoreCorruptError("candidate ledger contains duplicate candidate_id")
-        return probe, records
+        return _parse_candidate_ledger(self.path)
 
 
 # LLM: 同一宿主观察身份被拿去对应另一个类型化主题时抛出；仍是 ValueError（原调用方的全有或全无语义不变），
@@ -667,40 +678,53 @@ def merge_candidate_observations(
     result = list(candidates)
     bindings = TargetEvidenceVersionBindings(result)
     by_id = {item.candidate_id: index for index, item in enumerate(result)}
-    by_observation: dict[str, set[int]] = {}
-    for index, item in enumerate(result):
+    by_observation = _observation_index(result)
+    committed: list[MemoryCandidate] = []
+    for item in prepared:
+        committed.append(_merge_indexed_observation(result, by_id, by_observation, bindings, item))
+    return result, committed
+
+
+# LLM: 预演和正式合并共用一次索引构建，拒绝草稿不占用合法观察身份。
+# 函数用途: 将独立观察键映射到所有已有候选位置，不改原模型。
+def _observation_index(rows: list[MemoryCandidate]) -> dict[str, set[int]]:
+    result: dict[str, set[int]] = {}
+    for index, item in enumerate(rows):
         if not _rejected_draft(item):
             for key in item.observation_keys:
-                by_observation.setdefault(key, set()).add(index)
-    committed: list[MemoryCandidate] = []
-    for normalized, candidate_id, observation_key in prepared:
-        if bindings.conflicts(normalized):
-            raise CandidateIdentityConflictError("candidate evidence cannot refresh target observation version")
-        positions = sorted(by_observation.get(observation_key, ()))
-        matches = [result[index] for index in positions]
-        if any(not _same_candidate_identity(item, normalized) for item in matches):
-            raise CandidateIdentityConflictError(
-                "candidate observation identity was reused for a different typed subject"
-            )
-        index = by_id.get(candidate_id, positions[0] if positions else None)
-        if index is None:
-            candidate = _new_candidate(normalized, candidate_id, observation_key)
-            index = len(result)
-            result.append(candidate)
-        else:
-            existing = result[index]
-            if not _rejected_draft(existing) and not _same_candidate_identity(existing, normalized):
-                raise CandidateIdentityConflictError(
-                    "candidate observation identity was reused for a different typed subject"
-                )
-            candidate = _merge_candidate(existing, normalized, observation_key)
-            result[index] = candidate
-        by_id[candidate.candidate_id] = index
-        if not _rejected_draft(candidate) and observation_key in candidate.observation_keys:
-            by_observation.setdefault(observation_key, set()).add(index)
-        bindings.add(normalized)
-        committed.append(candidate)
-    return result, committed
+                result.setdefault(key, set()).add(index)
+    return result
+
+
+# LLM: 全部冲突检查及新模型构造先于共享索引变更；拒绝项不留下观察键、候选行或目标绑定。
+# 函数用途: 将单条已规范观察成功合入现有索引，供批提交与可跳冲突预演复用。
+def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared):
+    normalized, candidate_id, observation_key = prepared
+    if bindings.conflicts(normalized):
+        raise CandidateIdentityConflictError("candidate evidence cannot refresh target observation version")
+    positions = sorted(by_observation.get(observation_key, ()))
+    if any(not _same_candidate_identity(result[index], normalized) for index in positions):
+        raise CandidateIdentityConflictError("candidate observation identity was reused for a different typed subject")
+    index = by_id.get(candidate_id, positions[0] if positions else None)
+    if index is None:
+        candidate = _new_candidate(normalized, candidate_id, observation_key)
+    else:
+        existing = result[index]
+        if not _rejected_draft(existing) and not _same_candidate_identity(existing, normalized):
+            raise CandidateIdentityConflictError("candidate observation identity was reused for a different typed subject")
+        candidate = _merge_candidate(existing, normalized, observation_key)
+    # 验证绑定历史可能抛错，必须在任何共享状态变更之前完成。
+    binding_history(normalized)
+    if index is None:
+        index = len(result)
+        result.append(candidate)
+    else:
+        result[index] = candidate
+    by_id[candidate.candidate_id] = index
+    if not _rejected_draft(candidate) and observation_key in candidate.observation_keys:
+        by_observation.setdefault(observation_key, set()).add(index)
+    bindings.add(normalized)
+    return candidate
 
 
 # LLM: 同一观察可改述但不能换主题、范围、动作或目标版本；独立证据才能基于新目标版本创建观察。
@@ -738,7 +762,7 @@ def _identity_scope(value: object) -> dict[str, object]:
     return {**scope.to_dict(), "scope_key": key}
 
 
-# LLM: 纯函数，不写账本：用与提交完全相同的 merge_candidate_observations 逐条试合并，只把抛
+# LLM: 纯函数、不写账本；与正式提交共用一次建表后的增量合并，只把抛
 #   CandidateIdentityConflictError 的那几条剔掉；其它校验错误照常上抛（原全有或全无语义不变）。
 #   供 Curator 在整批提交前调用，一条冲突不再拖死整批、也不再让同一批反复重放。
 # 函数用途: 把一批观察分成可提交的和身份冲突的，返回（可提交的观察, 剔除条数）。
@@ -747,10 +771,14 @@ def split_identity_conflicts(
     observations: list[CandidateObservation] | tuple[CandidateObservation, ...],
 ) -> tuple[tuple[CandidateObservation, ...], int]:
     merged = list(candidates)
+    bindings = TargetEvidenceVersionBindings(merged)
+    by_id = {item.candidate_id: index for index, item in enumerate(merged)}
+    by_observation = _observation_index(merged)
     kept: list[CandidateObservation] = []
     for observation in observations:
         try:
-            merged, _committed = merge_candidate_observations(merged, [observation])
+            prepared = _prepare_observations([observation])[0]
+            _merge_indexed_observation(merged, by_id, by_observation, bindings, prepared)
         except CandidateIdentityConflictError:
             continue
         kept.append(observation)
@@ -814,7 +842,7 @@ def _promoted_rows(candidates, index, review):
     return rows
 
 
-# LLM: 硬删除先冻结版本约束，再清除正文、引用quote、来源自由文本和历史审核note；不依赖retention后补。
+# LLM: 硬删除先冻结约束，正文/引用已空也检查自由备注；固定宿主脱敏说明保留幂等，不依赖retention后补。
 # 函数用途: 将命中hash的候选脱敏，活跃候选按原状态机转为superseded。
 def _redacted_candidate(
     item: MemoryCandidate,
@@ -826,16 +854,18 @@ def _redacted_candidate(
 ) -> MemoryCandidate | None:
     if item.candidate_id in excluded or item.content_hash not in hashes:
         return None
+    note = "正文及引用随正式记忆硬删除清除，仅保留身份与版本约束。"
+    notes = [item.review_note, *(event.get("note", "") for event in item.status_history)]
+    safe_notes = {"", note, "retained_version_bindings", "CURATOR_REJECTED_VERSION_BINDING"}
     if not any((item.content, item.evidence_refs, item.source_message_refs, item.source_tool_refs,
                 item.source_artifact_refs, item.source_task_ids, item.source_run_ids,
-                item.learning_source, item.learning_source_coverage)):
+                item.learning_source, item.learning_source_coverage)) and all(value in safe_notes for value in notes):
         return None
     target = item.status if item.status in TERMINAL_CANDIDATE_STATUSES else "superseded"
     history = [{**event, "note": ""} for event in item.status_history]
-    note = "正文及引用随正式记忆硬删除清除，仅保留身份与版本约束。"
     if target != item.status and candidate_transition_allowed(item.status, target):
         history.append(_status_event(target, actor=reviewer, note=note, at=now))
-    return replace(item, content="", status=target, reviewer=reviewer, review_note=note,
+    return replace(item, content="", status=target, reviewer=reviewer, review_note=note, cold_detail_ref="",
         updated_at=now, content_redacted_at=now, status_history=history,
         target_evidence_bindings=binding_history(item), evidence_refs=[], source_message_refs=[],
         source_tool_refs=[], source_artifact_refs=[], source_task_ids=[], source_run_ids=[],
@@ -881,24 +911,91 @@ def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
 # LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。候选装记忆正文，走私有原子写（0600，目录 0700），
 #   已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # LLM: serialize/admission.check仍持原领域锁在Root外；C只把准备好的raw replace_once交原scope，默认字节/调用形状不变。
-# 函数用途: 原容量核验成功后使解析缓存失效并替换同一候选文件，C末核失败保原当前态。
+# 函数用途: 在owned副本归一化后原子写入，成功才发表新代缓存，失败/未知结果不保留缓存。
 def _write_candidates_unlocked(
     path: Path,
     candidates: list[MemoryCandidate],
     *,
     admission: Any,
     coordinator_io: bool = False,
+    cold_changes: dict[str, str] | None = None,
+    cold_redaction: dict | None = None,
 ) -> None:
-    text = "".join(
-        json.dumps(item.to_record(), ensure_ascii=False, sort_keys=True) + "\n"
-        for item in candidates
-    )
-    admission.check([OwnerQuotaChange(path, len(text.encode("utf-8")))])
+    owned = deepcopy(candidates)
+    redacted = [row for row in owned if row.content_redacted_at and not row._raw_json_line]
+    options = cold_redaction or {"hashes": {row.content_hash for row in redacted},
+        "excluded": {row.candidate_id for row in owned if row.content}, "reviewer": "memory-hard-delete", "now": utc_now_iso()}
+    archives = dict(cold_changes or {})
+    archives.update(_cold_redaction_plan(path, options, archives))
+    text = _serialize_candidates(owned)
+    admission.check([OwnerQuotaChange(path, len(text.encode("utf-8"))), *[
+        OwnerQuotaChange(path.parent / "candidates_archive" / name, len(content.encode("utf-8")))
+        for name, content in archives.items()]])
     _drop_candidate_load_cache(path)
-    if coordinator_io:
-        _coordinator_candidate_write(lambda: write_private_text_file_atomic_unlocked(path, text, replace_once=True))
-    else:
-        write_private_text_file_atomic_unlocked(path, text)
+    try:
+        _write_cold_changes(path, archives, coordinator_io=coordinator_io)
+        if coordinator_io:
+            _coordinator_candidate_write(lambda: write_private_text_file_atomic_unlocked(path, text, replace_once=True))
+        else:
+            write_private_text_file_atomic_unlocked(path, text)
+        _publish_written_candidates(path, text, owned)
+    except BaseException:
+        _drop_candidate_load_cache(path)
+        raise
+
+
+# LLM: 仅散列正式字段的完整逻辑状态；pickle只作进程内指纹编码，从不反序列化或落盘。
+# 函数用途: 捕捉嵌套引用/绑定改写，防止原行缓存隐藏没有经过字段赋值的变更。
+def _candidate_state_digest(item: MemoryCandidate) -> str:
+    values = tuple(getattr(item, name) for name, descriptor in item.__dataclass_fields__.items() if descriptor.init)
+    return hashlib.blake2b(pickle.dumps(values, protocol=5), digest_size=16).hexdigest()
+
+
+# LLM: 每条仅保留当前原行和小摘要；不缓存归一化前的行，坏schema必须在进入缓存前报错。
+# 函数用途: 从单行JSON构造合法模型，并在完全无需改写时保留原行。
+def _parse_candidate_line(raw: str, line_no: int = 0) -> MemoryCandidate:
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("candidate row must be an object")
+    try:
+        item = MemoryCandidate.from_record(payload)
+        normalized = item.to_record()
+    except (ValueError, TypeError) as error:
+        raise CandidateStoreCorruptError(f"candidate ledger row {line_no} failed schema validation") from error
+    if normalized == payload:
+        item._raw_json_line = raw.strip()
+        item._raw_state_digest = _candidate_state_digest(item)
+    return item
+
+
+# LLM: 未改行跳过to_record/asdict/JSON编码；完整状态摘要防嵌套变更，replace的新行重走严格归一化。
+# 函数用途: 复用当前合法原行生成候选账本文本，不把旧隐私字段或审核状态写回。
+def _serialize_candidates(candidates: Iterable[MemoryCandidate]) -> str:
+    lines = []
+    for item in candidates:
+        if not item._raw_json_line or item._raw_state_digest != _candidate_state_digest(item):
+            line = json.dumps(item.to_record(), ensure_ascii=False, sort_keys=True)
+            item._raw_json_line = line
+            item._raw_state_digest = _candidate_state_digest(item)
+        lines.append(item._raw_json_line)
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+# LLM: 调用方已持候选锁且原子写成功，owned模型不能再交外部；stat不稳或超预算时只失效不发表。
+# 函数用途: 从刚落盘文本建立解析及大文件摘要缓存，让后续读取不自砸缓存重读。
+def _publish_written_candidates(path: Path, text: str, owned: list[MemoryCandidate]) -> None:
+    stamp = _candidate_load_stamp(path)
+    if stamp is None or stamp[1] > _CANDIDATE_LOAD_CACHE_MAX_BYTES or stamp[1] != len(text.encode("utf-8")):
+        _drop_candidate_load_cache(path)
+        return
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+    if stamp[1] >= _CANDIDATE_FAST_STAT_PROBE_MIN_BYTES:
+        with _CANDIDATE_LOAD_CACHE_LOCK:
+            _CANDIDATE_STAMP_DIGEST_CACHE[str(path)] = (stamp, digest)
+            _CANDIDATE_STAMP_DIGEST_CACHE.move_to_end(str(path))
+            while len(_CANDIDATE_STAMP_DIGEST_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS:
+                _CANDIDATE_STAMP_DIGEST_CACHE.popitem(last=False)
+    _remember_candidate_load(path, (stamp, digest), owned, copy_records=False)
 
 
 # LLM: 排除标记只按结构化 candidate_id 命中；已带同原因码的条目跳过，写回由调用方在锁内一次性完成。
@@ -1253,7 +1350,7 @@ def _retention_records(candidates: list[MemoryCandidate], ids: set[str]) -> tupl
             retained.append(item)
             continue
         history = binding_history(item)
-        if not history and not item.content_redacted_at:
+        if not history and not item.content_redacted_at and not item.cold_detail_ref:
             cleaned += 1
             continue
         if _is_binding_tombstone(item):
@@ -1261,7 +1358,7 @@ def _retention_records(candidates: list[MemoryCandidate], ids: set[str]) -> tupl
             continue
         now = utc_now_iso()
         status = item.status if item.status in TERMINAL_CANDIDATE_STATUSES else "superseded"
-        retained.append(replace(item, status=status, content="", content_redacted_at=now, updated_at=now,
+        retained.append(replace(item, status=status, content="", content_redacted_at=now, updated_at=now, cold_detail_ref="",
             evidence_refs=[], source_message_refs=[], source_tool_refs=[], source_artifact_refs=[],
             source_task_ids=[], source_run_ids=[], learning_source={}, learning_source_coverage={},
             target_evidence_bindings=history, reviewer="retention", review_note="retained_version_bindings",
@@ -1284,3 +1381,263 @@ def _is_binding_tombstone(item: MemoryCandidate) -> bool:
 # 函数用途: 在C的当前真实末门执行一次准确目录/FD出生或已准备raw写。
 def _coordinator_candidate_write(operation):
     return execute_global_write(operation, require_scope=True)
+
+
+_COLD_MONTH = re.compile(r"[0-9]{4}-(?:0[1-9]|1[0-2])\.jsonl")
+_COLD_REF = re.compile(r"candidates_archive/([0-9]{4}-(?:0[1-9]|1[0-2])\.jsonl)#(memory-candidate-[A-Za-z0-9_-]+):([0-9a-f]{64})")
+_COLD_DETAIL_FIELDS = ("evidence_refs", "source_message_refs", "source_tool_refs", "source_artifact_refs",
+                       "source_task_ids", "source_run_ids", "status_history", "learning_source", "learning_source_coverage")
+
+
+# LLM: 固定候选根下逐段no-follow枚举，链接/坏目录不能当成不存在；锁文件等非归档文件不参与清理。
+# 函数用途: 安全列出当前owner所有冷归档月份，包含热写失败留下的孤儿月份。
+def _cold_archive_names(path: Path) -> list[str]:
+    try:
+        descriptor = open_directory_beneath(path.parent, ("candidates_archive",), require_dir_fd=True)
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise CandidateStoreCorruptError("candidate cold archive directory is unsafe") from error
+    try:
+        with os.scandir(descriptor) as entries:
+            return sorted(entry.name for entry in entries if _COLD_MONTH.fullmatch(entry.name))
+    finally:
+        os.close(descriptor)
+
+
+# LLM: hash包含受信owner规范根及完整正式记录；不把传入的ref当作owner授权或任意文件路径。
+# 函数用途: 创建同owner归档详情的内容校验信封。
+def _cold_envelope(path: Path, item: MemoryCandidate) -> dict:
+    record = replace(item, cold_detail_ref="").to_record()
+    material = {"owner_root": str(path.parent.resolve()), "candidate_id": item.candidate_id, "record": record}
+    digest = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    return {**material, "sha256": digest}
+
+
+# LLM: 先核owner/hash再解析模型；信封、记录及引用ID须一致，归档不得递归引用别的详情。
+# 函数用途: 验证单条归档详情的完整性、身份和来源覆盖。
+def _validate_cold_envelope(path: Path, envelope: object) -> None:
+    if not isinstance(envelope, dict) or set(envelope) != {"owner_root", "candidate_id", "record", "sha256"}:
+        raise ValueError("invalid candidate cold envelope")
+    material = {key: envelope[key] for key in ("owner_root", "candidate_id", "record")}
+    digest = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    if envelope["owner_root"] != str(path.parent.resolve()) or envelope["sha256"] != digest:
+        raise ValueError("candidate cold owner/hash mismatch")
+    item = MemoryCandidate.from_record(envelope["record"])
+    if item.candidate_id != envelope["candidate_id"] or item.cold_detail_ref:
+        raise ValueError("candidate cold identity mismatch")
+
+
+# LLM: 同根no-follow FD逐行校验，包括单链接普通文件约束；坏行/重复版本不能跳过或当空详情。
+# 函数用途: 读取完整月份用于维护或精确详情检索，缺失仅在创建新月份时显式允许。
+def _read_cold_records(path: Path, name: str, *, missing_ok: bool = False) -> list[dict]:
+    if not _COLD_MONTH.fullmatch(name):
+        raise CandidateStoreCorruptError("candidate cold archive filename is invalid")
+    try:
+        descriptor = open_readonly_file_beneath(path.parent, ("candidates_archive", name))
+        records, seen = [], set()
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            for raw in stream:
+                if not raw.strip():
+                    continue
+                envelope = json.loads(raw)
+                _validate_cold_envelope(path, envelope)
+                key = envelope["candidate_id"], envelope["sha256"]
+                if key in seen:
+                    raise ValueError("duplicate candidate cold version")
+                seen.add(key)
+                records.append(envelope)
+        return records
+    except FileNotFoundError as error:
+        if missing_ok:
+            return []
+        raise CandidateStoreCorruptError("candidate cold detail is missing") from error
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+        raise CandidateStoreCorruptError("candidate cold detail is corrupt") from error
+
+
+# LLM: 精确ref版本且核心身份/版本绑定一致才补白名单详情；热状态/计数/排除标记不被旧冷快照覆盖。
+# 函数用途: 为get/详情和指定写入目标透明回填独立的完整候选，缺失或篡改明确报损坏。
+def _hydrate_candidate(path: Path, item: MemoryCandidate) -> MemoryCandidate:
+    if not item.cold_detail_ref:
+        return item
+    match = _COLD_REF.fullmatch(item.cold_detail_ref)
+    if match is None or match[2] != item.candidate_id:
+        raise CandidateStoreCorruptError("candidate cold reference is invalid")
+    records = _read_cold_records(path, match[1])
+    envelope = next((row for row in records if row["candidate_id"] == match[2] and row["sha256"] == match[3]), None)
+    if envelope is None:
+        raise CandidateStoreCorruptError("candidate cold version is missing")
+    detail = MemoryCandidate.from_record(envelope["record"])
+    metadata = {*_COLD_DETAIL_FIELDS, "cold_detail_ref", "target_evidence_bindings", "promotion_exclusion", "updated_at"}
+    if any(getattr(item, name) != getattr(detail, name) for name, field in item.__dataclass_fields__.items()
+           if field.init and name not in metadata) or item.target_evidence_bindings != binding_history(detail):
+        raise CandidateStoreCorruptError("candidate hot/cold identity mismatch")
+    result = replace(item, **{name: deepcopy(getattr(detail, name)) for name in _COLD_DETAIL_FIELDS})
+    result.to_record()
+    return result
+
+
+# LLM: 只对可能命中的冷行回填并解除ref，不让每次写操作全表读取冷详情；pure merge仍不承担I/O。
+# 函数用途: 在观察合并前恢复其涉及的候选详情，避免重放丢历史或旧ref遮住新证据。
+def _hydrate_observation_targets(path: Path, rows: list[MemoryCandidate], observations) -> list[MemoryCandidate]:
+    if not observations or not any(row.cold_detail_ref for row in rows):
+        return rows
+    prepared = _prepare_observations(observations)
+    ids, keys = {item[1] for item in prepared}, {item[2] for item in prepared}
+    return [replace(_hydrate_candidate(path, row), cold_detail_ref="")
+            if row.cold_detail_ref and (row.candidate_id in ids or keys.intersection(row.observation_keys)) else row
+            for row in rows]
+
+
+# LLM: 按最后变更时间冷却，不能按创建时间把刚批准/晋升的老候选立即瘦身；负数量阈值拒绝。
+# 函数用途: 选择超过年龄或容量阈值且至少冷却一天的终态热行。
+def _terminal_compaction_indices(rows, now, cutoff, maximum):
+    if type(maximum) is not int or maximum < 0:
+        raise ValueError("max_hot_terminal must be a nonnegative integer")
+    eligible = [index for index, row in enumerate(rows) if row.status in {"promoted", "superseded", "rejected"}
+                and not row.cold_detail_ref and not row.content_redacted_at]
+    eligible.sort(key=lambda index: (rows[index].updated_at, rows[index].candidate_id))
+    overflow = max(0, len(eligible) - maximum)
+    return [index for position, index in enumerate(eligible)
+            if datetime.fromisoformat(rows[index].updated_at) < min(cutoff, now - timedelta(days=1))
+            or position < overflow and datetime.fromisoformat(rows[index].updated_at) < now - timedelta(days=1)]
+
+
+# LLM: 每月保持全版本详情且按ID/hash幂等，归档先于热替换；冻结绑定后清引用，保持去重与schema不变量。
+# 函数用途: 生成私有月归档文本和合法热stub，尚不执行任何写入。
+def _prepare_cold_compaction(path, rows, indices):
+    result, months = list(rows), {}
+    for index in indices:
+        item = rows[index]
+        name = item.updated_at[:7] + ".jsonl"
+        if name not in months:
+            months[name] = _read_cold_records(path, name, missing_ok=True)
+        envelope = _cold_envelope(path, item)
+        if envelope not in months[name]:
+            months[name].append(envelope)
+        reference = f"candidates_archive/{name}#{item.candidate_id}:{envelope['sha256']}"
+        cleared = {field: [] for field in _COLD_DETAIL_FIELDS if field not in {"status_history", "learning_source", "learning_source_coverage"}}
+        result[index] = replace(item, **cleared, cold_detail_ref=reference, target_evidence_bindings=binding_history(item),
+            status_history=[item.status_history[-1]], learning_source_coverage={})
+        result[index].to_record()
+    return result, {name: _cold_records_text(records) for name, records in months.items()}
+
+
+# LLM: 所有归档版本均用固定信封编码；不得把私有raw缓存或任意对象写进冷文件。
+# 函数用途: 生成一个月的完整候选详情JSONL文本。
+def _cold_records_text(records: list[dict]) -> str:
+    return "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in records)
+
+
+# LLM: 显式删除意图独立于热行存在；同月新增归档先合入再脱敏，不能用旧磁盘计划覆盖新ref。
+# 函数用途: 为正式删除或retention生成不再残留原正文与quote的冷归档替换计划。
+def _cold_redaction_plan(path: Path, options: dict, staged: dict[str, str] | None = None) -> dict[str, str]:
+    if not options.get("hashes") and not options.get("candidate_ids"):
+        return {}
+    changes = {}
+    staged = staged or {}
+    for name in sorted(set(_cold_archive_names(path)) | staged.keys()):
+        records = ([json.loads(raw) for raw in staged[name].splitlines() if raw.strip()]
+                   if name in staged else _read_cold_records(path, name))
+        replacements, changed = {}, False
+        for envelope in records:
+            _validate_cold_envelope(path, envelope)
+            item = MemoryCandidate.from_record(envelope["record"])
+            hashes = ({item.content_hash} if item.candidate_id in options.get("candidate_ids", ()) else options.get("hashes", set()))
+            redacted = _redacted_candidate(item, hashes=hashes, excluded=options.get("excluded", set()),
+                reviewer=str(options.get("reviewer") or "memory-hard-delete"), now=options["now"])
+            updated = _cold_envelope(path, redacted) if redacted is not None else envelope
+            changed |= redacted is not None
+            replacements[(updated["candidate_id"], updated["sha256"])] = updated
+        if changed:
+            changes[name] = _cold_records_text(list(replacements.values()))
+    return changes
+
+
+# LLM: 私有no-follow原子写包含文件/目录fsync；每月先完成耐久替换与完整hash读回，才能继续热行提交。
+# 函数用途: 按固定月份顺序写入已过quota的冷文件，并复用coordinator原末门。
+def _write_cold_changes(path: Path, changes: dict[str, str], *, coordinator_io: bool) -> None:
+    for name, text in sorted(changes.items()):
+        if not _COLD_MONTH.fullmatch(name):
+            raise CandidateStoreCorruptError("candidate cold archive filename is invalid")
+        # LLM: 同步消费本轮已准备的固定路径/文本，不保存活来源，也不把规划放入权限末门。
+        # 函数用途: 在原scope中执行当前月份的私有原子替换。
+        def operation():
+            write_text_atomic_beneath(path.parent, ("candidates_archive", name), text)
+        if coordinator_io:
+            _coordinator_candidate_write(operation)
+        else:
+            operation()
+        descriptor = open_readonly_file_beneath(path.parent, ("candidates_archive", name))
+        with os.fdopen(descriptor, "rb") as stream:
+            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        if actual != hashlib.sha256(text.encode()).hexdigest():
+            raise CandidateStoreCorruptError("candidate cold archive write verification failed")
+
+
+# LLM: 持原候选锁逐行校验并累积同FD摘要；只持当前字典，重复ID或任一坏行均拒绝完整加载。
+# 函数用途: 单遍构造模型和稳定磁盘探针，避免整表原文及中间字典列表同时驻留。
+def _parse_candidate_ledger(path: Path):
+    stamp = _candidate_load_stamp(path)
+    records = []
+    digest, ids = hashlib.blake2b(digest_size=16), set()
+    try:
+        descriptor = open_readonly_file_beneath(path.parent, (path.name,))
+        with os.fdopen(descriptor, "r", encoding="utf-8", newline="") as stream:
+            for line_no, raw in enumerate(stream, start=1):
+                digest.update(raw.encode("utf-8"))
+                if not raw.strip():
+                    continue
+                candidate = _parse_candidate_line(raw, line_no)
+                if candidate.candidate_id in ids:
+                    raise CandidateStoreCorruptError("candidate ledger contains duplicate candidate_id")
+                ids.add(candidate.candidate_id)
+                records.append(candidate)
+    except FileNotFoundError:
+        if stamp is not None:
+            raise CandidateStoreCorruptError("candidate ledger disappeared during read") from None
+    except (OSError, UnicodeError, ValueError, TypeError) as error:
+        raise CandidateStoreCorruptError("candidate ledger contains unreadable row(s)") from error
+    probe = ((stamp, digest.hexdigest()) if stamp is not None and stamp[1] <= _CANDIDATE_LOAD_CACHE_MAX_BYTES
+             and _candidate_load_stamp(path) == stamp else None)
+    return probe, records
+
+
+# LLM: quota先于原候选锁；所有冷计划在热写前统一准入，失败保留可重试的完整热行且失效缓存。
+# 函数用途: 编排终态归档准备与archive-first提交，不扩大服务类职责。
+def _compact_terminal_candidates(service, before, maximum, now):
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    cutoff = (before or current - timedelta(days=30)).astimezone(timezone.utc)
+    with _quota_admission(service.quota_enforcer) as admission, service._locked_candidates():
+        rows = service._load_unlocked()
+        selected = _terminal_compaction_indices(rows, current, cutoff, maximum)
+        if not selected:
+            return 0
+        rows, archives = _prepare_cold_compaction(service.path, rows, selected)
+        _write_candidates_unlocked(service.path, rows, admission=admission, cold_changes=archives,
+            **({} if not service.coordinator_io else {"coordinator_io": True}))
+        return len(selected)
+
+
+# LLM: 删除前保存精确ID意图，覆盖已经回热或只剩孤儿的旧详情；与同月新归档合并，quota/锁保持原窗口。
+# 函数用途: 一次提交候选保留清理及冷热维护，未变化时不重写。
+def _commit_retention_rows(service, candidates, ids, admission):
+    retained, deleted = _retention_records(candidates, ids)
+    now = datetime.now(timezone.utc)
+    selected = _terminal_compaction_indices(retained, now, now - timedelta(days=30), 1000)
+    retained, archives = _prepare_cold_compaction(service.path, retained, selected)
+    options = {"candidate_ids": ids, "hashes": set(), "excluded": set(), "reviewer": "retention", "now": now.isoformat()}
+    archives.update(_cold_redaction_plan(service.path, options, archives))
+    if retained != candidates or archives:
+        _write_candidates_unlocked(service.path, retained, admission=admission, cold_changes=archives, cold_redaction=options,
+            **({} if not service.coordinator_io else {"coordinator_io": True}))
+    return deleted
+
+
+# LLM: 热stub与完整get快照都做精确逻辑比较；不剥去预期详情猜相等，冷校验失败原样拒绝。
+# 函数用途: 保留冷热分离后的retention快照CAS，拒绝被改写的预期证据或历史。
+def _candidate_snapshot_matches(path: Path, current: MemoryCandidate, expected: MemoryCandidate) -> bool:
+    if current == expected:
+        return True
+    return bool(current.cold_detail_ref and _hydrate_candidate(path, current) == expected)
