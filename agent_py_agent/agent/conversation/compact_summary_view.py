@@ -1,17 +1,80 @@
 # LLM: 本模块只读取原 committed checkpoint chain，并携带本次采用的临时视图；提交指针和账本仍是唯一权威。
 # 摘要替代关系沿 summary_base_checkpoint_id，不得把提交链的局部覆盖无条件合并。
-# 模块用途: 逐行验证全部已提交快照，只留适用摘要及覆盖元数据，向冻结作用域提供只读应用视图。
+# 模块用途: 缓存稳定文件的完整验链元数据与独立范围视图，保留全部坏行验证及摘要base链语义。
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import threading
+from collections import OrderedDict
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..common.cache_freshness import cache_entry_trustworthy, cache_stat_signature
 from .compact_checkpoint import iter_committed_compact_checkpoints
 from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope, scope_can_inherit
+
+_VERIFIED_CHAINS = OrderedDict()
+_SUMMARY_VIEWS = OrderedDict()
+_SUMMARY_CACHE_LOCK = threading.Lock()
+
+
+# LLM: 缓存包含owner/原路径/五元组/head/generation；文件追加即换key，即使head没变也不能跳过坏orphan。
+# 函数用途: 从canonical文件事实建立两层缓存共同版本键，近期文件一律不复用。
+def _checkpoint_cache_key(agent, thread):
+    home = getattr(agent, "home_paths", None)
+    root = str(getattr(home, "owner_compact_dir", "") or "").strip()
+    if not root:
+        return None
+    path = Path(root) / "conversations" / f"{thread.thread_id}.jsonl"
+    try:
+        stamp = cache_stat_signature(path.stat())
+    except FileNotFoundError:
+        return None
+    if not cache_entry_trustworthy(stamp[3]):
+        return None
+    return ((getattr(thread, "owner_id", ""), getattr(thread, "owner_home", "")), str(path), stamp, thread.thread_id,
+            thread.compact_checkpoint_id, int(thread.compact_generation or 0))
+
+
+# LLM: 只在锁内操作有界LRU；返回值只供本模块只读消费，公开视图另做deepcopy。
+# 函数用途: 读取一份已验证链或已选范围视图，不进行磁盘I/O。
+def _cached_summary(cache, key):
+    if key is None:
+        return None
+    with _SUMMARY_CACHE_LOCK:
+        item = cache.get(key)
+        if item is not None:
+            cache.move_to_end(key)
+            return item[1]
+    return None
+
+
+# LLM: 每层最多64项/16MiB，单项最多4MiB；大小计算在锁外，缓存不能变成无界正文仓库。
+# 函数用途: 保存只读缓存投影并淘汰旧代，不改变原提交账本。
+def _remember_summary(cache, key, value):
+    if key is None:
+        return
+    size = len(repr(value).encode("utf-8", "surrogatepass"))
+    if size > 4 * 1024 * 1024:
+        return
+    with _SUMMARY_CACHE_LOCK:
+        cache[key] = (size, value)
+        cache.move_to_end(key)
+        while len(cache) > 64 or sum(row[0] for row in cache.values()) > 16 * 1024 * 1024:
+            cache.popitem(last=False)
+
+
+# LLM: 后端名称/模型外还绑定服务端协议端点，防同名后端换端点复用不可读密文；不把供应商记录当授权。
+# 函数用途: 生成范围视图的后端兼容性缓存键。
+def _backend_view_key(backend):
+    provider_scope = getattr(backend, "provider_compaction_scope", None)
+    protocol = json.dumps(provider_scope(), sort_keys=True) if callable(provider_scope) else ""
+    return str(getattr(backend, "name", "") or ""), str(getattr(backend, "model_name", "") or ""), protocol
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
@@ -207,8 +270,8 @@ def _indexed_rows(chain, scope: CompactScope, backend):
     return by_id, selected
 
 
-# LLM: 完整消费逆向提交链并释放旧正文后，仅沿选中摘要的基础链累计覆盖；异常/提前退出关闭原描述符。
-# 函数用途: 只读解析当前请求实际适用的摘要与来源，空范围返回空视图。
+# LLM: L1按文件版本完整验链，L2另按scope/backend选择摘要；命中返回deepcopy，文件追加/owner/head变化立即失效。
+# 函数用途: 复用已验证Compact来源，保持摘要base链覆盖和调用方嵌套对象隔离。
 def resolve_compact_summary_view(
     agent: SimpleAgent,
     thread: ConversationThread,
@@ -216,8 +279,50 @@ def resolve_compact_summary_view(
 ) -> CompactSummaryView:
     if not isinstance(scope, CompactScope):
         raise TypeError("Compact 作用域类型无效")
-    with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
-        by_id, selected = _indexed_rows(chain, scope, getattr(agent, "backend", None))
+    key = _checkpoint_cache_key(agent, thread)
+    backend = getattr(agent, "backend", None)
+    view_key = (key, scope, _backend_view_key(backend)) if key is not None else None
+    cached = _cached_summary(_SUMMARY_VIEWS, view_key)
+    if cached is not None and _checkpoint_cache_key(agent, thread) == key:
+        return deepcopy(cached)
+    by_id, selected = _summary_selection(agent, thread, scope, backend, key)
+    view = _view_from_selected(by_id, selected)
+    if key is not None and _checkpoint_cache_key(agent, thread) == key:
+        _remember_summary(_SUMMARY_VIEWS, view_key, deepcopy(view))
+    return view
+
+
+# LLM: 冷读完整消费原链并验证全部摘要/base关系，L1只留元数据；热读选中行仍经原lookup逐字节hash核对。
+# 函数用途: 分离完整验链和按范围选摘要，避免每个scope重复解析旧链。
+def _summary_selection(agent, thread, scope, backend, key):
+    by_id = _cached_summary(_VERIFIED_CHAINS, key)
+    if by_id is None:
+        with closing(iter_committed_compact_checkpoints(agent, thread)) as chain:
+            by_id, selected = _indexed_rows(chain, scope, backend)
+        if key is not None and _checkpoint_cache_key(agent, thread) == key:
+            _remember_summary(_VERIFIED_CHAINS, key, by_id)
+        return by_id, selected
+    next_base = None
+    for row in by_id.values():
+        candidate = (row["checkpoint_id"] == next_base if next_base is not None
+                     else scope_can_inherit(scope, _checkpoint_scope(row), row["created_at"]))
+        if not candidate:
+            continue
+        if _checkpoint_is_readable(backend, row):
+            from .compact_checkpoint_scan import checkpoint_row_lookup
+
+            with checkpoint_row_lookup(Path(key[1])) as lookup:
+                selected = lookup(str(row["checkpoint_id"]))
+            if selected is None:
+                raise OSError("conversation compact checkpoint chain is incomplete")
+            return by_id, selected
+        next_base = _summary_base_id(row)
+    return by_id, None
+
+
+# LLM: 只沿选中摘要的summary_base链累计精确覆盖，不扩大到同提交链其他scope；不修改L1共享元数据。
+# 函数用途: 从已验证的选择构造独立摘要视图，空范围返回空视图。
+def _view_from_selected(by_id, selected):
     if selected is None:
         return CompactSummaryView()
     messages: set[str] = set()

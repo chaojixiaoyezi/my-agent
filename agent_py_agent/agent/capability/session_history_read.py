@@ -83,12 +83,12 @@ def require_current_thread(thread_id: str, source: str) -> str:
     return thread_id
 
 
-# LLM: 只读 canonical 消息文件；读取错误以结构化失败返回，不把坏读当成“没有这条消息”。
-# 函数用途: 按消息编号取出一条原始会话消息。
+# LLM: owner/thread裁决先于本入口；只经原MessageStore字节索引读canonical，错误或跨thread记录一律拒绝。
+# 函数用途: 按消息首地址读取原话，防止坏读或错误线程记录变成合法消息。
 def _message_entry(agent: object, thread_id: str, message_id: str) -> MessageLogEntry | None:
     store = _conversation_store(agent)
     entry, errors = store.messages.by_id_report(thread_id, message_id)
-    if errors:
+    if errors or (entry is not None and entry.thread_id != thread_id):
         raise SessionHistoryRefusal("TOOL_EXECUTION_FAILED", "会话记录读取失败", "可原样重试一次。")
     return entry
 
@@ -131,8 +131,8 @@ def _bounded_int(value: object, default: int, low: int, high: int) -> int:
     return max(low, min(parsed, high))
 
 
-# LLM: 只读；offset 超过全文长度时返回空片段并标记读完。next_offset 为空表示已到结尾，模型据此停止续读。
-# 函数用途: 分段读取一条会话消息的原文（message_id 模式）。
+# LLM: 先裁决owner/thread再按canonical字节地址定位；offset/max_chars仍是Unicode字符而非物理字节，next_offset空表示结束。
+# 函数用途: 从已授权会话的单条原话按字符分页，不因底层seek优化改变分页口径。
 def read_conversation_message(agent: object, message_id: str, params: dict[str, object]) -> dict[str, Any]:
     thread_id, resolution = read_thread_scope(agent, params)
     entry = _message_entry(agent, thread_id, message_id)

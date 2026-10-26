@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
+from ..io.cursor_cache import note_seen
 from ..runtime_errors import DataCorruptionError, RecoverableRuntimeError
 from .display_checkpoint import is_display_checkpoint
 from .models import MessageLogEntry
@@ -22,8 +23,8 @@ _MAX_DEDUPE_INDEX_FILES = 64
 _MAX_DEDUPE_KEYS_PER_FILE = 16384
 
 
-# LLM: 仅保存首条非display键的原字节地址；尾锚加完整前缀摘要防中段改写后增长，不持有旧正文。
-# 类用途: 用有界键表、尾锚和固定长度前缀摘要复用已验证JSON，旧字节校验仍需分块读取。
+# LLM: recent保存首条非display键的精确地址，历史Bloom阳性需回查；64KiB尾锚及完整SHA256防中段改写后增长。
+# 类用途: 用有界混合键表及原字节证据复用已验证JSON，不持有正文，旧字节仍分块校验。
 @dataclass
 class _TranscriptDedupeIndex:
     dev: int
@@ -35,6 +36,7 @@ class _TranscriptDedupeIndex:
     prefix_digest: bytes
     mtime_ns: int
     ctime_ns: int
+    historical_seen: bytes
 
 
 _DEDUPE_INDEX_CACHE: OrderedDict[str, _TranscriptDedupeIndex] = OrderedDict()
@@ -162,10 +164,10 @@ def _dedupe_message_from_line(line: bytes) -> MessageLogEntry | None:
     return MessageLogEntry.from_dict(json.loads(text)) if text.strip() else None
 
 
-# LLM: 只读取水位前最多4096字节，不把局部锚声称为任意历史改写证明。
-# 函数用途: 计算已验证前缀的尾部字节锚，供后续增量扫描核对。
+# LLM: 只读取水位前最多64KiB；该锚是快速否定条件，完整前缀摘要仍是改写检测权威。
+# 函数用途: 计算已验证前缀的64KiB尾块锚，供后续增量扫描核对。
 def _dedupe_tail_anchor(handle: BinaryIO, offset: int) -> tuple[int, bytes]:
-    start = max(0, offset - 4096)
+    start = max(0, offset - 65536)
     handle.seek(start)
     return start, hashlib.blake2b(handle.read(offset - start), digest_size=16).digest()
 
@@ -209,10 +211,59 @@ def _indexed_dedupe_message(handle: BinaryIO, key: str, address: tuple[int, int]
     return None
 
 
-# LLM: 固定EOF前所有新行都必须校验，即使命中也不提前返回；摘要包含空白行，键满后仍扫描但不扩容。
-# 函数用途: 从当前位置扫描新增完整行，增量更新完整前缀摘要和有界键地址，保留首匹配。
-def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: dict[str, tuple[int, int]],
-                      existing: MessageLogEntry | None, hasher) -> MessageLogEntry | None:
+# LLM: 与cursor_cache.note_seen使用同一三探针算法；只读位图，不复制整份历史过滤器或修改覆盖事实。
+# 函数用途: 查询一个历史键是否可能存在，阳性必须回磁盘核实。
+def _dedupe_seen(seen: bytes | bytearray, key: str) -> bool:
+    digest = hashlib.blake2b(key.encode("utf-8", "surrogatepass"), digest_size=12).digest()
+    indexes = (int.from_bytes(digest[i:i + 4], "little") % (len(seen) * 8) for i in (0, 4, 8))
+    return all(seen[index // 8] & (1 << (index % 8)) for index in indexes)
+
+
+# LLM: 历史阳性只按原字节地址验证，不依据Bloom直接判重；完整消费给定前缀防首匹配掩盖后续坏行，退出恢复扫描位置。
+# 函数用途: 找到历史键的首地址，供Bloom阳性验证及重新进入recent使用。
+def _historical_dedupe_address(handle: BinaryIO, key: str, end: int) -> tuple[int, int] | None:
+    resume, found = handle.tell(), None
+    try:
+        handle.seek(0)
+        while handle.tell() < end:
+            start = handle.tell()
+            raw = handle.readline(end - start)
+            row = _dedupe_message_from_line(raw)
+            if (found is None and row is not None and not is_display_checkpoint(row)
+                    and str(row.metadata.get("dedupe_key") or "").strip() == key):
+                found = start, len(raw)
+        return found
+    finally:
+        handle.seek(resume)
+
+
+# LLM: 传入地址已被证明是首出现；旧键重新活跃时可回recent，淘汰进入Bloom，过滤器不删除位。
+# 函数用途: 保持最近16384个精确键及首地址，超过阈值不销毁缓存。
+def _promote_dedupe_key(offsets: OrderedDict, seen: bytearray, key: str, address: tuple[int, int]) -> None:
+    offsets[key] = address
+    offsets.move_to_end(key)
+    if len(offsets) > _MAX_DEDUPE_KEYS_PER_FILE:
+        old, _address = offsets.popitem(last=False)
+        note_seen(seen, old)
+
+
+# LLM: 历史Bloom阳性先核首地址再入recent；假阳性新键也正常进入，不能把当前重复行覆盖旧首地址。
+# 函数用途: 扫描一条键后更新真实recent集合及历史位图。
+def _remember_dedupe_key(handle, offsets: OrderedDict, seen: bytearray, key: str, address: tuple[int, int]) -> None:
+    if not key:
+        return
+    if key in offsets:
+        offsets.move_to_end(key)
+        return
+    if _dedupe_seen(seen, key):
+        address = _historical_dedupe_address(handle, key, address[0]) or address
+    _promote_dedupe_key(offsets, seen, key, address)
+
+
+# LLM: 固定EOF前所有新行必须校验，命中也不提前返回；空白入摘要，Bloom只保存被淘汰键，不限制扫描覆盖。
+# 函数用途: 单遍增量校验新尾、更新摘要与混合键表，保留首匹配。
+def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: OrderedDict,
+                      existing: MessageLogEntry | None, hasher, seen: bytearray) -> MessageLogEntry | None:
     while handle.tell() < end:
         start = handle.tell()
         line = handle.readline(end - start)
@@ -221,8 +272,7 @@ def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: dict[st
         if entry is None or is_display_checkpoint(entry):
             continue
         row_key = str(entry.metadata.get("dedupe_key") or "").strip()
-        if row_key and row_key not in key_offsets and len(key_offsets) < _MAX_DEDUPE_KEYS_PER_FILE:
-            key_offsets[row_key] = (start, len(line))
+        _remember_dedupe_key(handle, key_offsets, seen, row_key, (start, len(line)))
         if existing is None and row_key == key:
             existing = entry
     return existing
@@ -230,15 +280,15 @@ def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: dict[st
 
 # LLM: 原append-once锁仍是跨进程幂等权威；全局锁仅保护有界LRU字典，单路径锁保护本文件增量扫描，不阻塞其他文件。
 #   缓存只省略已验证前缀；先恢复其首匹配再扫描新尾，避免迟到同键覆盖首条；空key保持原全扫行为。
-# 函数用途: 校验水位、尾锚及前缀字节后增量解析新尾，旧地址不符则从0解析，饱和键表不缓存。
+# 函数用途: 校验水位、尾锚及前缀字节后增量解析新尾，Bloom命中历史时按原文件核实首匹配。
 def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
     cache_key = str(path)
     with _dedupe_file_lock(cache_key):
         return _find_message_dedupe_locked(path, cache_key, key)
 
 
-# LLM: 调用方已持有本路径扫描锁；只在锁内打开、复核前缀与更新LRU缓存。
-# 函数用途: 执行单路径去重扫描与增量索引维护。
+# LLM: 调用方已持路径锁；全局LRU锁不覆盖I/O，失败直接在当前锁内冷扫，不递归获取路径锁。
+# 函数用途: 复核完整前缀后复用recent/Bloom索引，历史可能命中才额外扫描旧键。
 def _find_message_dedupe_locked(path: Path, cache_key: str, key: str) -> MessageLogEntry | None:
     try:
         handle = path.open("rb")
@@ -251,32 +301,49 @@ def _find_message_dedupe_locked(path: Path, cache_key: str, key: str) -> Message
             index = _DEDUPE_INDEX_CACHE.pop(cache_key, None)
         status = os.fstat(handle.fileno())
         end = handle.seek(0, 2)
-        cursor, key_offsets, existing = 0, {}, None
-        hasher = hashlib.blake2b(digest_size=16)
+        cursor, key_offsets, existing = 0, OrderedDict(), None
+        seen = bytearray(65536)
+        hasher = hashlib.sha256()
         if key and index is not None and _dedupe_index_matches(handle, index, status, end, hasher):
-            cursor, key_offsets = index.scanned_offset, dict(index.key_offsets)
-            if key in key_offsets:
-                existing = _indexed_dedupe_message(handle, key, key_offsets[key])
-                if existing is None:
-                    cursor, key_offsets = 0, {}
-                    hasher = hashlib.blake2b(digest_size=16)
+            cursor, key_offsets = index.scanned_offset, OrderedDict(index.key_offsets)
+            seen = bytearray(index.historical_seen)
+            existing, valid = _cached_dedupe_match(handle, key, key_offsets, seen, cursor)
+            if not valid:
+                cursor, key_offsets, seen = 0, OrderedDict(), bytearray(65536)
+                hasher = hashlib.sha256()
         else:
-            hasher = hashlib.blake2b(digest_size=16)
+            hasher = hashlib.sha256()
         handle.seek(cursor)
-        existing = _scan_dedupe_tail(handle, end, key, key_offsets, existing, hasher)
-        if end and len(key_offsets) < _MAX_DEDUPE_KEYS_PER_FILE:
+        existing = _scan_dedupe_tail(handle, end, key, key_offsets, existing, hasher, seen)
+        if end:
             anchor_offset, anchor_digest = _dedupe_tail_anchor(handle, end)
             new_index = _TranscriptDedupeIndex(
                 dev=status.st_dev, ino=status.st_ino, scanned_offset=end,
                 tail_anchor_offset=anchor_offset, tail_anchor_digest=anchor_digest, key_offsets=key_offsets,
                 prefix_digest=hasher.digest(),
                 mtime_ns=status.st_mtime_ns, ctime_ns=status.st_ctime_ns,
+                historical_seen=bytes(seen),
             )
             with _DEDUPE_INDEX_LOCK:
                 _DEDUPE_INDEX_CACHE[cache_key] = new_index
                 while len(_DEDUPE_INDEX_CACHE) > _MAX_DEDUPE_INDEX_FILES:
                     _DEDUPE_INDEX_CACHE.popitem(last=False)
         return existing
+
+
+# LLM: 完整旧前缀已复核才调用；recent或Bloom阳性均需原行读回，失配由调用方同锁冷扫，不递归获取锁。
+# 函数用途: 核实首匹配并让已确认历史键回温，单独返回缓存是否仍有效。
+def _cached_dedupe_match(handle, key, offsets, seen, cursor):
+    address = offsets.get(key)
+    if address is None and _dedupe_seen(seen, key):
+        address = _historical_dedupe_address(handle, key, cursor)
+    if address is None:
+        return None, True
+    existing = _indexed_dedupe_message(handle, key, address)
+    if existing is None:
+        return None, False
+    _promote_dedupe_key(offsets, seen, key, address)
+    return existing, True
 
 
 # LLM: 固定LF尾界内严格解析，空白仍计hash；可选地址visitor只生成临时引用，原inode及取消在读取边界检查。

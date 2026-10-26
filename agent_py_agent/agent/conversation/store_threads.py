@@ -50,6 +50,7 @@ class _CachedThread:
 
 
 _THREAD_RECORD_CACHE: OrderedDict[str, _CachedThread] = OrderedDict()
+_THREAD_RECORD_CACHE_TOTAL_BYTES: int = 0
 
 
 # LLM: frozen线程仍含可变成员；缓存出入均深拷贝字典和字典元组，空字典也新建，不共享调用者对象。
@@ -69,39 +70,54 @@ def _clone_cached_thread(thread: ConversationThread) -> ConversationThread:
     )
 
 
-# LLM: 仅缓存稳定且不超64KiB单条的独立快照，总量32MiB并保原LRU条数限制；字节预算不替代磁盘权威。
-# 函数用途: 保存独立的线程快照，更新LRU顺序并淘汰最旧记录。
+# LLM: 单条64KiB/总量32MiB和条数限制不变；增减字节只在同一缓存锁内进行，覆盖/淘汰不遍历全表。
+# 函数用途: 保存独立线程快照，以O(1)更新预算并按需淘汰最旧记录。
 def _store_cached_thread(
     path: Path, fingerprint: tuple[int, int, int, int] | None, thread: ConversationThread,
 ) -> None:
+    global _THREAD_RECORD_CACHE_TOTAL_BYTES
     if fingerprint is None or fingerprint[1] > _THREAD_RECORD_CACHE_MAX_RECORD_BYTES:
         _drop_cached_thread(path)
         return
     snapshot = _clone_cached_thread(thread)
     key = str(path)
     with _THREAD_RECORD_CACHE_LOCK:
+        previous = _THREAD_RECORD_CACHE.pop(key, None)
+        if previous is not None:
+            _THREAD_RECORD_CACHE_TOTAL_BYTES -= previous.size_bytes
         _THREAD_RECORD_CACHE[key] = _CachedThread(fingerprint, snapshot, fingerprint[1])
-        _THREAD_RECORD_CACHE.move_to_end(key)
-        total = sum(row.size_bytes for row in _THREAD_RECORD_CACHE.values())
+        _THREAD_RECORD_CACHE_TOTAL_BYTES += fingerprint[1]
         while _THREAD_RECORD_CACHE and (
             len(_THREAD_RECORD_CACHE) > _THREAD_RECORD_CACHE_MAX_ENTRIES_COUNT
-            or total > _THREAD_CACHE_MAX_TOTAL_BYTES
+            or _THREAD_RECORD_CACHE_TOTAL_BYTES > _THREAD_CACHE_MAX_TOTAL_BYTES
         ):
             _key, removed = _THREAD_RECORD_CACHE.popitem(last=False)
-            total -= removed.size_bytes
+            _THREAD_RECORD_CACHE_TOTAL_BYTES -= removed.size_bytes
 
 
-# LLM: 写入、空记录与读取失败都丢弃旧投影；只触碰内存，不掩盖或修改原错误。
-# 函数用途: 在线程缓存锁内幂等移除指定路径。
+# LLM: 写入、超大记录、空记录与读取失败都丢弃旧投影；同锁扣除实际移除的字节，不更改原错误。
+# 函数用途: 在线程缓存锁内幂等移除指定路径并维护预算。
 def _drop_cached_thread(path: Path) -> None:
+    global _THREAD_RECORD_CACHE_TOTAL_BYTES
     with _THREAD_RECORD_CACHE_LOCK:
-        _THREAD_RECORD_CACHE.pop(str(path), None)
+        previous = _THREAD_RECORD_CACHE.pop(str(path), None)
+        if previous is not None:
+            _THREAD_RECORD_CACHE_TOTAL_BYTES -= previous.size_bytes
 
 
-# LLM: 仅同指纹/同身份的有界记录复用，缓存条目包含字节元数据；大记录返回独立解析对象，仍沿原磁盘校验与深拷贝。
-# 函数用途: 读取并校验独立线程快照，只把身份一致且读前读后稳定的文件放进有界缓存。
+# LLM: 仅清理进程内投影，同锁重置字节总额；不删除任何canonical线程或改变读取错误合同。
+# 函数用途: 清空线程缓存时同步归零预算，供缓存生命周期和测试使用。
+def _clear_cached_threads() -> None:
+    global _THREAD_RECORD_CACHE_TOTAL_BYTES
+    with _THREAD_RECORD_CACHE_LOCK:
+        _THREAD_RECORD_CACHE.clear()
+        _THREAD_RECORD_CACHE_TOTAL_BYTES = 0
+
+
+# LLM: 默认克隆保持公开隔离；clone=False仅供模块内只读筛选排序，返回前必须克隆最终切片，错误及磁盘校验不变。
+# 函数用途: 读取稳定线程快照，内部列表扫描可避免对不会返回的线程深拷贝。
 def _read_thread_record_report(
-    path: Path, *, thread_id: str = "",
+    path: Path, *, thread_id: str = "", clone: bool = True,
 ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
     actual_thread_id = str(thread_id or path.stem)
     before_fp = _file_fingerprint(path)
@@ -113,7 +129,7 @@ def _read_thread_record_report(
                 _THREAD_RECORD_CACHE.move_to_end(str(path))
                 cached_thread = cached.thread
     if cached_thread is not None:
-        return _clone_cached_thread(cached_thread), None
+        return (_clone_cached_thread(cached_thread) if clone else cached_thread), None
     payload, error = read_json_object_report(path, context="conversation.thread.read")
     if error is not None:
         _drop_cached_thread(path)
@@ -130,7 +146,7 @@ def _read_thread_record_report(
         if (before_fp is not None and after_fp == before_fp
                 and before_fp[1] <= _THREAD_RECORD_CACHE_MAX_RECORD_BYTES):
             _store_cached_thread(path, after_fp, thread)
-            return _clone_cached_thread(thread), None
+            return (_clone_cached_thread(thread) if clone else thread), None
         _drop_cached_thread(path)
         return thread, None
     except Exception as exc:
@@ -696,33 +712,34 @@ class ThreadStore:
             **({} if blocking else {"blocking": False}),
         )
 
-    # LLM: 仅指纹相同的有效线程命中；未命中按原reader/from_dict恢复，读前后不稳定不缓存，错误上下文保持不变。
-    # 函数用途: 读取独立线程对象，复用未变化文件；空记录或坏账立即移除旧缓存。
+    # LLM: clone=False只供模块内部列表只读投影；公开load默认独立对象，坏账立即失效，错误上下文保持。
+    # 函数用途: 复用未变化线程文件，允许内部列表延后克隆最终结果。
     def _load_path_report(
         self,
         path: Path,
         *,
         thread_id: str = "",
+        clone: bool = True,
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
-        return _read_thread_record_report(path, thread_id=thread_id)
+        return _read_thread_record_report(path, thread_id=thread_id, clone=clone)
 
 
-# LLM: 复用原目录扫描及错误合同，工作区归一化只用于匹配；不生成索引、锁或迁移记录。
-# 函数用途: 先筛选同目录线程再按活动时间截取列表，同时保留全部读取错误。
+# LLM: 缓存对象只读筛选排序，最终切片才深拷贝；目录过滤先于limit，全部坏账照旧报告。
+# 函数用途: 扫描原目录并筛选同目录线程，只克隆实际返回的记录。
 def _workspace_thread_report(threads: ThreadStore, *, limit: int,
                              workspace_dir: str | None) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
     selected: list[ConversationThread] = []
     load_errors: list[dict[str, Any]] = []
     root = str(Path(workspace_dir).expanduser().resolve(strict=False)) if workspace_dir is not None else None
     for path in sorted(threads.storage.threads_dir.glob("*.json")):
-        thread, error = threads._load_path_report(path)
+        thread, error = threads._load_path_report(path, clone=False)
         if thread is not None and (root is None or (thread.workspace_root
                 and str(Path(thread.workspace_root).expanduser().resolve(strict=False)) == root)):
             selected.append(thread)
         if error is not None:
             load_errors.append(error)
     selected.sort(key=lambda item: item.updated_at)
-    return (selected if limit <= 0 else selected[-limit:]), load_errors
+    return [_clone_cached_thread(row) for row in (selected if limit <= 0 else selected[-limit:])], load_errors
 
 
 # LLM: 无通道创建仍用原原子写钩子；实现移到类外以保持ThreadStore尺寸，不增加状态源。
