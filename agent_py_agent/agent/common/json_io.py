@@ -32,6 +32,11 @@ try:
 except ImportError:  # pragma: no cover - Windows import guard.
     fcntl = None
 
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX import guard.
+    msvcrt = None
+
 
 class _PathLock:
     """可弱引用的 per-path 锁包装。
@@ -316,7 +321,8 @@ def _atomic_write_text_unlocked(path: Path, content: str) -> None:
 #   若调用方已完成目录链准备或要保留符号链接目标权限，可关闭该步，临时文件仍出生即 0600；路径锁仍由调用方持有。
 #   replace_once仅供固定C写叶显式限制替换次数，不证明来源或权限；联验test_common_single_replace与私有写回归。
 # LLM: preserve_bytes显式用于原流水裁剪，surrogateescape及禁换行翻译使坏UTF8/CRLF可原样往返；默认编码/换行不变。
-# 函数用途: 在既有锁内以0600临时文件原子替换正文，可显式保留流水原字节或限制为一次替换。
+# LLM: 私有写须先flush/fsync临时FD，再replace并同步父目录；失败不向调用方发布缓存成功。
+# 函数用途: 在既有锁内耐久替换0600正文，保留原字节及单次替换选项。
 def write_private_text_file_atomic_unlocked(
     path: Path,
     content: str,
@@ -334,10 +340,13 @@ def write_private_text_file_atomic_unlocked(
         with os.fdopen(fd, "w", encoding="utf-8", **options) as handle:
             os.chmod(tmp, 0o600)
             handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         if replace_once:
             _replace_with_retry(tmp, path, keep_mode=False, replace_once=True)
         else:
             _replace_with_retry(tmp, path, keep_mode=False)
+        _sync_parent_directory(path)
     finally:
         _unlink_tmp_file(tmp)
 
@@ -675,33 +684,67 @@ def _open_private_lock_descriptor(lock_path: Path) -> int:
 # LLM: 不支持 OS 锁的平台沿原告警策略；支持时两种等待模式使用同一 flock，默认行为不变。
 # 函数用途: 执行原排他文件锁操作，可选择立即报告锁竞争。
 def _flock_exclusive(handle, *, blocking: bool = True) -> None:
-    if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-    else:
-        from .file_lock_support import warn_file_lock_unavailable_once
-        warn_file_lock_unavailable_once()
+    _flock_descriptor(handle.fileno(), blocking=blocking)
 
 
+# LLM: 文件对象与裸FD复用同一跨平台解锁协议，不改变锁文件身份校验。
+# 函数用途: 释放当前文件对象持有的OS锁。
 def _flock_unlock(handle) -> None:
-    if fcntl is not None:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    _funlock_descriptor(handle.fileno())
 
 
 # LLM: 与 _flock_exclusive 同一 OS 锁，只是作用于裸描述符（私有锁原语给的是 fd，不是文件对象）。
-# 函数用途: 在锁文件描述符上取排他锁，可选择立即报告竞争。
+# LLM: Windows固定锁文件首字节；LK_NBLCK加有界睡眠循环实现真正阻塞，非阻塞只尝试一次。
+# 函数用途: 在同一锁文件FD上取得POSIX或Windows排他锁。
 def _flock_descriptor(descriptor: int, *, blocking: bool = True) -> None:
     if fcntl is not None:
         fcntl.flock(descriptor, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    elif msvcrt is not None:
+        _windows_lock_descriptor(descriptor, blocking=blocking)
     else:
         from .file_lock_support import warn_file_lock_unavailable_once
         warn_file_lock_unavailable_once()
 
 
 # LLM: 并发 + 非阻塞模式下阻塞取锁会把调用方的“立即返回”语义变成挂起，故只在非阻塞失败时抛原竞争错误。
-# 函数用途: 释放锁文件描述符上的排他锁。
+# LLM: Windows取锁/解锁均定位首字节，不依赖调用者当前文件位置。
+# 函数用途: 释放同一FD上的跨平台排他锁。
 def _funlock_descriptor(descriptor: int) -> None:
     if fcntl is not None:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
+    elif msvcrt is not None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+
+
+# LLM: 锁首字节可超过空文件EOF；仅竞争错误可等待，真实IO错误立即抛出，不写锁文件内容。
+# 函数用途: 使用msvcrt取得Windows跨进程锁，保留blocking=False语义。
+def _windows_lock_descriptor(descriptor: int, *, blocking: bool) -> None:
+    import errno
+
+    while True:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                raise
+            if not blocking:
+                raise BlockingIOError(exc.errno, "共享文件OS锁繁忙") from exc
+            time.sleep(0.01)
+
+
+# LLM: POSIX父目录fsync保证replace耐久；Windows无目录fsync接口，依赖文件fsync及原replace协议。
+# 函数用途: 在私有文件原子替换后同步其父目录，错误交给调用方保留未确认状态。
+def _sync_parent_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 # LLM: 所有原子写（JSON、JSONL 账本、文本）都经这里替换；替换前先让临时文件带上目标原来的权限位，
