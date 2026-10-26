@@ -98,6 +98,27 @@ def _delivery_notification(envelope):
 # LLM: 所有读写仍沿同一可信root、nofollow及原quota锁；拆分存储职责不增加身份、路径或第二账本。
 # 类用途: 为投递领域动作集中提供受限JSON读写与两端写入准入。
 class _DeliveryStorage:
+    # LLM: 调用方已持接收方配额/投递锁；queued只对已发表inbox可消费，崩溃prepared由同一箱事实决定补发或回收。
+    # 函数用途: 在下次显式发送时对账中断通知，不在只读查询里写盘或触碰其他发送者回执。
+    def _recover_notifications(self, home, owner_id, admission):
+        for name in list_names_beneath(home, (*_BASE, 'notifications')):
+            if not name.endswith('.json'):
+                continue
+            identifier = safe_asset_id(name[:-5])
+            parts = (*_BASE, 'notifications', name)
+            event = self._read_json(home, parts)
+            if (event is None or event.get('schema_version') != 'asset_delivery_notification.v1'
+                    or event.get('delivery_id') != identifier or event.get('recipient_owner_id') != owner_id):
+                raise AssetDeliveryError('DELIVERY_STORE_CORRUPT', '通知记录身份或格式不匹配')
+            stored = self._read_json(home, (*_BASE, 'inbox', identifier, 'envelope.json'))
+            if stored is None:
+                if event.get('status') in {'prepared', 'queued'}:
+                    unlink_file_beneath(self.root_dir, (*home.relative_to(self.root_dir).parts, *parts))
+            elif event.get('status') == 'prepared':
+                envelope = self._envelope(home, owner_id, identifier)
+                event = self._inbox_notification(home, envelope)['notification_event']
+                self._put_json(home, parts, {**event, 'status': 'queued'}, admission)
+
     # LLM: 只投影已持久化队列，不以包裹内旧事件冒充已入队；记录身份必须与已核包裹一致，冷读不补写。
     # 函数用途: 让收件箱消费者看到当前真实通知状态，缺记录时明确标成missing。
     def _inbox_notification(self, home, envelope):
@@ -397,8 +418,8 @@ class AssetDeliveryService(_DeliveryStorage):
         value['notification_event'] = _delivery_notification(value)
         return value
 
-    # LLM: 同锁先耐久写通知、再原子发布箱；未入箱故障清通知/回执/暂存，入箱后fsync异常仍保留可核记录。
-    # 函数用途: 同时发表待确认投递和通知信号，不让成功入箱缺少耐久通知。
+    # LLM: 同锁先耐久prepared再发表箱，最后提升queued；中断后依据inbox对账，未发表通知绝不可消费。
+    # 函数用途: 在入箱提交后才发表可消费通知，异常保留可核状态而不伪称整次未写入。
     def _publish(self, sender, recipient, envelope, items, admissions):
         identifier = envelope['delivery_id']
         size = len(delivery_json(envelope)) + envelope['closure_summary']['total_bytes']
@@ -411,6 +432,7 @@ class AssetDeliveryService(_DeliveryStorage):
         receipt_parts = (*_BASE, 'outbox', identifier + '.json')
         notification_parts = (*_BASE, 'notifications', identifier + '.json')
         admissions[sender].check((OwnerQuotaChange(sender.joinpath(*receipt_parts), len(delivery_json(receipt))),))
+        self._recover_notifications(recipient, envelope['recipient_owner_id'], admissions[recipient])
         self._clean_staging(recipient)
         changes = [OwnerQuotaChange(recipient.joinpath(*stage, 'quota-projection'), size * 3)]
         admissions[recipient].check(changes)
@@ -421,9 +443,10 @@ class AssetDeliveryService(_DeliveryStorage):
             self._stage_payload(prefix, stage, items)
             self._put_json(recipient, (*stage, 'envelope.json'), envelope, admissions[recipient])
             self._put_json(sender, receipt_parts, receipt, admissions[sender])
-            self._put_json(recipient, notification_parts, envelope['notification_event'], admissions[recipient])
+            self._put_json(recipient, notification_parts, {**envelope['notification_event'], 'status': 'prepared'}, admissions[recipient])
             self._publish_stage(prefix, stage, inbox, identifier)
             published = True
+            self._put_json(recipient, notification_parts, envelope['notification_event'], admissions[recipient])
         finally:
             if not published:
                 # rename成功后fsync失败仍可能已入箱，不能删掉该包的真实来源回执。
@@ -442,17 +465,16 @@ class AssetDeliveryService(_DeliveryStorage):
                 parts = (*prefix, *stage, 'payload', descriptor.kind, descriptor.id, *name.split('/'))
                 write_bytes_atomic_beneath(self.root_dir, parts, raw)
 
-    # LLM: 两端父目录都经root-relative nofollow打开；失败由上层核实是否已有完整包，不用错误推断未提交。
-    # 函数用途: 原子将同文件系统暂存改名为正式收件包。
+    # LLM: 两端父目录nofollow打开后立即登记清理，第二次open失败也关闭首个FD；发表失败仍由上层核实提交事实。
+    # 函数用途: 无描述符泄漏地将同文件系统暂存原子改名为正式收件包。
     def _publish_stage(self, prefix, stage, inbox, identifier):
-        source = open_directory_beneath(self.root_dir, (*prefix, *stage[:-1]), require_dir_fd=True)
-        target = open_directory_beneath(self.root_dir, (*prefix, *inbox), create=True, require_dir_fd=True)
-        try:
+        with ExitStack() as stack:
+            source = open_directory_beneath(self.root_dir, (*prefix, *stage[:-1]), require_dir_fd=True)
+            stack.callback(os.close, source)
+            target = open_directory_beneath(self.root_dir, (*prefix, *inbox), create=True, require_dir_fd=True)
+            stack.callback(os.close, target)
             os.replace(stage[-1], identifier, src_dir_fd=source, dst_dir_fd=target)
             os.fsync(target)
-        finally:
-            os.close(target)
-            os.close(source)
 
     # LLM: 调用方必须持接收方delivery锁；原子发表会移走stage，此处只回收未发表UUID目录，rmtree必须具备FD防链接攻击能力。
     # 函数用途: 在下一次显式发送时回收崩溃暂存，失败发送也不把孤儿负载留给对方。
