@@ -495,3 +495,325 @@ def test_perf_e_prune_events_keeps_row_when_decoder_reports_recursion_limit(tmp_
     with scope():
         assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
     assert store.events_path.read_bytes() == b"".join(lines[1:]) + unmatched.encode()
+
+
+# LLM: 只读真实metadata，不用进程缓存或待实现helper推测恢复责任。
+# 函数用途: 核对测试数据库里仍待完成的事件删除ID。
+def _b2_pending_ids(store):
+    with sqlite3.connect(store.db_path) as conn:
+        row = conn.execute("SELECT value FROM metadata WHERE key='events_prune_pending_ids'").fetchone()
+    return [] if row is None else json.loads(row[0])
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_failed_rewrite_recovers_without_new_db_deletions(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    writer = maintenance.write_private_text_file_atomic_unlocked
+
+    def fail(*args, **kwargs):
+        raise OSError("injected rewrite failure")
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    with scope(), pytest.raises(OSError, match="injected"):
+        store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert _b2_pending_ids(store) == sorted(event.event_id for event in events[:3])
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", writer)
+    # 新实例模拟重启，不依赖旧进程缓存；DB 无符合 before 的新行。
+    with scope():
+        store = LocalStore(store.db_path, coordinator_io=coordinator)
+        result = store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert result == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": 3}
+    assert store.events_path.read_bytes() == b"".join(original[3:])
+    assert _b2_pending_ids(store) == []
+    assert list(tmp_path.glob(".events.jsonl.*.tmp")) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_dry_run_keeps_pending_and_never_rewrites(tmp_path, coordinator):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_id=?", (events[0].event_id,))
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)",
+                     (json.dumps([events[0].event_id]),))
+    original = store.events_path.read_bytes()
+    with scope():
+        result = store.prune_events(before=0, dry_run=True)
+    assert result == {"ok": True, "dry_run": True, "selected": 0, "deleted_db": 0, "deleted_jsonl": 0}
+    assert _b2_pending_ids(store) == [events[0].event_id]
+    assert store.events_path.read_bytes() == original
+    with scope():
+        assert store.prune_events(before=0)["deleted_jsonl"] == 1
+    assert _b2_pending_ids(store) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_path, monkeypatch, coordinator):
+    import tracemalloc
+
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    retained = b'{"event_id":"jsonl-only","body":"' + b"x" * 256 + b'"}\r\n'
+    bad = b'bad-utf8\xff\r\n{"unfinished"'
+    with store.events_path.open("ab") as handle:
+        for _ in range(20000):
+            handle.write(retained)
+        handle.write(bad)
+    actual_replace = maintenance.os.replace if hasattr(maintenance, "os") else None
+    modes = []
+
+    def replace(source, destination):
+        modes.append(Path(source).stat().st_mode & 0o777)
+        return actual_replace(source, destination)
+
+    if actual_replace is not None:
+        monkeypatch.setattr(maintenance.os, "replace", replace)
+    tracemalloc.start()
+    try:
+        with scope():
+            result = store.prune_events(before=50, keep_last=2, max_delete=1)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert result["deleted_jsonl"] == 1
+    assert peak < 2 * 1024 * 1024, f"whole-file buffering: peak={peak}"
+    assert modes == [0o600]
+    assert store.events_path.read_bytes() == b"".join(original[1:]) + retained * 20000 + bad
+    assert list(tmp_path.glob(".events.jsonl.*.tmp")) == []
+
+
+# LLM: 仅构造临时测试库的大样本；显式同步SQL与JSONL以避免逐条fsync耗时干扰稳态断言。
+# 函数用途: 快速准备带固定排序的事件流水，不读写真实用户数据。
+def _b2_seed_events(store, count):
+    with sqlite3.connect(store.db_path) as conn:
+        conn.executemany("INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES(?, 'old', '{}', 1)",
+                         ((f"b2-{index:06d}",) for index in range(count)))
+    with store.events_path.open("w") as handle:
+        for index in range(count):
+            handle.write(json.dumps({"event_id": f"b2-{index:06d}"}) + "\n")
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_steady_state_defaults_keep_latest_twenty_thousand_in_bounded_batches(tmp_path, coordinator):
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    with scope():
+        store.reset()
+    _b2_seed_events(store, 25005)
+    prune = getattr(store, "prune_events_steady_state", None)
+    assert callable(prune), "missing steady-state maintenance entry"
+    with scope():
+        dry = prune(dry_run=True)
+        assert dry["selected"] == 5000 and dry["deleted_db"] == 0
+        assert prune()["deleted_db"] == 5000
+        assert prune()["deleted_db"] == 5
+        assert prune()["deleted_db"] == 0
+    with sqlite3.connect(store.db_path) as conn:
+        ids = [row[0] for row in conn.execute("SELECT event_id FROM events ORDER BY seq")]
+    assert ids == [f"b2-{index:06d}" for index in range(5005, 25005)]
+    assert [json.loads(line)["event_id"] for line in store.events_path.read_text().splitlines()] == ids
+
+
+def test_b2_event_maintenance_is_explicit_and_bounded_not_record_event_hot_path(tmp_path, monkeypatch):
+    store = LocalStore(tmp_path / "index.db")
+    _b2_seed_events(store, 25005)
+    maintain = getattr(store, "maintain_events", None)
+    assert callable(maintain), "missing bounded event maintenance cycle"
+    result = maintain(max_batches=1)
+    assert result["deleted_db"] == 5000
+    assert store.stats()["event_count"] == 20005
+
+    def refuse(*args, **kwargs):
+        pytest.fail("single event hot path must not scan/prune")
+
+    monkeypatch.setattr(store, "prune_events_steady_state", refuse)
+    store.record_event("still-lightweight")
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import events as event_module
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    writer = LocalStore(store.db_path)
+    inserted, failures = threading.Event(), []
+    append = event_module.append_private_jsonl_records
+    prune_jsonl = store._prune_event_jsonl
+
+    def blocked_append(*args, **kwargs):
+        inserted.set()  # INSERT 已成功且持DB写锁，随后会等裁剪者的文件锁。
+        return append(*args, **kwargs)
+
+    def write():
+        try:
+            writer.record_event("concurrent-append")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=write, daemon=True)
+
+    def prune(targets):
+        removed = prune_jsonl(targets)
+        thread.start()
+        assert inserted.wait(2), "append writer never reached file lock"
+        return removed
+
+    monkeypatch.setattr(event_module, "append_private_jsonl_records", blocked_append)
+    monkeypatch.setattr(store, "_prune_event_jsonl", prune)
+    if coordinator:
+        transaction = store._coordinator_transaction
+
+        def clear_after_writer(operation):
+            if inserted.is_set():
+                # C的SQLite零等待合同不改；在开始清账事务前证实writer已能取得文件锁。
+                thread.join(2)
+                assert not thread.is_alive(), "cleanup still owns the event file lock"
+            return transaction(operation)
+
+        monkeypatch.setattr(store, "_coordinator_transaction", clear_after_writer)
+    try:
+        with scope():
+            assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+    finally:
+        thread.join(3)
+    assert not thread.is_alive() and failures == []
+    assert b"concurrent-append" in store.events_path.read_bytes()
+    assert _b2_pending_ids(store) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_retry_syncs_already_replaced_file_before_clearing_pending(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    sync = maintenance._sync_parent_directory
+    synced = []
+
+    def fail(path):
+        raise OSError("directory sync failed after replace")
+
+    monkeypatch.setattr(maintenance, "_sync_parent_directory", fail)
+    with scope(), pytest.raises(OSError, match="directory sync"):
+        store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert store.events_path.read_bytes() == b"".join(original[3:])
+    assert set(_b2_pending_ids(store)) == {event.event_id for event in events[:3]}
+
+    def track(path):
+        synced.append(path)
+        return sync(path)
+
+    monkeypatch.setattr(maintenance, "_sync_parent_directory", track)
+    with scope():
+        assert store.prune_events(before=50, keep_last=2)["deleted_jsonl"] == 0
+    assert synced == [store.events_path]
+    assert _b2_pending_ids(store) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_ledger_write_failure_rolls_back_db_and_never_touches_jsonl(tmp_path, coordinator):
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("CREATE TRIGGER fail_ledger BEFORE INSERT ON metadata "
+                     "WHEN NEW.key='events_prune_pending_ids' BEGIN SELECT RAISE(ABORT,'ledger unavailable'); END")
+    with scope(), pytest.raises(sqlite3.IntegrityError, match="ledger unavailable"):
+        store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert store.events_path.read_bytes() == original
+    assert _b2_pending_ids(store) == []
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 6
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_pending_merges_only_actually_deleted_trigger_survivors_stay(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_id=?", (events[0].event_id,))
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)",
+                     (json.dumps([events[0].event_id]),))
+        conn.execute(f"CREATE TRIGGER keep_event BEFORE DELETE ON events WHEN OLD.event_id='{events[1].event_id}' "
+                     "BEGIN SELECT RAISE(IGNORE); END")
+
+    def fail(*args, **kwargs):
+        raise OSError("pending retained")
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    with scope(), pytest.raises(OSError, match="pending retained"):
+        store.prune_events(before=50, keep_last=0, max_delete=2)
+    assert _b2_pending_ids(store) == [events[0].event_id, events[2].event_id]
+
+
+def test_b2_cleanup_preserves_concurrently_registered_new_pending_ids(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, False)
+    clear = maintenance._clear_pending_events_transaction
+
+    def register_then_clear(store, targets):
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute("DELETE FROM events WHERE event_id=?", (events[1].event_id,))
+            conn.execute("UPDATE metadata SET value=? WHERE key='events_prune_pending_ids'",
+                         (json.dumps([*targets, events[1].event_id]),))
+        return clear(store, targets)
+
+    monkeypatch.setattr(maintenance, "_clear_pending_events_transaction", register_then_clear)
+    with scope():
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+    assert _b2_pending_ids(store) == [events[1].event_id]
+
+
+@pytest.mark.parametrize("payload", ['{}', '[1]', '[""]', 'not-json'])
+def test_b2_invalid_pending_fails_closed_before_any_deletion(tmp_path, payload):
+    store, _events, _scope = _perf_e_event_store(tmp_path, False)
+    original = store.events_path.read_bytes()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)", (payload,))
+    with pytest.raises(ValueError):
+        store.prune_events(before=50, keep_last=2)
+    assert store.events_path.read_bytes() == original
+    assert store.stats()["event_count"] == 6
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_bare_carriage_return_inside_bad_jsonl_record_is_preserved(tmp_path, coordinator):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    bad = json.dumps({"event_id": events[0].event_id}).encode() + b"\rBROKEN\n"
+    with store.events_path.open("ab") as handle:
+        handle.write(bad)
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert result["deleted_jsonl"] == 1
+    assert store.events_path.read_bytes() == b"".join(original[1:]) + bad
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_temp_cleanup_failure_does_not_mask_primary_publish_error(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
+    primary = OSError("original publish error")
+    unlink = Path.unlink
+
+    def fail_publish(*args):
+        raise primary
+
+    def fail_cleanup(path, *args, **kwargs):
+        if path.name.startswith(".events.jsonl.") and path.suffix == ".tmp":
+            raise PermissionError("cleanup failed")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance.os, "replace", fail_publish)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+    with scope(), pytest.raises(OSError) as caught:
+        store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert caught.value is primary
+    assert _b2_pending_ids(store) == [events[0].event_id]
+    assert store.events_path.read_bytes() == original

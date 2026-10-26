@@ -1,5 +1,5 @@
 # LLM: 原事件构造/SQL/JSONL仍唯一；C只替换已持锁固定append叶，不改事件身份或事务次序。
-# 模块用途: 持久化原本地事件，支持C在SQL事务内无重复取锁追加。
+# 模块用途: 持久化原本地事件，支持C在SQL事务内无重复取锁追加和显式有界维护周期。
 
 from __future__ import annotations
 
@@ -19,9 +19,23 @@ from ..common.json_io import append_private_jsonl_records
 from .models import LocalStoreEvent, LocalTimelineItem
 
 
-# LLM: 原默认自取锁不变；append_records只由同Store内部C路径提供，必须固定原events_path/已持原锁。
-# 类用途: 统一构造和登记原事件，不复制第二审计状态。
+# LLM: 默认追加自取锁不变；C内部append固定原events_path/已持原锁，维护仅由显式有界周期调用。
+# 类用途: 统一登记事件和推进有限维护批次，不在单条写入时扫描或复制第二审计状态。
 class LocalStoreEventMixin:
+
+    # LLM: 由后台/显式维护入口调用，绝不从_record_event热路径调用；每批沿原文件锁串行，C须有当次scope。
+    # 函数用途: 在有限批次内推进两万条稳态裁剪，返回真实累计量，不启动线程或自动VACUUM。
+    def maintain_events(self, *, max_batches: int = 1, before: float | None = None,
+                        dry_run: bool = False) -> dict[str, int | bool]:
+        cutoff = time.time() if before is None else before
+        result = {"ok": True, "dry_run": bool(dry_run), "selected": 0, "deleted_db": 0, "deleted_jsonl": 0}
+        for _ in range(max(0, int(max_batches))):
+            batch = self.prune_events_steady_state(before=cutoff, dry_run=dry_run)
+            for key in ("selected", "deleted_db", "deleted_jsonl"):
+                result[key] += batch[key]
+            if dry_run or batch["deleted_db"] == 0:
+                break
+        return result
 
     def timeline(
         self,
