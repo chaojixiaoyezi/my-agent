@@ -585,9 +585,9 @@ class CandidateService:
                                     now: datetime | None = None) -> int:
         return _compact_terminal_candidates(self, before, max_hot_terminal, now)
 
-    # LLM: 精确ID且仅合法未晋升状态；同锁CAS后执行删除及其余老终态归档，规划读口不写。
+    # LLM: 精确ID且仅合法未晋升状态；同锁CAS后删除并仅归档其余陈旧未晋升终态，传递调用方now而非重取墙钟。
     #   无快照调用保留原状态检查；版本绑定仍脱敏保留，全跳过或账本未变时不重写。
-    # 函数用途: 原子复核并清理未晋升候选，将锁前变化 ID 交还调用方准确报告。
+    # 函数用途: 按本次保留运行时间清理未晋升候选，保留已晋升行，并准确报告锁前变化。
     # LLM: C复用同一原锁/序列化/准入，仅出生与raw末写消费原scope；状态/身份/事务顺序不变。
     # 函数用途: 沿原候选业务取得真实锁并保完整失败事实，不以活来源替换领域裁决。
     def delete_terminal(
@@ -596,6 +596,7 @@ class CandidateService:
         *,
         expected_snapshots: dict[str, MemoryCandidate] | None = None,
         skipped_state_changed: set[str] | None = None,
+        now: datetime | None = None,
     ) -> int:
         ids = set(normalize_string_list(tuple(candidate_ids)))
         if not ids:
@@ -623,7 +624,7 @@ class CandidateService:
                     raise CandidateTransitionError(
                         f"candidate {item.candidate_id} is not retention-eligible"
                     )
-            return _commit_retention_rows(self, candidates, ids, admission)
+            return _commit_retention_rows(self, candidates, ids, admission, now=now)
 
     # LLM: 原锁内借用已验证快照只读计数，热缓存零深拷贝；保留list及_load_unlocked覆盖入口，冷读仍完整验证账本。
     # 函数用途: 为doctor/CLI统计数量、状态和类型，不复制候选或暴露正文、路径及缓存引用。
@@ -1490,12 +1491,12 @@ def _hydrate_observation_targets(path: Path, rows: list[MemoryCandidate], observ
             for row in rows]
 
 
-# LLM: 按最后变更时间冷却，不能按创建时间把刚批准/晋升的老候选立即瘦身；负数量阈值拒绝。
-# 函数用途: 选择超过年龄或容量阈值且至少冷却一天的终态热行。
-def _terminal_compaction_indices(rows, now, cutoff, maximum):
+# LLM: 按最后变更时间冷却；默认覆盖全部终态，delete_terminal显式只选未晋升终态；负数量阈值拒绝。
+# 函数用途: 在调用方允许的终态中，选择超过年龄或容量阈值且至少冷却一天的热行。
+def _terminal_compaction_indices(rows, now, cutoff, maximum, *, statuses=frozenset({"promoted", "superseded", "rejected"})):
     if type(maximum) is not int or maximum < 0:
         raise ValueError("max_hot_terminal must be a nonnegative integer")
-    eligible = [index for index, row in enumerate(rows) if row.status in {"promoted", "superseded", "rejected"}
+    eligible = [index for index, row in enumerate(rows) if row.status in statuses
                 and not row.cold_detail_ref and not row.content_redacted_at]
     eligible.sort(key=lambda index: (rows[index].updated_at, rows[index].candidate_id))
     overflow = max(0, len(eligible) - maximum)
@@ -1622,14 +1623,15 @@ def _compact_terminal_candidates(service, before, maximum, now):
         return len(selected)
 
 
-# LLM: 删除前保存精确ID意图，覆盖已经回热或只剩孤儿的旧详情；与同月新归档合并，quota/锁保持原窗口。
-# 函数用途: 一次提交候选保留清理及冷热维护，未变化时不重写。
-def _commit_retention_rows(service, candidates, ids, admission):
+# LLM: 原quota/锁内提交精确删除与冷清理；统一使用传入now，只顺手冷归档未晋升终态，promoted不变。
+# 函数用途: 按本次时钟完成候选清理和有限冷热维护，不误把边界行变老或改写已晋升记录。
+def _commit_retention_rows(service, candidates, ids, admission, now=None):
     retained, deleted = _retention_records(candidates, ids)
-    now = datetime.now(timezone.utc)
-    selected = _terminal_compaction_indices(retained, now, now - timedelta(days=30), 1000)
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    selected = _terminal_compaction_indices(retained, current, current - timedelta(days=30), 1000,
+                                            statuses={"rejected", "superseded"})
     retained, archives = _prepare_cold_compaction(service.path, retained, selected)
-    options = {"candidate_ids": ids, "hashes": set(), "excluded": set(), "reviewer": "retention", "now": now.isoformat()}
+    options = {"candidate_ids": ids, "hashes": set(), "excluded": set(), "reviewer": "retention", "now": current.isoformat()}
     archives.update(_cold_redaction_plan(service.path, options, archives))
     if retained != candidates or archives:
         _write_candidates_unlocked(service.path, retained, admission=admission, cold_changes=archives, cold_redaction=options,

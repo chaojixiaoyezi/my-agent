@@ -215,8 +215,8 @@ class CandidateObservation:
     target_entry_version: int | None = None
 
 
-# LLM: 候选当前态唯一事实源；冷详情为同owner受校验归档，raw缓存不参与构造、比较或持久协议。
-# 类用途: 保存候选正文、证据、范围、审核、晋升位置和幂等观察次数。
+# LLM: 候选当前态唯一事实源；raw缓存仅实例属性，不属于dataclass字段/asdict，构造、比较、持久协议不含缓存。
+# 类用途: 保存候选正式字段；原行和摘要只用于内部复用，不能复制到对外序列化结果。
 @dataclass
 class MemoryCandidate:
     schema_version: str
@@ -271,8 +271,8 @@ class MemoryCandidate:
     # Host-only immutable historical bindings; no body/quote, retained inside this authority only.
     target_evidence_bindings: list[dict[str, object]] = field(default_factory=list)
     cold_detail_ref: str = ""
-    _raw_json_line: str = field(default="", init=False, repr=False, compare=False)
-    _raw_state_digest: str = field(default="", init=False, repr=False, compare=False)
+    _raw_json_line = ""
+    _raw_state_digest = ""
 
     # LLM: 字段赋值即时失效原行；嵌套变更由序列化器的完整状态摘要再次校验，不能依赖调用方自觉。
     # 函数用途: 避免状态、版本绑定或隐私字段改写后复用旧JSON。

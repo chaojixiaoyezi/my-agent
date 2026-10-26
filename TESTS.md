@@ -1,29 +1,34 @@
-## 2026-10-26 Wave 5 Track A Round 2：六项接线与恢复修复
+## 2026-10-26 Wave 5 Track A Round 2 + Round 3：接线、缓存投影与回收时钟
 
-来源：`07-tasks/wave5-tracka-round2-fix-20261026.md`，基线 `287d94b59`，仅在指定返工工作树实现、测试和提交，不部署或启停服务。
+来源：`07-tasks/wave5-tracka-round2-fix-20261026.md` 与 `07-tasks/wave5-tracka-round3-fix-20261026.md`。R3 起点 `39ed42185afa905ad423da4b258ef9ab0370ad3b`，继续在指定返工工作树实现、测试和提交，不部署或启停服务。
 
 - 两个前台召回入口显式 `latency_safe=True`；真实 `JsonlMemory` + 空向量缓存验证返回词面命中、后台回填排队且无实时 `embed()`。
 - 冷 Curator 预检包含 audit-only JSONL；冷归档写后 SHA256 以 64 KiB 分块读回，删除 `hashlib.file_digest` 属性后实际归档可完成。
 - 已 promoted 候选冷详情仍保护证据文件和归档自身；详情坏行关闭相关清理。跨日 checkpoint/delta 所在旧分片保留，不相关过期分片仍可回收，审计完整读取保持成功。
 - 首次/已有版本游标链的 >32 线程真实提交成功、报告失败后，失败账沿已提交游标；覆盖 `list()`、`recent_finished()` 和损坏 state 的审计恢复。
 - 中断 replace/merge 恢复严格拒绝 formal/tombstone 尾部的坏 JSON、非对象和非法 UTF-8，候选保持 approved，损坏原件及候选账本不改。
+- R3：`MemoryCandidate` 的原行和摘要改为非 dataclass 实例缓存，`asdict()` 不再复制原始 JSONL；原行复用、嵌套变更核验、比较/repr、`replace()` 清空与正式 schema 保持。
+- R3：同次 retention `now` 通过 executor→phase→actions→`delete_terminal`→提交函数完整透传；顺手归档仅限 rejected/superseded，不能改变 promoted 行。独立 `compact_terminal_candidates` 默认仍覆盖 promoted/rejected/superseded 三类终态。
 
 新增 21 项先在未修生产代码上全部失败，再在修复后全部通过（无 skip/xfail）；测试位于现有六个文件，定位入口为 `-k r2_`。严格尺寸门首次发现 retention 嵌套超限，随后按职责抽出只读 Curator pin helper，不改基线或阈值。独立 Astra high 仅取得实现摘要，差异引用读取失败，不能称完整代码审查。
 
 任务原 pytest 命令中的 `test_memory_retention.py`、`test_memory_store.py`、`test_hybrid_retriever.py` 在本基线不存在；原命令实际退出 4。复跑使用现存 `test_memory_retention_{v2,wave5,runs,isolation}.py`、`test_memory_store_{jsonl,jsonl_class,models,index_errors}.py` 与 `test_memory_jsonl_and_hybrid_wave5.py`，并连同 candidates、curator、promotion、decision_recall、gateway_loops_resilience 及相关 v2 文件执行。曾在扩展命令误写不存在的 `test_memory_candidates_v2.py`，未运行测试，纠正文件清单后再验，不作为通过证据。
 
-最终扩大定向回归 **579 passed / 5 failed / 0 error / 0 skipped**（40.13 秒），新增 21 项全部包含在通过集合中；原始结果保留在 `.pytest_cache/wave5-tracka-r2.xml`。没有跳过失败或调整既有断言：
+R3 的三个针对性反例在生产修复前 **3 failed**：缓存字段泄入 dataclass、Curator 大工具引用序列化 `12550 < 10000` 失败，以及按固定时钟回收后保留行被误改。原始两个业务反例未改；只将缓存测试中“必须存在 dataclass descriptor”的旧实现断言，更新为更严格的“不进字段/asdict、实例隔离、构造拒绝”，保留并加强比较、repr、`replace` 清空和 `to_record` 边界。没有删除或跳过有效测试。
 
-- `test_memory_curator_v2.py::test_curator_enriches_large_tool_output_ref_without_copying_body`：`asdict(candidate)` 包含缓存原行，序列化长度 `12550 < 10000` 断言失败。
-- `test_memory_promotion_v2.py` 的 `test_user_profile_requires_explicit_message_and_rejects_temporary_scope`、`test_persona_promotion_adopts_exact_prior_update_persona_entry`、`test_soul_requires_explicit_confirmation`：人格前像快照 `os.link(..., follow_symlinks=False)` 报 `PermissionError: [Errno 1] Operation not permitted`，不据此猜测具体隔离来源。
-- `test_memory_retention_v2.py::test_retention_cleans_all_old_unpromoted_drafts`：旧断言预期完整终态行，但本基线已生成冷引用 stub。
+R3 独立 Astra high 对精确内联关键代码片段复核，未发现确定的新 bug 或合同遗漏；不冒充完整源码审查或独立测试。容量溢出时严格超过一天的未晋升终态仍按原规则可入选，不把本次 29/30 天样本结论扩成“任何容量都永不归档”。
 
-在返工树内 `.pytest_cache/wave5-r2-baseline` 创建真正的 detached 干净 worktree，精确起点 **`287d94b59892b4b7366f6139751b884b4a8cf77e`**；确认 `importlib` 指向该基线，定向复跑上述五项，结果 **5 failed**、相同节点及失败形状（3.62 秒）。JUnit 保存到 `.pytest_cache/wave5-r2-baseline.xml`，脚本核对两边失败集合相等。这证明五项在本环境的任务起点已可复现，不代表整个基线套件已全跑；本轮不顺手修改范围外实现/旧断言，整体门禁不能报全绿。
+R3 任务指定的 R2 + v2 八文件组合已 **385 passed / 0 failed / 0 error / 0 skipped**（21.21 秒），包括原始两项业务反例、完整 R2 回归以及显式 promoted 冷归档维护用例。JUnit 保存于 `.pytest_cache/wave5-tracka-r3.xml`。本节按最新指定范围替换 R2 临时失败状态；旧运行事实保留在 `39ed42185` 和原始 XML，不回写历史结果。
 
-最终定向命令（工作树根；通配符对应当前真实测试分片）：
+全绿仅对应下列八文件，不外推 R2 更大的组合；其中人格快照硬链接问题未在本轮复测，不宣称已解决。复现（工作树根）：
 
 ```bash
-python3 -m pytest agent_py_agent/tests/test_memory_candidates.py agent_py_agent/tests/test_memory_candidate_services.py agent_py_agent/tests/test_memory_curator.py agent_py_agent/tests/test_memory_curator_v2.py agent_py_agent/tests/test_memory_promotion.py agent_py_agent/tests/test_memory_promotion_v2.py agent_py_agent/tests/test_memory_retention_*.py agent_py_agent/tests/test_memory_store_*.py agent_py_agent/tests/test_memory_jsonl_and_hybrid_wave5.py agent_py_agent/tests/test_decision_recall.py agent_py_agent/tests/test_gateway_loops_resilience.py -q --tb=short -o addopts='' --junitxml=.pytest_cache/wave5-tracka-r2.xml
+python3 -m pytest agent_py_agent/tests/test_decision_recall.py agent_py_agent/tests/test_gateway_loops_resilience.py agent_py_agent/tests/test_memory_candidates.py agent_py_agent/tests/test_memory_curator.py agent_py_agent/tests/test_memory_promotion.py agent_py_agent/tests/test_memory_retention_wave5.py agent_py_agent/tests/test_memory_curator_v2.py agent_py_agent/tests/test_memory_retention_v2.py -q --tb=short -o addopts='' --junitxml=.pytest_cache/wave5-tracka-r3.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
 ```
 
 Python 3.10 解释器实跑、真实模型/用户链路、线上 CI、部署及生产性能未验证；删除新 API 属性的兼容性回归不能替代跨版本运行。

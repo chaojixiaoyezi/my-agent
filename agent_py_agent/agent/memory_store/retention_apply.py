@@ -57,7 +57,8 @@ from .retention_transition import RetentionPolicyChangedError
 #   candidate 必须一次批量删除；清单阶段只扫描一次当前引用，快照动作失败或变化时保护仍被引用的清单。
 #   报告的 errors 只含执行期错误；计划带来的 isolated_errors（apply 隔离掉的扫描期路径级错误）原样带进报告和审计。
 # LLM: 仅已通过策略/法律保留的executor追加tmp/cache空目录清扫；扫描门外，每次rmdir仍沿原transition核权。
-# 函数用途: 执行已验证计划并清扫过期空临时目录，返回原动作状态及错误合同。
+# LLM: 本次now沿候选phase/actions透传到原删除提交，冷归档年龄不得另取真实墙钟；CAS及原短门保持。
+# 函数用途: 统一按本次时钟执行保留计划和过期目录清扫，返回原动作状态及错误。
 def execute_retention_plan(
     *,
     home: object,
@@ -68,7 +69,7 @@ def execute_retention_plan(
     commit_transition=None,
     audit_transition=None,
 ) -> MemoryRetentionReport:
-    results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan), commit_transition)
+    results, errors = _commit_step(lambda: _apply_candidate_phase(candidates, plan, now=now), commit_transition)
     manifest_references = None
     for action in plan.actions:
         if action.operation == "candidate_delete":
@@ -129,17 +130,20 @@ def _commit_step(operation, transition):
 
 # LLM: 计划里的 candidate_delete 动作必须一次批量删除（见 _apply_candidate_actions），不能与其它动作逐条交错；
 #   没有候选动作时返回两个空列表。从 execute_retention_plan 抽出只为控制函数长度，语义不变。
-# 函数用途: 先执行计划中的候选清理批次，返回动作结果与结构化错误两个列表，供后续逐条动作继续追加。
+# LLM: 可选now保持原内部两参数调用兼容；真实executor必须透传运行时钟，不能因抽层丢失。
+# 函数用途: 按同一次保留时钟执行候选清理批次，返回动作结果与结构化错误。
 def _apply_candidate_phase(
     candidates: CandidateService,
     plan: MemoryRetentionReport,
+    *,
+    now: datetime | None = None,
 ) -> tuple[list[MemoryRetentionAction], list[MemoryRetentionError]]:
     candidate_actions = tuple(
         action for action in plan.actions if action.operation == "candidate_delete"
     )
     if not candidate_actions:
         return [], []
-    candidate_results, candidate_errors = _apply_candidate_actions(candidates, candidate_actions)
+    candidate_results, candidate_errors = _apply_candidate_actions(candidates, candidate_actions, now=now)
     return list(candidate_results), list(candidate_errors)
 
 
@@ -154,11 +158,13 @@ def record_retention_report(
     _append_retention_audit(home, report=report, now=now)
 
 
-# LLM: 每批只算一次账本摘要并只读借用合法状态行；摘要、cutoff与原删除锁内CAS均须通过，不复制全账本。
-# 函数用途: 清理过期未晋升候选，坏摘要或锁前变化单列state_changed。
+# LLM: 每批一次摘要/只读借用，原cutoff/CAS保持；传入now给删除提交，避免顺手归档使用另一时钟。
+# 函数用途: 按本次时钟清理过期未晋升候选，坏摘要或锁前变化单列state_changed。
 def _apply_candidate_actions(
     candidates: CandidateService,
     actions: tuple[MemoryRetentionAction, ...],
+    *,
+    now: datetime | None = None,
 ) -> tuple[list[MemoryRetentionAction], list[MemoryRetentionError]]:
     errors: list[MemoryRetentionError] = []
     observed_fingerprint = file_fingerprint(candidates.path)
@@ -217,7 +223,7 @@ def _apply_candidate_actions(
         expected_snapshots[action.record_id] = record
     locked_changed: set[str] = set()
     if selected:
-        candidates.delete_terminal(selected, expected_snapshots=expected_snapshots, skipped_state_changed=locked_changed)
+        candidates.delete_terminal(selected, expected_snapshots=expected_snapshots, skipped_state_changed=locked_changed, now=now)
     for action in actions:
         if action.record_id in locked_changed:
             results.append(replace(action, status="state_changed"))

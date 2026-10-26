@@ -1,9 +1,11 @@
-## 2026-10-26 Wave 5 Track A Round 2 接线结构
+## 2026-10-26 Wave 5 Track A Round 2 + Round 3 接线结构
 
 - `agent_core/runtime/loop_support.py::_prepare_runtime_context` 与 `memory_store/decision_recall.py::FragmentSearch.additions` 在原 scope/预算调用上传 `latency_safe=True`；不新增召回入口、授权或访问计数旁路。
 - `candidates.py::_write_cold_changes` 保持 no-follow 写入与读回 FD，以 64 KiB 块 SHA256 核验；`retention_scan.py::current_retention_pins` 通过原 `_hydrate_candidate` 还原完整冷引用，`_curator_reference_pins` 收集引用并 pin 版本游标日分片，坏详情返回原不完整视图。
 - `curator.py::_commit_batch` 在真实提交后将完整 cursor 冻结到本轮 route；`_commit_failure` 在原未知异常门之后使用该游标作为失败基线。`promotion_remove_recovery.py::recover_committed_update` 在原锁内复用 `_strict_memory_events(require_source=True)`，正式/墓碑任一坏行拒绝恢复。
-- 测试结果和五项任务起点已复现的失败见 [TESTS](../../../TESTS.md)，本节不是部署或全绿验收声明。
+- R3 的 `candidate_models.py::MemoryCandidate` 以非 dataclass 的类默认值提供私有实例缓存，`asdict` 不复制原行；赋值失效和嵌套状态摘要仍沿原序列化器。
+- `retention_apply.py` 从 `execute_retention_plan` 经候选 phase/actions 透传同次 `now` 至 `CandidateService.delete_terminal` 和 `_commit_retention_rows`；`_terminal_compaction_indices` 的默认状态为全部终态，删除提交显式仅传 rejected/superseded。不新增删除授权或时钟事实源。
+- R3 指定套件与未复测边界见 [TESTS](../../../TESTS.md)，本节不是部署或全仓验收声明。
 
 ## Wave4 A1 索引快照与主根优先结构
 

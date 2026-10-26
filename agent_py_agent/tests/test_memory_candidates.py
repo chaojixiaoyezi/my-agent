@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -24,16 +24,22 @@ def candidate(index=0):
     return module._new_candidate(normalized, cid, key)
 
 
-# LLM: 新字段不能参与构造/比较或对外记录；dataclasses.replace必须使原行缓存自然失效。
-# 函数用途: 守住raw-line缓存与正式候选协议之间的隔离。
+# LLM: 原行/摘要仅实例缓存，不属于dataclass字段和asdict；保留构造拒绝、比较无关及replace清空语义。
+# 函数用途: 验证原行复用不会把缓存全文复制到对外候选或新快照。
 def test_raw_line_is_private_and_replace_clears_it():
     row = candidate()
-    descriptor = row.__dataclass_fields__.get("_raw_json_line")
-    assert descriptor is not None and not descriptor.init and not descriptor.repr and not descriptor.compare
+    assert not {"_raw_json_line", "_raw_state_digest"}.intersection(row.__dataclass_fields__)
     row._raw_json_line = "old raw"
+    row._raw_state_digest = "old digest"
+    assert not {"_raw_json_line", "_raw_state_digest"}.intersection(asdict(row))
+    assert "old raw" not in repr(row) and "old digest" not in repr(row)
+    assert candidate(1)._raw_json_line == "" and candidate(1)._raw_state_digest == ""
     assert row == replace(row)
     assert replace(row)._raw_json_line == ""
+    assert replace(row)._raw_state_digest == ""
     assert "_raw_json_line" not in row.to_record()
+    with pytest.raises(TypeError, match="_raw_json_line"):
+        replace(row, _raw_json_line="cannot construct cache")
 
 
 # LLM: 直接字段变更和嵌套字典改写均不能让旧JSON复活；复用行仍可重新读取为同一完整模型。
