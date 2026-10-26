@@ -272,9 +272,8 @@ def test_reference_pin_sources_cover_ids_and_paths(tmp_path, source):
 
         row = candidates.observe(CandidateObservation(candidate_type="lesson", content="cold detail",
             subject_key="test.cold", scope=MemoryScope("personal", "personal"), origin="model_inferred",
-            promotion_target="lesson"))
-        payload = {**row.to_record(), "cold_detail_ref": {"path": str(path)}}
-        candidates.path.write_text(json.dumps(payload) + "\n")
+            promotion_target="lesson", evidence_refs=[{"path": str(path)}]))
+        assert row.evidence_refs
         report = service.plan(now=NOW)
         assert report.ok, report.errors
         errors = []
