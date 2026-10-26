@@ -52,6 +52,8 @@ class GovernanceReviewItem:
     result: dict[str, Any] = field(default_factory=dict)
     history: tuple[dict[str, Any], ...] = ()
     schema_version: str = _SCHEMA
+    decision_intent: dict[str, Any] = field(default_factory=dict)
+    effect_applied_at: str = ""
 
     # LLM: 投影为独立JSON容器，target_owner_id始终由申请身份派生，不能独立改写。
     # 函数用途: 为Host和工具返回完整审核单及准确目标。
@@ -135,8 +137,8 @@ class GovernanceReviewStore:
         items.sort(key=lambda item: (item["created_at"], item["review_id"]))
         return {"items": items, "count": len(items)}
 
-    # LLM: review_id索引与target在同一原review锁内重核；终态及非pending拒绝重放，永不重复执行动作。
-    # 函数用途: CAS批准并应用审核动作，或带反馈驳回并通知原申请会话。
+    # LLM: review/target同锁校验；同意图中间态恢复，终态重入只修镜像/通知，异意图或错误CAS拒绝。
+    # 函数用途: 批复或恢复一个目标绑定的审核事务。
     def decide_review(self, review_id: str, decision: str, feedback: str = "", expected_revision: int | None = None,
                       decided_by: str = "local/main", patch_override: dict[str, Any] | None = None,
                       *, target_owner_id: str | None = None) -> dict[str, Any]:
@@ -160,29 +162,109 @@ class GovernanceReviewStore:
             item = _read_review(control, review_id)
             if target_owner_id is not None and resolve_managed_local_user(self.root_dir, target_owner_id)[0] != uid:
                 raise ManagedUserScopeDeniedError()
-            _require_revision(expected_revision, item["revision"])
-            if item["status"] != "pending_admin_review":
-                raise HostAPIError("REVISION_CONFLICT", 409)
-            item.update(feedback=feedback, decided_by=decided_by)
-            if decision == "reject_with_feedback":
-                _transition_review(control, item, "rejected")
-            else:
-                if patch_override is not None:
-                    if type(patch_override) is not dict or set(patch_override) & {"owner_id", "target_owner_id", "applicant_owner_id"}:
-                        raise ManagedUserScopeDeniedError()
-                    item["requested_action"] = {**item["requested_action"], **copy.deepcopy(patch_override)}
-                _transition_review(control, item, "approved")
-                _transition_review(control, item, "executing")
-                try:
-                    item["result"] = _execute_review(self.root_dir, home, item)
-                except Exception as error:
-                    item["result"] = {"ok": False, "error_code": getattr(error, "code", "GOVERNANCE_ACTION_FAILED"),
-                                      "error_type": type(error).__name__}
-                    _transition_review(control, item, "failed")
-                else:
-                    _transition_review(control, item, "applied")
-            _notify_review(home, item)
-            return copy.deepcopy(item)
+            request = {"decision": decision, "feedback": feedback, "decided_by": decided_by,
+                       "patch_override": copy.deepcopy(patch_override)}
+            return _decide_review_locked(control, home, item, request, expected_revision)
+
+    # LLM: 消费者必须同owner/类型/动作摘要；只消费已应用票据，原review锁内一次性发表，不执行命令。
+    # 函数用途: 核验并消费管理员签发的精确动作票据，拒绝跨用户和重复消费。
+    def consume_approved_action(self, review_id: str, *, target_user: str, review_type: str,
+                                action_match: dict[str, Any] | str | None = None) -> dict[str, Any]:
+        uid, identity, _home = resolve_managed_local_user(self.root_dir, target_user)
+        if self.actor_owner not in {OwnerIdentity.local_main(), identity}:
+            raise ManagedUserScopeDeniedError()
+        control = _GovernanceControl(self.root_dir, uid)
+        with control.locked(review_id):
+            item = _read_review(control, review_id)
+            record = control.store.read_json((*control.prefix, "approved_actions", review_id + ".json"))
+            if (item["status"] != "applied" or review_type not in {"capability_elevation", "high_risk_command"}
+                    or item["review_type"] != review_type or not record or record.get("target_owner_id") != f"local/{uid}"
+                    or record.get("review_type") != review_type or not record.get("approval_ticket")):
+                raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
+            expected = _action_digest(action_match) if isinstance(action_match, dict) else action_match
+            if expected is not None and expected != record["action_sha256"]:
+                raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
+            if record.get("consumed_at"):
+                raise HostAPIError("APPROVAL_ALREADY_CONSUMED", 409)
+            record.update(consumed_at=now_utc(), consumed_by=self.actor_owner.owner_id)
+            control.write(("approved_actions", review_id + ".json"), record)
+            return copy.deepcopy(record)
+
+
+# LLM: 决策补丁必须有限JSON且不能改归属；恢复意图包含补丁、actor、反馈与决策前修订。
+# 函数用途: 验证初次CAS或幂等重入意图。
+def _prepare_decision(item, request, expected_revision):
+    patch = request["patch_override"]
+    if patch is not None and (type(patch) is not dict or set(patch) & {"owner_id", "target_owner_id", "applicant_owner_id"}):
+        raise ManagedUserScopeDeniedError()
+    request = json.loads(json.dumps(request, allow_nan=False))
+    if item["status"] == "pending_admin_review":
+        _require_revision(expected_revision, item["revision"])
+        item.update(feedback=request["feedback"], decided_by=request["decided_by"],
+                    decision_intent={**request, "pre_decision_revision": item["revision"]})
+        if patch:
+            item["requested_action"] = {**item["requested_action"], **patch}
+        return
+    intent = item.get("decision_intent", {})
+    if (item["status"] not in {"approved", "executing", "applied", "rejected"}
+            or any(intent.get(key) != value for key, value in request.items())):
+        raise HostAPIError("REVISION_CONFLICT", 409)
+    _require_revision(expected_revision, expected_revision)
+    if expected_revision is not None and expected_revision not in {item["revision"], intent["pre_decision_revision"]}:
+        raise HostAPIError("REVISION_CONFLICT", 409)
+
+
+# LLM: 调用方持review锁；中断保留权威中间态，不回滚pending；终态重入不重复应用领域效果。
+# 函数用途: 驱动批复恢复、可见镜像和通知修复。
+def _decide_review_locked(control, home, item, request, expected_revision):
+    _prepare_decision(item, request, expected_revision)
+    if item["status"] == "pending_admin_review":
+        _transition_review(control, item, "rejected" if request["decision"] == "reject_with_feedback" else "approved")
+    if item["status"] == "approved":
+        _transition_review(control, item, "executing")
+    if item["status"] == "executing":
+        _apply_approved_review(control, home, item)
+    _write_review(control, item)
+    _notify_review(home, item)
+    return copy.deepcopy(item)
+
+
+# LLM: 动作前冻结恢复计划；完成立即持久化检查点；503/IO中断不伪装确定失败，留原事务恢复。
+# 函数用途: 应用领域效果并推进已应用或确定失败状态。
+def _apply_approved_review(control, home, item):
+    if not item.get("effect_applied_at"):
+        try:
+            if item["review_type"] == "persona_change" and "effect_action" not in item:
+                service = ManagedUserGovernanceService(home.root)
+                item["effect_action"] = _prepare_review_persona_action(service, home, item["requested_action"])
+                _write_review(control, item)
+            item["result"] = _execute_review(home.root, home, item)
+        except (OSError, HostAPIError) as error:
+            if isinstance(error, OSError) or error.status >= 500:
+                raise
+            _fail_review(control, item, error)
+            return
+        except Exception as error:
+            _fail_review(control, item, error)
+            return
+        item["effect_applied_at"] = now_utc()
+        _write_review(control, item)
+    _transition_review(control, item, "applied")
+
+
+# LLM: 只记录确定性领域失败，不把存储中断当作未发生副作用。
+# 函数用途: 为不可应用审核记录失败码和终态。
+def _fail_review(control, item, error):
+    item["result"] = {"ok": False, "error_code": getattr(error, "code", "GOVERNANCE_ACTION_FAILED"),
+                      "error_type": type(error).__name__}
+    _transition_review(control, item, "failed")
+
+
+# LLM: 权威记录发表后同步镜像；恢复可重放此动作，不增加修订或执行领域副作用。
+# 函数用途: 保存审核检查点并修复可见副本。
+def _write_review(control, item):
+    control.write(("governance_reviews", item["review_id"] + ".json"), item,
+                  ("data", "governance_reviews", item["review_id"] + ".json"))
 
 
 # LLM: 宿主控制项同样校验schema/归属和固定ID，损坏不降级为待审或批准。
@@ -206,46 +288,42 @@ def _transition_review(control: _GovernanceControl, item: dict[str, Any], status
     timestamp = now_utc()
     item.update(status=status, revision=item["revision"] + 1, updated_at=timestamp)
     item["history"] = [*item["history"], {"status": status, "at": timestamp}]
-    control.write(("governance_reviews", item["review_id"] + ".json"), item,
-                  ("data", "governance_reviews", item["review_id"] + ".json"))
+    _write_review(control, item)
 
 
-# LLM: 审批只调用固定领域入口，目标永远来自审核项权威归属；命令/提权仅记录获批意图，不执行任意shell。
-# 函数用途: 应用已批准的人格、资产或记忆动作，保存其它类型批准记录。
+# LLM: 只调用固定目标领域；人格用原计划幂等键，调度实际创建，命令/提权签发一次性票据但不执行shell。
+# 函数用途: 应用审核效果并返回可核验领域结果。
 def _execute_review(root: Path, home, item: dict[str, Any]) -> dict[str, Any]:
     action, kind = item["requested_action"], item["review_type"]
     service = ManagedUserGovernanceService(root, actor_owner=OwnerIdentity.local_main())
     if kind == "persona_change":
-        result = _apply_review_persona(service, home, action)
-    elif kind == "asset_enable":
-        result = service.toggle_asset(home.owner_id, action["asset_kind"], action["asset_id"], True)
-    elif kind == "memory_promotion":
+        return service.set_persona(home.owner_id, **item["effect_action"], idempotency_key="review:" + item["review_id"])
+    if kind == "asset_enable":
+        return service.toggle_asset(home.owner_id, action["asset_kind"], action["asset_id"], True)
+    if kind == "memory_promotion":
         result = service.mutate_memories(home.owner_id, "approve_candidate", candidate_id=action["candidate_id"])
         if result.get("ok") is not True:
             raise HostAPIError("MEMORY_PROMOTION_NOT_APPLIED", 409)
-    else:
-        control = _GovernanceControl(root, home.identity.owner_id)
-        record = {"schema_version": "governance_approved_action.v1", "review_id": item["review_id"],
-                  "target_owner_id": home.owner_id, "review_type": kind, "requested_action": copy.deepcopy(action),
-                  "approved_by": "local/main", "approved_at": now_utc(), "execution_performed": False}
-        control.write(("approved_actions", item["review_id"] + ".json"), record)
-        result = {"ok": True, "approval_recorded": True, "execution_performed": False}
-    return result
+        return result
+    if kind == "schedule_create":
+        return _apply_review_schedule(home, item)
+    if kind in {"capability_elevation", "high_risk_command"}:
+        return _issue_review_ticket(root, home, item)
+    raise ValueError("unsupported review effect")
 
 
-# LLM: 原人格纯操作算法保留条目及内容校验，SHA在批准时再次核对；写入走治理CAS，不创建第二份用户版本链。
-# 函数用途: 将已审人格请求应用到同一个受管用户文件。
-def _apply_review_persona(service, home, action: dict[str, Any]) -> dict[str, Any]:
+# LLM: 只冻结原正文/修订上的变更，不写人格；后续沿原set_persona幂等回执恢复同一计划。
+# 函数用途: 为审核人格请求计算绑定快照的持久写入参数。
+def _prepare_review_persona_action(service, home, action: dict[str, Any]) -> dict[str, Any]:
     from hashlib import sha256
 
     from ..capability.persona_repository import _apply_operation_to_text
-    from .managed_user_governance import _owner_text
 
     if any(key in action for key in ("soul_md", "agents_md", "user_md")):
         allowed = {"soul_md", "agents_md", "user_md", "persona_mode", "expected_revision"}
         if set(action) - allowed:
             raise ValueError("unsupported persona set fields")
-        return service.set_persona(home.owner_id, **action)
+        return {**action, "expected_revision": action.get("expected_revision", service.get_persona(home.owner_id)["revision"])}
     target = action.get("target", "soul")
     if target not in {"soul", "agents", "user"}:
         raise ValueError("invalid persona target")
@@ -265,15 +343,17 @@ def _apply_review_persona(service, home, action: dict[str, Any]) -> dict[str, An
         for entry in operations:
             next_text, _prior, _entry, _changed = _apply_operation_to_text(next_text, target=target,
                 action=entry.get("action", "add"), content=entry.get("content", ""), entry_id=entry.get("entry_id", ""))
-    return service.set_persona(home.owner_id, **{target + "_md": next_text}, expected_revision=current["revision"])
+    return {target + "_md": next_text, "expected_revision": current["revision"]}
 
 
 # LLM: 通知是执行结果之后的独立投递；失败不将已应用动作改写为未执行，不重复追加已成功消息。
 # 函数用途: 向原申请会话追加结构化批复并发布原owner唤醒。
 def _notify_review(home, item: dict[str, Any]) -> None:
+    control = _GovernanceControl(home.root, home.identity.owner_id)
     thread_id = item["applicant_thread_id"]
     if not thread_id:
         item["notification_status"] = "not_requested"
+        _write_review(control, item)
         return
     try:
         store = _managed_conversations(home, initialize=True)
@@ -289,9 +369,55 @@ def _notify_review(home, item: dict[str, Any]) -> None:
         store.wakes.raise_signal({"thread_id": thread_id, "reason": "governance_review_decision", "dedupe_key": key,
             "summary": json.dumps(notice, ensure_ascii=False), "metadata": {"governance_review": notice, "execution_owner_id": home.owner_id}})
         item["notification_status"] = "queued"
+        item.pop("notification_error_type", None)
     except Exception as error:
         item["notification_status"] = "failed"
         item["notification_error_type"] = type(error).__name__
-    control = _GovernanceControl(home.root, home.identity.owner_id)
-    control.write(("governance_reviews", item["review_id"] + ".json"), item,
-                  ("data", "governance_reviews", item["review_id"] + ".json"))
+    _write_review(control, item)
+
+
+# LLM: 摘要只绑定有限JSON动作数据，包含所有字段；不按自然语言含义匹配批准范围。
+# 函数用途: 计算一次批准动作的稳定内容摘要。
+def _action_digest(action: dict[str, Any]) -> str:
+    from hashlib import sha256
+
+    raw = json.dumps(action, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return sha256(raw.encode()).hexdigest()
+
+
+# LLM: 票据只在host authority签发，按review固定身份/类型/动作；恢复不换票、不清已消费状态，不执行shell。
+# 函数用途: 把提权或高危命令批准落实为可核验的一次性授权。
+def _issue_review_ticket(root: Path, home, item) -> dict[str, Any]:
+    control = _GovernanceControl(root, home.identity.owner_id)
+    parts = ("approved_actions", item["review_id"] + ".json")
+    record = control.store.read_json((*control.prefix, *parts))
+    binding = {"review_id": item["review_id"], "target_owner_id": home.owner_id, "review_type": item["review_type"],
+               "action_sha256": _action_digest(item["requested_action"])}
+    if record is not None:
+        if any(record.get(key) != value for key, value in binding.items()) or not record.get("approval_ticket"):
+            raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
+    else:
+        record = {"schema_version": "governance_approved_action.v1", **binding,
+                  "requested_action": copy.deepcopy(item["requested_action"]), "approval_ticket": uuid4().hex,
+                  "approved_by": "local/main", "approved_at": now_utc(), "consumed_at": "",
+                  "execution_performed": True, "authorization_applied": True, "command_executed": False}
+        control.write(parts, record)
+    return {"ok": True, **copy.deepcopy(record)}
+
+
+# LLM: 原scheduler负责正式创建；review确定job_id且检查来源摘要，副作用后中断重试不再建线程或计划。
+# 函数用途: 将定时提审真正应用到目标用户调度仓库，并返回可消费的任务标识。
+def _apply_review_schedule(home, item) -> dict[str, Any]:
+    from .managed_user_governance import _install_managed_monitor, _managed_monitor_rows
+
+    job_id = "job_review_" + item["review_id"].removeprefix("grv-")
+    digest = _action_digest(item["requested_action"])
+    jobs = [row for row in _managed_monitor_rows(home) if row["job_id"] == job_id]
+    provenance = {"sender_owner_id": "local/main", "provisioned_by_admin": True, "auto_enabled": True,
+                  "governance_review_id": item["review_id"], "action_sha256": digest}
+    if jobs:
+        if jobs[0].get("delivery_provenance") != provenance:
+            raise HostAPIError("APPROVAL_ACTION_MISMATCH", 409)
+    else:
+        _install_managed_monitor(home, job_id, item["requested_action"], {"enabled": True, "delivery_provenance": provenance})
+    return {"ok": True, "execution_performed": True, "job_id": job_id}

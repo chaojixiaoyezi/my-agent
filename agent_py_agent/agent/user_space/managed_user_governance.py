@@ -19,6 +19,7 @@ from .owner_resolver import OwnerHomeResult, OwnerIdentity
 _POLICY_SCHEMA = "managed_user_governance_policy.v1"
 _PERSONA_MODES = {"admin_locked", "admin_base_plus_user", "user_autonomous"}
 _ADMIN_WRITE: ContextVar[bool] = ContextVar("managed_governance_admin_write", default=False)
+_ADMIN_MEMORY_WRITE: ContextVar[tuple[str, str] | None] = ContextVar("managed_admin_memory_write", default=None)
 _POLICY_FIELDS = {
     "memory_governance": {"allow_self_learning": True, "require_admin_review_for_long_term": False,
                           "require_admin_review_for_lesson": False, "admin_locked_memory_ids": []},
@@ -74,7 +75,7 @@ def resolve_managed_local_user(root_dir: Path, target_user_or_owner_id: str) -> 
 # 函数用途: 返回尚未设定治理策略时的零修订视图。
 def _default_policy(uid: str) -> dict[str, Any]:
     return {"schema_version": _POLICY_SCHEMA, "owner_id": f"local/{uid}", "revision": 0,
-            "updated_at": "", "updated_by": "", "persona_mode": "user_autonomous",
+            "updated_at": "", "updated_by": "", "persona_mode": "user_autonomous", "memory_curate_mode": "user_autonomous",
             "role_title": "", "role_tags": [], **copy.deepcopy(_POLICY_FIELDS)}
 
 
@@ -119,7 +120,7 @@ class _GovernanceControl:
 # LLM: 可编辑字段由现行政策合同声明，修订和归属从不由patch决定。
 # 函数用途: 列出策略补丁允许修改的字段。
 def _editable_policy_keys() -> set[str]:
-    return {*_POLICY_FIELDS, "persona_mode", "role_title", "role_tags"}
+    return {*_POLICY_FIELDS, "persona_mode", "memory_curate_mode", "role_title", "role_tags"}
 
 
 # LLM: 嵌套策略的字段和严格类型共用此校验；返回副本，不改变待发表值的所有权。
@@ -139,6 +140,10 @@ def _validated_policy_fields(key: str, value: dict) -> dict:
 # LLM: 只接收补丁白名单中的三个人格元字段；各分支独立返回，列表值复制后交调用方发表。
 # 函数用途: 校验人格模式、角色名称或标签，不修改当前策略。
 def _validated_policy_metadata(key: str, value: Any) -> str | list[str]:
+    if key == "memory_curate_mode":
+        if type(value) is not str or value not in {"user_autonomous", "admin_only"}:
+            raise ValueError("invalid memory curate mode")
+        return value
     if key == "persona_mode":
         if type(value) is not str or value not in _PERSONA_MODES:
             raise ValueError("invalid persona mode")
@@ -268,14 +273,24 @@ class ManagedUserGovernanceService:
         _uid, _identity, home = self._target(target_owner_id)
         return _list_managed_memories(home, category, include_candidates, status_filter)
 
-    # LLM: 正式写和候选晋升委托原主链；仅内部收拢请求参数，公开Host/工具签名不变。
+    # LLM: actor先核验再建立精确目标活栈；锁定默认开启，旧locked显式参数保留优先级，不信任source文字。
     # 函数用途: 注入、修正、删除或审核受管用户记忆。
     def mutate_memories(self, target_owner_id: str, operation: str, *, entry_id: str = "", candidate_id: str = "",
-                        content: str = "", category: str = "long_term", locked: bool = False,
-                        expected_revision: int | None = None) -> dict[str, Any]:
+                        content: str = "", category: str = "long_term", expected_revision: int | None = None,
+                        **options: Any) -> dict[str, Any]:
         _uid, _identity, home = self._target(target_owner_id)
-        request = _ManagedMemoryMutation(operation, entry_id, candidate_id, content, category, locked, expected_revision)
-        return _mutate_managed_memory(home, request)
+        if set(options) - {"locked", "lock_memory"}:
+            raise TypeError(f"unexpected keyword arguments: {sorted(set(options) - {'locked', 'lock_memory'})}")
+        locked, lock_memory = options.get("locked"), options.get("lock_memory", True)
+        if type(lock_memory) is not bool or locked is not None and type(locked) is not bool:
+            raise ValueError("memory lock flags must be boolean")
+        request = _ManagedMemoryMutation(operation, entry_id, candidate_id, content, category,
+                                          lock_memory if locked is None else locked, expected_revision)
+        token = _ADMIN_MEMORY_WRITE.set((str(home.root), home.owner_id))
+        try:
+            return _mutate_managed_memory(home, request)
+        finally:
+            _ADMIN_MEMORY_WRITE.reset(token)
 
     # LLM: 闭包沿原资产仓库安装；身份只取已解析home，不向安装层重复传未使用UID；不执行代码。
     # 函数用途: 给受管用户配发工作流、脚本、技能及其依赖。
@@ -625,6 +640,46 @@ def _list_managed_memories(home, category, include_candidates, status_filter):
                                "status_filter": status_filter, "memories_returned": len(rows), "candidates_returned": len(pending)}}
 
 
+# LLM: 调用方不能用agent_home/source声明管理员；只有已核服务的精确root/owner活栈可绕过锁。
+# 函数用途: 核验受管用户正式记忆的管理员锁与仅管理员整理模式。
+def require_managed_memory_write(agent_home, owner_home, memory_id=None) -> None:
+    context = _persona_governance(Path(getattr(owner_home, "home_dir", owner_home)))
+    if context is None:
+        return
+    control, _identity, home = context
+    root = Path(agent_home if isinstance(agent_home, (str, Path)) else agent_home.root).resolve()
+    if root != home.root:
+        raise ManagedUserScopeDeniedError()
+    if _ADMIN_MEMORY_WRITE.get() == (str(home.root), home.owner_id):
+        return
+    policy = control.policy()
+    if (policy.get("memory_curate_mode") == "admin_only"
+            or memory_id in policy["memory_governance"]["admin_locked_memory_ids"]):
+        raise HostAPIError("MEMORY_LOCKED_BY_ADMIN", 403)
+
+
+# LLM: 只认规范正式JSONL；普通写持policy锁跨正式提交，与管理员写采用同一policy→quota→memory锁序。
+# 函数用途: 为JSONL唯一批量写口提供不授权的受管锁保护。
+@contextmanager
+def managed_memory_batch_guard(memory_path: Path, operations):
+    path = Path(memory_path).absolute()
+    if tuple(path.parts[-3:]) != ("memory", "long_term", "memory.jsonl"):
+        yield
+        return
+    context = _persona_governance(path.parents[2])
+    if context is None:
+        yield
+        return
+    control, _identity, home = context
+    if _ADMIN_MEMORY_WRITE.get() == (str(home.root), home.owner_id):
+        yield
+        return
+    with control.locked():
+        for operation in operations:
+            require_managed_memory_write(home.root, home.home_dir, operation.get("entry_id"))
+        yield
+
+
 # LLM: 晋升必须核原消息/工具证据及完整候选快照；缺工具verifier拒绝晋升，不采信候选自报success。
 # 函数用途: 以目标真实仓库装配唯一MemoryPromotionService。
 def _managed_promotion(home, memory, candidates):
@@ -692,25 +747,30 @@ def _mutate_managed_memory(home: OwnerHomeResult, request: _ManagedMemoryMutatio
         return {"ok": True, "entry": result}
     if category != "long_term":
         raise ValueError("lesson/hot writes must use an evidence-verified candidate promotion")
-    if operation == "add_memory":
-        if expected_revision not in {None, 0}:
-            raise HostAPIError("REVISION_CONFLICT", 409)
-        entry = memory.add("system", content, kind="fact", source="admin_managed_governance",
-                           attributes={"admin_injected": True, "updated_by": "local/main"})
-    elif operation == "edit_memory":
-        entry = memory.replace(entry_id, content, expected_version=expected_revision, source="admin_managed_governance")
-    else:
-        entry = memory.remove(entry_id, expected_version=expected_revision, source="admin_managed_governance")
-    if locked and operation == "add_memory":
-        control = _GovernanceControl(home.root, uid)
-        with control.locked():
-            policy = control.policy()
-            ids = policy["memory_governance"]["admin_locked_memory_ids"]
-            if entry.entry_id not in ids:
-                ids.append(entry.entry_id)
-                policy.update(revision=policy["revision"] + 1, updated_by="local/main", updated_at=now_utc())
-                control.write(("governance_policy.json",), policy, ("config", "governance_policy.json"))
-    return {"ok": True, "entry": asdict(entry)}
+    return _write_managed_formal_memory(home, memory, request)
+
+
+# LLM: 同policy锁覆盖正式写和锁ID增删；管理员权只来自服务活栈，旧source字段不能用于绕过。
+# 函数用途: 写正式记忆并同步管理员锁定或解锁状态。
+def _write_managed_formal_memory(home, memory, request: _ManagedMemoryMutation):
+    control = _GovernanceControl(home.root, home.identity.owner_id)
+    with control.locked():
+        if request.operation == "add_memory":
+            _require_revision(request.expected_revision, 0)
+            entry = memory.add("system", request.content, kind="fact", source="admin_managed_governance",
+                               attributes={"admin_injected": True, "updated_by": "local/main"})
+        elif request.operation == "edit_memory":
+            entry = memory.replace(request.entry_id, request.content, expected_version=request.expected_revision, source="admin_managed_governance")
+        else:
+            entry = memory.remove(request.entry_id, expected_version=request.expected_revision, source="admin_managed_governance")
+        policy = control.policy()
+        ids = set(policy["memory_governance"]["admin_locked_memory_ids"])
+        next_ids = ids | {entry.entry_id} if request.locked and request.operation != "delete_memory" else ids - {entry.entry_id}
+        if ids != next_ids:
+            policy["memory_governance"]["admin_locked_memory_ids"] = sorted(next_ids)
+            policy.update(revision=policy["revision"] + 1, updated_by="local/main", updated_at=now_utc())
+            control.write(("governance_policy.json",), policy, ("config", "governance_policy.json"))
+        return {"ok": True, "entry": asdict(entry)}
 
 
 # LLM: 仅绑定目标身份与原scheduler存储；不启动调度器，不取得管理员执行身份。
@@ -875,7 +935,7 @@ def _provision_managed_asset(root, home, kind, asset_id, auto_enable, strategy, 
             "enabled": auto_enable, "installed": installed, "delivery_provenance": provenance, "skipped": len(skipped)}
 
 
-# LLM: 只重写显式依赖ID和目标owner，来源字段不授予路径权；保留原资产校验及CAS。
+# LLM: 同一次原Store提交同步正式enabled与metadata；工作流定义层同值，不留下先启用后停用窗口。
 # 函数用途: 将一个闭包节点安全安装到受管用户原资产仓库。
 def _install_managed_asset(home, source, kind, asset_id, payload, mapping, metadata):
     from ..assets.descriptor import AssetDescriptor
@@ -886,7 +946,8 @@ def _install_managed_asset(home, source, kind, asset_id, payload, mapping, metad
         return _install_other_managed_asset(home, source, kind, asset_id, payload, metadata)
     descriptor = copy.deepcopy(payload.get("descriptor", payload))
     descriptor = {key: value for key, value in descriptor.items() if key in AssetDescriptor.__dataclass_fields__ or key == "schema_version"}
-    descriptor.update(id=asset_id, owner_id=home.owner_id, scope_layer="owner", source_scope="owner", workspace_root="")
+    descriptor.update(id=asset_id, owner_id=home.owner_id, scope_layer="owner", source_scope="owner", workspace_root="",
+                      enabled=metadata["enabled"])
     descriptor["metadata"] = {**descriptor.get("metadata", {}), **metadata}
     for plural, child_kind in (("scripts", "script"), ("workflows", "workflow"), ("skills", "skill")):
         refs = descriptor.get("refs", {})
@@ -905,7 +966,8 @@ def _install_managed_asset(home, source, kind, asset_id, payload, mapping, metad
         step["skill_ids"] = [mapping.get(("skill", ref.removeprefix("owner:")), ref) for ref in step.get("skill_ids", [])]
     store = WorkflowStore(home.home_dir)
     old = store.get_workflow(asset_id)
-    definition = WorkflowDefinition.from_any({"descriptor": descriptor, "steps": steps, "body_markdown": payload.get("body_markdown", "")})
+    definition = WorkflowDefinition.from_any({"descriptor": descriptor, "steps": steps,
+        "body_markdown": payload.get("body_markdown", ""), "enabled": metadata["enabled"]})
     return store.save_workflow(definition, expected_revision=old.descriptor.revision if old else 0)
 
 
@@ -947,7 +1009,7 @@ def _install_other_managed_asset(home, source, kind, asset_id, payload, metadata
     return result
 
 
-# LLM: 复用原scheduler构造、验证和单事务写入；paused在首次发表前设置，避免先active再暂停的可执行窗口。
+# LLM: 复用原scheduler构造、验证和单事务写入；首次发表前同时设置enabled/status，不先激活再暂停。
 # 函数用途: 将管理员监控定义直接安装到目标自己的调度账本。
 def _install_managed_monitor(home, asset_id, payload, metadata):
     import time
@@ -965,7 +1027,8 @@ def _install_managed_monitor(home, asset_id, payload, metadata):
         execution={"mode": "followup", "model_policy": "inherit"}, delivery={"mode": "local"},
         policy=payload.get("policy"), precheck=payload.get("precheck"), rules=payload.get("rules"))
     job = sync_event_sources(_new_job_payload(owner=repo.owner, request=request, now=time.time()))
-    job.update(job_id=asset_id, status="active" if metadata["enabled"] else "paused", delivery_provenance=metadata["delivery_provenance"])
+    job.update(job_id=asset_id, enabled=metadata["enabled"], status="active" if metadata["enabled"] else "paused",
+               delivery_provenance=metadata["delivery_provenance"])
     with repo._mutation_scope() as (store, admission):
         old = store["jobs"].get(asset_id)
         job["version"] = old["version"] + 1 if old else 1
@@ -977,11 +1040,14 @@ def _install_managed_monitor(home, asset_id, payload, metadata):
     return copy.deepcopy(job)
 
 
-# LLM: 技能存在性校验及原skill-policy锁内读改写独立收拢；不创建新启停账本，不授予执行权。
+# LLM: 先写SkillAdapter原skill_meta执行门，再同步原发现策略；任一步失败不报成功，不创建影子侧文件。
 # 函数用途: 在受管用户原技能策略中设置一个技能的禁用状态。
 def _toggle_managed_skill(home: OwnerHomeResult, asset_id: str, enabled: bool) -> None:
+    from ..assets.skill_adapter import SkillAdapter
+
     if not _target_asset_exists(home, "skill", asset_id):
         raise KeyError(asset_id)
+    SkillAdapter(home.home_dir).set_enabled(asset_id, enabled)
     store = LocalUserStore(home.root)
     parts = ("owners", "local", home.identity.owner_id, "skill_policy.json")
     with store.locked(parts):
@@ -995,7 +1061,37 @@ def _toggle_managed_skill(home: OwnerHomeResult, asset_id: str, enabled: bool) -
         store.write_json(parts, policy)
 
 
-# LLM: script/workflow写回原metadata；skill委托原策略锁事务，monitor用原pause/resume CAS，不执行资产。
+# LLM: 原scheduler单锁事务同步enabled/status，复用原事件退休、待运行取消和下次时间算法，不执行计划。
+# 函数用途: 原子更新一个目标用户计划的正式开关及调度状态。
+def _toggle_managed_monitor(home: OwnerHomeResult, asset_id: str, enabled: bool) -> None:
+    import time
+
+    from ..scheduler.event_source_lifecycle import cancel_retired_event_runs
+    from ..scheduler.event_sources import sync_event_sources
+    from ..scheduler.monitor_state import resume_monitor
+    from ..scheduler.repository import _resume_next_run
+
+    repo, current = _managed_scheduler(home), time.time()
+    with repo._mutation_scope() as (store, admission):
+        job = repo._require_mutable_job(store, asset_id, None)
+        previous = copy.deepcopy(job)
+        job = {**job, "enabled": enabled, "updated_at": current, "version": int(job["version"]) + 1}
+        cancelled = []
+        if enabled:
+            if job.get("rules"):
+                job = resume_monitor(job, current)
+            next_run = float(job["next_run_at"]) if job.get("rules") else _resume_next_run(job, current)
+            job.update(status="active", next_run_at=next_run, paused_at=0.0, paused_reason="")
+            job = sync_event_sources(job, previous, retire=True)
+        else:
+            job.update(status="paused", paused_at=current, paused_reason="admin_managed_governance")
+            job = cancel_retired_event_runs(store, sync_event_sources(job, retire=True), now=current)
+            cancelled = repo._cancel_waiting_runs_unlocked(store, asset_id, current, "job_paused")
+        store["jobs"][asset_id] = job
+        repo._write_store_unlocked(store, admission, history_records=cancelled)
+
+
+# LLM: script/workflow三层运行闸同事务同步；skill写原侧开关，monitor同步正式enabled/status，不执行资产。
 # 函数用途: 更新受管资产的原存储启停状态并返回当前值。
 def _toggle_managed_asset(home, kind, asset_id, enabled):
     from ..assets import safe_asset_id
@@ -1008,10 +1104,7 @@ def _toggle_managed_asset(home, kind, asset_id, enabled):
         mapping = {}
         _install_managed_asset(home, home, kind, asset_id, payload, mapping, {"enabled": enabled})
     elif kind == "monitor":
-        repo = _managed_scheduler(home)
-        job = repo.get_job(asset_id)
-        method = repo.resume_job if enabled else repo.pause_job
-        method(asset_id, expected_version=job["version"])
+        _toggle_managed_monitor(home, asset_id, enabled)
     elif kind == "skill":
         _toggle_managed_skill(home, asset_id, enabled)
     else:
@@ -1036,7 +1129,7 @@ def governance_tool_schema() -> dict[str, Any]:
         "target_owner_id", "soul_md", "agents_md", "user_md", "category", "status_filter", "entry_id", "candidate_id",
         "content", "asset_id", "conflict_strategy", "note", "prompt", "title", "thread_id", "priority", "review_id",
         "feedback", "review_type_filter", "idempotency_key")}
-    fields.update({name: {"type": "boolean"} for name in ("include_candidates", "locked", "auto_enable", "enabled")})
+    fields.update({name: {"type": "boolean"} for name in ("include_candidates", "locked", "lock_memory", "auto_enable", "enabled")})
     fields.update({name: {"type": "object"} for name in ("policy_patch", "patch_override", "payload_override")})
     fields["expected_revision"] = {"type": "integer", "minimum": 0}
     fields["persona_mode"] = {"type": "string", "enum": sorted(_PERSONA_MODES)}

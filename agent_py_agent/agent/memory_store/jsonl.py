@@ -489,6 +489,7 @@ class _JsonlMemoryMutationMixin:
     # LLM: 锁内全量验证并原子替换；同一准入内脱敏，正式删除提交后的必要清理失败单独报告且保留墓碑。
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
     # LLM: C原扫描/配额/编码/脱敏门外，formal准确一次末写成功才compare-delete本次pending；ops/清理仍原顺序且native不洗成功。
+    # LLM: 受管policy锁先于原quota/formal锁；普通调用和批量均不能靠source字段越过管理员记忆锁。
     # 函数用途: 沿唯一原批量算法落正式事实，失败保真实已写与待落访问信号。
     def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
@@ -500,8 +501,10 @@ class _JsonlMemoryMutationMixin:
 
         if not operations:
             raise ValueError("memory operations list is empty")
+        from ..user_space.managed_user_governance import managed_memory_batch_guard
+
         committed: list[MemoryRecord]
-        with _quota_admission(self.quota_enforcer, _admission) as admission:
+        with managed_memory_batch_guard(self.path, operations), _quota_admission(self.quota_enforcer, _admission) as admission:
             with locked_json_path(self.path, **({} if not self.coordinator_io else {"birth_commit": _coordinator_memory_write})):
                 current_events = self._read_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)

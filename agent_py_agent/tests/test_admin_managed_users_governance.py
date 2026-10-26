@@ -411,3 +411,250 @@ def test_admin_tool_preserves_persona_cas_and_denies_ordinary_actor(managed):
     denied = ordinary.execute({"action": "get_user_persona", "target_owner_id": "alice"})
     assert not denied.ok and denied.error_code == "ADMIN_CONTROL_DENIED"
     assert service.get_persona("alice")["SOUL.md"] == "tool persona"
+
+
+@pytest.mark.parametrize("kind", ["script", "workflow"])
+def test_stage3_provision_and_toggle_drive_canonical_execution_gates(managed, kind):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDisabledError
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStore
+    from agent_py_agent.agent.workflows import ScriptRunner, WorkflowEngine
+
+    root, service, home = managed
+    source = root / "owners/local/main"
+    if kind == "script":
+        ScriptStore(source).save_script(AssetDescriptor("gateasset", kind, "Gate asset"), 'print("{}")')
+    else:
+        WorkflowStore(source).save_workflow(WorkflowDefinition(AssetDescriptor("gateasset", kind, "Gate asset"), ()))
+    service.provision_assets("alice", kind, "gateasset", auto_enable=False)
+    runner = ScriptRunner(home.home_dir, use_sandbox=False) if kind == "script" else WorkflowEngine(home.home_dir)
+    for step, enabled in enumerate((False, True, False)):
+        if step:
+            service.toggle_asset("alice", kind, "gateasset", enabled)
+        if kind == "script":
+            descriptor = ScriptStore(home.home_dir).get_script("gateasset")
+            assert descriptor["enabled"] is enabled
+            assert descriptor["metadata"]["enabled"] is enabled
+            result = runner.run_script("gateasset")
+            assert result.ok is enabled
+            assert result.error_code == ("" if enabled else "ASSET_DISABLED_BY_OWNER")
+        else:
+            definition = WorkflowStore(home.home_dir).get_workflow("gateasset")
+            assert definition.enabled is enabled and definition.descriptor.enabled is enabled
+            assert definition.descriptor.metadata["enabled"] is enabled
+            if enabled:
+                assert runner.run_workflow("gateasset").status == "succeeded"
+            else:
+                with pytest.raises(AssetDisabledError) as caught:
+                    runner.run_workflow("gateasset")
+                assert caught.value.error_code == "ASSET_DISABLED_BY_OWNER"
+
+
+def test_stage3_skill_gate_rechecks_canonical_sidecar_even_for_old_snapshot(managed):
+    from hashlib import sha256
+
+    from agent_py_agent.agent.capability.skill_snapshot import (
+        SkillSnapshot,
+        SkillSnapshotEntry,
+        SkillSnapshotError,
+    )
+    from agent_py_agent.agent.capability.skills import skill_enabled
+
+    root, service, home = managed
+    body = "---\nname: gateskill\ndescription: Local test skill\n---\n# Local test\nRead local input.\n"
+    source = root / "owners/local/main/skills/gateskill/SKILL.md"
+    source.parent.mkdir(parents=True)
+    source.write_text(body)
+    service.provision_assets("alice", "skill", "gateskill", auto_enable=False)
+    path = home.home_dir / "skills/gateskill/SKILL.md"
+    entry = SkillSnapshotEntry("owner:gateskill", "gateskill", "Local test skill", str(path), "owner", "test", sha256(body.encode()).hexdigest())
+    snapshot = SkillSnapshot((entry,), (), "test", "local/alice", str(home.workspace_dir))
+    for step, enabled in enumerate((False, True, False)):
+        if step:
+            service.toggle_asset("alice", "skill", "gateskill", enabled)
+        assert skill_enabled(path) is enabled
+        if enabled:
+            assert snapshot.read_body("owner:gateskill") == body
+        else:
+            with pytest.raises(SkillSnapshotError) as caught:
+                snapshot.read_body("owner:gateskill")
+            assert caught.value.error_code == "ASSET_DISABLED_BY_OWNER"
+
+
+def test_stage3_monitor_enabled_and_status_persist_together(managed):
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_scheduler
+
+    _root, service, home = managed
+    payload = {"name": "Gate monitor", "prompt": "Inspect local input", "schedule": {"kind": "every", "every_seconds": 300, "anchor_at": 0.0}}
+    service.provision_assets("alice", "monitor", "job_gatemonitor", payload_override=payload, auto_enable=False)
+    for step, enabled in enumerate((False, True, False)):
+        if step:
+            service.toggle_asset("alice", "monitor", "job_gatemonitor", enabled)
+        job = _managed_scheduler(home).get_job("job_gatemonitor")
+        assert job["enabled"] is enabled
+        assert job["status"] == ("active" if enabled else "paused")
+
+
+# LLM: 只模拟进程在真实副作用完成后退出，不替换领域写入或批准判定。
+# 类用途: 让故障注入越过普通业务异常处理，留下真实中间态。
+class _Stage3Crash(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("phase", ["approved", "executing", "effect_checkpoint", "applied", "after_effect"])
+def test_stage3_review_recovers_crashes_without_repeating_persona_effect(managed, monkeypatch, phase):
+    import agent_py_agent.agent.user_space.governance_review_store as reviews_module
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.user_space.managed_user_governance import _GovernanceControl
+
+    root, service, home = managed
+    conversations = ConversationStore(home.home_dir / "conversations")
+    thread = conversations.threads.create(owner_id=home.owner_id, owner_home=str(home.home_dir))
+    reviews = reviews_module.GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", "persona_change", {"target": "soul", "action": "add", "content": "approved once"}, applicant_thread_id=thread.thread_id)
+    write, execute = _GovernanceControl.write, reviews_module._execute_review
+    interrupted = False
+
+    def broken_write(control, name, value, mirror=None):
+        nonlocal interrupted
+        matches = value.get("status") == phase or (phase == "effect_checkpoint" and value.get("status") == "executing" and value.get("effect_applied_at"))
+        if not interrupted and matches and name == ("governance_reviews", item.review_id + ".json"):
+            interrupted = True
+            write(control, name, value)
+            raise HostAPIError("GOVERNANCE_MIRROR_FAILED", 503)
+        return write(control, name, value, mirror)
+
+    def broken_execute(*args):
+        nonlocal interrupted
+        result = execute(*args)
+        if phase == "after_effect" and not interrupted:
+            interrupted = True
+            raise _Stage3Crash()
+        return result
+
+    monkeypatch.setattr(_GovernanceControl, "write", broken_write)
+    monkeypatch.setattr(reviews_module, "_execute_review", broken_execute)
+    with pytest.raises((HostAPIError, _Stage3Crash)):
+        reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    recovered = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    assert interrupted and recovered["status"] == "applied"
+    assert recovered["decision_intent"]["pre_decision_revision"] == 1
+    assert recovered["effect_applied_at"]
+    assert service.get_persona("alice")["revision"] == 1
+    assert home.soul_md.read_text().count("approved once") == 1
+    mirror = json.loads((home.home_dir / "data/governance_reviews" / (item.review_id + ".json")).read_text())
+    assert mirror == recovered
+    assert len(conversations.messages.recent(thread.thread_id)) == 1
+    assert len(conversations.wakes.pending()) == 1
+    assert reviews.decide_review(item.review_id, "approve", expected_revision=1) == recovered
+    assert reviews.decide_review(item.review_id, "approve", expected_revision=recovered["revision"]) == recovered
+    with pytest.raises(HostAPIError, match="REVISION_CONFLICT"):
+        reviews.decide_review(item.review_id, "approve", feedback="different intent", expected_revision=1)
+
+
+def test_stage3_review_rejection_reentry_is_idempotent(managed):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    root, _service, _home = managed
+    reviews = GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", "high_risk_command", {"command": "echo local"})
+    first = reviews.decide_review(item.review_id, "reject_with_feedback", "Use local input", expected_revision=1)
+    assert reviews.decide_review(item.review_id, "reject_with_feedback", "Use local input", expected_revision=1) == first
+
+
+@pytest.mark.parametrize("review_type,action", [
+    ("high_risk_command", {"command": "echo local", "tool_name": "run_command"}),
+    ("capability_elevation", {"tools": ["read_file"]}),
+])
+def test_stage3_approved_ticket_is_target_bound_and_one_use(managed, review_type, action):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    root, _service, _home = managed
+    reviews = GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", review_type, action)
+    applied = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    assert applied["status"] == "applied" and applied["result"]["execution_performed"] is True
+    assert applied["result"]["approval_ticket"]
+    owner = GovernanceReviewStore(root, actor_owner=OwnerIdentity.local_user("alice"))
+    with pytest.raises(HostAPIError, match="APPROVAL_ACTION_MISMATCH"):
+        owner.consume_approved_action(item.review_id, target_user="alice", review_type=review_type, action_match={"command": "different"})
+    denied = GovernanceReviewStore(root, actor_owner=OwnerIdentity.local_user("bob"))
+    with pytest.raises(ManagedUserScopeDeniedError):
+        denied.consume_approved_action(item.review_id, target_user="alice", review_type=review_type, action_match=action)
+    consumed = owner.consume_approved_action(item.review_id, target_user="local/alice", review_type=review_type, action_match=action)
+    assert consumed["consumed_at"] and consumed["approval_ticket"] == applied["result"]["approval_ticket"]
+    with pytest.raises(HostAPIError, match="APPROVAL_ALREADY_CONSUMED"):
+        owner.consume_approved_action(item.review_id, target_user="alice", review_type=review_type, action_match=action)
+
+
+def test_stage3_schedule_review_creates_real_enabled_target_job(managed):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+    from agent_py_agent.agent.user_space.managed_user_governance import _managed_scheduler
+
+    root, _service, home = managed
+    reviews = GovernanceReviewStore(root)
+    action = {"name": "Approved schedule", "prompt": "Inspect local data", "schedule": {"kind": "every", "every_seconds": 300, "anchor_at": 0.0}}
+    item = reviews.submit_review("alice", "schedule_create", action)
+    result = reviews.decide_review(item.review_id, "approve", expected_revision=1)
+    assert result["status"] == "applied" and result["result"]["execution_performed"] is True
+    job_id = result["result"]["job_id"]
+    job = _managed_scheduler(home).get_job(job_id)
+    assert job["enabled"] is True and job["status"] == "active"
+    assert job["owner"] == {"provider": "local", "kind": home.identity.owner_kind, "id": "local/alice"}
+    assert reviews.decide_review(item.review_id, "approve", expected_revision=1)["result"]["job_id"] == job_id
+    assert len(_managed_scheduler(home).list_jobs()[0]) == 1
+
+
+def test_stage3_locked_memory_blocks_direct_and_forged_source_edits_but_admin_can_unlock(managed):
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+
+    _root, service, home = managed
+    entry = service.mutate_memories("alice", "add_memory", content="admin fact", locked=True)["entry"]
+    memory = JsonlMemory(home.long_term_jsonl)
+    for operation in ("replace", "remove"):
+        with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
+            if operation == "replace":
+                memory.replace(entry["entry_id"], "forged", source="admin_managed_governance")
+            else:
+                memory.remove(entry["entry_id"], source="admin_managed_governance")
+    assert memory.all()[0].content == "admin fact"
+    changed = service.mutate_memories("alice", "edit_memory", entry_id=entry["entry_id"], content="admin correction", expected_revision=1)
+    assert changed["entry"]["content"] == "admin correction"
+    unlocked = service.mutate_memories("alice", "edit_memory", entry_id=entry["entry_id"], content="admin correction", lock_memory=False, expected_revision=2)
+    assert unlocked["entry"]["entry_id"] not in service.get_overview("alice")["governance_policy"]["memory_governance"]["admin_locked_memory_ids"]
+    assert memory.replace(entry["entry_id"], "allowed owner edit").content == "allowed owner edit"
+
+
+def test_stage3_memory_batch_cannot_hide_a_locked_edit_after_an_add(managed):
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+
+    _root, service, home = managed
+    entry = service.mutate_memories("alice", "add_memory", content="locked batch fact", locked=True)["entry"]
+    before = home.long_term_jsonl.read_bytes()
+    memory = JsonlMemory(home.long_term_jsonl)
+    with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
+        memory.apply_batch([{"action": "add", "content": "otherwise allowed fact", "role": "user"},
+                            {"action": "replace", "entry_id": entry["entry_id"], "content": "forged"}])
+    assert home.long_term_jsonl.read_bytes() == before
+
+
+def test_stage3_admin_memory_add_and_edit_default_to_locked(managed):
+    _root, service, _home = managed
+    entry = service.mutate_memories("alice", "add_memory", content="default locked fact")["entry"]
+    ids = service.get_overview("alice")["governance_policy"]["memory_governance"]["admin_locked_memory_ids"]
+    assert entry["entry_id"] in ids
+
+
+def test_stage3_admin_only_curate_policy_blocks_owner_add_and_edit(managed):
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+
+    _root, service, home = managed
+    entry = service.mutate_memories("alice", "add_memory", content="initial", locked=False)["entry"]
+    service.set_policy("alice", {"memory_curate_mode": "admin_only"})
+    memory = JsonlMemory(home.long_term_jsonl)
+    with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
+        memory.add("user", "owner should not add")
+    with pytest.raises(HostAPIError, match="MEMORY_LOCKED_BY_ADMIN"):
+        memory.replace(entry["entry_id"], "owner should not edit")
+    assert service.mutate_memories("alice", "edit_memory", entry_id=entry["entry_id"], content="admin permitted")["entry"]["content"] == "admin permitted"
