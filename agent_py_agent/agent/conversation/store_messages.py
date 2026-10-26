@@ -184,12 +184,39 @@ def _message_entries(
     return entries, errors
 
 
-# LLM: Exact Memory evidence lookup must stop at the matching row while preserving JSONL corruption errors.
-# 函数用途: 流式扫描单个 transcript 文件并返回目标消息，避免加载完整会话或在公开方法中堆叠嵌套分支。
+# LLM: 复用canonical完整前缀验证及首ID地址；只报告目标前的JSON错误和目标自身解析错误，不受目标后的坏行影响。
+# 函数用途: 用字节索引seek目标消息，保持精确证据查询的前缀损坏合同。
 def _message_entry_by_id_in_path(
     path: Path,
     target: str,
 ) -> tuple[MessageLogEntry | None, list[dict[str, Any]]]:
+    from .message_selection import message_position_index
+
+    through = complete_message_offset(path)
+    if through == path.stat().st_size:
+        index = message_position_index(path, through)
+        position = index.by_id.get(target)
+        target_line = position.line_number if position is not None else index.lines + 1
+        errors = [error for line_no, error, model_only in index.errors if line_no < target_line and not model_only]
+        errors.extend(error for line_no, error, _model_only in index.errors if line_no == target_line)
+        if errors or position is None:
+            return None, errors
+        with path.open("rb") as handle:
+            status = os.fstat(handle.fileno())
+            handle.seek(position.address.offset)
+            raw = handle.read(position.address.length)
+        import hashlib
+
+        if ((status.st_dev, status.st_ino) != index.identity
+                or hashlib.sha256(raw).digest() != position.address.digest):
+            raise DataCorruptionError("canonical message source changed during selection")
+        return MessageLogEntry.from_dict(json.loads(raw)), []
+    return _message_entry_unfinished_tail(path, target)
+
+
+# LLM: 未完成LF尾部不加入增量索引；保留旧by_id接受完整末行JSON、命中即止及坏行错误合同。
+# 函数用途: 对尚未提交完整行边界的文件执行原始精确定位，不把半行当作已验证前缀。
+def _message_entry_unfinished_tail(path: Path, target: str):
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -444,8 +471,8 @@ class MessageStore:
         except Exception as exc:
             return [], [jsonl_error(exc, "conversation.messages.after", path=path)]
 
-    # LLM: Persona/Memory evidence verification must resolve one exact message_id without loading a whole transcript.
-    # 函数用途: 流式查找一条 ConversationStore 消息并返回结构化读取错误。
+    # LLM: Persona/Memory证据复用canonical字节索引，前缀损坏仍拒绝；不使用派生搜索库或改变owner路径。
+    # 函数用途: 按原消息首地址读取单条记录，并返回目标前的结构化读取错误。
     def by_id_report(
         self,
         thread_id: str,
