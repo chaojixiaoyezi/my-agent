@@ -811,8 +811,8 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
     return bool(update(rows, active_count=result["active_count"])) or changed
 
 
-# LLM: 正常空会话清帧不告警；解析失败始终告警，运输失败仅在已观察/已绑定时告警，同范围读错可保留。
-# 函数用途: 按canonical线程更新展示并清理误报；不改消息、进程控制或完成wake链路。
+# LLM: 正常空会话及坏文件隔离后的成功投影均清除原观察专用告警，不能清其它kind；当前范围/运输真错仍沿原门报告。
+# 函数用途: 按canonical线程刷新或恢复观察提示，不改消息、进程控制与完成wake链路。
 def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
     if not callable(runtime_reader):

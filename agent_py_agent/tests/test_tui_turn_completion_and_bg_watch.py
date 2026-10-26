@@ -1,5 +1,5 @@
-# LLM: 只断言程序事实、渲染与只读边界；临时数据不发唤醒、不停止真实服务。
-# 模块用途: 回归回合尾标和后台进程观察入口。
+# LLM: 只断言程序事实、渲染与只读边界；缓存回归以真实读取次数/文件快照验证，临时数据不发唤醒或停止服务。
+# 模块用途: 回归回合尾标、后台只读缓存、按会话隔离坏文件与告警恢复。
 from __future__ import annotations
 
 import json
@@ -1294,3 +1294,511 @@ def test_c4_gateway_failed_session_switch_does_not_resolve_old_target(tmp_path):
     payload["ok"] = False
     assert not _consume_background_notices(agent, "display-two", runtime, [None], set(), [0], nav)
     assert _background_watch_thread_id(agent, nav, session_id="display-two", runtime=runtime) is None
+
+
+# LLM: 缓存是进程内优化；每例清空两级缓存，旧实现无缓存时仍能先运行行为反例而非导入报错。
+# 函数用途: 隔离后台观察缓存，避免测试顺序或时钟替身影响其它用例。
+@pytest.fixture(autouse=True)
+def _b1_reset_view_cache():
+    clear = getattr(bg, "_clear_background_process_view_cache", lambda: None)
+    clear()
+    yield
+    clear()
+
+
+# LLM: 只在临时目录构造轻量记录；文件与目录回拨十秒以真实通过共用粗粒度时间窗。
+# 函数用途: 准备可确定命中缓存的多个后台记录，不启动进程或写真实日志。
+def _b1_records(home, count=3):
+    root = home / "workspace/runtime/processes/sessions"
+    root.mkdir(parents=True)
+    old = time.time() - 10
+    for index in range(count):
+        path = root / f"bg-cache-{index}.json"
+        payload = {"session_id": path.stem, "status": "exited", "thread_id": "thread-one",
+                   "metadata": {"marker": "original"}, "started_at": time.time() - 100, "finished_at": time.time() - 1}
+        path.write_text(json.dumps(payload))
+        os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    return root
+
+
+# LLM: 仍走原nofollow读取；仅计数真实打开解析入口，不能用假payload制造缓存收益。
+# 函数用途: 捕获后台元数据的实际读取次数。
+def _b1_count_reads(monkeypatch):
+    original, reads = bg.read_bytes_beneath, []
+
+    # LLM: 参数和异常原样透传，不降低文件类型、身份或字节上限检查。
+    # 函数用途: 记录一次真实后台元数据读取。
+    def read(root, parts, **kwargs):
+        reads.append((str(root), parts))
+        return original(root, parts, **kwargs)
+
+    monkeypatch.setattr(bg, "read_bytes_beneath", read)
+    return reads
+
+
+# LLM: 不以耗时阈值验优化；同代可信目录的第二次观察必须零次重复文件读取。
+# 函数用途: 验证目录缓存命中且调用者不能污染缓存快照。
+def test_b1_trusted_directory_reuses_readonly_snapshots(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    _b1_records(home)
+    before = _files(home)
+    reads = _b1_count_reads(monkeypatch)
+    first = bg.list_background_processes(home, thread_id="thread-one")
+    assert first["total"] == 3 and len(reads) == 3
+    first["items"][0]["status"] = "caller-mutated"
+    second = bg.list_background_processes(home, thread_id="thread-one")
+    assert len(reads) == 3
+    assert {item["status"] for item in second["items"]} == {"exited"}
+    assert _files(home) == before
+
+
+# LLM: 原子replace改变目录代次；未变文件必须命中自己的安全指纹缓存。
+# 函数用途: 验证目录一项更新只重读这一项。
+def test_b1_atomic_replacement_only_reparses_changed_file(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    path = root / "bg-cache-1.json"
+    payload = json.loads(path.read_text())
+    payload["command"] = "updated"
+    replacement = root / "replacement.tmp"
+    replacement.write_text(json.dumps(payload))
+    replacement.replace(path)
+    result = bg.list_background_processes(home)
+    assert len(reads) == 4
+    assert next(item for item in result["items"] if item["session_id"] == path.stem)["command"] == "updated"
+
+
+# LLM: TTL按最初复核时刻而非命中时刻计算；60秒兜底必须穿透单文件缓存。
+# 函数用途: 验证目录期限强制完整重读并发现不改目录mtime的原位写。
+def test_b1_directory_ttl_forces_full_file_revalidation(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    clock = [10.0]
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    clock[0] = 69.9
+    bg.list_background_processes(home)
+    assert len(reads) == 3
+    path = root / "bg-cache-0.json"
+    payload = json.loads(path.read_text())
+    payload["command"] = "in-place-update"
+    path.write_text(json.dumps(payload))
+    clock[0] = 70.0
+    result = bg.list_background_processes(home)
+    assert len(reads) == 6
+    assert result["items"][0]["command"] == "in-place-update"
+
+
+# LLM: 读取前的不可信判断不能由读取完成后跨过时间窗洗白；目录和文件两层均须守门。
+# 函数用途: 验证粗粒度时间窗内不复用或发表缓存。
+@pytest.mark.parametrize("becomes_trusted", [False, True])
+def test_b1_recent_stat_cannot_seed_or_hit_cache(tmp_path, monkeypatch, becomes_trusted):
+    home = tmp_path / "owner"
+    _b1_records(home, count=1)
+    trusted = [False]
+    original, reads = bg.read_bytes_beneath, []
+    monkeypatch.setattr(bg, "cache_entry_trustworthy", lambda mtime: trusted[0], raising=False)
+
+    # LLM: 真实读取完成后才改变时间窗判定，专门构造延迟发布反例。
+    # 函数用途: 捕获时间窗变化前后的真实文件读取。
+    def read(root, parts, **kwargs):
+        reads.append(parts)
+        value = original(root, parts, **kwargs)
+        trusted[0] = becomes_trusted
+        return value
+
+    monkeypatch.setattr(bg, "read_bytes_beneath", read)
+    bg.list_background_processes(home)
+    bg.list_background_processes(home)
+    assert len(reads) == 2
+
+
+# LLM: 匹配会话的非终态探活和耗时每次现算，终态及其它会话不探活；缓存只存静态payload。
+# 函数用途: 验证热缓存不会冻结动态状态，也不会扩大探活范围。
+@pytest.mark.parametrize("status", ["running", "unknown"])
+def test_b1_cache_keeps_liveness_and_elapsed_dynamic_after_thread_filter(tmp_path, monkeypatch, status):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    for index, thread in [(0, "thread-one"), (1, "other-thread")]:
+        path = root / f"bg-cache-{index}.json"
+        payload = json.loads(path.read_text())
+        payload.update(status=status, thread_id=thread, started_at=100.0, finished_at=0.0)
+        path.write_text(json.dumps(payload))
+    for path in root.glob("bg-*.json"):
+        os.utime(path, (100, 100))
+    os.utime(root, (100, 100))
+    clock, live, probes = [200.0], [True], []
+    monkeypatch.setattr(bg.time, "time", lambda: clock[0])
+    monkeypatch.setattr(bg, "_managed_instance_still_live", lambda sid, *args: probes.append(sid) or live[0])
+    reads = _b1_count_reads(monkeypatch)
+    first = bg.list_background_processes(home, thread_id="thread-one")
+    assert first["items"][0]["elapsed_seconds"] == 100.0
+    clock[0], live[0] = 205.0, False
+    second = bg.list_background_processes(home, thread_id="thread-one")
+    assert second["items"][0]["elapsed_seconds"] == 105.0 and not second["items"][0]["alive"]
+    assert probes == ["bg-cache-0", "bg-cache-0"]
+    assert len(reads) == 3
+
+
+# LLM: 原日志reader仍每次读取文件尾部，append不会更新目录mtime也不能冻结所选日志。
+# 函数用途: 验证热缓存旁的详情日志实时且保持64KiB上限。
+def test_b1_cached_directory_does_not_freeze_selected_log_tail(tmp_path):
+    home = tmp_path / "owner"
+    root, output = _session(home, status="exited")
+    old = time.time() - 10
+    os.utime(root / "bg-example.json", (old, old))
+    os.utime(root, (old, old))
+    bg.list_background_processes(home)
+    before = root.stat().st_mtime_ns
+    assert bg.inspect_background_process(home, "bg-example", tail_lines=1)["log_tail"] == ["line-two"]
+    with output.open("a") as stream:
+        stream.write("new-tail\n")
+    assert root.stat().st_mtime_ns == before
+    detail = bg.inspect_background_process(home, "bg-example", tail_lines=1)
+    assert detail["log_tail"] == ["new-tail"]
+
+
+# LLM: 坏schema仍是合法JSON，归属须在验证失败后可提取；顶层与全部scope位置同等处理。
+# 函数用途: 验证明确其它线程的坏记录只出现在无关诊断中，全owner观察仍报告失败。
+@pytest.mark.parametrize("location", [None, "access_scope", "execution_scope", "completion_target", "metadata", "scope"])
+@pytest.mark.parametrize("key", ["thread_id", "conversation_id"])
+def test_b1_foreign_corrupt_record_is_isolated_at_every_scope_location(tmp_path, location, key):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid-schema"}
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[key] = "other-thread"
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    scoped = bg.list_background_processes(home, thread_id="thread-one")
+    assert scoped["projection_ok"] is True and scoped["errors"] == []
+    assert scoped.get("unrelated_errors") == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert scoped.get("unscoped_error_count") == 1
+    assert bg.list_background_processes(home)["projection_ok"] is False
+
+
+# LLM: 只有明确其它owner才隔离；当前线程或线程声明相互冲突的坏记录不得被历史年龄洗白。
+# 函数用途: 验证归属冲突失败关闭及其它owner坏文件的隔离。
+@pytest.mark.parametrize("kind", ["current", "conflicting", "foreign_owner", "foreign_nested_owner"])
+def test_b1_corrupt_scope_classification_preserves_current_thread_errors(tmp_path, kind):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-corrupt.json"
+    payload = {"session_id": path.stem, "schema": "invalid-schema", "thread_id": "thread-one"}
+    if kind == "conflicting":
+        payload["scope"] = {"thread_id": "other-thread"}
+    if kind.startswith("foreign"):
+        target = payload if kind == "foreign_owner" else payload.setdefault("metadata", {})
+        target["owner_home"] = str(tmp_path / "other-owner")
+    path.write_text(json.dumps(payload))
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is kind.startswith("foreign")
+    assert len(result.get("unrelated_errors", [])) == int(kind.startswith("foreign"))
+
+
+# LLM: 无法确认归属的坏文件只按文件mtime分界；恰好60秒仍按当前错误，非字典JSON同样保守。
+# 函数用途: 验证无归属坏文件的年龄边界，保留既有即时故障注入合同。
+@pytest.mark.parametrize("age,isolated", [(59.9, False), (60.0, False), (60.1, True)])
+@pytest.mark.parametrize("raw", ["broken-json", "[]", '{"session_id":"bg-corrupt","schema":"invalid"}'])
+def test_b1_unscoped_corruption_uses_exact_stale_boundary(tmp_path, monkeypatch, age, isolated, raw):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    clock = float(int(time.time()))
+    monkeypatch.setattr(bg.time, "time", lambda: clock)
+    path = root / "bg-corrupt.json"
+    path.write_text(raw)
+    os.utime(path, (clock - age, clock - age))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is isolated
+    assert len(result.get("unrelated_errors", [])) == int(isolated)
+    assert bg.list_background_processes(home)["projection_ok"] is False
+
+
+# LLM: 错误的归属分类不是缓存内容，热缓存里的新坏文件变老后也必须动态隔离。
+# 函数用途: 验证缓存不会冻结无归属错误的60秒年龄判断。
+def test_b1_cached_error_is_reclassified_when_it_becomes_stale(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-corrupt.json"
+    path.write_text("broken-json")
+    clock = [time.time()]
+    os.utime(path, (clock[0] - 59, clock[0] - 59))
+    os.utime(root, (clock[0] - 10, clock[0] - 10))
+    monkeypatch.setattr(bg.time, "time", lambda: clock[0])
+    reads = _b1_count_reads(monkeypatch)
+    assert not bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
+    clock[0] += 2
+    assert bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
+    assert len(reads) == 2
+
+
+# LLM: 真实TUI同步先因新坏文件报错，再因历史孤儿隔离恢复；不得清除其它kind的用户提示。
+# 函数用途: 验证观察恢复会主动清掉专用告警，而非等提示自然超时。
+def test_b1_tui_notice_recovers_after_unrelated_orphan_isolated(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _sync_background_watch
+
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    broken = root / "bg-orphan.json"
+    broken.write_text("broken-json")
+    runtime = TuiRuntime("b1-notice-recovery")
+    navigation = TuiAgentNavigationState(runtime)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), thread_id="thread-one")
+    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert "观察刷新失败" in runtime.notice()
+    old = time.time() - 120
+    os.utime(broken, (old, old))
+    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert runtime.notice() == "" and navigation.snapshot().background_process_count == 0
+    runtime.set_notice("其它功能的提示", notice_kind="other_feature")
+    _sync_background_watch(agent, navigation, runtime=runtime)
+    assert runtime.notice() == "其它功能的提示"
+
+
+# LLM: 根目录读取失败不可当成空目录或无关历史错误，缓存也不得创建缺失目录。
+# 函数用途: 验证不可读根目录保持真实失败诊断。
+def test_b1_unreadable_directory_is_current_projection_error(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    original = os.scandir
+
+    # LLM: 只在本测试目标目录拒绝列名，不伪造权限结论或影响其它临时目录。
+    # 函数用途: 注入确定的目录读取失败。
+    def scandir(path):
+        if str(path) == str(root):
+            raise PermissionError("fixture directory denied")
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert any(item["error"] == "PermissionError" for item in result["errors"])
+
+
+# LLM: 小容量仅缩短驱逐测试，不更改生产默认值；两级条目按LRU有界，清空入口必须同时失效。
+# 函数用途: 验证缓存容量、驱逐与显式清空。
+def test_b1_cache_limits_and_clear_are_effective(tmp_path, monkeypatch):
+    assert getattr(bg, "_DIRECTORY_CACHE_MAX_ENTRIES", None) == 64
+    assert getattr(bg, "_FILE_CACHE_MAX_ENTRIES", None) == 2048
+    monkeypatch.setattr(bg, "_DIRECTORY_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(bg, "_FILE_CACHE_MAX_ENTRIES", 2)
+    homes = [tmp_path / f"owner-{index}" for index in range(3)]
+    for home in homes:
+        _b1_records(home, count=1)
+    reads = _b1_count_reads(monkeypatch)
+    for home in homes:
+        bg.list_background_processes(home)
+    bg.list_background_processes(homes[-1])
+    assert len(reads) == 3
+    assert len(bg._DIRECTORY_CACHE) == len(bg._FILE_CACHE) == 2
+    bg.list_background_processes(homes[0])
+    assert len(reads) == 4
+    bg._clear_background_process_view_cache()
+    assert not bg._DIRECTORY_CACHE and not bg._FILE_CACHE
+    bg.list_background_processes(homes[0])
+    assert len(reads) == 5
+
+
+# LLM: 首次缺目录是正常空态；读取开始后目录消失是本轮观察失败，不能退回“目录本来不存在”。
+# 函数用途: 验证读取期间根目录消失不会被吞成成功空列表。
+def test_b1_disappearing_directory_after_read_is_not_successful_empty(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    original = getattr(bg, "_directory_stat_key", None)
+    assert callable(original)
+    visits = []
+
+    # LLM: 只在已见存在的同一目录第二次核验时注入真实类型的缺失错误。
+    # 函数用途: 重现初次stat成功、读后stat失败的确定交错。
+    def changed(path):
+        if path == root:
+            visits.append(path)
+            if len(visits) > 1:
+                raise FileNotFoundError("fixture directory vanished")
+        return original(path)
+
+    monkeypatch.setattr(bg, "_directory_stat_key", changed)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] and result["errors"][0]["error"] == "FileNotFoundError"
+
+
+# LLM: 原始v4文件沿真实schema校验且禁止可写Store入口；第二次稳定观察不能重复解析或验证。
+# 函数用途: 验证原生记录的缓存收益与严格只读边界。
+def test_b1_native_record_reuses_schema_validation_without_store_load(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.process_session_store import ProcessSessionStore
+    from agent_py_agent.tests import test_process_completion_events as fixtures
+
+    monkeypatch.setattr(fixtures, "capture_process_birth_token", lambda pid: "fixture-launcher")
+    agent, _, authority = fixtures._fixture(tmp_path, managed=True)
+    home, old = agent.home_paths.owner_home_dir, time.time() - 10
+    for path in authority.root.glob("bg-*.json"):
+        os.utime(path, (old, old))
+    os.utime(authority.root, (old, old))
+    original, validations = bg.validate_process_record, []
+
+    # LLM: 验证器返回值与异常均走原函数，不以伪schema通过替代真实校验。
+    # 函数用途: 计数实际v4记录校验次数。
+    def validated(payload):
+        validations.append(payload["session_id"])
+        return original(payload)
+
+    # LLM: 观察层误入恢复写入口时必须令测试失败。
+    # 函数用途: 拦截Store加载或事务副作用。
+    def forbidden(*args, **kwargs):
+        pytest.fail("background view must not load or transact writable Store")
+
+    monkeypatch.setattr(bg, "validate_process_record", validated)
+    monkeypatch.setattr(ProcessSessionStore, "load", forbidden)
+    monkeypatch.setattr(ProcessSessionStore, "transaction", forbidden)
+    before = _files(tmp_path), _files(authority.root)
+    assert bg.list_background_processes(home)["total"] == 1
+    assert bg.list_background_processes(home)["total"] == 1
+    assert validations == ["bg-test-notice"]
+    assert (_files(tmp_path), _files(authority.root)) == before
+
+
+# LLM: 概要消费者可能改动传入字典；深拷贝必须同时隔离文件缓存和目录缓存内部嵌套对象。
+# 函数用途: 验证动态投影修改不能污染后续缓存命中。
+def test_b1_summary_cannot_mutate_cached_nested_payload(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    _b1_records(home, count=1)
+    original = bg._summary
+
+    # LLM: 原概要正常生成后才修改本次私有payload，下一次必须重新拿到未污染快照。
+    # 函数用途: 模拟消费者持有并修改嵌套元数据。
+    def summary(root, payload):
+        assert payload["metadata"]["marker"] == "original"
+        result = original(root, payload)
+        payload["metadata"]["marker"] = "consumer-mutated"
+        return result
+
+    monkeypatch.setattr(bg, "_summary", summary)
+    assert bg.list_background_processes(home)["total"] == 1
+    assert bg.list_background_processes(home)["total"] == 1
+
+
+# LLM: 多观察线程只读同代快照；返回字典由各调用者独占，不把共享缓存暴露给并发消费者。
+# 函数用途: 验证并发命中不丢记录、不串改调用者数据。
+def test_b1_hot_directory_cache_is_threadsafe(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    home = tmp_path / "owner"
+    _b1_records(home)
+    assert bg.list_background_processes(home)["total"] == 3
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(bg.list_background_processes, [home] * 24))
+    assert all(result["projection_ok"] and result["total"] == 3 for result in results)
+    results[0]["items"][0]["status"] = "mutated"
+    assert results[1]["items"][0]["status"] == "exited"
+
+
+# LLM: 初始旧mtime不能赋给随后刚被改坏的新文件；读后看到的新代次年龄要重新决定是否属于历史孤儿。
+# 函数用途: 验证stat与读取之间的新坏JSON不会被旧文件年龄错误隔离。
+def test_b1_new_corruption_during_read_cannot_inherit_old_mtime(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-cache-0.json"
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    original = bg.read_bytes_beneath
+
+    # LLM: 仅在真实reader即将打开指定记录时改写为新坏JSON，不伪造stat或错误类型。
+    # 函数用途: 构造旧代次已stat、新代次被读取的确定交错。
+    def read(anchor, parts, **kwargs):
+        if anchor == root:
+            path.write_text("newly-broken-json")
+        return original(anchor, parts, **kwargs)
+
+    monkeypatch.setattr(bg, "read_bytes_beneath", read)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-cache-0", "error": "JSONDecodeError"}]
+    assert not result["unrelated_errors"]
+
+
+# LLM: 目录换代允许复用单文件，但不能给旧文件的复核期限重新起算60秒。
+# 函数用途: 验证无关目录变动不会延后完整重读期限。
+def test_b1_new_directory_generation_cannot_renew_old_file_ttl(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    clock = [10.0]
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    clock[0] = 63.0
+    (root / "unrelated.tmp").write_text("directory changed")
+    old = time.time() - 5
+    os.utime(root, (old, old))
+    bg.list_background_processes(home)
+    assert len(reads) == 3
+    clock[0] = 70.0
+    bg.list_background_processes(home)
+    assert len(reads) == 6
+
+
+# LLM: 成功展示按来源优先级去重，但坏文件诊断不能被同名有效行或其它坏行吞掉。
+# 函数用途: 验证跨根同名记录保留全部错误，并仍只展示一项有效记录。
+@pytest.mark.parametrize("first_good,second_good", [(True, False), (False, True), (False, False), (True, True)])
+def test_b1_duplicate_session_names_do_not_suppress_corruption(tmp_path, first_good, second_good):
+    home = tmp_path / "owner"
+    first = _b1_records(home, count=1)
+    second = home / ".background_jobs/process_sessions"
+    second.mkdir(parents=True)
+    raw = (first / "bg-cache-0.json").read_text()
+    for root, good in [(first, first_good), (second, second_good)]:
+        (root / "bg-cache-0.json").write_text(raw if good else "broken-json")
+    result = bg.list_background_processes(home)
+    assert len(result["errors"]) == 2 - int(first_good) - int(second_good)
+    assert result["total"] == int(first_good or second_good)
+
+
+# LLM: 解码超深和坏schema内的深对象都只影响单文件；不允许deepcopy缓存把本可报告的错误变成全列表异常。
+# 函数用途: 验证深JSON坏记录的只读隔离，同时保留其它有效任务。
+@pytest.mark.parametrize("kind", ["decoder", "bad_schema", "valid_legacy"])
+def test_b1_deep_json_does_not_abort_other_records(tmp_path, kind):
+    import sys
+
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-deep.json"
+    depth = min(20000, sys.getrecursionlimit() * (2 if kind == "decoder" else 3) // (1 if kind == "decoder" else 4))
+    nested = "[" * depth + "0" + "]" * depth
+    if kind == "decoder":
+        raw = nested
+    else:
+        extra = ',"schema":"invalid"' if kind == "bad_schema" else ''
+        raw = '{"session_id":"bg-deep","status":"exited","thread_id":"thread-one"' + extra + ',"metadata":{"unused":' + nested + '}}'
+    path.write_text(raw)
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    before = path.read_bytes()
+    try:
+        result = bg.list_background_processes(home, thread_id="thread-one")
+    except RecursionError:
+        result = None
+    assert isinstance(result, dict), "深JSON不能逃出单文件隔离边界"
+    assert any(row["session_id"] == "bg-cache-0" for row in result["items"])
+    assert result["projection_ok"] is (kind == "valid_legacy")
+    assert path.read_bytes() == before
+
+
+# LLM: 任务原文明确其它owner_home为最高优先级无关错误，不能因额外线程冲突反向污染当前会话。
+# 函数用途: 锁定跨owner坏记录的100%隔离合同。
+def test_b1_foreign_owner_corruption_stays_unrelated_even_with_thread_conflict(tmp_path):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "thread-one",
+               "scope": {"thread_id": "other-thread", "owner_home": str(tmp_path / "other-owner")}}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is True and result["errors"] == []
+    assert result["unrelated_errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
