@@ -122,6 +122,22 @@ BUNDLE_KWARG_FUNCTION_EXEMPTIONS = {
         "Strict allowlist-validated monitor binding writer "
         "keeps parameter count <= 6 while rejecting unknown binding keys with TypeError."
     ),
+    "agent_py_agent/agent/assets/turn_extractor.py:search_user_turns": (
+        "Strict allowlist-validated turn search filter entry point "
+        "keeps parameter count <= 6 while rejecting unknown filter keys with TURN_SEARCH_INVALID_FILTER."
+    ),
+    "agent_py_agent/agent/assets/turn_extractor.py:propose_assets_from_turns": (
+        "Strict allowlist-validated turn extraction proposal entry point "
+        "keeps parameter count <= 6 while rejecting unknown option keys with EXTRACTION_OPTIONS_INVALID."
+    ),
+    "agent_py_agent/agent/assets/browser_recorder.py:start_recording_session": (
+        "Strict allowlist-validated browser recording session starter "
+        "keeps parameter count <= 6 while rejecting unknown option keys with RECORDER_OPTIONS_INVALID."
+    ),
+    "agent_py_agent/agent/assets/browser_recorder.py:compile_recording_to_script": (
+        "Strict allowlist-validated browser recording compiler entry point "
+        "keeps parameter count <= 6 while rejecting unknown option keys with RECORDER_OPTIONS_INVALID."
+    ),
 }
 
 RUNTIME_ARTIFACT_NAMES = {
