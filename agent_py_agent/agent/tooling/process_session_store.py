@@ -287,8 +287,8 @@ class ProcessSessionTransaction:
         for session_id in selected:
             unlink_file_beneath(self.root, (f"{session_id}.json",))
 
-    # LLM: 数量裁剪保持原终态集合与排序；TTL只用可信finished_at，pending或未登记通知绝不删除。
-    #   调用方需先完成共享资源清理；TTL只回收已终态历史记录，不关闭进程或替代资源释放。
+    # LLM: 数量和年龄裁剪共用已终态、无保留/激活约束且通知结清的同一候选集合；TTL不能绕过这些门。
+    #   只按可信finished_at判断超龄，不关闭进程、不替代资源释放或用explicit_stop标记代替消费读口。
     # 函数用途: 在原目录锁内清理数量超额或安全超龄记录，并返回实际删除的句柄。
     def prune_finished(self, max_finished: int | None = None, *, max_age_seconds: float | None = None,
                        now: float | None = None, is_notice_consumed: Callable[[str], bool] | None = None) -> list[str]:
@@ -307,19 +307,21 @@ class ProcessSessionTransaction:
         )
         selected = {record["session_id"]: record for record in finished[max(0, int(max_finished)) :]} if max_finished is not None else {}
         current_now = time.time() if now is None else float(now)
-        for record in records:
-            if _record_ttl_expired(record, max_age_seconds, current_now) and _completion_obligation_finished(record, is_notice_consumed):
+        for record in finished:
+            if _record_ttl_expired(record, max_age_seconds, current_now):
                 selected[record["session_id"]] = record
         return [session_id for session_id, record in selected.items() if _unlink_session_if_unchanged(self.root, record)]
 
 
-# LLM: 规范空目标{}表示无收件人；有目标必须有回执且显式停止或消费读口证明已不pending，缺读口即保留。
+# LLM: pending状态优先保留；规范空目标{}无收件人，有目标必须有回执且消费读口明确证明结清，缺读口即保留。
 # 函数用途: 判断历史完成通知义务是否已经结清，不缓存或猜测wake状态。
 def _completion_obligation_finished(record: dict[str, object], consumed: Callable[[str], bool] | None) -> bool:
+    if record.get("completion_notification_status") == "pending":
+        return False
     if not record.get("completion_target"):
         return True
     notice = str(record.get("completion_notice_id") or "").strip()
-    return bool(notice) and (notice == "explicit_stop" or (consumed is not None and consumed(notice) is True))
+    return bool(notice) and consumed is not None and consumed(notice) is True
 
 
 # LLM: TTL仅清理exited/killed，不能用started_at兜底；小合成时间、缺失、非有限数均不按年龄删。

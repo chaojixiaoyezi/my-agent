@@ -44,6 +44,10 @@ from .tool_output_failsafe import write_tool_output_fail_safe_checkpoint
 
 # 模型摘要存档的最大字符数。
 _MODEL_SUMMARY_MAX_CHARS = 12_000
+# 工具外置回执预览的最大字符数；完整正文与哈希仍保存在原归档中。
+TOOL_PREVIEW_CHAR_LIMIT_CHARS = 1200
+# 任务指定的接口名沿同一权威常数取值；目录按带单位后缀的定义投影，避免新增不合规常数。
+TOOL_PREVIEW_CHAR_LIMIT = TOOL_PREVIEW_CHAR_LIMIT_CHARS
 
 
 # LLM: 原始输出先按 owner/run 及实际 ToolCall 的 attempt/turn 归档；仅真正外置且未声明保留正文的结果使用预览。
@@ -328,11 +332,14 @@ def _bounded_model_summary(value: str) -> str:
     return f"{value[:head]}{marker}{value[-tail:]}"
 
 
+# LLM: 两个归档出口共用此配置读取；仅外置预览受1200字符硬上界，保留更小用户值，不更改外置阈值或完整正文。
+# 函数用途: 读取整数配置与原默认值，给归档预览套上统一上限。
 def _config_int(agent: object, key: str) -> int:
     try:
-        return int(getattr(agent.config, key))
+        value = int(getattr(agent.config, key))
     except (AttributeError, TypeError, ValueError):
-        return default_config_int(key)
+        value = default_config_int(key)
+    return min(value, TOOL_PREVIEW_CHAR_LIMIT) if key == "tool_output_preview_chars" else value
 
 
 # LLM: 布尔配置读取；agent/config 缺字段时用调用方给的默认值，不抛错（归档层不能因配置形状中断工具结果）。

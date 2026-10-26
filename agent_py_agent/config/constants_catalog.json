@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1169,
+  "count": 1171,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -548,6 +548,14 @@
       "description": "参数减量第 3 批：没给 count 时默认创建的子代理数不再是配置项；cli/_board.py 的 spawn 命令共用同一常量。"
     },
     {
+      "name": "TOOL_PREVIEW_CHAR_LIMIT",
+      "file": "agent_py_agent/agent/agent_core/tool_call_archive_record.py",
+      "value": 1200,
+      "unit": "",
+      "category": "上限预算",
+      "description": "工具外置回执预览的最大字符数；完整正文与哈希仍保存在原归档中。"
+    },
+    {
       "name": "_MODEL_SUMMARY_MAX_CHARS",
       "file": "agent_py_agent/agent/agent_core/tool_call_archive_record.py",
       "value": 12000,
@@ -970,6 +978,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "回收后仅有界排空管道；脱组进程仍持有描述符时，不无限等 EOF。"
+    },
+    {
+      "name": "_SEATBELT_LITERAL_MAX_BYTES",
+      "file": "agent_py_agent/agent/attempt/sandbox.py",
+      "value": 768,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单条 macOS Seatbelt 字符串字面量允许的最大 UTF-8 字节数（低于 TinyScheme 1024B 缓冲上限）。"
     },
     {
       "name": "_FICLONE",

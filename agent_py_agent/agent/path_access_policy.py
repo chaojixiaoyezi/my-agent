@@ -865,13 +865,6 @@ def macos_hidden_pattern(agent_home_root: Path, owner_home: Path | None = None) 
     return f"^{prefix}/({parts})(/|$)"
 
 
-# LLM: 兼容旧字符串检查接口；生产Seatbelt必须用复数接口按最终字面量字节切分，保护项仍来自原H3常量。
-# 函数用途: 返回完整等价正则供旧调用核对，不把它作为单条SBPL直接执行。
-def macos_readonly_pattern(root: Path, owner_home: Path | None = None) -> str:
-    prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(root)
-    return _macos_readonly_chunk(prefix, _macos_readonly_atoms())
-
-
 # LLM: 每个原子保留完整相对路径；同类锁/SQLite尾缀共用组，不重复展开，禁止删保护项换取字节达标。
 # 函数用途: 从唯一H3声明生成可独立拆分的保护分支。
 def _macos_readonly_atoms() -> list[tuple[str, str]]:
@@ -891,21 +884,22 @@ def _macos_readonly_chunk(prefix: str, atoms: list[tuple[str, str]]) -> str:
     return f"^{prefix}/({'|'.join(parts)})(/|$)"
 
 
-# LLM: 同时限制原始UTF-8与JSON/SBPL转义后的完整字面量；根须显式，单原子不可表示时失败关闭，不能跳过保护。
-# 函数用途: 按TinyScheme安全预算动态切分H3拒写正则，不枚举owner。
-def macos_readonly_patterns(root: Path | None = None, owner_home: Path | None = None, *, max_pattern_bytes: int = 768) -> tuple[str, ...]:
+# LLM: 最终JSON/SBPL字面量严格小于请求预算及768B；根须显式，单原子不可表示时失败关闭，不能跳过保护。
+# 函数用途: 按含引号与转义的字节预算切分H3拒写正则，不枚举owner；只有此复数接口维护投影。
+def macos_readonly_patterns(root: Path | None = None, owner_home: Path | None = None, *, max_pattern_bytes: int = 700) -> tuple[str, ...]:
     if root is None and owner_home is None:
         raise ValueError("macOS protection requires an explicit root")
     prefix = re.escape(str(owner_home.resolve(strict=False))) if owner_home is not None else macos_owner_prefix(root)
+    budget = min(max_pattern_bytes, 768)
     patterns, chunk = [], []
     for atom in _macos_readonly_atoms():
         candidate = _macos_readonly_chunk(prefix, [*chunk, atom])
-        if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > max_pattern_bytes:
+        if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) >= budget:
             if chunk:
                 patterns.append(_macos_readonly_chunk(prefix, chunk))
             chunk = [atom]
             candidate = _macos_readonly_chunk(prefix, chunk)
-            if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > max_pattern_bytes:
+            if len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) >= budget:
                 raise ValueError("macOS protection root exceeds SBPL literal budget")
         else:
             chunk.append(atom)
