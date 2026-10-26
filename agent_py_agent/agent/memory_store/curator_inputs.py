@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..common.cache_freshness import cache_entry_trustworthy
+from ..io.cursor_cache import CursorCache, file_stamp
 from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
@@ -26,6 +28,8 @@ _SUCCESS_TOOL_STATUSES = frozenset(
     {"success", "succeeded", "ok", "completed", "committed", "applied"}
 )
 _INCOMPLETE_TOOL_EFFECTS = frozenset({"unknown", "not_started", "failed"})
+# 可覆盖生产万级冷线程；仅保存文件指纹与游标，淘汰只会恢复原只读扫描。
+_COLD_THREAD_EOF = CursorCache(16_384)
 
 ToolReferenceQuery = Callable[[Path, tuple[str, ...], int], dict[str, object]]
 
@@ -373,7 +377,7 @@ def collect_curator_inputs(
 # LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
 # 两个读取能力来自同一 ConversationStore 的显式领域，不探测旧方法或建立第二份消息来源。
 # 学习排除名单在读取任何消息前生效：命中的会话整段跳过（cursor 不动），名单不可读时本轮全跳。
-# 函数用途: 收集最早仍未处理的消息直至批量/字符上限，跳过学习排除名单内的会话。
+# 函数用途: 收集预算内消息；排除来源先跳过，已确认EOF且文件未变的冷线程不再调用消息读取器。
 def _collect_messages(
     *,
     source: CuratorMessageSource,
@@ -398,14 +402,21 @@ def _collect_messages(
             break
         if thread_is_excluded(thread, source.excluded_conversation_ids):
             continue
+        thread_id = str(thread.thread_id)
+        cursor = str(cursors.get(thread_id) or "")
+        eof_key = _cold_thread_key(conversation_store, thread_id, cursor)
+        if eof_key is not None and _COLD_THREAD_EOF.get(eof_key):
+            continue
         entries, load_errors = after_report(
-            str(thread.thread_id),
-            after_message_id=str(cursors.get(str(thread.thread_id)) or ""),
+            thread_id,
+            after_message_id=cursor,
             limit=limit - len(selected),
         )
         errors.extend(dict(item) for item in load_errors)
         if load_errors:
             continue
+        if not entries and eof_key is not None and eof_key == _cold_thread_key(conversation_store, thread_id, cursor):
+            _COLD_THREAD_EOF.put(eof_key, True)
         for entry in entries:
             content = str(entry.content or "")
             remaining = max_chars - used_chars
@@ -435,6 +446,23 @@ def _collect_messages(
             if len(selected) >= limit:
                 break
     return selected, errors
+
+
+# LLM: 只从原Store的canonical路径读五字段stat；fresh、缺失或替身无路径时不缓存，任何变更回到原报告。
+# 函数用途: 为已确认追平的线程建立有界进程内EOF键，不保存消息正文或改变持久游标。
+def _cold_thread_key(store, thread_id: str, cursor: str):
+    storage = getattr(store, "storage", None)
+    path_for = getattr(storage, "message_path", None)
+    if not callable(path_for):
+        return None
+    try:
+        path = path_for(thread_id)
+        stamp = file_stamp(path.stat())
+        if cache_entry_trustworthy(stamp.mtime_ns):
+            return id(store), str(path.absolute()), cursor, stamp
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
 
 
 # LLM: audit 行按 thread_id 归属；名单是 channel_conversation_id，先经线程元数据翻译成 thread_id 集合。
