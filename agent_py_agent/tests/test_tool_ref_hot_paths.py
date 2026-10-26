@@ -1,3 +1,5 @@
+# LLM: 保留解码/作用域/物理路径合同；wave4-c5字面过滤零IO与命中坏目标拒绝分层验证。
+# 模块用途: 回归artifact、晋升和控制面热路径，区分纯筛选和安全读取观察点。
 """07 steer2：高频artifact/晋升/控制面逐条等价与非匹配行零loads。"""
 from __future__ import annotations
 
@@ -156,6 +158,8 @@ def test_canonical_posix_index_path_does_not_build_interned_path_objects(tmp_pat
     assert calls == []
 
 
+# LLM: c5要求literal先匹配；匹配筛选不得触路径，最终命中读取仍保持原路径错误与异常类别。
+# 函数用途: 分别验证零IO字面筛选与命中坏路径的拒绝，替代旧eager筛选合同。
 @pytest.mark.parametrize("suffix", ["normal.json", "./normal.json", "dir/../normal.json", "embedded\0null", "loop"])
 def test_posix_record_resolver_equals_original_path_contract(tmp_path: Path, suffix: str) -> None:
     if suffix == "loop":
@@ -168,10 +172,12 @@ def test_posix_record_resolver_equals_original_path_contract(tmp_path: Path, suf
         else _path_outcome(lambda: Path(path).expanduser().resolve(strict=False))
     )
     actual = _path_outcome(lambda: reader._record_matches_ref(row, "hit", None))
+    assert actual == ("value", True)
     if expected[0] == "error":
-        assert actual == expected
-    else:
-        assert actual == ("value", True)
+        assert _path_outcome(lambda: reader._resolve_index_record_path(path)) == expected
+        write_index(tmp_path, json.dumps(row).encode())
+        request = reader.ReadToolOutputArtifactRequest(tmp_path, "hit")
+        assert _path_outcome(lambda: reader._find_index_record(tmp_path, "hit", request)) == expected
 
 
 def _path_outcome(call):
@@ -273,15 +279,20 @@ def test_unmatched_oversized_integer_keeps_decode_error(tmp_path: Path, mode: st
         new()
 
 
+# LLM: 未匹配逻辑ID不解析噪声路径；同一坏行真正匹配时仍原样拒绝，解码错误另有独立回归。
+# 函数用途: 验证c5零噪声路径解析而不掩盖命中产物的symlink错误。
 def test_unmatched_symlink_loop_keeps_artifact_path_error(tmp_path: Path) -> None:
     loop = tmp_path / "loop"
     loop.symlink_to(loop)
     write_index(tmp_path, json.dumps({"call_id": "other", "path": str(loop)}).encode())
     request = reader.ReadToolOutputArtifactRequest(tmp_path, "needle")
+    from unittest.mock import patch
+
+    with patch.object(reader, "_resolve_index_record_path", side_effect=AssertionError("unmatched path resolved")):
+        assert reader._find_index_record(tmp_path, "needle", request) is None
+    matched = reader.ReadToolOutputArtifactRequest(tmp_path, "other")
     with pytest.raises(RuntimeError):
-        old_find(tmp_path, "needle", request)
-    with pytest.raises(RuntimeError):
-        reader._find_index_record(tmp_path, "needle", request)
+        reader._find_index_record(tmp_path, "other", matched)
 
 
 @pytest.mark.parametrize("path_value", ["~missing_toolrefs_user/a.json", "a\x00b", None, 10, {"a": "b"}])

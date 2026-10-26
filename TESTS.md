@@ -43,6 +43,46 @@ python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.j
 
 生成的`CODE_SIZE_REPORT.md`不得随功能提交。WT1/WT2真实实现、跨用户安装/通知/审核执行、真实CLI窗口和部署仍由集成者在合并版本上复核。原footer已无计时渲染分支，没有为凑“死代码删除”误删仍使用的CLI格式化函数；仅替换旧反向completion块名及仅final可处于末位的旧排序限制。
 
+## Wave4 A1–A5 性能优化（wt-wave4-c2，2026-10-25 开工）
+
+来源：07 的 `wt-wave4-c2-perf-a1-a5.md` 及 `foundation-latency-and-cpu-optimization-20261026.md`。工作树 `/tmp/wt-wave4-c2`，起始基线 `2231e5abda61994c0d8ec2a07e01527e586e0755`；未修改三项沙箱/路径/后台进程保留模块，未部署。
+
+- **A1**：逻辑引用先按字面字段匹配，无物理ref时不解析噪声路径。已安全打开的索引FD以 root/path/dev/ino/size/mtime/ctime 构造键，复用既有锁/LRU，索引缓存有16 MiB字节界限；返回记录深复制，缓存不代替owner/scope/nofollow授权。主根完整scoped命中跳过历史目录，范围不足、路径别名及basename歧义仍走原搜索。工具层本来已有prepared read计划，本次直接复用而不新增占位API。
+- **A2**：单键view先展示fact/parameter，不带无关能力目录；search的brief移除重复applied_rule，常数仅参数少于5项或显式include_constants时查询。写后沿真实read_config_fact回读；ok/action/changed_keys/applied_values等摘要先输出，默认config仅修改键，include_full_config才加载并脱敏完整配置。两个flag不对决策只读角色展示，原权限和旧回执字段保留。
+- **A3**：实际调用账本metadata记录context_assembly_ms、request_prepare_ms、pre_call_housekeeping_ms、supervision_sweep_ms，统一time.monotonic。纯组装不含前置输入/直属状态刷新或Compact/选模等待；未取得分阶段观测时记None，不伪造零。该基线的supervision字段计量实际直属快照刷新，不声称调用了不存在的旧函数或事件。
+- **A4**：沿已有内容指纹与冻结参数的_context_estimate_memo共享prompt/IR纯投影，预检→物化→最终计量调用次数由实测3次降到1次。冷计算仅复制一次一致IR快照，发表前核对原输入，热命中复核输入/输出内容；中段嵌套原位改写、回滚和作用域变化不能复用错误结果。原数字single-flight计量、schema/guidance新鲜读取及出站隔离不变。空真实manager目录跳过canonical列表；替代/覆盖manager、已有条目、新目录及IO错误仍回原路径。
+- **A5**：硬上限复用model_request_input_ceiling，保留已知输出预留，不拿软Compact线当容量。原开关、阈值、短预览、未知窗口及预算错误策略保持。未提交结果按原模型turn/call身份原子预留，仅typed ToolResult已进入canonical IR且配对AssistantTurn中的原ToolCall身份属于本批才结算；旧turn同call_id不能提前结算新结果。预算变化不丢未提交预留，新turn清空旧批，同call重试不重复计费。溢出保留软线字段并新增实际remaining_hard_headroom_tokens。
+
+### 回归与审阅证据
+
+新增 `agent_py_agent/tests/test_perf_a1_a5_optimizations.py`：覆盖字面零解析、索引追加失效/返回污染隔离、主根零历史枚举、紧凑与完整配置回执、单调时钟/阶段拆分、真实冻结参数、三阶段共享、原位修改、零子代理及新孩子、软/硬窗口、同批累计/预算变化/换turn/提交结算/重试/硬余量回执。
+
+先写失败测试再修复；独立gpt-6-astra high只做内联A4/A5静态审阅，完整报告已读。其四个反例均被产品入口测试复现为4 failed，再逐项修复；另补旧turn同call_id不能结算新turn的红转绿回归。不把该静态检查称为全仓或E2E通过。
+
+**2026-10-26 最终当前源码验证**：42个关联文件实测 **1028 passed / 8 failed / 4 skipped / 4 xfailed / 4 xpassed**，总1048项，未跑全仓pytest。其中本节复现命令的13个目标文件，经同份JUnit逐项筛选核对，为 **461 passed / 4 xfailed / 1 skipped / 0 failures / 0 errors**；新增A1–A5测试 **23项全部通过**。未删除、增加或放宽任何xfail标记。
+
+扩大回归的8个失败已在真正起始提交 `2231e5abda61994c0d8ec2a07e01527e586e0755` 的临时干净detached工作树逐条复跑，**8 failed / 0 passed，失败用例集合完全相同**，且已确认解释器实际导入该基线工作树。分别是：artifact_registry的中文文件rename出现Operation not permitted（1项）、真实shell guardrail断言（1项）、capability selection旧任务终态字节断言（2项）、scheduler_precheck仍假定compat正文（1项）、tool_loop_model_turn的旧request替身不接受基线已有assembly_started_at参数（3项）。这些是已复现的基线失败，不在本任务里顺手改动或跳过；此扩大套件**不是全绿**。
+
+原始日志及JUnit：`.pytest_cache/wave4-final-tests.{log,xml}`、`wave4-baseline-tests.{log,xml}`；程序统计为`wave4-final-summary.json`。临时基线工作树已移除，证据仍在父工作树缓存。全量Ruff、strict code-size（hard=0、blocked=False）、doc-sync、diff-check通过；CODE_SIZE_REPORT.md已还原，未随功能提交。
+
+旧 `test_artifact_read_lookup_plan.py` 的调用次数断言被加强为单命中解析/主根零历史发现。`test_tool_ref_hot_paths.py` 的旧eager matcher断言按c5改成字面过滤零IO，并**增加最终命中坏路径仍抛原异常的断言**；逻辑miss不解析无关loop，匹配loop仍拒绝。解码、UTF8、大整数、范围与物理别名检查保留，不通过删测或xfail迁就实现。
+
+任务单与此基线有名称差异：不存在test_artifact_tools.py/test_user_config_tool.py，实际使用test_memory_artifact_read.py、test_artifact_read_lookup_plan.py、test_tool_ref_scope_stream.py、test_user_config_capability.py、test_parameters.py和test_parameter_changes.py替代扩展。也不存在TOOL_PREVIEW_CHAR_LIMIT及指定旧函数/round_model_call_completed事件；真实AgentConfig.tool_output_preview_chars实测为**4000**，已高于1200，未降低默认值、伪造常数或新增无读取点目录项。
+
+删除的确认死代码：reader._sha256_text，以及迁移共享投影后tool_model_generation中不再使用的project_native_prompt_history导入。_unique_record_by_basename仍被历史oracle测试调用，因此保留。
+
+复现（工作树根，限定相关文件；不运行全仓pytest）：
+
+```bash
+python3 -m pytest -o addopts='' agent_py_agent/tests/test_perf_a1_a5_optimizations.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_user_config_capability.py agent_py_agent/tests/test_parameters.py agent_py_agent/tests/test_parameter_changes.py agent_py_agent/tests/test_model_latency_q2.py agent_py_agent/tests/test_context_pressure.py agent_py_agent/tests/test_tool_output_headroom_externalize.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_artifact_read_path_races.py -q --tb=short
+ruff check agent_py_agent
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+python3 scripts/check_doc_sync.py
+git diff --check
+```
+
+**未验证**：真实在线模型端到端耗时、生产大索引的绝对加速倍数、部署后的250k上下文和39.3s场景。调用次数与边界测试不是生产延迟收益。CODE_SIZE_REPORT.md为生成物，交付前还原，不随提交。
+
 ## 2026-10-26 底座残余性能、资源回收、沙箱安全与网关 04:00 安全重启死锁回归（7 Worktrees 集成）
 
 本轮集成覆盖 `wt-perf-a` 至 `wt-gw-g` 共 7 个隔离工作树的定向回归测试：

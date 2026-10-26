@@ -75,7 +75,7 @@ _HOST_SHUTDOWN_CLOSURE = ModelCallAdmissionClosure(
 
 
 # LLM: 超时/账本/TUI共用预计算快照；估算单独保留，组装用单调时钟，轮间隔只借同线程同账本同run/request的终态点。
-# 函数用途: 登记调用及组装/轮间耗时、绑定可选任务遥测，并按同一快照计算慢模型超时。
+# 函数用途: 登记纯组装、总准备与轮间耗时，按同一快照绑定遥测及慢模型超时。
 def start_model_call_record(
     request: object,
     *,
@@ -105,8 +105,10 @@ def start_model_call_record(
     from .response_provenance import response_call_purpose
 
     assembly_started = float(getattr(request, "context_assembly_started_at", 0.0) or 0.0)
+    prepared_started = float(getattr(request, "request_prepare_started_at", 0.0) or 0.0)
+    prepared_finished = time.monotonic()
     context_assembly_ms = (
-        round(max(0.0, (time.monotonic() - assembly_started) * 1000.0), 3)
+        round(max(0.0, (prepared_finished - assembly_started) * 1000.0), 3)
         if assembly_started > 0.0
         else 0.0
     )
@@ -123,6 +125,9 @@ def start_model_call_record(
                 "physical_attempt": physical_attempt, "model_selection": model_selection_metadata(agent),
                 "first_token_timeout_estimate": estimate.to_dict(),
                 "context_assembly_ms": context_assembly_ms,
+                "request_prepare_ms": round(max(0.0, prepared_finished - prepared_started) * 1000.0, 3) if prepared_started > 0 else context_assembly_ms,
+                "pre_call_housekeeping_ms": getattr(request, "pre_call_housekeeping_ms", None),
+                "supervision_sweep_ms": getattr(request, "supervision_sweep_ms", None),
                 "inter_round_gap_ms": _model_call_inter_round_gap_ms(ledger, params),
                 "estimated_input_tokens": input_tokens,
             },

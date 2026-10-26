@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from copy import deepcopy
@@ -305,14 +306,17 @@ def _empty_model_response_retry_context(params: ToolLoopExecuteParams) -> str:
 # only a full-recovery request host that owns this Compact moment may defer the native fit, so the
 # same source is not summarized/CAS-committed twice before capture. Do not bypass it otherwise.
 #   注入返回 True 也可能只有 lookup 告警；须确认已无使响应失效的待处理输入，才重置原连续作废计数。
-# 函数用途: 组装本轮工具模型输入，并在真正调用模型前用统一 Compact 配置压住可见上下文。
+# 函数用途: 分开计量前置输入/孩子刷新与纯组装，再沿统一Compact配置压住可见上下文。
 def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
+    preparation_started = time.monotonic()
     # 子代理状态是当前运行事实，不属于可被 compact 摘要冻结的历史。每次 provider 安全点
     # 原位刷新一个稳定的小尾巴；状态没变时字节不变，保留前缀缓存命中。
     refresh_runtime_direct_children_snapshot(agent, params)
+    supervision_ms = (time.monotonic() - preparation_started) * 1000
     if params.consume_pending_turn_input:
         if inject_pending_turn_input(agent, params) and not _pending_turn_input_invalidates_response(agent, params):
             _reset_pending_turn_input_invalidations(params)
+    assembly_started = time.monotonic()
     window_tool_context_params(agent, params)
     prompt = _render_tool_loop_prompt(agent, params)
     # native 下文本 tool_context 不发往 provider（IR messages 才发）。真正决定整个请求
@@ -322,6 +326,14 @@ def build_tool_loop_prompt(agent, params: ToolLoopExecuteParams) -> str:
 
     if not request_owns_compact(agent, params):
         _fit_native_ir_to_shared_budget(agent, params, prompt)
+    from .model.context_estimate_cache import estimate_memo_for
+
+    memo = estimate_memo_for(params)
+    if memo is not None:
+        memo.remember_prompt_timings({"started_at": preparation_started,
+            "assembly_ms": (time.monotonic() - assembly_started) * 1000,
+            "pre_call_housekeeping_ms": (assembly_started - preparation_started) * 1000,
+            "supervision_sweep_ms": supervision_ms})
     return prompt
 
 
@@ -1489,7 +1501,7 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
 # 选模仍在每次尝试内重新进行。主选包与 child 已授权入口只在真实业务首轮 build/capture 前准备，不进入回执/预览或已提交恢复候选。
 # LLM: 首片委派准备经原宿主创建服务；根表达零工具，只有 canonical OPEN 孩子申请可投影原父级裁决工具。
-# 函数用途: 选择真实出站上下文与模型依赖，保持委派协调、Compact、请求恢复和原输入确认合同。
+# 函数用途: 单调时钟拆分纯prompt组装与含Compact/选模的请求准备，保持原恢复和输入确认合同。
 def next_tool_loop_model_response(
     agent, params: ToolLoopExecuteParams, tool_rounds: int,
 ) -> ModelTurnRequest:
@@ -1500,11 +1512,12 @@ def next_tool_loop_model_response(
         reject_request_selection,
         select_request_model,
     )
-    from .model.call_runtime import model_call_ledger
     from .model.selection_refresh import refresh_selected_model
     from .subagent.model_selection import select_first_request_model
 
-    assembly_started_at = float(model_call_ledger(agent).context.now())
+    request_prepare_started_at = time.monotonic()
+    assembly_duration = 0.0
+    assembly_started_at = request_prepare_started_at
     committed = committed_request_selection(agent, params)
     if committed is not None:
         # 恢复候选已提交：重试原样复用，旧请求不再发送；新插话留到下一轮由新参数送出。
@@ -1537,13 +1550,17 @@ def next_tool_loop_model_response(
             prepare_capability_package_selection(agent, params)
             prepare_conversation_method_carry(agent, params)
             prepare_subagent_package_entries(agent, params)
+        assembly_started_at = time.monotonic()
         prompt = build_tool_loop_prompt(agent, params)
+        assembly_duration = time.monotonic() - assembly_started_at
         prepared, prompt = prepare_request_context(agent, params, prompt)
     baseline, baseline_prompt = select_first_request_model(agent, prepared, prompt)
     selected, selected_prompt = select_request_model(agent, baseline, baseline_prompt)
+    assembly_started_at = time.monotonic() - assembly_duration
     try:
         prompt, response = _request_tool_loop_model_response(
             agent, selected, tool_rounds, first_prompt=selected_prompt, assembly_started_at=assembly_started_at,
+            request_prepare_started_at=request_prepare_started_at,
         )
         return ModelTurnRequest(prompt, response, selected)
     except ModelRequestSelectionRejected:
@@ -1551,13 +1568,14 @@ def next_tool_loop_model_response(
         reject_request_selection(agent, selected)
         prompt, response = _request_tool_loop_model_response(
             agent, baseline, tool_rounds, first_prompt=baseline_prompt, assembly_started_at=assembly_started_at,
+            request_prepare_started_at=request_prepare_started_at,
         )
         return ModelTurnRequest(prompt, response, baseline)
 
 
 # LLM: 固定同一份参数完成原请求周期；首发可复用已准备的 prompt，超限重试照原方式重建，prompt/response 成对。
 # 主请求与回执均不撤回线程已加载Schema，当前授权仍由原工具快照约束。
-# 函数用途: 把请求组装、实际生成、输入恢复与原 Compact 回收绑定到同一份参数后交给模型请求周期。
+# 函数用途: 用一致单调时钟计量每次请求准备，重建重置起点，不把上次模型等待计入组装。
 def _request_tool_loop_model_response(
     agent,
     model_params: ToolLoopExecuteParams,
@@ -1565,24 +1583,37 @@ def _request_tool_loop_model_response(
     *,
     first_prompt: str | None = None,
     assembly_started_at: float = 0.0,
+    request_prepare_started_at: float = 0.0,
 ) -> tuple[str, ModelResponse]:
-    from .model.call_runtime import model_call_ledger
     from .tool_context.ptl_retry import DEFAULT_PTL_RETRY_MAX_COUNT
 
-    started_box = [assembly_started_at or float(model_call_ledger(agent).context.now())]
+    started_box = [assembly_started_at or time.monotonic()]
+    prepare_box = [request_prepare_started_at or started_box[0]]
 
+    # LLM: 每次恢复后重新计时，不复用压缩前或注入账本的时钟。
+    # 函数用途: 生成重试prompt并重新设置本次准备和组装起点。
     def _rebuild_with_timer() -> str:
-        started_box[0] = float(model_call_ledger(agent).context.now())
+        started_box[0] = prepare_box[0] = time.monotonic()
         return build_tool_loop_prompt(agent, model_params)
+
+    # LLM: 只借当前线程、本次准备开始后的实际计时；无观测时保留未知，不伪造零耗时。
+    # 函数用途: 为真实生成传递纯组装与总准备起点及前置工作耗时。
+    def _generate_prepared(prompt):
+        from .model.context_estimate_cache import estimate_memo_for
+
+        memo = estimate_memo_for(model_params)
+        phase = memo.prompt_timings() if memo is not None else None
+        phase = phase if phase is not None and phase["started_at"] >= prepare_box[0] else {}
+        assembly_start = time.monotonic() - phase["assembly_ms"] / 1000 if phase else started_box[0]
+        return generate_model_response(ModelGenerateParams(
+            agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds,
+            context_assembly_started_at=assembly_start, request_prepare_started_at=prepare_box[0],
+            pre_call_housekeeping_ms=phase.get("pre_call_housekeeping_ms"),
+            supervision_sweep_ms=phase.get("supervision_sweep_ms")))
 
     return request_model_response(
         build_prompt=_rebuild_with_timer if first_prompt is None else _prebuilt_prompt_first(first_prompt, _rebuild_with_timer),
-        generate_response=lambda prompt: generate_model_response(
-            ModelGenerateParams(
-                agent=agent, params=model_params, prompt=prompt, tool_rounds=tool_rounds,
-                context_assembly_started_at=started_box[0],
-            )
-        ),
+        generate_response=_generate_prepared,
         restore_rejected_input=partial(
             restore_injected_turn_input_for_provider_retry, agent, model_params
         ),

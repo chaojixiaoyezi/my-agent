@@ -1,3 +1,9 @@
+## Wave4 A1 索引快照与主根优先结构
+
+- `reader.py::_primary_index_has_scoped_ref` 只对可证明的完整scoped主根命中提前选择当前索引；否则原历史发现路径保持。既有`PreparedToolOutputArtifactRead`仍是工具读取与预算估计的共享计划，不新增第二个工具入口。
+- `_parsed_artifact_index` 使用安全打开FD的五元stat及可信root/path作为纯解析键，复用既有锁与LRU，受16 MiB索引字节上限约束；`_OpenArtifactIndex`让原UTF8/换行解码器消费同一个FD。字面映射保留原行顺序，返回记录深复制，物理别名与范围裁决不由缓存决定。
+- `_record_matches_ref` 字面命中优先；`resolved_ref is None`的逻辑miss不调用路径解析。真实命中产物由原候选/正文路径继续验证，纯筛选与读取错误的观察点分开；下方2026-10-23节保留的是此前结构。
+
 ## 2026-10-26 `candidates.py` 只读扫描接口、$O(1)$ 合并索引与 `retention_apply.py` 空目录回收结构
 
 - `memory_store/candidates.py::CandidateService.readonly_rows` 在未覆盖 `list` 或 `_load_unlocked` 时直接从 `_borrow_candidate_readonly_rows` 过滤并切片返回只读元组；`_merge_existing_candidates` 构建 `by_id` 与 `by_key` 哈希索引以 $O(1)$ 定位活跃与历史同键候选。

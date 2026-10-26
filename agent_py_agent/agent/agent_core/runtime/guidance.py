@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 from ...contracts.subagent_completion import (
@@ -74,13 +76,15 @@ def refresh_runtime_direct_children_snapshot(agent: object, params: object) -> b
 
 # LLM: Parent identity comes only from the runner scope or durable task id. Canonical run rows are
 # filtered by exact parent_id; root lineage, names, goals and summaries never establish ownership.
-# 函数用途: 在原状态快照中提供直属孩子的完成交接，主子孙都能在下一安全边界整合结果。
+# 函数用途: 空子代理目录直接返回，其余沿canonical快照交付直属孩子事实，不跳过替代manager。
 def _render_runtime_direct_children(agent: object, params: object) -> str:
     parent_run_id = current_subagent_run_id(agent) or durable_task_id(params)
     if not parent_run_id:
         return ""
     manager = getattr(agent, "subagents", None)
     if manager is None:
+        return ""
+    if _subagent_workspace_is_empty(manager):
         return ""
     runs: list[Any] = []
     load_errors: list[object] = []
@@ -159,6 +163,32 @@ def _render_runtime_direct_children(agent: object, params: object) -> str:
             ),
         ]
     )
+
+
+# LLM: 只有原manager、未覆盖的列表入口且真实目录为空才可短路；未知、替代对象、历史条目或IO拒绝仍查canonical。
+# 函数用途: 检查零子代理快路径，每次观察目录，创建新孩子后立即恢复原扫描。
+def _subagent_workspace_is_empty(manager):
+    from ...subagents.manager import SubAgentManager
+
+    if type(manager) is not SubAgentManager or getattr(manager, "_observed_subagent_entries", False):
+        return False
+    for name in ("list_runs_for_root_report", "list_runs_report", "list_runs"):
+        method = getattr(manager, name, None)
+        if name in vars(manager) or not str(getattr(getattr(method, "__func__", None), "__module__", "")).startswith("agent_py_agent.agent.subagents"):
+            return False
+    path = Path(manager.workspace)
+    try:
+        if path.is_symlink():
+            return False
+        with os.scandir(path) as entries:
+            empty = next(entries, None) is None
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not empty:
+        manager._observed_subagent_entries = True
+    return empty
 
 
 # LLM: 原opaque运输source在实际安全点drain；短锁忙在事务外同deadline重试，不重发模型，typed/unknown不吞；仅真实消费轮追加，随后仍原reserve/submit/ACK，递归父级不领取根邮箱。
