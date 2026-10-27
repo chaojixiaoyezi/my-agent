@@ -137,3 +137,31 @@ def test_r4_f11_old_adoption_cannot_credit_unadopted_new_version(tmp_path):
     agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), home_paths=ctx.home, _current_run_params=params)
     _observe(agent, params, 'effective', 'receipt-old')
     assert ctx.store.load_registry().skills['skill-a'].maintenance.get('helped_count', 0) == 0
+
+
+# LLM: 自动回滚清空当前observations前必须将采用记录沉入historical_adoptions，防止同run后续多技能无目标回执误归因。
+# 函数用途: 覆盖A@v2自动回滚至v1后同run采用B时的无目标回执歧义拒绝。
+def test_r5_f11_rollback_preserves_adoption_history_against_ambiguous_receipt(tmp_path):
+    ctx = _runtime(tmp_path)
+    store = ctx.store
+    publish_learned_skill(store, PublishRequest(decision('skill-a')))
+    v1_row = store.load_registry().skills['skill-a']
+    changed = replace(decision('skill-a'), decision='update', update_target='skill-a', body=BODY + '\nv2-body')
+    publish_learned_skill(store, PublishRequest(changed, expected_revision=v1_row.revision, expected_sha256=v1_row.sha256))
+    v2_hash = store.load_registry().skills['skill-a'].sha256
+    for idx in range(2):
+        observe_learning(store, 'skill-a', sha256=v2_hash, task_id=f'fail-{idx}',
+                         outcome='adopted', source=LearningObservationSource(run_id='run-rb'))
+        observe_learning(store, 'skill-a', sha256=v2_hash, task_id=f'fail-{idx}',
+                         outcome='ineffective', source=LearningObservationSource(
+                             run_id='run-rb', authority='host', receipt_id=f'neg-{idx}'))
+    assert store.load_registry().skills['skill-a'].sha256 == v1_row.sha256
+    publish_learned_skill(store, PublishRequest(decision('skill-b')))
+    _adopt(store, 'skill-b', 'run-rb')
+    params = SimpleNamespace(run_id='run-rb', attempt_id='attempt')
+    agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), home_paths=ctx.home, _current_run_params=params)
+    _observe(agent, params, 'effective', 'receipt-rb')
+    registry = store.load_registry()
+    assert registry.skills['skill-b'].maintenance.get('helped_count', 0) == 0
+    assert any(fact['sha256'] == v2_hash and fact['run_id'] == 'run-rb'
+               for fact in registry.skills['skill-a'].maintenance.get('historical_adoptions', []))
