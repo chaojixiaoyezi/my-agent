@@ -77,13 +77,16 @@ def test_original_pending_requests_remains_fifo_source(tmp_path):
         ("autonomous", True, False, 0),
     ],
 )
+# LLM: 到期事实来自registry.last_maintenance_at；mtime保留给原运输代次测试，不作为维护时钟。
+# 函数用途: 覆盖原策略开关与冷热维护来源，不创建虚构FIFO。
 def test_registry_maintenance_is_discovered_without_synthetic_fifo(
     tmp_path, mode, enabled, due, expected
 ):
     context = _runtime(tmp_path)
     path = due_registry(context)
     if not due:
-        os.utime(path, None)
+        with context.store.state_lock():
+            context.store.save_registry(replace(context.store.load_registry(), last_maintenance_at=time.time()))
     before = path.read_bytes()
     refs = learning_sources(context, mode=mode, enabled=enabled)
     assert len(refs) == expected

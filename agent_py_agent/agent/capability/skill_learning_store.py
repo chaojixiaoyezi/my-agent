@@ -591,9 +591,11 @@ def _request_context(request):
     return ()
 
 
-# LLM: 规范root/task优先；谱系可压实，轨迹不对称缺失或冲突均保留；双方旧格式缺轨迹才按旧run合同兼容。
+# LLM: 显式不同task先拒绝，共同root或谱系不能覆盖子任务身份；同task轨迹/旧run兼容规则不变。
 # 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
 def _mergeable_requests(left, right):
+    if left.get('task_id') and right.get('task_id') and left['task_id'] != right['task_id']:
+        return False
     contexts = _request_context(left), _request_context(right)
     common = [key for key in ('root_task_id', 'task_id', 'thread_id', 'run_id') if left.get(key) and right.get(key)]
     if all(context and context[0] == 'task_id' for context in contexts):

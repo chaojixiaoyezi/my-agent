@@ -128,7 +128,7 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     return _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else "")
 
 
-# LLM: 更新须CAS且磁盘未被改；连续trial保留最初稳定快照及其证明，新hash清本版计数；登记失败写回旧正文。
+# LLM: 更新须CAS且磁盘未被改；连续trial保留稳定快照/证明；历史采用只留身份防归因歧义，新版质量清零。
 #   副作用：原子替换 SKILL.md（保留同目录其它文件），写 versions/ 与 registry.json。
 # 函数用途: 在锁内更新一个自学 Skill。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
@@ -152,6 +152,7 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                      maintenance={**current.maintenance, 'state':'trial', 'quality':'trial', 'helped_count':0, 'hurt_count':0,
                                    'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
                                    'promotion_history':['observed','candidate','validated','trial'],
+                                   'historical_adoptions':_historical_adoptions(current),
                                    'previous_verification':current.maintenance.get('previous_verification', {}) if stable else {key:current.maintenance.get(key) for key in ('promotion_authority','verification_receipt')},
                                   'observations':[], 'previous_stable':stable or {'version':current.version,'revision':current.revision,'sha256':current.sha256}})
     try:
@@ -163,6 +164,16 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
         replace_skill_file(path, previous)
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
     return _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else "")
+
+
+# LLM: 调用方持发布锁；只保存真实model/adopted的run+hash身份，去重但不把旧版质量带到新版。
+# 函数用途: 跨连续更新保留采用过的版本，避免无目标回执遗忘旧版造成误归因。
+def _historical_adoptions(current):
+    facts = [*current.maintenance.get('historical_adoptions', []), *current.maintenance.get('observations', [])]
+    pairs = {(fact.get('run_id'), fact.get('sha256')) for fact in facts if isinstance(fact, dict)
+             and fact.get('authority') == 'model' and fact.get('outcome') == 'adopted'
+             and fact.get('run_id') and fact.get('sha256')}
+    return [{'authority':'model', 'outcome':'adopted', 'run_id':run, 'sha256':sha} for run, sha in sorted(pairs)]
 
 
 # LLM: 调用方持state锁，语义族仅复用仍存在且未被用户修改的正式Skill；不接管停用/归档/删除的方法。

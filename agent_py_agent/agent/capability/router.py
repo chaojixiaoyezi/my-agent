@@ -96,7 +96,7 @@ _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS = """### 能力包使用规则
 - 边界：目录匹配和正文读取不增加工具、路径或网络权限。不可读时如实说明并继续可做部分；原任务失效包不能自动换用同名新版，也不能把缺失的核验说成通过。"""
 
 _SKILL_METADATA_HEADER = ["# Available Skills", "下列是本轮可用 Skill 的 name + description + stable skill_id。普通问答没有匹配项时无需调用。"]
-_SELECTED_SKILL_HEADER = ["# Selected Skills", "以下仅是本工作片展示的 Skill 名卡；使用前仍须 skill_search(action=get) 读取正文。"]
+_SELECTED_SKILL_HEADER = ["# Selected Skills", "以下仅是本工作片展示的方法名卡；使用前仍须按卡片入口显式读取正文。"]
 _PACKAGE_METADATA_HEADER = ["# 能力包", "下列只展示包摘要；用 skill_search(action=get, package_id=包ID) 读取入口，再在该包内选择资源。"]
 _IN_USE_PACKAGE_GUIDANCE = "接着做同类的事，继续照在用包的方法和你走到的那一步；不相关的事照常处理。"
 
@@ -257,7 +257,7 @@ class CapabilityRouter:
 
     # LLM: 在用身份只与当前授权卡相交，按冻结的首次使用顺序优先显示；required 复用原必显，不扩权。
     #   公开 Skill 的原格式由 _render_public_skill_metadata 保持；联测目录字节、快照与提示投影。
-    # 函数用途: 渲染公开短卡及不可用包，完整12k信封统一交给同一帮助函数，不改变快照或授权。
+    # 函数用途: 渲染Skill及选中脚本/流程短卡；共用原预算，不改变快照或授权，也不读取或执行正文。
     def render_skill_metadata_index(
         self, *, context_window_tokens: int | None = None,
         selected_skill_ids: tuple[str, ...] | None = None,
@@ -276,7 +276,8 @@ class CapabilityRouter:
         params = getattr(agent, '_current_run_params', None)
         query = query or str(getattr(params, 'user_prompt', '') or '')
         skills = sorted(
-            self.cards(kinds={"skill"}),
+            [card for card in self.cards(kinds={"skill", "script", "workflow"}) if card.kind == "skill"
+             or card.metadata.get("stable_id") in (*(selected_skill_ids or ()), *required_skill_ids, *in_use_method_ids)],
             key=lambda card: (
                 -score_card(query, card)[0] if query else 0,
                 _SKILL_SOURCE_RANK.get(str(card.source or ""), 99),
@@ -540,7 +541,7 @@ def _package_priority(card, query, attrs):
             -score_card(query, card)[0] if query else 0, card.name)
 
 
-# LLM: 四维小写归一、维内交集、维间AND，*与all声明通配；缺维/坏类型不匹配，未知维仍精确相等。
+# LLM: 四维归一/交集/AND不变，空列表表示不限制；缺维/坏类型不匹配，未知维仍精确相等。
 # 函数用途: 核对工作台、领域、工作区标签的别名和每个已声明范围。
 def _scope_matches(scope, attrs):
     aliases = {'workbenches':('workbench_id','workbench','workbenches'),
@@ -552,6 +553,8 @@ def _scope_matches(scope, attrs):
                 return False
             continue
         required = _scope_values(expected)
+        if isinstance(expected, list) and not expected:
+            continue
         if required.intersection({'*', 'all'}):
             continue
         actual = {value for alias in aliases[key] for value in _scope_values(attrs.get(alias))}
@@ -765,13 +768,16 @@ def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataB
     return _SkillMetadataBudget(_DEFAULT_SKILL_METADATA_MAX_CHARS, False)
 
 
-# LLM: 包卡仅展示公开 package_id；在用标注来自授权卡的结构化元数据，空标注保持原字节。
-# 函数用途: 为公开方法或能力包生成一行完整稳定引用。
+# LLM: 包用package_id，Skill用skill_id；脚本/流程保留其真实ref和next_read，不能伪作Skill或增加授权。
+# 函数用途: 在同一预算行内展示准确方法入口，不读取或执行资产。
 def _skill_line(card: CapabilityCard, description: str) -> str:
     stable_id = str(card.metadata.get("stable_id") or "").strip()
     locator = (f"package_id: {card.metadata['package_id']}" if card.kind == "capability_package"
                else f"skill_id: {stable_id}")
     name = card.name + ("（本会话在用）" if card.metadata.get("conversation_in_use") else "")
+    if card.kind in {"script", "workflow"}:
+        locator = json.dumps({'ref':stable_id, 'next_read':card.metadata.get('next_read', {})}, ensure_ascii=False)
+        name = f"[{card.kind}] {name}"
     if description:
         return f"- {name}: {description} ({locator})"
     return f"- {name}: ({locator})"

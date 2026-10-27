@@ -36,7 +36,7 @@ def default_machine_promotion_verifier(candidate_or_draft, sha256=None):
                 'executed':False, 'error_code':str(error) if isinstance(error, ValueError) else 'MACHINE_DRAFT_INVALID'}
 
 
-# LLM: 纯元数据闸门，不打开路径；目标规范化后人格/约定硬拒绝，名称和声明路径不得穿越，脱敏命中整份拒绝。
+# LLM: 纯元数据闸门，不打开路径；人格/约定硬拒绝，Skill缺描述单列；路径穿越和脱敏命中整份拒绝。
 # 函数用途: 核对候选目标与公开字段，阻止把自动方法发布绕到AGENTS/SOUL。
 def _validate_identity(asset, target):
     manual = {'agents','soul','agents.md','soul.md'}
@@ -46,6 +46,8 @@ def _validate_identity(asset, target):
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', str(asset.get('name', ''))):
         raise ValueError('MACHINE_DRAFT_NAME_INVALID')
     description = asset.get('description')
+    if asset.get('kind', 'skill') == 'skill' and (not isinstance(description, str) or not description.strip()):
+        raise ValueError('description_missing')
     if not isinstance(description, str) or not description.strip() or '\n' in description or '\r' in description:
         raise ValueError('MACHINE_DRAFT_SCHEMA_INVALID')
     for key in ('path','resource_path','entrypoint','target'):
@@ -57,12 +59,11 @@ def _validate_identity(asset, target):
         raise ValueError('MACHINE_DRAFT_SECRET_REJECTED')
 
 
-# LLM: 仅编译不执行；workflow只接受唯一步骤、原生模式、存在且无环的依赖，未知载体不伪报通过。
-# 函数用途: 核对方法有正文、Python可编译、工作流结构能形成DAG。
+# LLM: Skill检查触发信息与结构；脚本仅编译不执行，workflow要求唯一身份和DAG，未知载体不伪报通过。
+# 函数用途: 按载体核对方法结构，不把检查通过当作业务执行。
 def _validate_procedure(kind, asset):
     if kind == 'skill':
-        if not isinstance(asset.get('body'), str) or not asset['body'].strip():
-            raise ValueError('MACHINE_DRAFT_PROCEDURE_EMPTY')
+        _validate_skill_procedure(asset)
     elif kind == 'script':
         code = asset.get('entry_source', asset.get('code'))
         if not isinstance(code, str) or not code.strip():
@@ -72,6 +73,37 @@ def _validate_procedure(kind, asset):
         _validate_steps(asset.get('steps'))
     else:
         raise ValueError('MACHINE_DRAFT_CARRIER_UNSUPPORTED')
+
+
+# LLM: 至少两行且有结构；旧格式兼容须标题加真实步骤或闭合非空代码块，空触发节不能借下一标题充数。
+# 函数用途: 拒绝空洞单句或没有适用信号的方法，保留旧的完整分节Skill。
+def _validate_skill_procedure(asset):
+    body = asset.get('body')
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError('MACHINE_DRAFT_PROCEDURE_EMPTY')
+    heading = re.search(r'(?m)^\s*#{1,6}\s+\S', body)
+    code = re.search(r'(?m)^[ \t]*(`{3,}|~{3,})[^\n]*\n((?:[^\n]*\n)+?)[ \t]*\1[ \t]*$', body)
+    steps = re.search(r'(?m)^[ \t]*(?:\d+[.)]\s+\S|[-*]\s+\S|\$\s+\S)', body) or (code and code.group(2).strip())
+    if len([line for line in body.splitlines() if line.strip()]) < 2 or not (heading or steps):
+        raise ValueError('skill_procedure_unstructured')
+    when = asset.get('when_to_use')
+    tags = asset.get('tags')
+    metadata = (isinstance(when, str) and bool(when.strip())) or (
+        isinstance(tags, (list, tuple)) and any(isinstance(tag, str) and tag.strip() for tag in tags))
+    trigger = _has_skill_trigger_section(body)
+    if not (metadata or trigger or (asset.get('description') and heading and steps)):
+        raise ValueError('skill_trigger_metadata_missing')
+
+
+# LLM: Markdown标题是节边界；仅本节非空内容构成信号，不跨过空节读下一标题，不做自然语言业务定性。
+# 函数用途: 识别有内容的中英文适用/触发节。
+def _has_skill_trigger_section(body):
+    titles = r'when(?:\s+to)?\s+use|适用(?:场景|范围|时机)?|何时使用|使用时机|触发(?:条件|场景)'
+    for section in re.split(r'(?m)^[ \t]*#{1,6}[ \t]+', body)[1:]:
+        title, _, content = section.partition('\n')
+        if re.fullmatch(titles, title.strip().rstrip('#').strip(), re.I) and content.strip():
+            return True
+    return False
 
 
 # LLM: 不调用脚本库或执行步骤；字段不合规、未知依赖、循环都拒绝，不把空流程当通过。

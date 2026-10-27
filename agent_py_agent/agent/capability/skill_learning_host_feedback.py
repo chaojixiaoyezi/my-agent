@@ -37,7 +37,7 @@ def observe_pack_verification(agent, params, result, key):
         _observe(agent,params,'ineffective',f'pack:{key}', vars(result))
 
 
-# LLM: 显式目标须准确hash；无目标仅同run唯一资产版本对可归因，旧版采用也构成歧义；不改变验证或授权。
+# LLM: 显式目标须准确hash；无目标核对当前及跨更新历史的唯一资产版本对，只有当前版实际采用才能记分。
 # 函数用途: 将原宿主回执归给准确采用的方法，兼容真实验证器没有目标字段的单技能运行。
 def _observe(agent,params,outcome,receipt,evidence=None):
     if not getattr(getattr(agent,'config',None),'enable_self_learning',False):
@@ -55,9 +55,7 @@ def _observe(agent,params,outcome,receipt,evidence=None):
                          and fact.get('run_id') == run_id and fact.get('sha256') == row.sha256])
                    for row in registry.skills.values()]
         adopted = [(row, facts) for row, facts in adopted if facts]
-        pairs = {(row.name, fact.get('sha256')) for row in registry.skills.values()
-                 for fact in row.maintenance.get('observations', []) if fact.get('authority') == 'model'
-                 and fact.get('outcome') == 'adopted' and fact.get('run_id') == run_id}
+        pairs = _adopted_skill_pairs(registry.skills.values(), run_id)
         explicit = any(key in evidence for key in _TARGET_KEYS)
         for row, adoptions in adopted:
             if explicit and not _receipt_targets(evidence, row):
@@ -68,6 +66,15 @@ def _observe(agent,params,outcome,receipt,evidence=None):
                 observe_learning(store,row.name,sha256=row.sha256,task_id=adoption['task_id'],outcome=outcome,source=LearningObservationSource(authority='host',run_id=run_id,receipt_id=receipt,job_id=adoption.get('job_id','')))
     except (AttributeError,OSError,RuntimeError,ValueError):
         return
+
+
+# LLM: 历史采用只用于歧义判断；返回名称+内容hash，不把历史采用变为当前版本的adoption事实。
+# 函数用途: 汇总同一run真正采用过的所有技能版本，包括更新前的版本。
+def _adopted_skill_pairs(entries, run_id):
+    return {(row.name, fact.get('sha256')) for row in entries
+            for fact in (*row.maintenance.get('observations', []), *row.maintenance.get('historical_adoptions', []))
+            if isinstance(fact, dict) and fact.get('authority') == 'model'
+            and fact.get('outcome') == 'adopted' and fact.get('run_id') == run_id}
 
 
 # LLM: 显式各组目标须提供顶层或同一结构引用内的准确hash；全部身份/hash别名须一致，不接受其它scope。
