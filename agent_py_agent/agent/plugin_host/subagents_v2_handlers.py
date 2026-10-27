@@ -12,6 +12,7 @@ from ..common.nofollow_fs import (
     open_readonly_file_beneath,
 )
 from ..concurrency.exceptions import ConcurrencyConflictError
+from ..settings import model_profiles
 from ..subagents.cancellation import (
     CancelSubagentTaskRequest,
     cleanup_subagent_tree,
@@ -20,6 +21,8 @@ from ..subagents.cancellation import (
 from ..subagents.services.persistence.service import SubAgentPersistenceService
 from ..tooling.process_session_cleanup import ProcessSessionCleanupError, stop_process_session
 from ..tooling.process_session_store import ProcessSessionStore, process_session_store_root
+from ..user_space.home_layout import home_paths
+from ..user_space.owner_resolver import home_paths_with_owner
 from .errors import HostAPIError
 from .tasks import resource_id
 
@@ -60,24 +63,38 @@ def _load(context, payload, agent):
         except FileNotFoundError:
             continue
     raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
-# LLM: 展示状态映射不回写；未知时间/模型保持None，不从profile ID冒充模型名。
+# LLM: 只按认证context重建原owner目录，不信agent或payload提供的路径；读取不迁移落盘，坏目录显式503。
+# 函数用途: 读取本次投影共用的当前用户模型档案。
+def _owner_model_profiles(context):
+    try:
+        paths = home_paths_with_owner(home_paths(context.owner_home.root), context.owner_home)
+        return model_profiles.read_model_profiles(model_profiles.model_profiles_path(paths))["profiles"]
+    except (OSError, model_profiles.ModelProfileError):
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from None
+# LLM: 只投影原记录名称或本owner档案名称；default才取注入配置，未知保持None，不宣称历史调用模型。
 # 函数用途: 投影原任务公开摘要及原canonical修订。
-def _project(task):
+def _project(task, profiles=None, *, agent=None):
     attrs, status = task.attributes or {}, task.status
     model = attrs.get("host_model_profile.v1") or {}
+    profile_id, model_name = model.get("profile_id"), model.get("model_name")
+    if not model_name and isinstance(profile_id, str):
+        model_name = (profiles or {}).get(profile_id, {}).get("model_name")
+    if not model_name and profile_id == "default":
+        model_name = getattr(getattr(agent, "config", None), "model_name", None)
     effort = attrs.get("host_reasoning_effort.v1") or {}
     return {"subagent_id": task.id, "run_id": task.id, "parent_run_id": task.parent_id,
             "thread_id": attrs.get("conversation_thread_id") or task.runtime_identity.conversation_id or task.agent_thread_id,
-            "name": task.agent_name, "role": task.role, "model_name": model.get("model_name"),
+            "name": task.agent_name, "role": task.role, "model_name": model_name,
             "reasoning_effort": effort.get("level"), "status": {"DONE": "completed", "TIMEOUT": "failed",
             "CHANNEL_ERROR": "failed"}.get(status, status.lower()), "current_action": task.current_tool or task.current_step,
             "started_at": task.created_at or None, "elapsed_seconds": max(0, (task.ended_at or time.time()) - task.created_at)
             if task.created_at else None, "revision": task.state_revision}
-# LLM: 列表只公开已核行，错误显式拒绝；未结束过滤按原状态集合，不按中文摘要猜测。
+# LLM: 本owner档案每次请求只读一次，列表只公开已核行；未结束过滤按原状态集合，不按中文摘要猜测。
 # 函数用途: 列出指定线程/根任务的子代理。
 def list_subagents(context, payload, *, agent=None, store=None):
     if not payload.get("thread_id"):
         raise HostAPIError("INVALID_SCHEMA")
+    profiles = _owner_model_profiles(context)
     rows = []
     for reader in _readers(context, agent):
         report = reader.list_runs_report()
@@ -89,7 +106,7 @@ def list_subagents(context, payload, *, agent=None, store=None):
             except HostAPIError:
                 continue
             if payload.get("include_finished", True) or task.status not in _TERMINAL:
-                rows.append(_project(task))
+                rows.append(_project(task, profiles, agent=agent))
     return {"items": rows}
 # LLM: 消息读取前核线程双归属和原消息路径的逐段nofollow；缺文件为空，坏路径/坏存储不能继续读正文。
 # 函数用途: 验证原会话消息来源，再调用原消息Store。
@@ -113,7 +130,7 @@ def _messages(context, task, store):
     if errors:
         raise HostAPIError("STORE_UNAVAILABLE", 503)
     return messages
-# LLM: 原时间线nofollow尾读至多256KiB，丢弃截断首行再取末100行；消息先核线程双归属和文件安全。
+# LLM: 原时间线有界nofollow尾读；消息先核双归属/文件安全，模型名仅解析认证owner原档案且不回写。
 # 函数用途: 返回目标指令、真实时间线、消息和结果摘要。
 def get_subagent(context, payload, *, agent=None, store=None):
     task = _load(context, payload, agent)
@@ -131,7 +148,7 @@ def get_subagent(context, payload, *, agent=None, store=None):
         lines = raw.decode("utf-8", "replace").splitlines()
         steps = (lines[1:] if size > 262144 and lines else lines)[-100:]
     messages = _messages(context, task, store)
-    return {**_project(task), "instruction": task.goal, "steps": steps,
+    return {**_project(task, _owner_model_profiles(context), agent=agent), "instruction": task.goal, "steps": steps,
             "messages": [row.to_dict() for row in messages], "output_summary": task.result or task.latest_summary}
 # LLM: mutation用原canonical CAS；有副作用后异常保unknown，不把队列已写伪装未执行。
 # 函数用途: 在原创建锁内执行一个窄修改，映射原修订冲突。

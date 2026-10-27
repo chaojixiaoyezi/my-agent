@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -18,12 +19,19 @@ from agent_py_agent.agent.plugin_host import capabilities_v2_handlers as caps
 from agent_py_agent.agent.plugin_host import subagents_v2_handlers as sub
 from agent_py_agent.agent.plugin_host import workspace_v2_handlers as files
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
+from agent_py_agent.agent.settings import model_profiles
+from agent_py_agent.agent.settings.config import AgentConfig
 from agent_py_agent.agent.subagents.manager import SubAgentManager
 from agent_py_agent.agent.tooling.process_session_store import (
     ProcessSessionStore,
     process_session_store_root,
 )
-from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
+from agent_py_agent.agent.user_space.home_layout import home_paths
+from agent_py_agent.agent.user_space.owner_resolver import (
+    OwnerIdentity,
+    ensure_owner_home,
+    home_paths_with_owner,
+)
 
 
 # LLM: 所有状态均在pytest临时目录；native manager非模型替身，整个测试不发网络请求。
@@ -452,3 +460,71 @@ def test_r2_large_timeline_returns_last_hundred_complete_lines(case):
     assert path.stat().st_size > 262144
     result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
     assert result["steps"] == lines[-100:]
+
+
+# LLM: 使用原模型管理入口保存两个owner同ID但不同名称的有效档案；只有临时测试凭据，不发网络请求。
+# 函数用途: 准备R3原生档案，并故意给agent不同owner的路径以验证只信认证context。
+@pytest.fixture
+def native_model_profile(case):
+    profile_id = str(uuid4())
+    for owner, name in ((case.home, "Owner-Model-R3"), (case.other, "Other-Model-R3")):
+        paths = home_paths_with_owner(home_paths(case.home.root), owner)
+        host = SimpleNamespace(home_paths=paths, config=AgentConfig(model_backend="echo", model_name="deployment-model"))
+        model_profiles.execute_model_profile_operation(host, "add", {"profile_id": profile_id, "profile": {
+            "model_backend": "anthropic_compatible", "model_name": name, "api_base": "https://example.test/anthropic",
+            "api_key": "synthetic-test-credential", "model_context_window_tokens": 96000}})
+    case.agent.home_paths = paths
+    case.agent.config = host.config
+    return profile_id
+
+
+# LLM: 冷/热列表与详情均读取认证owner原档案，单次列表至多读一次目录，不公开服务商凭据或回写配置。
+# 函数用途: 复现R3原生profile_id没有model_name时的展示缺失。
+@pytest.mark.parametrize("cold", [False, True])
+@pytest.mark.parametrize("action", ["list_subagents", "get_subagent"])
+def test_r3_native_profile_resolves_owner_model_name(case, native_model_profile, monkeypatch, cold, action):
+    ref = {"schema": "host_model_profile.v1", "profile_id": native_model_profile}
+    task = case.manager.create_run(goal="model projection", owner=case.home.owner_id,
+                                   attributes={"conversation_thread_id": "thread-one", "host_model_profile.v1": ref})
+    assert "model_name" not in case.manager.load(task.id).attributes["host_model_profile.v1"]
+    paths = home_paths_with_owner(home_paths(case.home.root), case.home)
+    catalog_path = model_profiles.model_profiles_path(paths)
+    before = catalog_path.read_bytes()
+    calls, original = [], model_profiles.read_model_profiles
+    monkeypatch.setattr(model_profiles, "read_model_profiles", lambda path: calls.append(path) or original(path))
+    result = getattr(sub, action)(case.context, {"subagent_id": task.id, "thread_id": "thread-one"},
+                                  agent=None if cold else case.agent)
+    row = next(item for item in result["items"] if item["subagent_id"] == task.id) if action == "list_subagents" else result
+    assert row["model_name"] == "Owner-Model-R3"
+    assert calls == [catalog_path]
+    assert "synthetic-test-credential" not in json.dumps(result)
+    assert catalog_path.read_bytes() == before
+
+
+# LLM: 显式名称优先；只有default可回退agent配置，未知或非字符串ID不能误报为部署模型。
+# 函数用途: 检查R3名称优先级、default与无配置时的未知语义。
+@pytest.mark.parametrize("ref, configured, expected", [
+    ({"model_name": "recorded-name", "profile_id": "default"}, True, "recorded-name"),
+    ({"profile_id": "default"}, True, "deployment-model"),
+    ({"profile_id": "default"}, False, None),
+    ({"profile_id": "removed-profile"}, True, None),
+    ({"profile_id": []}, True, None),
+    ({}, True, None),
+])
+def test_r3_model_name_fallback_semantics(case, ref, configured, expected):
+    case.agent.config = SimpleNamespace(model_name="deployment-model") if configured else None
+    case.manager.mutate(case.task.id, lambda task: task.attributes.update({"host_model_profile.v1": ref}))
+    rows = sub.list_subagents(case.context, {"thread_id": "thread-one"}, agent=case.agent)["items"]
+    detail = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent)
+    assert rows[0]["model_name"] == detail["model_name"] == expected
+
+
+# LLM: 模型目录损坏是存储不可用，不可伪装为空目录/未知模型，也不把原错误中的配置内容回给调用者。
+# 函数用途: 保留R3原生目录校验失败的结构化错误。
+@pytest.mark.parametrize("action", ["list_subagents", "get_subagent"])
+def test_r3_corrupt_model_catalog_is_unavailable(case, native_model_profile, action):
+    path = model_profiles.model_profiles_path(home_paths_with_owner(home_paths(case.home.root), case.home))
+    path.write_text("{broken")
+    with pytest.raises(HostAPIError) as error:
+        getattr(sub, action)(case.context, {"subagent_id": case.task.id, "thread_id": "thread-one"}, agent=case.agent)
+    assert error.value.code == "STORE_UNAVAILABLE" and error.value.status == 503

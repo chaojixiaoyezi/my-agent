@@ -1,3 +1,13 @@
+## 2026-10-27 Wave 7 W5 R3：从原生owner档案解析子代理模型名
+
+来源：`07-tasks/wave7-w5-r3-model-name.md`（c8 Finding 3），起点 `1751dc11a5c792801e0e5e2527fadcb927ca7c39`。
+
+- 原任务只冻结 `host_model_profile.v1.profile_id`，不含模型名；列表和详情现在按认证context重建owner路径，读取原生模型档案。列表每次请求只读一次目录，仅返回名称，不公开服务商凭据，不回写目录或任务。
+- 原记录显式名称优先；只有 `profile_id=default` 才回退注入agent的配置名称。未知/非字符串引用保持未知；坏模型目录返回结构化 `STORE_UNAVAILABLE`。停止回执只投影状态，不新增目录I/O。
+- 回归使用原 `execute_model_profile_operation` 保存有效档案，并为两个owner创建同ID不同名称；覆盖冷/热列表和详情、agent路径不同于认证context、目录单读、凭据不外泄与文件不变、default和未知引用、坏目录。原实现已实测返回 `None` 而不是档案名称，先红证据位于 `.pytest_cache/w5-r3/red.log` / `red.xml`。
+
+复现（工作树根）：`python3 -m pytest agent_py_agent/tests/test_plugin_host_subagents_and_workspace.py agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py -q --tb=short`。本轮不验证真实模型调用、HTTP入口或部署；当前档案名称不等于历史调用证据。
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。
