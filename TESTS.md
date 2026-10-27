@@ -296,6 +296,25 @@ git diff --check
 
 ```bash
 python3 -m pytest agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_local_store_coordinator_io.py agent_py_agent/tests/test_owner_maintenance.py agent_py_agent/tests/test_gateway_owner_maintenance.py -q --tb=short
+## 2026-10-26 Wave 6 B5-R3：缺 Store 僵尸组长与合成测试别名
+
+来源：确认版 `07-tasks/wave6-b5-round3-fix-20261026.md`，起点 `a45ae29e5128d8d58678f1e0db378b10e2ceb8e2`，沿用 `wt-wave6-b5-r2` 工作树，不新建接口或占位测试文件。
+
+- `_reap_test_process_instance` 保留原 PID/进程组/出生安全门，先核 `_same_process`。出生仍匹配的 host/child 僵尸组长先交给原 `terminate_process_tree(expected_birth_token=...)` 快照并清理同组后代，不能先 `poll()`。只有不匹配后才按原消失观察走 `already_gone`；终止回执的未确认值原样保留。未改出生探针、受管事务或信号实现。
+- `_is_test_launch_alias_module` 接受缺失/空 `__file__` 的 `tests`、`tests.*`、`agent_py_agent.tests.*`、`conftest`、`test_*` 及包含 `.test_` 的合成模块，保留原无来源包入口范围。已知文件来源的 `tests.*` / `agent.*` / `agent_py_agent.*` 不凭包名前缀命中仓库外文件；原顶层 `test_*` / `*_test` / `conftest` 名称规则仍保留，不能描述成所有外部模块一概排除。属性替换及条件恢复仍按原函数对象精确身份。
+- `test_b5_process_reap.py` 新增 17 个参数变体：host/child 僵尸、同组后代确认/未确认回执、真实启动函数在无文件 `tests.dynamic` 中的直接别名替换/恢复，以及合成名称与外部来源边界。实现前实跑 **11 failed / 6 passed**；修复后转绿。原 child 安全测试将“host 已消失”错误设置成 birth 匹配的僵尸状态，现只修正观察替身的一致性，七项零信号/确认断言全部保留，不删测、skip 或放宽有效断言。
+
+当前测试证据：
+
+- B5 与 registry-tools 两文件 **88 passed / 0 failed**，JUnit：本地 `.pytest_cache/b5-r3/focused.xml`。
+- 全范围 Ruff、文档同步、diff 检查通过；strict 尺寸门 **hard=0 / blocked=False**，仍有既有 high-risk/soft 提示，不宣称零告警。这些静态结果不改变下述完整 pytest 未通过的结论。
+- 指定完整三文件 **88 passed / 10 failed / 0 skipped**；十项均在 `test_process_cleanup_evidence.py` 的 `_reservation` 建立 launcher 身份时抛 `managed background launcher identity unavailable`，尚未进入本轮树回收分支，**不称完整门禁通过**。
+- 已用真正起点 `a45ae29e5128d8d58678f1e0db378b10e2ceb8e2` 在同一指定工作树复核完整三文件：**71 passed / 相同 10 failed / 0 skipped**，失败名称集合完全相同，错误均为上述 launcher 身份不可用。因任务限定单工作树，三份修改源码只暂存在内存，基线从精确 `git show` 取得，`finally` 逐字节恢复并核对 SHA-256；未切分支、未用 stash 或其它检出树。对照及原始 JUnit 保存在本地 `.pytest_cache/b5-r3/{baseline.log,baseline.xml,baseline-comparison.json}`。该结论只证明同一执行入口的基线失败，不推断身份不可用的根因。
+
+确认版指定门禁（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/tests/test_process_registry_tools.py agent_py_agent/tests/test_process_cleanup_evidence.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
@@ -339,6 +358,35 @@ python3 -m pytest agent_py_agent/tests/test_local_store_coordinator_io.py agent_
 收口实测：CLI新增回归修复前旧DONE/FAILED两个场景均有效失败（重建计数5而非预期1）；修复后上方第一条四文件组合125项通过，0失败/错误/跳过（专属文件74项）。收口单原命令中的 `test_subagent_persistence_projections.py` 在本工作树不存在，原样执行以exit 4终止；通过定位并阅读实际包含投影保存/重建/账本断言的 `test_subagent_persistence_service.py`，改跑上方真实四文件组合，没有创建占位测试或削弱既有断言。新进程从本工作树直接导入CLI成功。独立Astra high对CLI增量仅做内联静态复核，未发现阻断项，不替代实际测试；此前原四文件96项及C/LocalStore补充58项通过的证据仍适用于未改动的对应路径。
 
 边界/未完成：本切片提供维护API，不修改另片维护调度；调用方须传入当前Compact/恢复/记忆候选的有效引用集合，API不扫描其它权威存储来猜引用。关联图检查仍随派生元数据量增长，真实大库持锁耗时及完整ABA代次保护未验证。Gateway/subagent的02-progress与04-structure四份文档已在扩围内同步，CLI回填绕过缺口已由真实临时夹具回归封闭。未运行真实用户数据清理、全仓测试或部署。
+独立内联静态复核确认“原 birth 可核对时先清树”的目标分支，未独立执行测试或阅读仓库。保留限制：本轮没有验证出生探测失败且组长为僵尸时的完整处理，也没有真实 OS 同组后代回收、原生 Windows 或上线验收；虚拟树与假信号出口不能替代这些观察点。生成的 `CODE_SIZE_REPORT.md` 不随功能提交；完整三文件门禁仍需在具备 launcher 身份能力的车道复核。
+
+## 2026-10-26 Wave 6 B5-R2：测试进程别名、child 身份与共享缓存返修
+
+来源：`07-tasks/wave6-b5-round2-fix-20261026.md`，起点 `986da1c86e6c17cacab9a3bdf41da727b8da8a75`，仅在指定 `wt-wave6-b5-r2` 工作树修改三份代码与本节、文件树。
+
+- **P1-01**：默认 pytest 的顶层 `test_*`、`*_test` 及来源位于测试目录的模块纳入精确函数身份替换；setup 前安装、完成后增量扫描，保留后写 MonkeyPatch 的条件撤销。
+- **P1-02**：账本冻结 host/child 的 PID 与出生标识、PGID 观察、owner 与真实 root task 身份；Store 丢失或 host 已退出后，child 按自己的原出生标识核验并回收。PGID 仅作诊断，不发未经出生核验的旧组信号。缺身份、PID 复用、权限/观察未知不能升级为发信号许可。
+- **P2-01**：新增 `ProcessRegistry.forget(session_id, store_root)`，仅移除本次已到期的原目录缓存；共享 fixture 的 class/package/module/session 实例仍按真实 lifetime 保留，无 root 的 `get(session_id)` 跨两条测试继续可查。不同 owner 同名 ID 不被串删。
+- **P2-02**：异常与非明确确认的回收保存在 `conftest._UNCONFIRMED_PROCESS_REAPS`，仅投影创建身份与回执，不存命令、环境或 Popen；会话结束只报告诊断数量，不掩盖原测试失败。
+- 原 B5 的 20 项回归从 `conftest.py` 迁入默认可收集的 `test_b5_process_reap.py`，保留原安全断言；只把“全 clear”断言改为新合同的逐项 forget。新增顶层提前导入、setup 晚到别名、目录删除/host 消失后的 child、共享 module fixture 跨两条查询、同名 owner 缓存隔离及诊断回归。
+
+测试先行证据：旧 20 项迁移后先通过；新增核心反例在实现前为 **6 failed / 21 passed**，分别复现别名、child 快照/回收、两种未确认诊断和共享缓存丢失，再逐项修复。独立内联静态复核又指出首次空 child 可能被后续通知或当前 Store 补绑；两个新增回归先实测 **2 failed**，随后改为连空 PID/birth 对也严格冻结匹配。该合成反例不冒充真实 OS 可达误杀。
+
+假 PID 的信号出口均替身；共享缓存用真实 Store 和可控 Popen，不能当作真实 OS 树回收端到端或原生 Windows 验收。
+
+在工作树根运行指定门禁：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/tests/test_process_session_store.py -q --tb=short
+ruff check agent_py_agent/tests/conftest.py agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/agent/tooling/process_registry.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终当前源码验收：指定两文件 **131 passed / 1 skipped / 0 failed**。跳过由原能力 marker 报告 `ps,background_launcher_identity` 缺失，本轮未添加 skip/xfail。Ruff、doc sync、diff 检查通过；strict 尺寸门 **hard=0 / blocked=False**，仍保留既有 high-risk/soft 告警，不宣称零告警。空 child 修正经独立内联静态复评未发现该 delta 内遗漏；复评未读仓库或独立运行测试，不能外推为全仓批准。
+
+不放宽生产身份校验；真实 OS 树回收、原生 Windows 与上线行为仍未验证。生成的 `CODE_SIZE_REPORT.md` 不随功能提交。
 
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 

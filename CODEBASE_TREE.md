@@ -5,6 +5,13 @@
 ```
 
 实现位于 `local_storage/schema.py`、`records.py`、`search.py`、`gateway_parts/logging.py`、`subagents/services/persistence/projections.py`，扩围后 `cli/local_doctor.py` 的子代理回填入口也复用同一30天准入，先裁剪后重建不复活旧白名单全文；非白名单patch_review仍正常回填。TTL为显式维护API，不修改事件维护调度。Gateway/subagent的02-progress与04-structure已同步结构和边界，实测与未验证限制见TESTS.md。
+## 2026-10-26 Wave 6 B5-R2：测试派生进程精确回收
+
+```text
+`-- agent_py_agent/tests/test_b5_process_reap.py # 默认收集 B5 创建归属、顶层启动别名、child出生回退、共享fixture缓存与未确认诊断回归
+```
+
+关键文件说明：`tests/conftest.py` 仅保留共享 fixtures 与进程归属钩子；原 `test_b5_*` 迁入上述独立测试模块。`tooling/process_registry.py` 按冻结 host/child 出生身份回收，并提供只移除指定 session/目录缓存的 `forget()`，不删除 Store、不全局清共享索引。
 
 ## 2026-10-26 正式记忆压实、写安全与显式低延迟检索回归
 
