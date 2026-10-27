@@ -202,6 +202,24 @@ git diff --check
 
 未运行全仓测试、Linux 车道、生产 Gateway 自愈或真实性能测量；这些观察点未验证。
 
+## 2026-10-27 Wave 7 W4 R3：原生消息追加后的统一 CAS
+
+来源：`07-tasks/wave7-w4-r3-fix.md` 的剩余 `W4-F1`，起点 `31401c8224c0e9314f0d4c78cd60d9b292b7539d`。仅在指定 `/tmp/wt-wave7-w4` / `wt-wave7-w4` 返工，不部署或启停服务。
+
+- 摘要与设置共用 `conversations.thread_revision`；四个设置写入口只接受当前唯一公共修订，删除旧设置基数的第二版本 fallback。未迁移线程读取不落盘，初始版本 1 严格满足任务明示条件；其它状态把线程记录和原消息账本的字节数/纳秒时间纳入指纹。覆盖 owner 的 `data/conversations/messages` 与 `conversations/messages` 两种原位置，以原 nofollow 只读入口取得文件 stat，不另建消息库。
+- 已迁移公共修订加入消息字节增长量。`msg_bytes` 在首次迁移时固定，后续设置写保留；旧插件状态缺该字段时以 0 为锚。连续同时间戳追加即使原 Store 插件计数未推进，也能逐次使旧 CAS 失效。领域改名继续只推进原 Store 计数，避免公共字节增量被重复写进计数造成 receipt 与落盘版本不符。
+- 首批 20 项 R3 用例在实现前 **19 failed / 1 passed / 0 errors**，见 `.pytest_cache/r3-red.xml`；覆盖空/默认模型初始绑定、两种布局、四个写入口、连续同 tick 追加、迁移后追加和设置再写、真实改名回执及幂等重放。另补两项零字节账本纯读校验：原任务要求 `msg_fp == (0, 0)` 才属未出现账本，存在空文件的非零时间仍按明示公式换版；未采纳独立静态复核中与该明文相反的“空文件也应返回 1”建议。
+- 保留原有测试语义：无 agent 压缩用例改为传消息追加后实际读出的 CAS，仍断言 503、无写、无丢消息；R2 修订用例仍断言原插件计数为 3，公共修订按明确字节增量核对，并保留拒绝旧 CAS 的断言。
+- 最终指定两文件 **180 passed / 0 failed / 0 errors / 0 skipped**，见 `.pytest_cache/r3-complete.xml`。额外六个宿主 v2 回归文件 **595 passed / 0 failed / 0 errors / 0 skipped**，见 `.pytest_cache/r3-host.xml`。独立 Astra high 仅依据完整内联核心与原 Store 合同静态核对，不冒充独立测试或真实 HTTP/LLM 端到端验收。
+
+复现（工作树根；临时目录保持在工作树内）：
+
+```bash
+TMPDIR=/tmp/wt-wave7-w4/.pytest_cache python3 -m pytest agent_py_agent/tests/test_plugin_host_thread_and_model_settings.py agent_py_agent/tests/test_plugin_host_v2_conversations.py -q --tb=short --basetemp=.pytest_cache/r3-complete-tmp --junitxml=.pytest_cache/r3-complete.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w4-r3-size.md
+```
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。
