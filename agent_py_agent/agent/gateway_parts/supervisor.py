@@ -41,8 +41,8 @@ PLANNED_RESTART_STARTING_GRACE_SECONDS = 120.0
 SLOW_RESTART_BACKOFF_SECONDS = 300.0
 
 
-# LLM: 通知经 supervisor 已装配的独立投递服务，收件人只取原管理员绑定；不请求坏 Gateway/LLM。
-# 函数用途: 尽力直投管理员故障通知，只有 provider 成功回执才算已通知。
+# LLM: 成功只认原provider的sent；去重集保存在同一alert_key账内，单recipient异常不阻断后续绑定。
+# 函数用途: 尽力直投管理员告警，只补发尚未成功的接收人，返回当前绑定是否全部送达。
 def _deliver_supervisor_admin_alert(supervisor, fault: dict) -> bool:
     from ..conversation.channels import DeliveryContext, ReplyEnvelope
     from ..user_space.admin_channel_identity import list_admin_channel_identities
@@ -51,15 +51,26 @@ def _deliver_supervisor_admin_alert(supervisor, fault: dict) -> bool:
     service = getattr(agent, "delivery_service", None)
     if service is None or not getattr(agent.config, "admin_channel_identity_enabled", True):
         return False
-    delivered = False
-    for identity in list_admin_channel_identities(agent.home_paths.root):
-        receipt = service.deliver(DeliveryContext(identity.channel, identity.user_id,
-            idempotency_key="supervisor:" + fault["alert_key"]),
-            ReplyEnvelope(content=(f"Gateway 监护通知：{fault['fault_status']}。"
-                f"原因：{fault['last_failure_reason']}；已尝试重启 {fault['restart_attempts']} 次；"
-                f"慢探针间隔 {fault['slow_probe_interval_seconds']} 秒。")))
-        delivered = delivered or receipt.delivery_status == "sent"
-    return delivered
+    entry = fault.setdefault("fault_alerts", {}).setdefault(fault["alert_key"], {})
+    previous = entry.get("sent_recipients", [])
+    sent = set(previous) if isinstance(previous, list) and all(isinstance(item, str) for item in previous) else set()
+    recipients = {json.dumps([identity.channel, identity.user_id], separators=(",", ":")): identity
+                  for identity in list_admin_channel_identities(agent.home_paths.root)}
+    for recipient, identity in recipients.items():
+        if recipient in sent:
+            continue
+        try:
+            receipt = service.deliver(DeliveryContext(identity.channel, identity.user_id,
+                idempotency_key="supervisor:" + fault["alert_key"] + ":" + hashlib.sha256(recipient.encode()).hexdigest()),
+                ReplyEnvelope(content=(f"Gateway 监护通知：{fault['fault_status']}。"
+                    f"原因：{fault['last_failure_reason']}；已尝试重启 {fault['restart_attempts']} 次；"
+                    f"慢探针间隔 {fault['slow_probe_interval_seconds']} 秒。")))
+            if receipt.delivery_status == "sent":
+                sent.add(recipient)
+        except Exception:  # noqa: BLE001 单收件人失败只保留其重试义务
+            continue
+    entry["sent_recipients"] = sorted(sent)
+    return bool(recipients) and all(recipient in sent for recipient in recipients)
 
 
 # LLM: 故障代次取原 Gateway 身份；当前状态缺失沿上一故障代，不能拿 supervisor 存活当业务健康。
@@ -73,8 +84,8 @@ def _supervisor_fault_generation(supervisor, previous: dict) -> str:
     return json.dumps(value, sort_keys=True) if value else str(previous.get("fault_generation") or f"supervisor-{os.getpid()}")
 
 
-# LLM: 只保存结构化诊断与持久冷却；任何读写/通知失败都不能改变重启计数、维护锁或安全停止决策。
-# 函数用途: 按服务代次和原因持久去重故障/恢复通知，失败至少冷却五分钟后重试。
+# LLM: 同一原ledger保留成功收件人；全局notified仅汇总，不挡未送达者，读写/通知失败不改监护决策。
+# 函数用途: 按服务代次/原因及收件人持久去重故障与恢复通知，沿用五分钟冷却。
 def _record_supervisor_fault(supervisor, reason: str, *, recovered: bool = False) -> None:
     try:
         path = supervisor._paths.supervisor_state
@@ -99,13 +110,15 @@ def _record_supervisor_fault(supervisor, reason: str, *, recovered: bool = False
         else:
             fields["last_failure_reason"] = reason
             fields["last_failure_at"] = now if changed_state else previous.get("last_failure_at", now)
-        if old and (old.get("alert_notified") or now - float(old.get("last_attempt_at", 0)) < SLOW_RESTART_BACKOFF_SECONDS):
+        if old and now - float(old.get("last_attempt_at", 0)) < SLOW_RESTART_BACKOFF_SECONDS:
             if fields != previous:
                 write_json_file_atomic(path, fields)
             return
-        ledger[key] = {"last_attempt_at": now, "alert_notified": False}
-        if len(ledger) > 32:
+        ledger.pop(key, None)
+        ledger[key] = {**old, "last_attempt_at": now, "alert_notified": False}
+        while len(ledger) > 32:
             ledger.pop(next(iter(ledger)))
+        fields["alert_notified"] = False
         write_json_file_atomic(path, {**previous, **fields})
         try:
             notified = _deliver_supervisor_admin_alert(supervisor, fields)

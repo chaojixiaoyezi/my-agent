@@ -1,5 +1,5 @@
 # LLM: 只组合原owner维护写者与原claim短门；长扫描门外，每写T→原state锁→业务锁，最终原state完整bytes CAS。
-# 模块用途: 逐步运行私有保留/缓存/归档/rcb及LocalStore事件裁剪，写原maintenance.json，不创建新维护账。
+# 模块用途: 逐步运行私有保留/缓存/归档/rcb、runtime安全清理及LocalStore维护，写原maintenance.json。
 from __future__ import annotations
 
 import hashlib
@@ -23,17 +23,17 @@ def _state_bytes(home):
                              max_bytes=_MAINTENANCE_SOURCE_MAX_BYTES, require_dir_fd=True)
 
 
-# LLM: callback来自原C/W执行门；不改source快照，逐写同时重核原policy/state，已有局部副作用不回滚或伪造未进入。
-# LLM: 新增owner孤儿伴生锁逐文件沿同一commit核policy/state；目录扫描不占T，逻辑锁不回收。
-# LLM: 事件维护在T外调用，只将逐SQL/发表叶沿同一commit运输；不延长短写窗口来读JSONL或等事件锁。
-# LLM: 原保留拒绝或legal_hold时不启动新的事件删除；最终写状态仍沿原CAS。
-# 函数用途: 在门外扫描并沿原活scope逐步提交保留、孤儿锁及其它维护，最后写原状态。
+# LLM: callback来自原C/W执行门；逐写重核原policy/state，已有局部副作用不回滚或伪造未进入。
+# LLM: TTL/事件删除仍在原保留安全门后；runtime安全清理沿commit执行，不被retention未到期或hold推迟。
+# 函数用途: 沿原活scope逐步提交维护并最终CAS同一状态，不新增维护账或权限来源。
 def run_with_transition(home, now, transition, *, expected_policy_fingerprint=None, expected_state_fingerprint=None):
     from .owner_maintenance import (
         OwnerMaintenanceResult,
         _backfill_hung_runs,
+        _cleanup_owner_runtime,
         _maintain_local_store_events,
         _maintenance_state_path,
+        _prune_local_store_derived_records,
         _reclaim_text_vector_cache_orphans,
         _tighten_archive_permissions,
         _write_maintenance_result,
@@ -48,14 +48,12 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     policy = file_fingerprint(home.owner_retention_json)
     if expected_policy_fingerprint is not None and policy != expected_policy_fingerprint:
         raise RetentionPolicyChangedError("original_retention_source_changed_before_plan")
-    if not owner_maintenance_due(home.owner_home_dir, now=now):
-        return OwnerMaintenanceResult(False, "not_due")
     path = _maintenance_state_path(home.owner_home_dir)
 
-    # LLM: 原transition先T再取state锁；不重新采新state/新policy以复活旧源，body只含一个原写步骤。
-    # 函数用途: 在每个真实短写与最终CAS前拒绝并发来源变化。
+    # LLM: 原transition先T再取state锁；不重新采新state/policy复活旧源，只运输一个原维护步骤。
+    # 函数用途: 每个真实写步骤与最终CAS前拒绝并发来源变化。
     def commit(operation):
-        # LLM: 最后核原ports活窗口再锁state；拒迟到copy_context/回调，state锁防检查后改写，目标CAS仍归原写者。
+        # LLM: 最后核原ports活窗口再锁state，防迟到回调和检查后改写；目标CAS仍归原写者。
         # 函数用途: 校验本次固定来源并完成一个原维护步骤。
         def execute():
             with gateway_transaction_writer("owner_maintenance_write"), locked_json_path(path):
@@ -66,8 +64,15 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
                 return operation()
         return transition(execute)
 
+    runtime_cleanup = _cleanup_owner_runtime(home, now=now, commit_transition=commit)
+    if not owner_maintenance_due(home.owner_home_dir, now=now):
+        return OwnerMaintenanceResult(False, "not_due")
     retention = apply_owner_retention(home, now=datetime.fromtimestamp(now, timezone.utc),
         commit_transition=commit, expected_policy_fingerprint=policy)
+    derived_prune = (_prune_local_store_derived_records(home.owner_home_dir,
+                         now=datetime.fromtimestamp(now, timezone.utc), commit_transition=commit)
+                     if retention.applied and not retention.legal_hold and not retention.load_errors
+                     else {"executed": False, "reason": "retention_not_safe"})
     reclaim_owner_orphan_lock_files(home, commit_transition=commit)
     reclaimed, error = _reclaim_text_vector_cache_orphans(home, commit_transition=commit)
     permissions = _tighten_archive_permissions(home, commit_transition=commit)
@@ -78,7 +83,8 @@ def run_with_transition(home, now, transition, *, expected_policy_fingerprint=No
     effects = {"text_vector_cache_reclaimed": reclaimed, "text_vector_cache_reclaim_error": error,
                "indexes_compacted": [], "indexes_compact_failed": [],
                "memory_archive_permissions": permissions, "run_closeout_backfill": backfill,
-               "local_store_events_maintenance": local_events}
+               "local_store_events_maintenance": local_events, "derived_records_pruned": derived_prune,
+               "runtime_cleanup": runtime_cleanup}
 
     # LLM: 外层commit已持原state锁且完成字节CAS；仍写唯一原文件，不制造已确认物理退出或新调度事实。
     # 函数用途: 用实际执行结果提交本轮原维护状态。

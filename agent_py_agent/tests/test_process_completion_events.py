@@ -1339,3 +1339,28 @@ def test_native_relation_cache_window_starts_when_ps_finishes(native_process_pro
     assert operation() == ({321: 1}, True)
     assert operation() == ({321: 1}, True)
     assert len(probe.calls) == 1
+
+
+# LLM: 真实WakeStore没有get；旧终态与真实通知一起验证，不启动进程；pending保留，其余才准回收。
+# 函数用途: 捕获进程TTL被旧get替身掩盖的接口错误。
+@pytest.mark.parametrize("wake_state", ["pending", "handled", "missing"])
+def test_h09_process_ttl_queries_real_pending_wake(tmp_path, monkeypatch, wake_state):
+    from collections import OrderedDict
+
+    from agent_py_agent.agent.conversation import process_events as module
+
+    agent, params, authority = _fixture(tmp_path)
+    store = agent.conversation_store
+    if wake_state == "missing":
+        notice_id = "wake-missing"
+    else:
+        signal = store.wakes.raise_signal({"thread_id": params.task_attributes["conversation_thread_id"],
+            "reason": "synthetic_expiry_test"})
+        notice_id = signal.wake_signal_id
+        if wake_state == "handled":
+            store.wakes.mark_handled(notice_id)
+    payload = authority.load("bg-test-notice").record
+    authority.write({**payload, "finished_at": 1_000_000_000.0, "completion_notice_id": notice_id})
+    monkeypatch.setattr(module, "_PROCESS_COMPLETION_PRUNE_TIMES", OrderedDict())
+    module._prune_consumed_process_records(store, authority)
+    assert (authority.load("bg-test-notice").record is not None) is (wake_state == "pending")

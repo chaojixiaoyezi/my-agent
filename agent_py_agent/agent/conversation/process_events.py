@@ -82,10 +82,15 @@ def _prune_consumed_process_records(store, authority) -> None:
         while len(_PROCESS_COMPLETION_PRUNE_TIMES) > _PROCESS_COMPLETION_PRUNE_MAX_ROOTS_COUNT:
             _PROCESS_COMPLETION_PRUNE_TIMES.popitem(last=False)
 
-    # LLM: 只用原Wake权威状态证明消费；读失败抛给外层日志，不会被解释成wake不存在。
+    # LLM: 优先真实pending_one；仅缺接口的旧替身回退get，读失败不切接口或冒充wake不存在。
     # 函数用途: 允许清理明确不再pending的通知依赖。
     def consumed(notice_id: str) -> bool:
-        wake = store.wakes.get(notice_id)
+        query = getattr(store.wakes, "pending_one", None)
+        if not callable(query):
+            query = getattr(store.wakes, "get", None)
+        if not callable(query):
+            raise AttributeError("wake_pending_query_unavailable")
+        wake = query(notice_id)
         return wake is None or wake.status != "pending"
 
     try:
