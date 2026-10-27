@@ -843,3 +843,42 @@ def test_identity_local_name_does_not_cross_newline_when_empty(tmp_path):
         CapabilityFile('extras/a/SKILL.md', '1' * 64),
     ))
     assert assets['skills'] == ['extras/a', 'methods/a'] and len(assets['skills']) == 2
+    dot_assets = package_assets((
+        CapabilityFile('.a/SKILL.md', '0' * 64),
+        CapabilityFile('a/SKILL.md', '1' * 64),
+    ))
+    assert dot_assets['skills'] == ['.a', 'a'] and len(dot_assets['skills']) == 2
+    root_assets = package_assets((
+        CapabilityFile('SKILL.md', '0' * 64),
+        CapabilityFile('SKILL/SKILL.md', '1' * 64),
+    ))
+    assert root_assets['skills'] == ['SKILL', 'SKILL.md'] and len(root_assets['skills']) == 2
+
+
+# LLM: v2实例调用user_space.identity.resolve不应因缺失identity_credentials抛异常，且无read能力时应拒绝403。
+# 函数用途: 覆盖from_host_v2的身份查询与read能力门校验。
+def test_host_v2_broker_identity_and_read_capability_gate(tmp_path):
+    from agent_py_agent.agent import plugin_host_api
+    from agent_py_agent.agent.gateway_parts.plugin_broker_api import PluginBrokerService
+    from agent_py_agent.agent.plugin_host.authorization import IngressIssuer
+    from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts
+    from agent_py_agent.agent.plugin_manifest_host_v9 import host_capabilities
+    from agent_py_agent.tests.test_plugin_host_v2_grants import active_grant
+    home, _, entry, ref = active_grant(tmp_path, sorted(host_capabilities()), scope='private')
+    (home.home_dir / 'USER.md').write_text('- 称呼: 测试员\n', encoding='utf-8')
+    plugin_host_api.set_host_api_base('http://127.0.0.1:18429')
+    try:
+        token = plugin_host_api.issue_host_api_env(ref, entry.manifest.plugin_id)[plugin_host_api.HOST_API_TOKEN_ENV]
+        ports = HostDomainPorts()
+        issuer = IngressIssuer()
+        service = PluginBrokerService.from_host_v2(issuer.ingress(token), ports)
+        resolved = service.dispatch('user_space.identity.resolve', {})
+        assert resolved['ok'] is True and resolved['http_status'] == 200
+        assert resolved['data']['display_name'] == '测试员'
+        no_read_issuer = IngressIssuer(capability_policy=lambda: frozenset())
+        denied_service = PluginBrokerService.from_host_v2(no_read_issuer.ingress(token), ports)
+        for action in ('capability_packages.list', 'user_space.identity.resolve'):
+            denied = denied_service.dispatch(action, {})
+            assert denied['ok'] is False and denied['error_code'] == 'CAPABILITY_DENIED' and denied['http_status'] == 403
+    finally:
+        plugin_host_api.set_host_api_base(None)

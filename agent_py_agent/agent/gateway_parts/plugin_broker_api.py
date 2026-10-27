@@ -99,12 +99,13 @@ class PluginBrokerService:
     # LLM: 只收原DTO；此实例全部调用进入v2，不初始化或回退旧owner/执行路径，真伪登记仍由原发行器核验。
     # 函数用途: 将已认证v2来源和宿主领域端口接到Broker传输。
     @classmethod
-    def from_host_v2(cls, ingress, ports):
+    def from_host_v2(cls, ingress, ports, *, identity_credentials=None):
         from ..plugin_host.contracts import HostDomainPorts, PluginIngressSource
         if not isinstance(ingress, PluginIngressSource) or not isinstance(ports, HostDomainPorts):
             raise ValueError('需要真实Host v2来源和领域端口')
         service = cls.__new__(cls)
         service._host_v2_ingress, service._host_v2_ports = ingress, ports
+        service.identity_credentials = identity_credentials
         return service
 
     # LLM: 复用完整原授权与幂等门；闭合schema拒绝身份字段，Broker只读动作在v2来源下同样经原发行器核验。
@@ -121,7 +122,7 @@ class PluginBrokerService:
             if idempotency_key is not None or not isinstance(body, dict):
                 return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
             try:
-                probe = decode_call(canonical_json({'schema': 'plugin_host_call.v2', 'action': 'host.capabilities.get', 'payload': {}}).encode('utf-8'))
+                probe = decode_call(canonical_json({'schema': 'plugin_host_call.v2', 'action': 'conversations.threads.list', 'payload': {}}).encode('utf-8'))
                 authorized = authorize_call(self._host_v2_ingress, probe)
                 context = read_context(authorized)
                 data = self._route(context.owner_home.home_dir, context.owner_home.owner_id, action, dict(body))

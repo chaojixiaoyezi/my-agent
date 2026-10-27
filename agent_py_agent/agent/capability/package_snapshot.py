@@ -16,24 +16,30 @@ def package_assets(members):
     raw = {'skills': [], 'scripts': [], 'workflows': []}
     for member in members:
         path = PurePosixPath(member.path)
+        canon = path.as_posix()
         if path.name == 'SKILL.md':
             short = path.parent.name or path.stem
-            full = path.parent.as_posix().lstrip('./') or short
-            raw['skills'].append((short, full))
+            parent = path.parent.as_posix()
+            full = canon if parent == '.' else parent
+            raw['skills'].append((canon, short, full))
         for kind in ('scripts', 'workflows'):
             if kind in path.parts[:-1]:
                 idx = path.parts.index(kind)
                 following = path.parts[idx + 1:]
                 short = following[0] if len(following) > 1 else path.stem
-                full = PurePosixPath(*path.parts[:idx], short).as_posix() if idx > 0 else short
-                raw[kind].append((short, full))
+                key_path = PurePosixPath(*path.parts[:idx + 2]).as_posix() if len(following) > 1 else canon
+                full = PurePosixPath(*path.parts[:idx], short).as_posix() if idx > 0 else key_path
+                raw[kind].append((key_path, short, full))
     result = {}
-    for key, pairs in raw.items():
-        unique = list({full: (short, full) for short, full in pairs}.values())
-        counts = {}
-        for short, _ in unique:
-            counts[short] = counts.get(short, 0) + 1
-        result[key] = sorted(full if counts[short] > 1 else short for short, full in unique)
+    for key, rows in raw.items():
+        unique = list({canon: (canon, short, full) for canon, short, full in rows}.values())
+        short_counts, full_counts = {}, {}
+        for _, short, full in unique:
+            short_counts[short] = short_counts.get(short, 0) + 1
+            full_counts[full] = full_counts.get(full, 0) + 1
+        names = [short if short_counts[short] == 1 else (full if full_counts[full] == 1 else canon)
+                 for canon, short, full in unique]
+        result[key] = sorted(names)
     return result
 
 
