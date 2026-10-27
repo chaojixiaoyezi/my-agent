@@ -305,11 +305,16 @@ class GatewayPortalDomain:
             handler = handler_class(home_paths_with_owner(root_paths(context.owner_home.root), context.owner_home))
         return getattr(handler, method)(dict(payload))
 
-    # LLM: W4三位置参数和W5两位置参数先bind；内置列表总候选store再过滤；旧Owner关键字协议不重试执行。
+    # LLM: W4三位置参数和W5两位置参数先bind；文本上传归一化为data_base64；内置列表总候选store再过滤。
     # 函数用途: 在调用之前选择唯一签名，避免TypeError重试产生重复副作用。
     def _call_function(self, authorized, target, context, payload):
+        import base64
         from inspect import signature
 
+        if authorized.call.action == "workspace.files.upload" and "content" in payload:
+            if "data_base64" in payload:
+                raise HostAPIError("INVALID_SCHEMA", 400)
+            payload = {**payload, "data_base64": base64.b64encode(payload["content"].encode("utf-8")).decode("ascii")}
         params = signature(target)
         store = self.resources.store_for(context)
         if (authorized.call.action.startswith("conversations.threads.")

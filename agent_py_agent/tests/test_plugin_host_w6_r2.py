@@ -545,3 +545,41 @@ def test_usage_model_aliases_and_stream_budget_and_dict_packages(r2_case, monkey
     result = composition.dispatch_call(authorized_call(r2_case, "capability_packages.list", {}), host.ports)
     assert result.data["items"][0]["package_id"] == "pkg-dict"
 
+
+# LLM: 覆盖workspace.files.upload的content文本自动编码、interject在append_once后撤权返回unknown、以及http_transport对execute的outcome映射。
+# 函数用途: 核验c8与c9在R3复核中提出的3项边界。
+def test_upload_content_and_interject_post_append_revoke_and_http_execute_outcome(r2_case, monkeypatch):
+    host, _, store, _, _, home, *_ = r2_case
+    seen_upload = []
+    root = home.workspace_dir
+    root.mkdir(parents=True, exist_ok=True)
+    sibling(monkeypatch, "workspace_v2_handlers", upload_workspace_file=lambda ctx, payload: (seen_upload.append(payload), {"ok": True})[1])
+    up_call = authorized_call(
+        r2_case,
+        "workspace.files.upload",
+        {"workspace_dir": str(root), "path": "note.txt", "content": "x"},
+        "fixture-upload-content-0001",
+    )
+    assert composition.dispatch_call(up_call, host.ports).data["ok"] is True
+    assert seen_upload[0]["data_base64"] == "eA=="
+
+    thread, request_id = queued_case(r2_case)
+    orig_append = store.guidance.append_once
+
+    # LLM: 在guidance持久化成功后立即关闭issuer，模拟落账与请求关联之间的撤权窗口。
+    # 函数用途: 验证已落账的插话不会返回not_started。
+    def append_then_close(*args, **kwargs):
+        entry = orig_append(*args, **kwargs)
+        host.issuer.close()
+        return entry
+
+    monkeypatch.setattr(store.guidance, "append_once", append_then_close)
+    ij_call = authorized_call(
+        r2_case,
+        "conversations.requests.interject",
+        {"thread_id": thread, "request_id": request_id, "mode": "queue", "text": "半提交"},
+        "fixture-interject-revoke-0001",
+    )
+    with pytest.raises(HostAPIError) as exc_info:
+        composition.dispatch_call(ij_call, host.ports)
+    assert exc_info.value.outcome == "unknown"

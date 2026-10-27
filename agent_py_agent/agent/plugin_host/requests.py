@@ -539,7 +539,10 @@ def _append_interjection(domain, authorized, context, paths, store, payload, *, 
                      "plugin_installation_ref": authorized.binding.installation_ref, "input_artifact_refs": refs,
                      "plugin_request_id": request_id, "mode": mode}}, idempotency_key, len(row.get("interjections", [])))
     if folder in {"pending", "processing"}:
-        require_plugin_source(authorized)
+        try:
+            require_plugin_source(authorized)
+        except HostAPIError as error:
+            raise HostAPIError(error.code, error.status, "unknown") from None
 
         # LLM: 同一请求T内保留原path锁；已有guidance重放不计数，部分提交恢复遇满额保unknown，绝不补成65项。
         # 函数用途: 为排队和运行请求共同记录插话计数，保留其它并发字段。
