@@ -822,3 +822,15 @@ def test_workspace_workflows_tools_do_not_update_owner_shadow(tmp_path):
     result = tool.execute({'action': 'run', 'workflow_id': 'scoped'})
     assert result.ok and json.loads(result.output)['steps'][0]['step_id'] == 'project_step'
     assert WorkflowStore(home).get_workflow('scoped').descriptor.runtime_summary.run_count == 0
+
+
+# LLM: 空称呼行不得跨行吞入下一条角色/背景描述，保持未解析语义。
+# 函数用途: 覆盖USER.md称呼留空时的单行边界解析。
+def test_identity_local_name_does_not_cross_newline_when_empty(tmp_path):
+    from agent_py_agent.agent.adapter.feishu_profile import resolve_user_space_identity
+    home = tmp_path / 'owners' / 'local' / 'alice'
+    home.mkdir(parents=True)
+    (home / 'USER.md').write_text('- 称呼:\n- 角色/背景: 开发者\n', encoding='utf-8')
+    res = resolve_user_space_identity(home)
+    assert res['resolved'] is False and res['display_name'] is None
+

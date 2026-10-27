@@ -178,7 +178,7 @@ def _identity_local_name(home):
         text = read_text_beneath(home, ('USER.md',)) or ''
     except (OSError, ValueError):
         return None
-    match = re.search(r'^\s*-?\s*(?:称呼|显示名|display_name)\s*[:：]\s*([^\n]+)', text, re.MULTILINE)
+    match = re.search(r'^[ \t]*-?[ \t]*(?:称呼|显示名|display_name)[ \t]*[:：][ \t]*([^\r\n]+)', text, re.MULTILINE)
     return _identity_name(match[1]) if match else None
 
 
