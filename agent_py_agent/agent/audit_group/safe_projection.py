@@ -21,6 +21,9 @@ _SENSITIVE_PARTS = ("api_key", "apikey", "passphrase", "password", "passwd", "se
     "session_key", "auth_key", "bearer", "pwd", "cookie", "session", "authorization", "webhook")
 _SENSITIVE_TOKENS = frozenset({"pw", "key", "pin", "jwt", "pat", "ak", "sk"})
 _SCHEMA_LITERALS = frozenset({"default", "examples", "enum", "const"})
+_CAMEL_ACRONYM_BOUNDARY = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_WORD_BOUNDARY = re.compile(r"([a-z0-9])([A-Z])")
+_KEY_SEPARATOR = re.compile(r"[-.\s]+")
 
 
 # LLM: 先打码再限制长度，避免截断凭据语法后无法识别；不读取路径。
@@ -51,10 +54,11 @@ def public_value(value, *, depth=0, budget=None):
     return None
 
 
-# LLM: 长秘密名称按子串命中，短词仅按分隔后的整词命中；保留既有cookie/session等秘密分类。
-# 函数用途: 统一识别点号、连字符和下划线形式的敏感属性名。
+# LLM: 先切分驼峰/缩写边界再转小写，长秘密名称按子串命中，短词仅按完整词段命中；保留既有秘密分类。
+# 函数用途: 统一识别驼峰、空白、点号、连字符和下划线形式的敏感属性名。
 def _is_sensitive_key(key):
-    normalized = key.lower().replace("-", "_").replace(".", "_")
+    split_camel = _CAMEL_WORD_BOUNDARY.sub(r"\1_\2", _CAMEL_ACRONYM_BOUNDARY.sub(r"\1_\2", key))
+    normalized = _KEY_SEPARATOR.sub("_", split_camel).lower()
     return any(part in normalized for part in _SENSITIVE_PARTS) or bool(_SENSITIVE_TOKENS.intersection(normalized.split("_")))
 
 

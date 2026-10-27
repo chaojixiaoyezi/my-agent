@@ -1,3 +1,26 @@
+## 2026-10-26 AG2-R4：驼峰敏感Schema键拆分（R3-F1）
+
+来源：`07-tasks/wave5-ag2-round4-fix-20261026.md`，基线 `8ff1e9a870d5d993b2509ebcc553fcab7068f712`，仅在 `/tmp/wt-wave5-ag2` 的 `wt-wave5-ag2` 分支修改。仅改 `safe_projection.py`、原观察回归文件与本节；不修改已通过的技能政策、监控规则调用、Bot模式或Host分派，不推送或部署。
+
+- 原始路径：来源资产schema属性名进入 `_is_sensitive_key` 后先lower，`privateKey` 等变成无分隔的privatekey，既不命中private_key长模式，也不命中完整词段key，导致公开摘要保留秘密default/examples/enum/const。旧版实测分类False及真实摘要字面值未剥离，不以正则代码猜测代替复现。
+- 最小修复：模块级预编译缩写边界与小写/数字→大写边界两条正则，先拆分再lower；点号、连字符及空白共用预编译分隔符正则归一下划线。保留原长名称子串、短词整段匹配和既有秘密分类，不改Schema白名单、递归预算或其它输出合同。
+- 新增97项：任务列出的camelCase、APIKey、PRIVATEKey/AUTHKey缩写、空格/制表/换行/不换行空格分类；真实来源文件经摘要服务分别覆盖parameters_schema/input_schema/output_schema/config_schema，核父节点及嵌套$defs/anyOf/列表items/additionalProperties四类字面值均剥离。monkey/donkey/turkey/hotkey/sketch/pocket/limit保留完整default/examples/enum/const，源目录字节/权限/mtime不变。不是删除整个schema来造绿，不用模型或OS执行替身替代摘要路径。
+
+先红后绿：新增集合旧版 **60 failed / 37 passed / 0 errors**，修复后 **97 passed / 0 failed / 0 errors**。证据为 `.pytest_cache/ag2-r4-red.xml` 与 `ag2-r4-green.xml`。全仓Ruff首轮指出测试字典构造C420，改用语义等价dict.fromkeys后重跑通过，未调整任何有效断言。
+
+任务两个回归文件名在此基线不存在：`test_audit_group_governance_and_bots.py`、`test_managed_users_governance.py`。按真实对应文件使用 `test_dual_bot_sessions_and_rollover.py`、`test_admin_managed_users_governance.py`，并额外覆盖原技能政策/态势文件。实际串行命令：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_audit_group_policy_and_posture.py -q --tb=short -k 'not test_t4_actual_native_isolated_process' -o addopts='' --junitxml=.pytest_cache/ag2-r4-delivery.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+最终四文件组合 **564 passed / 0 failed / 0 errors / 1 deselected**，完整记录 `.pytest_cache/ag2-r4-delivery.xml`。原生隔离排除延用本会话原任务明确允许的TUI worker验证边界，不改skip/xfail或沙箱就绪门；真实原生隔离和Web/IM E2E未验证，须在宿主补测。尺寸门仅在pytest结束后运行，生成报告提交前还原；不把不存在的测试文件记成已运行。
+
 ## 2026-10-26 AG2-R3：规范技能策略、Schema脱敏与规则选择（Host接线已验证）
 
 来源：`07-tasks/wave5-ag2-round3-fix-20261026.md` 及补充授权 `07-tasks/wave5-ag2-round3-whitelist-20261026.md`；工作树 `/tmp/wt-wave5-ag2`，基线 `2d5362925c2703d942bac32f344baf5e8cce9ed5`。沿原任务禁止派子代理；修改范围为原12个文件加明确授权的实际Host分派文件，共13个文件，不推送或部署。

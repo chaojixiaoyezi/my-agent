@@ -1151,3 +1151,51 @@ def test_r3_compound_monitor_without_rule_id_keeps_explicit_selection_required(t
             asset_type="monitor", asset_id="multi")
     assert (denied.value.code, denied.value.status_code) == ("AUDIT_GROUP_RULE_REQUIRED", 400)
     assert not calls
+
+
+_R4_SENSITIVE_KEYS = ("privateKey", "accessKey", "encryptKey", "encryptionKey", "signingKey", "authKey",
+    "apiKey", "secretKey", "clientSecret", "webhookSecret", "sessionKey", "APIKey", "PRIVATEKey", "AUTHKey",
+    "private key", "auth\tkey", "access\nkey", "encryption\u00a0key")
+_R4_PUBLIC_KEYS = ("monkey", "donkey", "turkey", "hotkey", "sketch", "pocket", "limit")
+
+
+# LLM: 驼峰及缩写边界必须在lower前切开，空白同样是分隔符；普通近似词不能因包含key/sk片段误命中。
+# 函数用途: 直接回归敏感键分类的明确正反例，不靠Schema整段丢弃掩盖分类失败。
+@pytest.mark.parametrize("field,expected", [(key, True) for key in _R4_SENSITIVE_KEYS]
+    + [(key, False) for key in _R4_PUBLIC_KEYS])
+def test_r4_sensitive_key_camel_and_whitespace_boundaries(field, expected):
+    from agent_py_agent.agent.audit_group.safe_projection import _is_sensitive_key
+
+    assert _is_sensitive_key(field) is expected
+
+
+# LLM: 沿真实文件和摘要服务验证四个Schema出口；合成秘密必须从父节点及所有子Schema字面值中消失。
+# 函数用途: 验证驼峰敏感上下文穿透defs、anyOf、列表items和additionalProperties，普通字段四类字面值不变。
+@pytest.mark.parametrize("field", _R4_SENSITIVE_KEYS)
+@pytest.mark.parametrize("schema_field", ["parameters_schema", "input_schema", "output_schema", "config_schema"])
+def test_r4_all_schema_variants_strip_camel_literals_and_keep_public_values(tmp_path, field, schema_field):
+    from agent_py_agent.agent.audit_group.observation_service import AuditGroupObservationService
+
+    member(tmp_path)
+    literals = {"default": "r4-plain-default", "examples": ["r4-plain-example"],
+                "enum": ["r4-plain-enum"], "const": "r4-plain-const"}
+    secret = {"type": "string", **literals}
+    public = {"type": "integer", "default": 3, "examples": [4], "enum": [3, 4], "const": 3}
+    sensitive = {**secret, "$defs": {"child": secret}, "anyOf": [secret],
+                 "items": [secret], "additionalProperties": secret}
+    schema = {"type": "object", "properties": {field: sensitive, **dict.fromkeys(_R4_PUBLIC_KEYS, public)}}
+    asset(tmp_path, "script", "r4-schema", **{schema_field: schema})
+    source = tmp_path / "owners/local/main"
+    before = inventory(source)
+    result = AuditGroupObservationService(tmp_path).summarize_assets("local/alice", target_owner="local/main", kinds=["script"])
+    assert result["coverage"] == "complete" and result["source_errors"] == []
+    row, = result["items"]
+    projected = row[schema_field]["properties"]
+    parent = projected[field]
+    nodes = [parent, parent["$defs"]["child"], parent["anyOf"][0], parent["items"][0], parent["additionalProperties"]]
+    for node in nodes:
+        assert node["type"] == "string" and not set(literals).intersection(node)
+    assert "r4-plain-" not in json.dumps(row)
+    for key in _R4_PUBLIC_KEYS:
+        assert projected[key] == public
+    assert inventory(source) == before
