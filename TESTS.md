@@ -1,3 +1,44 @@
+## 2026-10-27 Wave 7 W2-R3：Astra 八项审计修复
+
+来源：完整读取 `07-tasks/wave7-w2-r3-astra-fixes.md`（96 行），准确起点 `4a12a701803f7e040bae3c3b6b967f7bfb0ddc52`；仅在派工工作树修改，尺寸报告按任务指定写 `/tmp/w2-r3-code-size.md`，不推送、不部署。
+
+- **F07**：`asset_promotion` 保留公开入口，生产晋升流程拆到 `skill_learning_promotion.py`，确定性验证拆到 `skill_learning_validation.py`。Runtime 默认及显式 `None` 都走内置核验；自主开关关闭仍只提出候选。默认实际检查名称/目标/脱敏/非空正文/Python语法/工作流DAG，原发布解析、guard、所有权、限额、CAS不放宽。AGENTS/SOUL 目标硬拒绝 `MANUAL_ONLY_TARGET`；生产调用 `select_asset_carrier` 并在事件及静态报告记录载体。
+- **核验等级不能混淆**：默认报告为 `verification_kind=deterministic_static, checks_executed=True, executed=False`，允许按本轮明确要求进入 trial，但 `business_validated(report)` 必须为 False。已有准确宿主执行证明仍可复用；静态检查不会写入真实业务证明缓存，不伪造 `user_confirmed`，不执行候选命令，不把语法正确外推成业务通过。
+- **F11**：真实 `authority/outcome/run_id/sha256` 采用字段不改。无目标只允许同 run 唯一资产版本对（包含旧版本采用的歧义核对）；显式目标支持 skill_id/skill_name/target_skill_id 等，必须提供同一引用内或顶层准确 hash，所有 hash 别名一致。旧正例补真实 hash，另有缺 hash/错 hash 反例，未删除旧拒绝断言。
+- **F01**：推荐投影保留 script/workflow 方法引用，并将原授权快照内 scripts/workflows 工具放回 shortlist、移出 deferred；不新增运行绑定或授权。
+- **F12**：stable v1→trial v2→trial v3 保留 v1 正文快照及对应验证元数据，回归回滚仍递增 revision。
+- **B3**：包卡片 scope 从直接字段或 metadata 读取；工作台、领域、工作区标签、渠道支持单复数别名、字符串序列/set、大小写归一、维间 AND/维内交集和 `*`/`all` 通配；未知 scalar 仍精确匹配，只排序不扩权。
+- **F08**：请求键绑定原 run/request 身份、task/root、显式 digest 及完整脱敏轨迹；队列恢复也核 digest 冲突，同材料重复幂等。仍要求真实 run/request，未放宽为只凭 thread 入队。
+- **F17**：生产 C 发现从同代 registry 正文读取独立 `last_maintenance_at`，缺失为 0；mtime 继续用于原运输 CAS，不再作冷维护时钟。
+- **F04**：包卡片传 activation_id，全局分页摘要绑定代次；返回 `total_count` 并保留 `total`。
+
+红绿证据：`.pytest_cache/w2-r3-red.xml` 和 `w2-r3-red-extra.xml` 留存实现前反例；F01 首次夹具缺 schema 校验方法的错误不计业务红例，修正为真实 ToolModelSpec 后实际复现执行工具丢失。新增 R3 用例 39 项通过（`w2-r3-green.xml`）；更新旧合同并保留准入规则后，48 项定向兼容通过（`w2-r3-compat-green.xml`）。最终当前版本已实际复跑，结果如下（不把早先 8 项旧合同失败改称通过）：
+
+| 当前验证范围 | 实际结果 | 证据 |
+| --- | --- | --- |
+| W2 闭环 + 全部 `test_skill_learning*.py` + 实际 Router 套件 | 362 passed / 0 failed / 1 skipped / 0 errors | `.pytest_cache/w2-r3-final.xml` |
+| 其中 W2 闭环文件 | 118 passed / 0 skipped | 同 XML，按 testcase classname 核对 |
+| 其中独审新增回归 | 7 passed | 同 XML，`test_r3_review_*` |
+| 额外推荐/提炼/候选/运输回归 | 160 passed / 0 failed / 0 skipped / 0 errors | `.pytest_cache/w2-r3-related-final.xml` |
+| 规定 Ruff、文档同步、strict 尺寸门、差异检查 | 全部通过，hard=0，blocked=False | 本轮命令退出码 0；报告 `/tmp/w2-r3-code-size.md` |
+
+独立复核只依据内联真实函数和合同静态检查，未读全仓或跑测试；主代理已实跑核对并修复三项：只用 AST 会放行重复形参/顶层 return、单边缺轨迹时误合并、不可哈希 Callable 分类报错；另补假值 callback 被隐式替成默认的反例。脚本改为 `compile(..., dont_inherit=True)` 后丢弃代码对象，有正例证明不执行候选；callback 按身份比较且仅 None 取默认。队列保留双方旧格式兼容，但一边缺失/冲突轨迹不能吞掉另一边已知材料。队列首个夹具 key 不合法不计业务红例，换真实 16 位 hex key 后两个方向均实际复现 1!=2，见 `w2-r3-review-queue-red.xml`；其余反例见 `w2-r3-review-red.xml`，当前七项已在最终组合转绿。
+
+额外 160 项明确覆盖 `test_pack_recommendation_threshold.py`、`test_capability_package_recommendations.py`、`test_decision_skill_projection.py`、`test_skill_proposals.py`、`test_turn_asset_extractor.py`，以及 `test_gateway_learning_discovery.py` 的四项原 FIFO、registry 代次拒绝、实际 C claim、due 精确边界测试；不是整个 gateway 测试文件通过的声明。唯一跳过项为原 confirmation 真实硬链接场景，创建返回 `EPERM`，该观察点未验证。尺寸报告使用显式外置路径，受跟踪 `CODE_SIZE_REPORT.md` 未变更。
+
+任务书的 `test_skill_learning_Confirmation.py` 大小写与磁盘不符，实际使用小写 `test_skill_learning_confirmation.py`；当前树没有 `test_capability_router*.py`，已核对 glob，实际 Router 回归位于 `test_capabilities.py`，并补包推荐/投影相关套件，不把不存在文件算作已跑。
+
+复现（仓库根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_skill_learning*.py agent_py_agent/tests/test_capabilities.py -q --tb=short --junitxml=.pytest_cache/w2-r3-final.xml
+ruff check agent_py_agent/agent/capability/ agent_py_agent/agent/workflows/script_runner.py agent_py_agent/agent/assets/turn_extractor.py agent_py_agent/agent/gateway_parts/multiprocess_background_discovery.py agent_py_agent/tests/test_wave7_autonomous_learning_closure.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w2-r3-code-size.md
+git diff --check
+```
+
+验证边界：默认核验实际运行的是确定性静态检查，不是候选业务代码。真实模型、CLI/TUI/IM、部署入口和全仓 Linux 车道未验证；真实硬链接观察点若沿原测试出现 EPERM，仍如实保留未验证，不改断言。
+
 ## 2026-10-27 Wave 7 W2-R2：六项评审修复与跨线验收边界
 
 来源：`07-tasks/wave7-w2-r2-fixes.md`，起点 `54fc27d7e08d339222569cc021860beaa3aa2401`；只在派工工作树修改，不推送、不部署，不改 W1 生产文件。

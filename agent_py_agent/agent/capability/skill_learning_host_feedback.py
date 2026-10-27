@@ -7,6 +7,9 @@ from dataclasses import asdict, replace
 from .skill_learning_maintenance import LearningObservationSource, observe_learning
 from .skill_learning_store import SkillLearningStore
 
+_TARGET_KEYS = ('skill_id','skill_name','target_skill_id','asset_id','asset_ref','method_id','target_skill_ids')
+_HASH_KEYS = ('sha256','content_hash','content_sha256','skill_content_hash','version_hash')
+
 
 # LLM: 晚到工具回执不能冒当前新run/attempt记分；call身份来自宿主原调用，缺当前scope不猜测。
 # 函数用途: 把同一实际执行的已落账证据批次交给质量记录器，跳过过期执行。
@@ -34,7 +37,7 @@ def observe_pack_verification(agent, params, result, key):
         _observe(agent,params,'ineffective',f'pack:{key}', vars(result))
 
 
-# LLM: 显式目标逐项核对；无目标仅允许同run唯一当前版本采用，多个采用绝不广播；持久反馈不改变验证或授权。
+# LLM: 显式目标须准确hash；无目标仅同run唯一资产版本对可归因，旧版采用也构成歧义；不改变验证或授权。
 # 函数用途: 将原宿主回执归给准确采用的方法，兼容真实验证器没有目标字段的单技能运行。
 def _observe(agent,params,outcome,receipt,evidence=None):
     if not getattr(getattr(agent,'config',None),'enable_self_learning',False):
@@ -52,11 +55,14 @@ def _observe(agent,params,outcome,receipt,evidence=None):
                          and fact.get('run_id') == run_id and fact.get('sha256') == row.sha256])
                    for row in registry.skills.values()]
         adopted = [(row, facts) for row, facts in adopted if facts]
-        explicit = any(key in evidence for key in ('skill_id','asset_id','asset_ref','method_id','target_skill_ids'))
+        pairs = {(row.name, fact.get('sha256')) for row in registry.skills.values()
+                 for fact in row.maintenance.get('observations', []) if fact.get('authority') == 'model'
+                 and fact.get('outcome') == 'adopted' and fact.get('run_id') == run_id}
+        explicit = any(key in evidence for key in _TARGET_KEYS)
         for row, adoptions in adopted:
             if explicit and not _receipt_targets(evidence, row):
                 continue
-            if not explicit and (len(adopted) != 1 or not _receipt_hash_matches(evidence, row)):
+            if not explicit and (len(pairs) != 1 or len(adopted) != 1 or not row.sha256 or not _receipt_hash_matches(evidence, row)):
                 continue
             for adoption in adoptions:
                 observe_learning(store,row.name,sha256=row.sha256,task_id=adoption['task_id'],outcome=outcome,source=LearningObservationSource(authority='host',run_id=run_id,receipt_id=receipt,job_id=adoption.get('job_id','')))
@@ -64,10 +70,10 @@ def _observe(agent,params,outcome,receipt,evidence=None):
         return
 
 
-# LLM: 支持单目标、多目标、结构化asset_ref；字段同时存在时都须一致，不接受其它scope的同名资产。
+# LLM: 显式各组目标须提供顶层或同一结构引用内的准确hash；全部身份/hash别名须一致，不接受其它scope。
 # 函数用途: 核对一份宿主验证究竟覆盖哪项当前版本的方法。
 def _receipt_targets(evidence, row):
-    groups = [[evidence[key]] for key in ('skill_id','asset_id','asset_ref','method_id') if evidence.get(key)]
+    groups = [[evidence[key]] for key in _TARGET_KEYS[:-1] if key in evidence]
     multiple = evidence.get('target_skill_ids')
     if multiple is not None:
         if not isinstance(multiple, (list, tuple)):
@@ -77,13 +83,15 @@ def _receipt_targets(evidence, row):
         return False
     if not _receipt_hash_matches(evidence, row):
         return False
-    return all(any(_target_matches(target, row) for target in group) for group in groups)
+    hashed = any(key in evidence for key in _HASH_KEYS)
+    return all(any(_target_matches(target, row) and (hashed or isinstance(target, dict)
+                   and any(key in target for key in _HASH_KEYS)) for target in group) for group in groups)
 
 
-# LLM: 同时存在的所有hash都要匹配，不能用正确sha256掩盖冲突content_hash；不解析正文。
+# LLM: 所有版本hash别名须匹配，不能用正确sha256掩盖冲突skill_content_hash/content_hash；不解析正文。
 # 函数用途: 让显式目标和单技能归因共用准确版本核对。
 def _receipt_hash_matches(evidence, row):
-    return all(evidence[key] == row.sha256 for key in ('sha256','content_hash','content_sha256') if key in evidence)
+    return all(evidence[key] == row.sha256 for key in _HASH_KEYS if key in evidence)
 
 
 # LLM: 结构化引用的所有身份/hash别名均须一致；列表中不同引用仍为OR，不用一个正确字段掩盖冲突字段。

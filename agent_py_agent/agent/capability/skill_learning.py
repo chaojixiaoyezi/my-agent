@@ -53,6 +53,7 @@ from .skill_learning_store import (
     request_key,
     utc_now,
 )
+from .skill_learning_validation import default_machine_promotion_verifier, verify_machine_candidate
 from .skill_snapshot import skill_content_sha256
 from .skills import parse_skill_file
 
@@ -107,7 +108,7 @@ class SkillLearningSettings:
 
 # LLM: backend 与记忆整理共用（owner 选定模型、非流式）；snapshot_provider 返回当前 owner 的 Skill 快照，
 #   只读取 entries 的 name/description/source/path/stable_id；guard_config 只用于 guard 的文件数与大小上限。
-#   owner_id自绑宿主会话；默认verifier由Service绑定原Store，仅复用准确宿主证明，显式None仍保持候选。
+#   owner_id自绑宿主会话；默认静态verifier由Service绑定原Store先复用准确证明，None也走默认；关闭开关保持候选。
 # 类用途: 自动总结在运行期依赖的外部对象。
 @dataclass(frozen=True)
 class SkillLearningRuntime:
@@ -118,7 +119,7 @@ class SkillLearningRuntime:
     protection_provider: Callable[[],dict] | None = None
     lesson_provider: Callable[[],object] | None = None
     deployment_root: Path | None = None
-    promotion_verifier: Callable | None = builtin_machine_verifier
+    promotion_verifier: Callable | None = default_machine_promotion_verifier
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -386,7 +387,7 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: 模型只产候选；开关加宿主准确核验才发布；默认核验绑定原Store，不把模型字段或语义族当CAS/guard。
+    # LLM: 模型只产候选；默认机器核验分静态与真实执行级别，开关关闭不晋升，不把模型声明当证明或绕CAS/guard。
     # 函数用途: 解析总结，复用同族候选，或按机器验证事实晋升正式Skill。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
@@ -404,11 +405,11 @@ class SkillLearningService:
         try:
             from .asset_promotion import propose_or_promote_skill
             verifier = getattr(self.runtime, 'promotion_verifier', None)
-            if verifier is builtin_machine_verifier:
-                verifier = partial(verifier, store=self.store)
+            if verifier is None or verifier in (builtin_machine_verifier, default_machine_promotion_verifier):
+                verifier = partial(verify_machine_candidate, store=self.store)
             with gateway_short_transaction("skill_learning_propose"):
                 return propose_or_promote_skill(self.store, publish,
-                    verifier=verifier if self.settings.autonomous_verified else None)
+                    verifier=verifier, autonomous_verified=self.settings.autonomous_verified)
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:

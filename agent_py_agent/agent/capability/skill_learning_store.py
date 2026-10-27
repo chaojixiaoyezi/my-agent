@@ -162,7 +162,7 @@ class SkillLearningRegistry:
         }
 
 
-# LLM: 事件只含 ID、名字、版本、hash、结果码和有界 reason；绝不写 Skill 正文或对话内容。
+# LLM: 事件只含身份/hash/结果码/有界reason及可选载体；carrier仅展示静态选择，不授执行权，不写正文。
 # 类用途: 账本里的一条自学事件。
 @dataclass(frozen=True)
 class SkillLearningEvent:
@@ -174,8 +174,9 @@ class SkillLearningEvent:
     request_key: str = ""
     run_id: str = ""
     reason: str = ""
+    carrier: str = ""
 
-    # LLM: event_id 与时间在落盘时生成；reason 截到 200 字防止账本变成正文副本。
+    # LLM: event_id/时间落盘时生成，reason最多200字；只为有载体的新晋升附carrier，保留旧事件形状。
     # 函数用途: 转成写入 ledger.jsonl 的一行。
     def to_record(self) -> dict[str, object]:
         return {
@@ -190,6 +191,7 @@ class SkillLearningEvent:
             "request_key": self.request_key,
             "run_id": self.run_id,
             "reason": self.reason[:200],
+            **({'carrier':self.carrier} if self.carrier else {}),
         }
 
 
@@ -589,7 +591,7 @@ def _request_context(request):
     return ()
 
 
-# LLM: 先按同一规范root/task身份比较，再兼容旧thread；同轨迹可压实，异轨迹或缺轨迹异run须明确谱系。
+# LLM: 规范root/task优先；谱系可压实，轨迹不对称缺失或冲突均保留；双方旧格式缺轨迹才按旧run合同兼容。
 # 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
 def _mergeable_requests(left, right):
     contexts = _request_context(left), _request_context(right)
@@ -605,6 +607,8 @@ def _mergeable_requests(left, right):
         if isinstance(refs, list) and older.get('request_key') in refs:
             return True
     first, second = left.get('trajectory_fingerprint'), right.get('trajectory_fingerprint')
+    if any((left.get(key) or right.get(key)) and left.get(key) != right.get(key) for key in ('trajectory_digest', 'trajectory_fingerprint')):
+        return False
     if first and second:
         return first == second
     runs = left.get('run_id'), right.get('run_id')

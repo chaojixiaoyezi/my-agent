@@ -128,7 +128,7 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     return _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else "")
 
 
-# LLM: 更新必须CAS且磁盘未被用户改动；新hash回到trial、清本版计数并保存previous_stable；登记失败写回旧正文。
+# LLM: 更新须CAS且磁盘未被改；连续trial保留最初稳定快照及其证明，新hash清本版计数；登记失败写回旧正文。
 #   副作用：原子替换 SKILL.md（保留同目录其它文件），写 versions/ 与 registry.json。
 # 函数用途: 在锁内更新一个自学 Skill。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
@@ -146,13 +146,14 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     path = store.skill_path(current.name)
     previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
     _stage_and_check(store, publish, text)
+    stable = current.maintenance.get('previous_stable') if current.maintenance.get('state') == 'trial' else None
     record = replace(current, version=current.revision + 1, revision=current.revision + 1, sha256=sha, updated_at=utc_now(),
                      source_run_ids=_runs(current.source_run_ids, publish.request), last_operation_id=str(publish.request.get("operation_id") or ""),
                      maintenance={**current.maintenance, 'state':'trial', 'quality':'trial', 'helped_count':0, 'hurt_count':0,
                                    'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
                                    'promotion_history':['observed','candidate','validated','trial'],
-                                   'previous_verification':{key:current.maintenance.get(key) for key in ('promotion_authority','verification_receipt')},
-                                  'observations':[], 'previous_stable':{'version':current.version,'revision':current.revision,'sha256':current.sha256}})
+                                   'previous_verification':current.maintenance.get('previous_verification', {}) if stable else {key:current.maintenance.get(key) for key in ('promotion_authority','verification_receipt')},
+                                  'observations':[], 'previous_stable':stable or {'version':current.version,'revision':current.revision,'sha256':current.sha256}})
     try:
         store.check_write(path,text)
         replace_skill_file(path, text)

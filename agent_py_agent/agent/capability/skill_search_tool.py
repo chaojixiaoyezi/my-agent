@@ -322,10 +322,11 @@ def _saved_asset_match(hit):
             'next_read':hit.card.metadata['next_read'], 'version':hit.card.metadata['version']}
 
 
-# LLM: 游标包含完整候选身份/版本和查询摘要；变代明确失败，不沿旧页码跳过新结果；不存查询原文。
+# LLM: 游标绑定候选身份/内容/activation代次与查询；变代明确失败，总数保留total兼容并提供total_count。
 # 函数用途: 给冻结的全局结果分页，返回总数、完整性和下一页游标。
 def _search_page(hits, params, query, category, limit):
-    identities = [(hit.card.id, hit.card.metadata.get('content_sha256', hit.card.metadata.get('version')), hit.score) for hit in hits]
+    identities = [(hit.card.id, hit.card.metadata.get('content_sha256', hit.card.metadata.get('version')),
+                   str(hit.card.metadata.get('activation_id') or ''), hit.score) for hit in hits]
     digest = hashlib.sha256(json.dumps([query, category, identities], ensure_ascii=False).encode()).hexdigest()[:24]
     offset = _nonnegative_int(params, 'offset', 0)
     if 'cursor' in params:
@@ -337,7 +338,7 @@ def _search_page(hits, params, query, category, limit):
         offset = int(parts[1])
     selected = hits[offset:offset+limit]
     next_offset = offset+len(selected)
-    return selected, {'offset':offset, 'total':len(hits), 'has_more':next_offset < len(hits),
+    return selected, {'offset':offset, 'total':len(hits), 'total_count':len(hits), 'has_more':next_offset < len(hits),
                       'next_cursor':f'{digest}:{next_offset}' if next_offset < len(hits) else None}
 
 

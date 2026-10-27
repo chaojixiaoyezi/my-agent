@@ -1,3 +1,8 @@
+## 2026-10-27 Wave 7 W2-R3：自学 registry 冷维护时钟结构
+
+- `gateway_parts/multiprocess_background_discovery.py::_owner_sources` 对 `learning_registry` 的既有 source ref 调用原 `read_source`，只从同代正文读 `last_maintenance_at`；缺省为 0，随后调用原 `learning_maintenance_due(interval/dayhour/timezone)`。mtime/input_revision 只保留运输层 CAS 身份，不再兼任业务维护时间。
+- 发现和实际消费分工不变：旧代引用由原读取/C claim 拒绝，实际维护仍按原锁和 due 再核，不从发现结果扩大 owner 或执行权限。静态与定向组件证据见根目录 `TESTS.md`，生产 Gateway 链路未验证。
+
 ## 2026-10-26 全量跨模块对向审计收口结构（Bot 执行约束、全库引用保护与协调路径派生清理）
 
 - `gateway_parts/request_execution.py::_gateway_run_params` 接收 `bot_request_allowed_tools(..., return_constraints=True)` 返回的 `(allowed_tools, bot_constraints)`，通过 `_bind_bot_execution_policy` 将结构化约束绑定至当前 worker agent 并设置 `learning_excluded`；`conversation/bot_tool_policy.py::wrap_bot_tool_registry` 对多动作工具按 `READONLY_TOOL_ACTIONS` 校验只读子操作、强校验物理 `workspace_root` 与 `max_tool_calls` 预算。

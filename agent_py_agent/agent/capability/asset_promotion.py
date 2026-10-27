@@ -9,15 +9,21 @@ import re
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 
-from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import read_text_beneath, unlink_file_beneath, write_text_atomic_beneath
+from .skill_learning_promotion import promote_verified_skill as promote_verified_skill
+from .skill_learning_promotion import propose_or_promote_skill as propose_or_promote_skill
 from .skill_learning_store import LearnedSkill, SkillLearningStore, utc_now
+from .skill_learning_validation import (
+    default_machine_promotion_verifier as default_machine_promotion_verifier,
+)
 from .skill_snapshot import skill_content_sha256
 
 
-# LLM: 纯结构分类，不解析自然语言授执行权。
+# LLM: 纯结构分类，显式四类载体优先，否则按分支/步骤/命令归类；不解析自然语言授执行权。
 # 函数用途: 选择适合复用的资产载体。
 def select_asset_carrier(features):
+    if features.get('kind') in {'skill','script','workflow','capability_package'}:
+        return features['kind']
     if features.get('branches'):
         return 'skill'
     if len(features.get('steps') or ()) > 1:
@@ -124,75 +130,3 @@ def register_extracted_assets(home, chosen, proposal, scope):
 def _restore_on_failure(store, parts, rollback):
     previous = read_text_beneath(store.directory, parts)
     rollback.callback(unlink_file_beneath, store.directory, parts) if previous is None else rollback.callback(write_text_atomic_beneath, store.directory, parts, previous)
-
-
-# LLM: 宿主重新验证前撤销同条件旧证明；准确执行/合同过闸后登记原回执，默认复用不重跑，publisher仍核CAS。
-# 函数用途: 让通过机器核验的Skill免人工确认进入试用，否则保持候选，绝不伪造user_confirmed。
-def promote_verified_skill(store, publish, verifier):
-    from . import skill_learning_host_feedback as feedback
-    from .skill_learning_publish import (
-        _redacted_publish,
-        _stage_and_check,
-        publish_learned_skill,
-        render_learned_skill,
-    )
-
-    if verifier is None:
-        return None
-    safe, redacted = _redacted_publish(publish)
-    if redacted:
-        return None
-    with store.state_lock():
-        _stage_and_check(store, safe, render_learned_skill(safe.decision))
-    sha = skill_content_sha256(render_learned_skill(safe.decision))
-    if getattr(verifier, 'func', verifier) is not feedback.builtin_machine_verifier:
-        feedback.remember_verified_candidate(store, safe, None, sha256=sha)
-    receipt = verifier(safe, sha)
-    feedback.remember_verified_candidate(store, safe, receipt, sha256=sha)
-    if (not isinstance(receipt, dict) or not business_validated(receipt) or receipt.get('sha256') != sha
-            or not receipt.get('receipt_id')):
-        return None
-    return publish_learned_skill(store, replace(safe, promotion_authority='autonomous_verified',
-        verification_receipt={'sha256':sha,'receipt_id':receipt['receipt_id']}))
-
-
-# LLM: 先按正式语义族和准确候选复用，再尝试宿主机器核验；候选默认仍经原结构/脱敏/guard入口，不伪造用户确认。
-# 函数用途: 为S3统一处理复用、机器晋升与保留候选三种路径。
-def propose_or_promote_skill(store, publish, *, verifier=None):
-    with locked_json_path(store.directory / '.families'):
-        return _propose_or_promote_locked(store, publish, verifier)
-
-
-# LLM: 只由family锁内调用，模型无verifier；正式复用仍验证磁盘所有权，原发布闸门二次核CAS。
-# 函数用途: 串行化同族候选检查及创建，允许已有pending获得真实验证后晋升。
-def _propose_or_promote_locked(store, publish, verifier):
-    from dataclasses import asdict
-
-    from .skill_learning_proposals import list_learning_proposals, propose_learning
-    from .skill_learning_publish import (
-        CODE_LIMIT_REACHED,
-        SkillLearningGateError,
-        _family_record_locked,
-    )
-    from .skill_learning_store import SkillLearningEvent
-
-    family = task_family_fingerprint('skill', asdict(publish.decision))
-    with store.state_lock():
-        registry = store.load_registry()
-        if (publish.decision.decision == 'create' and publish.max_skills > 0
-                and len(registry.skills) >= publish.max_skills and publish.decision.name not in registry.skills):
-            raise SkillLearningGateError(CODE_LIMIT_REACHED)
-        reusable = _family_record_locked(store, registry, publish) if publish.decision.decision == 'create' else None
-    if reusable is not None:
-        return SkillLearningEvent('skipped', 'SKILL_LEARNING_FAMILY_REUSED', skill_name=reusable.name)
-    pending = next((row for row in list_learning_proposals(store) if row['status']=='pending'
-                    and task_family_fingerprint('skill', row['decision']) == family), None)
-    event = promote_verified_skill(store, publish, verifier)
-    if event is not None:
-        return event
-    if pending is not None:
-        return SkillLearningEvent('skipped', 'SKILL_LEARNING_FAMILY_REUSED', skill_name=pending['decision']['name'])
-    event = propose_learning(store, publish)
-    register_asset(store, kind='skill', asset_id=publish.decision.name, asset=asdict(publish.decision),
-                   source={'origin':'S3','proposal_id':event.reason}, state='candidate')
-    return event

@@ -431,14 +431,16 @@ def from_skill_snapshot_entry(entry: SkillSnapshotEntry) -> CapabilityCard:
     return card
 
 
-# LLM: 卡片只能含包级公开声明；不得附带 members、内部文件名、正文或宿主路径。
+# LLM: 卡片只含公开声明；scope兼容直接字段与metadata，绑定activation代次；不附带私有成员或宿主路径。
 # 函数用途: 将能力包摘要加入统一软召回，同时保持独立于全局 Skill 的类别。
 def from_capability_package(package: CapabilityPackageSnapshot) -> CapabilityCard:
     return CapabilityCard(
         id=package.stable_id, kind="capability_package", name=package.package_id,
         description=package.description, keywords=list(package.keywords),
         when_to_use=[package.summary], source=package.source,
-        metadata={**package.to_ref(), "version": package.version, 'application_scope':getattr(package, 'application_scope', None)},
+        metadata={**package.to_ref(), "version": package.version,
+                  'activation_id':str(getattr(package, 'activation_id', '') or ''),
+                  'application_scope':getattr(package, 'application_scope', None) or (getattr(package, 'metadata', None) or {}).get('application_scope')},
     )
 
 
@@ -538,29 +540,32 @@ def _package_priority(card, query, attrs):
             -score_card(query, card)[0] if query else 0, card.name)
 
 
-# LLM: 只接受字符串或字符串序列作维度集合；缺维/空集/坏类型不匹配，未知维保留精确相等合同。
+# LLM: 四维小写归一、维内交集、维间AND，*与all声明通配；缺维/坏类型不匹配，未知维仍精确相等。
 # 函数用途: 核对工作台、领域、工作区标签的别名和每个已声明范围。
 def _scope_matches(scope, attrs):
     aliases = {'workbenches':('workbench_id','workbench','workbenches'),
-               'domains':('domain','domains'), 'workspace_tags':('workspace_tags','tags')}
+               'domains':('domain','domains'), 'workspace_tags':('workspace_tags','workspace_tag','tags'),
+               'channels':('channel','channels')}
     for key, expected in scope.items():
         if key not in aliases:
             if attrs.get(key) != expected:
                 return False
             continue
         required = _scope_values(expected)
+        if required.intersection({'*', 'all'}):
+            continue
         actual = {value for alias in aliases[key] for value in _scope_values(attrs.get(alias))}
         if not required.intersection(actual):
             return False
     return True
 
 
-# LLM: 软排序纯归一化，不从自然语言或对象字符串猜取值，不给调用方授予范围。
+# LLM: 字符串或字符串序列/set按strip+casefold归一；不从自然语言或对象猜取值，不授予范围。
 # 函数用途: 将标量或列表规范成范围值集合，坏形状当不匹配。
 def _scope_values(value):
     if isinstance(value, str):
-        return {value} if value else set()
-    return set(value) if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value) else set()
+        return {value.strip().casefold()} if value.strip() else set()
+    return {item.strip().casefold() for item in value if item.strip()} if isinstance(value, (list, tuple, set, frozenset)) and all(isinstance(item, str) for item in value) else set()
 
 
 # LLM: 否定短语仅影响软排序，不按自然语言裁定执行或权限；保留分句后的正面需求。

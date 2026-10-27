@@ -1,3 +1,8 @@
+## 2026-10-27 Wave 7 W2-R3：自学冷维护独立时钟（源码候选）
+
+- `multiprocess_background_discovery._owner_sources` 使用原只读来源引用读取同代 registry 顶层 `last_maintenance_at`，未维护时按 0 交给原 due 判断；热反馈/采用写入带来的文件 mtime 不再推迟冷维护。原 FIFO、来源代次 CAS、C claim 和实际维护复核保持不变，不新增队列或权限。
+- 覆盖热 mtime/旧维护时钟、旧 mtime/新维护时钟和原 FIFO/C claim/代次拒绝等定向回归；准确结果见根目录 `TESTS.md` 的 W2-R3 小节。真实 Gateway 启动、生产定时触发和部署未验证。
+
 ## 2026-10-26 全量跨模块对向审计收口（H01..H16 & P2-1..P2-3 & P1-02 已落地）
 
 - **网关 Bot 执行约束、只读操作级工具闸门与禁学贯通（`gateway_parts/request_execution.py`、`conversation/bot_tool_policy.py`、`plugin_host/gateway_runtime.py`）**：`bot_execution_policy` 与 `bot_request_allowed_tools` 冻结并传递 `bot_execution_policy`（含目标 Owner 物理 `workspace_root`、`max_tool_calls`、只读动作白名单与 `learning_excluded`）；`request_execution._gateway_run_params` 在构造 `RunParams` 时将 `bot_execution_policy` 挂载到运行实例并透传 `learning_excluded=True`，由 `wrap_bot_tool_registry` 在单次工具调用层拦截越权 action、超预算调用和越根路径。

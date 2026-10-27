@@ -3966,7 +3966,9 @@ S01–S05关键职责：`scheduler/creator_access.py`只读原身份索引与官
 ```text
 agent_py_agent/agent/capability/
 |   |   |-- skill_learning_publish.py  # S3 用户确认后的受控发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
-|   |   |-- asset_promotion.py # S1/S3/回合提炼共用registry出处、语义族、载体选择、准确hash宿主核验晋升及证明复用；缺证明保留候选
+|   |   |-- asset_promotion.py # S1/S3/回合提炼共用registry出处、语义族、四载体选择及机器晋升公开入口
+|   |   |-- skill_learning_promotion.py # 默认静态核验/真实宿主证明复用、同族候选与安全发布接线；自主关闭仍待审
+|   |   |-- skill_learning_validation.py # 名称/手工目标/脱敏/方法正文/Python/工作流DAG确定性检查，不冒充业务执行
 |   |   |-- skill_learning_budget.py # 共享home根的UTC日部署总模型预算，与owner预算并守
 |   |   |-- skill_learning_proposals.py # 待确认S3候选，准确修订的人类确认/拒绝后才走原发布
 |   |   |-- skill_learning_host_feedback.py # 原验证命令/包检查器准确采用归因、唯一技能无目标反馈、默认机器核验及原registry证明绑定

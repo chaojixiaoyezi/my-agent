@@ -40,23 +40,28 @@ def learning_request_eligible(ctx: object, min_tool_rounds: int, *, include_back
     )
 
 
-# LLM: 不合格或缺少运行身份时返回 None；返回的字典就是要写进队列的请求，之后只读（重试时只改 attempts）。
+# LLM: 仍须run/request宿主身份；幂等键另绑定task/root、完整脱敏轨迹与显式digest，不同任务不撞键。
 # 函数用途: 从收口上下文构造一条学习请求。
 def build_learning_request(ctx: object, min_tool_rounds: int, *, include_background: bool = False) -> dict[str, object] | None:
     if not learning_request_eligible(ctx, min_tool_rounds, include_background=include_background):
         return None
-    identity = str(getattr(ctx, "run_id", "") or getattr(ctx, "request_id", "") or "").strip()
-    if not identity:
-        return None
     attrs = getattr(ctx, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
+    identity = str(getattr(ctx, "run_id", "") or getattr(ctx, "request_id", "") or '').strip()
+    if not identity:
+        return None
     records = [item for item in (getattr(ctx, "archive_tool_calls", None) or []) if isinstance(item, dict)]
+    task = str(getattr(ctx, 'task_id', '') or '')
+    root = str(attrs.get('root_task_id') or getattr(ctx, 'root_task_id', '') or '')
+    digest = str(getattr(ctx, 'trajectory_digest', '') or attrs.get('trajectory_digest') or '')
+    fingerprint = hashlib.sha256(json.dumps(redact_sensitive_value(records), sort_keys=True, default=str).encode()).hexdigest()
     return {
         "schema_version": REQUEST_SCHEMA_VERSION,
-        "request_key": request_key(identity),
+        "request_key": request_key(json.dumps([identity, task, root, digest, fingerprint], ensure_ascii=False)),
         "request_id": str(getattr(ctx, "request_id", "") or ""),
         "run_id": str(getattr(ctx, "run_id", "") or ""),
-        "task_id": str(getattr(ctx, "task_id", "") or ""),
+        "task_id": task,
+        "trajectory_digest": digest,
         "thread_id": str(attrs.get("conversation_thread_id") or ""),
         "source": str(getattr(ctx, "source", "") or ""),
         "tool_rounds": int(getattr(ctx, "tool_rounds", 0) or 0),
@@ -65,8 +70,8 @@ def build_learning_request(ctx: object, min_tool_rounds: int, *, include_backgro
         "user_prompt": bounded_text(getattr(ctx, "user_prompt", ""), TEXT_LIMIT_CHARS),
         "final_response": bounded_text(getattr(getattr(ctx, "final_response", None), "text", ""), TEXT_LIMIT_CHARS),
         "tool_calls_total": len(records),
-        "root_task_id": str(attrs.get("root_task_id") or getattr(ctx, "root_task_id", "") or ""),
-        "trajectory_fingerprint": hashlib.sha256(json.dumps(redact_sensitive_value(records), sort_keys=True, default=str).encode()).hexdigest(),
+        "root_task_id": root,
+        "trajectory_fingerprint": fingerprint,
         "tool_trace": [_trace_entry(item) for item in _sample_learning_trace(records, limit=TRACE_COUNT)],
         "used_skill_ids": used_skill_ids(records),
     }

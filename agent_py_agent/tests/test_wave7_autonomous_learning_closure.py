@@ -55,6 +55,58 @@ def learned(tmp_path):
     return home, store
 
 
+@pytest.mark.parametrize('source', ['def run(value, value):\n    return value\n', 'return 1\n'])
+def test_r3_review_static_script_rejects_compile_errors(source):
+    from agent_py_agent.agent.capability.asset_promotion import default_machine_promotion_verifier
+
+    result = default_machine_promotion_verifier({'kind':'script', 'name':'compile-probe',
+                                               'description':'检查脚本编译错误', 'code':source})
+    assert result['status'] == 'failed' and result['executed'] is False
+
+
+def test_r3_review_script_compilation_does_not_execute():
+    from agent_py_agent.agent.capability.asset_promotion import default_machine_promotion_verifier
+
+    result = default_machine_promotion_verifier({'kind':'script', 'name':'no-exec-probe',
+                                               'description':'编译不能执行候选',
+                                               'code':'raise AssertionError("candidate was executed")'})
+    assert result['status'] == 'passed' and result['executed'] is False
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_r3_review_missing_trajectory_cannot_erase_known_material(learned, reverse):
+    _, store = learned
+    left = build_learning_request(context('same'), 1)
+    left.update(request_key='a'*16, trajectory_digest='a'*64, trajectory_fingerprint='b'*64)
+    right = {key:value for key, value in left.items() if key not in {'trajectory_digest','trajectory_fingerprint'}}
+    right['request_key'] = 'b'*16
+    for request in (right, left) if reverse else (left, right):
+        store.enqueue(request)
+    assert len(store.pending_requests(refill=True)) == 2
+
+
+@pytest.mark.parametrize('kind', ['unhashable', 'falsey'])
+def test_r3_review_custom_callable_is_not_implicitly_defaulted(learned, kind):
+    from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
+
+    class Verifier:
+        __hash__ = None
+        calls = 0
+
+        def __bool__(self):
+            return kind != 'falsey'
+
+        def __call__(self, candidate, sha256):
+            self.calls += 1
+            return {'status':'failed', 'sha256':sha256, 'receipt_id':'rejected'}
+
+    _, store = learned
+    verifier = Verifier()
+    publish = PublishRequest(decision('callable-probe'), request=build_learning_request(context(), 1))
+    assert promote_verified_skill(store, publish, verifier) is None
+    assert verifier.calls == 1 and 'callable-probe' not in store.load_registry().skills
+
+
 def test_f08_distinct_runs_in_same_thread_survive_queue_recovery(learned):
     _, store = learned
     for run in ('csv', 'ssh'):
@@ -142,7 +194,8 @@ def test_f11_receipt_credits_only_named_current_version(learned, target_field):
         observe_learning(store, row.name, sha256=row.sha256, task_id='task', outcome='adopted',
                          source=LearningObservationSource(run_id=params.run_id))
     target = ['owner:csv-cleaner'] if target_field == 'target_skill_ids' else 'owner:csv-cleaner'
-    observe_command_verification(agent, params, {'id': 1, 'status': 'passed', 'exit_code': 0, target_field: target})
+    observe_command_verification(agent, params, {'id': 1, 'status': 'passed', 'exit_code': 0, target_field: target,
+                                               'skill_content_hash':store.load_registry().skills['csv-cleaner'].sha256})
     registry = store.load_registry()
     assert any(row['authority'] == 'host' for row in registry.skills['csv-cleaner'].maintenance['observations'])
     assert not any(row['authority'] == 'host' for row in registry.skills['ssh-triage'].maintenance['observations'])
@@ -180,7 +233,7 @@ def test_f11_conflicting_explicit_targets_do_not_credit(learned):
 
     _,store = learned
     row = store.load_registry().skills['csv-cleaner']
-    assert not _receipt_targets({'skill_id':'owner:csv-cleaner','asset_ref':'owner:unrelated'},row)
+    assert not _receipt_targets({'skill_id':'owner:csv-cleaner','asset_ref':'owner:unrelated','sha256':row.sha256},row)
 
 
 @pytest.mark.parametrize('conflict', [{'asset_id':'owner:unrelated'}, {'content_sha256':'a'*64}])
@@ -425,7 +478,7 @@ def test_f07_machine_verified_promotion_never_forges_user_confirmation(tmp_path,
     service = SkillLearningService(store, settings, runtime)
     payload = {'schema_version':OUTPUT_SCHEMA_VERSION, **asdict(decision())}
     result = service._decide(SkillLearningMaterial({'run_id':'source-run'}), json.dumps(payload))
-    if receipt_kind != 'verified':
+    if receipt_kind in {'dry_run', 'wrong_hash'}:
         assert result.event == 'proposed'
         assert not store.load_registry().skills
         return
@@ -434,6 +487,9 @@ def test_f07_machine_verified_promotion_never_forges_user_confirmation(tmp_path,
     assert row.maintenance['promotion_authority'] == 'autonomous_verified'
     assert row.maintenance['promotion_history'] == ['observed','candidate','validated','trial']
     assert row.maintenance['quality'] == 'trial'
+    if receipt_kind == 'missing':
+        assert row.maintenance['verification_receipt']['verification_kind'] == 'deterministic_static'
+        assert row.maintenance['verification_receipt']['executed'] is False
     assert 'user_confirmed' not in json.dumps(store.load_registry().to_record())
     assert personality == {name:(home.owner_home_dir/name).read_bytes() for name in personality}
 
@@ -486,7 +542,7 @@ def test_f10_pending_candidate_can_become_machine_verified(tmp_path):
 
     store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
     request = PublishRequest(decision())
-    propose_or_promote_skill(store, request)
+    propose_or_promote_skill(store, request, autonomous_verified=False)
     result = propose_or_promote_skill(store, request, verifier=lambda _,sha: {
         'sha256':sha,'status':'passed','executed':True,'contract_valid':True,'output':{},'receipt_id':'r'})
     assert result.event == 'published'
@@ -692,7 +748,10 @@ def test_r2_default_runtime_has_machine_verifier_and_ignores_request_claims(tmp_
     material = SkillLearningMaterial({'run_id':'r', 'request_key':'r', 'verification_receipt':{
         'status':'passed', 'executed':True, 'contract_valid':True, 'receipt_id':'model-claim', 'output':{}}})
     event = service._decide(material, json.dumps({'schema_version':OUTPUT_SCHEMA_VERSION, **asdict(decision())}))
-    assert event.event == 'proposed' and not store.load_registry().skills
+    assert event.event == 'published'
+    receipt = store.load_registry().skills['csv-cleaner'].maintenance['verification_receipt']
+    assert receipt['receipt_id'] != 'model-claim'
+    assert receipt['verification_kind'] == 'deterministic_static' and receipt['executed'] is False
 
 
 def test_r2_default_verifier_reuses_host_receipt_after_publish_interruption(tmp_path, monkeypatch):
@@ -776,3 +835,194 @@ def test_r2_failed_reverification_invalidates_previous_machine_receipt(tmp_path,
     else:
         assert promote_verified_skill(store, publish, failed) is None
     assert builtin_machine_verifier(publish, sha, store=store) is None
+
+
+@pytest.mark.parametrize('field', ['skill_id', 'skill_name', 'target_skill_id'])
+@pytest.mark.parametrize('hash_value,expected', [(None, False), ('wrong', False), ('current', True)])
+def test_r3_f11_explicit_target_requires_exact_hash(learned, field, hash_value, expected):
+    from agent_py_agent.agent.capability.skill_learning_host_feedback import _receipt_targets
+
+    _, store = learned
+    row = store.load_registry().skills['csv-cleaner']
+    evidence = {field:'owner:csv-cleaner'}
+    if hash_value is not None:
+        evidence['skill_content_hash'] = row.sha256 if hash_value == 'current' else 'a'*64
+    assert _receipt_targets(evidence, row) is expected
+
+
+def test_r3_f11_multiple_adopted_versions_are_ambiguous(learned):
+    home, store = learned
+    row = store.load_registry().skills['csv-cleaner']
+    observe_learning(store, row.name, sha256=row.sha256, task_id='t', outcome='adopted',
+                     source=LearningObservationSource(run_id='r'))
+    with store.state_lock():
+        registry = store.load_registry()
+        current = registry.skills[row.name]
+        observations = current.maintenance['observations']
+        data = {**current.maintenance, 'observations':[{**observations[0], 'sha256':'a'*64}, *observations]}
+        store.save_registry(replace(registry, skills={row.name:replace(current, maintenance=data)}))
+    params = SimpleNamespace(run_id='r', attempt_id='a')
+    agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), home_paths=home, _current_run_params=params)
+    observe_command_verification(agent, params, {'id':42, 'status':'passed', 'exit_code':0})
+    assert not any(f['authority']=='host' for f in store.load_registry().skills[row.name].maintenance['observations'])
+
+
+def test_r3_f12_repeated_trial_updates_restore_original_stable(learned):
+    _, store = learned
+    stable = store.load_registry().skills['csv-cleaner']
+    with store.state_lock():
+        registry = store.load_registry()
+        store.save_registry(replace(registry, skills={stable.name:replace(stable, maintenance={**stable.maintenance, 'state':'active'})}))
+    for suffix in ('second', 'third'):
+        current = store.load_registry().skills[stable.name]
+        draft = replace(decision(), decision='update', body=BODY+'\n'+suffix)
+        publish_learned_skill(store, PublishRequest(draft, expected_revision=current.revision, expected_sha256=current.sha256))
+    trial = store.load_registry().skills[stable.name]
+    assert trial.maintenance['previous_stable']['sha256'] == stable.sha256
+    for task in ('regression-a', 'regression-b'):
+        observe_learning(store, stable.name, sha256=trial.sha256, task_id=task, outcome='adopted')
+        observe_learning(store, stable.name, sha256=trial.sha256, task_id=task, outcome='ineffective',
+                         source=LearningObservationSource(authority='host', receipt_id=task))
+    restored = store.load_registry().skills[stable.name]
+    assert restored.sha256 == stable.sha256 and restored.version == stable.version
+    assert restored.revision > trial.revision
+
+
+@pytest.mark.parametrize('difference', ['task', 'digest', 'trace', 'legacy'])
+def test_r3_f08_primary_identity_retains_task_and_trajectory(learned, difference):
+    _, store = learned
+    left, right = context('same'), context('same')
+    if difference == 'task':
+        right.task_id = 'another-task'
+    elif difference == 'digest':
+        left.trajectory_digest, right.trajectory_digest = 'first', 'second'
+    elif difference == 'trace':
+        right.archive_tool_calls = [{'tool':'read_file', 'ok':True, 'parameters':{'path':'other'}}]
+    else:
+        left.run_id = right.run_id = ''
+        right.task_id = 'another-legacy-task'
+    first, second = build_learning_request(left, 1), build_learning_request(right, 1)
+    assert first['request_key'] != second['request_key']
+    store.enqueue(first)
+    store.enqueue(second)
+    assert len(store.pending_requests(refill=True)) == 2
+    store.enqueue(build_learning_request(right, 1))
+    assert len(store.pending_requests(refill=True)) == 2
+
+
+@pytest.mark.parametrize('scope,attrs,expected', [
+    ({'workbenches':['PenTest']}, {'workbench_id':'pentest'}, True),
+    ({'workspace_tags':{'Prod'}, 'channels':['IM']}, {'workspace_tag':'prod', 'channel':['im']}, True),
+    ({'domains':['*'], 'channels':['all']}, {}, True),
+    ({'channels':['im']}, {'channel':'tui'}, False),
+    ({'workbenches':['pentest']}, {}, False),
+])
+def test_r3_b3_scope_aliases_case_sets_and_wildcards(scope, attrs, expected):
+    from agent_py_agent.agent.capability.router import _scope_matches
+
+    assert _scope_matches(scope, attrs) is expected
+
+
+def test_r3_b3_package_metadata_scope_survives_projection():
+    from agent_py_agent.agent.capability.router import from_capability_package
+
+    package = SimpleNamespace(stable_id='capability:p', package_id='p', description='summary', keywords=[],
+        summary='summary', source='test', version='1', metadata={'application_scope':{'channels':['im']}},
+        to_ref=lambda: {'package_id':'p'})
+    assert from_capability_package(package).metadata['application_scope'] == package.metadata['application_scope']
+
+
+@pytest.mark.parametrize('clock,expected', [(0, 1), (1, 1), ('recent', 0)])
+def test_r3_f17_discovery_uses_maintenance_clock_not_hot_mtime(learned, clock, expected):
+    import time
+
+    from agent_py_agent.tests.test_gateway_learning_discovery import learning_sources
+
+    home, store = learned
+    with store.state_lock():
+        store.save_registry(replace(store.load_registry(), last_maintenance_at=time.time() if clock == 'recent' else clock))
+    refs = learning_sources(SimpleNamespace(home=home, store=store))
+    assert len(refs) == expected
+
+
+def test_r3_f04_reactivation_rejects_old_cursor_and_counts_total():
+    from agent_py_agent.agent.capability.skill_search_tool import _search_page
+
+    hits = [SimpleNamespace(card=SimpleNamespace(id=str(i), metadata={'content_sha256':'a'*64, 'activation_id':'old'}), score=1) for i in range(2)]
+    _, page = _search_page(hits, {}, 'query', '', 1)
+    assert page.get('total_count') == page['total'] == 2
+    hits[0].card.metadata['activation_id'] = 'new'
+    with pytest.raises(ValueError, match='CURSOR_STALE'):
+        _search_page(hits, {'cursor':page['next_cursor']}, 'query', '', 1)
+
+
+@pytest.mark.parametrize('kind,tool', [('script','scripts'), ('workflow','workflows')])
+def test_r3_f01_selected_asset_keeps_execution_tool_and_reference(kind, tool):
+    from agent_py_agent.agent.capability.decision_recommendation import _project
+    from agent_py_agent.agent.tooling.models import (
+        ToolModelHints,
+        ToolModelSpec,
+        ToolRuntimeSnapshot,
+    )
+
+    runtimes = tuple(SimpleNamespace(model_spec=ToolModelSpec(name, name, {'type':'object'}, hints=ToolModelHints(category='capability')),
+        exposure=SimpleNamespace(model_visible=True), availability=SimpleNamespace(available=True),
+        handler=SimpleNamespace(), runtime_policy=None) for name in ('scripts','workflows','tool_search'))
+    tools = ToolRuntimeSnapshot('r', runtimes, frozenset(('scripts','workflows','tool_search')), (), None)
+    params = SimpleNamespace(allowed_tools=None, task_attributes={}, context_scope='default')
+    row = {'kind':kind, 'ref':kind+':owner:asset', 'tools_required':[tool]}
+    result = _project(params, tools, None, snapshot(), [row], {'optional_categories':['capability'], 'context_policy':'progressive'}, True)
+    assert tool in result.tool_snapshot.presentation_shortlist_names
+    assert tool not in result.tool_snapshot.presentation_deferred_names
+    assert row['ref'] in result.selected_skill_ids
+
+
+def test_r3_f07_default_production_promotion_is_static_not_business_execution(tmp_path):
+    from agent_py_agent.agent.capability import asset_promotion
+
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
+    event = asset_promotion.promote_verified_skill(store, PublishRequest(decision()), None)
+    assert event is not None and event.event == 'published'
+    assert event.carrier == 'skill'
+    receipt = store.load_registry().skills['csv-cleaner'].maintenance['verification_receipt']
+    assert receipt['verification_kind'] == 'deterministic_static'
+    assert receipt['checks_executed'] is True
+    assert not asset_promotion.business_validated(receipt)
+
+
+@pytest.mark.parametrize('kind,body,passed', [('script','print("ok")',True), ('script','def broken(',False),
+    ('workflow',[{'step_id':'a','mode':'deterministic_script','script_id':'s'}],True), ('workflow',[],False)])
+def test_r3_f07_default_machine_verifier_checks_draft_syntax(kind, body, passed):
+    from agent_py_agent.agent.capability import asset_promotion
+
+    verifier = getattr(asset_promotion, 'default_machine_promotion_verifier', None)
+    assert callable(verifier)
+    draft = {'kind':kind, 'name':'valid-name', 'description':'reusable procedure', 'code':body if kind=='script' else '',
+             'steps':body if kind=='workflow' else []}
+    assert (verifier(draft)['status'] == 'passed') is passed
+
+
+@pytest.mark.parametrize('extra', [{'target':'agents'}, {'target':'SOUL.md'}, {'name':'../escape'}, {'body':''},
+                                  {'body':'Authorization: Bearer '+'x'*50}])
+def test_r3_f07_default_verifier_rejects_unsafe_or_empty_drafts(extra):
+    from agent_py_agent.agent.capability import asset_promotion
+
+    verifier = getattr(asset_promotion, 'default_machine_promotion_verifier', None)
+    assert callable(verifier)
+    assert verifier({'kind':'skill', 'name':'valid-name', 'description':'procedure', 'body':BODY, **extra})['status'] != 'passed'
+
+
+def test_r3_f04_cursor_alone_binds_activation_generation():
+    from agent_py_agent.agent.capability.skill_search_tool import _search_page
+
+    hits = [SimpleNamespace(card=SimpleNamespace(id=str(i), metadata={'content_sha256':'a'*64, 'activation_id':'old'}), score=1) for i in range(2)]
+    _, page = _search_page(hits, {}, 'query', '', 1)
+    hits[0].card.metadata['activation_id'] = 'new'
+    with pytest.raises(ValueError, match='CURSOR_STALE'):
+        _search_page(hits, {'cursor':page['next_cursor']}, 'query', '', 1)
+
+
+def test_r3_f07_package_carrier_is_representable():
+    from agent_py_agent.agent.capability.asset_promotion import select_asset_carrier
+
+    assert select_asset_carrier({'kind':'capability_package'}) == 'capability_package'

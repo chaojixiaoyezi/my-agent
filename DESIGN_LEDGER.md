@@ -1,3 +1,11 @@
+## 2026-10-27 Wave 7 W2-R3：确定性静态核验自主试用与业务执行证明分层
+
+来源：`07-tasks/wave7-w2-r3-astra-fixes.md` 明确改变 R2 的无证明默认待审策略。Runtime 默认和 None 改为内置确定性检查；检查通过可自动进入 trial，但原 guard、解析、限额、托管权、CAS 和自主关闭开关不变，AGENTS/SOUL 目标保持硬拒绝。
+
+静态报告显式记 `verification_kind=deterministic_static`、`checks_executed=True`、`executed=False`，不能通过 `business_validated`。真实宿主回执缓存仍只接纳准确绑定的已执行业务证明；默认检查不是新候选真实业务执行闭环。生产调用结构化载体选择，事件记录 carrier；脚本/流程这里只解析、不执行，原执行工具仍负责业务合同。
+
+同时修正显式目标必须准确 hash、请求幂等键含任务/轨迹、连续 trial 保留原 stable、C 冷维护独立时钟、包激活代次分页绑定及四维 scope。复现、反例、兼容与剩余观察点见 `TESTS.md` R3 小节；以下 R2 文字保留为历史决策，不代表 R3 当前默认。
+
 ## 2026-10-27 Wave 7 W2-R2：默认核验与证据复用（源码候选，真实首次自主验证待接入）
 
 来源：`07-tasks/wave7-w2-r2-fixes.md`。默认 `SkillLearningRuntime.promotion_verifier` 使用内置核验函数，由 Service 绑定原 owner Store，不从模型请求反序列化权限或执行命令；显式 `None` 保持原候选路径。
