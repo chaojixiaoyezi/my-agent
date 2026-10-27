@@ -296,13 +296,13 @@ class SkillLearningStore:
         surviving, superseded = self._classify_requests([*hot, *overflow])
         return bool(superseded) or hot != surviving[:MAX_PENDING_REQUESTS]
 
-    # LLM: 从最新到最旧仅合并同文件、同请求键或同根执行+轨迹；thread只归属，不能删除另一任务的材料。
-    # 函数用途: 区分全局FIFO有效请求与合并中断遗留的旧副本。
+    # LLM: 只读同文件/同键及可替代上下文；复用入队的同一比较器核轨迹与合并关系，不把相异任务误去重。
+    # 函数用途: 识别最新材料及崩溃遗留旧副本，不为发现写盘或建立另一索引。
     def _classify_requests(self, paths: list[Path]) -> tuple[list[Path], list[Path]]:
         ordered = sorted(paths, key=lambda item: (item.name, 0 if item.parent.name == "requests" else 1))
         seen_names: set[str] = set()
         seen_keys: set[str] = set()
-        seen_contexts: set[tuple] = set()
+        kept_payloads: list[dict] = []
         kept_reversed: list[Path] = []
         superseded: list[Path] = []
         for path in reversed(ordered):
@@ -311,15 +311,13 @@ class SkillLearningStore:
                 continue
             payload = self.read_request(path)
             req_key = str((payload or {}).get("request_key") or path.stem.rsplit("-", 1)[-1])
-            context = _request_context(payload or {})
-            if req_key in seen_keys or (context and context in seen_contexts):
+            if req_key in seen_keys or any(_mergeable_requests(payload or {}, kept) for kept in kept_payloads):
                 superseded.append(path)
                 continue
             seen_names.add(path.name)
             if req_key:
                 seen_keys.add(req_key)
-            if context:
-                seen_contexts.add(context)
+            kept_payloads.append(payload or {})
             kept_reversed.append(path)
         kept_reversed.reverse()
         return kept_reversed, superseded
@@ -361,12 +359,11 @@ class SkillLearningStore:
         self._recover_requests_locked()
         return "queued", None
 
-    # LLM: 合并需同根执行与准确轨迹；缺身份不猜测，聊天线程与单独task相同不代表同一次学习证据。
-    # 函数用途: 判断满队列中一条待处理请求是否可被新材料替代。
+    # LLM: 原队列与崩溃投影共用成对比较；准确task冲突不能退到thread，不同轨迹无合并关系不得覆盖。
+    # 函数用途: 判断满队列中的旧材料是否允许由这条新请求替代。
     def _same_request_context(self, path: Path, request: dict[str, object]) -> bool:
         previous = self.read_request(path)
-        context = _request_context(request)
-        return bool(previous is not None and context and context == _request_context(previous))
+        return previous is not None and _mergeable_requests(previous, request)
 
     # LLM: 只在原state/配额事务内写固定目录；新记录先原子落盘，不改变请求正文协议或确认权限。
     # 函数用途: 安全写入一条热请求或重试记录。
@@ -531,7 +528,7 @@ class SkillLearningStore:
 
         return load_skill_usage_summary(self)
 
-    # LLM: feedback负责adopted权限与claim；显式字段归一为台账参数字典，保留省略值，复用统一软失败写口。
+    # LLM: feedback负责adopted权限与claim；过滤MISSING后按公开关键字形状调用台账，保留显式None与故障软失败。
     # 函数用途: 接通现有采用反馈的可选写账钩子，不确认或发布任何Skill内容。
     def record_skill_usage(
         self, *, event, skill_id, source, kind="skill",
@@ -541,7 +538,7 @@ class SkillLearningStore:
 
         params = dict(event=event, skill_id=skill_id, source=source, kind=kind,
                       request_id=request_id, thread_id=thread_id, task_id=task_id, chars=chars)
-        record_skill_usage_event(self, params={key: value for key, value in params.items() if value is not MISSING})
+        record_skill_usage_event(self, **{key: value for key, value in params.items() if value is not MISSING})
 
     # LLM: 每个发布修订存不可变全文供回滚和在途快照；同编号异内容拒绝，暂不清理仍可能被引用的版本。调用方必须已持 state_lock，
     #   所以用不再取 per-path 锁的原子写，版本目录里不会留下 .lock 文件。副作用：写 versions/<name>/。
@@ -582,11 +579,36 @@ class SkillLearningStore:
         return self.learned_root / name / "SKILL.md"
 
 
-# LLM: owner已由Store路径隔离，只有根执行或run和同轨迹才构成可替代上下文；空身份不参与合并。
-# 函数用途: 计算请求上下文身份，不把同一聊天线程误当同一个任务。
+# LLM: owner由Store路径隔离，root/task优先，旧请求才退thread/run；成对轨迹与谱系检查由_mergeable_requests承担。
+# 函数用途: 计算规范请求上下文，不让不同task因共享thread而撞名。
 def _request_context(request):
-    identity = request.get('root_task_id') or request.get('run_id')
-    return (identity, request.get('trajectory_fingerprint', '')) if identity else ()
+    for key in ('root_task_id', 'task_id', 'thread_id', 'run_id'):
+        value = str(request.get(key) or '').strip()
+        if value:
+            return ('task_id' if key == 'root_task_id' else key), value
+    return ()
+
+
+# LLM: 先按同一规范root/task身份比较，再兼容旧thread；同轨迹可压实，异轨迹或缺轨迹异run须明确谱系。
+# 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
+def _mergeable_requests(left, right):
+    contexts = _request_context(left), _request_context(right)
+    common = [key for key in ('root_task_id', 'task_id', 'thread_id', 'run_id') if left.get(key) and right.get(key)]
+    if all(context and context[0] == 'task_id' for context in contexts):
+        matches = contexts[0] == contexts[1]
+    else:
+        matches = bool(common and left[common[0]] == right[common[0]])
+    if not matches:
+        return False
+    for newer, older in ((left, right), (right, left)):
+        refs = newer.get('merge_from_request_ids')
+        if isinstance(refs, list) and older.get('request_key') in refs:
+            return True
+    first, second = left.get('trajectory_fingerprint'), right.get('trajectory_fingerprint')
+    if first and second:
+        return first == second
+    runs = left.get('run_id'), right.get('run_id')
+    return not all(runs) or runs[0] == runs[1]
 
 
 # LLM: request_key 只由运行身份决定，同一次运行重复收口不会重复入队。

@@ -29,7 +29,7 @@ class LearningObservationSource:
     run_id: str = ''
 
 
-# LLM: 反馈绑定当前hash与独立任务；trial两次真实回归触发原previous_stable回滚，写失败恢复旧正文。
+# LLM: 反馈绑定当前hash与独立任务；trial晋升active追加状态历史，两次真实回归回滚，写失败恢复旧正文。
 # 函数用途: 登记采用或用户验证结果，不从任务最终回复猜成败，不写Skill正文。
 def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
     source = source or LearningObservationSource()
@@ -66,6 +66,8 @@ def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
             data['state'] = 'trial'
         if data.get('state') not in {'disabled','archived'}:
             data['state'] = 'cooled' if data['quality']=='unreliable' else 'active' if data['quality']=='established' else data.get('state','trial')
+        if current.maintenance.get('state') == 'trial' and data.get('state') == 'active':
+            data['promotion_history'] = [*data.get('promotion_history', []), 'active'][-100:]
         record = replace(current,maintenance=data)
         if current.maintenance.get('state') == 'trial' and negative >= 2 and negative > positive:
             record = _rollback_trial(store, current, data, rollback)

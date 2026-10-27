@@ -3,7 +3,7 @@
 来源: 2026-10-27 wave7-w2-autonomous-learning.md / F01–F17审计及原始复现。
 做法: 真Store/Router/Runner和故障注入；verifier替身只验证晋升合同，不宣称生产接线。
 复现: python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py -q --tb=short
-W1依赖(F06/F14/F15)使用正常断言，不跳过、xfail或放宽；进程执行不等于完整沙箱端到端验证。
+W1依赖(F06/F14/F15)原样单列test_wave7_w1_integration_contracts.py，仍正常收集且不跳过/xfail；此处验证W2自身合同。
 """
 from __future__ import annotations
 
@@ -71,6 +71,41 @@ def test_f08_same_task_different_trajectory_is_not_overwritten(learned):
     assert len(store.pending_requests(refill=True)) == 2
 
 
+@pytest.mark.parametrize('root,task', [('root-a', 'same-task'), ('', '')])
+def test_f08_distinct_runs_without_merge_evidence_survive(learned, root, task):
+    _, store = learned
+    for number, run in enumerate(('first', 'second')):
+        request = build_learning_request(context(run), 1)
+        request.update(root_task_id=root+str(number) if root else '', task_id=task,
+                       trajectory_fingerprint='')
+        store.enqueue(request)
+    assert len(store.pending_requests(refill=True)) == 2
+
+
+def test_f08_explicit_merge_lineage_converges_changed_trajectory(learned):
+    _, store = learned
+    first = build_learning_request(context('first'), 1)
+    second = build_learning_request(context('second'), 1)
+    first.update(task_id='same', trajectory_fingerprint='old')
+    second.update(task_id='same', trajectory_fingerprint='new', merge_from_request_ids=[first['request_key']])
+    store.enqueue(first)
+    store.enqueue(second)
+    paths = store.pending_requests(refill=True)
+    assert len(paths) == 1 and store.read_request(paths[0])['run_id'] == 'second'
+
+
+@pytest.mark.parametrize('other_task,count', [('task-A', 1), ('task-B', 2)])
+def test_review_f08_root_and_task_aliases_do_not_fall_back_to_thread(learned, other_task, count):
+    _, store = learned
+    first = build_learning_request(context('a'), 1)
+    second = build_learning_request(context('b'), 1)
+    first.update(root_task_id='task-A', task_id='', trajectory_fingerprint='same')
+    second.update(task_id=other_task, trajectory_fingerprint='same')
+    store.enqueue(first)
+    store.enqueue(second)
+    assert len(store.pending_requests(refill=True)) == count
+
+
 def test_f09_segmented_trace_keeps_fix_verifier_and_evidence():
     calls = [{'tool': 'run_command', 'ok': False, 'tool_round': n,
               'parameters': {'command': f'attempt-{n}'}} for n in range(1, 81)]
@@ -115,13 +150,29 @@ def test_f11_receipt_credits_only_named_current_version(learned, target_field):
 
 def test_f11_unattributed_or_stale_hash_receipt_does_not_credit(learned):
     home, store = learned
+    publish_learned_skill(store, PublishRequest(decision('ssh-triage')))
     row = store.load_registry().skills['csv-cleaner']
     params = SimpleNamespace(run_id='r', attempt_id='a')
     agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), home_paths=home, _current_run_params=params)
     observe_learning(store, row.name, sha256=row.sha256, task_id='t', outcome='adopted', source=LearningObservationSource(run_id='r'))
+    other = store.load_registry().skills['ssh-triage']
+    observe_learning(store, other.name, sha256=other.sha256, task_id='t', outcome='adopted', source=LearningObservationSource(run_id='r'))
     for extra in ({}, {'skill_id': 'owner:csv-cleaner', 'sha256': 'a'*64}):
         observe_command_verification(agent, params, {'id': 2, 'status': 'passed', 'exit_code': 0, **extra})
     assert not any(f['authority'] == 'host' for f in store.load_registry().skills[row.name].maintenance['observations'])
+
+
+@pytest.mark.parametrize('extra,credited', [({}, True), ({'sha256':'a'*64}, False),
+                                          ({'content_hash':'a'*64}, False),
+                                          ({'target_skill_ids':[]}, False)])
+def test_f11_single_adoption_uses_unambiguous_host_receipt(learned, extra, credited):
+    home, store = learned
+    row = store.load_registry().skills['csv-cleaner']
+    params = SimpleNamespace(run_id='single', attempt_id='a')
+    agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), home_paths=home, _current_run_params=params)
+    observe_learning(store, row.name, sha256=row.sha256, task_id='t', outcome='adopted', source=LearningObservationSource(run_id='single'))
+    observe_command_verification(agent, params, {'id':3, 'status':'passed', 'exit_code':0, **extra})
+    assert any(f['authority'] == 'host' for f in store.load_registry().skills[row.name].maintenance['observations']) is credited
 
 
 def test_f11_conflicting_explicit_targets_do_not_credit(learned):
@@ -130,6 +181,16 @@ def test_f11_conflicting_explicit_targets_do_not_credit(learned):
     _,store = learned
     row = store.load_registry().skills['csv-cleaner']
     assert not _receipt_targets({'skill_id':'owner:csv-cleaner','asset_ref':'owner:unrelated'},row)
+
+
+@pytest.mark.parametrize('conflict', [{'asset_id':'owner:unrelated'}, {'content_sha256':'a'*64}])
+def test_review_f11_nested_target_aliases_must_all_agree(learned, conflict):
+    from agent_py_agent.agent.capability.skill_learning_host_feedback import _receipt_targets
+
+    _, store = learned
+    row = store.load_registry().skills['csv-cleaner']
+    target = {'stable_id':'owner:csv-cleaner', 'sha256':row.sha256, **conflict}
+    assert not _receipt_targets({'target_skill_ids':[target]}, row)
 
 
 def test_f17_malformed_refs_are_not_a_complete_empty_set():
@@ -439,50 +500,52 @@ def test_f10_workflow_literal_inputs_are_not_rewritten_as_step_ids():
     assert task_family_fingerprint('workflow', a) != task_family_fingerprint('workflow', b)
 
 
-def test_f06_script_tool_requires_and_honors_revision(tmp_path):
-    from agent_py_agent.agent.tooling.scripts_tool import ScriptsTool
+def test_f06_machine_verified_skill_update_honors_cas(learned):
+    from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
+    from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
 
-    tool = ScriptsTool(tmp_path/'owner')
-    descriptor = {'name':'CAS','access_targets':[],'data_sources':[],'credential_refs':[],'io_contract':{}}
-    assert tool.execute({'action':'register','script_id':'cas','descriptor':descriptor,'code':'print("{}")'}).ok
-    current = json.loads(tool.execute({'action':'get','script_id':'cas'}).output)
-    revision = current['revision']
-    assert tool.execute({'action':'update','script_id':'cas','expected_revision':revision,'code':'print("{}")\n# new revision'}).ok
-    stale = tool.execute({'action':'update','script_id':'cas','expected_revision':revision,'code':'print("{}")'})
-    assert not stale.ok
+    _, store = learned
+    row = store.load_registry().skills['csv-cleaner']
+    update = PublishRequest(replace(decision(), decision='update', body=BODY+'\n复核列类型。'),
+                            expected_revision=row.revision, expected_sha256=row.sha256)
+    def verifier(_, sha):
+        return {'status':'passed', 'executed':True, 'contract_valid':True,
+                'sha256':sha, 'receipt_id':'cas-check', 'output':{}}
+    assert promote_verified_skill(store, update, verifier).event == 'updated'
+    current = store.skill_path(row.name).read_bytes()
+    with pytest.raises(SkillLearningGateError, match='REVISION_CONFLICT'):
+        promote_verified_skill(store, update, verifier)
+    assert store.skill_path(row.name).read_bytes() == current
 
 
-def test_f14_resumed_workflow_does_not_execute_changed_script(tmp_path):
+def test_f14_runner_executes_frozen_code_not_later_store_edit(tmp_path, monkeypatch):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     from agent_py_agent.agent.assets.script_store import ScriptStore
-    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStepSpec
-    from agent_py_agent.agent.workflows import ScriptRunner, WorkflowEngine
+    from agent_py_agent.agent.workflows import script_runner
 
     home = tmp_path/'owner'
     store = ScriptStore(home)
-    for name,code in [('pause','print(\'{"_pause_for_resume":true}\')'),('tail','print(\'{"version":1}\')')]:
-        store.save_script(AssetDescriptor(id=name,kind='script',name=name),code)
-    engine = WorkflowEngine(home)
-    engine.runner = ScriptRunner(home,use_sandbox=False)
-    definition = WorkflowDefinition(AssetDescriptor(id='flow',kind='workflow',name='flow'),tuple(
-        WorkflowStepSpec(name,name,'deterministic_script',script_id=name) for name in ('pause','tail')))
-    paused = engine.run_workflow(definition)
-    assert paused.status == 'paused_for_resume'
-    store.save_script(AssetDescriptor(id='tail',kind='script',name='tail'),'print(\'{"version":2}\')')
-    resumed = engine.resume_workflow_run(paused.workflow_run_id,patched_step_output={'_pause_for_resume':False},resolution_origin='system')
-    assert resumed.status != 'succeeded' or resumed.final_output.get('version') == 1
+    descriptor = AssetDescriptor(id='tail', kind='script', name='tail')
+    store.save_script(descriptor, 'print(\'{"version":1}\')')
+    execute = script_runner._execute
+    def change_after_freeze(*args):
+        store.save_script(descriptor, 'print(\'{"version":2}\')')
+        return execute(*args)
+    monkeypatch.setattr(script_runner, '_execute', change_after_freeze)
+    result = script_runner.ScriptRunner(home, use_sandbox=False).run_script('tail')
+    assert result.ok and result.output_data == {'version':1}
 
 
-def test_f15_workflow_final_output_must_pass_contract(tmp_path):
+def test_f15_runner_final_output_must_pass_contract(tmp_path):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor, IOContract
-    from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStepSpec
-    from agent_py_agent.agent.workflows import WorkflowEngine
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.workflows import ScriptRunner
 
-    definition = WorkflowDefinition(AssetDescriptor(id='contract',kind='workflow',name='contract',
-        io_contract=IOContract(outputs=('report_uri',),output_types={'report_uri':'string'})),
-        (WorkflowStepSpec('analysis','analysis','llm_skill_analysis'),))
-    result = WorkflowEngine(tmp_path/'owner',analysis_handler=lambda *args:{}).run_workflow(definition)
-    assert result.status == 'failed'
+    home = tmp_path/'owner'
+    ScriptStore(home).save_script(AssetDescriptor(id='contract', kind='script', name='contract',
+        io_contract=IOContract(outputs=('report_uri',),output_types={'report_uri':'string'})), 'print("{}")')
+    result = ScriptRunner(home, use_sandbox=False).run_script('contract')
+    assert not result.ok and result.error_code == 'SCRIPT_MISSING_OUTPUT_KEYS'
 
 
 def test_review_same_family_provenance_keeps_exact_identity(tmp_path):
@@ -555,3 +618,161 @@ def test_f04_application_scope_prioritizes_relevant_package():
     router._skill_snapshot_provider = Provider().current
     result = router.render_skill_metadata_index(context_window_tokens=128000)
     assert result.index('z-current') < result.index('a-other')
+
+
+@pytest.mark.parametrize('attrs,applies', [
+    ({'workbench_id':'ops', 'domain':'alerts', 'tags':['prod']}, True),
+    ({'workbench':'ops', 'domains':['alerts'], 'workspace_tags':['prod']}, True),
+    ({'workbenches':['ops'], 'domain':'other', 'tags':['prod']}, False),
+    ({'workbench':'ops', 'domain':'alerts'}, False),
+    ({'workbench':'other', 'workbenches':['ops'], 'domains':['alerts'], 'tags':['prod']}, True),
+])
+def test_r2_application_scope_intersects_each_dimension(attrs, applies):
+    from agent_py_agent.agent.capability.router import CapabilityCard, _package_priority
+
+    card = CapabilityCard('capability:scoped', 'capability_package', 'scoped', '查询', metadata={
+        'application_scope':{'workbenches':['ops'], 'domains':['alerts'], 'workspace_tags':['prod']}})
+    assert _package_priority(card, '', attrs)[1] is not applies
+
+
+@pytest.mark.parametrize('broken', ['conversations', 'scheduler', 'proposals', 'subagents'])
+def test_r2_protection_source_failure_preserves_other_references(learned, monkeypatch, broken):
+    from agent_py_agent.agent.capability import skill_learning_proposals as proposals
+    from agent_py_agent.agent.capability.skill_learning_protection import (
+        learning_protection_for_agent,
+    )
+
+    home, _ = learned
+    def fail(*args, **kwargs):
+        raise RuntimeError('one source unavailable')
+    task = SimpleNamespace(status='running', to_dict=lambda: {'allowed_skills':['owner:task']})
+    agent = SimpleNamespace(home_paths=home, conversation_store=SimpleNamespace(
+        threads=SimpleNamespace(list_report=fail if broken == 'conversations' else lambda **kw: ([SimpleNamespace(thread_id='t')], [])),
+        tasks=SimpleNamespace(active_report=lambda thread: ([task], []))),
+        scheduler_repository=SimpleNamespace(list_jobs=fail if broken == 'scheduler' else lambda **kw: ([{'allowed_skills':['owner:job']}], [])),
+        subagents=SimpleNamespace(list_runs_report=fail if broken == 'subagents' else lambda: SimpleNamespace(
+            load_errors=[], runs=[SimpleNamespace(status='running', attributes={'allowed_skills':['owner:child']})])))
+    monkeypatch.setattr(proposals, 'list_learning_proposals', fail if broken == 'proposals' else lambda *a, **kw: [
+        {'status':'pending', 'expected_sha256':'a'*64, 'decision':{'name':'proposal'}}])
+    result = learning_protection_for_agent(agent)
+    assert not result['protection_complete']
+    expected = {'conversations':'owner:task', 'scheduler':'owner:job', 'proposals':'owner:proposal', 'subagents':'owner:child'}
+    assert set(expected.values()) - {expected[broken]} <= set(result['protected_ids'])
+
+
+def test_r2_trial_to_active_records_one_promotion_transition(learned):
+    _, store = learned
+    current = store.load_registry().skills['csv-cleaner']
+    for task in ('one', 'two', 'three'):
+        observe_learning(store, current.name, sha256=current.sha256, task_id=task, outcome='adopted')
+        observe_learning(store, current.name, sha256=current.sha256, task_id=task, outcome='effective',
+                         source=LearningObservationSource(authority='host', receipt_id=task))
+    row = store.load_registry().skills[current.name]
+    assert row.maintenance['state'] == 'active'
+    assert row.maintenance['promotion_history'] == ['observed','candidate','validated','trial','active']
+
+
+def test_r2_default_runtime_has_machine_verifier_and_ignores_request_claims(tmp_path):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.capability.skill_learning import (
+        SkillLearningRuntime,
+        SkillLearningService,
+        SkillLearningSettings,
+    )
+    from agent_py_agent.agent.capability.skill_learning_prompt import (
+        OUTPUT_SCHEMA_VERSION,
+        SkillLearningMaterial,
+    )
+
+    runtime = SkillLearningRuntime(backend=None, snapshot_provider=lambda: snapshot())
+    assert callable(runtime.promotion_verifier)
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
+    service = SkillLearningService(store, SkillLearningSettings(autonomous_verified=True), runtime)
+    material = SkillLearningMaterial({'run_id':'r', 'request_key':'r', 'verification_receipt':{
+        'status':'passed', 'executed':True, 'contract_valid':True, 'receipt_id':'model-claim', 'output':{}}})
+    event = service._decide(material, json.dumps({'schema_version':OUTPUT_SCHEMA_VERSION, **asdict(decision())}))
+    assert event.event == 'proposed' and not store.load_registry().skills
+
+
+def test_r2_default_verifier_reuses_host_receipt_after_publish_interruption(tmp_path, monkeypatch):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.capability import skill_learning_publish as publisher
+    from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
+    from agent_py_agent.agent.capability.skill_learning import (
+        SkillLearningRuntime,
+        SkillLearningService,
+        SkillLearningSettings,
+    )
+    from agent_py_agent.agent.capability.skill_learning_prompt import (
+        OUTPUT_SCHEMA_VERSION,
+        SkillLearningMaterial,
+    )
+
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
+    request = {'run_id':'verified-run', 'request_key':'original-request', 'trajectory_fingerprint':'original-input'}
+    publish = PublishRequest(decision(), request)
+    original = publisher.publish_learned_skill
+    def interrupted(*args):
+        raise OSError('publish interrupted after host verification')
+    monkeypatch.setattr(publisher, 'publish_learned_skill', interrupted)
+    with pytest.raises(OSError):
+        promote_verified_skill(store, publish, lambda _, sha: {
+            'status':'passed', 'executed':True, 'contract_valid':True, 'sha256':sha,
+            'receipt_id':'host-execution-1', 'output':{}})
+    monkeypatch.setattr(publisher, 'publish_learned_skill', original)
+    from agent_py_agent.agent.capability.skill_learning_host_feedback import (
+        builtin_machine_verifier,
+    )
+    from agent_py_agent.agent.capability.skill_learning_publish import render_learned_skill
+    from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
+
+    sha = skill_content_sha256(render_learned_skill(publish.decision))
+    for field in ('run_id', 'request_key', 'trajectory_fingerprint'):
+        assert builtin_machine_verifier(replace(publish, request={**request, field:'changed'}), sha, store=store) is None
+    assert builtin_machine_verifier(publish, 'a'*64, store=store) is None
+    other = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'other'))
+    with other.state_lock():
+        other.save_registry(store.load_registry())
+    assert builtin_machine_verifier(publish, sha, store=other) is None
+    runtime = SkillLearningRuntime(backend=None, snapshot_provider=lambda: snapshot())
+    service = SkillLearningService(store, SkillLearningSettings(autonomous_verified=True), runtime)
+    result = service._decide(SkillLearningMaterial(request), json.dumps({'schema_version':OUTPUT_SCHEMA_VERSION, **asdict(decision())}))
+    assert result.event == 'published'
+    row = store.load_registry().skills['csv-cleaner']
+    assert row.maintenance['verification_receipt']['receipt_id'] == 'host-execution-1'
+    assert row.maintenance['promotion_authority'] == 'autonomous_verified'
+
+
+@pytest.mark.parametrize('throws', [False, True])
+def test_r2_failed_reverification_invalidates_previous_machine_receipt(tmp_path, monkeypatch, throws):
+    from agent_py_agent.agent.capability import skill_learning_publish as publisher
+    from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
+    from agent_py_agent.agent.capability.skill_learning_host_feedback import (
+        builtin_machine_verifier,
+    )
+    from agent_py_agent.agent.capability.skill_learning_publish import render_learned_skill
+    from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
+
+    store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
+    publish = PublishRequest(decision(), {'run_id':'r', 'request_key':'q', 'trajectory_fingerprint':'f'})
+    def interrupted(*args):
+        raise OSError('interrupted publication')
+    monkeypatch.setattr(publisher, 'publish_learned_skill', interrupted)
+    with pytest.raises(OSError):
+        promote_verified_skill(store, publish, lambda _, sha: {
+            'status':'passed', 'executed':True, 'contract_valid':True, 'sha256':sha,
+            'receipt_id':'old-pass', 'output':{}})
+    sha = skill_content_sha256(render_learned_skill(publish.decision))
+    assert builtin_machine_verifier(publish, sha, store=store) is not None
+    def failed(*args):
+        if throws:
+            raise RuntimeError('verifier failed')
+        return {'status':'failed'}
+    if throws:
+        with pytest.raises(RuntimeError, match='verifier failed'):
+            promote_verified_skill(store, publish, failed)
+    else:
+        assert promote_verified_skill(store, publish, failed) is None
+    assert builtin_machine_verifier(publish, sha, store=store) is None

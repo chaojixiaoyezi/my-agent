@@ -1,3 +1,11 @@
+## 2026-10-27 Wave 7 W2-R2：默认核验与证据复用（源码候选，真实首次自主验证待接入）
+
+来源：`07-tasks/wave7-w2-r2-fixes.md`。默认 `SkillLearningRuntime.promotion_verifier` 使用内置核验函数，由 Service 绑定原 owner Store，不从模型请求反序列化权限或执行命令；显式 `None` 保持原候选路径。
+
+可信 verifier 已完成的准确候选证明保存在原 `registry.assets` 的 `candidate_verification` 中，不建第二发布账。证明包含原 receipt 引用及 owner/渲染 hash/请求/run/冻结轨迹/决策/CAS 绑定，只供同条件发布中断后的重试；重新执行 verifier 前先撤销同绑定旧证明，失败或进程中断不复活旧通过。发布仍重核名字、所有权、guard 和 CAS，不伪造用户确认。
+
+原任务成功事件缺少候选内容绑定，不能成为生成后新 Skill 的业务通过证明。尚无真实执行合同的新候选保持 pending；内置接线、回执替身与定向测试不等于首次自主学习业务闭环已验收。W1 三项集成合同保留普通断言并单列，集成者合入后仍须验收。准确测试与限制见 `TESTS.md` 的 W2-R2 小节。
+
 ## 2026-10-26 Stage 3 Round 2：Git 发现预算与生产 basename 裁决（源码实现，原生隔离待可施加主机复核）
 
 来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，在 `wt-wave4-c3` 上执行；不修改运行包、不宣称已发布。

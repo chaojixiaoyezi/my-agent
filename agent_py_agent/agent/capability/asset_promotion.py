@@ -126,9 +126,10 @@ def _restore_on_failure(store, parts, rollback):
     rollback.callback(unlink_file_beneath, store.directory, parts) if previous is None else rollback.callback(write_text_atomic_beneath, store.directory, parts, previous)
 
 
-# LLM: verifier是宿主依赖，不反序列化模型字段；必须验证候选准确hash、真实执行、输出合同与receipt。原publisher继续guard/CAS。
+# LLM: 宿主重新验证前撤销同条件旧证明；准确执行/合同过闸后登记原回执，默认复用不重跑，publisher仍核CAS。
 # 函数用途: 让通过机器核验的Skill免人工确认进入试用，否则保持候选，绝不伪造user_confirmed。
 def promote_verified_skill(store, publish, verifier):
+    from . import skill_learning_host_feedback as feedback
     from .skill_learning_publish import (
         _redacted_publish,
         _stage_and_check,
@@ -144,7 +145,10 @@ def promote_verified_skill(store, publish, verifier):
     with store.state_lock():
         _stage_and_check(store, safe, render_learned_skill(safe.decision))
     sha = skill_content_sha256(render_learned_skill(safe.decision))
+    if getattr(verifier, 'func', verifier) is not feedback.builtin_machine_verifier:
+        feedback.remember_verified_candidate(store, safe, None, sha256=sha)
     receipt = verifier(safe, sha)
+    feedback.remember_verified_candidate(store, safe, receipt, sha256=sha)
     if (not isinstance(receipt, dict) or not business_validated(receipt) or receipt.get('sha256') != sha
             or not receipt.get('receipt_id')):
         return None

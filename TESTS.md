@@ -1,3 +1,44 @@
+## 2026-10-27 Wave 7 W2-R2：六项评审修复与跨线验收边界
+
+来源：`07-tasks/wave7-w2-r2-fixes.md`，起点 `54fc27d7e08d339222569cc021860beaa3aa2401`；只在派工工作树修改，不推送、不部署，不改 W1 生产文件。
+
+- F11：真实采用字段为 `authority/outcome/run_id/sha256`。无显式目标仅归给同 run 唯一当前版本；多技能不广播。显式单/多目标、顶层与嵌套 hash/身份别名全部核对，空目标和冲突字段拒绝。
+- F08：原队列、满额替换和崩溃投影共用成对比较。`root_task_id` 与 `task_id` 先规范为同一种任务身份，冲突不能退到 thread；旧请求缺较高层身份时保留 thread 兼容。同轨迹可压实，不同轨迹或缺轨迹的异 run 无合并谱系则保留独立材料。原 12 个失败断言未改。
+- F17：任务、监控、待审更新、子代理分别容错；一个来源失败不阻止其余引用加入，但完整性保持 False。仅 tasks 的空物理库可证明完整空集；没有可读活动索引且存在文件时不冒认完整。
+- 公开使用钩子过滤 `MISSING` 后展开 kwargs，保留台账已有 `params` 映射与关键字调用兼容，辅助记账异常不改变采用结果。
+- 应用范围的工作台、领域、工作区标签采用维间 AND、维内交集；读取属性别名的并集，保留未知维精确 scalar 匹配。它只排序已授权目录，不扩大权限。
+- 默认 Runtime 绑定内置机器核验器，Service 绑定原 Store；显式 `None` 仍只保留候选。内置核验只复用原 registry 中已由可信宿主 verifier 产生的准确候选证明，绑定 owner、完整渲染 hash、请求、run、轨迹、决策种类和 CAS。发布前先持久化证明，发布中断可复用；再次执行宿主核验前撤销同条件旧证明，异常或进程中断也不能保留旧通过。试用晋升 active 追加一次状态历史。
+- W1 的 F06/F14/F15 三个函数 AST 原样迁入 `test_wave7_w1_integration_contracts.py`，正常收集、不 skip/xfail；W2 文件改测自己的 Skill 晋升 CAS、Runner 冻结代码和脚本输出合同。W2 通过不代表 W1 接口已合入。
+
+红绿证据：准确起点七文件为 **314 passed / 19 failed / 1 skipped / 0 errors**，见 `.pytest_cache/w2-r2-baseline.xml`。新增定向反例先红后绿；独立 Astra high 仅根据内联函数及合同静态复核，补出 root/task 异名冲突、嵌套目标别名冲突、核验异常旧证明残留三项，实际回归先为 4 failed / 2 passed，修复后 6 passed（`w2-r2-review-red.xml` / `w2-r2-review-green.xml`）。独审没有读全仓、执行测试或真实模型，不能算完整端到端验收。
+
+最终当前版本（独审修复后）的实际结果：
+
+| 范围 | 结果 | 证据 |
+| --- | --- | --- |
+| 规定七文件组合 | 358 passed / 0 failed / 1 skipped / 0 errors | `.pytest_cache/w2-r2-final.xml` |
+| 其中 W2 闭环文件 | 72 passed / 0 failed / 0 skipped | 同上，按 testcase classname 分组 |
+| 额外六文件回归 | 84 passed / 0 failed / 0 skipped / 0 errors | `.pytest_cache/w2-r2-related-final.xml` |
+| 独立 W1 合同文件 | 3 failed / 0 skipped / 0 errors | `.pytest_cache/w2-r2-w1-final.xml` |
+| 全范围 Ruff / 文档同步 / strict 尺寸门 / diff 检查 | 全部通过；晋升模块 198 行；生成报告已还原 | 本轮命令退出码 0 |
+
+W1 三个函数已通过与准确起点 AST 相等核对。失败仍是 ScriptsTool 拒绝 `expected_revision`、恢复工作流执行了新脚本版本、工作流最终输出未被合同拒绝；本轮不修改 W1 生产代码，待集成者合入 W1 后复核，不能声称全仓全绿。额外回归覆盖 `test_capabilities.py`、`test_pack_recommendation_threshold.py`、`test_capability_package_recommendations.py`、`test_capability_package_catalog_scale.py`、`test_decision_skill_projection.py`、`test_skill_learning_versions.py`；其中四个 catalog-scale 用例有 JUnit 属性兼容警告，不影响断言结果。
+
+硬链接场景沿原测试真实 `EPERM` 记录未验证，不放宽断言。额外相关测试曾与尺寸报告生成并发，触发受跟踪 `CODE_SIZE_REPORT.md` 变化的 teardown 守卫；先还原生成物，再串行门禁和复跑，最新 84 passed 已无该错误，不将旧错误改记为产品通过。
+
+复现（仓库根；尺寸门结束并还原报告后再跑 pytest，不并发生成报告）：
+
+```bash
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout HEAD -- CODE_SIZE_REPORT.md
+python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_skill_learning.py agent_py_agent/tests/test_skill_learning_host_feedback.py agent_py_agent/tests/test_skill_learning_confirmation.py agent_py_agent/tests/test_skill_learning_maintenance.py agent_py_agent/tests/test_skill_proposals.py agent_py_agent/tests/test_turn_asset_extractor.py -q --tb=short --junitxml=.pytest_cache/w2-r2-final.xml
+python3 -m pytest agent_py_agent/tests/test_wave7_w1_integration_contracts.py -q --tb=short
+git diff --check
+```
+
+边界：机器核验正向回归使用可信 verifier 回执替身，只证明宿主证明落盘、精确复用、故障恢复和发布接线；无可执行验证合同的新候选仍 pending，不能从生成前的成功任务或 guard 通过倒推生成后方法已经业务验证。首次新候选的真实自主执行验证、W1 合并后业务链路、真实模型/CLI/TUI/IM/部署均未验证。
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。

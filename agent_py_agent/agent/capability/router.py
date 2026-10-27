@@ -525,17 +525,42 @@ def has_strong_match(query: str, card: CapabilityCard) -> bool:
     return declared or len(concepts) >= 2
 
 
-# LLM: 偏好和应用范围只重排已授权包，不将不在快照中的包加回来；未知范围不猜测匹配。
-# 函数用途: 按本轮偏好、精确应用范围和查询相关性排序包目录。
+# LLM: 应用范围各维AND、维内取交集，只重排已授权包；精确scalar范围继续支持，不按scope扩大权限。
+# 函数用途: 按本轮偏好、多维应用范围和查询相关性排序包目录。
 def _package_priority(card, query, attrs):
     scope = card.metadata.get('application_scope')
-    applies = isinstance(scope, dict) and bool(scope) and all(attrs.get(key) == value for key,value in scope.items())
+    applies = isinstance(scope, dict) and bool(scope) and _scope_matches(scope, attrs)
     if isinstance(scope, (str, list, tuple)):
         requested = attrs.get('application_scope')
         applies = bool(requested) and (requested == scope if isinstance(scope, str) else requested in scope)
     preferred = attrs.get('preferred_pack_ids') or ()
     return (not (card.name in preferred or card.id in preferred), not applies,
             -score_card(query, card)[0] if query else 0, card.name)
+
+
+# LLM: 只接受字符串或字符串序列作维度集合；缺维/空集/坏类型不匹配，未知维保留精确相等合同。
+# 函数用途: 核对工作台、领域、工作区标签的别名和每个已声明范围。
+def _scope_matches(scope, attrs):
+    aliases = {'workbenches':('workbench_id','workbench','workbenches'),
+               'domains':('domain','domains'), 'workspace_tags':('workspace_tags','tags')}
+    for key, expected in scope.items():
+        if key not in aliases:
+            if attrs.get(key) != expected:
+                return False
+            continue
+        required = _scope_values(expected)
+        actual = {value for alias in aliases[key] for value in _scope_values(attrs.get(alias))}
+        if not required.intersection(actual):
+            return False
+    return True
+
+
+# LLM: 软排序纯归一化，不从自然语言或对象字符串猜取值，不给调用方授予范围。
+# 函数用途: 将标量或列表规范成范围值集合，坏形状当不匹配。
+def _scope_values(value):
+    if isinstance(value, str):
+        return {value} if value else set()
+    return set(value) if isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value) else set()
 
 
 # LLM: 否定短语仅影响软排序，不按自然语言裁定执行或权限；保留分句后的正面需求。

@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
@@ -24,6 +25,7 @@ from ..common.request_execution_ports import (
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..memory_store.curator_backend import CuratorModelStillRunningError, call_backend_with_timeout
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+from .skill_learning_host_feedback import builtin_machine_verifier
 from .skill_learning_prompt import (
     DECISION_SKIP,
     EXISTING_DESCRIPTION_CHARS,
@@ -105,7 +107,7 @@ class SkillLearningSettings:
 
 # LLM: backend 与记忆整理共用（owner 选定模型、非流式）；snapshot_provider 返回当前 owner 的 Skill 快照，
 #   只读取 entries 的 name/description/source/path/stable_id；guard_config 只用于 guard 的文件数与大小上限。
-#   owner_id 用于后台调用自绑宿主会话（要求会话头的服务商没有会话会直接拒绝请求），与 Curator 同一原语。
+#   owner_id自绑宿主会话；默认verifier由Service绑定原Store，仅复用准确宿主证明，显式None仍保持候选。
 # 类用途: 自动总结在运行期依赖的外部对象。
 @dataclass(frozen=True)
 class SkillLearningRuntime:
@@ -116,7 +118,7 @@ class SkillLearningRuntime:
     protection_provider: Callable[[],dict] | None = None
     lesson_provider: Callable[[],object] | None = None
     deployment_root: Path | None = None
-    promotion_verifier: Callable | None = None
+    promotion_verifier: Callable | None = builtin_machine_verifier
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -384,7 +386,7 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: 模型只产候选；显式自学开关加宿主准确候选核验才免确认发布，缺证据保持候选，语义族不替代CAS/guard。
+    # LLM: 模型只产候选；开关加宿主准确核验才发布；默认核验绑定原Store，不把模型字段或语义族当CAS/guard。
     # 函数用途: 解析总结，复用同族候选，或按机器验证事实晋升正式Skill。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
@@ -401,9 +403,12 @@ class SkillLearningService:
                                  expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""))
         try:
             from .asset_promotion import propose_or_promote_skill
+            verifier = getattr(self.runtime, 'promotion_verifier', None)
+            if verifier is builtin_machine_verifier:
+                verifier = partial(verifier, store=self.store)
             with gateway_short_transaction("skill_learning_propose"):
                 return propose_or_promote_skill(self.store, publish,
-                    verifier=getattr(self.runtime, 'promotion_verifier', None) if self.settings.autonomous_verified else None)
+                    verifier=verifier if self.settings.autonomous_verified else None)
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:
