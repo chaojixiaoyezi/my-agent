@@ -329,8 +329,8 @@ def test_feishu_session_rechecks_current_password_and_identity(tmp_path, change)
     assert not (tmp_path / "owners/providers/feishu/users/ou_second").exists()
 
 
-# LLM: 有原目录及原库密码、没有展示索引的历史IM账号可认证，但未知用户不能借此物化新目录。
-# 函数用途: 验证仅目录回退仍复用原空间和密码且不初始化第二套owner。
+# LLM: 历史IM目录回退及显式provider规范身份绑定可认证；受管普通本地账号仍严格Web-only，管理员拒绝另测。
+# 函数用途: 验证原空间复用、规范provider身份认证和普通本地账号的IM拒绝合同。
 def test_feishu_materialized_identity_without_index_and_explicit_local_binding(tmp_path):
     module = auth_module()
     home, _, _ = feishu_user(tmp_path)
@@ -338,10 +338,17 @@ def test_feishu_materialized_identity_without_index_and_explicit_local_binding(t
     session = module.authenticate_user(tmp_path, account_source="feishu", user_id="ou_first", password=PASSWORD)
     assert resolve_owner_home(tmp_path, session.effective_owner).home_dir == home.home_dir
     create_user(tmp_path)
-    bound, _, _ = feishu_user(tmp_path, "ou_bound", bound=OwnerIdentity.local_user("alice"))
+    canonical = OwnerIdentity.provider_user("feishu", "ou_canonical")
+    bound, _, _ = feishu_user(tmp_path, "ou_bound", bound=canonical)
     linked = module.authenticate_user(tmp_path, account_source="feishu", user_id="ou_bound", password=PASSWORD)
-    assert linked.owner_id == "local/alice" and bound.home_dir == tmp_path / "owners/local/alice"
-    assert module.verify_user_session(tmp_path, linked.session_token).owner_id == "local/alice"
+    assert linked.owner_id == "providers/feishu/users/ou_canonical"
+    assert bound.home_dir == tmp_path / "owners/providers/feishu/users/ou_canonical"
+    assert linked.effective_owner == canonical
+    assert module.verify_user_session(tmp_path, linked.session_token).effective_owner == canonical
+    with pytest.raises(HostAPIError) as denied:
+        feishu_user(tmp_path, "ou_managed", bound=OwnerIdentity.local_user("alice"))
+        module.authenticate_user(tmp_path, account_source="feishu", user_id="ou_managed", password=PASSWORD)
+    assert denied.value.code == "MANAGED_USER_WEB_ONLY_CHANNEL_RESTRICTED" and denied.value.status == 403
 
 
 # LLM: 同根并发首次发token必须共用一个32字节密钥，不能相互覆盖导致刚发即失效。

@@ -1,5 +1,5 @@
-# LLM: 生命周期沿操作→用户→owner quota→JSON短锁发布，未完成物化不得标成enabled。
-# 模块用途: 实现普通本地账号创建、密码管理、启停和与原来源绑定的耐久幂等。
+# LLM: 生命周期沿原锁和CAS发布，入组/初始资格复核旧IM绑定；未完成物化或准入失败不得发布enabled。
+# 模块用途: 实现普通本地账号与审计资格管理，保留原密码、启停、幂等及半成品恢复。
 from __future__ import annotations
 
 import hashlib
@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -14,6 +15,7 @@ from ..common.nofollow_fs import ensure_private_dir, open_directory_beneath
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.owner_context import validate_local_user_id
 from ..session_lock.passwords import hash_password, validate_password_policy, verify_password
+from .local_user_channel_policy import reject_if_local_user_has_im_binding
 from .local_user_store import LocalUser, parse_local_user
 from .owner_quota import LocalUserQuotaLimits, OwnerQuotaUnavailable, seed_local_user_quota
 from .owner_resolver import OwnerIdentity
@@ -119,12 +121,70 @@ class LocalUserLifecycle:
         if self.revalidate is not None:
             self.revalidate()
 
-    # LLM: 原插件operation/复查口保持；宿主命令可传明确幂等键，密码慢散列先于所有文件副作用。
-    # 函数用途: 在原事务内创建或恢复普通本地账号，并可一次设置初始密码。
+    # LLM: 仅local/main，沿原操作→用户锁/CAS/回执；入组含重放先核历史IM绑定，发表前再核，撤组不受此门阻断。
+    # 函数用途: 管理员为纯Web普通用户加入或撤销审计组资格，保留原幂等和审计记录。
+    def set_audit_group_membership(self, user_id: str, *, in_audit_group: bool, actor_owner="local/main",
+                                   expected_revision: int | None = None, reason: str = "",
+                                   idempotency_key: str = "") -> dict:
+        if actor_owner not in ("local/main", OwnerIdentity.local_main()):
+            raise HostAPIError("AUDIT_GROUP_ADMIN_ONLY", 403)
+        try:
+            uid = validate_local_user_id(user_id.removeprefix("local/"))
+        except (AttributeError, HostAPIError):
+            raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403) from None
+        if (type(in_audit_group) is not bool or type(reason) is not str or len(reason) > 256
+                or type(idempotency_key) is not str or len(idempotency_key) > 128
+                or expected_revision is not None and (type(expected_revision) is not int or expected_revision < 1)):
+            raise HostAPIError("INVALID_SCHEMA")
+        operation = _host_operation(digest([idempotency_key]) if idempotency_key else secrets.token_hex(32),
+                                    OwnerIdentity.local_main())
+        action = "users.local.audit_group.set"
+        op_id = operation.identifier(action)
+        intent = {"user_id": uid, "in_audit_group": in_audit_group,
+                  "expected_revision": expected_revision, "reason": reason}
+        self.check_authority()
+        with self.store.locked(("local_users", "operations", op_id)):
+            self.bind_operation(operation, action, intent)
+            with self.store.locked(("local_users", f"{uid}.json")):
+                record = self.store.read_record(uid)
+                if record is None:
+                    raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403)
+                if in_audit_group:
+                    reject_if_local_user_has_im_binding(self.store.root, uid)
+                replay = self.replay(record, op_id)
+                if replay is not None:
+                    return replay.user.public_view() | {"replayed": True, "operation_id": op_id}
+                user = parse_local_user(record["user"], uid)
+                if expected_revision is not None and user.revision != expected_revision:
+                    raise HostAPIError("REVISION_CONFLICT", 409)
+                if user.status not in {"enabled", "disabled"}:
+                    raise HostAPIError("USER_STATE_CONFLICT", 409)
+                stamp = now_utc()
+                record["user"].update(in_audit_group=in_audit_group, revision=user.revision + 1, updated_at=stamp,
+                                      audit_group_updated_at=stamp, audit_group_updated_by="local/main")
+                record["operations"][op_id] = dict(record["user"])
+                record.setdefault("audit_events", []).append({"event": action, "actor_owner": "local/main",
+                    "operation_id": op_id, "reason": reason, "revision": user.revision + 1, "at": stamp})
+                self.check_authority()
+                if in_audit_group:
+                    reject_if_local_user_has_im_binding(self.store.root, uid)
+                self.store.save(uid, record)
+                return parse_local_user(record["user"], uid).public_view() | {"replayed": False, "operation_id": op_id}
+
+    # LLM: 初始审计组仅管理员，创建/重放同样先核历史IM绑定；False沿旧幂等摘要，原密码/配额/actor合同不变。
+    # 函数用途: 在原创建事务里设置密码和初始资格，阻止借新账号或创建回执绕过入组检查。
     def create(self, user_id, operation=None, *, display_name="", quota=None, password=None,
-               quotas=None, idempotency_key=None, actor_owner=None):
+               idempotency_key=None, in_audit_group=False, **host_options):
+        if host_options.keys() - {"actor_owner", "quotas"}:
+            raise TypeError("unsupported local user creation options")
+        actor_owner, quotas = host_options.get("actor_owner"), host_options.get("quotas")
         uid = validate_local_user_id(user_id)
-        operation = operation or _host_operation(idempotency_key, actor_owner)
+        if type(in_audit_group) is not bool:
+            raise HostAPIError("INVALID_SCHEMA")
+        if in_audit_group and actor_owner not in (None, "local/main", OwnerIdentity.local_main()):
+            raise HostAPIError("AUDIT_GROUP_ADMIN_ONLY", 403)
+        actor = OwnerIdentity.local_main() if actor_owner == "local/main" else actor_owner
+        operation = operation or _host_operation(idempotency_key, actor)
         operation.validate()
         password_hash = _validate_and_hash_password(password) if password is not None and password != "" else None
         if quotas is not None:
@@ -141,16 +201,20 @@ class LocalUserLifecycle:
         intent = {"user_id": uid, "display_name": display_name, "quota": limits.to_dict()}
         if password is not None:
             intent["password"] = password
+        if in_audit_group:
+            intent["in_audit_group"] = True
         op_id = operation.identifier("users.local.create")
         self.check_authority()
         with self.store.locked(("local_users", "operations", op_id)):
             self.bind_operation(operation, "users.local.create", intent)
             with self.store.locked(("local_users", f"{uid}.json")):
                 record = self.store.read_record(uid)
+                if in_audit_group:
+                    reject_if_local_user_has_im_binding(self.store.root, uid)
                 replay = self.replay(record, op_id)
                 if replay is not None:
                     return replay
-                record = self.begin(uid, record, op_id, display_name, password_hash)
+                record = self.begin(uid, record, op_id, display_name, password_hash, in_audit_group=in_audit_group)
                 return self.provision(record, limits, op_id)
 
     # LLM: 密码先按任务合同去明文，再用同根私有密钥HMAC保护落盘摘要；用途前缀与会话签名隔离，非密码旧算法不变。
@@ -184,9 +248,9 @@ class LocalUserLifecycle:
         raw = record["operations"][op_id]
         return LocalUserResult(parse_local_user(raw, record["user"]["user_id"]), op_id, True)
 
-    # LLM: 未登记目录不接管，原操作恢复不覆盖已保存密码；散列与账号一起私有原子存储。
-    # 函数用途: 保存含可选密码的创建意图和provisioning状态。
-    def begin(self, uid, record, op_id, display_name, password_hash=None):
+    # LLM: 不接管未登记目录，原操作恢复不覆盖密码或资格；初始资格的时间和管理员与账号同文件发表。
+    # 函数用途: 保存包含可选密码、审计组资格及审计来源的创建中账号。
+    def begin(self, uid, record, op_id, display_name, password_hash=None, *, in_audit_group=False):
         if record is not None:
             if record["provision"].get("operation_id") != op_id:
                 raise HostAPIError("USER_EXISTS", 409)
@@ -196,15 +260,17 @@ class LocalUserLifecycle:
             raise HostAPIError("USER_UNMANAGED", 409)
         timestamp = now_utc()
         user = LocalUser(uid, "provisioning", 1, display_name, timestamp, timestamp, 1,
-                         password_hash=password_hash, password_updated_at=timestamp if password_hash else None)
+                         password_hash=password_hash, password_updated_at=timestamp if password_hash else None,
+                         in_audit_group=in_audit_group, audit_group_updated_at=timestamp if in_audit_group else "",
+                         audit_group_updated_by="local/main" if in_audit_group else "")
         record = {"schema": "local-user.v1", "user": asdict(user), "operations": {},
                   "provision": {"operation_id": op_id, "phase": "reserved"}}
         self.check_authority()
         self.store.save(uid, record)
         return record
 
-    # LLM: 逐项物化并读回后才发布enabled；失败保留原操作和半成品，不删除用户目录。
-    # 函数用途: 完成同一账号的目录、策略、有限配额和成功回执。
+    # LLM: 逐项物化/读回后且初始审计资格再次通过IM门才发布enabled；失败保留原操作和半成品，不删除目录。
+    # 函数用途: 发布已完成目录、策略和配额的账号；晚到历史绑定保留原失败恢复语义。
     def provision(self, record, limits, op_id):
         uid = record["user"]["user_id"]
         try:
@@ -216,6 +282,8 @@ class LocalUserLifecycle:
             if self.store.directory_identity(("owners", "local", uid)) != record["provision"]["home_identity"]:
                 raise HostAPIError("STORE_UNAVAILABLE", 503)
             self.check_authority()
+            if record["user"].get("in_audit_group") is True:
+                reject_if_local_user_has_im_binding(self.store.root, uid)
             record["user"].update(status="enabled", updated_at=now_utc())
             record["provision"].update(phase="committed", quota_digest=digest(limits.to_dict()))
             record["operations"][op_id] = dict(record["user"])

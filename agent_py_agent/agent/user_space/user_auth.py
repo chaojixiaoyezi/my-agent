@@ -32,6 +32,7 @@ from ..session_lock.service import UnlockService
 from ..session_lock.store import SessionLockStore
 from .admin_channel_identity import AdminIdentityStoreError, list_admin_channel_identities
 from .identity_store import ProviderIdentityRecord
+from .local_user_channel_policy import require_local_user_channel
 from .local_user_lifecycle import LocalUserLifecycle
 from .local_user_store import LocalUserStore
 from .owner_admin_controls import read_owner_admin_controls
@@ -184,7 +185,7 @@ def _feishu_record(root, uid, tenant):
     return next(iter(rows.values()), None)
 
 
-# LLM: provider记录的原provider/kind/owner_id是绑定权威，owner_home或姓名不能覆盖它；管理员通道也拒普通登录。
+# LLM: provider身份为绑定权威，旧local/user绑定也必须先过纯Web门；管理员仍拒普通登录。
 # 函数用途: 将飞书准确身份绑定解析成原有普通owner。
 def _feishu_owner(root, uid, row):
     try:
@@ -197,6 +198,7 @@ def _feishu_owner(root, uid, row):
     if row.get("status", "active") != "active":
         raise HostAPIError("USER_DISABLED", 403, message="provider identity is not active")
     record = ProviderIdentityRecord.from_dict(row)
+    require_local_user_channel(record, "feishu")
     if record.provider == "local" and record.owner_kind == "main":
         raise HostAPIError("ADMIN_OWNER_FORBIDDEN", 403)
     if record.owner_kind != "user" or not record.owner_id or safe_path_segment(record.owner_id) != record.owner_id:

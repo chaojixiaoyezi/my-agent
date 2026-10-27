@@ -104,11 +104,13 @@ class GatewayPluginRequests:
     def __init__(self, resources):
         self.resources, self.conversation = resources, None
 
-    # LLM: 原队列中记录显式零工具/受限策略，不允许降回main；输入制品须由注册服务另核，不默默忽略。
-    # 函数用途: 准备准确消息的固定执行合同。
+    # LLM: Bot只使用manager已持久绑定的代次，不能取页面thread_id；普通消息仍保留原零工具合同。
+    # 函数用途: 准备普通或Bot消息的准确线程与模式执行信封。
     def prepare(self, authorized, context, execution, prepared):
         from .authorization import revalidate_call
         revalidate_call(authorized)
+        if authorized.call.action == "conversations.bots.submit":
+            return self.prepare_bot_request(authorized, context, execution, prepared)
         if authorized.call.payload.get("input_artifact_refs"):
             raise HostAPIError("ARTIFACT_INPUT_NOT_SUPPORTED", 403)
         if authorized.call.payload.get("tool_policy", "none") != "none" or authorized.execution_policy.tool_names:
@@ -121,6 +123,69 @@ class GatewayPluginRequests:
                     "network": False, "budgets": thaw(authorized.execution_policy.budgets),
                     "policy_digest": authorized.execution_policy.policy_digest,
                     "thread_id": authorized.call.payload["thread_id"]}}}
+
+    # LLM: 绑定来自原prepare_submit回执，并与canonical线程双核；普通payload/page_context无权覆盖模式与禁学。
+    # 函数用途: 给Bot原输入准备函数生成固定线程、代次和工具策略。
+    def prepare_bot_request(self, authorized, context, binding, prepared):
+        from ..conversation.bot_sessions import bot_thread_fields
+        from .authorization import revalidate_call
+
+        revalidate_call(authorized)
+        tid = binding["active_thread_id"]
+        store = self.resources.store_for(context)
+        thread = self.conversation.require_thread(store, tid, authorized, context)
+        fields = bot_thread_fields(thread)
+        if fields.get("bot_mode") != binding["bot_mode"] or fields.get("bot_generation") != binding["generation"]:
+            raise HostAPIError("BOT_MODE_MISMATCH", 409)
+        policy = bot_execution_policy(authorized, context, fields)
+        policy["thread_id"] = tid
+        ensure_gateway_folders(self.resources.paths_for(context))
+        metadata = {**prepared["metadata"], **{key: fields[key] for key in
+            ("bot_mode", "bot_generation", "learning_excluded")},
+            "read_only_mode": fields["bot_mode"] == "query_readonly", "plugin_execution_policy": policy}
+        return {**prepared, "owner_id": context.owner_home.owner_id,
+                "conversation": {"thread_id": tid}, "metadata": metadata}
+
+    # LLM: 原input receipt是唯一入队权威，key不含代次以防重放跨线程；权限现查，队列只受理不冒领业务完成。
+    # 函数用途: 将已准备的Bot代次幂等排入调用者自己的Gateway队列。
+    def submit_bot_message(self, authorized, context, binding):
+        from .authorization import revalidate_call
+
+        revalidate_call(authorized)
+        payload = thaw(authorized.call.payload)
+        if payload["text"].lstrip().startswith("/"):
+            raise HostAPIError("CONTROL_COMMAND_NOT_ALLOWED", 403)
+        scope = [authorized.binding.installation_ref, asdict(context.identity),
+                 authorized.call.action, authorized.call.idempotency_key]
+        request_id = "plugin-msg-" + hashlib.sha256(canonical_json(scope).encode()).hexdigest()
+        fingerprint = hashlib.sha256(canonical_json([scope, payload, binding["active_thread_id"],
+                                                     binding["generation"]]).encode()).hexdigest()
+        provenance = {"installation_ref": authorized.binding.installation_ref,
+            "package_sha256": authorized.binding.package_sha256, "activation_id": authorized.binding.activation_id,
+            "grant_revision": authorized.binding.grant_revision, "thread_id": binding["active_thread_id"],
+            "kind": "chat", "tool_policy": payload["tool_policy"]}
+        prepared = {"id": request_id, "kind": "ask", "source": "plugin", "goal": payload["text"],
+            "host_request_owner.v1": asdict(context.identity), "metadata": {"origin": "plugin",
+            "client_input_digest": fingerprint, "plugin_provenance": provenance,
+            "page_context": payload["page_context"]}}
+        prepared = self.prepare(authorized, context, binding, prepared)
+        request = inputs.GatewayInputPreparation(request_id, fingerprint, request_id, request_id, prepared)
+        paths = self.resources.paths_for(context)
+        with inputs.gateway_input_transition(paths, request_id):
+            revalidate_call(authorized)
+            try:
+                receipt, fresh = inputs.load_or_prepare_gateway_input_request_locked(paths, request)
+            except ValueError:
+                raise HostAPIError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", 409) from None
+            revalidate_call(authorized)
+            if receipt.state in {"pending", "queued"}:
+                inputs.queue_gateway_input_locked(paths, receipt)
+        facts = read_request_facts(paths, request_id, expected_owner=context.identity,
+                                    installation_ref=authorized.binding.installation_ref)
+        return {"bot_mode": binding["bot_mode"], "thread_id": binding["active_thread_id"],
+                "request_id": request_id, "status": facts["state"], "generation": binding["generation"],
+                "rolled_over": binding["rolled_over"], "previous_thread_id": binding["previous_thread_id"],
+                "rollover_reason": binding["rollover_reason"], "idempotent_replay": not fresh}
 
     # LLM: 原cancel已持久标记；没有当前运行句柄时不假装成功杀进程。
     # 函数用途: 对已受理请求保留取消请求，停止事实留待canonical观察。
@@ -211,3 +276,45 @@ class GatewayPluginRequests:
         terminal = _terminal_gateway_request_payload(request_id, row, response)
         _commit_gateway_terminal_request(paths, claim.path, paths.done if ok else paths.failed, request_id, terminal)
         return ExecutionAccepted(request_id, payload["thread_id"], False)
+
+
+# LLM: 许可取插件grant、原owner权限/禁用表、治理authority和当前成员的交集；只生成执行策略，不初始化main Agent。
+# 函数用途: 准备当前Bot的可撤销工具与根目录策略，供原worker快照接缝消费。
+def bot_execution_policy(authorized, context, fields):
+    from ..audit_group.access_policy import current_tool_policy
+    from ..conversation.bot_tool_policy import READ_TOOLS
+    from ..user_space.local_user_store import LocalUserStore
+    from ..user_space.managed_user_governance import _GovernanceControl
+    from ..user_space.owner_resolver import OwnerIdentity
+
+    home = context.owner_home
+    users = LocalUserStore(home.root)
+    policy, controls = current_tool_policy(home.root, home)
+    if controls.get("disabled", False):
+        raise HostAPIError("USER_DISABLED", 403)
+    member = context.identity == OwnerIdentity.local_main()
+    governance = {}
+    if context.identity.provider == "local" and context.identity.owner_kind == "user":
+        user = users.require_enabled(context.identity.owner_id)
+        member = user.in_audit_group is True
+        governance = _GovernanceControl(home.root, user.user_id).policy()
+    execution = authorized.binding.grant["execution"]
+    names = set(execution["tool_names"]) - set(policy.get("disabled_tools", []))
+    if authorized.call.payload["tool_policy"] == "none" or execution["max_tool_calls"] == 0:
+        names.clear()
+    parts = home.home_dir.relative_to(users.root).parts
+    permissions = users.read_json((*parts, "permissions.json")) or {}
+    readonly = fields["bot_mode"] == "query_readonly"
+    if readonly or permissions.get("filesystem", {}).get("access_mode") == "read-only":
+        names &= READ_TOOLS
+    if not member:
+        names = {name for name in names if not name.startswith("audit_group_")}
+    fingerprint = hashlib.sha256(canonical_json([policy, permissions, governance, member, sorted(names)]).encode()).hexdigest()
+    return {"schema": "plugin_execution_policy.v1", "tool_names": sorted(names), "network": False,
+            "budgets": {key: value for key, value in execution.items() if key.startswith("max_")},
+            "policy_digest": fingerprint,
+            "bot_mode": fields["bot_mode"], "bot_generation": fields["bot_generation"],
+            "learning_excluded": fields["learning_excluded"], "read_only_mode": readonly,
+            "in_audit_group": member, "governance_revision": governance.get("revision", 0),
+            "read_roots": [str(home.workspace_dir), str(home.tasks_dir)],
+            "write_roots": [] if readonly else [str(home.workspace_dir), str(home.tasks_dir)]}

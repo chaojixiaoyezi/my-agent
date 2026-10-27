@@ -21,7 +21,7 @@ from .owner_resolver import OwnerIdentity, resolve_owner_home
 
 
 # LLM: 密码慢散列只进入私有序列化且不进入repr/public_view；配额仍以owner quota.json为准。
-# 类用途: 保存普通账号与可选密码凭据，显式区分磁盘记录和公开状态。
+# 类用途: 保存普通账号、纯Web约束与审计组状态，区分私有和公开字段。
 @dataclass(frozen=True)
 class LocalUser:
     user_id: str
@@ -34,6 +34,17 @@ class LocalUser:
     has_running_work: bool | None = None
     password_hash: str | None = field(default=None, repr=False)
     password_updated_at: str | None = None
+    in_audit_group: bool = False
+    allowed_channels: tuple[str, ...] = ("web",)
+    im_binding_allowed: bool = False
+    audit_group_updated_at: str = ""
+    audit_group_updated_by: str = ""
+
+    # LLM: 普通账号通道策略固定且不由旧JSON或dataclass.replace放宽，无IO。
+    # 函数用途: 将所有受管账号固定成纯Web账号，兼容旧通道字段。
+    def __post_init__(self):
+        object.__setattr__(self, "allowed_channels", ("web",))
+        object.__setattr__(self, "im_binding_allowed", False)
 
     # LLM: 账号身份总是普通local/user，不接受插件提供provider或kind。
     # 函数用途: 构造与注册编号一一对应的宿主身份。
@@ -63,7 +74,7 @@ class LocalUser:
         return result
 
 
-# LLM: 严格解析原账号及可选密码/运行字段；旧无密码记录仍可读，非字符串凭据或非布尔运行状态视为损坏。
+# LLM: 原严格账号解析新增审计组布尔和审计时间；旧记录默认非成员，旧通道声明不能授权IM。
 # 函数用途: 完整恢复私有账号的已知字段，损坏时由存储层失败关闭。
 def parse_local_user(value, expected_user_id):
     required = {"user_id", "status", "revision", "display_name", "created_at", "updated_at", "quota_revision"}
@@ -84,10 +95,17 @@ def parse_local_user(value, expected_user_id):
             raise ValueError("invalid credential field")
     if value.get("has_running_work") is not None and type(value["has_running_work"]) is not bool:
         raise ValueError("invalid runtime status")
+    if type(value.get("in_audit_group", False)) is not bool:
+        raise ValueError("invalid audit group membership")
+    if any(type(value.get(key, "")) is not str for key in ("audit_group_updated_at", "audit_group_updated_by")):
+        raise ValueError("invalid audit group metadata")
     return LocalUser(value["user_id"], value["status"], value["revision"], value["display_name"],
                      value["created_at"], value["updated_at"], value["quota_revision"],
                      has_running_work=value.get("has_running_work"),
-                     password_hash=value.get("password_hash"), password_updated_at=value.get("password_updated_at"))
+                     password_hash=value.get("password_hash"), password_updated_at=value.get("password_updated_at"),
+                     in_audit_group=value.get("in_audit_group", False),
+                     audit_group_updated_at=value.get("audit_group_updated_at", ""),
+                     audit_group_updated_by=value.get("audit_group_updated_by", ""))
 
 
 # LLM: 固定可信宿主根，账号写入由生命周期服务持短锁完成；只读不获取会创建文件的锁。

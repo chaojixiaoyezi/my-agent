@@ -870,6 +870,8 @@ def _require_gateway_conversation_ready(
 # 函数用途: 构造当前请求执行参数，并验证显式输入附件的归属与资源上限。
 # LLM: 前台source仅捕获原实际C/W invocation/Agent/claim，Count0 None零IO；媒体/actor/refs/原所有参数保持，不由运输投影创建执行身份。
 # 函数用途: 在原Gateway参数构造处接同一请求安全点，保留原执行选项和全部宿主事实。
+# LLM: 仅已核canonical owner/线程/代次的Bot策略可启用原快照交集；普通插件tool_names非空继续失败关闭。
+# 函数用途: 在原worker参数接缝应用Bot工具限制，不扩大工具handler或使用旧成员资格。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
     context = inputs.context
@@ -911,12 +913,16 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
 
     plugin_policy = (request.get("metadata") or {}).get("plugin_execution_policy")
     has_plugin_policy = isinstance(plugin_policy, dict) and plugin_policy.get("schema") == "plugin_execution_policy.v1"
+    allowed_tools = [] if (request.get("host_im_task_ack") or request.get("source") == "plugin" or has_plugin_policy) else None
     if request.get("source") == "plugin" or has_plugin_policy:
         if not has_plugin_policy or plugin_policy.get("network") is not False:
             raise RuntimeError("plugin request requires valid offline plugin_execution_policy.v1")
-        if plugin_policy.get("tool_names"):
+        if "bot_mode" in plugin_policy:
+            from ..conversation.bot_tool_policy import bot_request_allowed_tools
+            bot_tools = bot_request_allowed_tools(context.agent, request, conversation.thread_id, plugin_policy)
+            allowed_tools = [] if request.get("host_im_task_ack") else bot_tools
+        elif plugin_policy.get("tool_names"):
             raise RuntimeError("plugin chat request cannot enable tools on unrestricted worker")
-    allowed_tools = [] if (request.get("host_im_task_ack") or request.get("source") == "plugin" or has_plugin_policy) else None
     return RunParams(
         pending_turn_input_source=pending_turn_input_source(context.agent, request, conversation.thread_id),
         inject=request_prompt.gateway_injections(request, conversation),

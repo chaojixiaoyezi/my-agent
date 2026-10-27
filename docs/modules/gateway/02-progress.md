@@ -1,4 +1,11 @@
 ## 2026-10-26 Wave 5 Track A Round 2：audit-only 冷 Curator 预检
+## 2026-10-26 WT-AG2-R2B Bot worker工具策略接线（源码候选）
+
+- `request_execution._gateway_run_params` 不再一律拒绝Bot非空工具列表。只有同一owner规范ConversationStore中的受保护Bot线程、代次、禁学字段及原input receipt冻结策略全部一致时，才把 `bot_request_allowed_tools` 生成的真实快照交集交给原RunParams；普通插件非空策略仍拒绝。
+- 执行前现查账号enabled、治理版本、owner权限/禁用工具和所需审计组成员资格；没有凭排队时的成员布尔值扩权。`execution`与`ops_config`归一为`action_avatar`。不新增handler、配置开关或第二执行队列，不修改隔离单元和授权模块。
+- 新增37项R2B回归通过；指定双文件123通过、4失败，四项同节点在准确起点`4289922d083c94446d4eb23b65718b45c849b40a`独立worktree同现。原生网络隔离和三类授权状态码失败仍须对应负责人协调；临时文件产物仅替身边界验证，真实隔离单元仍禁写。未部署，详细证据与命令见[TESTS.md](../../../TESTS.md)。
+
+## 2026-10-26 网关 04:00 安全重启死锁修复、看门狗日志分离、管理员日志自诊与维护账本裁剪（已实现）
 
 - `cli/gateway_loops.py::_cold_curator_activity` 将 `home/audit` 非空 `.jsonl` 纳入原有界三态预检，只有审计输入的 owner 不再被误判为空；不创建 Agent、不读正文，不改变原 due/配置/租约与启动保护门。
 - 回归覆盖空目录、无关后缀、空 JSONL、新增记录与原地更新。扩大组合结果 579 通过/5 失败，五项均在真实任务起点基线复现，详见 [TESTS](../../../TESTS.md)。未部署或验收真实 Gateway 唤醒链路。

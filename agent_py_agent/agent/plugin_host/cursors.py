@@ -101,12 +101,12 @@ class CursorCodec:
             self._secret = secrets.token_bytes(32)
 
 
-# LLM: 排除分页游标自身，其余请求参数和显式过滤都参与绑定，跨授权版本不可续用。
+# LLM: 排除原四类分页游标自身（含Bot before_cursor），其它请求字段及显式过滤仍完整绑定，不跨授权续页。
 # 函数用途: 计算游标的完整查询范围摘要。
 def _scope_digest(authorized, filters) -> str:
     binding = authorized.binding
     payload = {key: value for key, value in authorized.call.payload.items()
-               if key not in {"cursor", "event_cursor", "reply_cursor"}}
+               if key not in {"cursor", "event_cursor", "reply_cursor", "before_cursor"}}
     scope = {"installation": binding.installation_ref, "activation": binding.activation_id,
              "package": binding.package_sha256, "grant_revision": binding.grant_revision,
              "owner": asdict(authorized.effective_owner), "action": authorized.call.action,

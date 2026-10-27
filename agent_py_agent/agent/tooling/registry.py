@@ -26,6 +26,7 @@ from ..path_access_policy import effective_owner_scope_root, path_scope_regime
 from ..settings.defaults import default_config_int
 from .artifact import ReadArtifactTool
 from .asset_delivery_tool import register_asset_delivery_tool
+from .audit_group_tools import register_audit_group_tools
 from .content_transport_policy import (
     MAX_INLINE_WRITE_CONTENT_CHARS,
     FileSourceContent,
@@ -594,10 +595,20 @@ def _registry_write_inline_max_chars(registry: Any) -> int:
         return MAX_INLINE_WRITE_CONTENT_CHARS
 
 
+# LLM: 原基础和发现工具装配顺序不变，审计组注册只消费同一宿主owner绑定；不构造插件或连接MCP。
+# 函数用途: 集中登记原生工具，避免给已达尺寸上限的注册表类继续堆装配分支。
+def _register_native_tools(registry, params):
+    register_base_tools(registry, params)
+    register_asset_delivery_tool(registry, params)
+    register_audit_group_tools(registry, params)
+    registry.register(ToolSearchTool(registry))
+    registry.register(ListToolsTool(registry))
+
+
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
 # 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
-    # LLM: 生命周期锁、关闭标记、连接状态与客户端池先建立且由权限视图共享；默认eager不变，defer不启动普通MCP。
+    # LLM: 原生命周期和连接策略不变；审计组工具仅沿宿主真实owner绑定注册，权限不取插件安装者。
     # 函数用途: 初始化owner工具表和唯一连接生命周期，按宿主参数决定何时首次连接。
     def __init__(
         self,
@@ -643,10 +654,7 @@ class ToolRegistry:
         self.plugin_gate_reviewer = params.plugin_gate_reviewer
         self.retrieval_limit = params.retrieval_limit
         self.retriever = build_tool_retriever(params)
-        register_base_tools(self, params)
-        register_asset_delivery_tool(self, params)
-        self.register(ToolSearchTool(self))
-        self.register(ListToolsTool(self))
+        _register_native_tools(self, params)
         if not params.defer_mcp_connect:
             self.ensure_mcp_connected()
 

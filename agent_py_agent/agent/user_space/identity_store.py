@@ -21,6 +21,7 @@ from ..common.json_io import (
 from ..common.nofollow_fs import ensure_private_dir
 from ..common.path_segments import safe_path_segment
 from .home_layout import MyAgentHomePaths
+from .local_user_channel_policy import require_local_user_channel
 
 if TYPE_CHECKING:
     from .owner_resolver import OwnerHomeResult
@@ -140,11 +141,12 @@ class CanonicalMemoryNoteRequest:
 
 # LLM: 身份链接账本走私有写（0600/0700）；owner 内与 home 级两处账本同口径。
 # 函数用途: 把一条第三方身份链接写进两级账本。
-# LLM: provider身份链接是全局归属事实；拒门先于原私有追加，姓名展示与受控owner note不借此提权。
+# LLM: provider链接为全局事实；普通local/user纯Web门先于写入，原全局writer门不变。
 # 函数用途: 阻止W改身份映射，保留原两级索引及JSONL格式。
 def link_provider_identity(home: MyAgentHomePaths, record: ProviderIdentityRecord) -> Path:
     from ..common.global_write_guard import require_global_writer
 
+    require_local_user_channel(record, "im")
     require_global_writer("identity_bindings")
     path = _provider_index_path(home, record.provider)
     # 私有追加：0600/0700，存量宽权限身份索引下次写入即收紧；内容逐字节不变。
@@ -328,6 +330,8 @@ def resolve_owner_from_provider_identity(
     return resolve_owner_from_provider_identity_report(home, provider=provider, provider_subject_id=provider_subject_id).owner
 
 
+# LLM: 旧绑定解析也先核纯Web门再物化home；缺记录与坏索引仍沿原报告，不扩大管理员权限。
+# 函数用途: 将可用IM身份映射到规范owner，禁止普通本地账号借旧绑定入站。
 def resolve_owner_from_provider_identity_report(
     home: MyAgentHomePaths,
     *,
@@ -340,6 +344,7 @@ def resolve_owner_from_provider_identity_report(
     from .owner_resolver import OwnerIdentity, ensure_owner_home
 
     record = lookup.record
+    require_local_user_channel(record, provider)
     if record.provider == "local" and record.owner_kind == "main":
         identity = OwnerIdentity.local_main()
     elif record.owner_kind == "group":

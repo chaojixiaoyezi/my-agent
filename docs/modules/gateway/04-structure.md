@@ -1,4 +1,11 @@
 ## 2026-10-26 Wave 5 Track A Round 2 冷 Curator 输入结构
+## 2026-10-26 WT-AG2-R2B 原worker消费Bot策略结构
+
+- `gateway_parts/request_execution.py::_gateway_run_params` 调用 `conversation/bot_tool_policy.py::bot_request_allowed_tools`；验证本owner规范存储及线程metadata后，冷读原 `gateway_input_receipt.v2/v3` 的prepared策略，与请求全量比较，防止队列扩充白名单。再核当前账号、治理、权限与审计成员，通过原 `snapshot_for_bot_request` / `build_bot_snapshot` 收窄真实父快照，向RunParams传准确工具列表（空列表仍无工具，不降级None）。
+- Host `action_specs_audit_bots.py` 与 `audit_bot_v2_handlers.py` 透传rule_id并增加history的before_cursor/15条消息合同；`conversation/bot_sessions.py` 从canonical日志完整行逆读同owner/模式代次，原MAC codec同时排除before_cursor自身，旧摘要分页不变。
+- `audit_group/blackbox_execution.py` 只在invocation独占临时workspace扫描输出，先全批验证净化，再经caller quota预留及目录原子发表；临时原输出在回执保存前清理。这里不授原生文件写权限，真实隔离单元仍只读，二进制产物不支持。测试及仍未验证链路见[TESTS.md](../../../TESTS.md)。
+
+## 2026-10-26 网关安全重启交接、看门狗双日志分离、管理员日志只读策略与维护事件裁剪结构
 
 - `_cold_curator_activity(home)` 继续先检查原候选非空事实，再对消息与 `home/audit` 调用同一 `_directory_activity(..., ".jsonl")`；至多采样 65 个名字，非空为 due、预算/读取未知为 unknown，两者都不当空输入。
 - 该入口只读元数据，不承担执行授权、游标推进或记忆晋升；原 `_cold_curator_precheck` 和 Curator 主链仍独立复核。回归与未验证边界见 [TESTS](../../../TESTS.md)。
