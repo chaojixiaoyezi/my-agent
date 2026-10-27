@@ -33,13 +33,13 @@ def package_assets(members):
     result = {}
     for key, rows in raw.items():
         unique = list({canon: (canon, short, full) for canon, short, full in rows}.values())
-        short_counts, full_counts = {}, {}
-        for _, short, full in unique:
-            short_counts[short] = short_counts.get(short, 0) + 1
-            full_counts[full] = full_counts.get(full, 0) + 1
-        names = [short if short_counts[short] == 1 else (full if full_counts[full] == 1 else canon)
-                 for canon, short, full in unique]
-        result[key] = sorted(names)
+        tiers = [(short, full, canon) for canon, short, full in unique]
+        levels = [0] * len(tiers)
+        for _ in range(3):
+            chosen = [tiers[idx][levels[idx]] for idx in range(len(tiers))]
+            counts = {name: chosen.count(name) for name in set(chosen)}
+            levels = [min(2, lvl + (1 if counts[chosen[idx]] > 1 else 0)) for idx, lvl in enumerate(levels)]
+        result[key] = sorted(tiers[idx][levels[idx]] for idx in range(len(tiers)))
     return result
 
 
