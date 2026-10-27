@@ -1,3 +1,28 @@
+## 2026-10-27 Wave 7 W3 R4：跨段批次扣数与neutral窗口起点
+
+来源：`07-tasks/wave7-w3-r4-fix.md`；精确前置 `216fceb055402ba2fbadecea16149b81c21e4f92`，在 `/tmp/wt-wave7-w3` / `wt-wave7-w3` 续做。
+
+当前为**未提交生产候选**：原 W3 明令禁止新增状态字段，R4 未显式解除；实现与零失败证据已准备，但新增字段方案需要发起者明确批准后才能按 R4 消息提交。不能把“本轮未重申限制”视为自动授权。
+
+- 生产修复在状态转移时保存独立 `neutral_count` / `neutral_since`：batch 只推进原不计数提醒段，计数失败清空 neutral 窗口但保留累计 `batch_failures`，success 清空全部。隔离必须有五次 neutral 且从首个 neutral 起满 24 小时，不再扣历史 batch，也不借 batch 的早期起点。原同因、累计、重投上限及共享期限辨识不变。
+- 新字段有明确兼容边界：缺少字段的旧账按 `neutral_count=None` 读入；无 batch 的旧账可证明全段 neutral，有 batch 的歧义旧账不推断类型/首 neutral 时间，下一次真实 neutral 从当前时刻重新累计。仍严格拒绝未知键、布尔/小数计数、非有限时间和矛盾窗口。**这是新增持久字段的结构变更，不是原 R1“不新增字段”方案；新代码能读旧账，不代表旧二进制能读新账。降级/混跑须先由集成者处理新键兼容，未验证跨版本回滚。**
+- R3 跨段序列在 `86499` 不隔离、`86500` 隔离；纯 batch 对照保留。R4 `batch@0 -> neutral@90000..91200` 不隔离，`176399` 不隔离、`176400` 隔离。原历史 batch 用例补充 `86400` 不隔离，正向第五次输入按 R4 改为 `100+86400`，没有删除或放宽断言。另核旧状态碰撞、严格读回、歧义/纯neutral旧账、failure/success 重置。
+- 指定 store 测试的十个基线失败来自夹具出生值缺失：本机 `build_process_identity` 的 legacy ps 出生值实际为 None，内核出生观测可用；生产观察器正确保持未知。死亡夹具改为捕获真实子进程的完整同源出生身份，断言 live=True，握手结束并 wait 后再断言 dead=False；不复用父进程出生值替换 PID，不靠 0.3 秒 sleep。未改生产身份观察器/死亡准入，也未 mock 判死、跳过测试或删改原业务断言。此结果不证明 legacy ps 不可用时的默认生产身份链已修好。
+
+红绿证据：未改生产代码时，精确 HEAD 基线四文件为 `309` 项、`11 failures`（R3 一项及上述 store 十项），见 `tmp/w3-r4-baseline.xml`；目标窗口十项为五个真实断言失败、0 errors/skips，见 `tmp/w3-r4-red.xml`。第一轮组合为 `314 passed`；补严格字段用例后发现一项缺失的“无 reset 时 neutral+batch 不得超过原段次数”校验，`tmp/w3-r4-schema-red.xml` 为 15 项、1 failure，补齐后转绿。最终指定四文件 **329 passed / 0 failures / 0 errors / 0 skipped**，见 `tmp/w3-r4-final.xml`：wake poison 180、store 46、runtime stale 72、foundation 31。
+
+复现（cwd 为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wake_poison.py agent_py_agent/tests/test_wake_attempt_store.py agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/pytest-w3-r4-final --junitxml=tmp/w3-r4-final.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w3-r4-size.md
+git diff --check
+```
+
+Ruff 全范围通过；strict 尺寸门 `hard=0 / blocked=False`，没有改检查器或尺寸基线，生成报告按任务指定路径输出，不改受控 `CODE_SIZE_REPORT.md`。未运行全仓/Linux 车道、生产 Gateway 自愈、默认出生观测的跨平台端到端或性能测量；未部署、推送、启停服务或操作真实 owner 运行库。
+
+独立复核仅检查冻结内联逻辑，未发现指定跨段、纯 batch、legacy 主场景的确定反例；没有独立跑测试或核完整调用链。其指出的字段授权/降级边界按上文保留为提交阻塞；既有 R2 的 deadline 来源碰撞与后续 batch 时间反推延迟未在本轮改动或宣称解决。
+
 ## 2026-10-27 Wave 7 W3 R2：隔离边界与结清后的副作用证明
 
 来源：`07-tasks/wave7-w3-r2-fixes.md`，精确前置为 `7fc4066bcafd779524e9d64aece93deb4dff88b8`；只在 `/tmp/wt-wave7-w3` / `wt-wave7-w3` 续做，不部署或操作真实运行库。
