@@ -9,6 +9,12 @@
 
 - `cli/gateway_loops.py::_cold_curator_activity` 将 `home/audit` 非空 `.jsonl` 纳入原有界三态预检，只有审计输入的 owner 不再被误判为空；不创建 Agent、不读正文，不改变原 due/配置/租约与启动保护门。
 - 回归覆盖空目录、无关后缀、空 JSONL、新增记录与原地更新。扩大组合结果 579 通过/5 失败，五项均在真实任务起点基线复现，详见 [TESTS](../../../TESTS.md)。未部署或验收真实 Gateway 唤醒链路。
+## 2026-10-26 Wave 6 B2 Round 3：owner后台LocalStore事件稳态维护（源码及指定组件验收，未部署）
+
+- `run_owner_retention_if_due` 与 `run_with_transition` 在原维护周期内调用事件辅助维护，将回执加到同一 `maintenance.json` 的 `local_store_events_maintenance`，不改变retention状态口径；法律保留或原保留拒绝时不删除事件。
+- 兼容owner data库及当前真实的workspace runtime库，只维护已有库；每库每周期一批，默认保留20000条、最多删除5000条，不在事件热路径扫描，不自动VACUUM。协调路径只在SQL/发表叶借原commit，JSONL读取和事件锁等待不占短门。
+- 普通错误显式区分完成失败、可能已有副作用和不完整计数；发现IO错误按来源隔离。四类实际执行未知原样上抛，R2坏字节和pending恢复算法不变。
+- 原任务验收的旧测试失配已在精确起点独立复现；追加白名单授权后，只将Gateway业务测试观测时钟置于原180秒保护期之后，不修改生产保护或原业务断言。指定四套157项全部通过；详细证据、复现和验收边界见 [TESTS](../../../TESTS.md)。未做生产、跨平台或全仓验收。
 
 ## 2026-10-26 Wave 4 Round 4 资产与冷通知修复（源码及指定组件验收，未部署）
 

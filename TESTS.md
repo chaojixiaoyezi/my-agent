@@ -206,6 +206,34 @@ git diff --check
 ```
 
 最终规定两文件回归：344例中343通过、0失败、0执行错误、1例按上述既有能力夹具跳过；Ruff、doc-sync、strict code-size（`hard=0` / `blocked=False`）、diff检查均通过。统计取自 `final-review.xml`，机器汇总见 `verification-summary.json`。本轮日志和JUnit在 `.pytest_cache/b1-r2/`；code-size生成报告提交前还原，不纳入功能提交。
+## 2026-10-26 Wave 6 B2 Round 3：LocalStore事件裁剪接入owner后台周期
+
+来源：`07-tasks/wave6-b2-round3-fix-20261026.md` 与追加授权 `07-tasks/wave6-b2-round3-whitelist-20261026.md`，起点 `e06ad63279e9c0c747f88ccb06862dc407b4af79`，工作树 `/tmp/wt-wave6-b2`。只改授权白名单内的两份owner维护模块、三份测试及本节/网关模块文档，未改R2底层事件删除和字节保留算法。
+
+- 普通维护在原owner状态锁内调用；协调维护用临时 `global_write_commit_scope` 运输原 `commit_transition`，只让SQL/文件发表叶入原短门。完整JSONL读取、解析及事件锁等待仍在门外，不从单事件热路径调用，不自动VACUUM，不添加维护线程或第二维护账。
+- 每个已存在的库调用 `maintain_events(max_batches=1, before=now)`，沿原默认保留20000条/每批最多删除5000条。Home当前没有 `owner_local_store_dir` 字段；实际默认位置由 `runtime_paths.py` 放在 `owner_workspace_dir/runtime/workspaces/<scope>/local_store`，同时兼容任务中的 `owner_data_dir/local_store`。只看固定规范目录，不扫描自定义外置配置库；两种布局均无 `local.db`/`events.jsonl` 时不建空库。静态发现拒绝符号链接/特殊文件，不声称抵御检查后并发换链的所有场景。
+- `effects.local_store_events_maintenance` 只加键；retention的status/apply_outcome不变，法律保留或原保留拒绝时不再启动新的事件删除。四类实际执行未知错误原对象上抛，其余普通错误不反噬保留主流程。
+- `executed=False, reason=error` 只表示没有完整成功返回，不能证明没有产生副作用。库调用异常另记 `side_effects_unknown=True, counts_complete=False`；多库计数只累计成功返回的库，失败/发现不完整显式标记，不把未知删除数填成零。发现普通IO错误单列 `discovery_errors`，其它正常库继续维护；出现发现缺口时辅助 `ok=False`，不改变retention旧口径。
+- 新增普通/transition双入口、两种布局、多库、空owner、独立JSONL原字节、精确before、四类原异常、普通同码错误、真实C/claim/P3短门、法律保留/策略拒绝、提交后文件失败及原pending恢复、发现故障隔离回归。真实C观测只包维护阶段，正常审计追加仍允许在原短门内。独立Astra high仅做内联静态复核，其提出的部分提交诊断与发现阶段隔离均先补失败复现再修复；不是全仓或生产端到端批准。
+
+在工作树根复现任务门禁（原命令不删测、不跳过）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_local_store_coordinator_io.py agent_py_agent/tests/test_owner_maintenance.py agent_py_agent/tests/test_gateway_owner_maintenance.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+首轮曾因旧测试失配停在提交前：任务起始提交的独立detached worktree原样运行owner/gateway两文件，复现五个失败（`.pytest_cache/wave6-b2-r3/baseline.{log,xml}`，已确认Python导入指向该基线）。其中owner旧用例漏掉已存在的 `MEMORY_RETENTION_PIN_SOURCE_UNREADABLE`：已在白名单内把精确计数修正为两条TASK_STATE_INVALID加一条PIN错误，原status/apply_outcome及真实执行断言均保留。四个Gateway旧用例在controller构造后立即tick，受原180秒启动保护而早返；最初该文件不在白名单，故只做保护期后时钟诊断（`baseline-clock-probe.*`，不能代替原门禁）。追加授权现已明确纳入该文件，正式增加 `_after_startup_grace` 测试helper，只将当前controller的出生时钟前移原保护时长加1秒，并用原判定确认保护期结束。生产常量、保护逻辑、tick与四个业务断言均未改动，不跳过或放宽有效测试。
+
+本轮最终核验记录：
+
+- 本次按追加授权重跑指定四文件：**157项 / 157 passed / 0 failed / 0 error / 0 skipped**，`whitelist-final.{log,xml}`；新增B2-R3 **37项全部通过**，包括真实后台C短写/门外读锁、原异常上抛和原pending恢复。四个Gateway业务回归也全部通过，原首轮 `final.*` 的153通过/4失败记录保留，不覆盖成绿测。
+- 追加真实执行端口回归：`test_owner_maintenance_execution_ports.py` **40 passed / 0 failed / 0 error / 0 skipped**，`execution-ports-final.{log,xml}`；本次未改生产源码及该套输入，沿用前轮有效结果。这些组件结果不代表部署后的所有C/W场景均已验收。
+- 本次重跑 `ruff check agent_py_agent scripts` 通过；严格尺寸门 `strict_scope_total=3679 / hard=0 / high-risk=2630 / soft=1049 / test_advisory=2152 / blocked=False`，见 `whitelist-ruff.log`、`whitelist-size.log`。文档同步、diff收口输出分别保留在 `whitelist-doc-sync.log`、`whitelist-diff-check.log`；生成的 `CODE_SIZE_REPORT.md` 不纳入功能提交。
+- 证据均在 `.pytest_cache/wave6-b2-r3/`；独立基线工作树已移除，原日志/JUnit保留。追加授权后的时钟夹具阻塞已消除，按指定门禁全绿后提交本轮八个授权文件。未推送、部署或操作生产库；Linux、全仓、真实生产库与上线效果未验证。
 
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 

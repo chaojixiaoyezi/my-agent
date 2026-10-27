@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 
+# LLM: 业务分页用例观察保护期结束后的真实tick，不删除或替换生产启动保护判定。
+# 函数用途: 验证后台维护按owner分页运行而不创建scoped agent。
 def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
     tmp_path: Path,
     monkeypatch,
@@ -43,7 +45,7 @@ def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
         lambda _context: base_agent,
     )
 
-    controller = gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace())
+    controller = _after_startup_grace(gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace()))
     summary = controller.tick(now=200_000)
 
     assert summary == {"scanned": 1, "ran": 2, "failed": 0, "refused": 0, "isolated": 0}
@@ -52,6 +54,8 @@ def test_gateway_owner_maintenance_pages_without_creating_scoped_agents(
     assert marker["status"] == "success"
 
 
+# LLM: 只推进测试观测到原180秒保护期之后，保留全部汇总和实际执行断言。
+# 函数用途: 验证拒绝与局部隔离错误分别进入正确的维护摘要计数。
 def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(tmp_path: Path, monkeypatch, capsys) -> None:
     from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
     from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, ensure_owner_home
@@ -70,7 +74,8 @@ def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(tmp_p
     )
     monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _context: base_agent)
 
-    summary = gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace()).tick(now=200_000)
+    controller = _after_startup_grace(gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace()))
+    summary = controller.tick(now=200_000)
 
     # failed 只算整次被拒与执行期失败；「执行了、只有隔离错误」只进 isolated（3a 补充裁定）。
     assert summary == {"scanned": 2, "ran": 3, "failed": 1, "refused": 1, "isolated": 1}
@@ -78,6 +83,18 @@ def test_gateway_owner_maintenance_summary_separates_refused_from_isolated(tmp_p
     assert json.loads(printed[-1].split(" ", 1)[1]) == summary
 
 
+# LLM: 只改变当前测试controller的出生时钟，不修改生产常量、判定函数或其它controller。
+# 函数用途: 将维护业务回归的观测点置于原启动保护结束后。
+def _after_startup_grace(controller):
+    from agent_py_agent.cli import gateway_loops
+
+    controller._startup_started_at -= gateway_loops.STARTUP_GRACE_WINDOW_SECONDS + 1
+    assert not gateway_loops._startup_grace_active(controller)
+    return controller
+
+
+# LLM: 真实controller沿原基准home构造；业务用例统一在保护期结束后观察，不替换tick或维护写者。
+# 函数用途: 为隔离错误和执行失败测试准备到达稳态的维护controller。
 def _controller_for(base_home, monkeypatch):
     from agent_py_agent.cli import gateway_loops
 
@@ -86,7 +103,7 @@ def _controller_for(base_home, monkeypatch):
         home_paths=base_home,
     )
     monkeypatch.setattr(gateway_loops, "_gateway_agent_from_context", lambda _context: base_agent)
-    return gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace())
+    return _after_startup_grace(gateway_loops._GatewayOwnerMaintenanceController(SimpleNamespace()))
 
 
 def test_gateway_owner_maintenance_isolated_only_is_not_failed(tmp_path: Path, monkeypatch) -> None:

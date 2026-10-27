@@ -2,7 +2,7 @@
 #   status/last_success_at 是旧汇总口径（有任何错误就 policy_unavailable）；「到底执行了没有」看 apply_outcome，
 #   被隔离的路径级错误看 isolated_error_count，最近一次真正执行看 last_applied_at。改动联测 test_owner_maintenance
 #   与 test_gateway_owner_maintenance。
-# 模块用途: 保留Count0原维护；真实后台按原claim逐写私有状态，W不压shared索引，不新增维护账。
+# 模块用途: 保留Count0原维护；后台按原claim逐写私有状态及有界LocalStore事件裁剪，W不压shared索引。
 from __future__ import annotations
 
 import os
@@ -134,6 +134,7 @@ def owner_maintenance_due(
 #   维护状态只加键：apply_outcome / isolated_error_count / last_applied_at（旧文件缺这个键时按 0 起算）；
 #   status 与 last_success_at 含义不变。写 maintenance.json 与审计属于副作用，都在 locked_json_path 内完成。
 # LLM: 单进程保留执行后回收已登记孤儿伴生锁，逻辑锁和原request门不变；C/W仍用transition路径。
+# LLM: LocalStore事件只在原保留允许删除时推进，legal_hold/refused不新增删除；结果加到原effects。
 # 函数用途: owner到期执行保留及辅助维护，写原结构化状态；未到期返回not_due。
 def run_owner_retention_if_due(
     home: MyAgentHomePaths,
@@ -183,6 +184,9 @@ def run_owner_retention_if_due(
         # rcb：历史悬挂 run 一次性补收口迁移（幂等；迁移记录写 runtime.db metadata，
         # 重复调用是空操作）。失败只记结构化回执，绝不影响保留主流程。
         run_closeout_backfill = _backfill_hung_runs(home, now=current)
+        local_events = (_maintain_local_store_events(home, now=current)
+                        if retention.applied and not retention.legal_hold else
+                        {"executed": False, "reason": "legal_hold" if retention.legal_hold else "retention_refused"})
         previous = read_json_object_report(
             state_path,
             context="owner_maintenance.state",
@@ -190,7 +194,8 @@ def run_owner_retention_if_due(
         effects = {"text_vector_cache_reclaimed": dropped_cache_keys,
                    "text_vector_cache_reclaim_error": reclaim_error,
                    "indexes_compacted": compacted, "indexes_compact_failed": compact_failed,
-                   "memory_archive_permissions": permissions, "run_closeout_backfill": run_closeout_backfill}
+                   "memory_archive_permissions": permissions, "run_closeout_backfill": run_closeout_backfill,
+                   "local_store_events_maintenance": local_events}
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
@@ -360,6 +365,102 @@ def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float, commit_transition
         raise
     except Exception as exc:  # noqa: BLE001 迁移失败不反噬保留主流程
         return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
+
+
+# LLM: 只发现本owner两种固定规范位置的已存在库；每库一批，发现/执行普通故障分别隔离，四类未知原抛。
+#   executed=False表示没有完整返回成功，非未写入证明；异常后的副作用未知及不完整计数须单列。
+#   Home当前没有owner_local_store_dir字段，真实默认库由runtime_paths放在workspace/runtime/workspaces/*/local_store。
+# 函数用途: 在原owner后台周期裁剪既有事件库，把执行或跳过事实交给同一maintenance.json。
+def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_transition=None) -> dict[str, Any]:
+    try:
+        directories, discovery_errors = _local_event_store_directories(home)
+        if not directories:
+            if discovery_errors:
+                return {"executed": False, "reason": "error", "counts_complete": False,
+                        "error_type": discovery_errors[0]["error_type"], "discovery_errors": discovery_errors}
+            return {"executed": False, "reason": "no_local_store"}
+        results = [_maintain_event_store(directory, now=now, commit_transition=commit_transition)
+                   for directory in directories]
+        if len(results) == 1:
+            summary = results[0]
+        else:
+            summary = {"executed": any(result["executed"] for result in results),
+                       "ok": all(result.get("ok", False) for result in results),
+                       "counts_complete": all(result.get("ok", False) for result in results),
+                       "side_effects_unknown": any(result.get("side_effects_unknown", False) for result in results),
+                       **{key: sum(result.get(key, 0) for result in results)
+                          for key in ("selected", "deleted_db", "deleted_jsonl")},
+                       "stores": [{"directory": str(directory.relative_to(home.owner_home_dir)), **result}
+                                  for directory, result in zip(directories, results, strict=True)]}
+        if discovery_errors:
+            summary = {**summary, "ok": False, "counts_complete": False, "discovery_errors": discovery_errors}
+        return summary
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
+    except Exception as exc:
+        return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
+
+
+# LLM: 普通模式沿原Store；C只临时运输当次commit，不把完整maintain包进T，不把回调留在Store或启动线程。
+#   普通异常可能发生在SQL提交后，不能将未完成冒充零副作用，也不根据缺失阶段结果推算删除数。
+# 函数用途: 对一个已存在的库推进最多一批5000条稳态维护，SQL和发表逐叶复核原来源。
+def _maintain_event_store(directory: Path, *, now: float, commit_transition=None) -> dict[str, Any]:
+    try:
+        from ..local_storage import LocalStore
+
+        if commit_transition is None:
+            result = LocalStore(directory / "local.db").maintain_events(max_batches=1, before=now)
+        else:
+            from ..common.global_write_commit import global_write_commit_scope
+
+            with global_write_commit_scope(commit_transition):
+                store = LocalStore(directory / "local.db", coordinator_io=True)
+                result = store.maintain_events(max_batches=1, before=now)
+        return {"executed": True, **result}
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
+    except Exception as exc:
+        return {"executed": False, "reason": "error", "error_type": type(exc).__name__,
+                "side_effects_unknown": True, "counts_complete": False}
+
+
+# LLM: 仅扫描固定workspace根直接子目录，IO错误单列后继续其它来源；双文件缺失不建库，拒符号链接/特殊文件。
+# 函数用途: 找到本owner已经初始化的兼容data库及规范workspace事件库。
+def _local_event_store_directories(home: MyAgentHomePaths) -> tuple[list[Path], list[dict[str, str]]]:
+    candidates = [Path(getattr(home, "owner_local_store_dir", home.owner_data_dir / "local_store"))]
+    workspaces = home.owner_workspace_dir / "runtime" / "workspaces"
+    errors = []
+    try:
+        if _real_owner_directory(home, workspaces):
+            candidates.extend(path / "local_store" for path in sorted(workspaces.iterdir()))
+    except OSError as exc:
+        errors.append({"source": "workspace_scan", "error_type": type(exc).__name__})
+    result = []
+    for directory in dict.fromkeys(candidates):
+        try:
+            if not _real_owner_directory(home, directory):
+                continue
+            files = (directory / "local.db", directory / "events.jsonl")
+            if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in files):
+                continue
+            if any(path.is_file() for path in files):
+                result.append(directory)
+        except OSError as exc:
+            errors.append({"source": str(directory.relative_to(home.owner_home_dir)), "error_type": type(exc).__name__})
+    return result, errors
+
+
+# LLM: Home为可信根，候选必须在同一owner内且每级都是真实目录；不跟随符号链接到别的owner或任意外置库。
+# 函数用途: 在只读发现阶段排除目录别名和缺失目录，不创建维护目标。
+def _real_owner_directory(home: MyAgentHomePaths, directory: Path) -> bool:
+    current = home.owner_home_dir
+    for part in directory.relative_to(current).parts:
+        current = current / part
+        if current.is_symlink():
+            return False
+    return directory.is_dir()
 
 
 def _positive_interval(value: object) -> int:

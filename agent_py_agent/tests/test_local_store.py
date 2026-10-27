@@ -495,3 +495,671 @@ def test_perf_e_prune_events_keeps_row_when_decoder_reports_recursion_limit(tmp_
     with scope():
         assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
     assert store.events_path.read_bytes() == b"".join(lines[1:]) + unmatched.encode()
+
+
+# LLM: 只读真实metadata，不用进程缓存或待实现helper推测恢复责任。
+# 函数用途: 核对测试数据库里仍待完成的事件删除ID。
+def _b2_pending_ids(store):
+    with sqlite3.connect(store.db_path) as conn:
+        row = conn.execute("SELECT value FROM metadata WHERE key='events_prune_pending_ids'").fetchone()
+    return [] if row is None else json.loads(row[0])
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_failed_rewrite_recovers_without_new_db_deletions(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    writer = maintenance.write_private_text_file_atomic_unlocked
+
+    def fail(*args, **kwargs):
+        raise OSError("injected rewrite failure")
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    with scope(), pytest.raises(OSError, match="injected"):
+        store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert _b2_pending_ids(store) == sorted(event.event_id for event in events[:3])
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", writer)
+    # 新实例模拟重启，不依赖旧进程缓存；DB 无符合 before 的新行。
+    with scope():
+        store = LocalStore(store.db_path, coordinator_io=coordinator)
+        result = store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert result == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": 3}
+    assert store.events_path.read_bytes() == b"".join(original[3:])
+    assert _b2_pending_ids(store) == []
+    assert list(tmp_path.glob(".events.jsonl.*.tmp")) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_dry_run_keeps_pending_and_never_rewrites(tmp_path, coordinator):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_id=?", (events[0].event_id,))
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)",
+                     (json.dumps([events[0].event_id]),))
+    original = store.events_path.read_bytes()
+    with scope():
+        result = store.prune_events(before=0, dry_run=True)
+    assert result == {"ok": True, "dry_run": True, "selected": 0, "deleted_db": 0, "deleted_jsonl": 0}
+    assert _b2_pending_ids(store) == [events[0].event_id]
+    assert store.events_path.read_bytes() == original
+    with scope():
+        assert store.prune_events(before=0)["deleted_jsonl"] == 1
+    assert _b2_pending_ids(store) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_default_rewrite_streams_with_bounded_memory_and_private_temp(tmp_path, monkeypatch, coordinator):
+    import tracemalloc
+
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    retained = b'{"event_id":"jsonl-only","body":"' + b"x" * 256 + b'"}\r\n'
+    bad = b'bad-utf8\xff\r\n{"unfinished"'
+    with store.events_path.open("ab") as handle:
+        for _ in range(20000):
+            handle.write(retained)
+        handle.write(bad)
+    actual_replace = maintenance.os.replace if hasattr(maintenance, "os") else None
+    modes = []
+
+    def replace(source, destination):
+        modes.append(Path(source).stat().st_mode & 0o777)
+        return actual_replace(source, destination)
+
+    if actual_replace is not None:
+        monkeypatch.setattr(maintenance.os, "replace", replace)
+    tracemalloc.start()
+    try:
+        with scope():
+            result = store.prune_events(before=50, keep_last=2, max_delete=1)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert result["deleted_jsonl"] == 1
+    assert peak < 2 * 1024 * 1024, f"whole-file buffering: peak={peak}"
+    assert modes == [0o600]
+    assert store.events_path.read_bytes() == b"".join(original[1:]) + retained * 20000 + bad
+    assert list(tmp_path.glob(".events.jsonl.*.tmp")) == []
+
+
+# LLM: 仅构造临时测试库的大样本；显式同步SQL与JSONL以避免逐条fsync耗时干扰稳态断言。
+# 函数用途: 快速准备带固定排序的事件流水，不读写真实用户数据。
+def _b2_seed_events(store, count):
+    with sqlite3.connect(store.db_path) as conn:
+        conn.executemany("INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES(?, 'old', '{}', 1)",
+                         ((f"b2-{index:06d}",) for index in range(count)))
+    with store.events_path.open("w") as handle:
+        for index in range(count):
+            handle.write(json.dumps({"event_id": f"b2-{index:06d}"}) + "\n")
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_steady_state_defaults_keep_latest_twenty_thousand_in_bounded_batches(tmp_path, coordinator):
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    with scope():
+        store.reset()
+    _b2_seed_events(store, 25005)
+    prune = getattr(store, "prune_events_steady_state", None)
+    assert callable(prune), "missing steady-state maintenance entry"
+    with scope():
+        dry = prune(dry_run=True)
+        assert dry["selected"] == 5000 and dry["deleted_db"] == 0
+        assert prune()["deleted_db"] == 5000
+        assert prune()["deleted_db"] == 5
+        assert prune()["deleted_db"] == 0
+    with sqlite3.connect(store.db_path) as conn:
+        ids = [row[0] for row in conn.execute("SELECT event_id FROM events ORDER BY seq")]
+    assert ids == [f"b2-{index:06d}" for index in range(5005, 25005)]
+    assert [json.loads(line)["event_id"] for line in store.events_path.read_text().splitlines()] == ids
+
+
+def test_b2_event_maintenance_is_explicit_and_bounded_not_record_event_hot_path(tmp_path, monkeypatch):
+    store = LocalStore(tmp_path / "index.db")
+    _b2_seed_events(store, 25005)
+    maintain = getattr(store, "maintain_events", None)
+    assert callable(maintain), "missing bounded event maintenance cycle"
+    result = maintain(max_batches=1)
+    assert result["deleted_db"] == 5000
+    assert store.stats()["event_count"] == 20005
+
+    def refuse(*args, **kwargs):
+        pytest.fail("single event hot path must not scan/prune")
+
+    monkeypatch.setattr(store, "prune_events_steady_state", refuse)
+    store.record_event("still-lightweight")
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_clear_ledger_releases_file_lock_before_waiting_for_append_writer(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import events as event_module
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    writer = LocalStore(store.db_path)
+    inserted, failures = threading.Event(), []
+    append = event_module.append_private_jsonl_records
+    prune_jsonl = store._prune_event_jsonl
+
+    def blocked_append(*args, **kwargs):
+        inserted.set()  # INSERT 已成功且持DB写锁，随后会等裁剪者的文件锁。
+        return append(*args, **kwargs)
+
+    def write():
+        try:
+            writer.record_event("concurrent-append")
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=write, daemon=True)
+
+    def prune(targets):
+        removed = prune_jsonl(targets)
+        thread.start()
+        assert inserted.wait(2), "append writer never reached file lock"
+        return removed
+
+    monkeypatch.setattr(event_module, "append_private_jsonl_records", blocked_append)
+    monkeypatch.setattr(store, "_prune_event_jsonl", prune)
+    if coordinator:
+        transaction = store._coordinator_transaction
+
+        def clear_after_writer(operation):
+            if inserted.is_set():
+                # C的SQLite零等待合同不改；在开始清账事务前证实writer已能取得文件锁。
+                thread.join(2)
+                assert not thread.is_alive(), "cleanup still owns the event file lock"
+            return transaction(operation)
+
+        monkeypatch.setattr(store, "_coordinator_transaction", clear_after_writer)
+    try:
+        with scope():
+            assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+    finally:
+        thread.join(3)
+    assert not thread.is_alive() and failures == []
+    assert b"concurrent-append" in store.events_path.read_bytes()
+    assert _b2_pending_ids(store) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_retry_syncs_already_replaced_file_before_clearing_pending(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    sync = maintenance._sync_parent_directory
+    synced = []
+
+    def fail(path):
+        raise OSError("directory sync failed after replace")
+
+    monkeypatch.setattr(maintenance, "_sync_parent_directory", fail)
+    with scope(), pytest.raises(OSError, match="directory sync"):
+        store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert store.events_path.read_bytes() == b"".join(original[3:])
+    assert set(_b2_pending_ids(store)) == {event.event_id for event in events[:3]}
+
+    def track(path):
+        synced.append(path)
+        return sync(path)
+
+    monkeypatch.setattr(maintenance, "_sync_parent_directory", track)
+    with scope():
+        assert store.prune_events(before=50, keep_last=2)["deleted_jsonl"] == 0
+    assert synced == [store.events_path]
+    assert _b2_pending_ids(store) == []
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_ledger_write_failure_rolls_back_db_and_never_touches_jsonl(tmp_path, coordinator):
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("CREATE TRIGGER fail_ledger BEFORE INSERT ON metadata "
+                     "WHEN NEW.key='events_prune_pending_ids' BEGIN SELECT RAISE(ABORT,'ledger unavailable'); END")
+    with scope(), pytest.raises(sqlite3.IntegrityError, match="ledger unavailable"):
+        store.prune_events(before=50, keep_last=2, max_delete=3)
+    assert store.events_path.read_bytes() == original
+    assert _b2_pending_ids(store) == []
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 6
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_pending_merges_only_actually_deleted_trigger_survivors_stay(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("DELETE FROM events WHERE event_id=?", (events[0].event_id,))
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)",
+                     (json.dumps([events[0].event_id]),))
+        conn.execute(f"CREATE TRIGGER keep_event BEFORE DELETE ON events WHEN OLD.event_id='{events[1].event_id}' "
+                     "BEGIN SELECT RAISE(IGNORE); END")
+
+    def fail(*args, **kwargs):
+        raise OSError("pending retained")
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    with scope(), pytest.raises(OSError, match="pending retained"):
+        store.prune_events(before=50, keep_last=0, max_delete=2)
+    assert _b2_pending_ids(store) == [events[0].event_id, events[2].event_id]
+
+
+def test_b2_cleanup_preserves_concurrently_registered_new_pending_ids(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, False)
+    clear = maintenance._clear_pending_events_transaction
+
+    def register_then_clear(store, targets):
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute("DELETE FROM events WHERE event_id=?", (events[1].event_id,))
+            conn.execute("UPDATE metadata SET value=? WHERE key='events_prune_pending_ids'",
+                         (json.dumps([*targets, events[1].event_id]),))
+        return clear(store, targets)
+
+    monkeypatch.setattr(maintenance, "_clear_pending_events_transaction", register_then_clear)
+    with scope():
+        assert store.prune_events(before=50, keep_last=2, max_delete=1)["deleted_jsonl"] == 1
+    assert _b2_pending_ids(store) == [events[1].event_id]
+
+
+@pytest.mark.parametrize("payload", ['{}', '[1]', '[""]', 'not-json'])
+def test_b2_invalid_pending_fails_closed_before_any_deletion(tmp_path, payload):
+    store, _events, _scope = _perf_e_event_store(tmp_path, False)
+    original = store.events_path.read_bytes()
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("INSERT INTO metadata(key,value) VALUES('events_prune_pending_ids',?)", (payload,))
+    with pytest.raises(ValueError):
+        store.prune_events(before=50, keep_last=2)
+    assert store.events_path.read_bytes() == original
+    assert store.stats()["event_count"] == 6
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_bare_carriage_return_inside_bad_jsonl_record_is_preserved(tmp_path, coordinator):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    bad = json.dumps({"event_id": events[0].event_id}).encode() + b"\rBROKEN\n"
+    with store.events_path.open("ab") as handle:
+        handle.write(bad)
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert result["deleted_jsonl"] == 1
+    assert store.events_path.read_bytes() == b"".join(original[1:]) + bad
+
+
+@pytest.mark.parametrize("coordinator", [False, True])
+def test_b2_temp_cleanup_failure_does_not_mask_primary_publish_error(tmp_path, monkeypatch, coordinator):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes()
+    primary = OSError("original publish error")
+    unlink = Path.unlink
+
+    def fail_publish(*args):
+        raise primary
+
+    def fail_cleanup(path, *args, **kwargs):
+        if path.name.startswith(".events.jsonl.") and path.suffix == ".tmp":
+            raise PermissionError("cleanup failed")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance.os, "replace", fail_publish)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+    with scope(), pytest.raises(OSError) as caught:
+        store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert caught.value is primary
+    assert _b2_pending_ids(store) == [events[0].event_id]
+    assert store.events_path.read_bytes() == original
+
+
+# LLM: 坏UTF-8位于JSON字符串内仍须原字节保留；替身writer只在过滤后接收surrogateescape文本。
+# 函数用途: 复现surrogateescape让坏字节行冒充可删除JSON事件的问题，覆盖普通/C及兼容发表路径。
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("patched_writer", [False, True])
+@pytest.mark.parametrize("ending", [b"\n", b""])
+def test_prune_events_preserves_invalid_utf8_inside_json_string_even_when_event_id_matches(
+    tmp_path, monkeypatch, coordinator, patched_writer, ending,
+):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    bad = b'{"event_id":"' + events[0].event_id.encode() + b'","payload":{"text":"\xff"}}' + ending
+    with store.events_path.open("ab") as handle:
+        handle.write(bad)
+    captured = []
+    if patched_writer:
+        writer = maintenance.write_private_text_file_atomic_unlocked
+
+        # LLM: 包装原writer保留其真实写入与C参数，不替代被测的过滤过程。
+        # 函数用途: 核对兼容text writer收到的内容仍含完整坏字节。
+        def capture(path, content, **kwargs):
+            captured.append(content.encode("utf-8", errors="surrogateescape"))
+            return writer(path, content, **kwargs)
+
+        monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", capture)
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+        assert events[0].event_id not in {row.event_id for row in store.timeline()}
+    expected = b"".join(original[1:]) + bad
+    assert result == {"ok": True, "dry_run": False, "selected": 1, "deleted_db": 1, "deleted_jsonl": 1}
+    assert store.events_path.read_bytes() == expected
+    assert captured == ([expected] if patched_writer else [])
+    assert _b2_pending_ids(store) == []
+
+
+# LLM: LF才是二进制JSONL边界；含原始CR的行即便json.loads接受为合法空白，也不得删除。
+# 函数用途: 验证裸CR、CRLF及无末尾LF的CR记录按任务约定原字节保留。
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("ending", [b"\r\n", b"\r \n", b"\r"])
+def test_b2_r2_preserves_raw_carriage_return_even_when_json_parser_accepts_it(tmp_path, coordinator, ending):
+    store, events, scope = _perf_e_event_store(tmp_path, coordinator)
+    original = store.events_path.read_bytes().splitlines(keepends=True)
+    bad = json.dumps({"event_id": events[0].event_id}).encode() + ending
+    assert json.loads(bad)["event_id"] == events[0].event_id
+    with store.events_path.open("ab") as handle:
+        handle.write(bad)
+    with scope():
+        result = store.prune_events(before=50, keep_last=2, max_delete=1)
+    assert result["deleted_jsonl"] == 1
+    assert store.events_path.read_bytes() == b"".join(original[1:]) + bad
+
+
+# LLM: 用真实失败发表建立pending，重复失败不能追加删除；恢复后本轮只清旧账，下轮才继续新批。
+# 函数用途: 覆盖普通/C的当前批次、默认维护5000阈值及大max_delete不能绕过5000恢复闸。
+@pytest.mark.parametrize("coordinator", [False, True])
+@pytest.mark.parametrize("entry", ["small_prune", "maintain", "wide_prune"])
+def test_b2_r2_full_pending_recovers_before_new_delete_batches(tmp_path, monkeypatch, coordinator, entry):
+    from agent_py_agent.agent.local_storage import maintenance
+
+    store, _events, scope = _perf_e_event_store(tmp_path, coordinator)
+    if entry != "small_prune":
+        with scope():
+            store.reset()
+        _b2_seed_events(store, 25005 if entry == "maintain" else 5010)
+    writer = maintenance.write_private_text_file_atomic_unlocked
+    original = store.events_path.read_bytes()
+
+    # LLM: 只在最后发表注入失败，SQL删除与pending仍走真实事务。
+    # 函数用途: 保留待恢复账本及未改写的JSONL供下一次重试。
+    def fail(*args, **kwargs):
+        raise OSError("r2 publish unavailable")
+
+    # LLM: 首次裁剪与重试沿原公开入口，wide重试显式增大max_delete以检查独立5000阈值。
+    # 函数用途: 统一运行三种公开维护调用，不改被测批次逻辑。
+    def prune(*, retry=False):
+        if entry == "maintain":
+            return store.maintain_events(max_batches=2, before=50)
+        maximum = (10000 if retry else 5000) if entry == "wide_prune" else 2
+        return store.prune_events(before=50, keep_last=2, max_delete=maximum)
+
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", fail)
+    with scope(), pytest.raises(OSError, match="r2 publish"):
+        prune()
+    pending = _b2_pending_ids(store)
+    assert len(pending) == (2 if entry == "small_prune" else 5000)
+    with sqlite3.connect(store.db_path) as conn:
+        remaining = list(conn.execute("SELECT event_id FROM events ORDER BY seq"))
+    for _ in range(2):
+        with scope(), pytest.raises(OSError, match="r2 publish"):
+            prune(retry=True)
+        assert _b2_pending_ids(store) == pending
+        with sqlite3.connect(store.db_path) as conn:
+            assert list(conn.execute("SELECT event_id FROM events ORDER BY seq")) == remaining
+        assert store.events_path.read_bytes() == original
+    monkeypatch.setattr(maintenance, "write_private_text_file_atomic_unlocked", writer)
+    with scope():
+        recovered = prune(retry=True)
+    assert recovered == {"ok": True, "dry_run": False, "selected": 0, "deleted_db": 0, "deleted_jsonl": len(pending)}
+    assert _b2_pending_ids(store) == []
+    assert [json.loads(line)["event_id"] for line in store.events_path.read_bytes().splitlines()] == [row[0] for row in remaining]
+    with scope():
+        assert prune(retry=True)["deleted_db"] > 0
+
+
+# LLM: 只在临时owner的规范data/兼容workspace布局准备真库；不让后台扫描凭空建库。
+# 函数用途: 为后台接线回归生成超过稳态保留上限的真实事件流水。
+def _r3_owner_store(tmp_path, layout):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    directory = (home.owner_data_dir / "local_store" if layout == "data" else
+                 home.owner_workspace_dir / "runtime" / "workspaces" / "project-scope" / "local_store")
+    store = LocalStore(directory / "local.db")
+    _b2_seed_events(store, 25005)
+    return home, store
+
+
+# LLM: 通过真实owner维护入口而非直接helper调用，核同一状态文件、新批至多5000及原not_due节流。
+# 函数用途: 验证普通和transition两种维护周期确实裁剪已存在的owner事件库。
+@pytest.mark.parametrize("layout", ["data", "workspace"])
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_background_maintenance_prunes_existing_events(tmp_path, layout, transition):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, layout)
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    result = run_owner_retention_if_due(home, now=200_000, **options)
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert result.status == marker["status"] == "success" and result.apply_outcome == "applied"
+    effect = marker.get("local_store_events_maintenance", {})
+    assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5000
+    assert len(store.events_path.read_bytes().splitlines()) == 20005
+    assert run_owner_retention_if_due(home, now=200_001, **options).status == "not_due"
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+
+
+# LLM: owner初始化不等于LocalStore初始化；只记录跳过原因，不创建空local.db或事件流水。
+# 函数用途: 验证两种后台维护路径对未初始化的owner保持无库状态。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_maintenance_does_not_initialize_missing_local_store(tmp_path, transition):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    assert run_owner_retention_if_due(home, now=200_000, **options).ran
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker.get("local_store_events_maintenance") == {"executed": False, "reason": "no_local_store"}
+    assert not list(home.owner_home_dir.rglob("local.db"))
+    assert not list(home.owner_home_dir.rglob("events.jsonl"))
+
+
+# LLM: 已有独立events.jsonl属于初始化证据；建缺失SQL库后也不能凭JSONL猜可删除ID。
+# 函数用途: 验证仅有流水时允许维护但原始流水内容不丢失。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_events_only_store_keeps_original_bytes(tmp_path, transition):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    directory = home.owner_data_dir / "local_store"
+    directory.mkdir()
+    source = b'{"event_id":"jsonl-only","body":"\xff"}\n'
+    (directory / "events.jsonl").write_bytes(source)
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    run_owner_retention_if_due(home, now=200_000, **options)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker.get("local_store_events_maintenance", {}).get("executed") is True
+    assert (directory / "local.db").is_file() and (directory / "events.jsonl").read_bytes() == source
+
+
+# LLM: 两种规范布局可能同时存在；每库只推进一个有界批次，汇总数字来自实际删除而非库数量。
+# 函数用途: 验证不会只维护兼容旧库而遗漏owner的workspace库。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_maintenance_covers_multiple_existing_stores(tmp_path, transition):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, first = _r3_owner_store(tmp_path, "data")
+    second = LocalStore(home.owner_workspace_dir / "runtime" / "workspaces" / "other-scope" / "local_store" / "local.db")
+    _b2_seed_events(second, 20001)
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    run_owner_retention_if_due(home, now=200_000, **options)
+    counts = []
+    for store in (first, second):
+        with sqlite3.connect(store.db_path) as conn:
+            counts.append(conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+    assert counts == [20005, 20000]
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    effect = marker.get("local_store_events_maintenance", {})
+    assert effect.get("executed") is True and effect["deleted_db"] == effect["deleted_jsonl"] == 5001
+    assert len(effect["stores"]) == 2 and all(row["executed"] for row in effect["stores"])
+
+
+# LLM: 只维护已登记的真实owner目录；不沿workspace/库目录/DB/JSONL符号链接进入其它位置。
+# 函数用途: 验证后台发现库时不裁剪符号链接指向的外部事件库。
+@pytest.mark.parametrize("link", ["workspace", "store", "db", "events"])
+def test_b2_r3_owner_event_discovery_does_not_follow_symlinks(tmp_path, link):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    external = LocalStore(tmp_path / "external" / "project" / "local_store" / "local.db")
+    _b2_seed_events(external, 25005)
+    directory = home.owner_data_dir / "local_store"
+    if link == "workspace":
+        (home.owner_workspace_dir / "runtime").mkdir()
+        (home.owner_workspace_dir / "runtime" / "workspaces").symlink_to(tmp_path / "external", target_is_directory=True)
+    elif link == "store":
+        directory.symlink_to(external.root, target_is_directory=True)
+    else:
+        directory.mkdir()
+        name = "local.db" if link == "db" else "events.jsonl"
+        (directory / name).symlink_to(external.root / name)
+    run_owner_retention_if_due(home, now=200_000, include_global_indexes=False)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker.get("local_store_events_maintenance", {}).get("executed") is False
+    with sqlite3.connect(external.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25005
+    assert len(external.events_path.read_bytes().splitlines()) == 25005
+
+
+# LLM: 使用早于所有事件的当前时刻来约束before参数，不以默认墙钟代替这轮owner维护的now。
+# 函数用途: 验证两种入口均将本轮截止时刻传给稳态维护。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_owner_event_maintenance_uses_supplied_now(tmp_path, transition):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    run_owner_retention_if_due(home, now=0, **options)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    effect = marker.get("local_store_events_maintenance", {})
+    assert effect.get("executed") is True and effect["selected"] == effect["deleted_db"] == 0
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25005
+
+
+# LLM: retention拒绝或法律保留时不应新增事件删除副作用；旧status/apply_outcome语义保持。
+# 函数用途: 验证新接入的后台事件裁剪服从原owner的停止删除判定。
+@pytest.mark.parametrize("transition", [False, True])
+@pytest.mark.parametrize("refusal", ["legal_hold", "policy_error"])
+def test_b2_r3_event_maintenance_respects_retention_refusal(tmp_path, transition, refusal):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    policy = json.loads(home.owner_retention_json.read_text())
+    home.owner_retention_json.write_text(json.dumps({**policy, "legal_hold": True}) if refusal == "legal_hold" else "{broken")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    result = run_owner_retention_if_due(home, now=200_000, **options)
+    assert result.status == ("legal_hold" if refusal == "legal_hold" else "policy_unavailable")
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 25005
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker["local_store_events_maintenance"] == {
+        "executed": False, "reason": "legal_hold" if refusal == "legal_hold" else "retention_refused"}
+
+
+# LLM: 真库先提交删除再注入JSONL发表失败；故障后pending仍真实存在，effects不能暗示肯定没写过。
+# 函数用途: 验证部分执行诊断及下一维护周期沿R2恢复原pending。
+@pytest.mark.parametrize("transition", [False, True])
+def test_b2_r3_partial_event_failure_reports_unknown_and_recovers(tmp_path, monkeypatch, transition):
+    from agent_py_agent.agent.local_storage import maintenance
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+    from agent_py_agent.tests.test_local_store_coordinator_io import Door
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    # LLM: 仅在JSONL发表叶注入普通故障，保留此前实际SQL提交和pending状态用于断言。
+    # 函数用途: 模拟文件发表失败，不代写或回滚任何数据。
+    def refuse(*_args):
+        raise OSError("failed after committed SQLite deletion")
+    options = {"include_global_indexes": False}
+    if transition:
+        options["commit_transition"] = Door()
+    with monkeypatch.context() as patch:
+        patch.setattr(maintenance, "_publish_pruned_event_file", refuse)
+        run_owner_retention_if_due(home, now=200_000, **options)
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+        assert len(json.loads(conn.execute("SELECT value FROM metadata WHERE key='events_prune_pending_ids'").fetchone()[0])) == 5000
+    effect = marker["local_store_events_maintenance"]
+    assert effect.get("side_effects_unknown") is True and effect.get("counts_complete") is False
+    assert effect["executed"] is False and "deleted_db" not in effect
+    run_owner_retention_if_due(home, now=286_400, **options)
+    recovered = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
+    assert recovered["executed"] is True and recovered["deleted_db"] == 0 and recovered["deleted_jsonl"] == 5000
+    assert len(store.events_path.read_bytes().splitlines()) == 20005
+
+
+# LLM: 只注入一个发现来源的普通IO故障；其余真实库仍可维护，并单列覆盖不完整，不能造全量计数。
+# 函数用途: 验证workspace枚举或单个候选故障不会阻止正常兼容库维护。
+@pytest.mark.parametrize("fault", ["workspace", "candidate"])
+def test_b2_r3_event_discovery_fault_is_isolated(tmp_path, monkeypatch, fault):
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home, store = _r3_owner_store(tmp_path, "data")
+    workspaces = home.owner_workspace_dir / "runtime" / "workspaces"
+    bad = workspaces / "bad" / "local_store" / "local.db"
+    bad.parent.mkdir(parents=True)
+    bad.touch()
+    original_iter, original_file = Path.iterdir, Path.is_file
+    # LLM: 只拒一个规范扫描目录，其它真实目录枚举保持原调用。
+    # 函数用途: 模拟workspace枚举时的权限错误。
+    def iterate(path):
+        if path == workspaces and fault == "workspace":
+            raise PermissionError("synthetic directory failure")
+        return original_iter(path)
+    # LLM: 只拒一个候选库的普通文件检查，不影响正常兼容库。
+    # 函数用途: 模拟单个候选的读取权限错误。
+    def is_file(path):
+        if path == bad and fault == "candidate":
+            raise PermissionError("synthetic candidate failure")
+        return original_file(path)
+    monkeypatch.setattr(Path, "iterdir", iterate)
+    monkeypatch.setattr(Path, "is_file", is_file)
+    run_owner_retention_if_due(home, now=200_000, include_global_indexes=False)
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 20005
+    effect = json.loads((home.owner_data_dir / "maintenance.json").read_text())["local_store_events_maintenance"]
+    assert effect["executed"] is True and effect["deleted_db"] == 5000 and effect["counts_complete"] is False
+    assert effect.get("ok") is False
+    assert len(effect["discovery_errors"]) == 1 and effect["discovery_errors"][0]["error_type"] == "PermissionError"
