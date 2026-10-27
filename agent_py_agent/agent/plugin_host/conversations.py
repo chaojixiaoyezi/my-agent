@@ -19,6 +19,7 @@ from .action_specs import action_spec
 from .authorization import workspace_directory
 from .cursors import CursorCodec
 from .errors import HostAPIError
+from .model_settings_v2_handlers import configured_thread, creation_schema, settings_fields
 from .schemas import PAGE_MAX_BYTES, canonical_json, integer, text, thaw, validate_object
 
 # 游标允许续读的固定窗口，单位秒；并非授权有效期，返回前仍重核A0。
@@ -121,6 +122,8 @@ def thread_scoped(tid, state, authorized):
     for scope in (authorized.binding.grant.get("threads", {}), authorized.resource_scope.get("threads", {})):
         if not isinstance(scope, Mapping):
             return False
+        if scope.get("scope") in ("owner", "owner_all", "all"):
+            continue
         if tid not in scope.get("explicit_ids", ()) and not (
             scope.get("created_by_installation") is True
             and state.get("installation_ref") == authorized.binding.installation_ref
@@ -146,6 +149,7 @@ def thread_summary(thread, authorized, *, include_workspace=None):
             "revision": thread_revision(thread), "workspace_ref": state.get("workspace_ref"),
             "created_by_installation": state.get("installation_ref") == authorized.binding.installation_ref,
             "created_at": public_time(thread.created_at), "updated_at": public_time(thread.updated_at)}
+    result.update(settings_fields(thread))
     if include_workspace is None:
         include_workspace = state.get("has_workspace_binding") is True or bool(getattr(thread, "forked_from_thread_id", ""))
     if include_workspace:
@@ -178,6 +182,7 @@ def workspace_changes(thread, directory):
 def domain_payload(call):
     schema = action_spec(call.action).payload_schema
     if call.action == "conversations.threads.create":
+        schema = creation_schema(schema)
         schema["properties"]["workspace_ref"] = {**text(128, 1, r"^[A-Za-z0-9_-]+$"), "default": "default"}
     if call.action == "conversations.messages.list":
         schema["properties"]["max_content_bytes"] = {**integer(65536, 1), "default": 16384}
@@ -359,7 +364,20 @@ class ConversationDomain:
                                   owner_id=context.owner_home.owner_id, owner_home=str(context.owner_home.home_dir),
                                   title=payload["title"], cwd=str(directory),
                                   created_at=current, updated_at=current, metadata={_STATE_KEY: state})
-        return replace(row, **workspace_changes(row, directory))
+        from ..user_space.home_layout import home_paths
+        from ..user_space.owner_resolver import home_paths_with_owner
+        return configured_thread(replace(row, **workspace_changes(row, directory)), payload,
+            home_paths_with_owner(home_paths(context.owner_home.root), context.owner_home))
+
+    # LLM: 直接领域调用供W5/W6接线；两层创建范围须许可，不沿用源安装权限或回执。
+    # 函数用途: 使用统一分叉处理器保留偏好并兼容消息边界别名。
+    def fork(self, store, payload, authorized, context):
+        from .thread_settings_v2 import ThreadSettingsV2Handlers
+        self.require_thread(store, payload["source_thread_id"], authorized, context)
+        if any(scope.get("created_by_installation") is not True for scope in (
+                authorized.binding.grant.get("threads", {}), authorized.resource_scope.get("threads", {}))):
+            raise HostAPIError("CAPABILITY_DENIED", 403)
+        return ThreadSettingsV2Handlers(store, context, authorized=authorized).fork_thread(payload)
 
     # LLM: 回执与绑定事实同次提交且共用查询摘要；默认仍隐藏路径，绑定/分叉回执保留完整目录与谱系。
     # 函数用途: 保存生命周期或目录操作的准确原始结果。
