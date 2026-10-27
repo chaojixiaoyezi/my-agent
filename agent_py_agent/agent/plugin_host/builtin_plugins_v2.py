@@ -27,10 +27,10 @@ _TOOLS = {"tool-bash": ("run_command", "terminal_session"), "tool-pwsh": ("run_c
 # 函数用途: 校验可信owner下的状态位置和可选线程编号。
 def _path(owner_home, thread_id):
     home = Path(owner_home)
-    path = home / "data" / "builtin_plugins_state.json"
+    path = home / "data" / "plugin_host" / "builtin_features.json"
     if not isinstance(thread_id, str) or thread_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id):
         raise HostAPIError("INVALID_SCHEMA")
-    if any(p.is_symlink() for p in (home, path.parent, path)):
+    if any(p.is_symlink() for p in (home, home / "data", path.parent, path)):
         raise HostAPIError("INVALID_SCHEMA")
     return path
 
@@ -57,12 +57,13 @@ def list_builtin_plugins(owner_home, *, thread_id: str = "") -> dict[str, Any]:
     return {"thread_id": thread_id, "plugins": [{"plugin_id": key, "enabled": switches.get(key, True)} for key in BUILTIN_PLUGIN_IDS]}
 
 
-# LLM: 单个固定状态文件原锁下读改写；私有原子writer不可重入锁，损坏或无效输入不覆盖。
+# LLM: 固定data/plugin_host/builtin_features.json原锁下读改写；损坏、链接或无效输入不覆盖。
 # 函数用途: 保存一个owner默认或线程级内置插件开关。
 def toggle_builtin_plugin(owner_home, *, plugin_id: str, enabled: bool, thread_id: str = "") -> dict[str, Any]:
     if not isinstance(plugin_id, str) or plugin_id not in BUILTIN_PLUGIN_IDS or type(enabled) is not bool:
         raise HostAPIError("INVALID_SCHEMA")
     path = _path(owner_home, thread_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with locked_json_path(path):
         data = _state(path)
         switches = data["threads"].setdefault(thread_id, {}) if thread_id else data["owner"]

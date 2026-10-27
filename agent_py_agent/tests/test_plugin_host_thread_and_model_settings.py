@@ -123,7 +123,7 @@ def test_pack_alias_conflict_rejected(case):
 def test_stale_revision_has_stable_error_and_no_write(case, method):
     with pytest.raises(HostAPIError) as error:
         getattr(case.service, method)({"thread_id": case.thread.thread_id, "expected_revision": 77})
-    assert error.value.code == "THREAD_REVISION_CONFLICT"
+    assert error.value.code == "REVISION_CONFLICT"
     assert case.store.threads.require(case.thread.thread_id).revision == 1
 
 
@@ -140,7 +140,7 @@ def test_settings_concurrent_cas_one_winner(case):
         except HostAPIError as error:
             return error.code
     with ThreadPoolExecutor(max_workers=2) as pool:
-        assert sorted(pool.map(update, range(2))) == ["THREAD_REVISION_CONFLICT", "saved"]
+        assert sorted(pool.map(update, range(2))) == ["REVISION_CONFLICT", "saved"]
 
 
 @pytest.mark.parametrize("method", ["get_thread_settings", "update_thread_settings", "get_thread_usage", "compact_thread", "delete_thread"])
@@ -173,15 +173,17 @@ def test_usage_from_real_persisted_schema_no_private_metadata(case):
     assert "SECRET" not in json.dumps(result)
 
 
-# LLM: standalone仅边界，不将此测试说成真实LLM压缩。
-# 函数用途: 验证边界落盘且原消息不丢失。
+# LLM: 没有运行时不可伪造压缩成功，拒绝不得改变线程或原消息。
+# 函数用途: 验证无agent时503且保持原代次和历史。
 def test_standalone_compact_boundary_persists_without_losing_messages(case):
     msg = case.store.messages.append({"thread_id": case.thread.thread_id, "role": "user", "content": "Keep me"})
-    result = case.service.compact_thread({"thread_id": case.thread.thread_id, "expected_revision": 1, "instruction": "retain facts"})
-    assert isinstance(result, dict)
-    assert result["compacted"] and result["compact_generation"] == 1 and result["revision"] == 2
+    before = case.store.storage.thread_path(case.thread.thread_id).read_bytes()
+    with pytest.raises(HostAPIError) as error:
+        case.service.compact_thread({"thread_id": case.thread.thread_id, "expected_revision": 1, "instruction": "retain facts"})
+    assert (error.value.code, error.value.status) == ("HOST_NOT_READY", 503)
     row = case.store.threads.require(case.thread.thread_id)
-    assert row.metadata["plugin_host_v2"]["compact_boundary"]["instruction"] == "retain facts"
+    assert row.compact_generation == 0 and "plugin_host_v2" not in row.metadata
+    assert case.store.storage.thread_path(row.thread_id).read_bytes() == before
     assert case.store.messages.recent(row.thread_id, limit=0)[0].message_id == msg.message_id
 
 
@@ -292,7 +294,8 @@ def test_provider_list_filters_and_never_leaks_key_or_oauth(case):
     assert result["providers"][0]["has_key"] and result["providers"][0]["api_key_masked"] == "***"
     assert result["providers"][0]["session_header"] == "x-opencode-session"
     assert set(result["reasoning_efforts"]) == {"off", "low", "medium", "high", "xhigh", "max", "ultra", "auto"}
-    assert "TEST_KEY" not in json.dumps(result) and "api_key\"" not in json.dumps(result)
+    assert "TEST_KEY" not in json.dumps(result)
+    assert all("api_key" not in row and "auth" not in row for row in result["providers"])
     assert handler.list_providers({"capability_filter": "all"})["providers"]
 
 
@@ -337,7 +340,7 @@ def test_builtin_catalog_and_thread_override_persist(case):
     toggle_builtin_plugin(case.home.home_dir, plugin_id="persona", enabled=True, thread_id=case.thread.thread_id)
     assert resolve_builtin_plugin_restrictions(case.home.home_dir)["skip_persona"]
     assert not resolve_builtin_plugin_restrictions(case.home.home_dir, thread_id=case.thread.thread_id)["skip_persona"]
-    assert (case.home.data_dir / "builtin_plugins_state.json").is_file()
+    assert (case.home.data_dir / "plugin_host" / "builtin_features.json").is_file()
 
 
 @pytest.mark.parametrize("plugin,tool", [("tool-bash", "run_command"), ("tool-pwsh", "run_command"),
@@ -389,7 +392,8 @@ def test_nonadmin_full_access_is_rejected_for_owner_and_thread(case):
 # LLM: 既有损坏状态必须失败关闭，不能误认为首次使用。
 # 函数用途: 验证空对象文件不被全开默认覆盖。
 def test_builtin_empty_existing_state_is_corruption_not_default(case):
-    path = case.home.data_dir / "builtin_plugins_state.json"
+    path = case.home.data_dir / "plugin_host" / "builtin_features.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{}")
     with pytest.raises(HostAPIError) as error:
         resolve_builtin_plugin_restrictions(case.home.home_dir)
@@ -473,7 +477,7 @@ def test_agent_compact_race_cannot_relabel_another_generation(case, monkeypatch)
     handler = ThreadSettingsV2Handlers(case.store, case.context, agent=object(), home_paths=case.paths)
     with pytest.raises(HostAPIError) as error:
         handler.compact_thread({"thread_id": case.thread.thread_id, "instruction": "ours"})
-    assert error.value.code == "THREAD_REVISION_CONFLICT" and error.value.outcome == "committed"
+    assert error.value.code == "REVISION_CONFLICT" and error.value.outcome == "committed"
     assert case.store.threads.require(case.thread.thread_id).metadata["plugin_host_v2"]["compact_boundary"]["instruction"] == "theirs"
 
 
@@ -483,7 +487,7 @@ def test_fork_checks_optional_source_revision_before_creating(case):
     before = case.store.threads.list(limit=0)
     with pytest.raises(HostAPIError) as error:
         case.service.fork_thread({"source_thread_id": case.thread.thread_id, "expected_revision": 99})
-    assert error.value.code == "THREAD_REVISION_CONFLICT"
+    assert error.value.code == "REVISION_CONFLICT"
     assert case.store.threads.list(limit=0) == before
 
 
@@ -545,3 +549,166 @@ def test_provider_secret_cannot_reappear_under_public_header_name(case, auth_kin
     public = ModelSettingsV2Handlers(case.paths).list_providers()
     assert marker not in json.dumps(public)
     assert public["providers"][0]["custom_headers"]["x-project"] == "***"
+
+
+@pytest.mark.parametrize("migrated", [False, True])
+# LLM: 用原Store写入，插件首写和既有插件写都必须与摘要一致。
+# 函数用途: 验证首次设置的修订与后续消息更新统一。
+def test_r2_settings_and_summary_share_revision_after_every_write(case, migrated):
+    tid = case.thread.thread_id
+    if migrated:
+        case.store.threads.update_atomic(tid, lambda row: replace(row, metadata={"plugin_host_v2": {"revision": 1}}))
+    updated = case.service.update_thread_settings({"thread_id": tid, "expected_revision": 1, "pack_ids": ["one"]})
+    row = case.store.threads.require(tid)
+    assert updated["revision"] == thread_summary(row, case.authorized)["revision"] == 2
+    case.store.messages.append({"thread_id": tid, "role": "user", "content": "native append"})
+    row = case.store.threads.require(tid)
+    assert case.service.get_thread_settings({"thread_id": tid})["revision"] == thread_summary(row, case.authorized)["revision"] == 3
+    with pytest.raises(HostAPIError) as error:
+        case.service.update_thread_settings({"thread_id": tid, "expected_revision": 2, "pack_ids": []})
+    assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
+
+
+@pytest.mark.parametrize("migrated", [False, True])
+@pytest.mark.parametrize("method", ["update_thread_settings", "compact_thread", "delete_thread", "fork_thread"])
+# LLM: 真实原生选择入口不联网，所有设置写动作都须拒绝其之前的版本。
+# 函数用途: 验证原生显式切模会使已读CAS失效。
+def test_r2_native_model_selection_invalidates_all_settings_cas(case, monkeypatch, migrated, method):
+    from agent_py_agent.agent.settings import thread_model_selection as native
+    tid = case.thread.thread_id
+    if migrated:
+        case.store.threads.update_atomic(tid, lambda row: replace(row, metadata={"plugin_host_v2": {"revision": 1}}))
+    old = case.service.get_thread_settings({"thread_id": tid})["revision"]
+    monkeypatch.setattr(native, "selected_model_config", lambda *_args, **_kwargs: None)
+    native.thread_model_profile_id(SimpleNamespace(conversation_store=case.store, home_paths=case.paths), tid, select="default")
+    params = {"source_thread_id" if method == "fork_thread" else "thread_id": tid, "expected_revision": old, "pack_ids": []}
+    with pytest.raises(HostAPIError) as error:
+        getattr(case.service, method)(params)
+    assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
+
+
+# LLM: 旧摘要的hash修订仍是合法迁移前置条件，不得强迫客户端丢弃CAS。
+# 函数用途: 验证未迁移线程接收threads.get读出的版本。
+def test_r2_unmigrated_summary_revision_can_initialize_settings(case):
+    version = thread_summary(case.thread, case.authorized)["revision"]
+    result = case.service.update_thread_settings({"thread_id": case.thread.thread_id, "expected_revision": version, "pack_ids": []})
+    assert result["revision"] == 2
+
+
+# LLM: 删除仅移除目标线程的原文件和索引，其他线程必须逐值保留。
+# 函数用途: 验证消息JSONL、通道绑定及最近线程索引均清理。
+def test_r2_delete_cleans_messages_bindings_and_latest_without_touching_others(case):
+    from agent_py_agent.agent.conversation.message_selection import message_position_index
+    from agent_py_agent.agent.gateway_parts.io import write_json_file_atomic
+    tid, storage = case.thread.thread_id, case.store.storage
+    other = case.store.threads.create(owner_id=case.home.owner_id, owner_home=str(case.home.home_dir))
+    for row in (case.thread, other):
+        case.store.messages.append({"thread_id": row.thread_id, "role": "user", "content": "keep only other"})
+        path = storage.message_path(row.thread_id)
+        assert message_position_index(path, path.stat().st_size).by_id
+    for path in (storage.bindings_path, storage.user_latest_path):
+        write_json_file_atomic(path, {"target": tid, "unrelated": other.thread_id})
+    case.service.delete_thread({"thread_id": tid})
+    assert not storage.thread_path(tid).exists() and not storage.message_path(tid).exists()
+    assert case.store.messages.recent(tid, limit=0) == []
+    assert case.store.messages.recent(other.thread_id, limit=0)[0].content == "keep only other"
+    for path in (storage.bindings_path, storage.user_latest_path):
+        assert json.loads(path.read_text()) == {"unrelated": other.thread_id}
+
+
+@pytest.mark.parametrize("busy", ["claim", "active_task", "goal"])
+# LLM: 忙碌检查必须发生在慢模型端口之前，使用真实claim/goal存储。
+# 函数用途: 验证忙碌压缩不调用prepare且不写线程。
+def test_r2_compact_rejects_busy_before_prepare(case, monkeypatch, busy):
+    from agent_py_agent.agent.conversation import compact
+    tid = case.thread.thread_id
+    if busy == "claim":
+        assert case.store.claims.acquire({"thread_id": tid, "task_id": "active"})
+    elif busy == "active_task":
+        case.store.threads.update_atomic(tid, lambda row: replace(row, active_task_ids=("active",)))
+    else:
+        case.store.goals.create({"thread_id": tid, "objective": "active goal"})
+    prepare = []
+    # LLM: 若误调用端口，返回合法但未压缩的结果，让断言精确失败而非因替身类型出错。
+    # 函数用途: 记录是否越过忙碌保护。
+    def prepare_port(*_args, **_kwargs):
+        prepare.append(True)
+        return compact.ConversationCompactResult(case.store.threads.require(tid), [], 10, 80, compacted=False)
+    monkeypatch.setattr(compact, "prepare_conversation_context", prepare_port)
+    before = case.store.storage.thread_path(tid).read_bytes()
+    handler = ThreadSettingsV2Handlers(case.store, case.context, agent=object(), home_paths=case.paths)
+    with pytest.raises(HostAPIError) as error:
+        handler.compact_thread({"thread_id": tid})
+    assert (error.value.code, error.value.status) == ("THREAD_BUSY", 409)
+    assert not prepare and case.store.storage.thread_path(tid).read_bytes() == before
+
+
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("advice_key", ["host_subagent_model_advice.v1", "subagent_model_advice"])
+# LLM: 校准及建议来自真实持久线程，同值重选仍应终结pending但保留校准。
+# 函数用途: 验证Web选模与原生入口的模型变更副作用一致。
+def test_r2_web_selection_preserves_native_side_effects(case, changed, advice_key):
+    pid = seed_catalog(case)
+    tid = case.thread.thread_id
+    case.service.update_thread_settings({"thread_id": tid, "model_profile_id": pid})
+    before = case.store.threads.update_atomic(tid, lambda row: replace(row,
+        provider_context_observation={"test": "observation"}, model_context_usage={"test": "usage"},
+        metadata={**row.metadata, advice_key: {"status": "pending", "operation_id": "keep"}}))
+    case.service.update_thread_settings({"thread_id": tid, "model_profile_id": "default" if changed else pid})
+    after = case.store.threads.require(tid)
+    assert after.provider_context_observation == ({} if changed else before.provider_context_observation)
+    assert after.model_context_usage == ({} if changed else before.model_context_usage)
+    assert after.metadata[advice_key] == {"status": "retained", "operation_id": "keep", "reason": "explicit_model_selection"}
+
+
+# LLM: 所有自定义头值都按潜在秘密处理，脱敏读回保存不能覆盖私有原值。
+# 函数用途: 验证非典型敏感头、双has_key别名及完整往返保留。
+def test_r2_all_custom_headers_redacted_and_roundtrip_preserved(case):
+    handler = ModelSettingsV2Handlers(case.paths)
+    headers = {"X-Password": "TEST_PASSWORD", "x-private-session": "TEST_SESSION", "x-project": "public-name", "x-empty": ""}
+    public = handler.save_provider(provider_payload(custom_headers=headers))["providers"][0]
+    assert public["custom_headers"] == {key: "***" if value else "" for key, value in headers.items()}
+    assert public["custom_header_names"] == sorted(headers)
+    assert public["has_api_key"] is public["has_key"] is True
+    handler.save_provider(provider_payload(api_key="***", custom_headers=public["custom_headers"]))
+    assert read_model_profiles(model_profiles_path(case.paths))["providers"]["example"]["custom_headers"] == headers
+
+
+# LLM: 摘要不缓存owner默认，权限及数值用量都来自原读取函数。
+# 函数用途: 验证无线程覆盖时摘要与设置动态继承默认模式。
+def test_r2_summary_inherits_owner_permission_and_public_context_usage(case):
+    from agent_py_agent.agent.conversation.context_usage import context_usage_from_thread
+    tid = case.thread.thread_id
+    case.service.update_thread_settings({"permission_mode": "auto"})
+    row = case.store.threads.update_atomic(tid, lambda row: replace(row,
+        model_context_usage={"schema": "model_visible_context_usage.v1", "compact_generation": 0, "current_tokens": 123,
+            "context_window_tokens": 1000, "compact_trigger_tokens": 800, "private": "SECRET"}))
+    summary = thread_summary(row, case.authorized)
+    assert summary["permission_mode"] == case.service.get_thread_settings({"thread_id": tid})["permission_mode"] == "auto"
+    assert summary["context_usage"] == context_usage_from_thread(row)
+    assert summary["context_usage"]["current_tokens"] == 123 and "SECRET" not in json.dumps(summary)
+
+
+# LLM: 新增的plugin_host父级不能成为跟随链接写出owner的路径。
+# 函数用途: 验证开关目录是链接时读写均拒绝且不修改目标。
+def test_r2_builtin_rejects_symlinked_plugin_host_parent(case, tmp_path):
+    target = tmp_path / "outside"
+    target.mkdir()
+    (case.home.data_dir / "plugin_host").symlink_to(target, target_is_directory=True)
+    for operation in (lambda: list_builtin_plugins(case.home.home_dir),
+                      lambda: toggle_builtin_plugin(case.home.home_dir, plugin_id="persona", enabled=False)):
+        with pytest.raises(HostAPIError) as error:
+            operation()
+        assert error.value.code == "INVALID_SCHEMA"
+    assert not list(target.iterdir())
+
+
+@pytest.mark.parametrize("changes", [{"compact_generation": 1}, {"summary": "native summary"}, {"revision": 2}])
+# LLM: 旧线程的原生压缩/摘要提交未必推进目录修订，不能继续接收已读版本1。
+# 函数用途: 验证迁移前的原生更新也会使陈旧设置CAS失效。
+def test_r2_unmigrated_native_compact_summary_and_workspace_invalidate_cas(case, changes):
+    tid = case.thread.thread_id
+    case.store.threads.update_atomic(tid, lambda row: replace(row, **changes))
+    with pytest.raises(HostAPIError) as error:
+        case.service.update_thread_settings({"thread_id": tid, "expected_revision": 1, "pack_ids": []})
+    assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)

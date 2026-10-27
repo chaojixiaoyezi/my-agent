@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from ..conversation.context_usage import context_usage_from_thread
 from ..conversation.models import ConversationThread
 from ..conversation.store_threads import create_thread_atomic
 from ..gateway_parts.io import locked_file_transition
@@ -139,7 +140,7 @@ def thread_visible(thread, authorized, context):
             and thread_scoped(thread.thread_id, thread.metadata.get(_STATE_KEY), authorized))
 
 
-# LLM: 默认按持久绑定/分叉事实选择摘要；目录过滤可显式展开，旧默认线程不因cwd存在而公开路径。
+# LLM: 默认沿持久绑定/谱系隐藏路径；设置继承真实owner策略，用量只投影原公开数值。
 # 函数用途: 为创建、查询、列表和回执生成一致的线程摘要。
 def thread_summary(thread, authorized, *, include_workspace=None):
     state = thread_state(thread)
@@ -150,6 +151,7 @@ def thread_summary(thread, authorized, *, include_workspace=None):
             "created_by_installation": state.get("installation_ref") == authorized.binding.installation_ref,
             "created_at": public_time(thread.created_at), "updated_at": public_time(thread.updated_at)}
     result.update(settings_fields(thread))
+    result["context_usage"] = context_usage_from_thread(thread)
     if include_workspace is None:
         include_workspace = state.get("has_workspace_binding") is True or bool(getattr(thread, "forked_from_thread_id", ""))
     if include_workspace:

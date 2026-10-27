@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from ..common.json_io import locked_json_path
@@ -15,8 +16,17 @@ from ..settings.model_provider_schema import (
     validate_provider_id,
 )
 from ..settings.reasoning_effort import REASONING_LEVELS, normalize_reasoning_level
-from ..user_space.approval_mode import is_permission_admin
+from ..settings.thread_model_selection import SUBAGENT_MODEL_ADVICE_KEY
+from ..user_space.approval_mode import is_permission_admin, read_permission_mode
+from ..user_space.home_layout import home_paths as root_paths
+from ..user_space.owner_resolver import OwnerIdentity, home_paths_with_owner, resolve_owner_home
 from .errors import HostAPIError
+
+
+# LLM: 旧线程首次默认模型绑定不算显式修改；此基数只用于未迁移设置及首次插件状态初始化。
+# 函数用途: 合并原目录修订与原生模型选择修订。
+def settings_base_revision(thread):
+    return thread.revision + max(0, thread.model_selection_revision - (1 if thread.model_selection_source == "default" and thread.model_profile_id else 0))
 
 
 # LLM: 仅规范化偏好，不改变宿主权限上限；owner默认和线程设置共用管理员闸。
@@ -40,10 +50,11 @@ def creation_schema(schema):
     return schema
 
 
-# LLM: 仅校验会话偏好，不执行授权升级；完整宿主权限门仍在运行入口，非管理员不可保存Full Access。
+# LLM: 首写从旧设置基数前进一步，后续修订由Store递增；显式选模同时清旧校准、终结pending建议。
 # 函数用途: 生成模型、档位、权限和双名能力包字段的一次性线程替换。
 def configured_thread(thread, params, home_paths):
-    changes, state = {}, dict(thread.metadata.get("plugin_host_v2", {}))
+    from .conversations import thread_state
+    changes, state, metadata = {}, dict(thread_state(thread)), dict(thread.metadata)
     effort = params.get("reasoning_effort")
     if effort is not None:
         normalized = normalize_reasoning_level(effort)
@@ -69,20 +80,45 @@ def configured_thread(thread, params, home_paths):
         candidates = [profile] if profile in data["profiles"] else [key for key, row in data["profiles"].items() if row["model_name"] == profile]
         if profile != "default" and (len(candidates) != 1 or data["profiles"][candidates[0]]["capability"] != "agentic"):
             raise HostAPIError("INVALID_MODEL_PROFILE")
-        changes.update(model_profile_id="default" if profile == "default" else candidates[0],
+        selected = "default" if profile == "default" else candidates[0]
+        if thread.model_profile_id != selected:
+            changes.update(provider_context_observation={}, model_context_usage={})
+        for key in (SUBAGENT_MODEL_ADVICE_KEY, "subagent_model_advice"):
+            advice = metadata.get(key)
+            if isinstance(advice, dict) and advice.get("status") == "pending":
+                metadata[key] = {**advice, "status": "retained", "reason": "explicit_model_selection"}
+        changes.update(model_profile_id=selected,
             model_selection_revision=thread.model_selection_revision + 1, model_selection_source="explicit",
             model_selection_last_explicit_revision=thread.model_selection_revision + 1)
-    state.setdefault("revision", 1)
-    return replace(thread, **changes, metadata={**thread.metadata, "plugin_host_v2": state})
+    state.setdefault("revision", settings_base_revision(thread) + 1)
+    return replace(thread, **changes, metadata={**metadata, "plugin_host_v2": state})
 
 
-# LLM: 只投影展示字段，不返回凭据或源元数据；摘要与设置读取共用双名能力包键。
+# LLM: 只从持久owner身份/规范home解析原策略读取上下文；不创建文件或从请求选owner。
+# 函数用途: 为摘要缺少显式home_paths时解析同owner默认权限。
+def _thread_home_paths(thread):
+    home, parts = Path(thread.owner_home), thread.owner_id.split("/")
+    if len(parts) == 2 and parts[0] == "local":
+        identity = OwnerIdentity.local_main() if parts[1] == "main" else OwnerIdentity.local_user(parts[1])
+    elif len(parts) == 4 and parts[0] == "providers" and parts[2] in {"users", "groups"}:
+        identity = OwnerIdentity(parts[1], "user" if parts[2] == "users" else "group", parts[3])
+    else:
+        raise HostAPIError("CORRUPT_THREAD", 500)
+    root = home.parents[len(parts)] if home.is_absolute() and len(home.parents) > len(parts) else None
+    if root is None or (owner := resolve_owner_home(root, identity)).home_dir != home:
+        raise HostAPIError("CORRUPT_THREAD", 500)
+    return home_paths_with_owner(root_paths(root), owner)
+
+
+# LLM: 只投影展示字段；摘要与设置共用owner默认和双名能力包键，不缓存或另建权限事实。
 # 函数用途: 提供线程设置的无副作用公共部分。
-def settings_fields(thread):
+def settings_fields(thread, home_paths=None):
     state = thread.metadata.get("plugin_host_v2", {})
     packs = list(state.get("preferred_pack_ids", []))
+    home = home_paths or (_thread_home_paths(thread) if thread.owner_home else None)
+    default_mode = read_permission_mode(home) if home is not None else "ask"
     return {"model_profile_id": thread.model_profile_id, "reasoning_effort": thread.reasoning_effort,
-            "permission_mode": state.get("permission_mode", "ask"), "preferred_pack_ids": packs,
+            "permission_mode": state.get("permission_mode") or default_mode, "preferred_pack_ids": packs,
             "pack_ids": list(packs), "compact_generation": thread.compact_generation}
 
 
@@ -94,7 +130,7 @@ class ModelSettingsV2Handlers:
     def __init__(self, home_paths):
         self.path = catalog.model_profiles_path(home_paths)
 
-    # LLM: 白名单投影排除auth/access_token；静态认证头同样不回显秘密，空结果不代表其它owner无配置。
+    # LLM: 白名单排除auth/access_token，全部非空自定义头值脱敏；双has_key字段仅表明是否配置。
     # 函数用途: 按显式用途过滤服务商及其模型，并返回当前选择和八档推理强度。
     def list_providers(self, params=None):
         capability = (params or {}).get("capability_filter", "agentic")
@@ -106,13 +142,11 @@ class ModelSettingsV2Handlers:
                 continue
             models = [{"profile_id": key, "id": key, **row} for key, row in data["profiles"].items()
                       if row["provider_id"] == pid and (capability == "all" or row["capability"] == capability)]
-            secrets = (provider["api_key"], *(provider.get("auth", {}).get(key, "") for key in ("access_token", "refresh_token", "client_secret")))
-            headers = {key: "***" if value and (re.search(r"auth|token|key|secret|credential", key, re.I)
-                       or any(secret and secret in value for secret in secrets)) else value
-                       for key, value in provider["custom_headers"].items()}
+            headers = {key: "***" if value else "" for key, value in provider["custom_headers"].items()}
             providers.append({"provider_id": pid, "id": pid, **{key: provider[key] for key in
                 ("display_name", "api_base", "enabled", "capabilities", "session_header")},
-                "custom_headers": headers, "has_key": bool(provider["api_key"]),
+                "custom_headers": headers, "custom_header_names": sorted(headers),
+                "has_api_key": bool(provider["api_key"]), "has_key": bool(provider["api_key"]),
                 "api_key_masked": "***" if provider["api_key"] else "", "models": models})
         return {"providers": providers, "selected_profile_id": data["selected"], "reasoning_efforts": list(REASONING_LEVELS)}
 
