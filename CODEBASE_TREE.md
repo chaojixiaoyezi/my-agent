@@ -3966,6 +3966,7 @@ S01–S05关键职责：`scheduler/creator_access.py`只读原身份索引与官
 ```text
 agent_py_agent/agent/capability/
 |   |   |-- skill_learning_publish.py  # S3 用户确认后的受控发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
+|   |   |-- asset_promotion.py # S1/S3/回合提炼共用registry出处、语义族、载体选择、准确hash宿主核验晋升；无verifier保留候选
 |   |   |-- skill_learning_budget.py # 共享home根的UTC日部署总模型预算，与owner预算并守
 |   |   |-- skill_learning_proposals.py # 待确认S3候选，准确修订的人类确认/拒绝后才走原发布
 |   |   |-- skill_learning_host_feedback.py # 原验证命令/包检查器的准确采用质量反馈
@@ -3975,6 +3976,7 @@ agent_py_agent/agent/capability/
 |   |   |-- skill_feedback_tool.py # 当前任务结构化采用声明，不能冒充人类结果或自批
 |   |   |-- skill_learning_versions.py # 自学单调修订与不可变正文快照固定，撤销后禁止读历史
 |   |-- test_skill_learning_confirmation.py # S3仅候选、精确确认/拒绝、停用阻旧确认及IM用户入口
+|   |-- test_wave7_autonomous_learning_closure.py # F01–F17回归，保留W1原生CAS/流程版本冻结/最终输出合同的未闭环失败
 |   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效
 |   |-- test_skill_learning_versions.py # 自学CAS/回滚交错、版本不可覆盖和旧快照正文回归
 |   |   |-- skill_transfer.py           # 精确清单签名、来源授权与接收入口

@@ -20,21 +20,21 @@ def observe_command_verifications(agent,call,evidence):
 # 函数用途: 登记项目明确声明的验证命令通过事实，不解释命令、输出或整轮状态。
 def observe_command_verification(agent, params, evidence):
     if evidence.get('status') == 'passed' and evidence.get('exit_code') == 0 and type(evidence.get('id')) is int:
-        _observe(agent,params,'effective',f"verification:{evidence['id']}")
+        _observe(agent,params,'effective',f"verification:{evidence['id']}", evidence)
 
 
 # LLM: 包检查器failed仅来自valid=false的声明式内容检查；not_run/error/cancelled均不记负样本，复用键绑定目标内容hash。
 # 函数用途: 登记原沙箱检查器的内容有效性结论，不复制目标、检查错误或秘密。
 def observe_pack_verification(agent, params, result, key):
     if result.status == 'passed' and result.valid is True:
-        _observe(agent,params,'effective',f'pack:{key}')
+        _observe(agent,params,'effective',f'pack:{key}', vars(result))
     elif result.status == 'failed' and result.valid is False:
-        _observe(agent,params,'ineffective',f'pack:{key}')
+        _observe(agent,params,'ineffective',f'pack:{key}', vars(result))
 
 
-# LLM: 缺当前run或未登记准确采用时跳过，持久质量反馈尽力而为，绝不改变底层验证结果或授权。
+# LLM: 回执必须明确指向资产，指定hash必须匹配；不明归属记unknown而不广播。持久反馈绝不改变验证结果或授权。
 # 函数用途: 将同一执行内采用的当前版本与宿主证据相连；不跨owner读取正文。
-def _observe(agent,params,outcome,receipt):
+def _observe(agent,params,outcome,receipt,evidence=None):
     if not getattr(getattr(agent,'config',None),'enable_self_learning',False):
         return
     run_id = str(getattr(params,'run_id','') or '')
@@ -45,8 +45,35 @@ def _observe(agent,params,outcome,receipt):
         store = SkillLearningStore.for_home(agent.home_paths)
         registry = store.load_registry()
         for row in registry.skills.values():
+            if not _receipt_targets(evidence or {}, row):
+                continue
             adoptions = [fact for fact in row.maintenance.get('observations',[]) if fact.get('authority')=='model' and fact.get('outcome')=='adopted' and fact.get('run_id')==run_id and fact.get('sha256')==row.sha256]
             for adoption in adoptions:
                 observe_learning(store,row.name,sha256=row.sha256,task_id=adoption['task_id'],outcome=outcome,source=LearningObservationSource(authority='host',run_id=run_id,receipt_id=receipt,job_id=adoption.get('job_id','')))
     except (AttributeError,OSError,RuntimeError,ValueError):
         return
+
+
+# LLM: 支持单目标、多目标、结构化asset_ref；字段同时存在时都须一致，不接受其它scope的同名资产。
+# 函数用途: 核对一份宿主验证究竟覆盖哪项当前版本的方法。
+def _receipt_targets(evidence, row):
+    groups = [[evidence[key]] for key in ('skill_id','asset_id','asset_ref','method_id') if evidence.get(key)]
+    multiple = evidence.get('target_skill_ids')
+    if multiple is not None:
+        if not isinstance(multiple, (list, tuple)):
+            return False
+        groups.append(multiple)
+    if not groups:
+        return False
+    expected = evidence.get('sha256') or evidence.get('content_hash') or evidence.get('content_sha256')
+    if expected and expected != row.sha256:
+        return False
+    return all(any(_target_matches(target, row) for target in group) for group in groups)
+
+
+# LLM: 单个身份必须是当前owner规范名或别名；结构化引用附带的hash也必须与当前版一致。
+# 函数用途: 核对一个方法目标，不把别的范围同名项算成命中。
+def _target_matches(target, row):
+    sha = (target.get('sha256') or target.get('content_sha256')) if isinstance(target, dict) else ''
+    identity = (target.get('stable_id') or target.get('asset_id')) if isinstance(target, dict) else target
+    return isinstance(identity, str) and identity in {row.name, 'owner:'+row.name} and (not sha or sha == row.sha256)

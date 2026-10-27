@@ -144,6 +144,8 @@ class SkillLearningRegistry:
     daily_calls: int = 0
     import_operations: dict = field(default_factory=dict)
     daily_history: dict[str, int] = field(default_factory=dict)
+    assets: dict[str, dict] = field(default_factory=dict)
+    last_maintenance_at: float = 0
 
     # LLM: 保持原schema和单日快照，另存有界每日调用历史；不改正式Skill登记事实。
     # 函数用途: 转成写入 registry.json 的字典。
@@ -155,6 +157,8 @@ class SkillLearningRegistry:
             "daily": {"date": self.daily_date, "calls": self.daily_calls},
             "daily_history": dict(self.daily_history),
             "import_operations":dict(self.import_operations),
+            "assets": dict(self.assets),
+            "last_maintenance_at": self.last_maintenance_at,
         }
 
 
@@ -292,14 +296,13 @@ class SkillLearningStore:
         surviving, superseded = self._classify_requests([*hot, *overflow])
         return bool(superseded) or hot != surviving[:MAX_PENDING_REQUESTS]
 
-    # LLM: 从最新到最旧扫描，同文件名、request_key或非空thread_id/task_id只保留最新材料；不依赖队列是否满额。
+    # LLM: 从最新到最旧仅合并同文件、同请求键或同根执行+轨迹；thread只归属，不能删除另一任务的材料。
     # 函数用途: 区分全局FIFO有效请求与合并中断遗留的旧副本。
     def _classify_requests(self, paths: list[Path]) -> tuple[list[Path], list[Path]]:
         ordered = sorted(paths, key=lambda item: (item.name, 0 if item.parent.name == "requests" else 1))
         seen_names: set[str] = set()
         seen_keys: set[str] = set()
-        seen_threads: set[str] = set()
-        seen_tasks: set[str] = set()
+        seen_contexts: set[tuple] = set()
         kept_reversed: list[Path] = []
         superseded: list[Path] = []
         for path in reversed(ordered):
@@ -308,22 +311,15 @@ class SkillLearningStore:
                 continue
             payload = self.read_request(path)
             req_key = str((payload or {}).get("request_key") or path.stem.rsplit("-", 1)[-1])
-            thread_id = str((payload or {}).get("thread_id") or "").strip()
-            task_id = str((payload or {}).get("task_id") or "").strip()
-            if (
-                req_key in seen_keys
-                or (thread_id and thread_id in seen_threads)
-                or (task_id and task_id in seen_tasks)
-            ):
+            context = _request_context(payload or {})
+            if req_key in seen_keys or (context and context in seen_contexts):
                 superseded.append(path)
                 continue
             seen_names.add(path.name)
             if req_key:
                 seen_keys.add(req_key)
-            if thread_id:
-                seen_threads.add(thread_id)
-            if task_id:
-                seen_tasks.add(task_id)
+            if context:
+                seen_contexts.add(context)
             kept_reversed.append(path)
         kept_reversed.reverse()
         return kept_reversed, superseded
@@ -365,14 +361,12 @@ class SkillLearningStore:
         self._recover_requests_locked()
         return "queued", None
 
-    # LLM: 同类仅凭非空结构化thread_id/task_id精确相等，不能从正文、请求时间或名字猜测关系。
+    # LLM: 合并需同根执行与准确轨迹；缺身份不猜测，聊天线程与单独task相同不代表同一次学习证据。
     # 函数用途: 判断满队列中一条待处理请求是否可被新材料替代。
     def _same_request_context(self, path: Path, request: dict[str, object]) -> bool:
         previous = self.read_request(path)
-        return previous is not None and any(
-            isinstance(request.get(key), str) and request[key].strip() and previous.get(key) == request[key]
-            for key in ("thread_id", "task_id")
-        )
+        context = _request_context(request)
+        return bool(previous is not None and context and context == _request_context(previous))
 
     # LLM: 只在原state/配额事务内写固定目录；新记录先原子落盘，不改变请求正文协议或确认权限。
     # 函数用途: 安全写入一条热请求或重试记录。
@@ -588,6 +582,13 @@ class SkillLearningStore:
         return self.learned_root / name / "SKILL.md"
 
 
+# LLM: owner已由Store路径隔离，只有根执行或run和同轨迹才构成可替代上下文；空身份不参与合并。
+# 函数用途: 计算请求上下文身份，不把同一聊天线程误当同一个任务。
+def _request_context(request):
+    identity = request.get('root_task_id') or request.get('run_id')
+    return (identity, request.get('trajectory_fingerprint', '')) if identity else ()
+
+
 # LLM: request_key 只由运行身份决定，同一次运行重复收口不会重复入队。
 # 函数用途: 计算学习请求的稳定键（16 位十六进制）。
 def request_key(identity: str) -> str:
@@ -620,8 +621,11 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
         raise ValueError("registry daily calls must be a non-negative integer")
     daily_date = str(daily.get("date") or "")
     history = _registry_daily_history(payload.get("daily_history", {}), daily_date, calls)
+    assets, clock = payload.get('assets', {}), payload.get('last_maintenance_at', 0)
+    if not isinstance(assets, dict) or type(clock) not in (int, float) or not 0 <= clock < float('inf'):
+        raise ValueError('registry assets/maintenance invalid')
     return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), daily_date, calls,
-                                 dict(payload.get("import_operations") or {}), history)
+                                 dict(payload.get("import_operations") or {}), history, assets, clock)
 
 
 # LLM: 每日历史只保留UTC最近30天的整数计数；合法ISO日期作结构化键，不靠展示文字推断日期。

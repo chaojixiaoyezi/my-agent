@@ -12,7 +12,7 @@ from .skill_learning_publish import SkillLearningGateError, _owned_record
 from .skill_learning_store import SkillLearningEvent
 
 
-# LLM: 同一原registry修改时间决定自主维护节拍；仅到期预筛，不替代owner、来源完整性或原请求末门。
+# LLM: 参数为registry独立last_maintenance_at而非文件mtime；纯到期预筛不授执行权。
 # 函数用途: 共用原一天维护间隔，Count0和C发现都按当前真实时间判断，不缓存到期结论。
 def learning_maintenance_due(modified_at, mode, now):
     return mode == "autonomous" and now - modified_at >= 86400
@@ -29,7 +29,7 @@ class LearningObservationSource:
     run_id: str = ''
 
 
-# LLM: 反馈绑定当前准确hash和任务/监控，重试去重；定时job只算一份独立证据；环境失败不能降低质量。
+# LLM: 反馈绑定当前hash与独立任务；trial两次真实回归触发原previous_stable回滚，写失败恢复旧正文。
 # 函数用途: 登记采用或用户验证结果，不从任务最终回复猜成败，不写Skill正文。
 def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
     source = source or LearningObservationSource()
@@ -39,7 +39,7 @@ def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
     allowed = {'adopted','unknown'} if authority == 'model' else {'adopted','unknown','effective','ineffective','environment'} if authority in {'human','host'} else set()
     if outcome not in allowed or not task_id or (authority in {'human','host'} and not receipt_id) or (authority == 'human' and not actor_id):
         raise ValueError('学习反馈缺少准确来源或确认事实')
-    with store.state_lock():
+    with store.state_lock(), ExitStack() as rollback:
         registry = store.load_registry()
         current = _owned_record(store,registry,name)
         if current.sha256 != sha256:
@@ -60,14 +60,43 @@ def observe_learning(store, name, *, sha256, task_id, outcome, source=None):
         # 观察有界，但不因重复读取刷有效证据；当前版本只汇总独立核验结果。
         data.update(observations=observations[-200:],last_used_at=time.time(),baseline_at=data.get('baseline_at') or time.time())
         positive, negative = _verified_counts(observations,sha256)
+        data.update(helped_count=positive, hurt_count=negative)
         data['quality'] = 'unreliable' if negative >= 2 and negative >= positive else 'established' if positive >= 2 and positive > negative else 'trial'
         if data.get('state') == 'cooled' and outcome == 'adopted' and data['quality'] != 'unreliable':
             data['state'] = 'trial'
         if data.get('state') not in {'disabled','archived'}:
             data['state'] = 'cooled' if data['quality']=='unreliable' else 'active' if data['quality']=='established' else data.get('state','trial')
         record = replace(current,maintenance=data)
+        if current.maintenance.get('state') == 'trial' and negative >= 2 and negative > positive:
+            record = _rollback_trial(store, current, data, rollback)
         store.save_registry(replace(registry,skills={**registry.skills,name:record}))
+        rollback.pop_all()
     return {'skill_name':name,'sha256':sha256,'quality':data['quality'],'state':data['state']}
+
+
+# LLM: 调用方持原state锁；previous_stable全文和hash双核，用户手改已由_owned_record挡住；保revision高水位。
+# 函数用途: 回归失败时自动恢复上一稳定正文，原事务失败则撤回正文替换。
+def _rollback_trial(store, current, data, rollback):
+    from .skill_learning_store import replace_skill_file
+    from .skill_snapshot import skill_content_sha256
+
+    stable = data.get('previous_stable')
+    if not isinstance(stable, dict):
+        return replace(current, maintenance=data)
+    text = store.read_version(current.name, stable['version'])
+    if text is None or skill_content_sha256(text) != stable['sha256']:
+        raise SkillLearningGateError('SKILL_LEARNING_VERSION_MISSING')
+    path = store.skill_path(current.name)
+    previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
+    store.check_write(path, text)
+    rollback.callback(replace_skill_file, path, previous)
+    replace_skill_file(path, text)
+    store.save_version(current.name, current.revision+1, text)
+    restored = {**data, 'state':'active', 'quality':'trial', 'observations':[], 'helped_count':0, 'hurt_count':0,
+                'rolled_back_from':current.sha256, **data.get('previous_verification', {})}
+    restored.pop('previous_stable', None)
+    restored.pop('previous_verification', None)
+    return replace(current, version=stable['version'], revision=current.revision+1, sha256=stable['sha256'], maintenance=restored)
 
 
 # LLM: 同一独立任务/job最多计一份结果，人类纠正优先宿主；模型声明和环境异常没有质量权重。
@@ -138,7 +167,7 @@ def recommended_learning(registry, limit=50):
     return {row.name for row in rows[:limit] if limit > 0} if limit > 0 else {row.name for row in rows}
 
 
-# LLM: 自动维护需显式策略，引用读取不完整时不归档；旧条目先建立baseline。自然语言和frontmatter不参与状态裁决。
+# LLM: 自动维护写入独立last_maintenance_at，热观测不延期；引用不完整不归档，旧条目建立baseline。
 # 函数用途: 按owner事件驱动执行一批冷藏/归档检查，不调用模型、不永久删除。
 def maintain_learning(store, *, mode='observe', cool_seconds=0, archive_seconds=0, protected_ids=(), protection_complete=False, now=None, keep_versions=5):
     if mode not in {'observe','autonomous'}:
@@ -155,7 +184,7 @@ def maintain_learning(store, *, mode='observe', cool_seconds=0, archive_seconds=
             if data != current.maintenance:
                 skills[name] = replace(current,maintenance=data)
                 changed.append(name)
-        store.save_registry(replace(registry,skills=skills))
+        store.save_registry(replace(registry,skills=skills,last_maintenance_at=now))
         if mode == 'autonomous' and protection_complete:
             removed_versions = _collect_unreferenced_versions(store,registry,set(protected_ids),keep_versions)
         rollback.pop_all()
@@ -213,7 +242,8 @@ def _collect_unreferenced_versions(store,registry,protected,keep_versions):
         paths.sort(key=lambda path:int(path.stem[1:]))
         if any(path.is_symlink() for path in paths):
             continue
-        keep = {path.name for path in paths[-keep_versions:]} | {f'v{record.version}.md'}
+        stable = record.maintenance.get('previous_stable', {})
+        keep = {path.name for path in paths[-keep_versions:]} | {f'v{record.version}.md', f"v{stable.get('version')}.md"}
         for path in paths:
             if path.name not in keep:
                 path.unlink()

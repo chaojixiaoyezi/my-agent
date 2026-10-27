@@ -20,6 +20,7 @@
 #   稳定引用和按需正文,书架上千本也不用把目录全背进对话里。
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -36,6 +37,7 @@ from ..tooling.models import (
     ToolParameterCondition,
     ToolRuntimePolicy,
 )
+from .decision_candidates import asset_cards_for_agent
 from .learnpack_domain import self_made_package_ids
 from .method_carry import record_method_read
 from .package_read import (
@@ -77,6 +79,7 @@ def build_skill_search_model_spec() -> ToolModelSpec:
                 "package_id": {"type": "string", "description": "逐字复制能力包摘要的 package_id；与 skill_id 互斥。action=get 读取包入口或资源，action=search 检索包内资源；省略本字段时只检索公开摘要。"},
                 "resource_path": {"type": "string", "description": "仅包内 action=get 可传；action=search 即使空串也不能传。使用已声明的包根相对成员路径，不是宿主地址；省略时读取入口。"},
                 "offset": {"type": "integer", "minimum": 0, "description": "包内检索的结果偏移，或正文读取的字符偏移。"},
+                "cursor": {"type": "string", "description": "全局检索下一页的不透明游标，绑定当前查询和冻结候选版本。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。"},
                 "expected_package_sha256": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的包摘要，防止读到同名新版本。"},
                 "expected_activation_id": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的激活代次，停用重启后的旧建议不能继续使用。"},
@@ -136,7 +139,7 @@ class SkillSearchTool(BaseTool):
             return _invalid("action 只接受 search 或 get")
         return self._search(params)
 
-    # LLM: 未限定 package_id 时只查公开 Skill 与包级摘要；成功命中一次批量计 manual_search，不计有效使用、不存 query、不预读或 pin。
+    # LLM: 全局四资产只投影摘要；cursor绑定查询、范围和准确版本；不读取代码、不pin或授执行权。
     # 函数用途: 返回公开方法卡及可原样重用的读取参数，让模型无需从多种身份字段猜调用方式。
     def _search(self, params: dict[str, object]) -> ToolHandlerOutcome:
         query = str(params.get("query") or "").strip()
@@ -150,16 +153,21 @@ class SkillSearchTool(BaseTool):
         try:
             hits = [
                 hit
-                for hit in router.search(query, limit=0, kinds={"skill", "capability_package"})
+                for hit in router.search(query, limit=0, kinds={"skill", "capability_package", "script", "workflow"},
+                                         extra_cards=tuple(asset_cards_for_agent(self.agent)))
                 if not category or str(hit.card.metadata.get("category") or "") == category
-            ][:limit]
+            ]
+            hits, page = _search_page(hits, params, query, category, limit)
         except SkillSnapshotError as exc:
             return _snapshot_unavailable(exc)
+        except ValueError as exc:
+            return _invalid(str(exc))
         if not hits:
             payload = {
                 "matches": [],
                 "hint": "没有命中的技能;可以换关键词,或按下方类目浏览。",
                 "categories": router.render_category_index(),
+                **page,
             }
             return ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
         mine = _self_made_ids(self.agent) if any(hit.card.kind == "capability_package" for hit in hits) else set()
@@ -169,7 +177,8 @@ class SkillSearchTool(BaseTool):
               "stable_id": hit.card.metadata["stable_id"], "score": round(hit.score, 1),
               "made_by_me": hit.card.metadata["package_id"] in mine,
               "next_read": package_read_parameters(hit.card.metadata)}
-             if hit.card.kind == "capability_package" else {
+             if hit.card.kind == "capability_package" else _saved_asset_match(hit)
+             if hit.card.kind in {"script", "workflow"} else {
                 "kind": "skill",
                 "name": hit.card.name,
                 "skill_id": str(hit.card.metadata.get("stable_id") or ""),
@@ -184,6 +193,7 @@ class SkillSearchTool(BaseTool):
         ]
         payload = {
             "matches": matches,
+            **page,
             "hint": "选择后原样使用对应 next_read 调用本工具；Skill 用 skill_id，能力包用 package_id，不能混用。",
         }
         outcome = ToolHandlerOutcome("skill_search", True, json.dumps(payload, ensure_ascii=False, indent=2))
@@ -298,10 +308,37 @@ def _record_search_matches(agent, matches: list[dict]) -> None:
         batch = [{"event": "manual_search", "kind": match["kind"],
                   "skill_id": match["package_id"] if match["kind"] == "capability_package" else match["skill_id"],
                   "source": "package" if match["kind"] == "capability_package" else match["source"], **context}
-                 for match in matches]
+                 for match in matches if match["kind"] in {"skill", "capability_package"}]
         record_skill_usage_events(SkillLearningStore.for_home(agent.home_paths), batch)
     except Exception:  # noqa: BLE001 - 附带统计不能改变搜索成功事实。
         logging.getLogger(__name__).warning("SKILL_USAGE_RECORD_UNAVAILABLE")
+
+
+# LLM: 非Skill资产只给原工具读取入口，不伪造skill_id或允许skill_search执行；版本与scope保留。
+# 函数用途: 把保存的脚本/工作流命中转换成只读短卡。
+def _saved_asset_match(hit):
+    return {'kind':hit.card.kind, 'name':hit.card.name, 'stable_id':hit.card.id,
+            'description':hit.card.description, 'source':hit.card.source, 'score':round(hit.score, 1),
+            'next_read':hit.card.metadata['next_read'], 'version':hit.card.metadata['version']}
+
+
+# LLM: 游标包含完整候选身份/版本和查询摘要；变代明确失败，不沿旧页码跳过新结果；不存查询原文。
+# 函数用途: 给冻结的全局结果分页，返回总数、完整性和下一页游标。
+def _search_page(hits, params, query, category, limit):
+    identities = [(hit.card.id, hit.card.metadata.get('content_sha256', hit.card.metadata.get('version')), hit.score) for hit in hits]
+    digest = hashlib.sha256(json.dumps([query, category, identities], ensure_ascii=False).encode()).hexdigest()[:24]
+    offset = _nonnegative_int(params, 'offset', 0)
+    if 'cursor' in params:
+        parts = str(params['cursor']).split(':')
+        if len(parts) != 2 or parts[0] != digest or not parts[1].isdigit():
+            raise ValueError('SKILL_SEARCH_CURSOR_STALE')
+        if 'offset' in params and offset != int(parts[1]):
+            raise ValueError('SKILL_SEARCH_CURSOR_CONFLICT')
+        offset = int(parts[1])
+    selected = hits[offset:offset+limit]
+    next_offset = offset+len(selected)
+    return selected, {'offset':offset, 'total':len(hits), 'has_more':next_offset < len(hits),
+                      'next_cursor':f'{digest}:{next_offset}' if next_offset < len(hits) else None}
 
 
 # LLM: learnpack 只对本机管理员开放，别的 owner 一律空集；读不到安装表或存储也是空集（made_by_me 都为 false），不让检索失败。只读。

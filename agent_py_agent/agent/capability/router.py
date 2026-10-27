@@ -71,7 +71,7 @@ _MAX_SKILL_METADATA_ENVELOPE_CHARS = 12_000
 _MAX_SKILL_DESCRIPTION_CHARS = 1_024
 # 每 token 的近似字节数，用于估算上下文占用。
 _APPROX_BYTES_PER_TOKEN = 4
-_SKILL_SOURCE_RANK = {"builtin": 0, "shared": 1, "workspace": 2, "owner": 3}
+_SKILL_SOURCE_RANK = {"workspace": 0, "owner": 1, "shared": 2, "builtin": 3}
 
 _SKILL_USAGE_INSTRUCTIONS = """### How to use Skills
 - 发现：上面列的是当前轮可用 Skill 的名称、说明和稳定 skill_id；正文由 `skill_search` 读取。
@@ -204,7 +204,7 @@ class CapabilityRouter:
             return cards
         return [card for card in cards if card.kind in kinds]
 
-    # LLM: 原 Skill 与包摘要各自从同一 scoped snapshot 派生，私有成员既不注册也不参加全局计数/搜索。
+    # LLM: 原快照保留授权边界；宿主绑定的脚本/流程只读元数据，不展平包内成员，不授执行权。
     # 函数用途: 汇集本轮公开可见的工具、Skill 与能力包卡片。
     def _current_cards(self) -> list[CapabilityCard]:
         snapshot = self._snapshot()
@@ -214,7 +214,10 @@ class CapabilityRouter:
         non_skills = [card for card in static if card.kind not in {"skill", "capability_package"}]
         skills = [from_skill_snapshot_entry(entry) for entry in snapshot.enabled_entries()]
         packages = [from_capability_package(package) for package in snapshot.packages]
-        return [*non_skills, *skills, *packages]
+        from .decision_candidates import asset_cards_for_agent
+        agent = getattr(self._skill_snapshot_provider, '__self__', None)
+        assets = asset_cards_for_agent(agent) if getattr(getattr(agent, 'home_paths', None), 'owner_id', None) == snapshot.owner_id else []
+        return [*non_skills, *skills, *packages, *assets]
 
     def _snapshot(self) -> SkillSnapshot | None:
         if self._skill_snapshot_provider is not None:
@@ -260,6 +263,7 @@ class CapabilityRouter:
         selected_skill_ids: tuple[str, ...] | None = None,
         required_skill_ids: tuple[str, ...] = (),
         in_use_method_ids: tuple[str, ...] = (),
+        query: str = "",
     ) -> str:
         """Render 会话运行时 model-visible Skill metadata within a 2% budget.
 
@@ -268,9 +272,13 @@ class CapabilityRouter:
         auto-selected or granted by this renderer.
         """
 
+        agent = getattr(self._skill_snapshot_provider, '__self__', None)
+        params = getattr(agent, '_current_run_params', None)
+        query = query or str(getattr(params, 'user_prompt', '') or '')
         skills = sorted(
             self.cards(kinds={"skill"}),
             key=lambda card: (
+                -score_card(query, card)[0] if query else 0,
                 _SKILL_SOURCE_RANK.get(str(card.source or ""), 99),
                 card.name,
                 str(card.metadata.get("stable_id") or ""),
@@ -280,7 +288,8 @@ class CapabilityRouter:
         total_budget = budget
         unavailable_text = _render_unavailable_package_references(self._snapshot())
         budget = _SkillMetadataBudget(max(0, budget.limit - budget.cost(unavailable_text + "\n\n" if unavailable_text else "")), budget.token_based)
-        packages = sorted(self.cards(kinds={"capability_package"}), key=lambda card: card.name)
+        attrs = getattr(params, 'task_attributes', None) or {}
+        packages = sorted(self.cards(kinds={"capability_package"}), key=lambda card: _package_priority(card, query, attrs))
         if selected_skill_ids is None:
             skills = [card for card in skills if card.metadata.get("recommended",True) or card.metadata.get("stable_id") in {*required_skill_ids,*in_use_method_ids}]
         skills = using_method_cards(skills, in_use_method_ids)
@@ -320,6 +329,7 @@ class CapabilityRouter:
         *,
         limit: int | None = None,
         kinds: set[str] | None = None,
+        extra_cards: tuple[CapabilityCard, ...] = (),
     ) -> list[CapabilitySearchHit]:
         """检索候选能力。
 
@@ -330,7 +340,8 @@ class CapabilityRouter:
         # CapabilityConfig 快照。生产调用都显式传 limit，新调用方也必须显式传，不能依赖 limit=None。
         effective_limit = self.config.capability_candidate_limit if limit is None else limit
         hits: list[CapabilitySearchHit] = []
-        for card in self.cards(kinds=kinds):
+        cards = {card.id: card for card in [*self.cards(kinds=kinds), *extra_cards] if kinds is None or card.kind in kinds}
+        for card in cards.values():
             score, reasons = score_card(query, card)
             if score > 0:
                 hits.append(CapabilitySearchHit(card=card, score=score, reasons=reasons[:4]))
@@ -427,7 +438,7 @@ def from_capability_package(package: CapabilityPackageSnapshot) -> CapabilityCar
         id=package.stable_id, kind="capability_package", name=package.package_id,
         description=package.description, keywords=list(package.keywords),
         when_to_use=[package.summary], source=package.source,
-        metadata={**package.to_ref(), "version": package.version},
+        metadata={**package.to_ref(), "version": package.version, 'application_scope':getattr(package, 'application_scope', None)},
     )
 
 
@@ -505,8 +516,34 @@ def classify_tool_model_risk(spec: ToolModelSpec) -> tuple[list[str], str]:
 #   排序不变，skill_search 主动搜照旧能按描述搜到。纯函数。
 # 函数用途: 判断提问里有没有出现能力卡声明的名称、能力或关键词。
 def has_strong_match(query: str, card: CapabilityCard) -> bool:
-    lowered = query.lower()
-    return any(_declared_term_in(term.strip().lower(), lowered) for term in (card.name, *card.capabilities, *card.keywords))
+    positive, _ = _positive_negative(query)
+    if score_card(query, card)[0] <= 0:
+        return False
+    declared = any(_declared_term_in(term.strip().lower(), positive.lower()) for term in (card.name, *card.capabilities, *card.keywords))
+    overlap = set(tokenize(positive)) & set(tokenize(' '.join([card.description, *card.when_to_use, *card.keywords])))
+    concepts = {token for token in overlap if not any(token != other and token in other for other in overlap)}
+    return declared or len(concepts) >= 2
+
+
+# LLM: 偏好和应用范围只重排已授权包，不将不在快照中的包加回来；未知范围不猜测匹配。
+# 函数用途: 按本轮偏好、精确应用范围和查询相关性排序包目录。
+def _package_priority(card, query, attrs):
+    scope = card.metadata.get('application_scope')
+    applies = isinstance(scope, dict) and bool(scope) and all(attrs.get(key) == value for key,value in scope.items())
+    if isinstance(scope, (str, list, tuple)):
+        requested = attrs.get('application_scope')
+        applies = bool(requested) and (requested == scope if isinstance(scope, str) else requested in scope)
+    preferred = attrs.get('preferred_pack_ids') or ()
+    return (not (card.name in preferred or card.id in preferred), not applies,
+            -score_card(query, card)[0] if query else 0, card.name)
+
+
+# LLM: 否定短语仅影响软排序，不按自然语言裁定执行或权限；保留分句后的正面需求。
+# 函数用途: 从中英文能力说明或提问分离肯定段和否定段。
+def _positive_negative(text):
+    negatives = re.findall(r'(?:不用于|不适用于|别做|不要|not\s+for\s+)([^，。；,;\n]+)', text, re.I)
+    positive = re.sub(r'(?:不用于|不适用于|别做|不要|not\s+for\s+)[^，。；,;\n]+', ' ', text, flags=re.I)
+    return positive, negatives
 
 
 # LLM: 空词不算；纯 ASCII 的词要求两头不紧挨英文字母，其余（含中文）按子串。纯函数。
@@ -519,12 +556,14 @@ def _declared_term_in(term: str, lowered_query: str) -> bool:
     return term in lowered_query
 
 
-# LLM: 泛中文请求词不参与软匹配；显式名称仍按原名称权重召回，不把停用词当权限或选择。
+# LLM: 负面说明从正向haystack剔除；query否定和不适用命中扣分只影响软推荐，绝非权限判断。
 # 函数用途: 给有效查询打可解释分数，避免问候在说明和关键词中制造伪命中。
 def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
     """用可解释的关键词规则给能力卡打分。"""
 
-    tokens = tokenize(query)
+    positive, query_negatives = _positive_negative(query)
+    description, card_negatives = _positive_negative(card.description)
+    tokens = tokenize(positive)
     if card.name.lower() in _ZH_REQUEST_STOPWORDS and _declared_term_in(card.name.lower(), query.lower()):
         tokens = dedupe_strings([card.name.lower(), *tokens])
     if not tokens:
@@ -532,12 +571,13 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
     haystacks = {
         "name": card.name.lower(),
         "kind": card.kind.lower(),
-        "description": card.description.lower(),
+        "description": description.lower(),
         "capabilities": " ".join(card.capabilities).lower(),
         "keywords": " ".join(card.keywords).lower(),
         "when_to_use": " ".join(card.when_to_use).lower(),
         "not_when_to_use": " ".join(card.not_when_to_use).lower(),
     }
+    haystacks = {key:_synonym_text(value) for key,value in haystacks.items()}
     score = 0.0
     reasons: list[str] = []
     for token in tokens:
@@ -558,7 +598,23 @@ def score_card(query: str, card: CapabilityCard) -> tuple[float, list[str]]:
             token_score += 1.5
             reasons.append(f"命中描述'{token}'")
         score += token_score
+    exclusions = [*card_negatives, *(part for text in card.not_when_to_use for part in (_positive_negative(text)[1] or [text]))]
+    if any(_negative_match(tokens, text, positive) for text in exclusions if text.strip()):
+        score = -max(score, 1.0)
+        reasons.append('命中不适用场景')
+    affirmative = ' '.join(haystacks[key] for key in ('name','description','capabilities','keywords','when_to_use'))
+    if any(_negative_match(tokenize(affirmative), text, affirmative) for text in query_negatives):
+        score = -max(score, 1.0)
+        reasons.append('用户明确排除此能力')
     return score, dedupe_strings(reasons)
+
+
+# LLM: 否定场景需覆盖大部分限定词，不能因为长条件只撞到“浏览器”就排除正常浏览器任务。
+# 函数用途: 区分准确的不适用需求与条件说明里的偶然词重叠。
+def _negative_match(tokens, text, positive):
+    excluded = set(tokenize(text))
+    overlap = excluded & set(tokens)
+    return text.strip().lower() in positive.lower() or (len(overlap) >= 2 and len(overlap) >= .7 * len(excluded))
 
 
 @dataclass(frozen=True)
@@ -974,12 +1030,22 @@ _EN_STOPWORDS = frozenset(
 _ZH_REQUEST_STOPWORDS = frozenset({"你好", "只回", "回复", "收到", "请问", "帮我", "一下", "可以", "什么", "怎么"})
 
 
-# LLM: 仅移除无领域信息的中文二元词；其它Unicode脚本和中文2-4gram仍走原粗检索路径。
+# LLM: 小型中英文别名仅扩充软检索文本，不将别名当权限、资产身份或精确名称。
+# 函数用途: 将常见同义查询统一到相同的召回词。
+def _synonym_text(text):
+    result = text.lower()
+    for terms in (('源代码','源码'), ('警报','告警'), ('归纳','汇总','统计')):
+        if any(term in result for term in terms):
+            result += ' ' + ' '.join(terms)
+    return result
+
+
+# LLM: 仅移除无领域信息的中文二元词并扩充同义词；其它Unicode脚本和中文2-4gram仍走原粗检索路径。
 # 函数用途: 为能力软检索提供降噪token，不影响精确名称或正文读取选择器。
 def tokenize(text: str) -> list[str]:
     """把查询切成适合粗检索的 token。"""
 
-    lowered = text.lower()
+    lowered = _synonym_text(text)
     # [^\W\u4e00-\u9fff]+ = \u4efb\u610f\u811a\u672c\u8bcd\u5b57\u7b26(\u9664 CJK)\u2192 \u97e9/\u4fc4/\u963f/\u5370\u5730/\u91cd\u97f3\u62c9\u4e01\u4e0d\u518d\u96f6 token(\u5ba1\u8ba1 #7);CJK \u4ecd\u5355\u5217\u8d70 n-gram
     tokens = re.findall(r"[^\W\u4e00-\u9fff]+|[\u4e00-\u9fff]+", lowered)
     expanded: list[str] = []

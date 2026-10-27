@@ -79,6 +79,7 @@ class SkillLearningSettings:
     archive_seconds: int = 15552000
     include_background: bool = False
     keep_versions: int = 5
+    autonomous_verified: bool = False
 
     # LLM: 读不到或类型不对时用默认值，不因配置损坏而关掉整条链。
     # 函数用途: 从 AgentConfig 读取自动总结设置。
@@ -97,6 +98,8 @@ class SkillLearningSettings:
             archive_seconds=_config_int(config,"self_learning_archive_seconds",15552000),
             include_background=getattr(config,"self_learning_include_background",False) is True,
             keep_versions=_config_int(config,"self_learning_keep_versions",5),
+            autonomous_verified=getattr(config, 'enable_self_learning', False) is True
+                or getattr(config, 'self_learning_promotion_mode', '') == 'autonomous_verified',
         )
 
 
@@ -113,6 +116,7 @@ class SkillLearningRuntime:
     protection_provider: Callable[[],dict] | None = None
     lesson_provider: Callable[[],object] | None = None
     deployment_root: Path | None = None
+    promotion_verifier: Callable | None = None
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -280,14 +284,14 @@ class SkillLearningService:
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
         return outcome
 
-    # LLM: 发现仅只读检查热/溢出FIFO，不能为了判待办先搬文件；registry到期仍复用原判据。
+    # LLM: 只读FIFO和registry独立维护时钟；热技能写入mtime不影响冷技能维护，不写锁或触发模型。
     # 函数用途: 判断原队列或自主维护是否待处理，发现只作预筛不授执行权。
     def has_pending(self) -> bool:
         from .skill_learning_maintenance import learning_maintenance_due
 
         return bool(self.store.pending_requests(refill=False) or self.store.overflow_requests()) or (self.settings.maintenance_mode == "autonomous"
             and self.store.registry_path.exists()
-            and learning_maintenance_due(self.store.registry_path.stat().st_mtime, self.settings.maintenance_mode, time.time()))
+            and learning_maintenance_due(self.store.load_registry().last_maintenance_at, self.settings.maintenance_mode, time.time()))
 
     # LLM: 最早核准确Agent/原执行与同owner源目录，预筛只读FIFO；维护/候选/收尾写入重核短门，模型等待在门外。
     #   maintenance_only只由真实registry来源内部选择，完成原维护即返回，不消费后来FIFO或调用模型；默认False保原预算/人工proposals。
@@ -380,8 +384,8 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: skip原路记账；create/update在原短门保存main待确认候选，source只是执行门，不给正式Skill发布权。
-    # 函数用途: 把模型输出变成待确认候选或跳过/拒绝账本事实，不自动发布正式内容。
+    # LLM: 模型只产候选；显式自学开关加宿主准确候选核验才免确认发布，缺证据保持候选，语义族不替代CAS/guard。
+    # 函数用途: 解析总结，复用同族候选，或按机器验证事实晋升正式Skill。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
@@ -396,9 +400,10 @@ class SkillLearningService:
                                  expected_revision=next((item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
                                  expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""))
         try:
-            from .skill_learning_proposals import propose_learning
+            from .asset_promotion import propose_or_promote_skill
             with gateway_short_transaction("skill_learning_propose"):
-                return propose_learning(self.store, publish)
+                return propose_or_promote_skill(self.store, publish,
+                    verifier=getattr(self.runtime, 'promotion_verifier', None) if self.settings.autonomous_verified else None)
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:
@@ -460,7 +465,10 @@ def _material(store: SkillLearningStore, request: dict[str, object], entries: tu
         evidence = [row for row in record.maintenance.get('observations',[]) if row.get('sha256')==record.sha256]
         if len({row.get('subject') for row in evidence}) >= 2:
             used.add('owner:'+name)
-    candidates = (_updatable(store, registry, entry) for entry in entries if getattr(entry, "stable_id", "") in used)
+    candidates = (_updatable(store, registry, entry) for entry in entries
+                  if getattr(entry, "stable_id", "") in used
+                  or (getattr(entry, "source", "") == "owner" and getattr(entry, "name", "") in used)
+                  or f"owner:{getattr(entry, 'name', '')}" in used)
     updatable = tuple(item for item in candidates if item is not None)[:UPDATABLE_COUNT]
     taken = frozenset(item["name"] for item in existing if item["name"])
     return SkillLearningMaterial(request, existing, updatable, taken)

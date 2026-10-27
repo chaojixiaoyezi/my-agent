@@ -320,12 +320,12 @@ class _EntrypointMissing(ValueError):
     pass
 
 
-# LLM: 权威入口先走Store恢复及nofollow；仅None可读旧meta.json，旧Store的明确缺代码错误只分类、不绕过验证。
+# LLM: 权威入口沿宿主workspace覆盖与nofollow；项目根只读代码，Owner仍为执行/权限根；缺失才读旧Owner格式。
 # 函数用途: 取得脚本配置和冻结代码，返回目录仅供兼容调用方展示。
-def load_script(owner_home, script_id):
+def load_script(owner_home, script_id, *, workspace_root=None):
     folder = safe_path(owner_home, 'scripts', script_id)
     try:
-        asset = ScriptStore(owner_home).get_script(script_id)
+        asset = ScriptStore(owner_home, workspace_root=workspace_root).get_script(script_id)
     except ValueError as exc:
         if str(exc) == '脚本代码文件缺失':
             raise _EntrypointMissing(str(exc)) from exc
@@ -600,11 +600,11 @@ class ScriptRunner:
         self.restrict_to_roots = bool(restrict_to_roots)
         self.workspace_root = Path(workspace_root).absolute() if workspace_root is not None else None
 
-    # LLM: 禁用闸先于解释器、临时目录和数据源绑定；其余冻结/清理与原沙箱权限合同不变。
+    # LLM: workspace由构造器冻结并透传Store；禁用闸先于进程和数据源，执行仍使用Owner与原沙箱边界。
     # 函数用途: 冻结代码、绑定声明连接、构造沙箱命令并清理临时秘密。
     @contextmanager
     def _prepare(self, script_id, inputs, timeout_seconds, override_data_sources, network_access, *, capture=None):
-        _, metadata = load_script(self.owner_home, script_id)
+        _, metadata = load_script(self.owner_home, script_id, workspace_root=self.workspace_root)
         if metadata.get('enabled', True) is False:
             raise AssetDisabledError('script', script_id)
         interpreter = metadata.get('interpreter', 'python3')
