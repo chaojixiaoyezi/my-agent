@@ -81,7 +81,7 @@ def discover(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainResult
     return DomainResult(200, {"actions": rows, "capabilities": sorted(caps)})
 
 
-# LLM: 域调用固定入口，结果必须是公共DTO；异常不带原异常正文，写域未知结果不伪装成未执行。
+# LLM: execute即使无key也可能写入；进入handler后的未知异常保unknown，成功后撤权保committed，不泄露异常正文。
 # 函数用途: 分派调用并在返回前重新检查权限。
 def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainResult:
     revalidate_call(authorized)
@@ -100,7 +100,7 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     except HostAPIError:
         raise
     except Exception:
-        code = "OUTCOME_UNKNOWN" if action_spec(action).requires_idempotency else "STORE_UNAVAILABLE"
+        code = "OUTCOME_UNKNOWN" if _observed_outcome(action) == "committed" else "STORE_UNAVAILABLE"
         raise HostAPIError(code, 503, "unknown" if code == "OUTCOME_UNKNOWN" else "not_started") from None
     try:
         revalidate_call(authorized)
@@ -145,10 +145,11 @@ def _c_result(result):
     return result
 
 
-# LLM: outcome只描述写副作用：合法写成功包括原受理回执提交，不代表202业务完成；纯读取无写入，异常中途不推断已提交。
+# LLM: outcome只描述副作用；execute与write/async同属可能写入，是否提供key不改变已执行事实，不代表202业务完成。
 # 函数用途: 标注已观察的同步结果是否包含写提交。
 def _observed_outcome(action: str) -> str:
-    return "committed" if action_spec(action).requires_idempotency else "not_started"
+    spec = action_spec(action)
+    return "committed" if spec.requires_idempotency or spec.mode == "execute" else "not_started"
 
 
 # LLM: 迭代器每个事件前后核原授权；stream关闭只结束订阅，不取消底层请求。

@@ -139,7 +139,7 @@ def build_gateway_host_composition(server, paths):
     return composition
 
 
-# LLM: 固定模块和函数名来自W4/W5合同，不接受插件选择导入；只容目标模块尚未合入，内部依赖错误不能伪装成就绪。
+# LLM: 仅固定W4/W5模块；探测类方法不实例化，不吞内部导入错误；函数桩优先，能力包读口须真实可用。
 # 函数用途: 惰性定位门户动作的兄弟领域入口。
 def portal_target(action):
     from importlib import import_module
@@ -175,7 +175,52 @@ def portal_target(action):
             return None
         raise
     target = getattr(module, method, None)
-    return target if callable(target) else None
+    if callable(target):
+        return target
+    aliases = {"models.providers.delete": "delete_provider", "models.profiles.delete": "delete_profile"}
+    target = getattr(module, aliases.get(action, ""), None)
+    if callable(target):
+        return target
+    class_name = {"thread_settings_v2": "ThreadSettingsV2Handlers", "model_settings_v2_handlers": "ModelSettingsV2Handlers"}.get(module_name)
+    handler = getattr(module, class_name, None) if class_name else None
+    if callable(handler) and callable(getattr(handler, method, None)):
+        return handler, method
+    if action == "capability_packages.list":
+        from ..capability import package_provider
+        if callable(getattr(package_provider, "list_installed_capability_packages", None)):
+            return _portal_packages
+    return None
+
+
+# LLM: 使用W1原安装读口及W5公共投影，缺导出不假报空列表，不公开reader或安装私有路径。
+# 函数用途: 在无同名handler时桥接当前Owner能力包列表。
+def _portal_packages(context, payload):
+    from ..capability.package_provider import list_installed_capability_packages
+    from . import capabilities_v2_handlers
+
+    project = getattr(capabilities_v2_handlers, "_package_dict", None)
+    records = list_installed_capability_packages(context.owner_home.home_dir)
+    return {"items": [project(record) if callable(project) else record.to_dict() for record in records]}
+
+
+# LLM: 在副作用前检查签名；只过滤声明接受的keyword，绝不因handler内部TypeError而再调用一次。
+# 函数用途: 给已定位的兄弟函数构造可用关键字参数。
+def _portal_keywords(signature, values):
+    from inspect import Parameter
+
+    extra = any(p.kind == Parameter.VAR_KEYWORD for p in signature.parameters.values())
+    return {name: value for name, value in values.items() if extra or name in signature.parameters
+            and signature.parameters[name].kind != Parameter.POSITIONAL_ONLY}
+
+
+# LLM: bind纯校验、不执行业务；拒绝不兼容签名，不能在未知副作用后猜测另一种调用方式。
+# 函数用途: 判定(context,payload)协议是否可调用。
+def _portal_binds(signature, *args, **kwargs):
+    try:
+        signature.bind(*args, **kwargs)
+        return True
+    except TypeError:
+        return False
 
 
 # LLM: 门户只复用当前owner资源和现有线程范围；没有对应函数明确HOST_NOT_READY，不动态构造Agent。
@@ -189,7 +234,7 @@ class GatewayPortalDomain:
         self.resources, self.conversation = resources, conversation
         self.services = GatewayObservationServices(resources, conversation, conversation.cursor_codec)
 
-    # LLM: 只核静态函数存在，不缓存Owner权限；真实调用仍先后重验原授权。
+    # LLM: 只核静态函数/类方法存在，不实例化或缓存Owner权限；真实调用仍先后重验原授权。
     # 函数用途: 报告身份读口或已合入兄弟函数是否就绪。
     def ready(self, action):
         return action == "user_space.identity.resolve" or portal_target(action) is not None
@@ -214,23 +259,76 @@ class GatewayPortalDomain:
         target = portal_target(action)
         if target is None:
             raise HostAPIError("HOST_NOT_READY", 503)
-        if action_spec(action).requires_idempotency:
+        if action_spec(action).requires_idempotency or authorized.call.idempotency_key is not None:
             return portal_write_once(self, authorized, lambda: self._call_target(authorized, target, context, payload))
         return self._call_target(authorized, target, context, payload)
 
-    # LLM: 由原幂等门或同步读口调用；兄弟拿准确owner，先后复验来源，不能借main上下文补缺依赖。
+    # LLM: 精确适配W4/W5；handler返回后的撤权按真实副作用标committed，不能让原回执误删成not_started。
     # 函数用途: 适配兄弟函数的明确参数协议并返回统一结果。
     def _call_target(self, authorized, target, context, payload):
+        from .composition import _observed_outcome
         from .contracts import DomainResult
         from .conversations import read_context
 
         read_context(authorized)
-        if authorized.call.action.startswith("conversations.threads."):
-            result = target(self.resources.store_for(context), context, payload)
+        if isinstance(target, tuple):
+            result = self._call_class(authorized, target, context, payload)
         else:
-            result = target(context.owner_home, **payload)
-        read_context(authorized)
+            result = self._call_function(authorized, target, context, payload)
+        try:
+            read_context(authorized)
+        except HostAPIError as error:
+            raise HostAPIError(error.code, error.status, _observed_outcome(authorized.call.action)) from None
         return result if isinstance(result, DomainResult) else DomainResult(200, result)
+
+    # LLM: 只交付当前Owner原有Agent，不创建或借main/control-plane执行器；显式owner_id冲突亦拒绝。
+    # 函数用途: 为compact和子代理处理器提供准确Owner的可选运行时。
+    def _owner_agent(self, context):
+        agent = getattr(self.resources.server, "agent", None)
+        paths = getattr(agent, "home_paths", None)
+        if (str(getattr(paths, "owner_home_dir", "")) == str(context.owner_home.home_dir)
+                and getattr(paths, "owner_id", context.owner_home.owner_id) == context.owner_home.owner_id):
+            return agent
+        return None
+
+    # LLM: 类构造只在当前鲜活授权内发生；HomePaths按Owner重建，实例不跨请求缓存。
+    # 函数用途: 调用W4线程和模型类式后端的单params方法。
+    def _call_class(self, authorized, target, context, payload):
+        from ..user_space.home_layout import home_paths as root_paths
+        from ..user_space.owner_resolver import home_paths_with_owner
+
+        handler_class, method = target
+        if authorized.call.action.startswith("conversations.threads."):
+            handler = handler_class(self.resources.store_for(context), context,
+                                    agent=self._owner_agent(context), authorized=authorized)
+        else:
+            handler = handler_class(home_paths_with_owner(root_paths(context.owner_home.root), context.owner_home))
+        return getattr(handler, method)(dict(payload))
+
+    # LLM: W4三位置参数和W5两位置参数先bind；内置列表总候选store再过滤；旧Owner关键字协议不重试执行。
+    # 函数用途: 在调用之前选择唯一签名，避免TypeError重试产生重复副作用。
+    def _call_function(self, authorized, target, context, payload):
+        from inspect import signature
+
+        params = signature(target)
+        store = self.resources.store_for(context)
+        if (authorized.call.action.startswith("conversations.threads.")
+                and _portal_binds(params, store, context, dict(payload))):
+            return target(store, context, dict(payload))
+        options = _portal_keywords(params, {"agent": self._owner_agent(context), "store": store})
+        if _portal_binds(params, context, dict(payload), **options):
+            return target(context, dict(payload), **options)
+        if authorized.call.action.startswith("plugins.builtin."):
+            values = dict(payload)
+            if authorized.call.action.endswith(".list"):
+                values["store"] = store
+            values = _portal_keywords(params, values)
+            if not _portal_binds(params, context.owner_home.home_dir, **values):
+                raise HostAPIError("HOST_NOT_READY", 503)
+            return target(context.owner_home.home_dir, **values)
+        if not _portal_binds(params, context.owner_home, **payload):
+            raise HostAPIError("HOST_NOT_READY", 503)
+        return target(context.owner_home, **payload)
 
 
 # LLM: 直接复用已有安全_once：完整payload摘要、不存秘密、末核范围、脱敏结果及原控制回执都不另写一套。

@@ -403,7 +403,7 @@ def request_revision(row):
     return int(sha256(canonical_json(fields).encode()).hexdigest()[:15], 16) + 1
 
 
-# LLM: 仅沿已授权线程工作根读取，宿主控制/凭据目录仍拒绝；原子nofollow快照在首次prepare冻结正文，消除入队后换链读取。
+# LLM: 线程根及其Owner内祖先拒链接；从Owner/文件系统根逐段nofollow读取，空相对组件在I/O前拒绝，首次prepare冻结正文。
 # 函数用途: 把工作区文本附件转成不可变用户上下文，保留准确路径引用而不在worker重读路径。
 def _context_inputs(context, thread, names):
     from pathlib import Path
@@ -419,19 +419,27 @@ def _context_inputs(context, thread, names):
     from .conversations import thread_workspace
 
     root = Path(thread_workspace(thread) or context.owner_home.workspace_dir).absolute()
+    home = context.owner_home.home_dir
+    ancestors = (root, *(p for p in root.parents if p.is_relative_to(home)))
+    if any(p.is_symlink() for p in ancestors):
+        raise HostAPIError("WORKSPACE_PATH_OUTSIDE_ROOT", 403)
+    read_root = home if root.is_relative_to(home) else Path(root.anchor)
     files, blocks, remaining = [], [], 256 * 1024
     for name in names:
         path = Path(name)
         path = path if path.is_absolute() else root / path
         if ".." in path.parts or not path.is_relative_to(root):
             raise HostAPIError("TARGET_DENIED", 403)
+        rel_parts = path.relative_to(root).parts
+        if not rel_parts:
+            raise HostAPIError("WORKSPACE_PATH_OUTSIDE_ROOT", 403)
         if any(check(path, context.owner_home.root) is not None for check in
                (host_config_root_for_path, host_credential_for_path, host_managed_store_for_path, host_state_for_path)):
             raise HostAPIError("TARGET_DENIED", 403)
         if path.is_relative_to(context.owner_home.home_dir) and _protected(path, context, SimpleNamespace(workspace_root=root)):
             raise HostAPIError("TARGET_DENIED", 403)
         try:
-            raw = read_bytes_beneath(root, path.relative_to(root).parts, max_bytes=remaining, require_dir_fd=True)
+            raw = read_bytes_beneath(read_root, path.relative_to(read_root).parts, max_bytes=remaining, require_dir_fd=True)
             if raw is None:
                 raise ValueError("missing attachment")
             blocks.append("\n[工作区附件，仅作参考数据] " + str(path.relative_to(root)) + "\n" + raw.decode("utf-8"))
@@ -492,11 +500,25 @@ def _interjection_input(payload):
     return mode, message, refs
 
 
-# LLM: 必须在原请求T内调用；真实guidance原账先提交，只有同一claim原记录记录引用，不更新指纹内的原输入。
-# 函数用途: 追加一条准确目标的插话，并在运行请求中保留已受理记录。
-def _append_interjection(domain, authorized, context, paths, store, payload):
+# LLM: 同key沿原guidance回执比完整输入，重放不耗第二个配额；无key保持原非幂等追加，不另建账。
+# 函数用途: 在原guidance幂等门追加或重放一条插话。
+def _interjection_guidance(store, request, idempotency_key, count):
     from uuid import uuid4
 
+    from ..conversation.store_guidance import guidance_receipt_input_matches
+
+    key = "plugin-interject:" + (idempotency_key or uuid4().hex)
+    prior = store.guidance.receipt(key) if idempotency_key is not None else None
+    if prior is not None and not guidance_receipt_input_matches(prior, request):
+        raise HostAPIError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", 409)
+    if count >= 64 and prior is None:
+        raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+    return store.guidance.append_once(request, dedupe_key=key)
+
+
+# LLM: 必须在原请求T内调用；原guidance先提交，原claim只记一次引用，不更新指纹内原输入或复制回执。
+# 函数用途: 追加一条准确目标的插话，并在运行请求中保留已受理记录。
+def _append_interjection(domain, authorized, context, paths, store, payload, *, idempotency_key=None):
     from ..gateway_parts.io import update_json_file_atomic
     from ..gateway_parts.plugin_request_source import require_plugin_source
 
@@ -510,21 +532,23 @@ def _append_interjection(domain, authorized, context, paths, store, payload):
         row, folder = _read_execution(paths, receipt)
         if facts["terminal"] is not None or folder not in {"pending", "processing"} or mode != "queue" and folder != "processing":
             raise HostAPIError("REQUEST_NOT_RUNNING", 409)
-        if len(row.get("interjections", [])) >= 64:
-            raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
     require_plugin_source(authorized)
-    entry = store.guidance.append_once({"target_type": "thread", "target_id": payload["thread_id"], "message": message,
+    entry = _interjection_guidance(store, {"target_type": "thread", "target_id": payload["thread_id"], "message": message,
         "delivery": "next_turn" if mode == "queue" else "interrupt", "sender": authorized.binding.installation_ref,
         "metadata": {"expected_turn_id": request_id if mode != "queue" and request_id else "",
                      "plugin_installation_ref": authorized.binding.installation_ref, "input_artifact_refs": refs,
-                     "plugin_request_id": request_id, "mode": mode}}, dedupe_key="plugin-interject:" + uuid4().hex)
+                     "plugin_request_id": request_id, "mode": mode}}, idempotency_key, len(row.get("interjections", [])))
     if folder in {"pending", "processing"}:
         require_plugin_source(authorized)
 
-        # LLM: 同一请求T内保留原path更新锁，合并当前字段而不覆盖heartbeat；源已移动则未知，不能复活pending。
+        # LLM: 同一请求T内保留原path锁；已有guidance重放不计数，部分提交恢复遇满额保unknown，绝不补成65项。
         # 函数用途: 为排队和运行请求共同记录插话计数，保留其它并发字段。
         def record(current):
             if current.get("id") != request_id or current.get("request_fingerprint") != row.get("request_fingerprint"):
+                raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
+            if any(item.get("guidance_id") == entry.guidance_id for item in current.get("interjections", [])):
+                return current
+            if len(current.get("interjections", [])) >= 64:
                 raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
             return {**current, "interjections": [*current.get("interjections", []), {"guidance_id": entry.guidance_id, "mode": mode}]}
 
@@ -537,7 +561,7 @@ def _append_interjection(domain, authorized, context, paths, store, payload):
             "mode": mode, "guidance_id": entry.guidance_id}
 
 
-# LLM: 真实发行对象、线程范围和准确请求归属均先核；原input T串行插话与终态，不授予额外执行能力。
+# LLM: 真实来源/线程先核，opaque请求ID在构造原T锁前验证；可选key只交原guidance幂等门，不授执行能力。
 # 函数用途: 通过原guidance原账受理线程或活动回合插话。
 def interject_request(domain, authorized, context, paths, store):
     from contextlib import nullcontext
@@ -552,7 +576,13 @@ def interject_request(domain, authorized, context, paths, store):
     if thread.status != "active":
         raise HostAPIError("THREAD_ARCHIVED", 409)
     _interjection_input(payload)
+    if payload.get("request_id") is not None:
+        try:
+            payload["request_id"] = validate_opaque_id(payload["request_id"], kind="plugin_request")
+        except ValueError:
+            raise HostAPIError("INVALID_SCHEMA") from None
     scope = inputs.gateway_input_transition(paths, payload["request_id"]) if payload.get("request_id") else nullcontext()
     with scope:
-        result = _append_interjection(domain, authorized, context, paths, store, payload)
+        result = _append_interjection(domain, authorized, context, paths, store, payload,
+                                      idempotency_key=authorized.call.idempotency_key)
     return DomainResult(202, result)

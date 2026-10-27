@@ -1,3 +1,28 @@
+## 2026-10-27 Wave 7 W6 R2：真实兄弟签名、execute幂等与锁前校验
+
+来源：`07-tasks/wave7-w6-r2-fixes.md`，起点 `2210241509976f938a6dc6f31f15ed854a8efeb0`。只改W6工作树；W4/W5仅作只读参考，不推送、部署或启停服务。
+
+- `gateway_composition` 惰性识别W4线程/模型类，按当前Owner传入HomePaths、准确授权及可选同Owner Agent。兼容模块级三位置参数及旧Owner函数；W5接`(context, payload)`，内置插件按真实签名过滤关键字。先bind再调用，不捕获handler内部TypeError重试。能力包桥接原安装读口，缺导出保持未就绪。
+- `decode_call`仅对execute允许可选合法幂等key；write/async必填与read/stream禁止不变。带key门户execute沿原摘要控制账重放。组合根及Gateway内部末核均将已返回的execute标committed，进入后未知异常保unknown，不删原executing回执开放重放。
+- 插话沿原guidance稳定key和原请求关联去重；同key异文409，64项边界已关联重试不再计数。guidance已提交但关联未完成且配额已满的恢复窗口保unknown，不补成65项；不另建请求账。
+- 请求ID在构造原input transition之前用真实opaque validator校验。附件根及Owner内祖先拒链接，空相对路径拒绝；从Owner/文件系统根逐段nofollow读取，宿主控制目录及冻结原goal的约束保留。
+- 旧基础动作矩阵按任务授权同时减去独立覆盖的`V2_ACTIONS`与`PORTAL_V2_ACTIONS`，原全集等式及逐动作extra拒绝保留，不删案例或放宽payload。
+
+新增`test_plugin_host_w6_r2.py`定向回归54项，覆盖真实issuer/控制回执/guidance原账、精确兄弟签名、同Owner Agent、execute有无key及异文、handler内部异常/末核撤权、插话满额恢复和链接路径。缺陷反例实际先红后绿；保留旧读写边界的正反对照。
+
+独立Astra high仅依据内嵌相关源码做有限静态复核；线程模块旧签名缺口及两项边界风险均补反例修正。另在临时Owner中只读编译W4/W5真实源码作进程内组合联测，需包含W4的`conversations.py`新依赖；设置/选模、服务商、内置开关、工作区文件和子代理列表通过，无Agent的compact/steer明确503。源字节哈希前后核对一致。这不是实际挑入、部署、模型调用或真实停止验收。
+
+任务原指定命令中的`test_plugin_host_v2_execution.py`在本基线不存在，实际执行退出4，不创建占位测试。当前存在的全部Host v2文件及两轮W6回归按下列命令验证，完整结果保留在JUnit。尺寸报告必须外置，不能与pytest并行改写被跟踪的`CODE_SIZE_REPORT.md`。
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_plugin_host_requests_and_streams_v2.py agent_py_agent/tests/test_plugin_host_w6_r2.py agent_py_agent/tests/test_plugin_host_v2_*.py -q --tb=short --junitxml=.pytest_cache/w6-r2-full.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w6-r2-size.md
+git diff --check
+```
+
+未改变的边界：只在线程上的统计仍不能冒充可归属单请求的计量；真实模型压缩、多模态消费、跨进程停止及W1安装读口合入后的能力包列表尚未端到端验证。插话key按任务给定原格式保存，不宣称新增了跨installation的独立key命名空间；宿主Owner根以上仍是原可信路径边界。
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。
