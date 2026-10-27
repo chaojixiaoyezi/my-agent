@@ -32,9 +32,13 @@ _MAX, _GIT_MAX = 20 * 1024 * 1024, 256 * 1024
 def _forbid_internal(home, target):
     if any(part.lower() == ".git" for part in target.parts):
         raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
-    if target.is_relative_to(home) and any(target.is_relative_to(home.joinpath(*parts))
-            for parts in (*HOST_STATE_OWNER_DIRS, ("runs",))):
-        raise HostAPIError("WORKSPACE_PATH_INVALID")
+    t_parts = tuple(p.lower() for p in target.parts)
+    for base in (home, home.resolve(strict=False)):
+        h_parts = tuple(p.lower() for p in base.parts)
+        if t_parts[:len(h_parts)] == h_parts:
+            rel = t_parts[len(h_parts):]
+            if any(rel[:len(parts)] == tuple(p.lower() for p in parts) for parts in (*HOST_STATE_OWNER_DIRS, ("runs",))):
+                raise HostAPIError("WORKSPACE_PATH_INVALID")
 # LLM: 目录I/O前先拒绝.git组件，再核owner内外根与控制目录；持有字面路径FD，resolve不能放行根链接。
 # 函数用途: 验证根并在全程持有目录FD，所有异常关闭资源。
 @contextmanager

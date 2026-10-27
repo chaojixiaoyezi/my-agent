@@ -695,3 +695,24 @@ def test_r4_jsonl_unicode_separators_are_content(case, message_thread, separator
         assert [row["content"] for row in result["messages"]] == [content]
     else:
         assert result["steps"] == [raw]
+
+
+# LLM: 大小写不敏感文件系统上DATA/RUNS/workspace/RUNTIME等受保护宿主目录别名同样必须被拒绝。
+# 函数用途: 覆盖工作区根路径与相对路径的大小写受保护目录在列举、读取、下载和上传入口的拦截。
+@pytest.mark.parametrize("alias", ["DATA", "DaTa", "RUNS", "workspace/RUNTIME", "WORKSPACE/runtime"])
+def test_r5_case_insensitive_protected_dirs_forbidden(case, alias):
+    encoded = base64.b64encode(b"probe").decode()
+    for root_val, rel_val in ((str(case.root / alias), "probe.txt"), (str(case.root), f"{alias}/probe.txt")):
+        with pytest.raises(HostAPIError) as err_list:
+            files.list_workspace_files(case.context, {"workspace_dir": root_val, "relative_path": "" if root_val != str(case.root) else alias})
+        assert err_list.value.code == "WORKSPACE_PATH_INVALID"
+        with pytest.raises(HostAPIError) as err_read:
+            files.read_workspace_file(case.context, {"workspace_dir": root_val, "path": rel_val})
+        assert err_read.value.code == "WORKSPACE_PATH_INVALID"
+        with pytest.raises(HostAPIError) as err_down:
+            files.download_workspace_file(case.context, {"workspace_dir": root_val, "path": rel_val})
+        assert err_down.value.code == "WORKSPACE_PATH_INVALID"
+        if root_val != str(case.root):
+            with pytest.raises(HostAPIError) as err_up:
+                files.upload_workspace_file(case.context, {"workspace_dir": root_val, "path": "probe.txt", "data_base64": encoded})
+            assert err_up.value.code == "WORKSPACE_PATH_INVALID"
