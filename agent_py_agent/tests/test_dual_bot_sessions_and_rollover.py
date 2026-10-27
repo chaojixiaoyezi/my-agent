@@ -852,3 +852,175 @@ def test_holistic_pending_automatic_recovery_defers_for_foreground(bot, monkeypa
     assert result["active_thread_id"] == target and result["generation"] == 2 and result["rolled_over"]
     assert invoke() == {**result, "idempotent_replay": True} if operation == "submit" else invoke() == result
     assert len(bot.store.threads.list()) == 2
+
+
+@pytest.mark.parametrize("mode", ["query_readonly", "action_avatar"])
+def test_h03_network_false_strips_network_and_opaque_extension_tools(tmp_path, mode):
+    from agent_py_agent.agent.conversation.bot_tool_policy import snapshot_for_bot_request
+    from agent_py_agent.agent.tooling._filesystem_read import ReadFileTool
+    from agent_py_agent.agent.tooling.models import ToolRuntime, ToolRuntimeSnapshot
+
+    names = {"read_file", "web_search", "http_request", "fetch_url", "browser", "mcp_remote_query", "plugin__remote",
+             "scripts", "workflows", "schedule", "run_command", "terminal_session"}
+    rows = []
+    for name in names:
+        tool = ReadFileTool(tmp_path, max_chars=1000)
+        tool.model_spec = replace(tool.model_spec, name=name)
+        rows.append(ToolRuntime(tool.model_spec, tool.runtime_policy, tool))
+    snapshot = ToolRuntimeSnapshot(run_id="offline-bot", runtimes=tuple(rows),
+        available_tool_names=frozenset(names), unavailable_tools=(), allowed_tools=None)
+    policy = {"schema": "plugin_execution_policy.v1", "bot_mode": mode,
+              "tool_names": sorted(names), "network": False, "in_audit_group": False}
+    assert snapshot_for_bot_request(snapshot, policy).allowed_tools == frozenset({"read_file"})
+    assert snapshot.available_tool_names == frozenset(names)
+
+
+@pytest.mark.parametrize("mode", ["query_readonly", "action_avatar"])
+def test_h03_worker_receives_host_execution_policy(wired_host, mode):
+    from agent_py_agent.agent.gateway_parts.request_execution import _gateway_run_params
+
+    inputs = queued_bot_params(wired_host, mode=mode)
+    params = _gateway_run_params(inputs)
+    policy = inputs.request["metadata"]["plugin_execution_policy"]
+    execution = (params.task_attributes or {}).get("bot_execution_policy")
+    assert execution == {"network": False,
+        "workspace_root": str(inputs.context.agent.home_paths.workspace_dir),
+        "max_tool_calls": policy["budgets"]["max_tool_calls"],
+        "learning_excluded": mode == "query_readonly"}
+    assert policy["bot_execution_policy"] == execution
+    assert params.write_boundary["execution_cwd"] == execution["workspace_root"]
+
+
+# LLM: 只替代模型叶，原入队、receipt身份、worker参数构造和ToolRegistry.execute_tool均真实执行；不访问真实账号或网络。
+# 函数用途: 用同一worker入口重现越界读、跨轮预算和调用后作用域恢复。
+@pytest.mark.parametrize("mode", ["query_readonly", "action_avatar"])
+@pytest.mark.parametrize("probe", ["budget", "outside", "relative", "symlink", "shared", "compact", "parallel", "exception", "write"])
+def test_h03_worker_hard_gates_before_actual_file_handler(wired_host, monkeypatch, probe, mode):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts.request_execution import (
+        _run_gateway_turn_with_conversation_compact,
+    )
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.plugin_host import gateway_runtime
+    from agent_py_agent.agent.settings.model_scope import ModelScopedAttribute
+    from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
+    from agent_py_agent.agent.tooling.runtime_contracts import ToolCall
+
+    original = gateway_runtime.bot_execution_policy
+
+    def issue(*args):
+        policy = original(*args)
+        policy["budgets"]["max_tool_calls"] = 2
+        if "bot_execution_policy" in policy:
+            policy["bot_execution_policy"]["max_tool_calls"] = 2
+        return policy
+
+    monkeypatch.setattr(gateway_runtime, "bot_execution_policy", issue)
+    inputs = queued_bot_params(wired_host, mode=mode)
+    old = inputs.context.agent
+    home = old.home_paths
+    home.workspace_dir.mkdir(parents=True, exist_ok=True)
+    (home.workspace_dir / "inside.txt").write_text("inside")
+    outside = home.home_dir / "private-fixture.txt"
+    outside.write_text("outside-private")
+    shared = home.root / "shared/h03-shared.txt"
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.write_text("outside-private")
+    (home.workspace_dir / "link.txt").symlink_to(outside)
+    operation_store = LocalStore(home.home_dir / "data/h03-local.db", enable_fts=False)
+    registry = ToolRegistry(ToolRegistryParams(workspace_root=home.workspace_dir, max_chars=1000,
+        max_entries=20, max_matches=20, web_max_chars=1000, http_timeout=1, catalog_limit=20,
+        retrieval_limit=3, vector_search_enabled=False, owner_scope_root=str(home.home_dir),
+        path_access_mode="full", defer_mcp_connect=True, operation_store=operation_store,
+        operation_owner_id="local/alice"))
+
+    class ScopedAgent(SimpleNamespace):
+        tools = ModelScopedAttribute("tools")
+        config = ModelScopedAttribute("config")
+
+    agent = ScopedAgent(**vars(old))
+    agent.tools = registry
+    inputs = replace(inputs, context=replace(inputs.context, agent=agent))
+    outcomes, slices = [], []
+    written = home.workspace_dir / "bot-write.txt"
+    outside_write = home.home_dir / "bot-write.txt"
+
+    def call(path, identifier, *, tool_name="read_file"):
+        arguments = {"path": path, **({"content": "bot-write"} if tool_name == "write_file" else {})}
+        return ToolCall(tool_name=tool_name, arguments=arguments, call_id=identifier,
+            source_protocol="native", schema_hash=registry.tools[tool_name].model_spec.schema_hash,
+            run_id="h03-run", turn_id=inputs.context.request_id, attempt_id="h03-attempt")
+
+    def run(_prompt, *, params):
+        slices.append(params)
+        assert agent.tools.operation_store is operation_store
+        assert agent.tools.operation_store_required is True
+        path = {"outside": str(outside), "relative": "../private-fixture.txt", "symlink": "link.txt",
+                "shared": str(shared)}.get(probe, "inside.txt")
+        count = 3 if probe == "budget" else 2 if probe == "write" else 8 if probe == "parallel" else 1
+
+        def execute(index):
+            target = (str(written) if index == 0 else str(outside_write)) if probe == "write" else path
+            proposed = call(target, f"h03-call-{len(slices)}-{index}",
+                tool_name="write_file" if probe == "write" else "read_file")
+            snapshot = agent.tools.runtime_snapshot(allowed_tools=params.allowed_tools, run_id="h03-run")
+            boundary = {**params.write_boundary, "canonical_owner_home_root": str(home.home_dir)}
+            return agent.tools.execute_tool(proposed, write_boundary=boundary, runtime_snapshot=snapshot).result
+
+        if probe == "parallel":
+            from concurrent.futures import ThreadPoolExecutor
+            from contextvars import copy_context
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [pool.submit(copy_context().run, execute, i) for i in range(count)]
+                outcomes.extend(future.result() for future in futures)
+        else:
+            outcomes.extend(execute(i) for i in range(count))
+        if probe == "exception":
+            raise ValueError("fixture model interruption")
+        return SimpleNamespace(runtime_status="context_overflow" if probe == "compact" and len(slices) < 3 else "ok",
+            archive_tool_calls=(), active_turn_user_inputs=(), runtime_source="provider_error")
+
+    agent.run = run
+    if probe == "compact":
+        monkeypatch.setattr("agent_py_agent.agent.gateway_parts.request_execution._gateway_compact_overflowing_turn",
+            lambda *args, **kwargs: inputs.conversation)
+    try:
+        if probe == "exception":
+            with pytest.raises(ValueError, match="fixture model interruption"):
+                _run_gateway_turn_with_conversation_compact(inputs.context, inputs.prompt, inputs.conversation)
+        else:
+            _run_gateway_turn_with_conversation_compact(inputs.context, inputs.prompt, inputs.conversation)
+        assert agent.tools is registry
+        if probe in {"budget", "compact", "parallel"}:
+            assert sum(row.ok for row in outcomes) == 2
+            assert all(row.reported_error_code == "BOT_TOOL_BUDGET_EXCEEDED" and row.handler_executed is False
+                for row in outcomes if not row.ok)
+            if probe != "parallel":
+                assert [row.ok for row in outcomes] == [True, True, False]
+        elif probe == "write":
+            assert [row.ok for row in outcomes] == [mode == "action_avatar", False], [
+                (row.reported_error_code, row.output) for row in outcomes]
+            assert written.exists() is (mode == "action_avatar")
+            assert not outside_write.exists()
+        elif probe == "exception":
+            assert outcomes[0].ok
+        else:
+            assert outcomes[-1].ok is False
+            assert "outside-private" not in outcomes[-1].output
+        snapshot = registry.runtime_snapshot(allowed_tools=["read_file"], run_id="h03-run")
+        unrestricted = registry.execute_tool(call(str(outside), "h03-after-scope"),
+            write_boundary=None, runtime_snapshot=snapshot)
+        assert unrestricted.result.ok and "outside-private" in unrestricted.result.output
+    finally:
+        registry.close_mcp_clients()
+
+
+@pytest.mark.parametrize("tool_name,action", [("scripts", "run"), ("workflows", "run"),
+    ("workflows", "resume"), ("schedule", "create"), ("process_session", "stop"), ("user_config", "set")])
+def test_h03_offline_guard_rejects_opaque_or_mutating_operations(tool_name, action):
+    from agent_py_agent.agent.conversation.bot_tool_policy import bot_tool_allowed
+
+    assert not bot_tool_allowed("action_avatar", tool_name, {"action": action},
+        allowed_tools={tool_name}, network=False)

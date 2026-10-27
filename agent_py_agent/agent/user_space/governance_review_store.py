@@ -92,7 +92,7 @@ class GovernanceReviewStore:
             raise ValueError("invalid risk summary")
         action = json.loads(json.dumps(requested_action, allow_nan=False))
         if applicant_thread_id:
-            thread = _managed_conversations(home).threads.require(applicant_thread_id)
+            thread = _managed_conversations(home, thread_id=applicant_thread_id).threads.require(applicant_thread_id)
             if thread.owner_id != home.owner_id:
                 raise ManagedUserScopeDeniedError()
         control = _GovernanceControl(self.root_dir, uid)
@@ -366,7 +366,7 @@ def _notify_review(home, item: dict[str, Any]) -> None:
         _write_review(control, item)
         return
     try:
-        store = _managed_conversations(home, initialize=True)
+        store = _managed_conversations(home, initialize=True, thread_id=thread_id)
         thread = store.threads.require(thread_id)
         if thread.owner_id != home.owner_id:
             raise ManagedUserScopeDeniedError()
@@ -374,10 +374,15 @@ def _notify_review(home, item: dict[str, Any]) -> None:
                   "target_owner_id": home.owner_id, "status": item["status"], "feedback": item["feedback"],
                   "decided_by": "local/main"}
         key = f"governance-review:{item['review_id']}:{item['status']}"
-        store.messages.append_once({"thread_id": thread_id, "role": "system", "channel": "internal",
-            "content": json.dumps(notice, ensure_ascii=False), "metadata": {"governance_review": notice}}, dedupe_key=key)
-        store.wakes.raise_signal({"thread_id": thread_id, "reason": "governance_review_decision", "dedupe_key": key,
-            "summary": json.dumps(notice, ensure_ascii=False), "metadata": {"governance_review": notice, "execution_owner_id": home.owner_id}})
+        stores = {store.storage.root: store}
+        rt_store = _managed_conversations(home, initialize=False, thread_id="*")
+        if rt_store.storage.root.exists() and rt_store.threads.load(thread_id) is not None:
+            stores.setdefault(rt_store.storage.root, rt_store)
+        for target in stores.values():
+            target.messages.append_once({"thread_id": thread_id, "role": "system", "channel": "internal",
+                "content": json.dumps(notice, ensure_ascii=False), "metadata": {"governance_review": notice}}, dedupe_key=key)
+            target.wakes.raise_signal({"thread_id": thread_id, "reason": "governance_review_decision", "dedupe_key": key,
+                "summary": json.dumps(notice, ensure_ascii=False), "metadata": {"governance_review": notice, "execution_owner_id": home.owner_id}})
         item["notification_status"] = "queued"
         item.pop("notification_error_type", None)
     except Exception as error:

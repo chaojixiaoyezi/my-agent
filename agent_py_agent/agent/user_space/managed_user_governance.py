@@ -525,24 +525,37 @@ def _finish_persona_transaction(service, control, home, transaction):
     return result
 
 
-# LLM: ConversationStore必须使用目标owner/conversations，读写均先检查目录链；不接管理员队列。
-# 函数用途: 打开受管用户自己的原会话存储。
-def _managed_conversations(home: OwnerHomeResult, *, initialize: bool = False):
+# LLM: 核对目标owner/conversations与唯一runtime_paths会话库；读写均先检查nofollow目录链，不接管理员队列。
+# 函数用途: 打开受管用户自己的原会话存储，按需定位运行时workspace会话线程。
+def _managed_conversations(home: OwnerHomeResult, *, initialize: bool = False, thread_id: str = ""):
     import os
+    from types import SimpleNamespace
 
     from ..common.nofollow_fs import ensure_private_dir, open_directory_beneath
     from ..conversation.store import ConversationStore
+    from .runtime_paths import runtime_paths_for_agent
 
+    direct = home.home_dir / "conversations"
+    scoped = SimpleNamespace(owner_home_dir=home.home_dir, owner_workspace_dir=home.workspace_dir)
+    runtime = runtime_paths_for_agent(SimpleNamespace(), home.home_dir, scoped)["conversation_workspace"]
     if initialize:
-        ensure_private_dir(home.home_dir / "conversations", canonical_root=home.root)
+        ensure_private_dir(direct, canonical_root=home.root)
     try:
-        descriptor = open_directory_beneath(home.root, ("owners", "local", home.identity.owner_id, "conversations"))
+        os.close(open_directory_beneath(home.root, ("owners", "local", home.identity.owner_id, "conversations")))
     except FileNotFoundError:
         if initialize:
             raise
-    else:
-        os.close(descriptor)
-    return ConversationStore(home.home_dir / "conversations", initialize=initialize)
+    direct_store = ConversationStore(direct, initialize=initialize)
+    if runtime != direct and runtime.exists():
+        os.close(open_directory_beneath(home.root, runtime.relative_to(home.root).parts))
+        runtime_store = ConversationStore(runtime, initialize=False)
+        if thread_id == "*":
+            return runtime_store
+        if thread_id and direct_store.threads.load(thread_id) is None and runtime_store.threads.load(thread_id) is not None:
+            return runtime_store
+        if not thread_id and not (direct / "threads").exists() and (runtime / "threads").exists():
+            return runtime_store
+    return direct_store
 
 
 # LLM: 只创建目标owner线程和原task/wake事实；priority只是队列级别，不扩大用户权限。
@@ -554,7 +567,7 @@ def _dispatch_managed_task(home, prompt, title, thread_id, priority):
         raise ValueError("invalid prompt")
     if type(title) is not str or len(title) > 160 or priority not in {"normal", "high", "urgent", "low"}:
         raise ValueError("invalid dispatch options")
-    store = _managed_conversations(home, initialize=True)
+    store = _managed_conversations(home, initialize=True, thread_id=str(thread_id or ""))
     thread = store.threads.require(thread_id) if thread_id else store.threads.create(
         canonical_user_id=home.owner_id, title=title, owner_id=home.owner_id, owner_home=str(home.home_dir),
         workspace_root=str(home.workspace_dir), cwd=str(home.workspace_dir))
@@ -563,13 +576,20 @@ def _dispatch_managed_task(home, prompt, title, thread_id, priority):
     request_id, task_id = new_id("request"), new_id("task")
     metadata = {"dispatched_by": "local/main", "target_owner_id": home.owner_id,
                 "execution_owner_id": home.owner_id, "request_id": request_id, "task_id": task_id}
-    store.messages.append({"thread_id": thread.thread_id, "role": "user", "content": prompt,
-                           "channel": "internal", "metadata": metadata})
-    store.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "request_id": request_id,
-                      "goal": prompt, "status": "queued"})
-    store.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "admin_dispatched_task", "root_task_id": task_id,
-                              "summary": prompt, "urgency": "urgent" if priority in {"high", "urgent"} else "normal",
-                              "metadata": metadata, "dedupe_key": task_id})
+    urgency = "urgent" if priority in {"high", "urgent"} else "normal"
+    stores = {store.storage.root: store}
+    for extra in (_managed_conversations(home, initialize=False), _managed_conversations(home, initialize=False, thread_id="*")):
+        if extra.storage.root.exists():
+            stores.setdefault(extra.storage.root, extra)
+    for target in stores.values():
+        if target.threads.load(thread.thread_id) is None:
+            target.threads.write(thread)
+        target.messages.append({"thread_id": thread.thread_id, "role": "user", "content": prompt,
+                                "channel": "internal", "metadata": metadata})
+        target.tasks.bind({"thread_id": thread.thread_id, "task_id": task_id, "request_id": request_id,
+                           "goal": prompt, "status": "queued"})
+        target.wakes.raise_signal({"thread_id": thread.thread_id, "reason": "admin_dispatched_task", "root_task_id": task_id,
+                                   "summary": prompt, "urgency": urgency, "metadata": metadata, "dedupe_key": task_id})
     return {"ok": True, **metadata, "thread_id": thread.thread_id, "status": "queued"}
 
 
@@ -578,16 +598,24 @@ def _dispatch_managed_task(home, prompt, title, thread_id, priority):
 def _list_managed_tasks(home, status_filter, limit):
     if type(limit) is not int or not 1 <= limit <= 200:
         raise ValueError("limit must be between 1 and 200")
-    store = _managed_conversations(home)
-    threads = store.threads.list(limit=200)
-    tasks, errors = [], []
-    for thread in threads:
-        if thread.owner_id and thread.owner_id != home.owner_id:
-            raise ManagedUserScopeDeniedError()
-        rows, failures = store.tasks.list_report(thread.thread_id)
-        tasks.extend(row.to_dict() for row in rows)
-        errors.extend(failures)
-    selected = [row for row in tasks if status_filter is None or row.get("status") == status_filter]
+    stores = {_managed_conversations(home).storage.root: _managed_conversations(home)}
+    runtime_store = _managed_conversations(home, thread_id="*")
+    stores.setdefault(runtime_store.storage.root, runtime_store)
+    by_key, errors, total_threads = {}, [], 0
+    for store in stores.values():
+        threads = store.threads.list(limit=200)
+        total_threads = max(total_threads, len(threads))
+        for thread in threads:
+            if thread.owner_id and thread.owner_id != home.owner_id:
+                raise ManagedUserScopeDeniedError()
+            rows, failures = store.tasks.list_report(thread.thread_id)
+            for row in rows:
+                item = row.to_dict()
+                key = (item.get("thread_id"), item.get("task_id"))
+                if key not in by_key or item.get("updated_at", 0) >= by_key[key].get("updated_at", 0):
+                    by_key[key] = item
+            errors.extend(failures)
+    selected = [row for row in by_key.values() if status_filter is None or row.get("status") == status_filter]
     selected.sort(key=lambda row: row.get("updated_at", 0), reverse=True)
     subagents = []
     for path in sorted(home.agents_dir.glob("*/state.json"))[:200]:
@@ -597,7 +625,7 @@ def _list_managed_tasks(home, status_filter, limit):
     monitors = _managed_monitor_rows(home)
     return {"target_owner_id": home.owner_id, "tasks": selected[:limit], "subagent_runs": subagents[:limit],
             "scheduled_jobs": [row for row in monitors if status_filter is None or row.get("status") == status_filter][:limit],
-            "errors": errors, "truncated": len(selected) > limit or len(threads) == 200,
+            "errors": errors, "truncated": len(selected) > limit or total_threads == 200,
             "coverage": {"thread_scan_limit": 200}}
 
 

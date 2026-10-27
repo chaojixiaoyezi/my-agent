@@ -1,3 +1,8 @@
+## 2026-10-26 全量跨模块对向审计收口结构（Bot 执行约束与协调路径派生清理）
+
+- `gateway_parts/request_execution.py::_gateway_run_params` 接收 `bot_request_allowed_tools(..., return_constraints=True)` 返回的 `(allowed_tools, bot_constraints)`，通过 `_bind_bot_execution_policy` 将结构化约束绑定至当前 worker agent 并设置 `learning_excluded`；`conversation/bot_tool_policy.py::wrap_bot_tool_registry` 对多动作工具按 `READONLY_TOOL_ACTIONS` 校验只读子操作、强校验物理 `workspace_root` 与 `max_tool_calls` 预算。
+- `user_space/owner_maintenance_transition.py::run_with_transition` 在原 retention 与事件维护完成后调用 `_prune_local_store_derived_records` 并将 `derived_records_pruned` 写入同一维护回执；`user_space/managed_user_governance.py::_managed_conversations` 兼容直连 `conversations` 与 `runtime_paths` 会话库，保障跨入口线程派单、列表与审核通知一致。
+
 ## 2026-10-26 Wave 5 Track A Round 2 冷 Curator 输入结构
 ## 2026-10-26 WT-AG2-R2B 原worker消费Bot策略结构
 

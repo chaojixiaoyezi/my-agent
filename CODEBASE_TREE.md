@@ -66,8 +66,11 @@
 |-- agent_py_agent/agent/user_space/governance_review_store.py # 权威提审记录、目标绑定CAS、批复执行及通知
 |-- agent_py_agent/tests/test_admin_managed_users_governance.py # 受管边界、原仓库接线、人格并发及管理员工具回归
 |-- agent_py_agent/tests/test_cross_owner_asset_delivery.py # 跨用户资产投递、秘密拦截、屏蔽名单与默认禁用门端到端单测
+|-- agent_py_agent/tests/test_managed_user_governance.py # 受管用户改名Skill身份、监控依赖闭包与运行时会话同步回归
 |-- agent_py_agent/tests/test_perf_a1_a5_optimizations.py # A1-A5 产物查找、user_config 瘦身、计时拆分与上下文去重单测
-`-- agent_py_agent/tests/test_sandbox_profile_perf.py # B1 macOS Seatbelt 规则收敛与 TinyScheme 1024B 字面量上限编译单测
+|-- agent_py_agent/tests/test_persona_agents_ownership.py # 受管用户 AGENTS/SOUL 提审排队与非受管Owner直拒回归
+|-- agent_py_agent/tests/test_sandbox_profile_perf.py # B1 macOS Seatbelt 规则收敛与 TinyScheme 1024B 字面量上限编译单测
+`-- agent_py_agent/tests/test_user_config_tool.py # user_config write/patch 严格白名单与拒绝未知字段回归
 ```
 
 关键文件说明：`assets/delivery_*.py` 实现跨用户四类一等公民拓扑闭包投递、秘密阻断与两阶段默认禁用安装；`user_space/managed_user_governance.py` 与 `governance_review_store.py` 实现主管理员对自建本地普通用户的六大治理域与通用提审流；`plugin_host/governance_delivery_v2_handlers.py` 将新增 21 个动作接入 Plugin Host API v2（总计 86 动作）；`A1..A5` 与 `B1..B4` 完成全链路延迟与 CPU 轮询收敛。

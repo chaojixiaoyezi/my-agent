@@ -1200,3 +1200,120 @@ def test_r4_all_schema_variants_strip_camel_literals_and_keep_public_values(tmp_
     for key in _R4_PUBLIC_KEYS:
         assert projected[key] == public
     assert inventory(source) == before
+
+
+# LLM: 合成短秘密不依赖字符串模式识别；同一键分类须覆盖对象、列表与复合命名，不能丢掉普通业务值。
+# 函数用途: 回归公开值与黑盒净化器在任意有界嵌套中的敏感键脱敏。
+@pytest.mark.parametrize("field", ["clientSecret", "authToken", "privateKey", "passPhrase", "webHook",
+    "serviceAuthToken", "dbPrivateKey", "APIKey", "auth key", "db.pin"])
+@pytest.mark.parametrize("projector", ["public_value", "scrub_private_result"])
+def test_h02_nested_public_values_use_shared_sensitive_keys(field, projector):
+    from agent_py_agent.agent.audit_group import safe_projection as module
+
+    value = {"rows": [{"nested": {field: {"nested": ["h02-short-secret"]},
+                                       "monkey": 7, "sketch": [3, 4], "password": "old-secret"}}],
+             "count": 3, "code": "hidden-source", "message": "api_key=old-text-secret"}
+    original = json.dumps(value)
+    projected = (module.public_value(value) if projector == "public_value"
+                 else module.scrub_private_result(value, {}))
+    nested = projected["rows"][0]["nested"]
+    assert nested[field] == "<redacted>" and nested["password"] == "<redacted>"
+    assert nested["monkey"] == 7 and nested["sketch"] == [3, 4] and projected["count"] == 3
+    assert "code" not in projected
+    assert all(secret not in json.dumps(projected)
+               for secret in ("h02-short-secret", "old-secret", "hidden-source", "old-text-secret"))
+    assert json.dumps(value) == original
+
+
+# LLM: 字面对象不能按schema解释；敏感属性的schema结构仍保留，普通属性的四类字面值必须不变。
+# 函数用途: 回归default/examples/const/enum内跨列表与字典的敏感键，并验证所有真实摘要出口。
+@pytest.mark.parametrize("schema_field", ["parameters_schema", "input_schema", "output_schema", "config_schema"])
+@pytest.mark.parametrize("location", ["record", "metadata", "descriptor"])
+def test_h02_observation_object_literals_are_sanitized(tmp_path, schema_field, location):
+    from agent_py_agent.agent.audit_group.observation_service import AuditGroupObservationService
+
+    member(tmp_path)
+    literal = {"clientSecret": "h02-default-secret", "rows": [
+        {"authToken": "h02-token-secret", "nested": {"privateKey": "h02-key-secret", "count": 5}}],
+        "passPhrase": ["h02-pass-secret"], "webHook": {"url": "h02-hook-secret"}, "monkey": 3}
+    schema = {"type": "object", "default": literal, "examples": [literal], "const": literal, "enum": [literal],
+              "properties": {"clientSecret": {"type": "string", "default": "h02-property-secret"},
+                             "count": {"type": "integer", "default": 3, "enum": [3, 4]}}}
+    patch = {schema_field: schema} if location == "record" else {location: {schema_field: schema}}
+    asset(tmp_path, "script", "h02-schema", **patch)
+    source = tmp_path / "owners/local/main"
+    before = inventory(source)
+    result = AuditGroupObservationService(tmp_path).summarize_assets(
+        "local/alice", target_owner="local/main", kinds=["script"])
+    assert result["coverage"] == "complete" and result["source_errors"] == []
+    row, = result["items"]
+    projected = row[schema_field]
+    assert projected["type"] == "object"
+    assert projected["properties"]["clientSecret"] == {"type": "string"}
+    assert projected["properties"]["count"] == {"type": "integer", "default": 3, "enum": [3, 4]}
+    for obj in (projected["default"], projected["examples"][0], projected["const"], projected["enum"][0]):
+        assert obj["monkey"] == 3 and obj["rows"][0]["nested"]["count"] == 5
+        assert obj["clientSecret"] == obj["passPhrase"] == obj["webHook"] == "<redacted>"
+        assert obj["rows"][0]["authToken"] == obj["rows"][0]["nested"]["privateKey"] == "<redacted>"
+    assert "h02-" not in json.dumps(projected)
+    assert inventory(source) == before
+
+
+# LLM: 仅替代OS执行边界，成员鉴权、真实来源冻结、结果投影和caller回执落盘均走产品入口。
+# 函数用途: 验证黑盒嵌套结果不能回流复合秘密键，且正常值及身份合同保持。
+def test_h02_blackbox_nested_result_and_receipt_are_sanitized(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+
+    invocation_assets(tmp_path)
+    nested = {"rows": [{"clientSecret": "h02-blackbox-secret", "payload": {
+        "authToken": "h02-blackbox-token", "privateKey": ["h02-blackbox-key"], "monkey": 17}}]}
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", lambda *_a, **_k: {"value": nested})
+    result = module.AuditGroupBlackboxInvokeService(tmp_path).invoke_asset(
+        "local/alice", source_owner="local/main", asset_type="script", asset_id="source_script")
+    assert result["status"] == "succeeded"
+    assert result["caller_owner_id"] == result["output_workspace_owner"] == "local/alice"
+    row = result["result"]["value"]["rows"][0]
+    assert row["clientSecret"] == row["payload"]["authToken"] == row["payload"]["privateKey"] == "<redacted>"
+    assert row["payload"]["monkey"] == 17 and "h02-blackbox-" not in json.dumps(result)
+    receipts = list((tmp_path / "owners/local/alice/data/audit_group_exec").rglob("result.json"))
+    assert receipts
+    assert all("h02-blackbox-" not in path.read_text() for path in receipts)
+
+
+# LLM: 深度/成员/节点预算保持原上限；分类使用截断前原键，非字符串键不参与公开投影。
+# 函数用途: 防止统一敏感键修复扩大遍历范围、误伤普通值或被长键绕过。
+def test_h02_projection_preserves_bounds_and_classifies_original_keys():
+    from agent_py_agent.agent.audit_group.safe_projection import public_value
+
+    long_key = "x" * 130 + "PrivateKey"
+    assert public_value({long_key: "h02-long-key-secret", 1: "ignored", "monkey": 3}) == {
+        "x" * 128: "<redacted>", "monkey": 3}
+    assert public_value({"safe": 1}, depth=9) is None
+    budget = [2]
+    assert public_value({"safe": [1, 2]}, budget=budget) == {"safe": [None, None]}
+    assert budget == [-2]
+    assert public_value(list(range(100))) == list(range(64))
+    assert len(public_value({f"item{i}": i for i in range(100)})) == 64
+    assert public_value({"message": "x" * 5000})["message"] == "x" * 4096
+    nested = {"authToken": "h02-depth-secret", "monkey": 3}
+    for _ in range(10):
+        nested = {"rows": [nested]}
+    assert "h02-depth-secret" not in json.dumps(public_value(nested))
+
+
+# LLM: 错误分支只能返回固定领域码，不能把待过滤原结果或执行异常正文变成公开错误。
+# 函数用途: 沿真实工具入口验证失败时也不会回显合成秘密。
+def test_h02_blackbox_errors_do_not_echo_private_values(tmp_path, monkeypatch):
+    from agent_py_agent.agent.audit_group import blackbox_invoke_service as module
+    from agent_py_agent.agent.tooling.audit_group_tools import AuditGroupInvokeAssetTool
+
+    invocation_assets(tmp_path)
+
+    def fail(*_a, **_k):
+        raise ValueError("clientSecret=h02-error-secret")
+
+    monkeypatch.setattr(module.IsolatedScriptUnit, "execute", fail)
+    result = AuditGroupInvokeAssetTool(tmp_path, "local/alice").execute({
+        "source_owner": "local/main", "asset_type": "script", "asset_id": "source_script"})
+    assert not result.ok and result.reported_error_code == "AUDIT_GROUP_EXECUTION_UNAVAILABLE"
+    assert "h02-error-secret" not in result.output

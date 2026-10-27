@@ -1,5 +1,5 @@
-# LLM: clean_json前核原字节，JSON解码正文再核YAML结构；只豁免完整单行占位/环境引用，不执行表达式或YAML标签。
-# 模块用途: 硬拒绝投递秘密或显式替换为占位符，移除发送方主机路径且无损处理二进制。
+# LLM: clean_json前核原字节；JSON先关联归一化敏感键与完整字符串值，再保留原有正文/YAML/已知秘密扫描，不执行表达式。
+# 模块用途: 为附件和script_store_support提供唯一敏感键口径，硬拒绝秘密或保形替换，移除主机路径且无损处理二进制。
 from __future__ import annotations
 
 import json
@@ -13,8 +13,12 @@ from ..common.log_redaction import redact_sensitive_text
 from ..common.nofollow_fs import list_names_beneath, read_bytes_beneath
 from .delivery_contracts import MAX_BUNDLE_BYTES, AssetDeliveryError
 
+_SECRET_KEYS = frozenset(('secret', 'token', 'password', 'passwd', 'pwd', 'passphrase', 'pass_phrase',
+    'apikey', 'api_key', 'access_key', 'access_token', 'refresh_token', 'client_secret',
+    'private_key', 'auth_token', 'credential', 'webhook', 'web_hook', 'cookie', 'bearer', 'authorization'))
+_KEY_NAME = r'[A-Za-z0-9_][A-Za-z0-9_.-]*'
 _UNQUOTED_ASSIGNMENT = re.compile(
-    r'''(?im)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{}()\[\]]+)[ \t]*(?:\#.*)?$''')
+    rf'''(?im)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?(?P<key>{_KEY_NAME})[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{{}}()\[\]]+)[ \t]*(?:\#.*)?$''')
 _PATTERNS = (
     ('openai_key', re.compile(r'sk-[A-Za-z0-9_-]{20,}')),
     ('aws_access_key', re.compile(r'AKIA[0-9A-Z]{16}')),
@@ -23,7 +27,7 @@ _PATTERNS = (
     ('jwt', re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')),
     ('unquoted_secret_assignment', _UNQUOTED_ASSIGNMENT),
     ('secret_assignment', re.compile(
-        r'''(?i)(?<!\w)(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)(?!\w)["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote)''')),
+        rf'''(?i)(?=(?<![\w.-])[-.]*(?P<key>{_KEY_NAME})["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote))''')),
 )
 _PLACEHOLDER = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}|<[A-Za-z_][A-Za-z0-9_.-]*>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b|\*\*\*REDACTED\*\*\*', re.I)
 _ENV_REFERENCE = re.compile(
@@ -31,10 +35,19 @@ _ENV_REFERENCE = re.compile(
 _SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
     'updated_at', 'created_at', 'kind', 'driver'})
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
-_YAML_KEYS = r'api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer'
-_YAML_HEADER = re.compile(rf'''(?i)^(?P<indent>[ \t]*)(?P<seq>-[ \t]+)?(?P<key>["']?(?:{_YAML_KEYS})["']?)[ \t]*:[ \t]*(?P<tail>.*)$''')
-_YAML_INLINE = re.compile(rf'''(?im)(?:^|(?<=[{{,\[\s]))["']?(?:{_YAML_KEYS})["']?[ \t]*:[ \t]*''')
+_JSON_STRUCTURE_TOKEN = re.compile(_JSON_STRING.pattern + r'|[{}\[\],]')
+_YAML_HEADER = re.compile(rf'''(?i)^(?P<indent>[ \t]*)(?P<seq>-[ \t]+)?["']?(?P<key>{_KEY_NAME})["']?[ \t]*:[ \t]*(?P<tail>.*)$''')
+_YAML_INLINE = re.compile(rf'''(?im)(?:^|(?<=[{{,\[\s]))["']?(?P<key>{_KEY_NAME})["']?[ \t]*:[ \t]*''')
 _YAML_BLOCK = re.compile(r'[|>](?:[1-9][+-]?|[+-][1-9]?)?')
+
+
+# LLM: 仅归一键名；词表同收passPhrase/webHook拆词别名，缩写及camelCase沿完整末尾片段匹配，不误伤token_count。
+# 函数用途: 为JSON、YAML和env/代码赋值提供同一敏感键判定，支持业务前缀及下划线、横线、点连接。
+def _sensitive_key(key):
+    normalized = re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1_\2', key)
+    normalized = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', normalized)
+    normalized = normalized.replace('-', '_').replace('.', '_').lower()
+    return any(normalized == word or normalized.endswith('_' + word) for word in _SECRET_KEYS)
 
 
 # LLM: 只遍历已由本Owner凭据读口认证的内存值；元数据整支排除，任意非空字符串均作为秘密而不按长度猜测。
@@ -182,13 +195,15 @@ def _yaml_flow_step(state, char):
     return state
 
 
-# LLM: 一次扫描括号/引用/注释上下文，位置始终取原文；key自身的引号不泄入后续value，不解析对象或执行标签。
-# 函数用途: 为每个敏感键标注是否位于跨行flow集合内。
+# LLM: 一次扫描括号/引用/注释上下文；键先过统一归一化判定，不让普通键消费敏感值，不解析对象或执行标签。
+# 函数用途: 为每个归一化敏感键标注是否位于跨行flow集合内。
 def _yaml_inline_contexts(text):
     lexical = _yaml_lexical_text(text)
     cursor, state = 0, (0, '', False, False)
     result = []
     for match in _YAML_INLINE.finditer(text):
+        if not _sensitive_key(match['key']):
+            continue
         for char in lexical[cursor:match.start()]:
             state = _yaml_flow_step(state, char)
         result.append((match, state[0]))
@@ -243,14 +258,14 @@ def _yaml_body_lines(lines, index, indent, offset, *, indentless=False, plain=Fa
     return body, end
 
 
-# LLM: 块体保留头及缩进；plain含首值和全部续行只替换一次；容器/引用仍由原flow扫描器处理。
-# 函数用途: 定位块标量、首行带值折行标量及含同级无缩进项的标量列表。
+# LLM: 块体保留头及缩进；只处理统一敏感键，plain首值和续行一起替换；容器/引用仍沿原flow扫描器。
+# 函数用途: 定位归一化敏感键的块标量、折行标量及无缩进项列表。
 def _yaml_indented_spans(text, findings, flow_keys):
     lines, spans, offset = text.splitlines(keepends=True), [], 0
     covered_until = 0
     for index, line in enumerate(lines):
         match = _YAML_HEADER.match(line.rstrip('\r\n'))
-        if match is None or offset < covered_until or offset + match.start('key') in flow_keys:
+        if match is None or not _sensitive_key(match['key']) or offset < covered_until or offset + match.start('key') in flow_keys:
             offset += len(line)
             continue
         tail = match['tail'].split('#', 1)[0].strip()
@@ -277,8 +292,8 @@ def _yaml_indented_spans(text, findings, flow_keys):
     return spans
 
 
-# LLM: 外层flow深度显式交给边界扫描，plain逗号不截断；完整多行替换优先于旧单行赋值规则。
-# 函数用途: 扫描并保形替换YAML flow、多行及块标量秘密，不把块头符号当密码。
+# LLM: 外层flow深度显式交给边界扫描，plain逗号不截断；旧赋值以完整literal闭引号边界接管，零宽定位不改变替换合同。
+# 函数用途: 沿统一敏感键保形扫描YAML flow、多行及块标量，不把块头符号当密码。
 def _scan_and_redact_yaml_structure(text: str, *, findings: set[str], redact: bool) -> str:
     pairs = _yaml_inline_contexts(text)
     spans = _yaml_indented_spans(text, findings, {match.start() for match, depth in pairs if depth})
@@ -306,7 +321,7 @@ def _scan_and_redact_yaml_structure(text: str, *, findings: set[str], redact: bo
         if not depth and (not prefix.strip() or prefix.strip() == '-'):
             legacy = _UNQUOTED_ASSIGNMENT.match(text, line_start)
             quoted = _PATTERNS[-1][1].search(text, match.start(), end)
-            if legacy and legacy.end('literal') == end or quoted and quoted.end() == end:
+            if legacy and _sensitive_key(legacy['key']) and legacy.end('literal') == end or quoted and _sensitive_key(quoted['key']) and quoted.end('literal') + 1 == end:
                 continue
         if _yaml_secret(value):
             findings.add('yaml_flow_secret')
@@ -329,14 +344,15 @@ def _environment_secrets():
         and len(value) >= 8 and value.strip() and not _placeholder(value)})
 
 
-# LLM: 原文位置保留；YAML块头交结构扫描，不把|/>当短秘密破坏块体；其余扫描仍有界。
-# 函数用途: 收集高危凭据键、密钥形状和当前已知秘密的原始位置。
+# LLM: 原文位置保留；赋值沿完整键边界统一判定，零宽引用匹配不吞内部赋值或反复扫描长键后缀；形状/已知秘密规则不变。
+# 函数用途: 收集归一化凭据键、密钥形状和当前已知秘密的原始位置。
 def _matches(text, secrets, *, limit=None):
     matches = []
     for name, pattern in _PATTERNS:
         group = 'literal' if 'literal' in pattern.groupindex else 0
         candidates = (match for match in pattern.finditer(text)
-            if not (name == 'unquoted_secret_assignment' and _YAML_BLOCK.fullmatch(match.group(group)))
+            if ('key' not in pattern.groupindex or _sensitive_key(match['key']))
+            and not (name == 'unquoted_secret_assignment' and _YAML_BLOCK.fullmatch(match.group(group)))
             and not _placeholder(match.group(group), unquoted=name == 'unquoted_secret_assignment'))
         matches.extend((*match.span(group), name) for match in islice(candidates,
             None if limit is None else max(0, limit - len(matches))))
@@ -359,27 +375,62 @@ def _replace_matches(text, matches):
     return ''.join((*pieces, text[cursor:]))
 
 
-# LLM: 模板先遮成短非秘密标记，扫描后恢复；复用Skill迁移同一个公共秘密检查器，不能用clean_json先遮原秘密。
-# 函数用途: 兼容模板占位符地调用既有秘密扫描和脱敏实现。
+# LLM: 模板先遮成短标记并恢复；只保护统一敏感键下完整引用，code_file模式仅供共享形状扫描，不能代替JSON关联检查。
+# 函数用途: 兼容原模板合同地保留既有公共秘密扫描，不提前clean_json或弱化已知秘密检测。
 def _shared_scan(text):
     placeholders = {}
 
-    # LLM: 标记只存内存且短于秘密阈值；恢复按完整标记替换，不修改原占位正文。
-    # 函数用途: 临时保护调用者已有的配置模板。
+    # LLM: 标记只存内存并采用共享扫描器可认的纯变量形状；避开原文冲突，不让authorization/cookie将保护标记误判为秘密。
+    # 函数用途: 临时保护调用者完整模板并在扫描后原样恢复，不改变原占位正文。
     def shield(match):
-        marker = f'~{len(placeholders)}~'
+        variable = f'DELIVERY_PLACEHOLDER_{len(placeholders)}'
+        while '${' + variable + '}' in text:
+            variable += '_'
+        marker = '${' + variable + '}'
         placeholders[marker] = match.group()
         return marker
 
     protected = _PLACEHOLDER.sub(shield, text)
     protected = _UNQUOTED_ASSIGNMENT.sub(lambda match: shield(match)
-        if _placeholder(match.group('literal'), unquoted=True) else match.group(), protected)
+        if _sensitive_key(match['key']) and _placeholder(match.group('literal'), unquoted=True) else match.group(), protected)
     scanned = redact_sensitive_text(protected, code_file=True)
     changed = scanned != protected
     scanned = re.sub(r'<redacted[^>]*>|\[redacted\]', '${REDACTED_SECRET}', scanned, flags=re.I)
     for marker, original in placeholders.items():
         scanned = scanned.replace(marker, original)
     return changed, scanned
+
+
+# LLM: 仅接受已确认合法的JSON；平坦词法栈保留容器敏感关联及重复键，解码判占位后只替换完整token，不重建字段。
+# 函数用途: 递归关联敏感键与其dict/list内字符串值；短值和转义值同样拒绝，显式替换使用固定字面值。
+def _json_structure_scan(text, *, replace=False):
+    matches, pieces, cursor = [], [], 0
+    # 每层保存继承敏感性和当前键敏感性；列表及根标量不凭空产生键关联。
+    stack = [[False, False]]
+    for token in _JSON_STRUCTURE_TOKEN.finditer(text):
+        raw = token.group()
+        if raw in {'{', '['}:
+            stack.append([any(stack[-1]), False])
+            continue
+        if raw in {'}', ']'}:
+            stack.pop()
+            continue
+        if raw == ',':
+            stack[-1][1] = False
+            continue
+        value = json.loads(raw)
+        following = token.end()
+        while following < len(text) and text[following].isspace():
+            following += 1
+        if text[following:following + 1] == ':':
+            stack[-1][1] = _sensitive_key(value)
+        elif any(stack[-1]) and value and not _placeholder(value):
+            matches.append((*token.span(), 'json_sensitive_key'))
+            if not replace:
+                return matches, text
+            pieces.extend((text[cursor:token.start()], '"<REDACTED_SECRET>"'))
+            cursor = token.end()
+    return matches, ''.join((*pieces, text[cursor:])) if replace else text
 
 
 # LLM: JSON字符串解码后同样扫描YAML结构；只重编码完整token，跨语法或非字符串命中仍失败关闭。
@@ -425,8 +476,8 @@ def _paths(text, owner_home):
     return re.sub(r'/(?:Users/[^/\s"\'<>]+|home/[^/\s"\'<>]+|root)(?=/|\b)', '${OWNER_HOME}', text)
 
 
-# LLM: 原字节先核秘密，JSON正文解码后亦扫描结构；块/flow先保形替换再做行扫描，路径秘密始终拒绝。
-# 函数用途: 在清洗和暂存前扫描整包，防止秘密经正文或资源清单流出。
+# LLM: 原字节先核秘密；合法JSON先关联归一化键值并整值替换，继续原形状/已知秘密/内嵌YAML扫描；路径秘密始终拒绝。
+# 函数用途: 在清洗和暂存前扫描整包附件与元数据，保留合法JSON结构、普通字段及原二进制合同。
 def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace=False, extra_secrets=()):
     if type(allow_secret_placeholder_replace) is not bool:
         raise ValueError('allow_secret_placeholder_replace必须是布尔值')
@@ -443,6 +494,7 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
         text = raw.decode('utf-8', errors='surrogateescape')
         preserve_json = False
         valid_json = False
+        structured = []
         if name.lower().endswith('.json'):
             try:
                 json.loads(text)
@@ -450,6 +502,8 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
                 preserve_json = allow_secret_placeholder_replace
             except (ValueError, RecursionError):
                 pass
+        if valid_json:
+            structured, text = _json_structure_scan(text, replace=allow_secret_placeholder_replace)
         yaml_findings = set()
         if not valid_json:
             text = _scan_and_redact_yaml_structure(text, findings=yaml_findings, redact=allow_secret_placeholder_replace)
@@ -457,12 +511,12 @@ def sanitize_bundle_files(files, *, owner_home, allow_secret_placeholder_replace
         encoded = (_json_string_scan(text, secrets)[0]
             if name.lower().endswith('.json') and not allow_secret_placeholder_replace else [])
         shared, _ = _shared_scan(text)
-        if (matches or encoded or shared or yaml_findings) and not allow_secret_placeholder_replace:
+        if (structured or matches or encoded or shared or yaml_findings) and not allow_secret_placeholder_replace:
             newlines = [index for index, char in enumerate(text) if char == '\n']
             safe_name = _replace_matches(_paths(name, owner_home), _matches(_paths(name, owner_home), secrets))
             safe_name = redact_sensitive_text(safe_name, code_file=True)
             diagnostics = [{'file_path': safe_name, 'line_number': bisect_right(newlines, start) + 1,
-                'pattern_name': pattern, 'masked_snippet': '<redacted>'} for start, _, pattern in (matches + encoded)[:100]]
+                'pattern_name': pattern, 'masked_snippet': '<redacted>'} for start, _, pattern in (structured + matches + encoded)[:100]]
             if not diagnostics:
                 diagnostics = [{'file_path': safe_name, 'line_number': 1, 'pattern_name': 'shared_secret',
                     'masked_snippet': '<redacted>'}]

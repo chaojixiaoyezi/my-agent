@@ -1,5 +1,5 @@
-# LLM: 发送方canonical原字节先扫描再clean_json；接收方只沿原资产/Scheduler事务安装，单job事实不成为第二调度权威。
-# 模块用途: 冻结依赖闭包及负载，按原锁和quota安装或恢复精确调度变更，不复制凭据库或执行包裹代码。
+# LLM: 发送方canonical原字节先交delivery_sanitizer统一归一敏感键和JSON关联扫描再clean_json；接收方沿原事务安装，不另建秘密词表。
+# 模块用途: 冻结并扫描包含配置附件的完整负载，按原锁和quota安装或恢复精确调度变更，不复制凭据库或执行包裹代码。
 from __future__ import annotations
 
 import base64
@@ -230,8 +230,8 @@ def _portable_monitor_job(job):
     return _without_private_bindings(result)
 
 
-# LLM: 持原根只读锁；原字节及本Owner已配置秘密先扫描再建描述符，不创建存储；拓扑缺依赖转换为投递领域码。
-# 函数用途: 为预览和发送冻结同一安全闭包，凭据只在扫描内存中使用而不导出。
+# LLM: 持原根只读锁；附件和元数据同交唯一sanitize_bundle_files，先关联归一化敏感键再建描述符；不让clean或code_file模式绕过JSON检查。
+# 函数用途: 为预览和发送冻结同一安全闭包，包含嵌套配置附件；凭据只用于内存扫描，不导出或创建存储。
 def snapshot_delivery_bundle(home, root_kind, root_id, *, include_dependencies=True, allow_secret_placeholder_replace=False):
     safe_asset_id(root_id)
     if root_kind not in {'script', 'workflow', 'monitor', 'skill'} or type(include_dependencies) is not bool:

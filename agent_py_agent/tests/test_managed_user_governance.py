@@ -183,3 +183,29 @@ def test_holistic_monitor_preserves_nonowner_skill_identity(managed, prefix, sha
     assert [item["asset_kind"] for item in result["installed"]] == ["monitor"]
     assert governance._managed_scheduler(home).get_job(result["asset_id"])["skill_refs"] == [reference]
     assert {str(p.relative_to(home.home_dir)): p.read_bytes() for p in (home.home_dir / "skills").rglob("*") if p.is_file()} == before
+
+
+# LLM: 运行时ConversationStore位于workspace/runtime/workspaces/<scope>/conversations；治理派单、列表和审核须双向互通。
+# 函数用途: 验证运行时线程可直接提交审核、接收派单通知，且新建派单在运行时库已存在时同步镜像。
+def test_holistic_managed_conversations_syncs_with_runtime_workspace(managed):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+    from agent_py_agent.agent.user_space.runtime_paths import runtime_paths_for_agent
+
+    root, service, home = managed
+    scoped = SimpleNamespace(owner_home_dir=home.home_dir, owner_workspace_dir=home.workspace_dir)
+    rt_path = runtime_paths_for_agent(SimpleNamespace(), home.home_dir, scoped)["conversation_workspace"]
+    rt_store = ConversationStore(rt_path, initialize=True)
+    rt_thread = rt_store.threads.create(owner_id=home.owner_id, owner_home=str(home.home_dir),
+                                        workspace_root=str(home.workspace_dir), cwd=str(home.workspace_dir))
+    dispatched = service.dispatch_task("alice", "Inspect runtime thread", thread_id=rt_thread.thread_id)
+    assert dispatched["thread_id"] == rt_thread.thread_id
+    assert any(row["task_id"] == dispatched["task_id"] for row in service.list_tasks("alice")["tasks"])
+    assert any(wake.root_task_id == dispatched["task_id"] for wake in rt_store.wakes.pending())
+    reviews = GovernanceReviewStore(root)
+    item = reviews.submit_review("alice", "high_risk_command", {"command": "ls"}, applicant_thread_id=rt_thread.thread_id)
+    decided = reviews.decide_review(item.review_id, "reject_with_feedback", "Use read_file", expected_revision=1, target_owner_id="alice")
+    assert decided["status"] == "rejected" and decided["notification_status"] == "queued"
+    assert rt_store.messages.recent(rt_thread.thread_id)[-1].metadata["governance_review"]["review_id"] == item.review_id
