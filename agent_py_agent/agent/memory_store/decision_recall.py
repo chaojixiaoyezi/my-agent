@@ -232,11 +232,13 @@ def _pre_recall_miss_reason(queries: tuple, slots: int, remaining_chars: int, st
 
 # LLM: 原完整查询与已选正式材料先成立；此点只给不足的 long-term 槽位追加同 scope 的候选，不能删除/替换原记忆。
 #   每次到达都在 decision_reach_counts 记一次结果（没调用的原因码或 called，节流写盘的诊断计数副作用）。
-# 函数用途: 在同一召回阶段内消费有限查询建议，最终有效且能注入的补充记录才确认访问。
+# LLM: 独立调用默认沿原严格确认；外层仍有预算时显式defer_access，仅返候选，必须由最终准入点重核并记访问。
+# 函数用途: 消费有限补充查询；直接调用保持原访问合同，运行时组合由最终预算后的统一入口确认。
 def supplement_recalled_memories(
     agent: object, request: object, records: list, *, recall_scope: object, stage: object,
     queries: tuple[tuple[str, str], ...], slots: int, search_top_k: int, remaining_chars: int,
     refresh: Callable[[], list],
+    defer_access: bool = False,
 ) -> tuple[list, str]:
     reason = _pre_recall_miss_reason(queries, slots, remaining_chars, stage)
     if reason:
@@ -266,7 +268,7 @@ def supplement_recalled_memories(
         _check_interrupted()
         if reason := _pre_recall_stale(agent, stage, outcome, (baseline, bound, state)):
             return drop_and_return(agent, (stage, outcome), reason, (baseline, "memory_pre_recall_decision:apply:stale"))
-        # 开了预检就用决策模型看到的那份新增事实（基线已核对未变）；最终仍由 confirm_scoped_access 重读正式源确认。
+        # 预检仍用决策看到的同份候选；独立调用在此重核，延后模式由外层最终预算准入后重核。
         chosen = previews[answer.value] if previews is not None else search.additions(selected)
         baseline = latest = refresh()
         _check_interrupted()
@@ -274,7 +276,7 @@ def supplement_recalled_memories(
             return drop_and_return(agent, (stage, outcome), reason, (latest, "memory_pre_recall_decision:apply:stale"))
         if not decision_outcome_is_current(agent, request, stage, outcome):
             return latest, "memory_pre_recall_decision:apply:stale"
-        confirmed = agent.memory.confirm_scoped_access(chosen, search.predicate) if chosen else []
+        confirmed = chosen if defer_access else (agent.memory.confirm_scoped_access(chosen, search.predicate) if chosen else [])
         return [*latest, *confirmed], finding if confirmed else f"{finding}:no_addition"
     except (InterruptedError, ToolCancelled):
         raise
@@ -299,12 +301,12 @@ class FragmentSearch:
 
         return long_term_record_matches_scope(row, self.recall_scope)
 
-    # LLM: 调 search_scoped_candidates（语义召回时有一次查询嵌入，不记访问）；按检索顺序取不在基线里、放得下的记录。
-    # 函数用途: 返回某个查询文本选中后会追加的正式事实（还没确认，不能直接当已注入）。
+    # LLM: 前台候选检索显式latency_safe，不记访问、不实时embed；scope/去重/预算和后续确认仍由原链执行。
+    # 函数用途: 仅用就绪向量或词面召回挑出可追加事实，缺向量交后台补，尚不能当作已注入。
     def additions(self, query: str) -> list:
         slots, top_k, remaining = self.budget
         chosen, seen = [], set(self.seen_ids)
-        for candidate in self.agent.memory.search_scoped_candidates(query, top_k, self.predicate):
+        for candidate in self.agent.memory.search_scoped_candidates(query, top_k, self.predicate, latency_safe=True):
             cost = len(candidate.content)
             if candidate.entry_id not in seen and cost <= remaining and len(chosen) < slots:
                 chosen.append(candidate)

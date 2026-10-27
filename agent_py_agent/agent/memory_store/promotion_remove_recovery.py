@@ -127,10 +127,11 @@ def recover_promotion_result(service, candidate, reviewer):
     return None
 
 
-# LLM: 只恢复approved的精确replace/merge，quota→policy→candidate→formal锁内核全身份并补回执，不重放正式写入。
-# 函数用途: 正式更新已成功但候选终态写失败时，认出同一已提交版本而非误报观察版本过期。
+# LLM: 仅恢复approved精确replace/merge；quota→policy→candidate→formal锁内严格读正式/墓碑全账，坏源拒绝补回执。
+# 函数用途: 正式更新成功但候选回执中断时，完整核对来源后补记；有坏行就保留approved，不冒认恢复成功。
 def recover_committed_update(service, candidate, reviewer):
     from ..common.json_io import locked_json_path
+    from .jsonl import _strict_memory_events
     from .promotion import (
         MemoryPromotionResult,
         _coordinator_policy_birth,
@@ -153,7 +154,7 @@ def recover_committed_update(service, candidate, reviewer):
     options = {"birth_commit": _coordinator_policy_birth} if service.coordinator_io else {}
     with enforcer.admission() as admission, _learning_exclusion_scope(service), service.candidates.locked_snapshot(candidate):
         with locked_json_path(service.long_term.path, **options):
-            events = service.long_term._read_memory_events(service.long_term.path)
+            events = _strict_memory_events(service.long_term.path, require_source=True)
             latest = next((row for row in reversed(events) if row.entry_id == candidate.target_entry_id and row.action != "touch"), None)
             if not _same_committed_update(latest, candidate):
                 return None

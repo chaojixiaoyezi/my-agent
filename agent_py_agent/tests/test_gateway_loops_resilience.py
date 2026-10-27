@@ -16,6 +16,26 @@ from agent_py_agent.agent.gateway_parts.paths import GatewayPaths
 from agent_py_agent.agent.gateway_parts.queue_service import GatewayClaim
 
 
+def test_r2_cold_curator_detects_audit_only_input_and_updates(tmp_path):
+    import os
+
+    from agent_py_agent.cli.gateway_loops import _cold_curator_activity
+
+    assert _cold_curator_activity(tmp_path) == "not_due"
+    root = tmp_path / "audit"
+    root.mkdir()
+    (root / "ignored.txt").write_text("not an audit")
+    path = root / "2026-10-26.jsonl"
+    path.touch()
+    assert _cold_curator_activity(tmp_path) == "not_due"
+    path.write_text('{"event_id":"new"}\n')
+    os.utime(path, (1, 1))
+    assert _cold_curator_activity(tmp_path) == "due"
+    path.write_text('{"event_id":"updated"}\n')
+    os.utime(path, (2, 2))
+    assert _cold_curator_activity(tmp_path) == "due"
+
+
 def test_owner_discovery_pages_continue_next_tick_before_steady_rescan_delay() -> None:
     from agent_py_agent.cli.gateway_loops import _next_owner_discovery_at
 

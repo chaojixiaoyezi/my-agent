@@ -1,3 +1,27 @@
+## 2026-10-26 Wave 5 Track A Round 5 渲染准入接线
+
+- `prompting_parts/memory_context.py::is_memory_context_admissible(record)` 是原 `scan_memory_content(content).safe` 与 origin 白名单的共享谓词；渲染器直接调用仍累计隔离数并保留原安全信封和无相关记忆提示。
+- `_budgeted_formal_memories` 在预算分组前过滤不可渲染项、保留原遗漏数；`_confirm_final_memory_access` 排除隔离长期候选，再以真实 `JsonlMemory.confirm_scoped_access` 的返回交集生成最终集合及补充 ID 元数据。
+- `jsonl.py::confirm_scoped_access` 在原范围内重读并逐字段复核的 `active` 上调用共享门，之后才写入保序确认映射和 `_note_access`。映射替代重复的列表/seen 状态，返回仍为保序列表；无新访问字段、确认旁路或顶层循环导入。
+- F2 与新增回归均使用临时磁盘 JSONL，访问验证以渲染 records、原待刷信号及重新打开后的访问时间为准；实现和验证边界见 [TESTS](../../../TESTS.md)。
+
+## 2026-10-26 Wave 5 Track A Round 4 最终访问确认结构
+
+- `loop_support.py::_prepare_runtime_context` 改取 `search_scoped_candidates(..., latency_safe=True)`；候选阶段没有访问副作用。
+- `memory_store/decision_recall.py::supplement_recalled_memories` 默认 `defer_access=False`，独立调用仍沿原严格确认；组合运行时显式传 `True`，把确认交还外层最终准入点。
+- `_formal_memories_for_request` 在最后去重和完整信封预算后调用 `_confirm_final_memory_access`，以真实 HOT/lesson 来源 ID 区分固定项，其余通过原 `JsonlMemory.confirm_scoped_access` 重核后一次登记。失效项移除但不补位，不擦除既有 pending，确认后无再次预算淘汰；补充 ID 清单交集最终集合。
+- 固定来源 ID 为本 run 局部集合；两处 refresh 回调均沿 `_refresh_recall_candidates` 在完整原刷新/预算成功后同步“当前固定源 ID ∩ 本次返回 ID”，失败不发布半套分类。HOT/lesson 撤销后同 ID 回落 JSONL 必须重核，新出现但未入选的固定源也不能豁免补充 JSONL；原四参数独立刷新调用保持兼容。
+- `jsonl.py` 候选检索和严格确认实现保持不变；新回归以真实刷盘及重新打开核对访问时间，不以返回列表替代副作用验收。
+
+## 2026-10-26 Wave 5 Track A Round 2 + Round 3 接线结构
+
+- `agent_core/runtime/loop_support.py::_prepare_runtime_context` 与 `memory_store/decision_recall.py::FragmentSearch.additions` 在原 scope/预算调用上传 `latency_safe=True`；不新增召回入口、授权或访问计数旁路。
+- `candidates.py::_write_cold_changes` 保持 no-follow 写入与读回 FD，以 64 KiB 块 SHA256 核验；`retention_scan.py::current_retention_pins` 通过原 `_hydrate_candidate` 还原完整冷引用，`_curator_reference_pins` 收集引用并 pin 版本游标日分片，坏详情返回原不完整视图。
+- `curator.py::_commit_batch` 在真实提交后将完整 cursor 冻结到本轮 route；`_commit_failure` 在原未知异常门之后使用该游标作为失败基线。`promotion_remove_recovery.py::recover_committed_update` 在原锁内复用 `_strict_memory_events(require_source=True)`，正式/墓碑任一坏行拒绝恢复。
+- R3 的 `candidate_models.py::MemoryCandidate` 以非 dataclass 的类默认值提供私有实例缓存，`asdict` 不复制原行；赋值失效和嵌套状态摘要仍沿原序列化器。
+- `retention_apply.py` 从 `execute_retention_plan` 经候选 phase/actions 透传同次 `now` 至 `CandidateService.delete_terminal` 和 `_commit_retention_rows`；`_terminal_compaction_indices` 的默认状态为全部终态，删除提交显式仅传 rejected/superseded。不新增删除授权或时钟事实源。
+- R3 指定套件与未复测边界见 [TESTS](../../../TESTS.md)，本节不是部署或全仓验收声明。
+
 ## Wave4 A1 索引快照与主根优先结构
 
 - `reader.py::_primary_index_has_scoped_ref` 只对可证明的完整scoped主根命中提前选择当前索引；否则原历史发现路径保持。既有`PreparedToolOutputArtifactRead`仍是工具读取与预算估计的共享计划，不新增第二个工具入口。

@@ -24,6 +24,77 @@ from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
 NOW = datetime(2026, 10, 26, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize("damage", [False, True])
+def test_r2_promoted_cold_details_pin_expired_evidence_or_fail_closed(tmp_path, damage):
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    home, candidates, service = runtime(tmp_path)
+    path = old_file(home.owner_memory_daily_dir / "cold-evidence.jsonl")
+    control = old_file(home.owner_memory_daily_dir / "unreferenced.jsonl")
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="已晋升的归档事实",
+        subject_key="r2.cold", scope=MemoryScope("personal", "personal"), origin="model_inferred",
+        promotion_target="lesson", evidence_refs=[{"path": str(path)}]))
+    candidates.transition(row.candidate_id, "approved", reviewer="test")
+    row = candidates.mark_promoted(row.candidate_id, reviewer="test", promotion_ref="memory/lessons/r2")
+    candidates.path.write_text(json.dumps(replace(row, updated_at="2020-01-01T00:00:00+00:00").to_record()) + "\n")
+    assert candidates.compact_terminal_candidates(now=NOW) == 1
+    hot = candidates.readonly_rows()[0]
+    assert hot.status == "promoted" and hot.cold_detail_ref and not hot.evidence_refs
+    if damage:
+        next((candidates.path.parent / "candidates_archive").glob("*.jsonl")).write_text("{corrupt\n")
+    errors = []
+    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert complete is not damage
+    if not damage:
+        assert not errors and pins.protects(path, errors)
+        archive = next((candidates.path.parent / "candidates_archive").glob("*.jsonl"))
+        assert pins.protects(archive, errors)
+    else:
+        assert errors and errors[0].error_code == "MEMORY_RETENTION_PIN_SOURCE_UNREADABLE"
+    plan = service.plan(now=NOW)
+    assert not [item for item in plan.actions if item.path == path]
+    if not damage:
+        assert [item for item in plan.actions if item.path == control]
+    report = service.apply(now=NOW)
+    assert path.exists() and not [item for item in report.actions if item.path == path and item.status == "trashed"]
+    assert control.exists() is damage
+
+
+def test_r2_versioned_curator_shards_are_pinned_across_days(tmp_path):
+    from agent_py_agent.agent.memory_store.curator_run_log import (
+        _CURSOR_CHECKPOINT,
+        _CURSOR_DELTA,
+        CuratorRunLog,
+        CuratorRunRecord,
+    )
+
+    home, _, service = runtime(tmp_path)
+    log = CuratorRunLog(home.owner_memory_curator_runs_dir)
+    before = {"per_thread_cursors": {f"thread-{i}": f"message-{i}" for i in range(40)}, "last_audit_event_id": ""}
+    after = {"per_thread_cursors": {**before["per_thread_cursors"], "active": "new"}, "last_audit_event_id": ""}
+    first = CuratorRunRecord("r2-checkpoint", "lease", "succeeded", "admin", "test", "test",
+        "2020-01-02T00:00:00+00:00", "2020-01-02T00:00:00+00:00", cursor_before=before, cursor_after=after)
+    log.append(first)
+    log.append(replace(first, run_id="r2-delta", started_at="2020-01-02T01:00:00+00:00",
+        finished_at="2020-01-02T01:00:00+00:00", cursor_before=after))
+    log.append(replace(first, run_id="r2-new-day", started_at="2026-10-26T00:00:00+00:00",
+        finished_at="2026-10-26T00:00:00+00:00", cursor_before=after))
+    old = home.owner_memory_curator_runs_dir / "2020-01-02.jsonl"
+    warnings = [warning for line in old.read_text().splitlines() for warning in json.loads(line)["warnings"]]
+    assert any(value.startswith(_CURSOR_CHECKPOINT) for value in warnings)
+    assert any(value.startswith(_CURSOR_DELTA) for value in warnings)
+    control = old_file(old.with_name("2020-01-01.jsonl"), "{}\n")
+    os.utime(old, (1, 1))
+    errors = []
+    pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert complete and not errors and old.resolve() in pins.paths
+    assert not [item for item in service.plan(now=NOW).actions if item.path == old]
+    assert [item for item in service.plan(now=NOW).actions if item.path == control]
+    report = service.apply(now=NOW)
+    assert report.ok and old.exists() and not control.exists()
+    assert len(log.list()) == 3 and len(log.recent_finished(3)) == 3
+
+
 # LLM: 所有写入限于pytest临时home；返回真实服务，不替换授权和执行链。
 # 函数用途: 构造最小保留服务，便于验证实际文件是否被保护。
 def runtime(tmp_path):

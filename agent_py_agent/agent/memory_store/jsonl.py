@@ -808,27 +808,27 @@ class _JsonlMemorySearchMixin:
     ) -> tuple[list[MemoryRecord], dict[str, object]]:
         return self._search_scoped(query, top_k, predicate, record_access=False, latency_safe=latency_safe)
 
-    # LLM: 访问确认重读正式源并核对原 scope、ID、版本及正文；撤销或替换的候选不得留下 touch。
-    # 函数用途: 在最终注入记忆后，给仍然有效的候选记录登记访问信号并返回已确认记录。
+    # LLM: 重读正式源核对原scope/完整版本及渲染门；保序映射只确认每个ID一次，隔离/撤销/替换项不得touch。
+    # 函数用途: 只给有效且可注入的候选登记访问，保序去重后返回确认列表，不重复维护两套ID状态。
     def confirm_scoped_access(
         self,
         records: Iterable[MemoryRecord],
         predicate: Callable[[MemoryRecord], bool],
     ) -> list[MemoryRecord]:
+        from ..prompting_parts.memory_context import is_memory_context_admissible
         current = {record.entry_id: record for record in self.all() if predicate(record)}
-        confirmed: list[MemoryRecord] = []
-        seen: set[str] = set()
+        confirmed: dict[str, MemoryRecord] = {}
         for record in records:
             active = current.get(record.entry_id)
-            if (active is None or active.entry_id in seen or active.version != record.version
+            if (active is None or active.entry_id in confirmed or active.version != record.version
                     or active.content != record.content or active.attributes != record.attributes
                     or active.source != record.source or active.kind != record.kind
-                    or active.role != record.role or active.expires_at != record.expires_at):
+                    or active.role != record.role or active.expires_at != record.expires_at
+                    or not is_memory_context_admissible(active)):
                 continue
-            seen.add(active.entry_id)
-            confirmed.append(active)
+            confirmed[active.entry_id] = active
             self._note_access(active.entry_id)
-        return confirmed
+        return list(confirmed.values())
 
     # LLM: 正式与候选检索只能在访问确认时分叉；索引、scope 与排序必须完全相同。检索事实（第二个返回值）只是观察，
     #   取自 HybridRetriever 的 last_retrieval_mode/last_fallback_reason，不参与排序。

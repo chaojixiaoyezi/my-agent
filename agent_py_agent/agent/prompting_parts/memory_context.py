@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """Project recalled memory into one bounded, non-authoritative prompt envelope."""
 
-# LLM: 本模块是 recalled Memory 进入模型 prompt 的唯一投影；不得在通道或 IM 增加另一种格式。
-# 模块用途: 把安全的历史记忆包装成非权威数据块，防止它伪装当前指令或泄露到用户出口。
+# LLM: recalled Memory的唯一prompt投影；预算/访问确认共用渲染准入门，不得在通道或IM另造格式或放宽安全过滤。
+# 模块用途: 统一安全准入并包装非权威历史数据，防止隔离项冒充已使用记忆或泄露到用户出口。
 
 import json
 from collections.abc import Iterable
@@ -33,8 +33,21 @@ class BudgetedMemoryRecords(list):
         self.omitted_count = max(0, int(omitted_count))
 
 
-# LLM: 内容必须重新扫描并转义 markup；任何记录都不能闭合信封或取得指令权威。
-# 函数用途: 安全渲染召回结果及预算遗漏提示；提示保留在可统一剥离的同一信封内。
+# LLM: 纯准入判断，严格保持原正文扫描及origin白名单；渲染、预算和JSONL确认共用，不登记访问或改记录。
+# 函数用途: 判断一条记录的正文和来源是否允许进入记忆信封。
+def is_memory_context_admissible(record: MemoryRecord) -> bool:
+    from ..memory_store.security import scan_memory_content
+
+    content = str(getattr(record, "content", "") or "")
+    if not scan_memory_content(content).safe:
+        return False
+    attributes = getattr(record, "attributes", None)
+    attributes = attributes if isinstance(attributes, dict) else {}
+    return str(attributes.get("origin") or "legacy").strip() in _ALLOWED_ORIGINS
+
+
+# LLM: 原正文扫描/origin准入共用同一predicate；直接调用仍统计全部隔离项，markup转义与非权威信封不变。
+# 函数用途: 安全渲染召回结果、隔离计数及预算遗漏提示，全部保留在同一个可剥离信封内。
 def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
     """Render safe recalled records without allowing a record to break its envelope."""
 
@@ -42,18 +55,13 @@ def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
     blocked = 0
     omitted = max(0, int(getattr(memories, "omitted_count", 0)))
     for record in memories:
-        content = str(getattr(record, "content", "") or "")
-        from ..memory_store.security import scan_memory_content
-
-        if not scan_memory_content(content).safe:
+        if not is_memory_context_admissible(record):
             blocked += 1
             continue
+        content = str(getattr(record, "content", "") or "")
         attributes = getattr(record, "attributes", None)
         attributes = attributes if isinstance(attributes, dict) else {}
         origin = str(attributes.get("origin") or "legacy").strip()
-        if origin not in _ALLOWED_ORIGINS:
-            blocked += 1
-            continue
         rows.append(
             {
                 "entry_id": str(getattr(record, "entry_id", "") or ""),
@@ -95,4 +103,4 @@ def memory_context_text(memories: Iterable[MemoryRecord]) -> str:
     return f"<memory-context>\n{_MEMORY_GUIDANCE}\n{envelope}{notice}\n</memory-context>"
 
 
-__all__ = ["BudgetedMemoryRecords", "memory_context_text"]
+__all__ = ["BudgetedMemoryRecords", "is_memory_context_admissible", "memory_context_text"]
