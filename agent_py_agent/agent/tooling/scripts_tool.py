@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,13 +33,18 @@ REQUIRED_KEYS = {'name', 'access_targets', 'data_sources', 'credential_refs', 'i
 # LLM: 独立动作锁仅包管理动作；源检查与其它只读入口不建资产动作目录，绑定另归Store集合锁。
 # 函数用途: 串行化同Owner同类资产的管理动作，防止增量更新或Skill绑定丢失。
 def _dispatch(tool, params):
-    if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run', 'check_sources'):
-        return tool._dispatch(params)
-    tool.owner_home.mkdir(parents=True, exist_ok=True)
-    collection = tool.model_spec.name
-    os.close(open_directory_beneath(tool.owner_home, (collection,), create=True))
-    with locked_json_path(tool.owner_home / collection / '.tool-actions'):
-        return tool._dispatch(params)
+    from ..workflows.datasource_runtime import _ASSET_IM_NOTIFIER, bind_asset_im_notifier
+    notifier = getattr(tool, 'im_notifier', None)
+    ctx = (bind_asset_im_notifier(tool.owner_home, notifier)
+           if callable(notifier) and _ASSET_IM_NOTIFIER.get() is None else nullcontext())
+    with ctx:
+        if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run', 'check_sources'):
+            return tool._dispatch(params)
+        tool.owner_home.mkdir(parents=True, exist_ok=True)
+        collection = tool.model_spec.name
+        os.close(open_directory_beneath(tool.owner_home, (collection,), create=True))
+        with locked_json_path(tool.owner_home / collection / '.tool-actions'):
+            return tool._dispatch(params)
 
 
 # LLM: 注入对象来自宿主，显式不同Owner仍拒绝，不能借依赖注入跨Owner执行。
@@ -171,11 +177,12 @@ class ScriptsTool(BaseTool):
 
     # LLM: Store/runner和项目范围只由宿主注入；动态provider每次读取，模型参数不授予路径权限。
     # 函数用途: 固定Owner并保存显式领域依赖。
-    def __init__(self, owner_home: Path, *, store=None, runner=None, workspace_root=None, workspace_root_provider=None):
+    def __init__(self, owner_home: Path, *, store=None, runner=None, workspace_root=None,
+                 workspace_root_provider=None, im_notifier=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, runner)
-        self.store, self.runner = store, runner
+        self.store, self.runner, self.im_notifier = store, runner, im_notifier
         self.workspace_root, self.workspace_root_provider = workspace_root, workspace_root_provider
 
     # LLM: 只使用宿主提供的项目；无显式项目时兼容已绑定runner范围，不从脚本元数据恢复权限。

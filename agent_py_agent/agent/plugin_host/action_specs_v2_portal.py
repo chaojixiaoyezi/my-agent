@@ -77,7 +77,10 @@ def _settings_specs():
         _spec("plugins.builtin.list", "read", "read", closed({}, {"thread_id": id_schema()})),
         _spec("plugins.builtin.toggle", "write", "write", closed({"plugin_id": id_schema(), "enabled": {"type": "boolean"}}, {
             "thread_id": id_schema(), **revision})),
-        _spec("user_space.identity.resolve", "read", "read", closed({})),
+        _spec("user_space.identity.resolve", "read", "read", closed({}, {
+            "id": text(256), "id_type": {"enum": ["auto", "user", "chat"], "default": "auto"},
+            "targets": {"type": "array", "maxItems": 64, "items": closed(
+                {"id": text(256)}, {"id_type": {"enum": ["auto", "user", "chat"], "default": "auto"}})}})),
         _spec("capability_packages.list", "read", "read", closed({}, {
             "thread_id": id_schema(), "query": text(512), "limit": integer(200, 1)})),
     ]

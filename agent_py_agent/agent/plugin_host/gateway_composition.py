@@ -255,7 +255,13 @@ class GatewayPortalDomain:
         if "thread_id" in payload:
             self.conversation.require_thread(store, payload["thread_id"], authorized, context)
         if action == "user_space.identity.resolve":
-            return DomainResult(200, {"identity": asdict(context.identity), "owner_id": context.owner_home.owner_id})
+            from ..adapter.feishu_profile import resolve_user_space_identity
+
+            creds = getattr(self.resources, "identity_credentials", None) or getattr(
+                getattr(self.resources, "server", None), "identity_credentials", None)
+            data = resolve_user_space_identity(context.owner_home.home_dir, targets=payload.get("targets"),
+                id_value=payload.get("id", ""), id_type=payload.get("id_type", "auto"), feishu_credentials=creds)
+            return DomainResult(200, {"identity": asdict(context.identity), "owner_id": context.owner_home.owner_id, **data})
         target = portal_target(action)
         if target is None:
             raise HostAPIError("HOST_NOT_READY", 503)

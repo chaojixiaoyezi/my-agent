@@ -110,11 +110,11 @@ class WorkflowsTool(BaseTool):
     # LLM: Owner与项目/快照/模型提供者仅由可信宿主注入，模型实参不能替换；无分析器不注入假实现。
     # 函数用途: 固定当前Owner及运行时依赖，构造阶段不执行资产。
     def __init__(self, owner_home: Path, *, store=None, engine=None, analysis_handler=None,
-                 workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None):
+                 workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None, im_notifier=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
-        self.store, self.engine = store, engine
+        self.store, self.engine, self.im_notifier = store, engine, im_notifier
         self.analysis_handler = analysis_handler
         self.workspace_root_provider = workspace_root_provider
         self.skill_snapshot_provider = skill_snapshot_provider

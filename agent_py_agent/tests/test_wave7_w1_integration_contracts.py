@@ -142,3 +142,164 @@ def test_e1_end_to_end_autonomous_learning_and_router_closed_loop(tmp_path):
     )
     updated_entry = store.load_registry().skills['e1-csv-deduper']
     assert updated_entry.maintenance.get('helped_count') == 1 and updated_entry.maintenance.get('last_used_at', 0) > 0
+
+
+def test_holistic_gateway_identity_resolve_and_public_pack_and_fork_preferences(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent import plugin_host_api as api
+    from agent_py_agent.agent.conversation.store import ConversationStore
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
+    from agent_py_agent.agent.plugin_host import composition
+    from agent_py_agent.agent.plugin_host.contracts import HostDomainPorts, decode_call
+    from agent_py_agent.agent.plugin_host.conversations import ConversationDomain
+    from agent_py_agent.agent.plugin_host.gateway_composition import GatewayPortalDomain
+    from agent_py_agent.agent.plugin_host.gateway_observations import (
+        GatewayObservations,
+    )
+    from agent_py_agent.agent.plugin_manifest_host_v9 import host_capabilities
+    from agent_py_agent.tests.test_plugin_host_v2_grants import active_grant
+
+    caps = sorted(host_capabilities())
+    home, _, entry, ref = active_grant(tmp_path, caps, scope='public')
+    (home.home_dir / 'USER.md').write_text('- 称呼: 测试员\n', encoding='utf-8')
+    api.set_host_api_base('http://127.0.0.1:8420')
+    try:
+        token = api.issue_host_api_env(ref, entry.manifest.plugin_id)[api.HOST_API_TOKEN_ENV]
+        host = composition.HostComposition(capability_policy=lambda: frozenset(caps))
+        store = ConversationStore(home.data_dir / 'conversations')
+        paths = gateway_paths_from_root(home.data_dir / 'gateway')
+        ensure_gateway_folders(paths)
+        conversation = ConversationDomain(lambda _: store, host.cursors, default_thread=lambda *_: False)
+        resources = SimpleNamespace(store_for=lambda _: store, paths_for=lambda _: paths, server=SimpleNamespace(agent=None))
+        portal = GatewayPortalDomain(resources, conversation)
+        conversation.portal_v2 = portal
+        observations = GatewayObservations(resources, conversation, host.cursors)
+        host.ports = HostDomainPorts(conversation=conversation, observations=observations)
+        ingress = host.issuer.ingress(token)
+
+        def call_v2(action, payload, key=None):
+            from agent_py_agent.agent.plugin_host.schemas import thaw
+            env = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': payload}
+            if key:
+                env['idempotency_key'] = key
+            auth = host.issuer.authorize(ingress, decode_call(json.dumps(env).encode()))
+            return thaw(composition.dispatch_call(auth, host.ports).data)
+
+        id_default = call_v2('user_space.identity.resolve', {})
+        assert id_default['display_name'] == '测试员' and id_default['resolved'] is True
+        id_single = call_v2('user_space.identity.resolve', {'id': 'ou_unknown', 'id_type': 'user'})
+        assert id_single['id'] == 'ou_unknown' and id_single['resolved'] is False
+        id_batch = call_v2('user_space.identity.resolve', {'targets': [{'id': 'ou_unknown'}]})
+        assert len(id_batch['items']) == 1 and id_batch['items'][0]['id'] == 'ou_unknown'
+
+        created = call_v2('conversations.threads.create', {'title': '源线程'}, 'idem-create-0001')
+        tid = created['thread_id']
+        packs_updated = call_v2(
+            'conversations.threads.settings.update',
+            {'thread_id': tid, 'permission_mode': 'ask', 'preferred_pack_ids': ['public/story-content']},
+            'idem-settings-0001',
+        )
+        assert packs_updated['permission_mode'] == 'ask'
+        assert packs_updated['preferred_pack_ids'] == ['public/story-content']
+
+        packs_set = call_v2(
+            'conversations.threads.packs.set',
+            {'thread_id': tid, 'pack_ids': ['public/story-content']},
+            'idem-packs-set-0001',
+        )
+        assert packs_set['preferred_pack_ids'] == ['public/story-content']
+
+        forked = call_v2('conversations.threads.fork', {'source_thread_id': tid, 'title': '分叉线程'}, 'idem-fork-000001')
+        fork_settings = call_v2('conversations.threads.settings.get', {'thread_id': forked['thread_id']})
+        assert fork_settings['permission_mode'] == 'ask'
+        assert fork_settings['preferred_pack_ids'] == ['public/story-content']
+        host.close()
+    finally:
+        api.set_host_api_base(None)
+
+
+def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_path):
+    from types import SimpleNamespace
+
+    import pytest
+
+    from agent_py_agent.agent.agent_core.self_map_bootstrap import register_self_map
+    from agent_py_agent.agent.capability.asset_promotion import promote_verified_asset
+    from agent_py_agent.agent.capability.skill_learning_publish import (
+        SkillLearningGateError,
+    )
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.tests.test_wave7_autonomous_learning_closure import BODY
+
+    home = ensure_my_agent_home(tmp_path / 'home')
+    owner_home = home.owner_home_dir
+    sent_messages = []
+    state = {'mode': 'active'}
+
+    class FakeDelivery:
+        registry = SimpleNamespace(
+            capabilities_for=lambda _p: SimpleNamespace(proactive=state['mode'] != 'no_channel')
+        )
+
+        def deliver(self, ctx, env):
+            if state['mode'] == 'error':
+                raise RuntimeError('channel down')
+            sent_messages.append((ctx.channel, ctx.target, env.content))
+            return SimpleNamespace(delivery_status='sent')
+
+    registered = {}
+    agent = SimpleNamespace(
+        tools=SimpleNamespace(owner_type='user', register=lambda t: registered.setdefault(type(t).__name__, t)),
+        home_paths=SimpleNamespace(
+            owner_home_dir=owner_home, owner_provider='feishu', owner_kind='user', owner_id='providers/feishu/users/ou_1',
+            root=home.root,
+        ),
+        config=SimpleNamespace(enable_self_map=False, my_agent_owner_id='ou_1'),
+        effective_workspace_root=owner_home,
+        current_skill_snapshot=lambda: None,
+        delivery_service=FakeDelivery(),
+    )
+    register_self_map(agent)
+    scripts_tool = registered['ScriptsTool']
+    from agent_py_agent.tests.test_wave7_broker_workflow_identity import file_source
+
+    empty_src = file_source(owner_home, 'empty', content='')
+    descriptor = {
+        'name': '缺源脚本',
+        'access_targets': [],
+        'data_sources': [empty_src.to_dict()],
+        'credential_refs': [],
+        'io_contract': {},
+    }
+    assert scripts_tool.execute({'action': 'register', 'script_id': 'miss', 'descriptor': descriptor, 'code': 'print("{}")'}).ok
+    run_active = scripts_tool.execute({'action': 'run', 'script_id': 'miss'})
+    assert not run_active.ok and len(sent_messages) == 1
+    state['mode'] = 'no_channel'
+    assert not scripts_tool.execute({'action': 'run', 'script_id': 'miss'}).ok and len(sent_messages) == 1
+    state['mode'] = 'error'
+    assert not scripts_tool.execute({'action': 'run', 'script_id': 'miss'}).ok and len(sent_messages) == 1
+
+    with pytest.raises(SkillLearningGateError):
+        promote_verified_asset(owner_home, {'kind': 'skill', 'name': 'AGENTS.md', 'description': '禁止', 'body': BODY})
+
+    r_skill = promote_verified_asset(owner_home, {
+        'kind': 'skill', 'name': 'auto-skill-1', 'description': '自动技能',
+        'when_to_use': '需要自动整理时', 'body': BODY,
+    })
+    r_script = promote_verified_asset(owner_home, {
+        'kind': 'script', 'name': 'auto-script-1', 'description': '自动脚本',
+        'code': 'print("{\\"rows\\": 3}")', 'io_contract': {'outputs': ['rows']},
+    })
+    r_workflow = promote_verified_asset(owner_home, {
+        'kind': 'workflow', 'name': 'auto-workflow-1', 'description': '自动工作流',
+        'steps': [{'step_id': 'step1', 'name': '步骤1', 'mode': 'deterministic_script', 'script_id': 'auto-script-1'}],
+        'io_contract': {'outputs': ['rows']},
+    })
+    r_pkg = promote_verified_asset(owner_home, {
+        'kind': 'capability_package', 'name': 'auto-pkg-1', 'description': '自动能力包',
+        'entry_document': 'CAPABILITY.md', 'body': '# 自动能力包\n包含自动提炼的方法。',
+    })
+    for receipt in (r_skill, r_script, r_workflow, r_pkg):
+        assert receipt is not None and receipt['executed'] is True and receipt['contract_valid'] is True

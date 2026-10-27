@@ -69,7 +69,7 @@ def configured_thread(thread, params, home_paths):
         raise HostAPIError("INVALID_SCHEMA")
     packs = packs if packs is not None else alias
     if packs is not None:
-        if not isinstance(packs, list) or len(packs) > 100 or any(not isinstance(p, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", p) for p in packs):
+        if not isinstance(packs, list) or len(packs) > 100 or any(not isinstance(p, str) or len(p) > 128 or not re.fullmatch(r"(?:public/)?[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", p) for p in packs):
             raise HostAPIError("INVALID_SCHEMA")
         state["preferred_pack_ids"] = list(dict.fromkeys(packs))
     profile = params.get("model_profile_id")

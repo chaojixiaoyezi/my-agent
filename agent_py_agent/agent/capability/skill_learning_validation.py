@@ -63,16 +63,16 @@ def _validate_identity(asset, target):
 # 函数用途: 按载体核对方法结构，不把检查通过当作业务执行。
 def _validate_procedure(kind, asset):
     if kind == 'skill':
-        _validate_skill_procedure(asset)
-    elif kind == 'script':
+        return _validate_skill_procedure(asset)
+    if kind == 'script':
         code = asset.get('entry_source', asset.get('code'))
         if not isinstance(code, str) or not code.strip():
             raise ValueError('MACHINE_DRAFT_SCRIPT_EMPTY')
-        compile(code, '<machine-candidate>', 'exec', dont_inherit=True)
-    elif kind == 'workflow':
-        _validate_steps(asset.get('steps'))
-    else:
-        raise ValueError('MACHINE_DRAFT_CARRIER_UNSUPPORTED')
+        return compile(code, '<machine-candidate>', 'exec', dont_inherit=True)
+    if kind == 'workflow':
+        return _validate_steps(asset.get('steps'))
+    if kind != 'capability_package' or not isinstance(asset.get('entry_document', 'CAPABILITY.md'), str) or not (asset.get('body') or asset.get('files')):
+        raise ValueError('MACHINE_DRAFT_PACKAGE_INVALID' if kind == 'capability_package' else 'MACHINE_DRAFT_CARRIER_UNSUPPORTED')
 
 
 # LLM: 至少两行且有结构；旧格式兼容须标题加真实步骤或闭合非空代码块，空触发节不能借下一标题充数。

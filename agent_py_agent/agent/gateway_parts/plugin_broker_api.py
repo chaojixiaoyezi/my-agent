@@ -119,7 +119,8 @@ class PluginBrokerService:
         from ..plugin_host.schemas import canonical_json, thaw
         body = {} if payload is None else payload
         if (isinstance(action, str) and action in ('capability_packages.list', 'user_space.identity.resolve')
-                and (action not in action_specs() or not domain_ready(action, self._host_v2_ports))):
+                and (action not in action_specs() or not domain_ready(action, self._host_v2_ports)
+                     or (action == 'user_space.identity.resolve' and getattr(self, 'identity_credentials', None) is not None))):
             if idempotency_key is not None or not isinstance(body, dict):
                 return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
             try:

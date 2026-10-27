@@ -722,13 +722,18 @@ def test_r5_case_insensitive_protected_dirs_forbidden(case, monkeypatch, alias):
         ("## main\x00 M data/secret.txt\x00 M src/app.py\x00", False),
         (
             'diff --git a/old.txt "b/run\\305\\277/probe.txt"\n+secret1\n'
-            'diff --git "a/run\\305\\277/fixture.txt" "b/run\\305\\277/fixture.txt"\n+secret2\n'
+            'diff --git "1/run\\305\\277/fixture.txt" "2/run\\305\\277/fixture.txt"\n+secret2\n'
+            'diff --git "x/run\\305\\277/before.txt" "y/run\\305\\277/after.txt"\n--- "x/run\\305\\277/before.txt"\n+++ "y/run\\305\\277/after.txt"\n@@ -1 +1 @@\n-before\n+secret3\n'
+            'diff --git a/a/data/before.txt b/b/after.txt\nsimilarity index 100%\nrename from a/data/before.txt\nrename to b/after.txt\n'
+            'diff --git a/notes a/data/old.txt b/notes a/data/new.txt\n--- a/notes a/data/old.txt\n+++ b/notes a/data/new.txt\n@@ -1 +1 @@\n-old\n+kept_space_dir\n'
             'diff --git a/src/app.py b/src/app.py\n+literal diff --git a/data/not-a-path.txt b/data/not-a-path.txt\n+ok\n',
             False,
         ),
     ])
-    monkeypatch.setattr(files, "_git", lambda *args: next(outputs))
-    git_res = files.inspect_workspace_git(case.context, {"workspace_dir": str(case.root)})
+    recorded = []
+    monkeypatch.setattr(files, "_git", lambda _fd, args: recorded.append(args) or next(outputs))
+    git_res = files.inspect_workspace_git(case.context, {"workspace_dir": str(case.root), "path": ":(exclude,icase)agent_py_agent"})
+    assert recorded[0][recorded[0].index("--") + 1] == ":(literal):(exclude,icase)agent_py_agent"
     assert git_res["changed_files"] == [{"status": "M", "path": "src/app.py"}]
-    assert "secret" not in git_res["diff"] and "+literal diff --git a/data/not-a-path.txt" in git_res["diff"]
-    assert "+ok" in git_res["diff"] and git_res["clean"] is False
+    assert "secret" not in git_res["diff"] and "rename from a/data/before.txt" in git_res["diff"] and "kept_space_dir" in git_res["diff"]
+    assert "+literal diff --git a/data/not-a-path.txt" in git_res["diff"] and git_res["clean"] is False

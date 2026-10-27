@@ -275,13 +275,14 @@ def _effect(action, payload, authorized, context, ports, store):
 # LLM: 先检查源线程及允许创建范围；克隆后只为新线程固定本安装来源，绝不改源线程或沿用其它安装回执。
 # 函数用途: 调用WP-1主会话分叉并将新线程接回原插件范围。
 def _fork(payload, authorized, context, conversation, store):
-    conversation.require_thread(store, payload["source_thread_id"], authorized, context)
+    source = conversation.require_thread(store, payload["source_thread_id"], authorized, context)
     for scope in (authorized.binding.grant["threads"], authorized.resource_scope["threads"]):
         if scope.get("created_by_installation") is not True:
             raise HostAPIError("CAPABILITY_DENIED", 403)
     directory = _workspace(payload, authorized, context, conversation, store)
     result = _module("conversation.thread_fork_service").fork_conversation_thread(store,
-        source_thread_id=payload["source_thread_id"], up_to_message_id=payload.get("up_to_message_id"),
+        source_thread_id=payload["source_thread_id"],
+        up_to_message_id=payload.get("up_to_message_id", payload.get("source_message_id")),
         title=payload.get("title"), workspace_dir=str(directory) if directory else None,
         owner_home=context.owner_home.home_dir, is_admin=context.identity == OwnerIdentity.local_main())
 
@@ -291,7 +292,9 @@ def _fork(payload, authorized, context, conversation, store):
         read_context(authorized)
         if row.owner_id != context.owner_home.owner_id or row.owner_home != str(context.owner_home.home_dir):
             raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
-        state = {"installation_ref": authorized.binding.installation_ref, "revision": 1, "workspace_ref": "default"}
+        prefs = {k: v for k, v in source.metadata.get("plugin_host_v2", {}).items()
+                 if k in {"permission_mode", "preferred_pack_ids"}}
+        state = {**prefs, "installation_ref": authorized.binding.installation_ref, "revision": 1, "workspace_ref": "default"}
         return replace(row, metadata={**row.metadata, "plugin_host_v2": state})
 
     branch = store.threads.update_atomic(result["thread_id"], bind)

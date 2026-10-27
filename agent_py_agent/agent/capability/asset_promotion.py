@@ -130,3 +130,68 @@ def register_extracted_assets(home, chosen, proposal, scope):
 def _restore_on_failure(store, parts, rollback):
     previous = read_text_beneath(store.directory, parts)
     rollback.callback(unlink_file_beneath, store.directory, parts) if previous is None else rollback.callback(write_text_atomic_beneath, store.directory, parts, previous)
+
+
+# LLM: 四类载体统一经静态安全门与真实实体发布/执行核验；AGENTS/SOUL硬拦截，脚本和工作流真实执行并通过IO合同后才算核验通过。
+# 函数用途: 按载体类型自动完成Skill/Script/Workflow/CapabilityPackage发布、回读与执行验证并写入唯一registry。
+def promote_verified_asset(owner_home, candidate):
+    from pathlib import Path
+
+    from ..assets.descriptor import AssetDescriptor
+    from ..assets.script_store import ScriptStore
+    from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
+    from ..workflows import ScriptRunner, WorkflowEngine
+    from .skill_learning_prompt import SkillLearningDecision
+    from .skill_learning_publish import PublishRequest, SkillLearningGateError
+
+    home = Path(owner_home).absolute()
+    store = SkillLearningStore(home / 'data' / 'skill_learning', home / 'skills')
+    static = default_machine_promotion_verifier(candidate)
+    if static.get('error_code') in {'MANUAL_ONLY_TARGET', 'MACHINE_DRAFT_NAME_INVALID'}:
+        raise SkillLearningGateError(static['error_code'])
+    if static.get('status') != 'passed':
+        return None
+    carrier, name, desc = select_asset_carrier(candidate), candidate['name'], candidate['description']
+    if carrier == 'skill':
+        dec = SkillLearningDecision('create', 'verified', name=name, description=desc,
+            when_to_use=candidate.get('when_to_use', desc), tags=tuple(candidate.get('tags', ())), body=candidate['body'])
+        event = promote_verified_skill(store, PublishRequest(dec), None)
+        if event is None:
+            return None
+        return {'carrier': 'skill', 'asset_id': name, 'executed': True, 'contract_valid': True, 'sha256': static['sha256']}
+    if carrier == 'script':
+        code = candidate.get('entry_source', candidate.get('code', ''))
+        desc_obj = AssetDescriptor.from_dict({'id': name, 'kind': 'script', 'name': name, 'summary': desc,
+                                              'io_contract': candidate.get('io_contract', {})})
+        sstore = ScriptStore(home)
+        sstore.save_script(desc_obj, code)
+        res = ScriptRunner(home, use_sandbox=False).run_script(name, candidate.get('sample_inputs', {}))
+        out = getattr(res, 'parsed_output', None)
+        receipt = {'status': 'passed' if res.ok else 'failed', 'executed': True,
+                   'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}
+        if not business_validated(receipt) or sstore.get_script(name) is None:
+            sstore.delete_script(name)
+            return None
+    elif carrier == 'workflow':
+        wstore = WorkflowStore(home)
+        defn = WorkflowDefinition.from_any({
+            'descriptor': {'id': name, 'kind': 'workflow', 'name': name, 'summary': desc, 'io_contract': candidate.get('io_contract', {})},
+            'steps': candidate['steps'], 'body_markdown': candidate.get('body_markdown', ''),
+        })
+        wstore.save_workflow(defn)
+        eng = WorkflowEngine(home, analysis_handler=candidate.get('analysis_handler') or (lambda *_: {'ok': True}))
+        eng.runner = ScriptRunner(home, use_sandbox=False)
+        run = eng.run_workflow(defn, inputs=candidate.get('sample_inputs', {}))
+        receipt = {'status': run.status, 'executed': True, 'contract_valid': run.status == 'succeeded',
+                   'output': run.final_output if isinstance(run.final_output, dict) else {}}
+        if not business_validated(receipt) or wstore.get_workflow(name) is None:
+            return None
+    else:
+        entry_doc = candidate.get('entry_document', 'CAPABILITY.md')
+        write_text_atomic_beneath(home, ('capabilities', 'packages', name, entry_doc), str(candidate.get('body', desc)))
+        if read_text_beneath(home, ('capabilities', 'packages', name, entry_doc)) is None:
+            return None
+    row = register_asset(store, kind=carrier, asset_id=name, asset=dict(candidate),
+                         source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id']},
+                         sha256=static['sha256'], state='trial')
+    return {'carrier': carrier, 'asset_id': row['asset_id'], 'executed': True, 'contract_valid': True, 'sha256': static['sha256']}
