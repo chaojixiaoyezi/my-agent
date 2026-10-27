@@ -227,7 +227,8 @@ def emit_asset_im_notification(owner_home: str | Path, *, event_type: str, title
     if binding and binding[0] == Path(owner_home).absolute() and callable(binding[1]):
         try:
             sent = binding[1](notice)
-            result['delivery_status'] = 'no_channel' if sent is None else ('queued' if sent is not False else 'unavailable')
+            result['delivery_status'] = (sent if sent in ('queued', 'no_channel', 'unavailable')
+                                         else ('queued' if sent is None or bool(sent) else 'unavailable'))
         except Exception:
             result['delivery_status'] = 'unavailable'
     return result

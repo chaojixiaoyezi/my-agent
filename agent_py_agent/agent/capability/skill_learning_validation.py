@@ -41,7 +41,8 @@ def default_machine_promotion_verifier(candidate_or_draft, sha256=None):
 def _validate_identity(asset, target):
     manual = {'agents','soul','agents.md','soul.md'}
     names = (str(target).strip().casefold(), str(asset.get('name', '')).strip().casefold())
-    if any(name in manual or PurePosixPath(name.replace('\\', '/')).name in manual for name in names):
+    payload_text = json.dumps([asset.get('entry_source', ''), asset.get('code', ''), asset.get('steps', ''), asset.get('sample_inputs', '')], ensure_ascii=False).casefold()
+    if any(name in manual or PurePosixPath(name.replace('\\', '/')).name in manual for name in names) or 'agents.md' in payload_text or 'soul.md' in payload_text:
         raise ValueError('MANUAL_ONLY_TARGET')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', str(asset.get('name', ''))):
         raise ValueError('MACHINE_DRAFT_NAME_INVALID')

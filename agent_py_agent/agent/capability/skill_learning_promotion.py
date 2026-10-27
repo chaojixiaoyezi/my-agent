@@ -63,7 +63,12 @@ def propose_or_promote_skill(store, publish, *, verifier=None, autonomous_verifi
 # LLM: 只在原family锁内，正式复用仍核磁盘所有权；发布继续经原publisher，静态失败不得冒充发布成功。
 # 函数用途: 串行处理同族候选及晋升，保持原限额和出处记录。
 def _propose_or_promote_locked(store, publish, verifier, autonomous_verified):
-    from .asset_promotion import register_asset, task_family_fingerprint
+    from .asset_promotion import (
+        promote_verified_asset,
+        register_asset,
+        select_asset_carrier,
+        task_family_fingerprint,
+    )
     from .skill_learning_proposals import list_learning_proposals, propose_learning
     from .skill_learning_publish import (
         CODE_LIMIT_REACHED,
@@ -72,6 +77,21 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified):
     )
     from .skill_learning_store import SkillLearningEvent
 
+    req = publish.request if isinstance(publish.request, dict) else {}
+    extra = req.get('candidate_asset') if isinstance(req.get('candidate_asset'), dict) else {
+        k: req[k] for k in ('kind', 'code', 'entry_source', 'steps', 'io_contract', 'sample_inputs',
+                            'entry_document', 'files', 'application_scope', 'analysis_handler') if k in req
+    }
+    if extra and select_asset_carrier({**asdict(publish.decision), **extra}) != 'skill':
+        cand = {**asdict(publish.decision), **extra}
+        carrier = select_asset_carrier(cand)
+        promoted = promote_verified_asset(store.skills_root.parent, cand) if autonomous_verified else None
+        if promoted is not None:
+            return SkillLearningEvent('published', 'SKILL_LEARNING_AUTONOMOUS_PROMOTED', skill_name=promoted['asset_id'], carrier=carrier)
+        event = propose_learning(store, publish)
+        register_asset(store, kind=carrier, asset_id=cand['name'], asset=cand,
+                       source={'origin': 'S3', 'proposal_id': event.reason}, state='candidate')
+        return replace(event, carrier=carrier)
     family = task_family_fingerprint('skill', asdict(publish.decision))
     with store.state_lock():
         registry = store.load_registry()

@@ -199,12 +199,13 @@ def test_native_git_readonly_helper_with_actual_repository():
 # 函数用途: 检查分支、重命名及带换行文件名的NUL解析。
 def test_git_projection_of_authorized_workspace(case, monkeypatch):
     monkeypatch.setattr(files, "_stat", lambda *args, **kwargs: SimpleNamespace(st_mode=0o040700))
-    outputs = iter([("## main...origin/main\x00 M with\nnewline.txt\x00R  new.txt\x00old.txt\x00", False), ("+changed\n", False)])
+    valid_diff = "diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n@@ -1 +1 @@\n+changed\n"
+    outputs = iter([("## main...origin/main\x00 M with\nnewline.txt\x00R  new.txt\x00old.txt\x00", False), ("unheaded\n" + valid_diff, False)])
     monkeypatch.setattr(files, "_git", lambda *args: next(outputs))
     result = files.inspect_workspace_git(case.context, {"workspace_dir": str(case.root)})
     assert result == {"branch": "main", "clean": False,
                       "changed_files": [{"status": "M", "path": "with\nnewline.txt"}, {"status": "R", "path": "new.txt"}],
-                      "diff": "+changed\n", "truncated": False}
+                      "diff": valid_diff, "truncated": False}
 
 
 # LLM: 不启动进程；使用v2原Store及原cleanup结清已确认未启动的资源，不伪造PID终止。
@@ -724,8 +725,10 @@ def test_r5_case_insensitive_protected_dirs_forbidden(case, monkeypatch, alias):
             'diff --git a/old.txt "b/run\\305\\277/probe.txt"\n+secret1\n'
             'diff --git "1/run\\305\\277/fixture.txt" "2/run\\305\\277/fixture.txt"\n+secret2\n'
             'diff --git "x/run\\305\\277/before.txt" "y/run\\305\\277/after.txt"\n--- "x/run\\305\\277/before.txt"\n+++ "y/run\\305\\277/after.txt"\n@@ -1 +1 @@\n-before\n+secret3\n'
+            '\x1b[1mdiff --git a/run\u017f/color.txt b/run\u017f/color.txt\x1b[m\n+secret4\n'
             'diff --git a/a/data/before.txt b/b/after.txt\nsimilarity index 100%\nrename from a/data/before.txt\nrename to b/after.txt\n'
             'diff --git a/notes a/data/old.txt b/notes a/data/new.txt\n--- a/notes a/data/old.txt\n+++ b/notes a/data/new.txt\n@@ -1 +1 @@\n-old\n+kept_space_dir\n'
+            'diff --git a/runs  b/ordinary.txt \n--- a/runs \t2026-10-27\n+++ b/ordinary.txt \t2026-10-27\n@@ -1 +1 @@\n-old\n+kept_trailing_space\n'
             'diff --git a/src/app.py b/src/app.py\n+literal diff --git a/data/not-a-path.txt b/data/not-a-path.txt\n+ok\n',
             False,
         ),
@@ -736,4 +739,4 @@ def test_r5_case_insensitive_protected_dirs_forbidden(case, monkeypatch, alias):
     assert recorded[0][recorded[0].index("--") + 1] == ":(literal):(exclude,icase)agent_py_agent"
     assert git_res["changed_files"] == [{"status": "M", "path": "src/app.py"}]
     assert "secret" not in git_res["diff"] and "rename from a/data/before.txt" in git_res["diff"] and "kept_space_dir" in git_res["diff"]
-    assert "+literal diff --git a/data/not-a-path.txt" in git_res["diff"] and git_res["clean"] is False
+    assert "kept_trailing_space" in git_res["diff"] and "+literal diff --git a/data/not-a-path.txt" in git_res["diff"] and git_res["clean"] is False

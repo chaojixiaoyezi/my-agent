@@ -181,7 +181,7 @@ def _git(descriptor, arguments):
     output, deadline = bytearray(), time.monotonic() + 5.0
     env = {"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0", "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_LAZY_FETCH": "1"}
     lit = () if any(isinstance(a, _Spec) for a in arguments) else ("--literal-pathspecs",)
-    git = ["git", "--no-pager", *lit, "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-c", "core.attributesFile=" + os.devnull, "-c", "core.fsmonitor=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.srcPrefix=a/", "-c", "diff.dstPrefix=b/", "-c", "core.worktree=.", *arguments]
+    git = ["git", "--no-pager", *lit, "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-c", "core.attributesFile=" + os.devnull, "-c", "core.fsmonitor=false", "-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=never", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "diff.srcPrefix=a/", "-c", "diff.dstPrefix=b/", "-c", "core.worktree=.", *arguments]
     command = [sys.executable, "-c", "import os,sys; os.fchdir(int(sys.argv[1])); os.execvpe(sys.argv[2],sys.argv[2:],os.environ)", str(descriptor), *git]
     with subprocess.Popen(command, cwd="/", pass_fds=(descriptor,), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         try:
@@ -237,16 +237,15 @@ def _git_filter(home, root, status, diff):
         if _ok(rel, old):
             changed.append({"status": code.strip(), "path": rel})
     kept = []
-    for chunk in re.split(r"(?m)(?=^diff --git )", diff) if re.search(r"(?m)^diff --git ", diff) else [diff]:
+    for chunk in re.split(r"(?m)(?=^diff --git )", diff):
         if not chunk.startswith("diff --git "):
-            kept.append(chunk)
             continue
         head, hdr = chunk.split("\n", 1)[0][11:], chunk.split("\n@@", 1)[0].splitlines()[1:]
         ren = [_unq(ln.split(" ", 2)[2], False) for ln in hdr if ln.startswith(("rename from ", "rename to ", "copy from ", "copy to "))]
-        pm = [_unq(ln[4:].split("\t", 1)[0].strip()) for ln in hdr if ln.startswith(("--- ", "+++ ")) and ln[4:].strip() != "/dev/null"]
+        pm = [_unq(ln[4:].split("\t", 1)[0]) for ln in hdr if ln.startswith(("--- ", "+++ ")) and ln[4:].strip() != "/dev/null"]
         known = {p for p in (*ren, *pm) if p}
-        pairs = [(lp, rp) for m in re.finditer(r"\s+", head) if (lp := _unq(head[:m.start()])) is not None and (rp := _unq(head[m.end():])) is not None]
-        hp = next((p for p in pairs if known and set(p) <= known or p[0] == p[1] or p[0].rpartition("/")[0] == p[1].rpartition("/")[0]), pairs[0] if pairs else (None,))
+        pairs = [(lp, rp) for m in re.finditer(r" ", head) if (lp := _unq(head[:m.start()])) is not None and (rp := _unq(head[m.end():])) is not None]
+        hp = next((p for p in pairs if known and set(p) <= known), next((p for p in pairs if not known and (p[0] == p[1] or p[0].rpartition("/")[0] == p[1].rpartition("/")[0])), pairs[0] if pairs else (None,)))
         if len(hp) == 2 and _ok(*hp, *ren, *pm):
             kept.append(chunk)
     return branch, changed, "".join(kept)
@@ -278,7 +277,7 @@ def inspect_workspace_git(context, payload):
               for p in (*HOST_STATE_OWNER_DIRS, ("runs",)) if home.joinpath(*p).is_relative_to(root)]
         specs = [_Spec(f":(literal){path or '.'}"), *ex]
         status, limited = _git(descriptor, ["status", "--porcelain=v1", "-b", "-z", "--ignore-submodules=all", "--", *specs])
-        diff, truncated = _git(descriptor, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--", *specs])
+        diff, truncated = _git(descriptor, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--", *specs])
         branch, changed, diff = _git_filter(home, root, status, diff)
         return {"branch": branch, "clean": not changed and not diff and not limited and not truncated,
                 "changed_files": changed, "diff": diff, "truncated": limited or truncated}

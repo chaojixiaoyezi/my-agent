@@ -132,15 +132,143 @@ def _restore_on_failure(store, parts, rollback):
     rollback.callback(unlink_file_beneath, store.directory, parts) if previous is None else rollback.callback(write_text_atomic_beneath, store.directory, parts, previous)
 
 
-# LLM: 四类载体统一经静态安全门与真实实体发布/执行核验；AGENTS/SOUL硬拦截，脚本和工作流真实执行并通过IO合同后才算核验通过。
-# 函数用途: 按载体类型自动完成Skill/Script/Workflow/CapabilityPackage发布、回读与执行验证并写入唯一registry。
+# LLM: 隔离暂存目录并快照保护手工维护文件，任何篡改尝试立即恢复并抛MANUAL_ONLY_TARGET。
+# 函数用途: 为候选脚本和工作流提供与正式Owner隔离的验证环境。
+@contextmanager
+def _stage_dir(home):
+    import shutil
+    from uuid import uuid4
+
+    from .skill_learning_publish import SkillLearningGateError
+
+    manual = {name: (home / name).read_bytes() for name in ('AGENTS.md', 'SOUL.md') if (home / name).is_file()}
+    staging = home / 'data' / 'skill_learning' / ('_stage_' + uuid4().hex)
+    staging.mkdir(parents=True, exist_ok=True)
+    for folder in ('scripts', 'skills'):
+        if (home / folder).is_dir():
+            shutil.copytree(home / folder, staging / folder)
+    try:
+        yield staging
+        for name in ('AGENTS.md', 'SOUL.md'):
+            if (staging / name).exists() or ((home / name).read_bytes() if (home / name).is_file() else None) != manual.get(name):
+                raise SkillLearningGateError('MANUAL_ONLY_TARGET')
+    finally:
+        for name, content in manual.items():
+            (home / name).write_bytes(content)
+        for name in {'AGENTS.md', 'SOUL.md'} - set(manual):
+            if (home / name).exists():
+                (home / name).unlink()
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+# LLM: 先在隔离暂存区开启restrict_to_roots沙箱执行并核对业务合同，通过后才按CAS写入正式ScriptStore。
+# 函数用途: 验证并发布脚本候选，失败绝不覆盖或删除既有正式脚本。
+def _promote_script_asset(home, name, desc, candidate):
+    from ..assets.descriptor import AssetDescriptor
+    from ..assets.script_store import ScriptStore
+    from ..workflows import ScriptRunner
+
+    sstore = ScriptStore(home)
+    existing = sstore.get_script(name)
+    if existing is not None and candidate.get('expected_revision') != existing.get('revision'):
+        return False
+    code = candidate.get('entry_source', candidate.get('code', ''))
+    desc_obj = AssetDescriptor.from_dict({'id': name, 'kind': 'script', 'name': name, 'summary': desc,
+                                          'io_contract': candidate.get('io_contract', {})})
+    with _stage_dir(home) as staging:
+        ScriptStore(staging).save_script(desc_obj, code)
+        res = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True).run_script(name, candidate.get('sample_inputs', {}))
+        out = getattr(res, 'parsed_output', None)
+        receipt = {'status': 'passed' if res.ok else 'failed', 'executed': True,
+                   'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}
+        if not business_validated(receipt):
+            return False
+    sstore.save_script(desc_obj, code, expected_revision=candidate.get('expected_revision'))
+    return sstore.get_script(name) is not None
+
+
+# LLM: 工作流在隔离暂存区执行真实步骤（禁止注入假analysis_handler），通过后才按CAS写入正式WorkflowStore。
+# 函数用途: 验证并发布工作流候选，失败绝不污染正式定义或运行记录。
+def _promote_workflow_asset(home, name, desc, candidate):
+    from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
+    from ..workflows import ScriptRunner, WorkflowEngine
+
+    wstore = WorkflowStore(home)
+    existing = wstore.get_workflow(name)
+    if existing is not None and candidate.get('expected_revision') != existing.descriptor.revision:
+        return False
+    defn = WorkflowDefinition.from_any({
+        'descriptor': {'id': name, 'kind': 'workflow', 'name': name, 'summary': desc, 'io_contract': candidate.get('io_contract', {})},
+        'steps': candidate['steps'], 'body_markdown': candidate.get('body_markdown', ''),
+    })
+    with _stage_dir(home) as staging:
+        WorkflowStore(staging).save_workflow(defn)
+        eng = WorkflowEngine(staging, analysis_handler=candidate.get('analysis_handler'))
+        eng.runner = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True)
+        run = eng.run_workflow(defn, inputs=candidate.get('sample_inputs', {}))
+        receipt = {'status': run.status, 'executed': True, 'contract_valid': run.status == 'succeeded',
+                   'output': run.final_output if isinstance(run.final_output, dict) else {}}
+        if not business_validated(receipt):
+            return False
+    wstore.save_workflow(defn, expected_revision=candidate.get('expected_revision'))
+    return wstore.get_workflow(name) is not None
+
+
+# LLM: 能力包按正式plugin_package.v7归档检验并写入PluginInstallStore且激活，支持list_installed_capability_packages读取。
+# 函数用途: 构建、核验、安装并启用纯内容能力包，失败不覆盖既有安装。
+def _promote_package_asset(home, name, desc, candidate):
+    import io
+    import zipfile
+
+    from ..plugin_activation import PluginActivationRequest
+    from ..plugin_content_activation import PluginContentActivation
+    from ..plugin_install_store import PluginInstallStore
+    from ..plugin_installation import PluginInstallRequest
+    from ..plugin_package import (
+        PackageReadLimits,
+        inspect_plugin_package,
+        read_plugin_member,
+    )
+    from ..user_space.owner_resolver import resolve_owner_home
+    from .package_provider import _owner_from_home, list_installed_capability_packages
+
+    entry_doc = candidate.get('entry_document', 'CAPABILITY.md')
+    raw_files = {entry_doc: str(candidate.get('body', desc)), **dict(candidate.get('files') or {})}
+    encoded = {p: (v if isinstance(v, bytes) else str(v).encode('utf-8')) for p, v in raw_files.items()}
+    cap = {'description': desc, 'keywords': list(candidate.get('keywords') or candidate.get('tags') or [name]), 'entry_document': entry_doc}
+    if candidate.get('application_scope'):
+        cap['application_scope'] = candidate['application_scope']
+    manifest = {'schema_version': 'plugin_package.v7', 'package_kind': 'capability', 'plugin_id': name,
+                'version': str(candidate.get('version', '1.0.0')), 'summary': desc, 'capability': cap,
+                'files': [{'path': p, 'sha256': hashlib.sha256(b).hexdigest(), 'executable': False} for p, b in encoded.items()],
+                'settings_schema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as zf:
+        zf.writestr('plugin.json', json.dumps(manifest, ensure_ascii=False))
+        for p, b in encoded.items():
+            zf.writestr(p, b)
+    snap = inspect_plugin_package(buf.getvalue())
+    if not read_plugin_member(snap, entry_doc, max_bytes=PackageReadLimits().member_bytes):
+        return False
+    try:
+        owner = _owner_from_home(home)
+    except ValueError:
+        owner = resolve_owner_home(home)
+    pstore = PluginInstallStore(owner)
+    existing = next((item for item in pstore.snapshot() if item.manifest.plugin_id == name), None)
+    if existing is not None and candidate.get('expected_revision') != existing.revision:
+        return False
+    inst = pstore.install(PluginInstallRequest(snap, f'promote:{name}:{existing.revision if existing else 0}', existing.revision if existing else 0)).installation
+    act = PluginContentActivation('enable', inst.manifest.plugin_id, inst.package_sha256, inst.revision, inst.settings_revision)
+    pstore.change_activation(PluginActivationRequest('enable', inst.revision, act))
+    return any(r['package_id'] == name and r['enabled'] for r in list_installed_capability_packages(owner.home_dir, include_disabled=False))
+
+
+# LLM: 四类载体统一经静态安全门与隔离暂存/安装核验；AGENTS/SOUL硬拦截，诚实区分静态检查与真实执行证明。
+# 函数用途: 按载体类型自动完成Skill/Script/Workflow/CapabilityPackage发布、回读与验证并写入唯一registry。
 def promote_verified_asset(owner_home, candidate):
     from pathlib import Path
 
-    from ..assets.descriptor import AssetDescriptor
-    from ..assets.script_store import ScriptStore
-    from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
-    from ..workflows import ScriptRunner, WorkflowEngine
     from .skill_learning_prompt import SkillLearningDecision
     from .skill_learning_publish import PublishRequest, SkillLearningGateError
 
@@ -155,43 +283,18 @@ def promote_verified_asset(owner_home, candidate):
     if carrier == 'skill':
         dec = SkillLearningDecision('create', 'verified', name=name, description=desc,
             when_to_use=candidate.get('when_to_use', desc), tags=tuple(candidate.get('tags', ())), body=candidate['body'])
-        event = promote_verified_skill(store, PublishRequest(dec), None)
+        event = promote_verified_skill(store, PublishRequest(dec), candidate.get('verifier'))
         if event is None:
             return None
-        return {'carrier': 'skill', 'asset_id': name, 'executed': True, 'contract_valid': True, 'sha256': static['sha256']}
-    if carrier == 'script':
-        code = candidate.get('entry_source', candidate.get('code', ''))
-        desc_obj = AssetDescriptor.from_dict({'id': name, 'kind': 'script', 'name': name, 'summary': desc,
-                                              'io_contract': candidate.get('io_contract', {})})
-        sstore = ScriptStore(home)
-        sstore.save_script(desc_obj, code)
-        res = ScriptRunner(home, use_sandbox=False).run_script(name, candidate.get('sample_inputs', {}))
-        out = getattr(res, 'parsed_output', None)
-        receipt = {'status': 'passed' if res.ok else 'failed', 'executed': True,
-                   'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}
-        if not business_validated(receipt) or sstore.get_script(name) is None:
-            sstore.delete_script(name)
-            return None
-    elif carrier == 'workflow':
-        wstore = WorkflowStore(home)
-        defn = WorkflowDefinition.from_any({
-            'descriptor': {'id': name, 'kind': 'workflow', 'name': name, 'summary': desc, 'io_contract': candidate.get('io_contract', {})},
-            'steps': candidate['steps'], 'body_markdown': candidate.get('body_markdown', ''),
-        })
-        wstore.save_workflow(defn)
-        eng = WorkflowEngine(home, analysis_handler=candidate.get('analysis_handler') or (lambda *_: {'ok': True}))
-        eng.runner = ScriptRunner(home, use_sandbox=False)
-        run = eng.run_workflow(defn, inputs=candidate.get('sample_inputs', {}))
-        receipt = {'status': run.status, 'executed': True, 'contract_valid': run.status == 'succeeded',
-                   'output': run.final_output if isinstance(run.final_output, dict) else {}}
-        if not business_validated(receipt) or wstore.get_workflow(name) is None:
-            return None
-    else:
-        entry_doc = candidate.get('entry_document', 'CAPABILITY.md')
-        write_text_atomic_beneath(home, ('capabilities', 'packages', name, entry_doc), str(candidate.get('body', desc)))
-        if read_text_beneath(home, ('capabilities', 'packages', name, entry_doc)) is None:
-            return None
+        exec_ok = business_validated(candidate.get('verification_receipt') or {})
+        return {'carrier': 'skill', 'asset_id': name, 'verification_kind': 'runtime_execution' if exec_ok else 'deterministic_static',
+                'checks_executed': True, 'executed': exec_ok, 'contract_valid': True, 'sha256': static['sha256']}
+    handlers = {'script': _promote_script_asset, 'workflow': _promote_workflow_asset, 'capability_package': _promote_package_asset}
+    if not handlers[carrier](home, name, desc, candidate):
+        return None
+    executed = carrier in {'script', 'workflow'}
     row = register_asset(store, kind=carrier, asset_id=name, asset=dict(candidate),
                          source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id']},
                          sha256=static['sha256'], state='trial')
-    return {'carrier': carrier, 'asset_id': row['asset_id'], 'executed': True, 'contract_valid': True, 'sha256': static['sha256']}
+    return {'carrier': carrier, 'asset_id': row['asset_id'], 'verification_kind': 'runtime_execution' if executed else 'deterministic_static',
+            'checks_executed': True, 'executed': executed, 'contract_valid': True, 'sha256': static['sha256']}
