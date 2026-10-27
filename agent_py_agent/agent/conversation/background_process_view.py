@@ -34,8 +34,8 @@ _DIRECTORY_CACHE_MAX_ENTRIES = 64
 _FILE_CACHE_MAX_ENTRIES = 2048
 _MAX_DIRECTORY_RECORDS = 4096
 _CACHE_RECHECK_SECONDS = 60.0
-_SCOPE_FIELDS = ("access_scope", "execution_scope", "completion_target", "metadata", "scope")
-_ATTRIBUTION_FIELDS = ("thread_id", "conversation_id", "owner_home", "task_id", "request_id")
+_SCOPE_FIELDS = ("access_scope", "execution_scope", "activation_scope", "completion_target", "metadata", "scope")
+_ATTRIBUTION_FIELDS = ("owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id")
 
 
 # LLM: 保留文件名身份及实际stat代次；失败仅保留归属字符串/非法标记，目录超限用结构化错误，不保存正文。
@@ -321,14 +321,14 @@ def _error_scope_payload(payload: object) -> dict | None:
 
 
 # LLM: 正常校验与错误诊断共用原JSON字典位置；只枚举字典，不在此转换归属类型或丢弃原字符串差异。
-# 函数用途: 提取顶层与五类scope，供严格验证和只读线程提取使用。
+# 函数用途: 提取顶层与含activation的六类scope，供严格验证和只读线程提取使用。
 def _raw_record_scopes(payload: object) -> tuple[dict, ...]:
     if not isinstance(payload, dict):
         return ()
     return (payload, *(payload[key] for key in _SCOPE_FIELDS if isinstance(payload.get(key), dict)))
 
 
-# LLM: 坏类型/空白/原字符串冲突均失败关闭，不能靠trim或路径规范化合并不同声明；年龄无效。
+# LLM: 已失败的坏记录仍拒绝空串/坏类型/空白，含owner_id和激活归属冲突；正常未绑定兼容不能洗白错误。
 # 函数用途: 每次观察重新判断坏文件是否与当前会话无关。
 def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | None, now: float) -> bool:
     if not isinstance(thread_id, str) or not thread_id.strip() or not isinstance(snapshot.payload, dict):
@@ -350,7 +350,7 @@ def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | No
         owners = {str(Path(value).expanduser().resolve()) for value in claims["owner_home"]}
     except (OSError, ValueError, RuntimeError):
         return False
-    if len(threads) > 1 or len(owners) > 1 or any(len(claims[key]) > 1 for key in ("owner_home", "task_id", "request_id")):
+    if len(threads) > 1 or len(owners) > 1 or any(len(claims[key]) > 1 for key in ("owner_id", "owner_home", "task_id", "request_id")):
         return False
     if thread_id.strip() in {value.strip() for value in threads}:
         return False
@@ -404,8 +404,8 @@ def _read_session_payload(root: Path, session_id: str) -> object:
     return json.loads(raw)
 
 
-# LLM: 所有schema及无schema均要求scope为字典或None、归属为非空字符串或None；原声明逐字一致，线程别名同组。
-# 函数用途: 在任何schema转换或会话过滤之前拒绝非法、冲突的原始归属，纯校验不写盘。
+# LLM: 正常路径允许None/原生空串表示未绑定；严格拒非字符串和非空纯空白，先于schema转换核验owner/激活等原声明。
+# 函数用途: 校验正常记录归属并保留共享MCP空串合同，各schema强制字段仍交原验证器，不写盘。
 def _validate_session_attribution(payload: dict) -> None:
     if any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in _SCOPE_FIELDS):
         raise ValueError("invalid_session_scope")
@@ -415,11 +415,15 @@ def _validate_session_attribution(payload: dict) -> None:
             value = scope.get(key)
             if value is None:
                 continue
-            if not isinstance(value, str) or not value.strip():
+            if not isinstance(value, str):
+                raise ValueError("invalid_session_attribution")
+            if value == "":
+                continue
+            if not value.strip():
                 raise ValueError("invalid_session_attribution")
             claims[key].add(value)
     threads = claims["thread_id"] | claims["conversation_id"]
-    if len(threads) > 1 or any(len(claims[key]) > 1 for key in ("owner_home", "task_id", "request_id")):
+    if len(threads) > 1 or any(len(claims[key]) > 1 for key in ("owner_id", "owner_home", "task_id", "request_id")):
         raise ValueError("conflicting_session_attribution")
 
 

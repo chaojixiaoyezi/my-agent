@@ -681,7 +681,7 @@ def test_background_processes_keep_notice_loop_at_active_cadence(monkeypatch):
     assert waits == [tui_threading.TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS]
 
 
-# LLM: 同owner未绑定记录用合同允许的None而非非法空串；线程过滤、全owner展示及只读断言不变。
+# LLM: 恢复原生空串未绑定身份；同owner线程过滤、全owner展示及只读断言保持不变。
 # 函数用途: 验证列表严格按会话过滤、Owner全局入口保留未绑定记录及只读文件边界。
 @pytest.mark.parametrize("thread_id,expected", [
     (None, {"bg-one", "bg-two", "bg-global"}),
@@ -691,7 +691,7 @@ def test_background_processes_keep_notice_loop_at_active_cadence(monkeypatch):
 ])
 def test_thread_scoped_background_list_keeps_global_records(tmp_path, thread_id, expected):
     home = tmp_path / "owner"
-    for sid, thread in [("bg-one", "thread-one"), ("bg-two", "thread-two"), ("bg-global", None)]:
+    for sid, thread in [("bg-one", "thread-one"), ("bg-two", "thread-two"), ("bg-global", "")]:
         _session(home, session_id=sid, thread_id=thread)
     before = _files(tmp_path)
     result = bg.list_background_processes(home, thread_id=thread_id)
@@ -708,7 +708,7 @@ def test_thread_scoped_inspection_rejects_foreign_record_before_log_read(tmp_pat
     assert "thread_id" in inspect.signature(bg.inspect_background_process).parameters
     home = tmp_path / "owner"
     _session(home, session_id="bg-one", thread_id="thread-one")
-    _session(home, session_id="bg-global", thread_id=None)
+    _session(home, session_id="bg-global", thread_id="")
     before = _files(tmp_path)
     original = bg._log_tail
     reads = []
@@ -741,7 +741,7 @@ def test_thread_scope_covers_all_record_identity_locations(tmp_path, scope, key)
 
     assert "thread_id" in inspect.signature(bg.inspect_background_process).parameters
     home = tmp_path / "owner"
-    root, _ = _session(home, thread_id=None)
+    root, _ = _session(home, thread_id="")
     path = root / "bg-example.json"
     payload = json.loads(path.read_text())
     if scope is None:
@@ -765,7 +765,7 @@ def test_gateway_first_poll_scopes_background_list_and_detail(tmp_path, monkeypa
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
 
     home = tmp_path / "owner"
-    for sid, thread in [("bg-one", "thread-one"), ("bg-two", "thread-two"), ("bg-global", None)]:
+    for sid, thread in [("bg-one", "thread-one"), ("bg-two", "thread-two"), ("bg-global", "")]:
         _session(home, session_id=sid, thread_id=thread)
     target = GatewayExecutionTarget("thread-one", "request", "turn", "claim").to_dict()
     agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), request_background_notices=lambda *args, **kwargs:
@@ -2037,7 +2037,7 @@ def _b1r3_payload(home, version):
 @pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
 @pytest.mark.parametrize("location", [None, "metadata"])
 @pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
-@pytest.mark.parametrize("value", [23, False, [], {}, "", " \t"])
+@pytest.mark.parametrize("value", [23, False, [], {}, " \t"])
 def test_b1r3_normal_parse_rejects_invalid_attribution(tmp_path, version, location, field, value):
     home = tmp_path / "owner"
     root = _b1_records(home, count=1)
@@ -2112,3 +2112,155 @@ def test_b1r3_schemaless_none_attribution_and_scopes_remain_optional(tmp_path):
 @pytest.mark.parametrize("value", [23, True, [], {}, "", " \t", None])
 def test_b1r3_thread_reader_never_coerces_invalid_values(value):
     assert bg._record_thread_id({"thread_id": value, "metadata": {"conversation_id": value}}) == ""
+
+
+# LLM: 按MCP生产路径序列化真实scope dataclass，v3不带v4保留字段；原生验证先于观察，激活ID沿64位hex合同。
+# 函数用途: 构造合法共享MCP元数据，不启动MCP或伪造插件安装/激活授权。
+def _b1r4_shared_payload(home, version):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.tooling.process_scope import (
+        ProcessAccessScope,
+        ProcessActivationScope,
+        ProcessExecutionScope,
+    )
+    from agent_py_agent.agent.tooling.process_session_records import (
+        ACTIVATION_PROCESS_SESSION_SCHEMA,
+    )
+
+    payload = _b1r3_payload(home, "managed")
+    payload.pop("thread_id")
+    payload.update(access_scope=asdict(ProcessAccessScope("fixture", "", str(home))),
+                   execution_scope=asdict(ProcessExecutionScope(owner_home=str(home))),
+                   activation_scope=asdict(ProcessActivationScope("fixture", str(home), "mcp-demo", "a" * 64)))
+    if version == "v3":
+        payload["schema"] = ACTIVATION_PROCESS_SESSION_SCHEMA
+        payload.pop("retain_until_consumed")
+    bg.validate_process_record(payload)
+    return payload
+
+
+@pytest.mark.parametrize("version", ["v3", "v4"])
+def test_b1r4_native_shared_mcp_does_not_poison_any_thread(tmp_path, version):
+    home = tmp_path / "owner"
+    root, _ = _session(home, session_id="bg-one", thread_id="thread-one")
+    _session(home, session_id="bg-two", thread_id="thread-two")
+    payload = _b1r4_shared_payload(home, version)
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    old = time.time() - 10
+    for path in root.glob("bg-*.json"):
+        os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    before = _files(home)
+    for thread, expected in [("thread-one", "bg-one"), ("thread-two", "bg-two")]:
+        result = bg.list_background_processes(home, thread_id=thread)
+        assert result["projection_ok"] is True and result["errors"] == []
+        assert result["active_count"] == 1
+        assert not result["unrelated_errors"]
+        assert {row["session_id"] for row in result["items"]} == {expected}
+    assert bg.list_background_processes(home)["total"] == 3
+    assert bg._record_thread_id(payload) == "" and _files(home) == before
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("location", [None, "metadata"])
+@pytest.mark.parametrize("field", ["owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+def test_b1r4_normal_empty_strings_are_unbound(tmp_path, version, location, field):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[field] = ""
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is True and not result["errors"] and not result["unrelated_errors"]
+    assert bg.list_background_processes(home)["total"] == 2
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("location", [None, "access_scope", "execution_scope", "completion_target", "metadata", "scope", "activation_scope"])
+@pytest.mark.parametrize("value", [23, True, [], {}, " \t\n"])
+def test_b1r4_normal_owner_id_type_is_strict(tmp_path, version, location, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    if location is None:
+        payload["owner_id"] = value
+    else:
+        if payload.get(location) is None:
+            payload[location] = {}
+        payload[location]["owner_id"] = value
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+def test_b1r4_top_level_owner_id_conflict_fails_closed(tmp_path, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    payload["owner_id"] = "owner-A"
+    payload.setdefault("access_scope", {})["owner_id"] = "owner-B"
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^conflicting_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("value", [False, [], "bad-scope"])
+def test_b1r4_activation_scope_requires_mapping_or_none(tmp_path, version, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    payload["activation_scope"] = value
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_scope$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("field", ["owner_id", "owner_home"])
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+def test_b1r4_activation_owner_conflict_is_not_ignored(tmp_path, field, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r4_shared_payload(home, "v4") if version == "managed" else _b1r3_payload(home, version)
+    payload.update(owner_id="fixture", owner_home=str(home))
+    payload["activation_scope"] = {"owner_id": "fixture", "owner_home": str(home), "plugin_id": "mcp-demo", "activation_id": "a" * 64}
+    payload["activation_scope"][field] = "other-owner" if field == "owner_id" else str(tmp_path / "other-owner")
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^conflicting_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("location", ["access_scope", "activation_scope"])
+@pytest.mark.parametrize("value", [None, "", " \t", 23, True, [], {}, "owner-B"])
+def test_b1r4_corrupt_owner_id_never_excused_as_foreign(tmp_path, location, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "other-thread", "owner_id": "owner-A",
+               location: {"owner_id": value}}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+
+
+@pytest.mark.parametrize("field", ["owner_id", "conversation_id"])
+def test_b1r4_v1_schema_still_rejects_required_empty_binding(tmp_path, field):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, "legacy")
+    payload["access_scope"][field] = ""
+    with pytest.raises(ValueError):
+        bg.validate_process_record(payload)
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]

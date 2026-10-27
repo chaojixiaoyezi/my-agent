@@ -1,3 +1,29 @@
+## 2026-10-26 Wave 6 B1-R4：恢复原生未绑定空串并补齐owner/激活归属
+
+来源：`07-tasks/wave6-b1-round4-fix-20261026.md` 两项P1审查反馈；基线 `d87011bc475837f9f6898b89c6589a9b7825475b`，只改原工作树三文件。本节覆盖R3“正常路径空串非法”的旧结论，坏记录诊断规则不放宽。
+
+- **原生合同核实**：`mcp_managed_process.py` 使用空会话 `ProcessAccessScope` 和未绑定 `ProcessExecutionScope`；`background_process_launch._reservation` 原样asdict序列化，`process_session_records` 校验共享激活不能携带业务身份。正常路径将None与精确空串 `""` 视为未绑定，非字符串及非空纯空白仍在schema转换之前拒绝。各版本强制字段继续交给原schema验证器，不修改或绕过它。
+- **坏记录仍失败关闭**：`_unrelated_error` 的 `not isinstance(value, str) or not value.strip()` 门保持不变，空串/空白/非法类型不能作为坏记录归属的豁免。`owner_id` 加入归属字段及两个路径的冲突组，`activation_scope` 加入scope枚举和错误快照；激活内的类型及owner冲突不能被忽略。
+- **恢复原夹具**：R3改为None的四处全局未绑定/线程位置/Gateway夹具全部恢复空串，原断言不变。正常空串从“非法类型”负例转为独立正例，坏schema的空串负例完整保留；没有靠把空串写成None来通过。
+- **回归**：新增v3/v4共享MCP元数据，按生产scope dataclass序列化、先经真实 `validate_process_record` 验证，在同一owner目录与两个运行线程记录共存；冷/热线程观察及全owner观察均验证无污染、线程过滤和不写盘。另覆盖无schema/v1/v4的owner_id顶层及六类scope类型矩阵、owner冲突、激活容器类型及owner_id/owner_home冲突、坏记录归属隔离、v1必需绑定仍由schema拒绝空串。
+- **激活ID纠正**：生产 `ProcessActivationScope` 要求64位十六进制，不接受任务示例 `act-1`；测试使用合法64位hex，不将无效激活误充共享MCP反例。
+- **先红后绿**：初始聚焦197例中188例断言失败、0执行错误，包含合法v3/v4共享记录被错误阻塞及owner_id漏洞；其余9例为已有效的控制。最终整文件687例通过、0失败/错误/跳过（`verified.xml`）；之后仅修导入排版，并针对这处格式改动复跑真实共享MCP两例通过（`formatted-shared.xml`），没有改动产品逻辑。全范围Ruff首次只发现本轮helper的导入排版，现已通过；doc-sync通过，strict code-size为blocked=False，未放宽lint、基线或测试门禁。
+- **独立复核**：只审内联相关产品片段的只读复核未发现明确反例；没有读取工作树或独立跑测试，不将它外推为完整系统评审。
+- **范围与限制**：仅验证真实临时文件、原生序列化/schema及只读投影，不启动MCP或更改插件激活授权；实际MCP启动/协议/停止链、全仓pytest、跨平台及线上均未验证。开工已有尺寸生成报告差异，备份到 `.pytest_cache/b1-r4/preexisting-code-size.patch`，按任务在验收后还原，不修改基线。
+
+复现（工作树根）：
+
+```bash
+pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+本轮日志及JUnit保存在 `.pytest_cache/b1-r4/`。
+
 ## 2026-10-26 Wave 6 B1-R3：正常解析路径严格归属校验
 
 来源：`07-tasks/wave6-b1-round3-fix-20261026.md`，单项 `B1-R2-F1`，基线 `f039c639da8ab66db7296bb601f240cca6aad38d`。仅修改原工作树三文件，遵守不派子代理、不切分支、不碰main、不推送的要求。
