@@ -42,7 +42,7 @@ def _parts(value):
     if not isinstance(value, str) or len(value) > 4096 or "\x00" in value or "\\" in value:
         raise HostAPIError("WORKSPACE_PATH_INVALID")
     parts = tuple(value.split("/"))
-    if any(part.lower() == ".git" for part in parts):
+    if any(part.casefold() == ".git" for part in parts):
         raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
     if any(part in {"", ".", ".."} for part in parts):
         raise HostAPIError("WORKSPACE_PATH_INVALID")

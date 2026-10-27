@@ -697,10 +697,11 @@ def test_r4_jsonl_unicode_separators_are_content(case, message_thread, separator
         assert result["steps"] == [raw]
 
 
-# LLM: 大小写不敏感文件系统上DATA/RUNS/workspace/RUNTIME等受保护宿主目录别名同样必须被拒绝。
-# 函数用途: 覆盖工作区根路径与相对路径的大小写受保护目录在列举、读取、下载和上传入口的拦截。
-@pytest.mark.parametrize("alias", ["DATA", "DaTa", "RUNS", "workspace/RUNTIME", "WORKSPACE/runtime"])
-def test_r5_case_insensitive_protected_dirs_forbidden(case, alias):
+# LLM: 大小写不敏感文件系统上DATA/RUNS/runſ(U+017F)等受保护宿主目录别名及Git观察子目录均必须拦截或过滤。
+# 函数用途: 覆盖工作区根与相对路径的Unicode casefold/inode受保护目录拦截及inspect_workspace_git过滤。
+@pytest.mark.parametrize("alias", ["DATA", "DaTa", "RUNS", "run\u017f", "workspace/RUNTIME", "WORKSPACE/runtime"])
+def test_r5_case_insensitive_protected_dirs_forbidden(case, monkeypatch, alias):
+    (case.root / "runs").mkdir(exist_ok=True)
     encoded = base64.b64encode(b"probe").decode()
     for root_val, rel_val in ((str(case.root / alias), "probe.txt"), (str(case.root), f"{alias}/probe.txt")):
         with pytest.raises(HostAPIError) as err_list:
@@ -716,3 +717,12 @@ def test_r5_case_insensitive_protected_dirs_forbidden(case, alias):
             with pytest.raises(HostAPIError) as err_up:
                 files.upload_workspace_file(case.context, {"workspace_dir": root_val, "path": "probe.txt", "data_base64": encoded})
             assert err_up.value.code == "WORKSPACE_PATH_INVALID"
+    monkeypatch.setattr(files, "_stat", lambda *args, **kwargs: SimpleNamespace(st_mode=0o040700))
+    outputs = iter([
+        ("## main\x00 M data/secret.txt\x00 M src/app.py\x00", False),
+        ("diff --git a/data/secret.txt b/data/secret.txt\n+secret\ndiff --git a/src/app.py b/src/app.py\n+ok\n", False),
+    ])
+    monkeypatch.setattr(files, "_git", lambda *args: next(outputs))
+    git_res = files.inspect_workspace_git(case.context, {"workspace_dir": str(case.root)})
+    assert git_res["changed_files"] == [{"status": "M", "path": "src/app.py"}]
+    assert "secret" not in git_res["diff"] and "+ok" in git_res["diff"]

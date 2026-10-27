@@ -27,18 +27,35 @@ from .capabilities_v2_handlers import _parts
 from .errors import HostAPIError
 
 _MAX, _GIT_MAX = 20 * 1024 * 1024, 256 * 1024
-# LLM: 内外工作根及子路径均不区分大小写拒绝.git；原宿主控制目录/runs按组件匹配，不能误杀普通前缀。
+# LLM: 内外工作根及子路径均按Unicode casefold与inode拒绝.git及宿主控制目录/runs，不能误杀普通前缀。
 # 函数用途: 拒绝把当前家目录内的运行状态当作工作区文件。
 def _forbid_internal(home, target):
-    if any(part.lower() == ".git" for part in target.parts):
+    if any(part.casefold() == ".git" for part in target.parts):
         raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
-    t_parts = tuple(p.lower() for p in target.parts)
+    t_parts = tuple(p.casefold() for p in target.parts)
     for base in (home, home.resolve(strict=False)):
-        h_parts = tuple(p.lower() for p in base.parts)
+        h_parts = tuple(p.casefold() for p in base.parts)
         if t_parts[:len(h_parts)] == h_parts:
             rel = t_parts[len(h_parts):]
-            if any(rel[:len(parts)] == tuple(p.lower() for p in parts) for parts in (*HOST_STATE_OWNER_DIRS, ("runs",))):
+            if any(rel[:len(parts)] == tuple(p.casefold() for p in parts) for parts in (*HOST_STATE_OWNER_DIRS, ("runs",))):
                 raise HostAPIError("WORKSPACE_PATH_INVALID")
+    inodes = set()
+    for parts in (*HOST_STATE_OWNER_DIRS, ("runs",)):
+        try:
+            st = home.joinpath(*parts).lstat()
+            inodes.add((st.st_dev, st.st_ino))
+        except OSError:
+            pass
+    if inodes:
+        for node in (target, *target.parents):
+            try:
+                st = node.lstat()
+                if (st.st_dev, st.st_ino) in inodes:
+                    raise HostAPIError("WORKSPACE_PATH_INVALID")
+            except HostAPIError:
+                raise
+            except OSError:
+                pass
 # LLM: 目录I/O前先拒绝.git组件，再核owner内外根与控制目录；持有字面路径FD，resolve不能放行根链接。
 # 函数用途: 验证根并在全程持有目录FD，所有异常关闭资源。
 @contextmanager
@@ -85,7 +102,7 @@ def list_workspace_files(context, payload):
                 except HostAPIError:
                     continue
                 info = entry.stat(follow_symlinks=False)
-                if entry.name.lower() == ".git" or payload.get("query", "").casefold() not in entry.name.casefold():
+                if entry.name.casefold() == ".git" or payload.get("query", "").casefold() not in entry.name.casefold():
                     continue
                 if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) and info.st_nlink == 1):
                     continue
@@ -158,7 +175,8 @@ def download_workspace_file(context, payload):
 def _git(descriptor, arguments):
     output, deadline = bytearray(), time.monotonic() + 5.0
     env = {"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0", "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_LAZY_FETCH": "1"}
-    git = ["git", "--no-pager", "--literal-pathspecs", "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-c", "core.attributesFile=" + os.devnull, "-c", "core.fsmonitor=false", "-c", "core.worktree=.", *arguments]
+    lit = () if any(str(a).startswith(":(") for a in arguments) else ("--literal-pathspecs",)
+    git = ["git", "--no-pager", *lit, "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-c", "core.attributesFile=" + os.devnull, "-c", "core.fsmonitor=false", "-c", "core.worktree=.", *arguments]
     command = [sys.executable, "-c", "import os,sys; os.fchdir(int(sys.argv[1])); os.execvpe(sys.argv[2],sys.argv[2:],os.environ)", str(descriptor), *git]
     with subprocess.Popen(command, cwd="/", pass_fds=(descriptor,), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         try:
@@ -182,12 +200,45 @@ def _git(descriptor, arguments):
                 process.kill()
                 process.wait()
     return bytes(output[:_GIT_MAX]).decode("utf-8", "replace"), len(output) > _GIT_MAX
+# LLM: 过滤落入宿主控制目录或runs的Git变更与diff块，保持NUL重命名对对齐且不泄露受保护路径。
+# 函数用途: 拆解Git状态与diff并剔除受保护子目录条目。
+def _git_filter(home, root, status, diff):
+    entries, changed = iter(status.split("\x00")), []
+    branch = next(entries, "").removeprefix("## ").split("...")[0].removeprefix("No commits yet on ")
+    for entry in entries:
+        if entry:
+            code, rel = entry[:2], entry[3:]
+            old = next(entries, "") if ("R" in code or "C" in code) else ""
+            try:
+                _forbid_internal(home, root / rel)
+                if old:
+                    _forbid_internal(home, root / old)
+                changed.append({"status": code.strip(), "path": rel})
+            except HostAPIError:
+                pass
+    if "diff --git " in diff:
+        kept = []
+        for idx, chunk in enumerate(diff.split("diff --git ")):
+            if idx == 0:
+                if chunk:
+                    kept.append(chunk)
+                continue
+            parts = [p[2:] for p in chunk.split("\n", 1)[0].split(" ") if p.startswith(("a/", "b/"))]
+            try:
+                for part in parts:
+                    _forbid_internal(home, root / part)
+                kept.append("diff --git " + chunk)
+            except HostAPIError:
+                pass
+        diff = "".join(kept)
+    return branch, changed, diff
 # LLM: Git启动前核目标控制目录和nofollow；NUL分隔保留换行/空格文件名，状态不足时不宣称clean。
 # 函数用途: 返回Git分支、变更清单和有界diff；workspace.git.inspect可由注册层映射同一函数。
 def inspect_workspace_git(context, payload):
     path = "/".join(_parts(payload["path"])) if payload.get("path") else ""
     with _directory(context, payload) as (root, prefix, descriptor):
-        _forbid_internal(context.owner_home.home_dir, root / path)
+        home = context.owner_home.home_dir
+        _forbid_internal(home, root / path)
         # 外置gitdir/commondir和对象库链接不在单项目文件根内，保守拒绝而不扩大目录授权。
         if not stat.S_ISDIR(_stat(".git", dir_fd=descriptor, follow_symlinks=False).st_mode):
             raise HostAPIError("WORKSPACE_GIT_EXTERNAL_METADATA_DENIED", 403)
@@ -205,14 +256,11 @@ def inspect_workspace_git(context, payload):
                 pass
             finally:
                 os.close(parent)
-        status, limited = _git(descriptor, ["status", "--porcelain=v1", "-b", "-z", "--ignore-submodules=all", "--", path or "."])
-        diff, truncated = _git(descriptor, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--", path or "."])
-        entries, changed = iter(status.split("\x00")), []
-        branch = next(entries, "").removeprefix("## ").split("...")[0].removeprefix("No commits yet on ")
-        for entry in entries:
-            if entry:
-                changed.append({"status": entry[:2].strip(), "path": entry[3:]})
-                if "R" in entry[:2] or "C" in entry[:2]:
-                    next(entries, None)
+        ex = [f":(exclude,icase){home.joinpath(*p).relative_to(root).as_posix()}"
+              for p in (*HOST_STATE_OWNER_DIRS, ("runs",)) if home.joinpath(*p).is_relative_to(root)]
+        specs = [f":(literal){path or '.'}", *ex] if ex else [path or "."]
+        status, limited = _git(descriptor, ["status", "--porcelain=v1", "-b", "-z", "--ignore-submodules=all", "--", *specs])
+        diff, truncated = _git(descriptor, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--", *specs])
+        branch, changed, diff = _git_filter(home, root, status, diff)
         return {"branch": branch, "clean": not changed and not limited and not truncated,
                 "changed_files": changed, "diff": diff, "truncated": limited or truncated}
