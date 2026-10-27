@@ -9,6 +9,7 @@
 # 新晋升提示并入当轮原 host_notice 流和 final；开轮旧提示不重发，联测 test_decision_experiment_notice 与 test_host_notices。
 # 本轮工具排的提示（details.turn_request_id 是本请求）同批发布；别的来源中途到的仍留下一轮，联测 test_host_notices。
 # 内部background只消费原canonical来源；原运输或心跳/Call停止unknown上抛至claim出口，停止本线程资源但不封终态或发续跑许可。
+# LLM: Bot在receipt复验后绑定私有工具视图；原执行器守目录/离线/总预算，Compact不重置额度，不改普通会话依赖。
 # 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ import json
 import logging
 import threading
 import time
-from dataclasses import dataclass, replace
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -139,6 +141,13 @@ class _GatewayRunParamsRequest:
     prompt: str
     carried_archive_tool_calls: tuple[dict[str, object], ...] = ()
     carried_active_turn_user_inputs: tuple[dict[str, object], ...] = ()
+
+
+# LLM: 策略只由本worker校验receipt后构造，非模型attrs；同栈replace保留，底层循环不从它恢复额外权限。
+# 类用途: 携带本次Bot已核执行约束，让宿主在真实agent.run周围安装执行门。
+@dataclass
+class _BotGatewayRunParams(RunParams):
+    bot_execution_policy: dict | None = field(default=None, repr=False, compare=False)
 
 
 # LLM: 请求租约与会话执行车道是不同边界；只能按本包的精确 request/worker/attempt 刷新队列租约。
@@ -619,6 +628,7 @@ def _register_named_system_task(
 # 展示callback同步更新本turn局部值及当前宿主参数；新请求重置，失效None与已评估事实阻止额外决策。
 # 能力推荐的结构化观测另走 observer，只追加到本请求记录，不改展示回调的语义；实验对照记录由同一出口拆出另写。
 # 有宿主时transcript延迟到完整恢复输入就绪后提交；成功材料从同次run回传，后续overflow/最终持久化不复活旧上下文。
+# Bot在同一请求共享预算和私有目录墙，覆盖并行工具及Compact重试，不以工具轮数冒充调用数。
 # 函数用途: 在同一用户回合内处理上下文超限，正式压缩旧会话或本轮工具历史后继续执行。
 def _run_gateway_turn_with_conversation_compact(
     context: request_context.GatewayAskRunContext,
@@ -636,6 +646,7 @@ def _run_gateway_turn_with_conversation_compact(
     runtime_rejected_actions: list[dict[str, str]] = []
     capability_presentation = None
     presentation_evaluated = False
+    bot_guard = None
 
     # LLM: 回调只由原运行/Compact同步调用；不持久化或改活快照，清旧值后仍保留本turn已评估事实。
     # 函数用途: 在当前请求内保存真实采用结果，让压缩和后续重试使用同一展示或基础面。
@@ -665,11 +676,13 @@ def _run_gateway_turn_with_conversation_compact(
         run_params.capability_presentation_callback = retain_presentation
         run_params.capability_presentation_observer = partial(
             request_experiment_records.observe_capability_presentation, context)
+        from ..conversation.bot_tool_policy import BotExecutionGuard, bot_execution_scope
+
+        if isinstance(run_params, _BotGatewayRunParams) and bot_guard is None:
+            bot_guard = BotExecutionGuard(run_params.bot_execution_policy, carried_archive_tool_calls)
         _run_started = time.monotonic()
-        result = context.agent.run(
-            prompt,
-            params=run_params,
-        )
+        with bot_execution_scope(context.agent, bot_guard):
+            result = context.agent.run(prompt, params=run_params)
         if observer is not None and observer.compact_recovery is not None and observer.compact_recovery.committed:
             current = observer.compact_recovery.host_state
         _record_gateway_stage(context.stages, "run_ms", _run_started)
@@ -870,8 +883,26 @@ def _require_gateway_conversation_ready(
 # 函数用途: 构造当前请求执行参数，并验证显式输入附件的归属与资源上限。
 # LLM: 前台source仅捕获原实际C/W invocation/Agent/claim，Count0 None零IO；媒体/actor/refs/原所有参数保持，不由运输投影创建执行身份。
 # 函数用途: 在原Gateway参数构造处接同一请求安全点，保留原执行选项和全部宿主事实。
+# LLM: 原worker复验receipt后构造；深拷贝分离执行权威与attrs，exact读取根不继承shared例外。
+# 函数用途: 冻结Bot原工具交集及目录写边界，不从模型attrs反推授权。
+def _gateway_bot_execution_params(inputs, policy, attrs):
+    from ..conversation.bot_tool_policy import bot_request_allowed_tools
+
+    names = bot_request_allowed_tools(inputs.context.agent, inputs.request, inputs.conversation.thread_id, policy)
+    frozen = deepcopy(policy)
+    constraints = frozen["bot_execution_policy"]
+    attrs = {**(attrs or {}), "bot_execution_policy": deepcopy(constraints),
+             CONVERSATION_EXECUTION_CWD_ATTR: constraints["workspace_root"]}
+    boundary = {"execution_cwd": constraints["workspace_root"],
+        "effective_owner_scope_root": constraints["workspace_root"],
+        "read_scope_mode": "exact", "allowed_read_roots": [constraints["workspace_root"]],
+        "allowed_write_roots": [] if frozen["read_only_mode"] else [constraints["workspace_root"]]}
+    return ([] if inputs.request.get("host_im_task_ack") else names), frozen, attrs, boundary
+
+
 # LLM: 仅已核canonical owner/线程/代次的Bot策略可启用原快照交集；普通插件tool_names非空继续失败关闭。
-# 函数用途: 在原worker参数接缝应用Bot工具限制，不扩大工具handler或使用旧成员资格。
+# LLM: 离线/根/预算仅从已核receipt冻结为宿主参数；约束投影进attrs但不从模型attrs反授执行权。
+# 函数用途: 在原worker参数接缝应用Bot工具与目录预算限制，不扩大handler或使用旧成员资格。
 def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     request = inputs.request
     context = inputs.context
@@ -914,19 +945,21 @@ def _gateway_run_params(inputs: _GatewayRunParamsRequest) -> RunParams:
     plugin_policy = (request.get("metadata") or {}).get("plugin_execution_policy")
     has_plugin_policy = isinstance(plugin_policy, dict) and plugin_policy.get("schema") == "plugin_execution_policy.v1"
     allowed_tools = [] if (request.get("host_im_task_ack") or request.get("source") == "plugin" or has_plugin_policy) else None
+    bot_policy, boundary = None, None
     if request.get("source") == "plugin" or has_plugin_policy:
         if not has_plugin_policy or plugin_policy.get("network") is not False:
             raise RuntimeError("plugin request requires valid offline plugin_execution_policy.v1")
         if "bot_mode" in plugin_policy:
-            from ..conversation.bot_tool_policy import bot_request_allowed_tools
-            bot_tools = bot_request_allowed_tools(context.agent, request, conversation.thread_id, plugin_policy)
-            allowed_tools = [] if request.get("host_im_task_ack") else bot_tools
+            allowed_tools, bot_policy, attrs, boundary = _gateway_bot_execution_params(inputs, plugin_policy, attrs)
         elif plugin_policy.get("tool_names"):
             raise RuntimeError("plugin chat request cannot enable tools on unrestricted worker")
-    return RunParams(
+    params_type = _BotGatewayRunParams if bot_policy is not None else RunParams
+    return params_type(
+        **({"bot_execution_policy": bot_policy} if bot_policy is not None else {}),
         pending_turn_input_source=pending_turn_input_source(context.agent, request, conversation.thread_id),
         inject=request_prompt.gateway_injections(request, conversation),
         allowed_tools=allowed_tools,
+        write_boundary=boundary,
         prompt_files=[str(item) for item in request.get("prompt_files", [])],
         save=bool(request.get("save", True)),
         request_id=context.request_id,

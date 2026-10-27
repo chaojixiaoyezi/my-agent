@@ -1,4 +1,4 @@
-# LLM: 只桥接原input/claim/canonical与C受限文件工具；未知结局不得重做写，绝不借main invoker。
+# LLM: 桥接原input/claim与受限工具；Bot冻结离线集合、物理根与总预算，由原worker复验执行，不借main invoker。
 # 模块用途: 组装生产请求提交、受限工具和有界撤权观察。
 from __future__ import annotations
 
@@ -278,11 +278,11 @@ class GatewayPluginRequests:
         return ExecutionAccepted(request_id, payload["thread_id"], False)
 
 
-# LLM: 许可取插件grant、原owner权限/禁用表、治理authority和当前成员的交集；只生成执行策略，不初始化main Agent。
+# LLM: grant/owner/治理交集后只保已核离线工具；冻结同owner物理workspace、总调用预算及禁学，供receipt和worker共核。
 # 函数用途: 准备当前Bot的可撤销工具与根目录策略，供原worker快照接缝消费。
 def bot_execution_policy(authorized, context, fields):
     from ..audit_group.access_policy import current_tool_policy
-    from ..conversation.bot_tool_policy import READ_TOOLS
+    from ..conversation.bot_tool_policy import OFFLINE_TOOLS, READ_TOOLS, bot_execution_constraints
     from ..user_space.local_user_store import LocalUserStore
     from ..user_space.managed_user_governance import _GovernanceControl
     from ..user_space.owner_resolver import OwnerIdentity
@@ -299,7 +299,7 @@ def bot_execution_policy(authorized, context, fields):
         member = user.in_audit_group is True
         governance = _GovernanceControl(home.root, user.user_id).policy()
     execution = authorized.binding.grant["execution"]
-    names = set(execution["tool_names"]) - set(policy.get("disabled_tools", []))
+    names = (set(execution["tool_names"]) - set(policy.get("disabled_tools", []))) & OFFLINE_TOOLS
     if authorized.call.payload["tool_policy"] == "none" or execution["max_tool_calls"] == 0:
         names.clear()
     parts = home.home_dir.relative_to(users.root).parts
@@ -309,12 +309,14 @@ def bot_execution_policy(authorized, context, fields):
         names &= READ_TOOLS
     if not member:
         names = {name for name in names if not name.startswith("audit_group_")}
-    fingerprint = hashlib.sha256(canonical_json([policy, permissions, governance, member, sorted(names)]).encode()).hexdigest()
+    constraints = bot_execution_constraints(home, execution["max_tool_calls"], fields["learning_excluded"])
+    fingerprint = hashlib.sha256(canonical_json([policy, permissions, governance, member, sorted(names), constraints]).encode()).hexdigest()
     return {"schema": "plugin_execution_policy.v1", "tool_names": sorted(names), "network": False,
             "budgets": {key: value for key, value in execution.items() if key.startswith("max_")},
             "policy_digest": fingerprint,
             "bot_mode": fields["bot_mode"], "bot_generation": fields["bot_generation"],
             "learning_excluded": fields["learning_excluded"], "read_only_mode": readonly,
             "in_audit_group": member, "governance_revision": governance.get("revision", 0),
-            "read_roots": [str(home.workspace_dir), str(home.tasks_dir)],
-            "write_roots": [] if readonly else [str(home.workspace_dir), str(home.tasks_dir)]}
+            "bot_execution_policy": constraints,
+            "read_roots": [constraints["workspace_root"]],
+            "write_roots": [] if readonly else [constraints["workspace_root"]]}

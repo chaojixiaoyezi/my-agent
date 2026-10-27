@@ -14,6 +14,131 @@ from agent_py_agent.agent.assets.descriptor import AssetDescriptor, AssetRefs
 from agent_py_agent.agent.assets.script_store import ScriptStore
 from agent_py_agent.agent.assets.workflow_store import WorkflowDefinition, WorkflowStore
 
+# LLM: 合成短值不依赖供应商形状或共享日志扫描；大小写和连接符必须走同一敏感键合同。
+# 常量用途: 覆盖基本词、camelCase、snake_case、kebab-case及带业务前缀的完整末尾片段。
+_H01_SECRET_KEYS = (
+    'secret', 'token', 'password', 'passwd', 'pwd', 'passphrase', 'apikey', 'api_key',
+    'access_key', 'access_token', 'refresh_token', 'client_secret', 'private_key',
+    'auth_token', 'credential', 'webhook', 'cookie', 'bearer', 'authorization',
+    'accessToken', 'refreshToken', 'clientSecret', 'apiKey', 'privateKey', 'authToken',
+    'serviceClientSecret', 'SERVICE_ACCESS_TOKEN', 'service-access-token',
+    'service.apiKey', 'APIKey', 'serviceWebhook', 'passPhrase', 'webHook',
+    'servicePassPhrase', 'serviceWebHook',
+)
+
+
+@pytest.mark.parametrize('key', _H01_SECRET_KEYS)
+@pytest.mark.parametrize('literal', ['x', '秘密\\"\n尾', '${TOKEN}literal-tail'])
+def test_h01_json_key_value_association_rejects_and_replaces(sanitize, tmp_path, key, literal):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    value = {'nested': [{'ordinary': '保留', key: literal}], 'port': 8080, 'enabled': True}
+    raw = json.dumps(value, ensure_ascii=True).encode()
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({'config.json': raw}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert literal not in str(failure.value.to_dict())
+    output = sanitize({'config.json': raw}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)['config.json']
+    value['nested'][0][key] = '<REDACTED_SECRET>'
+    assert json.loads(output) == value
+    assert sanitize({'config.json': output}, owner_home=tmp_path)['config.json'] == output
+
+
+@pytest.mark.parametrize('key', ['accessToken', 'apiKey', 'clientSecret', 'authorization'])
+def test_h01_json_sensitive_container_and_duplicate_keys(sanitize, tmp_path, key):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    raw = ('{"' + key + '":["x",{"ordinary":"y"},null,42,false],'
+        '"safe":"保留","' + key + '":"${TOKEN}"}').encode()
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({'config.json': raw}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    output = sanitize({'config.json': raw}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)['config.json']
+    pairs = json.loads(output, object_pairs_hook=list)
+    assert pairs == [(key, ['<REDACTED_SECRET>', [('ordinary', '<REDACTED_SECRET>')], None, 42, False]),
+        ('safe', '保留'), (key, '${TOKEN}')]
+
+
+@pytest.mark.parametrize('literal', ['', '${TOKEN}', '<CONFIGURED_TOKEN>', '<REDACTED_SECRET>',
+    'YOUR_TOKEN', 'CHANGE_ME', '***REDACTED***'])
+def test_h01_json_pure_placeholders_and_nonsecret_keys_remain_unchanged(sanitize, tmp_path, literal):
+    import json
+
+    value = dict.fromkeys(_H01_SECRET_KEYS, literal)
+    value.update(max_tokens=500, token_count='ordinary', password_hint='ordinary',
+        secretary='ordinary', timeout=30)
+    raw = json.dumps(value).encode()
+    assert sanitize({'config.json': raw}, owner_home=tmp_path)['config.json'] == raw
+    assert sanitize({'config.json': raw}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)['config.json'] == raw
+
+
+@pytest.mark.parametrize('key', _H01_SECRET_KEYS)
+@pytest.mark.parametrize('style', ['yaml', 'env', 'code'])
+def test_h01_nonjson_key_variants_use_same_contract(sanitize, tmp_path, key, style):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    text = f'{key}: x\n' if style == 'yaml' else f'{key}="x"\n' if style == 'code' else f'{key}=x\n'
+    name = 'main.py' if style == 'code' else 'config.' + style
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({name: text.encode()}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    output = sanitize({name: text.encode()}, owner_home=tmp_path,
+        allow_secret_placeholder_replace=True)[name]
+    assert b'REDACTED_SECRET' in output
+    assert sanitize({name: output}, owner_home=tmp_path)[name] == output
+
+
+@pytest.mark.parametrize('text', ['--password="x"', '.password="x"', '1-password="x"',
+    'ordinary = "clientSecret=\'x\'"'])
+def test_h01_key_boundaries_keep_embedded_and_cli_assignments(sanitize, tmp_path, text):
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    with pytest.raises(AssetDeliveryError) as failure:
+        sanitize({'main.py': text.encode()}, owner_home=tmp_path)
+    assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+
+
+def test_h01_attachment_preview_send_and_install_share_structured_scan(kit):
+    import json
+
+    from agent_py_agent.agent.assets.delivery_contracts import AssetDeliveryError
+
+    ScriptStore(kit.main).save_script(AssetDescriptor('config_demo', 'script', '配置附件'), 'print("{}")\n')
+    path = kit.main / 'scripts/config_demo/config.json'
+    value = {'nested': [{'clientSecret': 'fixture-client-literal', 'apiKey': 'x',
+                         'passPhrase': 'phrase', 'webHook': 'hook'}], 'port': 8080}
+    raw = json.dumps(value).encode()
+    path.write_bytes(raw)
+    for action in (lambda: kit.service.preview_bundle('local/main', 'script', 'config_demo'),
+            lambda: kit.service.send_bundle('local/main', 'local/alice', 'script', 'config_demo')):
+        with pytest.raises(AssetDeliveryError) as failure:
+            action()
+        assert failure.value.error_code == 'ASSET_DELIVERY_SECRET_DETECTED'
+    assert kit.service.list_inbox('local/alice')['deliveries'] == []
+    assert path.read_bytes() == raw
+    from agent_py_agent.agent.assets.script_store_support import snapshot_delivery_bundle
+
+    frozen, = snapshot_delivery_bundle(kit.main, 'script', 'config_demo',
+        allow_secret_placeholder_replace=True)
+    value['nested'][0].update(clientSecret='<REDACTED_SECRET>', apiKey='<REDACTED_SECRET>',
+        passPhrase='<REDACTED_SECRET>', webHook='<REDACTED_SECRET>')
+    assert json.loads(frozen['files']['config.json']) == value
+    sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 'config_demo',
+        allow_secret_placeholder_replace=True)
+    payload = kit.alice / 'data/asset_delivery/inbox' / sent['delivery_id'] / 'payload/script/config_demo/config.json'
+    assert json.loads(payload.read_bytes()) == value
+    assert kit.service.accept_delivery('local/alice', sent['delivery_id'])['status'] == 'accepted'
+    assert json.loads((kit.alice / 'scripts/config_demo/config.json').read_bytes()) == value
+    assert ScriptStore(kit.alice).get_script('config_demo')['enabled'] is False
+    assert path.read_bytes() == raw
+
 
 @pytest.mark.parametrize('serialized', [False, True])
 @pytest.mark.parametrize('text', [

@@ -34,8 +34,8 @@ def safe_text(value, limit=1024):
     return _PATH.sub("<path>", redact_sensitive_value(value))[:limit]
 
 
-# LLM: 节点数、深度、字符串及序列长度均有界；禁止内部字段在任意嵌套层回流。
-# 函数用途: 将结构化输出裁成安全JSON副本，不保留源对象引用。
+# LLM: 节点数、深度、字符串及序列长度均有界；每层字典按原键统一识别秘密，不让驼峰或截断后键绕过。
+# 函数用途: 将结构化输出裁成安全JSON副本，保留原预算与脱敏标记，供Schema字面值和黑盒结果共用。
 def public_value(value, *, depth=0, budget=None):
     budget = [512] if budget is None else budget
     budget[0] -= 1
@@ -48,8 +48,13 @@ def public_value(value, *, depth=0, budget=None):
     if isinstance(value, (list, tuple)):
         return [public_value(item, depth=depth + 1, budget=budget) for item in value[:64]]
     if type(value) is dict:
-        clean = {safe_text(key, 128): public_value(item, depth=depth + 1, budget=budget)
-                 for key, item in list(value.items())[:64] if type(key) is str and key.lower() not in FORBIDDEN}
+        clean = {}
+        for key, item in list(value.items())[:64]:
+            if type(key) is not str or key.lower() in FORBIDDEN:
+                continue
+            # 沿原顺序扣除子节点预算；敏感性按净化/截断前原键判断，保留既有脱敏值语义。
+            projected = public_value(item, depth=depth + 1, budget=budget)
+            clean[safe_text(key, 128)] = "<redacted>" if _is_sensitive_key(key) else projected
         return redact_sensitive_value(clean)
     return None
 
