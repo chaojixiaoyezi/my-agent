@@ -441,6 +441,39 @@ class TestUncountedStall:
         decision = quarantine_decision(state)
         assert decision is not None and decision.reason_code == self.WAIT.reason_code
 
+    # LLM: R3跨段批次累计不能扣掉新段neutral；两条分支各自只有五次neutral且走真实状态转移与严格读回。
+    # 函数用途: 复现batch@0、failure@30后新段五次neutral的24小时边界。
+    @pytest.mark.parametrize("latest,quarantines", [(86499.0, False), (86500.0, True)])
+    def test_cross_streak_batch_does_not_deduct_new_neutrals(self, latest, quarantines):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = next_poison_state(WakePoisonState(), batch, now=0.0)
+        state = next_poison_state(state, _failure("error:X"), now=30.0)
+        assert (state.batch_failures, state.uncounted_count, state.last_failed_at) == (1, 0, 30.0)
+        for now in (100.0, 200.0, 400.0, 800.0, latest):
+            state = next_poison_state(state, self.WAIT, now=now)
+            state = WakePoisonState.from_dict(state.to_dict())
+        assert (state.batch_failures, state.uncounted_count, state.uncounted_since) == (1, 5, 100.0)
+        assert needs_isolation(state) is True
+        decision = quarantine_decision(state)
+        assert (decision is not None) is quarantines
+        if decision is not None:
+            assert isinstance(decision, wake_poison.QuarantineDecision)
+            assert decision.reason_code == self.WAIT.reason_code
+            assert (decision.same_cause_count, decision.total_count, decision.mixed_causes) == (1, 1, False)
+
+    # LLM: 即使直接调用公开纯函数，在计数失败后再次喂纯batch也不得冒充neutral超时；提醒同样不能授权隔离。
+    # 函数用途: 保护跨段重置修复不会把长时间纯批次失败变成隔离结案。
+    @pytest.mark.parametrize("prior_batches", [0, 1, 7])
+    def test_cross_streak_pure_batches_remain_exempt(self, prior_batches):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = _feed([batch] * prior_batches, start=0.0, step=1.0)
+        state = next_poison_state(state, _failure("error:X"), now=30.0)
+        for now in (100.0, 200.0, 400.0, 800.0, 1000000.0):
+            state = next_poison_state(state, batch, now=now)
+            assert quarantine_decision(state) is None
+        state = mark_stall_alerted(state, now=1000000.0)
+        assert quarantine_decision(WakePoisonState.from_dict(state.to_dict())) is None
+
     # LLM: 使用真实临时唤醒存储，不调模型、不发通知；至少五次neutral再核24小时隔离。
     # 函数用途: 验证五次未计数阻塞且满一天最终写成failed_permanently。
     def test_uncounted_timeout_moves_real_wake_to_quarantine(self, tmp_path):
