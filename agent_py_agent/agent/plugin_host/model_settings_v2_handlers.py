@@ -50,10 +50,10 @@ def creation_schema(schema):
     return schema
 
 
-# LLM: 首写从旧设置基数前进一步，后续修订由Store递增；显式选模同时清旧校准、终结pending建议。
+# LLM: 首写从旧设置基数前进一步，固定消息锚不重置；显式选模同时清旧校准、终结pending建议。
 # 函数用途: 生成模型、档位、权限和双名能力包字段的一次性线程替换。
 def configured_thread(thread, params, home_paths):
-    from .conversations import thread_state
+    from .conversations import message_revision_state, thread_state
     changes, state, metadata = {}, dict(thread_state(thread)), dict(thread.metadata)
     effort = params.get("reasoning_effort")
     if effort is not None:
@@ -91,7 +91,7 @@ def configured_thread(thread, params, home_paths):
             model_selection_revision=thread.model_selection_revision + 1, model_selection_source="explicit",
             model_selection_last_explicit_revision=thread.model_selection_revision + 1)
     state.setdefault("revision", settings_base_revision(thread) + 1)
-    return replace(thread, **changes, metadata={**metadata, "plugin_host_v2": state})
+    return replace(thread, **changes, metadata={**metadata, "plugin_host_v2": message_revision_state(thread, state)})
 
 
 # LLM: 只从持久owner身份/规范home解析原策略读取上下文；不创建文件或从请求选owner。

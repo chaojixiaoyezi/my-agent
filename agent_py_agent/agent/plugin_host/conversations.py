@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -11,6 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from ..common.nofollow_fs import open_readonly_file_beneath
 from ..conversation.context_usage import context_usage_from_thread
 from ..conversation.models import ConversationThread
 from ..conversation.store_threads import create_thread_atomic
@@ -20,7 +22,12 @@ from .action_specs import action_spec
 from .authorization import workspace_directory
 from .cursors import CursorCodec
 from .errors import HostAPIError
-from .model_settings_v2_handlers import configured_thread, creation_schema, settings_fields
+from .model_settings_v2_handlers import (
+    configured_thread,
+    creation_schema,
+    settings_base_revision,
+    settings_fields,
+)
 from .schemas import PAGE_MAX_BYTES, canonical_json, integer, text, thaw, validate_object
 
 # 游标允许续读的固定窗口，单位秒；并非授权有效期，返回前仍重核A0。
@@ -109,11 +116,44 @@ def thread_state(thread):
     return state
 
 
-# LLM: 旧线程读取不能落盘造版本；用其canonical值生成有界比较值，首个插件写入后转入原Store递增修订。
-# 函数用途: 使未迁移线程同样能拒绝宿主更新后的陈旧CAS。
+# LLM: 只读owner内两种原消息位置的fstat，不创建路径或跟随链接；只缺失可视为空，其它错误失败关闭。
+# 函数用途: 取得消息字节总数及各在用账本的纳秒修改时间，供摘要和设置共用。
+def message_ledger_fingerprint(thread):
+    if not thread.owner_home:
+        return (0, 0)
+    stamps = []
+    for prefix in (("data", "conversations", "messages"), ("conversations", "messages")):
+        try:
+            with os.fdopen(open_readonly_file_beneath(thread.owner_home, (*prefix, thread.thread_id + ".jsonl")), "rb") as handle:
+                stat = os.fstat(handle.fileno())
+                stamps.append((stat.st_size, stat.st_mtime_ns))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise HostAPIError("CORRUPT_THREAD", 500) from None
+    return (sum(row[0] for row in stamps), *(row[1] for row in stamps)) if stamps else (0, 0)
+
+
+# LLM: 首次迁移冻结已有消息字节，旧插件无锚时从0兼容；后续永不重置，避免CAS在设置写后复活。
+# 函数用途: 为插件状态补上固定消息字节基线，不写独立账本。
+def message_revision_state(thread, state):
+    return {"msg_bytes": 0 if thread_state(thread) else message_ledger_fingerprint(thread)[0], **state}
+
+
+# LLM: 所有入口共用唯一修订；原Store计数加固定锚后的消息字节增量，旧线程用完整记录/消息指纹。
+# 函数用途: 初始空线程返回1，其余原生变化和同tick追加都使旧CAS失效，读取不迁移状态。
 def thread_revision(thread):
     state = thread_state(thread)
-    return state["revision"] if "revision" in state else int(digest(thread.to_dict())[:15], 16) + 1
+    msg_fp = message_ledger_fingerprint(thread)
+    if state:
+        anchor = state.get("msg_bytes", 0)
+        if type(anchor) is not int or anchor < 0 or anchor > msg_fp[0]:
+            raise HostAPIError("CORRUPT_THREAD", 500)
+        return state["revision"] + msg_fp[0] - anchor
+    if (not thread.compact_generation and not thread.summary and settings_base_revision(thread) == 1
+            and thread.updated_at == thread.created_at and thread.title in {"", "新会话"} and msg_fp == (0, 0)):
+        return 1
+    return int(digest({**thread.to_dict(), "_msg_fp": list(msg_fp)})[:15], 16) + 2
 
 
 # LLM: 不先验证不可见对象的损坏字段；无法读取创建来源时只认明确ID授权，仍取两层范围的交集。
@@ -321,7 +361,7 @@ class ConversationDomain:
                 create_thread_atomic(store.threads, row)
                 return result
 
-            # LLM: CAS、显式绑定标记及receipt共原线程锁；切换仍核管理员且递增版本，归档沿原goal→claim锁序。
+            # LLM: CAS用公共修订，状态只推进原Store计数，消息锚保留；receipt须与最终落盘版本相同。
             # 函数用途: 在线程原子提交内复验权限并应用目录或生命周期变更。
             def update(row):
                 read_context(authorized)
@@ -333,7 +373,7 @@ class ConversationDomain:
                 revision = thread_revision(row)
                 if revision != payload.get("expected_revision", revision):
                     raise HostAPIError("REVISION_CONFLICT", 409)
-                state = {**state, "revision": revision + 1}
+                state = message_revision_state(row, {**state, "revision": state.get("revision", revision) + 1})
                 if action == "threads.workspace.switch":
                     changes = workspace_changes(row, workspace_directory(context, payload["workspace_dir"]))
                     state["has_workspace_binding"] = True

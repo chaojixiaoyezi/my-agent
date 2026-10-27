@@ -25,14 +25,11 @@ from .model_settings_v2_handlers import (
 )
 
 
-# LLM: 已迁移线程共用B1公共修订；旧压缩/摘要没有独立计数，沿B1指纹避免旧版本1继续有效。
-# 函数用途: 读取有效设置修订，首次迁移仍按原设置基数初始化。
+# LLM: 直接委托摘要的唯一版本算法，不接受第二个旧设置基数，消息账变化即使同tick也参与CAS。
+# 函数用途: 使设置、摘要和四个写入口读取相同修订。
 def _effective_revision(row):
-    from .conversations import thread_revision, thread_state
-    state = thread_state(row)
-    if state or row.compact_generation or row.summary:
-        return thread_revision(row)
-    return settings_base_revision(row)
+    from .conversations import thread_revision
+    return thread_revision(row)
 
 
 # LLM: 调用方负责鲜活授权；可选authorized再核安装交集，省略时仍强核同owner记录，agent只用于真实Compact/用量。
@@ -46,10 +43,10 @@ class ThreadSettingsV2Handlers:
         if self.home.owner_home_dir != owner_context.owner_home.home_dir or self.home.owner_id != owner_context.owner_home.owner_id:
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
 
-    # LLM: owner错误统一404；CAS取插件公共修订，未迁移时兼容原摘要指纹及设置基数。
+    # LLM: owner错误统一404；CAS仅接受当前唯一公共修订，不能用另一种基数绕过消息追加后的冲突。
     # 函数用途: 核验准确线程及可选设置版本。
     def _require(self, params, row=None):
-        from .conversations import thread_revision, thread_visible
+        from .conversations import thread_visible
         if row is None:
             try:
                 row, error = self.store.threads.load_report(params.get("thread_id", ""))
@@ -65,7 +62,7 @@ class ThreadSettingsV2Handlers:
         revision = params.get("expected_revision")
         if revision is not None and (type(revision) is not int or revision < 1):
             raise HostAPIError("INVALID_SCHEMA")
-        if revision is not None and revision not in {_effective_revision(row), thread_revision(row)}:
+        if revision is not None and revision != _effective_revision(row):
             raise HostAPIError("REVISION_CONFLICT", 409)
         return row
 
@@ -136,9 +133,10 @@ class ThreadSettingsV2Handlers:
         if not result.compacted:
             return {"thread_id": row.thread_id, "compacted": False, "compact_generation": result.thread.compact_generation,
                     "revision": _effective_revision(result.thread), "summary_preview": result.thread.summary[:512]}
-        # LLM: agent已完成真实提交，不拿旧expected_revision覆盖其新代次；边界写前比完整快照防竞争。
+        # LLM: agent已完成真实提交，不拿旧expected_revision覆盖新代次；边界写前比完整快照且保留消息锚。
         # 函数用途: 保存边界标记及本接口修订，保持并发新增消息和原选择事实。
         def boundary(latest):
+            from .conversations import message_revision_state
             self._require({"thread_id": row.thread_id}, latest)
             if latest.to_dict() != result.thread.to_dict():
                 raise HostAPIError("REVISION_CONFLICT", 409, "committed", "压缩已经提交，但后续状态已变；请重新读取，不要自动重放。")
@@ -146,7 +144,7 @@ class ThreadSettingsV2Handlers:
             generation = latest.compact_generation
             state.update(revision=state.get("revision", settings_base_revision(latest) + 1), compact_boundary={"generation": generation, "instruction": instruction})
             return replace(latest, compact_generation=generation, revision=latest.revision + 1,
-                metadata={**latest.metadata, "plugin_host_v2": state})
+                metadata={**latest.metadata, "plugin_host_v2": message_revision_state(latest, state)})
         updated = self.store.threads.update_atomic(row.thread_id, boundary)
         return {"thread_id": row.thread_id, "compacted": True, "compact_generation": updated.compact_generation,
                 "revision": _effective_revision(updated), "summary_preview": updated.summary[:512]}

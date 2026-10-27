@@ -178,8 +178,9 @@ def test_usage_from_real_persisted_schema_no_private_metadata(case):
 def test_standalone_compact_boundary_persists_without_losing_messages(case):
     msg = case.store.messages.append({"thread_id": case.thread.thread_id, "role": "user", "content": "Keep me"})
     before = case.store.storage.thread_path(case.thread.thread_id).read_bytes()
+    revision = case.service.get_thread_settings({"thread_id": case.thread.thread_id})["revision"]
     with pytest.raises(HostAPIError) as error:
-        case.service.compact_thread({"thread_id": case.thread.thread_id, "expected_revision": 1, "instruction": "retain facts"})
+        case.service.compact_thread({"thread_id": case.thread.thread_id, "expected_revision": revision, "instruction": "retain facts"})
     assert (error.value.code, error.value.status) == ("HOST_NOT_READY", 503)
     row = case.store.threads.require(case.thread.thread_id)
     assert row.compact_generation == 0 and "plugin_host_v2" not in row.metadata
@@ -552,7 +553,7 @@ def test_provider_secret_cannot_reappear_under_public_header_name(case, auth_kin
 
 
 @pytest.mark.parametrize("migrated", [False, True])
-# LLM: 用原Store写入，插件首写和既有插件写都必须与摘要一致。
+# LLM: 插件原计数仍逐次+1；R3消息字节增量参与公共修订，不能再用裸计数代替公共CAS。
 # 函数用途: 验证首次设置的修订与后续消息更新统一。
 def test_r2_settings_and_summary_share_revision_after_every_write(case, migrated):
     tid = case.thread.thread_id
@@ -563,7 +564,10 @@ def test_r2_settings_and_summary_share_revision_after_every_write(case, migrated
     assert updated["revision"] == thread_summary(row, case.authorized)["revision"] == 2
     case.store.messages.append({"thread_id": tid, "role": "user", "content": "native append"})
     row = case.store.threads.require(tid)
-    assert case.service.get_thread_settings({"thread_id": tid})["revision"] == thread_summary(row, case.authorized)["revision"] == 3
+    state = row.metadata["plugin_host_v2"]
+    assert state["revision"] == 3
+    expected = 3 + case.store.storage.message_path(tid).stat().st_size - state["msg_bytes"]
+    assert case.service.get_thread_settings({"thread_id": tid})["revision"] == thread_summary(row, case.authorized)["revision"] == expected
     with pytest.raises(HostAPIError) as error:
         case.service.update_thread_settings({"thread_id": tid, "expected_revision": 2, "pack_ids": []})
     assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
@@ -712,3 +716,115 @@ def test_r2_unmigrated_native_compact_summary_and_workspace_invalidate_cas(case,
     with pytest.raises(HostAPIError) as error:
         case.service.update_thread_settings({"thread_id": tid, "expected_revision": 1, "pack_ids": []})
     assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
+
+
+@pytest.mark.parametrize("bound_default", [False, True])
+@pytest.mark.parametrize("layout", ["data", "legacy"])
+@pytest.mark.parametrize("method", ["update_thread_settings", "delete_thread", "fork_thread", "compact_thread"])
+# LLM: 原生首次消息前绝不调用设置写；固定时间戳让版本变化只能来自消息账本，四入口均须无写拒绝。
+# 函数用途: 覆盖空模型和默认模型初始绑定、两种Store目录及连续追加的旧CAS拒绝。
+def test_r3_unmigrated_appends_invalidate_all_cas(case, bound_default, layout, method):
+    root = (case.home.data_dir if layout == "data" else case.home.home_dir) / "conversations"
+    store = ConversationStore(root, model_default=(lambda: "default") if bound_default else None)
+    row = store.threads.create(owner_id=case.home.owner_id, owner_home=str(case.home.home_dir))
+    handler = ThreadSettingsV2Handlers(store, case.context, home_paths=case.paths)
+    tid = row.thread_id
+    assert "plugin_host_v2" not in row.metadata
+    assert row.model_profile_id == ("default" if bound_default else "")
+    old = handler.get_thread_settings({"thread_id": tid})["revision"]
+    assert old == thread_summary(row, case.authorized)["revision"] == 1
+    for content in ("first", "second"):
+        store.messages.append({"thread_id": tid, "role": "user", "content": content, "now": row.updated_at})
+        latest = store.threads.require(tid)
+        current = handler.get_thread_settings({"thread_id": tid})["revision"]
+        assert current == thread_summary(latest, case.authorized)["revision"] > 1
+        assert current != old and latest.updated_at == row.updated_at
+        before = store.storage.thread_path(tid).read_bytes()
+        params = {"source_thread_id" if method == "fork_thread" else "thread_id": tid, "expected_revision": old}
+        with pytest.raises(HostAPIError) as error:
+            getattr(handler, method)(params)
+        assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
+        assert store.storage.thread_path(tid).read_bytes() == before
+        old = current
+    assert len(store.messages.recent(tid, limit=0)) == 2
+
+
+@pytest.mark.parametrize("title", ["", "旧线程"])
+# LLM: 自定义标题的旧线程也必须从同一个读口取得CAS，不接受旧设置基数作为第二版本。
+# 函数用途: 验证摘要与设置在迁移前一致，标题变化后拒绝已读修订。
+def test_r3_legacy_titles_share_one_revision(case, title):
+    row = case.store.threads.create(owner_id=case.home.owner_id, owner_home=str(case.home.home_dir), title=title)
+    old = case.service.get_thread_settings({"thread_id": row.thread_id})["revision"]
+    assert old == thread_summary(row, case.authorized)["revision"]
+    changed = case.store.threads.update_atomic(row.thread_id, lambda current: replace(current, title="changed"))
+    assert case.service.get_thread_settings({"thread_id": row.thread_id})["revision"] == thread_summary(changed, case.authorized)["revision"] != old
+    for version in {old, 1}:
+        with pytest.raises(HostAPIError) as error:
+            case.service.update_thread_settings({"thread_id": row.thread_id, "expected_revision": version})
+        assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
+
+
+# LLM: 同时间戳使原Store的插件计数不变，消息账增长仍必须逐次改版本；设置再写不能重置字节锚。
+# 函数用途: 验证已迁移线程的连续同tick追加、拒旧CAS和新CAS可提交。
+def test_r3_migrated_same_tick_appends_keep_advancing_and_settings_anchor(case):
+    tid = case.thread.thread_id
+    old = case.service.update_thread_settings({"thread_id": tid, "pack_ids": ["one"]})["revision"]
+    row = case.store.threads.require(tid)
+    native = row.metadata["plugin_host_v2"]["revision"]
+    for content in ("first", "second"):
+        case.store.messages.append({"thread_id": tid, "role": "user", "content": content, "now": row.updated_at})
+        latest = case.store.threads.require(tid)
+        assert latest.metadata["plugin_host_v2"]["revision"] == native
+        current = case.service.get_thread_settings({"thread_id": tid})["revision"]
+        assert current == thread_summary(latest, case.authorized)["revision"] > old
+        with pytest.raises(HostAPIError) as error:
+            case.service.update_thread_settings({"thread_id": tid, "expected_revision": old, "pack_ids": []})
+        assert (error.value.code, error.value.status) == ("REVISION_CONFLICT", 409)
+        old = current
+    updated = case.service.update_thread_settings({"thread_id": tid, "expected_revision": old, "pack_ids": ["two"]})
+    assert updated["revision"] == old + 1
+    with pytest.raises(HostAPIError) as error:
+        case.service.update_thread_settings({"thread_id": tid, "expected_revision": old, "pack_ids": []})
+    assert error.value.code == "REVISION_CONFLICT"
+
+
+# LLM: 仅替换授权重核端口，不冒充HTTP认证；原领域CAS、原子存储和幂等回执均真实执行。
+# 函数用途: 验证消息附加修订参与改名后，回执版本仍与真实落盘一致。
+def test_r3_message_revision_rename_receipt_matches_persisted_state(case, monkeypatch):
+    from agent_py_agent.agent.plugin_host import conversations
+    tid = case.thread.thread_id
+    case.service.update_thread_settings({"thread_id": tid, "pack_ids": []})
+    row = case.store.threads.require(tid)
+    case.store.messages.append({"thread_id": tid, "role": "user", "content": "same tick", "now": row.updated_at})
+    old = case.service.get_thread_settings({"thread_id": tid})["revision"]
+    authorized = case.authorized
+    authorized.call = SimpleNamespace(idempotency_key="r3_rename_receipt_001")
+    authorized.binding.activation_id = "r3-test"
+    monkeypatch.setattr(conversations, "read_context", lambda *_: case.context)
+    domain = ConversationDomain(None, None, default_thread=lambda *_: False)
+    payload = {"thread_id": tid, "title": "renamed", "expected_revision": old}
+    result = domain.mutate(case.store, "threads.rename", payload, authorized, case.context)
+    assert result.data["revision"] == case.service.get_thread_settings({"thread_id": tid})["revision"] == old + 1
+    assert result.data["revision"] == thread_summary(case.store.threads.require(tid), authorized)["revision"]
+    assert domain.mutate(case.store, "threads.rename", payload, authorized, case.context) == result
+
+
+@pytest.mark.parametrize("layout", ["data", "legacy"])
+# LLM: R3原文以msg_fp==(0,0)区分未出现账本；已存在的空文件也纳入指纹，读取绝不落盘迁移。
+# 函数用途: 核对两布局的零字节账本采用明示公式，摘要和设置读取不建文件或改线程。
+def test_r3_empty_ledger_uses_explicit_fingerprint_contract_without_read_writes(case, layout):
+    from agent_py_agent.agent.plugin_host.conversations import digest
+    tid = case.thread.thread_id
+    assert case.service.get_thread_settings({"thread_id": tid})["revision"] == 1
+    root = case.home.data_dir if layout == "data" else case.home.home_dir
+    path = root / "conversations" / "messages" / (tid + ".jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    stamp = path.stat()
+    assert stamp.st_size == 0 and stamp.st_mtime_ns > 0
+    row = case.store.threads.require(tid)
+    expected = int(digest({**row.to_dict(), "_msg_fp": [0, stamp.st_mtime_ns]})[:15], 16) + 2
+    before = {str(p): p.stat().st_mtime_ns for p in case.home.home_dir.rglob("*")}
+    assert case.service.get_thread_settings({"thread_id": tid})["revision"] == thread_summary(row, case.authorized)["revision"] == expected
+    assert {str(p): p.stat().st_mtime_ns for p in case.home.home_dir.rglob("*")} == before
+    assert case.store.threads.require(tid).to_dict() == row.to_dict()
