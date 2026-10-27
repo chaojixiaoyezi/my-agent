@@ -219,6 +219,27 @@ TMPDIR=/tmp/wt-wave7-w4/.pytest_cache python3 -m pytest agent_py_agent/tests/tes
 ruff check agent_py_agent scripts
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w4-r3-size.md
 ```
+## 2026-10-27 Wave 7 W5 R4：消息FD竞态、Git根路径和时间线顺序
+
+来源：`07-tasks/wave7-w5-r4-fixes.md`（c9/c18），起点 `888cc8615ac7c0ac6d5bfb1c064ad9646374559e`。只在指定W5工作树修复，不部署、不启停服务。
+
+- `_messages` 保留线程双归属门，消息JSONL只从原 `open_readonly_file_beneath` 返回的FD读取512KiB尾窗，不再调用按路径重开的 `recent_report`。复用原 `MessageLogEntry` 解析，跳过损坏行和display/不同线程行，至多返回50条并经原递归脱敏；所有出口关闭原流。
+- `_forbid_internal` 在目录验证/I/O前拒绝根或目标任意大小写的完整 `.git` 组件，解析后的根再复核；共享 `_parts` 同样返回 `403 PATH_OUTSIDE_WORKSPACE`。普通 `project.git` 等名字不误杀，原宿主目录门、外部授权和nofollow仍保留。
+- `_steps` 保持原字符串列表回执和256KiB/末100行预算；JSON对象按 `ts_ms`、`ts`、ISO `timestamp` / `created_at` 归一为秒后稳定排序，无时区ISO固定UTC，原seq/正文不改。同值保留追加次序，未知时间及旧非JSON行稳定放末尾。
+- 首批新增46项回归已在原实现全部失败：真实消息FD打开后替换叶/父路径，观察到跨owner消息泄露；Git根被接受或错误码不符；`[30,10,20]` 仍按追加顺序。修复回归还核对真实流仅 `read(524288)`、末50条/脱敏/坏行跳过、FD关闭、根/相对路径大小写、跨单位/时区/稳定同值及旧时间线兼容。证据保留于 `.pytest_cache/w5-r4/`。
+- 独立只读复核后的16项追加回归也先复现失败：原生消息写入的U+0085/U+2028/U+2029会被 `splitlines` 错拆、`.git/..` 复合非法根先报通用400。尾读改为只按LF分行并兼容CRLF，原始Unicode正文完整保留；根校验将.git拒绝放在通用点点拒绝之前，不放宽任何路径。
+
+复现（工作树根）：`python3 -m pytest agent_py_agent/tests/test_plugin_host_subagents_and_workspace.py agent_py_agent/tests/test_plugin_host_v2_*.py -q --tb=short`。同时运行全范围Ruff、`scripts/check_doc_sync.py` 和strict尺寸门；报告指定 `/tmp/w5-r4-size.md`，不修改检查器或基线。窄窗口之外的历史不保证凑满50条消息/100行时间线，真实HTTP和部署链路不在本轮验收内。
+
+## 2026-10-27 Wave 7 W5 R3：从原生owner档案解析子代理模型名
+
+来源：`07-tasks/wave7-w5-r3-model-name.md`（c8 Finding 3），起点 `1751dc11a5c792801e0e5e2527fadcb927ca7c39`。
+
+- 原任务只冻结 `host_model_profile.v1.profile_id`，不含模型名；列表和详情现在按认证context重建owner路径，读取原生模型档案。列表每次请求只读一次目录，仅返回名称，不公开服务商凭据，不回写目录或任务。
+- 原记录显式名称优先；只有 `profile_id=default` 才回退注入agent的配置名称。未知/非字符串引用保持未知；坏模型目录返回结构化 `STORE_UNAVAILABLE`。停止回执只投影状态，不新增目录I/O。
+- 回归使用原 `execute_model_profile_operation` 保存有效档案，并为两个owner创建同ID不同名称；覆盖冷/热列表和详情、agent路径不同于认证context、目录单读、凭据不外泄与文件不变、default和未知引用、坏目录。原实现已实测返回 `None` 而不是档案名称，先红证据位于 `.pytest_cache/w5-r3/red.log` / `red.xml`。
+
+复现（工作树根）：`python3 -m pytest agent_py_agent/tests/test_plugin_host_subagents_and_workspace.py agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py -q --tb=short`。本轮不验证真实模型调用、HTTP入口或部署；当前档案名称不等于历史调用证据。
 
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
