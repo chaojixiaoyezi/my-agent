@@ -63,6 +63,7 @@ Node 换成对应 ZIP。真实读取器核清单、成员、摘要及合法事�
 修改业务后必须补与用户需求直接相关的测试，模板测试不能证明新增业务正确。
 
 最终报告提供源码和实际 ZIP 路径、当前版本执行结果，明确“宿主安装、启用和真实 TUI/模型调用未验证”。
-**B7 前生产启用返回 plugin_events_disabled**；不可通过安装/启用到真实 home 做作者自检。
-强制沙箱、默认断网、收窄读、仅 local/main 是 B7 的启用前置合同；本页组件测试没有核对其真实生效。
+宿主 `plugin_events_enabled` 关闭时返回 `plugin_events_disabled`；不可通过安装/启用到真实 home 做作者自检。
+强制沙箱、默认断网、收窄读、当前支持的Owner范围和本人确认仍是启用前置条件；本页组件测试不证明真实生效。
+若业务用到 `user_space.identity.resolve` 或 `capability_packages.list`，还须按作者合同验证授权Broker入口、显示名失败回退、安装表停用/卸载及 `actor_user_ref/actor_display_name` 的缺省兼容；不能拿本页stdio结果替代这些链路。v8不能混用host_api的限制保持不变。
 最后提示用户：“请用 /plugins install <路径> 安装，启用时按界面提示输确认码”。

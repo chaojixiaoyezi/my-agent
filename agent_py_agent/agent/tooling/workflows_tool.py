@@ -93,6 +93,8 @@ class WorkflowsTool(BaseTool):
     READ_ONLY_ACTIONS = ('list', 'get', 'inspect_run', 'preview')
     model_spec = _spec('workflows', '管理Owner工作流、自动脚本/Skill引用、动态技能绑定、运行与断点续跑；步骤输出含_pause_for_resume=true可正常暂停等待确认，再用resume+patched_step_output续跑。',
         list(ACTIONS), {
+            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
+            'allow_script_drift': {'type': 'boolean', 'description': '显式确认恢复采用当前脚本版本'},
             **{key: {'type': 'string'} for key in ('workflow_id', 'step_id', 'skill_id', 'workflow_run_id', 'from_step_id')},
             'definition': {'type': 'object', 'description': (
                 '工作流定义对象：{descriptor: {name, access_targets:[], data_sources:[], credential_refs:[], io_contract:{}}, '
@@ -105,10 +107,10 @@ class WorkflowsTool(BaseTool):
             'inputs': {'type': 'object', 'description': '工作流运行输入参数字典（可在step的condition或inputs_map中用step_id="$inputs"引用）'}})
     runtime_policy = _policy('workflows', READ_ONLY_ACTIONS, ('run', 'resume', 'delete'))
 
-    # LLM: Owner与目录/快照/模型提供者仅由可信宿主注入，模型实参不能替换；无分析器不注入预览假实现。
+    # LLM: Owner与项目/快照/模型提供者仅由可信宿主注入，模型实参不能替换；无分析器不注入假实现。
     # 函数用途: 固定当前Owner及运行时依赖，构造阶段不执行资产。
     def __init__(self, owner_home: Path, *, store=None, engine=None, analysis_handler=None,
-                 workspace_root_provider=None, skill_snapshot_provider=None):
+                 workspace_root_provider=None, skill_snapshot_provider=None, workspace_root=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, engine)
@@ -116,12 +118,13 @@ class WorkflowsTool(BaseTool):
         self.analysis_handler = analysis_handler
         self.workspace_root_provider = workspace_root_provider
         self.skill_snapshot_provider = skill_snapshot_provider
+        self.workspace_root = workspace_root
 
-    # LLM: None表示未提供快照，空的受限快照仍必须原样传递；提供者每次读取当前运行，不缓存其它Owner权限。
+    # LLM: None表示无快照，空受限快照仍原样传递；项目只来自宿主且每次读取，不缓存其它Owner权限。
     # 函数用途: 取得可信宿主当前的技能发现范围。
     def _skill_options(self):
         return {
-            'workspace_root': self.workspace_root_provider() if self.workspace_root_provider else None,
+            'workspace_root': self.workspace_root_provider() if self.workspace_root_provider else self.workspace_root,
             'skill_snapshot': self.skill_snapshot_provider() if self.skill_snapshot_provider else None,
         }
 
@@ -130,19 +133,17 @@ class WorkflowsTool(BaseTool):
     def validate_invocation(self, params, context):
         return _validate(self, params)
 
-    # LLM: 正式Store优先，模块损坏不静默回退；所有CRUD与另一工具共享c4权威路径。
+    # LLM: 正式Store优先，默认每次绑定当前项目，模块损坏不回退；写入仍由Store显式scope裁决。
     # 函数用途: 延迟取得当前Owner工作流存储。
     def _store(self):
-        if self.store is None:
-            self.store = WorkflowStore(self.owner_home)
-        return self.store
+        return self.store if self.store is not None else WorkflowStore(self.owner_home, workspace_root=self._skill_options()['workspace_root'])
 
-    # LLM: 分析回调只使用显式/宿主实现；解析和正文详情沿同一当前授权范围，禁止静态摘要冒充分析成功。
+    # LLM: 默认引擎绑定本次项目；解析和正文沿同一授权范围，禁止旧项目缓存或静态摘要冒充分析。
     # 函数用途: 延迟取得Owner绑定的正式工作流执行器。
     def _engine(self):
         if self.engine is None:
             from ..workflows.engine import WorkflowEngine
-            self.engine = WorkflowEngine(self.owner_home,
+            return WorkflowEngine(self.owner_home, workspace_root=self._skill_options()['workspace_root'],
                 skill_resolver=lambda step, context: _resolve_owner_skills(
                     self.owner_home, step, context, **self._skill_options()),
                 skill_details_resolver=lambda references: [
@@ -151,7 +152,7 @@ class WorkflowsTool(BaseTool):
                 analysis_handler=self.analysis_handler)
         return self.engine
 
-    # LLM: inspect历史失败是成功读取；正常完成或needs_repair=False的主动确认断点均返回ok=True，仅失败或需修复断点返回执行失败。
+    # LLM: inspect失败是成功读取；运行失败保留断点机器码，CAS在Store原锁拒绝，不冒称写入已发生。
     # 函数用途: 统一工具结果与结构化错误，不吞中断。
     def execute(self, params):
         invalid = self.validate_invocation(params, None)
@@ -166,18 +167,22 @@ class WorkflowsTool(BaseTool):
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('workflows', exc)
         except (ValueError, KeyError, TypeError) as exc:
+            if str(exc).startswith('ASSET_REVISION_CONFLICT:'):
+                return _outcome('workflows', {'error_code': 'ASSET_REVISION_CONFLICT', 'error': str(exc)},
+                                False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('workflows', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
-    # LLM: 恢复只允许显式修复输出与数据源变更；定义、输入与前缀仍由冻结快照裁决。
+    # LLM: 恢复默认拒绝依赖漂移，显式允许才透传；保存CAS只由原Store核验，输入与前缀沿冻结快照。
     # 函数用途: 分派CRUD、绑定、运行、补丁恢复或快照检查。
     def _dispatch(self, params):
         action = params['action']
         if action == 'resume':
+            options = {'allow_script_drift': params['allow_script_drift']} if 'allow_script_drift' in params else {}
             return _plain(self._engine().resume_workflow_run(params['workflow_run_id'], params.get('from_step_id'),
                 patched_step_output=params.get('patched_step_output'), updated_data_sources=params.get('updated_data_sources'),
-                resolution_origin=params.get('resolution_origin')))
+                resolution_origin=params.get('resolution_origin'), **options))
         if action == 'inspect_run':
             return _plain(self._engine().store.load_run(params['workflow_run_id']))
         store = self._store()
@@ -185,7 +190,8 @@ class WorkflowsTool(BaseTool):
             return {'workflows': [_plain(item) for item in store.list_workflows()]}
         workflow_id = params['workflow_id']
         if action == 'save':
-            return _plain(store.save_workflow(_definition(params['definition'], workflow_id)))
+            options = {'expected_revision': params['expected_revision']} if 'expected_revision' in params else {}
+            return _plain(store.save_workflow(_definition(params['definition'], workflow_id), **options))
         definition = store.get_workflow(workflow_id)
         if definition is None:
             raise ValueError('工作流不存在')

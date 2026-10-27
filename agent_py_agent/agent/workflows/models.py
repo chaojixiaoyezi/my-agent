@@ -48,6 +48,7 @@ class ScriptExecutionResult:
     error_code: str = ''
     needs_repair: bool = False
     escalation_context: dict[str, Any] = field(default_factory=dict)
+    source_check: dict[str, Any] = field(default_factory=dict)
 
 
 # LLM: 状态仅接受 StepStatus；所有可变字段独立创建，供账本序列化。
@@ -105,7 +106,12 @@ class WorkflowRunRecord:
     resumed_from_step_id: str = ''
     needs_repair: bool = False
 
-    # LLM: 嵌套步骤与修复标记一起序列化，不隐式清除历史失败事实。
+    workflow_name: str = ''
+    total_steps: int = 0
+    completed_steps: int = 0
+    breakpoint: dict[str, Any] | None = None
+
+    # LLM: 嵌套步骤、进度和断点一起序列化；旧记录缺字段由默认值兼容，不清除历史失败。
     # 函数用途: 输出完整运行JSON快照。
     def to_dict(self):
         return payload(self)

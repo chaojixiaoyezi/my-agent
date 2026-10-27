@@ -9,21 +9,267 @@ import math
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict
+from copy import deepcopy
+from dataclasses import asdict, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 
 from ..assets import safe_asset_id
 from ..assets.datasource_store import DatasourceStore, secret_values
-from ..assets.descriptor import DataSourceSpec
-from ..common.nofollow_fs import read_text_beneath, unlink_file_beneath, write_text_atomic_beneath
+from ..assets.descriptor import AssetDescriptor, DataSourceSpec, clean_json
+from ..common.nofollow_fs import (
+    append_text_beneath,
+    open_readonly_file_beneath,
+    read_text_beneath,
+    unlink_file_beneath,
+    write_text_atomic_beneath,
+)
 
 _RUNTIME_BINDINGS = ContextVar('datasource_runtime_bindings', default=None)
 MANIFEST_ENV = 'MY_AGENT_DATASOURCE_RUNTIME_MANIFEST'
 MANIFEST_SECRET_ENV = 'MY_AGENT_DATASOURCE_RUNTIME_SECRET'
 _FROZEN_MANIFEST = None
+_SCRIPT_WORKSPACE = ContextVar('script_workspace', default=None)
+_ASSET_IM_NOTIFIER = ContextVar('asset_im_notifier', default=None)
+_SCRIPT_EXECUTION_RECORD = ContextVar('script_execution_record', default=None)
+
+
+# LLM: 仅可信执行包装器绑定已验版本；副本按Owner/脚本/workspace隔离，用户子进程不继承宿主ContextVar。
+# 函数用途: 让原runner的Store加载取得本次已核对的同份代码与合同。
+@contextmanager
+def bind_script_execution_record(owner_home, script_id, workspace_root, record):
+    key = (Path(owner_home).absolute(), script_id, Path(workspace_root).resolve() if workspace_root else None)
+    token = _SCRIPT_EXECUTION_RECORD.set((key, deepcopy(record)))
+    try:
+        yield
+    finally:
+        _SCRIPT_EXECUTION_RECORD.reset(token)
+
+
+# LLM: 仅同调用栈的相同授权范围命中，返回独立副本；不把持久字段或模型输入当作快照授权。
+# 函数用途: 给原ScriptStore加载器取得当前执行记录。
+def script_execution_record(owner_home, script_id, workspace_root):
+    current = _SCRIPT_EXECUTION_RECORD.get()
+    key = (Path(owner_home).absolute(), script_id, Path(workspace_root).resolve() if workspace_root else None)
+    return deepcopy(current[1]) if current and current[0] == key else None
+
+
+# LLM: 只有可信调用方可绑定workspace，线程/异步上下文退出即恢复；不从脚本输入或持久投影取得路径权限。
+# 函数用途: 给既有runner的Store读取传递同Owner的项目覆盖范围。
+@contextmanager
+def bind_script_workspace(owner_home, workspace_root):
+    token = _SCRIPT_WORKSPACE.set((Path(owner_home).absolute(), workspace_root))
+    try:
+        yield
+    finally:
+        _SCRIPT_WORKSPACE.reset(token)
+
+
+# LLM: 必须匹配原Owner，不能把一个Owner的项目环境传播给另一个Owner的Store。
+# 函数用途: 读取当前脚本执行栈的可信项目范围。
+def script_workspace_root(owner_home):
+    current = _SCRIPT_WORKSPACE.get()
+    return current[1] if current and current[0] == Path(owner_home).absolute() else None
+
+
+# LLM: 展示字段不属于AssetDescriptor；只取权威字段并复用严格模型，不持久化源检查结果。
+# 函数用途: 从完整脚本记录或描述符取得统一源声明。
+def _script_descriptor(record):
+    if isinstance(record, AssetDescriptor):
+        return record.to_dict()
+    record = record.get('descriptor', record)
+    names = {item.name for item in fields(AssetDescriptor)}
+    return AssetDescriptor.from_dict({key: value for key, value in record.items() if key in names}).to_dict()
+
+
+# LLM: 名称只投影声明/已登记安全options，不参与权限；显式绑定名优先，用于发现同ID连接换源。
+# 函数用途: 构造固定三字段源绑定。
+def _source_binding(source_id, scope):
+    return {'source_id': source_id, **{key: value if isinstance(value := scope.get(key), str) else ''
+            for key in ('device_name', 'log_source_name')}}
+
+
+# LLM: 无enabled顶层字段的旧连接采用options.enabled；不改变原DatasourceConnectionSpec契约。
+# 函数用途: 读取已登记连接是否被明确停用。
+def _source_enabled(row):
+    return row.get('enabled', row.get('options', {}).get('enabled', True)) is not False
+
+
+# LLM: 文件检查不越出原Owner/workspace，nofollow持FD取大小；SQL仅原声明查询且强制read合同，不做网络探测。
+# 函数用途: 检查一个已登记源是否缺失或在本次有界查询中为空。
+def _source_content_status(owner_home, store, source, row, workspace_root):
+    from ..assets.datasource_store import database_path
+    from .runtime_sdk import query_sql
+
+    scope, options = source['query_scope'], row.get('options', {})
+    path = options.get('path') or options.get('file_path') or row.get('database_path')
+    try:
+        if path and path != ':memory:':
+            path = database_path(path, owner_home, workspace_root)
+            root = next(root for root in (Path(owner_home).absolute(), *([Path(workspace_root).absolute()] if workspace_root else []))
+                        if path.is_relative_to(root))
+            fd = open_readonly_file_beneath(root, path.relative_to(root).parts)
+            try:
+                if os.fstat(fd).st_size == 0:
+                    return 'empty_sources'
+            finally:
+                os.close(fd)
+        sql = scope.get('query') or scope.get('sql')
+        if sql and row['kind'] == 'sqlite':
+            declared = [DataSourceSpec(source['source_id'], source['system'], query_scope={'access': 'read'})]
+            with bind_runtime_datasources(store, declared, workspace_root=workspace_root):
+                if not query_sql(source['source_id'], sql, scope.get('params')):
+                    return 'empty_sources'
+    except Exception:
+        return 'missing_sources'
+    return ''
+
+
+# LLM: 只读当前Owner/workspace目录；优先报告缺失再空源再新增，普通无源脚本不触碰连接或秘密。
+# 函数用途: 比较脚本冻结绑定和当前连接，返回固定差异状态而不执行脚本。
+def evaluate_script_source_check(owner_home: str | Path, record_or_descriptor: Mapping | AssetDescriptor, *, workspace_root=None):
+    descriptor = _script_descriptor(record_or_descriptor)
+    sources = descriptor['data_sources']
+    check = {'status': 'not_applicable' if not sources else 'ok', 'added_sources': [],
+             'missing_sources': [], 'empty_sources': [], 'checked_at': datetime.now(timezone.utc).isoformat()}
+    if not sources:
+        return [], check
+    store = DatasourceStore(owner_home)
+    # 当前Store总是包含全部登记连接，停用状态由options投影，不传尚不存在的include_disabled参数。
+    rows = store.list_datasources(workspace_root=workspace_root)
+    by_id, bindings = {row['datasource_id']: row for row in rows}, []
+    for source in sources:
+        row = by_id.get(source['source_id'])
+        binding = _source_binding(source['source_id'], {**(row or {}).get('options', {}), **source['query_scope']})
+        bindings.append(binding)
+        changed = row and any(binding[key] and binding[key] != row.get('options', {}).get(key, '')
+                              for key in ('device_name', 'log_source_name') if key in row.get('options', {}))
+        issue = ('missing_sources' if row is None or not _source_enabled(row) or changed else
+                 _source_content_status(owner_home, store, source, row, workspace_root))
+        if issue:
+            check[issue].append(binding)
+    bound = {item['source_id'] for item in bindings}
+    systems, devices = {source['system'] for source in sources}, {row['device_name'] for row in bindings if row['device_name']}
+    for row in rows:
+        options = row.get('options', {})
+        if (row['datasource_id'] not in bound and _source_enabled(row)
+                and (options.get('system', row['kind']) in systems or options.get('device_name') in devices)):
+            check['added_sources'].append(_source_binding(row['datasource_id'], options))
+    check['status'] = next((status for key, status in (('missing_sources', 'source_missing'),
+        ('empty_sources', 'source_empty'), ('added_sources', 'source_added')) if check[key]), 'ok')
+    return bindings, check
+
+
+# LLM: 派生字段仅供当前读回，不写回描述符或改变源授权；多个名称按绑定顺序去重。
+# 函数用途: 给所有脚本统一投影四个展示字段及源差异。
+def project_script_asset_fields(owner_home: str | Path, record: Mapping, *, workspace_root=None):
+    descriptor = _script_descriptor(record)
+    bindings, check = evaluate_script_source_check(owner_home, descriptor, workspace_root=workspace_root)
+    return {'script_name': descriptor['name'], 'summary': descriptor['summary'], 'source_bindings': bindings,
+            'source_check': check, **{key: ', '.join(dict.fromkeys(row[key] for row in bindings if row[key]))
+                                     for key in ('device_name', 'log_source_name')}}
+
+
+# LLM: 通道回调由宿主原投递链注入，owner必须一致；不从通知正文、配置文件或脚本取得发送权限。
+# 函数用途: 在本调用栈绑定可用IM outbox的入队回调，退出不保留通道句柄。
+@contextmanager
+def bind_asset_im_notifier(owner_home, notifier):
+    token = _ASSET_IM_NOTIFIER.set((Path(owner_home).absolute(), notifier))
+    try:
+        yield
+    finally:
+        _ASSET_IM_NOTIFIER.reset(token)
+
+
+# LLM: 本Owner固定nofollow账本先落盘；可用的宿主outbox回调仅入队，缺通道或失败不影响原业务；queued不冒称已送达。
+# 函数用途: 记录源差异或工作流断点通知，并尽力交给当前活跃IM通道。
+def emit_asset_im_notification(owner_home: str | Path, *, event_type: str, title: str, message: str, payload: Mapping):
+    notice = clean_json({'event_type': event_type, 'title': title, 'message': message,
+                         'payload': dict(payload), 'created_at': datetime.now(timezone.utc).isoformat()})
+    result = {'recorded': False, 'delivery_status': 'no_channel'}
+    try:
+        append_text_beneath(owner_home, ('workspace', 'runtime', 'notifications', 'im_alerts.jsonl'),
+                            json.dumps(notice, ensure_ascii=False, allow_nan=False) + '\n')
+        result['recorded'] = True
+    except (OSError, ValueError):
+        result['record_error'] = 'NOTIFICATION_STORE_UNAVAILABLE'
+    binding = _ASSET_IM_NOTIFIER.get()
+    if binding and binding[0] == Path(owner_home).absolute() and callable(binding[1]):
+        try:
+            result['delivery_status'] = 'queued' if binding[1](notice) is not False else 'unavailable'
+        except Exception:
+            result['delivery_status'] = 'unavailable'
+    return result
+
+
+# 兼容任务文档中的大小写拼法，生产调用统一使用小写名称。
+emit_Asset_im_notification = emit_asset_im_notification
+
+
+# LLM: 覆盖仅补充预检或替换同ID查询，不改变原SDK授权；空覆盖不能抹掉原声明，旧被动dict不推断连接权限。
+# 函数用途: 生成本次健康预检的有效源声明。
+def _execution_source_check(owner_home, record, overrides, workspace_root):
+    if not isinstance(overrides, (list, tuple)):
+        return record.get('source_check') or evaluate_script_source_check(owner_home, record, workspace_root=workspace_root)[1]
+    descriptor = _script_descriptor(record)
+    sources = {source['source_id']: source for source in descriptor['data_sources']}
+    for value in overrides:
+        source = DataSourceSpec.from_dict(value).to_dict()
+        sources[source['source_id']] = source
+    descriptor['data_sources'] = list(sources.values())
+    return evaluate_script_source_check(owner_home, descriptor, workspace_root=workspace_root)[1]
+
+
+# LLM: 冻结版本来自宿主运行快照，比较后将同记录送原runner，不允许按ID重新加载其它版本。
+# 函数用途: 检查实际执行代码是否仍符合运行时冻结的脚本版本。
+def _execution_pin_matches(script_id, record, expected):
+    actual = {'script_id': script_id, 'revision': record.get('revision', 0),
+              'code_sha256': hashlib.sha256(record['code'].encode('utf-8')).hexdigest(),
+              'source_scope': record.get('source_scope', 'owner')}
+    return expected is None or all(expected.get(key) == value for key, value in actual.items())
+
+
+# LLM: 硬门失败零执行且保留明确机器码、合同与源状态，不伪造退出成功或调用模型恢复。
+# 函数用途: 构造源或版本预检失败的标准脚本结果。
+def _preflight_failure(script_id, record, code, check):
+    from .models import ScriptExecutionResult
+    stamp = time.time()
+    return ScriptExecutionResult(script_id, False, None, 0, stamp, stamp, {}, '', code, code, True,
+        {'script_id': script_id, 'error_code': code, 'io_contract': record.get('io_contract', {}),
+         'source_check': check}, source_check=check)
+
+
+# LLM: 入口受原审批；版本/源硬门在runner前，执行消费同份记录，原SDK授权/沙箱/清理不变；workspace仅宿主给定。
+# 函数用途: 为工具和工作流统一增加源差异硬门，并返回原脚本结果结构。
+def run_script_with_datasources(owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None, **options):
+    from .script_runner import ScriptRunner, _EntrypointMissing, load_script
+
+    with bind_script_workspace(owner_home, workspace_root):
+        try:
+            record = load_script(owner_home, script_id)[1]
+        except _EntrypointMissing:
+            code = 'SCRIPT_REVISION_DRIFT' if expected_script_pin and expected_script_pin.get('code_sha256') else 'ENTRYPOINT_MISSING'
+            return _preflight_failure(script_id, {}, code, {})
+        if not _execution_pin_matches(script_id, record, expected_script_pin):
+            return _preflight_failure(script_id, record, 'SCRIPT_REVISION_DRIFT', record.get('source_check', {}))
+        check = _execution_source_check(owner_home, record, options.get('override_data_sources'), workspace_root)
+        status = check['status']
+        if status in ('source_missing', 'source_empty', 'source_added'):
+            emit_asset_im_notification(owner_home, event_type=status, title=str(record.get('name', script_id)),
+                message=f'{script_id}: {status}', payload={'script_id': script_id, 'source_check': check})
+        if status in ('source_missing', 'source_empty'):
+            code = 'DATASOURCE_MISSING' if status == 'source_missing' else 'DATASOURCE_EMPTY'
+            return _preflight_failure(script_id, record, code, check)
+        with bind_script_execution_record(owner_home, script_id, workspace_root, record):
+            result = (runner or ScriptRunner(owner_home, workspace_root=workspace_root)).run_script(script_id, inputs, **options)
+        if isinstance(result, dict):
+            return {**result, 'source_check': check}
+        result.source_check = check
+        return result
 
 
 # LLM: 签名与完整快照摘要使用相同严格规范JSON；不把dict插入顺序、空白或非有限浮点当授权依据。

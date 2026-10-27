@@ -39,6 +39,8 @@ class EventFact:
     actor: str = "main"
     content: str = ""
     channel_conversation_ref: str = ""
+    actor_user_ref: str = ''
+    actor_display_name: str = ''
 
 
 # LLM: 事件能力缺失不是连接故障：调用方按"不可用"计数并丢弃该批，不退避整条连接（与请求级错误同级）。
@@ -73,7 +75,7 @@ def require_events_capability(client) -> None:
         raise PluginEventUnavailable("插件未声明事件能力")
 
 
-# LLM: 归一化在发布入口做（坏输入丢弃而不是抛给调用方）；字符串字段截断、actor 只认白名单、
+# LLM: 发布入口归一（坏输入丢弃）；actor只认白名单，用户引用/显示名仅展示、按原长度截断，不能授权；
 #   facts 必须是字典否则置空；content 只在提示事件上保留，纵深防御不依赖 B4 投影先过滤。
 # 函数用途: 纯计算归一不可变事件并剥离非提示正文，发布入口调用；不读写磁盘或改变正文许可。
 def normalize_event_fact(value) -> EventFact | None:
@@ -88,10 +90,12 @@ def normalize_event_fact(value) -> EventFact | None:
         actor=actor,
         content=_ref(value.content, MAX_PROMPT_CONTENT_CHARS) if value.type == "prompt_submitted" else "",
         channel_conversation_ref=_ref(value.channel_conversation_ref),
+        actor_user_ref=_ref(value.actor_user_ref),
+        actor_display_name=_ref(value.actor_display_name),
     )
 
 
-# LLM: 公共字段按设计第 6 节；dropped_before 与 seq 由 hub 计算后传入；content 只在该插件声明
+# LLM: actor引用/显示名按宿主事实投影，不用于授权；dropped_before/seq由hub计算；content只在插件声明
 #   text 且确实有内容时出现，其余情况连键都不给，避免插件靠键的存在与否猜宿主实现。
 # 函数用途: 组装一条发给某插件的观察事件。
 def build_event_payload(envelope: EventEnvelope) -> dict:
@@ -102,6 +106,7 @@ def build_event_payload(envelope: EventEnvelope) -> dict:
         "channel": fact.channel, "thread_ref": fact.thread_ref,
         "channel_conversation_ref": fact.channel_conversation_ref,
         "actor": fact.actor, "facts": dict(fact.facts),
+        'actor_user_ref': fact.actor_user_ref, 'actor_display_name': fact.actor_display_name,
     }
     if envelope.include_content and fact.content:
         payload["content"] = fact.content

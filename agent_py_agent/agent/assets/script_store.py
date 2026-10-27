@@ -2,10 +2,11 @@
 # 模块用途: 分层管理固化脚本、项目覆盖、动态查询范围、候选评估和运行摘要。
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from . import (
     TRANSACTION_FILE,
+    AssetPostCommitReadbackError,
     _AssetStore,
     next_asset_revision,
     next_run_summary,
@@ -45,11 +46,11 @@ def _candidate_history(previous, incoming):
     return tuple(dict.fromkeys((*previous, *observations)))
 
 
-# LLM: 只恢复真实记录的描述符部分，代码/执行声明不混入公共契约；不执行额外IO。
+# LLM: 只恢复标准字段，代码/执行声明和实时源投影不能混入严格描述符；不执行额外IO。
 # 函数用途: 给锁内历史合并与源更新共用严格描述符解码。
 def _record_descriptor(record):
-    return AssetDescriptor.from_dict({key: value for key, value in record.items()
-                                     if key not in {'entrypoint', 'interpreter', 'timeout_seconds', 'code', 'entrypoint_path'}})
+    names = {item.name for item in fields(AssetDescriptor)}
+    return AssetDescriptor.from_dict({key: value for key, value in record.items() if key in names})
 
 
 # LLM: 仅继承新定义仍存在的source_id历史；非空新摘要保持显式值，不恢复已删除数据源。
@@ -66,11 +67,29 @@ def _preserve_history(descriptor, old):
 # LLM: 每个写操作共用根锁及原集合锁；workspace仅用于读取覆盖，写入必须显式指定，路径不从投影恢复。
 # 类用途: 在Owner空间管理固化脚本，供工具、工作流和Broker共用。
 class ScriptStore(_AssetStore):
-    # LLM: 项目根只登记且冷读不创建.agent；额外根仍只读，is_admin不自动开放任何覆盖写入。
+    # LLM: 项目根只来自显式宿主参数或同Owner运行栈，冷读不创建.agent，不从资产正文取权限。
     # 函数用途: 绑定脚本Owner写根、项目读取覆盖及全局只读来源。
     def __init__(self, owner_home, *, extra_roots=(), is_admin: bool = False, workspace_root=None):
+        from ..workflows.datasource_runtime import script_workspace_root
+        if workspace_root is None:
+            workspace_root = script_workspace_root(owner_home)
         super().__init__(owner_home, "scripts", "script.json", extra_roots=extra_roots, is_admin=is_admin,
                          workspace_root=workspace_root)
+
+    # LLM: 返回副本以原Owner和授权workspace计算，不写回实时源状态或改变描述符。
+    # 函数用途: 给脚本统一投影四个展示字段和源差异。
+    def _project_record(self, record):
+        from ..workflows.datasource_runtime import project_script_asset_fields
+        return {**record, **project_script_asset_fields(self.owner_home, record, workspace_root=self.workspace_root)} if record is not None else None
+
+    # LLM: 仅原写操作正常返回后使用，投影失败也是已提交读回失败，不能误报未执行。
+    # 函数用途: 给全部保存/更新读回补充统一展示。
+    def _readback_after_commit(self, asset_id):
+        record = super()._readback_after_commit(asset_id)
+        try:
+            return self._project_record(record)
+        except Exception as exc:
+            raise AssetPostCommitReadbackError('脚本已提交但展示投影失败') from exc
 
     # LLM: 标记只存在于返回副本，不写共享元数据，不从元数据取得路径或写入权。
     # 函数用途: 给全局脚本的详情或列表补充真实来源标记。
@@ -131,30 +150,36 @@ class ScriptStore(_AssetStore):
             target._write(descriptor.to_dict() | options, files)
             return target._readback_after_commit(descriptor.id)
 
-    # LLM: 项目冷读沿readonly视图，坏记录不回退；低优先级损坏不击穿已命中覆盖，不跨Owner枚举。
+    # LLM: 同作用域可信执行栈只读已验快照；其它冷读沿readonly视图，坏记录不回退，不跨Owner枚举。
     # 函数用途: 优先读取项目、再Owner、最后全局脚本的安全代码副本。
     def get_script(self, script_id):
         safe_asset_id(script_id)
+        from ..workflows.datasource_runtime import script_execution_record
+        snapshot = script_execution_record(self.owner_home, script_id, self.workspace_root)
+        if snapshot is not None:
+            return snapshot
         if self.workspace_root is not None:
             from .workspace_assets import WorkspaceAssetOverlay
 
-            return WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
+            record = WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
                                          builtin_roots=self._global_roots).get_asset('script', script_id)
+            return self._project_record(record)
         with self._locked():
             record = self._get(script_id)
-        return record if record is not None else self._global_get(script_id)
+        return self._project_record(record if record is not None else self._global_get(script_id))
 
-    # LLM: 有workspace走同一只读覆盖入口，不创建.agent；列表仅元数据且同ID首来源认领。
+    # LLM: 有workspace走同一只读覆盖入口，不创建.agent；只投影元数据，实时状态不持久化。
     # 函数用途: 按ID稳定列出项目、Owner和全局脚本的去重元数据。
     def list_scripts(self):
         if self.workspace_root is not None:
             from .workspace_assets import WorkspaceAssetOverlay
 
-            return WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
+            records = WorkspaceAssetOverlay(self.workspace_root, owner_home=self.owner_home,
                                          builtin_roots=self._global_roots).list_assets('script')
+            return [self._project_record(row) for row in records]
         with self._locked():
             records = self._local_records()
-        return self._merge_globals(records)
+        return [self._project_record(row) for row in self._merge_globals(records)]
 
     # LLM: 删除前验证代码及元数据，基座拒绝所有链接和未支持目录；不执行文件。
     # 函数用途: 删除单个脚本目录，缺失返回False。
@@ -203,13 +228,18 @@ class ScriptStore(_AssetStore):
             self._write(replace(descriptor, data_sources=tuple(sources)).to_dict() | options)
             return self._readback_after_commit(script_id)
 
-    # LLM: 本Owner摘要原锁提交后单独读回；全局存在时仅返回只读副本，绝不累计到共享文件。
+    # LLM: 项目/全局命中不累计到同名Owner；本Owner摘要原锁读改写，展示字段不能进入严格解码。
     # 函数用途: 保存本地脚本运行摘要，安全跳过只读全局摘要写入。
     def record_run_summary(self, script_id, status, duration_ms, run_at=None, *, last_error=""):
+        if self.workspace_root is not None:
+            selected = self.get_script(script_id)
+            if selected is not None and selected.get('scope_layer') != 'owner':
+                return selected
         with self._locked():
             record = self._get(script_id)
             if record is not None:
-                descriptor, options = _decode_script({key: value for key, value in record.items() if key not in {"code", "entrypoint_path"}})
+                descriptor = _record_descriptor(record)
+                options = {key: record[key] for key in ('entrypoint', 'interpreter', 'timeout_seconds')}
                 summary = next_run_summary(descriptor.runtime_summary, status, duration_ms, run_at, last_error=last_error)
                 self._write(replace(descriptor, runtime_summary=summary).to_dict() | options)
                 return self._readback_after_commit(script_id)

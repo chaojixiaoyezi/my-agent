@@ -20,7 +20,7 @@ tools_required: [skill_search, list_files, read_file, write_file, edit_file, app
 | 观察宿主流程（`events`） | v8：六类事件中只有 `prompt_submitted` 能声明 `content: text`；其它类型只有结构化事实，`tool_call_started` 必须 `none` |
 | 工具调用前收紧（`tool_gates`） | v8：只能 `allow_as_is` / `ask` / `deny`，不能改参数或接管调用；`arguments: full` 必须列精确工具名且 `effects: []` |
 
-写观察事件的插件，先看[作者合同](references/author-contract.md)里的「观察事件字段表」，按它读九个公共字段和每类的 `facts`——**不要猜字段名**。宿主以后可能加新的事件类型或新字段：不认识的 `type` 要跳过、不认识的字段要忽略，不能抛异常或当成错误。
+写观察事件的插件，先看[作者合同](references/author-contract.md)里的「观察事件字段表」，按它读公共字段和每类的 `facts`——**不要猜字段名**。`actor_user_ref` 与 `actor_display_name` 只是宿主给出的发起者展示，名称缺失不能阻断业务，也不能用名称判定权限。宿主以后可能加新的事件类型或新字段：不认识的 `type` 要跳过、不认识的字段要忽略，不能抛异常或当成错误。
 
 写收紧门（`tool_gates`）的插件，若声明了 `arguments: full`，要处理[作者合同](references/author-contract.md)里的「参数截断标记 `arguments_truncated`」：收到 `true` 表示参数被截断、看不全，依赖完整参数的判断必须回 `ask`，否则别人可以用填充内容绕过你的门。
 
@@ -30,8 +30,8 @@ tools_required: [skill_search, list_files, read_file, write_file, edit_file, app
 
 ## 生产安全边界
 
-- **B7 之前 v8 插件在生产不能启用**，返回 `plugin_events_disabled`；不能删除关闭门、改配置或降成 v6 绕过。包能构建/读回不表示可以启用。
-- B7 的启用前置合同：第一期只允许 `local/main`，插件进程**强制沙箱**（不可用就拒绝）、默认断网、收窄读；读不到宿主的配置、会话和记忆。B9 的独立 stdio 测试不验证这些宿主保证。
+- v8 观察/收紧由宿主 `plugin_events_enabled` 总开关控制；关闭时返回 `plugin_events_disabled`。开关打开也不代表安装或启用已获准，不能删除门、改配置或降成 v6 绕过。构建/读回不是启用证据。
+- 启用仍受原Owner范围和用户确认限制，插件进程**强制沙箱**（不可用就拒绝）、默认断网、收窄读；不能读取宿主配置、会话和记忆。独立 stdio 测试不验证这些宿主保证。
 - `permissions.network` 默认 `false`；确需联网必须在授权范围内显式声明 `true`，不能为了演示默认打开。网络、订阅正文/参数范围和强制沙箱要求会写进确认码；变更后由用户重新确认。
 - v8 插件启用必须由用户本人输确认码；模型不能自行安装、启用、取码、代填，不能借子代理代操作。自己做的 v6 文件插件走 `package_install`，确认码由宿主按用户的开关处理，你同样不碰确认码。
 
@@ -52,6 +52,8 @@ tools_required: [skill_search, list_files, read_file, write_file, edit_file, app
 4. 失败按回执改：回执会写缺了哪些字段、多了哪些字段和宿主校验的具体原因。不要改用 shell 跑构建脚本——那样打的包不在宿主记录里，`package_install` 会回 `PACKAGE_INSTALL_NOT_SELF_BUILT`。本机 `python3` 导入的 my-agent 不一定是正在运行的版本，宿主校验以 `package_build` 回执为准。
 
 ## 交付与常见错误
+
+授权的Broker客户端可使用 `user_space.identity.resolve` 查询用户/群显示名，或 `capability_packages.list` 读取能力包安装总表、范围和资源索引；参数与隐私边界见[作者合同](references/author-contract.md#只读broker身份与能力包目录)。这不是给v8模板新增 `host_api` 的许可，现行组合限制仍有效。
 
 - 给出源码、包的实际路径、真实测试结果及未验证范围；工作区不得留下密钥、会话正文或宿主内部状态。模板的 stdio 测试不等于安装/启用或真实 TUI/模型调用。
 - 改工具 schema 后还沿用旧 `tools/list`：改为同源声明再复验最终包；stdout 混日志：改到 stderr。

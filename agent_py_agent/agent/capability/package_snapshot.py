@@ -5,8 +5,24 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
-from ..capability_package_manifest import CapabilityFile
+from ..capability_package_manifest import CapabilityFile, application_scope_payload
+
+
+# LLM: 只按已声明成员的明确目录/SKILL.md归类展示，不读正文、不创建可执行资产，不依据扩展名授执行权。
+# 函数用途: 汇总包内技能、脚本和工作流资源的稳定名称。
+def package_assets(members):
+    result = {'skills': [], 'scripts': [], 'workflows': []}
+    for member in members:
+        path = PurePosixPath(member.path)
+        if path.name == 'SKILL.md':
+            result['skills'].append(path.parent.name or path.stem)
+        for kind in ('scripts', 'workflows'):
+            if kind in path.parts[:-1]:
+                following = path.parts[path.parts.index(kind) + 1:]
+                result[kind].append(following[0] if len(following) > 1 else path.stem)
+    return {key: sorted(set(values)) for key, values in result.items()}
 
 
 # LLM: 读取建议只来自已校验的当前包引用，携带原内容与激活代次；调用方仍须经过原工具授权、晋升和鲜活复核。
@@ -37,8 +53,9 @@ class CapabilityPackageSnapshot:
     members: tuple[CapabilityFile, ...]
     reader: Callable[[str], bytes] = field(repr=False, compare=False)
     installation_scope: str = "private"
+    application_scope: dict = field(default_factory=dict)
 
-    # LLM: 安装声明的深层校验归 PluginManifest；这里只拒绝可变成员、重复键和缺入口，防止快照出现歧义。
+    # LLM: 安装深校验归Manifest；复制范围并校验唯一资源/入口，范围和资源名仅展示，不授执行权。
     # 函数用途: 确认包快照能按唯一成员路径读取，且具有宿主固定的内容与激活身份。
     def __post_init__(self) -> None:
         if not self.package_id or not self.package_sha256 or not self.activation_id:
@@ -51,6 +68,21 @@ class CapabilityPackageSnapshot:
         paths = {item.path for item in self.members}
         if len(paths) != len(self.members) or self.entry_document not in paths:
             raise ValueError("CAPABILITY_PACKAGE_ENTRY_INVALID")
+        object.__setattr__(self, 'application_scope', application_scope_payload(self.application_scope))
+
+    # LLM: 卡片不读私有正文或暴露本机路径；资源清单只供展示，引用身份仍沿to_ref和原激活核验。
+    # 函数用途: 输出范围和包内资源索引的发现卡。
+    def to_card(self):
+        assets = package_assets(self.members)
+        return {'package_id': self.package_id, 'name': self.name, 'version': self.version, 'summary': self.summary,
+                'installation_scope': self.installation_scope, 'application_scope': application_scope_payload(self.application_scope),
+                'assets': assets, 'asset_counts': {key: len(value) for key, value in assets.items()},
+                'digest': self.package_sha256, 'enabled': True}
+
+    # LLM: 详情仅加公开声明，不预读入口正文或把资源转全局Skill。
+    # 函数用途: 生成能力包公开详情。
+    def to_detail(self):
+        return {**self.to_card(), 'description': self.description, 'keywords': list(self.keywords), 'entry_document': self.entry_document}
 
     # LLM: 稳定引用标识包的公开能力，版本与撤销身份必须另查 to_ref，不能只靠这个名称续用新安装。
     # 函数用途: 返回可保存在现有 allowed_skills 中的包级引用。

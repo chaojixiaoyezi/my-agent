@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,10 +29,10 @@ from .models import (
 REQUIRED_KEYS = {'name', 'access_targets', 'data_sources', 'credential_refs', 'io_contract'}
 
 
-# LLM: 独立动作锁仅包住工具层管理动作；preview与其它只读入口不建目录，原子绑定另归Store集合锁。
+# LLM: 独立动作锁仅包管理动作；源检查与其它只读入口不建资产动作目录，绑定另归Store集合锁。
 # 函数用途: 串行化同Owner同类资产的管理动作，防止增量更新或Skill绑定丢失。
 def _dispatch(tool, params):
-    if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run'):
+    if params['action'] in ('list', 'get', 'preview', 'run', 'resume', 'inspect_run', 'check_sources'):
         return tool._dispatch(params)
     tool.owner_home.mkdir(parents=True, exist_ok=True)
     collection = tool.model_spec.name
@@ -154,7 +154,8 @@ def _descriptor(data, asset_id, kind):
 # 类用途: 为Agent提供脚本目录、管理、源评估和受控运行工具。
 class ScriptsTool(BaseTool):
     model_spec = _spec('scripts', '管理Owner固化脚本、标准提取Key与源评估；脚本应输出单行JSON对象到stdout；run仅单次覆盖数据源。',
-        ['list', 'get', 'register', 'update', 'update_sources', 'record_candidate', 'run', 'delete'], {
+        ['list', 'get', 'register', 'update', 'update_sources', 'record_candidate', 'run', 'delete', 'check_sources'], {
+            'expected_revision': {'type': ['integer', 'null'], 'minimum': 0},
             **{key: {'type': 'string'} for key in ('script_id', 'code', 'entrypoint', 'interpreter', 'source_id', 'scope_key')},
             'descriptor': {'type': 'object', 'description': (
                 '必填标准提取Key对象：{name: 非空字符串, access_targets: 列表(如[]), '
@@ -166,29 +167,34 @@ class ScriptsTool(BaseTool):
             **{key: {'type': 'array', 'items': {'type': 'string'}} for key in ('add', 'remove')},
             'override_data_sources': {'type': ['object', 'array'], 'description': '仅本次传给runner，绝不写回资产'},
             'timeout_seconds': {'type': 'number', 'exclusiveMinimum': 0, 'maximum': 3600}})
-    runtime_policy = _policy('scripts', ('list', 'get'), ('run', 'delete'))
+    runtime_policy = _policy('scripts', ('list', 'get', 'check_sources'), ('run', 'delete'))
 
-    # LLM: 可注入同Owner的Store和固定run_script协议，不在构造时启动进程；不猜同仓模块是否尚未开发。
+    # LLM: Store/runner和项目范围只由宿主注入；动态provider每次读取，模型参数不授予路径权限。
     # 函数用途: 固定Owner并保存显式领域依赖。
-    def __init__(self, owner_home: Path, *, store=None, runner=None):
+    def __init__(self, owner_home: Path, *, store=None, runner=None, workspace_root=None, workspace_root_provider=None):
         self.owner_home = Path(owner_home).absolute()
         _owner(self.owner_home, store)
         _owner(self.owner_home, runner)
         self.store, self.runner = store, runner
+        self.workspace_root, self.workspace_root_provider = workspace_root, workspace_root_provider
+
+    # LLM: 只使用宿主提供的项目；无显式项目时兼容已绑定runner范围，不从脚本元数据恢复权限。
+    # 函数用途: 获取当前操作使用的项目根。
+    def _workspace_root(self):
+        return (self.workspace_root_provider() if callable(self.workspace_root_provider)
+                else self.workspace_root or getattr(self.runner, 'workspace_root', None))
 
     # LLM: 纯参数预检供原执行器claim前使用，不创建Owner或取得领域Store。
     # 函数用途: 返回条件必填及Schema错误，合法调用返回None。
     def validate_invocation(self, params, context):
         return _validate(self, params)
 
-    # LLM: 显式注入优先，其余固定采用同仓ScriptStore，不猜多版本模块或另建平行账本。
+    # LLM: 显式Store优先；默认Store每次绑定当前workspace，避免缓存旧项目目录。
     # 函数用途: 按需取得当前Owner唯一脚本存储。
     def _store(self):
-        if self.store is None:
-            self.store = ScriptStore(self.owner_home)
-        return self.store
+        return self.store if self.store is not None else ScriptStore(self.owner_home, workspace_root=self._workspace_root())
 
-    # LLM: 先区分已提交读回异常，再区分预检错误和运行失败；不吞中断，不以业务JSON文字重签副作用事实。
+    # LLM: 提交后错误优先；CAS冲突单独结构化，运行保留领域源错误码，不从普通文本推导执行权。
     # 函数用途: 路由结构化脚本动作并返回JSON或原失败事实。
     def execute(self, params):
         invalid = self.validate_invocation(params, None)
@@ -201,11 +207,14 @@ class ScriptsTool(BaseTool):
         except AssetPostCommitReadbackError as exc:
             return _post_commit_failure('scripts', exc)
         except (ValueError, TypeError, KeyError) as exc:
+            if str(exc).startswith('ASSET_REVISION_CONFLICT:'):
+                return _outcome('scripts', {'error_code': 'ASSET_REVISION_CONFLICT', 'error': str(exc)},
+                                False, 'TOOL_INVALID_ARGUMENTS', effect_outcome='not_started')
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_INVALID_ARGUMENTS')
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
-    # LLM: action只做精确枚举；ID归Store校验，runner显式注入优先且默认只延迟导入固定ScriptRunner。
+    # LLM: action精确枚举；运行统一经过源硬门，workspace和runner只消费原宿主绑定，不创建另一执行器合同。
     # 函数用途: 将公开动作交给领域存储或执行器。
     def _dispatch(self, params):
         action, store = params['action'], self._store()
@@ -221,25 +230,26 @@ class ScriptsTool(BaseTool):
             return self._save(params, old)
         if action == 'get':
             return _plain(old)
+        if action == 'check_sources':
+            from ..workflows.datasource_runtime import project_script_asset_fields
+            return project_script_asset_fields(self.owner_home, old, workspace_root=self._workspace_root())
         if action == 'delete':
             return {'deleted': store.delete_script(script_id)}
         if action in ('update_sources', 'record_candidate'):
             return self._sources(params, old)
         if action == 'run':
-            runner = self.runner
-            if runner is None:
-                from ..workflows.script_runner import ScriptRunner
-                runner = ScriptRunner(self.owner_home)
-            return _plain(runner.run_script(script_id, params.get('inputs', {}),
+            from ..workflows.datasource_runtime import run_script_with_datasources
+            return _plain(run_script_with_datasources(self.owner_home, script_id, params.get('inputs', {}),
+                runner=self.runner, workspace_root=self._workspace_root(),
                 timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
         raise ValueError('未知脚本action')
 
-    # LLM: update从Store原值无损继承字段和代码，绝不从展示脱敏结果继承；register必须完整。
+    # LLM: update只从原值的正式描述符字段和代码继承，不写回实时投影；CAS由Store在原锁内检查。
     # 函数用途: 创建或更新脚本，保留其代码与执行参数。
     def _save(self, params, old):
         prior = _raw(old) if old else {}
-        defaults = {key: value for key, value in prior.items()
-                    if key not in {'entrypoint', 'interpreter', 'timeout_seconds', 'code', 'entrypoint_path'}}
+        names = {item.name for item in fields(AssetDescriptor)}
+        defaults = {key: value for key, value in prior.items() if key in names}
         descriptor = _descriptor(params.get('descriptor', defaults), params['script_id'], 'script')
         options = {key: params.get(key, prior.get(key, value)) for key, value in
                    (('entrypoint', 'main.py'), ('interpreter', 'python3'), ('timeout_seconds', 120))}
@@ -248,6 +258,8 @@ class ScriptsTool(BaseTool):
         code = params.get('code', prior.get('code'))
         if not isinstance(code, str):
             raise ValueError('代码必须为文本')
+        if 'expected_revision' in params:
+            options['expected_revision'] = params['expected_revision']
         return _plain(self._store().save_script(descriptor, code, **options))
 
     # LLM: 读改写沿Store原值，不把展示脱敏字段回写；active候选仅加入显式scope_key，评估时间由宿主生成。
