@@ -824,13 +824,22 @@ def test_workspace_workflows_tools_do_not_update_owner_shadow(tmp_path):
     assert WorkflowStore(home).get_workflow('scoped').descriptor.runtime_summary.run_count == 0
 
 
-# LLM: 空称呼行不得跨行吞入下一条角色/背景描述，保持未解析语义。
-# 函数用途: 覆盖USER.md称呼留空时的单行边界解析。
+# LLM: 空称呼行不得跨行吞入下一条角色/背景描述，且同行#标题不得作为有效显示名，同名不同路径的包内Skill不得被set合并漏项。
+# 函数用途: 覆盖USER.md称呼单行/标题边界解析与能力包同名不同路径资源统计。
 def test_identity_local_name_does_not_cross_newline_when_empty(tmp_path):
     from agent_py_agent.agent.adapter.feishu_profile import resolve_user_space_identity
+    from agent_py_agent.agent.capability.package_snapshot import package_assets
+    from agent_py_agent.agent.capability_package_manifest import CapabilityFile
     home = tmp_path / 'owners' / 'local' / 'alice'
     home.mkdir(parents=True)
     (home / 'USER.md').write_text('- 称呼:\n- 角色/背景: 开发者\n', encoding='utf-8')
     res = resolve_user_space_identity(home)
     assert res['resolved'] is False and res['display_name'] is None
-
+    (home / 'USER.md').write_text('- 称呼: # 敏感背景\n', encoding='utf-8')
+    res_heading = resolve_user_space_identity(home)
+    assert res_heading['resolved'] is False and res_heading['display_name'] is None
+    assets = package_assets((
+        CapabilityFile('methods/a/SKILL.md', '0' * 64),
+        CapabilityFile('extras/a/SKILL.md', '1' * 64),
+    ))
+    assert assets['skills'] == ['extras/a', 'methods/a'] and len(assets['skills']) == 2

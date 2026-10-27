@@ -10,19 +10,31 @@ from pathlib import PurePosixPath
 from ..capability_package_manifest import CapabilityFile, application_scope_payload
 
 
-# LLM: 只按已声明成员的明确目录/SKILL.md归类展示，不读正文、不创建可执行资产，不依据扩展名授执行权。
-# 函数用途: 汇总包内技能、脚本和工作流资源的稳定名称。
+# LLM: 只按已声明成员的明确目录/SKILL.md归类展示，同名不同路径保留相对路径消歧，不读正文或授执行权。
+# 函数用途: 汇总包内技能、脚本和工作流资源的稳定名称与准确数量。
 def package_assets(members):
-    result = {'skills': [], 'scripts': [], 'workflows': []}
+    raw = {'skills': [], 'scripts': [], 'workflows': []}
     for member in members:
         path = PurePosixPath(member.path)
         if path.name == 'SKILL.md':
-            result['skills'].append(path.parent.name or path.stem)
+            short = path.parent.name or path.stem
+            full = path.parent.as_posix().lstrip('./') or short
+            raw['skills'].append((short, full))
         for kind in ('scripts', 'workflows'):
             if kind in path.parts[:-1]:
-                following = path.parts[path.parts.index(kind) + 1:]
-                result[kind].append(following[0] if len(following) > 1 else path.stem)
-    return {key: sorted(set(values)) for key, values in result.items()}
+                idx = path.parts.index(kind)
+                following = path.parts[idx + 1:]
+                short = following[0] if len(following) > 1 else path.stem
+                full = PurePosixPath(*path.parts[:idx], short).as_posix() if idx > 0 else short
+                raw[kind].append((short, full))
+    result = {}
+    for key, pairs in raw.items():
+        unique = list({full: (short, full) for short, full in pairs}.values())
+        counts = {}
+        for short, _ in unique:
+            counts[short] = counts.get(short, 0) + 1
+        result[key] = sorted(full if counts[short] > 1 else short for short, full in unique)
+    return result
 
 
 # LLM: 读取建议只来自已校验的当前包引用，携带原内容与激活代次；调用方仍须经过原工具授权、晋升和鲜活复核。

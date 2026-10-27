@@ -107,13 +107,31 @@ class PluginBrokerService:
         service._host_v2_ingress, service._host_v2_ports = ingress, ports
         return service
 
-    # LLM: 复用完整原授权与幂等门；闭合schema拒绝身份字段，异常只公开结构化代码，不打印payload或秘密。
+    # LLM: 复用完整原授权与幂等门；闭合schema拒绝身份字段，Broker只读动作在v2来源下同样经原发行器核验。
     # 函数用途: 将Broker动作转换成原Host v2调用并返回公共结果。
     def _dispatch_host_v2(self, action, payload, idempotency_key):
+        from ..plugin_host.action_specs import action_specs
         from ..plugin_host.contracts import authorize_call, decode_call, dispatch_call
+        from ..plugin_host.conversations import read_context
         from ..plugin_host.errors import HostAPIError
         from ..plugin_host.schemas import canonical_json, thaw
-        envelope = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': {} if payload is None else payload}
+        body = {} if payload is None else payload
+        if (isinstance(action, str) and action in ('capability_packages.list', 'user_space.identity.resolve')
+                and action not in action_specs()):
+            if idempotency_key is not None or not isinstance(body, dict):
+                return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
+            try:
+                probe = decode_call(canonical_json({'schema': 'plugin_host_call.v2', 'action': 'host.capabilities.get', 'payload': {}}).encode('utf-8'))
+                authorized = authorize_call(self._host_v2_ingress, probe)
+                context = read_context(authorized)
+                data = self._route(context.owner_home.home_dir, context.owner_home.owner_id, action, dict(body))
+                read_context(authorized)
+                return {'ok': True, 'data': public_payload(data), 'http_status': 200}
+            except HostAPIError as error:
+                return {'ok': False, 'error_code': error.code, 'http_status': error.status, 'outcome': error.outcome}
+            except (TypeError, ValueError, KeyError):
+                return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
+        envelope = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': body}
         if idempotency_key is not None:
             envelope['idempotency_key'] = idempotency_key
         try:

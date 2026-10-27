@@ -1,3 +1,8 @@
+## 2026-10-27 Wave 7 W1：Broker 身份解析、能力包目录、数据源声明门与工作流恢复收口
+
+- `gateway_parts/plugin_broker_api.py` 与 `plugin_host_broker_topics.py` 接入 `capability_packages.list` 与 `user_space.identity.resolve` 只读 Broker 主题（并在 `from_host_v2` 下复用原发行器鉴权），`adapter/feishu_profile.py` 拒绝同行的 `# ...` Markdown 标题或跨行吞入并兼容 macOS 系统临时目录符号链接前缀。
+- `capability/package_snapshot.py` 与 `package_provider.py` 对不同子目录下同名资源保留相对路径消歧并准确统计 `asset_counts`；`workflows/engine.py`、`datasource_runtime.py` 与内置插件作者合同对齐硬停错误与 `on_error: skip` 语义。
+
 ## 2026-10-26 全量跨模块对向审计收口（H01..H16 & P2-1..P2-3 & P1-02 已落地）
 
 - **网关 Bot 执行约束、只读操作级工具闸门与禁学贯通（`gateway_parts/request_execution.py`、`conversation/bot_tool_policy.py`、`plugin_host/gateway_runtime.py`）**：`bot_execution_policy` 与 `bot_request_allowed_tools` 冻结并传递 `bot_execution_policy`（含目标 Owner 物理 `workspace_root`、`max_tool_calls`、只读动作白名单与 `learning_excluded`）；`request_execution._gateway_run_params` 在构造 `RunParams` 时将 `bot_execution_policy` 挂载到运行实例并透传 `learning_excluded=True`，由 `wrap_bot_tool_registry` 在单次工具调用层拦截越权 action、超预算调用和越根路径。

@@ -91,7 +91,10 @@ def seed_call_name(
 ) -> bool:
     """把显示名填进 USER.md 空的"称呼"行;已填/无该行→不动(幂等)。成功写回返回 True。"""
     try:
-        path = Path(user_md_path)
+        raw_path = Path(user_md_path)
+        if raw_path.is_symlink() or raw_path.parent.is_symlink():
+            return False
+        path = raw_path.parent.resolve(strict=True) / raw_path.name
         text = path.read_text(encoding="utf-8")
     except OSError:
         return False
@@ -171,7 +174,7 @@ def _identity_owner_id(home):
     return ''
 
 
-# LLM: 本人USER.md称呼不用于其它目标；nofollow只读本人文件，缺失/损坏保持未解析。
+# LLM: 本人USER.md称呼不用于其它目标；nofollow只读本人文件，拒绝Markdown标题，缺失/损坏保持未解析。
 # 函数用途: 为本地默认本人身份读取已登记显示名。
 def _identity_local_name(home):
     try:
@@ -179,7 +182,8 @@ def _identity_local_name(home):
     except (OSError, ValueError):
         return None
     match = re.search(r'^[ \t]*-?[ \t]*(?:称呼|显示名|display_name)[ \t]*[:：][ \t]*([^\r\n]+)', text, re.MULTILINE)
-    return _identity_name(match[1]) if match else None
+    value = _identity_name(match[1]) if match else None
+    return None if value and value.startswith('#') else value
 
 
 # LLM: 名称缓存按Owner/认证指纹/精确目标隔离；网络锁仅每目标持有，不跨目标串行，缓存和飞行表有独立短锁。

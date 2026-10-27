@@ -1,3 +1,7 @@
+## 2026-10-27 Wave 7 W1：Broker 只读主题与能力包/工作流恢复结构
+
+- `gateway_parts/plugin_broker_api.py` 在 `READ_ACTIONS`、`_route` 与 `_dispatch_host_v2` 中挂载 `capability_packages.list` 与 `user_space.identity.resolve`；`adapter/feishu_profile.py::_identity_local_name` 限制单行匹配并拒绝 `#` 标题，`seed_call_name` 解析父目录真实路径防 macOS `/var` 符号链接报错；`capability/package_snapshot.py::package_assets` 按相对成员路径去重消歧。
+
 ## 2026-10-26 全量跨模块对向审计收口结构（Bot 执行约束、全库引用保护与协调路径派生清理）
 
 - `gateway_parts/request_execution.py::_gateway_run_params` 接收 `bot_request_allowed_tools(..., return_constraints=True)` 返回的 `(allowed_tools, bot_constraints)`，通过 `_bind_bot_execution_policy` 将结构化约束绑定至当前 worker agent 并设置 `learning_excluded`；`conversation/bot_tool_policy.py::wrap_bot_tool_registry` 对多动作工具按 `READONLY_TOOL_ACTIONS` 校验只读子操作、强校验物理 `workspace_root` 与 `max_tool_calls` 预算。

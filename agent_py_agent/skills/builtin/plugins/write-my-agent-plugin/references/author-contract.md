@@ -152,5 +152,5 @@ v8 两语言启用都要求用户本人确认入口/文件/解释器、订阅正
 - `capability_packages.list`：可传 `include_disabled`（默认true），直接读取唯一安装表；卸载后消失、停用行显示 `enabled:false`。字段包括 `package_id/name/version/summary/enabled/installation_scope/application_scope/assets/asset_counts/digest/revision`；`assets` 按 `skills/scripts/workflows` 给声明资源索引，不预读正文，不把私有资源变成全局Skill或自动赋予执行权。
 - `application_scope` 支持 `workbenches/domains/workspace_tags` 字符串列表；工作台、领域、标签和显式偏好ID只影响软排序，不启用包、不扩大授权。空范围不写入规范清单，旧包摘要保持不变。
 - 脚本资产展示包含固定四列 `script_name/summary/device_name/log_source_name`，并有 `source_bindings/source_check`。它们是返回投影，不可写入严格 `AssetDescriptor`；缺源/空源硬停，新增同设备/系统源会提示而不自动绑定。无数据源的工具脚本显示空设备/日志源与 `not_applicable`。
-- 工作流运行返回 `workflow_name/total_steps/completed_steps/breakpoint`；断点使用一基步骤位置、稳定机器码及恢复选项。非零退出、缺源/空源和输出合同错误不能skip或自动伪造成功；最终输出仍须满足工作流合同。恢复默认拦截 `SCRIPT_REVISION_DRIFT`，只有显式 `allow_script_drift:true` 才采用新版本，成功前缀不重跑。
+- 工作流运行返回 `workflow_name/total_steps/completed_steps/breakpoint`；断点使用一基步骤位置、稳定机器码及恢复选项。版本漂移、缺源/空源和输出合同错误属于硬停，不能 `skip` 或自动伪造成功；普通脚本运行失败仅在步骤显式配置 `on_error: skip` 时可跳过，最终输出仍须满足工作流合同。恢复默认拦截 `SCRIPT_REVISION_DRIFT`，只有显式 `allow_script_drift:true`（或当前失败步骤属于非漂移错误且在修复后重新固定版本）才采用新版本，成功前缀不重跑。
 - 源差异/断点先写通知账本，可用的宿主IM回调仅入队；`queued` 不表示外部用户已收到。无通道或通道失败时不影响原业务，真实IM送达须单独验证。
