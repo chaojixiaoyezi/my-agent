@@ -3966,15 +3966,20 @@ S01–S05关键职责：`scheduler/creator_access.py`只读原身份索引与官
 ```text
 agent_py_agent/agent/capability/
 |   |   |-- skill_learning_publish.py  # S3 用户确认后的受控发布：重名/删过的名字/上限/所有权 hash/脱敏/解析/guard，回滚与删除
+|   |   |-- asset_promotion.py # S1/S3/回合提炼共用registry出处、语义族、四载体选择及机器晋升公开入口
+|   |   |-- skill_learning_promotion.py # 默认静态核验/真实宿主证明复用、同族候选与安全发布接线；自主关闭仍待审
+|   |   |-- skill_learning_validation.py # 名称/手工目标/脱敏/方法正文/Python/工作流DAG确定性检查，不冒充业务执行
 |   |   |-- skill_learning_budget.py # 共享home根的UTC日部署总模型预算，与owner预算并守
 |   |   |-- skill_learning_proposals.py # 待确认S3候选，准确修订的人类确认/拒绝后才走原发布
-|   |   |-- skill_learning_host_feedback.py # 原验证命令/包检查器的准确采用质量反馈
+|   |   |-- skill_learning_host_feedback.py # 原验证命令/包检查器准确采用归因、唯一技能无目标反馈、默认机器核验及原registry证明绑定
 |   |   |-- skill_learning_maintenance.py # 原registry的观察、固定/停用、冷藏、可恢复归档与推荐
 |   |   |-- skill_learning_protection.py # 原任务/子代理/未删除监控refs保护与完整性
 |   |   |-- skill_learning_migration.py # 按原committed来源与hash纳管S1，保原路径和身份
 |   |   |-- skill_feedback_tool.py # 当前任务结构化采用声明，不能冒充人类结果或自批
 |   |   |-- skill_learning_versions.py # 自学单调修订与不可变正文快照固定，撤销后禁止读历史
 |   |-- test_skill_learning_confirmation.py # S3仅候选、精确确认/拒绝、停用阻旧确认及IM用户入口
+|   |-- test_wave7_autonomous_learning_closure.py # W2自包含F01–F17及R2六项修复回归；CAS/冻结/输出合同限W2自身入口
+|   |-- test_wave7_w1_integration_contracts.py # W1三项原普通断言原样保留，正常收集、不skip/xfail，跨线集成须另验
 |   |-- test_skill_learning_maintenance.py # 采用与质量分离、引用保护/归档回滚、52条真实库与缓存失效
 |   |-- test_skill_learning_versions.py # 自学CAS/回滚交错、版本不可覆盖和旧快照正文回归
 |   |   |-- skill_transfer.py           # 精确清单签名、来源授权与接收入口

@@ -1,6 +1,10 @@
 ## 2026-10-27 Wave 7 W1：Broker 只读主题与能力包/工作流恢复结构
 
 - `gateway_parts/plugin_broker_api.py` 在 `READ_ACTIONS`、`_route` 与 `_dispatch_host_v2` 中挂载 `capability_packages.list` 与 `user_space.identity.resolve`；`adapter/feishu_profile.py::_identity_local_name` 限制单行匹配并拒绝 `#` 标题，`seed_call_name` 解析父目录真实路径防 macOS `/var` 符号链接报错；`capability/package_snapshot.py::package_assets` 按相对成员路径去重消歧。
+## 2026-10-27 Wave 7 W2-R3：自学 registry 冷维护时钟结构
+
+- `gateway_parts/multiprocess_background_discovery.py::_owner_sources` 对 `learning_registry` 的既有 source ref 调用原 `read_source`，只从同代正文读 `last_maintenance_at`；缺省为 0，随后调用原 `learning_maintenance_due(interval/dayhour/timezone)`。mtime/input_revision 只保留运输层 CAS 身份，不再兼任业务维护时间。
+- 发现和实际消费分工不变：旧代引用由原读取/C claim 拒绝，实际维护仍按原锁和 due 再核，不从发现结果扩大 owner 或执行权限。静态与定向组件证据见根目录 `TESTS.md`，生产 Gateway 链路未验证。
 
 ## 2026-10-26 全量跨模块对向审计收口结构（Bot 执行约束、全库引用保护与协调路径派生清理）
 

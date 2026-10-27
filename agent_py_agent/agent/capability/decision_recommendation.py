@@ -420,13 +420,16 @@ def _tools_current(snapshot) -> bool:
 
 # LLM: 只替换展示字段，原snapshot_hash/runtimes/allowed不变；Skill 与包级引用共用原展示载体，包不展开私有成员。
 # 选中的插件行展开回它的全部成员工具；未选中的插件工具整体进入延迟名单，由原提示按插件列出。
+# 脚本/流程保留原方法引用，并只展示当前授权快照内的原执行工具，不新增runtimes或权限。
 # 函数用途: 保留非可选、明确必要和发现工具；将其余可选schema与Skill名卡转成可搜索的短名单。
 def _project(params, snapshot, contract, skills, selected: list[dict], policy: dict, discoverable: bool) -> CapabilityPresentation:
     required_tools, required_skills = required_capabilities(params, contract, skills)
     selected_tools = {row["ref"] for row in selected if row["kind"] == "tool"}
     # 插件整体被选中时展开回它的全部成员工具；成员引用来自同次候选，不另查注册表。
     selected_tools.update(name for row in selected if row["kind"] == "provider" for name in row["tool_refs"])
-    selected_skills = tuple(row["ref"] for row in selected if row["kind"] in {"skill", "capability_package"})
+    selected_skills = tuple(row["ref"] for row in selected if row["kind"] in {"skill", "capability_package", "script", "workflow"})
+    selected_tools.update({'script':'scripts', 'workflow':'workflows'}[row['kind']] for row in selected if row['kind'] in {'script','workflow'})
+    selected_tools.intersection_update(snapshot.available_tool_names)
     required_tools.update(name for row in selected if row["kind"] == "skill" for name in row["tools_required"])
     optional = {row["ref"] for row in capability_candidates(snapshot, skills,
                 categories=policy["optional_categories"], skills_discoverable=False)}

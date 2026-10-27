@@ -2,6 +2,10 @@
 
 - `gateway_parts/plugin_broker_api.py` 与 `plugin_host_broker_topics.py` 接入 `capability_packages.list` 与 `user_space.identity.resolve` 只读 Broker 主题（并在 `from_host_v2` 下复用原发行器鉴权），`adapter/feishu_profile.py` 拒绝同行的 `# ...` Markdown 标题或跨行吞入并兼容 macOS 系统临时目录符号链接前缀。
 - `capability/package_snapshot.py` 与 `package_provider.py` 对不同子目录下同名资源保留相对路径消歧并准确统计 `asset_counts`；`workflows/engine.py`、`datasource_runtime.py` 与内置插件作者合同对齐硬停错误与 `on_error: skip` 语义。
+## 2026-10-27 Wave 7 W2-R3：自学冷维护独立时钟（源码候选）
+
+- `multiprocess_background_discovery._owner_sources` 使用原只读来源引用读取同代 registry 顶层 `last_maintenance_at`，未维护时按 0 交给原 due 判断；热反馈/采用写入带来的文件 mtime 不再推迟冷维护。原 FIFO、来源代次 CAS、C claim 和实际维护复核保持不变，不新增队列或权限。
+- 覆盖热 mtime/旧维护时钟、旧 mtime/新维护时钟和原 FIFO/C claim/代次拒绝等定向回归；准确结果见根目录 `TESTS.md` 的 W2-R3 小节。真实 Gateway 启动、生产定时触发和部署未验证。
 
 ## 2026-10-26 全量跨模块对向审计收口（H01..H16 & P2-1..P2-3 & P1-02 已落地）
 

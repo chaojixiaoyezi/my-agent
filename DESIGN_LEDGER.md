@@ -1,3 +1,27 @@
+## 2026-10-27 Wave 7 W2-R4：跨更新采用身份与真实提示投影补齐
+
+来源：`07-tasks/wave7-w2-r4-fixes.md`。只收口五项剩余问题，不改变原发布权限、所有权、CAS、guard、质量准入或业务执行证明等级。
+
+Skill 静态检查新增描述/结构/适用信号，完整旧分节方法仍兼容；共同 root 不能覆盖显式不同的子任务身份。更新只保留历史采用的 run/hash 身份用于无目标回执歧义判断，旧质量和采用不能当作新版的当前采用事实。脚本/流程选中引用进入实际 `render_skill_metadata_index` 提示渲染，并保留各自原生读取入口和统一预算，不自动执行或扩权。空范围列表为不限，维护时钟夹具遵循 R3 的独立 registry 时钟。
+
+新增两个回归文件分别覆盖学习与真实 Router 入口；验证证据、旧夹具兼容和未验边界见 `TESTS.md` R4 小节。当前是源码修复，不代表已部署或真实模型/Gateway业务链路验收。
+
+## 2026-10-27 Wave 7 W2-R3：确定性静态核验自主试用与业务执行证明分层
+
+来源：`07-tasks/wave7-w2-r3-astra-fixes.md` 明确改变 R2 的无证明默认待审策略。Runtime 默认和 None 改为内置确定性检查；检查通过可自动进入 trial，但原 guard、解析、限额、托管权、CAS 和自主关闭开关不变，AGENTS/SOUL 目标保持硬拒绝。
+
+静态报告显式记 `verification_kind=deterministic_static`、`checks_executed=True`、`executed=False`，不能通过 `business_validated`。真实宿主回执缓存仍只接纳准确绑定的已执行业务证明；默认检查不是新候选真实业务执行闭环。生产调用结构化载体选择，事件记录 carrier；脚本/流程这里只解析、不执行，原执行工具仍负责业务合同。
+
+同时修正显式目标必须准确 hash、请求幂等键含任务/轨迹、连续 trial 保留原 stable、C 冷维护独立时钟、包激活代次分页绑定及四维 scope。复现、反例、兼容与剩余观察点见 `TESTS.md` R3 小节；以下 R2 文字保留为历史决策，不代表 R3 当前默认。
+
+## 2026-10-27 Wave 7 W2-R2：默认核验与证据复用（源码候选，真实首次自主验证待接入）
+
+来源：`07-tasks/wave7-w2-r2-fixes.md`。默认 `SkillLearningRuntime.promotion_verifier` 使用内置核验函数，由 Service 绑定原 owner Store，不从模型请求反序列化权限或执行命令；显式 `None` 保持原候选路径。
+
+可信 verifier 已完成的准确候选证明保存在原 `registry.assets` 的 `candidate_verification` 中，不建第二发布账。证明包含原 receipt 引用及 owner/渲染 hash/请求/run/冻结轨迹/决策/CAS 绑定，只供同条件发布中断后的重试；重新执行 verifier 前先撤销同绑定旧证明，失败或进程中断不复活旧通过。发布仍重核名字、所有权、guard 和 CAS，不伪造用户确认。
+
+原任务成功事件缺少候选内容绑定，不能成为生成后新 Skill 的业务通过证明。尚无真实执行合同的新候选保持 pending；内置接线、回执替身与定向测试不等于首次自主学习业务闭环已验收。W1 三项集成合同保留普通断言并单列，集成者合入后仍须验收。准确测试与限制见 `TESTS.md` 的 W2-R2 小节。
+
 ## 2026-10-26 Stage 3 Round 2：Git 发现预算与生产 basename 裁决（源码实现，原生隔离待可施加主机复核）
 
 来源：`07-tasks/fix-wave4-r2-c2-sandbox-perf-20261026.md`，在 `wt-wave4-c3` 上执行；不修改运行包、不宣称已发布。

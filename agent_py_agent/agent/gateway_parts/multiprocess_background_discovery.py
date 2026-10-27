@@ -180,7 +180,7 @@ class CoordinatorBackgroundRequests:
                 count += int(self._submit(ref))
         return count
 
-    # LLM: ProcessSession只读规范目录冻结原终态；owner配置由原control纯解析，策展用实际interval/dayhour/timezone粗筛不代真实batch；DB仍ro零等待，learning沿原FIFO/registry。
+    # LLM: 只读原owner来源；learning沿FIFO/registry，冷维护按同代正文last_maintenance_at，mtime仅CAS不作维护时钟。
     # 函数用途: 为一个现存owner列出有限的原后台工作引用。
     def _owner_sources(self, target):
         owner, home = target.identity, target.home_dir
@@ -238,7 +238,7 @@ class CoordinatorBackgroundRequests:
                 if kind == "learning" and ref["source_ref"] == "data/skill_learning/registry.json":
                     from ..capability.skill_learning_maintenance import learning_maintenance_due
 
-                    if not learning_maintenance_due(int(ref["input_revision"]) / 1_000_000_000,
+                    if not learning_maintenance_due(float(read_source(self.control.home_root, ref).get('last_maintenance_at') or 0.0),
                             self.control.config.self_learning_maintenance_mode, time.time()):
                         continue
                 if kind == "harvester":

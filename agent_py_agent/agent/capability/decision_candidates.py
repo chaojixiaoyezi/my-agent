@@ -77,7 +77,42 @@ def capability_candidates(snapshot, skills, *, categories: list[str], skills_dis
                      "when_to_use": package.summary, "keywords": list(package.keywords),
                      "version": package.package_sha256, "tools_required": []}
                     for package in skills.packages)
+        owner = next((getattr(runtime.handler, 'owner_home', None) for runtime in snapshot.runtimes
+                      if runtime.model_spec.name in {'scripts', 'workflows'} and getattr(runtime.handler, 'owner_home', None)), None)
+        rows.extend(asset_candidate_rows(owner, getattr(skills, 'workspace_root', None)))
     return rows
+
+
+# LLM: 只从传入宿主Owner/workspace根经原只读覆盖列元数据；不加载代码、不创建锁、不改变工具权限。
+# 函数用途: 为统一候选池投影实际保存的脚本/流程，停用项不推荐。
+def asset_candidate_rows(owner_home, workspace_root=None):
+    if owner_home is None:
+        return []
+    from ..assets.workspace_assets import WorkspaceAssetOverlay
+
+    overlay = WorkspaceAssetOverlay(workspace_root or None, owner_home=owner_home)
+    records = [*overlay.list_assets('script'), *overlay.list_assets('workflow')]
+    return [{'kind': row['kind'], 'ref': f"{row['kind']}:{row['source_scope']}:{row['id']}",
+             'name': row['name'], 'description': row.get('summary', ''), 'when_to_use': row.get('summary', ''),
+             'version': str(row.get('revision', 0)), 'tools_required': ['scripts' if row['kind']=='script' else 'workflows'],
+             'asset_id': row['id'], 'scope': row['source_scope']}
+            for row in records if row.get('enabled', True)]
+
+
+# LLM: 只使用当前Agent绑定的Owner/workspace，不从Skill路径或用户文本反推权限。
+# 函数用途: 将当前Agent保存的资产变成只读名卡，不自动执行或为子代理开放其它Owner。
+def asset_cards_for_agent(agent):
+    from .router import CapabilityCard
+
+    home = getattr(agent, 'home_paths', None)
+    if home is None:
+        return []
+    workspace = getattr(getattr(agent, 'tools', None), 'workspace_root', None)
+    return [CapabilityCard(row['ref'], row['kind'], row['name'], row['description'], source=row['scope'],
+                           metadata={**row, 'stable_id':row['ref'], 'next_read':{
+                               'tool':'scripts' if row['kind']=='script' else 'workflows',
+                               'arguments':{'action':'get', row['kind']+'_id':row['asset_id']}}})
+            for row in asset_candidate_rows(home.owner_home_dir, workspace)]
 
 
 # LLM: 只按结构化 provider_id 合并同一插件的工具，一个插件一题；不读描述、关键词或用户原话判断归属。

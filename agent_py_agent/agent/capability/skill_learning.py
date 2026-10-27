@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 from ..backends.bounded_call import BoundedCallExitUnconfirmedError
@@ -24,6 +25,7 @@ from ..common.request_execution_ports import (
 from ..common.tool_write_context import ToolWriteContextUnavailable
 from ..memory_store.curator_backend import CuratorModelStillRunningError, call_backend_with_timeout
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
+from .skill_learning_host_feedback import builtin_machine_verifier
 from .skill_learning_prompt import (
     DECISION_SKIP,
     EXISTING_DESCRIPTION_CHARS,
@@ -51,6 +53,7 @@ from .skill_learning_store import (
     request_key,
     utc_now,
 )
+from .skill_learning_validation import default_machine_promotion_verifier, verify_machine_candidate
 from .skill_snapshot import skill_content_sha256
 from .skills import parse_skill_file
 
@@ -79,6 +82,7 @@ class SkillLearningSettings:
     archive_seconds: int = 15552000
     include_background: bool = False
     keep_versions: int = 5
+    autonomous_verified: bool = False
 
     # LLM: 读不到或类型不对时用默认值，不因配置损坏而关掉整条链。
     # 函数用途: 从 AgentConfig 读取自动总结设置。
@@ -97,12 +101,14 @@ class SkillLearningSettings:
             archive_seconds=_config_int(config,"self_learning_archive_seconds",15552000),
             include_background=getattr(config,"self_learning_include_background",False) is True,
             keep_versions=_config_int(config,"self_learning_keep_versions",5),
+            autonomous_verified=getattr(config, 'enable_self_learning', False) is True
+                or getattr(config, 'self_learning_promotion_mode', '') == 'autonomous_verified',
         )
 
 
 # LLM: backend 与记忆整理共用（owner 选定模型、非流式）；snapshot_provider 返回当前 owner 的 Skill 快照，
 #   只读取 entries 的 name/description/source/path/stable_id；guard_config 只用于 guard 的文件数与大小上限。
-#   owner_id 用于后台调用自绑宿主会话（要求会话头的服务商没有会话会直接拒绝请求），与 Curator 同一原语。
+#   owner_id自绑宿主会话；默认静态verifier由Service绑定原Store先复用准确证明，None也走默认；关闭开关保持候选。
 # 类用途: 自动总结在运行期依赖的外部对象。
 @dataclass(frozen=True)
 class SkillLearningRuntime:
@@ -113,6 +119,7 @@ class SkillLearningRuntime:
     protection_provider: Callable[[],dict] | None = None
     lesson_provider: Callable[[],object] | None = None
     deployment_root: Path | None = None
+    promotion_verifier: Callable | None = default_machine_promotion_verifier
 
 
 # LLM: status 取 idle/busy/daily_limit/retry 或账本事件名（published/updated/skipped/rejected/failed/dropped）；
@@ -280,14 +287,14 @@ class SkillLearningService:
             self.store.append_event(_request_event(EVENT_DROPPED, CODE_QUEUE_FULL, request))
         return outcome
 
-    # LLM: 发现仅只读检查热/溢出FIFO，不能为了判待办先搬文件；registry到期仍复用原判据。
+    # LLM: 只读FIFO和registry独立维护时钟；热技能写入mtime不影响冷技能维护，不写锁或触发模型。
     # 函数用途: 判断原队列或自主维护是否待处理，发现只作预筛不授执行权。
     def has_pending(self) -> bool:
         from .skill_learning_maintenance import learning_maintenance_due
 
         return bool(self.store.pending_requests(refill=False) or self.store.overflow_requests()) or (self.settings.maintenance_mode == "autonomous"
             and self.store.registry_path.exists()
-            and learning_maintenance_due(self.store.registry_path.stat().st_mtime, self.settings.maintenance_mode, time.time()))
+            and learning_maintenance_due(self.store.load_registry().last_maintenance_at, self.settings.maintenance_mode, time.time()))
 
     # LLM: 最早核准确Agent/原执行与同owner源目录，预筛只读FIFO；维护/候选/收尾写入重核短门，模型等待在门外。
     #   maintenance_only只由真实registry来源内部选择，完成原维护即返回，不消费后来FIFO或调用模型；默认False保原预算/人工proposals。
@@ -380,8 +387,8 @@ class SkillLearningService:
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: skip原路记账；create/update在原短门保存main待确认候选，source只是执行门，不给正式Skill发布权。
-    # 函数用途: 把模型输出变成待确认候选或跳过/拒绝账本事实，不自动发布正式内容。
+    # LLM: 模型只产候选；默认机器核验分静态与真实执行级别，开关关闭不晋升，不把模型声明当证明或绕CAS/guard。
+    # 函数用途: 解析总结，复用同族候选，或按机器验证事实晋升正式Skill。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
         updatable = frozenset(str(item.get("name") or "") for item in material.updatable_skills)
@@ -396,9 +403,13 @@ class SkillLearningService:
                                  expected_revision=next((item["revision"] for item in material.updatable_skills if item["name"] == decision.name), None),
                                  expected_sha256=next((item["sha256"] for item in material.updatable_skills if item["name"] == decision.name), ""))
         try:
-            from .skill_learning_proposals import propose_learning
+            from .asset_promotion import propose_or_promote_skill
+            verifier = getattr(self.runtime, 'promotion_verifier', None)
+            if verifier is None or verifier in (builtin_machine_verifier, default_machine_promotion_verifier):
+                verifier = partial(verify_machine_candidate, store=self.store)
             with gateway_short_transaction("skill_learning_propose"):
-                return propose_learning(self.store, publish)
+                return propose_or_promote_skill(self.store, publish,
+                    verifier=verifier, autonomous_verified=self.settings.autonomous_verified)
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:
@@ -460,7 +471,10 @@ def _material(store: SkillLearningStore, request: dict[str, object], entries: tu
         evidence = [row for row in record.maintenance.get('observations',[]) if row.get('sha256')==record.sha256]
         if len({row.get('subject') for row in evidence}) >= 2:
             used.add('owner:'+name)
-    candidates = (_updatable(store, registry, entry) for entry in entries if getattr(entry, "stable_id", "") in used)
+    candidates = (_updatable(store, registry, entry) for entry in entries
+                  if getattr(entry, "stable_id", "") in used
+                  or (getattr(entry, "source", "") == "owner" and getattr(entry, "name", "") in used)
+                  or f"owner:{getattr(entry, 'name', '')}" in used)
     updatable = tuple(item for item in candidates if item is not None)[:UPDATABLE_COUNT]
     taken = frozenset(item["name"] for item in existing if item["name"])
     return SkillLearningMaterial(request, existing, updatable, taken)
