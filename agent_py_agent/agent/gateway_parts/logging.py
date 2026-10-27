@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..local_storage.records import DERIVED_RECORD_TTL_SECONDS, derived_terminal_expired
 from ..runtime_errors import runtime_error_report
 
 if TYPE_CHECKING:
@@ -159,6 +160,8 @@ def _gateway_conversation_runtime(
     return result
 
 
+# LLM: 明确payload状态优先，缺失时仅认宿主终态事件名；未知事件不合成done，实时日志仍沿原写入口。
+# 函数用途: 保存网关事件及可供TTL验证的明确状态和记录时间。
 def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:
 
     try:
@@ -171,9 +174,10 @@ def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> Non
             content=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
             metadata={
                 "event_type": event_type,
-                "status": str(payload.get("status", "")),
+                "status": _gateway_event_status(event_type, payload),
                 "pid": int(payload.get("pid", 0) or 0),
                 "created_at": created_at,
+                "recorded_at": created_at,
             },
             event_type=event_type,
         )
@@ -181,6 +185,16 @@ def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> Non
         _report_gateway_side_effect_error("log_gateway_event", str(payload.get("id", event_type)), exc)
 
 
+# LLM: 精确事件名映射而非子串匹配，ok或无错误不是终态证明，冲突时保留payload原状态。
+# 函数用途: 给已确认的完成/失败事件补齐状态，保留其它事件未知状态。
+def _gateway_event_status(event_type, payload):
+    known = {"gateway_request_completed": "completed", "gateway_request_failed": "failed",
+             "gateway_request_cancelled": "cancelled", "gateway_stopped": "stopped"}
+    return str(payload.get("status") or known.get(event_type, ""))
+
+
+# LLM: 重建只更新派生索引；老于30天的可信终态不回填，不碰canonical归档或正常实时日志。
+# 函数用途: 从请求或响应归档补索引，保留原时间窗而非把历史刷成今天。
 def _index_gateway_payload(
     agent: SimpleAgent,
     payload: dict,
@@ -188,6 +202,8 @@ def _index_gateway_payload(
 ) -> bool:
 
     options = options or GatewayIndexPayloadOptions()
+    if _gateway_rebuild_expired(payload, options):
+        return False
     request_path = options.request_path
     response_path = options.response_path
     event_type = options.event_type
@@ -208,6 +224,22 @@ def _index_gateway_payload(
         response_path=response_path,
     )
     return True
+
+
+# LLM: 仅重建/归档入口检查TTL；时间未知或状态未结束继续保留，mtime不能覆盖有效载荷时间。
+# 函数用途: 阻止30天外的请求全文在重建时重新进入LocalStore。
+def _gateway_rebuild_expired(payload, options):
+    if options.event_type != "gateway_request_rebuilt" and not (options.request_path or options.response_path):
+        return False
+    mtimes = []
+    for path in (options.request_path, options.response_path):
+        if path is None:
+            continue
+        try:
+            mtimes.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    return derived_terminal_expired(payload, time.time() - DERIVED_RECORD_TTL_SECONDS, max(mtimes, default=None))
 
 
 def _report_gateway_side_effect_error(operation: str, request_id: str, exc: Exception) -> None:

@@ -61,6 +61,10 @@ _BASE_SCHEMA_SQL = (
     ON records(updated_at)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_records_source_updated_id
+    ON records(source_type, updated_at DESC, id DESC)
+    """,
+    """
     CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id TEXT NOT NULL UNIQUE,

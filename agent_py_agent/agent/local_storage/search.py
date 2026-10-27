@@ -36,6 +36,8 @@ class LocalStoreSearchMixin:
             visibility=visibility,
         )
 
+    # LLM: 来源过滤后的时间并列用id稳定排序，对齐(source_type,updated_at DESC,id DESC)正式索引；只读。
+    # 函数用途: 稳定返回最近的派生或正式记录，不因TTL批次改变同时间排序。
     def list_recent(
         self,
         *,
@@ -48,7 +50,7 @@ class LocalStoreSearchMixin:
         where, params = self._record_filters(source_type=source_type, visibility=visibility)
         with self._connection() as conn:
             rows = conn.execute(
-                f"SELECT * FROM records {where} ORDER BY updated_at DESC LIMIT ?",
+                f"SELECT * FROM records {where} ORDER BY updated_at DESC, id DESC LIMIT ?",
                 [*params, limit],
             ).fetchall()
         return [self._row_to_result(row) for row in rows]

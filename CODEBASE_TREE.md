@@ -1,3 +1,11 @@
+## 2026-10-26 Wave 6 B3 派生索引TTL协议与专属回归
+
+```text
+`-- agent_py_agent/tests/test_local_store_derived_ttl_wave6.py # 白名单30天TTL、永久来源/活跃/证据保护、事务/FTS/正文欠账、重建准入、索引迁移及2000行投影账本
+```
+
+实现位于 `local_storage/schema.py`、`records.py`、`search.py`、`gateway_parts/logging.py`、`subagents/services/persistence/projections.py`，扩围后 `cli/local_doctor.py` 的子代理回填入口也复用同一30天准入，先裁剪后重建不复活旧白名单全文；非白名单patch_review仍正常回填。TTL为显式维护API，不修改事件维护调度。Gateway/subagent的02-progress与04-structure已同步结构和边界，实测与未验证限制见TESTS.md。
+
 ## 2026-10-26 正式记忆压实、写安全与显式低延迟检索回归
 
 ```text

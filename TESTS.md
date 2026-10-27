@@ -20,6 +20,82 @@
 python3 -m pytest agent_py_agent/tests/test_wave5_tracka_r2_review_fixes.py agent_py_agent/tests/test_memory_recall_v2.py agent_py_agent/tests/test_memory_hardening.py agent_py_agent/tests/test_decision_recall.py agent_py_agent/tests/test_memory_candidates.py agent_py_agent/tests/test_memory_retention_v2.py agent_py_agent/tests/test_memory_retention_wave5.py -q --tb=short --junitxml=.pytest_cache/wave5-tracka-r5.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
+## 2026-10-26 Wave 6 B3-R3：有界收口/身份容器与失败正文公平轮转
+
+来源：`07-tasks/wave6-b3-round3-fix-20261026.md`，前置/本轮文档检查基线为 `26f7bf1a8906a1d3f296390cd507d5ae3b5e9976`。只在 `/tmp/wt-wave6-b3` / `wt-wave6-b3` 修改本单授权的八文件；生产改动仅 `local_storage/records.py` 与 `subagents/services/indexing/service.py`，未修改检查器、基线或原测试函数。
+
+- **P1-01**：共享读取点覆盖顶层及 attributes/conversation_runtime/closeout/notification/wake/metadata/scope 七个 dict 容器，仅在 attributes/metadata 内额外展开一层，不递归任意 JSON。三个收口字典含空对象都算 pending；补齐九种 truthy 标记、父/完成通知 False，以及四种状态字段。非空状态只接受 sent/delivered/consumed/done/completed/acknowledged/closed/settled 作为已结算，空串不单独阻止清理，坏类型仍保守保留。实际函数名是 `_task_index_metadata`（任务单的 `_task_metadata` 不存在），九个新增 attributes 字段仅在有键时原样透传，不洗掉 False/空字典，不制造缺失字段。
+- **P1-02**：`root_task_id` / `parent_task_id` 纳入同一 `_derived_run_keys`；metadata.run_id、scope.task_id 和声明的两层嵌套同时参与显式 protected_refs、跨来源活跃关联及原正文 journal。真实测试分别走显式引用与活跃组，两种路径均保住关联项而仍删除无关项。
+- **P2-01**：流式 hash 仅在读前字节预算不足时返回 None，cleanup 的 True/False/None 分别表示已结算/保留/预算延期。原队列按“预算延期→数量上限未选中→尝试后保留”写回，不新增持久字段；首个超软预算文件、数量上限、原互斥锁、nofollow、共享引用、活跃组与 hash 验证不变。
+
+红绿证据：首批 67 项新场景在改实现前为 **58 个真实 AssertionError、9 个已有通过、0 errors/skips**，见 `tmp/b3-r3-red.xml`；各类首次失败已按 JUnit 全量核对，不把输出解析脚本曾误要求不存在的 XML type 属性当产品失败。收口/索引 51 项与身份 12 项先各自转绿（`b3-r3-p1-01.xml` / `b3-r3-p1-02.xml`）。追加明确 `closeout: {closeout_pending: true}` 参数，以 git 中前置版原两个 pending 函数仅在一次性测试进程重新绑定，得到 1 个真实红例（`b3-r3-explicit-closeout-red.xml`）；这只是该函数边界反例，不是完整基线套件，不改工作树源码。修复后的真实四文件组合覆盖该参数通过。
+
+独立只读评审仅核冻结的内联函数片段，未发现确定阻断项；没有读全仓、运行测试或验证完整调用链。其建议补数量上限外的未选中队列条目，已追加真实欠账顺序/重开/逐轮 unlink 回归，无需改生产代码。主代理额外核对两生产文件 SHA 在评审与最终测试期间未变；专属测试中所有原函数 AST 与前置版一致，没有跳过、删除或放宽原断言。
+
+最终指定四文件 **240 passed / 0 failed / 0 errors / 0 skipped**，其中专属 193（本轮新增场景 69）、LocalStore 23、gateway 维护 5、持久化 service 19；准确证据为 `tmp/b3-r3-delivery.xml`。首次组合 238、补明确组合后 239 的结果只作过程记录，不混用为最终计数。预算回归同时覆盖首项大小 6/9 对预算 8、次项大小 5，以及 hash 冲突/unlink 错误；第二轮真实删除合法次项，冲突文件和欠账保留。另测文件数量上限外条目优先于失败项并逐轮前进。
+
+复现（cwd 必须是工作树根）：
+```bash
+pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_gateway_owner_maintenance.py agent_py_agent/tests/test_subagent_persistence_service.py -q --tb=short --basetemp=tmp/b3-r3-delivery --junitxml=tmp/b3-r3-delivery.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_doc_sync.py --base 26f7bf1a8906a1d3f296390cd507d5ae3b5e9976
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+最终门禁：全范围 Ruff 为 `All checks passed!`，strict 尺寸门 `hard=0 / blocked=False`，生成报告已还原；还原后默认及固定上述前置提交的文档门均为 `DOC_SYNC_PASS`，`git diff --check` 通过。不借生成报告触发文档豁免，也不以空差异代替固定本轮基线检查。未运行全仓 pytest、真实用户数据库清理、大库时延/内存、跨平台或生产端到端；未推送、合 main、部署或启停服务。下方旧轮次的失败与边界记录保留，不改写成当前已验证通过。
+
+## 2026-10-26 Wave 6 B3-R2-docsync：授权补齐文档与维护启动时钟
+
+来源：`07-tasks/wave6-b3-round2-docsync-20261026.md`。本轮前置为 `61a98ae1d543cb2557303ecefbf15d0d1ca644a5`，仍在 `/tmp/wt-wave6-b3` / `wt-wave6-b3` 续做。只修改本节、gateway/subagent 各自的 `02-progress.md` 与 `04-structure.md`、以及新增授权的 `test_gateway_owner_maintenance.py`；不改生产代码、检查器或门禁基线。
+
+四份模块文档按现有 R2 源码同步：明确状态的事件投影、收口 bool（含空字典）、三层身份和 best-effort 当前 owner 引用保护、关闭开关时物理 FTS 同步、流式正文软预算及默认单进程到期维护接入。旧“仅显式 API、尚未接入维护”的当前行为描述已更新；C/W transition、冷库不创建、法律保留与错误分支不旁路等边界明确保留。
+
+维护测试先原样运行，实际文件仅 4 项且全部断言失败（0 设置错误）：`tick(now=200_000)` 只设置 retention 墙钟，控制器新建后的单调时钟仍在 180 秒保护期，摘要全零。只给 `gateway_loops` 安装可推进的时间代理，不改全局 time、不 mock 保护判定/retention/扫描结果、不改原断言；原 4 项移到保护期结束后执行。新增第 5 项验证起点及 180 秒前不扫描/不删缓存/不写维护标记，恰到 180 秒才执行真实维护。新增边界夹具首次遗漏 `cache_days=1`（默认 30 天，墙钟只到第 3 天）导致 1 项失败；已补正确策略，未放宽生产规则或断言。
+
+最终本轮定向组合 **35 passed / 0 failed / 0 errors / 0 skipped**，其中维护 5 项、原 Wave5 基础层 30 项，JUnit 为 `tmp/b3-r2-docsync-green.xml`；初始 4 红为 `tmp/b3-r2-docsync-red.xml`，边界夹具首次失败记录为 `tmp/b3-r2-docsync-clock.xml`。从工作树根导入 `agent_py_agent` 已核对落在本工作树内。下方上轮 R2 的 166 项生产回归未变版本，复用原有效结果，不当作本轮重跑。
+
+复现（cwd 为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_gateway_owner_maintenance.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/b3-r2-docsync-green --junitxml=tmp/b3-r2-docsync-green.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_doc_sync.py --base c73586c533bc5a766299cc3c7d179d8acb6e2824
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git restore --source=HEAD -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+四门禁最终结果：全范围 Ruff 为 `All checks passed!`；默认及固定基线两次文档检查均为 `DOC_SYNC_PASS`；strict 尺寸门为 `hard=0 / blocked=False`；`git diff --check` 通过。组合 doc-sync 固定 R2 原基线 `c73586c533bc5a766299cc3c7d179d8acb6e2824`，覆盖原生产代码加本次文档，不把仅文档相对 HEAD 的通过冒充 R2 代码同步完成。生成报告按要求还原、不提交，并在还原后再核组合文档门与 diff，不借报告豁免注释检查。
+
+本节更新下方上轮的当前限制：四模块文档白名单阻塞已获授权处理；原 gateway 4 项失败已由上述真实时钟夹具修正并重跑通过。另一个 `test_owner_maintenance.py::test_applied_run_with_isolated_errors_is_not_masked` 的指定基线失败没有在本轮授权中，保持不动，既有基线证据仍见下节；不宣称全仓 pytest 全绿。未派子代理、未推送/合 main/部署/启停服务，未清理真实用户数据库；大库性能、跨平台及真实端到端未验证。下方历史失败与上轮交付状态保留，不覆盖为成功。
+
+## 2026-10-26 Wave 6 B3-R2：收口元数据、完整引用保护与日常维护接入
+
+来源：`07-tasks/wave6-b3-round2-fix-20261026.md`，本轮基线 `c73586c533bc5a766299cc3c7d179d8acb6e2824`，仅修改任务列出的六文件；未派子代理，未触碰main、推送、部署、启停服务或清理真实用户数据库。
+
+本节取代下方B3首轮的当前行为说明：派生TTL已接入默认owner维护，引用默认自动收集，8MiB改为软字节预算。首轮记录仍保留作历史证据。
+
+- **反馈1**：索引器把canonical `attributes.runtime_closeout_pending` 投影为顶层bool，空字典沿原协议仍视为待收口；TTL同时检查顶层、attributes与conversation_runtime中的收口、唤醒及通知欠账。
+- **反馈2**：根/父run、task/request和嵌套ID共用关联与显式保护读取点，正文欠账也保存同一ID全集。自动收集复用实际存在的 `current_retention_pins`（任务单所写 `_collect_protected_ids` 在当前代码不存在），并从本owner内被保护的恢复根补充真实state身份；不初始化owner、不从目录名猜ID，导入/IO失败按best-effort处理，调用方原记录/来源保护集继续合并。
+- **反馈3**：同一连接每批探测物理FTS table/view，关闭检索开关也同步删除已有FTS行；单条SQL失败回滚SAVEPOINT、保留records和正文并计跳过，不宣称删除成功。
+- **反馈4**：created_at不再是终态完成依据；只认九种明确完成/更新时间，缺省才使用mtime，无可信时间保留，坏时间沿原保守规则处理。
+- **反馈5**：九类来源一律需要明确终态，删除gateway_event缺状态可删及合成done的分支。事件writer只由明确payload状态或精确宿主终态事件名补充状态，并记录recorded_at；未知事件不猜终态。旧测试中的可删事件改成明确done，另测缺失/空状态必须保留。
+- **反馈6**：保留原nofollow FD上的流式SHA-256，每块至多65536字节；本批尚未读正文时允许首个超过8MiB的文件，后续无预算则留欠账，仍检查文件增长/hash与共享引用。到期、允许且无来源错误的原保留分支顺带清理已有普通LocalStore；冷库、data/db/files链接、法律保留、坏策略及未到期不旁路，普通DB错误返回未执行，执行上下文未知等原异常透传。C/W transition分支保持原入口，不新增绕过调用。
+
+接口兼容整理：保留原有显式关键词，新增 `now` 与 `protected_refs` 作为受限 `retention_context` 关键字上下文传入；仍支持 `prune_derived_records(now=..., protected_refs=...)`，缺省refs自动收集，未知关键词抛TypeError而不是静默忽略。未修改尺寸检查器、基线或门禁规则。
+
+最终实际三文件组合166项通过，0失败/错误/跳过（专属124、LocalStore23、持久化service19），证据 `tmp/b3-r2-delivery.xml`。所列范围Ruff通过，原命令strict尺寸检查通过（hard=0、blocked=False）；生成报告已按要求还原，git diff --check通过。文档门禁及附加基线失败另列如下，不把这些结论扩成全仓或全部门禁通过。
+
+测试方法与证据：首批39个R2场景先运行得到35个真实断言失败、4个已有通过、0设置错误；自查补出的空字典收口及仅有活跃task_id场景另先得到4个真实断言失败、1个已有通过。新增冷库/链接、法律保留/策略拒绝/未到期及损坏DB验证。流式大文件测试阻止Path.read_bytes读取正文，真实FTS覆盖关闭开关及不可删除view错误回滚；没有用mock成功冒充真实删除。
+
+复现（cwd必须为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_subagent_persistence_service.py -q --tb=short
+ruff check agent_py_agent/agent/local_storage/records.py agent_py_agent/agent/subagents/services/indexing/service.py agent_py_agent/agent/gateway_parts/logging.py agent_py_agent/agent/user_space/owner_maintenance.py agent_py_agent/tests/test_local_store_derived_ttl_wave6.py
+python3 scripts/check_doc_sync.py
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
@@ -234,6 +310,35 @@ git diff --check
 - 追加真实执行端口回归：`test_owner_maintenance_execution_ports.py` **40 passed / 0 failed / 0 error / 0 skipped**，`execution-ports-final.{log,xml}`；本次未改生产源码及该套输入，沿用前轮有效结果。这些组件结果不代表部署后的所有C/W场景均已验收。
 - 本次重跑 `ruff check agent_py_agent scripts` 通过；严格尺寸门 `strict_scope_total=3679 / hard=0 / high-risk=2630 / soft=1049 / test_advisory=2152 / blocked=False`，见 `whitelist-ruff.log`、`whitelist-size.log`。文档同步、diff收口输出分别保留在 `whitelist-doc-sync.log`、`whitelist-diff-check.log`；生成的 `CODE_SIZE_REPORT.md` 不纳入功能提交。
 - 证据均在 `.pytest_cache/wave6-b2-r3/`；独立基线工作树已移除，原日志/JUnit保留。追加授权后的时钟夹具阻塞已消除，按指定门禁全绿后提交本轮八个授权文件。未推送、部署或操作生产库；Linux、全仓、真实生产库与上线效果未验证。
+任务原pytest命令的 `test_subagent_Local_store_indexing.py` 不存在，原样执行以exit 4终止；改用真实的 `test_subagent_persistence_service.py`，真实索引器的收口投影和嵌套保护另由本轮专属测试直接覆盖。未创建占位文件或修改原有相关测试文件。
+
+附加回归及限制：C/LocalStore四文件与owner维护execution_ports共98项通过；另有5项失败（owner维护隔离错误数1项，gateway维护4项），均在上述指定基线的独立干净工作树复现相同断言，最终基线5失败、0设置错误。早先基线探针的临时目录缺失属于设置错误，不计入此结论；改用绝对basetemp后的证据为 `tmp/b3-r2-baseline-proof.xml`，临时基线工作树已移除。没有跳过、删改或放宽这5项测试。
+
+文档门禁实际失败：当前六文件白名单没有允许更新gateway与subagent各自的 `02-progress.md`、`04-structure.md`，因此本轮未更新这四文件，也未改变检查基线来制造通过。全仓、真实大库时延/内存、跨平台和部署效果未验证；自动pins仍为best-effort，不宣称所有外部引用已完整覆盖。本轮按要求保存六文件修复提交，但不据此宣称全部门禁通过或可直接合入。
+
+## 2026-10-26 Wave 6 B3：派生索引30天TTL协议、FTS同步与重建准入
+
+来源：`07-tasks/wave6-wt-b3-20261026.md` 及扩围收口单 `07-tasks/wave6-b3-finish-commit-20261026.md`，基线 `287d94b59892b4b7366f6139751b884b4a8cf77e`，仅在 `/tmp/wt-wave6-b3` 修改扩展后的任务白名单。新增专属测试 `agent_py_agent/tests/test_local_store_derived_ttl_wave6.py`，未修改 `maintenance.py`、`events.py`、`test_local_store.py` 或正式用户数据。
+
+- 只允许九类明确派生来源进入TTL；`memory`、`conversation_message`、`task_progress`、工具/运行证据及未来未知来源均豁免，非法来源过滤立即拒绝。坏元数据、缺可信状态/时间、活跃状态、待收口/通知、显式记录/源引用以及跨来源关联的活跃运行均保留。
+- `(source_type, updated_at DESC, id DESC)` 索引纳入原schema指纹与迁移，最近列表用同一时间/id稳定序。SQL短事务内重新校验完整行版本，FTS先删但由SAVEPOINT保证触发器忽略records删除时同步回滚；只有实际删除成功的ID进入正文欠账。
+- 正文在提交后经nofollow边界、全库路径引用与旧hash复核再删。upsert正文发表和TTL共用命名空间锁；C替代原单正文锁而不增加原提交门时序。文件失败可重开恢复，坏欠账条目隔离、不丢共享或hash冲突欠账；恢复时再次保护活跃组。每次最多检查1000个文件并读取8MiB正文，失败条目轮转；超预算仍留欠账，不宣称文件已删完。
+- Gateway归档回填与子代理`rebuild_derived_projections`/保存投影遵守可信终态30天窗，未知/活跃/BLOCKED不按TTL跳过，轻量task_registry继续保存。子代理canonical `attributes.runtime_closeout_pending` 的真实结构也参与准入。
+- 扩围后 `cli/local_doctor.py::rebuild_subagent_index` 在 `index_task` 及白名单文件读取前复用同一准入。过期的 `subagent_run`、work_log、execution_context、runner_result 不会因CLI重建复活；非白名单 `subagent_patch_review` 不受TTL过滤。真实SQLite先裁剪再重建，断言永久memory和全部canonical文件字节保留。
+- `projection_ledger.jsonl` 在同路径双层锁内流式保留末尾2000行并以0600原子替换，不丢并发新增记录。
+
+专属测试覆盖：白名单及永久数据、FTS开关、严格cutoff、干跑/空过滤/批量序、跨来源活跃保护、四类证据引用、坏状态/JSON、触发器、共享正文、文件欠账恢复/异常/活跃恢复/资源预算、索引迁移、旧/新/未知时间重建、mtime兜底、真实收口属性、账本滚动和并发追加、版本CAS、越界/链接正文以及并发memory写入。
+
+复现命令：
+```bash
+python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_gateway_logging.py agent_py_agent/tests/test_subagent_persistence_service.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_cold_recovery_optional_index.py agent_py_agent/tests/test_gateway_compact_deferred_source.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_local_store_coordinator_io.py agent_py_agent/tests/test_local_store_common_ports.py agent_py_agent/tests/test_local_store_coordinator_review_outer.py agent_py_agent/tests/test_local_store_basics.py -q --tb=short
+```
+
+收口实测：CLI新增回归修复前旧DONE/FAILED两个场景均有效失败（重建计数5而非预期1）；修复后上方第一条四文件组合125项通过，0失败/错误/跳过（专属文件74项）。收口单原命令中的 `test_subagent_persistence_projections.py` 在本工作树不存在，原样执行以exit 4终止；通过定位并阅读实际包含投影保存/重建/账本断言的 `test_subagent_persistence_service.py`，改跑上方真实四文件组合，没有创建占位测试或削弱既有断言。新进程从本工作树直接导入CLI成功。独立Astra high对CLI增量仅做内联静态复核，未发现阻断项，不替代实际测试；此前原四文件96项及C/LocalStore补充58项通过的证据仍适用于未改动的对应路径。
+
+边界/未完成：本切片提供维护API，不修改另片维护调度；调用方须传入当前Compact/恢复/记忆候选的有效引用集合，API不扫描其它权威存储来猜引用。关联图检查仍随派生元数据量增长，真实大库持锁耗时及完整ABA代次保护未验证。Gateway/subagent的02-progress与04-structure四份文档已在扩围内同步，CLI回填绕过缺口已由真实临时夹具回归封闭。未运行真实用户数据清理、全仓测试或部署。
 
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 
