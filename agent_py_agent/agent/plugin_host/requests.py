@@ -117,13 +117,13 @@ def _terminal_view(row):
 # LLM: 同请求计量优先usage→result→terminal_response；布尔、负数、非有限值不冒充测量，不改原记录。
 # 函数用途: 投影已经记录的token和耗时，未记录时保留旧版两字段null合同。
 def request_usage(row):
-    aliases = {"input_tokens": ("input_tokens", "prompt_tokens"),
-        "output_tokens": ("output_tokens", "completion_tokens"),
-        "cached_tokens": ("cached_tokens", "cache_read_tokens", "cache_read_input_tokens"),
+    aliases = {"input_tokens": ("input_tokens", "prompt_tokens", "model_accounted_input_tokens"),
+        "output_tokens": ("output_tokens", "completion_tokens", "model_output_tokens"),
+        "cached_tokens": ("cached_tokens", "cache_read_tokens", "cache_read_input_tokens", "model_cached_input_tokens"),
         "elapsed_seconds": ("elapsed_seconds", "last_turn_elapsed_seconds"),
         "tokens_per_second": ("tokens_per_second", "last_turn_tokens_per_sec", "output_tps"),
         "cache_read_tokens": ("cache_read_tokens",), "cache_write_tokens": ("cache_write_tokens",),
-        "total_tokens": ("total_tokens",)}
+        "total_tokens": ("total_tokens", "model_total_tokens")}
     sources = [row.get("usage"), row.get("result"), row.get("terminal_response")]
     candidates = []
     for source in sources:

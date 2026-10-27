@@ -289,7 +289,7 @@ def request_progress(paths, facts, position):
         raise HostAPIError("CURSOR_EXPIRED", 410)
     if offset == 0 and not eof:
         raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
-    if eof and offset < len(raw) and facts.get("terminal") is not None:
+    if eof and offset < len(raw) and raw.find(b"\n", offset) < 0 and facts.get("terminal") is not None:
         raise HostAPIError("STORE_UNAVAILABLE", 503)
     saved = _progress_position(prefix, raw, base, offset, 0, None)
     return None, saved, not eof or offset < len(raw)

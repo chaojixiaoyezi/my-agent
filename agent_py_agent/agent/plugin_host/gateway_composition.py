@@ -200,7 +200,7 @@ def _portal_packages(context, payload):
 
     project = getattr(capabilities_v2_handlers, "_package_dict", None)
     records = list_installed_capability_packages(context.owner_home.home_dir)
-    return {"items": [project(record) if callable(project) else record.to_dict() for record in records]}
+    return {"items": [dict(record) if isinstance(record, dict) else (project(record) if callable(project) else record.to_dict()) for record in records]}
 
 
 # LLM: 在副作用前检查签名；只过滤声明接受的keyword，绝不因handler内部TypeError而再调用一次。

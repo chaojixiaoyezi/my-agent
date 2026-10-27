@@ -507,3 +507,41 @@ def test_interject_partial_association_retry_preserves_limit(r2_case):
     assert failure.value.outcome == "unknown"
     assert len(json.loads(path.read_bytes())["interjections"]) == 64
     assert len(store.guidance.pending(target_type="thread", target_id=thread)) == 1
+
+
+# LLM: 覆盖gateway_parts/request_execution.py写入terminal_response的model_*计量字段、64行忽略日志预算以及W1字典记录返回。
+# 函数用途: 核验R2复核补齐的三处收尾边界。
+def test_usage_model_aliases_and_stream_budget_and_dict_packages(r2_case, monkeypatch):
+    from agent_py_agent.agent.capability import package_provider
+    from agent_py_agent.agent.plugin_host.requests import request_usage
+    from agent_py_agent.agent.plugin_host.streams import request_progress
+
+    usage = request_usage({
+        "terminal_response": {
+            "model_accounted_input_tokens": 120,
+            "model_output_tokens": 45,
+            "model_cached_input_tokens": 30,
+            "model_total_tokens": 165,
+            "last_turn_elapsed_seconds": 1.5,
+            "last_turn_tokens_per_sec": 30.0,
+        }
+    })
+    assert usage["input_tokens"] == 120 and usage["output_tokens"] == 45
+    assert usage["cached_tokens"] == 30 and usage["total_tokens"] == 165
+
+    host, _, _, paths, _, _, *_ = r2_case
+    chunks = paths.done / "req-budget.chunks.jsonl"
+    chunks.write_bytes(
+        b'{"kind":"heartbeat"}\n' * 65
+        + b'{"kind":"tool_progress","progress":{"call_id":"call-1","tool_name":"bash","phase":"started","summary":"run"}}\n'
+    )
+    facts = {"request_id": "req-budget", "terminal": {"terminal_id": "req-budget", "status": "completed"}}
+    event, pos1, more1 = request_progress(paths, facts, {})
+    assert event is None and more1 is True and pos1["offset"] > 0
+    event2, _, more2 = request_progress(paths, facts, pos1)
+    assert event2 is not None and event2[0] == "tool_progress" and more2 is False
+
+    monkeypatch.setattr(package_provider, "list_installed_capability_packages", lambda owner_home: [{"package_id": "pkg-dict"}], raising=False)
+    result = composition.dispatch_call(authorized_call(r2_case, "capability_packages.list", {}), host.ports)
+    assert result.data["items"][0]["package_id"] == "pkg-dict"
+
