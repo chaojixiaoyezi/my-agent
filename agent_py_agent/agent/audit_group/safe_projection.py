@@ -54,12 +54,14 @@ def public_value(value, *, depth=0, budget=None):
     return None
 
 
-# LLM: 先切分驼峰/缩写边界再转小写，长秘密名称按子串命中，短词仅按完整词段命中；保留既有秘密分类。
-# 函数用途: 统一识别驼峰、空白、点号、连字符和下划线形式的敏感属性名。
+# LLM: 长秘密名称同时匹配原词和拆分驼峰，防止passPhrase等历史匹配丢失；短词仍只按两路完整词段命中。
+# 函数用途: 兼容原长敏感词及驼峰、缩写、空白等敏感键写法，不误伤普通近似词。
 def _is_sensitive_key(key):
+    raw_normalized = _KEY_SEPARATOR.sub("_", key.lower())
     split_camel = _CAMEL_WORD_BOUNDARY.sub(r"\1_\2", _CAMEL_ACRONYM_BOUNDARY.sub(r"\1_\2", key))
-    normalized = _KEY_SEPARATOR.sub("_", split_camel).lower()
-    return any(part in normalized for part in _SENSITIVE_PARTS) or bool(_SENSITIVE_TOKENS.intersection(normalized.split("_")))
+    camel_normalized = _KEY_SEPARATOR.sub("_", split_camel.lower())
+    return (any(part in raw_normalized or part in camel_normalized for part in _SENSITIVE_PARTS)
+            or bool(_SENSITIVE_TOKENS.intersection(raw_normalized.split("_") + camel_normalized.split("_"))))
 
 
 # LLM: 命名schema继承父敏感性并核子名称，不把映射值交给普通数据投影；仍限制名称长度和私有字段。

@@ -1,3 +1,26 @@
+## 2026-10-26 AG2-R5：保留长敏感词原词匹配（R4-F1）
+
+来源：`07-tasks/wave5-ag2-round5-fix-20261026.md`；基线 `c7059c0ac476e2341024d5687a8912e28fb1278c`，工作树 `/tmp/wt-wave5-ag2`、分支 `wt-wave5-ag2`。仅修改 `safe_projection.py`、原观察测试与本节，不改其它已通过业务入口，不推送或部署。
+
+- 复现：R4先拆分后只检查拆词结果，使passPhrase/passWord/webHook等失去原来passphrase/password/webhook长子串匹配，分类False并在四类实际资产摘要中保留秘密字面值。六个指定键passPhrase/passWord/webHook/PASSWord/PassPhrase/WebHook加入原R4共享参数，两条原测试直接复用，新增30项；不放宽任何已有断言。
+- 修复：保留未拆词的lower+分隔符归一结果raw_normalized及原驼峰拆分结果camel_normalized；长模式任一路子串命中即敏感，短词仅匹配两路完整词段。词表、预编译正则、Schema结构/预算和权限边界不变。
+- 覆盖：分类与parameters_schema/input_schema/output_schema/config_schema摘要都验证六个新键，沿父节点及$defs/anyOf/列表items/additionalProperties剥离default/examples/enum/const；原18个敏感键、7个正常词及正常字段四类字面值保留、来源目录无写检查全留。公开字段说明仍存在，不以删除Schema替代脱敏。
+- 红绿证据：`.pytest_cache/ag2-r5-red.xml`为 **30 failed / 97 passed / 0 errors**，`.pytest_cache/ag2-r5-green.xml`为 **127 passed / 0 failed / 0 errors**，证明新增回归能抓到原始问题，修复后消失且原集合不退步。
+
+任务的 `test_audit_group_governance_and_bots.py`、`test_managed_users_governance.py` 在此树仍不存在，实际使用技能政策/态势及管理员治理对应文件，并保留原列出的观察与双Bot回归。实际命令（工作树根目录运行）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py -k 'test_r4_' -q --tb=short -o addopts='' --junitxml=.pytest_cache/ag2-r5-green.xml
+python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_audit_group_policy_and_posture.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py -q --tb=short -k 'not test_t4_actual_native_isolated_process' -o addopts='' --junitxml=.pytest_cache/ag2-r5-delivery.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout HEAD -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+完整组合 **594 passed / 0 failed / 0 errors / 1 deselected**（`.pytest_cache/ag2-r5-delivery.xml`）。原生隔离排除延用本会话原任务允许的TUI worker验证边界，未改skip/xfail或原生就绪门；真实原生隔离及Web/IM E2E仍未验证，交宿主补测。尺寸门在pytest退出后单独运行，生成报告提交前还原。上节R4的97/564是其冻结版本历史结果，本轮扩展后对应127/594，不混用旧版本证据。
+
 ## 2026-10-26 AG2-R4：驼峰敏感Schema键拆分（R3-F1）
 
 来源：`07-tasks/wave5-ag2-round4-fix-20261026.md`，基线 `8ff1e9a870d5d993b2509ebcc553fcab7068f712`，仅在 `/tmp/wt-wave5-ag2` 的 `wt-wave5-ag2` 分支修改。仅改 `safe_projection.py`、原观察回归文件与本节；不修改已通过的技能政策、监控规则调用、Bot模式或Host分派，不推送或部署。

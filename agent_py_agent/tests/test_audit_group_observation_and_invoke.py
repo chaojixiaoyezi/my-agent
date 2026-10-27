@@ -1155,7 +1155,8 @@ def test_r3_compound_monitor_without_rule_id_keeps_explicit_selection_required(t
 
 _R4_SENSITIVE_KEYS = ("privateKey", "accessKey", "encryptKey", "encryptionKey", "signingKey", "authKey",
     "apiKey", "secretKey", "clientSecret", "webhookSecret", "sessionKey", "APIKey", "PRIVATEKey", "AUTHKey",
-    "private key", "auth\tkey", "access\nkey", "encryption\u00a0key")
+    "private key", "auth\tkey", "access\nkey", "encryption\u00a0key",
+    "passPhrase", "passWord", "webHook", "PASSWord", "PassPhrase", "WebHook")
 _R4_PUBLIC_KEYS = ("monkey", "donkey", "turkey", "hotkey", "sketch", "pocket", "limit")
 
 
