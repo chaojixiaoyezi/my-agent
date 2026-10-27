@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -61,6 +63,89 @@ if TYPE_CHECKING:
     from ..local_storage import LocalSearchResult, LocalStore
     from ..user_space.owner_quota import OwnerQuotaEnforcer
     from .candidates import CandidateService
+
+
+# LLM: 仅同进程同线程、原锁尚未退出的活对象允许重入；复制Context只能共享失效标记，不能延寿锁。
+# 类用途: 记录当前受管policy锁的精确持有期，不保存策略或授予管理员权限。
+@dataclass
+class _ManagedPolicyHold:
+    identity: tuple[str, str]
+    pid: int
+    thread_id: int
+    active: bool = True
+
+
+_MANAGED_POLICY_HELD: ContextVar[_ManagedPolicyHold | None] = ContextVar("memory_managed_policy_held", default=None)
+
+
+# LLM: 只解析原登记owner；仅同owner/进程/线程且未失效的活锁可重入，finally先失效复制Context再释放原锁。
+# 函数用途: 让晋升和JSONL共用quota之后、candidate/formal之前的治理临界区。
+@contextmanager
+def _managed_policy_scope(owner_home: Path):
+    from ..user_space.managed_user_governance import _ADMIN_MEMORY_WRITE, _persona_governance
+
+    context = _persona_governance(owner_home)
+    if context is None:
+        yield None
+        return
+    control, _identity, home = context
+    identity = (str(home.root), home.owner_id)
+    held = _MANAGED_POLICY_HELD.get()
+    if (_ADMIN_MEMORY_WRITE.get() == identity or held is not None and held.active and held.identity == identity
+            and held.pid == os.getpid() and held.thread_id == threading.get_ident()):
+        yield context
+        return
+    with control.locked():
+        held = _ManagedPolicyHold(identity, os.getpid(), threading.get_ident())
+        token = _MANAGED_POLICY_HELD.set(held)
+        try:
+            yield context
+        finally:
+            held.active = False
+            _MANAGED_POLICY_HELD.reset(token)
+
+
+# LLM: context仅来自原宿主治理解析，严格bool控制自动学习；目标来自原目标解析器或固定JSONL目标。
+# 函数用途: 返回受管自动学习的稳定阻断码，不创建政策、候选或正式记忆。
+def _managed_learning_policy_block(context, target: str) -> str:
+    if context is None:
+        return ""
+    policy = context[0].policy()
+    flags = policy["memory_governance"]
+    if policy.get("memory_curate_mode") == "admin_only":
+        return "AUTO_GOVERNANCE_ADMIN_ONLY"
+    if flags.get("allow_self_learning") is False:
+        return "AUTO_GOVERNANCE_SELF_LEARNING_DISABLED"
+    if ((target in {"long_term", "user"} and flags.get("require_admin_review_for_long_term") is True)
+            or (target in {"lesson", "hot"} and flags.get("require_admin_review_for_lesson") is True)):
+        return "AUTO_GOVERNANCE_ADMIN_REVIEW_REQUIRED"
+    return ""
+
+
+# LLM: 保规范路径、管理员活栈、locked ID及锁序；source字符串不授豁免，同owner晋升活锁只复用不重领。
+# 函数用途: 在同一治理锁内核对长期写入的全部管理员学习开关。
+@contextmanager
+def _managed_learning_batch_guard(path: Path, operations):
+    from ..plugin_host.errors import HostAPIError
+    from ..user_space.managed_user_governance import (
+        _ADMIN_MEMORY_WRITE,
+        require_managed_memory_write,
+    )
+
+    path = path.absolute()
+    if tuple(path.parts[-3:]) != ("memory", "long_term", "memory.jsonl"):
+        yield
+        return
+    with _managed_policy_scope(path.parents[2]) as context:
+        if context is not None:
+            _control, _identity, home = context
+            for operation in operations:
+                require_managed_memory_write(home.root, home.home_dir, operation.get("entry_id"))
+            if _ADMIN_MEMORY_WRITE.get() != (str(home.root), home.owner_id):
+                code = _managed_learning_policy_block(context, "long_term")
+                if code:
+                    raise HostAPIError(code, 403)
+        yield
 
 
 # LLM: quota 必须先于 policy/正式记忆锁；晋升显式传已持准入，不能重复获取不可重入 flock。
@@ -501,7 +586,7 @@ class _JsonlMemoryMutationMixin:
     # LLM: 锁内全量验证并原子替换；同一准入内脱敏，正式删除提交后的必要清理失败单独报告且保留墓碑。
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
     # LLM: C原扫描/配额/编码/脱敏门外，formal准确一次末写成功才compare-delete本次pending；ops/清理仍原顺序且native不洗成功。
-    # LLM: 统一quota→受管policy→formal锁；已有准入显式复用，普通调用不能靠source字段越过管理员记忆锁。
+    # LLM: 统一quota→受管policy→formal锁；晋升活锁精确复用，锁ID与治理学习开关每次重核，source不授豁免。
     # 函数用途: 沿唯一原批量算法落正式事实，失败保真实已写与待落访问信号。
     def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
@@ -513,10 +598,8 @@ class _JsonlMemoryMutationMixin:
 
         if not operations:
             raise ValueError("memory operations list is empty")
-        from ..user_space.managed_user_governance import managed_memory_batch_guard
-
         committed: list[MemoryRecord]
-        with _quota_admission(self.quota_enforcer, _admission) as admission, managed_memory_batch_guard(self.path, operations):
+        with _quota_admission(self.quota_enforcer, _admission) as admission, _managed_learning_batch_guard(self.path, operations):
             with self._locked_memory():
                 current_events = _strict_memory_events(self.path)
                 working = _materialize_memory_events(current_events, include_expired=True)
@@ -2355,14 +2438,14 @@ def _tombstone_path(path: Path) -> Path:
     return path.with_name(name)
 
 
-# LLM: 两文件指纹均含dev/ino/mtime_ns/size；IO错误不伪装缺失，缓存不可跨路径复用。
+# LLM: 两文件指纹均含dev/ino/mtime_ns/ctime_ns/size；原地等长改写恢复mtime也失效，IO错误不伪装缺失。
 # 函数用途: 取正式库和墓碑归档的同进程缓存代次。
 def _memory_stamp(path: Path) -> tuple:
     stamps = [str(path.absolute())]
     for source in (path, _tombstone_path(path)):
         try:
             stat = source.stat()
-            stamps.append((stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size))
+            stamps.append((stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
         except FileNotFoundError:
             stamps.append(None)
     return tuple(stamps)

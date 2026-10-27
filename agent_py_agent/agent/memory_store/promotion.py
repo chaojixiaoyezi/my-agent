@@ -66,6 +66,8 @@ from .jsonl import (
     MemoryLibraryWriteCapExceeded,
     MemoryRecord,
     MemoryVersionConflict,
+    _managed_learning_policy_block,
+    _managed_policy_scope,
 )
 from .learning_exclusions import excluded_candidate_ids
 from .lessons import HotRuleRepository, LessonRepository, LessonRoutingPendingError
@@ -73,6 +75,7 @@ from .operations import normalized_memory_content
 
 # LLM: working_agreement 第 1 期起与事实/事件/项目同走唯一长期库（JSONL），不再写 AGENTS。
 _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project", "working_agreement"})
+_AUTOMATIC_PROMOTION: ContextVar[tuple[int, str] | None] = ContextVar("automatic_memory_promotion", default=None)
 
 # 写路径查重:表述变体(LCS 覆盖率)与长度差双闸,只合并"逐字近重复"的同一断言,
 # 绝不把不同事实(加信息/换词义)并掉——漏并多存一条,误并丢信息,后者更糟。
@@ -728,19 +731,30 @@ def _commit_with_exclusion_guard(
         raise _PromotionBlocked(candidate.status, exc.code) from None
 
 
-# LLM: quota→policy→候选锁贯穿正式写入、promoted和remove脱敏，锁内回调用同一准入；解锁前不暴露半成功。
+# LLM: quota→受管policy→学习名单→候选→formal；自动策略锁内重核并贯穿写入，JSONL复用精确活锁。
 # 函数用途: 依目标的原配额策略领取准入，在名单锁内核对并写入正式目标。
 def _commit_admitted(service: MemoryPromotionService, candidate: MemoryCandidate, review: tuple[str, bool]) -> tuple[_TargetCommit, MemoryCandidate]:
     enforcer = service.persona.quota_enforcer
     if _promotion_target(candidate) == "long_term" and service.long_term.quota_enforcer is not None:
         enforcer = service.long_term.quota_enforcer
     with enforcer.admission() as admission:
-        with _learning_exclusion_scope(service), service.candidates.locked_snapshot(candidate):
-            _ensure_not_excluded(service, candidate)
-            context = _PromotionWriteContext(*review, admission)
-            outcome = _commit_target_blocked(service, candidate, context)
-            promoted = _complete_candidate_commit(service, candidate, context, outcome.reference)
-            return outcome, promoted
+        with _managed_policy_scope(service.persona.owner_home) as governance:
+            if _AUTOMATIC_PROMOTION.get() == (id(service), candidate.candidate_id):
+                code = _managed_learning_policy_block(governance, _promotion_target(candidate))
+                if code:
+                    raise _PromotionBlocked(candidate.status, code)
+            return _commit_governed(service, candidate, review, admission)
+
+
+# LLM: 已持quota和受管policy；复用原名单/candidate/formal事务，不再领准入或治理锁。
+# 函数用途: 在当前治理策略保护下完成原候选正式提交。
+def _commit_governed(service, candidate, review, admission):
+    with _learning_exclusion_scope(service), service.candidates.locked_snapshot(candidate):
+        _ensure_not_excluded(service, candidate)
+        context = _PromotionWriteContext(*review, admission)
+        outcome = _commit_target_blocked(service, candidate, context)
+        promoted = _complete_candidate_commit(service, candidate, context, outcome.reference)
+        return outcome, promoted
 
 
 # LLM: 调用方已正式提交并持quota/policy/候选锁；删除终态写入失败须保留本轮提交事实及清理责任。
@@ -926,7 +940,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
     # 自动、积压重试、人工晋升与审核后提交都算；候选保持原状态并带结构化原因码，不丢弃、
     # 不标失败。用户直接要求写 AGENTS 走 /agents 预览确认，不经本服务。证据、精确 mutation id、
     # 冲突、门槛、临时过期与目标仓库仍照常 fail-closed。
-    #   正式提交沿原quota/policy/candidate锁序，自动审核仅批准通过全部门的精确快照，删除恢复只清既有墓碑。
+    #   自动身份仅绑定本服务/候选活栈，finally复原；正式提交重核治理，不从reviewer/source猜管理员。
     # 函数用途: 核验证据后提交；批次上下文延后治理，单条调用也在释放业务锁后收尾。
     def promote(
         self,
@@ -937,12 +951,16 @@ class MemoryPromotionService(_PromotionCommitMixin):
         confirmed: bool = False,
         expected_candidate: MemoryCandidate | None = None,
     ) -> MemoryPromotionResult:
-        with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
-            try:
-                return self._promote_snapshot(candidate_id, reviewer=reviewer, automatic=automatic, confirmed=confirmed,
-                                              expected_candidate=expected_candidate)
-            except CandidateStateChangedError as exc:
-                return MemoryPromotionResult(candidate_id, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+        token = _AUTOMATIC_PROMOTION.set((id(self), candidate_id) if automatic else None)
+        try:
+            with promotion_batch(long_term=self.long_term, candidates=self.candidates, coordinator_io=self.coordinator_io):
+                try:
+                    return self._promote_snapshot(candidate_id, reviewer=reviewer, automatic=automatic, confirmed=confirmed,
+                                                  expected_candidate=expected_candidate)
+                except CandidateStateChangedError as exc:
+                    return MemoryPromotionResult(candidate_id, False, exc.status, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+        finally:
+            _AUTOMATIC_PROMOTION.reset(token)
 
     # LLM: 各条仍走原完整审核/CAS；空批也偿还持久治理欠账，condense不持有policy/candidate或配额锁。
     # 函数用途: 成批自动晋升只读筛出的候选，整批只做一次总量治理。
@@ -951,7 +969,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
             rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=limit)
             return tuple(self.promote(row.candidate_id, automatic=True) for row in rows)
 
-    # LLM: 先核完整预期及证据/权威；自动策略通过才CAS审核pending，最终提交仍锁完整快照；清理错误不猜成功。
+    # LLM: 来源/证据/权威先核；治理阻断登记原审核队列，不改变候选状态，正式写前仍锁内复核。
     # 函数用途: 合并默认落点与自动批准的预提交写入；精确恢复旧提交，正式写前登记耐久治理责任。
     def _promote_snapshot(
         self,
@@ -985,8 +1003,9 @@ class MemoryPromotionService(_PromotionCommitMixin):
         if authority_code:
             return MemoryPromotionResult(candidate_id, False, candidate.status, authority_code)
         if automatic:
-            policy_code = _automatic_policy_block(effective)
+            policy_code = _automatic_policy_block(effective, owner_home=self.persona.owner_home)
             if policy_code:
+                _register_automatic_governance_review(self, candidate, policy_code)
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
             candidate = self._apply_automatic_policy(candidate, reviewer)
         if candidate.status != "approved":
@@ -1084,11 +1103,17 @@ class MemoryPromotionService(_PromotionCommitMixin):
         )
 
 
-# LLM: 仅结构化判定自动审核资格；保AGENTS禁写、宿主来源/权威、精确目标、冲突及临时过期门和诊断优先级。
-# 函数用途: 不合格返回原阻断码，全部通过返回空串；本函数不写候选或正式库。
-def _automatic_policy_block(candidate: MemoryCandidate) -> str:
+# LLM: owner_home由真实Persona仓库注入，只读原宿主治理；原AGENTS/来源/权威/精确目标门不放宽。
+# 函数用途: 返回自动资格及当前管理员治理的稳定阻断码，不写候选或正式库。
+def _automatic_policy_block(candidate: MemoryCandidate, *, owner_home: Path | None = None) -> str:
     if str(candidate.promotion_target or "").strip().lower() == "agents":
         return "AUTO_AGENTS_WRITE_FORBIDDEN"
+    if owner_home is not None:
+        from ..user_space.managed_user_governance import _persona_governance
+
+        code = _managed_learning_policy_block(_persona_governance(owner_home), _promotion_target(candidate))
+        if code:
+            return code
     # 自动学习对旧空来源也保守关闭；人工审核不调用此策略，不能借空字段授予自动资格。
     source = candidate.learning_source if isinstance(candidate.learning_source, dict) else {}
     if not projection_is_learnable(source):
@@ -1103,6 +1128,30 @@ def _automatic_policy_block(candidate: MemoryCandidate) -> str:
     if scope.scope_type == "temporary" and not candidate.valid_until:
         return "AUTO_POLICY_TEMPORARY_REQUIRES_EXPIRY"
     return ""
+
+
+# LLM: 只为已核owner的治理阻断提审；同候选完整快照串行去重，原状态机应用批准，不新增候选状态。
+# 函数用途: 保留原候选并登记唯一pending_admin_review待管理员处理。
+def _register_automatic_governance_review(service, candidate, code):
+    if not code.startswith("AUTO_GOVERNANCE_"):
+        return
+    from ..user_space.governance_review_store import GovernanceReviewStore
+    from ..user_space.managed_user_governance import _persona_governance
+
+    context = _persona_governance(service.persona.owner_home)
+    if context is None:
+        return
+    control, identity, home = context
+    digest = hashlib.sha256(json.dumps(candidate.to_record(), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    action = {"candidate_id": candidate.candidate_id, "candidate_sha256": digest}
+    name = "memory-review-" + hashlib.sha256(candidate.candidate_id.encode()).hexdigest()
+    with control.locked(name):
+        # 主管理面只读精确已解析目标的原队列，不向申请者暴露其它owner或批准能力。
+        pending = GovernanceReviewStore(home.root).list_reviews(home.owner_id, status_filter="pending_admin_review",
+                                                               review_type_filter="memory_promotion")
+        if not any(item["requested_action"] == action for item in pending["items"]):
+            GovernanceReviewStore(home.root, actor_owner=identity).submit_review(home.owner_id, "memory_promotion",
+                action, reason=code)
 
 
 # LLM: 人工审核也不能把模型推断制造成正式用户事实或SOUL权威；AGENTS禁写与会话/临时范围约束不可绕过。
@@ -1352,7 +1401,7 @@ __all__ = [
 ]
 
 
-# LLM: 仅提交阶段捕获已分类失败，正文提交事实和派生修复责任不得丢失；使用已核验候选快照。
+# LLM: 仅分类失败转回执；最终治理阻断在退出业务锁后登记原待审队列，不伪装已晋升或提交成功。
 # 函数用途: 把提交与清理的不同终态转换为准确晋升回执。
 def _commit_promotion_result(service, candidate, reviewer, confirmed):
     from ._jsonl_indexing import RemovalCleanupError
@@ -1369,6 +1418,7 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
         return MemoryPromotionResult(candidate_id, False, candidate.status, "REMOVE_CLEANUP_PENDING",
                                      formal_memory_changed=exc.formal_memory_changed)
     except _PromotionBlocked as exc:
+        _register_automatic_governance_review(service, candidate, exc.reason_code)
         return MemoryPromotionResult(
             candidate.candidate_id,
             False,

@@ -18,7 +18,7 @@ from ..io.cursor_cache import CursorCache, file_stamp
 from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
-from .learning_exclusions import excluded_thread_ids, thread_is_excluded
+from .learning_exclusions import thread_is_excluded
 
 # 消息预览最多 6000 字符：多轮消息给足上下文又不过载。
 _MESSAGE_PREVIEW_CHARS = 6_000
@@ -376,7 +376,7 @@ def collect_curator_inputs(
 
 # LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
 # 两个读取能力来自同一 ConversationStore 的显式领域，不探测旧方法或建立第二份消息来源。
-# 学习排除名单在读取任何消息前生效：命中的会话整段跳过（cursor 不动），名单不可读时本轮全跳。
+# 学习排除名单与线程只读标记在读取任何消息前生效；消息级严格True标记在构造输入前过滤。
 # 函数用途: 收集预算内消息；排除来源先跳过，已确认EOF且文件未变的冷线程不再调用消息读取器。
 def _collect_messages(
     *,
@@ -400,7 +400,7 @@ def _collect_messages(
     for thread in sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id))):
         if len(selected) >= limit or used_chars >= max_chars:
             break
-        if thread_is_excluded(thread, source.excluded_conversation_ids):
+        if _thread_learning_excluded(thread) or thread_is_excluded(thread, source.excluded_conversation_ids):
             continue
         thread_id = str(thread.thread_id)
         cursor = str(cursors.get(thread_id) or "")
@@ -418,13 +418,15 @@ def _collect_messages(
         if not entries and eof_key is not None and eof_key == _cold_thread_key(conversation_store, thread_id, cursor):
             _COLD_THREAD_EOF.put(eof_key, True)
         for entry in entries:
+            metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+            if metadata.get("learning_excluded") is True:
+                continue
             content = str(entry.content or "")
             remaining = max_chars - used_chars
             if remaining < 300:
                 break
             preview_limit = min(_MESSAGE_PREVIEW_CHARS, max(200, remaining - 250))
             preview = content[:preview_limit]
-            metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
             thread_source = getattr(thread, "learning_source", None)
             item = CuratorMessageInput(
                 message_id=str(entry.message_id),
@@ -465,15 +467,25 @@ def _cold_thread_key(store, thread_id: str, cursor: str):
     return None
 
 
-# LLM: audit 行按 thread_id 归属；名单是 channel_conversation_id，先经线程元数据翻译成 thread_id 集合。
-#   名单不可读返回 None（fail-closed：audit 与消息一起跳过，游标不动）。
-# 函数用途: 计算本次 audit 收集要排除的 thread_id 集合。
+# LLM: 仅宿主线程metadata的严格True或query_readonly能排除；缺省/旧记录不凭正文猜来源。
+# 函数用途: 在消息和审计收集前识别不可学习线程。
+def _thread_learning_excluded(thread: object) -> bool:
+    metadata = getattr(thread, "metadata", None)
+    return isinstance(metadata, dict) and (
+        metadata.get("learning_excluded") is True or metadata.get("bot_mode") == "query_readonly"
+    )
+
+
+# LLM: audit与消息共用名单及线程metadata门；线程或名单不可读时不消费audit游标。
+# 函数用途: 即使owner名单为空，也排除只读/不可学习线程的审计事件。
 def _excluded_audit_thread_ids(source: CuratorMessageSource) -> frozenset[str] | None:
     if source.excluded_conversation_ids is None:
         return None
-    if not source.excluded_conversation_ids:
-        return frozenset()
-    return frozenset(excluded_thread_ids(source.conversation_store, source.excluded_conversation_ids))
+    threads, errors = source.conversation_store.threads.list_report(limit=0)
+    if errors:
+        return None
+    return frozenset(str(thread.thread_id) for thread in threads if _thread_learning_excluded(thread)
+                     or thread_is_excluded(thread, source.excluded_conversation_ids))
 
 
 # LLM: 排除会话的 audit 事件不进入模型输入；窗口整段被排除时给出可安全跳过的游标，
