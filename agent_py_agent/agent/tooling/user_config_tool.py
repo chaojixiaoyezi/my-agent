@@ -431,7 +431,7 @@ def _decision_model_operation(agent: object | None, operation: str, params: dict
 # LLM: 只有主 owner 能走到这里（execute 已拦普通 owner）；写入统一交给参数中心，actor 记为 model。有写文件副作用。
 #   set/reset/revert 回执对登记了派生规则的参数附上新值在本片会话模型上的实际效果（_with_applied_effect）。
 #   capability 键写入目标=运行时实际读取的那份文件（capability_path），runtime_guard 会被写入口拒绝。
-# 函数用途: 执行参数中心动作，搜索省重复说明，成功写入直接带单键回读及紧凑摘要。
+# 函数用途: 执行参数中心动作；完整回执传入当前配置，缺主配置路径时仍能诚实回读已保存的能力设置。
 def _parameter_action(agent: object, params: dict) -> dict[str, object]:
     action = str(params.get("action") or "").strip().lower()
     key = str(params.get("key") or "").strip()
@@ -472,17 +472,17 @@ def _parameter_action(agent: object, params: dict) -> dict[str, object]:
         report = {"ok": True, "action": action, "config_scope": "current_user", "changed_keys": [changed_key],
                   "applied_values": {changed_key: report.get("applied_value", fact.get("effective"))},
                   "config_path": str(report.get("saved_to") or user_path or ""), **report, "fact": fact,
-                  "config": _full_config_receipt(user_path, paths.capability_path) if params.get("include_full_config") is True
+                  "config": _full_config_receipt(user_path, paths.capability_path, agent_config=getattr(agent, "config", None)) if params.get("include_full_config") is True
                   else {changed_key: fact.get("effective")}}
     return report
 
 
-# LLM: 仅显式完整回执使用，正式加载磁盘配置一次，仍沿原running_value及mask_value，不返回原始秘密。
-# 函数用途: 构造用户明确要求的完整脱敏配置，默认修改回执不执行此扫描。
-def _full_config_receipt(user_path, capability_path):
-    from ..settings.config import load_config
+# LLM: 显式完整回执有路径才正式加载磁盘；无路径取当前运行配置或AgentConfig默认值，仍沿原running_value/mask_value。
+# 函数用途: 构造完整脱敏配置，不在能力配置已保存后因load_config(None)抛出错误。
+def _full_config_receipt(user_path, capability_path, *, agent_config=None):
+    from ..settings.config import AgentConfig, load_config
 
-    config = load_config(user_path)
+    config = load_config(user_path) if user_path is not None else (agent_config if agent_config is not None else AgentConfig())
     return {key: mask_value(key, running_value(spec, config, capability_path=capability_path))
             for key, spec in parameter_registry().items()}
 
