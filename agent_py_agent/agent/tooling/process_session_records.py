@@ -278,6 +278,8 @@ def merge_process_record(
             for key in ("stop_requested", "handoff_confirmed", "child_launch_started", "termination")
             if managed and key in merged
         }
+        if existing.get("finished_at") is None and merged.get("finished_at") is not None:
+            controls["finished_at"] = merged["finished_at"]
         merged = {
             **existing,
             **controls,

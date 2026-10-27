@@ -1363,4 +1363,4 @@ def test_h09_process_ttl_queries_real_pending_wake(tmp_path, monkeypatch, wake_s
     authority.write({**payload, "finished_at": 1_000_000_000.0, "completion_notice_id": notice_id})
     monkeypatch.setattr(module, "_PROCESS_COMPLETION_PRUNE_TIMES", OrderedDict())
     module._prune_consumed_process_records(store, authority)
-    assert (authority.load("bg-test-notice").record is not None) is (wake_state == "pending")
+    assert bool(authority.load("bg-test-notice").record) is (wake_state == "pending")

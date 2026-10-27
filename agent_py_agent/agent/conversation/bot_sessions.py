@@ -190,26 +190,39 @@ class BotSessionStorage:
         admission.check((OwnerQuotaChange(self.home.home_dir.joinpath(*parts), len(raw)),))
         write_bytes_atomic_beneath(self.home.home_dir, parts, raw)
 
-    # LLM: journal先于线程写入发表；恢复重用相同线程ID，不创建第二代或触碰任何运行责任。
+    # LLM: journal先于线程写入发表；自动轮换恢复前复核原线程前台活跃状态，恢复重用相同线程ID，不创建第二代。
     # 函数用途: 应用并结清一次可恢复的前台槽位发布。
-    def recover(self, state, admission):
+    def recover(self, state, admission, *, recovering_journal=False):
         pending = state.get("pending")
         if pending is None:
-            return
+            return None
         self.check_access()
-        if pending.get("old_thread_id"):
-            self.archive(pending, admission)
-        thread = ConversationThread.from_dict(pending["thread"])
-        existing = self.store.threads.load(thread.thread_id)
-        if existing is None:
-            raw = canonical_json(thread.to_dict()).encode()
-            admission.check((OwnerQuotaChange(self.store.storage.thread_path(thread.thread_id), len(raw)),))
-            create_thread_atomic(self.store.threads, thread)
-        elif bot_thread_fields(existing) != bot_thread_fields(thread):
-            raise HostAPIError("STORE_UNAVAILABLE", 503)
-        state["slots"][pending["mode"]] = pending["slot"]
-        state.pop("pending")
-        self.write(_SLOTS, state, admission)
+        old_tid = pending.get("old_thread_id")
+        reason = (pending.get("archive") or {}).get("rollover_reason")
+        transition = (self._foreground_transition({"active_thread_id": old_tid})
+                      if recovering_journal and old_tid and hasattr(self, "_foreground_transition") else nullcontext())
+        with transition:
+            if recovering_journal and old_tid and reason and reason != "manual" and hasattr(self, "_foreground_turn_active"):
+                probe = dict(state.get("slots", {}).get(pending["mode"])
+                             or {"active_thread_id": old_tid, "metrics_offset": 0, "completed_turn_ids": []})
+                probe["active_thread_id"] = old_tid
+                self.refresh_metrics(probe)
+                if not probe.get("metrics_caught_up", True) or self._foreground_turn_active(probe):
+                    raise HostAPIError("BOT_FOREGROUND_TURN_BUSY", 409, "unknown")
+            if old_tid:
+                self.archive(pending, admission)
+            thread = ConversationThread.from_dict(pending["thread"])
+            existing = self.store.threads.load(thread.thread_id)
+            if existing is None:
+                raw = canonical_json(thread.to_dict()).encode()
+                admission.check((OwnerQuotaChange(self.store.storage.thread_path(thread.thread_id), len(raw)),))
+                create_thread_atomic(self.store.threads, thread)
+            elif bot_thread_fields(existing) != bot_thread_fields(thread):
+                raise HostAPIError("STORE_UNAVAILABLE", 503)
+            state["slots"][pending["mode"]] = pending["slot"]
+            state.pop("pending")
+            self.write(_SLOTS, state, admission)
+        return pending
 
     # LLM: 只标记前台封闭，原status保持active以允许旧任务落账；后台责任字段完全原样保留。
     # 函数用途: 在原线程锁中封存旧代前台，并保存确定性历史摘要。
@@ -336,7 +349,7 @@ class BotSessionManager(BotSessionStorage):
             state = self.read(_SLOTS) or {"schema": "bot_sessions.v1", "owner_id": self.home.owner_id, "slots": {}}
             if state.get("owner_id") != self.home.owner_id or state.get("schema") != "bot_sessions.v1":
                 raise HostAPIError("STORE_UNAVAILABLE", 503)
-            self.recover(state, admission)
+            recovered = self.recover(state, admission, recovering_journal=True)
             prior = self.read(receipt_path)
             if prior:
                 if prior["fingerprint"] != _digest(payload):
@@ -357,6 +370,8 @@ class BotSessionManager(BotSessionStorage):
                              "before_slots": json.loads(canonical_json(state["slots"])), "at": self.clock()}
                 state["operation"] = operation
                 self.write(_SLOTS, state, admission)
+            elif recovered is not None:
+                state["_recovered_pending"] = recovered
             else:
                 state["slots"] = json.loads(canonical_json(operation["before_slots"]))
             try:
@@ -528,10 +543,15 @@ class BotSessionManager(BotSessionStorage):
         # LLM: 原claim短门覆盖阈值检查和切代，不能在两者之间领取前台运行权；不读thread.updated_at。
         # 函数用途: 检查当前代、必要时分卷，并更新前台访问时间。
         def effect(state, admission):
-            slot = state["slots"].get(mode)
-            with self._foreground_transition(slot):
-                reason = self.rollover_reason(slot) if slot else None
-                old = self.rotate(state, mode, admission, reason) if not slot or reason else None
+            recovered = state.pop("_recovered_pending", None)
+            if recovered is not None:
+                old = (state.get("operation") or {}).get("before_slots", {}).get(mode)
+                reason = (recovered.get("archive") or {}).get("rollover_reason")
+            else:
+                slot = state["slots"].get(mode)
+                with self._foreground_transition(slot):
+                    reason = self.rollover_reason(slot) if slot else None
+                    old = self.rotate(state, mode, admission, reason) if not slot or reason else None
             slot = state["slots"][mode]
             slot["last_foreground_activity_at"] = self.clock()
             return self.descriptor(slot, old, reason)
@@ -563,26 +583,31 @@ class BotSessionManager(BotSessionStorage):
         # LLM: 原claim短门覆盖阈值/CAS及切代，入队在门外；消息数据不能覆盖thread宿主管理字段。
         # 函数用途: 核当前代、记录首问和告警引用，并提交绑定线程的输入。
         def effect(state, admission):
-            slot = state["slots"].get(mode)
-            if slot is None:
-                self.rotate(state, mode, admission, None)
-                slot = state["slots"][mode]
-            if payload.get("thread_id") and payload["thread_id"] != slot["active_thread_id"]:
-                supplied = self.store.threads.load(payload["thread_id"])
-                if supplied is None or supplied.metadata.get("bot_mode") != mode:
-                    raise HostAPIError("BOT_MODE_MISMATCH", 409)
-                if not payload.get("auto_rollover"):
-                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-            expected = payload.get("expected_generation")
-            with self._foreground_transition(slot):
-                reason = self.rollover_reason(slot)
-                if expected is not None and expected > slot["generation"]:
-                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                if expected is not None and expected != slot["generation"] and not payload.get("auto_rollover"):
-                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                if reason and not payload.get("auto_rollover"):
-                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                old = self.rotate(state, mode, admission, reason) if reason else None
+            recovered = state.pop("_recovered_pending", None)
+            if recovered is not None:
+                old = (state.get("operation") or {}).get("before_slots", {}).get(mode)
+                reason = (recovered.get("archive") or {}).get("rollover_reason")
+            else:
+                slot = state["slots"].get(mode)
+                if slot is None:
+                    self.rotate(state, mode, admission, None)
+                    slot = state["slots"][mode]
+                if payload.get("thread_id") and payload["thread_id"] != slot["active_thread_id"]:
+                    supplied = self.store.threads.load(payload["thread_id"])
+                    if supplied is None or supplied.metadata.get("bot_mode") != mode:
+                        raise HostAPIError("BOT_MODE_MISMATCH", 409)
+                    if not payload.get("auto_rollover"):
+                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                expected = payload.get("expected_generation")
+                with self._foreground_transition(slot):
+                    reason = self.rollover_reason(slot)
+                    if expected is not None and expected > slot["generation"]:
+                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                    if expected is not None and expected != slot["generation"] and not payload.get("auto_rollover"):
+                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                    if reason and not payload.get("auto_rollover"):
+                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                    old = self.rotate(state, mode, admission, reason) if reason else None
             slot = state["slots"][mode]
             slot["last_foreground_activity_at"] = self.clock()
             slot["first_question"] = slot["first_question"] or payload["text"][:120]
