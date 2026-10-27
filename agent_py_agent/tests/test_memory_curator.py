@@ -452,3 +452,259 @@ def test_m2_cursor_chain_survives_shrink_then_small_full_record(tmp_path):
     service.run_log.append(replace(shrink, run_id="m2-small", record_id="",
                                   finished_at=(finished + timedelta(seconds=1)).isoformat(), cursor_before=small))
     assert service.run_log.list()[-1].cursor_after == small
+
+
+# LLM: 实际注册临时受管用户并装配原治理/记忆/会话仓库；不访问真实用户。
+# 函数用途: 为H04建立带真实宿主策略的晋升环境。
+def _holistic_memory(tmp_path):
+    from agent_py_agent.agent.conversation import learning_source as ls
+    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
+    from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        ManagedUserGovernanceService,
+        _managed_conversations,
+        _managed_memory_stores,
+        _managed_promotion,
+    )
+
+    root = tmp_path / "host"
+    LocalUserLifecycle(LocalUserStore(root)).create("alice", idempotency_key="holistic-memory-alice")
+    home = LocalUserStore(root).owner_home("alice")
+    store = _managed_conversations(home, initialize=True)
+    thread = store.threads.get_or_create(dict(canonical_user_id=home.owner_id, channel="internal",
+        channel_conversation_id="chat", channel_user_id="alice", owner_id=home.owner_id,
+        owner_home=str(home.home_dir), learning_source=ls.user_dialogue_projection()))
+    memory, candidates = _managed_memory_stores(home)
+    return root, ManagedUserGovernanceService(root), home, _managed_promotion(home, memory, candidates), store, thread
+
+
+# LLM: 候选来源引用回到真实消息，target/type只取当前参数；不伪造证据核验结果。
+# 函数用途: 建立可以通过原来源和证据门的受管候选。
+def _holistic_candidate(env, target="long_term"):
+    import hashlib
+
+    from agent_py_agent.agent.conversation import learning_source as ls
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+
+    _root, _admin, home, service, store, thread = env
+    message = store.messages.append(dict(thread_id=thread.thread_id, role="user", content="开发电脑使用 macOS。"))
+    ref = dict(thread_id=thread.thread_id, message_id=message.message_id, role="user", quote=message.content,
+               content_hash="sha256:" + hashlib.sha256(message.content.encode()).hexdigest())
+    kinds = {"long_term": "long_term_fact", "user": "user_preference", "lesson": "lesson", "hot": "hot_rule"}
+    return service.candidates.observe(CandidateObservation(candidate_type=kinds[target], content=message.content,
+        subject_key="holistic.device", scope=MemoryScope("personal", "personal"), origin="user_explicit",
+        source_message_refs=(ref,), learning_source=ls.merge_message_sources([ls.facts_for_message(message.metadata,
+            owner=home.owner_id, thread_id=thread.thread_id, thread_source=thread.learning_source)]),
+        promotion_target=target, proposed_action="add", promotion_mode="auto_eligible", confidence=0.99))
+
+
+# LLM: USER/lesson/HOT用失败探针观察提交边界；长期库保留真实提交路径。
+# 函数用途: 每个治理开关都必须在自动批准或任何目标写入之前阻断。
+@pytest.mark.parametrize("approved", [False, True])
+@pytest.mark.parametrize("target,patch,code", [
+    *[(target, {"memory_curate_mode": "admin_only"}, "AUTO_GOVERNANCE_ADMIN_ONLY")
+      for target in ("long_term", "user", "lesson", "hot")],
+    *[(target, {"memory_governance": {"allow_self_learning": False}}, "AUTO_GOVERNANCE_SELF_LEARNING_DISABLED")
+      for target in ("long_term", "user", "lesson", "hot")],
+    *[(target, {"memory_governance": {"require_admin_review_for_long_term": True}}, "AUTO_GOVERNANCE_ADMIN_REVIEW_REQUIRED")
+      for target in ("long_term", "user")],
+    *[(target, {"memory_governance": {"require_admin_review_for_lesson": True}}, "AUTO_GOVERNANCE_ADMIN_REVIEW_REQUIRED")
+      for target in ("lesson", "hot")],
+])
+def test_h04_automatic_governance_blocks_and_registers_review(tmp_path, monkeypatch, target, patch, code, approved):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    env = _holistic_memory(tmp_path)
+    root, admin, home, service, _store, _thread = env
+    candidate = _holistic_candidate(env, target)
+    if approved:
+        candidate = service.review(candidate, approved=True, reviewer="owner")
+    admin.set_policy("alice", patch)
+    if target in {"user", "lesson", "hot"}:
+        monkeypatch.setattr(service, "_commit_target", lambda *_args: pytest.fail("governance allowed formal commit"))
+    result = service.promote(candidate.candidate_id, automatic=True)
+    assert not result.promoted and result.reason_code == code
+    assert service.candidates.get(candidate.candidate_id).status == candidate.status
+    assert service.long_term.all() == []
+    reviews = GovernanceReviewStore(root).list_reviews(home.owner_id, status_filter="pending_admin_review")
+    assert reviews["count"] == 1
+    assert reviews["items"][0]["review_type"] == "memory_promotion"
+    assert reviews["items"][0]["requested_action"]["candidate_id"] == candidate.candidate_id
+    assert service.promote(candidate.candidate_id, automatic=True).reason_code == code
+    assert GovernanceReviewStore(root).list_reviews(home.owner_id, status_filter="pending_admin_review")["count"] == 1
+
+
+# LLM: 走真实管理员批复和正式库写入，不用reviewer/source字符串冒充管理员活栈。
+# 函数用途: 待审候选仍能由原管理员服务核证据后正式批准。
+def test_h04_review_queue_can_apply_real_admin_approval(tmp_path):
+    from agent_py_agent.agent.user_space.governance_review_store import GovernanceReviewStore
+
+    env = _holistic_memory(tmp_path)
+    root, admin, home, service, _store, _thread = env
+    candidate = _holistic_candidate(env)
+    admin.set_policy("alice", {"memory_governance": {"require_admin_review_for_long_term": True}})
+    assert not service.promote(candidate.candidate_id, automatic=True).promoted
+    reviews = GovernanceReviewStore(root)
+    item = reviews.list_reviews(home.owner_id, status_filter="pending_admin_review")["items"][0]
+    result = reviews.decide_review(item["review_id"], "approve", expected_revision=item["revision"])
+    assert result["status"] == "applied"
+    assert service.candidates.get(candidate.candidate_id).status == "promoted"
+    assert [record.content for record in service.long_term.all()] == [candidate.content]
+
+
+# LLM: 只开启不适用于长期事实的lesson审核，验证治理不能把所有学习一刀切。
+# 函数用途: 无适用阻断策略时仍沿原自动晋升链落库。
+def test_h04_nonapplicable_review_flag_preserves_autonomous_promotion(tmp_path):
+    env = _holistic_memory(tmp_path)
+    _root, admin, _home, service, _store, _thread = env
+    candidate = _holistic_candidate(env)
+    admin.set_policy("alice", {"memory_governance": {"require_admin_review_for_lesson": True}})
+    assert service.promote(candidate.candidate_id, automatic=True).promoted
+    assert len(service.long_term.all()) == 1
+
+
+# LLM: 策略在原自动批准返回后收紧，真实服务必须在最终写口前重新核对，而不是复用早期结果。
+# 函数用途: 覆盖自动批准与正式提交之间的治理变更。
+@pytest.mark.parametrize("target", ["long_term", "user", "lesson", "hot"])
+def test_h04_governance_change_after_auto_approval_blocks_commit(tmp_path, monkeypatch, target):
+    env = _holistic_memory(tmp_path)
+    _root, admin, _home, service, _store, _thread = env
+    candidate = _holistic_candidate(env, target)
+    original = service._apply_automatic_policy
+
+    # LLM: 只在原批准完成之后更新真实宿主策略，正式提交仍委托原服务。
+    # 函数用途: 构造批准与正式写入之间的策略收紧。
+    def tighten(row, reviewer):
+        approved = original(row, reviewer)
+        admin.set_policy("alice", {"memory_governance": {"allow_self_learning": False}})
+        return approved
+
+    monkeypatch.setattr(service, "_apply_automatic_policy", tighten)
+    if target != "long_term":
+        monkeypatch.setattr(service, "_commit_target", lambda *_args: pytest.fail("stale governance allowed commit"))
+    result = service.promote(candidate.candidate_id, automatic=True)
+    assert not result.promoted and result.reason_code == "AUTO_GOVERNANCE_SELF_LEARNING_DISABLED"
+    assert service.long_term.all() == []
+
+
+# LLM: 真正的policy flock由原实现取得；仅观察锁调用，复制的Context不能延寿已经释放的锁。
+# 函数用途: 治理锁同栈重入可复用，过期copy_context必须重新取得原锁。
+def test_h04_copied_context_cannot_reuse_released_governance_lock(tmp_path, monkeypatch):
+    from contextvars import copy_context
+
+    from agent_py_agent.agent.memory_store.jsonl import _managed_policy_scope
+    from agent_py_agent.agent.user_space.managed_user_governance import _GovernanceControl
+
+    _root, _admin, home, _service, _store, _thread = _holistic_memory(tmp_path)
+    original = _GovernanceControl.locked
+    calls = []
+
+    # LLM: 不替代文件锁，只记录实际进入原治理锁的次数。
+    # 函数用途: 观察重入是否取得新的真实policy锁。
+    def observe(control, name="policy"):
+        calls.append(name)
+        return original(control, name)
+
+    # LLM: 保存的上下文只携带历史活栈，不能成为持锁权威。
+    # 函数用途: 从原锁已退出的复制上下文重新进入治理门。
+    def reenter():
+        with _managed_policy_scope(home.home_dir):
+            pass
+
+    monkeypatch.setattr(_GovernanceControl, "locked", observe)
+    with _managed_policy_scope(home.home_dir):
+        reenter()
+        assert calls == ["policy"]
+        saved = copy_context()
+    saved.run(reenter)
+    assert calls == ["policy", "policy"]
+
+
+# LLM: 原正式JSONL批量口不能信source或已缓存策略；管理员原活栈仍有合法写入路径。
+# 函数用途: 下层写口阻断绕过并保持受信管理员写入。
+@pytest.mark.parametrize("flag,value", [("allow_self_learning", False), ("require_admin_review_for_long_term", True)])
+def test_h04_jsonl_governance_rechecks_and_rejects_forged_admin_source(tmp_path, flag, value):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    _root, admin, _home, service, _store, _thread = _holistic_memory(tmp_path)
+    admin.set_policy("alice", {"memory_governance": {flag: value}})
+    with pytest.raises(HostAPIError):
+        service.long_term.add("system", "unreviewed fact", source="admin_managed_governance", kind="fact")
+    assert service.long_term.all() == []
+    result = admin.mutate_memories("alice", "add_memory", content="admin approved fact", locked=False)
+    assert result["ok"]
+    assert [row.content for row in service.long_term.all()] == ["admin approved fact"]
+
+
+# LLM: 线程标记通过原update_atomic持久化；断言实际消息读取器完全没有被调用。
+# 函数用途: 只读/排除线程在Curator输入收集前跳过消息及审计。
+@pytest.mark.parametrize("metadata", [{"learning_excluded": True}, {"bot_mode": "query_readonly"}])
+def test_h16_excluded_thread_never_enters_curator_inputs(tmp_path, monkeypatch, metadata):
+    import json
+
+    from agent_py_agent.agent.memory_store.curator_inputs import (
+        CuratorMessageSource,
+        collect_curator_inputs,
+    )
+    from agent_py_agent.agent.memory_store.curator_models import (
+        MemoryCuratorConfig,
+        MemoryCuratorState,
+    )
+
+    service, thread, _message = _m2_service(tmp_path)
+    store = service.conversation_store
+    store.threads.update_atomic(thread.thread_id, lambda row: replace(row, metadata=metadata))
+    audit = tmp_path / "h16-audit"
+    audit.mkdir()
+    (audit / "2026-10-26.jsonl").write_text(json.dumps(dict(event_id="excluded-audit", thread_id=thread.thread_id)) + "\n")
+    monkeypatch.setattr(store.messages, "after_report", lambda *_a, **_k: pytest.fail("excluded thread was read"))
+    batch = collect_curator_inputs(message_source=CuratorMessageSource(store), audit_dir=audit,
+                                   state=MemoryCuratorState(), config=MemoryCuratorConfig())
+    assert batch.messages == () and batch.audit_events == ()
+    assert batch.skipped_audit_cursor == "excluded-audit"
+
+
+# LLM: 用真实存储中的消息元数据过滤，严格True而不是按字符串/数字猜排除。
+# 函数用途: 消息级排除不污染模型输入，也不丢掉正常消息。
+@pytest.mark.parametrize("excluded", [True, False, "true", 1])
+def test_h16_message_learning_excluded_is_filtered_before_model(tmp_path, excluded):
+    from agent_py_agent.agent.memory_store.curator_inputs import (
+        CuratorMessageSource,
+        _collect_messages,
+    )
+
+    service, thread, first = _m2_service(tmp_path)
+    store = service.conversation_store
+    flagged = store.messages.append(dict(thread_id=thread.thread_id, role="user", content="message flag",
+                                        metadata={"learning_excluded": excluded}))
+    normal = store.messages.append(dict(thread_id=thread.thread_id, role="user", content="normal after flag"))
+    rows, errors = _collect_messages(source=CuratorMessageSource(store), cursors={thread.thread_id: first.message_id},
+                                     limit=20, max_chars=20_000)
+    assert not errors
+    assert [row.message_id for row in rows] == ([normal.message_id] if excluded is True else [flagged.message_id, normal.message_id])
+
+
+# LLM: 真实同inode等长原地改写并恢复mtime，不能通过刷新实例或改版本绕开旧缓存。
+# 函数用途: ctime变化必须让confirm_scoped_access拒绝缓存中的旧正文。
+def test_h16_jsonl_ctime_invalidates_scoped_access_cache(tmp_path):
+    import os
+
+    from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+
+    path = tmp_path / "memory.jsonl"
+    memory = JsonlMemory(path)
+    memory.add("system", "safe-alpha", kind="fact", attributes={"origin": "user_explicit"})
+    candidates = memory.all()
+    assert len(candidates) == 1
+    before = path.stat()
+    raw = path.read_bytes()
+    changed = raw.replace(b"safe-alpha", b"safe-omega")
+    assert changed != raw and len(changed) == len(raw)
+    with path.open("r+b") as handle:
+        handle.write(changed)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
+    assert before.st_ctime_ns != after.st_ctime_ns
+    assert memory.confirm_scoped_access(candidates, lambda _record: True) == []
+    assert memory.all()[0].content == "safe-omega"

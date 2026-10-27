@@ -285,13 +285,19 @@ class PersonaRepository:
             **({} if not coordinator_io else {"coordinator_io": True}),
         )
 
-    # LLM: 显式来源不允许旧API按默认路径读写；唯一来源授权入口在AgentsSourceRepository，默认兼容不退化。
-    # 函数用途: 返回原owner默认人格路径，显式AGENTS来源要求原生来源API。
+    # LLM: admin_locked只认宿主治理及owner canonical AGENTS；其余保显式来源原生API和owner边界。
+    # 函数用途: 解析人格路径，管理员锁定不能被旧agents_path或自定义来源覆盖。
     def path_for(self, target: str) -> Path:
         _require_legacy_persona_target(self, target)
         if target not in self.paths:
             raise ValueError(f"unknown persona target: {target}")
         path = self.paths[target]
+        if target == "agents":
+            from ..user_space.managed_user_governance import _persona_governance
+
+            context = _persona_governance(self.owner_home)
+            if context is not None and context[0].policy()["persona_mode"] == "admin_locked":
+                path = self.owner_home / "AGENTS.md"
         if not str(path):
             raise PersonaRepositoryError(f"{target} path is unavailable")
         resolved = path.resolve(strict=False)

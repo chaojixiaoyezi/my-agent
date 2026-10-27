@@ -127,10 +127,12 @@ class AgentsSourceRepository:
         except FileNotFoundError:
             return self._unavailable(snapshot, "AGENTS_SOURCE_MISSING")
 
-    # LLM: 默认完整URL/DNS检查；validate_network=False只供已在门外验证的最终file CAS/策略比较，不返回正文或授网络权。
+    # LLM: 当前admin_locked先撤销旧自定义来源；其余保原URL/DNS/路径门，不能借历史active权限延寿。
     # 函数用途: 复核同owner/来源CAS和当前路径或网络策略，避免网络等待进入管理短门。
     def require_permission(self, snapshot: AgentsSourceSnapshot, *, validate_network=True) -> None:
         validate_source_snapshot(snapshot, self.owner)
+        if self._admin_locked() and (snapshot.kind != "owner_default" or snapshot.locator != str(self.default_path)):
+            raise AgentsContractError("AGENTS_SOURCE_PERMISSION_REVOKED", "locator")
         if snapshot.kind != "owner_default" and not self._enabled():
             raise AgentsContractError("AGENTS_SOURCE_DISABLED", "kind")
         if snapshot.kind == "url":
@@ -180,10 +182,20 @@ class AgentsSourceRepository:
         if context.owner != self.owner or context.action != action or context.intent_sha256 != intent:
             raise AgentsContractError("AGENTS_WRITE_BINDING_MISMATCH", "intent_sha256")
 
-    # LLM: 配置由严格来源FD有界读取，schema/owner/计数/身份/定位都精确类型；拒绝额外字段和坏JSON。
-    # 函数用途: 读取唯一权威配置，缺失才使用显式revision0默认。
+    # LLM: 只从原宿主治理权威读锁定模式；不读取用户镜像，不缓存策略或改写旧来源配置。
+    # 函数用途: 判断本owner是否必须使用管理员canonical AGENTS。
+    def _admin_locked(self) -> bool:
+        from ..user_space.managed_user_governance import _persona_governance
+
+        context = _persona_governance(self.owner_home)
+        return context is not None and context[0].policy()["persona_mode"] == "admin_locked"
+
+    # LLM: admin_locked忽略整个旧override，包括坏JSON/外部URL；默认正文仍走原nofollow/权限/大小门。
+    # 函数用途: 返回当前有效来源身份，自治时保持原严格配置合同。
     def _configuration_record(self):
         from .agents_source_configuration import configuration_record
+        if self._admin_locked():
+            return self._default_configuration(), None
         return configuration_record(self)
 
     # LLM: 无I/O的revision0来源身份，仅用于缺配置或无法安全读取时的无正文诊断；不是默认读取豁免。
