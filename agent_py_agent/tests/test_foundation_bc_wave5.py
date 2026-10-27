@@ -410,29 +410,28 @@ def test_c3_orphan_cancel_and_corrupt_pointer_preserved(tmp_path):
     assert repo.settle_unidentified_attempts(older_than_seconds=0, now=4002) == []
 
 
-# LLM: 运维确认不等于恢复；原create_attempt恢复门仍须拒绝。
-# 函数用途: 核对unknown确认归档后不授予重放。
-def test_c3_unknown_ack_preserves_business_status_and_replay_gate(tmp_path):
-    from agent_py_agent.agent.runtime_db.repository import RuntimeRecoveryRequiredError
-
+# LLM: W3将旧unknown收敛为取消/abandoned，不伪造成功或重放原工具操作。
+# 函数用途: 核对结清后解除unknown门，并允许原运行创建新一代attempt。
+def test_c3_unknown_settlement_cancels_and_unblocks_next_attempt(tmp_path):
     repo, run = _runtime_record(tmp_path, unknown=True)
     assert repo.settle_unidentified_attempts(older_than_seconds=0, now=90000) == [run]
-    assert repo.get_agent_run(run)["status"] == "unknown"
-    assert repo.current_attempt(run)["status"] == "unknown"
+    attempt = repo.current_attempt(run)
+    assert repo.get_agent_run(run)["status"] == attempt["status"] == "cancelled"
     assert repo.unidentified_stale_attempts() == []
-    meta = json.loads(repo.current_attempt(run)["metadata_json"])
-    assert meta["operator_settled_at"] == 90000 and "effect_disposition" not in meta
-    with pytest.raises(RuntimeRecoveryRequiredError):
-        repo.create_attempt(run)
+    meta = json.loads(attempt["metadata_json"])
+    assert meta["operator_settled_at"] == 90000 and meta["effect_disposition"] == "abandoned"
+    assert meta["previous_attempt_status"] == "unknown"
+    assert repo.create_attempt(run)["attempt_id"] != attempt["attempt_id"]
 
 
 # LLM: 不以无PID或年龄证明副作用未发生。
-# 函数用途: 核对24小时门槛及unknown业务审计保留。
+# 函数用途: 核对24小时门槛及abandoned而非noop的自动结清。
 def test_c3_auto_thresholds_and_unknown_without_pid_not_noop(tmp_path):
     repo, run = _runtime_record(tmp_path, unknown=True)
     assert repo.cleanup_stale_runtime(now=3600)["settled"] == []
     assert repo.cleanup_stale_runtime(now=90000)["settled"] == [run]
-    assert repo.current_attempt(run)["status"] == "unknown"
+    assert repo.current_attempt(run)["status"] == repo.get_agent_run(run)["status"] == "cancelled"
+    assert json.loads(repo.current_attempt(run)["metadata_json"])["effect_disposition"] == "abandoned"
 
 
 # LLM: 真实锁行和删除CAS，仅替代进程观察；过期不能代替死亡证明。
@@ -539,8 +538,8 @@ def test_c3_cli_settle_does_not_prompt(tmp_path, monkeypatch, capsys):
     assert result["settled_agent_run_ids"] == [run] and result["remaining"] == []
 
 
-# LLM: 独审反例：运维确认不能改写已经取消的 run 或补造 unknown 的结束时刻。
-# 函数用途: 锁定历史 unknown 确认仅写 metadata/event 的边界。
+# LLM: W3将unknown转取消时仅为未记录结束时刻的attempt补上结清时刻，run保持取消。
+# 函数用途: 验证已有取消run的历史unknown同样收敛。
 def test_review_unknown_ack_preserves_existing_run_terminal(tmp_path):
     repo, run = _runtime_record(tmp_path, unknown=True)
     with repo._runtime_connection() as conn:
@@ -548,7 +547,8 @@ def test_review_unknown_ack_preserves_existing_run_terminal(tmp_path):
         conn.commit()
     assert repo.settle_unidentified_attempts(older_than_seconds=0, now=90000) == [run]
     assert repo.get_agent_run(run)["status"] == "cancelled"
-    assert repo.current_attempt(run)["ended_at"] == 0
+    assert repo.current_attempt(run)["status"] == "cancelled"
+    assert repo.current_attempt(run)["ended_at"] == 90000
 
 
 # LLM: 独审反例：同代再次故障仍须更新真实状态，通知去重仅影响发送。
@@ -627,3 +627,23 @@ def test_review_lock_scan_advances_past_live_head(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "holder_is_alive", lambda pid, *args: pid == 1)
     assert repo.cleanup_stale_resource_locks(now=90000, bounded=True) == []
     assert repo.cleanup_stale_resource_locks(now=90000, bounded=True) == ["lock-256"]
+
+
+# LLM: W3只调用临时库上的真实CLI入口，活runner观察替身不触碰真实进程；不允许交互确认。
+# 函数用途: 验证被保护的运行仍给准确提示，不再声称结清永远不能解除unknown。
+def test_w3_cli_stale_hint_matches_cancelled_settlement(tmp_path, monkeypatch, capsys):
+    from agent_py_agent.agent.runtime_db import repository as module
+    from agent_py_agent.cli import home_runtime_commands as commands
+
+    repo, run = _runtime_record(tmp_path, unknown=True)
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_attempts SET metadata_json=? WHERE agent_run_id=?",
+                     (json.dumps({"runner_pid": 123, "runner_start_time": "birth"}), run))
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: True)
+    monkeypatch.setattr(commands, "make_agent", lambda _: SimpleNamespace(subagents=SimpleNamespace(runtime_db=repo)))
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("unexpected confirmation"))
+    assert commands.cmd_runtime_stale_attempts(SimpleNamespace(settle=True, older_than_days=0, json=False)) == 0
+    text = capsys.readouterr().out
+    assert "settled=0 remaining=1" in text
+    assert "可安全结清的运行会取消并解除 unknown 阻塞" in text
+    assert repo.current_attempt(run)["status"] == "unknown"

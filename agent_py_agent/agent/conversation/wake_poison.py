@@ -29,8 +29,7 @@ WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0
 WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0
 # 从第一次重投失败起满 24 小时（>=）仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
 WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0
-# 连续不计数满这么久（与只重投路径同一个窗口）就发一次运维提醒，之后每隔同样时长再提醒；不自动结案，
-# 因为这些结果按定义属于预期等待、瞬时或环境故障，长时间故障里自动结案会误伤健康的工作。
+# 连续不计数满24小时且至少五次非batch尝试才结案；纯批次失败只隔离执行并提醒。
 WAKE_UNCOUNTED_STALL_SECONDS = 86400.0
 
 # 唤醒结案后的终态：不再被领取，只能人工重放；发布层把它当作与 pending/handled 并列的状态。
@@ -82,7 +81,7 @@ _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})
 
 
 # LLM: kind 取 WAKE_VERDICT_* 之一；reason_code 是结构化原因，计数失败时是比较"是否同因"的唯一依据，
-#   不计数时只用于长时间不计数的提醒。
+#   不计数时用于长时间不计数的提醒与超时结案。
 # 类用途: 一次领取尝试的结构化判定结果。
 @dataclass(frozen=True)
 class WakeAttemptVerdict:
@@ -98,7 +97,7 @@ WAKE_ATTEMPT_GATEWAY_STOPPED = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, WAKE_REA
 
 # LLM: 持久尝试账里的判定状态；字段全为结构化计数、原因码与时间戳，from_dict 严格校验类型与一致性，
 #   坏值抛 ValueError 交存储层转数据损坏。batch_failures>0 表示下一次必须逐条单独执行；uncounted_* 描述当前
-#   连续不计数段，stall_* 记录这一段已经发过几次提醒。
+#   连续不计数段，stall_* 记录提醒；neutral_* 单独保存结案窗口，None计数表示旧账尚无类型证据。
 # 类用途: 保存一条唤醒的同因连续段、总失败次数、批次隔离、连续不计数段、只重投失败和下次最早可再试的时间。
 @dataclass(frozen=True)
 class WakePoisonState:
@@ -117,6 +116,8 @@ class WakePoisonState:
     first_redelivery_failed_at: float = 0.0
     last_redelivery_failed_at: float = 0.0
     next_attempt_at: float = 0.0
+    neutral_count: int | None = None
+    neutral_since: float = 0.0
 
     # LLM: 字段与写盘键一一对应，from_dict 是它的严格逆操作；新增字段要同步 from_dict 的一致性检查与测试。
     # 函数用途: 转成可写盘的普通字典。
@@ -281,7 +282,7 @@ _REASON_REQUIRED_KINDS = frozenset({WAKE_VERDICT_FAILURE, WAKE_VERDICT_BATCH_FAI
 
 # LLM: 成功清空全部；计数失败推进同因与总次数并结束当前不计数段；不计数与批次失败都推进连续不计数段（既不累加失败，
 #   也不打断同因连续段），批次失败另加 batch_failures；只重投失败只动重投字段。next_attempt_at 按本次结果的退避重算
-#   （不计数保持原值）。时间只往前走：本机时钟回拨时各段的"最近一次"取 max(now, 已记的最近时间)，账始终自洽可读。
+#   （不计数按段内次数指数退避）。batch只推进提醒段，不计入neutral结案窗口；时钟回拨仍按原时间下界。
 #   未知 kind、需要原因的 kind 却给了空原因，都抛 ValueError，不静默写坏账。
 # 函数用途: 按一次尝试的判定推进状态，不修改传入对象。
 def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, now: float) -> WakePoisonState:
@@ -294,7 +295,7 @@ def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, no
     if verdict.kind == WAKE_VERDICT_NEUTRAL:
         return _after_uncounted(state, verdict.reason_code, now)
     if verdict.kind == WAKE_VERDICT_BATCH_FAILURE:
-        return replace(_after_uncounted(state, verdict.reason_code, now), batch_failures=state.batch_failures + 1,
+        return replace(_after_uncounted(state, verdict.reason_code, now, is_batch=True), batch_failures=state.batch_failures + 1,
                        next_attempt_at=now + WAKE_POISON_BACKOFF_BASE_SECONDS)
     if verdict.kind == WAKE_VERDICT_REDELIVERY_FAILURE:
         failures = state.redelivery_failures + 1
@@ -306,7 +307,7 @@ def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, no
 
 
 # LLM: 同因比较只看 reason_code；换了原因从 1 重新计，总次数照加；首次失败时间只在第一次失败时写入。
-#   计数失败说明这条唤醒不再处于"连续不计数"，不计数段与它的提醒记录一起清零；batch_failures 保留，
+#   计数失败清空不计数提醒段和neutral结案窗口；batch_failures累计保留，不能再拿它扣除新段neutral次数，
 #   直到成功为止都继续逐条单独执行。时钟回拨时按 max(now, last_failed_at) 记，首次失败时间不会晚于最近一次。
 # 函数用途: 计算一次计数失败之后的状态。
 def _after_failure(state: WakePoisonState, reason_code: str, now: float) -> WakePoisonState:
@@ -316,20 +317,38 @@ def _after_failure(state: WakePoisonState, reason_code: str, now: float) -> Wake
     return replace(state, reason_code=reason_code, same_cause_count=same, total_count=total,
                    first_failed_at=at if state.total_count == 0 else state.first_failed_at, last_failed_at=at,
                    uncounted_reason_code="", uncounted_count=0, uncounted_since=0.0, stall_alerts=0,
-                   last_stall_alert_at=0.0, next_attempt_at=at + poison_backoff_seconds(total))
+                   last_stall_alert_at=0.0, next_attempt_at=at + poison_backoff_seconds(total),
+                   neutral_count=0, neutral_since=0.0)
 
 
-# LLM: 不计数与批次失败共用：段内次数加 1，原因码取最近一次（空原因的不计数结果保留原码），段起点只在段开始时写入。
-# 函数用途: 推进连续不计数段。
-def _after_uncounted(state: WakePoisonState, reason_code: str, now: float) -> WakePoisonState:
+# LLM: 提醒仍合并batch/neutral；结案窗口只计neutral且从首个neutral起算，歧义旧账从当前观察重新累计。
+# 函数用途: 保留原退避和批次提醒，同时推进独立neutral窗口，避免借用很早的batch时间。
+def _after_uncounted(state: WakePoisonState, reason_code: str, now: float, *, is_batch: bool = False) -> WakePoisonState:
+    count = state.uncounted_count + 1
+    since = now if state.uncounted_count == 0 else state.uncounted_since
+    at = max(now, since, state.last_failed_at)
+    neutral_count, neutral_since = _neutral_window(state)
+    if not is_batch:
+        neutral_since = neutral_since if neutral_count else at
+        neutral_count += 1
     return replace(state, uncounted_reason_code=reason_code or state.uncounted_reason_code,
-                   uncounted_count=state.uncounted_count + 1,
-                   uncounted_since=now if state.uncounted_count == 0 else state.uncounted_since)
+                   uncounted_count=count, uncounted_since=since,
+                   next_attempt_at=at + poison_backoff_seconds(count),
+                   neutral_count=neutral_count, neutral_since=neutral_since)
 
 
-# LLM: 判定顺序固定：同因达上限 → 总次数达上限（标 mixed_causes）→ 只重投失败跨度满 24 小时（>=）；都不满足返回 None。
-#   批次失败与不计数结果永远不会触发结案。
-# 函数用途: 判断当前状态是否应当结案。
+# LLM: 无batch的旧账可证明全段neutral；混合旧账没有窗口证据，只能等下一次真实neutral建立新窗口。
+# 函数用途: 读独立neutral窗口，保守兼容旧状态，不从累计batch或共享期限猜次数与起点。
+def _neutral_window(state: WakePoisonState) -> tuple[int, float]:
+    if state.neutral_count is not None:
+        return state.neutral_count, state.neutral_since
+    if state.batch_failures == 0:
+        return state.uncounted_count, state.uncounted_since
+    return 0, 0.0
+
+
+# LLM: 同因/总数/重投先判；至少五次可信neutral且其窗口满24小时才结案。原重投期限辨识不变。
+# 函数用途: 不扣历史批次，不借用批次窗口，保护纯batch与短时间neutral重试。
 def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
         return _decision(state, state.reason_code, mixed_causes=False)
@@ -338,6 +357,21 @@ def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.redelivery_failures and (
             state.last_redelivery_failed_at - state.first_redelivery_failed_at >= WAKE_REDELIVERY_GIVE_UP_SECONDS):
         return _decision(state, WAKE_REASON_CHANNEL_UNAVAILABLE, mixed_causes=False)
+    neutral_count, neutral_since = _neutral_window(state)
+    if state.total_count == 0:
+        neutral_count = min(neutral_count, max(0, state.uncounted_count - state.batch_failures))
+    if neutral_count >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
+        redelivery_deadline = (
+            state.last_redelivery_failed_at + redelivery_backoff_seconds(state.redelivery_failures)
+            if state.redelivery_failures > 0 else -1.0
+        )
+        uncounted_at = (
+            state.last_redelivery_failed_at if state.next_attempt_at == redelivery_deadline
+            else state.next_attempt_at - poison_backoff_seconds(state.uncounted_count)
+        )
+        latest_at = max(state.last_stall_alert_at, uncounted_at)
+        if latest_at - neutral_since >= WAKE_UNCOUNTED_STALL_SECONDS:
+            return _decision(state, state.uncounted_reason_code or "uncounted_stall_timeout", mixed_causes=False)
     return None
 
 
@@ -476,14 +510,16 @@ def _sqlite_lock_code(error: sqlite3.OperationalError) -> bool:
     return type(code) is int and (code & 0xFF) in _SQLITE_LOCK_PRIMARY_CODES
 
 
-# LLM: 以字段默认值的类型为准：str 字段要字符串，int 字段要非负 int（bool 不算），其余为有限非负数（拦 NaN/inf）。
+# LLM: 原字段严格类型不变；neutral_count额外允许None代表旧账缺少证据，其余只接受非负int而非bool。
 # 函数用途: 按字段默认值的类型校验一个状态字段。
 def _checked_field(name: str, value: object, default: object) -> object:
+    if name == "neutral_count" and value is None:
+        return None
     if isinstance(default, str):
         if not isinstance(value, str):
             raise ValueError(f"wake poison state field {name} must be a string")
         return value
-    if isinstance(default, int):
+    if isinstance(default, int) or name == "neutral_count":
         if type(value) is not int or value < 0:
             raise ValueError(f"wake poison state field {name} must be a non-negative integer")
         return value
@@ -501,7 +537,7 @@ def ensure_writable_state(state: WakePoisonState) -> WakePoisonState:
 
 # LLM: 计数与时间必须互相吻合：同因不超过总数，原因码与同因次数同时为空或同时非空，
 #   没有失败时失败时间为 0、有失败时首次不晚于最近一次；只重投字段同理；没有不计数段时它的原因码、起点和提醒
-#   记录都为空；有提醒时最近一次提醒不早于段起点。任何矛盾都按数据损坏处理。
+#   记录都为空；有提醒时最近一次提醒不早于段起点；neutral计数/窗口也必须与原段一致。矛盾按数据损坏处理。
 # 函数用途: 校验一份状态内部是否自洽，不自洽抛 ValueError。
 def _check_consistency(state: WakePoisonState) -> None:
     problems = [
@@ -510,9 +546,19 @@ def _check_consistency(state: WakePoisonState) -> None:
         _window_broken(state.total_count, state.first_failed_at, state.last_failed_at),
         _window_broken(state.redelivery_failures, state.first_redelivery_failed_at, state.last_redelivery_failed_at),
         _uncounted_broken(state),
+        _neutral_window_broken(state),
     ]
     if any(problems):
         raise ValueError("wake poison state counts and timestamps contradict each other")
+
+
+# LLM: 未知/零次数不得夹带窗口；neutral不得越过原段，无counted reset时还须留够当前段所有batch次数。
+# 函数用途: 拒绝错误的neutral窗口，不削弱原计数、时间及未知键校验。
+def _neutral_window_broken(state: WakePoisonState) -> bool:
+    if state.neutral_count is None or state.neutral_count == 0:
+        return state.neutral_since != 0.0
+    return (state.neutral_count > state.uncounted_count or state.neutral_since < state.uncounted_since
+            or (state.total_count == 0 and state.neutral_count + state.batch_failures > state.uncounted_count))
 
 
 # LLM: 次数为 0 时两端时间都必须是 0；次数大于 0 时首次不能晚于最近一次。
