@@ -40,7 +40,11 @@ from ...memory_store import (
     runtime_long_term_scope,
 )
 from ...path_access_policy import effective_owner_scope_root
-from ...prompting_parts.memory_context import BudgetedMemoryRecords, memory_context_text
+from ...prompting_parts.memory_context import (
+    BudgetedMemoryRecords,
+    is_memory_context_admissible,
+    memory_context_text,
+)
 from ...runtime_context import current_subagent_run_id
 from ...runtime_errors import runtime_error_report
 from ...settings.defaults import context_window_or_default
@@ -613,10 +617,11 @@ def _formal_memories_for_request(
 
 
 # LLM: 调用方已完成全部预算与去重；固定源ID必须随成功refresh更新，不能凭初始来源或kind豁免回落JSONL。
-#   失效候选只丢弃不补位，不再裁剪确认集合；保留既有pending和预算遗漏数，补充来源只观察最终入选ID。
-# 函数用途: 只为最终注入且仍合法的长期记录登记访问，保留HOT/lesson原来源，不复活撤销项。
+#   失效或渲染隔离项只丢弃不补位；JSONL重核active安全门，不再裁剪确认集合，补充来源只观察最终入选ID。
+# 函数用途: 只为最终真正可渲染的合法长期记录登记访问，保留固定源、既有pending和预算遗漏数。
 def _confirm_final_memory_access(agent, memories, recall_scope, fixed_ids, routed_context):
-    candidates = [record for record in memories if record.entry_id not in fixed_ids]
+    candidates = [record for record in memories
+                  if record.entry_id not in fixed_ids and is_memory_context_admissible(record)]
     confirmed = agent.memory.confirm_scoped_access(
         candidates, lambda record: long_term_record_matches_scope(record, recall_scope),
     ) if candidates else []
@@ -665,9 +670,11 @@ _HOT_MEMORY_CONTENT_BUDGET_CHARS = 5000
 _WORKING_AGREEMENT_SUB_BUDGET_CHARS = 2400
 
 
-# LLM: HOT按5000正文预算整条保留；非HOT独立4000完整信封预算，约定另限2400；所有预算遗漏计数随list传递，不裁正文。
-# 函数用途: 保留有效HOT并限制其它正式记忆的格式开销，让最终渲染显式提示预算遗漏。
+# LLM: 先用共享渲染门隔离不可注入项；HOT5000正文/非HOT4000信封/约定2400预算不变，原遗漏数随list传递。
+# 函数用途: 只为真正可渲染的正式记录分配预算；安全隔离不冒充预算遗漏，也不裁正文。
 def _budgeted_formal_memories(records: list) -> list:
+    records = BudgetedMemoryRecords((record for record in records if is_memory_context_admissible(record)),
+                                   omitted_count=getattr(records, 'omitted_count', 0))
     hot = [record for record in records if str(getattr(record, "kind", "") or "") == "hot"]
     lessons = [record for record in records if str(getattr(record, "kind", "") or "") == "lesson"]
     agreements = [

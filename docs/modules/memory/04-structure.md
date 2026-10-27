@@ -1,3 +1,10 @@
+## 2026-10-26 Wave 5 Track A Round 5 渲染准入接线
+
+- `prompting_parts/memory_context.py::is_memory_context_admissible(record)` 是原 `scan_memory_content(content).safe` 与 origin 白名单的共享谓词；渲染器直接调用仍累计隔离数并保留原安全信封和无相关记忆提示。
+- `_budgeted_formal_memories` 在预算分组前过滤不可渲染项、保留原遗漏数；`_confirm_final_memory_access` 排除隔离长期候选，再以真实 `JsonlMemory.confirm_scoped_access` 的返回交集生成最终集合及补充 ID 元数据。
+- `jsonl.py::confirm_scoped_access` 在原范围内重读并逐字段复核的 `active` 上调用共享门，之后才写入保序确认映射和 `_note_access`。映射替代重复的列表/seen 状态，返回仍为保序列表；无新访问字段、确认旁路或顶层循环导入。
+- F2 与新增回归均使用临时磁盘 JSONL，访问验证以渲染 records、原待刷信号及重新打开后的访问时间为准；实现和验证边界见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-26 Wave 5 Track A Round 4 最终访问确认结构
 
 - `loop_support.py::_prepare_runtime_context` 改取 `search_scoped_candidates(..., latency_safe=True)`；候选阶段没有访问副作用。

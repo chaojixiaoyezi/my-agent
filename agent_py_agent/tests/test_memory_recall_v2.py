@@ -212,7 +212,9 @@ def test_subject_and_scope_dedupe_keeps_distinct_scopes(monkeypatch, tmp_path: P
     assert [item.entry_id for item in recalled] == ["p-new", "c-new"]
 
 
-def test_runtime_formal_recall_uses_only_long_term_routed_lesson_and_hot() -> None:
+# LLM: 正式召回必须绑定真实JSONL并确认原scope/subject/ID；不以缺memory的夹具迫使生产绕过访问确认。
+# 函数用途: 验证HOT、路由lesson与持久长期事实的唯一注入，并核对真实待刷及刷盘访问。
+def test_runtime_formal_recall_uses_only_long_term_routed_lesson_and_hot(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
     lesson = _lesson(now)
     hot = _hot(now)
@@ -226,12 +228,16 @@ def test_runtime_formal_recall_uses_only_long_term_routed_lesson_and_hot() -> No
         scope_key="project:alpha",
         subject_key="project.language",
     )
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add_record(long_term)
+    assert [(row.entry_id, row.attributes) for row in memory.all()] == [(long_term.entry_id, long_term.attributes)]
     routed = SimpleNamespace(
         receipts=[{"path": lesson.path, "status": "read"}],
         findings=[],
         injected_sections=["旧 routing 原文不得成为第二种注入。"],
     )
     agent = SimpleNamespace(
+        memory=memory,
         memory_hot=_ListRepository([hot]),
         memory_lessons=_ListRepository([lesson]),
         config=SimpleNamespace(home_lesson_stale_caveat_days=7),
@@ -259,6 +265,14 @@ def test_runtime_formal_recall_uses_only_long_term_routed_lesson_and_hot() -> No
     assert "Ops 正文不得召回" not in rendered
     assert routed.injected_sections == []
     assert "memory-age-caveat" in rendered
+    assert set(agent.memory._pending_access) == {long_term.entry_id}
+    timestamp = agent.memory._pending_access[long_term.entry_id]
+    assert agent.memory.flush_access_events() == 1
+    assert agent.memory._pending_access == {}
+    [persisted] = JsonlMemory(agent.memory.path).all()
+    assert (persisted.entry_id, persisted.attributes, persisted.last_accessed_at) == (
+        long_term.entry_id, long_term.attributes, timestamp,
+    )
 
 
 def test_model_inferred_record_is_blocked_and_one_safe_envelope_is_escaped() -> None:

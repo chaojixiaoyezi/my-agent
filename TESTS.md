@@ -1,3 +1,32 @@
+## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
+
+来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。
+
+- `prompting_parts/memory_context.py::is_memory_context_admissible` 抽取原正文扫描与来源白名单的同一准入条件。直接渲染仍逐项隔离，保留 `blocked_record_count`、全隔离提示、JSON 信封与 markup 转义；不放宽 `model_inferred` 或不安全正文。
+- `JsonlMemory.confirm_scoped_access` 在重读的 `active` 上核对完整原版本、范围及渲染准入，之后才确认并登记访问。组合运行时最终集合、预算候选及补充来源 ID 都排除隔离项；独立补充调用仍沿真实确认。原预算遗漏数保留，安全隔离不计为预算淘汰。
+- 原确认函数的 `list + seen` 合为保序字典，返回仍为列表、每个 ID 只登记一次。严格尺寸门曾实报检索 mixin 超过 250 行；只整理本函数的重复状态和空行，不改基线、阈值、原版本核对或注释安全合同。
+- `test_memory_recall_v2` 的 F2 节点绑定真实临时 `JsonlMemory` 并写入原 `memory-1`，保留 scope/subject 与全部原断言，新增 pending、flush 和重开账本的访问校验；生产不增加缺 `agent.memory` 时跳过确认的兜底。
+- `_assert_access` 解析实际 `memory_context_text(selected)` 的 `records`，同时核对真实 `_note_access` 调用、pending、刷盘返回数及重开账本的 `last_accessed_at`。正式记录没有持久 `access_count` 字段；零/一次访问以实际调用和持久访问时间证明，不构造假字段。
+
+新增 12 项真实磁盘回归：两类隔离条件分别覆盖组合运行时、原 JSONL 确认、最终确认叶、独立补充和预算入口，共 10 个缺陷反例先红后绿；另有 2 项直接渲染控制保持原隔离计数。所有访问用例都带安全同范围对照。原 28 项 R4 回归保留。首次原版运行 **11 failed / 30 passed**（10 个新反例加 F2 原 `AttributeError`）；共享准入修正后该回归文件 **40 passed**。
+
+独立 Astra high 仅依据相关完整内联函数及 F2 差异静态复核，未发现确定新增缺陷，确认共享准入、保序去重及副作用顺序；未独立读取完整调用链/全部测试，也未运行测试或真实模型，不冒充完整源码或部署验收。
+
+最终指定七文件 **243 passed / 0 failed / 0 error / 0 skipped**（JUnit 6.373 秒）；全部 40 项 R4/R5 回归在内。Ruff、文档同步、严格尺寸门及差异检查通过，生成的 `CODE_SIZE_REPORT.md` 已还原且不提交。原始失败和门禁阻断记录保留，不覆盖为成功。
+
+复现（工作树根；原始先红证据 `.pytest_cache/wave5-tracka-r5-red.xml`，组合结果 `.pytest_cache/wave5-tracka-r5.xml`）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave5_tracka_r2_review_fixes.py agent_py_agent/tests/test_memory_recall_v2.py agent_py_agent/tests/test_memory_hardening.py agent_py_agent/tests/test_decision_recall.py agent_py_agent/tests/test_memory_candidates.py agent_py_agent/tests/test_memory_retention_v2.py agent_py_agent/tests/test_memory_retention_wave5.py -q --tb=short --junitxml=.pytest_cache/wave5-tracka-r5.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+本轮不跑全仓、真实付费模型或线上用户链路；这些观察点未验证，定向结果不外推部署或全产品端到端。
+
 ## 2026-10-26 Wave 5 Track A Round 4：最终准入后确认记忆访问
 
 来源：`07-tasks/wave5-tracka-round4-fix-20261026.md` 更新后的实际路径白名单，起点 `57c9689ca2034599efed8d10433795329be4a431`。只在指定返工树修改和提交，不部署或启停服务。
