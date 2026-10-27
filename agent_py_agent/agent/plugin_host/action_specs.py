@@ -65,8 +65,8 @@ def _spec(name: str, mode: str, caps: str, schema: dict, scopes: str = "", alter
                       tuple(scopes.split()), frozenset(alternatives.split()))
 
 
-# LLM: workspace_dir只声明输入，领域另核有效owner与规范路径；请求kind权限仍需原元数据二次核对。
-# 函数用途: 声明发现、支持目录绑定的线程、历史及请求动作。
+# LLM: W7允许显式设置与附件，但这里只声明输入；实际线程、媒体、文件和原请求kind仍由领域核验。
+# 函数用途: 声明发现、线程、历史及支持带附件的消息请求合同。
 def _conversation_specs() -> list[ActionSpec]:
     thread, request = {"thread_id": id_schema()}, {"request_id": id_schema()}
     revision = {"expected_revision": integer(2**63 - 1, 1)}
@@ -74,7 +74,11 @@ def _conversation_specs() -> list[ActionSpec]:
     return [
         _spec("host.capabilities.get", "read", "", closed({})),
         _spec("conversations.threads.create", "write", "chat", closed({}, {
-            "title": {**text(120), "default": ""}, "workspace_dir": text(4096, 1)})),
+            "title": {**text(120), "default": ""}, "workspace_dir": text(4096, 1),
+            "model_profile_id": text(256, 1), "reasoning_effort": {"enum": ["auto", "off", "low", "medium", "high", "xhigh", "max", "ultra"]},
+            "permission_mode": {"enum": ["ask", "auto", "full-access"]},
+            "preferred_pack_ids": {"type": "array", "items": id_schema(), "maxItems": 32},
+            "pack_ids": {"type": "array", "items": id_schema(), "maxItems": 32}})),
         _spec("conversations.threads.get", "read", "read", closed(thread), "thread"),
         _spec("conversations.threads.list", "read", "read", closed({}, {
             **page_fields(), "workspace_dir": text(4096, 1),
@@ -86,7 +90,9 @@ def _conversation_specs() -> list[ActionSpec]:
         _spec("conversations.messages.list", "read", "chat.history", closed(thread, page_fields()), "thread"),
         _spec("conversations.messages.send", "async", "chat", closed({**thread, "text": text(16384, 1, byte_limit=16384)}, {
             "tool_policy": {"enum": ["none", "bounded"], "default": "none"},
-            "input_artifact_refs": {"type": "array", "items": id_schema(), "maxItems": 8, "default": []}}), "thread artifacts"),
+            "input_artifact_refs": {"type": "array", "items": id_schema(), "maxItems": 8, "default": []},
+            "context_paths": {"type": "array", "items": text(4096, 1), "maxItems": 32},
+            "input_media": {"type": "array", "items": {"type": "object"}, "maxItems": 8}}), "thread artifacts"),
         _spec("conversations.requests.poll", "read", "", closed(request, {
             "event_cursor": cursor_schema(), "reply_cursor": cursor_schema(),
             "event_limit": {**integer(100, 1), "default": 50}}), "request request_kind", "chat execute"),
@@ -192,14 +198,15 @@ def _read_specs() -> list[ActionSpec]:
     ]
 
 
-# LLM: 双Bot/审计声明同样惰性合入唯一目录，重名拒绝；缓存不含动态成员资格或任何执行许可。
-# 函数用途: 合并原动作、V2扩展及十项双Bot审计动作。
+# LLM: 门户、双Bot/审计均惰性合入唯一目录，重名拒绝；缓存不含动态资格或执行许可。
+# 函数用途: 合并原动作、V2扩展、双Bot及W7门户动作。
 @lru_cache(maxsize=1)
 def action_specs():
     from .action_specs_audit_bots import audit_bot_specs
     from .action_specs_v2_ext import v2_action_specs
+    from .action_specs_v2_portal import portal_v2_action_specs
     rows = (_conversation_specs() + _user_specs() + _execution_specs() + _interaction_specs()
-            + _task_goal_specs() + _read_specs() + v2_action_specs() + audit_bot_specs())
+            + _task_goal_specs() + _read_specs() + v2_action_specs() + audit_bot_specs() + portal_v2_action_specs())
     if len({row.name for row in rows}) != len(rows):
         raise ValueError("宿主动作重名")
     return MappingProxyType({row.name: row for row in rows})
@@ -213,10 +220,14 @@ def action_spec(action: str) -> ActionSpec:
     return action_specs()[action]
 
 
-# LLM: Bot bounded提交同样需要execute；模式专属工具裁剪仍由原执行接缝落实，静态能力不代替运行权限。
-# 函数用途: 计算原消息和Bot消息等动作的参数相关能力。
+# LLM: 插话的资源引用也须artifacts.read；bounded消息仍需execute，静态能力不代替运行范围。
+# 函数用途: 计算带附件消息、Bot消息和插话的参数相关能力。
 def required_capabilities(action: str, payload: dict) -> frozenset[str]:
     required = set(action_spec(action).capabilities)
+    if action == "conversations.messages.send" and (payload.get("context_paths") or payload.get("input_media")):
+        required.add("read")
+    if action == "conversations.requests.interject" and payload.get("input_artifact_refs"):
+        required.add("artifacts.read")
     if action in {"conversations.messages.send", "conversations.bots.submit"}:
         if payload.get("tool_policy") == "bounded":
             required.add("execute")

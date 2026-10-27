@@ -10,12 +10,15 @@ from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, thaw, validate_tree
 
 
-# LLM: Bot/审计扩展也只按静态集合分组，缺后端的动作由ready明确不可用，不借observations或main兜底。
-# 函数用途: 选择原四域、V2扩展或双Bot适配领域。
+# LLM: W7门户优先按静态集合选域，缺兄弟后端保持不可用；不能落入通用observations伪装已接线。
+# 函数用途: 选择原四域、门户、V2扩展或双Bot领域。
 def domain_name(action: str) -> str:
     action_spec(action)
     from .action_specs_audit_bots import AUDIT_BOT_ACTIONS
     from .action_specs_v2_ext import V2_ACTIONS
+    from .action_specs_v2_portal import PORTAL_V2_ACTIONS
+    if action in PORTAL_V2_ACTIONS:
+        return "portal_v2"
     if action in AUDIT_BOT_ACTIONS:
         return "audit_bots"
     if action in V2_ACTIONS:
@@ -31,10 +34,16 @@ def domain_name(action: str) -> str:
     return "observations"
 
 
-# LLM: 双Bot动作逐项核真实依赖，未接AG1或执行接缝保持不可用；原stream和call合同不变。
-# 函数用途: 核验当前组合根能否真正处理指定动作。
+# LLM: 门户与双Bot逐动作核真实依赖，惰性兄弟模块缺失时不可用，不借main执行器兜底。
+# 函数用途: 核验当前组合根是否真正具备指定动作的后端。
 def domain_ready(action: str, ports: HostDomainPorts) -> bool:
     name = domain_name(action)
+    if name == "portal_v2":
+        if action == "conversations.requests.interject":
+            return (getattr(ports.conversation, "request_ports", None) is not None
+                    and callable(getattr(ports.conversation, "require_thread", None)))
+        backend = getattr(ports.conversation, "portal_v2", None)
+        return bool(backend is not None and backend.ready(action))
     if name == "audit_bots":
         from .audit_bot_v2_handlers import audit_bots_ready
         return audit_bots_ready(action, ports)
@@ -100,10 +109,16 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     return result
 
 
-# LLM: 双Bot分派沿原四端口和已授权对象，缺依赖直接拒绝，不能在组合根构造临时替身业务。
-# 函数用途: 执行原领域、V2扩展或已就绪Bot动作。
+# LLM: 门户只消费真实AuthorizedCall和生产端口，插话直接进入请求域；缺兄弟模块不构造替身业务。
+# 函数用途: 执行原领域、门户、V2扩展或已就绪Bot动作。
 def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     name = domain_name(authorized.call.action)
+    if name == "portal_v2":
+        if authorized.call.action == "conversations.requests.interject":
+            from .conversations import read_context
+            from .requests import RequestDomain
+            return RequestDomain(ports.conversation).call(authorized, read_context(authorized))
+        return ports.conversation.portal_v2.call(authorized)
     if name == "audit_bots":
         from .audit_bot_v2_handlers import call_audit_bots
         return call_audit_bots(authorized, ports)

@@ -2,16 +2,15 @@
 # 模块用途: 提供有界SSE传输、心跳和慢消费者关闭。
 from __future__ import annotations
 
-import re
+import hashlib
+import json
+import math
 import threading
 from collections import deque
-from datetime import datetime
 
 from .errors import HostAPIError
-from .schemas import canonical_json, closed, integer, text, validate_object
+from .schemas import canonical_json, validate_request_event
 
-_STATES = ("queued", "admission_wait", "running", "waiting_approval", "waiting_input",
-           "cancelling", "succeeded", "failed", "cancelled", "unknown")
 # SSE 流式心跳间隔 15 秒：无新事件时定期发送注释帧保持连接活跃。
 _HEARTBEAT_SECONDS = 15.0
 # 单条 SSE 事件帧最大字节数 64 KiB：防止超大事件占用流缓冲。
@@ -26,62 +25,10 @@ def _safe_cursor(value):
     return value
 
 
-# LLM: 只输出封闭公开形状；未知字段不能靠调用者声称已脱敏而穿透。
-# 函数用途: 校验事件和时间戳并复制为独立字典。
+# LLM: HTTP泵与缓冲消费同一schema，新增可选计量/耗时不能在第二份合同中丢失；不放行任意原始工具字段。
+# 函数用途: 使用宿主唯一公开事件校验器，返回独立JSON副本。
 def _public_event(event):
-    schemas = _event_schemas()
-    row = validate_object(event, closed({
-        "event_id": text(128, 1), "sequence": integer(2**63 - 1, 1),
-        "kind": {"enum": list(schemas)}, "created_at": text(64, 1),
-        "data": {"type": "object"},
-    }))
-    row["data"] = validate_object(row["data"], schemas[row["kind"]])
-    _utc_timestamp(row["created_at"])
-    if row["kind"] == "terminal":
-        _validate_terminal_data(row["data"])
-    return row
-
-
-# LLM: 每种事件只允许公开结构，禁止任意raw参数、tool结果和私卡内容。
-# 函数用途: 构造各事件数据的封闭schema。
-def _event_schemas():
-    interaction = closed({"interaction_id": text(128, 1), "summary": text(1024)})
-    return {
-        "status": closed({"state": {"enum": list(_STATES)}}),
-        "assistant_delta": closed({"message_id": text(128, 1), "part": {"enum": ["commentary", "final"]},
-            "offset_bytes": integer(2**63 - 1), "text": text(65536)}),
-        "tool_progress": closed({"call_id": text(128, 1), "tool_name": text(96, 1),
-            "status": {"enum": ["started", "progress", "ended"]}, "summary": text(1024)}),
-        "approval_required": interaction, "input_required": interaction,
-        "terminal": closed({"terminal_id": text(128, 1), "status": {"enum": ["succeeded", "failed", "cancelled"]},
-            "completed_at": text(64, 1), "result_message_ids": {"type": "array", "items": text(128, 1), "maxItems": 100},
-            "error_code": {}, "usage": closed({"input_tokens": {}, "output_tokens": {}}), "resources_stopped": {}}),
-    }
-
-
-# LLM: nullable字段做严格类型检查，bool不能冒充token整数。
-# 函数用途: 检查终态里可为空的安全字段。
-def _validate_terminal_data(data):
-    _utc_timestamp(data["completed_at"])
-    code = data["error_code"]
-    if code is not None and (type(code) is not str or re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) is None):
-        raise HostAPIError("INVALID_SCHEMA")
-    if data["resources_stopped"] is not None and type(data["resources_stopped"]) is not bool:
-        raise HostAPIError("INVALID_SCHEMA")
-    for value in data["usage"].values():
-        if value is not None and (type(value) is not int or not 0 <= value <= 2**63 - 1):
-            raise HostAPIError("INVALID_SCHEMA")
-
-
-# LLM: 日期只能是可解析UTC，不按字符串看起来像时间就授信。
-# 函数用途: 校验事件及终态的UTC时间戳。
-def _utc_timestamp(value):
-    try:
-        stamp = datetime.fromisoformat(value)
-        if stamp.utcoffset() is None or stamp.utcoffset().total_seconds() != 0:
-            raise ValueError("UTC required")
-    except ValueError as error:
-        raise HostAPIError("INVALID_SCHEMA") from error
+    return validate_request_event(event)
 
 
 # LLM: 每条帧有明确字节上限，超限拒绝而不截断业务事件。
@@ -192,13 +139,11 @@ def _stream_stopped() -> bool:
     return bool(stop is not None and stop.is_set())
 
 
-# LLM: 生产只拉一条有界原消息页；MAC保存已交付位置，重新连接仍核A和B1范围，断连不取消请求。
-# 函数用途: 从原请求/最终消息投影持续RequestEvent，交给A原SSE泵运输。
+# LLM: 先消费同请求原chunk再读最终消息，MAC保存字节前缀/分片位置；逐次核A/B1，断连不取消请求。
+# 函数用途: 将真实过程、最终消息和规范终态有序交给原SSE泵。
 def request_events(conversation, authorized):
-    from datetime import datetime, timezone
-
     from .conversations import read_context
-    from .requests import RequestDomain, request_replies
+    from .requests import RequestDomain
     from .schemas import thaw, validate_request_event
 
     domain = RequestDomain(conversation)
@@ -214,26 +159,207 @@ def request_events(conversation, authorized):
         facts = domain.facts(authorized, context, paths, store)
         if position.get("terminal"):
             return
-        rows, reply, more = request_replies(store, facts, position.get("reply", {}))
-        sequence = position.get("sequence", 0) + 1
-        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        position = {**position, "reply": reply}
-        if rows:
-            row = rows[0]
-            kind = "assistant_delta"
-            data = {"message_id": row["message_id"], "part": "final", "offset_bytes": row["offset_bytes"], "text": row["content"]}
-        elif facts["terminal"] is not None and not more:
-            kind, data = "terminal", facts["terminal"]
-            position["terminal"] = True
-            stamp = data["completed_at"]
-        elif position.get("state") != facts["state"]:
-            kind, data = "status", {"state": facts["state"]}
-            position["state"] = facts["state"]
-        else:
+        event = _next_request_event(paths, store, facts, position)
+        if event is None:
             _wait_stream_idle()
             continue
+        kind, data, stamp = event
+        sequence = position.get("sequence", 0) + 1
         position["sequence"] = sequence
         event_id = domain.codec.encode(authorized, facts["request_id"], position, filters)
         read_context(authorized)
         yield validate_request_event({"event_id": event_id, "sequence": sequence,
                                       "kind": kind, "created_at": stamp, "data": data})
+
+
+# LLM: 顺序固定为原过程→最终消息→规范终态；空闲不推进sequence，续读位置只在原MAC内保存。
+# 函数用途: 选择下一条公开事件并推进其准确字节位置，不用多层分支拼状态。
+def _next_request_event(paths, store, facts, position):
+    from datetime import datetime, timezone
+
+    from .requests import request_replies
+
+    progress, saved, pending = request_progress(paths, facts, position.get("progress", {}))
+    position["progress"] = saved
+    if progress or pending:
+        return progress
+    stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    rows, reply, more = request_replies(store, facts, position.get("reply", {}))
+    if rows:
+        position["reply"] = reply
+        row = rows[0]
+        return "assistant_delta", {"message_id": row["message_id"], "part": "final",
+            "offset_bytes": row["offset_bytes"], "text": row["content"]}, stamp
+    if facts["terminal"] is not None and not more:
+        position["terminal"] = True
+        return "terminal", facts["terminal"], facts["terminal"]["completed_at"]
+    if position.get("state") != facts["state"]:
+        position["state"] = facts["state"]
+        return "status", {"state": facts["state"]}, stamp
+    return None
+
+
+# LLM: 原producer无模型call_id时，仅按本请求round/index生成稳定展示ID；不赋予审批或执行能力。
+# 函数用途: 给原生工具卡配对展示身份，不依赖文案或日志字节位置。
+def _progress_tool_id(progress, request_id):
+    explicit = progress.get("call_id", progress.get("tool_call_id"))
+    if explicit is not None:
+        return explicit
+    parts = (progress.get("round"), progress.get("call_index"))
+    if not all(type(value) is int and 0 <= value < 2 ** 63 for value in parts):
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    return "tool-" + hashlib.sha256(f"{request_id}:{parts[0]}:{parts[1]}".encode()).hexdigest()[:32]
+
+
+# LLM: 只消费原writer已净化的typed公开事件；原phase优先于中文status，不暴露raw参数/输出/旧文本。
+# 函数用途: 将原chunk的公开说明或工具状态裁为Host事件。
+def _progress_event(row, request_id, offset):
+    from datetime import datetime, timezone
+
+    from ..gateway_parts.stream_events import public_model_text
+
+    kind = row.get("kind")
+    stamp = row.get("t")
+    stamp = stamp if type(stamp) in (int, float) and math.isfinite(stamp) else None
+    created = datetime.fromtimestamp(stamp, timezone.utc) if stamp is not None else datetime.now(timezone.utc)
+    created = created.isoformat().replace("+00:00", "Z")
+    if kind in {"assistant_commentary", "thinking_delta"}:
+        text = public_model_text(row.get("text"), max_chars=0, delivery_channel="plugin", identifiers=())
+        if text:
+            return "assistant_delta", {"message_id": request_id + ":p" + str(offset), "part": "commentary",
+                                       "offset_bytes": 0, "text": text}, created
+    if kind == "tool_progress":
+        progress = row.get("progress", row.get("data", {}))
+        if type(progress) is not dict:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        states = {"started": "started", "progress": "progress", "ended": "ended",
+                  "finished": "ended", "completed": "ended", "deferred": "ended", "interrupted": "ended"}
+        status = states.get(progress.get("phase")) or states.get(progress.get("status"))
+        if status is None:
+            return None
+        summary = public_model_text(progress.get("summary", progress.get("status", "")), max_chars=1024,
+                                    delivery_channel="plugin", identifiers=())
+        elapsed = progress.get("elapsed_ms")
+        if elapsed is None and type(progress.get("elapsed_seconds")) in (int, float):
+            seconds = progress["elapsed_seconds"]
+            elapsed = round(seconds * 1000) if math.isfinite(seconds) and seconds >= 0 else None
+        return "tool_progress", {"call_id": _progress_tool_id(progress, request_id),
+            "tool_name": progress.get("tool_name", progress.get("tool")),
+            "status": status, "elapsed_ms": elapsed, "summary": summary}, created
+    return None
+
+
+# LLM: chunk只是展示原账；完整旧前缀常量内存校hash，每次读1MiB窗口，分片还绑定当前完整行；终态坏尾显式失败。
+# 函数用途: 从原流取下一条有界事件，支持超过4MiB的长请求，不建立第二事件账。
+def request_progress(paths, facts, position):
+    base, content_offset = position.get("offset", 0), position.get("content_offset", 0)
+    if type(content_offset) is not int or content_offset < 0:
+        raise HostAPIError("CURSOR_EXPIRED", 410)
+    raw, prefix, eof = _progress_window(paths, facts["request_id"], position)
+    if raw is None:
+        if (base or content_offset) and facts.get("terminal") is not None:
+            raise HostAPIError("CURSOR_EXPIRED", 410)
+        return None, position, bool(base or content_offset)
+    offset, line_hash = 0, None
+    for _ in range(64):
+        end = raw.find(b"\n", offset)
+        if end < 0:
+            break
+        line_hash = hashlib.sha256(raw[offset:end]).hexdigest()
+        if content_offset and position.get("line_sha256") != line_hash:
+            raise HostAPIError("CURSOR_EXPIRED", 410)
+        event = _parse_progress(raw[offset:end], facts["request_id"], base + offset)
+        next_offset = end + 1
+        if event and event[0] == "assistant_delta":
+            encoded = event[1]["text"].encode("utf-8")
+            if content_offset >= len(encoded):
+                raise HostAPIError("CURSOR_EXPIRED", 410)
+            piece = encoded[content_offset:content_offset + 8192].decode("utf-8", errors="ignore")
+            event[1].update(text=piece, offset_bytes=content_offset)
+            content_offset += len(piece.encode("utf-8"))
+            if content_offset < len(encoded):
+                next_offset = offset
+            else:
+                content_offset = 0
+        offset = next_offset
+        saved = _progress_position(prefix, raw, base, offset, content_offset, line_hash)
+        if event:
+            return event, saved, not eof or offset < len(raw)
+    if content_offset:
+        raise HostAPIError("CURSOR_EXPIRED", 410)
+    if offset == 0 and not eof:
+        raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+    if eof and offset < len(raw) and facts.get("terminal") is not None:
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    saved = _progress_position(prefix, raw, base, offset, 0, None)
+    return None, saved, not eof or offset < len(raw)
+
+
+# LLM: 只从已核请求原队列取FD，不跟链接；前缀用64KiB块校验，窗口固定1MiB，不把整个日志载入内存。
+# 函数用途: 按准确旧字节位置读取长日志窗口，并拒绝已消费前缀被改写或截断。
+def _progress_window(paths, request_id, position):
+    import os
+
+    from ..common.nofollow_fs import open_readonly_file_beneath
+
+    offset = position.get("offset", 0)
+    if type(offset) is not int or offset < 0:
+        raise HostAPIError("CURSOR_EXPIRED", 410)
+    for folder in ("processing", "done", "failed"):
+        try:
+            descriptor = open_readonly_file_beneath(paths.root, ("requests", folder, request_id + ".chunks.jsonl"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            raise HostAPIError("STORE_UNAVAILABLE", 503) from None
+        with os.fdopen(descriptor, "rb") as reader:
+            before = os.fstat(reader.fileno())
+            if offset > before.st_size:
+                raise HostAPIError("CURSOR_EXPIRED", 410)
+            prefix, remaining = hashlib.sha256(), offset
+            while remaining:
+                block = reader.read(min(65536, remaining))
+                if not block:
+                    raise HostAPIError("CURSOR_EXPIRED", 410)
+                prefix.update(block)
+                remaining -= len(block)
+            if position.get("sha256", hashlib.sha256(b"").hexdigest()) != prefix.hexdigest():
+                raise HostAPIError("CURSOR_EXPIRED", 410)
+            raw = reader.read(min(1024 * 1024, before.st_size - offset))
+            after = os.fstat(reader.fileno())
+            if after.st_nlink != 1 or after.st_size < before.st_size:
+                raise HostAPIError("CURSOR_EXPIRED", 410)
+            return raw, prefix, offset + len(raw) == before.st_size
+    return None, None, True
+
+
+# LLM: 任意坏JSON或深层递归都映射成安全存储错误；原始字段不能进入异常消息。
+# 函数用途: 解码一条原日志并投影公开事件。
+def _parse_progress(raw, request_id, offset):
+    try:
+        row = json.loads(raw, object_pairs_hook=_unique_progress_fields)
+        if type(row) is not dict:
+            raise ValueError("invalid event")
+        return _progress_event(row, request_id, offset)
+    except (ValueError, TypeError, OverflowError, OSError, RecursionError):
+        raise HostAPIError("STORE_UNAVAILABLE", 503) from None
+
+
+# LLM: 旧前缀与分片中整行分别签入原MAC；digest对象仅是本次局部计算，不另建运行缓存或持久状态。
+# 函数用途: 生成完整消费或当前分片的准确续读位置。
+def _progress_position(prefix, raw, base, offset, content_offset, line_hash):
+    current = prefix.copy()
+    current.update(raw[:offset])
+    return {"offset": base + offset, "sha256": current.hexdigest(), "content_offset": content_offset,
+            **({"line_sha256": line_hash} if content_offset else {})}
+
+
+# LLM: 展示原账也不能接受重复键隐藏原始kind或身份；不从JSON值获取执行权。
+# 函数用途: 拒绝进度JSON行里的歧义字段。
+def _unique_progress_fields(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate progress key")
+        value[key] = item
+    return value
