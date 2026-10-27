@@ -785,15 +785,15 @@ class RuntimeRepository(
             conn.commit()
         return recovered
 
-    # LLM: LEFT JOIN 保留从未建 attempt 与指针损坏两类，unknown 仅移出运维队列，不改变业务恢复门。
-    # 函数用途: 列出未确认的历史运行、无身份尝试和无尝试孤儿，保持旧输出字段。
+    # LLM: LEFT JOIN保留孤儿/坏指针；legacy unknown即使写过结清标记也继续列出，直到状态收敛。保持旧输出字段。
+    # 函数用途: 列出尚未取消收敛的历史unknown、无身份尝试和无尝试孤儿。
     def unidentified_stale_attempts(self) -> list[dict[str, Any]]:
         with self._runtime_connection() as conn:
             rows = self._stale_runtime_rows(conn, limit=0)
         result = []
         for row in rows:
             meta = _json_object(row["metadata_json"])
-            if meta.get("operator_settled_at") or meta.get("settled_at"):
+            if row["attempt_status"] != "unknown" and (meta.get("operator_settled_at") or meta.get("settled_at")):
                 continue
             if row["attempt_status"] != "unknown" and _runner_pid_recorded(row["metadata_json"]):
                 continue
@@ -806,23 +806,23 @@ class RuntimeRepository(
             })
         return result
 
-    # LLM: 空 current 指针与悬空非空指针必须分开；已标运维确认的 unknown 不再进入活动队列。
-    # 函数用途: 在调用方同一事务中读取有界待结清运行，缺 attempt 不被 WHERE 过滤。
+    # LLM: 空指针与悬空指针分开；旧结清事件不得隐藏仍unknown的当前attempt，取消后自然退出原状态集合。
+    # 函数用途: 在原事务中读取有界待结清运行，兼容只打过标记而未解锁的旧行。
     def _stale_runtime_rows(self, conn, *, after: tuple = (0.0, ""), limit: int = 256) -> list:
         return conn.execute(
             "SELECT ar.agent_run_id, ar.run_id, ar.role, ar.status AS run_status, ar.current_attempt_id, "
             "at.status AS attempt_status, COALESCE(at.started_at, ar.created_at) AS started_at, at.metadata_json "
             "FROM agent_runs ar LEFT JOIN agent_attempts at ON at.attempt_id=ar.current_attempt_id AND at.agent_run_id=ar.agent_run_id "
             "WHERE (at.status IN ('running','created','unknown') OR (ar.status='created' AND at.attempt_id IS NULL)) "
-            "AND NOT EXISTS (SELECT 1 FROM runtime_events ev WHERE ev.agent_run_id=ar.agent_run_id "
-            "AND ev.attempt_id=COALESCE(ar.current_attempt_id,'') AND ev.event_type='agent_run.operational_settlement') "
+            "AND (at.status='unknown' OR NOT EXISTS (SELECT 1 FROM runtime_events ev WHERE ev.agent_run_id=ar.agent_run_id "
+            "AND ev.attempt_id=COALESCE(ar.current_attempt_id,'') AND ev.event_type='agent_run.operational_settlement')) "
             "AND (COALESCE(at.started_at,ar.created_at),ar.agent_run_id) > (?,?) "
             "ORDER BY COALESCE(at.started_at,ar.created_at), ar.agent_run_id LIMIT ?",
             (*after, int(limit) if limit else -1),
         ).fetchall()
 
-    # LLM: 自动只确认老 unknown/从未执行孤儿，显式仍可把无身份运行标 unknown；所有判断在 IMMEDIATE 事务重读。
-    # 函数用途: 按三类边界结清运维欠账，不把未知副作用说成 noop 或授予重放。
+    # LLM: 自动仅取消老unknown/未执行孤儿，显式可取消无身份运行；IMMEDIATE事务内复核进程、全锁和current指针，不重放工具。
+    # 函数用途: 按原阈值与死亡证明结清运维欠账，取消收敛后解除unknown阻塞门。
     def settle_unidentified_attempts(self, *, older_than_seconds: float, now: float | None = None,
                                      settled_by: str = "explicit_control", automatic: bool = False) -> list[str]:
         current = time.time() if now is None else float(now)
@@ -864,17 +864,18 @@ class RuntimeRepository(
                                              "operator_settled_at": now, "status": "cancelled"})
         return bool(changed)
 
-    # LLM: unknown 的业务状态与 DIRTY/MUTATING 原样保留；活/不可证死的 runner 或持锁者不能归档。
-    # 函数用途: 区分孤儿、无身份显式结清与历史 unknown 确认，保持原精确副作用恢复入口。
+    # LLM: 原IMMEDIATE事务内通过阈值、runner及全锁死亡证明的current attempt才可取消；旧标记不跳过unknown。
+    #   释放旧锁并取消未启动CLAIMED，不改执行中/UNKNOWN工具或DIRTY/MUTATING，不伪造noop/成功。
+    # 函数用途: 取消并解锁安全可结清的旧运行，保留abandoned及原状态审计，允许后续新attempt。
     def _settle_stale_runtime_row(self, conn, row, now: float, actor: str, automatic: bool) -> bool:
         if row["attempt_status"] is None:
             if automatic and now - row["started_at"] < 3600:
                 return False
             return self._settle_orphan_created(conn, row, now, actor)
         meta = _json_object(row["metadata_json"])
-        if meta.get("settled_at") or meta.get("operator_settled_at"):
-            return False
         status = row["attempt_status"]
+        if status != "unknown" and (meta.get("settled_at") or meta.get("operator_settled_at")):
+            return False
         if automatic and (status != "unknown" or now - row["started_at"] < 86400):
             return False
         if _runner_pid_recorded(row["metadata_json"]):
@@ -883,21 +884,25 @@ class RuntimeRepository(
         locks = conn.execute("SELECT * FROM resource_locks WHERE attempt_id=?", (row["current_attempt_id"],)).fetchall()
         if any(not self._lock_is_takeoverable(lock, now) for lock in locks):
             return False
-        meta.update({"settled_by": actor, "settled_at": now, "operator_settled_at": now})
+        meta.update({"settled_by": actor, "settled_at": now, "operator_settled_at": now,
+                     "previous_attempt_status": status, "effect_disposition": "abandoned"})
         meta.setdefault("recovery_reason", "historical_unknown_acknowledged" if status == "unknown" else "no_runner_identity")
         changed = conn.execute(
-            "UPDATE agent_attempts SET status='unknown', ended_at=CASE WHEN status!='unknown' AND ended_at=0 THEN ? ELSE ended_at END, "
+            "UPDATE agent_attempts SET status='cancelled', ended_at=CASE WHEN ended_at=0 THEN ? ELSE ended_at END, "
             "metadata_json=? WHERE attempt_id=? AND status=? AND EXISTS "
             "(SELECT 1 FROM agent_runs WHERE agent_run_id=? AND current_attempt_id=?)",
             (now, json.dumps(meta, ensure_ascii=False), row["current_attempt_id"], status,
              row["agent_run_id"], row["current_attempt_id"]),
         ).rowcount
-        if changed and status != "unknown":
-            conn.execute("UPDATE agent_runs SET status='unknown', updated_at=? WHERE agent_run_id=? AND current_attempt_id=?",
-                         (now, row["agent_run_id"], row["current_attempt_id"]))
         if changed:
+            conn.execute("DELETE FROM resource_locks WHERE attempt_id=?", (row["current_attempt_id"],))
+            _cancel_unstarted_tool_operations(conn, agent_run_id=row["agent_run_id"], now=now,
+                                             attempt_id=row["current_attempt_id"])
+            conn.execute("UPDATE agent_runs SET status='cancelled', updated_at=? WHERE agent_run_id=? AND current_attempt_id=?",
+                         (now, row["agent_run_id"], row["current_attempt_id"]))
             self._append_event_conn(conn, event_type="agent_run.operational_settlement", attempt_id=row["current_attempt_id"],
-                agent_run_id=row["agent_run_id"], payload={"operator_settled_at": now, "settled_by": actor, "status": "unknown"})
+                agent_run_id=row["agent_run_id"], payload={"operator_settled_at": now, "settled_by": actor,
+                                                         "status": "cancelled", "previous_status": status})
         return bool(changed)
 
     # LLM: 到期本身不是死亡证明；活/未知 holder 保留，死 holder 仅按完整锁版本 CAS 删除，mutation 不伪造 STABLE。
@@ -924,8 +929,8 @@ class RuntimeRepository(
                 self._stale_lock_cursor = (rows[-1]["lease_expires_at"], rows[-1]["lock_id"]) if len(rows) == 256 else (0.0, "")
         return released
 
-    # LLM: 进程死亡仍走原恢复；自动仅归档老 unknown 与一小时孤儿，不改变精确业务恢复许可。
-    # 函数用途: 为启动及后台维护提供幂等的三类运维清理入口。
+    # LLM: 原死亡恢复先标unknown；自动仅取消满24小时unknown与一小时孤儿，不重放未决工具或洗白脏资源。
+    # 函数用途: 为启动及后台维护提供幂等结清入口，自动解除可安全取消的历史unknown阻塞。
     def cleanup_stale_runtime(self, *, now: float | None = None) -> dict[str, list[str]]:
         current = time.time() if now is None else float(now)
         recovered = self.recover_stale_attempts(now=current)

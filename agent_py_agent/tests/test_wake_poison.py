@@ -276,13 +276,15 @@ class TestStreak:
         with pytest.raises(ValueError):
             next_poison_state(WakePoisonState(), WakeAttemptVerdict("mystery", "x"), now=1.0)
 
+    # LLM: W3中neutral不改变已有失败首末时间，但必须刷新自己的30秒冷却。
+    # 函数用途: 验证真实失败时间保留且未计数重试不立即到期。
     def test_failure_timestamps_keep_the_first_and_move_the_last(self):
         state = next_poison_state(WakePoisonState(), _failure("error:X"), now=100.0)
         assert (state.first_failed_at, state.last_failed_at) == (100.0, 100.0)
         state = next_poison_state(state, _failure("error:Y"), now=250.0)
         assert (state.first_failed_at, state.last_failed_at) == (100.0, 250.0)
         state = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=400.0)
-        assert (state.first_failed_at, state.last_failed_at, state.next_attempt_at) == (100.0, 250.0, 310.0)
+        assert (state.first_failed_at, state.last_failed_at, state.next_attempt_at) == (100.0, 250.0, 430.0)
 
     def test_abandoned_attempts_count_as_their_own_cause(self):
         state = _feed([WAKE_ATTEMPT_ABANDONED] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT)
@@ -321,12 +323,14 @@ class TestBatchIsolation:
 class TestUncountedStall:
     WAIT = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:PROVIDER_CONNECTION_FAILED")
 
+    # LLM: 两次neutral保持同一段起点、更新最新原因，并按第二次60秒退避而非保留零期限。
+    # 函数用途: 验证未计数段元数据及递增冷却共同落入状态。
     def test_uncounted_run_tracks_count_start_and_latest_reason(self):
         state = next_poison_state(WakePoisonState(), self.WAIT, now=100.0)
         state = next_poison_state(state, WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "admission:turn_interrupted"), now=200.0)
         assert (state.uncounted_count, state.uncounted_since, state.uncounted_reason_code) == (
             2, 100.0, "admission:turn_interrupted")
-        assert (state.same_cause_count, state.total_count, state.next_attempt_at) == (0, 0, 0.0)
+        assert (state.same_cause_count, state.total_count, state.next_attempt_at) == (0, 0, 260.0)
 
     def test_alert_fires_at_the_window_and_then_every_window(self):
         state = next_poison_state(WakePoisonState(), self.WAIT, now=0.0)
@@ -363,8 +367,85 @@ class TestUncountedStall:
     def test_uncounted_results_never_quarantine(self):
         assert quarantine_decision(_feed([self.WAIT] * 500)) is None
 
+    # LLM: W3 不新增持久字段；按最近尝试时间而非未来重试期限判定24小时，失败计数仍保持零。
+    # 函数用途: 验证未计数段在临界点之前不隔离，恰满24小时隔离。
+    @pytest.mark.parametrize("reason", ["", "error:RUN_RECOVERY_REQUIRED"])
+    def test_uncounted_stall_quarantines_after_24h(self, reason):
+        verdict = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
+        state = next_poison_state(WakePoisonState(), verdict, now=100.0)
+        before = next_poison_state(state, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS - 1)
+        assert quarantine_decision(before) is None
+        at_limit = next_poison_state(before, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        decision = quarantine_decision(WakePoisonState.from_dict(at_limit.to_dict()))
+        assert decision is not None
+        assert decision.reason_code == (reason or "uncounted_stall_timeout")
+        assert (decision.same_cause_count, decision.total_count, decision.mixed_causes) == (0, 0, False)
+
+    # LLM: 旧账没有最新未计数时间字段，已发提醒的时间必须能提供24小时的现有证据。
+    # 函数用途: 验证用原提醒字段兼容历史未退避账，批次失败仍不能误隔离。
+    def test_legacy_stall_alert_can_prove_timeout_but_batch_is_exempt(self):
+        state = mark_stall_alerted(next_poison_state(WakePoisonState(), self.WAIT, now=100.0),
+                                   now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        state = replace(state, next_attempt_at=0.0)
+        assert quarantine_decision(state) is not None
+        assert quarantine_decision(replace(state, batch_failures=1)) is None
+
+    # LLM: W3硬约束是不加字段并从共享next_attempt_at反推；重投会覆盖它，本例显式记录该时间口径限制。
+    # 函数用途: 锁定neutral后重投交错时按指定公式判定，不声称持有独立的最新neutral时间。
+    def test_redelivery_interleaving_uses_required_shared_deadline_formula(self):
+        state = next_poison_state(WakePoisonState(), self.WAIT, now=0.0)
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        for now in (86300.0, 86330.0):
+            state = next_poison_state(state, redelivery, now=now)
+            assert quarantine_decision(state) is None
+        state = next_poison_state(state, redelivery, now=86390.0)
+        assert state.next_attempt_at - poison_backoff_seconds(state.uncounted_count) == 86480.0
+        decision = quarantine_decision(state)
+        assert decision is not None and decision.reason_code == self.WAIT.reason_code
+
+    # LLM: 使用真实临时唤醒存储，不调模型、不发外部通知；验证原结案口实际移出pending。
+    # 函数用途: 验证24小时未计数阻塞最终写成failed_permanently。
+    def test_uncounted_timeout_moves_real_wake_to_quarantine(self, tmp_path):
+        from agent_py_agent.tests.test_wake_attempt_store import _raise, _store
+
+        store = _store(tmp_path)
+        signal = _raise(store)
+        verdict = verdict_for_error(RuntimeRecoveryRequiredError("blocked"))
+        store.wakes.attempts.record(signal, verdict, now=100.0)
+        result = store.wakes.attempts.record(signal, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        assert result.decision is not None
+        settled = store.wakes.attempts.quarantine(signal.wake_signal_id, result.decision,
+                                                now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        assert settled.settled is not None
+        assert settled.settled.status == wake_poison.WAKE_STATUS_FAILED_PERMANENTLY
+        assert store.wakes.pending_report()[0] == []
+
 
 class TestBackoff:
+    # LLM: RuntimeRecoveryRequiredError沿原neutral分类；只增加等待，不挪到计数失败或补成成功。
+    # 函数用途: 验证真实阻塞异常按30到300秒递增退避。
+    def test_uncounted_recovery_error_backs_off_without_counting_failures(self):
+        state = WakePoisonState()
+        verdict = verdict_for_error(RuntimeRecoveryRequiredError("unknown run"))
+        for index, delay in enumerate((30.0, 60.0, 120.0, 240.0, 300.0, 300.0), 1):
+            now = index * 1000.0
+            state = next_poison_state(state, verdict, now=now)
+            assert state.next_attempt_at == now + delay
+            assert (state.uncounted_count, state.uncounted_since) == (index, 1000.0)
+            assert (state.total_count, state.same_cause_count) == (0, 0)
+            assert WakePoisonState.from_dict(state.to_dict()) == state
+
+    # LLM: 回拨不得把重试期限放到当前未计数段起点或最近计数失败之前。
+    # 函数用途: 验证neutral退避的时间下界。
+    @pytest.mark.parametrize("state,expected", [
+        (WakePoisonState(uncounted_count=1, uncounted_since=1000.0), 1060.0),
+        (WakePoisonState(reason_code="error:X", same_cause_count=1, total_count=1,
+                         first_failed_at=2000.0, last_failed_at=2000.0), 2030.0),
+    ])
+    def test_uncounted_backoff_respects_recorded_clock_floor(self, state, expected):
+        result = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=940.0)
+        assert result.next_attempt_at == expected
+
     def test_counted_failures_back_off_30_60_120_240_then_cap(self):
         assert [poison_backoff_seconds(n) for n in range(0, 8)] == [0.0, 30.0, 60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
         state = next_poison_state(WakePoisonState(), _failure("error:X"), now=100.0)

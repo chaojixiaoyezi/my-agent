@@ -150,8 +150,8 @@ def cmd_home_index_rebuild(args) -> int:
     return 0
 
 
-# LLM: --settle 是显式控制，不加交互确认；三类结清沿原 repo CAS，unknown 不伪造 noop，不放宽业务恢复门。
-# 函数用途: 列出或清理当前 owner 运维欠账，报告死锁回收与仍未知的业务状态。
+# LLM: --settle沿原repo死亡证明/CAS直接结清，无交互确认；安全结清转cancelled/abandoned，不伪造noop或重放旧工具。
+# 函数用途: 列出或取消当前owner可安全结清的历史运行，报告解锁结果及仍受保护的记录。
 def cmd_runtime_stale_attempts(args) -> int:
     agent = make_agent(args)
     repo = getattr(getattr(agent, "subagents", None), "runtime_db", None)
@@ -175,7 +175,7 @@ def cmd_runtime_stale_attempts(args) -> int:
     for item in remaining:
         print(f"- {item['run_id']} role={item['role']} attempt_status={item['attempt_status']} started_at={item['started_at']:.0f}")
     if remaining and not settled:
-        print("剩余记录可能仍活跃、身份不可核验或指针损坏；运维确认不会解除 unknown 业务恢复门。")
+        print("剩余记录可能仍活跃、身份不可核验或指针损坏；可安全结清的运行会取消并解除 unknown 阻塞。")
     return 0
 
 

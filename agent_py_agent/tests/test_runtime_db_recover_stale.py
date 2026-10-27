@@ -156,7 +156,7 @@ def test_no_pid_metadata_kept(tmp_path):
 
 # LLM: 已终态 attempt 不在调和范围（JOIN 只取 running/created）。
 # 函数用途: 验证 done attempt 不动。
-# LLM: 无 runner 身份的行不能被自动判死（同一 owner 库可能被别的运行版本写入），但必须能被列出并由显式命令按阈值结清为 unknown。
+# LLM: 无runner身份的running行不自动判死；显式结清按阈值取消，不把未知副作用说成noop。
 # 函数用途: 验证无身份悬挂运行轮的只读列出、阈值内保留、显式结清与幂等。
 def test_unidentified_attempts_are_listed_and_only_settled_explicitly(tmp_path):
     repo = _make_repo(tmp_path)
@@ -175,10 +175,12 @@ def test_unidentified_attempts_are_listed_and_only_settled_explicitly(tmp_path):
         run = conn.execute("SELECT status FROM agent_runs WHERE agent_run_id=?", (unidentified,)).fetchone()
         other = conn.execute("SELECT status FROM agent_attempts WHERE agent_run_id=?", (identified,)).fetchone()
     meta = json.loads(attempt["metadata_json"])
-    assert (attempt["status"], run["status"]) == ("unknown", "unknown") and attempt["ended_at"] == started + 2 * 86400.0
+    assert (attempt["status"], run["status"]) == ("cancelled", "cancelled") and attempt["ended_at"] == started + 2 * 86400.0
     assert (meta["recovery_reason"], meta["settled_by"]) == ("no_runner_identity", "explicit_control")
+    assert (meta["previous_attempt_status"], meta["effect_disposition"]) == ("running", "abandoned")
     assert other["status"] == "running", "有身份的行不受显式结清影响"
     assert repo.unidentified_stale_attempts() == [] and repo.settle_unidentified_attempts(older_than_seconds=0.0) == []
+    assert repo.create_attempt(unidentified)["attempt_id"]
 
 
 def test_terminal_attempt_untouched(tmp_path):
@@ -635,3 +637,141 @@ def test_cleanup_keeps_unstarted_claimed_operation_recoverable(tmp_path):
         ).fetchone()
     assert attempt["status"] == "recovered"
     assert cancelled["status"] == "CANCELLED"
+
+
+# LLM: W3使用临时真实SQLite、原工具领取口和合成死亡锁，不接触真实运行库或进程。
+# 函数用途: 准备当前unknown及已结清标记/事件，供三条结清入口回归。
+def _selfheal_unknown(repo, *, marker="none", ended_at=0.0):
+    run = _seed_run(repo, status="unknown", metadata={}, attempt_status="unknown")
+    attempt = repo.current_attempt(run)["attempt_id"]
+    unstarted = repo.create_tool_operation(agent_run_id=run, attempt_id=attempt, operation_type="write_file")
+    executing = repo.create_tool_operation(agent_run_id=run, attempt_id=attempt, operation_type="run_command")
+    repo.mark_operation_executing(executing["operation_id"])
+    meta = {"original_evidence": "keep"}
+    if marker in {"metadata", "metadata_and_event"}:
+        meta["operator_settled_at"] = 100.0
+    if marker == "settled_at":
+        meta["settled_at"] = 100.0
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_attempts SET started_at=1, ended_at=?, metadata_json=? WHERE attempt_id=?",
+                     (ended_at, json.dumps(meta), attempt))
+        conn.execute("INSERT INTO resource_locks(lock_id,canonical_scope,holder_instance,pid,start_token,attempt_id,"
+                     "attempt_generation,workspace_epoch,lease_expires_at,created_at,updated_at) "
+                     "VALUES('selfheal-lock','selfheal-scope','old-holder',123,'birth',?,1,1,1,1,1)", (attempt,))
+        if marker in {"event", "metadata_and_event"}:
+            repo._append_event_conn(conn, event_type="agent_run.operational_settlement", attempt_id=attempt,
+                                    agent_run_id=run, payload={"status": "unknown", "operator_settled_at": 100.0})
+    return run, attempt, unstarted["operation_id"], executing["operation_id"]
+
+
+# LLM: 覆盖旧metadata与旧事件两层跳过条件；只取消未启动CLAIMED，未知执行结果不可改成功。
+# 函数用途: 验证三入口收敛、解锁、精确取消、审计留存、幂等和新attempt实际放行。
+@pytest.mark.parametrize("mode", ["explicit", "automatic", "cleanup"])
+@pytest.mark.parametrize("marker", ["none", "metadata", "settled_at", "event", "metadata_and_event"])
+def test_selfheal_settlement_converges_legacy_unknown_and_unlocks(tmp_path, monkeypatch, mode, marker):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    run, attempt, unstarted, executing = _selfheal_unknown(repo, marker=marker)
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: False)
+    assert [row["agent_run_id"] for row in repo.unidentified_stale_attempts()] == [run]
+    if mode == "cleanup":
+        settled = repo.cleanup_stale_runtime(now=90000)["settled"]
+    else:
+        settled = repo.settle_unidentified_attempts(older_than_seconds=0, now=90000,
+                                                   automatic=mode == "automatic")
+    assert settled == [run]
+    row = repo.get_attempt(attempt)
+    assert (row["status"], row["ended_at"], repo.get_agent_run(run)["status"]) == ("cancelled", 90000, "cancelled")
+    meta = json.loads(row["metadata_json"])
+    assert meta["original_evidence"] == "keep"
+    assert meta["previous_attempt_status"] == "unknown" and meta["effect_disposition"] == "abandoned"
+    assert meta["operator_settled_at"] == meta["settled_at"] == 90000
+    assert repo.get_operation(unstarted)["status"] == "CANCELLED"
+    assert repo.get_operation(executing)["status"] == "EXECUTING"
+    with repo._runtime_connection() as conn:
+        assert conn.execute("SELECT 1 FROM resource_locks WHERE attempt_id=?", (attempt,)).fetchone() is None
+        events = conn.execute("SELECT payload_json FROM runtime_events WHERE attempt_id=? "
+                              "AND event_type='agent_run.operational_settlement'", (attempt,)).fetchall()
+    payloads = [json.loads(event["payload_json"]) for event in events]
+    assert sum(payload.get("status") == "cancelled" for payload in payloads) == 1
+    assert next(payload for payload in payloads if payload.get("status") == "cancelled") == {
+        "operator_settled_at": 90000, "settled_by": "gateway_maintenance" if mode == "cleanup" else "explicit_control",
+        "status": "cancelled", "previous_status": "unknown",
+    }
+    assert repo.unidentified_stale_attempts() == []
+    assert repo.settle_unidentified_attempts(older_than_seconds=0, now=90001) == []
+    assert repo.create_attempt(run)["attempt_id"] != attempt
+
+
+# LLM: 自动必须满24小时，且runner和全部资源锁均通过原死亡证明；旧标记不能绕过保护。
+# 函数用途: 验证过早、活runner、活锁的legacy unknown既不取消也不提前删除操作或锁。
+@pytest.mark.parametrize("blocker", ["age", "runner", "lock"])
+def test_selfheal_legacy_unknown_retains_live_or_recent_work(tmp_path, monkeypatch, blocker):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    run, attempt, unstarted, _ = _selfheal_unknown(repo, marker="metadata_and_event")
+    if blocker == "runner":
+        with repo.transaction() as conn:
+            meta = json.loads(repo.get_attempt(attempt)["metadata_json"])
+            meta.update(runner_pid=456, runner_start_time="birth")
+            conn.execute("UPDATE agent_attempts SET metadata_json=? WHERE attempt_id=?", (json.dumps(meta), attempt))
+    monkeypatch.setattr(module, "holder_is_alive", lambda pid, *_: blocker == "lock" or pid == 456)
+    now = 86400 if blocker == "age" else 90000
+    assert repo.settle_unidentified_attempts(older_than_seconds=0, now=now, automatic=True) == []
+    assert repo.get_attempt(attempt)["status"] == repo.get_agent_run(run)["status"] == "unknown"
+    assert repo.get_operation(unstarted)["status"] == "CLAIMED"
+    with repo._runtime_connection() as conn:
+        assert conn.execute("SELECT 1 FROM resource_locks WHERE attempt_id=?", (attempt,)).fetchone() is not None
+
+
+# LLM: 已有真实结束时刻不得被运维取消覆盖；阈值恰好满24小时应允许结清。
+# 函数用途: 验证自动阈值等号与结束时刻保留。
+def test_selfheal_threshold_boundary_preserves_existing_end(tmp_path, monkeypatch):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    run, attempt, _, _ = _selfheal_unknown(repo, ended_at=77.0)
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: False)
+    assert repo.settle_unidentified_attempts(older_than_seconds=0, now=86401, automatic=True) == [run]
+    assert (repo.get_attempt(attempt)["status"], repo.get_attempt(attempt)["ended_at"]) == ("cancelled", 77.0)
+
+
+# LLM: 在真实SQLite结案事件处注入事务中止；不靠mock假装回滚，不更改生产事务实现。
+# 函数用途: 验证状态、锁删除及未启动工具取消不会出现部分提交。
+def test_selfheal_settlement_rolls_back_all_effects_when_event_write_fails(tmp_path, monkeypatch):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    run, attempt, unstarted, _ = _selfheal_unknown(repo)
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: False)
+    with repo.transaction() as conn:
+        conn.execute("CREATE TRIGGER selfheal_abort BEFORE INSERT ON runtime_events "
+                     "WHEN NEW.event_type='agent_run.operational_settlement' "
+                     "BEGIN SELECT RAISE(ABORT, 'test cancellation transaction'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="test cancellation transaction"):
+        repo.settle_unidentified_attempts(older_than_seconds=0, now=90000)
+    assert repo.get_attempt(attempt)["status"] == repo.get_agent_run(run)["status"] == "unknown"
+    assert repo.get_operation(unstarted)["status"] == "CLAIMED"
+    with repo._runtime_connection() as conn:
+        assert conn.execute("SELECT 1 FROM resource_locks WHERE attempt_id=?", (attempt,)).fetchone() is not None
+
+
+# LLM: W3明确按started_at满24小时，不是成为unknown后再等一天；死亡仍由原恢复入口证明。
+# 函数用途: 验证同轮cleanup先归unknown后安全取消长龄已死运行。
+def test_selfheal_cleanup_uses_attempt_age_not_time_since_unknown(tmp_path, monkeypatch):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    run, attempt, unstarted, _ = _selfheal_unknown(repo)
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_attempts SET status='running', metadata_json=? WHERE attempt_id=?",
+                     (json.dumps({"runner_pid": 123, "runner_start_time": "birth"}), attempt))
+        conn.execute("UPDATE agent_runs SET status='created' WHERE agent_run_id=?", (run,))
+    monkeypatch.setattr(module, "_proc_state", lambda _: "dead")
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: False)
+    result = repo.cleanup_stale_runtime(now=90000)
+    assert result["recovered"] == result["settled"] == [run]
+    assert repo.get_attempt(attempt)["status"] == repo.get_agent_run(run)["status"] == "cancelled"
+    assert repo.get_operation(unstarted)["status"] == "CANCELLED"

@@ -29,8 +29,7 @@ WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0
 WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0
 # 从第一次重投失败起满 24 小时（>=）仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
 WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0
-# 连续不计数满这么久（与只重投路径同一个窗口）就发一次运维提醒，之后每隔同样时长再提醒；不自动结案，
-# 因为这些结果按定义属于预期等待、瞬时或环境故障，长时间故障里自动结案会误伤健康的工作。
+# 连续不计数满24小时按现有尝试/提醒时间结案，避免永久阻塞；批次失败仍只隔离执行并提醒，不自动结案。
 WAKE_UNCOUNTED_STALL_SECONDS = 86400.0
 
 # 唤醒结案后的终态：不再被领取，只能人工重放；发布层把它当作与 pending/handled 并列的状态。
@@ -82,7 +81,7 @@ _SQLITE_LOCK_PRIMARY_CODES = frozenset({5, 6})
 
 
 # LLM: kind 取 WAKE_VERDICT_* 之一；reason_code 是结构化原因，计数失败时是比较"是否同因"的唯一依据，
-#   不计数时只用于长时间不计数的提醒。
+#   不计数时用于长时间不计数的提醒与超时结案。
 # 类用途: 一次领取尝试的结构化判定结果。
 @dataclass(frozen=True)
 class WakeAttemptVerdict:
@@ -281,7 +280,7 @@ _REASON_REQUIRED_KINDS = frozenset({WAKE_VERDICT_FAILURE, WAKE_VERDICT_BATCH_FAI
 
 # LLM: 成功清空全部；计数失败推进同因与总次数并结束当前不计数段；不计数与批次失败都推进连续不计数段（既不累加失败，
 #   也不打断同因连续段），批次失败另加 batch_failures；只重投失败只动重投字段。next_attempt_at 按本次结果的退避重算
-#   （不计数保持原值）。时间只往前走：本机时钟回拨时各段的"最近一次"取 max(now, 已记的最近时间)，账始终自洽可读。
+#   （不计数按段内次数指数退避）。时间戳使用各段已有的时间下界，时钟回拨时账仍自洽可读。
 #   未知 kind、需要原因的 kind 却给了空原因，都抛 ValueError，不静默写坏账。
 # 函数用途: 按一次尝试的判定推进状态，不修改传入对象。
 def next_poison_state(state: WakePoisonState, verdict: WakeAttemptVerdict, *, now: float) -> WakePoisonState:
@@ -319,17 +318,19 @@ def _after_failure(state: WakePoisonState, reason_code: str, now: float) -> Wake
                    last_stall_alert_at=0.0, next_attempt_at=at + poison_backoff_seconds(total))
 
 
-# LLM: 不计数与批次失败共用：段内次数加 1，原因码取最近一次（空原因的不计数结果保留原码），段起点只在段开始时写入。
-# 函数用途: 推进连续不计数段。
+# LLM: 不计数与批次失败共用段计数，空原因保留原码；不增加状态字段。neutral按次数30..300秒退避，批次调用方保留30秒。
+# 函数用途: 推进连续不计数段并设置非零重试冷却，避免阻塞异常触发忙循环。
 def _after_uncounted(state: WakePoisonState, reason_code: str, now: float) -> WakePoisonState:
+    count = state.uncounted_count + 1
+    since = now if state.uncounted_count == 0 else state.uncounted_since
+    at = max(now, since, state.last_failed_at)
     return replace(state, uncounted_reason_code=reason_code or state.uncounted_reason_code,
-                   uncounted_count=state.uncounted_count + 1,
-                   uncounted_since=now if state.uncounted_count == 0 else state.uncounted_since)
+                   uncounted_count=count, uncounted_since=since,
+                   next_attempt_at=at + poison_backoff_seconds(count))
 
 
-# LLM: 判定顺序固定：同因达上限 → 总次数达上限（标 mixed_causes）→ 只重投失败跨度满 24 小时（>=）；都不满足返回 None。
-#   批次失败与不计数结果永远不会触发结案。
-# 函数用途: 判断当前状态是否应当结案。
+# LLM: 同因/总数/重投按原阈值先判；无批次失败的连续neutral满24小时也结案。用退避反推最近尝试，不把未来期限当已等待时间。
+# 函数用途: 判断计数失败、重投失败或长时间未计数阻塞是否应结案，批次失败不误隔离。
 def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
         return _decision(state, state.reason_code, mixed_causes=False)
@@ -338,6 +339,11 @@ def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.redelivery_failures and (
             state.last_redelivery_failed_at - state.first_redelivery_failed_at >= WAKE_REDELIVERY_GIVE_UP_SECONDS):
         return _decision(state, WAKE_REASON_CHANNEL_UNAVAILABLE, mixed_causes=False)
+    if state.uncounted_count > 0 and state.batch_failures == 0:
+        latest_at = max(state.last_stall_alert_at,
+                        state.next_attempt_at - poison_backoff_seconds(state.uncounted_count))
+        if latest_at - state.uncounted_since >= WAKE_UNCOUNTED_STALL_SECONDS:
+            return _decision(state, state.uncounted_reason_code or "uncounted_stall_timeout", mixed_causes=False)
     return None
 
 
