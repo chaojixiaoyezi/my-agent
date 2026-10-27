@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..runtime_errors import runtime_error_report
 from . import cache_freshness
 from .cache_freshness import cache_stat_signature
 from .nofollow_fs import (
@@ -26,6 +25,14 @@ from .nofollow_fs import (
     open_private_lock_beneath_tightened,
     split_existing_anchor,
 )
+
+
+# LLM: 错误格式化只在实际错误路径加载原实现，避免SDK正常预载拉入模型账本；签名、异常和返回值原样保留。
+# 函数用途: 延迟取得统一错误报告器，不复制错误分类逻辑。
+def runtime_error_report(exc: BaseException, *, context: str = "") -> dict[str, Any]:
+    from ..runtime_errors import runtime_error_report as report
+    return report(exc, context=context)
+
 
 try:
     import fcntl

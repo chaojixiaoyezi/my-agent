@@ -197,17 +197,25 @@ def test_event_actor_fields_round_trip():
     assert data['actor_user_ref'] == 'feishu:ou_test' and data['actor_display_name'] == '测试用户'
 
 
-# LLM: 核心失败不能通过skip或自动兜底伪造成功；真实退出码和缺输出合同由原runner产生。
-# 函数用途: 验证非零退出/合同失败始终停在当前步，成功前缀及尾步状态准确。
+# LLM: R2将不可绕过的硬门限定于源缺失、空源和版本漂移；宿主显式策略不授予绕过权限。
+# 函数用途: 验证预检失败始终停在当前步，成功前缀及尾步状态准确。
 @pytest.mark.parametrize('policy', ['skip', 'escalate_to_agent'])
-@pytest.mark.parametrize('code', ['raise RuntimeError("broken")', 'print("{}")'])
-def test_workflow_script_hard_stop_cannot_skip_or_auto_recover(tmp_path, policy, code):
-    from agent_py_agent.agent.assets.descriptor import IOContract
+@pytest.mark.parametrize('state,error', [('missing', 'DATASOURCE_MISSING'),
+    ('empty', 'DATASOURCE_EMPTY'), ('drift', 'SCRIPT_REVISION_DRIFT')])
+def test_workflow_script_hard_stop_cannot_skip_or_auto_recover(tmp_path, policy, state, error):
     from agent_py_agent.agent.workflows.engine import WorkflowEngine
     from agent_py_agent.agent.workflows.script_runner import ScriptRunner
-    ScriptStore(tmp_path).save_script(AssetDescriptor('broken', 'script', '坏脚本', io_contract=IOContract(outputs=('value',))), code)
+    sources = (DataSourceSpec('missing', 'logs'),) if state == 'missing' else (
+        (file_source(tmp_path, content=''),) if state == 'empty' else ())
+    save_script(tmp_path, name='broken', sources=sources)
     calls = []
-    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *args: {'prefix': True},
+    # LLM: 前序分析后修改已冻结的后续代码，漂移必须在runner前被拦截。
+    # 函数用途: 为版本门构造确定性交错。
+    def analyze(*_):
+        if state == 'drift':
+            save_script(tmp_path, name='broken', code='print("{}")')
+        return {'prefix': True}
+    engine = WorkflowEngine(tmp_path, analysis_handler=analyze,
         escalation_handler=lambda *args: calls.append(args) or {'recovered': True, 'output_data': {'value': 1}})
     engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
     definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
@@ -218,7 +226,258 @@ def test_workflow_script_hard_stop_cannot_skip_or_auto_recover(tmp_path, policy,
     assert run.status in ('failed', 'paused_for_resume')
     assert run.steps[0].output_snapshot == {'prefix': True} and run.steps[2].status == 'pending'
     assert run.breakpoint['step_id'] == 'broken' and run.breakpoint['step_index'] == 2
-    assert run.completed_steps == 1 and calls == []
+    assert run.completed_steps == 1 and calls == [] and run.steps[1].error_code == error
+
+
+# LLM: 仅空登记表允许不含连接键的被动内联范围；并不授予SDK访问不存在连接的权限。
+# 函数用途: 验证旧参数源不再误报连接缺失。
+def test_r2_passive_inline_scope_without_registry(tmp_path):
+    source = DataSourceSpec('apps', 'logs', query_scope={'active_appnames': ['A', 'B']})
+    _, check = runtime.evaluate_script_source_check(tmp_path, AssetDescriptor('collect', 'script', '采集', data_sources=(source,)))
+    assert check['status'] == 'ok' and check['missing_sources'] == []
+
+
+# LLM: 空范围及任何显式连接/权限键都不属于被动参数，即使键值为空也不得回退。
+# 函数用途: 保护被动范围兼容规则的严格边界。
+@pytest.mark.parametrize('scope', [{}, *[{key: ''} for key in (
+    'device_name', 'log_source_name', 'path', 'file_path', 'database_path', 'query', 'sql', 'access')]])
+def test_r2_explicit_connection_scope_still_missing(tmp_path, scope):
+    source = DataSourceSpec('apps', 'logs', query_scope=scope)
+    _, check = runtime.evaluate_script_source_check(tmp_path, AssetDescriptor('collect', 'script', '采集', data_sources=(source,)))
+    assert check['status'] == 'source_missing'
+
+
+# LLM: 已有登记连接时，旧参数样式也不能掩盖删除或错配的源ID。
+# 函数用途: 验证兼容回退仅限全空的连接目录。
+def test_r2_passive_scope_with_other_registry_entry_still_missing(tmp_path):
+    file_source(tmp_path)
+    source = DataSourceSpec('apps', 'logs', query_scope={'active_appnames': ['A']})
+    _, check = runtime.evaluate_script_source_check(tmp_path, AssetDescriptor('collect', 'script', '采集', data_sources=(source,)))
+    assert check['status'] == 'source_missing' and check['missing_sources'][0]['source_id'] == 'apps'
+
+
+# LLM: 展示时间只缓存状态，不缓存健康检查；显式check_sources仍实际检查且刷新时间。
+# 函数用途: 验证相同读取稳定、实际源状态往返变化及显式检查刷新。
+def test_r2_read_projection_timestamp_stable_but_checks_live(tmp_path):
+    source = file_source(tmp_path)
+    save_script(tmp_path, sources=(source,))
+    tool = ScriptsTool(tmp_path)
+    before = json.loads(tool.execute({'action': 'get', 'script_id': 'collect'}).output)
+    again = json.loads(ScriptsTool(tmp_path).execute({'action': 'get', 'script_id': 'collect'}).output)
+    assert before == again
+    explicit = json.loads(tool.execute({'action': 'check_sources', 'script_id': 'collect'}).output)['source_check']
+    assert explicit['checked_at'] != before['source_check']['checked_at']
+    (tmp_path / 'traffic.log').write_text('')
+    empty = ScriptStore(tmp_path).get_script('collect')['source_check']
+    assert empty['status'] == 'source_empty' and empty['checked_at'] != before['source_check']['checked_at']
+    (tmp_path / 'traffic.log').write_text('record\n')
+    restored = ScriptStore(tmp_path).get_script('collect')['source_check']
+    assert restored['status'] == 'ok' and restored['checked_at'] not in (empty['checked_at'], before['source_check']['checked_at'])
+
+
+# LLM: 环境覆盖不扩大SDK授权；显式空列表/字典只清除本次健康预检声明，不能落盘改描述符。
+# 函数用途: 验证空覆盖与旧被动dict不再沿用缺失的原源。
+@pytest.mark.parametrize('overrides', [[], {}, {'active': ['new']}])
+def test_r2_explicit_passive_override_clears_preflight(tmp_path, overrides):
+    row = save_script(tmp_path, sources=(DataSourceSpec('missing', 'logs'),))
+    check = runtime._execution_source_check(tmp_path, row, overrides, None)
+    assert check['status'] == 'not_applicable' and check['missing_sources'] == []
+    assert ScriptStore(tmp_path).get_script('collect')['source_check']['status'] == 'source_missing'
+
+
+# LLM: 默认引擎不能把真实运行失败或缺输出当成功；错误需要保留具体修复指引。
+# 函数用途: 验证默认暂停和repair_guide，不注入任何自动恢复策略。
+@pytest.mark.parametrize('code,error', [('raise RuntimeError("broken")', 'SCRIPT_EXIT_NONZERO'),
+    ('print("{}")', 'SCRIPT_MISSING_OUTPUT_KEYS')])
+def test_r2_runtime_error_default_pauses_with_repair_guide(tmp_path, code, error):
+    from agent_py_agent.agent.assets.descriptor import IOContract
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    ScriptStore(tmp_path).save_script(AssetDescriptor('broken', 'script', '故障', io_contract=IOContract(outputs=('value',))), code)
+    engine = WorkflowEngine(tmp_path)
+    engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('broken', '故障', 'deterministic_script', script_id='broken'),))
+    result = engine.run_workflow(definition.to_dict())
+    assert result.status == 'paused_for_resume' and result.needs_repair and result.steps[0].error_code == error
+    assert result.steps[0].escalation_result['repair_guide']['error_code'] == error
+
+
+# LLM: 仅显式skip/宿主注入的恢复回调可处理普通运行错误；与预检硬门区别验证。
+# 函数用途: 验证合法的旧错误策略恢复兼容。
+@pytest.mark.parametrize('policy', ['skip', 'escalate_to_agent'])
+def test_r2_runtime_errors_obey_explicit_policy(tmp_path, policy):
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    save_script(tmp_path, code='raise RuntimeError("broken")')
+    calls = []
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *_: {'done': True},
+        escalation_handler=lambda *_: calls.append(True) or {'recovered': True, 'output_data': {'value': 1}})
+    engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('collect', '采集', 'deterministic_script', script_id='collect', on_error=policy),
+        WorkflowStepSpec('tail', '后续', 'llm_skill_analysis')))
+    result = engine.run_workflow(definition.to_dict())
+    assert result.status == 'succeeded' and result.final_output == {'done': True}
+    assert result.steps[0].status == ('skipped' if policy == 'skip' else 'succeeded')
+    assert calls == ([] if policy == 'skip' else [True])
+
+
+# LLM: 最后一步保持真实输出；显式类型合同可由成功前序步骤满足，不合并跳过或失败步骤。
+# 函数用途: 验证旧工作流与新强类型工作流都可跨步骤产出所需字段。
+@pytest.mark.parametrize('typed', [False, True])
+def test_r2_workflow_contract_uses_merged_successful_outputs(tmp_path, typed):
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    desc = AssetDescriptor.from_dict({'id': 'daily', 'kind': 'workflow', 'name': '日报',
+        'io_contract': {'outputs': ['value'], **({'output_types': {'value': 'integer'}} if typed else {})}})
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda spec, *_: {'value': 1} if spec['step_id'] == 'first' else {'decision': 'alert'})
+    definition = WorkflowDefinition(desc, (WorkflowStepSpec('first', '采集', 'llm_skill_analysis'),
+        WorkflowStepSpec('last', '研判', 'llm_skill_analysis')))
+    result = engine.run_workflow(definition.to_dict())
+    assert result.status == 'succeeded' and result.final_output == {'decision': 'alert'}
+
+
+# LLM: 未声明类型的旧工作流描述符可能复用脚本必填键；非空结果保持兼容，完全空输出仍校验。
+# 函数用途: 区分非空旧输出与真正空工作流输出。
+@pytest.mark.parametrize('output,expected', [({'decision': 'alert'}, 'succeeded'), ({}, 'failed')])
+def test_r2_legacy_untyped_workflow_contract(tmp_path, output, expected):
+    from agent_py_agent.agent.assets.descriptor import IOContract
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报', io_contract=IOContract(outputs=('value',))), (
+        WorkflowStepSpec('last', '研判', 'llm_skill_analysis'),))
+    result = WorkflowEngine(tmp_path, analysis_handler=lambda *_: output).run_workflow(definition.to_dict())
+    assert result.status == expected
+
+
+# LLM: 显式续跑允许修好当前故障脚本，但不批准后续脚本变化；成功前缀不得重跑。
+# 函数用途: 验证修复重钉与后续漂移硬门不会互相混淆。
+@pytest.mark.parametrize('change_tail', [False, True])
+def test_r2_repaired_current_step_repins_only_itself(tmp_path, change_tail):
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    save_script(tmp_path, name='broken', code='raise RuntimeError("broken")')
+    save_script(tmp_path, name='tail')
+    engine = WorkflowEngine(tmp_path, analysis_handler=lambda *_: {'prefix': True})
+    engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('prefix', '前序', 'llm_skill_analysis'),
+        WorkflowStepSpec('repair', '修复', 'deterministic_script', script_id='broken'),
+        WorkflowStepSpec('tail', '尾步', 'deterministic_script', script_id='tail')))
+    paused = engine.run_workflow(definition.to_dict())
+    assert paused.status == 'paused_for_resume' and paused.steps[1].needs_repair
+    (tmp_path / 'scripts/broken/main.py').write_text('print("{}")')
+    if change_tail:
+        save_script(tmp_path, name='tail', code='print("{\\"value\\": 2}")')
+    result = WorkflowEngine(tmp_path)
+    result.runner = ScriptRunner(tmp_path, use_sandbox=False)
+    resumed = result.resume_workflow_run(paused.workflow_run_id)
+    assert resumed.steps[0] == paused.steps[0]
+    if change_tail:
+        assert resumed.status == 'paused_for_resume' and resumed.breakpoint['step_id'] == 'tail'
+        assert resumed.breakpoint['error_code'] == 'SCRIPT_REVISION_DRIFT'
+    else:
+        assert resumed.status == 'succeeded'
+
+
+# LLM: SDK可信预载必须保留签名冻结，但不能无关加载整个工作流/技能/归档服务；公开类的身份和导入方式保持。
+# 函数用途: 在新解释器验证轻量SDK启动和所有旧公开导出。
+def test_r2_sdk_preload_does_not_eagerly_import_engine():
+    import subprocess
+    import sys
+    from pathlib import Path
+    code = '''import sys
+sys.path.insert(0, ROOT)
+import agent_py_agent.runtime_sdk
+assert 'agent_py_agent.agent.workflows.engine' not in sys.modules
+assert 'agent_py_agent.agent.workflows.script_runner' not in sys.modules
+assert 'agent_py_agent.agent.runtime_errors' not in sys.modules
+import agent_py_agent.agent.workflows as public
+from agent_py_agent.agent.workflows.engine import WorkflowEngine
+from agent_py_agent.agent.workflows.models import ScriptExecutionResult, StepExecutionRecord, WorkflowRunRecord
+from agent_py_agent.agent.workflows.run_store import WorkflowRunStore
+from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+for name in public.__all__:
+    assert getattr(public, name) is locals()[name]
+try:
+    public.not_an_api
+except AttributeError:
+    pass
+else:
+    raise AssertionError('unknown export must raise AttributeError')
+'''.replace('ROOT', repr(str(Path(__file__).resolve().parents[2])))
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', code], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+
+
+# LLM: 延迟的错误格式化仍调用唯一原实现，异常身份、上下文和返回对象原样保留。
+# 函数用途: 验证轻量导入不会复制或改写错误协议。
+def test_r2_json_error_report_delegates_exact_arguments(monkeypatch):
+    from agent_py_agent.agent import runtime_errors
+    from agent_py_agent.agent.common import json_io
+    seen, expected = [], {'original_report': True}
+    # LLM: 替换原格式化口只观察参数，不替换实际JSON读写或安全校验。
+    # 函数用途: 识别是否确实转交唯一错误实现。
+    def report(exc, *, context=''):
+        seen.append((exc, context))
+        return expected
+    monkeypatch.setattr(runtime_errors, 'runtime_error_report', report)
+    error = ValueError('synthetic')
+    assert json_io.runtime_error_report(error, context='sdk-test') is expected
+    assert seen == [(error, 'sdk-test')]
+
+
+# LLM: 脚本已编辑也不能让非法修复输出在验证前改变冻结pin、账本或旁件。
+# 函数用途: 验证无效恢复请求在任何持久化之前失败。
+def test_r2_invalid_patch_after_edit_has_no_persistent_effect(tmp_path):
+    from agent_py_agent.agent.assets.descriptor import IOContract
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    ScriptStore(tmp_path).save_script(AssetDescriptor('broken', 'script', '故障', io_contract=IOContract(outputs=('value',))),
+        'raise RuntimeError("broken")')
+    engine = WorkflowEngine(tmp_path)
+    engine.runner = ScriptRunner(tmp_path, use_sandbox=False)
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('broken', '故障', 'deterministic_script', script_id='broken'),))
+    run = engine.run_workflow(definition.to_dict())
+    folder = engine.store.run_dir(run.workflow_run_id)
+    before = {str(path.relative_to(folder)): path.read_bytes() for path in folder.rglob('*') if path.is_file()}
+    (tmp_path / 'scripts/broken/main.py').write_text('print("{\\"value\\": 2}")')
+    with pytest.raises(ValueError, match='SCRIPT_MISSING_OUTPUT_KEYS'):
+        engine.resume_workflow_run(run.workflow_run_id, patched_step_output={})
+    after = {str(path.relative_to(folder)): path.read_bytes() for path in folder.rglob('*') if path.is_file()}
+    assert before == after
+
+
+# LLM: 真实脚本退出后注入合成的宿主清理上下文，仅验证合并边界，不冒称真实清理故障已复现。
+# 函数用途: 防止恢复回调覆盖原修复指引或重新带回未脱敏的清理字段。
+@pytest.mark.parametrize('field', ['repair_guide', 'cleanup_error'])
+def test_r2_callback_cannot_overwrite_host_repair_context(tmp_path, field):
+    from agent_py_agent.agent.workflows.engine import WorkflowEngine
+    from agent_py_agent.agent.workflows.script_runner import ScriptRunner
+    save_script(tmp_path, code='raise RuntimeError("broken")')
+    # LLM: 子进程照常执行；合成附加字段不授执行权，只定位恢复结果的合并和脱敏顺序。
+    # 类用途: 在真实失败之后补入一个用于测试的清理诊断。
+    class ContextRunner(ScriptRunner):
+        # LLM: 原始失败、退出码和输出不变；测试秘密仅为合成占位值。
+        # 函数用途: 给故障结果补入明确不可被回调抹掉的上下文。
+        def run_script(self, *args, **kwargs):
+            result = super().run_script(*args, **kwargs)
+            result.escalation_context['cleanup_error'] = {'error_code': 'SCRIPT_CLEANUP_ERROR',
+                'group_cleanup_verified': False, 'password': 'synthetic-test-secret'}
+            return result
+    engine = WorkflowEngine(tmp_path, escalation_handler=lambda *_: {
+        'recovered': False, 'repair_guide': None, 'cleanup_error': {'group_cleanup_verified': True}})
+    engine.runner = ContextRunner(tmp_path, use_sandbox=False)
+    definition = WorkflowDefinition(AssetDescriptor('daily', 'workflow', '日报'), (
+        WorkflowStepSpec('collect', '采集', 'deterministic_script', script_id='collect'),))
+    run = engine.run_workflow(definition.to_dict())
+    assert run.status == 'paused_for_resume' and run.needs_repair
+    context = run.steps[0].escalation_result
+    if field == 'repair_guide':
+        assert isinstance(context[field], dict) and context[field]['script_id'] == 'collect'
+    else:
+        assert context[field]['group_cleanup_verified'] is False
+        assert 'synthetic-test-secret' not in json.dumps(context)
 
 
 # LLM: 旧清单规范字节保持不变；新范围必须严格解析且不能污染调用方原字典。

@@ -214,8 +214,8 @@ class ScriptsTool(BaseTool):
         except (OSError, RuntimeError, ImportError) as exc:
             return _outcome('scripts', {'error': str(exc)}, False, 'TOOL_EXECUTION_FAILED')
 
-    # LLM: action精确枚举；运行统一经过源硬门，workspace和runner只消费原宿主绑定，不创建另一执行器合同。
-    # 函数用途: 将公开动作交给领域存储或执行器。
+    # LLM: action精确枚举；check_sources刷新而get稳定，运行仍经源硬门；workspace/runner仅取原宿主绑定。
+    # 函数用途: 将公开动作交给原领域存储、实时检查或执行器。
     def _dispatch(self, params):
         action, store = params['action'], self._store()
         if action == 'list':
@@ -232,7 +232,7 @@ class ScriptsTool(BaseTool):
             return _plain(old)
         if action == 'check_sources':
             from ..workflows.datasource_runtime import project_script_asset_fields
-            return project_script_asset_fields(self.owner_home, old, workspace_root=self._workspace_root())
+            return project_script_asset_fields(self.owner_home, old, workspace_root=self._workspace_root(), refresh_timestamp=True)
         if action == 'delete':
             return {'deleted': store.delete_script(script_id)}
         if action in ('update_sources', 'record_candidate'):

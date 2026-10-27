@@ -9,6 +9,7 @@ import math
 import os
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -16,6 +17,7 @@ from copy import deepcopy
 from dataclasses import asdict, fields
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from types import MappingProxyType
 
 from ..assets import safe_asset_id
@@ -36,6 +38,8 @@ _FROZEN_MANIFEST = None
 _SCRIPT_WORKSPACE = ContextVar('script_workspace', default=None)
 _ASSET_IM_NOTIFIER = ContextVar('asset_im_notifier', default=None)
 _SCRIPT_EXECUTION_RECORD = ContextVar('script_execution_record', default=None)
+_SOURCE_CHECK_TIMESTAMPS = OrderedDict()
+_SOURCE_CHECK_TIMESTAMP_LOCK = RLock()
 
 
 # LLM: 仅可信执行包装器绑定已验版本；副本按Owner/脚本/workspace隔离，用户子进程不继承宿主ContextVar。
@@ -129,15 +133,31 @@ def _source_content_status(owner_home, store, source, row, workspace_root):
     return ''
 
 
-# LLM: 只读当前Owner/workspace目录；优先报告缺失再空源再新增，普通无源脚本不触碰连接或秘密。
-# 函数用途: 比较脚本冻结绑定和当前连接，返回固定差异状态而不执行脚本。
-def evaluate_script_source_check(owner_home: str | Path, record_or_descriptor: Mapping | AssetDescriptor, *, workspace_root=None):
+# LLM: 仅缓存展示时间不缓存健康状态，Owner/workspace/版本/声明隔离且有界；显式检查刷新，同一状态的读取稳定。
+# 函数用途: 为本次实际检查结果补充稳定或显式刷新的时间戳。
+def _stamp_source_check(owner_home, descriptor, bindings, check, workspace_root, refresh):
+    key = (str(Path(owner_home).resolve()), str(Path(workspace_root).resolve()) if workspace_root else '',
+           descriptor['id'], descriptor.get('revision'), hashlib.sha256(_canonical(descriptor['data_sources'])).digest())
+    state = _canonical([bindings, check])
+    with _SOURCE_CHECK_TIMESTAMP_LOCK:
+        previous = _SOURCE_CHECK_TIMESTAMPS.pop(key, None)
+        stamp = previous[1] if not refresh and previous and previous[0] == state else datetime.now(timezone.utc).isoformat()
+        _SOURCE_CHECK_TIMESTAMPS[key] = (state, stamp)
+        while len(_SOURCE_CHECK_TIMESTAMPS) > 512:
+            _SOURCE_CHECK_TIMESTAMPS.popitem(last=False)
+    check['checked_at'] = stamp
+    return bindings, check
+
+
+# LLM: 每次只读检查真实连接/内容；仅空连接目录的非空被动参数兼容旧脚本，不授予SDK权限；缺失优先于空源和新增。
+# 函数用途: 比较脚本冻结绑定和当前连接，不执行脚本；普通读回可保持展示时间稳定。
+def evaluate_script_source_check(owner_home: str | Path, record_or_descriptor: Mapping | AssetDescriptor, *, workspace_root=None, refresh_timestamp=True):
     descriptor = _script_descriptor(record_or_descriptor)
     sources = descriptor['data_sources']
     check = {'status': 'not_applicable' if not sources else 'ok', 'added_sources': [],
-             'missing_sources': [], 'empty_sources': [], 'checked_at': datetime.now(timezone.utc).isoformat()}
+             'missing_sources': [], 'empty_sources': []}
     if not sources:
-        return [], check
+        return _stamp_source_check(owner_home, descriptor, [], check, workspace_root, refresh_timestamp)
     store = DatasourceStore(owner_home)
     # 当前Store总是包含全部登记连接，停用状态由options投影，不传尚不存在的include_disabled参数。
     rows = store.list_datasources(workspace_root=workspace_root)
@@ -146,6 +166,12 @@ def evaluate_script_source_check(owner_home: str | Path, record_or_descriptor: M
         row = by_id.get(source['source_id'])
         binding = _source_binding(source['source_id'], {**(row or {}).get('options', {}), **source['query_scope']})
         bindings.append(binding)
+        scope = source.get('query_scope')
+        if (row is None and not rows and isinstance(scope, dict) and scope
+                and not any(key in scope for key in ('device_name', 'log_source_name', 'path', 'file_path',
+                    'database_path', 'query', 'sql', 'access'))
+                and not source.get('device_name') and not source.get('log_source_name')):
+            continue
         changed = row and any(binding[key] and binding[key] != row.get('options', {}).get(key, '')
                               for key in ('device_name', 'log_source_name') if key in row.get('options', {}))
         issue = ('missing_sources' if row is None or not _source_enabled(row) or changed else
@@ -161,14 +187,14 @@ def evaluate_script_source_check(owner_home: str | Path, record_or_descriptor: M
             check['added_sources'].append(_source_binding(row['datasource_id'], options))
     check['status'] = next((status for key, status in (('missing_sources', 'source_missing'),
         ('empty_sources', 'source_empty'), ('added_sources', 'source_added')) if check[key]), 'ok')
-    return bindings, check
+    return _stamp_source_check(owner_home, descriptor, bindings, check, workspace_root, refresh_timestamp)
 
 
-# LLM: 派生字段仅供当前读回，不写回描述符或改变源授权；多个名称按绑定顺序去重。
-# 函数用途: 给所有脚本统一投影四个展示字段及源差异。
-def project_script_asset_fields(owner_home: str | Path, record: Mapping, *, workspace_root=None):
+# LLM: 派生字段不写回或授权；默认稳定展示时间，显式check_sources刷新，实际源健康每次重查。
+# 函数用途: 给所有脚本统一投影展示字段及源差异。
+def project_script_asset_fields(owner_home: str | Path, record: Mapping, *, workspace_root=None, refresh_timestamp=False):
     descriptor = _script_descriptor(record)
-    bindings, check = evaluate_script_source_check(owner_home, descriptor, workspace_root=workspace_root)
+    bindings, check = evaluate_script_source_check(owner_home, descriptor, workspace_root=workspace_root, refresh_timestamp=refresh_timestamp)
     return {'script_name': descriptor['name'], 'summary': descriptor['summary'], 'source_bindings': bindings,
             'source_check': check, **{key: ', '.join(dict.fromkeys(row[key] for row in bindings if row[key]))
                                      for key in ('device_name', 'log_source_name')}}
@@ -210,14 +236,14 @@ def emit_asset_im_notification(owner_home: str | Path, *, event_type: str, title
 emit_Asset_im_notification = emit_asset_im_notification
 
 
-# LLM: 覆盖仅补充预检或替换同ID查询，不改变原SDK授权；空覆盖不能抹掉原声明，旧被动dict不推断连接权限。
-# 函数用途: 生成本次健康预检的有效源声明。
+# LLM: 显式空列表/被动dict清除本次预检声明，非空列表补充检查；原SDK仍使用原授权合同，覆盖不持久化。
+# 函数用途: 按本次有效覆盖检查源健康，不复用旧展示结果。
 def _execution_source_check(owner_home, record, overrides, workspace_root):
-    if not isinstance(overrides, (list, tuple)):
-        return record.get('source_check') or evaluate_script_source_check(owner_home, record, workspace_root=workspace_root)[1]
+    if overrides is None or not isinstance(overrides, (dict, list, tuple)):
+        return evaluate_script_source_check(owner_home, record, workspace_root=workspace_root)[1]
     descriptor = _script_descriptor(record)
-    sources = {source['source_id']: source for source in descriptor['data_sources']}
-    for value in overrides:
+    sources = {} if not overrides or isinstance(overrides, dict) else {source['source_id']: source for source in descriptor['data_sources']}
+    for value in (() if isinstance(overrides, dict) else overrides):
         source = DataSourceSpec.from_dict(value).to_dict()
         sources[source['source_id']] = source
     descriptor['data_sources'] = list(sources.values())

@@ -89,8 +89,8 @@ class _WorkflowRunLifecycle:
         with self.store.execution_lock(record.workflow_run_id):
             return self._drive(record, definition, 0)
 
-    # LLM: 恢复先核开关及后缀脚本版本；未显式允许漂移不重置输出，确认后重钉版本；成功前缀保持。
-    # 函数用途: 在独占锁内注入带来源合法输出或数据源变更并续跑。
+    # LLM: 参数/补丁先完成无副作用验证，再核后缀版本；合法修复可重钉当前依赖，确认/漂移断点仍强制版本门。
+    # 函数用途: 在独占锁内校验修复请求、保存批准的快照变更并续跑，保留成功前缀。
     def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
                             resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False):
         if type(allow_script_drift) is not bool:
@@ -111,17 +111,17 @@ class _WorkflowRunLifecycle:
                 start -= 1
             if any(step.status not in SUCCESS for step in record.steps[:start]):
                 raise ValueError('不能跳过未成功的前序步骤')
-            blocked = self._resume_script_gate(record, definition, start, allow_script_drift)
-            if blocked is not None:
-                return blocked
             repaired = None
             if patched_step_output is not None:
                 if start == len(ids):
                     raise ValueError('没有可注入修复输出的目标步骤')
                 repaired = self._patched_step(record.steps[start], definition['steps'][start], patched_step_output, resolution_origin)
+            if updated_data_sources is not None and not isinstance(updated_data_sources, (dict, list)):
+                raise ValueError('updated_data_sources必须为dict或list')
+            blocked = self._resume_script_gate(record, definition, start, allow_script_drift)
+            if blocked is not None:
+                return blocked
             if updated_data_sources is not None:
-                if not isinstance(updated_data_sources, (dict, list)):
-                    raise ValueError('updated_data_sources必须为dict或list')
                 definition.setdefault('descriptor', {})['data_sources'] = payload(updated_data_sources)
                 definition['_override_data_sources'] = True
                 self._save_definition(record, definition)
@@ -162,8 +162,8 @@ class _WorkflowRunLifecycle:
                 pins[spec['step_id']] = {'script_id': spec['script_id'], 'revision': None, 'code_sha256': '', 'source_scope': 'missing'}
         return pins
 
-    # LLM: 仅接受一次原Store运行摘要推进，代码/来源不变且revision/run_count都精确+1；真实编辑或竞态不重钉。
-    # 函数用途: 将本次执行自己的摘要版本推进到复用同脚本的冻结步骤，避免正常恢复误报漂移。
+    # LLM: 仅接受一次原Store摘要推进，代码/来源不变且revision/run_count精确+1；只更新权威run内嵌pin，不创建修复旁件。
+    # 函数用途: 推进本次执行自己的摘要版本，避免正常恢复误报漂移。
     def _advance_summary_pin(self, run, definition, spec):
         frozen = definition.get('_frozen_scripts', {})
         previous = frozen.get(spec['step_id'], {})
@@ -179,19 +179,25 @@ class _WorkflowRunLifecycle:
         for key, pin in tuple(frozen.items()):
             if pin == previous:
                 frozen[key] = dict(current)
-        self._save_definition(run, definition)
+        self.store.save_run(run, definition)
 
-    # LLM: 默认比较重跑后缀的原pin，拒绝不重置输出；显式确认只更新本运行快照，不修改脚本或成功前缀。
-    # 函数用途: 在恢复前拦截脚本漂移并保存可恢复断点。
+    # LLM: 非漂移故障可修复当前依赖及后缀中完全相同原pin的同版本复用；其它后续/确认断点仍核原pin，前缀不变。
+    # 函数用途: 接纳当前故障资产修复，拦截其它后续漂移，仅在核验通过后发表新pin。
     def _resume_script_gate(self, record, definition, start, allow):
         current = self._script_pins(definition['steps'][start:])
         frozen = definition.get('_frozen_scripts', {})
-        changed = next((key for key, value in current.items() if frozen.get(key) != value), None)
-        if changed is None:
-            return None
-        if allow:
-            definition['_frozen_scripts'] = {**frozen, **current}
-            self._save_definition(record, definition)
+        target = record.steps[start] if start < len(record.steps) else None
+        repaired = set()
+        if target and target.needs_repair and target.error_code != 'SCRIPT_REVISION_DRIFT' and target.step_id in current:
+            previous, replacement = frozen.get(target.step_id), current[target.step_id]
+            repaired = {key for key, value in current.items() if key == target.step_id
+                        or previous and frozen.get(key) == previous and value == replacement}
+        changed = next((key for key, value in current.items() if key not in repaired and frozen.get(key) != value), None)
+        if changed is None or allow:
+            approved = {key: value for key, value in current.items() if (allow or key in repaired) and frozen.get(key) != value}
+            if approved:
+                definition['_frozen_scripts'] = {**frozen, **approved}
+                self._save_definition(record, definition)
             return None
         index = next(i for i, step in enumerate(record.steps) if step.step_id == changed)
         step = replace(record.steps[index], error_code='SCRIPT_REVISION_DRIFT',
@@ -221,14 +227,21 @@ class _WorkflowRunLifecycle:
             payload={'workflow_run_id': record.workflow_run_id, 'workflow_id': record.workflow_id,
                      'total_steps': record.total_steps, 'completed_steps': record.completed_steps, 'breakpoint': record.breakpoint})
 
-    # LLM: 最终合同复用原脚本类型/必填校验；失败保留末步真实输出，不重写已成功的步骤快照。
-    # 函数用途: 更新进度、构造断点，并拒绝缺字段或类型错误的最终输出。
+    # LLM: 显式类型合同或完全空输出按成功步骤合并值校验，不采纳失败/跳过输出；旧非空无类型合同保持兼容。
+    # 函数用途: 更新进度、构造断点并核工作流合同，保留末步真实final_output。
     def _finalize_record(self, record, definition):
         record = replace(record, workflow_name=definition['descriptor']['name'], total_steps=len(record.steps),
                          completed_steps=sum(step.status in SUCCESS for step in record.steps))
         error = ''
         if record.status == 'succeeded':
-            _, error = parse_script_output(json.dumps(record.final_output), definition['descriptor'].get('io_contract', {}))
+            merged_outputs = {}
+            for step in record.steps:
+                if step.status in ('succeeded', 'escalated_recovered') and isinstance(step.output_snapshot, dict):
+                    merged_outputs.update(step.output_snapshot)
+            merged_outputs.update(record.final_output)
+            contract = definition['descriptor'].get('io_contract', {})
+            if contract.get('output_types') or not merged_outputs:
+                _, error = parse_script_output(json.dumps(merged_outputs), contract)
         if error:
             record = replace(record, status='failed', needs_repair=True,
                 current_step_id=record.steps[-1].step_id if record.steps else '',
@@ -388,8 +401,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             if descriptor.get('enabled', True) is False:
                 raise AssetDisabledError('skill', reference)
 
-    # LLM: 源缺失、空源、非零退出和输出合同失败硬停，不能skip或自动兜底；其余错误保留原策略与清理门。
-    # 函数用途: 执行脚本并记录结构化修复指引、主动暂停断点及实际恢复结果。
+    # LLM: 源缺失/空源/漂移不能skip或兜底；运行错误遵循显式策略；回调不得覆盖宿主指引和已脱敏清理事实。
+    # 函数用途: 执行脚本，记录修复上下文并应用明确注入的错误策略。
     def _script_step(self, record, spec, run, definition):
         sources = definition.get('descriptor', definition).get('data_sources')
         options = {'override_data_sources': payload(sources)} if sources or definition.get('_override_data_sources') else {}
@@ -407,21 +420,20 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             return
         policy = spec.get('on_error', 'escalate_to_agent')
         record.escalation_result = redact_sensitive_value(payload(result.escalation_context or {}))
-        hard_stop = result.error_code in {'SCRIPT_EXIT_NONZERO', 'SCRIPT_REVISION_DRIFT', 'DATASOURCE_MISSING', 'DATASOURCE_EMPTY',
-            'SCRIPT_INVALID_JSON', 'SCRIPT_MISSING_OUTPUT_KEYS', 'SCRIPT_NULL_OUTPUT_VALUE', 'SCRIPT_OUTPUT_TYPE_MISMATCH'}
+        cleanup = result.escalation_context.get('cleanup_error')
+        record.escalation_result['repair_guide'] = redact_sensitive_value({
+            'failed_step_id': record.step_id, 'script_id': record.script_id, 'error_code': result.error_code,
+            'io_contract': payload(result.escalation_context.get('io_contract', {})),
+            'resume_options': ['patched_step_output', 'updated_data_sources', 'rerun_from_step']})
+        hard_stop = result.error_code in {'SCRIPT_REVISION_DRIFT', 'DATASOURCE_MISSING', 'DATASOURCE_EMPTY'}
         if hard_stop:
             record.status = 'paused_for_resume' if policy == 'escalate_to_agent' else 'failed'
             return
-        cleanup = result.escalation_context.get('cleanup_error')
         if policy == 'skip' and not cleanup:
             record.status, record.needs_repair = 'skipped', False
             return
         if policy != 'escalate_to_agent':
             return
-        record.escalation_result['repair_guide'] = redact_sensitive_value({
-            'failed_step_id': record.step_id, 'script_id': record.script_id, 'error_code': result.error_code,
-            'io_contract': payload(result.escalation_context.get('io_contract', {})),
-            'resume_options': ['patched_step_output', 'updated_data_sources', 'rerun_from_step']})
         record.status = 'paused_for_resume'
         if self.escalation_handler is None:
             return
@@ -429,9 +441,9 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         recovered = payload(self._escalate(spec, result, run))
         if not isinstance(recovered, dict):
             raise ValueError('兜底回调必须返回 JSON 对象')
-        record.escalation_result.update(redact_sensitive_value(recovered))
+        record.escalation_result.update({key: value for key, value in redact_sensitive_value(recovered).items()
+                                         if key not in ('repair_guide', 'cleanup_error')})
         if cleanup:
-            record.escalation_result['cleanup_error'] = payload(cleanup)
             return
         if recovered.get('recovered') is True:
             patched = recovered.get('patched_output', recovered.get('output_data'))

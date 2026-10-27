@@ -1,3 +1,34 @@
+## 2026-10-27 Wave 7 W1 R2：恢复工作流兼容并保留预检硬门
+
+来源：`07-tasks/wave7-w1-r2-fixes.md`，返工起点 `65d2daaf4f26624dcf3b4b85ee8004692ad4cb12`。代码仅在 `/tmp/wt-wave7-w1` / `wt-wave7-w1` 修改，不部署、不启停服务。
+
+- `datasource_runtime` 只在连接登记表全空、非空查询范围且没有任何显式连接/访问键时兼容旧被动参数源。缺源、停用、空文件、空 SQL 结果和命名错配仍按原规则拦截；显式空列表或被动 dict 只清除本次预检，不改原 SDK 权限合同，非空结构化覆盖仍逐源检查。
+- `source_check.checked_at` 只缓存展示时间，按 Owner、workspace、脚本版本、源声明隔离并限量；健康状态仍每次重查。同进程、缓存未淘汰时的相同 get 保持稳定，源状态改变或显式 `check_sources` 刷新时间；时间不进入持久描述符或作为权限依据。缓存为 512 条进程内观察记录，不承诺跨淘汰、重启保持同一时间，也不为只读查询新增持久写入。
+- 只有 `DATASOURCE_MISSING`、`DATASOURCE_EMPTY`、`SCRIPT_REVISION_DRIFT` 不可被 skip/兜底绕过。运行错误恢复显式错误策略，默认仍暂停；提前保存 `repair_guide`，清理故障不被恢复结果覆盖，非法补丁在任何 pin/快照变更前拒绝。
+- 工作流合同按成功或合同已验证的修复步骤合并输出；显式 `output_types` 或完全空输出才强制校验，保留真实末步 `final_output`。修复当前非漂移故障脚本后重钉当前依赖；后缀中同原 pin、同修复版本的同资产复用同步采用，其他后续资产、确认断点和漂移断点仍须显式批准。正常运行摘要推进只更新权威运行内嵌 pin，不创建修复旁件。
+- 五套首轮另暴露 100ms 脚本预算耗在 SDK 无关导入的问题。导入剖析定位到 `workflows.__init__ -> engine -> skill_adapter` 及 `json_io -> runtime_errors -> model_call_ledger`；公开类改为按需取得原类型，JSON 错误报告用同签名延迟转交唯一原实现。没有修改超时、执行 deadline、SDK 可信预载、签名冻结、连接类或 SQL authorizer，也没有改旧四套测试。
+
+测试先行：首批 31 项定向验证实际 14 失败 / 17 通过，覆盖六类问题；另补轻量预载、编辑后非法补丁无持久副作用、错误转发身份与参数的红绿证据。按本轮新策略将 W1 原硬停用例改为三类预检错误不可绕过，并新增默认普通运行错误不能成功的验证；未删、跳过或放宽其他旧断言。
+
+首次五套组合 **503 passed / 0 failed / 0 errors / 0 skipped**，含 W1 71、工具 212、引擎 66、数据源权限 115、事件中心 39。原 100ms 错误分类和真实 timeout 用例在原预算、原断言下通过，证据 `.pytest_cache/w1-r2-final.xml`。原始失败保留为 `.pytest_cache/w1-r2-red.xml`、`w1-r2-first.xml`、`w1-r2-additional-red.xml`、`w1-r2-error-import-red.xml`。
+
+独立 Astra high 仅按所示关键函数片段只读静态复核，未读完整仓库或独立跑测试。其指出回调能覆盖 `repair_guide` 和清理分支重新放入未脱敏值，已用真实脚本失败后附加合成宿主诊断的两项红例复现（`.pytest_cache/w1-r2-review-red.xml`），修正为回调不覆盖宿主保留字段、保持原已脱敏清理事实。真实清理故障及完整 IM/Web 链路不由该合成测试证明。
+
+最终当前源码五套组合 **505 passed / 0 failed / 0 errors / 0 skipped**（W1 73、工具 212、引擎 66、数据源权限 115、事件 39），证据 `.pytest_cache/w1-r2-delivery-serial.xml`。此前与尺寸门并行的同版本组合有两项 100ms `SCRIPT_TIMEOUT`（`.pytest_cache/w1-r2-delivery.xml`），失败记录保留；停止本代理并行重活后原命令、原预算、原断言串行通过，不据此承诺其他机器/负载下的 100ms 稳定性，也不将并行竞争当作已证实原因。交付源码摘要与该次验证一致。
+
+另跑 JSON 错误报告、资产存储及公共端口三套 **181 passed / 0 failed / 0 skipped**，证据 `.pytest_cache/w1-r2-json-asset-extra.xml`；有两条原 `record_property` 与 JUnit xunit2 不兼容的 pytest 警告，未隐藏或改变测试。
+
+Ruff、差异检查和严格尺寸门通过（hard=0，blocked=False），报告按任务要求写 `/tmp/w1-r2-size.md`，不随功能提交。未运行全仓测试，也不以本地测试声称部署、真实 IM、Web/Hostv2 或飞书网络端到端已验证。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave7_broker_workflow_identity.py agent_py_agent/tests/test_scripts_and_workflows_tools.py agent_py_agent/tests/test_workflow_script_engine.py agent_py_agent/tests/test_datasource_keyring_and_script_binding.py agent_py_agent/tests/test_plugin_event_hub.py -q --tb=short --junitxml=.pytest_cache/w1-r2-delivery-serial.xml
+ruff check agent_py_agent scripts
+git diff --check
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w1-r2-size.md
+```
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。
