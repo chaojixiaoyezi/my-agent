@@ -1,5 +1,5 @@
-# LLM: 只断言程序事实、渲染与只读边界；临时数据不发唤醒、不停止真实服务。
-# 模块用途: 回归回合尾标和后台进程观察入口。
+# LLM: 只断言程序事实、渲染与只读边界；缓存回归以真实读取次数/文件快照验证，临时数据不发唤醒或停止服务。
+# 模块用途: 回归回合尾标、后台只读缓存、按会话隔离坏文件与告警恢复。
 from __future__ import annotations
 
 import json
@@ -681,7 +681,7 @@ def test_background_processes_keep_notice_loop_at_active_cadence(monkeypatch):
     assert waits == [tui_threading.TUI_BACKGROUND_NOTICE_INTERVAL_SECONDS]
 
 
-# LLM: 所有数据均为同owner临时记录；显式指定thread_id时严格只返回同线程记录，未指定线程时返回全owner记录。
+# LLM: 恢复原生空串未绑定身份；同owner线程过滤、全owner展示及只读断言保持不变。
 # 函数用途: 验证列表严格按会话过滤、Owner全局入口保留未绑定记录及只读文件边界。
 @pytest.mark.parametrize("thread_id,expected", [
     (None, {"bg-one", "bg-two", "bg-global"}),
@@ -1294,3 +1294,1035 @@ def test_c4_gateway_failed_session_switch_does_not_resolve_old_target(tmp_path):
     payload["ok"] = False
     assert not _consume_background_notices(agent, "display-two", runtime, [None], set(), [0], nav)
     assert _background_watch_thread_id(agent, nav, session_id="display-two", runtime=runtime) is None
+
+
+# LLM: 缓存是进程内优化；每例清空两级缓存，旧实现无缓存时仍能先运行行为反例而非导入报错。
+# 函数用途: 隔离后台观察缓存，避免测试顺序或时钟替身影响其它用例。
+@pytest.fixture(autouse=True)
+def _b1_reset_view_cache():
+    clear = getattr(bg, "_clear_background_process_view_cache", lambda: None)
+    clear()
+    yield
+    clear()
+
+
+# LLM: 只在临时目录构造轻量记录；文件与目录回拨十秒以真实通过共用粗粒度时间窗。
+# 函数用途: 准备可确定命中缓存的多个后台记录，不启动进程或写真实日志。
+def _b1_records(home, count=3):
+    root = home / "workspace/runtime/processes/sessions"
+    root.mkdir(parents=True)
+    old = time.time() - 10
+    for index in range(count):
+        path = root / f"bg-cache-{index}.json"
+        payload = {"session_id": path.stem, "status": "exited", "thread_id": "thread-one",
+                   "metadata": {"marker": "original"}, "started_at": time.time() - 100, "finished_at": time.time() - 1}
+        path.write_text(json.dumps(payload))
+        os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    return root
+
+
+# LLM: 仍走原nofollow读取；仅计数真实打开解析入口，不能用假payload制造缓存收益。
+# 函数用途: 捕获后台元数据的实际读取次数。
+def _b1_count_reads(monkeypatch):
+    original, reads = bg.read_bytes_beneath, []
+
+    # LLM: 参数和异常原样透传，不降低文件类型、身份或字节上限检查。
+    # 函数用途: 记录一次真实后台元数据读取。
+    def read(root, parts, **kwargs):
+        reads.append((str(root), parts))
+        return original(root, parts, **kwargs)
+
+    monkeypatch.setattr(bg, "read_bytes_beneath", read)
+    return reads
+
+
+# LLM: 不以耗时阈值验优化；同代可信目录的第二次观察必须零次重复文件读取。
+# 函数用途: 验证目录缓存命中且调用者不能污染缓存快照。
+def test_b1_trusted_directory_reuses_readonly_snapshots(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    _b1_records(home)
+    before = _files(home)
+    reads = _b1_count_reads(monkeypatch)
+    first = bg.list_background_processes(home, thread_id="thread-one")
+    assert first["total"] == 3 and len(reads) == 3
+    first["items"][0]["status"] = "caller-mutated"
+    second = bg.list_background_processes(home, thread_id="thread-one")
+    assert len(reads) == 3
+    assert {item["status"] for item in second["items"]} == {"exited"}
+    assert _files(home) == before
+
+
+# LLM: 原子replace改变目录代次；未变文件必须命中自己的安全指纹缓存。
+# 函数用途: 验证目录一项更新只重读这一项。
+def test_b1_atomic_replacement_only_reparses_changed_file(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    path = root / "bg-cache-1.json"
+    payload = json.loads(path.read_text())
+    payload["command"] = "updated"
+    replacement = root / "replacement.tmp"
+    replacement.write_text(json.dumps(payload))
+    replacement.replace(path)
+    result = bg.list_background_processes(home)
+    assert len(reads) == 4
+    assert next(item for item in result["items"] if item["session_id"] == path.stem)["command"] == "updated"
+
+
+# LLM: TTL按最初复核时刻而非命中时刻计算；60秒兜底必须穿透单文件缓存。
+# 函数用途: 验证目录期限强制完整重读并发现不改目录mtime的原位写。
+def test_b1_directory_ttl_forces_full_file_revalidation(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    clock = [10.0]
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    clock[0] = 69.9
+    bg.list_background_processes(home)
+    assert len(reads) == 3
+    path = root / "bg-cache-0.json"
+    payload = json.loads(path.read_text())
+    payload["command"] = "in-place-update"
+    path.write_text(json.dumps(payload))
+    clock[0] = 70.0
+    result = bg.list_background_processes(home)
+    assert len(reads) == 6
+    assert result["items"][0]["command"] == "in-place-update"
+
+
+# LLM: 读取前的不可信判断不能由读取完成后跨过时间窗洗白；目录和文件两层均须守门。
+# 函数用途: 验证粗粒度时间窗内不复用或发表缓存。
+@pytest.mark.parametrize("becomes_trusted", [False, True])
+def test_b1_recent_stat_cannot_seed_or_hit_cache(tmp_path, monkeypatch, becomes_trusted):
+    home = tmp_path / "owner"
+    _b1_records(home, count=1)
+    trusted = [False]
+    original, reads = bg.read_bytes_beneath, []
+    monkeypatch.setattr(bg, "cache_entry_trustworthy", lambda mtime: trusted[0], raising=False)
+
+    # LLM: 真实读取完成后才改变时间窗判定，专门构造延迟发布反例。
+    # 函数用途: 捕获时间窗变化前后的真实文件读取。
+    def read(root, parts, **kwargs):
+        reads.append(parts)
+        value = original(root, parts, **kwargs)
+        trusted[0] = becomes_trusted
+        return value
+
+    monkeypatch.setattr(bg, "read_bytes_beneath", read)
+    bg.list_background_processes(home)
+    bg.list_background_processes(home)
+    assert len(reads) == 2
+
+
+# LLM: 匹配会话的非终态探活和耗时每次现算，终态及其它会话不探活；缓存只存静态payload。
+# 函数用途: 验证热缓存不会冻结动态状态，也不会扩大探活范围。
+@pytest.mark.parametrize("status", ["running", "unknown"])
+def test_b1_cache_keeps_liveness_and_elapsed_dynamic_after_thread_filter(tmp_path, monkeypatch, status):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    for index, thread in [(0, "thread-one"), (1, "other-thread")]:
+        path = root / f"bg-cache-{index}.json"
+        payload = json.loads(path.read_text())
+        payload.update(status=status, thread_id=thread, started_at=100.0, finished_at=0.0)
+        path.write_text(json.dumps(payload))
+    for path in root.glob("bg-*.json"):
+        os.utime(path, (100, 100))
+    os.utime(root, (100, 100))
+    clock, live, probes = [200.0], [True], []
+    monkeypatch.setattr(bg.time, "time", lambda: clock[0])
+    monkeypatch.setattr(bg, "_managed_instance_still_live", lambda sid, *args: probes.append(sid) or live[0])
+    reads = _b1_count_reads(monkeypatch)
+    first = bg.list_background_processes(home, thread_id="thread-one")
+    assert first["items"][0]["elapsed_seconds"] == 100.0
+    clock[0], live[0] = 205.0, False
+    second = bg.list_background_processes(home, thread_id="thread-one")
+    assert second["items"][0]["elapsed_seconds"] == 105.0 and not second["items"][0]["alive"]
+    assert probes == ["bg-cache-0", "bg-cache-0"]
+    assert len(reads) == 3
+
+
+# LLM: 原日志reader仍每次读取文件尾部，append不会更新目录mtime也不能冻结所选日志。
+# 函数用途: 验证热缓存旁的详情日志实时且保持64KiB上限。
+def test_b1_cached_directory_does_not_freeze_selected_log_tail(tmp_path):
+    home = tmp_path / "owner"
+    root, output = _session(home, status="exited")
+    old = time.time() - 10
+    os.utime(root / "bg-example.json", (old, old))
+    os.utime(root, (old, old))
+    bg.list_background_processes(home)
+    before = root.stat().st_mtime_ns
+    assert bg.inspect_background_process(home, "bg-example", tail_lines=1)["log_tail"] == ["line-two"]
+    with output.open("a") as stream:
+        stream.write("new-tail\n")
+    assert root.stat().st_mtime_ns == before
+    detail = bg.inspect_background_process(home, "bg-example", tail_lines=1)
+    assert detail["log_tail"] == ["new-tail"]
+
+
+# LLM: 坏schema仍是合法JSON，归属须在验证失败后可提取；顶层与全部scope位置同等处理。
+# 函数用途: 验证明确其它线程的坏记录只出现在无关诊断中，全owner观察仍报告失败。
+@pytest.mark.parametrize("location", [None, "access_scope", "execution_scope", "completion_target", "metadata", "scope"])
+@pytest.mark.parametrize("key", ["thread_id", "conversation_id"])
+def test_b1_foreign_corrupt_record_is_isolated_at_every_scope_location(tmp_path, location, key):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid-schema"}
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[key] = "other-thread"
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    scoped = bg.list_background_processes(home, thread_id="thread-one")
+    assert scoped["projection_ok"] is True and scoped["errors"] == []
+    assert scoped.get("unrelated_errors") == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert scoped.get("unscoped_error_count") == 1
+    assert bg.list_background_processes(home)["projection_ok"] is False
+
+
+# LLM: 只有明确其它owner才隔离；当前线程或线程声明相互冲突的坏记录不得被历史年龄洗白。
+# 函数用途: 验证归属冲突失败关闭及其它owner坏文件的隔离。
+@pytest.mark.parametrize("kind", ["current", "conflicting", "foreign_owner", "foreign_nested_owner"])
+def test_b1_corrupt_scope_classification_preserves_current_thread_errors(tmp_path, kind):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-corrupt.json"
+    payload = {"session_id": path.stem, "schema": "invalid-schema", "thread_id": "thread-one"}
+    if kind == "conflicting":
+        payload["scope"] = {"thread_id": "other-thread"}
+    if kind.startswith("foreign"):
+        target = payload if kind == "foreign_owner" else payload.setdefault("metadata", {})
+        target["owner_home"] = str(tmp_path / "other-owner")
+    path.write_text(json.dumps(payload))
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert result["unrelated_errors"] == []
+
+
+# LLM: 无法确认归属的坏文件不能凭年龄隔离，非字典JSON同样保守。
+# 函数用途: 验证跨越60秒与长期陈旧后，无归属错误仍令观察失败。
+@pytest.mark.parametrize("age", [0.0, 59.9, 60.0, 60.1, 120.0])
+@pytest.mark.parametrize("raw", ["broken-json", "[]", '{"session_id":"bg-corrupt","schema":"invalid"}'])
+def test_b1_unscoped_corruption_never_isolated_by_age(tmp_path, monkeypatch, age, raw):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    clock = float(int(time.time()))
+    monkeypatch.setattr(bg.time, "time", lambda: clock)
+    path = root / "bg-corrupt.json"
+    path.write_text(raw)
+    os.utime(path, (clock - age, clock - age))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] and result["unrelated_errors"] == []
+    assert bg.list_background_processes(home)["projection_ok"] is False
+
+
+# LLM: 热缓存中的坏文件变老不产生新的归属证据，始终按未知归属错误报告。
+# 函数用途: 验证缓存与时间推进不能把无归属错误洗白。
+def test_b1_cached_unscoped_error_stays_current_after_aging(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-corrupt.json"
+    path.write_text("broken-json")
+    clock = [time.time()]
+    os.utime(path, (clock[0] - 59, clock[0] - 59))
+    os.utime(root, (clock[0] - 10, clock[0] - 10))
+    monkeypatch.setattr(bg.time, "time", lambda: clock[0])
+    reads = _b1_count_reads(monkeypatch)
+    assert not bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
+    clock[0] += 2
+    assert not bg.list_background_processes(home, thread_id="thread-one")["projection_ok"]
+    assert len(reads) == 2
+
+
+# LLM: 真实TUI先报告未知归属坏文件，只有出现明确其它线程证据才恢复；不得清除其它kind的用户提示。
+# 函数用途: 验证观察恢复会主动清掉专用告警，而非等提示自然超时。
+def test_b1_tui_notice_recovers_after_unrelated_orphan_isolated(tmp_path):
+    from types import SimpleNamespace
+
+    from agent_py_agent.cli.chat_parts.tui_threading import _sync_background_watch
+
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    broken = root / "bg-orphan.json"
+    broken.write_text("broken-json")
+    runtime = TuiRuntime("b1-notice-recovery")
+    navigation = TuiAgentNavigationState(runtime)
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), thread_id="thread-one")
+    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert "观察刷新失败" in runtime.notice()
+    old = time.time() - 120
+    os.utime(broken, (old, old))
+    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert "观察刷新失败" in runtime.notice()
+    broken.write_text(json.dumps({"session_id": broken.stem, "schema": "invalid", "thread_id": "other-thread"}))
+    assert _sync_background_watch(agent, navigation, runtime=runtime)
+    assert runtime.notice() == "" and navigation.snapshot().background_process_count == 0
+    runtime.set_notice("其它功能的提示", notice_kind="other_feature")
+    _sync_background_watch(agent, navigation, runtime=runtime)
+    assert runtime.notice() == "其它功能的提示"
+
+
+# LLM: 根目录读取失败不可当成空目录或无关历史错误，缓存也不得创建缺失目录。
+# 函数用途: 验证不可读根目录保持真实失败诊断。
+def test_b1_unreadable_directory_is_current_projection_error(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    original = os.scandir
+
+    # LLM: 只在本测试目标目录拒绝列名，不伪造权限结论或影响其它临时目录。
+    # 函数用途: 注入确定的目录读取失败。
+    def scandir(path):
+        if str(path) == str(root):
+            raise PermissionError("fixture directory denied")
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert any(item["error"] == "PermissionError" for item in result["errors"])
+
+
+# LLM: 小容量仅缩短驱逐测试，不更改生产默认值；两级条目按LRU有界，清空入口必须同时失效。
+# 函数用途: 验证缓存容量、驱逐与显式清空。
+def test_b1_cache_limits_and_clear_are_effective(tmp_path, monkeypatch):
+    assert getattr(bg, "_DIRECTORY_CACHE_MAX_ENTRIES", None) == 64
+    assert getattr(bg, "_FILE_CACHE_MAX_ENTRIES", None) == 2048
+    monkeypatch.setattr(bg, "_DIRECTORY_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(bg, "_FILE_CACHE_MAX_ENTRIES", 2)
+    homes = [tmp_path / f"owner-{index}" for index in range(3)]
+    for home in homes:
+        _b1_records(home, count=1)
+    reads = _b1_count_reads(monkeypatch)
+    for home in homes:
+        bg.list_background_processes(home)
+    bg.list_background_processes(homes[-1])
+    assert len(reads) == 3
+    assert len(bg._DIRECTORY_CACHE) == len(bg._FILE_CACHE) == 2
+    bg.list_background_processes(homes[0])
+    assert len(reads) == 4
+    bg._clear_background_process_view_cache()
+    assert not bg._DIRECTORY_CACHE and not bg._FILE_CACHE
+    bg.list_background_processes(homes[0])
+    assert len(reads) == 5
+
+
+# LLM: 首次缺目录是正常空态；读取开始后目录消失是本轮观察失败，不能退回“目录本来不存在”。
+# 函数用途: 验证读取期间根目录消失不会被吞成成功空列表。
+def test_b1_disappearing_directory_after_read_is_not_successful_empty(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    original = getattr(bg, "_directory_stat_key", None)
+    assert callable(original)
+    visits = []
+
+    # LLM: 只在已见存在的同一目录第二次核验时注入真实类型的缺失错误。
+    # 函数用途: 重现初次stat成功、读后stat失败的确定交错。
+    def changed(path):
+        if path == root:
+            visits.append(path)
+            if len(visits) > 1:
+                raise FileNotFoundError("fixture directory vanished")
+        return original(path)
+
+    monkeypatch.setattr(bg, "_directory_stat_key", changed)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] and result["errors"][0]["error"] == "FileNotFoundError"
+
+
+# LLM: 原始v4文件沿真实schema校验且禁止可写Store入口；第二次稳定观察不能重复解析或验证。
+# 函数用途: 验证原生记录的缓存收益与严格只读边界。
+def test_b1_native_record_reuses_schema_validation_without_store_load(tmp_path, monkeypatch):
+    from agent_py_agent.agent.tooling.process_session_store import ProcessSessionStore
+    from agent_py_agent.tests import test_process_completion_events as fixtures
+
+    monkeypatch.setattr(fixtures, "capture_process_birth_token", lambda pid: "fixture-launcher")
+    agent, _, authority = fixtures._fixture(tmp_path, managed=True)
+    home, old = agent.home_paths.owner_home_dir, time.time() - 10
+    for path in authority.root.glob("bg-*.json"):
+        os.utime(path, (old, old))
+    os.utime(authority.root, (old, old))
+    original, validations = bg.validate_process_record, []
+
+    # LLM: 验证器返回值与异常均走原函数，不以伪schema通过替代真实校验。
+    # 函数用途: 计数实际v4记录校验次数。
+    def validated(payload):
+        validations.append(payload["session_id"])
+        return original(payload)
+
+    # LLM: 观察层误入恢复写入口时必须令测试失败。
+    # 函数用途: 拦截Store加载或事务副作用。
+    def forbidden(*args, **kwargs):
+        pytest.fail("background view must not load or transact writable Store")
+
+    monkeypatch.setattr(bg, "validate_process_record", validated)
+    monkeypatch.setattr(ProcessSessionStore, "load", forbidden)
+    monkeypatch.setattr(ProcessSessionStore, "transaction", forbidden)
+    before = _files(tmp_path), _files(authority.root)
+    assert bg.list_background_processes(home)["total"] == 1
+    assert bg.list_background_processes(home)["total"] == 1
+    assert validations == ["bg-test-notice"]
+    assert (_files(tmp_path), _files(authority.root)) == before
+
+
+# LLM: 概要消费者可能改动传入字典；深拷贝必须同时隔离文件缓存和目录缓存内部嵌套对象。
+# 函数用途: 验证动态投影修改不能污染后续缓存命中。
+def test_b1_summary_cannot_mutate_cached_nested_payload(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    _b1_records(home, count=1)
+    original = bg._summary
+
+    # LLM: 原概要正常生成后才修改本次私有payload，下一次必须重新拿到未污染快照。
+    # 函数用途: 模拟消费者持有并修改嵌套元数据。
+    def summary(root, payload):
+        assert payload["metadata"]["marker"] == "original"
+        result = original(root, payload)
+        payload["metadata"]["marker"] = "consumer-mutated"
+        return result
+
+    monkeypatch.setattr(bg, "_summary", summary)
+    assert bg.list_background_processes(home)["total"] == 1
+    assert bg.list_background_processes(home)["total"] == 1
+
+
+# LLM: 多观察线程只读同代快照；返回字典由各调用者独占，不把共享缓存暴露给并发消费者。
+# 函数用途: 验证并发命中不丢记录、不串改调用者数据。
+def test_b1_hot_directory_cache_is_threadsafe(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    home = tmp_path / "owner"
+    _b1_records(home)
+    assert bg.list_background_processes(home)["total"] == 3
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(bg.list_background_processes, [home] * 24))
+    assert all(result["projection_ok"] and result["total"] == 3 for result in results)
+    results[0]["items"][0]["status"] = "mutated"
+    assert results[1]["items"][0]["status"] == "exited"
+
+
+# LLM: 初始旧mtime不能赋给随后刚被改坏的新文件；读后看到的新代次年龄要重新决定是否属于历史孤儿。
+# 函数用途: 验证stat与读取之间的新坏JSON不会被旧文件年龄错误隔离。
+def test_b1_new_corruption_during_read_cannot_inherit_old_mtime(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-cache-0.json"
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    original = bg.read_bytes_beneath
+
+    # LLM: 仅在真实reader即将打开指定记录时改写为新坏JSON，不伪造stat或错误类型。
+    # 函数用途: 构造旧代次已stat、新代次被读取的确定交错。
+    def read(anchor, parts, **kwargs):
+        if anchor == root:
+            path.write_text("newly-broken-json")
+        return original(anchor, parts, **kwargs)
+
+    monkeypatch.setattr(bg, "read_bytes_beneath", read)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-cache-0", "error": "JSONDecodeError"}]
+    assert not result["unrelated_errors"]
+
+
+# LLM: 目录换代允许复用单文件，但不能给旧文件的复核期限重新起算60秒。
+# 函数用途: 验证无关目录变动不会延后完整重读期限。
+def test_b1_new_directory_generation_cannot_renew_old_file_ttl(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    clock = [10.0]
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    clock[0] = 63.0
+    (root / "unrelated.tmp").write_text("directory changed")
+    old = time.time() - 5
+    os.utime(root, (old, old))
+    bg.list_background_processes(home)
+    assert len(reads) == 3
+    clock[0] = 70.0
+    bg.list_background_processes(home)
+    assert len(reads) == 6
+
+
+# LLM: 成功展示按来源优先级去重，但坏文件诊断不能被同名有效行或其它坏行吞掉。
+# 函数用途: 验证跨根同名记录保留全部错误，并仍只展示一项有效记录。
+@pytest.mark.parametrize("first_good,second_good", [(True, False), (False, True), (False, False), (True, True)])
+def test_b1_duplicate_session_names_do_not_suppress_corruption(tmp_path, first_good, second_good):
+    home = tmp_path / "owner"
+    first = _b1_records(home, count=1)
+    second = home / ".background_jobs/process_sessions"
+    second.mkdir(parents=True)
+    raw = (first / "bg-cache-0.json").read_text()
+    for root, good in [(first, first_good), (second, second_good)]:
+        (root / "bg-cache-0.json").write_text(raw if good else "broken-json")
+    result = bg.list_background_processes(home)
+    assert len(result["errors"]) == 2 - int(first_good) - int(second_good)
+    assert result["total"] == int(first_good or second_good)
+
+
+# LLM: 解码超深和坏schema内的深对象都只影响单文件；不允许deepcopy缓存把本可报告的错误变成全列表异常。
+# 函数用途: 验证深JSON坏记录的只读隔离，同时保留其它有效任务。
+@pytest.mark.parametrize("kind", ["decoder", "bad_schema", "valid_legacy"])
+def test_b1_deep_json_does_not_abort_other_records(tmp_path, kind):
+    import sys
+
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    path = root / "bg-deep.json"
+    depth = min(20000, sys.getrecursionlimit() * (2 if kind == "decoder" else 3) // (1 if kind == "decoder" else 4))
+    nested = "[" * depth + "0" + "]" * depth
+    if kind == "decoder":
+        raw = nested
+    else:
+        extra = ',"schema":"invalid"' if kind == "bad_schema" else ''
+        raw = '{"session_id":"bg-deep","status":"exited","thread_id":"thread-one"' + extra + ',"metadata":{"unused":' + nested + '}}'
+    path.write_text(raw)
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    before = path.read_bytes()
+    try:
+        result = bg.list_background_processes(home, thread_id="thread-one")
+    except RecursionError:
+        result = None
+    assert isinstance(result, dict), "深JSON不能逃出单文件隔离边界"
+    assert any(row["session_id"] == "bg-cache-0" for row in result["items"])
+    assert result["projection_ok"] is (kind == "valid_legacy")
+    assert path.read_bytes() == before
+
+
+# LLM: 外owner声明不得压过当前线程或自相冲突的归属，坏记录不能猜为无关。
+# 函数用途: 锁定当前线程与外owner声明冲突时的失败关闭。
+def test_b1_foreign_owner_corruption_with_current_thread_fails_closed(tmp_path):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "thread-one",
+               "scope": {"thread_id": "other-thread", "owner_home": str(tmp_path / "other-owner")}}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert result["unrelated_errors"] == []
+
+
+@pytest.mark.parametrize("location", [None, "metadata"])
+@pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+@pytest.mark.parametrize("value", [None, True, 23, [], {}, "", " \t"])
+def test_b1r2_invalid_attribution_never_isolated(tmp_path, location, field, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "other-thread"}
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[field] = value
+    path = root / "bg-corrupt.json"
+    path.write_text(json.dumps(payload))
+    old = time.time() - 120
+    os.utime(path, (old, old))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert not result["unrelated_errors"]
+
+
+@pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+def test_b1r2_conflicting_foreign_declarations_fail_closed(tmp_path, field):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "other-thread"}
+    first, second = (str(tmp_path / "foreign-one"), str(tmp_path / "foreign-two")) if field == "owner_home" else ("foreign-one", "foreign-two")
+    payload[field] = first
+    payload["scope"] = {field: second}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"]
+    assert not result["unrelated_errors"]
+
+
+@pytest.mark.parametrize("location", [None, "completion_target"])
+def test_b1r2_consistent_foreign_owner_without_current_thread_isolated(tmp_path, location):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid"}
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope["owner_home"] = str(tmp_path / "other-owner")
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is True and not result["errors"]
+    assert result["unrelated_errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+
+
+def test_b1r2_error_snapshot_preserves_ids_without_copying_body():
+    scope = {"thread_id": "other", "task_id": "task-fixture", "request_id": "request-fixture"}
+    payload = {**scope, "metadata": {**scope, "body": {"ignored": [0] * 1000}}, "body": "not attribution"}
+    assert bg._error_scope_payload(payload) == {**scope, "metadata": scope}
+
+
+def test_b1r2_directory_generations_replace_one_canonical_slot(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    reads = _b1_count_reads(monkeypatch)
+    assert bg.list_background_processes(home)["total"] == 3
+    for generation in range(5):
+        (root / "unrelated.tmp").write_text(str(generation))
+        old = time.time() - 10 - generation
+        os.utime(root, (old, old))
+        assert bg.list_background_processes(home)["total"] == 3
+    assert len(reads) == 3
+    assert list(bg._DIRECTORY_CACHE) == [(str(home.resolve()), str(root.resolve()))]
+
+
+@pytest.mark.parametrize("count", [4096, 4097])
+def test_b1r2_directory_record_limit_is_explicit_not_truncation(tmp_path, monkeypatch, count):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=count)
+    before = _files(home)
+    reads = _b1_count_reads(monkeypatch)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    if count == 4096:
+        assert result["projection_ok"] is True and result["total"] == 4096
+        assert not result["errors"] and len(reads) == 4096
+        assert len(bg._DIRECTORY_CACHE) == 1
+        assert bg.list_background_processes(home, thread_id="thread-one")["total"] == 4096
+        assert len(reads) == 4096
+    else:
+        assert result["projection_ok"] is False
+        assert any(error.get("error_code") == "DIRECTORY_RECORD_LIMIT_EXCEEDED" for error in result["errors"])
+        assert result["total"] == 0 and not result["unrelated_errors"]
+        assert not reads and not bg._DIRECTORY_CACHE
+    assert getattr(bg, "_MAX_DIRECTORY_RECORDS", None) == 4096
+    assert len(bg._FILE_CACHE) <= 2048
+    assert _files(home) == before and root.exists()
+
+
+@pytest.mark.parametrize("change", ["state", "corruption"])
+def test_b1r2_hot_directory_rechecks_in_place_file_stat(tmp_path, monkeypatch, change):
+    home = tmp_path / "owner"
+    root = _b1_records(home)
+    reads = _b1_count_reads(monkeypatch)
+    assert bg.list_background_processes(home)["total"] == 3
+    path = root / "bg-cache-1.json"
+    directory_mtime, inode = root.stat().st_mtime_ns, path.stat().st_ino
+    if change == "state":
+        payload = json.loads(path.read_text())
+        payload.update(status="failed", command="updated-in-place-without-directory-change")
+        path.write_text(json.dumps(payload))
+    else:
+        path.write_text("new-invalid-json")
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    assert path.stat().st_ino == inode and root.stat().st_mtime_ns == directory_mtime
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert len(reads) == 4
+    if change == "state":
+        row = next(item for item in result["items"] if item["session_id"] == path.stem)
+        assert row["status"] == "failed" and row["command"].startswith("updated-in-place")
+        assert result["projection_ok"] is True
+    else:
+        assert result["projection_ok"] is False and result["total"] == 2
+        assert result["errors"] == [{"session_id": path.stem, "error": "JSONDecodeError"}]
+    assert bg.list_background_processes(home, thread_id="thread-one") == result
+    assert len(reads) == 4
+
+
+def test_b1r2_empty_directory_hits_do_not_renew_full_scan_deadline(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=0)
+    clock, scans = [10.0], []
+    original = os.scandir
+
+    def scan(path):
+        if Path(path) == root:
+            scans.append(path)
+        return original(path)
+
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(os, "scandir", scan)
+    assert bg.list_background_processes(home)["total"] == 0
+    clock[0] = 69.9
+    assert bg.list_background_processes(home)["total"] == 0
+    assert len(scans) == 1
+    clock[0] = 70.0
+    assert bg.list_background_processes(home)["total"] == 0
+    assert len(scans) == 2
+    clock[0] = 129.9
+    assert bg.list_background_processes(home)["total"] == 0
+    assert len(scans) == 2
+
+
+def test_b1r2_refreshing_all_files_does_not_renew_directory_deadline(tmp_path, monkeypatch):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    clock, scans = [10.0], []
+    original = os.scandir
+
+    def scan(path):
+        if Path(path) == root:
+            scans.append(path)
+        return original(path)
+
+    monkeypatch.setattr(bg.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(os, "scandir", scan)
+    reads = _b1_count_reads(monkeypatch)
+    bg.list_background_processes(home)
+    directory_mtime = root.stat().st_mtime_ns
+    path = root / "bg-cache-0.json"
+    payload = json.loads(path.read_text())
+    payload["command"] = "changed-after-initial-scan"
+    path.write_text(json.dumps(payload))
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    assert root.stat().st_mtime_ns == directory_mtime
+    clock[0] = 50.0
+    bg.list_background_processes(home)
+    assert len(reads) == 2 and len(scans) == 1
+    clock[0] = 70.0
+    bg.list_background_processes(home)
+    assert len(scans) == 2 and len(reads) == 3
+
+
+@pytest.mark.parametrize("initial_count", [1, 2])
+def test_b1r2_directory_growth_during_scan_cannot_claim_complete(tmp_path, monkeypatch, initial_count):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=initial_count)
+    monkeypatch.setattr(bg, "_MAX_DIRECTORY_RECORDS", 2)
+    original, inserted = bg._directory_record_names, []
+
+    def names(path):
+        result = original(path)
+        if path == root and not inserted:
+            inserted.append(True)
+            (root / "bg-added.json").write_text(json.dumps({"session_id": "bg-added", "status": "exited", "thread_id": "thread-one"}))
+        return result
+
+    monkeypatch.setattr(bg, "_directory_record_names", names)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["total"] == 0
+    code = "DIRECTORY_RECORD_LIMIT_EXCEEDED" if initial_count == 2 else "DIRECTORY_CHANGED_DURING_READ"
+    assert result["errors"][0].get("error_code") == code
+    assert not result["unrelated_errors"] and not bg._DIRECTORY_CACHE
+
+
+# LLM: 三类正常记录先由真实schema验证器确认合法，再仅污染待测归属；不使用invalid schema或替代reader。
+# 函数用途: 构造无schema、合法v1/v4后台记录，不创建或启动真实进程。
+def _b1r3_payload(home, version):
+    from agent_py_agent.agent.tooling.process_session_records import (
+        LEGACY_PROCESS_SESSION_SCHEMA,
+        PROCESS_SESSION_SCHEMA,
+    )
+
+    payload = {"session_id": "bg-corrupt", "status": "exited", "thread_id": "other-thread"}
+    if version == "legacy":
+        payload.update(schema=LEGACY_PROCESS_SESSION_SCHEMA, pid=99999999, pid_birth_token="fixture", started_at=1.0,
+                       access_scope={"owner_id": "fixture", "conversation_id": "other-thread", "owner_home": str(home)})
+    elif version == "managed":
+        payload.update(schema=PROCESS_SESSION_SCHEMA, status="not_started", revision=0,
+                       activation_scope=None, retain_until_consumed=False,
+                       access_scope={"owner_id": "fixture", "conversation_id": "other-thread", "owner_home": str(home)},
+                       execution_scope={"owner_home": str(home), "thread_id": "other-thread", "root_task_id": "task-fixture",
+                                        "run_id": "run-fixture", "attempt_id": "attempt-fixture"},
+                       completion_target={}, launcher_pid=99999999, launcher_birth_token="fixture",
+                       pid=0, pid_birth_token="", child_pid=0, child_pid_birth_token="",
+                       reserved_at=1.0, started_at=0.0, finished_at=2.0, exit_code=None,
+                       stop_requested=False, handoff_confirmed=False, child_launch_started=False,
+                       command="fixture", cwd="", output_file="", host_state_file="", completion_notice_id="")
+    if version != "schemaless":
+        bg.validate_process_record(payload)
+    return payload
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("location", [None, "metadata"])
+@pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+@pytest.mark.parametrize("value", [23, False, [], {}, " \t"])
+def test_b1r3_normal_parse_rejects_invalid_attribution(tmp_path, version, location, field, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[field] = value
+    path = root / "bg-corrupt.json"
+    path.write_text(json.dumps(payload))
+    before = _files(home)
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False
+    assert result["errors"] == [{"session_id": path.stem, "error": "ValueError"}]
+    assert not result["unrelated_errors"]
+    assert result["total"] == 1 and _files(home) == before
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, path.stem, home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("location", ["access_scope", "execution_scope", "completion_target", "metadata", "scope"])
+@pytest.mark.parametrize("value", [False, 0, [], ""])
+def test_b1r3_normal_parse_rejects_present_nonmapping_scope(tmp_path, version, location, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    payload[location] = value
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"]
+    assert not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_scope$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+@pytest.mark.parametrize("difference", ["distinct", "whitespace"])
+def test_b1r3_normal_parse_rejects_conflicting_attribution(tmp_path, version, field, difference):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    first = str(tmp_path / "foreign") if field == "owner_home" else "other-thread"
+    payload[field] = first
+    payload["metadata"] = {field: first + ("-different" if difference == "distinct" else " ")}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"]
+    assert not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^conflicting_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+def test_b1r3_valid_normal_records_remain_valid_and_filtered(tmp_path, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is True and result["total"] == 1
+    assert not result["errors"] and not result["unrelated_errors"]
+    assert bg.list_background_processes(home)["total"] == 2
+
+
+def test_b1r3_schemaless_none_attribution_and_scopes_remain_optional(tmp_path):
+    payload = {"session_id": "bg-optional", "status": "exited",
+               **dict.fromkeys((*bg._ATTRIBUTION_FIELDS, *bg._SCOPE_FIELDS))}
+    assert bg._validate_session_payload(payload, "bg-optional", tmp_path) == payload
+    assert bg._record_thread_id(payload) == ""
+
+
+@pytest.mark.parametrize("value", [23, True, [], {}, "", " \t", None])
+def test_b1r3_thread_reader_never_coerces_invalid_values(value):
+    assert bg._record_thread_id({"thread_id": value, "metadata": {"conversation_id": value}}) == ""
+
+
+# LLM: 按MCP生产路径序列化真实scope dataclass，v3不带v4保留字段；原生验证先于观察，激活ID沿64位hex合同。
+# 函数用途: 构造合法共享MCP元数据，不启动MCP或伪造插件安装/激活授权。
+def _b1r4_shared_payload(home, version):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.tooling.process_scope import (
+        ProcessAccessScope,
+        ProcessActivationScope,
+        ProcessExecutionScope,
+    )
+    from agent_py_agent.agent.tooling.process_session_records import (
+        ACTIVATION_PROCESS_SESSION_SCHEMA,
+    )
+
+    payload = _b1r3_payload(home, "managed")
+    payload.pop("thread_id")
+    payload.update(access_scope=asdict(ProcessAccessScope("fixture", "", str(home))),
+                   execution_scope=asdict(ProcessExecutionScope(owner_home=str(home))),
+                   activation_scope=asdict(ProcessActivationScope("fixture", str(home), "mcp-demo", "a" * 64)))
+    if version == "v3":
+        payload["schema"] = ACTIVATION_PROCESS_SESSION_SCHEMA
+        payload.pop("retain_until_consumed")
+    bg.validate_process_record(payload)
+    return payload
+
+
+@pytest.mark.parametrize("version", ["v3", "v4"])
+def test_b1r4_native_shared_mcp_does_not_poison_any_thread(tmp_path, version):
+    home = tmp_path / "owner"
+    root, _ = _session(home, session_id="bg-one", thread_id="thread-one")
+    _session(home, session_id="bg-two", thread_id="thread-two")
+    payload = _b1r4_shared_payload(home, version)
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    old = time.time() - 10
+    for path in root.glob("bg-*.json"):
+        os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    before = _files(home)
+    for thread, expected in [("thread-one", "bg-one"), ("thread-two", "bg-two")]:
+        result = bg.list_background_processes(home, thread_id=thread)
+        assert result["projection_ok"] is True and result["errors"] == []
+        assert result["active_count"] == 1
+        assert not result["unrelated_errors"]
+        assert {row["session_id"] for row in result["items"]} == {expected}
+    assert bg.list_background_processes(home)["total"] == 3
+    assert bg._record_thread_id(payload) == "" and _files(home) == before
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("location", [None, "metadata"])
+@pytest.mark.parametrize("field", ["owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
+def test_b1r4_normal_empty_strings_are_unbound(tmp_path, version, location, field):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    scope = payload if location is None else payload.setdefault(location, {})
+    scope[field] = ""
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is True and not result["errors"] and not result["unrelated_errors"]
+    assert bg.list_background_processes(home)["total"] == 2
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("location", [None, "access_scope", "execution_scope", "completion_target", "metadata", "scope", "activation_scope"])
+@pytest.mark.parametrize("value", [23, True, [], {}, " \t\n"])
+def test_b1r4_normal_owner_id_type_is_strict(tmp_path, version, location, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    if location is None:
+        payload["owner_id"] = value
+    else:
+        if payload.get(location) is None:
+            payload[location] = {}
+        payload[location]["owner_id"] = value
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+def test_b1r4_top_level_owner_id_conflict_fails_closed(tmp_path, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    payload["owner_id"] = "owner-A"
+    payload.setdefault("access_scope", {})["owner_id"] = "owner-B"
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^conflicting_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+@pytest.mark.parametrize("value", [False, [], "bad-scope"])
+def test_b1r4_activation_scope_requires_mapping_or_none(tmp_path, version, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, version)
+    payload["activation_scope"] = value
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_scope$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("field", ["owner_id", "owner_home"])
+@pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
+def test_b1r4_activation_owner_conflict_is_not_ignored(tmp_path, field, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r4_shared_payload(home, "v4") if version == "managed" else _b1r3_payload(home, version)
+    payload.update(owner_id="fixture", owner_home=str(home))
+    payload["activation_scope"] = {"owner_id": "fixture", "owner_home": str(home), "plugin_id": "mcp-demo", "activation_id": "a" * 64}
+    payload["activation_scope"][field] = "other-owner" if field == "owner_id" else str(tmp_path / "other-owner")
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^conflicting_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+@pytest.mark.parametrize("location", ["access_scope", "activation_scope"])
+@pytest.mark.parametrize("value", [None, "", " \t", 23, True, [], {}, "owner-B"])
+def test_b1r4_corrupt_owner_id_never_excused_as_foreign(tmp_path, location, value):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = {"session_id": "bg-corrupt", "schema": "invalid", "thread_id": "other-thread", "owner_id": "owner-A",
+               location: {"owner_id": value}}
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+
+
+@pytest.mark.parametrize("field", ["owner_id", "conversation_id"])
+def test_b1r4_v1_schema_still_rejects_required_empty_binding(tmp_path, field):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r3_payload(home, "legacy")
+    payload["access_scope"][field] = ""
+    with pytest.raises(ValueError):
+        bg.validate_process_record(payload)
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+
+
+# LLM: v2不带激活和保留字段，v3不带保留字段；先通过真实原生验证器，再由调用测试单点污染。
+# 函数用途: 复用已有记录构造合法v2/v3/v4普通任务元数据，不启动进程。
+def _b1r5_payload(home, version):
+    payload = _b1r3_payload(home, "managed")
+    payload["schema"] = f"managed_process_session.{version}"
+    if version != "v4":
+        payload.pop("retain_until_consumed")
+    if version == "v2":
+        payload.pop("activation_scope")
+    bg.validate_process_record(payload)
+    return payload
+
+
+# LLM: 成对空home复现原生schema仍接受的绕过；独立scope也必须由投影门报指定错误，冷热错误不可豁免。
+# 函数用途: 锁住v2/v3/v4必需owner_home非空，保留当前记录展示与全程不写盘。
+@pytest.mark.parametrize("version", ["v2", "v3", "v4"])
+@pytest.mark.parametrize("location", ["paired", "access_scope", "execution_scope", "activation_scope"])
+def test_b1r5_v2_v3_v4_reject_empty_scope_owner_home(tmp_path, version, location):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = (_b1r4_shared_payload(home, version) if location == "activation_scope" and version != "v2"
+               else _b1r5_payload(home, version))
+    if location == "paired":
+        payload["access_scope"]["owner_home"] = payload["execution_scope"]["owner_home"] = ""
+        bg.validate_process_record(payload)
+    elif location == "activation_scope":
+        if version == "v2":
+            payload[location] = {"owner_id": "fixture", "plugin_id": "mcp-demo", "activation_id": "a" * 64}
+        payload[location]["owner_home"] = ""
+    else:
+        payload[location]["owner_home"] = ""
+    path = root / "bg-corrupt.json"
+    path.write_text(json.dumps(payload))
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    before = _files(home)
+    for _ in range(2):
+        result = bg.list_background_processes(home, thread_id="thread-one")
+        assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+        assert result["total"] == 1 and _files(home) == before
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+# LLM: 激活owner_id不能借可选未绑定空串规则过关；v2夹带激活也先报归属错误，不伪称合法v2共享资源。
+# 函数用途: 验证激活必需owner_id空串在原生schema转换之前被拒绝。
+@pytest.mark.parametrize("version", ["v2", "v3", "v4"])
+def test_b1r5_activation_rejects_empty_owner_id(tmp_path, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r4_shared_payload(home, version) if version != "v2" else _b1r5_payload(home, version)
+    if version == "v2":
+        payload["activation_scope"] = {"owner_home": str(home), "plugin_id": "mcp-demo", "activation_id": "a" * 64}
+    payload["activation_scope"]["owner_id"] = ""
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)

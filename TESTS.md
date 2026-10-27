@@ -43,6 +43,15 @@ git diff --check
 最终 Astra high 定向源码复核确认上述两条 finding 已在审查范围闭合，未发现最后交集修正引入的确定新 bug；复核仅只读源码，未独立运行测试或真实模型，不能替代下面的实际测试回执或部署验收。
 
 任务指定六文件最终 **307 passed / 0 failed / 0 error / 0 skipped**（12.77 秒，包含全部 28 项新增回归）；Ruff 与严格尺寸门通过。原始先红证据为 `.pytest_cache/wave5-tracka-r4-red.xml`、`wave5-tracka-r4-red-edges.xml`、`wave5-tracka-r4-review-red.xml` 和 `wave5-tracka-r4-review2-red.xml`；组合结果为 `.pytest_cache/wave5-tracka-r4.xml`。
+## 2026-10-26 Wave 6 B1-R5：补齐身份scope必需owner空串检查
+
+来源：`07-tasks/wave6-b1-round5-fix-20261026.md`，c9的R4-F1，基线 `c515e2003d43b4bf6008a6ba7be39d39ac6a568f`，仍仅改原工作树三白名单文件。
+
+- **核实与修复**：原生v2/v3/v4验证器只校验owner_home为字符串且access/execution相等，成对空串仍通过；原投影又过滤空home声明。现在 `_validate_session_attribution` 在schema转换前明确拒绝access/execution/activation的空owner_home及activation的空owner_id，统一抛 `invalid_session_attribution`。不改原生schema、owner路径边界、缓存、探活或错误隔离。
+- **兼容范围**：不是把所有空串重新判非法；顶层、metadata及可选线程/任务/请求空串的未绑定含义不变。原R4共享MCP v3/v4两例及正常空串36例均在本轮完整回归中通过。None、非字符串、纯空白和冲突的旧合同未放宽，既有测试与断言均未改动。
+- **新增回归**：`test_b1r5_v2_v3_v4_reject_empty_scope_owner_home` 覆盖v2/v3/v4成对空home、单独access/execution空home、activation空home；另覆盖activation空owner_id。base先经真实原生验证器确认合法，成对空home污染后再次调用原生验证器，明确复现其漏检；v3/v4激活用真实shared scope，v2本不支持激活，测试其非法激活仍先命中本轮归属门，不冒充合法v2共享资源。冷热列表必须报错且不能列为不相关错误，正常当前记录及文件字节保持不变，直接解析需精确错误文本。
+- **先红后绿**：新增15例在修复前全部断言失败、0执行错误，其中3例直接复现投影错误成功；修复后指定整文件 **702通过、0失败/错误/跳过**（`final.xml`），全范围Ruff通过。JUnit及完整日志在 `.pytest_cache/b1-r5/`，本轮import来源已核对为当前工作树。
+- **独立复核与限制**：只读内联产品片段复核未发现明确反例；未独立读工作树或跑测试，不作为全仓审查。实际MCP启动/协议/停止链、全仓pytest、跨平台及线上未验证。
 
 复现（工作树根）：
 
@@ -113,6 +122,7 @@ python3 -m pytest agent_py_agent/tests/test_decision_recall.py agent_py_agent/te
 
 ```bash
 python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_audit_group_policy_and_posture.py -q --tb=short -k 'not test_t4_actual_native_isolated_process' -o addopts='' --junitxml=.pytest_cache/ag2-r4-delivery.xml
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
@@ -121,6 +131,81 @@ git diff --check
 ```
 
 Python 3.10 解释器实跑、真实模型/用户链路、线上 CI、部署及生产性能未验证；删除新 API 属性的兼容性回归不能替代跨版本运行。
+## 2026-10-26 Wave 6 B1-R4：恢复原生未绑定空串并补齐owner/激活归属
+
+来源：`07-tasks/wave6-b1-round4-fix-20261026.md` 两项P1审查反馈；基线 `d87011bc475837f9f6898b89c6589a9b7825475b`，只改原工作树三文件。本节覆盖R3“正常路径空串非法”的旧结论，坏记录诊断规则不放宽。
+
+- **原生合同核实**：`mcp_managed_process.py` 使用空会话 `ProcessAccessScope` 和未绑定 `ProcessExecutionScope`；`background_process_launch._reservation` 原样asdict序列化，`process_session_records` 校验共享激活不能携带业务身份。正常路径将None与精确空串 `""` 视为未绑定，非字符串及非空纯空白仍在schema转换之前拒绝。各版本强制字段继续交给原schema验证器，不修改或绕过它。
+- **坏记录仍失败关闭**：`_unrelated_error` 的 `not isinstance(value, str) or not value.strip()` 门保持不变，空串/空白/非法类型不能作为坏记录归属的豁免。`owner_id` 加入归属字段及两个路径的冲突组，`activation_scope` 加入scope枚举和错误快照；激活内的类型及owner冲突不能被忽略。
+- **恢复原夹具**：R3改为None的四处全局未绑定/线程位置/Gateway夹具全部恢复空串，原断言不变。正常空串从“非法类型”负例转为独立正例，坏schema的空串负例完整保留；没有靠把空串写成None来通过。
+- **回归**：新增v3/v4共享MCP元数据，按生产scope dataclass序列化、先经真实 `validate_process_record` 验证，在同一owner目录与两个运行线程记录共存；冷/热线程观察及全owner观察均验证无污染、线程过滤和不写盘。另覆盖无schema/v1/v4的owner_id顶层及六类scope类型矩阵、owner冲突、激活容器类型及owner_id/owner_home冲突、坏记录归属隔离、v1必需绑定仍由schema拒绝空串。
+- **激活ID纠正**：生产 `ProcessActivationScope` 要求64位十六进制，不接受任务示例 `act-1`；测试使用合法64位hex，不将无效激活误充共享MCP反例。
+- **先红后绿**：初始聚焦197例中188例断言失败、0执行错误，包含合法v3/v4共享记录被错误阻塞及owner_id漏洞；其余9例为已有效的控制。最终整文件687例通过、0失败/错误/跳过（`verified.xml`）；之后仅修导入排版，并针对这处格式改动复跑真实共享MCP两例通过（`formatted-shared.xml`），没有改动产品逻辑。全范围Ruff首次只发现本轮helper的导入排版，现已通过；doc-sync通过，strict code-size为blocked=False，未放宽lint、基线或测试门禁。
+- **独立复核**：只审内联相关产品片段的只读复核未发现明确反例；没有读取工作树或独立跑测试，不将它外推为完整系统评审。
+- **范围与限制**：仅验证真实临时文件、原生序列化/schema及只读投影，不启动MCP或更改插件激活授权；实际MCP启动/协议/停止链、全仓pytest、跨平台及线上均未验证。开工已有尺寸生成报告差异，备份到 `.pytest_cache/b1-r4/preexisting-code-size.patch`，按任务在验收后还原，不修改基线。
+
+复现（工作树根）：
+
+```bash
+pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+本轮日志及JUnit保存在 `.pytest_cache/b1-r4/`。
+
+## 2026-10-26 Wave 6 B1-R3：正常解析路径严格归属校验
+
+来源：`07-tasks/wave6-b1-round3-fix-20261026.md`，单项 `B1-R2-F1`，基线 `f039c639da8ab66db7296bb601f240cca6aad38d`。仅修改原工作树三文件，遵守不派子代理、不切分支、不碰main、不推送的要求。
+
+- 正常解析不再依赖schema是否存在才校验归属。顶层及五类scope统一校验：scope只允许字典/None；五类归属只允许非空字符串/None；线程别名同组，owner/task/request各自同组，多位置的原始字符串不一致即拒绝。
+- 在原生schema验证之前先验原始声明，避免v1将非法值先转字符串；schema处理后复验输出。错误码文字分别为 `invalid_session_scope`、`invalid_session_attribution`、`conflicting_session_attribution`，原owner边界保持。
+- `_record_thread_id`只取非空字符串，不再用str转换身份；错误分类保留原字符串差异，防trim/路径规范化合并冲突后将错误忽略为外线程。
+- 新增真实文件矩阵覆盖无schema及合法v1/v4（污染前先调用真实schema验证器确认有效），验证非法类型/空白、五个scope容器、跨位置冲突及尾随空白差异、有效外线程仍可正常过滤、None可选字段及直接线程读取不转型。初始281例中273例断言失败、0执行错误，其余有效控制用例通过。
+- 旧“全局未绑定”夹具曾用空字符串表示无归属，与本轮明确规则冲突；仅将这些输入改为允许的None，保留原全owner展示、线程隔离、KeyError早于日志读取、Gateway首轮过滤及只读断言。空字符串本身仍由新增矩阵明确验证为拒绝，不放宽生产规则或既有断言。
+- 开工时仅 `CODE_SIZE_REPORT.md` 有既存生成差异，已备份至 `.pytest_cache/b1-r3/preexisting-code-size.patch`，按任务要求在门禁后还原生成报告；不提交报告或基线改动。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+最终指定测试文件538例全部通过，0失败、0执行错误、0跳过；Ruff、文档同步、strict code-size（`hard=0`、`blocked=False`）与diff检查通过，生成报告已还原。统计取自 `final.xml`，机器汇总见 `verification-summary.json`。
+
+本轮输出位于 `.pytest_cache/b1-r3/`。不声称全仓、跨平台、运行TUI或真实监控进程树链已经验证；本轮按明确要求由主代理自查，没有独立子代理审查。
+
+## 2026-10-26 Wave 6 B1-R2：后台观察错误归属与有界缓存修复
+
+来源：`07-tasks/wave6-b1-round2-fix-20261026.md` 三审 F1/F2/F3；起点 `54c27d4a39445983442fea71babe51be57409e3f`，只在指定 `/tmp/wt-wave6-b1-r2` 工作树修改白名单文件，不部署或启停服务。
+
+- **F1**：删除凭坏文件年龄超过60秒判无关的分支。无法解析字典、缺少证据、非法/空白归属、当前线程声明或冲突声明均保留 `errors`；仅严格一致的外线程/外owner归属进入 `unrelated_errors`。错误快照保留 `task_id` / `request_id`，非法类型以有界标记保留，不复制坏正文。
+- **F2**：目录缓存键为规范化 `(home.resolve(), root.resolve())`，目录指纹和复核时刻在值内，每目录仅一槽，LRU仍最多64目录。扫描遇到第4097个候选即返回 `DIRECTORY_RECORD_LIMIT_EXCEEDED`，不读JSON、不缓存超大快照，不以截断列表冒充完整结果。
+- **F3**：热目录逐文件复核含dev/ino/mtime/size/ctime的安全指纹；未变项零重复JSON解析，仅变化项沿原nofollow reader重读。粗mtime保护窗与60秒全量复查保留；空目录热命中不续租截止时刻。元数据核对是O(n)，不宣称整体O(1)。
+- **回归**：使用真实临时文件、原reader计数及只读文件快照。覆盖所有原归属位置、非法类型与空白、声明冲突、任务/请求ID保留、TUI仅在出现明确无关证据后清告警、目录多代单槽、4096/4097真实边界、4096条热命中（FILE LRU仅2048仍零重复JSON读取）、同inode/同目录mtime原位改写/改坏即时感知、空目录60秒复查。保留原线程动态探活、日志、TTL、并发、深JSON及原生schema的回归。
+- **先红后绿**：初始聚焦105例中92例断言失败、0个执行错误；另补空目录截止时刻反例，先观察到应二次扫描却只扫描一次，再修复。不删除/跳过有效测试，不修改门禁或基线。
+- **独立复核跟进**：gpt-6-astra high仅对给定关键片段静态找错（未读仓库、未实跑），指出全部文件刷新可能推迟目录截止、扫描中增长可能仍返回旧完整列表。父级另用真实文件/原reader复现3例失败后修复：所有热刷新均保留原目录时间锚点；读后发现目录换代时仅额外做一次有界列名，确认超限返回超限码，否则返回 `DIRECTORY_CHANGED_DURING_READ`，不缓存或把旧结果称作完整。不将片段审查称为全仓或最终版本审查批准。
+- **限制**：规定两文件初版回归中，`test_opt6_real_monitor_preserves_child_until_tree_termination` 被现有夹具以 `SANDBOX_CAPABILITY_MISSING[ps,background_launcher_identity]` 跳过；真实监控子进程树终止链仍未验证，不能计为通过。没有跑全仓、线上或跨平台验收。
+
+复现（工作树根执行）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_process_session_store.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终规定两文件回归：344例中343通过、0失败、0执行错误、1例按上述既有能力夹具跳过；Ruff、doc-sync、strict code-size（`hard=0` / `blocked=False`）、diff检查均通过。统计取自 `final-review.xml`，机器汇总见 `verification-summary.json`。本轮日志和JUnit在 `.pytest_cache/b1-r2/`；code-size生成报告提交前还原，不纳入功能提交。
 
 ## 2026-10-26 Wave 5 WT-BC：B5/B6/C1–C3 基础层优化
 
