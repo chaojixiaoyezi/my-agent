@@ -193,7 +193,7 @@ class HostDomainPorts:
     observations: object = None
 
 
-# LLM: 治理和审计组拒as_user；审计组selector交原managed范围门统一403，其余local动作保留严格UID校验，DTO不授权。
+# LLM: execute可选合法key；write/async仍必填、read/stream仍禁止。身份与范围校验不变，DTO不授权。
 # 函数用途: 校验冻结调用并区分受管选择器、普通本地账号和资产投递的身份边界。
 def decode_call(raw: bytes) -> Call:
     row = validate_object(strict_json(raw), closed({
@@ -201,7 +201,7 @@ def decode_call(raw: bytes) -> Call:
         "idempotency_key": text(128, 16, r"^[A-Za-z0-9_-]{16,128}$"),
         "as_user": closed({"user_id": text(64, 3, r"^[a-z][a-z0-9_-]{2,63}$")})}))
     spec = action_spec(row["action"])
-    if spec.requires_idempotency != ("idempotency_key" in row):
+    if spec.mode != "execute" and spec.requires_idempotency != ("idempotency_key" in row):
         raise HostAPIError("INVALID_SCHEMA")
     users = row["action"].startswith(("users.", "governance.reviews.", "assets.delivery."))
     if row["action"].startswith(("users.", "governance.reviews.")) and "as_user" in row:

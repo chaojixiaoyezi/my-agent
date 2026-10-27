@@ -382,16 +382,20 @@ def _handle(handler, server, streaming):
             transport.streams.open(handler, authorized, transport.composition.ports)
             return
         entered = True
+        spec = action_spec(authorized.call.action)
+        mutating = spec.requires_idempotency or spec.mode == "execute"
         result = dispatch_call(authorized, transport.composition.ports)
         body = envelope(authorized, result)
         if len(json.dumps(body, ensure_ascii=False).encode("utf-8")) > PAGE_MAX_BYTES:
-            outcome = "committed" if action_spec(authorized.call.action).requires_idempotency else "not_started"
+            outcome = "committed" if mutating else "not_started"
             raise HostAPIError("PAYLOAD_TOO_LARGE", 413, outcome)
         handler._send_json(result.http_status, body)
     except HostAPIError as error:
         handler._send_json(error.status, envelope(authorized, error=error))
     except (OSError, ValueError, TypeError, RuntimeError):
-        outcome = "unknown" if entered and action_spec(authorized.call.action).requires_idempotency else "not_started"
+        spec = action_spec(authorized.call.action) if authorized is not None else None
+        mutating = spec is not None and (spec.requires_idempotency or spec.mode == "execute")
+        outcome = "unknown" if entered and mutating else "not_started"
         error = HostAPIError("OUTCOME_UNKNOWN" if outcome == "unknown" else "HOST_NOT_READY", 503, outcome)
         handler._send_json(error.status, envelope(authorized, error=error))
 

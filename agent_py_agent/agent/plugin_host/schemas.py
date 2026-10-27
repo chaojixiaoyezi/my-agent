@@ -148,10 +148,15 @@ def validate_object(value: object, schema: dict) -> dict:
     return result
 
 
-# LLM: 扩展UTF8字节限制和严格整数覆盖原通用schema未声明的单位差异。
-# 函数用途: 递归复核字节、布尔与整数边界。
+# LLM: nullable数值仍排除bool；事件的可选耗时/计量与旧整数共用校验，不放宽其它字段或身份门。
+# 函数用途: 递归复核字节、布尔与含空值数值的边界。
 def _validate_units(value, schema: dict) -> None:
     kind = schema.get("type")
+    kinds = kind if isinstance(kind, list) else [kind]
+    if value is not None and "integer" in kinds and type(value) is not int:
+        raise HostAPIError("INVALID_SCHEMA")
+    if value is not None and "number" in kinds and type(value) not in (int, float):
+        raise HostAPIError("INVALID_SCHEMA")
     if kind == "integer" and type(value) is not int:
         raise HostAPIError("INVALID_SCHEMA")
     if kind == "boolean" and type(value) is not bool:
@@ -220,21 +225,26 @@ def validate_request_event(value) -> dict:
     return row
 
 
-# LLM: 状态集合来源唯一协议；终态的null表示未观测而非补零。
-# 函数用途: 返回六种事件各自的闭合数据schema。
+# LLM: 新计量/耗时仅可选扩展，保留旧四字段工具事件及两字段usage；HTTP泵与缓冲共用唯一合同。
+# 函数用途: 返回兼容旧事件的六种闭合数据schema，未知数值仍用null。
 def _event_data_schemas(timestamp: dict) -> dict:
     identifier = text(128, 1)
     interaction = closed({"interaction_id": identifier, "summary": text(1024)})
+    count = {"type": ["integer", "null"], "minimum": 0, "maximum": 2**63 - 1}
+    timing = {"type": ["number", "null"], "minimum": 0}
+    usage = closed({"input_tokens": count, "output_tokens": count}, {
+        **dict.fromkeys(("cache_read_tokens", "cache_write_tokens", "total_tokens", "cached_tokens"), count),
+        "elapsed_seconds": timing, "tokens_per_second": timing})
     terminal = closed({"terminal_id": identifier, "status": {"enum": ["succeeded", "failed", "cancelled"]},
         "completed_at": timestamp, "result_message_ids": {"type": "array", "items": identifier, "maxItems": 100},
-        "error_code": {"type": ["string", "null"], "maxLength": 64},
-        "usage": closed({"input_tokens": {"type": ["integer", "null"], "minimum": 0},
-                         "output_tokens": {"type": ["integer", "null"], "minimum": 0}}),
+        "error_code": {"type": ["string", "null"], "maxLength": 64, "pattern": r"^[A-Z][A-Z0-9_]{0,63}$"},
+        "usage": usage,
         "resources_stopped": {"type": ["boolean", "null"]}})
     return {"status": closed({"state": {"enum": ["queued", "admission_wait", "running", "waiting_approval",
         "waiting_input", "cancelling", "succeeded", "failed", "cancelled", "unknown"]}}),
         "assistant_delta": closed({"message_id": identifier, "part": {"enum": ["commentary", "final"]},
                                    "offset_bytes": integer(2**63 - 1), "text": text(REQUEST_MAX_BYTES)}),
         "tool_progress": closed({"call_id": identifier, "tool_name": text(96, 1),
-                                 "status": {"enum": ["started", "progress", "ended"]}, "summary": text(1024)}),
+                                 "status": {"enum": ["started", "progress", "ended"]}, "summary": text(1024)},
+                                {"elapsed_ms": count}),
         "approval_required": interaction, "input_required": interaction, "terminal": terminal}
