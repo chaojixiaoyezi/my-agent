@@ -22,6 +22,31 @@ from .observations import _has_agents, process_visible, workspace_asset_rows, wo
 from .schemas import canonical_json, thaw
 
 
+# LLM: 仅公开包卡字段，不复制安装路径/reader；旧manifest缺应用声明时保留空映射。
+# 函数用途: 给W4包列表/详情委派提供含应用范围的公共投影。
+def _package_dict(record):
+    cap = getattr(record, "capability", None) or getattr(getattr(record, "manifest", None), "capability", None)
+    return {"package_id": getattr(record, "package_id", ""), "name": getattr(record, "name", ""),
+            "enabled": bool(getattr(record, "enabled", False)),
+            "application_scope": dict(getattr(cap, "application_scope", None) or {})}
+
+
+# LLM: 不从payload接受身份，也不以包/管理员安装身份代替有效owner；鲜活授权仍唯一归原解析器。
+# 函数用途: 向W4身份接口委派原owner解析入口。
+def user_space_identity_resolve(authorized):
+    return read_context(authorized)
+
+# LLM: 不resolve相对文件路径、不清洗点点/绝对路径，Git内部目录不是文件浏览入口。
+# 函数用途: 为W5文件委派拆出安全非空相对组件。
+def _parts(value):
+    if not isinstance(value, str) or len(value) > 4096 or "\x00" in value or "\\" in value:
+        raise HostAPIError("WORKSPACE_PATH_INVALID")
+    parts = tuple(value.split("/"))
+    if any(part in {"", ".", "..", ".git"} for part in parts):
+        raise HostAPIError("WORKSPACE_PATH_INVALID")
+    return parts
+
+
 # LLM: 导入地址仅来自本模块静态表；只对准确缺模块返回未就绪，不吞掉模块内部依赖错误。
 # 函数用途: 装入一个已经固定在产品代码中的领域实现。
 def _module(name):
@@ -75,7 +100,7 @@ def call_capabilities_v2(authorized, ports):
     action = authorized.call.action
     if action not in V2_ACTIONS:
         raise HostAPIError("UNSUPPORTED_ACTION")
-    context = read_context(authorized)
+    context = user_space_identity_resolve(authorized)
     if not required_capabilities(action, authorized.call.payload) <= authorized.binding.capabilities:
         raise HostAPIError("CAPABILITY_DENIED", 403)
     payload = action_spec(action).validate_payload(thaw(authorized.call.payload))
