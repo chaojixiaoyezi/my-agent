@@ -582,7 +582,7 @@ def test_r2_gateway_event_writer_projects_known_terminal_event(tmp_path, event, 
     from agent_py_agent.agent.gateway_parts.logging import log_gateway_event
 
     store = LocalStore(tmp_path / "local.db")
-    log_gateway_event(SimpleNamespace(local_store=store), event, {})
+    log_gateway_event(SimpleNamespace(local_store=store, store_event_mirror_enabled=True), event, {})
     assert store.list_recent()[0].metadata["status"] == expected
 
 
@@ -876,3 +876,86 @@ def test_r3_failed_head_rotates_behind_files_outside_count_limit(tmp_path, monke
     assert prune(store, before=CUTOFF)["pending_files"] == 1
     assert not (store.root / third.content_path).exists()
     assert (store.root / head.content_path).is_file()
+
+
+# LLM: 五个真实既存SQLite覆盖兼容名及两个workspace；transition只运输原写叶，不替代TTL或维护算法。
+# 函数用途: 验证单进程和多进程维护都裁剪全部owner库，永久数据保留且事件维护逐库调用。
+@pytest.mark.parametrize("transition_mode", [False, True])
+def test_h07_maintenance_visits_all_existing_owner_databases(tmp_path, monkeypatch, transition_mode):
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import run_owner_retention_if_due
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    root = home.owner_home_dir
+    paths = [root / name for name in ("data/local_store.sqlite3", "data/local_store/local.db",
+        "local_store/local.db", "workspace/runtime/workspaces/a/local_store/local.db",
+        "workspace/runtime/workspaces/b/local_store/local.db")]
+    stores = [LocalStore(path) for path in paths]
+    kept = []
+    for store in stores:
+        record(store, "expired")
+        kept.append(record(store, "permanent", source="memory"))
+    calls, commits = [], []
+    original = LocalStore.maintain_events
+
+    def maintain(store, **kwargs):
+        calls.append(store.db_path)
+        return original(store, **kwargs)
+
+    def commit(operation):
+        commits.append(True)
+        return operation()
+
+    monkeypatch.setattr(LocalStore, "maintain_events", maintain)
+    options = {"include_global_indexes": False, "commit_transition": commit} if transition_mode else {}
+    assert run_owner_retention_if_due(home, now=NOW, **options).ran
+    assert set(calls) == set(paths) and len(calls) == len(paths)
+    for store, permanent in zip(stores, kept, strict=True):
+        assert ids(store) == {permanent.id}
+        assert (store.root / permanent.content_path).is_file()
+    marker = json.loads((home.owner_data_dir / "maintenance.json").read_text())
+    assert marker["derived_records_pruned"]["executed"] is True
+    if transition_mode:
+        assert commits
+
+
+# LLM: 用原task和真实重建链，顶层及attributes嵌套欠账不能被旧done时间遮蔽；不改LocalStore终态定义。
+# 函数用途: 覆盖共享欠账别名和本轮明示的delivery/consume/callback pending准入。
+@pytest.mark.parametrize("location", ["top", "attributes", "nested"])
+@pytest.mark.parametrize(("flag", "value"), [("wake_pending", True), ("notification_pending", True),
+    ("completion_notice_pending", True), ("notify_pending", True), ("pending_closeout", {}),
+    ("parent_notified", False), ("notification_status", "pending"), ("delivery_pending", True),
+    ("consume_pending", True), ("callback_pending", True)])
+def test_h08_pending_task_projection_is_not_expired(tmp_path, monkeypatch, location, flag, value):
+    from agent_py_agent.agent.subagents.services.persistence import projections
+
+    manager, task = projection_case(tmp_path, "DONE", CUTOFF - 1)
+    if location == "top":
+        setattr(task, flag, value)
+    elif location == "attributes":
+        task.attributes[flag] = value
+    else:
+        task.attributes["metadata"] = {flag: value}
+    monkeypatch.setattr(projections, "time", SimpleNamespace(time=lambda: NOW))
+    assert not projections._task_projection_expired(task)
+    projections.rebuild_derived_projections(manager, task.id)
+    assert ids(manager.local_store)
+
+
+# LLM: 不启用时连local_store属性也不访问；配置和显式属性均可启用，属性False优先。
+# 函数用途: 验证Gateway事件镜像默认关闭且开关不会误关原请求日志路径。
+@pytest.mark.parametrize(("attribute", "configured", "enabled"), [
+    (None, False, False), (False, True, False), (True, False, True), (None, True, True)])
+def test_holistic_gateway_event_mirror_gate(attribute, configured, enabled):
+    from agent_py_agent.agent.gateway_parts import logging
+
+    calls = []
+    agent = SimpleNamespace(config=SimpleNamespace(store_event_mirror_enabled=configured),
+        local_store=SimpleNamespace(log_record=lambda **kwargs: calls.append(kwargs)))
+    if attribute is not None:
+        agent.store_event_mirror_enabled = attribute
+    logging.log_gateway_event(agent, "gateway_request_completed", {"id": "synthetic"})
+    assert bool(calls) is enabled
+    if enabled:
+        assert calls[0]["source_type"] == "gateway_event"
+        assert calls[0]["metadata"]["status"] == "completed"

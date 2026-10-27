@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import sys
@@ -106,7 +107,7 @@ def _startup_grace_active(controller) -> bool:
     return started is not None and time.monotonic() - started < STARTUP_GRACE_WINDOW_SECONDS
 
 
-# LLM: 不构造冷 owner，复用原 repo 死亡证明和 CAS；保护期不得推迟该安全恢复，失败进入原 loop 诊断。
+# LLM: 不构造冷owner，复用原repo死亡证明/CAS；每repo失败只报warning，不阻断其它owner或retention。
 # 函数用途: 维护首拍及周期清理基础和已加载 owner 的运行欠账。
 def _cleanup_loaded_runtime_safety(agent) -> None:
     agents = [agent]
@@ -119,7 +120,10 @@ def _cleanup_loaded_runtime_safety(agent) -> None:
         cleanup = getattr(repo, "cleanup_stale_runtime", None)
         if callable(cleanup) and id(repo) not in seen:
             seen.add(id(repo))
-            cleanup()
+            try:
+                cleanup()
+            except Exception as exc:
+                logging.getLogger(__name__).warning("owner runtime cleanup failed: %s", type(exc).__name__)
 
 
 # LLM: 每个目录至多采样65个名字；预算用尽或IO未知不推断空目录，不创建服务或读取正文。

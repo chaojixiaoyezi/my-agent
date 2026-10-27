@@ -160,11 +160,14 @@ def _gateway_conversation_runtime(
     return result
 
 
-# LLM: 明确payload状态优先，缺失时仅认宿主终态事件名；未知事件不合成done，实时日志仍沿原写入口。
-# 函数用途: 保存网关事件及可供TTL验证的明确状态和记录时间。
+# LLM: 事件镜像默认关闭，显式agent属性优先于config；关闭时不触Store，payload状态/终态事件映射不变。
+# 函数用途: 仅按原开关保存网关事件及TTL时间，不改变独立请求日志入口。
 def log_gateway_event(agent: SimpleAgent, event_type: str, payload: dict) -> None:
 
     try:
+        if not getattr(agent, "store_event_mirror_enabled",
+                       getattr(getattr(agent, "config", None), "store_event_mirror_enabled", False)):
+            return
         created_at = time.time()
         source_id = f"{event_type}:{created_at:.6f}"
         agent.local_store.log_record(

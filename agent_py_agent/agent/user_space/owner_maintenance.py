@@ -204,24 +204,81 @@ def run_owner_retention_if_due(
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
-# LLM: 仅已有本owner普通数据库才构造Store，不建冷库、不跟随data/db/files链接；普通故障隔离，原执行未知异常仍透传。
-# 函数用途: 在到期维护内尽力清理派生记录并返回真实结果，不影响原保留主链。
-def _prune_local_store_derived_records(home: Path, *, now: datetime) -> dict[str, Any]:
+# LLM: 所有既存owner库共用发现；C逐叶沿原commit，冷库不创建、单库普通错误隔离，执行未知仍原抛。
+# 函数用途: 在原保留门后裁剪全部派生库，单库回执兼容，多库分列真实结果。
+def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_transition=None) -> dict[str, Any]:
+    paths, errors = _local_store_database_paths(Path(home))
+    if not paths:
+        return {"executed": False, "reason": "error" if errors else "no_local_store", **({"discovery_errors": errors} if errors else {})}
+    results = [_prune_derived_store(path, now=now, commit_transition=commit_transition) for path in paths]
+    result = results[0] if len(results) == 1 else {
+        "executed": any(item["executed"] for item in results),
+        "stores": [{"database": str(path.relative_to(home)), **item} for path, item in zip(paths, results, strict=True)],
+        "deleted_ids": [value for item in results for value in item.get("deleted_ids", [])]}
+    if errors:
+        result = {**result, "discovery_errors": errors, "counts_complete": False}
+    return result
+
+
+# LLM: 原Store负责TTL/引用/FTS事务；coordinator_io只选择逐末叶commit，不把长扫描包进T或缓存回调。
+# 函数用途: 对一个已存在库执行派生TTL，普通故障保留可能部分写入事实。
+def _prune_derived_store(db_path: Path, *, now: datetime, commit_transition=None) -> dict[str, Any]:
     try:
         from ..local_storage import LocalStore
 
-        db_path = Path(home) / "data" / "local_store.sqlite3"
-        if not db_path.is_file():
-            return {"executed": False, "reason": "no_local_store"}
-        if db_path.is_symlink() or db_path.parent.is_symlink() or (db_path.parent / "files").is_symlink():
-            return {"executed": False, "reason": "unsafe_local_store"}
-        result = LocalStore(db_path, enable_fts=False).prune_derived_records(now=now)
+        if commit_transition is None:
+            result = LocalStore(db_path).prune_derived_records(now=now)
+        else:
+            from ..common.global_write_commit import global_write_commit_scope
+
+            with global_write_commit_scope(commit_transition):
+                result = LocalStore(db_path, coordinator_io=True).prune_derived_records(now=now)
         return {"executed": True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
         raise
     except Exception as exc:
-        return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
+        return {"executed": False, "reason": "error", "error_type": type(exc).__name__, "side_effects_unknown": True}
+
+
+# LLM: 只扫三个固定库名及workspace根下一层；父目录/DB/files链接拒绝，不创建或递归任意路径。
+# 函数用途: 共用单进程和transition维护的全部既存LocalStore数据库发现。
+def _local_store_database_paths(home: Path) -> tuple[list[Path], list[dict[str, str]]]:
+    candidates = [home / name for name in ("data/local_store.sqlite3", "data/local_store/local.db", "local_store/local.db")]
+    workspaces = home / "workspace" / "runtime" / "workspaces"
+    result, errors = [], []
+    try:
+        if _real_owner_directory(home, workspaces):
+            candidates.extend(path / "local_store" / "local.db" for path in sorted(workspaces.iterdir()))
+    except OSError as exc:
+        errors.append({"source": "workspace_scan", "error_type": type(exc).__name__})
+    for path in dict.fromkeys(candidates):
+        try:
+            if (_real_owner_directory(home, path.parent) and not path.is_symlink() and path.is_file()
+                    and not (path.parent / "files").is_symlink()):
+                result.append(path)
+        except OSError as exc:
+            errors.append({"source": str(path.relative_to(home)), "error_type": type(exc).__name__})
+    return result, errors
+
+
+# LLM: 冷owner不建runtime库；原cleanup在transition中执行，四类执行未知原抛，其余故障分列不遮住retention。
+# 函数用途: 多进程维护沿原claim写门回收runtime安全欠账，不受保留到期或hold约束。
+def _cleanup_owner_runtime(home: MyAgentHomePaths, *, now: float, commit_transition) -> dict[str, Any]:
+    try:
+        from ..runtime_db.repository import RuntimeRepository
+        from ..runtime_db.schema import runtime_db_path
+
+        path = runtime_db_path(home.owner_home_dir)
+        if not _real_owner_directory(home, path.parent) or path.is_symlink() or not path.is_file():
+            return {"executed": False, "reason": "no_runtime_db"}
+        result = commit_transition(lambda: RuntimeRepository(path, existing_only=True).cleanup_stale_runtime(now=now))
+        return {"executed": True, **result}
+    except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
+            ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):
+        raise
+    except Exception as exc:
+        return {"executed": False, "reason": "error", "error_type": type(exc).__name__, "side_effects_unknown": True}
 
 
 # LLM: caller已持原maintenance锁；仍写原唯一schema/状态口径，不把局部成功变成新许可或第二账。
@@ -392,20 +449,23 @@ def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float, commit_transition
         return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
 
 
-# LLM: 只发现本owner两种固定规范位置的已存在库；每库一批，发现/执行普通故障分别隔离，四类未知原抛。
+# LLM: 共用本owner全部既存DB发现，保留JSONL-only事件恢复；每库一批，普通故障隔离，四类未知原抛。
 #   executed=False表示没有完整返回成功，非未写入证明；异常后的副作用未知及不完整计数须单列。
 #   Home当前没有owner_local_store_dir字段，真实默认库由runtime_paths放在workspace/runtime/workspaces/*/local_store。
 # 函数用途: 在原owner后台周期裁剪既有事件库，把执行或跳过事实交给同一maintenance.json。
 def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_transition=None) -> dict[str, Any]:
     try:
         directories, discovery_errors = _local_event_store_directories(home)
-        if not directories:
+        databases, errors = _local_store_database_paths(home.owner_home_dir)
+        discovery_errors.extend(errors)
+        databases = list(dict.fromkeys([*databases, *(directory / "local.db" for directory in directories)]))
+        if not databases:
             if discovery_errors:
                 return {"executed": False, "reason": "error", "counts_complete": False,
                         "error_type": discovery_errors[0]["error_type"], "discovery_errors": discovery_errors}
             return {"executed": False, "reason": "no_local_store"}
-        results = [_maintain_event_store(directory, now=now, commit_transition=commit_transition)
-                   for directory in directories]
+        results = [_maintain_event_store(path.parent, now=now, commit_transition=commit_transition, db_path=path)
+                   for path in databases]
         if len(results) == 1:
             summary = results[0]
         else:
@@ -415,8 +475,9 @@ def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_t
                        "side_effects_unknown": any(result.get("side_effects_unknown", False) for result in results),
                        **{key: sum(result.get(key, 0) for result in results)
                           for key in ("selected", "deleted_db", "deleted_jsonl")},
-                       "stores": [{"directory": str(directory.relative_to(home.owner_home_dir)), **result}
-                                  for directory, result in zip(directories, results, strict=True)]}
+                       "stores": [{"directory": str(path.parent.relative_to(home.owner_home_dir)),
+                                   "database": str(path.relative_to(home.owner_home_dir)), **result}
+                                  for path, result in zip(databases, results, strict=True)]}
         if discovery_errors:
             summary = {**summary, "ok": False, "counts_complete": False, "discovery_errors": discovery_errors}
         return summary
@@ -429,18 +490,18 @@ def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_t
 
 # LLM: 普通模式沿原Store；C只临时运输当次commit，不把完整maintain包进T，不把回调留在Store或启动线程。
 #   普通异常可能发生在SQL提交后，不能将未完成冒充零副作用，也不根据缺失阶段结果推算删除数。
-# 函数用途: 对一个已存在的库推进最多一批5000条稳态维护，SQL和发表逐叶复核原来源。
-def _maintain_event_store(directory: Path, *, now: float, commit_transition=None) -> dict[str, Any]:
+# 函数用途: 对原库精确文件名推进一批维护，兼容目录旧调用，不误建legacy库的local.db。
+def _maintain_event_store(directory: Path, *, now: float, commit_transition=None, db_path: Path | None = None) -> dict[str, Any]:
     try:
         from ..local_storage import LocalStore
 
         if commit_transition is None:
-            result = LocalStore(directory / "local.db").maintain_events(max_batches=1, before=now)
+            result = LocalStore(db_path or directory / "local.db").maintain_events(max_batches=1, before=now)
         else:
             from ..common.global_write_commit import global_write_commit_scope
 
             with global_write_commit_scope(commit_transition):
-                store = LocalStore(directory / "local.db", coordinator_io=True)
+                store = LocalStore(db_path or directory / "local.db", coordinator_io=True)
                 result = store.maintain_events(max_batches=1, before=now)
         return {"executed": True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
@@ -465,7 +526,7 @@ def _local_event_store_directories(home: MyAgentHomePaths) -> tuple[list[Path], 
     result = []
     for directory in dict.fromkeys(candidates):
         try:
-            if not _real_owner_directory(home, directory):
+            if not _real_owner_directory(home, directory) or (directory / "files").is_symlink():
                 continue
             files = (directory / "local.db", directory / "events.jsonl")
             if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in files):
@@ -478,10 +539,14 @@ def _local_event_store_directories(home: MyAgentHomePaths) -> tuple[list[Path], 
 
 
 # LLM: Home为可信根，候选必须在同一owner内且每级都是真实目录；不跟随符号链接到别的owner或任意外置库。
-# 函数用途: 在只读发现阶段排除目录别名和缺失目录，不创建维护目标。
-def _real_owner_directory(home: MyAgentHomePaths, directory: Path) -> bool:
-    current = home.owner_home_dir
-    for part in directory.relative_to(current).parts:
+# 函数用途: 由可信home或owner根排除目录别名、越界和缺失目录，不创建维护目标。
+def _real_owner_directory(home: MyAgentHomePaths | Path, directory: Path) -> bool:
+    current = Path(getattr(home, "owner_home_dir", home))
+    try:
+        parts = directory.relative_to(current).parts
+    except ValueError:
+        return False
+    for part in parts:
         current = current / part
         if current.is_symlink():
             return False

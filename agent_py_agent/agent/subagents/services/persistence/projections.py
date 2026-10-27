@@ -25,7 +25,11 @@ from ....common.json_io import (
 )
 from ....common.nofollow_fs import open_readonly_file_beneath
 from ....contracts.protocol_status import TOOL_STATUS_FAILED
-from ....local_storage.records import DERIVED_RECORD_TTL_SECONDS, derived_terminal_expired
+from ....local_storage.records import (
+    DERIVED_RECORD_TTL_SECONDS,
+    _derived_metadata_scopes,
+    derived_terminal_expired,
+)
 from ....user_space.home_indexes import (
     AgentIndexRef,
     RunIndexRef,
@@ -180,15 +184,21 @@ def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:
     )
 
 
-# LLM: 只认原task的结构化状态/时间，缺可信时间、活跃、BLOCKED和有收口欠账者不按TTL跳过。
-# 函数用途: 判断子代理全文是否已经离开30天索引保留窗。
+# LLM: 原task顶层与attributes沿LocalStore同一有界scope检查；明示delivery/consume/callback欠账也不能跳过。
+# 函数用途: 判断全文是否过期，保留嵌套通知/收口事实，不将待处理任务误当历史归档。
 def _task_projection_expired(task):
     names = ("status", "ended_at", "updated_at", "completed_at", "created_at", "runtime_closeout_pending",
-             "completion_notice_pending", "notification_pending", "wake_pending")
-    payload = {name: getattr(task, name, None) for name in names}
-    attributes = getattr(task, "attributes", None)
-    if isinstance(attributes, dict) and isinstance(attributes.get("runtime_closeout_pending"), dict):
-        payload["runtime_closeout_pending"] = True
+             "completion_notice_pending", "notification_pending", "wake_pending", "pending_closeout", "closeout_pending",
+             "notify_pending", "completion_delivery_pending", "pending_completion_notification", "closeout_status",
+             "notification_status", "completion_notification_status", "completion_delivery_status", "completion_notified",
+             "parent_notified", "delivery_pending", "consume_pending", "callback_pending", "attributes", "metadata",
+             "conversation_runtime", "closeout", "notification", "wake", "scope")
+    # 缺失字段不补None；真实声明的None通知状态仍按共享规则保守保留。
+    missing = object()
+    payload = {name: value for name in names if (value := getattr(task, name, missing)) is not missing}
+    if any(scope.get(key) for scope in _derived_metadata_scopes(payload)
+           for key in ("delivery_pending", "consume_pending", "callback_pending")):
+        return False
     return derived_terminal_expired(payload, time.time() - DERIVED_RECORD_TTL_SECONDS)
 
 
