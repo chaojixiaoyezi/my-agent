@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import codecs
 import os
+import re
 import select
 import stat
 import subprocess
@@ -175,7 +176,7 @@ def download_workspace_file(context, payload):
 def _git(descriptor, arguments):
     output, deadline = bytearray(), time.monotonic() + 5.0
     env = {"PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_OPTIONAL_LOCKS": "0", "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_LAZY_FETCH": "1"}
-    lit = () if any(str(a).startswith(":(") for a in arguments) else ("--literal-pathspecs",)
+    lit = () if any(str(a).startswith(":(exclude,icase)") for a in arguments) else ("--literal-pathspecs",)
     git = ["git", "--no-pager", *lit, "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-c", "core.attributesFile=" + os.devnull, "-c", "core.fsmonitor=false", "-c", "core.worktree=.", *arguments]
     command = [sys.executable, "-c", "import os,sys; os.fchdir(int(sys.argv[1])); os.execvpe(sys.argv[2],sys.argv[2:],os.environ)", str(descriptor), *git]
     with subprocess.Popen(command, cwd="/", pass_fds=(descriptor,), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
@@ -200,38 +201,45 @@ def _git(descriptor, arguments):
                 process.kill()
                 process.wait()
     return bytes(output[:_GIT_MAX]).decode("utf-8", "replace"), len(output) > _GIT_MAX
-# LLM: 过滤落入宿主控制目录或runs的Git变更与diff块，保持NUL重命名对对齐且不泄露受保护路径。
+_ESC = {b"n": b"\n", b"t": b"\t", b"r": b"\r", b"b": b"\b", b"f": b"\f", b"v": b"\v", b"a": b"\a", b"\\": b"\\", b'"': b'"'}
+# LLM: 解码Git双引号与八进制字节/C转义路径，还原真实UTF-8路径再交给控制目录门校验。
+# 函数用途: 还原Git diff头中的带引号或转义路径。
+def _unq(token):
+    if token.startswith('"') and token.endswith('"'):
+        raw = re.sub(rb"\\([0-7]{1,3}|.)", lambda m: bytes([int(m[1], 8)]) if m[1].isdigit() else _ESC.get(m[1], m[1]), token[1:-1].encode())
+        token = raw.decode("utf-8", "replace")
+    return token[2:] if token.startswith(("a/", "b/")) else token
+# LLM: 过滤落入宿主控制目录或runs的Git变更与diff块，按行首diff头与C转义路径严格拦截。
 # 函数用途: 拆解Git状态与diff并剔除受保护子目录条目。
 def _git_filter(home, root, status, diff):
+    def _ok(*paths):
+        try:
+            for p in paths:
+                if p:
+                    _forbid_internal(home, root / p)
+            return True
+        except HostAPIError:
+            return False
     entries, changed = iter(status.split("\x00")), []
     branch = next(entries, "").removeprefix("## ").split("...")[0].removeprefix("No commits yet on ")
-    for entry in entries:
-        if entry:
-            code, rel = entry[:2], entry[3:]
-            old = next(entries, "") if ("R" in code or "C" in code) else ""
-            try:
-                _forbid_internal(home, root / rel)
-                if old:
-                    _forbid_internal(home, root / old)
-                changed.append({"status": code.strip(), "path": rel})
-            except HostAPIError:
-                pass
-    if "diff --git " in diff:
-        kept = []
-        for idx, chunk in enumerate(diff.split("diff --git ")):
-            if idx == 0:
-                if chunk:
-                    kept.append(chunk)
-                continue
-            parts = [p[2:] for p in chunk.split("\n", 1)[0].split(" ") if p.startswith(("a/", "b/"))]
-            try:
-                for part in parts:
-                    _forbid_internal(home, root / part)
-                kept.append("diff --git " + chunk)
-            except HostAPIError:
-                pass
-        diff = "".join(kept)
-    return branch, changed, diff
+    for entry in filter(None, entries):
+        code, rel = entry[:2], entry[3:]
+        old = next(entries, "") if ("R" in code or "C" in code) else ""
+        if _ok(rel, old):
+            changed.append({"status": code.strip(), "path": rel})
+    kept = []
+    for chunk in re.split(r"(?m)(?=^diff --git )", diff) if re.search(r"(?m)^diff --git ", diff) else [diff]:
+        if not chunk.startswith("diff --git "):
+            kept.append(chunk)
+            continue
+        head = chunk.split("\n", 1)[0][11:]
+        parts = [_unq(t) for t in re.findall(r'"(?:\\.|[^"\\])*"|(?:a|b)/.*?(?=\s+"?b/|$)', head) if _unq(t)]
+        hdr = chunk.split("\n@@", 1)[0].splitlines()[1:]
+        parts += [_unq(ln.split(" ", 2)[2]) for ln in hdr if ln.startswith(("rename from ", "rename to ", "copy from ", "copy to "))]
+        parts += [_unq(ln[4:].split("\t", 1)[0].strip()) for ln in hdr if ln.startswith(("--- ", "+++ ")) and ln[4:].strip() != "/dev/null"]
+        if len(parts) >= 2 and _ok(*parts):
+            kept.append(chunk)
+    return branch, changed, "".join(kept)
 # LLM: Git启动前核目标控制目录和nofollow；NUL分隔保留换行/空格文件名，状态不足时不宣称clean。
 # 函数用途: 返回Git分支、变更清单和有界diff；workspace.git.inspect可由注册层映射同一函数。
 def inspect_workspace_git(context, payload):
@@ -262,5 +270,5 @@ def inspect_workspace_git(context, payload):
         status, limited = _git(descriptor, ["status", "--porcelain=v1", "-b", "-z", "--ignore-submodules=all", "--", *specs])
         diff, truncated = _git(descriptor, ["diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "--", *specs])
         branch, changed, diff = _git_filter(home, root, status, diff)
-        return {"branch": branch, "clean": not changed and not limited and not truncated,
+        return {"branch": branch, "clean": not changed and not diff and not limited and not truncated,
                 "changed_files": changed, "diff": diff, "truncated": limited or truncated}

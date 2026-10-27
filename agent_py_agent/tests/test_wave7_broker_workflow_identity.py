@@ -867,6 +867,10 @@ def test_identity_local_name_does_not_cross_newline_when_empty(tmp_path):
         ))
     ))
     assert len(set(cascade_assets['skills'])) == 5
+    pair_s = (CapabilityFile('scripts/a.py', '0' * 64), CapabilityFile('scripts/a.py/mod.py', '1' * 64))
+    assert package_assets(pair_s)['scripts'] == package_assets(tuple(reversed(pair_s)))['scripts'] == ['a', 'a.py']
+    pair_w = (CapabilityFile('workflows/a.json', '0' * 64), CapabilityFile('workflows/a.json/flow.json', '1' * 64))
+    assert package_assets(pair_w)['workflows'] == package_assets(tuple(reversed(pair_w)))['workflows'] == ['a', 'a.json']
 
 
 # LLM: v2实例调用user_space.identity.resolve不应因缺失identity_credentials抛异常，且无read能力时应拒绝403。

@@ -89,14 +89,14 @@ def _active_agent_workspace_root(agent):
     return getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None))
 
 
-# LLM: main/user脚本保持，数据源与工作流动态读取当前目录和受限快照；治理仍只给可信管理员，目录开关不扩授权。
-# 函数用途: 登记Owner脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
+# LLM: main/user脚本、数据源与工作流统一动态读取当前经校验工作区与受限快照；治理仍只给可信管理员，目录开关不扩授权。
+# 函数用途: 登记Owner与项目工作区脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
 def register_self_map(agent):
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
         if owner_home is not None:
             ws_provider = functools.partial(_active_agent_workspace_root, agent)
-            agent.tools.register(ScriptsTool(owner_home))
+            agent.tools.register(ScriptsTool(owner_home, workspace_root_provider=ws_provider))
             agent.tools.register(DatasourcesTool(owner_home, workspace_root_provider=ws_provider))
             agent.tools.register(WorkflowsTool(owner_home,
                 workspace_root_provider=ws_provider,

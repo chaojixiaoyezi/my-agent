@@ -1,3 +1,31 @@
+## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
+
+```text
+|-- agent_py_agent/agent/capability/
+|   |-- asset_promotion.py # 四类一等公民资产确定性静态核验、载体选择与自动晋升
+|   |-- skill_learning_promotion.py # 自学技能候选证明持久化、CAS绑定与无人工确认自动发布
+|   `-- skill_learning_validation.py # 自学技能、脚本与工作流草稿结构、语法与安全门校验
+|-- agent_py_agent/agent/plugin_host/
+|   |-- action_specs_v2_portal.py # Web工作台（Coding与渗透测试）新增Host v2动作目录与Schema规范
+|   |-- builtin_plugins_v2.py # 内置插件列表查询与按Owner持久化启停切换Handler
+|   |-- model_settings_v2_handlers.py # 模型供应商与Profile增删改查、密钥脱敏与掩码保留Handler
+|   |-- subagents_v2_handlers.py # 子代理树列表、详情、時間线排序、转向、单节点停止与后台进程停止Handler
+|   |-- thread_settings_v2.py # 会话级能力包、模型、权限模式与工作区统一设置及CAS更新Handler
+|   `-- workspace_v2_handlers.py # 工作区nofollow文件列表、读写、20MiB上传下载与有界只读Git观察Handler
+|-- agent_py_agent/tests/
+|   |-- test_capability_router_r4.py # 脚本与工作流选中引用进入提示索引渲染与范围过滤回归
+|   |-- test_plugin_host_requests_and_streams_v2.py # 请求中断/接管、SSE after_seq续传与门户动作装配单测
+|   |-- test_plugin_host_subagents_and_workspace.py # 子代理监控/停止与工作区文件/Git安全边界单测
+|   |-- test_plugin_host_thread_and_model_settings.py # 会话设置、生命周期扩展、模型供应商与内置插件单测
+|   |-- test_plugin_host_w6_r2.py # W6门户动作权限映射、幂等与流式回放边界回归
+|   |-- test_skill_learning_r4.py # 跨更新采用身份、静态检查与无效反馈回归
+|   |-- test_wave7_autonomous_learning_closure.py # 自主学习A1-E1/F01-F17全链路闭环单测
+|   |-- test_wave7_broker_workflow_identity.py # 项目资产双层作用域、数据源预检、能力包范围与身份解析单测
+|   `-- test_wave7_w1_integration_contracts.py # W1+W2跨模块CAS、工作流恢复快照、ScriptsTool工作区接线与E1闭环单测
+```
+
+关键文件说明：`W1–W3` 完成项目级脚本/工作流双层拓扑与写回隔离、数据源执行前强预检与 IM 告警通知、`user_space.identity.resolve` 身份解析、除 `AGENTS.md`/`SOUL.md` 外 100% 机器核验零人工确认的自主学习晋升闭环、以及 `wake_poison` 指数退避/24h 隔离与死进程 `unknown` 运行态自动结清；`W4–W6` 完成两份 Web 插件工作台（Coding 与渗透测试）接口去重合并与 Host v2 落盘。
+
 ## 2026-10-26 Wave 6 B3 派生索引TTL协议与专属回归
 
 ```text

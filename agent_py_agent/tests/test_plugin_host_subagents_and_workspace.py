@@ -720,9 +720,15 @@ def test_r5_case_insensitive_protected_dirs_forbidden(case, monkeypatch, alias):
     monkeypatch.setattr(files, "_stat", lambda *args, **kwargs: SimpleNamespace(st_mode=0o040700))
     outputs = iter([
         ("## main\x00 M data/secret.txt\x00 M src/app.py\x00", False),
-        ("diff --git a/data/secret.txt b/data/secret.txt\n+secret\ndiff --git a/src/app.py b/src/app.py\n+ok\n", False),
+        (
+            'diff --git a/old.txt "b/run\\305\\277/probe.txt"\n+secret1\n'
+            'diff --git "a/run\\305\\277/fixture.txt" "b/run\\305\\277/fixture.txt"\n+secret2\n'
+            'diff --git a/src/app.py b/src/app.py\n+literal diff --git a/data/not-a-path.txt b/data/not-a-path.txt\n+ok\n',
+            False,
+        ),
     ])
     monkeypatch.setattr(files, "_git", lambda *args: next(outputs))
     git_res = files.inspect_workspace_git(case.context, {"workspace_dir": str(case.root)})
     assert git_res["changed_files"] == [{"status": "M", "path": "src/app.py"}]
-    assert "secret" not in git_res["diff"] and "+ok" in git_res["diff"]
+    assert "secret" not in git_res["diff"] and "+literal diff --git a/data/not-a-path.txt" in git_res["diff"]
+    assert "+ok" in git_res["diff"] and git_res["clean"] is False

@@ -1,3 +1,14 @@
+## 2026-10-27 Wave 7：底座能力闭环、自主学习闭环、Gateway 自愈与 Web 插件 Host v2 契约接口（已集成）
+
+- **主线一（底座能力闭环与 Gateway 自愈，`W1–W3`）**：
+  - **项目级资产双层拓扑与写回隔离（`1.1`）**：`ScriptStore`、`WorkflowStore`、`ScriptsTool`、`WorkflowsTool` 与 `self_map_bootstrap.register_self_map` 统一接入 `workspace_root_provider`，遵循 `workspace > owner` 优先级；执行 `workspace` 层资产时运行统计绝不写回被遮蔽的同名 `owner` 资产，工作流执行复用预检通过的代码快照消除 TOCTOU。
+  - **数据源运行时强预检与 IM 通知（`1.2`）**：`datasource_runtime.py` 在执行前完成文件源存在性、非空与结构校验，失败直接返回结构化错误码并触发 fail-open 的 `emit_asset_im_notification`。
+  - **能力包 `application_scope` 与身份解析（`1.3` + `Part 2`）**：`CapabilityDeclaration` 与 `CapabilityPackageSnapshot` 支持四维 `application_scope`，`package_assets` 采用收敛消歧循环并区分文件与目录分组键；新增 `user_space.identity.resolve` 主题与 Host v2 `read` 权限门接线。
+  - **自主学习全闭环（`A1–E1 / F01–F17`）**：除 `AGENTS.md` 与 `SOUL.md` 保持 100% 强制人工确认外，`Skill / Script / Workflow / Capability Package` 通过确定性机器校验后自动晋升、立即可被 `CapabilityRouter` 与 `SkillSearchTool` 检索并纳入后续采用/退化观测。
+  - **Gateway 自愈（`Part 4`）**：`wake_poison.py` 对 `uncounted` 唤醒实施 `30s..300s` 指数退避与 24 小时自动 `quarantined` 隔离；`runtime_db/repository.py` 对死进程遗留 `unknown` 行自动结清为 `cancelled` 并释放资源锁。
+- **主线二（Web 插件契约接口去重与落地，`W4–W6`）**：
+  - 合并 Coding 工作台与渗透测试工作台重合接口：提供统一 `conversations.threads.settings.get/update` 及 `packs.get/set`、`model.set`、`permission_mode.set` 别名，补齐 `usage.get`、`compact`、`delete`（含 `THREAD_BUSY` 保护）、`fork`（含 `up_to_message_id`）、`models.providers.*`（含密钥脱敏与 `"***"` 保留）、`plugins.builtin.list/toggle`、`subagents.list/get/steer/stop`、`processes.stop`、`workspace.files.*`（20MiB 上传下载与 `.git`/宿主控制目录 Unicode casefold + inode 隔离）、`workspace.git.inspect`（含受保护子目录排除与带引号 diff 过滤）、`conversations.requests.interrupt/takeover` 与 SSE `after_seq` 断线续传。
+
 ## 2026-10-27 Wave 7 W2-R4：跨更新采用身份与真实提示投影补齐
 
 来源：`07-tasks/wave7-w2-r4-fixes.md`。只收口五项剩余问题，不改变原发布权限、所有权、CAS、guard、质量准入或业务执行证明等级。

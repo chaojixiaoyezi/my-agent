@@ -112,13 +112,14 @@ class PluginBrokerService:
     # 函数用途: 将Broker动作转换成原Host v2调用并返回公共结果。
     def _dispatch_host_v2(self, action, payload, idempotency_key):
         from ..plugin_host.action_specs import action_specs
+        from ..plugin_host.composition import domain_ready
         from ..plugin_host.contracts import authorize_call, decode_call, dispatch_call
         from ..plugin_host.conversations import read_context
         from ..plugin_host.errors import HostAPIError
         from ..plugin_host.schemas import canonical_json, thaw
         body = {} if payload is None else payload
         if (isinstance(action, str) and action in ('capability_packages.list', 'user_space.identity.resolve')
-                and action not in action_specs()):
+                and (action not in action_specs() or not domain_ready(action, self._host_v2_ports))):
             if idempotency_key is not None or not isinstance(body, dict):
                 return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
             try:

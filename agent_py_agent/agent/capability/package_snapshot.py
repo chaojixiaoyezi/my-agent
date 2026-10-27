@@ -27,7 +27,7 @@ def package_assets(members):
                 idx = path.parts.index(kind)
                 following = path.parts[idx + 1:]
                 short = following[0] if len(following) > 1 else path.stem
-                key_path = PurePosixPath(*path.parts[:idx + 2]).as_posix() if len(following) > 1 else canon
+                key_path = f"{PurePosixPath(*path.parts[:idx + 2]).as_posix()}/" if len(following) > 1 else canon
                 full = PurePosixPath(*path.parts[:idx], short).as_posix() if idx > 0 else key_path
                 raw[kind].append((key_path, short, full))
     result = {}
