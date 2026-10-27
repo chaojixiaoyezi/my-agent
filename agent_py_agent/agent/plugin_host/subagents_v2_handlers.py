@@ -2,16 +2,22 @@
 # 模块用途: 冷读canonical子代理，沿原短事务/CAS投递指导和精确取消，不新建执行身份或影子状态。
 from __future__ import annotations
 
+import json
 import os
 import time
+from datetime import datetime, timezone
+from math import isfinite
 from pathlib import Path
 from types import SimpleNamespace
 
+from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import (
     open_directory_beneath,
     open_readonly_file_beneath,
 )
 from ..concurrency.exceptions import ConcurrencyConflictError
+from ..conversation.display_checkpoint import is_display_checkpoint
+from ..conversation.store_messages import _message_entries
 from ..settings import model_profiles
 from ..subagents.cancellation import (
     CancelSubagentTaskRequest,
@@ -108,8 +114,26 @@ def list_subagents(context, payload, *, agent=None, store=None):
             if payload.get("include_finished", True) or task.status not in _TERMINAL:
                 rows.append(_project(task, profiles, agent=agent))
     return {"items": rows}
-# LLM: 消息读取前核线程双归属和原消息路径的逐段nofollow；缺文件为空，坏路径/坏存储不能继续读正文。
-# 函数用途: 验证原会话消息来源，再调用原消息Store。
+# LLM: 原FD固定尾窗按JSONL的LF分行、兼容CRLF，Unicode正文不拆开；超窗首行保守丢弃，绝不按路径重开。
+# 函数用途: 从同一个流取得有界末尾行。
+def _tail_lines(stream, max_bytes):
+    size = os.fstat(stream.fileno()).st_size
+    stream.seek(max(0, size - max_bytes))
+    lines = stream.read(max_bytes).decode("utf-8", "replace").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    lines = [line.removesuffix("\r") for line in lines]
+    return lines[1:] if size > max_bytes else lines
+# LLM: 只接受JSON对象；坏JSON/过深结构不成为记录，时间线原字符串可由调用方独立保留。
+# 函数用途: 安全解析一行JSONL对象。
+def _json_row(line):
+    try:
+        row = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    return row if isinstance(row, dict) else None
+# LLM: 线程双归属核验后只读原nofollow FD的512KiB尾窗，不调用按路径重开的recent_report；至多50条本线程非display消息。
+# 函数用途: 在已验证文件上直接解析原消息类型，缺文件为空并跳过损坏行。
 def _messages(context, task, store):
     if store is None or not task.agent_thread_id:
         return []
@@ -121,35 +145,58 @@ def _messages(context, task, store):
         raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
     try:
         parts = store.storage.message_path(task.agent_thread_id).relative_to(home).parts
-        os.close(open_readonly_file_beneath(home, parts))
+        with os.fdopen(open_readonly_file_beneath(home, parts), "rb") as stream:
+            rows = [_json_row(line) for line in _tail_lines(stream, 524288)]
     except FileNotFoundError:
         return []
     except (OSError, ValueError):
         raise HostAPIError("SUBAGENT_NOT_FOUND", 404) from None
-    messages, errors = store.messages.recent_report(task.agent_thread_id, limit=100)
-    if errors:
-        raise HostAPIError("STORE_UNAVAILABLE", 503)
-    return messages
-# LLM: 原时间线有界nofollow尾读；消息先核双归属/文件安全，模型名仅解析认证owner原档案且不回写。
+    messages, _errors = _message_entries([row for row in rows if row is not None])
+    return [row for row in messages if row.thread_id == task.agent_thread_id and not is_display_checkpoint(row)][-50:]
+# LLM: 数字按原单位解释，ISO有时区则保留、无时区固定UTC；布尔/非有限/损坏值未知，不借宿主时区猜测。
+# 函数用途: 解析一个可比较的时间值，未知返回排序哨兵但不改原记录。
+def _timestamp(value):
+    if isinstance(value, bool):
+        return float("inf")
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            value = (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)).timestamp()
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            return float("inf")
+    return value if isfinite(value) else float("inf")
+# LLM: 优先毫秒/秒/ISO时间字段，统一为秒；未知排末尾，稳定sort负责保留同值及未知项的文件次序。
+# 函数用途: 为时间线记录提取统一时间排序键。
+def _step_sort_ts(row):
+    if not isinstance(row, dict):
+        return float("inf")
+    for key, divisor in (("ts_ms", 1000), ("ts", 1), ("timestamp", 1), ("created_at", 1)):
+        value = _timestamp(row.get(key))
+        if isfinite(value):
+            return value / divisor
+    return float("inf")
+# LLM: 仍只读256KiB/末100行；JSON对象按时间稳定排序，但保留原JSON字符串、seq及旧非JSON行回执。
+# 函数用途: 在同一nofollow FD上读时间线并按时间返回原始行。
+def _steps(home, path):
+    if not path:
+        return []
+    parts = Path(path).relative_to(home).parts
+    try:
+        with os.fdopen(open_readonly_file_beneath(home, parts), "rb") as stream:
+            lines = _tail_lines(stream, 262144)[-100:]
+    except FileNotFoundError:
+        return []
+    return sorted(lines, key=lambda line: _step_sort_ts(_json_row(line)))
+# LLM: 原时间线有界nofollow尾读并稳定时间排序；消息沿同一FD读取/脱敏，模型名仅解析本owner原档案。
 # 函数用途: 返回目标指令、真实时间线、消息和结果摘要。
 def get_subagent(context, payload, *, agent=None, store=None):
     task = _load(context, payload, agent)
-    steps = []
-    if task.agent_run_timeline_jsonl:
-        parts = Path(task.agent_run_timeline_jsonl).relative_to(context.owner_home.home_dir).parts
-        try:
-            with os.fdopen(open_readonly_file_beneath(context.owner_home.home_dir, parts), "rb") as stream:
-                size = os.fstat(stream.fileno()).st_size
-                if size > 262144:
-                    stream.seek(size - 262144)
-                raw = stream.read(262144)
-        except FileNotFoundError:
-            raw, size = b"", 0
-        lines = raw.decode("utf-8", "replace").splitlines()
-        steps = (lines[1:] if size > 262144 and lines else lines)[-100:]
+    steps = _steps(context.owner_home.home_dir, task.agent_run_timeline_jsonl)
     messages = _messages(context, task, store)
     return {**_project(task, _owner_model_profiles(context), agent=agent), "instruction": task.goal, "steps": steps,
-            "messages": [row.to_dict() for row in messages], "output_summary": task.result or task.latest_summary}
+            "messages": redact_sensitive_value([row.to_dict() for row in messages]), "output_summary": task.result or task.latest_summary}
 # LLM: mutation用原canonical CAS；有副作用后异常保unknown，不把队列已写伪装未执行。
 # 函数用途: 在原创建锁内执行一个窄修改，映射原修订冲突。
 def _mutate(context, payload, agent, reducer):

@@ -528,3 +528,170 @@ def test_r3_corrupt_model_catalog_is_unavailable(case, native_model_profile, act
     with pytest.raises(HostAPIError) as error:
         getattr(sub, action)(case.context, {"subagent_id": case.task.id, "thread_id": "thread-one"}, agent=case.agent)
     assert error.value.code == "STORE_UNAVAILABLE" and error.value.status == 503
+
+
+# LLM: 在真实nofollow FD打开后立刻替换叶/父路径；只注入确定性时序，不替换真实消息内容或解析器。
+# 函数用途: 复现R4消息预检后重新按路径打开导致的跨owner泄露。
+@pytest.mark.parametrize("swap", ["leaf", "parent"])
+def test_r4_messages_keep_verified_descriptor_after_path_swap(case, message_thread, monkeypatch, swap):
+    case.store.messages.append({"thread_id": message_thread.thread_id, "role": "assistant", "content": "own-safe-text"})
+    path = case.store.storage.message_path(message_thread.thread_id)
+    foreign = case.other.home_dir / path.name
+    foreign.write_text(json.dumps({"message_id": "foreign", "thread_id": message_thread.thread_id,
+                                   "role": "assistant", "content": "foreign-private-text"}) + "\n")
+    original, opened, calls = sub.open_readonly_file_beneath, [], []
+    original_recent = case.store.messages.recent_report
+    monkeypatch.setattr(case.store.messages, "recent_report", lambda *a, **kw: calls.append(a) or original_recent(*a, **kw))
+    # LLM: 保留真正已校验的FD，再把同一原路径换成另一个owner的文件。
+    # 函数用途: 在旧预检和路径重开之间建立准确的竞态观察点。
+    def swapped(home, parts):
+        fd = original(home, parts)
+        if Path(home).joinpath(*parts) == path:
+            opened.append(fd)
+            if swap == "leaf":
+                path.rename(path.with_name("preserved.jsonl"))
+                path.symlink_to(foreign)
+            else:
+                path.parent.rename(case.root / "preserved-messages")
+                path.parent.symlink_to(case.other.home_dir, target_is_directory=True)
+        return fd
+    monkeypatch.setattr(sub, "open_readonly_file_beneath", swapped)
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    assert [row["content"] for row in result["messages"]] == ["own-safe-text"]
+    assert len(opened) == 1 and calls == []
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+# LLM: 大display记录占满窗口前缀；真实消息含合成秘密，坏JSON/坏类型不占最后50条真实消息名额。
+# 函数用途: 验证R4有界FD尾读、原类型解析、display过滤及递归脱敏。
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_r4_messages_tail_limit_and_redaction(case, message_thread, monkeypatch, corrupt):
+    from unittest.mock import MagicMock
+
+    path = case.store.storage.message_path(message_thread.thread_id)
+    prefix = json.dumps({"role": "display", "content": "x" * (600 * 1024)})
+    rows = [{"message_id": f"row-{index}", "thread_id": message_thread.thread_id, "role": "assistant",
+             "content": f"message-{index}; api_key=synthetic-inline-value",
+             "metadata": {"api_key": "synthetic-field-value"}} for index in range(60)]
+    suffix = ['{"role":"display"}', json.dumps({"thread_id": "different-thread", "role": "assistant", "content": "wrong-thread"})]
+    if corrupt:
+        suffix += ["{broken", "[]", '{"created_at":"not-a-number"}']
+    path.write_text("\n".join([prefix, *(json.dumps(row) for row in rows), *suffix]) + "\n")
+    original, calls = case.store.messages.recent_report, []
+    monkeypatch.setattr(case.store.messages, "recent_report", lambda *a, **kw: calls.append(a) or original(*a, **kw))
+    open_file, fdopen, descriptors, reads = sub.open_readonly_file_beneath, os.fdopen, set(), []
+    # LLM: 不伪造FD，只标记真正消息FD以观察其单次读取预算。
+    # 函数用途: 在原nofollow打开后记录准确描述符。
+    def tracked(home, parts):
+        fd = open_file(home, parts)
+        if Path(home).joinpath(*parts) == path:
+            descriptors.add(fd)
+        return fd
+    # LLM: 包装真实流且沿原__exit__关闭；仅消息的rb流记录read参数，不改变数据或seek。
+    # 函数用途: 确认固定字节预算而非无界read。
+    def observed(fd, *args, **kwargs):
+        stream = fdopen(fd, *args, **kwargs)
+        if fd not in descriptors or args != ("rb",):
+            return stream
+        proxy = MagicMock(wraps=stream)
+        proxy.__enter__.return_value = proxy
+        proxy.__exit__.side_effect = stream.__exit__
+        proxy.read.side_effect = lambda count: reads.append(count) or stream.read(count)
+        return proxy
+    monkeypatch.setattr(sub, "open_readonly_file_beneath", tracked)
+    monkeypatch.setattr(os, "fdopen", observed)
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    assert [row["message_id"] for row in result["messages"]] == [f"row-{index}" for index in range(10, 60)]
+    assert "synthetic-" not in json.dumps(result)
+    assert all(row["metadata"]["api_key"] == "<redacted>" for row in result["messages"])
+    assert calls == [] and reads == [524288]
+
+
+# LLM: 元数据路径必须在检查目录存在性或运行后端之前拒绝；只创建空.git目录，不写Git配置或hooks。
+# 函数用途: 复现R4工作根含.git及大小写变体绕过。
+@pytest.mark.parametrize("raw", ["project/.git", "project/.GIT/hooks", "project/.GiT/objects", "project/.GiT/../project"])
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("action", ["list_workspace_files", "read_workspace_file", "download_workspace_file", "upload_workspace_file", "inspect_workspace_git"])
+def test_r4_workspace_git_root_is_forbidden(case, monkeypatch, raw, absolute, action):
+    (case.root / "project" / ".git").mkdir(parents=True)
+    calls, original = [], files.validate_workspace_directory
+    monkeypatch.setattr(files, "validate_workspace_directory", lambda *a, **kw: calls.append(a) or original(*a, **kw))
+    payload = {"workspace_dir": str(case.root / raw) if absolute else raw, "path": "pack", "data_base64": "eA=="}
+    with pytest.raises(HostAPIError) as error:
+        getattr(files, action)(case.context, payload)
+    assert error.value.code == "PATH_OUTSIDE_WORKSPACE" and error.value.status == 403
+    assert calls == []
+
+
+# LLM: workspace使用capabilities的同一相对路径拆分器，两条入口均须不区分大小写且保留稳定403。
+# 函数用途: 防止R4只修工作根却漏掉共享相对路径校验。
+@pytest.mark.parametrize("parts", [caps._parts, files._parts])
+@pytest.mark.parametrize("value", [".git", ".GIT/hooks", "project/.GiT/objects"])
+def test_r4_relative_git_parts_are_forbidden(parts, value):
+    with pytest.raises(HostAPIError) as error:
+        parts(value)
+    assert error.value.code == "PATH_OUTSIDE_WORKSPACE" and error.value.status == 403
+
+
+# LLM: 管理员外部项目同样不授Git元数据浏览；相似前缀的普通目录仍可读。
+# 函数用途: 验证R4外部根边界和普通工作区不误杀。
+def test_r4_external_git_path_and_lookalike_directory(case):
+    with pytest.raises(HostAPIError) as error:
+        files._forbid_internal(case.root, case.other.home_dir / "project" / ".GIT" / "objects")
+    assert error.value.code == "PATH_OUTSIDE_WORKSPACE" and error.value.status == 403
+    folder = case.root / "project.git"
+    folder.mkdir()
+    (folder / "ok").write_text("ordinary")
+    assert files.read_workspace_file(case.context, {"workspace_dir": str(folder), "path": "ok"})["content"] == "ordinary"
+
+
+# LLM: 原回执仍为JSON字符串列表；秒/毫秒/带时区与无时区ISO统一后稳定排序，不改原seq或正文。
+# 函数用途: 复现R4时间线按追加顺序而非实际时间返回的问题。
+@pytest.mark.parametrize("field, values", [
+    ("ts", [30, 10, 20]), ("ts_ms", [30000, 10000, 20000]),
+    ("timestamp", ["1970-01-01T00:00:30Z", "1970-01-01T01:00:10+01:00", "1970-01-01T00:00:20Z"]),
+    ("created_at", ["1970-01-01T00:00:30", "1970-01-01T00:00:10", "1970-01-01T00:00:20"]),
+])
+def test_r4_steps_are_chronological(case, field, values):
+    path = Path(case.manager.load(case.task.id).agent_run_timeline_jsonl)
+    rows = [{field: value, "label": label, "seq": index} for index, (value, label) in enumerate(zip(values, ("thirty", "ten", "twenty")))]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent)
+    parsed = [json.loads(line) for line in result["steps"]]
+    assert [row["label"] for row in parsed] == ["ten", "twenty", "thirty"]
+    assert [row["seq"] for row in parsed] == [1, 2, 0]
+
+
+# LLM: 同时出现不同时间字段也必须按同一单位比较；非有限数/布尔时间无效，未知项稳定放末尾。
+# 函数用途: 验证R4时间键回退、稳定同值次序以及原始非JSON行兼容。
+def test_r4_steps_mixed_timestamps_and_stable_ties(case):
+    path = Path(case.manager.load(case.task.id).agent_run_timeline_jsonl)
+    rows = [{"ts_ms": 30000, "label": "thirty"}, {"ts": "NaN", "timestamp": "1970-01-01T00:00:10Z", "label": "ten-a"},
+            {"created_at": "1970-01-01T00:00:20", "label": "twenty"}, {"ts": 10, "label": "ten-b"},
+            {"ts": True, "label": "unknown"}]
+    path.write_text("\n".join([*(json.dumps(row) for row in rows), "legacy-plain-line"]) + "\n")
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent)
+    assert [json.loads(line)["label"] for line in result["steps"][:-1]] == ["ten-a", "ten-b", "twenty", "thirty", "unknown"]
+    assert result["steps"][-1] == "legacy-plain-line"
+
+
+# LLM: 原生消息写入器实际保留这些Unicode字符，它们是正文而不是JSONL的LF记录分隔符。
+# 函数用途: 复现独立复核发现的splitlines误拆合法正文，并覆盖CRLF时间线。
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("view", ["messages", "steps"])
+def test_r4_jsonl_unicode_separators_are_content(case, message_thread, separator, view):
+    content = "甲" + separator + "乙"
+    if view == "messages":
+        case.store.messages.append({"thread_id": message_thread.thread_id, "role": "assistant", "content": content})
+        path = case.store.storage.message_path(message_thread.thread_id)
+    else:
+        path = Path(case.manager.load(case.task.id).agent_run_timeline_jsonl)
+        raw = json.dumps({"ts": 10, "label": content}, ensure_ascii=False)
+        path.write_bytes((raw + "\r\n").encode())
+    assert separator.encode() in path.read_bytes()
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    if view == "messages":
+        assert [row["content"] for row in result["messages"]] == [content]
+    else:
+        assert result["steps"] == [raw]

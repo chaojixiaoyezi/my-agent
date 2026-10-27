@@ -27,13 +27,15 @@ from .capabilities_v2_handlers import _parts
 from .errors import HostAPIError
 
 _MAX, _GIT_MAX = 20 * 1024 * 1024, 256 * 1024
-# LLM: 使用原宿主控制目录清单及runs，按完整路径组件拒绝，不能把相似名字的普通项目一并封禁。
+# LLM: 内外工作根及子路径均不区分大小写拒绝.git；原宿主控制目录/runs按组件匹配，不能误杀普通前缀。
 # 函数用途: 拒绝把当前家目录内的运行状态当作工作区文件。
 def _forbid_internal(home, target):
+    if any(part.lower() == ".git" for part in target.parts):
+        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
     if target.is_relative_to(home) and any(target.is_relative_to(home.joinpath(*parts))
             for parts in (*HOST_STATE_OWNER_DIRS, ("runs",))):
         raise HostAPIError("WORKSPACE_PATH_INVALID")
-# LLM: owner内外根均过原目录校验，内部目标另核控制目录；持有原字面路径FD，校验resolve不能放行根链接。
+# LLM: 目录I/O前先拒绝.git组件，再核owner内外根与控制目录；持有字面路径FD，resolve不能放行根链接。
 # 函数用途: 验证根并在全程持有目录FD，所有异常关闭资源。
 @contextmanager
 def _directory(context, payload, parts=()):
@@ -41,6 +43,7 @@ def _directory(context, payload, parts=()):
     try:
         home = context.owner_home.home_dir
         root = home / Path(payload["workspace_dir"]).expanduser()
+        _forbid_internal(home, root.joinpath(*parts))
         if ".." in root.parts:
             raise HostAPIError("WORKSPACE_PATH_INVALID")
         if root.is_relative_to(home):
@@ -65,7 +68,7 @@ def _limit(value, maximum):
     if type(value) is not int or not 1 <= value <= maximum:
         raise HostAPIError("INVALID_SCHEMA")
     return value
-# LLM: 逐项先滤内部控制目录再lstat，不跟随链接，仅展示普通单链接文件和目录，达到限额即停止。
+# LLM: 逐项先滤控制目录和任意大小写.git再lstat，不跟随链接，仅展示普通单链接文件/目录。
 # 函数用途: 返回查询匹配的直接子项，跳过Git内部噪声。
 def list_workspace_files(context, payload):
     parts, items = _parts(payload["relative_path"]) if payload.get("relative_path") else (), []
@@ -78,7 +81,7 @@ def list_workspace_files(context, payload):
                 except HostAPIError:
                     continue
                 info = entry.stat(follow_symlinks=False)
-                if entry.name == ".git" or payload.get("query", "").casefold() not in entry.name.casefold():
+                if entry.name.lower() == ".git" or payload.get("query", "").casefold() not in entry.name.casefold():
                     continue
                 if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode) and info.st_nlink == 1):
                     continue

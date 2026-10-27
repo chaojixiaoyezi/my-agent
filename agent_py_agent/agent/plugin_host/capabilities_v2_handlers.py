@@ -36,13 +36,15 @@ def _package_dict(record):
 def user_space_identity_resolve(authorized):
     return read_context(authorized)
 
-# LLM: 不resolve相对文件路径、不清洗点点/绝对路径，Git内部目录不是文件浏览入口。
+# LLM: 不resolve或清洗相对路径；任意大小写.git组件都以403拒绝，不能作为文件浏览入口。
 # 函数用途: 为W5文件委派拆出安全非空相对组件。
 def _parts(value):
     if not isinstance(value, str) or len(value) > 4096 or "\x00" in value or "\\" in value:
         raise HostAPIError("WORKSPACE_PATH_INVALID")
     parts = tuple(value.split("/"))
-    if any(part in {"", ".", "..", ".git"} for part in parts):
+    if any(part.lower() == ".git" for part in parts):
+        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
+    if any(part in {"", ".", ".."} for part in parts):
         raise HostAPIError("WORKSPACE_PATH_INVALID")
     return parts
 
