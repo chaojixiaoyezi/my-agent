@@ -779,23 +779,69 @@ def apply_scheduler_batch(root, jobs, runs, *, previous=False, admission=None, h
     repo._sync_due_index_unlocked(store)
 
 
-# LLM: 比较安装定义而非store时间、其它job/run或执行统计；显式启停及定义变化仍不匹配。
+# LLM: 沿job→rules递归剔除运行投影；工具参数/metadata等静态子树逐字保留，不能按同名键删除用户输入。
+# 函数用途: 清除单任务安装事实中的时间、计数、领取、退避、检查点与已确认结果。
+def _scheduler_static_value(value):
+    runtime = {'next_run_at', 'last_run_at', 'last_run_status', 'last_error_code', 'run_count',
+        'failure_count', 'consecutive_failures', 'backoff_until', 'last_status', 'last_error',
+        'updated_at', 'claimed_by', 'active_run_id', 'precheck_checkpoint', 'result'}
+    if isinstance(value, dict):
+        return {key: _scheduler_static_value(item) if key == 'rules' else deepcopy(item)
+            for key, item in value.items() if key not in runtime}
+    if isinstance(value, list):
+        return [_scheduler_static_value(item) for item in value]
+    return value
+
+
+# LLM: 比较静态安装定义及启用意图，递归排除运行字段；覆盖原有定义及执行/通知配置，不比较整store时间。
 # 函数用途: 投影可用于投递提交辨认的稳定单任务事实。
 def scheduler_job_fact(job):
     if job is None:
         return None
-    return {key: job.get(key) for key in ('job_id', 'enabled', 'status', 'schedule', 'prompt', 'name',
-        'owner', 'source', 'metadata', 'thread_id', 'precheck', 'policy', 'skill_refs', 'rules')}
+    return _scheduler_static_value({key: job.get(key) for key in ('job_id', 'enabled', 'status', 'schedule', 'prompt', 'name',
+        'owner', 'source', 'metadata', 'thread_id', 'precheck', 'policy', 'skill_refs', 'rules', 'execution', 'delivery')})
 
 
-# LLM: 调用方持root/store锁且已核资产hash；只核本job定义，匹配后用同一读取结果同步due，不写store。
+# LLM: 比较原生运行数值与安装快照，不以旧last_run_status授权新的状态归一化；不读写store。
+# 函数用途: 确认任务或规则在安装快照之后确有新的运行完成记录。
+def _scheduler_run_advanced(current, previous):
+    return bool(current.get('last_run_status')) and (
+        float(current.get('last_run_at') or 0) > float(previous.get('last_run_at') or 0)
+        or int(current.get('run_count') or 0) > int(previous.get('run_count') or 0))
+
+
+# LLM: 单at须原生完成原因、下一次已耗尽且运行推进；全规则耗尽保原合同，manual_pause及其它显式暂停原因一律不归一。
+# 函数用途: 辨认同一安装任务的自然运行推进，不把手动试跑后的用户暂停误补成已接受。
+def _scheduler_job_matches(job, expected):
+    current, target = scheduler_job_fact(job), scheduler_job_fact(expected)
+    if current is None or target is None:
+        return current == target
+    rules = job.get('rules') or []
+    reason = job.get('paused_reason') or ''
+    natural_reasons = {'one_shot_finished', 'misfire_grace_expired'}
+    one_shot = ((job.get('schedule') or {}).get('kind') == 'at' and reason in natural_reasons
+        and float(job.get('next_run_at') or 0) == 0)
+    exhausted = one_shot or bool(rules) and not any(rule['enabled'] for rule in rules)
+    if (target['status'] == 'active' and current['status'] in {'paused', 'completed'}
+            and (not reason or reason in natural_reasons) and exhausted and _scheduler_run_advanced(job, expected)):
+        current['status'] = 'active'
+    previous_rules = {rule['id']: rule for rule in expected.get('rules') or []}
+    for rule, raw in zip(current.get('rules') or [], job.get('rules') or []):
+        previous = previous_rules.get(rule['id'], {})
+        if (previous.get('enabled') is True and rule.get('enabled') is False
+                and rule.get('schedule', {}).get('kind') == 'at' and _scheduler_run_advanced(raw, previous)):
+            rule['enabled'] = True
+    return current == target
+
+
+# LLM: 调用方持root/store锁且已核资产hash；before=None不能匹配存在任务；容正常调度推进，仅after匹配补due，不写store。
 # 函数用途: 辨认单任务安装前后事实并补齐已安装任务的原唤醒投影。
 def scheduler_installation_matches(home, changes, *, previous=False):
     if not changes:
         return True
     repo = scheduler_batch_repository(home)
     store = repo._load_store_unlocked()
-    if any(scheduler_job_fact(store['jobs'].get(identifier)) != scheduler_job_fact(change['before' if previous else 'after'])
+    if any(not _scheduler_job_matches(store['jobs'].get(identifier), change['before' if previous else 'after'])
             for identifier, change in changes.items()):
         return False
     if not previous:

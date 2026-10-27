@@ -18,11 +18,55 @@
 ```bash
 python3 -m pytest agent_py_agent/tests/test_foundation_bc_wave5.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_gateway_service_role_identity.py agent_py_agent/tests/test_scoped_lock_private_permissions.py agent_py_agent/tests/test_runtime_db_recover_stale.py -q --tb=short --junitxml=.pytest_cache/wave5-bc-gate.xml
 ruff check agent_py_agent scripts
+## 2026-10-26 Wave 4 Round 6：纯占位引用与手动暂停恢复边界
+
+来源：`07-tasks/wave4-round6-fix-20261026.md`，精确基线 `2db4f1fdb258272d9cee796b664891d04a129462`，仅修改指定四个文件，不部署、不推送或接管其它工作树。
+
+- R6-F1：`_placeholder` 先拒绝 CR/LF，再完整匹配占位符和允许的环境引用，不再按 `$` / `os.` / `env.` 前缀豁免整段。`${NAME}` 与尖括号模板限制为单个标识；环境调用只接受单个变量名，不放行附加字面量默认值。保留原有效 `os.environ` 裸表达式兼容测试，但只精确匹配该表达式，任何拼接尾串或续行仍拒绝。占位判断不执行表达式或读取引用的变量。
+- `test_round6_variable_prefix_never_shields_literal_tail`：裸 YAML 与 JSON 编码正文覆盖多行 plain scalar、无缩进列表续行、单行空白/无空白拼接、`os.getenv` 和 `env.` 前缀，以及内部非法 `${TOKEN literal}`。默认拒绝，公开错误不含合成尾串；显式脱敏逐字断言整个原值替换为一个占位、相邻端口保留，清理结果再次默认扫描不变。
+- R6-F2：单次 `at` 的状态归一化需要原生自然原因、`next_run_at=0` 和安装后新运行记录；`manual_pause` 及其它显式暂停原因不能归一化。复合规则自然耗尽仍沿原恢复合同，不把时间、次数的单独增加当作用户暂停授权。
+- `test_round6_manual_at_run_then_pause_is_installation_drift`：真实子进程在整批提交后、回执前 `os._exit(79)`；未来一小时的 `at` 经原 `reserve_manual_run → claim_run → mark_run_running → finish_run` 试跑，确认 trigger 为 manual、任务仍 active、到期时间未被消耗，然后调用原 `pause_job`。单任务/复合 × accept/reject × 默认/自定义暂停原因均冲突失败；store/history/envelope 原字节及双方未结算状态保留，不补 accepted。原自然 due/every 恢复用例继续通过。
+- 初始新增组 **42 项中 28 failed / 14 passed**（`.pytest_cache/round6-red.xml`），有效复现混合值、占位判断和单次任务暂停误判；修复后聚焦加原自然完成组 **50 passed**。首次完整回归暴露两个既有 `os.environ` 兼容用例被误拒绝，已收窄成精确允许，不改或放宽原测试。
+- 最终指定测试文件 **354 passed / 0 failed / 0 error / 0 skipped**，其中 Round6 新增 **44 项**，回执 `.pytest_cache/round6-gate.xml`。独立 Astra high 只静态审查内联关键差异，未读仓库或跑测试，未确认本轮目标残留缺陷；不把片段复核当全仓批准。
+
+工作树根复现指定门禁（尺寸报告不要与 pytest 并行生成；生成物提交前还原）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py -q --tb=short
+ruff check agent_py_agent/agent/assets/delivery_sanitizer.py agent_py_agent/agent/assets/script_store_support.py agent_py_agent/tests/test_cross_owner_asset_delivery.py
+python3 scripts/check_doc_sync.py
 python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
 最终当前源码验收：指定五文件 **191 passed / 0 failed / 0 error / 0 skipped**，其中新增 Wave5 **30 项**；额外 supervisor/curator/retention/request 七文件 **370 passed / 0 failed / 0 error / 0 skipped**。统计来自 `.pytest_cache/wave5-bc-gate.xml` 和 `wave5-bc-extra.xml` 的实际 testcase 结果。全范围 Ruff 与 `git diff --check` 通过，strict 尺寸门 **hard=0 / blocked=False**。补充 scoped_locks 直接授权读口回归后，已重跑上述全部验收。早期额外 `test_gateway_host_identity.py` 出现两项失败（一项 fixture 缺 state，一项真实 ps 返回 EPERM），未做基线复核，不宣称既有失败或该 host_identity 套件全绿。真实管理员IM投递、真实进程跨代/跨平台、上线启动及生产吞吐改善未验证；本轮没有跑全仓 pytest。生成的 `CODE_SIZE_REPORT.md` 不随功能提交。
+范围仅临时 Owner 的脱敏和真实持久化/调度仓库链；不代表真实 worker、模型、外部通知、断电、Linux/Windows 或全仓验收。未增加依赖，未删除、skip/xfail 或放宽有效测试。
+
+## 2026-10-26 Wave 4 Round 5：完整 YAML 值与监控自身运行后的回执恢复
+
+来源：`07-tasks/wave4-round5-fix-20261026.md`，起点 `7528eb762af053d164db3a60fb70ee18a75ab101`。仅修改任务列出的五个文件。
+
+- `test_round5_yaml_complete_values`：裸文及 JSON 正文同时覆盖根/嵌套/序列映射下的同级无缩进序列、序列项续行、首行有值的折行普通标量、零深度逗号、逗号加注释续行、`null` 开头的实际多行字符串。默认必须拒绝，显式替换无原值/续行尾部残留且保留相邻端口。原 flow/引用/块体与占位符测试保留。
+- `test_round5_installed_monitor_own_tick_recovers_receipt`：真实子进程 `os._exit(79)` 在整批提交但回执前退出；随后刚安装的监控自己走原 `reserve_due_runs → claim_run → mark_run_running → finish_run`，覆盖单任务/复合 × every/at × accept/reject。重试接受和拒绝自愈均补 accepted，不重装、不复活已完成任务，store/history 原字节不变；`before=None` 不允许匹配现存 job。
+- `test_round5_reject_drifted_installation_fails_closed`：安装后原生修改 job 定义或变动绑定文件时，接受与拒绝均失败关闭，不改任务、不写伪 accepted/rejected。
+- `test_round5_runtime_names_in_static_configuration_remain_identity`：运行字段过滤仅沿 job→rules 节点递归；工具参数和 metadata 中同名的 `result/run_count/updated_at/last_error` 仍是静态输入，不可忽略其修改。此反例先暴露了泛化递归过滤的错误，再收窄实现。
+- 独立 `gpt-6-astra max` 仅静态审查给定关键片段，未读仓库或运行测试；新增 `test_round5_yaml_review_boundaries` 覆盖注释穿插、独占行的 `-`、带注释的空 item 头及 plain 的 dash 续行，检查完整精确输出和重扫幂等。人工暂停及旧 at 运行状态误授权的反例也先在 `.pytest_cache/round5/red-review.log` 复现，再要求新增运行时间/计数及耗尽事实后才归一化。
+- 使用当前环境已有 `PyYAML.safe_load` 对本轮 **24 组**裸文/JSON 原文与脱敏后正文实际解析，全部合法且映射/序列/标量类型结构不变（`.pytest_cache/round5/yaml-parse.json`）；未新增 CI/生产依赖。初版一个“首行注释后再续行”的额外夹具实测非法，已改为合法的末行注释，保留原秘密残留和相邻端口断言，不拿非法输入充当合法 YAML 覆盖。
+- 新 YAML 及实际调度推进失败均先在未修复代码上实跑；记录在 `.pytest_cache/round5/{red,red-native,red-static2}.log`。首轮夹具的 basetemp 父目录缺失、错误 API 参数不计为缺陷复现；修正夹具后才取得有效失败。
+
+任务单的 `test_managed_user_governance.py` 不存在；对应仓库现有治理文件是 `test_admin_managed_users_governance.py`。在工作树根按此真实路径复现组合门禁：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short --basetemp=.pytest_cache/round5/gate-tmp --junitxml=.pytest_cache/round5/gate.xml
+ruff check agent_py_agent/agent/assets/delivery_sanitizer.py agent_py_agent/agent/assets/script_store_support.py agent_py_agent/agent/assets/delivery_service.py agent_py_agent/tests/test_cross_owner_asset_delivery.py
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git diff --check
+```
+
+最终组合 **602 tests / 0 failures / 0 errors / 0 skipped**（`.pytest_cache/round5/final.xml`），本轮聚焦组 **44 / 0 / 0 / 0**（`green-review.xml`）。Ruff、`DOC_SYNC_PASS`、严格体积门禁和 `git diff --check` 均通过；体积门禁为 `hard=0, blocked=False`，未改基线。服务类原本贴近硬上限，拒绝状态检查已等价提取为本模块函数；生成的 `CODE_SIZE_REPORT.md` 已还原到 HEAD，不随功能提交。
+
+本轮仅验证临时 Owner 的原生持久化与调度仓库链，不代表真实 worker/模型/通知通道、Linux/Windows 或全仓验收。未增加生产依赖、不修改生成物基线、不删除或跳过原有有效测试。
 
 ## 2026-10-26 Wave 4 Round 4：单任务调度恢复、结构化 YAML 与冷通知失败关闭
 

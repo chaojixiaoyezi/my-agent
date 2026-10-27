@@ -301,6 +301,17 @@ class _DeliveryStorage:
             yield admissions
 
 
+# LLM: 仅reject在原write_scope锁内调用；已安装先补accepted，有prepared但不再是before则只抛冲突，不写rejected。
+# 函数用途: 统一检查能否拒绝投递，保护已经发表或被本人改动的安装目标。
+def _guard_delivery_rejection(service, sender, recipient, envelope, receipt, admissions):
+    if receipt['status'] == 'accepted' or envelope['status'] == 'accepted' or service._installation_matches(recipient, envelope):
+        envelope['resolution'] = receipt.get('resolution') or envelope.get('resolution', {})
+        service._resolve_delivery(sender, recipient, envelope, receipt, 'accepted', admissions)
+        raise AssetDeliveryError('DELIVERY_STATE_CONFLICT', '资产已安装，不能再拒绝')
+    if envelope.get('resolution', {}).get('expected_files') and not service._installation_matches(recipient, envelope, previous=True):
+        raise AssetDeliveryError('DELIVERY_STATE_CONFLICT', '资产已进入安装或已安装状态，不能拒绝')
+
+
 # LLM: 调用方必须冻结真实effective_owner，模型参数不能指定首个Owner或admin_provision；只读入口不物化存储。
 # 类用途: 为Host v2、管理预置、Agent工具和斜杠命令提供同一跨Owner投递服务。
 class AssetDeliveryService(_DeliveryStorage):
@@ -436,7 +447,7 @@ class AssetDeliveryService(_DeliveryStorage):
             commit_delivery_items(recipient, drafts, extras, admissions[recipient], prepared)
             return self._resolve_delivery(sender, recipient, envelope, receipt, 'accepted', admissions)
 
-    # LLM: 仅本人可拒绝待确认包裹；接受后不得用reject回滚资产，重复拒绝不再次改变正式资产。
+    # LLM: 已提交先补accepted；有prepared事实但不再是before的目标失败关闭，不以运行推进或定义漂移误标rejected。
     # 函数用途: 拒绝本人投递并同步发送方回执，不安装任何文件。
     def reject_delivery(self, recipient_owner_id, delivery_id, reason=''):
         recipient = self._home(recipient_owner_id)
@@ -448,10 +459,7 @@ class AssetDeliveryService(_DeliveryStorage):
         with self._write_scope((sender, recipient)) as admissions:
             envelope = self._envelope(recipient, recipient_owner_id, delivery_id)
             receipt = self._origin_receipt(sender, envelope)
-            if receipt['status'] == 'accepted' or envelope['status'] == 'accepted' or self._installation_matches(recipient, envelope):
-                envelope['resolution'] = receipt.get('resolution') or envelope.get('resolution', {})
-                self._resolve_delivery(sender, recipient, envelope, receipt, 'accepted', admissions)
-                raise AssetDeliveryError('DELIVERY_STATE_CONFLICT', '资产已安装，不能再拒绝')
+            _guard_delivery_rejection(self, sender, recipient, envelope, receipt, admissions)
             if receipt['status'] == 'rejected' or envelope['status'] == 'rejected':
                 envelope['resolution'] = receipt.get('resolution') or envelope.get('resolution', {})
                 return self._resolve_delivery(sender, recipient, envelope, receipt, 'rejected', admissions)

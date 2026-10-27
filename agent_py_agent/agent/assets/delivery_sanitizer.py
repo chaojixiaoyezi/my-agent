@@ -1,4 +1,4 @@
-# LLM: clean_json前核原字节，JSON解码正文再核YAML缩进/flow边界；复用公共redactor，不借用Skill迁移预算或执行YAML标签。
+# LLM: clean_json前核原字节，JSON解码正文再核YAML结构；只豁免完整单行占位/环境引用，不执行表达式或YAML标签。
 # 模块用途: 硬拒绝投递秘密或显式替换为占位符，移除发送方主机路径且无损处理二进制。
 from __future__ import annotations
 
@@ -25,7 +25,9 @@ _PATTERNS = (
     ('secret_assignment', re.compile(
         r'''(?i)(?<!\w)(?:api_key|secret|token|password|passwd|private_key|access_key|client_secret|bearer)(?!\w)["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote)''')),
 )
-_PLACEHOLDER = re.compile(r'\$\{[^}\n]+\}|<[^>\n]+>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b|\*\*\*REDACTED\*\*\*', re.I)
+_PLACEHOLDER = re.compile(r'\$\{[A-Za-z_][A-Za-z0-9_]*\}|<[A-Za-z_][A-Za-z0-9_.-]*>|\bYOUR_[A-Za-z0-9_]+|\bCHANGE_ME\b|\*\*\*REDACTED\*\*\*', re.I)
+_ENV_REFERENCE = re.compile(
+    r'''\$[A-Za-z_][A-Za-z0-9_]*|env\.[A-Za-z_][A-Za-z0-9_]*|os\.environ(?:\[[ \t]*(?P<bracket>["'])[A-Za-z_][A-Za-z0-9_]*(?P=bracket)[ \t]*\])?|(?:os\.environ\.get|os\.getenv|env\.get)\([ \t]*(?P<call>["'])[A-Za-z_][A-Za-z0-9_]*(?P=call)[ \t]*\)''')
 _SECRET_METADATA = frozenset({'schema_version', 'credential_ref', 'datasource_id',
     'updated_at', 'created_at', 'kind', 'driver'})
 _JSON_STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -71,12 +73,14 @@ def datasource_secret_values(owner_home):
     return tuple(sorted(result))
 
 
-# LLM: 普通模板可豁免；未加引号凭据键仅允许布尔/空值/变量引用，数字PIN和带引号的真实短秘密不能放行。
-# 函数用途: 区分模板与YAML/env非秘密表达式，不访问变量或凭据来源。
+# LLM: 只豁免完整单行模板/变量引用；续行、拼接及字面量默认值不因变量前缀放行，布尔/空值仍仅限未引用值。
+# 函数用途: 区分纯占位与敏感值，不求值或读取环境，数字PIN及混合值继续拒绝。
 def _placeholder(value, *, unquoted=False):
+    if '\n' in value or '\r' in value:
+        return False
     return (_PLACEHOLDER.fullmatch(value) is not None or unquoted and (
         value.lower() in {'true', 'false', 'null', 'none', 'yes', 'no', '~'}
-        or value.startswith(('$', 'os.', 'env.'))))
+        or _ENV_REFERENCE.fullmatch(value) is not None))
 
 
 # LLM: 不构造YAML对象、不执行tag/alias；只判定已定位标量，带引号的布尔/数字仍可是真秘密。
@@ -104,9 +108,9 @@ def _yaml_quoted_step(text, cursor, quote, escaped):
     return '', False, cursor + 1, True
 
 
-# LLM: 跨物理行追踪引号与容器，不在内嵌逗号或#截断；单引号双写按YAML转义处理，不展开tag/alias。
+# LLM: 调用方传外层flow上下文；块式plain的逗号是正文，flow逗号才分值；引用与内部容器仍按闭合边界处理。
 # 函数用途: 找到完整flow或引用标量边界，避免半替换遗留秘密或破坏集合闭合。
-def _yaml_value_end(text, start, stop):
+def _yaml_value_end(text, start, stop, *, in_flow=False):
     quote, depth, escaped, cursor = '', 0, False, start
     container = text[start:start + 1] in {'[', '{'}
     while cursor < stop:
@@ -132,7 +136,7 @@ def _yaml_value_end(text, start, stop):
                 return cursor + 1
             cursor += 1
             continue
-        if not depth and (char == ',' or char == '#' and (cursor == start or text[cursor - 1].isspace())):
+        if not depth and (in_flow and char == ',' or char == '#' and (cursor == start or text[cursor - 1].isspace())):
             return cursor
         cursor += 1
     return stop
@@ -192,19 +196,24 @@ def _yaml_inline_contexts(text):
     return result
 
 
-# LLM: 普通折行标量整体替换；标量列表按item边界合并续行，子映射不按字符串清除。
+# LLM: plain首值及续行是一组；序列包括独占行的dash，保留指示符，注释/空行不另开秘密字符串。
 # 函数用途: 生成多行敏感值的保形替换片段。
-def _yaml_multiline_spans(body, findings):
-    groups = []
+def _yaml_multiline_spans(body, findings, *, plain=False):
+    groups, pending_sequence = [], False
+    pattern = r'(?P<prefix>[ \t]*)(?P<value>[^\r\n]*)' if plain else (
+        r'(?P<prefix>[ \t]*(?P<seq>-(?:[ \t]+|(?=\r?\n|$)))?)(?P<value>[^\r\n]*)')
     for start, child in body:
-        scalar = re.match(r'(?P<prefix>[ \t]*(?P<seq>-[ \t]+)?)(?P<value>[^\r\n]*)', child)
+        scalar = re.match(pattern, child)
+        if not plain and scalar['seq']:
+            pending_sequence = True
         value = scalar['value'].strip()
         if not value or value.startswith('#'):
             continue
-        if re.match(r'''["']?[^\s:]+["']?\s*:\s''', value) or value.startswith(('{', '[')):
+        if not plain and (re.match(r'''["']?[^\s:]+["']?\s*:\s''', value) or value.startswith(('{', '['))):
             return []
-        if scalar['seq'] or not groups:
+        if pending_sequence or not groups:
             groups.append([start + scalar.start('value'), start + scalar.end('value'), value])
+            pending_sequence = False
         else:
             groups[-1][1] = start + scalar.end('value')
             groups[-1][2] += '\n' + value
@@ -216,8 +225,26 @@ def _yaml_multiline_spans(body, findings):
     return spans
 
 
-# LLM: 块体按原缩进边界整段替换，空行也移除；多行标量只改标量叶，不把子映射/list-of-mappings当秘密字符串。
-# 函数用途: 定位敏感键的块标量、多行标量和缩进标量列表。
+# LLM: 注释不决定缩进边界；无首值时认同级序列，有plain首值时更深dash是同一字符串续行。
+# 函数用途: 找出敏感键值所属的后续物理行，遇同级兄弟键立即停止。
+def _yaml_body_lines(lines, index, indent, offset, *, indentless=False, plain=False):
+    body, end = [], offset
+    for child in islice(lines, index + 1, None):
+        stripped = child.lstrip(' \t')
+        child_indent = len(child) - len(stripped)
+        sequence = re.match(r'-(?:\s|$)', stripped)
+        if child.strip() and not stripped.startswith('#'):
+            if child_indent < indent or child_indent == indent and not (indentless and sequence):
+                break
+            if plain and re.match(r'''(?:["'][^"']+["']|[^:]+):(?:\s|$)''', stripped):
+                break
+        body.append((end, child))
+        end += len(child)
+    return body, end
+
+
+# LLM: 块体保留头及缩进；plain含首值和全部续行只替换一次；容器/引用仍由原flow扫描器处理。
+# 函数用途: 定位块标量、首行带值折行标量及含同级无缩进项的标量列表。
 def _yaml_indented_spans(text, findings, flow_keys):
     lines, spans, offset = text.splitlines(keepends=True), [], 0
     covered_until = 0
@@ -227,17 +254,14 @@ def _yaml_indented_spans(text, findings, flow_keys):
             offset += len(line)
             continue
         tail = match['tail'].split('#', 1)[0].strip()
-        if tail and _YAML_BLOCK.fullmatch(tail) is None:
+        block = bool(_YAML_BLOCK.fullmatch(tail))
+        if tail and not block and tail.startswith(('[', '{', '"', "'")):
             offset += len(line)
             continue
-        indent, body, end = len(match['indent']) + len(match['seq'] or ''), [], offset + len(line)
-        for child_index in range(index + 1, len(lines)):
-            child = lines[child_index]
-            if child.strip() and len(child) - len(child.lstrip(' \t')) <= indent:
-                break
-            body.append((end, child))
-            end += len(child)
-        if tail and any(child.strip() for _, child in body):
+        indent = len(match['indent']) + len(match['seq'] or '')
+        body, end = _yaml_body_lines(lines, index, indent, offset + len(line),
+            indentless=not tail, plain=bool(tail) and not block)
+        if block and any(child.strip() for _, child in body):
             value = '\n'.join(child.strip() for _, child in body if child.strip())
             if _yaml_secret(json.dumps(value)):
                 findings.add('yaml_block_secret')
@@ -247,11 +271,13 @@ def _yaml_indented_spans(text, findings, flow_keys):
                 covered_until = end
         elif not tail:
             spans.extend(_yaml_multiline_spans(body, findings))
+        elif not block and any(child.strip() and not child.lstrip().startswith('#') for _, child in body):
+            spans.extend(_yaml_multiline_spans([(offset + match.start('tail'), line[match.start('tail'):]), *body], findings, plain=True))
         offset += len(line)
     return spans
 
 
-# LLM: 跨行flow及引用值按完整词法边界替换，块体不参加flow上下文；原简单行赋值保持已有占位协议。
+# LLM: 外层flow深度显式交给边界扫描，plain逗号不截断；完整多行替换优先于旧单行赋值规则。
 # 函数用途: 扫描并保形替换YAML flow、多行及块标量秘密，不把块头符号当密码。
 def _scan_and_redact_yaml_structure(text: str, *, findings: set[str], redact: bool) -> str:
     pairs = _yaml_inline_contexts(text)
@@ -259,8 +285,8 @@ def _scan_and_redact_yaml_structure(text: str, *, findings: set[str], redact: bo
     covered = sorted((start, end) for start, end, _ in spans)
     starts = [start for start, _ in covered]
     for match, depth in pairs:
-        index = bisect_right(starts, match.start()) - 1
-        if index >= 0 and match.start() < covered[index][1]:
+        index = bisect_right(starts, match.end()) - 1
+        if index >= 0 and match.end() < covered[index][1]:
             continue
         start = match.end()
         if depth:
@@ -270,7 +296,7 @@ def _scan_and_redact_yaml_structure(text: str, *, findings: set[str], redact: bo
         stop = len(text) if stop < 0 else stop
         if depth or text[start:start + 1] in {'[', '{', '"', "'"}:
             stop = len(text)
-        end = _yaml_value_end(text, start, stop)
+        end = _yaml_value_end(text, start, stop, in_flow=bool(depth))
         value = text[start:end].strip()
         if not value or _YAML_BLOCK.fullmatch(value):
             continue
