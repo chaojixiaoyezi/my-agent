@@ -204,13 +204,16 @@ def run_owner_retention_if_due(
         return _write_maintenance_result(state_path, retention, previous, current, effects)
 
 
-# LLM: 所有既存owner库共用发现；C逐叶沿原commit，冷库不创建、单库普通错误隔离，执行未知仍原抛。
+# LLM: 所有既存owner库共用发现与显式owner引用保护；C逐叶沿原commit，冷库不创建、单库普通错误隔离，执行未知仍原抛。
 # 函数用途: 在原保留门后裁剪全部派生库，单库回执兼容，多库分列真实结果。
 def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_transition=None) -> dict[str, Any]:
+    from ..local_storage.records import owner_protected_ref_ids
+
     paths, errors = _local_store_database_paths(Path(home))
     if not paths:
         return {"executed": False, "reason": "error" if errors else "no_local_store", **({"discovery_errors": errors} if errors else {})}
-    results = [_prune_derived_store(path, now=now, commit_transition=commit_transition) for path in paths]
+    protected_refs = owner_protected_ref_ids(Path(home), now.timestamp())
+    results = [_prune_derived_store(path, now=now, protected_refs=protected_refs, commit_transition=commit_transition) for path in paths]
     result = results[0] if len(results) == 1 else {
         "executed": any(item["executed"] for item in results),
         "stores": [{"database": str(path.relative_to(home)), **item} for path, item in zip(paths, results, strict=True)],
@@ -221,18 +224,18 @@ def _prune_local_store_derived_records(home: Path, *, now: datetime, commit_tran
 
 
 # LLM: 原Store负责TTL/引用/FTS事务；coordinator_io只选择逐末叶commit，不把长扫描包进T或缓存回调。
-# 函数用途: 对一个已存在库执行派生TTL，普通故障保留可能部分写入事实。
-def _prune_derived_store(db_path: Path, *, now: datetime, commit_transition=None) -> dict[str, Any]:
+# 函数用途: 对一个已存在库执行带owner引用保护的派生TTL，普通故障保留可能部分写入事实。
+def _prune_derived_store(db_path: Path, *, now: datetime, protected_refs=None, commit_transition=None) -> dict[str, Any]:
     try:
         from ..local_storage import LocalStore
 
         if commit_transition is None:
-            result = LocalStore(db_path).prune_derived_records(now=now)
+            result = LocalStore(db_path).prune_derived_records(now=now, protected_refs=protected_refs)
         else:
             from ..common.global_write_commit import global_write_commit_scope
 
             with global_write_commit_scope(commit_transition):
-                result = LocalStore(db_path, coordinator_io=True).prune_derived_records(now=now)
+                result = LocalStore(db_path, coordinator_io=True).prune_derived_records(now=now, protected_refs=protected_refs)
         return {"executed": True, **result}
     except (RequestExecutionOutcomeUncertainError, RequestExecutionContextUnavailable,
             ToolWriteContextUnavailable, BoundedCallExitUnconfirmedError):

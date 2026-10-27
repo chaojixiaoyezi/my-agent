@@ -688,6 +688,7 @@ def test_h16_message_learning_excluded_is_filtered_before_model(tmp_path, exclud
 # 函数用途: ctime变化必须让confirm_scoped_access拒绝缓存中的旧正文。
 def test_h16_jsonl_ctime_invalidates_scoped_access_cache(tmp_path):
     import os
+    import time
 
     from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
 
@@ -700,6 +701,7 @@ def test_h16_jsonl_ctime_invalidates_scoped_access_cache(tmp_path):
     raw = path.read_bytes()
     changed = raw.replace(b"safe-alpha", b"safe-omega")
     assert changed != raw and len(changed) == len(raw)
+    time.sleep(0.02)
     with path.open("r+b") as handle:
         handle.write(changed)
     os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
@@ -708,3 +710,36 @@ def test_h16_jsonl_ctime_invalidates_scoped_access_cache(tmp_path):
     assert before.st_ctime_ns != after.st_ctime_ns
     assert memory.confirm_scoped_access(candidates, lambda _record: True) == []
     assert memory.all()[0].content == "safe-omega"
+
+
+# LLM: 连续learning_excluded消息占满分页时必须有界跨页读取后续正常消息并记录可跳过前缀游标。
+# 函数用途: 回归验证消息级禁学标记不会造成Curator分页游标永久停滞。
+def test_h16_learning_excluded_messages_do_not_stall_pagination(tmp_path):
+    from agent_py_agent.agent.memory_store.curator_inputs import (
+        CuratorMessageSource,
+        _collect_messages,
+    )
+
+    service, thread, first = _m2_service(tmp_path)
+    store = service.conversation_store
+    ex1 = store.messages.append(
+        dict(thread_id=thread.thread_id, role="user", content="excl-1", metadata={"learning_excluded": True})
+    )
+    ex2 = store.messages.append(
+        dict(thread_id=thread.thread_id, role="user", content="excl-2", metadata={"learning_excluded": True})
+    )
+    normal = store.messages.append(
+        dict(thread_id=thread.thread_id, role="user", content="normal-after-two-excluded")
+    )
+    skipped: dict[str, str] = {}
+    rows, errors = _collect_messages(
+        source=CuratorMessageSource(store),
+        cursors={thread.thread_id: first.message_id},
+        limit=2,
+        max_chars=20_000,
+        skipped_cursors=skipped,
+    )
+    assert not errors
+    assert ex1.message_id != ex2.message_id
+    assert [row.message_id for row in rows] == [normal.message_id]
+    assert skipped[thread.thread_id] == ex2.message_id

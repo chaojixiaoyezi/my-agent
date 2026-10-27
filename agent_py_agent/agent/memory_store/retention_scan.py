@@ -988,9 +988,12 @@ def _trash_actions(
 
 
 # LLM: 使用直接目录枚举以传播权限错误，glob可能把EACCES洗为空；链接/坏类型拒绝，缺失可选源为空。
-# 函数用途: 严格发现标准ConversationStore根，保证pin发现完整性。
+# 函数用途: 严格发现标准ConversationStore根（含直连与runtime布局），保证pin发现完整性。
 def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path, ...]:
     discovered = list(explicit)
+    owner_home = getattr(home, "owner_home_dir", None)
+    if owner_home is not None:
+        discovered.append(Path(owner_home) / "conversations")
     runtime = Path(home.owner_workspace_dir) / "runtime" / "workspaces"
     try:
         runtime.stat()

@@ -654,7 +654,12 @@ class _CuratorExecutionMixin:
             finished_at=finished_at,
             extra_warnings=extra_warnings,
         )
-        run_record = self.run_log.cursor_record(run_record, relevant_thread_ids=tuple(dict.fromkeys(item.thread_id for item in batch.messages)))
+        run_record = self.run_log.cursor_record(
+            run_record,
+            relevant_thread_ids=tuple(
+                dict.fromkeys((*(item.thread_id for item in batch.messages), *batch.skipped_message_cursors))
+            ),
+        )
         state_commit = _success_commit(
             context,
             prepared,
@@ -1433,9 +1438,9 @@ def _prepare_outputs(
     owner: str = "",
 ) -> _PreparedOutputs:
     if extraction is None:
-        # 空批次也要消费「整段被排除」的 audit 游标，否则同一排除窗口会被反复扫描。
+        # 空批次也要消费「整段被排除」的消息与 audit 游标，否则同一排除窗口会被反复扫描。
         cursor = CuratorCursorAdvance(
-            dict(context.state_before.per_thread_cursors),
+            {**context.state_before.per_thread_cursors, **batch.skipped_message_cursors},
             batch.skipped_audit_cursor or context.state_before.last_processed_audit_event_id,
             0,
             0,
@@ -1880,7 +1885,12 @@ def _interval_due(
     now: datetime,
     interval_seconds: int,
 ) -> bool:
-    if not batch.messages and not batch.audit_events and not batch.skipped_audit_cursor:
+    if (
+        not batch.messages
+        and not batch.audit_events
+        and not batch.skipped_audit_cursor
+        and not batch.skipped_message_cursors
+    ):
         return False
     return interval_elapsed(state, now, interval_seconds)
 

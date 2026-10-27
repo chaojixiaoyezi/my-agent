@@ -309,3 +309,43 @@ def test_h12_partial_admin_alert_retries_only_failed_recipient(tmp_path, monkeyp
     module._record_supervisor_fault(other, "gateway_recovered", recovered=True)
     assert [target for target, key in calls[-2:]] == list(order)
     assert supervisor._restart_count == other._restart_count == 5
+
+
+# LLM: 运行时local_store/local.db清理必须携带owner引用保护，不误删仍被候选引用的派生记录。
+# 函数用途: 回归验证workspace/runtime/workspaces/*/local_store/local.db过期但受引用记录受保护。
+def test_h07_runtime_local_store_respects_owner_protected_refs(tmp_path):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.user_space.home_layout import ensure_my_agent_home
+    from agent_py_agent.agent.user_space.owner_maintenance import _prune_local_store_derived_records
+
+    home = ensure_my_agent_home(tmp_path / "home")
+    runtime_db = home.owner_home_dir / "workspace" / "runtime" / "workspaces" / "main-1" / "local_store" / "local.db"
+    runtime_db.parent.mkdir(parents=True)
+    store = LocalStore(runtime_db)
+    rec = store.upsert_record(
+        source_type="subagent_run",
+        source_id="src-protected-1",
+        title="Referenced subagent run",
+        content="derived body",
+        metadata={"status": "done", "conversation_runtime": {"task_id": "active-task"}},
+    )
+    unreferenced = store.upsert_record(
+        source_type="subagent_run",
+        source_id="src-expired-2",
+        title="Expired subagent run",
+        content="expired body",
+        metadata={"status": "done"},
+    )
+    with sqlite3.connect(store.db_path) as conn:
+        conn.execute("UPDATE records SET created_at = ?, updated_at = ?", (1000.0, 1000.0))
+    state = home.owner_tasks_dir / "2026-10-26" / "active-task" / "work" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"task_id": "active-task", "status": "RUNNING", "source_refs": [rec.id]}), encoding="utf-8")
+    report = _prune_local_store_derived_records(home.owner_home_dir, now=datetime(2026, 10, 26, tzinfo=timezone.utc))
+    assert report["executed"] is True
+    assert report["deleted_ids"] == [unreferenced.id]
+    assert rec.id not in report["deleted_ids"]
+    assert store.get_record(rec.id) is not None

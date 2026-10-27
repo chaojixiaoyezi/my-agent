@@ -82,16 +82,30 @@ def _prune_consumed_process_records(store, authority) -> None:
         while len(_PROCESS_COMPLETION_PRUNE_TIMES) > _PROCESS_COMPLETION_PRUNE_MAX_ROOTS_COUNT:
             _PROCESS_COMPLETION_PRUNE_TIMES.popitem(last=False)
 
-    # LLM: 优先真实pending_one；仅缺接口的旧替身回退get，读失败不切接口或冒充wake不存在。
-    # 函数用途: 允许清理明确不再pending的通知依赖。
-    def consumed(notice_id: str) -> bool:
-        query = getattr(store.wakes, "pending_one", None)
+    current_root = Path(store.storage.root).resolve()
+
+    # LLM: 优先真实pending_one；先按completion_target.store_root核验目标会话库，不跨库误判已消费。
+    # 函数用途: 允许清理明确在本会话库或目标会话库不再pending的通知依赖。
+    def consumed(notice_id: str, record: dict[str, object] | None = None) -> bool:
+        target = record.get("completion_target") if isinstance(record, dict) else None
+        target_root = str(target.get("store_root") or "").strip() if isinstance(target, dict) else ""
+        wakes = store.wakes
+        if target_root and Path(target_root).resolve() != current_root:
+            target_path = Path(target_root)
+            if not target_path.is_dir():
+                return False
+            from .store import ConversationStore
+
+            wakes = ConversationStore(target_path).wakes
+        query = getattr(wakes, "pending_one", None)
         if not callable(query):
-            query = getattr(store.wakes, "get", None)
+            query = getattr(wakes, "get", None)
         if not callable(query):
             raise AttributeError("wake_pending_query_unavailable")
         wake = query(notice_id)
         return wake is None or wake.status != "pending"
+
+    consumed._accepts_record = True  # type: ignore[attr-defined]
 
     try:
         prune(max_age_seconds=_PROCESS_COMPLETION_RETENTION_SECONDS, is_notice_consumed=consumed)

@@ -314,14 +314,18 @@ class ProcessSessionTransaction:
 
 
 # LLM: pending状态优先保留；规范空目标{}无收件人，有目标必须有回执且消费读口明确证明结清，缺读口即保留。
-# 函数用途: 判断历史完成通知义务是否已经结清，不缓存或猜测wake状态。
-def _completion_obligation_finished(record: dict[str, object], consumed: Callable[[str], bool] | None) -> bool:
+# 函数用途: 判断历史完成通知义务是否已经结清，支持将目标记录传给跨会话库核验回调。
+def _completion_obligation_finished(record: dict[str, object], consumed: Callable[..., bool] | None) -> bool:
     if record.get("completion_notification_status") == "pending":
         return False
     if not record.get("completion_target"):
         return True
     notice = str(record.get("completion_notice_id") or "").strip()
-    return bool(notice) and consumed is not None and consumed(notice) is True
+    if not notice or consumed is None:
+        return False
+    if getattr(consumed, "_accepts_record", False):
+        return consumed(notice, record) is True
+    return consumed(notice) is True
 
 
 # LLM: TTL仅清理exited/killed，不能用started_at兜底；小合成时间、缺失、非有限数均不按年龄删。

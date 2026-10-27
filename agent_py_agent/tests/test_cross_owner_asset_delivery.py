@@ -2126,3 +2126,37 @@ def test_publish_target_open_failure_closes_source_directory_fd(kit, monkeypatch
                 os.close(opened[0])
             except OSError:
                 pass
+
+
+@pytest.mark.parametrize(
+    "sample",
+    [
+        "-----BEGIN PGP " + "PRIVATE KEY BLOCK-----\nPRIVATE_BODY_PAYLOAD_XYZ987\n-----END PGP PRIVATE KEY BLOCK-----",
+        "-----BEGIN RSA " + "PRIVATE KEY-----\nPRIVATE_BODY_PAYLOAD_XYZ987\n-----END RSA PRIVATE KEY-----",
+        "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nPRIVATE_BODY_PAYLOAD_XYZ987\n-----END OPENSSH PRIVATE KEY-----",
+        "ASIA" + "IOSFODNN7EXAMPLE",
+        "sk_" + "live_4eC39HqLyjWDarjtT1zdp7dc",
+        "rk_" + "live_4eC39HqLyjWDarjtT1zdp7dc",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        + "eyJzdWIiOiIxMjM0NTY3ODkwIn0."
+        + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+    ],
+)
+def test_h01_h02_secret_shapes_blocked_in_delivery_and_safe_projection(sample, tmp_path):
+    from agent_py_agent.agent.assets.delivery_sanitizer import _shared_scan, sanitize_bundle_files
+    from agent_py_agent.agent.audit_group.safe_projection import public_value
+
+    changed, replaced = _shared_scan(f"note={sample}")
+    assert changed is True
+    assert sample not in replaced
+    assert "PRIVATE_BODY_PAYLOAD_XYZ987" not in replaced
+    cleaned = sanitize_bundle_files(
+        {"note.txt": f"prefix\n{sample}\nsuffix".encode()},
+        owner_home=tmp_path,
+        allow_secret_placeholder_replace=True,
+    )["note.txt"].decode()
+    assert sample not in cleaned
+    assert "PRIVATE_BODY_PAYLOAD_XYZ987" not in cleaned
+    projected = public_value({"message": f"leak={sample}"})
+    assert sample not in projected["message"]
+    assert "PRIVATE_BODY_PAYLOAD_XYZ987" not in projected["message"]

@@ -142,15 +142,16 @@ _URL_TEMPLATE_USERINFO_RE = re.compile(rf'(\b[A-Za-z][A-Za-z0-9+.-]*://)({_SOURC
 _LOG_URL_PASSWORD_RE = re.compile(r'(\b[A-Za-z][A-Za-z0-9+.-]*://[^:/?#\s@]+:)([^@\s]+)(@)')
 _SOURCE_STRING_RE = re.compile(r'''(["'])((?:\\.|(?!\1)[^\\\r\n])*)\1''')
 _KNOWN_SECRET_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{10,}|github_pat_[A-Za-z0-9_]{10,}|"
-    r"gh[pousr]_[A-Za-z0-9_]{10,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}|"
+    r"(?<![A-Za-z0-9_-])(?:sk-[A-Za-z0-9_-]{10,}|(?:s|r)k_(?:live|test)_[A-Za-z0-9]{10,}|"
+    r"github_pat_[A-Za-z0-9_]{10,}|gh[pousr]_[A-Za-z0-9_]{10,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}|"
+    r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|"
     r"pypi-[A-Za-z0-9_-]{10,}|npm_[A-Za-z0-9]{10,})(?![A-Za-z0-9_-])"
 )
-# LLM: 明确的PEM私钥BEGIN即建立秘密边界；完整块沿原END结束，终态缺END则保守遮到绝对EOF，不推断任意正文。
-# 常量用途: 隐藏完整或被截断的私钥块，普通文本和原私钥标记不变。
+# LLM: 明确的PEM/PGP私钥BEGIN即建立秘密边界；完整块沿原END结束，终态缺END则保守遮到绝对EOF，不推断任意正文。
+# 常量用途: 隐藏完整或被截断的PEM/OpenSSH/PGP私钥块，普通文本和原私钥标记不变。
 _PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END[A-Z ]*PRIVATE KEY-----|\Z)"
+    r"-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)"
 )
 # LLM: 打码要隐藏的是秘密本身；变量引用不是秘密，只是"值在别处"的写法。整段恰好是一个纯变量引用
 #   时保留原文，否则复审会看到 <redacted> 而误判正确的脚本"没带凭据"，模型照抄还可能把字面量

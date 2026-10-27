@@ -588,11 +588,29 @@ class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
         return _prune_derived_records(self, plan, dry_run)
 
 
-# LLM: 不初始化owner、不建文件；复用规范路径投影及现存只读pin扫描，未知来源/导入IO失败按best-effort返回空集。
-# 函数用途: 从当前数据库所属owner收集正式记忆、候选、恢复与Compact的有效引用ID。
-def _derived_owner_ref_ids(store, current):
-    if store.db_path.parent.name != "data":
-        return set()
+# LLM: 覆盖data、local_store及workspace/runtime/workspaces/*/local_store四种规范owner库布局；非规范路径返回None。
+# 函数用途: 从已知LocalStore数据库路径反解所属owner根目录。
+def _resolve_local_store_owner(db_path: Path) -> Path | None:
+    parent = db_path.parent
+    if parent.name == "data":
+        return parent.parent.resolve()
+    if parent.name != "local_store":
+        return None
+    if parent.parent.name == "data":
+        return parent.parent.parent.resolve()
+    if (
+        len(db_path.parents) >= 6
+        and db_path.parents[2].name == "workspaces"
+        and db_path.parents[3].name == "runtime"
+        and db_path.parents[4].name == "workspace"
+    ):
+        return db_path.parents[5].resolve()
+    return parent.parent.resolve()
+
+
+# LLM: 不初始化owner、不建文件；复用规范路径投影及现存只读pin扫描（含直连与runtime会话库），未知来源/导入IO失败按best-effort返回空集。
+# 函数用途: 按显式owner根目录收集正式记忆、候选、恢复与Compact的有效引用ID。
+def owner_protected_ref_ids(owner_root: Path, current: float) -> set[str]:
     try:
         from ..memory_store.retention_scan import current_retention_pins
         from ..user_space.home_layout_v2 import (
@@ -600,13 +618,24 @@ def _derived_owner_ref_ids(store, current):
             _owner_workspace_path_fields,
         )
 
-        owner = store.db_path.parent.parent.resolve()
+        owner = Path(owner_root).resolve()
         home = SimpleNamespace(owner_home_dir=owner, owner_retention_json=owner / "retention.json",
             **_owner_memory_path_fields(owner / "memory"), **_owner_workspace_path_fields(owner))
-        pins, _complete = current_retention_pins(home, (), [], now=datetime.fromtimestamp(current, timezone.utc))
+        direct_conv = owner / "conversations"
+        explicit_roots = (direct_conv,) if (direct_conv / "threads").exists() else ()
+        pins, _complete = current_retention_pins(home, explicit_roots, [], now=datetime.fromtimestamp(current, timezone.utc))
         return _derived_owner_pin_ids(home, pins)
     except Exception:
         return set()
+
+
+# LLM: 不初始化owner、不建文件；支持全部四种规范owner数据库位置并复用owner_protected_ref_ids。
+# 函数用途: 从当前数据库所属owner收集正式记忆、候选、恢复与Compact的有效引用ID。
+def _derived_owner_ref_ids(store, current):
+    owner = _resolve_local_store_owner(store.db_path)
+    if owner is None:
+        return set()
+    return owner_protected_ref_ids(owner, current)
 
 
 # LLM: 只补当前owner内已被原pin扫描保护的恢复根身份，不读pin声明的任意外部文件，不从目录名猜ID。

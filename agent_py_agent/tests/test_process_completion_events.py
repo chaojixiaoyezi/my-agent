@@ -1364,3 +1364,29 @@ def test_h09_process_ttl_queries_real_pending_wake(tmp_path, monkeypatch, wake_s
     monkeypatch.setattr(module, "_PROCESS_COMPLETION_PRUNE_TIMES", OrderedDict())
     module._prune_consumed_process_records(store, authority)
     assert bool(authority.load("bg-test-notice").record) is (wake_state == "pending")
+
+
+# LLM: 同owner存在多ConversationStore时，按completion_target.store_root核验目标队列，不因当前库查不到而误删。
+# 函数用途: 回归验证跨会话库pending通知对应的权威进程记录不被误删。
+def test_h09_process_ttl_does_not_delete_other_store_pending_wake(tmp_path, monkeypatch):
+    from collections import OrderedDict
+
+    from agent_py_agent.agent.conversation import process_events as module
+    from agent_py_agent.agent.conversation.store import ConversationStore
+
+    agent, params, authority = _fixture(tmp_path)
+    store_a = agent.conversation_store
+    store_b = ConversationStore(tmp_path / "other_conversations")
+    thread_b = store_b.threads.create(title="other")
+    signal_b = store_b.wakes.raise_signal({"thread_id": thread_b.thread_id, "reason": "cross_store_pending"})
+    payload = authority.load("bg-test-notice").record
+    scope = {**dict(payload.get("access_scope") or {}), "conversation_id": thread_b.thread_id}
+    target = {**dict(payload.get("completion_target") or {}), "store_root": str(store_b.storage.root), "thread_id": thread_b.thread_id}
+    authority.write({**payload, "session_id": "bg-test-other-store", "finished_at": 1_000_000_000.0, "access_scope": scope, "completion_target": target, "completion_notice_id": signal_b.wake_signal_id})
+    monkeypatch.setattr(module, "_PROCESS_COMPLETION_PRUNE_TIMES", OrderedDict())
+    module._prune_consumed_process_records(store_a, authority)
+    assert bool(authority.load("bg-test-other-store").record) is True
+    store_b.wakes.mark_handled(signal_b.wake_signal_id)
+    monkeypatch.setattr(module, "_PROCESS_COMPLETION_PRUNE_TIMES", OrderedDict())
+    module._prune_consumed_process_records(store_a, authority)
+    assert bool(authority.load("bg-test-other-store").record) is False

@@ -579,6 +579,7 @@ def next_cursors(
         current_message_cursors,
         batch.messages,
         processed_message_ids,
+        batch.skipped_message_cursors,
     )
     audit_cursor, advanced_audit = _advance_audit_cursor(
         current_audit_cursor,
@@ -594,13 +595,17 @@ def next_cursors(
 
 # LLM: Per-thread order is inherited from ConversationStore typed reads rather than timestamp
 # comparison.
-# 函数用途: 推进每个线程的连续消息前缀。
+# 函数用途: 推进每个线程的连续消息前缀及已核验的排除消息前缀。
 def _advance_message_cursors(
     current: dict[str, str],
     messages: tuple[CuratorMessageInput, ...],
     processed: set[str],
+    skipped: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], int]:
     cursors = dict(current)
+    for thread_id, cursor in (skipped or {}).items():
+        if cursor:
+            cursors[thread_id] = cursor
     grouped: dict[str, list[CuratorMessageInput]] = {}
     for message in messages:
         grouped.setdefault(message.thread_id, []).append(message)

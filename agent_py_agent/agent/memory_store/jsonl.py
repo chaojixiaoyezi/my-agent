@@ -1162,25 +1162,28 @@ class _JsonlMemoryLifecycleMixin:
         self._pending_access[entry_id] = time.time()
 
     # LLM: 落盘仍是写路径职责(锁内原子);公开入口供无写场景时手动冲刷。
-    # LLM: 锁内严格读前像，折叠访问时间而不改变版本；成功后才比较清旧pending，不反取上层锁。
+    # LLM: 遵循quota→policy→formal锁序（按parents[2]定位owner_home），折叠访问时间而不改变版本；成功后才比较清旧pending。
     # 函数用途: 原子压实访问热度，失败保留待刷信号。
     def flush_access_events(self) -> int:
         if not self._pending_access:
             return 0
-        with self._locked_memory():
-            if not self._pending_access:
-                return 0
-            current_events = _strict_memory_events(self.path)
-            active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
-            snapshot = dict(self._pending_access)
-            pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
-            _write_compacted_memory(self, current_events, current_events, pending, None)
-            _consume_pending_snapshot(self, snapshot)
+        resolved = self.path.absolute()
+        owner_home = resolved.parents[2] if len(resolved.parents) >= 3 else resolved.parent.parent
+        with _quota_admission(self.quota_enforcer, None) as admission, _managed_policy_scope(owner_home):
+            with self._locked_memory():
+                if not self._pending_access:
+                    return 0
+                current_events = _strict_memory_events(self.path)
+                active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
+                snapshot = dict(self._pending_access)
+                pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
+                _write_compacted_memory(self, current_events, current_events, pending, admission)
+                _consume_pending_snapshot(self, snapshot)
         return len(pending)
 
     # LLM: 只给当前owner实际HTTP长scope使用；原formal锁在Root外持有，锁出生/固定一次replace各消费同source末门，失败保完整snapshot。
     #   只在成功search后显式调用，不在finally补写；原默认flush/apply_batch不变，C3-J另负责其它写链。
-    # LLM: 同次source末门写压实结果，不保留单独touch；失败保snapshot，成功只清旧值。
+    # LLM: 遵循quota→policy→formal锁序并在同次source末门写压实结果，不保留单独touch；失败保snapshot，成功只清旧值。
     # 函数用途: 在协调来源下折叠访问信号。
     def flush_access_events_from_source(self) -> int:
         from ..common.global_write_commit import execute_global_write
@@ -1194,11 +1197,14 @@ class _JsonlMemoryLifecycleMixin:
         def commit(operation):
             return execute_global_write(operation, require_scope=True)
 
-        with locked_json_path(self.path, birth_commit=commit):
-            current_events = _strict_memory_events(self.path, require_source=True)
-            active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
-            pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
-            _write_compacted_memory(self, current_events, current_events, pending, None, commit=commit)
+        resolved = self.path.absolute()
+        owner_home = resolved.parents[2] if len(resolved.parents) >= 3 else resolved.parent.parent
+        with _quota_admission(self.quota_enforcer, None) as admission, _managed_policy_scope(owner_home):
+            with locked_json_path(self.path, birth_commit=commit):
+                current_events = _strict_memory_events(self.path, require_source=True)
+                active_ids = {record.entry_id for record in _materialize_memory_events(current_events)}
+                pending = {key: stamp for key, stamp in snapshot.items() if key in active_ids}
+                _write_compacted_memory(self, current_events, current_events, pending, admission, commit=commit)
         _consume_pending_snapshot(self, snapshot)
         return len(pending)
 

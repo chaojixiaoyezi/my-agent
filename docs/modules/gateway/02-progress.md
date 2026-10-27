@@ -1,7 +1,7 @@
 ## 2026-10-26 全量跨模块对向审计收口（H01..H16 & P2-1..P2-3 & P1-02 已落地）
 
 - **网关 Bot 执行约束、只读操作级工具闸门与禁学贯通（`gateway_parts/request_execution.py`、`conversation/bot_tool_policy.py`、`plugin_host/gateway_runtime.py`）**：`bot_execution_policy` 与 `bot_request_allowed_tools` 冻结并传递 `bot_execution_policy`（含目标 Owner 物理 `workspace_root`、`max_tool_calls`、只读动作白名单与 `learning_excluded`）；`request_execution._gateway_run_params` 在构造 `RunParams` 时将 `bot_execution_policy` 挂载到运行实例并透传 `learning_excluded=True`，由 `wrap_bot_tool_registry` 在单次工具调用层拦截越权 action、超预算调用和越根路径。
-- **网关派生索引、维护过渡与冷 Curator 输入（`gateway_parts/logging.py`、`user_space/owner_maintenance.py`、`user_space/owner_maintenance_transition.py`、`cli/gateway_loops.py`、`memory_store/curator_inputs.py`）**：`log_gateway_event` 仅对显式状态字段或精确终态事件填充完成状态；`owner_maintenance_transition.py` 在协调迁移路径同步接入 `prune_derived_records`；`_cold_curator_precheck` 与 `curator_inputs.py` 跳过 `learning_excluded=True` 的只读查询会话。
+- **网关派生索引、维护过渡、跨库唤醒保护与冷 Curator 输入（`gateway_parts/logging.py`、`user_space/owner_maintenance.py`、`user_space/owner_maintenance_transition.py`、`local_storage/records.py`、`conversation/process_events.py`、`cli/gateway_loops.py`、`memory_store/curator_inputs.py`）**：`log_gateway_event` 仅对显式状态字段或精确终态事件填充完成状态；`owner_maintenance.py` 在清理 4 个规范数据库（含 `workspace/runtime/workspaces/*/local_store/local.db`）前统一通过 `owner_protected_ref_ids` 汇总全 Owner 活跃引用保护集；`process_events.py` 按 `completion_target.store_root` 核查目标会话库的未消费唤醒；`cli/gateway_loops.py::_store_messages_activity` 与 `_cold_curator_precheck` 统一跳过 `learning_excluded=True` 的只读查询会话。
 
 ## 2026-10-26 Wave 5 Track A Round 2：audit-only 冷 Curator 预检
 ## 2026-10-26 WT-AG2-R2B Bot worker工具策略接线（源码候选）

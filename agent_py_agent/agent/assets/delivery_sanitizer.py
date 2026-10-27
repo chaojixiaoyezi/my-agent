@@ -21,10 +21,12 @@ _UNQUOTED_ASSIGNMENT = re.compile(
     rf'''(?im)^[ \t]*(?:-[ \t]+)?(?:export[ \t]+)?(?P<key>{_KEY_NAME})[ \t]*[:=][ \t]*(?P<literal>[^\s#"'\r\n,;{{}}()\[\]]+)[ \t]*(?:\#.*)?$''')
 _PATTERNS = (
     ('openai_key', re.compile(r'sk-[A-Za-z0-9_-]{20,}')),
-    ('aws_access_key', re.compile(r'AKIA[0-9A-Z]{16}')),
+    ('stripe_key', re.compile(r'(?:s|r)k_(?:live|test)_[A-Za-z0-9]{10,}')),
+    ('aws_access_key', re.compile(r'(?:AKIA|ASIA)[0-9A-Z]{16}')),
     ('github_token', re.compile(r'ghp_[A-Za-z0-9]{20,}')),
     ('slack_token', re.compile(r'xox[baprs]-[A-Za-z0-9-]{10,}')),
     ('jwt', re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}')),
+    ('private_key', re.compile(r'-----BEGIN[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)')),
     ('unquoted_secret_assignment', _UNQUOTED_ASSIGNMENT),
     ('secret_assignment', re.compile(
         rf'''(?i)(?=(?<![\w.-])[-.]*(?P<key>{_KEY_NAME})["']?\s*[:=]\s*(?P<quote>["'])(?P<literal>(?:\\.|(?!(?P=quote))[^\\\r\n])+)(?P=quote))''')),

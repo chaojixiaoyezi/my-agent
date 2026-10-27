@@ -43,11 +43,11 @@ class RoutedBatch:
     warnings: tuple[str, ...] = ()
 
 
-# LLM: 组的顺序确定：批内第一条消息（按会话最近更新时间从早到晚收集）所在的组先跑；只有工具审计事件时跟默认组走。
+# LLM: 组的顺序确定：批内第一条消息（按会话最近更新时间从早到晚收集）所在的组先跑；只有工具审计事件或跳过消息游标时跟默认组走。
 #   一直失败的组只要还排在最前，全局起始游标就不变，原“同游标连续 3 次”熔断照常生效。
 #   用了默认模型兜底的会话按原因计数，写成结构化警告 curator_thread_model_fallback:<原因>:<条数>；路由表整批共用的
 #   警告（如 curator_profile_unavailable_fallback:<原因>）排在最前，每组都带。
-# 函数用途: 从一批输入里切出这一次要处理的那组会话，并算出还剩几组。
+# 函数用途: 从一批输入里切出这一次要处理的那组会话（含默认组携带跳过游标与审计事件），并算出还剩几组。
 def route_batch(batch: CuratorInputBatch, routing: CuratorModelRouting) -> RoutedBatch:
     if not batch.messages:
         return RoutedBatch(routing.default, batch, (), 0, True, routing.warnings)
@@ -56,8 +56,24 @@ def route_batch(batch: CuratorInputBatch, routing: CuratorModelRouting) -> Route
     thread_ids = tuple(dict.fromkeys(item.thread_id for item in chosen))
     include_audit = first.group_key == routing.default.group_key
     others = {routing.route_for(item.thread_id).group_key for item in batch.messages} - {first.group_key}
-    audit_left = bool(batch.audit_events) and not include_audit and routing.default.group_key not in others
-    sub = replace(batch, messages=chosen, audit_events=batch.audit_events if include_audit else ())
+    message_threads = {item.thread_id for item in batch.messages}
+    skipped_messages = {
+        tid: cur
+        for tid, cur in batch.skipped_message_cursors.items()
+        if tid in thread_ids or (include_audit and tid not in message_threads)
+    }
+    audit_left = (
+        bool(batch.audit_events or batch.skipped_audit_cursor or (set(batch.skipped_message_cursors) - message_threads))
+        and not include_audit
+        and routing.default.group_key not in others
+    )
+    sub = replace(
+        batch,
+        messages=chosen,
+        audit_events=batch.audit_events if include_audit else (),
+        skipped_audit_cursor=batch.skipped_audit_cursor if include_audit else "",
+        skipped_message_cursors=skipped_messages,
+    )
     return RoutedBatch(first, sub, thread_ids, len(others) + int(audit_left), include_audit,
                        (*routing.warnings, *_fallback_warnings(routing, thread_ids)))
 

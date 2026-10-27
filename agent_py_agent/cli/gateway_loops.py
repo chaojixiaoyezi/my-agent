@@ -152,8 +152,39 @@ def _owner_home_skill_learning_state(home: Path) -> str:
     return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
 
 
-# LLM: 只读消息/候选/audit元数据；沿原有界三态扫描，不读正文，预算耗尽或不可读不能丢掉冷owner。
-# 函数用途: 确认周期整理是否有非空输入，只有审计记录的冷owner也能唤醒。
+# LLM: 只采样最多65个消息文件；线程元数据明确learning_excluded=True时跳过，不唤醒冷owner。
+# 函数用途: 三态检查会话库是否有非禁学线程的消息输入。
+def _store_messages_activity(store_root: Path) -> str:
+    from ..agent.common.json_io import read_json_object_report
+
+    try:
+        with os.scandir(store_root / "messages") as entries:
+            sample = list(islice(entries, 65))
+    except FileNotFoundError:
+        return "not_due"
+    except OSError:
+        return "unknown"
+    try:
+        for entry in sample[:64]:
+            if not (entry.name.endswith(".jsonl") and entry.is_file() and entry.stat().st_size):
+                continue
+            thread_path = store_root / "threads" / f"{entry.name[:-6]}.json"
+            report = read_json_object_report(thread_path, context="gateway.curator.thread_precheck")
+            payload = report.payload if not report.load_error and isinstance(report.payload, dict) else None
+            meta = payload.get("metadata") if isinstance(payload, dict) else None
+            if isinstance(payload, dict) and (
+                payload.get("learning_excluded") is True
+                or (isinstance(meta, dict) and meta.get("learning_excluded") is True)
+            ):
+                continue
+            return "due"
+    except OSError:
+        return "unknown"
+    return "unknown" if len(sample) > 64 else "not_due"
+
+
+# LLM: 只读消息/候选/audit元数据；沿原有界三态扫描并跳过禁学线程，预算耗尽或不可读不能丢掉冷owner。
+# 函数用途: 确认周期整理是否有非空可学输入，只有审计记录的冷owner也能唤醒。
 def _cold_curator_activity(home: Path) -> str:
     try:
         candidate = home / "memory" / "candidates.jsonl"
@@ -163,7 +194,7 @@ def _cold_curator_activity(home: Path) -> str:
         return "unknown"
     from ..agent.owner_wake_discovery import _store_roots
 
-    states = [_directory_activity(root / "messages", ".jsonl") for root in _store_roots(home)]
+    states = [_store_messages_activity(root) for root in _store_roots(home)]
     states.append(_directory_activity(home / "audit", ".jsonl"))
     return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
 

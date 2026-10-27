@@ -1,3 +1,8 @@
+## 2026-10-26 全量对向复核二轮收口（消息级禁学游标推进、访问冲刷锁序对齐与直连会话引用覆盖，已实现）
+
+- `memory_store/curator_inputs.py`、`curator_validation.py`、`curator_routing.py` 与 `curator.py` 补齐 `skipped_message_cursors`：当单条消息携带 `learning_excluded=True` 时，`_collect_messages` 向前多页扫描收集后续正常消息，并在无有效提取输出时仍推进已跳过消息的分页游标，防止单页禁学消息造成游标永久停滞。
+- `memory_store/jsonl.py` 在 `flush_access_events` 与 `flush_access_events_from_source` 外层按 `self.path.absolute().parents[2]` 定位 `owner_home` 获取 `_quota_admission` 与 `_managed_policy_scope`，严格维持 `quota -> policy -> memory` 统一锁序；`memory_store/retention_scan.py::_conversation_roots` 与 `local_storage/records.py::owner_protected_ref_ids` 同时纳入 `<owner_home>/conversations` 直连会话库与 runtime 会话库。
+
 ## 2026-10-26 Wave 5 Track A Round 5（分支修复，待集成）
 
 - 渲染器、预算入口及最终访问确认共用原正文扫描/来源白名单准入门；对 JSONL 重读的当前记录也复核，隔离项不登记访问、不进入最终集合或获得补充来源 ID 信用。直接调用渲染器的隔离计数和转义保留，原 scope/版本/来源及固定来源优先级不变。

@@ -1,3 +1,8 @@
+## 2026-10-26 消息级禁学跳过游标推进、访问事件冲刷锁序与直连会话 pin 发现结构
+
+- `memory_store/curator_inputs.py::CuratorInputBatch` 新增 `skipped_message_cursors: dict[str, str]`，由 `_collect_messages` 在跨过 `learning_excluded=True` 消息时记录最新已扫描 `message_id`；`curator_validation.py::_advance_message_cursors` 合并跳过游标与提取批尾游标；`curator_routing.py::route_batch` 将跳过游标挂入默认组，并由 `curator.py::_prepare_outputs` 在纯跳过批次上执行无模型调用的游标推进提交。
+- `memory_store/jsonl.py::JsonlMemory.flush_access_events` 与 `flush_access_events_from_source` 在进入 `_locked_memory()` 前获取 `_quota_admission(self.quota_enforcer, None)` 与 `_managed_policy_scope(self.path.absolute().parents[2])`，并将 `admission` 透传至 `_write_compacted_memory`；`memory_store/retention_scan.py::_conversation_roots` 自动将 `owner_home_dir / "conversations"` 纳入候选会话根。
+
 ## 2026-10-26 Wave 5 Track A Round 5 渲染准入接线
 
 - `prompting_parts/memory_context.py::is_memory_context_admissible(record)` 是原 `scan_memory_content(content).safe` 与 origin 白名单的共享谓词；渲染器直接调用仍累计隔离数并保留原安全信封和无相关记忆提示。

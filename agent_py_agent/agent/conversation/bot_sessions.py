@@ -563,9 +563,13 @@ class BotSessionManager(BotSessionStorage):
     def rollover(self, payload, key):
         mode = normalize_bot_mode(payload.get("bot_mode"), payload.get("bot_kind"))
 
-        # LLM: 预期代次和槽位修订均须匹配，不能自动修正调用者陈旧预期。
+        # LLM: 预期代次和槽位修订均须匹配，不能自动修正调用者陈旧预期；已恢复的pending直接生成对应回执。
         # 函数用途: 核验手动轮换版本并封存当前前台。
         def effect(state, admission):
+            recovered = state.pop("_recovered_pending", None)
+            if recovered is not None:
+                old = (state.get("operation") or {}).get("before_slots", {}).get(mode)
+                return self.descriptor(state["slots"][mode], old, "manual")
             slot = state["slots"].get(mode)
             if not slot or any(payload.get(key) != slot[field] for key, field in
                     (("expected_generation", "generation"), ("expected_revision", "slot_revision"))):
@@ -575,39 +579,54 @@ class BotSessionManager(BotSessionStorage):
 
         return self.transact("rollover", payload, key, effect)
 
+    # LLM: 校验初次建槽或现存槽位上的thread_id与expected_generation，不匹配直接拒绝且不写pending。
+    # 函数用途: 守卫提交请求的线程绑定与代次预期。
+    def _validate_submit_target(self, mode, payload, active_thread_id, generation, reason=None):
+        if payload.get("thread_id") and payload["thread_id"] != active_thread_id:
+            supplied = self.store.threads.load(payload["thread_id"])
+            if supplied is None or supplied.metadata.get("bot_mode") != mode:
+                raise HostAPIError("BOT_MODE_MISMATCH", 409)
+            if not payload.get("auto_rollover"):
+                raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+        expected = payload.get("expected_generation")
+        if expected is not None and expected > generation:
+            raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+        if expected is not None and expected != generation and not payload.get("auto_rollover"):
+            raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+        if reason and not payload.get("auto_rollover"):
+            raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+
     # LLM: submitter仅可做有界准备/原输入提交，不在锁内跑模型；旧代pin仍核验，重放绑定不得迁移到新代。
     # 函数用途: 将消息意图原子绑定到当前Bot代次，保留旧领域调用合同。
     def submit(self, payload, key, submitter, *, report_replay=False):
         mode = normalize_bot_mode(payload.get("bot_mode"), payload.get("bot_kind"))
 
-        # LLM: 原claim短门覆盖阈值/CAS及切代，入队在门外；消息数据不能覆盖thread宿主管理字段。
+        # LLM: 原claim短门覆盖阈值/CAS及切代，入队在门外；初次建槽先校验代次/线程，仅在无前代归档时回退非法initial槽位。
         # 函数用途: 核当前代、记录首问和告警引用，并提交绑定线程的输入。
         def effect(state, admission):
             recovered = state.pop("_recovered_pending", None)
             if recovered is not None:
                 old = (state.get("operation") or {}).get("before_slots", {}).get(mode)
                 reason = (recovered.get("archive") or {}).get("rollover_reason")
+                if old is None:
+                    slot = state["slots"][mode]
+                    try:
+                        self._validate_submit_target(mode, payload, slot["active_thread_id"], slot["generation"])
+                    except HostAPIError:
+                        state["slots"].pop(mode, None)
+                        raise
             else:
                 slot = state["slots"].get(mode)
                 if slot is None:
+                    _, preview_slot = self.new_generation(mode, 1, 1)
+                    self._validate_submit_target(mode, payload, preview_slot["active_thread_id"], 1)
                     self.rotate(state, mode, admission, None)
-                    slot = state["slots"][mode]
-                if payload.get("thread_id") and payload["thread_id"] != slot["active_thread_id"]:
-                    supplied = self.store.threads.load(payload["thread_id"])
-                    if supplied is None or supplied.metadata.get("bot_mode") != mode:
-                        raise HostAPIError("BOT_MODE_MISMATCH", 409)
-                    if not payload.get("auto_rollover"):
-                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                expected = payload.get("expected_generation")
-                with self._foreground_transition(slot):
-                    reason = self.rollover_reason(slot)
-                    if expected is not None and expected > slot["generation"]:
-                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                    if expected is not None and expected != slot["generation"] and not payload.get("auto_rollover"):
-                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                    if reason and not payload.get("auto_rollover"):
-                        raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-                    old = self.rotate(state, mode, admission, reason) if reason else None
+                    old, reason = None, None
+                else:
+                    with self._foreground_transition(slot):
+                        reason = self.rollover_reason(slot)
+                        self._validate_submit_target(mode, payload, slot["active_thread_id"], slot["generation"], reason)
+                        old = self.rotate(state, mode, admission, reason) if reason else None
             slot = state["slots"][mode]
             slot["last_foreground_activity_at"] = self.clock()
             slot["first_question"] = slot["first_question"] or payload["text"][:120]

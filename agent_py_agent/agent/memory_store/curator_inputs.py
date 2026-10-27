@@ -227,6 +227,8 @@ class CuratorInputBatch:
     relation_annotations: tuple[CuratorRelationAnnotation, ...] = ()
     # 排除名单过滤后整个 audit 窗口被跳过的游标（原始窗口最后一条 event_id）；空串表示无跳过。
     skipped_audit_cursor: str = ""
+    # 消息级 learning_excluded 连续前缀被宿主核验跳过的线程游标；坏线程不写入此表。
+    skipped_message_cursors: dict[str, str] = field(default_factory=dict)
 
     # LLM: 保持原材料顺序；标签校验来源 hash，关系同时校验正式 ref/hash/版本；缩批不能遗留尾部建议。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
@@ -334,11 +336,13 @@ def collect_curator_inputs(
     formal_memories: tuple[CuratorFormalMemoryInput, ...] = (),
     tool_reference_source: CuratorToolReferenceSource | None = None,
 ) -> CuratorInputBatch:
+    skipped_message_cursors: dict[str, str] = {}
     messages, message_errors = _collect_messages(
         source=message_source,
         cursors=state.per_thread_cursors,
         limit=config.batch_message_limit,
         max_chars=config.max_input_chars,
+        skipped_cursors=skipped_message_cursors,
     )
     remaining_chars = max(
         1_000,
@@ -371,12 +375,13 @@ def collect_curator_inputs(
         formal_memories=tuple(formal_memories),
         load_errors=(*message_errors, *audit_errors, *tool_reference_errors),
         skipped_audit_cursor=skipped_audit_cursor,
+        skipped_message_cursors=skipped_message_cursors,
     )
 
 
 # LLM: threads.list_report 只列元数据，messages.after_report 从精确 cursor 后读取；坏线程阻断游标推进。
 # 两个读取能力来自同一 ConversationStore 的显式领域，不探测旧方法或建立第二份消息来源。
-# 学习排除名单与线程只读标记在读取任何消息前生效；消息级严格True标记在构造输入前过滤。
+# 学习排除名单与线程只读标记在读取任何消息前生效；消息级严格True标记有界跨页跳过并记录跳过游标前缀。
 # 函数用途: 收集预算内消息；排除来源先跳过，已确认EOF且文件未变的冷线程不再调用消息读取器。
 def _collect_messages(
     *,
@@ -384,6 +389,7 @@ def _collect_messages(
     cursors: dict[str, str],
     limit: int,
     max_chars: int,
+    skipped_cursors: dict[str, str] | None = None,
 ) -> tuple[list[CuratorMessageInput], list[dict[str, object]]]:
     conversation_store = source.conversation_store
     list_report = getattr(getattr(conversation_store, 'threads', None), 'list_report', None)
@@ -396,58 +402,112 @@ def _collect_messages(
         # fail-closed：名单不可读时本轮不学任何会话；消息留在原游标后，名单修复后重放。
         return [], errors
     selected: list[CuratorMessageInput] = []
-    used_chars = 0
+    state = {
+        "store": conversation_store,
+        "after_report": after_report,
+        "limit": limit,
+        "max_chars": max_chars,
+        "used_chars": 0,
+        "selected": selected,
+        "errors": errors,
+        "skipped_cursors": skipped_cursors,
+    }
     for thread in sorted(threads, key=lambda item: (float(item.updated_at), str(item.thread_id))):
-        if len(selected) >= limit or used_chars >= max_chars:
+        if len(selected) >= limit or int(state["used_chars"]) >= max_chars:
             break
         if _thread_learning_excluded(thread) or thread_is_excluded(thread, source.excluded_conversation_ids):
             continue
-        thread_id = str(thread.thread_id)
-        cursor = str(cursors.get(thread_id) or "")
-        eof_key = _cold_thread_key(conversation_store, thread_id, cursor)
-        if eof_key is not None and _COLD_THREAD_EOF.get(eof_key):
-            continue
-        entries, load_errors = after_report(
-            thread_id,
-            after_message_id=cursor,
-            limit=limit - len(selected),
-        )
+        _collect_thread_messages(state, thread, str(cursors.get(str(thread.thread_id)) or ""))
+    return selected, errors
+
+
+# LLM: 单线程有界多页读取：跨过 learning_excluded=True 的消息并记录连续前缀跳过游标，遇读错即清空跳过记录。
+# 函数用途: 从单个会话增量收集预算内待提取消息。
+def _collect_thread_messages(state: dict[str, object], thread: object, cursor: str) -> None:
+    thread_id = str(thread.thread_id)
+    eof_key = _cold_thread_key(state["store"], thread_id, cursor)
+    if eof_key is not None and _COLD_THREAD_EOF.get(eof_key):
+        return
+    scan_cursor = cursor
+    seen_cursors = {scan_cursor}
+    thread_selected = False
+    selected: list[CuratorMessageInput] = state["selected"]  # type: ignore[assignment]
+    errors: list[dict[str, object]] = state["errors"]  # type: ignore[assignment]
+    skipped_cursors: dict[str, str] | None = state["skipped_cursors"]  # type: ignore[assignment]
+    after_report = state["after_report"]
+    limit = int(state["limit"])
+    for _page in range(16):
+        page_limit = max(1, limit - len(selected))
+        entries, load_errors = after_report(thread_id, after_message_id=scan_cursor, limit=page_limit)  # type: ignore[operator]
         errors.extend(dict(item) for item in load_errors)
         if load_errors:
+            if skipped_cursors is not None:
+                skipped_cursors.pop(thread_id, None)
+            break
+        if not entries:
+            if not thread_selected and scan_cursor == cursor and eof_key is not None and eof_key == _cold_thread_key(state["store"], thread_id, cursor):
+                _COLD_THREAD_EOF.put(eof_key, True)
+            break
+        scan_cursor, thread_selected, stopped = _consume_thread_page(
+            state, entries, thread, (scan_cursor, thread_selected)
+        )
+        if stopped or len(entries) < page_limit or not scan_cursor or scan_cursor in seen_cursors:
+            break
+        seen_cursors.add(scan_cursor)
+
+
+# LLM: 处理单页返回的消息：严格跳过 learning_excluded=True 并按字符/条数预算收口。
+# 函数用途: 遍历一页增量消息并追加到批列表。
+def _consume_thread_page(
+    state: dict[str, object],
+    entries: list[object],
+    thread: object,
+    page_state: tuple[str, bool],
+) -> tuple[str, bool, bool]:
+    scan_cursor, thread_selected = page_state
+    thread_id = str(thread.thread_id)
+    thread_source = getattr(thread, "learning_source", None)
+    source_dict = dict(thread_source) if isinstance(thread_source, dict) else {}
+    selected: list[CuratorMessageInput] = state["selected"]  # type: ignore[assignment]
+    skipped_cursors: dict[str, str] | None = state["skipped_cursors"]  # type: ignore[assignment]
+    limit = int(state["limit"])
+    max_chars = int(state["max_chars"])
+    for entry in entries:
+        entry_id = str(entry.message_id)
+        metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
+        if metadata.get("learning_excluded") is True:
+            scan_cursor = entry_id
+            if skipped_cursors is not None and not thread_selected:
+                skipped_cursors[thread_id] = entry_id
             continue
-        if not entries and eof_key is not None and eof_key == _cold_thread_key(conversation_store, thread_id, cursor):
-            _COLD_THREAD_EOF.put(eof_key, True)
-        for entry in entries:
-            metadata = entry.metadata if isinstance(entry.metadata, dict) else {}
-            if metadata.get("learning_excluded") is True:
-                continue
-            content = str(entry.content or "")
-            remaining = max_chars - used_chars
-            if remaining < 300:
-                break
-            preview_limit = min(_MESSAGE_PREVIEW_CHARS, max(200, remaining - 250))
-            preview = content[:preview_limit]
-            thread_source = getattr(thread, "learning_source", None)
-            item = CuratorMessageInput(
-                message_id=str(entry.message_id),
-                thread_id=str(entry.thread_id),
-                role=str(entry.role),
-                channel=str(entry.channel),
-                created_at=float(entry.created_at),
-                full_content=content,
-                content_preview=preview,
-                content_hash=_content_hash(content),
-                metadata=dict(metadata),
-                thread_source=dict(thread_source) if isinstance(thread_source, dict) else {},
-            )
-            item_chars = len(json.dumps(item.to_model(), ensure_ascii=False))
-            if selected and used_chars + item_chars > max_chars:
-                break
-            selected.append(item)
-            used_chars += item_chars
-            if len(selected) >= limit:
-                break
-    return selected, errors
+        used_chars = int(state["used_chars"])
+        remaining = max_chars - used_chars
+        if remaining < 300:
+            return scan_cursor, thread_selected, True
+        content = str(entry.content or "")
+        preview = content[: min(_MESSAGE_PREVIEW_CHARS, max(200, remaining - 250))]
+        item = CuratorMessageInput(
+            message_id=entry_id,
+            thread_id=str(entry.thread_id),
+            role=str(entry.role),
+            channel=str(entry.channel),
+            created_at=float(entry.created_at),
+            full_content=content,
+            content_preview=preview,
+            content_hash=_content_hash(content),
+            metadata=dict(metadata),
+            thread_source=dict(source_dict),
+        )
+        item_chars = len(json.dumps(item.to_model(), ensure_ascii=False))
+        if selected and used_chars + item_chars > max_chars:
+            return scan_cursor, thread_selected, True
+        selected.append(item)
+        state["used_chars"] = used_chars + item_chars
+        thread_selected = True
+        scan_cursor = entry_id
+        if len(selected) >= limit:
+            return scan_cursor, thread_selected, True
+    return scan_cursor, thread_selected, False
 
 
 # LLM: 只从原Store的canonical路径读五字段stat；fresh、缺失或替身无路径时不缓存，任何变更回到原报告。
