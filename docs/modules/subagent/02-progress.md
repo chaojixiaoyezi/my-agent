@@ -1,9 +1,9 @@
-## 2026-10-26 Wave 6 B3 / B3-R2 子代理全文 TTL 与完整引用保护（源码实现，未部署）
+## 2026-10-26 Wave 6 B3-R3 子代理全文 TTL 与完整引用保护（源码实现，未部署）
 
 - `services/persistence/projections.py` 的全文投影及 `cli/local_doctor.py::rebuild_subagent_index` 共用同一 30 天终态准入。CLI 在调用运行索引器与读取白名单事实文件之前跳过过期派生项，避免裁剪后重建再次引入旧全文；非白名单 `subagent_patch_review` 仍按原逻辑回填。
 - 活跃、BLOCKED、PAUSED、未知时间及待通知/待收口任务不按 TTL 跳过；规范 `task.attributes.runtime_closeout_pending` 即使为空字典也保留。canonical 状态和原始工单文件不因 TTL 删除；轻量任务登记保持。
-- B3-R2 的真实运行索引器把 canonical attributes 中的 `runtime_closeout_pending` 投影为顶层 bool，空字典也算待收口。TTL 同时检查顶层、`attributes`、`conversation_runtime`，不因收口/唤醒/通知欠账藏在嵌套字段里误删。
-- source/run/task/request/root/parent/root_run/parent_run 身份共用三层读取点，显式来源保护、活跃关联图与正文清理欠账使用同一身份集合；记录 ID 保护仍沿原入口。默认引用收集复用本 owner 的 `current_retention_pins`，并从被保护的真实恢复根 `work/state.json` 补结构化身份，不从目录名猜 ID、不初始化 owner；原显式保护继续合并。收集为 best-effort，未承诺所有外部引用完整覆盖。
+- 真实运行索引器继续把 canonical `runtime_closeout_pending`（含空字典）投影为顶层 bool；B3-R3 另外原样透传 attributes 中存在的九种收口/通知/唤醒字段，不把 False、空字典洗掉，也不制造缺失字段。TTL 共读顶层和七个声明 dict 容器，并在 attributes/metadata 内再读一层；三个收口字典含空对象均保留，父/完成通知明确为 False 同样保留。四种通知/收口状态的空串忽略，未知非空值及坏类型仍保留，closed/settled 等明确结算值不单独阻止 TTL。
+- source/run/task/request/root/parent/root_run/parent_run 及新增 root_task_id/parent_task_id 共用上述有界读取点，显式来源保护、活跃关联图与正文清理欠账使用同一身份集合；记录 ID 保护仍沿原入口。默认引用收集复用本 owner 的 `current_retention_pins`，并从被保护的真实恢复根 `work/state.json` 补结构化身份，不从目录名猜 ID、不初始化 owner；原显式保护继续合并。收集为 best-effort，未承诺所有外部引用完整覆盖。
 - `projection_ledger.jsonl` 在原路径锁内追加后原子保留最近 2000 行，保持私有文件权限。新增 CLI 回归先复现旧 DONE/FAILED 重建复活，再验证修复和永久 memory/canonical 字节保留；复现命令见 [TESTS](../../../TESTS.md)。真实大库性能、部署和全仓回归未验证。
 
 ## 2026-10-26 子代理外层控制面 MCP 延迟连接与巡检按需筛选（已实现）

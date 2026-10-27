@@ -721,3 +721,158 @@ def test_r2_retention_context_rejects_unknown_keyword(tmp_path):
     with pytest.raises(TypeError, match="unexpected keyword argument 'protected_ref'"):
         store.prune_derived_records(before=CUTOFF, protected_ref={item.id})
     assert ids(store) == {item.id}
+
+
+# LLM: 只包裹声明的结构化容器，供真实SQL保护与关联回归复用，不修改产品规则。
+# 函数用途: 为回归组装顶层或至多两层的元数据。
+def r3_nested_metadata(path, fields):
+    for key in reversed(path):
+        fields = {key: fields}
+    return fields
+
+
+# LLM: 容器欠账不仅保护自身，还必须阻止同运行的终态全文被删；无关项仍可删。
+# 函数用途: 复现新增容器及attributes/metadata内一层嵌套遗漏。
+@pytest.mark.parametrize("path", [("wake",), ("notification",), ("closeout",), ("metadata",), ("scope",),
+    ("attributes", "wake"), ("attributes", "notification"), ("attributes", "closeout"),
+    ("attributes", "metadata"), ("attributes", "scope"), ("metadata", "wake"),
+    ("metadata", "notification"), ("metadata", "closeout"), ("metadata", "scope"),
+    ("metadata", "attributes"), ("metadata", "conversation_runtime")])
+def test_r3_nested_pending_containers_protect_related_records(tmp_path, path):
+    store = LocalStore(tmp_path / "local.db")
+    held = record(store, "held", metadata={"status": "done", **r3_nested_metadata(path, {"wake_pending": True})})
+    sibling = record(store, "sibling", source="subagent_work_log", metadata={"status": "done", "run_id": "held"})
+    unrelated = record(store, "unrelated")
+    assert prune(store, before=CUTOFF)["deleted_ids"] == [unrelated.id]
+    assert ids(store) == {held.id, sibling.id}
+    assert (store.root / held.content_path).is_file() and (store.root / sibling.content_path).is_file()
+
+
+@pytest.mark.parametrize(("key", "value"), [("runtime_closeout_pending", {}), ("pending_closeout", {}),
+    ("closeout_pending", {}), ("pending_closeout", True), ("closeout_pending", True),
+    ("notify_pending", True), ("parent_notified", False), ("completion_notified", False),
+    ("closeout_status", "pending"), pytest.param("closeout", {"closeout_pending": True}, id="nested-closeout-pending")])
+def test_r3_pending_aliases_keep_terminal_record(tmp_path, key, value):
+    store = LocalStore(tmp_path / "local.db")
+    held = record(store, "held", metadata={"status": "done", key: value})
+    assert prune(store, before=CUTOFF)["deleted_ids"] == []
+    assert ids(store) == {held.id} and (store.root / held.content_path).is_file()
+
+
+@pytest.mark.parametrize("key", ["closeout_status", "notification_status", "completion_notification_status", "completion_delivery_status"])
+@pytest.mark.parametrize("value", ["pending", "closed", "settled", ""])
+def test_r3_closeout_status_aliases_respect_settled_and_empty_states(tmp_path, key, value):
+    store = LocalStore(tmp_path / "local.db")
+    item = record(store, "status-alias", metadata={"status": "done", key: value})
+    deleted = prune(store, before=CUTOFF)["deleted_ids"]
+    assert deleted == ([] if value == "pending" else [item.id])
+
+
+# LLM: 使用真实task→索引器→SQLite→TTL链路，False和空字典必须原样透传，不以bool洗掉别名语义。
+# 函数用途: 覆盖canonical attributes中全部新增收口/通知/唤醒字段。
+@pytest.mark.parametrize(("key", "value"), [("wake_pending", True), ("notification_pending", True),
+    ("notify_pending", True), ("pending_closeout", {}), ("closeout_pending", {}),
+    ("parent_notified", False), ("completion_notified", False), ("closeout_status", "pending"),
+    ("notification_status", "pending")])
+def test_r3_indexed_task_forwards_present_pending_attributes(tmp_path, key, value):
+    manager, task = projection_case(tmp_path, "DONE", CUTOFF - 1)
+    task.attributes[key] = value
+    manager.indexing.index_task(task)
+    with sqlite3.connect(manager.local_store.db_path) as conn:
+        conn.execute("UPDATE records SET created_at=?,updated_at=?", (CUTOFF - 1, CUTOFF - 1))
+    item = manager.local_store.list_recent()[0]
+    assert key in item.metadata and item.metadata[key] == value
+    assert prune(manager.local_store, before=CUTOFF)["deleted_ids"] == []
+    assert ids(manager.local_store) == {item.id}
+
+
+def test_r3_indexed_task_does_not_invent_missing_pending_attributes(tmp_path):
+    manager, task = projection_case(tmp_path, "DONE", CUTOFF - 1)
+    manager.indexing.index_task(task)
+    item = manager.local_store.list_recent()[0]
+    assert not ({"wake_pending", "notification_pending", "notify_pending", "pending_closeout", "closeout_pending",
+                 "parent_notified", "completion_notified", "closeout_status", "notification_status"} & item.metadata.keys())
+
+
+# LLM: 显式refs和活跃图分开运行，避免前一个断言失败掩盖另一条保护路径。
+# 函数用途: 验证任务根/父和metadata/scope身份在不同来源间保护关联记录。
+@pytest.mark.parametrize(("path", "key"), [((), "root_task_id"), ((), "parent_task_id"),
+    (("metadata",), "run_id"), (("scope",), "task_id"),
+    (("attributes", "metadata"), "root_task_id"), (("metadata", "scope"), "parent_task_id")])
+@pytest.mark.parametrize("mode", ["explicit", "active"])
+def test_r3_task_and_nested_identity_protects_refs_and_active_groups(tmp_path, path, key, mode):
+    store = LocalStore(tmp_path / "local.db")
+    held = record(store, "held", metadata={"status": "done", **r3_nested_metadata(path, {key: "protected-task"})})
+    unrelated = record(store, "unrelated")
+    options = {"protected_refs": {"protected-task"}}
+    expected = {held.id}
+    if mode == "active":
+        active = record(store, "active", metadata={"status": "RUNNING", "task_id": "protected-task"}, stamp=NOW)
+        expected.add(active.id)
+        options = {}
+    assert prune(store, before=CUTOFF, **options)["deleted_ids"] == [unrelated.id]
+    assert ids(store) == expected and (store.root / held.content_path).is_file()
+
+
+# LLM: 先通过真实裁剪提交两条正文欠账，缩小预算但不mock哈希或SQL；失败首项不能饿死后项。
+# 函数用途: 覆盖超软预算与剩余正预算不足，以及hash冲突和unlink临时错误两种失败。
+@pytest.mark.parametrize("head_size", [6, 9])
+@pytest.mark.parametrize("failure", ["hash", "unlink"])
+def test_r3_failed_pending_head_rotates_behind_budget_deferred_file(tmp_path, monkeypatch, head_size, failure):
+    import hashlib
+
+    from agent_py_agent.agent.local_storage import records
+
+    store = LocalStore(tmp_path / "local.db")
+    head, later = sorted([record(store, "first"), record(store, "second")], key=lambda item: item.id)
+    for item, body in ((head, b"x" * head_size), (later, b"valid")):
+        (store.root / item.content_path).write_bytes(body)
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute("UPDATE records SET content_hash=? WHERE id=?", (hashlib.sha256(body).hexdigest(), item.id))
+    with monkeypatch.context() as setup:
+        setup.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_FILES", 0)
+        assert prune(store, before=CUTOFF)["pending_files"] == 2
+    assert ids(store) == set()
+    if failure == "hash":
+        (store.root / head.content_path).write_bytes(b"y" * head_size)
+    else:
+        original = records.unlink_file_beneath
+
+        def fail_head(root, parts):
+            if parts[-1] == f"{head.id}.txt":
+                raise OSError("transient unlink failure")
+            return original(root, parts)
+
+        monkeypatch.setattr(records, "unlink_file_beneath", fail_head)
+    monkeypatch.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_BYTES", 8)
+    assert prune(store, before=CUTOFF)["pending_files"] == 2
+    with sqlite3.connect(store.db_path) as conn:
+        pending = json.loads(conn.execute("SELECT value FROM metadata WHERE key='derived_prune_pending_files'").fetchone()[0])
+    assert [entry["id"] for entry in pending] == [later.id, head.id]
+    assert prune(LocalStore(store.db_path), before=CUTOFF)["pending_files"] == 1
+    assert not (store.root / later.content_path).exists()
+    assert (store.root / head.content_path).is_file()
+
+
+# LLM: 数量上限外的未选中项也必须先于失败项；只用真实SQL提交欠账和内容冲突，不mock清理结果。
+# 函数用途: 补独立评审指出的文件数预算轮转边界，验证欠账不丢失且下一轮前进。
+def test_r3_failed_head_rotates_behind_files_outside_count_limit(tmp_path, monkeypatch):
+    from agent_py_agent.agent.local_storage import records
+
+    store = LocalStore(tmp_path / "local.db")
+    head, second, third = sorted([record(store, f"count-{i}") for i in range(3)], key=lambda item: item.id)
+    with monkeypatch.context() as setup:
+        setup.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_FILES", 0)
+        assert prune(store, before=CUTOFF)["pending_files"] == 3
+    (store.root / head.content_path).write_text("changed hash; keep this debt")
+    monkeypatch.setattr(records, "_DERIVED_FILE_CLEANUP_MAX_FILES", 1)
+    assert prune(store, before=CUTOFF)["pending_files"] == 3
+    with sqlite3.connect(store.db_path) as conn:
+        pending = json.loads(conn.execute("SELECT value FROM metadata WHERE key='derived_prune_pending_files'").fetchone()[0])
+    assert [entry["id"] for entry in pending] == [second.id, third.id, head.id]
+    assert prune(LocalStore(store.db_path), before=CUTOFF)["pending_files"] == 2
+    assert not (store.root / second.content_path).exists()
+    assert (store.root / third.content_path).is_file() and (store.root / head.content_path).is_file()
+    assert prune(store, before=CUTOFF)["pending_files"] == 1
+    assert not (store.root / third.content_path).exists()
+    assert (store.root / head.content_path).is_file()

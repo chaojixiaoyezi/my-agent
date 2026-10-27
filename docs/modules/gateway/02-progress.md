@@ -1,9 +1,10 @@
-## 2026-10-26 Wave 6 B3 / B3-R2 派生全文准入与到期维护（源码实现，未部署）
+## 2026-10-26 Wave 6 B3-R3 派生全文准入与到期维护（源码实现，未部署）
 
 - `gateway_parts/logging.py::_index_gateway_payload` 在归档回填前复用 LocalStore 的终态/时间/待通知判定，跳过 30 天外且无未完成通知的终态请求；活跃、未知状态、缺可信时间及待收口请求继续保留。仅时间字段缺省时允许从归档文件 mtime 兜底，不以坏时间作过期证据。
 - 实时 `log_gateway_payload` 不变；`log_gateway_event` 现在记录 `recorded_at`，优先使用 payload 的非空明确状态，仅对精确的 `gateway_request_completed`、`gateway_request_failed`、`gateway_request_cancelled`、`gateway_stopped` 补充终态。未知事件不靠名称子串、`ok` 或无错误猜测 done；九类派生来源缺失/空状态均保留。
 - B3-R2 已将 `prune_derived_records` 接入默认单进程 owner 到期维护：原 retention 已应用、无法律保留且无来源加载错误时，才尝试裁剪已有普通 LocalStore。冷库不创建；data/db/files 符号链接拒绝；未到期、策略拒绝及 C/W transition 分支不新增旁路调用。不删除请求/响应事实源，不修改 canonical 状态；尚未在真实用户数据库执行。
 - 清理默认尽力收集当前 owner 的保留引用，显式保护集继续合并；FTS 关闭也同步已有物理索引，单条 SQL 失败保留记录和正文。正文在原 nofollow FD 上流式核 hash，8 MiB 为可容纳本批首个大文件的软预算，文件检查数量上限不变。引用收集仍为 best-effort，不承诺完整覆盖外部引用。
+- B3-R3 的共享准入补读 `closeout`、`notification`、`wake`、`metadata`、`scope`，并在 `attributes` / `metadata` 内多读一层声明容器；新增收口/通知别名与父通知未完成保护，不递归任意正文。任务根/父身份同样参与引用与活跃组保护。文件清理将读前预算延期与尝试后失败分开，前者和未选中项排在失败项之前，避免 hash 冲突或临时 unlink 错误反复耗尽预算；欠账仍完整保留。
 - 维护控制器保留 180 秒单调时钟启动保护，墙钟 `tick(now=...)` 不跳过它，安全恢复不因保护期推迟。专属回归、维护时钟夹具及文档组合门禁的准确范围和结果见 [TESTS](../../../TESTS.md)；不等于部署、真实大库性能或端到端恢复已验证。
 
 ## 2026-10-26 Wave 4 Round 4 资产与冷通知修复（源码及指定组件验收，未部署）

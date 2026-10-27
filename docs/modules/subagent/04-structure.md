@@ -1,10 +1,11 @@
-## 2026-10-26 Wave 6 B3 / B3-R2 子代理重建准入、收口与引用结构
+## 2026-10-26 Wave 6 B3-R3 子代理重建准入、收口与引用结构
 
 - `services/persistence/projections.py::_task_projection_expired` 将可信 task 状态、生命周期时间和规范 attributes 收口标记交给 LocalStore 公共终态判定。持久化全文投影与 CLI 重建复用该入口；CLI 对文件源另外检查 `DERIVED_PRUNABLE_SOURCE_TYPES`，不把 30 天策略扩到非白名单回填。
 - `manager_index` 与 LocalStore 全文投影在过期时跳过，轻量 task registry 继续登记。`cli/local_doctor.py` 的返回计数只累加实际执行的索引调用，不代表新插入行数；文件内容仍由原 `_log_task_fact_source` 读取，TTL 跳过发生在读取之前。
 - 投影账本通过 `locked_json_path` 串行化读取/追加/替换，以 `deque(maxlen=2000)` 保留尾窗、nofollow 读取并私有原子写回，不修改 canonical 状态、不把账本提升成事实源。
-- `services/indexing/service.py::_task_index_metadata` 将 `task.attributes.runtime_closeout_pending`（包括空字典）投影成顶层 bool。`local_storage/records.py::_derived_metadata_scopes` / `_derived_scope_pending` 在顶层、attributes、conversation_runtime 共用收口、唤醒及通知欠账语义；这是派生保护投影，不替代 canonical 收口协议。
-- `_derived_run_keys` 从相同三层读取 source/run/task/request/root/parent/root_run/parent_run 身份，供显式来源保护、活跃图及正文 journal 共同使用。`_derived_owner_ref_ids` 仅在可从数据库父目录确定 owner 时复用 `current_retention_pins`；`_derived_owner_pin_ids` 保留原 ids，再从 owner 内被保护恢复根的真实 `work/state.json` 提取结构化身份。导入/IO 失败沿 best-effort，不建立第二套引用账。
+- `services/indexing/service.py::_task_index_metadata` 保留 runtime 收口 bool 投影，另外只在 attributes 有键时原样透传 `wake_pending`、`notification_pending`、`notify_pending`、`pending_closeout`、`closeout_pending`、`parent_notified`、`completion_notified`、`closeout_status`、`notification_status`。这是派生保护投影，不替代 canonical 收口协议。
+- `records.py::_derived_metadata_scopes` 产出顶层及 `attributes`、`conversation_runtime`、`closeout`、`notification`、`wake`、`metadata`、`scope` 的 dict；仅在 attributes/metadata 内额外读一层同名容器，不递归任意 JSON。`_derived_scope_pending` 保留三个收口字典（含空对象）、九种 truthy 标记及两种明确 False 通知标记；四种收口/通知状态仅允许非空结算值 sent/delivered/consumed/done/completed/acknowledged/closed/settled，空串不单独阻止清理，非字符串仍保守保留。
+- `_derived_run_keys` 从同一有界容器读取原身份及 `root_task_id` / `parent_task_id`，供显式来源保护、活跃图及正文 journal 共同使用。`_derived_owner_ref_ids` 仅在可从数据库父目录确定 owner 时复用 `current_retention_pins`；`_derived_owner_pin_ids` 保留原 ids，再从 owner 内被保护恢复根的真实 `work/state.json` 提取结构化身份。导入/IO 失败沿 best-effort，不建立第二套引用账。
 - `prune_derived_records` 保留原显式关键词，新增的 `now` / `protected_refs` 通过受限 `retention_context` 传入；未知关键词抛 TypeError，缺省 refs 才自动收集，调用方原记录/来源保护集继续合并。终态只认明确状态和可信完成/更新时间，不把 `created_at` 当完成证明；非白名单、活跃、欠账与无可信时间继续保留。
 
 ## 2026-10-26 子代理持久化按需筛选接口与 OPEN 能力延迟目录同步结构

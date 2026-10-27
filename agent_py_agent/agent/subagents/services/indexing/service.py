@@ -272,7 +272,7 @@ def _task_index_list_section(name: str, values: list[str]) -> list[str]:
 # LLM: subagent_run_saved 事件的 payload。接替关系（takeover_by / superseded_by）只在有值时带上，供时间线、审计等投影看到；
 #   权威位置仍是任务记录里的 takeover_records，这里不新增事件类型、不改已有键。改键须同步 test_subagent_done_supersede。
 # 函数用途: 生成写进本地索引和事件日志的子代理状态摘要。
-# LLM: canonical收口欠账必须投影到TTL读取的顶层；空字典仍按原运行协议视为待收口。
+# LLM: canonical收口欠账投影到TTL顶层；runtime收口转bool，存在的别名原样透传，不能把False或空字典洗掉。
 def _task_index_metadata(task: SubAgentTask) -> dict[str, object]:
     attrs = dict(getattr(task, "attributes", None) or {})
     metadata: dict[str, object] = {
@@ -292,6 +292,10 @@ def _task_index_metadata(task: SubAgentTask) -> dict[str, object]:
         "runtime_closeout_pending": bool(attrs.get("runtime_closeout_pending"))
             or isinstance(attrs.get("runtime_closeout_pending"), dict),
     }
+    for key in ("wake_pending", "notification_pending", "notify_pending", "pending_closeout", "closeout_pending",
+                "parent_notified", "completion_notified", "closeout_status", "notification_status"):
+        if key in attrs:
+            metadata[key] = attrs[key]
     for key in ("takeover_by", "superseded_by"):
         value = str(getattr(task, key, "") or "").strip()
         if value:

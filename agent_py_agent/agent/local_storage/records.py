@@ -55,33 +55,39 @@ def derived_record_terminal(metadata: dict[str, Any]) -> bool:
             and not _derived_notification_pending(metadata))
 
 
-# LLM: 顶层及两个结构化容器共用同一收口语义；未知通知状态保留，不从正文推断。
+# LLM: 顶层及声明的有界结构化容器共用同一收口语义；未知通知状态保留，不从正文推断。
 # 函数用途: 保住待收口、唤醒和未送达的完成通知。
 def _derived_notification_pending(metadata):
     return any(_derived_scope_pending(scope) for scope in _derived_metadata_scopes(metadata))
 
 
-# LLM: 只枚举协议声明的元数据容器，不递归任意JSON或复制正文。
-# 函数用途: 共用顶层、attributes与conversation_runtime的保护字段读取点。
+# LLM: 只枚举七个声明容器；attributes/metadata内再读一层同名容器，不递归任意JSON或复制正文。
+# 函数用途: 共用收口、通知、唤醒及结构化身份的有界读取点。
 def _derived_metadata_scopes(metadata):
-    return (metadata, *(value for key in ("attributes", "conversation_runtime")
-                        if isinstance(value := metadata.get(key), dict)))
+    keys = ("attributes", "conversation_runtime", "closeout", "notification", "wake", "metadata", "scope")
+    yield metadata
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, dict):
+            yield value
+            if key in {"attributes", "metadata"}:
+                yield from (nested for name in keys if isinstance(nested := value.get(name), dict))
 
 
-# LLM: 原顶层标志规则集中保留；供嵌套容器复用，不赋予缺失状态终态资格。
+# LLM: 别名复用原保守语义，三个收口字典含空对象均算欠账；空状态忽略，坏类型和未知非空状态保留。
 # 函数用途: 判断一层结构化元数据是否仍有通知或收口欠账。
 def _derived_scope_pending(metadata):
-    if isinstance(metadata.get("runtime_closeout_pending"), dict):
+    if any(isinstance(metadata.get(key), dict) for key in ("runtime_closeout_pending", "pending_closeout", "closeout_pending")):
         return True
-    flags = ("runtime_closeout_pending", "completion_notice_pending", "notification_pending",
-             "wake_pending", "completion_delivery_pending", "pending_completion_notification")
+    flags = ("runtime_closeout_pending", "pending_closeout", "closeout_pending", "completion_notice_pending",
+             "notification_pending", "notify_pending", "wake_pending", "completion_delivery_pending", "pending_completion_notification")
     if any(metadata.get(key) for key in flags):
         return True
-    for key in ("notification_status", "completion_notification_status", "completion_delivery_status"):
-        if key in metadata and (not isinstance(metadata[key], str) or metadata[key] not in
-                                {"sent", "delivered", "consumed", "done", "completed", "acknowledged"}):
+    for key in ("closeout_status", "notification_status", "completion_notification_status", "completion_delivery_status"):
+        if key in metadata and (not isinstance(metadata[key], str) or (metadata[key] and metadata[key] not in
+                                {"sent", "delivered", "consumed", "done", "completed", "acknowledged", "closed", "settled"})):
             return True
-    return metadata.get("completion_notified") is False
+    return metadata.get("completion_notified") is False or metadata.get("parent_notified") is False
 
 
 # LLM: 0是旧结构的缺省时间而非1970年终态；bool、非有限数和坏时间不能赋予清理资格。
@@ -676,10 +682,11 @@ def _derived_metadata(row):
     return metadata if isinstance(metadata, dict) else None
 
 
-# LLM: 根/父运行、任务与请求也参与保守关联；同根活跃项可以保护旧兄弟，不把保护扩大为删除权。
+# LLM: 根/父运行及root_task_id/parent_task_id共用有界容器读取点；同根活跃项保护旧兄弟，不增加删除权。
 # 函数用途: 从各层结构化元数据提取运行/任务/请求关联键。
 def _derived_run_keys(row, metadata):
-    keys = ("source_id", "run_id", "task_id", "request_id", "root_id", "parent_id", "root_run_id", "parent_run_id")
+    keys = ("source_id", "run_id", "task_id", "request_id", "root_id", "parent_id",
+            "root_run_id", "parent_run_id", "root_task_id", "parent_task_id")
     values = [row["source_id"], *(scope.get(key) for scope in _derived_metadata_scopes(metadata or {}) for key in keys)]
     return {value.strip() for value in values if isinstance(value, str) and value.strip()}
 
@@ -846,7 +853,7 @@ def _derived_file_parts(store, entry):
     return (path.parent.resolve() / path.name).relative_to(root).parts
 
 
-# LLM: 正文流式hash，8MiB为软预算；本批尚未读正文时允许一个超大文件，之后无预算则保留欠账。
+# LLM: 正文流式hash，8MiB为软预算；首个超大文件仍可前进，后续读前预算不足返回None区分未读延期与真正失败。
 # 函数用途: 确认待删文件仍是已删记录的旧内容，变更后的文件保留。
 def _derived_file_hash(root, parts, state):
     digest = hashlib.sha256()
@@ -854,7 +861,7 @@ def _derived_file_hash(root, parts, state):
     with os.fdopen(descriptor, "rb") as handle:
         size = os.fstat(handle.fileno()).st_size
         if size > state.remaining_bytes and state.remaining_bytes != _DERIVED_FILE_CLEANUP_MAX_BYTES:
-            raise ValueError("derived cleanup byte budget exceeded")
+            return None
         read_bytes = 0
         while chunk := handle.read(min(65536, size - read_bytes + 1)):
             state.remaining_bytes -= len(chunk)
@@ -874,8 +881,8 @@ def _derived_live_paths(store, conn):
             for row in conn.execute("SELECT DISTINCT content_path FROM records")}
 
 
-# LLM: 只有无引用且hash未变的受管普通文件才删；复用、内容变化、活跃组、坏条目、超预算和IO失败都保留恢复账。
-# 函数用途: 安全处理一个已提交删除的正文，返回清理是否已经结算。
+# LLM: 只有无引用且hash未变的受管普通文件才删；True已结算、False尝试后仍保留、None读前预算延期，均不丢恢复账。
+# 函数用途: 安全处理一个已提交删除的正文，并区分延期与失败以便公平轮转。
 def _derived_cleanup_file(store, entry, state, plan):
     try:
         sources = entry.get("source_ids", [])
@@ -888,7 +895,10 @@ def _derived_cleanup_file(store, entry, state, plan):
         root = store.files_dir.resolve()
         if root.joinpath(*parts).resolve() in state.live_paths:
             return False
-        if _derived_file_hash(root, parts, state) != entry["content_hash"]:
+        content_hash = _derived_file_hash(root, parts, state)
+        if content_hash is None:
+            return None
+        if content_hash != entry["content_hash"]:
             return False
         if store.coordinator_io:
             store._local_write(lambda: unlink_file_beneath(root, parts))
@@ -901,8 +911,8 @@ def _derived_cleanup_file(store, entry, state, plan):
         return False
 
 
-# LLM: SQL提交后共持upsert锁；每批最多1000文件、8MiB软预算且允许首个超大文件，失败欠账轮转保留。
-# 函数用途: 幂等清理待删正文并提交剩余欠账。
+# LLM: SQL提交后共持upsert锁；1000文件及8MiB软预算不变；预算延期和未选中项排在尝试后失败项之前，不丢hash冲突欠账。
+# 函数用途: 幂等清理待删正文并将失败项轮到队尾，避免反复耗尽预算饿死后项。
 def _derived_cleanup_files(store, plan):
     with store._connection() as conn:
         pending = _derived_pending_files(conn)
@@ -910,7 +920,14 @@ def _derived_cleanup_files(store, plan):
         parents, blocked = _derived_protected_groups(conn, plan) if pending else ({}, set())
     state = _DerivedFileCleanupState(live_paths, parents, blocked, _DERIVED_FILE_CLEANUP_MAX_BYTES)
     batch = pending[:_DERIVED_FILE_CLEANUP_MAX_FILES]
-    remaining = [*pending[len(batch):], *(entry for entry in batch if not _derived_cleanup_file(store, entry, state, plan))]
+    deferred, retained = [], []
+    for entry in batch:
+        settled = _derived_cleanup_file(store, entry, state, plan)
+        if settled is None:
+            deferred.append(entry)
+        elif not settled:
+            retained.append(entry)
+    remaining = [*deferred, *pending[len(batch):], *retained]
     _derived_transaction(store, lambda conn: _derived_write_pending(conn, remaining))
     return len(remaining)
 
