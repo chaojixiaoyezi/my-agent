@@ -2264,3 +2264,65 @@ def test_b1r4_v1_schema_still_rejects_required_empty_binding(tmp_path, field):
     (root / "bg-corrupt.json").write_text(json.dumps(payload))
     result = bg.list_background_processes(home, thread_id="thread-one")
     assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+
+
+# LLM: v2不带激活和保留字段，v3不带保留字段；先通过真实原生验证器，再由调用测试单点污染。
+# 函数用途: 复用已有记录构造合法v2/v3/v4普通任务元数据，不启动进程。
+def _b1r5_payload(home, version):
+    payload = _b1r3_payload(home, "managed")
+    payload["schema"] = f"managed_process_session.{version}"
+    if version != "v4":
+        payload.pop("retain_until_consumed")
+    if version == "v2":
+        payload.pop("activation_scope")
+    bg.validate_process_record(payload)
+    return payload
+
+
+# LLM: 成对空home复现原生schema仍接受的绕过；独立scope也必须由投影门报指定错误，冷热错误不可豁免。
+# 函数用途: 锁住v2/v3/v4必需owner_home非空，保留当前记录展示与全程不写盘。
+@pytest.mark.parametrize("version", ["v2", "v3", "v4"])
+@pytest.mark.parametrize("location", ["paired", "access_scope", "execution_scope", "activation_scope"])
+def test_b1r5_v2_v3_v4_reject_empty_scope_owner_home(tmp_path, version, location):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = (_b1r4_shared_payload(home, version) if location == "activation_scope" and version != "v2"
+               else _b1r5_payload(home, version))
+    if location == "paired":
+        payload["access_scope"]["owner_home"] = payload["execution_scope"]["owner_home"] = ""
+        bg.validate_process_record(payload)
+    elif location == "activation_scope":
+        if version == "v2":
+            payload[location] = {"owner_id": "fixture", "plugin_id": "mcp-demo", "activation_id": "a" * 64}
+        payload[location]["owner_home"] = ""
+    else:
+        payload[location]["owner_home"] = ""
+    path = root / "bg-corrupt.json"
+    path.write_text(json.dumps(payload))
+    old = time.time() - 10
+    os.utime(path, (old, old))
+    os.utime(root, (old, old))
+    before = _files(home)
+    for _ in range(2):
+        result = bg.list_background_processes(home, thread_id="thread-one")
+        assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+        assert result["total"] == 1 and _files(home) == before
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)
+
+
+# LLM: 激活owner_id不能借可选未绑定空串规则过关；v2夹带激活也先报归属错误，不伪称合法v2共享资源。
+# 函数用途: 验证激活必需owner_id空串在原生schema转换之前被拒绝。
+@pytest.mark.parametrize("version", ["v2", "v3", "v4"])
+def test_b1r5_activation_rejects_empty_owner_id(tmp_path, version):
+    home = tmp_path / "owner"
+    root = _b1_records(home, count=1)
+    payload = _b1r4_shared_payload(home, version) if version != "v2" else _b1r5_payload(home, version)
+    if version == "v2":
+        payload["activation_scope"] = {"owner_home": str(home), "plugin_id": "mcp-demo", "activation_id": "a" * 64}
+    payload["activation_scope"]["owner_id"] = ""
+    (root / "bg-corrupt.json").write_text(json.dumps(payload))
+    result = bg.list_background_processes(home, thread_id="thread-one")
+    assert result["projection_ok"] is False and result["errors"] and not result["unrelated_errors"]
+    with pytest.raises(ValueError, match="^invalid_session_attribution$"):
+        bg._validate_session_payload(payload, "bg-corrupt", home)

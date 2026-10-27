@@ -1,3 +1,24 @@
+## 2026-10-26 Wave 6 B1-R5：补齐身份scope必需owner空串检查
+
+来源：`07-tasks/wave6-b1-round5-fix-20261026.md`，c9的R4-F1，基线 `c515e2003d43b4bf6008a6ba7be39d39ac6a568f`，仍仅改原工作树三白名单文件。
+
+- **核实与修复**：原生v2/v3/v4验证器只校验owner_home为字符串且access/execution相等，成对空串仍通过；原投影又过滤空home声明。现在 `_validate_session_attribution` 在schema转换前明确拒绝access/execution/activation的空owner_home及activation的空owner_id，统一抛 `invalid_session_attribution`。不改原生schema、owner路径边界、缓存、探活或错误隔离。
+- **兼容范围**：不是把所有空串重新判非法；顶层、metadata及可选线程/任务/请求空串的未绑定含义不变。原R4共享MCP v3/v4两例及正常空串36例均在本轮完整回归中通过。None、非字符串、纯空白和冲突的旧合同未放宽，既有测试与断言均未改动。
+- **新增回归**：`test_b1r5_v2_v3_v4_reject_empty_scope_owner_home` 覆盖v2/v3/v4成对空home、单独access/execution空home、activation空home；另覆盖activation空owner_id。base先经真实原生验证器确认合法，成对空home污染后再次调用原生验证器，明确复现其漏检；v3/v4激活用真实shared scope，v2本不支持激活，测试其非法激活仍先命中本轮归属门，不冒充合法v2共享资源。冷热列表必须报错且不能列为不相关错误，正常当前记录及文件字节保持不变，直接解析需精确错误文本。
+- **先红后绿**：新增15例在修复前全部断言失败、0执行错误，其中3例直接复现投影错误成功；修复后指定整文件 **702通过、0失败/错误/跳过**（`final.xml`），全范围Ruff通过。JUnit及完整日志在 `.pytest_cache/b1-r5/`，本轮import来源已核对为当前工作树。
+- **独立复核与限制**：只读内联产品片段复核未发现明确反例；未独立读工作树或跑测试，不作为全仓审查。实际MCP启动/协议/停止链、全仓pytest、跨平台及线上未验证。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
 ## 2026-10-26 Wave 6 B1-R4：恢复原生未绑定空串并补齐owner/激活归属
 
 来源：`07-tasks/wave6-b1-round4-fix-20261026.md` 两项P1审查反馈；基线 `d87011bc475837f9f6898b89c6589a9b7825475b`，只改原工作树三文件。本节覆盖R3“正常路径空串非法”的旧结论，坏记录诊断规则不放宽。

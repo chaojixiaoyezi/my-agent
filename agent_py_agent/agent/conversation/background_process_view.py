@@ -404,11 +404,17 @@ def _read_session_payload(root: Path, session_id: str) -> object:
     return json.loads(raw)
 
 
-# LLM: 正常路径允许None/原生空串表示未绑定；严格拒非字符串和非空纯空白，先于schema转换核验owner/激活等原声明。
-# 函数用途: 校验正常记录归属并保留共享MCP空串合同，各schema强制字段仍交原验证器，不写盘。
+# LLM: 可选身份保留None/空串未绑定；三个身份scope的home及激活owner_id拒空串，非字符串/纯空白仍先于schema拒绝。
+# 函数用途: 补齐原schema遗漏的必需owner空串检查，同时保留共享MCP可选未绑定合同，不写盘。
 def _validate_session_attribution(payload: dict) -> None:
     if any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in _SCOPE_FIELDS):
         raise ValueError("invalid_session_scope")
+    for name in ("access_scope", "execution_scope", "activation_scope"):
+        scope = payload.get(name)
+        if isinstance(scope, dict) and (
+            scope.get("owner_home") == "" or name == "activation_scope" and scope.get("owner_id") == ""
+        ):
+            raise ValueError("invalid_session_attribution")
     claims = {key: set() for key in _ATTRIBUTION_FIELDS}
     for scope in _raw_record_scopes(payload):
         for key in _ATTRIBUTION_FIELDS:
