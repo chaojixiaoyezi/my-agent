@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from agent_py_agent.agent.conversation.store import ConversationStore
+from agent_py_agent.agent.path_access_policy import HOST_STATE_OWNER_DIRS
 from agent_py_agent.agent.plugin_host import capabilities_v2_handlers as caps
 from agent_py_agent.agent.plugin_host import subagents_v2_handlers as sub
 from agent_py_agent.agent.plugin_host import workspace_v2_handlers as files
@@ -328,3 +331,124 @@ def test_git_timeout_stops_child_and_returns_typed_error(monkeypatch):
     assert "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904" in calls[0][0][0]
     assert calls[0][1]["env"]["GIT_ATTR_NOSYSTEM"] == "1"
     assert calls[0][1]["env"]["GIT_NO_LAZY_FETCH"] == "1"
+
+
+# LLM: 使用原ThreadStore创建同owner线程，显式绑定canonical任务，不替换消息解析和路径保护。
+# 函数用途: 准备需要读取消息的真实子代理详情。
+@pytest.fixture
+def message_thread(case):
+    thread = case.store.threads.create(owner_id=case.home.owner_id, owner_home=str(case.root))
+    case.manager.mutate(case.task.id, lambda task: setattr(task, "agent_thread_id", thread.thread_id))
+    return thread
+
+
+# LLM: 外部消息是可解析的真实JSONL；叶/父链接及直接外部路径均须在原消息后端调用前拒绝。
+# 函数用途: 复现F1跨owner消息文件读取并守住前置检查顺序。
+@pytest.mark.parametrize("kind", ["leaf", "parent", "outside"])
+def test_r2_messages_reject_foreign_path_before_reader(case, message_thread, monkeypatch, kind):
+    path = case.store.storage.message_path(message_thread.thread_id)
+    foreign = case.other.home_dir / path.name
+    foreign.write_text(json.dumps({"message_id": "foreign-message", "thread_id": message_thread.thread_id,
+                                   "role": "assistant", "content": "foreign-private-message"}) + "\n")
+    if kind == "leaf":
+        path.symlink_to(foreign)
+    elif kind == "parent":
+        path.parent.rename(case.root / "saved-messages")
+        path.parent.symlink_to(case.other.home_dir, target_is_directory=True)
+    else:
+        monkeypatch.setattr(case.store.storage, "message_path", lambda _: foreign)
+    # 确认来源有效，避免用不可解析的假消息掩盖越界读取。
+    rows, errors = case.store.messages.recent_report(message_thread.thread_id, limit=100)
+    assert not errors and rows[0].content == "foreign-private-message"
+    calls, original = [], case.store.messages.recent_report
+    monkeypatch.setattr(case.store.messages, "recent_report", lambda *a, **kw: calls.append(a) or original(*a, **kw))
+    with pytest.raises(HostAPIError) as error:
+        sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    assert error.value.code in {"SUBAGENT_NOT_FOUND", "STORE_UNAVAILABLE"}
+    assert calls == []
+
+
+# LLM: owner_id和owner_home分别核验，线程存储出错不可降级为无记录或继续读取消息。
+# 函数用途: 复现F1线程归属错误与读取失败分支。
+@pytest.mark.parametrize("kind", ["owner_id", "owner_home", "load_error"])
+def test_r2_messages_reject_foreign_or_unavailable_thread(case, message_thread, monkeypatch, kind):
+    if kind == "load_error":
+        monkeypatch.setattr(case.store.threads, "load_report", lambda _: (None, "unavailable"))
+    else:
+        value = case.other.owner_id if kind == "owner_id" else str(case.other.home_dir)
+        case.store.threads.update_atomic(message_thread.thread_id, lambda thread: replace(thread, **{kind: value}))
+    calls = []
+    monkeypatch.setattr(case.store.messages, "recent_report", lambda *a, **kw: (calls.append(a) or [], []))
+    with pytest.raises(HostAPIError) as error:
+        sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    assert error.value.code == ("STORE_UNAVAILABLE" if kind == "load_error" else "SUBAGENT_NOT_FOUND")
+    assert calls == []
+
+
+# LLM: 缺少消息文件是合法空历史，普通文件仍沿原消息Store解析，不能把保护做成全面禁用。
+# 函数用途: 验证F1正常消息与尚未产生消息的详情。
+@pytest.mark.parametrize("has_message", [False, True])
+def test_r2_messages_allow_owned_regular_or_missing_file(case, message_thread, has_message):
+    if has_message:
+        case.store.messages.append({"thread_id": message_thread.thread_id, "role": "assistant", "content": "own-message"})
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    assert [row["content"] for row in result["messages"]] == (["own-message"] if has_message else [])
+
+
+# LLM: 目录清单来自原策略，不另抄一份；相对/绝对根与读/写入口都不能把宿主控制目录当工作区。
+# 函数用途: 复现F2内部工作根绕过并确认上传拒绝前不落盘。
+@pytest.mark.parametrize("parts", [*HOST_STATE_OWNER_DIRS, ("runs",)])
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("action", ["list_workspace_files", "upload_workspace_file"])
+def test_r2_workspace_rejects_control_root(case, parts, absolute, action):
+    root = case.root.joinpath(*parts)
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {"workspace_dir": str(root) if absolute else "/".join(parts), "filename": "probe.txt", "data_base64": "eA=="}
+    with pytest.raises(HostAPIError) as error:
+        getattr(files, action)(case.context, payload)
+    assert error.value.code == "WORKSPACE_PATH_INVALID"
+    assert not (root / "uploads" / "probe.txt").exists()
+
+
+# LLM: home根本身合法，但相对目标仍需独立拒绝控制目录；Git仅替换进程/元数据投影，不伪装仓库E2E。
+# 函数用途: 复现F2从home根读、下载、列举、Git观察内部路径的绕过。
+@pytest.mark.parametrize("parts", [("runs",), ("data",), ("workspace", "runtime"), ("memory", "curator")])
+@pytest.mark.parametrize("action", ["read_workspace_file", "download_workspace_file", "list_workspace_files", "inspect_workspace_git"])
+def test_r2_workspace_rejects_control_descendant(case, monkeypatch, parts, action):
+    target = case.root.joinpath(*parts)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "internal.txt").write_text("private-control-content")
+    monkeypatch.setattr(files, "_stat", lambda *a, **kw: SimpleNamespace(st_mode=0o040700))
+    calls = []
+    monkeypatch.setattr(files, "_git", lambda *a: calls.append(a) or ("## main\x00", False))
+    payload = {"workspace_dir": str(case.root), "relative_path": "/".join(parts), "path": "/".join((*parts, "internal.txt"))}
+    with pytest.raises(HostAPIError) as error:
+        getattr(files, action)(case.context, payload)
+    assert error.value.code == "WORKSPACE_PATH_INVALID"
+    assert calls == []
+
+
+# LLM: 列出祖先不能展示受保护直接子项，但同名前缀的普通项目不能被误杀。
+# 函数用途: 检查F2列表过滤及正常项目路径不回归。
+@pytest.mark.parametrize("parent, hidden, visible", [((), "runs", "runs-project"), (("workspace",), "runtime", "runtime-project")])
+def test_r2_workspace_listing_hides_control_children(case, parent, hidden, visible):
+    root = case.root.joinpath(*parent)
+    (root / hidden).mkdir(parents=True, exist_ok=True)
+    (root / visible).mkdir(parents=True, exist_ok=True)
+    (root / visible / "allowed.txt").write_text("ordinary-project")
+    result = files.list_workspace_files(case.context, {"workspace_dir": str(root)})
+    names = {row["name"] for row in result["items"]}
+    assert hidden not in names and visible in names
+    preview = files.read_workspace_file(case.context, {"workspace_dir": str(root), "path": f"{visible}/allowed.txt"})
+    assert preview["content"] == "ordinary-project"
+
+
+# LLM: 真实时间线超过256KiB；截断点落在UTF8/长行中，返回值须恰为原文件最后100整行。
+# 函数用途: 复现F3大时间线失败并验证尾读内容，不只验证没有抛错。
+def test_r2_large_timeline_returns_last_hundred_complete_lines(case):
+    lines = [f"{index:04d}:" + "中文进度" * 90 for index in range(600)]
+    path = Path(case.manager.load(case.task.id).agent_run_timeline_jsonl)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert path.stat().st_size > 262144
+    result = sub.get_subagent(case.context, {"subagent_id": case.task.id}, agent=case.agent, store=case.store)
+    assert result["steps"] == lines[-100:]

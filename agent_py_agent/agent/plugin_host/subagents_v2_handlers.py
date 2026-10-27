@@ -7,7 +7,10 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
+from ..common.nofollow_fs import (
+    open_directory_beneath,
+    open_readonly_file_beneath,
+)
 from ..concurrency.exceptions import ConcurrencyConflictError
 from ..subagents.cancellation import (
     CancelSubagentTaskRequest,
@@ -88,18 +91,46 @@ def list_subagents(context, payload, *, agent=None, store=None):
             if payload.get("include_finished", True) or task.status not in _TERMINAL:
                 rows.append(_project(task))
     return {"items": rows}
-# LLM: 只从任务原日志字段nofollow有界读取；消息来自宿主注入的原ConversationStore，不从请求接受文件地址。
+# LLM: 消息读取前核线程双归属和原消息路径的逐段nofollow；缺文件为空，坏路径/坏存储不能继续读正文。
+# 函数用途: 验证原会话消息来源，再调用原消息Store。
+def _messages(context, task, store):
+    if store is None or not task.agent_thread_id:
+        return []
+    home = context.owner_home.home_dir
+    thread, error = store.threads.load_report(task.agent_thread_id)
+    if error:
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    if thread is not None and (thread.owner_id != context.owner_home.owner_id or thread.owner_home != str(home)):
+        raise HostAPIError("SUBAGENT_NOT_FOUND", 404)
+    try:
+        parts = store.storage.message_path(task.agent_thread_id).relative_to(home).parts
+        os.close(open_readonly_file_beneath(home, parts))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        raise HostAPIError("SUBAGENT_NOT_FOUND", 404) from None
+    messages, errors = store.messages.recent_report(task.agent_thread_id, limit=100)
+    if errors:
+        raise HostAPIError("STORE_UNAVAILABLE", 503)
+    return messages
+# LLM: 原时间线nofollow尾读至多256KiB，丢弃截断首行再取末100行；消息先核线程双归属和文件安全。
 # 函数用途: 返回目标指令、真实时间线、消息和结果摘要。
 def get_subagent(context, payload, *, agent=None, store=None):
     task = _load(context, payload, agent)
     steps = []
     if task.agent_run_timeline_jsonl:
         parts = Path(task.agent_run_timeline_jsonl).relative_to(context.owner_home.home_dir).parts
-        raw = read_bytes_beneath(context.owner_home.home_dir, parts, max_bytes=262144)
-        steps = (raw or b"").decode("utf-8").splitlines()[-100:]
-    messages, errors = store.messages.recent_report(task.agent_thread_id, limit=100) if store and task.agent_thread_id else ([], [])
-    if errors:
-        raise HostAPIError("STORE_UNAVAILABLE", 503)
+        try:
+            with os.fdopen(open_readonly_file_beneath(context.owner_home.home_dir, parts), "rb") as stream:
+                size = os.fstat(stream.fileno()).st_size
+                if size > 262144:
+                    stream.seek(size - 262144)
+                raw = stream.read(262144)
+        except FileNotFoundError:
+            raw, size = b"", 0
+        lines = raw.decode("utf-8", "replace").splitlines()
+        steps = (lines[1:] if size > 262144 and lines else lines)[-100:]
+    messages = _messages(context, task, store)
     return {**_project(task), "instruction": task.goal, "steps": steps,
             "messages": [row.to_dict() for row in messages], "output_summary": task.result or task.latest_summary}
 # LLM: mutation用原canonical CAS；有副作用后异常保unknown，不把队列已写伪装未执行。

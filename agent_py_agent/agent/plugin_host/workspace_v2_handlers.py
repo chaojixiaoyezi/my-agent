@@ -19,22 +19,36 @@ from ..common.nofollow_fs import (
     open_readonly_file_beneath,
     write_bytes_atomic_beneath,
 )
+from ..conversation.workspace_context import validate_workspace_directory
+from ..path_access_policy import HOST_STATE_OWNER_DIRS
+from ..user_space.owner_resolver import OwnerIdentity
 from .authorization import workspace_directory
 from .capabilities_v2_handlers import _parts
 from .errors import HostAPIError
 
 _MAX, _GIT_MAX = 20 * 1024 * 1024, 256 * 1024
-# LLM: owner内目录以其家为上限；外部目录必须过原管理员门；从真实文件系统根逐段打开，避免父链接逃逸。
+# LLM: 使用原宿主控制目录清单及runs，按完整路径组件拒绝，不能把相似名字的普通项目一并封禁。
+# 函数用途: 拒绝把当前家目录内的运行状态当作工作区文件。
+def _forbid_internal(home, target):
+    if target.is_relative_to(home) and any(target.is_relative_to(home.joinpath(*parts))
+            for parts in (*HOST_STATE_OWNER_DIRS, ("runs",))):
+        raise HostAPIError("WORKSPACE_PATH_INVALID")
+# LLM: owner内外根均过原目录校验，内部目标另核控制目录；持有原字面路径FD，校验resolve不能放行根链接。
 # 函数用途: 验证根并在全程持有目录FD，所有异常关闭资源。
 @contextmanager
 def _directory(context, payload, parts=()):
     descriptor = -1
     try:
-        root = context.owner_home.home_dir / Path(payload["workspace_dir"]).expanduser()
+        home = context.owner_home.home_dir
+        root = home / Path(payload["workspace_dir"]).expanduser()
         if ".." in root.parts:
             raise HostAPIError("WORKSPACE_PATH_INVALID")
-        if not root.is_relative_to(context.owner_home.home_dir):
+        if root.is_relative_to(home):
+            validate_workspace_directory(root, owner_home=home, is_admin=context.identity == OwnerIdentity.local_main(),
+                                         home_root=context.owner_home.root)
+        else:
             root = workspace_directory(context, str(root))
+        _forbid_internal(home, root.joinpath(*parts))
         prefix = root.parts[1:]
         descriptor = open_directory_beneath(root.anchor, (*prefix, *parts), require_dir_fd=True)
         yield root, prefix, descriptor
@@ -51,7 +65,7 @@ def _limit(value, maximum):
     if type(value) is not int or not 1 <= value <= maximum:
         raise HostAPIError("INVALID_SCHEMA")
     return value
-# LLM: 逐项lstat不跟随链接，普通单链接文件和目录才展示，达到限额即停止。
+# LLM: 逐项先滤内部控制目录再lstat，不跟随链接，仅展示普通单链接文件和目录，达到限额即停止。
 # 函数用途: 返回查询匹配的直接子项，跳过Git内部噪声。
 def list_workspace_files(context, payload):
     parts, items = _parts(payload["relative_path"]) if payload.get("relative_path") else (), []
@@ -59,6 +73,10 @@ def list_workspace_files(context, payload):
     with _directory(context, payload, parts) as (root, _, descriptor):
         with os.scandir(descriptor) as entries:
             for entry in entries:
+                try:
+                    _forbid_internal(context.owner_home.home_dir, root.joinpath(*parts, entry.name))
+                except HostAPIError:
+                    continue
                 info = entry.stat(follow_symlinks=False)
                 if entry.name == ".git" or payload.get("query", "").casefold() not in entry.name.casefold():
                     continue
@@ -70,17 +88,19 @@ def list_workspace_files(context, payload):
                 if len(items) == limit:
                     break
         return {"workspace_dir": str(root), "relative_path": "/".join(parts), "items": items}
-# LLM: 只读普通单链接文件；实际读取至多预算+1字节，保留真实文件大小，不把预览行数当总行数。
+# LLM: 相对文件另核控制目录，只读普通单链接文件；至多读取预算+1字节，不把预览行数当总行数。
 # 函数用途: 读取一份有界字节预览。
-def _read(root, prefix, path, limit):
-    with os.fdopen(open_readonly_file_beneath(root.anchor, (*prefix, *_parts(path))), "rb") as stream:
+def _read(home, root, prefix, path, limit):
+    parts = _parts(path)
+    _forbid_internal(home, root.joinpath(*parts))
+    with os.fdopen(open_readonly_file_beneath(root.anchor, (*prefix, *parts)), "rb") as stream:
         return stream.read(limit + 1), os.fstat(stream.fileno()).st_size
-# LLM: UTF8前缀切在多字节字符中不误判binary；截断时总行数未知，媒体仅回base64不执行。
+# LLM: 经当前home的控制目录检查后预览；UTF8切在多字节中不误判binary，截断总行数未知。
 # 函数用途: 返回文本行范围或二进制预览。
 def read_workspace_file(context, payload):
     limit = _limit(payload.get("max_bytes", 262144), _MAX)
     with _directory(context, payload) as (root, prefix, _):
-        raw, size = _read(root, prefix, payload["path"], limit)
+        raw, size = _read(context.owner_home.home_dir, root, prefix, payload["path"], limit)
         truncated, raw = len(raw) > limit, raw[:limit]
         try:
             content = codecs.getincrementaldecoder("utf-8")().decode(raw, final=not truncated)
@@ -97,7 +117,7 @@ def read_workspace_file(context, payload):
         return {"path": payload["path"], "is_binary": False, "content": "".join(lines[start - 1:end]),
                 "total_lines": None if truncated else len(lines), "start_line": start, "end_line": min(end, len(lines)),
                 "size_bytes": size, "truncated": truncated}
-# LLM: 上传固定在uploads内；解码前后都限额，原子no-follow写拒绝父/叶链接，提交后故障保持unknown。
+# LLM: 上传固定在uploads且拒绝内部控制目标；解码前后都限额，原子nofollow写提交后故障保持unknown。
 # 函数用途: 保存通用模板或媒体，不按扩展名另造领域接口。
 def upload_workspace_file(context, payload):
     parts = _parts(payload.get("path", payload.get("filename", "")))
@@ -112,16 +132,17 @@ def upload_workspace_file(context, payload):
     if len(raw) > _MAX:
         raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
     with _directory(context, payload) as (root, prefix, _):
+        _forbid_internal(context.owner_home.home_dir, root.joinpath(*parts))
         try:
             write_bytes_atomic_beneath(root.anchor, (*prefix, *parts), raw)
         except OSError:
             raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
     return {"path": "/".join(parts), "size_bytes": len(raw)}
-# LLM: 下载不默默截断大文件，20MiB上限按解码后的原字节计算。
+# LLM: 下载目标经过同一控制目录门，不默默截断大文件，20MiB上限按原字节计算。
 # 函数用途: 下载完整通用文件。
 def download_workspace_file(context, payload):
     with _directory(context, payload) as (root, prefix, _):
-        raw, size = _read(root, prefix, payload["path"], _MAX)
+        raw, size = _read(context.owner_home.home_dir, root, prefix, payload["path"], _MAX)
         if len(raw) > _MAX:
             raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
         return {"path": payload["path"], "data_base64": base64.b64encode(raw).decode(), "size_bytes": size}
@@ -154,11 +175,12 @@ def _git(descriptor, arguments):
                 process.kill()
                 process.wait()
     return bytes(output[:_GIT_MAX]).decode("utf-8", "replace"), len(output) > _GIT_MAX
-# LLM: NUL分隔保留换行/空格文件名；路径字面匹配且前置nofollow，Git状态不足时不宣称clean。
+# LLM: Git启动前核目标控制目录和nofollow；NUL分隔保留换行/空格文件名，状态不足时不宣称clean。
 # 函数用途: 返回Git分支、变更清单和有界diff；workspace.git.inspect可由注册层映射同一函数。
 def inspect_workspace_git(context, payload):
     path = "/".join(_parts(payload["path"])) if payload.get("path") else ""
     with _directory(context, payload) as (root, prefix, descriptor):
+        _forbid_internal(context.owner_home.home_dir, root / path)
         # 外置gitdir/commondir和对象库链接不在单项目文件根内，保守拒绝而不扩大目录授权。
         if not stat.S_ISDIR(_stat(".git", dir_fd=descriptor, follow_symlinks=False).st_mode):
             raise HostAPIError("WORKSPACE_GIT_EXTERNAL_METADATA_DENIED", 403)
