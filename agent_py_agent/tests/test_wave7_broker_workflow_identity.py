@@ -860,6 +860,13 @@ def test_identity_local_name_does_not_cross_newline_when_empty(tmp_path):
     ))
     assert cross_tier_assets['skills'] == ['SKILL', 'SKILL.md', 'methods/SKILL.md']
     assert len(set(cross_tier_assets['skills'])) == 3
+    cascade_assets = package_assets(tuple(
+        CapabilityFile(p, str(i) * 64) for i, p in enumerate((
+            'SKILL.md', 'SKILL/SKILL.md', 'SKILL.md/SKILL.md',
+            'SKILL.md/SKILL.md/SKILL.md', 'SKILL.md/SKILL.md/SKILL.md/SKILL.md',
+        ))
+    ))
+    assert len(set(cascade_assets['skills'])) == 5
 
 
 # LLM: v2实例调用user_space.identity.resolve不应因缺失identity_credentials抛异常，且无read能力时应拒绝403。

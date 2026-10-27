@@ -35,10 +35,13 @@ def package_assets(members):
         unique = list({canon: (canon, short, full) for canon, short, full in rows}.values())
         tiers = [(short, full, canon) for canon, short, full in unique]
         levels = [0] * len(tiers)
-        for _ in range(3):
+        while True:
             chosen = [tiers[idx][levels[idx]] for idx in range(len(tiers))]
             counts = {name: chosen.count(name) for name in set(chosen)}
-            levels = [min(2, lvl + (1 if counts[chosen[idx]] > 1 else 0)) for idx, lvl in enumerate(levels)]
+            nxt = [min(2, lvl + (1 if counts[chosen[idx]] > 1 else 0)) for idx, lvl in enumerate(levels)]
+            if nxt == levels:
+                break
+            levels = nxt
         result[key] = sorted(tiers[idx][levels[idx]] for idx in range(len(tiers)))
     return result
 
