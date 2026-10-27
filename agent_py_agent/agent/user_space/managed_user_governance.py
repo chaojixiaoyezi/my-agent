@@ -888,6 +888,17 @@ def _managed_asset_payload(home, kind, asset_id):
     raise ValueError("unsupported asset kind")
 
 
+# LLM: 非owner稳定来源不得剥前缀变成私人目录；只解析裸名/owner引用，其它版本引用保持原样。
+# 函数用途: 从规范监控引用中识别真正需要复制的管理员私人技能。
+def _managed_monitor_owner_skill_name(reference):
+    from ..assets import canonical_skill_name
+
+    stable_id = reference["stable_id"]
+    if reference.get("kind") == "capability_package" or ":" in stable_id and not stable_id.startswith("owner:"):
+        return None
+    return canonical_skill_name(stable_id)
+
+
 # LLM: 依赖只来自原结构化refs/steps，先收全图再写目标；循环、缺依赖、未重绑凭据均在安装前失败。
 # 类用途: 构建有界管理员资产闭包，不运行任何资产。
 class _ManagedAssetClosure:
@@ -902,7 +913,7 @@ class _ManagedAssetClosure:
         self.plan: list[tuple[str, str, dict]] = []
 
     # LLM: 限64节点防畸形图；递归深度受节点数限制，refs只声明依赖不授执行权。
-    # 函数用途: 后序收集工作流/脚本/技能依赖，并验证可安装值。
+    # 函数用途: 后序收集工作流/脚本/技能及监控依赖，并验证可安装值。
     def collect(self, kind: str, asset_id: str, payload: dict | None = None):
         from ..assets import canonical_skill_name, safe_asset_id
 
@@ -930,9 +941,33 @@ class _ManagedAssetClosure:
                     self.collect("skill", canonical_skill_name(child))
             for child in refs.get("workflows", []):
                 self.collect("workflow", child)
+        elif kind == "monitor":
+            self._monitor_dependencies(value)
         self.visiting.remove(key)
         self.seen.add(key)
         self.plan.append((kind, asset_id, value))
+
+    # LLM: 沿scheduler版本引用合同读取stable_id，核冻结正文hash；builtin/包不降级成本地技能，统一闭包去重/限额。
+    # 函数用途: 在安装任何节点前补齐监控用到的owner技能和脚本。
+    def _monitor_dependencies(self, value):
+        from hashlib import sha256
+
+        from ..scheduler.repository import _normalize_skill_refs
+
+        for reference in _normalize_skill_refs(value.get("skill_refs") or []):
+            identifier = _managed_monitor_owner_skill_name(reference)
+            if identifier is None:
+                continue
+            self.collect("skill", identifier)
+            payload = next(row for kind, name, row in self.plan if kind == "skill" and name == identifier)
+            raw = payload["files"]["SKILL.md"]
+            if sha256(raw.encode() if isinstance(raw, str) else raw).hexdigest() != reference["content_sha256"]:
+                raise HostAPIError("ASSET_SKILL_REFERENCE_STALE", 409)
+        for rule in value.get("rules") or ():
+            tool = rule.get("tool") or {}
+            child = (tool.get("arguments") or {}).get("script_id")
+            if tool.get("name") == "scripts" and child:
+                self.collect("script", child)
 
 
 # LLM: 查询原资产是否存在，不使用传输值声称的workspace/root；输入ID已严格验证。
@@ -985,7 +1020,7 @@ def _provision_managed_asset(root, home, kind, asset_id, auto_enable, strategy, 
             "enabled": auto_enable, "installed": installed, "delivery_provenance": provenance, "skipped": len(skipped)}
 
 
-# LLM: 同一次原Store提交同步正式enabled与metadata；工作流定义层同值，不留下先启用后停用窗口。
+# LLM: 同一次原Store提交同步正式enabled与metadata；非脚本节点传递冻结映射，工作流定义层同值。
 # 函数用途: 将一个闭包节点安全安装到受管用户原资产仓库。
 def _install_managed_asset(home, source, kind, asset_id, payload, mapping, metadata):
     from ..assets.descriptor import AssetDescriptor
@@ -993,7 +1028,7 @@ def _install_managed_asset(home, source, kind, asset_id, payload, mapping, metad
     from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
 
     if kind not in {"script", "workflow"}:
-        return _install_other_managed_asset(home, source, kind, asset_id, payload, metadata)
+        return _install_other_managed_asset(home, source, kind, asset_id, payload, metadata, mapping)
     descriptor = copy.deepcopy(payload.get("descriptor", payload))
     descriptor = {key: value for key, value in descriptor.items() if key in AssetDescriptor.__dataclass_fields__ or key == "schema_version"}
     descriptor.update(id=asset_id, owner_id=home.owner_id, scope_layer="owner", source_scope="owner", workspace_root="",
@@ -1021,9 +1056,9 @@ def _install_managed_asset(home, source, kind, asset_id, payload, mapping, metad
     return store.save_workflow(definition, expected_revision=old.descriptor.revision if old else 0)
 
 
-# LLM: 技能/数据源/授权/监控分别使用原存储，默认不激活；不接受闭包传来的任意写路径。
+# LLM: 技能先整体验证并准备身份/初始开关；监控消费已冻结映射，其它资产仍走原存储和身份边界。
 # 函数用途: 安装非脚本工作流的受管资产及来源记录。
-def _install_other_managed_asset(home, source, kind, asset_id, payload, metadata):
+def _install_other_managed_asset(home, source, kind, asset_id, payload, metadata, mapping):
     from ..assets import safe_asset_id
     from ..assets.datasource_store import DatasourceStore
     from .resource_grants import set_resource_grant
@@ -1031,17 +1066,15 @@ def _install_other_managed_asset(home, source, kind, asset_id, payload, metadata
     safe_asset_id(asset_id)
     control = _GovernanceControl(home.root, home.identity.owner_id)
     if kind == "skill":
-        for relative, data in payload["files"].items():
-            parts = Path(relative).parts
-            if not parts or Path(relative).is_absolute() or any(part in {".", ".."} for part in parts):
-                raise ValueError("unsafe skill resource path")
-            write_bytes_atomic_beneath(home.root, ("owners", "local", home.identity.owner_id, "skills", asset_id, *parts),
-                                       data.encode() if isinstance(data, str) else data)
+        files = _prepared_managed_skill_files(payload, asset_id, metadata)
+        for relative, data in files.items():
+            write_bytes_atomic_beneath(home.root, ("owners", "local", home.identity.owner_id, "skills", asset_id,
+                                                  *Path(relative).parts), data)
         control.write(("provisioned_assets", "skill-" + asset_id + ".json"), metadata,
                       ("data", "provisioned_assets", "skill-" + asset_id + ".json"))
         return _toggle_managed_asset(home, "skill", asset_id, metadata["enabled"])
     if kind == "monitor":
-        return _install_managed_monitor(home, asset_id, payload, metadata)
+        return _install_managed_monitor(home, asset_id, payload, metadata, mapping)
     if kind == "datasource":
         spec = copy.deepcopy(payload)
         if spec.get("kind") == "sqlite" and spec.get("database_path") not in {None, "", ":memory:"}:
@@ -1059,23 +1092,87 @@ def _install_other_managed_asset(home, source, kind, asset_id, payload, metadata
     return result
 
 
-# LLM: 复用原scheduler构造、验证和单事务写入；首次发表前同时设置enabled/status，不先激活再暂停。
+# LLM: 所有资源路径及侧元数据先验证，未完成准备不得写任何成员；侧文件先于正文发表，原输入不修改。
+# 函数用途: 准备准确技能身份、初始开关和来源，复用原投递frontmatter重命名codec。
+def _prepared_managed_skill_files(payload, asset_id, metadata):
+    from ..assets.script_store_support import _received_skill_body
+    from ..assets.skill_adapter import _descriptor
+    from ..capability.skills import split_skill_frontmatter
+
+    files = {}
+    for relative, data in payload["files"].items():
+        path = Path(relative)
+        if not path.parts or path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+            raise ValueError("unsafe skill resource path")
+        name = str(path)
+        if name in files or not isinstance(data, (str, bytes)):
+            raise ValueError("invalid or duplicated skill resource")
+        files[name] = data.encode("utf-8") if isinstance(data, str) else data
+    meta = json.loads(files.get("skill_meta.json", b"{}"))
+    if not isinstance(meta, dict) or not isinstance(meta.get("metadata", {}), dict):
+        raise ValueError("invalid skill metadata")
+    meta.update(id=asset_id, name=asset_id, enabled=bool(metadata["enabled"]),
+                metadata={**meta.get("metadata", {}), **metadata})
+    body = files.pop("SKILL.md", None)
+    if body is not None and split_skill_frontmatter(body.decode("utf-8"))[0].get("name") != asset_id:
+        body = _received_skill_body(body, asset_id, bool(metadata["enabled"])).encode("utf-8")
+    header = split_skill_frontmatter(body.decode("utf-8"))[0] if body is not None else {}
+    _descriptor(Path(asset_id), {**header, **meta}, "")
+    files.pop("skill_meta.json", None)
+    return {"skill_meta.json": json.dumps(meta, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+            **files, **({"SKILL.md": body} if body is not None else {})}
+
+
+# LLM: 技能引用保留原类型/前缀，改名后按安装正文重钉hash；builtin/包原样保留，脚本仅改scripts规则。
+# 函数用途: 将监控中的技能及脚本依赖重绑到本次安装的目标身份。
+def _mapped_managed_monitor_refs(home, payload, mapping):
+    from hashlib import sha256
+
+    from ..scheduler.repository import _normalize_skill_refs
+
+    refs = []
+    for reference in _normalize_skill_refs(payload.get("skill_refs") or []):
+        ref = reference["stable_id"]
+        name = _managed_monitor_owner_skill_name(reference)
+        if name is None:
+            refs.append(reference)
+            continue
+        target = mapping.get(("skill", name), name)
+        raw = read_bytes_beneath(home.root, ("owners", "local", home.identity.owner_id,
+            "skills", target, "SKILL.md"), max_bytes=2097152)
+        if raw is None:
+            raise HostAPIError("ASSET_NOT_FOUND", 404)
+        refs.append({**reference, "stable_id": "owner:" + target if ref.startswith("owner:") else target,
+                     "content_sha256": sha256(raw).hexdigest()})
+    rules = copy.deepcopy(payload.get("rules"))
+    for rule in rules or ():
+        tool = rule.get("tool") or {}
+        arguments = tool.get("arguments") or {}
+        identifier = arguments.get("script_id")
+        if tool.get("name") == "scripts" and identifier:
+            arguments["script_id"] = mapping.get(("script", identifier), identifier)
+    return refs, rules
+
+
+# LLM: 配发显式传映射后重绑依赖；原审核省略映射时保留冻结引用/旧签名，复用scheduler事务和初始enabled/status。
 # 函数用途: 将管理员监控定义直接安装到目标自己的调度账本。
-def _install_managed_monitor(home, asset_id, payload, metadata):
+def _install_managed_monitor(home, asset_id, payload, metadata, mapping=None):
     import time
 
     from ..scheduler.event_sources import sync_event_sources
     from ..scheduler.monitor_state import next_alias
     from ..scheduler.repository import SchedulerJobCreateRequest, _new_job_payload
 
+    skill_refs, rules = (_mapped_managed_monitor_refs(home, payload, mapping) if mapping is not None
+                        else (payload.get("skill_refs", ()), payload.get("rules")))
     conversation = _managed_conversations(home, initialize=True)
     thread = conversation.threads.create(owner_id=home.owner_id, owner_home=str(home.home_dir),
                                          workspace_root=str(home.workspace_dir), cwd=str(home.workspace_dir))
     repo = _managed_scheduler(home)
     request = SchedulerJobCreateRequest(name=payload["name"], prompt=payload["prompt"], thread_id=thread.thread_id,
-        schedule=payload["schedule"], source_request_id="admin-provision:" + asset_id, skill_refs=payload.get("skill_refs", ()),
+        schedule=payload["schedule"], source_request_id="admin-provision:" + asset_id, skill_refs=skill_refs,
         execution={"mode": "followup", "model_policy": "inherit"}, delivery={"mode": "local"},
-        policy=payload.get("policy"), precheck=payload.get("precheck"), rules=payload.get("rules"))
+        policy=payload.get("policy"), precheck=payload.get("precheck"), rules=rules)
     job = sync_event_sources(_new_job_payload(owner=repo.owner, request=request, now=time.time()))
     job.update(job_id=asset_id, enabled=metadata["enabled"], status="active" if metadata["enabled"] else "paused",
                delivery_provenance=metadata["delivery_provenance"])

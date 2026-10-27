@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 
 import pytest
 
@@ -680,3 +681,174 @@ def test_r2b_queued_bot_cannot_expand_the_host_issued_tool_names(wired_host):
     inputs.request["metadata"]["plugin_execution_policy"]["tool_names"].append("write_file")
     with pytest.raises(HostAPIError, match="BOT_TOOL_DENIED"):
         _gateway_run_params(inputs)
+
+
+# LLM: 消息和claim都走真实存储，时间由测试注入，不依赖线程updated_at或伪造槽位完成计数。
+# 函数用途: 回归长前台执行/排队期间ensure和submit不封闭原代，final完成时间推进idle基准。
+@pytest.mark.parametrize("claimed", [False, True])
+def test_holistic_inflight_foreground_keeps_generation_and_completion_time(bot, claimed):
+    first = bot.manager.ensure({}, "holistic_ensure_0001")
+    tid = first["active_thread_id"]
+    # 没有claim的等待消息只证明刚进入活动窗口；超窗长执行由真实恢复专属claim覆盖，不能把孤立日志当永久运行。
+    if not claimed:
+        bot.now += 1900
+    bot.store.messages.append({"thread_id": tid, "role": "user", "content": "Long running question",
+        "now": bot.now, "metadata": {"conversation_request_id": "holistic-request"}})
+    claim = bot.store.claims.acquire({"thread_id": tid, "task_id": "gateway:holistic-request",
+        "reason": "gateway_foreground_turn", "now": bot.now, "lease_seconds": 60,
+        "recover_same_task_only": True}) if claimed else None
+    if claimed:
+        bot.now += 1900
+    current = bot.manager.ensure({}, "holistic_ensure_0002")
+    assert not current["rolled_over"] and current["active_thread_id"] == tid
+    assert bot.store.threads.require(tid).metadata["foreground_closed"] is False
+    submitted = bot.manager.prepare_submit({"text": "Follow-up", "auto_rollover": True}, "holistic_submit_0001")
+    assert submitted["thread_id"] == tid and not submitted["rolled_over"]
+    bot.now += 1900
+    bot.store.messages.append({"thread_id": tid, "role": "assistant", "content": "Done", "now": bot.now,
+        "metadata": {"phase": "final", "conversation_request_id": "holistic-request"}})
+    if claim:
+        bot.store.claims.finish({"thread_id": tid, "claim_id": claim["claim_id"], "status": "finished", "now": bot.now})
+    slot = bot.manager.read(("data", "bot_sessions", "slots.json"))["slots"]["query_readonly"]
+    bot.manager.refresh_metrics(slot)
+    assert slot["foreground_turn_in_flight"] is False
+    assert slot["last_foreground_activity_at"] == bot.now and bot.manager.rollover_reason(slot) is None
+    bot.now += 1801
+    assert bot.manager.rollover_reason(slot) == "idle_timeout"
+
+
+# LLM: 即使尚未产生用户日志或final已写但租约未结算，原宿主前台claim仍阻止自动分卷；后台claim不阻止。
+# 函数用途: 核真实执行权优先于idle/轮数/字节阈值，且不误伤后台责任。
+@pytest.mark.parametrize("reason,expected", [("gateway_foreground_turn", False), ("goal_continue", True)])
+@pytest.mark.parametrize("trigger", ["idle", "turns", "bytes"])
+def test_holistic_active_foreground_claim_blocks_all_rollover_thresholds(bot, reason, expected, trigger):
+    tid = bot.manager.ensure({}, "holistic_claim_ensure")["active_thread_id"]
+    bot.store.claims.acquire({"thread_id": tid, "task_id": "gateway:claim-only", "reason": reason,
+        "now": bot.now, "lease_seconds": 5000})
+    state = bot.manager.read(("data", "bot_sessions", "slots.json"))
+    slot = state["slots"]["query_readonly"]
+    if trigger == "turns":
+        slot["completed_foreground_turns"] = 30
+    elif trigger == "bytes":
+        slot["visible_text_bytes"] = 32768
+    else:
+        slot["last_foreground_activity_at"] = bot.now - 1801
+    result = bot.manager.rollover_reason(slot)
+    assert (result is not None) is expected
+
+
+# LLM: 终态claim会被后续后台片正常替换；不依赖只保留一代的previous_claim，也不允许孤立请求ID永久阻挡分卷。
+# 函数用途: 回归前台无final失败/取消后后台接手及从未执行的过窗消息。
+@pytest.mark.parametrize("terminal", [None, "failed", "cancelled"])
+def test_holistic_orphaned_foreground_message_does_not_block_forever(bot, terminal):
+    tid = bot.manager.ensure({}, "holistic_orphan_start")["active_thread_id"]
+    bot.store.messages.append({"thread_id": tid, "role": "user", "content": "Old input", "now": bot.now,
+        "metadata": {"conversation_request_id": "abandoned"}})
+    if terminal:
+        claim = bot.store.claims.acquire({"thread_id": tid, "task_id": "gateway:abandoned",
+            "reason": "gateway_foreground_turn", "now": bot.now, "recover_same_task_only": True})
+        bot.store.claims.finish({"thread_id": tid, "claim_id": claim["claim_id"], "status": terminal, "now": bot.now})
+        for index in range(2):
+            background = bot.store.claims.acquire({"thread_id": tid, "task_id": f"task-bg-{index}",
+                "reason": "goal_continue", "now": bot.now})
+            bot.store.claims.finish({"thread_id": tid, "claim_id": background["claim_id"], "status": "finished", "now": bot.now})
+    bot.now += 1801
+    current = bot.manager.ensure({}, "holistic_orphan_check")
+    assert current["rolled_over"] and current["rollover_reason"] == "idle_timeout"
+    assert current["previous_thread_id"] == tid
+
+
+# LLM: barrier停在检查已完成但尚未归档处，探测原claim锁并实际竞争领取，不靠sleep制造“同时执行”。
+# 函数用途: 确认ensure/submit自动归档和原claim领取共用原短事务锁，不在检查之后插入运行claim。
+@pytest.mark.parametrize("operation", ["ensure", "submit"])
+def test_holistic_rollover_serializes_with_real_foreground_claim(bot, monkeypatch, operation):
+    from agent_py_agent.agent.gateway_parts.io import try_locked_file_transition
+
+    tid = bot.manager.ensure({}, "holistic_race_initial")["active_thread_id"]
+    bot.now += 1801
+    checked, proceed, entering = Event(), Event(), Event()
+    original = bot.manager.rollover_reason
+
+    # LLM: 只暂停判定返回点，判定和真正归档/claim写入仍走原实现。
+    # 函数用途: 为主线程在检查和归档之间安排一次确定性交错。
+    def pause(slot):
+        reason = original(slot)
+        checked.set()
+        assert proceed.wait(5)
+        return reason
+
+    # LLM: 与Gateway同一ClaimStore和同一reason，事件只标记进入领取，不伪造运行状态。
+    # 函数用途: 实际领取原线程前台claim并观测是否已经归档。
+    def acquire():
+        entering.set()
+        claim = bot.store.claims.acquire({"thread_id": tid, "task_id": "gateway:race",
+            "reason": "gateway_foreground_turn", "now": bot.now, "lease_seconds": 5000})
+        return claim, bot.store.threads.require(tid).metadata["foreground_closed"]
+
+    monkeypatch.setattr(bot.manager, "rollover_reason", pause)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(bot.manager.ensure, {}, "holistic_race_ensure") if operation == "ensure" else pool.submit(
+            bot.manager.prepare_submit, {"text": "New input", "auto_rollover": True}, "holistic_race_submit")
+        try:
+            assert checked.wait(5)
+            with try_locked_file_transition(bot.store.storage.background_claim_path(tid)) as available:
+                claim_lock_was_free = available
+            contender = pool.submit(acquire)
+            assert entering.wait(5)
+            acquired_before = contender.result(timeout=5) if claim_lock_was_free else None
+        finally:
+            proceed.set()
+        result = future.result(timeout=5)
+        claim, closed_when_acquired = contender.result(timeout=5)
+    assert claim is not None
+    assert not (result["rolled_over"] and acquired_before and not acquired_before[1])
+    assert claim_lock_was_free is False and closed_when_acquired is True
+
+
+# LLM: 真实journal已发表而archive尚未开始时崩溃，再领取真实恢复专属前台claim；重试不得绕过正常路径保护。
+# 函数用途: 回归自动轮换恢复先延后，再在前台终态后只完成原冻结代次，不因新增final回滚到旧代。
+@pytest.mark.parametrize("operation", ["ensure", "submit"])
+def test_holistic_pending_automatic_recovery_defers_for_foreground(bot, monkeypatch, operation):
+    tid = bot.manager.ensure({}, "holistic_pending_init")["active_thread_id"]
+    bot.now += 1801
+    original_write, crashed = bot.manager.write, False
+
+    # LLM: 先走原atomic写，再抛一次异常，确保重试读取的确是磁盘pending而非内存伪造。
+    # 函数用途: 注入pending发表和archive之间的进程中断。
+    def crash_after_pending(parts, value, admission):
+        nonlocal crashed
+        result = original_write(parts, value, admission)
+        if not crashed and value.get("pending"):
+            crashed = True
+            raise OSError("crash after publishing pending")
+        return result
+
+    # LLM: 重试保持相同动作、payload和key；不以新请求改绑原事务。
+    # 函数用途: 调用原ensure或submit的同一自动轮换意图。
+    def invoke():
+        if operation == "ensure":
+            return bot.manager.ensure({}, "holistic_pending_retry")
+        return bot.manager.prepare_submit({"text": "Next input", "auto_rollover": True}, "holistic_pending_retry")
+
+    monkeypatch.setattr(bot.manager, "write", crash_after_pending)
+    with pytest.raises(OSError, match="publishing pending"):
+        invoke()
+    pending = bot.manager.read(("data", "bot_sessions", "slots.json"))["pending"]
+    target = pending["thread"]["thread_id"]
+    claim = bot.store.claims.acquire({"thread_id": tid, "task_id": "gateway:pending-foreground",
+        "reason": "gateway_foreground_turn", "recover_same_task_only": True, "lease_seconds": 60, "now": bot.now})
+    bot.now += 4000
+    with pytest.raises(HostAPIError) as error:
+        invoke()
+    assert error.value.code == "BOT_FOREGROUND_TURN_BUSY"
+    assert bot.manager.read(("data", "bot_sessions", "slots.json"))["pending"]["thread"]["thread_id"] == target
+    assert bot.store.threads.require(tid).metadata["foreground_closed"] is False
+    assert bot.store.threads.load(target) is None
+    assert bot.store.claims.load_report(tid)[0]["claim_id"] == claim["claim_id"]
+    bot.store.messages.append({"thread_id": tid, "role": "assistant", "content": "Complete", "now": bot.now,
+        "metadata": {"phase": "final", "conversation_request_id": "pending-foreground"}})
+    bot.store.claims.finish({"thread_id": tid, "claim_id": claim["claim_id"], "status": "finished", "now": bot.now})
+    result = invoke()
+    assert result["active_thread_id"] == target and result["generation"] == 2 and result["rolled_over"]
+    assert invoke() == {**result, "idempotent_replay": True} if operation == "submit" else invoke() == result
+    assert len(bot.store.threads.list()) == 2

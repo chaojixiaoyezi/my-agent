@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import replace
 
 from ..common.nofollow_fs import (
@@ -29,6 +31,18 @@ _PREFIX = ("data", "bot_sessions")
 _SLOTS = (*_PREFIX, "slots.json")
 _MAX_STATE = 2 * 1024 * 1024
 TAIL_BYTES = 65536
+
+
+# LLM: bool/NaN/Infinity不构成前台活动时间；数字仅用于度量，不建立运行身份。
+# 函数用途: 归一可用的非负消息时间，防止污染idle基准。
+def _foreground_timestamp(value):
+    if type(value) not in (int, float):
+        return None
+    try:
+        stamp = float(value)
+    except OverflowError:
+        return None
+    return stamp if math.isfinite(stamp) and stamp >= 0 else None
 
 
 # LLM: 摘要只用于内部索引和确定性ID，不是授权证明；输入必须来自宿主冻结参数。
@@ -378,7 +392,8 @@ class BotSessionManager(BotSessionStorage):
         slot = {"bot_mode": mode, "bot_kind": mode, "active_thread_id": tid, "generation": generation,
                 "slot_revision": revision, "slot_id": slot_id, "created_at": stamp,
                 "last_foreground_activity_at": stamp, "completed_foreground_turns": 0,
-                "visible_text_bytes": 0, "metrics_offset": 0, "completed_turn_ids": [], "first_question": ""}
+                "visible_text_bytes": 0, "metrics_offset": 0, "completed_turn_ids": [], "first_question": "",
+                "foreground_turn_in_flight": False}
         return thread, slot
 
     # LLM: CAS在journal发表前验证；旧任务不迁移，新线程确定性生成；摘要只用首问和告警，不持锁调用模型。
@@ -398,10 +413,12 @@ class BotSessionManager(BotSessionStorage):
         self.recover(state, admission)
         return old
 
-    # LLM: 明确使用前台活动时间，后台updated_at和Compact不会延长会话；阈值精确按严格idle及累计正文判定。
-    # 函数用途: 判定槽位是否需要自动轮换。
+    # LLM: 原前台执行/排队事实优先于阈值；有界消息扫描未追平时不归档，后台updated_at和Compact仍不延长idle。
+    # 函数用途: 只在没有运行中前台回合时判定自动轮换。
     def rollover_reason(self, slot):
         self.refresh_metrics(slot)
+        if not slot.get("metrics_caught_up", True) or self._foreground_turn_active(slot):
+            return None
         if self.clock() - slot["last_foreground_activity_at"] > 1800:
             return "idle_timeout"
         if slot["completed_foreground_turns"] >= 30:
@@ -410,11 +427,65 @@ class BotSessionManager(BotSessionStorage):
             return "max_text_bytes"
         return None
 
-    # LLM: 增量游标避免每次页面打开重扫历史；工具原文不计正文，后台/派活/定时答复不计前台轮数。
-    # 函数用途: 从原消息日志追加区更新前台计数，达到阈值即可停止扫描。
+    # LLM: 自动检查/归档共持原ClaimStore领取/续约/终态JSON锁，不创建第二把运行锁；只包文件事务，绝不跑模型。
+    # 函数用途: 阻止前台claim在“检查结束、原代归档之前”的间隙取得运行权。
+    def _foreground_transition(self, slot):
+        return (locked_file_transition(self.store.storage.background_claim_path(slot["active_thread_id"]))
+                if slot else nullcontext())
+
+    # LLM: 原车道登记和同线程Gateway claim是运行事实，不释放/续约；坏claim不当空。无ID历史线索仅限既有idle窗口。
+    # 函数用途: 核验活跃前台或尚未完成的消息，精确终态可清除同请求的在途投影。
+    def _foreground_turn_active(self, slot):
+        from .run_claim import user_input_turn_on_lane
+
+        tid = slot["active_thread_id"]
+        if user_input_turn_on_lane(self.store, tid):
+            return True
+        claim, error = self.store.claims.load_report(tid)
+        if error or claim and claim.get("thread_id") != tid:
+            raise HostAPIError("STORE_UNAVAILABLE", 503)
+        if claim.get("reason") == "gateway_foreground_turn":
+            if claim.get("status") == "running" and (claim.get("recover_same_task_only") is True
+                    or (_foreground_timestamp(claim.get("expires_at")) or 0) > self.clock()):
+                return True
+            request_id = slot.get("foreground_request_id")
+            if (request_id and claim.get("task_id") == "gateway:" + request_id
+                    and claim.get("status") in {"finished", "failed", "cancelled"}):
+                slot["foreground_turn_in_flight"] = False
+        if not slot.get("foreground_turn_in_flight"):
+            return False
+        started = _foreground_timestamp(slot.get("foreground_turn_started_at"))
+        active = started is not None and 0 <= self.clock() - started <= 1800
+        if not active:
+            slot["foreground_turn_in_flight"] = False
+        return active
+
+    # LLM: 用户与final投影前台状态，final时间单调推进；既有轮数去重和正文度量不变，后台先由调用者剔除。
+    # 函数用途: 从一个可见前台消息更新在途标记、完成时间和轮数。
+    def _foreground_message_metrics(self, slot, entry, visible):
+        if visible[0] == "user":
+            slot["foreground_turn_in_flight"] = True
+            slot["foreground_turn_started_at"] = _foreground_timestamp(entry.created_at)
+            slot["foreground_request_id"] = str(entry.metadata.get("conversation_request_id")
+                or entry.metadata.get("request_id") or entry.metadata.get("turn_id") or "")
+        if visible[:2] != ("assistant", "final"):
+            return
+        slot["foreground_turn_in_flight"] = False
+        stamp = _foreground_timestamp(entry.created_at)
+        if stamp is not None:
+            slot["last_foreground_activity_at"] = max(float(slot.get("last_foreground_activity_at") or 0), stamp)
+        turn = entry.metadata.get("turn_id") or entry.metadata.get("conversation_request_id") or entry.message_id
+        if turn not in slot["completed_turn_ids"]:
+            slot["completed_turn_ids"].append(turn)
+            slot["completed_foreground_turns"] += 1
+
+    # LLM: 增量游标及256行预算保持有界；过阈值后仍读完本批，以免错过后面的user/final；不把后台当前台。
+    # 函数用途: 从原日志追加区更新计数及在途状态，报告本次是否追平。
     def refresh_metrics(self, slot):
         from ..plugin_host.history import HISTORY_RECORD_MAX_BYTES, _entry, _open, _visible_content
 
+        slot.setdefault("foreground_turn_in_flight", False)
+        slot["metrics_caught_up"] = True
         try:
             handle = _open(self.store, slot["active_thread_id"])
         except FileNotFoundError:
@@ -438,12 +509,8 @@ class BotSessionManager(BotSessionStorage):
                 slot["visible_text_bytes"] += len(visible[2].encode())
                 if visible[0] == "user" and not slot["first_question"]:
                     slot["first_question"] = visible[2][:120]
-                turn = entry.metadata.get("turn_id") or entry.metadata.get("conversation_request_id") or entry.message_id
-                if visible[:2] == ("assistant", "final") and turn not in slot["completed_turn_ids"]:
-                    slot["completed_turn_ids"].append(turn)
-                    slot["completed_foreground_turns"] += 1
-                if slot["visible_text_bytes"] >= 32768 or slot["completed_foreground_turns"] >= 30:
-                    break
+                self._foreground_message_metrics(slot, entry, visible)
+            slot["metrics_caught_up"] = handle.tell() >= os.fstat(handle.fileno()).st_size
 
     # LLM: 回执只给槽位和公开消息；不公开home、原工具正文或owner私有元数据。
     # 函数用途: 生成页面当前代描述和非打断轮换引用。
@@ -458,12 +525,13 @@ class BotSessionManager(BotSessionStorage):
     def ensure(self, payload, key):
         mode = normalize_bot_mode(payload.get("bot_mode"), payload.get("bot_kind"))
 
-        # LLM: 仅在短槽位事务内执行，threshold检查不读thread.updated_at。
+        # LLM: 原claim短门覆盖阈值检查和切代，不能在两者之间领取前台运行权；不读thread.updated_at。
         # 函数用途: 检查当前代、必要时分卷，并更新前台访问时间。
         def effect(state, admission):
             slot = state["slots"].get(mode)
-            reason = self.rollover_reason(slot) if slot else None
-            old = self.rotate(state, mode, admission, reason) if not slot or reason else None
+            with self._foreground_transition(slot):
+                reason = self.rollover_reason(slot) if slot else None
+                old = self.rotate(state, mode, admission, reason) if not slot or reason else None
             slot = state["slots"][mode]
             slot["last_foreground_activity_at"] = self.clock()
             return self.descriptor(slot, old, reason)
@@ -492,7 +560,7 @@ class BotSessionManager(BotSessionStorage):
     def submit(self, payload, key, submitter, *, report_replay=False):
         mode = normalize_bot_mode(payload.get("bot_mode"), payload.get("bot_kind"))
 
-        # LLM: 短门中完成模式/CAS/阈值检查及幂等入队；消息数据不能覆盖thread的宿主管理字段。
+        # LLM: 原claim短门覆盖阈值/CAS及切代，入队在门外；消息数据不能覆盖thread宿主管理字段。
         # 函数用途: 核当前代、记录首问和告警引用，并提交绑定线程的输入。
         def effect(state, admission):
             slot = state["slots"].get(mode)
@@ -506,14 +574,15 @@ class BotSessionManager(BotSessionStorage):
                 if not payload.get("auto_rollover"):
                     raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
             expected = payload.get("expected_generation")
-            reason = self.rollover_reason(slot)
-            if expected is not None and expected > slot["generation"]:
-                raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-            if expected is not None and expected != slot["generation"] and not payload.get("auto_rollover"):
-                raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-            if reason and not payload.get("auto_rollover"):
-                raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
-            old = self.rotate(state, mode, admission, reason) if reason else None
+            with self._foreground_transition(slot):
+                reason = self.rollover_reason(slot)
+                if expected is not None and expected > slot["generation"]:
+                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                if expected is not None and expected != slot["generation"] and not payload.get("auto_rollover"):
+                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                if reason and not payload.get("auto_rollover"):
+                    raise HostAPIError("BOT_SESSION_ROLLED_OVER", 409)
+                old = self.rotate(state, mode, admission, reason) if reason else None
             slot = state["slots"][mode]
             slot["last_foreground_activity_at"] = self.clock()
             slot["first_question"] = slot["first_question"] or payload["text"][:120]
