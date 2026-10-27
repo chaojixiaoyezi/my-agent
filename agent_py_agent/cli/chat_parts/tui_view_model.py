@@ -384,8 +384,8 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             if block.metadata.get("foreground_gateway_request_id") != request_id
         }
 
-    # LLM: 本片final/计时合为相邻展示单元，再复用原created_seq槽位，不能隔着其它回合，不改journal。
-    # 函数用途: 实时客户端漏收较早过程后，补全快照时将同一工作片重新放回原顺序，而不是追加在 final 后。
+    # LLM: 原过程重排只交换非计时槽位，计时不能占用或拖走final锚点；计时另沿renderer全序移动，不改journal。
+    # 函数用途: 补齐同片历史过程，再只调整完成计时的相对位置，保持无关块显示顺序。
     def _handle_history_blocks_reordered(self, event: TuiEvent) -> None:
         ids = event.payload.get("block_ids")
         final_id = event.payload.get("final_block_id")
@@ -402,18 +402,30 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         selected = {block.block_id: block for block in self.stable_blocks if block.block_id in id_set}
         if len(selected) != len(ids):
             return
-        ordered = iter(selected[key] for key in ids)
+        ordered = iter(selected[key] for key in ids if key != timing_id)
         self.stable_blocks = [
-            replace(next(ordered), created_seq=block.created_seq) if block.block_id in selected else block
+            replace(next(ordered), created_seq=block.created_seq)
+            if block.block_id in selected and block.block_id != timing_id else block
             for block in self.stable_blocks
         ]
         if timing_id in selected:
-            slots = sorted(block.created_seq for block in self.stable_blocks)
-            timing = next(block for block in self.stable_blocks if block.block_id == timing_id)
-            blocks = [block for block in self.stable_blocks if block.block_id != timing_id]
-            index = next(i for i, block in enumerate(blocks) if block.block_id == final_id)
-            blocks.insert(index + 1, timing)
-            self.stable_blocks = [replace(block, created_seq=slot) for block, slot in zip(blocks, slots, strict=True)]
+            self._align_history_timing(final_id, timing_id, event.seq)
+
+    # LLM: stable/active共用renderer全序，只把本计时移到final后；重建唯一整数显示槽位以消除重复槽位的updated_seq/id反排。
+    #   槽位上界不超过本次真实事件seq，后续新事件仍在尾部；不改updated_seq、journal、正文或业务状态。
+    # 函数用途: 保持所有其它稳定/活动块相对次序，让计时在真实渲染中紧邻final，而不是只在列表中相邻。
+    def _align_history_timing(self, final_id: str, timing_id: str, event_seq: int) -> None:
+        blocks = sorted([*self.stable_blocks, *self.active_blocks.values()],
+                        key=lambda block: (block.created_seq, block.updated_seq, block.block_id))
+        timing = next(block for block in blocks if block.block_id == timing_id)
+        blocks = [block for block in blocks if block.block_id != timing_id]
+        index = next(i for i, block in enumerate(blocks) if block.block_id == final_id)
+        blocks.insert(index + 1, timing)
+        start = min(0, event_seq - len(blocks))
+        positioned = {block.block_id: replace(block, created_seq=start + index) for index, block in enumerate(blocks)}
+        stable_ids = {block.block_id for block in self.stable_blocks}
+        self.stable_blocks = [positioned[block.block_id] for block in blocks if block.block_id in stable_ids]
+        self.active_blocks = {key: positioned[block.block_id] for key, block in self.active_blocks.items()}
 
     # LLM: created_seq 在显示层充当排序槽位；仅更早页取得前置槽位，原事件 journal/运行时间/活动块不改。
     # 函数用途: 把后读到的历史放回正文前部，保留欢迎卡在顶部，不让 renderer 又按到达时间排回底部。

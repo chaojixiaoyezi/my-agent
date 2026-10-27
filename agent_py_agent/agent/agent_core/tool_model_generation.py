@@ -258,9 +258,8 @@ def generate_model_response(request: ModelGenerateParams):
             _clear_next_call_reasoning_override(request.params)
 
 
-# LLM: Native dynamic sections enter IR by host source before submission; compare only each
-# source's surviving latest value. Use the same pure projection as preflight before committing IR.
-# 函数用途: 提交预检查同一内容键缓存的原生投影，去掉重复尾部并保持旧消息前缀。
+# LLM: Native动态段按原宿主来源进入IR；只消费与预检共用、已按完整typed结构==复核的投影，hash命中不能作为IR覆盖依据。
+# 函数用途: 提交精确内容核对后的原生投影，去掉重复尾部且不把旧工具参数写回历史。
 def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGenerateParams:
     if not native_tool_use_active(request.params):
         return request

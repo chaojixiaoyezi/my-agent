@@ -24,7 +24,6 @@ from ...conversation.compact_progress import (
 )
 from ...conversation.context_usage import ContextUsageBinding, public_context_usage
 from ...memory_archive import estimate_tokens
-from ...memory_archive.tokens import _item_length_fingerprint
 from ...model_guidance import provider_system_instruction
 from ...prompting_parts.cache_layout import prompt_cache_layout
 from ...settings.defaults import configured_context_window_tokens
@@ -805,8 +804,8 @@ def _model_visible_request_projection(agent: object, params: object | None, prom
     return projection, history, guidance, already_forwarded
 
 
-# LLM: 冷计算只复制一份IR快照并核对键；投影不能重读可变params导致H键绑定H+X，热命中不再深复制。
-# 函数用途: 为预检和物化复用同一内容快照投影，提交后等价输入命中且原位变化失效。
+# LLM: 冷计算只复制一份IR快照；命中必须按完整typed结构==同时核对输入和缓存输出，hash相同不能证明IR相同。
+# 函数用途: 为预检和物化复用严格结构相等的投影，防止旧工具参数覆盖canonical IR。
 def project_request_prompt_history(params, prompt):
     from copy import copy, deepcopy
 
@@ -819,7 +818,7 @@ def project_request_prompt_history(params, prompt):
     key = _prompt_history_projection_key(params, prompt, history, conversation, project_native_prompt_history)
     memo = estimate_memo_for(params)
     cached = memo.prompt_projection() if memo is not None else None
-    if key is not None and cached is not None and key in cached[:2]:
+    if key is not None and cached is not None and (key == cached[0] or key == cached[1]):
         if cached[1] == _prompt_history_projection_key(params, cached[2], cached[3], conversation, project_native_prompt_history):
             return cached[2], list(cached[3])
     projection_params = params
@@ -839,8 +838,8 @@ def project_request_prompt_history(params, prompt):
     return projected, result
 
 
-# LLM: 复用估算器原内容摘要；未知对象/递归保守不缓存，scope和替代投影器变化也失效。
-# 函数用途: 为同轮纯投影构造覆盖完整可见输入的内容键。
+# LLM: 内容键保留完整类型和值树，使用==核对而非压成Python hash；未知/递归旁路，scope与投影器变化也失效。
+# 函数用途: 为同轮纯投影构造精确结构键，不能因摘要碰撞复用旧历史。
 def _prompt_history_projection_key(params, prompt, history, conversation, projector):
     try:
         content = _context_value_fingerprint((str(prompt), prompt_cache_layout(prompt), tuple(history), conversation))
@@ -850,11 +849,17 @@ def _prompt_history_projection_key(params, prompt, history, conversation, projec
     return (scope, content, id(projector)) if content is not None else None
 
 
-# LLM: 不序列化历史；递归折叠容器节点及typed IR字段，字符串沿用估算器的缓存hash。仅存64位摘要，不保留正文或嵌套树副本。
-#   中段原位变化也失效；未知对象、环和过深结构返回None放弃memo，碰撞口径与原token元素缓存一致，不参与授权。
-# 函数用途: 以轻量内容摘要证明输入未变，避免id/条数/首尾相同但中间内容改变时沿用旧估算。
-def _context_value_fingerprint(value: object) -> int | None:
+# LLM: 精确类型标签加不可变值树；容器复制结构，字符串只借不可变值，NaN/负零保float表示；不调用hash压缩身份。
+#   未知对象、非字符串字典键、环或超过64层时不缓存；该键仅留请求私有memo，不进入归档或公开遥测。
+# 函数用途: 通过完整结构相等核对输入，避免-1/-2等hash碰撞污染投影和计量。
+def _context_value_fingerprint(value: object, *, _depth: int = 0) -> tuple | None:
+    if _depth > 64:
+        return None
     kind = type(value)
+    if kind in (str, bytes, int, bool, type(None)):
+        return kind, value
+    if kind is float:
+        return kind, value.hex()
     if kind is dict:
         if any(type(key) is not str for key in value):
             return None
@@ -864,14 +869,14 @@ def _context_value_fingerprint(value: object) -> int | None:
     elif is_dataclass(value) and not isinstance(value, type):
         entries = ((item.name, getattr(value, item.name)) for item in fields(value))
     else:
-        return _item_length_fingerprint(value)
-    digest = hash(kind)
+        return None
+    parts = []
     for key, item in entries:
-        part = _context_value_fingerprint(item)
+        part = _context_value_fingerprint(item, _depth=_depth + 1)
         if part is None:
             return None
-        digest = hash((digest, key, part))
-    return digest
+        parts.append((key, part))
+    return kind, tuple(parts)
 
 
 # LLM: 跨阶段只复用原纯估算器，不缓存校准/阈值；替代估算器的外部状态未知时放弃memo，session/run/request隔离。

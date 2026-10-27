@@ -51,6 +51,187 @@ def test_round4_cold_notice_any_corrupt_store_fails_closed(tmp_path, corrupt_ind
     assert {str(path): path.read_bytes() for path in home.rglob('*') if path.is_file()} == before
 
 
+# LLM: 只构造真实typed IR和冻结原生协议；缓存与物化运行产品入口，不替换指纹函数。
+# 函数用途: 为H13准备可原位修改的嵌套工具参数。
+def _h13_params(value=-1):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.backends.tool_ir import AssistantTurn, ToolCall
+    from agent_py_agent.agent.tooling.runtime_contracts import (
+        ProviderToolCapability,
+        ToolProtocolSnapshot,
+    )
+
+    call = ToolCall("h13-call", "probe", {"nested": [value]}, "native", "sha256:" + "a" * 64, "run", "turn", "attempt")
+    capability = ProviderToolCapability("test", "local://fixture", "fixture", False, True, "fixture")
+    return SimpleNamespace(tool_ir_history=[AssistantTurn(tool_calls=[call])], live_archive_state={},
+                           session_id="h13", run_id="run", request_id="request",
+                           tool_protocol_snapshot=ToolProtocolSnapshot("run", "native", capability))
+
+
+# LLM: 原生预检先温缓存，随后canonical参数原位改变；真实物化入口不能把旧投影写回IR。
+# 函数用途: 复现-1/-2整数及嵌套负数的hash碰撞污染。
+@pytest.mark.parametrize("before,after", [(-1, -2), (-1.0, -2.0)])
+def test_h13_materialization_preserves_changed_arguments(before, after):
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        project_request_prompt_history,
+    )
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        ModelGenerateParams,
+        _materialize_native_prompt_facts,
+    )
+
+    params = _h13_params(before)
+    project_request_prompt_history(params, "prompt")
+    params.tool_ir_history[0].tool_calls[0].arguments["nested"][0] = after
+    request = ModelGenerateParams(object(), params, "prompt", 0)
+    materialized = _materialize_native_prompt_facts(request)
+    actual = materialized.params.tool_ir_history[0].tool_calls[0].arguments["nested"][0]
+    assert actual == after and type(actual) is type(after)
+
+
+# LLM: 调用方可能持有上次返回的投影；热命中前仍须验证缓存结果没有被原位改变。
+# 函数用途: 拦住缓存输出被碰撞值污染后反向覆盖未变canonical IR。
+def test_h13_cached_projection_output_is_structurally_revalidated():
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        project_request_prompt_history,
+    )
+
+    params = _h13_params()
+    _, first = project_request_prompt_history(params, "prompt")
+    first[0].tool_calls[0].arguments["nested"][0] = -2
+    _, second = project_request_prompt_history(params, "prompt")
+    assert params.tool_ir_history[0].tool_calls[0].arguments["nested"] == [-1]
+    assert second[0].tool_calls[0].arguments["nested"] == [-1]
+
+
+# LLM: 类型、负零、容器种类都属于内容键；即使Python的hash或数值==相同，也不能当作同一输入。
+# 函数用途: 锁定结构键在标量和容器上的精确区分。
+@pytest.mark.parametrize("left,right", [(-1, -2), (-1.0, -2.0), (True, 1), (1, 1.0),
+                                       (0.0, -0.0), ([1], (1,))])
+def test_h13_projection_fingerprint_preserves_types_and_values(left, right):
+    from agent_py_agent.agent.agent_core.model.context_pressure import _context_value_fingerprint
+
+    assert _context_value_fingerprint({"nested": [left]}) != _context_value_fingerprint({"nested": [right]})
+
+
+# LLM: 修复不能直接禁用缓存；同结构输入仍复用纯投影，只有实际结构变化才重算。
+# 函数用途: 验证精确结构核对保留热缓存收益。
+def test_h13_unchanged_projection_keeps_cache_hit(monkeypatch):
+    from agent_py_agent.agent.agent_core import tool_ir_history
+    from agent_py_agent.agent.agent_core.model.context_pressure import (
+        project_request_prompt_history,
+    )
+
+    calls = []
+    original = tool_ir_history.project_native_prompt_history
+
+    # LLM: 包装原投影器只统计执行次数，不改变输出、输入或缓存键。
+    # 函数用途: 观察冷计算与热命中。
+    def observe(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tool_ir_history, "project_native_prompt_history", observe)
+    params = _h13_params()
+    for _ in range(3):
+        project_request_prompt_history(params, "prompt")
+    assert len(calls) == 1
+
+
+# LLM: 稳定列表模拟较旧工具晚完成，检查真实reducer与renderer的created_seq/updated_seq排序，而非列表顺序猜测。
+# 函数用途: 复现完成计时重排翻转无关旧工具与新用户消息，并检查重复重放幂等。
+@pytest.mark.parametrize("same_created_slot", [False, True])
+def test_h14_completion_alignment_preserves_unrelated_render_order(same_created_slot):
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import _block_sort_key
+    from agent_py_agent.cli.chat_parts.tui_events import TuiEvent
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock, TuiViewModelReducer
+
+    request = "bg-main:thread:h14"
+    final_id, timing_id = "history:thread:h14:assistant", f"{request}:completion"
+    model = TuiViewModelReducer()
+    model.stable_blocks = [
+        TuiBlock("new-user", "user_message", "user", "completed", text="NEW_USER",
+                 created_seq=10 if same_created_slot else 20, updated_seq=20),
+        TuiBlock("old-tool", "tool_completed", "tool", "completed", title="probe", detail="OLD_TOOL",
+                 created_seq=10, updated_seq=10),
+        TuiBlock(timing_id, "system_message", "system", "completed", created_seq=30, updated_seq=30,
+                 metadata={"source_kind": "turn_timing", "display": {"status": "completed",
+                     "completed_at": 1700000000.0, "elapsed_seconds": 1.0}}),
+        TuiBlock(final_id, "assistant_completed", "assistant", "completed", text="FINAL_BODY",
+                 created_seq=40, updated_seq=40),
+    ]
+    expected = [block.block_id for block in sorted(model.stable_blocks, key=_block_sort_key)
+                if block.block_id != timing_id]
+    event = TuiEvent("h14-reorder", 100, "h14-stream", "h14-reorder", "history_blocks_reordered", "completed",
+                     {"block_ids": [final_id, timing_id], "final_block_id": final_id}, request_id=request)
+    model.apply(event)
+    once = model.snapshot().stable_blocks
+    for _ in range(2):
+        model.apply(event)
+    assert model.snapshot().stable_blocks == once
+    ordered = [block.block_id for block in sorted(once, key=_block_sort_key)]
+    assert [key for key in ordered if key != timing_id] == expected
+    assert ordered.index(timing_id) == ordered.index(final_id) + 1
+    frame = render_tui_snapshot(model.snapshot(), TuiRenderContext(width=180))
+    rendered = [key for key, _offset in frame.block_line_offsets]
+    assert rendered.index("old-tool") < rendered.index("new-user")
+    assert rendered.index(timing_id) == rendered.index(final_id) + 1
+
+
+# LLM: 独立复核给出源代码反例；先运行真实reducer证实，不能用静态意见替代动态失败证据。
+# 函数用途: 检查早到计时不能拖走final，以及重复created槽位仍须按真实渲染键紧邻。
+@pytest.mark.parametrize("tied_slots", [False, True])
+def test_h14_review_counterexamples_preserve_final_anchor(tied_slots):
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import _block_sort_key
+    from agent_py_agent.cli.chat_parts.tui_events import TuiEvent
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock, TuiViewModelReducer
+
+    request, final_id = "bg-main:review", "history:review:assistant"
+    timing_id = f"{request}:completion"
+    model = TuiViewModelReducer()
+    final = TuiBlock(final_id, "assistant_completed", "assistant", "completed",
+                     created_seq=10 if tied_slots else 30, updated_seq=20 if tied_slots else 30)
+    timing = TuiBlock(timing_id, "system_message", "system", "completed", created_seq=10, updated_seq=10)
+    user = TuiBlock("user", "user_message", "user", "completed", created_seq=20, updated_seq=20)
+    model.stable_blocks = [final, timing] if tied_slots else [timing, user, final]
+    expected = [block.block_id for block in sorted(model.stable_blocks, key=_block_sort_key)
+                if block.block_id != timing_id]
+    event = TuiEvent("review", 100, "review", "review", "history_blocks_reordered", "completed",
+                     {"block_ids": [final_id, timing_id], "final_block_id": final_id}, request_id=request)
+    for _ in range(2):
+        model.apply(event)
+        actual = [block.block_id for block in sorted(model.stable_blocks, key=_block_sort_key)]
+        assert [key for key in actual if key != timing_id] == expected
+        assert actual.index(timing_id) == actual.index(final_id) + 1
+
+
+# LLM: 稳定块的显示槽位若需调整，活动块仍须保持原相对位置，随后真实新事件也必须落在正确尾部。
+# 函数用途: 保护旧活动工具、稳定用户和后续新用户的全局显示次序。
+def test_h14_alignment_preserves_active_blocks_and_later_events():
+    from agent_py_agent.cli.chat_parts.tui_block_renderer import _block_sort_key
+    from agent_py_agent.cli.chat_parts.tui_events import TuiEvent
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiBlock, TuiViewModelReducer
+
+    request, final_id = "bg-main:active", "history:active:assistant"
+    timing_id = f"{request}:completion"
+    model = TuiViewModelReducer()
+    model.stable_blocks = [
+        TuiBlock(timing_id, "system_message", "system", "completed", created_seq=10, updated_seq=10),
+        TuiBlock("user", "user_message", "user", "completed", created_seq=20, updated_seq=20),
+        TuiBlock(final_id, "assistant_completed", "assistant", "completed", created_seq=30, updated_seq=30),
+    ]
+    model.active_blocks["old-active"] = TuiBlock("old-active", "tool_started", "tool", "running",
+                                               created_seq=15, updated_seq=15)
+    event = TuiEvent("active", 100, "active", "active", "history_blocks_reordered", "completed",
+                     {"block_ids": [final_id, timing_id], "final_block_id": final_id}, request_id=request)
+    model.apply(event)
+    model.apply(TuiEvent("new-user", 101, "active", "new-user", "user_message", "completed", {"text": "new"}))
+    all_blocks = [*model.stable_blocks, *model.active_blocks.values()]
+    assert [block.block_id for block in sorted(all_blocks, key=_block_sort_key)] == [
+        "old-active", "user", final_id, timing_id, "new-user"]
+
+
 # LLM: 参数覆盖秒、分钟、小时和进位边界，不调用任何时钟或外部进程。
 # 函数用途: 核对时长格式合同。
 @pytest.mark.parametrize("seconds,expected", [(0, "0s"), (0.2, "1s"), (12, "12s"), (106, "1m 46s"), (120, "2m 0s"), (3725, "1h 2m 5s"), (59.9, "1m 0s")])
