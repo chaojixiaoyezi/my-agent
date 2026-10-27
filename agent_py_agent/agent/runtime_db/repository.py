@@ -487,6 +487,21 @@ def _uncertain_attempt_mutation_ids(
     return [str(item["mutation_id"] or "") for item in rows]
 
 
+# LLM: Both unknown recovery and previously-unknown cancellation need the same read-only proof,
+# in the caller's existing transaction; return operation facts unchanged when all resources are stable.
+# 函数用途: 先核工具归档，再核资源稳定性，共用副作用安全闸而不重放或改写运行账。
+def _active_turn_effect_recovery_report(
+    conn: sqlite3.Connection, attempt_id: str, recorded: dict[str, dict[str, str]],
+) -> dict[str, object]:
+    report = _active_turn_operation_recovery_report(conn, attempt_id, recorded)
+    if report.get("ok") is not True:
+        return report
+    mutation_ids = _uncertain_attempt_mutation_ids(conn, attempt_id)
+    if mutation_ids:
+        return {"reason": "resource_state_uncertain", "blocking_mutation_ids": mutation_ids}
+    return report
+
+
 # LLM: RuntimeRepository 是 owner runtime.db 的唯一写入口；新增状态前必须区分
 # 长期 Task 身份与可停止、失败、恢复的 TaskRun/AgentRun/Attempt 执行状态。
 # wake合并探针只读取原WHERE条件，提交与取消仍走现有事务。
@@ -865,7 +880,7 @@ class RuntimeRepository(
         return bool(changed)
 
     # LLM: 原IMMEDIATE事务内通过阈值、runner及全锁死亡证明的current attempt才可取消；旧标记不跳过unknown。
-    #   释放旧锁并取消未启动CLAIMED，不改执行中/UNKNOWN工具或DIRTY/MUTATING，不伪造noop/成功。
+    #   释放旧锁并取消未启动CLAIMED，不改执行中/UNKNOWN工具或DIRTY/MUTATING，不伪造noop/成功；run已有终态不覆盖。
     # 函数用途: 取消并解锁安全可结清的旧运行，保留abandoned及原状态审计，允许后续新attempt。
     def _settle_stale_runtime_row(self, conn, row, now: float, actor: str, automatic: bool) -> bool:
         if row["attempt_status"] is None:
@@ -898,7 +913,8 @@ class RuntimeRepository(
             conn.execute("DELETE FROM resource_locks WHERE attempt_id=?", (row["current_attempt_id"],))
             _cancel_unstarted_tool_operations(conn, agent_run_id=row["agent_run_id"], now=now,
                                              attempt_id=row["current_attempt_id"])
-            conn.execute("UPDATE agent_runs SET status='cancelled', updated_at=? WHERE agent_run_id=? AND current_attempt_id=?",
+            conn.execute("UPDATE agent_runs SET status='cancelled', updated_at=? WHERE agent_run_id=? AND current_attempt_id=? "
+                         "AND status NOT IN ('done', 'failed', 'cancelled', 'abandoned')",
                          (now, row["agent_run_id"], row["current_attempt_id"]))
             self._append_event_conn(conn, event_type="agent_run.operational_settlement", attempt_id=row["current_attempt_id"],
                 agent_run_id=row["agent_run_id"], payload={"operator_settled_at": now, "settled_by": actor,
@@ -945,7 +961,9 @@ class RuntimeRepository(
     # task-only match, model text, error strings, PID age, or a best-effort archive scan.
     # Owner Agents may be loaded lazily after Gateway startup: reconcile only this exact
     # current runner using durable PID/start identity, then apply the unchanged effect proof.
-    # 函数用途: 按用户和精确执行绑定调和已死进程，再核对工具账；不要求默认管理员先代办所有用户恢复。
+    # A cancelled attempt previously unknown must still pass the same proof before returning
+    # not_required; operational settlement is not durable effect evidence or permission to replay.
+    # 函数用途: 按精确执行绑定核对旧工具和资源证据；运维取消不能绕过原副作用安全闸。
     def recover_recorded_active_turn_attempt(
         self,
         *,
@@ -997,7 +1015,9 @@ class RuntimeRepository(
                 str(row["run_status"] or ""),
                 attempt_status,
             )
-            if attempt_status != ATTEMPT_STATUS_UNKNOWN:
+            settled_unknown = (attempt_status == "cancelled"
+                               and _json_object(row["metadata_json"]).get("previous_attempt_status") == "unknown")
+            if attempt_status != ATTEMPT_STATUS_UNKNOWN and not settled_unknown:
                 not_required = not recovery_reason and attempt_status in _ATTEMPT_TERMINAL_STATUSES
                 return {
                     "recovered": False,
@@ -1007,7 +1027,7 @@ class RuntimeRepository(
                     ),
                     "attempt_id": attempt_id,
                 }
-            operation_report = _active_turn_operation_recovery_report(
+            operation_report = _active_turn_effect_recovery_report(
                 conn,
                 attempt_id,
                 recorded,
@@ -1019,15 +1039,9 @@ class RuntimeRepository(
                     "attempt_id": attempt_id,
                     **operation_report,
                 }
-            mutation_ids = _uncertain_attempt_mutation_ids(conn, attempt_id)
-            if mutation_ids:
-                return {
-                    "recovered": False,
-                    "status": "blocked",
-                    "reason": "resource_state_uncertain",
-                    "attempt_id": attempt_id,
-                    "blocking_mutation_ids": mutation_ids,
-                }
+            if settled_unknown:
+                return {"recovered": False, "status": "not_required", "reason": "attempt_already_terminal",
+                        "attempt_id": attempt_id}
             _cancel_unstarted_tool_operations(
                 conn,
                 agent_run_id=str(row["agent_run_id"] or ""),

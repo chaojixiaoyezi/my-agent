@@ -29,7 +29,7 @@ WAKE_REDELIVERY_BACKOFF_BASE_SECONDS = 30.0
 WAKE_REDELIVERY_BACKOFF_MAX_SECONDS = 900.0
 # 从第一次重投失败起满 24 小时（>=）仍送不出去就结案；足够覆盖一次渠道长时间故障或人工处理。
 WAKE_REDELIVERY_GIVE_UP_SECONDS = 86400.0
-# 连续不计数满24小时按现有尝试/提醒时间结案，避免永久阻塞；批次失败仍只隔离执行并提醒，不自动结案。
+# 连续不计数满24小时且至少五次非batch尝试才结案；纯批次失败只隔离执行并提醒。
 WAKE_UNCOUNTED_STALL_SECONDS = 86400.0
 
 # 唤醒结案后的终态：不再被领取，只能人工重放；发布层把它当作与 pending/handled 并列的状态。
@@ -329,8 +329,8 @@ def _after_uncounted(state: WakePoisonState, reason_code: str, now: float) -> Wa
                    next_attempt_at=at + poison_backoff_seconds(count))
 
 
-# LLM: 同因/总数/重投按原阈值先判；无批次失败的连续neutral满24小时也结案。用退避反推最近尝试，不把未来期限当已等待时间。
-# 函数用途: 判断计数失败、重投失败或长时间未计数阻塞是否应结案，批次失败不误隔离。
+# LLM: 同因/总数/重投先判；扣除batch至少五次neutral且满24小时才超时结案。辨识重投期限，不错减neutral退避。
+# 函数用途: 保护少次数与纯batch，结清历史batch后仍长期阻塞的唤醒，并避免重投导致提前隔离。
 def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.same_cause_count >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
         return _decision(state, state.reason_code, mixed_causes=False)
@@ -339,9 +339,16 @@ def quarantine_decision(state: WakePoisonState) -> QuarantineDecision | None:
     if state.redelivery_failures and (
             state.last_redelivery_failed_at - state.first_redelivery_failed_at >= WAKE_REDELIVERY_GIVE_UP_SECONDS):
         return _decision(state, WAKE_REASON_CHANNEL_UNAVAILABLE, mixed_causes=False)
-    if state.uncounted_count > 0 and state.batch_failures == 0:
-        latest_at = max(state.last_stall_alert_at,
-                        state.next_attempt_at - poison_backoff_seconds(state.uncounted_count))
+    if state.uncounted_count - state.batch_failures >= WAKE_POISON_SAME_CAUSE_LIMIT_COUNT:
+        redelivery_deadline = (
+            state.last_redelivery_failed_at + redelivery_backoff_seconds(state.redelivery_failures)
+            if state.redelivery_failures > 0 else -1.0
+        )
+        uncounted_at = (
+            state.last_redelivery_failed_at if state.next_attempt_at == redelivery_deadline
+            else state.next_attempt_at - poison_backoff_seconds(state.uncounted_count)
+        )
+        latest_at = max(state.last_stall_alert_at, uncounted_at)
         if latest_at - state.uncounted_since >= WAKE_UNCOUNTED_STALL_SECONDS:
             return _decision(state, state.uncounted_reason_code or "uncounted_stall_timeout", mixed_causes=False)
     return None

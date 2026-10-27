@@ -1,3 +1,30 @@
+## 2026-10-27 Wave 7 W3 R2：隔离边界与结清后的副作用证明
+
+来源：`07-tasks/wave7-w3-r2-fixes.md`，精确前置为 `7fc4066bcafd779524e9d64aece93deb4dff88b8`；只在 `/tmp/wt-wave7-w3` / `wt-wave7-w3` 续做，不部署或操作真实运行库。
+
+- `quarantine_decision` 按 `uncounted_count - batch_failures >= 5` 和满 24 小时共同判定；纯 batch 豁免，历史 batch 不再永久阻止后续五次 neutral 的隔离。共享期限与重投期限相等时用最后重投时间，否则减 neutral 退避，不把未来期限当成已等待时间。状态字段和严格解析器不变。
+- 结清 current unknown attempt 时保留 run 已有的 `done/failed/cancelled/abandoned` 及其 `updated_at`，原死亡证明、事务、指针比较、未启动工具取消及事件留存不变。
+- 对 `cancelled + previous_attempt_status=unknown`，恢复仍先核工具终态/耐久记录，再核资源稳定性；任一失败保持 blocked，全干净才 not_required，不再次恢复或重放。为满足原尺寸门，把这两步提成只读共用函数，原 unknown 路径的结果字段和事务范围不变。
+
+新增回归覆盖少于五次、混合 batch、重投前后覆盖期限、真实临时唤醒结案、四种终态及时间戳、工具归档缺失/错配/执行中、DIRTY/MUTATING/STABLE、未启动工具、干净旧轮与同任务新运行，以及非 unknown 来源的 cancelled 原行为。最初针对性红例 `tmp/w3-r2-red.xml` 为 34 项、20 failures、0 errors/skips，修改实现前逐条核对为目标断言失败。首次四文件组合 `tmp/w3-r2-green.xml` 为 300 项、290 passed、10 failures、0 errors/skips；这是提取共用函数和补控制用例前的过程记录，不代替最终版本结果。
+
+10 个 wake store 死亡进程/矛盾账本断言已用本轮精确前置完整源码归档复核，见 `tmp/w3-r2-baseline.xml`：同 10 个测试全部失败，末尾断言输出一致。临时 worktree 创建在 `.git` 写入时被拒绝，未作为运行证据；改用 `git archive` 完整导出到 `tmp/w3-r2-baseline-src-7fc4066`，核对关键源码与 `git show` 字节相同、导入落在归档根，再只重跑这 10 个 ID。未将其归因为沙箱，也未修改或跳过原测试。
+
+最终版本指定四文件：`tmp/w3-r2-final.xml` 为 **304 项、294 passed、10 failures、0 errors/skips**；wake poison 155/155、runtime stale 72/72、foundation 31/31，wake store 36/46，失败 ID 及末尾断言与上述精确基线一致。原四次 neutral 提醒用例已自然通过，未修改该测试文件。Ruff 全范围通过；strict 尺寸门为 hard=0 / blocked=False（没有修改检查器或基线），生成报告按任务要求还原，不随功能提交。状态类与严格解析器、原两项副作用 helper 的 AST 均与前置一致。
+
+独立静态审阅分别覆盖 R2 三处边界与后续只读 helper 提取，均未发现给定契约下的确定缺陷；仅核内联冻结代码，未独立运行测试或查全仓。已按建议补 neutral 覆盖旧重投期限及非 unknown 来源 cancelled 的控制回归。
+
+复现（cwd 必须为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wake_poison.py agent_py_agent/tests/test_wake_attempt_store.py agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/pytest-w3-r2-final --junitxml=tmp/w3-r2-final.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+未运行全仓测试、Linux 车道、生产 Gateway 自愈或真实性能测量；这些观察点未验证。
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。

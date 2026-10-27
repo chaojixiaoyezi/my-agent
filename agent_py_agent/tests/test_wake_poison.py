@@ -367,12 +367,12 @@ class TestUncountedStall:
     def test_uncounted_results_never_quarantine(self):
         assert quarantine_decision(_feed([self.WAIT] * 500)) is None
 
-    # LLM: W3 不新增持久字段；按最近尝试时间而非未来重试期限判定24小时，失败计数仍保持零。
-    # 函数用途: 验证未计数段在临界点之前不隔离，恰满24小时隔离。
+    # LLM: R2至少五次neutral且满24小时才隔离；不新增字段，失败计数仍保持零。
+    # 函数用途: 验证达到最少次数后，临界点之前不隔离、恰满24小时隔离。
     @pytest.mark.parametrize("reason", ["", "error:RUN_RECOVERY_REQUIRED"])
     def test_uncounted_stall_quarantines_after_24h(self, reason):
         verdict = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
-        state = next_poison_state(WakePoisonState(), verdict, now=100.0)
+        state = _feed([verdict] * (WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1), start=100.0)
         before = next_poison_state(state, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS - 1)
         assert quarantine_decision(before) is None
         at_limit = next_poison_state(before, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
@@ -381,37 +381,76 @@ class TestUncountedStall:
         assert decision.reason_code == (reason or "uncounted_stall_timeout")
         assert (decision.same_cause_count, decision.total_count, decision.mixed_causes) == (0, 0, False)
 
-    # LLM: 旧账没有最新未计数时间字段，已发提醒的时间必须能提供24小时的现有证据。
-    # 函数用途: 验证用原提醒字段兼容历史未退避账，批次失败仍不能误隔离。
+    # LLM: 旧提醒可证明时间跨度，但仍至少需要五次非batch尝试；纯批次始终豁免。
+    # 函数用途: 验证兼容旧未退避账且不足五次neutral不隔离。
     def test_legacy_stall_alert_can_prove_timeout_but_batch_is_exempt(self):
-        state = mark_stall_alerted(next_poison_state(WakePoisonState(), self.WAIT, now=100.0),
+        state = mark_stall_alerted(_feed([self.WAIT] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, start=100.0),
                                    now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
         state = replace(state, next_attempt_at=0.0)
         assert quarantine_decision(state) is not None
         assert quarantine_decision(replace(state, batch_failures=1)) is None
 
-    # LLM: W3硬约束是不加字段并从共享next_attempt_at反推；重投会覆盖它，本例显式记录该时间口径限制。
-    # 函数用途: 锁定neutral后重投交错时按指定公式判定，不声称持有独立的最新neutral时间。
-    def test_redelivery_interleaving_uses_required_shared_deadline_formula(self):
-        state = next_poison_state(WakePoisonState(), self.WAIT, now=0.0)
+    # LLM: R2辨识重投写入的deadline，不能从900秒重投退避减去300秒neutral退避来造超时。
+    # 函数用途: 验证五次neutral后交错重投，在24小时前不提前隔离，恰满才隔离。
+    def test_redelivery_interleaving_does_not_quarantine_before_24h(self):
+        state = _feed([self.WAIT] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, start=0.0, step=100.0)
         redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
-        for now in (86300.0, 86330.0):
+        for now in (1000.0, 2000.0, 3000.0, 4000.0, 5000.0):
             state = next_poison_state(state, redelivery, now=now)
             assert quarantine_decision(state) is None
-        state = next_poison_state(state, redelivery, now=86390.0)
-        assert state.next_attempt_at - poison_backoff_seconds(state.uncounted_count) == 86480.0
+        for now in (86300.0, 86390.0):
+            before = next_poison_state(state, redelivery, now=now)
+            assert quarantine_decision(before) is None
+        at_limit = next_poison_state(state, redelivery, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        decision = quarantine_decision(at_limit)
+        assert decision is not None and decision.reason_code == self.WAIT.reason_code
+
+    # LLM: 历史重投不代表当前deadline仍由它写入；后续neutral覆盖后必须走neutral时间还原。
+    # 函数用途: 验证共享期限不相等时不误用旧重投时间，仍能恰满一天结案。
+    def test_neutral_after_redelivery_uses_its_own_rewritten_deadline(self):
+        state = _feed([self.WAIT] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, start=0.0, step=100.0)
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        for now in (1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 86000.0):
+            state = next_poison_state(state, redelivery, now=now)
+        before = next_poison_state(state, self.WAIT, now=86390.0)
+        assert quarantine_decision(before) is None
+        at_limit = next_poison_state(before, self.WAIT, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(at_limit) is not None
+
+    # LLM: 提醒只证明时间，不代表已经重试至少五次；不足次数时任意提醒都不能隔离。
+    # 函数用途: 验证少于五次neutral的旧账即使等满一天仍保留。
+    @pytest.mark.parametrize("count", range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT))
+    def test_uncounted_stall_requires_at_least_five_neutral_attempts(self, count):
+        state = _feed([self.WAIT] * count, start=0.0)
+        if count:
+            state = mark_stall_alerted(state, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(state) is None
+
+    # LLM: batch_failures属于历史累计，单次batch不能永久阻止其后的单条neutral超时隔离。
+    # 函数用途: 验证历史批次失败后隔离执行五次neutral且满24小时会结案，纯batch不结案。
+    def test_historical_batch_then_five_neutrals_can_quarantine(self):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = _feed([batch] * 10, start=0.0, step=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(state) is None
+        state = next_poison_state(WakePoisonState(), batch, now=0.0)
+        for now in (100.0, 200.0, 300.0, 400.0):
+            state = next_poison_state(state, self.WAIT, now=now)
+            assert quarantine_decision(state) is None
+        state = next_poison_state(state, self.WAIT, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert (state.uncounted_count, state.batch_failures) == (6, 1)
         decision = quarantine_decision(state)
         assert decision is not None and decision.reason_code == self.WAIT.reason_code
 
-    # LLM: 使用真实临时唤醒存储，不调模型、不发外部通知；验证原结案口实际移出pending。
-    # 函数用途: 验证24小时未计数阻塞最终写成failed_permanently。
+    # LLM: 使用真实临时唤醒存储，不调模型、不发通知；至少五次neutral再核24小时隔离。
+    # 函数用途: 验证五次未计数阻塞且满一天最终写成failed_permanently。
     def test_uncounted_timeout_moves_real_wake_to_quarantine(self, tmp_path):
         from agent_py_agent.tests.test_wake_attempt_store import _raise, _store
 
         store = _store(tmp_path)
         signal = _raise(store)
         verdict = verdict_for_error(RuntimeRecoveryRequiredError("blocked"))
-        store.wakes.attempts.record(signal, verdict, now=100.0)
+        for index in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1):
+            store.wakes.attempts.record(signal, verdict, now=100.0 + index * 1000.0)
         result = store.wakes.attempts.record(signal, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
         assert result.decision is not None
         settled = store.wakes.attempts.quarantine(signal.wake_signal_id, result.decision,

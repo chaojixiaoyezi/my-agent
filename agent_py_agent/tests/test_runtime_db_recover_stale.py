@@ -775,3 +775,104 @@ def test_selfheal_cleanup_uses_attempt_age_not_time_since_unknown(tmp_path, monk
     assert result["recovered"] == result["settled"] == [run]
     assert repo.get_attempt(attempt)["status"] == repo.get_agent_run(run)["status"] == "cancelled"
     assert repo.get_operation(unstarted)["status"] == "CANCELLED"
+
+
+# LLM: R2取消历史unknown attempt只收敛该attempt，不能覆盖run已有业务终态和updated_at。
+# 函数用途: 验证显式与自动结清均保留done/failed/cancelled/abandoned运行结果。
+@pytest.mark.parametrize("run_status", ["done", "failed", "cancelled", "abandoned"])
+@pytest.mark.parametrize("automatic", [False, True])
+def test_r2_settlement_preserves_already_terminal_run(tmp_path, monkeypatch, run_status, automatic):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    run, attempt, _, _ = _selfheal_unknown(repo)
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_runs SET status=?, updated_at=77 WHERE agent_run_id=?", (run_status, run))
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: False)
+    assert repo.settle_unidentified_attempts(older_than_seconds=0, now=90000, automatic=automatic) == [run]
+    assert repo.get_attempt(attempt)["status"] == "cancelled"
+    assert (repo.get_agent_run(run)["status"], repo.get_agent_run(run)["updated_at"]) == (run_status, 77)
+
+
+# LLM: 通过真实结清口获得cancelled/previous_unknown，不手造豁免元数据；读取证明不能写状态或重放操作。
+# 函数用途: 验证精确旧回合在结清后仍受工具归档/不稳定资源闸约束，干净情况才not_required。
+@pytest.mark.parametrize("case,expected_reason", [
+    ("missing", "operation_record_incomplete"),
+    ("mismatched_status", "operation_record_incomplete"),
+    ("mismatched_type", "operation_record_incomplete"),
+    ("executing", "operation_outcome_uncertain"),
+    ("dirty", "resource_state_uncertain"),
+    ("mutating", "resource_state_uncertain"),
+    ("stable", "attempt_already_terminal"),
+    ("clean", "attempt_already_terminal"),
+    ("unstarted", "attempt_already_terminal"),
+])
+def test_r2_settled_unknown_keeps_exact_turn_effect_proof(tmp_path, monkeypatch, case, expected_reason):
+    from agent_py_agent.agent.runtime_db import repository as module
+
+    repo = _make_repo(tmp_path)
+    request_id = "gw-r2-settled-effect-proof"
+    if case == "unstarted":
+        record = repo.record_run_creation(owner_id="local/main", conversation_task_id=request_id,
+                                         run_id=request_id, role="main", goal="未启动工具")
+        operation_id = repo.create_tool_operation(agent_run_id=record["agent_run_id"],
+            attempt_id=record["attempt_id"], operation_type="write_file")["operation_id"]
+    else:
+        record, operation_id = _seed_unknown_active_turn(repo, request_id,
+            operation_status="EXECUTING" if case == "executing" else "SUCCEEDED")
+    attempt_id = record["attempt_id"]
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_attempts SET status='unknown', started_at=1, metadata_json='{}' WHERE attempt_id=?",
+                     (attempt_id,))
+        conn.execute("UPDATE agent_runs SET status='unknown' WHERE agent_run_id=?", (record["agent_run_id"],))
+        if case in {"dirty", "mutating", "stable"}:
+            conn.execute("INSERT INTO resource_mutations(mutation_id,canonical_scope,state,dirty_reason,attempt_id,updated_at) "
+                         "VALUES('r2-mutation','scope:r2',?,'original evidence',?,1)", (case.upper(), attempt_id))
+    monkeypatch.setattr(module, "holder_is_alive", lambda *_: False)
+    assert repo.settle_unidentified_attempts(older_than_seconds=0, now=90000) == [record["agent_run_id"]]
+    assert json.loads(repo.get_attempt(attempt_id)["metadata_json"])["previous_attempt_status"] == "unknown"
+    facts = {} if case in {"missing", "executing", "unstarted"} else {
+        operation_id: {"status": "succeeded", "operation_type": "write_file"}}
+    if case == "mismatched_status":
+        facts[operation_id]["status"] = "failed"
+    if case == "mismatched_type":
+        facts[operation_id]["operation_type"] = "run_command"
+    before = dict(repo.get_attempt(attempt_id))
+    result = repo.recover_recorded_active_turn_attempt(task_id=request_id, run_id=request_id,
+        recorded_operation_facts=facts, operator="r2-test", expected_attempt_id=attempt_id,
+        expected_agent_run_id=record["agent_run_id"])
+    assert result["reason"] == expected_reason
+    clean = expected_reason == "attempt_already_terminal"
+    assert result["status"] == ("not_required" if clean else "blocked")
+    assert result["recovered"] is False and result["attempt_id"] == attempt_id
+    assert dict(repo.get_attempt(attempt_id)) == before
+    assert repo.get_agent_run(record["agent_run_id"])["status"] == "cancelled"
+    if case in {"missing", "mismatched_status", "mismatched_type"}:
+        key = "missing_operation_ids" if case == "missing" else "mismatched_operation_ids"
+        assert result[key] == [operation_id]
+    if case in {"dirty", "mutating"}:
+        assert result["blocking_mutation_ids"] == ["r2-mutation"]
+    if clean:
+        fresh = repo.record_run_creation(owner_id="local/main", conversation_task_id=request_id,
+                                        run_id=request_id + "-next", role="main", goal="新执行轮")
+        assert fresh["attempt_id"] != attempt_id
+        assert repo.get_attempt(fresh["attempt_id"])["status"] == "running"
+
+
+# LLM: 只对previous_unknown取消账追加proof，其他原终态路径不因本轮修复扩大检查范围。
+# 函数用途: 验证没有unknown来源标记的cancelled仍按原契约返回not_required。
+@pytest.mark.parametrize("previous", [None, "running", "created"])
+def test_r2_other_cancelled_attempts_keep_existing_terminal_behavior(tmp_path, previous):
+    repo = _make_repo(tmp_path)
+    request_id = "gw-r2-ordinary-cancelled"
+    record, operation_id = _seed_unknown_active_turn(repo, request_id, operation_status="EXECUTING")
+    metadata = {} if previous is None else {"previous_attempt_status": previous}
+    with repo.transaction() as conn:
+        conn.execute("UPDATE agent_attempts SET status='cancelled', metadata_json=? WHERE attempt_id=?",
+                     (json.dumps(metadata), record["attempt_id"]))
+        conn.execute("UPDATE agent_runs SET status='cancelled' WHERE agent_run_id=?", (record["agent_run_id"],))
+    result = repo.recover_recorded_active_turn_attempt(task_id=request_id, run_id=request_id,
+        recorded_operation_facts={}, operator="r2-test")
+    assert result == {"recovered": False, "status": "not_required", "reason": "attempt_already_terminal",
+                      "attempt_id": record["attempt_id"]}
+    assert repo.get_operation(operation_id)["status"] == "EXECUTING"
