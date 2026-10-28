@@ -1292,9 +1292,10 @@ def _run_standalone_gateway(args, lifecycle) -> int:
     return exit_code
 
 
-# LLM: status分别展示实际配置和已读state拓扑，未知保持unknown；这些展示字段不改变原存活/就绪判据。
+# LLM: status延迟闲置MCP，分别展示实际配置和已读state拓扑，未知保持unknown；这些展示字段不改变原存活/就绪判据。
 # 函数用途: 查看Gateway运行事实与配置目标，避免把改YAML说成运行拓扑已切换。
 def cmd_gateway_status(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     pid_record = read_pid_record(paths.pid)
@@ -1359,7 +1360,10 @@ def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
 # 函数用途: 请求正在运行的 Gateway 排水退出，超时后按 --kill 强制结束；按显式要求停止遗留后台资源。
 # LLM: 只有 argparse 的显式布尔 drain=True 才走原两阶段排空，缺字段或其它对象不能成为控制指令。
 # 函数用途: 显式 drain 先完成原两阶段排空再停止，遗留后台清理仍沿原入口。 修改需同步原控制、恢复或权限测试。
+# LLM: Retain original agent/path/process identity and explicit background-stop contracts; control-only construction defers unrelated MCP.
+# 函数用途: 沿原身份门停止所选Gateway，不为控制命令启动闲置MCP。
 def cmd_gateway_stop(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     background = _background_processes_for_stop(agent)
@@ -1487,7 +1491,10 @@ def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
 # LLM: 默认走安全重启（gateway_restart_handover.safe_restart_from_cli），Gateway 未运行时才落到启动；
 #   --force 保持原来的先停后起（停止超时强制终止）。改动须同步 test_gateway_commands.py 与 test_gateway_safe_restart.py。
 # 函数用途: 终端重启 Gateway：默认先排空再换进程，--force 立即先停后起。
+# LLM: Defer MCP only in this control process; original topology freeze, coordinated handover and full-agent start/run composition stay unchanged.
+# 函数用途: 按原拓扑和交接协议重启Gateway，管理进程不急连MCP。
 def cmd_gateway_restart(args) -> int:
+    args._defer_mcp_connect = True
     from .common import frozen_gateway_arguments
 
     args = frozen_gateway_arguments(args)
@@ -1528,7 +1535,10 @@ def cmd_gateway_restart(args) -> int:
     return cmd_gateway_start(start_args)
 
 
+# LLM: Preserve the original canonical log path and current-generation reader; defer local MCP before read-only construction.
+# 函数用途: 查看原Gateway日志，不为只读命令启动MCP。
 def cmd_gateway_logs(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     if not paths.log.exists():

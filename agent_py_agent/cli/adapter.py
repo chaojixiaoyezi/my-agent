@@ -71,12 +71,15 @@ def cmd_adapter(args) -> int:
     return 2
 
 
+# LLM: Original host construction remains the path authority; defer unused MCP and transport the exact resolved Gateway paths to readiness.
+# 函数用途: 文件适配器只构造一次原代理，不重复解析Gateway收件箱或启动MCP。
 def cmd_adapter_file(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
     apaths = _resolve_adapter_paths(agent, options)
-    gateway_code = ensure_gateway_started(args) if not options.no_start_gateway else _ensure_gateway_available(options, gpaths)
+    gateway_code = ensure_gateway_started(args, paths=gpaths) if not options.no_start_gateway else _ensure_gateway_available(options, gpaths)
     if gateway_code:
         return gateway_code
 
@@ -171,7 +174,10 @@ def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> Non
     )
 
 
+# LLM: Keep original owner/config/runtime paths and adapter credential checks; adapter forwarding never needs eager local MCP.
+# 函数用途: 延迟无用MCP后按原生命周期启动通道适配器。
 def cmd_adapter_start(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
@@ -432,7 +438,10 @@ def _write_adapter_state_guarded(gpaths, state: str, extra: dict | None = None) 
     return True
 
 
+# LLM: Status uses the original factory/path authority without eagerly connecting unrelated MCP clients.
+# 函数用途: 沿原规范路径查询适配器状态，不启动闲置MCP。
 def cmd_adapter_status(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
@@ -456,7 +465,10 @@ def _print_foreground_adapter_status() -> int:
     return 0
 
 
+# LLM: Stop retains exact process selection and original daemon/foreground cleanup; only unused MCP startup is deferred.
+# 函数用途: 延迟MCP后停止所选适配器，保持原停止归属及收尾。
 def cmd_adapter_stop(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)

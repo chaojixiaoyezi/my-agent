@@ -145,34 +145,38 @@ def _print_service_result(result: dict) -> int:
     return 2 if result["errors"] else 0
 
 
-# LLM: CLI唯一make_agent选择同配置与home；不依据当前目录猜服务归属。
+# LLM: CLI唯一make_agent选择同配置与home并延迟闲置MCP；不依据当前目录猜服务归属。
 # 函数用途: 将命令行安装参数交给用户级服务安装器。
 def cmd_supervisor_install_service(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     result = install_supervisor_systemd_service(gateway_paths(agent), config_path=agent.config.config_path,
         home_root=agent.home_paths.root, unit_name=args.unit, start_now=not args.no_start)
     return _print_service_result(result)
 
 
-# LLM: 卸载使用同一Agent的规范回执路径；只处理显式选择的unit。
+# LLM: 卸载使用同一Agent的规范回执路径并延迟MCP；只处理显式选择的unit。
 # 函数用途: 卸载OS看门狗，不直接停止Gateway进程。
 def cmd_supervisor_uninstall_service(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     return _print_service_result(uninstall_supervisor_systemd_service(gateway_paths(agent), unit_name=args.unit))
 
 
-# LLM: 维护只发布有限期意图，不停止服务或修改业务状态。
+# LLM: 维护只发布有限期意图并延迟MCP，不停止服务或修改业务状态。
 # 函数用途: 为所选Gateway写入CLI维护锁并显示回执。
 def cmd_maintenance_lock(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     lock = write_maintenance_lock(gateway_paths(agent), reason=args.reason, ttl_seconds=args.ttl)
     print(json.dumps(lock, ensure_ascii=False))
     return 0
 
 
-# LLM: 解锁幂等且仅作用于所选配置，恢复由后续原监护节奏触发。
+# LLM: 解锁幂等且仅作用于所选配置，构造延迟MCP；恢复由后续原监护节奏触发。
 # 函数用途: 移除维护锁并显示是否已解除。
 def cmd_maintenance_unlock(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     print(json.dumps({"cleared": clear_maintenance_lock(gateway_paths(agent))}))
     return 0
@@ -241,8 +245,10 @@ def _wait_for_supervisor_start(supervisor_pid_path: Path, process: subprocess.Po
 
 # LLM: 原配置/身份预核先行，确认可启动后才沿原可信配置解析的service路径文件系统锚点逐段私有准备；未知记录不建目录/重复spawn，不补身份。
 #   文件系统锚点仅作可信配置路径的no-follow创建起点，不认证owner；先拒上级跳转，防准备和原log打开不同链。
+#   原make_agent仍是路径权威，仅延迟本管理进程不使用的MCP。
 # 函数用途: 为首次监护启动准备规范日志父目录，再创建进程并等待其独立身份回执；既有目录权限不改。
 def cmd_supervisor_start(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
 
@@ -267,9 +273,10 @@ def cmd_supervisor_start(args) -> int:
     return 0
 
 
-# LLM: 唯一CLI组合根沿make_agent解析YAML/环境/owner与工作区一次，runtime只消费这个真实Agent，不能注入任意factory或Count0默认。
+# LLM: 唯一CLI组合根沿make_agent解析YAML/环境/owner与工作区一次，延迟本监护进程不用的MCP；runtime只消费这个真实Agent，不能注入任意factory或Count0默认。
 # 函数用途: 装配实际Agent后进入原监护循环，配置失败仍沿原CLI错误出口。
 def cmd_supervisor_run(args) -> int:
+    args._defer_mcp_connect = True
     try:
         agent = make_agent(args)
         return run_supervisor(
@@ -285,9 +292,10 @@ def cmd_supervisor_run(args) -> int:
         return 2
 
 
-# LLM: 状态命令复用make_agent所得原Agent/配置/paths核实际N，不清PID或另建Agent；supervisor活不等于Gateway ready。
+# LLM: 状态命令延迟MCP，复用make_agent所得原Agent/配置/paths核实际N，不清PID或另建Agent；supervisor活不等于Gateway ready。
 # 函数用途: 分别显示监护进程与原Gateway的可核验健康，不把角色状态混用。
 def cmd_supervisor_status(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     report = read_supervisor_process_report(paths.supervisor_pid)
@@ -308,9 +316,10 @@ def cmd_supervisor_status(args) -> int:
     return 0
 
 
-# LLM: 原CLI组合根固定Agent及规范路径；argparse缺省None或原零值采用25秒覆盖子服务收尾，显式非零预算和原返回码不变。
+# LLM: 原CLI组合根延迟MCP且固定Agent及规范路径；argparse缺省None或原零值采用25秒覆盖子服务收尾，显式非零预算和原返回码不变。
 # 函数用途: 停止所选监护者，默认留足子服务优雅退出时间，不改变停止目标或身份门。
 def cmd_supervisor_stop(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
 
@@ -322,9 +331,10 @@ def cmd_supervisor_stop(args) -> int:
         return 2
 
 
-# LLM: 只构造一次正式Agent，原paths/配置连同Agent运输给ready reader；保留原启动顺序及适配器副作用，不放宽健康门。
+# LLM: 只构造一次延迟MCP的正式Agent，原paths/配置连同Agent运输给ready reader；保留原启动顺序及适配器副作用，不放宽健康门。
 # 函数用途: 沿原监护启动与Gateway就绪后再启动所选适配器，避免健康读取丢失实际拓扑配置。
 def cmd_start_all(args) -> int:
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)

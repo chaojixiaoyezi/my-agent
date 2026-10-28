@@ -90,10 +90,19 @@ def cmd_gateway(args) -> int:
     return 2
 
 
-def ensure_gateway_started(args) -> int:
-
-    agent = make_agent(args)
-    paths = gateway_paths(agent)
+# LLM: Explicit paths are the caller's canonical authority; legacy fallback preserves full-agent resolution but defers and closes precheck MCP.
+# 函数用途: 复用已解析Gateway路径确认启动，未传路径才临时构造原代理且及时收尾。
+def ensure_gateway_started(args, paths=None) -> int:
+    if paths is None:
+        args._defer_mcp_connect = True
+        agent = make_agent(args)
+        try:
+            paths = gateway_paths(agent)
+        finally:
+            close = getattr(getattr(agent, "tools", None), "close_mcp_clients", None)
+            if callable(close):
+                close()
+        del agent, close
     pid, alive = gateway_running(paths)
     if alive:
         return 0
@@ -326,8 +335,10 @@ def _gateway_ask_context(args, agent, paths, submitted: GatewaySubmittedAsk) -> 
     )
 
 
+# LLM: This transient client retains original owner/path/HTTP resolution, only deferring unused local MCP before construction.
+# 函数用途: 延迟MCP后按原协议提交并观察Gateway请求，不改变认证和运输回执。
 def cmd_gateway_ask(args) -> int:
-
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     pid, alive = wait_for_gateway_running(
@@ -360,11 +371,11 @@ def cmd_gateway_ask(args) -> int:
     )
 
 
-# LLM: CLI result reads the canonical terminal envelope. responses/*.json is only a projection and
+# LLM: Defer unused MCP before original construction; CLI result reads the canonical terminal envelope. responses/*.json is only a projection and
 # cannot authorize, complete, or replace a request.
 # 函数用途: 按请求 ID 显示已封存的 Gateway 最终结果。
 def cmd_gateway_result(args) -> int:
-
+    args._defer_mcp_connect = True
     agent = make_agent(args)
     paths = gateway_paths(agent)
     terminal_path = paths.terminal / f"{args.request_id}.json"
