@@ -1,4 +1,5 @@
-
+# LLM: 进程缓存只复用内容hash对应的provider投影；每次先验canonical完整性，返回值不共享可变引用。
+# 模块用途: 有界缓存宿主扩展剥离结果，按调用生成隔离的模型工具Schema。
 from __future__ import annotations
 
 """LLM: provider 适配只渲染 run 快照里的 canonical ToolModelSpec。
@@ -6,6 +7,7 @@ from __future__ import annotations
 模块用途: 把统一工具输入结构包装成 Anthropic/OpenAI 原生工具定义，保持模型与运行时一致。
 """
 
+import threading
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
@@ -14,16 +16,30 @@ from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
 if TYPE_CHECKING:
     from ..tooling.models import ToolModelSpec
 
+_STRIPPED_SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
+_STRIPPED_SCHEMA_CACHE_LOCK = threading.Lock()
+_STRIPPED_SCHEMA_CACHE_MAX_ENTRIES = 1024
 
-# LLM: canonical schema 里的宿主扩展参与哈希与运行时校验，但第三方 provider 不承诺接受未知关键字；这里只剥离精确注册的宿主键，不弱化标准 Schema。
-# 函数用途: 校验快照完整性并生成可安全发送给模型服务商的隔离 Schema 副本。
+
+# LLM: 先assert再查hash缓存；miss还须核副本hash，防校验后并发篡改污染旧hash槽，返回再深拷贝。
+# 函数用途: 复用宿主扩展剥离结果，保持每次返回可独立修改且不污染canonical或进程缓存。
 def tool_model_spec_to_input_schema(spec: ToolModelSpec) -> dict[str, Any]:
     """Return the provider-safe snapshotted schema after verifying its hash."""
 
     spec.assert_schema_hash()
-    schema = deepcopy(spec.input_schema)
-    _strip_host_schema_extensions(schema)
-    return schema
+    with _STRIPPED_SCHEMA_CACHE_LOCK:
+        cached = _STRIPPED_SCHEMA_CACHE.get(spec.schema_hash)
+        if cached is None:
+            cached = deepcopy(spec.input_schema)
+            from ..tooling.models import tool_schema_hash
+
+            if tool_schema_hash(cached) != spec.schema_hash:
+                raise ValueError(f"tool input_schema mutated during provider snapshot: {spec.name}")
+            _strip_host_schema_extensions(cached)
+            if len(_STRIPPED_SCHEMA_CACHE) >= _STRIPPED_SCHEMA_CACHE_MAX_ENTRIES:
+                _STRIPPED_SCHEMA_CACHE.pop(next(iter(_STRIPPED_SCHEMA_CACHE)))
+            _STRIPPED_SCHEMA_CACHE[spec.schema_hash] = cached
+    return deepcopy(cached)
 
 
 # LLM: 用显式栈遍历整棵 schema 以支持嵌套对象声明；仅移除当前宿主拥有的互斥扩展，其它 x-* annotation 保持原行为。
