@@ -491,6 +491,15 @@ def test_push_real_http_exact_signature_and_idempotency(portal):
         assert api(portal, "/api/pentest/secops/repro-dispatch", request)[1]["dispatch_id"] == result["dispatch_id"]
         assert len(received) == 1
         assert api(portal, "/api/pentest/secops/repro-dispatch/" + result["dispatch_id"])[1]["push_id"] == "push-real-1"
+        status, persisted = api(portal, "/api/pentest/secops/repro-dispatch/" + result["dispatch_id"] + "/status")
+        assert status == 200 and persisted == result
+        other = portal.issue_session("other-owner")
+        for suffix in ("", "/status"):
+            path = "/api/pentest/secops/repro-dispatch/" + result["dispatch_id"] + suffix
+            assert api(portal, path, token=other)[0] == 404
+            assert api(portal, path, token="")[0] == 401
+        assert api(portal, "/api/pentest/secops/repro-dispatch", request, token="")[0] == 401
+        assert len(received) == 1, "状态查询不能再次发送推送"
         request["payload"] = {"different": True}
         assert api(portal, "/api/pentest/secops/repro-dispatch", request)[0] == 409
     finally:
@@ -936,6 +945,233 @@ def test_data_pure_pcap(portal_module):
         portal_module.parse_secops_pcap(data_test_pcap(), max_packets=0)
     empty = struct.pack("<IHHIIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)
     assert portal_module.parse_secops_pcap(empty)["query_evidence"]["source_has_no_data"] is None
+
+
+# LLM: Independent fixture encoder only; lengths, padding and duplicated trailers follow the wire format, not product helpers.
+# 函数用途: 编码合成 PCAPNG 块，不运行或发送其中的流量。
+def data_test_pcapng_block(kind, body, endian="<"):
+    padded = body + b"\0" * (-len(body) % 4)
+    length = len(padded) + 12
+    return struct.pack(endian + "II", kind, length) + padded + struct.pack(endian + "I", length)
+
+
+# LLM: Synthetic SHB/IDB/EPB/SPB fixture; packet bytes reuse a legal classic packet without passing through the parser.
+# 函数用途: 生成大小端最小抓包，支持接口时间选项、无时间戳简单包和截断捕获。
+def data_test_pcapng(endian="<", *, simple=False, options=b"", snaplen=65535, captured=None, vlan=False):
+    section = data_test_pcapng_block(0x0A0D0D0A, struct.pack(endian + "IHHq", 0x1A2B3C4D, 1, 0, -1), endian)
+    interface = data_test_pcapng_block(1, struct.pack(endian + "HHI", 1, 0, snaplen) + options, endian)
+    frame = data_test_pcap(vlan=vlan)[40:]
+    count = len(frame) if captured is None else captured
+    if simple:
+        packet = struct.pack(endian + "I", len(frame)) + frame[:count]
+    else:
+        packet = struct.pack(endian + "IIIII", 0, 0, 100500000, count, len(frame)) + frame[:count]
+    return section + interface + data_test_pcapng_block(3 if simple else 6, packet, endian)
+
+
+@pytest.mark.parametrize("endian", ["<", ">"])
+@pytest.mark.parametrize("simple", [False, True])
+def test_data_pcapng_minimal_packet_blocks(portal_module, endian, simple):
+    blob = data_test_pcapng(endian, simple=simple)
+    parsed = portal_module.parse_secops_pcap(blob)
+    assert parsed["packet_count"] == 1 and parsed["flow_count"] == 1
+    assert parsed["dns_queries"] == ["unit.invalid"]
+    flow = parsed["flows"][0]
+    assert (flow["src_ip"], flow["dst_ip"], flow["protocol"]) == ("10.0.0.1", "10.0.0.2", "UDP")
+    evidence = parsed["query_evidence"]
+    assert evidence["source_kind"] == "uploaded_pcapng" and evidence["input_bytes"] == len(blob)
+    assert evidence["byte_order"] == ("little" if endian == "<" else "big")
+    assert evidence["captured_records"] == evidence["decoded_packets"] == 1
+    expected = None if simple else 100.5
+    assert evidence["observed_time_range"] == {"start": expected, "end": expected}
+    assert flow["first_seen"] == flow["last_seen"] == expected
+    if simple:
+        assert "pcapng_packets_without_timestamps" in parsed["warnings"]
+
+
+@pytest.mark.parametrize("endian", ["<", ">"])
+@pytest.mark.parametrize("resolution,units", [(9, 10**9), (0x80 | 10, 2**10)])
+def test_data_pcapng_interface_timestamp_options(portal_module, endian, resolution, units):
+    options = (struct.pack(endian + "HHB3x", 9, 1, resolution)
+               + struct.pack(endian + "HHq", 14, 8, -10) + b"\0" * 4)
+    parsed = portal_module.parse_secops_pcap(data_test_pcapng(endian, options=options))
+    assert parsed["flows"][0]["first_seen"] == pytest.approx(100500000 / units - 10)
+    assert parsed["query_evidence"]["timestamp_resolution"] == units
+
+
+def test_data_pcapng_sections_interfaces_and_packet_limits(portal_module):
+    first = data_test_pcapng()
+    second = data_test_pcapng(">", simple=True)
+    parsed = portal_module.parse_secops_pcap(first + second, max_packets=2)
+    assert parsed["packet_count"] == 2 and parsed["flows"][0]["packets"] == 2
+    assert parsed["query_evidence"]["byte_order"] == "mixed"
+    assert parsed["flows"][0]["first_seen"] == parsed["flows"][0]["last_seen"] == 100.5
+    with pytest.raises(portal_module.PortalError) as error:
+        portal_module.parse_secops_pcap(first + second, max_packets=1)
+    assert error.value.code == "PCAP_LIMIT"
+    with pytest.raises(portal_module.PortalError) as error:
+        portal_module.parse_secops_pcap(first + b"\0" * (8 * 1024 * 1024))
+    assert error.value.code == "INVALID_PCAP"
+    empty = portal_module.parse_secops_pcap(first[:48])
+    assert empty["packet_count"] == 0 and empty["query_evidence"]["source_has_no_data"] is None
+    # Interface 1 is valid only after its IDB, and carries its own snap length.
+    interface = data_test_pcapng_block(1, struct.pack("<HHI", 1, 0, 65535))
+    packet = bytearray(first[48:])
+    struct.pack_into("<I", packet, 8, 1)
+    assert portal_module.parse_secops_pcap(first[:48] + interface + packet)["packet_count"] == 1
+    with pytest.raises(portal_module.PortalError) as error:
+        portal_module.parse_secops_pcap(first + second[:28] + packet)
+    assert error.value.code == "MALFORMED_PCAP"
+
+
+@pytest.mark.parametrize("simple", [False, True])
+def test_data_pcapng_snaplen_truncation(portal_module, simple):
+    parsed = portal_module.parse_secops_pcap(data_test_pcapng(simple=simple, snaplen=34, captured=34))
+    assert parsed["packet_count"] == 1 and parsed["flow_count"] == 0
+    assert parsed["query_evidence"]["truncated_capture_packets"] == 1
+    assert "snaplen_truncated_packets" in parsed["warnings"]
+
+
+# LLM: Compare the same legal wire truncation across all supported containers; no product encoding helpers are used.
+# 函数用途: 构造完整头部不足的合法截断包，或原始长度也同样短的真正畸形包。
+def data_test_short_capture(kind, captured, *, vlan=False, original_short=False):
+    if kind == "classic":
+        blob = data_test_pcap(vlan=vlan)
+        original = captured if original_short else len(blob) - 40
+        return blob[:24] + struct.pack("<IIII", 100, 0, captured, original) + blob[40:40 + captured]
+    blob = bytearray(data_test_pcapng(simple=kind == "spb", snaplen=captured, captured=captured, vlan=vlan))
+    if original_short:
+        struct.pack_into("<I", blob, 56 if kind == "spb" else 72, captured)
+    return bytes(blob)
+
+
+@pytest.mark.parametrize("kind", ["classic", "epb", "spb"])
+@pytest.mark.parametrize("captured", [10, 14, 16, 24])
+def test_pcap_truncated_headers_are_undecoded_not_malformed(portal_module, kind, captured):
+    parsed = portal_module.parse_secops_pcap(data_test_short_capture(kind, captured))
+    assert parsed["packet_count"] == 1 and parsed["flow_count"] == 0
+    assert parsed["query_evidence"]["truncated_capture_packets"] == 1
+    assert parsed["query_evidence"]["unsupported_or_skipped_packets"] == 1
+    assert "snaplen_truncated_packets" in parsed["warnings"]
+
+
+@pytest.mark.parametrize("kind", ["classic", "epb", "spb"])
+def test_pcap_truncated_vlan_header_is_undecoded(portal_module, kind):
+    parsed = portal_module.parse_secops_pcap(data_test_short_capture(kind, 16, vlan=True))
+    assert parsed["packet_count"] == 1 and parsed["flow_count"] == 0
+    assert parsed["query_evidence"]["unsupported_or_skipped_packets"] == 1
+
+
+@pytest.mark.parametrize("kind", ["classic", "epb", "spb"])
+def test_pcap_nontruncated_short_frame_still_rejected(portal_module, kind):
+    with pytest.raises(portal_module.PortalError) as error:
+        portal_module.parse_secops_pcap(data_test_short_capture(kind, 10, original_short=True))
+    assert error.value.code == "MALFORMED_PCAP"
+
+
+@pytest.mark.parametrize("delta", [-4, 0, 4])
+def test_pcapng_explicit_section_length(portal_module, delta):
+    blob = bytearray(data_test_pcapng())
+    struct.pack_into("<q", blob, 16, len(blob) - 28 + delta)
+    if delta == 0:
+        assert portal_module.parse_secops_pcap(bytes(blob))["packet_count"] == 1
+    else:
+        with pytest.raises(portal_module.PortalError) as error:
+            portal_module.parse_secops_pcap(bytes(blob))
+        assert error.value.code == "MALFORMED_PCAP"
+
+
+def test_pcapng_multiple_interface_resolutions_and_timestamp_high_word(portal_module):
+    first = data_test_pcapng()
+    options = struct.pack("<HHB3x", 9, 1, 9) + b"\0" * 4
+    interface = data_test_pcapng_block(1, struct.pack("<HHI", 1, 0, 65535) + options)
+    packet = bytearray(first[48:])
+    struct.pack_into("<III", packet, 8, 1, 1, 1)
+    parsed = portal_module.parse_secops_pcap(first + interface + packet)
+    assert parsed["packet_count"] == 2
+    assert parsed["query_evidence"]["timestamp_resolution"] is None
+    assert parsed["flows"][0]["first_seen"] == pytest.approx((2**32 + 1) / 10**9)
+    assert parsed["flows"][0]["last_seen"] == 100.5
+
+
+def test_pcapng_simple_packets_do_not_invent_periodicity(portal_module):
+    first = data_test_pcapng(simple=True)
+    parsed = portal_module.parse_secops_pcap(first[:48] + first[48:] * 6)
+    assert parsed["packet_count"] == 6
+    assert parsed["flows"][0]["first_seen"] is None
+    assert not any(a["kind"] == "periodic_traffic" for a in parsed["anomalies"])
+
+
+@pytest.mark.parametrize("damage", ["bad_end_length", "after_end", "duplicate_resolution", "spb_extra"])
+def test_pcapng_option_terminators_and_simple_length(portal_module, damage):
+    if damage == "spb_extra":
+        blob = data_test_pcapng(simple=True)
+        body = blob[56:-4] + b"\0" * 4
+        blob = blob[:48] + data_test_pcapng_block(3, body)
+    else:
+        options = {"bad_end_length": struct.pack("<HH", 0, 1),
+                   "after_end": b"\0" * 4 + b"bad!",
+                   "duplicate_resolution": struct.pack("<HHB3x", 9, 1, 6) * 2}[damage]
+        blob = data_test_pcapng(options=options)
+    with pytest.raises(portal_module.PortalError) as error:
+        portal_module.parse_secops_pcap(blob)
+    assert error.value.code == "MALFORMED_PCAP"
+
+
+@pytest.mark.parametrize("endian", ["<", ">"])
+@pytest.mark.parametrize("resolution,magic", [(10**6, 0xA1B2C3D4), (10**9, 0xA1B23C4D)])
+def test_classic_pcap_all_four_magic_values(portal_module, endian, resolution, magic):
+    blob = bytearray(data_test_pcap(endian))
+    struct.pack_into(endian + "I", blob, 0, magic)
+    struct.pack_into(endian + "I", blob, 28, resolution // 2)
+    parsed = portal_module.parse_secops_pcap(bytes(blob))
+    assert parsed["packet_count"] == 1 and parsed["dns_queries"] == ["unit.invalid"]
+    assert parsed["flows"][0]["first_seen"] == 100.5
+    assert parsed["query_evidence"]["timestamp_resolution"] == resolution
+
+
+@pytest.mark.parametrize("damage", [
+    "bom", "short_block", "unaligned_block", "trailer", "truncated", "missing_interface",
+    "unknown_interface", "captured_gt_original", "snaplen", "short_packet", "bad_options",
+])
+def test_data_pcapng_rejects_malformed_blocks(portal_module, damage):
+    blob = bytearray(data_test_pcapng())
+    if damage == "bom":
+        blob[8:12] = b"bad!"
+    elif damage == "short_block":
+        struct.pack_into("<I", blob, 4, 8)
+    elif damage == "unaligned_block":
+        struct.pack_into("<I", blob, 4, 29)
+    elif damage == "trailer":
+        struct.pack_into("<I", blob, len(blob) - 4, 12)
+    elif damage == "truncated":
+        blob = blob[:-1]
+    elif damage == "missing_interface":
+        blob = blob[:28] + blob[48:]
+    elif damage == "unknown_interface":
+        struct.pack_into("<I", blob, 56, 1)
+    elif damage == "captured_gt_original":
+        struct.pack_into("<I", blob, 72, 1)
+    elif damage == "snaplen":
+        struct.pack_into("<I", blob, 40, 14)
+    elif damage == "short_packet":
+        blob = blob[:48] + data_test_pcapng_block(6, b"\0" * 16)
+    else:
+        blob = data_test_pcapng(options=struct.pack("<HH", 9, 100))
+    with pytest.raises(portal_module.PortalError) as error:
+        portal_module.parse_secops_pcap(bytes(blob))
+    assert error.value.status == 422 and error.value.code == "MALFORMED_PCAP"
+
+
+def test_pcapng_http_persists_parsed_evidence(portal):
+    raw = data_test_pcapng(">")
+    status, result = api(portal, "/api/secops/investigations/pcap-inspect", {
+        "pcap_base64": base64.b64encode(raw).decode(),
+    })
+    assert status == 200 and result["packet_count"] == 1
+    assert result["sha256"] == hashlib.sha256(raw).hexdigest()
+    row = portal._get("secops_pcap_investigations", result["investigation_id"])
+    assert row["query_evidence"] == result["query_evidence"]
 
 
 # LLM: Pure risk tests distinguish static evidence from runtime proof and forbid secret echo.

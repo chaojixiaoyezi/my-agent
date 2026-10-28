@@ -1,4 +1,42 @@
-## 2026-10-28 Wave 9 A3：SecOps 插件 API 与 SQLite 闭环
+## 2026-10-28 Wave 9 A3 Round 2：lint、状态路径与最小 PCAPNG
+
+来源：完整阅读 `07-tasks/fix-wave9-a3.md`（51行）。工作树 `/tmp/wt-wave9-a3`，分支 `wave9-a3`，本轮起点 `b1506446b11d7387f41bfc1f7b4e245d2706e808`；文档/提交区间检查按派工要求用 `db4d5de92`。外部源码与 ZIP 仍独立交付，不纳入本分支 Git 提交，不安装、启用或部署插件。
+
+### 修复与回归
+
+- 外部 `workbench_server.py` 的26项 Ruff 诊断已清除：去重/排序 import、异常链、超时别名、固定表集合和相同分支合并。为指定6个类补齐直接位于定义上方的 `# LLM:` / `# 类用途:`；新增容器解码函数均保留双层注释。`build_plugin_package.py` 内容未改，指纹不变。
+- 两种 GET `/api/pentest/secops/repro-dispatch/{dispatch_id}` 和追加 `/status` 共读同一 owner 的持久记录。回归检查两路径回执一致、跨 owner 404、无认证401、查询不重发推送。执行期间共享外部文件被其他行动加入旧门户通配分流，造成原推送测试200空结果/预期502却200；本轮只排除 `/api/pentest/secops/` 命名空间，使其仍走原认证服务，未撤销其他并发改动。
+- classic PCAP四种magic的容器读取提取为迭代器，帧解析与DNS/HTTP/静态异常逻辑共用。PCAPNG支持大小端SHB、每节独立IDB、EPB和SPB；校验重复块长度、4字节对齐、接口引用、节边界、捕获长度和选项边界。IDB时间分辨率支持十进制/二进制及秒偏移；SPB无时间戳保持 `None` 并给覆盖警告，不伪造周期性证据。仍限制8MiB、最多10000包/2000流；每节最多256接口，未知块明确记录未解析。未新增流重组或其他链路类型。
+- 首批新增23个参数化用例，涵盖大小端EPB/SPB、时间选项、跨节/多接口、截断捕获、空抓包、包数/字节边界、11种畸形块/选项及真实回环HTTP归档。扩展已有推送回归，未删除/skip/xfail或放宽原断言。
+- Astra high完成固定源码快照的独立只读审查，发现短snaplen把合法捕获误判为畸形。父级补31例，其中15个Ethernet/VLAN/IPv4短头用例先实测失败、16个防误放行/额外覆盖对照已通过；随后修为仅对已由容器证明的截断计未解码，未截断短帧仍拒绝。同步覆盖显式节长度、timestamp high word、多接口不同计时、异常/重复时间选项、SPB多余数据、无时间包不产生周期性及classic四种magic。修正后做了完整动态回归，未把静态审查结论说成执行结果。
+
+实际证据（Python 3.14，工作树根）：原41例全通过；新增目标首次执行24例全部失败（含原推送测试扩展，`a3-r2-red.xml`）；修正通配分流后focused 26例全通过；审查补例的15红/16绿见 `a3-r2-review-red.xml`。当前完整指定文件 **95 passed / 0 failed / 0 errors / 0 skipped**（`.pytest_cache/a3-r2-final-current.xml`）。前一轮95例本身通过但后置摘要发现共享源码被并发加入SSE而变动，因此该轮不作最终版本验收；重新构建后最终pytest前后全部外部 `.py` 及测试文件摘要未变。中间失败不归因沙箱，也不隐去。
+
+复现：
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -m pytest /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short
+ruff check agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/workbench_server.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py
+git diff --check db4d5de92..HEAD
+```
+
+指定 ZIP 已重新构建，原生 `inspect_plugin_package` 通过；逐项核对 ZIP 成员、清单所有摘要及全部内含 `.py` 与外部源码字节相同。当前交付指纹：
+
+| 文件（相对外部 handoff 目录） | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `5552bf48ac58c1d1534d2ddc5961b8fa8d6db4dbc7424735f96c4952af250854` |
+| `build_plugin_package.py` | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `b3f8e7676e9d3f7131a342dfc4dabc2118f27145a4986a1ff9ed3b7904e7e8ee` |
+
+**收口后的共享目录漂移：**上面的全部源码字节核对成立于构建/最终pytest时。之后附加“所有外部文件仍与验收时一致”检查失败，定位到 `dsh_coding_backend.py`、`dsh_coding_portal_ui.py`、`pentest_portal_ui.py` 三份并发修改；本任务的 `workbench_server.py`、构建器、测试文件和已验ZIP未改变。保留上述已验包，不把这三份后续UI/DSH改动冒充已打包或已验证，也不无止境重打包追逐共享目录。集成方若要纳入这些新改动，须冻结目录后另行重建、更新指纹并验收；这项额外全目录一致性检查的失败不隐去。
+
+重要范围外风险：共享源码在本轮过程中还被加入旧门户登录/验证码、DSH/其他pentest分流、SSE与默认 `0.0.0.0` 监听；这些不是本轮实现，未作为已安全验收的功能。其旧门户分支位于原认证前，登录分支未验证密码便按用户名返回管理员展示标记，但未见其token登记为SecOps会话，不能据此宣称已突破SecOps认证；其他分流模块的实际鉴权未验证。不能把本轮95例通过等同于整个新增门户认证安全、可直接上线。没有部署或启停生产服务；全部HTTP测试显式绑定回环。真实Host/企业设备/SSO、跨机可达性、浏览器UI、Windows及Linux CI未验证。交接时须先审查这批并发外部差异，不建议直接发布。
+
+## 2026-10-28 Wave 9 A3：SecOps 插件 API 与 SQLite 闭环（首轮记录）
 
 来源：完整阅读修订后的 `07-tasks/wave9-a3.md`。工作树 `/tmp/wt-wave9-a3`，分支 `wave9-a3`，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。本任务明确允许外部插件目录独立维护源码；仓内仅提交本节、`CODEBASE_TREE.md` 和新测试，不往通用 Host 包塞垂直业务路由。
 
@@ -36,13 +74,7 @@ git diff --check
 
 原生 `inspect_plugin_package(zip_bytes)` 通过；最终交付 ZIP 还逐字节核对内含两份源码，并在 `python -S`、清空 `PYTHONPATH` 的新解释器中实测 MCP 身份/状态和 HTTP 查询，证明不依赖已安装 Host Python 包才能启动。导入边界 findings=0、指定 Ruff 和 diff-check 均通过。没有运行已退休尺寸检查器，没有跑全仓 pytest。
 
-交付指纹（外部源码和 ZIP 不包含在本分支提交内，集成时须保留并核对）：
-
-| 文件（相对外部 handoff 目录） | SHA-256 |
-| --- | --- |
-| `workbench_server.py` | `424eb21e1049f4b31318bd0bf776adb610aee64c41076270aba887e9399691ab` |
-| `build_plugin_package.py` | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
-| `dist/my-agent-web-portal-plugin.zip` | `df5397d986695f67c8de1d12ad46182d1f1995cd5175367273c1d5b2a3f952d8` |
+交付指纹已更新到本文件顶部 Round 2 表；以下首轮行为和41例结果只记录当时版本，不代表并发改动后的整个门户已安全验收。
 
 限制：真实 SIEM/EDR/企业 SSO、A1/A2 宿主、另一台远端节点、浏览器 UI、跨机可达性和 Windows 未验证；MCP 进程组启动当前明确只支持 POSIX。连接器需真实适配器配置；本地 owner 读取硬限 5000 条，超限明确拒绝而非无声截断。YAML 是显式拒绝 alias/tag 等构造的安全子集。未知 daemon 或中断的安全 pending 操作需可信运维核实，不能自动当作完成。
 
