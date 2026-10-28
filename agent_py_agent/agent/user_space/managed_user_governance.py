@@ -1,4 +1,4 @@
-# LLM: 治理权威仅在宿主data；owner镜像不授权。公开动作先解析登记身份，再核宿主注入的actor。
+# LLM: 治理及压缩强制权威仅在宿主data，owner镜像不授权；单用户沿原CAS，批量逐项报告，不伪装跨文件事务。
 # 模块用途: 管理普通本地受管用户的策略、人设、记忆、资产和派单，不接管IM独立用户。
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ _PERSONA_MODES = {"admin_locked", "admin_base_plus_user", "user_autonomous"}
 _ADMIN_WRITE: ContextVar[bool] = ContextVar("managed_governance_admin_write", default=False)
 _ADMIN_MEMORY_WRITE: ContextVar[tuple[str, str] | None] = ContextVar("managed_admin_memory_write", default=None)
 _POLICY_FIELDS = {
+    "user_compact_policy": {"default_trigger_percent": None, "force_locked": False},
     "memory_governance": {"allow_self_learning": True, "require_admin_review_for_long_term": False,
                           "require_admin_review_for_lesson": False, "admin_locked_memory_ids": []},
     "execution_governance": {"allow_self_created_scripts": False, "allow_self_created_workflows": False,
@@ -123,11 +124,19 @@ def _editable_policy_keys() -> set[str]:
     return {*_POLICY_FIELDS, "persona_mode", "memory_curate_mode", "role_title", "role_tags"}
 
 
-# LLM: 嵌套策略的字段和严格类型共用此校验；返回副本，不改变待发表值的所有权。
+# LLM: 嵌套策略严格校验；压缩比例仅int/None、锁仅bool，不因新数值字段放宽其他治理开关。
 # 函数用途: 验证记忆、执行和审核开关的局部更新。
 def _validated_policy_fields(key: str, value: dict) -> dict:
     if type(value) is not dict or set(value) - set(_POLICY_FIELDS[key]):
         raise ValueError("invalid governance policy fields")
+    if key == "user_compact_policy":
+        for name, item in value.items():
+            if name == "force_locked":
+                if type(item) is not bool:
+                    raise ValueError("compact force_locked must be boolean")
+            elif item is not None and (type(item) is not int or not 50 <= item <= 95):
+                raise ValueError("compact percentage must be between 50 and 95")
+        return dict(value)
     for field, item in value.items():
         if field == "admin_locked_memory_ids":
             if type(item) is not list or any(type(v) is not str or not v for v in item):
@@ -165,7 +174,7 @@ def _policy_patch(current: dict, patch: dict) -> dict:
     result = copy.deepcopy(current)
     for key, value in patch.items():
         if key in _POLICY_FIELDS:
-            result[key].update(_validated_policy_fields(key, value))
+            result.setdefault(key, copy.deepcopy(_POLICY_FIELDS[key])).update(_validated_policy_fields(key, value))
             continue
         result[key] = _validated_policy_metadata(key, value)
     return result
@@ -178,6 +187,21 @@ def _require_revision(expected: int | None, actual: int) -> None:
         raise ValueError("invalid expected_revision")
     if expected is not None and expected != actual:
         raise HostAPIError("REVISION_CONFLICT", 409)
+
+
+# LLM: 只读根级host authority，缺失返回None沿用宿主配置；损坏不降级或从owner镜像恢复。
+# 函数用途: 取得管理员全局压缩强制政策，不创建目录或存储。
+def read_global_compact_force_policy(root_dir: Path) -> dict | None:
+    value = LocalUserStore(root_dir).read_json(("data", "managed_user_governance", "compact_force_policy.json"))
+    if value is None:
+        return None
+    percent = value.get("trigger_percent")
+    if (value.get("schema_version") != "compact_admin_force.v1"
+            or type(value.get("revision")) is not int or value["revision"] < 1
+            or type(value.get("force_compact_trigger_percent")) is not bool
+            or percent is not None and (type(percent) is not int or not 50 <= percent <= 95)):
+        raise HostAPIError("GOVERNANCE_STORE_INVALID", 503)
+    return value
 
 
 # LLM: 只由已核身份的治理事务进入；可编辑JSON和admin_override布尔值不能自行建立该活栈。
@@ -204,7 +228,7 @@ class _ManagedMemoryMutation:
     expected_revision: int | None
 
 
-# LLM: 主服务各公开目标入口先用此resolver；actor来自宿主依赖，updated_by不授予权限。
+# LLM: 主服务单用户先核resolver/actor，批量先核全体且逐项CAS，global另核local/main；updated_by不授权限。
 # 类用途: 对已登记的普通本地用户提供统一治理服务。
 class ManagedUserGovernanceService:
     # LLM: root及actor为宿主构造依赖；默认供已鉴权host adapter，不供模型设置actor。
@@ -245,6 +269,82 @@ class ManagedUserGovernanceService:
                 "governance_policy": _GovernanceControl(self.root_dir, uid).policy(),
                 **_managed_overview_counts(home)}
 
+
+    # LLM: 只读已登记目标的host authority，版本与原整份治理记录一致，不另造字段级revision。
+    # 函数用途: 读取用户默认压缩比例及管理员锁。
+    def get_user_compact_policy(self, target_owner_id: str) -> dict[str, Any]:
+        uid, _identity, home = self._target(target_owner_id)
+        policy = _GovernanceControl(self.root_dir, uid).policy()
+        return {"owner_id": home.owner_id, "revision": policy["revision"],
+                **{**_POLICY_FIELDS["user_compact_policy"], **policy.get("user_compact_policy", {})}}
+
+    # LLM: 严格字段校验后沿原set_policy锁/CAS/authority及镜像写口，省略不变、None清除默认比例。
+    # 函数用途: 管理员修改一个受管用户的压缩策略。
+    def set_user_compact_policy(self, target_owner_id: str, policy_patch: dict, expected_revision: int | None = None) -> dict:
+        patch = _validated_policy_fields("user_compact_policy", policy_patch)
+        policy = self.set_policy(target_owner_id, {"user_compact_policy": patch}, expected_revision)
+        return {"owner_id": policy["owner_id"], "revision": policy["revision"], **policy["user_compact_policy"]}
+
+    # LLM: 全部目标先核登记，写入仍逐项重核；原CAS独立，失败后停止并保留已提交/未知/未尝试结果。
+    # 函数用途: 批量设置明确用户或全部受管用户，不宣称跨文件原子事务。
+    def batch_set_users_compact_policy(self, policy_patch: dict, *, user_ids: list[str] | None = None,
+                                      scope: str | None = None, expected_revisions: dict | None = None) -> dict:
+        if self.actor_owner != OwnerIdentity.local_main():
+            raise ManagedUserScopeDeniedError()
+        patch = _validated_policy_fields("user_compact_policy", policy_patch)
+        if scope == "all_managed_users" and user_ids is None:
+            requested = LocalUserStore(self.root_dir).list_user_ids()
+        elif scope is None and type(user_ids) is list and user_ids and all(type(uid) is str for uid in user_ids):
+            requested = user_ids
+        else:
+            raise ValueError("select user_ids or all_managed_users")
+        targets = [self._target(target)[0] for target in requested]
+        if len(set(targets)) != len(targets):
+            raise ValueError("duplicate compact policy targets")
+        revisions = expected_revisions or {}
+        if type(revisions) is not dict or set(revisions) - set(targets):
+            raise ValueError("invalid compact policy revisions")
+        for revision in revisions.values():
+            if type(revision) is not int or revision < 0:
+                raise ValueError("invalid compact policy revision")
+        items, stopped = [], False
+        for uid in targets:
+            if stopped:
+                items.append({"owner_id": "local/" + uid, "status": "not_attempted"})
+                continue
+            try:
+                result = self.set_user_compact_policy(uid, patch, revisions.get(uid))
+                items.append({**result, "status": "applied"})
+            except HostAPIError as error:
+                stopped = True
+                items.append({"owner_id": "local/" + uid, "status": "revision_conflict" if error.code == "REVISION_CONFLICT" else "unknown",
+                              "error_code": error.code})
+        return {"atomic": False, "partial": stopped and any(item["status"] == "applied" for item in items), "items": items}
+
+    # LLM: 三别名只在核实local/main后归一；None为未赋值、False清除，矛盾值在写前400拒绝；global锁/CAS及规范存储键不变。
+    # 函数用途: 管理员用任一公开别名切换全局压缩强制开关及可选比例。
+    def set_global_compact_force_policy(self, force_compact_trigger_percent: bool | None = None, *,
+                                        admin_force_compact_trigger_percent: bool | None = None,
+                                        memory_compact_admin_forced: bool | None = None, trigger_percent: int | None = None,
+                                        expected_revision: int | None = None) -> dict:
+        if self.actor_owner != OwnerIdentity.local_main():
+            raise ManagedUserScopeDeniedError()
+        values = [value for value in (force_compact_trigger_percent, admin_force_compact_trigger_percent,
+                                      memory_compact_admin_forced) if value is not None]
+        if not values or any(type(value) is not bool for value in values) or any(value != values[0] for value in values):
+            raise HostAPIError("INVALID_ARGUMENT", 400, message="Compact force aliases require one consistent boolean value.")
+        if trigger_percent is not None and (type(trigger_percent) is not int or not 50 <= trigger_percent <= 95):
+            raise ValueError("invalid global compact policy")
+        store = LocalUserStore(self.root_dir)
+        with store.locked(("data", "managed_user_governance", ".compact-force.lock")):
+            current = read_global_compact_force_policy(self.root_dir) or {"revision": 0}
+            _require_revision(expected_revision, current["revision"])
+            result = {"schema_version": "compact_admin_force.v1", "revision": current["revision"] + 1,
+                      "force_compact_trigger_percent": values[0],
+                      "trigger_percent": trigger_percent if trigger_percent is not None else current.get("trigger_percent"),
+                      "updated_at": now_utc(), "updated_by": "local/main"}
+            store.write_json(("data", "managed_user_governance", "compact_force_policy.json"), result)
+            return result
 
     # LLM: 正文仅限登记受管用户；模式和修订读取宿主authority，不信任镜像版本。
     # 函数用途: 读取受管人格全文、管理员底线和修订。

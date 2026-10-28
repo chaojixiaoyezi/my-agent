@@ -59,6 +59,8 @@ from .runtime.run_params import (
 )
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 类用途: 保存本回合提示、任务与方法快照，供退出时完整恢复。
 @dataclass(frozen=True)
 class _PromptScopeSnapshot:
     had_prompt: bool
@@ -69,8 +71,7 @@ class _PromptScopeSnapshot:
     previous_skills: object
 
 
-# LLM: Gateway conversation compact may release only this attempt's pre-provider active inputs;
-# callers outside agent_core use this narrow runtime boundary instead of importing private leaves.
+# LLM: Gateway 会话压缩只能释放本次供应商调用前的活动输入；agent_core 外部调用方必须使用这个窄运行时边界，不导入私有叶子模块。
 # 函数用途: 在 Compact 续跑前释放本轮尚未提交给模型的活动回合补充消息。
 def release_active_turn_inputs_for_compact(
     agent: object,
@@ -81,7 +82,7 @@ def release_active_turn_inputs_for_compact(
     return release_reserved_turn_input_after_attempt(agent, params)
 
 
-# LLM: 先固定旧临时状态，再在同一 try/finally 中安装参数与快照；包括 yield 前的过期引用错误也必须恢复。
+# LLM: 安装参数/能力后按本轮规范thread冻结压缩比例；同try/finally恢复临时状态，live/finalization不重读变动设置。
 # 函数用途: 进入逐 run prompt/能力快照范围，并冻结会话方法名单；退出恢复原线程状态。
 @contextmanager
 def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
@@ -108,11 +109,20 @@ def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = Non
             agent._current_run_params = params
         agent._current_skill_snapshot = _turn_skill_snapshot(agent)
         freeze_conversation_methods(agent)
-        yield
+        from ..conversation.compact_threshold_policy import compact_policy_scope
+
+        attributes = getattr(params, "task_attributes", None) or {}
+        thread_id = attributes.get("conversation_thread_id") if isinstance(attributes, dict) else None
+        store = getattr(agent, "conversation_store", None)
+        thread = store.threads.load(thread_id) if store is not None and thread_id else None
+        with compact_policy_scope(agent, thread) if thread is not None else nullcontext():
+            yield
     finally:
         _restore_current_prompt(agent, snapshot)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 恢复进入回合前的当前提示及其关联运行状态。
 def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
     if snapshot.had_prompt:
         agent._current_user_prompt = snapshot.previous_prompt
@@ -128,6 +138,8 @@ def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
         delattr(agent, "_current_skill_snapshot")
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 取得本回合可用技能的冻结快照，不另建授权来源。
 def _turn_skill_snapshot(agent):
     provider = getattr(agent, "skill_snapshot_for_run_scope", None)
     if not callable(provider):
@@ -275,6 +287,8 @@ class SimpleAgentRuntimeMixin:
             candidates=self.memory_candidates, promotion=self.memory_promotion, long_term=self.memory,
         ), content, kind=kind)
 
+    # LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+    # 函数用途: 按给定查询和数量检索记忆，数量缺省沿当前配置。
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
@@ -698,7 +712,7 @@ def _settle_main_agent_run_status(
         pass
 
 
-# LLM: Child Compact and active-Goal boundaries stay in the exact outer runner; only that lifecycle may finally settle them.
+# LLM: 子代理压缩与活动目标边界仍属于准确的外层执行器，只有该生命周期能最终结算它们。
 # 函数用途: 子代理压缩或 Goal 下一轮不能提前注销执行凭证；错误、停止和已完成目标仍正常收口。
 def _task_local_continuation_keeps_attempt_open(agent, params: RunParams, result: object) -> bool:
     attrs = getattr(params, "task_attributes", None)
@@ -760,10 +774,9 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
     _settle_terminal_conversation_task_run(agent, params)
 
 
-# LLM: A TaskRun spans every foreground/background slice and descendant of one conversation task. This runs on root and
-# child terminal edges so either side of their race can complete the same CAS. The decision itself (root terminal, link
-# terminal or truly absent, tree terminal/quiescent) lives in conversation/task_run_closeout.settle_terminal_task_run, which
-# the gateway /recover child branch also calls (gateway_parts may not import agent_core); keep both callers on that function.
+# LLM: TaskRun 覆盖一个会话任务的全部前后台片及后代；根与子代理终态均调用这里，让竞争任一方都能完成同一CAS。
+# 根终态、任务链接终态或确实不存在、代理树终态或静止等裁决只属于 conversation/task_run_closeout.settle_terminal_task_run；
+# Gateway 的 /recover 子代理分支也调用它，gateway_parts 不可导入 agent_core，两个调用方必须保持共用该函数。
 # 函数用途: 在任一代理执行收口后核对持久会话任务状态，并幂等关闭整棵任务执行总账；没有会话任务的请求在代理树结束后同样关闭。
 def _settle_terminal_conversation_task_run(agent: object, params: object) -> None:
     settle_terminal_task_run(
@@ -1031,6 +1044,8 @@ def _settle_approval_retirement_run(agent, params, error):
     return record_approval_retirement_run(error, agent, params)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 构造压缩后自动续跑的参数，保留原任务身份和已完成步骤。
 def _compact_auto_continue_params(
     params: RunParams,
     injection: str,
@@ -1102,6 +1117,8 @@ def _result_added_tool_progress(
     return not _result_has_no_tool_progress(result)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 判断归档记录是否确有工具推进，不从模型正文猜执行结果。
 def _archive_record_is_tool_progress(record: dict[str, object]) -> bool:
     tool_name = str(record.get("tool") or "").strip()
     error_code = str(record.get("error_code") or "").strip().upper()
@@ -1110,12 +1127,16 @@ def _archive_record_is_tool_progress(record: dict[str, object]) -> bool:
     return bool(tool_name)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 判断本轮结果是否缺少工具进展，供自动续跑策略使用。
 def _result_has_no_tool_progress(result) -> bool:
     return int(getattr(result, "tool_rounds", 0) or 0) <= 0 and not list(
         getattr(result, "executed_tools", None) or []
     )
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 筛出非压缩型的自动上下文注入，保留原注入顺序。
 def _non_compact_auto_injections(injections: list[str] | None) -> list[str]:
     return [
         item
@@ -1156,6 +1177,8 @@ def _merged_archive_tool_calls(
     return merged
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 从工具记录参数里读取规范路径，供去重索引使用。
 def _record_parameter_path(record: dict[str, object]) -> str:
     params = record.get("parameters")
     if not isinstance(params, dict):
@@ -1167,6 +1190,8 @@ def _record_parameter_path(record: dict[str, object]) -> str:
     return ""
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 把工具参数编码成稳定去重键，不修改原参数。
 def _record_parameters_key(record: dict[str, object]) -> str:
     params = record.get("parameters")
     if not isinstance(params, dict):
@@ -1177,6 +1202,8 @@ def _record_parameters_key(record: dict[str, object]) -> str:
         return ""
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 从本轮结果提取待延后执行的工具调用，不重复执行已完成调用。
 def _pending_deferred_tool_calls_from_result(source_result) -> list[dict[str, object]]:
     packet = getattr(source_result, "memory_compact_auto_continue_packet", None)
     if not isinstance(packet, dict):

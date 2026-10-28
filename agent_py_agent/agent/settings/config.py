@@ -1,12 +1,11 @@
-
-from __future__ import annotations
-
 # LLM: 默认值须与随包 YAML 一致；主会话沟通开关仅供提示构造消费，B5 超时同步规范化/参数边界，覆盖仍由原 owner/thread 保存。
 #   显式后台回执开关只管新结构策略的可用性，不能重解释旧 always 通知或把供应商空响应当静默成功。
 #   群引用附件开关沿原通道启动接线，只改变准确父消息资源读取，不授予原发送者身份或跨群文件权限。
 #   host_home_snapshot只承运C构造期已解析home；host_only元数据与来源白名单共同排除用户参数，replace不得丢失该原事实。
 # LLM: gateway_worker_process_count是宿主唯一拓扑，YAML/直接构造都严格核非bool非负int，不接受聊天参数覆盖。
 # 模块用途: 定义并加载 Agent 配置，统一显式采样、人格、工具反馈、插件管理与用户确认口径。
+from __future__ import annotations
+
 """智能体配置加载工具。
 
 这个模块干的事情不复杂，但很关键：
@@ -377,6 +376,14 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
+    # 四层策略的管理员默认；用户/会话覆盖另存，强制开关仅由管理员全局来源设置。
+    memory_compact_trigger_percent: int = 80
+    force_compact_trigger_percent: bool = False
+    # 闲置压缩：任一为0即关闭；百分比0..95，启用后的最短静默时间60秒。
+    memory_compact_idle_trigger_percent: int = 60
+    memory_compact_idle_seconds: int = 7200
+    # 每个维护拍最多检查的会话数；0关闭该维护拍，不扫描或迁移线程。
+    memory_compact_idle_max_per_tick: int = 2
     memory_compact_auto_trigger_percent: int = 90
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。
     memory_compact_auto_trigger_max_tokens: int = 300_000
@@ -673,9 +680,13 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 宿主内部擦洗上界：配置解析/克隆时冻结，不能由 YAML、参数中心或模型覆盖，也不含密钥值。
     host_credential_env_names: tuple[str, ...] = field(default=(), repr=False, metadata={"host_only": True})
 
+    # LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
+    # 函数用途: 查询一个配置项的有效来源，不更改其当前值。
     def config_source_for(self, key: str) -> dict[str, object]:
         return dict(self.config_sources.get(key, {}))
 
+    # LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
+    # 函数用途: 复制配置来源快照，避免调用方修改原来源记录。
     def config_source_snapshot(self) -> dict[str, object]:
         return {
             "schema_version": "agent_config_sources.v1",
@@ -685,7 +696,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         }
 
 
-# LLM: 决策字段在原 YAML 读取后严格校验，不用宽松 coercion 把非法时间变成另一有效设置。
+# LLM: 原YAML决策严格校验保持；两个管理员强制别名由规范化转换成唯一字段，不当未知键忽略。
 # 函数用途: 加载原部署配置与来源，拒绝无效决策字段，不创建 Agent 或发网络请求。
 def load_config(config_path: str | Path) -> AgentConfig:
 
@@ -693,6 +704,10 @@ def load_config(config_path: str | Path) -> AgentConfig:
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
     raw = load_simple_yaml(path)
+    if {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"} & raw.keys():
+        from .memory import normalize_memory_settings
+
+        raw["force_compact_trigger_percent"] = normalize_memory_settings(raw)[0].force_compact_trigger_percent
     from .decision_settings_defaults import validate_config_decision_fields
 
     raw.update(validate_config_decision_fields(raw, domain="agent"))
@@ -703,7 +718,8 @@ def load_config(config_path: str | Path) -> AgentConfig:
     # 过滤未知字段。运行时诊断字段只由 loader 写入，不能从 YAML 注入。
     allowed = _public_config_keys()
     raw_keys = set(raw)
-    unknown_keys = [key for key in raw_keys if key not in allowed]
+    unknown_keys = [key for key in raw_keys if key not in allowed
+                    and key not in {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"}]
     for key in unknown_keys:
         config_warnings.append(f"unknown config key: {key!r}; ignored")
     resolved_path = str(path.expanduser().resolve())
@@ -724,10 +740,14 @@ def load_config(config_path: str | Path) -> AgentConfig:
     return config
 
 
+# LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
+# 函数用途: 取得公开配置键集合，内部诊断字段不进入用户可写范围。
 def _public_config_keys() -> set[str]:
     return public_config_keys(AgentConfig)
 
 
+# LLM: 配置值/来源入口；公开值与内部诊断分离，日志设置副作用限原进程，联测配置加载。
+# 函数用途: 将有效日志级别应用到进程日志配置。
 def apply_log_level(config: AgentConfig) -> None:
     from ..common.log_redaction import install_log_redaction
 

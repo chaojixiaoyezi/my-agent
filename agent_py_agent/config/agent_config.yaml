@@ -215,8 +215,19 @@ memory_rule_auto_read_limit: 3
 # - always：每轮都尝试加，适合专门做恢复/排障的会话。
 # 偶尔需要时单次运行加 --resume-context 就行，不用改这里。
 memory_resume_auto_context_mode: "off"
-# 自动压缩对话上下文的触发线：用到这个程度就整理一次，把较早内容压成摘要。
-# 数字调小会压缩得更早、保留的原文更少，调大则更晚压缩、更容易顶到上限；如果你的对话经常被压缩打断，可以调大一点。
+# 四级压缩比例：管理员强制 > 当前会话 > 用户默认 > 此管理员默认，实际范围50..95。
+memory_compact_trigger_percent: 80
+# 管理员全局强制开关；开启后用户和会话覆盖不能改变生效比例，运行覆盖层不得解除。
+# 同一管理员配置源也识别 admin_force_compact_trigger_percent / memory_compact_admin_forced，任一true即强制。
+force_compact_trigger_percent: false
+# 会话闲置自动压缩的容量门，默认60%，限制0..95；0关闭此能力。
+memory_compact_idle_trigger_percent: 60
+# 距最后真实用户发言静默多久才尝试闲置压缩，默认2小时；0关闭，启用时最短60秒。
+memory_compact_idle_seconds: 7200
+# 每拍最多检查的会话数，默认2；0关闭扫描，不迁移会话模型选择。
+memory_compact_idle_max_per_tick: 2
+# 旧兼容比例键：只有同一YAML来源未提供 memory_compact_trigger_percent 时才迁移；新旧并列以新键为准。
+# 新配置和代码内运行期设置请使用上面的新键；旧比例迁移后的实际范围同样限制在50..95。
 memory_compact_auto_trigger_percent: 90
 # 自动压缩触发线的绝对上限（单位 tokens），和上面的百分比取小：实际触发线 = min(模型窗口 × 百分比, 这个数)。
 # 默认 0 表示不封顶，行为和以前完全一样。模型窗口很大（比如 1M）时百分比最低也只能压到 50%（50 万），

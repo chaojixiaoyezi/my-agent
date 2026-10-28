@@ -303,16 +303,20 @@ class GatewayPortalDomain:
             return agent
         return None
 
-    # LLM: 类构造只在当前鲜活授权内发生；HomePaths按Owner重建，实例不跨请求缓存。
+    # LLM: 类构造只在鲜活授权内发生；冷管理仅传部署压缩配置，不借main执行器，HomePaths按Owner重建且不缓存实例。
     # 函数用途: 调用W4线程和模型类式后端的单params方法。
     def _call_class(self, authorized, target, context, payload):
+        from inspect import signature
+
         from ..user_space.home_layout import home_paths as root_paths
         from ..user_space.owner_resolver import home_paths_with_owner
 
         handler_class, method = target
         if authorized.call.action.startswith("conversations.threads."):
+            options = _portal_keywords(signature(handler_class), {"agent": self._owner_agent(context), "authorized": authorized,
+                "compact_config": getattr(getattr(self.resources.server, "agent", None), "config", None)})
             handler = handler_class(self.resources.store_for(context), context,
-                                    agent=self._owner_agent(context), authorized=authorized)
+                                    **options)
         else:
             handler = handler_class(home_paths_with_owner(root_paths(context.owner_home.root), context.owner_home))
         return getattr(handler, method)(dict(payload))

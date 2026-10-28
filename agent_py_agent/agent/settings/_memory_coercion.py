@@ -1,7 +1,6 @@
-"""Coercion helpers for memory-related config fields."""
-
 # LLM: 所有记忆字段共用此类型表；模型引用只保留编号，存在、启用与用途由原模型目录解析器校验，不拼接聊天连接。
 # 模块用途: 校验 Memory/Curator 配置类型、枚举与范围，并生成不含秘密的结构化警告。
+"""Coercion helpers for memory-related config fields."""
 
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ COMPACT_TRIGGER_PERCENT_RANGE = (50, 100)
 COMPACT_RECOVERY_PERCENT_RANGE = (25, 80)
 
 
-# LLM: Field specs are the sole coercion rules; max_chars bounds provider/model identifiers without parsing semantics.
+# LLM: 字段规格是唯一类型转换规则；max_chars 只限制供应商及模型身份长度，不解析其语义。
 # 类用途: 描述一个 Memory 配置字段的类型、范围、枚举或长度限制。
 @dataclass(frozen=True)
 class _FieldSpec:
@@ -32,6 +31,8 @@ class _FieldSpec:
     max_chars: int | None = None
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 类用途: 暂存一次配置降级告警的键、原值与原因。
 @dataclass(frozen=True)
 class _WarningDraft:
     field_name: str
@@ -40,6 +41,8 @@ class _WarningDraft:
     reason: str
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 类用途: 描述枚举配置的允许值和默认值，供统一解析。
 @dataclass(frozen=True)
 class _ChoiceCoercion:
     field_name: str
@@ -49,6 +52,8 @@ class _ChoiceCoercion:
     warnings: list[MemoryConfigWarning]
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 类用途: 描述整数配置的范围、默认值与来源信息。
 @dataclass(frozen=True)
 class _IntCoercion:
     field_name: str
@@ -64,6 +69,11 @@ _FIELDS = (
     _FieldSpec("memory_rule_routing_mode", "choice", choices={"off", "soft", "strict"}),
     _FieldSpec("memory_rule_auto_read_limit", "int", 0, None),
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
+    _FieldSpec("memory_compact_trigger_percent", "clamped_int", 50, 95),
+    _FieldSpec("force_compact_trigger_percent", "bool"),
+    _FieldSpec("memory_compact_idle_trigger_percent", "clamped_int", 0, 95),
+    _FieldSpec("memory_compact_idle_seconds", "idle_seconds", 0, None),
+    _FieldSpec("memory_compact_idle_max_per_tick", "int", 0, None),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
     # 0 表示不封顶；负数、非整数回到默认 300000，与 runtime 的 compact_trigger_max_tokens 同一口径。
     _FieldSpec("memory_compact_auto_trigger_max_tokens", "int", 0, None),
@@ -90,7 +100,7 @@ _FIELDS = (
 )
 
 
-# LLM: 原记忆字段维持既有 warning，新增决策字段严格校验，不将非法时间静默替换成另一有效配置。
+# LLM: 原warning及决策校验保持；管理员强制别名在配置源规范化，不进入用户覆盖可写字段。
 # 函数用途: 从配置源构造完整、已验证的 Memory 设置字典。
 def _build_memory_settings_dict(
     source: Mapping[str, Any] | object,
@@ -101,6 +111,10 @@ def _build_memory_settings_dict(
     result: dict[str, Any] = {}
     for spec in _FIELDS:
         result[spec.field_name] = _coerce_field(spec, source, defaults, warnings)
+    for key in ("admin_force_compact_trigger_percent", "memory_compact_admin_forced"):
+        raw = _lookup(source, key)
+        if raw is not _MISSING:
+            result["force_compact_trigger_percent"] |= _coerce_bool(key, raw, default=False, warnings=warnings)
     from .decision_settings_defaults import decision_config_fields, validate_config_decision_fields
 
     decision = {name: _lookup(source, name) for domain, name in decision_config_fields().values() if domain == "memory"}
@@ -109,7 +123,7 @@ def _build_memory_settings_dict(
     return result
 
 
-# LLM: Dispatch is based only on typed FieldSpec.kind; unknown prose or runtime values cannot select another parser.
+# LLM: 只按显式字段规格解析；新比例严格整数夹取，闲置秒数0关闭、启用至少60，不改变旧字段校验。
 # 函数用途: 按字段规格校验并规范化一个 Memory 配置值。
 def _coerce_field(
     spec: _FieldSpec,
@@ -120,6 +134,14 @@ def _coerce_field(
     """Coerce one field spec while preserving user-facing warning order."""
     raw_value = _lookup(source, spec.field_name)
     default = getattr(defaults, spec.field_name)
+    if spec.kind in {"clamped_int", "idle_seconds"}:
+        number = _memory_int_number(raw_value)
+        if number is None:
+            return default
+        number = max(spec.min_value or 0, number)
+        if spec.kind == "idle_seconds":
+            return max(60, number) if number else 0
+        return min(spec.max_value, number)
     if spec.kind == "bool":
         return _coerce_bool(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "choice":
@@ -153,7 +175,7 @@ def _coerce_field(
     )
 
 
-# LLM: Model/provider strings must be short single-line values; booleans/numbers cannot be coerced into identifiers.
+# LLM: 模型及供应商字符串必须是短单行值，不得把布尔值或数字强转成身份标识。
 # 函数用途: 校验后台模型等短字符串配置，非法值回退默认并记录警告。
 def _coerce_string(
     field_name: str,
@@ -206,8 +228,7 @@ def _coerce_compact_trigger_percent(
     return number
 
 
-# LLM: This config parser mirrors runtime compact bounds so YAML cannot produce a different target
-# from direct AgentConfig construction; clamped values remain explicit structured warnings.
+# LLM: 配置解析与运行时压缩边界保持一致，YAML不得产生不同于直接构造AgentConfig的目标；被限幅的值仍须报告明确结构化告警。
 # 范围取自 COMPACT_RECOVERY_PERCENT_RANGE，user_config 自助校验用同一常量。
 # 函数用途: 校验压缩恢复目标百分比，越界时限制到有效范围（25%--80%）并留下配置警告。
 def _coerce_compact_recovery_percent(
@@ -234,6 +255,8 @@ def _coerce_compact_recovery_percent(
     return number
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 从映射或配置对象读取原字段，保留缺省与显式值的差别。
 def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     """Read a raw config field from a mapping or dataclass-like object."""
     if isinstance(source, Mapping):
@@ -241,6 +264,8 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     return getattr(source, field_name, _MISSING)
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 追加一条结构化默认值告警，不输出敏感配置正文。
 def _warn(
     warnings: list[MemoryConfigWarning],
     draft: _WarningDraft,
@@ -256,6 +281,8 @@ def _warn(
     )
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 按原布尔规则解析配置，含糊或注入式字符串不能变成有效开关。
 def _coerce_bool(
     field_name: str,
     raw_value: Any,
@@ -280,6 +307,8 @@ def _coerce_bool(
     return default
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 按有限配置选项解析字符串，非法值记录告警并沿默认。
 def _coerce_choice(params: _ChoiceCoercion) -> str:
     """Parse an enum-like string config value against an allowlist."""
     if params.raw_value is _MISSING:
@@ -295,6 +324,8 @@ def _coerce_choice(params: _ChoiceCoercion) -> str:
     return params.default
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 只按ASCII整数和闭合上下界解析数值配置。
 def _coerce_int(
     request: _IntCoercion,
     *,
@@ -319,6 +350,8 @@ def _coerce_int(
     return number
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 把记忆配置的原始数值转换成受约束整数候选。
 def _memory_int_number(raw_value: Any) -> int | None:
     if isinstance(raw_value, bool):
         return None

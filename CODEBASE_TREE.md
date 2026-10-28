@@ -111,6 +111,21 @@ agent_py_agent/
 - `agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py`：多步工具增量、租约与池寿命解耦、脏连接、一次全量回退、跨owner/session/凭据隔离、HTTP/WS亲和头、reset/compaction失效、配置与usage，以及真实本机loopback WebSocket验证。
 - 既有入口仍为`backends/responses.py`、`oauth.py`及`responses_websocket.py`；没有新增同名影子`openai_responses.py`。配置通过既有settings/config、YAML、BackendOptions与factory，相关合同/命令见`TESTS.md`顶部。
 
+## 2026-10-28 Wave 9 B1：空闲会话压缩与分层比例
+
+```text
+|-- agent_py_agent/agent/conversation/
+|   `-- compact_threshold_policy.py # 四层比例、回合冻结、只读status及threshold/reset解析
+|-- agent_py_agent/agent/gateway_parts/
+|   `-- compact_operations.py # 原审批/坏账保护、规范消息CAS及配置限额维护游标
+`-- agent_py_agent/tests/
+    |-- test_wave9_idle_and_multilevel_compact.py # 分层策略、活动CAS、CLI/Host权限、维护拍和原摘要集成回归
+    |-- test_wave9_idle_compact_and_threshold_policy.py # status/reset、审批坏账、只读扫描及消息尾部竞争回归
+    `-- test_compact_threshold_unification.py # 管理员三个强制键、YAML与运行覆盖一致性
+```
+
+运行策略继续位于 `agent_core/runtime/context_compactor.py`；持久活动代和闲置幂等标记在原 `conversation/store_threads.py`，不建立第二个线程库。治理复用 `user_space/managed_user_governance.py` 及原Host动作目录、授权和幂等分发。范围与未验证边界见 `TESTS.md` 的Wave9 B1条目。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

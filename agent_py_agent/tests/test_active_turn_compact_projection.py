@@ -1,3 +1,5 @@
+# LLM: 显式90%夹具验证活动归档压缩的完整投影、检查点及真实CAS；模型/运输末端仅本地替身，断言不得靠生产默认值漂移。
+# 模块用途: 回归活动回合压缩的容量、取消、来源、作用域和缓存前缀，不访问真实供应商。
 """跨片 Compact 先校验完整请求，再沿真实 Store/checkpoint/CAS 提交；只替身摘要模型。"""
 
 from __future__ import annotations
@@ -61,14 +63,14 @@ _SUMMARY = (
 )
 
 
-# LLM: 测试只替换摘要生成，原边界选择、磁盘归档、checkpoint 内容封印和原子 CAS 全部真实执行。
+# LLM: 正式触发比例与旧自动键都显式设90%，不改默认80%；只替换摘要生成，原边界选择、磁盘归档、checkpoint封印和原子CAS真实执行。
 # 函数用途: 在临时 home 初始化可追踪停止和摘要调用次数的 carried 压缩环境，不使用网络。
 @pytest.fixture
 def carried_case(tmp_path, monkeypatch):
     config = AgentConfig(
         model_backend="echo", my_agent_home=str(tmp_path / "home"), prompt_files=[],
         max_tokens=64, model_context_window_tokens=10_000,
-        memory_compact_auto_trigger_percent=90,
+        memory_compact_auto_trigger_percent=90, memory_compact_trigger_percent=90,
     )
     config.config_sources = {"model_context_window_tokens": {"source": "test"}}
     agent = SimpleAgent(config, tmp_path)
@@ -84,6 +86,8 @@ def carried_case(tmp_path, monkeypatch):
         checkpoint_path=agent.home_paths.owner_compact_dir / "conversations" / f"{thread.thread_id}.jsonl",
     )
 
+    # LLM: 仅在测试内记录原摘要请求并按指定阶段设置停止，不替换检查点或提交链。
+    # 函数用途: 返回固定摘要，让调用次数和摘要后取消可被准确核对。
     def summarize(request):
         case.summaries.append(request)
         if case.stop_after_summary:
@@ -132,6 +136,8 @@ def _assert_uncommitted(case):
     return current
 
 
+# LLM: 完整投影材料、工具和媒体身份须随同一候选提交；真实归档及检查点数字不能被局部估算替代。
+# 函数用途: 验证提交使用准确宿主材料及完整请求计量，原工具记录不变。
 def test_complete_projection_commits_its_exact_material_and_full_measurement(carried_case):
     case = carried_case
     original = deepcopy(case.records)
@@ -141,6 +147,8 @@ def test_complete_projection_commits_its_exact_material_and_full_measurement(car
         "media": [{"type": "image", "ref": "prepared-image"}], "runtime_guidance": "同一准备内的引导",
     }
 
+    # LLM: 投影时真实线程仍未提交，记录宿主材料身份并实际估算整份材料，不写检查点。
+    # 函数用途: 构造可核对同源性及代次的完整候选投影。
     def project(summary, retained_records, expected_generation):
         assert case.store.threads.require(case.thread.thread_id).compact_generation == 0
         assert not case.checkpoint_path.exists()
@@ -174,6 +182,8 @@ def test_complete_projection_commits_its_exact_material_and_full_measurement(car
     assert case.progress[-1]["after_tokens"] == projections[0].projected_tokens
 
 
+# LLM: 缺失结构化来源身份的工具记录不得被摘要隐藏或乱序，真实检查点只声明已验证来源。
+# 函数用途: 逐字段验证未知归档身份被原样保留。
 @pytest.mark.parametrize("missing", ["call_id", "run_id", "attempt_id", "turn_id"])
 def test_candidate_retains_unknown_archive_identity_in_original_order(carried_case, missing):
     case = carried_case
@@ -183,6 +193,8 @@ def test_candidate_retains_unknown_archive_identity_in_original_order(carried_ca
     original = deepcopy(case.records)
     retained = []
 
+    # LLM: 只观察实际保留记录，不补造来源身份；容量返回小值以隔离身份选择合同。
+    # 函数用途: 捕获候选保留的未知身份记录及顺序。
     def project(_summary, records, _generation):
         retained.extend(records)
         return ConversationCompactProjection(100, records)
@@ -197,6 +209,8 @@ def test_candidate_retains_unknown_archive_identity_in_original_order(carried_ca
     assert model_visible_active_turn_tool_calls(case.agent, case.attrs, case.records) == retained
 
 
+# LLM: 缺材料或非法计量必须走类型化失败，不能回落到小估算后取得来源覆盖权。
+# 函数用途: 验证未知完整投影拒绝提交并保留原失败记账。
 @pytest.mark.parametrize("tokens", [None, "unknown", -1, True, 1.5, "missing-material"])
 def test_unknown_projection_never_falls_back_to_small_estimate(carried_case, tokens):
     case = carried_case
@@ -213,16 +227,21 @@ def test_unknown_projection_never_falls_back_to_small_estimate(carried_case, tok
     assert current.compact_consecutive_failures == 1 and not case.checkpoint_path.exists()
 
 
+# LLM: 夹具显式90%得到9000输入上限；恰好等于和超过均拒绝，容量诊断须来自实际完整候选。
+# 函数用途: 验证过大候选不提交且报告准确固定开销及进度计量。
 @pytest.mark.parametrize("tokens", [9_000, 12_000])
 def test_complete_request_at_or_above_trigger_cannot_commit(carried_case, tokens):
     case = carried_case
     projected, measured = [], []
 
+    # LLM: 记录真实摘要与保留来源，固定容量只供边界测试，不替换候选接受门。
+    # 函数用途: 提供到线或越线的完整候选计量。
     def project(summary, records, _generation):
         projected.append((summary, list(records)))
         return ConversationCompactProjection(tokens, object())
 
-    # 宿主的“只计量、不提交”入口：只在候选真被拒时按预计代次调用一次。
+    # LLM: 宿主只计量入口仅在候选真正拒绝后调用，不写状态，代次仍须来自原压缩计划。
+    # 函数用途: 观察固定开销只计量调用并返回明确数值。
     def measure(generation):
         measured.append(generation)
         return ConversationCompactProjection(3_100, object())
@@ -250,10 +269,14 @@ def test_complete_request_at_or_above_trigger_cannot_commit(carried_case, tokens
 
 
 # 只计量入口缺失或投影异常时固定开销如实缺失（None）：failed 进度不带该字段、不补 0，原错误码与其它计量不变。
+# LLM: 固定开销观察缺失或抛错不能伪造零值，也不能遮住原候选容量失败。
+# 函数用途: 验证无固定计量时的失败进度如实缺字段且不提交。
 @pytest.mark.parametrize("measure", ["missing", "raises"])
 def test_rejected_candidate_without_fixed_measurement_leaves_the_field_missing(carried_case, measure):
     case = carried_case
 
+    # LLM: 只模拟可选固定开销投影器失败，候选与原提交链仍真实运行。
+    # 函数用途: 为缺失诊断场景抛出本地只计量异常。
     def broken(_generation):
         raise RuntimeError("只计量入口不可用")
 
@@ -268,6 +291,8 @@ def test_rejected_candidate_without_fixed_measurement_leaves_the_field_missing(c
     _assert_uncommitted(case)
 
 
+# LLM: 输出预留使用真实后端配置，上限比较保持严格小于；模型调用仍为本地替身。
+# 函数用途: 验证扣除输出预算后的2999接受、3000及以上拒绝。
 @pytest.mark.parametrize("tokens,accepted", [(2_999, True), (3_000, False), (4_000, False)])
 def test_actual_backend_output_reserve_limits_the_same_gate(carried_case, tokens, accepted):
     case = carried_case
@@ -287,18 +312,24 @@ def test_actual_backend_output_reserve_limits_the_same_gate(carried_case, tokens
         assert not case.checkpoint_path.exists()
 
 
+# LLM: 摘要、投影及提交边界停止均丢弃候选且不计失败，未获CAS的检查点不能拥有来源覆盖权。
+# 函数用途: 验证停止发生于不同阶段时原始记录可见、代次不前进。
 @pytest.mark.parametrize("stop_at", ["summary", "projection", "committing"])
 def test_cancellation_discards_projected_material_without_publishing(carried_case, stop_at):
     case = carried_case
     case.stop_after_summary = stop_at == "summary"
     projections = []
 
+    # LLM: 返回同一投影对象并按场景设置测试停止位，不替换取消门。
+    # 函数用途: 在完整请求投影期间注入停止。
     def project(*_):
         projections.append(ConversationCompactProjection(100, object()))
         if stop_at == "projection":
             case.stop = True
         return projections[-1]
 
+    # LLM: 只记录真实进度并在指定结构化stage设置停止，不以文案判断阶段。
+    # 函数用途: 在提交进度回调处注入可复现的用户停止。
     def progress(event):
         case.progress.append(event)
         if event["stage"] == stop_at:
@@ -313,13 +344,19 @@ def test_cancellation_discards_projected_material_without_publishing(carried_cas
     assert case.checkpoint_path.exists() is (stop_at == "committing")
 
 
+# LLM: 直接抛出的ToolCancelled不依赖停止位，必须按取消传播且不能打开压缩熔断。
+# 函数用途: 验证摘要或投影直接取消时不记失败、不提交。
 @pytest.mark.parametrize("stop_at", ["summary", "projection"])
 def test_typed_cancellation_without_token_state_does_not_open_circuit(carried_case, monkeypatch, stop_at):
     case = carried_case
 
+    # LLM: 只在原摘要请求边界抛类型化取消，不改其它候选状态。
+    # 函数用途: 模拟没有停止位变化的摘要取消。
     def cancel_summary(_request):
         raise ToolCancelled("摘要直接取消")
 
+    # LLM: 只在完整候选投影边界抛类型化取消，不能被分类为容量失败。
+    # 函数用途: 模拟没有停止位变化的投影取消。
     def cancel_projection(*_args):
         raise ToolCancelled("候选投影直接取消")
 
@@ -338,9 +375,13 @@ def test_typed_cancellation_without_token_state_does_not_open_circuit(carried_ca
     assert case.progress[-1]["stage"] == "candidate_discarded"
 
 
+# LLM: 检查点写完但CAS前的类型化取消必须保留未提交状态，不因已有文件把候选认成成功。
+# 函数用途: 验证提交边界直接取消不会获得摘要或归档覆盖权。
 def test_typed_cancellation_at_after_checkpoint_without_token_state_prevents_cas(carried_case):
     case = carried_case
 
+    # LLM: 依据结构化进度92定位原CAS前边界，记录事件后直接抛类型化取消。
+    # 函数用途: 在检查点已写后的提交进度处停止。
     def progress(event):
         case.progress.append(event)
         if event["percent"] == 92:
@@ -361,10 +402,14 @@ def test_typed_cancellation_at_after_checkpoint_without_token_state_prevents_cas
     assert case.progress[-1]["stage"] == "candidate_discarded"
 
 
+# LLM: 投影期间提交另一个真实候选作为胜者，外层旧代CAS必须拒绝且不覆盖获胜线程。
+# 函数用途: 验证完整请求投影不能绕过真实代次竞争。
 def test_projection_does_not_bypass_real_generation_cas(carried_case):
     case = carried_case
     winner = []
 
+    # LLM: 内层压缩沿真实归档及检查点提交，外层仍持原代快照；只记录内层胜者。
+    # 函数用途: 在投影回调内制造真实压缩代次竞争。
     def project(*_):
         winner.append(_compact(case, records=[_record(10)]))
         return ConversationCompactProjection(100, object())
@@ -379,6 +424,8 @@ def test_projection_does_not_bypass_real_generation_cas(carried_case):
     assert len(case.checkpoint_path.read_text().splitlines()) == 2
 
 
+# LLM: 已准备的供应商请求面和已应用摘要须沿原摘要API传递，不重新构造身份或丢失稳定前缀。
+# 函数用途: 验证第二代活动压缩继承原工具选择、system、摘要及检查点基线。
 def test_existing_provider_surface_and_applied_summary_reach_original_summary_api(carried_case):
     case = carried_case
     first = _compact(case)
@@ -410,6 +457,8 @@ def test_existing_provider_surface_and_applied_summary_reach_original_summary_ap
     assert checkpoint["summary_base_checkpoint_id"] == first.thread.compact_checkpoint_id
 
 
+# LLM: 任务或回合作用域继承自己的操作证据与检查点，不能被线程全局摘要或证据覆盖。
+# 函数用途: 验证局部活动压缩保持作用域隔离和真实来源基线。
 @pytest.mark.parametrize("kind", ["task", "turn"])
 def test_scoped_active_checkpoint_inherits_its_distinct_evidence_not_global(carried_case, monkeypatch, kind):
     case = carried_case
@@ -468,6 +517,8 @@ def test_scoped_active_checkpoint_inherits_its_distinct_evidence_not_global(carr
     assert checkpoint["operation_evidence"] == local.operation_evidence
 
 
+# LLM: 无可复用主请求前缀的活动摘要明确禁止工具选择；只替换HTTP末端，序列化及请求准备真实运行。
+# 函数用途: 验证无前缀摘要只发送一次且不携工具定义或重试工具调用。
 def test_active_turn_summary_without_prefix_contract_sends_none_without_retry(carried_case, monkeypatch):
     case = carried_case
     case.agent.backend = OpenAICompatibleBackend(BackendOptions(
@@ -480,6 +531,8 @@ def test_active_turn_summary_without_prefix_contract_sends_none_without_retry(ca
         "name": "read_file", "description": "读取文件", "parameters": {"type": "object", "properties": {}}
     }}
 
+    # LLM: 捕获真实序列化负载；错误地发送工具时回工具调用，让额外重试暴露，不访问外网。
+    # 函数用途: 为无工具摘要返回可检查的本地供应商响应。
     def post_json(request):
         payload = json.loads(json.dumps(request.payload))
         payloads.append(payload)
@@ -625,6 +678,8 @@ def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case
     fork = _fork_with_previous_summary(fork, previous)
     payloads, measured = [], []
 
+    # LLM: 只替换Responses运输末端，保存原负载并按结构化压缩触发项返回本地响应。
+    # 函数用途: 捕获主请求及压缩请求以核对完整前缀和预算同源。
     def send(_path, payload, _headers, **_options):
         payloads.append(deepcopy(payload))
         output = [BLOCK["item"]] if payload["input"][-1].get("type") == "compaction_trigger" else [
@@ -633,6 +688,8 @@ def test_compactcall_active_archive_wire_and_budget_are_same_source(carried_case
 
     estimate = compact_message_source.estimate_compact_payload
 
+    # LLM: 先保存可重放的完整预算材料，再调用真实估算器，不用伪造计量代替同源性验证。
+    # 函数用途: 记录实际参与预算的消息材料供原序列化器重放。
     def measure(payload):
         measured.append({**payload, "messages": list(deepcopy(list(payload["messages"])))})
         return estimate(payload)

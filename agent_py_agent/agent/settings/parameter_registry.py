@@ -79,7 +79,7 @@ _BOUNDARY_NAMES = frozenset({
 # 守卫见 test_parameter_registry：名单里的键必须存在、不能是安全边界项、必须有说明（过渡期例外单独登记）。顺序即展示顺序。
 COMMON_KEYS = (
     "max_tokens", "request_timeout", "temperature", "model_reasoning_effort",
-    "memory_compact_auto_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
+    "memory_compact_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
     "enable_self_learning", "enable_subagents", "max_subagents",
     "tool_shell_timeout", "tool_shell_output_max_chars", "tool_read_max_chars", "tool_list_max_entries",
     "tool_search_max_matches", "tool_web_max_chars", "tool_http_timeout", "tool_output_externalize_min_chars",
@@ -121,6 +121,8 @@ class ParameterSpec:
     # 来源文件（P17，2026-10-01）：agent/capability/runtime_guard；写入口按它选目标文件与回读加载器。
     source: str = SOURCE_AGENT
 
+    # LLM: 参数目录展示与写权限投影；只读目录不授配置写权，联测边界键与随包说明。
+    # 函数用途: 报告参数能否经参数中心写入，管理员强制项不能自助改写。
     @property
     def writable(self) -> bool:
         return self.key not in BOUNDARY_KEYS and (self.safety == SAFETY_FREE or self.key in TUNABLE_KEYS)
@@ -177,6 +179,7 @@ def is_masked(key: str) -> bool:
     return is_credential_key(key)
 
 
+# LLM: 参数目录展示与写权限投影；只读目录不授配置写权，联测边界键与随包说明。
 # 函数用途: 按键名前缀给参数一个展示分类，未知前缀归“其它”。
 def category_for(key: str) -> str:
     return next((name for prefixes, name in _CATEGORIES if key.startswith(prefixes)), "其它")
@@ -210,11 +213,13 @@ def _descriptions_from_lines(lines: list[str]) -> dict[str, str]:
     return descriptions
 
 
+# LLM: 参数目录展示与写权限投影；只读目录不授配置写权，联测边界键与随包说明。
 # 函数用途: 从随包 YAML 读出每个键的中文说明。
 def _yaml_descriptions() -> dict[str, str]:
     return _descriptions_from_lines(packaged_config_path().read_text(encoding="utf-8").splitlines())
 
 
+# LLM: 参数目录展示与写权限投影；只读目录不授配置写权，联测边界键与随包说明。
 # 函数用途: 返回另两份随包配置（capability/runtime_guard）的路径，与主配置同目录。
 def _packaged_extra_config_path(source: str) -> Path:
     return packaged_config_path().with_name(f"{source}_config.yaml")

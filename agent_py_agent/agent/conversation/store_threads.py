@@ -176,8 +176,7 @@ def _validate_model_selection_update(previous: ConversationThread, updated: Conv
         raise DataCorruptionError("已有模型选择不能重新声明为初始绑定")
 
 
-# LLM: Store commands may receive lists or tuples; normalize them before comparing exact
-# thread scope so serialization shape cannot create a false lineage change.
+# LLM: 存储命令可能收到列表或元组，必须先规范化再比较准确线程作用域，防止序列化形状伪造任务谱系变化。
 # 函数用途: 将会话运行根目录整理成有序、去空、去重的不可变列表。
 def normalized_runtime_workspace_roots(value: object) -> tuple[str, ...]:
     items = value if isinstance(value, (list, tuple)) else ()
@@ -301,6 +300,12 @@ def _preserve_plugin_thread_state(before: dict | None, updated: ConversationThre
     return replace(updated, metadata={**updated.metadata, "plugin_host_v2": state})
 
 
+# LLM: 活动冲突仅表示旧闲置候选让位，不计模型失败；供原CAS与闲置维护做类型化处理。
+# 类用途: 表示用户发言或同代闲置压缩已经完成。
+class IdleCompactActivityChanged(RuntimeError):
+    pass
+
+
 # LLM: 原线程元数据与通道绑定唯一存储；身份校验与扩展合并在类外小函数，仍在同一文件锁内守住 CAS，不建立第二状态源。
 # 类用途: 保存线程、目录与通道绑定，防止迟到更新回退模型/目录；默认模型只初始化新线程。
 class ThreadStore:
@@ -345,8 +350,7 @@ class ThreadStore:
         with locked_file_transition(self.storage.threads_dir / f".channel-{digest}", **({} if blocking else {"blocking": False})):
             return _get_or_create_bound_thread(self, request, **({} if blocking else {"blocking": False}))
 
-    # LLM: Keep this adapter small; exact-id creation and collision checks live in
-    # agent_thread_store so the channel-bound store does not absorb agent runtime policy.
+    # LLM: 此适配器保持精简；准确身份的创建及冲突检查属于 agent_thread_store，通道绑定存储不得吸收代理运行时策略。
     # 函数用途: 为一个确定的子代理运行创建或校验独立会话线程，不把它绑定成用户聊天会话。
     def ensure_agent(self, request: dict) -> ConversationThread:
         from .agent_thread_store import ensure_agent_thread_record
@@ -405,8 +409,7 @@ class ThreadStore:
         return self.load_report(thread_id) if thread_id else (None, None)
 
     # LLM: C首次模型元数据仅显式blocking=False透传原锁链；默认True不改调用形状、规范路径、创建/绑定次序或CAS。
-    # LLM: Channel binding updates must merge into the latest durable thread atomically so a
-    # delayed adapter request cannot revert compact, task indexes, or the sticky workspace.
+    # LLM: 通道绑定更新必须原子合并到最新持久线程，防止迟到的适配请求回退压缩状态、任务索引或固定工作区。
     # initialize_workspace 仅补齐空目录，必须在同一原子更新中判断，不能覆盖并发绑定或既有执行目录。
     # 函数用途: 刷新通道与目录绑定并保留并发状态，只在实际改目录时前进目录修订。
     def bind_channel(self, request: dict, *, blocking: bool = True) -> ConversationThread:
@@ -468,7 +471,7 @@ class ThreadStore:
     ) -> tuple[list[ConversationThread], list[dict[str, Any]]]:
         return _workspace_thread_report(self, limit=limit, workspace_dir=workspace_dir)
 
-    # LLM: A summary owns only summary and activity time; it must never replace a stale full thread.
+    # LLM: 摘要更新只拥有摘要及活动时间，不能用陈旧完整线程覆盖最新记录。
     # 函数用途: 原子更新会话摘要，不覆盖同时发生的任务目录、压缩游标或通道变化。
     def update_summary(
         self, thread_id: str, summary: str, *, now: float | None = None
@@ -483,30 +486,82 @@ class ThreadStore:
             ),
         )
 
-    # LLM: 唯一CAS推进提交链与活跃集；可选纯selector在同锁最新线程选择，冻结基线保护新发现，局部检查点不覆盖全线程摘要/游标。
+    # LLM: 用户活动独立于updated_at；同请求去重，原线程锁内只更新活动字段，不把后台元数据当新输入。
+    # 函数用途: 登记真实用户发言时间和单调代次，供闲置压缩提交核验。
+    def record_user_activity(self, thread_id: str, *, request_id: str = "", now: float | None = None) -> ConversationThread:
+        current = float(time.time() if now is None else now)
+
+        # LLM: 同锁合并最新metadata，保留设置、摘要及并发信息；重复请求不重置计时。
+        # 函数用途: 为一次新的用户请求递增活动代次。
+        def apply(thread):
+            metadata = dict(thread.metadata or {})
+            if request_id and metadata.get("last_user_activity_request_id") == request_id:
+                return thread
+            generation = metadata.get("user_activity_generation", 0)
+            generation = generation if type(generation) is int and generation >= 0 else 0
+            metadata.update(last_user_activity_at=current, user_activity_generation=generation + 1,
+                            last_user_activity_request_id=request_id)
+            return replace(thread, metadata=metadata, updated_at=max(thread.updated_at, current))
+
+        return self.update_atomic(thread_id, apply)
+
+    # LLM: 唯一CAS推进提交链；闲置按append锁→线程锁核指纹及活动代；普通提交只保存摘要前消息观察供去重，不加新CAS。
     # 函数用途: 原子提交压缩与可选活跃工具收缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
     def update_compact_state(
         self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
         active_loaded_tool_names: tuple[str, ...] | None = None, now: float | None = None,
         baseline_loaded_tool_names: tuple[str, ...] | None = None,
         active_tool_selector: Callable[[ConversationThread], tuple[str, ...]] | None = None,
+        expected_user_activity_generation: int | None = None,
+        expected_message_tail: dict[str, Any] | None = None,
+        idle_compact: bool = False,
     ) -> ConversationThread:
         """Atomically advance one validated summary/checkpoint without touching raw messages."""
         if type(commit.publish_thread_view) is not bool:
             raise ValueError("compact publication scope must be an explicit boolean")
+        if idle_compact and (type(expected_user_activity_generation) is not int or expected_user_activity_generation < 0):
+            raise ValueError("idle compact requires a user activity generation")
+        if idle_compact and not isinstance(expected_message_tail, dict):
+            raise ValueError("idle compact requires a canonical message tail marker")
         current = now if now is not None else time.time()
 
         # LLM: 先检查generation，再以同锁最新线程合并发现差集；局部摘要不成为全局权限。
         # 函数用途: 同锁提交唯一head；局部压缩保留全线程摘要时间和游标，防止其它任务跳过未覆盖原文。
         def apply(thread: ConversationThread) -> ConversationThread:
             if thread.compact_generation != expected_generation:
+                if idle_compact:
+                    raise IdleCompactActivityChanged("conversation user activity or compact generation superseded idle summary")
                 raise RuntimeError("conversation compact generation changed while summary was being prepared")
+            metadata = dict(thread.metadata or {})
+            if expected_user_activity_generation is not None:
+                if (type(expected_user_activity_generation) is not int
+                        or type(metadata.get("user_activity_generation", 0)) is not int
+                        or metadata.get("user_activity_generation", 0) != expected_user_activity_generation):
+                    raise IdleCompactActivityChanged("conversation user activity changed while idle summary was being prepared")
+                if idle_compact:
+                    previous = metadata.get("idle_auto_compact", {})
+                    if (previous.get("last_idle_compacted_activity_gen") == expected_user_activity_generation
+                            and previous.get("message_tail") == expected_message_tail):
+                        raise IdleCompactActivityChanged("conversation user activity already idle compacted")
             from .tool_discovery import compact_discovered_tools
             # selector仅计算展示名，不允许I/O；旧tuple调用方维持原合同。
             active = active_tool_selector(thread) if active_tool_selector is not None else active_loaded_tool_names
+            tool_updates = compact_discovered_tools(thread, active, baseline_loaded_tool_names=baseline_loaded_tool_names)
+            metadata.update(tool_updates.pop("metadata", {}))
+            metadata["last_compacted_user_activity_gen"] = metadata.get("user_activity_generation", 0)
+            metadata.pop("last_compacted_message_tail", None)
+            if expected_message_tail is not None:
+                metadata["last_compacted_message_tail"] = dict(expected_message_tail)
+            if idle_compact:
+                metadata["last_idle_compacted_activity_gen"] = expected_user_activity_generation
+                metadata["idle_auto_compact"] = {
+                    "last_idle_compacted_activity_gen": expected_user_activity_generation,
+                    "last_idle_compacted_message_id": expected_message_tail["last_message_id"],
+                    "last_idle_compacted_message_count": expected_message_tail["message_count"],
+                    "message_tail": dict(expected_message_tail),
+                }
             return replace(
-                thread, **compact_discovered_tools(thread, active,
-                                                  baseline_loaded_tool_names=baseline_loaded_tool_names),
+                thread, **tool_updates,
                 summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
                 compact_operation_evidence=(dict(commit.operation_evidence) if commit.publish_thread_view
                                             else thread.compact_operation_evidence),
@@ -525,14 +580,27 @@ class ThreadStore:
                 compact_vision_failed_generation=-1,
                 provider_context_observation={},
                 model_context_usage={},
+                metadata=metadata,
                 updated_at=current,
             )
 
+        if idle_compact:
+            from ..common.json_io import locked_json_path
+            from .store_messages import canonical_message_tail_marker
+
+            path = self.storage.message_path(thread_id)
+            with locked_json_path(path):
+                try:
+                    unchanged = canonical_message_tail_marker(path, thread_id) == expected_message_tail
+                except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
+                    raise IdleCompactActivityChanged("canonical messages unreadable before idle commit") from exc
+                if not unchanged:
+                    raise IdleCompactActivityChanged("canonical messages changed before idle commit")
+                return self.update_atomic(thread_id, apply)
         return self.update_atomic(thread_id, apply)
 
-    # LLM: Provider usage calibration is small numeric thread telemetry. The compact generation
-    # is a CAS fence, and this update must not advance updated_at because model activity is not a
-    # user-visible recency edge. Compact commits clear the field in their own atomic transition.
+    # LLM: 供应商用量校准只是少量数值线程遥测，以压缩代为CAS边界；模型活动不是用户可见活跃时间，因此不得推进 updated_at。
+    # 压缩提交在自己的原子转换中清除该字段。
     # 函数用途: 保存一次供应商真实输入量校准；若期间已经压缩会话则放弃旧观测，不改变会话最近活跃时间。
     def update_provider_context_observation(
         self,
@@ -552,9 +620,8 @@ class ThreadStore:
 
         return self.update_atomic(thread_id, apply)
 
-    # LLM: A failed summary candidate may update only the compact failure circuit; it must never
-    # move the generation, cursor, summary, checkpoint pointer, or raw transcript.
-    # 函数用途: 记录一次会话压缩失败，供跨请求熔断使用，但不把失败候选当成已经提交。
+    # LLM: 失败只改原熔断账，不动摘要/游标/检查点；闲置按消息追加锁→线程锁核消息尾、活动及压缩代，竞争原样上抛。
+    # 函数用途: 原子记录仍属于本次基线的失败；闲置旧候选让位，普通压缩保留原代数检查合同。
     def record_compact_failure(
         self,
         thread_id: str,
@@ -562,14 +629,26 @@ class ThreadStore:
         failure_code: str,
         expected_generation: int,
         now: float | None = None,
+        expected_user_activity_generation: int | None = None,
+        expected_message_tail: dict[str, Any] | None = None,
     ) -> ConversationThread:
         current = now if now is not None else time.time()
+        guarded = expected_user_activity_generation is not None or expected_message_tail is not None
+        if guarded and (type(expected_user_activity_generation) is not int or expected_user_activity_generation < 0
+                        or not isinstance(expected_message_tail, dict)):
+            raise IdleCompactActivityChanged("idle failure recording requires a valid activity and message baseline")
 
-        # LLM: store_threads 的持久化合同：仅为同一 Compact 代增加失败记录，保留原摘要与消息游标；修改须同步本领域调用方与存储回归。
-        # 函数用途: 仅为同一 Compact 代增加失败记录，保留原摘要与消息游标。
+        # LLM: 消息锁仍持有时进入原线程原子更新，核最新活动及压缩代；既有失败不得因旧闲置候选被增减。
+        # 函数用途: 只给当前有效基线增加一次失败，竞争则抛专用让位异常。
         def apply(thread: ConversationThread) -> ConversationThread:
             if thread.compact_generation != expected_generation:
+                if guarded:
+                    raise IdleCompactActivityChanged("compact generation changed before idle failure recording")
                 return thread
+            if guarded:
+                activity = (thread.metadata or {}).get("user_activity_generation", 0)
+                if type(activity) is not int or activity != expected_user_activity_generation:
+                    raise IdleCompactActivityChanged("user activity changed before idle failure recording")
             return replace(
                 thread,
                 compact_consecutive_failures=thread.compact_consecutive_failures + 1,
@@ -578,9 +657,22 @@ class ThreadStore:
                 updated_at=current,
             )
 
+        if guarded:
+            from ..common.json_io import locked_json_path
+            from .store_messages import canonical_message_tail_marker
+
+            path = self.storage.message_path(thread_id)
+            with locked_json_path(path):
+                try:
+                    unchanged = canonical_message_tail_marker(path, thread_id) == expected_message_tail
+                except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
+                    raise IdleCompactActivityChanged("canonical messages unreadable before idle failure recording") from exc
+                if not unchanged:
+                    raise IdleCompactActivityChanged("canonical messages changed before idle failure recording")
+                return self.update_atomic(thread_id, apply)
         return self.update_atomic(thread_id, apply)
 
-    # LLM: Verbose is a thread-local system control and updates only its own field atomically.
+    # LLM: 详细输出级别是线程本地控制字段，必须只原子更新它本身，不覆盖其它线程状态。
     # 函数用途: 修改当前会话的详细输出级别，不让旧会话快照覆盖其他状态。
     def update_verbose_level(
         self,
@@ -961,6 +1053,8 @@ def record_thread_compact_vision_failure(
 ) -> ConversationThread:
     current = now if now is not None else time.time()
 
+    # LLM: 线程存储原子更新回调；仅原锁内消费当前代数，不覆盖并发胜出状态，联测压缩提交。
+    # 函数用途: 仅在原压缩代数仍匹配时标记视觉摘要失败，沿原线程原子更新。
     def apply(thread: ConversationThread) -> ConversationThread:
         if thread.compact_generation != expected_generation:
             return thread

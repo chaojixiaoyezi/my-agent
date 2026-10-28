@@ -125,6 +125,8 @@ class GatewayControlScope:
     input_media: tuple[dict, ...] = ()
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 类用途: 保存Gateway活动请求及原始运行事实，供精确控制定位。
 @dataclass(frozen=True)
 class _GatewayRequestRecord:
     path: Path | None
@@ -142,8 +144,7 @@ class _MainTaskStop:
     preparation_errors: tuple[str, ...] = ()
 
 
-# LLM: A receipt state comes only from the owner-scoped ConversationStore. It lets control
-# routing distinguish a terminal replay from an in-flight write before inspecting live requests.
+# LLM: 回执状态只来自所有者隔离的 ConversationStore；控制路由先据此区分终态重放与写入中操作，再检查活动请求。
 # 类用途: 保存一条活动回合补充消息的持久回执及其权威存储位置。
 @dataclass(frozen=True)
 class _SteerReceiptState:
@@ -154,11 +155,9 @@ class _SteerReceiptState:
     input_matches: bool = True
 
 
-# LLM: A channel message is unique inside one owner/thread. The receipt stores the exact turn id
-# as a validated fact, while this lookup identity remains discoverable after that turn disappears.
+# LLM: 通道消息在同一所有者及线程内唯一；回执保存经验证的准确回合身份，即使回合消失，仍可沿这个查找身份找到回执。
 # 函数用途: 生成跨重试可查询的活动回合补充消息幂等键。
-# LLM: New cross-process ingress keys use authenticated channel scope, which is available before
-# any active-turn side effect. The owner store remains the outer isolation boundary.
+# LLM: 新的跨进程入口键使用任何活动回合副作用发生前就已确定的认证通道作用域，所有者存储仍是外层隔离边界。
 # 函数用途: 为普通消息预先生成可持久化的 guidance 幂等键，Gateway 崩溃后无需猜 thread。
 def active_turn_guidance_dedupe_key(scope: GatewayControlScope) -> str:
     return json.dumps(
@@ -176,7 +175,7 @@ def active_turn_guidance_dedupe_key(scope: GatewayControlScope) -> str:
     )
 
 
-# LLM: v1 lookup exists only for an explicit on-disk migration read; new writes never use it.
+# LLM: v1 查找仅供显式读取磁盘旧记录进行迁移，新写入绝不使用它。
 # 函数用途: 生成旧版 thread 作用域幂等键，以便升级后仍能查询已有回执。
 def _legacy_active_turn_guidance_dedupe_key(thread_id: str, channel_message_id: str) -> str:
     return json.dumps(
@@ -191,21 +190,19 @@ def _legacy_active_turn_guidance_dedupe_key(thread_id: str, channel_message_id: 
     )
 
 
-# LLM: Expected-turn authority is a typed ingress fact. Message text and current task labels can
-# never substitute for this exact id.
+# LLM: 预期回合权威是类型化入口事实，消息正文和当前任务标签绝不能替代这个准确身份。
 # 函数用途: 读取客户端提交时看到的活动回合 ID。
 def _steer_expected_turn_id(scope: GatewayControlScope) -> str:
     return str(scope.metadata.get("expected_turn_id") or "").strip()
 
 
-# LLM: Client correlation accepts only the explicit channel message id carried by the adapter.
+# LLM: 客户端关联只接受适配器显式携带的通道消息身份。
 # 函数用途: 读取补充消息在客户端侧生成的稳定 ID。
 def _steer_channel_message_id(scope: GatewayControlScope) -> str:
     return str(scope.metadata.get("message_id") or "").strip()
 
 
-# LLM: A durable task may own the guidance queue while its linked processing request remains the
-# active turn observed by the client. Exact-turn comparison therefore uses the linked request.
+# LLM: 持久任务可拥有引导队列，而其关联的处理中请求仍是客户端观察到的活动回合；准确回合比较因此必须使用该关联请求。
 # 函数用途: 返回当前控制目标对应的真实前台回合 ID。
 def _active_turn_request_id(active: _GatewayRequestRecord | None) -> str:
     if active is None:
@@ -354,8 +351,7 @@ def _active_turn_steer_receipt(
     )
 
 
-# LLM: Terminal receipt projection preserves the delivery tri-state separately from command
-# prose. Rejected receipts never become a successful queue acknowledgement.
+# LLM: 终态回执投影把投递三态与命令正文分开保留，被拒回执绝不能变成队列接收成功的确认。
 # 函数用途: 把持久回执转换成 Gateway 控制响应。
 def _control_result_from_steer_receipt(
     receipt: _SteerReceiptState,
@@ -398,8 +394,7 @@ def _control_result_from_steer_receipt(
     )
 
 
-# LLM: Durable control-operation reconciliation may only inspect an existing guidance receipt;
-# it must never append guidance while servicing a GET/status retry after an ambiguous POST.
+# LLM: 持久控制操作对账只检查已有引导回执；POST 结果不明后的 GET 或状态重试绝不能再次追加引导。
 # 函数用途: 只读查询同一条 `/btw` 是否已有权威投递回执，不存在时返回 None。
 def reconcile_gateway_steer_delivery(
     agent: object,
@@ -735,6 +730,8 @@ def request_gateway_memory_curator_lifecycle(
     return request_memory_curator_for_session(owner_agent, event=event)
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 核定owner和线程后分派Audit控制，沿原生命周期执行。
 def _execute_audit_control(
     base_agent: object,
     paths: GatewayPaths,
@@ -803,6 +800,8 @@ def _execute_audit_control(
         return ConversationControlResult("audit", False, "Audit 状态暂时不可用，请稍后重试。")
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 查找当前Audit精确关联的待处理请求，不把其它任务纳入控制范围。
 def _pending_exact_audit_requests(
     paths: GatewayPaths,
     scope: GatewayControlScope,
@@ -1099,7 +1098,7 @@ def _settings_thread(owner_agent: object, scope: GatewayControlScope) -> object:
     )
 
 
-# LLM: Verbose is a per-thread control setting; the command text never enters a model turn.
+# LLM: 详细输出是逐线程控制设置，命令正文不得进入模型回合。
 # 函数用途:在精确 owner/thread 上读取或修改过程显示档位，并返回确定性系统回执。
 def _execute_verbose_control(
     base_agent: object,
@@ -1187,8 +1186,7 @@ def _execute_wake_ops_control(
         return ConversationControlResult("wakes", False, "暂时无法查看或重放已结案的后台唤醒，请稍后重试。")
 
 
-# LLM: `/context` is a read-only projection of the same owner/thread, prompt estimator, and
-# compact policy used by Gateway preflight; it must not create a thread or trigger compaction.
+# LLM: /context 只读投影Gateway预检所用的同一所有者、线程、提示计量器及压缩策略，不得创建线程或触发压缩。
 # 函数用途: 查看当前会话的估算占用、模型窗口、自动压缩线和压缩代际。
 def _execute_context_control(
     base_agent: object,
@@ -1221,13 +1219,42 @@ def _execute_context_control(
 # LLM: Manual Compact is a first-class cancellable turn like 会话运行时's Compact task.  Register the
 # authenticated conversation plus original control message before any admission check so a TUI Esc
 # can target only this operation and provider transport can close its exact socket.
-# 函数用途: 为手动 Compact 建立精确中断身份，再进入唯一压缩实现。
+# status只读同一线程且不注册摘要；比例设置只改metadata，reset/default清除覆盖，锁定错误保留结构化码。
+# 函数用途: 设置当前线程比例，或为手动摘要建立精确中断身份。
 def _execute_compact_control(
     base_agent: object,
     paths: GatewayPaths,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
+    if command.operation == "status":
+        from ..conversation.compact_threshold_policy import compact_status_result
+
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        return compact_status_result(owner_agent, _conversation_thread_for_scope(owner_agent.conversation_store, scope))
+    if command.operation == "threshold":
+        from ..conversation.compact_threshold_policy import (
+            resolve_thread_compact_policy,
+            thread_with_compact_threshold,
+        )
+        from ..plugin_host.errors import HostAPIError
+
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        store = owner_agent.conversation_store
+        thread = _conversation_thread_for_scope(store, scope)
+        if thread is None:
+            return ConversationControlResult("compact", False, "当前会话尚未建立，无法设置压缩比例。", error_code="THREAD_UNAVAILABLE")
+        try:
+            value = None if command.value in {"reset", "default"} else int(command.value)
+            updated = store.threads.update_atomic(thread.thread_id,
+                lambda row: thread_with_compact_threshold(owner_agent, row, value))
+            policy = resolve_thread_compact_policy(owner_agent, updated, use_frozen=False)
+        except HostAPIError as error:
+            return ConversationControlResult("compact", False, "管理员已锁定压缩策略，不能修改当前会话比例。",
+                                             error_code=error.code, details={"http_status": error.status})
+        return ConversationControlResult("compact", True,
+            f"当前会话压缩比例：{policy['effective_trigger_percent']}%（{policy['effective_source']}）。",
+            details={"compact_policy": policy})
     client_message_id = str(scope.metadata.get("message_id") or "").strip()
     if not client_message_id:
         client_message_id = new_id("manual-compact-local")
@@ -1396,9 +1423,8 @@ def _manual_compact_lane(owner_agent: object, store: object, thread_id: str):
     )
 
 
-# LLM: A stop carrying target_control_message_id may interrupt only the manual Compact registered
-# under the same authenticated user/channel/conversation.  It never falls through to a foreground
-# task, child tree, or another owner's operation when that exact target is absent.
+# LLM: 携带 target_control_message_id 的停止只能中断同一认证用户、通道及会话下登记的手动压缩；
+# 精确目标不存在时绝不回落到前台任务、子代理树或其他所有者的操作。
 # 函数用途: 处理 TUI 在手动 Compact 动画期间发来的精确 Esc 停止请求。
 def _stop_targeted_manual_compact(
     scope: GatewayControlScope,
@@ -1497,8 +1523,7 @@ def _render_effort(owner_agent: object, thread: object, command: ConversationCon
     return "\n".join(lines)
 
 
-# LLM: Context controls resolve only the exact authenticated channel binding; query/manual
-# compact must not create a new thread as a side effect or fall back to another conversation.
+# LLM: 上下文控制只解析准确认证通道绑定；查询或手动压缩不得顺带创建线程，也不能回落到其他会话。
 # 函数用途: 按用户、通道和会话 id 读取当前唯一 thread，找不到就返回空。
 def _conversation_thread_for_scope(store: object, scope: GatewayControlScope):
     return store.threads.resolve(
@@ -1508,7 +1533,7 @@ def _conversation_thread_for_scope(store: object, scope: GatewayControlScope):
     )
 
 
-# LLM: Resume updates the existing task projection; it never registers a second task identity.
+# LLM: 恢复只更新已有任务投影，绝不登记第二个任务身份。
 # 函数用途: 恢复原持续任务在全局任务索引中的 running 状态。
 def _resume_task_registry_record(owner_agent: object, task_id: str) -> None:
     try:
@@ -1527,7 +1552,7 @@ def _resume_task_registry_record(owner_agent: object, task_id: str) -> None:
         return
 
 
-# LLM: Durable task selection wins over a transient chat request and uses only owner/thread links.
+# LLM: 持久任务选择优先于临时聊天请求，并且只使用所有者及线程链接。
 # 函数用途:先找会话仍活跃的根任务；尚未晋升时才回落 processing 请求。
 def _active_control_target(
     base_agent: object,
@@ -1547,6 +1572,8 @@ def _active_control_target(
     return _active_conversation_task(base_agent, scope) or processing
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 按耐久任务编号绑定活动请求，不凭显示名称猜归属。
 def _linked_active_task_record(
     base_agent: object,
     processing: _GatewayRequestRecord,
@@ -1565,7 +1592,7 @@ def _linked_active_task_record(
     )
 
 
-# LLM: Request selection uses structured owner/channel/conversation facts and never message text.
+# LLM: 请求选择只使用结构化所有者、通道及会话事实，不使用消息正文。
 # 函数用途:找到当前会话唯一的 processing 请求；同会话单飞时通常只有一个。
 def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _GatewayRequestRecord | None:
     records = [
@@ -1580,8 +1607,7 @@ def _active_request(paths: GatewayPaths, scope: GatewayControlScope) -> _Gateway
     return records[0]
 
 
-# LLM: Presence in processing is not enough once terminalization has closed the turn. Admission
-# reads this structured phase while holding the same exact-turn lock that writes it.
+# LLM: 回合一旦终态关闭，仅存在处理中记录不足以准入；准入必须持有写该阶段所用的同一准确回合锁，再读取结构化阶段。
 # 函数用途: 判断 processing 请求是否仍处于允许普通输入插入的开放阶段。
 def _request_accepts_active_input(record: _GatewayRequestRecord) -> bool:
     phase = str(record.payload.get("turn_phase") or "open").strip().lower()
@@ -1595,6 +1621,8 @@ def _request_accepts_active_input(record: _GatewayRequestRecord) -> bool:
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 取得精确的活动回合请求，包括已分离任务对应的入站回合。
 def _live_window_request(
     paths: GatewayPaths,
     scope: GatewayControlScope,
@@ -1604,8 +1632,7 @@ def _live_window_request(
     return records[0] if len(records) == 1 else None
 
 
-# LLM: Stop/status selection exposes all matching open turns so callers can fail closed on a
-# recovery conflict instead of choosing the newest timestamp as an invented authority.
+# LLM: 停止及状态选择暴露所有匹配的未关闭回合，让调用方遇恢复冲突时失败关闭，不能把最新时间戳臆造为选择权威。
 # 函数用途: 列出本用户会话所有仍开放的精确前台回合，供唯一性检查。
 def _live_window_requests(
     paths: GatewayPaths,
@@ -1618,6 +1645,8 @@ def _live_window_requests(
     ]
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 判断请求是否已转入分离执行，避免把交接当作请求丢失。
 def _request_is_detached(record: _GatewayRequestRecord) -> bool:
     if str(record.payload.get("conversation_cancellation_scope") or "") == "detached":
         return True
@@ -1633,7 +1662,7 @@ def _request_is_detached(record: _GatewayRequestRecord) -> bool:
     )
 
 
-# LLM: Resolve one foreground root from canonical task links; an active Goal belongs to that root, not a second detached executor.
+# LLM: 从规范任务链接解析唯一前台根；活动目标属于该根，不是第二个独立执行者。
 # 函数用途: 按当前用户会话定位可操作的主任务；普通窗口停止也要覆盖 Goal 两轮之间的等待，命名 Audit 保持独立。
 def _active_conversation_task(
     base_agent: object,
@@ -1701,6 +1730,8 @@ def _active_conversation_task(
     return _GatewayRequestRecord(None, payload, "task")
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 结合任务投影与耐久执行状态筛选仍可控制的会话任务。
 def _control_active_conversation_links(
     store: object,
     thread_id: str,
@@ -1744,7 +1775,7 @@ def _control_active_conversation_links(
     return candidates
 
 
-# LLM: Conversation active_task_ids may contain root and child projections.
+# LLM: 会话 active_task_ids 可能同时包含根任务和子任务投影，不可把每项都当独立根。
 # User controls target the root just as 会话运行时 user input targets the current
 # root session; child turns are interrupted recursively from that root.
 # 函数用途: 从会话活动任务中剔除子代理投影，避免普通 /stop 只停到某一个 child。
@@ -1770,9 +1801,8 @@ def _root_control_links(owner_agent: object, active: list[object]) -> list[objec
     return roots
 
 
-# LLM: An explicit task id wins, then the thread's canonical sticky root.  The
-# timestamp fallback is only for pre-v3 records lacking workspace_task_id; no
-# natural-language goal or model summary participates.
+# LLM: 显式任务身份优先，其次是线程的规范固定根；时间戳回退仅供缺少 workspace_task_id 的 v3 前旧记录，
+# 自然语言目标及模型摘要不参与选择。
 # 函数用途: 选择当前会话应被状态、插入或停止控制的唯一根任务。
 def _select_active_conversation_link(
     active: list[object],
@@ -1811,6 +1841,8 @@ def _select_active_conversation_link(
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 从已校验关联中取得规范会话任务编号。
 def _linked_conversation_task_id(record: _GatewayRequestRecord | None) -> str:
     if record is None:
         return ""
@@ -1820,7 +1852,7 @@ def _linked_conversation_task_id(record: _GatewayRequestRecord | None) -> str:
     return str(runtime.get("task_id") or "").strip()
 
 
-# LLM: Corrupt request records cannot prove ownership and are therefore excluded fail-closed.
+# LLM: 损坏请求记录不能证明归属，必须按失败关闭原则排除。
 # 函数用途:读取目录中属于当前用户会话的请求记录。
 def _matching_requests(folder: Path, scope: GatewayControlScope) -> list[_GatewayRequestRecord]:
     records: list[_GatewayRequestRecord] = []
@@ -1838,7 +1870,7 @@ def _matching_requests(folder: Path, scope: GatewayControlScope) -> list[_Gatewa
     return records
 
 
-# LLM: Even administrators get conversation-scoped selection unless they explicitly omit a user fact.
+# LLM: 即使管理员也按会话作用域选择，除非调用方明确省略用户事实。
 # 函数用途:比较请求里的结构化渠道、会话和用户身份。
 def _request_matches_scope(payload: dict[str, object], scope: GatewayControlScope) -> bool:
     conversation = payload.get("conversation")
@@ -1994,8 +2026,7 @@ def _execution_changed_result(kind: str, turn_id: str) -> ConversationControlRes
     )
 
 
-# LLM: Admission must re-read the selected processing record while holding its exact-turn lock.
-# Stale preselection, owner drift, stop, close, and expected-turn switches all fail before append.
+# LLM: 准入必须持有准确回合锁重读选中的处理中记录；预选过期、所有者漂移、停止、关闭及预期回合切换均在追加前拒绝。
 # 函数用途: 在插入补充消息前重新确认同一个请求仍开放且仍属于当前用户会话。
 def _load_open_exact_turn(
     paths: GatewayPaths,
@@ -2062,8 +2093,7 @@ def _mark_control_guidance_result(store: object, entry: GuidanceEntry, status: s
     return None
 
 
-# LLM: A concurrent runtime claim may beat rejection. Callers project the returned durable winner
-# instead of assuming their requested transition succeeded.
+# LLM: 并发运行时认领可能先于拒绝落库；调用方必须投影返回的持久胜者，不得假定自己请求的转换已成功。
 # 函数用途: 把补充消息状态竞争的真实结果转换成控制响应。
 def _control_result_for_guidance_winner(winner: object, request_id: str) -> ConversationControlResult:
     status = str(getattr(winner, "status", "rejected") or "rejected")
@@ -2134,9 +2164,8 @@ def _reconcile_existing_steer_receipt(
     )
 
 
-# LLM: This reader runs only while the exact Gateway turn transition lock is held. Canonical or
-# closed hot facts prove terminal; open processing and validated inbox facts remain live/recoverable;
-# absence, owner mismatch, and damaged JSON are UNKNOWN rather than guessed terminal.
+# LLM: 此读取只在持有准确Gateway回合转换锁时运行；规范终态或已关闭热记录可证明终态，开放处理记录及有效收件箱事实仍是活动或可恢复状态。
+# 缺失、所有者不符或JSON损坏只能判 UNKNOWN，不能猜测已终止。
 # 函数用途: 在精确回合锁内判定活动、待恢复、终态或证据不足。
 def _exact_gateway_turn_lifecycle_locked(
     paths: GatewayPaths,
@@ -2168,8 +2197,7 @@ def _exact_gateway_turn_lifecycle_locked(
     return "unknown"
 
 
-# LLM: Exact lifecycle files must be readable, identify the requested turn, and retain the same
-# authenticated scope before they can drive receipt state.
+# LLM: 准确生命周期文件必须可读、标识被请求回合且保持同一认证作用域，才可驱动回执状态。
 # 函数用途: 校验一个精确请求文件，并在身份一致时返回指定生命周期。
 def _validated_exact_turn_file_state(
     path: Path,
@@ -2186,8 +2214,7 @@ def _validated_exact_turn_file_state(
     return state
 
 
-# LLM: UNKNOWN keeps the original exact target and dedupe key so HTTP/TUI reconciliation can retry
-# the same receipt without rerouting to a later active turn.
+# LLM: UNKNOWN 保留原准确目标和去重键，使HTTP及TUI可重查同一回执，不重路由到后来的活动回合。
 # 函数用途: 构造已有补充消息仍待精确回合证据的统一响应。
 def _unknown_existing_steer_result(
     receipt: _SteerReceiptState,
@@ -2203,6 +2230,8 @@ def _unknown_existing_steer_result(
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 从控制范围中解析当前线程，避免跨会话误选目标。
 def _control_thread_id(
     store: object,
     active: _GatewayRequestRecord,
@@ -2234,6 +2263,8 @@ def _control_thread_id(
     return str(getattr(thread, "thread_id", "") or "").strip()
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 耐久写入后重核目标仍为当前任务，防止并发切换把引导给错回合。
 def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord) -> bool:
     """会话运行时 expected-turn check: the selected task must still be current.
 
@@ -2276,6 +2307,8 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
     return str(getattr(current, "task_id", "") or "").strip() == task_id
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 区分活动前台请求、正常交接和损坏状态，不把未知当终态。
 def _linked_request_target_state(linked: _GatewayRequestRecord, task_id: str) -> str:
     """Classify a claimed foreground turn without conflating handoff with corruption."""
     if linked.path is None:
@@ -2294,7 +2327,7 @@ def _linked_request_target_state(linked: _GatewayRequestRecord, task_id: str) ->
     return "current" if matches else "mismatch"
 
 
-# LLM: Publish a wake only when no linked live execution turn exists; live turns consume the durable FIFO guidance in place.
+# LLM: 只有不存在关联的活动执行回合时才发布唤醒；活动回合直接消费原持久先进先出引导队列。
 # 函数用途:只唤醒当前没有执行线的持久任务，避免 `/btw` 为同一任务启动第二个主执行器。
 def _wake_for_task_guidance(
     owner_agent: object,
@@ -2484,8 +2517,7 @@ def _stop_unpromoted_main(
     )
 
 
-# LLM: Every stop mutation shares the exact Gateway T lock with steer, provider admission, ACK,
-# and terminal closeout. Callers already holding T must use the locked helper below.
+# LLM: 所有停止写入与转向、供应商准入、确认及终态收口共用准确Gateway回合锁T；已持有T的调用方必须使用下方锁内辅助入口。
 # 函数用途: 为任意精确热请求获取回合锁，再安全保存停止状态。
 def _mark_request_stopping(
     active: _GatewayRequestRecord,
@@ -2510,6 +2542,8 @@ def _mark_request_stopping_locked(
     request_id = _record_id(active)
     updated_ref = [False]
 
+    # LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+    # 函数用途: 在原取消事务里标记请求取消，保留目标身份与并发检查。
     def mark_cancel(current: dict) -> dict:
         path_stem = active.path.stem if active.path is not None else ""
         if str(current.get("id") or path_stem) != request_id:
@@ -2765,6 +2799,8 @@ def _fresh_stop_runtime_binding(
         return gateway_runtime_authority(report.payload, request_id)
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 停止已精确绑定的活动请求，沿原中断与耐久取消链执行。
 def _stop_linked_live_request(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
@@ -2793,7 +2829,7 @@ def _pause_goal_for_stopped_task(store: object, task_link: object) -> None:
         raise ValueError("停止时目标状态发生冲突")
 
 
-# LLM: The global task projection records an interrupt as resumable, never as terminal cancellation.
+# LLM: 全局任务投影把中断记录为可恢复状态，不能当作终态取消。
 # 函数用途:同步任务索引中的中断状态，后续明确续接时可以恢复为 running。
 def _interrupt_task_registry_record(owner_agent: object, task_id: str) -> None:
     try:
@@ -2925,6 +2961,8 @@ def _status_model_name(owner_agent: object, *, idle: bool, scope: GatewayControl
     return str(getattr(config, "model_name", "") or "")
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 整理具名耐久任务状态，供用户控制查询使用。
 def _named_durable_statuses(
     owner_agent: object,
     paths: GatewayPaths,
@@ -3024,6 +3062,8 @@ def _named_durable_statuses(
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 从结构化Audit健康状态中只投影需要处理的摘要信息。
 def _audit_brief_health(owner_agent: object, link: object) -> str:
     """Project only actionable Audit health into the compact global status."""
     try:
@@ -3051,6 +3091,8 @@ def _audit_brief_health(owner_agent: object, link: object) -> str:
     return ""
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 将具名工作状态码转换为展示标签，不反向驱动状态机。
 def _named_work_status_label(status: str) -> str:
     return {
         "active": "运行中",
@@ -3063,7 +3105,7 @@ def _named_work_status_label(status: str) -> str:
     }.get(status, status or "未知")
 
 
-# LLM: A durable task is resumable conversation state, not proof that an executor is live.
+# LLM: 持久任务只表示可恢复会话状态，不能证明执行者仍在运行。
 # 函数用途:只按 processing 记录、活跃子代理和持久执行台账判断当前任务是否真在运行。
 def _control_record_is_executing(
     owner_agent: object,
@@ -3093,7 +3135,7 @@ def _control_record_is_executing(
     return execution.get("running") is True
 
 
-# LLM: Owner resolution reuses the request worker's fail-closed multi-user boundary.
+# LLM: 所有者解析复用请求工作者失败关闭的多用户边界。
 # 函数用途:按请求身份取得与真实执行相同的 owner-scoped agent。
 def _request_agent(base_agent: object, payload: dict[str, object]):
     from .request_worker import _resolve_request_agent
@@ -3101,8 +3143,7 @@ def _request_agent(base_agent: object, payload: dict[str, object]):
     return _resolve_request_agent(base_agent, payload)
 
 
-# LLM: A bound control scope carries the owner identity chosen before the operation receipt was
-# prepared. Exact recovery must use that identity instead of rerunning mutable routing config.
+# LLM: 已绑定控制作用域携带操作回执准备前选定的所有者身份；准确恢复必须使用它，不可重跑可能变化的路由配置。
 # 函数用途: 为首次控制请求冻结 owner；已有回执恢复时保留其中已经固定的 owner。
 def bind_gateway_control_scope_owner(
     base_agent: object,
@@ -3116,8 +3157,7 @@ def bind_gateway_control_scope_owner(
     return replace(scope, resolved_owner=owner)
 
 
-# LLM: Scope-based controls prefer the persisted owner identity. Raw channel facts are consulted
-# only once, before a durable control receipt exists.
+# LLM: 基于作用域的控制优先用持久所有者身份；原始通道事实只在持久控制回执创建前查询一次。
 # 函数用途: 按控制作用域取得唯一 Agent，确保配置变化后仍回到原 owner 对账。
 def _request_agent_for_scope(base_agent: object, scope: GatewayControlScope):
     if scope.resolved_owner is None:
@@ -3127,7 +3167,7 @@ def _request_agent_for_scope(base_agent: object, scope: GatewayControlScope):
     return _resolve_request_agent_for_owner(base_agent, scope.resolved_owner)
 
 
-# LLM: Read-only status may degrade to base model facts when an idle owner cannot be materialized.
+# LLM: 空闲所有者无法实例化时，只读状态可降级展示基础模型事实。
 # 函数用途:状态查询尽量解析 owner；失败时只返回基础 agent，不扩大写权限。
 def _request_agent_or_base(base_agent: object, payload: dict[str, object]):
     try:
@@ -3136,7 +3176,7 @@ def _request_agent_or_base(base_agent: object, payload: dict[str, object]):
         return base_agent
 
 
-# LLM: Thread profile is resolved by the same structured channel binding as ordinary conversation history.
+# LLM: 线程模型档案与普通会话历史必须沿同一结构化通道绑定解析。
 # 函数用途:读取当前会话已压缩次数和过程显示档位；未知时明确省略。
 def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[int | None, str]:
     conversation = payload.get("conversation")
@@ -3160,7 +3200,7 @@ def _conversation_profile(agent: object, payload: dict[str, object]) -> tuple[in
     )
 
 
-# LLM: Subagent counts are derived from durable parent/root ids, never from streamed chatter.
+# LLM: 子代理数量只从持久父级及根身份统计，不从流式对话正文推断。
 #   异常细分只用 conversation.agent_activity.subagent_display_label（转调 runner_display_projection，与 TUI 名册同一权威），
 #   不读正文。
 # 函数用途:统计当前主请求派生子代理的运行、完成和异常数量，并把异常按界面标签细分。
@@ -3223,7 +3263,7 @@ def _recent_progress(paths: GatewayPaths, request_id: str) -> str:
     return "正在处理（尚无当前进度）"
 
 
-# LLM: The tail reader is byte-bounded so /status cannot load an unbounded stream file into memory.
+# LLM: 尾部读取以字节数限制，防止 /status 把无界流文件全部载入内存。
 # 函数用途:读取进度文件末尾至多 64 KiB 的 JSON 行。
 def _tail_json_rows(path: Path, max_bytes: int = 64 * 1024) -> list[dict[str, object]]:
     try:
@@ -3247,7 +3287,7 @@ def _tail_json_rows(path: Path, max_bytes: int = 64 * 1024) -> list[dict[str, ob
     return rows
 
 
-# LLM: Synthetic idle status facts preserve the same owner and conversation schema as /ask.
+# LLM: 合成空闲状态事实与 /ask 保持同一所有者及会话结构。
 # 函数用途:没有活跃请求时，根据控制请求身份构造只读会话定位信息。
 def _scope_request_payload(scope: GatewayControlScope) -> dict[str, object]:
     # `/ask` and control commands must resolve the same owner for every
@@ -3277,9 +3317,8 @@ def resolve_gateway_scope_agent(base_agent: object, scope: GatewayControlScope):
     return _request_agent_for_scope(base_agent, scope)
 
 
-# LLM: Passive disk projections need the same authenticated owner decision as active requests but
-# must not construct an Agent. The returned identity is the only authority callers may use to
-# locate an owner home; channel text and filesystem discovery cannot select another owner.
+# LLM: 被动磁盘投影与活动请求共用认证所有者裁决，但不得构造Agent；调用方只能凭返回身份定位所有者家目录，
+# 不能根据通道正文或文件系统发现选择其他所有者。
 # 函数用途: 只解析当前控制请求对应的精确 owner，不加载模型和运行时。
 def resolve_gateway_scope_owner(
     base_agent: object,
@@ -3320,7 +3359,7 @@ def resolve_loaded_gateway_scope_agent(
     return _resolve_loaded_request_agent_for_owner(base_agent, owner)
 
 
-# LLM: Request ids are taken only from the claimed record or its filename.
+# LLM: 请求身份只取自已认领记录或其文件名。
 # 函数用途:读取请求记录的稳定 id。
 def _record_id(record: _GatewayRequestRecord | None) -> str:
     if record is None:
@@ -3329,7 +3368,7 @@ def _record_id(record: _GatewayRequestRecord | None) -> str:
     return str(record.payload.get("id") or record.payload.get("request_id") or path_stem)
 
 
-# LLM: Timestamp ordering uses durable queue/lease fields with a zero fallback.
+# LLM: 时间排序只使用持久队列或租约字段，缺失时回退为零。
 # 函数用途:取得请求排序时间。
 def _request_timestamp(payload: dict[str, object]) -> float:
     for key in ("lease_started_at", "created_at", "submitted_at"):
@@ -3341,7 +3380,7 @@ def _request_timestamp(payload: dict[str, object]) -> float:
     return 0.0
 
 
-# LLM: Elapsed time starts at the claimed lease, not user-controlled prompt metadata.
+# LLM: 已用时从已认领租约开始计算，不读用户可控的提示元数据。
 # 函数用途:取得任务实际开始时间。
 def _request_started_at(payload: dict[str, object]) -> float:
     try:
@@ -3350,7 +3389,7 @@ def _request_started_at(payload: dict[str, object]) -> float:
         return 0.0
 
 
-# LLM: Status exposes a bounded user prompt only; internal injection and tool plans are excluded.
+# LLM: 状态只暴露有界用户提示，排除内部注入和工具计划。
 # 函数用途:读取用户提交的任务正文。
 def _request_prompt(payload: dict[str, object]) -> str:
     return str(payload.get("prompt") or payload.get("goal") or "").strip()

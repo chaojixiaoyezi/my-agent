@@ -124,15 +124,31 @@ def managed_fields():
             {"limit": {**integer(100, 1), "default": 50}})
 
 
-# LLM: 治理动作均要求public_only/admin_owned，读写能力精确分离；复杂策略/记忆内容由领域再核。
+# LLM: 治理及压缩管理均要求public_only/admin_owned；强制开关三别名至少一个明确bool，冲突由领域写前拒绝，CAS/身份门不变。
 # 函数用途: 声明十二个管理员受管用户动作，与WT2方法签名逐项对应。
 def managed_action_specs():
     target, revision, paging = managed_fields()
+    compact_patch = closed({}, {"default_trigger_percent": {"type": ["integer", "null"], "minimum": 50, "maximum": 95},
+                                "force_locked": {"type": "boolean"}})
+    force_aliases = ("force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced")
+    force_policy = closed({}, {**revision, "trigger_percent": integer(95, 50),
+                              **{name: {"type": ["boolean", "null"]} for name in force_aliases}})
+    force_policy["anyOf"] = [{"required": [name], "properties": {name: {"type": "boolean"}}} for name in force_aliases]
     scope = "public_only admin_owned"
     kind = {"enum": ["workflow", "monitor", "script", "skill"]}
     asset = {"asset_kind": kind, "asset_id": id_schema()}
     return [
         _spec("users.managed.overview.get", "read", "read users.read", closed({}, target), scope),
+        _spec("users.managed.compact_policy.get", "read", "read users.read", closed({}, target), scope),
+        _spec("users.managed.compact_policy.set", "write", "write users.manage",
+              closed({"policy_patch": compact_patch}, {**target, **revision}), scope),
+        _spec("users.managed.compact_policy.batch_set", "write", "write users.manage",
+              closed({"policy_patch": compact_patch}, {
+                  "scope": {"enum": ["all_managed_users"]},
+                  "user_ids": {"type": "array", "items": text(128, 1), "minItems": 1, "maxItems": 1000, "uniqueItems": True},
+                  "expected_revisions": {"type": "object"}}), scope),
+        _spec("settings.compact_policy.admin_force.set", "write", "write users.manage",
+              force_policy, scope),
         _spec("users.managed.policy.set", "write", "write users.manage", closed({"policy_patch": {"type": "object"}}, {**target, **revision}), scope),
         _spec("users.managed.persona.get", "read", "read users.read", closed({}, target), scope),
         _spec("users.managed.persona.set", "write", "write users.manage", closed({}, {**target, **revision,

@@ -103,6 +103,7 @@ from .native_history import (
     iter_provider_history_messages_from_rows,
     provider_history_messages_from_rows,
 )
+from .store_threads import IdleCompactActivityChanged
 from .tool_context_window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
     conversation_message_with_terminal_tool_fold,
@@ -131,7 +132,7 @@ _VERIFICATION_COUNT_KEYS = (
 )
 
 
-# LLM: Scope is a read-only projection of the already-resolved owner/thread binding.
+# LLM: 作用域只是已解析所有者与线程绑定的只读投影，不重新裁决身份。
 # 类用途: 把当前会话的 owner、thread 和通道身份整理成统一只读结构。
 @dataclass(frozen=True)
 class ConversationScope:
@@ -157,8 +158,7 @@ class ConversationCompactResult:
     request_projection: ConversationCompactProjection | None = field(default=None, repr=False)
 
 
-# LLM: This read-only projection must use the exact token estimator and compact policy used by
-# automatic preflight; UI commands may render it but cannot replace it with cached display text.
+# LLM: 此只读投影必须与自动预检使用同一计量器和压缩策略；界面命令只负责渲染，不得以缓存展示文字替代真实投影。
 # 类用途: 保存当前会话真正的上下文估算、窗口、自动压缩线和历史代际。
 @dataclass(frozen=True)
 class ConversationContextUsage:
@@ -178,7 +178,7 @@ class ConversationContextUsage:
 
 
 # LLM: 内部宿主复用原来源/projector/摘要面；手动请求可显式绕过自动冷却但仍记录结果，不绕过来源/CAS校验。
-# 类用途: 统一压缩输入、停止检查与缓存面，显式手动恢复允许重试并由成功提交重置熔断。
+# 类用途: 统一压缩输入、停止检查与缓存面；闲置输入同时固定活动代及规范消息指纹。
 @dataclass(frozen=True)
 class ConversationCompactOptions:
     current_prompt: str = ""
@@ -202,10 +202,15 @@ class ConversationCompactOptions:
     trigger_source: str = ""
     # 显式手动/compact绕过自动压缩的冷却，结果仍走原失败账；成功提交会重置熔断，自动调用默认不绕过。
     bypass_circuit_breaker: bool = False
+    # 闲置维护沿原提交链核活动代；guard只在最终短提交门运行，不持锁调用模型。
+    expected_user_activity_generation: int | None = None
+    expected_message_tail: dict[str, object] | None = field(default=None, repr=False)
+    idle_compact: bool = False
+    commit_guard: Callable[[], bool] | None = field(default=None, repr=False)
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
-# 类用途: 将会话、可重放历史、范围及宿主准备交给候选和原提交链，不建立第二历史来源。
+# 类用途: 将会话、可重放历史和闲置消息CAS基线交给原提交链，不建立第二历史来源。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
@@ -235,6 +240,10 @@ class _CompactRunRequest:
     # LLM: 与 ConversationCompactOptions 同义：冻结校准只套在投影器计量上；触发来源只进进度事件。
     calibration: CompactRequestCalibration | None = field(default=None, kw_only=True, repr=False)
     trigger_source: str = field(default="", kw_only=True)
+    expected_user_activity_generation: int | None = field(default=None, kw_only=True)
+    expected_message_tail: dict[str, object] | None = field(default=None, kw_only=True, repr=False)
+    idle_compact: bool = field(default=False, kw_only=True)
+    commit_guard: Callable[[], bool] | None = field(default=None, kw_only=True, repr=False)
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
@@ -326,7 +335,7 @@ class _SummaryFinish:
     fallback_reason: str = "compact provider completed without summary text"
 
 
-# LLM: Never derive owner or thread authority from prompt text in this projection.
+# LLM: 此投影不得从提示正文推导所有者身份或线程权限。
 # 函数用途: 从已解析的 agent、thread 和通道字段生成会话作用域。
 def conversation_scope(
     agent: SimpleAgent,
@@ -375,7 +384,7 @@ def load_conversation_compact_source(
         if selector_factory is not None:
             raise ValueError("Compact row selection requires scope")
         pending = _without_current_request_suffix(_uncompacted_conversation_rows(store, thread), exclude_request_id)
-        return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}))
+        return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent, thread=thread), dict(_recent_operation_evidence(pending) or {}))
     from .compact_summary_view import (
         AppliedCompactContext,
         resolve_compact_summary_view,
@@ -389,7 +398,7 @@ def load_conversation_compact_source(
     )
     pending = _without_current_request_suffix(selected, exclude_request_id)
     return ConversationCompactSource(
-        thread, pending, runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}),
+        thread, pending, runtime_compact_policy(agent, thread=thread), dict(_recent_operation_evidence(pending) or {}),
         compact_context=AppliedCompactContext(thread.thread_id, scope, view),
     )
 
@@ -412,14 +421,20 @@ def _prepare_compact_source(agent, store, thread, options):
     return source, compact_context
 
 
-# LLM: 显式来源先核验同线程/行/视图；仅显式bypass跳过自动冷却，摘要、失败账和提交CAS仍走原链。
-# 函数用途: 复用来源并构造压缩请求，允许手动恢复绕过冷却但不绕过来源或容量检查。
+# LLM: 原来源/冷却门保持；普通标记须先于来源冻结，显式来源不补造标记；闲置复用已冻结基线并在末写CAS。
+# 函数用途: 构造压缩请求，去重不认领来源冻结后的新消息，手动恢复不绕过来源或容量检查。
 def _prepare_compact_request(
     agent: SimpleAgent,
     store: ConversationStore,
     thread: ConversationThread,
     options: ConversationCompactOptions,
 ) -> ConversationCompactResult | _CompactRunRequest:
+    expected_message_tail = options.expected_message_tail
+    # 只为本次加载的来源捕获更早的观察；显式来源可能已冻结很久，不能把当前消息误记为已覆盖。
+    if expected_message_tail is None and options.source is None:
+        marker, errors = store.messages.tail_marker_report(thread.thread_id)
+        if not errors:
+            expected_message_tail = marker
     source, compact_context = _prepare_compact_source(agent, store, thread, options)
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
@@ -522,6 +537,10 @@ def _prepare_compact_request(
         tool_source=options.tool_source,
         calibration=options.calibration,
         trigger_source=str(options.trigger_source or "").strip(),
+        expected_user_activity_generation=options.expected_user_activity_generation,
+        expected_message_tail=expected_message_tail,
+        idle_compact=options.idle_compact,
+        commit_guard=options.commit_guard,
     )
     return request
 
@@ -574,7 +593,7 @@ def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompact
     _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
     try:
         result = _compact_pending(request)
-    except (InterruptedError, ToolCancelled):
+    except (InterruptedError, ToolCancelled, IdleCompactActivityChanged):
         _emit_compact_progress(
             request,
             phase="superseded",
@@ -606,9 +625,8 @@ def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompact
     return result
 
 
-# LLM: `/context` and diagnostics are read-only consumers of the automatic compact contract;
-# terminal folds are counted separately from committed Compact generations and source pairs.
-# This function must never generate a summary, write a checkpoint, or advance a cursor.
+# LLM: /context 与诊断只读消费自动压缩合同；终态折叠与已提交的压缩代数、来源配对分别计数。
+# 此函数不得生成摘要、写检查点或推进游标。
 # 函数用途: 用自动 compact 的同一估算口径查看当前会话占用，并单列当前尾部的回合工具折叠。
 def inspect_conversation_context(
     agent: SimpleAgent,
@@ -619,7 +637,7 @@ def inspect_conversation_context(
 ) -> ConversationContextUsage:
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
 
-    policy = runtime_compact_policy(agent)
+    policy = runtime_compact_policy(agent, thread=thread)
     if thread is None:
         summary = ""
         evidence: dict[str, object] = {}
@@ -674,9 +692,8 @@ def inspect_conversation_context(
     )
 
 
-# LLM: Render only the structured usage snapshot; wording cannot become a trigger or compact
-# authority. Terminal folds must remain visibly distinct from true Compact generations.
-# Token counts remain explicitly estimated because providers may tokenize differently.
+# LLM: 只渲染结构化用量快照，文案不能成为触发条件或压缩权威；终态折叠必须与真正压缩代数明确区分。
+# 供应商分词可能不同，token 数必须明确标为估算。
 # 触发线被绝对上限封顶时改说“N tokens 触发（绝对上限封顶）”，免得“90%（30 万）”自相矛盾。
 # 函数用途: 把 `/context` 的真实估算、触发线、压缩历史和普通回合工具折叠分栏展示。
 def render_conversation_context_usage(
@@ -766,9 +783,8 @@ def _nontext_turn_start(rows: Sequence[MessageLogEntry], index: int) -> int:
 # LLM: 原生媒体或未知非文本块所在逻辑turn起的完整后缀必须保留；仅安全前缀进入原forced/auto分区与checkpoint覆盖。
 # 函数用途: 以地址分区尝试候选，立即释放超量候选；保留候选与自己的请求一起采用。
 def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
-    # LLM: A provider-pressure retry must replace the whole completed prefix once. Repeatedly
-    # protecting and then re-compacting the same tail creates checkpoint churn without helping
-    # the active turn fit. Normal threshold compaction still protects bounded complete turns.
+    # LLM: 供应商施压后的重试必须一次替换全部已完成前缀；反复保护再压同一尾部只会产生检查点抖动，不能帮活动回合装下请求。
+    # 普通阈值压缩仍保护有界的完整回合。
     # 逻辑说明: 平时到 90% 时保留近期完整问答；供应商已报压力时一次压完旧段，避免同一尾部连压多代。
     # 随图摘要只对"窗口上限/供应商施压"的恢复关闭；options.force 本身（一次压完前缀）不构成禁用理由。
     media_decision = resolve_compact_media_policy(request.agent, forced=request.pressure_forced, thread=request.thread)
@@ -822,12 +838,7 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
                 # 随图摘要的 typed 失败只写线程代次标记，不进熔断；同代次下一次压缩自动改走归档引用。
                 record_compact_vision_failure(request.store, request.thread, now=request.attempted_at)
             else:
-                record_compact_failure(
-                    request.store,
-                    request.thread,
-                    code=code,
-                    now=request.attempted_at,
-                )
+                _record_request_compact_failure(request, code=code)
             raise
         _emit_compact_progress(
             request,
@@ -855,13 +866,32 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
         "conversation compact candidate did not fit the input trigger and known output reserve",
         code="COMPACT_CANDIDATE_TOO_LARGE", capacity=rejected.capacity(),
     )
-    record_compact_failure(
-        request.store,
-        request.thread,
-        code=error.code,
-        now=request.attempted_at,
-    )
+    _record_request_compact_failure(request, code=error.code)
     raise error
+
+
+# LLM: 闲置失败与成功提交共用车道闸→消息锁→线程锁；闸内复核用户在场、取消与commit_guard，再传冻结基线到原存储CAS。
+#   普通压缩只用nullcontext，不取车道闸或增加新CAS；联测闲置用户先赢/失败先赢及容量熔断回归。
+# 函数用途: 把失败的最终复核与记账放进原短车道闸，防止迟到或恢复中的用户登记插入失败计数。
+def _record_request_compact_failure(request: _CompactRunRequest, *, code: str) -> None:
+    raise_if_compact_interrupted(request.interrupt_check)
+    from contextlib import nullcontext
+
+    from .run_claim import user_input_turn_gate
+
+    expected = {}
+    guard = nullcontext(False)
+    if request.idle_compact:
+        if request.expected_user_activity_generation is None or request.expected_message_tail is None:
+            raise IdleCompactActivityChanged("idle failure recording requires activity and canonical message baseline")
+        expected = {"expected_user_activity_generation": request.expected_user_activity_generation,
+                    "expected_message_tail": request.expected_message_tail}
+        guard = user_input_turn_gate(request.store, request.thread.thread_id)
+    with guard as user_present:
+        raise_if_compact_interrupted(request.interrupt_check)
+        if user_present or request.commit_guard is not None and request.commit_guard():
+            raise IdleCompactActivityChanged("conversation user activity changed before idle failure recording")
+        record_compact_failure(request.store, request.thread, code=code, now=request.attempted_at, **expected)
 
 
 # LLM: 固定开销是“空摘要、无任何保留”那一版完整下一请求的实测值：有宿主投影器时走它的“只计量、不提交”入口
@@ -964,7 +994,7 @@ def _resolved_provider_surface(request: _CompactRunRequest) -> ConversationCompa
             return provider
         return replace(provider, transcript_prefix=prefix)
     except Exception as exc:
-        record_compact_failure(request.store, request.thread, code=compact_exception_code(exc), now=request.attempted_at)
+        _record_request_compact_failure(request, code=compact_exception_code(exc))
         raise
 
 
@@ -985,8 +1015,7 @@ def _compact_request_input_ceiling(agent: SimpleAgent, policy: RuntimeCompactPol
     return min(policy.trigger_tokens, model_request_input_ceiling(agent, policy.context_window_tokens))
 
 
-# LLM: Every accepted transcript candidate reaches the same checkpoint/CAS failure bookkeeping;
-# choosing a trigger fallback must not create an unrecorded mutation-error path.
+# LLM: 已接受候选与回退候选共用检查点/CAS失败账；取消和闲置竞争不计失败，其余失败沿原记账入口。
 # 函数用途: 提交一个已验证的摘要候选，并把真实 checkpoint/CAS 异常记入同一会话熔断账。
 def _commit_compact_candidate_or_record_failure(
     request: _CompactRunRequest,
@@ -994,15 +1023,10 @@ def _commit_compact_candidate_or_record_failure(
 ) -> ConversationCompactResult:
     try:
         return _commit_compact_candidate(request, candidate)
-    except (InterruptedError, ToolCancelled):
+    except (InterruptedError, ToolCancelled, IdleCompactActivityChanged):
         raise
     except Exception as exc:
-        record_compact_failure(
-            request.store,
-            request.thread,
-            code=compact_exception_code(exc),
-            now=request.attempted_at,
-        )
+        _record_request_compact_failure(request, code=compact_exception_code(exc))
         raise
 
 
@@ -1144,7 +1168,8 @@ def _candidate_limits(request: _CompactRunRequest) -> _CandidateLimits:
 
 
 # LLM: 与提交前的容量门同一口径：有宿主投影器时用完整下一请求计量并按冻结校准折算（与预检同一观测），否则用本地
-#   会话估算（不套校准）；只读，不写状态。projection 里保留原始纯投影，供提交后改写本轮观测基线。
+#   会话估算（不套校准）；计量返回后立即复核取消，避免过大候选在活动变化后误记失败；只读，不写状态。
+#   projection 保留原始纯投影，供提交后改写本轮观测基线；联测闲置竞争和候选容量门。
 # 函数用途: 计量“某个摘要文本 + 保留尾部”组成的下一请求有多大。
 def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summary: str) -> _MeasuredSummary:
     raise_if_compact_interrupted(request.interrupt_check)
@@ -1164,6 +1189,7 @@ def _measure_candidate(request: _CompactRunRequest, tail: _CandidateTail, summar
             recent_operation_evidence=_recent_operation_evidence(retained_tail),
         )
     )
+    raise_if_compact_interrupted(request.interrupt_check)
     return _MeasuredSummary(summary, projection, tokens)
 
 
@@ -1188,7 +1214,7 @@ def _fit_landmarks_to_target(
     return smaller if smaller.tokens < measured.tokens else measured
 
 
-# LLM: 原checkpoint/generation CAS仍唯一；活跃工具按真实使用、新近性和固定名选择，并以冻结基线保留摘要期间的新发现。
+# LLM: checkpoint/generation仍唯一CAS；闲置候选在用户登记短门内复核活动，并传规范消息指纹到原append锁内CAS。
 # 函数用途: 复验实际覆盖及保留来源后沿原CAS提交同一候选，局部范围和原始文件不变。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
@@ -1246,29 +1272,41 @@ def _commit_compact_candidate(
             rows.validate()
     from . import tool_discovery
     selector = tool_discovery.compact_tool_selector(request.thread, request.pending)
-    updated = request.store.threads.update_compact_state(
-        request.thread.thread_id,
-        commit=ConversationCompactCommit(
-            summary=candidate.summary,
-            operation_evidence=candidate.operation_evidence,
-            checkpoint_id=checkpoint_id,
-            compacted_through_message_id=last_row.message_id,
-            compacted_through_byte_offset=byte_offset,
-            source_messages=(
-                request.thread.compact_source_messages
-                + len(candidate.compact_rows)
+    from contextlib import nullcontext
+
+    from .run_claim import user_input_turn_gate
+
+    guard = user_input_turn_gate(request.store, request.thread.thread_id) if request.idle_compact else nullcontext(False)
+    with guard as user_present:
+        if user_present or request.commit_guard is not None and request.commit_guard():
+            raise IdleCompactActivityChanged("conversation user activity changed before idle commit")
+        updated = request.store.threads.update_compact_state(
+            request.thread.thread_id,
+            commit=ConversationCompactCommit(
+                summary=candidate.summary,
+                operation_evidence=candidate.operation_evidence,
+                checkpoint_id=checkpoint_id,
+                compacted_through_message_id=last_row.message_id,
+                compacted_through_byte_offset=byte_offset,
+                source_messages=(
+                    request.thread.compact_source_messages
+                    + len(candidate.compact_rows)
+                ),
+                source_tool_pairs=request.thread.compact_source_tool_pairs + (
+                    len(candidate.tool_source.source_tool_refs) if candidate.tool_source is not None else 0
+                ),
+                publish_thread_view=(request.compact_context is None
+                                     or request.compact_context.scope.kind == "thread"),
             ),
-            source_tool_pairs=request.thread.compact_source_tool_pairs + (
-                len(candidate.tool_source.source_tool_refs) if candidate.tool_source is not None else 0
-            ),
-            publish_thread_view=(request.compact_context is None
-                                 or request.compact_context.scope.kind == "thread"),
-        ),
-        expected_generation=request.thread.compact_generation,
-        active_loaded_tool_names=selector(request.thread),
-        active_tool_selector=selector,
-        baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
-    )
+            expected_generation=request.thread.compact_generation,
+            active_loaded_tool_names=selector(request.thread),
+            active_tool_selector=selector,
+            baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
+            **({"expected_message_tail": request.expected_message_tail} if request.expected_message_tail is not None else {}),
+            **({"expected_user_activity_generation": request.expected_user_activity_generation,
+                "idle_compact": True}
+               if request.idle_compact else {}),
+        )
     return ConversationCompactResult(
         thread=updated,
         messages=candidate.retained_tail,
@@ -1325,7 +1363,7 @@ def _emit_compact_progress(
         return
 
 
-# LLM: The cursor must match an exact raw message id; missing authority fails closed.
+# LLM: 游标必须精确匹配原始消息身份，缺少该权威时失败关闭。
 # 函数用途: 兼容没有字节游标的旧 thread，从精确消息游标后读取尾部。
 def _messages_after_cursor(
     rows: list[MessageLogEntry],
@@ -1339,8 +1377,7 @@ def _messages_after_cursor(
     raise RuntimeError("conversation compact cursor is missing from the authoritative transcript")
 
 
-# LLM: Automatic preflight, manual compact, and `/context` must read the same uncompacted tail;
-# byte-offset authority wins, while legacy message cursors remain an explicit migration path.
+# LLM: 自动预检、手动压缩与 /context 必须读取同一未压缩尾部；字节偏移权威优先，旧消息游标只保留为显式迁移路径。
 # 函数用途: 从唯一 transcript 读取当前还没进摘要的原始消息段。
 def _uncompacted_conversation_rows(
     store: ConversationStore,
@@ -1354,10 +1391,8 @@ def _uncompacted_conversation_rows(
     return _messages_after_cursor(rows, thread.compacted_through_message_id)
 
 
-# LLM: Every surface writes the canonical conversation_request_id. Exclude only trailing user
-# inputs that have not yet produced a durable assistant checkpoint. Once the same request has an
-# assistant row, 会话运行时 mid-turn Compact must summarize that completed prefix instead of
-# hiding the whole request and repeatedly returning context_overflow.
+# LLM: 所有入口均写规范 conversation_request_id；只排除尚无持久助手检查点的尾部用户输入。
+# 同一请求一旦已有助手行，会话运行时的回合内压缩就必须摘要该已完成前缀，不得隐藏整条请求而反复报 context_overflow。
 # 函数用途: 按结构化身份切去尚未结束的用户后缀，只切地址；已落盘阶段回复仍可进入Compact。
 def _without_current_request_suffix(
     rows: Sequence[MessageLogEntry],
@@ -1721,6 +1756,7 @@ def _media_digest_for_summary(
     return final, digest
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
 # 函数用途: 从摘要调用的身份与缓存面派生看图小请求上下文，不复制历史；调用方保证 provider_surface 非空。
 def _media_digest_context(call: _CompactSummaryCall) -> MediaDigestContext:
     return MediaDigestContext(
@@ -1739,6 +1775,7 @@ def _media_blocks_summarized(candidate: _CompactCandidate) -> int:
     return max(0, min(int(decision.summarized_blocks), candidate.media_facts.blocks))
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
 # 函数用途: 算 checkpoint 里"本次按归档引用处理了几个图块"（范围内图块减去已总结的）。
 def _media_blocks_archived(candidate: _CompactCandidate) -> int:
     decision = candidate.media_decision
@@ -1747,8 +1784,7 @@ def _media_blocks_archived(candidate: _CompactCandidate) -> int:
     return max(0, candidate.media_facts.blocks - _media_blocks_summarized(candidate))
 
 
-# LLM: These shared rules are content guidance only. The cache-safe flag describes where the rows
-# live on the wire; it cannot authorize evidence, select a partition, or change commit semantics.
+# LLM: 这些共用规则只指导内容；缓存安全标志仅说明行在传输请求中的位置，不能授权证据、选择分区或改变提交语义。
 # media_archived / media_digest / media_prefix_refs 只是软引导：冻结前缀媒体在请求中原样存在，归档仅约束结果引用。
 # 函数用途: 生成 transcript Compact 的统一摘要要求，并说明历史是原生消息还是兼容 prompt 正文。
 def _conversation_summary_instruction(
@@ -1814,8 +1850,7 @@ def _conversation_summary_instruction(
     )
 
 
-# LLM: This compatibility path exists only for direct lightweight callers without a real runtime
-# surface. Production Gateway/child/manual entrypoints must supply the typed cache surface instead.
+# LLM: 此兼容路径只供没有真实运行时请求面的轻量直接调用；生产Gateway、子代理及手动入口必须提供类型化缓存面。
 # 函数用途: 为轻量测试或非完整 agent 调用保留旧式摘要 prompt；正式运行不再把大历史拼成新字符串。
 def _legacy_conversation_summary_prompt(
     instruction: str,
@@ -1841,10 +1876,8 @@ def _legacy_conversation_summary_prompt(
     )
 
 
-# LLM: This empty-response fallback reads only the prior summary's semantic part (its landmark section is
-# carried by _finish_summary), sanitized transcript projection, and structured operation evidence already
-# selected for this Compact candidate. It cannot decide
-# task completion or replace the separate authoritative operation-evidence field.
+# LLM: 空回复回退只读旧摘要语义部分、清洗后的会话投影及本候选已选中的结构化操作证据；原话备份由 _finish_summary 携带。
+# 它不能裁决任务完成，也不能替代独立的权威操作证据字段。
 # 函数用途: 无有效摘要时携结构化原因生成有界续接包，原始记录与独立证据保持权威。
 def _mechanical_conversation_summary(
     previous_summary: str,
@@ -1886,7 +1919,7 @@ def _mechanical_conversation_summary(
     )
 
 
-# LLM: Individual fallback values are single-line bounded projections and never parsed as state.
+# LLM: 每个回退值都是单行有界投影，绝不解析成运行状态。
 # 函数用途: 限制机械会话摘要中的单项长度，防止一条旧消息吃掉整个续接预算。
 def _clip_compact_field(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
@@ -1895,8 +1928,7 @@ def _clip_compact_field(value: object, limit: int) -> str:
     return text[: max(0, limit - 12)].rstrip() + "...[clipped]"
 
 
-# LLM: Global fallback truncation retains both the oldest task context and newest conversation
-# facts, with an explicit middle omission rather than silent head-only loss.
+# LLM: 回退整体截断同时保留最早任务上下文和最新会话事实，中间省略必须显式标明，不得只留头部而静默丢失新事实。
 # 函数用途: 将机械会话摘要限制在固定预算内，同时保留开头背景和末尾最新对话。
 def _bounded_compact_text(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -2002,6 +2034,8 @@ def _recent_operation_evidence(
     return _merge_compact_operation_evidence({}, rows)
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
+# 函数用途: 从操作证据中提取结构化事件，不把摘要正文当作执行证据。
 def _operation_events(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -2025,6 +2059,8 @@ def _operation_events(value: object) -> list[dict[str, object]]:
     return events
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
+# 函数用途: 按结构化操作事件累计结果数量，不因展示裁剪丢总数。
 def _operation_counts(value: object) -> dict[str, int]:
     source = value if isinstance(value, dict) else {}
     return {
@@ -2033,6 +2069,8 @@ def _operation_counts(value: object) -> dict[str, int]:
     }
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
+# 函数用途: 将计数字段规范为非负整数，非法值沿原默认处理。
 def _nonnegative_int(value: object) -> int:
     try:
         return max(0, int(value or 0))
@@ -2040,8 +2078,7 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: Compact input keeps prose, operation facts, and exactly one active terminal-fold projection
-# in separate fields; it must never duplicate inactive hot/cold text or infer state from prose.
+# LLM: 压缩输入把正文、操作事实和恰好一份活动终态折叠投影分字段保存；不得重复非活动冷热正文或从自然语言推断状态。
 # 函数用途: 为摘要模型保留正文、权威操作核验和跨回合工具折叠，供真正 Compact 一次性吸收。
 def _summary_content(row: MessageLogEntry) -> object:
     content = project_user_reply(row.content).content if row.role == "assistant" else row.content

@@ -70,7 +70,7 @@ def test_p2a_optional_preflight_failure_restores_seed_and_completes_turn(tmp_pat
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 
     fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
-    fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    fixture.agent.config.memory_compact_trigger_percent = 90
     monkeypatch.setattr(compact, "_summarize", lambda *a, **k: "已提交的第一代摘要")
     prepare_conversation_context(
         fixture.agent, fixture.agent.conversation_store,
@@ -146,7 +146,7 @@ def test_p2a_preflight_does_not_mask_hard_failures(tmp_path, monkeypatch, failur
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 
     fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
-    fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    fixture.agent.config.memory_compact_trigger_percent = 90
     state, reads, summaries = {}, [], []
     original = recovery.PreparedCompactRecovery.select
     tokens = 95_904 if failure == "ceiling" else 95_000
@@ -239,11 +239,12 @@ def test_p2a_manual_compact_lane_allows_five_seconds(monkeypatch):
     now[0] = 105.0
     assert check()
 
-# LLM: These tests intentionally use tiny policy thresholds to exercise checkpoint/tail/CAS
-# behavior, while the fake provider has no wire limit. Physical request budgeting is tested with
-# explicit small windows and complete source coverage in test_compact_request_budget.
+# LLM: 这些测试刻意使用很小的策略阈值检验检查点、尾部和CAS，替身供应商没有传输容量限制；
+# 物理请求预算由 test_compact_request_budget 以显式小窗口和完整来源覆盖验证。
 # 函数用途: 隔离旧会话状态测试的人工触发线和 fake 后端容量，避免完整工具表大于玩具窗口。
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 为摘要测试固定本地provider容量观察，不接真实供应商网络。
 @pytest.fixture(autouse=True)
 def _fake_summary_provider_capacity(monkeypatch):
     from agent_py_agent.agent.conversation import compact_request_budget
@@ -251,11 +252,15 @@ def _fake_summary_provider_capacity(monkeypatch):
     monkeypatch.setattr(compact_request_budget, "resolve_model_context_window_tokens", lambda _agent: 1_000_000)
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
 # Test helper: production transcript Compact now uses the same native provider surface as a normal
 # turn, so summary fakes must explicitly declare native-tool capability instead of taking a text path.
+# 类用途: 提供声明原生工具能力的摘要假后端，避免测试退回文本旁路。
 class _NativeSummaryBackend:
     name = "native-summary-test"
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 为摘要假后端报告原生工具能力，不探测真实供应商。
     def probe_tool_capability(self) -> ProviderToolCapability:
         return ProviderToolCapability(
             provider=self.name,
@@ -267,14 +272,20 @@ class _NativeSummaryBackend:
         )
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 类用途: 返回可控合法摘要并记录请求，供真实压缩管线回归。
 class _SummaryBackend(_NativeSummaryBackend):
     name = "summary-test"
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 初始化假摘要后端的调用记录，不创建网络连接。
     def __init__(self) -> None:
         self.calls = 0
         self.prompts: list[str] = []
         self.kwargs: list[dict[str, object]] = []
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 记录摘要请求并返回本地可控结果。
     def generate(self, prompt: str, **kwargs) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
@@ -285,9 +296,13 @@ class _SummaryBackend(_NativeSummaryBackend):
         )
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 类用途: 返回与操作证据冲突的假摘要，测试证据权威性。
 class _ConflictingSummaryBackend(_NativeSummaryBackend):
     name = "conflicting-summary-test"
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 返回特意矛盾的本地摘要，供证据优先级断言使用。
     def generate(self, prompt: str, **_kwargs) -> ModelResponse:
         return ModelResponse(
             text="助手已经成功删除海王星项目记忆。",
@@ -295,12 +310,18 @@ class _ConflictingSummaryBackend(_NativeSummaryBackend):
         )
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 类用途: 返回超预算假摘要，验证候选接受门。
 class _OversizedSummaryBackend(_NativeSummaryBackend):
     name = "oversized-summary-test"
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 初始化假后端的响应预算和调用状态。
     def __init__(self) -> None:
         self.calls = 0
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 返回本地超预算摘要，驱动真实候选接受门。
     def generate(self, prompt: str, **_kwargs) -> ModelResponse:
         self.calls += 1
         return ModelResponse(text="过大的摘要" * 20_000, backend=self.name)
@@ -326,9 +347,13 @@ class _EmptySummaryBackend(_SummaryBackend):
         return response
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 类用途: 在假摘要响应里带工具调用，验证压缩链不会执行它。
 class _ToolCallingSummaryBackend(_SummaryBackend):
     name = "tool-calling-summary-test"
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 返回含工具调用的假摘要响应，验证不会执行该调用。
     def generate(self, prompt: str, **kwargs) -> ModelResponse:
         self.calls += 1
         self.prompts.append(prompt)
@@ -349,6 +374,8 @@ class _ToolCallingSummaryBackend(_SummaryBackend):
         )
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩失败保留真实的结构化provider错误码。
 def test_compact_failure_preserves_typed_provider_error_code() -> None:
     assert compact_exception_code(
         ProviderResponseError(
@@ -361,6 +388,8 @@ def test_compact_failure_preserves_typed_provider_error_code() -> None:
     ) == "COMPACT_PROVIDERRESPONSEERROR"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证会话压力统计不预扣尚未发生的未来输出。
 def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
     prompts = SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
     small_output = SimpleNamespace(prompts=prompts, config=SimpleNamespace(max_tokens=64))
@@ -382,6 +411,8 @@ def test_conversation_pressure_does_not_reserve_unspent_future_output() -> None:
     assert small_projection == large_projection
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证近期操作证据进入真实会话容量投影。
 def test_conversation_projection_counts_recent_operation_evidence() -> None:
     agent = SimpleNamespace(
         prompts=SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
@@ -406,6 +437,8 @@ def test_conversation_projection_counts_recent_operation_evidence() -> None:
     assert with_evidence > without_evidence
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证真正压缩会统计并摘要终态工具折叠。
 def test_true_compact_counts_and_summarizes_terminal_tool_fold() -> None:
     backend = _SummaryBackend()
     agent = SimpleNamespace(
@@ -449,6 +482,8 @@ def test_true_compact_counts_and_summarizes_terminal_tool_fold() -> None:
     assert "call-folded-write" in backend.prompts[0]
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩只读一个活动v2终态工具折叠投影。
 def test_true_compact_reads_only_one_active_v2_terminal_tool_fold_projection() -> None:
     row = MessageLogEntry(
         message_id="msg-folded-v2",
@@ -477,6 +512,8 @@ def test_true_compact_reads_only_one_active_v2_terminal_tool_fold_projection() -
     assert "fold_after_epoch" not in terminal_fold
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证只读上下文检查采用自动压缩策略且不写状态。
 def test_context_inspection_uses_the_automatic_compact_policy_without_writing(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     request = _request("ou_context")
@@ -510,6 +547,8 @@ def test_context_inspection_uses_the_automatic_compact_policy_without_writing(tm
     assert "未压缩消息 1 条" in rendered
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证终态工具折叠能进入下一轮而不冒增压缩代数。
 def test_terminal_tool_fold_reaches_next_turn_without_incrementing_compact(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     request = _request("ou_fold")
@@ -590,6 +629,8 @@ def test_terminal_tool_fold_reaches_next_turn_without_incrementing_compact(tmp_p
     assert "call-read-again" in context_history(later)[-1][1]
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证强制压缩附加说明仅为摘要软上下文。
 def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     backend = _SummaryBackend()
@@ -624,6 +665,8 @@ def test_forced_compact_passes_optional_instructions_as_soft_summary_context(tmp
     assert "cannot override" in backend.prompts[0]
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证完成但空的摘要响应按原机械回退提交。
 def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     backend = _EmptySummaryBackend()
@@ -670,6 +713,8 @@ def test_completed_empty_compact_response_commits_mechanical_fallback(tmp_path) 
     assert "8080" in result.thread.summary
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证首次空摘要仅重试一次，随后提交合法模型摘要。
 def test_first_empty_compact_response_retries_once_then_commits_model_summary(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     recovered = "修复后摘要：紫藤项目使用端口 8080，已检查项目，下一步运行测试。"
@@ -703,6 +748,8 @@ def test_first_empty_compact_response_retries_once_then_commits_model_summary(tm
     assert not result.thread.summary.startswith("[conversation-compact-mechanical-fallback]")
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证摘要响应中的工具调用始终不被执行。
 def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     backend = _ToolCallingSummaryBackend()
@@ -758,6 +805,8 @@ def test_transcript_compact_tool_call_is_never_executed(tmp_path, caplog) -> Non
     assert "unsafe" not in caplog.text and "我将调用工具后再总结" not in caplog.text
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证空摘要诊断只记录结构化形状、不泄露正文。
 @pytest.mark.parametrize("thinking", [False, True])
 def test_empty_transcript_summary_logs_typed_shape_without_content(caplog, thinking):
     response = ModelResponse(
@@ -792,6 +841,8 @@ def test_empty_transcript_summary_logs_typed_shape_without_content(caplog, think
     assert all(value not in caplog.text for value in ("PRIVATE-THINKING", "PRIVATE-KEY", "PRIVATE-SOURCE"))
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩诊断对不可信标签作长度约束。
 def test_compact_response_diagnostic_bounds_untrusted_labels(caplog):
     response = ModelResponse(text="", backend="fake", stop_reason="x" * 10000, runtime_reason="PRIVATE BODY\nPRIVATE KEY")
     calls = []
@@ -807,6 +858,8 @@ def test_compact_response_diagnostic_bounds_untrusted_labels(caplog):
     assert len(caplog.text) < 2000 and "PRIVATE" not in caplog.text
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证模型漏写时仍保存精确用户要求及最终答复地标。
 def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_them() -> None:
     backend = _SummaryBackend()
     agent = SimpleNamespace(backend=backend)
@@ -843,6 +896,8 @@ def test_compact_keeps_exact_user_and_final_answer_landmarks_when_model_omits_th
     assert "我正在抓取网页，请稍候" not in summary
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证严格空摘要保留完整旧摘要基底和选定消息。
 def test_strict_empty_summary_keeps_full_previous_base_and_selected_rows(monkeypatch) -> None:
     from agent_py_agent.agent.conversation import compact_request_budget
     from agent_py_agent.agent.conversation.compact import _CompactSummaryCall
@@ -862,6 +917,8 @@ def test_strict_empty_summary_keeps_full_previous_base_and_selected_rows(monkeyp
     assert calls[0]["preserve_complete_fallback"] is True
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证地标跨后续压缩代保存且不重复附加后缀。
 def test_compact_landmarks_survive_later_generation_without_suffix_duplication() -> None:
     backend = _SummaryBackend()
     agent = SimpleNamespace(backend=backend)
@@ -911,6 +968,8 @@ def test_compact_landmarks_survive_later_generation_without_suffix_duplication()
     assert '- assistant_final [msg-new-final]: "第一行 first-line，第二行 second-line。"' in second
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证长答复不会挤掉较短的原始用户要求。
 def test_long_final_answers_cannot_displace_short_user_requirements_from_landmarks():
     from agent_py_agent.agent.conversation.compact_landmarks import (
         LandmarkOptions,
@@ -938,6 +997,8 @@ def test_long_final_answers_cannot_displace_short_user_requirements_from_landmar
     assert second.text.count("## Exact Conversation Landmarks") == 1
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证用户地标超预算时优先近期要求且不扩总预算。
 def test_landmark_user_overflow_prefers_recent_requests_without_growing_budget():
     from agent_py_agent.agent.conversation.compact_landmarks import (
         LandmarkOptions,
@@ -956,6 +1017,8 @@ def test_landmark_user_overflow_prefers_recent_requests_without_growing_budget()
     assert omitted.split("[", 1)[1].split()[0] == "u0" and "u19" not in omitted
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证进度回调对应真实压缩管线阶段。
 def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=20_000)
     agent.backend = _SummaryBackend()
@@ -1005,6 +1068,8 @@ def test_compact_progress_callback_reports_real_pipeline_stages(tmp_path) -> Non
     assert all("summary" not in event for event in events)
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证会话容量投影不计分离Audit投递正文。
 def test_conversation_projection_does_not_count_detached_audit_delivery_body() -> None:
     agent = SimpleNamespace(
         prompts=SimpleNamespace(build=lambda *_args, **_kwargs: "完整输入上下文")
@@ -1032,6 +1097,8 @@ def test_conversation_projection_does_not_count_detached_audit_delivery_body() -
     assert projected == baseline
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证会话压缩不摘要分离Audit投递正文。
 def test_conversation_compact_does_not_summarize_detached_audit_delivery_body() -> None:
     backend = _SummaryBackend()
     agent = SimpleNamespace(backend=backend)
@@ -1062,6 +1129,8 @@ def test_conversation_compact_does_not_summarize_detached_audit_delivery_body() 
     assert "不应进入摘要的新受益人事件正文" not in backend.prompts[0]
 
 
+# LLM: 夹具使用新规范键，仍保持原50%观察点；旧YAML兼容另有Wave9回归，不放宽预算断言。
+# 函数用途: 创建隔离真实Agent及明确比例，避免新默认80%改变原测试输入。
 def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent:
     config = AgentConfig(
         model_backend="echo",
@@ -1069,13 +1138,15 @@ def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent
         prompt_files=[],
         max_tokens=64,
         model_context_window_tokens=context_tokens,
-        memory_compact_auto_trigger_percent=50,
+        memory_compact_trigger_percent=50,
         conversation_history_max_turns=max_turns,
     )
     config.config_sources = {"model_context_window_tokens": {"source": "test"}}
     return SimpleAgent(config, tmp_path)
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 构造测试Gateway请求，保留显式线程与用户输入字段。
 def _request(user_id: str = "ou_alice") -> dict:
     return {
         "conversation": {
@@ -1087,12 +1158,16 @@ def _request(user_id: str = "ou_alice") -> dict:
     }
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 用真实请求预检取得测试会话上下文。
 def _context(agent: SimpleAgent, request: dict, request_id: str, prompt: str):
     return gateway_conversation_context(
         GatewayConversationLoadRequest(agent, request, request_id, prompt)
     )
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证同线程历史可超过近期轮数配置，直到实际压缩才移动游标。
 def test_same_thread_accumulates_beyond_recent_turn_setting_until_compact(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000, max_turns=2)
     request = _request()
@@ -1115,6 +1190,8 @@ def test_same_thread_accumulates_beyond_recent_turn_setting_until_compact(tmp_pa
     assert context_history(followup)[0][1] == "第 0 轮 user 内容"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩保留原始消息，并按owner建立旧消息索引。
 def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_path) -> None:
     # 给稳定 system/workspace prompt 留出小幅演进余量；本测试验证的是 transcript
     # 成功压缩与 owner 索引，不应卡在候选刚好高于优选 recovery target 的单 token 边界。
@@ -1165,6 +1242,8 @@ def test_compact_keeps_raw_transcript_and_indexes_old_messages_per_owner(tmp_pat
     assert tail == [], "当前请求之前的完整历史应一次替换为摘要，原始 transcript 仍保留"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩保留有界且完整的近期回合及全量检查点。
 def test_compact_preserves_bounded_complete_recent_turns_and_full_checkpoint(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=30_000)
     backend = _SummaryBackend()
@@ -1224,6 +1303,8 @@ def test_compact_preserves_bounded_complete_recent_turns_and_full_checkpoint(tmp
     assert compacted.compact_operation_evidence_ref == str(checkpoint_path)
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证多次压缩检查点组成单一递增代际链。
 def test_repeated_compact_checkpoints_form_one_generation_chain(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     agent.backend = _SummaryBackend()
@@ -1284,6 +1365,8 @@ def test_repeated_compact_checkpoints_form_one_generation_chain(tmp_path) -> Non
     ]
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证非法摘要不推进消息游标，并按原失败规则开启熔断。
 def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_path) -> None:
     # 初始化会话时不能先用小于固定 prompt 的窗口；该测试随后才显式制造坏候选。
     agent = _agent(tmp_path, context_tokens=20_000)
@@ -1354,6 +1437,8 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
     assert not checkpoint_path.exists()
 
 
+# LLM: 使用新规范比例键，仍强验8500候选/9000触发线和单次摘要，不放宽失败边界。
+# 函数用途: 验证健康目标不可达时保留低于实际触发线的候选。
 def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_unreachable(
     tmp_path,
     monkeypatch,
@@ -1363,7 +1448,7 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     from agent_py_agent.agent.conversation import compact as compact_module
 
     agent = _agent(tmp_path, context_tokens=10_000)
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     backend = _SummaryBackend()
     agent.backend = backend
@@ -1381,6 +1466,8 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
             )
     original_build = compact_module._build_compact_candidate
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 构造低于触发阈值的摘要候选，固定容量观察边界。
     def build_candidate_below_trigger(*args, **kwargs):
         candidate = original_build(*args, **kwargs)
         return replace(candidate, projected_tokens_after=8_500)
@@ -1409,6 +1496,8 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     assert backend.calls == 1
 
 
+# LLM: 新规范键显式90%，所有原输出预留与拒绝断言不变；不拿80%新默认改变旧观察输入。
+# 函数用途: 在多种输出预留和OAuth模式下核候选容量硬边界。
 @pytest.mark.parametrize("output_cap,candidate_tokens,explicit,oauth,force,accepted", [
     (4_000, 5_999, True, False, False, True),
     (4_000, 6_000, True, False, True, False),
@@ -1432,7 +1521,7 @@ def test_transcript_candidate_respects_output_reserve_before_target_or_fallback(
     agent = _agent(tmp_path, context_tokens=10_000)
     if not explicit:
         agent.config.model_context_window_tokens = None
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     backend_type = OpenAIResponsesBackend if oauth else HttpBackend
     agent.backend = backend_type(BackendOptions(api_base="https://example.invalid", api_key="fake-key",
@@ -1464,6 +1553,8 @@ def test_transcript_candidate_respects_output_reserve_before_target_or_fallback(
         assert stored.compacted_through_byte_offset == 0
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证冷却后压缩熔断进入半开态，成功后重置计数。
 def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     agent.backend = _SummaryBackend()
@@ -1505,6 +1596,8 @@ def test_compact_circuit_half_opens_after_cooldown_and_success_resets_it(tmp_pat
     assert stored.compact_failure_code == ""
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证检查点写入失败时不提交摘要候选。
 def test_checkpoint_write_failure_does_not_commit_candidate(tmp_path, monkeypatch) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     agent.backend = _SummaryBackend()
@@ -1520,6 +1613,8 @@ def test_checkpoint_write_failure_does_not_commit_candidate(tmp_path, monkeypatc
             content=f"待压缩 {role}",
         )
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 在真实检查点写入边界注入确定错误，不伪造摘要提交成功。
     def fail_checkpoint(*_args, **_kwargs):
         raise OSError("checkpoint unavailable")
 
@@ -1545,6 +1640,8 @@ def test_checkpoint_write_failure_does_not_commit_candidate(tmp_path, monkeypatc
     assert stored.compact_consecutive_failures == 1
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证近期尾部保留结构化操作证据。
 def test_recent_tail_keeps_typed_operation_evidence_visible(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=30_000)
     agent.backend = _SummaryBackend()
@@ -1599,6 +1696,8 @@ def test_recent_tail_keeps_typed_operation_evidence_visible(tmp_path) -> None:
     assert "write_file/write" in rendered
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证近期回合选取依据消息角色，而非正文词句。
 def test_recent_tail_selection_uses_roles_not_message_wording() -> None:
     rows = [
         MessageLogEntry(
@@ -1640,6 +1739,8 @@ def test_recent_tail_selection_uses_roles_not_message_wording() -> None:
     ]
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩与历史索引保留结构化操作核验结果。
 def test_compact_and_history_index_keep_typed_operation_verification(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     request = _request()
@@ -1688,6 +1789,8 @@ def test_compact_and_history_index_keep_typed_operation_verification(tmp_path) -
     assert indexed.metadata["operation_verification"] == stored_verification
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证操作证据独立保存，不被矛盾模型摘要覆盖。
 def test_compact_keeps_operation_evidence_outside_conflicting_model_summary(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     agent.backend = _ConflictingSummaryBackend()
@@ -1761,6 +1864,8 @@ def test_compact_keeps_operation_evidence_outside_conflicting_model_summary(tmp_
     assert "must-not-survive" not in section
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证操作证据有界，并如实标记旧历史缺口。
 def test_compact_operation_evidence_is_bounded_and_reports_legacy_gaps() -> None:
     rows = [
         MessageLogEntry(
@@ -1808,6 +1913,8 @@ def test_compact_operation_evidence_is_bounded_and_reports_legacy_gaps() -> None
     assert evidence["events"][-1]["assistant_sequence"] == 40
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证提示中保留全量操作计数，仅裁剪近期明细。
 def test_prompt_operation_evidence_keeps_full_counts_and_only_recent_details() -> None:
     evidence = {
         "schema": "conversation_operation_evidence.v1",
@@ -1854,6 +1961,8 @@ def test_prompt_operation_evidence_keeps_full_counts_and_only_recent_details() -
     assert len(evidence["events"]) == 12
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证模型正文不会被推断成已完成的工具操作。
 def test_summary_content_does_not_infer_operation_from_assistant_prose() -> None:
     row = MessageLogEntry(
         message_id="msg-1",
@@ -1866,6 +1975,8 @@ def test_summary_content_does_not_infer_operation_from_assistant_prose() -> None
     assert _summary_content(row) == "我已经删除了记忆。"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证强制压缩不把当前Gateway未完成回合纳入摘要。
 def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000, max_turns=3)
     backend = _SummaryBackend()
@@ -1916,6 +2027,8 @@ def test_forced_compact_keeps_current_gateway_turn_out_of_summary(tmp_path) -> N
     assert '"forced": true' in event_path.read_text(encoding="utf-8")
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证同一Gateway请求内已完成检查点可进入后续强制压缩。
 def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
     tmp_path,
 ) -> None:
@@ -2004,6 +2117,8 @@ def test_forced_compact_includes_completed_checkpoint_from_same_gateway_request(
     assert tail == []
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证上下文溢出后仍保留待延后工具的原生调用界面。
 def test_transcript_compact_preserves_pending_deferred_tool_surface_after_overflow(
     tmp_path,
 ) -> None:
@@ -2042,6 +2157,8 @@ def test_transcript_compact_preserves_pending_deferred_tool_surface_after_overfl
     assert "get_goal" in tool_names
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证Gateway线程把运行上下文标记为会话作用域。
 def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -> None:
     agent = _agent(tmp_path, context_tokens=1_000_000)
     request = _request()
@@ -2062,6 +2179,8 @@ def test_gateway_thread_marks_runtime_context_as_conversation_scoped(tmp_path) -
     assert params.context_scope == "conversation"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证压缩替换旧消息视图后，下一提示仍保留owner人格与相关记忆。
 def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tmp_path) -> None:
     """Compact 只替换旧 transcript 的模型视图，不应吞掉 owner Persona/Memory。"""
 
@@ -2119,6 +2238,8 @@ def test_conversation_compact_keeps_persona_and_related_memory_in_next_prompt(tm
     assert "旧消息 19 assistant" in history_text
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证会话历史索引不跨owner本地存储检索。
 def test_conversation_search_index_does_not_cross_owner_local_stores(tmp_path) -> None:
     alice = _agent(tmp_path / "alice", context_tokens=1_000_000)
     bob = _agent(tmp_path / "bob", context_tokens=1_000_000)
@@ -2136,6 +2257,8 @@ def test_conversation_search_index_does_not_cross_owner_local_stores(tmp_path) -
     assert bob.local_store.search("银杏计划", source_type="conversation_message") == []
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证非文本分段来源不能误提交机械摘要。
 @pytest.mark.parametrize("block", [
     {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "test"}},
     {"type": "future_media", "ref": "opaque-source"},

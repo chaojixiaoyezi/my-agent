@@ -7,7 +7,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from .config_layers import ConfigLayer, EffectiveConfig, merge_config_layers
+from .config_layers import ConfigLayer, EffectiveConfig, compact_policy_percent, merge_config_layers
 
 INTERNAL_RUNTIME_CONFIG_FIELDS = {
     "config_layers",
@@ -18,10 +18,14 @@ INTERNAL_RUNTIME_CONFIG_FIELDS = {
 }
 
 
+# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# 函数用途: 从配置模型取得对外公开的键，不把内部追踪字段当用户配置。
 def public_config_keys(config_cls: type) -> set[str]:
     return {item.name for item in fields(config_cls)} - INTERNAL_RUNTIME_CONFIG_FIELDS
 
 
+# LLM: 旧比例键只在同一来源未提供新键时迁移，来源优先级不变；用户字段仍排除宿主内部诊断和身份快照。
+# 函数用途: 合并默认、配置文件和环境来源，并兼容旧压缩比例配置。
 def merge_agent_config_sources(
     *,
     config_cls: type,
@@ -31,6 +35,8 @@ def merge_agent_config_sources(
 ) -> EffectiveConfig:
     allowed = public_config_keys(config_cls)
     clean = {key: normalized[key] for key in raw_keys if key in allowed and key in normalized}
+    if "memory_compact_auto_trigger_percent" in clean and "memory_compact_trigger_percent" not in clean:
+        clean["memory_compact_trigger_percent"] = compact_policy_percent(clean["memory_compact_auto_trigger_percent"], 80)
     schema_defaults = _schema_default_values(config_cls, allowed)
     env_values = _env_override_values(clean, schema_defaults)
     layers = [
@@ -42,11 +48,15 @@ def merge_agent_config_sources(
     return merge_config_layers(layers, allowed_keys=allowed)
 
 
+# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# 函数用途: 提取配置schema的默认值，作为最低优先级来源。
 def _schema_default_values(config_cls: type, allowed: set[str]) -> dict[str, Any]:
     defaults = config_cls()
     return {key: getattr(defaults, key) for key in allowed}
 
 
+# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# 函数用途: 读取受支持环境变量覆盖项，记录实际环境来源。
 def _env_override_values(clean: dict[str, object], schema_defaults: dict[str, object]) -> ConfigLayer:
     env_name = str(clean.get("api_key_env", schema_defaults.get("api_key_env", "")) or "").strip()
     if not env_name:

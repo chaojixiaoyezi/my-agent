@@ -17,6 +17,170 @@
 
 因此，用户明确将此参数移出跨标记边界测试矩阵；保留 `iew": "[` 精确8字符跨边界反例，并保持对整个output、已解码账本output和preview值的严格8字符窗口检查。没有修改coordinator序列化、固定字段或机器事实。本节不将标记边界性质外推为整个公共JSON文本不可能与任意人工秘密重合；生产部署、跨机网络、真实模型消费、全仓及跨平台CI未验证。
 
+## 2026-10-28 Wave 9 B1 Round 5：失败记账用户车道闸与显式90%容量夹具
+
+来源：完整阅读 `07-tasks/fix-r5-wave9-b1.md` 64行；返工起点 `b4ec315b703cd4ad6b52631d45b88c3b72fd7dd5`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。所有项目修改只在指定 `wave9-b1` 工作树，不推送、合并、部署或启停真实服务。
+
+- **原用户车道闸**：仅修改生产函数 `_record_request_compact_failure`；闲置分支使用与成功提交相同的 `user_input_turn_gate`，门内再次检查中断、用户在场及 `commit_guard`，再沿原消息锁→线程锁完成失败CAS。最终锁顺序为车道闸→规范消息锁→线程原子更新锁；不另建锁或失败账。普通压缩使用 `nullcontext(False)`，不增加用户车道闸或活动/消息CAS；不声称所有普通路径行为与旧版完全等价，额外的最终中断与guard复核是本次明确要求。
+- **事件控制并发先红后绿**：新增两种顺序×两种用户模式，共4个运行节点。`registered`沿原用户登记上下文覆盖排队/恢复登记，`active`另外运行原执行租约及退出清理；两者都不更改活动代或规范消息。用户先赢：在第一次真实中断检查读到False后暂停，让用户先登记，要求 `cas_aborted=True`、`reason=activity_changed`、失败数0且无摘要提交。失败先赢：在原失败写入口内等待前台对同一原锁的非阻塞探针失败，再完成原真实CAS，核对失败写入先于用户进入、失败数恰好1。探针证明锁当时不可取得，结合原阻塞登记代码及写入/进入顺序验证互斥，不冒充独立观测了阻塞式acquire内部全过程。无sleep猜时序，不替换锁或CAS；所有工作线程异常通过future回传。原实现4项均失败（`r5-lane-red.xml`），修复后4项通过（`r5-lane-green.xml`）。
+- **90%夹具修复**：`test_active_turn_compact_projection.py`的 `carried_case` 与 `test_compact_calibrated_candidate_gate.py`的 `_gateway_case`，各自只补正式 `memory_compact_trigger_percent=90`，保留原 `memory_compact_auto_trigger_percent=90`。前者输入上限9000，后者受输出预留约束仍80000；不改生产默认80、任何断言、原合成输入或校准比例。两文件修前67项中7失败（`r5-fixtures-red.xml`），修后在下述十文件完整运行中全部通过。AST核对进一步证明：分别移除这一个新增关键字/赋值后，与返工起点完整AST相等，没有其它测试行为改动。
+- **完整中文双层注释**：新触及的上述两测试文件共84个定义，原有69处缺失或装饰器后错位均补齐；新增模块头位于首个语句前。注释修改前后，两文件完整AST摘要相等。原功能基线至当前HEAD加工作树改动的并集，共35个Python文件、1173个函数/异步函数/类，模块头、所有嵌套helper及首个装饰器前双层注释缺失/错位0；所有双层注释正文无中文的首行0。完整AST复现脚本见下方Round3，LLM中文首行扫描见Round4；本次还逐行检查模块/类/函数用途的正文含中文。
+- **独立复核**：Astra high只读审阅内联生产函数、原车道闸/登记片段及新增并发测试，结论PASS，没有确定性阻断项；容量夹具仅按提供的准确diff说明审查。它未访问工作树、未独立运行测试或核对统计，不冒称全仓审阅或运行验收。可选的失败先赢消息尾对称断言不作为本次阻断要求。
+
+**当前指定十文件：373项通过，0失败/0错误/0跳过。** 已读取完整输出并解析 `.pytest_cache/r5-required.xml`，其中四个主文件分别108、59、10、73项；新增纳入的活动回合投影41项；五个兼容文件分别13、26、15、14、14项。下方Round4的5项兼容失败及本轮确认的另2项投影失败现均已关闭，历史结果不再表示当前状态。
+
+复现（工作树根；精确十文件完整命令）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py agent_py_agent/tests/test_compact_threshold_unification.py agent_py_agent/tests/test_gateway_conversation_compact.py agent_py_agent/tests/test_active_turn_compact_projection.py agent_py_agent/tests/test_compact_circuit_breaker.py agent_py_agent/tests/test_compact_calibrated_candidate_gate.py agent_py_agent/tests/test_compact_capacity_facts.py agent_py_agent/tests/test_compact_capacity_host_chain.py agent_py_agent/tests/test_compact_output_reserve.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+git diff --check
+```
+
+边界：本机真实临时Store、受控线程、原进程内用户闸及替身供应商验证，不外推真实供应商、生产Gateway/IM/TUI、完整重启恢复链或Linux/Windows；全仓、线上CI及上述真实入口均未验证。没有运行已退役尺寸checker。JUnit、注释盘点、AST摘要及本次复核证据仅留任务缓存，不加入产品提交。
+
+## 2026-10-28 Wave 9 B1 Round 4：闲置失败记账CAS与完整中文LLM注释
+
+来源：完整阅读 `07-tasks/fix-r4-wave9-b1.md` 55行；返工起点 `9a54ecd62f250f3a754d66cdc3e574ef9e12198d`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅修改指定 `wave9-b1` 工作树，不推送、合并、部署或启停真实服务。
+
+- **失败记账CAS**：最终候选计量完成后立即复核中断；摘要、容量拒绝、请求面准备及检查点提交失败统一在记账前再查中断。闲置失败把冻结的活动代与规范消息指纹透传到原失败存储方法，按原消息追加锁→线程文件锁顺序核对消息尾、最新活动代及压缩代，再增加失败数。漂移或坏读抛 `IdleCompactActivityChanged`，guard不能吞掉，Gateway按原 `activity_changed` / `cas_aborted=True` 干净让位并标明 `aborted_by_concurrent_activity`。无竞争的 `COMPACT_CANDIDATE_TOO_LARGE` 仍使失败数0→1；普通压缩保留原代数检查、调用形状及尽力记账，不另建失败账或清零旧失败。
+- **先红后绿**：新增最终计量的控制/活动/仅消息三例，零备份预算使用正式配置而非替换压缩算法；原实现控制通过、两种竞争失败（`r4-measure-final-red.xml`），失败写入口前的两种迟到竞争也均先红（`r4-write-red.xml`）。首次尝试仍用默认备份预算，变化被后续备份收缩重测的既有取消门挡住，三例全过，不把它当作缺陷已修证据。固定到真正最后计量后才得到有效红例。
+- **12个新增运行用例**：上述三例、失败写入口前活动/消息两例、直接存储拒绝活动/追加/同长改写/压缩代变化/坏消息五例，以及真实跨进程消息锁、指纹检查后最新活动事务两例。后七例从已有失败数2出发，证明不增也不清零；直接拒绝还逐字节确认线程未写。跨进程测试通过真实append持有原OS锁，非阻塞原锁探针确认争用，再按事件释放写者；活动测试让真实活动登记先提交，再放行原失败事务，不用sleep猜时序。指定四文件当前246项，0失败/0错误/0跳过（`r4-required.xml`）。
+- **中文注释**：扫描原区间全部32个Python文件，连同本次新触及的 `compact_guard.py` 共33文件；13个文件中的149处英文LLM首行完成翻译或按当前失败合同重写，也覆盖任务清单外的一处测试注释。最终1079个函数/异步函数/类及全部模块头，双层注释缺失或错位0，所有LLM首行无中文的数量0。13个翻译文件在翻译操作前后完整AST摘要相等；相对返工起点，生产行为只改变上述四个失败链模块。
+- **独立复核边界**：Astra high只读核对精确内联失败链、锁序、普通路径及错误透传片段，未发现协议内确定阻断缺陷；按其建议补了两例真实锁竞争。它不是全仓审阅或独立运行验收。哈希可识别检查前的同长改写，不代表任意不遵守消息锁的外部改写也获得原子CAS保证。
+
+指定复现（工作树根；四文件246项全部通过）：
+
+```bash
+pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py agent_py_agent/tests/test_compact_threshold_unification.py agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+git diff --check
+```
+
+模块头、嵌套定义及装饰器前双层注释按下方Round3的完整AST脚本复现；另对同一实际文件并集检查全部LLM首行，严格于只查定义注释块：
+
+```bash
+python3 - <<'PY'
+import re, subprocess
+from pathlib import Path
+names = set()
+for revision in ('db4d5de92..HEAD', 'HEAD'):
+    names.update(subprocess.check_output(['git', 'diff', '--name-only', revision, '--', '*.py'], text=True).splitlines())
+files = sorted(name for name in names if Path(name).is_file())
+errors = [(name, number) for name in files
+          for number, line in enumerate(Path(name).read_text().splitlines(), 1)
+          if line.lstrip().startswith('# LLM:') and not re.search('[\u4e00-\u9fff]', line)]
+print({'files': len(files), 'english_only_llm_lines': len(errors), 'errors': errors})
+assert not errors
+PY
+```
+
+**Round4历史兼容检查（Round5已修复，见顶部）**：以下五文件共82项，Round4当时77通过/5失败/0错误/0跳过（`r4-failure-compat.xml`），不能将该轮写成全部门禁或全仓通过。失败全部在 `test_compact_calibrated_candidate_gate.py`：两个活动回合上限用例及三个Gateway校准场景，夹具仍按90%推导9000/80000，实际却用了默认80%的8000/72000。Round4当时未修改这些旧断言或扩大到夹具修复。
+
+```bash
+pytest agent_py_agent/tests/test_compact_circuit_breaker.py agent_py_agent/tests/test_compact_calibrated_candidate_gate.py agent_py_agent/tests/test_compact_capacity_facts.py agent_py_agent/tests/test_compact_capacity_host_chain.py agent_py_agent/tests/test_compact_output_reserve.py -q --tb=short
+```
+
+为确认归属，Round4分别从返工起点 `9a54ecd62` 与真正原功能基线 `db4d5de92` 导出完整普通源码副本至本工作树缓存（未新建/切换其他worktree），在各副本根核对导入来源后，以 `python3 -m pytest` 跑完全相同五文件。起点仍77通过/同5失败，Round4与起点的失败节点及错误消息逐项一致；原功能基线82全部通过（`r4-baseline-start.xml`、`r4-baseline-feature.xml`、`r4-baseline-comparison.json`）。因此这是本功能分支在Round4前已有、相对原功能基线当时仍待处理的回归，不能说main原本就失败。Round5已按上游明确要求使这些90%容量场景显式配置90%，保持生产默认80及原容量门/断言，不再作为当前待修项。
+
+本轮未运行全仓及线上CI、真实供应商或生产Gateway/IM/TUI，也未验证Linux/Windows；本机真实临时Store、OS锁与替身供应商证据不外推上述链路。未运行已退役尺寸checker。缓存中的JUnit、源码副本及AST快照仅用于本次复核，不进入产品提交。
+
+## 2026-10-28 Wave 9 B1 Round 3：公开强制策略别名与完整双层注释
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-b1.md` 44行；返工起点 `49222cf3693bdb0fa966ab968aed91d33bd9bd3c`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在指定 `wave9-b1` 工作树修改，不推送、合并、部署或启停真实服务。
+
+- **公开参数**：`settings.compact_policy.admin_force.set` 的真实schema及原 `ManagedUserGovernanceService.set_global_compact_force_policy` 均接受 `force_compact_trigger_percent`、`admin_force_compact_trigger_percent`、`memory_compact_admin_forced`。至少一个非空严格bool；`False`清除强制，`null`仅是未赋值占位、全部null拒绝。多别名非空值必须一致，冲突在领域写前返回 `INVALID_ARGUMENT`/400。最终只存规范键，不另建别名策略账；`trigger_percent`原继承语义不变。
+- **安全边界**：原Host真实管理员及通配管理grant、领域actor检查、全局锁内CAS均保留。回归逐字节验证冲突与过期修订零写入，两个线程以不同别名争同一revision只能一个胜出；真实有效策略读取全局authority，个人 `force_locked=False`、owner配置和会话比例不能解除全局强制。普通用户治理写和线程设置/重置仍403。
+- **先红后绿**：首批34个参数用例在原实现17失败、17通过（`.pytest_cache/r3-alias-red.xml`），修复后34全部通过（`r3-alias-green.xml`）。独立Astra high只审精确内联schema/治理/授权片段，未发现确定性引入缺陷；按其建议补混合非法类型、null冲突、实际生效锁和并发CAS，当前四文件共234项。片段审查不冒充仓库全审或真实HTTP验证。
+- **完整注释**：不只修点名的两份测试；核对原区间31个Python文件全部定义，修复232处定义缺失/位置问题，含9个装饰器后注释上移；四个模块头移到首个语句前。后补Host合同文件也补齐全部helper/test注释。最终覆盖32文件、1051个 `def` / `async def` / `class`，模块头与装饰器前注释均零缺失/错位。批量整理的22文件在注释操作前后完整AST相等；相对返工起点，生产行为仅两个别名模块改变。
+- **通用Host合同回归**：额外三文件首跑375项中1项失败，实际是独立schema矩阵漏了四个已登记压缩治理动作；保留目录集合精确相等、闭合字段、AND能力与幂等断言，补四个独立合法payload。中间将四例误并入仅支持旧方法且仅授权alice的假领域矩阵，379项中4项失败；修正为独立压缩schema矩阵，真实领域/CAS及全局通配权限由Wave9回归验证，不扩大旧fixture授权或删弱旧断言。最终三文件375项全部通过。
+
+复现（工作树根；测试均为0失败/0错误/0跳过）：
+
+```bash
+pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py agent_py_agent/tests/test_compact_threshold_unification.py agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short
+pytest agent_py_agent/tests/test_managed_user_governance.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_plugin_host_v2_contracts.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+git diff --check
+```
+
+双层注释独立AST复现（包括嵌套定义、模块头和第一个装饰器前的同缩进连续注释；保留工作树改动并集，提交后仍适用）：
+
+```bash
+python3 - <<'PY'
+import ast, subprocess
+from pathlib import Path
+names = set()
+for revision in ('db4d5de92..HEAD', 'HEAD'):
+    names.update(subprocess.check_output(['git', 'diff', '--name-only', revision], text=True).splitlines())
+files = sorted(n for n in names if n.endswith('.py') and Path(n).is_file())
+errors, definitions = [], 0
+for name in files:
+    text = Path(name).read_text(); lines = text.splitlines(); tree = ast.parse(text)
+    header = lines[:tree.body[0].lineno - 1] if tree.body else lines
+    if not all(any(s.startswith('# ' + label) for s in header) for label in ('LLM:', '模块用途:')):
+        errors.append((name, 1, 'module'))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)): continue
+        definitions += 1; indent = ' ' * node.col_offset
+        end = min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1; start = end
+        while start and lines[start - 1].startswith(indent + '#'): start -= 1
+        labels = ('LLM:', '类用途:' if isinstance(node, ast.ClassDef) else '函数用途:')
+        if not all(any(s.startswith(indent + '# ' + label) for s in lines[start:end]) for label in labels):
+            errors.append((name, node.lineno, node.name))
+        if node.decorator_list and any(s.lstrip().startswith(('# LLM:', '# 函数用途:', '# 类用途:'))
+                for s in lines[end:node.lineno - 1]): errors.append((name, node.lineno, 'below_decorator'))
+print({'files': len(files), 'definitions': definitions, 'missing_or_misplaced': errors})
+assert not errors
+PY
+```
+
+本次JUnit为 `.pytest_cache/r3-required-final.xml`（234项）及 `.pytest_cache/r3-governance-delivery.xml`（375项）；修复脚本和逐定义检查证据仅留本任务缓存，不进入产品分发。全范围Ruff、文档同步、导入边界及差异检查已通过，最终提交前后另核准确区间及干净状态。未运行已退役尺寸checker，未验证真实供应商、生产Gateway/IM/TUI、跨平台或全仓CI；本地真实临时Store/受控线程/假provider测试不外推这些链路。
+
+## 2026-10-28 Wave 9 B1 Round 2：只读命令、审批保护与消息CAS返工
+
+来源：完整阅读 `07-tasks/fix-wave9-b1.md` 66行；返工起点 `9b0a7ae0e68d9e463420f14f2e0206795a233e79`，原任务基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。功能修改仅在指定 `wave9-b1` 工作树，不推送、合并、部署或启停服务。任务部分旧路径/测试名不存在，按实际 `settings/config.py`、`cli/chat_parts/control_runtime.py` 修改，补齐指定的两个真实回归文件。
+
+- **查询与运输**：精确 `/compact status` 独立解析、返回六字段政策及闲置元数据，Gateway和CLI都不进入摘要、不迁移模型选择、不改线程字节/代数。`threshold reset/default` 共用清除覆盖，锁定仍403；CLI序列化保留threshold前缀，parser→serializer→parser往返不能降成手动摘要。
+- **只读资格**：任务/claim/subagent含错报告失败关闭；BLOCKED、WAITING_APPROVAL、OPEN申请及原审批/私卡未决状态阻止压缩。明确过期只跳过，坏期限失败关闭，不续租或清理；run原attributes定位同线程，避免别的线程被误阻塞。禁用先返回；只读模型scope不迁移旧空选择，禁用、未到时长、忙碌、低容量四种原生扫描逐字节不改线程。
+- **消息CAS**：规范JSONL流式校验，消息数/末ID/字节数/SHA256共同参与闲置幂等。直接追加assistant/user/tool、同长改写及最后guard之后追加，都使旧候选让位，`cas_aborted=true`，代数和失败计数不变。闲置最终提交沿原消息append锁→线程锁；普通压缩仅保存来源冻结前观察，不新增普通CAS。显式旧来源无可信marker时不补造，提交清除旧marker；普通去重门也须匹配消息状态，不能在新消息达到普通阈值时再次按旧活动代阻塞。
+- **配置**：每拍上限 `memory_compact_idle_max_per_tick=2` 同步真实dataclass/MemorySettings/校验/YAML，0关闭。三个管理员强制键归一，保留原布尔coercion与owner覆盖隔离；默认80及50..95不变。
+- **回归纪律**：缺陷先复现失败再修。旧闲置单测仅补传新增必需指纹及联合幂等夹具，原断言、输入比例和摘要/活动竞争要求不放宽。独立Astra high首审发现CLI运输、普通去重、确认期限三项，均有红绿回归。复评又定位普通marker晚于来源冻结的竞争，loader/显式来源两条真实链修前2失败（`.pytest_cache/b1-r2-source-race-red.xml`），前移观察后转绿；最终定向独审通过，普通/闲置CAS边界保持。复评限定实际变更，不冒称全仓审计。
+
+指定门禁（工作树根）：
+
+```bash
+python3 -B -m pytest /tmp/wt-wave9-b1/agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py /tmp/wt-wave9-b1/agent_py_agent/tests/test_compact_threshold_unification.py -q --tb=short -o cache_dir=/tmp/pytest-b1-fix
+ruff check --no-cache /tmp/wt-wave9-b1/agent_py_agent/agent/conversation /tmp/wt-wave9-b1/agent_py_agent/agent/settings /tmp/wt-wave9-b1/agent_py_agent/agent/gateway_parts /tmp/wt-wave9-b1/agent_py_agent/agent/plugin_host /tmp/wt-wave9-b1/agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py
+python3 -B /tmp/wt-wave9-b1/scripts/check_doc_sync.py --base db4d5de92
+python3 -B /tmp/wt-wave9-b1/scripts/check_import_boundaries.py
+git -C /tmp/wt-wave9-b1 diff --check db4d5de92..HEAD
+```
+
+指定两文件53项通过（0失败/错误/跳过，`.pytest_cache/b1-r2-required-final.xml`）。额外六文件230项通过（0失败/错误/跳过），覆盖原Wave9/continuation/Gateway摘要、配置默认一致性、Memory和runtime合同；日志及JUnit分别为 `.pytest_cache/b1-r2-expanded-final.log/.xml`。指定Ruff（含额外CLI/新配置回归）、文档同步、导入边界及差异空白检查均通过；提交后另查最终提交区间和干净工作树。不将本地假供应商、受控竞争或静态复核外推为生产Gateway/TUI/IM、真实供应商、多进程全拓扑或跨平台验收；这些未验证。
+
+额外CLI扩展中的 `test_local_interrupt_stops_foreground_shell_without_resource_reclaim` 失败：返回71、`started`标记未创建。原基线相同节点同现，未改断言或跳过，71原因未定位。本次创建临时Git worktree被 `Operation not permitted` 拒绝；随后复用基线源码导出，逐一核对其5193个Git blob与 `db4d5de92` 全部一致，确认import origin在该导出根，再运行该节点（`.pytest_cache/b1-r2-baseline-shell.xml`：1失败）。这里明确是已核字节的基线导出，不冒充成功创建的独立Git worktree。
+
+## 2026-10-28 Wave 9 B1：空闲压缩与四层阈值（源码候选）
+
+来源：`07-tasks/wave9-b1.md` 全文及主计划 Item 1/6；指定分支 `wave9-b1`，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只修改派工工作树，不推送、合并、部署或启停真实服务；不运行已退役的尺寸检查器。
+
+- 新配置：`memory_compact_trigger_percent=80`，四层有效比例50..95；`force_compact_trigger_percent` 是模型不可改的管理员边界。闲置容量默认60%（0关闭，夹取0..95），静默默认7200秒（0关闭，启用至少60秒）。原运行模块实际位于 `agent_core/runtime/context_compactor.py`。
+- `compact_threshold_policy.py` 复用配置层合并，按全局/个人强制、会话、用户、管理员默认解析并投影六字段。主回合及外层模型scope冻结比例，覆盖Gateway预检到收口；设置写入读取新鲜管理员锁，不使用旧冻结值绕过403。owner运行覆盖保留管理员原值，不能把用户比例冒充强制值。旧YAML键仅在同源新键缺失时迁移；代码内运行设置使用新键。Gateway原预算测试仅迁移五处夹具键名，原50%/90%、输出预留、原文和检查点断言不放宽。
+- 真实用户预检独立登记活动时间/单调代次，同请求重复加载不增代；后台 `updated_at` 不刷新用户发言时间。闲置入口复核时长、容量、前台/子代理/托管进程、同代幂等，在原摘要/checkpoint链及原Store锁中核活动代。用户插话、胜出候选或压缩代次变化使旧闲置候选干净让位，不计模型失败；缺失活动CAS参数拒绝提交。活动metadata与原工具发现metadata在同一提交合并，保留原文和既有摘要权威。
+- 维护拍最多检查两条规范线程记录，跨已加载owner及其线程轮换；复用原池pin且不续空闲期，不构造冷Agent。原启动交互保护期仍生效，不延迟安全清理。真实维护controller→闲置入口→原摘要→CAS有本地假provider集成回归；模拟时钟不等于生产实际静默两小时实测。
+- `/compact threshold <50-95|default>` 只改线程设置，不调用摘要；推进原设置修订。Host设置同锁合并，锁定时返回 `COMPACT_POLICY_LOCKED_BY_ADMIN`/403；冷管理只接宿主配置，不借main执行器执行用户任务。四个Host治理动作复用原单用户CAS；批量先核所有目标，`all_managed_users` 仍取grant交集，全局强制必须local/main及通配管理授权。批量是逐项提交，`atomic=false`，冲突/未知后停止并报告未尝试项，不宣称跨用户事务。
+- 新测试先失败再实现；独立Astra high仅静态复核内联policy/idle代码，发现强制值来源、过期线程基线、非有限now三项，均有红绿回归。额外原摘要集成抓出metadata重复关键字，已修复。没有删除、skip/xfail或放宽有效测试来制造通过。
+
 复现（工作树根）：
 
 ```bash
@@ -618,6 +782,10 @@ TDD证据保存在`.pytest_cache/b5-*.xml`：原始12项红测；扩展17红6绿
 复现门禁（cwd必须为工作树根）：
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py agent_py_agent/tests/test_responses_websocket.py -q --tb=short
+
+python3 -m pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_gateway_conversation_compact.py agent_py_agent/tests/test_plugin_host_thread_and_model_settings.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_config_defaults_parity.py agent_py_agent/tests/test_memory_config.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_runtime_config_contract.py agent_py_agent/tests/test_managed_user_governance.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short
 python3 scripts/check_import_boundaries.py
 ruff check agent_py_agent scripts
 git diff --check
@@ -678,6 +846,8 @@ git diff --check
 验证结果：指定两文件65项通过（新增B5文件41项、既有WS文件24项）；扩展16文件303项通过，0失败/报错/跳过，涵盖Responses组包/缓存键/推理/失败分类、物理队列、OAuth、跨磁盘重载wire字节、签名与配置合同，以及Chat/Messages既有后端。`ruff check agent_py_agent scripts`与`check_import_boundaries.py`通过，导入边界findings=0；`git diff --check`通过。证据：`.pytest_cache/b5-targeted.xml`、`.pytest_cache/b5-final.xml`。
 
 局限：未部署、未向真实astra/sol端点发送计费请求；97–99%真实命中率、外部网络可达性和生产多owner长时间稳定性未验证。独立gpt-6-astra high只读审查基于内联源码，不冒充其运行过测试。
+
+最终证据：指定两文件 **143项**（`.pytest_cache/b1-required-final.xml`），额外八文件 **520项**（`.pytest_cache/b1-expanded-final.xml`），两组均0失败/0错误/0跳过；导入边界0项、全范围ruff及diff空白检查均通过。上述验证不等于真实供应商模型、生产Gateway/远端Host HTTP端到端、冷/已逐出owner执行器、多进程全拓扑或Linux/Windows全仓验证；这些均未验证。只读策略投影与管理配置不会为冷owner建立执行器。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 

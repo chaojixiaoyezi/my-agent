@@ -5,9 +5,14 @@ from __future__ import annotations
 import time
 from contextlib import ExitStack
 from dataclasses import asdict, replace
+from types import SimpleNamespace
 
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import unlink_file_beneath
+from ..conversation.compact_threshold_policy import (
+    resolve_thread_compact_policy,
+    thread_with_compact_threshold,
+)
 from ..conversation.context_usage import context_usage_from_thread
 from ..conversation.model_metrics import public_model_metrics
 from ..conversation.store_threads import _drop_cached_thread
@@ -35,10 +40,11 @@ def _effective_revision(row):
 # LLM: 调用方负责鲜活授权；可选authorized再核安装交集，省略时仍强核同owner记录，agent只用于真实Compact/用量。
 # 类用途: 对原ConversationStore提供可由多个接口别名共用的领域方法。
 class ThreadSettingsV2Handlers:
-    # LLM: home_paths只由宿主提供，构造不创建配置、模型或线程。
+    # LLM: home_paths/compact_config只由宿主提供；冷管理可读部署政策而不借用base执行器，构造不创建模型或线程。
     # 函数用途: 固定本次线程存储、owner与可选运行时。
-    def __init__(self, store, owner_context, *, agent=None, home_paths=None, authorized=None):
+    def __init__(self, store, owner_context, *, agent=None, home_paths=None, authorized=None, compact_config=None):
         self.store, self.context, self.agent, self.authorized = store, owner_context, agent, authorized
+        self.compact_config = compact_config
         self.home = home_paths or home_paths_with_owner(root_paths(owner_context.owner_home.root), owner_context.owner_home)
         if self.home.owner_home_dir != owner_context.owner_home.home_dir or self.home.owner_id != owner_context.owner_home.owner_id:
             raise HostAPIError("RESOURCE_NOT_FOUND", 404)
@@ -66,14 +72,19 @@ class ThreadSettingsV2Handlers:
             raise HostAPIError("REVISION_CONFLICT", 409)
         return row
 
-    # LLM: 读取只投影模型名及偏好；无默认模型事实时名称保持未知，不回显连接或凭据。
+    # LLM: 只投影模型、偏好及同owner政策；home权威独立于可选运行Agent，不借base Agent串用户。
     # 函数用途: 返回统一设置及Coding/Pentest共用的双名能力包字段。
     def _settings(self, row):
         data = read_model_profiles(model_profiles_path(self.home))
         name = data["profiles"].get(row.model_profile_id, {}).get("model_name", "")
         if row.model_profile_id == "default":
             name = getattr(getattr(self.agent, "config", None), "model_name", "")
+        policy_agent = SimpleNamespace(config=getattr(self.agent, "config", None) or self.compact_config, home_paths=self.home)
+        policy = resolve_thread_compact_policy(policy_agent, row, use_frozen=False)
         return {"thread_id": row.thread_id, **settings_fields(row, self.home), "model_name": name,
+            "compact_trigger_percent": policy["thread_override_percent"], "compact_policy": policy,
+            "effective_compact_trigger_percent": policy["effective_trigger_percent"],
+            "effective_compact_source": policy["effective_source"],
             "workspace_root": row.workspace_root or row.cwd, "revision": _effective_revision(row)}
 
     # LLM: get与packs.get共用；不写线程或默认配置。
@@ -108,7 +119,11 @@ class ThreadSettingsV2Handlers:
         # 函数用途: 在最新版本上合并本次显式偏好。
         def update(row):
             self._require(params, row)
-            return replace(configured_thread(row, params, self.home), revision=row.revision + 1, updated_at=time.time())
+            configured = configured_thread(row, params, self.home)
+            if "compact_trigger_percent" in params:
+                policy_agent = SimpleNamespace(config=getattr(self.agent, "config", None) or self.compact_config, home_paths=self.home)
+                configured = thread_with_compact_threshold(policy_agent, configured, params["compact_trigger_percent"])
+            return replace(configured, revision=row.revision + 1, updated_at=time.time())
         return self._settings(self.store.threads.update_atomic(params["thread_id"], update))
 
     # LLM: 数值只能来自原公开遥测白名单；缺报保留None，agent检查器提供估算而非伪造供应商账本。

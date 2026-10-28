@@ -1,4 +1,5 @@
-
+# LLM: 四层比例和闲置参数来自共享设置/会话解析，冻结进原不可变运行策略；不在Gateway复制第二套算法。
+# 模块用途: 统一窗口、触发点、尾部、恢复目标和冷却参数。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,11 +9,13 @@ from ...memory_archive.compact_circuit_breaker import (
     DEFAULT_COMPACT_COOLDOWN_SECONDS,
     DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
 )
+from ...settings.config_layers import compact_idle_parameters
 from ..model.context_window import resolve_model_context_window_tokens
 
-# LLM: These defaults define one provider-neutral runtime compact policy shared by root and child
-# agents. The configured percentage has one authoritative location.
+# LLM: 四层比例及闲置参数冻结进不可变策略；默认只读同owner治理，root与child共用且不授执行权。
+# LLM: 根代理与子代理共用这些供应商无关的运行时压缩默认值，配置百分比只保留一个权威来源。
 # 模块用途: 统一计算模型窗口、精确触发点、近期尾部预算和连续失败冷却参数。
+# 旧数值辅助API维持90%缺省；会话四层默认80%由config_layers解析，不从这个兼容常量重建。
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
 # 触发线绝对上限的默认值：与 AgentConfig/MemorySettings/随包 YAML 的默认一致；0 只在显式配置时表示不封顶。
 DEFAULT_COMPACT_TRIGGER_MAX_TOKENS = 300_000
@@ -26,7 +29,7 @@ DEFAULT_COMPACT_RECENT_TAIL_MAX_TOKENS = 20_000
 DEFAULT_COMPACT_RECENT_TAIL_PERCENT = 10
 
 
-# LLM: All compact callers consume this immutable resolved snapshot instead of recomputing limits.
+# LLM: 所有压缩调用方都消费这个已解析的不可变快照，不各自重新计算上限。
 # 类用途: 保存一次运行实际使用的窗口、触发点、近期尾部和熔断参数。
 @dataclass(frozen=True)
 class RuntimeCompactPolicy:
@@ -42,6 +45,13 @@ class RuntimeCompactPolicy:
     failure_cooldown_seconds: float
     # memory_compact_auto_trigger_max_tokens 规范化后的绝对上限；0 表示不封顶。trigger_tokens 已按它取小。
     trigger_max_tokens: int = 0
+    effective_source: str = "admin_default"
+    force_locked: bool = False
+    user_default_percent: int | None = None
+    thread_override_percent: int | None = None
+    admin_default_percent: int = 80
+    idle_trigger_percent: int = 60
+    idle_seconds: int = 7200
 
     # LLM: 只由结构化字段推出：上限严格小于「窗口 × 百分比」才算封顶；上限正好等于它时触发线与不封顶相同，
     #   finalization 仍按百分比判定。finalization 的 token 触发线、/context 展示和 recovery 的等比推导都据此切换；
@@ -52,9 +62,9 @@ class RuntimeCompactPolicy:
         return _trigger_is_capped(self.context_window_tokens, self.trigger_percent, self.trigger_max_tokens)
 
 
-# LLM: Resolve every durable compact limit from the model/config snapshot once per invocation.
-# Transcript authority may permit a canonical Compact even when save=False only suppresses the
-# legacy memory/final-response write path; auxiliary no-save calls still remain non-persistent.
+# LLM: 比例从已冻结回合或显式线程四层解析一次，闲置与主压缩共用同一窗口；不可变快照不随之后设置变化而变。
+# LLM: 每次调用只从模型与配置快照解析一次持久压缩上限；save=False 仅禁用旧记忆及最终回复写入时，
+# 规范会话权威仍可允许真正的会话压缩；辅助的不保存调用仍不得持久化。
 # 触发线 = 窗口 × 百分比；memory_compact_auto_trigger_max_tokens 大于 0 时再与它取小（1M 窗口的长期后台线程靠它把压缩提前），
 # 近期尾部与 recovery 目标都从封顶后的触发线推出：封顶时 recovery 按触发线 × recovery% ÷ 触发% 等比推导（_capped_recovery_target_tokens），
 # 不封顶时仍是 compact_recovery_target_tokens 的原公式。所有自动压缩入口只读这里，不要在调用方另算一条触发线。
@@ -65,10 +75,15 @@ def runtime_compact_policy(
     save: bool = True,
     context_scope: str = "default",
     task_attributes: object = None,
+    thread: object = None,
 ) -> RuntimeCompactPolicy:
+    from ...conversation.compact_threshold_policy import resolve_thread_compact_policy
+
     window = resolve_model_context_window_tokens(agent)
     config = getattr(agent, "config", None)
-    percent = compact_trigger_percent(getattr(config, "memory_compact_auto_trigger_percent", None))
+    resolution = resolve_thread_compact_policy(agent, thread)
+    idle_threshold, idle_seconds = compact_idle_parameters(config)
+    percent = resolution["effective_trigger_percent"]
     recovery_percent = compact_recovery_target_percent(getattr(config, "memory_compact_recovery_target_percent", None))
     trigger_max_tokens = compact_trigger_max_tokens(getattr(config, "memory_compact_auto_trigger_max_tokens", None))
     trigger_tokens = _capped_trigger_tokens(window, percent, trigger_max_tokens)
@@ -97,6 +112,13 @@ def runtime_compact_policy(
         failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
         failure_cooldown_seconds=DEFAULT_COMPACT_COOLDOWN_SECONDS,
         trigger_max_tokens=trigger_max_tokens,
+        effective_source=resolution["effective_source"],
+        force_locked=resolution["force_locked"],
+        user_default_percent=resolution["user_default_percent"],
+        thread_override_percent=resolution["thread_override_percent"],
+        admin_default_percent=resolution["admin_default_percent"],
+        idle_trigger_percent=idle_threshold,
+        idle_seconds=idle_seconds,
     )
 
 
@@ -141,6 +163,8 @@ def compact_trigger_max_tokens(value: object) -> int:
     return parsed if parsed >= 0 else DEFAULT_COMPACT_TRIGGER_MAX_TOKENS
 
 
+# LLM: 压缩运行时的纯比例换算；旧关闭语义与调用方预算测试必须同步，不能授予执行权。
+# 函数用途: 规范化输入压缩百分比，保留旧接口非正值关闭和上下界行为。
 def compact_trigger_percent(value: object) -> int:
     try:
         parsed = int(value)
@@ -155,15 +179,16 @@ def compact_trigger_percent(value: object) -> int:
     return parsed
 
 
+# LLM: 压缩运行时的纯比例换算；旧关闭语义与调用方预算测试必须同步，不能授予执行权。
+# 函数用途: 按当前上下文容量把百分比换算成压缩触发token数。
 def compact_trigger_tokens(context_window_tokens: int, trigger_percent: int) -> int:
     if context_window_tokens <= 0:
         return 0
     return max(1, int(context_window_tokens * (compact_trigger_percent(trigger_percent) / 100.0)))
 
 
-# LLM: Recovery is intentionally lower than the trigger and remains the compactor's preferred
-# target. It is not a second validity threshold: 会话运行时 and 终端交互 keep a successful replacement
-# once it is below the real trigger instead of discarding and reissuing the same summary request.
+# LLM: 恢复目标刻意低于触发线，只是压缩器的优选目标，不是第二条有效性门槛；会话运行时和终端交互
+# 只要成功候选低于真实触发线就保留，不丢掉它再重复发起相同摘要请求。
 # 函数用途: 规范化压缩后的目标百分比；非法值回到 60%，过小或过大值限制在 25%--80%。
 def compact_recovery_target_percent(value: object) -> int:
     try:
@@ -177,9 +202,8 @@ def compact_recovery_target_percent(value: object) -> int:
     return parsed
 
 
-# LLM: Every live-tool and transcript Compact aims below both the configured recovery share and
-# trigger-minus-tail ceiling. Callers may still commit a valid candidate below the trigger when
-# fixed prompt/tool context makes this ideal target unreachable.
+# LLM: 活动工具及会话压缩的目标同时低于配置恢复比例和扣除尾部后的触发上限；固定提示或工具开销
+# 使理想目标无法达到时，调用方仍可提交低于真实触发线的有效候选。
 # 函数用途: 同时按模型窗口恢复比例和触发线尾部余量计算压缩后的统一优选健康目标。
 def compact_recovery_target_tokens(
     context_window_tokens: int,

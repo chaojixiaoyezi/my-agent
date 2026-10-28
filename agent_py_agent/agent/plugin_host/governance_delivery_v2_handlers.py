@@ -19,6 +19,10 @@ DELIVERY_METHODS = {
     "assets.delivery.blocklist.update": "update_blocklist",
 }
 MANAGED_METHODS = {
+    "users.managed.compact_policy.get": "get_user_compact_policy",
+    "users.managed.compact_policy.set": "set_user_compact_policy",
+    "users.managed.compact_policy.batch_set": "batch_set_users_compact_policy",
+    "settings.compact_policy.admin_force.set": "set_global_compact_force_policy",
     "users.managed.overview.get": "get_overview", "users.managed.policy.set": "set_policy",
     "users.managed.persona.get": "get_persona", "users.managed.persona.set": "set_persona",
     "users.managed.memories.list": "list_memories", "users.managed.memories.mutate": "mutate_memories",
@@ -120,10 +124,17 @@ def managed_targets(payload, authorized, context):
     return tuple("local/" + uid for uid in selected)
 
 
-# LLM: 写入/回执重放之前仍核当前注册与名单；拒绝无目标的单用户写，审核决定还须精确提审单归属。
+# LLM: 写入/重放前核注册与名单；批量只用授权交集，global必须local/main且明确通配授权，不能由all选择器扩大权限。
 # 函数用途: 在原幂等短门中执行无业务写入的治理预检。
 def preflight_governance_delivery(action, payload, authorized, context):
     if action in DELIVERY_METHODS:
+        return
+    if action == "settings.compact_policy.admin_force.set":
+        if context.identity != OwnerIdentity.local_main() or "*" not in authorized.binding.grant["manageable_user_ids"]:
+            raise HostAPIError("MANAGED_USER_SCOPE_DENIED", 403)
+        return
+    if action == "users.managed.compact_policy.batch_set":
+        _compact_batch_targets(payload, authorized, context)
         return
     targets = managed_targets(payload, authorized, context)
     if action not in {"users.managed.overview.get", "governance.reviews.list"} and len(targets) != 1:
@@ -176,9 +187,17 @@ def _delivery(service, method, payload, context):
     return getattr(service, method)(owner, **args)
 
 
-# LLM: 服务得到真实管理员身份，updated_by固定；不丢弃CAS或将scope注入领域可变参数。
+# LLM: 服务使用真实管理员身份；批量先核完整名单且固定授权交集，global不经单目标分支，旧治理CAS不变。
 # 函数用途: 以规范本地Owner调用WT2十个用户治理接口，无目标概览只遍历批准交集。
 def _managed(service, method, payload, authorized, context):
+    if method == "set_global_compact_force_policy":
+        return service.set_global_compact_force_policy(**payload)
+    if method == "batch_set_users_compact_policy":
+        targets = _compact_batch_targets(payload, authorized, context)
+        if not targets:
+            return {"atomic": False, "partial": False, "items": []}
+        return service.batch_set_users_compact_policy(payload["policy_patch"], user_ids=list(targets),
+            expected_revisions=payload.get("expected_revisions"))
     targets = managed_targets(payload, authorized, context)
     args = {key: value for key, value in payload.items() if key not in {"user_id", "target_owner_id"}}
     if method == "get_overview" and not (payload.get("user_id") or payload.get("target_owner_id")):
@@ -186,6 +205,19 @@ def _managed(service, method, payload, authorized, context):
     if method in {"set_policy", "set_persona"}:
         args["updated_by"] = "local/main"
     return getattr(service, method)(targets[0], **args)
+
+
+# LLM: all只取注册用户与grant交集；显式列表逐个重核，任何越权或重复别名整批拒绝，不静默删去越权项。
+# 函数用途: 固定本次批量压缩政策写入的授权目标。
+def _compact_batch_targets(payload, authorized, context):
+    if payload.get("scope") == "all_managed_users" and "user_ids" not in payload:
+        return managed_targets({}, authorized, context)
+    if "scope" in payload or not isinstance(payload.get("user_ids"), list) or not payload["user_ids"]:
+        raise HostAPIError("INVALID_SCHEMA")
+    targets = tuple(managed_targets({"user_id": uid}, authorized, context)[0] for uid in payload["user_ids"])
+    if len(set(targets)) != len(targets):
+        raise HostAPIError("INVALID_SCHEMA")
+    return targets
 
 
 # LLM: 读取按批准目标逐个调用，决定同时透传预期Owner给WT2原子门；预检不能替代实际写口归属校验。

@@ -51,6 +51,17 @@
 
 `tool_request_capture.py`与`ToolLoopRequestInput`分别冻结原IR和覆盖，`context_pressure.py`的内容键包含覆盖；preflight在已降级本轮的92%安全线内放行但仍守真实容量。`tool_model_generation.py`固化动态事实时排除覆盖，实际后端消息再应用；`runtime/loop_support.py`原canonical序列化不改。`request_execution.py`仅按原结构化触发来源传递force，共享恢复以当前完整请求重新计量，失败不伪造提交或复活超限请求。测试及未验证边界见[TESTS](../../../TESTS.md)，不增加配置、权限或持久状态源。
 
+## 2026-10-28 Wave 9 B1 Round 2：只读控制、活动观察与消息CAS
+
+- `conversation/control_commands.py` 将精确 `status` 解析为只读操作；`compact_threshold_policy.py::compact_status_result` 供Gateway与CLI共用政策/闲置状态投影。`control_service.py` 在摘要注册前分派status及threshold，CLI保留原操作运输；reset/default同归清除覆盖，原管理员锁与线程revision保持。
+- `gateway_parts/compact_operations.py` 通过TaskStore、ClaimStore及 `subagents.list_runs_report` 保留读错误，读取原工具审批与私卡记录，不续租或消费。旧空模型选择在 `settings/model_scope.py::selected_model_scope(initialize_thread=False)` 中只读使用默认模型；维护外层不再先执行迁移。配置上限控制同一易失owner/thread游标，不另建队列或Agent。
+- `conversation/store_messages.py::canonical_message_tail_marker` 顺序校验原JSONL并流式生成末ID/总数/字节数/SHA256；读取前后文件身份或内容变更拒绝。Options和原Compact请求透传冻结指纹；ThreadStore仅闲置提交额外取原消息追加锁，再在原线程CAS内核活动代/Compact代。`metadata.idle_auto_compact` 保存联合幂等标记，原始消息零修改，普通压缩提交合同保持。
+- `settings/config_layers.py` 识别三种管理员强制键；加载源归一、原运行覆盖隔离和治理政策合并仍各守原权威。新增每拍上限同步AgentConfig/MemorySettings/校验/YAML，不新增权限或持久状态源。
+
+普通Compact请求在来源冻结前记录消息标记，仅供后续普通去重；显式旧来源无可信标记则不补造，避免认领新消息。闲置仍额外执行原append锁内CAS。CLI序列化对status/threshold分别保留原操作，不借value猜子命令；审批观察明确到期只读跳过、损坏期限失败关闭，run归属沿原attributes读取。
+
+组件验证和未验证边界见[TESTS](../../../TESTS.md)，未对生产Gateway或真实供应商作验收结论。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。
