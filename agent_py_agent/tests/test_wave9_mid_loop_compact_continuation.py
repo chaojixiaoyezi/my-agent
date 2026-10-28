@@ -854,3 +854,145 @@ def test_round_two_dynamic_prompt_prior_and_guidance_fingerprint_is_exact_and_re
     assert hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16] == fingerprint
     assert provider_messages_fingerprint(params) == fingerprint
     assert logical_model_call_id(request) == identity
+
+
+# LLM: 不替换投影、计量、校准或生成预检；仅在摘要准备注入软失败，业务模型使用本地捕获后端。
+# 函数用途: 复现current_run缩减后校准丢失，要求两个入口的两级降级真正越过生成预检并调用模型。
+@pytest.mark.parametrize("entry", ["native", "host"])
+@pytest.mark.parametrize("pressure_percent,level", [(90, 1), (98, 2)])
+def test_round_three_current_run_trim_reaches_real_model_generation(monkeypatch, tmp_path, caplog, entry, pressure_percent, level):
+    from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        ModelGenerateParams,
+        generate_model_response,
+    )
+    from agent_py_agent.agent.agent_core.tool_request_capture import capture_tool_loop_request
+    from agent_py_agent.agent.backends import ModelResponse
+    from agent_py_agent.agent.conversation.compact_calibration import (
+        calibrated_compact_request_tokens,
+    )
+    from agent_py_agent.agent.conversation.models import ConversationHistorySeed
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.prompting_parts.builder import (
+        PromptRenderInput,
+        render_prepared_prompt,
+    )
+    from agent_py_agent.agent.settings import AgentConfig
+
+    # LLM: 只替代外部业务模型，不绕过真实生成链；调用计数证明请求已实际通过预检。
+    # 类用途: 保存这次模型收到的消息并返回确定性本地答复。
+    class CaptureBackend:
+        name = "capture"
+        model_name = "fixture"
+
+        # LLM: 每个测试实例独占调用列表，不使用真实网络或供应商凭据。
+        # 函数用途: 初始化模型调用记录。
+        def __init__(self):
+            self.calls = []
+
+        # LLM: 由真实generate_model_response调用，保留出站消息供断言，不产生工具副作用。
+        # 函数用途: 记录业务请求并返回本地终答。
+        def generate(self, prompt, on_chunk=None, **kwargs):
+            self.calls.append(kwargs.get("messages"))
+            return ModelResponse(text="业务调用完成", backend=self.name)
+
+    agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home"),
+                                   auto_save_memory=False, memory_context_calibration_carry_enabled=False), tmp_path)
+    agent.backend = CaptureBackend()
+    params = replace(loop_params(), save=False, conversation_history_seed=ConversationHistorySeed())
+    params.tool_ir_history[:] = [replace(item, content_blocks=(ToolContentBlock("text", text="calibration payload " * 1000),))
+                                if isinstance(item, ToolResult) else item for item in params.tool_ir_history]
+    prompt_input = PromptRenderInput("system", "", "", "", "", (), "", "", "", params.user_prompt, "", True)
+    prompt = render_prepared_prompt(prompt_input)
+    initial = context_pressure.model_visible_context_snapshot(agent, params, prompt)
+    observed = initial.raw_estimated_tokens * 7 // 10
+    agent.config = replace(agent.config, model_context_window_tokens=observed * 100 // pressure_percent)
+    assert context_pressure.record_provider_context_observation(
+        agent, params, raw_estimated_tokens=initial.raw_estimated_tokens,
+        context_surface_fingerprint=initial.context_surface_fingerprint,
+        response=ModelResponse(text="previous", backend="capture", usage={"prompt_tokens": observed}),
+    )
+    calibration = context_pressure.compact_request_calibration_for_request(agent, params, prompt)
+    assert calibration.calibration_scope == "current_run"
+    persistence_calls = []
+    monkeypatch.setattr(context_pressure, "_persist_provider_context_observation", lambda *a: persistence_calls.append(True))
+    original = deepcopy(params.tool_ir_history)
+    error = ConversationCompactError("summary unavailable", code="COMPACT_TIMEOUT")
+
+    # LLM: 只在既有摘要准备边界注入失败，不改真实token、阈值、投影和预检结果。
+    # 函数用途: 将当前轮切入待修复的软失败降级路径。
+    def fail_summary(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(service, "_prepare_native_compact_plan", fail_summary)
+    monkeypatch.setattr(service, "_commit_native_ir_generation", lambda *a, **k: pytest.fail("turn-local projection committed"))
+    with caplog.at_level(logging.WARNING):
+        if entry == "native":
+            assert service._fit_native_ir_to_shared_budget(agent, params, prompt) > 0
+        else:
+            frozen = capture_tool_loop_request(agent, params, prompt_input)
+            host = SimpleNamespace(force=False, agent=agent, calibration=calibration,
+                                   source=SimpleNamespace(policy=service._native_compact_policy(agent, params)),
+                                   resolved_input=None, committed=False)
+            assert recovery._restore_optional_preflight(host, params, frozen, initial.raw_estimated_tokens, error)
+            assert not host.committed
+    assert params.tool_ir_history == original
+    accepted = next(record for record in caplog.records if getattr(record, "compact_degraded_level", None) == level)
+    after = context_pressure.model_visible_context_snapshot(agent, params, prompt)
+    assert after.raw_estimated_tokens < initial.raw_estimated_tokens
+    # 确保命中原缺陷形状：未经校准的新请求仍超过安全线，而冻结校准接受它。
+    assert after.raw_estimated_tokens > int(agent.config.model_context_window_tokens * 0.92)
+    expected = calibrated_compact_request_tokens(after.raw_estimated_tokens, calibration)
+    assert expected == accepted.after_tokens
+    assert after.current_tokens == expected
+    assert after.measurement_kind == "calibrated_estimate"
+    assert params.live_archive_state[context_pressure._PROVIDER_CONTEXT_OBSERVATION_KEY]["basis"] == "compact_candidate"
+    assert accepted.commit_authority == "turn_local"
+    assert not persistence_calls
+    baseline = params.compact_degraded_baseline_tokens
+    assert service._fit_native_ir_to_shared_budget(agent, params, prompt) == 0
+    assert params.compact_degraded_baseline_tokens == baseline
+    assert context_pressure.model_visible_context_snapshot(agent, params, prompt).current_tokens == expected
+    changed_surface = context_pressure.model_visible_context_snapshot(agent, params, "different system surface")
+    assert changed_surface.current_tokens == changed_surface.raw_estimated_tokens
+    assert changed_surface.measurement_kind == "conservative_estimate"
+    response = generate_model_response(ModelGenerateParams(agent, params, prompt, 1))
+    assert response.text == "业务调用完成"
+    assert len(agent.backend.calls) == 1
+    assert "TOOL_OUTPUT_COMPACTED" in json.dumps(agent.backend.calls[0], ensure_ascii=False)
+    assert params.tool_ir_history[:len(original)] == original
+
+
+# LLM: 共享恢复只应遵从统一分类器；明确解析来源可以降级，未标记JSON、普通ValueError和硬码仍必须拒绝。
+# 函数用途: 对比直接标记PARSE_FAILED的JSONDecodeError在native与共享恢复入口的行为。
+@pytest.mark.parametrize("kind", ["tagged_json", "untagged_json", "value", "hard_json"])
+def test_round_three_direct_parse_failure_matches_shared_entry(monkeypatch, kind):
+    from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
+    from agent_py_agent.agent.agent_core.tool_request_projection import ToolLoopRequestInput
+    from agent_py_agent.agent.conversation.compact_guard import compact_failure_is_degradable
+    from agent_py_agent.agent.conversation.models import ConversationHistorySeed
+
+    error = ValueError("structural") if kind == "value" else json.JSONDecodeError("fixture", "{", 1)
+    if kind != "untagged_json":
+        error.reason_code = "PARSE_FAILED"
+    if kind == "hard_json":
+        error.error_code = "STORE_CORRUPT"
+    expected = kind == "tagged_json"
+    assert compact_failure_is_degradable(error)[0] is expected
+    agent, params, _, _ = arrange(monkeypatch, error, tokens=650)
+    native_params = replace(params)
+    if expected:
+        assert service._fit_native_ir_to_shared_budget(agent, native_params, "system") == 0
+        assert native_params.compact_degradation_latched
+    else:
+        with pytest.raises(type(error)) as caught:
+            service._fit_native_ir_to_shared_budget(agent, native_params, "system")
+        assert caught.value is error
+        assert not native_params.compact_degradation_latched
+    params = replace(params, conversation_history_seed=ConversationHistorySeed())
+    host = SimpleNamespace(force=False, agent=agent, calibration=None,
+                           source=SimpleNamespace(policy=SimpleNamespace(context_window_tokens=1000)), resolved_input=None)
+    original = deepcopy(params.tool_ir_history)
+    assert recovery._restore_optional_preflight(host, params, ToolLoopRequestInput(), 650, error) is expected
+    assert params.compact_degradation_latched is expected
+    assert params.tool_ir_history == original

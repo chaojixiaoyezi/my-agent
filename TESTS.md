@@ -1,3 +1,26 @@
+## 2026-10-28 Wave 9 B4 Round 3：降级接受与真实生成预检同口径（本地返修候选）
+
+来源：`07-tasks/fix-r3-wave9-b4.md`中c17的P1校准漂移与c16的P2双入口解析差异；从干净`f630186b9c473014cb95f89deb029e182d116b18`继续，仅修改原`wave9-b4`工作树，不推送、部署或操作服务。
+
+- 原因：候选缩小时冻结校准按比例接受，但`current_run`预检对`raw < observed_raw`回退未经校准raw，下一跳可能在业务请求发出前报overflow。两个降级调用方现将同次冻结calibration/prompt传给原接受门，接受且取消检查通过后复用`rebase_provider_context_observation`。只改本轮内存派生观测，沿原`compact_candidate`标记及fingerprint；不改全局公式，不向线程、owner比值或canonical历史持久化，不移动原失败压力baseline。
+- 共享入口只服从`compact_failure_is_degradable`，去掉重复ValueError/类型/错误码门；显式`reason_code=PARSE_FAILED`的JSONDecodeError与native一致，未标记JSON、普通ValueError及硬码对照仍拒绝。
+- 新8项先实际运行得到5项断言失败、3项安全对照通过；修复后8项通过。四个用例覆盖native/shared × Level1/Level2，真实投影、原始估算、校准与`generate_model_response`预检均未替换，最后核对fake后端确被调用；另外四个核对直接解析异常与三个拒绝对照。追加断言证明不持久化派生观测、普通锁存不移动失败baseline、变化system表面不误用旧校准、原IR保持；这些安全断言也已运行通过。
+
+任务列出的三个文件在当前树不存在：`test_native_tool_ir_compaction_and_orphan_sweep.py`、`test_memory_auto_compaction_continuation.py`、`test_context_pressure_and_projection.py`。按真实文件名运行原生IR/自动续跑套件，以及context-pressure/native-trigger/完整请求投影套件，没有创建空壳或跳过测试：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_context_pressure.py agent_py_agent/tests/test_context_pressure_native_trigger.py agent_py_agent/tests/test_compact_request_projection.py -q --tb=short --basetemp=.pytest_cache/b4r3-focused-tmp --junitxml=.pytest_cache/b4r3-focused.xml
+python3 -m pytest agent_py_agent/tests/test_gateway_compact_recovery.py agent_py_agent/tests/test_gateway_compact_recovery_continuation.py agent_py_agent/tests/test_compact_recovery_release.py agent_py_agent/tests/test_compact_calibrated_candidate_gate.py agent_py_agent/tests/test_context_pressure_media_reserve.py -q --tb=short --basetemp=.pytest_cache/b4r3-hosts-tmp --junitxml=.pytest_cache/b4r3-hosts.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+macOS/Python3.14.4，导入确认指向本工作树。六文件402项、额外五文件64项均通过，全部0失败/错误/跳过。追加边界断言后专项文件再次运行通过，结果在`.pytest_cache/b4r3-final.xml`；它与402项重叠，不累加。红绿与组合JUnit在忽略的`.pytest_cache/b4r3-{red,green,focused,hosts}.xml`。Ruff最初仅报新测试import格式，修正后全指定范围通过；导入边界返回空列表。未跑全仓、跨平台、真实供应商、飞书/TUI端到端、退休尺寸门。
+
+独立Astra high只读审阅准确diff与八个相关文件快照，限定静态PASS，无已定位可达P1/P2；未独立跑测试或做全仓/真实宿主验收。按其边界建议追加上述持久化、表面变化与锁存断言，生产修复未再变化。这里只交本地候选，是否挑入、Linux车道与真实通道故障注入由集成者另验。
+
 ## 2026-10-28 Wave 9 B4 Round 2：分类、增长解锁、可核验裁剪与出站身份（本地返修候选）
 
 来源：`07-tasks/fix-wave9-b4.md`的c5/c9五项反馈；干净起点`cd0e084ee8a9d3c372fa744ae17944323140fd78`，仅在原`wave9-b4`工作树继续修改，不推送、部署或操作真实服务。

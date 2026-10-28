@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 B4 Round 3：局部接受后的本轮观测重锚定
+
+`_fit_native_ir_to_shared_budget`及`compact_request_recovery._restore_optional_preflight`将冻结校准与同次prompt传入`_continue_after_compact_failure`。局部候选接受并通过取消检查后，调用既有`context_pressure.rebase_provider_context_observation`，仅在`params.live_archive_state`中把候选raw/校准值设为预检基准；无校准不创建观测，表面指纹边界及下一次供应商响应覆盖仍沿原链。它与15%解锁使用的失败压力baseline是不同事实，不新增持久状态源。共享恢复删去重复类型门，软错资格只由原分类器裁决。当前是本地源码候选，组件证据和未验证范围见[TESTS](../../../TESTS.md)Round 3。
+
 ## 2026-10-28 Wave 9 B4 Round 2：压力基线与出站投影同源
 
 下方初版结构沿用，本轮在同一权威入口返修：`compact_guard`先按四字段硬码裁决；`ToolLoopExecuteParams`新增失败压力基线，新失败更新、普通续轮保留，`_fit_native_ir_to_shared_budget`在增长15%边界重新摘要。`_continue_after_compact_failure`区分新失败/旧锁存，Level1最多局部缩一条，避免无新输入却连续换桩扰动逻辑身份；完整native shared恢复复用同一实现，原安全无prompt回退也记基线及统一告警别名。

@@ -2,7 +2,7 @@
 
 # LLM: execute_tool_loop 是主子共用的唯一入口；发现复用正式搜索/凭据投影，交付复核只消费原验证/写入信封，native IR、Compact 与收口权威不变。
 # 取消响应实现归低层response_decision；本模块只保留原兼容委托，循环直接判断原action而不二次翻译。
-# 模块用途: 装配采样、工具展示及校准；摘要软失败局部降级，增长15%才解锁重试，不伪造提交或吞硬停。
+# 模块用途: 装配采样、工具展示及校准；摘要降级沿同次观测重锚定本轮预检，增长15%才重试，不伪造提交或吞硬停。
 from __future__ import annotations
 
 import json
@@ -458,10 +458,9 @@ def _string_sequence(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-# LLM: Normal Compact retains the checkpoint/CAS contract. Only summary preparation failures may
-# enter turn-local degradation. A 15% rise over the failed-attempt baseline unlocks a fresh attempt;
-# cancellation precedes retry and post-commit errors never enter this catch boundary.
-# 函数用途: 按完整校准压力决定本轮续跑或增长重试；新失败重设基线，硬停和提交后异常仍传播。
+# LLM: 正常Compact保留checkpoint/CAS合同，仅准备阶段软失败可降级；失败压力增长15%才再尝试。
+# 取消检查先于重试，提交后错误不进入此捕获边界；同次冻结校准透传至局部接受和下一跳预检。
+# 函数用途: 按完整校准压力决定续跑或增长重试；把同次冻结校准交给局部接受门，硬停和提交后异常仍传播。
 def _fit_native_ir_to_shared_budget(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -497,7 +496,7 @@ def _fit_native_ir_to_shared_budget(
         # 用整数上取整守住精确15%边界；没有可靠基线时不解锁付费调用。
         if baseline <= 0 or estimator() < (baseline * 115 + 99) // 100:
             return _continue_after_compact_failure(agent, params, estimator, reason=params.compact_degradation_reason,
-                                                   force=force, fresh_failure=False)
+                                                   force=force, fresh_failure=False, calibration=calibration, prompt=prompt)
         object.__setattr__(params, "compact_degradation_latched", False)
         object.__setattr__(params, "compact_degraded_baseline_tokens", 0)
     try:
@@ -510,21 +509,27 @@ def _fit_native_ir_to_shared_budget(
         allowed, reason = compact_failure_is_degradable(exc)
         if not allowed:
             raise
-        return _continue_after_compact_failure(agent, params, estimator, reason=reason, force=force)
+        return _continue_after_compact_failure(agent, params, estimator, reason=reason, force=force,
+                                              calibration=calibration, prompt=prompt)
     if plan is None:
         return 0
     plan = replace(plan, calibration=calibration, prompt=prompt)
     return _apply_native_compact_plan(agent, params, estimator, plan)
 
 
-# LLM: Called only after an eligible pre-commit failure or the same-turn latch; the estimator is
-# the full calibrated provider request. Only a new degradation fixes a new pressure baseline;
-# ordinary latch continuation never slides it or repeats Level1 trimming. Emit both telemetry key
-# sets from the same level/reason, without model/Store/pin writes.
-# 函数用途: 新失败在软阈值以上最多局部折叠一条，近窗收缩到85%；旧锁存不重复裁剪或移动基线。
-def _continue_after_compact_failure(agent, params, estimator, *, reason: str, force: bool, fresh_failure: bool = True) -> int:
+# LLM: 仅在提交前软失败或同轮锁存调用；estimator计量完整校准请求。新失败才更新失败压力，
+# 旧锁存不重复Level1裁剪；接受后沿同次冻结校准重锚定本轮内存观测，供下一跳预检复用。
+# 不写模型/Store/pin，不改变全局缩减观测失效规则；native与共享恢复调用方须传同次校准和prompt。
+# 函数用途: 局部折叠后同步本轮计量基线；旧锁存不重复裁剪或移动失败压力基线。
+def _continue_after_compact_failure(agent, params, estimator, *, reason: str, force: bool, fresh_failure: bool = True,
+                                  calibration=None, prompt: object = "") -> int:
+    from ..conversation.compact_calibration import calibrated_compact_request_tokens
     from ..conversation.compact_guard import ConversationCompactError
-    from .model.context_pressure import model_request_input_ceiling
+    from .model.context_pressure import (
+        model_request_input_ceiling,
+        model_visible_context_snapshot,
+        rebase_provider_context_observation,
+    )
     from .tool_ir_compact import stub_old_native_tool_results
     from .tool_request_projection import text_request_capacity_known
 
@@ -547,6 +552,10 @@ def _continue_after_compact_failure(agent, params, estimator, *, reason: str, fo
         trimmed = stub_old_native_tool_results(params, target_tokens=int(ceiling * 0.92),
                                                estimate_tokens=estimator, require_progress=True)
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    if calibration is not None:
+        raw = model_visible_context_snapshot(agent, params, prompt).raw_estimated_tokens
+        rebase_provider_context_observation(params, calibration=calibration, raw_estimated_tokens=raw,
+                                            calibrated_tokens=calibrated_compact_request_tokens(raw, calibration))
     already_latched = params.compact_degradation_latched
     if fresh_failure or not already_latched or params.compact_degraded_baseline_tokens <= 0:
         object.__setattr__(params, "compact_degraded_baseline_tokens", before)

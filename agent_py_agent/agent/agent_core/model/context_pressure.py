@@ -485,11 +485,11 @@ def compact_request_calibration_for_request(
     return frozen_compact_request_calibration(agent, params, context_surface_fingerprint=fingerprint)
 
 
-# LLM: 压缩提交后由恢复宿主调用：已接受候选的原始计量与校准值成为下一次真实预检的本轮基线（同 fingerprint，仍是
+# LLM: 压缩提交或turn_local降级接受后由原宿主调用：候选原始计量与校准值成为下一次真实预检的本轮基线（同 fingerprint，仍是
 #   provider + 追加增量口径），让“候选通过 → 提交 → 下一次预检”说同一种数，而不是清掉观测后按原始值立刻再压一次。
 #   写入的是派生观测（basis/derived_from_generation 结构化标记），只存本轮内存状态、不持久化到线程；下一次真实
 #   供应商响应照常覆盖。没有校准的提交仍走 invalidate_provider_context_observation。
-# 函数用途: 压缩提交后把本轮校准基线改写成接受基准，避免刚接受的候选被另一口径立刻判为超限。
+# 函数用途: 把已接受持久候选或临时投影的本轮基线改写成接受基准，不持久化派生观测，避免下一跳误报超限。
 def rebase_provider_context_observation(
     params: object,
     *,

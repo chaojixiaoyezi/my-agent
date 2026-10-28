@@ -1,5 +1,5 @@
 # LLM: 共用宿主完整准备与原Compact/CAS；额度耗尽不恢复业务模型重试，公共层仍不得重跑准备或建立持久状态。
-# 模块用途: 三宿主共用准备与降级告警/压力基线；仅恢复可发送的本轮视图，计量/CAS/取消仍走原链。
+# 模块用途: 三宿主共用准备和唯一软错分类；降级只恢复本轮视图并重锚定预检，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
 import logging
@@ -336,23 +336,14 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
 
 
 # LLM: 只供select提交前失败；统一分类后恢复原种子，逼近容量/强制失败只接受更小的回合局部视图。
-#   完整且可计量的native输入也复用Level1局部裁剪；无可裁IR时保留原安全回退，统一日志别名与失败基线。
+#   软错资格只认共享分类器（含显式标记的JSON解析失败）；可计量native裁剪沿冻结校准重锚定本轮预检。
 #   未满足预算时重新解绑，不能推进CAS或重跑业务工具；权限、配额、取消及来源损坏仍拒绝。
 # 函数用途: 恢复安全原请求或临时折叠旧结果，记录本次失败压力及两套等价的结构化告警字段。
 def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
-    from ..runtime_errors import DataCorruptionError
-    from .host_turn_scope import UNSETTLED_HOST_ERRORS
     from .tool_request_projection import text_request_capacity_known
 
     allowed, reason = compact_failure_is_degradable(exc)
-    if (
-        not allowed
-        or isinstance(exc, (*UNSETTLED_HOST_ERRORS, DataCorruptionError, TypeError, AttributeError, LookupError, ValueError, AssertionError))
-        or compact_exception_code(exc) in {
-            "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
-            "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT",
-        }
-    ):
+    if not allowed:
         return False
     if (type(params.__dict__.get("provider_history_messages")) is not list
             or getattr(params, "conversation_history_seed", None) is None):
@@ -379,7 +370,8 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
             return calibrated_compact_request_tokens(raw, recovery.calibration)
 
         try:
-            _continue_after_compact_failure(recovery.agent, params, estimate, reason=reason, force=recovery.force)
+            _continue_after_compact_failure(recovery.agent, params, estimate, reason=reason, force=recovery.force,
+                                           calibration=recovery.calibration, prompt=prompt)
         except BaseException as failure:
             object.__setattr__(params, "provider_history_messages", previous)
             if isinstance(failure, ConversationCompactError) and failure.code == "COMPACT_BUDGET_EXCEEDED":
