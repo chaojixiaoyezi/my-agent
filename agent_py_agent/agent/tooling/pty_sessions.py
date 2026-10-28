@@ -166,11 +166,12 @@ class _PtySandboxInputs:
     full_access_other_owner_homes: str = "read_only"
 
 
-# LLM: 继承原宿主环境/网络上界，只增加独立人格根；由Shell宿主装配，不能从模型参数构造许可。
-# 类用途: 在原host_policy参数内同时携带PTY所需的来源保护根，避免继续增长启动参数。
+# LLM: 继承原宿主环境/网络上界，只增加独立人格根与会话空闲超时；由Shell宿主装配，不能从模型参数构造许可。
+# 类用途: 在原host_policy参数内同时携带PTY所需的来源保护根与会话空闲超时，避免继续增长启动参数。
 @dataclass(frozen=True)
 class PtyHostPolicy(SandboxHostPolicy):
     protected_persona_root: object = None
+    idle_timeout_seconds: float | None = None
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -256,9 +257,9 @@ class PtySessionRegistry:
         run_scope: object = None,
         *,
         host_policy: SandboxHostPolicy | None = None,
-        idle_timeout_seconds: float | None = None,
     ) -> PtySession:
         host_policy = host_policy or SandboxHostPolicy()
+        idle_timeout_seconds = getattr(host_policy, "idle_timeout_seconds", None)
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
         raise_if_cancelled()
@@ -874,7 +875,6 @@ class TerminalSessionTool(BaseTool):
         if isinstance(target, ToolHandlerOutcome):
             return self._error(target.error_code, target.output)
         timeout = self.shell_tool.pty_session_idle_timeout_seconds
-        timeout_options = {} if timeout is None else {"idle_timeout_seconds": timeout}
         try:
             session = pty_session_registry.start(
                 command,
@@ -884,10 +884,14 @@ class TerminalSessionTool(BaseTool):
                 read_roots,
                 SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
-                host_policy=PtyHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True),
-                                          self.shell_tool.host_credential_env_names, self.shell_tool.protected_persona_root,
-                                          full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only")),
-                **timeout_options,
+                host_policy=PtyHostPolicy(
+                    self.shell_tool.host_private_roots,
+                    getattr(self.shell_tool, "_sandbox_network_access", True),
+                    self.shell_tool.host_credential_env_names,
+                    self.shell_tool.protected_persona_root,
+                    full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only"),
+                    idle_timeout_seconds=timeout,
+                ),
             )
         except AgentsContractError as exc:
             return self._error("SANDBOX_UNAVAILABLE", exc.code)

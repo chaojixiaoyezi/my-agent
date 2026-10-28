@@ -58,6 +58,7 @@ except ImportError:  # pragma: no cover - POSIX import guard.
     msvcrt = None
 
 _GATEWAY_HISTORY_CACHE_LOCK = threading.Lock()
+_path_lock = path_thread_lock
 # 限制历史文件进程内快照缓存条目上限，防止多工作区长期运行无界增长。
 _MAX_GATEWAY_HISTORY_CACHE_ENTRIES = 64
 # 网关历史缓存允许缓存的单个文件最大字节数。
@@ -394,14 +395,21 @@ def try_locked_file_transition(path: Path):
         yield True
     finally:
         try:
-            if file_handle is not None:
-                try:
-                    if os_lock_acquired:
-                        _flock_unlock(file_handle)
-                finally:
-                    file_handle.close()
+            _release_transition_file_handle(file_handle, os_lock_acquired)
         finally:
             handle.lock.release()
+
+
+# LLM: 先释放可能已取得的 OS 排他锁，再确保关闭底层锁文件描述符；任一步异常都不吞掉调用方归还线程锁。
+# 函数用途: 安全解锁并关闭非阻塞文件事务探测的 OS 锁文件句柄。
+def _release_transition_file_handle(file_handle, os_lock_acquired: bool) -> None:
+    if file_handle is None:
+        return
+    try:
+        if os_lock_acquired:
+            _flock_unlock(file_handle)
+    finally:
+        file_handle.close()
 
 
 # LLM: Every processing/inbox/terminal transition and active-turn ingress for one request must

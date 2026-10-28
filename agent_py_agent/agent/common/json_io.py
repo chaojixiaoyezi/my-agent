@@ -62,6 +62,11 @@ class _PathLock:
     def __init__(self) -> None:
         self.lock = threading.Lock()
 
+    # LLM: 只转发内部线程锁的占用布尔态，供既有测试与断言检查临界区是否仍持有，不改变锁所有权。
+    # 函数用途: 查询当前路径线程锁是否处于加锁状态。
+    def locked(self) -> bool:
+        return self.lock.locked()
+
 
 # 弱值字典:某路径的锁无任何线程持有/等待时被 GC 自动摘除 → 长跑进程锁表只随"活跃文件数"而非
 # "历史见过的文件数"增长,根治无界泄漏(审计 #16,对照 _TEXT_LINES_CACHE 的 FIFO 上限同理)。
@@ -596,6 +601,9 @@ def path_thread_lock(path: Path) -> _PathLock:
             handle = _PathLock()
             _JSON_FILE_LOCKS[key] = handle
         return handle
+
+
+_path_lock = path_thread_lock
 
 
 # LLM: 默认仍等待原双层锁；blocking=False 任一层繁忙即失败，调用方不能因此绕开原子读改写。
