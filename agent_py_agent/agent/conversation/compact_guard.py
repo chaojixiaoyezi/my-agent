@@ -1,5 +1,6 @@
 # LLM: This module owns structural recent-tail selection and the persisted conversation compact
-# failure circuit. It never reads natural-language meaning or mutates transcript/cursor state.
+# failure circuit and the shared fail-closed continuation classifier. It never reads error prose
+# as control or mutates transcript/cursor state; hard quota, cancellation and authority stay fatal.
 # 模块用途: 给唯一会话压缩链提供近期完整回合选择和连续失败熔断，防止截断对话或重复空烧模型。
 
 from __future__ import annotations
@@ -265,6 +266,71 @@ def is_provider_quota_failure(exc: BaseException) -> bool:
     return is_provider_quota_exhausted_error(exc) or compact_error_is_provider_quota(exc)
 
 
+# LLM: Both mid-loop and host recovery use these structural codes; new unknown failures are not
+# assumed safe. Inspect the complete exception graph before accepting any transient wrapper.
+# 函数用途: 统一判断摘要失败可否临时续跑，取消、额度、权限和存储错误不能被外层软错误洗掉。
+def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
+    import builtins
+    from asyncio import CancelledError as AsyncCancelledError
+    from concurrent.futures import CancelledError as FutureCancelledError
+    from urllib.error import HTTPError, URLError
+
+    from ..backends.errors import (
+        ProviderConfigurationError,
+        ProviderQuotaExhaustedError,
+        ProviderTimeoutError,
+        ProviderTransientError,
+        provider_error_http_status,
+    )
+    from ..common.cancellation import ToolCancelled
+    from ..runtime_errors import DataCorruptionError
+
+    hard = {
+        "AUTHORITY_CONFLICT", "PIN_CONFLICT", "LEDGER_CORRUPT", "STORE_CORRUPT",
+        "SCOPE_VIOLATION", "OWNER_MISMATCH", "SOURCE_CHANGED", "REQUEST_PROJECTION_UNKNOWN",
+        "REQUEST_PROJECTION_CHANGED", "TOOL_COVERAGE_UNKNOWN", "REQUEST_NON_TEXT",
+        "PROVIDER_QUOTA_EXHAUSTED", "QUOTA_EXCEEDED", "INSUFFICIENT_QUOTA", "BILLING",
+        "AUTHENTICATION_ERROR", "INVALID_API_KEY", "CANCELLED", "CANCELED", "INTERRUPTED",
+    }
+    soft = {"FAILED", "SUMMARY_EMPTY", "EMPTY_SUMMARY", "BUDGET_EXCEEDED", "TIMEOUT", "CIRCUIT_OPEN"}
+    pending, seen, eligible = [exc], set(), False
+    reason = compact_exception_code(exc)
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        code = compact_exception_code(current).removeprefix("COMPACT_")
+        codes = {code}
+        for field in ("error_code", "code"):
+            value = getattr(current, field, None)
+            if isinstance(value, str):
+                codes.add(value.strip().upper().removeprefix("COMPACT_"))
+        status = provider_error_http_status(current)
+        if isinstance(current, HTTPError) and type(current.code) is int:
+            status = current.code
+        if codes & hard:
+            return False, f"COMPACT_{sorted(codes & hard)[0]}"
+        if (status in {401, 402, 403, 407}
+                or isinstance(current, (ToolCancelled, AsyncCancelledError, FutureCancelledError,
+                    KeyboardInterrupt, SystemExit, InterruptedError, PermissionError, DataCorruptionError,
+                    ProviderQuotaExhaustedError, ProviderConfigurationError,
+                    TypeError, ValueError, LookupError, AssertionError))):
+            return False, compact_exception_code(current)
+        known_soft = bool(codes & soft) or status == 429 or (status is not None and status >= 500)
+        known_soft = known_soft or isinstance(current, (ProviderTransientError, ProviderTimeoutError, TimeoutError, ConnectionError))
+        # HTTPError继承URLError，但明确的永久4xx不能按网络瞬断放行；429/5xx已在上面判定。
+        known_soft = known_soft or (isinstance(current, URLError) and not isinstance(current, HTTPError))
+        # 只有真实异常组可作透明容器；任意未知叶/包装分支都拒绝，不能被外层soft洗白。
+        if not known_soft and not isinstance(current, builtins.BaseExceptionGroup):
+            return False, compact_exception_code(current)
+        eligible = eligible or known_soft
+        pending.extend(item for item in (current.__cause__, current.__context__) if item is not None)
+        if isinstance(current, builtins.BaseExceptionGroup):
+            pending.extend(current.exceptions)
+    return eligible, reason
+
+
 # LLM: 两条压缩链（会话 transcript 与活动回合）的 failed 进度都从这里取失败字段：安全错误码，加上错误自带的
 #   容量计量（若有；测不出为 None 的项整项缺失）。只读异常对象，不改熔断账；字段必须经 compact_progress 白名单才会外发。
 # 函数用途: 把一次压缩失败整理成进度事件要带的字段，让“候选过大”失败留下候选大小与上限。
@@ -285,6 +351,7 @@ __all__ = [
     "compact_circuit_is_open",
     "compact_exception_code",
     "compact_failure_progress_fields",
+    "compact_failure_is_degradable",
     "compact_partitions",
     "raise_if_compact_interrupted",
     "record_compact_failure",

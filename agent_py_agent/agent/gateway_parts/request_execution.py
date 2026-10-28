@@ -10,7 +10,7 @@
 # 本轮工具排的提示（details.turn_request_id 是本请求）同批发布；别的来源中途到的仍留下一轮，联测 test_host_notices。
 # 内部background只消费原canonical来源；原运输或心跳/Call停止unknown上抛至claim出口，停止本线程资源但不封终态或发续跑许可。
 # LLM: Bot在receipt复验后绑定私有工具视图；原执行器守目录/离线/总预算，Compact不重置额度，不改普通会话依赖。
-# 模块用途: 协调 Gateway 一轮请求的租约、模型执行、超窗恢复和收尾，复用各组件的唯一事实源。
+# 模块用途: 协调请求租约、执行与收尾；区别soft预检和provider溢出，统一恢复守住权限、额度与原CAS。
 from __future__ import annotations
 
 import json
@@ -716,7 +716,8 @@ def _run_gateway_turn_with_conversation_compact(
 # LLM: 有宿主时transcript或活动工具都只刷新来源，下一真实render/select才计量和CAS；无宿主不能粗估压活动归档。
 # 每次overflow清前一恢复载体，不借持久结果重建展示选择；唯一产品调用方始终提供observer。
 # 触发来源从 run_params.compact_trigger_source（调用方按溢出结果的 runtime_source 写入）透传给恢复宿主。
-# 函数用途: 给同轮下一模型请求安装完整恢复，缺少可压来源时明确停止而不账外重试。
+# LLM: soft preflight不等同provider硬溢出；降级由共享恢复分类器执行，不能在Gateway裸重放已执行工具。
+# 函数用途: 按真实触发来源安装同轮恢复，缺来源时停止，摘要瞬断交给共享两级续跑。
 def _gateway_compact_overflowing_turn(
     context: request_context.GatewayAskRunContext,
     prompt: str,
@@ -739,6 +740,7 @@ def _gateway_compact_overflowing_turn(
 
         observer.compact_recovery = prepare_gateway_compact_recovery(
             context, refreshed, trigger_source=str(getattr(run_params, "compact_trigger_source", "") or ""),
+            force=str(getattr(run_params, "compact_trigger_source", "") or "") != COMPACT_TRIGGER_PREFLIGHT,
         )
         return refreshed
     if refreshed.compact_generation > current.compact_generation:

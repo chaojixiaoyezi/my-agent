@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 B4：共享分类与回合局部模型视图
+
+`conversation/compact_guard.py::compact_failure_is_degradable`是中途Compact及`agent_core/compact_request_recovery.py`的唯一降级分类口。`_tool_loop_service.py`只捕获摘要准备阶段，正常候选提交及提交后错误仍走原CAS/回滚边界。`ToolLoopExecuteParams`保存本轮锁存与四元来源覆盖，不挂在Agent或线程上；`tool_ir_compact.py`产生确定性桩，`tool_ir_history.py`仅投影到出站副本，system、用户、摘要和尾四对不被覆盖。
+
+`tool_request_capture.py`与`ToolLoopRequestInput`分别冻结原IR和覆盖，`context_pressure.py`的内容键包含覆盖；preflight在已降级本轮的92%安全线内放行但仍守真实容量。`tool_model_generation.py`固化动态事实时排除覆盖，实际后端消息再应用；`runtime/loop_support.py`原canonical序列化不改。`request_execution.py`仅按原结构化触发来源传递force，共享恢复以当前完整请求重新计量，失败不伪造提交或复活超限请求。测试及未验证边界见[TESTS](../../../TESTS.md)，不增加配置、权限或持久状态源。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

@@ -1,12 +1,12 @@
 # LLM: 只在宿主已完成真实准备后读取原参数；未知历史不补空，不刷新工具目录、记忆或工作区。
-# 模块用途: 共用正常选模与压缩恢复的完整请求捕获，纯渲染仍归 tool_request_projection。
+# 模块用途: 共用正常选模与恢复的完整请求捕获；原IR和回合局部覆盖分别冻结，纯渲染归tool_request_projection。
 from __future__ import annotations
 
 from .tool_request_projection import ToolLoopRequestInput
 
 
-# LLM: 只组装原事实与工具选择；seed=None仅在显式turn范围且原provider历史确知为空时合法，未知历史不补空。
-# 函数用途: 将实际首请求的冻结 system、完整 IR 和原工具选择交给唯一纯投影。
+# LLM: 只组装原事实与工具选择，独立捕获临时覆盖而不将桩写进冻结原IR；未知历史不补空。
+# 函数用途: 将真实请求的system、原IR、降级覆盖和原工具选择交给唯一纯投影。
 def capture_tool_loop_request(agent: object, params: object, prompt_input: object) -> ToolLoopRequestInput:
     from ..conversation.models import ConversationHistorySeed
     from ..model_guidance import provider_system_instruction
@@ -29,4 +29,5 @@ def capture_tool_loop_request(agent: object, params: object, prompt_input: objec
         provider_history_messages=tuple(params.provider_history_messages), tool_context=tuple(params.tool_context),
         forwarded_guidance=frozenset(_forwarded_guidance_seen(params)),
         conversation_state=conversation_runtime_state_section(params),
+        compact_degradation_stubs=tuple((getattr(params, "compact_degradation_stubs", None) or {}).items()),
     )

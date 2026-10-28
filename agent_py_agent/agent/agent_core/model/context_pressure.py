@@ -1,5 +1,5 @@
 # LLM: 展示/阈值沿原策略，新增raw/校准来源不改预算；出站诊断复用原计量，只使用已加载观测，不为诊断水合store或写运行状态。
-# 模块用途: 估算即将发送的模型输入并给出结构化压缩信号，保持输出预留、运行期校准及纯投影的边界。
+# 模块用途: 估算即将发送的输入并给出压缩信号；投影键包含临时桩，保持输出预留、校准和纯投影边界。
 from __future__ import annotations
 
 import hashlib
@@ -261,7 +261,8 @@ def safe_inline_tool_result_tokens(
 # 已知媒体在策略不为 off 时压缩链可用（归档引用/随图摘要），门槛照常取压缩点。与 compact_request_recovery 的 _automatic_noop/select 同口径，改动须同步。
 # 返回的 runtime_source 是结构化触发来源（compact_progress.COMPACT_TRIGGER_*）：工具窗口溢出与普通预检越线分开报，
 # 下游不得从 detail 文本区分。
-# 函数用途: 每次模型请求前检查输入压缩点和已知协议容量，超出时沿原 Compact 链恢复。
+# LLM: 摘要已降级的本轮可在真实输入上限92%以内发送；只消费旧窗口信号，不放宽物理容量或未知模态。
+# 函数用途: 每次生成前守真实容量，避免已安全降级的回合又被旧软阈值重启。
 def preflight_context_pressure_response(request: object) -> ModelResponse | None:
     params = getattr(request, "params", None)
     policy = runtime_compact_policy(
@@ -279,7 +280,15 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
         getattr(request, "params", None),
         prompt,
     )
-    if policy.allow_persistent_apply and (overflow := _tool_context_window_overflow(request)):
+    overflow = _tool_context_window_overflow(request) if policy.allow_persistent_apply else {}
+    request_ceiling = model_request_input_ceiling(request.agent, window)
+    compact_chain_available = params is None or compact_request_source_supported(
+        params, media_policy=configured_media_policy(getattr(request, "agent", None)),
+    )
+    if (getattr(params, "compact_degradation_latched", False) and compact_chain_available
+            and prompt_tokens <= int(request_ceiling * 0.92) and prompt_tokens < request_ceiling):
+        return None
+    if overflow:
         return context_pressure_response(
             request,
             source=COMPACT_TRIGGER_TOOL_CONTEXT_OVERFLOW,
@@ -291,16 +300,12 @@ def preflight_context_pressure_response(request: object) -> ModelResponse | None
             ),
         )
     threshold = policy.trigger_tokens
-    compact_chain_available = params is None or compact_request_source_supported(
-        params, media_policy=configured_media_policy(getattr(request, "agent", None)),
-    )
     if not policy.allow_persistent_apply:
         threshold = window
     elif not compact_chain_available:
         # 压缩链对此请求不可用，在压缩点失败不是客观事实；越过窗口时仍由强制恢复给出结构化拒绝。
         threshold = window
     output_reserve = _known_shared_window_output_reserve(getattr(request, "agent", None))
-    request_ceiling = model_request_input_ceiling(request.agent, window)
     if prompt_tokens < threshold and prompt_tokens < request_ceiling:
         return None
     reason = (
@@ -838,11 +843,12 @@ def project_request_prompt_history(params, prompt):
     return projected, result
 
 
-# LLM: 内容键保留完整类型和值树，使用==核对而非压成Python hash；未知/递归旁路，scope与投影器变化也失效。
-# 函数用途: 为同轮纯投影构造精确结构键，不能因摘要碰撞复用旧历史。
+# LLM: 内容键含本轮降级覆盖的完整类型和值树，不能把缓存中的原文或旧桩送出；scope和投影器变化同样失效。
+# 函数用途: 为同轮纯投影构造含降级桩的精确结构键，不能在桩变化后复用旧原文或旧计量。
 def _prompt_history_projection_key(params, prompt, history, conversation, projector):
     try:
-        content = _context_value_fingerprint((str(prompt), prompt_cache_layout(prompt), tuple(history), conversation))
+        content = _context_value_fingerprint((str(prompt), prompt_cache_layout(prompt), tuple(history), conversation,
+                                              tuple((getattr(params, "compact_degradation_stubs", None) or {}).items())))
     except (AttributeError, TypeError, ValueError, RecursionError):
         return None
     scope = tuple(str(getattr(params, name, "") or "") for name in ("session_id", "run_id", "request_id"))

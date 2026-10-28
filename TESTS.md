@@ -1,3 +1,32 @@
+## 2026-10-28 Wave 9 B4：工具循环中途Compact两级无感续跑（本地源码候选）
+
+来源：`07-tasks/wave9-b4.md`及总体方案第5项；起点`db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，仅在指定分支/工作树实施，未推送或部署。基点的共享恢复实现在`agent_core/compact_request_recovery.py`，不是工单旧路径；`conversation/compact_guard.py`原已存在。
+
+- 共享`compact_failure_is_degradable`只读结构化类型、`code`/`error_code`、HTTP状态及完整cause/context/异常组；权限、取消、硬配额、认证、CAS/来源或存储错误优先拒绝，未知叶不因外层`COMPACT_FAILED`变安全。不解析错误文案、不切换账号或模型。
+- 摘要准备失败且完整校准估算不超过真实输入上限92%时，原IR不动并锁存本轮；后续preflight同样识别锁存，不能又按旧软阈值或旧窗口信号重启。上限继续扣除后端实际输出预留，不放宽物理容量或未知输入。
+- Level2只对较旧ToolResult建立临时覆盖，以原调用的run/attempt/turn/call四元来源区分跨turn重复ID，保留用户输入、摘要、调用和最新四对。确定性桩带tool_name/call_id/status/char_length/archive_ref；不存在已知引用时为null，不编造归档。按完整请求重估到85%，force还要求一次新缩减；达不到时恢复投影并拒绝发送。
+- 原IR与临时覆盖分别冻结；计量memo包含覆盖值。实际生成前materializer不把桩写回原IR，后端出站才用投影，最终canonical序列化仍保存原payload。真实绑定测试核对消息JSONL字节、summary/checkpoint/代次不变；既有失败熔断元数据记账保持，不声称整个Store零写入。
+- Gateway区分soft preflight与provider硬溢出，三宿主沿同一个共享恢复入口分类；不在请求边界裸重放已执行工具，不捕获正常Compact提交后的错误。
+
+新增`test_wave9_mid_loop_compact_continuation.py`覆盖阈值边界、锁存、尾四对、四元来源、冻结/发送/最终持久化隔离、真实线程JSONL与pin、硬停异常链、未知分支、SDK code、强制低估缩减、无法缩减回滚、Gateway触发来源及真实工具循环的fake LLM驱动。首批有效红测为19项中12项预期失败；冻结/共享恢复7项、materializer1项、独审及preflight/重复ID9项、SDK code5项均保留单独红测证据。HTTP状态补测为3项预期红、2项瞬断对照通过：标准库HTTPError虽继承URLError，永久400/404/422仍拒绝，429/503允许。准备错误、测试夹具路径错误不计为产品红测。
+
+最终版本在macOS/Python3.14.4、工作树根运行，核对import指向本树而非旧editable包：指定组合132项通过（本轮新文件56项），扩展八文件174项通过，均0失败/错误/跳过。真实SimpleAgent/fake LLM用例确认1次摘要准备、3次业务生成、2次成功read_file且不重放工具。准确JUnit及完整短日志位于`.pytest_cache/b4-required-verified.{xml,log}`与`b4-extended-verified.{xml,log}`（忽略的本地证据，不随功能提交）。
+
+兼容断言迁移：扩展回归首次174项中1项失败由本轮新的失败阶段引起，不称为基线既有失败。`test_persistent_native_window_restores_ir_when_summary_fails`的尾四对本身超预算；原英文`empty summary`匹配改为同时核对`COMPACT_BUDGET_EXCEEDED`及原异常链`COMPACT_EMPTY_SUMMARY`。原IR相等、代次0、checkpoint空、失败计数1、进度阶段及无completed全部保留，没有删除、跳过或放宽这些持久化红线。
+
+复现（工作树根；临时数据留在本树，非真实模型/飞书/TUI验收）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py -q --tb=short --basetemp=.pytest_cache/b4-required-verified --junitxml=.pytest_cache/b4-required-verified.xml
+python3 -m pytest agent_py_agent/tests/test_gateway_compact_recovery.py agent_py_agent/tests/test_gateway_compact_recovery_continuation.py agent_py_agent/tests/test_compact_recovery_release.py agent_py_agent/tests/test_compact_request_projection.py agent_py_agent/tests/test_tool_request_projection.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_compact_quota_wake.py agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py -q --tb=short --basetemp=.pytest_cache/b4-extended-verified --junitxml=.pytest_cache/b4-extended-verified.xml
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92e1e316cec56df7825dc7ea8a1ec7f84
+git diff --check
+```
+
+独立审阅只覆盖提供的内联实码摘录，异常链洗白、force低估未裁剪和跨turn裸ID风险由作者本地复现并修正；不声称独审执行了全diff或测试。未跑全仓、Linux/Windows、真实供应商或飞书/TUI端到端，也未运行已退休尺寸门。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。

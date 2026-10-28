@@ -743,6 +743,14 @@
 
 ## Tree
 
+### 2026-10-28 Wave 9 B4：中途Compact续跑直接回归（本地候选）
+
+```text
+|-- agent_py_agent/
+|   `-- tests/
+|       `-- test_wave9_mid_loop_compact_continuation.py # 两级续跑、硬停、四元来源、模型投影与canonical持久化隔离回归
+```
+
 ### 2026-10-28 Wave 8 正式边界与并发验收（集成目标）
 
 以下按 Wave 8 派单登记集成后的目标目录；文档分支基点 `9ee9bdc01` 尚未包含这些施工分支的新增文件，不能据此认定代码已合入、验收通过或已部署。集成时核对实际文件与对应回执，状态边界见 [设计台账](DESIGN_LEDGER.md) 当日条目。
@@ -1226,6 +1234,10 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 ```
 
 ## 关键文件说明
+
+### Wave 9 B4 中途Compact续跑（2026-10-28，本地候选）
+
+- `agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py`：覆盖92%原样续跑及本轮锁存、85%确定性旧结果投影、四元来源/尾四对/归档引用保留、真实线程JSONL与pin、冻结和实际发送及最终canonical序列化分离，以及共享恢复/Gateway硬停；组件验证不代表真实通道或部署验收。
 
 ### Wave 8 集成目标入口（2026-10-28）
 

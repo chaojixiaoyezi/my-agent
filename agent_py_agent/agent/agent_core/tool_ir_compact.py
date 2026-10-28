@@ -1,6 +1,6 @@
 
 # LLM: 原生工具回收复用唯一 typed IR 重写入口；摘要覆盖事实同时控制旧 assistant 与运行快照回收。
-# 模块用途: 只用原历史、窗口提示、归档引用和估算器形成压缩候选，保留配对与当前事实，不持久写账。
+# 模块用途: 形成正常压缩候选及独立的回合降级桩；后者不改原IR、用户输入、摘要或持久状态。
 from __future__ import annotations
 
 """native 模式下 compact 对结构化 IR 历史的「整对」回收（Step 3）。
@@ -37,17 +37,19 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 旧的记忆拼接 CompressionService 已移除；正式会话摘要由 ConversationStore/checkpoint 链负责。
 """
 
+import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..backends.tool_ir import AssistantTurn
 from ..conversation.tool_context_window import record_native_ir_window
-from ..tooling.runtime_contracts import ToolResult
+from ..tooling.runtime_contracts import ToolContentBlock, ToolResult
 from .tool_ir_history import (
     drop_tool_call_pairs,
     native_tool_ir_history,
+    native_tool_result_sources,
     replace_compaction_summary_ir,
 )
 
@@ -79,6 +81,45 @@ class NativeCompactCandidate:
 class NativeCompactSummary:
     text: str
     provider_compaction: str = ""
+
+
+# LLM: Only a provider-view override is changed; canonical IR and ToolCall/ToolResult pairs remain
+# intact. Overrides use original four-part source identity; force requires fresh shrinkage even
+# when a provider rejection contradicts the local estimate. Never invent archive references.
+# 函数用途: 保留尾四对并按真实来源折叠旧结果；强制恢复至少新裁一条，超预算时恢复原投影并拒绝发送。
+def stub_old_native_tool_results(params: object, *, target_tokens: int, estimate_tokens: Callable[[], int], require_progress: bool = False) -> int:
+    from ..conversation.compact_guard import ConversationCompactError
+    from ..conversation.compact_progress import COMPACT_AUTHORITY_TURN_LOCAL
+
+    results = native_tool_result_sources(params.tool_ir_history)
+    stubs = params.compact_degradation_stubs
+    original = dict(stubs)
+    changed = 0
+    try:
+        for source, result in results[:-4]:
+            if estimate_tokens() <= target_tokens and (not require_progress or changed):
+                return changed
+            if source in stubs:
+                continue
+            archive_ref = next((ref.ref for ref in result.refs if ref.kind == "artifact"), "")
+            archive_ref = archive_ref or next((ref.ref for ref in result.refs), "")
+            content = json.dumps({
+                "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL,
+                "tool_name": result.tool_name, "call_id": result.call_id,
+                "status": result.status, "char_length": len(result.output),
+                "archive_ref": archive_ref or None,
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if len(content) >= len(result.output):
+                continue
+            stubs[source] = replace(result, content_blocks=(ToolContentBlock("text", text=content),))
+            changed += 1
+        if estimate_tokens() > target_tokens:
+            raise ConversationCompactError("保留当前输入与最近四对工具后仍超过安全预算", code="COMPACT_BUDGET_EXCEEDED")
+        return changed
+    except BaseException:
+        stubs.clear()
+        stubs.update(original)
+        raise
 
 
 # LLM: 修改原列表而不持久化；先回收、安装摘要，再把窗口提示计入同一估算器。异常由调用方恢复快照。
