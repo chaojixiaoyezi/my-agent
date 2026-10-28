@@ -48,6 +48,25 @@
 
 关键文件说明：`plugin_package.py` 在新Host入口独立执行10MiB/256成员ZIP/tar预算，仍以根 `plugin.json` 和原安装表为权威；`plugin_management.py` 复用原生命周期与审批。`workflows/engine.py`、`script_runner.py`、`datasource_runtime.py` 显式禁止调试摘要、通知和pin推进，不改变正式暂停恢复。`user_auth.py` 在唯一签发/验证链加入MFA和认证版本撤销；`plugin_host/authorization.py` 读取原认证DTO的effective_owner。新 `plugins.manage` / `workflows.debug` 需明确批准，不由旧write/execute隐式获得。真实IdP与浏览器、真实模型硬deadline及插件物理启停未作为本轮验收；细节见设计说明和TESTS.md。
 
+## 2026-10-28 Wave 9 A3：外置 SecOps 插件引擎与契约测试
+
+本轮业务源码保留在任务明确授权的外部目录，不并入通用 `agent_py_agent/agent/`。仓内仅加入测试并更新两份文档；因此挑入本提交还须单独保留外部源码与 ZIP，指纹和复现方法见 `TESTS.md` 本轮记录。
+
+```text
+/Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/
+|-- workbench_server.py # 独立 SecOpsService/HTTP；SQLite、包/MCP、告警/PCAP、审批/调试、ASM/风险、TOTP/SSO、HMAC推送
+|-- build_plugin_package.py # 用指定框架 inspector 校验；打包服务及其模块，标准 MCP/显式 HTTP 入口
+`-- dist/my-agent-web-portal-plugin.zip # 最终交付包；未安装或激活
+
+agent_py_agent/tests/
+`-- test_wave9_secops_portal_plugin_apis.py # 实际回环HTTP、文件SQLite、MCP进程组、二进制PCAP及安全回归
+```
+
+- `SecOpsDataMixin`：严格有界本地 DSL、真实外部连接器 transport、去重告警、classic PCAP 和静态 API-risk。`SecOpsActionMixin`：可信剧本/审批、指定保存节点隔离调试、低频冻结地址 ASM。两个 mixin 都内联在外部服务文件，没有给底座新增垂直模块。
+- `SecOpsService`：owner-scoped SQLite 是插件业务状态，不是原生 Host 安装/授权表；安全更新用事务预留和确认。HTTP 默认 loopback、新入口不初始化旧演示用户/插件，不加载其他工作树或 monkeypatch 宿主授权。
+- `host_broker_call` / `remote_push_sender` 是受信可插拔适配点；前者的 `_portal_principal` 只描述认证后的 Web 身份，不授予原生 Host 权限。A1/A2 接收端与闭合合同映射由 Stage 4 集成实证，本轮不宣称已完成跨分支生产联调。
+- 测试源码默认定位上述外部目录，可用 `MY_AGENT_PORTAL_SOURCE_DIR` 指向集成者保存的等价 handoff 目录。最终 ZIP 的内含服务/构建源码已与交付文件逐字节核对，另有无 Host Python 包的新解释器 MCP/HTTP 实测。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

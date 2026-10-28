@@ -21,6 +21,39 @@
 
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --junitxml=.pytest_cache/r5-approved.xml
+
+## 2026-10-28 Wave 9 A3 Round 4：MCP BrokenPipe 清理与失败落库
+
+来源：先完整阅读 `07-tasks/fix-r4-wave9-a3.md` 全40行。工作树 `/tmp/wt-wave9-a3`、分支 `wave9-a3`，干净起点 `547bfc7653bee75be5699c409de1329eba188f77`，门禁基线仍为 `db4d5de92`。只处理 c16 报告的这一个 P2；外部插件独立交付，不安装、启用、部署或推送。
+
+### 修复范围与行为
+
+- **`_stop_process()`。** TERM、wait、必要的KILL/再次wait、各自的stdin/stdout/stderr关闭均独立保护；即使BufferedWriter.close再次flush抛BrokenPipe，也继续关闭后续流。嵌套finally保证两个句柄映射最终移除。无法确认归属或组消失时不假报成功；已退出或poll异常的锚点不发信号，仍不按数据库PID杀进程。
+- **`_spawn_mcp()`。** initialize、initialized通知及tools/list位于同一个握手异常边界；OSError（含BrokenPipeError）先清理，再持久化 `error`、`error_type`、实际 `exit_code`，然后返回 `502 MCP_TRANSPORT_FAILED`。回收确认字段 `cleanup_confirmed` 表示有归属进程退出且进程组已消失；未确认时仍保存 `unknown_after_handshake_exit`，不登记running，也不伪造退出码。
+- 产品AST核对证明，仅上述两个函数改变，其他函数与R3快照一致。新增/修改函数及嵌套测试helper均保留 `# LLM:` + `# 函数用途:` 双层中文注释；已有AST注释回归随完整文件通过。
+
+### 真实红绿证据与独立复核
+
+- 新增7项先在原始R3源码全部断言失败，JUnit `/tmp/pytest-a3-r4/red.xml`：真实子进程读取initialize后先 `os.close(0)`、再返回合法初始化响应并保持存活，HTTP实际返回 `500 INTERNAL_ERROR`。其余六项在真实Popen/三条真实流上分别注入stdin、stdout、stderr、TERM、wait、poll的单一系统异常，证实清理逃逸或stderr未关闭。
+- 修复后MCP专项（含正常握手、旧生命周期、协作worker回收等对照）**21 passed**，见 `focused.xml`。真实BrokenPipe用例连续两次重试，每次均检查进程已退出、stdin/stdout已关闭、两个映射为空、唯一新增失败行及与该次真实进程相同的退出码；最后服务close正常。测试兜底清理在所有产品断言之后，不用测试自己的回收冒充产品行为。
+- Astra high对冻结源码与测试diff做独立只读定向审查，无阻塞产品缺陷；指出第二次失败记录可能借第一次记录满足any断言。已按每次请求前后daemon_id集合差精确定位唯一新增行，并检查其错误类型、退出码与回收确认；只增强测试，不再改源码或ZIP。修正由父级动态复验，未声称做过第二次独立审查。
+- 最终完整指定文件 **144 passed / 0 failed / 0 errors / 0 skipped**，JUnit `/tmp/pytest-a3-r4/final-accepted.xml`。AST比对证明R3原测试模块完全不变，仅增加两个顶层测试函数（一个六项参数化），没有删除、跳过、xfail或放宽旧断言。最终测试前后9份外部源码、ZIP及测试共11文件摘要保持冻结。
+- `ruff check agent_py_agent scripts` 全指定范围通过；外部server、builder及该测试文件的额外Ruff也通过。导入边界 `--json` 输出 `[]`、退出0。文档同步与提交区间检查在本节更新及提交后执行，交接报告附最终结果。
+
+### 冻结包与复现命令
+
+按原构建器重建，原生包检查通过；全部11个清单成员SHA-256正确，全部9份外部 `.py` 与ZIP中字节一致，构建器未改。下方历史轮次指纹仅代表当轮快照；本轮交付指纹如下：
+
+| 文件（相对外部handoff目录） | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `1224d16e0a7c07ea25133ec90cbc98878e8bd56be5782bf674c51625c35efdf4` |
+| `build_plugin_package.py`（未改） | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `9e8683627bab1cd7ad24cbd94a0306e2fe4f300831da50284c27e327f5d3d8d8` |
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short --junitxml=/tmp/pytest-a3-r4/final-accepted.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py --json
@@ -146,6 +179,77 @@ python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_apis.py agent_p
 python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py agent_py_agent/tests/test_workflow_script_engine.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_host_gateway_composition.py -q --tb=short
 ruff check agent_py_agent/agent/plugin_package.py agent_py_agent/agent/plugin_management.py agent_py_agent/agent/workflows agent_py_agent/agent/user_space agent_py_agent/agent/plugin_host agent_py_agent/tests/test_wave9_host_substrate_apis.py
+
+验证边界：本机POSIX真实子进程、临时回环HTTP和SQLite；未验证跨机可达、生产部署、Windows或Linux全量CI。单一可恢复故障回归不等于动态覆盖持续TERM/KILL拒绝、持续wait异常、进程组探测异常的全部组合，也不代表各握手阶段都分别做过I/O故障注入；这些分支仅有共享异常边界的静态核对。没有放大为全门户发布验收。
+
+## 2026-10-28 Wave 9 A3 Round 3：认证、MFA 与输入边界修复
+
+来源：先完整阅读 `07-tasks/fix-r3-wave9-a3.md` 全67行。在 `/tmp/wt-wave9-a3`、分支 `wave9-a3`、干净起点 `e4fa35dc260416b6e29b19aaa40ce7026883c623` 续作；文档和提交区间门禁仍以 `db4d5de92` 为基线。外部插件继续独立交付；仓内只修改本文件和 `agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py`，不安装、启用、部署、推送或改动生产服务。
+
+### 六项修复与兼容边界
+
+1. **认证、owner与出站。** HTTP外层在读取/解析业务body、加载旧模块和探测前，先校验唯一Authorization及 `_principal()`；旧路径、编码路径、SSE目标和SecOps认证别名均走相同门。旧全局数据无多owner隔离合同，因此仅允许真正 `local/main` 管理员进入；其他owner即使带真实管理员角色也拒绝，body不能覆盖身份。`probe-node` 不再调用演示探测器：复用可信 `allowed_scopes`、目标格式校验、冻结数字IP、私网策略及共享限速，连接一次真实TCP端口。空/越界范围在连接前拒绝；旧硬编码 `remote-status` 明确403。
+2. **不再假登录或绕过MFA。** 密码登录默认关闭；仅由可信构造参数 `password_authenticator(username, password)` 校验配置凭据并返回真实owner/角色，缺配置/不匹配/异常均 `401 INVALID_CREDENTIALS`。成功令牌写入同一SQLite散列索引会话，不认浏览器admin/owner字段。密码与SSO共用MFA感知签发：已有活动TOTP时返回 `authenticated=False, mfa_required=True`，会话保存 `mfa_verified=False`。除session查询与TOTP验证外，待验证会话全部403 `MFA_REQUIRED`；正确口令仅原子升级当前同owner、未过期会话，不提升同owner其他会话、不延长有效期。旧格式会话也实时检查活动TOTP。两套认证前缀归一到 `/api/auth/*`。外部 `auth_resolver` token无本地会话升级合同，验证明确409 `MFA_SESSION_NOT_OWNED`，不假报authenticated；应走本地登录会话或宿主自身MFA流程。原独立管理令牌属于可信机器/运维凭据，不是密码/SSO用户会话，权限含义未扩大。
+3. **NDJSON连接器身份。** HTTP保留并交叉校验query、`X-Device-Id`、JSON顶层device；无显式来源时可由全事件行一致的device推导。每行若携device必须与连接器一致，冲突、非字符串、重复query不同值均拒绝。连接器仍按真实owner查找，整批规范化通过前不写事件；JSON摄入共享同一逐行规则。
+4. **MCP握手。** 每条响应必须为JSON-RPC `2.0`对象、严格匹配请求ID类型、无error字段且result为dict。initialize在RPC与spawn两层复用最小结构检查，必须至少含非空、类型正确的protocolVersion/capabilities/serverInfo之一；空dict/任意业务字段不能登记running。初始化或tools/list失败均走原进程组回收及持久失败路径。没有宣称实现完整MCP schema验证或恶意代码OS沙箱。
+5. **归档链接。** ZIP的UNIX符号链接位和tar软/硬链接检查均发生在跳过目录之前；带 `/` 后缀的目录型symlink不再被误当普通目录忽略。普通目录仍是允许对照，不解压链接或跳过失败。
+6. **注释和冻结包。** 补齐指定14个测试、4个helper类及 `do_OPTIONS` 的双层注释；新增永久AST回归递归检查嵌套定义和装饰器上方注释。当前测试全文104个定义（4类）和Wave9区108个定义（6类）全部覆盖，**100%**。按指定构建器重建ZIP，原生包检查通过，逐项校验全部11个清单成员摘要，并核对全部9份外部 `.py` 与ZIP字节完全相同；不是只抽查server文件。
+
+### 独立复核及明确关闭的旧功能
+
+Astra high对固定认证快照独立只读审查，指出旧DSH普通GET仍会自动转发硬编码远端、`remote-agent-ask`也会出站，另发现冷启动旧runtime缺接口和外部MFA假升级。父级核对实际旧模块并补运行回归：网络边界仅给合成回执、不发外网请求，原DSH与remote-agent入口实际返回200、冷workspace返回500，未配置安全适配期望503的断言全部先红；外部MFA错误成功也先红。
+
+**处理方式是默认关闭未适配旧分发，不是声称旧全功能已恢复。** 新服务不再加载旧自动代理/旧SSE生成器，除受控probe外旧动作明确503 `LEGACY_ADAPTER_NOT_CONFIGURED`。合法管理员的旧读取仅可经可信构造参数 `legacy_reader(path, query, principal)` 提供的、无出站/写入副作用的只读桥；未配同样503，不回落有越权风险的 `WorkbenchRuntime`。该桥是受信配置，不能把旧通用dispatcher直接接回生产；普通用户/其他owner仍先403。独立报告所涉旧runtime兼容性不再靠缺方法导致500，危险自动转发也不再可从新入口到达。没有第二次独立审查，修复后由父级做了完整动态验收。
+
+### 实测与复现
+
+- 原认证红例13项中12失败、1合法对照通过；其中SSE最初被JSON解码遮挡，改用只读HTTP状态后，五种legacy认证/owner断言均先失败（`auth-red.xml`、`legacy-red.xml`）。修复后13项全过。
+- 数据/进程/归档目标23项中12失败、11既有安全/正常对照通过（`data-red.xml`），包含四种NDJSON来源、JSON跨设备混入、六种MCP畸形握手和ZIP目录链接。注释AST单例先失败（`comments-red.xml`）。独立复核补例5项中4失败、1多会话/旧格式/过期对照已通过（`review-red.xml`）。
+- 第一轮完整137项有4个NDJSON跨owner断言失败：普通owner被现有摄入admin门先拒为403，而不是连接器查找404。没有放宽产品鉴权；回归保留普通owner403，再加真实foreign-admin404及该owner零写入断言，分开验证角色门和owner墙。
+- 最终指定完整文件 **137 passed / 0 failed / 0 errors / 0 skipped**，JUnit为 `/tmp/pytest-a3-r3/final-accepted.xml`。原95项全部保留，未删断言、skip、xfail或放宽安全门。最终pytest前后外部9份源码、ZIP与测试共11个文件摘要未变，避免把共享目录旧版本结果当本轮验收。
+- 指定三文件Ruff通过；导入边界 `IMPORT_BOUNDARIES findings=0`；AST实际覆盖计数如上。文档同步和提交区间检查随本节更新后运行；不执行已退休尺寸检查器，不跑全仓pytest。
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -B -m pytest /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short -o cache_dir=/tmp/pytest-a3-r3
+ruff check --no-cache /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/workbench_server.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -B /tmp/wt-wave9-a3/scripts/check_doc_sync.py --base db4d5de92
+python3 -B /tmp/wt-wave9-a3/scripts/check_import_boundaries.py
+git -C /tmp/wt-wave9-a3 diff --check db4d5de92..HEAD
+```
+
+当前交付指纹（相对外部handoff目录；历史节的指纹仅代表旧版本）：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `8da5215cf5b0834fd65030a59c849b0f79f5eef1e156026ee3ebd5d137d65bf2` |
+| `build_plugin_package.py`（未改） | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `2bcbbff8af29f1dd37c8f2f31fef9d117b5f1a3e496ca7da99e65948745410a5` |
+
+验证边界：真实HTTP入口均为临时回环服务、SQLite临时文件与真实MCP测试子进程；网络拒绝测试拦在IO边界，不向硬编码远端发送请求。已有真实回环IdP测试保留，新增MFA针对性测试只替代token/userinfo提供者IO。未验证真实IdP、企业设备、Host原生适配器、可信密码/旧读取桥的生产配置、浏览器UI、跨机网络、Windows及Linux全量CI；不把本轮结果称为整个门户可直接发布。
+
+## 2026-10-28 Wave 9 A3 Round 2：lint、状态路径与最小 PCAPNG
+
+来源：完整阅读 `07-tasks/fix-wave9-a3.md`（51行）。工作树 `/tmp/wt-wave9-a3`，分支 `wave9-a3`，本轮起点 `b1506446b11d7387f41bfc1f7b4e245d2706e808`；文档/提交区间检查按派工要求用 `db4d5de92`。外部源码与 ZIP 仍独立交付，不纳入本分支 Git 提交，不安装、启用或部署插件。
+
+### 修复与回归
+
+- 外部 `workbench_server.py` 的26项 Ruff 诊断已清除：去重/排序 import、异常链、超时别名、固定表集合和相同分支合并。为指定6个类补齐直接位于定义上方的 `# LLM:` / `# 类用途:`；新增容器解码函数均保留双层注释。`build_plugin_package.py` 内容未改，指纹不变。
+- 两种 GET `/api/pentest/secops/repro-dispatch/{dispatch_id}` 和追加 `/status` 共读同一 owner 的持久记录。回归检查两路径回执一致、跨 owner 404、无认证401、查询不重发推送。执行期间共享外部文件被其他行动加入旧门户通配分流，造成原推送测试200空结果/预期502却200；本轮只排除 `/api/pentest/secops/` 命名空间，使其仍走原认证服务，未撤销其他并发改动。
+- classic PCAP四种magic的容器读取提取为迭代器，帧解析与DNS/HTTP/静态异常逻辑共用。PCAPNG支持大小端SHB、每节独立IDB、EPB和SPB；校验重复块长度、4字节对齐、接口引用、节边界、捕获长度和选项边界。IDB时间分辨率支持十进制/二进制及秒偏移；SPB无时间戳保持 `None` 并给覆盖警告，不伪造周期性证据。仍限制8MiB、最多10000包/2000流；每节最多256接口，未知块明确记录未解析。未新增流重组或其他链路类型。
+- 首批新增23个参数化用例，涵盖大小端EPB/SPB、时间选项、跨节/多接口、截断捕获、空抓包、包数/字节边界、11种畸形块/选项及真实回环HTTP归档。扩展已有推送回归，未删除/skip/xfail或放宽原断言。
+- Astra high完成固定源码快照的独立只读审查，发现短snaplen把合法捕获误判为畸形。父级补31例，其中15个Ethernet/VLAN/IPv4短头用例先实测失败、16个防误放行/额外覆盖对照已通过；随后修为仅对已由容器证明的截断计未解码，未截断短帧仍拒绝。同步覆盖显式节长度、timestamp high word、多接口不同计时、异常/重复时间选项、SPB多余数据、无时间包不产生周期性及classic四种magic。修正后做了完整动态回归，未把静态审查结论说成执行结果。
+
+实际证据（Python 3.14，工作树根）：原41例全通过；新增目标首次执行24例全部失败（含原推送测试扩展，`a3-r2-red.xml`）；修正通配分流后focused 26例全通过；审查补例的15红/16绿见 `a3-r2-review-red.xml`。当前完整指定文件 **95 passed / 0 failed / 0 errors / 0 skipped**（`.pytest_cache/a3-r2-final-current.xml`）。前一轮95例本身通过但后置摘要发现共享源码被并发加入SSE而变动，因此该轮不作最终版本验收；重新构建后最终pytest前后全部外部 `.py` 及测试文件摘要未变。中间失败不归因沙箱，也不隐去。
+
+复现：
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -m pytest /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short
+ruff check agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/workbench_server.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py
 git diff --check db4d5de92..HEAD
@@ -203,6 +307,50 @@ tar尾部、验签器嵌套别名、原Host DTO、SSO配置竞态、UID命名冲
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py agent_py_agent/tests/test_workflow_script_engine.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_host_gateway_composition.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_path_access_error_codes.py -q --tb=short --junitxml=.pytest_cache/wave9-a2-final.xml
+
+指定 ZIP 已重新构建，原生 `inspect_plugin_package` 通过；逐项核对 ZIP 成员、清单所有摘要及全部内含 `.py` 与外部源码字节相同。当前交付指纹：
+
+| 文件（相对外部 handoff 目录） | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `5552bf48ac58c1d1534d2ddc5961b8fa8d6db4dbc7424735f96c4952af250854` |
+| `build_plugin_package.py` | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `b3f8e7676e9d3f7131a342dfc4dabc2118f27145a4986a1ff9ed3b7904e7e8ee` |
+
+**收口后的共享目录漂移：**上面的全部源码字节核对成立于构建/最终pytest时。之后附加“所有外部文件仍与验收时一致”检查失败，定位到 `dsh_coding_backend.py`、`dsh_coding_portal_ui.py`、`pentest_portal_ui.py` 三份并发修改；本任务的 `workbench_server.py`、构建器、测试文件和已验ZIP未改变。保留上述已验包，不把这三份后续UI/DSH改动冒充已打包或已验证，也不无止境重打包追逐共享目录。集成方若要纳入这些新改动，须冻结目录后另行重建、更新指纹并验收；这项额外全目录一致性检查的失败不隐去。
+
+重要范围外风险：共享源码在本轮过程中还被加入旧门户登录/验证码、DSH/其他pentest分流、SSE与默认 `0.0.0.0` 监听；这些不是本轮实现，未作为已安全验收的功能。其旧门户分支位于原认证前，登录分支未验证密码便按用户名返回管理员展示标记，但未见其token登记为SecOps会话，不能据此宣称已突破SecOps认证；其他分流模块的实际鉴权未验证。不能把本轮95例通过等同于整个新增门户认证安全、可直接上线。没有部署或启停生产服务；全部HTTP测试显式绑定回环。真实Host/企业设备/SSO、跨机可达性、浏览器UI、Windows及Linux CI未验证。交接时须先审查这批并发外部差异，不建议直接发布。
+
+## 2026-10-28 Wave 9 A3：SecOps 插件 API 与 SQLite 闭环（首轮记录）
+
+来源：完整阅读修订后的 `07-tasks/wave9-a3.md`。工作树 `/tmp/wt-wave9-a3`，分支 `wave9-a3`，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。本任务明确允许外部插件目录独立维护源码；仓内仅提交本节、`CODEBASE_TREE.md` 和新测试，不往通用 Host 包塞垂直业务路由。
+
+### 实现与安全边界
+
+- 外部 `workbench_server.py` 新增独立 `SecOpsService`、HTTP 工厂和标准库引擎。文件型 `portal_state.db` 持久保存插件、MCP、连接器、告警、PCAP、SOAR 剧本/执行、ASM、API 风险、复现推送及认证/审批状态。对象按已验证会话 owner 分区，浏览器 body 的 owner/admin/approved 不提供权限。私有目录 0700、数据库及生成管理令牌 0600；不声称实现了数据库密文加密。
+- ZIP/tar.gz 在解包前校验摘要、路径、普通文件类型和声明清单，限制原始包、整个解压流（包括 PAX/GNU 元数据）与逐文件体积。MCP 仅使用已登记且摘要未变的 Python 入口和精确声明 argv，`shell=False`；真实 initialize/tools/list 握手后才记录工具。POSIX 独立进程组停止、未知进程状态拒绝、重载实际重新握手；不按数据库 PID 盲杀，不声称是恶意插件的 OS 沙箱。
+- SIEM/EDR 查询使用本地 SQLite 或显式登记的真实 HTTP 连接器；时间、DSL、分页有界，零结果保留来源未知。告警规范化严重度并用 SQLite 幂等去重。PCAP 解析大小端 classic PCAP、Ethernet/VLAN/IPv4/TCP/UDP/DNS/HTTP 元数据及静态异常；不重组 IP 分片/TCP 流，不解析 PCAPNG，未覆盖部分显式记录。OpenAPI 3.x/Swagger 2.0 JSON、安全 YAML 子集和流量字段分析只产生静态线索，BOLA 等不伪称已实证漏洞，不回显字段秘密值。
+- SOAR 高影响动作必须持有已由可信配置入口批准、绑定 owner/action/device/params 摘要和有效期的审批，SQLite 事务单次消费；缺失/伪造/错配/过期/重放均 `403 SOAR_APPROVAL_REQUIRED`。真实执行器未配置或上游失败明确拒绝，不能写成设备已隔离。保存剧本不能替代审批。节点调试只运行已保存指定纯节点，或受信 Host 调试桥，不遍历危险兄弟节点，不 eval/shell。
+- ASM 只做可信范围内有界 DNS/TCP 连接，冻结解析 IP、防止域名隐授私网，跨扫描每目标至多约 2 次/秒；关闭取消后仍允许认证 GET 观察终态。TOTP 采用 RFC6238、原子 counter、防爆破、幂等 pending enrollment 和 Host 操作预留/确认；拒绝或未知不能关闭既有 MFA。SSO 是 OAuth2 授权码 + PKCE + 后端 userinfo 身份流程，单次 state，外部身份不得继承管理员；未实现 SAML 或 OIDC ID-token/JWKS 验签。
+- 复现推送只去显式登记的节点，凭据通过受信 resolver 引用取得；对实际 canonical body 签 HMAC，持久保存真实远端三个 ID，超时/畸形回执记 unknown，幂等冲突不重发。HTTP 外部请求禁跳转，有超时和响应上限。
+
+### 桥接和部署接口
+
+`create_secops_server(host, port, state_dir, **options)` 接受可信的 `host_broker_call(action, payload)`、`remote_push_sender(url, raw_body, headers)`、`auth_resolver(token)`、`secret_resolver(ref)`、`allowed_scopes` 和 `remote_nodes`。设备、剧本、工作流与审批分别由内部 `register_connector`、`register_playbook`、`register_workflow`、`approve_action` 配置，未开放可自签审批的 HTTP 接口。
+
+Host adapter 的 payload 附 `_portal_principal`（Web 已认证身份上下文）；它**不是原生 grant/as_user**，适配器须移除该元数据、独立解析原 Host 权限并映射闭合合同。配置的 adapter 拒绝不走假成功降级。TOTP setup 桥须返回真实 `secret`，debug 桥须返回真实 `status/duration_ms/output_data/logs/error_detail`。远端 sender 须返回真实 `push_id/remote_thread_id/remote_run_id`。A1/A2 原生动作和接收端的实际接线留到 Stage 4，不能把本轮受信适配器测试称为原生 Host 联调通过。
+
+正式 ZIP 的 `bin/plugin_main.py --serve-http --port ...` 转入新服务；默认只监听 loopback、只写插件自己的 data dir，不启动旧工作台用户/插件种子流程。旧演示模块加载和权限 monkeypatch 引导已移除，Legacy Host 导入仅显式环境开关启用，不是新服务的默认入口。未自动安装、激活或部署这个产物。
+
+### 新回归、实际结果和复现
+
+`test_wave9_secops_portal_plugin_apis.py` 最终组合 **41 passed / 0 failed / 0 errors / 0 skipped**。测试通过真实回环 HTTP、临时文件型 SQLite、真实 MCP 子进程/进程组与构造的合法 PCAP；连接器、SOAR、SSO provider 和远端 push 接收端均是受控回环接收器，不是真实生产设备。
+
+两轮 Astra 只读审查指出的 TOTP setup 竞态/Host 拒绝分叉、未知 MCP 状态与未先 list 的退出窗口均补了针对性回归；后者两种路径先实测为重复 spawn 和提前发 Host 动作，再修为共同前置检查。带 worker 的进程组回收、reload 重新握手、审批并发单消费、PKCE verifier、签名原字节/头和回执持久化都有实际断言。首轮源码缺引擎/硬绑开发目录红灯及中间关闭门误拦 GET 的失败保留，不删除、skip 或放宽有效断言制造通过。
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short
 python3 scripts/check_import_boundaries.py
 ruff check agent_py_agent scripts
 git diff --check
@@ -210,6 +358,12 @@ git diff --check
 
 
 未验证/未交付边界：真实OIDC/SAML协议验签器、真实IdP/浏览器与登录CSRF整链、远程网络、生产部署、插件物理进程完整启停、真实模型分析及外部同步analysis回调的强制硬deadline、其他OS/Python车道及全仓pytest。Host冷构造未注入分析器，分析节点结构化失败，脚本超时测试不能外推为所有模型节点已支持硬超时。SSO/MFA失败不恢复已消费IdP state，本版未实现MFA continuation，调用方须重新发起握手。上述边界不以mock、回环HTTP或目录显示就绪冒充通过。
+
+原生 `inspect_plugin_package(zip_bytes)` 通过；最终交付 ZIP 还逐字节核对内含两份源码，并在 `python -S`、清空 `PYTHONPATH` 的新解释器中实测 MCP 身份/状态和 HTTP 查询，证明不依赖已安装 Host Python 包才能启动。导入边界 findings=0、指定 Ruff 和 diff-check 均通过。没有运行已退休尺寸检查器，没有跑全仓 pytest。
+
+交付指纹已更新到本文件顶部 Round 2 表；以下首轮行为和41例结果只记录当时版本，不代表并发改动后的整个门户已安全验收。
+
+限制：真实 SIEM/EDR/企业 SSO、A1/A2 宿主、另一台远端节点、浏览器 UI、跨机可达性和 Windows 未验证；MCP 进程组启动当前明确只支持 POSIX。连接器需真实适配器配置；本地 owner 读取硬限 5000 条，超限明确拒绝而非无声截断。YAML 是显式拒绝 alias/tag 等构造的安全子集。未知 daemon 或中断的安全 pending 操作需可信运维核实，不能自动当作完成。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
