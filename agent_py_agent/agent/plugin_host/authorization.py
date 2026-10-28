@@ -59,8 +59,8 @@ class IngressIssuer:
             self._sources[id(source)] = source
             return source
 
-    # LLM: 每次执行重新核同一原会话；默认认证模块缺失时失败关闭，不接受业务正文身份。
-    # 函数用途: 将有效会话解析为原OwnerIdentity。
+    # LLM: 原认证DTO只取effective_owner，保留可信旧注入owner口；不从业务正文或principal字符串推导权限。
+    # 函数用途: 每次重验原会话并取得规范OwnerIdentity，密码与SSO会话走同一入站门。
     def _session_owner(self, root, token):
         if not isinstance(token, str) or not 1 <= len(token) <= 4096 or not token.isascii() or any(
                 ord(character) < 33 or ord(character) > 126 for character in token):
@@ -74,7 +74,8 @@ class IngressIssuer:
                 raise HostAPIError("USER_SESSION_INVALID", 401) from None
         try:
             result = verifier(root, token)
-            owner = result if isinstance(result, OwnerIdentity) else getattr(result, "owner", None)
+            owner = result if isinstance(result, OwnerIdentity) else (
+                getattr(result, 'effective_owner', None) or getattr(result, 'owner', None))
         except (OSError, ValueError, TypeError):
             raise HostAPIError("USER_SESSION_INVALID", 401) from None
         if not isinstance(owner, OwnerIdentity):

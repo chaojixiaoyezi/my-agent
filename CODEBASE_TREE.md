@@ -1,3 +1,18 @@
+## 2026-10-28 Wave 9 A2：通用Host包管理、无账本调试与TOTP/SSO底座（源码候选）
+
+```text
+|-- agent_py_agent/agent/plugin_host/
+|   |-- action_specs_substrate.py # 十个通用底座动作、闭合Schema和显式管理/调试能力
+|   `-- substrate.py # 原安装管理、注册制品、工作流调试和认证服务的管理员Host适配
+|-- agent_py_agent/agent/user_space/
+|   `-- totp_sso_auth.py # 标准库TOTP、防重放恢复码、SSO配置与可信验签器握手边界
+|-- agent_py_agent/tests/
+|   `-- test_wave9_host_substrate_plugins_workflow_auth.py # 安全归档、真实HTTP、零账本/pin、MFA和跨进程单次消费回归
+`-- docs/design/GENERIC_HOST_SUBSTRATE.md # 通用接口、批准范围、状态路径和未验证边界
+```
+
+关键文件说明：`plugin_package.py` 在新Host入口独立执行10MiB/256成员ZIP/tar预算，仍以根 `plugin.json` 和原安装表为权威；`plugin_management.py` 复用原生命周期与审批。`workflows/engine.py`、`script_runner.py`、`datasource_runtime.py` 显式禁止调试摘要、通知和pin推进，不改变正式暂停恢复。`user_auth.py` 在唯一签发/验证链加入MFA和认证版本撤销；`plugin_host/authorization.py` 读取原认证DTO的effective_owner。新 `plugins.manage` / `workflows.debug` 需明确批准，不由旧write/execute隐式获得。真实IdP与浏览器、真实模型硬deadline及插件物理启停未作为本轮验收；细节见设计说明和TESTS.md。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

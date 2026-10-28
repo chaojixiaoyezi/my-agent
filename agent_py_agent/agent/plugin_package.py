@@ -1,13 +1,15 @@
-# LLM: 读取器只处理已授权来源，严格 JSON 与安装表共用；不安装、不导入、不启动插件，保留完整字节快照。
-# 模块用途: 有界读取 ZIP、拒绝危险成员并核对 wheel 或随包文件摘要，让包验证和保存不受来源文件变化影响。
+# LLM: 读取器只处理已授权来源；Host暂存归档另施10MiB预算，tar先全量预检再转ZIP，不安装或执行。
+# 模块用途: 有界规范化归档、拒绝危险成员并复用原ZIP完整性检查，保留同次字节快照。
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import os
 import stat
 import struct
+import tarfile
 import unicodedata
 import zipfile
 import zlib
@@ -50,6 +52,63 @@ class PackageReadLimits:
 
 
 _DEFAULT_LIMITS = PackageReadLimits()
+HOST_PACKAGE_LIMITS = PackageReadLimits(archive_bytes=10 * 1024 * 1024,
+    expanded_bytes=10 * 1024 * 1024, member_bytes=10 * 1024 * 1024, members=256)
+
+
+# LLM: 仅规范化已有plugin.json协议；gzip解压和tar头部均有预算，禁止extract/链接/特殊成员，ZIP保留原字节。
+# 函数用途: 在内存预检ZIP或tar.gz，再将安全tar按固定元数据转为确定性ZIP供唯一安装器读取。
+def normalize_plugin_archive_bytes(raw_bytes: bytes) -> bytes:
+    if not isinstance(raw_bytes, bytes):
+        raise PluginPackageError('invalid_archive', '插件归档必须是字节。')
+    _check_limit(len(raw_bytes), HOST_PACKAGE_LIMITS.archive_bytes)
+    if not raw_bytes.startswith(b'\x1f\x8b'):
+        inspect_plugin_package(raw_bytes, limits=HOST_PACKAGE_LIMITS)
+        return raw_bytes
+    try:
+        # 单独限制包括PAX头和padding在内的解压流，不能等TarFile构造后才检查炸弹。
+        budget = HOST_PACKAGE_LIMITS.expanded_bytes + 1024 * 1024
+        with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes)) as compressed:
+            raw_tar = compressed.read(budget + 1)
+        _check_limit(len(raw_tar), budget)
+        with tarfile.open(fileobj=io.BytesIO(raw_tar), mode='r:', ignore_zeros=True) as archive:
+            members, names, total = [], set(), 0
+            for item in archive:
+                _check_limit(len(members) + 1, HOST_PACKAGE_LIMITS.members)
+                name = item.name
+                path = PurePosixPath(name)
+                if (not name or name != path.as_posix() or path.is_absolute()
+                        or any(part in {'.', '..', ''} for part in name.split('/'))
+                        or any(char in name for char in ('\\', ':', '\x00'))
+                        or archive_path_key(name) in names
+                        or not (item.isfile() or item.isdir()) or item.sparse is not None):
+                    raise PluginPackageError('invalid_archive', 'tar包含危险或重复成员。')
+                total += item.size
+                _check_limit(total, HOST_PACKAGE_LIMITS.expanded_bytes)
+                if item.isdir() and item.size:
+                    raise PluginPackageError('invalid_archive', 'tar目录不能携带正文。')
+                members.append(item)
+                names.add(archive_path_key(name))
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as canonical:
+                for item in sorted(members, key=lambda row: row.name):
+                    if item.isdir():
+                        continue
+                    with archive.extractfile(item) as stream:
+                        content = stream.read(item.size + 1)
+                    if len(content) != item.size:
+                        raise PluginPackageError('invalid_archive', 'tar成员正文长度无效。')
+                    info = zipfile.ZipInfo(item.name, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.external_attr = (stat.S_IFREG | 0o600) << 16
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    canonical.writestr(info, content)
+        result = output.getvalue()
+        inspect_plugin_package(result, limits=HOST_PACKAGE_LIMITS)
+        return result
+    except PluginPackageError:
+        raise
+    except (OSError, ValueError, EOFError, tarfile.TarError, zlib.error) as exc:
+        raise PluginPackageError('invalid_archive', '插件tar.gz归档无效。') from exc
 
 
 # LLM: bytes 和 manifest 一起固定校验时内容；sha256 是完整性标识，不证明作者可信或允许执行。

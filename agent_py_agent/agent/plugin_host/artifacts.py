@@ -1,5 +1,5 @@
-# LLM: D2只读canonical注册账，插件永远不提供路径；A/D1组合根提供已按原任务/线程权威裁剪的typed范围。
-# 模块用途: 列出和读取已注册工作区制品，以owner/任务/业务根、FD no-follow、实际hash和size守住边界。
+# LLM: D2沿原注册账和typed任务范围；Host安装内部读取也须同一范围/FD/hash门，不能把opaque ref当路径。
+# 模块用途: 有界读取已注册制品，供公开分片及通用包安装复用原安全验证。
 from __future__ import annotations
 
 import base64
@@ -236,13 +236,29 @@ def _read_artifact(record, scope, context, payload):
 
 # LLM: 领域port不拥有任务真相。task_scopes(authorized,context)必须由组合根读原TaskLink/thread/grant后返回
 # ArtifactTaskScope；缺接缝时HOST_NOT_READY，不扫描目录、不借main根回退。A0 .call签名保持不变。
-# 类用途: 实现注册制品的list/get/read三个同步只读动作。
+# 类用途: 实现注册制品公开查询和宿主内部有界字节读取，共用原范围与完整性验证。
 class ArtifactReadService:
     # LLM: 仅保留宿主接缝和内存游标签名器，不初始化任何目录或Agent。
     # 函数用途: 绑定任务权威的只读范围解析器。
     def __init__(self, task_scopes=None):
         self._task_scopes = task_scopes
         self._cursors = _ObservationCursors()
+
+    # LLM: 仅供宿主内部安装使用；不受公开64KiB回包限制但仍受显式预算，读前后授权及原FD/hash验证不减。
+    # 函数用途: 从真实注册ref读取一个完整小归档，不暴露路径或建立新制品注册表。
+    def read_registered_bytes(self, authorized, context, ref, *, max_bytes):
+        from .authorization import revalidate_call
+        revalidate_call(authorized)
+        if self._task_scopes is None:
+            raise HostAPIError('HOST_NOT_READY', 503)
+        scopes = _allowed_scopes(authorized, context, self._task_scopes(authorized, context))
+        scope, record = self._lookup(context, scopes, ref)
+        if record.size_bytes > max_bytes:
+            raise HostAPIError('PAYLOAD_TOO_LARGE', 413)
+        result = _read_artifact(record, scope, context, {'offset_bytes': 0, 'max_bytes': max_bytes,
+                                                       'expected_sha256': record.sha256})
+        revalidate_call(authorized)
+        return base64.b64decode(result['data_base64'], validate=True)
 
     # LLM: 请求只接ref/task ID，路径仅由当前宿主范围和原注册账取得；调用结束仍须A末核。
     # 函数用途: 取得当前授权任务集合并分发制品动作。

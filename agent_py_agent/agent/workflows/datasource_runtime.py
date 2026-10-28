@@ -1,4 +1,4 @@
-# LLM: 仅冻结合同声明可绑定；子进程用户代码前验HMAC并深度冻结，每次SDK访问复核同清单；不代替Python/OS沙箱。
+# LLM: 仅冻结合同可绑定；debug的record_summary=False禁止源通知写账，其它SDK权限和进程沙箱不变。
 # 模块用途: 归一声明、创建只读签名清单并固定本次运行的数据源权限快照。
 from __future__ import annotations
 
@@ -271,8 +271,8 @@ def _preflight_failure(script_id, record, code, check):
          'source_check': check}, source_check=check)
 
 
-# LLM: 入口受原审批；版本/源硬门在runner前，执行消费同份记录，原SDK授权/沙箱/清理不变；workspace仅宿主给定。
-# 函数用途: 为工具和工作流统一增加源差异硬门，并返回原脚本结果结构。
+# LLM: 版本/源硬门在runner前，record_summary=False同时禁通知写账，不改变预检裁决或SDK授权。
+# 函数用途: 为工具、工作流与内存调试统一校验数据源并执行同份脚本，debug不产生通知账。
 def run_script_with_datasources(
     owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None,
     timeout_seconds=None, override_data_sources=None, network_access=None, options=None,
@@ -294,7 +294,7 @@ def run_script_with_datasources(
             return _preflight_failure(script_id, record, 'SCRIPT_REVISION_DRIFT', record.get('source_check', {}))
         check = _execution_source_check(owner_home, record, run_opts.get('override_data_sources'), workspace_root)
         status = check['status']
-        if status in ('source_missing', 'source_empty', 'source_added'):
+        if status in ('source_missing', 'source_empty', 'source_added') and run_opts.get('record_summary', True):
             emit_asset_im_notification(owner_home, event_type=status, title=str(record.get('name', script_id)),
                 message=f'{script_id}: {status}', payload={'script_id': script_id, 'source_check': check})
         if status in ('source_missing', 'source_empty'):

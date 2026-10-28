@@ -1,5 +1,5 @@
-# LLM: 认证只复用local_users、原provider索引及原IM SQLite密码；不物化owner、不授权插件执行或复制密码库。
-# 模块用途: 为本地和飞书普通用户签发有期限的会话，并逐次复核当前身份、密码及禁用状态。
+# LLM: 原账号/session仍唯一权威；本地MFA和SSO配置版本进入原指纹，IdP验证必须来自可信协议端口。
+# 模块用途: 为普通用户签发有限会话，统一执行第二因素并复核当前账号和认证撤销状态。
 from __future__ import annotations
 
 import base64
@@ -251,9 +251,9 @@ def _im_password(root, uid):
         raise HostAPIError("STORE_UNAVAILABLE", 503) from None
 
 
-# LLM: 每次从原账号/IM库读取；本地启用复核必须绑定首次观察的revision，不能混用旧hash和新状态；不授插件执行权。
-# 函数用途: 为登录与验会话读取同一修订的当前有效账号，遇到并发改密立即拒绝旧快照。
-def _current_credential(root, source, uid, tenant):
+# LLM: 仅可信SSO或已验签session可读无本地密码账号，默认密码登录仍拒绝；账号启停及Owner门不变。
+# 函数用途: 取得原账号同一修订的认证快照，不创建另一账号或密码库。
+def _current_credential(root, source, uid, tenant, *, allow_passwordless=False):
     if source == "feishu":
         return _feishu_credential(root, uid, tenant)
     store = LocalUserStore(root)
@@ -262,7 +262,7 @@ def _current_credential(root, source, uid, tenant):
         raise HostAPIError("INVALID_CREDENTIALS", 401, message="invalid user_id or password")
     user = store.require_enabled(uid, user.revision)
     _require_live_owner(root, user.owner)
-    if not user.password_hash:
+    if not user.password_hash and not allow_passwordless:
         raise HostAPIError("INVALID_CREDENTIALS", 401)
     return _Credential("local/" + uid, user.owner, user.display_name, user.revision, user.password_hash)
 
@@ -304,10 +304,10 @@ def _decode(text):
     return data
 
 
-# LLM: 密码不进token，owner来自当前磁盘认证；仅成功后可创建HMAC密钥，慢验密后再读状态防改密竞态。
-# 函数用途: 认证本地或已有飞书普通用户并签发有限期限会话。
+# LLM: 密码先验证，当前MFA由唯一签发端强制核验；不因增加SSO入口而放宽原账号和凭据门。
+# 函数用途: 验证主因素，再经第二因素和认证版本栅栏签发普通会话。
 def authenticate_user(root: Path, *, account_source: str, user_id: str, password: str,
-                      tenant_or_app_key: str = "", ttl_seconds: int = 86400) -> AuthenticatedUserSession:
+                      tenant_or_app_key: str = "", ttl_seconds: int = 86400, totp_code: str | None = None) -> AuthenticatedUserSession:
     root = Path(root).resolve()
     uid = _subject(account_source, user_id)
     if type(tenant_or_app_key) is not str or len(tenant_or_app_key) > 256:
@@ -321,10 +321,38 @@ def authenticate_user(root: Path, *, account_source: str, user_id: str, password
         raise HostAPIError("INVALID_CREDENTIALS", 401, message="invalid user_id or password")
     if _current_credential(root, account_source, uid, tenant_or_app_key) != current:
         raise HostAPIError("SESSION_REVOKED", 401)
+    return _issue_session(root, current, account_source, tenant_or_app_key, ttl_seconds, totp_code=totp_code)
+
+
+# LLM: 认证版本只进入原credential_fingerprint，无配置仍保留旧指纹口径，不增加token字段或会话账。
+# 函数用途: 让MFA启停、SSO配置和改密共同撤销旧session。
+def _credential_fingerprint(root, current, *, stamp=None):
+    from .totp_sso_auth import authentication_stamp
+    if stamp is None:
+        stamp = (authentication_stamp(root, current.owner.owner_id)
+                 if current.owner.provider == 'local' and current.owner.owner_kind == 'user' else '')
+    return _fingerprint(current.password_hash + ('\n' + stamp if stamp else ''))
+
+
+# LLM: 只供已验主因素/可信SSO调用；SSO提交时stamp必须相同，token冻结旧stamp以拒并发变更后的旧认证。
+# 函数用途: 在原签发链统一消费第二因素、复核账号，再签有期限的普通用户会话。
+def _issue_session(root, current, account_source, tenant_or_app_key, ttl_seconds, *, totp_code=None, expected_auth_stamp=None):
+    from .totp_sso_auth import TotpSSOAuthService, authentication_stamp
+    local = current.owner.provider == 'local' and current.owner.owner_kind == 'user'
+    stamp = authentication_stamp(root, current.owner.owner_id) if local else ''
+    if expected_auth_stamp is not None and stamp != expected_auth_stamp:
+        raise HostAPIError('SESSION_REVOKED', 401)
+    if local:
+        TotpSSOAuthService(root).require_second_factor(current.owner.owner_id, totp_code)
+        if authentication_stamp(root, current.owner.owner_id) != stamp:
+            raise HostAPIError('SESSION_REVOKED', 401)
+    uid = _subject(account_source, current.principal_id)
+    if _current_credential(root, account_source, uid, tenant_or_app_key, allow_passwordless=True) != current:
+        raise HostAPIError('SESSION_REVOKED', 401)
     issued = int(time.time())
     payload = {"schema": "user-auth-session.v1", "principal_id": current.principal_id, "account_source": account_source,
                "owner_provider": current.owner.provider, "owner_kind": current.owner.owner_kind, "owner_id": current.owner.owner_id,
-               "revision": current.revision, "credential_fingerprint": _fingerprint(current.password_hash),
+               "revision": current.revision, "credential_fingerprint": _credential_fingerprint(root, current, stamp=stamp),
                "issued_at": issued, "expires_at": issued + ttl_seconds, "tenant_or_app_key": tenant_or_app_key}
     body = _encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
     signature = _encode(hmac.digest(_session_secret(root, create=True), body.encode("ascii"), "sha256"))
@@ -362,8 +390,8 @@ def _token_payload(root, token):
         raise HostAPIError("INVALID_SESSION", 401) from None
 
 
-# LLM: 每次验签后现读账号/IM密码/绑定及禁用，指纹与修订同时匹配；不把token当插件或管理员授权。
-# 函数用途: 验证会话期限和当前身份，禁用或改密立即拒绝旧会话。
+# LLM: 验签后现读账号/IM/MFA/SSO版本，指纹与修订均须匹配；密码less只对已验签会话开放。
+# 函数用途: 验证期限及认证版本，账号禁用、改密或认证设置变化拒绝旧会话。
 def verify_user_session(root: Path, session_token: str, *, now: int | None = None) -> AuthenticatedUserSession:
     root = Path(root).resolve()
     payload = _token_payload(root, session_token)
@@ -376,9 +404,9 @@ def verify_user_session(root: Path, session_token: str, *, now: int | None = Non
         raise HostAPIError("INVALID_SESSION", 401)
     source = payload["account_source"]
     uid = _subject(source, payload["principal_id"])
-    current = _current_credential(root, source, uid, payload["tenant_or_app_key"])
+    current = _current_credential(root, source, uid, payload["tenant_or_app_key"], allow_passwordless=True)
     if (current.owner != OwnerIdentity(payload["owner_provider"], payload["owner_kind"], payload["owner_id"])
             or current.revision != payload["revision"] or current.principal_id != payload["principal_id"]
-            or not hmac.compare_digest(_fingerprint(current.password_hash), payload["credential_fingerprint"])):
+            or not hmac.compare_digest(_credential_fingerprint(root, current), payload["credential_fingerprint"])):
         raise HostAPIError("SESSION_REVOKED", 401)
     return _session(current, source, payload["issued_at"], payload["expires_at"], session_token, root)

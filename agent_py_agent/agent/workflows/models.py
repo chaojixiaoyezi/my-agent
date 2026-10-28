@@ -1,5 +1,5 @@
-# LLM: 工作流运行记录的唯一内存与 JSON 字段契约；不保存脚本秘密或执行权限。
-# 模块用途: 定义脚本结果、步骤快照和工作流断点记录。
+# LLM: 工作流运行记录的唯一内存与JSON合同；ephemeral_debug仅控制调试副作用，不授予执行权限。
+# 模块用途: 定义脚本结果、步骤快照、正式运行和内存调试记录。
 import json
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -86,8 +86,8 @@ class StepExecutionRecord:
         return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ()))})
 
 
-# LLM: 运行身份不由模型正文推导；该结构仅是账本事实，不能授予 Owner 权限。
-# 类用途: 保存整个工作流运行的进度及断点位置。
+# LLM: 身份不由正文推导；debug只由引擎内存创建，禁止调试记录进入正式运行Store。
+# 类用途: 保存工作流运行或内存调试的进度及断点，不授予Owner权限。
 @dataclass
 class WorkflowRunRecord:
     workflow_run_id: str
@@ -110,6 +110,7 @@ class WorkflowRunRecord:
     total_steps: int = 0
     completed_steps: int = 0
     breakpoint: dict[str, Any] | None = None
+    ephemeral_debug: bool = False
 
     # LLM: 嵌套步骤、进度和断点一起序列化；旧记录缺字段由默认值兼容，不清除历史失败。
     # 函数用途: 输出完整运行JSON快照。

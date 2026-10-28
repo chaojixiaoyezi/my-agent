@@ -1,3 +1,29 @@
+## 2026-10-28 Wave 9 A2：通用Host包管理、无账本调试与TOTP/SSO底座
+
+来源：完整阅读 `07-tasks/wave9-a2.md`（58行）及指定缺失API参考；仅在 `wt-wave9-a2` / `wave9-a2` 修改，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。不推送、部署、修改运行包或其他工作树，不运行退役尺寸检查。
+
+实现与接口约束见 [通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)。当前规范为根plugin.json，与旧审计的plugin.yaml不符；新Host入口独立收紧10MiB/256预算，不修改旧安装权威。新plugins.manage/workflows.debug需独立批准；第一版caller/actor/effective_owner均为本机管理员，artifact引用另核artifacts.read和原task范围。
+
+新增专属回归 **59项**：ZIP保持、tar确定性规范化、路径/链接/特殊成员与炸弹/EOF后拼接拒绝；真实回环HTTP的base64/暂存tar/大于JSON容量的注册制品安装、CAS更新、清理源后稳定键重放、status/uninstall；enable/disable/reload通过受控命令边界核验原分派，不当成真实插件进程启停。调试覆盖mock/上游输入、只执行选中节点、零RunStore/摘要写、资产文件精确对照、真实暂停run恢复无SCRIPT_REVISION_DRIFT、真实脚本超时及失败日志保留。
+
+认证覆盖六个RFC6238六位SHA1向量、私有待激活设置、同counter重放、单次哈希恢复码、停用、旧密码入口强制MFA与旧session撤销；SSO状态签名/nonce/浏览器关联/期限/修订/重放、无真实verifier失败关闭、管理员映射拒绝、验签器输入深隔离、提交至签发的配置竞态、原Host DTO入站、合法UID与配置/state文件不冲突、MFA失败必须重新握手。两个独立Python解释器竞争同一磁盘TOTP、恢复码与SSO state，分别最多成功一次。
+
+tar尾部、验签器嵌套别名、原Host DTO、SSO配置竞态、UID命名冲突、失败日志均先有实际红例再修复。TOTP/SSO经两次astra high只读架构/关键代码摘录复核，提出的问题按真实代码和反例核验，不把摘录审查当成全仓安全审计。旧Host动作矩阵扩充十个独立需求用例，目录就绪测试区分缺IdP端口的callback；未删断言或新增skip/xfail。
+
+最终9文件联合回归：**602通过，0失败、0错误、0跳过**（Python 3.14.4；导入origin确认来自本工作树）。其中专属59、workflow_script_engine 66、plugin_package 97、plugin_management 27、gateway_composition 28、Host v2 contracts 182、原本地用户认证56、Host grants 73、路径错误码14。证据为工作树 `.pytest_cache/wave9-a2-final.xml`，数字从实际JUnit回读；此前58项及543项分开结果保留，不代替最终当前版本联合结果。导入边界0 findings、全范围Ruff及diff空白检查通过。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py agent_py_agent/tests/test_workflow_script_engine.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_host_gateway_composition.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_path_access_error_codes.py -q --tb=short --junitxml=.pytest_cache/wave9-a2-final.xml
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+未验证/未交付边界：真实OIDC/SAML协议验签器、真实IdP/浏览器与登录CSRF整链、远程网络、生产部署、插件物理进程完整启停、真实模型分析及外部同步analysis回调的强制硬deadline、其他OS/Python车道及全仓pytest。Host冷构造未注入分析器，分析节点结构化失败，脚本超时测试不能外推为所有模型节点已支持硬超时。SSO/MFA失败不恢复已消费IdP state，本版未实现MFA continuation，调用方须重新发起握手。上述边界不以mock、回环HTTP或目录显示就绪冒充通过。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。

@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 A2：通用Host安装、无账本调试与认证底座（源码候选，未部署）
+
+来源：`07-tasks/wave9-a2.md`，基线 `db4d5de92`。十个通用动作复用唯一Host目录、安装/工作流/本地用户/session权威；不增加门户专项域。新安装默认停用、更新显式CAS、启停沿原审批；新Host归档预算独立收紧，规范仍是当前根plugin.json。调试沿原runner传record_summary=False，不写run/摘要/通知/pin；旧受限execute不自动取得管理员空间调试权，新增plugins.manage/workflows.debug须独立批准。
+
+TOTP和SSO共私有跨进程消费锁，认证epoch/SSOrevision进入原session指纹；SSO单次state绑定期限、nonce、浏览器关联和配置快照。可信协议验签器是构造依赖，不由客户端声明，缺失时callback不可用。SSO/MFA失败不恢复旧state，当前契约要求重新握手；MFA continuation、真实IdP/浏览器接入及外部同步分析回调硬deadline仍未交付/验证。详见 [通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)，实际验证见TESTS.md。
+
 ## 2026-10-27 CI C8：目录切换与真正继任的状态分界（本地候选）
 
 切走一个真实目录时尚无同目录继任者，旧活动代应interrupted而非无边superseded；返回时沿原有界链解析，由原原子写口发表superseded和同线程同目录继任边。无目录占位退休不充当可复用工作区。初始工具折叠不撤销授权，quota失败也不能因物理窗口足够就降级烧同一额度；不新增事实源或放宽坏链保护。验证及未验边界见TESTS.md。
