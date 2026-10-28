@@ -181,6 +181,8 @@ def test_host_debug_llm_fallback_is_safe_deterministic_and_mock_capable(producti
     assert not (home / 'data/workflow_runs').exists()
 
 
+# LLM: 经真实Host在临时Owner安装合成包；两个摘要别名及大小写必须校验同一原字节，不放宽安装门。
+# 函数用途: 验证正确SHA256用任一或两个字段都能通过，并读回实际安装摘要。
 @pytest.mark.parametrize('field', ['sha256', 'expected_sha256', 'both'])
 def test_host_package_digest_aliases_accept_valid_hex(production_host, field):
     raw = _bundle()
@@ -191,6 +193,8 @@ def test_host_package_digest_aliases_accept_valid_hex(production_host, field):
     assert result['sha256'] == digest
 
 
+# LLM: 两摘要字段同时提供时逐个校验；正确字段不能覆盖另一字段的坏格式或错误摘要，失败早于安装。
+# 函数用途: 验证双字段冲突始终返回400及PACKAGE_SHA256_MISMATCH，不能靠参数顺序绕过。
 @pytest.mark.parametrize('bad', ['0' * 64, 'bad'])
 @pytest.mark.parametrize('bad_field', ['sha256', 'expected_sha256'])
 def test_host_package_digest_aliases_cannot_override_each_other(production_host, bad_field, bad):
@@ -203,6 +207,8 @@ def test_host_package_digest_aliases_cannot_override_each_other(production_host,
     assert status == 400 and body['error']['code'] == 'PACKAGE_SHA256_MISMATCH'
 
 
+# LLM: 从真实Host入口核对条件/审批/通知的新旧DTO及副作用门；仅临时Owner，不把响应当实际外部送达。
+# 函数用途: 确认新增控制节点可安全预览、显式执行且不创建正式工作流运行账。
 @pytest.mark.parametrize('mode', ['condition_branch', 'approval_wait', 'notification'])
 def test_host_debug_contract_aliases_and_new_control_modes(production_host, mode):
     home = production_host[2].home_dir

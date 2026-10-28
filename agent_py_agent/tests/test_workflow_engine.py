@@ -28,6 +28,8 @@ def observe_script_runs(monkeypatch):
     calls = []
     original = ScriptRunner.run_script
 
+    # LLM: 只记录入口调用后透传原run_script，不替换沙箱、子进程、参数或真实返回值。
+    # 函数用途: 让测试数清脚本实际调用次数，同时保留原执行链。
     def execute(runner, script_id, *args, **kwargs):
         calls.append(script_id)
         return original(runner, script_id, *args, **kwargs)
@@ -279,6 +281,8 @@ def assert_debug_contract(result, mode):
     assert result['persisted'] is False
 
 
+# LLM: 成功、失败、条件跳过及副作用抑制共用同源DTO断言；仅使用临时定义，不创建正式run。
+# 函数用途: 覆盖所有调试结果分支，防止新旧字段只在成功时齐全。
 @pytest.mark.parametrize('scenario', ['success', 'failed', 'skipped', 'suppressed'])
 def test_debug_contract_aliases_cover_all_result_branches(tmp_path, scenario):
     mode = 'deterministic_script' if scenario in ('skipped', 'suppressed') else 'script_transform'
@@ -289,6 +293,8 @@ def test_debug_contract_aliases_cover_all_result_branches(tmp_path, scenario):
     assert_debug_contract(result, mode)
 
 
+# LLM: 使用合成Bearer值检查两份别名均脱敏；修改返回投影不得污染原DTO或另一输出快照。
+# 函数用途: 验证调试字典的脱敏一致性及可变对象隔离，不接触真实凭据。
 def test_debug_dto_aliases_share_redaction_but_not_mutable_state():
     from agent_py_agent.agent.workflows.models import StepDebugResult
     dto = StepDebugResult('flow', 'step', 'failed', 1, {'value': 'Bearer fixture-token'}, {},
@@ -301,6 +307,8 @@ def test_debug_dto_aliases_share_redaction_but_not_mutable_state():
     assert result['output_data'] != result['output'] and dto.output_data['value'] == 'Bearer fixture-token'
 
 
+# LLM: 审批不可自批，通知仅核临时Owner本地账/no_channel；显式副作用许可不允许写正式run或资产摘要。
+# 函数用途: 对比控制节点默认预览与显式执行，检查真实通知记录及正式账本零变更。
 @pytest.mark.parametrize('mode', ['approval_wait', 'notification'])
 def test_debug_control_nodes_preview_then_execute_without_formal_ledger(tmp_path, monkeypatch, mode):
     save_node(tmp_path, mode, config={'title': 'fixture', 'message': 'notice'})
@@ -308,6 +316,8 @@ def test_debug_control_nodes_preview_then_execute_without_formal_ledger(tmp_path
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob('*.json')}
     notices = tmp_path / 'workspace/runtime/notifications/im_alerts.jsonl'
 
+    # LLM: 正式运行或摘要写端被调用即令测试失败；不替换节点执行或通知返回值来制造零写入结果。
+    # 函数用途: 捕获调试控制节点意外落盘正式运行或资产摘要的行为。
     def forbidden(*args, **kwargs):
         pytest.fail('debug控制节点不能写正式运行或资产摘要')
 
@@ -333,6 +343,8 @@ def test_debug_control_nodes_preview_then_execute_without_formal_ledger(tmp_path
     assert not (tmp_path / 'data/workflow_runs').exists()
 
 
+# LLM: 前置条件False必须先于任意副作用许可生效；脚本零调用、通知零记录，结果仍保留完整调试合同。
+# 函数用途: 验证新增副作用节点在两种许可开关下都会被关闭的前置条件跳过。
 @pytest.mark.parametrize('mode', ['approval_wait', 'notification', 'script'])
 @pytest.mark.parametrize('allow', [False, True])
 def test_debug_new_effect_modes_respect_false_precondition(tmp_path, monkeypatch, mode, allow):
