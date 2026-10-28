@@ -1,6 +1,7 @@
 # LLM: 本模块逐run装配参数并调用execute_tool_loop，工具发现复用tooling投影；包候选只消费 scoped 元数据与原能力配置，展示纯值经推荐接缝/回调传递，
 # 不能写入结果、Agent共享属性或扩大原快照权限；IM媒体恢复只取原输入快照或canonical子档；禁止反向依赖Gateway。
 #   后台按唤醒事实预加载展示名，不改变 allowed_tools；前台仍沿原恢复、合同及线程并集。
+# 参数规范化定义归run_params；本模块只保留旧导入口的同对象别名，不重复默认值或覆盖算法。
 # 模块用途: 为主链准备完整信封计费的记忆、定向工具及续跑输入，恢复同源核验与清理事实，驱动唯一循环。
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ import json
 import logging
 import re
 from copy import deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 from ...capability.config import CapabilityConfig
@@ -59,7 +60,6 @@ from ..parameters import _one_shot_tool_call_keys
 from ..tool_context.call_reducer import render_tool_payload_for_live_prompt
 from .live_archive import write_runtime_fact_start_if_enabled
 from .loop_models import (
-    FinalizeParams,
     PreparedRuntimeContext,
     RunParams,
     RuntimeContextRequest,
@@ -67,9 +67,8 @@ from .loop_models import (
     RuntimeLoopResult,
     RuntimeToolLoopSeed,
 )
+from .run_params import run_params_from_values as run_params_from_values
 from .turn_trigger import turn_trigger_recommendation
-
-_RUN_PARAM_FIELD_NAMES = tuple(field.name for field in fields(RunParams))
 
 
 # LLM: 范围与选中 ID 仅是当前片展示输入，权限仍从原工具快照和 scoped Skill 快照读取，不可变值不写共享 Agent。
@@ -86,42 +85,6 @@ class ToolSectionsRequest:
     selected_skill_ids: tuple[str, ...] | None = None
     # 回合触发类型；有固定推荐短名单的类型（如生命周期唤醒）不按任务文字检索推荐。
     turn_trigger: object | None = None
-
-
-# LLM: 只保留有真实运行消费者的字段；工具能力由 allowed_tools 与 runtime snapshot 共同决定。
-# 函数用途: 将显式关键字覆盖合并进不可共享的 RunParams，供续跑和 compact 安全复用。
-def run_params_from_values(
-    params: RunParams | None = None,
-    *,
-    inject: list[str] | None = None,
-    prompt_files: list[str] | None = None,
-    save: bool | None = None,
-    allowed_tools: list[str] | None = None,
-    write_boundary: dict[str, object] | None = None,
-    request_id: str | None = None,
-    run_id: str | None = None,
-    task_id: str | None = None,
-    task_attributes: dict | None = None,
-    delivery_contract: dict | None = None,
-    system_prompt_override: str | None = None,
-    source: str | None = None,
-    resume_context: bool | None = None,
-    recovery_task_refs: list[str] | None = None,
-    recovery_content_paths: list[str] | None = None,
-    recovery_next_actions: list[str] | None = None,
-    on_chunk: object = None,
-    context_scope: str | None = None,
-) -> RunParams:
-    if params is None:
-        params = RunParams()
-    elif not isinstance(params, RunParams):
-        raise TypeError("run() requires params: RunParams keyword argument")
-
-    values = {key: value for key, value in locals().items() if key != "params"}
-    updates = {key: values[key] for key in _RUN_PARAM_FIELD_NAMES if values.get(key) is not None}
-    if not updates:
-        return params
-    return replace(params, **updates)
 
 
 # LLM: 原拒绝/展示/Compact及opaque输入source只沿宿主参数链传递；不序列化或恢复身份，同片失效不得再决策，批准归原精确调用。
@@ -170,35 +133,6 @@ def _runtime_loop_params(
         capability_presentation_turn_id=params.capability_presentation_turn_id,
         capability_presentation_callback=params.capability_presentation_callback,
         capability_presentation_observer=params.capability_presentation_observer,
-    )
-
-
-def _finalize_params(
-    user_prompt: str,
-    prepared: PreparedRuntimeContext,
-    loop_result: RuntimeLoopResult,
-    run_params: RunParams,
-) -> FinalizeParams:
-    return FinalizeParams(
-        user_prompt=user_prompt,
-        final_prompt=loop_result.final_prompt,
-        final_response=loop_result.final_response,
-        memories=prepared.memories,
-        executed_tools=loop_result.executed_tools,
-        archive_tool_calls=loop_result.archive_tool_calls,
-        routed_context=prepared.routed_context,
-        resume_context_result=prepared.resume_context_result,
-        runtime_injections=prepared.runtime_injections,
-        compression_snapshot_id=loop_result.compression_snapshot_id,
-        compression_snapshot_path=loop_result.compression_snapshot_path,
-        compression_applied=loop_result.compression_applied,
-        run_params=run_params,
-        tool_rounds=loop_result.tool_rounds,
-        main_context_bundle_path=prepared.main_context_bundle_path,
-        main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
-        active_turn_user_inputs=loop_result.active_turn_user_inputs,
-        tool_runtime_evidence=loop_result.tool_runtime_evidence,
-        canonical_native_messages=loop_result.canonical_native_messages,
     )
 
 

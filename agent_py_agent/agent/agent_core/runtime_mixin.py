@@ -42,27 +42,21 @@ from .run_task_workspace_writer import (
     finish_run_task_workspace_if_needed,
 )
 from .runtime.live_archive import update_runtime_fact_terminal_if_enabled
-from .runtime.loop_models import RuntimeContextRequest
-from .runtime.loop_support import (
-    FinalizeParams,
+from .runtime.loop_models import (
+    PreparedRuntimeContext,
     RunParams,
+    RuntimeContextRequest,
+    RuntimeLoopResult,
+)
+from .runtime.loop_support import (
     _execute_runtime_loop,
-    _finalize_params,
     _prepare_runtime_context,
     _runtime_loop_params,
 )
 from .runtime.run_params import (
-    RunKeywordFields,
-    run_params_from_keywords,
+    run_params_from_values,
     run_params_with_request_id,
 )
-
-
-@dataclass
-class _RuntimeServices:
-    finalization: FinalizationService
-
-
 
 
 @dataclass(frozen=True)
@@ -146,10 +140,10 @@ def _turn_skill_snapshot(agent):
     return provider(workspace)
 
 
-# LLM: 主运行链沿原服务生命周期构造loop/finalize参数；响应来源身份必须显式贯穿，不能从正文或持久元数据恢复信任。
+# LLM: 主运行链沿原惰性服务寿命直接构造冻结收口上下文；响应身份显式贯穿，不缓存请求局部状态或从正文恢复信任。
 # 类用途: 为SimpleAgent连接运行入口、工具循环及最终收口，参数变更须联测CLI/Gateway和sealed来源。
 class SimpleAgentRuntimeMixin:
-    _services: _RuntimeServices | None = None
+    _finalization_service: FinalizationService | None = None
 
     # LLM: 仅在工具轮边界更新方法目录；复用宿主scope入口保留child/hash/包版本限制，不直接扫不受限roots。
     # 函数用途: 让本轮新写Skill在下一轮可发现，同时沿用SkillsService的目录签名缓存。
@@ -160,15 +154,15 @@ class SimpleAgentRuntimeMixin:
         self._current_skill_snapshot = snapshot
         return snapshot
 
-    def _get_services(self) -> _RuntimeServices:
-        if self._services is None:
-            self._services = _RuntimeServices(
-                finalization=FinalizationService(self),
-            )
-        return self._services
+    # LLM: 沿原agent实例惰性构造和缓存原服务，不保存本次请求参数，也不共享到其他owner门面。
+    # 函数用途: 直接取得原收口服务，去掉只有一个字段的服务聚合包装。
+    def _get_finalization_service(self) -> FinalizationService:
+        if self._finalization_service is None:
+            self._finalization_service = FinalizationService(self)
+        return self._finalization_service
 
 
-    # LLM: run 冻结模型和身份并登记端点占用；完整工作片结束后释放，后台记忆不得趁工具间隙抢同端点。
+    # LLM: run直接沿唯一入口规范化后冻结模型/身份并登记端点占用；完整工作片结束后释放，不改后台占用边界。
     # 函数用途: 绑定本轮模型/权限，再进入共享运行、压缩、工具和保存主链；前台之间不串行。
     def run(
         self,
@@ -194,28 +188,26 @@ class SimpleAgentRuntimeMixin:
         on_chunk: object = None,
         context_scope: str | None = None,
     ):
-        params = run_params_from_keywords(
+        params = run_params_from_values(
             params,
-            RunKeywordFields(
-                inject=inject,
-                prompt_files=prompt_files,
-                save=save,
-                allowed_tools=allowed_tools,
-                write_boundary=write_boundary,
-                request_id=request_id,
-                run_id=run_id,
-                task_id=task_id,
-                task_attributes=task_attributes,
-                delivery_contract=delivery_contract,
-                system_prompt_override=system_prompt_override,
-                source=source,
-                resume_context=resume_context,
-                recovery_task_refs=recovery_task_refs,
-                recovery_content_paths=recovery_content_paths,
-                recovery_next_actions=recovery_next_actions,
-                on_chunk=on_chunk,
-                context_scope=context_scope,
-            ),
+            inject=inject,
+            prompt_files=prompt_files,
+            save=save,
+            allowed_tools=allowed_tools,
+            write_boundary=write_boundary,
+            request_id=request_id,
+            run_id=run_id,
+            task_id=task_id,
+            task_attributes=task_attributes,
+            delivery_contract=delivery_contract,
+            system_prompt_override=system_prompt_override,
+            source=source,
+            resume_context=resume_context,
+            recovery_task_refs=recovery_task_refs,
+            recovery_content_paths=recovery_content_paths,
+            recovery_next_actions=recovery_next_actions,
+            on_chunk=on_chunk,
+            context_scope=context_scope,
         )
         from ..backends.provider_headers import provider_runtime_scope
         from ..backends.request_scope import foreground_model_scope
@@ -229,44 +221,49 @@ class SimpleAgentRuntimeMixin:
             with foreground_model_scope(self.backend):
                 return _run_with_params(self, user_prompt, params)
 
-    # LLM: 原run参数是收口身份唯一来源；attempt显式透传供sealed响应核验，不从response补猜，联测拒绝与最终投影。
-    # 函数用途: 冻结本轮最终保存和公开说明的原请求范围与已采纳结果。
-    def _build_finalize_context(self, params: FinalizeParams):
-        rp = params.run_params
+    # LLM: 直接消费原run/准备/循环结果，身份不从response猜补；active inputs/证据/native仅沿原时点浅复制。
+    # 函数用途: 一次构造冻结收口上下文，保留save默认解析、原引用和回调，不再逐字段包装再展开。
+    def _build_finalize_context(
+        self,
+        user_prompt: str,
+        prepared: PreparedRuntimeContext,
+        loop_result: RuntimeLoopResult,
+        params: RunParams,
+    ) -> FinalizeContext:
         return FinalizeContext(
-            user_prompt=params.user_prompt,
-            final_prompt=params.final_prompt,
-            final_response=params.final_response,
-            memories=params.memories,
-            executed_tools=params.executed_tools,
-            archive_tool_calls=params.archive_tool_calls,
-            routed_context=params.routed_context,
-            resume_context_result=params.resume_context_result,
-            runtime_injections=params.runtime_injections,
-            compression_snapshot_id=params.compression_snapshot_id,
-            compression_snapshot_path=params.compression_snapshot_path,
-            compression_applied=params.compression_applied,
-            request_id=rp.request_id,
-            attempt_id=rp.attempt_id,
-            run_id=rp.run_id,
-            task_id=rp.task_id,
-            source=rp.source,
-            do_save=self.config.auto_save_memory if rp.save is None else rp.save,
-            task_attributes=rp.task_attributes,
-            recovery_task_refs=rp.recovery_task_refs,
-            recovery_content_paths=rp.recovery_content_paths,
-            recovery_next_actions=rp.recovery_next_actions,
-            tool_rounds=params.tool_rounds,
-            compact_auto_continue_depth=rp.compact_auto_continue_depth,
-            compact_auto_no_tool_continue_depth=rp.compact_auto_no_tool_continue_depth,
-            main_context_bundle_path=params.main_context_bundle_path,
-            main_context_bundle_markdown_path=params.main_context_bundle_markdown_path,
-            delivery_contract=rp.delivery_contract,
-            context_scope=str(getattr(rp, "context_scope", "default") or "default"),
-            active_turn_user_inputs=list(params.active_turn_user_inputs or []),
-            tool_runtime_evidence=dict(params.tool_runtime_evidence or {}),
-            canonical_native_messages=list(params.canonical_native_messages or []),
-            on_chunk=rp.on_chunk,
+            user_prompt=user_prompt,
+            final_prompt=loop_result.final_prompt,
+            final_response=loop_result.final_response,
+            memories=prepared.memories,
+            executed_tools=loop_result.executed_tools,
+            archive_tool_calls=loop_result.archive_tool_calls,
+            routed_context=prepared.routed_context,
+            resume_context_result=prepared.resume_context_result,
+            runtime_injections=prepared.runtime_injections,
+            compression_snapshot_id=loop_result.compression_snapshot_id,
+            compression_snapshot_path=loop_result.compression_snapshot_path,
+            compression_applied=loop_result.compression_applied,
+            request_id=params.request_id,
+            attempt_id=params.attempt_id,
+            run_id=params.run_id,
+            task_id=params.task_id,
+            source=params.source,
+            do_save=self.config.auto_save_memory if params.save is None else params.save,
+            task_attributes=params.task_attributes,
+            recovery_task_refs=params.recovery_task_refs,
+            recovery_content_paths=params.recovery_content_paths,
+            recovery_next_actions=params.recovery_next_actions,
+            tool_rounds=loop_result.tool_rounds,
+            compact_auto_continue_depth=params.compact_auto_continue_depth,
+            compact_auto_no_tool_continue_depth=params.compact_auto_no_tool_continue_depth,
+            main_context_bundle_path=prepared.main_context_bundle_path,
+            main_context_bundle_markdown_path=prepared.main_context_bundle_markdown_path,
+            delivery_contract=params.delivery_contract,
+            context_scope=str(getattr(params, "context_scope", "default") or "default"),
+            active_turn_user_inputs=list(loop_result.active_turn_user_inputs or []),
+            tool_runtime_evidence=dict(loop_result.tool_runtime_evidence or {}),
+            canonical_native_messages=list(loop_result.canonical_native_messages or []),
+            on_chunk=params.on_chunk,
         )
 
     # LLM: 显式保存只传原三个服务引用到唯一remember算法；候选审核/正式写/原embedding费用和异常保持，修改须同验owner_services与client调用方。
@@ -983,10 +980,8 @@ def _run_once_with_params(agent, user_prompt: str, params: RunParams):
                 _runtime_loop_params(user_prompt, prepared, params),
             )
             _log_run_stage("loop_done", params, started_mono=_run_stage_started)
-            ctx = agent._build_finalize_context(
-                _finalize_params(root_user_prompt, prepared, loop_result, params)
-            )
-            result = agent._get_services().finalization.finalize(ctx)
+            ctx = agent._build_finalize_context(root_user_prompt, prepared, loop_result, params)
+            result = agent._get_finalization_service().finalize(ctx)
             result.native_compact_carry = loop_result.native_compact_carry
             _log_run_stage("finalize_done", params, started_mono=_run_stage_started)
             return result

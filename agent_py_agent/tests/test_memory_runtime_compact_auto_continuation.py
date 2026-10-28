@@ -1,3 +1,5 @@
+# LLM: 覆盖原续跑链及Wave8局部边界；身份、复制时机和取消协议不因去包装而变化，不依赖真实模型。
+# 模块用途: 验证自动Compact接续与运行参数、收口服务和取消响应的等价合同。
 """Runtime compact auto-continuation tests.
 运行时自动 compact 续接测试。"""
 
@@ -692,6 +694,8 @@ def test_run_auto_compact_apply_returns_after_no_tool_continuation(tmp_path):
     assert result.memory_compact_auto_status == "returned_after_continuation"
 
 
+# LLM: 直接消费原惰性收口服务；本地prompt估算不能被供应商低报usage覆盖，原Compact断言不变。
+# 函数用途: 验证去掉服务聚合包装后仍按真实上下文压力生成Compact接续。
 def test_auto_compact_uses_local_prompt_estimate_when_provider_underreports(tmp_path):
     agent = SimpleAgent(AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")), tmp_path)
     agent.backend.context_window_tokens = 200
@@ -714,7 +718,7 @@ def test_auto_compact_uses_local_prompt_estimate_when_provider_underreports(tmp_
         )(),
     )
 
-    result = agent._get_services().finalization.finalize(ctx)
+    result = agent._get_finalization_service().finalize(ctx)
 
     assert result.memory_compact_auto_status == "ready_after_action_guard"
     assert result.memory_compact_auto_continue_ready is True
@@ -2085,3 +2089,194 @@ def test_tool_output_index_hides_artifact_ref_for_non_externalized() -> None:
     assert "artifact_ref=run-x:call_function_deferred_1" not in rendered
     assert "source_path=src/externalized.py" in rendered
     assert "artifact_ref=run-x:call_function_ext_1" in rendered
+
+
+# LLM: 原loop_support导入口仍指向同一实现，唯一规范化定义必须归低层run_params，不再反向装配工具循环。
+# 函数用途: 固定参数规范化的单一所有权及旧导入口兼容。
+def test_wave8_run_parameter_normalization_has_one_low_level_owner():
+    from agent_py_agent.agent.agent_core.runtime import loop_support, run_params
+
+    normalizer = run_params.run_params_from_values
+    assert normalizer.__module__ == run_params.__name__
+    assert loop_support.run_params_from_values is normalizer
+
+
+# LLM: 两个导入口应共享同一规范化语义；None不能清除宿主参数，无更新必须返回原对象，错误类型沿原TypeError。
+# 函数用途: 防止参数合并改动无覆盖、默认对象独立性或类型拒绝行为。
+@pytest.mark.parametrize("entry", ["run_params", "loop_support"])
+def test_wave8_run_parameter_none_and_invalid_type_contract(entry):
+    from agent_py_agent.agent.agent_core.runtime import loop_support, run_params
+
+    normalize = {"run_params": run_params, "loop_support": loop_support}[entry].run_params_from_values
+    base = RunParams(inject=["original"], task_attributes={"scope": "original"}, on_chunk=object())
+    assert normalize(base) is base
+    assert normalize(base, inject=None, task_attributes=None, on_chunk=None) is base
+    first, second = normalize(), normalize()
+    assert type(first) is RunParams and first is not second
+    assert first.runtime_rejected_actions is not second.runtime_rejected_actions
+    with pytest.raises(TypeError, match="run.*RunParams"):
+        normalize({"request_id": "not-a-RunParams"})
+
+
+# LLM: replace保留真实子类和本工作片opaque来源；显式空值/False覆盖，原未复制的输入仍保留引用，不能新增深拷贝。
+# 函数用途: 检查规范化不丢续跑子类字段、宿主来源或原列表字典的引用语义。
+@pytest.mark.parametrize("entry", ["run_params", "loop_support"])
+def test_wave8_run_parameter_overrides_preserve_subclass_and_host_objects(entry):
+    from dataclasses import dataclass
+
+    from agent_py_agent.agent.agent_core.runtime import loop_support, run_params
+
+    # LLM: 模拟前台恢复RunParams子类，附加字段不能被基类重建丢弃。
+    # 类用途: 为replace的子类保持合同提供确定性样本。
+    @dataclass
+    class ExtendedRunParams(RunParams):
+        continuation_hint: str = "keep-subclass"
+
+    normalize = {"run_params": run_params, "loop_support": loop_support}[entry].run_params_from_values
+    opaque, callback, rejected = object(), object(), [{"tool": "read_file"}]
+    base = ExtendedRunParams(save=True, source="original", request_id="original", inject=["old"],
+        on_chunk=callback, pending_turn_input_source=opaque, runtime_rejected_actions=rejected)
+    overrides = {"save": False, "source": "", "request_id": "", "inject": [], "allowed_tools": [],
+                 "write_boundary": {}, "task_attributes": {}, "delivery_contract": {}, "resume_context": False,
+                 "context_scope": "", "recovery_task_refs": [], "recovery_content_paths": [], "recovery_next_actions": []}
+    result = normalize(base, **overrides)
+    assert result is not base and type(result) is ExtendedRunParams
+    assert result.continuation_hint == "keep-subclass"
+    for name, value in overrides.items():
+        assert getattr(result, name) is value
+    assert result.on_chunk is callback and result.pending_turn_input_source is opaque
+    assert result.runtime_rejected_actions is rejected
+    assert base.inject == ["old"] and base.save is True and base.request_id == "original"
+
+
+# LLM: 新收口入口直接消费原请求/准备/循环结果；冻结类、原身份、save解析及浅复制位置均沿旧合同。
+# 函数用途: 对完整FinalizeContext逐字段核对并防止运行中间容器继续搬运同一批字段。
+@pytest.mark.parametrize("save", [None, False, True])
+@pytest.mark.parametrize("auto_save", [False, True])
+@pytest.mark.parametrize("with_collections", [False, True])
+def test_wave8_finalize_context_is_built_directly_with_original_copy_contract(save, auto_save, with_collections):
+    import inspect
+    from dataclasses import FrozenInstanceError, fields
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.runtime.loop_models import (
+        PreparedRuntimeContext,
+        RuntimeLoopResult,
+    )
+    from agent_py_agent.agent.agent_core.runtime_mixin import SimpleAgentRuntimeMixin
+
+    build = SimpleAgentRuntimeMixin._build_finalize_context
+    assert {"user_prompt", "prepared", "loop_result", "params"}.issubset(inspect.signature(build).parameters)
+    agent = SimpleAgentRuntimeMixin()
+    agent.config = SimpleNamespace(auto_save_memory=auto_save)
+    rp = RunParams(request_id="request", attempt_id="attempt", run_id="run", task_id="task", source="source",
+        save=save, task_attributes={"thread": "thread"}, delivery_contract={"kind": "report"},
+        recovery_task_refs=["task-ref"], recovery_content_paths=["content"], recovery_next_actions=["next"],
+        compact_auto_continue_depth=3, compact_auto_no_tool_continue_depth=2, context_scope="task_local", on_chunk=object())
+    prepared = PreparedRuntimeContext([object()], [object()], object(), object(), "resume-section", "bundle", "bundle.md")
+    inputs = [{"message": "input"}] if with_collections else None
+    evidence = {"operation": {"state": "confirmed"}} if with_collections else None
+    native = [{"role": "assistant"}] if with_collections else None
+    loop = RuntimeLoopResult("final-prompt", ModelResponse(text="final", backend="test"), 4,
+        "snapshot", "snapshot-path", True, ["read_file"], [{"call_id": "call"}], inputs, evidence, native)
+    ctx = agent._build_finalize_context("root-prompt", prepared, loop, rp)
+    expected = FinalizeContext(
+        user_prompt="root-prompt", final_prompt="final-prompt", final_response=loop.final_response,
+        memories=prepared.memories, executed_tools=loop.executed_tools, archive_tool_calls=loop.archive_tool_calls,
+        routed_context=prepared.routed_context, resume_context_result=prepared.resume_context_result,
+        runtime_injections=prepared.runtime_injections, compression_snapshot_id="snapshot",
+        compression_snapshot_path="snapshot-path", compression_applied=True, request_id="request",
+        attempt_id="attempt", run_id="run", task_id="task", source="source",
+        do_save=auto_save if save is None else save, task_attributes=rp.task_attributes,
+        recovery_task_refs=rp.recovery_task_refs, recovery_content_paths=rp.recovery_content_paths,
+        recovery_next_actions=rp.recovery_next_actions, tool_rounds=4, compact_auto_continue_depth=3,
+        compact_auto_no_tool_continue_depth=2, main_context_bundle_path="bundle", main_context_bundle_markdown_path="bundle.md",
+        delivery_contract=rp.delivery_contract, context_scope="task_local", active_turn_user_inputs=inputs or [],
+        tool_runtime_evidence=evidence or {}, canonical_native_messages=native or [], on_chunk=rp.on_chunk,
+    )
+    assert type(ctx) is FinalizeContext
+    for field in fields(FinalizeContext):
+        assert getattr(ctx, field.name) == getattr(expected, field.name), field.name
+    for name in ("memories", "runtime_injections", "routed_context", "resume_context_result"):
+        assert getattr(ctx, name) is getattr(prepared, name)
+    for name in ("final_response", "executed_tools", "archive_tool_calls"):
+        assert getattr(ctx, name) is getattr(loop, name)
+    for name in ("task_attributes", "delivery_contract", "recovery_task_refs", "on_chunk"):
+        assert getattr(ctx, name) is getattr(rp, name)
+    for name in ("active_turn_user_inputs", "tool_runtime_evidence", "canonical_native_messages"):
+        assert getattr(ctx, name) is not getattr(loop, name)
+    if with_collections:
+        assert ctx.active_turn_user_inputs[0] is inputs[0]
+        assert ctx.tool_runtime_evidence["operation"] is evidence["operation"]
+        assert ctx.canonical_native_messages[0] is native[0]
+    with pytest.raises(FrozenInstanceError):
+        ctx.task_id = "mutated"
+
+
+# LLM: 收口服务仅按原agent惰性缓存，不保存请求局部参数；不同owner门面不能共享服务。
+# 函数用途: 验证去除单字段包装后仍保留同实例寿命和agent绑定。
+def test_wave8_finalization_service_is_lazy_and_agent_local():
+    from agent_py_agent.agent.agent_core._finalization_service import FinalizationService
+    from agent_py_agent.agent.agent_core.runtime_mixin import SimpleAgentRuntimeMixin
+
+    getter = getattr(SimpleAgentRuntimeMixin, "_get_finalization_service", None)
+    assert callable(getter)
+    first, second = SimpleAgentRuntimeMixin(), SimpleAgentRuntimeMixin()
+    assert getattr(first, "_finalization_service", None) is None
+    assert getattr(second, "_finalization_service", None) is None
+    service = first._get_finalization_service()
+    assert isinstance(service, FinalizationService) and service._agent is first
+    assert first._get_finalization_service() is service
+    other = second._get_finalization_service()
+    assert other is not service and other._agent is second
+
+
+# LLM: 新低层取消构造必须保留原空正文、无工具与typed取消事实；旧服务入口只允许委托同一实现。
+# 函数用途: 核对取消响应迁移前后的后端回退和公开协议不变。
+@pytest.mark.parametrize("backend_name", [None, "", "capture"])
+def test_wave8_interrupted_response_is_owned_by_decision_and_preserves_protocol(backend_name):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core import _tool_loop_service
+    from agent_py_agent.agent.agent_core.tool_loop import response_decision
+
+    factory = getattr(response_decision, "interrupted_conversation_response", None)
+    assert callable(factory)
+    agent = SimpleNamespace(backend=SimpleNamespace(name=backend_name))
+    for response in (factory(agent), _tool_loop_service._interrupted_conversation_response(agent)):
+        assert isinstance(response, ModelResponse)
+        assert response.text == "" and not response.tool_use_blocks
+        assert response.backend == (backend_name or "tool_loop")
+        assert response.runtime_status == "cancelled" and response.runtime_reason == "user_stop"
+        assert response.runtime_source == "conversation_control"
+
+
+# LLM: 取消裁决不能再次回导装配层；检查实际函数的导入边并验证其真实break响应与原计数对象。
+# 函数用途: 防止低层取消收口恢复对顶层工具循环的私有依赖。
+def test_wave8_cancelled_closeout_has_no_tool_loop_service_back_import():
+    import ast
+    import inspect
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_loop import response_decision
+
+    closeout = response_decision._cancelled_closeout_decision
+    tree = ast.parse(inspect.getsource(closeout))
+    assert not any(isinstance(node, ast.ImportFrom) and node.module == "_tool_loop_service" for node in ast.walk(tree))
+    counters = response_decision.ToolLoopRepairCounters()
+    decision = closeout(SimpleNamespace(agent=SimpleNamespace(), counters=counters))
+    assert decision.action == "break" and decision.calls == [] and decision.counters is counters
+    assert decision.response.text == "" and decision.response.runtime_status == "cancelled"
+
+
+# LLM: 当前循环只有原action三分支，不再经过无裁决语义的第二次翻译；分支行为由既有工具循环回归覆盖。
+# 函数用途: 防止本次已消除的动作翻译包装再次接回主链。
+def test_wave8_tool_loop_does_not_translate_routed_action_twice():
+    import ast
+    import inspect
+
+    from agent_py_agent.agent.agent_core import _tool_loop_service
+
+    calls = (node for node in ast.walk(ast.parse(inspect.getsource(_tool_loop_service.execute_tool_loop)))
+             if isinstance(node, ast.Call))
+    assert not any(isinstance(node.func, ast.Name) and node.func.id == "_routed_action_step" for node in calls)
