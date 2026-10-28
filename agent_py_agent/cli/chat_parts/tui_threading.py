@@ -44,15 +44,20 @@ class _BackgroundWatchTransientError(OSError):
     pass
 
 
-# LLM: 只读结构化code、异常类型及权限errno；顶层或任一子错误拒绝就优先失败关闭，不能被瞬态标签覆盖。
-# 函数用途: 识别需要立即清除旧观察帧的权限与owner归属错误。
+# LLM: 字典和异常按双字段或明确权限类型/errno分类；不看异常文案，不把普通ValueError当硬拒绝。
+# 函数用途: 统一列表和真实详情异常的硬拒绝判断，立即撤销旧观察帧。
 def _background_watch_hard_projection(result: object) -> bool:
+    if isinstance(result, BaseException):
+        if isinstance(result, PermissionError):
+            return True
+        result = {"error_code": getattr(result, "error_code", None), "reason_code": getattr(result, "reason_code", None),
+                  "errno": result.errno if isinstance(result, OSError) else None}
     if not isinstance(result, Mapping):
         return False
     errors = result.get("errors")
     entries = (result, *(errors if isinstance(errors, (list, tuple)) else ()))
     return any(isinstance(item, Mapping) and (
-        (isinstance(item.get("error_code"), str) and item["error_code"] in _HARD_BACKGROUND_VIEW_ERRORS)
+        any(isinstance(item.get(field), str) and item[field] in _HARD_BACKGROUND_VIEW_ERRORS for field in ("error_code", "reason_code"))
         or item.get("error") == "PermissionError" or (
             type(item.get("errno")) is int and item["errno"] in _BG_WATCH_PERMISSION_ERRNOS
         )
@@ -882,8 +887,8 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
     return updated or changed
 
 
-# LLM: 仅同scope已验证帧容忍两次瞬态；权限/owner硬错立即清帧和资格，未知错误仍告警，成功才清专用提示。
-# 函数用途: 按canonical线程同步观察，安全拒绝时撤销旧结果，不改消息、进程或完成wake链路。
+# LLM: 列表和详情异常均识别双字段owner拒绝后清帧/资格/预算；普通错误及同scope瞬态合同不变，不看文案。
+# 函数用途: 按canonical线程同步观察，避免列表成功后的详情owner竞态残留旧结果。
 def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
     if not callable(runtime_reader):
@@ -908,7 +913,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
         scope_confirmed = True
         changed = _refresh_background_watch(agent, navigation, thread_id=thread_id)
     except Exception as exc:
-        hard_error = isinstance(exc, PermissionError) or (isinstance(exc, OSError) and exc.errno in _BG_WATCH_PERMISSION_ERRNOS)
+        hard_error = _background_watch_hard_projection(exc)
         if hard_error or not scope_confirmed or isinstance(exc, LookupError):
             navigation.update_background_watch_rows([], active_count=0)
             navigation._background_watch_scope = None

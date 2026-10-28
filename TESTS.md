@@ -1,3 +1,31 @@
+## 2026-10-28 Wave 9 B2 四轮：真实owner拒绝分类贯通
+
+来源：完整读取 `07-tasks/fix-r4-wave9-b2.md`（47行）。工作树 `/tmp/wt-wave9-b2`、分支 `wave9-b2`，起点 `2afcc65a2f05f573e630639aefff03291f5af52f`，总基线 `db4d5de92`。本轮只修后台观察的真实owner拒绝链，不改导航、目录重试或进程控制。
+
+- 生产端以专门的 `ValueError` 子类保留 `error_code/reason_code=OWNER_MISMATCH`，覆盖owner_home跨家目录、owner归属冲突与原合同已拒绝的非法owner值。静态快照及动态概要捕获均保留分类；原其它线程/owner隔离规则不变，当前线程错配仍进入 `errors`。
+- 普通scope/非owner属性错误延后到owner检查之后，schema前后均检查owner。坏schema、非字典scope或其它坏属性都不能把已明确owner拒绝降成普通错误；原接受/拒绝范围和可选空身份合同不变。
+- 消费端统一识别诊断字典与真实异常的error_code/reason_code（含reason-only兼容入口），硬拒绝立即清行、清计数、撤销scope/有效帧与瞬态预算；普通ValueError仍按原合同告警并保留同scope旧帧。
+- 新回归写真实兼容格式JSON、走原list/inspect/_read_session及TUI同步建立有效帧，再原地改owner。详情交错为真实list先成功，返回前改磁盘记录，接着真实inspect拒绝。另测owner混合坏schema/坏scope/坏task、reason-only及普通PID错误；动态概要异常出口单独标注为边界单测，不冒充自然业务端到端。
+- 既有归属矩阵五个测试函数仅迁移owner分支的精确诊断预期，新增双字段断言，保留其原拒绝、隔离、文件不变、总数及ValueError兼容断言；未删除、跳过或放宽有效测试。
+- 任务指定两个测试名在起点不存在。`test_wave9_tui_observation_and_sticky_bar.py`、`test_tui_sticky_user_turn_jump.py`显式重导出原模块全部测试和所需autouse夹具；原测试源不改，不制造空门禁，扩展回归不重复执行源文件计数。
+
+红绿证据：最初11例中9个owner链路断言失败、普通ValueError两例通过；随后“跨owner+坏schema”1例，以及独立复核指出的混合坏scope/属性5例均先复现旧行残留，再修产品。
+
+最终验证：指定三文件 **136 passed**，额外三个既有相关文件 **775 passed**，两份JUnit测试身份无重叠，合计 **911 passed，0 failed/error/skipped**。全量Ruff、文档同步、导入边界及差异空白门禁通过；26个新增/修改定义的双层中文注释与两个兼容入口的完整重导出均以AST核对。原始结果为 `.pytest_cache/w9b2r4-{required-final,regression-final}.xml`。
+
+两次gpt-6-astra/high限定范围内联静态复核：第一次指出普通结构错误遮盖owner拒绝，已用真实链路复现并修复；第二次增量复核确认该控制流问题关闭，本范围未发现新P1/P2。不是全仓评审，评审者没有独立运行测试。未验证真实用户终端端到端、Linux/跨平台车道及全仓pytest；未推送、合入或部署。
+
+复现命令（工作树根目录）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_tui_observation_and_sticky_bar.py agent_py_agent/tests/test_tui_background_observation_resilience.py agent_py_agent/tests/test_tui_sticky_user_turn_jump.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_tui.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+本地忽略证据目录为 `.pytest_cache/w9b2r4-*.xml`，不随功能提交；没有运行退役的尺寸检查。
+
 ## 2026-10-28 Wave 9 B2 三轮：End覆盖、目录竞争与硬错误失败关闭
 
 来源：完整阅读 `07-tasks/fix-r3-wave9-b2.md`（52行）。起点 `5c1693877277cdbd66e508f000566a0128e3d787`，分支 `wave9-b2`，总基线 `db4d5de92`；项目编辑、测试及提交仅在 `/tmp/wt-wave9-b2` 内进行。

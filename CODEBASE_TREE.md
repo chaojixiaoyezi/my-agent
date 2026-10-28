@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 B2 四轮：真实owner拒绝贯通
+
+原 `agent/conversation/background_process_view.py` 内的owner校验使用稳定双字段的ValueError子类，静态快照与动态概要诊断保留分类；明确owner拒绝优先于坏schema或其它结构错误。原 `cli/chat_parts/tui_threading.py` 共用字典/异常属性硬拒绝判断，列表与详情均撤销旧帧。没有新增生产模块、进程控制或并行业务状态。
+
+`tests/test_tui_background_observation_resilience.py` 增加真实JSON列表/详情竞态及分类守卫；原归属矩阵保持拒绝与隔离断言，精确区分owner诊断。`tests/test_wave9_tui_observation_and_sticky_bar.py`、`tests/test_tui_sticky_user_turn_jump.py`仅为本轮指定命令显式复用原测试/夹具的兼容入口。验证和限制见 `TESTS.md` 四轮节。
+
 ## 2026-10-28 Wave 9 B2 三轮：后台观察失败关闭与导航优先级
 
 `agent/conversation/background_process_view.py` 的原单次安全扫描由四次有界尝试包裹，区分首次缺目录与扫描后消失，权限拒绝立即返回结构化错误；`cli/chat_parts/tui_threading.py` 分类同scope瞬态宽限及硬拒绝清帧；`tui_view.py` 的End覆盖待恢复锚点。没有新增生产模块或第二份业务状态。

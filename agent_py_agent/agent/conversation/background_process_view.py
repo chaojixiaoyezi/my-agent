@@ -50,6 +50,13 @@ _SCOPE_FIELDS = ("access_scope", "execution_scope", "activation_scope", "complet
 _ATTRIBUTION_FIELDS = ("owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id")
 
 
+# LLM: 仅owner错配/冲突/非法owner声明使用此ValueError子类；稳定双字段供列表投影和详情异常识别，不按文案猜权限。
+# 类用途: 保留真实reader的owner拒绝语义，同时兼容原有ValueError捕获链。
+class _OwnerMismatchError(ValueError):
+    error_code = "OWNER_MISMATCH"
+    reason_code = "OWNER_MISMATCH"
+
+
 # LLM: 保留文件名身份及实际stat代次；失败仅存归属字符串/非法标记和errno，不保存正文或猜测瞬态性质。
 # 类用途: 保存静态记录、无正文错误与实际复核时间，不保存动态探活或会话过滤结论。
 @dataclass(frozen=True)
@@ -111,8 +118,8 @@ class BackgroundProcessDetail(BackgroundProcessSummary):
     log_tail: tuple[str, ...] = ()
 
 
-# LLM: 仅缓存静态快照；线程过滤先于动态探活。坏文件按严格归属分类，未知错误不吞，OSError透传errno而不泄漏异常正文。
-# 函数用途: 返回当前范围的实时进程概要与分范围诊断，缺失目录不创建、不消费通知。
+# LLM: owner拒绝在静态和动态概要两条出口保留双字段；严格归属隔离不变，普通ValueError不升级，不泄漏异常正文。
+# 函数用途: 返回本范围进程及结构化诊断，让真实owner错配能触发消费端清帧。
 def list_background_processes(owner_home: Path, *, thread_id: str | None = None, active_only: bool = False) -> dict[str, object]:
     home = Path(owner_home).expanduser().absolute()
     items, errors, unrelated_errors = [], [], []
@@ -123,6 +130,8 @@ def list_background_processes(owner_home: Path, *, thread_id: str | None = None,
             diagnostic = {"session_id": snapshot.session_id, "error": snapshot.error}
             if snapshot.error_code:
                 diagnostic["error_code"] = snapshot.error_code
+                if snapshot.error_code == "OWNER_MISMATCH":
+                    diagnostic["reason_code"] = snapshot.error_code
             if snapshot.error_errno is not None:
                 diagnostic["errno"] = snapshot.error_errno
             destination.append(diagnostic)
@@ -134,9 +143,12 @@ def list_background_processes(owner_home: Path, *, thread_id: str | None = None,
             items.append(_summary(root, payload).to_dict())
         except (OSError, TypeError, ValueError) as exc:
             diagnostic = {"session_id": snapshot.session_id, "error": type(exc).__name__}
+            code = exc.error_code if isinstance(exc, _OwnerMismatchError) else ""
+            if code:
+                diagnostic.update(error_code=code, reason_code=code)
             if isinstance(exc, OSError) and exc.errno is not None:
                 diagnostic["errno"] = exc.errno
-            failed = replace(snapshot, error=type(exc).__name__)
+            failed = replace(snapshot, error=type(exc).__name__, error_code=code)
             destination = unrelated_errors if _unrelated_error(failed, home, thread_id, now) else errors
             destination.append(diagnostic)
     active = [item for item in items if item["alive"] or item["wake_pending"]]
@@ -315,8 +327,8 @@ def _file_stat_key(path: Path) -> tuple[int, ...]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_size, metadata.st_ctime_ns
 
 
-# LLM: 仅复用前后同代的可信文件，失败保留原归属和errno供分类；不凭年龄洗白错误，也不缓存动态探活。
-# 函数用途: 安全读取、校验并缓存静态元数据及无正文诊断，目录变化时只复用未变文件。
+# LLM: 仅复用同代可信文件；owner专用异常保留结构化code及原归属，普通错误不误标权限，不缓存动态探活。
+# 函数用途: 读取真实记录并保留owner拒绝分类，让缓存和实时列表具有相同错误语义。
 def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool = False) -> _SessionSnapshot:
     path, now = root / f"{session_id}.json", time.monotonic()
     payload, before, trusted = None, None, False
@@ -336,6 +348,7 @@ def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool 
     except (OSError, TypeError, ValueError, RecursionError) as exc:
         snapshot = _SessionSnapshot(session_id, _error_scope_payload(payload), type(exc).__name__,
                                     before[2] if before else 0, verified_at=now,
+                                    error_code=exc.error_code if isinstance(exc, _OwnerMismatchError) else "",
                                     error_errno=exc.errno if isinstance(exc, OSError) else None)
     try:
         after = _file_stat_key(path)
@@ -456,17 +469,17 @@ def _read_session_payload(root: Path, session_id: str) -> object:
     return json.loads(raw)
 
 
-# LLM: 可选身份保留None/空串未绑定；三个身份scope的home及激活owner_id拒空串，非字符串/纯空白仍先于schema拒绝。
-# 函数用途: 补齐原schema遗漏的必需owner空串检查，同时保留共享MCP可选未绑定合同，不写盘。
-def _validate_session_attribution(payload: dict) -> None:
-    if any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in _SCOPE_FIELDS):
-        raise ValueError("invalid_session_scope")
+# LLM: 原接受/拒绝范围不变；先完成可读取owner声明的校验，普通scope/属性错误延后，不能遮盖明确owner拒绝。
+# 函数用途: 精确区分owner归属拒绝与其它元数据错误，供列表和详情共享。
+def _validate_session_attribution(payload: dict, *, home: Path | None = None) -> None:
+    invalid_scope = any(payload.get(key) is not None and not isinstance(payload[key], dict) for key in _SCOPE_FIELDS)
+    invalid_attribution = False
     for name in ("access_scope", "execution_scope", "activation_scope"):
         scope = payload.get(name)
         if isinstance(scope, dict) and (
             scope.get("owner_home") == "" or name == "activation_scope" and scope.get("owner_id") == ""
         ):
-            raise ValueError("invalid_session_attribution")
+            raise _OwnerMismatchError("invalid_session_attribution")
     claims = {key: set() for key in _ATTRIBUTION_FIELDS}
     for scope in _raw_record_scopes(payload):
         for key in _ATTRIBUTION_FIELDS:
@@ -474,30 +487,49 @@ def _validate_session_attribution(payload: dict) -> None:
             if value is None:
                 continue
             if not isinstance(value, str):
-                raise ValueError("invalid_session_attribution")
+                if key in {"owner_id", "owner_home"}:
+                    raise _OwnerMismatchError("invalid_session_attribution")
+                invalid_attribution = True
+                continue
             if value == "":
                 continue
             if not value.strip():
-                raise ValueError("invalid_session_attribution")
+                if key in {"owner_id", "owner_home"}:
+                    raise _OwnerMismatchError("invalid_session_attribution")
+                invalid_attribution = True
+                continue
             claims[key].add(value)
     threads = claims["thread_id"] | claims["conversation_id"]
-    if len(threads) > 1 or any(len(claims[key]) > 1 for key in ("owner_id", "owner_home", "task_id", "request_id")):
+    if any(len(claims[key]) > 1 for key in ("owner_id", "owner_home")):
+        raise _OwnerMismatchError("conflicting_session_attribution")
+    if home is not None:
+        _validate_session_owner_home(payload, home)
+    if invalid_scope:
+        raise ValueError("invalid_session_scope")
+    if invalid_attribution:
+        raise ValueError("invalid_session_attribution")
+    if len(threads) > 1 or any(len(claims[key]) > 1 for key in ("task_id", "request_id")):
         raise ValueError("conflicting_session_attribution")
 
 
-# LLM: schema前先验证原归属，防旧schema将非法类型转字符串；规范化后再验，列表/详情同链，owner边界不放宽。
-# 函数用途: 验证新读取或待缓存的进程元数据，保持详情与列表解释一致。
+# LLM: schema前后均校验归属和home；明确跨owner不能被坏schema降级，普通元数据错误不升级，列表/详情同链。
+# 函数用途: 验证真实或待缓存元数据，并将跨owner错配显式传给上层。
 def _validate_session_payload(payload: object, selected: str, home: Path) -> dict:
     if not isinstance(payload, dict) or payload.get("session_id") != selected:
         raise ValueError("process session identity mismatch")
-    _validate_session_attribution(payload)
+    _validate_session_attribution(payload, home=home)
     if payload.get("schema"):
         payload = validate_process_record(payload)
-        _validate_session_attribution(payload)
+        _validate_session_attribution(payload, home=home)
+    return payload
+
+
+# LLM: 仅检查已验证owner字段的原home声明，原边界不放宽；普通错误尚可待报，不能遮盖已明确的跨owner拒绝。
+# 函数用途: 将真实owner_home错配稳定标成OWNER_MISMATCH，不读其它owner文件。
+def _validate_session_owner_home(payload: dict, home: Path) -> None:
     owners = [scope["owner_home"] for scope in _raw_record_scopes(payload) if scope.get("owner_home")]
     if any(not isinstance(owner, str) or Path(owner).absolute() != home for owner in owners):
-        raise ValueError("process owner mismatch")
-    return payload
+        raise _OwnerMismatchError("process owner mismatch")
 
 
 # LLM: 列表/详情输入已严格验证；直接调用也只取非空str，永不将非字符串转换为线程身份，冲突不猜归属。
