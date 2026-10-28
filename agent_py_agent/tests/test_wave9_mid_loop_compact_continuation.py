@@ -1,5 +1,5 @@
 # LLM: 覆盖中途摘要失败的原入口；只替换模型/计量边界，不访问真实供应商，canonical IR与Store仍作独立事实核对。
-# 模块用途: 验证两级回合局部续跑、硬停分类、参数替换寿命与原生请求/持久化隔离。
+# 模块用途: 验证两级续跑、四字段硬停、增长重试、可校验桩及出站身份/持久化隔离。
 from __future__ import annotations
 
 import asyncio
@@ -81,8 +81,8 @@ def arrange(monkeypatch, error, *, tokens=900):
     return agent, params, calls, snapshot
 
 
-# LLM: 软失败不改变当前IR，等于92%仍可继续，同轮replace不能再次烧摘要。
-# 函数用途: 核对四类摘要失败的Level1与含边界值的本轮锁存。
+# LLM: 软失败不改变原IR；70%以上按返修合同做局部模型投影，等于92%仍可继续，同轮replace不重复摘要。
+# 函数用途: 核对四类摘要失败的Level1局部缩减、边界和锁存，保留原历史相等断言。
 @pytest.mark.parametrize("code", ["COMPACT_FAILED", "COMPACT_SUMMARY_EMPTY", "COMPACT_BUDGET_EXCEEDED", "COMPACT_TIMEOUT"])
 @pytest.mark.parametrize("tokens", [900, 920])
 def test_soft_summary_failure_continues_unchanged_and_latches(monkeypatch, caplog, code, tokens):
@@ -93,7 +93,7 @@ def test_soft_summary_failure_continues_unchanged_and_latches(monkeypatch, caplo
             result = service._fit_native_ir_to_shared_budget(agent, params, "system")
         except ConversationCompactError:
             pytest.fail("degradable summary failure aborted an otherwise safe active turn")
-    assert result == 0
+    assert result > 0
     assert params.tool_ir_history == before
     assert params.compact_degradation_latched is True
     assert any(getattr(r, "compact_degraded_level", None) == 1 and r.reason == code for r in caplog.records)
@@ -456,8 +456,12 @@ def test_provider_code_attribute_also_blocks_degradation(code):
 
 
 # LLM: 本地fake LLM驱动真实SimpleAgent与工具循环，所有文件均在pytest临时目录，不调用外部模型。
-# 函数用途: 同时核对摘要准备、业务采样及真实工具执行次数，证明不是仅设置latch却仍重启/重放。
-def test_real_tool_loop_continues_without_replaying_tools(monkeypatch, tmp_path):
+# 函数用途: 核对真实循环的摘要/采样/工具次数；第二组跨多轮证明基线与15%增长确实随实际返回参数传播。
+@pytest.mark.parametrize("tool_count,pressures,summary_after,summary_count", [
+    (2, (60_000, 60_000, 90_000), 2, 1),
+    (4, (60_000, 80_000, 90_000, 92_000, 92_000), 1, 2),
+])
+def test_real_tool_loop_continues_without_replaying_tools(monkeypatch, tmp_path, tool_count, pressures, summary_after, summary_count):
     from pathlib import Path
 
     from agent_py_agent.agent.agent_core.runtime.loop_models import RunParams
@@ -466,8 +470,9 @@ def test_real_tool_loop_continues_without_replaying_tools(monkeypatch, tmp_path)
     from agent_py_agent.agent.settings import AgentConfig
     from agent_py_agent.agent.tooling.registry_workspace import effective_registry_cwd
 
+    file_names = ["first.txt", "second.txt", "third.txt", "fourth.txt"][:tool_count]
     # LLM: 只模拟模型响应，能力以typed probe声明，真实文件读取仍经过正式工具Gateway。
-    # 类用途: 固定返回两次不同读取和一条收口，捕获业务模型调用次数。
+    # 类用途: 返回指定次数的不同读取和一条收口，捕获业务模型调用次数。
     class NativeBackend:
         name = "capture"
 
@@ -481,12 +486,12 @@ def test_real_tool_loop_continues_without_replaying_tools(monkeypatch, tmp_path)
         def __init__(self):
             self.calls = []
 
-        # LLM: 只生成结构化read_file请求，第三次起不再要求工具；不直接执行或写工具结果。
-        # 函数用途: 让被测代理独立完成两次真实读取并收口。
+        # LLM: 只生成结构化read_file请求，达到指定次数后收口；不直接执行或写工具结果。
+        # 函数用途: 让被测代理独立完成真实读取，检查原始用例及增长重试用例。
         def generate(self, prompt, on_chunk=None, **kwargs):
             self.calls.append(kwargs.get("messages"))
-            if len(self.calls) <= 2:
-                name = "first.txt" if len(self.calls) == 1 else "second.txt"
+            if len(self.calls) <= tool_count:
+                name = file_names[len(self.calls) - 1]
                 return ModelResponse(text="", backend=self.name, tool_use_blocks=[{
                     "id": f"call-{len(self.calls)}", "name": "read_file", "input": {"path": name},
                 }])
@@ -497,24 +502,24 @@ def test_real_tool_loop_continues_without_replaying_tools(monkeypatch, tmp_path)
     cwd = Path(effective_registry_cwd(agent.tools.workspace_root, None)).resolve()
     assert cwd.is_relative_to(tmp_path.resolve())
     cwd.mkdir(parents=True, exist_ok=True)
-    (cwd / "first.txt").write_text("first result", encoding="utf-8")
-    (cwd / "second.txt").write_text("second result", encoding="utf-8")
+    for name in file_names:
+        (cwd / name).write_text(f"{name} result", encoding="utf-8")
     backend = NativeBackend()
     agent.backend = backend
     summaries = []
     original_snapshot = context_pressure.model_visible_context_snapshot
 
-    # LLM: 保留完整真实snapshot形状，只模拟容量在第二次工具结果后从60%增长到90%。
+    # LLM: 保留完整真实snapshot形状，只模拟容量序列，增长用例的80000→92000恰好15%。
     # 函数用途: 让真实生成前门和降级入口看到同一个可复现token计量。
     def snapshot(a, p, prompt, **kwargs):
         value = original_snapshot(a, p, prompt, **kwargs)
-        tokens = 90_000 if len(getattr(p, "executed_tools", ())) >= 2 else 60_000
+        tokens = pressures[min(len(getattr(p, "executed_tools", ())), len(pressures) - 1)]
         return replace(value, current_tokens=tokens, raw_estimated_tokens=tokens)
 
-    # LLM: 无工具前不失败，达到两次结果后只在摘要准备边界制造一次可恢复故障。
-    # 函数用途: 让真实主循环接手降级，记录不应重复发生的摘要尝试。
+    # LLM: 到指定工具数才在摘要准备边界失败；锁存应抑制重复，仅增长15%才再试。
+    # 函数用途: 观察真实主循环的摘要尝试，不替代理执行工具。
     def prepare(a, p, prompt, **kwargs):
-        if len(p.executed_tools) >= 2:
+        if len(p.executed_tools) >= summary_after:
             summaries.append(True)
             raise ConversationCompactError("temporary summary failure", code="COMPACT_FAILED")
         return None
@@ -522,12 +527,12 @@ def test_real_tool_loop_continues_without_replaying_tools(monkeypatch, tmp_path)
     monkeypatch.setattr(context_pressure, "model_visible_context_snapshot", snapshot)
     monkeypatch.setattr(context_pressure, "model_visible_context_tokens", lambda a, p, prompt: snapshot(a, p, prompt).current_tokens)
     monkeypatch.setattr(service, "_prepare_native_compact_plan", prepare)
-    result = agent.run("分别读取first.txt、second.txt，然后说明已核对。", params=RunParams(save=False))
+    result = agent.run(f"分别读取{'、'.join(file_names)}，然后说明已核对。", params=RunParams(save=False))
     assert result.response == "本轮已核对完成。"
-    assert len(backend.calls) == 3
-    assert len(result.executed_tools) == 2, result.archive_tool_calls
-    assert summaries == [True]
-    assert [r["parameters"]["path"] for r in result.archive_tool_calls if r.get("tool") == "read_file"] == ["first.txt", "second.txt"]
+    assert len(backend.calls) == tool_count + 1
+    assert len(result.executed_tools) == tool_count, result.archive_tool_calls
+    assert summaries == [True] * summary_count
+    assert [r["parameters"]["path"] for r in result.archive_tool_calls if r.get("tool") == "read_file"] == file_names
 
 
 # LLM: 标准库HTTPError也是URLError子类，但永久4xx不属于临时网络故障；仅429/5xx允许降级。
@@ -540,3 +545,312 @@ def test_http_transport_status_still_distinguishes_transient_from_permanent(stat
 
     error = HTTPError("local://fixture", status, "test status", None, None)
     assert compact_failure_is_degradable(error)[0] is allowed
+
+
+# LLM: 四个结构化码字段都须先于transient类型裁决；不从异常文字推断权限。
+# 函数用途: 对照大小写、前缀和字段验证硬停码不能借重试类进入降级。
+@pytest.mark.parametrize("field", ["code", "error_code", "reason_code", "failure_reason"])
+@pytest.mark.parametrize("code", [
+    form
+    for name in ("CAS_CONFLICT", "SCOPE_MISMATCH", "OWNER_MISMATCH", "LEDGER_CORRUPT",
+                 "CANCELLED", "USER_CANCELLED", "AUTH_ERROR", "PERMISSION_DENIED")
+    for value in (name, f"COMPACT_{name}")
+    for form in (value, value.lower())
+])
+def test_round_two_structured_hard_codes_override_transient_class(monkeypatch, field, code):
+    from agent_py_agent.agent.conversation.compact_guard import compact_failure_is_degradable
+
+    error = ProviderTransientError("probe")
+    setattr(error, field, code)
+    assert compact_failure_is_degradable(error)[0] is False
+    agent, params, calls, _ = arrange(monkeypatch, error)
+    before = deepcopy(params.tool_ir_history)
+    with pytest.raises(ProviderTransientError) as caught:
+        service._fit_native_ir_to_shared_budget(agent, params, "system")
+    assert caught.value is error
+    assert calls == [False]
+    assert not params.compact_degradation_latched
+    assert params.tool_ir_history == before
+    assert not params.compact_degradation_stubs
+
+
+# LLM: 这三类已有结构化摘要故障是可降级事实；小请求不需要局部折叠。
+# 函数用途: 在真实fit入口核对补齐软码后不再把仍安全的回合中断。
+@pytest.mark.parametrize("code", [
+    form
+    for name in ("MODEL_CALL_FAILED", "PARSE_FAILED", "BACKEND_UNAVAILABLE")
+    for value in (name, f"COMPACT_{name}")
+    for form in (value, value.lower())
+])
+def test_round_two_missing_soft_codes_continue_safely(monkeypatch, code):
+    from agent_py_agent.agent.conversation.compact_guard import compact_failure_is_degradable
+
+    error = ConversationCompactError("summary", code=code)
+    assert compact_failure_is_degradable(error)[0] is True
+    agent, params, calls, _ = arrange(monkeypatch, error, tokens=650)
+    before = deepcopy(params.tool_ir_history)
+    assert service._fit_native_ir_to_shared_budget(agent, params, "system") == 0
+    assert params.compact_degradation_latched
+    assert params.tool_ir_history == before
+    assert calls == [False]
+
+
+# LLM: 只替换完整请求计量边界；阈值前后应由实际fit控制摘要次数，普通锁存续轮不能移动基线。
+# 函数用途: 核对15%精确边界、整数上取整、再次失败更新基线及新run重置。
+@pytest.mark.parametrize("baseline,threshold", [(800, 920), (760, 874), (799, 919)])
+def test_round_two_growth_unlocks_remote_summary_at_exact_boundary(monkeypatch, baseline, threshold):
+    agent, params, calls, _ = arrange(monkeypatch, ConversationCompactError("summary", code="COMPACT_FAILED"))
+    pressure = [baseline]
+    monkeypatch.setattr(context_pressure, "model_visible_context_snapshot",
+                        lambda *a, **k: SimpleNamespace(raw_estimated_tokens=pressure[0]))
+    service._fit_native_ir_to_shared_budget(agent, params, "system")
+    continued = replace(params, tool_rounds=2)
+    pressure[0] = threshold - 1
+    service._fit_native_ir_to_shared_budget(agent, continued, "system")
+    assert calls == [False]
+    pressure[0] = threshold
+    service._fit_native_ir_to_shared_budget(agent, continued, "system")
+    assert calls == [False, False]
+    assert continued.compact_degraded_baseline_tokens == threshold
+    service._fit_native_ir_to_shared_budget(agent, continued, "system")
+    assert calls == [False, False]
+    assert continued.compact_degraded_baseline_tokens == threshold
+    assert loop_params().compact_degraded_baseline_tokens == 0
+
+
+# LLM: 新尝试遇明确硬停要传播原异常；旧latch不能在下一轮绕开新CAS错误。
+# 函数用途: 核对增长重新摘要后的硬错误不会再进入局部降级。
+def test_round_two_growth_reattempt_hard_failure_clears_old_latch(monkeypatch):
+    error = ProviderTransientError("probe")
+    agent, params, calls, _ = arrange(monkeypatch, error)
+    pressure = [800]
+    monkeypatch.setattr(context_pressure, "model_visible_context_snapshot",
+                        lambda *a, **k: SimpleNamespace(raw_estimated_tokens=pressure[0]))
+    service._fit_native_ir_to_shared_budget(agent, params, "system")
+    error.reason_code = "CAS_CONFLICT"
+    pressure[0] = 920
+    with pytest.raises(ProviderTransientError) as caught:
+        service._fit_native_ir_to_shared_budget(agent, params, "system")
+    assert caught.value is error
+    assert calls == [False, False]
+    assert not params.compact_degradation_latched
+
+
+# LLM: 用户停止先于增长解锁，不允许为重新摘要增加一次模型边界调用。
+# 函数用途: 核对已锁存回合增长时取消仍立即终止。
+def test_round_two_cancel_before_growth_unlock_never_retries_summary(monkeypatch):
+    agent, params, calls, _ = arrange(monkeypatch, ProviderTransientError("temporary"), tokens=800)
+    service._fit_native_ir_to_shared_budget(agent, params, "system")
+    params.cancellation_token.cancel("stop")
+    monkeypatch.setattr(context_pressure, "model_visible_context_snapshot",
+                        lambda *a, **k: SimpleNamespace(raw_estimated_tokens=920))
+    with pytest.raises(InterruptedError):
+        service._fit_native_ir_to_shared_budget(agent, params, "system")
+    assert calls == [False]
+
+
+# LLM: local_trim只处理受保护尾部以外的旧大结果；同输入重复进入不得继续换桩而改变逻辑调用身份。
+# 函数用途: 验证70%以上确有局部缩减，原IR/用户/摘要/尾四对不变，重复续轮保持投影幂等。
+def test_round_two_level_one_trims_old_output_without_mutating_source(monkeypatch):
+    agent, params, calls, snapshot = arrange(monkeypatch, ProviderTransientError("temporary"), tokens=800)
+    before = deepcopy(params.tool_ir_history)
+    assert service._fit_native_ir_to_shared_budget(agent, params, "system") > 0
+    assert params.tool_ir_history == before
+    _, projected = project_native_prompt_history(params, "system")
+    assert projected[:2] == before[:2]
+    assert projected[-8:] == before[-8:]
+    assert projected != before
+    assert snapshot(agent, params, "system").raw_estimated_tokens < 800
+    assert params.compact_degraded_baseline_tokens == 800
+    assert service._fit_native_ir_to_shared_budget(agent, params, "system") == 0
+    assert project_native_prompt_history(params, "system")[1] == projected
+    assert params.compact_degraded_baseline_tokens == 800
+    assert calls == [False]
+
+
+# LLM: 校验值必须来自原始UTF-8正文，不按Unicode字符数或桩正文算哈希。
+# 函数用途: 以1000个汉字核对原文字节数、摘要及可回查marker，保持原引用与原件。
+def test_round_two_stub_contains_verifiable_utf8_digest_and_marker(monkeypatch):
+    import hashlib
+
+    agent, params, _, _ = arrange(monkeypatch, ProviderTransientError("temporary"), tokens=980)
+    raw = replace(params.tool_ir_history[3], content_blocks=(ToolContentBlock("text", text="汉" * 1000),))
+    params.tool_ir_history[3] = raw
+    before = deepcopy(params.tool_ir_history)
+    service._fit_native_ir_to_shared_budget(agent, params, "system")
+    _, projected = project_native_prompt_history(params, "system")
+    data = json.loads(projected[3].output)
+    payload = raw.output.encode("utf-8")
+    digest = hashlib.sha256(payload).hexdigest()
+    assert data.get("bytes") == 3000 == len(payload)
+    assert data["sha256"] == digest
+    assert len(data["sha256"]) == 64
+    assert data["marker"] == f"[TOOL_OUTPUT_COMPACTED: tool_call_id={raw.call_id} bytes=3000 sha256={digest}]"
+    assert data["compact_authority"] == data["commit_authority"] == "turn_local"
+    assert data["archive_ref"] == raw.refs[0].ref
+    assert params.tool_ir_history == before
+
+
+# LLM: 出站内容变更须产生新逻辑身份；同一投影重试稳定，清除覆盖恢复原指纹，不读写账本。
+# 函数用途: 用实际发送消息独立重算指纹，验证临时桩参与指纹和logical_model_call_id。
+def test_round_two_fingerprint_and_logical_identity_follow_actual_degraded_messages(monkeypatch):
+    import hashlib
+
+    from agent_py_agent.agent.agent_core.model.call_runtime import logical_model_call_id
+    from agent_py_agent.agent.agent_core.tool_ir_history import provider_messages_fingerprint
+    from agent_py_agent.agent.agent_core.tool_model_generation import _native_provider_messages
+
+    agent, params, _, _ = arrange(monkeypatch, ProviderTransientError("temporary"), tokens=980)
+    original = deepcopy(params.tool_ir_history)
+    request = SimpleNamespace(agent=agent, params=params, prompt="system", tool_rounds=1)
+    before_fingerprint = provider_messages_fingerprint(params)
+    before_identity = logical_model_call_id(request)
+    service._fit_native_ir_to_shared_budget(agent, params, "system")
+    fingerprint = provider_messages_fingerprint(params)
+    assert fingerprint != before_fingerprint
+    assert logical_model_call_id(request) != before_identity
+    outbound = _native_provider_messages(agent, params)
+    expected = hashlib.sha256(json.dumps(outbound, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:16]
+    assert fingerprint == expected == provider_messages_fingerprint(params)
+    identity = logical_model_call_id(request)
+    assert logical_model_call_id(request) == identity
+    assert params.tool_ir_history == original
+    params.compact_degradation_stubs.clear()
+    assert provider_messages_fingerprint(params) == before_fingerprint
+    assert logical_model_call_id(request) == before_identity
+
+
+# LLM: 字符变短不等于完整请求token变少；强制恢复必须拒绝未产生实际token收益的候选。
+# 函数用途: 保留原可发送视图，避免换成更贵的桩后还把它当作新缩减重发。
+@pytest.mark.parametrize("extra_tokens", [0, 20])
+def test_round_two_force_rejects_stub_without_actual_token_reduction(monkeypatch, extra_tokens):
+    agent, params, _, _ = arrange(monkeypatch, ProviderTransientError("temporary"), tokens=800)
+    monkeypatch.setattr(context_pressure, "model_visible_context_snapshot", lambda a, p, prompt:
+                        SimpleNamespace(raw_estimated_tokens=800 + (extra_tokens if p.compact_degradation_stubs else 0)))
+    before = deepcopy(params.tool_ir_history)
+    with pytest.raises(ConversationCompactError) as caught:
+        service._fit_native_ir_to_shared_budget(agent, params, "system", force=True)
+    assert caught.value.code == "COMPACT_BUDGET_EXCEEDED"
+    assert params.tool_ir_history == before
+    assert not params.compact_degradation_stubs
+    assert not params.compact_degradation_latched
+
+
+# LLM: 完整宿主请求复用同一局部裁剪与计量；无prompt的既有安全回退仍须携带全部观测别名和基线。
+# 函数用途: 对照native/宿主的两层告警、来源权威与实际失败压力，不以日志文字做控制。
+@pytest.mark.parametrize("entry,tokens,level", [
+    ("native", 800, 1), ("native", 980, 2), ("host", 800, 1), ("host", 980, 2),
+    ("host-known-no-prompt", 650, 1),
+])
+def test_round_two_warning_aliases_and_baseline_match_all_recovery_entries(monkeypatch, caplog, entry, tokens, level):
+    from agent_py_agent.agent.agent_core import compact_request_recovery as recovery
+    from agent_py_agent.agent.agent_core.tool_request_capture import capture_tool_loop_request
+    from agent_py_agent.agent.agent_core.tool_request_projection import ToolLoopRequestInput
+    from agent_py_agent.agent.conversation.models import ConversationHistorySeed
+    from agent_py_agent.agent.prompting_parts.builder import PromptRenderInput
+
+    error = ConversationCompactError("summary", code="COMPACT_FAILED")
+    agent, params, _, _ = arrange(monkeypatch, error, tokens=tokens)
+    with caplog.at_level(logging.WARNING):
+        if entry == "native":
+            service._fit_native_ir_to_shared_budget(agent, params, "system")
+        else:
+            params = replace(params, conversation_history_seed=ConversationHistorySeed())
+            prompt = PromptRenderInput("system", "", "", "", "", (), "", "", "", "user", "", True)
+            frozen = (ToolLoopRequestInput() if entry == "host-known-no-prompt"
+                      else capture_tool_loop_request(agent, params, prompt))
+            host = SimpleNamespace(force=False, agent=agent, calibration=None,
+                                   source=SimpleNamespace(policy=SimpleNamespace(context_window_tokens=1000)),
+                                   resolved_input=None, committed=False)
+            monkeypatch.setattr(recovery, "_native_provider_history_messages", lambda *a, **k: [])
+            assert recovery._restore_optional_preflight(host, params, frozen, tokens, error)
+            assert not host.committed
+    record = next(r for r in caplog.records if getattr(r, "compact_degraded_level", None) == level)
+    expected = {"compact_degraded": True,
+                "compact_fallback_level": "local_trim" if level == 1 else "stub_collapse",
+                "compact_degraded_level": level, "compact_authority": "turn_local",
+                "commit_authority": "turn_local", "original_reason_code": "COMPACT_FAILED", "reason": "COMPACT_FAILED"}
+    for name, value in expected.items():
+        assert getattr(record, name, None) == value, name
+    assert params.compact_degraded_baseline_tokens == tokens
+    if tokens > 700:
+        assert params.compact_degradation_stubs
+
+
+# LLM: 仅明确PARSE_FAILED分支可携带JSON解码原因；同一叶的存储/CAS硬码仍优先。
+# 函数用途: 复现独审提出的解析原因链误拒，并核对cause/context/异常组不洗白硬停。
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("hard_code", [None, "STORE_CORRUPT", "CAS_CONFLICT"])
+def test_round_two_tagged_summary_json_parse_chain_keeps_hard_precedence(monkeypatch, link, grouped, hard_code):
+    from agent_py_agent.agent.conversation.compact_guard import compact_failure_is_degradable
+
+    decode = json.JSONDecodeError("fixture", "{", 1)
+    if hard_code:
+        decode.reason_code = hard_code
+    error = ConversationCompactError("summary parse", code="COMPACT_PARSE_FAILED")
+    setattr(error, link, builtins.ExceptionGroup("decode", [decode]) if grouped else decode)
+    allowed = hard_code is None
+    assert compact_failure_is_degradable(error)[0] is allowed
+    agent, params, calls, _ = arrange(monkeypatch, error, tokens=650)
+    original = deepcopy(params.tool_ir_history)
+    if allowed:
+        assert service._fit_native_ir_to_shared_budget(agent, params, "system") == 0
+        assert params.compact_degradation_latched
+    else:
+        with pytest.raises(ConversationCompactError) as caught:
+            service._fit_native_ir_to_shared_budget(agent, params, "system")
+        assert caught.value is error
+        assert not params.compact_degradation_latched
+    assert calls == [False]
+    assert params.tool_ir_history == original
+
+
+# LLM: 没有显式摘要解析来源，JSONDecodeError或普通ValueError仍可能代表Store/IR损坏，不能猜安全。
+# 函数用途: 守住新解析分支的窄边界，不让FAILED包装任意结构错误。
+@pytest.mark.parametrize("code,cause", [("COMPACT_FAILED", json.JSONDecodeError("fixture", "{", 1)),
+                                       ("COMPACT_PARSE_FAILED", ValueError("unknown structure"))])
+def test_round_two_unknown_decode_or_structural_value_error_still_stops(code, cause):
+    from agent_py_agent.agent.conversation.compact_guard import compact_failure_is_degradable
+
+    error = ConversationCompactError("wrapper", code=code)
+    error.__cause__ = cause
+    assert compact_failure_is_degradable(error)[0] is False
+
+
+# LLM: 真实调用先固化非空layout，再计算账本身份；指纹计算本身不得消费guidance或改原IR/prior。
+# 函数用途: 独立核对动态宿主事实、既有消息和未转发指引下的出站投影指纹及重试稳定性。
+def test_round_two_dynamic_prompt_prior_and_guidance_fingerprint_is_exact_and_readonly(monkeypatch):
+    import hashlib
+
+    from agent_py_agent.agent.agent_core.model.call_runtime import logical_model_call_id
+    from agent_py_agent.agent.agent_core.tool_ir_history import provider_messages_fingerprint
+    from agent_py_agent.agent.agent_core.tool_model_generation import (
+        ModelGenerateParams,
+        _materialize_native_prompt_facts,
+        _native_provider_messages,
+    )
+    from agent_py_agent.agent.prompting_parts.cache_layout import CacheStructuredPrompt
+
+    agent, params, _, _ = arrange(monkeypatch, ProviderTransientError("temporary"), tokens=980)
+    params.provider_history_messages.extend([{"role": "user", "content": "prior question"},
+                                            {"role": "assistant", "content": "prior answer"}])
+    params.tool_context.extend(["old guidance", "fresh guidance"])
+    params.live_archive_state["_forwarded_runtime_guidance"] = {"old guidance"}
+    prompt = CacheStructuredPrompt("stable system", canonical_user_turn=params.user_prompt,
+                                   volatile_sections=(("round2.dynamic", "changing host fact"),))
+    service._fit_native_ir_to_shared_budget(agent, params, prompt)
+    request = _materialize_native_prompt_facts(ModelGenerateParams(agent, params, prompt, 0))
+    before = deepcopy((params.tool_ir_history, params.provider_history_messages, params.live_archive_state))
+    fingerprint = provider_messages_fingerprint(params)
+    identity = logical_model_call_id(request)
+    assert provider_messages_fingerprint(params) == fingerprint
+    assert logical_model_call_id(request) == identity
+    assert (params.tool_ir_history, params.provider_history_messages, params.live_archive_state) == before
+    outbound = _native_provider_messages(agent, params)
+    serialized = json.dumps(outbound, sort_keys=True, ensure_ascii=False, default=str)
+    assert "changing host fact" in serialized and "fresh guidance" in serialized and "prior answer" in serialized
+    assert "TOOL_OUTPUT_COMPACTED" in serialized
+    assert hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16] == fingerprint
+    assert provider_messages_fingerprint(params) == fingerprint
+    assert logical_model_call_id(request) == identity

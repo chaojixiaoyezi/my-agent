@@ -748,7 +748,7 @@
 ```text
 |-- agent_py_agent/
 |   `-- tests/
-|       `-- test_wave9_mid_loop_compact_continuation.py # 两级续跑、硬停、四元来源、模型投影与canonical持久化隔离回归
+|       `-- test_wave9_mid_loop_compact_continuation.py # 两级续跑、四字段硬停、15%增长、UTF8校验桩、出站身份及canonical隔离回归
 ```
 
 ### 2026-10-28 Wave 8 正式边界与并发验收（集成目标）
@@ -1237,7 +1237,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 
 ### Wave 9 B4 中途Compact续跑（2026-10-28，本地候选）
 
-- `agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py`：覆盖92%原样续跑及本轮锁存、85%确定性旧结果投影、四元来源/尾四对/归档引用保留、真实线程JSONL与pin、冻结和实际发送及最终canonical序列化分离，以及共享恢复/Gateway硬停；组件验证不代表真实通道或部署验收。
+- `agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py`：覆盖92%内局部续跑、15%增长解锁、85%旧结果投影、四字段硬停/四元来源/尾四对/真实引用、UTF8校验桩、出站指纹与逻辑ID、真实线程JSONL/pin及冻结/发送/最终canonical隔离；含真实工具循环的fake LLM驱动，组件结果不代表真实通道或部署验收。
 
 ### Wave 8 集成目标入口（2026-10-28）
 

@@ -1,6 +1,6 @@
 
 # LLM: typed IR是唯一历史；有界投影LRU冻结全部真实字段并保prior引用身份，不消费guidance；applied前置且调用/推理不拆对。
-# 模块用途: 保存工具与模型历史，复用只读投影并隔离出站副本；回合降级桩只在模型视图中应用，canonical保持原件。
+# 模块用途: 保存工具与模型历史；回合桩仅用于模型视图及同源出站指纹，canonical保持原件。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -375,8 +375,8 @@ def applied_compact_summary_item(text: str, generation: int, provider_compaction
 #   指纹（只读：显式借用prior，不消费seen、不写IR或修改投影）。同一请求的断流重试里，未转发指引先经
 #   tool_context、再经 IR 投影，两次输出一致，因此身份稳定。判定或投影失败时返回空串，身份退化为
 #   prompt 指纹，绝不中断模型主链。改动时同步核对 call_runtime.logical_model_call_id 与
-#   tool_model_generation._native_provider_messages 的出站口径。
-# 函数用途: 计算此刻会出站的 native provider messages 指纹；text 模式或不可判定时返回空串。
+#   tool_model_generation._native_provider_messages 的出站口径；临时降级先按同一投影应用，不能哈希原IR冒充出站。
+# 函数用途: 对实际降级模型视图计算native消息指纹及逻辑调用身份，原IR不改；不可判定仍返回空串。
 def provider_messages_fingerprint(params: object) -> str:
     from .native_tool_protocol import native_tool_use_active
 
@@ -385,8 +385,9 @@ def provider_messages_fingerprint(params: object) -> str:
             return ""
         state = getattr(params, "live_archive_state", None)
         seen = state.get("_forwarded_runtime_guidance") if isinstance(state, dict) else None
+        _, history = project_native_prompt_history(params, "")
         messages = project_native_provider_messages(
-            getattr(params, "tool_ir_history", None),
+            history,
             prior_messages=getattr(params, "provider_history_messages", None),
             tool_context=getattr(params, "tool_context", None),
             forwarded_guidance=seen if isinstance(seen, set) else (),

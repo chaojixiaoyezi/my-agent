@@ -2,7 +2,7 @@
 
 # LLM: execute_tool_loop 是主子共用的唯一入口；发现复用正式搜索/凭据投影，交付复核只消费原验证/写入信封，native IR、Compact 与收口权威不变。
 # 取消响应实现归低层response_decision；本模块只保留原兼容委托，循环直接判断原action而不二次翻译。
-# 模块用途: 装配采样、工具展示及校准；摘要软失败只降级本轮模型视图，不伪造canonical提交或吞掉硬停。
+# 模块用途: 装配采样、工具展示及校准；摘要软失败局部降级，增长15%才解锁重试，不伪造提交或吞硬停。
 from __future__ import annotations
 
 import json
@@ -459,8 +459,9 @@ def _string_sequence(value: object) -> list[str]:
 
 
 # LLM: Normal Compact retains the checkpoint/CAS contract. Only summary preparation failures may
-# enter turn-local degradation; never catch post-commit errors or replace canonical IR with stubs.
-# 函数用途: 按原校准压缩；瞬时摘要失败时在真实输入上限内无感续跑，硬停与提交后异常仍原样传播。
+# enter turn-local degradation. A 15% rise over the failed-attempt baseline unlocks a fresh attempt;
+# cancellation precedes retry and post-commit errors never enter this catch boundary.
+# 函数用途: 按完整校准压力决定本轮续跑或增长重试；新失败重设基线，硬停和提交后异常仍传播。
 def _fit_native_ir_to_shared_budget(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -490,8 +491,15 @@ def _fit_native_ir_to_shared_budget(
         raw = model_visible_context_snapshot(agent, params, prompt).raw_estimated_tokens
         return calibrated_compact_request_tokens(raw, calibration)
 
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     if params.compact_degradation_latched:
-        return _continue_after_compact_failure(agent, params, estimator, reason=params.compact_degradation_reason, force=force)
+        baseline = params.compact_degraded_baseline_tokens
+        # 用整数上取整守住精确15%边界；没有可靠基线时不解锁付费调用。
+        if baseline <= 0 or estimator() < (baseline * 115 + 99) // 100:
+            return _continue_after_compact_failure(agent, params, estimator, reason=params.compact_degradation_reason,
+                                                   force=force, fresh_failure=False)
+        object.__setattr__(params, "compact_degradation_latched", False)
+        object.__setattr__(params, "compact_degraded_baseline_tokens", 0)
     try:
         plan = _prepare_native_compact_plan(
             agent, params, prompt, estimator=estimator, force=force,
@@ -510,9 +518,11 @@ def _fit_native_ir_to_shared_budget(
 
 
 # LLM: Called only after an eligible pre-commit failure or the same-turn latch; the estimator is
-# the full calibrated provider request. This never calls a model, Store or summary-pin mutation.
-# 函数用途: 92%以内原样放行，逼近容量或强制失败时只折叠模型视图中的旧结果，并留下结构化告警。
-def _continue_after_compact_failure(agent, params, estimator, *, reason: str, force: bool) -> int:
+# the full calibrated provider request. Only a new degradation fixes a new pressure baseline;
+# ordinary latch continuation never slides it or repeats Level1 trimming. Emit both telemetry key
+# sets from the same level/reason, without model/Store/pin writes.
+# 函数用途: 新失败在软阈值以上最多局部折叠一条，近窗收缩到85%；旧锁存不重复裁剪或移动基线。
+def _continue_after_compact_failure(agent, params, estimator, *, reason: str, force: bool, fresh_failure: bool = True) -> int:
     from ..conversation.compact_guard import ConversationCompactError
     from .model.context_pressure import model_request_input_ceiling
     from .tool_ir_compact import stub_old_native_tool_results
@@ -521,7 +531,8 @@ def _continue_after_compact_failure(agent, params, estimator, *, reason: str, fo
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     if not text_request_capacity_known(params):
         raise ConversationCompactError("降级请求的完整容量未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
-    ceiling = model_request_input_ceiling(agent, _native_compact_policy(agent, params).context_window_tokens)
+    policy = _native_compact_policy(agent, params)
+    ceiling = model_request_input_ceiling(agent, policy.context_window_tokens)
     if ceiling <= 0:
         raise ConversationCompactError("模型输入容量未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
     before = estimator()
@@ -531,13 +542,22 @@ def _continue_after_compact_failure(agent, params, estimator, *, reason: str, fo
         trimmed = stub_old_native_tool_results(params, target_tokens=int(ceiling * 0.85), estimate_tokens=estimator, require_progress=force)
         if force and not trimmed:
             raise ConversationCompactError("强制降级没有可缩小的旧工具结果，不能重发相同超限请求", code="COMPACT_BUDGET_EXCEEDED")
+    elif fresh_failure and before > policy.trigger_tokens:
+        # Level1仅在一次新摘要失败后尝试一个真正变小的旧结果；没有可缩项仍可按92%安全线续跑。
+        trimmed = stub_old_native_tool_results(params, target_tokens=int(ceiling * 0.92),
+                                               estimate_tokens=estimator, require_progress=True)
     raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
     already_latched = params.compact_degradation_latched
+    if fresh_failure or not already_latched or params.compact_degraded_baseline_tokens <= 0:
+        object.__setattr__(params, "compact_degraded_baseline_tokens", before)
     object.__setattr__(params, "compact_degradation_latched", True)
     object.__setattr__(params, "compact_degradation_reason", reason)
-    if not already_latched or trimmed:
+    if fresh_failure or not already_latched or trimmed:
         _LOGGER.warning("compact summary degraded; active turn continues", extra={
+            "compact_degraded": True,
+            "compact_fallback_level": "local_trim" if level == 1 else "stub_collapse",
             "compact_degraded_level": level, "reason": reason,
+            "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL, "original_reason_code": reason,
             "commit_authority": COMPACT_AUTHORITY_TURN_LOCAL,
             "before_tokens": before, "after_tokens": estimator(), "trimmed_results": trimmed,
         })

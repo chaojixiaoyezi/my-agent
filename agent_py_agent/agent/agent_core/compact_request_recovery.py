@@ -1,5 +1,5 @@
 # LLM: 共用宿主完整准备与原Compact/CAS；额度耗尽不恢复业务模型重试，公共层仍不得重跑准备或建立持久状态。
-# 模块用途: 三宿主共用一次准备；共享硬停分类，瞬时失败只恢复可发送的本轮视图，计量/CAS/取消仍走原链。
+# 模块用途: 三宿主共用准备与降级告警/压力基线；仅恢复可发送的本轮视图，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
 import logging
@@ -336,11 +336,13 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
 
 
 # LLM: 只供select提交前失败；统一分类后恢复原种子，逼近容量/强制失败只接受更小的回合局部视图。
-#   未能满足完整预算时重新解绑，不能复活原超限请求、推进CAS或重跑业务工具。
-# 函数用途: 恢复仍安全的原请求或临时折叠旧结果；权限、配额、取消和来源损坏一律不降级。
+#   完整且可计量的native输入也复用Level1局部裁剪；无可裁IR时保留原安全回退，统一日志别名与失败基线。
+#   未满足预算时重新解绑，不能推进CAS或重跑业务工具；权限、配额、取消及来源损坏仍拒绝。
+# 函数用途: 恢复安全原请求或临时折叠旧结果，记录本次失败压力及两套等价的结构化告警字段。
 def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
     from ..runtime_errors import DataCorruptionError
     from .host_turn_scope import UNSETTLED_HOST_ERRORS
+    from .tool_request_projection import text_request_capacity_known
 
     allowed, reason = compact_failure_is_degradable(exc)
     if (
@@ -360,7 +362,8 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     object.__setattr__(params, "provider_history_messages", restored)
     ceiling = model_request_input_ceiling(recovery.agent, recovery.source.policy.context_window_tokens)
     before = calibrated_compact_request_tokens(before_tokens, recovery.calibration)
-    if recovery.force or before > int(ceiling * 0.92):
+    if (recovery.force or before > int(ceiling * 0.92)
+            or (frozen.prompt_input is not None and params.tool_ir_history and text_request_capacity_known(params))):
         from ._tool_loop_service import _continue_after_compact_failure
         from .model.context_pressure import model_visible_context_snapshot
 
@@ -385,8 +388,11 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     elif ceiling > 0:
         object.__setattr__(params, "compact_degradation_latched", True)
         object.__setattr__(params, "compact_degradation_reason", reason)
+        object.__setattr__(params, "compact_degraded_baseline_tokens", before)
         logging.getLogger(__name__).warning("compact preflight degraded; active turn continues", extra={
+            "compact_degraded": True, "compact_fallback_level": "local_trim",
             "compact_degraded_level": 1, "reason": reason, "before_tokens": before,
+            "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL, "original_reason_code": reason,
             "commit_authority": COMPACT_AUTHORITY_TURN_LOCAL,
         })
     else:

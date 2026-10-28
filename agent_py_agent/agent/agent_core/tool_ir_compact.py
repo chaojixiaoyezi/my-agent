@@ -1,6 +1,6 @@
 
 # LLM: 原生工具回收复用唯一 typed IR 重写入口；摘要覆盖事实同时控制旧 assistant 与运行快照回收。
-# 模块用途: 形成正常压缩候选及独立的回合降级桩；后者不改原IR、用户输入、摘要或持久状态。
+# 模块用途: 形成正常候选和带UTF-8校验的回合降级桩；只采用完整token更小的覆盖，不改原IR或持久状态。
 from __future__ import annotations
 
 """native 模式下 compact 对结构化 IR 历史的「整对」回收（Step 3）。
@@ -37,6 +37,7 @@ tool_use id）。直接对这串 ToolResult 套用「保最近 / 预算」策略
 旧的记忆拼接 CompressionService 已移除；正式会话摘要由 ConversationStore/checkpoint 链负责。
 """
 
+import hashlib
 import json
 import re
 from collections.abc import Callable
@@ -85,8 +86,9 @@ class NativeCompactSummary:
 
 # LLM: Only a provider-view override is changed; canonical IR and ToolCall/ToolResult pairs remain
 # intact. Overrides use original four-part source identity; force requires fresh shrinkage even
-# when a provider rejection contradicts the local estimate. Never invent archive references.
-# 函数用途: 保留尾四对并按真实来源折叠旧结果；强制恢复至少新裁一条，超预算时恢复原投影并拒绝发送。
+# when a provider rejection contradicts the local estimate. Preserve raw UTF-8 bytes/digest/marker;
+# every accepted stub must actually reduce full request tokens. Never invent archive references.
+# 函数用途: 保尾四对并折叠旧结果，附原字节校验；无token收益则撤候选，超预算恢复原投影并拒发。
 def stub_old_native_tool_results(params: object, *, target_tokens: int, estimate_tokens: Callable[[], int], require_progress: bool = False) -> int:
     from ..conversation.compact_guard import ConversationCompactError
     from ..conversation.compact_progress import COMPACT_AUTHORITY_TURN_LOCAL
@@ -97,21 +99,30 @@ def stub_old_native_tool_results(params: object, *, target_tokens: int, estimate
     changed = 0
     try:
         for source, result in results[:-4]:
-            if estimate_tokens() <= target_tokens and (not require_progress or changed):
+            before_tokens = estimate_tokens()
+            if before_tokens <= target_tokens and (not require_progress or changed):
                 return changed
             if source in stubs:
                 continue
             archive_ref = next((ref.ref for ref in result.refs if ref.kind == "artifact"), "")
             archive_ref = archive_ref or next((ref.ref for ref in result.refs), "")
+            raw_bytes = result.output.encode("utf-8")
+            digest = hashlib.sha256(raw_bytes).hexdigest()
             content = json.dumps({
                 "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL,
+                "commit_authority": COMPACT_AUTHORITY_TURN_LOCAL,
                 "tool_name": result.tool_name, "call_id": result.call_id,
                 "status": result.status, "char_length": len(result.output),
                 "archive_ref": archive_ref or None,
+                "bytes": len(raw_bytes), "sha256": digest,
+                "marker": f"[TOOL_OUTPUT_COMPACTED: tool_call_id={result.call_id} bytes={len(raw_bytes)} sha256={digest}]",
             }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            if len(content) >= len(result.output):
+            if len(content.encode("utf-8")) >= len(raw_bytes):
                 continue
             stubs[source] = replace(result, content_blocks=(ToolContentBlock("text", text=content),))
+            if estimate_tokens() >= before_tokens:
+                stubs.pop(source)
+                continue
             changed += 1
         if estimate_tokens() > target_tokens:
             raise ConversationCompactError("保留当前输入与最近四对工具后仍超过安全预算", code="COMPACT_BUDGET_EXCEEDED")

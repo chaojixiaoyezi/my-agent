@@ -1,5 +1,5 @@
 # LLM: 本模块定义一次 run 和工具循环参数；replace 保留同轮控制及复核去重，临时建议标记不拥有权限或完成状态。
-# 模块用途: 保存模型循环、执行、压缩和归档参数；压缩降级状态只随同轮replace传递，不进入canonical IR或新run。
+# 模块用途: 保存模型循环、执行、压缩和归档参数；降级标记及增长基线只随同轮replace传递，不进入canonical IR或新run。
 
 from __future__ import annotations
 
@@ -57,8 +57,8 @@ class FinalizeContext:
     attempt_id: str = ""
 
 
-# LLM: ToolLoopExecuteParams保存本run事实及opaque原输入source；降级桩依原调用四元来源且不序列化/授权，逻辑turn/attempt独立。
-# 类用途: 汇总本轮上下文、快照、取消和摘要范围；降级投影与真实工具账分离，审批链保持完整。
+# LLM: ToolLoopExecuteParams保存本run事实；降级桩依四元来源，15%重试基线仅本轮replace传递，不序列化或授权。
+# 类用途: 汇总本轮上下文、快照、取消和摘要范围；降级投影和重试基线与真实工具账分离，新run重置。
 @dataclass(frozen=True)
 class ToolLoopExecuteParams:
     user_prompt: str
@@ -115,6 +115,8 @@ class ToolLoopExecuteParams:
     # 仅本轮有效；不修改canonical历史，也不从旧会话/其它Owner恢复。
     compact_degradation_latched: bool = False
     compact_degradation_reason: str = ""
+    # 本次摘要失败时的完整校准压力；普通续轮不更新，增长至少15%才再尝试摘要。
+    compact_degraded_baseline_tokens: int = 0
     compact_degradation_stubs: dict[tuple[str, str, str, str], Any] = field(default_factory=dict, repr=False, compare=False)
     conversation_turn_id: str = ""
     # 回合触发类型（runtime/turn_trigger.TurnTrigger），None 是普通用户轮；决定当前回合开头、推荐节与原生历史保存。

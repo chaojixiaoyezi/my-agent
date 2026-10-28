@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 B4 Round 2：压力基线与出站投影同源
+
+下方初版结构沿用，本轮在同一权威入口返修：`compact_guard`先按四字段硬码裁决；`ToolLoopExecuteParams`新增失败压力基线，新失败更新、普通续轮保留，`_fit_native_ir_to_shared_budget`在增长15%边界重新摘要。`_continue_after_compact_failure`区分新失败/旧锁存，Level1最多局部缩一条，避免无新输入却连续换桩扰动逻辑身份；完整native shared恢复复用同一实现，原安全无prompt回退也记基线及统一告警别名。
+
+`stub_old_native_tool_results`对原正文UTF-8生成bytes/SHA256/marker，并用完整投影重估逐项拒绝无收益候选；其canonical隔离/尾四对/失败回滚不变。`provider_messages_fingerprint`先调用与真实发送一致的`project_native_prompt_history`再哈希，原`logical_model_call_id`自然反映视图变化，无第二身份源或新持久字段。冻结、materializer与最终原IR序列化仍沿初版隔离边界，详见[TESTS](../../../TESTS.md)Round 2。
+
 ## 2026-10-28 Wave 9 B4：共享分类与回合局部模型视图
 
 `conversation/compact_guard.py::compact_failure_is_degradable`是中途Compact及`agent_core/compact_request_recovery.py`的唯一降级分类口。`_tool_loop_service.py`只捕获摘要准备阶段，正常候选提交及提交后错误仍走原CAS/回滚边界。`ToolLoopExecuteParams`保存本轮锁存与四元来源覆盖，不挂在Agent或线程上；`tool_ir_compact.py`产生确定性桩，`tool_ir_history.py`仅投影到出站副本，system、用户、摘要和尾四对不被覆盖。

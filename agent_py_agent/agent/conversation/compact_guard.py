@@ -1,5 +1,5 @@
 # LLM: This module owns structural recent-tail selection and the persisted conversation compact
-# failure circuit and the shared fail-closed continuation classifier. It never reads error prose
+# failure circuit and the shared four-field fail-closed continuation classifier. It never reads error prose
 # as control or mutates transcript/cursor state; hard quota, cancellation and authority stay fatal.
 # 模块用途: 给唯一会话压缩链提供近期完整回合选择和连续失败熔断，防止截断对话或重复空烧模型。
 
@@ -266,13 +266,15 @@ def is_provider_quota_failure(exc: BaseException) -> bool:
     return is_provider_quota_exhausted_error(exc) or compact_error_is_provider_quota(exc)
 
 
-# LLM: Both mid-loop and host recovery use these structural codes; new unknown failures are not
-# assumed safe. Inspect the complete exception graph before accepting any transient wrapper.
-# 函数用途: 统一判断摘要失败可否临时续跑，取消、额度、权限和存储错误不能被外层软错误洗掉。
+# LLM: Both mid-loop and host recovery first normalize code/error_code/reason_code/failure_reason;
+# any hard code wins over transient types. Only explicitly tagged summary-parse branches may
+# contain JSONDecodeError; unknown/structural branches remain fatal, including untagged JSON errors.
+# 函数用途: 用统一结构化错误码判定摘要能否续跑，补齐软码但不让瞬断类型洗掉取消、权限或CAS硬停。
 def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
     import builtins
     from asyncio import CancelledError as AsyncCancelledError
     from concurrent.futures import CancelledError as FutureCancelledError
+    from json import JSONDecodeError
     from urllib.error import HTTPError, URLError
 
     from ..backends.errors import (
@@ -291,18 +293,21 @@ def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
         "REQUEST_PROJECTION_CHANGED", "TOOL_COVERAGE_UNKNOWN", "REQUEST_NON_TEXT",
         "PROVIDER_QUOTA_EXHAUSTED", "QUOTA_EXCEEDED", "INSUFFICIENT_QUOTA", "BILLING",
         "AUTHENTICATION_ERROR", "INVALID_API_KEY", "CANCELLED", "CANCELED", "INTERRUPTED",
+        "CAS_CONFLICT", "SCOPE_MISMATCH", "USER_CANCELLED", "AUTH_ERROR", "PERMISSION_DENIED",
     }
-    soft = {"FAILED", "SUMMARY_EMPTY", "EMPTY_SUMMARY", "BUDGET_EXCEEDED", "TIMEOUT", "CIRCUIT_OPEN"}
-    pending, seen, eligible = [exc], set(), False
+    soft = {"FAILED", "SUMMARY_EMPTY", "EMPTY_SUMMARY", "BUDGET_EXCEEDED", "TIMEOUT", "CIRCUIT_OPEN",
+            "MODEL_CALL_FAILED", "PARSE_FAILED", "BACKEND_UNAVAILABLE"}
+    pending, seen, eligible = [(exc, False)], set(), False
     reason = compact_exception_code(exc)
     while pending:
-        current = pending.pop()
-        if id(current) in seen:
+        current, parse_scope = pending.pop()
+        visit = (id(current), parse_scope)
+        if visit in seen:
             continue
-        seen.add(id(current))
+        seen.add(visit)
         code = compact_exception_code(current).removeprefix("COMPACT_")
         codes = {code}
-        for field in ("error_code", "code"):
+        for field in ("error_code", "code", "reason_code", "failure_reason"):
             value = getattr(current, field, None)
             if isinstance(value, str):
                 codes.add(value.strip().upper().removeprefix("COMPACT_"))
@@ -311,13 +316,18 @@ def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
             status = current.code
         if codes & hard:
             return False, f"COMPACT_{sorted(codes & hard)[0]}"
+        parse_scope = parse_scope or "PARSE_FAILED" in codes
+        parse_leaf = parse_scope and isinstance(current, JSONDecodeError)
         if (status in {401, 402, 403, 407}
+                or (isinstance(current, ValueError) and not parse_leaf)
                 or isinstance(current, (ToolCancelled, AsyncCancelledError, FutureCancelledError,
                     KeyboardInterrupt, SystemExit, InterruptedError, PermissionError, DataCorruptionError,
                     ProviderQuotaExhaustedError, ProviderConfigurationError,
-                    TypeError, ValueError, LookupError, AssertionError))):
+                    TypeError, LookupError, AssertionError))):
             return False, compact_exception_code(current)
-        known_soft = bool(codes & soft) or status == 429 or (status is not None and status >= 500)
+        if current is exc and codes & soft:
+            reason = f"COMPACT_{sorted(codes & soft)[0]}"
+        known_soft = parse_leaf or bool(codes & soft) or status == 429 or (status is not None and status >= 500)
         known_soft = known_soft or isinstance(current, (ProviderTransientError, ProviderTimeoutError, TimeoutError, ConnectionError))
         # HTTPError继承URLError，但明确的永久4xx不能按网络瞬断放行；429/5xx已在上面判定。
         known_soft = known_soft or (isinstance(current, URLError) and not isinstance(current, HTTPError))
@@ -325,9 +335,9 @@ def compact_failure_is_degradable(exc: BaseException) -> tuple[bool, str]:
         if not known_soft and not isinstance(current, builtins.BaseExceptionGroup):
             return False, compact_exception_code(current)
         eligible = eligible or known_soft
-        pending.extend(item for item in (current.__cause__, current.__context__) if item is not None)
+        pending.extend((item, parse_scope) for item in (current.__cause__, current.__context__) if item is not None)
         if isinstance(current, builtins.BaseExceptionGroup):
-            pending.extend(current.exceptions)
+            pending.extend((item, parse_scope) for item in current.exceptions)
     return eligible, reason
 
 
