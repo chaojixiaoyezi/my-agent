@@ -1,6 +1,6 @@
 """Dataclasses for effective memory config and default warnings."""
 
-# LLM: 不可变 Memory 生效字段含召回前/后及 Curator 独立决策点；YAML 与 AgentConfig 默认必须一致，配置不构成写入权。
+# LLM: 不可变Memory设置包含闲置和四层压缩默认，须与YAML/AgentConfig一致；管理员强制字段不能作为用户授权。
 # 模块用途: 定义 Memory/Curator 生效配置和配置回退警告的数据结构。
 
 from __future__ import annotations
@@ -25,6 +25,10 @@ class MemorySettings:
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
+    memory_compact_trigger_percent: int = 80
+    force_compact_trigger_percent: bool = False
+    memory_compact_idle_trigger_percent: int = 60
+    memory_compact_idle_seconds: int = 7200
     memory_compact_auto_trigger_percent: int = 90
     memory_compact_auto_trigger_max_tokens: int = 300_000
     memory_compact_recovery_target_percent: int = 60

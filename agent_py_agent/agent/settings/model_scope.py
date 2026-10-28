@@ -263,7 +263,7 @@ def activate_model_dependencies(agent: object, dependencies: ModelScopeDependenc
     lifetime.stack.enter_context(foreground_model_scope(agent.backend))
 
 
-# LLM: 最外层按 canonical thread 建立初始依赖；后续显式选择由原循环请求安全点采用，子代理继承仍独立冻结。
+# LLM: 最外层按canonical thread建立模型及压缩比例快照，覆盖Gateway预检到收口；后续模型采用不重解析比例。
 # 函数用途: 为本次执行绑定初始模型及选择版本，退出恢复宿主依赖，不新建 MCP。
 @contextmanager
 def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True):
@@ -288,7 +288,11 @@ def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: s
     dependencies = prepare_model_dependencies(agent, model_config, inherited=inherited)
     assert dependencies is not None
     dependencies = replace(dependencies, selection=selection)
-    with model_dependencies_scope(agent, dependencies, thread_id=thread_id, active=active):
+    with model_dependencies_scope(agent, dependencies, thread_id=thread_id, active=active), ExitStack() as stack:
+        if selection is not None:
+            from ..conversation.compact_threshold_policy import compact_policy_scope
+
+            stack.enter_context(compact_policy_scope(agent, thread))
         yield
 
 

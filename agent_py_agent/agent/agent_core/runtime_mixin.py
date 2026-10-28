@@ -81,7 +81,7 @@ def release_active_turn_inputs_for_compact(
     return release_reserved_turn_input_after_attempt(agent, params)
 
 
-# LLM: 先固定旧临时状态，再在同一 try/finally 中安装参数与快照；包括 yield 前的过期引用错误也必须恢复。
+# LLM: 安装参数/能力后按本轮规范thread冻结压缩比例；同try/finally恢复临时状态，live/finalization不重读变动设置。
 # 函数用途: 进入逐 run prompt/能力快照范围，并冻结会话方法名单；退出恢复原线程状态。
 @contextmanager
 def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = None):
@@ -108,7 +108,14 @@ def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = Non
             agent._current_run_params = params
         agent._current_skill_snapshot = _turn_skill_snapshot(agent)
         freeze_conversation_methods(agent)
-        yield
+        from ..conversation.compact_threshold_policy import compact_policy_scope
+
+        attributes = getattr(params, "task_attributes", None) or {}
+        thread_id = attributes.get("conversation_thread_id") if isinstance(attributes, dict) else None
+        store = getattr(agent, "conversation_store", None)
+        thread = store.threads.load(thread_id) if store is not None and thread_id else None
+        with compact_policy_scope(agent, thread) if thread is not None else nullcontext():
+            yield
     finally:
         _restore_current_prompt(agent, snapshot)
 

@@ -1,4 +1,5 @@
-
+# LLM: 四层比例和闲置参数来自共享设置/会话解析，冻结进原不可变运行策略；不在Gateway复制第二套算法。
+# 模块用途: 统一窗口、触发点、尾部、恢复目标和冷却参数。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,11 +9,14 @@ from ...memory_archive.compact_circuit_breaker import (
     DEFAULT_COMPACT_COOLDOWN_SECONDS,
     DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
 )
+from ...settings.config_layers import compact_idle_parameters
 from ..model.context_window import resolve_model_context_window_tokens
 
+# LLM: 四层比例及闲置参数冻结进不可变策略；默认只读同owner治理，root与child共用且不授执行权。
 # LLM: These defaults define one provider-neutral runtime compact policy shared by root and child
 # agents. The configured percentage has one authoritative location.
 # 模块用途: 统一计算模型窗口、精确触发点、近期尾部预算和连续失败冷却参数。
+# 旧数值辅助API维持90%缺省；会话四层默认80%由config_layers解析，不从这个兼容常量重建。
 DEFAULT_COMPACT_TRIGGER_PERCENT = 90
 # 触发线绝对上限的默认值：与 AgentConfig/MemorySettings/随包 YAML 的默认一致；0 只在显式配置时表示不封顶。
 DEFAULT_COMPACT_TRIGGER_MAX_TOKENS = 300_000
@@ -42,6 +46,13 @@ class RuntimeCompactPolicy:
     failure_cooldown_seconds: float
     # memory_compact_auto_trigger_max_tokens 规范化后的绝对上限；0 表示不封顶。trigger_tokens 已按它取小。
     trigger_max_tokens: int = 0
+    effective_source: str = "admin_default"
+    force_locked: bool = False
+    user_default_percent: int | None = None
+    thread_override_percent: int | None = None
+    admin_default_percent: int = 80
+    idle_trigger_percent: int = 60
+    idle_seconds: int = 7200
 
     # LLM: 只由结构化字段推出：上限严格小于「窗口 × 百分比」才算封顶；上限正好等于它时触发线与不封顶相同，
     #   finalization 仍按百分比判定。finalization 的 token 触发线、/context 展示和 recovery 的等比推导都据此切换；
@@ -52,6 +63,7 @@ class RuntimeCompactPolicy:
         return _trigger_is_capped(self.context_window_tokens, self.trigger_percent, self.trigger_max_tokens)
 
 
+# LLM: 比例从已冻结回合或显式线程四层解析一次，闲置与主压缩共用同一窗口；不可变快照不随之后设置变化而变。
 # LLM: Resolve every durable compact limit from the model/config snapshot once per invocation.
 # Transcript authority may permit a canonical Compact even when save=False only suppresses the
 # legacy memory/final-response write path; auxiliary no-save calls still remain non-persistent.
@@ -65,10 +77,15 @@ def runtime_compact_policy(
     save: bool = True,
     context_scope: str = "default",
     task_attributes: object = None,
+    thread: object = None,
 ) -> RuntimeCompactPolicy:
+    from ...conversation.compact_threshold_policy import resolve_thread_compact_policy
+
     window = resolve_model_context_window_tokens(agent)
     config = getattr(agent, "config", None)
-    percent = compact_trigger_percent(getattr(config, "memory_compact_auto_trigger_percent", None))
+    resolution = resolve_thread_compact_policy(agent, thread)
+    idle_threshold, idle_seconds = compact_idle_parameters(config)
+    percent = resolution["effective_trigger_percent"]
     recovery_percent = compact_recovery_target_percent(getattr(config, "memory_compact_recovery_target_percent", None))
     trigger_max_tokens = compact_trigger_max_tokens(getattr(config, "memory_compact_auto_trigger_max_tokens", None))
     trigger_tokens = _capped_trigger_tokens(window, percent, trigger_max_tokens)
@@ -97,6 +114,13 @@ def runtime_compact_policy(
         failure_threshold=DEFAULT_COMPACT_FAILURE_THRESHOLD_COUNT,
         failure_cooldown_seconds=DEFAULT_COMPACT_COOLDOWN_SECONDS,
         trigger_max_tokens=trigger_max_tokens,
+        effective_source=resolution["effective_source"],
+        force_locked=resolution["force_locked"],
+        user_default_percent=resolution["user_default_percent"],
+        thread_override_percent=resolution["thread_override_percent"],
+        admin_default_percent=resolution["admin_default_percent"],
+        idle_trigger_percent=idle_threshold,
+        idle_seconds=idle_seconds,
     )
 
 

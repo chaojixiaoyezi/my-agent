@@ -70,7 +70,7 @@ def test_p2a_optional_preflight_failure_restores_seed_and_completes_turn(tmp_pat
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 
     fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
-    fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    fixture.agent.config.memory_compact_trigger_percent = 90
     monkeypatch.setattr(compact, "_summarize", lambda *a, **k: "已提交的第一代摘要")
     prepare_conversation_context(
         fixture.agent, fixture.agent.conversation_store,
@@ -146,7 +146,7 @@ def test_p2a_preflight_does_not_mask_hard_failures(tmp_path, monkeypatch, failur
     from agent_py_agent.tests.test_gateway_model_adoption import fake_http
 
     fixture = _history_request(tmp_path, original_window=100_000, history_repeat=1)
-    fixture.agent.config.memory_compact_auto_trigger_percent = 90
+    fixture.agent.config.memory_compact_trigger_percent = 90
     state, reads, summaries = {}, [], []
     original = recovery.PreparedCompactRecovery.select
     tokens = 95_904 if failure == "ceiling" else 95_000
@@ -1062,6 +1062,8 @@ def test_conversation_compact_does_not_summarize_detached_audit_delivery_body() 
     assert "不应进入摘要的新受益人事件正文" not in backend.prompts[0]
 
 
+# LLM: 夹具使用新规范键，仍保持原50%观察点；旧YAML兼容另有Wave9回归，不放宽预算断言。
+# 函数用途: 创建隔离真实Agent及明确比例，避免新默认80%改变原测试输入。
 def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent:
     config = AgentConfig(
         model_backend="echo",
@@ -1069,7 +1071,7 @@ def _agent(tmp_path, *, context_tokens: int, max_turns: int = 20) -> SimpleAgent
         prompt_files=[],
         max_tokens=64,
         model_context_window_tokens=context_tokens,
-        memory_compact_auto_trigger_percent=50,
+        memory_compact_trigger_percent=50,
         conversation_history_max_turns=max_turns,
     )
     config.config_sources = {"model_context_window_tokens": {"source": "test"}}
@@ -1354,6 +1356,8 @@ def test_invalid_summary_candidate_never_advances_cursor_and_opens_circuit(tmp_p
     assert not checkpoint_path.exists()
 
 
+# LLM: 使用新规范比例键，仍强验8500候选/9000触发线和单次摘要，不放宽失败边界。
+# 函数用途: 验证健康目标不可达时保留低于实际触发线的候选。
 def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_unreachable(
     tmp_path,
     monkeypatch,
@@ -1363,7 +1367,7 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     from agent_py_agent.agent.conversation import compact as compact_module
 
     agent = _agent(tmp_path, context_tokens=10_000)
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     backend = _SummaryBackend()
     agent.backend = backend
@@ -1409,6 +1413,8 @@ def test_transcript_compact_keeps_valid_candidate_below_trigger_when_target_is_u
     assert backend.calls == 1
 
 
+# LLM: 新规范键显式90%，所有原输出预留与拒绝断言不变；不拿80%新默认改变旧观察输入。
+# 函数用途: 在多种输出预留和OAuth模式下核候选容量硬边界。
 @pytest.mark.parametrize("output_cap,candidate_tokens,explicit,oauth,force,accepted", [
     (4_000, 5_999, True, False, False, True),
     (4_000, 6_000, True, False, True, False),
@@ -1432,7 +1438,7 @@ def test_transcript_candidate_respects_output_reserve_before_target_or_fallback(
     agent = _agent(tmp_path, context_tokens=10_000)
     if not explicit:
         agent.config.model_context_window_tokens = None
-    agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.memory_compact_recovery_target_percent = 60
     backend_type = OpenAIResponsesBackend if oauth else HttpBackend
     agent.backend = backend_type(BackendOptions(api_base="https://example.invalid", api_key="fake-key",

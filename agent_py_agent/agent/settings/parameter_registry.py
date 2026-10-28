@@ -79,7 +79,7 @@ _BOUNDARY_NAMES = frozenset({
 # 守卫见 test_parameter_registry：名单里的键必须存在、不能是安全边界项、必须有说明（过渡期例外单独登记）。顺序即展示顺序。
 COMMON_KEYS = (
     "max_tokens", "request_timeout", "temperature", "model_reasoning_effort",
-    "memory_compact_auto_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
+    "memory_compact_trigger_percent", "conversation_history_max_turns", "memory_top_k", "memory_curator_enabled",
     "enable_self_learning", "enable_subagents", "max_subagents",
     "tool_shell_timeout", "tool_shell_output_max_chars", "tool_read_max_chars", "tool_list_max_entries",
     "tool_search_max_matches", "tool_web_max_chars", "tool_http_timeout", "tool_output_externalize_min_chars",

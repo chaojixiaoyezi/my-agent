@@ -20,7 +20,8 @@ def _thread_specs():
     setting = {"model_profile_id": text(256, 1), "reasoning_effort": {"enum": [
         "auto", "off", "low", "medium", "high", "xhigh", "max", "ultra"]},
         "permission_mode": {"enum": ["ask", "auto", "full-access"]},
-        "preferred_pack_ids": references(), "pack_ids": references()}
+        "preferred_pack_ids": references(), "pack_ids": references(),
+        "compact_trigger_percent": {"type": ["integer", "null"], "minimum": 50, "maximum": 95}}
     scope = "threads.scope"
     return [
         _spec("conversations.threads.settings.get", "read", "read", closed(thread), scope),

@@ -7,7 +7,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from .config_layers import ConfigLayer, EffectiveConfig, merge_config_layers
+from .config_layers import ConfigLayer, EffectiveConfig, compact_policy_percent, merge_config_layers
 
 INTERNAL_RUNTIME_CONFIG_FIELDS = {
     "config_layers",
@@ -22,6 +22,8 @@ def public_config_keys(config_cls: type) -> set[str]:
     return {item.name for item in fields(config_cls)} - INTERNAL_RUNTIME_CONFIG_FIELDS
 
 
+# LLM: 旧比例键只在同一来源未提供新键时迁移，来源优先级不变；用户字段仍排除宿主内部诊断和身份快照。
+# 函数用途: 合并默认、配置文件和环境来源，并兼容旧压缩比例配置。
 def merge_agent_config_sources(
     *,
     config_cls: type,
@@ -31,6 +33,8 @@ def merge_agent_config_sources(
 ) -> EffectiveConfig:
     allowed = public_config_keys(config_cls)
     clean = {key: normalized[key] for key in raw_keys if key in allowed and key in normalized}
+    if "memory_compact_auto_trigger_percent" in clean and "memory_compact_trigger_percent" not in clean:
+        clean["memory_compact_trigger_percent"] = compact_policy_percent(clean["memory_compact_auto_trigger_percent"], 80)
     schema_defaults = _schema_default_values(config_cls, allowed)
     env_values = _env_override_values(clean, schema_defaults)
     layers = [

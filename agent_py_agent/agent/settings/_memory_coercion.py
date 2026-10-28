@@ -64,6 +64,10 @@ _FIELDS = (
     _FieldSpec("memory_rule_routing_mode", "choice", choices={"off", "soft", "strict"}),
     _FieldSpec("memory_rule_auto_read_limit", "int", 0, None),
     _FieldSpec("memory_resume_auto_context_mode", "choice", choices={"off", "trigger", "always"}),
+    _FieldSpec("memory_compact_trigger_percent", "clamped_int", 50, 95),
+    _FieldSpec("force_compact_trigger_percent", "bool"),
+    _FieldSpec("memory_compact_idle_trigger_percent", "clamped_int", 0, 95),
+    _FieldSpec("memory_compact_idle_seconds", "idle_seconds", 0, None),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
     # 0 表示不封顶；负数、非整数回到默认 300000，与 runtime 的 compact_trigger_max_tokens 同一口径。
     _FieldSpec("memory_compact_auto_trigger_max_tokens", "int", 0, None),
@@ -109,7 +113,7 @@ def _build_memory_settings_dict(
     return result
 
 
-# LLM: Dispatch is based only on typed FieldSpec.kind; unknown prose or runtime values cannot select another parser.
+# LLM: 只按显式字段规格解析；新比例严格整数夹取，闲置秒数0关闭、启用至少60，不改变旧字段校验。
 # 函数用途: 按字段规格校验并规范化一个 Memory 配置值。
 def _coerce_field(
     spec: _FieldSpec,
@@ -120,6 +124,14 @@ def _coerce_field(
     """Coerce one field spec while preserving user-facing warning order."""
     raw_value = _lookup(source, spec.field_name)
     default = getattr(defaults, spec.field_name)
+    if spec.kind in {"clamped_int", "idle_seconds"}:
+        number = _memory_int_number(raw_value)
+        if number is None:
+            return default
+        number = max(spec.min_value or 0, number)
+        if spec.kind == "idle_seconds":
+            return max(60, number) if number else 0
+        return min(spec.max_value, number)
     if spec.kind == "bool":
         return _coerce_bool(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "choice":

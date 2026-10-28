@@ -100,6 +100,12 @@ def _non_empty_text(value: object) -> tuple[bool, str, object]:
 # LLM: 白名单宁窄勿宽：只放"用户自己的偏好/运行节奏"，不放任何影响权限、路径、凭据、模型路由或宿主控制面的项。
 # 常量用途: 声明可自助修改的配置项。
 TUNABLE_KEYS: dict[str, TunableSpec] = {
+    "memory_compact_trigger_percent": TunableSpec(
+        key="memory_compact_trigger_percent",
+        describe="会话压缩的管理员默认比例（50~95，默认80；管理员强制、会话和用户策略另行解析）",
+        validate=_percent_within((50, 95)),
+        effect=EFFECT_GATEWAY_RESTART,
+    ),
     "memory_compact_auto_trigger_percent": TunableSpec(
         key="memory_compact_auto_trigger_percent",
         describe="上下文用到百分之多少时自动 compact（50~100，默认 90）",
@@ -160,6 +166,7 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
 #   要么属于宿主控制面。模型永远不能自行改；用户要改就走宿主入口或人工编辑。
 # 常量用途: 声明模型不可自行修改的配置项与原因。
 BOUNDARY_KEYS: dict[str, str] = {
+    "force_compact_trigger_percent": "管理员压缩强制策略；模型不能自助解除或伪造管理员锁，须走宿主管理入口",
     "im_group_authorization_required": "群能力显式授权的部署安全边界；模型不能关闭或绕过",
     "feishu_bot_subscriptions_enabled": "群机器人消息订阅的部署安全边界；模型不能自行扩大接收范围",
     "owner_default_permission_mode": "部署默认确认策略；仅部署者修改，模型不能扩大自身执行策略",

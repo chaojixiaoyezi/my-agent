@@ -1853,8 +1853,8 @@ def _submit_due_curators(
     return index
 
 
-# LLM: 只推迟非紧急 retention；安全清理在保护期内照常跑，原分页与 owner 边界保持。
-# 类用途: 分页维护 owner 磁盘保留策略与安全欠账，不创建冷 Agent。
+# LLM: 只推迟非紧急retention/闲置压缩；安全清理在保护期照跑，原分页与owner边界保持，不创建冷Agent。
+# 类用途: 分页维护磁盘保留和空闲会话压缩，沿原安全清理及已加载执行器范围运行。
 class _GatewayOwnerMaintenanceController:
     """Apply one bounded owner retention page per tick without creating agents."""
 
@@ -1865,6 +1865,7 @@ class _GatewayOwnerMaintenanceController:
         self._base_agent = _gateway_agent_from_context(context)
         self._base_home = self._base_agent.home_paths
         self._cursor: OwnerWakeCursor | None = None
+        self._idle_compact_cursor: dict = {}
         self.interval = max(
             0.0,
             _float_config(
@@ -1884,13 +1885,16 @@ class _GatewayOwnerMaintenanceController:
 
     # LLM: 每拍先跑基础 owner，再按分页游标跑一页 scoped owner，只做到期维护、不构造 owner agent；
     #   摘要由 _maintenance_summary 汇总（failed 只算整次被拒与执行期动作失败，另有 refused / isolated），只打印、不落盘。
-    # 函数用途: 保护期后跑原 retention 分页，不承担或推迟租约及未知结果恢复。
+    # 函数用途: 保护期后跑原retention分页及最多两条闲置会话，不推迟租约及未知结果恢复。
     def tick(self, *, now: float | None = None) -> dict[str, int]:
         _cleanup_loaded_runtime_safety(self._base_agent)
         if _startup_grace_active(self):
             return _maintenance_summary([], 0)
         current = float(now if now is not None else time.time())
         reports = [run_owner_retention_if_due(self._base_home, now=current)]
+        from ..agent.gateway_parts.compact_operations import idle_compact_maintenance_tick
+
+        idle_compact_maintenance_tick(self._base_agent, cursor=self._idle_compact_cursor, now=current)
         limit = _positive_int_config(
             self._base_agent,
             "owner_agent_pool_max_agents",

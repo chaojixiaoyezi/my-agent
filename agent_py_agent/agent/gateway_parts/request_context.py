@@ -320,7 +320,7 @@ def _gateway_excluded_conversation_ids(agent: object) -> frozenset[str]:
     return frozenset() if unreadable else excluded
 
 
-# LLM: 与控制入口共用 workspace_scope 校验，目录错误先失败；存储错误仍独立报告，不混入 prompt。
+# LLM: 与控制入口共用workspace_scope；真实用户request在等待车道前记活动，同request重复加载不增代，后台原文不走此入口。
 # 函数用途: 校验普通请求的执行目录并读取或绑定 canonical 会话线程。
 def _load_gateway_thread(
     inputs: GatewayConversationLoadRequest,
@@ -337,6 +337,8 @@ def _load_gateway_thread(
         thread, error = store.threads.load_report(explicit_tid)
         if error is not None or thread is None:
             return None, error or {"error_code": "thread_unavailable"}
+        if inputs.request_id:
+            thread = store.threads.record_user_activity(thread.thread_id, request_id=inputs.request_id)
         return thread, None
     try:
         thread = store.threads.get_or_create(
@@ -358,6 +360,8 @@ def _load_gateway_thread(
                 "learning_source": user_dialogue_projection(),
             }
         )
+        if inputs.request_id:
+            thread = store.threads.record_user_activity(thread.thread_id, request_id=inputs.request_id)
     except Exception as exc:
         return None, runtime_error_report(exc, context="gateway.conversation.thread")
     return thread, None

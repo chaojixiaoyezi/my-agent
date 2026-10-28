@@ -103,6 +103,7 @@ from .native_history import (
     iter_provider_history_messages_from_rows,
     provider_history_messages_from_rows,
 )
+from .store_threads import IdleCompactActivityChanged
 from .tool_context_window import (
     TERMINAL_TOOL_FOLD_METADATA_KEY,
     conversation_message_with_terminal_tool_fold,
@@ -202,6 +203,10 @@ class ConversationCompactOptions:
     trigger_source: str = ""
     # 显式手动/compact绕过自动压缩的冷却，结果仍走原失败账；成功提交会重置熔断，自动调用默认不绕过。
     bypass_circuit_breaker: bool = False
+    # 闲置维护沿原提交链核活动代；guard只在最终短提交门运行，不持锁调用模型。
+    expected_user_activity_generation: int | None = None
+    idle_compact: bool = False
+    commit_guard: Callable[[], bool] | None = field(default=None, repr=False)
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
@@ -235,6 +240,9 @@ class _CompactRunRequest:
     # LLM: 与 ConversationCompactOptions 同义：冻结校准只套在投影器计量上；触发来源只进进度事件。
     calibration: CompactRequestCalibration | None = field(default=None, kw_only=True, repr=False)
     trigger_source: str = field(default="", kw_only=True)
+    expected_user_activity_generation: int | None = field(default=None, kw_only=True)
+    idle_compact: bool = field(default=False, kw_only=True)
+    commit_guard: Callable[[], bool] | None = field(default=None, kw_only=True, repr=False)
 
 
 # LLM: 摘要、双来源分区及request_projection属于同一候选；保留候选回退时必须同时采用，不能取循环最后一次分区。
@@ -375,7 +383,7 @@ def load_conversation_compact_source(
         if selector_factory is not None:
             raise ValueError("Compact row selection requires scope")
         pending = _without_current_request_suffix(_uncompacted_conversation_rows(store, thread), exclude_request_id)
-        return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}))
+        return ConversationCompactSource(thread, tuple(pending), runtime_compact_policy(agent, thread=thread), dict(_recent_operation_evidence(pending) or {}))
     from .compact_summary_view import (
         AppliedCompactContext,
         resolve_compact_summary_view,
@@ -389,7 +397,7 @@ def load_conversation_compact_source(
     )
     pending = _without_current_request_suffix(selected, exclude_request_id)
     return ConversationCompactSource(
-        thread, pending, runtime_compact_policy(agent), dict(_recent_operation_evidence(pending) or {}),
+        thread, pending, runtime_compact_policy(agent, thread=thread), dict(_recent_operation_evidence(pending) or {}),
         compact_context=AppliedCompactContext(thread.thread_id, scope, view),
     )
 
@@ -522,6 +530,9 @@ def _prepare_compact_request(
         tool_source=options.tool_source,
         calibration=options.calibration,
         trigger_source=str(options.trigger_source or "").strip(),
+        expected_user_activity_generation=options.expected_user_activity_generation,
+        idle_compact=options.idle_compact,
+        commit_guard=options.commit_guard,
     )
     return request
 
@@ -574,7 +585,7 @@ def _execute_compact_request(request: _CompactRunRequest) -> ConversationCompact
     _emit_compact_progress(request, phase="started", stage="preparing", percent=5)
     try:
         result = _compact_pending(request)
-    except (InterruptedError, ToolCancelled):
+    except (InterruptedError, ToolCancelled, IdleCompactActivityChanged):
         _emit_compact_progress(
             request,
             phase="superseded",
@@ -619,7 +630,7 @@ def inspect_conversation_context(
 ) -> ConversationContextUsage:
     from ..agent_core.runtime.context_compactor import runtime_compact_policy
 
-    policy = runtime_compact_policy(agent)
+    policy = runtime_compact_policy(agent, thread=thread)
     if thread is None:
         summary = ""
         evidence: dict[str, object] = {}
@@ -994,7 +1005,7 @@ def _commit_compact_candidate_or_record_failure(
 ) -> ConversationCompactResult:
     try:
         return _commit_compact_candidate(request, candidate)
-    except (InterruptedError, ToolCancelled):
+    except (InterruptedError, ToolCancelled, IdleCompactActivityChanged):
         raise
     except Exception as exc:
         record_compact_failure(
@@ -1188,7 +1199,7 @@ def _fit_landmarks_to_target(
     return smaller if smaller.tokens < measured.tokens else measured
 
 
-# LLM: 原checkpoint/generation CAS仍唯一；活跃工具按真实使用、新近性和固定名选择，并以冻结基线保留摘要期间的新发现。
+# LLM: checkpoint/generation仍唯一CAS；闲置候选在用户登记短门内复核活动并传原Store代次CAS，不持门调用模型。
 # 函数用途: 复验实际覆盖及保留来源后沿原CAS提交同一候选，局部范围和原始文件不变。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
@@ -1246,29 +1257,39 @@ def _commit_compact_candidate(
             rows.validate()
     from . import tool_discovery
     selector = tool_discovery.compact_tool_selector(request.thread, request.pending)
-    updated = request.store.threads.update_compact_state(
-        request.thread.thread_id,
-        commit=ConversationCompactCommit(
-            summary=candidate.summary,
-            operation_evidence=candidate.operation_evidence,
-            checkpoint_id=checkpoint_id,
-            compacted_through_message_id=last_row.message_id,
-            compacted_through_byte_offset=byte_offset,
-            source_messages=(
-                request.thread.compact_source_messages
-                + len(candidate.compact_rows)
+    from contextlib import nullcontext
+
+    from .run_claim import user_input_turn_gate
+
+    guard = user_input_turn_gate(request.store, request.thread.thread_id) if request.idle_compact else nullcontext(False)
+    with guard as user_present:
+        if user_present or request.commit_guard is not None and request.commit_guard():
+            raise IdleCompactActivityChanged("conversation user activity changed before idle commit")
+        updated = request.store.threads.update_compact_state(
+            request.thread.thread_id,
+            commit=ConversationCompactCommit(
+                summary=candidate.summary,
+                operation_evidence=candidate.operation_evidence,
+                checkpoint_id=checkpoint_id,
+                compacted_through_message_id=last_row.message_id,
+                compacted_through_byte_offset=byte_offset,
+                source_messages=(
+                    request.thread.compact_source_messages
+                    + len(candidate.compact_rows)
+                ),
+                source_tool_pairs=request.thread.compact_source_tool_pairs + (
+                    len(candidate.tool_source.source_tool_refs) if candidate.tool_source is not None else 0
+                ),
+                publish_thread_view=(request.compact_context is None
+                                     or request.compact_context.scope.kind == "thread"),
             ),
-            source_tool_pairs=request.thread.compact_source_tool_pairs + (
-                len(candidate.tool_source.source_tool_refs) if candidate.tool_source is not None else 0
-            ),
-            publish_thread_view=(request.compact_context is None
-                                 or request.compact_context.scope.kind == "thread"),
-        ),
-        expected_generation=request.thread.compact_generation,
-        active_loaded_tool_names=selector(request.thread),
-        active_tool_selector=selector,
-        baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
-    )
+            expected_generation=request.thread.compact_generation,
+            active_loaded_tool_names=selector(request.thread),
+            active_tool_selector=selector,
+            baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
+            **({"expected_user_activity_generation": request.expected_user_activity_generation, "idle_compact": True}
+               if request.idle_compact else {}),
+        )
     return ConversationCompactResult(
         thread=updated,
         messages=candidate.retained_tail,

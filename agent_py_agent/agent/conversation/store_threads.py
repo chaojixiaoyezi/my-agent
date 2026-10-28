@@ -301,6 +301,12 @@ def _preserve_plugin_thread_state(before: dict | None, updated: ConversationThre
     return replace(updated, metadata={**updated.metadata, "plugin_host_v2": state})
 
 
+# LLM: 活动冲突仅表示旧闲置候选让位，不计模型失败；供原CAS与闲置维护做类型化处理。
+# 类用途: 表示用户发言或同代闲置压缩已经完成。
+class IdleCompactActivityChanged(RuntimeError):
+    pass
+
+
 # LLM: 原线程元数据与通道绑定唯一存储；身份校验与扩展合并在类外小函数，仍在同一文件锁内守住 CAS，不建立第二状态源。
 # 类用途: 保存线程、目录与通道绑定，防止迟到更新回退模型/目录；默认模型只初始化新线程。
 class ThreadStore:
@@ -470,30 +476,68 @@ class ThreadStore:
             ),
         )
 
-    # LLM: 唯一CAS推进提交链与活跃集；可选纯selector在同锁最新线程选择，冻结基线保护新发现，局部检查点不覆盖全线程摘要/游标。
+    # LLM: 用户活动独立于updated_at；同请求去重，原线程锁内只更新活动字段，不把后台元数据当新输入。
+    # 函数用途: 登记真实用户发言时间和单调代次，供闲置压缩提交核验。
+    def record_user_activity(self, thread_id: str, *, request_id: str = "", now: float | None = None) -> ConversationThread:
+        current = float(time.time() if now is None else now)
+
+        # LLM: 同锁合并最新metadata，保留设置、摘要及并发信息；重复请求不重置计时。
+        # 函数用途: 为一次新的用户请求递增活动代次。
+        def apply(thread):
+            metadata = dict(thread.metadata or {})
+            if request_id and metadata.get("last_user_activity_request_id") == request_id:
+                return thread
+            generation = metadata.get("user_activity_generation", 0)
+            generation = generation if type(generation) is int and generation >= 0 else 0
+            metadata.update(last_user_activity_at=current, user_activity_generation=generation + 1,
+                            last_user_activity_request_id=request_id)
+            return replace(thread, metadata=metadata, updated_at=max(thread.updated_at, current))
+
+        return self.update_atomic(thread_id, apply)
+
+    # LLM: 唯一CAS推进提交链与活跃集；闲置提交同锁验证用户活动代次，拒绝新输入后旧候选，普通压缩合同不变。
     # 函数用途: 原子提交压缩与可选活跃工具收缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
     def update_compact_state(
         self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
         active_loaded_tool_names: tuple[str, ...] | None = None, now: float | None = None,
         baseline_loaded_tool_names: tuple[str, ...] | None = None,
         active_tool_selector: Callable[[ConversationThread], tuple[str, ...]] | None = None,
+        expected_user_activity_generation: int | None = None,
+        idle_compact: bool = False,
     ) -> ConversationThread:
         """Atomically advance one validated summary/checkpoint without touching raw messages."""
         if type(commit.publish_thread_view) is not bool:
             raise ValueError("compact publication scope must be an explicit boolean")
+        if idle_compact and (type(expected_user_activity_generation) is not int or expected_user_activity_generation < 0):
+            raise ValueError("idle compact requires a user activity generation")
         current = now if now is not None else time.time()
 
         # LLM: 先检查generation，再以同锁最新线程合并发现差集；局部摘要不成为全局权限。
         # 函数用途: 同锁提交唯一head；局部压缩保留全线程摘要时间和游标，防止其它任务跳过未覆盖原文。
         def apply(thread: ConversationThread) -> ConversationThread:
             if thread.compact_generation != expected_generation:
+                if idle_compact:
+                    raise IdleCompactActivityChanged("conversation user activity or compact generation superseded idle summary")
                 raise RuntimeError("conversation compact generation changed while summary was being prepared")
+            metadata = dict(thread.metadata or {})
+            if expected_user_activity_generation is not None:
+                if (type(expected_user_activity_generation) is not int
+                        or type(metadata.get("user_activity_generation", 0)) is not int
+                        or metadata.get("user_activity_generation", 0) != expected_user_activity_generation):
+                    raise IdleCompactActivityChanged("conversation user activity changed while idle summary was being prepared")
+                if idle_compact:
+                    if metadata.get("last_idle_compacted_activity_gen") == expected_user_activity_generation:
+                        raise IdleCompactActivityChanged("conversation user activity already idle compacted")
             from .tool_discovery import compact_discovered_tools
             # selector仅计算展示名，不允许I/O；旧tuple调用方维持原合同。
             active = active_tool_selector(thread) if active_tool_selector is not None else active_loaded_tool_names
+            tool_updates = compact_discovered_tools(thread, active, baseline_loaded_tool_names=baseline_loaded_tool_names)
+            metadata.update(tool_updates.pop("metadata", {}))
+            metadata["last_compacted_user_activity_gen"] = metadata.get("user_activity_generation", 0)
+            if idle_compact:
+                metadata["last_idle_compacted_activity_gen"] = expected_user_activity_generation
             return replace(
-                thread, **compact_discovered_tools(thread, active,
-                                                  baseline_loaded_tool_names=baseline_loaded_tool_names),
+                thread, **tool_updates,
                 summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
                 compact_operation_evidence=(dict(commit.operation_evidence) if commit.publish_thread_view
                                             else thread.compact_operation_evidence),
@@ -512,6 +556,7 @@ class ThreadStore:
                 compact_vision_failed_generation=-1,
                 provider_context_observation={},
                 model_context_usage={},
+                metadata=metadata,
                 updated_at=current,
             )
 

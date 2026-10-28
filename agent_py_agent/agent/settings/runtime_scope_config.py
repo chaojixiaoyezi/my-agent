@@ -156,6 +156,8 @@ def _base_config_layers(config: object) -> tuple[dict[str, object], ...]:
     return (_LOADED_CONFIG_DEFAULT_SOURCE,)
 
 
+# LLM: 运行层不能修改管理员强制开关；权限/来源规则仍沿原优先级，私网名单只收窄。
+# 函数用途: 合并一层运行覆盖但保留宿主管理边界。
 def _apply_runtime_config_layer(
     *,
     values: dict[str, Any],
@@ -164,6 +166,8 @@ def _apply_runtime_config_layer(
     allowed: set[str],
 ) -> None:
     for key, value in _runtime_layer_items(layer, allowed):
+        if key == "force_compact_trigger_percent":
+            continue
         if layer.priority < _current_priority(sources.get(key)):
             continue
         if key == "allowed_private_hosts":
@@ -172,14 +176,24 @@ def _apply_runtime_config_layer(
             if not base_allowed and value:
                 continue
             value = narrowed
+        admin_default = sources.get(key, {}).get("compact_admin_default_percent", values.get(key))
         values[key] = value
         sources[key] = {"source": layer.source, "priority": layer.priority}
+        if key == "memory_compact_trigger_percent":
+            # 宿主原值只从base/原来源复制；运行覆盖值是用户默认，不能冒充管理员强制值。
+            sources[key]["compact_admin_default_percent"] = admin_default
 
 
+# LLM: 旧owner YAML比例映射到同一新键；新旧并列时只接受新键作生效比例，仍由原合并函数保留管理员原值。
+# 函数用途: 枚举已允许的运行字段和兼容压缩键。
 def _runtime_layer_items(layer: ConfigLayer, allowed: set[str]):
     for key, value in dict(layer.values).items():
         if key in allowed and value is not None:
             yield key, value
+            if key == "memory_compact_auto_trigger_percent" and "memory_compact_trigger_percent" not in layer.values:
+                from .config_layers import compact_policy_percent
+
+                yield "memory_compact_trigger_percent", compact_policy_percent(value, 80)
 
 
 # LLM: 来源来自已加载宿主 config，菜单 profile ID 是恢复引用；仅保留声明元数据，不复制未知秘密字段。
@@ -190,6 +204,8 @@ def _source_record(value: object) -> dict[str, object]:
         record = {"source": str(value.get("source") or "unknown"), "priority": priority}
         if record["source"] == "owner_model_profile" and isinstance(value.get("profile_id"), str):
             record["profile_id"] = value["profile_id"]
+        if type(value.get("compact_admin_default_percent")) is int:
+            record["compact_admin_default_percent"] = value["compact_admin_default_percent"]
         return record
     return dict(_LOADED_CONFIG_DEFAULT_SOURCE)
 

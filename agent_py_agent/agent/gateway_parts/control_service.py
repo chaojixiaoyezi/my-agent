@@ -1192,13 +1192,37 @@ def _execute_context_control(
 # LLM: Manual Compact is a first-class cancellable turn like 会话运行时's Compact task.  Register the
 # authenticated conversation plus original control message before any admission check so a TUI Esc
 # can target only this operation and provider transport can close its exact socket.
-# 函数用途: 为手动 Compact 建立精确中断身份，再进入唯一压缩实现。
+# 比例设置只改同一线程metadata，不执行摘要；锁定错误原样保留结构化码。
+# 函数用途: 设置当前线程比例，或为手动摘要建立精确中断身份。
 def _execute_compact_control(
     base_agent: object,
     paths: GatewayPaths,
     command: ConversationControlCommand,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
+    if command.operation == "threshold":
+        from ..conversation.compact_threshold_policy import (
+            resolve_thread_compact_policy,
+            thread_with_compact_threshold,
+        )
+        from ..plugin_host.errors import HostAPIError
+
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        store = owner_agent.conversation_store
+        thread = _conversation_thread_for_scope(store, scope)
+        if thread is None:
+            return ConversationControlResult("compact", False, "当前会话尚未建立，无法设置压缩比例。", error_code="THREAD_UNAVAILABLE")
+        try:
+            value = None if command.value == "default" else int(command.value)
+            updated = store.threads.update_atomic(thread.thread_id,
+                lambda row: thread_with_compact_threshold(owner_agent, row, value))
+            policy = resolve_thread_compact_policy(owner_agent, updated, use_frozen=False)
+        except HostAPIError as error:
+            return ConversationControlResult("compact", False, "管理员已锁定压缩策略，不能修改当前会话比例。",
+                                             error_code=error.code, details={"http_status": error.status})
+        return ConversationControlResult("compact", True,
+            f"当前会话压缩比例：{policy['effective_trigger_percent']}%（{policy['effective_source']}）。",
+            details={"compact_policy": policy})
     client_message_id = str(scope.metadata.get("message_id") or "").strip()
     if not client_message_id:
         client_message_id = new_id("manual-compact-local")

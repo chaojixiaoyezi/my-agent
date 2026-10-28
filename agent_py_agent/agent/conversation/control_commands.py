@@ -263,6 +263,11 @@ def parse_conversation_command(
         return _argumentless_command("context", trailing, "/context")
     if name == "compact":
         instructions = str(trailing or "").strip()
+        from .compact_threshold_policy import parse_compact_threshold_command
+
+        threshold = parse_compact_threshold_command(instructions)
+        if threshold is not None:
+            return threshold
         return ConversationControlCommand(
             "compact",
             value=instructions,

@@ -1,3 +1,27 @@
+## 2026-10-28 Wave 9 B1：空闲压缩与四层阈值（源码候选）
+
+来源：`07-tasks/wave9-b1.md` 全文及主计划 Item 1/6；指定分支 `wave9-b1`，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只修改派工工作树，不推送、合并、部署或启停真实服务；不运行已退役的尺寸检查器。
+
+- 新配置：`memory_compact_trigger_percent=80`，四层有效比例50..95；`force_compact_trigger_percent` 是模型不可改的管理员边界。闲置容量默认60%（0关闭，夹取0..95），静默默认7200秒（0关闭，启用至少60秒）。原运行模块实际位于 `agent_core/runtime/context_compactor.py`。
+- `compact_threshold_policy.py` 复用配置层合并，按全局/个人强制、会话、用户、管理员默认解析并投影六字段。主回合及外层模型scope冻结比例，覆盖Gateway预检到收口；设置写入读取新鲜管理员锁，不使用旧冻结值绕过403。owner运行覆盖保留管理员原值，不能把用户比例冒充强制值。旧YAML键仅在同源新键缺失时迁移；代码内运行设置使用新键。Gateway原预算测试仅迁移五处夹具键名，原50%/90%、输出预留、原文和检查点断言不放宽。
+- 真实用户预检独立登记活动时间/单调代次，同请求重复加载不增代；后台 `updated_at` 不刷新用户发言时间。闲置入口复核时长、容量、前台/子代理/托管进程、同代幂等，在原摘要/checkpoint链及原Store锁中核活动代。用户插话、胜出候选或压缩代次变化使旧闲置候选干净让位，不计模型失败；缺失活动CAS参数拒绝提交。活动metadata与原工具发现metadata在同一提交合并，保留原文和既有摘要权威。
+- 维护拍最多检查两条规范线程记录，跨已加载owner及其线程轮换；复用原池pin且不续空闲期，不构造冷Agent。原启动交互保护期仍生效，不延迟安全清理。真实维护controller→闲置入口→原摘要→CAS有本地假provider集成回归；模拟时钟不等于生产实际静默两小时实测。
+- `/compact threshold <50-95|default>` 只改线程设置，不调用摘要；推进原设置修订。Host设置同锁合并，锁定时返回 `COMPACT_POLICY_LOCKED_BY_ADMIN`/403；冷管理只接宿主配置，不借main执行器执行用户任务。四个Host治理动作复用原单用户CAS；批量先核所有目标，`all_managed_users` 仍取grant交集，全局强制必须local/main及通配管理授权。批量是逐项提交，`atomic=false`，冲突/未知后停止并报告未尝试项，不宣称跨用户事务。
+- 新测试先失败再实现；独立Astra high仅静态复核内联policy/idle代码，发现强制值来源、过期线程基线、非有限now三项，均有红绿回归。额外原摘要集成抓出metadata重复关键字，已修复。没有删除、skip/xfail或放宽有效测试来制造通过。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_gateway_conversation_compact.py agent_py_agent/tests/test_plugin_host_thread_and_model_settings.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_config_defaults_parity.py agent_py_agent/tests/test_memory_config.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_runtime_config_contract.py agent_py_agent/tests/test_managed_user_governance.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+最终证据：指定两文件 **143项**（`.pytest_cache/b1-required-final.xml`），额外八文件 **520项**（`.pytest_cache/b1-expanded-final.xml`），两组均0失败/0错误/0跳过；导入边界0项、全范围ruff及diff空白检查均通过。上述验证不等于真实供应商模型、生产Gateway/远端Host HTTP端到端、冷/已逐出owner执行器、多进程全拓扑或Linux/Windows全仓验证；这些均未验证。只读策略投影与管理配置不会为冷owner建立执行器。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。

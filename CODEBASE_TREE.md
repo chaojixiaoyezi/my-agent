@@ -1,3 +1,16 @@
+## 2026-10-28 Wave 9 B1：空闲会话压缩与分层比例
+
+```text
+|-- agent_py_agent/agent/conversation/
+|   `-- compact_threshold_policy.py # 四层比例、回合冻结、线程设置快照及threshold子命令解析
+|-- agent_py_agent/agent/gateway_parts/
+|   `-- compact_operations.py # 空闲五道安全门、原摘要链调用及每拍两线程维护游标
+`-- agent_py_agent/tests/
+    `-- test_wave9_idle_and_multilevel_compact.py # 分层策略、活动CAS、CLI/Host权限、维护拍和原摘要集成回归
+```
+
+运行策略继续位于 `agent_core/runtime/context_compactor.py`；持久活动代和闲置幂等标记在原 `conversation/store_threads.py`，不建立第二个线程库。治理复用 `user_space/managed_user_governance.py` 及原Host动作目录、授权和幂等分发。范围与未验证边界见 `TESTS.md` 的Wave9 B1条目。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

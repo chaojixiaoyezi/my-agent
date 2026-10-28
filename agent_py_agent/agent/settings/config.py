@@ -377,6 +377,12 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     memory_rule_routing_mode: str = "soft"
     memory_rule_auto_read_limit: int = 3
     memory_resume_auto_context_mode: str = "off"
+    # 四层策略的管理员默认；用户/会话覆盖另存，强制开关仅由管理员全局来源设置。
+    memory_compact_trigger_percent: int = 80
+    force_compact_trigger_percent: bool = False
+    # 闲置压缩：任一为0即关闭；百分比0..95，启用后的最短静默时间60秒。
+    memory_compact_idle_trigger_percent: int = 60
+    memory_compact_idle_seconds: int = 7200
     memory_compact_auto_trigger_percent: int = 90
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。
     memory_compact_auto_trigger_max_tokens: int = 300_000
