@@ -1,5 +1,5 @@
 # LLM: 四类资产共用纯值契约；来源字段仅为展示，真实读写根由存储构造参数决定；统一脱敏且无IO。
-# 模块用途: 定义可冻结、可JSON往返的资产描述符、来源投影及目标CAS版本。
+# 模块用途: 定义资产描述符、来源投影与CAS版本，并独立校验完整定义输入，保留存量JSON读取兼容性。
 from __future__ import annotations
 
 import math
@@ -13,6 +13,7 @@ from . import safe_asset_id
 
 ASSET_KINDS = ("monitor", "workflow", "script", "skill")
 SCHEMA_VERSION = "asset_descriptor.v1"
+REQUIRED_DEFINITION_KEYS = {'name', 'access_targets', 'data_sources', 'credential_refs', 'io_contract'}
 _TOKEN_METRICS = frozenset(('tokens', 'max_tokens', 'input_tokens', 'output_tokens', 'total_tokens',
                           'token_count', 'prompt_tokens', 'completion_tokens'))
 # 短sk-前缀也可能是locale或引用名；真实密钥形状由公共redactor统一识别。
@@ -269,3 +270,19 @@ class AssetDescriptor(_Record):
             raise ValueError('资产来源层无效')
         if self.revision < 0:
             raise ValueError('资产revision必须是非负整数')
+
+
+# LLM: 完整定义显式校验标准Key及目标id/kind，沿唯一AssetDescriptor.from_dict处理类型；不收紧旧JSON读口。
+# 函数用途: 为脚本与工作流从完整输入构造既有资产值对象，不写入或执行资产。
+def asset_descriptor_from_definition(data, asset_id, kind) -> AssetDescriptor:
+    if not isinstance(data, dict):
+        raise ValueError('descriptor必须为对象')
+    data = {'id': asset_id, 'kind': kind, **data}
+    missing = REQUIRED_DEFINITION_KEYS - data.keys()
+    if missing or data.get('id') != asset_id or data.get('kind') != kind:
+        raise ValueError(f"必须提供标准提取Key（缺少: {', '.join(sorted(missing))}）且id/kind与目标一致")
+    if not isinstance(data['name'], str) or not data['name'].strip() or not isinstance(data['io_contract'], dict):
+        raise ValueError('name或io_contract类型无效')
+    if any(not isinstance(data[key], list) for key in ('access_targets', 'data_sources', 'credential_refs')):
+        raise ValueError('目标、数据源和凭据引用必须为列表')
+    return AssetDescriptor.from_dict(data)

@@ -1,33 +1,33 @@
 # LLM: 工作流只由可信Owner的领域Store和Engine执行；工具不自建运行账本，不从正文猜断点或授权。
-# 模块用途: 提供工作流CRUD、动态Skill绑定、运行、断点续跑及快照检查的Agent工具。
+# 模块用途: 提供工作流CRUD、绑定与运行；直接使用纯schema及资产完整定义构造，不接管执行协议。
 from __future__ import annotations
 
 from pathlib import Path
 
 from ..assets import AssetPostCommitReadbackError
+from ..assets.descriptor import asset_descriptor_from_definition
 from ..assets.skill_adapter import get_owner_skill_descriptor, list_owner_skill_descriptors
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..capability.skills import split_skill_frontmatter
 from ..workflows.models import redact_bearer_values
 from .models import BaseTool
 from .scripts_tool import (
-    _descriptor,
     _dispatch,
     _outcome,
     _owner,
     _plain,
     _policy,
     _post_commit_failure,
-    _spec,
     _validate,
 )
+from .tool_spec import _spec
 
 
-# LLM: 工具只补目标id/kind与标准Key预检，定义校验和引用派生全部委托同一资产合同。
+# LLM: 完整定义的目标id/kind与标准Key交资产领域统一校验，引用派生沿原合同，不改变_plain顺序。
 # 函数用途: 规范工具保存请求，不另维护模式或错误策略副本。
 def _definition(value, workflow_id):
     value = _plain(value)
-    value['descriptor'] = _plain(_descriptor(value['descriptor'], workflow_id, 'workflow'))
+    value['descriptor'] = _plain(asset_descriptor_from_definition(value['descriptor'], workflow_id, 'workflow'))
     return with_workflow_step_refs(WorkflowDefinition.from_any(value))
 
 
@@ -86,7 +86,7 @@ def _analysis_summary(step, resolved_skills, context, *, owner_home, workspace_r
             'llm_involved': False, 'skill_summaries': summaries}
 
 
-# LLM: 所有路径由构造器Owner固定，model参数只含安全逻辑ID；运行/恢复/删除保持危险动作分类。
+# LLM: 路径由构造器Owner固定；纯schema沿tool_spec，运行/恢复/删除仍保持原危险动作分类。
 # 类用途: 对Agent暴露可管理和恢复的工作流工具。
 class WorkflowsTool(BaseTool):
     ACTIONS = ('list', 'get', 'save', 'delete', 'bind_skill', 'unbind_skill', 'run', 'resume', 'inspect_run', 'preview')

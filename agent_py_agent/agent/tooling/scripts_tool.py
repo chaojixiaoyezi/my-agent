@@ -1,5 +1,5 @@
 # LLM: Owner根只由宿主构造器注入；复用资产Store与受审批的ScriptRunner，不从模型参数取得执行权限。
-# 模块用途: 暴露固化脚本管理、源评估与单次运行的结构化工具，支持领域接口注入。
+# 模块用途: 暴露固化脚本管理、源评估与单次运行；schema与完整描述符构造复用所属纯模块。
 from __future__ import annotations
 
 import json
@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..assets import AssetPostCommitReadbackError, valid_skill_reference
-from ..assets.descriptor import AssetDescriptor, clean_json
+from ..assets.descriptor import AssetDescriptor, asset_descriptor_from_definition, clean_json
 from ..assets.script_store import ScriptStore
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import open_directory_beneath
@@ -22,12 +22,9 @@ from .models import (
     IdempotencyPolicy,
     ResourceScopePolicy,
     ToolHandlerOutcome,
-    ToolModelHints,
-    ToolModelSpec,
     ToolRuntimePolicy,
 )
-
-REQUIRED_KEYS = {'name', 'access_targets', 'data_sources', 'credential_refs', 'io_contract'}
+from .tool_spec import _spec
 
 
 # LLM: 独立动作锁仅包管理动作；源检查与其它只读入口不建资产动作目录，绑定另归Store集合锁。
@@ -130,34 +127,7 @@ def _policy(name, reads, dangerous):
         resource_scopes=ResourceScopePolicy(mode='declared', static_scopes=(name + ':current_owner',)))
 
 
-# LLM: 普通目录ID维持严格Schema；Skill引用由preclaim的valid_skill_reference校验，不能将来源前缀误当路径。
-# 函数用途: 构造默认收起的工具描述与封闭动作集合。
-def _spec(name, description, actions, properties):
-    properties = {key: {**value, **({'pattern': r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'}
-                  if key.endswith('_id') and key != 'skill_id' or key in ('scope_key', 'entrypoint') else {})} for key, value in properties.items()}
-    return ToolModelSpec(name, description, {'type': 'object', 'properties': {
-        'action': {'type': 'string', 'enum': actions}, **properties}, 'required': ['action'], 'additionalProperties': False},
-        hints=ToolModelHints(category='capability', default_deferred=True,
-                             deferred_summary=description.split('；', 1)[0][:60]))
-
-
-# LLM: 同仓唯一AssetDescriptor校验；补齐id/kind后仍强制标准Key与目录一致，注入Store同样接领域值对象。
-# 函数用途: 校验脚本描述符并恢复唯一AssetDescriptor合同。
-def _descriptor(data, asset_id, kind):
-    if not isinstance(data, dict):
-        raise ValueError('descriptor必须为对象')
-    data = {'id': asset_id, 'kind': kind, **data}
-    missing = REQUIRED_KEYS - data.keys()
-    if missing or data.get('id') != asset_id or data.get('kind') != kind:
-        raise ValueError(f"必须提供标准提取Key（缺少: {', '.join(sorted(missing))}）且id/kind与目标一致")
-    if not isinstance(data['name'], str) or not data['name'].strip() or not isinstance(data['io_contract'], dict):
-        raise ValueError('name或io_contract类型无效')
-    if any(not isinstance(data[key], list) for key in ('access_targets', 'data_sources', 'credential_refs')):
-        raise ValueError('目标、数据源和凭据引用必须为列表')
-    return AssetDescriptor.from_dict(data)
-
-
-# LLM: Store与runner均绑定同一个可信Owner；execute入口不接收身份、路径或任意命令。
+# LLM: Store与runner均绑定同一个可信Owner；纯schema/descriptor沿共享构造器，execute不接收执行身份或任意命令。
 # 类用途: 为Agent提供脚本目录、管理、源评估和受控运行工具。
 class ScriptsTool(BaseTool):
     model_spec = _spec('scripts', '管理Owner固化脚本、标准提取Key与源评估；脚本应输出单行JSON对象到stdout；run仅单次覆盖数据源。',
@@ -252,13 +222,13 @@ class ScriptsTool(BaseTool):
                 timeout_seconds=params.get('timeout_seconds'), override_data_sources=params.get('override_data_sources')))
         raise ValueError('未知脚本action')
 
-    # LLM: update只从原值的正式描述符字段和代码继承，不写回实时投影；CAS由Store在原锁内检查。
+    # LLM: update只继承原正式字段和代码；完整定义沿资产领域校验，不写回实时投影，CAS仍由Store原锁检查。
     # 函数用途: 创建或更新脚本，保留其代码与执行参数。
     def _save(self, params, old):
         prior = _raw(old) if old else {}
         names = {item.name for item in fields(AssetDescriptor)}
         defaults = {key: value for key, value in prior.items() if key in names}
-        descriptor = _descriptor(params.get('descriptor', defaults), params['script_id'], 'script')
+        descriptor = asset_descriptor_from_definition(params.get('descriptor', defaults), params['script_id'], 'script')
         options = {key: params.get(key, prior.get(key, value)) for key, value in
                    (('entrypoint', 'main.py'), ('interpreter', 'python3'), ('timeout_seconds', 120))}
         if options['interpreter'] not in ('python3', 'bash', 'sh'):

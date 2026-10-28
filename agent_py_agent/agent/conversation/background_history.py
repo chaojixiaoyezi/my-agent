@@ -1,4 +1,4 @@
-# LLM: 本模块只收集一个后台工作片的公开展示块；最终快照由 canonical 消息提交，不能成为模型历史或运行状态。
+# LLM: 本模块只收集一个后台工作片的公开展示块；计时复用会话领域纯格式化，最终快照不能成为模型历史或运行状态。
 # 模块用途: 保存临时事件环之外的完整终态展示，让恢复后的工具、思考和回复仍按原顺序排列。
 
 from __future__ import annotations
@@ -8,6 +8,8 @@ import math
 import threading
 import time
 from collections.abc import Mapping
+
+from .turn_timing import render_turn_timing
 
 BACKGROUND_DISPLAY_TURN_SCHEMA = "background_display_turn.v1"
 _TERMINAL_KINDS = frozenset({
@@ -75,24 +77,8 @@ class BackgroundTurnHistory:
             }
 
 
-# LLM: 纯展示用耗时格式化，不改变业务状态；短于1秒的非零正耗时按1s显示。
-# 函数用途: 将秒数格式化为 h/m/s 短串供后台完成快照使用。
-def _format_completed_turn_timing(duration: float, ended: float) -> str:
-    from datetime import datetime
-
-    try:
-        ended_dt = datetime.fromtimestamp(ended).astimezone()
-    except (OverflowError, OSError, ValueError):
-        return ""
-    seconds = 1 if 0 < duration < 1 else max(0, int(round(duration)))
-    minutes, seconds = divmod(seconds, 60)
-    hours, minutes = divmod(minutes, 60)
-    dur_text = f"{hours}h {minutes}m {seconds}s" if hours else (f"{minutes}m {seconds}s" if minutes else f"{seconds}s")
-    return f"✻ Worked for {dur_text} · 完成于 {ended_dt:%Y-%m-%d %H:%M:%S %Z}"
-
-
-# LLM: 仅成功canonical提交调用；无冻结时间、未完快照或失败不生成成功块，不从当前时间补旧历史。
-# 函数用途: 将本工作片已冻结的计时幂等加入原显示快照，供实时轮询与磁盘回放共用。
+# LLM: 仅成功canonical提交调用；复用纯领域formatter，无冻结时间、未完快照或失败不补造成功块。
+# 函数用途: 将本工作片已冻结的领域计时幂等加入原显示快照，供实时轮询与磁盘回放共用。
 def completed_display_snapshot(snapshot: dict, end_reason: str) -> dict:
     value = copy.deepcopy(snapshot)
     duration, ended = value.get("duration_s"), value.get("completed_at")
@@ -103,7 +89,7 @@ def completed_display_snapshot(snapshot: dict, end_reason: str) -> dict:
         return value
     display = {"logical_id": request, "status": "completed", "elapsed_seconds": duration,
                "completed_at": ended, "source": "host_monotonic"}
-    if not (text := _format_completed_turn_timing(float(duration), float(ended))):
+    if not (text := render_turn_timing(display)):
         return value
     event = {"request_id": request, "block_id": f"{request}:completion", "kind": "system_message", "phase": "completed",
              "payload": {"text": text, "source_kind": "turn_timing", "title": "回合完成", "display": display}}

@@ -3,7 +3,7 @@
 #   本地执行队列投递都在这里；tui_keybindings 只做按键注册与分派并显式导入这些入口。本模块运行时禁止
 #   导入 tui_keybindings（避免循环），TuiCreateKeybindingsParams 仅作类型注解在 TYPE_CHECKING 下导入。
 #   改动时同步检查 tui_keybindings 的调用点、tui_plugin_commands 的延迟导入和 test_tui_input 等测试的 monkeypatch 路径。
-# 模块用途: 集中放置快捷键触发的提交、排队、控制命令、子代理插话/停止与中断等有副作用的动作。
+# 模块用途: 集中快捷键副作用动作；共享命令识别直接依赖slash_commands，不经过空转发模块。
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .chat_style import CHAT_RESPONSE_STYLE_INJECT
-from .input_loop import is_show_prompt_command
 from .plain_state import ChatJob
+from .slash_commands import is_show_prompt_command
 from .tui import _tui_handle_command
 from .tui_interaction import TuiDraft
 from .tui_params import TuiHandleCommandParams

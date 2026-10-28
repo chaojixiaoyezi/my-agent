@@ -1,6 +1,6 @@
 
 # LLM: plain显示只接公开完整正文或原Gateway公开chunk；local候选不得直接stdout，提交复用同源typed安全投影，不授业务状态。
-# 模块用途: 普通终端的安全正文、折叠、展开和已验过程显示，内部历史与执行仍由原worker负责。
+# 模块用途: 普通终端的安全正文、折叠与展开；直接使用slash解析，内部历史与执行仍由原worker负责。
 from __future__ import annotations
 
 """small UI helpers for plain chat mode.
@@ -14,10 +14,10 @@ import threading
 from dataclasses import dataclass
 
 from ...agent.gateway_parts.stream_events import committed_model_events, public_model_text
-from .input_loop import parse_expand_target
 from .plain_state import PLAIN_CHAT_PROMPT
 from .renderer import strip_ansi
 from .rendering import GRAY, MAGENTA, _cprint, collapse_response_text, style_text
+from .slash_commands import parse_expand_target
 
 
 @dataclass(frozen=True)
