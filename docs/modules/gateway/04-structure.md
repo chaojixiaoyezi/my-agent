@@ -1,3 +1,12 @@
+## 2026-10-28 Wave 9 A1 Round 2：单向推送接线与隔离
+
+- `http_routes.py` / `http_service.py` 将 `POST /remote-agent/push` 分派给 `remote_push_service.handle_remote_push`，其余路由携带push Token立即拒绝。`authenticate_push` 核独立Token的SHA256验证器、目标owner/action/IP、准确原文HMAC和时间窗；`consume_push_nonce` 在独立锁下耐久防重放。`accept_remote_push` 先保存prepared短回执，再经 `enqueue_remote_push`、`write_gateway_request_once`、`prepare_coordinator_input` 沿原T→C末门一次提交，不新增执行队列。
+- 业务键仍是 `(token_id, target_owner, idempotency_key)`；线程派生另将模式前缀与对应标签一起hash。已存在的prepared/accepted回执沿用其原线程ID，不改旧会话或旧幂等事实；升级后首次接受的 `reuse_key` 使用新命名空间，不自动续接旧版复用线程。原账本容量与超限拒绝不变。
+- 出站 `tooling/remote_agent_push_tool.py` 从owner/显式host节点库解密固定端点的Token；`execute_scoped` 消费原Registry的 `ToolInvocationContext.execution_permission_context`，与当前owner持久权限及冻结上界求交，不修改共享handler。`remote_push_pin` 对所有DNS回答的原生地址和嵌入IPv4分别检查，永久拒绝任何一侧的link-local/元数据；别名白名单只豁免准确非全局目标，显式URL不继承。一次调用只提供一次固定连接pin，同址307也不能重发POST。
+- 所有 `ToolHandlerOutcome` 文本字段及嵌套键值在离开推送工具、进入操作账之前移除本次Token（含HTTP编码规范化的大小写变体）；替换后重检，若标记与相邻文本重新拼出Token则清空整字段。远端错误正文不返回。`conversation/remote_push_context.py` 与 `thread_fork_service.fork_untrusted_context` 只复制有界、脱敏的普通历史，导入 `input_origin=remote_push` / 不可学习来源，不能取得USER/SOUL/AGENTS写授权。
+
+准确验证和未验证边界见 [TESTS](../../../TESTS.md) 本轮小节。此接线不增加网络权限、真人确认或查询远端报告的能力，未部署。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

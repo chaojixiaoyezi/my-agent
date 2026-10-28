@@ -10,6 +10,8 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import Mapping
+from dataclasses import fields
 from urllib.parse import urlsplit
 
 from ..common.json_io import locked_json_path
@@ -22,6 +24,7 @@ from ..gateway_parts.remote_push_service import (
     read_push_json,
     validate_push_payload,
 )
+from ..user_space.owner_policy import resolve_effective_owner_policy
 from .models import (
     BaseTool,
     EffectResolverPolicy,
@@ -105,7 +108,47 @@ def resolve_owner_main_home(agent):
     return resolve_owner_home(agent.home_paths.root, OwnerIdentity.local_main()).home_dir
 
 
-# LLM: 所有DNS回答先核验再固定连接IP；只在节点别名的明确授权下放行私网/回环，元数据和link-local永不放行。
+# LLM: 结果离开工具前净化全部文本字段及嵌套键值；大小写变体覆盖Content-Encoding规范化，不改宿主效果事实。
+# 函数用途: 防止已知出站秘密进入模型结果、恢复提示或操作账预览。
+def scrub_push_outcome(result, secret):
+    # LLM: 替换后再核密钥；标记与相邻文本重拼出秘密时清空整字段，不靠固定次数重复替换。
+    # 函数用途: 递归去掉所有结果字段中的当前凭据及其大小写变体。
+    def scrub(value):
+        if isinstance(value, str):
+            if not secret:
+                return value
+            pattern = re.compile(re.escape(secret), re.IGNORECASE)
+            clean = pattern.sub("[REDACTED]", value)
+            return "" if pattern.search(clean) else clean
+        if isinstance(value, dict):
+            return {scrub(key): scrub(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return type(value)(scrub(item) for item in value)
+        return value
+
+    for field in fields(result):
+        setattr(result, field.name, scrub(getattr(result, field.name)))
+    return result
+
+
+# LLM: 正式调用消费原Registry冻结的只读权限，直接调用兼容宿主当前边界；持久owner策略和冻结上界只可收紧。
+# 函数用途: 在解密节点或DNS前拒绝禁网任务，不能由endpoint_ref或endpoint_url绕过。
+def assert_push_network(agent, context):
+    if context is not None:
+        permissions = context.execution_permission_context or {}
+        denied = permissions.get("network_access_mode") == "disabled" or permissions.get("network_enabled") is False
+    else:
+        boundary = getattr(getattr(agent, "_current_run_params", None), "write_boundary", None)
+        boundary = boundary if isinstance(boundary, Mapping) else {}
+        effective = boundary.get("effective_permissions") or {}
+        denied = boundary.get("network_access_mode") == "disabled" or (
+            isinstance(effective, Mapping) and effective.get("network_enabled") is False)
+    if (denied or getattr(getattr(agent, "owner_policy", None), "network_enabled", True) is False
+            or not resolve_effective_owner_policy(agent.home_paths).network_enabled):
+        raise RemotePushError("NETWORK_ACCESS_DISABLED", 403)
+
+
+# LLM: 所有DNS回答先核验再固定连接IP；原地址和IPv4投影各自核白名单，任何一侧的元数据/link-local永久拒绝。
 # 函数用途: 为固定单向URL解析安全连接地址，不允许DNS重绑定或代理环境劫持。
 def remote_push_pin(url, allowed_private_hosts):
     parts = urlsplit(validate_push_url(url))
@@ -115,18 +158,19 @@ def remote_push_pin(url, allowed_private_hosts):
         raise RemotePushError("REMOTE_PUSH_ENDPOINT_DENIED")
     for value in answers:
         address = ipaddress.ip_address(value)
-        projected = ipv4_projected(address) or address
-        if (projected.is_link_local or projected.is_multicast or projected.is_unspecified
-                or str(projected) in {"100.100.100.200", "fd00:ec2::254"}):
-            raise RemotePushError("REMOTE_PUSH_ENDPOINT_DENIED")
-        if not projected.is_global and not private_host_or_ip_is_allowlisted(value, allowed_private_hosts):
-            raise RemotePushError("REMOTE_PUSH_ENDPOINT_DENIED")
+        for candidate in {address, ipv4_projected(address) or address}:
+            if (candidate.is_link_local or candidate.is_multicast or candidate.is_unspecified
+                    or str(candidate) in {"100.100.100.200", "fd00:ec2::254"}):
+                raise RemotePushError("REMOTE_PUSH_ENDPOINT_DENIED")
+            restricted = (not candidate.is_global or candidate.is_private or candidate.is_loopback or candidate.is_reserved)
+            if restricted and not private_host_or_ip_is_allowlisted(str(candidate), allowed_private_hosts):
+                raise RemotePushError("REMOTE_PUSH_ENDPOINT_DENIED")
         if parts.scheme != "https" and not private_host_or_ip_is_allowlisted(value, allowed_private_hosts):
             raise RemotePushError("REMOTE_PUSH_ENDPOINT_DENIED")
     return answers[0]
 
 
-# LLM: 当前请求只签一次nonce/body；resolve_pin只接受原准确URL，任何重定向在下一跳连接前拒绝，绝不外带秘密。
+# LLM: 当前请求只签一次nonce/body；resolve_pin只放行第一次解析，同址/异址重定向都在下一跳连接前拒绝。
 # 函数用途: 通过既有固定IP/取消/总超时HTTP传输发送一条推送，响应仅作接收回执。
 def send_remote_push(url, secret, body, allowed_private_hosts, timeout):
     raw = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -137,12 +181,15 @@ def send_remote_push(url, secret, body, allowed_private_hosts, timeout):
     signature = hmac.digest(secret.encode(), f"{timestamp}.{nonce}.{hashlib.sha256(raw).hexdigest()}".encode(), "sha256").hex()
     headers = {"Content-Type": "application/json", "X-Agent-Push-Token": secret,
         "X-Agent-Timestamp": timestamp, "X-Agent-Nonce": nonce, "X-Agent-Signature": signature}
-    # LLM: 仅原URL返回已经校验的IP，不再次DNS解析，也不跟随任何同源/异源重定向。
-    # 函数用途: 给原HTTP传输提供单目标固定地址。
+    resolved = False
+    # LLM: 每次调用独立闭包只提供一次pin；即使同URL的307/308也不能重放签名POST。
+    # 函数用途: 给原HTTP传输提供单次固定地址，任何第二跳立即拒绝。
     def resolve(target):
-        if target != url:
+        nonlocal resolved
+        if resolved or target != url:
             return PinResult(None, ToolHandlerOutcome("remote_agent_push", False, "拒绝推送重定向",
                 error_code="REMOTE_PUSH_REDIRECT_DENIED", effect_outcome="unknown"))
+        resolved = True
         return PinResult(pin, None)
 
     # LLM: 不返回远端错误正文，避免其回显Token、路径或注入指令；明确HTTP拒绝也不自动重放POST。
@@ -156,7 +203,7 @@ def send_remote_push(url, secret, body, allowed_private_hosts, timeout):
     if not isinstance(result, RawResponseParts):
         if isinstance(result, ToolHandlerOutcome):
             result.effect_outcome = "unknown"
-        return result
+        return scrub_push_outcome(result, secret)
     try:
         receipt = json.loads(result.body)
         if (result.status != 202 or not isinstance(receipt, dict) or receipt.get("ok") is not True
@@ -203,15 +250,21 @@ class RemoteAgentPushTool(BaseTool):
         return hashlib.sha256(json.dumps([params.get(key) for key in
             ("endpoint_ref", "endpoint_url", "target_owner", "idempotency_key")], sort_keys=True).encode()).hexdigest()
 
-    # LLM: 先核source所有权再取凭据/联网；所有外发字段先脱敏，唯一副作用是一次原HTTP POST，不重试未知效果。
+    # LLM: 正式Registry入口仅运输本次冻结权限，不改共享handler或读取别的并发任务边界。
+    # 函数用途: 将宿主网络开关传给当前一次投递。
+    def execute_scoped(self, params, context):
+        return self.execute(params, _context=context)
+
+    # LLM: 网络门在凭据/DNS前，source所有权在外发前；成功与失败都在原操作账记录之前统一脱敏，不重试未知效果。
     # 函数用途: 发送事件，按需携带原会话上下文，并返回短接收结果。
-    def execute(self, params):
+    def execute(self, params, *, _context=None):
         from cryptography.fernet import InvalidToken
 
-        sending = False
+        sending, secret = False, ""
         try:
             if self.agent is None:
                 raise RemotePushError("REMOTE_PUSH_UNAVAILABLE")
+            assert_push_network(self.agent, _context)
             snapshot = None
             if params.get("source_thread_id"):
                 snapshot = export_remote_context(self.agent.conversation_store, params["source_thread_id"], self.agent.home_paths.owner_id)
@@ -221,9 +274,9 @@ class RemoteAgentPushTool(BaseTool):
                 body["context_snapshot"] = snapshot
             body = validate_push_payload(sanitize_remote_context(body, secrets=(secret,)))
             sending = True
-            return send_remote_push(url, secret, body, allowed, self.timeout)
+            return scrub_push_outcome(send_remote_push(url, secret, body, allowed, self.timeout), secret)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, InvalidToken) as exc:
             code = exc.error_code if isinstance(exc, RemotePushError) else str(exc) if str(exc) in {
                 "REMOTE_PUSH_SOURCE_THREAD_DENIED", "REMOTE_PUSH_CONTEXT_TOO_LARGE"} else "REMOTE_PUSH_UNAVAILABLE"
-            return ToolHandlerOutcome("remote_agent_push", False, code, error_code=code,
-                effect_outcome="unknown" if sending else "not_started")
+            return scrub_push_outcome(ToolHandlerOutcome("remote_agent_push", False, code, error_code=code,
+                effect_outcome="unknown" if sending else "not_started"), secret)

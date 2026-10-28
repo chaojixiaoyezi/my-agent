@@ -1,3 +1,35 @@
+## 2026-10-28 Wave 9 A1 Round 2：错误脱敏、禁网与推送隔离返工
+
+来源：完整读取 `07-tasks/fix-wave9-a1.md` 的六项要求；准确返工起点 `1e2192e3543a01ddd2425b14518aba6d582647a2`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。编辑、测试及提交只在 `/tmp/wt-wave9-a1` / `wave9-a1`；未推送、部署或启停真实Gateway，不运行已退休的尺寸检查。
+
+### 修复与回归
+
+1. `remote_agent_push_tool.scrub_push_outcome` 在返回原执行器前递归净化全部结果文本字段、envelope键值及嵌套列表；大小写不敏感替换覆盖 `Content-Encoding` 的小写规范化。替换后再核对，若标记与相邻文本重新拼出秘密则清空整个字段，不靠固定次数重复替换。真实回环服务将本次Token分别回显到不支持的编码头和HTTP错误正文，通过原ToolExecutor及LocalStore核对结果和操作账；没有只检查模型output而漏掉恢复提示/预览。远端错误正文仍不返回，已捕获异常仍仅给固定机器码。
+2. 正式调用通过 `execute_scoped` 消费本次冻结的只读网络事实，直接调用兼容宿主运行边界；同时核对当前owner持久网络权限和已冻结上界。`endpoint_ref` / `endpoint_url` 均在解密/DNS之前拒绝 `network_access_mode=disabled` 或 `network_enabled=False`。原执行器两入口、owner持久禁网、缓存上界及直接调用边界均有回归；同一handler并发禁网/有网调用只让有网的一次真实入队，不借用可变Agent当前边界，也不修改共享handler或接受模型授权字段。
+3. `remote_push_pin` 对每个DNS回答的原生地址及已知IPv4投影分别检查私网、回环、保留及非全局状态；任何一侧的link-local、multicast、unspecified或元数据地址永久拒绝。ULA/ISATAP公网投影、链路本地公网投影、IPv6白名单不能豁免投影回环等反例均覆盖，准确ULA例外及纯公网ISATAP仍有正向控制。
+4. 一次投递的pin闭包只能放行第一次连接；即使同URL的301/302/303/307/308也在第二跳连接前拒绝。测试服务同时接收并记录POST/GET，断言总请求数为1；未知投递效果继续保持unknown，不自动重放。
+5. 业务幂等键不变；线程hash的第三项改为 `new_thread:<idempotency_key>` / `reuse_key:<thread_reuse_key>`。相同标签不再混线，新线程同事件重试和复用线程不同事件仍各守原合同。旧prepared/accepted回执保留原ID；升级后首次新事件的复用键进入新域，不自动续接旧版复用线程，不迁移或改写旧线程数据。
+6. 补 `docs/modules/gateway/02-progress.md`、`04-structure.md` 的 `remote_push_service.py` / `POST /remote-agent/push` 与准确验收边界；宿主文件保护测试补 `# LLM:` / `# 模块用途:`，原强断言不变。
+
+### 已取得的证据
+
+- 有效先红后绿：编码头回显进入结果/操作账的断言失败记录在 `.pytest_cache/fix-w9-reflect-red.xml`；原执行器禁网和IPv6/重定向/命名域反例见 `.pytest_cache/fix-w9-red.xml`、`fix-w9-red2.xml`、`fix-w9-ipv6-red.xml`。最初账本夹具两处字段名不符已按实际类型修正，不能算产品缺陷复现；错误正文回显和发送后ValueError原本已安全，作为正向控制保留。
+- 第一组修复后22项通过：`.pytest_cache/fix-w9-first-green.xml`；先前整套95项及追加并发控制后的96项也已通过。独立复核意见处理后最终专属99项通过、0失败/错误/跳过：`.pytest_cache/fix-w9-delivery.xml`，对照上轮最终62项无缺失，新增37项。两条原宿主配置/shell保护声明通过：`.pytest_cache/fix-w9-host.xml`。测试用临时home及回环HTTP，不访问外部站点。
+- 指定Ruff范围 `All checks passed!`；`check_doc_sync.py --base db4d5de92` 从缺Gateway两文档的 `DOC_SYNC_FAIL` 转为 `DOC_SYNC_PASS`；`check_import_boundaries.py` 为 `IMPORT_BOUNDARIES findings=0`。原基线至候选变更的工作区空白检查通过，提交后仍按下列区间命令核对。
+- 独立 `gpt-6-astra max` 只读摘录复核指出替换标记重拼Token的P2，已在真实HTTP/操作账复现后修复（`.pytest_cache/fix-w9-review-red.xml` 为5项中1条准确失败，最终对应全绿）。其HTTPException证据缺口由父级核对原 `web_fetch_runtime._do_hop` 的捕获分支并补真实 `BadStatusLine` 状态行回显测试：结果/账本仅保留异常类名，不含远端原文或Token。该分支原本安全，没有扩宽异常吞噬。审查者未访问工作树或跑测试，不将此描述为完整仓库/真实E2E审计。
+
+复现（均在工作树根，临时文件限工作树内）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --basetemp=.pytest_cache/fix-w9-delivery-tmp --junitxml=.pytest_cache/fix-w9-delivery.xml
+ruff check agent_py_agent/agent/gateway_parts agent_py_agent/agent/plugin_host agent_py_agent/agent/tooling agent_py_agent/agent/conversation agent_py_agent/tests/test_wave9_remote_agent_push.py agent_py_agent/tests/test_host_files_access.py
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py
+git diff --check db4d5de92..HEAD
+```
+
+**未验证**：全仓/跨平台测试、另一台机器或真实公网可达、生产TLS/反向代理、真实模型从消费到最终完成、正多进程C/W生命周期和长负载。上一轮扩展回归及真正基线复核记录保留在下一节，本轮没有把其未过项目改写为通过。
+
 ## 2026-10-28 Wave 9 A1：单向远端推送、上下文快照与安全边界（源码候选）
 
 来源：完整阅读 `07-tasks/wave9-a1.md`，按主参考 Item 8 / Section 7 的单向事件合同实现；基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，分支 `wave9-a1`，仅修改派工工作树。未推送、部署，未运行已退休的尺寸检查。

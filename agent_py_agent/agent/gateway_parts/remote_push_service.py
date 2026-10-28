@@ -335,7 +335,7 @@ def enqueue_remote_push(server, body, entry, token_id):
     write_gateway_request_once(server.paths, request, commit_transition=transition)
 
 
-# LLM: state锁串行跨进程幂等与rate，nonce另持耐久锁；prepared先落盘再队列，崩溃重试复用原ID及原输入回执，不盲重排终态。
+# LLM: state锁串行幂等与rate；线程hash另含mode前缀，new_thread与reuse_key不能同标签碰撞。prepared恢复仍复用原ID。
 # 函数用途: 验证并耐久接纳一次推送，重复业务键返回原接收结果。
 def accept_remote_push(server, raw, headers, peer):
     root, current = remote_push_root(server), time.time()
@@ -364,8 +364,9 @@ def accept_remote_push(server, raw, headers, peer):
                 raise RemotePushError("REMOTE_PUSH_RATE_LIMITED", 429)
             if len(entries) >= 10000:
                 raise RemotePushError("REMOTE_PUSH_CAPACITY_EXCEEDED", 503)
-            thread_key = key if body["thread_mode"] == "new_thread" else hashlib.sha256(json.dumps(
-                [row["token_id"], body["target_owner"], body["thread_reuse_key"]]).encode()).hexdigest()
+            label = body["idempotency_key"] if body["thread_mode"] == "new_thread" else body["thread_reuse_key"]
+            thread_key = hashlib.sha256(json.dumps(
+                [row["token_id"], body["target_owner"], body["thread_mode"] + ":" + label]).encode()).hexdigest()
             thread_id = threads.setdefault(thread_key, "thread_remote_" + thread_key)
             entry = entries[key] = {"digest": digest, "accepted": False, "receipt": {
                 "ok": True, "status": "accepted", "push_id": "push_" + key,

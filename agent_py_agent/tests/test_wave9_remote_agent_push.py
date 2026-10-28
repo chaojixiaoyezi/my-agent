@@ -276,6 +276,10 @@ def test_body_tampering_duplicate_auth_header_and_size_are_rejected(receiver):
     (["169.254.169.254"], ["169.254.0.0/16"], False), (["100.100.100.200"], [], False),
     (["::ffff:127.0.0.1"], [], False), (["8.8.8.8", "10.0.0.1"], [], False),
     (["8.8.8.8"], [], True), (["10.1.2.3"], ["10.0.0.0/8"], True),
+    (["fd00::5efe:808:808"], ["fd00::/8"], True),
+    (["fd00::5efe:7f00:1"], ["fd00::/8"], False),
+    (["fe80::5efe:808:808"], ["fe80::/10"], False),
+    (["2001:4860::5efe:808:808"], [], True),
 ])
 def test_outbound_ssrf_checks_every_dns_answer_and_private_exception(monkeypatch, addresses, allow, accepted):
     from agent_py_agent.agent.tooling import remote_agent_push_tool as module
@@ -680,3 +684,298 @@ def test_untrusted_learning_origin_cannot_mutate_soul_even_with_tool_access(rece
     result = UpdatePersonaTool(agent).execute({"target": "soul", "action": "add", "content": "我更偏好极简表达。"})
     assert not result.ok and result.error_code == "PERSONA_USER_REQUEST_REQUIRED"
     assert agent.home_paths.owner_soul_md.read_bytes() == before
+
+
+# LLM: 故障接收器只绑定回环，读取真实请求但不记录认证；退出必须关闭服务和线程。
+# 函数用途: 提供可回显Token或返回重定向的本机反例服务。
+@pytest.fixture
+def adverse_receiver():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    state = {"status": 400, "encoding": False, "location": "", "seen": [], "suffix": "", "bad_status": False}
+
+    # LLM: 仅测试服务；故意把本次Token回显在响应，不能据此赋予凭据权限。
+    # 类用途: 观察每次真实HTTP调用的请求数及错误脱敏行为。
+    class Adverse(BaseHTTPRequestHandler):
+        # LLM: 仅在内存观察路径，不将请求头或凭据写入任何日志。
+        # 函数用途: 消费请求并返回测试指定的恶意响应。
+        def do_POST(self):
+            state["seen"].append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            token = self.headers["X-Agent-Push-Token"]
+            if state["bad_status"]:
+                self.wfile.write(("not-http:" + token + "\r\n\r\n").encode())
+                self.close_connection = True
+                return
+            raw = ("receiver reflected " + token).encode()
+            self.send_response(state["status"])
+            if state["encoding"]:
+                self.send_header("Content-Encoding", token + state["suffix"])
+            if state["location"]:
+                self.send_header("Location", state["location"])
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        do_GET = do_POST
+
+        # LLM: 测试HTTP日志不得意外持久化请求凭据。
+        # 函数用途: 关闭默认访问日志。
+        def log_message(self, *_args):
+            pass
+
+    listener = ThreadingHTTPServer(("127.0.0.1", 0), Adverse)
+    thread = threading.Thread(target=listener.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{listener.server_address[1]}/remote-agent/push", state
+    finally:
+        listener.shutdown()
+        listener.server_close()
+        thread.join(5)
+
+
+# LLM: 通过原ToolExecutor和LocalStore实测错误预览；断言实际进入handler及只发一次请求。
+# 函数用途: 确认回显的出站Token不出现在工具结果、归档或操作账预览。
+@pytest.mark.parametrize("encoding", [False, True])
+@pytest.mark.parametrize("marker_overlap", [False, True])
+def test_reflected_token_scrubbed_before_operation_ledger(receiver, adverse_receiver, tmp_path, encoding, marker_overlap):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import save_remote_endpoint
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    _server, agent, _secret, _path = receiver
+    url, state = adverse_receiver
+    # 混合大小写证明Content-Encoding小写规范化后仍不会泄漏。
+    secret = "Reflect-Canary-Mixed-" + uuid.uuid4().hex
+    state["encoding"] = encoding
+    if marker_overlap:
+        tail = "a" * 22
+        secret = "[REDACTED]" + tail
+        state["suffix"] = tail * 2
+    save_remote_endpoint(agent, "reflect", url, secret, allowed_private_hosts=["127.0.0.1"])
+    store = LocalStore(tmp_path / "operations.db", enable_fts=False)
+    execution = execute_canonical_test_call(tmp_path, tools=agent.tools.tools,
+        tool_name="remote_agent_push", arguments={"endpoint_ref": "reflect", **payload()},
+        operation_store=store, operation_store_required=True)
+    result = execution.result
+    assert not result.ok and result.handler_executed
+    assert state["seen"] == ["/remote-agent/push"]
+    assert result.operation is not None
+    operation = store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id=result.operation.operation_id)
+    assert operation is not None and operation.result
+    rendered = json.dumps({"result": asdict(result), "operation": asdict(operation)}, default=str).casefold()
+    assert secret.casefold() not in rendered
+    if encoding and not marker_overlap:
+        assert "[redacted]" in rendered
+
+
+# LLM: 注入真实传输返回形状，覆盖output之外的嵌套错误字段与异常，不把mock当网络验收。
+# 函数用途: 防止错误envelope、恢复提示或异常内容绕过统一秘密清洗。
+@pytest.mark.parametrize("failure", ["outcome", "exception"])
+def test_all_transport_failure_fields_are_scrubbed(receiver, monkeypatch, failure):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.tooling import remote_agent_push_tool as module
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+
+    _server, agent, secret, _path = receiver
+    module.save_remote_endpoint(agent, "error", "https://node.example/remote-agent/push", secret)
+
+    # LLM: 只替换传输边界，模拟回显到可被操作账读取的所有结果字段。
+    # 函数用途: 产生带秘密的错误结果或发送后异常。
+    def fail(*_args, **_kwargs):
+        if failure == "exception":
+            raise ValueError(secret)
+        result = ToolHandlerOutcome("remote_agent_push", False, secret, error_code="NETWORK_REQUEST_FAILED",
+            result_envelope={secret: {"preview": [secret, secret.upper()]}}, effect_outcome="unknown")
+        result.recovery_hint = secret
+        result.effect_source_ref = secret
+        return result
+
+    monkeypatch.setattr(module, "fetch_raw_response", fail)
+    monkeypatch.setattr(module, "remote_push_pin", lambda *_args: "8.8.8.8")
+    result = agent.tools.tools["remote_agent_push"].execute({"endpoint_ref": "error", **payload()})
+    assert not result.ok and result.effect_outcome == "unknown"
+    assert secret.casefold() not in json.dumps(asdict(result)).casefold()
+
+
+# LLM: 网络冻结事实来自原Executor的write_boundary，别名和显式URL都须在DNS之前拒绝。
+# 函数用途: 复现禁网任务仍能走remote_agent_push的问题。
+@pytest.mark.parametrize("endpoint_field", ["endpoint_ref", "endpoint_url"])
+@pytest.mark.parametrize("boundary", [
+    {"network_access_mode": "disabled"}, {"effective_permissions": {"network_enabled": False}},
+])
+def test_push_honors_runner_network_disabled(receiver, tmp_path, monkeypatch, endpoint_field, boundary):
+    from agent_py_agent.agent.tooling import remote_agent_push_tool as module
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    _server, agent, secret, _path = receiver
+    url = "https://node.example/remote-agent/push"
+    module.save_remote_endpoint(agent, "blocked", url, secret)
+    calls = []
+
+    # LLM: 不允许禁网反例真的访问公网；边界替身只记录不应发生的DNS尝试。
+    # 函数用途: 捕获禁网失守并使旧实现能走到可判定断言。
+    def pin(*_args):
+        calls.append("dns")
+        return "8.8.8.8"
+
+    monkeypatch.setattr(module, "remote_push_pin", pin)
+    monkeypatch.setattr(module, "fetch_raw_response", lambda *_args, **_kwargs:
+        ToolHandlerOutcome("remote_agent_push", False, "unexpected network", error_code="NETWORK_REQUEST_FAILED"))
+    result = execute_canonical_test_call(tmp_path, tools=agent.tools.tools, tool_name="remote_agent_push",
+        arguments={endpoint_field: "blocked" if endpoint_field == "endpoint_ref" else url, **payload()},
+        write_boundary=boundary).result
+    assert result.error_code == "NETWORK_ACCESS_DISABLED", result.output
+    assert result.effect_outcome == "not_started" and calls == []
+
+
+# LLM: 无白名单必须同时审查原IPv6和投影IPv4；DNS替身覆盖不能由本机提供的地址分类。
+# 函数用途: 防止ULA/link-local/multicast/保留IPv6用公网低位IPv4绕过SSRF门。
+@pytest.mark.parametrize("address", [
+    "fd00::5efe:808:808", "fe80::5efe:808:808", "ff02::5efe:808:808", "100::5efe:808:808",
+    "2001:4860::5efe:7f00:1", "2002:7f00:1::1", "::ffff:127.0.0.1",
+])
+def test_ipv6_native_and_projected_addresses_both_checked(monkeypatch, address):
+    from agent_py_agent.agent.tooling import remote_agent_push_tool as module
+
+    monkeypatch.setattr(module.socket, "getaddrinfo", lambda *_a, **_k: [(10, 1, 6, "", (address, 443, 0, 0))])
+    with pytest.raises(module.RemotePushError, match="REMOTE_PUSH_ENDPOINT_DENIED"):
+        module.remote_push_pin("https://node.example/remote-agent/push", [])
+
+
+# LLM: 同URL也属于重定向；真实HTTP观察不能只数POST，故同时记录任意后续请求路径。
+# 函数用途: 验证每类重定向最多发送一次请求，尤其同址307不得重放nonce。
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_same_url_redirect_never_sends_second_request(receiver, adverse_receiver, status):
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import save_remote_endpoint
+
+    _server, agent, secret, _path = receiver
+    url, state = adverse_receiver
+    state.update(status=status, location="/remote-agent/push")
+    save_remote_endpoint(agent, "redirect-same", url, secret, allowed_private_hosts=["127.0.0.1"])
+    result = agent.tools.tools["remote_agent_push"].execute({"endpoint_ref": "redirect-same", **payload()})
+    assert not result.ok and result.error_code == "REMOTE_PUSH_REDIRECT_DENIED"
+    assert result.effect_outcome == "unknown" and state["seen"] == ["/remote-agent/push"]
+
+
+# LLM: 相同明文标签不能跨会话策略共享线程，业务去重仍保持原token/owner/事件域。
+# 函数用途: 验证reuse_key与new_thread的确定性线程命名空间相互隔离。
+def test_new_thread_and_reuse_key_namespaces_are_distinct(receiver):
+    server, _agent, secret, _path = receiver
+    first_status, first = post(server, *signed(payload(thread_mode="reuse_key", thread_reuse_key="same-label"), secret))
+    new_body = payload(idempotency_key="same-label")
+    second_status, second = post(server, *signed(new_body, secret))
+    retry_status, retry = post(server, *signed(new_body, secret))
+    reuse_status, reuse = post(server, *signed(payload(thread_mode="reuse_key", thread_reuse_key="same-label"), secret))
+    assert first_status == second_status == retry_status == reuse_status == 202
+    assert first["thread_id"] != second["thread_id"]
+    assert second["thread_id"] == retry["thread_id"] and retry["duplicate"]
+    assert first["thread_id"] == reuse["thread_id"]
+    assert len(list(server.paths.inbox.glob("*.json"))) == 3
+
+
+# LLM: 实际用户权限及冻结owner上界都不能被别名或显式URL绕过；不访问外网。
+# 函数用途: 核对持久禁网、缓存上界及直接调用的宿主运行边界。
+@pytest.mark.parametrize("source", ["persisted", "cached", "direct_mode", "direct_permissions"])
+@pytest.mark.parametrize("endpoint_field", ["endpoint_ref", "endpoint_url"])
+def test_push_honors_owner_and_direct_network_disabled(receiver, monkeypatch, source, endpoint_field):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling import remote_agent_push_tool as module
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+
+    _server, agent, secret, _path = receiver
+    url = "https://node.example/remote-agent/push"
+    module.save_remote_endpoint(agent, "blocked", url, secret)
+    calls = []
+
+    # LLM: 禁网断言使用DNS边界哨兵，不允许真实公网副作用。
+    # 函数用途: 记录不应发生的解析尝试。
+    def pin(*_args):
+        calls.append("dns")
+        return "8.8.8.8"
+
+    monkeypatch.setattr(module, "remote_push_pin", pin)
+    monkeypatch.setattr(module, "fetch_raw_response", lambda *_args, **_kwargs:
+        ToolHandlerOutcome("remote_agent_push", False, "unexpected network", error_code="NETWORK_REQUEST_FAILED"))
+    if source == "persisted":
+        path = agent.home_paths.owner_permissions_json
+        permissions = json.loads(path.read_text())
+        permissions["network"]["enabled"] = False
+        write_private_json_file_atomic(path, permissions)
+    elif source == "cached":
+        agent.owner_policy = replace(agent.owner_policy, network_enabled=False)
+    else:
+        boundary = {"network_access_mode": "disabled"} if source == "direct_mode" else {
+            "effective_permissions": {"network_enabled": False}}
+        agent._current_run_params = SimpleNamespace(write_boundary=boundary)
+    result = agent.tools.tools["remote_agent_push"].execute({
+        endpoint_field: "blocked" if endpoint_field == "endpoint_ref" else url, **payload()})
+    assert result.error_code == "NETWORK_ACCESS_DISABLED", result.output
+    assert result.effect_outcome == "not_started" and calls == []
+
+
+# LLM: 两次正式调用共享同一handler但各持冻结权限；真实回环仅允许有网的一次入队，不借可变Agent当前边界串权。
+# 函数用途: 同时验证禁网拒绝、正常推送及请求级网络开关不会污染共享工具。
+def test_concurrent_scoped_network_permissions_do_not_leak(receiver, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import save_remote_endpoint
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    server, agent, secret, _path = receiver
+    url = f"http://127.0.0.1:{server.server.server_address[1]}/remote-agent/push"
+    save_remote_endpoint(agent, "scoped", url, secret, allowed_private_hosts=["127.0.0.1"])
+    # 正式调用应只读各自context，不能借用另一个并发任务的Agent当前边界。
+    agent._current_run_params = SimpleNamespace(write_boundary={"network_access_mode": "disabled"})
+    tool = agent.tools.tools["remote_agent_push"]
+    before = dict(tool.__dict__)
+
+    # LLM: 两调用走同一真实执行器/Registry，只有网络权限和业务身份不同。
+    # 函数用途: 为一个并发任务生成独立请求级开关。
+    def invoke(enabled):
+        return execute_canonical_test_call(tmp_path, tools=agent.tools.tools, tool_name="remote_agent_push",
+            arguments={"endpoint_ref": "scoped", **payload()}, run_id=f"network-{enabled}",
+            call_id=f"call-{enabled}", write_boundary={"network_access_mode": "enabled" if enabled else "disabled"}).result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        denied, accepted = list(pool.map(invoke, (False, True)))
+    assert not denied.ok and denied.error_code == "NETWORK_ACCESS_DISABLED"
+    assert denied.effect_outcome == "not_started"
+    assert accepted.ok and accepted.handler_executed, accepted.output
+    assert len(list(server.paths.inbox.glob("*.json"))) == 1
+    assert tool.__dict__ == before
+
+
+# LLM: 服务端畸形状态行引发真实http.client.BadStatusLine，必须由原传输叶压成无远端原文的错误。
+# 函数用途: 证明HTTPException不会带着状态行回显凭据逃逸到模型或操作账。
+def test_bad_http_status_line_never_leaks_token(receiver, adverse_receiver, tmp_path):
+    from dataclasses import asdict
+
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import save_remote_endpoint
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    _server, agent, secret, _path = receiver
+    url, state = adverse_receiver
+    state["bad_status"] = True
+    save_remote_endpoint(agent, "bad-status", url, secret, allowed_private_hosts=["127.0.0.1"])
+    store = LocalStore(tmp_path / "operations.db", enable_fts=False)
+    result = execute_canonical_test_call(tmp_path, tools=agent.tools.tools,
+        tool_name="remote_agent_push", arguments={"endpoint_ref": "bad-status", **payload()},
+        operation_store=store, operation_store_required=True).result
+    assert not result.ok and result.handler_executed and result.effect_outcome == "unknown"
+    assert result.operation is not None
+    operation = store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id=result.operation.operation_id)
+    assert operation is not None
+    rendered = json.dumps({"result": asdict(result), "operation": asdict(operation)})
+    assert secret not in rendered and "not-http:" not in rendered
+    assert "BadStatusLine" in rendered and state["seen"] == ["/remote-agent/push"]
