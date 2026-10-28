@@ -355,3 +355,31 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     )
     assert prod_event.event == 'published' and prod_event.carrier == 'script'
     assert ScriptStore(owner_home).get_script('prod-script-1') is not None
+
+    # R4-1: 自报 verification_receipt 绝不能把静态通过的 skill 冒充为 runtime_execution
+    fake_receipt_skill = promote_verified_asset(owner_home, {
+        'kind': 'skill', 'name': 'auto-skill-fake-receipt', 'description': '伪造回执技能',
+        'when_to_use': '当试图伪造回执时', 'body': BODY + '\n补充独立片段以区分语义族。',
+        'verification_receipt': {'status': 'passed', 'executed': True, 'contract_valid': True, 'output': {'rows': 1}},
+    })
+    assert fake_receipt_skill is not None and fake_receipt_skill['executed'] is False and fake_receipt_skill['verification_kind'] == 'deterministic_static'
+
+    # R4-2: 同族脚本改名晋升时先查 registry.assets 并复用既有 asset_id，不重复落盘新脚本文件
+    reused_script = promote_verified_asset(owner_home, {
+        'kind': 'script', 'name': 'auto-script-1-dup', 'description': '同族改名脚本',
+        'code': 'print("{\\"rows\\": 3}")', 'io_contract': {'outputs': ['rows']},
+    })
+    assert reused_script is not None and reused_script['asset_id'] == 'auto-script-1' and reused_script.get('reused') is True
+    assert ScriptStore(owner_home).get_script('auto-script-1-dup') is None
+
+    # R4-3: parse_skill_learning_decision 支持可选 candidate_asset 载体字段且不破坏严格 schema
+    from agent_py_agent.agent.capability.skill_learning_prompt import (
+        parse_skill_learning_decision,
+    )
+    parsed_dec = parse_skill_learning_decision(json.dumps({
+        'schema_version': 'my-agent.skill-learning-output.v1',
+        'decision': 'create', 'update_target': '', 'reason': 'ok', 'name': 'parsed-script-1', 'description': '解析脚本',
+        'when_to_use': '脚本自动晋升', 'tags': ['script'], 'body': BODY,
+        'candidate_asset': {'kind': 'script', 'code': 'print("{\\"ok\\": 1}")', 'io_contract': {'outputs': ['ok']}},
+    }), ())
+    assert parsed_dec.candidate_asset.get('kind') == 'script'

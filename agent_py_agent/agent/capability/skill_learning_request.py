@@ -55,7 +55,7 @@ def build_learning_request(ctx: object, min_tool_rounds: int, *, include_backgro
     root = str(attrs.get('root_task_id') or getattr(ctx, 'root_task_id', '') or '')
     digest = str(getattr(ctx, 'trajectory_digest', '') or attrs.get('trajectory_digest') or '')
     fingerprint = hashlib.sha256(json.dumps(redact_sensitive_value(records), sort_keys=True, default=str).encode()).hexdigest()
-    return {
+    req: dict[str, object] = {
         "schema_version": REQUEST_SCHEMA_VERSION,
         "request_key": request_key(json.dumps([identity, task, root, digest, fingerprint], ensure_ascii=False)),
         "request_id": str(getattr(ctx, "request_id", "") or ""),
@@ -75,6 +75,10 @@ def build_learning_request(ctx: object, min_tool_rounds: int, *, include_backgro
         "tool_trace": [_trace_entry(item) for item in _sample_learning_trace(records, limit=TRACE_COUNT)],
         "used_skill_ids": used_skill_ids(records),
     }
+    cand = getattr(ctx, "candidate_asset", None) or attrs.get("candidate_asset")
+    if isinstance(cand, dict):
+        req["candidate_asset"] = redact_sensitive_value(cand)
+    return req
 
 
 # LLM: 只投影收尾上下文的 memories（本轮实际注入模型的正式记忆）的编号、种类和先脱敏再截断的正文，有条数与字数上限；

@@ -78,10 +78,12 @@ def _propose_or_promote_locked(store, publish, verifier, autonomous_verified):
     from .skill_learning_store import SkillLearningEvent
 
     req = publish.request if isinstance(publish.request, dict) else {}
-    extra = req.get('candidate_asset') if isinstance(req.get('candidate_asset'), dict) else {
-        k: req[k] for k in ('kind', 'code', 'entry_source', 'steps', 'io_contract', 'sample_inputs',
-                            'entry_document', 'files', 'application_scope', 'analysis_handler') if k in req
-    }
+    extra = {k: req[k] for k in ('kind', 'code', 'entry_source', 'steps', 'io_contract', 'sample_inputs',
+                                 'entry_document', 'files', 'application_scope', 'analysis_handler') if k in req}
+    if isinstance(req.get('candidate_asset'), dict):
+        extra.update(req['candidate_asset'])
+    if isinstance(getattr(publish.decision, 'candidate_asset', None), dict):
+        extra.update(publish.decision.candidate_asset)
     if extra and select_asset_carrier({**asdict(publish.decision), **extra}) != 'skill':
         cand = {**asdict(publish.decision), **extra}
         carrier = select_asset_carrier(cand)

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 OUTPUT_SCHEMA_VERSION = "my-agent.skill-learning-output.v1"
 DECISION_CREATE = "create"
@@ -35,6 +35,8 @@ EXISTING_SKILLS_COUNT = 200
 EXISTING_DESCRIPTION_CHARS = 160
 _FIELDS = ("schema_version", "decision", "reason", "update_target", "name", "description",
            "when_to_use", "tags", "body")
+_CARRIER_FIELDS = ("kind", "candidate_asset", "code", "entry_source", "steps", "io_contract",
+                   "sample_inputs", "entry_document", "files", "application_scope")
 
 
 # LLM: code 固定为 OUTPUT_INVALID，field 指出第一个不合规字段；不携带模型原文。
@@ -60,6 +62,7 @@ class SkillLearningDecision:
     when_to_use: str = ""
     tags: tuple[str, ...] = ()
     body: str = ""
+    candidate_asset: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: existing_skills 是当前快照全部来源的名字索引（防重名、防重复）；updatable_skills 只放本轮用过、
@@ -120,6 +123,10 @@ def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> Skill
     target = str(payload.get("update_target") or "").strip()
     _require(NAME_RE.fullmatch(name) is not None, "name")
     _require(decision == DECISION_CREATE or (target in updatable and name == target), "update_target")
+    carrier_ext = dict(payload["candidate_asset"]) if isinstance(payload.get("candidate_asset"), dict) else {}
+    for key in _CARRIER_FIELDS:
+        if key != "candidate_asset" and key in payload:
+            carrier_ext[key] = payload[key]
     return SkillLearningDecision(
         decision=decision,
         reason=reason,
@@ -129,17 +136,20 @@ def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> Skill
         when_to_use=_single_line(payload.get("when_to_use"), WHEN_TO_USE_MAX_CHARS, "when_to_use", required=False),
         tags=_tags(payload.get("tags")),
         body=_body(payload.get("body")),
+        candidate_asset=carrier_ext,
     )
 
 
-# LLM: 只接受单个 JSON 对象，字段集合与 schema 完全一致，schema_version 与 decision 枚举精确匹配。
+# LLM: 只接受单个 JSON 对象，必填字段集合与 schema 一致且允许可选四载体扩展字段，schema_version 与 decision 枚举精确匹配。
 # 函数用途: 解析并做顶层形状检查。
 def _json_object(text: str) -> dict[str, object]:
     try:
         payload = json.loads(str(text or "").strip())
     except ValueError as exc:
         raise SkillLearningOutputError("json") from exc
-    _require(isinstance(payload, dict) and set(payload) == set(_FIELDS), "fields")
+    allowed = set(_FIELDS) | set(_CARRIER_FIELDS)
+    _require(isinstance(payload, dict) and set(_FIELDS) <= set(payload) <= allowed, "fields")
+    _require("candidate_asset" not in payload or isinstance(payload["candidate_asset"], dict), "candidate_asset")
     _require(payload.get("schema_version") == OUTPUT_SCHEMA_VERSION, "schema_version")
     _require(payload.get("decision") in DECISIONS, "decision")
     return payload

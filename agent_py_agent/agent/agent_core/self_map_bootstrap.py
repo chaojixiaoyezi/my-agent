@@ -89,7 +89,7 @@ def _active_agent_workspace_root(agent):
     return getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None))
 
 
-# LLM: 仅投递至当前Owner已绑定且支持proactive的同一渠道；无通道返回None保持no_channel，发送异常或失败返回False标记unavailable。
+# LLM: 仅投递至当前Owner已绑定且支持proactive的同一渠道；无通道返回no_channel，发送异常或失败返回unavailable。
 # 函数用途: 将脚本源异常与工作流断点通知接入当前Agent的DeliveryService。
 def _agent_im_notifier(agent, notice):
     from ..capability.channel_message_target import resolve_message_target
@@ -97,15 +97,15 @@ def _agent_im_notifier(agent, notice):
     delivery = getattr(agent, 'delivery_service', None)
     provider, target, owner_root, err = resolve_message_target(agent, '')
     if err or delivery is None or owner_root is None or not target:
-        return None
+        return 'no_channel'
     if not delivery.registry.capabilities_for(provider).proactive:
-        return None
+        return 'no_channel'
     title = str(notice.get('title') or notice.get('event_type') or 'notification')
     receipt = delivery.deliver(
         DeliveryContext(channel=provider, target=target, mode='proactive'),
         ReplyEnvelope(content=f"[{title}] {notice.get('message', '')}".strip()),
     )
-    return getattr(receipt, 'delivery_status', '') == 'sent'
+    return 'queued' if getattr(receipt, 'delivery_status', '') == 'sent' else 'unavailable'
 
 
 # LLM: main/user脚本、数据源与工作流统一动态读取当前经校验工作区与受限快照；治理仍只给可信管理员，目录开关不扩授权。

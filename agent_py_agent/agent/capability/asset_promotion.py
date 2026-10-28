@@ -22,13 +22,15 @@ from .skill_snapshot import skill_content_sha256
 # LLM: 纯结构分类，显式四类载体优先，否则按分支/步骤/命令归类；不解析自然语言授执行权。
 # 函数用途: 选择适合复用的资产载体。
 def select_asset_carrier(features):
-    if features.get('kind') in {'skill','script','workflow','capability_package'}:
-        return features['kind']
-    if features.get('branches'):
+    nested = features.get('candidate_asset')
+    data = {**features, **nested} if isinstance(nested, dict) and nested else features
+    if data.get('kind') in {'skill','script','workflow','capability_package'}:
+        return data['kind']
+    if data.get('branches'):
         return 'skill'
-    if len(features.get('steps') or ()) > 1:
+    if len(data.get('steps') or ()) > 1:
         return 'workflow'
-    return 'script' if features.get('commands') else 'skill'
+    return 'script' if (data.get('commands') or data.get('code') or data.get('entry_source')) else 'skill'
 
 
 # LLM: 只计算语义族，不作为授权或验证通过证明。
@@ -132,7 +134,7 @@ def _restore_on_failure(store, parts, rollback):
     rollback.callback(unlink_file_beneath, store.directory, parts) if previous is None else rollback.callback(write_text_atomic_beneath, store.directory, parts, previous)
 
 
-# LLM: 隔离暂存目录并快照保护手工维护文件，任何篡改尝试立即恢复并抛MANUAL_ONLY_TARGET。
+# LLM: 隔离暂存目录并保护手工维护文件，任何在暂存区内写出AGENTS/SOUL立即拦截并抛MANUAL_ONLY_TARGET，绝不覆写Owner真文件。
 # 函数用途: 为候选脚本和工作流提供与正式Owner隔离的验证环境。
 @contextmanager
 def _stage_dir(home):
@@ -141,7 +143,6 @@ def _stage_dir(home):
 
     from .skill_learning_publish import SkillLearningGateError
 
-    manual = {name: (home / name).read_bytes() for name in ('AGENTS.md', 'SOUL.md') if (home / name).is_file()}
     staging = home / 'data' / 'skill_learning' / ('_stage_' + uuid4().hex)
     staging.mkdir(parents=True, exist_ok=True)
     for folder in ('scripts', 'skills'):
@@ -149,15 +150,9 @@ def _stage_dir(home):
             shutil.copytree(home / folder, staging / folder)
     try:
         yield staging
-        for name in ('AGENTS.md', 'SOUL.md'):
-            if (staging / name).exists() or ((home / name).read_bytes() if (home / name).is_file() else None) != manual.get(name):
-                raise SkillLearningGateError('MANUAL_ONLY_TARGET')
+        if any((staging / name).exists() for name in ('AGENTS.md', 'SOUL.md')):
+            raise SkillLearningGateError('MANUAL_ONLY_TARGET')
     finally:
-        for name, content in manual.items():
-            (home / name).write_bytes(content)
-        for name in {'AGENTS.md', 'SOUL.md'} - set(manual):
-            if (home / name).exists():
-                (home / name).unlink()
         shutil.rmtree(staging, ignore_errors=True)
 
 
@@ -172,6 +167,7 @@ def _promote_script_asset(home, name, desc, candidate):
     existing = sstore.get_script(name)
     if existing is not None and candidate.get('expected_revision') != existing.get('revision'):
         return False
+    target_rev = existing.get('revision') if existing is not None else 0
     code = candidate.get('entry_source', candidate.get('code', ''))
     desc_obj = AssetDescriptor.from_dict({'id': name, 'kind': 'script', 'name': name, 'summary': desc,
                                           'io_contract': candidate.get('io_contract', {})})
@@ -183,7 +179,10 @@ def _promote_script_asset(home, name, desc, candidate):
                    'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}
         if not business_validated(receipt):
             return False
-    sstore.save_script(desc_obj, code, expected_revision=candidate.get('expected_revision'))
+    try:
+        sstore.save_script(desc_obj, code, expected_revision=target_rev)
+    except ValueError:
+        return False
     return sstore.get_script(name) is not None
 
 
@@ -197,6 +196,7 @@ def _promote_workflow_asset(home, name, desc, candidate):
     existing = wstore.get_workflow(name)
     if existing is not None and candidate.get('expected_revision') != existing.descriptor.revision:
         return False
+    target_rev = existing.descriptor.revision if existing is not None else 0
     defn = WorkflowDefinition.from_any({
         'descriptor': {'id': name, 'kind': 'workflow', 'name': name, 'summary': desc, 'io_contract': candidate.get('io_contract', {})},
         'steps': candidate['steps'], 'body_markdown': candidate.get('body_markdown', ''),
@@ -210,7 +210,10 @@ def _promote_workflow_asset(home, name, desc, candidate):
                    'output': run.final_output if isinstance(run.final_output, dict) else {}}
         if not business_validated(receipt):
             return False
-    wstore.save_workflow(defn, expected_revision=candidate.get('expected_revision'))
+    try:
+        wstore.save_workflow(defn, expected_revision=target_rev)
+    except ValueError:
+        return False
     return wstore.get_workflow(name) is not None
 
 
@@ -286,9 +289,18 @@ def promote_verified_asset(owner_home, candidate):
         event = promote_verified_skill(store, PublishRequest(dec), candidate.get('verifier'))
         if event is None:
             return None
-        exec_ok = business_validated(candidate.get('verification_receipt') or {})
-        return {'carrier': 'skill', 'asset_id': name, 'verification_kind': 'runtime_execution' if exec_ok else 'deterministic_static',
+        rec = store.load_registry().skills.get(event.skill_name or name)
+        v_rec = (rec.maintenance.get('verification_receipt') or {}) if rec else {}
+        exec_ok = v_rec.get('executed') is True
+        return {'carrier': 'skill', 'asset_id': event.skill_name or name, 'verification_kind': 'runtime_execution' if exec_ok else 'deterministic_static',
                 'checks_executed': True, 'executed': exec_ok, 'contract_valid': True, 'sha256': static['sha256']}
+    prev = store.load_registry().assets.get(task_family_fingerprint(carrier, candidate))
+    if prev and prev.get('asset_id') and prev['asset_id'].removeprefix('owner:') != name.removeprefix('owner:'):
+        row = register_asset(store, kind=carrier, asset_id=name, asset=dict(candidate),
+                             source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id']},
+                             sha256=static['sha256'], state='trial')
+        return {'carrier': carrier, 'asset_id': row['asset_id'], 'reused': True, 'verification_kind': 'deterministic_static',
+                'checks_executed': True, 'executed': False, 'contract_valid': True, 'sha256': static['sha256']}
     handlers = {'script': _promote_script_asset, 'workflow': _promote_workflow_asset, 'capability_package': _promote_package_asset}
     if not handlers[carrier](home, name, desc, candidate):
         return None

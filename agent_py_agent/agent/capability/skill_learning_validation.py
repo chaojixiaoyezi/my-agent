@@ -19,6 +19,8 @@ def default_machine_promotion_verifier(candidate_or_draft, sha256=None):
     try:
         publish = isinstance(candidate_or_draft, PublishRequest)
         asset = asdict(candidate_or_draft.decision) if publish else dict(candidate_or_draft)
+        if not asset.get('candidate_asset'):
+            asset.pop('candidate_asset', None)
         target = candidate_or_draft.request.get('target', '') if publish else asset.get('target', '')
         _validate_identity(asset, target)
         kind = asset.get('kind', 'skill')
