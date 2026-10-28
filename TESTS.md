@@ -1,3 +1,43 @@
+## 2026-10-28 Wave 9 A3 Round 4：MCP BrokenPipe 清理与失败落库
+
+来源：先完整阅读 `07-tasks/fix-r4-wave9-a3.md` 全40行。工作树 `/tmp/wt-wave9-a3`、分支 `wave9-a3`，干净起点 `547bfc7653bee75be5699c409de1329eba188f77`，门禁基线仍为 `db4d5de92`。只处理 c16 报告的这一个 P2；外部插件独立交付，不安装、启用、部署或推送。
+
+### 修复范围与行为
+
+- **`_stop_process()`。** TERM、wait、必要的KILL/再次wait、各自的stdin/stdout/stderr关闭均独立保护；即使BufferedWriter.close再次flush抛BrokenPipe，也继续关闭后续流。嵌套finally保证两个句柄映射最终移除。无法确认归属或组消失时不假报成功；已退出或poll异常的锚点不发信号，仍不按数据库PID杀进程。
+- **`_spawn_mcp()`。** initialize、initialized通知及tools/list位于同一个握手异常边界；OSError（含BrokenPipeError）先清理，再持久化 `error`、`error_type`、实际 `exit_code`，然后返回 `502 MCP_TRANSPORT_FAILED`。回收确认字段 `cleanup_confirmed` 表示有归属进程退出且进程组已消失；未确认时仍保存 `unknown_after_handshake_exit`，不登记running，也不伪造退出码。
+- 产品AST核对证明，仅上述两个函数改变，其他函数与R3快照一致。新增/修改函数及嵌套测试helper均保留 `# LLM:` + `# 函数用途:` 双层中文注释；已有AST注释回归随完整文件通过。
+
+### 真实红绿证据与独立复核
+
+- 新增7项先在原始R3源码全部断言失败，JUnit `/tmp/pytest-a3-r4/red.xml`：真实子进程读取initialize后先 `os.close(0)`、再返回合法初始化响应并保持存活，HTTP实际返回 `500 INTERNAL_ERROR`。其余六项在真实Popen/三条真实流上分别注入stdin、stdout、stderr、TERM、wait、poll的单一系统异常，证实清理逃逸或stderr未关闭。
+- 修复后MCP专项（含正常握手、旧生命周期、协作worker回收等对照）**21 passed**，见 `focused.xml`。真实BrokenPipe用例连续两次重试，每次均检查进程已退出、stdin/stdout已关闭、两个映射为空、唯一新增失败行及与该次真实进程相同的退出码；最后服务close正常。测试兜底清理在所有产品断言之后，不用测试自己的回收冒充产品行为。
+- Astra high对冻结源码与测试diff做独立只读定向审查，无阻塞产品缺陷；指出第二次失败记录可能借第一次记录满足any断言。已按每次请求前后daemon_id集合差精确定位唯一新增行，并检查其错误类型、退出码与回收确认；只增强测试，不再改源码或ZIP。修正由父级动态复验，未声称做过第二次独立审查。
+- 最终完整指定文件 **144 passed / 0 failed / 0 errors / 0 skipped**，JUnit `/tmp/pytest-a3-r4/final-accepted.xml`。AST比对证明R3原测试模块完全不变，仅增加两个顶层测试函数（一个六项参数化），没有删除、跳过、xfail或放宽旧断言。最终测试前后9份外部源码、ZIP及测试共11文件摘要保持冻结。
+- `ruff check agent_py_agent scripts` 全指定范围通过；外部server、builder及该测试文件的额外Ruff也通过。导入边界 `--json` 输出 `[]`、退出0。文档同步与提交区间检查在本节更新及提交后执行，交接报告附最终结果。
+
+### 冻结包与复现命令
+
+按原构建器重建，原生包检查通过；全部11个清单成员SHA-256正确，全部9份外部 `.py` 与ZIP中字节一致，构建器未改。下方历史轮次指纹仅代表当轮快照；本轮交付指纹如下：
+
+| 文件（相对外部handoff目录） | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `1224d16e0a7c07ea25133ec90cbc98878e8bd56be5782bf674c51625c35efdf4` |
+| `build_plugin_package.py`（未改） | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `9e8683627bab1cd7ad24cbd94a0306e2fe4f300831da50284c27e327f5d3d8d8` |
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short --junitxml=/tmp/pytest-a3-r4/final-accepted.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+验证边界：本机POSIX真实子进程、临时回环HTTP和SQLite；未验证跨机可达、生产部署、Windows或Linux全量CI。单一可恢复故障回归不等于动态覆盖持续TERM/KILL拒绝、持续wait异常、进程组探测异常的全部组合，也不代表各握手阶段都分别做过I/O故障注入；这些分支仅有共享异常边界的静态核对。没有放大为全门户发布验收。
+
 ## 2026-10-28 Wave 9 A3 Round 3：认证、MFA 与输入边界修复
 
 来源：先完整阅读 `07-tasks/fix-r3-wave9-a3.md` 全67行。在 `/tmp/wt-wave9-a3`、分支 `wave9-a3`、干净起点 `e4fa35dc260416b6e29b19aaa40ce7026883c623` 续作；文档和提交区间门禁仍以 `db4d5de92` 为基线。外部插件继续独立交付；仓内只修改本文件和 `agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py`，不安装、启用、部署、推送或改动生产服务。

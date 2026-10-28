@@ -441,6 +441,136 @@ for line in sys.stdin:
     assert all(row["status"] != "running" for row in portal._all("remote_mcp_Daemons"))
 
 
+# LLM: 真实子进程先关闭fd0再返回合法初始化，稳定触发后续写入与close再次flush的BrokenPipeError；不用假管道替代故障。
+# 函数用途: 验证HTTP结构化失败、真实进程终止、流关闭、映射回收及失败落盘，连续两次重试不占守护上限。
+def test_r4_mcp_closed_stdin_persists_failure_and_releases_handles(portal, portal_module, package_bytes, monkeypatch):
+    import contextlib
+    import io
+    import signal
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(package_bytes)) as archive:
+        entry = json.loads(archive.read("plugin.json"))["entry"]["command"]
+    script = b'''import json,os,sys,time
+request = json.loads(sys.stdin.buffer.readline())
+os.close(0)
+print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':'2024-11-05'}}),flush=True)
+time.sleep(60)
+'''
+    status, plugin = deploy(portal, r3_repack(package_bytes, {entry: script}))
+    assert status == 200, plugin
+    actual_popen = portal_module.subprocess.Popen
+    processes = []
+
+    # LLM: 仅记录真实Popen句柄，不修改stdin/stdout或握手时序；子进程在初始化响应前已关闭输入。
+    # 函数用途: 取得本次请求实际创建的进程，供退出码与资源关闭断言使用。
+    def record_process(*args, **kwargs):
+        process = actual_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(portal_module.subprocess, "Popen", record_process)
+    try:
+        for attempt in range(2):
+            previous_ids = {row["daemon_id"] for row in portal._all("remote_mcp_Daemons")}
+            status, result = api(portal, "/api/plugins/remote/" + plugin["plugin_id"] + "/mcp/spawn-remote", {})
+            assert (status, result.get("error")) == (502, "MCP_TRANSPORT_FAILED"), result
+            process = processes[-1]
+            assert process.poll() is not None
+            assert process.stdin.closed and process.stdout.closed
+            assert portal._daemons == {} and portal._daemon_owners == {}
+            rows = portal._all("remote_mcp_Daemons")
+            assert len(rows) == attempt + 1
+            assert all(row["status"] == "failed" and row["tools"] == [] for row in rows)
+            added = [row for row in rows if row["daemon_id"] not in previous_ids]
+            assert len(added) == 1
+            failure = added[0]
+            assert failure["exit_code"] == process.returncode
+            assert failure["error"] == "MCP_TRANSPORT_FAILED" and failure["error_type"] == "BrokenPipeError"
+            assert failure["cleanup_confirmed"] is True
+        portal.close()
+        assert portal._daemons == {} and portal._daemon_owners == {}
+    finally:
+        # 即使红例失败也回收本测试自己的进程与管道；这些兜底发生在全部产品断言之后。
+        for process in processes:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    with contextlib.suppress(OSError):
+                        stream.close()
+
+
+# LLM: 每个清理故障只注入单一系统边界，进程和三条流仍为真实资源；无法核验归属时必须保留未知而非盲杀。
+# 函数用途: 验证任一流关闭、终止、等待或poll异常都不跳过其他清理及两个映射的finally回收。
+@pytest.mark.parametrize("fault", ["stdin", "stdout", "stderr", "terminate", "wait", "poll"])
+def test_r4_mcp_stop_cleanup_steps_are_independent(portal, portal_module, monkeypatch, fault):
+    import contextlib
+    import signal
+    import subprocess
+    from types import SimpleNamespace
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    streams = {name: getattr(process, name) for name in ("stdin", "stdout", "stderr")}
+    actual_poll, actual_wait, actual_killpg = process.poll, process.wait, os.killpg
+    key = "r4-test-owned-process"
+    portal._daemons[key], portal._daemon_owners[key] = process, "local/main"
+    try:
+        if fault in streams:
+            stream = streams[fault]
+
+            # LLM: 先释放真实流再模拟flush/close的OSError，验证失败后续步骤，而不制造测试自己的FD泄漏。
+            # 函数用途: 在指定流关闭边界制造一次清理异常。
+            def close_fault():
+                stream.close()
+                raise OSError("synthetic close failure")
+
+            setattr(process, fault, SimpleNamespace(close=close_fault))
+        elif fault == "terminate":
+            # LLM: 仅第一次TERM发送失败，保留真实KILL和进程组归属检查，要求后续回收仍执行。
+            # 函数用途: 模拟终止信号的系统异常，不拦截测试兜底使用的原始killpg。
+            def kill_fault(pid, sig):
+                if pid == process.pid and sig == signal.SIGTERM:
+                    raise OSError("synthetic signal failure")
+                return actual_killpg(pid, sig)
+
+            monkeypatch.setattr(portal_module.os, "killpg", kill_fault)
+        else:
+            attempts = []
+            actual = actual_poll if fault == "poll" else actual_wait
+
+            # LLM: 第一次系统状态/等待调用失败，后续调用恢复真实Popen方法，不假造进程退出。
+            # 函数用途: 验证状态未知或wait异常不会跳过流关闭和句柄移除。
+            def process_fault(*args, **kwargs):
+                attempts.append(True)
+                if len(attempts) == 1:
+                    raise OSError("synthetic process observation failure")
+                return actual(*args, **kwargs)
+
+            monkeypatch.setattr(process, fault, process_fault)
+        try:
+            stopped = portal._stop_process(key)
+        except Exception as exc:
+            stopped = type(exc).__name__
+        assert stopped is (fault != "poll"), stopped
+        assert all(stream.closed for stream in streams.values())
+        assert key not in portal._daemons and key not in portal._daemon_owners
+        if fault == "poll":
+            assert actual_poll() is None  # 无法确认活锚点归属，不能发信号冒充已终止。
+        else:
+            assert actual_poll() is not None
+    finally:
+        if actual_poll() is None:
+            actual_killpg(process.pid, signal.SIGKILL)
+            actual_wait(timeout=5)
+        for stream in streams.values():
+            with contextlib.suppress(OSError):
+                stream.close()
+        portal._daemons.pop(key, None)
+        portal._daemon_owners.pop(key, None)
+
+
 # LLM: Archive links must be rejected even with a directory suffix; real ordinary directories stay valid controls.
 # 函数用途: 验证ZIP目录符号链接及tar软硬链接在部署前拒绝，不把普通目录误拒。
 @pytest.mark.parametrize("kind", ["zip-dir-link", "zip-file-link", "zip-directory", "tar-dir-link", "tar-hard-link", "tar-directory"])
