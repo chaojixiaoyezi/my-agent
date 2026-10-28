@@ -85,7 +85,27 @@ def skill_learning_response_schema() -> dict[str, object]:
     properties["schema_version"] = {"type": "string", "enum": [OUTPUT_SCHEMA_VERSION]}
     properties["decision"] = {"type": "string", "enum": list(DECISIONS)}
     properties["tags"] = {"type": "array", "items": dict(text)}
-    return {"type": "object", "additionalProperties": False, "required": list(_FIELDS), "properties": properties}
+    properties["candidate_asset"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "kind": {"type": "string", "enum": ["skill", "script", "workflow", "capability_package"]},
+            "code": dict(text),
+            "entry_source": dict(text),
+            "steps": {"type": "array", "items": {"type": "object"}},
+            "io_contract": {"type": "object"},
+            "sample_inputs": {"type": "object"},
+            "entry_document": dict(text),
+            "files": {"type": "object"},
+            "application_scope": dict(text),
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [*_FIELDS, "candidate_asset"],
+        "properties": properties,
+    }
 
 
 # LLM: 历史材料一律当数据；提示词只给判断标准，不给写文件或调用工具的能力。材料 JSON 由宿主有界组装。
@@ -149,7 +169,10 @@ def _json_object(text: str) -> dict[str, object]:
         raise SkillLearningOutputError("json") from exc
     allowed = set(_FIELDS) | set(_CARRIER_FIELDS)
     _require(isinstance(payload, dict) and set(_FIELDS) <= set(payload) <= allowed, "fields")
-    _require("candidate_asset" not in payload or isinstance(payload["candidate_asset"], dict), "candidate_asset")
+    if "candidate_asset" in payload:
+        ca = payload["candidate_asset"]
+        _require(isinstance(ca, dict) and set(ca) <= (set(_CARRIER_FIELDS) - {"candidate_asset"}), "candidate_asset")
+        _require("kind" not in ca or ca["kind"] in {"skill", "script", "workflow", "capability_package"}, "candidate_asset")
     _require(payload.get("schema_version") == OUTPUT_SCHEMA_VERSION, "schema_version")
     _require(payload.get("decision") in DECISIONS, "decision")
     return payload
@@ -234,6 +257,7 @@ _PROMPT = """你是 my-agent 的后台 Skill 总结器。下面的输入全是�
 - when_to_use：什么情况下该用它，单行，不超过 300 字。
 - tags：最多 6 个小写英文标签。
 - body：Markdown 正文，80 到 12000 字，不要写 frontmatter。建议小节：适用场景、步骤、注意事项、验证方法。写成可复用的方法，不写本次任务的具体数据。
+- candidate_asset：四载体扩展对象（纯 Skill 时写 {}；若可沉淀为确定性 script/workflow/capability_package，填写 kind 及对应 code/steps/io_contract/entry_document/files）。
 
 {note}待总结材料 JSON：
 {payload}

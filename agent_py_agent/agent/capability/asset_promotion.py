@@ -39,11 +39,15 @@ def task_family_fingerprint(kind, asset):
     if kind == 'script':
         code = asset.get('entry_source', asset.get('code', ''))
         signature = [ast.dump(ast.parse(code), include_attributes=False), asset.get('input_schema'), asset.get('output_schema')]
+        if asset.get('io_contract'):
+            signature.append(asset.get('io_contract'))
     elif kind == 'workflow':
         steps = asset.get('steps', [])
         ids = {step.get('step_id', step.get('id')): str(i) for i, step in enumerate(steps)}
         signature = [{key:value for key,value in step.items() if key not in {'name','step_id','id'}} for step in steps]
         signature = _normalize_step_refs(signature, ids)
+        if asset.get('io_contract'):
+            signature = [signature, asset.get('io_contract')]
     else:
         body = asset.get('body', '')
         body = re.sub(r'\A---\n.*?\n---\n', '', body, flags=re.S)
@@ -73,6 +77,26 @@ def business_validated(receipt):
             and output.get('dry_run') is not True and output.get('executed') is not False)
 
 
+# LLM: 核对正式资产存储是否真实可读且处于有效状态，防止将待审候选或已删资产误判为可复用正式资产。
+# 函数用途: 检查指定载体与asset_id在Owner正式存储中是否真实存在。
+def _formal_asset_exists(home, kind, asset_id):
+    from pathlib import Path
+    aid = str(asset_id or '').removeprefix('owner:')
+    if not aid:
+        return False
+    root = Path(home).absolute()
+    if kind == 'script':
+        from ..assets.script_store import ScriptStore
+        return ScriptStore(root).get_script(aid) is not None
+    if kind == 'workflow':
+        from ..assets.workflow_store import WorkflowStore
+        return WorkflowStore(root).get_workflow(aid) is not None
+    if kind == 'capability_package':
+        from .package_provider import list_installed_capability_packages
+        return any(r['package_id'] == aid and r['enabled'] for r in list_installed_capability_packages(root, include_disabled=False))
+    return (root / 'skills' / 'learned' / aid / 'SKILL.md').is_file()
+
+
 # LLM: 调用方持原state/配额锁；只保存摘要/精确引用不存代码秘密，语义族不替代正式hash和CAS。
 # 函数用途: 在唯一registry内合并四类资产来源，不因改名重复创建同族资产。
 def register_asset_locked(store, registry, *, kind, asset_id, asset, source, sha256='', state='candidate'):
@@ -81,11 +105,15 @@ def register_asset_locked(store, registry, *, kind, asset_id, asset, source, sha
     refs = list(previous.get('provenance', []))
     if source not in refs:
         refs.append(source)
-    same = previous.get('asset_id', asset_id).removeprefix('owner:') == asset_id.removeprefix('owner:')
-    update = same and bool(sha256)
-    row = {**previous, 'kind':kind, 'asset_id':previous.get('asset_id', asset_id),
+    prev_id = previous.get('asset_id', '')
+    prev_live = bool(prev_id) and previous.get('state') in {'trial', 'trusted'} and _formal_asset_exists(store.skills_root.parent, kind, prev_id)
+    take_new = not prev_live and (state in {'trial', 'trusted'} or not prev_id)
+    chosen_id = asset_id if take_new else prev_id
+    same = chosen_id.removeprefix('owner:') == asset_id.removeprefix('owner:')
+    update = (same or take_new) and bool(sha256)
+    row = {**previous, 'kind':kind, 'asset_id':chosen_id,
            'task_family_fingerprint':family, 'sha256':sha256 if update else previous.get('sha256', ''),
-           'state':state if update or not previous else previous['state'], 'provenance':refs[-10:]}
+           'state':state if (update or take_new or not previous) else previous['state'], 'provenance':refs[-10:]}
     return replace(registry, assets={**registry.assets, family:row}), row
 
 
@@ -295,7 +323,10 @@ def promote_verified_asset(owner_home, candidate):
         return {'carrier': 'skill', 'asset_id': event.skill_name or name, 'verification_kind': 'runtime_execution' if exec_ok else 'deterministic_static',
                 'checks_executed': True, 'executed': exec_ok, 'contract_valid': True, 'sha256': static['sha256']}
     prev = store.load_registry().assets.get(task_family_fingerprint(carrier, candidate))
-    if prev and prev.get('asset_id') and prev['asset_id'].removeprefix('owner:') != name.removeprefix('owner:'):
+    prev_id = (prev or {}).get('asset_id', '')
+    if (prev and prev.get('state') in {'trial', 'trusted'}
+            and prev_id.removeprefix('owner:') != name.removeprefix('owner:')
+            and _formal_asset_exists(home, carrier, prev_id)):
         row = register_asset(store, kind=carrier, asset_id=name, asset=dict(candidate),
                              source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id']},
                              sha256=static['sha256'], state='trial')

@@ -372,14 +372,67 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     assert reused_script is not None and reused_script['asset_id'] == 'auto-script-1' and reused_script.get('reused') is True
     assert ScriptStore(owner_home).get_script('auto-script-1-dup') is None
 
-    # R4-3: parse_skill_learning_decision 支持可选 candidate_asset 载体字段且不破坏严格 schema
+    # R5-1: 不兼容 io_contract 的同代码脚本绝不误判为同族复用，验证失败必须返回 None
+    assert promote_verified_asset(owner_home, {
+        'kind': 'script', 'name': 'auto-script-bad-contract', 'description': '不兼容合同脚本',
+        'code': 'print("{\\"rows\\": 3}")', 'io_contract': {'outputs': ['missing_field']},
+    }) is None
+    assert ScriptStore(owner_home).get_script('auto-script-bad-contract') is None
+
+    # R5-2: 先以 autonomous_verified=False 仅登记 candidate，后续开启自动晋升提交同族脚本 B 时必须真实落盘 B 并升级 state='trial'
+    cand_only_event = propose_or_promote_skill(
+        lstore,
+        PublishRequest(
+            SkillLearningDecision('create', 'ok', name='cand-only-a', description='仅候选脚本A', when_to_use='候选场景', tags=('script',), body=BODY),
+            {'candidate_asset': {'kind': 'script', 'name': 'cand-only-a', 'description': '仅候选脚本A', 'code': 'print("{\\"step\\": 7}")', 'io_contract': {'outputs': ['step']}}},
+        ),
+        autonomous_verified=False,
+    )
+    assert cand_only_event.event == 'proposed' and ScriptStore(owner_home).get_script('cand-only-a') is None
+    promoted_b_event = propose_or_promote_skill(
+        lstore,
+        PublishRequest(
+            SkillLearningDecision('create', 'ok', name='promoted-b', description='正式晋升脚本B', when_to_use='正式场景', tags=('script',), body=BODY),
+            {'candidate_asset': {'kind': 'script', 'name': 'promoted-b', 'description': '正式晋升脚本B', 'code': 'print("{\\"step\\": 7}")', 'io_contract': {'outputs': ['step']}}},
+        ),
+        autonomous_verified=True,
+    )
+    assert promoted_b_event.event == 'published' and promoted_b_event.skill_name == 'promoted-b'
+    assert ScriptStore(owner_home).get_script('promoted-b') is not None
+
+    # R5-3: S3 严格 skill_learning_response_schema 包含 candidate_asset 且端到端模型输出自动晋升脚本
+    from agent_py_agent.agent.capability.skill_learning import (
+        SkillLearningRuntime,
+        SkillLearningService,
+        SkillLearningSettings,
+    )
     from agent_py_agent.agent.capability.skill_learning_prompt import (
         parse_skill_learning_decision,
+        skill_learning_response_schema,
     )
-    parsed_dec = parse_skill_learning_decision(json.dumps({
+    from agent_py_agent.tests.test_wave7_autonomous_learning_closure import (
+        context,
+        snapshot,
+    )
+    schema = skill_learning_response_schema()
+    assert 'candidate_asset' in schema['properties'] and 'candidate_asset' in schema['required']
+    s3_json = json.dumps({
         'schema_version': 'my-agent.skill-learning-output.v1',
-        'decision': 'create', 'update_target': '', 'reason': 'ok', 'name': 'parsed-script-1', 'description': '解析脚本',
-        'when_to_use': '脚本自动晋升', 'tags': ['script'], 'body': BODY,
-        'candidate_asset': {'kind': 'script', 'code': 'print("{\\"ok\\": 1}")', 'io_contract': {'outputs': ['ok']}},
-    }), ())
+        'decision': 'create', 'update_target': '', 'reason': '沉淀确定性脚本', 'name': 's3-e2e-script',
+        'description': 'S3端到端自动晋升脚本', 'when_to_use': '需要自动汇总时', 'tags': ['script'], 'body': BODY,
+        'candidate_asset': {'kind': 'script', 'code': 'print("{\\"total\\": 42}")', 'io_contract': {'outputs': ['total']}},
+    })
+    assert set(json.loads(s3_json)) == set(schema['required'])
+    parsed_dec = parse_skill_learning_decision(s3_json, ())
     assert parsed_dec.candidate_asset.get('kind') == 'script'
+    s3_svc = SkillLearningService(
+        lstore,
+        SkillLearningSettings(min_tool_rounds=1, autonomous_verified=True),
+        SkillLearningRuntime(
+            backend=SimpleNamespace(generate_structured=lambda _p, *, response_schema, messages=None: SimpleNamespace(text=s3_json)),
+            snapshot_provider=lambda: snapshot(),
+        ),
+    )
+    assert s3_svc.enqueue_from_finalize(context('s3-script-run', calls=[{'tool': 'shell', 'ok': True, 'tool_round': 1}])) == 'queued'
+    s3_res = s3_svc.run_pending()
+    assert s3_res.status == 'published' and ScriptStore(owner_home).get_script('s3-e2e-script') is not None
