@@ -1,5 +1,5 @@
 # LLM: 运行参数只携当前身份、typed原输入和宿主回调；输入快照不从模型attrs恢复，本片展示不进序列化结果。
-# 模块用途: 定义主链执行与收口参数；拒绝记忆和可选展示分别沿原宿主生命周期传递。
+# 模块用途: 定义主链执行参数和准备/循环结果；最终上下文直接从这些原输入构造，不再重复包收口字段。
 
 from __future__ import annotations
 
@@ -172,29 +172,6 @@ class RuntimeLoopParams:
     capability_presentation_observer: Callable[[dict], object] | None = field(
         default=None, repr=False, compare=False,
     )
-
-
-@dataclass
-class FinalizeParams:
-    user_prompt: str
-    final_prompt: str
-    final_response: Any
-    memories: list
-    executed_tools: list[str]
-    archive_tool_calls: list[dict[str, object]]
-    routed_context: Any
-    resume_context_result: Any
-    runtime_injections: list
-    compression_snapshot_id: str
-    compression_snapshot_path: str
-    compression_applied: bool
-    run_params: RunParams
-    tool_rounds: int
-    main_context_bundle_path: str = ""
-    main_context_bundle_markdown_path: str = ""
-    active_turn_user_inputs: list[dict[str, object]] | None = None
-    tool_runtime_evidence: dict[str, object] | None = None
-    canonical_native_messages: list[dict[str, object]] | None = None
 
 
 @dataclass

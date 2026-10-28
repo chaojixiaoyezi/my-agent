@@ -1,6 +1,7 @@
 
 
 # LLM: execute_tool_loop 是主子共用的唯一入口；发现复用正式搜索/凭据投影，交付复核只消费原验证/写入信封，native IR、Compact 与收口权威不变。
+# 取消响应实现归低层response_decision；本模块只保留原兼容委托，循环直接判断原action而不二次翻译。
 # 模块用途: 装配采样、工具展示、窄收口及最终校准计量；保持输入账、取消和持久提交边界，核对共享展示测试。
 from __future__ import annotations
 
@@ -136,6 +137,7 @@ from .tool_loop.recovery import (
 from .tool_loop.response_decision import (
     ToolLoopRepairCounters,
     ToolLoopResponseDecisionRequest,
+    interrupted_conversation_response,
     tool_loop_response_decision,
 )
 from .tool_loop.round_execution import (
@@ -1819,6 +1821,7 @@ def _pending_turn_input_invalidation_exhausted(params: ToolLoopExecuteParams) ->
 # LLM: 本入口直接调用既有采样、工具和记账函数；每次调用独占计数与 params，只从模型轮具名结果显式换用采用后的参数。
 # 裁决顺序须同步核对中断、续跑和工具循环测试；返回具名结果，调用方从 result.params 取最终参数。
 #   收口时只读取当前空正文预算形成诊断；原待输入失效上限清除公开text/工具，保留原块与pending事实，不加采样。
+#   原continue/break/工具分支直接判断，先前的子代理等待和必要回复队列顺序不变。
 # 函数用途: 执行主子共用工具循环并带出只读诊断，仍按原响应、中断和预算推进。
 def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult:
     from ..conversation.task_rejected_actions import sync_task_rejected_actions
@@ -1901,10 +1904,10 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
             # 会话运行时 式自然收口：模型看过本轮真实工具结果后给出 plain final，
             # 当前 turn 就结束。operation/task_progress 继续作为审计和工作记忆，
             # 不能据此覆盖正文、强制返工或另起后台续跑。
-        verdict, routed_response = _routed_action_step(action)
-        if verdict == "continue":
+        if action.action == "continue":
             continue
-        if verdict == "stop":
+        if action.action == "break":
+            routed_response = action.response
             final_response = routed_response if routed_response is not None else final_response
             break
         final_prompt, final_response, tool_rounds = _tool_step_or_limit(
@@ -1925,30 +1928,10 @@ def execute_tool_loop(agent, params: ToolLoopExecuteParams) -> ToolLoopRunResult
     return ToolLoopRunResult(final_prompt, final_response, tool_rounds, params)
 
 
-# LLM: Interrupt exits the main loop without asking the model to reinterpret a cancellation flag.
-# 函数用途：构造统一的用户可见停止结果，阻止中断后继续收口或派发工具。
+# LLM: 兼容原服务模块的取消入口；真实构造只在response_decision，不新增正文、状态或模型调用。
+# 函数用途: 将旧调用委托给同一个结构化取消响应构造器。
 def _interrupted_conversation_response(agent: object) -> ModelResponse:
-    backend = str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop")
-    return ModelResponse(
-        # A stop button produces no assistant message.  The typed runtime
-        # fields below are the sole authority for clients and persistence.
-        text="",
-        backend=backend,
-        runtime_status="cancelled",
-        runtime_reason="user_stop",
-        runtime_source="conversation_control",
-    )
-
-
-# LLM: 会话运行时 turn semantics: a model final response ends the turn directly;
-# runtime errors and structured control states are handled by their own paths, not an artifact scanner.
-# 函数用途: 把模型响应的"继续/结束/执行工具"三岔路收成一次裁决,主循环保持扁平。
-def _routed_action_step(action):
-    if action.action == "continue":
-        return "continue", None
-    if action.action != "break":
-        return "tools", None
-    return "stop", action.response
+    return interrupted_conversation_response(agent)
 
 
 

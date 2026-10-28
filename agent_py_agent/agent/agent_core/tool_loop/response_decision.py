@@ -1,4 +1,5 @@
 # LLM: 按结构化响应决定工具/续跑/结束；本 run 取消优先于交付、核验及截断返工，保留其它 typed 原因。
+# 统一取消响应在本层构造，装配层只保留兼容委托；不回导顶层循环或创建新的取消状态。
 # 模块用途: 统一模型轮裁决和修复预算，保存真实响应原因与无工具续跑历史，不从正文推断完成。
 from __future__ import annotations
 
@@ -1156,12 +1157,23 @@ def _pack_closeout_cancelled(request: _NoToolCallsRequest) -> bool:
         return cancellation_requested()
 
 
-# LLM: 复用主循环原取消响应，不能回交模型“完成了”的正文或追加修复；不创建第二套取消状态。
+# LLM: 原取消ModelResponse构造的唯一实现；只取原backend名称，不读全局取消、不添公开正文、工具或模型调用。
+# 函数用途: 返回原cancelled/user_stop/conversation_control结构化结果，供循环和低层收口共同使用。
+def interrupted_conversation_response(agent: object) -> ModelResponse:
+    backend = str(getattr(getattr(agent, "backend", None), "name", "") or "tool_loop")
+    return ModelResponse(
+        text="",
+        backend=backend,
+        runtime_status="cancelled",
+        runtime_reason="user_stop",
+        runtime_source="conversation_control",
+    )
+
+
+# LLM: 在本层复用同一取消响应，不能回交模型“完成了”的正文或追加修复；不回导工具循环装配层。
 # 函数用途: 把收尾期间的取消交回既有 conversation_control 终态。
 def _cancelled_closeout_decision(request: _NoToolCallsRequest) -> ToolLoopResponseDecision:
-    from .._tool_loop_service import _interrupted_conversation_response
-
-    return ToolLoopResponseDecision("break", _interrupted_conversation_response(request.agent), [], request.counters)
+    return ToolLoopResponseDecision("break", interrupted_conversation_response(request.agent), [], request.counters)
 
 
 # LLM: 触发完全结构化，两条判据都在 provider_timeout_resume_eligible 里：
