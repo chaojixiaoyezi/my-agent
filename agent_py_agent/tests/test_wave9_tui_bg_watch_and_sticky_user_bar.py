@@ -258,8 +258,8 @@ def test_unstarted_local_session_and_new_are_clean_empty_without_owner_scan(tmp_
 
 
 # LLM: 历史由真实typed事件构造，渲染次序和换行均交给产品renderer，不用假行号替代用户消息位置。
-# 函数用途: 建立三轮用户提问及足够长的助手回复，覆盖视口内外边界。
-def sticky_history():
+# 函数用途: 建立指定轮数与回复长度的用户历史，覆盖视口和四页窗口内外边界。
+def sticky_history(*, turns=3, reply_rows=12):
     from agent_py_agent.cli.chat_parts.tui_block_renderer import TuiRenderContext
     from agent_py_agent.cli.chat_parts.tui_events import TuiEventSequencer
     from agent_py_agent.cli.chat_parts.tui_view import make_tui_transcript_view
@@ -268,11 +268,11 @@ def sticky_history():
     store = TuiStateStore()
     seq = TuiEventSequencer("wave9-sticky", clock=lambda: 1.0)
     store.publish(seq.emit("system_message", "completed", "intro", {"text": "系统信息"}))
-    for index in range(1, 4):
+    for index in range(1, turns + 1):
         store.publish(seq.emit("user_message", "completed", f"u-{index}",
             {"text": f"提问 {index}\n  继续\t说明"}))
         store.publish(seq.emit("assistant_completed", "completed", f"a-{index}",
-            {"text": "\n".join(f"回复 {index} 第 {row} 行" for row in range(12))}))
+            {"text": "\n".join(f"回复 {index} 第 {row} 行" for row in range(reply_rows))}))
     view = make_tui_transcript_view(store, lambda width: TuiRenderContext(width=width))
     return view, store, seq
 
@@ -314,6 +314,161 @@ def paint_transcript(view, *, modal=False, width=80, height=8, app=None):
 # 函数用途: 获取指定真实渲染屏幕行的可见文字。
 def screen_line(screen, row, width=80):
     return "".join(screen.data_buffer[row][column].char for column in range(width)).rstrip()
+
+
+# LLM: 用产品稀疏页定位与ReadingAnchor进入指定原文行，不渲染整段历史或伪造页内坐标。
+# 函数用途: 在千行回复中打开完整原文并将目标来源行对齐视口顶部。
+def focus_long_transcript(view, store, block_id, source_row):
+    from agent_py_agent.cli.chat_parts.tui_reading import ReadingAnchor, viewport_top
+
+    view.control.create_content(80, 8)
+    view.enter_transcript(store.snapshot())
+    view.toggle_full_detail()
+    view.provider.transcript_state.focus_complete_block(block_id, source_row)
+    view.modal_control.restore_reading_anchor(ReadingAnchor(block_id, source_row, 0))
+    view.modal_control.create_content(80, 8)
+    frame = view.provider.frame(80)
+    assert frame.line_origins[viewport_top(view.modal_control)] == (block_id, source_row)
+    assert len(frame.detail_page_offsets) <= 4
+
+
+# LLM: U1首行在四页窗口之外时仍须有顶栏；使用原生鼠标分发表点击并核对真实正文首行，不只检查回调被调用。
+# 函数用途: 复现并守住千行回复第700来源行的用户消息跨窗口跳转。
+def test_sticky_full_transcript_1000_line_reply_keeps_user_at_source_row_700():
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from agent_py_agent.cli.chat_parts.tui_reading import ReadingAnchor, viewport_top
+
+    view, store, _seq = sticky_history(turns=1, reply_rows=1000)
+    focus_long_transcript(view, store, "a-1", 700)
+    control = view.modal_control
+    assert all(key != "u-1" for key, _row in view.provider.frame(80).line_origins)
+    target = control.sticky_user_turn()
+    assert target is not None and target.block_id == "u-1"
+    app, screen, handlers = paint_transcript(view, modal=True)
+    assert "上一条我说的话" in screen_line(screen, 0)
+    with set_app(app):
+        handlers.mouse_handlers[0][2](MouseEvent(Point(2, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset()))
+    assert control.reading_anchor() == ReadingAnchor("u-1", 0, 0)
+    assert not control.is_following()
+    assert control.sticky_user_turn() is None
+    _app, screen, _handlers = paint_transcript(view, modal=True, app=app)
+    frame = view.provider.frame(80)
+    assert frame.line_origins[viewport_top(control)] == ("u-1", 0)
+    assert screen_line(screen, 0).startswith("── 用户")
+    assert "上一条我说的话" not in screen_line(screen, 0)
+    assert len(frame.detail_page_offsets) <= 4
+
+
+# LLM: 每轮回复跨越四页；有/无两次点击间重绘都必须立即选到前一条，不能靠下一次布局修补或一次性展开全部页。
+# 函数用途: 从A3第20来源行连续左击U3→U2→U1，最终才隐藏独立顶栏。
+@pytest.mark.parametrize("redraw_between_clicks", [False, True])
+def test_sticky_full_transcript_three_1000_line_turns_step_across_page_windows(redraw_between_clicks):
+    from prompt_toolkit.application.current import set_app
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from agent_py_agent.cli.chat_parts.tui_reading import ReadingAnchor, viewport_top
+
+    view, store, _seq = sticky_history(reply_rows=1000)
+    focus_long_transcript(view, store, "a-3", 20)
+    control = view.modal_control
+    assert all(key != "u-2" for key, _row in view.provider.frame(80).line_origins)
+    app, screen, handlers = paint_transcript(view, modal=True)
+    assert "上一条我说的话" in screen_line(screen, 0)
+    for expected, previous in (("u-3", "u-2"), ("u-2", "u-1"), ("u-1", None)):
+        target = control.sticky_user_turn()
+        assert target is not None and target.block_id == expected
+        with set_app(app):
+            handlers.mouse_handlers[0][2](MouseEvent(Point(2, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset()))
+        assert control.reading_anchor() == ReadingAnchor(expected, 0, 0)
+        assert not control.is_following()
+        following = control.sticky_user_turn()
+        assert (following.block_id if following else None) == previous
+        frame = view.provider.frame(80)
+        assert frame.line_origins[viewport_top(control)] == (expected, 0)
+        assert len(frame.detail_page_offsets) <= 4
+        if redraw_between_clicks:
+            app, screen, handlers = paint_transcript(view, modal=True, app=app)
+            frame = view.provider.frame(80)
+            assert frame.line_origins[viewport_top(control)] == (expected, 0)
+    _app, screen, _handlers = paint_transcript(view, modal=True, app=app)
+    assert screen_line(screen, 0).startswith("── 用户")
+    assert "上一条我说的话" not in screen_line(screen, 0)
+
+
+# LLM: 页窗口变化只排版至多四页、复用冻结元数据；live新增用户不得混入，重绑来源必须释放旧目标。
+# 函数用途: 守住全历史用户索引的轻量缓存、冻结范围和来源切换边界。
+def test_sticky_full_index_reuses_frozen_metadata_and_bounds_page_rendering(monkeypatch):
+    from agent_py_agent.cli.chat_parts.tui_complete_detail import CompleteDetailPage
+    from agent_py_agent.cli.chat_parts.tui_view_model import TuiStateStore
+
+    view, store, seq = sticky_history(reply_rows=1000)
+    focus_long_transcript(view, store, "a-3", 20)
+    cache = view.provider._complete_index
+    rows = view.provider.user_turn_lines(80)
+    assert [row.block_id for row in rows] == ["u-1", "u-2", "u-3"]
+    assert rows[0].start_line is None and rows[1].start_line is None
+    render = CompleteDetailPage.render_located
+    calls = []
+
+    # LLM: 包装真实页渲染器计数，不替换页内容或来源坐标。
+    # 函数用途: 捕获每次窗口刷新实际排版的页数。
+    def counted_render(page, width):
+        calls.append(page)
+        return render(page, width)
+
+    monkeypatch.setattr(CompleteDetailPage, "render_located", counted_render)
+    view.provider.transcript_state.focus_complete_block("a-2", 700)
+    view.provider.frame(80)
+    assert 0 < len(calls) <= 4
+    assert view.provider._complete_index is cache
+    assert view.provider.user_turn_lines(80) is view.provider.user_turn_lines(80)
+    store.publish(seq.emit("user_message", "completed", "late-live", {"text": "冻结之后的新消息"}))
+    assert [row.block_id for row in view.provider.user_turn_lines(80)] == ["u-1", "u-2", "u-3"]
+    assert view.provider._complete_index is cache
+    view.set_state_store(TuiStateStore())
+    assert view.provider.user_turn_lines(80) == ()
+    assert view.provider._complete_index is not cache
+
+
+# LLM: 十万远端页只是一条稀疏segment；建立用户索引和跨窗回跳均不得读取全部归档。
+# 函数用途: 验证遥远归档窗口仍选到U3，回跳只读取目标附近有限页。
+def test_sticky_full_index_keeps_remote_history_sparse():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    from agent_py_agent.cli.chat_parts.tui_reading import ReadingAnchor, viewport_top
+
+    view, store, seq = sticky_history()
+    reference = {"schema": "display_archive_ref.v1", "archive_id": "c" * 32,
+                 "thread_id": "wave9-sticky", "page_count": 100_000}
+    store.publish(seq.emit("tool_completed", "completed", "remote", {"output": "preview", "display_archive_ref": reference}))
+    view.control.create_content(80, 8)
+    view.enter_transcript(store.snapshot())
+    view.toggle_full_detail()
+    state, control = view.provider.transcript_state, view.modal_control
+    requests = []
+    state.request_complete_page = lambda ref, page: requests.append((ref, page))
+    state.focus_complete_block("remote")
+    assert state.move_complete_page(50_000)
+    control.restore_reading_anchor(ReadingAnchor("remote", 0, 0))
+    control.create_content(80, 8)
+    assert len(state._complete_pages.segments) == 2
+    assert 0 < len(requests) <= 4
+    assert all(49_999 <= page <= 50_002 for _ref, page in requests)
+    assert control.sticky_user_turn().block_id == "u-3"
+    requests.clear()
+    control.sticky_user_bar_mouse_handler(MouseEvent(Point(2, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset()))
+    assert len(requests) <= 3 and all(page < 3 for _ref, page in requests)
+    after_jump = len(requests)
+    # 点击末尾invalidate后，下一个观察入口可再构建一帧；分别核对两帧，不能把两次有界读取误算成一次。
+    assert control.reading_anchor() == ReadingAnchor("u-3", 0, 0)
+    assert view.provider.frame(80).line_origins[viewport_top(control)] == ("u-3", 0)
+    assert control.sticky_user_turn().block_id == "u-2"
+    assert len(requests) - after_jump <= 3 and all(page < 3 for _ref, page in requests)
 
 
 # LLM: 索引必须取真实renderer偏移；同帧复用，不因滚动重扫历史；宽度变化必须重排并重建索引。

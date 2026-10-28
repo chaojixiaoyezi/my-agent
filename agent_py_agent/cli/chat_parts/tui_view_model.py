@@ -36,13 +36,14 @@ class TuiBlock:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-# LLM: 仅记录当前渲染帧的用户块身份、物理起始行和安全单行摘要；宽度/显示来源变化后须重建，不持久化。
+# LLM: 用户块与摘要只属显示；完整原文的block_index取冻结排序，窗口外start_line为None，不能伪造物理行号或持久化。
 # 类用途: 为正文外的上一条用户消息顶栏提供只读导航目标。
 @dataclass(frozen=True)
 class TuiUserTurnLine:
     block_id: str
-    start_line: int
+    start_line: int | None
     summary: str
+    block_index: int = -1
 
 
 # LLM: TuiQueuedInput 保存输入队列的 UI 事实，真实执行顺序仍由同一 canonical prompt queue 驱动。

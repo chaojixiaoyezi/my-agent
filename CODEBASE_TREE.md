@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 B2 二轮：完整原文跨窗口用户索引
+
+`cli/chat_parts/tui_view.py` 在现有provider内增加按冻结块身份/宽度复用的轻量用户块索引：完整原文窗口外的用户仍有块顺序和摘要，点击通过现有稀疏页表聚焦其来源首行，继续只排版附近至多四页。`tui_view_model.py` 的 `TuiUserTurnLine` 明确区分可空的窗口物理行和冻结块序，不引入第二份业务状态。
+
+同一 `tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py` 新增千行长回复跨窗口导航、有/无重绘连续回跳、冻结缓存与十万页稀疏读取守卫。后台扫描/瞬态兜底模块本轮未改，无新增生产模块；验证记录见 `TESTS.md` 本日二轮节。
+
 ## 2026-10-28 Wave 9 B2：TUI后台观察与用户消息顶栏
 
 ```text

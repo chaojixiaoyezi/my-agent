@@ -1,3 +1,30 @@
+## 2026-10-28 Wave 9 B2 二轮：完整原文跨四页用户导航
+
+来源：完整阅读 `07-tasks/fix-wave9-b2.md`（38行），落实c17指出的P2。起点 `dad9a00ca65b4592262193bd8bba5ba5aa6b2cd1`，总基线仍为 `db4d5de92`；所有项目编辑、测试和提交均在 `/tmp/wt-wave9-b2` 的 `wave9-b2` 分支完成。
+
+- **修复**：完整原文索引从冻结typed块建立，排序与原分页器一致；缓存按稳定/活动tuple身份及宽度复用，只保存块位置和安全摘要，不排版全历史。`TuiUserTurnLine.start_line` 在当前四页外为 `None`，`block_index` 提供可比较的冻结顺序；不伪造全局物理行号。
+- **跳转**：完整模式按视口顶部的块/来源行选择用户；点击先用现有稀疏页定位目标块，再生成至多四页窗口，恢复 `ReadingAnchor(target,0,0)`、关闭follow，pending锚点立即指向前一条。普通/详细非完整模式仍使用实际排版行。切换显示来源清两类用户索引，冻结后的live用户不混入。
+- **保持不变**：本轮与起点逐文件diff确认 `background_process_view.py`、`tui_threading.py`、`CODE_SIZE_REPORT.md` 未改；没有让旧后台快照伪装成功，没有改变归档授权、异步读取和八页缓存。
+- **红绿证据**：新增单用户+1000行助手回复的来源行700、三轮各1000行从A3来源行20连续点击（有/无中间重绘）共3个参数例，改实现前分别在目标为None、下一目标缺U2的断言失败，改后通过。原生Window/Screen鼠标分发表核对实际首行来源、零偏移锚点、follow=False、立即下一目标及到U1才隐藏；每帧仍至多四页。
+- **补充守卫**：冻结元数据跨页复用/来源重绑、十万远端页仅两个稀疏segment且只请求窗口附近页面共2例。它们是后补守卫，不宣称都经历了红绿。首轮远端守卫曾错误地把点击及其invalidate后下一观察重建的两帧请求合并按一帧计数；现逐帧验证相同上限及页码范围，未修改产品读取策略。
+
+当前验证：
+- 任务指定两文件 **773 passed，0 failed/error/skipped**：本文件新增回归入口 `test_wave9_tui_bg_watch_and_sticky_user_bar.py` 为56例，`test_tui_turn_completion_and_bg_watch.py` 为717例。
+- 额外12个相关TUI测试文件 **261 passed，0 failed/error/skipped**；与上一项去重合计 **1034 passed**，由JUnit XML程序汇总。
+- gpt-6-astra/high只读复核了内联关键实现及调用合同，未确认P1/P2；没有独立读全仓或跑测试。父级自行检查了真实分页器的排序、来源映射、四页边界与后台文件不变。
+- 全仓pytest、真实用户终端端到端、Linux/跨平台车道及极端并发帧切换未验证；未推送、合入或部署。
+
+复现与门禁（均在本工作树根目录）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_{view,view_model,reading_position,complete_detail,transcript,combinatorial,resource_lifetime,agent_navigation,clipboard,threading,terminal,prompt_toolkit_pipe}.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/cli/chat_parts agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py
+git diff --check db4d5de92..HEAD
+```
+原始证据保留于本树忽略目录 `.pytest_cache/w9b2r2-red.xml`、`w9b2r2-required.xml`、`w9b2r2-regression.xml`，不随功能提交。
+
 ## 2026-10-28 Wave 9 B2：TUI后台瞬态刷新与上一条用户消息顶栏
 
 来源：完整阅读 `07-tasks/wave9-b2.md`（53行）及总体设计第2、3项。基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，工作树 `/tmp/wt-wave9-b2`，分支 `wave9-b2`。只改本树，不推送或部署，不运行已退役的代码尺寸脚本。
