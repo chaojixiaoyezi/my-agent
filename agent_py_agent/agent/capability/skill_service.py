@@ -1,11 +1,12 @@
 # LLM: 原全局 Skill 根与独立能力包分别装配到同一快照，不能把私有资源目录交给递归 Skill 扫描或名称去重。
-# 模块用途: 复用统一根声明和有界codec建立发现快照，目录元信息不执行正文。
+# 模块用途: 用同一份正文建立快照；进程仅共享builtin/shared的冻结发现结果，Owner策略仍单独计算。
 from __future__ import annotations
 
 """Single owner-scoped Skill discovery, policy, cache, and snapshot service."""
 
 import hashlib
 import json
+import stat
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
@@ -22,7 +23,8 @@ from .skill_snapshot import (
 )
 from .skills import (
     SkillCard,
-    parse_skill_file,
+    _as_list,
+    _has_frontmatter,
     read_skill_text,
     skill_catalog_roots,
     skill_enabled,
@@ -37,6 +39,13 @@ _MAX_SKILLS_PER_ROOT_COUNT = 2000
 _NAME_MAX_CHARS = 128
 # 技能描述最大字符数。
 _DESCRIPTION_MAX_CHARS = 1024
+_PROCESS_SKILL_DIR_CACHE: dict[tuple[str, str], SkillManifestItem] = {}
+_PROCESS_BUILTIN_ROOT_CACHE: dict[tuple, _SkillTreeState] = {}
+_PROCESS_SKILL_CACHE_LOCK = threading.RLock()
+_PROCESS_SKILL_CACHE_MAX_ENTRIES = 1024
+_PROCESS_SKILL_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_PROCESS_ROOT_CACHE_MAX_ENTRIES = 128
+_PROCESS_ROOT_CACHE_MAX_PATHS = 65536
 
 
 @dataclass(frozen=True)
@@ -45,8 +54,8 @@ class SkillRoot:
     source: str
 
 
-# LLM: manifest同时冻结正文hash与原侧文件/头部运行闸，旧位置构造默认True；不保存正文外秘密或权限。
-# 类用途: 保存一次技能发现的字节版本及启停事实，供快照指纹和条目共用。
+# LLM: 正文/hash/磁盘开关同次冻结；公开目录可附不可变卡片与guard错误，绝不缓存Owner enabled策略。
+# 类用途: 保存可共享的发现事实，原有位置构造参数保持兼容。
 @dataclass(frozen=True)
 class SkillManifestItem:
     root: SkillRoot
@@ -54,6 +63,16 @@ class SkillManifestItem:
     text: str
     content_sha256: str
     enabled: bool = True
+    parsed_entry: SkillSnapshotEntry | None = None
+    load_error: SkillLoadError | None = None
+
+
+# LLM: stat包含全部guard资源及目录；命中仍逐项复核，不能仅信根mtime来忽略后代改写。
+# 类用途: 缓存builtin目录清单与摘要，省去重复rglob而不省略变更检测。
+@dataclass(frozen=True)
+class _SkillTreeState:
+    stats: tuple[tuple, ...]
+    digest: str
 
 
 # LLM: 一个服务是 prompt、工具与子代理的唯一快照来源；能力包提供者只给原安装事实的投影，不给私有扫描根。
@@ -61,7 +80,7 @@ class SkillManifestItem:
 class SkillsService:
     """Owns the one Skill catalog used by prompts, tools, and subagents."""
 
-    # LLM: 两种 provider 每次快照重新取事实；插件 v3 roots 保持原优先级，内容包独立装配且不执行。
+    # LLM: provider逐次取事实；首次构造不强制丢弃进程公开缓存，显式clear/force则重读正文与guard。
     # 函数用途: 绑定 owner 策略、工作区和可选内容包发现来源。
     def __init__(
         self,
@@ -83,6 +102,7 @@ class SkillsService:
         self._extra_roots: tuple[Path, ...] = ()
         self._cache: dict[tuple[str, str], SkillSnapshot] = {}
         self._manifest_cache: tuple | None = None
+        self._force_manifest_reload = False
         self._lock = threading.RLock()
 
     # LLM: 新根集合须同时清除快照与stat缓存，不能跨来源复用旧manifest。
@@ -98,12 +118,13 @@ class SkillsService:
             self._cache.clear()
             self._manifest_cache = None
 
-    # LLM: 显式刷新必须连同轻量指纹缓存一起失效，下次调用重新读取正文与guard。
-    # 函数用途: 清空当前服务全部发现缓存。
+    # LLM: 显式clear使下一次发现绕过公开进程结果，不影响其它Owner策略或主动扫描磁盘。
+    # 函数用途: 清空当前服务缓存并安排下一次重新读取正文与guard。
     def clear_cache(self) -> None:
         with self._lock:
             self._cache.clear()
             self._manifest_cache = None
+            self._force_manifest_reload = True
 
     # LLM: 只有stat命中才复用旧快照；目录/guard资源变化即使正文hash相同也须重建，包/策略仍逐次核对。
     # 函数用途: 创建或复用当前 owner 的逐轮快照，并单独报告能力包发现错误。
@@ -138,16 +159,20 @@ class SkillsService:
             self._cache[cache_key] = snapshot
         return snapshot
 
-    # LLM: 只缓存最近一组根并返回stat是否命中；错误列表复制，stat失效后调用方必须重做snapshot的guard。
-    # 函数用途: 用目录和文件stat决定是否重读Skill正文与安全检查。
+    # LLM: 每次核所有guard资源stat；force/clear仅逐出当前根的共享结果，保持原build_manifest单参数读口。
+    # 函数用途: 保留每Owner快照缓存，按完整目录签名决定是否重建。
     def _manifest_for(self, roots: tuple[SkillRoot, ...], *, force_reload: bool):
         signature = _roots_signature(roots)
         with self._lock:
+            force_reload = force_reload or self._force_manifest_reload
             cached = self._manifest_cache
             if not force_reload and cached is not None and cached[:2] == (roots, signature):
                 return cached[2], list(cached[3]), True
+            if force_reload:
+                _invalidate_public_skill_cache(roots)
             manifest, errors = _build_manifest(roots)
             self._manifest_cache = (roots, signature, manifest, tuple(errors))
+            self._force_manifest_reload = False
             return manifest, errors, False
 
     # LLM: provider 错误只清空内容包集合并进入 errors；普通 Skill 与旧插件 Skill 不因包账损坏而消失。
@@ -189,33 +214,85 @@ class SkillsService:
         return _dedupe_roots(roots)
 
 
-# LLM: stat不读取正文；同根下资源/目录也参与失效，避免SKILL未变但guard依赖脚本已变化时复用旧授权。
-# 函数用途: 为当前来源集合计算轻量根目录和文件元信息指纹。
+# LLM: 包括guard会扫描的隐藏/深层资源；builtin复用目录清单但逐项stat，不能仅凭根mtime沿用授权。
+# 函数用途: 计算每Owner来源指纹，共享builtin目录元信息以免重复遍历。
 def _roots_signature(roots: tuple[SkillRoot, ...]) -> str:
     digest = hashlib.sha256()
     for root in roots:
         digest.update(repr((str(root.path), root.source)).encode())
-        paths = (root.path, *sorted(root.path.rglob('*')))
-        for path in paths:
-            if path != root.path and not _visible_skill_path(root.path, path):
-                continue
-            digest.update(repr(_path_stat_signature(path)).encode())
+        digest.update(_skill_tree_state(root.path, builtin=root.source == "builtin").digest.encode())
     return digest.hexdigest()
 
 
-# LLM: 文件身份、权限及纳秒时间参与指纹；读不到时保留errno以便正常发现失败关闭，中断不吞掉。
+# LLM: 文件/链接两种身份、权限及纳秒时间参与指纹；读不到时保留errno，中断不吞掉。
 # 函数用途: 获取不读正文的文件状态，区分不存在、不可读和符号链接目标变化。
 def _path_stat_signature(path: Path) -> tuple:
     try:
         stat = path.stat()
+        link = path.lstat()
         return (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns,
-                stat.st_dev, stat.st_ino, stat.st_mode)
+                stat.st_dev, stat.st_ino, stat.st_mode,
+                link.st_ino, link.st_ctime_ns, link.st_mode)
     except InterruptedError:
         raise
     except OSError as exc:
         return str(path), type(exc).__name__, exc.errno
 
 
+# LLM: 命中复核全部stat；未命中逐目录稳定枚举，最多三次重试，不能发表漏项但带新目录stat的清单。
+# 函数用途: 复用builtin目录清单，检测子文件改写和枚举期间增删，不无限重试。
+def _skill_tree_state(path: Path, *, builtin: bool = False) -> _SkillTreeState:
+    first = _path_stat_signature(path)
+    key = (str(path), first[5], first[1]) if len(first) >= 7 else None
+    with _PROCESS_SKILL_CACHE_LOCK:
+        cached = _PROCESS_BUILTIN_ROOT_CACHE.get(key) if builtin and key is not None else None
+    if cached is not None and all(_path_stat_signature(Path(row[0])) == row for row in cached.stats):
+        return cached
+    for _ in range(3):
+        stats = _scan_skill_tree_stats(path)
+        if stats is not None:
+            break
+    else:
+        raise OSError("skill directory changed during stat scan")
+    state = _SkillTreeState(stats, hashlib.sha256(repr(stats).encode()).hexdigest())
+    if builtin and key is not None and len(stats) <= _PROCESS_ROOT_CACHE_MAX_PATHS:
+        with _PROCESS_SKILL_CACHE_LOCK:
+            _PROCESS_BUILTIN_ROOT_CACHE[key] = state
+            while (len(_PROCESS_BUILTIN_ROOT_CACHE) > _PROCESS_ROOT_CACHE_MAX_ENTRIES
+                   or sum(len(item.stats) for item in _PROCESS_BUILTIN_ROOT_CACHE.values()) > _PROCESS_ROOT_CACHE_MAX_PATHS):
+                _PROCESS_BUILTIN_ROOT_CACHE.pop(next(iter(_PROCESS_BUILTIN_ROOT_CACHE)))
+    return state
+
+
+# LLM: 每个目录在列名首末核同一stat；之后再变会使缓存下一次复核失效，不跟随目录符号链接。
+# 函数用途: 获取不会把新增文件永久遗漏的确定性全目录元数据，变化时返回None供有界重扫。
+def _scan_skill_tree_stats(root: Path) -> tuple[tuple, ...] | None:
+    pending, signatures = [root], []
+    while pending:
+        path = pending.pop()
+        before = _path_stat_signature(path)
+        signatures.append(before)
+        if len(before) < 7 or not stat.S_ISDIR(before[6]) or stat.S_ISLNK(before[-1]):
+            continue
+        children = tuple(sorted(path.iterdir()))
+        if _path_stat_signature(path) != before:
+            return None
+        pending.extend(reversed(children))
+    return tuple(signatures)
+
+
+# LLM: 清理的只是可重建公开投影，不影响其它Owner私有根或现有快照；下一次guard必须重核。
+# 函数用途: 显式刷新时逐出当前公开根的进程目录缓存。
+def _invalidate_public_skill_cache(roots: tuple[SkillRoot, ...]) -> None:
+    public = {(str(root.path), root.source) for root in roots if root.source in {"builtin", "shared"}}
+    with _PROCESS_SKILL_CACHE_LOCK:
+        for key, item in tuple(_PROCESS_SKILL_DIR_CACHE.items()):
+            if (str(item.root.path), item.root.source) in public:
+                _PROCESS_SKILL_DIR_CACHE.pop(key)
+
+
+# LLM: 只合并各根发现结果，保持单参数读口，不改变来源优先级或owner边界。
+# 函数用途: 为当前根集合构建manifest与隔离的错误列表。
 def _build_manifest(roots: tuple[SkillRoot, ...]) -> tuple[list[SkillManifestItem], list[SkillLoadError]]:
     items: list[SkillManifestItem] = []
     errors: list[SkillLoadError] = []
@@ -226,13 +303,14 @@ def _build_manifest(roots: tuple[SkillRoot, ...]) -> tuple[list[SkillManifestIte
     return items, errors
 
 
-# LLM: 普通skills根不提前递归learned；独立后置根保持owner来源与普通目录优先。
-# 函数用途: 在单根预算内收集确定性manifest并逐文件隔离错误。
+# LLM: builtin复用已核stat的文件清单，owner不提前递归learned；原可见性、数量、路径拒绝保留。
+# 函数用途: 单根发现确定性manifest，公开结果可进程共享，私有根仍独立读取。
 def _discover_root(root: SkillRoot) -> tuple[list[SkillManifestItem], list[SkillLoadError]]:
     if not root.path.is_dir():
         return [], []
     resolved_root = root.path.resolve(strict=False)
-    files = [path for path in sorted(root.path.rglob("SKILL.md")) if _visible_skill_path(root.path, path)
+    candidates = (Path(row[0]) for row in _skill_tree_state(root.path, builtin=True).stats) if root.source == "builtin" else root.path.rglob("SKILL.md")
+    files = [path for path in sorted(candidates) if path.name == "SKILL.md" and _visible_skill_path(root.path, path)
              and not (root.source == "owner" and root.path.name == "skills"
                       and path.relative_to(root.path).parts[0] == "learned")]
     errors: list[SkillLoadError] = []
@@ -249,8 +327,8 @@ def _discover_root(root: SkillRoot) -> tuple[list[SkillManifestItem], list[Skill
     return items, errors
 
 
-# LLM: 路径限制在本根，正文及原侧文件运行闸在发现时冻结；不可读/坏bool形成发现错误，不能默认启用。
-# 函数用途: 固定技能有界正文与内容hash，不执行或写回文件。
+# LLM: 先核路径围栏；仅builtin/shared按全资源stat及来源/分类缓存不可变结果，发布前再核目录避免错键。
+# 函数用途: 为公开目录共享同一manifest，私有目录每次独立冻结正文，不缓存Owner策略。
 def _manifest_item(
     root: SkillRoot,
     resolved_root: Path,
@@ -261,13 +339,48 @@ def _manifest_item(
         resolved.relative_to(resolved_root)
     except (OSError, ValueError) as exc:
         return None, _error(root, path, "SKILL_PATH_ESCAPE", str(exc))
+    if root.source not in {"builtin", "shared"}:
+        return _read_manifest_item(root, resolved)
+    key = _skill_directory_key(root, resolved)
+    with _PROCESS_SKILL_CACHE_LOCK:
+        if key in _PROCESS_SKILL_DIR_CACHE:
+            return _PROCESS_SKILL_DIR_CACHE[key], None
+        item, error = _read_manifest_item(root, resolved)
+        if item is None:
+            return None, error
+        entry, error = _parse_manifest_entry(item)
+        item = replace(item, parsed_entry=entry, load_error=error)
+        if key != _skill_directory_key(root, resolved):
+            return None, _error(root, path, "SKILL_SOURCE_CHANGED", "skill directory changed during discovery")
+        # 同目录旧版本不再驻留；不同来源/分类已参与签名，不能错用guard信任级别。
+        for old in tuple(_PROCESS_SKILL_DIR_CACHE):
+            if old[0] == key[0]:
+                _PROCESS_SKILL_DIR_CACHE.pop(old)
+        _PROCESS_SKILL_DIR_CACHE[key] = item
+        while (len(_PROCESS_SKILL_DIR_CACHE) > _PROCESS_SKILL_CACHE_MAX_ENTRIES
+               or sum(len(value.text.encode("utf-8")) for value in _PROCESS_SKILL_DIR_CACHE.values()) > _PROCESS_SKILL_CACHE_MAX_BYTES):
+            _PROCESS_SKILL_DIR_CACHE.pop(next(iter(_PROCESS_SKILL_DIR_CACHE)))
+        return item, None
+
+
+# LLM: guard来源、分类、实际正文路径与全部后代stat一起绑定，防同目录两个合法SKILL别名错误共用卡片。
+# 函数用途: 生成完整Skill目录的缓存身份，不读取正文或执行脚本。
+def _skill_directory_key(root: SkillRoot, path: Path) -> tuple[str, str]:
+    state = _skill_tree_state(path.parent, builtin=root.source == "builtin")
+    context = root.source, str(root.path), str(path), _derived_category(root.path, path), state.digest
+    return str(path.parent), hashlib.sha256(repr(context).encode()).hexdigest()
+
+
+# LLM: 正文只read_skill_text一次；hash和解析后续使用同一字符串，侧开关在此固定，不写盘。
+# 函数用途: 有界读取一个Skill的正文、hash与磁盘启停状态。
+def _read_manifest_item(root: SkillRoot, resolved: Path):
     try:
         text = read_skill_text(resolved)
         enabled = skill_enabled(resolved, split_skill_frontmatter(text)[0])
     except InterruptedError:
         raise
     except (OSError, ValueError) as exc:
-        return None, _error(root, path, "SKILL_READ_FAILED", str(exc))
+        return None, _error(root, resolved, "SKILL_READ_FAILED", str(exc))
     return SkillManifestItem(root, resolved, text, skill_content_sha256(text), enabled), None
 
 
@@ -300,19 +413,28 @@ def _build_snapshot(
     )
 
 
-# LLM: enabled必须同时满足磁盘运行闸和原Owner策略；目录分类、guard、来源授权保持原合同，不让侧文件绕过策略。
-# 函数用途: 将单个已发现技能解析、核验并转换为快照条目。
+# LLM: 进程只共享冻结公开投影；disabled/共享allowlist每Owner重新计算，不能缓存最终enabled。
+# 函数用途: 将公开或私有发现事实按当前Owner策略装入快照。
 def _entry_from_manifest(
     item: SkillManifestItem,
     policy: EffectiveOwnerPolicy,
 ) -> tuple[SkillSnapshotEntry | None, SkillLoadError | None]:
+    entry, error = item.parsed_entry, item.load_error
+    if entry is None and error is None:
+        entry, error = _parse_manifest_entry(item)
+    if error is not None:
+        return None, error
+    enabled = entry.enabled and entry.name not in set(policy.disabled_skills)
+    if item.root.source == "shared" and policy.enabled_shared_skills:
+        enabled = enabled and entry.name in set(policy.enabled_shared_skills)
+    return replace(entry, enabled=enabled), None
+
+
+# LLM: parser使用manifest.text而非磁盘二读；guard仍核整个目录，缓存的是冻结条目/错误而非可变SkillCard。
+# 函数用途: 把同一份正文解析、验证并生成与Owner策略无关的Skill投影。
+def _parse_manifest_entry(item: SkillManifestItem):
     try:
-        card = parse_skill_file(
-            item.path,
-            source=item.root.source,
-            require_frontmatter=True,
-            default_category=_derived_category(item.root.path, item.path),
-        )
+        card = _card_from_manifest_text(item)
         _validate_card(card)
     except (OSError, TypeError, ValueError) as exc:
         return None, _error(item.root, item.path, "SKILL_PARSE_FAILED", str(exc))
@@ -322,10 +444,28 @@ def _entry_from_manifest(
     )
     if not decision.allowed:
         return None, _error(item.root, item.path, "SKILL_GUARD_DENIED", _guard_codes(decision.to_dict()))
-    enabled = item.enabled and card.enabled and card.name not in set(policy.disabled_skills)
-    if item.root.source == "shared" and policy.enabled_shared_skills:
-        enabled = enabled and card.name in set(policy.enabled_shared_skills)
-    return _snapshot_entry(item, card, card.category, enabled), None
+    return _snapshot_entry(item, card, card.category, item.enabled and card.enabled), None
+
+
+# LLM: 复用原有有界frontmatter/list codec及必填规则；只从已冻结文本建卡，磁盘enabled不二读。
+# 函数用途: 在不改变文件parser公共签名的情况下消除manifest卡片与hash的双读竞态。
+def _card_from_manifest_text(item: SkillManifestItem) -> SkillCard:
+    meta, _ = split_skill_frontmatter(item.text)
+    if not _has_frontmatter(item.text):
+        raise ValueError("missing YAML frontmatter delimited by ---")
+    if not str(meta.get("description") or "").strip():
+        raise ValueError("missing frontmatter field: description")
+    category = meta.get("category")
+    return SkillCard(
+        name=str(meta.get("name") or item.path.parent.name).strip(),
+        description=str(meta["description"]).strip(), path=item.path,
+        when_to_use=str(meta.get("when_to_use", "")).strip(),
+        category=(str(category).strip() if category is not None else "") or _derived_category(item.root.path, item.path),
+        platforms=_as_list(meta.get("platforms")), scope=str(meta.get("scope", "workspace")).strip() or "workspace",
+        tags=_as_list(meta.get("tags")), capabilities=_as_list(meta.get("capabilities")),
+        tools_required=_as_list(meta.get("tools_required")),
+        risk_level=str(meta.get("risk_level", "low")).strip() or "low", source=item.root.source, enabled=item.enabled,
+    )
 
 
 def _snapshot_entry(
