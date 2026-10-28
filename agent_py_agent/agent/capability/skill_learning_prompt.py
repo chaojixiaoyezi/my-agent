@@ -188,7 +188,7 @@ def _extract_carrier_asset(payload: dict[str, object]) -> dict[str, object]:
     return out
 
 
-# LLM: 单项载体字段清洗，把严格键值对还原为dict并剔除空默认占位值。
+# LLM: 单项载体字段清洗，把严格键值对还原为dict并剔除空默认占位值；非法JSON转抛SkillLearningOutputError。
 # 函数用途: 归一化单个candidate_asset子字段。
 def _norm_carrier_item(k: str, v: object) -> object:
     if k == "io_contract" and isinstance(v, dict):
@@ -196,7 +196,10 @@ def _norm_carrier_item(k: str, v: object) -> object:
     if k == "steps" and isinstance(v, list):
         return [{sk: sv for sk, sv in s.items() if sv not in ("", [], {}, None)} for s in v if isinstance(s, dict)] or None
     if k == "sample_inputs" and isinstance(v, list):
-        return {str(i["key"]): json.loads(str(i["value_json"])) for i in v if isinstance(i, dict) and i.get("key")} or None
+        try:
+            return {str(i["key"]): json.loads(str(i["value_json"])) for i in v if isinstance(i, dict) and i.get("key")} or None
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SkillLearningOutputError("candidate_asset") from exc
     if k == "files" and isinstance(v, list):
         return {str(i["path"]): str(i.get("content", "")) for i in v if isinstance(i, dict) and i.get("path")} or None
     return None if v in ("", [], {}, None) else v

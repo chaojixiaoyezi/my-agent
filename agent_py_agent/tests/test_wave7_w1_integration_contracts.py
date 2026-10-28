@@ -471,9 +471,46 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     assert replaced_c is not None and replaced_c['asset_id'] == 'promoted-c-fresh' and not replaced_c.get('reused')
     assert ScriptStore(owner_home).get_script('promoted-c-fresh') is not None
 
-    # R7-2: 脚本输出包含 dry_run=true 时必须被 business_validated 拒绝，绝不能伪报 contract_valid=True
+    # R7-2 & R8-1: 脚本输出包含 dry_run=true 时必须被拒绝；sample_inputs[].value_json 非法JSON时必须转抛 SkillLearningOutputError 拒绝并出队，不阻塞后续请求
     assert promote_verified_asset(owner_home, {
         'kind': 'script', 'name': 'dry-run-fake-script', 'description': '假执行脚本',
         'code': 'print("{\\"dry_run\\": true, \\"rows\\": 3}")', 'io_contract': {'outputs': ['rows']},
     }) is None
     assert ScriptStore(owner_home).get_script('dry-run-fake-script') is None
+
+    bad_s3_json = json.dumps({
+        'schema_version': 'my-agent.skill-learning-output.v1',
+        'decision': 'create', 'update_target': '', 'reason': '坏JSON输入样本', 'name': 's3-bad-json-input',
+        'description': '坏样本脚本', 'when_to_use': '测试坏样本出队', 'tags': ['script'], 'body': BODY,
+        'candidate_asset': {
+            'kind': 'script', 'code': 'print("{\\"total\\": 1}")', 'entry_source': '',
+            'steps': [], 'io_contract': {'inputs': ['n'], 'outputs': ['total']},
+            'sample_inputs': [{'key': 'n', 'value_json': 'not-json'}],
+            'entry_document': '', 'files': [], 'application_scope': '',
+        },
+    })
+    good_s3_json = json.dumps({
+        'schema_version': 'my-agent.skill-learning-output.v1',
+        'decision': 'create', 'update_target': '', 'reason': '队列第二条正常晋升', 'name': 's3-next-in-queue',
+        'description': '队列第二条脚本', 'when_to_use': '验证坏请求出队后继续处理', 'tags': ['script'], 'body': BODY,
+        'candidate_asset': {
+            'kind': 'script', 'code': 'print("{\\"ok_next\\": 9}")', 'entry_source': '',
+            'steps': [], 'io_contract': {'inputs': [], 'outputs': ['ok_next']},
+            'sample_inputs': [], 'entry_document': '', 'files': [], 'application_scope': '',
+        },
+    })
+    responses = [bad_s3_json, good_s3_json]
+    q_svc = SkillLearningService(
+        lstore,
+        SkillLearningSettings(min_tool_rounds=1, autonomous_verified=True),
+        SkillLearningRuntime(
+            backend=SimpleNamespace(generate_structured=lambda _p, *, response_schema, messages=None: SimpleNamespace(text=responses.pop(0))),
+            snapshot_provider=lambda: snapshot(),
+        ),
+    )
+    assert q_svc.enqueue_from_finalize(context('s3-bad-q1', calls=[{'tool': 'shell', 'ok': True, 'tool_round': 1}])) == 'queued'
+    assert q_svc.enqueue_from_finalize(context('s3-good-q2', calls=[{'tool': 'read_file', 'ok': True, 'tool_round': 1}])) == 'queued'
+    r_first = q_svc.run_pending()
+    assert r_first.status == 'rejected' and r_first.code == 'SKILL_LEARNING_OUTPUT_INVALID'
+    r_second = q_svc.run_pending()
+    assert r_second.status == 'published' and ScriptStore(owner_home).get_script('s3-next-in-queue') is not None
