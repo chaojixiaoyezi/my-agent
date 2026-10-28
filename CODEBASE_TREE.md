@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 B5：Responses会话连接复用
+
+- `agent_py_agent/agent/backends/responses_ws_pool.py`：宿主会话/凭据/端点/provider隔离的Responses空闲连接LRU、主动TTL回收与服务端亲和状态；只为当前物理连接保存完整字节增量锚点，不持请求并发lease，不持久化凭据或正文。
+- `agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py`：多步工具增量、租约与池寿命解耦、脏连接、一次全量回退、跨owner/session/凭据隔离、HTTP/WS亲和头、reset/compaction失效、配置与usage，以及真实本机loopback WebSocket验证。
+- 既有入口仍为`backends/responses.py`、`oauth.py`及`responses_websocket.py`；没有新增同名影子`openai_responses.py`。配置通过既有settings/config、YAML、BackendOptions与factory，相关合同/命令见`TESTS.md`顶部。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

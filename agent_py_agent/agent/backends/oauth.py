@@ -51,6 +51,7 @@ class _OAuthMixin:
     #   基类 request_json/request_stream/request_stream_iter 都按新形态调进来；首包预算、绝对期限和后台预算
     #   （provider_request_timeout）都沿用基类口径——fix3ar 实测原先用裸 request_timeout，后台预算在订阅账号上不生效。
     #   每次物理请求使用同一份刷新结果，认证头覆盖生成期旧值；禁止重定向投递 token。同步 test_model_oauth_transport。
+    #   非订阅Responses只在刷新后绑定HTTP亲和观察者；Chat/Messages仍返回原信封。
     # 函数用途: 用原传输信封携带账号与物理并发限制，不增加自动重试或新后台线程。
     def _gateway_request(self, call, payload=None, headers=None, *, options=None):
         from ..settings.model_oauth import request_credentials
@@ -62,12 +63,15 @@ class _OAuthMixin:
         clean = {name: value for name, value in headers.items() if name.lower() not in {"authorization", "x-api-key", "chatgpt-account-id"}}
         clean.update(Authorization="Bearer " + key, **account_headers)
         base, suffix = endpoint_parts(self.api_base, path)
-        return GatewayRequest(api_base=base, path=suffix, api_key=key, payload=payload,
+        request = GatewayRequest(api_base=base, path=suffix, api_key=key, payload=payload,
             headers=request_headers(clean, self.custom_headers, self.session_header),
             timeout=provider_request_timeout(self.request_timeout),
             connect_timeout=self.connect_timeout, first_event_timeout=options.first_event_timeout_seconds,
             deadline=stream_call_deadline(options), allow_redirects=False,
             provider_max_concurrent_requests=self.provider_max_concurrent_requests)
+        if isinstance(self, OpenAIResponsesBackend) and self.auth_ref["mode"] != "chatgpt":
+            return self._prepare_http_responses_request(request)
+        return request
 
     # LLM: OAuth 用户必须显式填写容量，不能以 metadata 探针向另一条 API 路径附送订阅凭据。
     # 函数用途: 保持容量来自用户配置；目录发现仍是独立显式菜单动作。
@@ -93,11 +97,14 @@ class OAuthResponsesBackend(_OAuthMixin, OpenAIResponsesBackend):
     # LLM: 订阅登录（auth mode=chatgpt）的流式请求改走 Responses WebSocket：服务商模型目录对这些模型声明 prefer_websockets，
     #   官方命令行默认也用它；普通 SSE 长输出会在服务端中途卡住（09-30 实测）。请求信封（地址、认证头、请求体）仍由
     #   _gateway_request 统一生成，事件文本交原 collect_response；其它登录模式保持 SSE。同步 test_responses_websocket。
-    # 函数用途: 按登录模式选择流式传输：订阅账号走 WebSocket，其余走原 SSE。
+    #   会话池使用宿主身份及实际刷新凭据生成隔离键；TTL/容量只传给Responses，不改变其它登录协议。
+    # 函数用途: 按登录模式选择流式传输：订阅账号走隔离会话WebSocket，其余走原SSE。
     def request_stream_iter(self, path, payload, headers, *, options=None):
         if self.auth_ref["mode"] != "chatgpt":
             return super().request_stream_iter(path, payload, headers, options=options)
         from .responses_websocket import iter_responses_websocket
 
         return iter_responses_websocket(
-            self._gateway_request(StreamCall(path=path, payload=payload, headers=headers), options=options))
+            self._gateway_request(StreamCall(path=path, payload=payload, headers=headers), options=options),
+            provider_id=str(self.auth_ref["provider_id"]), idle_ttl_seconds=self.responses_ws_idle_ttl_seconds,
+            max_idle=self.responses_ws_max_idle_connections)

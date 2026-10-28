@@ -1,3 +1,5 @@
+# LLM: Test native HTTP/WS request leases without relaxing cancellation, queue limits or close-failure cleanup; B5 releases at terminal.
+# 模块用途: 核对物理请求排队、终态归还及异常资源回收，不让闲置socket占名额。
 from __future__ import annotations
 
 import gc
@@ -157,7 +159,9 @@ def test_configuration_reaches_backend_envelope():
     assert getattr(envelope, "provider_max_concurrent_requests", None) == 2
 
 
-def test_websocket_slot_lives_until_close_and_releases_on_failed_handshake(monkeypatch):
+# LLM: B5 decouples response leases from retained generators/sockets; terminal observation must already release the request slot.
+# 函数用途: 钉住WebSocket终态即归还及握手失败归还名额，不再等待调用方关闭流。
+def test_websocket_slot_releases_at_terminal_and_on_failed_handshake(monkeypatch):
     from agent_py_agent.agent.backends import responses_websocket as ws
 
     req = request(max_retries=0)
@@ -166,7 +170,7 @@ def test_websocket_slot_lives_until_close_and_releases_on_failed_handshake(monke
     monkeypatch.setattr(ws, "_events", lambda *a: iter(['{"type":"response.completed"}']))
     stream = ws.iter_responses_websocket(req)
     assert next(stream) == '{"type":"response.completed"}'
-    assert scope.provider_endpoint_counts(req) == (1, 0)
+    assert scope.provider_endpoint_counts(req) == (0, 0)
     stream.close()
     assert scope.provider_endpoint_counts(req) == (0, 0)
 
@@ -490,6 +494,8 @@ def test_disabled_limiter_preserves_retained_stream_lifecycle(monkeypatch, proto
             stream.close()
 
 
+# LLM: Cleanup now runs before terminal yield; a legacy close failure remains visible but may never retain its request lease.
+# 函数用途: 即使关闭失败也必须及时归还名额，不依赖GC或后续generator.close。
 def test_websocket_close_failure_releases_retained_slot_without_gc(monkeypatch):
     from agent_py_agent.agent.backends import responses_websocket as ws
 
@@ -502,8 +508,8 @@ def test_websocket_close_failure_releases_retained_slot_without_gc(monkeypatch):
     monkeypatch.setattr(ws, "_connect", lambda _: connection)
     monkeypatch.setattr(ws, "_events", lambda *args: iter(['{"type":"response.completed"}']))
     stream = ws.iter_responses_websocket(req)
-    assert next(stream) == '{"type":"response.completed"}'
-    assert scope.provider_endpoint_counts(req) == (1, 0)
     with pytest.raises(RuntimeError, match="fixture websocket close"):
-        stream.close()
+        next(stream)
+    assert scope.provider_endpoint_counts(req) == (0, 0)
+    stream.close()
     assert scope.provider_endpoint_counts(req) == (0, 0)

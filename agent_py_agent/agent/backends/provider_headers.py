@@ -49,7 +49,7 @@ _PROTECTED = frozenset({
     "host", "content-length", "transfer-encoding", "connection", "proxy-authorization",
     "proxy-authenticate", "te", "trailer", "upgrade", "accept-encoding", "content-type",
     "authorization", "x-api-key", "x-goog-api-key", "cookie", "set-cookie",
-    "chatgpt-account-id", "session_id", "x-client-request-id", "x-codex-window-id",
+    "chatgpt-account-id", "session_id", "x-client-request-id", "x-codex-window-id", "x-codex-turn-state",
     "forwarded", "x-forwarded-for", "x-real-ip", "cf-connecting-ip",
 })
 

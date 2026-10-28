@@ -2,6 +2,7 @@
 # LLM: 各配置域共用默认和校验；人格线程冻结同其它home开关归一为布尔，字符串false不能误开；须同步加载测试。
 #   IM 心跳秒数统一归一为有限数字，后台回执和群引用附件开关不能因字符串 false 而意外开启。
 #   飞书原生图片开关与解码像素预算在此统一校验，实际读取方沿原owner输入入口消费。
+#   Responses连接池TTL/容量沿现有整数归一；零关闭复用，非法配置不留到网络请求时崩溃。
 # 模块用途: 将 YAML/覆盖配置转成运行字段，避免字符串 false 意外启用工具反馈、回查提示或决策记录。
 """Domain-specific normalize services for config fields.
 
@@ -204,6 +205,7 @@ def _normalize_temperature(out: dict[str, object], defaults: object) -> list[str
 class ModelFieldsService:
     # LLM: 不发模型请求或改持久配置；top_p 与模型表单共用范围校验，智能程度档位/控制方式按枚举校验，非法 YAML 告警回默认。
     #   上下文窗口和温度留空都是 None：窗口交给服务商元数据/探测，温度不发送。
+    #   Responses闲置TTL最小零，池容量0..256，越界/坏类型告警并回默认。
     # 函数用途: 统一模型字段的类型和范围，供 YAML/overlay 共用；None 保留为不覆盖供应商采样。
     @staticmethod
     def normalize(data: dict[str, object], defaults: object) -> tuple[dict[str, object], list[str]]:
@@ -218,6 +220,8 @@ class ModelFieldsService:
                 ("request_timeout", 1, 600),
                 ("max_tokens", 1, None),
                 ("provider_max_concurrent_requests", 0, None),
+                ("responses_ws_idle_ttl_seconds", 0, None),
+                ("responses_ws_max_idle_connections", 0, 256),
                 ("model_context_window_tokens", 1, None),
             ),
         ))

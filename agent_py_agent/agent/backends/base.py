@@ -89,6 +89,9 @@ class BackendOptions:
     structured_output: str = "native"
     # 仅控制本进程每 HTTP origin 的物理请求并发，0 保持原路径。
     provider_max_concurrent_requests: int = 0
+    # Responses-only idle resources; other protocols ignore these frozen values.
+    responses_ws_idle_ttl_seconds: int = 300
+    responses_ws_max_idle_connections: int = 32
 
 
 # LLM: 供应商级请求控制集中在 typed options；首包预算必须保持 request-local，不能通过修改共享 backend 传递。

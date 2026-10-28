@@ -1,3 +1,31 @@
+## 2026-10-28 Wave 9 B5：Responses会话WebSocket与Codex缓存亲和
+
+来源：`07-tasks/wave9-b5.md`，主参考总体计划第7项及任务内Stage 1合同；基线`db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅派工工作树改动，不推送、部署或运行退役的体积检查。
+
+做法：实际Responses后端是`agent/backends/responses.py`（本基线不存在任务描述中的`openai_responses.py`）。新增`responses_ws_pool.py`保存进程内、宿主owner+thread/端点/实际认证指纹/provider隔离的闲置连接与亲和状态，默认TTL 300秒、容量32（0关闭，容量上界256），配置沿原YAML/AgentConfig/BackendOptions/工厂及规范化链路透传。Chat/Messages不启用这些池选项；HTTP公共信封只新增默认None的宿主响应头观察者，实际仅Responses使用，不改其它协议请求字节。
+
+- 物理请求租约在终态交给收集器前归还；闲置socket不持有lease。只有合法completed且没有余帧的连接可回池；超时、取消、解析/准备失败及非干净终态清连接和锚点。
+- 增量锚点包含完整input及已有原生重放codec生成的assistant输出，以唯一wire编码器逐字节检查前缀和请求选项；不改本地完整历史。compaction立即清锚点，不新增raw-tail保留配置。
+- 已复用连接在未交出任何内容事件前断开、或服务端明确拒绝previous ID时，仅一次新连接全量恢复，保留原prompt_cache_key；已经产生内容不隐式重放；显式零重试仍不恢复；拒绝外来previous_response_id。
+- WS/HTTP握手头仅捕获合法服务端`x-codex-turn-state`，禁止用户自定义覆盖。新宿主会话使用独立键，不继承旧头；同会话显式reset入口`reset_responses_session()`清头和闲置连接，并撤销在途旧代次回池；已发送请求不因此跨线程强杀。
+- usage附`cached_tokens`、`uncached_input_tokens`、`cache_hit_rate`、`ws_connection_reused`、`incremental_chain_hit`；缺失供应商计数保留None，不冒充0命中；WS物理请求也沿原观察开关上报`request_surface`。
+
+新增`test_wave9_astra_codex_cache_optimization.py`：完整多步工具链（含Codex只发output_item.done）、隔离、sticky头及HTTP收集/回放、TTL/LRU、dirty/error/cancel、一次恢复上限、零重试、迟到余帧、reset并发代次、配置归一与usage；另有真实本机loopback WebSocket（合成服务端响应，仅验证传输，不验证真实缓存命中率）。既有`test_provider_queue_transport.py`两项由“流关闭才释放”更新为B5“终态即释放”，保留关闭异常可见与零泄漏检查，不skip/xfail。
+
+TDD证据保存在`.pytest_cache/b5-*.xml`：原始12项红测；扩展17红6绿；HTTP亲和头单红；独立静态复核指出的准备失败漏关、完成后异常仍回池、TTL调度/借出过期、reset旧对象及外来ID均先有失败复现，再修复。没有使用模拟计数宣称97–99%真机命中率。
+
+复现门禁（cwd必须为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py agent_py_agent/tests/test_responses_websocket.py -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+验证结果：指定两文件65项通过（新增B5文件41项、既有WS文件24项）；扩展16文件303项通过，0失败/报错/跳过，涵盖Responses组包/缓存键/推理/失败分类、物理队列、OAuth、跨磁盘重载wire字节、签名与配置合同，以及Chat/Messages既有后端。`ruff check agent_py_agent scripts`与`check_import_boundaries.py`通过，导入边界findings=0；`git diff --check`通过。证据：`.pytest_cache/b5-targeted.xml`、`.pytest_cache/b5-final.xml`。
+
+局限：未部署、未向真实astra/sol端点发送计费请求；97–99%真实命中率、外部网络可达性和生产多owner长时间稳定性未验证。独立gpt-6-astra high只读审查基于内联源码，不冒充其运行过测试。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。
