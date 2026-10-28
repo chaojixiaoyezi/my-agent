@@ -159,6 +159,10 @@ def test_editing_precheck_during_action_does_not_commit_old_checkpoint(tmp_path)
 
 def test_precheck_archives_once_and_compares_complete_output_beyond_preview(tmp_path, monkeypatch):
     from agent_py_agent.agent.agent_core import _tool_loop_service
+    from agent_py_agent.agent.memory_archive.artifact.reader import (
+        ReadToolOutputArtifactRequest,
+        read_tool_output_artifact,
+    )
 
     case = precheck_case(tmp_path)
     records = []
@@ -180,7 +184,11 @@ def test_precheck_archives_once_and_compares_complete_output_beyond_preview(tmp_
     assert entry["call_id"] == f"host-tool-{case.signal.root_task_id}"
     assert entry["actor"] == "host" and entry["run_id"] == case.signal.root_task_id
     assert entry["output_externalized"] is True
-    artifact = json.loads(Path(entry["output_path"]).read_text())
+    # 使用真实reader同时核对JSON包装和blob正文，不能假定大输出仍在旧content字段内。
+    artifact = read_tool_output_artifact(ReadToolOutputArtifactRequest(
+        root=case.agent.home_paths.owner_home_dir, artifact_ref=entry["scoped_call_id"], max_chars=0))
+    assert artifact["ok"] is True and artifact["content_hash_verified"] is True
+    assert artifact["truncated"] is False
     assert json.loads(artifact["content"])["version"] == 1
     db = case.agent.subagents.runtime_db
     row = db.agent_run_for_run_id(case.signal.root_task_id)
@@ -191,6 +199,44 @@ def test_precheck_archives_once_and_compares_complete_output_beyond_preview(tmp_
     case.tool.version = 2
     case.scheduler.tick(now=2200)
     assert case.tool.calls == 3 and len(case.backend.prompts) == 2
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_precheck_recovery_summary_preserves_status(tmp_path, monkeypatch, ok):
+    from agent_py_agent.agent.agent_core import _tool_loop_service
+
+    case = precheck_case(tmp_path)
+    records = []
+    original = _tool_loop_service._record_tool_call
+
+    def record(agent, request):
+        original(agent, request)
+        records.extend(request.params.archive_tool_calls)
+
+    case.tool.execute = lambda _params: ToolHandlerOutcome("test_version", ok, json.dumps({
+        "version": 1, "artifact_integrity": {"ok": ok}, "padding": "x" * 10_000}),
+        error_code="" if ok else "INVALID_ARGUMENTS")
+    monkeypatch.setattr(_tool_loop_service, "_record_tool_call", record)
+    case.scheduler.tick(now=1000)
+    assert len(records) == 1 and records[0]["ok"] is ok
+    assert ("status=ok" if ok else "status=error") in records[0]["model_summary"]
+    if not ok:
+        assert records[0]["error_code"] in records[0]["model_summary"]
+
+
+def test_archive_summary_does_not_downgrade_canonical_external_data():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_call_archive_record import _attach_model_summary
+
+    result = SimpleNamespace(tool_name="create_subagents", ok=True,
+        output=json.dumps({"created_run_ids": ["child-one"]}),
+        output_trust="external_data", output_redaction="default",
+        metadata={"handler_details": {"tool_output_policy": {
+            "trust": "runtime", "redaction": "none", "live_prompt_output": "Synthetic-Archive-Canary"}}})
+    record = {"ok": True}
+    _attach_model_summary(record, result)
+    assert "model_summary" not in record
 
 
 def test_precheck_archive_failure_is_failed_without_advancing_checkpoint(tmp_path, monkeypatch):

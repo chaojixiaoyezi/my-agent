@@ -15,6 +15,7 @@ from ..capability.skills import split_skill_frontmatter
 from ..common.json_io import _flock_descriptor, _funlock_descriptor, locked_json_path
 from ..common.nofollow_fs import (
     NoFollowPathError,
+    _supports_dir_fd,
     list_names_beneath,
     open_directory_beneath,
     open_readonly_file_beneath,
@@ -25,6 +26,8 @@ from ..common.nofollow_fs import (
 )
 from . import (
     MAX_ASSET_BYTES,
+    _open_readonly_lock_beneath,
+    _verify_directory_beneath,
     asset_root_lock,
     next_asset_revision,
     safe_asset_id,
@@ -86,7 +89,7 @@ def _content_bytes(content):
 def _read_lock(root, parts):
     descriptor = None
     try:
-        descriptor = open_readonly_file_beneath(root, parts)
+        descriptor = _open_readonly_lock_beneath(root, parts)
     except FileNotFoundError:
         pass
     try:
@@ -107,7 +110,7 @@ def _read_lock(root, parts):
 # 函数用途: 核对只读锁尚为同一单链接普通文件。
 def _check_lock(root, parts, descriptor):
     try:
-        current = open_readonly_file_beneath(root, parts)
+        current = _open_readonly_lock_beneath(root, parts)
     except FileNotFoundError:
         if descriptor is not None:
             raise BlockingIOError('资产锁已消失，请重试') from None
@@ -316,6 +319,17 @@ def _strict_skill_paths(root):
             yield root.joinpath(*parts, 'SKILL.md')
             continue
         if len(parts) >= 7 or not names:
+            continue
+        if not _supports_dir_fd():
+            base = _verify_directory_beneath(root, parts)
+            for name in reversed(names):
+                if name.startswith('.'):
+                    continue
+                metadata = (base / name).lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    raise NoFollowPathError('技能目录不能包含符号链接')
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append((*parts, name))
             continue
         directory = open_directory_beneath(root, parts)
         try:
@@ -530,9 +544,9 @@ def _canonical_locks(root, paths):
             targets.update({(*parts[:-1], '.assets'), tuple(parts)})
     with ExitStack() as stack:
         for parts in sorted(targets):
-            os.close(open_directory_beneath(root, parts[:-1], create=True))
+            _verify_directory_beneath(root, parts[:-1], create=True)
             stack.enter_context(locked_json_path(root.joinpath(*parts)))
-            os.close(open_directory_beneath(root, parts[:-1]))
+            _verify_directory_beneath(root, parts[:-1])
         yield
 
 
@@ -793,7 +807,7 @@ def _skill_resources(root, identifier):
             try:
                 text = _file_content(root, (*directory, *parts))
             except OSError:
-                os.close(open_directory_beneath(root, (*directory, *parts)))
+                _verify_directory_beneath(root, (*directory, *parts))
                 pending.append(parts)
             else:
                 resources['/'.join(parts)] = text

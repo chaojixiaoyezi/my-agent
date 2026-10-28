@@ -100,7 +100,8 @@ def test_cleanup_refuses_drained_when_background_future_is_still_running(tmp_pat
     from agent_py_agent.agent.agent_core import tool_model_generation
     from agent_py_agent.cli import gateway_process
     from agent_py_agent.tests.test_gateway_model_call_shutdown_settlement import _cleanup_request
-    monkeypatch.setattr(tool_model_generation, "_MODEL_INTERRUPT_DRAIN_SECONDS", 5.0)
+    # 用户停止走取消宽限，不是墙钟超时宽限；保留Future未退出及真实claim未结清断言。
+    monkeypatch.setattr(tool_model_generation, "_MODEL_CANCEL_DRAIN_SECONDS", 5.0)
     ctx = _running(tmp_path, cooperative=False)
     try:
         request, _events = _cleanup_request(monkeypatch, [], ctx.agent)
@@ -120,7 +121,7 @@ def test_finished_future_does_not_hide_late_original_model_worker(tmp_path, monk
     from agent_py_agent.cli import gateway_process
     from agent_py_agent.tests.test_gateway_model_call_shutdown_settlement import _cleanup_request
 
-    monkeypatch.setattr(tool_model_generation, '_MODEL_INTERRUPT_DRAIN_SECONDS', 0)
+    monkeypatch.setattr(tool_model_generation, '_MODEL_CANCEL_DRAIN_SECONDS', 0)
     ctx = _running(tmp_path, cooperative=False)
     try:
         ctx.supervisor.shutdown()

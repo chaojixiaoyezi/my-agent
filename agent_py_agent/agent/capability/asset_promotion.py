@@ -166,9 +166,29 @@ def register_asset_locked(store, registry, *, kind, asset_id, asset, source, sha
 
 # LLM: 仅宿主调用；原Owner锁包住唯一registry登记，正文仍留原资产库，不接管用户文件。
 # 函数用途: 为S1与显式提炼登记同族来源，返回可复用的既有资产身份。
-def register_asset(store, **kwargs):
+def register_asset(
+    store,
+    *,
+    kind,
+    asset_id,
+    asset,
+    source,
+    sha256='',
+    state='candidate',
+    options=None,
+):
+    _ = options
     with store.state_lock():
-        registry, row = register_asset_locked(store, store.load_registry(), **kwargs)
+        registry, row = register_asset_locked(
+            store,
+            store.load_registry(),
+            kind=kind,
+            asset_id=asset_id,
+            asset=asset,
+            source=source,
+            sha256=sha256,
+            state=state,
+        )
         store.save_registry(registry)
     return row
 

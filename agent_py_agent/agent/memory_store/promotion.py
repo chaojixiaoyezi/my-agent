@@ -76,6 +76,8 @@ from .operations import normalized_memory_content
 # LLM: working_agreement 第 1 期起与事实/事件/项目同走唯一长期库（JSONL），不再写 AGENTS。
 _LONG_TERM_TARGET_TYPES = frozenset({"long_term_fact", "event", "project", "working_agreement"})
 _AUTOMATIC_PROMOTION: ContextVar[tuple[int, str] | None] = ContextVar("automatic_memory_promotion", default=None)
+# 默认补全可与批准合并写；公开补全口被显式覆盖时仍须沿其原契约执行。
+_DEFAULT_FILL_LONG_TERM_TARGET = CandidateService.fill_long_term_target
 
 # 写路径查重:表述变体(LCS 覆盖率)与长度差双闸,只合并"逐字近重复"的同一断言,
 # 绝不把不同事实(加信息/换词义)并掉——漏并多存一条,误并丢信息,后者更糟。
@@ -970,7 +972,7 @@ class MemoryPromotionService(_PromotionCommitMixin):
             return tuple(self.promote(row.candidate_id, automatic=True) for row in rows)
 
     # LLM: 来源/证据/权威先核；治理阻断登记原审核队列，不改变候选状态，正式写前仍锁内复核。
-    # 函数用途: 合并默认落点与自动批准的预提交写入；精确恢复旧提交，正式写前登记耐久治理责任。
+    # 函数用途: 准备默认落点与批准，兼容显式旧补全覆盖；精确恢复旧提交并登记治理责任。
     def _promote_snapshot(
         self,
         candidate_id: str,
@@ -1014,13 +1016,18 @@ class MemoryPromotionService(_PromotionCommitMixin):
             _register_condense_debt(self.long_term, self.candidates, self.coordinator_io)
         return _commit_promotion_result(self, candidate, reviewer, confirmed)
 
-    # LLM: 仅由已通过来源/证据/权威/安全门的自动分支调用；transition消费完整快照CAS，不复活拒绝或覆盖人工审核。
-    # 函数用途: 在同一次耐久批准中补齐默认目标，批准必须先于任何正式写入。
+    # LLM: 默认同次CAS补落点并批准；显式旧fill覆盖先消费其真实结果，不替它改写none，仍须完整快照CAS。
+    # 函数用途: 保留默认单次准备写盘及旧补全扩展合同，耐久批准必须先于正式写入。
     def _apply_automatic_policy(self, candidate: MemoryCandidate, reviewer: str) -> MemoryCandidate:
         if candidate.status != "pending_review":
             return candidate
+        target = _promotion_target(candidate)
+        fill = self.candidates.fill_long_term_target
+        if getattr(fill, "__func__", None) is not _DEFAULT_FILL_LONG_TERM_TARGET:
+            candidate = self._fill_default_target(candidate, reviewer)
+            target = candidate.promotion_target
         return self.candidates.transition(candidate, "approved", reviewer=reviewer,
-            review_note="owner_autonomous_v1：结构化权威与安全门通过。", promotion_target=_promotion_target(candidate))
+            review_note="owner_autonomous_v1：结构化权威与安全门通过。", promotion_target=target)
 
     # LLM: 与提交/恢复共用目标解析；持久补全使用完整快照CAS，不借用同状态transition空操作。
     # 函数用途: 为符合原默认政策的用户长期事实补上实际保存的落点。
@@ -1483,11 +1490,13 @@ def promotion_batch(*, long_term=None, candidates=None, coordinator_io: bool = F
                 _finish_condense_debts(batch.debts)
 
 
-# LLM: 标记只绑定候选仓库同一memory根内的正式文件；任意路径或跨owner别名不能借此获得condense权限。
-# 函数用途: 定位唯一pending_condense标记并返回可验证的相对正式路径。
+# LLM: 同根保持旧标记位置；独立协调根仅按已注入formal定位实际根，relative及formal身份校验不变，不丢旧欠账。
+# 函数用途: 保留原治理标记并支持候选仓库与正式库使用不同的选定根。
 def _condense_scope(memory, candidates) -> tuple[Path, str]:
     root = candidates.path.parent.resolve()
     formal = memory.path.resolve()
+    if not formal.is_relative_to(root):
+        root = formal.parent.parent if formal.parent.name == "long_term" else formal.parent
     relative = str(formal.relative_to(root))
     return root / "curator" / "pending_condense.json", relative
 

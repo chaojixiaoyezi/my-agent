@@ -1,4 +1,4 @@
-# LLM: 共用宿主完整准备与原Compact/CAS；宿主投影历史，公共层合并工具交接替换，不能重跑准备或建立持久状态。
+# LLM: 共用宿主完整准备与原Compact/CAS；额度耗尽不恢复业务模型重试，公共层仍不得重跑准备或建立持久状态。
 # 模块用途: 让三宿主复用一次准备与可容纳主前缀；必超容量的优化不延长旧历史驻留，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from ..conversation.compact_guard import (
     ConversationCompactError,
     compact_circuit_is_open,
     compact_exception_code,
+    is_provider_quota_failure,
     raise_if_compact_interrupted,
 )
 from ..conversation.compact_media_policy import configured_media_policy, media_token_reserve
@@ -332,7 +333,7 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
     return not recovery.source.messages and tool_source is None
 
 
-# LLM: 只供select异常分支；强制、结构/坏账/未知副作用错误和超窗永不降级；重建时传include_compact_summary=False避免与IR已应用摘要重复。
+# LLM: 只供select异常分支；额度已耗尽同样禁止降级业务调用，避免同一后端再烧一次；强制、结构错误和超窗仍拒绝。
 # 函数用途: 可选压缩失败但原请求仍装得下时，从原种子重建原生历史并恢复本轮冻结输入。
 def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
     from ..runtime_errors import DataCorruptionError
@@ -340,6 +341,7 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
 
     if (
         recovery.force
+        or is_provider_quota_failure(exc)
         or isinstance(exc, (*UNSETTLED_HOST_ERRORS, DataCorruptionError, TypeError, AttributeError, LookupError, ValueError, AssertionError))
         or compact_exception_code(exc) in {
             "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",

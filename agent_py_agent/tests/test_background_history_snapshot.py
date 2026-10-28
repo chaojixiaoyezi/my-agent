@@ -7,7 +7,10 @@ import pytest
 
 from agent_py_agent.agent.conversation import background_delivery as delivery_module
 from agent_py_agent.agent.conversation import background_execution as execution_module
-from agent_py_agent.agent.conversation.background_history import background_display_turn_from_row
+from agent_py_agent.agent.conversation.background_history import (
+    background_display_turn_from_row,
+    completed_display_snapshot,
+)
 from agent_py_agent.agent.conversation.background_transcript import (
     BackgroundTranscriptSink,
     read_background_transcript_events,
@@ -220,4 +223,12 @@ def test_background_invocation_snapshot_commits_only_with_canonical_final(tmp_pa
     assert committed.persisted is True
     assert committed.commit_kind == "canonical_record"
     final = store.messages.recent(thread.thread_id)[0]
-    assert background_display_turn_from_row(final) == snapshot
+    # canonical成功提交才增加冻结计时；全过程、原始快照和计时均须完整保留。
+    expected = completed_display_snapshot(snapshot, "completed")
+    assert background_display_turn_from_row(final) == expected
+    assert expected["events"][:-1] == snapshot["events"]
+    timing = expected["events"][-1]
+    assert timing["payload"]["source_kind"] == "turn_timing"
+    assert timing["payload"]["display"]["elapsed_seconds"] == snapshot["duration_s"]
+    assert timing["payload"]["display"]["completed_at"] == snapshot["completed_at"]
+    assert completed_display_snapshot(expected, "completed") == expected

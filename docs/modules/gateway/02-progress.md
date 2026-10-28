@@ -1,3 +1,7 @@
+## 2026-10-27 CI C8：后台历史与恢复回归修复（本地候选）
+
+恢复后台重工具按需展示、完成计时回放幂等，禁止额度失败后的业务降级重试；工作区切走记interrupted，真实继任才发布superseded边。诊断仍测真实缓存读数，测试按持久neutral期限执行，不修改退避和两处其他cluster所有文件。指定11文件1340通过/0失败/3项原嵌套沙箱能力跳过；未部署或作真实TUI/跨平台验收。根因、测试调整与准确证据见[TESTS](../../../TESTS.md)的CI C8小节。
+
 ## 2026-10-27 Wave 7 W1：Broker 身份解析、能力包目录、数据源声明门与工作流恢复收口
 
 - `gateway_parts/plugin_broker_api.py` 与 `plugin_host_broker_topics.py` 接入 `capability_packages.list` 与 `user_space.identity.resolve` 只读 Broker 主题（并在 `from_host_v2` 下复用原发行器鉴权），`adapter/feishu_profile.py` 拒绝同行的 `# ...` Markdown 标题或跨行吞入并兼容 macOS 系统临时目录符号链接前缀。

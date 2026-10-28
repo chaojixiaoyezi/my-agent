@@ -11,7 +11,7 @@ class GatewayWorkspaceScopeError(ValueError):
     error_code = "GATEWAY_WORKSPACE_INVALID"
 
 
-# LLM: 显式绑定的目录经统一安全检查；本地管理员普通模式可声明墙外项目，其他owner只允许自己的家。
+# LLM: 请求声明不授权限；绑定须经现存目录、owner隔离及WorkspaceOnly硬门，不能依靠客户端预检。
 # 函数用途: 校验客户端执行目录和根，拒绝危险根、控制面与跨owner路径，不改默认owner home语义。
 def gateway_request_workspace_scope(
     agent: object,
@@ -41,8 +41,8 @@ def gateway_request_workspace_scope(
     return str(cwd), tuple(str(path) for path in roots)
 
 
-# LLM: 远程config先拒绝；HomePaths管理员还须与显式config kind一致，空工具墙不授管理员，薄Host保留原身份硬门。
-# 函数用途: 核对真实用户身份和目录边界，防止旧HomePaths覆盖远程或普通身份配置。
+# LLM: 远程config先拒绝，管理员须同时符合HomePaths身份；非Full Access不能覆盖家外目录，仅同一Full Access宿主原构造根可包含私有Home。
+# 函数用途: 核对用户及目录边界；允许请求复用宿主原项目，不借客户端路径为其它数据根祖先授权。
 def _validate_owner_workspace(agent: object, roots: list[Path]) -> None:
     from ..conversation.workspace_context import validate_workspace_directory
     from ..user_space.owner_access import is_local_admin_owner
@@ -62,12 +62,19 @@ def _validate_owner_workspace(agent: object, roots: list[Path]) -> None:
         owner_text = getattr(getattr(agent, "tools", None), "owner_scope_root", "")
     if not owner_text:
         raise GatewayWorkspaceScopeError("缺少规范的owner home，不能绑定目录")
+    access = str(getattr(config, "access_mode", "") or "").strip().lower().replace("_", "-")
+    owner_root = Path(owner_text).expanduser().resolve(strict=False)
+    startup_root = getattr(agent, "root", None)
     try:
         for root in roots:
             validate_workspace_directory(root, owner_home=Path(owner_text), is_admin=is_admin,
-                home_root=getattr(home, "root", None))
+                home_root=getattr(home, "root", None), allow_home_ancestor=bool(
+                    is_admin and access == "full-access" and startup_root
+                    and root == Path(startup_root).expanduser().resolve(strict=False)))
     except ValueError as error:
         raise GatewayWorkspaceScopeError(str(error)) from error
+    if access in {"", "workspace-only"} and any(not path_is_within(root, owner_root) for root in roots):
+        raise GatewayWorkspaceScopeError("WorkspaceOnly 不能覆盖 owner home 之外的工作目录；请先开启 Full Access")
 
 
 

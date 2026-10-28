@@ -1,3 +1,9 @@
+## 2026-10-27 C2 v2：包页面归档模型视图
+
+`capability/package_output_projection.py` 在真实归档后只为普通外置的成功 `skill_search` 包页面保存读取器声明的有界JSON视图；`archive_tool_output_projection` 仅调用该适配器。宿主显式外置原因优先，硬余量或未来未知原因保留原投影，不能强制重内联。通用1200字符日志预览仍裁剪，原始工具JSON/envelope、完整归档、哈希、准入及取消不变。原reducer沿真实scoped_call_id保留独立恢复锚点，零预览仍能原样复制资源，不从预览重建source_ref。
+
+本地指定Python3.12组合已覆盖原生读取/归档恢复/原字节复制、原6项回执哈希及Wave7两套合同；真实模型、平台沙箱与部署不由替身native循环证明。具体证据和剩余平台跳过见根[TESTS](../../../TESTS.md) C2 v2节。
+
 ## Wave4 A5 软Compact线与硬输入窗口分离（分支已实现，待三方集成验收）
 
 `agent_core/tool_call_archive_record.py` 两个归档出口均按实际ToolCall的turn/call身份预留内联结果，强制外置只使用`model_request_input_ceiling`的真实硬输入余量；软触发继续由统一preflight判断。保留已有输出上限预留、配置阈值、开关、预览、未知窗口和预算错误回退，不从软线猜新的容量。

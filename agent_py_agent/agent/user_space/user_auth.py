@@ -243,7 +243,8 @@ def _im_password(root, uid):
                     raise ValueError("invalid password database")
         finally:
             os.close(parent)
-        return SessionLockStore(root / "session_lock/private_chat_locks.db", read_only=True).password_hash(uid)
+        with _SERVICE_LOCK:
+            return SessionLockStore(root / "session_lock/private_chat_locks.db", read_only=True).password_hash(uid)
     except FileNotFoundError:
         raise HostAPIError("PASSWORD_NOT_CONFIGURED", 401) from None
     except (OSError, ValueError, sqlite3.Error):

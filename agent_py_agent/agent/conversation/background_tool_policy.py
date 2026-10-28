@@ -1,4 +1,4 @@
-# LLM: 后台工具策略是无副作用的结构化计算；命令与会话工具复用统一工具组，owner/task 策略只收紧目录，不授予执行权限。
+# LLM: 后台工具策略是无副作用的结构化计算；初次展示折叠不撤销授权，owner/task 策略只收紧目录，不授予执行权限。
 # 模块用途: 按唤醒事实和策略计算续跑可见工具，保持终端操作可续接；修改时联合后台运行、快照和工具回归。
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ def background_allowed_tools(
     return list(background_tool_policy_decision(config, request=request).allowed_tools)
 
 
-# LLM: 初次展示取原授权闭包与显式运行上界交集；记忆/画像保留续跑可见，打包仍按结构化唤醒预载，不解析正文。
+# LLM: 初次展示取原授权闭包与显式运行上界交集；记忆/画像等重工具只按结构化唤醒预载，授权仍可按需发现，不解析正文。
 # 函数用途: 为后台首次模型请求选择所需工具，未展示的允许工具仍能按需发现。
 def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -> frozenset[str]:
     allowed = frozenset(background_allowed_tools(request=request))
@@ -197,7 +197,7 @@ def background_initially_presented_tools(request: BackgroundToolPolicyRequest) -
         allowed &= frozenset(request.allowed_tools)
     if "tool_search" not in allowed:
         return allowed
-    heavy = {"watch_stream", "schedule", "package_build", "package_install"}
+    heavy = {"watch_stream", "schedule", "package_build", "package_install", "remember", "update_persona"}
     wake = request.wake_signal if isinstance(request.wake_signal, dict) else {}
     targets = set(tool_names(wake.get("tool_names"))) | set(tool_names(wake.get("required_tools")))
     targets.update(tool_names(wake.get("tool_name")))

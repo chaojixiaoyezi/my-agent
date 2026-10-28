@@ -44,7 +44,8 @@ _PROCESS_START_TIME_CACHE: OrderedDict[tuple[int, str], str] = OrderedDict()
 _PROCESS_START_TIME_TTL: OrderedDict[int, tuple[float, str]] = OrderedDict()
 # 原直接读口也被 scoped_locks 用于接管授权，默认必须新观察；TTL 仅供显式只读观察作用域。
 _FRESH_PROCESS_OBSERVATION = ContextVar("fresh_process_observation", default=True)
-_PROCESS_START_CACHE_LIMIT = 512
+# 只读进程出生时间观察缓存最多保留的条数，不作为接管授权依据。
+_PROCESS_START_CACHE_MAX_ENTRIES = 512
 _PROCESS_START_CACHE_LOCK = threading.RLock()
 
 
@@ -143,11 +144,11 @@ def _darwin_start_time(pid: int) -> str | None:
         except ProcessLookupError:
             return None
         _PROCESS_START_TIME_CACHE[cache_key] = value
-        while len(_PROCESS_START_TIME_CACHE) > _PROCESS_START_CACHE_LIMIT:
+        while len(_PROCESS_START_TIME_CACHE) > _PROCESS_START_CACHE_MAX_ENTRIES:
             _PROCESS_START_TIME_CACHE.popitem(last=False)
     elif value:
         _PROCESS_START_TIME_TTL[pid] = (now, value)
-        while len(_PROCESS_START_TIME_TTL) > _PROCESS_START_CACHE_LIMIT:
+        while len(_PROCESS_START_TIME_TTL) > _PROCESS_START_CACHE_MAX_ENTRIES:
             _PROCESS_START_TIME_TTL.popitem(last=False)
     return value
 

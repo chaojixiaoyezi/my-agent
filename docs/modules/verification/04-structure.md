@@ -1,3 +1,9 @@
+## 2026-10-27 C2 v2包页面展示适配
+
+`archive_tool_output_projection` 完成真实外置、fail-safe checkpoint及日志预览裁剪后，调用 `capability.package_output_projection.preserve_package_page_view`。适配器只修改本次派生归档记录的 `live_prompt_output` / `preserve_prompt_output`，不修改producer信封或归档正文；仅普通外置、成功的原生包命名空间页面适用。存在 `output_externalized_reason` 时保持整个record不变，不覆盖硬余量或未来新增宿主约束；普通Skill与其他工具仍沿通用策略。
+
+`tool_context/reducer` 复用现有有界视图与原 `_inline_result_with_archive_anchor`，完整来源、正文预览及续页参数不再成为截断JSON。物理归档引用仍由原过滤器隐藏，逻辑归档引用与包continuation仍是不同恢复入口，不构成执行或访问授权。
+
 ## Wave4 A5 按模型turn结算内联结果结构
 
 `archive_tool_output_projection`与`archive_tool_call_record`向`_headroom_forces_externalize`传实际ToolCall。`_inline_headroom_remaining`以原run/request/attempt和ToolCall.turn_id（旧调用方回退当前模型turn）构造批次身份。`_committed_inline_call_ids`按canonical IR的AssistantTurn→ToolResult配对核对原ToolCall的turn/run/attempt，再委托既有请求私有memo的`reserve_inline_headroom`原子结算；不以旧turn裸call_id、预算数值、正文或metadata猜已提交状态。内存预留不进入归档state或持久账本。

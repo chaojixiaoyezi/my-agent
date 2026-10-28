@@ -75,7 +75,13 @@ def _fuse(world) -> tuple[str, int, str]:
     return goal.status, int(state.get("idle_slices", 0) or 0), str(state.get("reason_code") or "")
 
 
+# LLM: 使用原持久尝试账推进虚拟时钟；不清冷却、不改唤醒或Goal，仍严格验证一次真实空片。
+# 函数用途: 在唤醒实际可领取后运行下一片，兼容取消片保留的neutral退避。
 def _background_slice(world, now: float) -> None:
+    for wake in world.store.wakes.pending():
+        state, error = world.store.wakes.attempts.state_report(wake.wake_signal_id)
+        assert error is None
+        now = max(now, state.next_attempt_at + 1)
     batch = world.scheduler.tick(now=now)
     assert len(batch) == 1 and batch[0].tool_call_count == 0
 

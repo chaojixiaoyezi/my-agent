@@ -37,13 +37,16 @@ DERIVED_PRUNABLE_SOURCE_TYPES: frozenset[str] = frozenset({
     "subagent_runner_result", "subagent_run", "subagent_execution_context",
     "subagent_capability_route", "gateway_event", "gateway_request",
 })
+# 已结束派生记录可保留的秒数，不凭年龄删除未结责任或权威记录。
 DERIVED_RECORD_TTL_SECONDS: float = 30.0 * 86400.0
 _DERIVED_TERMINAL_STATUSES = frozenset({
     "done", "completed", "succeeded", "failed", "cancelled", "abandoned", "timeout",
     "timed_out", "channel_error", "stopped", "dead_lettered", "ok", "error", "taken_over",
 })
 _DERIVED_PENDING_FILES_KEY = "derived_prune_pending_files"
+# 每次派生文件清理最多检查的文件数量。
 _DERIVED_FILE_CLEANUP_MAX_FILES = 1000
+# 每批派生文件清理的字节预算，首个大文件仍按原策略处理以免永久饥饿。
 _DERIVED_FILE_CLEANUP_MAX_BYTES = 8 * 1024 * 1024
 
 
@@ -555,6 +558,16 @@ class _LocalStoreRecordLogger:
         return f"rec-{digest[:24]}"
 
 
+# LLM: 转发子代理投影的30天TTL判定，避免CLI层直接跨层导入subagents持久化实现。
+# 函数用途: 判断子代理任务投影是否已超过保留窗口。
+def _task_projection_expired(task: Any, now: float | None = None) -> bool:
+    from ..subagents.services.persistence.projections import (
+        _task_projection_expired as _impl,
+    )
+
+    return _impl(task, now=now)
+
+
 class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
     """LocalStore record write, lookup, and log APIs."""
 
@@ -564,14 +577,16 @@ class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):
         self, *, before: float | None = None, ttl_seconds: float = DERIVED_RECORD_TTL_SECONDS,
         source_types: Collection[str] | None = None, protected_record_ids: Collection[str] = (),
         protected_source_ids: Collection[str] = (), max_delete: int = 1000, dry_run: bool = False,
-        **retention_context: Any,
+        now: datetime | float | None = None, protected_refs: Collection[str] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """retention_context接受now(datetime/float)与protected_refs；后者缺省时只读收集当前owner的pins。"""
-        for key in retention_context:
-            if key not in {"now", "protected_refs"}:
-                raise TypeError(f"prune_derived_records() got an unexpected keyword argument {key!r}")
-        now = retention_context.get("now")
-        protected_refs = retention_context.get("protected_refs")
+        """支持显式now(datetime/float)与protected_refs；后者缺省时只读收集当前owner的pins。"""
+        if options:
+            for key in options:
+                if key not in {"now", "protected_refs"}:
+                    raise TypeError(f"prune_derived_records() got an unexpected keyword argument {key!r}")
+            now = options.get("now", now)
+            protected_refs = options.get("protected_refs", protected_refs)
         sources = DERIVED_PRUNABLE_SOURCE_TYPES if source_types is None else frozenset(source_types)
         if not sources <= DERIVED_PRUNABLE_SOURCE_TYPES:
             raise ValueError("derived pruning accepts only explicit derived source types")

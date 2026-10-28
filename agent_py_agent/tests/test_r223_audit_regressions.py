@@ -387,6 +387,8 @@ def test_web_cache_eviction_and_expiry_release_bodies(tmp_path, monkeypatch):
 
 
 def test_web_refresh_bypasses_only_local_cache(tmp_path, monkeypatch):
+    import socket
+
     from agent_py_agent.agent.tooling.web import WebFetchTool
     from agent_py_agent.agent.tooling.web_fetch_runtime import RawResponseParts
     tool = WebFetchTool(max_chars=1000, timeout=5, artifact_root=tmp_path)
@@ -395,6 +397,9 @@ def test_web_refresh_bypasses_only_local_cache(tmp_path, monkeypatch):
         calls.append(request)
         return RawResponseParts(200, {"Content-Type": "text/plain"}, b"hello", request.url)
     monkeypatch.setattr(tool, "_fetch_raw_request", fetch)
+    # 测试不联网；缓存命中仍跑真实网络策略，只为保留域名提供确定的公网DNS回答。
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs:
+                        [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443))])
     for refresh in (False, False, True):
         result = tool.execute({"url": "https://example.test", "refresh": refresh})
         assert result.ok

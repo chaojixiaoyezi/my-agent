@@ -190,6 +190,19 @@ def test_missing_process_identity_does_not_prove_exit(monkeypatch):
     assert module._process_instance_terminated(99999999, "original-birth") is False
 
 
+@pytest.mark.parametrize("status,error,expected", [(5, 0, True), (2, 0, False), (None, 3, None), (None, 1, None)])
+def test_native_zombie_probe_requires_an_observed_process_state(monkeypatch, status, error, expected):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.gateway_parts import multiprocess_native_host_observation as native
+    from agent_py_agent.agent.tooling import process_registry as module
+
+    monkeypatch.setattr(native.sys, "platform", "darwin")
+    monkeypatch.setattr(native, "_darwin_info",
+                        lambda pid: (None if status is None else SimpleNamespace(prefix=(0, status)), error))
+    assert module._native_kernel_terminated(12345) is expected
+
+
 @pytest.mark.parametrize("state,code,expected", [("Z+", 0, True), ("S", 0, False), ("Z", 1, False), ("", 0, False)])
 def test_posix_without_proc_uses_kernel_state_without_reaping(monkeypatch, state, code, expected):
     from agent_py_agent.agent.tooling import process_registry as module

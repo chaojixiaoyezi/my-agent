@@ -22,6 +22,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsp
 
 from ..common.json_io import locked_json_path
 from ..common.nofollow_fs import (
+    _supports_dir_fd,
     ensure_private_dir,
     list_names_beneath,
     open_directory_beneath,
@@ -29,7 +30,7 @@ from ..common.nofollow_fs import (
     read_text_beneath,
     write_text_atomic_beneath,
 )
-from . import safe_asset_id
+from . import _verify_directory_beneath, safe_asset_id
 
 
 # LLM: 时间仅作审计，不参与授权或CAS。
@@ -50,7 +51,7 @@ def _vault_key(owner_home, *, create=False):
     parts = ('data', 'datasource_secrets', '.vault_key')
     if create:
         ensure_private_dir(owner_home)
-        os.close(open_directory_beneath(owner_home, parts[:-1], create=True))
+        _verify_directory_beneath(owner_home, parts[:-1], create=True)
         with locked_json_path(owner_home.joinpath(*parts)):
             text = read_text_beneath(owner_home, parts)
             if text is None:
@@ -296,6 +297,15 @@ def database_path(path, owner_home, workspace_root=None, *, create_parent=False)
     if root is None or candidate == root:
         raise ValueError('DATASOURCE_PATH_OUTSIDE_SCOPE')
     parts = candidate.relative_to(root).parts
+    if not _supports_dir_fd():
+        parent_dir = _verify_directory_beneath(root, parts[:-1], create=create_parent)
+        try:
+            info = (parent_dir / parts[-1]).lstat()
+        except FileNotFoundError:
+            return candidate
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError('DATASOURCE_UNSAFE_DATABASE_PATH')
+        return candidate
     descriptor = open_directory_beneath(root, parts[:-1], create=create_parent)
     try:
         try:
@@ -510,7 +520,7 @@ class _DatasourceMigration:
         known_values = (*secret_values(self.resolve_secret(source.credential_ref)),
                         *secret_values(self.resolve_secret(target_spec.get('credential_ref', ''))))
         migration_id = safe_asset_id(target_spec.get('migration_id', 'migration-' + uuid.uuid4().hex))
-        os.close(open_directory_beneath(self.owner_home, ('data', 'datasource_migrations'), create=True))
+        _verify_directory_beneath(self.owner_home, ('data', 'datasource_migrations'), create=True)
         with locked_json_path(self.owner_home / 'data/datasource_migrations' / (migration_id + '.json')):
             if 'migration_id' in target_spec:
                 record = self._resume_migration(source_id, target_spec, workspace_root)
@@ -668,7 +678,7 @@ class DatasourceStore(_DatasourceMigration):
                 _capture_secret(secrets, key, value)
         root, parts = self._location(scope, workspace_root)
         ensure_private_dir(root)
-        os.close(open_directory_beneath(root, parts, create=True))
+        _verify_directory_beneath(root, parts, create=True)
         path = root.joinpath(*parts, spec.datasource_id + '.json')
         with locked_json_path(path):
             old = self._read(root, (*parts, spec.datasource_id + '.json'))

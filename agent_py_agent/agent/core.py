@@ -1001,8 +1001,8 @@ TOOL_DETAIL_MAX_CHARS = 4000
 TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 
-# LLM: ToolRegistry唯一装配入口；实例defer原样透传且不修改mcp_servers，B5 owner/凭据来源与原审批合同保持。
-# 函数用途: 按身份和工作区组合工具、内网配置、只读自身状态和来源声明，主子代理共用接线。
+# LLM: ToolRegistry唯一装配入口；原defer/owner/凭据/审批不变，动态内网名单缺agent.config时按空集关闭而非异常。
+# 函数用途: 按身份和工作区装配工具及动态内网配置，完整agent与显式配置装配宿主共用原接线。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_connect: bool = False) -> ToolRegistry:
     from functools import partial
 
@@ -1038,6 +1038,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             # full access 视图不生效，所以这里无条件给出。
             host_private_roots=owner_hidden_host_roots(
                 agent.home_paths, config, platform_hides_host_paths=sandbox_hides_host_paths()),
+            full_access_other_owner_homes=config.sandbox_full_access_other_owner_homes,
             host_credential_env_names=managed_secret_environment_names(config),
             owner_quota_max_bytes=(
                 max(0, int(getattr(agent.owner_policy, "max_disk_mb", 0))) * 1024 * 1024
@@ -1056,7 +1057,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             http_timeout=config.tool_http_timeout,
             gateway_port=config.gateway_port,
             allowed_private_hosts=tuple(getattr(config, "allowed_private_hosts", None) or ()),
-            allowed_private_hosts_provider=lambda: tuple(getattr(agent.config, "allowed_private_hosts", None) or ()),
+            allowed_private_hosts_provider=lambda: tuple(getattr(getattr(agent, "config", None), "allowed_private_hosts", None) or ()),
             catalog_limit=TOOL_CATALOG_LIMIT_COUNT,
             catalog_mode=config.tool_catalog_mode,
             catalog_categories=config.tool_catalog_categories,

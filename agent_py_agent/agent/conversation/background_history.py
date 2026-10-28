@@ -75,6 +75,22 @@ class BackgroundTurnHistory:
             }
 
 
+# LLM: 纯展示用耗时格式化，不改变业务状态；短于1秒的非零正耗时按1s显示。
+# 函数用途: 将秒数格式化为 h/m/s 短串供后台完成快照使用。
+def _format_completed_turn_timing(duration: float, ended: float) -> str:
+    from datetime import datetime
+
+    try:
+        ended_dt = datetime.fromtimestamp(ended).astimezone()
+    except (OverflowError, OSError, ValueError):
+        return ""
+    seconds = 1 if 0 < duration < 1 else max(0, int(round(duration)))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    dur_text = f"{hours}h {minutes}m {seconds}s" if hours else (f"{minutes}m {seconds}s" if minutes else f"{seconds}s")
+    return f"✻ Worked for {dur_text} · 完成于 {ended_dt:%Y-%m-%d %H:%M:%S %Z}"
+
+
 # LLM: 仅成功canonical提交调用；无冻结时间、未完快照或失败不生成成功块，不从当前时间补旧历史。
 # 函数用途: 将本工作片已冻结的计时幂等加入原显示快照，供实时轮询与磁盘回放共用。
 def completed_display_snapshot(snapshot: dict, end_reason: str) -> dict:
@@ -85,11 +101,9 @@ def completed_display_snapshot(snapshot: dict, end_reason: str) -> dict:
             or not request or type(duration) not in (int, float) or type(ended) not in (int, float)
             or not math.isfinite(duration) or duration < 0 or not math.isfinite(ended) or ended <= 0):
         return value
-    from ...cli.turn_completion import render_turn_timing
-
     display = {"logical_id": request, "status": "completed", "elapsed_seconds": duration,
                "completed_at": ended, "source": "host_monotonic"}
-    if not (text := render_turn_timing(display)):
+    if not (text := _format_completed_turn_timing(float(duration), float(ended))):
         return value
     event = {"request_id": request, "block_id": f"{request}:completion", "kind": "system_message", "phase": "completed",
              "payload": {"text": text, "source_kind": "turn_timing", "title": "回合完成", "display": display}}

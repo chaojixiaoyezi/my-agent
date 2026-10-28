@@ -495,25 +495,15 @@ def _disable_thinking_for(payload: dict[str, Any], *, api_base: str) -> None:
         payload["thinking"] = {"type": "disabled"}
 
 
-# LLM: Chat发送与投影共用规范键序；properties按同层required顺序优先，其余按名字排序，数组和值不变。
-# 函数用途: 消除输入字典插入顺序对wire缓存的影响；新建容器，命名参数和定义不被误认成schema关键字。
+# LLM: schema定义键稳定排序，properties参数名及数组保留插入顺序；不原地修改或启用新协议。
+# 函数用途: 规范工具定义并保留参数顺序，名为properties的参数或命名定义不污染递归上下文。
 def _stable_json_object_keys(value: Any, *, _parent_key: str = "") -> Any:
     if isinstance(value, dict):
         keys = list(value)
-        if all(isinstance(key, str) for key in keys):
+        if _parent_key != "properties" and all(isinstance(key, str) for key in keys):
             keys.sort()
         schema_map = _parent_key in {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas", "dependencies"}
-        normalized = {key: _stable_json_object_keys(value[key], _parent_key="" if schema_map else str(key)) for key in keys}
-        props = normalized.get("properties")
-        if not schema_map and isinstance(props, dict):
-            required = value.get("required", ())
-            required = required if isinstance(required, (list, tuple)) else ()
-            preferred = list(dict.fromkeys(key for key in required if isinstance(key, str) and key in props))
-            preferred_set = set(preferred)
-            # 子层已按名字排好；只移动必需参数，保留所有定义与required数组本身。
-            ordered = [*preferred, *(key for key in props if key not in preferred_set)]
-            normalized["properties"] = {key: props[key] for key in ordered}
-        return normalized
+        return {key: _stable_json_object_keys(value[key], _parent_key="" if schema_map else str(key)) for key in keys}
     if isinstance(value, list):
         return [_stable_json_object_keys(item) for item in value]
     return value

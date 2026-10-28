@@ -75,6 +75,8 @@ def test_missing_report_and_existing_recovery_summary_are_not_a_result(tmp_path)
     assert row["readiness"] == "done_without_refs"
 
 
+# LLM: 生产者预览按节点广度保留首ref；正式reducer的既有领域摘要从同一全文取状态/完整refs，不要求两种投影逐字同形。
+# 函数用途: 锁住长树有界预览、领域摘要的真实引用与遗漏计数，以及唯一逻辑归档锚点。
 def test_large_model_status_uses_bounded_valid_preview_and_exact_archive_ref():
     snapshot = _snapshot([
         {"run_id": f"child-{i}", "parent_run_id": "parent", "status": "RUNNING",
@@ -101,7 +103,16 @@ def test_large_model_status_uses_bounded_valid_preview_and_exact_archive_ref():
         _result("list_agents", True, outcome.output, result_envelope=outcome.result_envelope),
         {"output_externalized": True, "artifact_ref": "/private/blob.json", "scoped_call_id": "parent:call-1"},
     )
-    assert preview_text in rendered
+    summary = next(json.loads(line) for line in rendered.splitlines() if line.startswith('{'))
+    assert summary['count'] == len(full['nodes'])
+    assert summary['agents']
+    for row, source in zip(summary['agents'], full['nodes'], strict=False):
+        assert row['id'] == source['run_id']
+        assert row['status'] == source['status']
+        assert row['read_order'] == source['read_order']
+    assert summary['omitted_agents'] == len(full['nodes']) - len(summary['agents'])
+    assert summary['output_artifact_ref'] == 'parent:call-1'
+    assert len(json.dumps(summary, ensure_ascii=False)) < 8000
     assert '"artifact_ref": "parent:call-1"' in rendered
     assert "/private/blob.json" not in rendered
     assert "output_preview:" not in rendered

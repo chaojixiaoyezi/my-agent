@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from functools import lru_cache
 
 from ..plugin_host.errors import HostAPIError
-from ..plugin_host.owner_context import validate_local_user_id
 from ..plugin_host.schemas import (
     canonical_json,
     closed,
@@ -16,6 +15,7 @@ from ..plugin_host.schemas import (
     quota_schema,
     strict_json,
     text,
+    validate_local_user_id,
     validate_object,
 )
 from ..plugin_manifest_host_v9 import host_capabilities
@@ -41,7 +41,7 @@ def execution_schema() -> dict:
 # LLM: 能力枚举动态取唯一host_capabilities（含assets.read/users.read）；批准不免除public管理员和目标名单复验。
 # 函数用途: 返回确认预览中可选择的API授权字段。
 def selection_schema() -> dict:
-    ids = _list_schema(text(32, 1, r"^(\*|[a-z0-9][a-z0-9_-]{1,31})$"))
+    ids = _list_schema(text(64, 1, r"^(\*|[a-z0-9][a-z0-9_-]{1,63})$"))
     resource = closed({"created_by_installation": {"type": "boolean"},
                        "explicit_ids": _list_schema(text(128, 1, r"^[A-Za-z0-9_.:-]+$"))})
     return closed({"approved_capabilities": _list_schema({"enum": sorted(host_capabilities())}, 1),

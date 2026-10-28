@@ -57,6 +57,9 @@ _TEST_PROCESS_ENTRIES_LOCK = threading.RLock()
 _TEST_PROCESS_SUITE_CLOSING = False
 _TESTS_SOURCE_ROOT = Path(__file__).resolve().parent
 _UNCONFIRMED_PROCESS_REAPS: list[dict[str, Any]] = []
+_RESOLVED_ALIAS_FILE_BOUNDS: dict[str, tuple[bool, bool]] = {}
+_CLEAN_ALIAS_MODULES: dict[int, dict[str, tuple[int, int]]] = {}
+_KNOWN_ALIAS_MODULES: dict[int, dict[int, tuple[str, Any]]] = {}
 
 
 # LLM: 只复制创建时 host/child 出生与执行身份；重复通知不重绑已知实例，读状态和出生探针不产生清理权限。
@@ -178,13 +181,40 @@ def _install_test_process_capture(state, nodeid: str) -> None:
 # LLM: 包名、test 模块名或测试目录仅限定观察范围；替换仍须当前属性与原函数对象精确相同。
 # 函数用途: 覆盖提前导入的包内与顶层测试别名，记录条件撤销需要的精确后像。
 def _patch_test_launch_aliases(state, original, start) -> None:
+    orig_id = id(original)
+    known = _KNOWN_ALIAS_MODULES.setdefault(orig_id, {})
+    for mod_id, (name, loaded) in list(known.items()):
+        if sys.modules.get(name) is loaded:
+            _patch_one_alias_module(state, name, loaded, original, start, known)
     for name, loaded in list(sys.modules.items()):
-        if loaded is None or not _is_test_launch_alias_module(name, loaded):
+        if loaded is None:
             continue
-        for attr, value in list(vars(loaded).items()):
-            if value is original and getattr(loaded, attr, None) is original:
-                state.patch.setattr(loaded, attr, start)
-                state.installed[(id(loaded), attr)] = start
+        mod_id = id(loaded)
+        mod_dict = getattr(loaded, "__dict__", None)
+        if not isinstance(mod_dict, dict):
+            continue
+        if mod_id not in known and not any(val is original or val is start for val in mod_dict.values()):
+            continue
+        _patch_one_alias_module(state, name, loaded, original, start, known)
+
+
+# LLM: 单个模块的启动别名扫描与替换；命中过原函数或当前包装器的模块纳入常驻复查集合。
+# 函数用途: 检查并替换单个模块内指向 original 的属性，返回该模块是否持有启动别名。
+def _patch_one_alias_module(state, name, loaded, original, start, known) -> bool:
+    if not _is_test_launch_alias_module(name, loaded):
+        return False
+    found = False
+    mod_id = id(loaded)
+    for attr, value in list(vars(loaded).items()):
+        if value is original and getattr(loaded, attr, None) is original:
+            state.patch.setattr(loaded, attr, start)
+            state.installed[(mod_id, attr)] = start
+            found = True
+        elif value is start:
+            found = True
+    if found:
+        known[mod_id] = (name, loaded)
+    return found
 
 
 # LLM: 无文件时接受显式合成测试名；有文件的包别名必须来自本仓库，不能凭 tests/agent 前缀触及第三方。
@@ -198,12 +228,19 @@ def _is_test_launch_alias_module(name, module) -> bool:
         return False
     if name == "conftest" or name.startswith("test_") or name.endswith("_test"):
         return True
-    try:
-        source = Path(filename).resolve()
-        return source.is_relative_to(_TESTS_SOURCE_ROOT) or (
-            name.startswith(("agent_py_agent.", "agent.")) and source.is_relative_to(_TESTS_SOURCE_ROOT.parent))
-    except (OSError, RuntimeError, ValueError):
-        return False
+    bounds = _RESOLVED_ALIAS_FILE_BOUNDS.get(filename)
+    if bounds is None:
+        try:
+            source = Path(filename).resolve()
+            bounds = (
+                source.is_relative_to(_TESTS_SOURCE_ROOT),
+                source.is_relative_to(_TESTS_SOURCE_ROOT.parent),
+            )
+        except (OSError, RuntimeError, ValueError):
+            bounds = (False, False)
+        if len(_RESOLVED_ALIAS_FILE_BOUNDS) < 32768:
+            _RESOLVED_ALIAS_FILE_BOUNDS[filename] = bounds
+    return bounds[0] or (name.startswith(("agent_py_agent.", "agent.")) and bounds[1])
 
 
 # LLM: 只复用本次安装时冻结的原函数身份，不包装 fixture 后写的 fake，不改变 owner 或恢复栈。

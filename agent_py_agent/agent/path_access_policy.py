@@ -832,12 +832,13 @@ class HostSandboxPaths:
     directory_unlink_patterns: tuple[str, ...] = ()
 
 
-# LLM: Linux/通用调用保留完整具体路径；Darwin无owner时改用规范布局正则，覆盖未来owner且不枚举目录。
-#   已知owner仍仅投影本owner。Python H2/H3、Linux挂载和人格来源的独立复核不依赖此压缩结果。
-# 函数用途: 按平台生成保护集合，避免Seatbelt随历史owner数量膨胀，不缓存权限或目录。
-def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, system: str | None = None) -> HostSandboxPaths:
+# LLM: 默认每次只枚举一次owner并复用全部字段；仅显式compact的Darwin全owner投影免枚举，不能缓存权限或目录。
+#   生产shell保留具体路径合同，最终Seatbelt编译器再压缩；已知owner不枚举他人，Linux挂载保持具体覆盖。
+# 函数用途: 返回本次新鲜路径快照，或调用方明确选择的Darwin固定拒绝投影。
+def host_sandbox_paths(agent_home_root: Path, owner_home: Path | None = None, system: str | None = None,
+                       *, compact: bool = False) -> HostSandboxPaths:
     mac = (system or platform.system()).casefold() == "darwin"
-    if mac and owner_home is None:
+    if compact and mac and owner_home is None:
         return _macos_all_owner_paths(agent_home_root)
     homes = (owner_home,) if owner_home is not None else _existing_owner_homes(agent_home_root)
     return HostSandboxPaths(

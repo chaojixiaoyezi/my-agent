@@ -1,3 +1,9 @@
+## 2026-10-27 CI 全绿收敛：候选兼容读取、晋升补全与大索引流式过滤结构
+
+- `memory_store/_candidate_read_compat.py` 与 `candidates.py`：封装未覆盖 `_load_unlocked` 时的五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离。
+- `memory_store/promotion.py`：`_apply_automatic_policy` 在 `fill_long_term_target` 被显式覆盖时先调用 `_fill_default_target`，`_condense_scope` 锚定已注入正式库的实际 `memory` 根；`jsonl.py` 在同线程重入写锁下保持原错误类型上抛。
+- `memory_archive/artifact/reader.py`：对超过 `_INDEX_PARSE_CACHE_MAX_BYTES` 的超大 `index.jsonl` 采用单遍有界流式过滤，避免全量解析行驻留内存。
+
 ## 2026-10-26 消息级禁学跳过游标推进、访问事件冲刷锁序与直连会话 pin 发现结构
 
 - `memory_store/curator_inputs.py::CuratorInputBatch` 新增 `skipped_message_cursors: dict[str, str]`，由 `_collect_messages` 在跨过 `learning_excluded=True` 消息时记录最新已扫描 `message_id`；`curator_validation.py::_advance_message_cursors` 合并跳过游标与提取批尾游标；`curator_routing.py::route_batch` 将跳过游标挂入默认组，并由 `curator.py::_prepare_outputs` 在纯跳过批次上执行无模型调用的游标推进提交。

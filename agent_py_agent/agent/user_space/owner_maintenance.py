@@ -34,9 +34,18 @@ _DEFAULT_INTERVAL_SECONDS = 86_400
 # LLM: 只登记本owner使用<数据扩展名>.lock协议的私有目录；不递归、不包含local_users/operations或逻辑锁目录。
 # 函数用途: 列出owner维护可回收伴生锁的固定目录，不创建目录。
 def owner_lock_sidecar_dirs(home: MyAgentHomePaths) -> tuple[Path, ...]:
-    return (home.owner_memory_dir, home.owner_memory_daily_dir, home.owner_memory_curator_runs_dir,
-        home.owner_compact_dir, home.owner_cache_dir, home.owner_tmp_dir, home.owner_scheduler_dir,
-        *(home.owner_data_dir / name for name in ("decision", "context", "skill_learning", "skill_proposals")))
+    root = home.owner_home_dir
+    data_dir = getattr(home, "owner_data_dir", None) or (root / "data")
+    return (
+        getattr(home, "owner_memory_dir", None) or (root / "memory"),
+        getattr(home, "owner_memory_daily_dir", None) or (root / "memory" / "daily"),
+        getattr(home, "owner_memory_curator_runs_dir", None) or (root / "memory" / "curator" / "runs"),
+        getattr(home, "owner_compact_dir", None) or (root / "compact"),
+        getattr(home, "owner_cache_dir", None) or (root / "cache"),
+        getattr(home, "owner_tmp_dir", None) or (root / "tmp"),
+        getattr(home, "owner_scheduler_dir", None) or (root / "scheduler"),
+        *(data_dir / name for name in ("decision", "context", "skill_learning", "skill_proposals")),
+    )
 
 
 # LLM: 从可信owner根逐段nofollow固定已登记目录FD；通用清扫器全程dirfd并排除逻辑锁，原transition逐文件核权。
@@ -244,9 +253,9 @@ def _prune_derived_store(db_path: Path, *, now: datetime, protected_refs=None, c
         return {"executed": False, "reason": "error", "error_type": type(exc).__name__, "side_effects_unknown": True}
 
 
-# LLM: 只扫三个固定库名及workspace根下一层；父目录/DB/files链接拒绝，不创建或递归任意路径。
-# 函数用途: 共用单进程和transition维护的全部既存LocalStore数据库发现。
-def _local_store_database_paths(home: Path) -> tuple[list[Path], list[dict[str, str]]]:
+# LLM: 三个固定库名与workspace一层只发现一次；事件维护显式包含JSONL-only的local.db候选，坏来源只报告一次。
+# 函数用途: 共用LocalStore数据库与事件发现；默认不建库，事件恢复仍拒绝链接及特殊文件。
+def _local_store_database_paths(home: Path, *, include_event_files: bool = False) -> tuple[list[Path], list[dict[str, str]]]:
     candidates = [home / name for name in ("data/local_store.sqlite3", "data/local_store/local.db", "local_store/local.db")]
     workspaces = home / "workspace" / "runtime" / "workspaces"
     result, errors = [], []
@@ -257,12 +266,27 @@ def _local_store_database_paths(home: Path) -> tuple[list[Path], list[dict[str, 
         errors.append({"source": "workspace_scan", "error_type": type(exc).__name__})
     for path in dict.fromkeys(candidates):
         try:
-            if (_real_owner_directory(home, path.parent) and not path.is_symlink() and path.is_file()
-                    and not (path.parent / "files").is_symlink()):
+            if _local_store_candidate_exists(home, path, include_event_files=include_event_files):
                 result.append(path)
         except OSError as exc:
             errors.append({"source": str(path.relative_to(home)), "error_type": type(exc).__name__})
     return result, errors
+
+
+# LLM: 不做扫描、不跟随父目录/叶/files链接；JSONL-only只归固定local.db候选，不能给legacy sqlite3误建新库。
+# 函数用途: 核对同一候选数据库或可恢复事件文件是否真实存在；IO故障由调用者准确记一次。
+def _local_store_candidate_exists(home: Path, path: Path, *, include_event_files: bool) -> bool:
+    if (not _real_owner_directory(home, path.parent) or path.is_symlink()
+            or (path.parent / "files").is_symlink()):
+        return False
+    if include_event_files:
+        event_path = path.parent / "events.jsonl"
+        if event_path.is_symlink() or (event_path.exists() and not event_path.is_file()):
+            return False
+        if path.exists() and not path.is_file():
+            return False
+        return path.is_file() or (path.name == "local.db" and event_path.is_file())
+    return path.is_file()
 
 
 # LLM: 冷owner不建runtime库；原cleanup在transition中执行，四类执行未知原抛，其余故障分列不遮住retention。
@@ -452,16 +476,13 @@ def _backfill_hung_runs(home: MyAgentHomePaths, *, now: float, commit_transition
         return {"executed": False, "reason": "error", "error_type": type(exc).__name__}
 
 
-# LLM: 共用本owner全部既存DB发现，保留JSONL-only事件恢复；每库一批，普通故障隔离，四类未知原抛。
+# LLM: 共用本owner单次候选发现，不再重复扫描同一workspace/DB；保留JSONL-only恢复和每库一批，四类未知原抛。
 #   executed=False表示没有完整返回成功，非未写入证明；异常后的副作用未知及不完整计数须单列。
 #   Home当前没有owner_local_store_dir字段，真实默认库由runtime_paths放在workspace/runtime/workspaces/*/local_store。
 # 函数用途: 在原owner后台周期裁剪既有事件库，把执行或跳过事实交给同一maintenance.json。
 def _maintain_local_store_events(home: MyAgentHomePaths, *, now: float, commit_transition=None) -> dict[str, Any]:
     try:
-        directories, discovery_errors = _local_event_store_directories(home)
-        databases, errors = _local_store_database_paths(home.owner_home_dir)
-        discovery_errors.extend(errors)
-        databases = list(dict.fromkeys([*databases, *(directory / "local.db" for directory in directories)]))
+        databases, discovery_errors = _local_store_database_paths(home.owner_home_dir, include_event_files=True)
         if not databases:
             if discovery_errors:
                 return {"executed": False, "reason": "error", "counts_complete": False,
@@ -513,32 +534,6 @@ def _maintain_event_store(directory: Path, *, now: float, commit_transition=None
     except Exception as exc:
         return {"executed": False, "reason": "error", "error_type": type(exc).__name__,
                 "side_effects_unknown": True, "counts_complete": False}
-
-
-# LLM: 仅扫描固定workspace根直接子目录，IO错误单列后继续其它来源；双文件缺失不建库，拒符号链接/特殊文件。
-# 函数用途: 找到本owner已经初始化的兼容data库及规范workspace事件库。
-def _local_event_store_directories(home: MyAgentHomePaths) -> tuple[list[Path], list[dict[str, str]]]:
-    candidates = [Path(getattr(home, "owner_local_store_dir", home.owner_data_dir / "local_store"))]
-    workspaces = home.owner_workspace_dir / "runtime" / "workspaces"
-    errors = []
-    try:
-        if _real_owner_directory(home, workspaces):
-            candidates.extend(path / "local_store" for path in sorted(workspaces.iterdir()))
-    except OSError as exc:
-        errors.append({"source": "workspace_scan", "error_type": type(exc).__name__})
-    result = []
-    for directory in dict.fromkeys(candidates):
-        try:
-            if not _real_owner_directory(home, directory) or (directory / "files").is_symlink():
-                continue
-            files = (directory / "local.db", directory / "events.jsonl")
-            if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in files):
-                continue
-            if any(path.is_file() for path in files):
-                result.append(directory)
-        except OSError as exc:
-            errors.append({"source": str(directory.relative_to(home.owner_home_dir)), "error_type": type(exc).__name__})
-    return result, errors
 
 
 # LLM: Home为可信根，候选必须在同一owner内且每级都是真实目录；不跟随符号链接到别的owner或任意外置库。

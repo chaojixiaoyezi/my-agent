@@ -244,10 +244,19 @@ class _BotToolRegistry(ToolRegistry):
 
     # LLM: 原executor继续审批/落账；exact读取上界覆盖shared例外，现有pre_handler先行，只在handler前消耗额度。
     # 函数用途: 强制同一workspace目录墙和可写范围，再执行本请求的Bot预算门。
-    def execute_tool(self, call, **kwargs):
+    def execute_tool(
+        self, call, *, write_boundary=None, runtime_snapshot=None, trusted_run_context=None,
+        cancellation_token=None, required_action=None, pre_handler_gate=None, output_archiver=None, options=None,
+    ):
         from ..tooling.models import ToolFailureStage, apply_tool_execution_facts
 
-        parent_gate = kwargs.get("pre_handler_gate")
+        call_kwargs = {
+            "write_boundary": write_boundary, "runtime_snapshot": runtime_snapshot,
+            "trusted_run_context": trusted_run_context, "cancellation_token": cancellation_token,
+            "required_action": required_action, "pre_handler_gate": pre_handler_gate,
+            "output_archiver": output_archiver, **(options or {}),
+        }
+        parent_gate = call_kwargs.get("pre_handler_gate")
 
         # LLM: 该宿主闭包不进入模型参数；原拒绝优先，避免审批或原运行门拒绝时误扣预算。
         # 函数用途: 把Bot预算并入唯一原工具执行缝隙。
@@ -261,12 +270,12 @@ class _BotToolRegistry(ToolRegistry):
 
         root = str(self.workspace_root)
         readonly = self._bot_guard.policy["bot_mode"] == "query_readonly"
-        kwargs["write_boundary"] = {**(kwargs.get("write_boundary") or {}), "execution_cwd": root,
+        call_kwargs["write_boundary"] = {**(call_kwargs.get("write_boundary") or {}), "execution_cwd": root,
             "runtime_workspace_roots": [root], "effective_owner_scope_root": root,
             "read_scope_mode": "exact", "allowed_read_roots": [root],
             "allowed_write_roots": [] if readonly else [root]}
-        kwargs["pre_handler_gate"] = gate
-        return super().execute_tool(call, **kwargs)
+        call_kwargs["pre_handler_gate"] = gate
+        return super().execute_tool(call, **call_kwargs)
 
 
 # LLM: 使用原ModelScopedAttribute/ContextVar绑定，保留本次全部模型依赖；成功/异常均恢复，不替换共享Agent属性。

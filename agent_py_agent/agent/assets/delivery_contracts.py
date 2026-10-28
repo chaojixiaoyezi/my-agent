@@ -36,17 +36,47 @@ class DeliverySendOptions:
             raise TypeError('发送参数重复赋值')
         return cls(**values, **options)
 
+    # LLM: 汇合显式命名参数与可选options字典/序列，不隐式放宽管理员预置与布尔校验。
+    # 函数用途: 为send_bundle显式参数签名构造冻结发送选项。
+    @classmethod
+    def resolve(cls, note='', *, include_dependencies=True, allow_secret_placeholder_replace=False,
+                auto_accept=False, auto_enable=False, sender_role='user', options=None):
+        call_opts = {'note': note, 'include_dependencies': include_dependencies,
+                     'allow_secret_placeholder_replace': allow_secret_placeholder_replace,
+                     'auto_accept': auto_accept, 'auto_enable': auto_enable, 'sender_role': sender_role}
+        if options is not None:
+            call_opts.update(options if isinstance(options, dict) else cls.from_call(options, {}).__dict__)
+        return cls.from_call((), call_opts)
+
 
 # LLM: error_code及details是唯一机器读口；调用方只传已脱敏说明或安全ID，不得放入原始文件、令牌或异常正文。
 # 类用途: 给投递和运行禁用门提供可统一转换成工具回执的错误。
 class AssetDeliveryError(ValueError):
     # LLM: 不读写文件、不根据文案分类；缺依赖诊断同时保留属性及details，工具必须完整传递安全字段。
     # 函数用途: 保存机器错误码和结构化诊断，避免缺依赖引用在跨层转换时丢失。
-    def __init__(self, error_code: str, message: str = '资产操作未完成', **details):
+    def __init__(
+        self,
+        error_code: str,
+        message: str = '资产操作未完成',
+        *,
+        missing_refs: object = None,
+        redacted_matches: object = None,
+        asset_kind: str | None = None,
+        asset_id: str | None = None,
+        options: dict | None = None,
+    ):
         self.error_code = error_code
-        self.details = details
-        if 'missing_refs' in details:
-            self.missing_refs = self.details['missing_refs'] = list(details['missing_refs'])
+        self.details = dict(options or {})
+        for key, val in (
+            ('missing_refs', missing_refs),
+            ('redacted_matches', redacted_matches),
+            ('asset_kind', asset_kind),
+            ('asset_id', asset_id),
+        ):
+            if val is not None:
+                self.details[key] = list(val) if key == 'missing_refs' else val
+        if 'missing_refs' in self.details:
+            self.missing_refs = self.details['missing_refs'] = list(self.details['missing_refs'])
         super().__init__(message)
 
     # LLM: 仅返回显式错误字段，不包含异常链或调用栈中的秘密。

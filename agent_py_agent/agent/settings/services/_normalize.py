@@ -254,7 +254,10 @@ class GatewayFieldsService:
         ("input_media_max_files", 1, None),
         ("input_image_max_pixels", 1, None),
     )
-    _FLOAT_FIELD_SPECS = (("owner_agent_idle_seconds", 0.0, None),)
+    _FLOAT_FIELD_SPECS = (
+        ("owner_agent_idle_seconds", 0.0, None),
+        ("background_idle_owner_max_backoff_seconds", 0.0, None),
+    )
 
     # LLM: 纯计算，不启动服务；部署数量只接严格非bool整数，其它字段沿原告警与默认合同。
     # 函数用途: 校验宿主拓扑后归一原Gateway参数。
@@ -497,6 +500,8 @@ def _normalize_background_tool_fields(out: dict[str, object], defaults: object) 
     return []
 
 
+# LLM: 仅接受声明枚举；归一不授予owner跨墙权限，非法其他owner视图告警后回安全默认。
+# 函数用途: 归一路径模式、危险根和Full Access下其他owner的只读/隐藏策略。
 def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> list[str]:
     raw_mode = out.get("path_access_mode", defaults.path_access_mode)
     mode = normalize_path_access_mode(raw_mode)
@@ -508,6 +513,8 @@ def _normalize_path_access_fields(out: dict[str, object], defaults: object) -> l
     out["path_access_mode"] = mode
     roots = _normalize_string_list(out.get("path_dangerous_roots", defaults.path_dangerous_roots))
     out["path_dangerous_roots"] = roots or list(defaults.path_dangerous_roots)
+    warnings.extend(_apply_choice_field(
+        out, defaults, "sandbox_full_access_other_owner_homes", ("read_only", "isolate")))
     return warnings
 
 

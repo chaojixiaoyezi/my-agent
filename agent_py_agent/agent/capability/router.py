@@ -96,7 +96,8 @@ _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS = """### 能力包使用规则
 - 边界：目录匹配和正文读取不增加工具、路径或网络权限。不可读时如实说明并继续可做部分；原任务失效包不能自动换用同名新版，也不能把缺失的核验说成通过。"""
 
 _SKILL_METADATA_HEADER = ["# Available Skills", "下列是本轮可用 Skill 的 name + description + stable skill_id。普通问答没有匹配项时无需调用。"]
-_SELECTED_SKILL_HEADER = ["# Selected Skills", "以下仅是本工作片展示的方法名卡；使用前仍须按卡片入口显式读取正文。"]
+_SELECTED_SKILL_HEADER = ["# Selected Skills", "以下仅是本工作片展示的 Skill 名卡；使用前仍须 skill_search(action=get) 读取正文。"]
+_SELECTED_METHOD_HEADER = ["# Selected Skills", "以下仅是本工作片展示的方法名卡；使用前仍须按卡片入口显式读取正文。"]
 _PACKAGE_METADATA_HEADER = ["# 能力包", "下列只展示包摘要；用 skill_search(action=get, package_id=包ID) 读取入口，再在该包内选择资源。"]
 _IN_USE_PACKAGE_GUIDANCE = "接着做同类的事，继续照在用包的方法和你走到的那一步；不相关的事照常处理。"
 
@@ -256,7 +257,7 @@ class CapabilityRouter:
         return "\n".join(lines)
 
     # LLM: 在用身份只与当前授权卡相交，按冻结的首次使用顺序优先显示；required 复用原必显，不扩权。
-    #   公开 Skill 的原格式由 _render_public_skill_metadata 保持；联测目录字节、快照与提示投影。
+    #   纯Skill选择保持冻结标题字节；脚本/流程才用方法标题，预算也按同一标题计费。
     # 函数用途: 渲染Skill及选中脚本/流程短卡；共用原预算，不改变快照或授权，也不读取或执行正文。
     def render_skill_metadata_index(
         self, *, context_window_tokens: int | None = None,
@@ -299,7 +300,7 @@ class CapabilityRouter:
         minimum_text = _minimum_metadata_index(skills, packages, total_budget, selected_skill_ids, required_skill_ids, unavailable_text)
         package_limit = max(1, budget.limit // 2) if skills else budget.limit
         if skills and packages:
-            skill_fixed = [*_SELECTED_SKILL_HEADER] if selected_skill_ids is not None else [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS]
+            skill_fixed = _selected_metadata_header(skills) if selected_skill_ids is not None else [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS]
             package_fixed = [*_PACKAGE_METADATA_HEADER, _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS]
             if any(card.metadata.get("conversation_in_use") for card in packages):
                 package_fixed.append(_IN_USE_PACKAGE_GUIDANCE)
@@ -663,7 +664,7 @@ class _SkillMetadataBudget:
         return len(text)
 
 
-# LLM: 12k硬字符信封只在此复核；必要时按字符预算重渲染，省略提示/用法仍由原渲染器提供，不切断身份。
+# LLM: 12k硬信封按当前Skill/方法标题同口径复核；必要时按字符预算重渲染，不切断身份。
 # 函数用途: 为公开、选择及能力包混合目录共用一个最终字符限额入口。
 def _enforce_skill_catalog_envelope(text, skills, packages, unavailable_text, selected_skill_ids, required_skill_ids):
     if len(text) <= _MAX_SKILL_METADATA_ENVELOPE_CHARS:
@@ -675,7 +676,7 @@ def _enforce_skill_catalog_envelope(text, skills, packages, unavailable_text, se
     )
     pkg_limit = max(1, char_budget.limit // 2) if skills else char_budget.limit
     if skills and packages:
-        skill_fixed = [*_SELECTED_SKILL_HEADER] if selected_skill_ids is not None else [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS]
+        skill_fixed = _selected_metadata_header(skills) if selected_skill_ids is not None else [*_SKILL_METADATA_HEADER, _SKILL_USAGE_INSTRUCTIONS]
         package_fixed = [*_PACKAGE_METADATA_HEADER, _CAPABILITY_PACKAGE_USAGE_INSTRUCTIONS]
         if any(card.metadata.get("conversation_in_use") for card in packages):
             package_fixed.append(_IN_USE_PACKAGE_GUIDANCE)
@@ -729,16 +730,23 @@ def _render_public_skill_lines(skills: list, budget: _SkillMetadataBudget, requi
     return [*first, *rest], omitted, first_short or rest_short
 
 
-# LLM: ID 仅匹配原 stable_id，不接受名称别名；required 也必须处于授权卡内，预算不足只省略可选项。
+# LLM: 纯Skill与混合方法的标题分别保持原合同，不读取正文；调用方须先与授权卡相交。
+# 函数用途: 选择准确读取指引供渲染和预算共用。
+def _selected_metadata_header(cards):
+    return _SELECTED_METHOD_HEADER if any(card.kind in {'script', 'workflow'} for card in cards) else _SELECTED_SKILL_HEADER
+
+
+# LLM: ID仅匹配原stable_id；选中原生方法使用准确标题；required仍须授权，预算不足只省略可选项。
 # 函数用途: 在当前名卡中渲染宿主选择和必要引用，准确报告省略数，完整检索目录保持原样。
 def _render_selected_skill_metadata(skills, budget, selected_skill_ids, required_skill_ids) -> str:
     selected = set(selected_skill_ids)
     required = set(required_skill_ids)
     mandatory = [card for card in skills if card.metadata.get("stable_id") in required]
     optional = [card for card in skills if card.metadata.get("stable_id") in selected - required]
+    header = _selected_metadata_header([*mandatory, *optional])
     notice = f"- 另有 {len(skills)} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。"
     original_budget = budget
-    budget, bounded = _metadata_line_budget([*mandatory, *optional], budget, _SELECTED_SKILL_HEADER, [notice], required_skill_ids)
+    budget, bounded = _metadata_line_budget([*mandatory, *optional], budget, header, [notice], required_skill_ids)
     minimum = sum(_line_cost(budget, _skill_line(card, "")) for card in mandatory)
     required_lines, _, _ = _render_skill_metadata_lines(
         mandatory, _SkillMetadataBudget(max(budget.limit, minimum), budget.token_based),
@@ -752,7 +760,7 @@ def _render_selected_skill_metadata(skills, budget, selected_skill_ids, required
     notice = ""
     if omitted:
         notice = f"- 另有 {omitted} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。"
-    return _metadata_text([*mandatory, *optional], original_budget, _SELECTED_SKILL_HEADER, shown, [], notice, bounded, required_skill_ids)
+    return _metadata_text([*mandatory, *optional], original_budget, header, shown, [], notice, bounded, required_skill_ids)
 
 
 def _skill_metadata_budget(context_window_tokens: int | None) -> _SkillMetadataBudget:
@@ -869,7 +877,7 @@ def _metadata_floor(cards, budget, fixed, required=()) -> int:
     return budget.cost("\n".join([*fixed, *_minimum_metadata_lines(cards, budget, required)]))
 
 
-# LLM: 最小整目录仍基于当前授权卡交集；包含两个外壳、不可用引用与实际分隔，不从候选扩大选择。
+# LLM: 最小目录仍按授权交集，纯Skill保留旧标题；方法标题及完整引用计入同一信封，不扩大选择。
 # 函数用途: 为混合目录提供真实全局底线，兜住恰好可容纳时的分区舍入误差。
 def _minimum_metadata_index(skills, packages, budget, selected, required, unavailable) -> str:
     skill_cards = [card for card in skills if selected is None or card.metadata.get("stable_id") in (*selected, *required)]
@@ -884,7 +892,7 @@ def _minimum_metadata_index(skills, packages, budget, selected, required, unavai
         pkg_notice = [f"- 另有 {pkg_omitted} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。"] if pkg_omitted else []
         sections.append("\n".join([*_PACKAGE_METADATA_HEADER, *pkg_lines, *pkg_notice, *tail]))
     if skill_cards:
-        header = _SKILL_METADATA_HEADER if selected is None else _SELECTED_SKILL_HEADER
+        header = _SKILL_METADATA_HEADER if selected is None else _selected_metadata_header(skill_cards)
         tail = [_SKILL_USAGE_INSTRUCTIONS] if selected is None else []
         sk_lines = _minimum_metadata_lines(skill_cards, budget, required)
         sk_omitted = max(0, len(skills) - len(sk_lines))
@@ -900,14 +908,14 @@ def _minimum_metadata_index(skills, packages, budget, selected, required, unavai
     return "\n\n".join(sections)
 
 
-# LLM: 最小回退与局部回退共用同一省略提示模板，不拆字符串身份。
+# LLM: 两种选择标题共用同一省略语义，最小/局部回退一致，不拆身份。
 # 函数用途: 按目录头部类型生成对应的省略提示与检索恢复入口。
 def _omitted_notice(header, omitted: int, fallback: str = "") -> str:
     if omitted <= 0:
         return ""
     if header == _SKILL_METADATA_HEADER:
         return f"- 2% Skill metadata 预算不足，另有 {omitted} 个 Skill 未显示；仍可用 skill_search(action=search) 按需求检索。"
-    if header == _SELECTED_SKILL_HEADER:
+    if header in (_SELECTED_SKILL_HEADER, _SELECTED_METHOD_HEADER):
         return f"- 另有 {omitted} 个授权 Skill 未展示；仍可用 skill_search(action=search) 按需求检索。"
     if header == _PACKAGE_METADATA_HEADER:
         return f"- 另有 {omitted} 个能力包未展示；可用 skill_search(action=search) 检索包摘要。"

@@ -42,7 +42,8 @@ def _dispatch(tool, params):
             return tool._dispatch(params)
         tool.owner_home.mkdir(parents=True, exist_ok=True)
         collection = tool.model_spec.name
-        os.close(open_directory_beneath(tool.owner_home, (collection,), create=True))
+        from ..assets import _verify_directory_beneath
+        _verify_directory_beneath(tool.owner_home, (collection,), create=True)
         with locked_json_path(tool.owner_home / collection / '.tool-actions'):
             return tool._dispatch(params)
 

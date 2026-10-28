@@ -4218,12 +4218,20 @@ def test_background_runtime_snapshot_contains_continuation_tools(tmp_path, reaso
     if params.allowed_tools is not None:
         assert expected.issubset(params.allowed_tools)
     assert expected.issubset(snapshot.available_tool_names)
+    # 授权完整不等于首轮Schema全部直出；通过同一快照的真实发现入口加载，再验证可见性。
+    from agent_py_agent.agent.tooling.registry import ToolSearchTool
+
+    discovered = ToolSearchTool(agent.tools)._execute_snapshot({"names": sorted(expected)}, snapshot)
+    assert discovered.ok
+    loaded = discovered.result_envelope["tool_search"]["loaded_tool_names"]
+    assert expected.issubset(loaded)
     assert expected.issubset(
         {
             spec.name
             for spec in agent.tools.model_visible_specs(
                 allowed_tools=params.allowed_tools,
                 runtime_snapshot=snapshot,
+                loaded_tool_names=loaded,
             )
         }
     )

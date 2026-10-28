@@ -887,8 +887,8 @@ class _ArtifactIndexSource:
             raise
 
 
-# LLM: 每次先安全打开索引，再复用解析；字面索引保留全部同名记录供scope裁决，物理别名仍扫描。
-# 函数用途: 从缓存索引定位候选，保留打开与严格解码错误合同。
+# LLM: 每次先安全打开再复用解析；逻辑负命中不入LRU，同名记录仍全留给scope裁决，物理别名沿原扫描。
+# 函数用途: 定位索引候选而不缓存无关历史，保留完整读盘和严格解码错误合同。
 def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *, root: Path | None = None, trusted_root: Path | None = None) -> list[_ArtifactIndexCandidate]:
     source = _ArtifactIndexSource(trusted_root or root, index_path, index_path.relative_to(root).parts) if root is not None else index_path
     if query is None:
@@ -896,7 +896,8 @@ def _index_records(index_path: Path, query: _ArtifactIndexQuery | None = None, *
         return []
     records: list[_ArtifactIndexCandidate] = []
     try:
-        rows, by_literal = _parsed_artifact_index(source)
+        literal_ref = query.artifact_ref if query.resolved_ref is None and not query.physical_only else None
+        rows, by_literal = _parsed_artifact_index(source, literal_ref=literal_ref)
         selected = by_literal.get(query.artifact_ref, ()) if query.resolved_ref is None and not query.physical_only else rows
         for record in selected:
             candidate = _artifact_index_candidate(record, query)
@@ -959,9 +960,9 @@ class _OpenArtifactIndex:
         return nullcontext(self.handle)
 
 
-# LLM: 32键/16MiB有界缓存以路径和FD完整stat失效；开盘与解析不持缓存锁，不缓存权限和失败。
-# 函数用途: 安全打开索引并建立字面引用到有序记录列表的常数时间查找表。
-def _parsed_artifact_index(source):
+# LLM: 原32键/16MiB及FD/stat失效不变；逻辑查找只准入命中索引，负命中仍完整解析，不缓存权限或失败。
+# 函数用途: 建立字面引用查找表并保留真正热索引，避免历史噪声撑大驻留内存或驱逐命中。
+def _parsed_artifact_index(source, *, literal_ref: str | None = None):
     with source.open("rb") as handle:
         before = _blob_stat_signature(os.fstat(handle.fileno()))
         key = str(getattr(source, "root", "")), str(getattr(source, "path", source)), *before
@@ -974,20 +975,20 @@ def _parsed_artifact_index(source):
             for ref in {str(row.get(field, "") or "") for field in _INDEX_LITERAL_FIELDS}:
                 by_literal.setdefault(ref, []).append(row)
         result = rows, by_literal
-        if _blob_stat_signature(os.fstat(handle.fileno())) == before:
+        if _blob_stat_signature(os.fstat(handle.fileno())) == before and (literal_ref is None or literal_ref in by_literal):
             _ARTIFACT_INDEX_CACHE.put(key, result)
         return result
 
 
-# LLM: 仅完整scoped身份可绕过历史发现；真实查找仍执行一次，保留安全打开、命中路径和scope验证。
-# 函数用途: 用已解析主根字面表判断能否只查主根，不额外调用记录查找入口。
+# LLM: 仅完整scoped身份可绕过历史发现；主根探针也只缓存字面命中，真实查找保留安全打开、路径与scope验证。
+# 函数用途: 用主根字面表判断能否避免历史发现，不用负命中污染缓存。
 def _primary_index_has_scoped_ref(root, artifact_ref, request):
     if ":" not in artifact_ref or Path(artifact_ref).is_absolute():
         return False
     index = root / "blobs" / "tool_outputs" / "index.jsonl"
     source = _ArtifactIndexSource(Path(request.root).expanduser(), index, index.relative_to(root).parts)
     try:
-        _rows, literals = _parsed_artifact_index(source)
+        _rows, literals = _parsed_artifact_index(source, literal_ref=artifact_ref)
     except OSError:
         return False
     matches = list(literals.get(artifact_ref, ()))

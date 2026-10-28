@@ -377,7 +377,7 @@ COMMAND_CATALOG = (
                 ArgumentSpec("source", "新版本本地包路径", required=True, path=True),
             ), available=False),
         ),
-        admin_only=False,
+        admin_only=True,
     ),
 )
 

@@ -16,6 +16,7 @@ from ..common.directory_lock import locked_private_directory
 from ..common.json_io import locked_json_path
 from ..common.log_redaction import redact_sensitive_value
 from ..common.nofollow_fs import (
+    _supports_dir_fd,
     ensure_private_dir,
     open_directory_beneath,
     read_bytes_beneath,
@@ -24,7 +25,7 @@ from ..common.nofollow_fs import (
 )
 from ..conversation.native_history import canonical_native_messages_from_metadata
 from ..observability.telemetry_ledger import ToolTelemetryLedger
-from . import MAX_ASSET_BYTES, asset_root_lock, safe_asset_id
+from . import MAX_ASSET_BYTES, _verify_directory_beneath, asset_root_lock, safe_asset_id
 from .descriptor import AccessTarget, AssetDescriptor, IOContract
 from .script_store import ScriptStore
 from .workflow_store import (
@@ -343,7 +344,7 @@ def _asset_root(owner_home, scope, workspace_root):
     if scope != 'workspace' or workspace_root is None:
         raise ValueError('ASSET_SCOPE_INVALID')
     project = Path(os.path.abspath(workspace_root))
-    os.close(open_directory_beneath(project, ()))
+    _verify_directory_beneath(project, ())
     return project / '.agent'
 
 
@@ -654,10 +655,9 @@ def _prepare_files(root, files, scope):
         if len(text.encode('utf-8')) > MAX_ASSET_BYTES:
             raise ValueError('ASSET_RECORD_TOO_LARGE')
         try:
-            descriptor = open_directory_beneath(root, parts[:-1])
+            _verify_directory_beneath(root, parts[:-1])
         except FileNotFoundError:
             continue
-        os.close(descriptor)
         raise FileExistsError('EXTRACTION_ASSET_ALREADY_EXISTS')
     return files
 
@@ -691,6 +691,12 @@ def _rollback_files(root, files):
     for parts in reversed(tuple(files)):
         unlink_file_beneath(root, parts)
     for parts in dict.fromkeys(parts[:-1] for parts in reversed(tuple(files))):
+        if not _supports_dir_fd():
+            try:
+                _verify_directory_beneath(root, parts).rmdir()
+            except FileNotFoundError:
+                pass
+            continue
         try:
             parent = open_directory_beneath(root, parts[:-1])
         except FileNotFoundError:
@@ -729,7 +735,7 @@ def _commit_batch(home, root, proposal, chosen, scope, key):
     ensure_private_dir(root)
     scripts, workflows = ScriptStore(root), WorkflowStore(root)
     for collection in (scripts.collection, workflows.collection):
-        os.close(open_directory_beneath(root, (collection,), create=True))
+        _verify_directory_beneath(root, (collection,), create=True)
     with (
         asset_root_lock(root),
         locked_json_path(root / scripts.collection / '.assets'),

@@ -93,8 +93,10 @@ def test_real_archive_source_reaches_curator(env, monkeypatch, reference, case):
     allowed = source_kind == "user"
     assert ls.projection_is_learnable(candidate.learning_source) is allowed, candidate.learning_source
     promoted = env.service.promote(candidate.candidate_id, automatic=True)
-    assert not promoted.promoted, promoted
-    assert env.service.long_term.all() == []
+    assert promoted.promoted is allowed, promoted
+    assert (len(env.service.long_term.all()) == 1) is allowed
+    if not allowed:
+        assert env.service.long_term.all() == []
     assert event.get("thread_id") == source_thread.thread_id
 
 

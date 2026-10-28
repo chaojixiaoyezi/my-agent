@@ -96,8 +96,10 @@ GATEWAY_REQUEST_POLL_INTERVAL_SECONDS = 0.2  # request worker 空闲时多久检
 BACKGROUND_MAIN_ERROR_BACKOFF_SECONDS = 30.0  # 后台普通宿主异常按 owner/thread 冷却多久再重试
 # owner 唤醒发现整轮磁盘扫描结束后休眠 120 秒再扫下一轮
 BACKGROUND_OWNER_WAKE_RESCAN_SECONDS = 120.0  # 磁盘级 owner 唤醒发现整轮扫完后休眠多久
+# 启动后暂缓非紧急后台维护的交互保护窗口秒数，不延迟撤销或恢复。
 STARTUP_GRACE_WINDOW_SECONDS = 180.0
-_COLD_CURATOR_BUILDS_PER_TICK = 2
+# 每拍后台维护最多冷构造的策展器数量，热实例不占此额度。
+_COLD_CURATOR_BUILDS_PER_TICK_COUNT = 2
 
 
 # LLM: 只节流非紧急维护，不用于取消、fencing、权限撤销、租约或未知结果恢复。
@@ -199,12 +201,11 @@ def _cold_curator_activity(home: Path) -> str:
     return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
 
 
-# LLM: 三态预检不授执行权；原 curator 仍复核配置、due、失败退避和租约；损坏 state 不当空态。
+# LLM: 三态预检从发现层公开入口取得canonical state类型；原curator仍复核due、退避和租约，损坏不当空态。
 # 函数用途: 在创建完整 Agent 前判断冷 owner 是否有策展/自学习工作，并标记紧急恢复。
 def _cold_curator_precheck(supervisor, owner) -> tuple[str, bool]:
     from ..agent.common.json_io import read_json_object_report
-    from ..agent.memory_store.curator_models import MemoryCuratorState
-    from ..agent.owner_wake_discovery import curator_work_is_due
+    from ..agent.owner_wake_discovery import MemoryCuratorState, curator_work_is_due
     from ..agent.user_space.owner_policy import effective_memory_enabled
 
     try:
@@ -1797,7 +1798,7 @@ def _resolve_curator_candidate(
             if state == "not_due" or (_startup_grace_active(supervisor) and not urgent):
                 return None, True
             builds = getattr(supervisor, "_curator_cold_builds", 0)
-            if builds >= _COLD_CURATOR_BUILDS_PER_TICK:
+            if builds >= _COLD_CURATOR_BUILDS_PER_TICK_COUNT:
                 return None, True
             supervisor._curator_cold_builds = builds + 1
         return pool.get(candidate, hard=False), True
@@ -1913,7 +1914,7 @@ def _submit_due_curators(
     examined = 0
     supervisor._curator_cold_builds = 0
     while available > 0 and examined < len(candidates):
-        if supervisor._curator_cold_builds >= _COLD_CURATOR_BUILDS_PER_TICK:
+        if supervisor._curator_cold_builds >= _COLD_CURATOR_BUILDS_PER_TICK_COUNT:
             break
         kind, candidate = candidates[index]
         index = (index + 1) % len(candidates)

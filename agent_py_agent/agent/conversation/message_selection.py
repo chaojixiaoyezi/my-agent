@@ -25,8 +25,11 @@ MessageSelectorFactory = Callable[[Mapping[str, int]], Callable[[MessageLogEntry
 
 _POSITION_CACHE = OrderedDict()
 _POSITION_CACHE_LOCK = threading.Lock()
-_POSITION_CACHE_MAX_ROWS = 131072
+# 消息物理位置缓存最多保留的行索引条数。
+_POSITION_CACHE_MAX_ENTRIES = 131072
+# 消息物理位置缓存可保留的累计估算字节上限。
 _POSITION_CACHE_MAX_BYTES = 16 * 1024 * 1024
+# 单个消息位置索引可累计保留的轻量字段字节上限，正文仍按需读取。
 _LIGHT_FIELDS_MAX_BYTES = 128 * 1024
 
 
@@ -193,7 +196,7 @@ def message_position_index(path: Path, through: int, interrupt_check=None) -> _P
                                 tuple(entries), by_id, tuple(errors), number, size, light_bytes)
     with _POSITION_CACHE_LOCK:
         _POSITION_CACHE.pop(identity, None)
-        if len(entries) <= _POSITION_CACHE_MAX_ROWS and len(errors) <= 128 and size <= _POSITION_CACHE_MAX_BYTES:
+        if len(entries) <= _POSITION_CACHE_MAX_ENTRIES and len(errors) <= 128 and size <= _POSITION_CACHE_MAX_BYTES:
             _POSITION_CACHE[identity] = result
             while (len(_POSITION_CACHE) > 16 or sum(item.size_bytes for item in _POSITION_CACHE.values())
                    > _POSITION_CACHE_MAX_BYTES):

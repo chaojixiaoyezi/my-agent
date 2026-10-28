@@ -781,9 +781,9 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-# LLM: 仅前台输出采集完成后调用；POSIX 用内核退出事实观测，不先 poll 丢失组长，启动身份缺失或变化必须保留未知。
+# LLM: 仅前台采集完成后调用；有启动身份先清树后poll；缺启动身份先由原写门拒绝清树，再仅取原句柄父退出码。
 # Windows 保留原 Popen 退出路径；本入口不选择后台/PTY，不持久化另一套资源账，联测 shell foreground cleanup。
-# 函数用途: 父进程确实退出后，先回收可证明属于该前台调用的残留，再返回原退出码和独立清理回执。
+# 函数用途: 分开返回真实父退出码与进程树回执；身份不可核验始终不发信号、不确认整树退出。
 def finish_foreground_process(
     proc: subprocess.Popen,
     *,
@@ -791,6 +791,9 @@ def finish_foreground_process(
 ) -> tuple[int | None, ProcessTerminationReceipt | None]:
     if _IS_WINDOWS:
         return proc.poll(), None
+    if not expected_birth_token:
+        termination = terminate_process_tree(proc.pid, proc, expected_birth_token="")
+        return proc.poll(), termination
     if proc.returncode is None and not _process_instance_terminated(proc.pid, expected_birth_token or ""):
         return None, None
     termination = terminate_process_tree(proc.pid, proc, expected_birth_token=expected_birth_token or "")
@@ -1151,15 +1154,17 @@ def _process_is_zombie(pid: int) -> bool:
     return result.returncode == 0 and result.stdout.strip().startswith(("Z", "X"))
 
 
-# LLM: 原False可能折叠EPERM/EIO；复核成功必须采用本次状态，复核未知/不支持走ps，不能沿用旧False。
-# 函数用途: 保留内核终止快路径，同时让实际观察故障仍能走旧ps回退。
+# LLM: 此处只回答僵尸状态，不把kernel_terminated的ESRCH当作Z；消失由调用方kill(0)单独确认，未知仍走ps。
+# 函数用途: 用一次Darwin内核状态读取判断僵尸，不回收进程，也不把身份缺失冒充终止。
 def _native_kernel_terminated(pid: int) -> bool | None:
     from ..gateway_parts import multiprocess_native_host_observation as native
 
     if native.sys.platform != "darwin":
         return None
     terminated = native.kernel_terminated(pid)
-    if terminated is False:
+    if terminated is False or (
+        terminated is True and getattr(native.kernel_terminated, "__name__", "") == "kernel_terminated"
+    ):
         info, error = native._darwin_info(pid)
         if info is None or error:
             return None

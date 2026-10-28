@@ -1226,6 +1226,8 @@ class TestPendingProcessCompletion:
         from agent_py_agent.tests.test_process_completion_events import _fixture
 
         agent, params, _authority = _fixture(tmp_path)
-        monkeypatch.setattr(ProcessSessionStore, "list_records", lambda self: ([], [{"code": "BROKEN"}]))
+        # 全量和候选查询已共用这个权威读底座；在实际读口注入故障，不弱化必须上抛的断言。
+        monkeypatch.setattr(ProcessSessionStore, "_load_records_projection_cached",
+                            lambda self, **kwargs: ([], [{"code": "BROKEN"}]))
         with pytest.raises(ProcessSessionAuthorityError):
             task_has_pending_process_completion(agent, params.task_id)

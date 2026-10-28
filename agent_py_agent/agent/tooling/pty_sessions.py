@@ -162,6 +162,7 @@ class _PtySandboxInputs:
     network_access: bool = True
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     protected_persona_root: object = None
+    full_access_other_owner_homes: str = "read_only"
 
 
 # LLM: 继承原宿主环境/网络上界，只增加独立人格根；由Shell宿主装配，不能从模型参数构造许可。
@@ -273,7 +274,8 @@ class PtySessionRegistry:
             protection = write_protection or SandboxWriteProtection()
             sandbox = _PtySandboxInputs(owner_home, write_roots, read_roots, protection.absolute_paths,
                                         host_policy.private_roots, protection.denied_roots, host_policy.network_access,
-                                        host_policy.host_credential_env_names, getattr(host_policy, "protected_persona_root", None))
+                                        host_policy.host_credential_env_names, getattr(host_policy, "protected_persona_root", None),
+                                        host_policy.full_access_other_owner_homes)
             with source_process_boundary():
                 return self._spawn(session_id, command, target, sandbox, run_scope)
         finally:
@@ -305,7 +307,8 @@ class PtySessionRegistry:
             write_roots=sandbox.write_roots,
             read_roots=sandbox.read_roots,
             write_protection=SandboxWriteProtection(tuple(sandbox.protected_write_paths or ()), sandbox.write_scope_denied_roots),
-            host_policy=SandboxHostPolicy(sandbox.private_roots, sandbox.network_access),
+            host_policy=SandboxHostPolicy(sandbox.private_roots, sandbox.network_access,
+                                          full_access_other_owner_homes=sandbox.full_access_other_owner_homes),
         )
         with self._lock:
             launch = self._pending_starts[session_id]
@@ -865,7 +868,8 @@ class TerminalSessionTool(BaseTool):
                 SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
                 host_policy=PtyHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True),
-                                          self.shell_tool.host_credential_env_names, self.shell_tool.protected_persona_root),
+                                          self.shell_tool.host_credential_env_names, self.shell_tool.protected_persona_root,
+                                          full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only")),
             )
         except AgentsContractError as exc:
             return self._error("SANDBOX_UNAVAILABLE", exc.code)

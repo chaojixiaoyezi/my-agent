@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """LLM: 运行状态只由结构化结果、task link 与子代理事件改变；文件路径不再触发任务选择或参数重写。
 
-模块用途: 建立可恢复运行身份并有界解析持久继任链；运行归档与用户目录权限相互独立。
+模块用途: 建立可恢复运行身份并有界解析持久继任链；切走目录先中断旧代，真正换代才发表替代边，目录权限独立。
 """
 
 import hashlib
@@ -725,7 +725,7 @@ def _persist_superseded_successor(store, previous, successor) -> bool:
         return False
 
 
-# LLM: 同路径终态base可跳过completed/interrupted/superseded前代，活跃后继幂等；跨路径只跳superseded，原大写/未知状态拒绝不变。
+# LLM: 同路径终态base可跳过已结束前代；已退休请求的跨目录往返可跨interrupted代，active跨路径仍只跳superseded。
 # 函数用途: 为多次后台唤醒分配后继编号，同时保留同请求目录往返和失败关闭边界。
 def _terminal_successor_task_id(
     store: object,
@@ -757,10 +757,12 @@ def _terminal_successor_task_id(
     allowed_prior_statuses = ({'superseded', 'completed', 'interrupted'}
                              if base_same_path and base_status in {'superseded', 'completed', 'interrupted'}
                              else {'superseded'})
+    if base_status == 'superseded':
+        allowed_prior_statuses.add('interrupted')
     suffix = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
     derived = f"{base_id}-continue-{suffix}"
     # 已占用编号数不超过任务数，因此这段有界扫描必能发现空槽或明确的状态/路径冲突。
-    # 同一请求A→B→A仍只跳过superseded；终态同路径根的后续wake才允许越过正常完成的前代。
+    # 同一请求切走的真实目录以interrupted结束，返回后再原子发表该代的继任边；不跳过失败/取消或未知状态。
     for visit in range(len(by_id) + 1):
         candidate = derived if visit == 0 else f"{derived}-visit-{visit + 1}"
         existing = by_id.get(candidate)
@@ -776,6 +778,8 @@ def _terminal_successor_task_id(
     return ""
 
 
+# LLM: 尚无同路径继任者时不能写superseded断链；真实目录切走记interrupted，占位任务无目录可直接退休。
+# 函数用途: 结束当前请求上一工作区的活动代，不伪造完成或跨路径继任边，不改变历史目录。
 def _supersede_prior_current(
     store: object,
     thread_id: str,
@@ -784,11 +788,12 @@ def _supersede_prior_current(
 ) -> bool:
     if not prior_current_id or prior_current_id == selected_id:
         return True
-    if _active_conversation_link(store, thread_id, prior_current_id) is None:
+    prior = _active_conversation_link(store, thread_id, prior_current_id)
+    if prior is None:
         return True
     try:
         return store.tasks.update_status(
-            {"task_id": prior_current_id, "status": "superseded"}
+            {"task_id": prior_current_id, "status": "interrupted" if prior.task_path else "superseded"}
         ) is not None
     except Exception:
         return False

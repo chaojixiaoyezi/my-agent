@@ -92,13 +92,13 @@ def test_users_secret_redaction(text, expected):
     assert "ExamplePass9" not in persisted_control_command_text(command, text)
 
 
-# LLM: 目录只暴露命令资格，插件的私有/公共资源权限仍归其服务检查。
-# 函数用途: 确认普通插件入口开放而用户管理保持管理员专用。
+# LLM: 目录只暴露会话控制资格，插件的私有/公共资源权限仍归其服务检查。
+# 函数用途: 确认会话级插件与用户管理均保持管理员专用。
 def test_users_catalog_and_plugin_visibility():
     assert "users" in COMMAND_INDEX
     assert COMMAND_INDEX["users"].admin_only and COMMAND_INDEX["users"].sensitive_input
     assert COMMAND_INDEX["user"] is COMMAND_INDEX["users"]
-    assert not COMMAND_INDEX["plugins"].admin_only
+    assert COMMAND_INDEX["plugins"].admin_only
 
 
 # LLM: local/users 只是别名，不能复用旧 providers/local/users 空间或获得 main 身份。

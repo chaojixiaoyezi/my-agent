@@ -1,6 +1,6 @@
 # LLM: 策展时间判断复用consumer纯判据；C调用显式可信配置，mtime仍仅候选而非消费许可。
 # LLM: owner恢复仍保pending/旧lease与真实输入/日终；待确认候选不单独成为新策展工作，修改须联测owner/curator/确认合同。
-# 模块用途: 从原owner结构事实恢复后台活跃登记，不替候选授自动执行或正式发布权。
+# 模块用途: 从原owner结构事实恢复后台活跃登记，公开冷预检使用的canonical state类型，不替候选授执行或发布权。
 # LLM: 本地普通用户与provider共享发现分页及快照，local/main仍由原base tick；不跟随本地链接或创建目录。
 """磁盘级 owner 唤醒发现:治「盯守转非阻塞后睡死叫不醒」的登记表易失性。
 
@@ -57,6 +57,7 @@ from typing import Any
 from .conversation.models import THREAD_TASK_LINK_ACTIVE_STATUS
 from .conversation.task_state import conversation_task_link_is_terminal
 from .gateway_parts.io import update_json_file_atomic
+from .memory_store.curator_models import MemoryCuratorState
 from .runtime_db.operations import exec_lock_scope
 from .runtime_db.repository import (
     _QUIESCENT_ATTEMPT_STATUSES,
@@ -702,7 +703,7 @@ def _owner_memory_enabled(owner_home: Path) -> bool:
     return effective_memory_enabled(report.payload)
 
 
-# LLM: 原失败退避、pending/旧lease恢复和输入/日终时间边界保持；待用户确认的候选不单独唤醒，不删除候选或恢复责任。
+# LLM: 复用模块公开的canonical state类型；原退避、pending/旧lease和时间边界不变，待确认候选不单独唤醒。
 # 函数用途: 判断owner是否仍有原策展运行/输入事实，区别于候选来源资格与用户正式确认。
 def _has_pending_memory_curator_work(
     owner_home: Path,
@@ -720,8 +721,6 @@ def _has_pending_memory_curator_work(
         return False  # 总闸关闭:curator 软活不判活(不占登记表工位,对称 skill 空快照)
     state_path = owner_home / "memory" / "curator" / "state.json"
     try:
-        from .memory_store.curator_models import MemoryCuratorState
-
         payload = json.loads(state_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return False

@@ -1,3 +1,7 @@
+## 2026-10-27 CI C8：原恢复与展示入口的合同对齐
+
+`conversation/background_tool_policy.py`只折叠首轮重工具；`agent_core/compact_request_recovery.py::_restore_optional_preflight`在原typed quota判定后拒绝恢复业务调用。`conversation/task_promotion.py`在跨目录切走时结束旧代为interrupted，返回后沿原继任链与CAS分配新代；`cli/chat_parts/tui_view_model.py::_align_history_timing`已对齐时不重分配显示槽位。没有增加状态源、工具、配置或文件；计时、消息回执、neutral退避仍各读原事实源。测试与验收边界见[TESTS](../../../TESTS.md)。
+
 ## 2026-10-27 Wave 7 W1：Broker 只读主题与能力包/工作流恢复结构
 
 - `gateway_parts/plugin_broker_api.py` 在 `READ_ACTIONS`、`_route` 与 `_dispatch_host_v2` 中挂载 `capability_packages.list` 与 `user_space.identity.resolve`；`adapter/feishu_profile.py::_identity_local_name` 限制单行匹配并拒绝 `#` 标题，`seed_call_name` 解析父目录真实路径防 macOS `/var` 符号链接报错；`capability/package_snapshot.py::package_assets` 按相对成员路径去重消歧。

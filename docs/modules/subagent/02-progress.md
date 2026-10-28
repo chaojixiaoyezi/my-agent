@@ -1,3 +1,7 @@
+## 2026-10-27 CI 全绿收敛：子代理全文投影 TTL 显式时钟透传与常数目录对齐
+
+- `subagents/services/persistence/projections.py`：`_task_projection_expired(task, *, now=None)` 与 `_subagent_index_expired` 统一支持显式 `now` 时钟注入，并与常数目录单位后缀（`_SUBAGENT_FULLTEXT_RETENTION_SECONDS` / `_PROJECTION_LEDGER_MAX_LINES_COUNT`）保持一致。
+
 ## 2026-10-26 Wave 6 B3-R3 子代理全文 TTL 与完整引用保护（源码实现，未部署）
 
 - `services/persistence/projections.py` 的全文投影及 `cli/local_doctor.py::rebuild_subagent_index` 共用同一 30 天终态准入。CLI 在调用运行索引器与读取白名单事实文件之前跳过过期派生项，避免裁剪后重建再次引入旧全文；非白名单 `subagent_patch_review` 仍按原逻辑回填。

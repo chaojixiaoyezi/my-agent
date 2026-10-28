@@ -780,13 +780,25 @@ def test_message_wake_timing_out_repeatedly_is_never_dropped(tmp_path, monkeypat
     _require(sent.get("ok") is True, f"消息没有发出：{sent}")
     now = time.time()
     for attempt in range(7):
+        (wake,) = _pending_wakes(chain, "C")
+        state, error = chain.agent.conversation_store.wakes.attempts.state_report(wake.wake_signal_id)
+        assert error is None and state.total_count == 0
+        now = max(now, state.next_attempt_at) + 1
+        before_attempt = len(chain.wire.calls)
         with pytest.raises(TimeoutError):
-            chain.scheduler.tick(now=now + 31 * attempt)
+            chain.scheduler.tick(now=now)
+        assert len(chain.wire.calls) > before_attempt
         receipt = _message_receipt(chain, "C", str(sent.get("message_id") or ""))
         assert (receipt.status, receipt.migration.get("release_count")) == ("pending", None), f"第 {attempt + 1} 次超时后：{receipt.status}"
+        state, error = chain.agent.conversation_store.wakes.attempts.state_report(wake.wake_signal_id)
+        assert error is None and state.uncounted_count == attempt + 1 and state.total_count == 0
+        assert state.next_attempt_at > now
+        calls = len(chain.wire.calls)
+        assert chain.scheduler.tick(now=state.next_attempt_at - 1) == []
+        assert len(chain.wire.calls) == calls
     before = len(chain.wire.calls)
 
-    chain.scheduler.tick(now=now + 31 * 7)
+    chain.scheduler.tick(now=state.next_attempt_at + 1)
 
     own = [call.get("kind") for call in chain.wire.calls[before:] if "RC-NOTE-TIMEOUTSEVEN" in call["own_notes"]]
     assert own, "超时恢复后，消息没有作为唤醒回合自己的输入送到"

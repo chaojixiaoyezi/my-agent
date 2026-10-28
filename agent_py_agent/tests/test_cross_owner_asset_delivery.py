@@ -1725,7 +1725,8 @@ def test_send_optional_argument_compatibility_and_admin_boundaries(kit):
 
     seed_delivery_bundle(kit)
     sent = kit.service.send_bundle('local/main', 'local/alice', 'script', 'collect',
-        'fixture', True, False, True, False, 'admin_provision')
+        'fixture', include_dependencies=True, allow_secret_placeholder_replace=False,
+        auto_accept=True, auto_enable=False, sender_role='admin_provision')
     assert sent['status'] == 'accepted' and ScriptStore(kit.alice).get_script('collect')['enabled'] is False
     with pytest.raises(TypeError):
         kit.service.send_bundle('local/main', 'local/bob', 'script', 'collect', 'note', note='duplicate')

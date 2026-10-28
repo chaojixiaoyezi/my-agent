@@ -535,6 +535,8 @@ def test_cancelled_selection_propagates_without_converting_to_optional_warning(t
     assert not _task(fixture).skill_snapshot_refs and not fixture.reads and not fixture.params.tool_ir_history
 
 
+# LLM: 实际继任沿WP15发布状态与准确指针，前代其他字段不变；选择pending只能属于新的执行代。
+# 函数用途: 检查终态工作区新执行的身份、目录复用和能力包选择状态不污染前代。
 @pytest.mark.parametrize("status", ["completed", "interrupted"])
 def test_exact_terminal_workspace_new_execution_gets_pending_only_on_new_link(tmp_path, monkeypatch, status):
     from agent_py_agent.agent.conversation.task_promotion import promote_conversation_task_for_run
@@ -553,7 +555,10 @@ def test_exact_terminal_workspace_new_execution_gets_pending_only_on_new_link(tm
     assert successor is not None and successor.task_id == fixture.params.task_id
     assert successor.task_id != "task-old" and successor.task_path == str(workspace)
     assert successor.capability_selection == TaskCapabilitySelection.pending()
-    assert store.storage.task_path("task-old").read_bytes() == old_bytes
+    # WP15要求实际发布继任边；旧任务只能改变状态与准确继任ID，不能补pending或改任何原任务字段。
+    assert json.loads(store.storage.task_path("task-old").read_bytes()) == {
+        **json.loads(old_bytes), "status": "superseded", "superseded_by_task_id": successor.task_id,
+    }
     assert not fixture.agent.backend.calls and not fixture.reads
 
 

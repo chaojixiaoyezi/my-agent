@@ -10,7 +10,9 @@ from ..common.nofollow_fs import open_directory_beneath, read_bytes_beneath
 from ..common.path_segments import safe_path_segment
 from ..plugin_host.errors import HostAPIError
 
+# 通道身份来源目录允许收集的绑定文件数量上限。
 _MAX_BINDING_FILES = 128
+# 检查本地用户通道绑定时最多读取的累计字节数。
 _MAX_BINDING_BYTES = 16 * 1024 * 1024
 
 

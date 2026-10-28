@@ -138,19 +138,25 @@ class WorkflowsTool(BaseTool):
     def _store(self):
         return self.store if self.store is not None else WorkflowStore(self.owner_home, workspace_root=self._skill_options()['workspace_root'])
 
-    # LLM: 默认引擎绑定本次项目；解析和正文沿同一授权范围，禁止旧项目缓存或静态摘要冒充分析。
+    # LLM: 默认引擎绑定本次项目并复用同一实例；项目路径变化时重建，保持外部注入analysis_handler跨调用生效。
     # 函数用途: 延迟取得Owner绑定的正式工作流执行器。
     def _engine(self):
-        if self.engine is None:
+        if self.engine is not None:
+            return self.engine
+        ws = self._skill_options()['workspace_root']
+        cached = getattr(self, '_lazy_engine', None)
+        if cached is None or getattr(self, '_lazy_engine_ws', None) != ws:
             from ..workflows.engine import WorkflowEngine
-            return WorkflowEngine(self.owner_home, workspace_root=self._skill_options()['workspace_root'],
+            cached = WorkflowEngine(self.owner_home, workspace_root=ws,
                 skill_resolver=lambda step, context: _resolve_owner_skills(
                     self.owner_home, step, context, **self._skill_options()),
                 skill_details_resolver=lambda references: [
                     _skill_descriptor(self.owner_home, reference, **self._skill_options())
                     for reference in references],
                 analysis_handler=self.analysis_handler)
-        return self.engine
+            self._lazy_engine = cached
+            self._lazy_engine_ws = ws
+        return cached
 
     # LLM: inspect失败是成功读取；运行失败保留断点机器码，CAS在Store原锁拒绝，不冒称写入已发生。
     # 函数用途: 统一工具结果与结构化错误，不吞中断。

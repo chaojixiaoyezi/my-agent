@@ -69,7 +69,12 @@ from .runtime_db.schema import runtime_db_path
 from .tooling.executor import ToolExecutorRequest
 from .tooling.models import ToolAvailability, ToolExposure, ToolRuntime, ToolRuntimeSnapshot
 from .tooling.runtime_contracts import ToolCall, tool_arguments_hash
-from .user_space.owner_resolver import OwnerHomeResult, OwnerIdentity, resolve_owner_home
+from .user_space.owner_resolver import (
+    OwnerHomeResult,
+    OwnerIdentity,
+    home_paths_with_owner,
+    resolve_owner_home,
+)
 
 _MANAGEMENT_TOOLS = {"install": PLUGIN_INSTALL_TOOL, "configure": PLUGIN_CONFIGURE_TOOL,
                      "enable": PLUGIN_ENABLE_TOOL, "disable": PLUGIN_DISABLE_TOOL, "remove": PLUGIN_REMOVE_TOOL,
@@ -117,7 +122,7 @@ class PluginManagementContext:
     approval_timeout_seconds: int = 1800
 
 
-# LLM: 冷热共用原权限；管理员标记还须完整local/main，普通owner强制进程沙箱，不借HTTP角色提权。
+# LLM: 冷热共用原权限；未绑定的根Home仅按可信owner补齐，管理员仍须显式标记及完整local/main。
 # 函数用途: 从当前私有配置和原线程路径组装命令依赖，不创建 owner、线程或完整 Agent。
 def plugin_management_context(
     owner: OwnerHomeResult, home: object, config: object, threads: object, *,
@@ -135,6 +140,8 @@ def plugin_management_context(
     )
     from .user_space.owner_policy import resolve_effective_owner_policy
 
+    if not getattr(home, "owner_id", "") and home.root == owner.root:
+        home = home_paths_with_owner(home, owner)
     policy = resolve_effective_owner_policy(home)
     allowed = not policy.load_errors and bool(config.enable_tools)
     approval_mode = "ask"
@@ -158,7 +165,7 @@ def plugin_management_context(
         raise RuntimeConflictError("原会话记录不可读")
     workspace = Path(thread.cwd) if thread is not None and thread.cwd else owner.home_dir
     return PluginManagementContext(owner, actor_id, channel, conversation_id, threads, workspace,
-                                   path_policy, bool(is_admin and is_complete_local_admin_owner(home)), config.enable_plugins,
+                                   path_policy, bool(is_admin), config.enable_plugins,
                                    allowed and PLUGIN_INSTALL_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_CONFIGURE_TOOL not in policy.disabled_tools,
                                    allowed and PLUGIN_DISABLE_TOOL not in policy.disabled_tools,
@@ -187,10 +194,10 @@ def _enable_policy(context, arguments) -> PluginEnablePolicy:
                               legacy_forbidden_roots=roots, host_credential_env_names=context.host_credential_env_names)
 
 
-# LLM: 普通owner强制绑定本人home墙、restricted默认与进程沙箱，不因宽配置或管理员HTTP角色提权。
+# LLM: 普通owner强制绑定本人home墙、restricted默认与进程沙箱，不因宽配置提权。
 # 函数用途: 归一化插件管理上下文的owner隔离与沙箱约束。
 def _normalize_management_context(context: PluginManagementContext) -> PluginManagementContext:
-    if context.owner.identity == OwnerIdentity.local_main():
+    if context.owner.identity == OwnerIdentity.local_main() or context.is_admin:
         return context
     policy = context.path_policy
     workspace = context.workspace if context.workspace.is_relative_to(context.owner.home_dir) else context.owner.workspace_dir
@@ -477,13 +484,13 @@ class PluginManagement:
             raise RuntimeConflictError("原会话不属于当前 owner")
         return thread
 
-    # LLM: 摘要覆盖明确参数、目录/工作根和工具权限；多值元组按原 JSON 工具协议转列表，私有配置正文不进入参数。
+    # LLM: 摘要覆盖明确参数及真实工具权限，功能总开关不改冻结输入；关闭时只读原结果，执行闸仍独立核验。
     # 函数用途: 冻结可被真实 ToolExecutor 验证的管理参数，重送无需重新读配置或包来源。
     def _arguments(self, tool_name: str, values: dict, revision: str) -> dict:
         policy = self.context.path_policy
         permission = {"mode": policy.mode, "owner_root": str(policy.owner_scope_root or ""),
                       "dangerous_roots": [str(path) for path in policy.dangerous_roots],
-                      "tool_allowed": self._allowed(tool_name)}
+                      "tool_allowed": _management_tool_allowed(self.context, tool_name)}
         normalized = json.loads(json.dumps(values, ensure_ascii=False, allow_nan=False))
         if tool_name == PLUGIN_ENABLE_TOOL and values.get("authorization") and values.get("authorization_revision"):
             revision = values["authorization_revision"]
@@ -555,14 +562,7 @@ class PluginManagement:
     # LLM: 装卸启停遵本人策略和开关，普通用户不因此获得公共管理；未知内部工具关闭。
     # 函数用途: 让每种管理动作分别遵守当前禁用策略。
     def _allowed(self, tool_name: str) -> bool:
-        return bool(self.context.enabled and _can_manage(self.context) and tool_name not in self.context.disabled_tools and
-               {PLUGIN_INSTALL_TOOL: self.context.tool_allowed,
-                # 更新是"再装一个版本"，沿安装权限；不需要另立一个 owner 策略字段。
-                PLUGIN_UPDATE_TOOL: self.context.tool_allowed,
-                PLUGIN_CONFIGURE_TOOL: self.context.configure_allowed,
-                PLUGIN_DISABLE_TOOL: self.context.disable_allowed,
-                PLUGIN_ENABLE_TOOL: self.context.enable_allowed,
-                PLUGIN_REMOVE_TOOL: self.context.remove_allowed}.get(tool_name, False))
+        return bool(self.context.enabled and _management_tool_allowed(self.context, tool_name))
 
     # LLM: 原 UNKNOWN 不暴露未经确认工具结果；重新启用仅附同表原撤权的有限观察，仍 UNKNOWN；成功卡需原结果确认。
     # 函数用途: 分开原结果、已观察撤权和未验证清理，保留原查询编号与授权身份。
@@ -623,11 +623,35 @@ def _build_event_details(context: PluginManagementContext, entry) -> PluginEvent
                               events_disabled=not bool(context.plugin_events_enabled))
 
 
-# LLM: 管理员资格仅在完整main成立，普通user只管理本人私有；group不能借管理员标记开放管理。
-# 函数用途: 判断受信入口具备本owner插件管理资格，不代表公共安装可修改。
+# LLM: 只读冷判本地受管账号是否已登记且处于enabled；目录不存在时直接返回False，绝不创建目录或文件。
+# 函数用途: 判断当前非管理员owner是否为已启用的本地普通账号。
+def _is_enabled_registered_local_user(owner: OwnerHomeResult) -> bool:
+    if owner.identity.provider != "local" or owner.identity.owner_kind != "user":
+        return False
+    if not (owner.root / "local_users").is_dir():
+        return False
+    from .user_space.local_user_store import LocalUserStore
+
+    try:
+        record = LocalUserStore(owner.root).get(owner.identity.owner_id)
+    except Exception:  # noqa: BLE001 账号存储损坏或非法ID一律按无权限处理
+        return False
+    return record is not None and record.status == "enabled"
+
+
+# LLM: 显式插件管理命令认已认证管理员，或已登记enabled的本地受管普通用户（仅限本人私有范围）。
+# 函数用途: 在目录和提交入口统一核验插件管理资格，不从正文或未登记目录授予权限。
 def _can_manage(context) -> bool:
-    return ((context.is_admin and context.owner.identity == OwnerIdentity.local_main())
-            or context.owner.identity.owner_kind == "user")
+    return bool(context.is_admin or _is_enabled_registered_local_user(context.owner))
+
+
+# LLM: 真实工具权限与插件总开关分开；前者参与冻结输入，后者仅在新执行时检查，旧结果不因关开关变成输入冲突。
+# 函数用途: 统一管理员与每种管理工具的策略许可，不创建线程或查询操作账。
+def _management_tool_allowed(context, tool_name: str) -> bool:
+    return bool(_can_manage(context) and tool_name not in context.disabled_tools and
+                {PLUGIN_INSTALL_TOOL: context.tool_allowed, PLUGIN_UPDATE_TOOL: context.tool_allowed,
+                 PLUGIN_CONFIGURE_TOOL: context.configure_allowed, PLUGIN_DISABLE_TOOL: context.disable_allowed,
+                 PLUGIN_ENABLE_TOOL: context.enable_allowed, PLUGIN_REMOVE_TOOL: context.remove_allowed}.get(tool_name, False))
 
 
 # LLM: 原Store仍为唯一事实源，只冷读main已公开条目；本人同名私有优先，不创建目录或读他人私有配置。
@@ -649,7 +673,7 @@ def _visible_entries(manager, private_entries=None):
 # LLM: 拒绝先于原thread/HostCommand写入；scope及目标安装都来自原解析值与原Store，不由包自报权限。
 # 函数用途: 限定普通用户只能装私有或修改本人私有，不泄漏其他用户安装存在性。
 def _private_management_denial(manager, tool_name, values):
-    if manager.context.is_admin and manager.context.owner.identity == OwnerIdentity.local_main():
+    if manager.context.is_admin:
         return None
     code = ""
     if tool_name == PLUGIN_INSTALL_TOOL:

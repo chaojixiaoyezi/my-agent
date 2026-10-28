@@ -1,4 +1,5 @@
-
+# LLM: 编排回执只投影宿主本次输出；接替边及处置沿原字段预算保留，超额显式截断，不用摘要授权。
+# 模块用途: 从完整编排结果保留动作、接替和续读引用，避免通用预览截掉真实处置。
 from __future__ import annotations
 
 import json
@@ -39,6 +40,7 @@ _TOP_LEVEL_ACTION_KEYS = (
     "blocking_run_ids",
     "repair_advice",
     "created_run_ids",
+    "replacement_records",
     "planned_count",
     "runner_selection_recovery",
     "quality_advice",

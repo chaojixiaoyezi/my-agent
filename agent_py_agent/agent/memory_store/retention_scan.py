@@ -882,7 +882,7 @@ def _wake_file_thread(path: Path, errors: list[MemoryRetentionError]) -> str:
     return ""
 
 
-# LLM: 先mtime后pin/内容读取；stat失败记诊断，Daily/Compact引用受保护，其余沿原删除合同。
+# LLM: 单次lstat判类型和mtime；包括链接检查阶段的IO失败均记诊断，不因Python版本把错误吞为空文件。
 # 函数用途: 规划过期文件，必要时使用原可恢复回收站。
 def _expired_file_actions(
     *,
@@ -900,7 +900,14 @@ def _expired_file_actions(
     cutoff = now.timestamp() - days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     for path in sorted(root.rglob(pattern)):
-        if path.is_symlink():
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            errors.append(_state_error("MEMORY_RETENTION_FINGERPRINT_INVALID", path))
+            continue
+        if stat.S_ISLNK(info.st_mode):
             errors.append(
                 MemoryRetentionError(
                     "MEMORY_RETENTION_SYMLINK_SKIPPED",
@@ -909,16 +916,9 @@ def _expired_file_actions(
                 )
             )
             continue
-        if not path.is_file() or _inside_any(path, excluded_roots):
+        if not stat.S_ISREG(info.st_mode) or _inside_any(path, excluded_roots):
             continue
-        try:
-            mtime = path.stat().st_mtime
-        except FileNotFoundError:
-            continue
-        except OSError:
-            errors.append(_state_error("MEMORY_RETENTION_FINGERPRINT_INVALID", path))
-            continue
-        if mtime >= cutoff:
+        if info.st_mtime >= cutoff:
             continue
         if protection is not None and protection[0].protects(path, errors):
             continue
@@ -987,7 +987,7 @@ def _trash_actions(
     return actions
 
 
-# LLM: 使用直接目录枚举以传播权限错误，glob可能把EACCES洗为空；链接/坏类型拒绝，缺失可选源为空。
+# LLM: 各Python版本统一用scandir传播发现错误；不跟随runtime子目录链接，缺失可选源为空而不可读不是零pin。
 # 函数用途: 严格发现标准ConversationStore根（含直连与runtime布局），保证pin发现完整性。
 def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path, ...]:
     discovered = list(explicit)
@@ -1002,7 +1002,12 @@ def _conversation_roots(home: object, explicit: tuple[Path, ...]) -> tuple[Path,
     else:
         if runtime.is_symlink():
             raise OSError("retention discovery root is a symlink")
-        discovered.extend(path / "conversations" for path in runtime.iterdir() if path.is_dir())
+        with os.scandir(runtime) as entries:
+            for entry in entries:
+                if entry.is_symlink():
+                    raise OSError("retention discovery child is a symlink", entry.path)
+                if entry.is_dir(follow_symlinks=False):
+                    discovered.append(Path(entry.path) / "conversations")
     result: list[Path] = []
     for raw in discovered:
         path = Path(raw).expanduser()

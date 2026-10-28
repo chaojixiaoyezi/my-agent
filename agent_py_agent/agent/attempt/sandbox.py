@@ -38,7 +38,7 @@ import sys
 import tempfile
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -46,8 +46,11 @@ from typing import Any, Literal
 from ..common.cancellation import raise_if_cancelled
 from ..path_access_policy import (
     AgentsSourceProtectionError,
+    _macos_all_owner_paths,
     agent_home_root_for_owner,
+    host_managed_store_dirs,
     host_readonly_paths,
+    host_readonly_patterns,
     macos_hidden_pattern,
     macos_host_alias_paths,
     macos_owner_prefix,
@@ -83,6 +86,7 @@ class SandboxHostPolicy:
     private_roots: tuple[object, ...] = ()
     network_access: bool = True
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
+    full_access_other_owner_homes: str = field(default="read_only", kw_only=True)
 
 
 class SandboxUnavailableError(SandboxUnavailable):
@@ -507,8 +511,9 @@ def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
     readonly_aliases: tuple[Path, ...] = ()
     hidden_aliases: tuple[Path, ...] = ()
     if compact:
-        homes = {owner_home_containing(path, agent) for path in paths}
-        readonly_aliases, hidden_aliases = macos_host_alias_paths(tuple(home for home in homes if home is not None))
+        homes = tuple(sorted({home for path in paths if (home := owner_home_containing(path, agent)) is not None}))
+        spec = _compact_macos_host_spec(spec, agent, homes)
+        readonly_aliases, hidden_aliases = macos_host_alias_paths(homes)
         paths = tuple(path for path in paths if not _default_owner_persona_path(path, agent))
         pattern = f"^{macos_owner_prefix(agent)}/(SOUL\\.md|USER\\.md|AGENTS\\.md|persona)(/|$)"
         persona_rules = _pattern_write_denies((pattern,))
@@ -520,7 +525,10 @@ def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
     readonly = spec.protected_write_paths
     if agent is not None and not spec.full_access and spec.protected_write_patterns:
         declared = set(host_readonly_paths(agent, root))
+        declared_hidden = set(host_managed_store_dirs(agent, root))
         readonly = tuple(path for path in readonly if path not in declared or path.resolve(strict=False) != path)
+        hidden = tuple(path for path in spec.hidden_paths if path not in declared_hidden or path.resolve(strict=False) != path)
+        spec = replace(spec, hidden_paths=hidden)
         persona_rules.extend(_pattern_write_denies(macos_readonly_patterns(agent, root)))
     write_denies = [*_readonly_path_denies((*readonly, *readonly_aliases)), *_readonly_path_denies(paths), *persona_rules]
     if (root is not None and any(path.is_file() for path in paths)) or compact:
@@ -535,6 +543,28 @@ def build_macos_sandbox_profile(spec: AttemptSandboxSpec) -> str:
     return profile
 
 
+# LLM: 只替换本次已核验owner的标准声明；自定义保护和canonical别名保留，固定正则覆盖未来owner，不再枚举。
+#   原spec不可变，动态来源身份仍由完整profile入口前后复核，不能把字符串压缩当成权限缓存。
+# 函数用途: 在最终编译层压缩具体宿主快照，兼容一次枚举的旧API而不膨胀Seatbelt配置。
+def _compact_macos_host_spec(spec: AttemptSandboxSpec, agent: Path, homes: tuple[Path, ...]) -> AttemptSandboxSpec:
+    compact = _macos_all_owner_paths(agent)
+    readonly = {path for home in homes for path in host_readonly_paths(agent, home)}
+    hidden = {path for home in homes for path in host_managed_store_dirs(agent, home)}
+    changes = {
+        'protected_write_paths': tuple(path for path in spec.protected_write_paths if path not in readonly),
+        'hidden_paths': tuple(path for path in spec.hidden_paths if path not in hidden),
+    }
+    for field_name, projected_name, operation in (
+        ('protected_write_patterns', 'patterns', ''),
+        ('protected_directory_write_patterns', 'directory_write_patterns', 'write'),
+        ('protected_directory_unlink_patterns', 'directory_unlink_patterns', 'unlink'),
+    ):
+        declared = {pattern for home in homes for pattern in host_readonly_patterns(agent, home, directory_operation=operation)}
+        custom = tuple(pattern for pattern in getattr(spec, field_name) if pattern not in declared)
+        changes[field_name] = tuple(dict.fromkeys((*custom, *getattr(compact, projected_name))))
+    return replace(spec, **changes)
+
+
 # LLM: 只识别可由固定regex覆盖的规范owner默认名称；任意名来源不得据前缀丢弃。
 # 函数用途: 判断一个已经安全核验的路径能否由统一人格规则替代。
 def _default_owner_persona_path(path: Path, agent: Path) -> bool:
@@ -542,7 +572,7 @@ def _default_owner_persona_path(path: Path, agent: Path) -> bool:
     return home is not None and path in tuple(home / name for name in ("SOUL.md", "USER.md", "AGENTS.md", "persona"))
 
 
-# LLM: 只给带宿主保护投影的普通owner加跨owner墙；allowlist绝不重新开放整个owner。显式写根只重开当前owner以内。
+# LLM: 只给带宿主保护投影的普通owner加跨owner墙；allowlist不重开owner，显式写根不跨owner，祖先只恢复metadata。
 # 函数用途: 用owners根拒绝与本owner放行替代逐owner拒绝，随后恢复普通拒写优先级，绝对保护再覆盖。
 def _macos_cross_owner_rules(spec: AttemptSandboxSpec) -> list[str]:
     if spec.full_access or spec.read_mode is not None or not spec.protected_write_patterns:
@@ -559,7 +589,8 @@ def _macos_cross_owner_rules(spec: AttemptSandboxSpec) -> list[str]:
     return [f"(deny file-read* file-write* (subpath {_seatbelt_string_literal(str(owners))}))",
             f"(allow file-read* (subpath {_seatbelt_string_literal(str(home))}))",
             *(f"(allow file-write* (subpath {_seatbelt_string_literal(str(path))}))" for path in sorted(writable)),
-            *_macos_write_scope_rules(tuple(sorted(replay)), spec.write_scope_denied_roots)]
+            *_macos_write_scope_rules(tuple(sorted(replay)), spec.write_scope_denied_roots),
+            *_ancestor_metadata_rules((owners,), {home})]
 
 
 # LLM: H2正则只用本次规范owner锚点及原声明，不取环境变量；在读放行之后拒绝，覆盖尚未创建的托管位置。
@@ -686,10 +717,11 @@ def _symlink_path_nodes(raw: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(nodes))
 
 
-# LLM: 两种 Seatbelt 读模式复用同一链事实；每个链接只获 file-read-metadata literal，不能变成 subpath 或 read-data。
-# 函数用途: 用真实Unicode链接名称生成精确元数据规则，不借编码扩大数据读取。
+# LLM: 仅对已授权路径的真实链接及其祖先给literal metadata；解析链中的安装bin不能获得subpath或read-data。
+# 函数用途: 补齐链接链祖先的精确元数据读取，保留旧链接节点API和未授权兄弟目录的拒读。
 def _symlink_metadata_rules(roots: tuple[Path, ...]) -> list[str]:
-    paths = sorted({_seatbelt_string_literal(str(node)) for root in roots for node in _symlink_path_nodes(root)})
+    nodes = {node for root in roots for node in _symlink_path_nodes(root)}
+    paths = sorted({_seatbelt_string_literal(str(path)) for node in nodes for path in (node, *node.parents)})
     return [f"(allow file-read-metadata (literal {path}))" for path in paths]
 
 
@@ -853,8 +885,8 @@ def _git_pointer_path(path: Path, *, gitfile: bool = False) -> Path | None:
 
 
 # LLM: 每根及全部祖先始终查.git；向下仅查3层/128目录并剪重目录，广度优先按realpath去环，不缓存发现事实。
-#   任意深度的规范.git仍由regex拒写；有界扫描只补近根gitfile/symlink的真实gitdir/commondir别名。
-# 函数用途: 有界发现近根worktree入口；缺失根由通配保护，实际扫描IO错误仍失败关闭。
+#   只发现已有仓库；未来仓库通配仅来自显式protected_write_patterns，不据.git名字封禁合法初始化。
+# 函数用途: 有界发现已有worktree控制入口；缺失根无现成仓库，实际扫描IO错误仍失败关闭。
 def _macos_git_markers(spec: AttemptSandboxSpec) -> tuple[Path, ...]:
     roots = {Path(path).resolve(strict=False) for path in (spec.attempt_view, *spec.extra_write_roots,
              *((spec.staging_root,) if spec.implicit_attempt_write_roots else ()))}
@@ -902,13 +934,11 @@ def _macos_git_scan_directory(directory: Path, *, descend: bool) -> tuple[Path |
     return marker, sorted(children)
 
 
-# LLM: 所有模式/full access共用Git拒写；通配保护未来仓库，具体路径补真实gitdir/commondir/链接别名。
-#   仅拒绝控制文件和目录改名，objects/index/refs正常可写；指针或发现失败沿SANDBOX_UNAVAILABLE，绝不退回宿主。
-# 函数用途: 防止命令修改hooks/config或移动其祖先绕过保护，不把整个.git树设为只读。
+# LLM: 所有模式保留已有Git控制文件及真实gitdir/commondir别名拒写；不再无条件增加全局.git正则。
+#   新仓库可在授权写根内初始化，下次命令重新发现；未来仓库的额外通配只由显式保护模式签发，未知指针仍失败关闭。
+# 函数用途: 精确保护已发现仓库的hooks/config及祖先，不阻止空工作区合法git init或放宽普通写边界。
 def _macos_git_write_denies(spec: AttemptSandboxSpec) -> list[str]:
-    rules = _pattern_write_denies((r"(^|/)\.git/(hooks|config(\.worktree)?)(/|$)",))
-    rules.extend(_pattern_write_denies((r"(^|/)\.git$",), directories=True, unlink_only=True))
-    rules.append(r'(deny file-write* (require-all (require-not (vnode-type DIRECTORY)) (regex "(^|/)\\.git$")))')
+    rules: list[str] = []
     paths: set[Path] = set()
     directories: set[Path] = set()
     try:
@@ -1070,8 +1100,8 @@ def gateway_isolation_status(ports: tuple[int, ...], *, system: str | None = Non
     return "unavailable:unsupported_platform"
 
 
-# LLM: 同一批deny之间没有allow，subpath已含目录本身，父前缀可覆盖子项；文件仍literal，不把/A误当/AB的父目录。
-#   不存在的路径继续用subpath禁止未来创建；不改变Linux具体挂载集合，不缓存文件类型或符号链接观察。
+# LLM: 同一批deny之间没有allow，父前缀可覆盖子项；目录及缺失路径保留literal+subpath合同，文件仍literal。
+#   不改变拒写范围、Linux挂载或父前缀去重，不把/A误当/AB的父目录，不缓存文件类型或链接观察。
 # 函数用途: 合并重复的只读前缀，生成宽授权之后生效的最小Seatbelt拒写集合。
 def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
     denies: list[str] = []
@@ -1091,7 +1121,7 @@ def _readonly_path_denies(paths: tuple[Path, ...]) -> list[str]:
             denies.append(f"(deny file-write* (literal {encoded}))")
         else:
             parents.add(path)
-            denies.append(f"(deny file-write* (subpath {encoded}))")
+            denies.append(f"(deny file-write* (literal {encoded}) (subpath {encoded}))")
     return denies
 
 

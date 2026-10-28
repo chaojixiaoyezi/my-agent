@@ -1,3 +1,75 @@
+## 2026-10-27 CI C2 v2：包页面归档投影与继任合同对齐
+
+来源：`07-tasks/ci-fix-c2-v2.md`，起点 `fb83bdf144a35318e38653240d1055929fd23720`。仅在 `/tmp/wt-ci-2` 工作，使用指定 `/tmp/ci-venv-312/bin/python3`。
+
+- capability侧只为普通外置的成功包页面保留读取器已按原预算生成的JSON视图，宿主归档入口做一次接线。原始工具JSON、result_envelope、完整归档、摘要、原生1200字符日志预览门槛和授权/取消均不改；复制来源与恢复锚点仍由原宿主生成，不能从预览猜路径。普通Skill、其他工具、失败或无效页面不启用该适配。宿主显式外置原因（包括硬余量及未来未知原因）优先，不能因页面配置而重新内联。
+- 新增 `test_capability_package_output_projection.py`，4项正向检查先在空实现上断言失败，另6项负向检查通用结果不受影响。现有原生读取、归档恢复、原字节复制用例沿真实工具循环验证接线；6项原包JSON/envelope冻结哈希原断言保留。
+- 修正两处旧测试合同，而非回退WP15继任：旧档案夹具从新版asdict投影时剔除新增继任指针，原序列化字节相等断言保留；终态换代仍要求仅新任务有pending，旧任务完整JSON严格只允许status和superseded_by_task_id这两项预期变化，其他原字段不得改变。另跑原WP15/WP19继任回归验证正式继任行为没有被削弱。
+
+复现：在本工作树使用指定3.12解释器运行任务所列12文件及新增投影测试；红例为 `.pytest_cache/c2-v2-before.xml`（462项中10失败、2平台沙箱跳过）和 `.pytest_cache/c2-v2-projection-red.xml`（4失败、6通过）。最终验证结果在收口时补记；平台沙箱跳过不能作为真实核验已通过的证据。
+
+独立Astra high只读静态复核指出初版preserve标记可能覆盖硬余量外置。新增两项真实externalizer→适配器→reducer回归（0与40000预览配置），原始大页不缩小，真实外置原因由request.force_externalize生成；修正测试状态Literal误用后两项在模型投影相等断言处失败，证据 `.pytest_cache/c2-v2-headroom-contract-red.xml`。修复为任何显式外置原因均跳过适配；要求最终工具投影与适配前逐字相等、完整blob不变、逻辑恢复锚点存在且本次物理归档路径不进入模型。这只证明新适配不新增硬余量重内联，不声称真实模型上下文窗口端到端已验证。
+
+## 2026-10-27 CI C8：后台展示、配额恢复与工作区继任合同
+
+来源：`07-tasks/ci-fix-c8.md`；工作树 `/tmp/wt-ci-8`，分支 `ci-fix-8`，准确起点 `384b110a1f9bde7aa84ddff0fbfc19eefbf99da5`。先完整读取任务，再在未修改的起点实跑指定11文件：1342项中1326通过、13失败、3项原能力跳过（`.pytest_cache/c8-baseline.xml`）。没有把其他分支或本分支早先修复冒充基线。
+
+- 后台记忆/画像等重工具恢复按结构化信号预载，执行授权不变；续接测试保留完整授权检查，经过同一快照真实 `ToolSearchTool` 加载后再检查全部Schema，区分初次展示与能力撤销。不把自由正文当工具目标，也不为定时任务强制直出全部工具。
+- TUI完成计时已在真实渲染全序中紧邻final时不再重编号，重复canonical回放保留完整块及序号。后台历史测试仍全值精确比较，额外独立检查原事件前缀、冻结耗时/时标及二次投影幂等；失败外发不落canonical的断言保持。
+- 自动摘要撞到typed provider quota时不恢复业务调用，同一失败不再调用后端两次；原窗口与512000窗口、唯一额度通知、Goal `usage_limited`、策略无失败账和车道环境暂停测试保持。
+- 跨目录切走的实际执行代先记 `interrupted`，无目录占位仍可退休；返回后由原原子换代写口发布 `superseded + 同目录继任边`。有界链、缺边/环/跨目录/错误状态拒绝不放宽。新直接反例及真实A→B→A回归先2失败再24相关项通过（`c8-reentry-red.xml`、`c8-reentry-green.xml`）。旧根状态断言按Wave7真实继任合同检查，不复活旧执行。
+- 诊断脚本和缓存不改：原12次读取断言已过时，现严格检查2 owner×2 tick的4次真实读取、on为0；字节、SQLite连接8/4、事务4/0及相同事实SHA仍验证。用户优先和消息超时测试按持久 `next_attempt_at` 推进虚拟时钟，不清冷却；真实执行7次超时，并逐次验证不计失败、期限前不调用、恢复后消息被消费。原 `wake_poison.py` 指数退避及其测试不改。
+
+最终指定11文件：**1340 passed / 0 failed / 0 errors / 3 skipped**（`.pytest_cache/c8-final.xml`）。三项均为原 `test_goal_and_task_resource_controls_are_independent` 的 `nested_sandbox_exec` 能力跳过，起点同现，未新增skip/xfail、未降低权限门；因此不称原生沙箱用例已验证。JUnit伴随六条原 `record_property`/xunit2警告，不隐藏。
+
+Ruff全范围、doc-sync、diff、四个产品文件compileall及clean-package均通过；严格尺寸门 `hard=0 / blocked=False`，报告仅写任务指定的 `/tmp/c8-size.md`，原尺寸告警仍保留，不更改baseline或提交生成报告。完整组合后仅同步中文注释与文档，不改变已验证的运行逻辑或测试输入。
+
+Astra high仅按准确函数与差异切片做独立静态复核，未读全仓或运行测试；未发现可证新增P1/P2或测试绕过。其跨线程候选假设由原TaskStore绑定时的thread身份拒门复核，计时假设须遵守真实journal序号不变量；不把片段审阅外推完整独审。实际生产/真实TUI窗口/跨平台与全仓CI均未验证，未推送或部署；不修改 `background_process_view.py`、`workspace_context.py`。
+
+复现（工作树根；实际解释器和导入origin已核对）：
+
+```bash
+PYTHONPATH=/tmp/wt-ci-8 /tmp/ci-venv-312/bin/python3 -m pytest \
+  agent_py_agent/tests/test_background_tool_policy.py \
+  agent_py_agent/tests/test_background_main_agent_runtime.py \
+  agent_py_agent/tests/test_background_history_snapshot.py \
+  agent_py_agent/tests/test_gateway_foreground_transcript.py \
+  agent_py_agent/tests/test_background_tick_cost.py \
+  agent_py_agent/tests/test_compact_quota_wake.py \
+  agent_py_agent/tests/test_gateway_goal_fuse_reset.py \
+  agent_py_agent/tests/test_gateway_conversation_control.py \
+  agent_py_agent/tests/test_session_task_real_chain.py \
+  agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py \
+  agent_py_agent/tests/test_wake_poison.py -q --tb=short --junitxml=.pytest_cache/c8-final.xml
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/c8-size.md
+ruff check agent_py_agent scripts
+```
+
+## 2026-10-27 CI Cluster 9：运行时合同修复
+
+来源：完整读取 `07-tasks/ci-fix-c9.md`（63 行）；干净起点 `83740cbf414da43fc43d05875d9f1194af9e869f`。仅在派工 `/tmp/wt-ci-9` / `ci-fix-9` 修改，不推送、不部署、不启停 Gateway。
+
+实现及合同：
+
+- `owner_wake_discovery` 重新公开原 `MemoryCuratorState` 类型；CLI 从允许的发现层入口导入，不穿透 import boundary。冷预检原 due/disabled/unknown 三态和轮转预算不变，合成 owner 不加专门放行分支。
+- SIGTERM/INT 的轻量上下文没有诊断 `state` 路径时不发布可选 SIGUSR1 标记；不阻止独立停止逻辑，不写新状态文件。
+- Darwin zombie 探测只接受实际内核状态，ESRCH/EPERM 不冒充 zombie；PID 消失仍由独立 `kill(0)` 核对。前台缺启动 birth 时先由原终止入口返回 `identity_unavailable`，不扫描树、不发信号，再仅从原 `Popen` 句柄取得父退出码；树清理始终 `confirmed=False`。有 birth 仍先清理后 reap，EOF 不等于父退出。
+- 用户取消区分“外层已注册真实异步取消回调”和“直接等待入口须自行转交”，保留 abandon、原取消宽限、真实 worker 生命周期及 200ms 慢取消旧断言。不把 Future 完成当 worker 物理退出。两个 shutdown 测试改接实际用户取消常数，不放宽原断言。
+- LocalStore 将同一 workspace/候选的数据库和事件发现合为一次扫描，而非在错误列表去重；JSONL-only 恢复、owner/symlink/特殊文件约束和 transition 写门保留。
+- 完整 JSON 截断前沿同一归档生成有界、脱敏的结构摘要，保留 `replacement_records`，不重复归档；后续摘要使用 canonical 的宿主信任/脱敏裁决，外部数据不能借原 handler 的宽松信封升级为可信摘要。成功/失败状态分别覆盖。
+- authority 故障注入从已绕开的 `list_records` 下移到实际共用权威读口，必须上抛的断言不变。Web 缓存测试原本已替换 HTTP 传输，现补确定的公网 DNS 回答；生产缓存命中的网络安全检查未删。大正文测试经真实 artifact reader 校验完整原文、哈希和非截断状态，不再假定 blob 包装有 `content` 键。
+- `test_scheduler_scan_costs.py` 在起点及当前组合均通过，没有改其实现、缓存边界或测试。
+
+复现（工作树根，保持指定解释器与 PYTHONPATH）：
+
+```bash
+(cd /tmp/wt-ci-9 && /tmp/ci-venv-312/bin/python3 -m pytest agent_py_agent/tests/test_foundation_bc_wave5.py agent_py_agent/tests/test_gateway_loops_resilience.py agent_py_agent/tests/test_gateway_host_identity.py agent_py_agent/tests/test_gateway_background_slice_shutdown.py agent_py_agent/tests/test_shell_orphan_kill.py agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_lifecycle_wake_host_event.py agent_py_agent/tests/test_model_wait_progress.py agent_py_agent/tests/test_r223_audit_regressions.py agent_py_agent/tests/test_scheduler_precheck.py agent_py_agent/tests/test_scheduler_scan_costs.py -q --tb=short)
+python3 scripts/check_import_boundaries.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/c9-size.md
+ruff check agent_py_agent scripts
+git diff --check
+```
+
 ## 2026-10-27 Wave 7 W1 R2：恢复工作流兼容并保留预检硬门
 
 来源：`07-tasks/wave7-w1-r2-fixes.md`，返工起点 `65d2daaf4f26624dcf3b4b85ee8004692ad4cb12`。代码仅在 `/tmp/wt-wave7-w1` / `wt-wave7-w1` 修改，不部署、不启停服务。

@@ -95,7 +95,7 @@ def normalize_event_fact(value) -> EventFact | None:
     )
 
 
-# LLM: actor引用/显示名按宿主事实投影，不用于授权；dropped_before/seq由hub计算；content只在插件声明
+# LLM: 非空actor身份才作为可选扩展投影，缺省保持原六事件闭合形状；身份不用于授权，seq由hub计算；content只在插件声明
 #   text 且确实有内容时出现，其余情况连键都不给，避免插件靠键的存在与否猜宿主实现。
 # 函数用途: 组装一条发给某插件的观察事件。
 def build_event_payload(envelope: EventEnvelope) -> dict:
@@ -106,8 +106,10 @@ def build_event_payload(envelope: EventEnvelope) -> dict:
         "channel": fact.channel, "thread_ref": fact.thread_ref,
         "channel_conversation_ref": fact.channel_conversation_ref,
         "actor": fact.actor, "facts": dict(fact.facts),
-        'actor_user_ref': fact.actor_user_ref, 'actor_display_name': fact.actor_display_name,
     }
+    for key in ("actor_user_ref", "actor_display_name"):
+        if value := getattr(fact, key):
+            payload[key] = value
     if envelope.include_content and fact.content:
         payload["content"] = fact.content
     return payload

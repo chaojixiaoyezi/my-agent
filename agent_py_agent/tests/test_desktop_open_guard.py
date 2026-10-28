@@ -61,18 +61,19 @@ def test_guard_io_ignores_patched_path_builtins_and_os(tmp_path, monkeypatch):
         touched.append(args[:1])
         raise AssertionError("防线不该经过被测试替换的 IO 接口")
 
-    for name in ("read_text", "read_bytes", "write_text", "open", "stat", "exists", "is_dir"):
-        monkeypatch.setattr(pathlib.Path, name, sentinel)
-    monkeypatch.setattr(builtins, "open", sentinel)
-    for name in ("open", "read", "write", "fstat", "stat", "lseek", "close"):
-        monkeypatch.setattr(os, name, sentinel)
+    with monkeypatch.context() as patch:
+        for name in ("read_text", "read_bytes", "write_text", "open", "stat", "exists", "is_dir"):
+            patch.setattr(pathlib.Path, name, sentinel)
+        patch.setattr(builtins, "open", sentinel)
+        for name in ("open", "read", "write", "fstat", "stat", "lseek", "close"):
+            patch.setattr(os, name, sentinel)
 
-    mark = guard.mark()
-    assert guard.python_opener("open")("https://example.invalid/?token=abc") is False
-    [record] = guard.take_since(mark)
-    assert record.program == "python-webbrowser.open" and "abc" not in record.arguments
-    assert guard.take_since(guard.mark()) == [] and guard.unattributed() == []
-    assert touched == []
+        mark = guard.mark()
+        assert guard.python_opener("open")("https://example.invalid/?token=abc") is False
+        [record] = guard.take_since(mark)
+        assert record.program == "python-webbrowser.open" and "abc" not in record.arguments
+        assert guard.take_since(guard.mark()) == [] and guard.unattributed() == []
+        assert touched == []
 
 
 def test_half_written_line_waits_for_its_newline(tmp_path):

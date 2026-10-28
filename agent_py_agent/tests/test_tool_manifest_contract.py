@@ -159,12 +159,17 @@ def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path):
     assert live["unavailable_tools"] == full["unavailable_tools"]
 
 
-# LLM: 使用真实外置器与临时 owner 存档，不替换 reducer 或外置策略；断言原文不是 live 短卡。
-# 函数用途: 验证两种发现工具都能从实际归档完整恢复定义。
+# LLM: 真实外置器及正式读口兼容内联/blob；逐字核对全文、SHA及定义，不以JSON包装的旧content槽位限定存储格式。
+# 函数用途: 验证两种发现工具的完整归档可实际恢复，保留短卡和权限边界而不停用大正文blob。
 def test_discovery_full_output_survives_real_externalization(tmp_path):
+    import hashlib
     from pathlib import Path
 
     from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.memory_archive.artifact.reader import (
+        ReadToolOutputArtifactRequest,
+        read_tool_output_artifact,
+    )
     from agent_py_agent.agent.memory_archive.tool_output_externalizer import (
         ExternalizeToolOutputRequest,
         externalize_tool_output_record,
@@ -179,7 +184,15 @@ def test_discovery_full_output_survives_real_externalization(tmp_path):
             root=tmp_path, tool=name, call_id=name, output=outcome.output, ok=True,
             result_envelope=outcome.result_envelope))
         assert record["output_externalized"] is True
-        stored = json.loads(Path(record["output_path"]).read_text())
+        wrapper = json.loads(Path(record["output_path"]).read_text())
+        if wrapper.get("artifact_format") == "blob_v1":
+            assert "content" not in wrapper
+            assert Path(record["output_path"]).with_suffix(".blob").is_file()
+        stored = read_tool_output_artifact(ReadToolOutputArtifactRequest(
+            root=tmp_path, artifact_ref=record["artifact_ref"], max_chars=0))
+        assert stored["ok"] and stored["content_hash_verified"]
+        assert stored["sha256"] == record["output_hash"] == hashlib.sha256(outcome.output.encode("utf-8")).hexdigest()
+        assert stored["size_bytes"] == len(outcome.output.encode("utf-8"))
         assert stored["content"] == outcome.output
         assert all("input_schema" in item for item in json.loads(stored["content"])["tools"])
         live = outcome.result_envelope["tool_output_policy"]["live_prompt_output"]

@@ -19,11 +19,13 @@ jobs:
     timeout-minutes: 90
 
     strategy:
+      fail-fast: false
       matrix:
         python-version:
           - "3.10"
           - "3.11"
           - "3.12"
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v4
@@ -52,4 +54,51 @@ jobs:
           python3 -c 'from agent_py_agent.agent.tooling.sandbox import main; raise SystemExit(main([]))'
 
       - name: Run fast tests
-        run: python3 -m pytest -q -m "not slow and not e2e" --tb=short --timeout=60
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures, os, shutil, subprocess, sys, tempfile, time
+          from pathlib import Path
+
+          shard_idx = int("${{ matrix.shard }}") - 1
+          total_shards = 4
+          all_files = sorted(str(p) for p in Path("agent_py_agent/tests").rglob("test_*.py"))
+          files = [f for idx, f in enumerate(all_files) if idx % total_shards == shard_idx]
+          batch_size = 25
+          batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
+          workers = max(1, min(os.cpu_count() or 4, 4))
+          root_tmp = Path(tempfile.mkdtemp(prefix="pytest_ci_shards_"))
+
+          def run_batch(idx: int, batch: list[str]):
+              t0 = time.monotonic()
+              basetemp = root_tmp / f"s_{idx}"
+              res = subprocess.run(
+                  [sys.executable, "-m", "pytest", "-q", "-m", "not slow and not e2e", "--tb=short", "--timeout=60", f"--basetemp={basetemp}", *batch],
+                  capture_output=True,
+                  text=True,
+              )
+              shutil.rmtree(basetemp, ignore_errors=True)
+              return idx, res.returncode, time.monotonic() - t0, res.stdout, res.stderr, batch
+
+          failed = []
+          ran_any = False
+          done = 0
+          with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+              futs = [ex.submit(run_batch, idx, b) for idx, b in enumerate(batches)]
+              for fut in concurrent.futures.as_completed(futs):
+                  idx, rc, dt, out, err, b = fut.result()
+                  done += 1
+                  if rc == 0:
+                      ran_any = True
+                  if rc not in (0, 5):
+                      print(f"[{done}/{len(batches)}] BATCH {idx} FAILED (rc={rc}, {dt:.1f}s): {b[0]} .. {b[-1]}", flush=True)
+                      print(out, flush=True)
+                      if err:
+                          print(err, file=sys.stderr, flush=True)
+                      failed.append(idx)
+                  elif done % 10 == 0 or done == len(batches):
+                      print(f"[{done}/{len(batches)}] BATCH {idx} OK ({dt:.1f}s)", flush=True)
+
+          shutil.rmtree(root_tmp, ignore_errors=True)
+          if failed or not ran_any:
+              raise SystemExit(1)
+          PY

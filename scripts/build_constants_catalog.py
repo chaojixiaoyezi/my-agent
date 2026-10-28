@@ -240,23 +240,27 @@ def check_catalog(root: Path | None = None, catalog_path: Path | None = None) ->
     return []
 
 
-# LLM: CLI 入口：默认写文件，--check 只比较不写；--output 可换输出路径（测试用）。退出码 0 表示一致/写成功。
+# LLM: 默认或--write显式生成；--check只读校验，两种显式动作互斥；--root/--output可换路径，原扫描/求值规则不变。
 # 函数用途: 命令行生成或校验常数目录。
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="生成或校验模块级数值常数目录（参数中心 P10）")
-    parser.add_argument("--check", action="store_true", help="只校验目录与源码是否一致，不写文件")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="只校验目录与源码是否一致，不写文件")
+    mode.add_argument("--write", action="store_true", help="显式生成目录（与默认动作一致）")
+    parser.add_argument("--root", default=None, help="项目根目录（默认当前仓库根）")
     parser.add_argument("--output", default=None, help="输出 JSON 路径（默认随包 config/constants_catalog.json）")
     args = parser.parse_args(argv)
-    output = Path(args.output) if args.output else _DEFAULT_OUTPUT
+    root = Path(args.root).resolve() if args.root else _ROOT
+    output = Path(args.output) if args.output else (root / "agent_py_agent" / "config" / "constants_catalog.json")
     if args.check:
-        differences = check_catalog(_ROOT, output)
+        differences = check_catalog(root, output)
         if not differences:
-            print(f"常数目录与源码一致（{len(build_catalog(_ROOT))} 项）。")
+            print(f"常数目录与源码一致（{len(build_catalog(root))} 项）。")
             return 0
         for line in differences:
             print(line)
         return 1
-    entries = build_catalog(_ROOT)
+    entries = build_catalog(root)
     payload = {
         "schema_version": 1,
         "generated_by": "scripts/build_constants_catalog.py",

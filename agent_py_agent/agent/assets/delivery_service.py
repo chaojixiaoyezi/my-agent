@@ -349,9 +349,9 @@ class AssetDeliveryService(_DeliveryStorage):
 
     # LLM: 原发送参数及管理员边界保持；备注和原文件先核已配置秘密，完成持久入队才报告queued，不声称外部送达。
     # 函数用途: 发布包裹、发件回执及接收方可消费通知，管理预置仍可显式接受。
-    def send_bundle(self, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, *positional, **options):
+    def send_bundle(self, sender_owner_id, recipient_owner_id, root_asset_kind, root_asset_id, note='', *, include_dependencies=True, allow_secret_placeholder_replace=False, auto_accept=False, auto_enable=False, sender_role='user', options=None):
         note, include_dependencies, allow_secret_placeholder_replace, auto_accept, auto_enable, sender_role = astuple(
-            DeliverySendOptions.from_call(positional, options))
+            DeliverySendOptions.resolve(note, include_dependencies=include_dependencies, allow_secret_placeholder_replace=allow_secret_placeholder_replace, auto_accept=auto_accept, auto_enable=auto_enable, sender_role=sender_role, options=options))
         sender, recipient = self._home(sender_owner_id), self._home(recipient_owner_id)
         if sender_owner_id == recipient_owner_id:
             raise AssetDeliveryError('DELIVERY_TARGET_INVALID', '投递目标不能是本人')

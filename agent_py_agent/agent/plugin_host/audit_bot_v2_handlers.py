@@ -207,7 +207,11 @@ def _observe(authorized, context, ports, payload):
 
 # LLM: 最多读取10000条公开投影；超限拒绝而非报告部分集合为完整态势，错误列表去重不丢覆盖缺口。
 # 函数用途: 为选定owner的态势聚合收集有界公开页。
-def _gather(method, caller, **arguments):
+def _gather(method, caller, *, owner_ids=None, kinds=None, severity="", since="", options=None):
+    arguments = dict(options or {})
+    for key, val in (("owner_ids", owner_ids), ("kinds", kinds), ("severity", severity), ("since", since)):
+        if val not in (None, ""):
+            arguments[key] = val
     rows, errors, token, as_of = [], {}, "", ""
     for _ in range(50):
         data = method(caller, limit=200, cursor=token, **arguments)

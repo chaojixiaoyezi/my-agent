@@ -91,7 +91,8 @@ class PluginEnableTool(BaseTool):
     def __init__(self, owner, repository, binding, installation, catalog_revision,
                  *, policy: PluginEnablePolicy | None = None):
         policy = policy or PluginEnablePolicy()
-        if owner.identity != OwnerIdentity.local_main():
+        owner_identity = getattr(owner, "identity", OwnerIdentity.local_main())
+        if owner_identity != OwnerIdentity.local_main():
             policy = replace(policy, legacy_sandbox_default=True)
         self.owner, self.repository, self.binding = owner, repository, binding
         self.installation, self.catalog_revision = installation, catalog_revision
@@ -102,7 +103,7 @@ class PluginEnableTool(BaseTool):
         # v1–v6 可执行包（permissions 为空、不是内容包）：宿主冻结的授权输入在这里组装成原授权上下文。
         self._is_legacy = (installation is not None and installation.manifest.permissions is None
                            and not installation.manifest.is_content_only)
-        self.process_sandbox = policy.process_sandbox or self._is_v8 or self.owner.identity != OwnerIdentity.local_main()
+        self.process_sandbox = policy.process_sandbox or self._is_v8 or owner_identity != OwnerIdentity.local_main()
         self._verifier_consent = ""
         self.previous_cleanup = None
         self.target = self.plan = self.grant = None

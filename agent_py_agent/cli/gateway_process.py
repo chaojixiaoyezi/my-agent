@@ -801,17 +801,20 @@ class _GatewaySignalHandlers(dict[int, object]):
         self.diagnostic_published = False
 
 
-# LLM: 公告只是同代SIGUSR1注册事实，不授健康或停止权；state必须已绑定本代，原子写失败保守拒发。
-# 函数用途: 在原状态中发布或撤销栈信号已注册标记。
+# LLM: 公告只是同代SIGUSR1注册事实，不授健康或停止权；无state路径不发表，不能阻断独立的TERM/INT处理。
+# 函数用途: 在已绑定本代的原状态中发布或撤销栈信号标记，轻量停止上下文没有诊断状态时不写文件。
 def _publish_gateway_diagnostic_signal(previous: _GatewaySignalHandlers, enabled: bool) -> bool:
-    report = read_json_file_report(previous.paths.state, context="gateway.diagnostics.publish.read")
+    state_path = getattr(previous.paths, "state", None)
+    if state_path is None:
+        return False
+    report = read_json_file_report(state_path, context="gateway.diagnostics.publish.read")
     state = report.payload or {}
     if report.load_error is not None:
         return False
     if state.get("process_identity") != previous.identity or state.get("pid") != previous.identity.get("pid"):
         return not enabled
     try:
-        write_json_file_atomic(previous.paths.state, {**state, "diagnostic_sigusr1": enabled})
+        write_json_file_atomic(state_path, {**state, "diagnostic_sigusr1": enabled})
     except (OSError, RuntimeError, ValueError):
         return False
     return True

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import re
 import time
 from collections.abc import Callable
@@ -301,12 +302,17 @@ class FragmentSearch:
 
         return long_term_record_matches_scope(row, self.recall_scope)
 
-    # LLM: 前台候选检索显式latency_safe，不记访问、不实时embed；scope/去重/预算和后续确认仍由原链执行。
+    # LLM: 支持新参数的候选口显式latency_safe；旧三参纯候选口保持原调用，不因TypeError重搜或退回带touch的search。
     # 函数用途: 仅用就绪向量或词面召回挑出可追加事实，缺向量交后台补，尚不能当作已注入。
     def additions(self, query: str) -> list:
         slots, top_k, remaining = self.budget
         chosen, seen = [], set(self.seen_ids)
-        for candidate in self.agent.memory.search_scoped_candidates(query, top_k, self.predicate, latency_safe=True):
+        search = self.agent.memory.search_scoped_candidates
+        parameters = inspect.signature(search).parameters.values()
+        options = {"latency_safe": True} if any(
+            parameter.name == "latency_safe" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters) else {}
+        for candidate in search(query, top_k, self.predicate, **options):
             cost = len(candidate.content)
             if candidate.entry_id not in seen and cost <= remaining and len(chosen) < slots:
                 chosen.append(candidate)

@@ -12,7 +12,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from types import MappingProxyType
 
-from ..common.nofollow_fs import open_directory_beneath
+from ..common.nofollow_fs import (
+    _portable_directory,
+    _supports_dir_fd,
+    open_directory_beneath,
+)
 
 PARSER_VERSION = 3
 # 产物登记表解析投影进程内LRU缓存的总字节预算上限
@@ -61,6 +65,9 @@ class RegistryProjection:
 # LLM: root由宿主调用范围传入，逐段no-follow打开验证身份；身份仅作缓存分区，不替代每次完整raw读取。
 # 函数用途: 用规范词法路径和当前目录设备/inode隔离缓存。
 def trusted_root_identity(root) -> tuple:
+    if not _supports_dir_fd():
+        info = _portable_directory(root, (), create=False).lstat()
+        return str(root), info.st_dev, info.st_ino
     descriptor = open_directory_beneath(root, ())
     try:
         info = os.fstat(descriptor)

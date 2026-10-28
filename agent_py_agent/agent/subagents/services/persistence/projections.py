@@ -42,7 +42,8 @@ from ...models import SubAgentTask
 from ..agent_run_state import build_agent_run_state, build_owner_agent_projection
 from ..control_plane_projection import sync_subagent_control_plane_projection
 
-MAX_PROJECTION_LEDGER_LINES = 2000
+# 子代理只读投影账本最多保留的行数，不替代原执行账本。
+MAX_PROJECTION_LEDGER_LINE_COUNT = 2000
 
 
 @dataclass(frozen=True)
@@ -186,7 +187,7 @@ def _sync_local_store_projection(manager: Any, task: SubAgentTask) -> None:
 
 # LLM: 原task顶层与attributes沿LocalStore同一有界scope检查；明示delivery/consume/callback欠账也不能跳过。
 # 函数用途: 判断全文是否过期，保留嵌套通知/收口事实，不将待处理任务误当历史归档。
-def _task_projection_expired(task):
+def _task_projection_expired(task, *, now: float | None = None):
     names = ("status", "ended_at", "updated_at", "completed_at", "created_at", "runtime_closeout_pending",
              "completion_notice_pending", "notification_pending", "wake_pending", "pending_closeout", "closeout_pending",
              "notify_pending", "completion_delivery_pending", "pending_completion_notification", "closeout_status",
@@ -199,7 +200,8 @@ def _task_projection_expired(task):
     if any(scope.get(key) for scope in _derived_metadata_scopes(payload)
            for key in ("delivery_pending", "consume_pending", "callback_pending")):
         return False
-    return derived_terminal_expired(payload, time.time() - DERIVED_RECORD_TTL_SECONDS)
+    current = time.time() if now is None else float(now)
+    return derived_terminal_expired(payload, current - DERIVED_RECORD_TTL_SECONDS)
 
 
 def _write_owner_agent_projection(manager: Any, task: SubAgentTask, projection: dict[str, Any]) -> None:
@@ -303,9 +305,9 @@ def _projection_ledger_tail(path):
     try:
         descriptor = open_readonly_file_beneath(path.parent, (path.name,))
     except FileNotFoundError:
-        return deque(maxlen=MAX_PROJECTION_LEDGER_LINES)
+        return deque(maxlen=MAX_PROJECTION_LEDGER_LINE_COUNT)
     with os.fdopen(descriptor, "r", encoding="utf-8", errors="replace") as handle:
-        return deque(handle, maxlen=MAX_PROJECTION_LEDGER_LINES)
+        return deque(handle, maxlen=MAX_PROJECTION_LEDGER_LINE_COUNT)
 
 
 def _write_projection_warnings(task_dir: Path, records: list[ProjectionRecord]) -> None:

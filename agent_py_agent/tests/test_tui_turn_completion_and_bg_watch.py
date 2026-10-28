@@ -1770,9 +1770,9 @@ def test_b1_unreadable_directory_is_current_projection_error(tmp_path, monkeypat
 # LLM: 小容量仅缩短驱逐测试，不更改生产默认值；两级条目按LRU有界，清空入口必须同时失效。
 # 函数用途: 验证缓存容量、驱逐与显式清空。
 def test_b1_cache_limits_and_clear_are_effective(tmp_path, monkeypatch):
-    assert getattr(bg, "_DIRECTORY_CACHE_MAX_ENTRIES", None) == 64
+    assert getattr(bg, "_PROCESS_VIEW_DIR_CACHE_MAX_ENTRIES", None) == 64
     assert getattr(bg, "_FILE_CACHE_MAX_ENTRIES", None) == 2048
-    monkeypatch.setattr(bg, "_DIRECTORY_CACHE_MAX_ENTRIES", 2)
+    monkeypatch.setattr(bg, "_PROCESS_VIEW_DIR_CACHE_MAX_ENTRIES", 2)
     monkeypatch.setattr(bg, "_FILE_CACHE_MAX_ENTRIES", 2)
     homes = [tmp_path / f"owner-{index}" for index in range(3)]
     for home in homes:
@@ -2056,6 +2056,8 @@ def test_b1r2_directory_generations_replace_one_canonical_slot(tmp_path, monkeyp
     assert list(bg._DIRECTORY_CACHE) == [(str(home.resolve()), str(root.resolve()))]
 
 
+# LLM: 同时保留4096正例和4097超限反例，只跟随常量单位命名更新，不改变目录上限或断言。
+# 函数用途: 核对目录超限必须明确报错，不能静默截断成完整列表。
 @pytest.mark.parametrize("count", [4096, 4097])
 def test_b1r2_directory_record_limit_is_explicit_not_truncation(tmp_path, monkeypatch, count):
     home = tmp_path / "owner"
@@ -2074,7 +2076,7 @@ def test_b1r2_directory_record_limit_is_explicit_not_truncation(tmp_path, monkey
         assert any(error.get("error_code") == "DIRECTORY_RECORD_LIMIT_EXCEEDED" for error in result["errors"])
         assert result["total"] == 0 and not result["unrelated_errors"]
         assert not reads and not bg._DIRECTORY_CACHE
-    assert getattr(bg, "_MAX_DIRECTORY_RECORDS", None) == 4096
+    assert getattr(bg, "_MAX_DIRECTORY_RECORDS_COUNT", None) == 4096
     assert len(bg._FILE_CACHE) <= 2048
     assert _files(home) == before and root.exists()
 
@@ -2165,11 +2167,13 @@ def test_b1r2_refreshing_all_files_does_not_renew_directory_deadline(tmp_path, m
     assert len(scans) == 2 and len(reads) == 3
 
 
+# LLM: 缩小同一有界常量以触发读取中换代；新名称只补单位，完整性断言不变。
+# 函数用途: 核对扫描期间目录增长不会被报告为完整观察。
 @pytest.mark.parametrize("initial_count", [1, 2])
 def test_b1r2_directory_growth_during_scan_cannot_claim_complete(tmp_path, monkeypatch, initial_count):
     home = tmp_path / "owner"
     root = _b1_records(home, count=initial_count)
-    monkeypatch.setattr(bg, "_MAX_DIRECTORY_RECORDS", 2)
+    monkeypatch.setattr(bg, "_MAX_DIRECTORY_RECORDS_COUNT", 2)
     original, inserted = bg._directory_record_names, []
 
     def names(path):

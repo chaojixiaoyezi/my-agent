@@ -139,6 +139,7 @@ class ShellToolOptions:
     # owner 隔离时沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录），其中本 owner 的可见范围
     # 仍放行；full access 不生效。空=不加读拒绝。HOME 落在这些根里时，子进程 HOME 改指到 owner home。
     host_private_roots: tuple[str, ...] = ()
+    full_access_other_owner_homes: str = "read_only"
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     # 来自配置 shell_sandbox_boundary_facts：owner 隔离时命令以非零码退出，结果附带沙箱边界事实，说明里多一条边界提示。
     sandbox_boundary_facts: bool = True
@@ -744,6 +745,10 @@ def _sandbox_exec(
     # Full Access is the absence of an owner wall. Persona and control metadata remain more
     # specific read-only overlays; they must not silently downgrade the rest of the filesystem.
     full_access = not owner_text
+    if full_access:
+        from ..user_space.owner_access import apply_other_owner_home_policy
+
+        host_paths = apply_other_owner_home_policy(host_paths, persona_text, host_policy.full_access_other_owner_homes)
     if owner_text:
         owner = Path(owner_text).expanduser().resolve(strict=False)
         shared = owner
@@ -1100,6 +1105,7 @@ class ShellTool(BaseTool):
         self.access_mode = _normalize_access_mode(options.access_mode)
         self.protected_persona_root = str(options.protected_persona_root or "")
         self.host_private_roots = tuple(str(root) for root in options.host_private_roots if str(root or "").strip())
+        self.full_access_other_owner_homes = options.full_access_other_owner_homes
         self.host_credential_env_names = frozenset(options.host_credential_env_names)
         self.artifact_backup_root = (
             Path(options.artifact_backup_root).expanduser().resolve(strict=False)
@@ -1380,7 +1386,8 @@ class ShellTool(BaseTool):
                                             self.protected_persona_root, *sandbox_roots[:2],
                                             SandboxWriteProtection(tuple(sandbox_roots[2] or ()), getattr(self, "_sandbox_forbidden_write_roots", ())),
                                             host_policy=SandboxHostPolicy(self.host_private_roots, getattr(self, '_sandbox_network_access', True),
-                                                                          self.host_credential_env_names))
+                                                                          self.host_credential_env_names,
+                                                                          full_access_other_owner_homes=self.full_access_other_owner_homes))
             jobs_dir = self.workspace_root / ".background_jobs"
             ensure_private_dir(jobs_dir)
             log_path = jobs_dir / f"job-{time.time_ns()}.log"
@@ -2206,7 +2213,8 @@ def _run_attempt_sandboxed_shell_command(
         sandbox_write_roots,
         sandbox_read_roots,
         SandboxWriteProtection(tuple(sandbox_protected_paths or ()), getattr(tool, "_sandbox_forbidden_write_roots", ())),
-        host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names),
+        host_policy=SandboxHostPolicy(tool.host_private_roots, getattr(tool, '_sandbox_network_access', True), tool.host_credential_env_names,
+                                      full_access_other_owner_homes=getattr(tool, "full_access_other_owner_homes", "read_only")),
     )
     deadline = time.monotonic() + max(0.0, float(timeout))
     completed = None

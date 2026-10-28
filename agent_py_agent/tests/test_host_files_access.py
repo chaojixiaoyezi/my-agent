@@ -51,7 +51,8 @@ CREDENTIAL_CODE = "PATH_HOST_CREDENTIAL_BLOCKED"
 # 9b 盘点 + 3a 口径（2026-10-02）里 owner home 下的 A 类宿主文件，逐项写死：文件、旁边的 .lock、SQLite 伴随文件，
 # 目录给一个里面的文件。runtime.db-wal 夹具里写 "HOST"，其余同。
 _STATE_FILES = ("permissions.json", "quota.json", "retention.json", "memory_policy.json", "skill_policy.json",
-                "tool_policy.json", "audit_log.jsonl", "memory/ops.jsonl", "memory/candidates.jsonl")
+                "tool_policy.json", "owner_status.json", "audit_log.jsonl", "memory/ops.jsonl", "memory/candidates.jsonl",
+                "memory/SOUL_ADMIN_BASE.md", "memory/AGENTS_ADMIN_BASE.md")
 OWNER_STATE_ITEMS = (
     *_STATE_FILES, *(f"{name}.lock" for name in _STATE_FILES),
     "runtime.db", "runtime.db-wal", "runtime.db-shm", "runtime.db-journal",
@@ -1181,6 +1182,8 @@ def test_cli_guard_only_rewrites_permission_failures_inside_the_sandbox(tmp_path
         host_state_read_only_guard,
     )
 
+    # 显式构造本用例的“沙箱外”状态；随后仍验证标记为1的拒写分支，monkeypatch退出后恢复原环境。
+    monkeypatch.delenv(HOST_STATE_READ_ONLY_ENV, raising=False)
     cant_open = None
     try:
         sqlite3.connect(tmp_path / "missing" / "local.db")

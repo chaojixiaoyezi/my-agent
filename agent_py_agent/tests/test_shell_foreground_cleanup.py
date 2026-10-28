@@ -215,6 +215,26 @@ def test_foreground_unknown_identity_never_signals(monkeypatch, launch_birth, cu
     signal_tree.assert_not_called()
 
 
+@pytest.mark.parametrize("exit_code", [None, 0, 7])
+def test_missing_launch_birth_preserves_parent_status_but_never_confirms_cleanup(monkeypatch, exit_code):
+    proc = Mock(pid=12345, returncode=None)
+    proc.poll.return_value = exit_code
+    monkeypatch.setattr(registry, "_IS_WINDOWS", False)
+    monkeypatch.setattr(registry, "_process_instance_terminated", lambda *args: False)
+    snapshot = Mock()
+    signal_tree = Mock()
+    monkeypatch.setattr(registry, "_fresh_process_tree_snapshot", snapshot)
+    monkeypatch.setattr(registry, "_signal_process_snapshot", signal_tree)
+
+    code, receipt = registry.finish_foreground_process(proc, expected_birth_token="")
+
+    assert code == exit_code
+    assert receipt.method == "identity_unavailable" and receipt.confirmed is False
+    assert receipt.unresolved_pids == (proc.pid,)
+    snapshot.assert_not_called()
+    signal_tree.assert_not_called()
+
+
 def test_closed_output_is_not_a_process_exit(monkeypatch):
     proc = Mock(pid=12345, returncode=None)
     monkeypatch.setattr(registry, "_IS_WINDOWS", False)

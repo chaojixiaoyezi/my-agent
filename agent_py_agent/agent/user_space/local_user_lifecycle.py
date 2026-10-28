@@ -173,11 +173,13 @@ class LocalUserLifecycle:
 
     # LLM: 初始审计组仅管理员，创建/重放同样先核历史IM绑定；False沿旧幂等摘要，原密码/配额/actor合同不变。
     # 函数用途: 在原创建事务里设置密码和初始资格，阻止借新账号或创建回执绕过入组检查。
-    def create(self, user_id, operation=None, *, display_name="", quota=None, password=None,
-               idempotency_key=None, in_audit_group=False, **host_options):
-        if host_options.keys() - {"actor_owner", "quotas"}:
-            raise TypeError("unsupported local user creation options")
-        actor_owner, quotas = host_options.get("actor_owner"), host_options.get("quotas")
+    def create(self, user_id, operation=None, *, display_name="", quota=None, quotas=None, password=None,
+               idempotency_key=None, in_audit_group=False, actor_owner=None, options=None):
+        if options:
+            if set(options) - {"actor_owner", "quotas"}:
+                raise TypeError("unsupported local user creation options")
+            actor_owner = options.get("actor_owner", actor_owner)
+            quotas = options.get("quotas", quotas)
         uid = validate_local_user_id(user_id)
         if type(in_audit_group) is not bool:
             raise HostAPIError("INVALID_SCHEMA")

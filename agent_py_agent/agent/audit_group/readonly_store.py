@@ -104,14 +104,18 @@ class ReadonlyAssetStore:
 
     # LLM: 从宿主root打开整条owner链，禁止先resolve来源符号链接。
     # 函数用途: 读取此owner里的一个固定JSON叶。
-    def object(self, *parts):
-        return read_object(self.root, (*self.parts, *parts))
+    def object(self, part1, part2=None, part3=None):
+        base = tuple(part1) if isinstance(part1, (tuple, list)) else (part1,)
+        tail = (*base, *(p for p in (part2, part3) if p is not None))
+        return read_object(self.root, (*self.parts, *tail))
 
     # LLM: 原批量及单资产事务未提交即拒读，避免观察或执行不一致的半版本。
     # 函数用途: 在无写入前提下检查资产发布是否完成。
-    def check_transaction(self, *parts):
+    def check_transaction(self, part1=(), part2=None):
+        base = tuple(part1) if isinstance(part1, (tuple, list)) else (part1,)
+        parts = (*base, *(p for p in (part2,) if p is not None))
         for leaf in ((".asset-batch.json",), (*parts, "asset-transaction.json")):
-            if self.object(*leaf) is not None:
+            if self.object(leaf) is not None:
                 raise ValueError("uncommitted asset transaction")
 
     # LLM: Scheduler store为唯一调度状态，坏jobs/runs不能按空处理。
@@ -167,9 +171,9 @@ class ReadonlyAssetStore:
             if len(matches) != 1:
                 raise FileNotFoundError()
             parts = matches[0]
-            self.check_transaction(*parts)
-            body = self.text(*parts, "SKILL.md")
-            meta = self.object(*parts, "skill_meta.json") or {}
+            self.check_transaction(parts)
+            body = self.text(parts, "SKILL.md")
+            meta = self.object(parts, "skill_meta.json") or {}
             disabled, policy_revision = _skill_policy_state(self)
             data = {**split_skill_frontmatter(body)[0], **meta, "body_markdown": body}
             enabled = data.get("enabled", True) is True and identifier not in disabled and f"owner:{identifier}" not in disabled
@@ -187,8 +191,10 @@ class ReadonlyAssetStore:
 
     # LLM: 源码只在宿主内存里，文本长度有界且nofollow，不产生source锁或输出文件。
     # 函数用途: 为冻结执行读取准确的脚本或技能正文。
-    def text(self, *parts):
-        raw = read_bytes_beneath(self.root, (*self.parts, *parts), max_bytes=4 * 1024 * 1024, require_dir_fd=True)
+    def text(self, part1, part2=None, part3=None):
+        base = tuple(part1) if isinstance(part1, (tuple, list)) else (part1,)
+        tail = (*base, *(p for p in (part2, part3) if p is not None))
+        raw = read_bytes_beneath(self.root, (*self.parts, *tail), max_bytes=4 * 1024 * 1024, require_dir_fd=True)
         if raw is None:
             raise FileNotFoundError()
         return raw.decode("utf-8")

@@ -2496,9 +2496,31 @@ def test_same_request_can_reenter_two_completed_workspaces_without_reviving_old_
     finally:
         del agent._current_run_params
     links = {link.task_id: link for link in agent.conversation_store.tasks.list(thread.thread_id)}
-    assert links["old-a"].status == links["old-b"].status == "completed"
-    assert all(links[task_id].status == "superseded" for task_id in visited[:-1])
+    # Wave7要求旧根保留真实继任边，不能仍声称completed；切走而尚无下一代时只能interrupted。
+    assert links["old-a"].status == links["old-b"].status == "superseded"
+    assert [links[task_id].status for task_id in visited[:-1]] == [
+        "superseded", "superseded", "superseded", "interrupted",
+    ]
     assert links[visited[-1]].status == "active"
+    assert links["old-a"].superseded_by_task_id == visited[0]
+    assert links["old-b"].superseded_by_task_id == visited[1]
+    for link in links.values():
+        if link.status == "superseded" and link.task_path:
+            successor = links[link.superseded_by_task_id]
+            assert successor.thread_id == link.thread_id and successor.task_path == link.task_path
+
+
+def test_workspace_switch_interrupts_prior_generation_without_dangling_successor():
+    from agent_py_agent.agent.conversation.task_promotion import _supersede_prior_current
+
+    requests = []
+    prior = SimpleNamespace(task_id="prior", status="active", task_path="/owner/tasks/a")
+    store = SimpleNamespace(tasks=SimpleNamespace(
+        active_report=lambda _thread: ([prior], []),
+        update_status=lambda request: requests.append(request) or prior,
+    ))
+    assert _supersede_prior_current(store, "thread", "prior", "next")
+    assert requests == [{"task_id": "prior", "status": "interrupted"}]
 
 
 @pytest.mark.parametrize("status", ["completed", "cancelled", "interrupted", "unknown", "SUPERSEDED"])

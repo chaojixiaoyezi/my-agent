@@ -273,9 +273,17 @@ def _preflight_failure(script_id, record, code, check):
 
 # LLM: 入口受原审批；版本/源硬门在runner前，执行消费同份记录，原SDK授权/沙箱/清理不变；workspace仅宿主给定。
 # 函数用途: 为工具和工作流统一增加源差异硬门，并返回原脚本结果结构。
-def run_script_with_datasources(owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None, **options):
+def run_script_with_datasources(
+    owner_home, script_id, inputs=None, *, runner=None, workspace_root=None, expected_script_pin=None,
+    timeout_seconds=None, override_data_sources=None, network_access=None, options=None,
+):
     from .script_runner import ScriptRunner, _EntrypointMissing, load_script
 
+    run_opts = dict(options or {})
+    for key, val in (('timeout_seconds', timeout_seconds), ('override_data_sources', override_data_sources),
+                     ('network_access', network_access)):
+        if val is not None:
+            run_opts[key] = val
     with bind_script_workspace(owner_home, workspace_root):
         try:
             record = load_script(owner_home, script_id)[1]
@@ -284,7 +292,7 @@ def run_script_with_datasources(owner_home, script_id, inputs=None, *, runner=No
             return _preflight_failure(script_id, {}, code, {})
         if not _execution_pin_matches(script_id, record, expected_script_pin):
             return _preflight_failure(script_id, record, 'SCRIPT_REVISION_DRIFT', record.get('source_check', {}))
-        check = _execution_source_check(owner_home, record, options.get('override_data_sources'), workspace_root)
+        check = _execution_source_check(owner_home, record, run_opts.get('override_data_sources'), workspace_root)
         status = check['status']
         if status in ('source_missing', 'source_empty', 'source_added'):
             emit_asset_im_notification(owner_home, event_type=status, title=str(record.get('name', script_id)),
@@ -293,7 +301,7 @@ def run_script_with_datasources(owner_home, script_id, inputs=None, *, runner=No
             code = 'DATASOURCE_MISSING' if status == 'source_missing' else 'DATASOURCE_EMPTY'
             return _preflight_failure(script_id, record, code, check)
         with bind_script_execution_record(owner_home, script_id, workspace_root, record):
-            result = (runner or ScriptRunner(owner_home, workspace_root=workspace_root)).run_script(script_id, inputs, **options)
+            result = (runner or ScriptRunner(owner_home, workspace_root=workspace_root)).run_script(script_id, inputs, **run_opts)
         if isinstance(result, dict):
             return {**result, 'source_check': check}
         result.source_check = check

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1171,
+  "count": 1197,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -106,6 +106,14 @@
       "unit": "秒",
       "category": "超时",
       "description": "查名网络超时 8 秒：短超时 fail-open，不让资料读取拖慢首聊热路径。"
+    },
+    {
+      "name": "_IDENTITY_TTL_SECONDS",
+      "file": "agent_py_agent/agent/adapter/feishu_profile.py",
+      "value": 1800,
+      "unit": "秒",
+      "category": "其它",
+      "description": "飞书远端身份查询结果的缓存有效秒数。"
     },
     {
       "name": "MAX_VISIBLE_DEPTH",
@@ -994,6 +1002,14 @@
       "unit": "",
       "category": "其它",
       "description": "FICLONE ioctl（Linux reflink）：_IOW(0x94, 9, int)；文件克隆的系统调用号，平台协议值（无物理单位）。"
+    },
+    {
+      "name": "MAX_RESULT_BYTES",
+      "file": "agent_py_agent/agent/audit_group/isolated_unit.py",
+      "value": 1048576,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "独立审计单元最多返回的结果字节数，超限保留原失败而不截断冒充成功。"
     },
     {
       "name": "_MAX_RETAINED_CALL_COUNT",
@@ -2676,12 +2692,44 @@
       "description": "BACKGROUND_PENDING_WAKE_PROMPT_LIMIT_COUNT 也被 runtime.py 的唤醒合批选择读取，只在这里定义。"
     },
     {
-      "name": "_TAIL_BYTES",
+      "name": "_CACHE_RECHECK_SECONDS",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 60.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "后台静态快照必须重新核验的最长秒数，热命中不延长有效期。"
+    },
+    {
+      "name": "_FILE_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 2048,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "后台进程只读视图最多缓存的单文件快照条数。"
+    },
+    {
+      "name": "_MAX_DIRECTORY_RECORDS_COUNT",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 4096,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "单个后台记录目录允许观察的记录数量上限，超限失败关闭。"
+    },
+    {
+      "name": "_PROCESS_LOG_TAIL_BYTES",
       "file": "agent_py_agent/agent/conversation/background_process_view.py",
       "value": 65536,
       "unit": "字节",
       "category": "其它",
       "description": "只读后台进程投影最多读取的日志尾部字节数。"
+    },
+    {
+      "name": "_PROCESS_VIEW_DIR_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 64,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "后台进程只读视图最多缓存的规范目录条数，每个目录只占一槽。"
     },
     {
       "name": "_FAILURE_BASE_BACKOFF_SECONDS",
@@ -2738,6 +2786,22 @@
       "unit": "字符",
       "category": "上限预算",
       "description": "单条后台转录正文最多 12000 字符：截断后保留头部，避免单条超长撑爆存储。"
+    },
+    {
+      "name": "TAIL_BYTES",
+      "file": "agent_py_agent/agent/conversation/bot_sessions.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "其它",
+      "description": "机器人会话观察最多保留的日志尾部字节数。"
+    },
+    {
+      "name": "_BOT_SESSION_STATE_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/bot_sessions.py",
+      "value": 2097152,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "机器人会话持久状态最多读取的字节数，超限不采用不完整状态。"
     },
     {
       "name": "SELECTION_RESULT_MAX_BYTES",
@@ -3300,6 +3364,30 @@
       "description": "单个消息文件去重索引最多保留的幂等键数量。"
     },
     {
+      "name": "_LIGHT_FIELDS_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_selection.py",
+      "value": 131072,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "单个消息位置索引可累计保留的轻量字段字节上限，正文仍按需读取。"
+    },
+    {
+      "name": "_POSITION_CACHE_MAX_BYTES",
+      "file": "agent_py_agent/agent/conversation/message_selection.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "消息物理位置缓存可保留的累计估算字节上限。"
+    },
+    {
+      "name": "_POSITION_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/conversation/message_selection.py",
+      "value": 131072,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "消息物理位置缓存最多保留的行索引条数。"
+    },
+    {
       "name": "THREAD_GOAL_OBJECTIVE_MAX_CHARS",
       "file": "agent_py_agent/agent/conversation/models.py",
       "value": 4000,
@@ -3516,6 +3604,14 @@
       "description": "单条会话线程元数据允许进入缓存的最大字节数。"
     },
     {
+      "name": "_THREAD_RECORD_CACHE_TOTAL_BYTES",
+      "file": "agent_py_agent/agent/conversation/store_threads.py",
+      "value": 0,
+      "unit": "字节",
+      "category": "其它",
+      "description": "线程记录只读缓存当前累计估算字节数，随缓存增删维护。"
+    },
+    {
       "name": "_UNKNOWN_PURPOSE_KEY_MAX_CHARS",
       "file": "agent_py_agent/agent/conversation/store_usage.py",
       "value": 64,
@@ -3689,7 +3785,7 @@
       "value": 86400.0,
       "unit": "秒",
       "category": "其它",
-      "description": "因为这些结果按定义属于预期等待、瞬时或环境故障，长时间故障里自动结案会误伤健康的工作。"
+      "description": "连续不计数满24小时且至少五次非batch尝试才结案；纯批次失败只隔离执行并提醒。"
     },
     {
       "name": "TOOL_CATALOG_LIMIT_COUNT",
@@ -3810,6 +3906,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "macOS gethostuuid 的等待上限秒数（timespec.tv_sec）；等不到按“取不到”处理，退回主机名。"
+    },
+    {
+      "name": "_PROCESS_START_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/gateway_parts/daemon_metadata.py",
+      "value": 512,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "只读进程出生时间观察缓存最多保留的条数，不作为接管授权依据。"
     },
     {
       "name": "_CANDIDATE_LIMIT_COUNT",
@@ -5100,6 +5204,30 @@
       "description": "存储记录预览正文的最大字符数；列表/详情展示时截断，避免整篇内容进展示。"
     },
     {
+      "name": "DERIVED_RECORD_TTL_SECONDS",
+      "file": "agent_py_agent/agent/local_storage/records.py",
+      "value": 2592000.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "已结束派生记录可保留的秒数，不凭年龄删除未结责任或权威记录。"
+    },
+    {
+      "name": "_DERIVED_FILE_CLEANUP_MAX_BYTES",
+      "file": "agent_py_agent/agent/local_storage/records.py",
+      "value": 8388608,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "每批派生文件清理的字节预算，首个大文件仍按原策略处理以免永久饥饿。"
+    },
+    {
+      "name": "_DERIVED_FILE_CLEANUP_MAX_FILES",
+      "file": "agent_py_agent/agent/local_storage/records.py",
+      "value": 1000,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "每次派生文件清理最多检查的文件数量。"
+    },
+    {
       "name": "ARTIFACT_DEFAULT_READ_CHARS",
       "file": "agent_py_agent/agent/memory_archive/artifact/read_modes.py",
       "value": 4000,
@@ -5393,7 +5521,7 @@
       "value": 512,
       "unit": "个",
       "category": "上限预算",
-      "description": "每条最多记录512个旧分片指纹，覆盖约100个生产分片且把多年目录的缓存内存封顶。"
+      "description": "最近512份旧分片保明细，更早分片折叠为前缀摘要；复用时仍逐份重新stat核验。"
     },
     {
       "name": "_TIMEOUT_SHRINK_FLOOR_COUNT",
@@ -5594,6 +5722,14 @@
       "unit": "字符",
       "category": "其它",
       "description": "拒绝并给结构化错误，已超帽的文件仍允许受控净缩减（清理才能进行）。"
+    },
+    {
+      "name": "_SOURCE_SNAPSHOT_CACHE_COUNT",
+      "file": "agent_py_agent/agent/memory_store/learning_source_authority.py",
+      "value": 64,
+      "unit": "个",
+      "category": "其它",
+      "description": "每轮只缓存64个线程快照的来源投影，不保存消息正文；淘汰仅恢复只读扫描。"
     },
     {
       "name": "HOT_MAX_INJECT_CHARS",
@@ -7012,6 +7148,14 @@
       "description": "文件锁账本最多保留的条目数；防止一次任务锁太多文件导致账本膨胀。"
     },
     {
+      "name": "MAX_PROJECTION_LEDGER_LINE_COUNT",
+      "file": "agent_py_agent/agent/subagents/services/persistence/projections.py",
+      "value": 2000,
+      "unit": "个",
+      "category": "上限预算",
+      "description": "子代理只读投影账本最多保留的行数，不替代原执行账本。"
+    },
+    {
       "name": "CLOSEOUT_RETRY_BACKOFF_AFTER_ATTEMPTS_COUNT",
       "file": "agent_py_agent/agent/subagents/services/runtime_closeout.py",
       "value": 2,
@@ -7546,6 +7690,22 @@
       "unit": "个",
       "category": "上限预算",
       "description": "回执 open_orders 里最多列出的还有效的安装单张数（最新的在前）。"
+    },
+    {
+      "name": "_MISSING_ENV_RETRY_SECONDS",
+      "file": "agent_py_agent/agent/tooling/plugin_registration.py",
+      "value": 30.0,
+      "unit": "秒",
+      "category": "重试",
+      "description": "缺失插件环境重新检查的最短间隔秒数，不改变激活或安装授权。"
+    },
+    {
+      "name": "_PLUGIN_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/tooling/plugin_registration.py",
+      "value": 128,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "插件安装快照及缺失环境提示缓存各自最多保留的条数。"
     },
     {
       "name": "_FIREWALL_NOT_RUNNING",
@@ -8316,6 +8476,22 @@
       "description": "写缓存最多缓存 5 万条索引键（个数）：批量写入前先攒内存，满了强制刷盘防失控。"
     },
     {
+      "name": "_MAX_BINDING_BYTES",
+      "file": "agent_py_agent/agent/user_space/local_user_channel_policy.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "检查本地用户通道绑定时最多读取的累计字节数。"
+    },
+    {
+      "name": "_MAX_BINDING_FILES",
+      "file": "agent_py_agent/agent/user_space/local_user_channel_policy.py",
+      "value": 128,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "通道身份来源目录允许收集的绑定文件数量上限。"
+    },
+    {
       "name": "_DEFAULT_INTERVAL_SECONDS",
       "file": "agent_py_agent/agent/user_space/owner_maintenance.py",
       "value": 86400,
@@ -8330,6 +8506,22 @@
       "unit": "字节",
       "category": "上限预算",
       "description": "原maintenance source完整快照预算，单位字节；超限拒绝，不截断后冒称同一来源。"
+    },
+    {
+      "name": "_DISPLAY_USAGE_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 256,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "仅用量展示缓存最多保留的目录统计条数，不参与写入配额准入。"
+    },
+    {
+      "name": "_DISPLAY_USAGE_TTL_SECONDS",
+      "file": "agent_py_agent/agent/user_space/owner_quota.py",
+      "value": 5.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "仅用量展示可短期复用碎片目录统计；权威写入准入绝不读取这个缓存。"
     },
     {
       "name": "_NATIVE_USAGE_SCAN_TIMEOUT_SECONDS",
@@ -9164,6 +9356,14 @@
       "description": "background_main_error_backoff_seconds / background_owner_wake_rescan_seconds），值不变；心跳节奏见 lease_service。"
     },
     {
+      "name": "STARTUP_GRACE_WINDOW_SECONDS",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 180.0,
+      "unit": "秒",
+      "category": "其它",
+      "description": "启动后暂缓非紧急后台维护的交互保护窗口秒数，不延迟撤销或恢复。"
+    },
+    {
       "name": "_BACKGROUND_OWNER_WORKER_COUNT",
       "file": "agent_py_agent/cli/gateway_loops.py",
       "value": 8,
@@ -9178,6 +9378,14 @@
       "unit": "个",
       "category": "其它",
       "description": "一个 owner 用大量待处理会话占满全局后台模型池。"
+    },
+    {
+      "name": "_COLD_CURATOR_BUILDS_PER_TICK_COUNT",
+      "file": "agent_py_agent/cli/gateway_loops.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "每拍后台维护最多冷构造的策展器数量，热实例不占此额度。"
     },
     {
       "name": "_CURATOR_DAILY_QUOTA_COUNT",

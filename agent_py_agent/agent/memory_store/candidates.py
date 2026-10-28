@@ -25,6 +25,7 @@ from typing import Any
 from ..common.global_write_commit import execute_global_write
 from ..common.json_io import (
     locked_json_path,
+    read_jsonl_objects_report,
     write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import (
@@ -85,6 +86,8 @@ _CANDIDATE_LOAD_CACHE: OrderedDict[
     str, tuple[tuple[int, int, int, int], str, tuple[MemoryCandidate, ...], dict[str, MemoryCandidate]]
 ] = OrderedDict()
 _CANDIDATE_LOAD_CACHE_LOCK = threading.Lock()
+# 旧注入点仅在显式替换时接管冷读；正常路径保持M1同FD流式解析。
+_DEFAULT_JSONL_READER = read_jsonl_objects_report
 
 
 # LLM: 四元内容身份之外以ctime检测探测/解析窗口内改写；错误不在这里吞成健康空候选。
@@ -134,7 +137,7 @@ def _drop_candidate_load_cache(path: Path) -> None:
 
 
 # LLM: 写侧先归一化owned副本，只读解析独占模型可接管；同代ID索引与元组原子发表/驱逐，最多8路径128MiB。
-# 函数用途: 缓存严格验证且磁盘代次稳定的候选及其ID索引，含成功写后的独占快照。
+# 函数用途: 缓存严格读验证且磁盘代次稳定的候选及其ID索引，不以写侧副本代替读验证。
 def _remember_candidate_load(path, probe, records, *, copy_records: bool = True):
     if probe is None or _candidate_load_stamp(path) != probe[0]:
         return
@@ -237,7 +240,7 @@ class CandidateStateChangedError(RuntimeError):
 
 # LLM: Service 只接收结构化 observation/review；不解析聊天正文或相似文本。
 # LLM: C只给原目录/锁FD/raw末写接当前scope；所有状态机/merge/CAS/配额原算法保持，同步锁不缩短。
-# LLM: 写前失效、成功后发表owned缓存；readonly_rows仅内部借用，公开list/get与写侧模型深复制隔离。
+# LLM: 写前失效、成功后仅发表字节探针，读验证后才发表模型缓存；readonly_rows仅内部借用，公开返回深复制隔离。
 # 类用途: 管理owner唯一候选源及同代只读索引，不创建第二事实源或保存活来源。
 class CandidateService:
     # LLM: 构造器只绑定 owner 规范路径和可选 quota；创建目录不读取或迁移旧候选源。
@@ -912,7 +915,7 @@ def _quota_admission(enforcer: OwnerQuotaEnforcer | None):
 # LLM: 写入用完整当前态原子 replace；不能 append 第二条相同 candidate_id。候选装记忆正文，走私有原子写（0600，目录 0700），
 #   已有 0644 的旧文件下次写入即收紧；改动同步 test_memory_file_permissions。
 # LLM: serialize/admission.check仍持原领域锁在Root外；C只把准备好的raw replace_once交原scope，默认字节/调用形状不变。
-# 函数用途: 在owned副本归一化后原子写入，成功才发表新代缓存，失败/未知结果不保留缓存。
+# 函数用途: 在owned副本归一化后原子写入，只发表字节探针，下一次读取仍须校验实际磁盘模型。
 def _write_candidates_unlocked(
     path: Path,
     candidates: list[MemoryCandidate],
@@ -982,8 +985,8 @@ def _serialize_candidates(candidates: Iterable[MemoryCandidate]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-# LLM: 调用方已持候选锁且原子写成功，owned模型不能再交外部；stat不稳或超预算时只失效不发表。
-# 函数用途: 从刚落盘文本建立解析及大文件摘要缓存，让后续读取不自砸缓存重读。
+# LLM: 写成功仅发表大文件摘要，不以写侧模型替代读合同；首次读重核schema/旧读取钩子，后续热读仍复用。
+# 函数用途: 从刚落盘文本建立字节探针，候选模型缓存保持失效到下一次严格读取。
 def _publish_written_candidates(path: Path, text: str, owned: list[MemoryCandidate]) -> None:
     stamp = _candidate_load_stamp(path)
     if stamp is None or stamp[1] > _CANDIDATE_LOAD_CACHE_MAX_BYTES or stamp[1] != len(text.encode("utf-8")):
@@ -996,7 +999,6 @@ def _publish_written_candidates(path: Path, text: str, owned: list[MemoryCandida
             _CANDIDATE_STAMP_DIGEST_CACHE.move_to_end(str(path))
             while len(_CANDIDATE_STAMP_DIGEST_CACHE) > _CANDIDATE_LOAD_CACHE_MAX_PATHS:
                 _CANDIDATE_STAMP_DIGEST_CACHE.popitem(last=False)
-    _remember_candidate_load(path, (stamp, digest), owned, copy_records=False)
 
 
 # LLM: 排除标记只按结构化 candidate_id 命中；已带同原因码的条目跳过，写回由调用方在锁内一次性完成。
@@ -1579,7 +1581,7 @@ def _write_cold_changes(path: Path, changes: dict[str, str], *, coordinator_io: 
             raise CandidateStoreCorruptError("candidate cold archive write verification failed")
 
 
-# LLM: 持原候选锁逐行校验并累积同FD摘要；只持当前字典，重复ID或任一坏行均拒绝完整加载。
+# LLM: 默认持原锁同FD流式校验；显式旧读取器覆盖仍只读此FD，重复ID/坏行及schema全部拒绝，不改变热缓存规则。
 # 函数用途: 单遍构造模型和稳定磁盘探针，避免整表原文及中间字典列表同时驻留。
 def _parse_candidate_ledger(path: Path):
     stamp = _candidate_load_stamp(path)
@@ -1588,6 +1590,15 @@ def _parse_candidate_ledger(path: Path):
     try:
         descriptor = open_readonly_file_beneath(path.parent, (path.name,))
         with os.fdopen(descriptor, "r", encoding="utf-8", newline="") as stream:
+            if read_jsonl_objects_report is not _DEFAULT_JSONL_READER:
+                from ._candidate_read_compat import read_candidate_override
+
+                records, checksum = read_candidate_override(path, stream, read_jsonl_objects_report, _parse_candidate_line)
+                if len({row.candidate_id for row in records}) != len(records):
+                    raise CandidateStoreCorruptError("candidate ledger contains duplicate candidate_id")
+                probe = ((stamp, checksum) if checksum is not None and stamp is not None
+                         and stamp[1] <= _CANDIDATE_LOAD_CACHE_MAX_BYTES and _candidate_load_stamp(path) == stamp else None)
+                return probe, records
             for line_no, raw in enumerate(stream, start=1):
                 digest.update(raw.encode("utf-8"))
                 if not raw.strip():

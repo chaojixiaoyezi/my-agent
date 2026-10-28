@@ -29,7 +29,9 @@ PROTECTED_BOT_FIELDS = frozenset({"bot_mode", "bot_generation", "bot_slot_id", "
                                   "foreground_closed", "conversation_archive_state"})
 _PREFIX = ("data", "bot_sessions")
 _SLOTS = (*_PREFIX, "slots.json")
-_MAX_STATE = 2 * 1024 * 1024
+# 机器人会话持久状态最多读取的字节数，超限不采用不完整状态。
+_BOT_SESSION_STATE_MAX_BYTES = 2 * 1024 * 1024
+# 机器人会话观察最多保留的日志尾部字节数。
 TAIL_BYTES = 65536
 
 
@@ -139,7 +141,7 @@ def _recent_bot_threads(store, thread_id):
                 if not item.name.endswith(".json"):
                     continue
                 validate_opaque_id(item.name[:-5], kind="thread")
-                raw = read_bytes_beneath(thread.owner_home, (*_PREFIX, "history", item.name), max_bytes=_MAX_STATE)
+                raw = read_bytes_beneath(thread.owner_home, (*_PREFIX, "history", item.name), max_bytes=_BOT_SESSION_STATE_MAX_BYTES)
                 row = json.loads(raw)
                 if row["bot_mode"] != fields["bot_mode"] or row["generation"] >= fields["bot_generation"]:
                     continue
@@ -173,7 +175,7 @@ class BotSessionStorage:
     # LLM: 缺失和坏JSON严格区分，不能把损坏回执当首次提交。
     # 函数用途: 读取同一owner家目录内的Bot状态文件。
     def read(self, parts):
-        raw = read_bytes_beneath(self.home.home_dir, parts, max_bytes=_MAX_STATE)
+        raw = read_bytes_beneath(self.home.home_dir, parts, max_bytes=_BOT_SESSION_STATE_MAX_BYTES)
         if raw is None:
             return None
         value = json.loads(raw)
@@ -185,7 +187,7 @@ class BotSessionStorage:
     # 函数用途: 有界写入一份Bot事务状态。
     def write(self, parts, value, admission):
         raw = canonical_json(value).encode()
-        if len(raw) > _MAX_STATE:
+        if len(raw) > _BOT_SESSION_STATE_MAX_BYTES:
             raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
         admission.check((OwnerQuotaChange(self.home.home_dir.joinpath(*parts), len(raw)),))
         write_bytes_atomic_beneath(self.home.home_dir, parts, raw)

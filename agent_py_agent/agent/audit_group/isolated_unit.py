@@ -55,6 +55,7 @@ _scope={'__name__':'__main__','__file__':'<audit-group-unit>'}
 del _cfg
 exec(_code,_scope)
 """
+# 独立审计单元最多返回的结果字节数，超限保留原失败而不截断冒充成功。
 MAX_RESULT_BYTES = 1024 * 1024
 
 

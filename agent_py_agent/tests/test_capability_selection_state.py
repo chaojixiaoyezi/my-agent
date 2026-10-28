@@ -57,6 +57,8 @@ def _finish(store, link, claim, **overrides):
     return store.tasks.finish_capability_selection(**values)
 
 
+# LLM: 从新版数据类投影旧格式时排除全部后来新增的可选字段，仍逐字节冻结旧序列化合同。
+# 函数用途: 证明缺少能力包选择标记的老任务读回重写不会被补上新状态。
 def test_absent_marker_preserves_original_task_json_bytes():
     link = ThreadTaskLink("thread", "task", "goal", skill_snapshot_refs=_refs())
     old_payload = asdict(link)
@@ -69,6 +71,8 @@ def test_absent_marker_preserves_original_task_json_bytes():
     old_payload.pop("host_channel_actor")
     old_payload.pop("host_message_context")
     old_payload.pop("input_dependency_refs")
+    # 继任指针同样是后来新增的字段；模拟旧档案不能把新版asdict的默认值当作旧JSON。
+    old_payload.pop("superseded_by_task_id")
     assert CAPABILITY_SELECTION_KEY not in link.to_dict()
     assert (json.dumps(link.to_dict(), ensure_ascii=False, sort_keys=True, indent=2).encode()
             == json.dumps(old_payload, ensure_ascii=False, sort_keys=True, indent=2).encode())

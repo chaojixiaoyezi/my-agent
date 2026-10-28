@@ -596,7 +596,10 @@ def unlink_file_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> No
 def list_names_beneath(root: str | Path, relative_parts: tuple[str, ...]) -> list[str]:
     _validate_relative_parts(relative_parts, allow_empty=True)
     if not _supports_dir_fd():
-        base = _portable_directory(root, relative_parts, create=False)
+        try:
+            base = _portable_directory(root, relative_parts, create=False)
+        except FileNotFoundError:
+            return []
         return sorted(path.name for path in base.iterdir())
     try:
         descriptor = open_directory_beneath(root, relative_parts)

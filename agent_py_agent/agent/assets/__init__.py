@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -14,6 +15,9 @@ from pathlib import Path
 
 from ..common.json_io import _flock_descriptor, _funlock_descriptor, locked_json_path
 from ..common.nofollow_fs import (
+    _portable_directory,
+    _supports_dir_fd,
+    _validate_relative_parts,
     list_names_beneath,
     open_directory_beneath,
     open_readonly_file_beneath,
@@ -99,12 +103,34 @@ def next_asset_revision(previous, expected_revision=None):
     return current + 1
 
 
+# LLM: POSIX沿用dir_fd打开后关闭；缺少dir_fd的平台（Windows）走_portable_directory逐段lstat拒绝链接与非目录。
+# 函数用途: 统一校验或按需创建受管子目录，避免Windows上os.open打开目录报PermissionError。
+def _verify_directory_beneath(root, parts=(), *, create=False):
+    _validate_relative_parts(parts, allow_empty=True)
+    if not _supports_dir_fd():
+        return _portable_directory(root, parts, create=create)
+    os.close(open_directory_beneath(root, parts, create=create))
+    return Path(root).joinpath(*parts)
+
+
+# LLM: POSIX走open_readonly_file_beneath；Windows无dir_fd时先逐段校验父目录再lstat核验单链接普通文件。
+# 函数用途: 安全打开已存在的只读锁文件描述符，缺失时抛FileNotFoundError。
+def _open_readonly_lock_beneath(root, parts):
+    if not _supports_dir_fd():
+        target = _verify_directory_beneath(root, parts[:-1]) / parts[-1]
+        info = target.lstat()
+        if not stat.S_ISREG(info.st_mode) or int(info.st_nlink) != 1:
+            raise PermissionError('资产锁不是单链接普通文件')
+        return os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    return open_readonly_file_beneath(root, parts)
+
+
 # LLM: 只有显式写操作可调用create=True；逐段从授权workspace打开.agent，不resolve内部链接。
 # 函数用途: 校验或创建项目资产根，冷读缺失时仅返回词法位置。
 def workspace_asset_home(workspace_root, *, create=False):
     root = Path(os.path.abspath(workspace_root))
     try:
-        os.close(open_directory_beneath(root, ('.agent',), create=create))
+        _verify_directory_beneath(root, ('.agent',), create=create)
     except FileNotFoundError:
         if create:
             raise
@@ -126,7 +152,7 @@ _ASSET_LOCK_CONTEXT = threading.local()
 def asset_root_lock(home):
     from .workspace_assets import _recover_batch
 
-    os.close(open_directory_beneath(home, ()))
+    _verify_directory_beneath(home, ())
     with locked_json_path(home / '.asset-batch'):
         previous = getattr(_ASSET_LOCK_CONTEXT, 'roots', ())
         _ASSET_LOCK_CONTEXT.roots = (*previous, str(Path(home).absolute()))
@@ -167,7 +193,7 @@ class _AssetStore:
         self._global_roots = _global_roots(self.owner_home, extra_roots)
         self._read_only, self.is_admin = False, is_admin is True
         self.owner_home.mkdir(parents=True, exist_ok=True)
-        os.close(open_directory_beneath(self.owner_home, ()))
+        _verify_directory_beneath(self.owner_home, ())
         self.collection, self.filename = collection, filename
 
     # LLM: is_admin是可信宿主核实后传入的身份事实，不接受1等真值；拒绝发生在任何目录创建前，不从资产正文授权。
@@ -206,7 +232,7 @@ class _AssetStore:
     @contextmanager
     def _readonly_locked(self):
         try:
-            descriptor = open_readonly_file_beneath(self.owner_home, (self.collection, '.assets.lock'))
+            descriptor = _open_readonly_lock_beneath(self.owner_home, (self.collection, '.assets.lock'))
         except FileNotFoundError:
             try:
                 yield
@@ -230,7 +256,7 @@ class _AssetStore:
     # 函数用途: 防止全局锁等待或读取期间的身份变化击穿一致性。
     def _check_readonly_lock(self, descriptor):
         try:
-            current = open_readonly_file_beneath(self.owner_home, (self.collection, '.assets.lock'))
+            current = _open_readonly_lock_beneath(self.owner_home, (self.collection, '.assets.lock'))
         except FileNotFoundError:
             if descriptor is not None:
                 raise BlockingIOError('全局资产锁已消失，请重试') from None
@@ -254,7 +280,7 @@ class _AssetStore:
                     raise ValueError('资产批量事务未提交，请显式写操作恢复')
                 yield
             return
-        os.close(open_directory_beneath(self.owner_home, (self.collection,), create=True))
+        _verify_directory_beneath(self.owner_home, (self.collection,), create=True)
         with asset_root_lock(self.owner_home):
             with locked_json_path(self.owner_home / self.collection / ".assets"):
                 yield
@@ -409,6 +435,9 @@ class _AssetStore:
             self._text(asset_id, name)
         for name in names:
             self._put(asset_id, name, None)
+        if not _supports_dir_fd():
+            _verify_directory_beneath(self.owner_home, parts).rmdir()
+            return True
         parent = open_directory_beneath(self.owner_home, (self.collection,))
         try:
             os.rmdir(asset_id, dir_fd=parent)

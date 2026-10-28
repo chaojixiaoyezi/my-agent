@@ -591,9 +591,11 @@ def _request_context(request):
     return ()
 
 
-# LLM: 显式不同task先拒绝，共同root或谱系不能覆盖子任务身份；同task轨迹/旧run兼容规则不变。
+# LLM: 用户总结与自动总结不互吞；显式不同task先拒绝，共同root或谱系不能覆盖来源和子任务身份。
 # 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
 def _mergeable_requests(left, right):
+    if (left.get('requested_by') or 'auto') != (right.get('requested_by') or 'auto'):
+        return False
     if left.get('task_id') and right.get('task_id') and left['task_id'] != right['task_id']:
         return False
     contexts = _request_context(left), _request_context(right)

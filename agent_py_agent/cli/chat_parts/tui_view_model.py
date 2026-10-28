@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理历史、候选与界面状态；同一状态复用不可变快照，真实变更后重新投影，终态不被重放改写。
+# 模块用途: 管理历史、候选与界面状态；同一状态复用不可变快照，已对齐的计时不重复分配槽位，终态不被重放改写。
 
 from __future__ import annotations
 
@@ -411,13 +411,16 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         if timing_id in selected:
             self._align_history_timing(final_id, timing_id, event.seq)
 
-    # LLM: stable/active共用renderer全序，只把本计时移到final后；重建唯一整数显示槽位以消除重复槽位的updated_seq/id反排。
+    # LLM: stable/active共用renderer全序，只把本计时移到final后；已紧邻时不改槽位，保证canonical重复回放严格幂等。
     #   槽位上界不超过本次真实事件seq，后续新事件仍在尾部；不改updated_seq、journal、正文或业务状态。
     # 函数用途: 保持所有其它稳定/活动块相对次序，让计时在真实渲染中紧邻final，而不是只在列表中相邻。
     def _align_history_timing(self, final_id: str, timing_id: str, event_seq: int) -> None:
         blocks = sorted([*self.stable_blocks, *self.active_blocks.values()],
                         key=lambda block: (block.created_seq, block.updated_seq, block.block_id))
         timing = next(block for block in blocks if block.block_id == timing_id)
+        final_index = next(i for i, block in enumerate(blocks) if block.block_id == final_id)
+        if final_index + 1 < len(blocks) and blocks[final_index + 1].block_id == timing_id:
+            return
         blocks = [block for block in blocks if block.block_id != timing_id]
         index = next(i for i, block in enumerate(blocks) if block.block_id == final_id)
         blocks.insert(index + 1, timing)

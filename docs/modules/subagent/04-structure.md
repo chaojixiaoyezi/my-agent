@@ -1,3 +1,7 @@
+## 2026-10-27 CI 全绿收敛：子代理全文投影 TTL 时钟注入与常数单位对齐结构
+
+- `services/persistence/projections.py::_task_projection_expired(task, *, now=None)` 与 `_subagent_index_expired` 接受显式 `now` 时间戳，统一委托 `local_storage.records.derived_record_expired` 判断 30 天终态 TTL；`_SUBAGENT_FULLTEXT_RETENTION_SECONDS` 与 `_PROJECTION_LEDGER_MAX_LINES_COUNT` 对齐常数目录单位后缀。
+
 ## 2026-10-26 Wave 6 B3-R3 子代理重建准入、收口与引用结构
 
 - `services/persistence/projections.py::_task_projection_expired` 将可信 task 状态、生命周期时间和规范 attributes 收口标记交给 LocalStore 公共终态判定。持久化全文投影与 CLI 重建复用该入口；CLI 对文件源另外检查 `DERIVED_PRUNABLE_SOURCE_TYPES`，不把 30 天策略扩到非白名单回填。

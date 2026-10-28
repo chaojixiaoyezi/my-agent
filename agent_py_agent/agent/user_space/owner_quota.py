@@ -30,7 +30,8 @@ _QUOTA_LOCK_BASENAME = ".owner-quota"
 _NATIVE_USAGE_SCAN_TIMEOUT_SECONDS = 15.0
 # 仅用量展示可短期复用碎片目录统计；权威写入准入绝不读取这个缓存。
 _DISPLAY_USAGE_TTL_SECONDS = 5.0
-_DISPLAY_USAGE_CACHE_LIMIT = 256
+# 仅用量展示缓存最多保留的目录统计条数，不参与写入配额准入。
+_DISPLAY_USAGE_CACHE_MAX_ENTRIES = 256
 _DISPLAY_USAGE_CACHE: OrderedDict[Path, tuple[tuple[int, ...], float, int]] = OrderedDict()
 _DISPLAY_USAGE_LOCK = RLock()
 
@@ -359,7 +360,7 @@ def _directory_usage_bytes(owner_root: Path, base: Path, names: list[str], *, ca
         with _DISPLAY_USAGE_LOCK:
             _DISPLAY_USAGE_CACHE[base] = (key, now, total)
             _DISPLAY_USAGE_CACHE.move_to_end(base)
-            while len(_DISPLAY_USAGE_CACHE) > _DISPLAY_USAGE_CACHE_LIMIT:
+            while len(_DISPLAY_USAGE_CACHE) > _DISPLAY_USAGE_CACHE_MAX_ENTRIES:
                 _DISPLAY_USAGE_CACHE.popitem(last=False)
     return total
 

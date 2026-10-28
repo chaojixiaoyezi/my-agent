@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: 包范围与动作是结构化参数；resource_path 只接受显式 get，字段约束和 action 默认须与 execute 一致。
+# LLM: 保持冻结模型schema；全局cursor仅兼容运行期续页，不新增模型字段；resource_path仍只接受显式get。
 # 函数用途: 声明统一方法检索入口和参数边界，不据正文路径、query 或错选择器扩权。
 def build_skill_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
@@ -79,7 +79,6 @@ def build_skill_search_model_spec() -> ToolModelSpec:
                 "package_id": {"type": "string", "description": "逐字复制能力包摘要的 package_id；与 skill_id 互斥。action=get 读取包入口或资源，action=search 检索包内资源；省略本字段时只检索公开摘要。"},
                 "resource_path": {"type": "string", "description": "仅包内 action=get 可传；action=search 即使空串也不能传。使用已声明的包根相对成员路径，不是宿主地址；省略时读取入口。"},
                 "offset": {"type": "integer", "minimum": 0, "description": "包内检索的结果偏移，或正文读取的字符偏移。"},
-                "cursor": {"type": "string", "description": "全局检索下一页的不透明游标，绑定当前查询和冻结候选版本。"},
                 "max_chars": {"type": "integer", "minimum": 1, "description": "包正文单页字符数，不超过原 tool_read_max_chars 配置。"},
                 "expected_package_sha256": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的包摘要，防止读到同名新版本。"},
                 "expected_activation_id": {"type": "string", "description": "原样携带 next_read、next_search 或分页 continuation 中的激活代次，停用重启后的旧建议不能继续使用。"},

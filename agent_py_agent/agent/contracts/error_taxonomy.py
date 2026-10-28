@@ -54,6 +54,91 @@ class ErrorContract:
 
 
 ERROR_CONTRACTS: dict[str, ErrorContract] = {
+    "ASSET_DEPENDENCY_MISSING": ErrorContract(
+        code="ASSET_DEPENDENCY_MISSING", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="核对原资产及缺失依赖的准确引用，在原授权范围修复依赖后再执行；不补造资产、不绕过依赖门或盲目重放。",
+    ),
+    "BOT_TOOL_BUDGET_EXCEEDED": ErrorContract(
+        code="BOT_TOOL_BUDGET_EXCEEDED", category="resource", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="Bot本次请求的工具额度已耗尽；使用现有证据交付并说明未完成项，不拆请求、换身份或修改运行策略绕过预算。",
+    ),
+    "BOT_TOOL_DENIED": ErrorContract(
+        code="BOT_TOOL_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="当前Bot模式或宿主冻结的工具策略不允许此调用；由原授权者核对准确能力，不换Bot、普通代理或其他身份绕过。",
+    ),
+    "COMMAND_ADMIN_REQUIRED": ErrorContract(
+        code="COMMAND_ADMIN_REQUIRED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="该管理命令需要真实本机管理员；请原管理员通过受控入口操作，不从参数自报管理员、借其他账号或改底层文件绕过。",
+    ),
+    "DATASOURCE_CONNECT_FAILED": ErrorContract(
+        code="DATASOURCE_CONNECT_FAILED", category="tool", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="数据源检查连接失败；查看原检查的异常类型及连接配置，修复后显式复查，不把失败当空数据、不换他人凭据或重放业务写入。",
+    ),
+    "GATEWAY_RESTART_DRAINING": ErrorContract(
+        code="GATEWAY_RESTART_DRAINING", category="state", retryable=True,
+        recommended_action=RecoveryAction.RETRY.value,
+        recovery_hint="宿主已在工具开跑前因安全重启拒绝，本次没有执行；待原Gateway重新就绪后可重试该未开始调用，不重放其他已执行或未知操作。",
+    ),
+    "HOST_NOT_READY": ErrorContract(
+        code="HOST_NOT_READY", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="原宿主接线、身份或领域能力尚不可用；核对同一入口的就绪与原回执，不降级到旧协议、不补造来源或假定失败前没有副作用。",
+    ),
+    "SCHEDULER_ASSET_RECOVERY_REQUIRED": ErrorContract(
+        code="SCHEDULER_ASSET_RECOVERY_REQUIRED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原调度资产事务持续变化或恢复尚未完成；核对原事务及任务版本，由宿主恢复一致状态，不删锁、另建任务或自动重放调度动作。",
+    ),
+    "SCRIPT_REVISION_DRIFT": ErrorContract(
+        code="SCRIPT_REVISION_DRIFT", category="state", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,
+        recovery_hint="依赖脚本已偏离原固定版本；核对变更与原断点，取得显式漂移确认后沿原工作流恢复，不自动接受新脚本或重新运行整条链。",
+    ),
+    "WORKFLOW_OUTPUT_CONTRACT_VIOLATION": ErrorContract(
+        code="WORKFLOW_OUTPUT_CONTRACT_VIOLATION", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原工作流输出未满足声明合同；核对缺失字段和类型并修复原断点，保留已执行步骤事实，不删除合同要求或从头重放副作用。",
+    ),
+    "WORKSPACE_CONTROL_INVALID": ErrorContract(
+        code="WORKSPACE_CONTROL_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前会话不满足目录切换或分叉命令的输入/状态要求；读取原会话及目录状态，修正准确参数，不凭正文猜目标或自动重复无效控制。",
+    ),
+    "WORKSPACE_DIR_INVALID": ErrorContract(
+        code="WORKSPACE_DIR_INVALID", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原工作目录不存在、类型不符或不满足路径要求；核对准确目录及原权限，不自动创建替身目录、换owner或扩大路径范围。",
+    ),
+    "WORKSPACE_REVISION_CONFLICT": ErrorContract(
+        code="WORKSPACE_REVISION_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="工作目录版本已变化，旧控制未被接受；重新读取当前版本并核对用户意图后提交，不按旧版本盲重试或覆盖并发更新。",
+    ),
+    "TOOL_EXECUTION_DENIED": ErrorContract(
+        code="TOOL_EXECUTION_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="原Broker调用被可信执行器拒绝；核对准确授权与审批回执，不原样重试、不借其他工具或身份绕过。",
+    ),
+    "TOOL_EXECUTION_TIMEOUT": ErrorContract(
+        code="TOOL_EXECUTION_TIMEOUT", category="tool", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原Broker调用超时，副作用是否完成尚不能由此确定；核对原调用及退出/提交回执，确认前不自动重放或另起替身调用。",
+    ),
+    "TOOL_EXECUTION_ERROR": ErrorContract(
+        code="TOOL_EXECUTION_ERROR", category="tool", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原Broker执行器抛出异常，可能已有局部副作用；保留原调用并核实实际结果，不把异常当未执行或自动重放。",
+    ),
+    "TOOL_EXECUTION_INCOMPLETE": ErrorContract(
+        code="TOOL_EXECUTION_INCOMPLETE", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="原执行已暂停等待修复或恢复；读取原运行和断点，沿准确恢复入口处理，不把传输成功当业务完成或从头重跑。",
+    ),
     "AGENTS_WRITE_USER_ONLY": ErrorContract(
         code="AGENTS_WRITE_USER_ONLY", category="permission", retryable=False,
         recommended_action=RecoveryAction.REQUEST_USER_INPUT.value,

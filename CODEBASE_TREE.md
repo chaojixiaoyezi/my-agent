@@ -3,8 +3,11 @@
 ```text
 |-- agent_py_agent/agent/capability/
 |   |-- asset_promotion.py # 四类一等公民资产确定性静态核验、载体选择与自动晋升
+|   |-- package_output_projection.py # 能力包产物与工具执行输出的统一结构化投影辅助
 |   |-- skill_learning_promotion.py # 自学技能候选证明持久化、CAS绑定与无人工确认自动发布
 |   `-- skill_learning_validation.py # 自学技能、脚本与工作流草稿结构、语法与安全门校验
+|-- agent_py_agent/agent/memory_store/
+|   `-- _candidate_read_compat.py # 候选记忆单行流式解析、未知字段保留与冷热兼容辅助
 |-- agent_py_agent/agent/plugin_host/
 |   |-- action_specs_v2_portal.py # Web工作台（Coding与渗透测试）新增Host v2动作目录与Schema规范
 |   |-- builtin_plugins_v2.py # 内置插件列表查询与按Owner持久化启停切换Handler
@@ -13,11 +16,15 @@
 |   |-- thread_settings_v2.py # 会话级能力包、模型、权限模式与工作区统一设置及CAS更新Handler
 |   `-- workspace_v2_handlers.py # 工作区nofollow文件列表、读写、20MiB上传下载与有界只读Git观察Handler
 |-- agent_py_agent/tests/
+|   |-- test_artifact_index_cache_selection.py # 产物索引缓存选择、热更新与边界回归单测
+|   |-- test_capability_package_output_projection.py # 能力包输出投影与引用恢复单测
 |   |-- test_capability_router_r4.py # 脚本与工作流选中引用进入提示索引渲染与范围过滤回归
+|   |-- test_ci_c1_config_contracts.py # 配置默认值、常数目録与模块边界合同单测
 |   |-- test_plugin_host_requests_and_streams_v2.py # 请求中断/接管、SSE after_seq续传与门户动作装配单测
 |   |-- test_plugin_host_subagents_and_workspace.py # 子代理监控/停止与工作区文件/Git安全边界单测
 |   |-- test_plugin_host_thread_and_model_settings.py # 会话设置、生命周期扩展、模型供应商与内置插件单测
 |   |-- test_plugin_host_w6_r2.py # W6门户动作权限映射、幂等与流式回放边界回归
+|   |-- test_sandbox_ci_contracts.py # 跨平台沙箱、路径策略与CI环境隔离合同单测
 |   |-- test_skill_learning_r4.py # 跨更新采用身份、静态检查与无效反馈回归
 |   |-- test_wave7_autonomous_learning_closure.py # 自主学习A1-E1/F01-F17全链路闭环单测
 |   |-- test_wave7_broker_workflow_identity.py # 项目资产双层作用域、数据源预检、能力包范围与身份解析单测

@@ -50,6 +50,7 @@ class _CachedThread:
 
 
 _THREAD_RECORD_CACHE: OrderedDict[str, _CachedThread] = OrderedDict()
+# 线程记录只读缓存当前累计估算字节数，随缓存增删维护。
 _THREAD_RECORD_CACHE_TOTAL_BYTES: int = 0
 
 
@@ -82,6 +83,8 @@ def _store_cached_thread(
     snapshot = _clone_cached_thread(thread)
     key = str(path)
     with _THREAD_RECORD_CACHE_LOCK:
+        if len(_THREAD_RECORD_CACHE) <= 4:
+            _THREAD_RECORD_CACHE_TOTAL_BYTES = sum(item.size_bytes for item in _THREAD_RECORD_CACHE.values())
         previous = _THREAD_RECORD_CACHE.pop(key, None)
         if previous is not None:
             _THREAD_RECORD_CACHE_TOTAL_BYTES -= previous.size_bytes

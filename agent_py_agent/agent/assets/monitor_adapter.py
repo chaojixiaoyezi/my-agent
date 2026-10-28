@@ -14,7 +14,7 @@ from ..common.nofollow_fs import (
     read_bytes_beneath,
     write_text_atomic_beneath,
 )
-from . import asset_root_lock, next_asset_revision, safe_asset_id
+from . import _verify_directory_beneath, asset_root_lock, next_asset_revision, safe_asset_id
 from .descriptor import AssetDescriptor
 
 
@@ -44,7 +44,7 @@ def save_monitor_binding(owner_home, monitor_id, *, name='', summary='', schedul
     parts = ('data', 'monitors', identifier + '.json')
     home.mkdir(parents=True, exist_ok=True)
     with asset_root_lock(home):
-        os.close(open_directory_beneath(home, ('data', 'monitors'), create=True))
+        _verify_directory_beneath(home, ('data', 'monitors'), create=True)
         with locked_json_path(home / 'data' / 'monitors' / (identifier + '.json')):
             previous = _read_object(home, parts)
             payload['revision'] = next_asset_revision(previous, bindings.get('expected_revision'))

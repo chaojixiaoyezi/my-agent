@@ -18,6 +18,8 @@ from pathlib import Path
 from ..common.cache_freshness import cache_entry_trustworthy
 from ..common.nofollow_fs import (
     NoFollowPathError,
+    _portable_directory,
+    _supports_dir_fd,
     open_directory_beneath,
     open_readonly_file_beneath,
     read_bytes_beneath,
@@ -29,10 +31,14 @@ from .process_events import _managed_instance_still_live
 
 _TERMINAL = frozenset({"exited", "failed", "killed", "completed", "not_started"})
 # 只读后台进程投影最多读取的日志尾部字节数。
-_TAIL_BYTES = 64 * 1024
-_DIRECTORY_CACHE_MAX_ENTRIES = 64
+_PROCESS_LOG_TAIL_BYTES = 64 * 1024
+# 后台进程只读视图最多缓存的规范目录条数，每个目录只占一槽。
+_PROCESS_VIEW_DIR_CACHE_MAX_ENTRIES = 64
+# 后台进程只读视图最多缓存的单文件快照条数。
 _FILE_CACHE_MAX_ENTRIES = 2048
-_MAX_DIRECTORY_RECORDS = 4096
+# 单个后台记录目录允许观察的记录数量上限，超限失败关闭。
+_MAX_DIRECTORY_RECORDS_COUNT = 4096
+# 后台静态快照必须重新核验的最长秒数，热命中不延长有效期。
 _CACHE_RECHECK_SECONDS = 60.0
 _SCOPE_FIELDS = ("access_scope", "execution_scope", "activation_scope", "completion_target", "metadata", "scope")
 _ATTRIBUTION_FIELDS = ("owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id")
@@ -161,6 +167,9 @@ def _store_view_cache(cache, key, snapshots, verified_at, limit, *, dir_stat_key
 # LLM: 原nofollow入口只读打开真实根，权限/链接/类型错误不伪装成缺失；FD用完立即关闭。
 # 函数用途: 读取目录dev/ino/mtime指纹，同时确认它仍可安全打开。
 def _directory_stat_key(root: Path) -> tuple[int, int, int]:
+    if not _supports_dir_fd():
+        metadata = _portable_directory(root, (), create=False).lstat()
+        return metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns
     descriptor = open_directory_beneath(root, ())
     try:
         metadata = os.fstat(descriptor)
@@ -194,7 +203,7 @@ def _directory_record_names(root: Path):
         for item in entries:
             if not (item.name.startswith("bg-") and item.name.endswith(".json")):
                 continue
-            if len(names) == _MAX_DIRECTORY_RECORDS:
+            if len(names) == _MAX_DIRECTORY_RECORDS_COUNT:
                 return None
             names.append(item.name)
     return sorted(names)
@@ -251,7 +260,7 @@ def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]
         return _directory_projection_error(root, key, code)
     if trusted and all(item.cacheable for item in snapshots):
         verified_at = min(observed_at, min((item.verified_at for item in snapshots), default=observed_at))
-        _store_view_cache(_DIRECTORY_CACHE, key, snapshots, verified_at, _DIRECTORY_CACHE_MAX_ENTRIES, dir_stat_key=before)
+        _store_view_cache(_DIRECTORY_CACHE, key, snapshots, verified_at, _PROCESS_VIEW_DIR_CACHE_MAX_ENTRIES, dir_stat_key=before)
     return snapshots
 
 
@@ -514,9 +523,9 @@ def _log_tail(home: Path, root: Path, session_id: str, payload: dict, tail_lines
             continue
         with os.fdopen(fd, "rb") as stream:
             size = os.fstat(stream.fileno()).st_size
-            offset = max(0, size - _TAIL_BYTES)
+            offset = max(0, size - _PROCESS_LOG_TAIL_BYTES)
             stream.seek(offset)
-            content = stream.read(_TAIL_BYTES)
+            content = stream.read(_PROCESS_LOG_TAIL_BYTES)
         if offset:
             # 窗口从一条长行中部开始时舍掉残片；不能把残片冒充完整日志行。
             content = content.partition(b"\n")[2]
@@ -542,7 +551,7 @@ def background_watch_rows(value: object) -> tuple[dict, ...]:
             continue
         row = {key: raw[key] for key in fields if key in raw and isinstance(raw[key], (str, int, float, bool, type(None)))}
         tail = raw.get("log_tail")
-        row["log_tail"] = "\n".join(str(line) for line in tail[-80:])[-_TAIL_BYTES:].splitlines() if isinstance(tail, (list, tuple)) else []
+        row["log_tail"] = "\n".join(str(line) for line in tail[-80:])[-_PROCESS_LOG_TAIL_BYTES:].splitlines() if isinstance(tail, (list, tuple)) else []
         rows.append(row)
         seen.add(sid)
     return tuple(rows)

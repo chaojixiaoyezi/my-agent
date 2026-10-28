@@ -20,8 +20,10 @@ from ..agent.gateway_parts import (
     gateway_stale_processing,
     rebuild_gateway_index,
 )
-from ..agent.local_storage.records import DERIVED_PRUNABLE_SOURCE_TYPES
-from ..agent.subagents.services.persistence.projections import _task_projection_expired
+from ..agent.local_storage.records import (
+    DERIVED_PRUNABLE_SOURCE_TYPES,
+    _task_projection_expired,
+)
 from .common import _memory_record_count
 
 

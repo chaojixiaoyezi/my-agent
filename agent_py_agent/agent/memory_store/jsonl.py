@@ -2463,14 +2463,17 @@ class MemoryAuthorityCorruptError(ValueError):
     code = "MEMORY_AUTHORITY_UNREADABLE"
 
 
-# LLM: 写调用方须持formal锁；两文件JSON/UTF8/对象/schema任一坏行均拒绝，普通容错读不使用此入口。
+# LLM: 写调用方须持formal锁；严格源缺失/不可读与坏JSON/schema统一报权威不可读，不创建空库或清pending。
 # 函数用途: 严格读取全部前像事件，保护重写不丢未解析行。
 def _strict_memory_events(path: Path, *, require_source: bool = False) -> list[MemoryRecord]:
     from ._jsonl_maintenance import require_maintenance_event
 
     events = []
     if require_source:
-        path.stat()
+        try:
+            path.stat()
+        except OSError as exc:
+            raise MemoryAuthorityCorruptError("MEMORY_AUTHORITY_UNREADABLE") from exc
     for source in (_tombstone_path(path), path):
         report = read_jsonl_objects_report(source, context="memory_store.prewrite")
         if report.load_errors:

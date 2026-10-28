@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from agent_py_agent.agent.plugin_host.action_specs import action_specs
 from agent_py_agent.agent.plugin_host.contracts import decode_call
 from agent_py_agent.agent.plugin_host.errors import HostAPIError
 from agent_py_agent.agent.plugin_permissions.host_grants import validate_host_grant
@@ -100,10 +101,11 @@ def production_call(host, action, payload=None, *, user=None, key=None, status=2
 
 
 # LLM: 显式空HostComposition旧单测保持不变；此处构造真实paths而不替换端口。
-# 函数用途: 证明实际Gateway发现目录的42项均接入，而非仅host动作。
+# 函数用途: 证明实际Gateway发现目录与当前完整动作合同一致，且每项都真实可用。
 def test_production_gateway_wires_all_actions(production_host):
     rows = production_call(production_host, "host.capabilities.get")["actions"]
-    assert len(rows) == 42
+    assert len(rows) == len(action_specs())
+    assert {row["action"] for row in rows} == set(action_specs())
     assert all(row["available"] for row in rows), [row["action"] for row in rows if not row["available"]]
 
 

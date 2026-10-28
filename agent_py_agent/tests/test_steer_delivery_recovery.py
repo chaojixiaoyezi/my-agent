@@ -174,13 +174,13 @@ def test_wall_timeout_retry_resubmits_the_steer_under_the_retry_call(tmp_path, m
     wall_timeouts: list[float] = []
 
     # 函数用途: 第一次物理调用等后端进入后按 0.05 秒墙钟等待；之后的调用原样使用配置超时（参数同原函数）。
-    def wait_with_per_call_wall_clock(*call):
+    def wait_with_per_call_wall_clock(*call, **kwargs):
         *wait_args, timeout = call
         if not wall_timeouts:
             assert backend.first_call_entered.wait(timeout=10.0)
             timeout = 0.05
         wall_timeouts.append(timeout)
-        return original_wait(*wait_args, timeout)
+        return original_wait(*wait_args, timeout, **kwargs)
 
     monkeypatch.setattr(generation, "_wait_for_generation_result", wait_with_per_call_wall_clock)
     try:

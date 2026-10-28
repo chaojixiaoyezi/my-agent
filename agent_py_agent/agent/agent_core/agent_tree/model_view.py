@@ -72,8 +72,8 @@ def agent_tree_model_payload(snapshot: dict[str, object]) -> dict[str, object]:
     }
 
 
-# LLM: 不修改完整正文；长结果只压缩当前 prompt，未展示的节点/引用必须计数并由统一归档锚点恢复。
-# 函数用途: 给大代理树保留有界且完整的 JSON 状态摘要，避免通用头尾裁剪吞掉运行状态或切坏路径。
+# LLM: 完整正文不变；长树先覆盖更多节点，每节点只留首条完整引用并准确计遗漏，余项沿统一归档恢复。
+# 函数用途: 生成有界JSON状态摘要，防止前部节点贪占引用预算而吞掉后续状态或切坏路径。
 def agent_tree_model_preview(payload: dict[str, object]) -> str:
     full = _json(payload)
     if len(full) <= _LIVE_CHARS:
@@ -88,13 +88,7 @@ def agent_tree_model_preview(payload: dict[str, object]) -> str:
         row["last_progress_summary"] = str(node.get("last_progress_summary") or "")[:160]
         refs = node.get("read_order")
         refs = [item for item in refs if isinstance(item, str) and item] if isinstance(refs, list) else []
-        kept_refs: list[str] = []
-        for ref in refs:
-            trial = {**row, "read_order": [*kept_refs, ref], "omitted_read_refs": len(refs) - len(kept_refs) - 1}
-            candidate = {**preview, "nodes": [*selected, trial], "omitted_nodes": len(nodes) - len(selected) - 1}
-            if len(_json(candidate)) > _LIVE_CHARS and kept_refs:
-                break
-            kept_refs.append(ref)
+        kept_refs = refs[:1]
         row["read_order"] = kept_refs
         row["omitted_read_refs"] = max(0, len(refs) - len(kept_refs))
         candidate = {**preview, "nodes": [*selected, row], "omitted_nodes": len(nodes) - len(selected) - 1}

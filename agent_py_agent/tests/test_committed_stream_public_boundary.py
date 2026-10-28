@@ -146,12 +146,20 @@ def test_real_fake_failure_close_does_not_commit_or_publish_raw(tmp_path, outcom
             return ModelResponse('不应公开。', self.name, runtime_status='error', runtime_reason='SYNTHETIC_ERROR')
 
     agent.backend = Failure()
-    with register_interruptible('rev03-cancelled-model'):
-        result = agent.run('核对失败收口', on_chunk=writer, save=False)
+    from agent_py_agent.agent.concurrency.interrupt import set_interrupt
+    try:
+        with register_interruptible('rev03-cancelled-model'):
+            if outcome == 'cancelled':
+                with pytest.raises(InterruptedError):
+                    agent.run('核对失败收口', on_chunk=writer, save=False)
+            else:
+                result = agent.run('核对失败收口', on_chunk=writer, save=False)
+                assert result.tool_rounds == 0 and result.runtime_status != 'ok'
+    finally:
+        set_interrupt(False)
     writer.close()
     rows, _ = _public_rows(path)
-    assert agent.backend.calls == 1 and result.tool_rounds == 0
-    assert result.runtime_status != 'ok' and not writer._committed_model_calls
+    assert agent.backend.calls == 1 and not writer._committed_model_calls
     assert not [row for row in rows if row.get('kind') in {'model_delta', 'model_draft', 'assistant_commentary', 'assistant_final'}]
 
 

@@ -11,26 +11,40 @@ class WorkspaceDirectoryError(ValueError):
     error_code = "WORKSPACE_DIR_INVALID"
 
 
-# LLM: 只解析已存在目录并拒绝根级目录的字面/解析形态；不创建工作目录或把进程cwd当默认授权。
-# 函数用途: 规范化显式目录，给全部入口使用相同的存在性检查。
-def existing_workspace_directory(value: str | Path) -> Path:
+# LLM: 纯路径归一化不创建目录；只有原CLI初始化链可要求must_exist=False，运行时入口仍须现存目录，根级目录和文件始终拒绝。
+# 函数用途: 区分构造前的待创建目录与运行时的现存目录，保留两者共同的路径安全检查。
+def normalize_workspace_directory(value: str | Path, *, must_exist: bool = True) -> Path:
     from ..path_access_policy import inheritable_declared_work_roots
 
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise WorkspaceDirectoryError("工作目录必须是非空路径")
     try:
-        path = Path(value).expanduser().resolve(strict=True)
-        if not path.is_dir() or not inheritable_declared_work_roots([str(path)]):
+        candidate = Path(value).expanduser()
+        path = candidate.resolve(strict=must_exist)
+        if not must_exist:
+            # 即使叶尚不存在，已有祖先也必须真是目录；不能把文件子路径或悬空链接当待创建目录。
+            ancestor = next((item for item in (candidate, *candidate.parents)
+                if item.exists() or item.is_symlink()), None)
+            if ancestor is None or not ancestor.resolve(strict=True).is_dir():
+                raise WorkspaceDirectoryError("工作目录的现存祖先必须是目录")
+        if ((must_exist or path.exists()) and not path.is_dir()) or not inheritable_declared_work_roots([str(path)]):
             raise WorkspaceDirectoryError("工作目录必须是现存且可继承的具体目录")
         return path
     except (OSError, RuntimeError) as error:
         raise WorkspaceDirectoryError("工作目录不存在或不可访问") from error
 
 
-# LLM: 管理员可显式绑定墙外项目，但数据根祖先、控制面、其它owner和自身运行状态都不能充当工作根。
-# 函数用途: 统一检查显式目录授权；普通用户只允许自己的家，管理员也不靠目录参数越过宿主保护。
+# LLM: 运行时目录切换/查询只接受现存目录；构造期不得通过这个默认严格入口提前创建目录或取消存在性检查。
+# 函数用途: 保留会话和Gateway对现存工作目录的统一校验入口。
+def existing_workspace_directory(value: str | Path) -> Path:
+    return normalize_workspace_directory(value)
+
+
+# LLM: 默认拒数据根祖先/控制面/其他owner/自身状态；initializing只暂缓存在性，allow_home_ancestor仅供已核Full Access构造根，不授子树权限。
+# 函数用途: 检查目录边界；区分待创建项目与现存绑定，项目内私有Home仍由工具路径策略逐子树保护。
 def validate_workspace_directory(
     workspace_dir: str | Path, *, owner_home: Path, is_admin: bool, home_root: Path | None = None,
+    initializing: bool = False, allow_home_ancestor: bool = False,
 ) -> Path:
     from ..path_access_policy import (
         HOST_STATE_OWNER_DIRS,
@@ -38,12 +52,12 @@ def validate_workspace_directory(
         inheritable_declared_work_roots,
     )
 
-    path = existing_workspace_directory(workspace_dir)
+    path = normalize_workspace_directory(workspace_dir, must_exist=not initializing)
     home = owner_home.expanduser().resolve(strict=False)
     data_root = home_root or agent_home_root_for_owner(home)
     if data_root is not None:
         data_root = data_root.resolve(strict=False)
-        if data_root.is_relative_to(path) and not path.is_relative_to(home):
+        if data_root.is_relative_to(path) and not path.is_relative_to(home) and (not allow_home_ancestor or path == data_root):
             raise WorkspaceDirectoryError("工作目录不能包含宿主数据根")
     if path.is_relative_to(home):
         if path != home and any(path.is_relative_to(home.joinpath(*parts))

@@ -29,7 +29,9 @@ def test_storage_diagnostic_measures_actual_calls_and_preserves_facts(tmp_path):
     assert report["scope"] == "storage_phases_only" and report["fixture_removed"]
     off, on = report["results"]
     assert off["sqlite_connections"] == 8 and on["sqlite_connections"] == 4
-    assert off["scheduler_reads"] == 12 and on["scheduler_reads"] == 0
+    # 每个owner每拍完整读一次；同拍后续scheduler读口共用可信投影，不禁用缓存凑旧12次。
+    assert off["scheduler_reads"] == report["owners"] * report["ticks"] == 4
+    assert on["scheduler_reads"] == 0
     assert off["scheduler_read_bytes"] > 0 and on["scheduler_read_bytes"] == 0
     assert off["process_transactions"] == 4 and on["process_transactions"] == 0
     assert off["facts_sha256"] == on["facts_sha256"]

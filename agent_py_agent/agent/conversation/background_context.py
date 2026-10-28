@@ -858,9 +858,19 @@ def _has_plugin_zero_tool_goal(store: object, thread_id: str, goal_id: str, task
         return False
     try:
         goals, report = store.goals.list_report(thread_id)
+    except KeyError:
+        storage = getattr(store, "storage", None)
+        goal_path = getattr(storage, "goal_path", None)
+        if callable(goal_path):
+            try:
+                if not goal_path(thread_id).exists():
+                    return False
+            except Exception:
+                return True
+        return True
     except Exception:
         return True
-    if getattr(report, "corrupt_records", 0) > 0:
+    if (isinstance(report, dict) and report) or getattr(report, "corrupt_records", 0) > 0:
         return True
     for item in goals or ():
         matched = (goal_id and getattr(item, "goal_id", "") == goal_id) or (

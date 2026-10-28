@@ -7,6 +7,7 @@ import base64
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 from ..artifacts.registry import (
     ARTIFACT_ROLE_METADATA_KEY,
@@ -16,6 +17,7 @@ from ..artifacts.registry import (
     ArtifactRegistration,
     register_artifact,
 )
+from ..capability.package_output_projection import preserve_package_page_view
 from ..conversation.input_media import (
     import_input_media_bytes,
     input_media_root,
@@ -50,8 +52,8 @@ TOOL_PREVIEW_CHAR_LIMIT_CHARS = 1200
 TOOL_PREVIEW_CHAR_LIMIT = TOOL_PREVIEW_CHAR_LIMIT_CHARS
 
 
-# LLM: 原始输出先按 owner/run 及实际 ToolCall 的 attempt/turn 归档；仅真正外置且未声明保留正文的结果使用预览。
-# 读取器有界正文完整进入canonical结果；进程外置预览在JSON被截断前保留流头尾，原文及哈希不变。
+# LLM: 原始输出按owner/run/attempt/turn归档；在JSON截断前生成同一脱敏结构摘要，外部数据仍不生成可信摘要。
+# 读取器有界正文与包页面模型视图分别保留；capability适配只改归档展示元数据，原文/信封/哈希不变。
 # 函数用途: 按真实调用身份归档并预留同批内联预算，日志预览不能代替有界正文。
 def archive_tool_output_projection(
     agent: object,
@@ -104,7 +106,12 @@ def archive_tool_output_projection(
     )
     output_record = externalize_tool_output_record(request)
     output_record.update(write_tool_output_fail_safe_checkpoint(request))
+    _attach_model_summary(output_record, SimpleNamespace(
+        tool_name=call.tool_name, output=outcome.output, ok=outcome.ok,
+        error_code=outcome.error_code, recommended_action=outcome.recommended_action,
+        metadata={"handler_details": envelope}))
     _cap_output_preview(agent, output_record)
+    preserve_package_page_view(outcome, output_record)
     # 读取工具已限制单页大小，output_externalized=false 是归档层的明确内联裁决。
     # 日志 output_preview 无论是否外置都会缩短，不能用它作为所有模型回执的正文。
     use_preview = bool(output_record.get("output_externalized")) and not bool(
@@ -294,6 +301,8 @@ def archive_tool_call_record(agent: object, record: ToolCallRecordParams) -> dic
     return output_record
 
 
+# LLM: canonical结果的宿主信任/脱敏裁决优先于原handler信封；早期适配器沿已合并的策略生成同一有界摘要。
+# 函数用途: 保存模型结构摘要，不把外部数据或原信封的宽松策略升级为可信回执。
 def _attach_model_summary(output_record: dict[str, object], result: object) -> None:
     """Persist the same bounded structured projection used by the live model."""
 
@@ -304,6 +313,8 @@ def _attach_model_summary(output_record: dict[str, object], result: object) -> N
 
     details = _result_details(result)
     trust, redaction = tool_output_projection_policy(details)
+    trust = getattr(result, "output_trust", trust)
+    redaction = getattr(result, "output_redaction", redaction)
     if trust == "external_data":
         return
     from .orchestration.context.live_summary import orchestration_live_summary

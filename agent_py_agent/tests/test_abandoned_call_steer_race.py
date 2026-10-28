@@ -65,11 +65,11 @@ def _race_hooks(store: ConversationStore, gate: threading.Event):
             assert gate.wait(timeout=10.0)
         return original_backend_response(request_, state, timeout)
 
-    def short_first_wall_clock(*call):
+    def short_first_wall_clock(*call, **kwargs):
         *wait_args, timeout = call
         timeout = timeout if wall_timeouts else 0.05
         wall_timeouts.append(timeout)
-        return original_wait(*wait_args, timeout)
+        return original_wait(*wait_args, timeout, **kwargs)
 
     def observed_mark_submitted(turn_id, entries, **kwargs):
         submitted_call_ids.append(str(kwargs.get("provider_call_id") or ""))

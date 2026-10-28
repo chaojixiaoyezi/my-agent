@@ -45,15 +45,15 @@ CHAT_PROMPT = "你> "
 PLAIN_CHAT_PROMPT = "user> "
 
 
-# LLM: CLI与C共用一次目录解析及原owner校验；显式配置冻结为规范根供后续运行消费，无声明仍为空，不创建Agent或目录。
-# 函数用途: 解析真实构造参数，让控制面与稍后的 Agent 使用相同配置来源及工作区规则。
+# LLM: CLI与C冻结同源配置和构造根；只做身份/路径检查，允许原构造器稍后创建合法目录，不提前物化Home或借配置授运行权限。
+# 函数用途: 解析实际构造参数，保留先初始化私有Home、再创建用户工作目录的原顺序。
 def agent_configuration(args):
     frozen = getattr(args, "_gateway_frozen_config", None)
     config = (copy.deepcopy(frozen) if frozen is not None
               else apply_runtime_config_environment(load_config(args.config)))
     config = config_with_owner_permission_mode(config)
     # 一次声明多个目录时，整串会被当成一条路径——必须逐项解析后再写回配置。
-    explicit_roots = explicit_workspace_roots(args)
+    explicit_roots = explicit_workspace_roots(args, initializing=True)
     if explicit_roots:
         config.workspace_root = [str(root) for root in explicit_roots]
     roots = resolve_workspace_roots(
@@ -61,7 +61,7 @@ def agent_configuration(args):
         args.config,
         current_dir=owner_home_workspace_root(config),
     )
-    validate_requested_workspace_roots(config, roots)
+    validate_requested_workspace_roots(config, roots, initializing=True)
     if config.workspace_root:
         config.workspace_root = [str(root) for root in roots]
     return config, roots

@@ -30,6 +30,7 @@ _OPEN_BASE = {"feishu": "https://open.feishu.cn", "lark": "https://open.larksuit
 _FEISHU_PROFILE_TIMEOUT_SECONDS = 8.0
 # 匹配 USER.md 里"称呼"为空的行(- 称呼:  后面没填),半/全角冒号都认
 _CALL_NAME_RE = re.compile(r"^([ \t]*-[ \t]*称呼[:：])[ \t]*$", re.MULTILINE)
+# 飞书远端身份查询结果的缓存有效秒数。
 _IDENTITY_TTL_SECONDS = 1800
 _IDENTITY_CACHE = {}
 _IDENTITY_LOCK = threading.Lock()

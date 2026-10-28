@@ -577,7 +577,7 @@ def test_permission_failure_in_pin_store_is_not_zero_pins(tmp_path, monkeypatch,
 def test_display_usage_cache_ttl_eviction_and_exact_mode(tmp_path, monkeypatch):
     from agent_py_agent.agent.user_space import owner_quota as quota
 
-    monkeypatch.setattr(quota, "_DISPLAY_USAGE_CACHE_LIMIT", 2)
+    monkeypatch.setattr(quota, "_DISPLAY_USAGE_CACHE_MAX_ENTRIES", 2)
     monkeypatch.setattr(quota.time, "monotonic", lambda: 10.0)
     root = tmp_path / "owner"
     paths = [old_file(root / "display_archives" / str(index) / "file", "x") for index in range(3)]

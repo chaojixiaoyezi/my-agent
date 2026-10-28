@@ -1,3 +1,9 @@
+## 2026-10-27 CI 全绿收敛：记忆候选兼容读口、自动晋升补全与产物大索引流式过滤
+
+- `memory_store/candidates.py` 与 `_candidate_read_compat.py`：保留完整五元组 stat 缓存、坏行/坏 UTF-8 必报与深拷贝隔离，兼容对 `_load_unlocked` 的测试覆盖。
+- `memory_store/promotion.py`、`_condense_scope`、`jsonl.py` 与 `retention_scan.py`：兼容显式 `fill_long_term_target` 覆盖与独立候选根下的 `pending_condense.json` 定位，在保持 `quota -> policy -> memory` 锁序的前提下支持同线程重入与精确错误上抛。
+- `memory_archive/artifact/reader.py`：超大 `index.jsonl` 在超缓存预算时使用单遍有界流式扫描替代全量列表驻留，将峰值内存控制在 `< 3 MiB` 预算内。
+
 ## 2026-10-26 全量对向复核二轮收口（消息级禁学游标推进、访问冲刷锁序对齐与直连会话引用覆盖，已实现）
 
 - `memory_store/curator_inputs.py`、`curator_validation.py`、`curator_routing.py` 与 `curator.py` 补齐 `skipped_message_cursors`：当单条消息携带 `learning_excluded=True` 时，`_collect_messages` 向前多页扫描收集后续正常消息，并在无有效提取输出时仍推进已跳过消息的分页游标，防止单页禁学消息造成游标永久停滞。

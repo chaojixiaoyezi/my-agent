@@ -215,9 +215,9 @@ def _portal_keywords(signature, values):
 
 # LLM: bind纯校验、不执行业务；拒绝不兼容签名，不能在未知副作用后猜测另一种调用方式。
 # 函数用途: 判定(context,payload)协议是否可调用。
-def _portal_binds(signature, *args, **kwargs):
+def _portal_binds(signature, args_tuple=(), kwargs_dict=None):
     try:
-        signature.bind(*args, **kwargs)
+        signature.bind(*args_tuple, **(kwargs_dict or {}))
         return True
     except TypeError:
         return False
@@ -324,20 +324,20 @@ class GatewayPortalDomain:
         params = signature(target)
         store = self.resources.store_for(context)
         if (authorized.call.action.startswith("conversations.threads.")
-                and _portal_binds(params, store, context, dict(payload))):
+                and _portal_binds(params, (store, context, dict(payload)))):
             return target(store, context, dict(payload))
         options = _portal_keywords(params, {"agent": self._owner_agent(context), "store": store})
-        if _portal_binds(params, context, dict(payload), **options):
+        if _portal_binds(params, (context, dict(payload)), options):
             return target(context, dict(payload), **options)
         if authorized.call.action.startswith("plugins.builtin."):
             values = dict(payload)
             if authorized.call.action.endswith(".list"):
                 values["store"] = store
             values = _portal_keywords(params, values)
-            if not _portal_binds(params, context.owner_home.home_dir, **values):
+            if not _portal_binds(params, (context.owner_home.home_dir,), values):
                 raise HostAPIError("HOST_NOT_READY", 503)
             return target(context.owner_home.home_dir, **values)
-        if not _portal_binds(params, context.owner_home, **payload):
+        if not _portal_binds(params, (context.owner_home,), payload):
             raise HostAPIError("HOST_NOT_READY", 503)
         return target(context.owner_home, **payload)
 

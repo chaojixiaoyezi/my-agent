@@ -39,8 +39,8 @@ def owners(tmp_path):
 
 # LLM: 与生产shell相同地运输HostSandboxPaths各字段，不调用假的profile渲染器。
 # 函数用途: 从规范root和当前owner生成完整的真实Seatbelt参数。
-def _spec(root, home, *, scoped=False):
-    paths = policy.host_sandbox_paths(root, home if scoped else None, system="Darwin")
+def _spec(root, home, *, scoped=False, compact=False):
+    paths = policy.host_sandbox_paths(root, home if scoped else None, system="Darwin", compact=compact)
     return AttemptSandboxSpec(home, home, home, home, full_access=not scoped,
         protected_persona_root=home, extra_write_roots=(home,), implicit_attempt_write_roots=False,
         private_read_roots=(root,) if scoped else (), macos_sandbox_exec="/usr/bin/sandbox-exec",
@@ -59,15 +59,16 @@ def _profile(spec):
 # LLM: 完整profile含全部附加规则，同时限制行数和UTF-8字节数，不能靠合并行骗过大小。
 # 函数用途: 验证106个owner下普通隔离和Full Access配置都保持有界。
 @pytest.mark.parametrize("scoped", [False, True])
-def test_many_owners_profile_is_bounded(owners, scoped):
+@pytest.mark.parametrize("compact", [False, True])
+def test_many_owners_profile_is_bounded(owners, scoped, compact):
     root, homes = owners
-    profile = _profile(_spec(root, homes[0], scoped=scoped))
+    profile = _profile(_spec(root, homes[0], scoped=scoped, compact=compact))
     assert len(profile.splitlines()) < 80, len(profile.splitlines())
     assert len(profile.encode()) < 8192, len(profile.encode())
 
 
 # LLM: spy只统计真实枚举入口，Linux仍核对具体路径，不替换保护集合。
-# 函数用途: 验证Darwin固定投影不扫owner，Linux保留全部具体覆盖。
+# 函数用途: 验证显式Darwin固定投影不扫owner，默认路径API与Linux保留具体快照合同。
 def test_darwin_projection_does_not_walk_owners_and_linux_keeps_concrete_paths(owners, monkeypatch):
     root, homes = owners
     calls, original = [], policy._existing_owner_homes
@@ -79,7 +80,7 @@ def test_darwin_projection_does_not_walk_owners_and_linux_keeps_concrete_paths(o
         return original(base)
 
     monkeypatch.setattr(policy, "_existing_owner_homes", observed)
-    compact = policy.host_sandbox_paths(root, system="Darwin")
+    compact = policy.host_sandbox_paths(root, system="Darwin", compact=True)
     assert calls == []
     assert compact.patterns
     linux = policy.host_sandbox_paths(root, system="Linux")
@@ -107,7 +108,7 @@ def test_governance_paths_remain_python_write_protected(owners, relative):
 # 函数用途: 验证四种布局和正则元字符的锚定转义。
 def test_compact_patterns_cover_future_owners_and_escape_root(owners):
     root, _homes = owners
-    compact = policy.host_sandbox_paths(root, system="Darwin")
+    compact = policy.host_sandbox_paths(root, system="Darwin", compact=True)
     for layout in ("local/future", "local/users/future", "providers/p/users/future", "providers/p/groups/future"):
         assert any(re.search(pattern, str(root / "owners" / layout / "memory/SOUL_ADMIN_BASE.md")) for pattern in compact.patterns)
     twin = Path(str(root).replace(".agent", "Xagent"))
@@ -354,7 +355,7 @@ def test_readonly_default_budget_is_strict_even_when_requested_wider(tmp_path):
         policy.macos_readonly_patterns(Path("/") / ("很" * 250))
 
 
-# LLM: 只创建临时Git布局，含外置worktree gitdir、commondir及真实链接，不调用用户仓库。
+# LLM: 临时Git布局显式请求未来仓库通配，保留原控制文件/别名断言；默认无模式时由CI合同另验合法初始化。
 # 函数用途: 供字符串和原生沙箱共同核对Git控制文件及旁路别名。
 def _git_layout(tmp_path, kind):
     root = tmp_path / "writable"
@@ -383,7 +384,8 @@ def _git_layout(tmp_path, kind):
     (common / "config").unlink()
     (common / "config").symlink_to(alias)
     spec = AttemptSandboxSpec(root, root, root, root, full_access=True,
-        protected_persona_root=None, implicit_attempt_write_roots=False, extra_write_roots=(root,))
+        protected_persona_root=None, implicit_attempt_write_roots=False, extra_write_roots=(root,),
+        protected_write_patterns=(r"(^|/)\.git/(hooks|config(\.worktree)?)(/|$)", r"(^|/)\.git$"))
     return spec, repo, gitdir, common, alias
 
 
@@ -550,10 +552,11 @@ def test_git_discovery_shallower_visit_keeps_remaining_depth(tmp_path, overlappi
     assert module._seatbelt_string_literal(str(metadata / "hooks")) in _profile(spec)
 
 
-def test_absent_write_root_keeps_future_git_regex_protection(tmp_path):
+def test_absent_write_root_keeps_explicit_future_git_regex_protection(tmp_path):
     root = tmp_path / "future"
-    spec = AttemptSandboxSpec(root, root, root, root, extra_write_roots=(root,))
-    assert module._macos_git_write_denies(spec)
+    pattern = r"(^|/)\.git/(hooks|config(\.worktree)?)(/|$)"
+    spec = AttemptSandboxSpec(root, root, root, root, extra_write_roots=(root,), protected_write_patterns=(pattern,))
+    assert f'(deny file-write* (regex {module._seatbelt_string_literal(pattern)}))' in _profile(spec)
 
 
 # LLM: 真权限错误可能在os.walk的DirEntry.is_dir内部被吞；不能把不可核验目录链接当普通业务文件。
@@ -579,7 +582,9 @@ def test_file_write_root_does_not_require_directory_scan(tmp_path):
     root = tmp_path / "file"
     root.write_text("business")
     spec = AttemptSandboxSpec(tmp_path, tmp_path, tmp_path, tmp_path, extra_write_roots=(root,))
-    assert module._macos_git_write_denies(spec)
+    markers = module._macos_git_markers(spec)
+    assert bool(module._macos_git_write_denies(spec)) is bool(markers)
+    assert root.read_text() == "business"
 
 
 def test_git_worktree_configuration_is_protected(tmp_path):

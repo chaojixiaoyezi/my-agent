@@ -230,7 +230,7 @@ class PluginBrokerService:
                                 include_asset_source=self.include_asset_source)
         return _query_telemetry(home, owner_id, action, payload)
 
-    # LLM: invoker 必须已绑定当前 owner 的授权/审批链；先创建账本，再执行一次，使用单调时钟测时。
+    # LLM: invoker 已绑定原owner授权/审批链且只执行一次；逐项声明完整错误码，不再由状态拼接前缀，不触发重放。
     # 函数用途: 执行工具并记录成功、拒绝、超时或失败；记账失败仍保留执行事实，不能自动重试。
     def _execute(self, home, owner_id, action, payload):
         from ..observability.telemetry_ledger import ToolTelemetryLedger
@@ -247,11 +247,13 @@ class PluginBrokerService:
                     'failed', 'error', 'paused_for_resume', 'cancelled', 'denied', 'timeout')):
                 status = result.get('status')
                 record.update(status=status if status in ('denied', 'timeout') else 'error',
-                              error_code=result.get('error_code') or 'TOOL_EXECUTION_' + (
-                                  'INCOMPLETE' if status == 'paused_for_resume' else 'FAILED'))
+                              error_code=result.get('error_code') or (
+                                  'TOOL_EXECUTION_INCOMPLETE' if status == 'paused_for_resume' else 'TOOL_EXECUTION_FAILED'))
         except Exception as exc:
             status = 'denied' if isinstance(exc, PermissionError) else 'timeout' if isinstance(exc, TimeoutError) else 'error'
-            record.update(status=status, error_code='TOOL_EXECUTION_' + status.upper())
+            record.update(status=status, error_code={
+                'denied': 'TOOL_EXECUTION_DENIED', 'timeout': 'TOOL_EXECUTION_TIMEOUT', 'error': 'TOOL_EXECUTION_ERROR',
+            }[status])
             result = {'ok': False, 'error_code': record['error_code']}
         record.update(ended_at=time.time(), duration_ms=round((time.monotonic() - start) * 1000, 3))
         if isinstance(result, dict):

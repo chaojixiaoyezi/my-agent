@@ -396,11 +396,15 @@ def _chat_backend():
         api_key="synthetic", model_name="test-model", stream_enabled=False))
 
 
-# LLM: 只扰动对象键序，数组及标量保持原值；不能在比较端排序来掩盖真实wire差异。
-# 函数用途: 生成逻辑相同但对象插入顺序相反的输入。
-def _reverse_object_keys(value):
+# LLM: 只扰动schema定义对象键序，properties参数顺序、数组及标量保持原值；不能在比较端排序来掩盖真实wire差异。
+# 函数用途: 生成逻辑相同但schema定义键插入顺序相反的输入。
+def _reverse_object_keys(value, *, _parent_key: str = ""):
     if isinstance(value, dict):
-        return {key: _reverse_object_keys(item) for key, item in reversed(list(value.items()))}
+        items = list(value.items())
+        if _parent_key != "properties":
+            items.reverse()
+        schema_map = _parent_key in {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas", "dependencies"}
+        return {key: _reverse_object_keys(item, _parent_key="" if schema_map else str(key)) for key, item in items}
     if isinstance(value, list):
         return [_reverse_object_keys(item) for item in value]
     return value

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from inspect import Parameter, signature
 
 from ...backends import ModelResponse
 from ...settings.runtime_guard_config import RuntimeGuardPolicy
@@ -21,6 +22,29 @@ class ModelTurnRequest:
     prompt: str
     response: ModelResponse
     params: object
+
+
+# LLM: 计时是可选观察，按实际callable签名传递；不捕获调用后的TypeError重试，避免重复模型请求和副作用。
+# 函数用途: 为旧宿主请求回调筛选支持的计时关键字，新回调和**kwargs仍收到完整计时。
+def supported_request_timings(
+    request: Callable,
+    *,
+    assembly_started_at: float | None = None,
+    request_prepare_started_at: float | None = None,
+) -> dict[str, float]:
+    timings: dict[str, float] = {}
+    if assembly_started_at is not None:
+        timings["assembly_started_at"] = assembly_started_at
+    if request_prepare_started_at is not None:
+        timings["request_prepare_started_at"] = request_prepare_started_at
+    try:
+        parameters = signature(request).parameters
+    except (TypeError, ValueError):
+        return {}
+    if any(item.kind is Parameter.VAR_KEYWORD for item in parameters.values()):
+        return timings
+    return {key: value for key, value in timings.items() if key in parameters
+            and parameters[key].kind in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)}
 
 
 # LLM: 流在完成标记前被切断（backend 归一为 MODEL_STREAM_INCOMPLETE）时，只有"还没有对外

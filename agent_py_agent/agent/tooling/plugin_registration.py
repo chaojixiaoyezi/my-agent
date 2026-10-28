@@ -15,7 +15,9 @@ logger = logging.getLogger(__name__)
 _INSTALLATION_SNAPSHOTS: OrderedDict[tuple, tuple] = OrderedDict()
 _MISSING_ENVIRONMENTS: OrderedDict[tuple, float] = OrderedDict()
 _MISSING_ENV_WARNED: OrderedDict[tuple, None] = OrderedDict()
-_PLUGIN_CACHE_LIMIT = 128
+# 插件安装快照及缺失环境提示缓存各自最多保留的条数。
+_PLUGIN_CACHE_MAX_ENTRIES = 128
+# 缺失插件环境重新检查的最短间隔秒数，不改变激活或安装授权。
 _MISSING_ENV_RETRY_SECONDS = 30.0
 
 
@@ -36,7 +38,7 @@ def _discover_plugin_manifests(owner) -> tuple[tuple, tuple]:
         if (after.st_mtime_ns, after.st_size, after.st_ino, after.st_ctime_ns, after.st_mode) != stamp:
             return PluginInstallStore(owner).snapshot(), ()
         _INSTALLATION_SNAPSHOTS[key] = rows
-        while len(_INSTALLATION_SNAPSHOTS) > _PLUGIN_CACHE_LIMIT:
+        while len(_INSTALLATION_SNAPSHOTS) > _PLUGIN_CACHE_MAX_ENTRIES:
             _INSTALLATION_SNAPSHOTS.popitem(last=False)
     _INSTALLATION_SNAPSHOTS.move_to_end(key)
     return _INSTALLATION_SNAPSHOTS[key], stamp
@@ -70,7 +72,7 @@ def _remember_missing_environment(key: tuple) -> None:
         logger.warning("插件业务连接暂不可创建：FileNotFoundError")
         _MISSING_ENV_WARNED[warning_key] = None
     for cache in (_MISSING_ENVIRONMENTS, _MISSING_ENV_WARNED):
-        while len(cache) > _PLUGIN_CACHE_LIMIT:
+        while len(cache) > _PLUGIN_CACHE_MAX_ENTRIES:
             cache.popitem(last=False)
 
 

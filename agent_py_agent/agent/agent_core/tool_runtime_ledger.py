@@ -420,21 +420,26 @@ def _attach_main_conversation_execution_cwd(boundary: dict[str, object], agent: 
         boundary["allowed_write_roots"] = list(dict.fromkeys([*_string_list(boundary.get("allowed_write_roots")), *roots]))
 
 
-# LLM: 每次工具调用重验所有typed规范目录；普通owner仅家内，管理员允许安全墙外，符号链接替换不能重定向授权。
-# 函数用途: 从主会话声明中挑出可实际授权的项目目录，坏目录不恢复为更宽路径。
+# LLM: owner宿主每次重验typed目录，Full Access仅复用原构造根的Home祖先；无owner独立库保留纯路径投影，已有owner墙缺Home仍拒绝，不制造管理员身份。
+# 函数用途: 保留实际项目执行位置并校验现存绑定；独立库的归档目录不替换宿主传入的显式工作目录。
 def _validated_main_workspace_roots(agent: object, roots: list[str]) -> list[str]:
     from ..conversation.workspace_context import validate_workspace_directory
     from ..user_space.owner_access import is_local_admin_owner
 
     home = getattr(agent, "home_paths", None)
     owner = _resolved_path(getattr(home, "owner_home_dir", None))
-    if home is None or owner is None:
+    if home is None:
+        tools = getattr(agent, "tools", None)
+        return [] if _text(getattr(tools, "owner_scope_root", "")) else inheritable_declared_work_roots(roots)
+    if owner is None:
         return []
+    startup_root = _resolved_path(getattr(agent, "root", None))
     result: list[str] = []
     for root in roots:
         try:
             resolved = validate_workspace_directory(root, owner_home=owner, is_admin=is_local_admin_owner(home),
-                home_root=getattr(home, "root", None))
+                home_root=getattr(home, "root", None), allow_home_ancestor=bool(
+                    _is_local_full_access(agent) and startup_root == _resolved_path(root)))
             if Path(root).expanduser() != resolved:
                 continue
         except ValueError:

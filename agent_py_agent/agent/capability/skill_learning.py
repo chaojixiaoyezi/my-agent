@@ -376,18 +376,19 @@ class SkillLearningService:
 
     # LLM: 后台线程没有前台的会话 ContextVar：按 owner_id + 请求键自绑宿主会话（同一请求的重试共用同一会话值、
     #   不冒用前台线程会话），bounded_call 的 copy_context 会把它带进供应商调用线程；退出即复位。
-    # 函数用途: 发起一次无工具结构化总结调用。
+    # 函数用途: 发起无工具结构化总结；仅自主后台模式附带四载体指导，普通/显式总结保持原提示合同。
     def _call_model(self, material: SkillLearningMaterial) -> object:
         session = "skill-learning:" + str(material.request.get("request_key") or "")
         with provider_session_scope((self.runtime.owner_id,), session):
             return call_backend_with_timeout(
                 self.runtime.backend,
-                prompt=skill_learning_prompt(material),
+                prompt=skill_learning_prompt(material, include_carrier_guidance=(
+                    self.settings.autonomous_verified and material.request.get('requested_by') != 'user')),
                 response_schema=skill_learning_response_schema(),
                 timeout_seconds=self.settings.timeout_seconds,
             )
 
-    # LLM: 模型只产候选；默认机器核验分静态与真实执行级别，开关关闭不晋升，不把模型声明当证明或绕CAS/guard。
+    # LLM: 显式用户总结只提候选待本人确认；自主后台仍按开关及核验晋升，不把模型声明当证明或绕CAS/guard。
     # 函数用途: 解析总结，复用同族候选，或按机器验证事实晋升正式Skill。
     def _decide(self, material: SkillLearningMaterial, text: str) -> SkillLearningEvent:
         request = material.request
@@ -409,7 +410,7 @@ class SkillLearningService:
                 verifier = partial(verify_machine_candidate, store=self.store)
             with gateway_short_transaction("skill_learning_propose"):
                 return propose_or_promote_skill(self.store, publish,
-                    verifier=verifier, autonomous_verified=self.settings.autonomous_verified)
+                    verifier=verifier, autonomous_verified=(self.settings.autonomous_verified and request.get('requested_by') != 'user'))
         except (OwnerQuotaExceeded,OwnerQuotaUnavailable):
             return _request_event(EVENT_REJECTED,"SKILL_LEARNING_STORAGE_LIMIT",request)
         except SkillLearningGateError as exc:

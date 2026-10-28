@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 
@@ -70,3 +71,30 @@ def _narrower_access_mode(requested: str, owner_policy: str) -> str:
     if requested not in rank:
         return owner_policy
     return min((requested, owner_policy), key=rank.__getitem__)
+
+
+# LLM: 仅在已解除owner墙的Shell使用；沿当前owner祖先拆容器，兄弟容器整体收紧，原H2/H3保护不变，不读业务正文。
+# 函数用途: 将其他owner目录并入只读或隐藏视图，当前owner仍由原精确保护管理。
+def apply_other_owner_home_policy(paths, owner_home: str, mode: str):
+    from ..path_access_policy import agent_home_root_for_owner
+
+    if mode not in {"read_only", "isolate"}:
+        raise ValueError("invalid full-access other-owner policy")
+    root = agent_home_root_for_owner(owner_home) if owner_home else None
+    if root is None:
+        return paths
+    own, owners = Path(owner_home).resolve(), (root / "owners").resolve()
+    pending, selected, seen = [owners], [], set()
+    while pending:
+        current = pending.pop().resolve()
+        if not current.is_relative_to(owners):
+            raise ValueError("owner container escapes canonical owners root")
+        if current == own or current in seen:
+            continue
+        seen.add(current)
+        if own.is_relative_to(current):
+            pending.extend(path for path in sorted(current.iterdir()) if path.is_dir())
+        else:
+            selected.append(current)
+    field = "readonly" if mode == "read_only" else "hidden"
+    return replace(paths, **{field: tuple(dict.fromkeys((*getattr(paths, field), *selected)))})

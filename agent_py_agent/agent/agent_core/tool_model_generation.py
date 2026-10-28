@@ -1216,7 +1216,7 @@ class _GenerationInterruptWake(Event):
 
 # LLM: Both execution paths use the same frozen ContextVars; snapshot before spawning the guard so config/backend/prompts cannot revert to deployment defaults. Preserve submission hooks and typed cancellation.
 # LLM: 当前后台片如有原宿主观察，出生前保同一Thread真实退出；默认无观察者仍原start，不改超时或模型请求。
-#   即时唤醒先于慢取消回调，两个注册均在退出时注销；队列无界，不阻塞迟到的原worker。
+#   即时唤醒先于慢取消回调；向等待者显式传递本次已注册事实，两个注册退出时注销，不重复慢close。
 # 函数用途: 按配置直接调用模型或启动保护线程；新线程继承当前工作片的模型与身份，停止仍精确传到实际连接。
 def _generate_through_wall_guard(
     request: ModelGenerateParams,
@@ -1245,23 +1245,25 @@ def _generate_through_wall_guard(
 
     start_background_model_worker(worker)
     with register_interrupt_wakeup(_GenerationInterruptWake(results)), register_interrupt_callback(lambda: _interrupt_generation_worker(worker)):
-        return _wait_for_generation_result(request, state, results, worker, timeout)
+        return _wait_for_generation_result(request, state, results, worker, timeout, interrupt_registered=True)
 
 
-# LLM: 结果/异常采纳前再检查中断；无效哨兵只重查原期限。取消已由guard注册异步转交，不在等待线程重复慢close。
-# 函数用途: 以队列即时唤醒及两秒兜底等待结果，保留短请求原墙钟超时。
+# LLM: 采纳前复核中断；显式注册的取消由外层异步转交，直接等待入口自行转交，不能在等待线程重复慢close。
+# 函数用途: 共用即时队列唤醒和原墙钟期限，按本次实际注册事实选择唯一取消转交通道。
 def _wait_for_generation_result(
     request: ModelGenerateParams,
     state: _ModelGenerationState,
     results: Queue[_BackendGenerateResult | object],
     worker: Thread,
     timeout: float,
+    *,
+    interrupt_registered: bool = False,
 ):
     started = time.monotonic()
     transport_owns_timeout = _transport_owns_stream_idle_timeout(request.agent)
     while True:
         if is_interrupted():
-            _raise_generation_interrupted(state, worker)
+            _raise_generation_interrupted(state, worker, interrupt_registered=interrupt_registered)
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0 and not transport_owns_timeout:
             _abandon_call(state)
@@ -1277,7 +1279,7 @@ def _wait_for_generation_result(
         )
         if result is not None:
             if is_interrupted():
-                _raise_generation_interrupted(state, worker)
+                _raise_generation_interrupted(state, worker, interrupt_registered=interrupt_registered)
             if result is _INTERRUPT_WAKE_SENTINEL:
                 continue
             if result.exc is not None:
@@ -1285,10 +1287,12 @@ def _wait_for_generation_result(
             return result.response
 
 
-# LLM: 调用者已注册原worker取消回调；先封住迟到采纳，快清理短等，慢物理退出仍归原shutdown跟踪。
-# 函数用途: 让用户取消及时抛出，同时给正常连接关闭一个有界收尾窗口。
-def _raise_generation_interrupted(state: _ModelGenerationState, worker: Thread) -> None:
+# LLM: 先封迟到采纳；外层已有本次精确取消注册时不重复慢close，没有注册才转交；物理退出仍归原shutdown跟踪。
+# 函数用途: 让用户取消经过唯一真实通道后有界等收尾，不等待展示或把逻辑返回当物理退出。
+def _raise_generation_interrupted(state: _ModelGenerationState, worker: Thread, *, interrupt_registered: bool = False) -> None:
     _abandon_call(state)
+    if not interrupt_registered:
+        _interrupt_generation_worker(worker)
     if worker.ident is not None:
         worker.join(timeout=_MODEL_CANCEL_DRAIN_SECONDS)
     raise InterruptedError("模型接口请求已被用户停止")

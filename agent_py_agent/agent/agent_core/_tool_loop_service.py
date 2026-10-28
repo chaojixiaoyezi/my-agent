@@ -119,6 +119,7 @@ from .tool_loop.model_turn import (
     ModelTurnRequest,
     request_model_response,
     sample_and_accept_model_response,
+    supported_request_timings,
 )
 from .tool_loop.natural_user_reply import (
     discard_pending_natural_user_reply,
@@ -1501,7 +1502,7 @@ def _text_conversation_history_section(seed: object, *, compact_context: object 
 # 同一次模型请求的瞬断重试若宿主已提交恢复候选，直接复用该候选，不在旧参数上 build、回收或注入插话；
 # 选模仍在每次尝试内重新进行。主选包与 child 已授权入口只在真实业务首轮 build/capture 前准备，不进入回执/预览或已提交恢复候选。
 # LLM: 首片委派准备经原宿主创建服务；根表达零工具，只有 canonical OPEN 孩子申请可投影原父级裁决工具。
-# 函数用途: 单调时钟拆分纯prompt组装与含Compact/选模的请求准备，保持原恢复和输入确认合同。
+# 函数用途: 单调时钟拆分组装和请求准备，仅向支持观察参数的回调传计时，保持原恢复和输入确认合同。
 def next_tool_loop_model_response(
     agent, params: ToolLoopExecuteParams, tool_rounds: int,
 ) -> ModelTurnRequest:
@@ -1532,7 +1533,8 @@ def next_tool_loop_model_response(
         model_params = natural_user_reply_model_params(params)
         if model_params is not params:
             prompt, response = _request_tool_loop_model_response(
-                agent, model_params, tool_rounds, assembly_started_at=assembly_started_at,
+                agent, model_params, tool_rounds,
+                **supported_request_timings(_request_tool_loop_model_response, assembly_started_at=assembly_started_at),
             )
             return ModelTurnRequest(prompt, response, params)
         if tool_rounds == 0:
@@ -1544,7 +1546,8 @@ def next_tool_loop_model_response(
             model_params = natural_user_reply_model_params(params)
             if model_params is not params:
                 prompt, response = _request_tool_loop_model_response(
-                    agent, model_params, tool_rounds, assembly_started_at=assembly_started_at,
+                    agent, model_params, tool_rounds,
+                    **supported_request_timings(_request_tool_loop_model_response, assembly_started_at=assembly_started_at),
                 )
                 return ModelTurnRequest(prompt, response, params)
             prepare_capability_package_selection(agent, params)
@@ -1557,18 +1560,18 @@ def next_tool_loop_model_response(
     baseline, baseline_prompt = select_first_request_model(agent, prepared, prompt)
     selected, selected_prompt = select_request_model(agent, baseline, baseline_prompt)
     assembly_started_at = time.monotonic() - assembly_duration
+    timings = supported_request_timings(_request_tool_loop_model_response, assembly_started_at=assembly_started_at,
+                                       request_prepare_started_at=request_prepare_started_at)
     try:
         prompt, response = _request_tool_loop_model_response(
-            agent, selected, tool_rounds, first_prompt=selected_prompt, assembly_started_at=assembly_started_at,
-            request_prepare_started_at=request_prepare_started_at,
+            agent, selected, tool_rounds, first_prompt=selected_prompt, **timings,
         )
         return ModelTurnRequest(prompt, response, selected)
     except ModelRequestSelectionRejected:
         # 宿主只在候选首次发送前拒绝；撤销候选后沿同一次准备的原参数与原 prompt 执行一次。
         reject_request_selection(agent, selected)
         prompt, response = _request_tool_loop_model_response(
-            agent, baseline, tool_rounds, first_prompt=baseline_prompt, assembly_started_at=assembly_started_at,
-            request_prepare_started_at=request_prepare_started_at,
+            agent, baseline, tool_rounds, first_prompt=baseline_prompt, **timings,
         )
         return ModelTurnRequest(prompt, response, baseline)
 

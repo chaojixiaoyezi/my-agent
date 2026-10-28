@@ -113,6 +113,7 @@ class ToolRegistryParams:
     protected_persona_root: str = ""  # 三份 Persona 只走专用入口；admin bypass 也不清空
     # owner 隔离时 Shell 沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录）
     host_private_roots: tuple[str, ...] = ()
+    full_access_other_owner_homes: str = "read_only"
     # 仅宿主装配；模型参数和工具目录不得覆盖或显示凭据环境来源。
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     owner_quota_max_bytes: int = 0
@@ -250,8 +251,12 @@ class ListToolsTool(BaseTool):
         for item in payload["unavailable_tools"]:
             tool = self.registry.tools.get(item["name"])
             item["category"] = tool.model_spec.category if tool is not None else "general"
-        live_payload = _live_tool_manifest_payload(payload, snapshot,
-                                                   {spec.name for spec in self.registry.specs_for_snapshot(snapshot)})
+        live_payload = _live_tool_manifest_payload(
+            payload,
+            snapshot,
+            {spec.name for spec in self.registry.specs_for_snapshot(snapshot)},
+            include_extended_context=context is not None,
+        )
         return ToolHandlerOutcome(
             "list_tools",
             True,
@@ -504,25 +509,49 @@ def _compact_tool_purpose(runtime: ToolRuntime | ToolModelSpec) -> str:
     return re.split(r"(?<=[。！？.!?])\s*|\n", text.strip(), maxsplit=1)[0][:90]
 
 
-# LLM: v4短目录保留同一快照的权限、身份、状态/发现事实和必要审批合同；短用途兼容旧消费者，完整定义留档。
-# 函数用途: 从完整 manifest 生成工具短卡目录，全文仍由原输出归档。
-def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntimeSnapshot,
-                                direct_tool_names: set[str]) -> dict[str, object]:
+# LLM: v4短目录只投影同一快照的身份与权限及四字段名卡；完整状态、审批合同和定义留在原归档及详情入口。
+# 函数用途: 从完整 manifest 生成去重短卡，不在模型上下文重复完整工具状态和审批参数表。
+def _live_tool_manifest_payload(
+    payload: dict[str, object],
+    snapshot: ToolRuntimeSnapshot,
+    direct_tool_names: set[str],
+    *,
+    include_extended_context: bool = False,
+) -> dict[str, object]:
     executable = set(payload.get("executable_tools") or [])
     compact_tools = []
     for item in payload.get("tools", []):
         if item["name"] not in executable:
             continue
         purpose = _compact_tool_purpose(snapshot.runtime(item["name"]))[:36]
-        compact = {"name": item["name"], "category": item.get("category", "general"),
-                   "purpose": purpose, "description": purpose,
-                   "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable"}
-        approval = (item.get("runtime_policy") or {}).get("approval_policy") or {}
-        if approval.get("always_effects") or approval.get("owner_grant_parameters"):
-            compact["approval_policy"] = {key: approval.get(key) or []
-                                           for key in ("always_effects", "owner_grant_parameters")}
+        compact = {
+            "name": item["name"],
+            "category": item.get("category", "general"),
+            "purpose": purpose,
+            "schema_visibility": "direct" if item["name"] in direct_tool_names else "discoverable",
+        }
+        if include_extended_context:
+            compact["description"] = purpose
+            approval = (item.get("runtime_policy") or {}).get("approval_policy") or {}
+            if approval.get("always_effects") or approval.get("owner_grant_parameters"):
+                compact["approval_policy"] = {
+                    key: approval.get(key) or []
+                    for key in ("always_effects", "owner_grant_parameters")
+                }
         compact_tools.append(compact)
     context = payload.get("self_context") or {}
+    context_keys = {
+        "schema_version",
+        "run_id",
+        "owner_type",
+        "scope",
+        "permissions",
+        "identity",
+        "filesystem",
+        "network",
+    }
+    if include_extended_context:
+        context_keys |= {"usage", "discovery"}
     live = {
         "schema_name": "tool_runtime_manifest_live",
         "schema_version": 4,
@@ -531,8 +560,7 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
         "snapshot_hash": str(payload.get("snapshot_hash") or ""),
         "permission_mode": str(payload.get("permission_mode") or ""),
         "permission_scope": str(payload.get("permission_scope") or ""),
-        "self_context": {key: value for key, value in context.items()
-                         if key in {"schema_version", "run_id", "owner_type", "scope", "permissions", "identity", "filesystem", "network", "usage", "discovery"}},
+        "self_context": {key: value for key, value in context.items() if key in context_keys},
         "unavailable_tools": payload.get("unavailable_tools") or [],
         "tools": compact_tools,
         "detail_ref": "tool_search(names=[需要详情的准确工具名])",
@@ -540,9 +568,12 @@ def _live_tool_manifest_payload(payload: dict[str, object], snapshot: ToolRuntim
                           "self_map": {"section": "tools", "item": "需要详情的工具名"},
                           "read_artifact": {"artifact_ref_source": "本次完整manifest的宿主归档回执"}},
     }
-    live["self_context"]["tool_states"] = [
-        {key: state[key] for key in ("name", "state", "reason", "error_code") if state.get(key)}
-        for state in context.get("tool_states", []) if isinstance(state, dict)]
+    if include_extended_context:
+        live["self_context"]["tool_states"] = [
+            {key: state[key] for key in ("name", "state", "reason", "error_code") if state.get(key)}
+            for state in context.get("tool_states", [])
+            if isinstance(state, dict)
+        ]
     return _bounded_live_manifest(live)
 
 
@@ -562,20 +593,22 @@ def _bounded_manifest_core(result: dict[str, object], size: Callable[[object], i
     return bounded_manifest_core(result, _LIVE_LIST_TOOLS_MAX_BYTES)
 
 
-# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；无预载子集的显式授权全部直出，后台预载仍沿原折叠链。
-# 函数用途: 生成稳定前缀的原生工具序列，无搜索入口时完整直出原授权工具。
+# LLM: 基础工具按注册顺序，发现工具按首次发现顺序追加；显式授权仍可折叠，但无可用搜索入口时必须全部直出。
+# 函数用途: 生成稳定前缀的原生工具序列，授权只限范围，不替代发现入口和真实加载事实。
 def _ordered_model_visible_specs(registry: Any, snapshot: ToolRuntimeSnapshot, specs: list[ToolModelSpec],
                                  allowed_tools: list[str] | None, loaded_tool_names: Collection[str] | None):
     from .tool_search_state import ordered_tool_names
 
-    if (allowed_tools is not None or snapshot.allowed_tools is not None) and not snapshot.preloaded_tool_names:
-        return specs
     search = snapshot.runtime("tool_search")
     if (search is None or not search.exposure.model_visible or not search.availability.available
             or not any(spec.name == "tool_search" for spec in specs)):
         return specs
     extra_deferred, _declared = _extra_deferred_names(registry, snapshot, allowed_tools)
-    deferred = set(registry.catalog_deferred_categories)
+    explicit_without_preload = (
+        (allowed_tools is not None or snapshot.allowed_tools is not None)
+        and not snapshot.preloaded_tool_names
+    )
+    deferred = set() if explicit_without_preload else set(registry.catalog_deferred_categories)
     loaded = ordered_tool_names(snapshot.loaded_tool_names if loaded_tool_names is None else loaded_tool_names)
     base = [spec for spec in specs if (spec.category not in deferred and spec.name not in extra_deferred)
             or spec.name in snapshot.preloaded_tool_names]
@@ -792,8 +825,8 @@ class ToolRegistry:
             specs = [spec for spec in specs if spec.category != "orchestration"]
         return specs
 
-    # LLM: 展示不改变授权；显式allowlist无预载子集时全部直出，后台预载允许折叠；发现项追加到稳定基础表后。
-    # 函数用途: 按基础注册顺序与真实发现顺序交付完整原生 Schema。
+    # LLM: 展示不改变授权；显式allowlist有可用搜索入口时仍可折叠，缺入口则全部直出；发现项追加到稳定基础表后。
+    # 函数用途: 按基础注册与真实发现顺序交付原生 Schema，未发现的重工具保持可搜索。
     def model_visible_specs(
         self,
         *,
@@ -906,7 +939,7 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in specs}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
-    # LLM: 按宿主给定顺序从本轮模型可见工具里取交集，可见性口径与检索推荐、目录相同（显式 allowed_tools 全部可见）；
+    # LLM: 按宿主给定顺序从本轮模型可见工具里取交集，可见性口径与检索推荐、目录相同（有搜索入口的显式授权仍按声明折叠）；
     #   不检索、不授权、不改 loaded，重复名字只取一次。
     # 函数用途: 取出宿主指定名字里本轮真正可见的工具说明，供固定推荐节渲染。
     def visible_specs_in_order(
@@ -1103,12 +1136,13 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
         registry._mcp_retry_state.clear()
 
 
-# LLM: 首次连接先经幂等入口；普通MCP目录以原owner为权威并投影各视图，插件仍走原同步，关闭不重连。
-# 函数用途: 为新运行完成首次MCP连接或后续恢复，并投影本视图目录，基础权限工具保持独立。
+# LLM: 新注册表首次连接经原幂等入口；已携客户端池的旧装配没有延后初连状态时只做原恢复，不另建连接或猜配置。
+# 函数用途: 为新运行准备MCP连接并投影视图，保留旧宿主装配的退避与关闭语义。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if registry._mcp_closed.is_set():
         return
-    registry.ensure_mcp_connected()
+    if hasattr(registry, "_mcp_connected_state"):
+        registry.ensure_mcp_connected()
     clients = list(getattr(registry, "_mcp_clients", ()) or ())
     plugin_owner = registry._construction_params.plugin_owner
     if plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
@@ -1133,10 +1167,10 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
             project_plugin_tools(registry)
 
 
-# LLM: 调用者持共享prepare锁；只投影原owner发布的普通MCP代理，不按名字猜类型，不复制基础权限工具或插件目录。
-# 函数用途: 为独立权限视图补齐同一连接的工具，避免按需连接后其它视图只有空目录。
+# LLM: 调用者持共享prepare锁；旧原始注册表无共享owner时自身即目录权威，独立视图仍只投影原owner发布的普通MCP代理。
+# 函数用途: 为权限视图补齐同一连接的工具，不给未声明共享来源的原始注册表构造第二份目录。
 def _project_shared_mcp_tools(registry: ToolRegistry) -> None:
-    owner = registry._mcp_catalog_owner
+    owner = getattr(registry, "_mcp_catalog_owner", registry)
     if owner is registry:
         return
     from ..plugin_runtime import PluginMCPClient

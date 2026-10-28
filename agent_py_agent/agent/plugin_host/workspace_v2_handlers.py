@@ -219,7 +219,9 @@ def _unq(token, strip_prefix=True):
 # LLM: 过滤落入宿主控制目录或runs的Git变更与diff块，按行首diff头与C转义路径严格拦截。
 # 函数用途: 拆解Git状态与diff并剔除受保护子目录条目。
 def _git_filter(home, root, status, diff):
-    def _ok(*paths):
+    # LLM: 逐项校验相对路径是否触碰宿主受保护目录，任一为None或越界即整块拒绝。
+    # 函数用途: 判断Git状态或diff条目涉及的路径集合是否全部安全。
+    def _ok(paths):
         try:
             for p in paths:
                 if p is None:
@@ -234,7 +236,7 @@ def _git_filter(home, root, status, diff):
     for entry in filter(None, entries):
         code, rel = entry[:2], entry[3:]
         old = next(entries, "") if ("R" in code or "C" in code) else ""
-        if _ok(rel, old):
+        if _ok((rel, old)):
             changed.append({"status": code.strip(), "path": rel})
     kept = []
     for chunk in re.split(r"(?m)(?=^diff --git )", diff):
@@ -246,7 +248,7 @@ def _git_filter(home, root, status, diff):
         known = {p for p in (*ren, *pm) if p}
         pairs = [(lp, rp) for m in re.finditer(r" ", head) if (lp := _unq(head[:m.start()])) is not None and (rp := _unq(head[m.end():])) is not None]
         hp = next((p for p in pairs if known and set(p) <= known), next((p for p in pairs if not known and (p[0] == p[1] or p[0].rpartition("/")[0] == p[1].rpartition("/")[0])), pairs[0] if pairs else (None,)))
-        if len(hp) == 2 and _ok(*hp, *ren, *pm):
+        if len(hp) == 2 and _ok((*hp, *ren, *pm)):
             kept.append(chunk)
     return branch, changed, "".join(kept)
 # LLM: Git启动前核目标控制目录和nofollow；NUL分隔保留换行/空格文件名，状态不足时不宣称clean。

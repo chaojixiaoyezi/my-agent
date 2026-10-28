@@ -307,11 +307,19 @@ def _prepare_runtime_context(agent, request: RuntimeContextRequest):
     long_term_memories = (
         []
         if recall_suppressed
-        else agent.memory.search_scoped_candidates(
-            request.user_prompt,
-            memory_top_k,
-            lambda record: long_term_record_matches_scope(record, recall_scope),
-            latency_safe=True,
+        else (
+            agent.memory.search_scoped_candidates(
+                request.user_prompt,
+                memory_top_k,
+                lambda record: long_term_record_matches_scope(record, recall_scope),
+                latency_safe=True,
+            )
+            if hasattr(agent.memory, "search_scoped_candidates")
+            else agent.memory.search_scoped(
+                request.user_prompt,
+                memory_top_k,
+                lambda record: long_term_record_matches_scope(record, recall_scope),
+            )
         )
     )
 
