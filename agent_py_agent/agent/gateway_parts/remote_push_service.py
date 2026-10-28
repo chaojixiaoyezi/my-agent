@@ -82,6 +82,24 @@ def read_push_json(root: Path, name: str):
     return push_json(raw) if raw is not None else {}
 
 
+_PUBLIC_ENDPOINT_FIELDS = frozenset({"endpoint_url", "enabled", "allowed_private_hosts", "allowed_callers"})
+
+
+# LLM: 同文件存储下在数据源出口即剥离token_ciphertext/token_hash等凭据字段，仅向目录层返回公开白名单字段。
+# 函数用途: 读取并裁剪远端推送节点的公开元数据，确保上层目录不取用、不解密、不暴露任何密文或摘要。
+def read_public_push_endpoints(root: Path, name: str) -> dict[str, dict]:
+    data = read_push_json(root, name)
+    rows = data.get("endpoints", {}) if isinstance(data, dict) else None
+    if not isinstance(rows, dict):
+        raise ValueError("invalid endpoints metadata")
+    public_rows: dict[str, dict] = {}
+    for ref, row in rows.items():
+        if not isinstance(row, dict):
+            raise ValueError("invalid endpoint metadata")
+        public_rows[ref] = {key: row[key] for key in _PUBLIC_ENDPOINT_FIELDS if key in row}
+    return public_rows
+
+
 # LLM: owner字符串须与唯一规范路径编号逐字一致，清洗或跨目录输入不能变成合法身份。
 # 函数用途: 解析local/main、local/用户和providers/通道/users或groups/编号。
 def push_owner(value):

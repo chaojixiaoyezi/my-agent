@@ -352,12 +352,73 @@ def test_settings_nonadmin_fields_are_cropped(make_agent, monkeypatch, kind):
     value = _read(agent, 'settings')
     policy = next(row for row in value['items'] if row['id'] == 'compact_policy')
     assert policy['trigger_percent'] == 69 and 'admin_default_percent' not in policy
-    assert policy['configuration_tool_state'] == 'unavailable'
+    assert policy['configuration_tool_state'] == 'deferred'
+    assert policy['configuration_scope'] == ('user_and_thread' if kind == 'user' else 'thread')
     for row in value['items']:
         if row['id'] == 'user_config':
             assert row['scope'] == 'decision-only'
             assert row['next_read'] == {'tool': 'tool_search', 'arguments': {'query': 'user_config', 'limit': 1}}
             assert row.get('read_parameters') == {'action': 'decision_read'}
+
+
+# LLM: 沿settings返回的next_read在main/user/group三类身份上真实调用tool_search并继续调用compact_policy，验证权限边界。
+# 函数用途: 证明压缩策略导航在三类身份下均能命中真实工具并按原权限裁剪执行。
+@pytest.mark.parametrize('kind', ['main', 'user', 'group'])
+def test_settings_next_read_navigation_and_compact_policy_execution(make_agent, kind):
+    import json
+
+    from agent_py_agent.agent.conversation.host_actor import HostChannelActor
+    agent = make_agent(kind=kind, memory_compact_trigger_percent=72)
+    thread = owner_thread(agent, 'nav-settings', channel='local' if kind == 'main' else 'feishu')
+    attrs = {'conversation_thread_id': thread.thread_id}
+    actor = None
+    if kind == 'group':
+        actor = HostChannelActor(
+            owner_id=agent.home_paths.owner_id,
+            source_thread_id=thread.thread_id,
+            entry_request_id='req-1',
+            channel='feishu',
+            conversation_id='nav-settings',
+            actor_id='actor-1',
+        )
+    agent._current_run_params = RunParams(task_attributes=attrs, host_channel_actor=actor)
+    item = _read(agent, 'settings', item='compact_policy')['item']
+    target = item['configuration_tool']
+    assert target == 'compact_policy' and target in agent.tools.tools
+    entry = item['next_read']
+    search_res = agent.tools.tools[entry['tool']].execute(entry['arguments'])
+    assert search_res.ok, search_res.output
+    search_payload = json.loads(search_res.output)
+    assert search_payload['matched_count'] > 0 and 'compact_policy' in search_payload['loaded_for_next_model_call']
+    after = item.get('after_expansion') or {'tool': 'compact_policy', 'arguments': {'action': 'status'}}
+    status_res = agent.tools.tools[after['tool']].execute(after['arguments'])
+    assert status_res.ok, status_res.output
+    status_payload = json.loads(status_res.output)
+    assert status_payload['trigger_percent'] == 72
+    assert ('admin_default_percent' in status_payload) is (kind == 'main')
+    set_res = agent.tools.tools['compact_policy'].execute({'action': 'set_thread', 'trigger_percent': 64})
+    assert set_res.ok, set_res.output
+    assert json.loads(set_res.output)['trigger_percent'] == 64
+    admin_res = agent.tools.tools['compact_policy'].execute({'action': 'admin_force', 'admin_force_enabled': True, 'trigger_percent': 85})
+    if kind == 'main':
+        assert admin_res.ok, admin_res.output
+        locked = agent.tools.tools['compact_policy'].execute({'action': 'set_thread', 'trigger_percent': 60})
+        assert not locked.ok and locked.error_code == 'COMPACT_POLICY_LOCKED_BY_ADMIN'
+    else:
+        assert not admin_res.ok and admin_res.error_code == 'TOOL_PERMISSION_DENIED'
+
+
+# LLM: 验证read_public_push_endpoints在数据源出口即剥离token_ciphertext与token_hash，目录层拿到的字典不含凭据键。
+# 函数用途: 守住远端节点公开元数据读取入口不向目录层传递任何密文或摘要字段。
+def test_read_public_push_endpoints_strips_credentials_at_source(make_agent):
+    from agent_py_agent.agent.gateway_parts.remote_push_service import read_public_push_endpoints
+    agent = make_agent()
+    peer_records(agent)
+    rows = read_public_push_endpoints(agent.home_paths.owner_home_dir / 'config', 'remote_endpoints.json')
+    assert 'mine' in rows
+    for row in rows.values():
+        assert 'token_ciphertext' not in row and 'token_hash' not in row
+        assert set(row) <= {'endpoint_url', 'enabled', 'allowed_private_hosts', 'allowed_callers'}
 
 
 # LLM: 在临时原Store中构造已存在的错归属记录，查询必须在调用策略解析器前失败关闭，不回落owner默认。

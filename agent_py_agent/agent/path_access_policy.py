@@ -158,6 +158,8 @@ _CREDENTIAL_FILENAMES = frozenset(
 )
 
 
+# LLM: 按文件名识别.env家族与已知凭据存储文件；.env.example作为公开模板放行，仅用于常规模式兜底。
+# 函数用途: 判断给定文件名是否属于需要拦截的敏感凭据文件。
 def _is_credential_filename(name: str) -> bool:
     """文件名是否是凭据文件(.env 家族 / 凭据存储)。.env.example 是文档化模板,放行(不含真密钥)。"""
     n = str(name or "").strip().lower()
@@ -417,6 +419,8 @@ class PathAccessPolicy:
             mode=self.mode, dangerous_roots=self.dangerous_roots, agent_home_root=self.agent_home_root)
         return policy.check(resolved)
 
+    # LLM: 在my-agent数据根内执行多租户owner级隔离裁决，仅放行当前owner私有子树与只读共享资源目录。
+    # 函数用途: 判断目标路径在多用户owner隔离围栏内是否允许访问。
     def _owner_scope_decision(self, resolved: Path, home_root: Path) -> PathAccessDecision:
         """多用户隔离:my-agent 数据目录内的 owner 级判定。
 
@@ -459,8 +463,7 @@ class PathAccessPolicy:
         )
 
 
-# LLM: Credential denial is a legacy/unscoped normal-mode guard. Owner-home and explicit full
-# access decisions must be made before calling it so filename heuristics never become authority.
+# LLM: 凭据文件名拒绝仅作常规模式未归属路径的兜底守卫，owner私有区与显式Full Access必须在调用前先行裁决。
 # 函数用途: 生成统一的凭据文件拒绝结果，供未处于 owner 私有区或 Full Access 的路径使用。
 def _credential_file_decision(resolved: Path) -> PathAccessDecision:
     return PathAccessDecision(
@@ -471,6 +474,8 @@ def _credential_file_decision(resolved: Path) -> PathAccessDecision:
     )
 
 
+# LLM: 将路径访问模式字符串归一化为合法枚举值，未知或空输入回落到normal安全模式。
+# 函数用途: 规范化路径访问模式配置值。
 def normalize_path_access_mode(value: object) -> str:
     text = str(value or "").strip().lower()
     return text if text in _VALID_MODES else PATH_ACCESS_MODE_NORMAL
@@ -500,6 +505,8 @@ def path_scope_regime(owner_scope_root: object, path_access_mode: object) -> str
     return PATH_SCOPE_FULL if normalize_path_access_mode(path_access_mode) == PATH_ACCESS_MODE_FULL else PATH_SCOPE_NORMAL
 
 
+# LLM: 展开环境变量与用户主目录并执行非严格resolve，空值或路径解析异常安全返回None。
+# 函数用途: 将原始路径输入规范化为绝对Path对象。
 def _normalized_root(value: object) -> Path | None:
     text = os.path.expandvars(str(value or "").strip())
     if not text:
@@ -510,6 +517,8 @@ def _normalized_root(value: object) -> Path | None:
         return None
 
 
+# LLM: 获取当前操作系统用户的家目录规范化路径，异常时返回None而不中断策略构造。
+# 函数用途: 安全解析当前系统用户的家目录路径。
 def _current_user_home() -> Path | None:
     try:
         return Path.home().resolve(strict=False)
@@ -517,6 +526,8 @@ def _current_user_home() -> Path | None:
         return None
 
 
+# LLM: 解析MY_AGENT_HOME环境变量或默认~/.my-agent根目录，用于豁免危险根下的自身数据目录。
+# 函数用途: 返回当前生效的my-agent宿主数据根目录路径。
 def _my_agent_home_root() -> Path | None:
     """my-agent 数据目录根(默认 ~/.my-agent,可经 MY_AGENT_HOME 覆盖)。agent 写自己 home 子树
     豁免 dangerous_roots——修 root 用户场景下 /root 被列危险目录误伤 /root/.my-agent 产物的问题。"""
@@ -527,6 +538,8 @@ def _my_agent_home_root() -> Path | None:
         return None
 
 
+# LLM: 从已可信的owner_scope_root向上反推规范my-agent数据根目录，兼容未导出MY_AGENT_HOME的自定义宿主根。
+# 函数用途: 根据owner专属目录路径推导所属的my-agent宿主根目录。
 def _home_root_from_owner_scope(owner_scope_root: Path) -> Path | None:
     """Derive the canonical my-agent home from an already trusted owner path.
 
@@ -709,6 +722,7 @@ def _task_record_patterns(home: str, *, directory_operation: str = "") -> list[s
     return [f"^{home}/({roots})/({parts})(/|$)"]
 
 
+# LLM: 转义POSIX扩展正则表达式中的全部元字符，供沙箱路径匹配规则安全拼接字面路径。
 # 函数用途: 把一段文字转成 POSIX ERE 里的字面匹配（给正则元字符加反斜杠）。
 def _ere_literal(text: str) -> str:
     return "".join("\\" + char if char in _ERE_SPECIAL else char for char in text)
@@ -735,11 +749,13 @@ def _host_write_block(resolved: Path, agent_home_root: Path) -> PathAccessDecisi
     return None
 
 
+# LLM: 汇总owner目录下受宿主保护的全部状态目录与文件相对路径片段，供路径门与沙箱规则同源消费。
 # 函数用途: owner home 里运行状态的全部路径片段：声明的目录，声明的文件及其 .lock，每个 SQLite 库及其伴随文件。
 def _owner_state_parts() -> tuple[tuple[str, ...], ...]:
     return (*HOST_STATE_OWNER_DIRS, *_owner_state_file_parts())
 
 
+# LLM: 仅枚举owner运行状态中的文件级相对路径片段（含.lock与SQLite伴随文件），供硬链接防护比对。
 # 函数用途: owner home 里运行状态的文件片段（不含目录）：声明的文件、它们的 .lock、SQLite 库及伴随文件；硬链接比对只看这些。
 def _owner_state_file_parts() -> tuple[tuple[str, ...], ...]:
     locks = tuple((*parts[:-1], parts[-1] + HOST_STATE_LOCK_SUFFIX) for parts in HOST_STATE_OWNER_FILES)
@@ -765,6 +781,7 @@ def _hardlinked_host_file(path: Path, agent_home_root: Path) -> Path | None:
     return next((item for item in candidates if item != path and _same_file(info, item)), None)
 
 
+# LLM: 递归枚举给定路径下的普通文件（若自身是文件则返回单元素元组），OSError安全降级为空元组。
 # 函数用途: 列出一个路径本身（是文件时）或它下面的全部文件；不存在或读取出错时返回空元组。
 def _files_at(root: Path) -> tuple[Path, ...]:
     try:
@@ -775,6 +792,7 @@ def _files_at(root: Path) -> tuple[Path, ...]:
         return ()
 
 
+# LLM: 使用os.path.samestat比对设备号与inode，判断候选路径是否与目标stat指向同一底层文件。
 # 函数用途: 判断一个路径是否就是已 stat 过的那个文件（同一设备同一 inode）。
 def _same_file(info: os.stat_result, candidate: Path) -> bool:
     try:
@@ -805,6 +823,7 @@ def _relative_folded(path: Path, base: Path) -> tuple[str, ...] | None:
     return folded[len(prefix):] if folded[:len(prefix)] == prefix else None
 
 
+# LLM: 按相对路径深度截取path自base向下的指定层级前缀路径，保持原始大小写组件。
 # 函数用途: 取 path 里 base 之后再往下 depth 段的那一层目录（relative 是 path 相对 base 的各段）。
 def _prefix_of(path: Path, relative: tuple[str, ...], depth: int) -> Path:
     return Path(*path.parts[:len(path.parts) - len(relative) + depth])
@@ -1044,6 +1063,8 @@ def _uninheritable_root_forms() -> frozenset[str]:
     return frozenset(forms)
 
 
+# LLM: 通过Path.relative_to无异常判定path是否位于root子树内，兼容不同Python小版本的路径比对语义。
+# 函数用途: 判断目标路径是否属于给定根目录的子路径或本身。
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)

@@ -24,6 +24,7 @@ READ_TOOLS = frozenset({
 READ_OPERATIONS = {
     "remember": ("action", frozenset({"list"}), None),
     "user_config": ("action", frozenset({"get", "list"}), None),
+    "compact_policy": ("action", frozenset({"status"}), "status"),
     "scripts": ("action", frozenset({"list", "get", "status"}), None),
     "workflows": ("action", frozenset({"list", "get", "status"}), None),
     "schedule": ("action", frozenset({"list", "get"}), None),

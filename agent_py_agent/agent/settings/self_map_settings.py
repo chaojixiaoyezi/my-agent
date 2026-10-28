@@ -35,13 +35,16 @@ def settings_projection(context):
     policy = resolve_thread_compact_policy(agent, thread, use_frozen=False)
     threshold, seconds = compact_idle_parameters(agent.config)
     states = {row["name"]: row["state"] for row in context.public_context.get("tool_states", ())}
+    owner_kind = getattr(agent.home_paths, "owner_kind", "")
+    scope = "admin" if context.admin else ("user_and_thread" if owner_kind == "user" else "thread")
     fields = {"trigger_percent": policy["effective_trigger_percent"], "source_layer": policy["effective_source"],
               "admin_force_enabled": policy["force_locked"], "idle_compact_enabled": bool(threshold and seconds),
               "idle_trigger_percent": threshold, "idle_seconds": seconds,
               "thread_override_percent": policy["thread_override_percent"], "user_default_percent": policy["user_default_percent"],
               "observation_point": "current_resolved_policy", "status_command": "/compact status",
               "configuration_tool": "compact_policy", "configuration_tool_state": states.get("compact_policy", "unavailable"),
-              "next_read": next_read("tool_search", {"query": "compact_policy", "limit": 1})}
+              "configuration_scope": scope,
+              "next_read": next_read("compact_policy", {"action": "status"})}
     if context.admin:
         fields["admin_default_percent"] = policy["admin_default_percent"]
     items = [map_item("compact_policy", "当前压缩策略", fields=fields)]

@@ -105,6 +105,8 @@ class PromptBuildRequest:
     thread_persona: ThreadPersonaScope | None = None
 
 
+# LLM: 内部过渡参数包，用于在旧式平铺调用参数与PromptBuildRequest之间无损桥接，不对外暴露。
+# 类用途: 承载PromptBuilder.build平铺调用参数并转换为统一构建请求。
 @dataclass(frozen=True)
 class _PromptBuildFields:
     user_prompt: str
@@ -156,6 +158,8 @@ class PromptRenderInput:
 class PromptBuilder:
     """负责构造每一轮发给模型的完整 prompt。"""
 
+    # LLM: 构造阶段仅绑定配置、工作区根、owner路径与快照引用，不发起文件写入或外部请求。
+    # 函数用途: 初始化提示词构建器并规范化有效工作区根列表。
     def __init__(
         self,
         config: AgentConfig,
@@ -303,12 +307,16 @@ class PromptBuilder:
             deployment_context=deployment_context,
         )
 
+    # LLM: 仅当home_context_enabled启用且存在owner路径或人格仓库时只读加载人格片段，忽略user_prompt文本内容。
+    # 函数用途: 读取当前owner的AGENTS/SOUL/USER等人格与家庭上下文文本块。
     def read_home_context(self, user_prompt: str) -> list[str]:
         if (not self.home_paths and self.persona_repository is None) or not bool(getattr(self.config, "home_context_enabled", True)):
             return []
         del user_prompt
         return _persona_home_context_chunks(self.home_paths, self.persona_repository)
 
+    # LLM: 冻结单轮时间与工作区结构化事实，facts_only模式仅保留路径与时间事实，不附通用工作提示。
+    # 函数用途: 生成单轮模型调用使用的工作区上下文快照文本。
     def snapshot_workspace_context(self, *, facts_only: bool = False) -> str:
         """Freeze date/time and workspace facts for one model turn."""
 
@@ -416,9 +424,7 @@ def _native_cache_volatile_sections(
     )
 
 
-# LLM: This projection must describe the exact ToolRegistry cwd. Permission roots are
-# not placement hints: 会话运行时 exposes one turn cwd separately from its sandbox profile,
-# so a broader owner wall must never compete with the cwd as the default destination.
+# LLM: 投影必须反映本轮ToolRegistry真实cwd；权限根不是默认落点提示，较宽的owner围栏不得覆盖当前cwd。
 # 函数用途: 把冻结的工作区提示更新为本轮真实 cwd，并明确“权限范围不等于默认落点”。
 def project_runtime_workspace_context(
     snapshot: str,
@@ -503,6 +509,8 @@ def _read_resolved_prompt_file(path: Path, source: str, required: bool) -> str |
     return None
 
 
+# LLM: 仅允许随包prompts目录下的相对路径，拒绝空路径、绝对路径或父目录逃逸。
+# 函数用途: 校验并返回安全的内置提示词相对路径。
 def _safe_builtin_prompt_path(value: str) -> Path:
     path = Path(str(value or "").strip())
     if not str(path) or path.is_absolute() or ".." in path.parts:
@@ -510,10 +518,14 @@ def _safe_builtin_prompt_path(value: str) -> Path:
     return path
 
 
+# LLM: 按当前模块相对层级定位agent_py_agent包根目录，不依赖进程当前工作目录。
+# 函数用途: 返回内置提示词资源所在的包根目录路径。
 def _builtin_prompt_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+# LLM: 优先返回已构造的PromptBuildRequest，否则将内部字段包转换为标准请求对象。
+# 函数用途: 归一生成PromptBuildRequest实例。
 def _prompt_build_request(
     request: PromptBuildRequest | None,
     args: _PromptBuildFields,
@@ -530,12 +542,13 @@ def _prompt_build_request(
     )
 
 
+# LLM: 委托memory_context_text格式化记忆记录列表，保持记忆渲染契约单一入口。
+# 函数用途: 将召回的记忆记录格式化为注入提示词的文本段落。
 def _memory_text(memories: list[MemoryRecord]) -> str:
     return memory_context_text(memories)
 
 
-# LLM: This prose guides behavior only. Permission is decided by the structured owner/full-access
-# profile; never parse a user sentence or this text to grant a path.
+# LLM: 本段文案仅作模型行为引导，真实权限由结构化owner/full-access策略裁决，绝不解析自然语言授权路径。
 # 函数用途: 用大白话告诉模型默认在哪工作、何时才应离开管理员自己的目录，以及跨用户时要少改动。
 def _owner_scope_text(builder: PromptBuilder) -> str:
     """Describe the already-resolved owner boundary without exposing its identifier."""
@@ -699,8 +712,6 @@ def _selected_skill_context(builder: PromptBuilder, request: PromptBuildRequest,
         return _SKILL_CATALOG_DEGRADED
 
 
-# LLM: 工作区块只提供时间/cwd 事实与交付软提示；不得强制所有诊断写文件，也不与系统的复杂任务计划纪律相反。
-# 函数用途: 冻结当前时间与目录，并提示按需交付、引用来源；不创建任务或改变权限。
 # LLM: 路径和时钟沿原已绑定值只读渲染；日期去重不移动稳定规则或改变facts_only隔离，不授额外权限。
 # 函数用途: 生成实际工作目录、当前日期范围及必要交付指导，保留原测试锁定短语。
 def _workspace_context_text(
@@ -761,6 +772,8 @@ def _workspace_context_text(
     return "\n".join(guidance)
 
 
+# LLM: 原生tool_use模式下工具往返由messages结构化承载，仅非native模式回退附加文本tool_context。
+# 函数用途: 返回需要在转录文本中显式拼接的工具上下文列表。
 def _transcript_tool_context(tools: ToolSections) -> list[str]:
     # native 下工具往返由原生 messages 携带，prompt 旁路 tool_context 文本（不双份重复）。
     return [] if tools.native_tool_use else (tools.tool_context or [])
@@ -806,10 +819,14 @@ def _task_and_transcript_section(
     )
 
 
+# LLM: 判定当前context_scope是否属于task_local或control_plane任务局部上下文。
+# 函数用途: 检查给定范围标识是否为任务局部或控制面范围。
 def _is_task_local_context(value: object) -> bool:
     return str(value or "").strip().lower() in {"task_local", "control_plane"}
 
 
+# LLM: 判定当前context_scope是否属于isolated、task_local或control_plane隔离范围，用于裁剪主会话上下文注入。
+# 函数用途: 检查给定范围标识是否需要隔离主会话上下文。
 def _is_isolated_scope(value: object) -> bool:
     return str(value or "").strip().lower() in {"isolated", "task_local", "control_plane"}
 
@@ -902,6 +919,8 @@ def _render_persona_sections(snapshots: dict, persona_epoch: int | None = None) 
                                    agents_source_metadata=getattr(snapshots.get("agents"), "agents_source_metadata", None))
 
 
+# LLM: 仅在注入系统提示词前剥离HTML注释并收敛连续空行，不修改磁盘上的原始模板文件。
+# 函数用途: 移除人格或记忆模板中的HTML引导注释以节省上下文Token。
 def _strip_injection_comments(text: str) -> str:
     """注入系统提示词前剥离 HTML 注释：注释供维护者查看，Read 原文件时仍可见。
     让人格/记忆模板里的引导注释零 token——模板可带丰富填写提示,却不占每轮上下文。"""
@@ -912,6 +931,8 @@ def _strip_injection_comments(text: str) -> str:
     return stripped.strip("\n")
 
 
+# LLM: 仅在内存中隐藏正文中无有效内容的二级标题模板空段落，不改动源文件。
+# 函数用途: 过滤掉Markdown文本里没有实质内容的空二级章节。
 def _strip_empty_markdown_sections(text: str) -> str:
     """Hide empty H2 template sections from model context without mutating source files."""
 

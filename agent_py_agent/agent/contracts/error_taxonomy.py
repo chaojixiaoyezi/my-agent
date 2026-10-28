@@ -44,6 +44,8 @@ _MANAGED_DELETE_RECOVERY_HINT = (
 )
 
 
+# LLM: 绑定唯一错误码、分类、可重试性与恢复建议，作为工具与状态机的结构化错误合同载体。
+# 类用途: 描述单个错误码的分类、重试策略、推荐恢复动作和恢复提示。
 @dataclass(frozen=True)
 class ErrorContract:
     code: str
@@ -3924,10 +3926,14 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
 }
 
 
+# LLM: 仅按显式错误码大写查表，未登记码统一回退到UNKNOWN_ERROR合同，不猜自然语言。
+# 函数用途: 根据结构化错误码返回对应的ErrorContract对象。
 def error_contract(code: str) -> ErrorContract:
     return ERROR_CONTRACTS.get(str(code or "").upper(), ERROR_CONTRACTS["UNKNOWN_ERROR"])
 
 
+# LLM: 仅匹配文本中显式标注的结构化错误码键（如error_code=...或行首错误码），不解析普通描述句子。
+# 函数用途: 从带显式错误码标记的消息文本中提取错误合同，无显式码时返回UNKNOWN_ERROR。
 def classify_error(message: str) -> ErrorContract:
     matches = _explicit_error_code_matches(str(message or ""), ERROR_CONTRACTS.keys())
     if matches:
@@ -3936,6 +3942,8 @@ def classify_error(message: str) -> ErrorContract:
     return error_contract("UNKNOWN_ERROR")
 
 
+# LLM: 扫描已知错误码集合在文本中的显式键值或行首匹配，不模糊匹配自然语言子串。
+# 函数用途: 收集文本中命中显式错误码格式的候选列表。
 def _explicit_error_code_matches(text: str, contract_codes: object) -> list[tuple[int, str]]:
     matches: list[tuple[int, str]] = []
     for code in contract_codes:
@@ -3944,11 +3952,15 @@ def _explicit_error_code_matches(text: str, contract_codes: object) -> list[tupl
     return matches
 
 
+# LLM: 同时兼容下划线与连字符大写形式，不扩充其它别名。
+# 函数用途: 生成错误码的标准大写形式与连字符变体。
 def _code_variants(code: object) -> tuple[str, str]:
     upper = str(code or "").upper()
     return (upper, upper.replace("_", "-"))
 
 
+# LLM: 正则只认行首码或error_code/error_type/code/finding键值位置，防止误把普通正文词汇当成错误码。
+# 函数用途: 检查文本是否以显式结构化位置包含指定错误码变体。
 def _has_explicit_error_code(text: str, variant: str) -> bool:
     escaped = re.escape(variant)
     return bool(
@@ -3961,6 +3973,8 @@ def _has_explicit_error_code(text: str, variant: str) -> bool:
     )
 
 
+# LLM: 返回有序完整错误码清单供合同测试与自检核对，不产生运行时副作用。
+# 函数用途: 列出当前已登记的全部工具与合同错误码名称。
 def tool_failure_taxonomy() -> list[str]:
     return sorted(ERROR_CONTRACTS)
 
@@ -4410,5 +4424,15 @@ ERROR_CONTRACTS.update({
         code="SKILL_SUMMARIZE_NO_RUN", category="state", retryable=False,
         recommended_action=RecoveryAction.NONE.value,
         recovery_hint="当前不在一次对话回合里，没法确定要总结哪一次的活；在用户的对话里再调用。",
+    ),
+    "COMPACT_POLICY_LOCKED_BY_ADMIN": ErrorContract(
+        code="COMPACT_POLICY_LOCKED_BY_ADMIN", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="管理员已开启强制上下文压缩比例锁定，当前会话或用户无法自行覆盖压缩阈值；如实告知用户当前锁定状态，不要重复尝试修改或绕过。",
+    ),
+    "SELF_MAP_THREAD_UNAVAILABLE": ErrorContract(
+        code="SELF_MAP_THREAD_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前绑定的会话记录不可用或不属于当前用户，未读取或修改会话级策略；核对原会话绑定，不回退到其他会话。",
     ),
 })

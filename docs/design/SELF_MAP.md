@@ -34,8 +34,8 @@
 
 | 按需section | 原权威及公开字段 | 权限和后续入口 |
 |---|---|---|
-| `remote_peers` | 当前owner的`config/remote_endpoints.json`，及宿主`remote_push/endpoints.json`中启用且caller ACL包含本人之项；owner同名优先。投影别名、URL、scope、enabled和私网许可 | 子代理与`isolated/task_local/control_plane`在读库前返回空集。只取公开字段，不读取凭据字段、不解密、不返回秘密/秘密散列、不做DNS/HTTP或写盘。详情为`peer:<ref>`；`work`复用启用节点摘要 |
-| `settings` | 原`resolve_thread_compact_policy(use_frozen=False)`与`compact_idle_parameters`；生效比例、来源、强制锁及闲置阈值/时长 | 精确线程缺失或错owner/home不可回落默认；受限上下文不读父策略。普通用户不见管理员默认值和编辑面；只给当前策略与合法工具发现入口 |
+| `remote_peers` | 当前owner的`config/remote_endpoints.json`，及宿主`remote_push/endpoints.json`中启用且caller ACL包含本人之项；owner同名优先。投影别名、URL、scope、enabled和私网许可 | 子代理与`isolated/task_local/control_plane`在读库前返回空集。同文件存储下经`read_public_push_endpoints`在数据源出口即剥离`token_ciphertext`/`token_hash`等凭据键，目录层只接收公开白名单字段，不取用、不解密、不暴露任何秘密或散列、不做DNS/HTTP或写盘。详情为`peer:<ref>`；`work`复用启用节点摘要 |
+| `settings` | 原`resolve_thread_compact_policy(use_frozen=False)`与`compact_idle_parameters`；生效比例、来源、强制锁及闲置阈值/时长 | 精确线程缺失或错owner/home不可回落默认；受限上下文不读父策略。普通用户不见管理员默认值和全局编辑面；导航指向按需展开的`compact_policy`工具（只读`status`及受原会话归属/群actor/管理员锁约束的阈值调整）与`user_config` |
 | `schedules` | 原`_schedules`及SchedulerRepository；`source_thread_id`（旧记录回退`thread_id`）显示为`bound_thread_id`，原`delivery`显示为`delivery_policy` | 复用原schedule授权和群`resolve_host_actor`，子/隔离先拒绝。`work`同步相同字段；详情仍走`schedule(action=get, job_id=...)`，收起的工具先发现再读 |
 | `assets` | 原冻结SkillSnapshot的普通方法数量、原包summary及本次工具状态 | 普通方法/包数量不混算，快照缺失或不完整保留null/partial；只提供scripts/workflows/datasources列表及skill_search/tool_search导航，不执行列表或读取正文、订单、构建历史 |
 

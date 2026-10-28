@@ -1331,6 +1331,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 |   |   |-- settings/
 |   |   |   `-- self_map_settings.py # 模型/配置及隐藏settings；原四层压缩和闲置参数只读，配置导航按身份裁剪。
 |   |   |-- tooling/
+|   |   |   |-- compact_policy_tool.py # 按需展开的多级压缩阈值查询与会话/用户/管理员治理工具，承接settings导航。
 |   |   |   |-- pty_process_lifecycle.py # 保留真实PTY组长的内核退出身份供原注册表清退，不用根退出推断整树死亡。
 |   |   |   |-- self_map_availability.py # 以同一纯判据决定本次模型输入是否可提示self_map入口。
 |   |   |   |-- self_map_display.py # 给自我目录提供短行、共享精确详情模板及数量/完整性说明，不读盘或保存状态。

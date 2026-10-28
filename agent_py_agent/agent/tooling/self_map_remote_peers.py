@@ -1,4 +1,4 @@
-# LLM: 只投影当前owner及host ACL准入的公开节点字段；不取凭据字段、不解密/哈希，不执行推送或DNS。
+# LLM: 只投影当前owner及host ACL准入的公开节点字段；经公开元数据读口剥离凭据字段，不取用、不解密、不暴露密文或哈希，不执行推送或DNS。
 # 模块用途: 提供远端别名的按需目录及work复用摘要，受限上下文在读库前返回空集。
 from __future__ import annotations
 
@@ -13,12 +13,15 @@ def restricted_owner_scope(context):
     return context.child or context.context_scope in {"isolated", "task_local", "control_plane"}
 
 
-# LLM: 沿原nofollow有界JSON读口，仅访问公开字段；owner同名优先，host须严格enabled和caller ACL，不触及凭据解析器。
+# LLM: 沿公开元数据专用读口获取已剥离凭据键的节点字典；owner同名优先，host须严格enabled和caller ACL，不取用、不解密或暴露密文。
 # 函数用途: 枚举可见节点别名，坏来源保留partial，不把读取失败当完整空库。
 def remote_peers_projection(context):
     if restricted_owner_scope(context):
         return SectionProjection((), "complete", source="restricted child/isolated scope")
-    from ..gateway_parts.remote_push_service import RemotePushError, read_push_json
+    from ..gateway_parts.remote_push_service import (
+        RemotePushError,
+        read_public_push_endpoints,
+    )
 
     home = context.agent.home_paths
     items, seen, errors = [], set(), []
@@ -26,17 +29,12 @@ def remote_peers_projection(context):
                (home.root / "remote_push", "endpoints.json", "host"))
     for root, filename, scope in sources:
         try:
-            data = read_push_json(root, filename)
-            rows = data.get("endpoints", {})
-            if not isinstance(rows, dict):
-                raise ValueError("invalid endpoints metadata")
+            rows = read_public_push_endpoints(root, filename)
             for ref, row in rows.items():
                 if not isinstance(ref, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", ref) is None or ref in seen:
                     continue
                 if scope == "owner":
                     seen.add(ref)
-                if not isinstance(row, dict):
-                    raise ValueError("invalid endpoint metadata")
                 enabled = row.get("enabled") is True
                 if scope == "host":
                     callers = row.get("allowed_callers", ["local/main"])

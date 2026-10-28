@@ -165,6 +165,8 @@ from .user_space.runtime_paths import (
 )
 
 
+# LLM: 将主工作区与附加工作区根统一resolve去重，保证主工作区位于首位。
+# 函数用途: 规范化并去重当前Agent的工作区根路径列表。
 def _normalized_workspace_roots(primary: Path, roots: list[str | Path] | None) -> list[Path]:
     resolved: list[Path] = []
     for raw in [primary, *(roots or [])]:
@@ -238,6 +240,8 @@ def _curator_model_router(agent: object, config: AgentConfig, curator_config: Me
     if fixed and _fixed_curator_profile_usable(agent, fixed):
         return None
 
+    # LLM: 按给定会话集合动态选择后台记忆整理模型后端，并在固定档案不可用时附带降级告警。
+    # 函数用途: 为一次Curator整理批次解析具体的模型路由与回退信息。
     def route(thread_ids: tuple[str, ...]) -> CuratorModelRouting:
         backend, provider, model, fallback = _curator_backend(agent, fixed)
         warnings = _curator_route_warnings(agent, fixed, fallback)
@@ -269,6 +273,7 @@ def _curator_route_warnings(agent: object, fixed: str, fallback: str) -> tuple[s
     return tuple(warnings)
 
 
+# LLM: 只读校验固定Curator模型档案在当前owner（含管理员共享目录）下是否可解析且含有效凭据，不实例化后端。
 # 函数用途: 判断指定的整理档案在本 owner 的目录（含管理员共享）里能不能解析到；只读，不建后端。
 def _fixed_curator_profile_usable(agent: object, profile_id: str) -> bool:
     from .backends.errors import ModelNotConfiguredError
@@ -281,6 +286,7 @@ def _fixed_curator_profile_usable(agent: object, profile_id: str) -> bool:
     return True
 
 
+# LLM: 使用已解析的模型档案配置构造关闭流式输出的Curator专用后端路由，失败时安全返回None交由调用方回退。
 # 函数用途: 用一个会话档案的完整配置建无工具非流式后端；建不出来返回 None（调用方退回默认组）。
 def _curator_profile_route(profile_id: str, profile_config: object):
     from .memory_store.curator_models import CuratorModelRoute
@@ -293,9 +299,7 @@ def _curator_profile_route(profile_id: str, profile_config: object):
     return CuratorModelRoute(profile_id, backend, str(scoped.model_backend), str(scoped.model_name))
 
 
-# LLM: The composition root is the only adapter allowed to join Memory Store with the existing
-# archive control plane; Curator receives bounded metadata and never imports the archive layer.
-#   批量契约：一次调用带全部 run_id，读取器每批只 glob、只顺序扫描一遍索引，不再每 run 全量重扫。
+# LLM: 组合根是唯一允许将Memory Store与归档控制面桥接的适配层，一次调用批量扫描run_id集合的索引元数据。
 # 函数用途: 按 run_id 集合查询当前 owner 的工具产物索引，并保持内部层依赖单向。
 def _query_curator_tool_references(
     owner_root: Path,
@@ -674,9 +678,8 @@ class SimpleAgent(
             snapshot = snapshot.restricted(references, expected_sha256=expected, expected_refs=refs)
         return scope_main_task_references(self, snapshot, attrs)
 
-    # LLM: This is the composition-root query used by status and stop; request linkage comes
-    # from typed task attributes, with current runtime roots only as a compatibility bridge.
-    # 函数用途：列出某个会话请求真正派生的子代理编号。
+    # LLM: 组合根级状态与停止查询入口，优先按结构化task attributes关联request_id与子代理run_id。
+    # 函数用途: 列出某个会话请求真正派生的子代理编号。
     def subagent_run_ids_for_request(self, request_id: str) -> list[str]:
         request_key = str(request_id or "").strip()
         if not request_key:
@@ -739,6 +742,8 @@ class SimpleAgent(
             return prepare_subagent_stops(self, requests)
 
 
+# LLM: 仅当task_id对应当前活动命名Audit时返回其run_epoch整数，非Audit返回None，链接损坏返回-1。
+# 函数用途: 读取活动命名Audit任务当前的执行纪元（run_epoch）。
 def _active_audit_run_epoch(agent: object, task_id: str) -> int | None:
     """Return the current epoch only when this id is one active named Audit."""
 
@@ -766,6 +771,8 @@ def _active_audit_run_epoch(agent: object, task_id: str) -> int | None:
         return -1
 
 
+# LLM: 校验子代理任务记录上的audit_run_epoch是否与当前活动Audit纪元匹配，防止停止旧纪元或误杀新纪元任务。
+# 函数用途: 判断任务记录的Audit纪元是否与预期活动纪元一致。
 def _task_matches_audit_run_epoch(task: object, expected: int | None) -> bool:
     if expected is None:
         return True
@@ -891,12 +898,14 @@ def _build_scheduler_due_index(paths, worker_bootstrap):
     return SchedulerDueIndex(paths.global_index_dir / "scheduler_due.sqlite3")
 
 
-# LLM: Compatibility shim only; home_root.configured_home_root remains the sole implementation.
+# LLM: 兼容转发垫片，委托home_root.configured_home_root作为唯一实现入口。
 # 函数用途: 保留旧测试和内部调用名，并把解析统一转交轻量 home 根模块。
 def _configured_home_root(config: AgentConfig) -> str | None:
     return configured_home_root(config)
 
 
+# LLM: 尽力向全局owner索引登记当前owner引用，磁盘只读或OSError时静默忽略而不阻断Agent初始化。
+# 函数用途: 在可写环境下注册owner索引记录。
 def _register_owner_ref_if_possible(paths, owner) -> None:
     try:
         register_owner_ref(paths, owner)
@@ -913,10 +922,8 @@ def _scheduler_follow_up_policy(agent: SimpleAgent) -> SchedulerFollowUpPolicy:
 
 
 # LLM: 挂接的目录准备回调只在真实OPEN路由前执行，不在manager构造期连接MCP；子权限边界保持。
-# LLM: Child agents inherit the parent's effective project roots but never inherit an absent
-# owner wall from an administrator's Full Access session. Child permissions are independently
-# capped to WorkspaceWrite and stay inside the structured owner/task scope.
-# manager.skill_proposals is the owner Skill-proposal service only when enable_self_learning is on (else None).
+#   子代理继承父级的有效项目根目录，但绝不从管理员Full Access会话继承缺失的owner边界墙；
+#   子代理权限独立封顶于WorkspaceWrite并留在结构化owner/task范围内；仅当enable_self_learning开启时挂载skill_proposals。
 # 函数用途: 创建子代理管理器；共享任务工作区事实，但不把管理员的全盘权限递归传给下级；
 # 同时按自学习开关接上当前 owner 的 Skill 提案服务。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
@@ -962,8 +969,7 @@ def _skill_proposal_service(agent: SimpleAgent) -> SkillProposalService | None:
 # 在长驻 Gateway 中会在构造时冻结、到期后仍保留权限，因此不再作为 Full Access 来源。
 
 
-# LLM: Process cwd never grants workspace authority. While the owner wall exists, both local and
-# remote agents use owner home; only a local/main Full Access registry may retain an explicit root.
+# LLM: 进程cwd绝不授予工作区权限；只要owner隔离围栏生效即收回owner home，仅local/main显式Full Access保留外部根。
 # 函数用途: 为 WorkspaceOnly 身份把默认工作区收回 owner home，避免从 /root 启动就污染系统目录。
 def _owner_scoped_workspace_override(
     agent: SimpleAgent, config: AgentConfig
@@ -976,8 +982,7 @@ def _owner_scoped_workspace_override(
     return owner_home, [owner_home]
 
 
-# LLM: Prompt, filesystem tools and process tools consume this normalized workspace view;
-# package entry recognition accepts source or intentional sourceless distribution bytecode.
+# LLM: 提示词、文件系统工具与进程工具共用此规范化工作区视图，兼容源码与无源码字节码发行入口。
 # 函数用途: 返回当前代理唯一有效的主工作区和根列表。
 def _effective_workspace_scope(agent: SimpleAgent, config: AgentConfig) -> tuple[Path, list[Path]]:
     """返回 prompt、文件工具和 shell 共用的唯一有效工作区。"""
@@ -1207,6 +1212,8 @@ def _current_delivery_context(agent: SimpleAgent) -> DeliveryContext | None:
     return DeliveryContext(channel=channel, target=target, mode="proactive", thread_id=thread_id)
 
 
+# LLM: 始终返回当前owner的home目录作为受保护人格根，不随临时admin文件访问豁免而解除SOUL/AGENTS写保护。
+# 函数用途: 返回受宿主确认门保护的当前owner人格根目录路径字符串。
 def _protected_persona_root(agent: SimpleAgent) -> str:
     """人格确认根不随临时 admin 文件访问豁免消失。"""
     return str(getattr(getattr(agent, "home_paths", None), "owner_home_dir", "") or "")
@@ -1245,6 +1252,9 @@ def _register_orchestration_tools(agent: SimpleAgent) -> None:
         agent.tools.register(PackageInstallTool(agent))
     # 所有owner只总结自己的当前执行；工具核验原scope，正式发布仍由人类确认。
     agent.tools.register(SkillSummarizeTool(agent))
+    from .tooling.compact_policy_tool import CompactPolicyTool
+
+    agent.tools.register(CompactPolicyTool(agent))
     # 普通 user 也能经原 owner/thread 设置服务操作自己的决策覆盖；group/未知 owner 不扩权。
     # 统一审计工具同一范围注册：只读本人结构化记录，跨用户审计另需管理员明确许可（工具内复核）。
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:

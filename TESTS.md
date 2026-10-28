@@ -5,11 +5,11 @@
 ### 实现及回归范围
 
 - 注册表新增默认True的`include_in_overview`与过滤读口；无参仅原12域，完整登记/schema/valid_sections含4个隐藏专项，默认总览不调用隐藏reader。
-- remote_peers只读原owner/host节点公开字段，owner同名优先、host enabled/caller ACL过滤；受限上下文读库前返回空集，work同步启用节点摘要。覆盖真实临时JSON、坏JSON/形状/链接、禁用、主/普通owner及4类受限上下文，禁用DNS/网络/解密探针且逐字节核对不写盘；不声称真实节点可达。
-- settings调用原四层resolver及idle参数，精确线程缺失/错归属不回落默认；补普通用户/群权限裁剪及真实持久全局治理强制/非强制、治理损坏不可用。用户级值以原配置来源夹具覆盖，不冒称已通过新目录独立覆盖真实托管账户默认策略库。当前起点未注册compact_policy工具，如实导航为unavailable；user_config先发现schema，保留原effect门，不把读取参数变成绕过mutating判定的快捷入口。
+- remote_peers经`read_public_push_endpoints`在数据源出口即剥离`token_ciphertext`/`token_hash`等凭据键，只向目录层返回owner/host节点公开白名单字段，不取用、不解密、不暴露任何密文或散列；owner同名优先、host enabled/caller ACL过滤；受限上下文读库前返回空集，work同步启用节点摘要。覆盖真实临时JSON、坏JSON/形状/链接、禁用、主/普通owner及4类受限上下文，禁用DNS/网络/解密探针且逐字节核对不写盘；不声称真实节点可达。
+- settings调用原四层resolver及idle参数，精确线程缺失/错归属不回落默认；补普通用户/群权限裁剪及真实持久全局治理强制/非强制、治理损坏不可用。注册按需展开的`compact_policy`工具（`status`只读，`set_thread`/`reset_thread`/`set_user`/`reset_user`/`admin_*`按原会话归属、群组`resolve_host_actor`、管理员锁与`is_complete_local_admin_owner`严格裁决），使`main`/`user`/`group`三类身份跟随`settings`返回的`next_read`经`tool_search`展开并继续执行`compact_policy`均真实跑通；`user_config`同样先发现schema并保留原effect门。
 - schedules/work共用原权限和群actor校验，补绑定线程及原delivery摘要，覆盖顺延/固定、单/双线及binding_id-only标签。channels仅显式local/channel_binding目标；origin/隐式回落未枚举，不以空列表断言不通知；完整发送认证仍由原执行链裁决。
 - assets复用冻结技能及原包摘要，普通方法/包不混算；未绑定快照、未枚举全集保持null/partial，脚本/工作流/数据源只提供状态和导航，不加载正文或执行列表/外部探测。
-- 新专项38项通过；补不带limit的4个真实默认短页/详情回读。原有测试文件未修改。本轮8个Python模块（含新测试），经AST与起点逐定义比较，共41个新增/修改定义的装饰器前中文双层注释缺失0；同时核对8个模块头。
+- 新专项42项通过；补不带limit的4个真实默认短页/详情回读与三类身份跟随`next_read`执行`compact_policy`回归。触及的全部Python文件经AST整文件扫描确认类/函数/方法装饰器上方100%具备中文`# LLM:`与`# 类用途:`/`# 函数用途:`双层注释（0缺口）。
 - 独立Astra high仅只读审查候选源码/diff/专项及原权威链，未确定P1/P2；默认短页、权限/治理补证与channels口径建议已落实。之后的user_config发现入口及home原目录短语修正由本会话红绿回归验证，未冒称最终字节被独立重审；独立审查未执行测试。
 
 ### 提示测量（不是完整供应商请求）
