@@ -1311,7 +1311,7 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 |   |   |-- conversation/
 |   |   |   |-- learning_source.py # 构造、解码学习来源投影，并从线程与消息推导当次有效来源事实。
 |   |   |   |-- self_map_context.py # 登记上下文和 Compact 的只读元数据。
-|   |   |   `-- self_map_work.py # 登记本 owner 与当前代理的工作元信息，正文和唤醒/维护副作用不进入目录。
+|   |   |   `-- self_map_work.py # 工作入口及隐藏schedules/remote_peers登记；只读原投递策略、绑定和启用节点摘要。
 |   |   |-- gateway_parts/
 |   |   |   |-- agents_control_service.py # 沿现有公共控制链提供同owner的规则来源、预览与一次确认，保留原HostActor和群配置租约。
 |   |   |   |-- memory_candidate_control.py # 让本人在IM或终端查看并准确确认记忆候选，普通/memory搜索仍走原入口。
@@ -1327,15 +1327,16 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 |   |   |   |-- evidence_admission.py # 拦住失败、未知或身份不完整的工具事实来源。
 |   |   |   |-- learning_source_authority.py # 为直接记忆与策展路径取得一致的宿主学习来源。
 |   |   |   `-- promotion_remove_recovery.py # 在重启和故障后收拾已删除记忆的候选与派生残留。
-|   |   |-- plugin_self_map.py # 分开能力包安装/构建/普通方法及插件库存，提供权威位置，不复制授权状态。
+|   |   |-- plugin_self_map.py # 分开包与插件库存；assets聚合冻结数量与脚本/工作流/数据源入口，不读正文。
 |   |   |-- settings/
-|   |   |   `-- self_map_settings.py # 登记模型库存和有效配置元数据，普通用户只开放原 decision-only 面。
+|   |   |   `-- self_map_settings.py # 模型/配置及隐藏settings；原四层压缩和闲置参数只读，配置导航按身份裁剪。
 |   |   |-- tooling/
 |   |   |   |-- pty_process_lifecycle.py # 保留真实PTY组长的内核退出身份供原注册表清退，不用根退出推断整树死亡。
 |   |   |   |-- self_map_availability.py # 以同一纯判据决定本次模型输入是否可提示self_map入口。
 |   |   |   |-- self_map_display.py # 给自我目录提供短行、共享精确详情模板及数量/完整性说明，不读盘或保存状态。
 |   |   |   |-- self_map_mcp.py # 登记 MCP 配置、连接和发布状态；配置与本机 transport 观测分别计数。
-|   |   |   |-- self_map_registry.py # 提供自我目录登记、只读上下文和分页来源合同，新领域只需登记 reader。
+|   |   |   |-- self_map_registry.py # 完整登记生成schema，overview_descriptors仅选默认总览；新领域不复制编号表。
+|   |   |   |-- self_map_remote_peers.py # 当前owner/host ACL节点公开白名单，子代理/隔离先拒绝，不解密或联机。
 |   |   |   |-- self_map_tool.py # 以短总览、分块分页和精确条目回答关于代理自己的问题。
 |   |   |   `-- self_map_tools.py # 为自我目录登记当前授权工具的用途、来源、展开及不可用原因。
 |   |   `-- user_space/
@@ -1355,7 +1356,8 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 |       |-- test_self_map_contract.py # 领域、分页、未知事实、路径与原权限负例
 |       |-- test_self_map_read_authority.py # 真实内置读门对照、插件范围区分、普通/群/子代理与冻结cwd
 |       |-- test_self_map_model_surface.py # 普通/Compact资格、关闭开关与main媒体保留
-|       `-- test_self_map_runtime.py # 正式工具执行、撤回、cursor与fake LLM/replay
+|       |-- test_self_map_runtime.py # 正式工具执行、撤回、cursor与fake LLM/replay
+|       `-- test_wave9_progressive_capability_addressing.py # 12总览/4专项、原策略及资产摘要、默认短页/权限和Level0去重
 `-- docs/
     `-- design/
         `-- SELF_MAP.md # 自我目录公开读口、权限、完整性与导航合同

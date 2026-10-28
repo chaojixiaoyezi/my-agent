@@ -1,3 +1,51 @@
+## 2026-10-28 Wave 9 Item 9：12域兼容的渐进寻址与初始提示瘦身
+
+来源：先完整阅读`07-tasks/wave9-item9.md`全78行及其引用计划；唯一目标`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，干净起点`b84b1479f08194a308a1ec0b0cfe69879b2c7324`。不推送、部署或启停服务。宿主环境已跑通全部 9 个相关测试文件（286 passed, 0 failed）与 5 项严格门禁。
+
+### 实现及回归范围
+
+- 注册表新增默认True的`include_in_overview`与过滤读口；无参仅原12域，完整登记/schema/valid_sections含4个隐藏专项，默认总览不调用隐藏reader。
+- remote_peers只读原owner/host节点公开字段，owner同名优先、host enabled/caller ACL过滤；受限上下文读库前返回空集，work同步启用节点摘要。覆盖真实临时JSON、坏JSON/形状/链接、禁用、主/普通owner及4类受限上下文，禁用DNS/网络/解密探针且逐字节核对不写盘；不声称真实节点可达。
+- settings调用原四层resolver及idle参数，精确线程缺失/错归属不回落默认；补普通用户/群权限裁剪及真实持久全局治理强制/非强制、治理损坏不可用。用户级值以原配置来源夹具覆盖，不冒称已通过新目录独立覆盖真实托管账户默认策略库。当前起点未注册compact_policy工具，如实导航为unavailable；user_config先发现schema，保留原effect门，不把读取参数变成绕过mutating判定的快捷入口。
+- schedules/work共用原权限和群actor校验，补绑定线程及原delivery摘要，覆盖顺延/固定、单/双线及binding_id-only标签。channels仅显式local/channel_binding目标；origin/隐式回落未枚举，不以空列表断言不通知；完整发送认证仍由原执行链裁决。
+- assets复用冻结技能及原包摘要，普通方法/包不混算；未绑定快照、未枚举全集保持null/partial，脚本/工作流/数据源只提供状态和导航，不加载正文或执行列表/外部探测。
+- 新专项38项通过；补不带limit的4个真实默认短页/详情回读。原有测试文件未修改。本轮8个Python模块（含新测试），经AST与起点逐定义比较，共41个新增/修改定义的装饰器前中文双层注释缺失0；同时核对8个模块头。
+- 独立Astra high仅只读审查候选源码/diff/专项及原权威链，未确定P1/P2；默认短页、权限/治理补证与channels口径建议已落实。之后的user_config发现入口及home原目录短语修正由本会话红绿回归验证，未冒称最终字节被独立重审；独立审查未执行测试。
+
+### 提示测量（不是完整供应商请求）
+
+相同config/cwd/home与冻结时钟，仅比较SELF_MAP_GUIDANCE、home、workspace、default四个实际渲染段；起点取上述Git提交，原有效结果复用，当前改动后重测。`estimate_tokens`为项目估算器，不是供应商精确tokenizer。
+
+| 段 | 字符前→后 | UTF-8字节前→后 | 估算token前→后 |
+|---|---|---|---|
+| SELF_MAP_GUIDANCE | 413→362 | 1011→632 | 337→211 |
+| home | 1190→840 | 2900→1900 | 967→634 |
+| workspace | 1296→1231 | 2880→2729 | 960→910 |
+| default | 1287→1257 | 3045→2971 | 1015→991 |
+| 四段合计 | 4186→3690 | 9836→8232 | 3281→2746 |
+
+合计少496字符；合计token对四段以双换行拼接后重新估算，不是分项简单相加。没有搬到动态段伪装降量。Level0唯一常量仍由原启用/实际可用条件注入，普通与Compact同源；先核对原四个提示测试文件全部字符串断言，再保留安全、专用确认、unknown/partial及准确路径等锁定规则。
+
+### 最终门禁与限制
+
+宿主环境运行任务指定8文件：**243项，243通过、0失败、0错误、0跳过**；其中新专项38项全部通过。额外persona文件：**43通过、0失败/错误/跳过**（两批合计 **286 passed, 0 failed**）。运行根的`importlib.util.find_spec('agent_py_agent').origin`确认为`/private/tmp/wt-wave9-integrated/agent_py_agent/__init__.py`，未误用旧editable代码。（注：TUI `run_command` 沙盒内 `test_prompting_builder.py:215` 写临时 `.git` 文件曾触发沙盒权限拦截，在宿主环境重跑已确认 243/243 全绿通过。）
+
+其余五项严格门禁均退出0：Ruff全范围通过，导入边界输出`[]`，`check_doc_sync.py --base main`为`DOC_SYNC_PASS`，`git diff --check`通过，clean-package为无发布阻塞项。
+
+复现（必须在工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_progressive_capability_addressing.py agent_py_agent/tests/test_self_map_contract.py agent_py_agent/tests/test_self_map_runtime.py agent_py_agent/tests/test_self_map_model_surface.py agent_py_agent/tests/test_self_map_read_authority.py agent_py_agent/tests/test_ctxopt_self_map.py agent_py_agent/tests/test_prompting.py agent_py_agent/tests/test_prompting_builder.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_ctxopt_prompt_persona.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base main
+git diff --check
+python3 scripts/check_clean_package.py .
+```
+
+未验证：真实供应商模型寻址、当前运行包/TUI/Gateway/IM链路、Linux/Windows、线上缓存命中或远端节点网络/推送。未运行全仓pytest、未跑已退役尺寸checker；本轮不更改Gateway服务结构，架构说明同步至SELF_MAP设计文档，无独立Gateway结构迁移。
+
 ## 2026-10-28 Wave 9 A1 Round 5：字符不相交标记与真实字段名边界
 
 来源：先完整阅读 `07-tasks/fix-r5-wave9-a1.md` 全35行；后续用户明确裁定只移除含8字符固定公共字段名片段的 `preview": "[` 参数，保留真实跨边界后缀 `iew": "[`，严格全输出8字符窗口零残留断言不变。干净起点 `844a3959464fcc46bc93176fa88ea31d56e491ef`，提交分支 `wave9-a1`；所有项目/临时文件修改仅在 `/tmp/wt-wave9-a1`，未碰其他工作树或my-agent-dsh。门禁基线仍为 `db4d5de92`；不推送或部署。

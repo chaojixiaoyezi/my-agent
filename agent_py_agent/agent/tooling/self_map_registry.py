@@ -43,7 +43,7 @@ class SelfMapSectionUnknown(ValueError):
     pass
 
 
-# LLM: ID、静态用途与列表形态由原领域登记；schema从此表生成，不接受外部插件回调或第二份编号枚举。
+# LLM: 声明统一生成完整schema；include_in_overview只控制总览读取，默认兼容原领域，专项不另建编号表或权限。
 # 类用途: 声明一个领域的标题、顺序和原权威读取器。
 @dataclass(frozen=True)
 class SectionDescriptor:
@@ -55,6 +55,7 @@ class SectionDescriptor:
     list_mode: bool = True
     summary_reader: Callable[[SelfMapReadContext], SectionProjection] | None = None
     item_reader: Callable[[SelfMapReadContext, str], SectionProjection | None] | None = None
+    include_in_overview: bool = True
 
 
 # LLM: 冻结一次调用的原工具快照和实际展示投影；child 管理资格不得继承本机主 Agent 的身份。
@@ -118,6 +119,11 @@ class SelfMapRegistry:
     # 函数用途: 枚举本 Agent 的全部已登记领域。
     def descriptors(self) -> tuple[SectionDescriptor, ...]:
         return tuple(sorted(self._sections.values(), key=lambda value: (value.order, value.id)))
+
+    # LLM: 总览筛选只消费原声明，不调用reader；完整登记和模型enum仍包含专项分块。
+    # 函数用途: 返回默认可见领域，避免Level1在无参总览中偷读或膨胀。
+    def overview_descriptors(self) -> tuple[SectionDescriptor, ...]:
+        return tuple(row for row in self.descriptors() if row.include_in_overview)
 
     # LLM: 未知 ID 用独立参数错交工具恢复；不猜同义词、不自动查询总览、不执行 reader。
     # 函数用途: 定位精确读取器，错编号由调用入口列出全部合法 ID。

@@ -105,12 +105,12 @@ class SelfMapTool(BaseTool):
             return _outcome(False, {"error": "section/item/cursor/limit 参数无效。"}, "TOOL_INVALID_ARGUMENTS")
         return _outcome(True, payload)
 
-    # LLM: 总览和默认页约束真实归档预算，详情保留完整公开投影；只读同一次来源，不写领域枚举。
+    # LLM: 总览只读overview声明，专项按完整登记寻址；保留真实归档预算、原分页和详情权限，不复制编号枚举。
     # 函数用途: 分派总览、分页和详情；能力族从同次原领域投影聚合，不额外读取或刷新快照。
     def _query(self, params: dict[str, Any], context: SelfMapReadContext) -> dict[str, Any]:
         section = params.get("section")
         if not section:
-            projections = [(descriptor, _read_projection(descriptor, context, summary=True)) for descriptor in self.sections.descriptors()]
+            projections = [(descriptor, _read_projection(descriptor, context, summary=True)) for descriptor in self.sections.overview_descriptors()]
             payload = {"sections": [_overview(descriptor, projection) for descriptor, projection in projections],
                        "capability_families": {descriptor.id: _capability_families(projection)
                            for descriptor, projection in projections if descriptor.id in {"tools", "skills"}}}

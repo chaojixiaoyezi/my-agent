@@ -1,4 +1,4 @@
-# LLM: 模型沿原 owner/共享公开投影读取；配置沿原参数登记表，不输出请求地址、env/headers、凭据或私有复合值。
+# LLM: 模型沿原owner公开投影，配置沿参数登记，压缩沿原四层解析器；不输出请求地址、凭据或私有复合值。
 # 模块用途: 登记模型库存和有效配置元数据，普通用户只开放原 decision-only 面。
 from dataclasses import replace
 
@@ -9,11 +9,48 @@ from .parameter_registry import SOURCE_AGENT, listed_parameters
 from .shared_model_catalog import shared_profile_key
 
 
-# LLM: 设置领域自己登记固定用途，工具schema无需维护第二份模型/配置编号清单。
-# 函数用途: 接入模型和配置分块。
+# LLM: 设置领域统一登记固定用途，压缩专项不进入原总览，schema不维护第二份编号清单。
+# 函数用途: 接入模型、配置和按需压缩设置分块。
 def register_setting_sections(registry):
     registry.register(SectionDescriptor("models", "模型", 80, model_projection, "当前模型与可用模型档案"))
     registry.register(SectionDescriptor("config", "配置", 90, config_projection, "配置文件位置、有效参数与设置入口"))
+    registry.register(SectionDescriptor("settings", "压缩与会话设置", 140, settings_projection,
+                                        "当前多级压缩比例、闲置压缩及配置工具导航", list_mode=False, include_in_overview=False))
+
+
+# LLM: 受限范围先拒绝父策略库，错线程不回退默认；原配置工具仍走mutating中央门，目录只给schema导航和公开读参数，不绕过effect门。
+# 函数用途: 只读显示当前owner/线程的四层比例、强制开关及闲置压缩设置。
+def settings_projection(context):
+    from ..conversation.compact_threshold_policy import resolve_thread_compact_policy
+    from ..tooling.self_map_remote_peers import restricted_owner_scope
+    from .config_layers import compact_idle_parameters
+
+    if restricted_owner_scope(context):
+        return SectionProjection((), source="restricted child/isolated scope")
+    agent = context.agent
+    thread, error = agent.conversation_store.threads.load_report(context.thread_id) if context.thread_id else (None, None)
+    if context.thread_id and (error or thread is None or thread.owner_id != agent.home_paths.owner_id
+                              or thread.owner_home != str(agent.home_paths.owner_home_dir)):
+        return SectionProjection((), "partial", "unavailable", ("SELF_MAP_THREAD_UNAVAILABLE",), count_known=False)
+    policy = resolve_thread_compact_policy(agent, thread, use_frozen=False)
+    threshold, seconds = compact_idle_parameters(agent.config)
+    states = {row["name"]: row["state"] for row in context.public_context.get("tool_states", ())}
+    fields = {"trigger_percent": policy["effective_trigger_percent"], "source_layer": policy["effective_source"],
+              "admin_force_enabled": policy["force_locked"], "idle_compact_enabled": bool(threshold and seconds),
+              "idle_trigger_percent": threshold, "idle_seconds": seconds,
+              "thread_override_percent": policy["thread_override_percent"], "user_default_percent": policy["user_default_percent"],
+              "observation_point": "current_resolved_policy", "status_command": "/compact status",
+              "configuration_tool": "compact_policy", "configuration_tool_state": states.get("compact_policy", "unavailable"),
+              "next_read": next_read("tool_search", {"query": "compact_policy", "limit": 1})}
+    if context.admin:
+        fields["admin_default_percent"] = policy["admin_default_percent"]
+    items = [map_item("compact_policy", "当前压缩策略", fields=fields)]
+    if "user_config" in context.snapshot.available_tool_names:
+        arguments = {"action": "view", "key": "memory_compact_trigger_percent"} if context.admin else {"action": "decision_read"}
+        items.append(map_item("user_config", "配置入口", state=states.get("user_config", "unavailable"),
+                              fields={"scope": "admin" if context.admin else "decision-only", "read_parameters": arguments,
+                                      "next_read": next_read("tool_search", {"query": "user_config", "limit": 1})}))
+    return SectionProjection(tuple(items), source="resolve_thread_compact_policy / compact_idle_parameters")
 
 
 # LLM: 沿原鉴权投影读取，子范围不读父库存；完整性只看结构化库存状态，正式数量按权威来源身份去重。

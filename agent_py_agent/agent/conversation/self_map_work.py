@@ -1,14 +1,19 @@
-# LLM: 工作目录只读已绑定会话、Goal、调度和受管进程服务；不执行其它工具、不另造代理树或审计读侧。
+# LLM: 工作及专项目录只读原会话/调度和公开节点元信息；不执行工具，不另造代理树、凭据或调度策略账。
 # 模块用途: 登记本 owner 与当前代理的工作元信息，正文和唤醒/维护副作用不进入目录。
 from ..tooling.self_map_registry import SectionDescriptor, SectionProjection, map_item, next_read
+from ..tooling.self_map_remote_peers import remote_peers_projection, restricted_owner_scope
 from .goal_binding import goal_binding
 
 
-# LLM: work自行登记固定用途，不让聚合器猜编号或任务归属。
-# 函数用途: 接入工作状态分块。
+# LLM: work保留原总览，节点和调度专项只进完整登记，避免无参调用额外读取专项来源。
+# 函数用途: 接入工作状态及两个按需专项分块。
 def register_work_section(registry):
     registry.register(SectionDescriptor("work", "工作状态", 100, work_projection, "项目工作位置、会话与受管任务状态",
                                         summary_reader=work_summary))
+    registry.register(SectionDescriptor("remote_peers", "远端推送节点", 130, remote_peers_projection,
+                                        "本Owner可用的单向推送节点别名，不读取凭据或联机", include_in_overview=False))
+    registry.register(SectionDescriptor("schedules", "监控与定时任务", 150, schedules_projection,
+                                        "监控绑定线程、同通道顺延及多通道告警摘要", include_in_overview=False))
 
 
 # LLM: 仅消费已绑定当前线程/任务位置，不加载历史、Goal、调度或进程；未枚举维度不报零。
@@ -22,11 +27,11 @@ def work_summary(context):
                              source="bound current workspace / thread", count_known=False)
 
 
-# LLM: 各来源失败保留安全码；项目位置取已绑定工作根及原业务tasks，不扫描项目或把元数据入口当业务数量。
+# LLM: 复用原读者及准入后的启用节点摘要；各来源失败保留安全码，不扫描项目或把元数据入口当业务数量。
 # 函数用途: 组合现有合法读侧的元信息，不改变生命周期。
 def work_projection(context):
     items, errors = [], []
-    for reader in (_sessions, _goals, _schedules, _processes, _terminals):
+    for reader in (_sessions, _goals, _schedules, _processes, _terminals, _remote_peers):
         try:
             rows, problems = reader(context)
             items.extend(rows)
@@ -79,20 +84,66 @@ def _goals(context):
                              "tokens_used": getattr(goal, "tokens_used", None), "next_read": next_read("get_goal", {})})], []
 
 
-# LLM: 仅读已绑定owner仓库，群须先复核同一宿主actor；不调用会刷新群成员姓名的展示函数，不联机。
-# 函数用途: 列定时任务元数据而不回显prompt/通知目标。
+# LLM: 仅读已绑定owner仓库，群须先复核宿主actor；受限scope先拒绝，策略仅从原delivery映射，不输出收件人或prompt。
+# 函数用途: 列定时任务绑定及投递通道元数据，不修改原job或通知绑定。
 def _schedules(context):
-    if context.child or "schedule" not in context.snapshot.available_tool_names:
+    if restricted_owner_scope(context) or "schedule" not in context.snapshot.available_tool_names:
         return [], []
     if getattr(context.agent.home_paths, "owner_kind", "") == "group":
         from .host_actor import resolve_host_actor
         if not context.thread_id or resolve_host_actor(context.agent, context.thread_id) is None:
             raise ValueError("group actor unavailable")
     jobs, errors = context.agent.scheduler_repository.list_jobs()
-    items = [map_item("schedule:" + job["job_id"], job["job_id"], state=job["status"],
-             fields={"kind": "schedule", "next_run_at": job.get("next_run_at"),
-                     "next_read": next_read("schedule", {"action": "get", "job_id": job["job_id"]})}) for job in jobs]
-    return items, ["SELF_MAP_SCHEDULE_RECORD_UNREADABLE"] if errors else []
+    items, problems = [], ["SELF_MAP_SCHEDULE_RECORD_UNREADABLE"] if errors else []
+    for job in jobs:
+        policy = _delivery_summary(context, job)
+        if policy["channels"] is None:
+            problems.append("SELF_MAP_SCHEDULE_CHANNELS_UNAVAILABLE")
+        items.append(map_item("schedule:" + job["job_id"], job["job_id"], state=job["status"], fields={
+            "kind": "schedule", "next_run_at": job.get("next_run_at"),
+            "bound_thread_id": job.get("source_thread_id") or job.get("thread_id"), "delivery_policy": policy,
+            "channels_source": "explicit policy targets; origin uses bound channel",
+            "next_read": next_read("schedule", {"action": "get", "job_id": job["job_id"]})}))
+    return items, sorted(set(problems))
+
+
+# LLM: 只用原_schedules的权限和错误合同，空授权面不回退父或全局仓库；没有副作用工具调用。
+# 函数用途: 让监控专项与work使用相同的原仓库投影。
+def schedules_projection(context):
+    rows, errors = _schedules(context)
+    return SectionProjection(tuple(rows), "partial" if errors else "complete", errors=tuple(errors),
+                             source="current owner SchedulerRepository / original delivery policy")
+
+
+# LLM: 原delivery是唯一权威；仅需binding_id补channel时读取原认证目录，不输出引用或地址，失效绑定保持未知。
+# 函数用途: 映射同通道跟随及显式多线通道标签，不把配置当实际投递或外部可达证据。
+def _delivery_summary(context, job):
+    policy = job.get("delivery") or {"mode": "origin"}
+    channels, unknown = set(), False
+    for target in policy.get("targets", ()):
+        if target.get("target_kind") == "local":
+            channels.add("local")
+        elif target.get("target_kind") == "channel_binding":
+            channel = target.get("channel")
+            if not channel:
+                from ..scheduler.delivery_policy import available_delivery_targets
+                key = "schedule_public_channels"
+                if key not in context.memo:
+                    context.memo[key] = {row["binding_id"]: row["channel"] for row in available_delivery_targets(context.agent)}
+                channel = context.memo[key].get(target.get("binding_id"))
+            if channel:
+                channels.add(channel)
+            else:
+                unknown = True
+    return {"mode": policy["mode"], "follow_active_thread": policy.get("follow_latest_channel_session", True),
+            "channels": None if unknown else sorted(channels)}
+
+
+# LLM: 节点读者先做child/隔离范围拒绝，再读公开字段；work只挂启用节点，不读第二份库存。
+# 函数用途: 为原工作入口复用远端别名及其安全错误码。
+def _remote_peers(context):
+    projection = remote_peers_projection(context)
+    return [row for row in projection.items if row["enabled"]], list(projection.errors)
 
 
 # LLM: 当前线程范围不能扩成owner全部进程；没有绑定保持未观测，不读取系统PID或任务账本。

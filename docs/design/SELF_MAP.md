@@ -24,7 +24,35 @@
 {"section":"tools","cursor":"<上一页返回的游标>"}
 ```
 
-合法编号由领域注册表生成 schema，当前有 `directories`、`permissions`、`tools`、`skills`、`packages`、`plugins`、`mcp`、`memory`、`models`、`config`、`work`、`context` 十二个领域。新增领域由所属模块登记 reader，不在工具中维护第二份能力或权限清单。
+合法编号由领域注册表生成 schema。无参总览仍精确为 `directories`、`permissions`、`tools`、`skills`、`packages`、`plugins`、`mcp`、`memory`、`models`、`config`、`work`、`context` 十二领域；完整登记与schema另含下述四个按需专项。新增领域由所属模块登记reader，不在工具中维护第二份能力或权限清单。
+
+## 2026-10-28 Wave9：Level0与Level1渐进寻址
+
+实现位于本轮工作树，尚未部署；测试门禁和剩余限制以TESTS本日item9条目为准，不以目录存在证明真实模型寻址或外部推送已验证。
+
+`SectionDescriptor.include_in_overview`默认`True`，`overview_descriptors()`只筛原登记声明，不调用reader。四个专项设为`False`：平时不进12项总览，显式查询可读；`descriptors()`、`model_spec.section.enum`、错误恢复的`valid_sections`均包含完整16项。`work`总览仍用轻量`work_summary`，不会因新增专项自动枚举节点或调度库。
+
+| 按需section | 原权威及公开字段 | 权限和后续入口 |
+|---|---|---|
+| `remote_peers` | 当前owner的`config/remote_endpoints.json`，及宿主`remote_push/endpoints.json`中启用且caller ACL包含本人之项；owner同名优先。投影别名、URL、scope、enabled和私网许可 | 子代理与`isolated/task_local/control_plane`在读库前返回空集。只取公开字段，不读取凭据字段、不解密、不返回秘密/秘密散列、不做DNS/HTTP或写盘。详情为`peer:<ref>`；`work`复用启用节点摘要 |
+| `settings` | 原`resolve_thread_compact_policy(use_frozen=False)`与`compact_idle_parameters`；生效比例、来源、强制锁及闲置阈值/时长 | 精确线程缺失或错owner/home不可回落默认；受限上下文不读父策略。普通用户不见管理员默认值和编辑面；只给当前策略与合法工具发现入口 |
+| `schedules` | 原`_schedules`及SchedulerRepository；`source_thread_id`（旧记录回退`thread_id`）显示为`bound_thread_id`，原`delivery`显示为`delivery_policy` | 复用原schedule授权和群`resolve_host_actor`，子/隔离先拒绝。`work`同步相同字段；详情仍走`schedule(action=get, job_id=...)`，收起的工具先发现再读 |
+| `assets` | 原冻结SkillSnapshot的普通方法数量、原包summary及本次工具状态 | 普通方法/包数量不混算，快照缺失或不完整保留null/partial；只提供scripts/workflows/datasources列表及skill_search/tool_search导航，不执行列表或读取正文、订单、构建历史 |
+
+专项同样保留默认短页预算、`item_columns`/`detail_next_read`和原分页合同；需要完整字段应沿准确item回读，而不是把紧凑行当作全部详情。
+
+### 设置与通知摘要口径
+
+- settings观察点为`current_resolved_policy`，是当前治理/线程状态的只读重读，不冒充活动回合已冻结的preflight策略。管理员字段按当前身份裁剪；它不修改压缩策略或触发compact。
+- 当前集成起点没有注册名为`compact_policy`的模型工具。条目如实返回`configuration_tool_state=unavailable`，保留`tool_search`发现导航和原`/compact status`读口，不能描述成已可直接调用。
+- `user_config`沿原mutating中央门，目录不绕过其effect判定：先给`tool_search`入口，再按公开`read_parameters`读取；普通用户仅`decision_read`，管理员可读准确参数。工具展开不等于允许修改或取得管理员权限。
+- `follow_active_thread`只映射原`delivery.follow_latest_channel_session`，未另存策略。`channels`只列显式local/channel_binding目标的通道标签；仅binding_id时复用原认证目录补标签，失效引用保持null及partial。`channels_source`明确该范围：隐式origin、`include_origin`和原绑定的动态通知路由不在此枚举，空列表不表示不通知；`bound_thread_id`是计划原绑定，不是外发成功或当前收件人的证明。完整策略与发送前认证仍由原调度读口/执行链裁决。
+
+### 常驻提示与证据边界
+
+Level0仅在原`enable_self_map and self_map_available`条件下通过`SELF_MAP_GUIDANCE`唯一注入，普通与Compact继续同源。索引含settings/schedules/remote_peers/assets及治理、监控、单向推送、技能/自动化工具导航；数量仍须核对原counts/完整性，清单仍须读items向用户展示，unknown/partial不可当0或没有，路径沿准确回执，不授予执行或外部验证。
+
+本轮合并home整理约定、workspace日期叮嘱和default清单说明，规则仍留在原作用域，不挪到动态段伪装减量；原安全边界、专用确认与测试锁定短语保留。离线估算器不是供应商精确tokenizer，数值见TESTS；没有据此声称线上总上下文、缓存命中率或真实模型遵守已通过。
 
 ## 范围与公开事实
 

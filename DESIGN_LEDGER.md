@@ -1,3 +1,15 @@
+## 2026-10-28 Wave 9 Item 9：12 域兼容的渐进能力寻址与初始提示瘦身（已集成，未部署）
+
+来源：`07-tasks/wave9-item9.md` 与 `batch_20261028_features_and_bugfixes_plan.md` Item 9，在集成工作树 `/tmp/wt-wave9-integrated`（`wave9-integrated`）落地。
+
+- **12 域无参总览兼容与 4 个按需 Level 1 分块（`self_map_registry.py` / `self_map_tool.py`）**：`SectionDescriptor` 新增 `include_in_overview: bool = True` 并提供 `overview_descriptors()`；无参 `self_map({})` 总览严格保持既有 12 个顶层领域，且不调用隐藏分块 reader；完整枚举与 `self_map(section=...)` 新增 `remote_peers`、`settings`、`schedules`、`assets` 四个按需分块。
+- **按需分块只读投影与受限上下文硬隔离（`self_map_remote_peers.py` / `self_map_settings.py` / `self_map_work.py` / `plugin_self_map.py`）**：
+  - `remote_peers`：只读投影当前 owner 与 host ACL 准入的远端节点公开元数据（`peer_id`、`endpoint_url`、`scope`、`enabled`、`allowed_private_hosts`），同名 `owner > host`，严禁解密/哈希、DNS 解析或联网探测；`child` 子代理与 `isolated` / `task_local` / `control_plane` 范围在读盘前直接返回空集，`work` 同步汇总当前可用节点。
+  - `settings`：复用 `resolve_thread_compact_policy` 与 `AgentConfig` 投影多级压缩比例（`admin_forced > thread > user > admin_default`）、闲置压缩参数（`idle_trigger_percent`、`idle_seconds`、`idle_max_per_tick`）及配置工具可发现入口，精确线程缺失或跨 owner 不回落默认值。
+  - `schedules`：复用原 `work` 调度读口与权限/群 actor 校验，补充 `bound_thread_id`、`follow_thread_reset` 与 `delivery_policy`（`delivery_mode`、`channels`）结构化只读摘要。
+  - `assets`：复用冻结 `skill_snapshot` 与已安装能力包公开摘要，脚本/工作流/数据源提供状态与原生工具发现入口，不加载正文或触发外部探测。
+- **Level 0 渐进寻址索引与初始提示词去重瘦身（`prompting_parts/builder.py` / `prompts/default.md`）**：在 `SELF_MAP_GUIDANCE` 内嵌唯一 Level 0 能力寻址索引表（估算约 211 tokens），并对 `SELF_MAP_GUIDANCE`、`home`、`workspace`、`default` 四段去重瘦身（实测 4186 → 3690 字符，净减 496 字符），保留全部安全、确认与路径硬约束。详见 [自我目录设计](docs/design/SELF_MAP.md) 与 [TESTS.md](TESTS.md)。
+
 ## 2026-10-28 Wave 9 A2 Round 3 v2：单步合同对齐（源码候选，未部署）
 
 按R3 v2卡补齐调试DTO五个合同键，别名只从旧字段投影，不建立第二状态源；Store唯一 `WORKFLOW_STEP_MODES` 纳入条件/脚本别名与审批/通知。审批结果始终待批准，通知显式True走原Owner通知账/outbox并保留实际投递状态；`persisted=False` 仅指正式工作流run不持久化，正式DAG仍拒绝通用新增mode。摘要两字段字符串交领域统一400，不放宽包来源/安装授权。沙箱夹具只改观察通道为stderr+真实透传spy，不修改runner或嵌套判断。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)及TESTS.md；无新运行/审批权威、无部署。

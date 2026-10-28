@@ -1,4 +1,4 @@
-# LLM: 安装事实由本owner原store读取；权限先于构建/订单读取，公开白名单不带settings或旧授权正文。
+# LLM: 安装及资产摘要沿本owner原store和冻结快照读取；权限先于库存，白名单不带配置、旧授权或Skill正文。
 # 模块用途: 分开能力包安装/构建/普通方法及插件库存，提供权威位置，不复制授权状态。
 import re
 from dataclasses import asdict
@@ -15,12 +15,41 @@ from .user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 from .user_space.self_map_paths import location_items
 
 
-# LLM: 插件/包登记不同静态用途，schema同源生成，避免把普通Skill或构建记录误认安装库存。
-# 函数用途: 接入能力包和插件分块。
+# LLM: 插件/包保留原总览，资产聚合只作按需导航，普通Skill或构建不能误算安装库存。
+# 函数用途: 接入能力包、插件及按需资产入口。
 def register_install_sections(registry):
     registry.register(SectionDescriptor("packages", "能力包", 40, package_projection, "能力包安装、启用、授权与构建库存",
                                         summary_reader=package_summary, item_reader=package_item))
     registry.register(SectionDescriptor("plugins", "插件", 50, plugin_projection, "插件安装和启用数量及贡献"))
+    registry.register(SectionDescriptor("assets", "技能与自动化资产", 160, assets_projection,
+                                        "Skill和能力包数量摘要、脚本/工作流/数据源工具入口", include_in_overview=False))
+
+
+# LLM: 只复用同owner冻结Skill及包summary，不读正文、订单或构建历史；工具状态来自本次公开快照，不执行或展开工具。
+# 函数用途: 汇总资产计数及合法导航，未知数量保留null，未注册/禁用入口不冒充可调用。
+def assets_projection(context):
+    from .capability.self_map_skills import skill_summary
+
+    skills, packages = skill_summary(context), package_summary(context)
+    skill_count = skills.summary_count if skills.completeness == "complete" and skills.count_known else None
+    package_count = packages.summary_count if packages.completeness == "complete" and packages.count_known else None
+    items = [map_item("skills", "普通Skill", state=skills.state, fields={
+        "count": skill_count, "counts": {"ordinary_skills": skill_count}, "completeness": skills.completeness,
+        "next_read": next_read("self_map", {"section": "skills"})}),
+        map_item("packages", "能力包", state=packages.state, fields={
+        "count": package_count, "counts": packages.counts or {"authorized": package_count}, "completeness": packages.completeness,
+        "next_read": next_read("self_map", {"section": "packages"})})]
+    states = {row["name"]: row for row in context.public_context.get("tool_states", ())}
+    for name in ("scripts", "workflows", "datasources"):
+        state = states.get(name, {}).get("state", "unavailable")
+        candidate = next_read(name, {"action": "list"}) if state == "ready" else next_read("tool_search", {"query": name, "limit": 1})
+        items.append(map_item(name, name, state=state, fields={"kind": "asset_tool", "count": None,
+            "reason": states.get(name, {}).get("reason", "不在本次授权工具面。"), "next_read": candidate}))
+    errors = tuple(sorted(set(skills.errors + packages.errors)))
+    partial = errors or skills.completeness != "complete" or packages.completeness != "complete"
+    return SectionProjection(tuple(items), "partial" if partial else "complete", errors=errors,
+                             source="SkillSnapshot / package_summary / frozen tool states", count_known=not partial,
+                             counts={"ordinary_skills": skill_count, "authorized_packages": (packages.counts or {}).get("authorized", package_count)})
 
 
 # LLM: 必须先通过完整本机身份；home.owner_id是规范scope ID，不是OwnerIdentity原始ID；复用本机身份工厂并核对路径/scope。
