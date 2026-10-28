@@ -15,6 +15,9 @@
 python3 -m pytest agent_py_agent/tests/test_cli_resume_and_gateway_client_lightweight.py agent_py_agent/tests/test_cli_chat.py agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_gateway_client.py agent_py_agent/tests/test_adapter_daemon_cli.py agent_py_agent/tests/test_gateway_adapter.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_gateway_commands.py agent_py_agent/tests/test_gateway_supervisor_maintenance.py agent_py_agent/tests/test_gateway_control_plane_construction.py agent_py_agent/tests/test_gateway_control_plane_frozen_home.py -q --tb=short
 python3 scripts/check_import_boundaries.py
+```
+
+JUnit及红例保留在工作树 `.pytest_cache/t2-w1-fix-*.xml`；最终准确通过数及门禁结果见本轮交接。Python 3.11/3.12、Linux/Windows CI、真实模型/通道和全仓测试未作为本轮已验证证据。
 
 ## 2026-10-28 Wave 8 T2 W2 Round 2：MCP重开、活实例预算与worker构造返工（源码候选）
 
@@ -39,8 +42,6 @@ python3 scripts/check_doc_sync.py
 ruff check agent_py_agent scripts
 git diff --check 9ee9bdc01..HEAD
 ```
-
-JUnit及红例保留在工作树 `.pytest_cache/t2-w1-fix-*.xml`；最终准确通过数及门禁结果见本轮交接。Python 3.11/3.12、Linux/Windows CI、真实模型/通道和全仓测试未作为本轮已验证证据。
 
 真实多进程整链、物理MCP树清理、生产及600用户/RSS压测仍未验证；独立审阅与补充回归结果在收口时追加。
 

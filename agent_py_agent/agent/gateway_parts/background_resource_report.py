@@ -38,13 +38,23 @@ _MEMORY_DIAGNOSTICS_LOCK = threading.Lock()
 
 
 # LLM: 仅宿主显式调用；ru_maxrss是历史峰值而非当前RSS，显式追踪只覆盖本次窗口，原已开启追踪不关闭。
-# 函数用途: 采集内存峰值、GC和池计数，可选给出不含正文的分配位置统计。
+# 函数用途: 采集内存峰值、GC和池计数，可选或按enable_gateway_memory_diagnostics配置给出不含正文的分配位置统计。
 def collect_runtime_memory_diagnostics(
-    *, owner_pool: object | None = None, include_tracemalloc: bool = False, top_n: int = 15,
+    *,
+    owner_pool: object | None = None,
+    config: object | None = None,
+    include_tracemalloc: bool | None = None,
+    top_n: int = 15,
 ) -> dict[str, object]:
+    effective_config = config if config is not None else getattr(owner_pool, "_config", None)
+    effective_include_tracemalloc = (
+        bool(getattr(effective_config, "enable_gateway_memory_diagnostics", False))
+        if include_tracemalloc is None
+        else bool(include_tracemalloc)
+    )
     with _MEMORY_DIAGNOSTICS_LOCK:
         already_tracing = tracemalloc.is_tracing()
-        started_here = include_tracemalloc and not already_tracing
+        started_here = effective_include_tracemalloc and not already_tracing
         if started_here:
             tracemalloc.start()
         try:
@@ -54,7 +64,7 @@ def collect_runtime_memory_diagnostics(
                 "gc_counts": list(gc.get_count()),
                 "owner_pool": _owner_pool_memory_gauges(owner_pool),
             }
-            if include_tracemalloc or already_tracing:
+            if effective_include_tracemalloc or already_tracing:
                 report["tracemalloc_scope"] = "existing_trace" if already_tracing else "snapshot_window"
                 report["tracemalloc_top"] = [
                     {"location": f"{Path(stat.traceback[0].filename).name}:{stat.traceback[0].lineno}",

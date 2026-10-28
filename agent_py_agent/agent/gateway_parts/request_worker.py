@@ -321,15 +321,23 @@ class AdmissionLimits:
     pool_can_acquire: Callable[[dict], bool] | None = field(default=None, compare=False, repr=False)
 
     # LLM: Existing config remains authoritative; optional Agent binding observes its actual shared pool without creating one.
-    # 函数用途: 读取原容量并绑定实时池预检，让退役和构建占用也能在认领前背压。
+    # 函数用途: 读取原容量（优先显式gateway_owner_inflight_limit，0则回退owner_agent_pool_max_agents）并绑定实时池预检。
     @classmethod
     def from_config(cls, config: object, *, agent: object | None = None) -> AdmissionLimits:
+        configured_owner_limit = _positive_int(
+            getattr(config, "gateway_owner_inflight_limit", 0), 0
+        )
+        owner_inflight = (
+            configured_owner_limit
+            if configured_owner_limit > 0
+            else _positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64)
+        )
         return cls(
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
             ),
-            owner_inflight=_positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64),
+            owner_inflight=owner_inflight,
             pool_can_acquire=partial(_request_pool_has_capacity, agent) if agent is not None else None,
         )
 
