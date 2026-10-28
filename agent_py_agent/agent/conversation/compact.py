@@ -870,17 +870,28 @@ def _compact_pending(request: _CompactRunRequest) -> ConversationCompactResult:
     raise error
 
 
-# LLM: 所有会话候选失败共用取消检查；闲置失败传原活动代及消息尾到存储锁内CAS，普通压缩不增加新CAS。
-# 函数用途: 在失败记账前再次让位，并保证迟到变化不会进入本次闲置失败计数。
+# LLM: 闲置失败与成功提交共用车道闸→消息锁→线程锁；闸内复核用户在场、取消与commit_guard，再传冻结基线到原存储CAS。
+#   普通压缩只用nullcontext，不取车道闸或增加新CAS；联测闲置用户先赢/失败先赢及容量熔断回归。
+# 函数用途: 把失败的最终复核与记账放进原短车道闸，防止迟到或恢复中的用户登记插入失败计数。
 def _record_request_compact_failure(request: _CompactRunRequest, *, code: str) -> None:
     raise_if_compact_interrupted(request.interrupt_check)
+    from contextlib import nullcontext
+
+    from .run_claim import user_input_turn_gate
+
     expected = {}
+    guard = nullcontext(False)
     if request.idle_compact:
         if request.expected_user_activity_generation is None or request.expected_message_tail is None:
             raise IdleCompactActivityChanged("idle failure recording requires activity and canonical message baseline")
         expected = {"expected_user_activity_generation": request.expected_user_activity_generation,
                     "expected_message_tail": request.expected_message_tail}
-    record_compact_failure(request.store, request.thread, code=code, now=request.attempted_at, **expected)
+        guard = user_input_turn_gate(request.store, request.thread.thread_id)
+    with guard as user_present:
+        raise_if_compact_interrupted(request.interrupt_check)
+        if user_present or request.commit_guard is not None and request.commit_guard():
+            raise IdleCompactActivityChanged("conversation user activity changed before idle failure recording")
+        record_compact_failure(request.store, request.thread, code=code, now=request.attempted_at, **expected)
 
 
 # LLM: 固定开销是“空摘要、无任何保留”那一版完整下一请求的实测值：有宿主投影器时走它的“只计量、不提交”入口

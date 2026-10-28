@@ -1,3 +1,5 @@
+# LLM: 显式90%容量夹具隔离生产默认80%；保留原校准、完整请求、输出预留及发送断言，只有模型/HTTP末端为替身。
+# 模块用途: 验证候选接受门与Gateway预检共用冻结供应商观测，不误拒有效候选或丢失失败计量。
 """压缩候选接受门与预检共用同一校准口径（2026-09-28，压缩异常②回归）。
 
 背景：真机 2026-09-28 单回合多次 read_file 之后，预检按供应商观测校准过的可见上下文越过触发线，
@@ -60,6 +62,8 @@ _OBSERVED_RAW = 10_000
 _OBSERVED_PROVIDER = 7_000
 
 
+# LLM: 只构造合成且类型化的冻结校准事实，作用域由参数显式提供，不写线程或伪装真实供应商观测。
+# 函数用途: 提供本地10000与供应商7000口径的测试校准快照。
 def _calibration(scope: str = "current_run"):
     from agent_py_agent.agent.conversation.compact_calibration import CompactRequestCalibration
 
@@ -69,6 +73,8 @@ def _calibration(scope: str = "current_run"):
     )
 
 
+# LLM: 生成结构化供应商观测载荷供真实冻结函数校验，覆盖项只属于测试输入，不绕过身份或代次检查。
+# 函数用途: 构造可控制表面、代次及作用域的合成观测。
 def _observation(**overrides):
     return {
         "schema": "provider_context_observation.v3", "raw_estimated_tokens": _OBSERVED_RAW,
@@ -82,6 +88,8 @@ def _observation(**overrides):
 # ---------------------------------------------------------------------------
 
 
+# LLM: 候选缩小时按冻结比例，大于观测请求时按追加口径；两种作用域都运行真实校准函数。
+# 函数用途: 验证候选校准的比例、增长及相等边界。
 @pytest.mark.parametrize("raw,scope,expected", [
     # 候选比观测请求小：按观测比例折算（8_000 × 0.7 = 5_600），两种作用域一致。
     (8_000, "current_run", 5_600),
@@ -100,6 +108,8 @@ def test_calibrated_candidate_tokens_follow_the_same_observation(raw, scope, exp
     assert calibrated_compact_request_tokens(raw, _calibration(scope)) == expected
 
 
+# LLM: 缺少或非法供应商观测时只能保留原始估算，不能凭缺失事实推导优惠比例。
+# 函数用途: 验证无可用校准时不改变候选计量。
 def test_calibrated_candidate_tokens_keep_raw_without_usable_observation() -> None:
     from agent_py_agent.agent.conversation.compact_calibration import (
         CompactRequestCalibration,
@@ -115,6 +125,8 @@ def test_calibrated_candidate_tokens_keep_raw_without_usable_observation() -> No
         assert calibrated_compact_request_tokens(8_000, calibration) == 8_000
 
 
+# LLM: 校准折算保守下限保持50%，耐久作用域增长仍取规定口径的较大值，不修改生产公式。
+# 函数用途: 验证极小供应商比例不会把候选不合理压低。
 def test_calibrated_candidate_tokens_never_scale_below_half() -> None:
     from agent_py_agent.agent.conversation.compact_calibration import (
         CompactRequestCalibration,
@@ -131,6 +143,8 @@ def test_calibrated_candidate_tokens_never_scale_below_half() -> None:
     assert calibrated_compact_request_tokens(12_000, calibration) == 6_000
 
 
+# LLM: 真实预检和候选函数对增长请求共用口径；缩小请求的刻意差异单独锁定，不能直接复用增长函数。
+# 函数用途: 验证增长校准一致并保留缩小候选的比例折算。
 def test_candidate_scale_matches_preflight_for_growth_and_documents_shrink_divergence() -> None:
     from agent_py_agent.agent.conversation.compact_calibration import (
         calibrated_compact_request_tokens,
@@ -160,6 +174,8 @@ def test_candidate_scale_matches_preflight_for_growth_and_documents_shrink_diver
 # ---------------------------------------------------------------------------
 
 
+# LLM: 使用临时真实ConversationStore和最小代理配置，只隔离模型后端，不替换观测存储及冻结逻辑。
+# 函数用途: 准备验证冻结校准身份和代次的本地会话。
 def _freeze_agent(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create({"canonical_user_id": "calibration-freeze"})
@@ -171,6 +187,8 @@ def _freeze_agent(tmp_path):
     return agent, store, thread
 
 
+# LLM: 参数显式绑定准确线程和真实测试协议快照，本轮观测载荷不被复制到另一权威来源。
+# 函数用途: 为校准冻结入口准备会话作用域及可选运行态观测。
 def _freeze_params(thread, state=None):
     return SimpleNamespace(
         context_scope="conversation", save=True,
@@ -180,6 +198,8 @@ def _freeze_params(thread, state=None):
     )
 
 
+# LLM: 本轮观测只在准确请求表面匹配时冻结，冻结必须纯读取，不得反写观测或跨表面复用。
+# 函数用途: 验证本轮校准的同表面准入和只读性。
 def test_frozen_calibration_uses_current_run_observation_with_same_surface(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.model.context_pressure import (
         frozen_compact_request_calibration,
@@ -196,6 +216,8 @@ def test_frozen_calibration_uses_current_run_observation_with_same_surface(tmp_p
     assert params.live_archive_state["_provider_context_observation"] == _observation(_calibration_scope="current_run")
 
 
+# LLM: 耐久观测通过真实存储写入，只有当前压缩代可复用；缺失或其它代不得补造校准。
+# 函数用途: 验证持久供应商观测的同代次冻结边界。
 def test_frozen_calibration_hydrates_durable_observation_only_for_current_generation(tmp_path) -> None:
     from agent_py_agent.agent.agent_core.model.context_pressure import (
         frozen_compact_request_calibration,
@@ -223,19 +245,27 @@ def test_frozen_calibration_hydrates_durable_observation_only_for_current_genera
 _TRANSCRIPT_CEILING = 6_000
 
 
+# LLM: 只提供受控完整请求计量，不替换校准或接受门；候选与压缩前由结构化is_candidate区分。
+# 函数用途: 构造可独立设置压缩前与候选大小的测试投影器。
 def _transcript_projector(candidate_raw: int, before_raw: int = 12_000):
+    # LLM: 根据真实候选视图返回完整材料占位和显式计量，不提交状态或解析摘要文案。
+    # 函数用途: 为会话容量门提供确定的两阶段请求大小。
     def project(view):
         return ConversationCompactProjection(candidate_raw if view.is_candidate else before_raw, object())
 
     return project
 
 
+# LLM: 只按结构化phase匹配进度，要求恰好一个事件，缺失或重复都失败而非选最新掩盖问题。
+# 函数用途: 取出待核对的唯一压缩阶段事件。
 def _phase(events, phase):
     matched = [event for event in events if event.get("phase") == phase]
     assert len(matched) == 1, (phase, events)
     return matched[0]
 
 
+# LLM: 摘要文本替身不改变原容量门；真实提交、检查点及进度必须共用校准后的数值而保留纯投影原值。
+# 函数用途: 验证原估算过大但校准后可容纳的会话候选被接受。
 def test_transcript_gate_accepts_candidate_under_calibrated_ceiling(tmp_path, monkeypatch) -> None:
     agent, store, thread = _transcript_case(tmp_path, monkeypatch, turns=3)
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "新摘要")
@@ -257,6 +287,8 @@ def test_transcript_gate_accepts_candidate_under_calibrated_ceiling(tmp_path, mo
     assert store.threads.load(thread.thread_id).compact_generation == 1
 
 
+# LLM: 未传冻结校准时真实接受门仍以原始值拒绝过大候选，失败记录及进度不可伪造折算。
+# 函数用途: 验证没有观测的会话压缩保留原始计量和类型化失败。
 def test_transcript_gate_keeps_raw_measurement_without_calibration(tmp_path, monkeypatch) -> None:
     agent, store, thread = _transcript_case(tmp_path, monkeypatch, turns=3)
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: "新摘要")
@@ -273,6 +305,8 @@ def test_transcript_gate_keeps_raw_measurement_without_calibration(tmp_path, mon
     assert store.threads.load(thread.thread_id).compact_failure_code == "COMPACT_CANDIDATE_TOO_LARGE"
 
 
+# LLM: 候选必须严格小于真实输入上限，输出预留仍生效，拒绝后代数不前进。
+# 函数用途: 验证会话候选校准后到线或越线仍不能提交。
 @pytest.mark.parametrize("candidate_raw,calibrated", [
     (8_570, 5_999),
     (8_571, 6_000),  # 折算后恰好等于输入上限：仍拒绝。
@@ -303,10 +337,14 @@ def test_transcript_gate_rejects_calibrated_candidate_at_or_over_ceiling(
 # ---------------------------------------------------------------------------
 
 
+# LLM: 复用显式90%的真实活动归档夹具，完整投影原值、冻结校准及检查点必须各保口径不混写。
+# 函数用途: 验证活动回合候选经校准后可在原输入上限内提交。
 def test_active_turn_gate_accepts_candidate_under_calibrated_ceiling(carried_case) -> None:
     case = carried_case
     projections = []
 
+    # LLM: 只记录带同一摘要的完整候选投影，原始9500计量不能被后续校准就地覆盖。
+    # 函数用途: 提供估算偏高但校准后可接受的活动候选。
     def project(summary, _retained, _generation):
         projection = ConversationCompactProjection(9_500, {"summary": summary})
         projections.append(projection)
@@ -330,6 +368,8 @@ def test_active_turn_gate_accepts_candidate_under_calibrated_ceiling(carried_cas
     assert _phase(case.progress, "completed")["after_tokens"] == 6_650
 
 
+# LLM: 显式90%输入上限与真实输出预留联合约束候选，严格小于才接受；不得为默认变化改弱断言。
+# 函数用途: 验证活动回合候选校准后的输入与输出预留边界。
 @pytest.mark.parametrize("output_cap,candidate_raw,calibrated", [
     # 上限 9_000（触发线）：候选比观测请求大，沿追加口径 7_000 + (raw − 10_000)。
     (0, 11_999, 8_999),
@@ -366,6 +406,8 @@ def test_active_turn_gate_rejects_at_ceiling_and_keeps_output_reserve(
 # ---------------------------------------------------------------------------
 
 
+# LLM: 只构造结构化进度测试载荷，覆盖项用于白名单反例，不把文字当触发来源。
+# 函数用途: 生成可控制触发来源的压缩开始事件。
 def _progress(**overrides):
     return {
         "schema": CONVERSATION_COMPACT_PROGRESS_SCHEMA, "phase": "started", "stage": "preparing", "percent": 5,
@@ -375,6 +417,8 @@ def _progress(**overrides):
     }
 
 
+# LLM: 触发来源只接受公开结构化枚举，缺失或自然语言不得由进度规范化器补成机器事实。
+# 函数用途: 验证开始进度只保留已知压缩触发来源。
 def test_compact_progress_whitelist_keeps_only_known_trigger_sources() -> None:
     from agent_py_agent.agent.conversation.compact_progress import COMPACT_TRIGGER_SOURCES
 
@@ -385,6 +429,8 @@ def test_compact_progress_whitelist_keeps_only_known_trigger_sources() -> None:
     assert "trigger_source" not in normalize_conversation_compact_progress(_progress(trigger_source="用户说要压缩"))
 
 
+# LLM: 工具窗口超限由运行态结构化事实触发真实预检，不能从展示detail文本猜测来源。
+# 函数用途: 验证工具上下文溢出的状态及触发来源准确透传。
 def test_tool_context_window_overflow_is_a_structured_trigger_source() -> None:
     params = SimpleNamespace(
         context_scope="default",
@@ -415,27 +461,39 @@ _REQUIREMENT = "CURRENT_REQUIREMENT_BEGIN " + "a" * 45_000 + " CURRENT_REQUIREME
 _SUMMARY_TEXT = "旧资料已完成核对，后续遵守当前完整要求。"
 
 
+# LLM: 只收集公开结构化进度及用量投影，不渲染正文、不修改原线程或进度规范化合同。
+# 类用途: 为本地Gateway回归保存可核对的压缩事件和上下文数字。
 class _ProgressSink:
     """只记录结构化进度与上下文数字的 on_chunk 替身；不渲染正文。"""
 
+    # LLM: 每例独立持有空事件列表，不复用其它回合或其它测试的观测。
+    # 函数用途: 初始化进度和用量收集容器。
     def __init__(self) -> None:
         self.progress: list[dict[str, object]] = []
         self.usage: list[dict[str, object]] = []
 
+    # LLM: 保存原进度字段的浅拷贝，返回写入成功只属于测试sink，不代表业务压缩成功。
+    # 函数用途: 收集一次公开压缩进度事件。
     def write_conversation_compact_progress(self, value):
         self.progress.append(dict(value))
         return True
 
+    # LLM: 只收集实际用量投影，不替换原观测、校准或线程快照。
+    # 函数用途: 收集一次公开上下文用量事件。
     def write_context_usage(self, usage):
         self.usage.append(dict(usage))
         return True
 
 
+# LLM: 仅替换供应商观测输入量后调用原记录器，表面身份和校准落库继续真实执行；None代表无可用usage。
+# 函数用途: 按显式比例构造可检查的本地供应商用量观测。
 def _calibrated_provider(monkeypatch, ratio):
     """让每次真实模型响应的 usage 变成“本地估算 × ratio”；ratio 为 None 时不给可用 usage（无观测）。"""
     raws = []
     original = tool_model_generation.record_provider_context_observation
 
+    # LLM: 保留原响应及表面参数，只按测试比例替换usage数值并沿原入口写观测，不伪造线程代数。
+    # 函数用途: 捕获真实原始估算并模拟供应商实际输入量。
     def record(agent, params, *, raw_estimated_tokens, context_surface_fingerprint, response):
         raws.append(raw_estimated_tokens)
         usage = {
@@ -453,9 +511,13 @@ def _calibrated_provider(monkeypatch, ratio):
     return raws
 
 
+# LLM: 只替换HTTP末端，真实请求投影、协议探针和Gateway恢复链仍运行，所有响应为合成本地数据。
+# 函数用途: 收集业务请求并提供不访问外网的供应商响应。
 def _fake_provider_http(monkeypatch):
     business = []
 
+    # LLM: 按结构化工具名区分合成协议探针与业务请求，不改变真实序列化请求内容或访问真实供应商。
+    # 函数用途: 返回探针确认或固定业务文本，并保存业务负载。
     def send(request):
         wire = json.loads(json.dumps(request.payload, ensure_ascii=False))
         names = [row.get("name") for row in wire.get("tools", [])]
@@ -473,23 +535,30 @@ def _fake_provider_http(monkeypatch):
     return business
 
 
+# LLM: 正式触发键及旧自动键显式90%，输出预留仍10000；仅模型及HTTP末端替身，原接受门、观测和CAS不替换。
+# 函数用途: 准备具有明确80000输入上限的两回合Gateway校准场景。
 def _gateway_case(tmp_path, monkeypatch, *, ratio):
     fixture = _history_request(tmp_path, mode="disabled", tools=True, original_window=_WINDOW, history_repeat=500)
     agent = fixture.agent
     agent.config.max_tokens = _OUTPUT
     agent.backend.max_tokens = _OUTPUT
     agent.config.memory_compact_auto_trigger_percent = 90
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.system_prompt += "\n" + _REQUIREMENT
     monkeypatch.setattr(compact_module, "_summarize", lambda *args, **kwargs: _SUMMARY_TEXT)
     befores, candidates = [], []
     original_before = recovery._full_request_tokens
     original_project = recovery._project_mixed_recovery_material
 
+    # LLM: 捕获真实完整请求计量后原样返回，不调整数值来制造场景成立。
+    # 函数用途: 记录恢复前完整请求的原始大小。
     def full_request_tokens(*args):
         value = original_before(*args)
         befores.append(value)
         return value
 
+    # LLM: 调用原混合恢复投影，只记录结构化候选视图的真实完整请求大小，不替换投影材料。
+    # 函数用途: 捕获被测Gateway恢复链构造的候选计量。
     def project(*args):
         value = original_project(*args)
         if args[1].is_candidate:
@@ -506,6 +575,8 @@ def _gateway_case(tmp_path, monkeypatch, *, ratio):
     )
 
 
+# LLM: 测试直接调用业务执行入口，须按原准确任务身份结束其固定租约，不清理其它请求或绕过认领合同。
+# 函数用途: 用真实claims终态入口释放本例请求的执行车道。
 def _finish_turn(case, request_id: str) -> None:
     """按 Gateway 终态收尾的同一结构化调用释放该请求钉住的执行车道（测试直接调 _run_gateway_ask，不经请求终态）。"""
     case.agent.conversation_store.claims.finish({
@@ -514,6 +585,8 @@ def _finish_turn(case, request_id: str) -> None:
     })
 
 
+# LLM: 只在隔离临时目录写第二回合处理中记录，沿原会话身份构造真实Gateway上下文，不复用旧attempt。
+# 函数用途: 为恢复校准测试准备第二个已绑定业务请求。
 def _second_turn(case, prompt: str, sink: _ProgressSink):
     fixture = case.fixture
     request = {
@@ -528,6 +601,8 @@ def _second_turn(case, prompt: str, sink: _ProgressSink):
     )
 
 
+# LLM: 校准只从真实线程持久观测读取，使用原表面及代次，不按期望结果反向构造大小。
+# 函数用途: 读回第一回合落库的耐久校准事实。
 def _durable_calibration(case):
     from agent_py_agent.agent.conversation.compact_calibration import CompactRequestCalibration
 
@@ -540,6 +615,8 @@ def _durable_calibration(case):
     )
 
 
+# LLM: 第一回合真实执行后按原终态释放认领，再核持久观测；无观测场景必须明确保持空状态。
+# 函数用途: 建立第二回合所需的真实历史和可选供应商校准。
 def _first_turn(case, *, observed: bool):
     """第一回合：请求本身放得下，只留下供应商观测（有观测的场景），并把回合正文追加进会话；返回冻结口径的校准事实。"""
     assert request_execution._run_gateway_ask(case.fixture.context).response == "资料整理完成。"
@@ -554,6 +631,8 @@ def _first_turn(case, *, observed: bool):
     return _durable_calibration(case)
 
 
+# LLM: 预期值来自真实探针计量再调用原校准函数，必须同时验证原始越线及校准后是否装下的场景前提。
+# 函数用途: 计算并核对压缩前及最小候选的真实口径大小。
 def _expected_sizes(case, calibration, *, fits: bool):
     """按探针捕获的原始计量算出口径折算后的压缩前/候选大小，并核对场景前提（尺寸漂移在这里失败，而不是悄悄换了含义）。"""
     from agent_py_agent.agent.conversation.compact_calibration import (
@@ -570,6 +649,8 @@ def _expected_sizes(case, calibration, *, fits: bool):
     return expected_before, expected_candidate
 
 
+# LLM: 成功须同时核真实线程、公开进度、实际发送材料及下一次预检基线，不能只凭候选提交标志认定全链成功。
+# 函数用途: 核对获选摘要按同一校准大小发送且不会立即再次触发压缩。
 def _assert_recovery_sent_the_accepted_candidate(case, sink, expected_candidate):
     thread = case.agent.conversation_store.threads.require(case.thread_id)
     assert _phase(sink.progress, "completed")["after_tokens"] == expected_candidate
@@ -584,6 +665,8 @@ def _assert_recovery_sent_the_accepted_candidate(case, sink, expected_candidate)
     assert thread.provider_context_observation["compact_generation"] == 1
 
 
+# LLM: 失败须保留原历史代次和业务发送数量，容量及用量快照仍用真实校准值，不得被原始估算覆盖。
+# 函数用途: 核对拒绝候选后的失败计量、类型化错误及线程观测。
 def _assert_failure_snapshot_is_calibrated(case, sink, expected_before, expected_candidate):
     thread = case.agent.conversation_store.threads.require(case.thread_id)
     failed = _phase(sink.progress, "failed")
@@ -597,9 +680,9 @@ def _assert_failure_snapshot_is_calibrated(case, sink, expected_before, expected
     assert [row["current_tokens"] for row in sink.usage] == [expected_before]
 
 
-@pytest.mark.parametrize("scenario", ["calibrated_fit", "calibrated_too_large", "no_observation"])
 # LLM: 只调合成输入长度恢复阈值场景，不改生产预算或放宽校准/发送断言；继续走真实Gateway预检。
 # 函数用途: 在默认提示缩短后仍验证候选使用与预检相同的校准口径。
+@pytest.mark.parametrize("scenario", ["calibrated_fit", "calibrated_too_large", "no_observation"])
 def test_gateway_recovery_measures_candidates_with_the_preflight_calibration(tmp_path, monkeypatch, scenario):
     case = _gateway_case(tmp_path, monkeypatch, ratio=None if scenario == "no_observation" else _RATIO)
     calibration = _first_turn(case, observed=scenario != "no_observation")

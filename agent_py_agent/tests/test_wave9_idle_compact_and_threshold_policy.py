@@ -625,3 +625,154 @@ def test_idle_failure_cas_reads_latest_activity_after_message_check(summary_case
     latest = store.threads.require(row.thread_id)
     assert latest.compact_generation == row.compact_generation and latest.compact_consecutive_failures == 2
     assert latest.metadata["user_activity_generation"] == row.metadata["user_activity_generation"] + 1
+
+
+# LLM: 只设置正式零备份预算及容量替身，用户车道、摘要调用、取消检查和失败存储全部保持真实。
+# 函数用途: 为车道闸竞争准备一个必然超过输入上限的闲置候选。
+@pytest.fixture
+def oversized_idle_lane_case(summary_case, monkeypatch):
+    from agent_py_agent.agent.conversation import compact as compact_chain
+
+    agent, store, row = summary_case
+    agent.config.compact_landmark_max_tokens = 0
+    monkeypatch.setattr(compact_chain, "_projected_context_tokens", lambda _agent, summary, *_, **__: 2_000_000 if summary else 650_000)
+    return agent, store, row
+
+
+# LLM: 两种模式都沿原用户登记闸；registered覆盖排队/恢复登记，active另取真实执行租约且退出时按原合同释放。
+# 函数用途: 提供不更改活动代或消息的真实前台用户车道上下文。
+def _foreground_user_lane(store, thread_id, mode):
+    from agent_py_agent.agent.conversation import run_claim
+
+    request = run_claim.ConversationRunLaneRequest(store=store, thread_id=thread_id,
+        claim_task_id="foreground-lane-test", reason="foreground", lease_seconds=60,
+        heartbeat_interval_seconds=10.0, interrupt_check=lambda: False, carries_user_input=True)
+    return (run_claim._user_input_turn_registered(request) if mode == "registered"
+            else run_claim.conversation_run_lane(request))
+
+
+# LLM: 在原失败前检查读到False后暂停，让真实用户登记先赢；活动代和消息指纹不变，只有车道闸能封住该窗口。
+# 函数用途: 验证用户先进入登记或活动车道时，闲置失败干净让位且不增加失败数。
+@pytest.mark.parametrize("mode", ["registered", "active"])
+def test_idle_failure_user_lane_enters_first_aborts_cleanly(oversized_idle_lane_case, monkeypatch, mode):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.conversation import compact as compact_chain
+    from agent_py_agent.agent.conversation import run_claim
+
+    agent, store, row = oversized_idle_lane_case
+    original = compact_chain._record_request_compact_failure
+    checked, user_entered, release_user = threading.Event(), threading.Event(), threading.Event()
+    before_tail, errors = store.messages.tail_marker_report(row.thread_id)
+    assert not errors
+    checks = []
+
+    # LLM: 包装原请求回调的读取时点，不伪造检查值；第二次读取必须重新观察已经登记的用户。
+    # 函数用途: 暂停第一次失败前检查，让用户在原读取与记账之间进入车道。
+    def at_failure_boundary(request, **kwargs):
+        check = request.interrupt_check
+
+        # LLM: 先调用真实回调再等待事件，仅第一次暂停；不修改原活动、消息或忙态判断。
+        # 函数用途: 暴露旧False观察与后来用户登记之间的确定竞争窗口。
+        def check_then_wait():
+            value = check()
+            checks.append(value)
+            if len(checks) == 1:
+                checked.set()
+                assert user_entered.wait(10), "用户车道没有先登记"
+            return value
+
+        return original(replace(request, interrupt_check=check_then_wait), **kwargs)
+
+    # LLM: 原用户登记及可选原执行租约真实运行；finally由主线程事件保证退出，不留下全局登记或认领。
+    # 函数用途: 在失败前检查后进入用户车道，并保持在场直到闲置判定结束。
+    def foreground():
+        assert checked.wait(10), "闲置失败没有到达最终检查"
+        with _foreground_user_lane(store, row.thread_id, mode):
+            assert run_claim.user_input_turn_on_lane(store, row.thread_id)
+            user_entered.set()
+            assert release_user.wait(15), "用户车道未被释放"
+
+    monkeypatch.setattr(compact_chain, "_record_request_compact_failure", at_failure_boundary)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(foreground)
+        try:
+            result = idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)
+        finally:
+            release_user.set()
+        future.result(timeout=15)
+    latest = store.threads.require(row.thread_id)
+    assert checks[0] is False and result.get("cas_aborted") is True
+    assert result["reason"] == "activity_changed" and not result["compacted"]
+    assert latest.compact_consecutive_failures == 0 and latest.compact_failure_code == ""
+    assert latest.compact_generation == row.compact_generation and latest.summary == row.summary
+    assert latest.metadata["user_activity_generation"] == row.metadata["user_activity_generation"]
+    assert store.messages.tail_marker_report(row.thread_id) == (before_tail, [])
+    assert not run_claim.user_input_turn_on_lane(store, row.thread_id)
+
+
+# LLM: 失败先持原车道闸；前台线程用原锁非阻塞探针确证争用，再沿原登记阻塞；没有sleep或替换锁。
+# 函数用途: 验证用户登记必须等失败事务完成，失败先赢仍合法记一次容量失败。
+@pytest.mark.parametrize("mode", ["registered", "active"])
+def test_idle_failure_user_lane_waits_until_failure_gate_releases(oversized_idle_lane_case, monkeypatch, mode):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.conversation import run_claim
+    from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
+
+    agent, store, row = oversized_idle_lane_case
+    failure_started, registration_attempted, failure_written = threading.Event(), threading.Event(), threading.Event()
+    user_entered = threading.Event()
+    main_thread = threading.get_ident()
+    lane_gate, record = run_claim._lane_gate, store.threads.record_compact_failure
+    contention, order = [], []
+
+    # LLM: 仍返回原闸且只探测一次真实锁；事件在探针结果确定后发出，不以尚未被调度伪装用户在等待。
+    # 函数用途: 证明前台登记确实遇到失败事务持有的同一把车道闸。
+    def observe_gate(key):
+        gate = lane_gate(key)
+        if threading.get_ident() != main_thread:
+            acquired = gate.lock.acquire(blocking=False)
+            if acquired:
+                gate.lock.release()
+            contention.append(not acquired)
+            registration_attempted.set()
+        return gate
+
+    # LLM: 不替换真实失败事务，仅在原入口内等待前台已竞争车道闸的证据，再执行原消息/线程CAS。
+    # 函数用途: 记录失败持闸写入完成时序，确认用户未插入事务内部。
+    def record_while_user_waits(*args, **kwargs):
+        failure_started.set()
+        assert registration_attempted.wait(10), "用户没有尝试登记"
+        assert not user_entered.is_set(), "用户在失败事务内提前登记"
+        result = record(*args, **kwargs)
+        order.append("failure_written")
+        failure_written.set()
+        return result
+
+    # LLM: 使用原用户登记和可选执行租约；进入时必须已观察到失败提交，退出仍沿原清理链。
+    # 函数用途: 在失败已持闸后尝试登记，获准进入时记录落库次序。
+    def foreground():
+        assert failure_started.wait(10), "失败事务未进入"
+        with _foreground_user_lane(store, row.thread_id, mode):
+            user_entered.set()
+            assert failure_written.is_set(), "用户早于失败写入完成"
+            assert store.threads.require(row.thread_id).compact_consecutive_failures == 1
+            order.append("user_entered")
+
+    monkeypatch.setattr(run_claim, "_lane_gate", observe_gate)
+    monkeypatch.setattr(store.threads, "record_compact_failure", record_while_user_waits)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(foreground)
+        with pytest.raises(ConversationCompactError) as failure:
+            idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)
+        future.result(timeout=15)
+    latest = store.threads.require(row.thread_id)
+    assert contention == [True] and order == ["failure_written", "user_entered"]
+    assert failure.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
+    assert latest.compact_consecutive_failures == 1 and latest.compact_failure_code == failure.value.code
+    assert latest.compact_generation == row.compact_generation and latest.summary == row.summary
+    assert latest.metadata["user_activity_generation"] == row.metadata["user_activity_generation"]
+    assert not run_claim.user_input_turn_on_lane(store, row.thread_id)
