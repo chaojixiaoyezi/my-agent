@@ -1790,6 +1790,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
         recovery_hint="通知目标未在当前用户的认证绑定中；读取schedule delivery_targets并选准确引用，不猜地址或跨用户投递。",
     ),
+    "SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID": ErrorContract(
+        code="SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID", category="tool", retryable=True,
+        recommended_action=RecoveryAction.REPAIR_TOOL_ARGUMENTS.value,
+        recovery_hint="update_delivery只接受通知策略与版本条件；其它监控字段请单独使用update并重新读取版本。",
+    ),
     "SCHEDULER_INVALID_SCHEDULE": ErrorContract(
         code="SCHEDULER_INVALID_SCHEDULE",
         category="tool",

@@ -124,6 +124,7 @@ def _record_background_owner_response(
     local_transcript_only: bool = False,
     delivery_observer: Callable | None = None,
     delivery_target_key: str = "",
+    delivery_event_key: str = "",
 ) -> BackgroundDeliveryCommit:
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
@@ -164,6 +165,8 @@ def _record_background_owner_response(
         message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
     if delivery_target_key:
         message_metadata["scheduler_delivery_target_key"] = delivery_target_key
+    if delivery_event_key:
+        message_metadata["scheduler_delivery_event_key"] = delivery_event_key
     route = _local_only_route(_background_delivery_route(
         delivery.channels,
         delivery_context,

@@ -1,3 +1,11 @@
+## 2026-10-28 Wave 9 B3 Round 2：会话继任与通知提交结构
+
+- `conversation/store_threads.py` 的 `succession_by_binding` 使用 `channel\x1faccount_id\x1fchat_id` 键；解析、索引重放和定时通知都按准确三元组查后继，保持 owner/home、双向前任、环和最多 16 跳校验。新候选仍先隐藏；前任事务提交后再写 `succession_published`，`plugin_host/conversations.py::check_archive` 阻止发表窗口删除锚点。
+- `cli/chat_parts/control_runtime.py` 先读绑定，再调用原继任事务并在原文件锁内复核 owner/home。`tui_actions.py` 把同一 runtime 交给 Direct slash，`tui_worker.py` 注册同一历史引用；`TuiRuntime.publish_conversation_reset` 清理原内存历史并递增代次。`tui_threading.py` 在 HTTP/本地整页读取后验证原代次，在同一 reset 锁内提交显示快照，不更换 transport session 或取消后台资源。
+- `plugin_host/gateway_composition.py` 向通知处理器显式传原 `AuthorizedCall`；`monitor_delivery_v2.py` 逐次重核 issuer、准确 owner/home/动作/载荷，再向 `ScheduleTool` 注入仅宿主可提供的授权器。非管理员使用独立请求视图承接原 creator/群校验；模型参数不能构造该授权器。只更新原仓库策略与 CAS，不新建 Agent 或借别人的运行上下文。
+- `scheduler/delivery_policy.py` 统一封闭策略、跟随开关及等级过滤；`execution.py` 在 run 首次准备时为固定模式冻结原目标线程，执行/creator/模型来源仍不迁移；`notification_binding.py` 保留管理员认证代次。`alert_delivery.py` 将稳定 wake/事件/幂等键（缺失才使用业务摘要）归一为事件键，逐目标复用原 sender 和事件发送前 CAS。
+- `scheduler/repository.py` 在原 quota/store 事务中写 `delivery_outbox[run_id:event_key][target_key]`。旧单事件只读接口可兼容；多事件必须明确指定，不能猜最新事件来授权。每事件保存完整计划角色，部分登记/部分提交不清正文；fallback 在已外发但 canonical 异常时停止推进，未补账不得结算。等级过滤后无目标的事件走原内部留档合同。完整业务冻结、目标 sent 回执、canonical 提交分别记账，wake 首次业务快照仍不可覆盖，不承诺跨系统 exactly-once。准确验证范围见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

@@ -10,9 +10,9 @@ from agent_py_agent.agent.conversation.control_commands import parse_conversatio
 from agent_py_agent.agent.conversation.store import ConversationStore
 
 
-@pytest.fixture
 # LLM: 只在pytest临时owner内建原Store，不连接真实通道。
 # 函数用途: 提供隔离会话账本。
+@pytest.fixture
 def conversations(tmp_path):
     return ConversationStore(tmp_path / "owner" / "conversations")
 
@@ -42,9 +42,9 @@ def resolve(store, identifier, **kwargs):
     return resolver(store, identifier, **kwargs)
 
 
-@pytest.mark.parametrize("text,title", [("/new", ""), ("/new 下一件事", "下一件事"), ("/NEW 中文 标题", "中文 标题")])
 # LLM: 使用原解析器与CLI序列化，验证/new不是模型普通消息。
 # 函数用途: 覆盖大小写、空标题及中文标题。
+@pytest.mark.parametrize("text,title", [("/new", ""), ("/new 下一件事", "下一件事"), ("/NEW 中文 标题", "中文 标题")])
 def test_new_is_shared_typed_control(text, title):
     command = parse_conversation_control(text)
     assert command is not None and command.valid and command.kind == "new"
@@ -90,9 +90,9 @@ def test_new_preserves_preferences_not_history_or_execution(conversations):
     assert current.thread_id == new.thread_id
 
 
-@pytest.mark.parametrize("hops", range(1, 6))
 # LLM: 一到五跳都由真实事务生成，不手写可绕过验证的目标选择。
 # 函数用途: 验证ConversationStore和ThreadStore共享解析入口。
+@pytest.mark.parametrize("hops", range(1, 6))
 def test_same_scope_successor_chain(conversations, hops):
     first = current = thread(conversations)
     for _ in range(hops):
@@ -101,9 +101,9 @@ def test_same_scope_successor_chain(conversations, hops):
     assert resolve(conversations.threads, first.thread_id) == current.thread_id
 
 
-@pytest.mark.parametrize("tamper", ["owner", "home", "channel", "actor", "chat", "cycle", "missing"])
 # LLM: 仅篡改临时记录，非法owner/home/三元组、环和缺失都必须拒绝。
 # 函数用途: 逐项验证继任链安全边界。
+@pytest.mark.parametrize("tamper", ["owner", "home", "channel", "actor", "chat", "cycle", "missing"])
 def test_successor_chain_fails_closed(conversations, tamper):
     old = thread(conversations)
     new = successor(conversations, old)
@@ -242,9 +242,9 @@ def test_new_gateway_entry_rejects_foreground_only(conversations, monkeypatch):
     assert not busy.ok and busy.error_code == "NEW_SESSION_BUSY"
 
 
-@pytest.fixture
 # LLM: 通过原认证和schedule构造IM计划，模型/运输替身限临时目录。
 # 函数用途: 提供同owner的飞书与本地双线目标。
+@pytest.fixture
 def alert_case(tmp_path):
     from agent_py_agent.agent.user_space.admin_channel_identity import bind_admin_channel_identity
     from agent_py_agent.tests.test_scheduler_im_l_integration import im_case
@@ -275,9 +275,9 @@ def delivery_targets(case):
     return reader(case.agent)
 
 
-@pytest.mark.parametrize("mode", ["origin", "local", "none"])
 # LLM: 原工具更新沿同一job和版本冲突合同，不创建第二计划。
 # 函数用途: 验证旧三种模式的兼容更新和CAS。
+@pytest.mark.parametrize("mode", ["origin", "local", "none"])
 def test_delivery_policy_update_uses_original_job_cas(alert_case, mode):
     import json
 
@@ -397,16 +397,18 @@ def prepared_alert(case, policy):
         reason=signal.reason, wake_signal=signal.to_dict())
 
 
-# LLM: 相同旧ID只能按已发表scope重试，另一个绑定不得返回跨通道后继。
-# 函数用途: 复现并防止旧ID重放跨范围。
+# LLM: R2允许其它已登记通道独立继任，但不允许它返回第一条通道后继，未登记绑定仍拒绝。
+# 函数用途: 验证按绑定重放隔离与兼容默认指针。
 def test_replayed_reset_cannot_switch_a_different_binding(conversations):
     old = thread(conversations)
     first = old.channel_bindings[0]
     other = replace(first, channel="chat", channel_user_id="terminal", channel_conversation_id="terminal")
     conversations.threads.update_atomic(old.thread_id, lambda row: replace(row, channel_bindings=(first, other)))
     new = conversations.threads.succeed(old.thread_id, binding=first)
+    separate = conversations.threads.succeed(old.thread_id, binding=other)
+    assert separate.thread_id != new.thread_id
     with pytest.raises(ValueError):
-        conversations.threads.succeed(old.thread_id, binding=other)
+        conversations.threads.succeed(old.thread_id, binding=replace(other, channel_user_id="unbound"))
     assert resolve(conversations, old.thread_id) == new.thread_id
 
 
@@ -474,9 +476,9 @@ def test_reset_retry_repairs_binding_indexes(conversations, monkeypatch):
     assert calls == [new_id]
 
 
-@pytest.mark.parametrize("mode", ["bound", "multi"])
 # LLM: 原sender和Store真实，只有IM运输替身，不向实际用户发送通知。
 # 函数用途: 验证双线逐目标回执、本地留档和include_origin去重。
+@pytest.mark.parametrize("mode", ["bound", "multi"])
 def test_real_delivery_records_every_target_and_deduplicates_origin(alert_case, mode):
     from agent_py_agent.agent.conversation.background_delivery import (
         BackgroundDeliveryDependencies,
@@ -646,9 +648,9 @@ def test_update_delivery_switches_all_rules_without_resetting_execution_state(al
     assert updated["rules"][0]["next_run_at"] == monitor["rules"][0]["next_run_at"]
 
 
-@pytest.mark.parametrize("foreground", [True, False])
 # LLM: 原claim账真实领取，前台拒绝与后台保留不能用替身状态证明。
 # 函数用途: 验证/new不停止活跃后台租约。
+@pytest.mark.parametrize("foreground", [True, False])
 def test_new_rejects_foreground_claim_but_keeps_background_claim(conversations, foreground):
     old = thread(conversations)
     claim = conversations.claims.acquire({"thread_id": old.thread_id, "task_id": "foreground" if foreground else "background",
@@ -676,9 +678,9 @@ def test_successor_chain_has_exact_sixteen_hop_boundary(conversations):
         resolve(conversations, old.thread_id)
 
 
-@pytest.mark.parametrize("fail_local", [True, False])
 # LLM: 仅注入canonical写失败，真实outbox、冻结信封和渠道回执仍按原顺序运行。
 # 函数用途: 验证本地优先及外发优先两种失败顺序均不丢结果、不重复外发。
+@pytest.mark.parametrize("fail_local", [True, False])
 def test_target_canonical_failure_keeps_complete_retry_and_never_resends_sent_route(alert_case, monkeypatch, fail_local):
     from agent_py_agent.agent.conversation.background_delivery import (
         BackgroundDeliveryDependencies,
@@ -889,10 +891,10 @@ def test_shared_outbox_failure_stops_other_transports(alert_case, monkeypatch):
     save = case.agent.scheduler_repository.record_delivery_receipt
     # LLM: 仅在发送事实落账时使共享仓库失败，初始业务快照仍用真实原仓库。
     # 函数用途: 定位发送后全局账本失败窗口。
-    def unavailable(run_id, key, receipt):
+    def unavailable(run_id, key, receipt, *, event_key=None):
         if receipt.get("state") == "sent":
             raise OSError("shared outbox unavailable")
-        return save(run_id, key, receipt)
+        return save(run_id, key, receipt, event_key=event_key)
     monkeypatch.setattr(case.agent.scheduler_repository, "record_delivery_receipt", unavailable)
     with pytest.raises(OSError, match="shared outbox unavailable"):
         flow.attempt()
@@ -968,3 +970,511 @@ def test_completed_alert_outbox_is_bounded_without_dropping_pending_debt():
     assert len(complete) == 128
     assert all("frozen" not in row and "business_result" not in row for rows in complete for row in rows.values())
     assert outbox["run-139"]["target"]["receipt_id"] == "receipt-139"
+
+
+# LLM: 原线程的用户选定目录不能被本地Agent启动目录覆盖；真实控制端与Store执行继任。
+# 函数用途: 复现Direct/new在继任前改写cwd的问题。
+def test_r2_direct_new_preserves_selected_directories(conversations):
+    from agent_py_agent.agent.conversation.control_commands import ConversationControlCommand
+    from agent_py_agent.cli.chat_parts.control_runtime import (
+        ChatControlExecution,
+        ChatControlState,
+        execute_chat_control,
+    )
+    original = thread(conversations, channel="chat", actor="local-agent", chat="terminal-r2")
+    original = conversations.threads.update_atomic(original.thread_id, lambda row: replace(row,
+        cwd="/selected/project/sub", workspace_root="/selected/project"))
+    agent = SimpleNamespace(conversation_store=conversations, root="/agent/startup")
+    result = execute_chat_control(ChatControlExecution(agent, False, ChatControlState(False, 0, "", 0, "terminal-r2")),
+        ConversationControlCommand("new"))
+    assert result.ok
+    for identifier in (original.thread_id, result.details["thread_id"]):
+        saved = conversations.threads.require(identifier)
+        assert (saved.cwd, saved.workspace_root) == (original.cwd, original.workspace_root)
+
+
+# LLM: 经过真实Direct slash、控制事务和worker共享历史，不用只调用显示清屏代替入口验收。
+# 函数用途: 验证Direct/new立即清屏清历史，下一轮不会注入旧正文。
+def test_r2_direct_tui_new_clears_worker_history_and_display(conversations):
+    import threading
+
+    from agent_py_agent.cli.chat_parts.tui import _tui_handle_command
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_worker import (
+        TuiWorkerConfig,
+        _build_turn_inject,
+        _worker_history_context,
+    )
+    thread(conversations, channel="chat", actor="local-agent", chat="terminal-r2")
+    agent = SimpleNamespace(conversation_store=conversations)
+    runtime = TuiRuntime("terminal-r2")
+    runtime.write_console("旧显示内容")
+    runtime.background_message_cursor = 500
+    history, outputs = [("旧用户正文", "旧助手正文")], ["旧助手正文"]
+    lock = threading.Lock()
+    cfg = TuiWorkerConfig(jobs=None, state_lock=lock, is_running_ref=[False], pending_jobs_ref=[0],
+        running_prompt_ref=[""], running_request_id_ref=[""], running_started_at_ref=[0.0], agent=agent, args=None,
+        paths=None, use_gateway=False, conversation_history=history, history_lock=threading.Lock(),
+        build_history_context=lambda: repr(history) if history else "", assistant_outputs=outputs,
+        last_token_estimate_ref=[0], stop_event=threading.Event(), current_session_id="terminal-r2", tui_runtime=runtime)
+    params = SimpleNamespace(user="/new", agent=agent, args=SimpleNamespace(memory_limit=10), runtime_inject=[],
+        prompt_files=[], use_gateway=False, plugin_client=None, plugin_revision="", command_interaction=None,
+        current_session_id="terminal-r2", state_lock=lock, is_running_ref=cfg.is_running_ref, pending_jobs_ref=cfg.pending_jobs_ref,
+        running_prompt_ref=cfg.running_prompt_ref, running_request_id_ref=cfg.running_request_id_ref,
+        running_started_at_ref=cfg.running_started_at_ref, local_run_ref=cfg.local_run_ref,
+        assistant_outputs=outputs, tui_runtime=runtime)
+    assert _tui_handle_command(params=params)
+    assert not runtime.store.snapshot().stable_blocks and runtime.background_message_cursor == 0
+    assert history == [] and outputs == []
+    assert _worker_history_context(cfg) == ""
+    assert "旧用户正文" not in repr(_build_turn_inject([], _worker_history_context(cfg)))
+
+
+# LLM: HTTP在途时真正执行reset再返回旧页；旧notice、游标、seen和过程页都不能再发表。
+# 函数用途: 复现Gateway旧poll覆盖新空白会话的问题。
+def test_r2_tui_discards_poll_started_before_reset():
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_gateway_background_snapshot
+    runtime = TuiRuntime("terminal-r2")
+    seen, cursor = set(), [0]
+    # LLM: 只替代HTTP边界并在响应前触发实际reset，后续消费仍走真实代码。
+    # 函数用途: 以确定时序交付过期快照。
+    def fetch(*_args, **_kwargs):
+        runtime.publish_conversation_reset("thread-new")
+        return {"ok": True, "thread_id": "thread-old", "cursor": 500, "event_cursor": 0, "event_stream_id": "",
+            "transcript_events": [], "notices": [{"schema_version": "background_message.v1", "display_kind": "assistant_response",
+                "thread_id": "thread-old", "message_id": "msg-old", "content": "过期poll正文"}]}
+    agent = SimpleNamespace(request_background_notices=fetch)
+    assert _consume_gateway_background_snapshot(agent, "terminal-r2", runtime, [None], seen, cursor)
+    assert runtime.background_message_cursor == 0 and not runtime.store.snapshot().stable_blocks
+    assert not seen and cursor == [0]
+
+
+# LLM: 两个通道都真实登记到同一线程；各自new只能移动自己的索引，重复旧ID必须幂等。
+# 函数用途: 复现一个通道继任后另一个通道无法new的问题。
+def test_r2_each_bound_channel_can_succeed_independently(conversations):
+    old = thread(conversations)
+    old = conversations.threads.bind_channel({"thread_id": old.thread_id, "canonical_user_id": "owner", "channel": "chat",
+        "channel_user_id": "local-agent", "channel_conversation_id": "terminal-r2"})
+    feishu, chat = old.channel_bindings
+    new_chat = conversations.threads.succeed(old.thread_id, binding=chat)
+    error = ""
+    try:
+        new_feishu = conversations.threads.succeed(old.thread_id, binding=feishu)
+    except ValueError as exc:
+        error = str(exc)
+    assert not error, error
+    assert new_feishu.thread_id != new_chat.thread_id
+    for binding, expected in ((chat, new_chat), (feishu, new_feishu)):
+        current = conversations.threads.resolve(channel=binding.channel, channel_user_id=binding.channel_user_id,
+            channel_conversation_id=binding.channel_conversation_id)
+        assert current.thread_id == expected.thread_id
+        assert conversations.threads.succeed(old.thread_id, binding=binding).thread_id == expected.thread_id
+    saved = conversations.threads.require(old.thread_id)
+    assert saved.metadata["succession_by_binding"]["\x1f".join((chat.channel, chat.channel_user_id, chat.channel_conversation_id))] == new_chat.thread_id
+
+
+# LLM: 通过真实Web删除入口移除空闲前任，新线程已发表的身份不再依赖前任文件永久存在。
+# 函数用途: 验证删除归档前任不会隐藏活动后继。
+def test_r2_deleting_archived_predecessor_keeps_successor_visible(alert_case):
+    from agent_py_agent.agent.plugin_host.thread_settings_v2 import ThreadSettingsV2Handlers
+    case = alert_case
+    new = successor(case.store, case.thread)
+    context = SimpleNamespace(owner_home=SimpleNamespace(owner_id=case.agent.home_paths.owner_id,
+        home_dir=case.agent.home_paths.owner_home_dir))
+    result = ThreadSettingsV2Handlers(case.store, context, home_paths=case.agent.home_paths).delete_thread({"thread_id": case.thread.thread_id})
+    assert result["deleted"] and case.store.threads.load(case.thread.thread_id) is None
+    visible = case.store.threads.load(new.thread_id)
+    assert visible is not None and visible.status == "active"
+    assert visible.metadata["succession_published"] is True
+    assert new.thread_id in {row.thread_id for row in case.store.threads.list(limit=0)}
+
+
+# LLM: 非通知字段在任何来源准备/写入之前拒绝，保留原版本和文件字节，不能抛AttributeError。
+# 函数用途: 复现update_delivery误入schedule/rules准备对象的问题。
+@pytest.mark.parametrize("extra", [{"rules": []}, {"schedule_kind": "every", "every_seconds": 60}, {"prompt": "不能混改"}, {"cron_expr": "* * * * *"}])
+def test_r2_update_delivery_rejects_unrelated_fields(alert_case, extra):
+    from agent_py_agent.agent.scheduler.tool import ScheduleTool
+    case = alert_case
+    before = case.agent.scheduler_repository.store_path.read_bytes()
+    error = ""
+    try:
+        result = ScheduleTool(case.agent).execute({"action": "update_delivery", "job_id": case.job["job_id"],
+            "expected_version": case.job["version"], "delivery_policy": {"mode": "none"}, **extra})
+    except AttributeError as exc:
+        error = str(exc)
+    assert not error, error
+    assert not result.ok and result.error_code == "SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID"
+    assert case.agent.scheduler_repository.store_path.read_bytes() == before
+
+
+# LLM: 实际安装、令牌、issuer、门户与scheduler都真实，只有模型和IM运输不启动；无当前model run。
+# 函数用途: 复现冷Host v2请求缺少模型上下文无法更新本人监控的问题。
+def test_r2_cold_host_delivery_update_uses_authenticated_owner(alert_case):
+    import json
+
+    from agent_py_agent.agent import plugin_host_api as api
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+    from agent_py_agent.agent.gateway_parts.queue_service import ensure_gateway_folders
+    from agent_py_agent.agent.plugin_host.composition import HostComposition
+    from agent_py_agent.agent.plugin_host.contracts import (
+        HostDomainPorts,
+        decode_call,
+        dispatch_call,
+    )
+    from agent_py_agent.agent.plugin_host.conversations import ConversationDomain
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.plugin_host.gateway_composition import GatewayPortalDomain
+    from agent_py_agent.agent.plugin_manifest_host_v9 import host_capabilities
+    from agent_py_agent.tests.test_plugin_host_v2_grants import active_grant
+    case = alert_case
+    caps = sorted(host_capabilities())
+    home, _install, entry, ref = active_grant(case.agent.home_paths.root, caps)
+    assert home.owner_id == case.agent.home_paths.owner_id and home.home_dir == case.agent.home_paths.owner_home_dir
+    api.set_host_api_base("http://127.0.0.1:8420")
+    host = None
+    try:
+        token = api.issue_host_api_env(ref, entry.manifest.plugin_id)[api.HOST_API_TOKEN_ENV]
+        host = HostComposition(capability_policy=lambda: frozenset(caps))
+        conversation = ConversationDomain(lambda _: case.store, host.cursors, default_thread=lambda *_: False)
+        paths = gateway_paths_from_root(home.data_dir / "gateway")
+        ensure_gateway_folders(paths)
+        resources = SimpleNamespace(store_for=lambda _: case.store, paths_for=lambda _: paths,
+            server=SimpleNamespace(agent=case.agent))
+        conversation.portal_v2 = GatewayPortalDomain(resources, conversation)
+        host.ports = HostDomainPorts(conversation=conversation)
+        source = host.issuer.ingress(token)
+        call = decode_call(json.dumps({"schema": "plugin_host_call.v2", "action": "monitors.delivery.update",
+            "idempotency_key": "cold-delivery-update-r2-0001", "payload": {"monitor_id": case.job["job_id"],
+                "expected_version": case.job["version"], "delivery_policy": {"mode": "none"}}}).encode())
+        authorized = host.issuer.authorize(source, call)
+        case.agent._current_run_params = None
+        error = ""
+        try:
+            result = dispatch_call(authorized, host.ports)
+        except HostAPIError as exc:
+            error = f"{exc.code}; cause={exc.__cause__!r}; context={exc.__context__!r}"
+        assert not error, error
+        assert result.data["job"]["delivery_policy"] == {"mode": "none"}
+        assert case.agent.scheduler_repository.get_job(case.job["job_id"])["version"] == case.job["version"] + 1
+        assert case.agent._current_run_params is None
+    finally:
+        if host is not None:
+            host.close()
+        api.set_host_api_base(None)
+
+
+# LLM: 原prepare/reserve/wake和sender均真实运行，只把外部IM运输换为可计数协议替身。
+# 函数用途: 为R2事件去重及路由测试准备同一run的原入口。
+def r2_delivery(case, policy=None):
+    from agent_py_agent.agent.conversation.background_delivery import BackgroundDeliveryDependencies
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.tests.test_scheduler_runtime import _RetryDelivery
+    refs = [{"target_kind": "channel_binding", "binding_id": row["binding_id"]}
+        for row in sorted(delivery_targets(case), key=lambda row: row["channel"] != "feishu")]
+    signal, request = prepared_alert(case, policy or {"mode": "multi", "targets": refs})
+    channels = _RetryDelivery()
+    channels.status = "sent"
+    return SimpleNamespace(signal=signal, request=request, channels=channels,
+        context=DeliveryContext("feishu", "ou_a", thread_id=case.thread.thread_id, task_id=request.task_id,
+            idempotency_key="r2-first-event"),
+        dependencies=BackgroundDeliveryDependencies(case.agent, case.store, channels, lambda _: "running"))
+
+
+# LLM: 两个真实wake共用run_id但事件身份不同；同事件重试仍不得第二次运输或落重复消息。
+# 函数用途: 复现run级outbox吞掉第二条通知的问题。
+def test_r2_different_events_in_same_run_deliver_once_each(alert_case):
+    from agent_py_agent.agent.conversation.background_delivery import record_background_response
+    case = alert_case
+    call = r2_delivery(case)
+    second = case.store.wakes.raise_signal({"thread_id": call.request.thread_id, "root_task_id": call.request.task_id,
+        "reason": call.request.reason, "dedupe_key": "r2-second-notification", "summary": "第二条通知"})
+    request_b = replace(call.request, wake_signal=second.to_dict())
+    context_b = replace(call.context, idempotency_key="r2-second-event")
+    for request, context, content in ((call.request, call.context, "事件A正文"), (request_b, context_b, "事件B正文")):
+        result = record_background_response(call.dependencies, request, context, content, deliver=True, delivery_reason="scheduled_job_due")
+        assert result.persisted and result.delivery_status == "sent"
+    assert len(call.channels.attempts) == 2
+    for request, context, content in ((call.request, call.context, "事件A正文"), (request_b, context_b, "事件B正文")):
+        assert record_background_response(call.dependencies, request, context, content, deliver=True,
+            delivery_reason="scheduled_job_due").persisted
+    assert len(call.channels.attempts) == 2
+    assert {row.content for row in case.store.messages.recent(case.local.thread_id)} == {"事件A正文", "事件B正文"}
+
+
+# LLM: 工具回执已经核验后进入正式镜像入口，只应补canonical和其它目标，不能把主通道改成未发送。
+# 函数用途: 复现multi镜像重复外发已经成功的主通道。
+def test_r2_multiline_mirror_keeps_existing_primary_send_receipt(alert_case):
+    from agent_py_agent.agent.conversation.background_delivery import mirror_message_tool_deliveries
+    case = alert_case
+    call = r2_delivery(case)
+    result = mirror_message_tool_deliveries(call.dependencies, call.request, call.context,
+        [{"content": "主通道已经发出", "receipt_id": "primary-existing-receipt"}], delivery_reason="scheduled_message_tool_delivery")
+    assert result.persisted and result.delivery_status == "sent"
+    assert call.channels.attempts == []
+    receipts = case.agent.scheduler_repository.delivery_receipts(call.request.task_id)
+    primary = next(row for row in receipts.values() if not row["local"])
+    assert primary["external_sent"] is True and primary["receipt_id"] == "primary-existing-receipt"
+    assert any(row.content == "主通道已经发出" for row in case.store.messages.recent(case.local.thread_id))
+
+
+# LLM: 可选flag是严格布尔值；不强制给旧策略补键，以兼容原投影/摘要形状。
+# 函数用途: 固定跟随开关的公开策略合同。
+@pytest.mark.parametrize("follow", [True, False])
+def test_r2_delivery_policy_accepts_follow_latest_boolean(follow):
+    from agent_py_agent.agent.scheduler.delivery_policy import normalize_delivery
+    from agent_py_agent.agent.scheduler.schedule import ScheduleValidationError
+    error, policy = "", None
+    try:
+        policy = normalize_delivery({"mode": "origin", "follow_latest_channel_session": follow})
+    except ScheduleValidationError as exc:
+        error = str(exc)
+    assert not error, error
+    assert policy == {"mode": "origin", "follow_latest_channel_session": follow}
+
+
+# LLM: 两通道分别继任后按监控冻结的feishu三元组走链；关闭跟随则仍落原线程，不动run来源。
+# 函数用途: 核验per-binding继任与固定会话通知。
+@pytest.mark.parametrize("follow", [True, False])
+def test_r2_origin_follow_flag_with_two_channel_successors(alert_case, follow):
+    from agent_py_agent.agent.conversation.channels import DeliveryContext
+    from agent_py_agent.agent.scheduler.execution import delivery_thread, validate_delivery_origin
+    case = alert_case
+    original = case.store.threads.bind_channel({"thread_id": case.thread.thread_id, "canonical_user_id": "owner", "channel": "chat",
+        "channel_user_id": "local-agent", "channel_conversation_id": "r2-multichannel-source"})
+    _signal, request = prepared_alert(case, {"mode": "origin", "follow_latest_channel_session": follow})
+    case.store.threads.succeed(original.thread_id, binding=original.channel_bindings[1])
+    new = case.store.threads.succeed(original.thread_id, binding=original.channel_bindings[0])
+    run = case.agent.scheduler_repository.get_active_run(request.task_id)
+    actual = delivery_thread(case.agent, case.store.threads.require(run["thread_id"]), request)
+    expected = new.thread_id if follow else original.thread_id
+    assert actual.thread_id == expected
+    assert validate_delivery_origin(case.agent, request, DeliveryContext("feishu", "ou_a", thread_id=expected, task_id=request.task_id))
+    assert run["origin_thread_id"] == original.thread_id
+
+
+# LLM: 固定绑定的多线策略在run首次准备时冻结目标线程；/new只移动通道索引，不移动固定canonical归属。
+# 函数用途: 验证多线关闭跟随后仍写原本地目标。
+def test_r2_multiline_pins_target_thread_when_follow_disabled(alert_case):
+    from agent_py_agent.agent.conversation.background_delivery import record_background_response
+    case = alert_case
+    refs = [{"target_kind": "channel_binding", "binding_id": row["binding_id"]} for row in delivery_targets(case)]
+    call = r2_delivery(case, {"mode": "multi", "targets": refs, "follow_latest_channel_session": False})
+    new_local = successor(case.store, case.local)
+    result = record_background_response(call.dependencies, call.request, call.context, "固定旧本地目标", deliver=True,
+        delivery_reason="scheduled_job_due")
+    assert result.persisted and result.delivery_status == "sent"
+    assert any(row.content == "固定旧本地目标" for row in case.store.messages.recent(case.local.thread_id))
+    assert not case.store.messages.recent(new_local.thread_id)
+
+
+# LLM: 通知接管保留原管理员认证代次，flag只改变canonical线程，不改变接管来源或接收地址。
+# 函数用途: 验证关闭跟随也适用于notification_binding。
+def test_r2_notification_binding_can_remain_pinned(alert_case):
+    from agent_py_agent.agent.scheduler.execution import delivery_thread
+    from agent_py_agent.agent.scheduler.notification_binding import SCHEMA
+    from agent_py_agent.agent.user_space.admin_channel_identity import find_admin_channel_identity
+    case = alert_case
+    repository = case.agent.scheduler_repository
+    identity = find_admin_channel_identity(case.agent.home_paths.root, "feishu", "ou_a")
+    binding = {"schema_version": SCHEMA, "version": 1, "owner": repository.owner, "source_thread_id": case.thread.thread_id,
+        "binding": {"channel": "feishu", "actor_id": "ou_a", "conversation_id": "oc_group"},
+        "admin_bound_at": identity.bound_at, "request_id": "r2-notification-binding"}
+    case.job = repository.update_notification_binding(case.job["job_id"], binding, expected_version=case.job["version"])
+    _signal, request = prepared_alert(case, {"mode": "origin", "follow_latest_channel_session": False})
+    successor(case.store, case.thread)
+    run = repository.get_active_run(request.task_id)
+    assert delivery_thread(case.agent, case.store.threads.require(run["thread_id"]), request).thread_id == case.thread.thread_id
+
+
+# LLM: 按实际运输/本地canonical与精确重试核语义；fallback成功不能再重试更早的失败路线。
+# 函数用途: 验证主线、双线和按序失败转移模式。
+@pytest.mark.parametrize("mode,status,local_count", [("primary_only", "sent", 0), ("dual_deliver", "sent", 1),
+    ("fallback_on_failure", "sent", 0), ("fallback_on_failure", "failed", 1), ("fallback_on_failure", "local_only", 1)])
+def test_r2_routing_modes_have_distinct_delivery_semantics(alert_case, mode, status, local_count):
+    from agent_py_agent.agent.conversation.background_delivery import record_background_response
+    case = alert_case
+    refs = [{"target_kind": "channel_binding", "binding_id": row["binding_id"]}
+        for row in sorted(delivery_targets(case), key=lambda row: row["channel"] != "feishu")]
+    call = r2_delivery(case, {"mode": mode, "targets": refs})
+    call.channels.status = status
+    first = record_background_response(call.dependencies, call.request, call.context, "按策略路由", deliver=True, delivery_reason="scheduled_job_due")
+    assert first.persisted
+    assert len(call.channels.attempts) == 1
+    assert len(case.store.messages.recent(case.local.thread_id)) == local_count
+    assert record_background_response(call.dependencies, call.request, call.context, "按策略路由", deliver=True,
+        delivery_reason="scheduled_job_due").persisted
+    assert len(call.channels.attempts) == 1
+
+
+# LLM: severity只读结构化wake；受限与不受限目标同时存在，不根据正文或分数自动扩大目标。
+# 函数用途: 验证精确等级列表、最低等级及无过滤目标的路由。
+@pytest.mark.parametrize("severity,expected", [("info", set()), ("warning", {"ou_b"}), ("high", {"ou_a"}),
+    ("critical", {"ou_a"}), ("", set())])
+def test_r2_severity_routing_filters_targets(alert_case, severity, expected):
+    from agent_py_agent.agent.conversation.background_delivery import record_background_response
+    case = alert_case
+    second_alert_remote(case)
+    choices = delivery_targets(case)
+    refs = [{"target_kind": "channel_binding", "binding_id": row["binding_id"],
+        **({"min_severity": "high"} if row["account_id"] == "ou_a" else
+            {"severities": ["warning"]} if row["account_id"] == "ou_b" else {})} for row in choices]
+    call = r2_delivery(case, {"mode": "severity_routed", "targets": refs})
+    signal = case.store.wakes.raise_signal({"thread_id": call.request.thread_id, "root_task_id": call.request.task_id,
+        "reason": call.request.reason, "severity": severity, "dedupe_key": f"r2-severity-{severity or 'unset'}"})
+    request = replace(call.request, wake_signal=signal.to_dict())
+    result = record_background_response(call.dependencies, request, call.context, "有等级的告警", deliver=True, delivery_reason="scheduled_job_due")
+    assert result.persisted
+    assert {attempt[0].target for attempt in call.channels.attempts} == expected
+    assert len(case.store.messages.recent(case.local.thread_id)) == 1
+
+
+# LLM: 所有通知目标被等级过滤时仍保留内部业务结果，不能无休止重试或把未发送伪报为sent。
+# 函数用途: 验证severity无匹配时静默留档而不外发。
+def test_r2_severity_without_matching_targets_keeps_internal_result(alert_case):
+    from agent_py_agent.agent.conversation.background_delivery import record_background_response
+    case = alert_case
+    remote = next(row for row in delivery_targets(case) if row["channel"] == "feishu")
+    call = r2_delivery(case, {"mode": "severity_routed", "targets": [{"target_kind": "channel_binding",
+        "binding_id": remote["binding_id"], "min_severity": "high"}]})
+    result = record_background_response(call.dependencies, call.request, call.context, "未到通知等级但要保留", deliver=True,
+        delivery_reason="scheduled_job_due")
+    assert result.persisted and result.delivery_status == "local_only"
+    assert not call.channels.attempts
+    assert any(row.content == "未到通知等级但要保留" for row in case.store.messages.recent(call.request.thread_id))
+
+
+# LLM: Direct当前绑定即使坏账指向外来owner也不能继任；原记录与全部字节在拒绝后保持。
+# 函数用途: 防止更换查找路径时漏掉Direct入口的owner/home门。
+def test_r2_direct_new_rejects_cross_owner_bound_record(alert_case):
+    from agent_py_agent.agent.conversation.control_commands import ConversationControlCommand
+    from agent_py_agent.cli.chat_parts.control_runtime import (
+        ChatControlExecution,
+        ChatControlState,
+        execute_chat_control,
+    )
+    case = alert_case
+    case.store.threads.update_atomic(case.local.thread_id, lambda row: replace(row, owner_id="foreign-owner", owner_home="/foreign-home"))
+    before = case.store.storage.thread_path(case.local.thread_id).read_bytes()
+    result = execute_chat_control(ChatControlExecution(case.agent, False, ChatControlState(False, 0, "", 0, "terminal-alerts")),
+        ConversationControlCommand("new"))
+    assert not result.ok and result.error_code == "THREAD_SUCCESSOR_OWNER_MISMATCH"
+    assert case.store.storage.thread_path(case.local.thread_id).read_bytes() == before
+
+
+# LLM: 主通道已送达但canonical欠账时，不得再发送fallback；只阻断原消息写入，不改sender或outbox。
+# 函数用途: 复现canonical异常路径越过已发送事实继续投下一线的问题。
+def test_r2_fallback_waits_for_sent_primary_canonical_repair(alert_case, monkeypatch):
+    from agent_py_agent.agent.conversation.background_delivery import (
+        frozen_owner_delivery,
+        record_background_response,
+    )
+    case = alert_case
+    second_alert_remote(case)
+    refs = [{"target_kind": "channel_binding", "binding_id": row["binding_id"]}
+        for row in sorted((row for row in delivery_targets(case) if not row["local"]), key=lambda row: row["account_id"])]
+    call = r2_delivery(case, {"mode": "fallback_on_failure", "targets": refs})
+    append = block_alert_canonical(case, monkeypatch, case.thread.thread_id)
+    result = record_background_response(call.dependencies, call.request, call.context, "主线已发等待补账", deliver=True,
+        delivery_reason="scheduled_job_due")
+    assert not result.persisted and result.delivery_status == "failed"
+    assert [attempt[0].target for attempt in call.channels.attempts] == ["ou_a"]
+    receipts = case.agent.scheduler_repository.delivery_receipts(call.request.task_id)
+    assert len(receipts) == 1
+    receipt = next(iter(receipts.values()))
+    assert receipt["external_sent"] and receipt["state"] == "sent"
+    monkeypatch.setattr(case.store.messages, "append_once", append)
+    cached = case.store.wakes.pending_one(call.signal.wake_signal_id).metadata["owner_delivery"]
+    # wake首次业务快照不可覆盖；准确已发事实保存在原目标outbox，而非把整封wake升级成所有目标已发。
+    assert receipt["frozen"]["external_sent"] and receipt["frozen"]["receipt_id"] == receipt["receipt_id"]
+    repaired = record_background_response(call.dependencies, call.request, call.context, cached["content"], deliver=True,
+        delivery_reason="cached_owner_delivery_retry", frozen_retry=frozen_owner_delivery(cached))
+    assert repaired.persisted and repaired.delivery_status == "sent"
+    assert [attempt[0].target for attempt in call.channels.attempts] == ["ou_a"]
+
+
+# LLM: 本地文件页读取期间执行真实继任并reset；去重窗口和游标必须整页拒绝，再正常读到新会话第一页。
+# 函数用途: 复现Direct本地poll恢复旧历史的问题。
+def test_r2_local_tui_discards_inflight_page_after_new(alert_case, monkeypatch):
+    from agent_py_agent.agent.conversation import message_stream
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_threading import _consume_local_background_snapshot
+    case = alert_case
+    runtime = TuiRuntime("terminal-alerts")
+    seen, cursor, calls = set(), [0], []
+    # LLM: 仅替代消息IO边界；reset和原绑定读取均真实，第二拍核实after游标没有跳过新消息。
+    # 函数用途: 精确制造旧页在reset后返回的时序。
+    def read_page(_store, thread_id, *, after, **_kwargs):
+        calls.append((thread_id, after))
+        if len(calls) == 1:
+            new = successor(case.store, case.local)
+            runtime.publish_conversation_reset(new.thread_id)
+            content, identifier, offset = "旧本地页", case.local.thread_id, 500
+        else:
+            content, identifier, offset = "新会话第一页", thread_id, 1
+        return [{"schema_version": "background_message.v1", "display_kind": "assistant_response", "thread_id": identifier,
+            "message_id": f"msg-{offset}", "content": content}], offset, True
+    monkeypatch.setattr(message_stream, "read_background_response_page", read_page)
+    assert _consume_local_background_snapshot(case.agent, case.store, "terminal-alerts", runtime, [None], seen, cursor)
+    assert not runtime.store.snapshot().stable_blocks and runtime.background_message_cursor == 0 and not seen
+    assert _consume_local_background_snapshot(case.agent, case.store, "terminal-alerts", runtime, [None], seen, cursor)
+    assert calls[1][1] == 0 and runtime.background_message_cursor == 1
+    assert "新会话第一页" in repr(runtime.store.snapshot().stable_blocks)
+    assert "旧本地页" not in repr(runtime.store.snapshot().stable_blocks)
+
+
+# LLM: 真实OwnerIdentity、Agent、creator及群权限，只有已认证Host上下文的读取端口替代；不冒充完整HTTP发行链。
+# 函数用途: 验证provider用户/群成员冷上下文采用实际身份字段，并保留creator与CAS拒绝。
+@pytest.mark.parametrize("group,caller,stale,allowed", [(False, "ou_a", False, True), (True, "ou_a", False, True),
+    (True, "ou_b", False, False), (False, "ou_a", True, False)])
+def test_r2_provider_host_context_keeps_native_identity_and_guards(tmp_path, monkeypatch, group, caller, stale, allowed):
+    import json
+
+    from agent_py_agent.agent.conversation.host_actor import actor_from_scope
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.plugin_host import conversations as host_conversations
+    from agent_py_agent.agent.plugin_host.contracts import OwnerReadContext
+    from agent_py_agent.agent.plugin_host.monitor_delivery_v2 import _host_schedule_context
+    from agent_py_agent.agent.scheduler.tool import ScheduleTool
+    from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity, resolve_owner_home
+    config = AgentConfig(my_agent_home=str(tmp_path / "home"), enable_tools=False, orphan_supervision_interval_seconds=0,
+        my_agent_owner_provider="feishu", my_agent_owner_kind="group" if group else "user", my_agent_owner_id="oc_group" if group else "ou_a")
+    agent = SimpleAgent(config, tmp_path)
+    original = agent.conversation_store.threads.get_or_create({"canonical_user_id": "owner", "channel": "feishu",
+        "channel_user_id": "ou_a", "channel_conversation_id": "oc_group" if group else "oc_private",
+        "owner_id": agent.home_paths.owner_id, "owner_home": str(agent.home_paths.owner_home_dir)})
+    scope = SimpleNamespace(channel="feishu", channel_user_id="ou_a", channel_conversation_id="oc_group" if group else "oc_private")
+    actor = actor_from_scope(agent, scope, original.thread_id, "create-provider-monitor")
+    agent._current_run_params = SimpleNamespace(host_channel_actor=actor, request_id="create-provider-monitor",
+        task_attributes={"conversation_thread_id": original.thread_id})
+    if group:
+        from agent_py_agent.tests.test_group_authorization import (
+            grant_synthetic_group_monitor_capability,
+        )
+        grant_synthetic_group_monitor_capability(agent, actor, members={"ou_a", "ou_b"})
+    created = ScheduleTool(agent).execute({"action": "create", "name": "Provider监控", "prompt": "整理本人的资料",
+        "schedule_kind": "every", "every_seconds": 600})
+    assert created.ok, created.output
+    job = json.loads(created.output)["job"]
+    identity = OwnerIdentity.provider_group("feishu", "oc_group") if group else OwnerIdentity.provider_user("feishu", "ou_a")
+    source = SimpleNamespace(actor=OwnerIdentity.local_main(), source=SimpleNamespace(caller_owner=OwnerIdentity.provider_user("feishu", caller)))
+    context = OwnerReadContext(identity, resolve_owner_home(agent.home_paths.root, identity), source)
+    authorized = SimpleNamespace(call=SimpleNamespace(idempotency_key="host-provider-update-r2"))
+    monkeypatch.setattr(host_conversations, "read_context", lambda _: context)
+    agent._current_run_params = None
+    before = agent.scheduler_repository.store_path.read_bytes()
+    error = ""
+    try:
+        scoped, authorizer = _host_schedule_context(agent, context, {"monitor_id": job["job_id"]}, authorized)
+        result = ScheduleTool(scoped, host_authorizer=authorizer).execute({"action": "update_delivery", "job_id": job["job_id"],
+            "expected_version": job["version"] + int(stale), "delivery_policy": {"mode": "none"}})
+    except AttributeError as exc:
+        error = str(exc)
+    assert not error, error
+    assert result.ok is allowed, result.output
+    assert agent._current_run_params is None
+    if not allowed:
+        # 非创建者只有已证离群时的pause/cancel/delete例外；update_delivery原合同直接拒绝scope。
+        assert result.error_code == ("SCHEDULER_CONFLICT" if stale else "CHANNEL_ACTOR_SCOPE_MISMATCH")
+        assert agent.scheduler_repository.store_path.read_bytes() == before

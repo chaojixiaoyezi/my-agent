@@ -435,6 +435,16 @@ class ConversationDomain:
     # 函数用途: 阻止归档默认线程、活跃回合、独立执行车道或任何未终结目标。
     def check_archive(self, store, row, context, activity_locks):
         from ..conversation.run_claim import detached_task_claim_scope_id
+        from ..conversation.store_threads import _read_thread_record_report
+
+        # 发表标记完成前保留前任锚点；标记完成后允许用户删除归档历史，活动后继自行保持可见。
+        successors = set((row.metadata.get("succession_by_binding") or {}).values())
+        if row.metadata.get("successor_thread_id"):
+            successors.add(row.metadata["successor_thread_id"])
+        for identifier in successors:
+            child, error = _read_thread_record_report(store.storage.thread_path(identifier), thread_id=identifier)
+            if error or child is None or child.metadata.get("succession_published") is not True:
+                raise HostAPIError("THREAD_BUSY", 409)
 
         scopes = [row.thread_id, *(detached_task_claim_scope_id(row.thread_id, task_id) for task_id in row.task_ids)]
         activity_locks.enter_context(locked_file_transition(store.storage.goal_path(row.thread_id)))

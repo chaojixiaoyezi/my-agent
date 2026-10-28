@@ -168,9 +168,11 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
 # 类用途: 管理当前 owner 的计划并查询运行和交付状态。
 class ScheduleTool(BaseTool):
     # LLM: 新控制动作沿同一工具副作用和幂等策略；显式 ask 保持原权限裁决，不通过 slash 入口改变模型调用策略。
+    # host_authorizer只由认证宿主适配器注入，不进入模型参数或修改Agent共享run上下文。
     # 函数用途: 装配计划工具与投递控制副作用；认证目录查询只读，更新通知仍需原CAS/creator授权。
-    def __init__(self, agent: SimpleAgent):
+    def __init__(self, agent: SimpleAgent, *, host_authorizer=None):
         self.agent = agent
+        self._host_authorizer = host_authorizer
         self.model_spec = build_schedule_tool_model_spec()
         self.runtime_policy = ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy(
@@ -214,6 +216,9 @@ class ScheduleTool(BaseTool):
             return _error("纯元数据模式仅支持查询动作", "TOOL_INVALID_ARGUMENTS", metadata_only=True)
         if action not in _ACTIONS:
             return _error("action 不受支持", "TOOL_INVALID_ARGUMENTS")
+        if action == "update_delivery" and set(params) - {"action", "job_id", "expected_version", "delivery", "delivery_policy",
+                "notify_mode", "metadata_only", "__tool_call_id", "__run_scope"}:
+            return _error("update_delivery 只能修改通知策略", "SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID")
         repository = getattr(self.agent, "scheduler_repository", None)
         if repository is None:
             return _error("当前 owner 的 scheduler 未装配", "TOOL_UNAVAILABLE")
@@ -287,10 +292,13 @@ class ScheduleTool(BaseTool):
             return _error("目标监控不属于当前发起人，已拒绝操作", "SCHEDULER_NOT_AUTHORIZED")
         if action not in {'create', 'get', 'history', 'execution', 'delete', 'cancel', 'takeover', 'recover'}:
             from .control import authorize_job
-            thread_id, _task = _conversation_scope(self.agent)
-            authorize_job(repository, repository.get_job(job_id, include_deleted=action == 'delete'),
-                resolve_host_actor(self.agent, thread_id), home_root=getattr(getattr(self.agent, 'home_paths', None), 'root', None),
-                agent=self.agent, operation=action)
+            if self._host_authorizer is not None:
+                self._host_authorizer(repository.get_job(job_id), action)
+            else:
+                thread_id, _task = _conversation_scope(self.agent)
+                authorize_job(repository, repository.get_job(job_id, include_deleted=action == 'delete'),
+                    resolve_host_actor(self.agent, thread_id), home_root=getattr(getattr(self.agent, 'home_paths', None), 'root', None),
+                    agent=self.agent, operation=action)
         if action == 'execution':
             from .control import inspect_monitor_execution
             thread_id, _task = _conversation_scope(self.agent)

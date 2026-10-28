@@ -329,7 +329,7 @@ class GatewayPortalDomain:
         if (authorized.call.action.startswith("conversations.threads.")
                 and _portal_binds(params, (store, context, dict(payload)))):
             return target(store, context, dict(payload))
-        options = _portal_keywords(params, {"agent": self._owner_agent(context), "store": store})
+        options = _portal_keywords(params, {"agent": self._owner_agent(context), "store": store, "authorized": authorized})
         if _portal_binds(params, (context, dict(payload)), options):
             return target(context, dict(payload), **options)
         if authorized.call.action.startswith("plugins.builtin."):

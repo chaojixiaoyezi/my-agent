@@ -1419,11 +1419,31 @@ class _TuiSessionRuntimeMixin(
         self._lock = threading.RLock()
         self._permission_coordinator = TuiPermissionCoordinator(self)
         self._background_activity = _TuiBackgroundActivityController(self)
+        self.conversation_reset_generation = 0
+        self._conversation_history_binding = None
+
+    # LLM: worker传入共享历史和原锁，runtime仅负责成功new时清理，不复制或持久化第二份正文。
+    # 函数用途: 注册当前worker实际使用的会话历史。
+    def bind_conversation_history(self, history, history_lock, outputs):
+        with self._lock:
+            self._conversation_history_binding = (history, history_lock, outputs)
+
+    # LLM: 网络读取必须在外部完成；旧代次的整页结果不允许改显示、去重窗口或游标。
+    # 函数用途: 在同一reset锁内验证并发表一页会话快照。
+    def apply_conversation_snapshot(self, generation, publish):
+        with self._lock:
+            return True if generation != self.conversation_reset_generation else publish()
 
     # LLM: 只能在/new服务端成功后调用；transport session_id保持同一chat，不取消任务、进程或监控，只发布显示事件。
     # 函数用途: 清空旧历史游标与显示投影，新会话继续使用原终端通道。
     def publish_conversation_reset(self, thread_id: str) -> JournalAppendResult:
         with self._lock:
+            self.conversation_reset_generation += 1
+            if self._conversation_history_binding is not None:
+                history, history_lock, outputs = self._conversation_history_binding
+                with history_lock:
+                    history.clear()
+                outputs.clear()
             self.background_message_cursor = 0
             self.history_before_cursor = 0
             self.background_event_stream_id = ""

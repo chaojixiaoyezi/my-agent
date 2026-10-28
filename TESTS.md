@@ -1,3 +1,29 @@
+## 2026-10-28 Wave 9 B3 Round 2：会话与通知返修
+
+来源：`07-tasks/fix-wave9-b3.md` 六项独立评审意见；返修起点 `89e8fb8f0973e79b657d8da8fd5e520ac10efc31`，批次基线仍为 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在指定工作树提交代码，不推送、部署或运行已退休的尺寸检查。
+
+- Direct `/new` 通过真实 slash/control/Store 清空显示及共享 worker 历史，保留选定 cwd/workspace_root；HTTP 与本地文件读取期间执行 reset 的旧 poll 整页丢弃。反例先失败，再修正；不是只调用 reducer 清屏代替入口验证。Direct 继任事务内再核当前 Agent 的 owner/home，坏索引不能跨 owner 归档。
+- 同一旧线程的两个绑定可以各自继任、独立重放；原测试将“其它已登记绑定一律拒绝”的旧合同更新为 R2 的独立继任要求，同时保留未登记绑定拒绝、owner/home/三元组/环/缺失等硬断言。实际 Web 删除空闲前任后，已发表后继仍可 load/list。
+- 冷 Host v2 回归使用真实安装、令牌、issuer、Portal 和原 scheduler，清空 `_current_run_params` 后可更新本人监控，不修改共享模型运行上下文。非通知 rules/schedule/prompt/cron 字段先复现 AttributeError 或越范围修改，再按 `SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID` 写前拒绝并核对原字节。没有借此放宽原 creator、群能力、目标认证或 CAS。
+- 两个真实 wake 共享同一 run，正文 A/B 分别外发一次，重复同事件不重发；消息工具已发主通道进入正式镜像入口时保留原 receipt，只补 canonical 和其它目标。原 outbox 故障替身只为新事件关键字更新签名，故障及“停止后续运输”断言不变。
+- 新增跟随 true/false、双绑定继任、固定多线目标、通知接管固定线程、主线/双线/按序 fallback、等级列表/最低等级/无过滤目标回归。策略、原执行身份和业务冻结仍分离。全部 fixture/parametrize 的双层注释移动到装饰器上方。
+- 独立静态复核提出的 provider 身份字段、本地在途 poll、空等级目标、装饰器位置均已修正并回归。fallback 的实测限定：原发送前重验已挡住第二次外发，但 canonical 异常后仍多建备用路线欠账；现已立即停止该循环，已发事实留在原目标 outbox，只补主线 canonical。wake 的首次业务快照仍不可覆盖，不把整封 wake 伪装成所有目标已发。
+- Provider 身份用真实 `OwnerIdentity`、Agent、原 creator/群门及 CAS 验证；只有认证上下文读口替代，不能声称完整 provider HTTP 链路已验收。非创建者的 `update_delivery` 按原合同拒绝 `CHANNEL_ACTOR_SCOPE_MISMATCH`，不套用只限 pause/cancel/delete 的离群代清理例外。
+
+当前源码实跑：专项 **102 passed / 0 failed / 0 skipped**；受影响 TUI 两文件 **34 passed**，scheduler policy/IM/execution **47 passed**，repository **43 passed**，Host v2 **70 passed**，各组均无失败、错误或跳过。计数由 JUnit XML 回读；相关回归与五项门禁的准确命令列于下方/交接。Ruff 通过，文档同步 `DOC_SYNC_PASS`，导入边界 `findings=0`；15 个带装饰器函数无错位注释，所有本轮变更函数双层注释静态检查通过。
+
+复现（工作树根目录；提交区间 diff 检查在提交后另跑）：
+
+```bash
+python3 -B -m pytest /tmp/wt-wave9-b3/agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short -o cache_dir=/tmp/pytest-b3-r2
+ruff check --no-cache /tmp/wt-wave9-b3/agent_py_agent/agent/conversation /tmp/wt-wave9-b3/agent_py_agent/agent/scheduler /tmp/wt-wave9-b3/agent_py_agent/agent/plugin_host /tmp/wt-wave9-b3/agent_py_agent/agent/gateway_parts /tmp/wt-wave9-b3/agent_py_agent/cli/chat_parts /tmp/wt-wave9-b3/agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py
+python3 -B /tmp/wt-wave9-b3/scripts/check_doc_sync.py --base db4d5de92
+python3 -B /tmp/wt-wave9-b3/scripts/check_import_boundaries.py
+git -C /tmp/wt-wave9-b3 diff --check db4d5de92..HEAD
+```
+
+观察边界：模型和 IM 运输用协议替身；真实 HTTP 网络传输、浏览器点击、TUI 键盘、断电恢复和多平台全仓均未验证。不能从本地合同测试外推外部用户可达，外发后本机落账前的崩溃窗口仍依赖原通道幂等能力。
+
 ## 2026-10-28 Wave 9 B3：原地新会话、同通道继任与多线告警
 
 来源：`07-tasks/wave9-b3.md` 及批次计划 Item 4；基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅修改派工工作树，不推送、部署或运行已退休的尺寸检查。

@@ -41,6 +41,7 @@ class TuiHandleCommandParams:
     plugin_client: object | None = None
     plugin_revision: str = ""
     command_interaction: CommandInteraction | None = None
+    tui_runtime: object | None = None
 
 
 # LLM: 保持与界面同一份 queue/refs，local_run_ref 随 job 更新，不能在工厂中复制。

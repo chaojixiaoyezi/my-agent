@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 
+from .delivery_policy import TARGET_DELIVERY_MODES
 from .execution_policy import (
     migrate_queued_execution_origin,
     normalize_execution,
@@ -64,6 +65,11 @@ def prepare_execution(service, run: dict, *, now: float) -> dict:
         "defined_model_policy": execution["model_policy"],
         "source_selection_revision": origin.model_selection_revision,
     }
+    if (run.get("delivery") or {}).get("follow_latest_channel_session") is False and run["delivery"].get("targets"):
+        from .delivery_policy import repository_delivery_targets
+        selected = {spec.get("binding_id") for spec in run["delivery"]["targets"]}
+        context["delivery_target_threads"] = {row["binding_id"]: row["thread_id"]
+            for row in repository_delivery_targets(service.repository) if row["binding_id"] in selected}
     if migration is not None:
         context['origin_migration'] = migration
     run = service.repository.prepare_run_context(str(run["run_id"]), context, origin_migration=migration)
@@ -162,7 +168,7 @@ def execution_run(agent, request) -> dict | None:
         wake = getattr(request, 'wake_signal', None) or {}
         cached = (wake.get('metadata') or {}).get('owner_delivery')
         if candidate is not None and (candidate.get('event_source') is not None or cached
-                and (candidate.get('delivery') or {}).get('mode') in {'bound', 'multi'}):
+                and (candidate.get('delivery') or {}).get('mode') in TARGET_DELIVERY_MODES):
             run = candidate
     if run is not None and str(run["thread_id"]) != request.thread_id:
         raise ValueError("定时执行线程与任务不匹配")
@@ -218,17 +224,18 @@ def scheduled_model_scope(agent, thread, request):
 
 # LLM: 两种定时执行模式都使用触发时冻结的绑定或明确通知接管引用；旧线程缺 owner 字段时只投影原 run 的准确 owner，不能回落管理员。
 # 函数用途: 为后台路由器提供同通道最新继任投影；执行线程和冻结来源记录均不修改。
-def delivery_thread(agent, thread, request):
+def delivery_thread(agent, thread, request, *, channel=""):
     from ..conversation.models import ChannelBinding
 
     run = execution_run(agent, request)
     if run is None:
         return thread
     context = run.get("execution_context") or {}
+    follow = (run.get("delivery") or {}).get("follow_latest_channel_session", True)
     notification = run.get('notification_binding')
     if notification is not None:
         from .notification_binding import bound_notification_thread
-        origin = bound_notification_thread(agent, notification)
+        origin = bound_notification_thread(agent, notification, follow_latest_channel_session=follow)
         binding = notification['binding']
         selected = tuple(row for row in origin.channel_bindings if row.channel == binding['channel']
             and row.channel_user_id == binding['actor_id'] and row.channel_conversation_id == binding['conversation_id'])
@@ -237,20 +244,21 @@ def delivery_thread(agent, thread, request):
     if origin is None:
         raise KeyError("定时交付来源会话不存在")
     bindings = tuple(ChannelBinding(**item) for item in context.get("origin_bindings", ()))
-    origin = _follow_delivery_origin(agent, origin, bindings)
+    origin = _follow_delivery_origin(agent, origin, bindings, follow=follow, channel=channel)
     return replace(origin, channel_bindings=bindings, owner_id=origin.owner_id or str(run['owner']['id']))
 
 
 # LLM: 仅原冻结三元组与/new范围相同才沿最多16跳的共享校验；其它通道仍留原线程，不能使用owner最近会话。
 # 函数用途: 为origin投递选择同通道继任，不改定时任务的执行、creator或模型来源。
-def _follow_delivery_origin(agent, origin, bindings):
+def _follow_delivery_origin(agent, origin, bindings, *, follow=True, channel=""):
     from ..conversation.store_threads import resolve_thread_successor_chain
 
-    if origin.metadata.get("successor_thread_id") and any(
-            origin.metadata.get("succession_binding") == [row.channel, row.channel_user_id, row.channel_conversation_id]
-            for row in bindings):
-        return agent.conversation_store.threads.require(resolve_thread_successor_chain(agent.conversation_store, origin.thread_id))
-    return origin
+    if not follow:
+        return origin
+    binding = next((row for row in bindings if row.channel == channel), None) if channel else next(iter(bindings), None)
+    if binding is None:
+        return origin
+    return agent.conversation_store.threads.require(resolve_thread_successor_chain(agent.conversation_store, origin.thread_id, binding=binding))
 
 
 # LLM: 普通请求保持原 route；所有定时执行只以冻结来源绑定调用原路由器，不能沿用 wake 中的错误目标。
@@ -263,7 +271,7 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
 
     if scheduled_local_delivery(agent, request):
         return thread, "internal", thread.thread_id
-    origin = delivery_thread(agent, thread, request)
+    origin = delivery_thread(agent, thread, request, channel=channel)
     if execution_run(agent, request) is None:
         return origin, channel, target
     channel, target = resolve_background_route(BackgroundRouteDependencies(
@@ -281,7 +289,8 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
         return context.thread_id == run["thread_id"] and context.channel == "internal" and context.target == run["thread_id"]
     if run is None:
         return True
-    if (run.get('delivery') or {}).get('mode') in {'bound', 'multi'}:
+    follow = (run.get('delivery') or {}).get('follow_latest_channel_session', True)
+    if (run.get('delivery') or {}).get('mode') in TARGET_DELIVERY_MODES:
         from .alert_delivery import validate_alert_delivery
         return validate_alert_delivery(agent, request, context, run, admitted_completion=admitted_completion)
     if run.get('notification_binding') is not None:
@@ -289,7 +298,7 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
         from .notification_binding import bound_notification_thread
         try:
             notification = run['notification_binding']
-            origin = bound_notification_thread(agent, notification)
+            origin = bound_notification_thread(agent, notification, follow_latest_channel_session=follow)
             binding = notification['binding']
             return (context.thread_id == origin.thread_id and context.channel == binding['channel']
                 and context.target == binding_delivery_target(binding['channel'], binding['actor_id'], binding['conversation_id'], group=False))
@@ -303,7 +312,8 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
         return False
     from ..conversation.models import ChannelBinding
     try:
-        origin = _follow_delivery_origin(agent, origin, tuple(ChannelBinding(**row) for row in frozen.get("origin_bindings", ())))
+        origin = _follow_delivery_origin(agent, origin, tuple(ChannelBinding(**row) for row in frozen.get("origin_bindings", ())),
+            follow=follow, channel=context.channel)
     except (ValueError, KeyError):
         return False
     origin_id = origin.thread_id
@@ -320,7 +330,8 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
             return False
         current, error = store.threads.resolve_report(channel=binding["channel"],
             channel_conversation_id=binding["channel_conversation_id"], channel_user_id=binding["channel_user_id"])
-        return error is None and current is not None and current.thread_id == origin_id
+        return error is None and current is not None and (current.thread_id == origin_id if follow else
+            current.owner_id == origin.owner_id and current.owner_home == origin.owner_home)
     return context.channel in {"", "internal"} and context.target in {"", origin_id}
 
 
@@ -328,9 +339,12 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
 # 函数用途: 区分正常周期结果与必须由原用户处理的通知，local/none不吞掉准确宿主义务。
 def scheduled_local_delivery(agent, request) -> bool:
     from ..conversation.required_user_action import required_notice
-    from .delivery_policy import normalize_delivery
+    from .delivery_policy import delivery_specs, normalize_delivery
 
     run = execution_run(agent, request)
     if run is not None and required_notice(agent, request) is not None:
         return False
-    return run is not None and normalize_delivery(run.get("delivery"))["mode"] in {"local", "none"}
+    if run is None:
+        return False
+    policy = normalize_delivery(run.get("delivery"))
+    return policy["mode"] in {"local", "none"} or policy["mode"] == "severity_routed" and not delivery_specs(policy, request)

@@ -88,6 +88,7 @@ def _handle_command_params(params: TuiCreateKeybindingsParams, text: str) -> Tui
         stop_event=params.stop_event,
         assistant_outputs=params.assistant_outputs,
         current_session_id=params.current_session_id,
+        tui_runtime=getattr(params, "tui_runtime", None),
     )
 
 
@@ -478,6 +479,7 @@ def _ensure_control_operation_reconciler(
             details = result.details or {}
             if result.ok and details.get("view_reset") is True and details.get("thread_id"):
                 runtime.publish_conversation_reset(details["thread_id"])
+                params.assistant_outputs.clear()
             runtime.write_console(result.message or "新会话操作已结束。")
             return
         if entry.command_kind == "stop":

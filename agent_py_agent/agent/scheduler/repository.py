@@ -1350,23 +1350,32 @@ class _SchedulerStoreSupport:
 
     # LLM: 回执只读原job outbox；不创建run、不改变配置版本或恢复执行，目标引用由发送层校验。
     # 函数用途: 读取一个准确运行的独立目标回执，不返回其它运行或owner内容。
-    def delivery_receipts(self, run_id):
+    def delivery_receipts(self, run_id, *, event_key=None):
         run = self.effect_run(run_id)
         if run is None or run['owner'] != self.owner:
             raise SchedulerNotFoundError('定时运行不存在')
         job = self.get_job(run['job_id'], include_deleted=True)
-        return deepcopy(job.get('delivery_outbox', {}).get(run_id, {}))
+        outbox = job.get('delivery_outbox', {})
+        key = f'{run_id}:{event_key}' if event_key is not None else run_id
+        if event_key is None and key not in outbox:
+            # 兼容只有一个事件的旧只读调用；多事件必须明确指定，不能猜最新一条来授权发送。
+            matches = [value for name, value in outbox.items() if name.startswith(f'{run_id}:')]
+            if len(matches) > 1:
+                raise SchedulerConflictError('通知运行包含多个事件，必须提供event_key')
+            return deepcopy(matches[0] if matches else {})
+        return deepcopy(outbox.get(key, {}))
 
     # LLM: quota→原store锁内只更新原运行的outbox；committed不可降级，网络运输不在锁内。
     # 函数用途: 原子保存每目标状态、整封已发回执和canonical编号，支持部分失败重投。
-    def record_delivery_receipt(self, run_id, target_key, receipt):
+    def record_delivery_receipt(self, run_id, target_key, receipt, *, event_key=None):
         run = self.effect_run(run_id)
         if run is None or run['owner'] != self.owner or not isinstance(target_key, str) or not target_key:
             raise SchedulerNotFoundError('定时运行不存在')
         with self._mutation_scope() as (store, admission):
             job = self._require_job(store, run['job_id'])
             outbox = job.setdefault('delivery_outbox', {})
-            targets = outbox.setdefault(run_id, {})
+            outbox_key = f'{run_id}:{event_key}' if event_key is not None else run_id
+            targets = outbox.setdefault(outbox_key, {})
             if targets.get(target_key, {}).get('state') == 'committed':
                 return
             targets[target_key] = {**deepcopy(receipt), 'updated_at': time.time()}
@@ -1374,11 +1383,16 @@ class _SchedulerStoreSupport:
             expected = {spec.get('binding_id') or spec['target_kind'] for spec in policy.get('targets', [])}
             if policy.get('include_origin'):
                 expected.add('origin')
+            if 'planned_specs' in receipt:
+                expected = set(receipt['planned_specs'])
             covered = {spec for row in targets.values() for spec in row.get('specs', [])}
-            if expected <= covered and all(row.get('state') == 'committed' for row in targets.values()):
+            fallback_complete = policy.get('mode') == 'fallback_on_failure' and any(row.get('state') == 'committed' for row in targets.values())
+            if fallback_complete or expected <= covered and all(row.get('state') == 'committed' for row in targets.values()):
                 for row in targets.values():
                     row['run_delivery_complete'] = True
-            _compact_delivery_outbox(outbox, run_id)
+                    if fallback_complete and row.get('state') != 'committed' and not row.get('external_sent'):
+                        row['state'] = 'superseded'
+            _compact_delivery_outbox(outbox, outbox_key)
             store['jobs'][run['job_id']] = job
             self._write_store_unlocked(store, admission)
 
@@ -2339,7 +2353,7 @@ def _estimate_projection_payload_bytes(
 def _compact_delivery_outbox(outbox, current_run_id):
     complete = []
     for run_id, targets in outbox.items():
-        if not targets or not all(row.get('state') == 'committed' and row.get('run_delivery_complete') is True for row in targets.values()):
+        if not targets or not all(row.get('state') in {'committed', 'superseded'} and row.get('run_delivery_complete') is True for row in targets.values()):
             continue
         for row in targets.values():
             row.pop('frozen', None)

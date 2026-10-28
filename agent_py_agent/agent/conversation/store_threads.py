@@ -381,12 +381,13 @@ class ThreadStore:
             bindings.get(_binding_key(channel, channel_conversation_id, channel_user_id)) or ""
         )
         thread, error = self.load_report(thread_id) if thread_id else (None, None)
-        if error is None and thread is not None and thread.metadata.get("successor_thread_id"):
-            if thread.metadata.get("succession_binding") == [channel, channel_user_id, channel_conversation_id]:
-                try:
-                    thread = self.require(resolve_thread_successor_chain(self, thread_id))
-                except (ValueError, KeyError) as exc:
-                    return None, runtime_error_report(exc, context="conversation.thread.successor")
+        if error is None and thread is not None:
+            scope = [channel, channel_user_id, channel_conversation_id]
+            try:
+                if _succession_target(thread, scope):
+                    thread = self.require(resolve_thread_successor_chain(self, thread_id, binding=scope))
+            except (ValueError, KeyError) as exc:
+                return None, runtime_error_report(exc, context="conversation.thread.successor")
         return thread, error
 
     # LLM: store_threads 的持久化合同：按用户最近线程索引加载原记录，返回坏账而不猜测替代线程；修改须同步本领域调用方与存储回归。
@@ -738,30 +739,32 @@ class ThreadStore:
     ) -> tuple[ConversationThread | None, dict[str, Any] | None]:
         thread, error = _read_thread_record_report(path, thread_id=thread_id, clone=clone)
         predecessor = thread.metadata.get("predecessor_thread_id") if thread is not None else None
-        if predecessor:
+        if predecessor and thread.metadata.get("succession_published") is not True:
             try:
                 prior, prior_error = _read_thread_record_report(self.storage.thread_path(predecessor), thread_id=predecessor)
             except (TypeError, ValueError) as exc:
                 return None, runtime_error_report(exc, context="conversation.thread.predecessor")
             if prior_error:
                 return None, prior_error
-            if prior is None or prior.metadata.get("successor_thread_id") != thread.thread_id:
+            scope = thread.metadata.get("predecessor_binding", thread.metadata.get("succession_binding"))
+            if prior is None or _succession_target(prior, scope) != thread.thread_id:
                 return None, None
         return thread, error
 
 
 # LLM: 显式继任链不提供授权；每跳复核准确owner/home及原(channel, account/actor, chat)三元组，环/缺失/越界拒绝。
 # 函数用途: 找到最多16跳内已成对发表的同通道新会话；不读取最近会话、不修改任何计划。
-def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 16) -> str:
+def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 16, binding=None) -> str:
     threads = getattr(store, "threads", store)
     if type(max_hops) is not int or not 0 <= max_hops <= 16:
         raise ValueError("THREAD_SUCCESSOR_HOP_LIMIT")
     current = threads.require(thread_id)
     identity = (current.owner_id, current.owner_home)
-    scope = current.metadata.get("succession_binding")
+    scope = ([binding.channel, binding.channel_user_id, binding.channel_conversation_id] if isinstance(binding, ChannelBinding)
+        else list(binding) if binding is not None else current.metadata.get("succession_binding"))
     visited = {current.thread_id}
     for hop in range(max_hops + 1):
-        next_id = current.metadata.get("successor_thread_id")
+        next_id = _succession_target(current, scope)
         if not next_id:
             return current.thread_id
         if hop == max_hops:
@@ -775,8 +778,7 @@ def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 16)
         if not all(identity) or (following.owner_id, following.owner_home) != identity:
             raise ValueError("THREAD_SUCCESSOR_OWNER_MISMATCH")
         if (not isinstance(scope, list) or len(scope) != 3
-                or current.metadata.get("succession_binding") != scope
-                or following.metadata.get("succession_binding") != scope
+                or following.metadata.get("predecessor_binding", following.metadata.get("succession_binding")) != scope
                 or following.metadata.get("predecessor_thread_id") != current.thread_id
                 or not _has_succession_binding(current, scope) or not _has_succession_binding(following, scope)):
             raise ValueError("THREAD_SUCCESSOR_CHANNEL_MISMATCH")
@@ -790,6 +792,20 @@ def resolve_thread_successor_chain(store, thread_id: str, *, max_hops: int = 16)
 def _has_succession_binding(thread, scope):
     return (not thread.channel_bindings if scope == ["", "", ""] else any(
         [row.channel, row.channel_user_id, row.channel_conversation_id] == scope for row in thread.channel_bindings))
+
+
+# LLM: 每个准确三元组单独继任；旧字段仅作同范围兼容，不能用另一通道的指针作fallback。
+# 函数用途: 从原记录取指定通道的显式后继编号。
+def _succession_target(thread, scope):
+    if not isinstance(scope, list) or len(scope) != 3 or any(not isinstance(value, str) for value in scope):
+        return None
+    mapping = thread.metadata.get("succession_by_binding", {})
+    if not isinstance(mapping, dict):
+        raise ValueError("THREAD_SUCCESSOR_CHANNEL_MISMATCH")
+    key = "\x1f".join(scope)
+    if key in mapping:
+        return mapping[key]
+    return thread.metadata.get("successor_thread_id") if thread.metadata.get("succession_binding") == scope else None
 
 
 # LLM: 原线程update_atomic是唯一发表点；先私有准备带predecessor的新文件，未发表候选对load/list不可见；失败不触后台账。
@@ -818,11 +834,9 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 raise ValueError("THREAD_SUCCESSOR_OWNER_MISMATCH")
             if not _has_succession_binding(latest, scope):
                 raise ValueError("THREAD_SUCCESSOR_CHANNEL_MISMATCH")
-            if latest.metadata.get("successor_thread_id") and latest.metadata.get("succession_binding") != scope:
-                raise ValueError("THREAD_SUCCESSOR_CHANNEL_MISMATCH")
             if validate is not None:
                 validate(latest)
-            if latest.metadata.get("successor_thread_id"):
+            if _succession_target(latest, scope):
                 return latest
             activity_locks.enter_context(locked_file_transition(threads.storage.background_claim_path(thread_id)))
             claim, error = ConversationStore(threads.storage.root, initialize=False).claims.load_report(thread_id)
@@ -838,7 +852,7 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 metadata["plugin_host_v2"] = {key: copy.deepcopy(value) for key, value in portal.items()
                     if key in {"permission_mode", "preferred_pack_ids", "installation_ref", "workspace_ref"}}
                 metadata["plugin_host_v2"].update(revision=1, receipts={}, msg_bytes=0)
-            metadata.update(predecessor_thread_id=latest.thread_id, succession_binding=scope)
+            metadata.update(predecessor_thread_id=latest.thread_id, predecessor_binding=scope, succession_binding=scope)
             created = ConversationThread(thread_id=new_id("thread"), canonical_user_id=latest.canonical_user_id,
                 owner_id=latest.owner_id, owner_home=latest.owner_home, title=title or "新会话",
                 cwd=latest.cwd, workspace_root=latest.workspace_root, runtime_workspace_roots=latest.runtime_workspace_roots,
@@ -853,9 +867,11 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 created = replace(created, channel_bindings=(replace(selected, thread_id=created.thread_id, last_active_at=stamp),))
             create_thread_atomic(threads, created)
             created_written = True
+            links = {**latest.metadata.get("succession_by_binding", {}), "\x1f".join(scope): created.thread_id}
+            compatibility = {} if latest.metadata.get("successor_thread_id") else {
+                "successor_thread_id": created.thread_id, "succeeded_at": stamp, "succession_binding": scope}
             return replace(latest, status="archived", updated_at=stamp,
-                metadata={**latest.metadata, "successor_thread_id": created.thread_id,
-                          "succeeded_at": stamp, "succession_binding": scope})
+                metadata={**latest.metadata, **compatibility, "succession_by_binding": links})
 
         try:
             archived = threads.update_atomic(thread_id, apply)
@@ -864,11 +880,14 @@ def _succeed_thread(threads, thread_id, *, title, binding, validate=None):
                 from ..common.nofollow_fs import unlink_file_beneath
                 published, _ = _read_thread_record_report(threads.storage.thread_path(thread_id), thread_id=thread_id)
                 candidate, _ = _read_thread_record_report(threads.storage.thread_path(created.thread_id), thread_id=created.thread_id)
-                if (published is not None and published.metadata.get("successor_thread_id") != created.thread_id
+                if (published is not None and _succession_target(published, scope) != created.thread_id
                         and candidate is not None and candidate.to_dict() == created.to_dict()):
                     unlink_file_beneath(threads.storage.threads_dir, (created.thread_id + ".json",))
             raise
-        current = threads.require(resolve_thread_successor_chain(threads, archived.thread_id))
+        current = threads.require(resolve_thread_successor_chain(threads, archived.thread_id, binding=scope))
+        if current.metadata.get("succession_published") is not True:
+            current = threads.update_atomic(current.thread_id, lambda row: replace(row,
+                metadata={**row.metadata, "succession_published": True}))
         for row in current.channel_bindings:
             threads._write_binding_indexes(row)
         return current

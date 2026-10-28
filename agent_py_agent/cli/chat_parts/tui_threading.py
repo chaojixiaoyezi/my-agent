@@ -275,6 +275,7 @@ def _consume_gateway_background_snapshot(
     if binding is None or binding[0] != session_id:
         tui_runtime._background_watch_gateway_binding = (session_id, "")
     message_after = max(0, int(getattr(tui_runtime, "background_message_cursor", 0)))
+    generation = getattr(tui_runtime, "conversation_reset_generation", 0)
     try:
         payload = fetcher(
             session_id,
@@ -284,6 +285,18 @@ def _consume_gateway_background_snapshot(
         )
     except Exception:
         return False
+    # LLM: 原HTTP调用已结束，只在原代次内发表，避免/new后迟到响应重建旧历史。
+    # 函数用途: 将本次快照交给带reset代次保护的显示提交。
+    def publish():
+        return _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor,
+            agent_navigation, payload, message_after)
+    apply = getattr(tui_runtime, "apply_conversation_snapshot", None)
+    return apply(generation, publish) if callable(apply) else publish()
+
+
+# LLM: 调用方已完成HTTP读取和reset代次核验；这里只消费原页，不重建执行或投递身份。
+# 函数用途: 同步已确认会话的消息、过程和显示游标。
+def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, payload, message_after):
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         return False
     target_publisher = getattr(tui_runtime, "publish_execution_target", None)
@@ -369,7 +382,7 @@ def _publish_gateway_background_watch_binding(runtime: object, session_id: str, 
 # LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
 # ConversationStore is the only message source; the typed active count affects only the
 # next display delay, while the event ring stays display-only and uses the same stream handshake.
-# 函数用途: 本地模式共用canonical过程检查点与后台活动流；只推进成功显示的游标，不改变模型输入。
+# 函数用途: 本地模式先读完整页再按reset代次发表；旧页不能恢复旧显示或覆盖新游标，不改变模型输入。
 def _consume_local_background_snapshot(
     agent: object,
     store: object,
@@ -382,6 +395,7 @@ def _consume_local_background_snapshot(
 ) -> bool:
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
+    generation = getattr(tui_runtime, "conversation_reset_generation", 0)
     root = getattr(getattr(store, "storage", None), "root", None)
     if not root:
         return True
@@ -395,19 +409,9 @@ def _consume_local_background_snapshot(
     thread_id = str(getattr(thread, "thread_id", "") or "")
     if not thread_id:
         return True
-    permission_changed = _sync_local_agent_permissions(
-        agent,
-        thread,
-        tui_runtime,
-    )
     from ...agent.conversation.agent_activity import conversation_agent_activity
 
     activity = conversation_agent_activity(agent, store, thread_id).to_dict()
-    activity_changed = _publish_background_activity(
-        tui_runtime,
-        activity,
-        agent_navigation=agent_navigation,
-    )
     from ...agent.conversation.background_transcript import (
         read_background_transcript_events,
     )
@@ -418,15 +422,6 @@ def _consume_local_background_snapshot(
         after=max(0, int(event_cursor[0] or 0)),
         stream_id=str(getattr(tui_runtime, "background_event_stream_id", "")),
     )
-    transcript_ok, transcript_changed = _consume_background_transcript_projection(
-        tui_runtime,
-        transcript.get("events"),
-        transcript.get("cursor"),
-        event_cursor,
-        stream_id=transcript.get("stream_id"),
-    )
-    if not transcript_ok:
-        return False
     from ...agent.conversation.message_stream import read_background_response_page
 
     fresh, cursor, messages_ok = read_background_response_page(
@@ -435,31 +430,36 @@ def _consume_local_background_snapshot(
     )
     if not messages_ok:
         return False
-    agent_view_ok, agent_view_changed = _consume_selected_agent_view(
-        agent,
-        store,
-        session_id,
-        agent_navigation,
-    )
-    if not agent_view_ok:
-        return False
-    if not fresh:
+
+    # LLM: 文件IO已在锁外完成；runtime在同一reset锁内校验代次，过期页不得触碰权限面板、显示、去重和游标。
+    # 函数用途: 原子发表当前本地快照，reset前启动的读取整页丢弃。
+    def publish():
+        permission_changed = _sync_local_agent_permissions(agent, thread, tui_runtime)
+        activity_changed = _publish_background_activity(tui_runtime, activity, agent_navigation=agent_navigation)
+        transcript_ok, transcript_changed = _consume_background_transcript_projection(
+            tui_runtime, transcript.get("events"), transcript.get("cursor"), event_cursor,
+            stream_id=transcript.get("stream_id"),
+        )
+        if not transcript_ok:
+            return False
+        agent_view_ok, agent_view_changed = _consume_selected_agent_view(agent, store, session_id, agent_navigation)
+        if not agent_view_ok:
+            return False
+        for row in fresh:
+            if not _publish_background_notice_row(tui_runtime, row, seen):
+                return False
         tui_runtime.background_message_cursor = cursor
         if (
-            activity_changed
+            fresh
+            or activity_changed
             or transcript_changed
             or agent_view_changed
             or permission_changed
         ) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
-    for row in fresh:
-        if not _publish_background_notice_row(tui_runtime, row, seen):
-            return False
-    tui_runtime.background_message_cursor = cursor
-    if app_ref[0] is not None:
-        app_ref[0].invalidate()
-    return True
+    guard = getattr(tui_runtime, "apply_conversation_snapshot", None)
+    return guard(generation, publish) if callable(guard) else publish()
 
 
 

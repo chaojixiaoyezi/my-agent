@@ -2,13 +2,17 @@
 # 模块用途: 展开已验证通知目标并只重投欠账路线，已外发路线仅补canonical，不重复发送已完成路线。
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from copy import deepcopy
 from dataclasses import replace
 
 from .delivery_policy import (
+    TARGET_DELIVERY_MODES,
     ScheduleDeliveryTargetUnauthorized,
     available_delivery_targets,
+    delivery_specs,
     normalize_delivery,
     validate_delivery_targets,
 )
@@ -20,6 +24,21 @@ class AlertOutboxUnavailable(OSError):
     pass
 
 
+# LLM: wake/来源事件/明确幂等键是稳定事件身份，不使用每轮随机attempt；无身份时才哈希完整业务载荷。
+# 函数用途: 为同一run内不同通知分桶，同时保留完全相同事件的重投去重。
+def delivery_event_key(request, context, *, content="", frozen=None, artifacts=()):
+    signal = request.wake_signal or {}
+    identity = next(((name, signal[name]) for name in ("wake_signal_id", "wake_id", "event_id", "idempotency_key") if signal.get(name)), None)
+    if identity is None:
+        token = str(context.idempotency_key or "")
+        if token.startswith("scheduler-event:"):
+            return token.split(":", 2)[1]
+        if frozen is not None and frozen.message_metadata.get("scheduler_delivery_event_key"):
+            return frozen.message_metadata["scheduler_delivery_event_key"]
+        identity = ("idempotency_key", token) if token else ("payload", [content, list(artifacts)])
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 # LLM: 目标目录来自同owner真实认证绑定；origin走原冻结路由和显式继任链，local仅指向原执行线程，不接任意地址。
 # 函数用途: 生成稳定binding键、实际投递上下文和本地标记，并把include_origin与相同绑定去重。
 def alert_delivery_targets(agent, request, context, run):
@@ -29,9 +48,7 @@ def alert_delivery_targets(agent, request, context, run):
     policy = validate_delivery_targets(agent, run.get("delivery"))
     available = {row["binding_id"]: row for row in available_delivery_targets(agent)}
     resolved = {}
-    specs = list(policy.get("targets", []))
-    if policy.get("include_origin"):
-        specs.append({"target_kind": "origin"})
+    specs = delivery_specs(policy, request)
     for spec in specs:
         if spec["target_kind"] == "local":
             thread = agent.conversation_store.threads.require(run["thread_id"])
@@ -42,7 +59,10 @@ def alert_delivery_targets(agent, request, context, run):
             if spec["target_kind"] == "origin":
                 seed = agent.conversation_store.threads.require(run["thread_id"])
                 thread, origin_channel, origin_target = resolve_delivery(agent, seed, request, context.channel, context.target)
-                matches = [row for row in available.values() if row["thread_id"] == thread.thread_id
+                matches = [row for row in available.values() if any(
+                    [binding.channel, binding.channel_user_id, binding.channel_conversation_id] == [row["channel"], row["account_id"], row["chat_id"]]
+                    for binding in thread.channel_bindings)
+                    and (row["thread_id"] == thread.thread_id or policy.get("follow_latest_channel_session") is False)
                     and row["channel"] == origin_channel and binding_delivery_target(row["channel"], row["account_id"],
                         row["chat_id"], group=agent.home_paths.owner_kind == "group") == origin_target]
                 if len(matches) != 1:
@@ -50,7 +70,16 @@ def alert_delivery_targets(agent, request, context, run):
                 row = matches[0]
             else:
                 row = available[spec["binding_id"]]
-                thread = agent.conversation_store.threads.require(row["thread_id"])
+                identifier = row["thread_id"]
+                if policy.get("follow_latest_channel_session") is False:
+                    identifier = (run.get("execution_context") or {}).get("delivery_target_threads", {}).get(spec["binding_id"])
+                    if not identifier:
+                        raise ScheduleDeliveryTargetUnauthorized()
+                thread = agent.conversation_store.threads.require(identifier)
+            if (thread.owner_id != agent.home_paths.owner_id or thread.owner_home != str(agent.home_paths.owner_home_dir)
+                    or not any([binding.channel, binding.channel_user_id, binding.channel_conversation_id] ==
+                        [row["channel"], row["account_id"], row["chat_id"]] for binding in thread.channel_bindings)):
+                raise ScheduleDeliveryTargetUnauthorized()
             key, local = row["binding_id"], row["local"]
             channel = "internal" if local else row["channel"]
             target = thread.thread_id if local else binding_delivery_target(row["channel"], row["account_id"],
@@ -67,14 +96,14 @@ def alert_delivery_targets(agent, request, context, run):
 def validate_alert_delivery(agent, request, context, run, *, admitted_completion=False):
     if not _canonical_owner_matches(agent, request, context):
         return False
+    rows = agent.scheduler_repository.delivery_receipts(run["run_id"], event_key=delivery_event_key(request, context))
     if admitted_completion:
-        rows = agent.scheduler_repository.delivery_receipts(run["run_id"])
         if any(row.get("state") in {"sent", "committed"} and row.get("external_sent") is True
                 and row.get("context") == _context_identity(context) for row in rows.values()):
             return True
     try:
         return any(plan["context"] is not None and _context_identity(plan["context"]) == _context_identity(context)
-            for plan in _alert_delivery_plans(agent, request, context, run, {}).values())
+            for plan in _alert_delivery_plans(agent, request, context, run, rows).values())
     except (ValueError, KeyError, OSError):
         return False
 
@@ -97,9 +126,7 @@ def _context_identity(context):
 # 函数用途: 建立独立目标计划并把同一绑定的origin别名去重。
 def _alert_delivery_plans(agent, request, context, run, receipts):
     policy = normalize_delivery(run["delivery"])
-    specs = list(policy["targets"])
-    if policy.get("include_origin"):
-        specs.append({"target_kind": "origin"})
+    specs = delivery_specs(policy, request)
     plans = {}
     for spec in specs:
         token = spec.get("binding_id") or spec["target_kind"]
@@ -112,7 +139,7 @@ def _alert_delivery_plans(agent, request, context, run, receipts):
                 if previous.get("state") != "committed" and not _canonical_owner_matches(agent, request, target):
                     raise ScheduleDeliveryTargetUnauthorized()
             else:
-                one_run = {**run, "delivery": {"mode": "bound", "targets": [spec]}}
+                one_run = {**run, "delivery": {**policy, "mode": "bound", "targets": [spec], "include_origin": False}}
                 [(key, (target, local))] = alert_delivery_targets(agent, request, context, one_run).items()
         except (ValueError, KeyError):
             target, error = None, "SCHEDULE_DELIVERY_TARGET_UNAUTHORIZED"
@@ -120,6 +147,11 @@ def _alert_delivery_plans(agent, request, context, run, receipts):
             plans[key]["specs"].append(token)
         else:
             plans[key] = {"context": target, "local": local, "specs": [token], "error_code": error}
+    if policy['mode'] == 'fallback_on_failure':
+        winner = next((key for key in plans if receipts.get(key, {}).get('state') == 'committed'
+            or receipts.get(key, {}).get('external_sent') is True), None)
+        if winner is not None:
+            return {winner: plans[winner]}
     return plans
 
 
@@ -159,13 +191,18 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
     from .execution import execution_run
 
     run = execution_run(delivery.agent, request)
-    if run is None or normalize_delivery(run.get("delivery"))["mode"] not in {"bound", "multi"}:
+    if run is None or normalize_delivery(run.get("delivery"))["mode"] not in TARGET_DELIVERY_MODES:
         return None
     if not options.get("deliver") and not options.get("local_transcript_only"):
         return None
     repository = delivery.agent.scheduler_repository
-    receipts = repository.delivery_receipts(run["run_id"])
+    incoming = options.get("frozen_retry")
+    event_key = delivery_event_key(request, context, content=content, frozen=incoming, artifacts=options.get("delivery_artifacts", ()))
+    context = replace(context, idempotency_key=f"scheduler-event:{event_key}")
+    receipts = repository.delivery_receipts(run["run_id"], event_key=event_key)
     targets = _alert_delivery_plans(delivery.agent, request, context, run, receipts)
+    mode = normalize_delivery(run.get('delivery'))['mode']
+    planned_specs = [spec for plan in targets.values() for spec in plan['specs']]
     business = _business_result(content, options, receipts)
     if "message_metadata" not in business:
         projection = project_user_reply(business["content"])
@@ -175,24 +212,38 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
             delivery_reason=options["delivery_reason"], projection_status=projection.projection_status,
             delivery_artifacts=tuple(business["delivery_artifacts"]), evidence_refs=tuple(business["evidence_refs"]),
             operation_verification=business["operation_verification"], public_receipt=business["public_receipt"], frozen_retry=None)
+    business["message_metadata"]["scheduler_delivery_event_key"] = event_key
     seed = {"schema_version": "wake-owner-delivery.v2", "task_id": request.task_id, "reason": request.reason,
         "created_at": time.time(), **deepcopy(business), "external_sent": False, "receipt_id": "", "ownership": ""}
     cached = _cache_alert_delivery(delivery, request, seed)
+    if not targets and mode == 'severity_routed':
+        from .execution import scheduled_local_delivery
+        if scheduled_local_delivery(delivery.agent, request):
+            target = replace(context, thread_id=run['thread_id'], channel='internal', target=run['thread_id'],
+                mode='proactive', reply_to='', progress_handle='')
+            return record_one(delivery, request, target, business['content'], **{**options,
+                'frozen_retry': frozen_owner_delivery(seed), 'local_transcript_only': True,
+                'route_supports_transcript': True, 'delivery_event_key': event_key})
     commits = []
     for key, plan in targets.items():
         target, local = plan["context"], plan["local"]
         previous = receipts.get(key, {})
         if previous.get("state") == "committed":
+            if mode == 'fallback_on_failure':
+                break
             continue
         # 先存原结果和目标角色；网络在此之后，任何目标失败也不需重新调用模型。
         saved = {**previous, "state": previous.get("state", "pending"), "specs": plan["specs"], "local": local,
-            "business_result": deepcopy(business), "error_code": plan["error_code"]}
-        repository.record_delivery_receipt(run["run_id"], key, saved)
+            "business_result": deepcopy(business), "error_code": plan["error_code"], "planned_specs": planned_specs}
+        repository.record_delivery_receipt(run["run_id"], key, saved, event_key=event_key)
         if target is None:
             continue
-        retry = frozen_owner_delivery(previous["frozen"]) if previous.get("frozen") else (
+        original_target = (incoming.message_metadata.get("scheduler_delivery_target_key") if incoming is not None else None)
+        primary_sent = bool(incoming is not None and incoming.external_sent and incoming.receipt_id and not local
+            and (original_target == key if original_target else target.channel == context.channel and target.target == context.target))
+        retry = frozen_owner_delivery(previous["frozen"]) if previous.get("frozen") else incoming if primary_sent else (
             frozen_owner_delivery(seed) if options.get("frozen_retry") is not None else None)
-        if retry is not None and not previous.get("external_sent"):
+        if retry is not None and not previous.get("external_sent") and not primary_sent:
             retry = replace(retry, external_sent=False, receipt_id="")
         # LLM: 闭包保存当前目标实际状态；只有sent才记external_sent，本地失败也冻原wake，不持锁跨网络或改执行身份。
         # 函数用途: 在canonical前保存目标回执；首条本地路线失败时同样保留整封结果供重投。
@@ -206,7 +257,7 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
             try:
                 repository.record_delivery_receipt(run["run_id"], key, {**saved, "state": "sent" if sent else "pending",
                     "delivery_status": freeze.delivery_status, "external_sent": sent, "receipt_id": freeze.receipt_id,
-                    "context": _context_identity(target), "frozen": frozen})
+                    "context": _context_identity(target), "frozen": frozen}, event_key=event_key)
             except OSError as exc:
                 raise AlertOutboxUnavailable(str(exc)) from exc
             _cache_alert_delivery(delivery, request, frozen)
@@ -214,7 +265,7 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
             "delivery_artifacts": tuple(business["delivery_artifacts"]), "assistant_commentaries": tuple(business["assistant_commentaries"]),
             "frozen_retry": retry, "local_transcript_only": local or options.get("local_transcript_only", False),
             "route_supports_transcript": True if local else None,
-            "delivery_observer": observe, "delivery_target_key": key}
+            "delivery_observer": observe, "delivery_target_key": key, "delivery_event_key": event_key}
         if retry is not None:
             kwargs.update(delivery_artifacts=retry.delivery_artifacts, assistant_commentaries=retry.assistant_commentaries)
         try:
@@ -222,17 +273,23 @@ def record_alert_delivery(delivery, request, context, content, *, record_one, op
         except AlertOutboxUnavailable:
             raise
         except OSError:
-            saved = repository.delivery_receipts(run["run_id"]).get(key, {})
-            repository.record_delivery_receipt(run["run_id"], key, {**saved, "error_code": "TARGET_DELIVERY_IO_ERROR"})
+            saved = repository.delivery_receipts(run["run_id"], event_key=event_key).get(key, {})
+            repository.record_delivery_receipt(run["run_id"], key, {**saved, "error_code": "TARGET_DELIVERY_IO_ERROR"}, event_key=event_key)
+            # 已外发只欠canonical，不得推进下一线或覆盖原wake的已发回执。
+            if mode == 'fallback_on_failure' and saved.get('external_sent'):
+                break
             continue
         commits.append(commit)
-        saved = repository.delivery_receipts(run["run_id"]).get(key, {})
+        saved = repository.delivery_receipts(run["run_id"], event_key=event_key).get(key, {})
         repository.record_delivery_receipt(run["run_id"], key, {**saved,
             "state": "committed" if commit.persisted and (commit.delivery_status == "sent" or local and commit.delivery_status == "local_only")
                 else "sent" if saved.get("external_sent") else "pending",
-            "delivery_status": commit.delivery_status, "context": _context_identity(target), "message_id": commit.message_id})
-    receipts = repository.delivery_receipts(run["run_id"])
-    complete = bool(targets) and all(receipts.get(key, {}).get("state") == "committed" for key in targets)
+            "delivery_status": commit.delivery_status, "context": _context_identity(target), "message_id": commit.message_id}, event_key=event_key)
+        if mode == 'fallback_on_failure' and (commit.persisted or saved.get('external_sent')):
+            break
+    receipts = repository.delivery_receipts(run["run_id"], event_key=event_key)
+    complete = (any(row.get('state') == 'committed' for row in receipts.values()) if mode == 'fallback_on_failure' else
+        bool(targets) and all(receipts.get(key, {}).get("state") == "committed" for key in targets))
     return BackgroundDeliveryCommit(content=business["content"], delivery_status=("sent" if any(row.get("delivery_status") == "sent" for row in receipts.values())
         else "local_only") if complete else "failed", persisted=complete,
         message_id=next((row.message_id for row in reversed(commits) if row.message_id), ""),

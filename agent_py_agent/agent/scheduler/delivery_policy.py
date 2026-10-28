@@ -7,14 +7,21 @@ import json
 
 from .schedule import ScheduleValidationError
 
+TARGET_DELIVERY_MODES = frozenset({"bound", "multi", "primary_only", "dual_deliver", "fallback_on_failure", "severity_routed"})
+_SEVERITY_RANK = {"debug": 0, "info": 1, "informational": 1, "normal": 1, "notice": 2, "low": 2,
+    "warn": 3, "warning": 3, "medium": 3, "error": 4, "high": 4, "critical": 5, "fatal": 5, "urgent": 6, "emergency": 6}
+
 DELIVERY_SCHEMA = {"type": "object", "properties": {
-    "mode": {"type": "string", "enum": ["origin", "local", "none", "bound", "multi"],
+    "mode": {"type": "string", "enum": ["origin", "local", "none", "bound", "multi", "primary_only", "dual_deliver", "fallback_on_failure", "severity_routed"],
              "description": "origin 跟随同通道/new；local/none 仅内部留档；bound/multi只向delivery_targets返回的已认证绑定投递。"},
     "targets": {"type": "array", "maxItems": 16, "items": {"type": "object", "properties": {
         "target_kind": {"enum": ["origin", "local", "channel_binding"]}, "binding_id": {"type": "string"},
-        "channel": {"type": "string"}, "chat_id": {"type": "string"}, "account_id": {"type": "string"}},
+        "channel": {"type": "string"}, "chat_id": {"type": "string"}, "account_id": {"type": "string"},
+        "severities": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string"}},
+        "min_severity": {"type": "string", "enum": sorted(_SEVERITY_RANK)}},
         "required": ["target_kind"], "additionalProperties": False}},
     "include_origin": {"type": "boolean"},
+    "follow_latest_channel_session": {"type": "boolean", "default": True},
     "reply_policy": {"type": "string", "enum": ["always", "explicit"],
                      "description": "缺省always保留逐轮回执；origin+explicit使用受管完成协议，只有明确公开意图才通知，无对外事项可内部成功。"}},
     "required": ["mode"], "additionalProperties": False}
@@ -25,30 +32,66 @@ DELIVERY_SCHEMA = {"type": "object", "properties": {
 def normalize_delivery(raw: object) -> dict:
     if raw is None:
         return {"mode": "origin"}
-    if not isinstance(raw, dict) or not {'mode'} <= set(raw) <= {'mode', 'reply_policy', 'targets', 'include_origin'}:
+    fields = {'mode', 'reply_policy', 'targets', 'include_origin', 'follow_latest_channel_session'}
+    if not isinstance(raw, dict) or not {'mode'} <= set(raw) <= fields:
         raise ScheduleValidationError("delivery 字段无效，不能指定任意收件人")
-    if not isinstance(raw['mode'], str) or raw['mode'] not in {'origin', 'local', 'none', 'bound', 'multi'}:
-        raise ScheduleValidationError("delivery.mode 必须为 origin/local/none/bound/multi")
+    if not isinstance(raw['mode'], str) or raw['mode'] not in {'origin', 'local', 'none'} | TARGET_DELIVERY_MODES:
+        raise ScheduleValidationError("delivery.mode 必须是公开通知模式")
     if 'reply_policy' in raw and (not isinstance(raw['reply_policy'], str) or raw['reply_policy'] not in {'always', 'explicit'}):
         raise ScheduleValidationError("delivery.reply_policy 必须为 always/explicit")
     if 'include_origin' in raw and type(raw['include_origin']) is not bool:
         raise ScheduleValidationError("include_origin 必须为布尔值")
+    if 'follow_latest_channel_session' in raw and type(raw['follow_latest_channel_session']) is not bool:
+        raise ScheduleValidationError("follow_latest_channel_session 必须为布尔值")
     targets = raw.get('targets', [])
     if not isinstance(targets, list) or len(targets) > 16:
         raise ScheduleValidationError("targets 必须为最多16项的数组")
     for target in targets:
-        if (not isinstance(target, dict) or not {'target_kind'} <= set(target) <=
-                {'target_kind', 'binding_id', 'channel', 'chat_id', 'account_id'}
-                or target.get('target_kind') not in ('origin', 'local', 'channel_binding')
-                or any(not isinstance(value, str) or not value or value != value.strip() for value in target.values())
-                or (target['target_kind'] == 'channel_binding' and not target.get('binding_id'))
-                or (target['target_kind'] != 'channel_binding' and set(target) != {'target_kind'})):
-            raise ScheduleDeliveryTargetUnauthorized()
+        _validate_delivery_target(target)
     if raw['mode'] in {'bound', 'multi'} and not targets:
         raise ScheduleValidationError("bound/multi 必须提供已认证目标")
-    if raw['mode'] not in {'bound', 'multi'} and (targets or raw.get('include_origin')):
-        raise ScheduleValidationError("多目标和include_origin需要bound/multi")
-    return {key: raw[key] for key in ('mode', 'reply_policy', 'targets', 'include_origin') if key in raw}
+    if raw['mode'] not in TARGET_DELIVERY_MODES and (targets or raw.get('include_origin')):
+        raise ScheduleValidationError("当前模式不接受目标列表或include_origin")
+    return {key: raw[key] for key in fields if key in raw}
+
+
+# LLM: 过滤字段不提供地址权限，原selector仍严格封闭；未知min等级拒绝，精确等级列表允许业务自定义字符串。
+# 函数用途: 核验一个目标及其可选严重程度过滤器。
+def _validate_delivery_target(target):
+    selectors = {'target_kind', 'binding_id', 'channel', 'chat_id', 'account_id'}
+    filters = {'severities', 'min_severity'}
+    if (not isinstance(target, dict) or not {'target_kind'} <= set(target) <= selectors | filters
+            or target.get('target_kind') not in ('origin', 'local', 'channel_binding')
+            or any(not isinstance(value, str) or not value or value != value.strip()
+                for key, value in target.items() if key in selectors)
+            or target['target_kind'] == 'channel_binding' and not target.get('binding_id')
+            or target['target_kind'] != 'channel_binding' and set(target) - filters != {'target_kind'}):
+        raise ScheduleDeliveryTargetUnauthorized()
+    if 'severities' in target:
+        values = target['severities']
+        if (not isinstance(values, list) or not 1 <= len(values) <= 16
+                or any(not isinstance(value, str) or not value or value != value.strip() or len(value) > 64 for value in values)):
+            raise ScheduleValidationError("severities 必须是1至16项的非空等级字符串列表")
+    if 'min_severity' in target and (not isinstance(target['min_severity'], str) or target['min_severity'] not in _SEVERITY_RANK):
+        raise ScheduleValidationError("min_severity 必须是公开等级")
+
+
+# LLM: 只读原wake结构化severity；未知或空等级不满足最低等级条件，不把正文或风险分数当等级。
+# 函数用途: 展开当前事件按策略实际需要的目标角色。
+def delivery_specs(policy, request):
+    specs = list(policy.get('targets', []))
+    if not specs and policy['mode'] in TARGET_DELIVERY_MODES - {'bound', 'multi'}:
+        specs = [{'target_kind': 'origin'}]
+    if policy.get('include_origin'):
+        specs.append({'target_kind': 'origin'})
+    if policy['mode'] == 'primary_only':
+        return specs[:1]
+    if policy['mode'] != 'severity_routed':
+        return specs
+    signal = request.wake_signal or {}
+    severity = str(signal.get('severity') or (signal.get('metadata') or {}).get('severity') or '').lower()
+    return [spec for spec in specs if ('severities' not in spec or severity in {value.lower() for value in spec['severities']})
+        and ('min_severity' not in spec or _SEVERITY_RANK.get(severity, -1) >= _SEVERITY_RANK[spec['min_severity']])]
 
 
 # LLM: 未认证目标是写前/发送前安全拒绝，不能降级origin或借任意chat_id发送。
@@ -140,6 +183,18 @@ def validate_repository_delivery(repository, raw):
     policy = normalize_delivery(raw)
     if not policy.get('targets'):
         return policy
+    return validate_delivery_targets(_repository_delivery_agent(repository), policy)
+
+
+# LLM: 与仓库写前验证复用同一准确owner/home及认证账，不创建Agent或新身份。
+# 函数用途: 为固定线程策略冻结原运行准备时的目标投影。
+def repository_delivery_targets(repository):
+    return available_delivery_targets(_repository_delivery_agent(repository))
+
+
+# LLM: 只读构造同owner目录上下文，所有权限和原认证账仍在现有存储中。
+# 函数用途: 解析原仓库所属用户的真实会话和home。
+def _repository_delivery_agent(repository):
     from pathlib import Path
     from types import SimpleNamespace
 
@@ -163,7 +218,7 @@ def validate_repository_delivery(repository, raw):
         paths = resolve_runtime_paths_for_agent(SimpleNamespace(), owner_home, home).paths
         store = ConversationStore(paths['conversation_workspace'], initialize=False)
     agent = SimpleNamespace(home_paths=home, conversation_store=store)
-    return validate_delivery_targets(agent, policy)
+    return agent
 
 
 # LLM: IM 判定只取当前 owner 可信来源绑定；新计划消费显式配置，已有计划和已预留 run 不在这里迁移。

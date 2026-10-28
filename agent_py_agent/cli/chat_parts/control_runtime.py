@@ -445,11 +445,25 @@ def _execute_local_control(
         from ...agent.conversation.new_session import new_session_result
         store = execution.agent.conversation_store
         home = getattr(execution.agent, "home_paths", None)
-        thread = store.threads.get_or_create({"canonical_user_id": "local-agent", "channel": "chat",
-            "channel_conversation_id": state.session_id or "default", "channel_user_id": "local-agent",
-            "owner_id": getattr(home, "owner_id", ""), "owner_home": str(getattr(home, "owner_home_dir", "") or ""),
-            "cwd": str(getattr(execution.agent, "root", "") or "")})
-        return new_session_result(store, thread.thread_id, title=command.value)
+        thread, error = store.threads.resolve_report(channel="chat", channel_conversation_id=state.session_id or "default",
+            channel_user_id="local-agent")
+        if error:
+            return ConversationControlResult("new", False, "会话绑定不可读，未切换。", error_code="THREAD_BINDING_UNAVAILABLE")
+        if thread is None:
+            thread = store.threads.get_or_create({"canonical_user_id": "local-agent", "channel": "chat",
+                "channel_conversation_id": state.session_id or "default", "channel_user_id": "local-agent",
+                "owner_id": getattr(home, "owner_id", ""), "owner_home": str(getattr(home, "owner_home_dir", "") or ""),
+                "cwd": str(getattr(execution.agent, "root", "") or "")})
+        binding = next((row for row in thread.channel_bindings if row.channel == "chat" and row.channel_user_id == "local-agent"
+            and row.channel_conversation_id == (state.session_id or "default")), None)
+        if binding is None:
+            return ConversationControlResult("new", False, "当前通道绑定不一致，未切换。", error_code="THREAD_SUCCESSOR_CHANNEL_MISMATCH")
+        # LLM: expected owner/home取当前Agent，不取被索引到的记录；继任原文件锁内重验，不能因坏索引跨owner归档。
+        # 函数用途: 拒绝Direct入口的外来或并发换主记录。
+        def validate_owner(latest):
+            if home is not None and (latest.owner_id, latest.owner_home) != (home.owner_id, str(home.owner_home_dir)):
+                raise ValueError("THREAD_SUCCESSOR_OWNER_MISMATCH")
+        return new_session_result(store, thread.thread_id, title=command.value, binding=binding, validate=validate_owner)
     if command.kind in {"context", "compact", "recover", "endtask", "wakes", "model", "effort", "skills", "settings", "plugins"}:
         return ConversationControlResult(
             command.kind,
