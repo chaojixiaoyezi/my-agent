@@ -1,3 +1,24 @@
+## 2026-10-28 Wave 9 B3 Round 3：轮询起点原子采样
+
+来源：`07-tasks/fix-r3-wave9-b3.md`；起点 `5cfbb4d56efe57dc966ac92aec7ddaf56e8e1b90`，批次基线 `db4d5de92`。业务文件改动仅限指定工作树，未推送、未部署。
+
+- `tui_threading._capture_background_poll_state` 在真实 TuiRuntime 已有 `_lock` 内一次取齐代次、消息游标、过程游标及流身份；Gateway/本地整页取数只用该快照，释放采样锁后执行消息页 HTTP/文件读取。沿原 `apply_conversation_snapshot` 在同一锁内核代次并提交，reset 和提交回调内部行为本轮不改，不据此声称原回调内所有其它读取均在锁外。
+- 新增 Gateway/本地双参数确定性回归：属性探针在首次读值后用事件启动 reset；旧代码稳定出现 Gateway 游标回写 500、本地代次读取未持锁。修复后同时核对锁归属、IO 出锁、完整旧代入参、迟到页不改变游标/显示/去重，以及本地过程流不在锁外重采样。没有用 sleep 抢时序，没有替代生产锁或修改已有有效断言。
+- 三处指定函数的英文契约注释改为中文；新增助手、测试类/函数/方法均使用中文双层注释，参数化装饰器在注释块下方。
+- 独立 Astra 局部静态复核在所给材料内未发现阻塞问题；其“补本地过程流入参断言”建议已纳入测试。复核未访问工作树或运行测试，不代表端到端验收。实际专项/门禁结果见本轮交接。
+
+复现（工作树根目录；pytest 临时文件和报告也限定在本工作树）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='--basetemp=.pytest_cache/wave9-b3-r3-final-tmp --junitxml=.pytest_cache/wave9-b3-r3-final.xml' python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+观察边界：事件握手和真实 RLock 已在本地测试，HTTP/消息页为边界替身；未验证真实浏览器、键盘、外部网络和其它 Python 实现。测试用 `_is_owned()` 观察 CPython 锁归属，生产代码不依赖该私有方法。
+
 ## 2026-10-28 Wave 9 B3 Round 2：会话与通知返修
 
 来源：`07-tasks/fix-wave9-b3.md` 六项独立评审意见；返修起点 `89e8fb8f0973e79b657d8da8fd5e520ac10efc31`，批次基线仍为 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在指定工作树提交代码，不推送、部署或运行已退休的尺寸检查。

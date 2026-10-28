@@ -1050,6 +1050,107 @@ def test_r2_tui_discards_poll_started_before_reset():
     assert not seen and cursor == [0]
 
 
+# LLM: 在首次采样字段读出后精确启动另一线程reset；锁内只等待对方尝试，锁外则等reset完成，不用sleep赌时序。
+# 函数用途: 同时核对两种poll原子采样、锁外IO，以及旧页不能回写游标500。
+@pytest.mark.parametrize("transport", ["gateway", "local"])
+def test_r3_poll_captures_cursor_and_generation_under_reset_lock(alert_case, monkeypatch, transport):
+    import threading
+
+    from agent_py_agent.agent.conversation import background_transcript, message_stream
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_threading import (
+        _consume_gateway_background_snapshot,
+        _consume_local_background_snapshot,
+    )
+    start, attempted, finished = threading.Event(), threading.Event(), threading.Event()
+    samples, errors, requests, transcripts = [], [], [], []
+    # LLM: 只探测属性读取边界；仍执行真实runtime锁、reset、快照提交，不替代被测同步机制。
+    # 类用途: 让reset确定落在旧实现的两次无锁字段读取之间。
+    class ProbedRuntime(TuiRuntime):
+        # LLM: 先保存实际属性值，再通知reset线程；读锁状态只用于测试握手，绝不改变生产锁行为。
+        # 函数用途: 精确记录首次采样是否持有真实reset锁。
+        def __getattribute__(self, name):
+            value = super().__getattribute__(name)
+            if name in {"background_message_cursor", "conversation_reset_generation"} and self.__dict__.get("probe_armed"):
+                self.probe_armed = False
+                locked = self._lock._is_owned()
+                samples.append((name, locked))
+                start.set()
+                assert attempted.wait(5), "reset线程未到达握手点"
+                if not locked:
+                    assert finished.wait(5), "无锁采样期间reset未完成"
+            return value
+    runtime = ProbedRuntime("terminal-alerts")
+    runtime.background_message_cursor = 500
+    runtime.background_event_stream_id = "stream-r3-old"
+    seen, cursor = set(), [7]
+    # LLM: 原reset必须沿真实RLock执行；线程异常显式交回主测试，结束前join，不遗留后台线程。
+    # 函数用途: 在采样首字段之后尝试切换会话。
+    def reset():
+        try:
+            assert start.wait(5), "poll未到达采样点"
+            attempted.set()
+            runtime.publish_conversation_reset("thread-r3-new")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+    worker = threading.Thread(target=reset)
+    worker.start()
+    runtime.probe_armed = True
+    # LLM: 只替代IO边界；若生产代码把HTTP或文件读取放进reset锁，此握手会直接失败而非等待超时掩盖。
+    # 函数用途: 证明采样锁已释放并让旧页在reset完成后返回。
+    def io_boundary():
+        assert not runtime._lock._is_owned(), "IO不得持有reset锁"
+        assert finished.wait(5), "IO前reset仍被采样锁阻塞"
+    # LLM: 服务端返回合法空页及请求位置；旧游标不能被配上reset后的新代次重新接纳。
+    # 函数用途: 模拟Gateway对游标500的迟到响应。
+    def fetch(_session_id, *, after, event_after, event_stream_id):
+        io_boundary()
+        requests.append((after, event_after, event_stream_id))
+        return {"ok": True, "thread_id": "thread-r3-old", "cursor": 500, "event_cursor": 7,
+            "event_stream_id": "stream-r3-old", "transcript_events": [], "notices": []}
+    # LLM: 本地页同样只返回请求位置，消息解析与提交仍由原poll执行。
+    # 函数用途: 记录本地文件页读取使用的采样游标。
+    def read_page(_store, _thread_id, *, after, **_kwargs):
+        io_boundary()
+        requests.append(after)
+        return [], 500, True
+    try:
+        if transport == "gateway":
+            result = _consume_gateway_background_snapshot(SimpleNamespace(request_background_notices=fetch),
+                "terminal-alerts", runtime, [None], seen, cursor)
+        else:
+            resolve = alert_case.store.threads.resolve_report
+            read_transcript = background_transcript.read_background_transcript_events
+            # LLM: 保留真实过程流读取，额外核对reset后的IO仍只使用同代捕获的位置与流身份。
+            # 函数用途: 防止过程游标或stream在锁外重新采样。
+            def read_events(*args, **kwargs):
+                io_boundary()
+                transcripts.append((kwargs["after"], kwargs["stream_id"]))
+                return read_transcript(*args, **kwargs)
+            # LLM: 原线程解析是本地首个文件IO；进入它之前也必须已经完成原子采样并释放锁。
+            # 函数用途: 保留真实线程解析，同时核对锁外读取边界。
+            def resolve_report(**kwargs):
+                io_boundary()
+                return resolve(**kwargs)
+            monkeypatch.setattr(alert_case.store.threads, "resolve_report", resolve_report)
+            monkeypatch.setattr(background_transcript, "read_background_transcript_events", read_events)
+            monkeypatch.setattr(message_stream, "read_background_response_page", read_page)
+            result = _consume_local_background_snapshot(alert_case.agent, alert_case.store,
+                "terminal-alerts", runtime, [None], seen, cursor)
+    finally:
+        start.set()
+        worker.join(5)
+    assert not worker.is_alive() and not errors
+    assert result and runtime.background_message_cursor == 0
+    assert samples and all(locked for _name, locked in samples)
+    assert requests == ([(500, 7, "stream-r3-old")] if transport == "gateway" else [500])
+    assert transcripts == ([(7, "stream-r3-old")] if transport == "local" else [])
+    assert runtime.background_event_stream_id == "" and cursor == [7] and not seen
+    assert not runtime.store.snapshot().stable_blocks
+
+
 # LLM: 两个通道都真实登记到同一线程；各自new只能移动自己的索引，重复旧ID必须幂等。
 # 函数用途: 复现一个通道继任后另一个通道无法new的问题。
 def test_r2_each_bound_channel_can_succeed_independently(conversations):

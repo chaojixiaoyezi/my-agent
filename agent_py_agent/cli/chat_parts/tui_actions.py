@@ -470,9 +470,8 @@ def _ensure_control_operation_reconciler(
                     pass
         runtime.set_notice("Restoring control confirmation…", duration_seconds=2.0)
 
-    # LLM: Compact command completion and transcript mutation are separate typed facts. ``ok``
-    # closes the command without an error (including an empty-history no-op); only a positive
-    # canonical generation may advance the visible compact boundary. Prose never changes state.
+    # LLM: 命令完成与历史变更是独立类型化事实；ok只表示无错误，空历史无操作也可成功。
+    # 只有正数canonical代次才能推进可见压缩边界；新会话只按成功的结构化reset回执清屏，文案不改状态。
     # 函数用途: 只按结构化成功回执重置新会话视图；压缩则按真实代次刷新，不根据文案猜状态。
     def on_complete(entry, result) -> None:
         if entry.command_kind == "new":

@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 B3 Round 3：采样、reset、提交共锁
+
+`tui_threading.py::_capture_background_poll_state` 只在 `TuiRuntime._lock` 内读取 `(generation, message_after, event_after, event_stream_id)`；两种 poll 都在起始网络/文件取数前调用，后续只消费这份不可变起点。该锁就是现有 `publish_conversation_reset` 与 `apply_conversation_snapshot` 使用的锁，不新增并行状态锁，采样助手不持锁执行 HTTP/文件读取。原提交回调内部行为不在本轮改动范围；旧代响应不会进入该回调，显示、去重和游标均不回填。测试及观察边界见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-28 Wave 9 B3 Round 2：会话继任与通知提交结构
 
 - `conversation/store_threads.py` 的 `succession_by_binding` 使用 `channel\x1faccount_id\x1fchat_id` 键；解析、索引重放和定时通知都按准确三元组查后继，保持 owner/home、双向前任、环和最多 16 跳校验。新候选仍先隐藏；前任事务提交后再写 `succession_published`，`plugin_host/conversations.py::check_archive` 阻止发表窗口删除锚点。

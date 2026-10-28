@@ -7,6 +7,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 
 from .tui_identity_window import TuiIdentityWindow
@@ -254,10 +255,17 @@ def _consume_background_notices(
     return snapshot_ok
 
 
-# LLM: Thin clients consume the authenticated canonical message page plus an independent
-# process-event cursor paired with its stream identity. Only a new stream can reset the event
-# sequence; canonical message offsets never rewind. Typed activity controls poll cadence.
-# Invalid responses enter the existing exponential backoff without clearing display state.
+# LLM: 真实runtime的锁与reset、快照提交共用；无锁旧显示替身沿原协议兼容，不另造锁，锁内不做IO。
+# 函数用途: 一次采样同代的消息游标、过程游标及流身份，避免旧游标配上新代次。
+def _capture_background_poll_state(tui_runtime, event_cursor):
+    with getattr(tui_runtime, "_lock", nullcontext()):
+        return (getattr(tui_runtime, "conversation_reset_generation", 0),
+            max(0, int(getattr(tui_runtime, "background_message_cursor", 0))),
+            max(0, int(event_cursor[0] or 0)), str(getattr(tui_runtime, "background_event_stream_id", "")))
+
+
+# LLM: 认证消息页与独立过程流分开消费；起始采样及提交均与reset共锁，消息页请求在锁外。
+# 同代消息位置不回退，过程序号仅在换流时重基；类型化活动只影响轮询频率，坏响应沿原退避且保留显示。
 # 函数用途: 同步当前会话线程和执行绑定，再按canonical顺序收消息；线程投影只供观察、不改变控制目标。
 def _consume_gateway_background_snapshot(
     agent: object,
@@ -274,14 +282,13 @@ def _consume_gateway_background_snapshot(
     binding = getattr(tui_runtime, "_background_watch_gateway_binding", None)
     if binding is None or binding[0] != session_id:
         tui_runtime._background_watch_gateway_binding = (session_id, "")
-    message_after = max(0, int(getattr(tui_runtime, "background_message_cursor", 0)))
-    generation = getattr(tui_runtime, "conversation_reset_generation", 0)
+    generation, message_after, event_after, event_stream_id = _capture_background_poll_state(tui_runtime, event_cursor)
     try:
         payload = fetcher(
             session_id,
             after=message_after,
-            event_after=max(0, int(event_cursor[0] or 0)),
-            event_stream_id=str(getattr(tui_runtime, "background_event_stream_id", "")),
+            event_after=event_after,
+            event_stream_id=event_stream_id,
         )
     except Exception:
         return False
@@ -379,9 +386,8 @@ def _publish_gateway_background_watch_binding(runtime: object, session_id: str, 
     return valid
 
 
-# LLM: Embedded/local mode reads the same agent-owned projection and event ring without HTTP.
-# ConversationStore is the only message source; the typed active count affects only the
-# next display delay, while the event ring stays display-only and uses the same stream handshake.
+# LLM: 本地模式只读同一owner的会话账本与过程流；采样和提交与reset共锁，原始整页取数在锁外。
+# 活动计数只控制下次刷新，过程流沿原身份握手且只供显示，不构造第二消息来源。
 # 函数用途: 本地模式先读完整页再按reset代次发表；旧页不能恢复旧显示或覆盖新游标，不改变模型输入。
 def _consume_local_background_snapshot(
     agent: object,
@@ -395,7 +401,7 @@ def _consume_local_background_snapshot(
 ) -> bool:
     from ...agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
-    generation = getattr(tui_runtime, "conversation_reset_generation", 0)
+    generation, message_after, event_after, event_stream_id = _capture_background_poll_state(tui_runtime, event_cursor)
     root = getattr(getattr(store, "storage", None), "root", None)
     if not root:
         return True
@@ -419,13 +425,13 @@ def _consume_local_background_snapshot(
     transcript = read_background_transcript_events(
         agent,
         thread_id=thread_id,
-        after=max(0, int(event_cursor[0] or 0)),
-        stream_id=str(getattr(tui_runtime, "background_event_stream_id", "")),
+        after=event_after,
+        stream_id=event_stream_id,
     )
     from ...agent.conversation.message_stream import read_background_response_page
 
     fresh, cursor, messages_ok = read_background_response_page(
-        store, thread_id, after=max(0, int(getattr(tui_runtime, "background_message_cursor", 0))),
+        store, thread_id, after=message_after,
         include_display_checkpoints=True,
     )
     if not messages_ok:
