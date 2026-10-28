@@ -79,8 +79,8 @@ def test_directory_persistent_changes_surface_after_retry_budget(tmp_path, monke
     assert not bg._DIRECTORY_CACHE
 
 
-# LLM: 权限错误不是并发换代，不重试或吞掉；沿原异常交给上层失败关闭。
-# 函数用途: 防止目录重试掩盖持续权限拒绝。
+# LLM: 权限错误不是并发换代，不重试或吞掉；显式PERMISSION_DENIED保留原异常类型/errno交上层失败关闭。
+# 函数用途: 防止目录重试掩盖权限拒绝，并核对第三轮结构化错误合同。
 def test_directory_permission_failure_is_not_retried(tmp_path, monkeypatch):
     calls = []
 
@@ -91,8 +91,10 @@ def test_directory_permission_failure_is_not_retried(tmp_path, monkeypatch):
         raise PermissionError(errno.EACCES, "denied")
 
     monkeypatch.setattr(bg, "_directory_stat_key", denied)
-    with pytest.raises(PermissionError):
-        bg._directory_snapshots(tmp_path, tmp_path)
+    snapshots = bg._directory_snapshots(tmp_path, tmp_path)
+    assert len(snapshots) == 1
+    assert snapshots[0].error_code == "PERMISSION_DENIED"
+    assert snapshots[0].error == "PermissionError" and snapshots[0].error_errno == errno.EACCES
     assert calls == [1]
 
 

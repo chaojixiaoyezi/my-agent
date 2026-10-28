@@ -1,0 +1,83 @@
+# LLM: 任务指定的旧测试入口在本分支已不存在；此兼容模块显式重导出现有test_tui_view全部测试，不替换、跳过或削弱断言。
+# 模块用途: 让既定三文件门禁仍运行真实TUI基础回归；实现与夹具继续只在拆分文件维护。
+from agent_py_agent.tests.test_tui_view import (
+    test_agent_store_switch_restores_each_viewport_without_cross_view_selection as test_agent_store_switch_restores_each_viewport_without_cross_view_selection,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_agent_switch_rebinds_expanded_transcript_to_selected_store as test_agent_switch_rebinds_expanded_transcript_to_selected_store,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_control_preferred_height_tracks_inline_transcript_and_terminal_cap as test_control_preferred_height_tracks_inline_transcript_and_terminal_cap,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_control_reads_formatted_lines_without_building_transcript_string as test_control_reads_formatted_lines_without_building_transcript_string,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_ctrlo_control_preserves_safe_tuple_lines_identity as test_ctrlo_control_preserves_safe_tuple_lines_identity,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_ctrlo_control_reuses_counted_ids_across_redraw_scroll_and_footer as test_ctrlo_control_reuses_counted_ids_across_redraw_scroll_and_footer,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_ctrlo_prefix_context_lru_is_bounded_and_refreshes_hits as test_ctrlo_prefix_context_lru_is_bounded_and_refreshes_hits,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_ctrlo_prefix_extension_only_sorts_and_renders_added_tail as test_ctrlo_prefix_extension_only_sorts_and_renders_added_tail,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_ctrlo_prefix_extension_preserves_fallback_and_budgets as test_ctrlo_prefix_extension_preserves_fallback_and_budgets,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_full_transcript_view_computes_footer_height_from_rendered_fragments as test_full_transcript_view_computes_footer_height_from_rendered_fragments,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_idle_animation_tick_reuses_static_long_transcript_frame as test_idle_animation_tick_reuses_static_long_transcript_frame,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_manual_scroll_anchor_does_not_jump_when_new_event_arrives as test_manual_scroll_anchor_does_not_jump_when_new_event_arrives,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_manual_scroll_counts_new_typed_messages_without_counting_tool_blocks as test_manual_scroll_counts_new_typed_messages_without_counting_tool_blocks,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_mouse_move_after_button_release_does_not_expand_selection as test_mouse_move_after_button_release_does_not_expand_selection,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_mouse_selection_highlights_and_copies_visible_columns as test_mouse_selection_highlights_and_copies_visible_columns,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_new_messages_footer_pill_click_restores_follow_tail as test_new_messages_footer_pill_click_restores_follow_tail,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_no_button_motion_finishes_lost_release_and_copies_once as test_no_button_motion_finishes_lost_release_and_copies_once,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_provider_shares_frame_and_block_cache_between_controls as test_provider_shares_frame_and_block_cache_between_controls,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_resize_clears_viewport_selection as test_resize_clears_viewport_selection,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_resize_rewraps_without_changing_state_or_losing_user_background as test_resize_rewraps_without_changing_state_or_losing_user_background,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_right_click_copies_wide_selection_once_and_keeps_highlight as test_right_click_copies_wide_selection_once_and_keeps_highlight,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_right_click_without_selection_does_not_interrupt_the_event_loop as test_right_click_without_selection_does_not_interrupt_the_event_loop,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_right_release_without_down_still_copies_existing_selection_once as test_right_release_without_down_still_copies_existing_selection_once,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_scrolling_down_to_last_line_restores_sticky_follow as test_scrolling_down_to_last_line_restores_sticky_follow,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_selection_uses_prompt_toolkit_source_indexes_for_wide_characters as test_selection_uses_prompt_toolkit_source_indexes_for_wide_characters,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_view_select_all_routes_to_active_viewport_and_preserves_other_selection as test_view_select_all_routes_to_active_viewport_and_preserves_other_selection,
+)
+from agent_py_agent.tests.test_tui_view import (
+    test_window_scroll_follows_each_agent_store_anchor_after_switch as test_window_scroll_follows_each_agent_store_anchor_after_switch,
+)

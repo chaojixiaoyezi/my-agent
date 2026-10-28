@@ -2,6 +2,7 @@
 # 模块用途: 给TUI与插件提供严格归属校验的只读进程观察，有界重试目录换代，保留真实错误分类与实时状态。
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -40,9 +41,11 @@ _FILE_CACHE_MAX_ENTRIES = 2048
 _MAX_DIRECTORY_RECORDS_COUNT = 4096
 # 后台静态快照必须重新核验的最长秒数，热命中不延长有效期。
 _CACHE_RECHECK_SECONDS = 60.0
-# 并发原子写导致目录换代时，初次读取后最多重试三次，每次退避5毫秒。
-_MAX_DIR_SCAN_RETRIES = 3
+# 显式换代或扫描边界瞬态异常总共最多尝试四次，每次重试前退避5毫秒。
+_MAX_SCAN_ATTEMPTS = 4
 _DIR_SCAN_RETRY_BACKOFF_SECONDS = 0.005
+_TRANSIENT_SCAN_ERRNOS = frozenset({errno.EINTR, errno.EAGAIN, errno.ENOENT, getattr(errno, "ESTALE", errno.ENOENT), errno.ESRCH})
+_PERMISSION_SCAN_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 _SCOPE_FIELDS = ("access_scope", "execution_scope", "activation_scope", "completion_target", "metadata", "scope")
 _ATTRIBUTION_FIELDS = ("owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id")
 
@@ -233,32 +236,47 @@ def _revalidate_cached_file(root, home, snapshot):
     return _file_snapshot(root, snapshot.session_id, home)
 
 
-# LLM: 目录级错误不得被归属隔离；锁内移除已失效投影，只返回结构化诊断，不写磁盘或恢复Store。
-# 函数用途: 丢弃此目录旧缓存并报告超限或读取期间换代。
-def _directory_projection_error(root, key, code):
+# LLM: 目录级错误不得归属隔离；锁内移除失效投影，异常仅保留类型/errno，不保存正文或写磁盘。
+# 函数用途: 丢弃此目录旧缓存并报告超限、换代或明确权限拒绝。
+def _directory_projection_error(root, key, code, *, failure: OSError | None = None):
     with _VIEW_CACHE_LOCK:
         _DIRECTORY_CACHE.pop(key, None)
-    return (_SessionSnapshot(str(root), error=code, error_code=code),)
+    return (_SessionSnapshot(str(root), error=type(failure).__name__ if failure is not None else code,
+                             error_code=code, error_errno=failure.errno if failure is not None else None),)
 
 
-# LLM: 仅重试明确的目录换代；每次重新执行原完整校验，超限/权限/坏记录不重试，不用旧帧冒充稳定扫描。
-# 函数用途: 为并发原子写提供初读加三次5ms退避的有界目录观察。
+# LLM: 换代及准确瞬态异常共用四次完整尝试；权限优先立即失败，未知错误透传，不拿旧帧冒充稳定扫描。
+# 函数用途: 在扫描边界竞争时最多退避重试三次，耗尽统一报告目录读取期间换代。
 def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]:
-    for attempt in range(_MAX_DIR_SCAN_RETRIES + 1):
-        snapshots = _directory_snapshot_attempt(root, home)
+    for attempt in range(_MAX_SCAN_ATTEMPTS):
+        try:
+            snapshots = _directory_snapshot_attempt(root, home, allow_initial_missing=attempt == 0)
+        except OSError as exc:
+            denied = isinstance(exc, PermissionError) or exc.errno in _PERMISSION_SCAN_ERRNOS
+            if not denied and not (isinstance(exc, (FileNotFoundError, ProcessLookupError)) or exc.errno in _TRANSIENT_SCAN_ERRNOS):
+                raise
+            try:
+                key = (str(home.resolve()), str(root.resolve()))
+            except OSError:
+                # 规范化本身也被拒绝时保留最初错误，不让额外文件系统访问掩盖它。
+                key = (str(home), str(root))
+            code = "PERMISSION_DENIED" if denied else "DIRECTORY_CHANGED_DURING_READ"
+            snapshots = _directory_projection_error(root, key, code, failure=exc)
         if not any(item.error_code == "DIRECTORY_CHANGED_DURING_READ" for item in snapshots):
             return snapshots
-        if attempt < _MAX_DIR_SCAN_RETRIES:
+        if attempt + 1 < _MAX_SCAN_ATTEMPTS:
             time.sleep(_DIR_SCAN_RETRY_BACKOFF_SECONDS)
     return snapshots
 
 
-# LLM: 规范目录单槽、逐文件stat、nofollow、记录上限和原cached_at均保持；一次尝试换代时丢弃其不完整投影。
-# 函数用途: 执行原单次安全扫描，供有界重试入口复用而不改变缓存复核期限。
-def _directory_snapshot_attempt(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]:
+# LLM: 单槽、stat/nofollow、上限和cached_at不变；只有整轮首次可把缺目录当空态，重试缺失仍须上抛竞争。
+# 函数用途: 执行一次安全扫描，区分初次不存在与读后消失，不改变缓存复核期限。
+def _directory_snapshot_attempt(root: Path, home: Path, *, allow_initial_missing: bool = True) -> tuple[_SessionSnapshot, ...]:
     try:
         before = _directory_stat_key(root)
     except FileNotFoundError:
+        if not allow_initial_missing:
+            raise
         return ()
     now = time.monotonic()
     trusted = cache_entry_trustworthy(before[2])

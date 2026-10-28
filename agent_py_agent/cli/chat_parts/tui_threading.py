@@ -33,6 +33,9 @@ TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS = 3.0
 # 同owner/thread已验证帧最多静默保留两次瞬态刷新失败，第三次报告原观察告警。
 _BG_WATCH_SILENT_TRANSIENT_FAILURES = 2
 _BG_WATCH_TRANSIENT_ERRNOS = frozenset({errno.ENOENT, getattr(errno, "ESTALE", errno.ENOENT), errno.EAGAIN})
+_TRANSIENT_BACKGROUND_VIEW_ERRORS = frozenset({"DIRECTORY_CHANGED_DURING_READ", "LOCK_TIMEOUT", "SNAPSHOT_PARSE_INCOMPLETE"})
+_HARD_BACKGROUND_VIEW_ERRORS = frozenset({"PERMISSION_DENIED", "OWNER_MISMATCH"})
+_BG_WATCH_PERMISSION_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
 
 
 # LLM: 仅代表本次投影全部错误均已结构化确认瞬态；不携正文、权限或第二份进程快照。
@@ -41,16 +44,33 @@ class _BackgroundWatchTransientError(OSError):
     pass
 
 
-# LLM: 只接受明确目录换代或准确OSError类别与errno；混合、缺失或持久结构错误均立即报告，不分析异常文案。
-# 函数用途: 判断一组投影错误是否全部来自短暂目录/文件原子替换。
+# LLM: 只读结构化code、异常类型及权限errno；顶层或任一子错误拒绝就优先失败关闭，不能被瞬态标签覆盖。
+# 函数用途: 识别需要立即清除旧观察帧的权限与owner归属错误。
+def _background_watch_hard_projection(result: object) -> bool:
+    if not isinstance(result, Mapping):
+        return False
+    errors = result.get("errors")
+    entries = (result, *(errors if isinstance(errors, (list, tuple)) else ()))
+    return any(isinstance(item, Mapping) and (
+        (isinstance(item.get("error_code"), str) and item["error_code"] in _HARD_BACKGROUND_VIEW_ERRORS)
+        or item.get("error") == "PermissionError" or (
+            type(item.get("errno")) is int and item["errno"] in _BG_WATCH_PERMISSION_ERRNOS
+        )
+    ) for item in entries)
+
+
+# LLM: 全部为准确瞬态code或原有OSError/errno才可宽限；权限、混合、缺失和未知错误不静默，不分析文案。
+# 函数用途: 识别目录竞争、锁超时及不完整快照是否可在同scope短暂保留旧帧。
 def _background_watch_transient_projection(errors: object) -> bool:
     if not isinstance(errors, (list, tuple)) or not errors:
+        return False
+    if _background_watch_hard_projection({"errors": errors}):
         return False
     for error in errors:
         if not isinstance(error, Mapping):
             return False
         code = error.get("error_code")
-        if code == "DIRECTORY_CHANGED_DURING_READ" and error.get("error") in {None, code}:
+        if isinstance(code, str) and code in _TRANSIENT_BACKGROUND_VIEW_ERRORS:
             continue
         if code or error.get("error") not in {"OSError", "FileNotFoundError", "BlockingIOError"}:
             return False
@@ -813,8 +833,8 @@ def _background_watch_thread_id(agent: object, navigation: object | None, *, ses
     return None
 
 
-# LLM: 仅已绑定owner/thread读原列表；范围改变先清旧帧资格，成功完成列表/详情后才登记有效帧，未知错误不转瞬态。
-# 函数用途: 刷新当前会话及未绑定旧记录的概要，打开观察页时才读取该范围选中日志。
+# LLM: 仅绑定owner/thread读列表；权限/owner错误优先显式拒绝，成功完成列表/详情才登记有效帧，未知错误不转瞬态。
+# 函数用途: 刷新本会话概要并区分硬拒绝与瞬态竞争，打开观察页才读取选中日志。
 def _refresh_background_watch(agent: object, navigation: object | None, *, thread_id: str | None = None) -> bool:
     from ...agent.conversation.background_process_view import (
         inspect_background_process,
@@ -844,6 +864,8 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
         _reset_background_watch_cache(navigation)
     result = list_background_processes(Path(home), thread_id=thread_id)
     if not result["projection_ok"]:
+        if _background_watch_hard_projection(result):
+            raise PermissionError("background process permission or owner check failed")
         if _background_watch_transient_projection(result.get("errors")):
             raise _BackgroundWatchTransientError("background process projection unavailable")
         raise OSError("background process projection unavailable")
@@ -860,8 +882,8 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
     return updated or changed
 
 
-# LLM: 空新会话静默清观察；仅同owner/thread成功旧帧可容忍两次明确瞬态，其余立即报告，成功才清专用告警。
-# 函数用途: 按canonical线程刷新或恢复观察提示，不改消息、进程控制与完成wake链路。
+# LLM: 仅同scope已验证帧容忍两次瞬态；权限/owner硬错立即清帧和资格，未知错误仍告警，成功才清专用提示。
+# 函数用途: 按canonical线程同步观察，安全拒绝时撤销旧结果，不改消息、进程或完成wake链路。
 def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
     if not callable(runtime_reader):
@@ -886,11 +908,13 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
         scope_confirmed = True
         changed = _refresh_background_watch(agent, navigation, thread_id=thread_id)
     except Exception as exc:
-        if not scope_confirmed or isinstance(exc, LookupError):
+        hard_error = isinstance(exc, PermissionError) or (isinstance(exc, OSError) and exc.errno in _BG_WATCH_PERMISSION_ERRNOS)
+        if hard_error or not scope_confirmed or isinstance(exc, LookupError):
             navigation.update_background_watch_rows([], active_count=0)
             navigation._background_watch_scope = None
             _reset_background_watch_cache(navigation)
-            message = "后台进程观察刷新失败；会话范围未确认，已暂停显示"
+            message = ("后台进程观察刷新失败；权限或归属校验失败，已暂停显示" if hard_error else
+                       "后台进程观察刷新失败；会话范围未确认，已暂停显示")
         else:
             transient = isinstance(exc, _BackgroundWatchTransientError) or (
                 type(exc) in {OSError, FileNotFoundError, BlockingIOError} and exc.errno in _BG_WATCH_TRANSIENT_ERRNOS

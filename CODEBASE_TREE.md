@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 B2 三轮：后台观察失败关闭与导航优先级
+
+`agent/conversation/background_process_view.py` 的原单次安全扫描由四次有界尝试包裹，区分首次缺目录与扫描后消失，权限拒绝立即返回结构化错误；`cli/chat_parts/tui_threading.py` 分类同scope瞬态宽限及硬拒绝清帧；`tui_view.py` 的End覆盖待恢复锚点。没有新增生产模块或第二份业务状态。
+
+新增 `tests/test_tui_background_observation_resilience.py`（目录/瞬态/硬拒绝）、`tests/test_tui_sticky_user_turn_bar.py`（点击后未重绘导航）及兼容入口 `tests/test_tui.py`（显式重导出现有 `test_tui_view.py` 全部真实测试）。原Wave9综合回归保留，权限一例迁移到结构化拒绝合同；三轮验证与未验证范围见 `TESTS.md`。
+
 ## 2026-10-28 Wave 9 B2 二轮：完整原文跨窗口用户索引
 
 `cli/chat_parts/tui_view.py` 在现有provider内增加按冻结块身份/宽度复用的轻量用户块索引：完整原文窗口外的用户仍有块顺序和摘要，点击通过现有稀疏页表聚焦其来源首行，继续只排版附近至多四页。`tui_view_model.py` 的 `TuiUserTurnLine` 明确区分可空的窗口物理行和冻结块序，不引入第二份业务状态。

@@ -1,3 +1,33 @@
+## 2026-10-28 Wave 9 B2 三轮：End覆盖、目录竞争与硬错误失败关闭
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-b2.md`（52行）。起点 `5c1693877277cdbd66e508f000566a0128e3d787`，分支 `wave9-b2`，总基线 `db4d5de92`；项目编辑、测试及提交仅在 `/tmp/wt-wave9-b2` 内进行。
+
+- **End优先级**：`move_end()` 在同一锁内清除待恢复阅读锚点再恢复follow。普通/详情/完整原文均通过“原生鼠标顶栏点击→未重绘立即End→真实Window/Screen绘制”，最终跟随页底且顶栏重指U3。复查Home、move、jump_to原已清pending，保留其三条守卫。
+- **目录竞争**：`_MAX_SCAN_ATTEMPTS=4`，显式换代、FileNotFoundError/ProcessLookupError及EINTR/EAGAIN/ENOENT/ESTALE/ESRCH共用最多三次5ms退避；权限异常或EACCES/EPERM立即返回PERMISSION_DENIED，未知错误仍透传。诊断只保留类型/errno，不保留异常正文。
+- **初始空态与读后消失**：整轮首次缺目录仍是原有干净空态；重试时不再允许吞掉起始缺失。既有 `test_b1_disappearing_directory_after_read_is_not_successful_empty` 曾抓到重试后误报成功，现通过产品修复转绿，未改该断言。耗尽统一error_code=DIRECTORY_CHANGED_DURING_READ，同时保留实际FileNotFoundError类型；重新出现必须完成前后stat核验。
+- **同scope宽限**：LOCK_TIMEOUT与SNAPSHOT_PARSE_INCOMPLETE加入瞬态code集合。仅同owner/thread已有成功帧才允许前两次静默保留，第三次告警；成功复位。首帧、owner/thread切换及范围解析失败不借旧帧。
+- **硬拒绝**：PERMISSION_DENIED、OWNER_MISMATCH、PermissionError及权限errno优先清行、清计数、撤销scope/有效帧资格并告警；之后瞬态不能复活旧帧。畸形顶层或兄弟error_code也不能遮盖后面的硬拒绝。
+
+测试入口说明：任务指定的三个文件在起点均不存在。本轮新建两个专项文件；`test_tui.py` 显式重导出既有 `test_tui_view.py` 全部27个测试函数、33个参数例，作为既定命令的兼容入口，不增造空测试，不删改原文件。额外回归不再重跑该源文件，避免重复计数。旧目录权限回归只将“抛出PermissionError”迁移为任务要求的结构化错误，并加强核对原类型/errno及仅一次调用。
+
+验证记录：
+- 指定三文件：**94 passed，0 failed/error/skipped**（后台韧性55、顶栏导航6、兼容入口33）。
+- 额外14个既有相关文件：**1026 passed，0 failed/error/skipped**；两份JUnit按测试身份去重合计 **1120 passed**。
+- 红绿：初始四项复现有46个明确断言失败、0 errors；随后畸形错误码2例、读后消失/恢复2例也分别先失败后转绿。其它已有合同守卫初始即通过，不冒充全部新例都经历红绿。权限异常正文守卫曾与临时目录名称撞词，已改为唯一正文标记，未修改产品行为来迎合它。
+- 两次gpt-6-astra/high限定范围的内联静态复核分别覆盖四项边界和扫描增量，未确认新的P1/P2；不是完整diff/全仓评审，也没有由评审者独立跑测试。
+- 未验证：真实用户终端端到端、真实权限变更压力、Linux/跨平台车道、全仓pytest；未推送、合入、部署或运行退役尺寸检查。
+
+门禁复现（工作树根目录）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_background_observation_resilience.py agent_py_agent/tests/test_tui_sticky_user_turn_bar.py agent_py_agent/tests/test_tui.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+额外回归文件为 `test_wave9_tui_bg_watch_and_sticky_user_bar.py`、`test_tui_turn_completion_and_bg_watch.py`、`test_gateway_background_process_identity.py`，以及 `test_tui_{view_model,reading_position,complete_detail,transcript,combinatorial,resource_lifetime,agent_navigation,clipboard,threading,terminal,prompt_toolkit_pipe}.py`。
+原始证据在本树忽略目录 `.pytest_cache/w9b2r3-{red,malformed-red,retry-missing-red,required,regression}.xml` 及初始 `w9b2r3-red.log`，不随功能提交。
+
 ## 2026-10-28 Wave 9 B2 二轮：完整原文跨四页用户导航
 
 来源：完整阅读 `07-tasks/fix-wave9-b2.md`（38行），落实c17指出的P2。起点 `dad9a00ca65b4592262193bd8bba5ba5aa6b2cd1`，总基线仍为 `db4d5de92`；所有项目编辑、测试和提交均在 `/tmp/wt-wave9-b2` 的 `wave9-b2` 分支完成。

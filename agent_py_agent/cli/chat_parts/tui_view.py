@@ -587,10 +587,11 @@ class TuiTranscriptControl(UIControl):
                 elif anchor is not None and anchor[0] in offsets:
                     self.cursor_line = offsets[anchor[0]] + anchor[1]
 
-    # LLM: end 恢复 follow-tail；具体末行在下一 create_content 根据当前 frame 决定。
-    # 函数用途: 跳到 transcript 底部并继续跟随新输出。
+    # LLM: End覆盖此前未重绘的显式跳转，必须清pending锚点；具体末行仍由下一create_content按当前帧决定。
+    # 函数用途: 丢弃过期阅读目标，跳到正文底部并继续跟随新输出。
     def move_end(self) -> None:
         with self._lock:
+            self._pending_reading_anchor = None
             self.follow = True
             self.cursor_line = max(0, self._line_count - 1)
             self._unseen_baseline = None
