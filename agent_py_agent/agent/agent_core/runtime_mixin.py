@@ -71,8 +71,7 @@ class _PromptScopeSnapshot:
     previous_skills: object
 
 
-# LLM: Gateway conversation compact may release only this attempt's pre-provider active inputs;
-# callers outside agent_core use this narrow runtime boundary instead of importing private leaves.
+# LLM: Gateway 会话压缩只能释放本次供应商调用前的活动输入；agent_core 外部调用方必须使用这个窄运行时边界，不导入私有叶子模块。
 # 函数用途: 在 Compact 续跑前释放本轮尚未提交给模型的活动回合补充消息。
 def release_active_turn_inputs_for_compact(
     agent: object,
@@ -713,7 +712,7 @@ def _settle_main_agent_run_status(
         pass
 
 
-# LLM: Child Compact and active-Goal boundaries stay in the exact outer runner; only that lifecycle may finally settle them.
+# LLM: 子代理压缩与活动目标边界仍属于准确的外层执行器，只有该生命周期能最终结算它们。
 # 函数用途: 子代理压缩或 Goal 下一轮不能提前注销执行凭证；错误、停止和已完成目标仍正常收口。
 def _task_local_continuation_keeps_attempt_open(agent, params: RunParams, result: object) -> bool:
     attrs = getattr(params, "task_attributes", None)
@@ -775,10 +774,9 @@ def _settle_main_agent_run(agent, params: RunParams, result) -> None:
     _settle_terminal_conversation_task_run(agent, params)
 
 
-# LLM: A TaskRun spans every foreground/background slice and descendant of one conversation task. This runs on root and
-# child terminal edges so either side of their race can complete the same CAS. The decision itself (root terminal, link
-# terminal or truly absent, tree terminal/quiescent) lives in conversation/task_run_closeout.settle_terminal_task_run, which
-# the gateway /recover child branch also calls (gateway_parts may not import agent_core); keep both callers on that function.
+# LLM: TaskRun 覆盖一个会话任务的全部前后台片及后代；根与子代理终态均调用这里，让竞争任一方都能完成同一CAS。
+# 根终态、任务链接终态或确实不存在、代理树终态或静止等裁决只属于 conversation/task_run_closeout.settle_terminal_task_run；
+# Gateway 的 /recover 子代理分支也调用它，gateway_parts 不可导入 agent_core，两个调用方必须保持共用该函数。
 # 函数用途: 在任一代理执行收口后核对持久会话任务状态，并幂等关闭整棵任务执行总账；没有会话任务的请求在代理树结束后同样关闭。
 def _settle_terminal_conversation_task_run(agent: object, params: object) -> None:
     settle_terminal_task_run(

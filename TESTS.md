@@ -1,3 +1,52 @@
+## 2026-10-28 Wave 9 B1 Round 4：闲置失败记账CAS与完整中文LLM注释
+
+来源：完整阅读 `07-tasks/fix-r4-wave9-b1.md` 55行；返工起点 `9a54ecd62f250f3a754d66cdc3e574ef9e12198d`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅修改指定 `wave9-b1` 工作树，不推送、合并、部署或启停真实服务。
+
+- **失败记账CAS**：最终候选计量完成后立即复核中断；摘要、容量拒绝、请求面准备及检查点提交失败统一在记账前再查中断。闲置失败把冻结的活动代与规范消息指纹透传到原失败存储方法，按原消息追加锁→线程文件锁顺序核对消息尾、最新活动代及压缩代，再增加失败数。漂移或坏读抛 `IdleCompactActivityChanged`，guard不能吞掉，Gateway按原 `activity_changed` / `cas_aborted=True` 干净让位并标明 `aborted_by_concurrent_activity`。无竞争的 `COMPACT_CANDIDATE_TOO_LARGE` 仍使失败数0→1；普通压缩保留原代数检查、调用形状及尽力记账，不另建失败账或清零旧失败。
+- **先红后绿**：新增最终计量的控制/活动/仅消息三例，零备份预算使用正式配置而非替换压缩算法；原实现控制通过、两种竞争失败（`r4-measure-final-red.xml`），失败写入口前的两种迟到竞争也均先红（`r4-write-red.xml`）。首次尝试仍用默认备份预算，变化被后续备份收缩重测的既有取消门挡住，三例全过，不把它当作缺陷已修证据。固定到真正最后计量后才得到有效红例。
+- **12个新增运行用例**：上述三例、失败写入口前活动/消息两例、直接存储拒绝活动/追加/同长改写/压缩代变化/坏消息五例，以及真实跨进程消息锁、指纹检查后最新活动事务两例。后七例从已有失败数2出发，证明不增也不清零；直接拒绝还逐字节确认线程未写。跨进程测试通过真实append持有原OS锁，非阻塞原锁探针确认争用，再按事件释放写者；活动测试让真实活动登记先提交，再放行原失败事务，不用sleep猜时序。指定四文件当前246项，0失败/0错误/0跳过（`r4-required.xml`）。
+- **中文注释**：扫描原区间全部32个Python文件，连同本次新触及的 `compact_guard.py` 共33文件；13个文件中的149处英文LLM首行完成翻译或按当前失败合同重写，也覆盖任务清单外的一处测试注释。最终1079个函数/异步函数/类及全部模块头，双层注释缺失或错位0，所有LLM首行无中文的数量0。13个翻译文件在翻译操作前后完整AST摘要相等；相对返工起点，生产行为只改变上述四个失败链模块。
+- **独立复核边界**：Astra high只读核对精确内联失败链、锁序、普通路径及错误透传片段，未发现协议内确定阻断缺陷；按其建议补了两例真实锁竞争。它不是全仓审阅或独立运行验收。哈希可识别检查前的同长改写，不代表任意不遵守消息锁的外部改写也获得原子CAS保证。
+
+指定复现（工作树根；四文件246项全部通过）：
+
+```bash
+pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py agent_py_agent/tests/test_compact_threshold_unification.py agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+git diff --check
+```
+
+模块头、嵌套定义及装饰器前双层注释按下方Round3的完整AST脚本复现；另对同一实际文件并集检查全部LLM首行，严格于只查定义注释块：
+
+```bash
+python3 - <<'PY'
+import re, subprocess
+from pathlib import Path
+names = set()
+for revision in ('db4d5de92..HEAD', 'HEAD'):
+    names.update(subprocess.check_output(['git', 'diff', '--name-only', revision, '--', '*.py'], text=True).splitlines())
+files = sorted(name for name in names if Path(name).is_file())
+errors = [(name, number) for name in files
+          for number, line in enumerate(Path(name).read_text().splitlines(), 1)
+          if line.lstrip().startswith('# LLM:') and not re.search('[\u4e00-\u9fff]', line)]
+print({'files': len(files), 'english_only_llm_lines': len(errors), 'errors': errors})
+assert not errors
+PY
+```
+
+**额外兼容检查仍有5项失败，不能写成全部门禁或全仓通过**：以下五文件共82项，当前77通过/5失败/0错误/0跳过（`r4-failure-compat.xml`）。失败全部在 `test_compact_calibrated_candidate_gate.py`：两个活动回合上限用例及三个Gateway校准场景，仍按旧触发比例推导9000/80000，而当前上限为8000/72000。本轮不修改这些旧断言或扩大到阈值修复。
+
+```bash
+pytest agent_py_agent/tests/test_compact_circuit_breaker.py agent_py_agent/tests/test_compact_calibrated_candidate_gate.py agent_py_agent/tests/test_compact_capacity_facts.py agent_py_agent/tests/test_compact_capacity_host_chain.py agent_py_agent/tests/test_compact_output_reserve.py -q --tb=short
+```
+
+为确认归属，分别从返工起点 `9a54ecd62` 与真正原功能基线 `db4d5de92` 导出完整普通源码副本至本工作树缓存（未新建/切换其他worktree），在各副本根核对导入来源后，以 `python3 -m pytest` 跑完全相同五文件。起点仍77通过/同5失败，当前与起点的失败节点及错误消息逐项一致；原功能基线82全部通过（`r4-baseline-start.xml`、`r4-baseline-feature.xml`、`r4-baseline-comparison.json`）。因此这是本功能分支在Round4前已有、相对原功能基线仍待集成者处理的回归，不能说main原本就失败。下一步宜独立对齐这些容量夹具与已明确的默认80%合同，不能为清零失败改回旧默认或放宽容量门。
+
+本轮未运行全仓及线上CI、真实供应商或生产Gateway/IM/TUI，也未验证Linux/Windows；本机真实临时Store、OS锁与替身供应商证据不外推上述链路。未运行已退役尺寸checker。缓存中的JUnit、源码副本及AST快照仅用于本次复核，不进入产品提交。
+
 ## 2026-10-28 Wave 9 B1 Round 3：公开强制策略别名与完整双层注释
 
 来源：完整阅读 `07-tasks/fix-r3-wave9-b1.md` 44行；返工起点 `49222cf3693bdb0fa966ab968aed91d33bd9bd3c`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在指定 `wave9-b1` 工作树修改，不推送、合并、部署或启停真实服务。

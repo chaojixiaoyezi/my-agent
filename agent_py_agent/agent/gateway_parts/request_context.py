@@ -62,8 +62,7 @@ class GatewayAskRunContext:
     stages: dict[str, float] | None = None
 
 
-# LLM: This is an eligible exact/Goal/active workspace selection, not proof that the current turn
-# has started task execution; lifecycle activation still happens at the first promoting tool.
+# LLM: 这里只表示准确请求、目标或活动任务选出的合格工作区，不证明当前回合已执行任务；生命周期仍在首个可升级工具调用时激活。
 # 类用途: 保存本轮具有结构化执行权的确切任务目录，普通历史投影不会自动进入这里。
 @dataclass(frozen=True)
 class GatewayWorkspaceSelection:
@@ -89,8 +88,7 @@ class GatewayConversationContext:
     compact_summary: str = ""
     compact_operation_evidence: dict[str, object] = field(default_factory=dict)
     compact_operation_evidence_ref: str = ""
-    # LLM: Keep retained-tail operation facts outside prose so text-only history projection
-    # cannot discard a recent verified side effect.
+    # LLM: 保留尾部的操作事实必须独立于正文，防止纯文本历史投影丢失最近已验证的副作用。
     # 字段用途: 保存近期未压缩 assistant metadata 中的程序核验事实，与摘要证据分栏注入下一轮。
     recent_operation_evidence: dict[str, object] = field(default_factory=dict)
     compact_generation: int = 0
@@ -102,12 +100,10 @@ class GatewayConversationContext:
     history_source: ConversationHistorySource | None = field(default=None, repr=False)
     recent_artifacts: tuple[dict[str, object], ...] = ()
     workspace_task: GatewayWorkspaceSelection | None = None
-    # LLM: These exact owner/thread completed-task refs are model-visible candidates only;
-    # they never select cwd, grant write authority, or bypass exact-path runtime rebinding.
+    # LLM: 这些准确所有者及线程的已完成任务引用仅供模型发现，不选择cwd、不授予写权限，也不绕过准确路径的运行时重绑定。
     # 字段用途: 保存同一会话最近完成任务的精确目录候选，让模型能识别“回到上个项目”而不靠猜路径。
     recent_task_workspaces: tuple[dict[str, str], ...] = ()
-    # LLM: These are bounded, exact-root terminal child deliveries from the observation ledger;
-    # prompt rendering must keep them separate from chat prose and omit runner-private payloads.
+    # LLM: 这些是观察账本中有界且准确匹配根任务的子代理终态交付；提示渲染须与聊天正文分开，并省略执行器私有载荷。
     # 字段用途: 保存当前根任务直属子代理的完成回复和精确产物引用，供普通后续轮直接整合。
     subagent_completions: dict[str, object] = field(default_factory=dict)
     thread_goal: dict[str, object] | None = None
@@ -132,8 +128,7 @@ class GatewayConversationLoadRequest:
     defer_compact: bool = False
 
 
-# LLM: Compact start saves numeric telemetry in the exact thread before publication, using the
-# captured generation CAS. This is display-only, not history, billing or Compact authority.
+# LLM: 压缩开始先按捕获代次CAS把数值遥测存入准确线程，再发布事件；该数据只用于展示，不是历史、计费或压缩权威。
 # 函数用途: 压缩开始先保存同一会话的新容量再通知界面，避免后台刷新恢复旧模型数字；遥测失败不打断压缩。
 def _gateway_compact_progress_callback(
     on_chunk: object,
@@ -145,8 +140,7 @@ def _gateway_compact_progress_callback(
     if not callable(writer):
         return None
 
-    # LLM: Same-generation numeric writes happen before the public event; failed telemetry does
-    # not change the original compact callback or result, and does not add model calls.
+    # LLM: 同代次的数值写入先于公开事件；遥测失败不改变原压缩回调或结果，也不增加模型调用。
     # 函数用途: 先落当前线程的显示快照，再送出进度，原聊天历史与成本账本不变。
     def publish(payload: dict[str, object]) -> object:
         usage_writer = getattr(on_chunk, "write_context_usage", None)
@@ -367,8 +361,7 @@ def _load_gateway_thread(
     return thread, None
 
 
-# LLM: Gateway preflight shares the registered request interrupt with Compact. User stop propagates
-# unchanged; compact failures keep their own typed error code and cannot become transcript corruption.
+# LLM: Gateway预检与压缩共用已登记的请求中断；用户停止原样透传，压缩失败保留自己的类型化错误码，不得误报成会话记录损坏。
 # 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
 # defer只读固定完整尾界的范围来源；逐行selector不得重排行，错误保留原因，普通入口沿同一来源压缩。
 # 函数用途: 加载同源历史并冻结给自动压缩；可延后准备，停止与坏原文不降级为空。
@@ -452,9 +445,8 @@ def _gateway_compact_model_surface(inputs, source):
     ))
 
 
-# LLM: The full structured ledger stays owner-local and append-only; the prompt receives only a
-# bounded projection plus this exact ref. This follows the same refs-first rule as large tool
-# output and avoids turning historical verification into an ever-growing fixed prompt prefix.
+# LLM: 完整结构化账本留在所有者本地且只追加，提示只接收有界投影及准确引用；与大工具输出共用引用优先规则，
+# 防止历史验证记录把固定提示前缀越撑越大。
 # 函数用途: 返回当前会话完整 Compact 操作证据的 owner 内路径，供模型按需读取而非常驻展开。
 def _compact_operation_evidence_ref(agent: object, thread_id: str) -> str:
     home = getattr(agent, "home_paths", None)
@@ -563,9 +555,8 @@ def _gateway_named_work(
     )
 
 
-# LLM: Foreground continuation consumes the same bounded completion envelope that child lifecycle
-# wakes publish. Exact root/parent ids select direct children; prose never selects ownership, and
-# runner_result_json/output_json remain private even when present in the durable observation.
+# LLM: 前台续接消费子代理生命周期唤醒所发布的同一有界完成信封；准确根及父身份选择直属孩子，正文不决定归属。
+# 即使持久观察中存在 runner_result_json 或 output_json，也必须保持私有。
 # 函数用途: 从会话观察账本提取当前根任务直属子代理的最终回复和交付引用，让后续聊天无需猜目录。
 def _gateway_subagent_completion_context(
     store: object,
@@ -609,10 +600,8 @@ def _gateway_subagent_completion_context(
     return context
 
 
-# LLM: A continued foreground turn gets a new task id while retaining the same canonical task
-# workspace. Exact task-link path equality is the only lineage join; prompt prose and cwd do not
-# participate, detached named work remains outside the ordinary lineage, and raw task_path strings
-# are memoized within the call so repeated links do not repeat Path.resolve(strict=True) syscalls.
+# LLM: 前台续接分配新任务身份但保留原规范任务工作区，只有任务链接准确路径相等才能连接谱系；提示正文和cwd不参与。
+# 独立命名工作仍不属于普通谱系；单次调用缓存原 task_path 字符串，避免重复链接反复调用 Path.resolve(strict=True)。
 # 函数用途: 找出当前持续工作目录在同一 thread 中使用过的结构化主任务 id，按原始路径去重复用路径解析结果。
 def _gateway_workspace_lineage_task_ids(
     store: object,
@@ -653,8 +642,7 @@ def _gateway_workspace_lineage_task_ids(
     return selected
 
 
-# LLM: Workspace execution follows an exact bound request, unfinished Goal, or currently active
-# task. A terminal sticky pointer is display/navigation state and must not select a new turn.
+# LLM: 工作区执行只跟随准确绑定请求、未结束目标或当前活动任务；终态固定指针只是展示和导航状态，不得选择新回合。
 # 函数用途: 为本轮选择仍有执行权的精确任务目录；普通终态任务不会自动吸附下一项工作。
 def _gateway_workspace_task(
     store: object,
@@ -789,15 +777,13 @@ def _required_gateway_workspace_link(
     raise ConversationTaskBindingError(f"{source} workspace task is missing or not reusable: {task_id}")
 
 
-# LLM: Only active means an ordinary new turn still belongs to a live execution. Interrupted and
-# completed are terminal here; they require exact request/Goal binding or an exact mutation path.
+# LLM: 只有 active 表示普通新回合仍属于活动执行；interrupted 和 completed 在这里均为终态，必须有准确请求或目标绑定，或准确写路径才可续接。
 # 函数用途: 判断任务链接是否仍在执行中，避免完成或中断任务自动吸附普通新消息。
 def _gateway_workspace_link_active(link: object) -> bool:
     return str(getattr(link, "status", "") or "").strip().lower() == "active"
 
 
-# LLM: Workspace inheritance accepts only an existing directory from the exact owner-local task
-# link. It resolves symlinks once so all downstream boundaries receive one canonical path.
+# LLM: 工作区继承只接受准确所有者本地任务链接里的已有目录，只解析一次符号链接，让下游边界共用同一规范路径。
 # 函数用途: 校验并规范化会话任务目录；路径不存在或不是目录时返回空。
 def _existing_gateway_workspace_path(value: object) -> str:
     text = str(value or "").strip()
@@ -810,9 +796,8 @@ def _existing_gateway_workspace_path(value: object) -> str:
     return str(path) if path.is_dir() else ""
 
 
-# LLM: This bounded projection exposes only canonical completed-task directories from the same
-# owner/thread. It is discovery context, never workspace selection or execution authority; exact
-# tool paths still pass scope checks. Canonical internal run records are not business directories.
+# LLM: 此有界投影只暴露同一所有者及线程的规范已完成任务目录，供发现而非选择工作区或授权执行；
+# 准确工具路径仍须通过作用域检查，规范内部运行记录不是业务目录。
 # 函数用途: 列出同会话真实业务目录候选，排除内部执行记录，避免续作时去 runs 里误找源码。
 def _gateway_recent_task_workspaces(
     store: object,

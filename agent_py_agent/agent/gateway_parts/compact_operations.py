@@ -115,7 +115,7 @@ def maybe_auto_compact_idle_session(agent, store, thread, *, now=None):
         return _compact_idle_candidate(agent, store, latest, now=now)
 
 
-# LLM: 用户代与canonical消息指纹联合幂等；摘要前捕获、摘要中及末写重核，坏读/变化只让位不计模型失败。
+# LLM: 用户代与规范消息指纹联合幂等；摘要/计量/成功及失败写口均重核，存储CAS拒绝统一转干净让位，不清零旧失败。
 # 函数用途: 确认只读安全门后沿原摘要链压缩；直接追加或同长改写也会废弃旧候选。
 def _compact_idle_candidate(agent, store, thread, *, now=None):
     policy = resolve_thread_compact_policy(agent, thread)
@@ -167,7 +167,7 @@ def _compact_idle_candidate(agent, store, thread, *, now=None):
             force=True, idle_compact=True, expected_user_activity_generation=generation, expected_message_tail=marker,
             interrupt_check=interrupted, commit_guard=interrupted, trigger_source="idle"))
     except (IdleCompactActivityChanged, InterruptedError, ToolCancelled):
-        return {**result, "reason": "activity_changed", "cas_aborted": True}
+        return {**result, "reason": "activity_changed", "cas_aborted": True, "aborted_by_concurrent_activity": True}
     return {**result, "compacted": bool(compacted.compacted), "reason": "compacted" if compacted.compacted else "no_source"}
 
 

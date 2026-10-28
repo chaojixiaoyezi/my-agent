@@ -213,8 +213,7 @@ def _execute_gateway_control(
     return _gateway_control_result_from_body(command.kind, body)
 
 
-# LLM: Polling a stable control operation is read-only and authenticates both owner and exact
-# conversation. An operation id locates a receipt but never substitutes for either scope fact.
+# LLM: 轮询稳定控制操作只读且必须核验所有者与准确会话；操作身份只定位回执，不能替代任一作用域事实。
 # G3 在原身份/会话头处追加唯一凭据；开关开时读取失败不创建 HTTP 请求，开关关时降级发送。
 # 函数用途: 按 Gateway 返回的 operation_id、当前 TUI 身份和精确会话查询最终状态。
 def request_gateway_control_status(
@@ -278,8 +277,7 @@ def request_gateway_control_status(
     )
 
 
-# LLM: Control HTTP responses preserve operation identity, delivery state, error_code, and typed details
-# separately from localized prose; callers must never infer interruption, retry safety, or recovery counts from text.
+# LLM: HTTP控制响应把操作身份、投递状态、error_code及类型化详情与本地化文案分开保留；调用方不得从文字推断中断、重试安全性或恢复数量。
 # 函数用途: 把控制 HTTP 字典恢复成含结构化错误码和详情的共享 ConversationControlResult。
 def _gateway_control_result_from_body(
     fallback_kind: str,
@@ -315,8 +313,7 @@ def _gateway_control_result_from_body(
     )
 
 
-# LLM: HTTP task status is untrusted adapter input. Restore only the frozen scalar fields and
-# bounded durable-work rows; malformed values cannot become a compact boundary or runtime state.
+# LLM: HTTP任务状态是不可信适配输入，只恢复冻结标量字段及有界持久工作记录；畸形值不得成为压缩边界或运行状态。
 # 函数用途: 将Gateway任务状态与原模型指标安全恢复为共享dataclass，保留真实Compact代数与同会话累计，不从正文推断。
 def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus | None:
     if not isinstance(value, dict):
@@ -368,8 +365,7 @@ def _conversation_task_status_from_body(value: object) -> ConversationTaskStatus
     )
 
 
-# LLM: Numeric control projections reject booleans and malformed strings instead of silently
-# turning them into status authority.
+# LLM: 数值控制投影拒绝布尔值和畸形字符串，不得静默把它们转换成状态权威。
 # 函数用途: 将控制结果中的整数计数安全收口为非负值。
 # LLM: 只接受 Gateway 算好的 [标签, 非负整数] 对；有界复制，畸形项跳过，客户端不重算或另写失败类型映射。
 # 函数用途: 解析 /status 里“异常”子代理按界面标签的细分。
@@ -397,7 +393,7 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
-# LLM: Optional compact generation distinguishes an absent field from canonical generation zero.
+# LLM: 可选压缩代次必须区分字段缺失与规范零代。
 # 函数用途: 安全读取可选的 Compact 代数，非法输入返回空。
 def _optional_nonnegative_int(value: object) -> int | None:
     if value is None or isinstance(value, bool):
@@ -408,7 +404,7 @@ def _optional_nonnegative_int(value: object) -> int | None:
         return None
 
 
-# LLM: Elapsed time is display-only and cannot accept negative or non-numeric transport values.
+# LLM: 已用时只供展示，不接受运输层传来的负数或非数值。
 # 函数用途: 将控制结果中的耗时安全收口为非负秒数。
 def _nonnegative_float(value: object) -> float:
     if isinstance(value, bool):
@@ -419,8 +415,7 @@ def _nonnegative_float(value: object) -> float:
         return 0.0
 
 
-# LLM: Structured HTTP errors such as idempotency conflicts are terminal protocol facts; reading
-# their JSON body prevents the client from retrying them as transport failures.
+# LLM: 幂等冲突等结构化HTTP错误是终态协议事实；读取其JSON正文，防止客户端把它们当运输故障重试。
 # 函数用途: 从 urllib HTTPError 中读取控制接口的结构化错误对象。
 def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
     try:
@@ -642,7 +637,7 @@ def _retire_local_guidance(agent: object, request_id: str) -> None:
         return
 
 
-# LLM: Local verbose persists the same per-thread setting as Gateway without opening a model turn.
+# LLM: 本地详细输出与Gateway持久化同一逐线程设置，不开启模型回合。
 # 函数用途:在本地直跑窗口读取或修改过程显示档位，并直接返回系统回执。
 def _execute_local_verbose(
     execution: ChatControlExecution,
@@ -812,8 +807,7 @@ def _command_text(command: ConversationControlCommand) -> str:
     return f"/{command.kind}"
 
 
-# LLM: Manual compact may make one real summary-model call, so its client timeout must cover the
-# provider request timeout; all cheap controls retain the bounded service-command timeout.
+# LLM: 手动压缩可能真实调用一次摘要模型，客户端超时须覆盖供应商请求超时；其他轻量控制仍用有界服务命令超时。
 # 函数用途: 为普通控制和手动压缩选择不同的 HTTP 等待上限。
 def _gateway_control_timeout(
     execution: ChatControlExecution,

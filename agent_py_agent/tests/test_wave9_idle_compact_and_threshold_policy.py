@@ -393,3 +393,235 @@ def test_idle_maintenance_reads_configured_limit(conversation, tmp_path, monkeyp
     monkeypatch.setattr(idle, "maybe_auto_compact_idle_session", lambda *args, **__: calls.append(args[-1].thread_id) or {"compacted": False})
     report = idle.idle_compact_maintenance_tick(agent, cursor={})
     assert len(calls) == report["checked"] == limit
+
+
+# LLM: 只替换候选容量观察，摘要、用户活动、消息追加和线程失败账均走真实入口；不调用真实供应商。
+# 函数用途: 验证候选计量期间出现活动或消息变化时干净让位，无竞争的超量候选仍记一次失败。
+@pytest.mark.parametrize("change", ["none", "activity", "message"])
+def test_idle_oversized_candidate_measurement_failure_cas(summary_case, monkeypatch, change):
+    from agent_py_agent.agent.conversation import compact as compact_chain
+    from agent_py_agent.agent.conversation.compact_guard import ConversationCompactError
+
+    agent, store, row = summary_case
+    # 原话备份使用正式零预算配置，候选无需再收缩重测，确保竞争落在最后一次容量观察中。
+    agent.config.compact_landmark_max_tokens = 0
+    measured = []
+
+    # LLM: 在摘要完成后的真实计量调用内制造竞争，不替换中断检查、失败记录、线程锁或CAS。
+    # 函数用途: 将候选测为超量，并在首次最终计量时登记活动或仅追加规范消息。
+    def measure(_agent, summary, *_args, **_kwargs):
+        if summary:
+            if not measured:
+                if change == "activity":
+                    store.threads.record_user_activity(row.thread_id, now=7401.0)
+                elif change == "message":
+                    store.messages.append({"thread_id": row.thread_id, "role": "assistant", "content": "最终计量期间追加"})
+            measured.append(True)
+            return 2_000_000
+        return 650_000
+
+    monkeypatch.setattr(compact_chain, "_projected_context_tokens", measure)
+    if change == "none":
+        with pytest.raises(ConversationCompactError) as failure:
+            idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)
+        assert failure.value.code == "COMPACT_CANDIDATE_TOO_LARGE"
+    else:
+        result = idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)
+        assert result.get("cas_aborted") is True and not result["compacted"]
+        assert result["reason"] == "activity_changed"
+    assert measured, "竞争必须发生在摘要后的候选计量，而非摘要调用前"
+    latest = store.threads.require(row.thread_id)
+    assert latest.compact_consecutive_failures == (1 if change == "none" else 0)
+    assert latest.compact_failure_code == ("COMPACT_CANDIDATE_TOO_LARGE" if change == "none" else "")
+    assert latest.compact_generation == row.compact_generation and latest.summary == row.summary
+    assert latest.compact_checkpoint_id == row.compact_checkpoint_id
+    assert latest.metadata["user_activity_generation"] == row.metadata["user_activity_generation"] + (change == "activity")
+
+
+# LLM: 仅在失败存储入口前插入真实竞争，调用原失败方法；必须验证锁内CAS，不能只靠计量后的取消检查。
+# 函数用途: 验证最后一次取消预检之后到达的活动或消息不会污染压缩失败账。
+@pytest.mark.parametrize("change", ["activity", "message"])
+def test_idle_oversized_failure_recording_rechecks_store_cas(summary_case, monkeypatch, change):
+    from agent_py_agent.agent.conversation import compact as compact_chain
+
+    agent, store, row = summary_case
+    agent.config.compact_landmark_max_tokens = 0
+    original = store.threads.record_compact_failure
+    attempted = []
+    monkeypatch.setattr(compact_chain, "_projected_context_tokens", lambda _agent, summary, *_, **__: 2_000_000 if summary else 650_000)
+
+    # LLM: 保留真实原子写口；活动改变只走线程活动登记，消息改变不增活动代，二者必须分别被CAS拒绝。
+    # 函数用途: 在进入原失败记录之前注入一次迟到变化。
+    def before_failure(*args, **kwargs):
+        attempted.append(True)
+        if change == "activity":
+            store.threads.record_user_activity(row.thread_id, now=7401.0)
+        else:
+            store.messages.append({"thread_id": row.thread_id, "role": "assistant", "content": "失败写入口前追加"})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store.threads, "record_compact_failure", before_failure)
+    result = idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)
+    latest = store.threads.require(row.thread_id)
+    assert attempted == [True] and result.get("cas_aborted") is True and not result["compacted"]
+    assert latest.compact_consecutive_failures == 0 and latest.compact_failure_code == ""
+    assert latest.compact_generation == row.compact_generation and latest.summary == row.summary
+
+
+# LLM: 直接调用真实失败存储门，不提供外围取消回调；必须拒绝过期活动、消息或压缩代，且已有失败数不能被清零。
+# 函数用途: 验证失败CAS本身保留最新状态，不依赖Gateway把异常掩盖成成功。
+@pytest.mark.parametrize("change", ["activity", "message", "rewrite", "generation", "corrupt"])
+def test_idle_failure_store_refuses_stale_baseline(summary_case, change):
+    from agent_py_agent.agent.conversation.store_threads import IdleCompactActivityChanged
+
+    _agent_value, store, row = summary_case
+    marker, errors = store.messages.tail_marker_report(row.thread_id)
+    assert not errors
+    store.threads.update_atomic(row.thread_id, lambda t: replace(t, compact_consecutive_failures=2,
+        compact_failure_code="COMPACT_PREVIOUS_FAILURE", compact_failure_updated_at=120.0))
+    if change == "activity":
+        store.threads.record_user_activity(row.thread_id, now=7401.0)
+    elif change == "message":
+        store.messages.append({"thread_id": row.thread_id, "role": "tool", "content": "规范消息单独变化"})
+    elif change == "generation":
+        store.threads.update_atomic(row.thread_id, lambda t: replace(t, compact_generation=t.compact_generation + 1))
+    else:
+        path = store.storage.message_path(row.thread_id)
+        data = path.read_bytes()
+        path.write_bytes(data.replace("原始".encode(), "改写".encode()) if change == "rewrite" else data + b"{broken\n")
+    before = store.storage.thread_path(row.thread_id).read_bytes()
+    with pytest.raises(IdleCompactActivityChanged):
+        store.threads.record_compact_failure(row.thread_id, failure_code="COMPACT_CANDIDATE_TOO_LARGE",
+            expected_generation=row.compact_generation, expected_user_activity_generation=row.metadata["user_activity_generation"],
+            expected_message_tail=marker, now=7402.0)
+    assert store.storage.thread_path(row.thread_id).read_bytes() == before
+    latest = store.threads.require(row.thread_id)
+    assert latest.compact_consecutive_failures == 2 and latest.compact_failure_code == "COMPACT_PREVIOUS_FAILURE"
+
+
+# LLM: 子进程只操作测试会话；真实append写完仍持原消息双层锁，用事件控制解锁，不模拟锁或供应商。
+# 函数用途: 为跨进程回归提供先写入、后放锁的消息写者。
+def _append_with_held_message_lock(root, thread_id, written, release):
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.common import json_io
+
+    store = ConversationStore(root)
+    message_path = store.storage.message_path(thread_id)
+    original = json_io._locked_json_path
+
+    # LLM: 包装原锁但不替换其线程锁或OS排他锁；只在真实写入结束、原锁退出之前暂停。
+    # 函数用途: 暴露消息已落盘且追加锁仍被持有的确定观察点。
+    @contextmanager
+    def hold_after_write(path, **kwargs):
+        with original(path, **kwargs):
+            yield
+            if path == message_path:
+                written.set()
+                assert release.wait(20), "父进程未按约释放真实消息锁"
+
+    json_io._locked_json_path = hold_after_write
+    try:
+        store.messages.append({"thread_id": thread_id, "role": "assistant", "content": "跨进程持锁追加"})
+    finally:
+        json_io._locked_json_path = original
+
+
+# LLM: spawn进程走真实append，父进程非阻塞探针确认OS锁确实繁忙后再等待原阻塞锁；不用sleep猜竞争时序。
+# 函数用途: 证明失败记录等到消息写者放锁后会重读指纹并拒绝旧候选，原有失败数不增不清零。
+def test_idle_failure_cas_waits_for_real_message_append_lock(summary_case, monkeypatch):
+    import multiprocessing
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+
+    from agent_py_agent.agent.common import json_io
+    from agent_py_agent.agent.conversation.store_threads import IdleCompactActivityChanged
+
+    _agent_value, store, row = summary_case
+    marker, errors = store.messages.tail_marker_report(row.thread_id)
+    assert not errors
+    store.threads.update_atomic(row.thread_id, lambda t: replace(t, compact_consecutive_failures=2))
+    context = multiprocessing.get_context("spawn")
+    written, release = context.Event(), context.Event()
+    contended = threading.Event()
+    writer = context.Process(target=_append_with_held_message_lock,
+        args=(str(store.storage.root), row.thread_id, written, release))
+    original = json_io.locked_json_path
+
+    # LLM: 探针与真正等待都调用原双层锁，只有非阻塞取得真实OS锁失败后才通知主线程释放写者。
+    # 函数用途: 记录本次失败存储确实遇到了另一进程持有的消息锁。
+    @contextmanager
+    def observe_contention(path, **kwargs):
+        if path == store.storage.message_path(row.thread_id):
+            with pytest.raises(BlockingIOError):
+                with original(path, blocking=False):
+                    pass
+            contended.set()
+        with original(path, **kwargs):
+            yield
+
+    writer.start()
+    try:
+        assert written.wait(15), "子进程未完成真实append"
+        monkeypatch.setattr(json_io, "locked_json_path", observe_contention)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(store.threads.record_compact_failure, row.thread_id,
+                failure_code="COMPACT_CANDIDATE_TOO_LARGE", expected_generation=row.compact_generation,
+                expected_user_activity_generation=row.metadata["user_activity_generation"], expected_message_tail=marker)
+            try:
+                assert contended.wait(10), "失败写口没有竞争真实消息锁"
+            finally:
+                release.set()
+            with pytest.raises(IdleCompactActivityChanged):
+                future.result(timeout=15)
+    finally:
+        release.set()
+        writer.join(timeout=15)
+        if writer.is_alive():
+            writer.terminate()
+            writer.join(timeout=5)
+    assert writer.exitcode == 0
+    latest = store.threads.require(row.thread_id)
+    assert latest.compact_generation == row.compact_generation and latest.compact_consecutive_failures == 2
+
+
+# LLM: 在真实消息指纹校验后、原线程事务读取前暂停失败写者，主线程沿真实活动写口先赢，不替换CAS回调。
+# 函数用途: 证明失败事务会读取最新活动代，而不是持消息锁前捕获的旧线程快照。
+def test_idle_failure_cas_reads_latest_activity_after_message_check(summary_case, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from agent_py_agent.agent.conversation.store_threads import IdleCompactActivityChanged
+
+    _agent_value, store, row = summary_case
+    marker, errors = store.messages.tail_marker_report(row.thread_id)
+    assert not errors
+    store.threads.update_atomic(row.thread_id, lambda t: replace(t, compact_consecutive_failures=2))
+    entered, release = threading.Event(), threading.Event()
+    main_thread = threading.get_ident()
+    original = store.threads.update_atomic
+
+    # LLM: 只暂停工作线程的原事务入口；主线程活动登记继续使用同一原子更新实现及真实线程文件锁。
+    # 函数用途: 精确控制活动代先提交、旧失败后读取的时序。
+    def wait_before_transaction(*args, **kwargs):
+        if threading.get_ident() != main_thread:
+            entered.set()
+            assert release.wait(15), "失败事务未被释放"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store.threads, "update_atomic", wait_before_transaction)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(store.threads.record_compact_failure, row.thread_id,
+            failure_code="COMPACT_CANDIDATE_TOO_LARGE", expected_generation=row.compact_generation,
+            expected_user_activity_generation=row.metadata["user_activity_generation"], expected_message_tail=marker)
+        try:
+            assert entered.wait(10), "失败记录未到达线程事务"
+            store.threads.record_user_activity(row.thread_id, now=7401.0)
+        finally:
+            release.set()
+        with pytest.raises(IdleCompactActivityChanged):
+            future.result(timeout=15)
+    latest = store.threads.require(row.thread_id)
+    assert latest.compact_generation == row.compact_generation and latest.compact_consecutive_failures == 2
+    assert latest.metadata["user_activity_generation"] == row.metadata["user_activity_generation"] + 1

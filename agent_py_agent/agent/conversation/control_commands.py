@@ -168,9 +168,7 @@ class NamedConversationWorkStatus:
     elapsed_seconds: float = 0.0
 
 
-# LLM: Control responses keep task status, transport delivery, and typed error identity separate;
-# ``ok`` reports command semantics while error_code distinguishes interrupt/busy/failure without
-# parsing the localized display message.
+# LLM: 控制回复分别保留任务状态、运输投递及类型化错误身份；ok 表示命令语义，error_code 区分中断、繁忙与失败，不解析本地化文案。
 # 类用途: 表示一条会话控制命令的结构化结果，并在跨进程边界保留投递三态和错误码。
 @dataclass(frozen=True)
 class ConversationControlResult:
@@ -186,7 +184,7 @@ class ConversationControlResult:
     error_code: str = ""
     details: dict[str, object] | None = None
 
-    # LLM: HTTP/IM boundaries receive a plain typed projection, never a dataclass repr.
+    # LLM: HTTP及IM边界只接收普通类型化投影，不接收数据类的 repr 展示字符串。
     # 函数用途:把控制结果转换成可以安全跨进程传输的普通字典。
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -217,7 +215,7 @@ class ConversationControlResult:
         return payload
 
 
-# LLM: Slash controls are an explicit protocol; ordinary Chinese prose never acquires authority.
+# LLM: 斜杠控制是显式协议，普通中文正文绝不因此获得控制权。
 # 函数用途:只识别完整斜杠命令，并把缺参数或多参数归成确定的用法错误。
 def parse_conversation_control(
     text: object,
@@ -342,14 +340,14 @@ def parse_conversation_command(
     return None
 
 
-# LLM: `/audit` is parsed once at ingress; only its opaque task body may reach the model.
+# LLM: /audit 只在入口解析一次，只有不作协议解析的任务正文可送给模型。
 # 函数用途:把保证档命令拆成普通任务正文和结构化运行属性，命令词本身不进入上下文。
 def parse_conversation_task_command(text: object) -> ConversationTaskCommand | None:
     command = parse_conversation_command(text)
     return command if isinstance(command, ConversationTaskCommand) else None
 
 
-# LLM: Runtime task attributes are projected from the typed command payload, never re-inferred from prose.
+# LLM: 运行时任务属性只投影自类型化命令载荷，不从自然语言重新推断。
 # 函数用途:校验系统任务载荷并生成允许进入 RunParams 的最小结构化属性。
 def conversation_task_attributes(system_task: object) -> dict[str, object]:
     if not isinstance(system_task, dict):
@@ -403,7 +401,7 @@ def decision_experiment_task(system_task: object) -> dict[str, object] | None:
     return dict(attributes)
 
 
-# LLM: Parse only the explicit goal lifecycle grammar; the objective body remains opaque model/user text.
+# LLM: 只解析明确的目标生命周期语法，目标正文仍是模型或用户文本，不参与协议解析。
 # 函数用途: 将 `/goal` 后缀解析为查看、创建、修改、暂停、恢复或清除操作。
 # LLM: 显式 slash command 才有控制权；名称或 goal ID 只作为结构化选择器，不从目标正文猜状态。
 # 函数用途: 解析持续目标的建立与精确暂停、恢复、清除命令，未命名目标仍可用简写。
@@ -870,7 +868,7 @@ def _split_head(value: str) -> tuple[str, str]:
     return (parts[0], parts[1].strip() if len(parts) == 2 else "") if parts else ("", "")
 
 
-# LLM: Status/stop reject trailing prose instead of silently changing command scope.
+# LLM: 状态及停止命令拒绝尾随正文，不能静默改变命令作用域。
 # 函数用途:构造不接参数的控制命令；多余内容会返回明确用法。
 def _argumentless_command(
     kind: Literal["status", "context", "stop"],
@@ -881,7 +879,7 @@ def _argumentless_command(
     return ConversationControlCommand(kind, valid=not value, usage=f"用法：{usage}")
 
 
-# LLM: Verbose acknowledgements are deterministic control-plane text, never model-authored claims.
+# LLM: 详细输出设置的确认是确定性的控制面文案，不是模型生成的声明。
 # 函数用途:根据当前档位和已解析命令生成系统设置回执，说明 IM 关闭详细过程仍保留最小存活展示。
 def render_verbose_control(current_level: str, command: ConversationControlCommand) -> str:
     if not command.valid:
@@ -899,7 +897,7 @@ def render_verbose_control(current_level: str, command: ConversationControlComma
     return "完整过程已开启：除工具步骤摘要外，还会发送经过脱敏和长度限制的工具结果。"
 
 
-# LLM: The interrupt registry key is stable across local and Gateway execution paths.
+# LLM: 中断登记键在本地与Gateway执行链中必须一致稳定。
 # 函数用途:为一轮主任务生成进程内协作中断登记名。
 def conversation_request_interrupt_name(request_id: object) -> str:
     return f"conversation-request:{str(request_id or '').strip()}"
@@ -913,9 +911,8 @@ def session_task_interrupt_name(turn_id: object) -> str:
     return f"session-task-turn:{str(turn_id or '').strip()}"
 
 
-# LLM: Manual Compact cancellation is scoped by authenticated channel identity, conversation, and
-# the original opaque client message id.  The digest is process-local routing data, never a user
-# or owner lookup, and prevents one TUI from naming another user's Compact worker.
+# LLM: 手动压缩取消以已认证通道身份、会话及原始不透明客户端消息身份限定；摘要键只是进程内路由数据，不用于查用户或所有者。
+# 该边界防止一个TUI指定另一用户的压缩工作者。
 # 函数用途:为一条手动 Compact 控制操作生成不泄露用户标识的进程内中断登记名。
 def conversation_compact_interrupt_name(
     user_id: object,
@@ -1037,7 +1034,7 @@ def _subagent_label_breakdown(labels: tuple[tuple[str, int], ...]) -> str:
     return "：" + "，".join(parts) if parts else ""
 
 
-# LLM: Durations are deterministic status facts, not model-generated prose.
+# LLM: 时长是确定性的状态事实，不是模型生成的文案。
 # 函数用途:把秒数压成紧凑的中文时长。
 def _duration_text(seconds: float) -> str:
     total = max(0, int(seconds))
@@ -1050,7 +1047,7 @@ def _duration_text(seconds: float) -> str:
     return f"{secs}秒"
 
 
-# LLM: User-visible status bounds untrusted task text before crossing an IM boundary.
+# LLM: 面向用户的状态在跨IM边界前必须限制不可信任务正文的长度。
 # 函数用途:压平换行并限制状态里的任务摘要长度。
 def _short_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())

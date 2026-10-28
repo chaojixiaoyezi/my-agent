@@ -19,7 +19,7 @@ COMPACT_TRIGGER_PERCENT_RANGE = (50, 100)
 COMPACT_RECOVERY_PERCENT_RANGE = (25, 80)
 
 
-# LLM: Field specs are the sole coercion rules; max_chars bounds provider/model identifiers without parsing semantics.
+# LLM: 字段规格是唯一类型转换规则；max_chars 只限制供应商及模型身份长度，不解析其语义。
 # 类用途: 描述一个 Memory 配置字段的类型、范围、枚举或长度限制。
 @dataclass(frozen=True)
 class _FieldSpec:
@@ -175,7 +175,7 @@ def _coerce_field(
     )
 
 
-# LLM: Model/provider strings must be short single-line values; booleans/numbers cannot be coerced into identifiers.
+# LLM: 模型及供应商字符串必须是短单行值，不得把布尔值或数字强转成身份标识。
 # 函数用途: 校验后台模型等短字符串配置，非法值回退默认并记录警告。
 def _coerce_string(
     field_name: str,
@@ -228,8 +228,7 @@ def _coerce_compact_trigger_percent(
     return number
 
 
-# LLM: This config parser mirrors runtime compact bounds so YAML cannot produce a different target
-# from direct AgentConfig construction; clamped values remain explicit structured warnings.
+# LLM: 配置解析与运行时压缩边界保持一致，YAML不得产生不同于直接构造AgentConfig的目标；被限幅的值仍须报告明确结构化告警。
 # 范围取自 COMPACT_RECOVERY_PERCENT_RANGE，user_config 自助校验用同一常量。
 # 函数用途: 校验压缩恢复目标百分比，越界时限制到有效范围（25%--80%）并留下配置警告。
 def _coerce_compact_recovery_percent(

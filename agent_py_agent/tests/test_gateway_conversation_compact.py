@@ -239,9 +239,8 @@ def test_p2a_manual_compact_lane_allows_five_seconds(monkeypatch):
     now[0] = 105.0
     assert check()
 
-# LLM: These tests intentionally use tiny policy thresholds to exercise checkpoint/tail/CAS
-# behavior, while the fake provider has no wire limit. Physical request budgeting is tested with
-# explicit small windows and complete source coverage in test_compact_request_budget.
+# LLM: 这些测试刻意使用很小的策略阈值检验检查点、尾部和CAS，替身供应商没有传输容量限制；
+# 物理请求预算由 test_compact_request_budget 以显式小窗口和完整来源覆盖验证。
 # 函数用途: 隔离旧会话状态测试的人工触发线和 fake 后端容量，避免完整工具表大于玩具窗口。
 
 # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。

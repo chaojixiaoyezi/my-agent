@@ -311,8 +311,7 @@ class MessageStore:
             self.storage.message_path(thread_id), thread_id, before=before, limit=limit
         )
 
-    # LLM: Transcript append is append-only; its activity projection must merge into the latest
-    # thread after the ledger write rather than writing the earlier loaded thread snapshot.
+    # LLM: 会话记录只追加；账本写入后的活动投影必须合并到最新线程，不能回写较早读取的线程快照。
     # 函数用途: 追加一条对话记录，并只刷新会话活动时间，避免迟到消息把新任务目录改回旧目录。
     def append(self, request: dict) -> MessageLogEntry:
         thread_id = str(request.get("thread_id") or "")

@@ -144,7 +144,7 @@ def _cold_curator_precheck(supervisor, owner) -> tuple[str, bool]:
         return "unknown", False
 
 
-# LLM: GatewayRunContext owns the one long-lived base-agent composition root; every base-owner controller and request lane must reuse it, while owner-scoped isolation remains delegated to OwnerScopedAgentPool.
+# LLM: GatewayRunContext 拥有唯一长生命周期基础代理组合根，基础所有者控制器及请求车道均须复用它；所有者隔离仍由OwnerScopedAgentPool负责。
 # 函数用途: 取得 Gateway 启动时已经初始化好的基础智能体，禁止后台线程再次加载配置并构造整套智能体。
 def _gateway_agent_from_context(context: GatewayRunContext) -> SimpleAgent:
     agent = context.agent
@@ -879,8 +879,7 @@ def _background_owner_workers(agent: object) -> int:
     return parsed if parsed > 0 else _BACKGROUND_OWNER_WORKER_COUNT
 
 
-# LLM: This configurable cap bounds simultaneous model turns for different
-# durable conversation threads owned by one identity; zero/invalid uses the safe default.
+# LLM: 此配置上限限制同一身份下不同持久会话线程同时运行的模型回合；零或非法值使用安全默认值。
 # 函数用途: 读取单个用户后台会话的最大并发数。
 def _background_threads_per_owner(agent: object) -> int:
     value = getattr(
@@ -895,8 +894,7 @@ def _background_threads_per_owner(agent: object) -> int:
     return parsed if parsed > 0 else _BACKGROUND_PER_OWNER_THREAD_COUNT
 
 
-# LLM: Memory extraction has its own bounded lane so low-priority owner backlog
-# cannot consume the conversation wake executor; invalid values retain the safe default.
+# LLM: 记忆提取使用独立有界车道，防止低优先级所有者积压占满会话唤醒执行器；非法值保留安全默认值。
 # 函数用途: 读取单 Gateway 同时运行的记忆策展数量，超出的 owner 留待下一轮。
 def _memory_curator_workers(agent: object) -> int:
     value = getattr(
@@ -911,8 +909,7 @@ def _memory_curator_workers(agent: object) -> int:
     return parsed if parsed > 0 else _MEMORY_CURATOR_WORKER_COUNT
 
 
-# LLM: This mixin owns only process-local planning/execution slots; durable
-# conversation sources and run claims remain in BackgroundMainAgentScheduler/Store.
+# LLM: 此混入类只拥有进程内规划及执行槽位；持久会话来源和运行认领仍属于BackgroundMainAgentScheduler及存储层。
 # 类用途: 为单 Gateway 按 owner 公平提交独立的 thread 后台车道。
 class _BackgroundOwnerPlannerMixin:
     # LLM: 只读取原store/数据库已声明路径的stat和登记本活动代次；未知或拒读时禁用退避，不扫描正文或创建新权威。
@@ -1053,10 +1050,8 @@ class _BackgroundOwnerPlannerMixin:
 # LLM: 仅持有本进程执行槽；规划缓存继承私有mixin，原scheduler/store仍是durable执行权威。
 # 类用途: 公平提交owner/thread后台车道，不把规划连接传给执行线程。
 class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
-    # LLM: Planning is single-threaded and model-free; submission is round-robin
-    # across owners, bounded globally and per owner, and keyed by durable thread id.
-    # Gateway's independent orphan reconciler owns recovery scans, so preparation
-    # must skip the duplicate inline sweep before ready lanes are submitted.
+    # LLM: 规划单线程且不调用模型，提交按所有者轮转、同时受全局及逐所有者上限约束，并以持久线程身份为键。
+    # 恢复扫描属于Gateway独立孤儿对账器，准备阶段必须跳过重复内联扫描，再提交就绪车道。
     # 每个owner的prepare/ready短查询按配置sqlite_connection_reuse跨拍复用连接；异常也解除Context，提交和后台执行不继承连接。
     # 函数用途: 复用规划连接后公平提交就绪会话；等待与暂停不占工位，单owner异常不影响其它窗口。
     def _submit_ready_thread_ticks(self) -> None:
@@ -1139,8 +1134,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             "gateway_background_main.iteration", f"background-main:{label}:{thread_id}", exc,
         )
 
-    # LLM: Candidate submission uses the already-bounded executor and never
-    # changes durable source status before the worker acquires its run claim.
+    # LLM: 候选提交使用已有界执行器，工作者取得运行认领之前绝不改变持久来源状态。
     # LLM: 停机关闭同一进程内提交门；已入队但未进入的job仍由原观察入口拒绝。
     # 函数用途: 按 owner 轮询把候选会话填入剩余全局工位。
     def _submit_thread_candidates(
@@ -1168,8 +1162,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
                 )
                 available -= 1
 
-    # LLM: In-flight identity is owner + thread; checking only owner would restore
-    # the starvation bug by treating independent TUI sessions as one execution.
+    # LLM: 在途身份由所有者与线程联合确定；只检查所有者会把独立TUI会话当成同一执行，重新引入饥饿问题。
     # 函数用途: 列出某 owner 正在跑的后台会话 ID。
     def _active_threads_for_owner(self, owner_key: object) -> set[str]:
         return {
@@ -1178,8 +1171,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             if isinstance(key, tuple) and len(key) == 2 and key[0] == owner_key
         }
 
-    # LLM: Metrics count real conversation model lanes; durable thread claims remain
-    # the final duplicate-execution fence across processes.
+    # LLM: 指标只统计真实会话模型车道，持久线程认领仍是跨进程防重复执行的最终边界。
     # LLM: 同一job携带本片停止观察，原claim后绑定；停止后不接新片，finally核原账而非另写终态。
     # 函数用途: 运行一条会话后台车道并更新并发指标。
     def _counted_thread_tick(
@@ -1198,7 +1190,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
         finally:
             background_tick_inflight(-1)
 
-    # LLM: The daemon executor is bounded by the exact configured global limit.
+    # LLM: 守护执行器必须严格遵守配置的全局上限。
     # 函数用途: 惰性创建全局有界后台会话线程池。
     def _get_executor(self) -> object:
         if self._executor is None:
@@ -1208,8 +1200,7 @@ class _BackgroundThreadLaneSupervisorMixin(_BackgroundOwnerPlannerMixin):
             )
         return self._executor
 
-    # LLM: Shutdown cancels only queued process-local submissions in both lanes;
-    # durable conversation and curator sources remain pending for restart recovery.
+    # LLM: 关闭只取消两条车道中进程本地仍排队的提交；持久会话和记忆整理来源保持待处理，供重启恢复。
     # 关池之前先给本进程在途的唤醒尝试打停机标记（C6，mark_inflight_attempts_stopping 内部逐条吞掉写失败，不会让停机失败），
     # 下次 preflight 按不计数的 attempt:gateway_stopped 补记，部署重启不给在途唤醒计失败。
     # LLM: 主会话已运行future沿准确claim中断并共用两秒绝对预算核收，未退/未结必须交cleanup为incomplete。
@@ -1440,8 +1431,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         if page.seeded:
             print(f"[gateway-background-main] wake-pending owners seeded from disk: {page.seeded}", flush=True)
 
-    # LLM: Conversation schedulers are retained only for registry hard facts;
-    # curator-only owners are materialized later inside the bounded memory lane.
+    # LLM: 只为登记表硬事实保留会话调度器，仅需记忆整理的所有者延后到有界记忆车道内实例化。
     # 函数用途: 同步真正有前台、任务或盯守工作的 owner 会话调度器。
     def _sync_owner_schedulers(self) -> None:
         # 登记本唯一入口:registry snapshot(controller claim_due_owners / wake seed 分页种回)。
@@ -1470,8 +1460,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             if key not in self._owner_schedulers:
                 self._owner_schedulers[key] = _build_background_scheduler(scoped_agent, self._channels)
 
-    # LLM: Watch recovery inspects only hard owner agents because a persisted
-    # active watch is itself a hard registry fact and curator-only owners cannot own one.
+    # LLM: 盯守恢复只检查硬事实所有者代理，因为持久活动盯守本身就是登记表硬事实，仅有记忆整理的所有者不可能拥有它。
     # 函数用途: 为当前确有盯守任务的 owner 恢复采集器，不唤醒纯记忆 owner。
     def _recover_active_watch_harvesters(self, *, now: float | None = None) -> int:
         """Reacquire active named-Audit collectors for active owner lanes.
@@ -1644,8 +1633,7 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             self._curator_quota_record_consumed()
         return result
 
-    # LLM: This executor is a separate low-priority capacity lane; queued
-    # conversation wake work must never wait behind memory extraction calls.
+    # LLM: 此执行器是独立低优先级容量车道，排队的会话唤醒绝不能排在记忆提取调用后等待。
     # 函数用途: 惰性创建记忆策展专用线程池，并按配置限制全 Gateway 并发。
     def _get_curator_executor(self) -> object:
         if self._curator_executor is None:
@@ -1670,9 +1658,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         return self._owner_pool
 
 
-# LLM: Finished curator futures are retired before capacity is computed. Soft
-# owner agents are evicted only after their exact future ends; hard/base agents
-# remain resident and every eviction failure stays diagnostic-only.
+# LLM: 先回收已结束记忆整理future，再计算容量；软所有者代理只在对应future结束后逐出，硬事实及基础代理保持常驻。
+# 逐出失败仅作诊断，不改变调度权威。
 # 函数用途: 清掉已结束的记忆策展 future，并释放这轮临时加载的软 owner agent。
 def _retire_finished_curators(
     supervisor: object,
@@ -1690,8 +1677,7 @@ def _retire_finished_curators(
         _evict_soft_curator_agent(pool, key)
 
 
-# LLM: Soft eviction is memory hygiene, never an authority or scheduler gate.
-# A failed eviction must not block another owner's curator lane.
+# LLM: 软代理逐出只是内存清理，不是权限或调度门；逐出失败不得阻塞其他所有者的记忆整理车道。
 # 函数用途: 尝试释放一个软 owner agent；失败只写诊断，不打断后台循环。
 def _evict_soft_curator_agent(pool: object | None, key: object) -> None:
     if pool is None:
@@ -1702,9 +1688,8 @@ def _evict_soft_curator_agent(pool: object | None, key: object) -> None:
         _print_gateway_loop_error("gateway_memory_curator.soft_evict", str(key), exc)
 
 
-# LLM: Candidate order is the fairness input: base agent, resident hard owners,
-# then bounded registry snapshots. The rotating cursor owns fairness, not this
-# collector, so this function never filters by due state or quota.
+# LLM: 公平性输入按基础代理、常驻硬事实所有者、有界登记表快照排序；公平轮转由游标负责，而不是此收集器。
+# 此函数不得按到期状态或额度筛选候选。
 # 函数用途: 收集本轮可轮转的基础 agent、硬 owner agent 与软 owner 身份。
 def _curator_candidates(
     supervisor: object,
@@ -1759,9 +1744,8 @@ def _resolve_curator_candidate(
         return None, True
 
 
-# LLM: Admission reads only typed memory policy, pending reasons, quota, the
-# durable skill-learning queue, and the exact in-flight map. Rejected soft
-# candidates are evicted immediately; no model prose or inferred task importance participates.
+# LLM: 准入只读类型化记忆策略、待处理原因、额度、持久技能学习队列和准确在途映射；被拒软候选立即逐出。
+# 模型正文或推断的任务重要性不参与裁决。
 # 函数用途: 判断一个 agent 本轮是否可提交策展车道（记忆整理或自动总结 Skill），并释放被策略跳过的软 agent。
 def _curator_candidate_is_admitted(
     supervisor: object,
@@ -1821,9 +1805,7 @@ def _background_curation_enabled(agent: object) -> bool:
     return bool(getattr(config, "memory_curator_enabled", True) or getattr(config, "enable_self_learning", False))
 
 
-# LLM: Submission is the only helper that mutates the curator in-flight map.
-# A soft agent stays resident until its future finishes; submit failure evicts
-# it before re-raising so the supervisor retry sees a clean pool.
+# LLM: 只有提交辅助入口可修改记忆整理在途映射；软代理在future结束前保持常驻，提交失败先逐出再上抛，让监督器重试面对干净代理池。
 # 函数用途: 把一个已准入 agent 提交到专用策展线程池，并登记去重 future。
 def _submit_curator_candidate(
     supervisor: object,
@@ -2120,8 +2102,7 @@ class _GatewayOrphanReconciler:
         self._owner_next_at: dict[tuple[str, str, str], float] = {}
         self._next_discovery_at = 0.0
 
-    # LLM: The orphan controller uses a bounded runnable set; never pre-fill the executor's
-    # private unbounded queue with every cold owner discovered at startup.
+    # LLM: 孤儿控制器使用有界可运行集合，不得把启动时发现的全部冷所有者预填进执行器私有无界队列。
     # 函数用途: 启动 base 与 owner 两条孤儿恢复车道，并在停止时非阻塞回收线程池。
     def run(self, stop_event: threading.Event) -> None:
         # Base/local and every scoped owner are independent controller lanes.
@@ -2203,8 +2184,7 @@ class _GatewayOrphanReconciler:
         finally:
             self._base_next_at = max(self._base_next_at, time.monotonic() + self.interval)
 
-    # LLM: Submit at most the actual worker capacity and pick the newest LRU owners first.
-    # Queued cold owners must not hide a just-reconnected long task behind dozens of agent builds.
+    # LLM: 提交数量不超过真实工作者容量，并优先选择LRU里最近活动的所有者；排队冷所有者不得让刚重连的长任务等在数十次代理构造之后。
     # 函数用途: 在有界恢复工位内优先扫描最近活跃的用户，未提交者保留到后续 tick。
     def _submit_owner_sweeps(self, now: float) -> None:
         if now >= self._next_discovery_at:
@@ -2393,8 +2373,7 @@ def _record_background_main_reports(agent: SimpleAgent, reports: list[object]) -
         )
 
 
-# LLM: Pagination remains bounded per controller tick, while an unfinished discovery cycle must
-# not inherit the long steady-state rescan delay between adjacent pages.
+# LLM: 每拍控制器分页仍有界，尚未完成的发现周期在相邻页之间不得继承稳态下较长的重扫延迟。
 # 函数用途: 决定 owner 磁盘发现下一次运行时间；有后页就下个 tick 继续，整轮扫完才按配置休眠。
 def _next_owner_discovery_at(
     now: float,

@@ -1,5 +1,4 @@
-# LLM: This module owns structural recent-tail selection and the persisted conversation compact
-# failure circuit. It never reads natural-language meaning or mutates transcript/cursor state.
+# LLM: 此模块拥有结构化近期尾部选择及持久会话压缩失败熔断，不解析自然语言含义，也不修改会话正文或游标。
 # 模块用途: 给唯一会话压缩链提供近期完整回合选择和连续失败熔断，防止截断对话或重复空烧模型。
 
 from __future__ import annotations
@@ -13,14 +12,13 @@ from .compact_message_source import CompactMessageSource, estimate_compact_messa
 from .message_replay import message_rows_iterator
 from .models import ConversationThread, MessageLogEntry
 from .native_history import iter_provider_history_messages_from_rows
+from .store_threads import IdleCompactActivityChanged
 
 if TYPE_CHECKING:
     from .store import ConversationStore
 
 
-# LLM: Every Compact producer uses this read-only callback contract at expensive and mutating
-# boundaries. Callback errors fail closed because losing the stop signal is more dangerous than
-# discarding an uncommitted candidate.
+# LLM: 所有压缩生产者在高开销及写入边界共用此只读回调合同；回调报错按失败关闭处理，丢弃未提交候选比丢失停止信号安全。
 # 类型用途: 表示一次压缩是否已被当前回合要求停止；只读状态，不允许回调自己修改压缩账本。
 CompactInterruptCheck: TypeAlias = Callable[[], bool]
 
@@ -43,13 +41,13 @@ class CompactCapacityFacts:
     candidates_tried: int
 
 
-# LLM: Compact failures are typed runtime facts; callers must not infer a retry class from text.
+# LLM: 压缩失败是类型化运行时事实，调用方不得从文字推断重试分类。
 #   capacity 只是失败时的诊断计量，不参与重试、熔断或错误码判定。
 # 类用途: 表示摘要候选或 checkpoint 未通过，Gateway 会按可恢复运行时错误如实上报。
 class ConversationCompactError(RecoverableRuntimeError):
     category = "conversation_compact"
 
-    # LLM: Keep the Compact-specific code and generic runtime error_code identical for Gateway propagation.
+    # LLM: 压缩专用code与通用运行时error_code必须一致，供Gateway原样传播。
     # 函数用途: 保留具体压缩失败原因，避免外围把窗口越界误报成会话文件损坏；容量类失败可附带候选计量。
     def __init__(self, message: str, *, code: str, capacity: CompactCapacityFacts | None = None) -> None:
         super().__init__(message)
@@ -58,14 +56,13 @@ class ConversationCompactError(RecoverableRuntimeError):
         self.capacity = capacity
 
 
-# LLM: This typed failure prevents repeated model calls while the persisted thread circuit cools.
+# LLM: 此类型化失败在持久线程熔断冷却期间阻止重复调用模型。
 # 类用途: 表示同一会话连续压缩失败已经熔断，冷却结束后才允许下一次真实尝试。
 class ConversationCompactCircuitOpenError(ConversationCompactError):
     category = "conversation_compact_circuit"
 
 
-# LLM: Transcript, active-turn archive and native-IR Compact must share this exact interruption
-# interpretation. It raises before checkpoint/CAS; a successful CAS is never rolled back later.
+# LLM: 会话、活动回合归档及原生IR压缩必须共用同一中断语义；检查点或CAS前抛出取消，已成功CAS绝不事后回滚。
 # 函数用途: 在压缩的模型调用、内存候选、恢复点和最终提交前统一检查用户停止信号。
 def raise_if_compact_interrupted(check: CompactInterruptCheck | None) -> None:
     if check is None:
@@ -78,8 +75,7 @@ def raise_if_compact_interrupted(check: CompactInterruptCheck | None) -> None:
         raise InterruptedError("conversation compact interrupted by user")
 
 
-# LLM: Prefer one bounded suffix of complete user/assistant turns, then retry once with no tail.
-# The second partition prevents a very large recent turn from making compaction impossible.
+# LLM: 优先保留有界的完整用户与助手回合后缀，再以不保留尾部的分区重试一次，防止单个巨大近期回合让压缩完全不可行。
 # 函数用途: 以只读范围先保留近期完整对话，必要时用完整来源重试，不物化全部行。
 def compact_partitions(
     rows: Sequence[MessageLogEntry],
@@ -97,8 +93,7 @@ def compact_partitions(
     return ((rows, []),)
 
 
-# LLM: A protected turn is structural: one user message followed by at least one assistant
-# message before the next user. No natural-language wording participates in this decision.
+# LLM: 被保护回合只按结构确定：用户消息之后、下个用户消息之前至少有一条助手消息；自然语言措辞不参与裁决。
 # 函数用途: 在同一可重放历史上选择完整问答尾部，原token上限不变，分区只保存范围。
 def split_recent_complete_turns(
     rows: Sequence[MessageLogEntry],
@@ -137,8 +132,7 @@ def _complete_turn_starts(
     return complete
 
 
-# LLM: Tail budgeting includes canonical native tool history, not only visible prose;
-# otherwise a short final reply can hide hundreds of thousands of retained tokens.
+# LLM: 尾部预算包含规范原生工具历史，不只计可见正文，否则短最终回复可能掩盖数十万保留token。
 # 函数用途: 流式计量可见正文和真实原生历史，避免试算巨大完整回合时物化全部正文。
 def _message_rows_tokens(rows: Sequence[MessageLogEntry]) -> int:
     return max(
@@ -147,8 +141,7 @@ def _message_rows_tokens(rows: Sequence[MessageLogEntry]) -> int:
     )
 
 
-# LLM: Circuit state is persisted on ConversationThread; it blocks only repeated automatic
-# summary work and never changes transcript, task, or memory authority.
+# LLM: 熔断状态持久化在ConversationThread，只阻止重复自动摘要，不改变会话记录、任务或记忆权威。
 # 函数用途: 判断同一会话是否在连续失败后的冷却期内，避免每条消息都重复烧模型。
 def compact_circuit_is_open(
     thread: ConversationThread,
@@ -166,22 +159,31 @@ def compact_circuit_is_open(
     return (now - thread.compact_failure_updated_at) < cooldown
 
 
-# LLM: Failure bookkeeping is best-effort and must not replace the original model or I/O error.
-# 函数用途: 在不遮住真实异常的前提下，给 thread 累加一次压缩失败。
+# LLM: 原模型/I/O错误优先于尽力记账异常；但闲置活动或消息CAS拒绝必须原样上抛，交Gateway干净让位。
+# 函数用途: 向原线程失败写口传递闲置基线，存储竞争不吞掉、不增加失败数。
 def record_compact_failure(
     store: ConversationStore,
     thread: ConversationThread,
     *,
     code: str,
     now: float,
+    expected_user_activity_generation: int | None = None,
+    expected_message_tail: dict[str, object] | None = None,
 ) -> None:
+    expected = {}
+    if expected_user_activity_generation is not None or expected_message_tail is not None:
+        expected = {"expected_user_activity_generation": expected_user_activity_generation,
+                    "expected_message_tail": expected_message_tail}
     try:
         store.threads.record_compact_failure(
             thread.thread_id,
             failure_code=code,
             expected_generation=thread.compact_generation,
             now=now,
+            **expected,
         )
+    except IdleCompactActivityChanged:
+        raise
     except Exception:
         return
 
@@ -208,8 +210,7 @@ def record_compact_vision_failure(
         return
 
 
-# LLM: Failure classification prefers a typed provider/runtime error_code, then falls back to
-# exception identity. It never parses message text and only emits bounded alphanumeric codes.
+# LLM: 失败分类优先读类型化供应商或运行时error_code，再回退到异常身份；不解析异常正文，只输出有界字母数字错误码。
 # 函数用途: 把真实异常的结构化错误码转成稳定 Compact 错误码，供熔断状态和界面诊断展示。
 def compact_exception_code(exc: BaseException) -> str:
     typed_code = str(getattr(exc, "error_code", "") or "").strip()
