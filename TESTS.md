@@ -1,3 +1,30 @@
+## 2026-10-28 Wave 8 T2 W2 Round 2：MCP重开、活实例预算与worker构造返工（源码候选）
+
+来源：完整阅读 `07-tasks/fix-wave8-t2-w2.md`（52行）。仅在指定工作树 `/tmp/wt-wave8-t2-w2`、分支 `wave8-t2-w2` 修改；返工起点为 `78c930f412b0ec29d06933502dedbff6654d804e`，原任务基线为 `9ee9bdc018f6587ac366f3565c0b7f06bcffe642`。不推送、不部署、不改其他工作树或运行包。
+
+- **MCP代理重开**：关闭时在清空客户端引用前按 `MCPProxyTool.client` 对象身份撤销代理；空池重开/首次发现前清理普通MCP残留，插件代理保留原投影路径。真实本地echo服务回归覆盖连接、调用、关闭、重开、新client同名工具发布、快照可见及再次实际调用。借用门面只撤销自身代理并归还一次引用，不停父连接；父级最后借用退出后沿原关闭路径收口。物理清理未知不会在本轮被改写为确认成功。
+- **实例预算**：构造前为Future预留槽位，发布时在同一池锁内用缓存替换预留；总量计算包含硬/软缓存、在途退役和构建。优先清理无人租用的退役项，只逐出未pin缓存。新硬owner无空间时抛 `PoolCapacityExceededError`，软活返回None；原get没有force_reload选项，本轮新增可选参数，满池强制刷新复用同owner在途代直到租用排空。离池pin同样重查预算，不承诺get+pin原子。
+- **认领前背压**：`AdmissionLimits.from_config(..., agent=...)` 为普通派发绑定原bootstrap Agent的实时共享池预检；global/user检查后同时检查活跃用户数与实际池容量，失败仍留inbox写原等待元数据。预检不创建池，不成为owner授权；正式构造/pin仍在锁内重查。MP C原持久准入仍消费canonical占用与原gate，W本地池执行相同预算，本轮没有新增跨进程池状态协议。
+- **构造与兼容**：原生SimpleAgent及其子类先通过原home/workspace/runtime-path/manager解析器准备最小配置资源，再经原dispatch授权、继承模型与overlay得到最终配置，只做一次Agent构造；最终构造仍完整执行原W/owner/home校验。旧自定义factory保留其自有bootstrap/配置恢复语义。延迟MCP关键字按签名支持情况传入，不在构造内部TypeError后重试。`__new__`旧Registry装配只补缺失生命周期字段，不覆盖原锁/客户端；ready在最后发布。
+- **尺寸与旧测试合同**：Registry五个公开入口提取到同模块辅助函数，权限快照算法不变。严格尺寸门已得到 `hard=0 / blocked=False`，未修改baseline或提交尺寸报告。迁移三条旧满池LRU断言：不能再要求max=1时逐出pinned对象并额外造一个实例；改为检查硬背压/软拒绝、总量上限，以及租用排空后仍实际锁外关闭。显式soft-id退役的嵌套pin收尾断言保留。旧MCP视图关闭测试改为实际调用父连接成功，再由父关闭撤销代理；其余物理退出断言不放宽。
+
+验证证据（工作树根，Python 3.14.4且导入origin已核对在本树）：
+
+- 修复前指定8文件：202项，169通过、33失败（`.pytest_cache/w8-w2-r2-before.xml`）。目标四个旧回归均有实际失败；新增首批6例亦全部失败（`w8-w2-r2-red.xml`），其中并发构造初稿的红例先撞到夹具等待超时，随后修正为只阻塞第一个owner，不能把该超时本身当作预算缺失的完整证据。Native构造次数单独红例明确为2而非1（`w8-w2-r2-worker-red.xml`）；退役池认领前背压也单独确认失败（`w8-w2-r2-admission-red.xml`）。
+- 当前指定8文件：**210项，181通过、29失败、0错误、0跳过**（`.pytest_cache/w8-w2-r2-required.xml`），失败节点没有新增，原四个目标回归已消失。17个MP运行时失败仍在 `os.link(..., dir_fd=...)` 返回EPERM后以 `worker_exit_unconfirmed` 收口；12个MCP原生生命周期失败仍涉及空birth、`identity_unavailable`、`MCP_CLEANUP_UNKNOWN`或物理退出未确认。本执行入口另有 `/bin/ps` 启动直接返回EPERM的只读观察；这不等于已证明所有失败共享同一原因。**指定pytest总门未通过**，不以局部组件通过替代全套验收，不增加skip/xfail或削弱进程身份/关闭硬门。
+
+复现：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_dual_owner_concurrent_canary.py agent_py_agent/tests/test_owner_scoped_pool.py agent_py_agent/tests/test_gateway_worker_runtime.py agent_py_agent/tests/test_gateway_two_tier_admission.py agent_py_agent/tests/test_gateway_dispatcher_resilience.py agent_py_agent/tests/test_agent/test_subagent_worker_pool.py agent_py_agent/tests/test_mcp_lifecycle.py agent_py_agent/tests/test_orchestration_background_dispatch.py -q --tb=short --basetemp=/tmp/wt-wave8-t2-w2/.pytest_cache/r2-required --junitxml=.pytest_cache/w8-w2-r2-required.xml
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/t2-w2-size.md
+python3 scripts/check_doc_sync.py
+ruff check agent_py_agent scripts
+git diff --check 9ee9bdc01..HEAD
+```
+
+真实多进程整链、物理MCP树清理、生产及600用户/RSS压测仍未验证；独立审阅与补充回归结果在收口时追加。
+
 ## 2026-10-28 CI Linux 跨平台回归收口与 Python 3.11–3.14 版本对齐
 
 - **Python 版本范围对齐**：`.github/workflows/test.yml` 移除 Python 3.10 矩阵项，保留 Python 3.11/3.12（`pyproject.toml` 同步更新为 `requires-python = ">=3.11"`，`AGENTS.md` 与 `docs/development/DEVELOPMENT_RULES.md` 同步声明面向 Python 3.11–3.14），并移除仅针对 3.10 的兼容分支。

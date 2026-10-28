@@ -27,7 +27,8 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -213,6 +214,7 @@ class GatewayAdmission:
         *,
         conversation_key: str = "",
         owner_limit: int | None = None,
+        pool_can_acquire: Callable[[], bool] | None = None,
     ) -> str:
         with self._lock:
             if self._total >= max(1, global_limit):
@@ -221,6 +223,8 @@ class GatewayAdmission:
                 return "user_inflight"
             capacity = self._owner_limit if owner_limit is None else owner_limit
             if capacity > 0 and not self._per_user.get(user_key, 0) and len(self._per_user) >= capacity:
+                return "owner_capacity"
+            if pool_can_acquire is not None and not pool_can_acquire():
                 return "owner_capacity"
             if conversation_key and self._per_conversation.get(conversation_key, 0) >= 1:
                 return "conversation_busy"
@@ -314,18 +318,36 @@ class AdmissionLimits:
     user_inflight: int
     global_inflight: int
     owner_inflight: int = 0
+    pool_can_acquire: Callable[[dict], bool] | None = field(default=None, compare=False, repr=False)
 
-    # LLM: Reuse owner_agent_pool_max_agents; invalid/non-positive values follow the pool's existing default 64.
-    # 函数用途: 从现有配置读取用户、全局及owner池容量。
+    # LLM: Existing config remains authoritative; optional Agent binding observes its actual shared pool without creating one.
+    # 函数用途: 读取原容量并绑定实时池预检，让退役和构建占用也能在认领前背压。
     @classmethod
-    def from_config(cls, config: object) -> AdmissionLimits:
+    def from_config(cls, config: object, *, agent: object | None = None) -> AdmissionLimits:
         return cls(
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
             ),
             owner_inflight=_positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64),
+            pool_can_acquire=partial(_request_pool_has_capacity, agent) if agent is not None else None,
         )
+
+
+# LLM: This is a read-only hint, never owner/auth authority; actual construction still rechecks canonical owner and reserves pool capacity.
+# 函数用途: 使用当前请求的原owner解析器检查真实共享池，基础Agent不占作用域池预算。
+def _request_pool_has_capacity(agent, payload: dict) -> bool:
+    pool = getattr(agent, "_owner_pool", None)
+    if pool is None:
+        return True
+    from ..user_space.owner_resolver import owner_identity_from_config
+
+    try:
+        owner = _resolve_request_owner_identity(agent, payload)
+    except (OwnerScopeUnavailableError, PermissionError, ValueError):
+        # 身份错误继续交原处理入口拒绝，不把它变成容量等待或执行许可。
+        return True
+    return owner == owner_identity_from_config(agent.config) or pool.can_acquire(owner)
 
 
 def _positive_int(value: object, fallback: int) -> int:
@@ -401,6 +423,7 @@ def _admit_and_submit(
         limits.global_inflight,
         conversation_key=conversation_key,
         owner_limit=limits.owner_inflight or None,
+        pool_can_acquire=partial(limits.pool_can_acquire, request.payload) if limits.pool_can_acquire is not None else None,
     )
     if blocked_reason:
         # 合法排队:把"仍在等准入"这一事实写成结构化字段,客户端据此续期而不是误判超时。

@@ -12,7 +12,7 @@ import pytest
 
 from agent_py_agent.agent.agent_core.runner import worker as runner
 from agent_py_agent.agent.gateway_parts import request_worker as requests
-from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool
+from agent_py_agent.agent.owner_scoped_pool import OwnerScopedAgentPool, PoolCapacityExceededError
 from agent_py_agent.agent.settings import AgentConfig
 from agent_py_agent.agent.tooling.registry import ToolRegistry, ToolRegistryParams
 from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
@@ -333,6 +333,9 @@ def test_pool_eviction_then_pin_reopens_registry(tmp_path):
     first.tools._mcp_connected_state[0] = True
     pool.get(OwnerIdentity.provider_user("test", "b"))
     assert first.tools._mcp_closed.is_set()
+    second = pool.peek(OwnerIdentity.provider_user("test", "b"))
+    key = ("test", "user", "b")
+    assert pool.evict_idle(key, second, pool._last_used[key])
     with pool.pin(first):
         assert not first.tools._mcp_closed.is_set()
         assert first.tools._mcp_connected_state == [False]
@@ -419,7 +422,7 @@ def test_dual_owner_and_child_thread_local_isolation(tmp_path):
 def test_eviction_close_cannot_overwrite_concurrent_pin(tmp_path):
     pool = OwnerScopedAgentPool(AgentConfig(my_agent_home=str(tmp_path / "home")), tmp_path, max_agents=1)
     pool._builder = lambda *_args: SimpleNamespace(tools=registry(tmp_path))
-    agent = pool.get(OwnerIdentity.provider_user("test", "a"))
+    agent = pool.get(OwnerIdentity.provider_user("test", "a"), hard=False)
     closing, allow_close, entered, evicted = (threading.Event() for _ in range(4))
     closed = threading.Event()
 
@@ -441,7 +444,7 @@ def test_eviction_close_cannot_overwrite_concurrent_pin(tmp_path):
             return agent.tools._mcp_closed.is_set()
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        removing = executor.submit(pool.get, OwnerIdentity.provider_user("test", "b"))
+        removing = executor.submit(pool.evict_soft_agent_id, id(agent))
         assert closing.wait(10)
         pinning = executor.submit(lease)
         entered.wait(0.1)
@@ -458,9 +461,11 @@ def test_pool_acquire_and_gauges(tmp_path):
     pool._builder = lambda *_args: SimpleNamespace(tools=registry(tmp_path))
     assert callable(getattr(pool, "acquire", None)), "coordinated pool acquisition is missing"
     with pool.acquire(OwnerIdentity.provider_user("test", "a")) as agent:
-        pool.get(OwnerIdentity.provider_user("test", "b"))
+        with pytest.raises(PoolCapacityExceededError):
+            pool.get(OwnerIdentity.provider_user("test", "b"))
         assert pool.hard_count == 1 and pool.soft_count == 0
-        assert pool.retired_count == 1 and pool.pinned_count == 1
+        assert pool.retired_count == 0 and pool.pinned_count == 1
+        assert pool.gauges()['total_live_instances'] == 1
         assert not agent.tools._mcp_closed.is_set()
     assert pool.retired_count == 0 and pool.pinned_count == 0
 
@@ -573,3 +578,137 @@ def test_durable_capacity_preserves_real_gate_rejection(tmp_path, monkeypatch):
     original = gate.admit(request.path, (owner, None), limits, snapshot=request.payload)
     assert original["reason"] == "coordinator_generation_unavailable"
     assert requests._durable_admission_decision(paths, request, gate, (owner, None), limits) == original
+
+
+# LLM: Use a real local stdio server and actual tool publication/execution, not only a connection-state flag.
+# 函数用途: 验证关闭重开后新连接能重新发布同名工具并实际执行。
+def test_reopened_registry_replaces_old_proxy_and_invokes_new_client(tmp_path):
+    from agent_py_agent.tests.test_mcp_lifecycle import _registry
+
+    tools = _registry(tmp_path)
+    name = "mcp__echo__echo"
+    old_client, old_proxy = tools._mcp_clients[0], tools.tools[name]
+    try:
+        assert old_proxy.execute({"text": "before-close"}).ok
+        tools.close_mcp_clients()
+        assert name not in tools.tools
+        tools.reopen_mcp_clients()
+        assert tools.ensure_mcp_connected()
+        assert tools._mcp_clients[0] is not old_client
+        assert tools.tools[name] is not old_proxy
+        assert name in tools.runtime_snapshot().available_tool_names
+        result = tools.tools[name].execute({"text": "after-reopen"})
+        assert result.ok and "after-reopen" in result.output
+    finally:
+        tools.close_mcp_clients()
+
+
+# LLM: Legacy factories are checked by signature, not retried after a constructor's internal TypeError.
+# 函数用途: 验证旧构造器可调用且构造内部异常不会导致重复副作用。
+def test_worker_legacy_factory_and_internal_typeerror(tmp_path):
+    params = SimpleNamespace(root=tmp_path, request_transport=None)
+    calls = []
+
+    # LLM: Deliberately omit the optional MCP keyword while retaining the original config/root contract.
+    # 函数用途: 模拟尚未接收延迟选项的旧构造器。
+    def legacy(config, root):
+        calls.append((config, root))
+        return calls[-1]
+
+    config = AgentConfig()
+    assert runner._construct_transported_worker(legacy, params, config) == (config, tmp_path)
+
+    # LLM: The exception occurs inside a keyword-compatible factory and must propagate exactly once.
+    # 函数用途: 排除把业务TypeError误当成签名不兼容而重试的实现。
+    def broken(config, root, **kwargs):
+        calls.append(kwargs)
+        raise TypeError("internal construction error")
+
+    with pytest.raises(TypeError, match="internal construction error"):
+        runner._construct_transported_worker(broken, params, config)
+    assert len(calls) == 2
+
+
+# LLM: Exercise the actual worker builder; only profile/overlay resolution and the heavyweight constructor are seams.
+# 函数用途: 验证配置覆盖完成后只构造一个worker且派工授权仍先于应用。
+def test_worker_effective_config_uses_single_construction(tmp_path, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.settings import model_profiles
+
+    base = AgentConfig(my_agent_home=str(tmp_path / "home"), model_backend="echo")
+    effective = replace(base, max_tool_rounds=7)
+    calls, authorized = [], []
+    task = SimpleNamespace(attributes={})
+
+    # LLM: The double exposes a config-application seam equivalent to the real fresh worker's dependency rebuild.
+    # 类用途: 观察真正Agent构造次数，不用构造次数自身伪装业务成功。
+    class Worker(SimpleAgent):
+        # LLM: Accept only normal worker constructor options.
+        # 函数用途: 记录最终配置及构造事件。
+        def __init__(self, config, root, **kwargs):
+            calls.append(config)
+            self.config = config
+            self.subagents = SimpleNamespace(owner_id="local/main", workspace_root=root)
+
+    monkeypatch.setattr(runner, "authorize_operation", lambda *_a: authorized.append(True) or task)
+    monkeypatch.setattr(model_profiles, "inherited_model_config", lambda *_a: base)
+    monkeypatch.setattr(runner, "apply_task_runtime_config_overlay", lambda *_a, **_k: effective)
+    params = runner.RunSubagentWorkerParams(base, tmp_path, "child", "", True, 4, False, "")
+    worker = runner._build_worker_agent(Worker, params)
+    assert authorized == [True]
+    assert len(calls) == 1, "effective config caused a second worker construction"
+    assert worker.config is effective
+
+
+# LLM: No user is admitted yet, so active-user counting alone cannot detect the pinned retired object consuming the budget.
+# 函数用途: 验证真实派发在退役实例占满容量时留队，释放租用后下一次扫描能认领。
+def test_retired_pool_capacity_keeps_request_in_inbox(tmp_path, monkeypatch):
+    import json
+
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    assert 'agent' in inspect.signature(requests.AdmissionLimits.from_config).parameters
+    config = AgentConfig(my_agent_home=str(tmp_path / 'home'), owner_agent_pool_max_agents=1)
+    pool = OwnerScopedAgentPool(config, tmp_path)
+    pool._builder = lambda *_args: SimpleNamespace()
+    owner = OwnerIdentity.provider_user('test', 'a')
+    old = pool.get(owner, hard=False)
+    agent = SimpleNamespace(config=config, _owner_pool=pool)
+    monkeypatch.setattr(requests, '_resolve_request_owner_identity', lambda *_a: owner)
+    monkeypatch.setattr(requests, 'admission', requests.GatewayAdmission())
+    limits = requests.AdmissionLimits.from_config(config, agent=agent)
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    requests.ensure_gateway_folders(paths)
+    path = paths.inbox / 'queued.json'
+    payload = {'id': 'queued', 'kind': 'ask', 'user_id': 'a', 'created_at': 1}
+    path.write_text(json.dumps(payload))
+    claimed = []
+    request = SimpleNamespace(path=path, payload=payload)
+    with pool.pin(old):
+        pool.evict_soft_agent_id(id(old))
+        assert requests._admit_and_submit(paths, request, (limits, lambda *a: claimed.append(a), None)) == 'blocked'
+        assert not claimed and path.exists()
+        assert json.loads(path.read_text())['admission_wait_reason'] == 'owner_capacity'
+    assert requests._admit_and_submit(paths, request, (limits, lambda *a: claimed.append(a), None)) == 'claimed'
+    assert len(claimed) == 1
+    requests.admission.release('a')
+
+
+# LLM: Interleaved same-owner forced reloads retain a live registry without exceeding the cached/building/retired instance budget.
+# 函数用途: 双用户金丝雀补验强制刷新与在途租用交错不会积累旧代。
+def test_canary_force_reload_never_accumulates_retired_generations(tmp_path):
+    from contextlib import ExitStack
+
+    pool = OwnerScopedAgentPool(AgentConfig(my_agent_home=str(tmp_path / 'home')), tmp_path, max_agents=1)
+    pool._builder = lambda *_a: SimpleNamespace(tools=registry(tmp_path))
+    owner = OwnerIdentity.provider_user('test', 'a')
+    with ExitStack() as leases:
+        first = pool.get(owner)
+        leases.enter_context(pool.pin(first))
+        for _ in range(4):
+            current = pool.get(owner, force_reload=True)
+            leases.enter_context(pool.pin(current))
+            assert current is first and not current.tools._mcp_closed.is_set()
+            assert pool.gauges()['total_live_instances'] <= pool._max_agents
+        assert pool.retired_count == 0
+    first.tools.close_mcp_clients()

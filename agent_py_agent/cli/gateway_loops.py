@@ -421,13 +421,14 @@ class _RequestDispatcher:
 
     # LLM: 原C正count组合根在pool ctor前供P6 initializer，真实worker进入业务前保Thread；默认0的None不新建观察/权威。
     # LLM: 原submit Future在本实例局部保留，退休未结不能随业务线程返回丢弃；不是第二队列或审批表。
+    # LLM: 单进程准入绑定原bootstrap Agent的实时池预检，不冻结池快照、不创建业务实例；C仍沿原持久准入门。
     # 函数用途: 构造原池并保存原Future完成核收责任及本代线程观察。
     def __init__(self, context: GatewayRunContext, paths: GatewayPaths) -> None:
         self.context = context
         self.paths = paths
         self.bootstrap_agent = _gateway_agent_from_context(context)
         _attach_shared_owner_registry(self.bootstrap_agent, context)
-        self.limits = AdmissionLimits.from_config(self.bootstrap_agent.config)
+        self.limits = AdmissionLimits.from_config(self.bootstrap_agent.config, agent=self.bootstrap_agent)
         # The request file and lease are authoritative.  If a provider/tool
         # call wedges during process shutdown, the next Gateway reclaims that
         # exact request; the old attempt cannot be allowed to hold Python open.
