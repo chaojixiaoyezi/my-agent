@@ -108,30 +108,36 @@ def resolve_owner_main_home(agent):
     return resolve_owner_home(agent.home_paths.root, OwnerIdentity.local_main()).home_dir
 
 
-# LLM: 纯函数核验标记与序列化包装的6字符碰撞；碰撞时用与原/URL解码秘密字符不相交的非空符号，避免空字段重新拼回秘密。
-# 不读凭据库、不记录secret或派生片段；调用方scrub_push_outcome仍保留原8字符清洗及机器事实合同。
-# 函数用途: 为一次推送选择安全展示标记，发生碰撞时保留非空隔断，不让JSON引号直接相邻。
+# LLM: 默认标记仅在原/URL解码秘密不含两端方括号且无四字符包装碰撞时保留；否则选字符及百分号表示不相交的非空隔断。
+# 不读凭据库或记录派生片段；字符不相交保证跨标记边界的窗口无法复原秘密，scrub_push_outcome仍守原8字符清洗和机器事实。
+# 函数用途: 不依赖字段名长度猜边界，安全时保留可读标记，碰撞时使用与秘密不相交的符号。
 def _safe_redaction_marker(secret):
     marker = "[REDACTED_PUSH_SECRET]"
-    wrapped = (marker, json.dumps(marker), repr(marker), f'\\"{marker}\\"', f" {marker} ",
-               json.dumps({"": marker}), json.dumps({marker: ""}), json.dumps([marker]),
-               json.dumps({"": marker}, separators=(",", ":")), repr({"": marker}))
-    wrapped += tuple(json.dumps(text) for text in wrapped)
-    surfaces = {text.casefold() for text in wrapped}
-    surfaces.update(quote(text, safe="").casefold() for text in wrapped)
-    surfaces.update("".join(f"%{byte:02x}" for byte in text.encode()) for text in wrapped)
-    for value in (secret.casefold(), unquote(secret).casefold()):
-        width = min(6, len(value))
-        if width and any(value[index:index + width] in surface
-                         for index in range(len(value) - width + 1) for surface in surfaces):
-            excluded = set(secret.casefold() + unquote(secret).casefold())
-            # 节点凭据至多512字符，必有未出现的可打印符号；不用引号、反斜杠、百分号或有大小写折叠的字母。
-            for codepoint in range(33, 0x110000):
-                char = chr(codepoint)
-                if char.isprintable() and not char.isalnum() and char not in '\\"\'% ' and char not in excluded:
-                    return char * 8
-            raise ValueError("REMOTE_PUSH_REDACTION_MARKER_UNAVAILABLE")
-    return marker
+    values = (secret.casefold(), unquote(secret).casefold())
+    excluded = set("".join(values))
+    # 任一端点字符出现在秘密中，默认标记就不再具备与未知字段名边界的不相交证明。
+    if not {"[", "]"} & excluded:
+        wrapped = (marker, json.dumps(marker), repr(marker), f'\\"{marker}\\"', f" {marker} ",
+                   json.dumps({"": marker}), json.dumps({marker: ""}), json.dumps([marker]),
+                   json.dumps({"": marker}, separators=(",", ":")), repr({"": marker}),
+                   json.dumps(dict.fromkeys(("reported_output_preview", "error", "detail", "message"), marker)))
+        wrapped += tuple(json.dumps(text) for text in wrapped)
+        surfaces = {text.casefold() for text in wrapped}
+        surfaces.update(quote(text, safe="").casefold() for text in wrapped)
+        surfaces.update("".join(f"%{byte:02x}" for byte in text.encode()) for text in wrapped)
+        if not any(value[index:index + min(4, len(value))] in surface
+                   for value in values if value
+                   for index in range(len(value) - min(4, len(value)) + 1) for surface in surfaces):
+            return marker
+    # 配置秘密至多512字符；只选可打印非字母数字符号，不使用会被JSON转义的引号/反斜杠或百分号。
+    for codepoint in range(33, 0x110000):
+        char = chr(codepoint)
+        if not (char.isprintable() and not char.isalnum() and char not in '\\"\'% ' and char not in excluded):
+            continue
+        encoded = (f"%{ord(char):02x}", "".join(f"%{byte:02x}" for byte in char.encode()))
+        if not any(token in value for token in encoded for value in values):
+            return char * 8
+    raise ValueError("REMOTE_PUSH_REDACTION_MARKER_UNAVAILABLE")
 
 
 # LLM: 全部8字符窗口覆盖任意更长片段；核字面/UTF8百分号组合及unquote，整字段清洗并保守选择包装安全标记，不改机器事实。

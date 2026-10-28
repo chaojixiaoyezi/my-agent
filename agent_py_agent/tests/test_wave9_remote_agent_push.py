@@ -1062,10 +1062,11 @@ def test_each_eight_character_window_scrubbed_recursively(secret, form):
         assert result.effect_outcome == "unknown"
 
 
-# LLM: 使用真实回环HTTP、原ToolExecutor和LocalStore；直接检查返回output及账本已解码output，不用再次JSON编码掩盖引号碰撞。
-# 函数用途: 复现标记尾部/前缀与JSON结束引号或键值分隔符重拼秘密，覆盖完整和全百分号两种大小写回显。
+# LLM: 真实回环HTTP→原ToolExecutor→LocalStore读回，直接核对output及已解码preview的全部8字符窗口，不用再次JSON编码掩盖字段名边界。
+# 函数用途: 覆盖标记两端与字段名尾巴、引号或键值分隔符重拼秘密，保留完整及全百分号大小写回显。
 @pytest.mark.parametrize("form", ["full", "percent_upper", "percent_lower"])
-@pytest.mark.parametrize("boundary", ['SECRET]"', '": "[RED', '[REDACTED_PUSH_SECRET]suffixiew": ""'])
+@pytest.mark.parametrize("boundary", ['SECRET]"', '": "[RED', '[REDACTED_PUSH_SECRET]suffixiew": ""',
+                                     'iew": "[', '"[', ']"'])
 def test_round_four_marker_boundary_scrubbed_in_http_and_decoded_ledger(receiver, adverse_receiver, tmp_path, form, boundary):
     from urllib.parse import unquote
 
@@ -1094,10 +1095,11 @@ def test_round_four_marker_boundary_scrubbed_in_http_and_decoded_ledger(receiver
             assert all(secret[index:index + 8].casefold() not in normalized for index in range(len(secret) - 7))
 
 
-# LLM: 只测合成令牌；比较值、JSON/repr/转义与URL包装后的全部8字符窗口，保留原机器事实和幂等约束。
-# 函数用途: 防止占位符与两侧引号、空格、百分号上下文重拼秘密，包含普通标记仍可使用的安全对照。
+# LLM: 合成令牌覆盖JSON/repr/转义及URL包装的8字符窗口；四字符上下文碰撞可保守退避，但不得改变机器事实或幂等。
+# 函数用途: 核对字段名尾巴及两侧引号边界，并保留普通可读标记和字段名碰撞退避两种对照。
 @pytest.mark.parametrize("boundary", ['SECRET]"', '"[REDACT', "SECRET]'", 'SECRET]\\"', '"%[REDACTED', "CRET] ", '": "[RED',
-                                     '[REDACTED_PUSH_SECRET]suffixiew": ""', "ordinary-safe-tail"])
+                                     '[REDACTED_PUSH_SECRET]suffixiew": ""', "ordinary-safe-tail",
+                                     'iew": "[', '"[', ']"', "plain-ok"])
 def test_round_four_marker_contexts_do_not_recreate_secret_windows(boundary):
     from dataclasses import asdict
     from urllib.parse import quote, unquote
@@ -1117,5 +1119,41 @@ def test_round_four_marker_contexts_do_not_recreate_secret_windows(boundary):
         assert all(secret[index:index + 8].casefold() not in normalized for index in range(len(secret) - 7))
     assert cleaned.effect_outcome == "unknown" and cleaned.ok is False
     assert asdict(cleaned) == asdict(scrub_push_outcome(cleaned, secret))
-    if boundary == "ordinary-safe-tail":
+    if boundary == "plain-ok":
         assert output == "[REDACTED_PUSH_SECRET]"
+    elif boundary == "ordinary-safe-tail":
+        # R5要求四字符上下文也检查；tail命中detail，原样例保留为退避对照，plain-ok另守普通标记。
+        assert len(output) == 8 and len(set(output)) == 1
+        assert not set(output.casefold()) & set(secret.casefold() + unquote(secret).casefold())
+
+
+# LLM: 不依赖一份字段名列表证明边界；原值或URL解码值带任意方括号，或命中四字符上下文时，标记须为字符不相交的非空隔断。
+# 函数用途: 对单侧方括号、百分号方括号、内部标记和真实JSON键的短重叠验证退避性质。
+@pytest.mark.parametrize("suffix", ["[", "]", "%5b", "%5D", "REDA", "PUSH", "cret", "tail"])
+def test_r5_marker_character_disjoint_invariant(suffix):
+    from urllib.parse import unquote
+
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import _safe_redaction_marker
+
+    secret = "R5-0123456789-abcdefghijklmnopqrstuvwxyz-" + suffix
+    marker = _safe_redaction_marker(secret)
+    excluded = set(secret.casefold() + unquote(secret).casefold())
+    assert len(marker) == 8 and len(set(marker)) == 1
+    assert not set(marker.casefold()) & excluded
+
+
+# LLM: 合成串用全部ASCII标点迫使Unicode退避，再用字面%a1排除候选符号的序号编码，禁止只检查原字符。
+# 函数用途: 验证退避符号的百分号十六进制表示不会成为秘密中的窗口。
+def test_r5_marker_fallback_rejects_percent_encoded_candidate():
+    import string
+    from urllib.parse import unquote
+
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import _safe_redaction_marker
+
+    secret = "R5-token-" + string.punctuation + "%a1[REDACTED_PUSH_SECRET]"
+    marker = _safe_redaction_marker(secret)
+    assert len(marker) == 8 and len(set(marker)) == 1
+    for value in (secret.casefold(), unquote(secret).casefold()):
+        assert marker[0] not in value
+        assert f"%{ord(marker[0]):02x}" not in value
+        assert "".join(f"%{byte:02x}" for byte in marker[0].encode()) not in value

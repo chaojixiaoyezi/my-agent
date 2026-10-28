@@ -1,3 +1,32 @@
+## 2026-10-28 Wave 9 A1 Round 5：字符不相交标记与真实字段名边界
+
+来源：先完整阅读 `07-tasks/fix-r5-wave9-a1.md` 全35行；后续用户明确裁定只移除含8字符固定公共字段名片段的 `preview": "[` 参数，保留真实跨边界后缀 `iew": "[`，严格全输出8字符窗口零残留断言不变。干净起点 `844a3959464fcc46bc93176fa88ea31d56e491ef`，提交分支 `wave9-a1`；所有项目/临时文件修改仅在 `/tmp/wt-wave9-a1`，未碰其他工作树或my-agent-dsh。门禁基线仍为 `db4d5de92`；不推送或部署。
+
+### 已实现并实测的范围
+
+- `_safe_redaction_marker` 先计算原秘密及一次URL解码值的casefold字符集；任一方括号存在即走不相交符号退避，不再靠字段名长度推测边界。无方括号时保留可读标记之前，按四字符窗口检查原标记、JSON/repr/转义/URL包装，并加入reported_output_preview/error/detail/message真实键。退避同时排除候选符号的序号百分号形式及UTF-8百分号形式；原8字符回显清洗、机器事实、网络门及coordinator未改。
+- 两个既有边界测试均加入 `iew": "[`、`"[`、`]"`，保留所有R4边界参数；真实HTTP继续覆盖完整/全百分号大写/小写回显，直接检查工具output、LocalStore已解码output及内层preview值。另补单侧/百分号方括号、四字符内部标记与字段上下文、Unicode候选百分号碰撞的纯函数性质测试。
+- R5按全部包装检查四字符的保守规则，旧 `ordinary-safe-tail` 中tail命中detail；原输入保留为符号退避对照，另加plain-ok明确守住普通可读标记。未放松秘密8字符及幂等/机器事实断言，无skip或xfail。两处全8字符窗口断言与起点HEAD逐一AST比对完全相同；矩阵仅按上述裁定移除不适用的公共字段名参数，没有改成仅检查preview值、排除特定窗口或给匹配开白名单。
+- 先在R4原源码运行未裁定矩阵 **44项、18失败、0错误/跳过**（`.pytest_cache/r5-red.xml`），保留真实先红证据。修复后裁定前完整文件 **163项、4失败、0错误/跳过**（`.pytest_cache/r5-current.xml`），四条剩余失败均为公共固定字段名自身匹配，不是跨标记残留；不能声称这四条是代码修复转绿。用户明确裁定后只调整两处参数列表，产品源码字节与已审版本相同。
+- 最终工作树根运行指定完整测试文件，JUnit实际读回 **159 passed / 0 failed / 0 errors / 0 skipped**（`.pytest_cache/r5-approved.xml`）；读取完整运行输出并核对源码/测试冻结摘要前后未变。原 `iew": "[` 三种真实回显及纯函数反例均通过。Ruff全指定范围通过，导入边界JSON为 `[]`；文档同步及最终提交区间门禁按下列命令执行，最终交接附提交与结果。
+- 新增/修改5个函数保持 `# LLM:` + `# 函数用途:` 双层中文注释。复用同字节产品源码的独立高深度静态审查；其未读取/修改项目或运行测试，动态证据来自本会话实际执行。审查指出的非ASCII候选casefold变化和JSON的Unicode转义风险尚未动态复现、未纳入本次已验范围，不宣称任意Unicode/编码情形均受保证。
+
+### 已裁定的公共字段名对照与适用边界
+
+`preview": "[` 秘密中已经包含 `preview"`、`review":`、`eview": `、`view": "` 四个8字符窗口。它们也位于固定公共JSON键 `"reported_output_preview": "` 内，均在标记之前。最小原生JSON探针对默认标记、8个感叹号、空串及当前不相交符号逐一验证：四个公共窗口始终存在；只有真正跨标记的 `iew": "[` 消失。这不是把原秘密内容传出了，而是公共固定文本与人为令牌的字面重合。
+
+因此，用户明确将此参数移出跨标记边界测试矩阵；保留 `iew": "[` 精确8字符跨边界反例，并保持对整个output、已解码账本output和preview值的严格8字符窗口检查。没有修改coordinator序列化、固定字段或机器事实。本节不将标记边界性质外推为整个公共JSON文本不可能与任意人工秘密重合；生产部署、跨机网络、真实模型消费、全仓及跨平台CI未验证。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --junitxml=.pytest_cache/r5-approved.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
 ## 2026-10-28 Wave 9 A1 Round 4：脱敏标记与JSON包装边界
 
 来源：完整读取 `07-tasks/fix-r4-wave9-a1.md` 全36行；用户随后明确c4已停止，由本会话独占接管 `/tmp/wt-wave9-a1` / `wave9-a1`，核验既有R4改动并提交。起点 `24ecb90945ac348ccdbb7bc44cd588941d242d48`，门禁基线仍为 `db4d5de92`。不推送、部署、切分支或操作生产服务。
