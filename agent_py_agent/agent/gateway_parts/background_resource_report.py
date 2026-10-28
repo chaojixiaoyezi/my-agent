@@ -78,23 +78,25 @@ def _rss_peak_bytes() -> int | None:
     return int(usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024))
 
 
-# LLM: 公开数值计数优先；现有owner池仅在原锁内统计容器和非零pin对象数，不读取/构造/repr池内对象。
+# LLM: 现有owner池在原锁内直接一次原子统计四份容器和非零pin对象数，避免持锁再调会重入同把非递归锁的公开property；替身对象在锁外读取公开数值计数。
 # 函数用途: 投影可取得的hard、soft、retired和pinned数量，缺失指标不猜成0。
 def _owner_pool_memory_gauges(owner_pool: object | None) -> dict[str, int]:
     result: dict[str, int] = {}
+    fields = (
+        ("hard_count", "_hard_agents"), ("soft_count", "_soft_agents"),
+        ("retired_count", "_retired_agents"), ("pinned_count", "_pins"),
+    )
     with getattr(owner_pool, "_lock", None) or nullcontext():
-        for name, attribute in (
-            ("hard_count", "_hard_agents"), ("soft_count", "_soft_agents"),
-            ("retired_count", "_retired_agents"), ("pinned_count", "_pins"),
-        ):
-            value = getattr(owner_pool, name, None)
-            if type(value) is int:
-                result[name] = value
-                continue
+        for name, attribute in fields:
             values = getattr(owner_pool, attribute, None)
             if isinstance(values, Mapping):
                 result[name] = (sum(1 for count in values.values() if count > 0)
                                 if name == "pinned_count" else len(values))
+    for name, _attribute in fields:
+        if name not in result:
+            value = getattr(owner_pool, name, None)
+            if type(value) is int:
+                result[name] = value
     return result
 
 
