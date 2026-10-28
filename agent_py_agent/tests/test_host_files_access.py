@@ -275,7 +275,12 @@ def test_declarations_match_the_canonical_layout(tmp_path):
 
     root = tmp_path.resolve()
     paths = home_paths(root)
-    assert {paths.config_dir, paths.system_config_dir, root / "remote_push"} == {root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS}
+    assert {
+        paths.config_dir,
+        paths.system_config_dir,
+        root / "remote_push",
+        root / "local_users_auth",
+    } == {root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS}
     owner = resolve_owner_home(root, OwnerIdentity.provider_user("feishu", "u-1")).home_dir
     capability = default_capability_config_path(owner)
     assert host_config_root_for_path(capability, root) == capability.parent
@@ -426,8 +431,14 @@ def test_shell_lists_host_files_per_mode(tmp_path):
     assert scoped == {main / "config", *(main / name for name in state)}
     full = set(host_readonly_paths_for("", str(main)))
     owners = (main, feishu, bare)
-    assert full == {root / "config", root / "system" / "config", root / "remote_push", *(home_dir / "config" for home_dir in owners),
-                    *(home_dir / name for home_dir in owners for name in state)}
+    assert full == {
+        root / "config",
+        root / "system" / "config",
+        root / "remote_push",
+        root / "local_users_auth",
+        *(home_dir / "config" for home_dir in owners),
+        *(home_dir / name for home_dir in owners for name in state),
+    }
     assert home["verification"] not in full | scoped and task, "任务核验记录只按写边界的 task_root 给（3a 定），不从路径反推"
     assert host_readonly_paths_for(str(tmp_path / "loose-owner"), "") == (), "非规范布局推不出数据根时不加覆盖"
 
