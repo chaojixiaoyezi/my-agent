@@ -2,7 +2,7 @@
 
 # LLM: execute_tool_loop 是主子共用的唯一入口；发现复用正式搜索/凭据投影，交付复核只消费原验证/写入信封，native IR、Compact 与收口权威不变。
 # 取消响应实现归低层response_decision；本模块只保留原兼容委托，循环直接判断原action而不二次翻译。
-# 模块用途: 装配采样、工具展示、窄收口及最终校准计量；保持输入账、取消和持久提交边界，核对共享展示测试。
+# 模块用途: 装配采样、工具展示及校准；摘要降级沿同次观测重锚定本轮预检，增长15%才重试，不伪造提交或吞硬停。
 from __future__ import annotations
 
 import json
@@ -458,9 +458,9 @@ def _string_sequence(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-# LLM: Native history is reduced only as complete ToolCall/ToolResult pairs. A save-enabled
-# authoritative turn must checkpoint and CAS the same ConversationThread before the mutation lives.
-# 函数用途: 原生工具历史达到统一阈值时，按冻结校准口径压缩并提交到唯一 Compact 账本。
+# LLM: 正常Compact保留checkpoint/CAS合同，仅准备阶段软失败可降级；失败压力增长15%才再尝试。
+# 取消检查先于重试，提交后错误不进入此捕获边界；同次冻结校准透传至局部接受和下一跳预检。
+# 函数用途: 按完整校准压力决定续跑或增长重试；把同次冻结校准交给局部接受门，硬停和提交后异常仍传播。
 def _fit_native_ir_to_shared_budget(
     agent: object,
     params: ToolLoopExecuteParams,
@@ -490,17 +490,87 @@ def _fit_native_ir_to_shared_budget(
         raw = model_visible_context_snapshot(agent, params, prompt).raw_estimated_tokens
         return calibrated_compact_request_tokens(raw, calibration)
 
-    plan = _prepare_native_compact_plan(
-        agent,
-        params,
-        prompt,
-        estimator=estimator,
-        force=force,
-    )
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    if params.compact_degradation_latched:
+        baseline = params.compact_degraded_baseline_tokens
+        # 用整数上取整守住精确15%边界；没有可靠基线时不解锁付费调用。
+        if baseline <= 0 or estimator() < (baseline * 115 + 99) // 100:
+            return _continue_after_compact_failure(agent, params, estimator, reason=params.compact_degradation_reason,
+                                                   force=force, fresh_failure=False, calibration=calibration, prompt=prompt)
+        object.__setattr__(params, "compact_degradation_latched", False)
+        object.__setattr__(params, "compact_degraded_baseline_tokens", 0)
+    try:
+        plan = _prepare_native_compact_plan(
+            agent, params, prompt, estimator=estimator, force=force,
+        )
+    except Exception as exc:
+        from ..conversation.compact_guard import compact_failure_is_degradable
+
+        allowed, reason = compact_failure_is_degradable(exc)
+        if not allowed:
+            raise
+        return _continue_after_compact_failure(agent, params, estimator, reason=reason, force=force,
+                                              calibration=calibration, prompt=prompt)
     if plan is None:
         return 0
     plan = replace(plan, calibration=calibration, prompt=prompt)
     return _apply_native_compact_plan(agent, params, estimator, plan)
+
+
+# LLM: 仅在提交前软失败或同轮锁存调用；estimator计量完整校准请求。新失败才更新失败压力，
+# 旧锁存不重复Level1裁剪；接受后沿同次冻结校准重锚定本轮内存观测，供下一跳预检复用。
+# 不写模型/Store/pin，不改变全局缩减观测失效规则；native与共享恢复调用方须传同次校准和prompt。
+# 函数用途: 局部折叠后同步本轮计量基线；旧锁存不重复裁剪或移动失败压力基线。
+def _continue_after_compact_failure(agent, params, estimator, *, reason: str, force: bool, fresh_failure: bool = True,
+                                  calibration=None, prompt: object = "") -> int:
+    from ..conversation.compact_calibration import calibrated_compact_request_tokens
+    from ..conversation.compact_guard import ConversationCompactError
+    from .model.context_pressure import (
+        model_request_input_ceiling,
+        model_visible_context_snapshot,
+        rebase_provider_context_observation,
+    )
+    from .tool_ir_compact import stub_old_native_tool_results
+    from .tool_request_projection import text_request_capacity_known
+
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    if not text_request_capacity_known(params):
+        raise ConversationCompactError("降级请求的完整容量未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    policy = _native_compact_policy(agent, params)
+    ceiling = model_request_input_ceiling(agent, policy.context_window_tokens)
+    if ceiling <= 0:
+        raise ConversationCompactError("模型输入容量未知", code="COMPACT_REQUEST_PROJECTION_UNKNOWN")
+    before = estimator()
+    level, trimmed = 1, 0
+    if force or before > int(ceiling * 0.92):
+        level = 2
+        trimmed = stub_old_native_tool_results(params, target_tokens=int(ceiling * 0.85), estimate_tokens=estimator, require_progress=force)
+        if force and not trimmed:
+            raise ConversationCompactError("强制降级没有可缩小的旧工具结果，不能重发相同超限请求", code="COMPACT_BUDGET_EXCEEDED")
+    elif fresh_failure and before > policy.trigger_tokens:
+        # Level1仅在一次新摘要失败后尝试一个真正变小的旧结果；没有可缩项仍可按92%安全线续跑。
+        trimmed = stub_old_native_tool_results(params, target_tokens=int(ceiling * 0.92),
+                                               estimate_tokens=estimator, require_progress=True)
+    raise_if_compact_interrupted(lambda: _native_compact_interrupted(params))
+    if calibration is not None:
+        raw = model_visible_context_snapshot(agent, params, prompt).raw_estimated_tokens
+        rebase_provider_context_observation(params, calibration=calibration, raw_estimated_tokens=raw,
+                                            calibrated_tokens=calibrated_compact_request_tokens(raw, calibration))
+    already_latched = params.compact_degradation_latched
+    if fresh_failure or not already_latched or params.compact_degraded_baseline_tokens <= 0:
+        object.__setattr__(params, "compact_degraded_baseline_tokens", before)
+    object.__setattr__(params, "compact_degradation_latched", True)
+    object.__setattr__(params, "compact_degradation_reason", reason)
+    if fresh_failure or not already_latched or trimmed:
+        _LOGGER.warning("compact summary degraded; active turn continues", extra={
+            "compact_degraded": True,
+            "compact_fallback_level": "local_trim" if level == 1 else "stub_collapse",
+            "compact_degraded_level": level, "reason": reason,
+            "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL, "original_reason_code": reason,
+            "commit_authority": COMPACT_AUTHORITY_TURN_LOCAL,
+            "before_tokens": before, "after_tokens": estimator(), "trimmed_results": trimmed,
+        })
+    return trimmed
 
 
 # LLM: Policy resolution stays identical for preflight and provider-overflow entrypoints.

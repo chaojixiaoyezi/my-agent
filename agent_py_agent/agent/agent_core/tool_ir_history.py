@@ -1,6 +1,6 @@
 
 # LLM: typed IR是唯一历史；有界投影LRU冻结全部真实字段并保prior引用身份，不消费guidance；applied前置且调用/推理不拆对。
-# 模块用途: 保存工具与模型历史，复用只读投影并隔离出站副本；须核对配对、媒体、缓存和取消回滚。
+# 模块用途: 保存工具与模型历史；回合桩仅用于模型视图及同源出站指纹，canonical保持原件。
 from __future__ import annotations
 
 """原生 tool_use 协议下的 IR 历史维护（Step 2 接线层）。
@@ -246,6 +246,29 @@ def native_tool_ir_history(params: object) -> list[Any]:
     return history
 
 
+# LLM: Source identity comes from the actual preceding canonical ToolCall, never current params.
+# Duplicate full identities fail closed; repeated provider call_id in different turns is valid.
+# 函数用途: 为原生结果解析真实run/attempt/turn/call四元来源，供局部桩与投影共享，未知来源不猜补。
+def native_tool_result_sources(history: list[Any]) -> list[tuple[tuple[str, str, str, str], ToolResult]]:
+    from ..conversation.compact_guard import ConversationCompactError
+
+    calls, resolved, seen = {}, [], set()
+    for item in history:
+        if isinstance(item, AssistantTurn):
+            calls = {call.call_id: (call.run_id, call.attempt_id, call.turn_id, call.call_id)
+                     for call in item.tool_calls}
+        results = (item,) if isinstance(item, ToolResult) else item if isinstance(item, (list, tuple)) else ()
+        for result in results:
+            if not isinstance(result, ToolResult) or result.call_id not in calls:
+                continue
+            source = calls[result.call_id]
+            if source in seen:
+                raise ConversationCompactError("原生工具结果来源重复，不能推断降级对象", code="COMPACT_TOOL_COVERAGE_UNKNOWN")
+            seen.add(source)
+            resolved.append((source, result))
+    return resolved
+
+
 # LLM: 插话身份及媒体由原 guidance packet 传入并与正文一起留在 IR；此处不读取图片或更改授权。
 # 函数用途: 把运行中用户补充输入追加到当前 turn 的原生消息历史，不在这里按正文去重。
 def record_user_turn_ir(params: object, text: str, *, input_ids: tuple[str, ...] = (), media: tuple = ()) -> None:
@@ -274,12 +297,24 @@ def record_runtime_facts_turn_ir(params: object, text: str, *, source: str = "")
     return True
 
 
-# LLM: 预检查与发送共享同一投影；显式 conversation_state 是冻结事实，None 才读取原 params 的内存快照。
-# 函数用途: 在历史副本追加变化状态并移除 prompt 重复尾部，不改原 IR、用量账或会话状态。
+# LLM: 预检与发送共用只读视图；只替换回合局部结果桩，canonical IR及最终持久化仍读原件。
+# 函数用途: 在模型历史副本应用临时桩和变化状态，不改原IR、用户输入、摘要或工具调用配对。
 def project_native_prompt_history(
     params: object, prompt: str, *, conversation_state: str | None = None,
 ) -> tuple[str, list[Any]]:
+    stubs = getattr(params, "compact_degradation_stubs", None) or {}
     history = list(getattr(params, "tool_ir_history", None) or [])
+    if stubs:
+        overrides = {id(result): stubs.get(source, result) for source, result in native_tool_result_sources(history)}
+        projected = []
+        for item in history:
+            if isinstance(item, list):
+                projected.append([overrides.get(id(result), result) for result in item])
+            elif isinstance(item, tuple):
+                projected.append(tuple(overrides.get(id(result), result) for result in item))
+            else:
+                projected.append(overrides.get(id(item), item))
+        history = projected
     layout = prompt_cache_layout(prompt)
     if layout is None:
         return prompt, history
@@ -340,8 +375,8 @@ def applied_compact_summary_item(text: str, generation: int, provider_compaction
 #   指纹（只读：显式借用prior，不消费seen、不写IR或修改投影）。同一请求的断流重试里，未转发指引先经
 #   tool_context、再经 IR 投影，两次输出一致，因此身份稳定。判定或投影失败时返回空串，身份退化为
 #   prompt 指纹，绝不中断模型主链。改动时同步核对 call_runtime.logical_model_call_id 与
-#   tool_model_generation._native_provider_messages 的出站口径。
-# 函数用途: 计算此刻会出站的 native provider messages 指纹；text 模式或不可判定时返回空串。
+#   tool_model_generation._native_provider_messages 的出站口径；临时降级先按同一投影应用，不能哈希原IR冒充出站。
+# 函数用途: 对实际降级模型视图计算native消息指纹及逻辑调用身份，原IR不改；不可判定仍返回空串。
 def provider_messages_fingerprint(params: object) -> str:
     from .native_tool_protocol import native_tool_use_active
 
@@ -350,8 +385,9 @@ def provider_messages_fingerprint(params: object) -> str:
             return ""
         state = getattr(params, "live_archive_state", None)
         seen = state.get("_forwarded_runtime_guidance") if isinstance(state, dict) else None
+        _, history = project_native_prompt_history(params, "")
         messages = project_native_provider_messages(
-            getattr(params, "tool_ir_history", None),
+            history,
             prior_messages=getattr(params, "provider_history_messages", None),
             tool_context=getattr(params, "tool_context", None),
             forwarded_guidance=seen if isinstance(seen, set) else (),

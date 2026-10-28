@@ -1,3 +1,5 @@
+# LLM: 保留原native配对/持久化红线；Wave9在摘要失败后再尝试局部降级，无法容纳时核对预算失败与原摘要原因链。
+# 模块用途: 验证原生工具回收、孤儿净化及降级仍不改canonical IR、pin和既有失败记账。
 from __future__ import annotations
 
 """Step 3/4 测试：native 下 compact 对 IR「整对」增删 + 出站孤儿净化。
@@ -1451,6 +1453,8 @@ def test_persistent_native_window_commits_completed_empty_summary_fallback(tmp_p
     assert not any(row["phase"] == "failed" for row in sink.progress_rows)
 
 
+# LLM: 最新四对本身过大，摘要空后确定性降级也不能安全发送；原IR、代次、检查点与失败进度断言均保留。
+# 函数用途: 按新的失败阶段核对结构化预算错码及原空摘要原因，不再绑定最初摘要的英文文案。
 def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     thread = store.threads.get_or_create(
@@ -1480,9 +1484,12 @@ def test_persistent_native_window_restores_ir_when_summary_fails(tmp_path):
     _record_large_write_calls(agent, params, start=1, stop=6, chars=12_000)
     before_ir = list(params.tool_ir_history)
 
-    with pytest.raises(ConversationCompactError, match="empty summary"):
+    with pytest.raises(ConversationCompactError) as caught:
         build_tool_loop_prompt(agent, params)
 
+    assert caught.value.code == "COMPACT_BUDGET_EXCEEDED"
+    assert isinstance(caught.value.__context__, ConversationCompactError)
+    assert caught.value.__context__.code == "COMPACT_EMPTY_SUMMARY"
     updated = store.threads.load(thread.thread_id)
     assert updated is not None
     assert params.tool_ir_history == before_ir

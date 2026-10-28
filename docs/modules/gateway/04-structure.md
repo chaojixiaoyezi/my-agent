@@ -35,6 +35,22 @@
 - `scheduler/delivery_policy.py` 统一封闭策略、跟随开关及等级过滤；`execution.py` 在 run 首次准备时为固定模式冻结原目标线程，执行/creator/模型来源仍不迁移；`notification_binding.py` 保留管理员认证代次。`alert_delivery.py` 将稳定 wake/事件/幂等键（缺失才使用业务摘要）归一为事件键，逐目标复用原 sender 和事件发送前 CAS。
 - `scheduler/repository.py` 在原 quota/store 事务中写 `delivery_outbox[run_id:event_key][target_key]`。旧单事件只读接口可兼容；多事件必须明确指定，不能猜最新事件来授权。每事件保存完整计划角色，部分登记/部分提交不清正文；fallback 在已外发但 canonical 异常时停止推进，未补账不得结算。等级过滤后无目标的事件走原内部留档合同。完整业务冻结、目标 sent 回执、canonical 提交分别记账，wake 首次业务快照仍不可覆盖，不承诺跨系统 exactly-once。准确验证范围见 [TESTS](../../../TESTS.md)。
 
+## 2026-10-28 Wave 9 B4 Round 3：局部接受后的本轮观测重锚定
+
+`_fit_native_ir_to_shared_budget`及`compact_request_recovery._restore_optional_preflight`将冻结校准与同次prompt传入`_continue_after_compact_failure`。局部候选接受并通过取消检查后，调用既有`context_pressure.rebase_provider_context_observation`，仅在`params.live_archive_state`中把候选raw/校准值设为预检基准；无校准不创建观测，表面指纹边界及下一次供应商响应覆盖仍沿原链。它与15%解锁使用的失败压力baseline是不同事实，不新增持久状态源。共享恢复删去重复类型门，软错资格只由原分类器裁决。当前是本地源码候选，组件证据和未验证范围见[TESTS](../../../TESTS.md)Round 3。
+
+## 2026-10-28 Wave 9 B4 Round 2：压力基线与出站投影同源
+
+下方初版结构沿用，本轮在同一权威入口返修：`compact_guard`先按四字段硬码裁决；`ToolLoopExecuteParams`新增失败压力基线，新失败更新、普通续轮保留，`_fit_native_ir_to_shared_budget`在增长15%边界重新摘要。`_continue_after_compact_failure`区分新失败/旧锁存，Level1最多局部缩一条，避免无新输入却连续换桩扰动逻辑身份；完整native shared恢复复用同一实现，原安全无prompt回退也记基线及统一告警别名。
+
+`stub_old_native_tool_results`对原正文UTF-8生成bytes/SHA256/marker，并用完整投影重估逐项拒绝无收益候选；其canonical隔离/尾四对/失败回滚不变。`provider_messages_fingerprint`先调用与真实发送一致的`project_native_prompt_history`再哈希，原`logical_model_call_id`自然反映视图变化，无第二身份源或新持久字段。冻结、materializer与最终原IR序列化仍沿初版隔离边界，详见[TESTS](../../../TESTS.md)Round 2。
+
+## 2026-10-28 Wave 9 B4：共享分类与回合局部模型视图
+
+`conversation/compact_guard.py::compact_failure_is_degradable`是中途Compact及`agent_core/compact_request_recovery.py`的唯一降级分类口。`_tool_loop_service.py`只捕获摘要准备阶段，正常候选提交及提交后错误仍走原CAS/回滚边界。`ToolLoopExecuteParams`保存本轮锁存与四元来源覆盖，不挂在Agent或线程上；`tool_ir_compact.py`产生确定性桩，`tool_ir_history.py`仅投影到出站副本，system、用户、摘要和尾四对不被覆盖。
+
+`tool_request_capture.py`与`ToolLoopRequestInput`分别冻结原IR和覆盖，`context_pressure.py`的内容键包含覆盖；preflight在已降级本轮的92%安全线内放行但仍守真实容量。`tool_model_generation.py`固化动态事实时排除覆盖，实际后端消息再应用；`runtime/loop_support.py`原canonical序列化不改。`request_execution.py`仅按原结构化触发来源传递force，共享恢复以当前完整请求重新计量，失败不伪造提交或复活超限请求。测试及未验证边界见[TESTS](../../../TESTS.md)，不增加配置、权限或持久状态源。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

@@ -1,7 +1,8 @@
 # LLM: 共用宿主完整准备与原Compact/CAS；额度耗尽不恢复业务模型重试，公共层仍不得重跑准备或建立持久状态。
-# 模块用途: 让三宿主复用一次准备与可容纳主前缀；必超容量的优化不延长旧历史驻留，计量/CAS/取消仍走原链。
+# 模块用途: 三宿主共用准备和唯一软错分类；降级只恢复本轮视图并重锚定预检，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from copy import deepcopy
@@ -17,10 +18,11 @@ from ..conversation.compact_guard import (
     ConversationCompactError,
     compact_circuit_is_open,
     compact_exception_code,
-    is_provider_quota_failure,
+    compact_failure_is_degradable,
     raise_if_compact_interrupted,
 )
 from ..conversation.compact_media_policy import configured_media_policy, media_token_reserve
+from ..conversation.compact_progress import COMPACT_AUTHORITY_TURN_LOCAL
 from ..conversation.compact_projection import (
     ConversationCompactProjection,
     ConversationCompactSource,
@@ -333,32 +335,63 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
     return not recovery.source.messages and tool_source is None
 
 
-# LLM: 只供select异常分支；额度已耗尽同样禁止降级业务调用，避免同一后端再烧一次；强制、结构错误和超窗仍拒绝。
-# 函数用途: 可选压缩失败但原请求仍装得下时，从原种子重建原生历史并恢复本轮冻结输入。
+# LLM: 只供select提交前失败；统一分类后恢复原种子，逼近容量/强制失败只接受更小的回合局部视图。
+#   软错资格只认共享分类器（含显式标记的JSON解析失败）；可计量native裁剪沿冻结校准重锚定本轮预检。
+#   未满足预算时重新解绑，不能推进CAS或重跑业务工具；权限、配额、取消及来源损坏仍拒绝。
+# 函数用途: 恢复安全原请求或临时折叠旧结果，记录本次失败压力及两套等价的结构化告警字段。
 def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
-    from ..runtime_errors import DataCorruptionError
-    from .host_turn_scope import UNSETTLED_HOST_ERRORS
+    from .tool_request_projection import text_request_capacity_known
 
-    if (
-        recovery.force
-        or is_provider_quota_failure(exc)
-        or isinstance(exc, (*UNSETTLED_HOST_ERRORS, DataCorruptionError, TypeError, AttributeError, LookupError, ValueError, AssertionError))
-        or compact_exception_code(exc) in {
-            "COMPACT_SOURCE_CHANGED", "COMPACT_REQUEST_PROJECTION_UNKNOWN", "COMPACT_REQUEST_PROJECTION_CHANGED",
-            "COMPACT_TOOL_COVERAGE_UNKNOWN", "COMPACT_REQUEST_NON_TEXT",
-        }
-    ):
-        return False
-    if calibrated_compact_request_tokens(before_tokens, recovery.calibration) >= model_request_input_ceiling(
-        recovery.agent, recovery.source.policy.context_window_tokens,
-    ):
+    allowed, reason = compact_failure_is_degradable(exc)
+    if not allowed:
         return False
     if (type(params.__dict__.get("provider_history_messages")) is not list
             or getattr(params, "conversation_history_seed", None) is None):
         return False
     restored = _native_provider_history_messages(params, include_compact_summary=False)
+    previous = params.provider_history_messages
     object.__setattr__(params, "provider_history_messages", restored)
-    recovery.resolved_input = replace(frozen, provider_history_messages=tuple(restored))
+    ceiling = model_request_input_ceiling(recovery.agent, recovery.source.policy.context_window_tokens)
+    before = calibrated_compact_request_tokens(before_tokens, recovery.calibration)
+    if (recovery.force or before > int(ceiling * 0.92)
+            or (frozen.prompt_input is not None and params.tool_ir_history and text_request_capacity_known(params))):
+        from ._tool_loop_service import _continue_after_compact_failure
+        from .model.context_pressure import model_visible_context_snapshot
+
+        if frozen.prompt_input is None:
+            object.__setattr__(params, "provider_history_messages", previous)
+            return False
+        prompt = render_prepared_prompt(frozen.prompt_input)
+
+        # LLM: 同次冻结校准作用于真实完整请求，桩变化后沿原投影重新计量；无Store或模型调用。
+        # 函数用途: 给宿主回退的纯内存折叠提供完整请求估算器。
+        def estimate() -> int:
+            raw = model_visible_context_snapshot(recovery.agent, params, prompt).raw_estimated_tokens
+            return calibrated_compact_request_tokens(raw, recovery.calibration)
+
+        try:
+            _continue_after_compact_failure(recovery.agent, params, estimate, reason=reason, force=recovery.force,
+                                           calibration=recovery.calibration, prompt=prompt)
+        except BaseException as failure:
+            object.__setattr__(params, "provider_history_messages", previous)
+            if isinstance(failure, ConversationCompactError) and failure.code == "COMPACT_BUDGET_EXCEEDED":
+                return False
+            raise
+    elif ceiling > 0:
+        object.__setattr__(params, "compact_degradation_latched", True)
+        object.__setattr__(params, "compact_degradation_reason", reason)
+        object.__setattr__(params, "compact_degraded_baseline_tokens", before)
+        logging.getLogger(__name__).warning("compact preflight degraded; active turn continues", extra={
+            "compact_degraded": True, "compact_fallback_level": "local_trim",
+            "compact_degraded_level": 1, "reason": reason, "before_tokens": before,
+            "compact_authority": COMPACT_AUTHORITY_TURN_LOCAL, "original_reason_code": reason,
+            "commit_authority": COMPACT_AUTHORITY_TURN_LOCAL,
+        })
+    else:
+        object.__setattr__(params, "provider_history_messages", previous)
+        return False
+    recovery.resolved_input = replace(frozen, provider_history_messages=tuple(restored),
+        compact_degradation_stubs=tuple((getattr(params, "compact_degradation_stubs", None) or {}).items()))
     return True
 
 

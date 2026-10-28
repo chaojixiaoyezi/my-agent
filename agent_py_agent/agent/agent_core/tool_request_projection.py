@@ -1,5 +1,5 @@
 # LLM: 只投影已冻结材料，用户/宿主事件媒体同样参与模态与容量分类；不读取文件、不授权或发送。
-# 模块用途: 让真实工具轮与容量检查共享PromptBuilder、原IR和精确schema；自我目录仅透传实际可用资格。
+# 模块用途: 让真实工具轮与容量检查共享PromptBuilder、原IR和精确schema；降级覆盖单独冻结，只供模型视图。
 from __future__ import annotations
 
 from copy import deepcopy
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 # LLM: None 表示未知，空元组/空字符串表示宿主明确知道为空；快照内容从原运行事实复制，不生成新身份或能力。
-# 类用途: 保存一次请求的全部冻结输入，缺任一原生历史或 schema 字段时不会把不完整输入误报为可容纳。
+# 类用途: 保存完整冻结输入和独立的临时结果覆盖；原IR保持原件，未知历史或schema不冒充可容纳。
 @dataclass(frozen=True)
 class ToolLoopRequestInput:
     prompt_input: PromptRenderInput | None = field(default=None, repr=False)
@@ -40,11 +40,12 @@ class ToolLoopRequestInput:
     tool_context: tuple[str, ...] | None = field(default=None, repr=False)
     forwarded_guidance: frozenset[str] | None = field(default=None, repr=False)
     conversation_state: str | None = field(default=None, repr=False)
+    compact_degradation_stubs: tuple[tuple[tuple[str, str, str, str], Any], ...] = field(default=(), repr=False)
 
-    # LLM: 借用的 IR/schema/message 容器必须在边界复制；纯投影和调用方之后的修改不能反写彼此的材料。
-    # 函数用途: 固定本次输入容器，保持原 typed IR 和 schema，不建立持久快照或第二注册表。
+    # LLM: 原IR与降级覆盖分别复制；冻结后不能因活动params的字典变化而复活旧正文或污染canonical材料。
+    # 函数用途: 固定本次输入容器及临时覆盖，不建立持久快照或第二注册表。
     def __post_init__(self) -> None:
-        for name in ("native_tools", "tool_ir_history", "provider_history_messages", "tool_context"):
+        for name in ("native_tools", "tool_ir_history", "provider_history_messages", "tool_context", "compact_degradation_stubs"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, tuple(deepcopy(value)))
@@ -141,8 +142,8 @@ def tool_loop_prompt_request(
     )
 
 
-# LLM: 先验证完整性，unknown 不渲染；只在副本追加状态与引导，复用原转换、清扫与已定 ToolChoice 的目录投影。
-# 函数用途: 无读盘、刷新、探测或网络地还原完整模型请求；图片、推理及工具往返仍由原 IR 适配器保真。
+# LLM: 先验证完整性；临时桩仅传给模型投影器，冻结原IR仍供canonical与正常Compact来源使用。
+# 函数用途: 无读盘或网络地还原完整请求及同轮降级视图；图片、推理与配对仍沿原适配器保真。
 def project_tool_loop_request(prepared: ToolLoopRequestInput) -> ToolLoopRequestProjection:
     missing = _missing_request_fields(prepared)
     if missing:
@@ -155,7 +156,8 @@ def project_tool_loop_request(prepared: ToolLoopRequestInput) -> ToolLoopRequest
             "ready", prompt=prompt, provider_prompt=prompt,
             system_instruction=prepared.system_instruction,
         )
-    params = SimpleNamespace(tool_ir_history=list(deepcopy(prepared.tool_ir_history)))
+    params = SimpleNamespace(tool_ir_history=list(deepcopy(prepared.tool_ir_history)),
+                             compact_degradation_stubs=dict(prepared.compact_degradation_stubs))
     provider_prompt, history = project_native_prompt_history(
         params, prompt, conversation_state=prepared.conversation_state,
     )

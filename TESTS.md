@@ -76,6 +76,20 @@ python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_tui_observation_and_sticky_bar.py agent_py_agent/tests/test_tui_background_observation_resilience.py agent_py_agent/tests/test_tui_sticky_user_turn_jump.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_tui.py -q --tb=short
+
+## 2026-10-28 Wave 9 B4 Round 3：降级接受与真实生成预检同口径（本地返修候选）
+
+来源：`07-tasks/fix-r3-wave9-b4.md`中c17的P1校准漂移与c16的P2双入口解析差异；从干净`f630186b9c473014cb95f89deb029e182d116b18`继续，仅修改原`wave9-b4`工作树，不推送、部署或操作服务。
+
+- 原因：候选缩小时冻结校准按比例接受，但`current_run`预检对`raw < observed_raw`回退未经校准raw，下一跳可能在业务请求发出前报overflow。两个降级调用方现将同次冻结calibration/prompt传给原接受门，接受且取消检查通过后复用`rebase_provider_context_observation`。只改本轮内存派生观测，沿原`compact_candidate`标记及fingerprint；不改全局公式，不向线程、owner比值或canonical历史持久化，不移动原失败压力baseline。
+- 共享入口只服从`compact_failure_is_degradable`，去掉重复ValueError/类型/错误码门；显式`reason_code=PARSE_FAILED`的JSONDecodeError与native一致，未标记JSON、普通ValueError及硬码对照仍拒绝。
+- 新8项先实际运行得到5项断言失败、3项安全对照通过；修复后8项通过。四个用例覆盖native/shared × Level1/Level2，真实投影、原始估算、校准与`generate_model_response`预检均未替换，最后核对fake后端确被调用；另外四个核对直接解析异常与三个拒绝对照。追加断言证明不持久化派生观测、普通锁存不移动失败baseline、变化system表面不误用旧校准、原IR保持；这些安全断言也已运行通过。
+
+任务列出的三个文件在当前树不存在：`test_native_tool_ir_compaction_and_orphan_sweep.py`、`test_memory_auto_compaction_continuation.py`、`test_context_pressure_and_projection.py`。按真实文件名运行原生IR/自动续跑套件，以及context-pressure/native-trigger/完整请求投影套件，没有创建空壳或跳过测试：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py agent_py_agent/tests/test_context_pressure.py agent_py_agent/tests/test_context_pressure_native_trigger.py agent_py_agent/tests/test_compact_request_projection.py -q --tb=short --basetemp=.pytest_cache/b4r3-focused-tmp --junitxml=.pytest_cache/b4r3-focused.xml
+python3 -m pytest agent_py_agent/tests/test_gateway_compact_recovery.py agent_py_agent/tests/test_gateway_compact_recovery_continuation.py agent_py_agent/tests/test_compact_recovery_release.py agent_py_agent/tests/test_compact_calibrated_candidate_gate.py agent_py_agent/tests/test_context_pressure_media_reserve.py -q --tb=short --basetemp=.pytest_cache/b4r3-hosts-tmp --junitxml=.pytest_cache/b4r3-hosts.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py --json
@@ -322,6 +336,30 @@ ruff check agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py /Users/x
 python3 -m pytest agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_tui_{view,view_model,reading_position,complete_detail,transcript,combinatorial,resource_lifetime,agent_navigation,clipboard,threading,terminal,prompt_toolkit_pipe}.py -q --tb=short
 ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/cli/chat_parts agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py
+
+macOS/Python3.14.4，导入确认指向本工作树。六文件402项、额外五文件64项均通过，全部0失败/错误/跳过。追加边界断言后专项文件再次运行通过，结果在`.pytest_cache/b4r3-final.xml`；它与402项重叠，不累加。红绿与组合JUnit在忽略的`.pytest_cache/b4r3-{red,green,focused,hosts}.xml`。Ruff最初仅报新测试import格式，修正后全指定范围通过；导入边界返回空列表。未跑全仓、跨平台、真实供应商、飞书/TUI端到端、退休尺寸门。
+
+独立Astra high只读审阅准确diff与八个相关文件快照，限定静态PASS，无已定位可达P1/P2；未独立跑测试或做全仓/真实宿主验收。按其边界建议追加上述持久化、表面变化与锁存断言，生产修复未再变化。这里只交本地候选，是否挑入、Linux车道与真实通道故障注入由集成者另验。
+
+## 2026-10-28 Wave 9 B4 Round 2：分类、增长解锁、可核验裁剪与出站身份（本地返修候选）
+
+来源：`07-tasks/fix-wave9-b4.md`的c5/c9五项反馈；干净起点`cd0e084ee8a9d3c372fa744ae17944323140fd78`，仅在原`wave9-b4`工作树继续修改，不推送、部署或操作真实服务。
+
+- 分类：四字段`code/error_code/reason_code/failure_reason`先规范化大小写与单个`COMPACT_`前缀，已知硬停码先于transient类型；补CAS_CONFLICT/SCOPE_MISMATCH/USER_CANCELLED/AUTH_ERROR/PERMISSION_DENIED等明确硬码，以及MODEL_CALL_FAILED/PARSE_FAILED/BACKEND_UNAVAILABLE软码。未知异常图分支、取消、额度、存储和权限拒绝不放宽，不解析文字。
+- 解锁：沿实际`compact_degradation_latched`字段，新增`compact_degraded_baseline_tokens=0`；新失败记录裁剪前完整校准压力，普通续轮不滑动。达到整数上取整的`baseline*115/100`才清旧锁存并重新尝试摘要；新硬错传播，取消先于新调用。边界覆盖800→920、760→874及799→919；不另增同义布尔状态。
+- 裁剪：Level1新摘要失败且超过策略触发点时，最多接受一条尾四对之外的旧大结果覆盖；普通锁存续轮不反复换桩。Level2仍按85%目标逐条尝试；每条须完整请求token严格减少，否则撤候选，force无实际收益时拒绝。原UTF-8正文的`bytes`、64hex `sha256`、`[TOOL_OUTPUT_COMPACTED: tool_call_id=... bytes=... sha256=...]`及两authority字段入桩；原refs/状态/调用/用户/摘要与canonical材料不变。
+- 遥测：native两层、完整shared两层以及原已知安全但无prompt的L1回退都同时带新旧七字段：`compact_degraded`、`compact_fallback_level`、`compact_degraded_level`、`compact_authority`、`commit_authority`、`original_reason_code`、`reason`。有完整可计量native材料的shared入口复用同一Level1裁剪。
+- 身份：`provider_messages_fingerprint`复用实际降级模型投影后再规范化哈希，原`logical_model_call_id`消费者不另加身份源；新测试从实际出站消息独立重算hash，同一视图重试稳定，清覆盖恢复原身份。
+
+红绿证据：新增分类矩阵140项中116项断言红、24项安全对照绿；修正后新旧专项196项通过。增长/局部裁剪/UTF-8/指纹8项中7项预期红、取消对照通过；额外两项force无token收益和五项遥测均先红后绿。本地证据在忽略的`.pytest_cache/b4r2-*.{xml,log}`。不把路径/夹具/启动失败记作产品红测。
+
+旧8项Level1断言从返回0改为返回正缩减数，适配本次明确要求的local_trim，原IR相等及不重复摘要断言保留。真实SimpleAgent/fake LLM在原2读取/3采样/1摘要组之外，新增4个不同文件读取/5采样/2摘要组，验证80000→92000的15%增长在真实参数传递中生效，未重放工具；不代表真实供应商验收。
+
+工单原pytest命令实际因旧文件名缺失退出4、未收集测试；当前树不存在`test_native_ir_compaction_and_orphan_sweep.py`和`test_memory_runtime_auto_continue.py`，对应实际文件如下，未创建空壳或跳过测试：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py -q --tb=short --basetemp=.pytest_cache/b4r2-final --junitxml=.pytest_cache/b4r2-final.xml
+ruff check agent_py_agent/agent/agent_core agent_py_agent/agent/gateway_parts agent_py_agent/agent/conversation agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py
 git diff --check db4d5de92..HEAD
@@ -554,6 +592,43 @@ git diff --check
 扩展回归已覆盖原控制、调度、通知策略、IM 来源、Web 设置/请求及 TUI 控制。`test_chat_control_runtime.py::test_local_interrupt_stops_foreground_shell_without_resource_reclaim` 在当前候选和从上述基线直接 `git archive` 提取的隔离副本中同样失败：子 shell 返回 71、`handler_executed=False`，未生成启动标记。未将其改为跳过或放宽断言，也未据此推断具体失败原因。另三项原 Gateway 资源控制测试报告缺少 `nested_sandbox_exec` 能力而跳过，不能算通过。
 
 未验证：真实飞书收件、浏览器点击链路、真实 TUI 键盘操作和断电恢复；远端发送已发生但本机回执尚未持久化的崩溃窗口仍依赖原渠道幂等能力，不承诺跨系统 exactly-once。隐藏未发表候选的真实进程崩溃回收不在本轮实测范围。
+
+最终验证：macOS/Python3.14.4，包导入指向本工作树。三文件组合370项通过（专项文件227项），额外宿主/恢复七文件107项、模型身份/延迟两文件53项均通过，三组全部0失败/错误/跳过。完整短日志与JUnit分别在`.pytest_cache/b4r2-final.{log,xml}`、`b4r2-hosts-final.{log,xml}`及`b4r2-model-final.xml`。扩展批首次启动超时并被宿主清理、日志为空，不作测试结果；随后拆分按上述真实结果收口。Ruff、导入边界、doc-sync及diff检查通过；最终提交后再核对基线到HEAD区间。未跑全仓、跨平台、真实供应商、飞书/TUI端到端或退休尺寸门；不增加权限、配置或持久状态源。
+
+独立Astra max只审内联摘录，未执行工具/测试或读取全diff。父级据其P1构造明确PARSE_FAILED→JSONDecodeError的cause/context/异常组反例：4项有效红、11项硬码/未知结构/动态布局对照通过；修正后15项全绿。现在仅显式摘要解析分支可携带JSONDecodeError，普通ValueError、未标记JSON及任何存储/CAS硬码仍拒绝，不切断异常链。非空CacheStructuredPrompt、prior和已/未转发guidance的实际发送hash也已独立重算相等，连续指纹计算不改IR/prior/seen。
+
+独审的重入疑点按真实调用点核对，而非关闭force安全要求：`tool_loop/model_turn.py::request_model_response`只在新的`context_overflow/provider_error`响应后调用恢复，`_ptl_reclaim_oldest`才传force=True；网络瞬断不是该入口，同一次超限内容不能原样重发。shared的`PreparedCompactRecovery.select`进入即设consumed，唯一降级调用位于本次Compact的except中，重复select不重复裁剪或移动基线。摘录中raw为描述简称，实际桩的char_length/bytes/digest均取同一canonical result.output，UTF-8用例已核对。上述为父级源码与组件核验，不把独审有限范围写成整条真实链路验收。
+
+## 2026-10-28 Wave 9 B4：工具循环中途Compact两级无感续跑（本地源码候选）
+
+以下保留初版提交`cd0e084ee`的当时记录；锁存、Level1裁剪、桩字段与指纹语义由上方Round 2替代，历史132/174项不作为返修最终验收。
+
+来源：`07-tasks/wave9-b4.md`及总体方案第5项；起点`db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，仅在指定分支/工作树实施，未推送或部署。基点的共享恢复实现在`agent_core/compact_request_recovery.py`，不是工单旧路径；`conversation/compact_guard.py`原已存在。
+
+- 共享`compact_failure_is_degradable`只读结构化类型、`code`/`error_code`、HTTP状态及完整cause/context/异常组；权限、取消、硬配额、认证、CAS/来源或存储错误优先拒绝，未知叶不因外层`COMPACT_FAILED`变安全。不解析错误文案、不切换账号或模型。
+- 摘要准备失败且完整校准估算不超过真实输入上限92%时，原IR不动并锁存本轮；后续preflight同样识别锁存，不能又按旧软阈值或旧窗口信号重启。上限继续扣除后端实际输出预留，不放宽物理容量或未知输入。
+- Level2只对较旧ToolResult建立临时覆盖，以原调用的run/attempt/turn/call四元来源区分跨turn重复ID，保留用户输入、摘要、调用和最新四对。确定性桩带tool_name/call_id/status/char_length/archive_ref；不存在已知引用时为null，不编造归档。按完整请求重估到85%，force还要求一次新缩减；达不到时恢复投影并拒绝发送。
+- 原IR与临时覆盖分别冻结；计量memo包含覆盖值。实际生成前materializer不把桩写回原IR，后端出站才用投影，最终canonical序列化仍保存原payload。真实绑定测试核对消息JSONL字节、summary/checkpoint/代次不变；既有失败熔断元数据记账保持，不声称整个Store零写入。
+- Gateway区分soft preflight与provider硬溢出，三宿主沿同一个共享恢复入口分类；不在请求边界裸重放已执行工具，不捕获正常Compact提交后的错误。
+
+新增`test_wave9_mid_loop_compact_continuation.py`覆盖阈值边界、锁存、尾四对、四元来源、冻结/发送/最终持久化隔离、真实线程JSONL与pin、硬停异常链、未知分支、SDK code、强制低估缩减、无法缩减回滚、Gateway触发来源及真实工具循环的fake LLM驱动。首批有效红测为19项中12项预期失败；冻结/共享恢复7项、materializer1项、独审及preflight/重复ID9项、SDK code5项均保留单独红测证据。HTTP状态补测为3项预期红、2项瞬断对照通过：标准库HTTPError虽继承URLError，永久400/404/422仍拒绝，429/503允许。准备错误、测试夹具路径错误不计为产品红测。
+
+最终版本在macOS/Python3.14.4、工作树根运行，核对import指向本树而非旧editable包：指定组合132项通过（本轮新文件56项），扩展八文件174项通过，均0失败/错误/跳过。真实SimpleAgent/fake LLM用例确认1次摘要准备、3次业务生成、2次成功read_file且不重放工具。准确JUnit及完整短日志位于`.pytest_cache/b4-required-verified.{xml,log}`与`b4-extended-verified.{xml,log}`（忽略的本地证据，不随功能提交）。
+
+兼容断言迁移：扩展回归首次174项中1项失败由本轮新的失败阶段引起，不称为基线既有失败。`test_persistent_native_window_restores_ir_when_summary_fails`的尾四对本身超预算；原英文`empty summary`匹配改为同时核对`COMPACT_BUDGET_EXCEEDED`及原异常链`COMPACT_EMPTY_SUMMARY`。原IR相等、代次0、checkpoint空、失败计数1、进度阶段及无completed全部保留，没有删除、跳过或放宽这些持久化红线。
+
+复现（工作树根；临时数据留在本树，非真实模型/飞书/TUI验收）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_mid_loop_compact_continuation.py agent_py_agent/tests/test_memory_runtime_compact_auto_continuation.py -q --tb=short --basetemp=.pytest_cache/b4-required-verified --junitxml=.pytest_cache/b4-required-verified.xml
+python3 -m pytest agent_py_agent/tests/test_gateway_compact_recovery.py agent_py_agent/tests/test_gateway_compact_recovery_continuation.py agent_py_agent/tests/test_compact_recovery_release.py agent_py_agent/tests/test_compact_request_projection.py agent_py_agent/tests/test_tool_request_projection.py agent_py_agent/tests/test_native_tool_ir_compact_and_orphan_sweep.py agent_py_agent/tests/test_compact_quota_wake.py agent_py_agent/tests/test_native_tool_use_ir_messages_flow.py -q --tb=short --basetemp=.pytest_cache/b4-extended-verified --junitxml=.pytest_cache/b4-extended-verified.xml
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92e1e316cec56df7825dc7ea8a1ec7f84
+git diff --check
+```
+
+独立审阅只覆盖提供的内联实码摘录，异常链洗白、force低估未裁剪和跨turn裸ID风险由作者本地复现并修正；不声称独审执行了全diff或测试。未跑全仓、Linux/Windows、真实供应商或飞书/TUI端到端，也未运行已退休尺寸门。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 

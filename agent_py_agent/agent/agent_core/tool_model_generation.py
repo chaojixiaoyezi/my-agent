@@ -1,6 +1,6 @@
 # LLM: 后台片如有原宿主观察，只追加同一wall-worker出生前退出观察；默认启动/超时/模型请求保持原样。
 # LLM: 模型生成拥有传输守卫和每次调用的唯一原 turn_id；真实估算前捕获遥测CAS版本，保持冻结身份、中断、排队及原 IR 提交时机；瞬断重试共用原输入投递判据。
-# 模块用途: 统一模型调用、超时、排队展示与流输出；重试仍共用原输入判据，模型、原生消息和停止准确进入请求线程。
+# 模块用途: 统一模型调用与流输出；临时降级仅在出站副本应用，真实IR和停止沿原线程与持久化边界。
 from __future__ import annotations
 
 import os
@@ -258,14 +258,20 @@ def generate_model_response(request: ModelGenerateParams):
             _clear_next_call_reasoning_override(request.params)
 
 
-# LLM: Native动态段按原宿主来源进入IR；只消费与预检共用、已按完整typed结构==复核的投影，hash命中不能作为IR覆盖依据。
-# 函数用途: 提交精确内容核对后的原生投影，去掉重复尾部且不把旧工具参数写回历史。
+# LLM: 动态事实仍进入canonical IR；降级覆盖必须从materialization副本移除，仅在实际发送时应用。
+# 函数用途: 固化真实原生事实而不是临时桩，避免最终收口把模型展示替代品写成原始历史。
 def _materialize_native_prompt_facts(request: ModelGenerateParams) -> ModelGenerateParams:
     if not native_tool_use_active(request.params):
         return request
     from .model.context_pressure import project_request_prompt_history
 
-    provider_prompt, history = project_request_prompt_history(request.params, request.prompt)
+    materialization_params = request.params
+    if getattr(request.params, "compact_degradation_stubs", None):
+        from copy import copy
+
+        materialization_params = copy(request.params)
+        object.__setattr__(materialization_params, "compact_degradation_stubs", {})
+    provider_prompt, history = project_request_prompt_history(materialization_params, request.prompt)
     native_tool_ir_history(request.params)[:] = history
     return replace(request, prompt=provider_prompt)
 
@@ -788,7 +794,8 @@ def _publish_runner_model_stream_activity(
 
 # LLM: 保持原引导提交时机，转换及孤儿清扫复用纯投影；来源与普通状态分开，不能重排历史或改写用户输入。
 # LLM: 每次出站按当前模型显式模态复核用户图片；换到不支持图的档案须明确失败，不能静默降为纯文。
-# 函数用途: 把新运行指引加入原 IR 后构造出站消息，与创建前容量投影保持相同协议字节和失败分类。
+# LLM: 临时降级覆盖只在出站历史副本应用，不能因生成或最后收口反写原始ToolResult。
+# 函数用途: 将真实指引写入IR，再用独立降级视图构造出站消息，保持容量投影的相同协议字节。
 def _native_provider_messages(agent: object, params: object) -> list[dict] | None:
     """native 下把 IR 历史和宿主运行时指引翻成厂商原生 messages。
 
@@ -817,6 +824,10 @@ def _native_provider_messages(agent: object, params: object) -> list[dict] | Non
     # tool_result，保证出站永不带孤儿。
     # 非工具运行时指引已经在翻译前写入 RuntimeFactsTurn；后续请求会永久带着它，
     # 不再出现“首轮发送、下一轮因 seen 去重反而消失”的瞬态消息。
+    if getattr(params, "compact_degradation_stubs", None):
+        from .tool_ir_history import project_native_prompt_history
+
+        _, history = project_native_prompt_history(params, "")
     return _with_pending_observation_screenshot(
         project_native_provider_messages(
             history, prior_messages=getattr(params, "provider_history_messages", None),
