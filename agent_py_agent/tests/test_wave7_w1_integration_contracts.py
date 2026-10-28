@@ -432,17 +432,20 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     _assert_openai_strict(schema)
     s3_json = json.dumps({
         'schema_version': 'my-agent.skill-learning-output.v1',
-        'decision': 'create', 'update_target': '', 'reason': '沉淀确定性脚本', 'name': 's3-e2e-script',
+        'decision': 'create', 'update_target': '', 'reason': '沉淀参数化确定性脚本', 'name': 's3-e2e-script',
         'description': 'S3端到端自动晋升脚本', 'when_to_use': '需要自动汇总时', 'tags': ['script'], 'body': BODY,
         'candidate_asset': {
-            'kind': 'script', 'code': 'print("{\\"total\\": 42}")', 'entry_source': '',
-            'steps': [], 'io_contract': {'inputs': [], 'outputs': ['total']},
-            'entry_document': '', 'application_scope': '',
+            'kind': 'script',
+            'code': 'import json, os\np = json.loads(os.environ.get("MY_AGENT_SCRIPT_INPUT_JSON", "{}"))\nassert p["n"] == 7\nprint(json.dumps({"total": p["n"] * 6}))',
+            'entry_source': '',
+            'steps': [], 'io_contract': {'inputs': ['n'], 'outputs': ['total']},
+            'sample_inputs': [{'key': 'n', 'value_json': '7'}],
+            'entry_document': '', 'files': [], 'application_scope': '',
         },
     })
     assert set(json.loads(s3_json)) == set(schema['required'])
     parsed_dec = parse_skill_learning_decision(s3_json, ())
-    assert parsed_dec.candidate_asset.get('kind') == 'script'
+    assert parsed_dec.candidate_asset.get('kind') == 'script' and parsed_dec.candidate_asset.get('sample_inputs') == {'n': 7}
     s3_svc = SkillLearningService(
         lstore,
         SkillLearningSettings(min_tool_rounds=1, autonomous_verified=True),
@@ -455,11 +458,11 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     s3_res = s3_svc.run_pending()
     assert s3_res.status == 'published' and ScriptStore(owner_home).get_script('s3-e2e-script') is not None
 
-    # R6-2: 当既有正式脚本被改坏或停用后，提交同族新候选必须重新验证发布新脚本并替换失效记录
+    # R6-2 & R7-1: 当既有正式脚本被改坏（含语法错误）或执行配置失效后，提交同族新候选必须重新验证发布新脚本并替换失效记录
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     ScriptStore(owner_home).save_script(
-        AssetDescriptor(id='promoted-b', kind='script', name='已改坏脚本B', io_contract={'outputs': ['step']}),
-        'print("{}")',
+        AssetDescriptor(id='promoted-b', kind='script', name='语法损坏脚本B', io_contract={'outputs': ['step']}),
+        'def broken(:\n',
     )
     replaced_c = promote_verified_asset(owner_home, {
         'kind': 'script', 'name': 'promoted-c-fresh', 'description': '替换改坏同族的新脚本C',
@@ -467,3 +470,10 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     })
     assert replaced_c is not None and replaced_c['asset_id'] == 'promoted-c-fresh' and not replaced_c.get('reused')
     assert ScriptStore(owner_home).get_script('promoted-c-fresh') is not None
+
+    # R7-2: 脚本输出包含 dry_run=true 时必须被 business_validated 拒绝，绝不能伪报 contract_valid=True
+    assert promote_verified_asset(owner_home, {
+        'kind': 'script', 'name': 'dry-run-fake-script', 'description': '假执行脚本',
+        'code': 'print("{\\"dry_run\\": true, \\"rows\\": 3}")', 'io_contract': {'outputs': ['rows']},
+    }) is None
+    assert ScriptStore(owner_home).get_script('dry-run-fake-script') is None

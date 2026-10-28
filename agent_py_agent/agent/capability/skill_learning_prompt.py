@@ -92,6 +92,8 @@ def skill_learning_response_schema() -> dict[str, object]:
         "inputs": {"type": "array", "items": dict(text)},
         "outputs": {"type": "array", "items": dict(text)},
     }
+    kv_props: dict[str, object] = {"key": dict(text), "value_json": dict(text)}
+    file_props: dict[str, object] = {"path": dict(text), "content": dict(text)}
     ca_props: dict[str, object] = {
         "kind": {"type": "string", "enum": ["", "skill", "script", "workflow", "capability_package"]},
         "code": dict(text),
@@ -101,7 +103,15 @@ def skill_learning_response_schema() -> dict[str, object]:
             "items": {"type": "object", "additionalProperties": False, "required": list(step_props), "properties": step_props},
         },
         "io_contract": {"type": "object", "additionalProperties": False, "required": list(io_props), "properties": io_props},
+        "sample_inputs": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": False, "required": list(kv_props), "properties": kv_props},
+        },
         "entry_document": dict(text),
+        "files": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": False, "required": list(file_props), "properties": file_props},
+        },
         "application_scope": dict(text),
     }
     properties["candidate_asset"] = {
@@ -150,22 +160,6 @@ def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> Skill
     target = str(payload.get("update_target") or "").strip()
     _require(NAME_RE.fullmatch(name) is not None, "name")
     _require(decision == DECISION_CREATE or (target in updatable and name == target), "update_target")
-    raw_ca = payload["candidate_asset"] if isinstance(payload.get("candidate_asset"), dict) else {}
-    carrier_ext: dict[str, object] = {}
-    for k, v in raw_ca.items():
-        if k == "io_contract" and isinstance(v, dict):
-            io_clean = {ik: iv for ik, iv in v.items() if iv not in ("", [], {}, None)}
-            if io_clean:
-                carrier_ext[k] = io_clean
-        elif k == "steps" and isinstance(v, list):
-            steps_clean = [{sk: sv for sk, sv in s.items() if sv not in ("", [], {}, None)} for s in v if isinstance(s, dict)]
-            if steps_clean:
-                carrier_ext[k] = steps_clean
-        elif v not in ("", [], {}, None):
-            carrier_ext[k] = v
-    for key in _CARRIER_FIELDS:
-        if key != "candidate_asset" and key in payload and payload[key] not in ("", [], {}, None):
-            carrier_ext[key] = payload[key]
     return SkillLearningDecision(
         decision=decision,
         reason=reason,
@@ -175,8 +169,37 @@ def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> Skill
         when_to_use=_single_line(payload.get("when_to_use"), WHEN_TO_USE_MAX_CHARS, "when_to_use", required=False),
         tags=_tags(payload.get("tags")),
         body=_body(payload.get("body")),
-        candidate_asset=carrier_ext,
+        candidate_asset=_extract_carrier_asset(payload),
     )
+
+
+# LLM: 将严格schema的数组/空默认值无损归一为内部载体字典，不接收未知扩展字段。
+# 函数用途: 从已校验的模型输出字典提取非空candidate_asset载荷。
+def _extract_carrier_asset(payload: dict[str, object]) -> dict[str, object]:
+    raw_ca = payload["candidate_asset"] if isinstance(payload.get("candidate_asset"), dict) else {}
+    out: dict[str, object] = {}
+    for k, v in raw_ca.items():
+        norm = _norm_carrier_item(k, v)
+        if norm is not None:
+            out[k] = norm
+    for key in _CARRIER_FIELDS:
+        if key != "candidate_asset" and key in payload and payload[key] not in ("", [], {}, None):
+            out[key] = payload[key]
+    return out
+
+
+# LLM: 单项载体字段清洗，把严格键值对还原为dict并剔除空默认占位值。
+# 函数用途: 归一化单个candidate_asset子字段。
+def _norm_carrier_item(k: str, v: object) -> object:
+    if k == "io_contract" and isinstance(v, dict):
+        return {ik: iv for ik, iv in v.items() if iv not in ("", [], {}, None)} or None
+    if k == "steps" and isinstance(v, list):
+        return [{sk: sv for sk, sv in s.items() if sv not in ("", [], {}, None)} for s in v if isinstance(s, dict)] or None
+    if k == "sample_inputs" and isinstance(v, list):
+        return {str(i["key"]): json.loads(str(i["value_json"])) for i in v if isinstance(i, dict) and i.get("key")} or None
+    if k == "files" and isinstance(v, list):
+        return {str(i["path"]): str(i.get("content", "")) for i in v if isinstance(i, dict) and i.get("path")} or None
+    return None if v in ("", [], {}, None) else v
 
 
 # LLM: 只接受单个 JSON 对象，必填字段集合与 schema 一致且允许可选四载体扩展字段，schema_version 与 decision 枚举精确匹配。

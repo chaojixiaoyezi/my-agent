@@ -47,8 +47,12 @@ def _norm_io(raw):
 def task_family_fingerprint(kind, asset):
     io_sig = _norm_io(asset.get('io_contract'))
     if kind == 'script':
-        code = asset.get('entry_source', asset.get('code', ''))
-        signature = [ast.dump(ast.parse(code), include_attributes=False), asset.get('input_schema'), asset.get('output_schema')]
+        code = str(asset.get('entry_source', asset.get('code', '')) or '')
+        try:
+            ast_sig = ast.dump(ast.parse(code), include_attributes=False)
+        except SyntaxError:
+            ast_sig = f'syntax_error:{code}'
+        signature = [ast_sig, asset.get('input_schema'), asset.get('output_schema')]
         if io_sig:
             signature.append(io_sig)
     elif kind == 'workflow':
@@ -87,6 +91,27 @@ def business_validated(receipt):
             and output.get('dry_run') is not True and output.get('executed') is not False)
 
 
+# LLM: 在隔离暂存区内复核既有脚本或工作流是否仍能真实跑通当前业务合同。
+# 函数用途: 为同族复用提供既有正式资产的沙箱执行复验。
+def _reverify_formal_exec(root, kind, aid, obj, candidate):
+    from ..workflows import ScriptRunner, WorkflowEngine
+    if candidate is None:
+        return True
+    inputs = candidate.get('sample_inputs', {})
+    with _stage_dir(root) as staging:
+        runner = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True)
+        if kind == 'script':
+            res = runner.run_script(aid, inputs)
+            out = getattr(res, 'output_data', None) or getattr(res, 'parsed_output', None)
+            return business_validated({'status': 'passed' if res.ok else 'failed', 'executed': True,
+                                       'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}})
+        eng = WorkflowEngine(staging, analysis_handler=candidate.get('analysis_handler'))
+        eng.runner = runner
+        run = eng.run_workflow(obj, inputs=inputs)
+        return business_validated({'status': run.status, 'executed': True, 'contract_valid': run.status == 'succeeded',
+                                   'output': run.final_output if isinstance(run.final_output, dict) else {}})
+
+
 # LLM: 核对正式资产存储是否真实可读、处于启用状态且当前内容/合同仍匹配语义族及执行合同，防止将待审、停用或已漂移资产误复用。
 # 函数用途: 检查指定载体与asset_id在Owner正式存储中是否真实有效且未发生版本或合同漂移。
 def _formal_asset_exists(home, kind, asset_id, expected_family='', candidate=None):
@@ -95,44 +120,25 @@ def _formal_asset_exists(home, kind, asset_id, expected_family='', candidate=Non
     if not aid:
         return False
     root = Path(home).absolute()
-    if kind == 'script':
-        from ..assets.script_store import ScriptStore
-        from ..workflows import ScriptRunner
-        rec = ScriptStore(root).get_script(aid)
-        if rec is None or rec.get('enabled', True) is False:
-            return False
-        if expected_family and task_family_fingerprint('script', rec) != expected_family:
-            return False
-        if candidate is not None:
-            with _stage_dir(root) as staging:
-                res = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True).run_script(aid, candidate.get('sample_inputs', {}))
-                out = getattr(res, 'parsed_output', None)
-                if not business_validated({'status': 'passed' if res.ok else 'failed', 'executed': True,
-                                           'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}):
-                    return False
-        return True
-    if kind == 'workflow':
-        from ..assets.workflow_store import WorkflowStore
-        from ..workflows import ScriptRunner, WorkflowEngine
-        wf = WorkflowStore(root).get_workflow(aid)
-        if wf is None or not wf.enabled:
-            return False
-        wf_dict = {'steps': [s.to_dict() for s in wf.steps], 'io_contract': wf.descriptor.io_contract.to_dict()}
-        if expected_family and task_family_fingerprint('workflow', wf_dict) != expected_family:
-            return False
-        if candidate is not None:
-            with _stage_dir(root) as staging:
-                eng = WorkflowEngine(staging, analysis_handler=candidate.get('analysis_handler'))
-                eng.runner = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True)
-                run = eng.run_workflow(wf, inputs=candidate.get('sample_inputs', {}))
-                if not business_validated({'status': run.status, 'executed': True, 'contract_valid': run.status == 'succeeded',
-                                           'output': run.final_output if isinstance(run.final_output, dict) else {}}):
-                    return False
-        return True
-    if kind == 'capability_package':
-        from .package_provider import list_installed_capability_packages
-        return any(r['package_id'] == aid and r['enabled'] for r in list_installed_capability_packages(root, include_disabled=False))
-    return (root / 'skills' / 'learned' / aid / 'SKILL.md').is_file()
+    try:
+        if kind == 'script':
+            from ..assets.script_store import ScriptStore
+            rec = ScriptStore(root).get_script(aid)
+            ok = rec is not None and rec.get('enabled', True) is not False
+            ok = ok and (not expected_family or task_family_fingerprint('script', rec) == expected_family)
+            return bool(ok and _reverify_formal_exec(root, 'script', aid, rec, candidate))
+        if kind == 'workflow':
+            from ..assets.workflow_store import WorkflowStore
+            wf = WorkflowStore(root).get_workflow(aid)
+            wf_dict = {'steps': [s.to_dict() for s in wf.steps], 'io_contract': wf.descriptor.io_contract.to_dict()} if wf else {}
+            ok = wf is not None and wf.enabled and (not expected_family or task_family_fingerprint('workflow', wf_dict) == expected_family)
+            return bool(ok and _reverify_formal_exec(root, 'workflow', aid, wf, candidate))
+        if kind == 'capability_package':
+            from .package_provider import list_installed_capability_packages
+            return any(r['package_id'] == aid and r['enabled'] for r in list_installed_capability_packages(root, include_disabled=False))
+        return (root / 'skills' / 'learned' / aid / 'SKILL.md').is_file()
+    except Exception:
+        return False
 
 
 # LLM: 调用方持原state/配额锁；只保存摘要/精确引用不存代码秘密，语义族不替代正式hash和CAS。
@@ -140,13 +146,15 @@ def _formal_asset_exists(home, kind, asset_id, expected_family='', candidate=Non
 def register_asset_locked(store, registry, *, kind, asset_id, asset, source, sha256='', state='candidate'):
     family = task_family_fingerprint(kind, asset)
     previous = registry.assets.get(family, {})
+    clean_src = {k: v for k, v in source.items() if k != 'force_replace'} if isinstance(source, dict) else source
+    force_replace = isinstance(source, dict) and bool(source.get('force_replace'))
     refs = list(previous.get('provenance', []))
-    if source not in refs:
-        refs.append(source)
+    if clean_src not in refs:
+        refs.append(clean_src)
     prev_id = previous.get('asset_id', '')
-    prev_live = (bool(prev_id) and previous.get('state') in {'trial', 'trusted'}
+    prev_live = (not force_replace and bool(prev_id) and previous.get('state') in {'trial', 'trusted'}
                  and _formal_asset_exists(store.skills_root.parent, kind, prev_id, expected_family=family))
-    take_new = not prev_live and (state in {'trial', 'trusted'} or not prev_id)
+    take_new = force_replace or (not prev_live and (state in {'trial', 'trusted'} or not prev_id))
     chosen_id = asset_id if take_new else prev_id
     same = chosen_id.removeprefix('owner:') == asset_id.removeprefix('owner:')
     update = (same or take_new) and bool(sha256)
@@ -241,7 +249,9 @@ def _promote_script_asset(home, name, desc, candidate):
     with _stage_dir(home) as staging:
         ScriptStore(staging).save_script(desc_obj, code)
         res = ScriptRunner(staging, use_sandbox=True, restrict_to_roots=True).run_script(name, candidate.get('sample_inputs', {}))
-        out = getattr(res, 'parsed_output', None)
+        out = getattr(res, 'output_data', None)
+        if out is None:
+            out = getattr(res, 'parsed_output', None)
         receipt = {'status': 'passed' if res.ok else 'failed', 'executed': True,
                    'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}
         if not business_validated(receipt):
@@ -379,7 +389,7 @@ def promote_verified_asset(owner_home, candidate):
         return None
     executed = carrier in {'script', 'workflow'}
     row = register_asset(store, kind=carrier, asset_id=name, asset=dict(candidate),
-                         source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id']},
+                         source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id'], 'force_replace': True},
                          sha256=static['sha256'], state='trial')
     return {'carrier': carrier, 'asset_id': row['asset_id'], 'verification_kind': 'runtime_execution' if executed else 'deterministic_static',
             'checks_executed': True, 'executed': executed, 'contract_valid': True, 'sha256': static['sha256']}
