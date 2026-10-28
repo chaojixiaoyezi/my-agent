@@ -219,7 +219,7 @@ def test_request_event_strict_timestamp_and_nullable_integer(change):
         validate_request_event(row)
 
 
-# 21项来自WT1/WT2公共方法契约，不从生产schema生成样例。
+# 投递、治理及压缩策略样例来自公开方法契约，不从生产schema反向生成。
 DELIVERY_GOVERNANCE_CASES = (
     ("assets.delivery.targets.list", "read", "assets.read", {}),
     ("assets.delivery.preview_bundle", "read", "assets.read", {"root_asset_kind": "workflow", "root_asset_id": "demo"}),
@@ -244,9 +244,20 @@ DELIVERY_GOVERNANCE_CASES = (
     ("governance.reviews.decide", "write", "users.manage", {"user_id": "alice", "review_id": "review-one", "decision": "approve", "expected_revision": 1}),
 )
 
+# 压缩schema独立矩阵；实际领域/CAS/全局通配授权由Wave9真实治理测试覆盖，不借原仅alice的假领域扩大授权。
+COMPACT_GOVERNANCE_CASES = (
+    ("users.managed.compact_policy.get", "read", "users.read", {"target_owner_id": "local/alice"}),
+    ("users.managed.compact_policy.set", "write", "users.manage", {"target_owner_id": "local/alice",
+        "policy_patch": {"default_trigger_percent": 72, "force_locked": True}, "expected_revision": 0}),
+    ("users.managed.compact_policy.batch_set", "write", "users.manage", {"user_ids": ["alice", "bob"],
+        "policy_patch": {"default_trigger_percent": None}, "expected_revisions": {"alice": 0, "bob": 1}}),
+    ("settings.compact_policy.admin_force.set", "write", "users.manage", {"force_compact_trigger_percent": True,
+        "trigger_percent": 84, "expected_revision": 0}),
+)
+
 
 # LLM: 扩展矩阵必须完整覆盖所有登记项，防止目录新增后原45项测试误红或漏测。
-# 函数用途: 校验WP4原20项与本轮21项的闭合schema、AND能力及幂等门。
+# 函数用途: 校验WP4扩展、治理及四个压缩动作的闭合schema、AND能力及幂等门。
 def test_all_v2_actions_have_valid_and_invalid_schema_coverage():
     from agent_py_agent.agent.plugin_host.action_specs import action_specs
     from agent_py_agent.agent.plugin_host.action_specs_v2_ext import V2_ACTIONS
@@ -255,7 +266,7 @@ def test_all_v2_actions_have_valid_and_invalid_schema_coverage():
     from agent_py_agent.tests.test_plugin_host_v2_five_capabilities import ACTION_CASES
 
     cases = [(a, mode, caps, payload) for a, mode, caps, payload in ACTION_CASES]
-    cases += [(a, mode, {mode, cap}, payload) for a, mode, cap, payload in DELIVERY_GOVERNANCE_CASES]
+    cases += [(a, mode, {mode, cap}, payload) for a, mode, cap, payload in (*DELIVERY_GOVERNANCE_CASES, *COMPACT_GOVERNANCE_CASES)]
     assert {row[0] for row in cases} == set(V2_ACTIONS)
     for action, mode, caps, payload in cases:
         spec = action_specs()[action]
@@ -388,6 +399,8 @@ def wired_domains(governed_host, monkeypatch):
     # LLM: 可替换业务结果，但不参与身份/权限判断；所有调用实参留下证据供断言。
     # 类用途: 模拟兄弟工作树已声明的公开服务方法，不读写真实业务资产。
     class Service:
+        # LLM: 领域替身仅保存宿主构造参数，不参与实际身份裁决，不写业务数据。
+        # 函数用途: 核对假服务接收的根和调用方身份。
         def __init__(self, root_dir, *, actor_owner=None):
             assert root_dir == owner.root
             self.actor_owner = actor_owner
@@ -395,6 +408,8 @@ def wired_domains(governed_host, monkeypatch):
     # LLM: 方法名由测试固定列表产生，插件不能动态选择属性；返回值只用于适配测试。
     # 函数用途: 创建记录准确参数的领域方法。
     def method(name):
+        # LLM: 仅记录已授权分派的准确实参；不伪造真实跨owner业务执行。
+        # 函数用途: 返回可断言的方法名和参数，并保留审核列表的测试响应。
         def invoke(self, *args, **kwargs):
             calls.append((name, args, kwargs, self.actor_owner))
             if name == "list_reviews":
@@ -578,6 +593,8 @@ def stage3_call(host, action, payload=None, mode="read", as_user=None):
     return dispatch_call(composition.issuer.authorize(source, call), composition.ports)
 
 
+# LLM: 真实Host解析、授权与原始零修订CAS链均保留，正式写入仅发生于pytest临时owner。
+# 函数用途: 验证初始治理版本0能经公开接口成功提交并读回。
 @pytest.mark.parametrize("action,payload,field,value", [
     ("users.managed.policy.set", {"policy_patch": {"role_title": "合成角色"}}, "role_title", "合成角色"),
     ("users.managed.persona.set", {"user_md": "合成用户说明"}, "USER.md", "合成用户说明"),
@@ -594,6 +611,8 @@ def test_stage3_zero_revision_reaches_real_governance_write(stage3_host, action,
     assert saved[field] == value
 
 
+# LLM: 只测试公开消息schema，不以解析通过宣称记忆已写入。
+# 函数用途: 验证新增记忆允许显式初始修订0。
 def test_stage3_zero_revision_memory_add_schema():
     from agent_py_agent.agent.plugin_host.contracts import decode_call
 
@@ -602,6 +621,8 @@ def test_stage3_zero_revision_memory_add_schema():
     assert call.payload["expected_revision"] == 0
 
 
+# LLM: 缺依赖使用真实资产库复现，领域拒绝须保留not_started且补齐后可沿原key重试。
+# 函数用途: 验证资产闭包缺失的可重试错误及恢复后的成功调用。
 @pytest.mark.parametrize("action,mode", [("assets.delivery.preview_bundle", "read"), ("assets.delivery.send", "write")])
 def test_stage3_real_missing_closure_is_retryable_domain_rejection(stage3_host, action, mode):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
@@ -629,6 +650,8 @@ def test_stage3_real_missing_closure_is_retryable_domain_rejection(stage3_host, 
     assert stage3_call(stage3_host, action, payload, mode).http_status == 200
 
 
+# LLM: 使用真实投递服务和Alice授权上下文；安装者身份不得污染发送、读取或接受归属。
+# 函数用途: 验证公共插件代表普通用户执行时采用实际Alice身份。
 @pytest.mark.parametrize("action", ["assets.delivery.inbox.list", "assets.delivery.send", "assets.delivery.accept"])
 def test_stage3_public_delivery_as_user_uses_real_alice_context(stage3_host, action):
     from agent_py_agent.agent.assets.delivery_service import AssetDeliveryService
@@ -659,6 +682,8 @@ def test_stage3_public_delivery_as_user_uses_real_alice_context(stage3_host, act
         assert inbox[-1]["sender_owner_id"] == "local/alice"
 
 
+# LLM: 私有安装和名单外代表身份必须在原issuer授权门403拒绝，不执行投递。
+# 函数用途: 验证插件作用域及可管理用户名单不能被as_user绕过。
 @pytest.mark.parametrize("scope,uid", [("private", "alice"), ("public", "bobby")])
 def test_stage3_delivery_as_user_rejected_by_authorization(tmp_path, scope, uid):
     from agent_py_agent.agent import plugin_host_api as api
@@ -682,6 +707,8 @@ def test_stage3_delivery_as_user_rejected_by_authorization(tmp_path, scope, uid)
         api.set_host_api_base(None)
 
 
+# LLM: 治理只能由真实管理员主语执行，解码不得接受投递专用的代表用户字段。
+# 函数用途: 验证治理接口继续拒绝as_user身份选择。
 @pytest.mark.parametrize("action,payload,mode", [
     ("users.managed.persona.get", {"target_owner_id": "local/alice"}, "read"),
     ("governance.reviews.list", {"target_owner_id": "local/alice"}, "read"),
@@ -695,6 +722,8 @@ def test_stage3_governance_still_rejects_as_user_at_decode(action, payload, mode
     assert failure.value.code == "INVALID_SCHEMA"
 
 
+# LLM: 已知领域拒绝须清除executing但保留准确错误和not_started，不能伪造未知副作用。
+# 函数用途: 核验确定性错误的映射、公开明细及同键重试。
 @pytest.mark.parametrize("code,status", [
     ("ASSET_DELIVERY_DEPENDENCY_MISSING", 422), ("ASSET_DEPENDENCY_MISSING", 422),
     ("ASSET_DELIVERY_QUOTA_EXCEEDED", 429), ("ASSET_NOT_FOUND", 404), ("DELIVERY_SELF_TARGET_FORBIDDEN", 400),
@@ -710,6 +739,8 @@ def test_stage3_deterministic_errors_clear_executing_receipt(stage3_host, monkey
 
     attempts = []
 
+    # LLM: 仅在真实投递服务边界注入明确领域拒绝，保留原Host幂等路径。
+    # 函数用途: 记录调用次数并抛出测试指定的结构化错误。
     def rejected(self, *args, **kwargs):
         attempts.append(True)
         raise AssetDeliveryError(code, "合成领域拒绝", missing_refs=["script:absent"])
@@ -767,11 +798,15 @@ def test_stage3_gateway_delivery_send_inbox_accept_real_entry(stage3_host, monke
     paths = gateway_paths_from_root(owner.root / "gateway")
     ScriptStore(owner.home_dir).save_script(AssetDescriptor("gateway-script", "script", "命令投递"), 'print("{}")')
 
+    # LLM: 投递命令不应落入活动回合控制，任何落入都会直接使原测试失败。
+    # 函数用途: 捕获错误的活动任务路由，不代替实际投递执行。
     def no_live_turn(*args, **kwargs):
         pytest.fail("delivery fell through to active-turn controls")
 
     monkeypatch.setattr(control_service, "_active_control_target", no_live_turn)
 
+    # LLM: 身份仅来自宿主resolved_owner，故意冲突的展示metadata不得授予管理员权。
+    # 函数用途: 经真实Gateway解析和控制入口执行投递命令并返回回执。
     def run(text, identity):
         scope = control_service.GatewayControlScope("untrusted-display", "feishu", "fixture-session",
             metadata={"owner_id": "local/main", "user_id": "main"}, resolved_owner=identity)

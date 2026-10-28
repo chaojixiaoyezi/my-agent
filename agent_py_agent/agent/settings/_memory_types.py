@@ -1,7 +1,6 @@
-"""Dataclasses for effective memory config and default warnings."""
-
 # LLM: 不可变Memory设置包含闲置和四层压缩默认，须与YAML/AgentConfig一致；管理员强制字段不能作为用户授权。
 # 模块用途: 定义 Memory/Curator 生效配置和配置回退警告的数据结构。
+"""Dataclasses for effective memory config and default warnings."""
 
 from __future__ import annotations
 
@@ -48,6 +47,8 @@ class MemorySettings:
     memory_hot_min_occurrences: int = 3
 
 
+# LLM: 记忆配置诊断DTO；仅投影警告不修改配置或执行状态，联测配置coercion。
+# 类用途: 承载记忆配置降级的结构化告警，供诊断和日志读取。
 @dataclass(frozen=True)
 class MemoryConfigWarning:
     """Structured warning emitted when a memory config value uses the default."""
@@ -56,6 +57,8 @@ class MemoryConfigWarning:
     default_value: Any
     reason: str
 
+    # LLM: 记忆配置诊断DTO；仅投影警告不修改配置或执行状态，联测配置coercion。
+    # 函数用途: 将配置告警转成可序列化的公开字典。
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable warning payload for doctor/log output."""
         return asdict(self)

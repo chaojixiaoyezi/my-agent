@@ -1,7 +1,7 @@
-from __future__ import annotations
-
 # LLM: 通用层合并保持原合同；压缩阈值以显式管理员/用户/线程输入解析，不按自然语言推断来源或授权。
 # 模块用途: 合并带来源的配置层，并统一解析会话压缩比例的四级优先顺序。
+from __future__ import annotations
+
 """Small config-layer merger with per-field source tracing.
 
 This module is deliberately field-agnostic.  It only answers two questions:
@@ -14,29 +14,41 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
 
+# LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+# 类用途: 承载一层配置值、来源及优先级，不自带写入授权。
 @dataclass(frozen=True)
 class ConfigLayer:
     source: str
     priority: int
     values: Mapping[str, Any] = field(default_factory=dict)
 
+    # LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+    # 函数用途: 由对象构造独立配置层，保留显式来源和优先级。
     @classmethod
     def from_object(cls, *, source: str, priority: int, obj: object) -> ConfigLayer:
         return cls(source=source, priority=priority, values=_object_values(obj))
 
 
+# LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+# 类用途: 保存合并后的配置值及逐键来源，供运行时统一读取。
 @dataclass(frozen=True)
 class EffectiveConfig:
     values: dict[str, Any]
     sources: dict[str, dict[str, object]]
     layers: tuple[dict[str, object], ...]
 
+    # LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+    # 函数用途: 读取合并结果中的一个配置值，缺失时沿调用方默认。
     def value(self, key: str, default: Any = None) -> Any:
         return self.values.get(key, default)
 
+    # LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+    # 函数用途: 读取合并结果中一个键的来源信息。
     def source_for(self, key: str) -> dict[str, object]:
         return dict(self.sources.get(key, {}))
 
+    # LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+    # 函数用途: 把合并配置及来源投影为普通字典，不暴露内部可变引用。
     def to_dict(self) -> dict[str, object]:
         return {
             "schema_version": "effective_config.v1",
@@ -46,6 +58,8 @@ class EffectiveConfig:
         }
 
 
+# LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+# 函数用途: 按声明优先级合并配置层，并保留每个键的真实来源。
 def merge_config_layers(
     layers: list[ConfigLayer] | tuple[ConfigLayer, ...],
     *,
@@ -66,6 +80,8 @@ def merge_config_layers(
     )
 
 
+# LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+# 函数用途: 遍历配置层中的有效键值，不引入额外层级权限。
 def _iter_layer_items(
     layer: ConfigLayer,
     *,
@@ -80,6 +96,8 @@ def _iter_layer_items(
         yield key, value
 
 
+# LLM: 分层配置值及来源；覆盖不能冒充管理员来源或解锁强制政策，联测多层压缩阈值。
+# 函数用途: 从对象投影可合并的配置字段，不修改原对象。
 def _object_values(obj: object) -> dict[str, Any]:
     if isinstance(obj, Mapping):
         return dict(obj)

@@ -634,6 +634,8 @@ def _gateway_workspace_lineage_task_ids(
     load_errors.extend(error for error in errors if isinstance(error, dict))
     resolved_cache: dict[str, str] = {"": ""}
 
+    # LLM: Gateway请求路径解析；只使用既有任务链接，不由路径字符串扩大owner范围，联测预检。
+    # 函数用途: 解析任务链接中的真实路径，失效链接不扩大执行范围。
     def _resolved_link_path(raw_value: object) -> str:
         key = str(raw_value or "").strip()
         if key not in resolved_cache:

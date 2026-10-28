@@ -104,6 +104,8 @@ class ConversationControlCommand:
     message_id_explicit: bool = False
 
 
+# LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
+# 类用途: 承载由显式斜杠命令产生的普通模型任务，不让任意正文获得控制权。
 @dataclass(frozen=True)
 class ConversationTaskCommand:
     """One explicit slash command that launches an ordinary model turn."""
@@ -114,6 +116,8 @@ class ConversationTaskCommand:
     valid: bool = True
     usage: str = ""
 
+    # LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
+    # 函数用途: 把已校验的任务命令转成请求载荷，不新增调用方身份。
     def to_request_payload(self) -> dict[str, object]:
         return {
             "kind": self.kind,
@@ -154,6 +158,8 @@ class ConversationTaskStatus:
     model_usage: dict[str, object] = field(default_factory=dict)
 
 
+# LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
+# 类用途: 保存一个具名持续工作的结构化状态，供控制回执展示。
 @dataclass(frozen=True)
 class NamedConversationWorkStatus:
     kind: Literal["audit", "goal"]
@@ -181,7 +187,7 @@ class ConversationControlResult:
     details: dict[str, object] | None = None
 
     # LLM: HTTP/IM boundaries receive a plain typed projection, never a dataclass repr.
-    # 函数用途：把控制结果转换成可以安全跨进程传输的普通字典。
+    # 函数用途:把控制结果转换成可以安全跨进程传输的普通字典。
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "kind": self.kind,
@@ -212,7 +218,7 @@ class ConversationControlResult:
 
 
 # LLM: Slash controls are an explicit protocol; ordinary Chinese prose never acquires authority.
-# 函数用途：只识别完整斜杠命令，并把缺参数或多参数归成确定的用法错误。
+# 函数用途:只识别完整斜杠命令，并把缺参数或多参数归成确定的用法错误。
 def parse_conversation_control(
     text: object,
     *,
@@ -337,14 +343,14 @@ def parse_conversation_command(
 
 
 # LLM: `/audit` is parsed once at ingress; only its opaque task body may reach the model.
-# 函数用途：把保证档命令拆成普通任务正文和结构化运行属性，命令词本身不进入上下文。
+# 函数用途:把保证档命令拆成普通任务正文和结构化运行属性，命令词本身不进入上下文。
 def parse_conversation_task_command(text: object) -> ConversationTaskCommand | None:
     command = parse_conversation_command(text)
     return command if isinstance(command, ConversationTaskCommand) else None
 
 
 # LLM: Runtime task attributes are projected from the typed command payload, never re-inferred from prose.
-# 函数用途：校验系统任务载荷并生成允许进入 RunParams 的最小结构化属性。
+# 函数用途:校验系统任务载荷并生成允许进入 RunParams 的最小结构化属性。
 def conversation_task_attributes(system_task: object) -> dict[str, object]:
     if not isinstance(system_task, dict):
         return {}
@@ -778,6 +784,8 @@ def _owner_recover_command(parts: list[str]) -> ConversationControlCommand:
     )
 
 
+# LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
+# 函数用途: 解析显式Audit命令和运行参数，保留任务正文与控制字段分界。
 def _audit_command(raw: str) -> ConversationCommand:
     usage = (
         "用法：/audit help；/audit 名称 prepare 内容；/audit 时长 名称 任务内容；"
@@ -845,6 +853,8 @@ def _audit_command(raw: str) -> ConversationCommand:
     return ConversationControlCommand("audit", valid=False, usage=usage)
 
 
+# LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
+# 函数用途: 从命令前缀读取时长参数，不解释普通任务正文。
 def _duration_prefix(value: str) -> tuple[int | None, str]:
     match = re.match(r"^(\d+)\s*([dhm])(?:\s+|$)(.*)$", value, re.IGNORECASE | re.DOTALL)
     if match is None:
@@ -853,13 +863,15 @@ def _duration_prefix(value: str) -> tuple[int | None, str]:
     return min(seconds, _AUDIT_WINDOW_MAX_SECONDS), str(match.group(3) or "").strip()
 
 
+# LLM: 显式会话控制协议；解析与渲染不从普通正文获得权限，修改须同步CLI和Gateway运输。
+# 函数用途: 把命令头与余下参数分开，供同一显式协议解析器使用。
 def _split_head(value: str) -> tuple[str, str]:
     parts = str(value or "").strip().split(None, 1)
     return (parts[0], parts[1].strip() if len(parts) == 2 else "") if parts else ("", "")
 
 
 # LLM: Status/stop reject trailing prose instead of silently changing command scope.
-# 函数用途：构造不接参数的控制命令；多余内容会返回明确用法。
+# 函数用途:构造不接参数的控制命令；多余内容会返回明确用法。
 def _argumentless_command(
     kind: Literal["status", "context", "stop"],
     trailing: object,
@@ -870,7 +882,7 @@ def _argumentless_command(
 
 
 # LLM: Verbose acknowledgements are deterministic control-plane text, never model-authored claims.
-# 函数用途：根据当前档位和已解析命令生成系统设置回执，说明 IM 关闭详细过程仍保留最小存活展示。
+# 函数用途:根据当前档位和已解析命令生成系统设置回执，说明 IM 关闭详细过程仍保留最小存活展示。
 def render_verbose_control(current_level: str, command: ConversationControlCommand) -> str:
     if not command.valid:
         return command.usage
@@ -888,7 +900,7 @@ def render_verbose_control(current_level: str, command: ConversationControlComma
 
 
 # LLM: The interrupt registry key is stable across local and Gateway execution paths.
-# 函数用途：为一轮主任务生成进程内协作中断登记名。
+# 函数用途:为一轮主任务生成进程内协作中断登记名。
 def conversation_request_interrupt_name(request_id: object) -> str:
     return f"conversation-request:{str(request_id or '').strip()}"
 
@@ -904,7 +916,7 @@ def session_task_interrupt_name(turn_id: object) -> str:
 # LLM: Manual Compact cancellation is scoped by authenticated channel identity, conversation, and
 # the original opaque client message id.  The digest is process-local routing data, never a user
 # or owner lookup, and prevents one TUI from naming another user's Compact worker.
-# 函数用途：为一条手动 Compact 控制操作生成不泄露用户标识的进程内中断登记名。
+# 函数用途:为一条手动 Compact 控制操作生成不泄露用户标识的进程内中断登记名。
 def conversation_compact_interrupt_name(
     user_id: object,
     channel: object,
@@ -926,7 +938,7 @@ def conversation_compact_interrupt_name(
 
 
 # LLM: 状态仅渲染结构化运行事实；监控坏记录保留未知而不补零，guidance和历史正文不参与裁决。
-# 函数用途：把原任务状态、后台运行和不占执行资源的待输入整理成可读文本，不泄露内部命令、路径或秘密。
+# 函数用途:把原任务状态、后台运行和不占执行资源的待输入整理成可读文本，不泄露内部命令、路径或秘密。
 def render_conversation_task_status(status: ConversationTaskStatus) -> str:
     labels = {
         "idle": "空闲",
@@ -1026,7 +1038,7 @@ def _subagent_label_breakdown(labels: tuple[tuple[str, int], ...]) -> str:
 
 
 # LLM: Durations are deterministic status facts, not model-generated prose.
-# 函数用途：把秒数压成紧凑的中文时长。
+# 函数用途:把秒数压成紧凑的中文时长。
 def _duration_text(seconds: float) -> str:
     total = max(0, int(seconds))
     hours, remainder = divmod(total, 3600)
@@ -1039,7 +1051,7 @@ def _duration_text(seconds: float) -> str:
 
 
 # LLM: User-visible status bounds untrusted task text before crossing an IM boundary.
-# 函数用途：压平换行并限制状态里的任务摘要长度。
+# 函数用途:压平换行并限制状态里的任务摘要长度。
 def _short_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"

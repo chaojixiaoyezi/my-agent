@@ -165,6 +165,8 @@ def compact_trigger_max_tokens(value: object) -> int:
     return parsed if parsed >= 0 else DEFAULT_COMPACT_TRIGGER_MAX_TOKENS
 
 
+# LLM: 压缩运行时的纯比例换算；旧关闭语义与调用方预算测试必须同步，不能授予执行权。
+# 函数用途: 规范化输入压缩百分比，保留旧接口非正值关闭和上下界行为。
 def compact_trigger_percent(value: object) -> int:
     try:
         parsed = int(value)
@@ -179,6 +181,8 @@ def compact_trigger_percent(value: object) -> int:
     return parsed
 
 
+# LLM: 压缩运行时的纯比例换算；旧关闭语义与调用方预算测试必须同步，不能授予执行权。
+# 函数用途: 按当前上下文容量把百分比换算成压缩触发token数。
 def compact_trigger_tokens(context_window_tokens: int, trigger_percent: int) -> int:
     if context_window_tokens <= 0:
         return 0

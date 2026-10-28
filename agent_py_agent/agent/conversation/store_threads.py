@@ -867,6 +867,8 @@ def record_thread_compact_vision_failure(
 ) -> ConversationThread:
     current = now if now is not None else time.time()
 
+    # LLM: 线程存储原子更新回调；仅原锁内消费当前代数，不覆盖并发胜出状态，联测压缩提交。
+    # 函数用途: 仅在原压缩代数仍匹配时标记视觉摘要失败，沿原线程原子更新。
     def apply(thread: ConversationThread) -> ConversationThread:
         if thread.compact_generation != expected_generation:
             return thread

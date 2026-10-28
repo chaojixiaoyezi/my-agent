@@ -59,6 +59,8 @@ from .runtime.run_params import (
 )
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 类用途: 保存本回合提示、任务与方法快照，供退出时完整恢复。
 @dataclass(frozen=True)
 class _PromptScopeSnapshot:
     had_prompt: bool
@@ -120,6 +122,8 @@ def current_prompt_scope(agent, user_prompt: str, params: RunParams | None = Non
         _restore_current_prompt(agent, snapshot)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 恢复进入回合前的当前提示及其关联运行状态。
 def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
     if snapshot.had_prompt:
         agent._current_user_prompt = snapshot.previous_prompt
@@ -135,6 +139,8 @@ def _restore_current_prompt(agent, snapshot: _PromptScopeSnapshot) -> None:
         delattr(agent, "_current_skill_snapshot")
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 取得本回合可用技能的冻结快照，不另建授权来源。
 def _turn_skill_snapshot(agent):
     provider = getattr(agent, "skill_snapshot_for_run_scope", None)
     if not callable(provider):
@@ -282,6 +288,8 @@ class SimpleAgentRuntimeMixin:
             candidates=self.memory_candidates, promotion=self.memory_promotion, long_term=self.memory,
         ), content, kind=kind)
 
+    # LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+    # 函数用途: 按给定查询和数量检索记忆，数量缺省沿当前配置。
     def recall(self, query: str, top_k: int | None = None):
         return self.memory.search(query, top_k or self.config.memory_top_k)
 
@@ -1038,6 +1046,8 @@ def _settle_approval_retirement_run(agent, params, error):
     return record_approval_retirement_run(error, agent, params)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 构造压缩后自动续跑的参数，保留原任务身份和已完成步骤。
 def _compact_auto_continue_params(
     params: RunParams,
     injection: str,
@@ -1109,6 +1119,8 @@ def _result_added_tool_progress(
     return not _result_has_no_tool_progress(result)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 判断归档记录是否确有工具推进，不从模型正文猜执行结果。
 def _archive_record_is_tool_progress(record: dict[str, object]) -> bool:
     tool_name = str(record.get("tool") or "").strip()
     error_code = str(record.get("error_code") or "").strip().upper()
@@ -1117,12 +1129,16 @@ def _archive_record_is_tool_progress(record: dict[str, object]) -> bool:
     return bool(tool_name)
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 判断本轮结果是否缺少工具进展，供自动续跑策略使用。
 def _result_has_no_tool_progress(result) -> bool:
     return int(getattr(result, "tool_rounds", 0) or 0) <= 0 and not list(
         getattr(result, "executed_tools", None) or []
     )
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 筛出非压缩型的自动上下文注入，保留原注入顺序。
 def _non_compact_auto_injections(injections: list[str] | None) -> list[str]:
     return [
         item
@@ -1163,6 +1179,8 @@ def _merged_archive_tool_calls(
     return merged
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 从工具记录参数里读取规范路径，供去重索引使用。
 def _record_parameter_path(record: dict[str, object]) -> str:
     params = record.get("parameters")
     if not isinstance(params, dict):
@@ -1174,6 +1192,8 @@ def _record_parameter_path(record: dict[str, object]) -> str:
     return ""
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 把工具参数编码成稳定去重键，不修改原参数。
 def _record_parameters_key(record: dict[str, object]) -> str:
     params = record.get("parameters")
     if not isinstance(params, dict):
@@ -1184,6 +1204,8 @@ def _record_parameters_key(record: dict[str, object]) -> str:
         return ""
 
 
+# LLM: 主回合提示/续跑辅助入口；保留原身份、上下文恢复及工具执行事实，联测自动续跑。
+# 函数用途: 从本轮结果提取待延后执行的工具调用，不重复执行已完成调用。
 def _pending_deferred_tool_calls_from_result(source_result) -> list[dict[str, object]]:
     packet = getattr(source_result, "memory_compact_auto_continue_packet", None)
     if not isinstance(packet, dict):

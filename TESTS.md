@@ -1,3 +1,58 @@
+## 2026-10-28 Wave 9 B1 Round 3：公开强制策略别名与完整双层注释
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-b1.md` 44行；返工起点 `49222cf3693bdb0fa966ab968aed91d33bd9bd3c`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在指定 `wave9-b1` 工作树修改，不推送、合并、部署或启停真实服务。
+
+- **公开参数**：`settings.compact_policy.admin_force.set` 的真实schema及原 `ManagedUserGovernanceService.set_global_compact_force_policy` 均接受 `force_compact_trigger_percent`、`admin_force_compact_trigger_percent`、`memory_compact_admin_forced`。至少一个非空严格bool；`False`清除强制，`null`仅是未赋值占位、全部null拒绝。多别名非空值必须一致，冲突在领域写前返回 `INVALID_ARGUMENT`/400。最终只存规范键，不另建别名策略账；`trigger_percent`原继承语义不变。
+- **安全边界**：原Host真实管理员及通配管理grant、领域actor检查、全局锁内CAS均保留。回归逐字节验证冲突与过期修订零写入，两个线程以不同别名争同一revision只能一个胜出；真实有效策略读取全局authority，个人 `force_locked=False`、owner配置和会话比例不能解除全局强制。普通用户治理写和线程设置/重置仍403。
+- **先红后绿**：首批34个参数用例在原实现17失败、17通过（`.pytest_cache/r3-alias-red.xml`），修复后34全部通过（`r3-alias-green.xml`）。独立Astra high只审精确内联schema/治理/授权片段，未发现确定性引入缺陷；按其建议补混合非法类型、null冲突、实际生效锁和并发CAS，当前四文件共234项。片段审查不冒充仓库全审或真实HTTP验证。
+- **完整注释**：不只修点名的两份测试；核对原区间31个Python文件全部定义，修复232处定义缺失/位置问题，含9个装饰器后注释上移；四个模块头移到首个语句前。后补Host合同文件也补齐全部helper/test注释。最终覆盖32文件、1051个 `def` / `async def` / `class`，模块头与装饰器前注释均零缺失/错位。批量整理的22文件在注释操作前后完整AST相等；相对返工起点，生产行为仅两个别名模块改变。
+- **通用Host合同回归**：额外三文件首跑375项中1项失败，实际是独立schema矩阵漏了四个已登记压缩治理动作；保留目录集合精确相等、闭合字段、AND能力与幂等断言，补四个独立合法payload。中间将四例误并入仅支持旧方法且仅授权alice的假领域矩阵，379项中4项失败；修正为独立压缩schema矩阵，真实领域/CAS及全局通配权限由Wave9回归验证，不扩大旧fixture授权或删弱旧断言。最终三文件375项全部通过。
+
+复现（工作树根；测试均为0失败/0错误/0跳过）：
+
+```bash
+pytest agent_py_agent/tests/test_wave9_idle_and_multilevel_compact.py agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py agent_py_agent/tests/test_compact_threshold_unification.py agent_py_agent/tests/test_gateway_conversation_compact.py -q --tb=short
+pytest agent_py_agent/tests/test_managed_user_governance.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_plugin_host_v2_contracts.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+git diff --check
+```
+
+双层注释独立AST复现（包括嵌套定义、模块头和第一个装饰器前的同缩进连续注释；保留工作树改动并集，提交后仍适用）：
+
+```bash
+python3 - <<'PY'
+import ast, subprocess
+from pathlib import Path
+names = set()
+for revision in ('db4d5de92..HEAD', 'HEAD'):
+    names.update(subprocess.check_output(['git', 'diff', '--name-only', revision], text=True).splitlines())
+files = sorted(n for n in names if n.endswith('.py') and Path(n).is_file())
+errors, definitions = [], 0
+for name in files:
+    text = Path(name).read_text(); lines = text.splitlines(); tree = ast.parse(text)
+    header = lines[:tree.body[0].lineno - 1] if tree.body else lines
+    if not all(any(s.startswith('# ' + label) for s in header) for label in ('LLM:', '模块用途:')):
+        errors.append((name, 1, 'module'))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)): continue
+        definitions += 1; indent = ' ' * node.col_offset
+        end = min([node.lineno] + [d.lineno for d in node.decorator_list]) - 1; start = end
+        while start and lines[start - 1].startswith(indent + '#'): start -= 1
+        labels = ('LLM:', '类用途:' if isinstance(node, ast.ClassDef) else '函数用途:')
+        if not all(any(s.startswith(indent + '# ' + label) for s in lines[start:end]) for label in labels):
+            errors.append((name, node.lineno, node.name))
+        if node.decorator_list and any(s.lstrip().startswith(('# LLM:', '# 函数用途:', '# 类用途:'))
+                for s in lines[end:node.lineno - 1]): errors.append((name, node.lineno, 'below_decorator'))
+print({'files': len(files), 'definitions': definitions, 'missing_or_misplaced': errors})
+assert not errors
+PY
+```
+
+本次JUnit为 `.pytest_cache/r3-required-final.xml`（234项）及 `.pytest_cache/r3-governance-delivery.xml`（375项）；修复脚本和逐定义检查证据仅留本任务缓存，不进入产品分发。全范围Ruff、文档同步、导入边界及差异检查已通过，最终提交前后另核准确区间及干净状态。未运行已退役尺寸checker，未验证真实供应商、生产Gateway/IM/TUI、跨平台或全仓CI；本地真实临时Store/受控线程/假provider测试不外推这些链路。
+
 ## 2026-10-28 Wave 9 B1 Round 2：只读命令、审批保护与消息CAS返工
 
 来源：完整阅读 `07-tasks/fix-wave9-b1.md` 66行；返工起点 `9b0a7ae0e68d9e463420f14f2e0206795a233e79`，原任务基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。功能修改仅在指定 `wave9-b1` 工作树，不推送、合并、部署或启停服务。任务部分旧路径/测试名不存在，按实际 `settings/config.py`、`cli/chat_parts/control_runtime.py` 修改，补齐指定的两个真实回归文件。

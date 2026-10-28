@@ -31,6 +31,7 @@ _EFFECT_TEXT = {
 }
 
 
+# LLM: 参数中心校验/展示辅助；不越过专用写入与授权，修改须同步参数工具测试。
 # 函数用途: 返回某个生效时机给人看的说明文字。
 def effect_text(effect: str) -> str:
     return _EFFECT_TEXT.get(effect, "")
@@ -67,6 +68,8 @@ def _percent_within(bounds: tuple[int, int]) -> Callable[[object], tuple[bool, s
     return validate
 
 
+# LLM: 参数中心校验/展示辅助；不越过专用写入与授权，修改须同步参数工具测试。
+# 函数用途: 校验参数为正整数，不让布尔值冒充数量。
 def _positive_int(value: object) -> tuple[bool, str, object]:
     try:
         number = int(str(value).strip())
@@ -90,6 +93,8 @@ def _non_negative_int(value: object) -> tuple[bool, str, object]:
     return True, "", number
 
 
+# LLM: 参数中心校验/展示辅助；不越过专用写入与授权，修改须同步参数工具测试。
+# 函数用途: 校验参数是非空文字，保留原用户输入的语义。
 def _non_empty_text(value: object) -> tuple[bool, str, object]:
     text = str(value or "").strip()
     if not text:
@@ -563,6 +568,7 @@ def user_config_path(config: object | None = None) -> Path | None:
     return Path(configured).expanduser() if configured else None
 
 
+# LLM: 参数中心校验/展示辅助；不越过专用写入与授权，修改须同步参数工具测试。
 # 函数用途: 返回随包发布的默认配置路径。
 def packaged_config_path() -> Path:
     return Path(__file__).resolve().parents[2] / "config" / "agent_config.yaml"

@@ -18,6 +18,8 @@ INTERNAL_RUNTIME_CONFIG_FIELDS = {
 }
 
 
+# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# 函数用途: 从配置模型取得对外公开的键，不把内部追踪字段当用户配置。
 def public_config_keys(config_cls: type) -> set[str]:
     return {item.name for item in fields(config_cls)} - INTERNAL_RUNTIME_CONFIG_FIELDS
 
@@ -46,11 +48,15 @@ def merge_agent_config_sources(
     return merge_config_layers(layers, allowed_keys=allowed)
 
 
+# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# 函数用途: 提取配置schema的默认值，作为最低优先级来源。
 def _schema_default_values(config_cls: type, allowed: set[str]) -> dict[str, Any]:
     defaults = config_cls()
     return {key: getattr(defaults, key) for key in allowed}
 
 
+# LLM: 配置来源投影；只承接真实默认/环境层，不把派生记录当新授权，联测配置加载。
+# 函数用途: 读取受支持环境变量覆盖项，记录实际环境来源。
 def _env_override_values(clean: dict[str, object], schema_defaults: dict[str, object]) -> ConfigLayer:
     env_name = str(clean.get("api_key_env", schema_defaults.get("api_key_env", "")) or "").strip()
     if not env_name:

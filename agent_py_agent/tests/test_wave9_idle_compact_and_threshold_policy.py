@@ -18,12 +18,16 @@ from agent_py_agent.tests.test_gateway_conversation_compact import (
 )
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 在测试临时目录创建真实会话存储与初始线程。
 @pytest.fixture
 def conversation(tmp_path):
     store = ConversationStore(tmp_path / "conversations")
     return store, store.threads.create(canonical_user_id="user")
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证只读status命令经CLI运输后不变成摘要请求。
 def test_status_parser_preserves_cli_transport():
     from agent_py_agent.cli.chat_parts.control_runtime import _command_text
 
@@ -33,6 +37,8 @@ def test_status_parser_preserves_cli_transport():
     assert parse_conversation_control("/compact preserve status evidence").operation == "run"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证比例设置与重置命令经CLI运输往返保留参数。
 @pytest.mark.parametrize("value", ["reset", "default", "71"])
 def test_threshold_cli_transport_roundtrip(value):
     from agent_py_agent.cli.chat_parts.control_runtime import _command_text
@@ -43,6 +49,8 @@ def test_threshold_cli_transport_roundtrip(value):
     assert restored.value == command.value == value
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证Gateway状态查询不调用模型、不写线程也不增压缩代数。
 def test_gateway_status_is_read_only_without_model_or_generation(conversation, monkeypatch):
     store, row = conversation
     row = store.threads.update_atomic(row.thread_id, lambda t: replace(t, metadata={
@@ -65,6 +73,8 @@ def test_gateway_status_is_read_only_without_model_or_generation(conversation, m
     assert store.storage.thread_path(row.thread_id).read_bytes() == before
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证CLI状态分派只读取线程及有效压缩策略。
 def test_cli_status_dispatch_is_read_only(conversation):
     from agent_py_agent.cli.chat_parts.control_runtime import (
         ChatControlExecution,
@@ -81,6 +91,8 @@ def test_cli_status_dispatch_is_read_only(conversation):
     assert store.storage.thread_path(row.thread_id).read_bytes() == before
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证重置阈值删除覆盖项但不执行摘要。
 @pytest.mark.parametrize("reset", ["reset", "default"])
 def test_threshold_reset_clears_override_without_summary(conversation, monkeypatch, reset):
     store, row = conversation
@@ -97,6 +109,8 @@ def test_threshold_reset_clears_override_without_summary(conversation, monkeypat
     assert latest.compact_generation == row.compact_generation
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证阻塞子代理和未决能力申请都使会话保持忙态。
 @pytest.mark.parametrize("status,requests,expected", [
     ("BLOCKED", [], "subagent_blocked"), ("WAITING_APPROVAL", [], "pending_approval"),
     ("DONE", [SimpleNamespace(status="OPEN")], "pending_approval"),
@@ -112,6 +126,8 @@ def test_blocked_and_open_capability_requests_are_busy(conversation, tmp_path, m
     assert idle.idle_compact_busy_state(agent, store, row) == expected
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证子代理持久化损坏不被当作空闲。
 def test_corrupted_subagent_persistence_is_not_idle(tmp_path):
     agent = _agent(tmp_path, context_tokens=1000000)
     store = agent.conversation_store
@@ -123,6 +139,8 @@ def test_corrupted_subagent_persistence_is_not_idle(tmp_path):
     assert idle.idle_compact_busy_state(agent, store, row) == "activity_unknown"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证活动claim或任务读取失败时闲置判断失败关闭。
 @pytest.mark.parametrize("source", ["claims", "tasks"])
 def test_activity_store_errors_fail_closed(conversation, tmp_path, monkeypatch, source):
     store, row = conversation
@@ -136,6 +154,8 @@ def test_activity_store_errors_fail_closed(conversation, tmp_path, monkeypatch, 
     assert idle.idle_compact_busy_state(agent, store, row) == "activity_unknown"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证工具审批、确认卡及损坏审批记录都不能被视为空闲。
 @pytest.mark.parametrize("kind", ["tool", "confirmation", "corrupt_approval"])
 def test_pending_approval_records_are_busy(conversation, tmp_path, monkeypatch, kind):
     import json
@@ -157,6 +177,8 @@ def test_pending_approval_records_are_busy(conversation, tmp_path, monkeypatch, 
     assert path.read_bytes() == before
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证确认卡过期检查只读，坏时刻保留未知状态。
 @pytest.mark.parametrize("expires,expected", [(99.0, ""), (101.0, "pending_approval"),
     ("bad", "activity_unknown"), (float("nan"), "activity_unknown")])
 def test_confirmation_expiry_is_read_only(conversation, tmp_path, monkeypatch, expires, expected):
@@ -176,6 +198,8 @@ def test_confirmation_expiry_is_read_only(conversation, tmp_path, monkeypatch, e
     assert path.read_bytes() == before
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证不符合闲置维护条件时不会迁移空模型选择。
 @pytest.mark.parametrize("scenario", ["disabled", "not_idle", "busy", "below_threshold"])
 def test_ineligible_native_maintenance_never_migrates_empty_model(tmp_path, monkeypatch, scenario):
     agent = _agent(tmp_path, context_tokens=1000000)
@@ -194,6 +218,8 @@ def test_ineligible_native_maintenance_never_migrates_empty_model(tmp_path, monk
     assert store.storage.thread_path(row.thread_id).read_bytes() == before
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 准备真实消息与用户活动基线，仅摘要provider和用量观察使用本地替身。
 @pytest.fixture
 def summary_case(tmp_path, monkeypatch):
     agent = _agent(tmp_path, context_tokens=1000000)
@@ -208,6 +234,8 @@ def summary_case(tmp_path, monkeypatch):
     return agent, store, row
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证任何新角色消息追加都使旧闲置幂等标记失效。
 @pytest.mark.parametrize("role", ["assistant", "user", "tool"])
 def test_message_append_after_idle_compact_invalidates_idempotency(summary_case, monkeypatch, role):
     agent, store, row = summary_case
@@ -223,6 +251,8 @@ def test_message_append_after_idle_compact_invalidates_idempotency(summary_case,
     assert idle.maybe_auto_compact_idle_session(agent, store, latest, now=7600.0)["reason"] != "already_compacted"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证变化后的消息超过普通阈值时确实进入准备链。
 def test_changed_messages_above_regular_threshold_are_actually_prepared(summary_case, monkeypatch):
     agent, store, row = summary_case
     assert idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)["compacted"]
@@ -234,11 +264,15 @@ def test_changed_messages_above_regular_threshold_are_actually_prepared(summary_
     assert calls == [True]
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证摘要期间追加或同尺寸改写消息会中止CAS且不计模型失败。
 @pytest.mark.parametrize("change", ["assistant", "user", "tool", "modify"])
 def test_message_changes_during_summary_abort_cas_without_failure(summary_case, change):
     agent, store, row = summary_case
     generate = agent.backend.generate
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 在真实摘要调用期间追加或改写消息，保留原生成响应供CAS竞争。
     def racing_summary(*args, **kwargs):
         if change == "modify":
             path = store.storage.message_path(row.thread_id)
@@ -257,10 +291,14 @@ def test_message_changes_during_summary_abort_cas_without_failure(summary_case, 
     assert latest.compact_consecutive_failures == 0 and latest.summary == ""
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证最后预检之后到达的新消息仍被存储CAS拦住。
 def test_message_arriving_after_last_guard_is_rejected_by_store_cas(summary_case, monkeypatch):
     agent, store, row = summary_case
     original = store.threads.update_compact_state
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 在最后提交前追加真实消息，再调用原线程CAS写口。
     def before_cas(*args, **kwargs):
         store.messages.append({"thread_id": row.thread_id, "role": "assistant", "content": "最后检查之后追加"})
         return original(*args, **kwargs)
@@ -272,6 +310,8 @@ def test_message_arriving_after_last_guard_is_rejected_by_store_cas(summary_case
     assert latest.compact_generation == 0 and latest.compact_consecutive_failures == 0
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证其它线程的子代理阻塞不污染本线程闲置状态。
 def test_subagent_thread_attributes_keep_other_threads_independent(conversation, tmp_path, monkeypatch):
     store, row = conversation
     run = SimpleNamespace(status="BLOCKED", attributes={"conversation_thread_id": "thread-other"}, capability_requests=[])
@@ -281,6 +321,8 @@ def test_subagent_thread_attributes_keep_other_threads_independent(conversation,
     assert idle.idle_compact_busy_state(agent, store, row) == ""
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证普通压缩记录实际消息基线，供闲置重复压缩门使用。
 def test_regular_compact_records_message_baseline_for_idle_guard(summary_case, monkeypatch):
     agent, store, row = summary_case
     result = idle.prepare_conversation_context(agent, store, row, options=idle.ConversationCompactOptions(force=True))
@@ -291,6 +333,8 @@ def test_regular_compact_records_message_baseline_for_idle_guard(summary_case, m
     assert idle.maybe_auto_compact_idle_session(agent, store, row, now=7400.0)["reason"] == "regular_compacted"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证普通压缩不会宣称处理冻结来源之外的新消息。
 @pytest.mark.parametrize("explicit_source", [False, True])
 def test_regular_compact_never_claims_messages_outside_frozen_source(summary_case, monkeypatch, explicit_source):
     from agent_py_agent.agent.conversation import compact as compact_chain
@@ -300,6 +344,8 @@ def test_regular_compact_never_claims_messages_outside_frozen_source(summary_cas
     assert not errors
     load = compact_chain.load_conversation_compact_source
 
+    # LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+    # 函数用途: 冻结真实摘要来源后追加消息，证明候选不能覆盖新消息。
     def frozen_then_append(*args, **kwargs):
         source = load(*args, **kwargs)
         message = store.messages.append({"thread_id": row.thread_id, "role": "assistant", "content": "来源冻结后追加"})
@@ -321,6 +367,8 @@ def test_regular_compact_never_claims_messages_outside_frozen_source(summary_cas
     assert result.thread.metadata.get("last_compacted_message_tail") == (None if explicit_source else before_marker)
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证损坏消息尾标记报告错误，而非伪装成空历史。
 def test_corrupt_message_marker_is_not_an_empty_tail(conversation):
     store, row = conversation
     path = store.storage.message_path(row.thread_id)
@@ -330,6 +378,8 @@ def test_corrupt_message_marker_is_not_an_empty_tail(conversation):
     assert path.read_bytes() == b"{broken\n"
 
 
+# LLM: 本地压缩回归；副作用仅限测试数据，替身不代表真实供应商，保留原Store/CAS及错误断言。
+# 函数用途: 验证闲置维护每拍按实际配置上限处理线程。
 @pytest.mark.parametrize("limit", [0, 1, 3])
 def test_idle_maintenance_reads_configured_limit(conversation, tmp_path, monkeypatch, limit):
     store, _ = conversation

@@ -125,6 +125,8 @@ class GatewayControlScope:
     input_media: tuple[dict, ...] = ()
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 类用途: 保存Gateway活动请求及原始运行事实，供精确控制定位。
 @dataclass(frozen=True)
 class _GatewayRequestRecord:
     path: Path | None
@@ -706,6 +708,8 @@ def request_gateway_memory_curator_lifecycle(
     return request_memory_curator_for_session(owner_agent, event=event)
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 核定owner和线程后分派Audit控制，沿原生命周期执行。
 def _execute_audit_control(
     base_agent: object,
     paths: GatewayPaths,
@@ -774,6 +778,8 @@ def _execute_audit_control(
         return ConversationControlResult("audit", False, "Audit 状态暂时不可用，请稍后重试。")
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 查找当前Audit精确关联的待处理请求，不把其它任务纳入控制范围。
 def _pending_exact_audit_requests(
     paths: GatewayPaths,
     scope: GatewayControlScope,
@@ -1547,6 +1553,8 @@ def _active_control_target(
     return _active_conversation_task(base_agent, scope) or processing
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 按耐久任务编号绑定活动请求，不凭显示名称猜归属。
 def _linked_active_task_record(
     base_agent: object,
     processing: _GatewayRequestRecord,
@@ -1595,6 +1603,8 @@ def _request_accepts_active_input(record: _GatewayRequestRecord) -> bool:
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 取得精确的活动回合请求，包括已分离任务对应的入站回合。
 def _live_window_request(
     paths: GatewayPaths,
     scope: GatewayControlScope,
@@ -1618,6 +1628,8 @@ def _live_window_requests(
     ]
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 判断请求是否已转入分离执行，避免把交接当作请求丢失。
 def _request_is_detached(record: _GatewayRequestRecord) -> bool:
     if str(record.payload.get("conversation_cancellation_scope") or "") == "detached":
         return True
@@ -1701,6 +1713,8 @@ def _active_conversation_task(
     return _GatewayRequestRecord(None, payload, "task")
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 结合任务投影与耐久执行状态筛选仍可控制的会话任务。
 def _control_active_conversation_links(
     store: object,
     thread_id: str,
@@ -1811,6 +1825,8 @@ def _select_active_conversation_link(
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 从已校验关联中取得规范会话任务编号。
 def _linked_conversation_task_id(record: _GatewayRequestRecord | None) -> str:
     if record is None:
         return ""
@@ -2203,6 +2219,8 @@ def _unknown_existing_steer_result(
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 从控制范围中解析当前线程，避免跨会话误选目标。
 def _control_thread_id(
     store: object,
     active: _GatewayRequestRecord,
@@ -2234,6 +2252,8 @@ def _control_thread_id(
     return str(getattr(thread, "thread_id", "") or "").strip()
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 耐久写入后重核目标仍为当前任务，防止并发切换把引导给错回合。
 def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord) -> bool:
     """会话运行时 expected-turn check: the selected task must still be current.
 
@@ -2276,6 +2296,8 @@ def _durable_task_is_current(owner_agent: object, active: _GatewayRequestRecord)
     return str(getattr(current, "task_id", "") or "").strip() == task_id
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 区分活动前台请求、正常交接和损坏状态，不把未知当终态。
 def _linked_request_target_state(linked: _GatewayRequestRecord, task_id: str) -> str:
     """Classify a claimed foreground turn without conflating handoff with corruption."""
     if linked.path is None:
@@ -2510,6 +2532,8 @@ def _mark_request_stopping_locked(
     request_id = _record_id(active)
     updated_ref = [False]
 
+    # LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+    # 函数用途: 在原取消事务里标记请求取消，保留目标身份与并发检查。
     def mark_cancel(current: dict) -> dict:
         path_stem = active.path.stem if active.path is not None else ""
         if str(current.get("id") or path_stem) != request_id:
@@ -2765,6 +2789,8 @@ def _fresh_stop_runtime_binding(
         return gateway_runtime_authority(report.payload, request_id)
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 停止已精确绑定的活动请求，沿原中断与耐久取消链执行。
 def _stop_linked_live_request(
     active: _GatewayRequestRecord,
     scope: GatewayControlScope,
@@ -2925,6 +2951,8 @@ def _status_model_name(owner_agent: object, *, idle: bool, scope: GatewayControl
     return str(getattr(config, "model_name", "") or "")
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 整理具名耐久任务状态，供用户控制查询使用。
 def _named_durable_statuses(
     owner_agent: object,
     paths: GatewayPaths,
@@ -3024,6 +3052,8 @@ def _named_durable_statuses(
     )
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 从结构化Audit健康状态中只投影需要处理的摘要信息。
 def _audit_brief_health(owner_agent: object, link: object) -> str:
     """Project only actionable Audit health into the compact global status."""
     try:
@@ -3051,6 +3081,8 @@ def _audit_brief_health(owner_agent: object, link: object) -> str:
     return ""
 
 
+# LLM: Gateway控制定位/投影；身份与目标仅取原结构化事实，写入和停止沿原锁/取消链，联测会话控制。
+# 函数用途: 将具名工作状态码转换为展示标签，不反向驱动状态机。
 def _named_work_status_label(status: str) -> str:
     return {
         "active": "运行中",

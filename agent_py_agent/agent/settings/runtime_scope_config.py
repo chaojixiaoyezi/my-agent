@@ -33,6 +33,8 @@ _SCOPE_PRIORITIES = {
 _LOADED_CONFIG_DEFAULT_SOURCE = {"source": "loaded_agent_config", "priority": 20}
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 类用途: 保存一次作用域配置覆盖及来源，不作为权限凭证。
 @dataclass(frozen=True)
 class RuntimeConfigLayer:
     scope: str
@@ -41,6 +43,8 @@ class RuntimeConfigLayer:
     priority: int | None = None
     warnings: tuple[str, ...] = ()
 
+    # LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+    # 函数用途: 将运行时覆盖投影成通用配置层，保留作用域和来源。
     def to_config_layer(self) -> ConfigLayer:
         return ConfigLayer(
             source=self.source,
@@ -49,6 +53,8 @@ class RuntimeConfigLayer:
         )
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 类用途: 承载构造运行时配置层所需的作用域、路径和配置事实。
 @dataclass(frozen=True)
 class RuntimeConfigLayerRequest:
     scope: str
@@ -58,12 +64,16 @@ class RuntimeConfigLayerRequest:
     priority: int | None = None
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 返回运行时作用域的固定优先级，不由请求正文决定。
 def runtime_scope_priority(scope: str, explicit: int | None = None) -> int:
     if explicit is not None:
         return int(explicit)
     return _SCOPE_PRIORITIES.get(str(scope or "").strip().lower(), 70)
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 校验并构造一层运行配置，拒绝内部诊断字段进入覆盖。
 def make_runtime_config_layer(request: RuntimeConfigLayerRequest) -> RuntimeConfigLayer:
     """Normalize one scoped override layer and reject internal diagnostics fields."""
 
@@ -87,6 +97,8 @@ def make_runtime_config_layer(request: RuntimeConfigLayerRequest) -> RuntimeConf
     )
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 从指定小型YAML文件读取运行配置层，保留原格式错误处理。
 def load_runtime_config_layer(
     path: str | Path,
     *,
@@ -109,6 +121,8 @@ def load_runtime_config_layer(
     )
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 把作用域覆盖合入已加载配置，保留管理员来源和强制锁。
 def merge_runtime_config_layers(
     base_config: object,
     layers: list[RuntimeConfigLayer] | tuple[RuntimeConfigLayer, ...],
@@ -134,10 +148,14 @@ def merge_runtime_config_layers(
     return EffectiveConfig(values=values, sources=sources, layers=tuple(layer_records))
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 取得基础配置中的公开值，避免复制内部运行状态。
 def _base_config_values(config: object, allowed: set[str]) -> dict[str, Any]:
     return {key: getattr(config, key) for key in allowed if hasattr(config, key)}
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 复制基础配置的来源信息，供后续叠加保留管理员原值。
 def _base_config_sources(config: object, values: Mapping[str, Any]) -> dict[str, dict[str, object]]:
     raw_sources = getattr(config, "config_sources", {}) if config is not None else {}
     sources: dict[str, dict[str, object]] = {}
@@ -147,6 +165,8 @@ def _base_config_sources(config: object, values: Mapping[str, Any]) -> dict[str,
     return sources
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 恢复基础配置已有的层级记录，不把owner层冒充部署层。
 def _base_config_layers(config: object) -> tuple[dict[str, object], ...]:
     raw_layers = getattr(config, "config_layers", ()) if config is not None else ()
     if isinstance(raw_layers, list | tuple):
@@ -210,6 +230,8 @@ def _source_record(value: object) -> dict[str, object]:
     return dict(_LOADED_CONFIG_DEFAULT_SOURCE)
 
 
+# LLM: 作用域配置层；仅原优先级合并，保留管理员源与强制开关，联测owner覆盖隔离。
+# 函数用途: 取得当前配置键的生效优先级，保持原层级顺序。
 def _current_priority(source: object) -> int:
     if isinstance(source, dict):
         try:

@@ -18,6 +18,8 @@ def test_idle_compact_configuration_defaults():
     assert getattr(config, "force_compact_trigger_percent", None) is False
 
 
+# LLM: 四层策略必须返回同一完整结构；全局强制优先个人强制，强制无专属值时只能锁管理员默认。
+# 函数用途: 验证管理员强制、会话、用户、管理员默认的优先顺序。
 @pytest.mark.parametrize("forced,locked,user,thread,expected,source", [
     (True, False, 65, 70, 80, "admin_forced"),
     (True, True, 65, 70, 80, "admin_forced"),
@@ -27,8 +29,6 @@ def test_idle_compact_configuration_defaults():
     (False, False, 65, None, 65, "user"),
     (False, False, None, None, 80, "admin_default"),
 ])
-# LLM: 四层策略必须返回同一完整结构；全局强制优先个人强制，强制无专属值时只能锁管理员默认。
-# 函数用途: 验证管理员强制、会话、用户、管理员默认的优先顺序。
 def test_compact_threshold_precedence(forced, locked, user, thread, expected, source):
     from agent_py_agent.agent.settings import config_layers
 
@@ -42,9 +42,9 @@ def test_compact_threshold_precedence(forced, locked, user, thread, expected, so
                       "thread_override_percent": thread, "admin_default_percent": 80}
 
 
-@pytest.mark.parametrize("value,expected", [(-1, 50), (49, 50), (50, 50), (95, 95), (100, 95), (True, 80)])
 # LLM: 有效百分比夹在50..95，布尔不是管理员数值；失效值不能变成100或解除安全阈值。
 # 函数用途: 钉住新四层解析器的有效范围。
+@pytest.mark.parametrize("value,expected", [(-1, 50), (49, 50), (50, 50), (95, 95), (100, 95), (True, 80)])
 def test_compact_policy_clamps_percent(value, expected):
     from agent_py_agent.agent.settings import config_layers
 
@@ -202,6 +202,8 @@ def test_global_compact_force_is_admin_only_and_revisioned(governance):
     assert error.value.status == 403
 
 
+# LLM: 状态读取及模型边界可替换，时间/代次/原子提交使用真实ThreadStore；不声称此测试调用真实摘要模型。
+# 函数用途: 覆盖闲置压缩五道闸和成功后同代次幂等。
 @pytest.mark.parametrize("scenario,expected", [
     ("idle_disabled", "disabled"), ("seconds_disabled", "disabled"),
     ("not_idle", "not_idle"), ("below_threshold", "below_threshold"),
@@ -209,8 +211,6 @@ def test_global_compact_force_is_admin_only_and_revisioned(governance):
     ("subagent", "subagent_active"), ("process", "background_process_active"),
     ("regular_compacted", "regular_compacted"), ("eligible", "compacted"),
 ])
-# LLM: 状态读取及模型边界可替换，时间/代次/原子提交使用真实ThreadStore；不声称此测试调用真实摘要模型。
-# 函数用途: 覆盖闲置压缩五道闸和成功后同代次幂等。
 def test_idle_compact_guards_and_generation_idempotency(conversation, tmp_path, monkeypatch, scenario, expected):
     import importlib.util
     from dataclasses import replace
@@ -299,10 +299,10 @@ def test_idle_entry_aborts_when_user_speaks_during_summary(conversation, tmp_pat
     assert "last_idle_compacted_activity_gen" not in latest.metadata
 
 
-@pytest.mark.parametrize("text,value,valid", [("50", "50", True), ("95", "95", True),
-    ("default", "default", True), ("49", "49", False), ("96", "96", False), ("", "", False), ("80 extra", "80 extra", False)])
 # LLM: 仅显式threshold子命令产生设置操作，旧自定义摘要说明仍保持run，非法比例不发摘要请求。
 # 函数用途: 钉住最小命令扩展及50..95/default语法。
+@pytest.mark.parametrize("text,value,valid", [("50", "50", True), ("95", "95", True),
+    ("default", "default", True), ("49", "49", False), ("96", "96", False), ("", "", False), ("80 extra", "80 extra", False)])
 def test_compact_threshold_command_parses_separately(text, value, valid):
     from agent_py_agent.agent.conversation.control_commands import parse_conversation_control
 
@@ -431,9 +431,9 @@ def test_idle_maintenance_is_bounded_and_round_robin(conversation, tmp_path, mon
     assert len(calls) == 4 and set(calls) == {row.thread_id, *(r.thread_id for r in extra)}
 
 
-@pytest.mark.parametrize("forced,expected,source", [(True, 80, "admin_forced"), (False, 94, "user")])
 # LLM: 来源元数据必须跨多次叠加保留管理员原值，不能把owner比例冒充强制值或管理员默认。
 # 函数用途: 复现独立评审指出的强制比例绕过，并核未强制时owner默认生效。
+@pytest.mark.parametrize("forced,expected,source", [(True, 80, "admin_forced"), (False, 94, "user")])
 def test_owner_threshold_preserves_trusted_admin_default(forced, expected, source):
     from agent_py_agent.agent.conversation.compact_threshold_policy import (
         resolve_thread_compact_policy,
@@ -451,10 +451,10 @@ def test_owner_threshold_preserves_trusted_admin_default(forced, expected, sourc
     assert (policy["effective_trigger_percent"], policy["effective_source"], policy["admin_default_percent"]) == (expected, source, 80)
 
 
-@pytest.mark.parametrize("patch", [{"default_trigger_percent": True}, {"default_trigger_percent": 49},
-    {"force_locked": "false"}, {"surprise": 80}])
 # LLM: 非法嵌套字段应在Host原schema门拒绝，不进入幂等写口后变成未知500。
 # 函数用途: 验证两个压缩写动作使用闭合严格类型的政策schema。
+@pytest.mark.parametrize("patch", [{"default_trigger_percent": True}, {"default_trigger_percent": 49},
+    {"force_locked": "false"}, {"surprise": 80}])
 def test_compact_governance_host_schema_rejects_bad_patch(patch):
     from agent_py_agent.agent.plugin_host.action_specs import action_spec
     from agent_py_agent.agent.plugin_host.errors import HostAPIError
@@ -500,9 +500,9 @@ def test_idle_uses_latest_policy_and_freezes_summary(conversation, tmp_path, mon
     idle.maybe_auto_compact_idle_session(agent, store, latest, now=7300.0)
 
 
-@pytest.mark.parametrize("current", [float("nan"), float("inf")])
 # LLM: 测试显式now健壮性，不宣称生产时钟会返回NaN；非有限时刻不得绕过闲置时长。
 # 函数用途: 验证维护时间失效时失败关闭。
+@pytest.mark.parametrize("current", [float("nan"), float("inf")])
 def test_idle_rejects_nonfinite_now(conversation, tmp_path, monkeypatch, current):
     from agent_py_agent.agent.gateway_parts import compact_operations as idle
 
@@ -579,9 +579,9 @@ def test_compact_parameter_registry_authority_and_current_key():
     assert parameters["memory_compact_trigger_percent"].common
 
 
-@pytest.mark.parametrize("race", [False, True])
 # LLM: 真实Agent/原消息库/原prepare/检查点/CAS全链，仅摘要provider为本地假后端、用量为固定观察，不证明真实供应商链路。
 # 函数用途: 验证空闲options穿过原摘要实现且并发发言不会计失败或发布旧摘要。
+@pytest.mark.parametrize("race", [False, True])
 def test_idle_original_summary_chain_and_user_race(tmp_path, monkeypatch, race):
     from agent_py_agent.agent.gateway_parts import compact_operations as idle
     from agent_py_agent.agent.gateway_parts.request_history import (
@@ -645,9 +645,9 @@ def test_compact_threshold_control_executes_without_summary(conversation, monkey
     assert control._execute_compact_control(agent, None, parse_conversation_control("/compact threshold 75"), scope).error_code == "COMPACT_POLICY_LOCKED_BY_ADMIN"
 
 
-@pytest.mark.parametrize("canonical,expected", [(False, 73), (True, 82)])
 # LLM: 旧YAML只在未明确配置新键时迁移，新旧同时出现以新键为准，不改变本轮冻结对象。
 # 函数用途: 防止现有部署压缩配置升级后被默默丢弃。
+@pytest.mark.parametrize("canonical,expected", [(False, 73), (True, 82)])
 def test_legacy_compact_yaml_migration(tmp_path, canonical, expected):
     from agent_py_agent.agent.conversation.compact_threshold_policy import (
         resolve_thread_compact_policy,
@@ -755,3 +755,224 @@ def test_native_gateway_maintenance_tick_compacts_idle_thread(tmp_path, monkeypa
     updated = agent.conversation_store.threads.require(row.thread_id)
     assert updated.compact_generation == 1 and agent.backend.calls == 1
     assert updated.metadata["last_idle_compacted_activity_gen"] == row.metadata["user_activity_generation"]
+
+
+# LLM: 使用真实静态动作schema和治理adapter，仅提供宿主身份/grant依赖，不启动HTTP或放宽领域CAS。
+# 函数用途: 将公开强制策略payload送过校验器和实际治理处理器。
+def _call_admin_compact_force(service, payload, *, actor=None, manageable=("*",)):
+    from agent_py_agent.agent.plugin_host.action_specs import action_spec
+    from agent_py_agent.agent.plugin_host.governance_delivery_v2_handlers import (
+        call_governance_delivery,
+    )
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    action = "settings.compact_policy.admin_force.set"
+    validated = action_spec(action).validate_payload(payload)
+    authorized = SimpleNamespace(binding=SimpleNamespace(grant={"manageable_user_ids": list(manageable)}))
+    context = SimpleNamespace(identity=actor or OwnerIdentity.local_main(), owner_home=SimpleNamespace(root=service.root_dir))
+    return call_governance_delivery(action, validated, authorized, context)
+
+
+# LLM: 三种公开别名均经真实schema/adapter/宿主存储；返回和持久化只能保留规范开关，旧版本必须拒绝且零写入。
+# 函数用途: 回归每个别名设置、清除全局强制及CAS冲突。
+@pytest.mark.parametrize("alias", ["force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_admin_compact_force_host_accepts_all_aliases(governance, alias, enabled):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        read_global_compact_force_policy,
+    )
+
+    service, _ = governance
+    result = _call_admin_compact_force(service, {alias: enabled, "trigger_percent": 84, "expected_revision": 0})
+    assert result.http_status == 200
+    value = read_global_compact_force_policy(service.root_dir)
+    assert value["force_compact_trigger_percent"] is enabled and value["trigger_percent"] == 84
+    assert value["revision"] == 1 and value == result.data
+    assert not {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"} & value.keys()
+    path = service.root_dir / "data/managed_user_governance/compact_force_policy.json"
+    before = path.read_bytes()
+    with pytest.raises(HostAPIError) as error:
+        _call_admin_compact_force(service, {alias: not enabled, "expected_revision": 0})
+    assert error.value.code == "REVISION_CONFLICT" and error.value.status == 409
+    assert path.read_bytes() == before
+    cleared = _call_admin_compact_force(service, {alias: False, "expected_revision": 1})
+    assert cleared.data["force_compact_trigger_percent"] is False and cleared.data["revision"] == 2
+
+
+# LLM: 领域方法本身也规范化别名，不能只在Host适配器临时改名；直接调用仍受同一管理员/CAS边界约束。
+# 函数用途: 核验真实全局治理方法接受三个显式关键字。
+@pytest.mark.parametrize("alias", ["force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced"])
+def test_admin_compact_force_service_accepts_all_aliases(governance, alias):
+    service, _ = governance
+    value = service.set_global_compact_force_policy(**{alias: True}, expected_revision=0)
+    assert value["force_compact_trigger_percent"] is True and value["revision"] == 1
+
+
+# LLM: 非空别名必须一致；null仅表示该名字没有赋值，不能用truthiness丢掉明确False或解除类型限制。
+# 函数用途: 验证同值多别名和带null占位的合法更新。
+@pytest.mark.parametrize("payload,expected", [
+    ({"force_compact_trigger_percent": True, "admin_force_compact_trigger_percent": True, "memory_compact_admin_forced": True}, True),
+    ({"force_compact_trigger_percent": False, "admin_force_compact_trigger_percent": False}, False),
+    ({"force_compact_trigger_percent": None, "admin_force_compact_trigger_percent": False}, False),
+    ({"admin_force_compact_trigger_percent": None, "memory_compact_admin_forced": True}, True),
+])
+def test_admin_compact_force_alias_agreement_and_null_placeholder(governance, payload, expected):
+    service, _ = governance
+    assert _call_admin_compact_force(service, payload).data["force_compact_trigger_percent"] is expected
+
+
+# LLM: 矛盾payload通过字段类型校验后仍须在原领域写前拒绝，不能按别名顺序静默挑值或推进修订。
+# 函数用途: 验证任意两别名冲突都返回明确400且权威文件不变。
+@pytest.mark.parametrize("payload", [
+    {"force_compact_trigger_percent": True, "admin_force_compact_trigger_percent": False},
+    {"force_compact_trigger_percent": False, "memory_compact_admin_forced": True},
+    {"admin_force_compact_trigger_percent": True, "memory_compact_admin_forced": False},
+    {"force_compact_trigger_percent": None, "admin_force_compact_trigger_percent": True, "memory_compact_admin_forced": False},
+])
+def test_admin_compact_force_alias_conflicts_do_not_write(governance, payload):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    service, _ = governance
+    service.set_global_compact_force_policy(True, expected_revision=0)
+    path = service.root_dir / "data/managed_user_governance/compact_force_policy.json"
+    before = path.read_bytes()
+    with pytest.raises(HostAPIError) as error:
+        _call_admin_compact_force(service, {**payload, "expected_revision": 1})
+    assert error.value.code in {"INVALID_ARGUMENT", "INVALID_SCHEMA"} and error.value.status == 400
+    assert path.read_bytes() == before
+
+
+# LLM: 至少一个明确bool才是设置/清除请求；schema保持闭合，不把null、整数或文字当开关。
+# 函数用途: 钉住公开动作的必填组、严格类型与额外字段拒绝。
+@pytest.mark.parametrize("payload", [{}, {"trigger_percent": 80},
+    {"force_compact_trigger_percent": None}, {"memory_compact_admin_forced": None},
+    {"force_compact_trigger_percent": True, "admin_force_compact_trigger_percent": 1},
+    {"force_compact_trigger_percent": True, "admin_force_compact_trigger_percent": "true"},
+    {"force_compact_trigger_percent": True, "memory_compact_admin_forced": []},
+    {"admin_force_compact_trigger_percent": "false"},
+    {"force_compact_trigger_percent": False, "surprise": True}])
+def test_admin_compact_force_schema_rejects_missing_or_invalid_aliases(payload):
+    from agent_py_agent.agent.plugin_host.action_specs import action_spec
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    with pytest.raises(HostAPIError) as error:
+        action_spec("settings.compact_policy.admin_force.set").validate_payload(payload)
+    assert error.value.code == "INVALID_SCHEMA" and error.value.status == 400
+
+
+# LLM: 绕开schema直调领域也不能接受空值、伪布尔或矛盾别名，异常必须明确为未写入的400而非未知副作用。
+# 函数用途: 核验全局服务独立的别名输入校验和零写入拒绝。
+@pytest.mark.parametrize("payload", [{}, {"force_compact_trigger_percent": None},
+    {"memory_compact_admin_forced": 1}, {"admin_force_compact_trigger_percent": "false"},
+    {"force_compact_trigger_percent": True, "memory_compact_admin_forced": False}])
+def test_admin_compact_force_service_rejects_invalid_aliases(governance, payload):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    service, _ = governance
+    with pytest.raises(HostAPIError) as error:
+        service.set_global_compact_force_policy(**payload)
+    assert error.value.code == "INVALID_ARGUMENT" and error.value.status == 400
+    assert not (service.root_dir / "data/managed_user_governance/compact_force_policy.json").exists()
+
+
+# LLM: 别名只扩展参数拼写，不能扩展actor或manageable授权；普通用户直调和Host调用都不能解除管理员强制。
+# 函数用途: 验证三别名在非管理员及非通配授权下均保持403。
+@pytest.mark.parametrize("alias", ["force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced"])
+def test_admin_compact_force_aliases_preserve_admin_authority(governance, alias):
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.user_space.managed_user_governance import ManagedUserGovernanceService
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    service, _ = governance
+    service.set_global_compact_force_policy(True, expected_revision=0)
+    path = service.root_dir / "data/managed_user_governance/compact_force_policy.json"
+    before = path.read_bytes()
+    actor = OwnerIdentity.local_user("alice")
+    outsider = ManagedUserGovernanceService(service.root_dir, actor_owner=actor)
+    with pytest.raises(HostAPIError) as direct:
+        outsider.set_global_compact_force_policy(**{alias: False})
+    assert direct.value.status == 403
+    for identity, grant in ((actor, ("*",)), (OwnerIdentity.local_main(), ("alice",))):
+        with pytest.raises(HostAPIError) as host:
+            _call_admin_compact_force(service, {alias: False}, actor=identity, manageable=grant)
+        assert host.value.status == 403
+    assert path.read_bytes() == before
+
+
+# LLM: 别名属于全局管理员接口，个人政策schema和治理patch白名单仍拒绝该字段，不能借嵌套补丁解锁。
+# 函数用途: 保持单用户、批量及通用个人治理入口的原闭合字段边界。
+@pytest.mark.parametrize("alias", ["force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced"])
+def test_admin_force_aliases_are_not_user_policy_fields(governance, alias):
+    from agent_py_agent.agent.plugin_host.action_specs import action_spec
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+
+    service, _ = governance
+    for action in ("users.managed.compact_policy.set", "users.managed.compact_policy.batch_set"):
+        with pytest.raises(HostAPIError, match="INVALID_SCHEMA"):
+            action_spec(action).validate_payload({"policy_patch": {alias: False}})
+    with pytest.raises(ValueError):
+        service.set_policy("alice", {"user_compact_policy": {alias: False}}, expected_revision=0)
+    assert service.get_user_compact_policy("alice")["revision"] == 0
+
+
+# LLM: 读取真实全局authority和个人策略；owner配置/个人force_locked=False/线程覆盖均不能解管理员全局锁，不调用模型。
+# 函数用途: 从真实生效比例及线程写入口验证三个别名建立的管理员强制仍优先。
+@pytest.mark.parametrize("alias", ["force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced"])
+def test_admin_force_aliases_keep_effective_lock_over_user_preferences(governance, alias):
+    from agent_py_agent.agent.conversation.compact_threshold_policy import (
+        resolve_thread_compact_policy,
+        thread_with_compact_threshold,
+    )
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.user_space.managed_user_governance import ManagedUserGovernanceService
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
+
+    service, _ = governance
+    _call_admin_compact_force(service, {alias: True, "trigger_percent": 84, "expected_revision": 0})
+    service.set_user_compact_policy("alice", {"default_trigger_percent": 93, "force_locked": False}, expected_revision=0)
+    outsider = ManagedUserGovernanceService(service.root_dir, actor_owner=OwnerIdentity.local_user("alice"))
+    with pytest.raises(HostAPIError) as denied:
+        outsider.set_user_compact_policy("alice", {"force_locked": False}, expected_revision=1)
+    assert denied.value.status == 403
+    agent = SimpleNamespace(config=AgentConfig(force_compact_trigger_percent=False, memory_compact_trigger_percent=92),
+        home_paths=SimpleNamespace(root=service.root_dir, owner_provider="local", owner_kind="user", owner_id="alice"))
+    row = SimpleNamespace(thread_id="locked-thread", metadata={"settings": {"compact_trigger_percent": 95}})
+    policy = resolve_thread_compact_policy(agent, row)
+    assert (policy["effective_trigger_percent"], policy["effective_source"], policy["force_locked"]) == (84, "admin_forced", True)
+    for threshold in (70, None):
+        with pytest.raises(HostAPIError) as locked:
+            thread_with_compact_threshold(agent, row, threshold)
+        assert locked.value.code == "COMPACT_POLICY_LOCKED_BY_ADMIN" and locked.value.status == 403
+
+
+# LLM: 两个真实线程同一revision竞争原跨进程文件锁；只一个写入可发表，失败方不能自动重试覆盖胜者。
+# 函数用途: 验证不同别名并发设置仍共用一个全局CAS权威。
+def test_admin_compact_force_aliases_share_concurrent_cas(governance):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        read_global_compact_force_policy,
+    )
+
+    service, _ = governance
+    barrier = Barrier(2)
+
+    # LLM: 仅在进入真实治理写口前同步起跑；不替换文件锁、版本读取或原子发表。
+    # 函数用途: 用一个别名提交revision0并保留真实CAS结果。
+    def write(alias, enabled):
+        barrier.wait(timeout=5)
+        try:
+            return "applied", _call_admin_compact_force(service, {alias: enabled, "expected_revision": 0}).data
+        except HostAPIError as error:
+            return error.code, None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(write, "admin_force_compact_trigger_percent", True),
+                   pool.submit(write, "memory_compact_admin_forced", False)]
+        results = [future.result(timeout=10) for future in futures]
+    assert sorted(code for code, _ in results) == ["REVISION_CONFLICT", "applied"]
+    winner = next(value for code, value in results if code == "applied")
+    assert read_global_compact_force_policy(service.root_dir) == winner and winner["revision"] == 1

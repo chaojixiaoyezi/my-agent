@@ -153,6 +153,7 @@ class _Validation:
     rows: int = 0
     last_line: int = 0
 
+    # LLM: 消息库校验辅助；只核规范文件及行记录，不把损坏或未覆盖数据当空历史，联测闲置CAS。
     # 函数用途: 校验一行并更新状态。
     def check(self, line_number: int, text: str) -> None:
         self.last_line = line_number
@@ -190,6 +191,7 @@ def _validated_entries(path: Path, identity: tuple[int, int], last_line: int) ->
             yield MessageLogEntry.from_dict(json.loads(text))
 
 
+# LLM: 消息库校验辅助；只核规范文件及行记录，不把损坏或未覆盖数据当空历史，联测闲置CAS。
 # 函数用途: 读取打开文件的设备号与 inode，用于确认两遍扫描读的是同一个 canonical 文件。
 def _file_identity(handle) -> tuple[int, int]:
     info = os.fstat(handle.fileno())

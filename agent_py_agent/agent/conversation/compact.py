@@ -1753,6 +1753,7 @@ def _media_digest_for_summary(
     return final, digest
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
 # 函数用途: 从摘要调用的身份与缓存面派生看图小请求上下文，不复制历史；调用方保证 provider_surface 非空。
 def _media_digest_context(call: _CompactSummaryCall) -> MediaDigestContext:
     return MediaDigestContext(
@@ -1771,6 +1772,7 @@ def _media_blocks_summarized(candidate: _CompactCandidate) -> int:
     return max(0, min(int(decision.summarized_blocks), candidate.media_facts.blocks))
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
 # 函数用途: 算 checkpoint 里"本次按归档引用处理了几个图块"（范围内图块减去已总结的）。
 def _media_blocks_archived(candidate: _CompactCandidate) -> int:
     decision = candidate.media_decision
@@ -2034,6 +2036,8 @@ def _recent_operation_evidence(
     return _merge_compact_operation_evidence({}, rows)
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
+# 函数用途: 从操作证据中提取结构化事件，不把摘要正文当作执行证据。
 def _operation_events(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -2057,6 +2061,8 @@ def _operation_events(value: object) -> list[dict[str, object]]:
     return events
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
+# 函数用途: 按结构化操作事件累计结果数量，不因展示裁剪丢总数。
 def _operation_counts(value: object) -> dict[str, int]:
     source = value if isinstance(value, dict) else {}
     return {
@@ -2065,6 +2071,8 @@ def _operation_counts(value: object) -> dict[str, int]:
     }
 
 
+# LLM: 会话摘要证据投影；只消费结构化来源，模型摘要不授予操作成功或身份，联测Gateway压缩。
+# 函数用途: 将计数字段规范为非负整数，非法值沿原默认处理。
 def _nonnegative_int(value: object) -> int:
     try:
         return max(0, int(value or 0))

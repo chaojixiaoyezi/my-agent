@@ -321,21 +321,26 @@ class ManagedUserGovernanceService:
                               "error_code": error.code})
         return {"atomic": False, "partial": stopped and any(item["status"] == "applied" for item in items), "items": items}
 
-    # LLM: 根级强制仅允许宿主local/main；global锁内CAS后发表，不批量改写个人政策或把请求字段当actor。
-    # 函数用途: 管理员切换全局压缩强制开关及可选比例。
-    def set_global_compact_force_policy(self, force_compact_trigger_percent: bool, *, trigger_percent: int | None = None,
+    # LLM: 三别名只在核实local/main后归一；None为未赋值、False清除，矛盾值在写前400拒绝；global锁/CAS及规范存储键不变。
+    # 函数用途: 管理员用任一公开别名切换全局压缩强制开关及可选比例。
+    def set_global_compact_force_policy(self, force_compact_trigger_percent: bool | None = None, *,
+                                        admin_force_compact_trigger_percent: bool | None = None,
+                                        memory_compact_admin_forced: bool | None = None, trigger_percent: int | None = None,
                                         expected_revision: int | None = None) -> dict:
         if self.actor_owner != OwnerIdentity.local_main():
             raise ManagedUserScopeDeniedError()
-        if type(force_compact_trigger_percent) is not bool or trigger_percent is not None and (
-                type(trigger_percent) is not int or not 50 <= trigger_percent <= 95):
+        values = [value for value in (force_compact_trigger_percent, admin_force_compact_trigger_percent,
+                                      memory_compact_admin_forced) if value is not None]
+        if not values or any(type(value) is not bool for value in values) or any(value != values[0] for value in values):
+            raise HostAPIError("INVALID_ARGUMENT", 400, message="Compact force aliases require one consistent boolean value.")
+        if trigger_percent is not None and (type(trigger_percent) is not int or not 50 <= trigger_percent <= 95):
             raise ValueError("invalid global compact policy")
         store = LocalUserStore(self.root_dir)
         with store.locked(("data", "managed_user_governance", ".compact-force.lock")):
             current = read_global_compact_force_policy(self.root_dir) or {"revision": 0}
             _require_revision(expected_revision, current["revision"])
             result = {"schema_version": "compact_admin_force.v1", "revision": current["revision"] + 1,
-                      "force_compact_trigger_percent": force_compact_trigger_percent,
+                      "force_compact_trigger_percent": values[0],
                       "trigger_percent": trigger_percent if trigger_percent is not None else current.get("trigger_percent"),
                       "updated_at": now_utc(), "updated_by": "local/main"}
             store.write_json(("data", "managed_user_governance", "compact_force_policy.json"), result)

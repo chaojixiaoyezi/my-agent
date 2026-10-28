@@ -55,6 +55,8 @@ class ChatControlState:
     model_payload: dict | None = None
 
 
+# LLM: 本地CLI控制执行依赖；保留当前线程和原命令语义，不从展示值推运行状态，联测控制运输。
+# 类用途: 保存CLI控制执行的Agent、当前线程和会话状态。
 @dataclass(frozen=True)
 class ChatControlExecution:
     agent: object
@@ -384,6 +386,8 @@ def _label_counts(value: object) -> tuple[tuple[str, int], ...]:
     return tuple(rows)
 
 
+# LLM: 本地CLI控制执行依赖；保留当前线程和原命令语义，不从展示值推运行状态，联测控制运输。
+# 函数用途: 把CLI状态计数转成非负整数，不以坏值推断运行成功。
 def _nonnegative_int(value: object) -> int:
     if isinstance(value, bool):
         return 0
@@ -825,6 +829,8 @@ def _gateway_control_timeout(
     return max(GATEWAY_SERVICE_COMMAND_TIMEOUT_SECONDS, provider_timeout + 30.0)
 
 
+# LLM: 本地CLI控制执行依赖；保留当前线程和原命令语义，不从展示值推运行状态，联测控制运输。
+# 函数用途: 解析控制命令中的时长词元，不改变业务任务正文。
 def _duration_token(seconds: int) -> str:
     if seconds % 86400 == 0:
         return f"{seconds // 86400}d"

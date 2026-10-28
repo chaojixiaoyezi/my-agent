@@ -586,6 +586,8 @@ class _RequestDispatcher:
             admission.release(user_key, conversation_key=conversation_key)
 
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 取得当前维护线程绑定的Agent，保留owner隔离实例。
     def _thread_agent(self) -> SimpleAgent:
         return self.bootstrap_agent
 
@@ -623,6 +625,8 @@ class _RequestDispatcher:
                     del self._request_futures[future]
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 把共享活跃owner登记表绑定到隔离Agent，不复制其它owner业务状态。
 def _attach_shared_owner_registry(agent: SimpleAgent, context: GatewayRunContext) -> None:
     """把共享活跃 owner 登记表(挂在 context.agent 上)同步给本 worker 的隔离 agent。best-effort。"""
     try:
@@ -711,6 +715,8 @@ def _run_background_main_ticks(
             stop_event.wait(wait_seconds)
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 按原停止事件关闭Gateway后台主循环及其资源。
 def _shutdown_background_main(
     supervisor: object,
     controller_threads: tuple[threading.Thread | None, ...],
@@ -723,6 +729,8 @@ def _shutdown_background_main(
             thread.join(timeout=2)
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 启动不依赖模型的孤儿核对线程，遵守原停止事件。
 def _start_orphan_reconcile_loop(
     context: GatewayRunContext,
     stop_event: threading.Event,
@@ -752,6 +760,8 @@ def _start_orphan_reconcile_loop(
     return thread
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 启动owner维护线程，沿原节拍和停止机制运行。
 def _start_owner_maintenance_loop(
     context: GatewayRunContext,
     stop_event: threading.Event,
@@ -773,6 +783,8 @@ def _start_owner_maintenance_loop(
     return thread
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 启动定时任务到期检查线程，不改任务授权或执行身份。
 def _start_scheduler_due_loop(
     context: GatewayRunContext,
     stop_event: threading.Event,
@@ -811,6 +823,8 @@ def _supervisor_tick_survives(
     return 0.0 if busy else site.interval
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 按当前宿主依赖构造后台调度器，不直接执行模型任务。
 def _build_background_scheduler(agent: SimpleAgent, channels: DeliveryService) -> BackgroundMainAgentScheduler:
     runtime = BackgroundMainAgentRuntime(agent=agent, store=agent.conversation_store, channels=channels)
     return BackgroundMainAgentScheduler(
@@ -841,6 +855,8 @@ _CURATOR_DAILY_QUOTA_COUNT = 5000
 _CURATOR_CONSUMED_STATUSES = frozenset({"succeeded", "failed"})
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 读取owner记忆总开关，关闭时不调度Curator。
 def _agent_memory_enabled(agent: object) -> bool:
     """owner memory_policy 总闸(effective flag):关闭则 curator 不调度。
 
@@ -852,6 +868,8 @@ def _agent_memory_enabled(agent: object) -> bool:
     return bool(getattr(policy, "memory_enabled", True))
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 读取后台owner工作线程配置，沿原有效范围和默认值。
 def _background_owner_workers(agent: object) -> int:
     value = getattr(getattr(agent, "config", None), "background_owner_workers", _BACKGROUND_OWNER_WORKER_COUNT)
     try:
@@ -1308,6 +1326,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             self._heartbeat_path = Path(str(index_dir)) / "background_supervisor_heartbeat.json"
             self._load_curator_quota()
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 读取当天Curator已用配额，跨天重置而非恢复旧日额度。
     def _load_curator_quota(self) -> None:
         """启动时恢复当日配额计数(重启不丢);只认当天日期,跨天自然重置。"""
         if self._curator_quota_path is None or not self._curator_quota_path.is_file():
@@ -1326,6 +1346,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         self._curator_quota_count = count
         self._curator_quota_date = today
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 按节流周期写调度器存活心跳，供只读诊断观察。
     def _maybe_write_heartbeat(self) -> None:
         """调度器存活心跳:节流写 ts+pid 到 global_index_dir,诊断「调度循环死了没有」。"""
         now = time.time()
@@ -1368,6 +1390,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
         _record_background_main_reports(self._base_agent, reports)
         return True
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 收割已完成的维护future，保留异常和后续调度边界。
     def _collect_finished_ticks(self) -> list[object]:
         out: list[object] = []
         for key in list(self._inflight):
@@ -1378,6 +1402,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             out.extend(self._tick_result(future, key))
         return out
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 解析一次维护future的真实结果，不把异常写成成功。
     def _tick_result(self, future: object, key: object) -> list[object]:
         try:
             return list(future.result() or [])
@@ -1385,6 +1411,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             _print_gateway_loop_error("gateway_background_main.owner_result", str(key), exc)
             return []
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 按有界条件把待唤醒owner加入登记表，避免每拍全量播种。
     def _maybe_seed_wake_pending_owners(self) -> None:
         if self._wake_rescan_interval <= 0:
             return
@@ -1535,9 +1563,13 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             pool,
         )
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 读取当前Curator每日配额配置，不在查询时扣额度。
     def _curator_daily_quota(self) -> int:
         return _positive_int_config(self._base_agent, "curator_daily_quota", default=_CURATOR_DAILY_QUOTA_COUNT)
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 只读检查Curator当日剩余额度，实际消费另行记账。
     def _curator_quota_available(self) -> bool:
         """常规车道当日剩余配额检查(不记账)。提交前调用:还有额度才发起 curator run。"""
         quota = self._curator_daily_quota()
@@ -1549,6 +1581,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             self._curator_quota_count = 0
         return self._curator_quota_count < quota
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 仅在真实Curator事务执行后更新每日消费记录。
     def _curator_quota_record_consumed(self) -> None:
         """实际执行后记账:只有真正跑了一次 curator 事务(提取/晋升/提交)才扣配额。
 
@@ -1573,6 +1607,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             except OSError:
                 pass  # 配额账本写失败不阻塞策展(内存计数仍在)
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 只读Curator待处理原因或活动lease，决定是否进入紧急车道。
     def _curator_has_pending_reason(self, agent: object) -> bool:
         """紧急车道判定:该 agent 的 curator state 是否有 pending reason/active lease(纯读 state.json)。"""
         owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", "")
@@ -1619,6 +1655,8 @@ class _BackgroundMainSupervisor(_BackgroundThreadLaneSupervisorMixin):
             )
         return self._curator_executor
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 惰性取得请求链共用的owner池，失败记录原诊断而不另造池。
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
             return self._owner_pool
@@ -2119,6 +2157,8 @@ class _GatewayOrphanReconciler:
         self._submit_base_sweep(current)
         self._submit_owner_sweeps(current)
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 收割已经完成的owner扫描future，不重复提交同一工作。
     def _collect_finished_sweeps(self) -> None:
         future = self._base_inflight
         if future is not None and getattr(future, "done", lambda: True)():
@@ -2131,6 +2171,8 @@ class _GatewayOrphanReconciler:
             self._owner_inflight.pop(key, None)
             self._consume_sweep_result(future, "/".join(key))
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 消费单次扫描结果，分别保留进展、异常和未知状态。
     @staticmethod
     def _consume_sweep_result(future: object, label: str) -> None:
         try:
@@ -2221,6 +2263,8 @@ class _GatewayOrphanReconciler:
         finally:
             self._owner_next_at[key] = max(self._owner_next_at.get(key, 0.0), time.monotonic() + self.interval)
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 从宿主owner事实生成稳定登记键，不用显示名称猜身份。
     @staticmethod
     def _owner_key(owner: OwnerIdentity) -> tuple[str, str, str]:
         return (
@@ -2229,6 +2273,8 @@ class _GatewayOrphanReconciler:
             str(getattr(owner, "owner_id", "") or ""),
         )
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 关闭维护执行器并回收其资源，不把未完成工作伪装成完成。
     def _shutdown_executors(self) -> None:
         for name in ("_base_executor", "_owner_executor"):
             executor = getattr(self, name, None)
@@ -2266,6 +2312,8 @@ class _GatewayOrphanReconciler:
                 _print_gateway_loop_error("gateway_orphan_reconcile.owner", label, exc)
         return reports
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 将已知owner写入共享登记表，沿原有界播种逻辑。
     def _seed_owner_registry(self) -> None:
         owners_dir = getattr(getattr(self._base_agent, "home_paths", None), "owners_dir", None)
         if not owners_dir:
@@ -2280,6 +2328,8 @@ class _GatewayOrphanReconciler:
         )
         self._discovery_cursor = page.next_cursor
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 为孤儿核对惰性取得原owner池，失败保留原错误诊断。
     def _ensure_owner_pool(self) -> object | None:
         if self._owner_pool is not None:
             return self._owner_pool
@@ -2291,6 +2341,8 @@ class _GatewayOrphanReconciler:
             _print_gateway_loop_error("gateway_orphan_reconcile.owner_pool", "orphan-reconcile", exc)
         return self._owner_pool
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 执行本owner的一次维护扫描，沿原配额、忙态和停止边界。
     @staticmethod
     def _sweep(agent: SimpleAgent, label: str) -> dict[str, object]:
         from ..agent.agent_core.orchestration.dispatch.capability_auto_sweep import (
@@ -2352,6 +2404,8 @@ def _next_owner_discovery_at(
     return float(now) if next_cursor is not None else float(now) + max(0.0, float(interval))
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 读取受约束正整数配置，失效输入沿原默认。
 def _positive_int_config(agent: SimpleAgent, key: str, *, default: int) -> int:
     try:
         parsed = int(getattr(agent.config, key))
@@ -2368,6 +2422,8 @@ def _background_main_poll_interval() -> float:
     return max(1.0, min(5.0, GATEWAY_REQUEST_POLL_INTERVAL_SECONDS, GATEWAY_HEARTBEAT_INTERVAL_SECONDS))
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 函数用途: 读取维护循环浮点配置，保留原默认与范围处理。
 def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
     try:
         return float(getattr(agent.config, key))
@@ -2375,17 +2431,23 @@ def _float_config(agent: SimpleAgent, key: str, *, default: float) -> float:
         return default
 
 
+# LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+# 类用途: 保存过期lease恢复扫描节流状态，避免每拍重复全扫。
 class _RecoverThrottle:
     """worker-0 的 stale lease 恢复扫描节流：按 processing 超时的 1/3（至少 2 秒）执行。
 
     恢复扫描要遍历 processing 目录并逐文件读 JSON，原来每个轮询周期（0.2s）都跑，
     空闲时是主要的无效 IO；节流后检测延迟上界仍远小于 lease 超时。"""
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 初始化过期lease扫描节流时间，不在构造时启动扫描。
     def __init__(self, agent: SimpleAgent) -> None:
         timeout = _float_config(agent, "gateway_processing_timeout_seconds", default=120.0)
         self._interval = max(2.0, timeout / 3.0 if timeout > 0 else 30.0)
         self._next_at = 0.0
 
+    # LLM: Gateway后台维护；沿原owner实例、配额、停机与future生命周期，不建立第二任务账，联测维护拍。
+    # 函数用途: 判断当前时刻是否达到恢复扫描间隔，并更新节流状态。
     def due(self) -> bool:
         now = time.monotonic()
         if now < self._next_at:

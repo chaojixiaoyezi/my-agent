@@ -1,7 +1,6 @@
-"""Coercion helpers for memory-related config fields."""
-
 # LLM: 所有记忆字段共用此类型表；模型引用只保留编号，存在、启用与用途由原模型目录解析器校验，不拼接聊天连接。
 # 模块用途: 校验 Memory/Curator 配置类型、枚举与范围，并生成不含秘密的结构化警告。
+"""Coercion helpers for memory-related config fields."""
 
 from __future__ import annotations
 
@@ -32,6 +31,8 @@ class _FieldSpec:
     max_chars: int | None = None
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 类用途: 暂存一次配置降级告警的键、原值与原因。
 @dataclass(frozen=True)
 class _WarningDraft:
     field_name: str
@@ -40,6 +41,8 @@ class _WarningDraft:
     reason: str
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 类用途: 描述枚举配置的允许值和默认值，供统一解析。
 @dataclass(frozen=True)
 class _ChoiceCoercion:
     field_name: str
@@ -49,6 +52,8 @@ class _ChoiceCoercion:
     warnings: list[MemoryConfigWarning]
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 类用途: 描述整数配置的范围、默认值与来源信息。
 @dataclass(frozen=True)
 class _IntCoercion:
     field_name: str
@@ -251,6 +256,8 @@ def _coerce_compact_recovery_percent(
     return number
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 从映射或配置对象读取原字段，保留缺省与显式值的差别。
 def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     """Read a raw config field from a mapping or dataclass-like object."""
     if isinstance(source, Mapping):
@@ -258,6 +265,8 @@ def _lookup(source: Mapping[str, Any] | object, field_name: str) -> Any:
     return getattr(source, field_name, _MISSING)
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 追加一条结构化默认值告警，不输出敏感配置正文。
 def _warn(
     warnings: list[MemoryConfigWarning],
     draft: _WarningDraft,
@@ -273,6 +282,8 @@ def _warn(
     )
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 按原布尔规则解析配置，含糊或注入式字符串不能变成有效开关。
 def _coerce_bool(
     field_name: str,
     raw_value: Any,
@@ -297,6 +308,8 @@ def _coerce_bool(
     return default
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 按有限配置选项解析字符串，非法值记录告警并沿默认。
 def _coerce_choice(params: _ChoiceCoercion) -> str:
     """Parse an enum-like string config value against an allowlist."""
     if params.raw_value is _MISSING:
@@ -312,6 +325,8 @@ def _coerce_choice(params: _ChoiceCoercion) -> str:
     return params.default
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 只按ASCII整数和闭合上下界解析数值配置。
 def _coerce_int(
     request: _IntCoercion,
     *,
@@ -336,6 +351,8 @@ def _coerce_int(
     return number
 
 
+# LLM: 记忆配置解析叶；严格类型及降级告警沿原规则，不凭文字猜开关，联测Memory配置。
+# 函数用途: 把记忆配置的原始数值转换成受约束整数候选。
 def _memory_int_number(raw_value: Any) -> int | None:
     if isinstance(raw_value, bool):
         return None
