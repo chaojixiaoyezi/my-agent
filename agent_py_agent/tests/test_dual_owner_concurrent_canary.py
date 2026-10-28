@@ -712,3 +712,198 @@ def test_canary_force_reload_never_accumulates_retired_generations(tmp_path):
             assert pool.gauges()['total_live_instances'] <= pool._max_agents
         assert pool.retired_count == 0
     first.tools.close_mcp_clients()
+
+
+@pytest.mark.parametrize('configured,expected', [(3, 3), ('2', 2), (0, 5), (-1, 5), ('bad', 5), (None, 5)])
+def test_explicit_owner_inflight_limit_precedes_pool_budget(configured, expected):
+    config = SimpleNamespace(gateway_owner_inflight_limit=configured, owner_agent_pool_max_agents=5)
+    assert requests.AdmissionLimits.from_config(config).owner_inflight == expected
+
+
+def test_owner_resolver_preserves_transient_capacity_type(tmp_path):
+    config = AgentConfig(my_agent_home=str(tmp_path / 'home'), owner_agent_pool_max_agents=1)
+    pool = OwnerScopedAgentPool(config, tmp_path)
+    pool._builder = lambda *_args: SimpleNamespace()
+    base = SimpleNamespace(config=config, _owner_pool=pool)
+    old = pool.get(OwnerIdentity.provider_user('test', 'retired'), hard=False)
+    with pool.pin(old):
+        assert pool.evict_soft_agent_id(id(old))
+        with pytest.raises(PoolCapacityExceededError):
+            requests._resolve_request_agent_for_owner(base, OwnerIdentity.provider_user('test', 'new'))
+
+
+# LLM: Real admission, claim fencing, worker acquisition and terminal IO; only business/model execution is a controlled boundary.
+# 函数用途: 两个新owner预检均通过后竞争剩余一槽，输者必须回队且旧租用释放后能成功。
+def test_post_precheck_capacity_race_requeues_and_retries(tmp_path, monkeypatch):
+    import json
+    from concurrent.futures import as_completed
+    from contextlib import ExitStack
+
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    config = AgentConfig(my_agent_home=str(tmp_path / 'home'), owner_agent_pool_max_agents=2,
+                         gateway_per_user_owner_scoping=True)
+    pool = OwnerScopedAgentPool(config, tmp_path)
+    pool._builder = lambda _c, _r, owner, _w: SimpleNamespace(
+        config=replace(config, my_agent_owner_provider=owner.provider,
+                       my_agent_owner_kind=owner.owner_kind, my_agent_owner_id=owner.owner_id),
+        conversation_store=None, owner_id=owner.owner_id)
+    base = SimpleNamespace(config=config, _owner_pool=pool)
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    requests.ensure_gateway_folders(paths)
+    monkeypatch.setattr(requests, 'admission', requests.GatewayAdmission())
+    limits = requests.AdmissionLimits.from_config(config, agent=base)
+    old = pool.get(OwnerIdentity.provider_user('test', 'retired'), hard=False)
+    competing, release_business = threading.Event(), threading.Event()
+    executed, claims = [], []
+    payloads = {}
+    for name in ('owner-a', 'owner-b'):
+        payload = {'id': name, 'kind': 'ask', 'goal': 'original prompt', 'user_id': name,
+                   'created_at': 1, 'metadata': {'channel': 'test', 'nested': {'keep': name}}}
+        payloads[name] = payload
+        (paths.inbox / f'{name}.json').write_text(json.dumps(payload))
+
+    def business(context):
+        executed.append(context.request_id)
+        assert pool._pins.get(id(context.agent), 0) > 0
+        if len(executed) == 1:
+            competing.set()
+            assert release_business.wait(10)
+        return {'id': context.request_id, 'status': 'ok', 'text': 'done'}
+
+    monkeypatch.setattr(requests, '_process_claimed_gateway_request', business)
+
+    def run(claim, user, conversation):
+        try:
+            return requests._process_claimed_gateway_request_path(base, paths, claim.path, 'worker', claim=claim)
+        finally:
+            requests.admission.release(user, conversation_key=conversation)
+
+    with ExitStack() as leases, ThreadPoolExecutor(max_workers=2) as executor:
+        leases.enter_context(pool.pin(old))
+        assert pool.evict_soft_agent_id(id(old))
+        # Both real read-only hints are evaluated before either worker is permitted to build.
+        prechecks = list(executor.map(pool.can_acquire, [OwnerIdentity.provider_user('test', n) for n in payloads]))
+        assert prechecks == [True, True]
+        assert requests.dispatch_pending_requests(paths, limits, lambda *args: claims.append(args)) == 2
+        assert len(claims) == 2
+        futures = [executor.submit(run, *claims[0])]
+        try:
+            assert competing.wait(10)
+            futures.append(executor.submit(run, *claims[1]))
+            loser = next(as_completed(futures, timeout=10))
+            assert loser.result(timeout=10) is True
+            waiting = list(paths.inbox.glob('*.json'))
+            assert len(waiting) == 1, 'capacity race was permanently failed instead of requeued'
+            queued = json.loads(waiting[0].read_text())
+            request_id = queued['id']
+            assert request_id not in executed
+            assert queued['status'] == 'pending'
+            assert queued['admission_wait_reason'] == 'owner_capacity'
+            assert queued.get('admission_wait_at', 0) > 0
+            assert not queued.get('execution_attempt_id') and not queued.get('lease_owner')
+            for key, value in payloads[request_id].items():
+                assert queued[key] == value
+            assert not list(paths.terminal.glob('*.json'))
+            assert not list(paths.failed.glob('*.json'))
+            assert requests.admission.snapshot()['total'] == 1
+            assert pool.gauges()['total_live_instances'] == 2
+            leases.close()  # Keep the first request running: only release the retired instance's budget.
+            retried = []
+            assert requests.dispatch_pending_requests(paths, limits, lambda *args: retried.append(args)) == 1
+            assert run(*retried[0]) is True
+            terminal = json.loads((paths.terminal / f'{request_id}.json').read_text())
+            assert terminal['status'] == 'ok'
+        finally:
+            release_business.set()
+        assert all(future.result(timeout=10) is True for future in futures)
+    assert sorted(executed) == sorted(payloads)
+    assert requests.admission.snapshot()['total'] == 0
+    assert pool.pinned_count == 0 and pool.retired_count == 0
+    assert not list(paths.inbox.glob('*.json'))
+    assert not list(paths.processing.glob('*.json'))
+
+
+# LLM: Real queue/claim IO and pool, without model or network execution; preserves the canonical request fence for negative checks.
+# 函数用途: 为回队拒绝和业务后异常测试准备一个准确claim。
+def _capacity_canary_claim(tmp_path):
+    import json
+
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths_from_root
+
+    config = AgentConfig(my_agent_home=str(tmp_path / 'home'), gateway_per_user_owner_scoping=True)
+    pool = OwnerScopedAgentPool(config, tmp_path)
+    pool._builder = lambda _c, _r, owner, _w: SimpleNamespace(
+        config=replace(config, my_agent_owner_provider=owner.provider,
+                       my_agent_owner_kind=owner.owner_kind, my_agent_owner_id=owner.owner_id),
+        conversation_store=None)
+    base = SimpleNamespace(config=config, _owner_pool=pool)
+    paths = gateway_paths_from_root(tmp_path / 'gateway')
+    requests.ensure_gateway_folders(paths)
+    path = paths.inbox / 'capacity.json'
+    path.write_text(json.dumps({'id': 'capacity', 'kind': 'ask', 'goal': 'original', 'user_id': 'a',
+                               'metadata': {'channel': 'test'}, 'created_at': 1}))
+    claim = requests.claim_request(paths, path)
+    assert claim is not None
+    return base, paths, claim, json.loads(claim.path.read_text())
+
+
+@pytest.mark.parametrize('changed', ['attempt', 'epoch', 'lease_owner', 'prompt', 'cancel', 'pending', 'terminal'])
+def test_capacity_requeue_rejects_stale_claim_or_existing_target(tmp_path, changed):
+    import json
+
+    base, paths, claim, payload = _capacity_canary_claim(tmp_path)
+    if changed in {'pending', 'terminal'}:
+        folder = paths.inbox if changed == 'pending' else paths.terminal
+        (folder / claim.path.name).write_text('existing target bytes')
+    else:
+        current = dict(payload)
+        key = {'attempt': 'execution_attempt_id', 'epoch': 'lease_epoch', 'lease_owner': 'lease_owner',
+               'prompt': 'goal', 'cancel': 'cancel_requested'}[changed]
+        current[key] = 999 if changed == 'epoch' else True if changed == 'cancel' else 'changed'
+        claim.path.write_text(json.dumps(current))
+    before = claim.path.read_bytes()
+    with pytest.raises((requests.DataCorruptionError, InterruptedError)):
+        requests._requeue_owner_capacity(paths, claim.path, payload)
+    assert claim.path.read_bytes() == before
+    if changed in {'pending', 'terminal'}:
+        assert (folder / claim.path.name).read_text() == 'existing target bytes'
+    else:
+        assert not (paths.inbox / claim.path.name).exists()
+    assert base._owner_pool.pinned_count == 0
+
+
+def test_business_capacity_exception_is_not_requeued(tmp_path, monkeypatch):
+    base, paths, claim, payload = _capacity_canary_claim(tmp_path)
+    effects = []
+
+    def business(context):
+        effects.append(context.request_id)
+        assert base._owner_pool._pins.get(id(context.agent), 0) > 0
+        raise PoolCapacityExceededError('business capacity failure after side effect')
+
+    monkeypatch.setattr(requests, '_process_claimed_gateway_request', business)
+    with pytest.raises(PoolCapacityExceededError, match='after side effect'):
+        requests._process_claimed_gateway_request_path(base, paths, claim.path, 'worker', claim=claim)
+    assert effects == [claim.request_id]
+    assert claim.path.exists() and not (paths.inbox / claim.path.name).exists()
+    assert requests.read_json_file(claim.path)['execution_attempt_id'] == payload['execution_attempt_id']
+    assert base._owner_pool.pinned_count == 0
+
+
+def test_frozen_execution_keeps_explicit_instance_pin(tmp_path, monkeypatch):
+    from contextlib import ExitStack
+
+    from agent_py_agent.agent.gateway_parts import multiprocess_execution as execution_module
+
+    base, _paths, _claim, payload = _capacity_canary_claim(tmp_path)
+    selected = base._owner_pool.get(OwnerIdentity.provider_user('test', 'a'))
+    execution = SimpleNamespace(agent=selected)
+    checks = []
+    monkeypatch.setattr(execution_module, 'current_worker_execution', lambda: execution)
+    monkeypatch.setattr(execution_module, 'check_worker_transition', lambda *args: checks.append(args))
+    with ExitStack() as leases:
+        assert requests._resolve_request_agent(base, payload, leases) is selected
+        assert base._owner_pool._pins[id(selected)] == 1
+    assert checks == [(execution, payload)]
+    assert base._owner_pool.pinned_count == 0
