@@ -1,7 +1,7 @@
 
 # LLM: 派生记录共用原写入/审计权威，索引比较只取必要列及流式正文，不另建记录或持久状态。
 # LLM: C仅增加原scope本地IO分支，默认body→SQL/FTS/event顺序和身份不变；联验LocalStore/源撤权及partial测试。
-# 模块用途: 管理原派生记录与正文，C末写消费同一次活来源。
+# 模块用途: 管理原派生记录与正文，C末写消费同一次活来源；不再转导子代理私有TTL判据。
 from __future__ import annotations
 
 """owns LocalStore record upsert, lookup, content-file paths, and row hydration.
@@ -556,16 +556,6 @@ class _LocalStoreRecordLogger:
 
         digest = hashlib.sha256(f"{source_type}\0{source_id}".encode()).hexdigest()
         return f"rec-{digest[:24]}"
-
-
-# LLM: 转发子代理投影的30天TTL判定，避免CLI层直接跨层导入subagents持久化实现。
-# 函数用途: 判断子代理任务投影是否已超过保留窗口。
-def _task_projection_expired(task: Any, now: float | None = None) -> bool:
-    from ..subagents.services.persistence.projections import (
-        _task_projection_expired as _impl,
-    )
-
-    return _impl(task, now=now)
 
 
 class LocalStoreRecordMixin(_LocalStoreRecordWriter, _LocalStoreRecordLogger):

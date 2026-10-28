@@ -1,5 +1,5 @@
 # LLM: Owner/workspace只由宿主授予；凭据双参数经Store隔离，保存/探测/迁移仍走审批，公开结果不含秘密。
-# 模块用途: 提供数据源目录、保存、连通性、schema与安全迁移的结构化Agent工具。
+# 模块用途: 提供数据源结构化工具；参数schema共用纯构造器，结果保留专属安全输出投影。
 from __future__ import annotations
 
 import json
@@ -9,7 +9,8 @@ from pathlib import Path
 from ..assets.datasource_store import DatasourceStore
 from .input_schema import validate_tool_input
 from .models import BaseTool, ToolHandlerOutcome
-from .scripts_tool import _policy, _spec
+from .scripts_tool import _policy
+from .tool_spec import _spec
 
 
 # LLM: 结果已由DatasourceStore安全投影，不套会误删has_secret的资产描述符codec；失败不回显输入或驱动异常正文。
@@ -19,7 +20,7 @@ def _result(data, ok=True, code='', *, effect=''):
                               error_code=code, effect_outcome=effect)
 
 
-# LLM: 所有路径及权限绑定到同一可信宿主；模型只能传安全ID和连接规格，不能指定任意Owner/授权workspace。
+# LLM: 所有权限绑定到同一可信宿主；共用纯schema不改变安全ID、连接规格或专属结果投影。
 # 类用途: 向Agent暴露数据源管理操作。
 class DatasourcesTool(BaseTool):
     name = 'datasources'

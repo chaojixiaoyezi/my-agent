@@ -1,12 +1,11 @@
 # LLM: 排队job保存slash解析前用户原输入供HTTP重解析，显示与机器权限分责，不能按摘要重建命令。
 # LLM: 普通终端只分派输入和控制快照；运行绑定从原 worker 句柄取得，不根据界面文本选择资源。
-# 模块用途: 驱动普通聊天输入、共享命令与队列。
+# 模块用途: 驱动普通聊天输入、直接复用slash_commands与原队列。
 from __future__ import annotations
 
 from ...agent.conversation.control_commands import parse_conversation_task_command
 from ...agent.conversation.models import new_id
 from .control_runtime import ChatControlExecution, ChatControlState, execute_chat_control
-from .input_loop import handle_common_slash_command, is_exit_command, is_show_prompt_command
 from .plain_state import (
     MAX_HISTORY_TURNS,
     PLAIN_CHAT_PROMPT,
@@ -21,6 +20,7 @@ from .plain_ui import _handle_expand_command, _read_user_input
 from .plain_worker import _start_plain_worker
 from .rendering import BLUE, BOLD, RESET, startup_banner, terminal_rule
 from .slash_command_types import SlashCommandContext
+from .slash_commands import handle_common_slash_command, is_exit_command, is_show_prompt_command
 
 
 def _plain_handle_command(cfg: PlainHandleCommandConfig) -> bool | None:

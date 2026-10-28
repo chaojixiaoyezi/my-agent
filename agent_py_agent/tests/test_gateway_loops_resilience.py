@@ -19,7 +19,7 @@ from agent_py_agent.agent.gateway_parts.queue_service import GatewayClaim
 def test_r2_cold_curator_detects_audit_only_input_and_updates(tmp_path):
     import os
 
-    from agent_py_agent.cli.gateway_loops import _cold_curator_activity
+    from agent_py_agent.agent.memory_api import _cold_curator_activity
 
     assert _cold_curator_activity(tmp_path) == "not_due"
     root = tmp_path / "audit"

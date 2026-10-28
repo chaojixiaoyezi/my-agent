@@ -1,11 +1,13 @@
-
 from __future__ import annotations
+
+# LLM: CLI诊断只调用既有领域维护入口；子代理重建不在此解析TTL或事实文件，实际LocalStore显式透传。
+# 模块用途: 汇总体检与修复建议，并把索引维护交给各自所属领域。
 
 """builds LocalStore/gateway/subagent diagnostics and rebuild plans.
 
 给人看的解释：
-这里负责'体检'和'重建索引'的业务规则。
-命令函数只负责打印，真正判断哪里坏了、该建议什么修复动作，都放在这里。
+这里负责'体检'与修复建议，重建索引委托所属领域服务。
+命令函数只负责打印；子代理TTL和事实文件回填由索引服务维护。
 """
 
 import json
@@ -19,10 +21,6 @@ from ..agent.gateway_parts import (
     gateway_request_counts,
     gateway_stale_processing,
     rebuild_gateway_index,
-)
-from ..agent.local_storage.records import (
-    DERIVED_PRUNABLE_SOURCE_TYPES,
-    _task_projection_expired,
 )
 from .common import _memory_record_count
 
@@ -41,15 +39,6 @@ class GatewayQueueCheckContext:
     paths: object
     counts: dict
     agent: object
-
-
-@dataclass(frozen=True)
-class TaskFactSourceRequest:
-    agent: SimpleAgent
-    task: object
-    task_dir: Path
-    rel_path: str
-    source_type: str
 
 
 def _add_doctor_check(checks: list[dict], request: DoctorCheckRequest) -> None:
@@ -229,44 +218,10 @@ def build_local_doctor_report(
 
 
 
-# LLM: CLI与持久化投影共用可信终态/时间/待收口准入；过期只跳白名单派生全文，不删除canonical或阻断非白名单回填。
-# 函数用途: 重建子代理索引，避免把30天外已裁剪的运行与日志重新塞回LocalStore。
+# LLM: CLI沿既有subagents.indexing公开维护入口，显式保留agent.local_store，不绑定替代manager或吞异常。
+# 函数用途: 请求子代理领域重建索引并返回其准确计数。
 def rebuild_subagent_index(agent: SimpleAgent) -> int:
-
-    count = 0
-    for task in agent.subagents.list_runs():
-        expired = _task_projection_expired(task)
-        if not expired:
-            agent.subagents.indexing.index_task(task)
-            count += 1
-        task_dir = Path(task.task_dir)
-        for rel_path, source_type in {
-            "WORK_LOG.md": "subagent_work_log",
-            "execution_context.json": "subagent_execution_context",
-            "reports/runner_result.json": "subagent_runner_result",
-            "reports/patch_review.json": "subagent_patch_review",
-        }.items():
-            if expired and source_type in DERIVED_PRUNABLE_SOURCE_TYPES:
-                continue
-            count += _log_task_fact_source(TaskFactSourceRequest(agent, task, task_dir, rel_path, source_type))
-    return count
-
-
-def _log_task_fact_source(request: TaskFactSourceRequest) -> int:
-    path = request.task_dir / request.rel_path
-    if not path.exists():
-        return 0
-    content = path.read_text(encoding="utf-8", errors="replace")
-    source_id = request.task.id if request.rel_path == "execution_context.json" else f"{request.task.id}:{request.rel_path}"
-    request.agent.local_store.log_record(
-        source_type=request.source_type,
-        source_id=source_id,
-        title=f"{request.source_type} {request.task.id}",
-        content=content,
-        metadata={"run_id": request.task.id, "path": str(path), "rebuilt": True},
-        event_type=f"{request.source_type}_rebuilt",
-    )
-    return 1
+    return agent.subagents.indexing.rebuild_subagent_index(local_store=agent.local_store)
 
 
 def rebuild_local_store(agent: SimpleAgent, *, sources: set[str], reset: bool = False) -> dict:

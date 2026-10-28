@@ -1,5 +1,5 @@
 # LLM: 本模块是 TuiViewSnapshot 到 prompt_toolkit formatted lines 的唯一 block renderer；不得读取原始模型文本猜工具、权限或生命周期。
-# 模块用途: 生成消息、计时尾标和只读观察提示；帮助列出鼠标模式兼容键，缓存保持真实状态变化可见。
+# 模块用途: 生成消息、领域计时尾标和只读提示；按需导入纯formatter，缓存保持真实状态变化可见。
 
 from __future__ import annotations
 
@@ -803,11 +803,11 @@ def _render_foreground_activity(snapshot: TuiViewSnapshot, context: TuiRenderCon
     return ((("class:tui-spinner-highlight", prefix), ("class:tui-thinking", label)),)
 
 
-# LLM: 计时只读冻结元数据；非法/缺失时标整块略过而不以当前时间替代，其他正文仍原分派。
-# 函数用途: 为消息流的计时行使用次要色，保留各类正文的原渲染入口。
+# LLM: 计时直接使用会话层formatter和冻结元数据；非法/缺失时标整块略过，不补now或加载CLI时钟。
+# 函数用途: 为领域计时行使用次要色，保留各类正文的原渲染入口。
 def _render_block(block: TuiBlock, context: TuiRenderContext) -> tuple[FormattedLine, ...]:
     if block.metadata.get("source_kind") == "turn_timing":
-        from ..turn_completion import render_turn_timing
+        from ...agent.conversation.turn_timing import render_turn_timing
 
         display = block.metadata.get("display")
         text = render_turn_timing(display) if isinstance(display, dict) else ""

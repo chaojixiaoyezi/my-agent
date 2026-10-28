@@ -1,5 +1,7 @@
-
 from __future__ import annotations
+
+# LLM: 子代理领域拥有任务及事实文件的索引重建；TTL复用持久化判据，显式LocalStore不改变写入目标或异常合同。
+# 模块用途: 集中子代理索引与事件投影，不修改或删除canonical任务事实。
 
 """indexing and event logging service.
 
@@ -42,6 +44,8 @@ from .records import (
 _LOGGER = logging.getLogger(__name__)
 
 
+# LLM: 服务绑定既有manager；任务索引沿原best-effort写入，重建事实文件的异常仍向维护调用者传播。
+# 类用途: 维护子代理任务、报告及本地事件索引，为CLI提供完整重建操作。
 class SubAgentIndexingService:
     """Indexing and local event logging service."""
 
@@ -150,6 +154,43 @@ class SubAgentIndexingService:
 
     def index_channel_probe(self, result: ChannelProbeResult) -> None:
         index_channel_probe_via(self, result)
+
+    # LLM: 只跳过过期白名单派生全文，非白名单patch_review仍回填；事实写入使用CLI传入的实际库，异常不吞。
+    # 函数用途: 从原任务与四类事实文件重建索引，返回原计数，不删除任何canonical文件。
+    def rebuild_subagent_index(self, *, local_store: Any) -> int:
+        from ....local_storage.records import DERIVED_PRUNABLE_SOURCE_TYPES
+        from ..persistence.projections import _task_projection_expired
+
+        count = 0
+        for task in self.manager.list_runs():
+            expired = _task_projection_expired(task)
+            if not expired:
+                self.index_task(task)
+                count += 1
+            task_dir = Path(task.task_dir)
+            for rel_path, source_type in {
+                "WORK_LOG.md": "subagent_work_log",
+                "execution_context.json": "subagent_execution_context",
+                "reports/runner_result.json": "subagent_runner_result",
+                "reports/patch_review.json": "subagent_patch_review",
+            }.items():
+                if expired and source_type in DERIVED_PRUNABLE_SOURCE_TYPES:
+                    continue
+                path = task_dir / rel_path
+                if not path.exists():
+                    continue
+                content = path.read_text(encoding="utf-8", errors="replace")
+                source_id = task.id if rel_path == "execution_context.json" else f"{task.id}:{rel_path}"
+                local_store.log_record(
+                    source_type=source_type,
+                    source_id=source_id,
+                    title=f"{source_type} {task.id}",
+                    content=content,
+                    metadata={"run_id": task.id, "path": str(path), "rebuilt": True},
+                    event_type=f"{source_type}_rebuilt",
+                )
+                count += 1
+        return count
 
     def select_runs(self, run_ids: list[str] | None) -> list[SubAgentTask]:
         """Select runs by id, filtering out ineligible statuses."""

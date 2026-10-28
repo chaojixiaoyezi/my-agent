@@ -1,5 +1,5 @@
 # LLM: 本模块编排 chat TUI 生命周期；TuiRuntime 是显示唯一事实源，worker/按键只通过 typed event 更新它。
-# 模块用途: 创建界面，经同一 preflight 连接和恢复会话后启动 worker，并负责退出收尾。
+# 模块用途: 创建界面并直接复用slash解析，经同一preflight恢复会话后启动worker并负责退出收尾。
 
 from __future__ import annotations
 
@@ -60,11 +60,11 @@ class TuiLoopContext:
     pre_run: object | None = None
 
 
-# LLM: rich TUI 展开只读已保存的完整回复；解析规则来自共享 slash parser，展示文案
+# LLM: rich TUI 展开只读已保存的完整回复；直接使用slash_commands的共享解析规则，展示文案
 # 不得另造一套参数合同或英文 fallback。
 # 函数用途: 展开最后一条或指定编号的完整助手回复。
 def _tui_handle_expand_command(raw: str, assistant_outputs: list[str]) -> bool:
-    from .input_loop import parse_expand_target
+    from .slash_commands import parse_expand_target
 
     target = parse_expand_target(raw)
     if target is None:
@@ -105,12 +105,12 @@ def _make_tui_exit_refs(params: TuiHandleCommandParams) -> TuiExitRefs:
     )
 
 
-# LLM: 命令共用原分派；插件版本及独立交互引用原样传递，不能借聊天控制句柄，调用方负责把 I/O 移出 UI 线程。
+# LLM: 命令直接共用slash_commands原分派；插件版本及独立交互引用原样传递，调用方负责把IO移出UI线程。
 # 函数用途: 为 TUI 处理一条明确命令，不把处理结果再次投递为普通聊天。
 def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
     from .control_runtime import ChatControlExecution, execute_chat_control
-    from .input_loop import handle_common_slash_command, is_exit_command
     from .slash_command_types import SlashCommandContext
+    from .slash_commands import handle_common_slash_command, is_exit_command
 
     if is_exit_command(params.user):
         _tui_request_exit(_make_tui_exit_refs(params))

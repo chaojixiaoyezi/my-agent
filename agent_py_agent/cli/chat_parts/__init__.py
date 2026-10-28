@@ -4,7 +4,7 @@ import importlib
 from typing import Any
 
 # LLM: This facade keeps legacy chat_parts imports compatible while lazily loading leaf modules.
-# Importing history, renderer, or TUI setup must not initialize Gateway workers or the full agent.
+# Slash exports resolve directly to slash_commands; loading a leaf must not initialize Gateway or the full agent.
 # 模块用途: 汇总聊天界面的公共函数和常量，并按需加载；单个界面组件可以独立快速导入。
 
 
@@ -17,11 +17,11 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "MAX_HISTORY_TURNS": ("history", "MAX_HISTORY_TURNS"),
     "append_conversation_turn": ("history", "append_conversation_turn"),
     "build_history_context": ("history", "build_history_context"),
-    "CHAT_HELP_TEXT": ("input_loop", "CHAT_HELP_TEXT"),
-    "handle_common_slash_command": ("input_loop", "handle_common_slash_command"),
-    "is_exit_command": ("input_loop", "is_exit_command"),
-    "is_show_prompt_command": ("input_loop", "is_show_prompt_command"),
-    "parse_expand_target": ("input_loop", "parse_expand_target"),
+    "CHAT_HELP_TEXT": ("slash_commands", "CHAT_HELP_TEXT"),
+    "handle_common_slash_command": ("slash_commands", "handle_common_slash_command"),
+    "is_exit_command": ("slash_commands", "is_exit_command"),
+    "is_show_prompt_command": ("slash_commands", "is_show_prompt_command"),
+    "parse_expand_target": ("slash_commands", "parse_expand_target"),
     "run_plain": ("plain", "run_plain"),
     "BLUE": ("renderer", "BLUE"),
     "BOLD": ("renderer", "BOLD"),

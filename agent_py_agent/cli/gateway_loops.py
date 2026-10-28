@@ -7,7 +7,7 @@
 #   C冷组合只运行同源metadata producer与请求盖章，心跳末写核原lease；Count0业务公平、三旧控制线程顺序不变。
 #   C输入段仅接原queued/cursor元数据源，绑定输入延期不构造foreign Agent；Count0旧receipt/guidance链保持。
 #   单owner规划阶段跨拍复用SQLite物理连接；离开规划即解除Context，不跨提交和后台模型车道。
-# 模块用途: 连接请求处理、公平调度、维护和心跳，减少规划连接抖动；不新增任务状态、权限或默认模型。
+# 模块用途: 连接请求处理、公平调度、维护和心跳；冷owner预检委托记忆公开读口，不解析内部state。
 
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from itertools import islice
 from pathlib import Path
 
 from ..agent.concurrency import DurableDaemonThreadPoolExecutor
@@ -128,109 +127,16 @@ def _cleanup_loaded_runtime_safety(agent) -> None:
                 logging.getLogger(__name__).warning("owner runtime cleanup failed: %s", type(exc).__name__)
 
 
-# LLM: 每个目录至多采样65个名字；预算用尽或IO未知不推断空目录，不创建服务或读取正文。
-# 函数用途: 三态检查一个目录是否有指定后缀的非空输入。
-def _directory_activity(root: Path, suffix: str) -> str:
-    try:
-        with os.scandir(root) as entries:
-            sample = list(islice(entries, 65))
-    except FileNotFoundError:
-        return "not_due"
-    except OSError:
-        return "unknown"
-    try:
-        if any(entry.name.endswith(suffix) and entry.is_file() and entry.stat().st_size for entry in sample[:64]):
-            return "due"
-    except OSError:
-        return "unknown"
-    return "unknown" if len(sample) > 64 else "not_due"
-
-
-# LLM: 只检查持久队列元数据，不实例化自学习服务；未知不缓存为无任务。
-# 函数用途: 对冷 owner 自学习队列作三态轻量检查。
-def _owner_home_skill_learning_state(home: Path) -> str:
-    states = [_directory_activity(home / "data" / "skill_learning" / folder, ".json")
-              for folder in ("requests", "requests_overflow")]
-    return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
-
-
-# LLM: 只采样最多65个消息文件；线程元数据明确learning_excluded=True时跳过，不唤醒冷owner。
-# 函数用途: 三态检查会话库是否有非禁学线程的消息输入。
-def _store_messages_activity(store_root: Path) -> str:
-    from ..agent.common.json_io import read_json_object_report
-
-    try:
-        with os.scandir(store_root / "messages") as entries:
-            sample = list(islice(entries, 65))
-    except FileNotFoundError:
-        return "not_due"
-    except OSError:
-        return "unknown"
-    try:
-        for entry in sample[:64]:
-            if not (entry.name.endswith(".jsonl") and entry.is_file() and entry.stat().st_size):
-                continue
-            thread_path = store_root / "threads" / f"{entry.name[:-6]}.json"
-            report = read_json_object_report(thread_path, context="gateway.curator.thread_precheck")
-            payload = report.payload if not report.load_error and isinstance(report.payload, dict) else None
-            meta = payload.get("metadata") if isinstance(payload, dict) else None
-            if isinstance(payload, dict) and (
-                payload.get("learning_excluded") is True
-                or (isinstance(meta, dict) and meta.get("learning_excluded") is True)
-            ):
-                continue
-            return "due"
-    except OSError:
-        return "unknown"
-    return "unknown" if len(sample) > 64 else "not_due"
-
-
-# LLM: 只读消息/候选/audit元数据；沿原有界三态扫描并跳过禁学线程，预算耗尽或不可读不能丢掉冷owner。
-# 函数用途: 确认周期整理是否有非空可学输入，只有审计记录的冷owner也能唤醒。
-def _cold_curator_activity(home: Path) -> str:
-    try:
-        candidate = home / "memory" / "candidates.jsonl"
-        if candidate.exists() and candidate.stat().st_size:
-            return "due"
-    except OSError:
-        return "unknown"
-    from ..agent.owner_wake_discovery import _store_roots
-
-    states = [_store_messages_activity(root) for root in _store_roots(home)]
-    states.append(_directory_activity(home / "audit", ".jsonl"))
-    return "due" if "due" in states else "unknown" if "unknown" in states else "not_due"
-
-
-# LLM: 三态预检从发现层公开入口取得canonical state类型；原curator仍复核due、退避和租约，损坏不当空态。
-# 函数用途: 在创建完整 Agent 前判断冷 owner 是否有策展/自学习工作，并标记紧急恢复。
+# LLM: CLI只解析可信owner归属并传宿主配置；三态/urgent和状态文件解释归memory_api，解析失败保unknown。
+# 函数用途: 将Gateway候选身份适配到记忆领域只读预检，不创建冷owner Agent。
 def _cold_curator_precheck(supervisor, owner) -> tuple[str, bool]:
-    from ..agent.common.json_io import read_json_object_report
-    from ..agent.owner_wake_discovery import MemoryCuratorState, curator_work_is_due
-    from ..agent.user_space.owner_policy import effective_memory_enabled
+    from ..agent.memory_api import cold_owner_curator_precheck
 
     try:
         base = supervisor._base_agent
         home = resolve_owner_home(base.home_paths.root, owner).home_dir
-        config = base.config
-        skill = (_owner_home_skill_learning_state(home) if getattr(config, "enable_self_learning", False)
-                 else "not_due")
-        policy = read_json_object_report(home / "memory_policy.json", context="gateway.curator.precheck")
-        if policy.load_error:
-            return ("due" if skill == "due" else "unknown"), False
-        if not getattr(config, "memory_curator_enabled", True) or not effective_memory_enabled(policy.payload):
-            return skill, False
-        report = read_json_object_report(home / "memory" / "curator" / "state.json", context="gateway.curator.state")
-        if report.load_error:
-            return ("due" if skill == "due" else "unknown"), False
-        state = MemoryCuratorState.from_dict(report.payload or {})
-        urgent = bool(state.pending_reasons or state.active_lease)
-        due = curator_work_is_due(home, state,
-            curator_config=getattr(getattr(base, "memory_curator", None), "config", None),
-            timezone_name=getattr(config, "timezone", ""))
-        if skill == "due" or (due and urgent):
-            return "due", urgent
-        activity = _cold_curator_activity(home) if due else "not_due"
-        return (activity if activity != "not_due" else skill), False
+        return cold_owner_curator_precheck(home, config=base.config,
+            curator_config_provider=lambda: getattr(getattr(base, "memory_curator", None), "config", None))
     except (OSError, ValueError, TypeError, AttributeError):
         return "unknown", False
 
