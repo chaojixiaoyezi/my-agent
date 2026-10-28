@@ -81,6 +81,417 @@ def api(portal, path, body=None, method=None, token="unit-test-admin"):
         return response.status, json.load(response)
 
 
+# LLM: Status-only HTTP client also handles SSE/non-JSON denial targets without mistaking a JSON decoder failure for auth evidence.
+# 函数用途: 读取真实HTTP状态并立即关闭响应，避免SSE格式干扰认证回归断言。
+def r3_http_status(portal, path, body, token):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    request = urllib.request.Request(portal.test_url + path,
+                                     None if body is None else json.dumps(body).encode(), headers)
+    try:
+        response = urllib.request.urlopen(request, timeout=10)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        return response.status
+
+
+# LLM: HTTP regressions intercept only the legacy adapter, never bypass the actual authentication dispatcher.
+# 函数用途: 验证所有旧门户路由先认证，且全局旧状态不能被其他owner读取。
+@pytest.mark.parametrize("path,body", [
+    ("/api/pentest/probe-node", {"ip": "127.0.0.1", "port": 9}),
+    ("/api/pentest/projects", None), ("/api/dsh/streams/private", None),
+    ("/api/pentest/session/stream-sse?stream_id=private", None),
+    ("/api/%64sh/streams/private", None),
+])
+def test_r3_legacy_requires_auth_and_owner(portal, portal_module, monkeypatch, path, body):
+    calls = []
+    monkeypatch.setattr(portal_module, "_dispatch_pentest_api", lambda *_: calls.append("pentest") or {})
+    monkeypatch.setattr(portal_module, "_dispatch_dsh_api", lambda *_: (200, calls.append("dsh") or {}))
+    status = r3_http_status(portal, path, body, "")
+    assert status == 401 and calls == []
+    other = portal.issue_session("other-owner", is_admin=True)
+    assert r3_http_status(portal, path, body, other) == 403
+    assert calls == []
+
+
+# LLM: Real loopback listener detects any socket effect; denied requests must not even reach its accept queue.
+# 函数用途: 复现空范围和越界目标探测，验证拒绝发生在真正连接之前。
+@pytest.mark.parametrize("scopes", [(), ("192.0.2.0/24",)])
+def test_r3_probe_scope_denies_before_connect(portal, scopes):
+    import select
+    import socket
+    portal.allowed_scopes = scopes
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        status, _ = api(portal, "/api/pentest/probe-node", {
+            "ip": "127.0.0.1", "port": listener.getsockname()[1],
+        })
+        assert status in (403, 422)
+        assert not select.select([listener], [], [], 0.05)[0]
+
+
+# LLM: Approved loopback scope must still permit an actual connect, without demo/fabricated reachability responses.
+# 函数用途: 验证获准探测使用真实回环端口，固定IP出站并保留实际回执。
+def test_r3_probe_authorized_connect_and_legacy_read(portal, portal_module, monkeypatch):
+    import select
+    import socket
+    calls = []
+    monkeypatch.setattr(portal_module, "_dispatch_dsh_api", lambda *_: (200, calls.append(True) or {"result": "owned"}))
+    portal.legacy_reader = lambda path, query, principal: portal_module._dispatch_dsh_api(portal, "GET", path, query, {})[1]
+    assert api(portal, "/api/dsh/streams/owned")[1]["result"] == "owned"
+    assert calls == [True]
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        status, result = api(portal, "/api/pentest/probe-node", {
+            "ip": "127.0.0.1", "port": listener.getsockname()[1],
+        })
+        assert status == 200 and result["reachable"] is True
+        assert select.select([listener], [], [], 0.5)[0]
+
+
+# LLM: Execute actual legacy module selection, replacing only outbound IO with a bounded reply to avoid any real remote access.
+# 函数用途: 复现旧模块隐式代理和冷启动缺接口，要求未适配路由明确503且完全无出站尝试。
+@pytest.mark.parametrize("path,body", [
+    ("/api/dsh/session/stream_poll?stream_id=unit", None),
+    ("/api/pentest/remote-agent-ask", {"prompt": "synthetic-only"}),
+    ("/api/pentest/workspace", None),
+])
+def test_r3_unconfigured_legacy_never_loads_remote_forwarders(portal, portal_module, monkeypatch, path, body):
+    import io
+    portal.allowed_scopes = ()
+    monkeypatch.delenv("DSH_DISABLE_REMOTE_15", raising=False)
+    original = urllib.request.urlopen
+    attempted = []
+
+    # LLM: Keep the API client's loopback HTTP real; capture all legacy outbound attempts without opening any external socket.
+    # 函数用途: 在真实旧转发器的网络边界截获请求，合成有限响应以避免失败后落入用户文件读写。
+    def local_only(request, *args, **kwargs):
+        url = request.full_url if hasattr(request, "full_url") else str(request)
+        if url.startswith(portal.test_url + "/"):
+            return original(request, *args, **kwargs)
+        attempted.append(url)
+        return io.BytesIO(b'{"ok":true,"synthetic":true}')
+
+    monkeypatch.setattr(portal_module.urllib.request, "urlopen", local_only)
+    status, _ = api(portal, path, body)
+    assert status == 503
+    assert attempted == []
+
+
+# LLM: No configured password verifier means no password credential; browser admin/owner flags confer no authority.
+# 函数用途: 任意密码及未启用密码登录均不能生成假管理员会话。
+def test_r3_password_login_disabled_and_bad_credentials(portal):
+    body = {"username": "admin", "password": "synthetic-invalid-password", "is_admin": True}
+    status, result = api(portal, "/api/auth/login", body, token="")
+    assert (status, result.get("error")) == (401, "INVALID_CREDENTIALS")
+    assert portal._all("portal_sessions", "_sessions") == []
+
+
+# LLM: The trusted verifier is the only password-to-principal authority; issued tokens must work via persisted hash-only sessions.
+# 函数用途: 受信密码校验成功才能登录，绑定真实owner/角色，拒绝浏览器提权并保留会话可用性。
+def test_r3_password_verified_session_is_real(portal):
+    portal.password_authenticator = lambda name, password: (
+        {"owner_id": "password-owner", "is_admin": False}
+        if (name, password) == ("alice", "synthetic-correct-password") else None
+    )
+    assert api(portal, "/api/auth/login", {"username": "alice", "password": "wrong"}, token="")[0] == 401
+    status, result = api(portal, "/api/auth/login", {
+        "username": "alice", "password": "synthetic-correct-password", "is_admin": True, "owner_id": "local/main",
+    }, token="")
+    assert status == 200 and result["owner_id"] == "password-owner" and result["is_admin"] is False
+    assert api(portal, "/api/secops/alerts", token=result["session_token"])[0] == 200
+    assert api(portal, "/api/dsh/streams/private", token=result["session_token"])[0] == 403
+    rows = portal._all("portal_sessions", "_sessions")
+    assert len(rows) == 1 and result["session_token"] not in json.dumps(rows)
+
+
+# LLM: Enrollment goes through real HTTP and TOTP code consumption; clock advancement avoids reuse of the enrollment counter.
+# 函数用途: 为隔离用户启用真实TOTP并返回后续挑战可用的密钥。
+def r3_enable_mfa(portal, module, owner):
+    portal.clock = lambda: 1234567890
+    token = portal.issue_session(owner)
+    setup = api(portal, "/api/auth/mfa/totp/setup", {}, token=token)[1]
+    code = module.totp_code(setup["secret"], int(portal.clock()) // 30)
+    assert api(portal, "/api/auth/mfa/totp/verify", {"code": code}, token=token)[0] == 200
+    portal.clock = lambda: 1234567920
+    return setup["secret"]
+
+
+# LLM: Provider IO alone is substituted; callback, session policy, TOTP and protected API access use the real HTTP/SQLite path.
+# 函数用途: SSO已完成首因子仍须TOTP，错码/伪造升级无效，成功后仅升级该会话且不能重放。
+@pytest.mark.parametrize("root", ["/api/auth", "/api/pentest/secops/auth"])
+def test_r3_sso_mfa_pending_then_session_upgrade(portal, portal_module, root):
+    issuer, subject = "https://sso.unit.test", "mfa-user"
+    owner = "sso/" + hashlib.sha256((issuer + "\0" + subject).encode()).hexdigest()
+    secret = r3_enable_mfa(portal, portal_module, owner)
+    config = {"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
+              "userinfo_endpoint": issuer + "/userinfo", "client_id": "test", "redirect_uri": "http://127.0.0.1/callback"}
+    portal._put("portal_sso_config", "default", config, "_sso")
+    portal._http_json = lambda url, *args, **kwargs: ({"access_token": "synthetic-provider-access"}
+                                                    if url.endswith("/token") else {"sub": subject})
+    status, start = api(portal, root + "/sso/initiate", {}, token="")
+    assert status == 200, start
+    status, result = api(portal, root + "/sso/callback", {
+        "state": start["state"], "code": "synthetic-auth-code", "mfa_verified": True,
+    }, token="")
+    assert status == 200 and result.get("authenticated") is False and result.get("mfa_required") is True
+    token = result["session_token"]
+    assert api(portal, "/api/secops/alerts", token=token)[0] == 403
+    assert api(portal, "/api/dsh/streams/private", token=token)[0] == 403
+    session = api(portal, root + "/session", token=token)
+    assert session[0] == 200 and session[1]["authenticated"] is False
+    code = portal_module.totp_code(secret, int(portal.clock()) // 30)
+    assert api(portal, root + "/mfa/totp/verify", {"code": code, "user_id": "other"}, token=token)[0] == 403
+    assert api(portal, root + "/mfa/totp/verify", {"code": "not-a-code"}, token=token)[0] == 401
+    assert api(portal, "/api/secops/alerts", token=token)[0] == 403
+    assert api(portal, root + "/mfa/totp/verify", {"code": code}, token=token)[0] == 200
+    assert api(portal, root + "/session", token=token)[1]["authenticated"] is True
+    assert api(portal, "/api/secops/alerts", token=token)[0] == 200
+    assert api(portal, root + "/mfa/totp/verify", {"code": code}, token=token)[0] == 409
+
+
+# LLM: Password login uses the same MFA-aware session issuer as SSO, never trusting callback/body bypass flags.
+# 函数用途: 有TOTP的密码用户先取得受限会话，不能跳过第二因子读取受保护数据。
+def test_r3_password_login_also_requires_mfa(portal, portal_module):
+    owner = "password-mfa-owner"
+    secret = r3_enable_mfa(portal, portal_module, owner)
+    portal.password_authenticator = lambda *_: {"owner_id": owner, "is_admin": False}
+    status, result = api(portal, "/api/auth/login", {"username": "user", "password": "synthetic-only"}, token="")
+    assert status == 200 and result.get("mfa_required") is True and result.get("authenticated") is False
+    token = result["session_token"]
+    assert api(portal, "/api/secops/alerts", token=token)[0] == 403
+    code = portal_module.totp_code(secret, int(portal.clock()) // 30)
+    assert api(portal, "/api/pentest/secops/auth/mfa/totp/verify", {"code": code}, token=token)[0] == 200
+    assert api(portal, "/api/secops/alerts", token=token)[0] == 200
+
+
+# LLM: Trusted external resolver tokens cannot be mutated locally; TOTP must not falsely claim session upgrade without a local session key.
+# 函数用途: 外部认证未提供本地会话升级合同则明确拒绝，不返回下次访问仍会失败的假authenticated成功。
+def test_r3_external_mfa_token_has_no_fake_local_upgrade(portal, portal_module):
+    owner = "external-mfa-owner"
+    secret = r3_enable_mfa(portal, portal_module, owner)
+    portal.auth_resolver = lambda token: {"owner_id": owner, "is_admin": False} if token == "synthetic-external-token" else None
+    code = portal_module.totp_code(secret, int(portal.clock()) // 30)
+    status, result = api(portal, "/api/auth/mfa/totp/verify", {"code": code}, token="synthetic-external-token")
+    assert (status, result.get("error")) == (409, "MFA_SESSION_NOT_OWNED")
+    assert api(portal, "/api/secops/alerts", token="synthetic-external-token")[0] == 403
+
+
+# LLM: Completing one challenge must not elevate sibling sessions; expired and legacy-shaped sessions obey the same live policy.
+# 函数用途: 验证同owner双会话仅升级当前会话，旧字段和过期令牌不能绕过MFA。
+def test_r3_mfa_upgrade_is_per_session_and_expiry_fails_closed(portal, portal_module):
+    owner = "mfa-session-owner"
+    secret = r3_enable_mfa(portal, portal_module, owner)
+    first, second = portal.issue_session(owner), portal.issue_session(owner)
+    key = hashlib.sha256(second.encode()).hexdigest()
+    row = portal._get("portal_sessions", key, "_sessions")
+    for field in ("mfa_required", "mfa_verified", "authenticated"):
+        row.pop(field, None)
+    portal._put("portal_sessions", key, row, "_sessions")
+    assert api(portal, "/api/secops/alerts", token=second)[0] == 403
+    code = portal_module.totp_code(secret, int(portal.clock()) // 30)
+    assert api(portal, "/api/auth/mfa/totp/verify", {"code": code}, token=first)[0] == 200
+    assert api(portal, "/api/secops/alerts", token=first)[0] == 200
+    assert api(portal, "/api/secops/alerts", token=second)[0] == 403
+    assert api(portal, "/api/auth/mfa/totp/verify", {"code": code}, token=second)[0] == 409
+    portal.clock = lambda: row["expires_at"] + 1
+    assert api(portal, "/api/auth/session", token=first)[0] == 401
+    assert api(portal, "/api/auth/mfa/totp/verify", {"code": code}, token=second)[0] == 401
+
+
+# LLM: Raw HTTP client preserves NDJSON framing and caller-provided connector metadata.
+# 函数用途: 将原始字节与请求头送入真实解析入口，不用服务内部调用代替NDJSON测试。
+def r3_raw_api(portal, path, raw, headers=None):
+    headers = {"Authorization": "Bearer " + portal.admin_token, "Content-Type": "application/x-ndjson", **(headers or {})}
+    request = urllib.request.Request(portal.test_url + path, raw, headers, method="POST")
+    try:
+        response = urllib.request.urlopen(request, timeout=15)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        return response.status, json.load(response)
+
+
+# LLM: Each documented connector identity carrier must survive NDJSON parsing and owner-scoped ingestion.
+# 函数用途: 验证查询、请求头、事件行及一致组合都能摄入，并保留幂等与租户隔离。
+@pytest.mark.parametrize("carrier", ["query", "header", "rows", "all"])
+def test_r3_ndjson_device_identity_carriers(portal, carrier):
+    portal.register_connector("ndjson-device")
+    path, headers = "/api/secops/ingest/alert-stream", {}
+    events = [{"event_id": "nd-a"}, {"event_id": "nd-b"}]
+    if carrier in ("query", "all"):
+        path += "?device_id=ndjson-device"
+    if carrier in ("header", "all"):
+        headers["X-Device-Id"] = "ndjson-device"
+    if carrier in ("rows", "all"):
+        for row in events:
+            row["device_id"] = "ndjson-device"
+    raw = b"\n".join(json.dumps(row).encode() for row in events)
+    status, result = r3_raw_api(portal, path, raw, headers)
+    assert status == 200 and result["device_id"] == "ndjson-device", result
+    assert result["inserted"] == 2
+    assert r3_raw_api(portal, path, raw, headers)[1]["duplicates"] == 2
+    stored = portal._all("secops_alert_events")
+    assert len(stored) == 2 and {row["device_id"] for row in stored} == {"ndjson-device"}
+    other = portal.issue_session("ndjson-other")
+    assert r3_raw_api(portal, path, raw, {**headers, "Authorization": "Bearer " + other})[0] == 403
+    other_admin = portal.issue_session("ndjson-other", is_admin=True)
+    assert r3_raw_api(portal, path, raw, {**headers, "Authorization": "Bearer " + other_admin})[0] == 404
+    assert portal._all("secops_alert_events", "ndjson-other") == []
+
+
+# LLM: Conflicting identity sources must fail the complete batch before any SQLite insertion; JSON shares the row invariant.
+# 函数用途: 拒绝跨设备、重复查询值及来源冲突，验证不会半批写入或静默改写设备字段。
+@pytest.mark.parametrize("kind", ["query-row", "query-header", "mixed-rows", "duplicate-query", "json-row"])
+def test_r3_ingest_device_conflicts_are_atomic(portal, kind):
+    portal.register_connector("device-a")
+    portal.register_connector("device-b")
+    path, headers = "/api/secops/ingest/alert-stream", {}
+    events = [{"event_id": "good", "device_id": "device-a"}, {"event_id": "bad", "device_id": "device-b"}]
+    if kind == "query-row":
+        path += "?device_id=device-a"
+    elif kind == "query-header":
+        path += "?device_id=device-a"
+        headers["X-Device-Id"] = "device-b"
+        events = [{"event_id": "bad"}]
+    elif kind == "duplicate-query":
+        path += "?device_id=device-a&device_id=device-b"
+        events = [{"event_id": "bad"}]
+    if kind == "json-row":
+        headers["Content-Type"] = "application/json"
+        raw = json.dumps({"device_id": "device-a", "events": events}).encode()
+    else:
+        raw = b"\n".join(json.dumps(row).encode() for row in events)
+    assert r3_raw_api(portal, path, raw, headers)[0] == 422
+    assert portal._all("secops_alert_events") == []
+
+
+# LLM: Repack only synthetic test inputs, updating declared digests so malformed handshakes reach the actual MCP boundary.
+# 函数用途: 替换测试包入口并同步清单指纹，不修改产品构建器或已验产物。
+def r3_repack(package, replacements=None, extra=None):
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(package)) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    files.update(replacements or {})
+    manifest = json.loads(files["plugin.json"])
+    for record in manifest["files"]:
+        record["sha256"] = hashlib.sha256(files[record["path"]]).hexdigest()
+    files["plugin.json"] = json.dumps(manifest).encode()
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w") as archive:
+        for name, raw in files.items():
+            archive.writestr(name, raw)
+        if extra:
+            archive.writestr(*extra)
+    return target.getvalue()
+
+
+# LLM: Real child processes respond with one controlled protocol defect; failure must reap the process and never persist running state.
+# 函数用途: 对抗空初始化、缺版本、错误信封与非对象响应，验证握手拒绝和真实进程清理。
+@pytest.mark.parametrize("mode", ["empty", "missing-version", "wrong-version", "unknown-fields", "non-dict", "error", "bad-tools-version", "valid"])
+def test_r3_mcp_initialize_response_validation(portal, portal_module, package_bytes, monkeypatch, mode):
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(package_bytes)) as archive:
+        entry = json.loads(archive.read("plugin.json"))["entry"]["command"]
+    script = '''import json,sys
+mode = MODE
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    init = request['method'] == 'initialize'
+    result = {'protocolVersion':'2024-11-05','capabilities':{},'serverInfo':{'name':'unit','version':'1'}} if init else {'tools':[]}
+    response = {'jsonrpc':'2.0','id':request['id'],'result':result}
+    if init and mode == 'empty': response['result'] = {}
+    if init and mode == 'missing-version': response.pop('jsonrpc')
+    if init and mode == 'wrong-version': response['jsonrpc'] = '1.0'
+    if init and mode == 'unknown-fields': response['result'] = {'ready':True}
+    if init and mode == 'non-dict': response = []
+    if init and mode == 'error': response['error'] = None
+    if not init and mode == 'bad-tools-version': response.pop('jsonrpc')
+    print(json.dumps(response), flush=True)
+'''.replace("MODE", repr(mode))
+    package = r3_repack(package_bytes, {entry: script.encode()})
+    status, plugin = deploy(portal, package)
+    assert status == 200, plugin
+    actual_popen = portal_module.subprocess.Popen
+    processes = []
+
+    # LLM: Save the real constructor before patching; capture actual handles without replacing the subprocess or handshake.
+    # 函数用途: 记录本次真实子进程，供失败清理与管道关闭断言使用。
+    def record_process(*args, **kwargs):
+        process = actual_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(portal_module.subprocess, "Popen", record_process)
+    status, result = api(portal, "/api/plugins/remote/" + plugin["plugin_id"] + "/mcp/spawn-remote", {})
+    if mode == "valid":
+        assert status == 200 and result["status"] == "running", result
+        return
+    assert status in (422, 502), result
+    assert processes and all(process.poll() is not None and process.stdin.closed and process.stdout.closed for process in processes)
+    assert not portal._daemons
+    assert all(row["status"] != "running" for row in portal._all("remote_mcp_Daemons"))
+
+
+# LLM: Archive links must be rejected even with a directory suffix; real ordinary directories stay valid controls.
+# 函数用途: 验证ZIP目录符号链接及tar软硬链接在部署前拒绝，不把普通目录误拒。
+@pytest.mark.parametrize("kind", ["zip-dir-link", "zip-file-link", "zip-directory", "tar-dir-link", "tar-hard-link", "tar-directory"])
+def test_r3_archive_directory_symlinks_rejected(portal, package_bytes, kind):
+    import io
+    import stat
+    import tarfile
+    import zipfile
+    if kind.startswith("zip"):
+        info = zipfile.ZipInfo("link" if kind == "zip-file-link" else "link/")
+        info.create_system = 3
+        info.external_attr = ((stat.S_IFDIR if kind == "zip-directory" else stat.S_IFLNK) | 0o755) << 16
+        package = r3_repack(package_bytes, extra=(info, b"" if kind == "zip-directory" else b"bin/plugin_main.py"))
+    else:
+        target = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(package_bytes)) as archive, tarfile.open(fileobj=target, mode="w:gz") as tar:
+            for name in archive.namelist():
+                raw = archive.read(name)
+                info = tarfile.TarInfo(name)
+                info.size = len(raw)
+                tar.addfile(info, io.BytesIO(raw))
+            info = tarfile.TarInfo("link/")
+            info.type = tarfile.DIRTYPE if kind == "tar-directory" else (tarfile.LNKTYPE if kind == "tar-hard-link" else tarfile.SYMTYPE)
+            info.linkname = "bin/plugin_main.py"
+            tar.addfile(info)
+        package = target.getvalue()
+    status, result = deploy(portal, package)
+    assert status == (200 if kind.endswith("directory") else 422), result
+    if status != 200:
+        assert portal._all("remote_plugins") == []
+
+
+# LLM: AST checks every definition including nested helpers and methods; decorators do not hide missing contract comments.
+# 函数用途: 自动检查测试全文与Wave9服务区的双层注释，新增定义也必须进入覆盖。
+def test_r3_dual_layer_comments_cover_all_definitions():
+    missing = []
+    for path in (Path(__file__), SOURCE / "workbench_server.py"):
+        source = path.read_text()
+        lines = source.splitlines()
+        first = source[:source.index("# A3 service:")].count("\n") + 1 if path.name == "workbench_server.py" else 1
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) or node.lineno < first:
+                continue
+            start = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])]) - 1
+            prefix = "\n".join(lines[max(0, start - 2):start])
+            human = "类用途" if isinstance(node, ast.ClassDef) else "函数用途"
+            if "# LLM:" not in prefix or "# " + human + ":" not in prefix:
+                missing.append((path.name, node.lineno, node.name))
+    assert not missing, missing
+
+
 # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.
 # 函数用途: 验证接口行为、持久化与安全拒绝（test_authentication_and_sqlite_closure）。
 def test_authentication_and_sqlite_closure(portal):
@@ -453,6 +864,8 @@ def test_push_real_http_exact_signature_and_idempotency(portal):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     received = []
 
+    # LLM: Loopback-only push receiver checks exact signed bytes and emits a bounded receipt.
+    # 类用途: 接收合成复现推送并记录原字节，不访问生产节点。
     class Receiver(BaseHTTPRequestHandler):
         # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.
         # 函数用途: 准备隔离测试输入并回收本用例资源（do_POST）。
@@ -527,6 +940,8 @@ def test_sso_pkce_backchannel_callback_replay_and_privilege_floor(portal):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     observed = []
 
+    # LLM: Local OAuth fixture records the token exchange and supplies a fixed non-admin subject.
+    # 类用途: 在回环验证PKCE后端链路，不信任身份响应中的管理员声明。
     class Provider(BaseHTTPRequestHandler):
         # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.
         # 函数用途: 准备隔离测试输入并回收本用例资源（do_POST）。
@@ -595,6 +1010,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 def action_receiver(reject=False):
     received = []
 
+    # LLM: Local connector fixture returns explicit success/rejection without real device effects.
+    # 类用途: 记录SOAR合成动作及失败回执，不实际隔离设备。
     class Receiver(BaseHTTPRequestHandler):
         # LLM: Test POST handler returns explicit upstream success or failure.
         # 函数用途: 保存真实动作载荷并发送有界 JSON 响应。
@@ -969,6 +1386,8 @@ def data_test_pcapng(endian="<", *, simple=False, options=b"", snaplen=65535, ca
     return section + interface + data_test_pcapng_block(3 if simple else 6, packet, endian)
 
 
+# LLM: Both byte orders decode EPB/SPB metadata; timestamp-less SPB stays unknown.
+# 函数用途: 核验最小PCAPNG包块的流、DNS和来源证据，不编造时间。
 @pytest.mark.parametrize("endian", ["<", ">"])
 @pytest.mark.parametrize("simple", [False, True])
 def test_data_pcapng_minimal_packet_blocks(portal_module, endian, simple):
@@ -989,6 +1408,8 @@ def test_data_pcapng_minimal_packet_blocks(portal_module, endian, simple):
         assert "pcapng_packets_without_timestamps" in parsed["warnings"]
 
 
+# LLM: Interface timestamps use declared decimal/binary resolution and signed offset.
+# 函数用途: 验证接口计时选项，避免统一按微秒误解时间。
 @pytest.mark.parametrize("endian", ["<", ">"])
 @pytest.mark.parametrize("resolution,units", [(9, 10**9), (0x80 | 10, 2**10)])
 def test_data_pcapng_interface_timestamp_options(portal_module, endian, resolution, units):
@@ -999,6 +1420,8 @@ def test_data_pcapng_interface_timestamp_options(portal_module, endian, resoluti
     assert parsed["query_evidence"]["timestamp_resolution"] == units
 
 
+# LLM: Section switches reset interface IDs, but packet/byte budgets remain capture-wide.
+# 函数用途: 验证跨节大小端、多接口引用与输入上限，拒绝借新节绕过限额。
 def test_data_pcapng_sections_interfaces_and_packet_limits(portal_module):
     first = data_test_pcapng()
     second = data_test_pcapng(">", simple=True)
@@ -1024,6 +1447,8 @@ def test_data_pcapng_sections_interfaces_and_packet_limits(portal_module):
     assert error.value.code == "MALFORMED_PCAP"
 
 
+# LLM: Snaplen truncation is evidence of an undecoded packet, not a complete flow.
+# 函数用途: 核验EPB/SPB截断计数和覆盖警告，不把缺失字节解释为完整流。
 @pytest.mark.parametrize("simple", [False, True])
 def test_data_pcapng_snaplen_truncation(portal_module, simple):
     parsed = portal_module.parse_secops_pcap(data_test_pcapng(simple=simple, snaplen=34, captured=34))
@@ -1045,6 +1470,8 @@ def data_test_short_capture(kind, captured, *, vlan=False, original_short=False)
     return bytes(blob)
 
 
+# LLM: Container-proven truncation can cut headers and must retain packet/skip counts.
+# 函数用途: 三种容器共同验证合法短捕获不会导致整份抓包误拒。
 @pytest.mark.parametrize("kind", ["classic", "epb", "spb"])
 @pytest.mark.parametrize("captured", [10, 14, 16, 24])
 def test_pcap_truncated_headers_are_undecoded_not_malformed(portal_module, kind, captured):
@@ -1055,6 +1482,8 @@ def test_pcap_truncated_headers_are_undecoded_not_malformed(portal_module, kind,
     assert "snaplen_truncated_packets" in parsed["warnings"]
 
 
+# LLM: Incomplete VLAN tags distinguish snaplen loss from malformed original bytes.
+# 函数用途: 验证截断VLAN头只计未解码，不越界读取标签。
 @pytest.mark.parametrize("kind", ["classic", "epb", "spb"])
 def test_pcap_truncated_vlan_header_is_undecoded(portal_module, kind):
     parsed = portal_module.parse_secops_pcap(data_test_short_capture(kind, 16, vlan=True))
@@ -1062,6 +1491,8 @@ def test_pcap_truncated_vlan_header_is_undecoded(portal_module, kind):
     assert parsed["query_evidence"]["unsupported_or_skipped_packets"] == 1
 
 
+# LLM: Truncation tolerance must not permit malformed complete short frames.
+# 函数用途: 用未截断短包作反例，防止修复放宽包格式校验。
 @pytest.mark.parametrize("kind", ["classic", "epb", "spb"])
 def test_pcap_nontruncated_short_frame_still_rejected(portal_module, kind):
     with pytest.raises(portal_module.PortalError) as error:
@@ -1069,6 +1500,8 @@ def test_pcap_nontruncated_short_frame_still_rejected(portal_module, kind):
     assert error.value.code == "MALFORMED_PCAP"
 
 
+# LLM: Explicit section length must align with the actual section/end boundary.
+# 函数用途: 对照合法节长度与错位长度，校验节边界合同。
 @pytest.mark.parametrize("delta", [-4, 0, 4])
 def test_pcapng_explicit_section_length(portal_module, delta):
     blob = bytearray(data_test_pcapng())
@@ -1081,6 +1514,8 @@ def test_pcapng_explicit_section_length(portal_module, delta):
         assert error.value.code == "MALFORMED_PCAP"
 
 
+# LLM: Interface ID and all 64 timestamp bits determine each packet observation time.
+# 函数用途: 验证高32位时间与不同接口时钟，不丢高位或套错分辨率。
 def test_pcapng_multiple_interface_resolutions_and_timestamp_high_word(portal_module):
     first = data_test_pcapng()
     options = struct.pack("<HHB3x", 9, 1, 9) + b"\0" * 4
@@ -1094,6 +1529,8 @@ def test_pcapng_multiple_interface_resolutions_and_timestamp_high_word(portal_mo
     assert parsed["flows"][0]["last_seen"] == 100.5
 
 
+# LLM: Repeated SPBs carry no time evidence and cannot establish periodicity.
+# 函数用途: 验证无时间戳包不会被补零并误报周期性通信。
 def test_pcapng_simple_packets_do_not_invent_periodicity(portal_module):
     first = data_test_pcapng(simple=True)
     parsed = portal_module.parse_secops_pcap(first[:48] + first[48:] * 6)
@@ -1102,6 +1539,8 @@ def test_pcapng_simple_packets_do_not_invent_periodicity(portal_module):
     assert not any(a["kind"] == "periodic_traffic" for a in parsed["anomalies"])
 
 
+# LLM: Option terminators, unique clock fields and exact SPB length are wire boundaries.
+# 函数用途: 拒绝畸形选项结束、重复计时声明与包块多余数据。
 @pytest.mark.parametrize("damage", ["bad_end_length", "after_end", "duplicate_resolution", "spb_extra"])
 def test_pcapng_option_terminators_and_simple_length(portal_module, damage):
     if damage == "spb_extra":
@@ -1118,6 +1557,8 @@ def test_pcapng_option_terminators_and_simple_length(portal_module, damage):
     assert error.value.code == "MALFORMED_PCAP"
 
 
+# LLM: Classic endian and micro/nanosecond variants remain positive shared-decoder controls.
+# 函数用途: 验证四种经典magic不因PCAPNG扩展回退或误算时间。
 @pytest.mark.parametrize("endian", ["<", ">"])
 @pytest.mark.parametrize("resolution,magic", [(10**6, 0xA1B2C3D4), (10**9, 0xA1B23C4D)])
 def test_classic_pcap_all_four_magic_values(portal_module, endian, resolution, magic):
@@ -1130,6 +1571,8 @@ def test_classic_pcap_all_four_magic_values(portal_module, endian, resolution, m
     assert parsed["query_evidence"]["timestamp_resolution"] == resolution
 
 
+# LLM: Mutated PCAPNG headers fail structurally rather than reading outside bounded bytes.
+# 函数用途: 覆盖BOM、长度、接口、捕获尺寸和选项的畸形输入。
 @pytest.mark.parametrize("damage", [
     "bom", "short_block", "unaligned_block", "trailer", "truncated", "missing_interface",
     "unknown_interface", "captured_gt_original", "snaplen", "short_packet", "bad_options",
@@ -1163,6 +1606,8 @@ def test_data_pcapng_rejects_malformed_blocks(portal_module, damage):
     assert error.value.status == 422 and error.value.code == "MALFORMED_PCAP"
 
 
+# LLM: Real HTTP upload persists exact parser evidence and the uploaded-byte digest.
+# 函数用途: 核验PCAPNG从回环上传到SQLite归档的来源和指纹一致。
 def test_pcapng_http_persists_parsed_evidence(portal):
     raw = data_test_pcapng(">")
     status, result = api(portal, "/api/secops/investigations/pcap-inspect", {
@@ -1262,6 +1707,8 @@ def test_data_cross_owner_isolation(portal):
 # 函数用途: 验证配置连接器的真实 HTTP 调用、查询证据和未配置失败。
 def test_data_connector_loopback_http(portal):
     received = []
+    # LLM: Loopback connector fixture returns controlled rows and records actual query transport.
+    # 类用途: 模拟告警查询接收端，不代表真实SIEM设备。
     class ConnectorHandler(BaseHTTPRequestHandler):
         # LLM: Test response emits structured upstream events after reading the real request.
         # 函数用途: 接收查询并返回有界的测试响应。

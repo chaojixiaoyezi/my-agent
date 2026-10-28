@@ -1,3 +1,50 @@
+## 2026-10-28 Wave 9 A3 Round 3：认证、MFA 与输入边界修复
+
+来源：先完整阅读 `07-tasks/fix-r3-wave9-a3.md` 全67行。在 `/tmp/wt-wave9-a3`、分支 `wave9-a3`、干净起点 `e4fa35dc260416b6e29b19aaa40ce7026883c623` 续作；文档和提交区间门禁仍以 `db4d5de92` 为基线。外部插件继续独立交付；仓内只修改本文件和 `agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py`，不安装、启用、部署、推送或改动生产服务。
+
+### 六项修复与兼容边界
+
+1. **认证、owner与出站。** HTTP外层在读取/解析业务body、加载旧模块和探测前，先校验唯一Authorization及 `_principal()`；旧路径、编码路径、SSE目标和SecOps认证别名均走相同门。旧全局数据无多owner隔离合同，因此仅允许真正 `local/main` 管理员进入；其他owner即使带真实管理员角色也拒绝，body不能覆盖身份。`probe-node` 不再调用演示探测器：复用可信 `allowed_scopes`、目标格式校验、冻结数字IP、私网策略及共享限速，连接一次真实TCP端口。空/越界范围在连接前拒绝；旧硬编码 `remote-status` 明确403。
+2. **不再假登录或绕过MFA。** 密码登录默认关闭；仅由可信构造参数 `password_authenticator(username, password)` 校验配置凭据并返回真实owner/角色，缺配置/不匹配/异常均 `401 INVALID_CREDENTIALS`。成功令牌写入同一SQLite散列索引会话，不认浏览器admin/owner字段。密码与SSO共用MFA感知签发：已有活动TOTP时返回 `authenticated=False, mfa_required=True`，会话保存 `mfa_verified=False`。除session查询与TOTP验证外，待验证会话全部403 `MFA_REQUIRED`；正确口令仅原子升级当前同owner、未过期会话，不提升同owner其他会话、不延长有效期。旧格式会话也实时检查活动TOTP。两套认证前缀归一到 `/api/auth/*`。外部 `auth_resolver` token无本地会话升级合同，验证明确409 `MFA_SESSION_NOT_OWNED`，不假报authenticated；应走本地登录会话或宿主自身MFA流程。原独立管理令牌属于可信机器/运维凭据，不是密码/SSO用户会话，权限含义未扩大。
+3. **NDJSON连接器身份。** HTTP保留并交叉校验query、`X-Device-Id`、JSON顶层device；无显式来源时可由全事件行一致的device推导。每行若携device必须与连接器一致，冲突、非字符串、重复query不同值均拒绝。连接器仍按真实owner查找，整批规范化通过前不写事件；JSON摄入共享同一逐行规则。
+4. **MCP握手。** 每条响应必须为JSON-RPC `2.0`对象、严格匹配请求ID类型、无error字段且result为dict。initialize在RPC与spawn两层复用最小结构检查，必须至少含非空、类型正确的protocolVersion/capabilities/serverInfo之一；空dict/任意业务字段不能登记running。初始化或tools/list失败均走原进程组回收及持久失败路径。没有宣称实现完整MCP schema验证或恶意代码OS沙箱。
+5. **归档链接。** ZIP的UNIX符号链接位和tar软/硬链接检查均发生在跳过目录之前；带 `/` 后缀的目录型symlink不再被误当普通目录忽略。普通目录仍是允许对照，不解压链接或跳过失败。
+6. **注释和冻结包。** 补齐指定14个测试、4个helper类及 `do_OPTIONS` 的双层注释；新增永久AST回归递归检查嵌套定义和装饰器上方注释。当前测试全文104个定义（4类）和Wave9区108个定义（6类）全部覆盖，**100%**。按指定构建器重建ZIP，原生包检查通过，逐项校验全部11个清单成员摘要，并核对全部9份外部 `.py` 与ZIP字节完全相同；不是只抽查server文件。
+
+### 独立复核及明确关闭的旧功能
+
+Astra high对固定认证快照独立只读审查，指出旧DSH普通GET仍会自动转发硬编码远端、`remote-agent-ask`也会出站，另发现冷启动旧runtime缺接口和外部MFA假升级。父级核对实际旧模块并补运行回归：网络边界仅给合成回执、不发外网请求，原DSH与remote-agent入口实际返回200、冷workspace返回500，未配置安全适配期望503的断言全部先红；外部MFA错误成功也先红。
+
+**处理方式是默认关闭未适配旧分发，不是声称旧全功能已恢复。** 新服务不再加载旧自动代理/旧SSE生成器，除受控probe外旧动作明确503 `LEGACY_ADAPTER_NOT_CONFIGURED`。合法管理员的旧读取仅可经可信构造参数 `legacy_reader(path, query, principal)` 提供的、无出站/写入副作用的只读桥；未配同样503，不回落有越权风险的 `WorkbenchRuntime`。该桥是受信配置，不能把旧通用dispatcher直接接回生产；普通用户/其他owner仍先403。独立报告所涉旧runtime兼容性不再靠缺方法导致500，危险自动转发也不再可从新入口到达。没有第二次独立审查，修复后由父级做了完整动态验收。
+
+### 实测与复现
+
+- 原认证红例13项中12失败、1合法对照通过；其中SSE最初被JSON解码遮挡，改用只读HTTP状态后，五种legacy认证/owner断言均先失败（`auth-red.xml`、`legacy-red.xml`）。修复后13项全过。
+- 数据/进程/归档目标23项中12失败、11既有安全/正常对照通过（`data-red.xml`），包含四种NDJSON来源、JSON跨设备混入、六种MCP畸形握手和ZIP目录链接。注释AST单例先失败（`comments-red.xml`）。独立复核补例5项中4失败、1多会话/旧格式/过期对照已通过（`review-red.xml`）。
+- 第一轮完整137项有4个NDJSON跨owner断言失败：普通owner被现有摄入admin门先拒为403，而不是连接器查找404。没有放宽产品鉴权；回归保留普通owner403，再加真实foreign-admin404及该owner零写入断言，分开验证角色门和owner墙。
+- 最终指定完整文件 **137 passed / 0 failed / 0 errors / 0 skipped**，JUnit为 `/tmp/pytest-a3-r3/final-accepted.xml`。原95项全部保留，未删断言、skip、xfail或放宽安全门。最终pytest前后外部9份源码、ZIP与测试共11个文件摘要未变，避免把共享目录旧版本结果当本轮验收。
+- 指定三文件Ruff通过；导入边界 `IMPORT_BOUNDARIES findings=0`；AST实际覆盖计数如上。文档同步和提交区间检查随本节更新后运行；不执行已退休尺寸检查器，不跑全仓pytest。
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -B -m pytest /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short -o cache_dir=/tmp/pytest-a3-r3
+ruff check --no-cache /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/workbench_server.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -B /tmp/wt-wave9-a3/scripts/check_doc_sync.py --base db4d5de92
+python3 -B /tmp/wt-wave9-a3/scripts/check_import_boundaries.py
+git -C /tmp/wt-wave9-a3 diff --check db4d5de92..HEAD
+```
+
+当前交付指纹（相对外部handoff目录；历史节的指纹仅代表旧版本）：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `8da5215cf5b0834fd65030a59c849b0f79f5eef1e156026ee3ebd5d137d65bf2` |
+| `build_plugin_package.py`（未改） | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `2bcbbff8af29f1dd37c8f2f31fef9d117b5f1a3e496ca7da99e65948745410a5` |
+
+验证边界：真实HTTP入口均为临时回环服务、SQLite临时文件与真实MCP测试子进程；网络拒绝测试拦在IO边界，不向硬编码远端发送请求。已有真实回环IdP测试保留，新增MFA针对性测试只替代token/userinfo提供者IO。未验证真实IdP、企业设备、Host原生适配器、可信密码/旧读取桥的生产配置、浏览器UI、跨机网络、Windows及Linux全量CI；不把本轮结果称为整个门户可直接发布。
+
 ## 2026-10-28 Wave 9 A3 Round 2：lint、状态路径与最小 PCAPNG
 
 来源：完整阅读 `07-tasks/fix-wave9-a3.md`（51行）。工作树 `/tmp/wt-wave9-a3`，分支 `wave9-a3`，本轮起点 `b1506446b11d7387f41bfc1f7b4e245d2706e808`；文档/提交区间检查按派工要求用 `db4d5de92`。外部源码与 ZIP 仍独立交付，不纳入本分支 Git 提交，不安装、启用或部署插件。
