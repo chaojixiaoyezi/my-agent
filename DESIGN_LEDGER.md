@@ -9285,3 +9285,20 @@ F1/F2/F4–F7及当前F3修复已在开发工作树整合。S11四机160定向�
 ## 2026-10-23 Context & Tooling & Native Skill/Workflow 底座全量优化（PR01–PR12 已落地）
 
 状态：已实现并通过全量合同单测与 4 台 Linux + 真实 MiniMax-M2.7 端到端对比验证。涵盖：1）出站全请求 token 计量与校准来源透传、前缀缓存工具顺序稳定化；2）`list_tools`/`tool_search` 紧凑回执、前台核心工具精简与后台按需唤醒加载、中文复合意图发现；3）系统提示词去重、版本化出厂 `AGENTS.md` 种子增量投影、动态能力族目录；4）Skill/工作区事实/人格/正式记忆全信封预算与子代理/Goal/Gateway 修订去重；5）统一 `SkillsService` 与资产目录、真实工作流宿主分析器注入、提交后读回 `unknown` 副作用分类、风险分级原生创作快路径；6）领域感知工具输出 reducer 与有界反向尾行读取器。
+
+## 2026-10-28 闲置自动 Compact、TUI 后台进程观察瞬态误报修复与 TUI 顶部用户发言连续跳转栏（已确认需求，待实现）
+
+状态：用户已确认需求，待收集完其他问题后一并实现。
+
+1. **会话闲置自动 Compact（Idle Auto-Compact，参数可配置）**：
+   - **触发语义**：当会话上下文占用超过配置的百分比阈值（如默认 `60%`），且距离该会话最后一次用户发言/交互闲置达到配置的时长（如默认 `7200` 秒即 2 小时）时，自动触发一次会话 Compact；只要用户有新发言即重新从 0 开始计时，本次闲置 Compact 完成后停表，直到下次产生新发言才重新计时。
+   - **配置项（需同步更新 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig` dataclass）**：
+     - `memory_compact_idle_trigger_percent`（会话水位阈值百分比，默认 `60`，`0` 表示关闭闲置自动 Compact）
+     - `memory_compact_idle_seconds`（闲置触发秒数，默认 `7200` 即 2 小时，`0` 表示关闭）
+   - **并发边界**：复用现有 `prepare_conversation_context` 与 CAS 提交门；在途请求或用户新消息到达时立即让路。
+2. **修复 TUI `后台进程观察刷新失败；仅保留同会话上次结果` 误报 Bug**：
+   - **定位**：`agent_py_agent/agent/conversation/background_process_view.py:_directory_snapshots` 在扫描后台进程目录时遇到并发原子写导致目录 `mtime` 变化（`DIRECTORY_CHANGED_DURING_READ`）时零重试直接报 `projection_ok=False`，以及新会话 `thread_id=None` 时 `_unrelated_error` 将其他会话记录错误归入当前会话，触发 `tui_threading.py:845` 底部错误提示。
+   - **修复方向**：对目录并发换代做有界重试并在瞬态冲突时复用上一帧有效快照；`thread_id=None` 时隔离明确属于其他线程的坏记录。
+3. **TUI 顶部“上一条我说的话”常驻显示与阶梯式点击跳转栏**：
+   - **交互语义**：在 TUI 聊天视口最上方常驻显示当前视口顶部上方最近的一条用户消息（`role == "user"`）摘要；鼠标左键点击该顶栏即可将视口直接向上跳转到该条用户消息所在位置；跳转到位后，顶栏自动更新为再上一条用户消息，再次点击可继续向上逐条回溯历史提问。
+
