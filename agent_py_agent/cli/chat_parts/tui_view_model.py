@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理历史、候选与界面状态；同一状态复用不可变快照，已对齐的计时不重复分配槽位，终态不被重放改写。
+# 模块用途: 管理历史、候选与界面状态；用户行索引类型仅供瞬态布局，不能写回事件或业务历史。
 
 from __future__ import annotations
 
@@ -34,6 +34,15 @@ class TuiBlock:
     created_seq: int = 0
     updated_seq: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# LLM: 仅记录当前渲染帧的用户块身份、物理起始行和安全单行摘要；宽度/显示来源变化后须重建，不持久化。
+# 类用途: 为正文外的上一条用户消息顶栏提供只读导航目标。
+@dataclass(frozen=True)
+class TuiUserTurnLine:
+    block_id: str
+    start_line: int
+    summary: str
 
 
 # LLM: TuiQueuedInput 保存输入队列的 UI 事实，真实执行顺序仍由同一 canonical prompt queue 驱动。

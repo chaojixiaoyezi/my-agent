@@ -1,3 +1,11 @@
+## 2026-10-28 Wave 9 B2：TUI后台观察与用户消息顶栏
+
+```text
+`-- agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py # 目录重试、空会话/瞬态兜底、用户行索引、独立顶栏布局/连续点击与复制隔离回归
+```
+
+实现复用 `agent/conversation/background_process_view.py` 与 `cli/chat_parts/tui_threading.py` 的原只读链路；用户行索引类型在 `tui_view_model.py`，实际索引及正文外header Window在 `tui_view.py`，顶部阅读锚点在 `tui_reading.py`。无新增生产模块、外部接口或第二份业务状态；验证入口和未验证边界见TESTS.md本日Wave9 B2节。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

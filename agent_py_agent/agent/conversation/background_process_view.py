@@ -1,5 +1,5 @@
 # LLM: 静态缓存按规范目录单槽、逐文件stat重验、4096条硬上限；坏记录仅凭严格一致归属隔离，不凭年龄忽略错误。
-# 模块用途: 给TUI与插件提供严格归属校验的只读进程观察，隔离明确无关坏文件并实时计算当前会话动态状态。
+# 模块用途: 给TUI与插件提供严格归属校验的只读进程观察，有界重试目录换代，保留真实错误分类与实时状态。
 from __future__ import annotations
 
 import json
@@ -40,11 +40,14 @@ _FILE_CACHE_MAX_ENTRIES = 2048
 _MAX_DIRECTORY_RECORDS_COUNT = 4096
 # 后台静态快照必须重新核验的最长秒数，热命中不延长有效期。
 _CACHE_RECHECK_SECONDS = 60.0
+# 并发原子写导致目录换代时，初次读取后最多重试三次，每次退避5毫秒。
+_MAX_DIR_SCAN_RETRIES = 3
+_DIR_SCAN_RETRY_BACKOFF_SECONDS = 0.005
 _SCOPE_FIELDS = ("access_scope", "execution_scope", "activation_scope", "completion_target", "metadata", "scope")
 _ATTRIBUTION_FIELDS = ("owner_id", "thread_id", "conversation_id", "owner_home", "task_id", "request_id")
 
 
-# LLM: 保留文件名身份及实际stat代次；失败仅保留归属字符串/非法标记，目录超限用结构化错误，不保存正文。
+# LLM: 保留文件名身份及实际stat代次；失败仅存归属字符串/非法标记和errno，不保存正文或猜测瞬态性质。
 # 类用途: 保存静态记录、无正文错误与实际复核时间，不保存动态探活或会话过滤结论。
 @dataclass(frozen=True)
 class _SessionSnapshot:
@@ -56,6 +59,7 @@ class _SessionSnapshot:
     verified_at: float = 0.0
     stat_key: tuple[int, ...] = ()
     error_code: str = ""
+    error_errno: int | None = None
 
 
 # LLM: cached_at沿最老文件复核时间传递，不因目录换代续租；目录代次放值内，键只绑定规范目录身份。
@@ -104,7 +108,7 @@ class BackgroundProcessDetail(BackgroundProcessSummary):
     log_tail: tuple[str, ...] = ()
 
 
-# LLM: 仅缓存静态快照；线程过滤先于动态探活。坏文件按严格归属证据分类，目录超限/未知归属错误不吞。
+# LLM: 仅缓存静态快照；线程过滤先于动态探活。坏文件按严格归属分类，未知错误不吞，OSError透传errno而不泄漏异常正文。
 # 函数用途: 返回当前范围的实时进程概要与分范围诊断，缺失目录不创建、不消费通知。
 def list_background_processes(owner_home: Path, *, thread_id: str | None = None, active_only: bool = False) -> dict[str, object]:
     home = Path(owner_home).expanduser().absolute()
@@ -116,6 +120,8 @@ def list_background_processes(owner_home: Path, *, thread_id: str | None = None,
             diagnostic = {"session_id": snapshot.session_id, "error": snapshot.error}
             if snapshot.error_code:
                 diagnostic["error_code"] = snapshot.error_code
+            if snapshot.error_errno is not None:
+                diagnostic["errno"] = snapshot.error_errno
             destination.append(diagnostic)
             continue
         try:
@@ -124,7 +130,12 @@ def list_background_processes(owner_home: Path, *, thread_id: str | None = None,
                 continue
             items.append(_summary(root, payload).to_dict())
         except (OSError, TypeError, ValueError) as exc:
-            errors.append({"session_id": snapshot.session_id, "error": type(exc).__name__})
+            diagnostic = {"session_id": snapshot.session_id, "error": type(exc).__name__}
+            if isinstance(exc, OSError) and exc.errno is not None:
+                diagnostic["errno"] = exc.errno
+            failed = replace(snapshot, error=type(exc).__name__)
+            destination = unrelated_errors if _unrelated_error(failed, home, thread_id, now) else errors
+            destination.append(diagnostic)
     active = [item for item in items if item["alive"] or item["wake_pending"]]
     return {"items": active if active_only else items, "active_count": len(active),
             "total": len(items), "errors": errors, "projection_ok": not errors,
@@ -178,7 +189,7 @@ def _directory_stat_key(root: Path) -> tuple[int, int, int]:
         os.close(descriptor)
 
 
-# LLM: 目录错误与同名坏文件诊断不得去重；仅有效记录按原目录优先级保留首项，坏副本不能遮住有效行。
+# LLM: 目录错误与同名坏文件不得去重；仅有效记录按原优先级保留首项，错误保留真实errno，不将未知错误解释为瞬态。
 # 函数用途: 遍历本owner的快照，保留全部只读错误并去重成功展示项。
 def _owner_session_snapshots(home: Path):
     seen = set()
@@ -186,7 +197,8 @@ def _owner_session_snapshots(home: Path):
         try:
             snapshots = _directory_snapshots(root, home)
         except (OSError, TypeError, ValueError) as exc:
-            snapshots = (_SessionSnapshot(str(root), error=type(exc).__name__),)
+            snapshots = (_SessionSnapshot(str(root), error=type(exc).__name__,
+                error_errno=exc.errno if isinstance(exc, OSError) else None),)
         for snapshot in snapshots:
             if not snapshot.error and snapshot.session_id in seen:
                 continue
@@ -229,9 +241,21 @@ def _directory_projection_error(root, key, code):
     return (_SessionSnapshot(str(root), error=code, error_code=code),)
 
 
-# LLM: 规范目录每个只占一槽；热命中逐文件stat重验，目录换代则失败关闭；所有热刷新沿原cached_at，不续租。
-# 函数用途: 按目录身份复用静态快照，变化时仅重读必要文件，仍保证原文件复核期限。
+# LLM: 仅重试明确的目录换代；每次重新执行原完整校验，超限/权限/坏记录不重试，不用旧帧冒充稳定扫描。
+# 函数用途: 为并发原子写提供初读加三次5ms退避的有界目录观察。
 def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]:
+    for attempt in range(_MAX_DIR_SCAN_RETRIES + 1):
+        snapshots = _directory_snapshot_attempt(root, home)
+        if not any(item.error_code == "DIRECTORY_CHANGED_DURING_READ" for item in snapshots):
+            return snapshots
+        if attempt < _MAX_DIR_SCAN_RETRIES:
+            time.sleep(_DIR_SCAN_RETRY_BACKOFF_SECONDS)
+    return snapshots
+
+
+# LLM: 规范目录单槽、逐文件stat、nofollow、记录上限和原cached_at均保持；一次尝试换代时丢弃其不完整投影。
+# 函数用途: 执行原单次安全扫描，供有界重试入口复用而不改变缓存复核期限。
+def _directory_snapshot_attempt(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]:
     try:
         before = _directory_stat_key(root)
     except FileNotFoundError:
@@ -273,7 +297,7 @@ def _file_stat_key(path: Path) -> tuple[int, ...]:
     return metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_size, metadata.st_ctime_ns
 
 
-# LLM: 只复用读取前可信且前后同代的单文件；快照保存同一stat代次供目录热重验，不凭文件年龄改变错误归属。
+# LLM: 仅复用前后同代的可信文件，失败保留原归属和errno供分类；不凭年龄洗白错误，也不缓存动态探活。
 # 函数用途: 安全读取、校验并缓存静态元数据及无正文诊断，目录变化时只复用未变文件。
 def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool = False) -> _SessionSnapshot:
     path, now = root / f"{session_id}.json", time.monotonic()
@@ -293,7 +317,8 @@ def _file_snapshot(root: Path, session_id: str, home: Path, *, force_read: bool 
         snapshot = _SessionSnapshot(session_id, payload, mtime_ns=before[2], verified_at=now)
     except (OSError, TypeError, ValueError, RecursionError) as exc:
         snapshot = _SessionSnapshot(session_id, _error_scope_payload(payload), type(exc).__name__,
-                                    before[2] if before else 0, verified_at=now)
+                                    before[2] if before else 0, verified_at=now,
+                                    error_errno=exc.errno if isinstance(exc, OSError) else None)
     try:
         after = _file_stat_key(path)
     except OSError:
@@ -337,10 +362,10 @@ def _raw_record_scopes(payload: object) -> tuple[dict, ...]:
     return (payload, *(payload[key] for key in _SCOPE_FIELDS if isinstance(payload.get(key), dict)))
 
 
-# LLM: 已失败的坏记录仍拒绝空串/坏类型/空白，含owner_id和激活归属冲突；正常未绑定兼容不能洗白错误。
+# LLM: 空观察线程也可隔离严格确认的非空其他线程；坏记录的空串/坏类型/owner或激活归属冲突仍不得洗白。
 # 函数用途: 每次观察重新判断坏文件是否与当前会话无关。
 def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | None, now: float) -> bool:
-    if not isinstance(thread_id, str) or not thread_id.strip() or not isinstance(snapshot.payload, dict):
+    if thread_id is not None and not isinstance(thread_id, str) or not isinstance(snapshot.payload, dict):
         return False
     if any(key in snapshot.payload and not isinstance(snapshot.payload[key], dict) for key in _SCOPE_FIELDS):
         return False
@@ -361,7 +386,7 @@ def _unrelated_error(snapshot: _SessionSnapshot, home: Path, thread_id: str | No
         return False
     if len(threads) > 1 or len(owners) > 1 or any(len(claims[key]) > 1 for key in ("owner_id", "owner_home", "task_id", "request_id")):
         return False
-    if thread_id.strip() in {value.strip() for value in threads}:
+    if thread_id and thread_id.strip() in {value.strip() for value in threads}:
         return False
     return bool(threads or owners and str(home.resolve()) not in owners)
 

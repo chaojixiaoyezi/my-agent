@@ -1,3 +1,29 @@
+## 2026-10-28 Wave 9 B2：TUI后台瞬态刷新与上一条用户消息顶栏
+
+来源：完整阅读 `07-tasks/wave9-b2.md`（53行）及总体设计第2、3项。基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，工作树 `/tmp/wt-wave9-b2`，分支 `wave9-b2`。只改本树，不推送或部署，不运行已退役的代码尺寸脚本。
+
+- **目录观察**：原单次nofollow扫描、4096条门、逐文件stat和最老复核TTL保持；仅 `DIRECTORY_CHANGED_DURING_READ` 初读后最多再试3次，每次退避5ms。持续换代最终仍报告错误，不拿不完整旧扫描冒充成功。OSError诊断保留errno但不保留异常正文。
+- **空会话与范围**：reader和动态概要阶段均按严格原归属证据隔离其他线程坏记录；未知/冲突/非法归属继续失败关闭。本树没有任务卡中的 `inspect_session_background_processes` 或 `session_confirmed` 接口，沿真实 `list_background_processes` → TUI链路修复：owner级列表保留有效owner记录，TUI没有canonical thread时直接清观察，不读全owner。已有owner范围丢失立即清旧帧；未装配此观察能力、从未有帧的轻客户端仍静默跳过。
+- **瞬态兜底**：有效帧资格和连续失败计数绑定 `(owner_home, thread_id)`；全部为目录换代或可识别原子替换errno、且有同scope成功旧帧时，前2次静默保留，第三次告警。混合、权限、坏JSON及原因未知错误立即报告。成功才重置计数并清观察专用提示；scope变化和空新会话清资格，不消费通知或控制进程。
+- **独立顶栏**：用户角色取typed块，起始行取最终排版offset/完整原文origin；摘要净化、压空白并按Unicode字素簇和终端列宽截断。普通/详情Window各有独立header，正文行、搜索、选区与复制不插入导航文字。只选 `start_line < viewport_top`；左键释放跳到目标首行、锚点screen_row=0、关闭follow，并重新选择上一条。无目标时不占行；仅剩一行时优先正文。
+- **阅读与兼容**：顶栏显隐及终端高度变化前从最后实际帧捕获正文首行。保留Window原滚动/焦点入口和正文鼠标选择行为；完整原文继续显示原“用户”标题，不改成普通模式的 `❯`。
+
+新增 `test_wave9_tui_bg_watch_and_sticky_user_bar.py`：**51通过，0失败/错误/跳过**（`.pytest_cache/w9b2-required.xml`）。13个既有相关文件组合：**995通过，0失败/错误/跳过**（`.pytest_cache/w9b2-regression.xml`）。起始5文件基线为800通过；后来14条旧断言冲突不是“既有失败”，而是本次显式新合同的迁移：三个旧测试函数分别补canonical thread夹具、保留None线程独立坏记录诊断、要求预算内目录增长恢复后不漏新增行；超限、归属冲突、未知损坏、只读文件及按需日志断言保留，无新增skip/xfail。
+
+红绿证据保留在 `.pytest_cache/w9b2-*-red.xml`：目录、空会话、两次兜底、errno传递、20个顶栏入口/布局要求、owner范围丢失及概要阶段隔离均有实际失败后通过的观察。恢复计数测试初稿先遇缺属性，改用缺省值断言后重新确认缺失计数的真实失败；不把夹具错误当功能红例。新增负向保护和高度/最右列覆盖并非全部曾失败，不声称51项均为红例。
+
+复现（工作树根，实测Python 3.14.4，import origin已核对在本树）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_tui_view.py agent_py_agent/tests/test_tui_reading_position.py agent_py_agent/tests/test_tui_view_model.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py agent_py_agent/tests/test_tui_clipboard.py agent_py_agent/tests/test_tui_transcript.py agent_py_agent/tests/test_tui_terminal.py agent_py_agent/tests/test_tui_resource_lifetime.py agent_py_agent/tests/test_tui_threading.py agent_py_agent/tests/test_tui_combinatorial.py agent_py_agent/tests/test_tui_agent_navigation.py -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+验证边界：屏幕/点击用真实prompt_toolkit Window、Screen及MouseHandlers和DummyOutput驱动，每次按框架规则递增render_counter；不是人工终端或真实模型/通道端到端。两个独立只读审阅仅看内联关键函数，未发现节选可确证的P1/P2；不是完整diff审计。首次跨会话材料读取不可用的审阅已取消，不算成功复核。原目录reader全链、真实并发压力、不同Python/操作系统及发布后用户终端仍未独立端到端验证。索引/点击间极端并发换帧是审阅提出的条件性风险，未证实为实际串源，不宣称压力竞态已排除。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。

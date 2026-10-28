@@ -1,9 +1,10 @@
 # LLM: 本模块只启动 TUI worker 与轻量动画刷新线程；业务事件仍由 worker/runtime 发布，刷新线程不得改 reducer 状态。
 # 过程轮询按流身份与序号一起确认；换进程只重基易失游标，不重置 canonical 消息位置。
-# 模块用途: 低频刷新后台通知与当前会话只读进程观察；同范围读取失败保留旧帧，换范围先清空。
+# 模块用途: 低频刷新后台通知与当前会话只读进程观察；仅同scope已验证帧容忍两次瞬态错误，空新会话不扫owner。
 
 from __future__ import annotations
 
+import errno
 import threading
 import time
 from collections.abc import Mapping
@@ -29,6 +30,41 @@ TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT = 2
 # 去抖：距上一次成功超过这个秒数才提示。和次数门槛同时满足才显示，避免在快速恢复时误报；
 # 3 秒按 1 秒轮询节奏相当于"连续三个周期都没拿到"，足够排除单次抖动。
 TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS = 3.0
+# 同owner/thread已验证帧最多静默保留两次瞬态刷新失败，第三次报告原观察告警。
+_BG_WATCH_SILENT_TRANSIENT_FAILURES = 2
+_BG_WATCH_TRANSIENT_ERRNOS = frozenset({errno.ENOENT, getattr(errno, "ESTALE", errno.ENOENT), errno.EAGAIN})
+
+
+# LLM: 仅代表本次投影全部错误均已结构化确认瞬态；不携正文、权限或第二份进程快照。
+# 类用途: 将可短暂保留旧帧的投影错误与普通OSError区分。
+class _BackgroundWatchTransientError(OSError):
+    pass
+
+
+# LLM: 只接受明确目录换代或准确OSError类别与errno；混合、缺失或持久结构错误均立即报告，不分析异常文案。
+# 函数用途: 判断一组投影错误是否全部来自短暂目录/文件原子替换。
+def _background_watch_transient_projection(errors: object) -> bool:
+    if not isinstance(errors, (list, tuple)) or not errors:
+        return False
+    for error in errors:
+        if not isinstance(error, Mapping):
+            return False
+        code = error.get("error_code")
+        if code == "DIRECTORY_CHANGED_DURING_READ" and error.get("error") in {None, code}:
+            continue
+        if code or error.get("error") not in {"OSError", "FileNotFoundError", "BlockingIOError"}:
+            return False
+        number = error.get("errno")
+        if type(number) is not int or number not in _BG_WATCH_TRANSIENT_ERRNOS:
+            return False
+    return True
+
+
+# LLM: scope变更、未确认和/new仅清易失观察资格，不改进程状态或消费通知。
+# 函数用途: 丢弃已验证旧帧资格和连续瞬态计数。
+def _reset_background_watch_cache(navigation: object) -> None:
+    navigation._background_watch_valid_scope = None
+    navigation._bg_watch_consecutive_transient_failures = 0
 
 
 # LLM: config factory 透传同一 queue/refs/runtime/local_run_ref；不得复制状态或创建第二个控制句柄。
@@ -777,7 +813,7 @@ def _background_watch_thread_id(agent: object, navigation: object | None, *, ses
     return None
 
 
-# LLM: 只从已绑定owner读取；线程/owner改变先清旧展示，列表和详情同传thread_id，观察不创建或控制进程。
+# LLM: 仅已绑定owner/thread读原列表；范围改变先清旧帧资格，成功完成列表/详情后才登记有效帧，未知错误不转瞬态。
 # 函数用途: 刷新当前会话及未绑定旧记录的概要，打开观察页时才读取该范围选中日志。
 def _refresh_background_watch(agent: object, navigation: object | None, *, thread_id: str | None = None) -> bool:
     from ...agent.conversation.background_process_view import (
@@ -787,19 +823,29 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
 
     update = getattr(navigation, "update_background_watch_rows", None)
     home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
-    if not home or not callable(update):
+    if not callable(update):
         return False
+    if not home:
+        if getattr(navigation, "_background_watch_scope", None) is None:
+            _reset_background_watch_cache(navigation)
+            return False
+        raise LookupError("background process owner scope unavailable")
     if thread_id is None:
         thread_id = _background_watch_thread_id(agent, navigation)
+    if not thread_id:
+        _reset_background_watch_cache(navigation)
+        navigation._background_watch_scope = None
+        return bool(update([], active_count=0))
     scope = (str(Path(home)), thread_id)
     changed = False
     if getattr(navigation, "_background_watch_scope", None) != scope:
         changed = bool(update([], active_count=0))
         navigation._background_watch_scope = scope
-    if thread_id is None and callable(getattr(agent, "request_background_notices", None)):
-        raise LookupError("background process conversation scope unavailable")
+        _reset_background_watch_cache(navigation)
     result = list_background_processes(Path(home), thread_id=thread_id)
     if not result["projection_ok"]:
+        if _background_watch_transient_projection(result.get("errors")):
+            raise _BackgroundWatchTransientError("background process projection unavailable")
         raise OSError("background process projection unavailable")
     rows = sorted(result["items"], key=lambda row: not (row["alive"] or row["wake_pending"]))[:128]
     view = navigation.snapshot()
@@ -808,10 +854,13 @@ def _refresh_background_watch(agent: object, navigation: object | None, *, threa
         for index, row in enumerate(rows):
             if row["session_id"] == selected:
                 rows[index] = inspect_background_process(Path(home), selected, thread_id=thread_id)
-    return bool(update(rows, active_count=result["active_count"])) or changed
+    updated = bool(update(rows, active_count=result["active_count"]))
+    navigation._background_watch_valid_scope = scope
+    navigation._bg_watch_consecutive_transient_failures = 0
+    return updated or changed
 
 
-# LLM: 正常空会话及坏文件隔离后的成功投影均清除原观察专用告警，不能清其它kind；当前范围/运输真错仍沿原门报告。
+# LLM: 空新会话静默清观察；仅同owner/thread成功旧帧可容忍两次明确瞬态，其余立即报告，成功才清专用告警。
 # 函数用途: 按canonical线程刷新或恢复观察提示，不改消息、进程控制与完成wake链路。
 def _sync_background_watch(agent: object, navigation: object | None, *, session_id: str = "", runtime: object | None = None, snapshot_ok: bool = True, scope_error: bool = False) -> bool:
     runtime_reader = getattr(navigation, "active_runtime", None)
@@ -832,7 +881,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
             if not known_gateway and not navigation.snapshot().background_watch_active and not getattr(navigation, "_background_watch_scope", None):
                 return _clear_background_watch(navigation, display_runtime)
             raise LookupError("background process snapshot unavailable")
-        if thread_id is None and (gateway or session_id and callable(resolver)):
+        if thread_id is None:
             return _clear_background_watch(navigation, display_runtime)
         scope_confirmed = True
         changed = _refresh_background_watch(agent, navigation, thread_id=thread_id)
@@ -840,17 +889,31 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
         if not scope_confirmed or isinstance(exc, LookupError):
             navigation.update_background_watch_rows([], active_count=0)
             navigation._background_watch_scope = None
+            _reset_background_watch_cache(navigation)
             message = "后台进程观察刷新失败；会话范围未确认，已暂停显示"
         else:
+            transient = isinstance(exc, _BackgroundWatchTransientError) or (
+                type(exc) in {OSError, FileNotFoundError, BlockingIOError} and exc.errno in _BG_WATCH_TRANSIENT_ERRNOS
+            )
+            scope = getattr(navigation, "_background_watch_scope", None)
+            valid_prior = scope is not None and getattr(navigation, "_background_watch_valid_scope", None) == scope
+            if transient and valid_prior:
+                count = getattr(navigation, "_bg_watch_consecutive_transient_failures", 0) + 1
+                navigation._bg_watch_consecutive_transient_failures = count
+                if count <= _BG_WATCH_SILENT_TRANSIENT_FAILURES:
+                    return False
+            else:
+                navigation._bg_watch_consecutive_transient_failures = 0
             message = "后台进程观察刷新失败；仅保留同会话上次结果"
         display_runtime.set_notice(message, duration_seconds=6, notice_kind="background_watch_error")
         return True
     return display_runtime.clear_notice(expected_kind="background_watch_error") or changed
 
 
-# LLM: 只清观察专用易失状态与同kind提示，不能清掉其它错误或读取全owner进程作为空态回退。
+# LLM: 只清观察帧/资格/瞬态计数与同kind提示，不能清掉其它错误或读取全owner进程作为空态回退。
 # 函数用途: 统一处理新会话及主页面尚未确认范围时的静默空列表。
 def _clear_background_watch(navigation: object, display_runtime: object) -> bool:
     changed = bool(navigation.update_background_watch_rows([], active_count=0))
     navigation._background_watch_scope = None
+    _reset_background_watch_cache(navigation)
     return display_runtime.clear_notice(expected_kind="background_watch_error") or changed

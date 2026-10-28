@@ -1,5 +1,5 @@
 # LLM: 阅读位置只来自显示块身份、来源行与视口坐标；不写模型历史，不猜正文或任务状态。
-# 模块用途: 统一普通、详细和完整原文的阅读定位，并把内部分页接成连续滚动。
+# 模块用途: 统一正文与独立顶栏跳转的阅读定位，布局高度改变仍锚定正文来源，不把顶栏计入行号。
 
 from __future__ import annotations
 
@@ -21,6 +21,22 @@ class ReadingAnchor:
 def viewport_top(control: Any) -> int:
     return max(0, min(control._line_count - control._last_render_height,
                       control.cursor_line - control._last_render_height + 1))
+
+
+# LLM: 仅从最后实际显示帧取顶部来源，不能拿已按新宽度排版的帧解释旧坐标；锚点固定screen_row=0。
+# 函数用途: 顶栏显隐或终端高度改变前保住正文首行，避免导航栏挤动正在阅读的位置。
+def capture_viewport_top_anchor(control: Any, frame: Any) -> ReadingAnchor | None:
+    top = viewport_top(control)
+    if frame.line_origins:
+        if top >= len(frame.line_origins):
+            return None
+        key, row = frame.line_origins[top]
+        return ReadingAnchor(key, row, 0) if key else None
+    previous = [(key, start) for key, start in frame.block_line_offsets if start <= top]
+    if not previous:
+        return None
+    key, start = previous[-1]
+    return ReadingAnchor(key, top - start, 0)
 
 
 # LLM: 同宽原文页的内容不可变，异步邻页只能改变其窗口偏移；按页内显示行恢复，不把长逻辑行归零。
