@@ -21,6 +21,28 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     # 此适配器尚未投影 Responses 工具参数增量，不能继承 Chat 已实现能力的标志。
     supports_tool_input_progress = False
 
+    # LLM: Only Responses consumes pool options; freeze per-backend config without changing Chat/Messages transport behavior.
+    # 函数用途: 初始化Responses会话连接池选项。
+    def __init__(self, options):
+        super().__init__(options)
+        self.responses_ws_idle_ttl_seconds = max(0, int(options.responses_ws_idle_ttl_seconds))
+        self.responses_ws_max_idle_connections = max(0, min(256, int(options.responses_ws_max_idle_connections)))
+
+    # LLM: Normal Responses HTTP envelopes use this hook; OAuth constructs its own envelope and invokes the same preparation explicitly.
+    # 函数用途: 在最终HTTP信封上绑定Responses会话亲和，不改变其它协议请求。
+    def _gateway_request(self, call, payload=None, headers=None, *, options=None):
+        request = super()._gateway_request(call, payload, headers, options=options)
+        return self._prepare_http_responses_request(request)
+
+    # LLM: Options are frozen, but credentials and owner/session always come from this request, not shared backend fields.
+    # 函数用途: 统一配置HTTP Responses路由状态的捕获与回放。
+    def _prepare_http_responses_request(self, request):
+        from .responses_websocket import prepare_http_responses_request
+
+        return prepare_http_responses_request(
+            request, provider_id=str(getattr(self, "auth_ref", {}).get("provider_id") or ""),
+            idle_ttl_seconds=self.responses_ws_idle_ttl_seconds, max_idle=self.responses_ws_max_idle_connections)
+
     # LLM: capability 记录使用真实规范接口，不推断模型家族。
     # 函数用途: 返回能力探针使用的接口地址。
     def _tool_endpoint(self) -> str:
@@ -34,6 +56,7 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
     #   降档位置只读typed布局及compaction_trigger：远端压缩追加于完整历史之后，文字摘要才可放在新volatile指令前。
     #   业务工具请求的完整空输出沿 MODEL_EMPTY_RESPONSE 合同交回有界修复；宿主显式探测用途由探测判证据，不改原生块及失败。
     #   诊断从最终payload和原始响应只取类型、状态、长度；不落正文、不改供应商错误或重试。
+    #   cache用量只按服务商上报计数计算；WS复用事实由真实传输产生，HTTP不能自行声明复用。
     # 函数用途: 用工作片冻结的私有配置及 top_p 发送一次请求，转成上层通用模型结果。
     def _generate(self, request) -> ModelResponse:
         messages = project_input_media(repair_native_messages(request.messages), self.input_media_max_bytes)
@@ -83,6 +106,11 @@ class OpenAIResponsesBackend(OpenAICompatibleBackend):
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}",
                    **_subscription_affinity_headers(subscription)}
         obj = self._send_responses_request(payload, headers, request)
+        from .responses_ws_pool import cache_usage
+
+        usage = obj.get("usage") or {}
+        obj["usage"] = cache_usage(usage, reused=subscription and usage.get("ws_connection_reused") is True,
+                                   incremental=subscription and usage.get("incremental_chain_hit") is True)
         return ModelResponse(backend=self.name, model_call_diagnostic=responses_call_diagnostic(obj, payload, request), **_checked_response_fields(obj, self.model_name, tools, request.is_probe))
 
     # LLM: 只按结构化事实判断：档案显式 on/off 优先；auto 按已核对的模型名前缀 gpt-6（OpenAI 文档：GPT-6 及以后

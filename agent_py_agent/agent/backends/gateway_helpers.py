@@ -152,6 +152,8 @@ class GatewayRequest:
     connection_pool: Any | None = field(default=None, repr=False, compare=False)
     # 只限制物理在途请求；0 保留原路径，无排队锁等待。
     provider_max_concurrent_requests: int = 0
+    # Optional host-owned Responses routing observer; None preserves every other protocol's HTTP behavior and bytes.
+    response_headers_observer: Any | None = field(default=None, repr=False, compare=False)
 
     # LLM: 新限制在信封创建时校验，不修改共享 backend 或普通请求默认值；校验失败不产生网络副作用。
     # 许可请求另须零重试、禁止重定向且有绝对期限，由同一校验入口拒绝。
@@ -704,6 +706,7 @@ def _gateway_admitted_attempt(request: GatewayRequest, attempt: int, last_attemp
 # LLM: 每次物理 open 都发布观察事实；显式重试合并无定位 400 与网络重试，严格错误正文也不能绕过 deadline/大小上限。
 # 带发送许可时，硬门位于最终字节与期限复核之后、started 遥测与任何 DNS/连接之前，不包 try/except。
 # 观察者开启分段计时时，计时器在 started 前创建（建连阶段从此刻起算），每个尝试事件附当时的阶段快照。
+# Responses可选响应头观察者只接收宿主响应头；失败不改变请求或重试，默认None保持其它协议不变。
 # 函数用途: 在准入完成后发送一次连接及响应头请求，登记真实失败或有限退避，不重放半截正文。
 def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt: int, *, provider_lease=None):
     req = _urllib_request(request)
@@ -775,6 +778,11 @@ def _gateway_request_attempt(request: GatewayRequest, attempt: int, last_attempt
         },
         timing,
     )
+    if request.response_headers_observer is not None:
+        try:
+            request.response_headers_observer(getattr(response, "headers", None))
+        except Exception:
+            pass
     return response
 
 

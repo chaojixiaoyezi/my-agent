@@ -11,8 +11,8 @@
 #   实验发送许可不支持（拒绝发送）。
 #   与官方 Codex 一致不主动发心跳 ping，只自动回应服务端 ping（09-30 审计：49 次里 2 次在 23–24 秒中途断开，紧跟客户端
 #   第 20 秒的 ping）。改动须同步 test_responses_websocket。
-#   recv的2秒超时只作兜底，取消仍由当前物理连接close_socket即时唤醒。
-# 模块用途: 通过 WebSocket 运输订阅模型长回复；每次连接独占物理名额，关闭或失败立即归还。
+#   recv的2秒超时只作兜底，取消仍由当前物理连接close_socket即时唤醒；干净终态先归还请求租约再回会话池。
+# 模块用途: 复用隔离的Responses会话连接；空闲不占并发名额，失败丢弃旧链且只在无输出时有界回退。
 from __future__ import annotations
 
 import email.message
@@ -21,10 +21,12 @@ import json
 import time
 import urllib.error
 from collections.abc import Iterator
+from dataclasses import replace
 from threading import Event, Timer
 
-from .errors import ProviderTransientError
+from .errors import ProviderResponseError, ProviderTransientError
 from .gateway_helpers import (
+    _PROVIDER_ATTEMPT_OBSERVER,
     _RETRYABLE_HTTP_DELAYS_SECONDS,
     _RETRYABLE_HTTP_STATUS_CODES,
     GatewayRequest,
@@ -45,6 +47,15 @@ from .gateway_helpers import (
 )
 from .gateway_request_limits import remaining_deadline_seconds
 from .request_scope import acquire_provider_request, release_provider_response
+from .responses_ws_pool import (
+    ConnectionEntry,
+    ResponsesSessionPool,
+    SessionState,
+    cache_usage,
+    incremental_payload,
+    remember_completed,
+    session_pool_key,
+)
 
 # Responses WebSocket 协议版本头；与官方命令行使用的取值一致，服务端据此启用 response.create 消息。
 BETA_HEADER_VALUE = "responses_websockets=2026-02-06"
@@ -58,6 +69,13 @@ _STOP_CHECK_SECONDS = 2.0
 _STOPPED_MESSAGE = "模型接口流式请求已被用户停止"
 # 这些事件之后服务端不会再发本次回复的内容；产出后即结束，不再等下一条（错误事件由 collect_response 报错）。
 _TERMINAL_EVENT_TYPES = frozenset({"response.completed", "response.incomplete", "response.failed", "error"})
+_POOL = ResponsesSessionPool()
+
+
+# LLM: Internal control signal consumed only before any output was delivered; provider error text is never used for retry decisions.
+# 类用途: 标记结构化previous_response_id失效，供一次新连接全量恢复。
+class _PreviousResponseRejected(Exception):
+    pass
 
 
 # LLM: 只做协议名替换（https→wss、http→ws），路径和查询保持原样；不按域名做任何分支。
@@ -70,27 +88,185 @@ def websocket_url(url: str) -> str:
     return url
 
 
-# LLM: 生成器：打开连接、限时发 response.create、逐条产出事件；取消直接关 socket，正常收尾用有限 close_timeout。
-#   请求体沿用 payload（含 stream=true），只加 type 字段；发送许可不支持时拒绝，不发任何字节。
-# 函数用途: 限时发送 Responses 请求并逐条返回事件；所有出口关闭原连接并归还物理名额。
-def iter_responses_websocket(request: GatewayRequest) -> Iterator[str]:
+# LLM: The real collector stops at terminal yield: release/clean-pool return must PRECEDE it. Borrowed sockets are request-exclusive.
+#   Recovery is bounded to once, before output, only for structured previous-ID rejection/connection-close; max_retries=0 remains strict.
+#   done保留完整事件及output_index，增量锚点复用既有collector的排序、去重与未知索引规则，不另建到达顺序历史。
+# 函数用途: 按宿主会话复用连接和增量链，逐请求借还租约，脏连接即时丢弃。
+def iter_responses_websocket(request: GatewayRequest, *, provider_id: str = "", idle_ttl_seconds: float = 300,
+                             max_idle: int = 32) -> Iterator[str]:
     if request.send_permit is not None:
         raise ValueError("WebSocket 传输不支持实验发送许可，未发送请求。")
+    if "previous_response_id" in request.payload:
+        raise ValueError("previous_response_id 只能由本次会话连接的完整历史锚点生成。")
     remaining_deadline_seconds(request.deadline)
-    connection = _open_connection(request)
-    completed = False
+    key = session_pool_key(request, provider_id)
+    state = _POOL.state(key, idle_ttl_seconds, max_idle)
+    for attempt in range(2):
+        entry, connection, clean, retry, visible, terminal, done = None, None, False, False, False, None, []
+        reused, terminal_text = False, ""
+        try:
+            entry = _POOL.take(key, state) if state is not None and attempt == 0 else None
+            if entry is not None and not _socket_clean(entry.connection):
+                entry.discard()
+                entry = None
+            reused = entry is not None
+            payload = incremental_payload(entry, request.payload) if entry is not None else request.payload
+            sending = _sticky_request(replace(request, payload=payload), state)
+            if entry is None:
+                connection = _open_connection(sending)
+                entry = ConnectionEntry(connection, state or SessionState(0))
+                _POOL.capture(key, state, getattr(getattr(connection, "response", None), "headers", None))
+            else:
+                connection = entry.connection
+                connection._provider_request_lease = acquire_provider_request(sending, _emit_provider_queue)
+                _reused_attempt(sending)
+            with _provider_interrupt_callback(connection.close_socket):
+                _send_create_message(connection, sending)
+                for text in _events(connection, sending):
+                    event = _protocol_event(text)
+                    kind = event.get("type")
+                    if reused and not visible and _previous_rejected(event) and attempt == 0 and request.max_retries != 0:
+                        raise _PreviousResponseRejected()
+                    if kind in _TERMINAL_EVENT_TYPES:
+                        terminal = event
+                        terminal_text = text
+                        break
+                    if kind == "response.output_item.done" and isinstance(event.get("item"), dict):
+                        done.append(event)
+                    visible = visible or kind not in {"response.created", "response.in_progress", "codex.rate_limits"}
+                    yield text
+            response = (terminal or {}).get("response", {})
+            if not isinstance(response, dict):
+                raise ProviderResponseError("Responses 流终态格式无效。")
+            if terminal is not None and "response" in terminal and terminal.get("type") in {"response.completed", "response.incomplete"}:
+                response["usage"] = cache_usage(response.get("usage"), reused=reused, incremental="previous_response_id" in payload)
+                terminal_text = json.dumps(terminal, ensure_ascii=False)
+            _raise_if_stopped()
+            completed = (terminal or {}).get("type") == "response.completed" and response.get("status") == "completed"
+            if completed and state is not None and isinstance(response.get("id"), str) and response["id"] and _socket_clean(connection):
+                remember_completed(entry, request.payload, response, done)
+                clean = True
+        except BaseException as exc:
+            clean = False
+            retry = reused and not visible and attempt == 0 and request.max_retries != 0 and _recoverable_reuse_error(exc)
+            if not retry or _provider_is_interrupted():
+                raise
+        finally:
+            if connection is not None:
+                release_provider_response(connection)
+                connection._provider_request_lease = None
+            if entry is not None:
+                if clean and not _provider_is_interrupted():
+                    _POOL.put(key, entry, idle_ttl_seconds, max_idle)
+                elif state is None:
+                    _close_admitted_connection(connection, (terminal or {}).get("type") == "response.completed")
+                else:
+                    entry.discard()
+        if retry:
+            continue
+        if terminal is not None:
+            yield terminal_text
+        return
+
+
+# LLM: A nonblocking read must find NO application frame; any unexpected data, close, or unsupported socket is conservatively dirty.
+# 函数用途: 验证终态后及借出前没有未读帧，防止下一请求读到旧数据。
+def _socket_clean(connection) -> bool:
     try:
-        with _provider_interrupt_callback(connection.close_socket):
-            _send_create_message(connection, request)
-            yield from _events(connection, request)
-            completed = True
-    finally:
-        _close_admitted_connection(connection, completed)
+        connection.recv(timeout=0)
+    except TimeoutError:
+        return True
+    except Exception:
+        return False
+    return False
 
 
-# LLM: 正常关闭和用户中止均只触碰当前连接；close 自身报错也无条件归还物理名额。
+# LLM: Malformed JSON/object/type is a protocol violation, never a reusable stream or an implicit successful EOF.
+# 函数用途: 只接收合法的结构化Responses事件。
+def _protocol_event(text: str) -> dict:
+    try:
+        event = json.loads(text)
+    except ValueError as exc:
+        raise ProviderResponseError("Responses 流包含无效 JSON。") from exc
+    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+        raise ProviderResponseError("Responses 流事件格式无效。")
+    return event
+
+
+# LLM: Match exact provider codes only; arbitrary error messages never authorize replay of a potentially billed request.
+# 函数用途: 判断服务端是否明确拒绝旧response锚点。
+def _previous_rejected(event: dict) -> bool:
+    error = event.get("error") or (event.get("response") or {}).get("error") or event
+    return isinstance(error, dict) and error.get("code") in {"previous_response_not_found", "invalid_previous_response_id"}
+
+
+# LLM: Timeouts, cancellation and general midstream errors are NOT replayable; only a closed reused connection or explicit bad ID is.
+# 函数用途: 区分可安全全量恢复的复用失效与必须向上层报告的失败。
+def _recoverable_reuse_error(exc: BaseException) -> bool:
+    from websockets.exceptions import ConnectionClosed
+
+    return isinstance(exc, (_PreviousResponseRejected, ConnectionClosed)) or (
+        isinstance(exc, ProviderTransientError) and isinstance(exc.__cause__, ConnectionClosed))
+
+
+# LLM: Never accept an arbitrary sticky input header; only server-origin state for this exact identity may be echoed.
+# 函数用途: 给本次握手附加可信路由状态，不修改原请求头。
+def _sticky_request(request: GatewayRequest, state: SessionState | None) -> GatewayRequest:
+    headers = {name: value for name, value in request.headers.items() if name.lower() != "x-codex-turn-state"}
+    if state is not None and state.turn_state_header:
+        headers["x-codex-turn-state"] = state.turn_state_header
+    return replace(request, headers=headers)
+
+
+# LLM: Reused physical sends must be visible in the same attempt ledger, with full request-local diagnostic input and no socket headers.
+# 函数用途: 为复用连接上的真实发送补齐请求尝试观察事件。
+def _reused_attempt(request: GatewayRequest) -> None:
+    event = _attempt_event(request, 1)
+    _emit_provider_attempt({**event, "status": "started"})
+    _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
+
+
+# LLM: Follow the HTTP observer's explicit diagnostics switch; surface contains irreversible summaries, never input text/token identity.
+# 函数用途: 生成WebSocket请求尝试的既有账本事件及前缀诊断。
+def _attempt_event(request: GatewayRequest, attempt: int) -> dict:
+    event = {"attempt_id": f"provider-ws:{time.time_ns()}:{attempt}", "method": "WEBSOCKET", "path": request.path}
+    if getattr(_PROVIDER_ATTEMPT_OBSERVER, "cache_diagnostics", False):
+        from .cache_diagnostics import request_surface
+
+        event["request_surface"] = request_surface(request.payload, request.url)
+    return event
+
+
+# LLM: Host calls this on explicit same-thread reset; /new gets a different host session key and cannot read old state.
+# 函数用途: 清理当前宿主会话的空闲连接、sticky头和增量链。
+def reset_responses_session() -> None:
+    from .provider_headers import current_provider_session
+
+    session = current_provider_session()
+    if session:
+        _POOL.close(session)
+
+
+# LLM: Bind only Responses requests after actual credential refresh, so response callbacks cannot cross a changed account or owner.
+# 函数用途: 为HTTP Responses信封附加当前会话路由头及服务端握手头收集器。
+def prepare_http_responses_request(request: GatewayRequest, *, provider_id: str = "", idle_ttl_seconds: float = 300,
+                                   max_idle: int = 32) -> GatewayRequest:
+    key = session_pool_key(request, provider_id)
+    state = _POOL.state(key, idle_ttl_seconds, max_idle)
+
+    # LLM: Capture one exact state object; reset/eviction prevents this late response from restoring retired headers.
+    # 函数用途: 只回收本请求所属会话的路由状态。
+    def capture(headers) -> None:
+        _POOL.capture(key, state, headers)
+
+    return replace(_sticky_request(request, state), response_headers_observer=capture if state is not None else None)
+
+
+# LLM: Legacy explicit-close helper releases the request lease before closing; pooled transport uses its own pre-terminal return path.
 # 函数用途: 按完成事实关闭 WebSocket，并及时归还供应商名额而不依赖 GC。
 def _close_admitted_connection(connection, completed: bool) -> None:
+    release_provider_response(connection)
+    connection._provider_request_lease = None
     try:
         if completed:
             connection.close()
@@ -101,30 +277,44 @@ def _close_admitted_connection(connection, completed: bool) -> None:
 
 
 # LLM: 握手失败按 HTTP 同一套可重试状态和网络错误判断；每次尝试都发布 started / failed / response_opened 观察事件，
-#   与 HTTP 传输的账本口径一致（method=WEBSOCKET）。用户停止优先，不进入重试。
-# 函数用途: 先取得名额再记录真实握手；失败释放后有限重试，返回已打开且持有名额的连接。
+#   与HTTP传输的账本口径一致。取得lease后立即纳入BaseException保护；诊断异常原样抛出，不误归握手失败。
+#   连接返回前所有失败都归还名额；已打开但尚未交给调用方的连接同时关闭，取消不依赖traceback释放或GC。
+# 函数用途: 保护首次请求从取得名额到交出连接的全部步骤，失败立即归还而不留下隐形占用。
 def _open_connection(request: GatewayRequest):
     last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS) if request.max_retries is None else request.max_retries
     for attempt in range(last_attempt + 1):
+        connection = None
         lease = acquire_provider_request(request, _emit_provider_queue)
-        event = {"attempt_id": f"provider-ws:{time.time_ns()}:{attempt + 1}", "method": "WEBSOCKET", "path": request.path}
-        _emit_provider_attempt({**event, "status": "started"})
         try:
-            connection = _connect_admitted(request, lease)
-        except Exception as exc:  # noqa: BLE001 握手/网络异常统一交给下面的分类，不吞掉
-            retry = _handshake_retry(exc, request, attempt, last_attempt)
-            _emit_provider_attempt({**event, "status": "failed", "error_type": type(exc).__name__,
-                                    "http_status": _status_code(exc), "retry_scheduled": retry})
-            if not retry:
-                raise _handshake_error(exc, request) from exc
-            _request_retry_wait(request, _network_retry_delay_seconds(attempt))
-            continue
-        _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
-        return connection
+            event = _attempt_event(request, attempt + 1)
+            _emit_provider_attempt({**event, "status": "started"})
+            try:
+                connection = _connect_admitted(request, lease)
+            except Exception as exc:  # noqa: BLE001 仅握手/网络异常进入既有分类与退避
+                retry = _handshake_retry(exc, request, attempt, last_attempt)
+                _emit_provider_attempt({**event, "status": "failed", "error_type": type(exc).__name__,
+                                        "http_status": _status_code(exc), "retry_scheduled": retry})
+                if not retry:
+                    raise _handshake_error(exc, request) from exc
+                _request_retry_wait(request, _network_retry_delay_seconds(attempt))
+                continue
+            _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
+            return connection
+        except BaseException:
+            if lease is not None:
+                lease.release()
+            if connection is not None:
+                connection._provider_request_lease = None
+                try:
+                    connection.close_socket()
+                except BaseException:
+                    # 清理失败不能遮住原始诊断异常或用户中断；租约已经显式归还。
+                    pass
+            raise
     raise RuntimeError("unreachable websocket retry state")
 
 
-# LLM: 每次握手在 started 前已取得名额；失败先释放再交原退避，成功名额跟随 connection 到关闭。
+# LLM: 每次握手在started前取得本请求名额；失败释放再退避，成功由响应终态归还，空闲连接不保留lease。
 # 函数用途: 用已准入名额保护一次 WebSocket 连接，排队不计入握手/首包等待。
 def _connect_admitted(request: GatewayRequest, lease):
     try:

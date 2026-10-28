@@ -846,6 +846,10 @@ model_queue_wait_seconds: 0
 # 每个Python进程、每个HTTP origin（协议/主机/端口）的物理请求上限，0关闭。
 # 开启按可信owner公平排队；同origin共用，不跨进程/代理别名计额，不保证消除RPM/TPM限制。
 provider_max_concurrent_requests: 0
+# 仅用于Responses会话WebSocket：空闲连接不占用供应商请求并发名额。
+# 空闲存活时间（秒）与空闲池容量；任一值设为0即关闭连接复用。
+responses_ws_idle_ttl_seconds: 300
+responses_ws_max_idle_connections: 32
 
 # 模型名称；不设置占位名称，不回退到其它模型。
 model_name: ""

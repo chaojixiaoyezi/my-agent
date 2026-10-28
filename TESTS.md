@@ -573,6 +573,51 @@ git -C /tmp/wt-wave9-b3 diff --check db4d5de92..HEAD
 
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
+
+## 2026-10-28 Wave 9 B5 Round 2：诊断租约、done锚点顺序与模型隔离
+
+来源：`07-tasks/fix-wave9-b5.md`（Stage 3：c8/c16/Argon审计）；本轮干净起点`a702729602fb5cc65b83334f6a4c30b7ed0dab9b`，门禁比较基线仍用任务指定的`db4d5de92`。仅原派工工作树和`wave9-b5`分支，不推送、不合并main、不部署，不运行已退役的体积检查。
+
+逐项核实与修复：
+
+1. `_open_connection`取得租约后，诊断生成/started事件原先在保护范围外。现立即进入`BaseException`保护，诊断失败保留原异常，不误归握手/网络错误；交出连接前失败立即归还租约，已打开但未交出的socket一并关闭。复用连接的准入和诊断原本已经处于iterator的`try/finally`内，保留该链路。新增测试保留实际异常/traceback，在`except TypeError`内断言计数立即为`(0, 0)`并实际完成随后同端点请求；另覆盖started/response_opened诊断中断。原版3项均红，修复后通过。
+2. done集合现在保留完整事件及`output_index`；空terminal output的锚点通过既有`collect_response`排序/去重，直接把其返回载体交给`response_fields`，不再展开字典丢失真实索引/冲突属性。乱序`1→0`、重复`1→0→1`、未知索引混合`1→unknown→0`三项均先观察到增量命中False，修复后都只发送工具结果delta并带previous ID。
+3. 池键加入`str(model or "").strip()`，模型位于session之前，reset按末项仍能清该会话全部模型。回归实际运行同线程`model-a → model-b → model-a`：前两次必须开不同socket、B不继承A的sticky头，切回A仍走A的有效增量链；覆盖模型名空白归一及reset同时清理两者。原版只开1条socket而失败，修复后通过。原配置变化测试仍保留，切模型额外断言分连接；同模型变instructions/tools仍验证全量、无旧previous ID，没有删除/跳过测试。
+4. YAML与AgentConfig的TTL/容量说明改为中文；改动函数保留双层用途/契约注释。
+
+红绿证据：`.pytest_cache/b5-r2-lease-{red,green}.xml`、`b5-r2-order-{red,green}.xml`、`b5-r2-model-{red,green}.xml`。独立gpt-6-astra high静态审查仅使用内联源码，未发现本轮阻塞项；其建议的response_opened中断和identity conflict元数据补证均已由主代理实际测试覆盖，冲突响应不会建立增量锚点。不声称审查者实际跑过测试或验证真机缓存。
+
+最终结果：指定两测试文件**80项通过**（B5文件49项、队列传输31项）；扩展16测试文件**311项通过，0失败/报错/跳过**，覆盖WS、Responses组包/缓存键/推理/错误、OAuth、配置、物理队列和既有Chat/Messages后端。证据为`.pytest_cache/b5-r2-final.xml`、`.pytest_cache/b5-r2-regression.xml`。指定Ruff通过，`check_doc_sync.py --base db4d5de92`返回`DOC_SYNC_PASS`；基线区间及工作区diff检查通过。未删除测试、放宽断言或添加skip/xfail；旧“模型配置改变发全量”用例升级为同时核对模型物理连接隔离。
+
+本轮指定验收命令（cwd为工作树根）：
+```bash
+python3 -m pytest /tmp/wt-wave9-b5/agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py /tmp/wt-wave9-b5/agent_py_agent/tests/test_provider_queue_transport.py -q --tb=short
+ruff check /tmp/wt-wave9-b5/agent_py_agent/agent/backends /tmp/wt-wave9-b5/agent_py_agent/agent/settings /tmp/wt-wave9-b5/agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py
+python3 /tmp/wt-wave9-b5/scripts/check_doc_sync.py --base db4d5de92
+git -C /tmp/wt-wave9-b5 diff --check db4d5de92..HEAD
+```
+
+本轮未进行真实astra/sol计费调用、部署或生产长时间运行；不把模拟usage或本机loopback结果外推为真实服务商缓存命中率。
+
+## 2026-10-28 Wave 9 B5：Responses会话WebSocket与Codex缓存亲和
+
+来源：`07-tasks/wave9-b5.md`，主参考总体计划第7项及任务内Stage 1合同；基线`db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅派工工作树改动，不推送、部署或运行退役的体积检查。
+
+做法：实际Responses后端是`agent/backends/responses.py`（本基线不存在任务描述中的`openai_responses.py`）。新增`responses_ws_pool.py`保存进程内、宿主owner+thread/端点/实际认证指纹/provider隔离的闲置连接与亲和状态，默认TTL 300秒、容量32（0关闭，容量上界256），配置沿原YAML/AgentConfig/BackendOptions/工厂及规范化链路透传。Chat/Messages不启用这些池选项；HTTP公共信封只新增默认None的宿主响应头观察者，实际仅Responses使用，不改其它协议请求字节。
+
+- 物理请求租约在终态交给收集器前归还；闲置socket不持有lease。只有合法completed且没有余帧的连接可回池；超时、取消、解析/准备失败及非干净终态清连接和锚点。
+- 增量锚点包含完整input及已有原生重放codec生成的assistant输出，以唯一wire编码器逐字节检查前缀和请求选项；不改本地完整历史。compaction立即清锚点，不新增raw-tail保留配置。
+- 已复用连接在未交出任何内容事件前断开、或服务端明确拒绝previous ID时，仅一次新连接全量恢复，保留原prompt_cache_key；已经产生内容不隐式重放；显式零重试仍不恢复；拒绝外来previous_response_id。
+- WS/HTTP握手头仅捕获合法服务端`x-codex-turn-state`，禁止用户自定义覆盖。新宿主会话使用独立键，不继承旧头；同会话显式reset入口`reset_responses_session()`清头和闲置连接，并撤销在途旧代次回池；已发送请求不因此跨线程强杀。
+- usage附`cached_tokens`、`uncached_input_tokens`、`cache_hit_rate`、`ws_connection_reused`、`incremental_chain_hit`；缺失供应商计数保留None，不冒充0命中；WS物理请求也沿原观察开关上报`request_surface`。
+
+新增`test_wave9_astra_codex_cache_optimization.py`：完整多步工具链（含Codex只发output_item.done）、隔离、sticky头及HTTP收集/回放、TTL/LRU、dirty/error/cancel、一次恢复上限、零重试、迟到余帧、reset并发代次、配置归一与usage；另有真实本机loopback WebSocket（合成服务端响应，仅验证传输，不验证真实缓存命中率）。既有`test_provider_queue_transport.py`两项由“流关闭才释放”更新为B5“终态即释放”，保留关闭异常可见与零泄漏检查，不skip/xfail。
+
+TDD证据保存在`.pytest_cache/b5-*.xml`：原始12项红测；扩展17红6绿；HTTP亲和头单红；独立静态复核指出的准备失败漏关、完成后异常仍回池、TTL调度/借出过期、reset旧对象及外来ID均先有失败复现，再修复。没有使用模拟计数宣称97–99%真机命中率。
+
+复现门禁（cwd必须为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py agent_py_agent/tests/test_responses_websocket.py -q --tb=short
 python3 scripts/check_import_boundaries.py
 ruff check agent_py_agent scripts
 git diff --check
@@ -629,6 +674,10 @@ git diff --check
 ```
 
 独立审阅只覆盖提供的内联实码摘录，异常链洗白、force低估未裁剪和跨turn裸ID风险由作者本地复现并修正；不声称独审执行了全diff或测试。未跑全仓、Linux/Windows、真实供应商或飞书/TUI端到端，也未运行已退休尺寸门。
+
+验证结果：指定两文件65项通过（新增B5文件41项、既有WS文件24项）；扩展16文件303项通过，0失败/报错/跳过，涵盖Responses组包/缓存键/推理/失败分类、物理队列、OAuth、跨磁盘重载wire字节、签名与配置合同，以及Chat/Messages既有后端。`ruff check agent_py_agent scripts`与`check_import_boundaries.py`通过，导入边界findings=0；`git diff --check`通过。证据：`.pytest_cache/b5-targeted.xml`、`.pytest_cache/b5-final.xml`。
+
+局限：未部署、未向真实astra/sol端点发送计费请求；97–99%真实命中率、外部网络可达性和生产多owner长时间稳定性未验证。独立gpt-6-astra high只读审查基于内联源码，不冒充其运行过测试。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
