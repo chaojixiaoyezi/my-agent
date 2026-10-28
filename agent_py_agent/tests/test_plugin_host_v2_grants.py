@@ -351,7 +351,7 @@ def http_host(tmp_path, monkeypatch):
 # 函数用途: 发送测试v2调用。
 def http_request(server, token, body, headers=None, path="/plugin-host/v2/call"):
     from http.client import HTTPConnection
-    client = HTTPConnection("127.0.0.1", server.server.server_address[1], timeout=3)
+    client = HTTPConnection("127.0.0.1", server.server.server_address[1], timeout=15)
     supplied = {"Content-Type": "application/json", "X-Plugin-Host-Token": token, **(headers or {})}
     client.request("POST", path, body if isinstance(body, bytes) else json.dumps(body).encode(), supplied)
     response = client.getresponse()

@@ -64,7 +64,7 @@ jobs:
           files = [f for idx, f in enumerate(all_files) if idx % total_shards == shard_idx]
           batch_size = 25
           batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
-          workers = max(1, min(os.cpu_count() or 4, 4))
+          workers = max(1, min(os.cpu_count() or 2, 2))
           root_tmp = Path(tempfile.mkdtemp(prefix="pytest_ci_shards_"))
 
           def run_batch(idx: int, batch: list[str]):

@@ -855,17 +855,40 @@ def _readonly_mount_unchanged(path: Path, arguments: tuple[str, str, str], mount
     return False
 
 
+# LLM: 对非软链接隐藏目录复用已解析父目录，避免对每个Owner的托管子目录重复逐级realpath；软链接仍完整resolve并核验目标为目录。
+# 函数用途: 将存在的隐藏目录候选解析为规范路径字符串，不存在或非目录时返回None。
+def _resolve_existing_hidden_dir(raw: Path, resolved_parents: dict[Path, Path]) -> str | None:
+    try:
+        candidate = Path(raw).expanduser()
+        st = candidate.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            resolved = candidate.resolve(strict=False)
+            return os.fspath(resolved) if resolved.is_dir() else None
+        if not stat.S_ISDIR(st.st_mode):
+            return None
+        parent = candidate.parent
+        resolved_parent = resolved_parents.get(parent)
+        if resolved_parent is None:
+            resolved_parent = parent.resolve(strict=False)
+            resolved_parents[parent] = resolved_parent
+        path = resolved_parent / candidate.name if candidate.name else resolved_parent
+        return os.fspath(path)
+    except (OSError, RuntimeError):
+        return None
+
+
 # LLM: H2：宿主托管存储对模型命令隐藏。只盖已存在的目录（宿主按 owner 布局列出），排在所有挂载之后才能压过可写父目录；
 #   --tmpfs 换成空目录、--remount-ro 让它只读，写进去也不会落到真实存储。改动须同步 test_host_managed_store_access.py。
 # 函数用途: 在 bwrap 参数末尾用只读空目录盖住要隐藏的宿主托管存储。
 def _append_hidden_mounts(argv: list[str], paths: tuple[Path, ...]) -> None:
-    seen: set[Path] = set()
+    seen: set[str] = set()
+    resolved_parents: dict[Path, Path] = {}
     for raw in paths:
-        path = Path(raw).resolve(strict=False)
-        if path in seen or not path.is_dir():
+        path_str = _resolve_existing_hidden_dir(raw, resolved_parents)
+        if path_str is None or path_str in seen:
             continue
-        seen.add(path)
-        argv += ["--tmpfs", str(path), "--remount-ro", str(path)]
+        seen.add(path_str)
+        argv += ["--tmpfs", path_str, "--remount-ro", path_str]
 
 
 # LLM: 所有 POSIX shell 命令都必须经此入口，保证管道任一阶段失败会成为命令失败。
