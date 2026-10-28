@@ -1,3 +1,51 @@
+## 2026-10-28 Wave 9 A3：SecOps 插件 API 与 SQLite 闭环
+
+来源：完整阅读修订后的 `07-tasks/wave9-a3.md`。工作树 `/tmp/wt-wave9-a3`，分支 `wave9-a3`，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。本任务明确允许外部插件目录独立维护源码；仓内仅提交本节、`CODEBASE_TREE.md` 和新测试，不往通用 Host 包塞垂直业务路由。
+
+### 实现与安全边界
+
+- 外部 `workbench_server.py` 新增独立 `SecOpsService`、HTTP 工厂和标准库引擎。文件型 `portal_state.db` 持久保存插件、MCP、连接器、告警、PCAP、SOAR 剧本/执行、ASM、API 风险、复现推送及认证/审批状态。对象按已验证会话 owner 分区，浏览器 body 的 owner/admin/approved 不提供权限。私有目录 0700、数据库及生成管理令牌 0600；不声称实现了数据库密文加密。
+- ZIP/tar.gz 在解包前校验摘要、路径、普通文件类型和声明清单，限制原始包、整个解压流（包括 PAX/GNU 元数据）与逐文件体积。MCP 仅使用已登记且摘要未变的 Python 入口和精确声明 argv，`shell=False`；真实 initialize/tools/list 握手后才记录工具。POSIX 独立进程组停止、未知进程状态拒绝、重载实际重新握手；不按数据库 PID 盲杀，不声称是恶意插件的 OS 沙箱。
+- SIEM/EDR 查询使用本地 SQLite 或显式登记的真实 HTTP 连接器；时间、DSL、分页有界，零结果保留来源未知。告警规范化严重度并用 SQLite 幂等去重。PCAP 解析大小端 classic PCAP、Ethernet/VLAN/IPv4/TCP/UDP/DNS/HTTP 元数据及静态异常；不重组 IP 分片/TCP 流，不解析 PCAPNG，未覆盖部分显式记录。OpenAPI 3.x/Swagger 2.0 JSON、安全 YAML 子集和流量字段分析只产生静态线索，BOLA 等不伪称已实证漏洞，不回显字段秘密值。
+- SOAR 高影响动作必须持有已由可信配置入口批准、绑定 owner/action/device/params 摘要和有效期的审批，SQLite 事务单次消费；缺失/伪造/错配/过期/重放均 `403 SOAR_APPROVAL_REQUIRED`。真实执行器未配置或上游失败明确拒绝，不能写成设备已隔离。保存剧本不能替代审批。节点调试只运行已保存指定纯节点，或受信 Host 调试桥，不遍历危险兄弟节点，不 eval/shell。
+- ASM 只做可信范围内有界 DNS/TCP 连接，冻结解析 IP、防止域名隐授私网，跨扫描每目标至多约 2 次/秒；关闭取消后仍允许认证 GET 观察终态。TOTP 采用 RFC6238、原子 counter、防爆破、幂等 pending enrollment 和 Host 操作预留/确认；拒绝或未知不能关闭既有 MFA。SSO 是 OAuth2 授权码 + PKCE + 后端 userinfo 身份流程，单次 state，外部身份不得继承管理员；未实现 SAML 或 OIDC ID-token/JWKS 验签。
+- 复现推送只去显式登记的节点，凭据通过受信 resolver 引用取得；对实际 canonical body 签 HMAC，持久保存真实远端三个 ID，超时/畸形回执记 unknown，幂等冲突不重发。HTTP 外部请求禁跳转，有超时和响应上限。
+
+### 桥接和部署接口
+
+`create_secops_server(host, port, state_dir, **options)` 接受可信的 `host_broker_call(action, payload)`、`remote_push_sender(url, raw_body, headers)`、`auth_resolver(token)`、`secret_resolver(ref)`、`allowed_scopes` 和 `remote_nodes`。设备、剧本、工作流与审批分别由内部 `register_connector`、`register_playbook`、`register_workflow`、`approve_action` 配置，未开放可自签审批的 HTTP 接口。
+
+Host adapter 的 payload 附 `_portal_principal`（Web 已认证身份上下文）；它**不是原生 grant/as_user**，适配器须移除该元数据、独立解析原 Host 权限并映射闭合合同。配置的 adapter 拒绝不走假成功降级。TOTP setup 桥须返回真实 `secret`，debug 桥须返回真实 `status/duration_ms/output_data/logs/error_detail`。远端 sender 须返回真实 `push_id/remote_thread_id/remote_run_id`。A1/A2 原生动作和接收端的实际接线留到 Stage 4，不能把本轮受信适配器测试称为原生 Host 联调通过。
+
+正式 ZIP 的 `bin/plugin_main.py --serve-http --port ...` 转入新服务；默认只监听 loopback、只写插件自己的 data dir，不启动旧工作台用户/插件种子流程。旧演示模块加载和权限 monkeypatch 引导已移除，Legacy Host 导入仅显式环境开关启用，不是新服务的默认入口。未自动安装、激活或部署这个产物。
+
+### 新回归、实际结果和复现
+
+`test_wave9_secops_portal_plugin_apis.py` 最终组合 **41 passed / 0 failed / 0 errors / 0 skipped**。测试通过真实回环 HTTP、临时文件型 SQLite、真实 MCP 子进程/进程组与构造的合法 PCAP；连接器、SOAR、SSO provider 和远端 push 接收端均是受控回环接收器，不是真实生产设备。
+
+两轮 Astra 只读审查指出的 TOTP setup 竞态/Host 拒绝分叉、未知 MCP 状态与未先 list 的退出窗口均补了针对性回归；后者两种路径先实测为重复 spawn 和提前发 Host 动作，再修为共同前置检查。带 worker 的进程组回收、reload 重新握手、审批并发单消费、PKCE verifier、签名原字节/头和回执持久化都有实际断言。首轮源码缺引擎/硬绑开发目录红灯及中间关闭门误拦 GET 的失败保留，不删除、skip 或放宽有效断言制造通过。
+
+```bash
+cd /tmp/wt-wave9-a3
+python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+原生 `inspect_plugin_package(zip_bytes)` 通过；最终交付 ZIP 还逐字节核对内含两份源码，并在 `python -S`、清空 `PYTHONPATH` 的新解释器中实测 MCP 身份/状态和 HTTP 查询，证明不依赖已安装 Host Python 包才能启动。导入边界 findings=0、指定 Ruff 和 diff-check 均通过。没有运行已退休尺寸检查器，没有跑全仓 pytest。
+
+交付指纹（外部源码和 ZIP 不包含在本分支提交内，集成时须保留并核对）：
+
+| 文件（相对外部 handoff 目录） | SHA-256 |
+| --- | --- |
+| `workbench_server.py` | `424eb21e1049f4b31318bd0bf776adb610aee64c41076270aba887e9399691ab` |
+| `build_plugin_package.py` | `46b629a14f7555de486b2411094f9ffebba25a115972427d0c9c0ef45feadab3` |
+| `dist/my-agent-web-portal-plugin.zip` | `df5397d986695f67c8de1d12ad46182d1f1995cd5175367273c1d5b2a3f952d8` |
+
+限制：真实 SIEM/EDR/企业 SSO、A1/A2 宿主、另一台远端节点、浏览器 UI、跨机可达性和 Windows 未验证；MCP 进程组启动当前明确只支持 POSIX。连接器需真实适配器配置；本地 owner 读取硬限 5000 条，超限明确拒绝而非无声截断。YAML 是显式拒绝 alias/tag 等构造的安全子集。未知 daemon 或中断的安全 pending 操作需可信运维核实，不能自动当作完成。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。
