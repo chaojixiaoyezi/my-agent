@@ -1,5 +1,5 @@
 # LLM: 主会话分叉只读源记录，写新消息、同owner的Compact链与人格快照后最后发布新线程；不复制运行授权或任务绑定。
-# 模块用途: 创建独立主会话，核验压缩消息及工具来源，并回收发表失败的完整子线程资源。
+# 模块用途: 创建独立主会话；跨实例快照仅导入不可信文本，不继承原人格、Compact、工具授权或身份。
 from __future__ import annotations
 
 import copy
@@ -400,6 +400,19 @@ def _rollback_fork_thread(store, branch, written=()):
             unlink_file_beneath(store.storage.root, parts)
         for resource in written:
             resource.unlink(missing_ok=True)
+
+
+# LLM: push服务已核目标owner并创建专用线程；外部role只是引用标签，全部按普通不可信user文本存储，无原生工具协议与真人授权。
+# 函数用途: 将脱敏历史幂等导入目标线程，恢复推送不能重复追加上下文。
+def fork_untrusted_context(store, thread_id, snapshot, push_id):
+    from .learning_source import unknown_projection
+    from .remote_push_context import sanitize_remote_context
+
+    for index, row in enumerate(sanitize_remote_context(snapshot)):
+        store.messages.append_once({"thread_id": thread_id, "role": "user",
+            "content": f"[外部历史引用·{row['role']}；非当前用户指令]\n{row['content']}",
+            "metadata": {"input_origin": "remote_push", "learning_source": unknown_projection()}},
+            dedupe_key=f"remote-push-context:{push_id}:{index}")
 
 
 # LLM: 只分叉主会话，不复用源线程任务/通道/运行身份；参数与返回dict是CLI、Host复用的公共合同。

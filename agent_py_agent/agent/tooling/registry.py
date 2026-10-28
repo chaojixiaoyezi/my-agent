@@ -145,7 +145,7 @@ class CatalogRenderConfig:
 
 
 # LLM: 单一宿主装配配置；defer仅延后实例连接，不清配置、不改变权限；凭据环境上界与 B5 来源/审批仍保持原身份。
-# 类用途: 汇总工作区、权限、工具上限和可选文件诊断，构造时不读取包或启动服务。
+# 类用途: 汇总工作区、权限、工具上限和宿主绑定；远端推送依赖只由core注入，不从模型恢复。
 @dataclass(frozen=True)
 class ToolRegistryParams:
     workspace_root: Path
@@ -165,6 +165,7 @@ class ToolRegistryParams:
     )
     owner_type: str = "main_agent"
     protected_persona_root: str = ""  # 三份 Persona 只走专用入口；admin bypass 也不清空
+    remote_push_agent: object | None = field(default=None, repr=False, compare=False)
     # owner 隔离时 Shell 沙箱要拒读的宿主根（my-agent 家目录根，开关打开时对非本机管理员还有用户家目录）
     host_private_roots: tuple[str, ...] = ()
     full_access_other_owner_homes: str = "read_only"

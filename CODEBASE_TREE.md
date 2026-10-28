@@ -1,3 +1,22 @@
+## 2026-10-28 Wave 9 A1：跨实例单向事件推送（源码候选）
+
+```text
+|-- agent_py_agent/agent/gateway_parts/
+|   `-- remote_push_service.py # 独立push Token鉴权、耐久nonce/限流/幂等、目标线程和原队列接纳
+|-- agent_py_agent/agent/tooling/
+|   `-- remote_agent_push_tool.py # 加密节点配置、固定单向路径、DNS pin、签名发送及短回执
+|-- agent_py_agent/agent/conversation/
+|   `-- remote_push_context.py # owner校验、有界文本历史导出、公共秘密及宿主路径净化
+`-- agent_py_agent/tests/
+    `-- test_wave9_remote_agent_push.py # 真实本机HTTP、独立home跨实例、重启/中断恢复及安全合同回归
+```
+
+关键接线：实际入口是 `gateway_parts/http_routes.py` 与 `http_service.py`（不存在任务书所称 `http_server.py`）。`core.py` / `registry_bootstrap.py` 绑定当前owner的推送工具；`conversation/thread_fork_service.py::fork_untrusted_context` 只导入带外部引用标签的普通文本，不继承原生工具调用、Compact、人格、运行身份或授权。`path_access_policy.py` 将数据根 `remote_push/` 纳入原宿主只读配置根；`capability/persona_tool.py` 拒绝明确不可学习来源的写入；`contracts/error_taxonomy.py` 保留具体拒绝与未知发送效果。
+
+持久资料：数据根 `remote_push/tokens.json` 仅保存Token SHA256验证器及ACL；`nonces.json` 为跨进程600秒防重放账本，`receipts.json` 保存限流和业务幂等。owner `config/remote_endpoints.json` 或宿主 `remote_push/endpoints.json` 只保存原私密交互密钥加密的节点凭据。目标会话沿原owner有效工作区和运行路径解析，入队复用原 `write_gateway_request_once` 与 `prepare_coordinator_input`，不建第二执行队列。
+
+本机组件证据与部署限制见 `TESTS.md` 本节；接收回执不是任务完成报告，未部署或验证另一台机器可达。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

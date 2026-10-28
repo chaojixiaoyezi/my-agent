@@ -1,6 +1,6 @@
 # LLM: 真实Agent认证配置与CLI共用原factory，漏middleware不得降为无鉴权；HTTP传输沿唯一结构化分发表，观察复用同一路由模板；启动先确保/绑定持久凭据，秘密不进状态、日志或环境。
 # LLM: 正count只拥有零IO记忆holder；stop先关准入再沿原HTTP关闭，不缓存请求来源、不flush未落盘信号。
-# 模块用途: 提供有界Gateway HTTP监听器及同C领域资源寿命，C3未闭合不开放记忆写链。
+# 模块用途: 提供有界Gateway HTTP监听器及同C领域资源寿命；单向推送独立鉴权，不能进入其它路由。
 from __future__ import annotations
 
 """HTTP service for gateway using a bounded standard-library HTTP server.
@@ -177,10 +177,13 @@ class GatewayHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._dispatch_route("POST")
 
-    # LLM: 同route先原凭据门；C历史/recent走原只读leaf，私卡与模型交各自原handler逐项守门；/control其它kind仍waiting，Count0权限不变。
-    # 函数用途: 在读body前认证，再分发C只读历史、最近记忆、受限私卡及模型处理器，不扩其它业务权限。
+    # LLM: push头在读body前隔离到唯一POST路由，即使混带Gateway/Plugin凭据也不能提升；其余原认证、C与私卡边界不变。
+    # 函数用途: 先隔离单向推送凭据，再沿原路由档位核验并分派请求。
     def _dispatch_route(self, method: str) -> None:
         self._inject_auth_middleware()
+        if any(key.casefold() == "x-agent-push-token" for key in self.headers) and (method, self.path) != ("POST", "/remote-agent/push"):
+            self._send_json(403, {"ok": False, "error_code": "REMOTE_PUSH_TOKEN_SCOPE_DENIED"})
+            return
         route = match_gateway_http_route(method, self.path)
         if route is None:
             self._send_json(404, {"error": "not found"})

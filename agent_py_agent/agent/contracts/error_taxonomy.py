@@ -22,7 +22,7 @@
 #   多进程记录、分区和预留拒绝保留原责任，不自动重放、补造记录或用投影释放占用。
 #   有界调用退出未确认独立于业务失败和未发送；保留原调用及清理责任，不因超时清表或自动重跑。
 #   单进程生命周期及拓扑迁移拒绝须核原锁、来源和结构化原因；分类不能签发接手许可或重放业务。
-# 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
+# 模块用途: 给工具结果提供一致恢复分类；单向推送失败不授重放许可，外部来源不能替真人确认。
 
 from __future__ import annotations
 
@@ -4314,6 +4314,22 @@ ERROR_CONTRACTS.update({
                     'FEISHU_SOURCE_MESSAGE_REQUIRED', 'FEISHU_OTHER_BOT_SOURCE_REQUIRED',
                     'FEISHU_BOT_GROUP_MEMBERSHIP_REQUIRED', 'FEISHU_GROUP_ROLES_UNVERIFIED',
                     'FEISHU_GROUP_MEMBERS_INCOMPLETE', 'FEISHU_OBSERVATION_SCOPE_MISMATCH', 'FEISHU_BOT_LOOP_SUPPRESSED')},
+})
+
+
+# LLM: 推送错误只有实际处理器能证明未发送；分类保留准确原因，不自动重复POST或借另一owner节点配置。
+ERROR_CONTRACTS.update({
+    **{code: ErrorContract(code=code, category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="核对准确节点配置、Token范围和来源；不要放宽SSRF、借他人身份或把外部事件当作真人授权。")
+       for code in ("REMOTE_PUSH_SOURCE_THREAD_DENIED", "REMOTE_PUSH_ENDPOINT_DENIED", "REMOTE_PUSH_REDIRECT_DENIED",
+                    "REMOTE_PUSH_TOKEN_SCOPE_DENIED", "REMOTE_PUSH_SOURCE_IP_DENIED", "PERSONA_USER_REQUEST_REQUIRED")},
+    **{code: ErrorContract(code=code, category="configuration", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="推送未确认接收；先核对原幂等键和远端节点状态，不自动重放POST，不展示凭据或远端错误正文。")
+       for code in ("REMOTE_PUSH_UNAVAILABLE", "REMOTE_PUSH_ENDPOINT_NOT_CONFIGURED", "REMOTE_PUSH_ENDPOINT_INVALID",
+                    "REMOTE_PUSH_HTTP_REJECTED", "REMOTE_PUSH_RECEIPT_INVALID", "REMOTE_PUSH_CONTEXT_TOO_LARGE",
+                    "REMOTE_PUSH_SCHEMA_INVALID", "REMOTE_PUSH_TARGET_INVALID")},
 })
 
 

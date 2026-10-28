@@ -1,3 +1,34 @@
+## 2026-10-28 Wave 9 A1：单向远端推送、上下文快照与安全边界（源码候选）
+
+来源：完整阅读 `07-tasks/wave9-a1.md`，按主参考 Item 8 / Section 7 的单向事件合同实现；基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，分支 `wave9-a1`，仅修改派工工作树。未推送、部署，未运行已退休的尺寸检查。
+
+### 做法及协议
+
+- 实际 `POST /remote-agent/push` 接入原HTTP分发表。独立 `X-Agent-Push-Token` 头出现在任何其它路由或方法均先返回 `REMOTE_PUSH_TOKEN_SCOPE_DENIED`，不参与Gateway/Host v2认证。Token配置必须启用、未过期、允许准确目标，且动作仅为 `push_event`；默认来源IP不限，非空时按CIDR及右向左可信代理链检查。
+- 只存SHA256验证器；已通过验证的本次Token仅在内存作HMAC密钥，不另存明文副本。时间窗±300秒，签名绑定原始bytes和nonce；nonce在原文件锁内消费，600秒包含边界仍拒重放，超期清理。拒绝重复JSON键、重复认证头、NaN/Infinity/数字溢出、超64KiB正文和客户端授权/路径等额外字段。
+- 原业务键为 `(token_id, target_owner, idempotency_key)`；同键异正文409，相同业务重试带新nonce复用原短回执。prepared状态先耐久落盘，再沿原输入T→C末门和原请求回执提交；提交后中断重试不产生第二队列记录或第二份历史。`new_thread` 专用线程，`reuse_key` 仍按Token和目标owner隔离。`run_id` 是已接纳排队回合的request id，不声称模型已经执行，也不提供报告查询。
+- `remote_agent_push` 只接受配置别名或准确匹配已有配置的显式URL，不接受模型明文Token参数。原宿主帮助函数 `save_remote_endpoint` 保存Fernet密文；owner节点只给本人，host节点默认仅main，额外调用者须准确 `allowed_callers`。显式URL不继承别名的私网例外。所有DNS回答核验后固定连接IP，禁止重定向；HTTP还须本次实际IP命中节点白名单，公网默认HTTPS。元数据/link-local即使列入白名单仍拒绝。发送阶段异常保留unknown，不自动重放。
+- 本地及跨实例都经 `thread_fork_service.fork_untrusted_context` 导入脱敏文本；来源线程先核当前owner，管理员例外按任务保留且仅在明确提供的当前库内查询，不枚举他人磁盘。最多256条/48KiB，超限拒绝、不悄悄截断。去掉原metadata和系统/工具协议，公共秘密净化加绝对/UNC路径移除；无法识别的任意自然语言秘密不作零泄漏保证。目标明确 `input_origin=remote_push`、不可学习，原Gateway属性投影仍保持该来源，USER/SOUL/AGENTS写入拒绝，不能把外部slash文字变成真人控制。
+- Token/nonce/receipt/host节点根纳入原文件及shell只读保护。单份幂等账本最多10000项、nonce最多100000项，满后明确503而不是丢掉旧幂等事实；回执锁繁忙时同样503。长期运行的账本迁移/容量治理需运维规划，不在本轮自动删除旧回执。
+
+### 实测及未验证
+
+首批18项在真实HTTP入口跑出缺功能断言失败；入站19项首先转绿。后续补充坏输入、配置写保护、发送效果、真实跨owner路径与秘密/路径canary，确认并修复实际失败。独立摘录审查提出的UNC、HTTP名单与nonce边界又各自跑红后修复；其要求删除main来源例外与任务第29行冲突，未采纳。独立审查未读完整仓库或跑测试，实际复核由父级完成。
+
+- 专属最终证据：`.pytest_cache/w9-a1-delivery.xml`，推送62项及两条原宿主配置/shell声明共64项通过、0失败/错误/跳过；涵盖独立发送/接收home的真实本机HTTP、来源不变、代理/IP、双Token隔离、监听器重启、跨进程nonce、队列提交后中断、SSRF所有DNS回答及重定向前拒绝。两条原保护声明用例随新增宿主根同步验证。最终导入边界0发现、全范围Ruff及差异空白检查通过。
+- 额外7文件324项扩展：首次22失败、3跳过，其余通过（`.pytest_cache/w9-a1-regression.xml`）。新增保护根造成的一条旧shell根列表断言已同步为更严格合同。其余21个失败在上述真正基线的完整 `git archive` 快照中逐一复现（`.pytest_cache/w9-a1-baseline.xml`，导入origin已核对快照内）；未修改/跳过这些测试。观察包含硬链接EPERM、shell返回71及搜索未命中，不把它们一概归因为沙箱，也不把扩展回归说成全通过。
+- **未验证**：真实外部网络/另一台主机可达、生产反向代理与TLS部署、正多进程C/W生命周期、真实模型消费至最终任务完成、长期高负载与完整自学习晋升链路。当前证据是本机协议/原队列/来源投影和拒绝门，不外推这些端到端结果。
+
+复现（工作树根；本机测试的临时文件放入工作树内）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_host_files_access.py::test_shell_lists_host_files_per_mode agent_py_agent/tests/test_host_files_access.py::test_declarations_match_the_canonical_layout -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。
