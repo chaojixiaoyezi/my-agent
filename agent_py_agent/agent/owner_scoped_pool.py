@@ -25,6 +25,94 @@ from .delivery import RuntimeHealthProvider
 _DEFAULT_MAX_AGENT_COUNT = 64
 
 
+# LLM: Exhaustion is transient local backpressure, not permission denial or a durable task failure.
+# 类用途: 表示所有实例预算均被缓存、构建或在途退役对象占用。
+class PoolCapacityExceededError(RuntimeError):
+    """Owner agent pool live-instance capacity exhausted."""
+
+
+# LLM: Caller holds the pool mutex; a build reservation counts until atomically replaced by a cached result.
+# 函数用途: 统一计算硬软、退役和构建中的实例预算。
+def _pool_total_live_locked(pool) -> int:
+    return len(pool._hard_agents) + len(pool._soft_agents) + len(pool._retired_agents) + len(pool._building)
+
+
+# LLM: Caller holds the pool mutex; returned agents must only be closed after releasing it.
+# 函数用途: 优先清除已无人租用的退役对象，防止陈旧条目占用容量。
+def _pool_cleanup_retired_locked(pool) -> list[Any]:
+    ready = []
+    for identity, agent in tuple(pool._retired_agents.items()):
+        if not pool._pins.get(identity):
+            ready.extend(pool._retire_agent_locked(agent))
+    return ready
+
+
+# LLM: Never evict a pinned generation to fake available capacity; soft work cannot displace hard work.
+# 函数用途: 构造前逐出未租用的软/硬实例，不能腾位时明确返回背压。
+def _pool_make_room_locked(pool, *, hard: bool, extra: int = 1, exclude: tuple | None = None):
+    ready = pool._cleanup_retired_locked()
+    tables = (pool._soft_agents, pool._hard_agents) if hard else (pool._soft_agents,)
+    while _pool_total_live_locked(pool) + extra > pool._max_agents:
+        victim = next(((table, key, agent) for table in tables for key, agent in table.items()
+                       if key != exclude and not pool._pins.get(id(agent))), None)
+        if victim is None:
+            return False, ready
+        table, key, agent = victim
+        table.pop(key)
+        pool._last_used.pop(key, None)
+        ready.extend(pool._retire_agent_locked(agent))
+    return True, ready
+
+
+# LLM: Reservation is atomic with budget checks; same-owner callers wait on one Future outside all pool/lifecycle locks.
+# 函数用途: 只为真正有容量的新构造预留一个槽，缓存竞态命中不重复建实例。
+def _pool_reserve_build(pool, key: tuple, *, hard: bool):
+    with pool._mcp_lifecycle_lock:
+        with pool._lock:
+            future, creator, ready = _pool_reserve_build_locked(pool, key, hard=hard)
+        pool._close_retired_agents(ready)
+    if future is None and hard:
+        raise PoolCapacityExceededError("owner pool live-instance capacity exhausted")
+    return future, creator
+
+
+# LLM: Caller holds lifecycle and pool mutexes; this step only changes cache/reservation bookkeeping, never performs MCP IO.
+# 函数用途: 原子区分等待同owner、命中缓存和为真正新构造预留槽位。
+def _pool_reserve_build_locked(pool, key: tuple, *, hard: bool):
+    future = pool._building.get(key)
+    if future is not None:
+        return future, False, []
+    existing = pool._hard_agents.get(key) or pool._soft_agents.get(key)
+    if existing is not None:
+        future = Future()
+        future.set_result(existing)
+        return future, False, []
+    fits, ready = _pool_make_room_locked(pool, hard=hard)
+    if not fits:
+        return None, False, ready
+    future = pool._building[key] = Future()
+    return future, True, ready
+
+
+# LLM: Reload is optional freshness, not authority to exceed the cap; an in-flight generation may be reused until it drains.
+# 函数用途: 强制刷新前计算旧代退役成本，满池时复用原在途实例。
+def _pool_reload_owner(pool, key: tuple, *, hard: bool):
+    with pool._mcp_lifecycle_lock:
+        with pool._lock:
+            ready = pool._cleanup_retired_locked()
+            existing = pool._hard_agents.get(key) or pool._soft_agents.get(key)
+            replace = existing is not None
+            if replace and pool._pins.get(id(existing)):
+                replace, evicted = _pool_make_room_locked(pool, hard=hard, exclude=key)
+                ready.extend(evicted)
+            if replace:
+                pool._hard_agents.pop(key, None)
+                pool._soft_agents.pop(key, None)
+                pool._last_used.pop(key, None)
+                ready.extend(pool._retire_agent_locked(existing))
+        pool._close_retired_agents(ready)
+
+
 # LLM: 仅由池退役路径在池锁外调用；异常软失败，只关闭该Agent的MCP客户端，不触碰用户后台进程会话。
 # 函数用途: 安全释放离池实例的MCP资源，清理失败不影响原缓存和业务结果。
 def _close_agent_mcp_clients(agent: Any) -> None:
@@ -82,7 +170,7 @@ def _config_with_owner(base_config: Any, owner: Any) -> Any:
     )
 
 
-# LLM: owner只由原池提供；已登记账号禁用通用配置克隆，W仍核原bootstrap及真实home。
+# LLM: owner只由原池提供；冷构造延迟MCP至首个run，已登记账号门及W bootstrap/home核验不变。
 # 函数用途: 为原owner构造唯一Agent，W不能用热配置改变冻结根或返回另一owner实例。
 def build_owner_scoped_agent(
     base_config: Any,
@@ -105,6 +193,7 @@ def build_owner_scoped_agent(
         root,
         workspace_roots=workspace_roots,
         channel_runtime_health_provider=channel_runtime_health_provider,
+        defer_mcp_connect=True,
         **worker_options,
     )
     if worker_bootstrap is not None:
@@ -157,7 +246,7 @@ class OwnerScopedAgentPool:
     池满不进,且被后来的硬 owner 逐出——软活可以等,硬活不能饿死。请求路/盯守路默认
     硬(用户正在交互),后台 seed 路按发现的事实类别显式传 hard。"""
 
-    # LLM: 初始化原池及退休暂存；仅在途离池对象由退休表持有，可选W bootstrap及容量/惰性/合流合同不变。
+    # LLM: 原池锁只管缓存；生命周期锁协调退休关闭与pin重开，MCP I/O始终不持缓存锁，W/合流合同不变。
     # 函数用途: 绑定构建依赖并准备有界缓存、首次构建协调和活动租用计数。
     def __init__(
         self,
@@ -188,16 +277,19 @@ class OwnerScopedAgentPool:
         self._hard_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._soft_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
+        self._mcp_lifecycle_lock = threading.RLock()
         self._last_used: dict[tuple, float] = {}
         self._pins: dict[int, int] = {}
         self._retired_agents: dict[int, Any] = {}
         self._building: dict[tuple, Future] = {}
 
-    # LLM: W命中缓存前后都核原分区/实际home；同owner合流/LRU/租用保main，touch=False不伪造活动事实。
-    # 函数用途: 复用或创建唯一用户实例，等待同身份初始化时不重复加载工具和记忆。
-    def get(self, owner: Any, *, hard: bool = True, touch: bool = True) -> Any | None:
+    # LLM: W/home checks and same-owner coalescing remain; force_reload cannot retire a pinned generation beyond the live budget.
+    # 函数用途: 复用或有界构造用户实例，满池时背压而不是堆积在途退役实例。
+    def get(self, owner: Any, *, hard: bool = True, touch: bool = True, force_reload: bool = False) -> Any | None:
         self._require_worker_owner(owner)
         key = (owner.provider, owner.owner_kind, owner.owner_id)
+        if force_reload:
+            _pool_reload_owner(self, key, hard=hard)
         hit = self._get_cached(key, hard=hard)
         if hit is None:
             if not hard and not self._room_for_soft():
@@ -236,29 +328,18 @@ class OwnerScopedAgentPool:
             require_worker_workspace(frozen, agent.root, agent.workspace_roots)
 
 
-    # LLM: Future 只表示同 owner 初始化，不持久化；失败传播给所有等待者，完成后删除临时槽。
-    # 函数用途: 防止多个请求同时首次访问同一用户时重复构造重量级实例。
+    # LLM: Reserve capacity before the builder; publication consumes that reservation atomically, with failure shared by original waiters.
+    # 函数用途: 合流同owner首次构造，并限制不同owner同时构造的总量。
     def _build_once(self, key: tuple, owner: Any, *, hard: bool) -> Any | None:
-        with self._lock:
-            future = self._building.get(key)
-            creator = future is None
-            if creator:
-                future = self._building[key] = Future()
+        future, creator = _pool_reserve_build(self, key, hard=hard)
+        if future is None:
+            return None
         if not creator:
             result = future.result()
-            if hard:
-                cached = self._get_cached(key, hard=True)
-                if cached is not None:
-                    return cached
-                if result is None:
-                    result = self._builder(self._base_config, self._root, owner, self._workspace_roots)
-                return self._store(key, result, hard=True)
-            return result
+            return self.get(owner, hard=True, touch=False) if hard else result
         try:
-            existing = self._get_cached(key, hard=hard)
-            result = existing if existing is not None else self._store(
-                key, self._builder(self._base_config, self._root, owner, self._workspace_roots), hard=hard,
-            )
+            candidate = self._builder(self._base_config, self._root, owner, self._workspace_roots)
+            result = self._store(key, candidate, hard=hard, reservation=future)
             future.set_result(result)
             return result
         except BaseException as exc:
@@ -266,25 +347,32 @@ class OwnerScopedAgentPool:
             raise
         finally:
             with self._lock:
-                self._building.pop(key, None)
+                if self._building.get(key) is future:
+                    self._building.pop(key)
 
-    # LLM: 租用只固定身份不授予任务权；若进入pin前已被逐出则恢复租用期MCP并在最后pin释放时退役，所有MCP操作移到池锁外。
+    # LLM: 生命周期锁先于池锁；旧关闭先完成才可重开，或新pin先登记使旧关闭推迟，MCP I/O不持池锁。
     # 函数用途: 保护执行中的实例，并在最后一次释放后清理已淘汰实例的MCP资源。
     @contextmanager
     def pin(self, agent: Any, *, touch: bool = True):
         identity = id(agent)
         reopen = False
-        with self._lock:
-            self._pins[identity] = self._pins.get(identity, 0) + 1
-            in_pool = (
-                any(value is agent for value in self._hard_agents.values())
-                or any(value is agent for value in self._soft_agents.values())
-            )
-            if not in_pool:
-                self._retired_agents[identity] = agent
-                reopen = True
-        if reopen:
-            _reopen_agent_mcp_clients(agent)
+        with self._mcp_lifecycle_lock:
+            with self._lock:
+                in_pool = (
+                    any(value is agent for value in self._hard_agents.values())
+                    or any(value is agent for value in self._soft_agents.values())
+                )
+                fits, ready = (True, []) if in_pool or identity in self._retired_agents else _pool_make_room_locked(self, hard=True)
+                if fits:
+                    self._pins[identity] = self._pins.get(identity, 0) + 1
+                if fits and not in_pool:
+                    self._retired_agents[identity] = agent
+                    reopen = True
+            self._close_retired_agents(ready)
+            if not fits:
+                raise PoolCapacityExceededError("owner pool live-instance capacity exhausted before pin")
+            if reopen:
+                _reopen_agent_mcp_clients(agent)
         try:
             yield agent
         finally:
@@ -300,8 +388,28 @@ class OwnerScopedAgentPool:
                 for key, value in (*self._hard_agents.items(), *self._soft_agents.items()):
                     if value is agent and touch:
                         self._last_used[key] = time.monotonic()
-            for retired in ready:
-                _close_agent_mcp_clients(retired)
+            self._close_retired_agents(ready)
+
+    # LLM: Preserve owner validation/build coalescing; coordinated pin restores an agent evicted during get.
+    # 函数用途: 用一个上下文管理器取得并安全租用owner实例，不在池内等待容量。
+    @contextmanager
+    def acquire(self, owner: Any, *, hard: bool = True):
+        agent = self.get(owner, hard=hard)
+        if agent is None:
+            yield None
+        else:
+            with self.pin(agent):
+                yield agent
+
+    # LLM: Pending eviction lists do not authorize close; recheck live references under the same lock order as pin/store.
+    # 函数用途: 在真正关闭前重查缓存与租用，避免锁外旧关闭覆盖新租用。
+    def _close_retired_agents(self, agents: list[Any]) -> None:
+        for agent in agents:
+            with self._mcp_lifecycle_lock:
+                with self._lock:
+                    ready = self._retire_agent_locked(agent)
+                if ready:
+                    _close_agent_mcp_clients(agent)
 
     # LLM: 调用方必须持池锁；身份仍被硬/软表引用则不退役，有pin时暂存强引用，无pin仅返回锁外待关闭列表。
     # 函数用途: 区分仍在池、等待最后租用释放和可以立即清理的实例，不在锁内关闭资源。
@@ -315,6 +423,11 @@ class OwnerScopedAgentPool:
             return []
         self._retired_agents.pop(identity, None)
         return [agent]
+
+    # LLM: Caller holds the pool mutex; MCP cleanup is deferred to the existing lock-external close path.
+    # 函数用途: 清除无人租用的退役条目并返回待关闭对象。
+    def _cleanup_retired_locked(self) -> list[Any]:
+        return _pool_cleanup_retired_locked(self)
 
     # LLM: 候选只是缓存投影，调用者必须再验证持久事实及在途线程；过期不等于任务完成。
     # 函数用途: 返回超过空闲期限且无人租用的硬实例，不做磁盘读取。
@@ -335,8 +448,7 @@ class OwnerScopedAgentPool:
             self._hard_agents.pop(key)
             self._last_used.pop(key, None)
             ready = self._retire_agent_locked(agent)
-        for retired in ready:
-            _close_agent_mcp_clients(retired)
+        self._close_retired_agents(ready)
         return True
 
     # LLM: Read-only polling may inspect an already-loaded owner, but it must not
@@ -353,12 +465,12 @@ class OwnerScopedAgentPool:
         self._require_worker_owner(owner, agent)
         return agent
 
+    # LLM: Include reservations and retired leases; a pinned soft entry cannot be an eviction candidate.
+    # 函数用途: 只读预检软活是否有可用落点，正式构造仍须锁内预留容量。
     def _room_for_soft(self) -> bool:
-        """锁内判断软 agent 是否有落点:软表非空可逐软腾位,或总容量未满。"""
         with self._lock:
-            if self._soft_agents:
-                return True
-            return len(self._hard_agents) + len(self._soft_agents) < self._max_agents
+            return (_pool_total_live_locked(self) < self._max_agents
+                    or any(not self._pins.get(id(agent)) for agent in self._soft_agents.values()))
 
     def _get_cached(self, key: tuple, *, hard: bool) -> Any | None:
         with self._lock:
@@ -384,39 +496,79 @@ class OwnerScopedAgentPool:
                 return existing
             return None
 
-    # LLM: 原硬软准入/双检及记账保持；替换完成后按身份判退役，未采用候选同样退役，关闭全部在锁外且不取消持久工作。
+    # LLM: 生命周期锁先于池锁，防止重新存入与旧关闭交错；保留原硬软/双检，所有MCP I/O仍在池锁外。
     # 函数用途: 存放初始化结果并回收被逐出或未采用实例的MCP资源，仍保护在途租用。
-    def _store(self, key: tuple, agent: Any, *, hard: bool) -> Any | None:
+    def _store(self, key: tuple, agent: Any, *, hard: bool, reservation: Future | None = None) -> Any | None:
         ready = []
-        with self._lock:
+        exhausted = False
+        with self._mcp_lifecycle_lock, self._lock:
+            if reservation is not None and self._building.get(key) is reservation:
+                self._building.pop(key)
             # 双检期间多建的候选也须清理；若是同对象，退休检查会保留池内引用。
             existing = self._hard_agents.get(key)
             if existing is None:
                 existing = self._soft_agents.get(key)
-            total = len(self._hard_agents) + len(self._soft_agents)
             if existing is not None:
                 ready = self._retire_agent_locked(agent)
                 result = existing
-            elif not hard and total >= self._max_agents and not self._soft_agents:
-                ready = self._retire_agent_locked(agent)
-                result = None
             else:
-                evicted = []
-                if total >= self._max_agents:
-                    victims = self._soft_agents if self._soft_agents else self._hard_agents
-                    old_key, old_agent = victims.popitem(last=False)
-                    self._last_used.pop(old_key, None)
-                    evicted.append(old_agent)
-                self._last_used[key] = time.monotonic()
-                target = self._hard_agents if hard else self._soft_agents
-                target[key] = agent
-                target.move_to_end(key)
-                for old_agent in evicted:
-                    ready.extend(self._retire_agent_locked(old_agent))
-                result = agent
-        for retired in ready:
-            _close_agent_mcp_clients(retired)
+                fits, ready = _pool_make_room_locked(self, hard=hard)
+                if not fits:
+                    ready.extend(self._retire_agent_locked(agent))
+                    result, exhausted = None, hard
+                else:
+                    self._last_used[key] = time.monotonic()
+                    target = self._hard_agents if hard else self._soft_agents
+                    target[key] = agent
+                    target.move_to_end(key)
+                    # 同对象换键的旧引用不能导致仍在池的对象被关闭。
+                    result = agent
+        self._close_retired_agents(ready)
+        if exhausted:
+            raise PoolCapacityExceededError("owner pool live-instance capacity exhausted at publication")
         return result
+
+    # LLM: Lock-consistent live budget includes construction reservations, never persistent-task completion authority.
+    # 函数用途: 返回硬软缓存、在途退役和构建占用的总实例数。
+    def gauges(self) -> dict[str, int]:
+        with self._lock:
+            return {"hard_count": len(self._hard_agents), "soft_count": len(self._soft_agents),
+                    "retired_count": len(self._retired_agents), "pinned_count": len(self._pins),
+                    "building_count": len(self._building), "total_live_instances": _pool_total_live_locked(self),
+                    "max_agents": self._max_agents}
+
+    # LLM: Read-only admission hint; the actual build/pin still reserves and rechecks under the pool mutex.
+    # 函数用途: 判断原owner能否复用实例或有空间创建，不改变LRU、目录或池状态。
+    def can_acquire(self, owner: Any) -> bool:
+        key = (owner.provider, owner.owner_kind, owner.owner_id)
+        with self._lock:
+            return (key in self._hard_agents or key in self._soft_agents or key in self._building
+                    or _pool_total_live_locked(self) < self._max_agents
+                    or any(not self._pins.get(id(agent)) for agent in (*self._soft_agents.values(), *self._hard_agents.values())))
+
+    # LLM: Read-only gauge; does not touch LRU or create an agent.
+    # 函数用途: 返回硬缓存实例数。
+    @property
+    def hard_count(self) -> int:
+        return self.gauges()["hard_count"]
+
+    # LLM: Read-only gauge; does not touch LRU or create an agent.
+    # 函数用途: 返回软缓存实例数。
+    @property
+    def soft_count(self) -> int:
+        return self.gauges()["soft_count"]
+
+    # LLM: Read-only gauge; retired does not mean a persistent task has ended.
+    # 函数用途: 返回等待在途租用结束的离池实例数。
+    @property
+    def retired_count(self) -> int:
+        return self.gauges()["retired_count"]
+
+    # LLM: Count distinct pinned agents, not the sum of nested leases.
+    # 函数用途: 返回当前被租用的实例数。
+    @property
+    def pinned_count(self) -> int:
+        return self.gauges()["pinned_count"]
 
     def active_count(self) -> int:
         with self._lock:
@@ -453,8 +605,7 @@ class OwnerScopedAgentPool:
             agent = self._soft_agents.pop(matched_key)
             self._last_used.pop(matched_key, None)
             ready = self._retire_agent_locked(agent)
-        for retired in ready:
-            _close_agent_mcp_clients(retired)
+        self._close_retired_agents(ready)
         return True
 
 

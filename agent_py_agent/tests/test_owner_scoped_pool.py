@@ -16,6 +16,7 @@ import pytest
 from agent_py_agent.agent.owner_scoped_pool import (
     ActiveOwnerRegistry,
     OwnerScopedAgentPool,
+    PoolCapacityExceededError,
     _config_with_owner,
     shared_active_owner_registry,
 )
@@ -488,18 +489,28 @@ def test_opt7_pool_mcp_unpinned_eviction_closes_outside_lock(tmp_path, route, ha
     assert not getattr(pool, '_retired_agents', {})
 
 
-# LLM: 两层真实pin释放，逐出后保留强引用，不把第一次释放或缓存移除当成可关闭事实。
-# 函数用途: 验证在途淘汰到最后一次pin释放才执行一次锁外关闭。
+# LLM: Full pinned pools backpressure LRU replacement; explicit soft retirement still waits for the last nested lease before closing.
+# 函数用途: 验证满池不以在途淘汰制造空位，显式退役仍在最后释放后锁外清理。
 @pytest.mark.parametrize('route,hard', _OPT7_MCP_EVICTIONS[1:])
 def test_opt7_pool_mcp_pinned_eviction_waits_for_last_release(tmp_path, route, hard):
     pool, closed = _opt7_mcp_pool(tmp_path)
     agent = pool.get(OwnerIdentity.provider_user('feishu', 'victim'), hard=hard)
     with pool.pin(agent):
         with pool.pin(agent, touch=False):
-            _opt7_evict_mcp_agent(pool, agent, route)
+            if route == 'soft_id':
+                _opt7_evict_mcp_agent(pool, agent, route)
+                assert pool._retired_agents.get(id(agent)) is agent
+            elif route == 'soft_lru':
+                assert pool.get(OwnerIdentity.provider_user('feishu', 'replacement'), hard=False) is None
+            else:
+                with pytest.raises(PoolCapacityExceededError):
+                    _opt7_evict_mcp_agent(pool, agent, route)
             assert closed == []
-            assert getattr(pool, '_retired_agents', {}).get(id(agent)) is agent
+            assert pool.gauges()['total_live_instances'] == 1
         assert closed == [] and pool._pins[id(agent)] == 1
+    if route != 'soft_id':
+        assert closed == []
+        _opt7_evict_mcp_agent(pool, agent, 'idle' if hard else 'soft_id')
     assert len(closed) == 1 and closed[0][0] is agent and closed[0][1] is True
     assert not pool._pins and not pool._retired_agents
 
@@ -572,3 +583,69 @@ def test_opt7_pool_mcp_pin_exception_still_retires(tmp_path):
             raise ValueError('business error')
     assert len(closed) == 1 and closed[0] == (agent, True)
     assert not pool._pins and not getattr(pool, '_retired_agents', {})
+
+
+# LLM: Count all live objects before invoking the builder, including explicit soft retirement and reservations.
+# 函数用途: 验证退役但仍在途的实例占满容量，新owner不能先构造后拒绝。
+def test_retired_pinned_instance_blocks_new_build_until_release(tmp_path):
+    pool, builds = _counting_pool(tmp_path, max_agents=1)
+    first = pool.get(OwnerIdentity.provider_user('test', 'a'), hard=False)
+    with pool.pin(first):
+        assert pool.evict_soft_agent_id(id(first))
+        with pytest.raises(RuntimeError, match='capacity'):
+            pool.get(OwnerIdentity.provider_user('test', 'b'))
+        assert len(builds) == 1
+        assert pool.gauges()['total_live_instances'] == 1
+    assert pool.gauges()['total_live_instances'] == 0
+    assert pool.get(OwnerIdentity.provider_user('test', 'b')) is not first
+
+
+# LLM: A concurrent build holds a real budget slot even before its result is published to the cache.
+# 函数用途: 验证并发不同owner的首次构造不能突破单实例上限。
+def test_building_reservation_counts_toward_live_capacity(tmp_path):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool, _ = _counting_pool(tmp_path, max_agents=1)
+    building, proceed = threading.Event(), threading.Event()
+
+    # LLM: Delay the actual construction result without holding any pool mutex.
+    # 函数用途: 固定第一个owner正在构造的交错。
+    def build(_base, _root, owner, _roots):
+        if owner.owner_id == 'a':
+            building.set()
+            assert proceed.wait(10)
+        return SimpleNamespace(owner_id=owner.owner_id)
+
+    pool._builder = build
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(pool.get, OwnerIdentity.provider_user('test', 'a'))
+        try:
+            assert building.wait(10)
+            with pytest.raises(RuntimeError, match='capacity'):
+                pool.get(OwnerIdentity.provider_user('test', 'b'))
+            assert pool.gauges()['total_live_instances'] == 1
+        finally:
+            proceed.set()
+        assert future.result(timeout=10).owner_id == 'a'
+
+
+# LLM: Force reload may defer replacement by reusing the pinned owner; it must not accumulate retired generations.
+# 函数用途: 验证单容量池反复强制刷新仍只保留一个在途实例。
+def test_force_reload_reuses_pinned_generation_at_capacity(tmp_path):
+    import inspect
+    from contextlib import ExitStack
+
+    pool, builds = _counting_pool(tmp_path, max_agents=1)
+    assert 'force_reload' in inspect.signature(pool.get).parameters, 'force_reload capacity contract missing'
+    owner = OwnerIdentity.provider_user('test', 'a')
+    first = pool.get(owner)
+    with ExitStack() as leases:
+        leases.enter_context(pool.pin(first))
+        for _ in range(4):
+            current = pool.get(owner, force_reload=True)
+            leases.enter_context(pool.pin(current))
+            assert current is first
+            assert pool.gauges()['total_live_instances'] <= pool._max_agents
+        assert len(builds) == 1
+    assert pool.get(owner, force_reload=True) is not first

@@ -6,6 +6,12 @@
 
 路径、工厂兼容、冷进程和日志组件回归见 [TESTS](../../../TESTS.md)。这里不表示生产Gateway、真实TUI/IM、跨平台或全仓已通过，也不改变owner权限、认证、拓扑和停止协议。
 
+## 2026-10-28 Wave 8 T2 W2 Round 2：活实例预算与准入接线
+
+- `owner_scoped_pool.py` 的 `_pool_reserve_build` 在调用builder前预留Future；`_store` 在池锁内消费同一预留。`_pool_make_room_locked` 优先清理已无pin的退役项，只逐出未租用缓存；`get(force_reload=True)` 满池复用同owner在途代。`gauges()` 导出 `total_live_instances` / `max_agents`，`can_acquire(owner)` 只提供准入提示，构造和pin仍负责最终重查。
+- `cli/gateway_loops.py::_RequestDispatcher` 用 `AdmissionLimits.from_config(config, agent=bootstrap_agent)` 绑定实时池预检；`request_worker.py::_request_pool_has_capacity` 复用原owner解析器且不创建池。普通 `GatewayAdmission.try_acquire_report` 保留global/user/会话计数与原claim，追加池预算检查；MP C仍走原canonical持久准入，未增加影子占用账或跨进程池快照协议。
+- `agent_core/runner/worker.py` 为原生Agent构造配置资源投影，经原dispatch授权和模型/overlay入口取得最终配置；最终Agent仍完整核W bootstrap/home/roots。`tooling/registry.py` 将视图、共享、快照和生命周期入口委托同模块辅助函数，在丢弃client引用前撤销对应代理。借用归还与owner最终关闭分离，GC仍只向原安全队列入队。组件证据、未过的原生总门和验收边界见根目录 `TESTS.md`。
+
 ## 2026-10-27 CI C8 & Linux 工作区边界结构
 
 `conversation/background_tool_policy.py`只折叠首轮重工具；`agent_core/compact_request_recovery.py::_restore_optional_preflight`在原typed quota判定后拒绝恢复业务调用。`conversation/task_promotion.py`在跨目录切走时结束旧代为interrupted，返回后沿原继任链与CAS分配新代；`cli/chat_parts/tui_view_model.py::_align_history_timing`已对齐时不重分配显示槽位。`gateway_parts/workspace_scope.py`、`cli/workspace_resolution.py` 与 `cli/chat_client_context.py` 对齐 `CAP-DIR` 规则，`local/main` 在 `workspace-write`/`full-access` 下允许外部安全项目根，在 `restricted`/`workspace-only` 下仅允许 `owner_home` 内目录。没有增加状态源、工具、配置或文件；计时、消息回执、neutral退避仍各读原事实源。测试与验收边界见[TESTS](../../../TESTS.md)。

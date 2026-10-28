@@ -3,12 +3,14 @@ from __future__ import annotations
 
 # LLM: 子代理复用原attempt/权限/心跳；正MP原timeout Thread ACK也须原stop/join，未知不ordinary结果，原roots/可恢复片/Count0保留。
 # 模块用途: 启动和收口子代理工作片，线程内绑定可信排队 owner，并把新结果交回直属父级。
+import inspect
 import logging
 import threading
 import time
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 from ...backends.provider_headers import provider_agent_owner_scope
 from ...common.runner_thread_origin import _capture_runner_thread, _finish_original_runner_thread
@@ -74,7 +76,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
         _close_worker_mcp_clients(worker, params)
 
 
-# LLM: 仅清理worker独立tools；父身份取原运输scope，不猜owner或关闭共享注册表，异常只告警。
+# LLM: 父原tools身份仍跳过；独立门面一律调用close，由其所有权/借用计数决定关闭或释放，异常只告警。
 # 函数用途: 在worker被替换或退出时释放其MCP客户端，不掩盖业务返回或异常。
 def _close_worker_mcp_clients(worker, params: RunSubagentWorkerParams) -> None:
     tools = getattr(worker, "tools", None)
@@ -247,52 +249,140 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
         )
 
 
-# LLM: 保原owner/dispatch授权与模型引用；配置重建前清理旧worker独立MCP，child原roots/dispatch来源保持。
-# 函数用途: 构造子代理依赖并恢复正确模型配置，元数据在准确激活后才条件保存。
+# LLM: Native workers resolve owner/dispatch/model/overlay before their sole Agent construction; legacy factories retain their own bootstrap contract.
+# 函数用途: 先取得授权的最终配置再构造真实worker，只有最终同用户门面可借用父连接。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
-    worker = _construct_transported_worker(simple_agent_cls, params, params.config)
-    _attach_worker_runtime(worker, params)
+    context = _worker_configuration_context(simple_agent_cls, params)
+    native_context = context is not None
+    if context is None:
+        context = _construct_transported_worker(simple_agent_cls, params, params.config)
+        _attach_worker_runtime(context, params)
     # 3.txt B.4：dispatch/resume 执行阶段过统一授权查询门。系统驱动（调度器）
     # 无 requester run_id——只做 owner 一致性 + ID 形态 + 存在性；owner 不
     # 匹配 = 数据异常（任务归属另一 owner 域），fail-closed 拒绝派工。
     task = authorize_operation(
-        worker.subagents,
+        context.subagents,
         OperationRequest(
             operation="dispatch",
             run_id=params.run_id,
-            requester_owner=str(getattr(worker.subagents, "owner_id", "") or ""),
+            requester_owner=str(getattr(context.subagents, "owner_id", "") or ""),
         ),
     )
     from ...settings.model_profiles import inherited_model_config
 
     effective_config = apply_task_runtime_config_overlay(
-        inherited_model_config(worker, task),
+        inherited_model_config(context, task),
         task,
-        workspace_root=worker.subagents.workspace_root,
+        workspace_root=context.subagents.workspace_root,
     )
-    if effective_config is not params.config:
-        _close_worker_mcp_clients(worker, params)
+    if native_context or effective_config is not params.config:
+        if not native_context:
+            _close_worker_mcp_clients(context, params)
         worker = _construct_transported_worker(simple_agent_cls, params, effective_config)
         _attach_worker_runtime(worker, params)
+    else:
+        worker = context
     if params.request_transport is not None:
         from ...gateway_parts.multiprocess_child_execution_binding import (
             capture_original_child_dispatch,
         )
 
         capture_original_child_dispatch(params.request_transport, worker, task)
+    parent = getattr(getattr(getattr(params.request_transport, "scope", None), "execution", None), "agent", None)
+    if parent is not None and parent is not worker:
+        parent_tools, worker_tools = getattr(parent, "tools", None), getattr(worker, "tools", None)
+        share = getattr(worker_tools, "share_same_owner_mcp_state_from", None)
+        if (callable(share) and callable(getattr(parent_tools, "share_same_owner_mcp_state_from", None))
+                and worker_tools.operation_owner_id == parent_tools.operation_owner_id):
+            share(parent_tools)
     return worker
 
 
-# LLM: 无运输保main构造签名；真实child仅复用原scope实际Agent的constructor roots及W bootstrap，不从task/请求补根或更换owner。
-# 函数用途: 构造同来源子代理依赖，W不能借普通Agent初始化旁路绕过原资源门。
-def _construct_transported_worker(simple_agent_cls, params, config):
-    if params.request_transport is None:
-        return simple_agent_cls(config, params.root)
-    original = params.request_transport.scope.execution.agent
-    options = {"workspace_roots": original.workspace_roots}
+# LLM: Only native Agent classes have the canonical resource contract; no tools/backend/memory or second Agent is built for this projection.
+# 函数用途: 为真实worker预先准备派工授权与选模所需的最小同源资源。
+def _worker_configuration_context(simple_agent_cls, params):
+    from ...core import SimpleAgent
+    from ...gateway_parts.multiprocess_worker_agent import (
+        require_worker_construction,
+        require_worker_workspace,
+    )
+    from ...settings.secret_ref import freeze_managed_secret_environment
+
+    if not isinstance(simple_agent_cls, type) or not issubclass(simple_agent_cls, SimpleAgent):
+        return None
+    config = freeze_managed_secret_environment(params.config)
+    transport = params.request_transport
+    original = transport.scope.execution.agent if transport is not None else None
     frozen = getattr(original, "_worker_bootstrap", None)
+    require_worker_construction(frozen, config)
     if frozen is not None:
-        options["worker_bootstrap"] = frozen
+        from ...gateway_parts.multiprocess_agent_contract import require_agent_home
+        from ...user_space.owner_resolver import owner_identity_from_config
+
+        require_worker_workspace(frozen, params.root, original.workspace_roots)
+        require_agent_home(frozen, owner_identity_from_config(config), original.home_paths)
+    if original is not None:
+        return SimpleNamespace(config=config, home_paths=original.home_paths, subagents=original.subagents,
+                               conversation_store=original.conversation_store)
+    return _untransported_worker_configuration_context(config, params)
+
+
+# LLM: Use the composition root's exact home/workspace/path resolvers and canonical manager, not a second task loader or model selector.
+# 函数用途: 无父运输时只装配配置读取所需的owner目录、会话库和规范任务管理器。
+def _untransported_worker_configuration_context(config, params):
+    from ...conversation import ConversationStore
+    from ...core import (
+        _effective_workspace_scope,
+        _normalized_workspace_roots,
+        _resolve_home_paths,
+        configure_canonical_background_contracts,
+    )
+    from ...subagents.manager import SubAgentManager
+    from ...user_space.owner_policy import resolve_effective_owner_policy
+    from ...user_space.runtime_paths import (
+        apply_runtime_paths_to_config,
+        resolve_runtime_paths_for_agent,
+    )
+
+    context = SimpleNamespace(config=config, root=Path(params.root), home_paths=_resolve_home_paths(config))
+    context.workspace_roots = _normalized_workspace_roots(context.root, None)
+    context.root.mkdir(parents=True, exist_ok=True)
+    context.owner_policy = resolve_effective_owner_policy(context.home_paths)
+    workspace, roots = _effective_workspace_scope(context, config)
+    resolution = resolve_runtime_paths_for_agent(config, workspace, context.home_paths)
+    apply_runtime_paths_to_config(config, resolution)
+    context.conversation_store = ConversationStore(resolution.paths["conversation_workspace"])
+    home = context.home_paths
+    configure_canonical_background_contracts()
+    context.subagents = SubAgentManager(
+        resolution.paths["subagent_workspace"], local_store=params.local_store,
+        conversation_store=context.conversation_store, workspace_root=workspace, workspace_roots=roots,
+        role_template_dirs=config.subagent_role_template_dirs, owner_id=str(home.owner_id or ""),
+        owner_home_dir=str(home.owner_home_dir or ""), execution_mode=str(config.execution_mode or ""),
+        owner_scope_root=str(home.owner_home_dir or ""), owner_policy_snapshot=context.owner_policy.to_dict(),
+    )
+    context.subagents.home_paths = home
+    return context
+
+
+# LLM: Inspect optional keyword support before calling; never retry after a constructor raises an internal TypeError.
+# 函数用途: 给真实Agent延迟MCP，旧构造器不接收新选项时保持兼容且不重复执行失败的构造。
+def _construct_transported_worker(simple_agent_cls, params, config, *, defer_mcp_connect: bool = True):
+    options = {}
+    try:
+        parameters = inspect.signature(simple_agent_cls).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    optional = parameters.get("defer_mcp_connect")
+    if ((optional is not None and optional.kind is not inspect.Parameter.POSITIONAL_ONLY)
+            or any(value.kind is inspect.Parameter.VAR_KEYWORD for value in parameters.values())):
+        options["defer_mcp_connect"] = defer_mcp_connect
+    if params.request_transport is not None:
+        original = params.request_transport.scope.execution.agent
+        options["workspace_roots"] = original.workspace_roots
+        frozen = getattr(original, "_worker_bootstrap", None)
+        if frozen is not None:
+            options["worker_bootstrap"] = frozen
     return simple_agent_cls(config, params.root, **options)
 
 

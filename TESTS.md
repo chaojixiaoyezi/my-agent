@@ -15,12 +15,34 @@
 python3 -m pytest agent_py_agent/tests/test_cli_resume_and_gateway_client_lightweight.py agent_py_agent/tests/test_cli_chat.py agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_gateway_client.py agent_py_agent/tests/test_adapter_daemon_cli.py agent_py_agent/tests/test_gateway_adapter.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_gateway_commands.py agent_py_agent/tests/test_gateway_supervisor_maintenance.py agent_py_agent/tests/test_gateway_control_plane_construction.py agent_py_agent/tests/test_gateway_control_plane_frozen_home.py -q --tb=short
 python3 scripts/check_import_boundaries.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/t2-w1-size.md
+
+## 2026-10-28 Wave 8 T2 W2 Round 2：MCP重开、活实例预算与worker构造返工（源码候选）
+
+来源：完整阅读 `07-tasks/fix-wave8-t2-w2.md`（52行）。仅在指定工作树 `/tmp/wt-wave8-t2-w2`、分支 `wave8-t2-w2` 修改；返工起点为 `78c930f412b0ec29d06933502dedbff6654d804e`，原任务基线为 `9ee9bdc018f6587ac366f3565c0b7f06bcffe642`。不推送、不部署、不改其他工作树或运行包。
+
+- **MCP代理重开**：关闭时在清空客户端引用前按 `MCPProxyTool.client` 对象身份撤销代理；空池重开/首次发现前清理普通MCP残留，插件代理保留原投影路径。真实本地echo服务回归覆盖连接、调用、关闭、重开、新client同名工具发布、快照可见及再次实际调用。借用门面只撤销自身代理并归还一次引用，不停父连接；父级最后借用退出后沿原关闭路径收口。物理清理未知不会在本轮被改写为确认成功。
+- **实例预算**：构造前为Future预留槽位，发布时在同一池锁内用缓存替换预留；总量计算包含硬/软缓存、在途退役和构建。优先清理无人租用的退役项，只逐出未pin缓存。新硬owner无空间时抛 `PoolCapacityExceededError`，软活返回None；原get没有force_reload选项，本轮新增可选参数，满池强制刷新复用同owner在途代直到租用排空。离池pin同样重查预算，不承诺get+pin原子。
+- **认领前背压**：`AdmissionLimits.from_config(..., agent=...)` 为普通派发绑定原bootstrap Agent的实时共享池预检；global/user检查后同时检查活跃用户数与实际池容量，失败仍留inbox写原等待元数据。预检不创建池，不成为owner授权；正式构造/pin仍在锁内重查。MP C原持久准入仍消费canonical占用与原gate，W本地池执行相同预算，本轮没有新增跨进程池状态协议。
+- **构造与兼容**：原生SimpleAgent及其子类先通过原home/workspace/runtime-path/manager解析器准备最小配置资源，再经原dispatch授权、继承模型与overlay得到最终配置，只做一次Agent构造；最终构造仍完整执行原W/owner/home校验。旧自定义factory保留其自有bootstrap/配置恢复语义。延迟MCP关键字按签名支持情况传入，不在构造内部TypeError后重试。`__new__`旧Registry装配只补缺失生命周期字段，不覆盖原锁/客户端；ready在最后发布。
+- **尺寸与旧测试合同**：Registry五个公开入口提取到同模块辅助函数，权限快照算法不变。严格尺寸门已得到 `hard=0 / blocked=False`，未修改baseline或提交尺寸报告。迁移三条旧满池LRU断言：不能再要求max=1时逐出pinned对象并额外造一个实例；改为检查硬背压/软拒绝、总量上限，以及租用排空后仍实际锁外关闭。显式soft-id退役的嵌套pin收尾断言保留。旧MCP视图关闭测试改为实际调用父连接成功，再由父关闭撤销代理；其余物理退出断言不放宽。
+
+验证证据（工作树根，Python 3.14.4且导入origin已核对在本树）：
+
+- 修复前指定8文件：202项，169通过、33失败（`.pytest_cache/w8-w2-r2-before.xml`）。目标四个旧回归均有实际失败；新增首批6例亦全部失败（`w8-w2-r2-red.xml`），其中并发构造初稿的红例先撞到夹具等待超时，随后修正为只阻塞第一个owner，不能把该超时本身当作预算缺失的完整证据。Native构造次数单独红例明确为2而非1（`w8-w2-r2-worker-red.xml`）；退役池认领前背压也单独确认失败（`w8-w2-r2-admission-red.xml`）。
+- 当前指定8文件：**210项，181通过、29失败、0错误、0跳过**（`.pytest_cache/w8-w2-r2-required.xml`），失败节点没有新增，原四个目标回归已消失。17个MP运行时失败仍在 `os.link(..., dir_fd=...)` 返回EPERM后以 `worker_exit_unconfirmed` 收口；12个MCP原生生命周期失败仍涉及空birth、`identity_unavailable`、`MCP_CLEANUP_UNKNOWN`或物理退出未确认。本执行入口另有 `/bin/ps` 启动直接返回EPERM的只读观察；这不等于已证明所有失败共享同一原因。**指定pytest总门未通过**，不以局部组件通过替代全套验收，不增加skip/xfail或削弱进程身份/关闭硬门。
+
+复现：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_dual_owner_concurrent_canary.py agent_py_agent/tests/test_owner_scoped_pool.py agent_py_agent/tests/test_gateway_worker_runtime.py agent_py_agent/tests/test_gateway_two_tier_admission.py agent_py_agent/tests/test_gateway_dispatcher_resilience.py agent_py_agent/tests/test_agent/test_subagent_worker_pool.py agent_py_agent/tests/test_mcp_lifecycle.py agent_py_agent/tests/test_orchestration_background_dispatch.py -q --tb=short --basetemp=/tmp/wt-wave8-t2-w2/.pytest_cache/r2-required --junitxml=.pytest_cache/w8-w2-r2-required.xml
+python3 scripts/check_doc_sync.py
 ruff check agent_py_agent scripts
 git diff --check 9ee9bdc01..HEAD
 ```
 
 JUnit及红例保留在工作树 `.pytest_cache/t2-w1-fix-*.xml`；最终准确通过数及门禁结果见本轮交接。Python 3.11/3.12、Linux/Windows CI、真实模型/通道和全仓测试未作为本轮已验证证据。
+
+真实多进程整链、物理MCP树清理、生产及600用户/RSS压测仍未验证；独立审阅与补充回归结果在收口时追加。
 
 ## 2026-10-28 CI Linux 跨平台回归收口与 Python 3.11–3.14 版本对齐
 
@@ -32,7 +54,6 @@ JUnit及红例保留在工作树 `.pytest_cache/t2-w1-fix-*.xml`；最终准确�
   - `test_sandbox_profile_perf.py`：在非 macOS 平台上未显式传入 `macos_sandbox_exec` 时提供测试默认路径 `"/usr/bin/sandbox-exec"`，仅用于构造 Seatbelt 规则字符串并度量生成耗时，不代表在 Linux 上执行真实 Seatbelt 沙箱。
   - `test_web_fetch_ssrf.py`：在模块级拦截 `_PinnedHTTPConnection.connect` 避免首个 SSRF 回归用例直连示例公网 IP 超时，保留 DNS 钉扎与重定向复核断言。
   - `test_workflow_script_engine.py` 与 `test_provider_queue_transport.py`：为非超时错误分类用例与并发队列槽位测试提供充足的子进程启动/请求 deadline 余量，保留 `SCRIPT_TIMEOUT` 与 `PROVIDER_QUEUE_WAIT_TIMEOUT` 原断言。
-  - `scripts/check_code_size.py`：`--root` 参数同步切换 `ROOT`、`REPORT_PATH` 与 `DEFAULT_BASELINE_PATH`，相对基线路径按 `ROOT` 解析。
   - `timeout_budget_evidence.py`：按 `(abs_path, mtime_ns, size, rel)` 缓存单次纯 AST 扫描结果，不做原始文本子串预筛，保持相邻字符串字面量等完整 AST 语义并消除单测内重复全仓 parse。
 
 ## 2026-10-27 CI C2 v2：包页面归档投影与继任合同对齐
@@ -78,7 +99,6 @@ PYTHONPATH=/tmp/wt-ci-8 /tmp/ci-venv-312/bin/python3 -m pytest \
   agent_py_agent/tests/test_session_task_real_chain.py \
   agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py \
   agent_py_agent/tests/test_wake_poison.py -q --tb=short --junitxml=.pytest_cache/c8-final.xml
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/c8-size.md
 ruff check agent_py_agent scripts
 ```
 
@@ -102,7 +122,6 @@ ruff check agent_py_agent scripts
 ```bash
 (cd /tmp/wt-ci-9 && /tmp/ci-venv-312/bin/python3 -m pytest agent_py_agent/tests/test_foundation_bc_wave5.py agent_py_agent/tests/test_gateway_loops_resilience.py agent_py_agent/tests/test_gateway_host_identity.py agent_py_agent/tests/test_gateway_background_slice_shutdown.py agent_py_agent/tests/test_shell_orphan_kill.py agent_py_agent/tests/test_scheduler_waiting_deadlock.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_lifecycle_wake_host_event.py agent_py_agent/tests/test_model_wait_progress.py agent_py_agent/tests/test_r223_audit_regressions.py agent_py_agent/tests/test_scheduler_precheck.py agent_py_agent/tests/test_scheduler_scan_costs.py -q --tb=short)
 python3 scripts/check_import_boundaries.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/c9-size.md
 ruff check agent_py_agent scripts
 git diff --check
 ```
@@ -135,7 +154,6 @@ Ruff、差异检查和严格尺寸门通过（hard=0，blocked=False），报告
 python3 -m pytest agent_py_agent/tests/test_wave7_broker_workflow_identity.py agent_py_agent/tests/test_scripts_and_workflows_tools.py agent_py_agent/tests/test_workflow_script_engine.py agent_py_agent/tests/test_datasource_keyring_and_script_binding.py agent_py_agent/tests/test_plugin_event_hub.py -q --tb=short --junitxml=.pytest_cache/w1-r2-delivery-serial.xml
 ruff check agent_py_agent scripts
 git diff --check
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w1-r2-size.md
 ```
 
 ## 2026-10-27 Wave 7 W2-R4：c16/c17 五项审计收口
@@ -174,7 +192,6 @@ python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py
 python3 -m pytest agent_py_agent/tests/test_capabilities.py agent_py_agent/tests/test_capability_package_catalog_scale.py agent_py_agent/tests/test_capability_package_recommendations.py agent_py_agent/tests/test_decision_skill_projection.py agent_py_agent/tests/test_pack_recommendation_threshold.py -q --tb=short --junitxml=.pytest_cache/w2-r4-related.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w2-r4-size.md
 git diff --check
 ```
 
@@ -213,7 +230,6 @@ git diff --check
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_skill_learning*.py agent_py_agent/tests/test_capabilities.py -q --tb=short --junitxml=.pytest_cache/w2-r3-final.xml
 ruff check agent_py_agent/agent/capability/ agent_py_agent/agent/workflows/script_runner.py agent_py_agent/agent/assets/turn_extractor.py agent_py_agent/agent/gateway_parts/multiprocess_background_discovery.py agent_py_agent/tests/test_wave7_autonomous_learning_closure.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w2-r3-code-size.md
 git diff --check
 ```
 
@@ -251,7 +267,6 @@ W1 三个函数已通过与准确起点 AST 相等核对。失败仍是 ScriptsT
 
 ```bash
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout HEAD -- CODE_SIZE_REPORT.md
 python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_skill_learning.py agent_py_agent/tests/test_skill_learning_host_feedback.py agent_py_agent/tests/test_skill_learning_confirmation.py agent_py_agent/tests/test_skill_learning_maintenance.py agent_py_agent/tests/test_skill_proposals.py agent_py_agent/tests/test_turn_asset_extractor.py -q --tb=short --junitxml=.pytest_cache/w2-r2-final.xml
 python3 -m pytest agent_py_agent/tests/test_wave7_w1_integration_contracts.py -q --tb=short
@@ -276,7 +291,6 @@ git diff --check
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wake_poison.py agent_py_agent/tests/test_wake_attempt_store.py agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/pytest-w3-r4-final --junitxml=tmp/w3-r4-final.xml
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w3-r4-size.md
 git diff --check
 ```
 
@@ -304,7 +318,6 @@ Ruff 全范围通过；strict 尺寸门 `hard=0 / blocked=False`，没有改检�
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wake_poison.py agent_py_agent/tests/test_wake_attempt_store.py agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/pytest-w3-r2-final --junitxml=tmp/w3-r2-final.xml
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -326,7 +339,6 @@ git diff --check
 ```bash
 TMPDIR=/tmp/wt-wave7-w4/.pytest_cache python3 -m pytest agent_py_agent/tests/test_plugin_host_thread_and_model_settings.py agent_py_agent/tests/test_plugin_host_v2_conversations.py -q --tb=short --basetemp=.pytest_cache/r3-complete-tmp --junitxml=.pytest_cache/r3-complete.xml
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w4-r3-size.md
 ```
 ## 2026-10-27 Wave 7 W5 R4：消息FD竞态、Git根路径和时间线顺序
 
@@ -368,7 +380,6 @@ python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.j
 ```bash
 python3 -m pytest agent_py_agent/tests/test_plugin_host_requests_and_streams_v2.py agent_py_agent/tests/test_plugin_host_w6_r2.py agent_py_agent/tests/test_plugin_host_v2_*.py -q --tb=short --junitxml=.pytest_cache/w6-r2-full.xml
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w6-r2-size.md
 git diff --check
 ```
 
@@ -416,7 +427,6 @@ pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
 python3 scripts/check_doc_sync.py --base 26f7bf1a8906a1d3f296390cd507d5ae3b5e9976
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -439,7 +449,6 @@ python3 -m pytest agent_py_agent/tests/test_gateway_owner_maintenance.py agent_p
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
 python3 scripts/check_doc_sync.py --base c73586c533bc5a766299cc3c7d179d8acb6e2824
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git restore --source=HEAD -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -472,7 +481,6 @@ git diff --check
 python3 -m pytest agent_py_agent/tests/test_local_store_derived_ttl_wave6.py agent_py_agent/tests/test_local_store.py agent_py_agent/tests/test_subagent_persistence_service.py -q --tb=short
 ruff check agent_py_agent/agent/local_storage/records.py agent_py_agent/agent/subagents/services/indexing/service.py agent_py_agent/agent/gateway_parts/logging.py agent_py_agent/agent/user_space/owner_maintenance.py agent_py_agent/tests/test_local_store_derived_ttl_wave6.py
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -525,7 +533,6 @@ python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.p
 python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_audit_group_policy_and_posture.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py -q --tb=short -k 'not test_t4_actual_native_isolated_process' -o addopts='' --junitxml=.pytest_cache/ag2-r5-delivery.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout HEAD -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -577,7 +584,6 @@ python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.p
 python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -602,7 +608,6 @@ Python 3.10 解释器实跑、真实模型/用户链路、线上 CI、部署及�
 pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -626,7 +631,6 @@ git diff --check
 python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
 ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -653,7 +657,6 @@ git diff --check
 python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_process_session_store.py -q --tb=short
 ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -693,7 +696,6 @@ python3 -m pytest agent_py_agent/tests/test_local_store.py agent_py_agent/tests/
 python3 -m pytest agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/tests/test_process_registry_tools.py agent_py_agent/tests/test_process_cleanup_evidence.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -756,7 +758,6 @@ python3 -m pytest agent_py_agent/tests/test_local_store_coordinator_io.py agent_
 python3 -m pytest agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/tests/test_process_session_store.py -q --tb=short
 ruff check agent_py_agent/tests/conftest.py agent_py_agent/tests/test_b5_process_reap.py agent_py_agent/agent/tooling/process_registry.py
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -801,7 +802,6 @@ ruff check agent_py_agent scripts
 python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py -q --tb=short
 ruff check agent_py_agent/agent/assets/delivery_sanitizer.py agent_py_agent/agent/assets/script_store_support.py agent_py_agent/tests/test_cross_owner_asset_delivery.py
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -826,7 +826,6 @@ git diff --check
 python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short --basetemp=.pytest_cache/round5/gate-tmp --junitxml=.pytest_cache/round5/gate.xml
 ruff check agent_py_agent/agent/assets/delivery_sanitizer.py agent_py_agent/agent/assets/script_store_support.py agent_py_agent/agent/assets/delivery_service.py agent_py_agent/tests/test_cross_owner_asset_delivery.py
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -868,7 +867,6 @@ python3 -m pytest agent_py_agent/tests/test_cross_owner_asset_delivery.py agent_
 python3 -m pytest agent_py_agent/tests/test_audit_group_policy_and_posture.py agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py -q --tb=short -k 'not test_t4_actual_native_isolated_process' -o addopts='' --junitxml=.pytest_cache/ag2-r3-delivery.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 ```
@@ -898,7 +896,6 @@ mkdir -p .pytest_cache
 PYTEST_ADDOPTS='--basetemp=.pytest_cache/r2-focused' python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_manifest_v9.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short --junitxml=.pytest_cache/r2-focused.xml
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -935,7 +932,6 @@ Ruff、doc sync、strict code-size、diff和clean-package五项静态/发布门�
 ```bash
 python3 -m pytest agent_py_agent/tests/test_audit_group_policy_and_posture.py agent_py_agent/tests/test_audit_group_observation_and_invoke.py -q --tb=short
 ruff check agent_py_agent/agent/audit_group/readonly_store.py agent_py_agent/agent/audit_group/observation_service.py agent_py_agent/tests/test_audit_group_policy_and_posture.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 ## 2026-10-26 WT-AG2-R2B：四项返修与原生边界（源码候选，完整门未全绿）
@@ -974,7 +970,6 @@ python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.p
 ```bash
 PYTEST_ADDOPTS='--basetemp=.pytest_cache/ag2-part2-gate' python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_plugin_host_v2_conversations.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_local_users.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short --junitxml=.pytest_cache/ag2-part2-gate.xml
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -995,7 +990,6 @@ HostComposition已实际接入ensure、rollover和history.list三个动作。新
 ```bash
 PYTEST_ADDOPTS='--basetemp=.pytest_cache/ag2-temp' python3 -m pytest agent_py_agent/tests/test_dual_bot_sessions_and_rollover.py agent_py_agent/tests/test_plugin_host_v2_conversations.py -q --tb=short
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -1016,7 +1010,6 @@ git diff --check
 python3 -m pytest agent_py_agent/tests/test_audit_group_observation_and_invoke.py agent_py_agent/tests/test_plugin_local_users.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_admin_managed_users_governance.py -q --tb=short --junitxml=tmp/ag1-focused.xml
 python3 -m pytest agent_py_agent/tests/test_tool_registry.py agent_py_agent/tests/test_local_user_cross_module_guards.py -q --tb=short --junitxml=tmp/ag1-registry.xml
 ruff check agent_py_agent scripts
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -1051,7 +1044,6 @@ git diff --check
 python3 -m pytest -o addopts='' agent_py_agent/tests/test_sandbox_profile_perf.py agent_py_agent/tests/test_perf_a1_a5_optimizations.py agent_py_agent/tests/test_tool_output_externalizer.py -q --tb=short -ra
 python3 -m pytest -o addopts='' agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_artifact_read_path_races.py -q --tb=short -ra
 ruff check agent_py_agent/agent/attempt/sandbox.py agent_py_agent/agent/memory_archive/artifact/reader.py agent_py_agent/tests/test_sandbox_profile_perf.py agent_py_agent/tests/test_perf_a1_a5_optimizations.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -1073,7 +1065,6 @@ git diff --check
 python3 -m pytest agent_py_agent/tests/test_admin_managed_users_governance.py agent_py_agent/tests/test_plugin_local_users.py -q --tb=short
 ruff check --fix agent_py_agent
 ruff check agent_py_agent
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 ```
 
@@ -1099,7 +1090,6 @@ Ruff 与 strict 尺寸门通过（`hard=0`、`blocked=False`）；未放宽基�
 python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_manifest_v9.py -q --tb=short
 python3 -B -m pytest agent_py_agent/tests/test_tui_history_paging.py agent_py_agent/tests/test_tui_reading_position.py agent_py_agent/tests/test_tui_runtime.py agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_background_owner_delivery_commit.py -q --tb=short -o addopts=''
 ruff check agent_py_agent
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 ```
 
 当前版本实际验证：上述九个相关测试文件合并运行`550 passed`；全目录Ruff通过；严格尺寸门`hard=0 / blocked=False`；修改的51个生产函数/方法AST节点均查到双层注释。两名Astra独立复核仅基于内联材料静态检查，其提出的时间戳、跨片紧邻和决定目标绑定均由父级用真实入口反例核验修复；未宣称复核者独立运行测试。
@@ -1139,7 +1129,6 @@ python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.j
 ```bash
 python3 -m pytest -o addopts='' agent_py_agent/tests/test_perf_a1_a5_optimizations.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_user_config_capability.py agent_py_agent/tests/test_parameters.py agent_py_agent/tests/test_parameter_changes.py agent_py_agent/tests/test_model_latency_q2.py agent_py_agent/tests/test_context_pressure.py agent_py_agent/tests/test_tool_output_headroom_externalize.py agent_py_agent/tests/test_runtime_guidance.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_artifact_read_path_races.py -q --tb=short
 ruff check agent_py_agent
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 python3 scripts/check_doc_sync.py
 git diff --check
 ```
@@ -1281,7 +1270,6 @@ git diff --check DESIGN_LEDGER.md CODEBASE_TREE.md TESTS.md docs/modules/
 - `test_nonblocking_model_switch.py`：覆盖慢控制占用时独立设置 lane、真实 outbox 锁争用按键不阻塞、原顺序/claim、菜单实际按键自动关闭与 Esc 后继续保存、菜单复用同一本 outbox、迟到 revision/撤销提示、Count0/冷 C 短保存和 effort 不触发 probe，以及同一请求档位冻结。菜单 Future 只观察原操作，不承担副作用授权。
 - `test_cli_turn_completion_timing.py`：覆盖单调时钟/本地时区/秒分时天、排队和重复终态冻结、run 准备失败、plain 的确认失败与 silent stop、TUI 运输超时/退出观察不伪造终态、恢复旧请求缺原起点显示“未知”。完成块为程序 system 消息，不进入模型正文或 canonical assistant 历史；旧错误、思考、工具和正文顺序断言保留，并显式断言新增的独立完成块。
 - 标准回归（工作树根）：`python3 -B -m pytest -p no:cacheprovider agent_py_agent/tests/test_active_turn_media_interjection.py agent_py_agent/tests/test_nonblocking_model_switch.py agent_py_agent/tests/test_cli_turn_completion_timing.py agent_py_agent/tests/test_input_media.py agent_py_agent/tests/test_runtime_model_selection_refresh.py agent_py_agent/tests/test_tui_model_menu.py agent_py_agent/tests/test_architecture_guardrails.py -q --tb=short`。另跑 `test_gateway_active_input_transport.py`、`test_tui_runtime.py`、`test_tui_control_delivery.py`、`test_tui_input.py`、`test_tui_prompt_toolkit_pipe.py`、`test_reasoning_effort.py`、`test_cli_manual_resume.py`、`test_cli_resume_contract.py`。
-- 尺寸检查须与 pytest **串行**执行：`python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`，结束后 `git checkout HEAD -- CODE_SIZE_REPORT.md`。曾并行执行导致架构 fixture 观察到报告被修改；该次 teardown error 是本轮验证安排错误，不是基线问题。
 
 ## 2026-10-23 C1b 审计返工：计量来源消费与工具发现顺序
 
@@ -2306,7 +2294,6 @@ MiniQL 最后真实工具进展在初始需求后 3 小时 2 分 56 秒，主 Co
 - 高水位复现：后台真实 preflight 入口，合成旧 RuntimeFacts + 完整工具组 + 最新同源事实，仅摘要与末端 HTTP 用替身。禁用旧事实退休时候选 175750/200000（87.875%）超过健康目标 120000；恢复修复后当前候选 37401 <= 120000，下一业务请求无旧事实正文。
 - 覆盖：四元身份完整组、未覆盖工具屏障、每 source 最新事实与原列表不变；raw/校准两臂的完成 after 等最终发送快照；TUI、Gateway、原生/联合恢复、CAS/取消原测试不删不跳过。
 - 当前八文件 200 passed，完整 guards9 十二文件 194 passed（均 rc=0）；命令：指定 ci-venv Python 在根运行 `-m pytest <相关文件> -q -o addopts= --tb=short -p no:cacheprovider --basetemp=<隔离目录>`。
-- 门禁：`python -m ruff check agent_py_agent scripts`、`scripts/check_doc_sync.py`、`scripts/check_import_boundaries.py`（0 条）、`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`、`git diff --check`、`scripts/check_clean_package.py .` 均 rc=0；`size_diff.sh $PWD` rc=0，输出为“新增告警: 0；消失告警: 13”。初次共用 helper 移名暴露一条嵌套身份告警，已拆平控制流并重跑八文件及完整 guards9；生成 CODE_SIZE_REPORT 未提交。
 - 单点数字复核：`test_mixed_compact_recovery.py::test_preflight_mixed_recovery_reaches_healthy_target_with_retired_runtime_facts -s`；完成计量见 `test_conversation_method_native_compact.py` 新增参数化用例。
 - 独立静态评审指出中途原生补带预算使用 trigger 而非健康线；核实原合同明确健康目标是优选、保留最新工具对的有效候选低于 trigger 即提交。本轮不改该合同或再压一代；回合开头健康样例走联合 recovery 而非该中途路径。
 - 未验证：真实飞书/TUI 接收、真实模型/测试机、原 mc4 复发、供应商缓存收益、Linux/全仓测试。IM 活动消费者仅显示阶段，不另算数字；共用完成事件数字已改，真实渠道仍需集成者验收。
@@ -2381,7 +2368,6 @@ agent_py_agent/tests/test_tool_call_guardrail_runtime.py::test_real_shell_execut
 | `$PY scripts/check_import_boundaries.py` | `findings=0` / 0 |
 | `$PY -m ruff check agent_py_agent scripts` | `All checks passed!` / 0 |
 | `$PY scripts/check_doc_sync.py` | `DOC_SYNC_PASS` / 0 |
-| `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` | `blocked=False` / 0 |
 | `git diff --no-ext-diff --check d7e68e492` | 无空白错误 / 0 |
 | `$PY scripts/check_clean_package.py .` | 未发现发布阻塞项 / 0 |
 | `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh $PWD ~/.my-agent/releases/claude-tools/3a-scripts/size-baseline-d7e68e492.json` | 新增告警 0、消失告警 0 / 0 |
@@ -2599,7 +2585,6 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 - 完整 guards9 当前 12 文件（含 packaging、参数目录、常量目录）：最终版本同 pytest 参数，`m-w1-guards9-final` / `tmp/w1-carry/guards9-final.xml`，194 passed，rc=0。
 - `$PY scripts/check_import_boundaries.py`：findings=0，rc=0。
 - `$PY -m ruff check agent_py_agent scripts`：初轮 4 个 I001，新增入口助手另有 1 个 I001；均只修导入格式，最终全仓通过，rc=0。
-- `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：rc=0；hard=0、high-risk=1487、soft=694，blocked=False，不等于全仓零告警；生成的 CODE_SIZE_REPORT.md 还原到 HEAD，不纳入功能提交。
 - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh "$PWD" ~/.my-agent/releases/claude-tools/3a-scripts/size-baseline-7dd3f9ba0.json`：rc=0，新增告警 0 / 消失告警 0，按身份对比真正基线；初轮新增的助手尺寸告警已拆平，未更改阈值或白名单。
 - `$PY scripts/check_doc_sync.py`：DOC_SYNC_PASS，rc=0；`git diff --check 7dd3f9ba0`：rc=0。
 - `$PY scripts/check_clean_package.py .`：首次报新增 native_compact 测试未跟踪，rc=1；把真实已验证的新文件纳入本分支索引后 rc=0，未删文件或跳过检查。
@@ -2643,7 +2628,6 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 | --- | --- | --- | --- |
 | 只删工具模型说明新增语言提醒；skill 正文不动 | `test_learn_external_agent_skill.py -k declaration_language`，basetemp `m-w2-lang-mutation` | 工具项 1 failed，skill 项 1 passed，3 deselected；rc=1 | 有效业务断言捕获，非收集失败；`finally` 按变异前字节原样恢复，之后 142 项回归通过 |
 
-- 静态门禁均 rc=0：`$PY scripts/check_import_boundaries.py`（findings=0）；`$PY -m ruff check agent_py_agent scripts`；`$PY scripts/check_doc_sync.py`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`（blocked=False）；`git diff --check 7dd3f9ba0`；`$PY scripts/check_clean_package.py .`。生成的 `CODE_SIZE_REPORT.md` 已按规则还原 HEAD，不提交。
 - 尺寸差集：`bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff_vs.sh $PWD /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size-baseline-7dd3f9ba0.json`，rc=0，原输出“新增告警: 0 / 消失告警: 0”。
 - 独立静态审查只读需求和三处 diff，未执行测试、未独立核对全文件；提出工具入口也应给实际中英词的低项。对照原任务第 17 行只要求工具示意“中文说明、中英文关键词”，第 20–21 行才要求 skill 举通用词例子，现稿已满足；不为此扩大工具说明或锁死示例词。该审查不替代 6d 或父级已执行的字节/AST/回归验证。
 - 真实 MiniMax/Gateway/TUI 学习与打包、目录/关键词推荐命中率、缓存收益和生产业务质量**未验证**；未部署、未改已装包或运行配置。下一步由 6d 在固定候选上复核生产入口，不能拿模拟或文字测试替代。
@@ -3137,7 +3121,6 @@ _tool_loop_service `a93ead71a65616074035ffcc2ebb774eb742768ede4ec1b9602fba8430c2
 - **静态门禁（当前实现与目录实际执行，均 rc=0）**：`$PY scripts/check_import_boundaries.py` 为 findings=0；
   `$PY -m ruff check agent_py_agent scripts` 全过；`$PY scripts/check_doc_sync.py --base 6e8f61564` 为 DOC_SYNC_PASS；
   `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` 为 266 fields 同步。
-  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
   strict_scope_total=2190/hard=0/high-risk=1494/soft=696/test_advisory=1239/blocked=False；这是接受既有基线告警，不是全仓零告警。
   `git diff --check 6e8f61564` 无输出；`$PY scripts/check_clean_package.py .` 无发布阻塞项。
   新实现/测试六文件先纳入 Git 后 clean-package 才通过；之前未跟踪导致的失败不冒充通过。
@@ -3209,7 +3192,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest "${TEST_FILES[@]}" \
 | `$PY -m ruff check agent_py_agent scripts` | All checks passed，rc=0 |
 | `PYTHON=$PY node frontend/scripts/sync-backend-config.mjs --check` | 265 fields 同步，rc=0 |
 | `$PY scripts/check_doc_sync.py` | DOC_SYNC_PASS，rc=0 |
-| `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` | hard=0、blocked=False，rc=0；生成报告已还原 HEAD、不提交 |
 | `git diff --check 6e8f61564` | rc=0 |
 | `$PY scripts/check_clean_package.py .` | 未发现发布阻塞项，rc=0 |
 | `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` | rc=0，输出如下 |
@@ -3307,7 +3289,6 @@ PY
   - `scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`。
   - `-m ruff check agent_py_agent scripts`：`All checks passed!`。
   - `scripts/check_doc_sync.py --base 6e8f61564`：`DOC_SYNC_PASS`；`git diff --check 6e8f61564` 无输出。
-  - `scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：hard=0、blocked=False；生成 `CODE_SIZE_REPORT.md` 已还原，不提交。
   - `scripts/check_clean_package.py .`：未发现发布阻塞项；新测试先暂存，使原守卫可正确检查，不改守卫或豁免。
   - `bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：原输出“新增告警: 0”“消失告警: 1”。
   - 参数/常量目录、打包和后端签名守卫包含在上述完整 guards9 中；`test_backend_config_catalog.py` 包含在最终集合中。
@@ -3344,7 +3325,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/t
     12 个独立主会话、16 条调用（main 12 / selection 4），三份输出均生成；临时目录结束清理，不是正式评测文件。
   - `scripts/check_import_boundaries.py`：rc=0，`findings=0`；`-m ruff check agent_py_agent scripts`：rc=0。
   - `scripts/check_doc_sync.py --base 6e8f61564`：rc=0，`DOC_SYNC_PASS`；`git diff --check 6e8f61564`：rc=0。
-  - `scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：rc=0，hard=0；生成报告还原，不提交。
   - `scripts/check_clean_package.py .`：rc=0，未发现发布阻塞项；新增文件须先 git add，未登记的源码会按原守卫被拒绝。
   - `bash /Users/xiaoyezi/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：rc=0，原输出为“新增告警: 0”“消失告警: 0”。
   - 开发中曾被架构守卫抓出两个 `**kwargs` 服务接口、被 size_diff 抓出三项新增告警；已改为原解析接缝、标准库假传输和单层 helper，
@@ -3400,7 +3380,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/t
   **618 passed / 9 skipped / 3 failed，rc=1**，三个失败与上文相同，不登记联合全绿。测试只把两处长 import 拆成多行以修 I001，
   没有改断言、选择范围或产品行为；修复后的 `$PY -m ruff check agent_py_agent scripts` 为 `All checks passed!`，rc=0。
   `$PY scripts/check_import_boundaries.py` 为 `IMPORT_BOUNDARIES findings=0`，rc=0；`$PY scripts/check_doc_sync.py` 为 `DOC_SYNC_PASS`，rc=0。
-  `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 为
   `strict_scope_total=2190 hard=0 high-risk=1494 soft=696 test_advisory=1239 blocked=False`，rc=0；这是接受基线告警，不是全仓零告警。
   `git diff --check 6e8f61564` 无输出、rc=0；`$PY scripts/check_clean_package.py .` 为 `OK: . 未发现发布阻塞项`，rc=0。
   code-size 与 size_diff 后均已还原生成的 `CODE_SIZE_REPORT.md`，不提交报告。
@@ -3479,7 +3458,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/t
   - 插件（hello-node 的 5 个文件由她逐个写进工作区；没有 node 时跳过）：插件开关关只给 `/plugins confirm <单号>`，确认后装上，`/plugins list` 标她做的、不进能力包列表，停用、删除；插件开关开时直接装上、不开单。
   - 合并链路见第 6 步 `test_learnpack_merge.py`。"回放"按产品已有语义验：确认单只执行一次，重发回放当时结果；仓库里现成的 replay 设施（tests/replay、fake_llm_runner）是交付合同的假工具回放，不覆盖这条安装链路，所以没套用。
 - **连带**：learnpack 整组 15 个测试文件（开关、打包、安装、存储、`/plugins#`、学习技能、总结、门槛、合并、整条链路，以及跟着改的 TUI 输入、默认收起、写插件技能）+ 14 个守卫：584 passed / 0 skipped / 0 failed（本机有 node 与平台沙箱，插件用例都真跑了）。
-- **本地严格门禁**（第四节，逐条存 rc、不经管道）：`ruff check agent_py_agent scripts` rc=0；`check_doc_sync.py --base e5d7f3c90` rc=0；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` rc=0（报告写到 scratchpad，不动仓库里的 CODE_SIZE_REPORT.md）；`git diff --check e5d7f3c90` rc=0；`check_clean_package.py .` rc=0；`check_import_boundaries.py` rc=0。
 - **Linux 通道**：在提交 ce4f769a2 上用 linux-test-main 检出跑全量 12 片（Docker，py3.12，bwrap 自检 SANDBOX_READY）：12/12 rc=0，29427 passed / 138 skipped / 32 xfailed / 5 xpassed / 0 failed，pytest 481 秒。learnpack 的能力包用例全部真跑通过；镜像里没有 node，hello-node 插件相关的 3 条按设计跳过（test_learnpack_install 712/725 两条、test_learnpack_e2e 插件链路一条），另有 1 条（test_learnpack_install 838）因容器里以 root 运行不受目录权限限制而跳过；平台沙箱不可用时的跳过分支在这里没被触发（是没 node 先跳过的）。在本机 Mac 上插件用例都真跑了（见上面连带）。证据：claude-tools/linux-lane-ce4f769a2/（totals.json、out-0..11.txt、rc.txt、timing.txt）。宿主 docker run 客户端在容器退出后卡住（已知现象），只 kill -9 了自己那一个客户端进程。
 
 ## learnpack 第 6 步：能力包推荐门槛与同领域合并（2026-10-06，3a，分支 `claude/3a-learnpack-p1`）
@@ -3674,7 +3652,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/t
 - 背景、根因与两条修法见 `DESIGN_LEDGER.md` 同名两节。
 - 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
   - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_closeout_recovery_dependencies.py agent_py_agent/tests/test_runtime_db_operations.py -q` → **87 passed**（含 4 + 1 条新用例）。
-  - guards9 全部 12 个文件 → **190 passed**；`scripts/check_import_boundaries.py` → findings=0；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py --base f7849d7ff` → DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → hard=0 blocked=False；`size_diff.sh` → **新增告警 0 / 消失 57**；`scripts/check_clean_package.py .` → OK；`git diff --check` → 干净。
   - 新增 3 个模块常量后重新生成常数目录：`scripts/build_constants_catalog.py`（912 → 915 项），`test_constants_catalog.py` 通过。
 - 新增用例：
   - `test_closeout_recovery_dependencies.py`：`test_unknown_status_conflict_event_written_once_across_retries`、`test_unknown_closeout_retry_backoff_stops_repeated_settle`、`test_manual_recovery_resumes_closeout_after_backoff_window`、`test_stale_wal_after_new_attempt_is_rejected_not_settled`。
@@ -3785,7 +3762,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 "$PY" -m pytest agent_py_agent/tests/t
 - 验证命令（工作目录根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`）：
   - `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_pty_sessions.py agent_py_agent/tests/test_pty_turn_lifecycle.py -q` → **33 项：27 passed、5 failed、1 skipped**。5 条失败与基线一致（见下）；1 条 skip 是能力门（见下）。
   - guards9 前 11 个文件（第 12 个 `test_backend_signature_guardrails.py` 属 17k，本分支基线没有）→ **全绿 187 项**（72+72+43）。
-  - `scripts/check_import_boundaries.py` → findings=0；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py --base da6e38093` → DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → hard=0 blocked=False；`size_diff.sh` → **新增告警 0 / 消失告警 44**；`scripts/check_clean_package.py .` → OK；`git diff --check` → 干净。
   - 新增两个模块常量后重新生成常数目录：`scripts/build_constants_catalog.py`（899 → 901 项），`test_constants_catalog.py` 通过。
 - 新增用例：
   - `test_pty_sessions.py`（8 条常规 + 1 条能力门）：`test_reclaim_pty_sessions_kills_task_sessions_and_preserves_others`、`test_reclaim_pty_sessions_task_scope_covers_other_runs_of_same_task`、`test_reclaim_pty_sessions_falls_back_to_run_identity`、`test_reclaim_pty_sessions_without_owner_or_identity_is_not_selected`、`test_idle_sweep_reclaims_idle_sessions_only`、`test_idle_sweeper_thread_starts_once_and_is_daemon`、`test_subprocess_env_defaults_pagers_to_cat`、`test_subprocess_env_keeps_explicit_pagers`、`test_reclaim_pty_sessions_confirms_termination_outside_sandbox`。
@@ -3863,7 +3839,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   ```
 
 - **结果**：37 个唯一文件、863 项收集；**848 passed、12 skipped、3 failed**。两份 `test_plugin_m1_joint_*` 与 guards9 12 文件均在该批次中，未出现失败。3 个失败均为 `agent_py_agent/tests/test_plugin_sandbox_v8.py` 的嵌套 sandbox 用例（`test_macos_v8_narrows_read_and_enforces_network[True]`、`test_python_installation_prefix_inside_hidden_home_runs`、`test_node_realpath_and_own_data_under_hidden_home`）；子进程明确返回 71，stderr=`sandbox-exec: sandbox_apply: Operation not permitted`。依 tref3 要求交 3a 沙箱外复跑，不把该结果归因于产品代码。
-- **静态门禁**：`python -m ruff check agent_py_agent scripts` → `All checks passed!`；`python scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`python scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2186, hard=0, high-risk=1492, soft=694, test_advisory=1234, blocked=False`。运行后已将生成的 `CODE_SIZE_REPORT.md` 恢复为 HEAD 版本；`git diff --check 886965f3a` exit 0。
 - **未验证**：真实 Gateway/外部沙箱运行及上述三个用例的沙箱外复跑；未部署、未推送。
 
 ## 插件事件 thread_ref 统一与 channel_conversation_ref（tref2，2026-10-05，worker/tref2）
@@ -4053,7 +4028,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
 | M2 漏比末块直接归追加 | `_history_changes` 的 `shared < min(...)` 分支改为 `if False` | 31→32 改写＋追加错误报 `history_appended`；1 failed / exit 1，KILLED |
 | M3 不可比仍报可比 | `_history_changes` 的 `return [], None, shared, False` 改为 True | `comparable` True≠False；1 failed / exit 1，KILLED |
 
-- **其余门禁**：`$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_import_boundaries.py` → findings=0；`$PY scripts/check_doc_sync.py --base ffca71c54` → DOC_SYNC_PASS；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2202、hard=0、high-risk=1505、soft=697、test_advisory=1234、blocked=False；`git diff --check` 通过；`$PY scripts/check_clean_package.py .` → OK，无发布阻塞项。
 - **尺寸差集**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` 最终 **新增告警 0、消失告警 41**。初次抓到测试 helper `_cache_call` 四参数新增 1 条；把夹具三项收成一个 sample 入参后重跑上述当前版本回归、三变异和尺寸差集归零。生成 `CODE_SIZE_REPORT.md` 按规则恢复，不提交。
 - **旧节口径**：下面 cachediag/cachediag2 数字保留作者当时回执，不作为本次验证结果；当前数字以上述实际命令为准。
 - **未验证**：真实端点缓存、生产重启/重放、真实 TUI/IM、Linux 全量；本轮不联网、不启动 Gateway、不读取真实会话或凭据。
@@ -4169,7 +4143,6 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
 - `scripts/build_constants_catalog.py` 生成 906 项目录，只改变默认 claim TTL 的中文说明投影，不手改 JSON；目录单文件 **11 passed**，随后十二文件 guards9（含 packaging）**190 passed，64.38s**，exit 0。当前目录不再过期。
 - 三项当前版本单点变异 **3/3 KILLED**：M1 `_start_dispatch` 只返回内存 marker、不 commit（`test_dispatch_is_durable_before_provider_io`，1 个断言失败）；M2 不可查询恢复跳过 unknown 而重发（`test_dead_non_queryable_dispatch_is_unknown_without_resend`，接受前后 2 个断言失败）；M3 `_dispatch_marker` 把两阶段共用 final 身份（`test_progress_and_final_have_distinct_durable_message_identities`，外部只见进度、final 丢失，1 个断言失败）。夹具使用传入 message_key，不从正文猜阶段。每项使用独立 basetemp 和原字节备份、finally 还原；JUnit errors=0 且 failure 为行为断言，准备/collection 错误不计 KILLED。
 - 新增进度接受前后崩溃恢复、租约未到时回拨不得重发及精确去重窗口边界用例；新增文件单独 **21 passed**，与 510 重叠不累加。当前三变异还原的 delivery SHA256 为 `9011163b2aefe99e21e2e25fa157a2cb5e467c23a8aeda22480b1e96250428b3`，恢复后完整相关回归和守卫重新执行。
-- 全 `python -m ruff check agent_py_agent scripts`：All checks passed；`scripts/check_import_boundaries.py`：findings=0；`scripts/check_doc_sync.py --base e180f4185`：DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：hard=0、blocked=False；`scripts/check_clean_package.py .` 及 `git diff --check` 通过。尺寸生成报告还原到提交前 HEAD，不入提交。
 - 线上尺寸差集脚本首次新增 3/消失 55，不能绕过；回执字段装配提为小函数、鉴权外发抽平、QQ 继承 Base 默认声明后重跑。最终输出：**新增告警: 0；消失告警: 55**，exit 0；按 kind/path/name/severity 身份比较，不以总量替代。
 - 复现参数：相关用例/守卫分别使用 `--basetemp=/private/tmp/claude-501/m-ds2-slp5-receipt-regression` 和 `m-ds2-slp5-receipt-guards`；变异使用 `m-ds2-slp5-continue-final-M1/M2/M3`，以 `-k` 指定上述测试并输出 JUnit。35 文件清单和最后完整输出留在本树 `tmp/slp5-continue/{related-tests.txt,regression.log,guards.log,strict-size.log,size-diff.log}`，变异回执在 `mutations/`；临时证据可重建，不作为产品状态源或发布文件。
 - 前轮 WIP `6777f8c95` 的 500/189+1、目录过期、无效首轮变异是真实历史，不称既有失败。续做补齐后再交独立初审；本轮收尾超出约 90 分钟窗口，不把实际超时写成按时完成。完整工具输出引用失效后仅为采集可核对回执重跑必要验证，当前日志直接留在本树。
@@ -4347,7 +4320,6 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
   - `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`
   - `$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`
   - `$PY scripts/check_doc_sync.py --base 51b3efb20` → `DOC_SYNC_PASS`（首跑要求补 `docs/modules/gateway/02-progress.md`、`04-structure.md`，补后通过）
-  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2199 hard=0 high-risk=1503 soft=696 blocked=False`
   - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0 / 消失告警: 44`
   - `git diff --check` → 干净；`$PY scripts/check_clean_package.py .` → `OK: 未发现发布阻塞项`
 - **size_diff 拆平记录**：首跑报 1 条新增告警 `('function', 'agent_py_agent/tests/test_chat_client_context.py', 'test_active_turn_input_credential_404_is_rejected_but_plain_404_is_not', 'high-risk')`——加了两行断言后函数 48 行踩 near-soft。把函数内重复的 `import urllib.error`（顶部已有）和 `from io import BytesIO` 上提，函数回到 45 行，复跑 `新增告警: 0`。
@@ -4374,7 +4346,6 @@ $PY -m pytest agent_py_agent/tests/test_cache_diagnostics.py agent_py_agent/test
   - `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`
   - `$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`
   - `$PY scripts/check_doc_sync.py --base 45d8cdcc5` → `DOC_SYNC_PASS`
-  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2199 hard=0 high-risk=1503 soft=696 blocked=False`
   - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0 / 消失告警: 44`
   - `git diff --check` → 干净；`$PY scripts/check_clean_package.py .` → `OK: 未发现发布阻塞项`
 - **size_diff 拆平记录**：首跑报 1 条新增告警 `('params', 'agent_py_agent/tests/test_tui_input.py', '_auth_rejecting_reconciler', 'high-risk')`——helper 5 个参数（3 位置 + 2 关键字）。把 `reason_code`/`auth_denied` 收成 frozen dataclass `_AuthRejection`，默认值用模块级单例 `_AUTH_REJECTION_DEFAULT`（ruff B008：参数默认值里不做函数调用）；helper 回到 4 个参数后复跑 `新增告警: 0`。
@@ -4444,7 +4415,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 ```
 
 - 两个因果变异逐次真实执行，均只跑上面入口文件加 `-k heterogeneous`：M1改回传previous、按整体token差裁剪 → **1 failed、1 passed**（三包交付317/318字符差异）；M2后续页仅给半份 → **2 failed**（两包/三包投递差异）。均exit1、0 errors/skips，非准备失败。每次立即按备份原字节恢复后全入口文件 **33 passed**，恢复前后SHA256均 `e5121e4933c753d1b24424dc582be0bbb96cf28e3874df7a05b1ccea630381ca`；原XML、输出和备份在 `tmp/selfix3-m1-whole-token-difference*`、`tmp/selfix3-m2-unequal-later-share*`、`tmp/selfix3-context-before-mutations.py`，摘要 `tmp/selfix3-mutation-summary.json`。恢复及聚焦轮与最终491重叠，不累加。
-- 静态门禁：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts` 全过；同前缀 `$PY scripts/check_import_boundaries.py` → findings=0；`$PY scripts/check_doc_sync.py --base 1400fe725` → DOC_SYNC_PASS；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2200、hard=0、blocked=False（`tmp/selfix3-strict.txt`）；`git diff --check`、`$PY scripts/check_clean_package.py .` 通过。报告执行 `git checkout -- CODE_SIZE_REPORT.md` 还原，不提交、不提高baseline。
 - 尺寸身份差集：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` → **新增告警: 0；消失告警: 43**。产品/测试输入未再改，复用同版本有效结果；只补本节记录后重核doc_sync/diff。完整机读回执、skip及守卫清单核对见 `tmp/selfix3-verification-facts.json`。
 - 未验证：真实 Gateway/模型正反 selected_ids、真实子入口全部排列、TUI/IM 可见链路、沙箱外 checker、生产部署及全仓；线上CI不作证据，全量由3a Linux12片复核。下方保留 selfix2 的历史结果，不冒充本轮证据。
 
@@ -4703,7 +4673,6 @@ $PY -m pytest $(cat ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt) -q
 $PY scripts/check_import_boundaries.py  → findings=0
 $PY -m ruff check agent_py_agent scripts → All checks passed!
 $PY scripts/check_doc_sync.py → DOC_SYNC_PASS
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json → hard=0 blocked=False（跑后 git checkout -- CODE_SIZE_REPORT.md）
 $PY scripts/check_clean_package.py . → 通过（新测试文件先 git add 后复跑）
 git diff --check → 干净
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD → 新增告警 0 / 消失告警 31
@@ -4751,7 +4720,6 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD → 新增�
   - guards9 全部 10 个文件：**173 passed**。
   - `test_memory_compact_runtime_handoff.py` + `test_subagent_failure_handoff.py` + `test_subagent_registered_artifact_handoff.py`：**30 passed**。
   - `test_background_handoff.py`：22 failed。在真基线 `ce646f783`（`git merge-base claude/3a-step17i HEAD`，临时树 `/private/tmp/claude-501/pb32-base`，用完已 `git worktree remove --force`）上**同样是 22 failed、名单逐条相同**，属沙箱环境既有失败（`managed background launcher identity unavailable`）。
-  - 静态门禁：`check_import_boundaries.py` findings=0、`ruff check` All checks passed、`check_doc_sync.py` DOC_SYNC_PASS、`git diff --check` 干净、`check_clean_package.py .` OK、`check_code_size.py --mode strict` hard=0 blocked=False（跑完已 `git checkout -- CODE_SIZE_REPORT.md`）、`size_diff.sh` 新增告警 0 / 消失 31。
   - 防泄露：`python3 ~/.my-agent/releases/claude-tools/b8-harness/leak_check.py examples/capability-packages/drama-workflow-b B 6` → 只有 `declaration.json` 的「短剧制作资料」×3（3a 已裁定为领域通用词）；`B 5` 同样只有这 3 处，无新命中。
 - 变异三组共 11 个（驱动脚本 `/private/tmp/claude-501/pb32_mutate.py`、`pb32_mutate2.py`、`pb32w_mutate.py`，每次只改一处、跑完按原字节还原）：
   - 第一组 6 个：① 对象 ID 报错退回只有 `code`+`path`；② 对象 ID 判定放宽（有期望值也不比对）；③ `refs` 报错退回只有 `code`+`path`；④ `refs` 判定放宽（空数组不报）；⑤ `PACKAGE_VERSION` 回退 0.3.1；⑥ `declaration.json` 版本回退 0.3.1。**全部被抓**。
@@ -4975,7 +4943,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **变异**：① 临时删除 `_is_compact_purpose` 对 `conversation_compact_summary` 的识别，Gateway 测试在分区断言处变红（摘要 default、主请求 max）；② 临时让 active-turn 重新传递 `surface.tools`，测试在 tool_choice 断言处变红（出站 auto）。两处原代码均已还原，各自再跑通过。
 - **全量压缩与 cache-prefix 回归**：对 `test_*compact*.py` 与 `test_cache_prefix_*.py` 文件集合，使用指定 CI Python 跑完整套件。首次运行以退出码 1 暴露旧断言仍要求 `request.tools is tools`；按 active-turn 新合同保留 system、历史、线程上下文和摘要基线断言，改为核验空 tools + `ToolChoice.none`。再跑两个相关聚焦用例（2 项）通过。独立审查指出 Gateway 命中断言最初未显式关联到摘要调用；现测试在 `_generate_auxiliary_with_retry` 周围记录模拟器调用区间，明确断言区间首项就是对应的 `conversation_compact_summary` 调用，并验证摘要后业务请求以 `SIM-COMPACT-NEXT` final 收口。修正后完整集合重新跑至 100%、退出码 0。
 - **guards9**：`guards9.txt` 后来增至 12 项，其中 `test_backend_signature_guardrails.py` 不在 pinned HEAD `9d5165809`（`git ls-tree` 无此文件；其源在提交 `07d7b3306`）。精确列表首次运行因缺文件退出码 4。为覆盖当前列表，临时从该提交取出这份守卫测试到同一路径，运行完整 12 项至 100%、退出码 0 后立即删除临时文件；不纳入交付 diff。单独重跑 pinned HEAD 自带的 11 项同样到 100%、退出码 0。
-- **最终静态门禁**：`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2193 hard=0 blocked=False`；`git diff --check` 退出码 0、无输出。code-size 曾生成的 `CODE_SIZE_REPORT.md` 已按约定还原，未留在改动中。首轮 Ruff 找到 `ToolChoice` 注解缺导入及导入排序问题，首轮 doc sync 指出 memory 模块进度/结构文档未同步；均已修复后重新通过。
 - **复审与未验证边界**：独立只读审查最初指出 Gateway 调用/缓存断言映射不够显式，上述区间追踪与 final 收口断言已补；复审未发现剩余严重/重要问题。active-turn 复审疑点源于首份摘录省略了 payload `tool_choice` 解码，当前测试实际读取最终 JSON 并断言 `none`，且无 tools。未连接真实 DeepSeek、未测服务端缓存命中率或实际费用；本地前缀模拟器仅验证本地 payload 顺序/分区。
 
 - **fake transport payload 合同**：`agent_py_agent/tests/test_compact_reasoning_options.py` 捕获 OpenAI-compatible 后端最终 JSON，不访问供应商；**14 passed**。覆盖 max/off 两档、`conversation_compact_summary` 与 `conversation_compact_media_digest` 的选项换算、历史 tool-call 往返、system/messages（reasoning/tool ID/参数）、tools/schema、`auto`、thinking/reasoning_effort；bounded 与 live 的 typed `CacheStructuredPrompt` 路径均核实同一 system/tools/历史，仅在最后 user 内容追加 Compact 指令；carried 文本和分段核实其非完整前缀边界；结构化工具调用不执行，仅额外尝试一次无工具/`none`。tool-loop 包装器与 active-turn 包装器另有线程身份转接断言。
@@ -5013,7 +4980,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   $PY scripts/check_import_boundaries.py
   $PY -m ruff check agent_py_agent scripts
   $PY scripts/check_doc_sync.py
-  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
   git checkout HEAD -- CODE_SIZE_REPORT.md
   $PY scripts/check_clean_package.py .
   git diff --check
@@ -5187,7 +5153,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   $PY scripts/check_import_boundaries.py
   $PY -m ruff check agent_py_agent scripts
   $PY scripts/check_doc_sync.py
-  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
   git checkout -- CODE_SIZE_REPORT.md
   git diff --check
   $PY scripts/check_clean_package.py .
@@ -5315,7 +5280,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   ```bash
   $PY -m ruff check agent_py_agent scripts
   $PY scripts/check_import_boundaries.py
-  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
   git checkout HEAD -- CODE_SIZE_REPORT.md
   bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
   $PY scripts/check_doc_sync.py
@@ -5349,7 +5313,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   ```bash
   $PY -m ruff check agent_py_agent scripts
   $PY scripts/check_import_boundaries.py
-  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
   git checkout HEAD -- CODE_SIZE_REPORT.md
   bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
   $PY scripts/check_doc_sync.py --staged
@@ -5357,7 +5320,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   $PY scripts/check_clean_package.py .
   git diff --check
   git diff --cached --check
-  git diff --exit-code HEAD -- CODE_SIZE_REPORT.md CODE_SIZE_BASELINE.json
   ```
 - 9b 注释和后续验收已同步：有意刷新后旧确认码只能重预览，走到 `_enable` 时消费的是最后确认的同一授权；B7 第四段必须在 restricted 的每次实际启动核对完整授权事实与固定激活 `permission_json`，候选/业务/面板/重连均覆盖，不能只在 enable 核。本轮仅登记验收项，**B7 接线、真实链探针、真实 OS/用户通道、外部复审仍未验证**。下一步由9b在沙箱外只复跑五文件及真实链探针，3a安排正式接线，不先把默认改false或分批上线。
 
@@ -5456,7 +5418,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   **349 passed in 63.07s，exit 0，无 skip/xfail**。这是补齐导入故障后的当前版本；此前同范围 348 passed 属于上一阶段，不冒充最终版本。包含变异之后的原源码回归；不跑全仓 pytest。
 - **源码副本变异**：六个独立指定 Python 进程 AST compile/exec 单函数副本，各自 pytest 都为 **1 failed、exit 1、无 collection error**：M2 去 gateway_event_context 自身 try；warning 函数静默返回；首次资格恒 True（不去重）；忽略关闭开关；warning 去掉日志异常保护；warning 添加 exc_info（泄漏异常正文）。合计 **6/6 被抓到**，源文件 SHA256 前后一致，未写磁盘或另开工作树。
   M2 复现：解析 `gateway_parts/event_points.py` 的 `gateway_event_context` AST，将其 `Try` 节点替换为 `Try.body`，用原模块 globals compile/exec；只运行 `test_plugin_event_gateway.py::test_gateway_context_assembly_failure_is_isolated_without_callers`。其余变异对应 `test_gateway_context_failure_warns_once_only_when_enabled[True/False]` 或 `test_gateway_warning_sink_failure_cannot_escape`；32 次/8 线程的真实 logger 去重断言在正常回归中通过。
-- **当前版本门禁**：`$PY scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts`：`All checks passed!`；`$PY scripts/check_doc_sync.py`：`DOC_SYNC_PASS`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：`strict_scope_total=2204 hard=0 high-risk=1507 soft=697 test_advisory=1234 blocked=False`；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"`：**新增告警 0、消失告警 39**；`git diff --check` 干净；`$PY scripts/check_clean_package.py .`：`OK: . 未发现发布阻塞项`。常数目录守卫（897 项）在十一份 guards9 内通过；生成 `CODE_SIZE_REPORT.md` 已还原 HEAD，不提交。仅新增/修改既有函数和测试，未新增重要文件或配置项。
 - **未验证**：本机隔离 home/echo/HTTP 与真实 Registry/Executor/计数 handler 只证明该入口。本轮未验证生产 Gateway、真实模型/TUI/IM、B7 实际安装启用/OS 沙箱/断网、text 确认许可链，也未重跑 3a 的 Linux 全范围；不引用旧 b4g 门禁冒充本切片。
 
 ## B5×B7 跨件：收紧征询遇上插件进程慢/起不来（b5x，2026-10-04，分支 `worker/b5x`，基于 17j 头 `1e1aadb80`）
@@ -5791,7 +5752,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - **联合范围内分组**（从同份JUnit逐用例计算，不额外相加）：B5五文件204通过、B4三文件44通过、B6十二通过、B8四通过、常数十一通过；完整guards9十文件（含packaging）176通过。
 - **新组合两项有效内存变异**：旁路 `tighten_plugin_decision` → 删除拒绝用例在 `allow != deny` 业务断言失败；丢弃Registry的B4事件上下文 → 更新正对照在 `[] != [started, finished]` 失败。两次原pytest均exit=1、各1 failure/0 errors，不是setup/import失败；仅进程内替换，未写产品文件。JUnit为 `tmp/b5r-mutation-b5-bypass.xml` / `tmp/b5r-mutation-b4-drop-event.xml`。这是新增组合反证，不把源第4段六项算成本次重新执行。
 - **真正基线复核**：`git worktree add --detach /private/tmp/claude-501/b5r-baseline-17j ebe621d87` 后在该树根用同Python/选项、`--basetemp=/private/tmp/claude-501/m-b5r-baseline`，只跑上述两个失败文件，JUnit落回本树 `tmp/b5r-baseline.xml`：**13 failed、5 errors**；两版失败身份及错误种类集合逐项比较相同。临时worktree已按 `git worktree remove` 移除。不删测试、不改skip/xfail；这里只证实该17j基线同样失败，不据此宣布宿主启用链通过，也不无证据断言环境根因。
-- **静态实际已验**：全范围 `$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_import_boundaries.py` → findings=0；`$PY scripts/build_constants_catalog.py --check` →899一致；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2201、hard=0、high-risk=1504、soft=697、test_advisory=1234、blocked=False。`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → **新增告警: 0 / 消失告警: 42**。基线未抬高，`git checkout -- CODE_SIZE_REPORT.md` 已还原。`$PY scripts/check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check`、`git diff --cached --check` →干净；`$PY scripts/check_clean_package.py .` → OK、无发布阻塞项。
 - **未做/未验**：第5段写账由ds2在 `worker/m1-b5-seg5-on-s3` 迁移、3a后叠；sol2事件装配保护仍由3a后叠，本线保持17j写法。B7真正启用/沙箱、真实TUI/IM/Gateway与12片Linux全量未验证，无生产数据、配置、进程或远端变更。
 
 
@@ -5854,7 +5814,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
     -q --tb=short -rs -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-b4g
   ```
   **`803 passed, 2 skipped in 73.97s`**。随后仅将测试 helper/分派拆平（无产品代码、输入或观察断言变化），两个改动直接文件按同一 pytest 参数复跑：**`43 passed in 6.40s`**。两项 skip 为 `test_pack_verification_service.py:480/555` 的“本机平台沙箱不可用”；未执行该两项的目标沙箱观察点，不推断 OS 隔离已通过，交 3a 沙箱外复核。
-- **门禁（当前产品源码）**：`$PY scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts`：`All checks passed!`；`$PY scripts/check_doc_sync.py`：`DOC_SYNC_PASS`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：`strict_scope_total=2207 hard=0 high-risk=1509 soft=698 test_advisory=1234 blocked=False`；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"`：**新增告警 0、消失告警 35**。先前测试 helper 的嵌套/参数告警已拆平，断言不删除不放宽。生成报告已还原 HEAD，不提交；`git diff --check` 干净；`$PY scripts/check_clean_package.py .`：`OK: . 未发现发布阻塞项`。
 - **3a 追加覆盖（产品源码仍为 `821ed5d65`）**：八文件合跑 **`233 passed, 2 skipped, 20 xfailed in 29.33s`**，无失败。使用指定 Python 的 `pytest.main` 和下列同一参数，由只读报告插件汇总逐文件；以下为同入口复现命令。20 个 xfail 未作为通过，两项平台沙箱 skip 未改变。
 
   ```bash
@@ -5972,7 +5931,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
   PYTHONPATH=$PWD $PY scripts/check_doc_sync.py        # DOC_SYNC_PASS
   PATHS: git diff --check                              # 干净
-  PYTHONPATH=$PWD $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json   # blocked=False
   PYTHONPATH=$PWD $PY scripts/check_clean_package.py . # OK
   bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"  # 新增告警 0
   ```
@@ -6105,7 +6063,6 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
   - **guards9**（10 文件）→ **178 passed**；
   - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；
   - `check_doc_sync.py --base 312a4fec4` → **DOC_SYNC_PASS**；
-  - `check_code_size.py --mode strict` → `hard=0 blocked=False`（报告已还原）；`git diff --check` 干净；`check_clean_package.py .` → OK；`size_diff.sh` → 新增告警 0。
 - **变异（2 个，均 KILLED、原字节还原 sha256 一致）**：
   1. `ensure_private_dir` 退回 `mkdir(parents=True, exist_ok=True, mode=0o700)` → `test_ensure_private_dir_creates_every_missing_level_with_0700` 变红（`(448, 493, 493) != (448, 448, 448)`）；
   2. `tokens.py` 加回普通 `mkdir` → `test_memory_archive_permissions` 回归复红。
@@ -6155,7 +6112,6 @@ guards9 清单（11 文件，含新加的 `test_constants_catalog.py`）**全部
   - `git diff --check` → 干净
   - `$PY -m ruff check agent_py_agent scripts` → All checks passed
   - `PYTHONPATH=$PWD $PY scripts/check_import_boundaries.py` → findings=0
-  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → hard=0 blocked=False（报告已还原不提交）
   - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → **新增告警 0 / 消失 36**
   - `PYTHONPATH=$PWD $PY scripts/check_clean_package.py .` → OK
 - **一致性自查**：脚本比对 Tree 段条目，内容完全相同的重复条目 **0**；37 个新增文件逐个核对，除目录级条目已覆盖者外无遗漏。
@@ -6478,7 +6434,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
 git diff --check
@@ -6531,7 +6486,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout HEAD -- CODE_SIZE_REPORT.md
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
 git diff --check
@@ -6605,7 +6559,6 @@ harness-console 的 `test_missing_host_api_env_reports_unavailable` 和 `test_de
   ```
   结果：守卫文件全过（含新增用例）；四个脚本 `bash -n` 全部 OK。
 - 守卫变异：在 `d3_quota_selfheal.sh` 的 `/ask` curl 上删掉 `"${GW_AUTH_HEADER[@]}"`，守卫立即失败并列出 `scripts/feishu_limit/d3_quota_selfheal.sh:行号`；还原后重跑通过（按原字节备份还原，未用 git stash/checkout）。
-- 收尾门禁（工作树根，全部通过）：guards9 清单 **175 passed**；`check_import_boundaries.py` findings=0；`ruff check agent_py_agent scripts` All checks passed；`check_doc_sync.py` DOC_SYNC_PASS；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` blocked=False（跑后 `git checkout -- CODE_SIZE_REPORT.md`）；`git diff --check` 干净；`check_clean_package.py .` OK。
 - 未验证：四个脚本要真实 Gateway 才能跑，本轮没跑（按分工由 3a 在沙箱外复核）；脚本的实际 HTTP 行为未实测，只验证了语法与守卫。
 
 ## M1 B6 账本与展示（m1b6，2026-10-03，分支 `worker/m1-b6-ledger-display`，提交 `d9f158e8d`、文档补丁 `e80db5918`、初审 M1 修复 `b6f`，基于 B3 返工后的头 `0a3064078`，已并入 step17j `24c3aec0f`；**查询与展示完成，写账待 B5**）
@@ -6704,7 +6657,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **收尾 gate 结果**（工作目录根，全部通过）：
   - B6 定向 + 相邻回归 9 个文件：`371 passed`（`test_plugin_event_display` / `plugin_commands` / `plugin_management` / `plugin_manifest_v8` / `gateway_plugin_commands` / `gateway_plugin_management` / `gateway_plugin_panels` / `plugin_event_hub` / `runtime_db`）。
   - guards9 清单全部测试文件：`172 passed`。
-  - `scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → All checks passed；`scripts/check_doc_sync.py` → DOC_SYNC_PASS；`scripts/check_code_size.py --mode strict` → hard=0、blocked=False；`git diff --check` 干净；`scripts/check_clean_package.py .` → 未发现发布阻塞项；`size_diff.sh` → **新增告警 0**（消失 16）。
   - `test_plugin_any_language.py` 6 项失败与 `test_plugins_chat_control.py` 2 项失败：本机命令沙箱限制（v6 宿主启用链/子进程），已在 HEAD 基线临时工作树复核过是既有失败，与本次改动无关；沙箱外由 3a 复核。
 
 - **未验证**：写账方（B5）未合入，账本写入路径未联测；v8 启用门未开（B7 前），未启用真实 v8 插件；真实 TUI、飞书客户端、真实 Gateway 未跑（本沙箱不启动 Gateway）；观察计数只在 Gateway 进程内存里，TUI 直连入口没有 hub，按“暂无记录”降级已覆盖，但真实 Gateway 里同一 hub 的计数未在真进程复核。
@@ -6938,7 +6890,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
     --files-root "$R/probe-net" --output "$R/packages/probe-net.zip"
   ```
   → **exit=0**（打包成功）；抽出的声明含全部 13 个键、五个必需字段齐；`server.py` 52 行完整抽出。**改前实测同一份片段会报 `PluginPackageError: 插件包描述无效`**（rb3r 记录），补全后通过。
-  `$PY scripts/check_doc_sync.py --base 7b86fe7dc` → `DOC_SYNC_PASS`；`git diff --check` → 干净；`check_code_size.py --mode strict` blocked=False；`check_clean_package.py .` OK；`size_diff.sh` 新增告警 0。
 - **未验证**：手册本身仍未真实验收（待 B3–B9 与 B5/B7 合入后按手册执行）；§6.8 只能在真渠道核对，本轮只写了判据、没跑。
 
 
@@ -7054,7 +7005,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   - **guards9**（10 文件）→ **172 passed**；
   - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；
   - `check_doc_sync.py --base 199879045` 与 `--base 3a42f457d` → 均 **DOC_SYNC_PASS**；
-  - `check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；
   - `check_clean_package.py .` → `OK: 未发现发布阻塞项`；`size_diff.sh $PWD` → 新增告警 0 / 消失告警 24（提交 `4cba1b91b` 后跑）。
 - **变异（6 个，全部 KILLED，跑完按原字节还原 sha256 一致）**：
   1. `_ensure_private_dir` 新建改宽权限（mode=0o777）→ 用例 1 失败；
@@ -7081,7 +7031,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   - B：M3 `write_json_file_atomic` → 公开 `mkdir+write_text`、M4 `update_json_file_atomic` → 公开 tmp+replace、M5 `write_gateway_request` → 公开 tmp+replace → **均 KILLED**。
   - C：M6 `utils._write_if_missing` → 公开 `mkdir+write_text`、M7 `task_trash` 清单 → 公开 `open('a')` → **均 KILLED**。
   - 变异脚本在仓库外的 `/private/tmp`；`git status` 交付时干净。
-- **收尾门禁**：guards9（10 文件）→ **172 passed**；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`（首跑 4 处 import 折行，已修）；`check_doc_sync.py --base 9bd2fc318` → **DOC_SYNC_PASS**（首跑缺 subagent/memory/gateway 三份模块文档，已补 02-progress 与 04-structure 各一条）；`check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；`size_diff.sh $PWD` → **新增告警 0 / 消失告警 17**；`check_clean_package.py .` → `OK: 未发现发布阻塞项`。
 - **环境限制**：本机未跑全仓 pytest（按规则只跑直接相关文件与 guards9）；真实 Gateway、TUI、IM 与真实 home 权限未验证。
 
 ## 私有锁只动自己建的东西（lkp，2026-10-03，同一分支，基于 `459354e1b`，已实现，待 3a 合并验证）
@@ -7101,7 +7050,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-lkp*`）：
   - 17 文件（锁/私有权限/nofollow/jsonl/派工锁/daemon/gateway_io）→ **222 passed / 1 failed**；唯一失败 `test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`，已在干净基线 `459354e1b`（临时 worktree）不改代码复跑，**基线同样失败**，属沙箱环境限制，与本改动无关。
   - **guards9** → **172 passed**。
-  - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；`git diff --check` → 干净；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`size_diff.sh` → **新增告警 0 / 消失告警 16**。
 - **未验证**：与 step17i 合跑的两条符号链接用例由 3a 沙箱外验证；真实快照链路与真实 Gateway 未跑。
 
 ## 宿主数据私有写入后续（pwf，2026-10-03，分支 `worker/private-writes-followup`，基于 ds3 头 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
@@ -7117,7 +7065,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   - 命令：`PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest <上面 5 文件> -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-pwf` → **11 passed**。
 - **相关回归（同一命令）**：`test_agent_transcript`、`test_conversation_wake_events`、`test_wake_publication_recovery`、`test_audit`、`test_audit_class`、`test_audit_redaction`、`test_local_store`、`test_local_store_basics`、`test_gateway_readiness_generation`、`test_collaboration_concurrency`、`test_collaboration_control_plane_coordinator`、`test_home_identity_store`、`test_subagent_task_workspace_state`、`test_subagent_debug_trace`、`test_agent/test_subagent_action_and_route`、`test_agent/test_dispatch_capability_followup`、`test_dispatch_mixin`、`test_owner_maintenance`、`test_gateway_owner_retention` → **全部通过（含 1 项既有 skip）**。
 - **变异（每组 1 个，退回 `append_jsonl` 跟随 umask 的写法；跑完已用备份还原）**：conversation / audit / collaboration / subagents / memory 五组各被对应用例抓到（rc=1）；还原后 rc=0。
-- **收尾门禁**：guards9（10 文件）→ **172 passed**；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `hard=0 blocked=False`（`CODE_SIZE_REPORT.md` 已还原不提交）；`git diff --check` → 干净；`size_diff.sh` → **新增告警 0 / 消失告警 16**（首跑曾因测试 helper 参数超 4 个新增 1 条，已拆平）；`check_clean_package.py .` → `OK: 未发现发布阻塞项`。
 - **环境限制**：本机未跑全仓 pytest（按规则只跑直接相关文件与 guards9）；真实 Gateway、TUI、IM 与真实 home 权限未验证。
 
 ## 写锁 sidecar（.wlock）同批收私（lkf，2026-10-03，同一分支，基于 `199879045`，已实现，9b 终审通过（含 pbfix 修复），已并入 step17j `2ad257314`）
@@ -7136,7 +7083,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
 - **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-lkf*`）：
   - 直接相关 26 文件（初审 11 文件 + `test_gateway_io` + daemon/scoped/adapter_daemon/transcript/guidance/usage/retention/host_identity 等）→ **329 passed, 4 xfailed**。
   - **guards9** → **172 passed**。
-  - `check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；`git diff --check` → 干净；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
 - **未验证**：真实 Gateway 运行中 `.wlock` 的收敛效果（沙箱不连真实 Gateway）；非 dir_fd 平台的 `_open_private_lock_portable` 分支行为。
 
 ## 三套锁写法统一成私有（ds3l，2026-10-03，分支 `worker/ds3-lock-private`，基于 `claude/3a-step17i` `b6ede99e0`，已实现，待 be 复审）
@@ -7157,7 +7103,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   4. 跟随符号链接（改走 portable 分支）→ 2 条失败。
 - **跑过的命令与结果**（工作树根，`PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，`--basetemp=/private/tmp/claude-501/m-ds3l`）：
   - `test_private_lock_permissions/test_dispatch_lock/test_session_lock/test_nofollow_binary_io/test_nofollow_tree/test_memory_file_permissions/test_config_write_permissions/test_distributed_lock/test_jsonl_capped_append/test_subagent_lock_lifecycle` → **93 passed**。
-  - `check_import_boundaries.py` → `findings=0`；`ruff` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`git diff --check` → 干净；`check_code_size.py --mode strict` → `hard=0 blocked=False`；`size_diff.sh` → 新增告警 0 / 消失告警 16；`check_clean_package.py .` → 通过（提交前唯一阻塞项是新测试文件未纳入版本控制，提交后消失）。
 - **环境限制（未处理）**：`test_directory_lock_wait.py::test_store_recovery_and_commit_are_not_interrupted_after_lock_admission` 报 `managed background launcher identity unavailable`。已在干净基线 `b6ede99e0` 上不改代码复跑：**基线同样失败**，属沙箱读不到进程 birth token 的环境限制，与本改动无关，未处理、未删测试。
 - **符号链接口径**：锁叶子是符号链接/非单链接普通文件时按 A 的既有口径抛 `NoFollowPathError`（加固）。`locked_json_path` 的调用方目前没有任何一处把锁做成符号链接，故不会让现有调用方每轮失败；极少数畸形存量锁上会显式报错而不是静默跟随。
 
@@ -7280,7 +7225,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_import_boundaries.py
   $PY -m ruff check agent_py_agent scripts
   $PY scripts/check_doc_sync.py
-  $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
   git checkout -- CODE_SIZE_REPORT.md
   bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
   git diff --check
@@ -7335,7 +7279,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   GUARD_TESTS=$(awk 'NF && $1 !~ /^#/' ~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt)
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-sol1g --junitxml=tmp/sol1g-g2a-guards.xml
   ```
-- 已执行 `$PY scripts/check_import_boundaries.py` → findings=0；`$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2224、hard=0、high-risk=1520、soft=704、test_advisory=1241、blocked=False。按要求 `git checkout -- CODE_SIZE_REPORT.md` 恢复生成报告。`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 实测：**新增告警: 0；消失告警: 11**。
 - 最终文档/发布检查：`$PY scripts/check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check` 和 `git diff --cached --check` 退出0；`$PY scripts/check_clean_package.py .` 初次因两个新增文件尚未暂存返回 UNTRACKED_FILE，显式 git add 后重跑为 `OK: . 未发现发布阻塞项`（退出0），未绕过检查。
 - 边界：G2a 只观察，不强制；回环无凭据仍有旧信任，unknown peer兼容仍保留。G2b/G3/G4/G5/G6未做，未跑全仓/真实Gateway/真实模型/客户端、未跑嵌套 Seatbelt/bwrap。H2只验证隐藏路径声明，真实插件进程隔离未验证；Full Access 与关插件沙箱同信任域边界不变。设计要求引用的 `PLUGIN_EVENT_HOOKS.md` 在本树不存在（按文件名查无命中），没有新建空设计文件代替它，由集成者在 M 线文档存在的组合版本补8.1引用。
 
@@ -7369,7 +7312,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_plugin_event_points.py agent_py_agent/tests/test_plugin_event_hub.py agent_py_agent/tests/test_plugin_channel_pool.py agent_py_agent/tests/test_plugin_channel_lifecycle.py agent_py_agent/tests/test_plugin_display_service.py agent_py_agent/tests/test_gateway_request_runtime_errors.py agent_py_agent/tests/test_gateway_strict_request.py agent_py_agent/tests/test_gateway_control_operation.py agent_py_agent/tests/test_tool_runtime_unification.py agent_py_agent/tests/test_tool_runtime_scope.py agent_py_agent/tests/test_executor_decision_message.py agent_py_agent/tests/test_executor_exit_recovery.py agent_py_agent/tests/test_plugin_event_gateway.py agent_py_agent/tests/test_plugin_event_runtime.py agent_py_agent/tests/test_plugin_event_e2e.py agent_py_agent/tests/test_decision_action_execute.py agent_py_agent/tests/test_gateway_per_user_scoping.py agent_py_agent/tests/test_gateway_bounded_http_server.py agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -p no:cacheprovider -o addopts='' --basetemp=/private/tmp/claude-501/m-m1b4
   ```
-- **最终门禁实输**：固定 CI Python 的 `scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`-m ruff check agent_py_agent scripts` → `All checks passed!`（初次新增测试 I001 已修）；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2218 hard=0 high-risk=1517 soft=701 test_advisory=1241 blocked=False`；`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0 / 消失告警: 17`；`git diff --check` 无错误；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。生成 CODE_SIZE_REPORT 恢复 HEAD，不提交。全仓 pytest、线上 CI 未作为本轮验收来源。
 - **未验证**：生产 Gateway、真实模型/TUI/IM、B7 安装启用/沙箱断网、授权 text 确认链未验。luna6 的 conversation_control 三条资源控制失败本轮未复核，不定性为既有或环境原因；3a 已安排沙箱外核对。原旧段按其时点保留。
 
 ## M1 B4 拒绝组合及 ds9 尾补（m1b4，2026-10-03，待非作者初审）
@@ -7424,7 +7366,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   ```
 - **限制**：SSE/WS 连接打开期间的系统 DNS `getaddrinfo` 是标准库同步系统解析，socket timeout 和传输取消回调不能中止正在执行的 OS resolver；若 resolver 永久挂住，不能保证 worker 在 1 秒 drain 窗口退出。真实 Gateway、生产模型、真实网络和系统 DNS 挂死均未验证；此轮没有新增配置或常数。
 - **架构守卫**：读取 `~/.my-agent/releases/claude-tools/3a-scripts/guards9.txt` 中清单（含 `test_packaging.py`）并以规定 CI Python 运行，退出码 0，输出到达 100%，无失败。
-- **静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → 退出码 0、无差异空白错误。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → `新增告警: 0`、`消失告警: 9`。strict code-size 后已执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
 - **常数目录**：本次没有新增常数，无需重新生成目录或单独跑 `test_constants_catalog.py`。
 - **初审补强用例（wsc）**：`test_websocket_cancel_during_blocked_send_aborts_socket_and_closes_ledger`（`test_tool_model_generation.py`）——发送（sendall）阻塞期间收到取消必须走 `close_socket()` 直接中断：断言直接关 socket 被调用、关闭握手未被调用、worker 在 1 秒排空窗口内退出、账本终态 `failed` 且在途计数归零。变异（取消回调 `connection.close_socket` → `connection.close`）被该用例杀死（rc=1，失败点 `socket_closed_directly` 未置位）；产品文件还原后 sha256 与改前一致。定向回归 `test_tool_model_generation.py`+`test_responses_websocket.py` **52 passed**；guards9 **172 passed**；size_diff `新增告警: 0`、消失告警 16。
@@ -7524,7 +7465,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   | M6 不捕获发布异常 | 三种发布异常及真实执行器成功结果 | 抓到，4 failed |
 
 - **静态命令**：`$PY scripts/check_import_boundaries.py` → findings=0；`$PY -m ruff check agent_py_agent scripts` → All checks passed；`$PY scripts/check_doc_sync.py` → DOC_SYNC_PASS；`git diff --check` → 通过；`$PY scripts/check_clean_package.py .` → OK（首次因新文件未跟踪失败，git add 后复核通过）。
-- **尺寸命令**：`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → strict_scope_total=2219 / hard=0 / high-risk=1518 / soft=701 / blocked=False，随后 `git checkout -- CODE_SIZE_REPORT.md` 已恢复；报告不提交。`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` **未通过**：新增告警 1，`('class', 'agent_py_agent/agent/plugin_events/hub.py', 'PluginEventHub', 'high-risk')`；消失 17。B4 自己产生的 `_execute_authorized` 参数新告警已拆除。剩余 hub 文件与基线 `d8970996c` 的 git blob 均为 `3e0105df46bf7a9d82f0b78064a7f433a0f6c2ec`，diff 为空，属继承 B3 与线上尺寸比较的差异；本任务禁止修改 B3，留给 3a 处理，不伪称新增 0。
 - **WIP / 未验证**：90 分钟交接点保留阶段实现；未接 Gateway 提示/回合/命令和生产 Registry 上下文，没有真实声明+确认码组合、真实用户拒绝审批、真实主/子/决策模型装配或假插件端到端事件点测试。B4 不可判“已实施”。本轮未运行全仓 pytest、未启停 Gateway、未安装/启用真实插件，真实沙箱/TUI/IM 未验证；不把这些缺口归因于环境。
 
 ## B3 事件中心：观察投递（m1b3，2026-10-03，分支 `worker/m1-b3-event-hub`，提交 `c9571b037`、返工 `11a56269a`，基于 step17i `b6ede99e0`，待 9b 复审）
@@ -7583,7 +7523,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_architecture_guardrails.py agent_py_agent/tests/test_config_field_readers.py agent_py_agent/tests/test_constant_names_unique.py agent_py_agent/tests/test_main_agent_has_no_case_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_recovery_actions.py agent_py_agent/tests/test_recovery_code_policy.py agent_py_agent/tests/test_skill_snapshot_error_codes.py agent_py_agent/tests/test_subagent_config_inheritance.py agent_py_agent/tests/test_packaging.py -q --tb=short -ra -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna2cb
   ```
-- **静态门禁**：`check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` 退出码 0。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 输出 `新增告警: 0`、`消失告警: 9`。code-size 后执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
 
 
@@ -7609,7 +7548,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   ```
 - **最终定向回归**：同节聚焦命令运行原三个测试文件（含两个新增 symlink 用例及首写字节用例），退出码 0、输出到达 100%。
 - **最终 guards9**：按上方 guards9 命令运行清单中的十个文件（含 `test_packaging.py`），退出码 0、输出到达 100%。
-- **本轮静态门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → 退出码 0。
 - **尺寸差分原始输出**：
   ```text
   新增告警: 0
@@ -7748,7 +7686,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4m
   ```
   结果：guards9 所列全部测试到达 100%，退出码 0，无失败。
-- **静态门禁**：`$PY scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；`$PY -m ruff check agent_py_agent scripts` → `All checks passed!`；`$PY scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2226 hard=0 high-risk=1521 soft=705 test_advisory=1241 blocked=False`，随后已执行 `git checkout -- CODE_SIZE_REPORT.md`；`git diff --check` 退出码 0；`$PY scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 实际输出：
   ```text
   新增告警: 0
@@ -7882,7 +7819,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   - 目标用例在**外加压力**下连跑 40 次全过：`run_test_n.py <repo> <nodeid> 40 8` 在进程内重复调用目标用例 40 轮，同时起 8 个 CPU spinner 制造高负载，结果 `pytest exit=0 rounds=40 load=8`（耗时约 2.2 秒）。这是本轮“原来能复现的条件”下的稳定性证据，N=40。
   - `test_decision_observe_nonblocking.py` 整文件：33 passed。
   - 相关回归分三批跑（`gates.sh a|b|c`，脚本在任务 `tmp/`）：a = settings_notifications / settings / settings_scope / settings_reason / observe_nonblocking / observe_sampling → 126 passed；b = decision_service / decision_service_http / decision_background_deadline / gateway_decision_shutdown_cancel → 62 passed；c = decision_skill_tool_settings / outcome_log / cooldown_backoff / cooldown_persistence / user_config_decision_operations / user_config_decision_patch → 113 passed。
-  - 收尾门禁：guards9 清单全过（172 项，`guards9_exit=0`）；`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → `All checks passed!`；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict` → `hard=0 blocked=False`；`size_diff.sh` → 新增告警 0 / 消失告警 10；`check_clean_package.py .` → `OK: . 未发现发布阻塞项`；`git diff --check` → exit 0。
   - 基线对照：在 `db963ea66` 的临时 worktree 上跑这两个测试文件 → 41 passed，确认既有用例在基线上本来就是绿的（我早期版本的新用例一度污染进程级 `_ACTIVE`，已改成用登记时那把注销令牌修好）。
 - **边界**：只改进程内取消通知的顺序，不动设置文件、不改结果码、不动 `_ACTIVE` 索引和句柄合同；真实 Gateway/车道高负载由 3a 复核。
 
@@ -7920,7 +7856,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   "$PY" scripts/check_import_boundaries.py
   "$PY" -m ruff check agent_py_agent scripts
   "$PY" scripts/check_doc_sync.py
-  "$PY" scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
   git checkout -- CODE_SIZE_REPORT.md
   "$PY" scripts/check_clean_package.py .
   bash "$SIZE_DIFF" "$PWD"
@@ -7942,7 +7877,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   ```
 - 第一次定向红测按旧合同真实失败三项；重置所有变异后，上述五个测试文件全部通过。常数目录已由 `scripts/build_constants_catalog.py` 重建，`--check` 为 876 项一致。
 - **guards9**：使用该脚本 `guards9.txt` 所列的十个测试文件（含 `test_packaging.py`），按相同 Python/PYTHONPATH/隔离 basetemp 运行；pytest 退出码 0，全部到达 100%。
-- **静态门禁**：`check_import_boundaries.py` → `findings=0`；`ruff check agent_py_agent scripts` → All checks passed；`check_doc_sync.py` → `DOC_SYNC_PASS`；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `hard=0 blocked=False`；`git diff --check` 通过；`check_clean_package.py .` → OK。
 - **尺寸差分**：`bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` → 新增告警 0、消失告警 7。code-size 后已执行 `git checkout -- CODE_SIZE_REPORT.md`，生成报告不提交。
 - **合同/边界**：无配置项；公共 `append_jsonl_capped` 默认语义未改；Audit 汇总和 recent 20 行不变，真实 Gateway/owner 未验证。
 
@@ -7964,7 +7898,6 @@ PYTHONPATH=$PWD $PY tmp/mut/run_mutations.py   # 变异脚本（临时文件，�
   PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $GUARD_TESTS -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-luna4
   ```
   结果：guards9 所列测试全部执行完成，退出码 0、输出到达 100%，无失败。
-- **门禁**：`scripts/check_import_boundaries.py` → `IMPORT_BOUNDARIES findings=0`；Ruff 首次发现 `model_connections.py` 的 I001 导入格式问题，修正后 `$PY -m ruff check agent_py_agent scripts` → `All checks passed!`；`scripts/check_doc_sync.py` → `DOC_SYNC_PASS`；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → `strict_scope_total=2228 hard=0 high-risk=1523 soft=705 test_advisory=1241 blocked=False`，随后按要求还原 `CODE_SIZE_REPORT.md`；`scripts/check_clean_package.py .` → `OK: . 未发现发布阻塞项`。`size_diff.sh` 实际输出：`新增告警: 0`、`消失告警: 7`。
 - 尚未验证真实 TUI/Gateway、供应商连接、重启后向量模型采用及实际向量请求；以上仅证明当前源代码的单元/本地组件链路。`git diff --check` 在最终文档变更后退出码 0；本地提交号见交接报告。
 
 ## ChatGPT 订阅 WebSocket 握手超时交回合层退避（wsto，2026-10-03，分支 `worker/ws-handshake-timeout`，基线 `7e421024f`）
@@ -8074,7 +8007,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 - `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_import_boundaries.py`：`IMPORT_BOUNDARIES findings=0`。
 - `PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts`：`All checks passed!`。
 - `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_doc_sync.py`：`DOC_SYNC_PASS`。
-- `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：`strict_scope_total=2219 hard=0 high-risk=1517 soft=702 test_advisory=1241 blocked=False`；执行后 `git checkout -- CODE_SIZE_REPORT.md` 已还原生成报告。
 - `git diff --check`：退出码 0。
 - `PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_clean_package.py .`：`OK: . 未发现发布阻塞项`。
 - `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD`：输出 `新增告警: 0`、`消失告警: 16`。
@@ -8154,7 +8086,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 PY=~/.my-agent/releases/claude-tools/ci-venv-312/bin/python
 PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_import_boundaries.py
 PYTHONDONTWRITEBYTECODE=1 $PY -m ruff check agent_py_agent scripts
-PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD
 PYTHONDONTWRITEBYTECODE=1 $PY scripts/check_doc_sync.py --base b453f88831ab3c902daa8fd61e4eb91707956771
@@ -8262,7 +8193,6 @@ $PY agent_py_agent/tests/fixtures/plugin_manifest_v8_mutation_probe.py <上述�
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
 git diff --check
@@ -8310,7 +8240,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest $(cat ~/.my-agent/releas
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
 git diff --check
@@ -9396,7 +9325,6 @@ schema 不看开关 → 1；不重验上限/附件根 → 1；不查重复引用
   `test_gateway_dispatcher_resilience.py`、`test_constants_catalog.py`、`test_constant_names_unique.py` 共 59 passed, 1 xpassed（既有）；
 - guards9（`3a-scripts/guards9.txt` 10 文件）170 passed；`check_import_boundaries.py` findings=0；
 - `ruff check agent_py_agent scripts` All checks passed；`check_doc_sync.py` DOC_SYNC_PASS；
-- `check_code_size.py --mode strict` blocked=False（hard=0，报告已 `git checkout` 还原）；`size_diff.sh` 新增告警 0；
 - `git diff --check` OK；`check_clean_package.py .` OK；常数目录重新生成 817 项，`--check` 一致。
 - 环境：`claude-tools/ci-venv-312`，basetemp `/private/tmp/claude-501/pef*`；不启动 Gateway、不碰 8420、不读产品会话正文。
   真实 Gateway 的 `curl /status` 看 `usage_accounting` 段由 3a 集成部署后核对。
@@ -9535,7 +9463,6 @@ schema 不看开关 → 1；不重验上限/附件根 → 1；不查重复引用
 - 相关测试合集（探测计量、reasoning_probe/reasoning_effort、后端/协议、模型调用账本、gateway 收口/选模、决策调用、usage 标签/重投影、wire_contract）：全过（约 440 个）。
 - guards9 全量通过；`check_import_boundaries.py` findings=0；`ruff check` All checks passed；
   `check_doc_sync.py` DOC_SYNC_PASS；`git diff --check` OK；
-  `check_code_size.py --mode strict` blocked=False（hard=0，报告已 checkout 还原）；
   `check_clean_package.py .` OK；
   `bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD` 新增告警 0。
 - 沙箱限制：不启动 Gateway/真实供应商请求、不跑全仓 pytest；真实 /effort 回执与用量账由 3a 集成后核对。
@@ -9671,7 +9598,6 @@ python scripts/check_doc_sync.py        # DOC_SYNC_PASS
 git diff --check                        # rc=0
 python scripts/check_import_boundaries.py  # findings=0
 python -m ruff check agent_py_agent scripts   # All checks passed!
-python scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
                                         # hard=0 high-risk=1527 soft=707 blocked=False（报告已 checkout 还原）
 python scripts/check_clean_package.py .  # OK
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告警 0、消失 1
@@ -9777,7 +9703,6 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
     delivery_stale、action_candidate、external_material_order、recall、pre_recall、planning、curator、curator_relation、skill_proposal_review、model_profiles、
     model_operations、tui_model_menu、audit_requests_topic、decision_service、decision_subagent、skill_proposal_review_integration）→ 890 passed；
   - guards9 → 169 passed；`check_import_boundaries` findings=0；ruff All checks passed；`check_doc_sync` DOC_SYNC_PASS；
-    `check_code_size --mode strict` hard=0 blocked=False（跑后还原 CODE_SIZE_REPORT.md）；`git diff --check` 干净；`check_clean_package` OK；
     `size_diff.sh` 新增告警 0（消失 1）。
 - **变异验证 2 个，全部被拦下并还原（先备份再拷回）**：
   1. 门不通过时调用方又 `drop_and_return` 登记一行（去掉“不重复登记”） → `test_gate_failure_records_exactly_one_dropped_row` 红（`assert 2 == 1`）；
@@ -9802,7 +9727,6 @@ bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh $PWD  # 新增告
 - **验证命令与结果**（Python：`~/.my-agent/releases/claude-tools/ci-venv-312/bin/python`，工作目录根，`--basetemp=/private/tmp/claude-501/m-ds1-fix2`）：
   - 上一轮 22 个相关测试文件 + `test_decision_transport_timing.py` → **915 passed**；
   - guards9 → **170 passed**；`check_import_boundaries` findings=0；ruff All checks passed；`check_doc_sync` DOC_SYNC_PASS；
-    `check_code_size --mode strict` hard=0 blocked=False（跑后还原 CODE_SIZE_REPORT.md）；`git diff --check` 干净；`check_clean_package` OK；`size_diff.sh` 新增告警 0。
 - **变异验证 2 个，全部被拦下并还原（先备份再拷回，sha256 与备份一致）**：
   1. 去掉 M1 守卫（非选择也登记） → `test_result_category_records_host_drops_with_the_existing_reason_code`、`test_not_needed_with_expired_adoption_deadline_records_no_dropped_row` 红；
   2. S1 改回空格连接（`" ".join`） → `test_result_category_separates_selection_non_selection_and_unrecorded` 红（多题非选择键变成 `non_selection:not_needed no_match`）。
@@ -10066,7 +9990,6 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/build_constants_catalog.py --check
 PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_import_boundaries.py
 PYTHONDONTWRITEBYTECODE=1 "$PY" -m ruff check agent_py_agent scripts
 PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_doc_sync.py
-PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"
 git diff --check
@@ -10338,7 +10261,6 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
   ③unavailable_label 恒返回"（尚未开放）" → `test_non_admin_sees_admin_only_label_instead_of_not_open`（/plugins、
   /plugins help install 两个入口）红。
 - **门禁**：guards9 清单 + `check_import_boundaries.py`（0 条）+ ruff + `check_doc_sync.py` +
-  `check_code_size.py --mode strict`（跑完还原 CODE_SIZE_REPORT.md）+ `git diff --check` +
   `check_clean_package.py .` + `size_diff.sh`（新增告警 0），结果见下方"门禁全套"节。
 - **未验证/环境限制**：宿主安装/启用、沙箱子进程类用例在沙箱内失败/跳过（`/bin/ps` 与嵌套 Seatbelt 被拒），
   3a 在沙箱外复核；shuohao 聚焦 1 failed 与基线（C14 验收记录 L55）一致，非本次改动引入。
@@ -10391,7 +10313,6 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
   - 目录守卫 `test_constants_catalog.py` + `test_constant_names_unique.py`：**13 passed**；
   - 引用改名的 17 个测试文件（skill_learning/persona/session_search/session_history/channel_message/decision 等）：**全过**；
   - guards9 全部：**全过**；`check_import_boundaries.py`：**0 条**；`ruff check agent_py_agent scripts`：**All checks passed**；
-    `check_doc_sync.py`：**PASS**；`check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；
     `git diff --check` 通过；`check_clean_package.py .`：**OK**；`size_diff.sh $PWD`：**新增告警 0**。
 
 ## C4：执行器退出后父级唤醒回执里的结构化接替提示（2026-10-02，分支 `claude/38-c4-takeover-hint`，基于 `claude/3a-step16z` `e0a6d53af`）
@@ -10437,7 +10358,6 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
   - 目录守卫 `test_constants_catalog.py` + `test_constant_names_unique.py`：**13 passed**；
   - 引用改名的 16 个测试文件：**217 passed**；guards9 全部：**168 passed**；
   - `check_import_boundaries.py`：**0 条**；`ruff check agent_py_agent scripts`：**All checks passed**；
-    `check_doc_sync.py`：**PASS**；`check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；
     `git diff --check` 通过；`check_clean_package.py .`：**OK**；`size_diff.sh $PWD`：**新增告警 0**（消失 2）。
 
 ## 配置与账本写回保留权限（2026-10-02，3a，step16z）
@@ -10573,7 +10493,6 @@ PYTHONDONTWRITEBYTECODE=1 "$PY" scripts/check_clean_package.py .
     （Popen 子进程被沙箱拦，基线 ed64438fc worktree 实测同样失败，已移除基线 worktree）。
   - guards9 10 文件：**167 passed**（含 test_packaging.py）。
   - `check_import_boundaries.py`：**0 条**；`ruff check agent_py_agent scripts`：**All checks passed**；`check_doc_sync.py`：**PASS**；
-    `check_code_size.py --mode strict`：hard=0 blocked=False（报告已还原）；`git diff --check` 通过；`check_clean_package.py .`：**OK**；
     `size_diff.sh $PWD`：**新增告警 0**。
   - **变异 3 个**（scripts 一次性脚本，改后跑对应测试，全被拦截后还原）：①`identity_status` 恒 True → mismatched/missing_meta 测试红；
     ②注释掉 `_write_meta` → matching 后 meta 不存在红；③`_vectors_rebuild_payload` 去掉 confirmed 检查 → CLI 未确认执行断言红。
@@ -10626,7 +10545,6 @@ $PY -m pytest $(cat "$HOME/.my-agent/releases/claude-tools/3a-scripts/guards9.tx
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 $PY scripts/check_clean_package.py .
@@ -10804,7 +10722,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
 - `$PY scripts/check_import_boundaries.py` → **IMPORT_BOUNDARIES findings=0**。
 - `$PY -m ruff check agent_py_agent scripts` → **All checks passed**。
 - `node frontend/scripts/sync-backend-config.mjs --check` → **in sync（249 fields）**；目录由原脚本重生成，只同步两条档位说明。
-- `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → **hard=0、blocked=False**；生成报告已还原，不提交报告或修改 baseline。
 - `$PY scripts/check_clean_package.py .` → **OK：未发现发布阻塞项**；`git diff --check` → 退出 0、无输出。
 - `$PY scripts/check_doc_sync.py` → **DOC_SYNC_PASS**。首跑因 Gateway 的 `04-structure.md` 漏更失败，补齐八档的数据流与边界后，重跑同一入口通过。
 - `PYTHONDONTWRITEBYTECODE=1 bash ~/.my-agent/releases/claude-tools/3a-scripts/size_diff.sh "$PWD"` → 退出 0。
@@ -10860,7 +10777,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
   6. restore 不过滤过期 → `test_restore_drops_expired_entries` 红。
 - 收尾门禁（全部通过）：guards9（10 文件）→ **167 passed**；`check_import_boundaries.py` → **0 条**；
   `ruff check agent_py_agent scripts` → **All checks passed**；`check_doc_sync.py` → **DOC_SYNC_PASS**；
-  `check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` → **hard=0, blocked=False**
   （跑完还原 CODE_SIZE_REPORT.md）；`git diff --check` → 通过；`check_clean_package.py .` → **OK**；
   `size_diff.sh` → **新增告警 0**（3 条 nesting 拆平后归零，消失 2 条）。
 
@@ -10963,7 +10879,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
     test_user_config_decision_patch/test_value_display_parity/test_parameter_changes/test_structured_masking）→ **174 passed**；
   - guards9 全量（10 文件，含 test_packaging）→ **167 passed**；
   - `check_import_boundaries.py` → **0 条**；`ruff check agent_py_agent scripts` → **All checks passed**；
-  - `check_doc_sync.py` → **DOC_SYNC_PASS**；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
     → **hard=0, blocked=False**（跑完 `git checkout -- CODE_SIZE_REPORT.md` 还原）；`git diff --check` → 通过；
     `check_clean_package.py .` → **OK**。
 
@@ -11038,7 +10953,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
   - **code-size 拆平（2026-10-01，ds1，纯重构行为不变）**：相对 step16y 基线多出的 3 条 high-risk 全部消除——
     runtime 类抽 `_background_goal_delivery_mode` 模块级函数（类 202→199）、`_background_external_delivery`
     参数收进 `_ExternalDeliveryOptions`（4 个）、60 行推送测试拆成两个。
-    命令：`PYTHONPATH=$PWD $PY scripts/check_code_size.py --mode warn --write-baseline /private/tmp/claude-501/m-ds1-after3.json --report /private/tmp/claude-501/m-ds1-after3.md`
     → 三个目标文件相对 step16y（3598 条）**0 新增**；strict 2239 blocked=False；
     相关测试 217 passed（5+8+204）、guards9 166 passed。
 - **测试者偏差（如实记录）**：
@@ -11116,7 +11030,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
     backend_config_catalog/frontend_settings_labels）→ **233 passed**；
   - guards9 全量（10 文件，含 test_packaging）→ **167 passed**；
   - `scripts/check_import_boundaries.py` → **0 条**；`ruff check agent_py_agent scripts` → **All checks passed**；
-  - `scripts/check_doc_sync.py` → **DOC_SYNC_PASS**；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
     → **hard=0, blocked=False**（跑完 `git checkout -- CODE_SIZE_REPORT.md` 还原，未提交）；`git diff --check` → 通过；
     `scripts/check_clean_package.py .` → **OK: 未发现发布阻塞项**。
 - 未验证：真实 Gateway 进程里的 `/settings` 交互与 capability 改动重启生效（测试走控制服务单测与运行时入口函数，未启动 Gateway、
@@ -11148,7 +11061,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/tes
     test_config_defaults_parity test_value_display_parity test_config_field_readers` → **153 passed**；
   - guards9 全量（10 文件，含 test_packaging）→ **167 passed**；
   - `scripts/check_import_boundaries.py` → **0 条**；`ruff check agent_py_agent scripts` → **All checks passed**；
-  - `scripts/check_doc_sync.py` → **DOC_SYNC_PASS**；`scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
     → **hard=0, blocked=False**（跑完 `git checkout -- CODE_SIZE_REPORT.md` 还原，未提交）；`git diff --check` → 通过；
     `scripts/check_clean_package.py .` → **OK: 未发现发布阻塞项**。
 - 未验证：`test_backend_config_catalog.py`/`test_frontend_settings_labels.py`（前端目录守卫，P17 未动 frontend/、只加行尾注释不改键，理论不受影响，
@@ -11211,7 +11123,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
   3. 用户授权 ContextVar 默认改为 True：模型写入边界断言失败，**1 failed**。
   原四个关键文件 SHA256 逐字节恢复一致；随后 Curator 档案/未配置/失败归因、设置、参数修改及前端目录七文件恢复回归 **99 passed**。
 - 静态门禁：`$PY scripts/check_import_boundaries.py` → **0 条**；`$PY -m ruff check agent_py_agent scripts` → **通过**；
-  `$PY scripts/check_doc_sync.py` → **DOC_SYNC_PASS**；`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`
   → **hard=0、blocked=False**；`git diff --check` → **通过**；`$PY scripts/check_clean_package.py .` → **未发现发布阻塞项**。
   初检曾因缺少 Gateway 模块同步、两个新增文件尚未纳入索引而失败，补齐后原门禁复跑通过；没有削弱检查。
   code-size 的报告已恢复，不提交；baseline 未扩大，现有基线风险不写成全仓零风险。
@@ -11254,7 +11165,6 @@ GOCACHE=$PWD/tmp/mb1-go-cache GOPROXY=off GOTOOLCHAIN=local GOSUMDB=off \
 "$PY" scripts/check_import_boundaries.py
 "$PY" -m ruff check agent_py_agent scripts
 "$PY" scripts/check_doc_sync.py
-"$PY" scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 "$PY" scripts/check_clean_package.py .
@@ -11396,7 +11306,6 @@ git diff --check
   - `$PY scripts/check_import_boundaries.py`：0 条
   - `$PY -m ruff check agent_py_agent scripts`：通过
   - `$PY scripts/check_doc_sync.py`：通过
-  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：通过
   - `git diff --check`：通过；`$PY scripts/check_clean_package.py .`：通过
 
 ## 前端参数目录生成器修正、重新生成与守卫（2026-10-01，分支 `worker/ds1-config-catalog`，基于 main `34e4d874e`）
@@ -11411,7 +11320,6 @@ git diff --check
   - 命令与结果：
     `PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest agent_py_agent/tests/test_backend_config_catalog.py -q --tb=short -p no:cacheprovider --basetemp=/private/tmp/claude-501/m-ds1` → **3 passed**
 - guards9 全套（10 文件）→ **182 passed**；`check_import_boundaries.py` → 0 条；`ruff check agent_py_agent scripts` → All checks passed；
-  `check_doc_sync.py` → DOC_SYNC_PASS；`check_code_size.py --mode strict` → blocked=False（strict_scope_total=2241，CODE_SIZE_REPORT.md 已还原）；
   `git diff --check` 干净；`check_clean_package.py .` 通过。
 
 ## Jev 前台默认期限 2→3 秒（J5）与实际版本号落结构化事实（J19）（2026-10-01，分支 `claude/be-jev-deadline-version`，基于 main `34e4d874e`）
@@ -11551,7 +11459,6 @@ PYTHONPATH=$PWD PYTHONDONTWRITEBYTECODE=1 $PY -m pytest \
 $PY scripts/check_import_boundaries.py
 $PY -m ruff check agent_py_agent scripts
 $PY scripts/check_doc_sync.py
-$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git checkout -- CODE_SIZE_REPORT.md
 git diff --check
 $PY scripts/check_clean_package.py .
@@ -11828,7 +11735,6 @@ $PY scripts/check_clean_package.py .
   - `$PY scripts/check_doc_sync.py`：通过
   - `git diff --check`：通过
   - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
-  - 未跑 `check_code_size.py`（纯文档任务，任务明确可不跑）
 
 ## 没有会话任务的请求，代理树结束后 TaskRun 也关闭（2026-09-30，分支 `claude/38-taskrun-close-without-conversation-runtime`，基于 main `a8c71f0e0`）
 
@@ -11908,7 +11814,6 @@ $PY scripts/check_clean_package.py .
   - `$PY scripts/check_doc_sync.py`：通过
   - `git diff --check`：通过
   - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
-  - 未跑 `check_code_size.py`（纯文档任务，任务明确可不跑；如需全量门禁再补跑）
 
 ## list_agents 显示子代理模型与智能程度（2026-09-30，分支 `worker/ds2-capability-guide`，已实现）
 
@@ -11920,7 +11825,6 @@ $PY scripts/check_clean_package.py .
   - `$PY -m pytest agent_py_agent/tests/test_subagent_kernel.py agent_py_agent/tests/test_reasoning_effort.py -q --tb=short`：44 passed
   - `$PY -m ruff check agent_py_agent scripts`：通过
   - `$PY scripts/check_doc_sync.py`：通过
-  - `$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`：通过
   - `git diff --check`：通过
 
 ## 能力包 G03／G05 真实模型补测、G07 一次选择开启臂与子代理选模权限（2026-09-30，分支 `claude/ae-capability-real-model`，仅文档）
@@ -11947,7 +11851,6 @@ $PY scripts/check_clean_package.py .
 - **覆盖**：续跑集成测试校验连续 3 片后暂停与配置 0 不限；合同测试覆盖工具/状态变化清零、用户新消息重置、持久计数、host notice 按来源/原因码去重；恢复用例验证 `/goal resume` 清原因与通知、首片回到计数 1；参数登记测试核对默认值、整数类型、可修改与 YAML 中文说明。
 - **运行（通过）**：`$PY -m pytest agent_py_agent/tests/test_goal_progress_fuse.py agent_py_agent/tests/test_goal_lifecycle_recovery.py agent_py_agent/tests/test_background_main_agent_runtime.py agent_py_agent/tests/test_parameter_registry.py agent_py_agent/tests/test_host_notices.py -q --tb=short` → 退出码 0，全部通过。既有 host notice 测试覆盖 TUI 流事件/Gateway 结果与 IM 最终回复前缀。
 - **补充交叉检查**：上述定向套件之外，将 `agent_py_agent/tests/test_gateway_conversation_control.py` 一并运行时，其中 `test_goal_and_task_resource_controls_are_independent` 的 3 个参数化用例失败；观察到两个 PTY 子进程以退出码 71 结束，另一个没有确认终止回执，失败原因未确定。单独重跑目标相关的 `test_first_work_tool_does_not_resume_explicitly_paused_goal` 退出码 0。前述失败不计入本功能通过项。
-- **门禁**：`$PY -m ruff check agent_py_agent scripts`、`$PY scripts/check_doc_sync.py`、`$PY scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json`、`git diff --check` 均退出码 0；strict code-size 报告 `hard=0`。检查后已按要求还原生成的 `CODE_SIZE_REPORT.md`。
 - **未验证**：没有连接真实 MiniMax 模型或真实 TUI/IM 观察通知抵达；新增用例验证熔断提示入队/去重，通道呈现复用既有 host notice 测试，不宣称真实收件通过。
 
 ## 智能程度逐模型真实审计（2026-09-30，38）
@@ -12032,7 +11935,6 @@ $PY scripts/check_clean_package.py .
   - `$PY scripts/check_doc_sync.py`：通过
   - `git diff --check`：通过
   - `$PY -m ruff check agent_py_agent scripts`：通过（无代码改动，作为回归）
-  - 未跑 `check_code_size.py`（任务明确纯文档可不跑 code-size）。
 
 ## 上下文数字第二个来源：owner 级校准比值缓存（2026-09-30，分支 `claude/38-context-calibration-carry`，基于 main `bf4f740c3`）
 
@@ -12245,7 +12147,6 @@ $PY scripts/check_clean_package.py .
 
 ## 尺寸脚本自检不再改写被跟踪的 CODE_SIZE_REPORT.md（2026-09-29，分支 `claude/9a-magicmock-guard`）
 
-- **起因**：`test_code_size_script.py::test_check_code_size_warn_generates_report` 在仓库根跑 `scripts/check_code_size.py`，
   脚本默认把报告写在仓库根，于是每次全量都会改写被跟踪的 `CODE_SIZE_REPORT.md`。
 - **改法**：
   - 脚本加 `--report <路径>`，不给时仍写仓库根，门禁命令行为不变；汇总行对仓库外的报告显示原路径。
@@ -12947,7 +12848,6 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
   这 148 条全是沙箱环境的既有失败（需要真实起子进程/进程组，沙箱里 `capture_process_birth_token` 不可用等）。
   9a 环境里这些文件是绿的，按它那边的结果为准。
 - **门禁**：9 个全仓守卫 **134 passed**；ruff `All checks passed!`；`DOC_SYNC_PASS`；`git diff --check` 干净；
-  `check_code_size.py` hard=0、blocked=False。
 
 - **来源**：dev 09-29 01:15 任务。ae 复审 47bd37d20 时发现既有问题：`process_session` 在读不出后台进程权威时对所有动作一律记 `effect_outcome=unknown`，
   而 `unknown` 会让 `contracts/required_actions.settle_required_action` 把动作标成 `blocked`，主代理据此收口、整轮停止调用工具 ——
@@ -12967,7 +12867,6 @@ dev 裁定**真的实现它**，并顺手修 V5。**这一轮的第一件事是�
   `cleanup-unresolved` 分支保持 `unknown`。
 - **复现**：`python3 -m pytest agent_py_agent/tests/test_process_read_only_not_started.py agent_py_agent/tests/test_process_unknown_reason_codes.py -q -k "not terminal_close"`（20 passed）。
   注：该文件里两条 `terminal_close` 用例在**未改动的基线上同样失败**（沙箱内 pty 子进程退出确认拿不到），与本改动无关。
-- **门禁**：dev 指定的 9 个全仓守卫 **134 passed**；ruff `All checks passed!`；`DOC_SYNC_PASS`；`git diff --check` 干净；`check_code_size.py` hard=0、blocked=False。
 
 ## 后台进程与终端会话结果未知时带出具体原因码（2026-09-29，分支 `claude/75-process-unknown-codes`，基于 `64f7ee64e`）
 
@@ -13754,7 +13653,6 @@ clean package OK）；生成物 `CODE_SIZE_REPORT.md` 已还原，不入提交�
   3. `docs/design/LONG_RUNNING_EXECUTION.md` 与 `docs/modules/memory/04-structure.md` 里把 `cache_diagnostics_enabled` 从「配置开关」改写成「已降为读取点旁的具名常量」，并去掉「关闭开关不计算摘要」这种已不存在的运行时路径说法；
   4. `frontend/src/pages/settings/SettingsTools.tsx` 那个写死的标签 `tool_retrieval_limit（检索限制）` 改掉 —— 它绑的是前端自己的 `settingsStore.retrieval_limit`，不写后端键，也不在后端 catalog 里。
 - **验证**：`agent_py_agent/config/agent_config.yaml` 一改，前端 catalog 需要同步重新生成 —— 跑 `node frontend/scripts/sync-backend-config.mjs`（265 fields）后 `--check` 报 `Config catalog is in sync (265 fields).`，并确认 catalog 里已无这 7 个键名。
-- **复现门禁**：`ruff check agent_py_agent/`（All checks passed）、`python3 scripts/check_doc_sync.py`（DOC_SYNC_PASS）、`git diff --check`（干净）、相关定向测试 **161 passed**、四个守卫 **98 passed**、`check_code_size.py`（hard=0、blocked=False）。
 
 ## 参数减量：7 个内部实现参数降为读取点旁的具名常量（2026-09-28，分支 `my-agent/self-dev-params`，基于 `f7a4cc909`）
 
@@ -14527,7 +14425,6 @@ python3 -m pytest agent_py_agent/tests/test_memory_vector_cache.py agent_py_agen
 
 ## 当日新增 code-size 发现项清理（2026-09-28，分支 `claude/75-codesize-cleanup`，基于 `ca756b5db`，行为不变）
 
-- **比较口径**：用 `check_code_size.py --write-baseline` 按发现项身份和级别比较今早的 main `0c340fe29` 与 `ca756b5db`。strict 口径下 high-risk 从 1518 升到 1524，soft 从 708 降到 705。
 - **已清掉 6 项**：相对 `ca756b5db` 新增 0 项、消失 6 项；strict high-risk 降到 1519。
   - `agent_tree/status.py::agent_tree_status_payload`：函数 52 行。把快照解析拆到 `_resolved_kernel_snapshot`。
   - `agent_tree/status.py::_unmatched_explicit_run_query`：参数 5 个。删掉未使用的 `params` 参数。
@@ -14852,7 +14749,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **复现**：`cd agent_py_agent && python3 -m pytest tests/test_compact_semantic_summary.py tests/test_runtime_parameter_config.py
   tests/test_background_main_agent_runtime.py tests/test_memory_config.py tests/test_settings_memory.py tests/test_parameter_registry.py
   tests/test_constant_names_unique.py tests/test_architecture_guardrails.py tests/test_config_field_readers.py -q --tb=short`（396 passed）；
-  仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
 
 ## 能力包 G05 补测：跨回合 Goal 恢复与工具操作 UNKNOWN（2026-09-28，被测 `9f88e4905`，仅文档）
 
@@ -14978,7 +14874,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
 - **复现**：`cd agent_py_agent && python3 -m pytest tests/test_memory_curator_v2.py tests/test_curator_*.py tests/test_collect_curator_evidence.py
   tests/test_decision_curator*.py tests/test_memory_config.py tests/test_settings_memory.py tests/test_parameter_registry.py
   tests/test_constant_names_unique.py tests/test_architecture_guardrails.py tests/test_config_field_readers.py -q --tb=short`（369 passed）；
-  仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
 - **环境注记**：整目录 `pytest tests` 在本机因缺 dev extra（`hypothesis`、`pyte`）无法收集，本次用显式文件列表；与本批改动无关。
 
 ## R10 深度切片：长前台工具中途中断与 `/goal resume` 对照（2026-09-28，分支 `claude/be-r10-depth`，基于 `53477806d`，只改文档）
@@ -15182,7 +15077,6 @@ python3 -m pytest agent_py_agent/tests/test_decision_observe_sampling.py \
   删除或改写旧键用例（这些键已不是参数，对应归一化/边界用例随之移除）。
 - **复现**：`cd agent_py_agent && python3 -m pytest tests/test_memory_*.py tests/test_artifact_*.py tests/test_settings*.py tests/test_config*.py -q --tb=short`
   （1447 passed），另跑 `test_parameter_registry / test_config_field_readers / test_constant_names_unique / test_architecture_guardrails`；
-  仓库根跑 Ruff、`scripts/check_doc_sync.py`、`scripts/check_code_size.py --mode strict`、`git diff --check`、`scripts/check_clean_package.py .`。
 - **未包含**：`frontend/config/backend-config-catalog.json` 是随包 YAML 的生成物，本批没有重新生成（重新生成会带出 189/303 行与本批无关的历史差异）；
   该目录在本基线上已 stale，前端线需单独跑 `npm run sync:config`。
 
@@ -18262,7 +18156,6 @@ OAuth 传输、采样和模型菜单回归。覆盖保存无网络、公开字�
 
 - 纯搬移，行为不变：`tui_keybindings.py`（2656→1744 行）中的副作用动作移到新模块 `tui_actions.py`：记忆命令后台执行、本地/Gateway 排队、执行选项快照、控制命令提交与对账器、补充消息提交与对账器、子代理插话/停止、Esc 中断，以及只被它们使用或需被双方共享的 `_handle_command_params`、`_required_tui_runtime`、`_active_tui_runtime`、`_agent_guidance_sent_notice`、`_restore_failed_agent_input`、`_safe_http_status` 和两个重试间隔常量；`_run_clipboard_tool`、`_load_tmux_clipboard_buffer` 移到 `tui_clipboard.py`。
 - `tui_actions.py` 运行时不导入 `tui_keybindings`；唯一延迟导入是 `_restore_failed_agent_input` 回调内的 `_set_input_draft`。`tui_plugin_commands.py` 的延迟导入改指 `tui_actions`。
-- 测试只改 monkeypatch/调用路径到实际解析位置（`test_tui_input.py`、`test_tui_plugin_panels.py`、`test_host_command_stream.py`），断言不变；`CODE_SIZE_BASELINE.json` 两条既有函数豁免的路径随函数改到 `tui_actions.py`，数值不变。
 - 验证：test_tui_*、test_chat_parts、test_cli_chat、test_chat_prompt_queue、test_chat_control_runtime、test_plugin_command*、test_architecture_guardrails、test_host_command_stream 共 42 个文件 862 passed；ruff、strict code-size、doc sync、diff check 通过。
 
 ## 第 9 步插件面板（本地，待发布）
@@ -20484,7 +20377,6 @@ start 子进程超时还是其它异常，`finally` 都调用 `stop_scenario_gat
 python3 -m pytest <直接相关测试文件> -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
 git diff --check
 python3 scripts/check_clean_package.py .
 ```

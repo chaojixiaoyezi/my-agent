@@ -411,13 +411,21 @@ def test_q4_refresh_keeps_live_mcp_client_and_transport(tmp_path):
     assert process.poll() is not None
 
 
-def test_close_shared_permission_view_prevents_other_view_reconnect(tmp_path):
+# LLM: A borrowed view only detaches; owner shutdown is still responsible for the shared transport's final close.
+# 函数用途: 验证子视图关闭不影响父连接，父关闭后所有可调用代理撤销。
+def test_close_shared_permission_view_preserves_parent_until_owner_close(tmp_path):
     registry = _registry(tmp_path)
     view = registry.with_access_policy(access_mode="full-access", path_access_mode="full-access", owner_scope_root="")
     client = registry._mcp_clients[0]
     assert view is not registry and view._mcp_clients is registry._mcp_clients
     view.close_mcp_clients()
+    assert view._mcp_clients == [] and view._mcp_borrow_released
     registry.prepare_for_run()
+    assert registry._mcp_clients == [client] and client.is_running()
+    result = registry.tools['mcp__echo__echo'].execute({'text': 'parent-still-alive'})
+    assert result.ok and 'parent-still-alive' in result.output
+    assert 'mcp__echo__echo' not in view.runtime_snapshot().available_tool_names
+    registry.close_mcp_clients()
     assert not registry._mcp_clients and not registry._mcp_retry_state
     assert client.is_closed()
     assert all(not name.startswith("mcp__") for name in registry.runtime_snapshot().available_tool_names)

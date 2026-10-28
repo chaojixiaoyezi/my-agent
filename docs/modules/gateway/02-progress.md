@@ -2,6 +2,12 @@
 
 管理入口不再为配置/路径解析创建SimpleAgent；共用原owner权限、冻结配置及runtime paths，真实执行组合根不变。common与gateway_loops的传递core导入已解除，原工厂注入仍兼容；原日志索引只在实际写日志时按需构造，普通解析和关闭的事件镜像不建库。冷子进程、原路径对照和真实构造禁止回归，以及实际验证边界见[TESTS](../../../TESTS.md)本轮小节；结构见[04-structure](04-structure.md)。不代表生产Gateway、真实TUI/IM或跨平台已验收，尚未部署。
 
+## 2026-10-28 Wave 8 T2 W2 Round 2：owner活实例预算（源码候选）
+
+- owner池将硬/软缓存、仍被pin的退役实例和构建预留统一计入 `total_live_instances`；构造前预留，发布时替换预留，强制刷新不能累积在途旧代。普通派发在原global/user门之后检查原共享池是否可复用/有空间，不足仍留inbox；池内正式构造与pin继续重查。
+- 原生worker先按原owner/home/workspace和canonical管理器取得授权后的最终配置，再唯一构造Agent；旧factory兼容延迟MCP选项。MCP关闭前撤销旧client代理，重开后真实本地echo工具可重新发布并调用。Registry辅助函数提取后严格尺寸门hard=0。
+- 指定8文件当前181通过、29失败，未达全绿：MP硬链接EPERM与MCP进程身份/物理退出未确认仍保留原硬断言。未部署、未验证真实MP/生产负载。准确起点、变更与证据见根目录 `TESTS.md` 本轮小节。
+
 ## 2026-10-27 CI C8 & Linux 工作区边界收口（本地候选）
 
 - 恢复后台重工具按需展示、完成计时回放幂等，禁止额度失败后的业务降级重试；工作区切走记interrupted，真实继任才发布superseded边。诊断仍测真实缓存读数，测试按持久neutral期限执行，不修改退避和两处其他cluster所有文件。指定11文件1340通过/0失败/3项原嵌套沙箱能力跳过；未部署或作真实TUI/跨平台验收。根因、测试调整与准确证据见[TESTS](../../../TESTS.md)的CI C8小节。
