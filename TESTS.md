@@ -54,6 +54,28 @@ python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=s
 cd /tmp/wt-wave9-a3
 python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
 python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short --junitxml=/tmp/pytest-a3-r4/final-accepted.xml
+
+## 2026-10-28 Wave 9 B2 四轮：真实owner拒绝分类贯通
+
+来源：完整读取 `07-tasks/fix-r4-wave9-b2.md`（47行）。工作树 `/tmp/wt-wave9-b2`、分支 `wave9-b2`，起点 `2afcc65a2f05f573e630639aefff03291f5af52f`，总基线 `db4d5de92`。本轮只修后台观察的真实owner拒绝链，不改导航、目录重试或进程控制。
+
+- 生产端以专门的 `ValueError` 子类保留 `error_code/reason_code=OWNER_MISMATCH`，覆盖owner_home跨家目录、owner归属冲突与原合同已拒绝的非法owner值。静态快照及动态概要捕获均保留分类；原其它线程/owner隔离规则不变，当前线程错配仍进入 `errors`。
+- 普通scope/非owner属性错误延后到owner检查之后，schema前后均检查owner。坏schema、非字典scope或其它坏属性都不能把已明确owner拒绝降成普通错误；原接受/拒绝范围和可选空身份合同不变。
+- 消费端统一识别诊断字典与真实异常的error_code/reason_code（含reason-only兼容入口），硬拒绝立即清行、清计数、撤销scope/有效帧与瞬态预算；普通ValueError仍按原合同告警并保留同scope旧帧。
+- 新回归写真实兼容格式JSON、走原list/inspect/_read_session及TUI同步建立有效帧，再原地改owner。详情交错为真实list先成功，返回前改磁盘记录，接着真实inspect拒绝。另测owner混合坏schema/坏scope/坏task、reason-only及普通PID错误；动态概要异常出口单独标注为边界单测，不冒充自然业务端到端。
+- 既有归属矩阵五个测试函数仅迁移owner分支的精确诊断预期，新增双字段断言，保留其原拒绝、隔离、文件不变、总数及ValueError兼容断言；未删除、跳过或放宽有效测试。
+- 任务指定两个测试名在起点不存在。`test_wave9_tui_observation_and_sticky_bar.py`、`test_tui_sticky_user_turn_jump.py`显式重导出原模块全部测试和所需autouse夹具；原测试源不改，不制造空门禁，扩展回归不重复执行源文件计数。
+
+红绿证据：最初11例中9个owner链路断言失败、普通ValueError两例通过；随后“跨owner+坏schema”1例，以及独立复核指出的混合坏scope/属性5例均先复现旧行残留，再修产品。
+
+最终验证：指定三文件 **136 passed**，额外三个既有相关文件 **775 passed**，两份JUnit测试身份无重叠，合计 **911 passed，0 failed/error/skipped**。全量Ruff、文档同步、导入边界及差异空白门禁通过；26个新增/修改定义的双层中文注释与两个兼容入口的完整重导出均以AST核对。原始结果为 `.pytest_cache/w9b2r4-{required-final,regression-final}.xml`。
+
+两次gpt-6-astra/high限定范围内联静态复核：第一次指出普通结构错误遮盖owner拒绝，已用真实链路复现并修复；第二次增量复核确认该控制流问题关闭，本范围未发现新P1/P2。不是全仓评审，评审者没有独立运行测试。未验证真实用户终端端到端、Linux/跨平台车道及全仓pytest；未推送、合入或部署。
+
+复现命令（工作树根目录）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_tui_observation_and_sticky_bar.py agent_py_agent/tests/test_tui_background_observation_resilience.py agent_py_agent/tests/test_tui_sticky_user_turn_jump.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_tui.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py --json
@@ -76,6 +98,31 @@ git diff --check db4d5de92..HEAD
 
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --junitxml=/tmp/pytest-a1-r4/final-submission.xml
+
+本地忽略证据目录为 `.pytest_cache/w9b2r4-*.xml`，不随功能提交；没有运行退役的尺寸检查。
+
+## 2026-10-28 Wave 9 B2 三轮：End覆盖、目录竞争与硬错误失败关闭
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-b2.md`（52行）。起点 `5c1693877277cdbd66e508f000566a0128e3d787`，分支 `wave9-b2`，总基线 `db4d5de92`；项目编辑、测试及提交仅在 `/tmp/wt-wave9-b2` 内进行。
+
+- **End优先级**：`move_end()` 在同一锁内清除待恢复阅读锚点再恢复follow。普通/详情/完整原文均通过“原生鼠标顶栏点击→未重绘立即End→真实Window/Screen绘制”，最终跟随页底且顶栏重指U3。复查Home、move、jump_to原已清pending，保留其三条守卫。
+- **目录竞争**：`_MAX_SCAN_ATTEMPTS=4`，显式换代、FileNotFoundError/ProcessLookupError及EINTR/EAGAIN/ENOENT/ESTALE/ESRCH共用最多三次5ms退避；权限异常或EACCES/EPERM立即返回PERMISSION_DENIED，未知错误仍透传。诊断只保留类型/errno，不保留异常正文。
+- **初始空态与读后消失**：整轮首次缺目录仍是原有干净空态；重试时不再允许吞掉起始缺失。既有 `test_b1_disappearing_directory_after_read_is_not_successful_empty` 曾抓到重试后误报成功，现通过产品修复转绿，未改该断言。耗尽统一error_code=DIRECTORY_CHANGED_DURING_READ，同时保留实际FileNotFoundError类型；重新出现必须完成前后stat核验。
+- **同scope宽限**：LOCK_TIMEOUT与SNAPSHOT_PARSE_INCOMPLETE加入瞬态code集合。仅同owner/thread已有成功帧才允许前两次静默保留，第三次告警；成功复位。首帧、owner/thread切换及范围解析失败不借旧帧。
+- **硬拒绝**：PERMISSION_DENIED、OWNER_MISMATCH、PermissionError及权限errno优先清行、清计数、撤销scope/有效帧资格并告警；之后瞬态不能复活旧帧。畸形顶层或兄弟error_code也不能遮盖后面的硬拒绝。
+
+测试入口说明：任务指定的三个文件在起点均不存在。本轮新建两个专项文件；`test_tui.py` 显式重导出既有 `test_tui_view.py` 全部27个测试函数、33个参数例，作为既定命令的兼容入口，不增造空测试，不删改原文件。额外回归不再重跑该源文件，避免重复计数。旧目录权限回归只将“抛出PermissionError”迁移为任务要求的结构化错误，并加强核对原类型/errno及仅一次调用。
+
+验证记录：
+- 指定三文件：**94 passed，0 failed/error/skipped**（后台韧性55、顶栏导航6、兼容入口33）。
+- 额外14个既有相关文件：**1026 passed，0 failed/error/skipped**；两份JUnit按测试身份去重合计 **1120 passed**。
+- 红绿：初始四项复现有46个明确断言失败、0 errors；随后畸形错误码2例、读后消失/恢复2例也分别先失败后转绿。其它已有合同守卫初始即通过，不冒充全部新例都经历红绿。权限异常正文守卫曾与临时目录名称撞词，已改为唯一正文标记，未修改产品行为来迎合它。
+- 两次gpt-6-astra/high限定范围的内联静态复核分别覆盖四项边界和扫描增量，未确认新的P1/P2；不是完整diff/全仓评审，也没有由评审者独立跑测试。
+- 未验证：真实用户终端端到端、真实权限变更压力、Linux/跨平台车道、全仓pytest；未推送、合入、部署或运行退役尺寸检查。
+
+门禁复现（工作树根目录）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_tui_background_observation_resilience.py agent_py_agent/tests/test_tui_sticky_user_turn_bar.py agent_py_agent/tests/test_tui.py -q --tb=short
 ruff check agent_py_agent scripts
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py --json
@@ -250,6 +297,31 @@ cd /tmp/wt-wave9-a3
 python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
 python3 -m pytest /tmp/wt-wave9-a3/agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short
 ruff check agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/workbench_server.py /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
+
+额外回归文件为 `test_wave9_tui_bg_watch_and_sticky_user_bar.py`、`test_tui_turn_completion_and_bg_watch.py`、`test_gateway_background_process_identity.py`，以及 `test_tui_{view_model,reading_position,complete_detail,transcript,combinatorial,resource_lifetime,agent_navigation,clipboard,threading,terminal,prompt_toolkit_pipe}.py`。
+原始证据在本树忽略目录 `.pytest_cache/w9b2r3-{red,malformed-red,retry-missing-red,required,regression}.xml` 及初始 `w9b2r3-red.log`，不随功能提交。
+
+## 2026-10-28 Wave 9 B2 二轮：完整原文跨四页用户导航
+
+来源：完整阅读 `07-tasks/fix-wave9-b2.md`（38行），落实c17指出的P2。起点 `dad9a00ca65b4592262193bd8bba5ba5aa6b2cd1`，总基线仍为 `db4d5de92`；所有项目编辑、测试和提交均在 `/tmp/wt-wave9-b2` 的 `wave9-b2` 分支完成。
+
+- **修复**：完整原文索引从冻结typed块建立，排序与原分页器一致；缓存按稳定/活动tuple身份及宽度复用，只保存块位置和安全摘要，不排版全历史。`TuiUserTurnLine.start_line` 在当前四页外为 `None`，`block_index` 提供可比较的冻结顺序；不伪造全局物理行号。
+- **跳转**：完整模式按视口顶部的块/来源行选择用户；点击先用现有稀疏页定位目标块，再生成至多四页窗口，恢复 `ReadingAnchor(target,0,0)`、关闭follow，pending锚点立即指向前一条。普通/详细非完整模式仍使用实际排版行。切换显示来源清两类用户索引，冻结后的live用户不混入。
+- **保持不变**：本轮与起点逐文件diff确认 `background_process_view.py`、`tui_threading.py`、`CODE_SIZE_REPORT.md` 未改；没有让旧后台快照伪装成功，没有改变归档授权、异步读取和八页缓存。
+- **红绿证据**：新增单用户+1000行助手回复的来源行700、三轮各1000行从A3来源行20连续点击（有/无中间重绘）共3个参数例，改实现前分别在目标为None、下一目标缺U2的断言失败，改后通过。原生Window/Screen鼠标分发表核对实际首行来源、零偏移锚点、follow=False、立即下一目标及到U1才隐藏；每帧仍至多四页。
+- **补充守卫**：冻结元数据跨页复用/来源重绑、十万远端页仅两个稀疏segment且只请求窗口附近页面共2例。它们是后补守卫，不宣称都经历了红绿。首轮远端守卫曾错误地把点击及其invalidate后下一观察重建的两帧请求合并按一帧计数；现逐帧验证相同上限及页码范围，未修改产品读取策略。
+
+当前验证：
+- 任务指定两文件 **773 passed，0 failed/error/skipped**：本文件新增回归入口 `test_wave9_tui_bg_watch_and_sticky_user_bar.py` 为56例，`test_tui_turn_completion_and_bg_watch.py` 为717例。
+- 额外12个相关TUI测试文件 **261 passed，0 failed/error/skipped**；与上一项去重合计 **1034 passed**，由JUnit XML程序汇总。
+- gpt-6-astra/high只读复核了内联关键实现及调用合同，未确认P1/P2；没有独立读全仓或跑测试。父级自行检查了真实分页器的排序、来源映射、四页边界与后台文件不变。
+- 全仓pytest、真实用户终端端到端、Linux/跨平台车道及极端并发帧切换未验证；未推送、合入或部署。
+
+复现与门禁（均在本工作树根目录）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_{view,view_model,reading_position,complete_detail,transcript,combinatorial,resource_lifetime,agent_navigation,clipboard,threading,terminal,prompt_toolkit_pipe}.py -q --tb=short
+ruff check agent_py_agent/agent/conversation/background_process_view.py agent_py_agent/cli/chat_parts agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py
 git diff --check db4d5de92..HEAD
@@ -351,6 +423,28 @@ Host adapter 的 payload 附 `_portal_principal`（Web 已认证身份上下文�
 cd /tmp/wt-wave9-a3
 python3 /Users/xiaoyezi/.my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff/build_plugin_package.py
 python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -q --tb=short
+
+原始证据保留于本树忽略目录 `.pytest_cache/w9b2r2-red.xml`、`w9b2r2-required.xml`、`w9b2r2-regression.xml`，不随功能提交。
+
+## 2026-10-28 Wave 9 B2：TUI后台瞬态刷新与上一条用户消息顶栏
+
+来源：完整阅读 `07-tasks/wave9-b2.md`（53行）及总体设计第2、3项。基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，工作树 `/tmp/wt-wave9-b2`，分支 `wave9-b2`。只改本树，不推送或部署，不运行已退役的代码尺寸脚本。
+
+- **目录观察**：原单次nofollow扫描、4096条门、逐文件stat和最老复核TTL保持；仅 `DIRECTORY_CHANGED_DURING_READ` 初读后最多再试3次，每次退避5ms。持续换代最终仍报告错误，不拿不完整旧扫描冒充成功。OSError诊断保留errno但不保留异常正文。
+- **空会话与范围**：reader和动态概要阶段均按严格原归属证据隔离其他线程坏记录；未知/冲突/非法归属继续失败关闭。本树没有任务卡中的 `inspect_session_background_processes` 或 `session_confirmed` 接口，沿真实 `list_background_processes` → TUI链路修复：owner级列表保留有效owner记录，TUI没有canonical thread时直接清观察，不读全owner。已有owner范围丢失立即清旧帧；未装配此观察能力、从未有帧的轻客户端仍静默跳过。
+- **瞬态兜底**：有效帧资格和连续失败计数绑定 `(owner_home, thread_id)`；全部为目录换代或可识别原子替换errno、且有同scope成功旧帧时，前2次静默保留，第三次告警。混合、权限、坏JSON及原因未知错误立即报告。成功才重置计数并清观察专用提示；scope变化和空新会话清资格，不消费通知或控制进程。
+- **独立顶栏**：用户角色取typed块，起始行取最终排版offset/完整原文origin；摘要净化、压空白并按Unicode字素簇和终端列宽截断。普通/详情Window各有独立header，正文行、搜索、选区与复制不插入导航文字。只选 `start_line < viewport_top`；左键释放跳到目标首行、锚点screen_row=0、关闭follow，并重新选择上一条。无目标时不占行；仅剩一行时优先正文。
+- **阅读与兼容**：顶栏显隐及终端高度变化前从最后实际帧捕获正文首行。保留Window原滚动/焦点入口和正文鼠标选择行为；完整原文继续显示原“用户”标题，不改成普通模式的 `❯`。
+
+新增 `test_wave9_tui_bg_watch_and_sticky_user_bar.py`：**51通过，0失败/错误/跳过**（`.pytest_cache/w9b2-required.xml`）。13个既有相关文件组合：**995通过，0失败/错误/跳过**（`.pytest_cache/w9b2-regression.xml`）。起始5文件基线为800通过；后来14条旧断言冲突不是“既有失败”，而是本次显式新合同的迁移：三个旧测试函数分别补canonical thread夹具、保留None线程独立坏记录诊断、要求预算内目录增长恢复后不漏新增行；超限、归属冲突、未知损坏、只读文件及按需日志断言保留，无新增skip/xfail。
+
+红绿证据保留在 `.pytest_cache/w9b2-*-red.xml`：目录、空会话、两次兜底、errno传递、20个顶栏入口/布局要求、owner范围丢失及概要阶段隔离均有实际失败后通过的观察。恢复计数测试初稿先遇缺属性，改用缺省值断言后重新确认缺失计数的真实失败；不把夹具错误当功能红例。新增负向保护和高度/最右列覆盖并非全部曾失败，不声称51项均为红例。
+
+复现（工作树根，实测Python 3.14.4，import origin已核对在本树）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_tui_view.py agent_py_agent/tests/test_tui_reading_position.py agent_py_agent/tests/test_tui_view_model.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py agent_py_agent/tests/test_tui_clipboard.py agent_py_agent/tests/test_tui_transcript.py agent_py_agent/tests/test_tui_terminal.py agent_py_agent/tests/test_tui_resource_lifetime.py agent_py_agent/tests/test_tui_threading.py agent_py_agent/tests/test_tui_combinatorial.py agent_py_agent/tests/test_tui_agent_navigation.py -q --tb=short
 python3 scripts/check_import_boundaries.py
 ruff check agent_py_agent scripts
 git diff --check
@@ -364,6 +458,8 @@ git diff --check
 交付指纹已更新到本文件顶部 Round 2 表；以下首轮行为和41例结果只记录当时版本，不代表并发改动后的整个门户已安全验收。
 
 限制：真实 SIEM/EDR/企业 SSO、A1/A2 宿主、另一台远端节点、浏览器 UI、跨机可达性和 Windows 未验证；MCP 进程组启动当前明确只支持 POSIX。连接器需真实适配器配置；本地 owner 读取硬限 5000 条，超限明确拒绝而非无声截断。YAML 是显式拒绝 alias/tag 等构造的安全子集。未知 daemon 或中断的安全 pending 操作需可信运维核实，不能自动当作完成。
+
+验证边界：屏幕/点击用真实prompt_toolkit Window、Screen及MouseHandlers和DummyOutput驱动，每次按框架规则递增render_counter；不是人工终端或真实模型/通道端到端。两个独立只读审阅仅看内联关键函数，未发现节选可确证的P1/P2；不是完整diff审计。首次跨会话材料读取不可用的审阅已取消，不算成功复核。原目录reader全链、真实并发压力、不同Python/操作系统及发布后用户终端仍未独立端到端验证。索引/点击间极端并发换帧是审阅提出的条件性风险，未证实为实际串源，不宣称压力竞态已排除。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 

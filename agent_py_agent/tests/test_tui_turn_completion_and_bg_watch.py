@@ -547,18 +547,18 @@ def test_watch_page_refreshes_same_removable_block():
     assert not root.store.snapshot().stable_blocks
 
 
-# LLM: 调用真实通知同步接缝读取临时 owner 记录；根页计数和观察页详情均保持文件不变。
-# 函数用途: 验证轮询将只读进程投影接入导航与日志。
+# LLM: Wave9新会话不再读取owner全量；夹具显式绑定canonical线程，原只读文件与按需日志断言保持。
+# 函数用途: 验证已绑定会话的轮询将只读进程投影接入导航与日志。
 def test_polling_connects_owner_records_and_only_reads_logs_when_watching(tmp_path):
     from types import SimpleNamespace
 
     from agent_py_agent.cli.chat_parts.tui_threading import _consume_background_notices
 
     home = tmp_path / "owner"
-    _session(home)
+    _session(home, thread_id="thread-one")
     root = TuiRuntime("poll")
     nav = TuiAgentNavigationState(root)
-    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home))
+    agent = SimpleNamespace(home_paths=SimpleNamespace(owner_home_dir=home), thread_id="thread-one")
     before = _files(tmp_path)
     assert _consume_background_notices(agent, "session", root, [None], set(), [0], nav)
     assert nav.snapshot().background_process_count == 1
@@ -1643,8 +1643,8 @@ def test_b1_cached_directory_does_not_freeze_selected_log_tail(tmp_path):
     assert detail["log_tail"] == ["new-tail"]
 
 
-# LLM: 坏schema仍是合法JSON，归属须在验证失败后可提取；顶层与全部scope位置同等处理。
-# 函数用途: 验证明确其它线程的坏记录只出现在无关诊断中，全owner观察仍报告失败。
+# LLM: 坏schema仍是合法JSON；Wave9空线程也隔离严格确认的其他线程，原六类位置与无关诊断不能丢失。
+# 函数用途: 验证明确其它线程的坏记录在指定及空线程观察中均保留独立诊断。
 @pytest.mark.parametrize("location", [None, "access_scope", "execution_scope", "completion_target", "metadata", "scope"])
 @pytest.mark.parametrize("key", ["thread_id", "conversation_id"])
 def test_b1_foreign_corrupt_record_is_isolated_at_every_scope_location(tmp_path, location, key):
@@ -1658,10 +1658,13 @@ def test_b1_foreign_corrupt_record_is_isolated_at_every_scope_location(tmp_path,
     assert scoped["projection_ok"] is True and scoped["errors"] == []
     assert scoped.get("unrelated_errors") == [{"session_id": "bg-corrupt", "error": "ValueError"}]
     assert scoped.get("unscoped_error_count") == 1
-    assert bg.list_background_processes(home)["projection_ok"] is False
+    empty_thread = bg.list_background_processes(home)
+    assert empty_thread["projection_ok"] is True and empty_thread["errors"] == []
+    assert empty_thread["unrelated_errors"] == scoped["unrelated_errors"]
+    assert empty_thread["unscoped_error_count"] == 1
 
 
-# LLM: 只有明确其它owner才隔离；当前线程或线程声明相互冲突的坏记录不得被历史年龄洗白。
+# LLM: 当前线程或冲突声明不得因年龄隔离；已明确跨owner优先保留双字段，不能被坏schema遮盖。
 # 函数用途: 验证归属冲突失败关闭及其它owner坏文件的隔离。
 @pytest.mark.parametrize("kind", ["current", "conflicting", "foreign_owner", "foreign_nested_owner"])
 def test_b1_corrupt_scope_classification_preserves_current_thread_errors(tmp_path, kind):
@@ -1679,7 +1682,10 @@ def test_b1_corrupt_scope_classification_preserves_current_thread_errors(tmp_pat
     os.utime(path, (old, old))
     result = bg.list_background_processes(home, thread_id="thread-one")
     assert result["projection_ok"] is False
-    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    expected = {"session_id": "bg-corrupt", "error": "ValueError"}
+    if kind.startswith("foreign"):
+        expected.update(error="_OwnerMismatchError", error_code="OWNER_MISMATCH", reason_code="OWNER_MISMATCH")
+    assert result["errors"] == [expected]
     assert result["unrelated_errors"] == []
 
 
@@ -1976,7 +1982,7 @@ def test_b1_deep_json_does_not_abort_other_records(tmp_path, kind):
     assert path.read_bytes() == before
 
 
-# LLM: 外owner声明不得压过当前线程或自相冲突的归属，坏记录不能猜为无关。
+# LLM: 外owner声明不得将当前/冲突线程洗成无关；明确owner拒绝优先保留双字段，不降为普通schema/线程错误。
 # 函数用途: 锁定当前线程与外owner声明冲突时的失败关闭。
 def test_b1_foreign_owner_corruption_with_current_thread_fails_closed(tmp_path):
     home = tmp_path / "owner"
@@ -1986,10 +1992,13 @@ def test_b1_foreign_owner_corruption_with_current_thread_fails_closed(tmp_path):
     (root / "bg-corrupt.json").write_text(json.dumps(payload))
     result = bg.list_background_processes(home, thread_id="thread-one")
     assert result["projection_ok"] is False
-    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "_OwnerMismatchError",
+                                "error_code": "OWNER_MISMATCH", "reason_code": "OWNER_MISMATCH"}]
     assert result["unrelated_errors"] == []
 
 
+# LLM: 仍拒绝所有原非法归属且不隔离；仅owner非法值按第四轮合同增加专用双字段，其余字段保持原诊断。
+# 函数用途: 核对旧schema坏记录的严格隔离边界与精确owner错误分类。
 @pytest.mark.parametrize("location", [None, "metadata"])
 @pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
 @pytest.mark.parametrize("value", [None, True, 23, [], {}, "", " \t"])
@@ -2005,7 +2014,10 @@ def test_b1r2_invalid_attribution_never_isolated(tmp_path, location, field, valu
     os.utime(path, (old, old))
     result = bg.list_background_processes(home, thread_id="thread-one")
     assert result["projection_ok"] is False
-    assert result["errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    expected = {"session_id": "bg-corrupt", "error": "ValueError"}
+    if field == "owner_home" and value is not None and value != "":
+        expected.update(error="_OwnerMismatchError", error_code="OWNER_MISMATCH", reason_code="OWNER_MISMATCH")
+    assert result["errors"] == [expected]
     assert not result["unrelated_errors"]
 
 
@@ -2023,6 +2035,8 @@ def test_b1r2_conflicting_foreign_declarations_fail_closed(tmp_path, field):
     assert not result["unrelated_errors"]
 
 
+# LLM: 明确其它owner且未绑定当前线程的隔离规则不变；跨owner拒绝双字段仍保留，不能借新增分类扩大本线程错误。
+# 函数用途: 确认不相关owner诊断仍被隔离，且没有丢失明确错误分类。
 @pytest.mark.parametrize("location", [None, "completion_target"])
 def test_b1r2_consistent_foreign_owner_without_current_thread_isolated(tmp_path, location):
     home = tmp_path / "owner"
@@ -2033,7 +2047,8 @@ def test_b1r2_consistent_foreign_owner_without_current_thread_isolated(tmp_path,
     (root / "bg-corrupt.json").write_text(json.dumps(payload))
     result = bg.list_background_processes(home, thread_id="thread-one")
     assert result["projection_ok"] is True and not result["errors"]
-    assert result["unrelated_errors"] == [{"session_id": "bg-corrupt", "error": "ValueError"}]
+    assert result["unrelated_errors"] == [{"session_id": "bg-corrupt", "error": "_OwnerMismatchError",
+                                          "error_code": "OWNER_MISMATCH", "reason_code": "OWNER_MISMATCH"}]
 
 
 def test_b1r2_error_snapshot_preserves_ids_without_copying_body():
@@ -2167,8 +2182,8 @@ def test_b1r2_refreshing_all_files_does_not_renew_directory_deadline(tmp_path, m
     assert len(scans) == 2 and len(reads) == 3
 
 
-# LLM: 缩小同一有界常量以触发读取中换代；新名称只补单位，完整性断言不变。
-# 函数用途: 核对扫描期间目录增长不会被报告为完整观察。
+# LLM: Wave9允许单次换代后重新扫描；预算内恢复必须包含新记录，缩小样本超限仍失败关闭。
+# 函数用途: 核对扫描期间目录增长恢复不漏行，超限不被重试洗白。
 @pytest.mark.parametrize("initial_count", [1, 2])
 def test_b1r2_directory_growth_during_scan_cannot_claim_complete(tmp_path, monkeypatch, initial_count):
     home = tmp_path / "owner"
@@ -2185,9 +2200,13 @@ def test_b1r2_directory_growth_during_scan_cannot_claim_complete(tmp_path, monke
 
     monkeypatch.setattr(bg, "_directory_record_names", names)
     result = bg.list_background_processes(home, thread_id="thread-one")
+    if initial_count == 1:
+        assert result["projection_ok"] is True and result["total"] == 2
+        assert {row["session_id"] for row in result["items"]} == {"bg-cache-0", "bg-added"}
+        assert not result["errors"] and not result["unrelated_errors"]
+        return
     assert result["projection_ok"] is False and result["total"] == 0
-    code = "DIRECTORY_RECORD_LIMIT_EXCEEDED" if initial_count == 2 else "DIRECTORY_CHANGED_DURING_READ"
-    assert result["errors"][0].get("error_code") == code
+    assert result["errors"][0].get("error_code") == "DIRECTORY_RECORD_LIMIT_EXCEEDED"
     assert not result["unrelated_errors"] and not bg._DIRECTORY_CACHE
 
 
@@ -2219,6 +2238,8 @@ def _b1r3_payload(home, version):
     return payload
 
 
+# LLM: 三种版本均保留原拒绝、文件不变与ValueError兼容断言；owner字段另须携带明确拒绝双字段。
+# 函数用途: 验证全量归属反例及owner分类不会误标其它字段。
 @pytest.mark.parametrize("version", ["schemaless", "legacy", "managed"])
 @pytest.mark.parametrize("location", [None, "metadata"])
 @pytest.mark.parametrize("field", ["thread_id", "conversation_id", "owner_home", "task_id", "request_id"])
@@ -2234,7 +2255,10 @@ def test_b1r3_normal_parse_rejects_invalid_attribution(tmp_path, version, locati
     before = _files(home)
     result = bg.list_background_processes(home, thread_id="thread-one")
     assert result["projection_ok"] is False
-    assert result["errors"] == [{"session_id": path.stem, "error": "ValueError"}]
+    expected = {"session_id": path.stem, "error": "ValueError"}
+    if field == "owner_home":
+        expected.update(error="_OwnerMismatchError", error_code="OWNER_MISMATCH", reason_code="OWNER_MISMATCH")
+    assert result["errors"] == [expected]
     assert not result["unrelated_errors"]
     assert result["total"] == 1 and _files(home) == before
     with pytest.raises(ValueError, match="^invalid_session_attribution$"):

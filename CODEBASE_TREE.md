@@ -67,6 +67,32 @@ agent_py_agent/tests/
 - `host_broker_call` / `remote_push_sender` 是受信可插拔适配点；前者的 `_portal_principal` 只描述认证后的 Web 身份，不授予原生 Host 权限。A1/A2 接收端与闭合合同映射由 Stage 4 集成实证，本轮不宣称已完成跨分支生产联调。
 - 测试源码默认定位上述外部目录，可用 `MY_AGENT_PORTAL_SOURCE_DIR` 指向集成者保存的等价 handoff 目录。最终 ZIP 的内含服务/构建源码已与交付文件逐字节核对，另有无 Host Python 包的新解释器 MCP/HTTP 实测。
 
+## 2026-10-28 Wave 9 B2 四轮：真实owner拒绝贯通
+
+原 `agent/conversation/background_process_view.py` 内的owner校验使用稳定双字段的ValueError子类，静态快照与动态概要诊断保留分类；明确owner拒绝优先于坏schema或其它结构错误。原 `cli/chat_parts/tui_threading.py` 共用字典/异常属性硬拒绝判断，列表与详情均撤销旧帧。没有新增生产模块、进程控制或并行业务状态。
+
+`tests/test_tui_background_observation_resilience.py` 增加真实JSON列表/详情竞态及分类守卫；原归属矩阵保持拒绝与隔离断言，精确区分owner诊断。`tests/test_wave9_tui_observation_and_sticky_bar.py`、`tests/test_tui_sticky_user_turn_jump.py`仅为本轮指定命令显式复用原测试/夹具的兼容入口。验证和限制见 `TESTS.md` 四轮节。
+
+## 2026-10-28 Wave 9 B2 三轮：后台观察失败关闭与导航优先级
+
+`agent/conversation/background_process_view.py` 的原单次安全扫描由四次有界尝试包裹，区分首次缺目录与扫描后消失，权限拒绝立即返回结构化错误；`cli/chat_parts/tui_threading.py` 分类同scope瞬态宽限及硬拒绝清帧；`tui_view.py` 的End覆盖待恢复锚点。没有新增生产模块或第二份业务状态。
+
+新增 `tests/test_tui_background_observation_resilience.py`（目录/瞬态/硬拒绝）、`tests/test_tui_sticky_user_turn_bar.py`（点击后未重绘导航）及兼容入口 `tests/test_tui.py`（显式重导出现有 `test_tui_view.py` 全部真实测试）。原Wave9综合回归保留，权限一例迁移到结构化拒绝合同；三轮验证与未验证范围见 `TESTS.md`。
+
+## 2026-10-28 Wave 9 B2 二轮：完整原文跨窗口用户索引
+
+`cli/chat_parts/tui_view.py` 在现有provider内增加按冻结块身份/宽度复用的轻量用户块索引：完整原文窗口外的用户仍有块顺序和摘要，点击通过现有稀疏页表聚焦其来源首行，继续只排版附近至多四页。`tui_view_model.py` 的 `TuiUserTurnLine` 明确区分可空的窗口物理行和冻结块序，不引入第二份业务状态。
+
+同一 `tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py` 新增千行长回复跨窗口导航、有/无重绘连续回跳、冻结缓存与十万页稀疏读取守卫。后台扫描/瞬态兜底模块本轮未改，无新增生产模块；验证记录见 `TESTS.md` 本日二轮节。
+
+## 2026-10-28 Wave 9 B2：TUI后台观察与用户消息顶栏
+
+```text
+`-- agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py # 目录重试、空会话/瞬态兜底、用户行索引、独立顶栏布局/连续点击与复制隔离回归
+```
+
+实现复用 `agent/conversation/background_process_view.py` 与 `cli/chat_parts/tui_threading.py` 的原只读链路；用户行索引类型在 `tui_view_model.py`，实际索引及正文外header Window在 `tui_view.py`，顶部阅读锚点在 `tui_reading.py`。无新增生产模块、外部接口或第二份业务状态；验证入口和未验证边界见TESTS.md本日Wave9 B2节。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text
