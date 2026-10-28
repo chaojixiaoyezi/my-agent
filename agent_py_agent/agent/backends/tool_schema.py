@@ -16,29 +16,46 @@ from ..contracts.tool_input_schema import EXCLUSIVE_ARGUMENT_GROUPS_KEY
 if TYPE_CHECKING:
     from ..tooling.models import ToolModelSpec
 
-_STRIPPED_SCHEMA_CACHE: dict[str, dict[str, Any]] = {}
+_STRIPPED_SCHEMA_CACHE: dict[Any, dict[str, Any]] = {}
 _STRIPPED_SCHEMA_CACHE_LOCK = threading.Lock()
 _STRIPPED_SCHEMA_CACHE_MAX_ENTRIES = 1024
 
 
-# LLM: 先assert再查hash缓存；miss还须核副本hash，防校验后并发篡改污染旧hash槽，返回再深拷贝。
-# 函数用途: 复用宿主扩展剥离结果，保持每次返回可独立修改且不污染canonical或进程缓存。
+# LLM: 递归提取剥离宿主扩展后的字典键顺序指纹；同内容不同键序不能共用同一缓存槽，否则破坏工具参数顺序确定性。
+# 函数用途: 计算工具输入 Schema 的各级字典键顺序签名，与内容 hash 一起作为缓存键。
+def _schema_key_order(value: Any) -> Any:
+    if isinstance(value, dict):
+        return tuple(
+            (key, _schema_key_order(child))
+            for key, child in value.items()
+            if key != EXCLUSIVE_ARGUMENT_GROUPS_KEY
+        )
+    if isinstance(value, list):
+        return tuple(_schema_key_order(item) for item in value)
+    return None
+
+
+# LLM: 先assert再查(hash,键序)LRU缓存；miss还须核副本hash与键序，防校验后并发篡改污染旧槽，返回再深拷贝。
+# 函数用途: 复用宿主扩展剥离结果并保持原始属性键顺序，每次返回可独立修改且不污染canonical或进程缓存。
 def tool_model_spec_to_input_schema(spec: ToolModelSpec) -> dict[str, Any]:
     """Return the provider-safe snapshotted schema after verifying its hash."""
 
     spec.assert_schema_hash()
+    cache_key = (spec.schema_hash, _schema_key_order(spec.input_schema))
     with _STRIPPED_SCHEMA_CACHE_LOCK:
-        cached = _STRIPPED_SCHEMA_CACHE.get(spec.schema_hash)
-        if cached is None:
+        cached = _STRIPPED_SCHEMA_CACHE.pop(cache_key, None)
+        if cached is not None:
+            _STRIPPED_SCHEMA_CACHE[cache_key] = cached
+        else:
             cached = deepcopy(spec.input_schema)
             from ..tooling.models import tool_schema_hash
 
-            if tool_schema_hash(cached) != spec.schema_hash:
+            if tool_schema_hash(cached) != spec.schema_hash or _schema_key_order(cached) != cache_key[1]:
                 raise ValueError(f"tool input_schema mutated during provider snapshot: {spec.name}")
             _strip_host_schema_extensions(cached)
-            if len(_STRIPPED_SCHEMA_CACHE) >= _STRIPPED_SCHEMA_CACHE_MAX_ENTRIES:
+            while len(_STRIPPED_SCHEMA_CACHE) >= _STRIPPED_SCHEMA_CACHE_MAX_ENTRIES:
                 _STRIPPED_SCHEMA_CACHE.pop(next(iter(_STRIPPED_SCHEMA_CACHE)))
-            _STRIPPED_SCHEMA_CACHE[spec.schema_hash] = cached
+            _STRIPPED_SCHEMA_CACHE[cache_key] = cached
     return deepcopy(cached)
 
 

@@ -359,11 +359,43 @@ def test_schema_cache_is_content_addressed_and_returns_isolated_copies(monkeypat
     second = tool_schema.tool_model_spec_to_input_schema(_spec("another"))
     assert second == expected and first != second
     assert strip.call_count == 1
-    assert spec.schema_hash in tool_schema._STRIPPED_SCHEMA_CACHE
+    assert any(key[0] == spec.schema_hash for key in tool_schema._STRIPPED_SCHEMA_CACHE)
     assert EXCLUSIVE_ARGUMENT_GROUPS_KEY not in second["properties"]["arg"]
     assert EXCLUSIVE_ARGUMENT_GROUPS_KEY in spec.input_schema["properties"]["arg"]
     assert tool_schema.tool_model_spec_to_input_schema(_spec(description="new")) != second
     assert strip.call_count == 2
+
+
+# LLM: 同hash但属性插入顺序不同的Schema不得互相污染；命中后还须更新LRU顺序。
+# 函数用途: 防止sort_keys=True的schema_hash吞掉属性键顺序确定性。
+def test_schema_cache_preserves_property_insertion_order_and_lru():
+    spec_ab = ToolModelSpec(
+        name="ab",
+        description="工具",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "first": {"type": "string"},
+                "second": {"type": "string"},
+            },
+        },
+    )
+    spec_ba = ToolModelSpec(
+        name="ba",
+        description="工具",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "second": {"type": "string"},
+                "first": {"type": "string"},
+            },
+        },
+    )
+    assert spec_ab.schema_hash == spec_ba.schema_hash
+    out_ab = tool_schema.tool_model_spec_to_input_schema(spec_ab)
+    out_ba = tool_schema.tool_model_spec_to_input_schema(spec_ba)
+    assert list(out_ab["properties"].keys()) == ["first", "second"]
+    assert list(out_ba["properties"].keys()) == ["second", "first"]
 
 
 # LLM: 先填缓存再改canonical，仍须由原完整hash断言拒绝。
