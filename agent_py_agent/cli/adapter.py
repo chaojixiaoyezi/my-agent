@@ -1,4 +1,4 @@
-# LLM: 适配器生命周期复用原 Agent 数据根，启动通道前核对 G3 凭据；开关开且凭据不可读时拒绝启动，开关关时记一次降级 warning 后继续。
+# LLM: 适配器轻上下文复用原owner数据根，启动通道前沿原入口核对G3凭据；保持开关拒绝/降级策略，不构造业务Agent。
 # 秘密只留宿主请求头，不能传给 daemon、日志或状态。
 # 模块用途: 运行文件和 IM 适配器，接线实际短窗口与引用附件开关；凭据不可用时按 G2b 降级或拒绝无凭据客户端。
 from __future__ import annotations
@@ -44,7 +44,7 @@ from .adapter_daemon import (
     print_daemon_adapter_status,
     stop_adapter_daemon,
 )
-from .common import make_agent
+from .common import make_agent, make_lightweight_cli_agent_context
 from .gateway_client import ensure_gateway_started
 from .models import AdapterOptions
 
@@ -71,12 +71,15 @@ def cmd_adapter(args) -> int:
     return 2
 
 
+# LLM: 原配置及owner路径经轻上下文解析一次；传递同一Gateway路径，不构造本地业务Agent或预检TUI凭据。
+# 函数用途: 文件适配器只解析一次管理上下文，不重复定位Gateway收件箱。
 def cmd_adapter_file(args) -> int:
-    agent = make_agent(args)
+    args._defer_mcp_connect = True
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
     apaths = _resolve_adapter_paths(agent, options)
-    gateway_code = ensure_gateway_started(args) if not options.no_start_gateway else _ensure_gateway_available(options, gpaths)
+    gateway_code = ensure_gateway_started(args, paths=gpaths) if not options.no_start_gateway else _ensure_gateway_available(options, gpaths)
     if gateway_code:
         return gateway_code
 
@@ -171,8 +174,11 @@ def _print_file_adapter_summary(total: int, apaths: AdapterPaths, gpaths) -> Non
     )
 
 
+# LLM: 轻上下文保留原owner/config/runtime路径，原通道凭据检查及生命周期不变，不构造本地业务Agent。
+# 函数用途: 解析管理上下文后按原生命周期启动通道适配器。
 def cmd_adapter_start(args) -> int:
-    agent = make_agent(args)
+    args._defer_mcp_connect = True
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
     gpaths.root.mkdir(parents=True, exist_ok=True)
@@ -432,8 +438,11 @@ def _write_adapter_state_guarded(gpaths, state: str, extra: dict | None = None) 
     return True
 
 
+# LLM: 仅解析轻上下文及原进程路径，不初始化Agent；daemon与foreground状态选择保持。
+# 函数用途: 沿原规范路径查询适配器状态，不启动工具或模型服务。
 def cmd_adapter_status(args) -> int:
-    agent = make_agent(args)
+    args._defer_mcp_connect = True
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
     pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid
@@ -456,8 +465,11 @@ def _print_foreground_adapter_status() -> int:
     return 0
 
 
+# LLM: 停止仍按原精确进程选择及daemon/foreground收尾执行，轻上下文不创建业务Agent。
+# 函数用途: 停止所选适配器，保持原停止归属及收尾。
 def cmd_adapter_stop(args) -> int:
-    agent = make_agent(args)
+    args._defer_mcp_connect = True
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     options = _adapter_options_from_args(args)
     gpaths = gateway_paths(agent)
     pid_file = options.pid_file if options.pid_file else gpaths.adapter_pid

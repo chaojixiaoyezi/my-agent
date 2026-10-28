@@ -1,11 +1,12 @@
 # LLM: 本模块是Gateway ask共用提交合同；正式本地调用显式交HTTP callable，host owner只由宿主准备。受控内部队列不作网络失败fallback；导入不加载worker/Agent/模型。
-# 模块用途: 统一请求快照、提交前显示登记与原受控队列写入；本地CLI/TUI经认证HTTP，保留同ID观察未知结果。
+# 模块用途: 保存轻量管理上下文并统一请求快照、显示登记与原队列写入；本地CLI/TUI经认证HTTP，保留同ID观察未知结果。
 
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,34 @@ from .paths import GatewayPaths
 
 if TYPE_CHECKING:
     from ..core import SimpleAgent
+
+
+# LLM: 构造时仅承载配置/owner/路径，无模型、工具、记忆及凭据预检；原CLI日志首次使用才缓存派生索引，workspace为原有效工作区。
+# 类用途: 为管理客户端保留服务定位信息，不初始化第二个完整智能体。
+@dataclass(frozen=True, repr=False)
+class GatewayClientContext:
+    config: object
+    root: Path
+    workspace_roots: list[Path]
+    home_paths: object
+    workspace: Path
+    runtime_paths: dict[str, Path]
+
+    # LLM: 沿原路径函数派生服务地址，不创建目录或以路径授予执行权限。
+    # 函数用途: 返回管理上下文对应的规范Gateway路径。
+    @property
+    def paths(self) -> GatewayPaths:
+        from .paths import gateway_paths
+
+        return gateway_paths(self)
+
+    # LLM: 只有原日志调用才走同一owner LocalStore构造叶，保持路径/FTS与原派生镜像副作用，不创建记忆、策展或执行服务。
+    # 函数用途: 按需缓存原CLI索引库，避免超时和显式事件镜像丢失记录；普通路径解析不建库。
+    @cached_property
+    def local_store(self):
+        from ..memory_store.owner_resources import build_owner_local_store
+
+        return build_owner_local_store(self.config, self.runtime_paths)
 
 
 # LLM: GatewayAskExecutionOptions is the immutable, transport-neutral execution option set for one
@@ -296,6 +325,7 @@ def _absolute_workspace_path(value: object) -> str:
 __all__ = [
     "GatewayAskExecutionOptions",
     "GatewayAskParams",
+    "GatewayClientContext",
     "gateway_request_workspace_payload",
     "submit_gateway_ask",
 ]

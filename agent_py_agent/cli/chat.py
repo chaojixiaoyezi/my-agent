@@ -249,10 +249,11 @@ def _ensure_chat_memory_limit(args) -> None:
 
 # LLM: Only canonical chat/local-agent bindings can identify a recoverable session; read failures are fail-closed and never fall back to request text.
 # 函数用途: 从当前 Agent 的持久会话库按精确通道绑定读取 thread。
-def _find_session_recovery_thread(agent, session_id: str):
+def _find_session_recovery_thread(agent, session_id: str, *, store=None):
     from ..agent.conversation.channels import LOCAL_AGENT_USER_ID, LOCAL_CHAT_CHANNEL
 
-    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        store = getattr(agent, "conversation_store", None)
     resolver = getattr(getattr(store, "threads", None), "resolve_report", None)
     if not callable(resolver):
         return None
@@ -336,13 +337,27 @@ def _audit_session_registration_restore(agent, session_id: str, thread) -> bool:
     return True
 
 
-# LLM: Explicit resume alone may rebuild the owner-local registry projection, and only after the canonical thread and audit checks pass.
+# LLM: Missing registration alone lazily opens the same resolved conversation root read-only; canonical owner/binding/audit checks still precede registry writes.
 # 函数用途: 用同一 owner 的持久 Gateway thread 恢复丢失的本地会话登记。
 def _restore_missing_session_registration(agent, manager, session_id: str) -> bool:
     from ..agent.conversation.channels import LOCAL_CHAT_CHANNEL
     from ..agent.session.models import Session
 
-    thread = _find_session_recovery_thread(agent, session_id)
+    store = getattr(agent, "conversation_store", None)
+    if store is None:
+        root = getattr(agent, "root", None)
+        home = getattr(agent, "home_paths", None)
+        if root is None or home is None:
+            return False
+        from ..agent.conversation.store import ConversationStore
+        from ..agent.user_space.runtime_paths import resolve_runtime_paths_for_agent
+
+        try:
+            paths = resolve_runtime_paths_for_agent(agent.config, root, home).paths
+            store = ConversationStore(root=paths["conversation_workspace"], initialize=False)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
+    thread = _find_session_recovery_thread(agent, session_id, store=store)
     if thread is None or not _session_thread_matches_owner(agent, session_id, thread):
         return False
     if manager.session_exists(session_id):
@@ -369,10 +384,28 @@ def _restore_missing_session_registration(agent, manager, session_id: str) -> bo
     return True
 
 
+# LLM: Both chat/resume decide the route before construction and before handoff redirects terminal output; MCP policy stays at the owning entrypoint.
+# 函数用途: 用同一判据选择轻量Gateway界面，不改变普通direct聊天的构造策略。
+def _select_chat_client_mode(args) -> tuple[bool, bool]:
+    use_gateway = bool(getattr(args, "gateway", False))
+    use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
+    args._gateway_client_mode = bool(use_gateway and use_tui)
+    return use_gateway, use_tui
+
+
+# LLM: Only the temporary precheck owns these clients; thin clients have no tools and are never promoted to a full agent for cleanup.
+# 函数用途: 关闭临时resume预检代理的MCP，避免交接或拒绝恢复时泄漏子进程。
+def _close_resume_precheck(agent) -> None:
+    close = getattr(getattr(agent, "tools", None), "close_mcp_clients", None)
+    if callable(close):
+        close()
+
+
 # LLM: 显式 resume <session_id> 只连接指定会话(owner seq1943 语义③ +
 # 双席 seq1958 fail-closed): session 不存在/无效 → 报错退出(非 0), 绝不
 # 静默创建新会话或回退到其他历史；仅同 owner 的精确 Gateway thread 可触发登记恢复。session/task/run/attempt 四层保持分开——
 # 本命令只决定"接哪条会话", 会话下的任务续跑仍由共享权威(runtime.db)驱动。
+# 函数用途: 轻量预检精确会话，收尾并恢复调用者MCP策略，交接聊天前释放预检代理和manager。
 def cmd_resume(args) -> int:
     from ..agent.session.manager import SessionManager
     from .chat_parts.tui_upgrade_follow import HANDOFF_ENV
@@ -388,33 +421,48 @@ def cmd_resume(args) -> int:
             file=sys.stderr,
         )
         return 3
+    defer_configured = hasattr(args, "_defer_mcp_connect")
+    original_defer = getattr(args, "_defer_mcp_connect", None)
+    _select_chat_client_mode(args)
+    if not args._gateway_client_mode:
+        args._defer_mcp_connect = True
+    agent = None
     try:
-        agent = make_agent(args)
-        manager = SessionManager(agent.config)
-    except Exception as exc:  # noqa: BLE001 初始化失败 fail-closed
-        print(f"初始化失败: {exc}", file=sys.stderr)
-        return 3
-    if not manager.session_exists(session_id):
-        if not _restore_missing_session_registration(agent, manager, session_id):
+        try:
+            agent = make_agent(args)
+            manager = SessionManager(agent.config)
+        except Exception as exc:  # noqa: BLE001 初始化失败 fail-closed
+            print(f"初始化失败: {exc}", file=sys.stderr)
+            return 3
+        if not manager.session_exists(session_id):
+            if not _restore_missing_session_registration(agent, manager, session_id):
+                print(
+                    f"会话 {session_id} 不存在; resume 只连接已存在的会话"
+                    f"(用 my-agent chat 创建新会话)",
+                    file=sys.stderr,
+                )
+                return 3
+        # Session归属仍由原user_id校验，不因轻量客户端或恢复登记而放宽。
+        current_user = str(getattr(agent.config, "user_id", "") or "")
+        session = manager.load_session(session_id)
+        if session is not None and session.user_id and current_user \
+                and session.user_id != current_user:
             print(
-                f"会话 {session_id} 不存在; resume 只连接已存在的会话"
-                f"(用 my-agent chat 创建新会话)",
+                f"会话 {session_id} 属于其他用户({session.user_id}), 无权恢复",
                 file=sys.stderr,
             )
             return 3
-    # 跨用户负例(双席 seq1966): session 归属校验——session 的 user_id 与
-    # 当前用户不符 → fail-closed 拒绝(拿到别人 session_id 也不能恢复)。
-    current_user = str(getattr(agent.config, "user_id", "") or "")
-    session = manager.load_session(session_id)
-    if session is not None and session.user_id and current_user \
-            and session.user_id != current_user:
-        print(
-            f"会话 {session_id} 属于其他用户({session.user_id}), 无权恢复",
-            file=sys.stderr,
-        )
-        return 3
-    # 存在且归属匹配: 复用 chat 流程——_setup_session 会 load + touch 恢复
-    # 该会话, 不会新建。make_agent 的重复构建是 CLI 单次启动成本, 可接受。
+    finally:
+        try:
+            _close_resume_precheck(agent)
+        finally:
+            if defer_configured:
+                args._defer_mcp_connect = original_defer
+            elif hasattr(args, "_defer_mcp_connect"):
+                del args._defer_mcp_connect
+    # cmd_chat整个TUI生命周期内resume栈帧仍在，不能把预检对象留在该帧。
+    del agent
+    del manager
     return cmd_chat(args)
 
 
@@ -432,15 +480,15 @@ def cmd_chat(args) -> int:
     handoff = adopt_handoff()
     if handoff.child and not str(getattr(args, "session_id", "") or "").strip():
         args.session_id = handoff.session_id
-    use_gateway = bool(args.gateway)
-    use_tui = _has_prompt_toolkit() and not bool(getattr(args, "plain", False))
+    use_gateway, use_tui = _select_chat_client_mode(args)
+    if use_gateway and not use_tui:
+        args._defer_mcp_connect = True
     if handoff.child:
         # 先用真实 stdout 判断完是不是终端，再暂存启动输出（旧画面还在屏幕上）；不能用 TUI 就立刻把终端还给 shell。
         if use_tui:
             hold_setup_output()
         else:
             drop_handoff_screen()
-    args._gateway_client_mode = bool(use_gateway and use_tui)
     agent = make_agent(args)
     _ensure_chat_memory_limit(args)
     paths = gateway_paths(agent)

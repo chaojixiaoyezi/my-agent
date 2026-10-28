@@ -39,7 +39,7 @@ from ..agent.gateway_parts.response_renderer import (
     read_gateway_terminal_response_file_when_ready,
 )
 from .chat import cmd_chat
-from .common import make_agent, resume_context_override
+from .common import make_agent, make_lightweight_cli_agent_context, resume_context_override
 from .gateway_process import cmd_gateway_start
 from .thinking_spinner import ThinkingSpinner
 
@@ -90,10 +90,19 @@ def cmd_gateway(args) -> int:
     return 2
 
 
-def ensure_gateway_started(args) -> int:
-
-    agent = make_agent(args)
-    paths = gateway_paths(agent)
+# LLM: 显式paths原样复用；缺省仅解析轻上下文，原factory注入仍保留并在退出时关闭其资源。
+# 函数用途: 不创建完整Agent地确认Gateway启动，保持原存活观察及错误返回。
+def ensure_gateway_started(args, paths=None) -> int:
+    if paths is None:
+        args._defer_mcp_connect = True
+        agent = make_lightweight_cli_agent_context(args, factory=make_agent)
+        try:
+            paths = gateway_paths(agent)
+        finally:
+            close = getattr(getattr(agent, "tools", None), "close_mcp_clients", None)
+            if callable(close):
+                close()
+        del agent, close
     pid, alive = gateway_running(paths)
     if alive:
         return 0
@@ -326,9 +335,11 @@ def _gateway_ask_context(args, agent, paths, submitted: GatewaySubmittedAsk) -> 
     )
 
 
+# LLM: 轻上下文保留原owner/path/HTTP认证与未知回执语义，不构造模型、工具或业务存储。
+# 函数用途: 按原协议提交并观察Gateway请求，只在服务端执行真实任务。
 def cmd_gateway_ask(args) -> int:
-
-    agent = make_agent(args)
+    args._defer_mcp_connect = True
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
     pid, alive = wait_for_gateway_running(
         paths,
@@ -360,12 +371,11 @@ def cmd_gateway_ask(args) -> int:
     )
 
 
-# LLM: CLI result reads the canonical terminal envelope. responses/*.json is only a projection and
-# cannot authorize, complete, or replace a request.
-# 函数用途: 按请求 ID 显示已封存的 Gateway 最终结果。
+# LLM: 轻上下文只定位canonical终态；responses投影不能授权、完成或替代请求，不初始化完整Agent。
+# 函数用途: 按请求ID只读显示已封存的Gateway最终结果。
 def cmd_gateway_result(args) -> int:
-
-    agent = make_agent(args)
+    args._defer_mcp_connect = True
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
     terminal_path = paths.terminal / f"{args.request_id}.json"
     payload = read_gateway_terminal_response_file(

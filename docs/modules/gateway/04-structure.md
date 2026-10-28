@@ -1,3 +1,11 @@
+## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
+
+`cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。
+
+`gateway_client` 的ensure/ask/result、adapter的file/start/status/stop、Gateway进程管理命令和supervisor管理命令改用轻上下文。显式paths保持对象原样传递，显式替换的原工厂仍是注入边界；真实Gateway执行、supervisor run及direct/plain聊天组合根不变。`common.make_agent` 只在真正构造时导入core，旧构造类型的显式访问按需导入；`gateway_loops` 只作类型注解的Agent导入移入 `TYPE_CHECKING`，不改变循环、调度、执行或收尾函数。
+
+路径、工厂兼容、冷进程和日志组件回归见 [TESTS](../../../TESTS.md)。这里不表示生产Gateway、真实TUI/IM、跨平台或全仓已通过，也不改变owner权限、认证、拓扑和停止协议。
+
 ## 2026-10-27 CI C8 & Linux 工作区边界结构
 
 `conversation/background_tool_policy.py`只折叠首轮重工具；`agent_core/compact_request_recovery.py::_restore_optional_preflight`在原typed quota判定后拒绝恢复业务调用。`conversation/task_promotion.py`在跨目录切走时结束旧代为interrupted，返回后沿原继任链与CAS分配新代；`cli/chat_parts/tui_view_model.py::_align_history_timing`已对齐时不重分配显示槽位。`gateway_parts/workspace_scope.py`、`cli/workspace_resolution.py` 与 `cli/chat_client_context.py` 对齐 `CAP-DIR` 规则，`local/main` 在 `workspace-write`/`full-access` 下允许外部安全项目根，在 `restricted`/`workspace-only` 下仅允许 `owner_home` 内目录。没有增加状态源、工具、配置或文件；计时、消息回执、neutral退避仍各读原事实源。测试与验收边界见[TESTS](../../../TESTS.md)。
