@@ -23,7 +23,7 @@ my-agent --help
 |:---:|------|--------|:---:|
 | 1 | **本文件** (ONBOARDING.md) | 全局地图 | 5 min |
 | 2 | [AGENTS.md](AGENTS.md) | LLM 开发者的行为规范：语言、注释、配置、自学习约束 | 10 min |
-| 3 | [docs/development/DEVELOPMENT_RULES.md](docs/development/DEVELOPMENT_RULES.md) | 编码规则：导入纪律、命名、尺寸限制、写入边界 | 10 min |
+| 3 | [docs/development/DEVELOPMENT_RULES.md](docs/development/DEVELOPMENT_RULES.md) | 编码规则：导入纪律、命名、职责划分、写入边界 | 10 min |
 | 4 | [docs/architecture/BOUNDARY_RULES.md](docs/architecture/BOUNDARY_RULES.md) | 分层导入矩阵：谁能导入谁、禁止模式 | 5 min |
 | 5 | [docs/architecture/MODULE_OWNERSHIP.md](docs/architecture/MODULE_OWNERSHIP.md) | 每个模块的职责和状态：新增代码放哪里 | 查表 |
 
@@ -40,8 +40,11 @@ python3 -m pytest -q -m "not slow and not e2e" --tb=short
 # 架构护栏
 python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q
 
-# 代码规模检查
-python3 scripts/check_code_size.py --mode warn
+# 导入与职责边界检查
+python3 scripts/check_import_boundaries.py --json
+
+# 文档同步（填写本轮实际基线提交）
+python3 scripts/check_doc_sync.py --base <本轮实际基线提交>
 
 # 脏文件检查
 python3 scripts/check_clean_package.py .
@@ -106,8 +109,8 @@ my-agent/
 
 1. **不许 `import *`** — 每个 import 必须写明符号名
 2. **不许新文件叫 `utils.py` / `common.py` / `helpers.py`** — 用具体名字
-3. **新文件不超过 400 行，新函数不超过 100 行，类不超过 250 行（Mixin 不超过 200 行）** — 超了就拆
-4. **参数超过 8 个的函数必须用 dataclass bundling 模式** — 用 `params: SomeParams` 而不是展开 kwargs
+3. **按职责、状态所有权与调用边界拆分或合并** — 不以文件、函数、类或 Mixin 行数决定是否通过
+4. **参数结构表达真实合同** — 有共同语义或快照/生命周期责任时使用类型化 bundle，不为凑参数个数增加包装或空转发
 5. **所有文件写入必须走 `tooling/filesystem_write.py`** — 不许直接 `Path.write_text()`
 5. **Python 3.10+** — f-string 里不许用反斜杠
 6. **中文写注释和文档，英文写代码**
@@ -122,5 +125,5 @@ my-agent/
 | 这个文件能不能导入那个文件？ | [BOUNDARY_RULES.md](docs/architecture/BOUNDARY_RULES.md) |
 | 测试怎么分层？ | [TESTING_POLICY.md](TESTING_POLICY.md) |
 | 打包要注意什么？ | [CLEAN_PACKAGE_POLICY.md](CLEAN_PACKAGE_POLICY.md) |
-| 代码尺寸超标了？ | [CODE_SIZE_POLICY.md](CODE_SIZE_POLICY.md) |
+| 代码职责或依赖不清楚？ | [开发规则](docs/development/DEVELOPMENT_RULES.md) · [边界规则](docs/architecture/BOUNDARY_RULES.md) |
 | 要做大的架构变更？ | 先写 ADR，放在 [docs/decisions/](docs/decisions/) |

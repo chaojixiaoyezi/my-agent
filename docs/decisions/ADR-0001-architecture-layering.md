@@ -9,6 +9,8 @@ LLM: Prefer layered dependencies over direct cross-module mutation.
 
 Accepted
 
+2026-10-28 状态补充：本 ADR 的分层、职责和状态所有权决策继续有效；当时引用的代码尺寸数值门与 `CODE_SIZE_POLICY.md` 已退役，不再作为当前执行指令。旧引用保留为历史来源，现行要求见 [开发规则](../development/DEVELOPMENT_RULES.md)、[边界规则](../architecture/BOUNDARY_RULES.md) 与 [设计台账](../../DESIGN_LEDGER.md) 当日 Wave 8 条目。
+
 ## Context
 
 The project has grown into a multi-module system with CLI, orchestration, subagent management, memory, gateway, and tooling. Without explicit layering, modules reach into each other's internals, creating circular dependencies and making refactoring risky. CLI modules directly mutate agent core state; subagent mixins reach into memory internals; gateway depends on CLI formatting.

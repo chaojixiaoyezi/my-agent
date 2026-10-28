@@ -1,5 +1,5 @@
 # Boundary Rules
-# 模块边界规则：导入、写入、大小、调用、安全
+# 模块边界规则：导入、写入、职责、调用、安全
 
 LLM: Apply these rules before importing across modules or writing files.
 给人看的解释：边界规则的目的不是限制开发速度，而是防止一个文件慢慢吞掉整个系统。违反这些规则的 PR 不应被合并。
@@ -217,7 +217,7 @@ config/local*.json
 
 文件行数不再是硬门。为了让主链路清楚、调用更直接，可以合并文件；为了让职责更清楚，也可以拆分文件。判断标准是调用路径、职责边界和排查成本，不是固定行数。
 
-`scripts/check_code_size.py` 会刷新 `CODE_SIZE_REPORT.md`，用于观察趋势；文件总行数不阻断合并。生产代码和脚本里的函数、类、参数、嵌套、星号导入、语法错误和新增垃圾文件名仍然可以在 strict 模式阻断。`agent_py_agent/tests/` 下的测试规模只作为 advisory 展示，不参与 strict 阻断。
+2026-10-28 起代码尺寸数值门退役：不再运行尺寸 checker、生成报告、维护 baseline，或保留 warn/advisory 模式。生产与测试均按职责、状态所有权和接口合同维护；星号导入、UTF-8/AST、命名和导入分层等非尺寸检查继续由现有独立守卫与 Ruff 执行。
 
 ### 3.2 Consolidation Direction / 合并方向
 
@@ -228,7 +228,7 @@ config/local*.json
 
 ### 3.3 Local Complexity / 局部复杂度
 
-生产代码和脚本里的函数长度、嵌套、参数数量和类大小仍是硬门。测试文件的规模信号只做报告提示。看到复杂度问题时，优先修主链结构，而不是为了满足文件行数数字继续加转发壳。
+复杂度评审检查职责混杂、重复状态与调用绕行，不把函数/类行数、参数数量、嵌套层数或 Mixin 数量换成新的硬门。拆分或合并应改善真实主链路，不为计数增加参数 bundle 或转发壳；必要快照、初始化顺序和事务边界保持。
 
 ### 3.4 Manager Shape / Manager 形态
 
@@ -236,8 +236,6 @@ config/local*.json
 
 | 规则 | 限制 | 说明 |
 |---|---|---|
-| 单个 mixin 最大行数 | 400 行 | 超过说明承担了过多职责 |
-| manager 类 mixin 数量 | 5 个 | 当前仍高于目标；继续把 patch、dispatch、runner、learning 等切到服务对象 |
 | mixin 间方法调用 | 禁止直接 `self.other_mixin_method()` | 应通过注入的服务调用 |
 
 ---

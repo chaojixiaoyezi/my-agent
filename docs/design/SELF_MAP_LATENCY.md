@@ -96,6 +96,8 @@ plugin_self_map.py、capability/self_map_skills.py、skill_learning_versions.py�
 
 必须在本工作树根运行，不能在 agent_py_agent 子目录运行：
 
+2026-10-28 状态补充：下列代码块和后文结果为当时验收记录。尺寸数值门已退役，今后复验不再执行其中的尺寸 checker，也不生成/恢复报告；其余回归和现行职责/边界门禁保持。
+
 ```bash
 python3 -m pytest agent_py_agent/tests/test_self_map_latency.py agent_py_agent/tests/test_self_map_metadata_batch.py agent_py_agent/tests/test_learnpack_projection.py agent_py_agent/tests/test_self_map_runtime.py agent_py_agent/tests/test_self_map_contract.py agent_py_agent/tests/test_self_map_read_authority.py agent_py_agent/tests/test_ctxopt_self_map.py agent_py_agent/tests/test_self_map_model_surface.py -q --tb=short
 ruff check agent_py_agent/agent/tooling/self_map_registry.py agent_py_agent/agent/tooling/self_map_tool.py agent_py_agent/agent/conversation/self_map_work.py agent_py_agent/agent/plugin_self_map.py agent_py_agent/agent/capability/

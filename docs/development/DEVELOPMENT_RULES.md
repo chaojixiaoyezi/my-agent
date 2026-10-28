@@ -164,31 +164,19 @@ before changing code.
 
 ## 4. Code Shape / 代码形态
 
-| Dimension       | Limit   | Enforcement                                   |
-|-----------------|---------|-----------------------------------------------|
-| File length     | no limit / no finding | governed by architecture clarity, not line count |
-| New function    | <= 100 lines | `scripts/check_code_size.py`             |
-| New class       | <= 250 lines (Mixin <= 200) | `scripts/check_code_size.py` |
-| Function params | <= 8 (use dataclass bundling if more) | `scripts/check_code_size.py` |
+2026-10-28 起代码尺寸数值门完整退役，不再运行 checker、维护尺寸报告或 baseline，也不保留 warn/advisory 扫描。
 
-- Whole-file line count is not a hard gate. Merge or split files based on
-  call-path clarity, responsibility boundaries, and debugging cost.
-- If a function approaches 80 lines, start decomposing it into named helpers.
-- Params over 8 must use dataclass bundling: `def f(*, params: SomeParams)`.
+- 文件、函数、类、Mixin 和参数的数量或行数不作为提交门；按调用路径、职责边界、状态所有权和排查成本决定拆分或合并。
+- 仅当参数有真实共同语义、快照或生命周期责任时才引入类型化 bundle，不为凑数量增加包装、空转发或新的阈值。
+- 继续通过 `scripts/check_import_boundaries.py`、`ruff check`、带实际基线的 `scripts/check_doc_sync.py`、`scripts/check_clean_package.py` 和相关合同回归核验；UTF-8/AST、星号导入、命名与分发边界检查不退役。
 
 ## 4.1 Bundle Interface Standard / 统一 Bundle 接口规范
 
 - Product service / domain / repository / gateway / subagent / memory / tool /
   skill / delegation interfaces must not use loose `*args` or `**kwargs` as
   business parameter entry points.
-- When a function reaches the code-size high-risk band because related values
-  keep growing, split those values into a named dataclass bundle instead of
-  raising limits. Recent examples include `ResumeGuidanceRequest`,
-  `ProviderTrashRequest`, and chat/TUI render request objects.
-- Test files are report-only for strict code-size: test findings may remain as
-  advisory signals, but they must not create strict blockers or hard/high-risk
-  pressure. Any path with a `tests/` segment is test scope for this gate. Clean
-  test structure when it helps readability, not to satisfy the strict gate.
+- 类型化 bundle 用于表达相关值的真实合同；现有 `ResumeGuidanceRequest`、`ProviderTrashRequest` 和 chat/TUI render request 的语义、快照与生命周期责任应保留，不因数值门退役而批量拆除。
+- 测试结构按可读性、夹具边界和可复现性维护，不再生成测试尺寸 advisory，也不以数量或行数制造提交压力。
 - Service-facing APIs should accept one typed dataclass bundle, usually named
   `Params`, `Options`, `Context`, `Request`, `Command`, or `Query` according to
   intent.
@@ -468,13 +456,9 @@ x = x + 1  # skip the sentinel row emitted by the exporter
 - Existing generated comments should be removed when touching nearby code unless
   they contain a concrete invariant that is still true.
 - Inline comments are for non-obvious decisions, workarounds, and domain constraints.
-- Code-size spans count implementation lines, not comment/docstring lines. Do not weaken
-  required comments to satisfy size checks; split real implementation when the
-  implementation itself approaches the limit.
-- Frontend files under `frontend/` are excluded from the Python strict code-size
-  guard. They must instead pass the frontend gates: `npm run check:config`,
-  `npm run lint`, and `npm run build` from `frontend/`. This keeps Python
-  architecture guardrails focused while still making UI changes testable.
+- 不为行数或告警删弱真实职责、权威来源、副作用和失败边界的注释；实现按真实职责调整。
+- Frontend files under `frontend/` must pass `npm run check:config`, `npm run lint`,
+  and `npm run build` from `frontend/`. Python 与前端各自的有效验证仍须保留。
 
 ---
 
@@ -498,7 +482,7 @@ do_write()
 ```
 
 - Early returns reduce cognitive load and make error paths explicit.
-- Maximum nesting depth: 3 levels.  Beyond that, extract a helper.
+- 根据职责混杂、重复分支及错误路径的可读性决定是否提取 helper，不以固定嵌套层数强制拆分。
 
 ---
 
@@ -516,8 +500,10 @@ do_write()
 1. `python -m compileall -q agent_py_agent scripts` — syntax check.
 2. `python -m pytest agent_py_agent/tests/ -q` — all tests pass.
 3. `ruff check agent_py_agent` — no lint errors.
-4. `python scripts/check_code_size.py` — no local-complexity hard violations; whole-file length is advisory.
-5. `git diff --check` — no whitespace errors.
+4. `python scripts/check_import_boundaries.py --json` — 导入分层与生产边界。
+5. `python scripts/check_doc_sync.py --base <本轮实际基线提交>` — 文档与实现同步。
+6. `git diff --check` — no whitespace errors.
+7. `python scripts/check_clean_package.py .` — 打包与工作树洁净度。
 
 ## 11.1 Subagent Token / Model-Call Budget
 
@@ -566,8 +552,8 @@ do_write()
   itself, that current-run instruction should override the default delegation
   preference while still staying inside filesystem/tool boundaries.
 - For remote CI pushes, use the strict remote-submit profile before pushing:
-  focused tests for touched areas, full pytest when feasible, ruff, doc sync,
-  strict code-size, and `git diff --check`. If not pushing remote, use the
+  focused tests for touched areas, full pytest when feasible, ruff, import boundaries,
+  doc sync with the actual base, clean-package, and `git diff --check`. If not pushing remote, use the
   smaller local checklist appropriate to the change risk.
 - Do not push small cleanup slices to remote `main` just because combined churn
   is large. A remote push is allowed only when the current diff has more than

@@ -718,6 +718,8 @@ tui_plugin_commands.py、tui_params.py、slash_command_types.py、tui.py、slash
 以及 agent/gateway_parts/plugin_command_service.py、新命令传输模块和对应测试。
 本线已回复：当前只做独立计划，产品代码认领为空，不接触上述文件，也不要求对方等待或改变 Goal。
 原工作区的 CODEBASE_TREE、DESIGN_LEDGER、TESTS、CODE_SIZE_REPORT 由对方统一维护；本线导航差异仅在独立 worktree。
+
+2026-10-28 状态补充：上句保留当时并行分工；尺寸数值门与报告已退役，当前不再要求任何一线维护 CODE_SIZE_REPORT，其余文件归属保持。
 计划集成时发送基于新 HEAD 的精确段落，不能把旧版共享文档整体覆盖回去；LLM_GUIDE、ROADMAP 和设计索引也须先分区。
 用户现已授权 P1—P5 实施，对方已确认 P1-A 配置/后端范围无重叠；完整共享入口仍按切片逐项认领，见执行 Goal。
 原十步重构文档明确 Jev 属于独立范围；本计划不把它追加到对方 Goal 的完成条件。
@@ -773,7 +775,7 @@ tui_plugin_commands.py、tui_params.py、slash_command_types.py、tui.py、slash
 test_gateway_helpers.py、test_model_call_ledger.py、test_orchestration_create_subagents_items.py、
 test_orchestration_create_subagents_idempotency.py、test_memory_curator_v2.py、test_model_context_window.py、test_runtime_context_pressure.py。
 新增决策合同/传输测试只验证真实可失败边界，不照抄实现断言；实际文件清单随阶段认领登记。
-远端提交前执行 AGENTS.md 的 focused pytest、Ruff、doc sync、strict code-size、diff、clean-package；全仓频率遵守原规则。
+远端提交前执行 AGENTS.md 的 focused pytest、Ruff、导入边界、带实际基线的 doc sync、diff、clean-package；全仓频率遵守原规则。2026-10-28 起尺寸数值门退役，历史验证结果不改写为本轮结果。
 真实功能和模型判断质量分别记结果；文档和假服务通过不等于真实 TUI/远端接口通过。
 
 ## 12. 明确不扩大的范围

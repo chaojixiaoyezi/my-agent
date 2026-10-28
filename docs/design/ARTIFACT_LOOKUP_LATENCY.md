@@ -61,6 +61,8 @@ hash 合同保持 wrapper.sha256 优先、缺失时才取 record.sha256 的旧�
 
 验收使用工作树根和正确解释器（现有 Python 3.12 环境，PYTHONPATH=.），不重装或修改全局环境：
 
+2026-10-28 状态补充：以下为当时执行的历史命令，原结果保留；尺寸数值门已退役，今后复验不再运行该尺寸命令或生成/恢复报告，其余实际回归、Ruff、导入边界、文档同步与 clean-package 按现行 AGENTS 执行。
+
 ```bash
 python3 -m pytest agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_artifact_read_path_races.py agent_py_agent/tests/test_memory_artifact_read.py agent_py_agent/tests/test_tool_ref_hot_paths.py agent_py_agent/tests/test_tool_ref_scope_stream.py agent_py_agent/tests/test_tool_ref_hot_measurement.py -q --tb=short
 ruff check agent_py_agent/agent/tooling/artifact.py agent_py_agent/agent/memory_archive/artifact/reader.py agent_py_agent/tests/test_artifact_read_lookup_plan.py agent_py_agent/tests/test_artifact_read_path_races.py
@@ -68,7 +70,7 @@ python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.j
 git diff --check
 ```
 
-尺寸门生成的 CODE_SIZE_REPORT 不是本切片交付物，验后恢复，不随提交带入。计量必须同时观察查找发现和权限根复核，不把返回字符数当总 IO，不把本地合成计数等同 2C4G Linux 线上延迟。
+历史验收时生成的 CODE_SIZE_REPORT 不是本切片交付物，已恢复、不随提交带入；退役后不再生成或恢复。计量必须同时观察查找发现和权限根复核，不把返回字符数当总 IO，不把本地合成计数等同 2C4G Linux 线上延迟。
 
 ## 本机验证结果
 

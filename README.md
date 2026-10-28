@@ -282,7 +282,7 @@ my-agent skills proposals list            # 查看子代理经验 Skill 提案�
 ## 项目状态
 
 - 十步重构 / 插件 Goal 的第 1—7、10 步已按真实 TUI 验收收口，第 8、9 步（模型与工具循环拆分、TUI 拆分）仍在进行，见 [执行 Goal](docs/tasks/REFACTOR_PLUGIN_GOAL.md)。
-- 每次发布都要先过本地严格 gate（focused pytest、Ruff、文档同步、代码尺寸、diff、打包洁净度），再推送并双机同版部署；线上 CI 只作参考，不是验收来源。
+- 每次发布都要先过本地严格 gate（focused pytest、Ruff、导入边界、带实际基线的文档同步、diff、打包洁净度），再推送并双机同版部署；线上 CI 只作参考，不是验收来源。2026-10-28 起不再以代码行数、参数数或 Mixin 数量设数值门，治理依据是职责、边界及真实合同回归。
 - 真实验收方法、历史证据和已知问题见 [TESTS.md](TESTS.md) 与 [STATUS.md](STATUS.md)。
 
 ## 测试

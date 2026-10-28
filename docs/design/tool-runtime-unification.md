@@ -705,8 +705,8 @@ Anthropic-compatible 的辅助结构化判定只接受强制的非执行 `tool_u
 ```bash
 python3 -m pytest -q --tb=short
 ruff check agent_py_agent scripts
-python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base <本轮实际基线提交>
 git diff --check
 python3 scripts/check_clean_package.py .
 ```

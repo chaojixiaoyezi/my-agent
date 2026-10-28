@@ -138,7 +138,7 @@
 - **并行性**：方向A三项内部串行（A1→A2→A3 有依赖），A 与 B/E 可并行（不同模块）；
   C 依赖 A1 的系统事实账本；D 相对独立，可单独 agent 承接。
 - **每步收尾**：focused tests → 全量回归对照基线零新增 → ruff → check_doc_sync →
-  check_code_size strict → offline_contract_matrix → clean_package → git diff --check。
+  导入边界 → offline_contract_matrix → clean_package → git diff --check；文档同步须带实际基线，2026-10-28 起尺寸数值门退役，不再作为执行要求。
 - **不提交**：沿用当前"用户下令才 commit"约定。
 - **铁律守住**：软引导不做成硬门；配置三同步；一个概念一个权威；参考 长期助手/会话运行时/
   通道运行时 先于自己发明。

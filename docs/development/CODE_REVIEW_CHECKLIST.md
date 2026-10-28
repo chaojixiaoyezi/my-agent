@@ -11,9 +11,9 @@ risk reduction over formalism.
 
 - [ ] **Single responsibility** — does the module/class/function do exactly one thing?
 - [ ] **Thin entry points** — do CLI entry files delegate to services, not inline logic?
-- [ ] **No god classes** — is every new class <= 250 lines?
-- [ ] **No god functions** — is every new function <= 100 lines?
-- [ ] **No god files** — is every new file <= 300 lines?
+- [ ] **类职责清楚** — 状态所有权与生命周期是否完整，而非承担无关领域？
+- [ ] **函数职责清楚** — 正常、失败与取消路径是否直接可追踪？
+- [ ] **文件边界清楚** — 拆分或合并是否改善实际调用路径，而非满足行数？
 - [ ] **Module boundary** — does the change stay inside the owning module's directory?
 - [ ] **Explicit dependencies** — are dependencies injected or passed, not imported
       from global singletons?
@@ -34,12 +34,13 @@ risk reduction over formalism.
 
 ---
 
-## 3. Size / 代码尺寸
+## 3. Responsibility / 职责与合同
 
-- [ ] File length changes make the call path clearer; file line count alone is not a blocker.
-- [ ] New functions are <= 100 lines.
-- [ ] New classes are <= 250 lines.
-- [ ] `scripts/check_code_size.py` passes.
+代码尺寸数值门已于 2026-10-28 退役，不再要求 checker、报告或 baseline。
+
+- [ ] 拆分/合并依据真实职责、状态所有权与接口合同，不以行数、参数数或 Mixin 数量决策。
+- [ ] 类型化 bundle 承担真实语义、快照或生命周期责任，没有为计数新增包装与空转发。
+- [ ] 导入边界、Ruff、文档同步、clean-package 与相关回归仍有对应证据。
 
 ---
 
@@ -118,7 +119,7 @@ When time is limited, review in this order:
 
 1. **Security** — path traversal, input validation, sandboxing.
 2. **File writing** — write boundary, storage class, `.gitignore`.
-3. **Architecture** — single responsibility, size limits, naming.
+3. **Architecture** — single responsibility, state ownership, import boundaries, naming.
 4. **Testing** — coverage for new behavior, architecture tests pass.
 5. **Upgrade safety** — CLI, data format, Python version.
 6. **Documentation** — task record, feature spec, comments.

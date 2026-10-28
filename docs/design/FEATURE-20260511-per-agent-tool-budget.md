@@ -80,7 +80,7 @@ Status: Implemented
 
 - 直接 helper 单测：无 `run_id` 不限流、同 run 达阈值阻断、不同 run 隔离、窗口外调用过期。
 - 工具循环单测：同一 `run_id` 第二次工具调用被预算拦截，真实工具不执行，模型能看到自检提示并收口。
-- 回归：ruff、doc sync、strict code-size、full pytest。
+- 回归：Ruff、带实际基线的 doc sync、导入边界及原 full pytest；2026-10-28 起尺寸数值门退役，其他合同保持。
 
 ## Acceptance Criteria / 验收标准
 
