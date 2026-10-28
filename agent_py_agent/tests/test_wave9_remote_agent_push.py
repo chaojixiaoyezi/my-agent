@@ -1060,3 +1060,62 @@ def test_each_eight_character_window_scrubbed_recursively(secret, form):
         assert "[REDACTED_PUSH_SECRET]" in json.dumps(first, ensure_ascii=False)
         assert secret[index:index + 8].casefold() not in unquote(json.dumps(first, ensure_ascii=False)).casefold()
         assert result.effect_outcome == "unknown"
+
+
+# LLM: 使用真实回环HTTP、原ToolExecutor和LocalStore；直接检查返回output及账本已解码output，不用再次JSON编码掩盖引号碰撞。
+# 函数用途: 复现标记尾部/前缀与JSON结束引号或键值分隔符重拼秘密，覆盖完整和全百分号两种大小写回显。
+@pytest.mark.parametrize("form", ["full", "percent_upper", "percent_lower"])
+@pytest.mark.parametrize("boundary", ['SECRET]"', '": "[RED', '[REDACTED_PUSH_SECRET]suffixiew": ""'])
+def test_round_four_marker_boundary_scrubbed_in_http_and_decoded_ledger(receiver, adverse_receiver, tmp_path, form, boundary):
+    from urllib.parse import unquote
+
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import save_remote_endpoint
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    _server, agent, _secret, _path = receiver
+    url, state = adverse_receiver
+    secret = "R4-boundary-" + uuid.uuid4().hex + boundary
+    state.update(encoding=True, echo_form=form)
+    save_remote_endpoint(agent, "r4-boundary", url, secret, allowed_private_hosts=["127.0.0.1"])
+    store = LocalStore(tmp_path / "operations.db", enable_fts=False)
+    result = execute_canonical_test_call(tmp_path, tools=agent.tools.tools, tool_name="remote_agent_push",
+        arguments={"endpoint_ref": "r4-boundary", **payload()}, operation_store=store, operation_store_required=True).result
+    assert not result.ok and result.handler_executed and result.effect_outcome == "unknown"
+    assert state["seen"] == ["/remote-agent/push"] and result.operation is not None
+    record = store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id=result.operation.operation_id)
+    assert record is not None and record.result
+    assert record.result["output"] == result.output
+    for output in (result.output, record.result["output"]):
+        assert isinstance(output, str)
+        preview = json.loads(output)["reported_output_preview"]
+        for text in (output, preview):
+            normalized = unquote(text).casefold()
+            assert all(secret[index:index + 8].casefold() not in normalized for index in range(len(secret) - 7))
+
+
+# LLM: 只测合成令牌；比较值、JSON/repr/转义与URL包装后的全部8字符窗口，保留原机器事实和幂等约束。
+# 函数用途: 防止占位符与两侧引号、空格、百分号上下文重拼秘密，包含普通标记仍可使用的安全对照。
+@pytest.mark.parametrize("boundary", ['SECRET]"', '"[REDACT', "SECRET]'", 'SECRET]\\"', '"%[REDACTED', "CRET] ", '": "[RED',
+                                     '[REDACTED_PUSH_SECRET]suffixiew": ""', "ordinary-safe-tail"])
+def test_round_four_marker_contexts_do_not_recreate_secret_windows(boundary):
+    from dataclasses import asdict
+    from urllib.parse import quote, unquote
+
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import scrub_push_outcome
+
+    secret = "R4-0123456789-abcdefghijklmnopqrstuvwxyz-" + boundary
+    outcome = ToolHandlerOutcome("remote_agent_push", False, secret, error_code="NETWORK_REQUEST_FAILED",
+                                 result_envelope={secret: [secret]}, effect_outcome="unknown")
+    cleaned = scrub_push_outcome(outcome, secret)
+    output = cleaned.output
+    variants = [output, json.dumps(output), json.dumps({"reported_output_preview": output}), repr(output), f'\\"{output}\\"', f" {output} ",
+                json.dumps(asdict(cleaned), ensure_ascii=False), quote(json.dumps(output), safe="")]
+    for text in variants:
+        normalized = unquote(text).casefold()
+        assert all(secret[index:index + 8].casefold() not in normalized for index in range(len(secret) - 7))
+    assert cleaned.effect_outcome == "unknown" and cleaned.ok is False
+    assert asdict(cleaned) == asdict(scrub_push_outcome(cleaned, secret))
+    if boundary == "ordinary-safe-tail":
+        assert output == "[REDACTED_PUSH_SECRET]"

@@ -1,3 +1,27 @@
+## 2026-10-28 Wave 9 A1 Round 4：脱敏标记与JSON包装边界
+
+来源：完整读取 `07-tasks/fix-r4-wave9-a1.md` 全36行；用户随后明确c4已停止，由本会话独占接管 `/tmp/wt-wave9-a1` / `wave9-a1`，核验既有R4改动并提交。起点 `24ecb90945ac348ccdbb7bc44cd588941d242d48`，门禁基线仍为 `db4d5de92`。不推送、部署、切分支或操作生产服务。
+
+### 处理与真实证据
+
+- 保留已有 `_safe_redaction_marker` 的原/URL解码秘密6字符窗口及原始标记、JSON/repr、键值/数组、引号转义、百分号包装检查；`scrub_push_outcome` 仍按8字符窗口识别完整、片段及混合编码回显，整字段替换，不改变布尔、数值和执行效果事实。
+- 接管后的完整指定文件实测 **137项中4失败、0错误/跳过**（`/tmp/pytest-a1-r4/submission.xml`）：既有退避返回空串，与 `reported_output_preview` 的键尾、冒号及空字符串引号仍重拼秘密末8字符。完整回显、全百分号大写/小写三个真实回环HTTP→原执行器→LocalStore读回用例及一个纯函数用例均先红。此前133通过的旧版本结果未当作当前验收。
+- 仅补这一退避分支：碰撞时使用与原秘密及URL解码秘密字符不相交的可打印符号重复8次，避开引号、反斜杠、百分号、空白和字母数字；不再让空字符串的两侧JSON边界直接相邻。正常安全令牌仍使用原可读标记。配置凭据最多512字符，符号选择有充足字符空间；无网络、凭据库或日志副作用。
+- **测试文件原样保留**，没有删断言、skip、xfail或放宽用例。最终完整文件 **137 passed / 0 failed / 0 errors / 0 skipped**（`/tmp/pytest-a1-r4/final-submission.xml`），上述四条真实失败已转绿。另用三组含全部ASCII标点、全部可打印ASCII及全百分号编码的合成输入验证非空符号退避、包装后无8字符残留及机器事实不变；这是纯函数补充控制，不外推为Unicode HTTP认证头支持。
+- 当前新增/修改的5个函数或嵌套定义均经AST核验，完整保留 `# LLM:` + `# 函数用途:` 双层中文注释。源码及测试摘要在最终pytest前后未变。指定全范围Ruff通过；导入边界 `--json` 为 `[]`、退出0；文档同步及提交区间检查在本节更新/提交后执行，最终交接附结果。本轮不再追加独立子代理评审，不将父级核对称作独立审查。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --junitxml=/tmp/pytest-a1-r4/final-submission.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+边界：本机临时HTTP、实际执行器和SQLite读回已验；未验证生产部署、跨机网络、真实模型消费、全仓及跨平台CI，也不宣称任意层数编码或任意公共机器字段与人为选定秘密之间的碰撞都已覆盖。下方历史R3风险及旧结果仅代表当轮状态，不覆盖本轮最终回归。
+
 ## 2026-10-28 Wave 9 A1 Round 3：凭据片段/编码净化与专用禁网码
 
 来源：完整阅读 `07-tasks/fix-r3-wave9-a1.md` 的两项返工要求；准确起点 `717e1e94b5ed9471775e76720b90a0a683141052`，功能基线仍为 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在 `/tmp/wt-wave9-a1` / `wave9-a1` 编辑、测试及提交；未改已验收的IPv6双检、单次pin或线程命名域，未推送、部署或操作真实服务。
