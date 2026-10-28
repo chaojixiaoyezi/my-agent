@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 3 v2：原文件职责补充（无新增路径）
+
+`workflows/models.py::StepDebugResult` 是新旧调试键的同源DTO；`debug_nodes.py` 增加不自批的纯待审批值；`engine.py` 为条件/脚本别名复用旧计算链，通知显式许可后走原Owner出口。模式仍仅由 `assets/workflow_store.py::WORKFLOW_STEP_MODES` 定义。`plugin_host/action_specs_substrate.py` 接收两种摘要字符串，`substrate.py` 同时验证所有值并统一HTTP400。两个R2测试文件补R3合同和沙箱无写marker回归；无新执行器、运行账或审批账。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)。
+
 ## 2026-10-28 Wave 9 A2 Round 2：密文与安全单步调试
 
 ```text

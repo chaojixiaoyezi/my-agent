@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 3 v2：同源DTO与调试模式结构
+
+`models.StepDebugResult.to_dict()` 从已脱敏旧字段生成output/error/suppressed及固定persisted=False，engine提供原mode作step_type，Host原样透传。`assets/workflow_store.WORKFLOW_STEP_MODES` 是唯一模式目录；condition_branch共用有界AST、script沿原runner，approval_wait仅构造待审批值，notification显式通过门后复用原Owner通知出口。SHA两字段在闭合schema只核字符串，在substrate领域同时校验并统一400。测试观察真实stderr/入口计数及输出，不改内外沙箱判定。正式运行与原授权结构不变，详见[通用Host底座](../../design/GENERIC_HOST_SUBSTRATE.md)。
+
 ## 2026-10-28 Wave 9 A2 Round 2：Host底座安全结构
 
 `plugin_host/action_specs_substrate.py` 闭合声明allow_side_effects，`substrate.py` 缺省False透传；`workflows/engine.py` 先映射/前置条件再核副作用，`models.StepDebugResult` 始终返回输入/分支字段。新 `workflows/debug_nodes.py` 仅做有界AST与固定mock（函数对象身份例外），外部执行器仅来自可信组合根。`user_space/totp_sso_auth.py` 复用原锁和认证记录，在 `local_users_auth/.keys/<uid>.key` 保存独立私钥、JSON只存认证封套；坏封套/丢钥包括pending重新setup均失败关闭。详细合同见[通用Host底座](../../design/GENERIC_HOST_SUBSTRATE.md)；六generic mode不隐式进入正式DAG。

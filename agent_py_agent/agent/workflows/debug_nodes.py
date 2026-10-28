@@ -1,5 +1,5 @@
-# LLM: 只做固定mock和有界AST解释；不使用eval/exec/compile、不调用用户函数、不取属性、不访问外部。
-# 模块用途: 为通用调试提供纯内存表达式和唯一可在默认副作用门内运行的分析预览。
+# LLM: 仅固定mock、有界AST及待审批值构造；条件别名同用解释器，审批值不能消费输入中的批准声明。
+# 模块用途: 提供纯内存调试计算；待审批结果仍由引擎显式许可门控制，不写账或批准实际动作。
 from __future__ import annotations
 
 import ast
@@ -25,6 +25,12 @@ def analysis_preview(spec, context, resolved_skills):
 
 
 analysis_preview.llm_involved = False
+
+
+# LLM: 只构造调试等待结果，不创建正式审批、恢复令牌或工作流run；输入approved不具有批准权。
+# 函数用途: 明确返回仍在等待审批的结构化状态，保留请求输入供预览。
+def approval_wait_result(inputs):
+    return {'state': 'waiting_for_approval', 'approved': False, 'request': payload(inputs)}
 
 
 # LLM: AST最多128节点/4096字符，所有中间值有界；不支持幂、格式化%、调用、属性或隐式Python对象。

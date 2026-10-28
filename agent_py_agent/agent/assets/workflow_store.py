@@ -1,5 +1,5 @@
-# LLM: 工作流只存结构化模式/config不执行；六种通用节点与三种旧模式共用严格定义，写入仍核原scope/CAS。
-# 模块用途: 分层保存工作流、通用节点配置、Skill绑定和摘要，不从配置产生执行许可。
+# LLM: 所有步骤mode只由WORKFLOW_STEP_MODES校验；存储支持调试别名/控制节点，不授正式DAG新执行权。
+# 模块用途: 分层保存工作流、节点配置、Skill绑定和摘要，保留原scope/CAS及执行权限边界。
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -16,12 +16,13 @@ from . import (
 from .descriptor import AssetDescriptor, _Record
 
 WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid",
-                       "http_request", "script_transform", "condition", "tool_call", "llm_prompt", "subworkflow")
+                       "http_request", "script_transform", "condition", "tool_call", "llm_prompt", "subworkflow",
+                       "condition_branch", "approval_wait", "notification", "script")
 WORKFLOW_ON_ERROR_POLICIES = ("escalate_to_agent", "fail", "skip")
 
 
-# LLM: 九种mode共用原值对象；config仅有限JSON，不承载回调或授权；condition/inputs_map仍为结构化数据。
-# 类用途: 定义一步的模式、脚本、通用配置、条件和预算，不在存储时执行节点。
+# LLM: 旧模式及调试别名/控制节点共用原值对象；config仅有限JSON，不承载回调、审批或执行授权。
+# 类用途: 定义一步的模式、脚本、配置、结构化条件及预算，不在保存时执行节点。
 @dataclass(frozen=True)
 class WorkflowStepSpec(_Record):
     step_id: str

@@ -1,5 +1,5 @@
-# LLM: A2返工的单节点调试合同回归；真实脚本只写隔离临时Owner，通用外部节点只走明确注入的受控边界。
-# 模块用途: 锁定安全默认、输入渲染、条件分支、六种节点和零正式账本。
+# LLM: A2单节点调试合同回归；脚本诊断走stderr及真实入口透传spy，不写沙箱只读Owner或替换沙箱判断。
+# 模块用途: 锁定安全默认、新旧DTO、节点别名、审批/通知及零正式运行账本。
 from __future__ import annotations
 
 import json
@@ -9,6 +9,7 @@ import pytest
 
 from agent_py_agent.agent.assets.workflow_store import WorkflowStore
 from agent_py_agent.agent.workflows import WorkflowEngine
+from agent_py_agent.agent.workflows.script_runner import ScriptRunner
 from agent_py_agent.tests.test_wave9_host_substrate_plugins_workflow_auth import definition, script
 
 
@@ -21,20 +22,35 @@ def save_node(home, mode, *, config=None, **extra):
     return WorkflowStore(home).save_workflow(definition(spec))
 
 
-# LLM: 两次调用同一真实脚本；默认必须不执行，显式许可必须执行而不增加摘要或运行账。
-# 函数用途: 用实际标记文件检测副作用，避免只检查mock调用或dry-run标签。
-def test_debug_default_does_not_spawn_marker_script_but_explicit_true_does(tmp_path):
-    marker = tmp_path / 'marker'
-    script(tmp_path, 'marker', f'from pathlib import Path; Path({str(marker)!r}).write_text("executed"); print(\'{{"value":8}}\')')
-    save_node(tmp_path, 'deterministic_script', script_id='marker')
+# LLM: 保存原类方法再透传；不替换执行结果、沙箱或进程，供Python及HTTP夹具共用观察点。
+# 函数用途: 记录真实脚本入口被调用的次数，配合stderr/输出证明是否执行。
+def observe_script_runs(monkeypatch):
+    calls = []
+    original = ScriptRunner.run_script
+
+    def execute(runner, script_id, *args, **kwargs):
+        calls.append(script_id)
+        return original(runner, script_id, *args, **kwargs)
+
+    monkeypatch.setattr(ScriptRunner, 'run_script', execute)
+    return calls
+
+
+# LLM: 两次调用同一真实脚本；stderr可穿过真实OS沙箱，Owner只读保护和原输出断言不变。
+# 函数用途: 用真实执行计数、子进程诊断及输出三重检查安全默认与显式执行。
+@pytest.mark.parametrize('mode', ['deterministic_script', 'script'])
+def test_debug_default_does_not_spawn_marker_script_but_explicit_true_does(tmp_path, monkeypatch, mode):
+    calls = observe_script_runs(monkeypatch)
+    script(tmp_path, 'marker', 'import sys; print("MARKER_EXECUTED", file=sys.stderr); print(\'{"value":8}\')')
+    save_node(tmp_path, mode, script_id='marker')
     before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob('*.json')}
     engine = WorkflowEngine(tmp_path)
     preview = engine.debug_step('debug-flow', 'target', mock_inputs={'n': 3})
-    assert not marker.exists()
+    assert calls == [] and 'MARKER_EXECUTED' not in '\n'.join(preview['logs'])
     assert preview['dry_run'] is True and preview['side_effects_blocked'] is True
     assert preview['rendered_input'] == {'n': 3} and preview['condition_branch'] is None
     result = engine.debug_step('debug-flow', 'target', allow_side_effects=True)
-    assert marker.read_text() == 'executed'
+    assert calls == ['marker'] and 'MARKER_EXECUTED' in '\n'.join(result['logs'])
     assert result['status'] == 'succeeded' and result['output_data'] == {'value': 8}
     assert result['dry_run'] is False and result['side_effects_blocked'] is False
     assert not (tmp_path / 'data/workflow_runs').exists()
@@ -56,15 +72,17 @@ def test_debug_rendered_input_mock_and_upstream_resolution(tmp_path):
 # LLM: 条件拒绝分支必须先于任何显式许可的脚本副作用；布尔branch不是“执行成功”的替代标签。
 # 函数用途: 确认非condition节点的条件求值进入返回合同且false分支跳过执行。
 @pytest.mark.parametrize('matched', [False, True])
-def test_debug_step_condition_precedes_side_effect_permission(tmp_path, matched):
-    marker = tmp_path / 'condition-marker'
-    script(tmp_path, 'conditional', f'from pathlib import Path; Path({str(marker)!r}).write_text("x"); print(\'{{"value":1}}\')')
+def test_debug_step_condition_precedes_side_effect_permission(tmp_path, monkeypatch, matched):
+    calls = observe_script_runs(monkeypatch)
+    script(tmp_path, 'conditional', 'import sys; print("MARKER_EXECUTED", file=sys.stderr); print(\'{"value":1}\')')
     save_node(tmp_path, 'deterministic_script', script_id='conditional',
         condition={'step_id': '$inputs', 'key': 'enabled', 'equals': True})
     result = WorkflowEngine(tmp_path).debug_step('debug-flow', 'target',
         mock_inputs={'enabled': matched}, allow_side_effects=True)
     assert result['condition_branch'] is matched
-    assert marker.exists() is matched
+    assert calls == (['conditional'] if matched else [])
+    assert ('MARKER_EXECUTED' in '\n'.join(result['logs'])) is matched
+    assert result['output_data'] == ({'value': 1} if matched else {})
     assert result['status'] == ('succeeded' if matched else 'skipped')
 
 
@@ -75,6 +93,8 @@ def test_debug_step_condition_precedes_side_effect_permission(tmp_path, matched)
     ('script_transform', {'expression': "{'value': inputs['n'] * 2}"}, {'n': 4}, {'value': 8}, None),
     ('condition', {'expression': "inputs['n'] > 3"}, {'n': 4}, {'matched': True}, True),
     ('condition', {'expression': "inputs['n'] > 3"}, {'n': 2}, {'matched': False}, False),
+    ('condition_branch', {'expression': "inputs['n'] > 3"}, {'n': 4}, {'matched': True}, True),
+    ('condition_branch', {'expression': "inputs['n'] > 3"}, {'n': 2}, {'matched': False}, False),
 ])
 def test_generic_pure_nodes_roundtrip_and_evaluate_in_memory(tmp_path, mode, config, inputs, expected, branch):
     saved = save_node(tmp_path, mode, config=config)
@@ -205,11 +225,11 @@ def test_debug_script_transform_preserves_workflow_datasource_override(tmp_path)
 
 # LLM: 本轮扩展的是单节点调试，不是正式DAG新执行权；原正式run不得把未知mode当可运行脚本/分析。
 # 函数用途: 防止可存储通用节点意外绕过正式摘要/执行策略。
-@pytest.mark.parametrize('mode', ['script_transform', 'llm_prompt'])
+@pytest.mark.parametrize('mode', ['script_transform', 'llm_prompt', 'condition_branch', 'approval_wait', 'notification', 'script'])
 def test_debug_generic_modes_do_not_implicitly_enable_formal_execution(tmp_path, mode):
     marker = tmp_path / 'formal-marker'
     script(tmp_path, 'formal', f'from pathlib import Path; Path({str(marker)!r}).write_text("bad"); print(\'{{"value":1}}\')')
-    save_node(tmp_path, mode, script_id='formal' if mode == 'script_transform' else '')
+    save_node(tmp_path, mode, script_id='formal' if mode in ('script_transform', 'script') else '')
     seen = []
     run = WorkflowEngine(tmp_path, analysis_handler=lambda *args: seen.append(args) or {'value': 1}).run_workflow('debug-flow')
     assert run.status == 'failed' and not seen and not marker.exists()
@@ -218,13 +238,14 @@ def test_debug_generic_modes_do_not_implicitly_enable_formal_execution(tmp_path,
 
 # LLM: 前置执行条件和condition节点自身表达式不是一个缓存，不能用True前置条件掩盖False或坏表达式。
 # 函数用途: 验证两层条件分别生效且关闭的前置门不求值节点正文。
+@pytest.mark.parametrize('mode', ['condition', 'condition_branch'])
 @pytest.mark.parametrize('gate,expression,status,branch', [
     (True, 'False', 'succeeded', False),
     (True, "__import__('os')", 'failed', True),
     (False, "__import__('os')", 'skipped', False),
 ])
-def test_condition_precondition_does_not_replace_node_expression(tmp_path, gate, expression, status, branch):
-    save_node(tmp_path, 'condition', config={'expression': expression},
+def test_condition_precondition_does_not_replace_node_expression(tmp_path, mode, gate, expression, status, branch):
+    save_node(tmp_path, mode, config={'expression': expression},
         condition={'step_id': '$inputs', 'key': 'gate', 'equals': True})
     result = WorkflowEngine(tmp_path).debug_step('debug-flow', 'target', mock_inputs={'gate': gate})
     assert result['status'] == status and result['condition_branch'] is branch
@@ -245,3 +266,79 @@ def test_arbitrary_analyzer_purity_attribute_cannot_bypass_debug_default(tmp_pat
     analyze.side_effect_free = True
     result = WorkflowEngine(tmp_path, analysis_handler=analyze).debug_step('debug-flow', 'target')
     assert result['side_effects_blocked'] and not seen
+
+
+# LLM: 别名从既有值投影，不建立第二份状态；成功/失败/跳过/抑制均保留相同键。
+# 函数用途: 检查单步结果的新旧字段及未持久化声明。
+def assert_debug_contract(result, mode):
+    assert {'step_type', 'output', 'error', 'side_effects_suppressed', 'persisted'} <= result.keys()
+    assert result['step_type'] == mode
+    assert result['output'] == result['output_data']
+    assert result['error'] == result['error_detail']
+    assert result['side_effects_suppressed'] is bool(result['side_effects_blocked'])
+    assert result['persisted'] is False
+
+
+@pytest.mark.parametrize('scenario', ['success', 'failed', 'skipped', 'suppressed'])
+def test_debug_contract_aliases_cover_all_result_branches(tmp_path, scenario):
+    mode = 'deterministic_script' if scenario in ('skipped', 'suppressed') else 'script_transform'
+    options = {'condition': {'step_id': '$inputs', 'key': 'gate', 'equals': True}} if scenario == 'skipped' else {}
+    save_node(tmp_path, mode, config={'expression': "inputs['missing']" if scenario == 'failed' else "{'value': 4}"}, **options)
+    result = WorkflowEngine(tmp_path).debug_step('debug-flow', 'target', mock_inputs={'gate': False})
+    assert result['status'] == {'failed': 'failed', 'skipped': 'skipped'}.get(scenario, 'succeeded')
+    assert_debug_contract(result, mode)
+
+
+def test_debug_dto_aliases_share_redaction_but_not_mutable_state():
+    from agent_py_agent.agent.workflows.models import StepDebugResult
+    dto = StepDebugResult('flow', 'step', 'failed', 1, {'value': 'Bearer fixture-token'}, {},
+        error_detail={'code': 'FIXTURE', 'message': 'Bearer fixture-error'}, side_effects_blocked=True)
+    dto.step_type = 'script'
+    result = dto.to_dict()
+    assert_debug_contract(result, 'script')
+    assert 'fixture-token' not in json.dumps(result) and 'fixture-error' not in json.dumps(result)
+    result['output']['value'] = 'changed'
+    assert result['output_data'] != result['output'] and dto.output_data['value'] == 'Bearer fixture-token'
+
+
+@pytest.mark.parametrize('mode', ['approval_wait', 'notification'])
+def test_debug_control_nodes_preview_then_execute_without_formal_ledger(tmp_path, monkeypatch, mode):
+    save_node(tmp_path, mode, config={'title': 'fixture', 'message': 'notice'})
+    engine = WorkflowEngine(tmp_path)
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob('*.json')}
+    notices = tmp_path / 'workspace/runtime/notifications/im_alerts.jsonl'
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('debug控制节点不能写正式运行或资产摘要')
+
+    for method in ('create_run', 'save_run', 'save_step_result'):
+        monkeypatch.setattr(engine.store, method, forbidden)
+    monkeypatch.setattr(WorkflowStore, 'record_run_summary', forbidden)
+    preview = engine.debug_step('debug-flow', 'target', mock_inputs={'n': 2, 'approved': True})
+    assert_debug_contract(preview, mode)
+    assert preview['dry_run'] and preview['side_effects_suppressed'] and preview['output'] == {}
+    assert preview['rendered_input'] == {'n': 2, 'approved': True} and not notices.exists()
+    result = engine.debug_step('debug-flow', 'target', mock_inputs={'n': 2, 'approved': True}, allow_side_effects=True)
+    assert_debug_contract(result, mode)
+    assert result['status'] == 'succeeded' and not result['dry_run'] and not result['side_effects_suppressed']
+    if mode == 'approval_wait':
+        assert result['output']['state'] == 'waiting_for_approval' and result['output']['approved'] is False
+        assert not notices.exists()
+    else:
+        assert result['output']['dispatch_result']['recorded'] is True
+        assert result['output']['dispatch_result']['delivery_status'] == 'no_channel'
+        rows = [json.loads(line) for line in notices.read_text().splitlines()]
+        assert len(rows) == 1 and rows[0]['message'] == 'notice' and rows[0]['payload'] == {'n': 2, 'approved': True}
+    assert {p.relative_to(tmp_path): p.read_bytes() for p in tmp_path.rglob('*.json')} == before
+    assert not (tmp_path / 'data/workflow_runs').exists()
+
+
+@pytest.mark.parametrize('mode', ['approval_wait', 'notification', 'script'])
+@pytest.mark.parametrize('allow', [False, True])
+def test_debug_new_effect_modes_respect_false_precondition(tmp_path, monkeypatch, mode, allow):
+    calls = observe_script_runs(monkeypatch)
+    save_node(tmp_path, mode, condition={'step_id': '$inputs', 'key': 'gate', 'equals': True})
+    result = WorkflowEngine(tmp_path).debug_step('debug-flow', 'target', mock_inputs={'gate': False}, allow_side_effects=allow)
+    assert result['status'] == 'skipped' and result['condition_branch'] is False and result['output_data'] == {}
+    assert not calls and not (tmp_path / 'workspace/runtime/notifications/im_alerts.jsonl').exists()
+    assert_debug_contract(result, mode)

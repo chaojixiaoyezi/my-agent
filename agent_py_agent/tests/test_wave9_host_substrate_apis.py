@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import shutil
 
@@ -19,6 +20,7 @@ from agent_py_agent.tests.test_wave9_host_substrate_plugins_workflow_auth import
     local_user,
     script,
 )
+from agent_py_agent.tests.test_workflow_engine import assert_debug_contract, observe_script_runs
 
 pytest_plugins = ('agent_py_agent.tests.test_plugin_host_gateway_composition',)
 
@@ -133,29 +135,34 @@ def test_totp_pending_setup_does_not_hide_key_loss_or_corruption(tmp_path, attac
 
 
 # LLM: 使用真实Gateway授权、闭合解码和回环HTTP；摘要失败必须早于安装副作用。
-# 函数用途: 锁定调用方依赖的SHA256错误码而非只测内部异常文案。
-def test_host_package_sha256_mismatch_code(production_host):
+# 函数用途: 两种摘要字段的坏格式及错误摘要必须在领域层统一400，不能先被schema改成另一错误码。
+@pytest.mark.parametrize('field', ['sha256', 'expected_sha256'])
+@pytest.mark.parametrize('value', ['', 'bad', 'g' * 64, 'a' * 63, 'a' * 65, '0' * 64])
+def test_host_package_sha256_mismatch_code(production_host, field, value):
     status, body = http_request(production_host[0], production_host[1], {
         'schema': 'plugin_host_call.v2', 'action': 'plugins.packages.install',
-        'idempotency_key': 'round2-sha256-mismatch',
-        'payload': {'package_base64': base64.b64encode(_bundle()).decode(), 'sha256': '0' * 64}})
-    assert status == 409
+        'idempotency_key': 'round3-sha256-mismatch',
+        'payload': {'package_base64': base64.b64encode(_bundle()).decode(), field: value}})
+    assert status == 400
     assert body['error']['code'] == 'PACKAGE_SHA256_MISMATCH'
 
 
-# LLM: 真实HTTP默认不写标记，显式许可沿闭合schema至同一执行器；不是绕过Host域的单测。
-# 函数用途: 核验新的布尔参数已接通真实管理路由，且不写正式run。
-def test_host_debug_default_preview_and_explicit_execution(production_host):
+# LLM: 真实HTTP透传同一沙箱执行器，诊断不写只读Owner；不mock执行结果或外层Seatbelt判断。
+# 函数用途: 核验默认零真实调用，显式许可只调用一次且返回真实stderr/输出，不写正式run。
+@pytest.mark.parametrize('mode', ['deterministic_script', 'script'])
+def test_host_debug_default_preview_and_explicit_execution(production_host, monkeypatch, mode):
     home = production_host[2].home_dir
-    marker = home / 'debug-marker'
-    script(home, 'marker', f'from pathlib import Path; Path({str(marker)!r}).write_text("done"); print(\'{{"value":3}}\')')
-    WorkflowStore(home).save_workflow(definition({'step_id': 'one', 'mode': 'deterministic_script', 'script_id': 'marker'}))
+    calls = observe_script_runs(monkeypatch)
+    script(home, 'marker', 'import sys; print("MARKER_EXECUTED", file=sys.stderr); print(\'{"value":3}\')')
+    WorkflowStore(home).save_workflow(definition({'step_id': 'one', 'mode': mode, 'script_id': 'marker'}))
     data = {'workflow_id': 'debug-flow', 'step_id': 'one', 'mock_inputs': {'n': 4}}
     preview = production_call(production_host, 'workflows.steps.debug', data)
-    assert not marker.exists() and preview['dry_run'] and preview['side_effects_blocked']
+    assert calls == [] and 'MARKER_EXECUTED' not in '\n'.join(preview['logs'])
+    assert preview['dry_run'] and preview['side_effects_blocked']
     assert preview['rendered_input'] == {'n': 4} and preview['condition_branch'] is None
     actual = production_call(production_host, 'workflows.steps.debug', {**data, 'allow_side_effects': True})
-    assert marker.read_text() == 'done' and actual['output_data'] == {'value': 3}
+    assert calls == ['marker'] and 'MARKER_EXECUTED' in '\n'.join(actual['logs'])
+    assert actual['output_data'] == {'value': 3} and actual['status'] == 'succeeded'
     assert not actual['dry_run'] and not (home / 'data/workflow_runs').exists()
 
 
@@ -171,4 +178,46 @@ def test_host_debug_llm_fallback_is_safe_deterministic_and_mock_capable(producti
     assert result['status'] == 'succeeded' and result['dry_run'] and result['side_effects_blocked']
     assert result['output_data'] == {'mock': True, 'llm_called': False, 'output': {'verdict': 'fixture'}}
     assert result['rendered_input'] == {'n': 2} and result['condition_branch'] is None
+    assert not (home / 'data/workflow_runs').exists()
+
+
+@pytest.mark.parametrize('field', ['sha256', 'expected_sha256', 'both'])
+def test_host_package_digest_aliases_accept_valid_hex(production_host, field):
+    raw = _bundle()
+    digest = hashlib.sha256(raw).hexdigest()
+    fields = {'sha256': digest, 'expected_sha256': digest.upper()} if field == 'both' else {field: digest.upper()}
+    result = production_call(production_host, 'plugins.packages.install',
+        {'package_base64': base64.b64encode(raw).decode(), **fields}, key='round3-valid-digest')
+    assert result['sha256'] == digest
+
+
+@pytest.mark.parametrize('bad', ['0' * 64, 'bad'])
+@pytest.mark.parametrize('bad_field', ['sha256', 'expected_sha256'])
+def test_host_package_digest_aliases_cannot_override_each_other(production_host, bad_field, bad):
+    raw = _bundle()
+    fields = dict.fromkeys(('sha256', 'expected_sha256'), hashlib.sha256(raw).hexdigest())
+    fields[bad_field] = bad
+    status, body = http_request(production_host[0], production_host[1], {
+        'schema': 'plugin_host_call.v2', 'action': 'plugins.packages.install', 'idempotency_key': 'round3-digest-conflict',
+        'payload': {'package_base64': base64.b64encode(raw).decode(), **fields}})
+    assert status == 400 and body['error']['code'] == 'PACKAGE_SHA256_MISMATCH'
+
+
+@pytest.mark.parametrize('mode', ['condition_branch', 'approval_wait', 'notification'])
+def test_host_debug_contract_aliases_and_new_control_modes(production_host, mode):
+    home = production_host[2].home_dir
+    WorkflowStore(home).save_workflow(definition({'step_id': 'one', 'mode': mode,
+        'config': {'expression': "inputs['n'] > 3", 'title': 'fixture', 'message': 'notice'}}))
+    data = {'workflow_id': 'debug-flow', 'step_id': 'one', 'mock_inputs': {'n': 4}}
+    preview = production_call(production_host, 'workflows.steps.debug', data)
+    assert_debug_contract(preview, mode)
+    assert preview['rendered_input'] == {'n': 4}
+    if mode == 'condition_branch':
+        assert preview['condition_branch'] is True and preview['output'] == {'matched': True}
+        assert not preview['side_effects_suppressed'] and not preview['dry_run']
+    else:
+        assert preview['side_effects_suppressed'] and preview['dry_run'] and preview['output'] == {}
+        result = production_call(production_host, 'workflows.steps.debug', {**data, 'allow_side_effects': True})
+        assert_debug_contract(result, mode)
+        assert result['status'] == 'succeeded' and not result['side_effects_suppressed']
     assert not (home / 'data/workflow_runs').exists()

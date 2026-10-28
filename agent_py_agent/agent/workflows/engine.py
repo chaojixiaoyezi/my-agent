@@ -1,5 +1,5 @@
-# LLM: 正式运行沿原账本，debug默认无外部副作用；显式许可仍不写摘要/通知/pin，外部通用节点只经可信注入。
-# 模块用途: 编排脚本、分析及断点恢复，提供含渲染输入/分支和安全预览的单节点调试。
+# LLM: 正式运行沿原账本；debug默认无外部副作用，显式许可仍禁正式账本/摘要/pin；通知仅走原Owner出口。
+# 模块用途: 编排正式执行及安全单节点调试，保留模式别名、审批等待和真实通知投递状态。
 from __future__ import annotations
 
 import hashlib
@@ -261,8 +261,8 @@ class _WorkflowRunLifecycle:
 # LLM: 复用原执行链；debug显式副作用许可与内存标志由调用方传入，不能从config/mock授予权限。
 # 类用途: 执行正式工作流，或默认只预览一个节点而不改变正式运行、资产修订及外部业务。
 class WorkflowEngine(_WorkflowRunLifecycle):
-    # LLM: 默认False在映射/条件后阻止脚本/网络/工具/子流/外部分析器；显式True仍禁RunStore/摘要/pin及失败升级。
-    # 函数用途: 仅调试指定节点，完整报告渲染输入、分支和dry-run；真实脚本沿原沙箱/超时合同。
+    # LLM: 默认False在映射/条件后阻止业务副作用；显式True不写RunStore/摘要/pin或升级，返回原mode与新旧DTO键。
+    # 函数用途: 只调试目标节点，报告渲染输入、分支、预览和未持久化正式运行；脚本仍走原沙箱。
     def debug_step(self, workflow_id: str, step_id: str, *, mock_inputs: dict | None = None,
                    context_overrides: dict | None = None, timeout_seconds: float = 30.0,
                    allow_side_effects: bool = False):
@@ -297,7 +297,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             record.error_message = '调试步骤执行失败'
         status = ('skipped' if record.status == 'skipped' else 'succeeded'
                   if record.status in ('succeeded', 'escalated_recovered', 'paused_for_resume') else 'failed')
-        return StepDebugResult(workflow_id=descriptor['id'], step_id=step_id, status=status,
+        return StepDebugResult(workflow_id=descriptor['id'], step_id=step_id, step_type=record.mode, status=status,
             duration_ms=(time.monotonic() - timer) * 1000, output_data=record.output_snapshot,
             rendered_input=record.input_snapshot, condition_branch=record.escalation_result.get('condition_branch'),
             logs=record.escalation_result.get('debug_logs', []),
@@ -402,8 +402,8 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         self._record_summary(record)
         return record
 
-    # LLM: 正式链只执行原三模式；debug先算前置条件/渲染输入再核副作用，仅固定内置mock可在默认门内调用。
-    # 函数用途: 复用旧执行链并提供安全单步预览，不把泛型debug模式或分析器自报属性当正式执行授权。
+    # LLM: 正式链仍只原三模式；条件别名纯求值，脚本别名及审批/通知都先过debug副作用门，内置mock例外不变。
+    # 函数用途: 复用旧脚本执行链并安全分派单节点，不能从mode别名/config或分析器属性取得新权限。
     def _perform(self, record, spec, outputs, definition, run, *, record_summary=True, allow_side_effects=True):
         from .debug_nodes import analysis_preview
         self._require_step_enabled(spec)
@@ -423,7 +423,7 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             if not matched:
                 record.status = 'skipped'
                 return
-        pure = record.mode == 'condition' or record.mode == 'script_transform' and not spec.get('script_id')
+        pure = record.mode in ('condition', 'condition_branch') or record.mode == 'script_transform' and not spec.get('script_id')
         local_analysis = (record.mode in ('llm_skill_analysis', 'llm_prompt')
                           and self.analysis_handler is analysis_preview)
         if run.ephemeral_debug and not allow_side_effects and not pure:
@@ -432,23 +432,24 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.status = 'succeeded'
                 record.escalation_result['debug_logs'] = ['仅预览：未执行脚本、外部分析器、网络、工具或子工作流']
                 return
-        if record.mode in ('condition', 'script_transform', 'http_request', 'tool_call', 'subworkflow'):
+        if record.mode in ('condition', 'condition_branch', 'script_transform', 'http_request', 'tool_call',
+                           'subworkflow', 'approval_wait', 'notification'):
             self._generic_debug_step(record, spec, outputs, definition, run)
             return
-        if record.mode in ('deterministic_script', 'hybrid'):
+        if record.mode in ('deterministic_script', 'script', 'hybrid'):
             self._script_step(record, spec, run, definition, record_summary=record_summary)
-            if record.status not in ('succeeded', 'escalated_recovered') or record.mode == 'deterministic_script':
+            if record.status not in ('succeeded', 'escalated_recovered') or record.mode in ('deterministic_script', 'script'):
                 return
             outputs = {**outputs, record.step_id: payload(record.output_snapshot)}
         context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
         self._analysis_step(record, spec, context)
 
-    # LLM: 仅debug进入；节点表达式独立于前置门，脚本保留原definition/源/pin，外部节点必须有可信执行器。
-    # 函数用途: 计算纯转换/业务分支，或显式执行唯一节点，不遍历DAG、不替换原脚本数据源合同。
+    # LLM: 仅debug通过副作用门后进入；审批不自批，通知只走原Owner通知账/outbox并保留真实状态，不写正式run。
+    # 函数用途: 计算条件/转换、审批等待或显式通知；其它外部节点仍需可信执行器，脚本源合同不变。
     def _generic_debug_step(self, record, spec, outputs, definition, run):
-        from .debug_nodes import evaluate_expression
+        from .debug_nodes import approval_wait_result, evaluate_expression
         config = spec.get('config', {})
-        if record.mode == 'condition':
+        if record.mode in ('condition', 'condition_branch'):
             if 'expression' in config:
                 matched = bool(evaluate_expression(config['expression'], record.input_snapshot))
             else:
@@ -470,6 +471,15 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         elif record.mode == 'script_transform':
             self._script_step(record, spec, run, definition, record_summary=False)
             return
+        elif record.mode == 'approval_wait':
+            record.output_snapshot = approval_wait_result(record.input_snapshot)
+        elif record.mode == 'notification':
+            title, message = config.get('title', record.name), config.get('message', record.input_snapshot.get('message', ''))
+            if not isinstance(title, str) or not isinstance(message, str):
+                raise ValueError('通知title/message必须是字符串')
+            notice = redact_sensitive_value({'title': title, 'message': message, 'payload': record.input_snapshot})
+            dispatched = emit_asset_im_notification(self.owner_home, event_type='workflow_debug_notification', **notice)
+            record.output_snapshot = {'dispatch_result': dispatched}
         elif not run.ephemeral_debug or not callable(self.debug_node_handler):
             record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
             record.error_message = '未配置可信单节点执行器'

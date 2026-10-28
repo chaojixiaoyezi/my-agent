@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 3 v2：单步合同对齐（源码候选，未部署）
+
+按R3 v2卡补齐调试DTO五个合同键，别名只从旧字段投影，不建立第二状态源；Store唯一 `WORKFLOW_STEP_MODES` 纳入条件/脚本别名与审批/通知。审批结果始终待批准，通知显式True走原Owner通知账/outbox并保留实际投递状态；`persisted=False` 仅指正式工作流run不持久化，正式DAG仍拒绝通用新增mode。摘要两字段字符串交领域统一400，不放宽包来源/安装授权。沙箱夹具只改观察通道为stderr+真实透传spy，不修改runner或嵌套判断。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)及TESTS.md；无新运行/审批权威、无部署。
+
 ## 2026-10-28 Wave 9 A2 Round 2：加密封套与默认预览（源码候选，未部署）
 
 按返工卡收紧：TOTP每Owner独立32字节私有密钥留在原宿主凭据保护域，版本/UID绑定的Encrypt-then-MAC封套先验后解；原认证状态、跨进程锁、epoch和session权威不变，旧明文只在首次锁内消费迁移。debug显式 `allow_side_effects=False` 默认预览，不能把“无账本”当成“无业务副作用”；True不撤销原沙箱/授权。固定mock函数按对象身份识别，不信analyzer自报纯属性。六种通用mode可保存和单步调试，正式DAG明确不隐式启用；外部节点只经可信宿主端口，缺失不伪造执行成功。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)，实际回归和边界见TESTS.md；不新增生产迁移任务或第二身份/运行权威。

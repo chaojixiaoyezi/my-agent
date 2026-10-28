@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 3 v2：调试合同与真实执行夹具（源码候选）
+
+四项修复：三处夹具用stderr+真实runner透传计数替代只读Owner写marker；调试新旧DTO键并存；条件/脚本别名及审批/通知受同一副作用门；两种包摘要字符串坏格式/冲突/不匹配统一领域HTTP400。通知显式许可沿原通知账/outbox，审批不自批，不写正式run/摘要；正式DAG未扩权。定向两文件94项通过，完整五门及平台局限见根TESTS.md，合同见[通用Host底座](../../design/GENERIC_HOST_SUBSTRATE.md)。未修改生产沙箱、外层Seatbelt判断、部署或外部服务。
+
 ## 2026-10-28 Wave 9 A2 Round 2：Host底座返工（源码候选）
 
 TOTP种子在pending/active均为每Owner认证密文；默认debug不执行脚本/HTTP/工具/子流/外部模型，显式True仍无正式账本。Host已接通布尔schema、完整输入/分支DTO和固定mock fallback，上传摘要不匹配统一 `PACKAGE_SHA256_MISMATCH`。真实回环HTTP与原认证/工作流/Host合同共537项当前源码回归通过；准确分组、红绿证据及未验入口见根 `TESTS.md`。未部署，不外推生产IdP、live LLM或外部适配通过。

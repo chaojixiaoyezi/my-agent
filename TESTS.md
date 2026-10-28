@@ -1,3 +1,16 @@
+## 2026-10-28 Wave 9 A2 Round 3 v2：沙箱夹具、调试别名与摘要400合同
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-a2.md`（65行，v2）；起点 `4d2f4a4c6206ecfab3531215355b8da14d113171`，任务基线 `db4d5de92`。仅在 `wt-wave9-a2` / `wave9-a2` 修复四项，不修改生产沙箱、ScriptRunner或外层Seatbelt判断。
+
+- 三个原marker夹具改为stderr `MARKER_EXECUTED` + `ScriptRunner.run_script`真实透传计数 + JSON输出。默认/条件False要求零调用且无诊断；显式True且条件True要求一次真实调用、诊断和正确输出。没有向只读Owner根写marker，也没有mock执行结果或 `_outer_seatbelt_active`。
+- `StepDebugResult` 增加原mode的 `step_type`；`output/error/side_effects_suppressed` 从已脱敏旧字段派生，`persisted=False` 表示不写正式工作流运行账。覆盖成功、失败、跳过、预览、DTO独立快照和真实Host HTTP。
+- 原 `WORKFLOW_STEP_MODES` 唯一目录增加 `condition_branch/approval_wait/notification/script`；条件别名共用有界AST，脚本别名仍走原runner。审批/通知默认抑制；显式执行仅返回待审批状态或沿原Owner通知出口返回真实recorded/delivery_status，拒绝自报approved，正式DAG仍拒绝新增模式。测试核通知本地账与零正式运行/摘要，不冒称实际送达。
+- `sha256/expected_sha256` 的字符串通过schema，在领域层对所有提供值检查hex/长度和原上传字节摘要；坏格式、冲突或不匹配统一HTTP400 / `PACKAGE_SHA256_MISMATCH`。含空串、非hex、63/65位、错误摘要、正确大小写和双字段不能相互覆盖的HTTP回归。
+
+先只补测试，在旧实现观察到46个缺合同失败（未知mode、缺别名、摘要错误码/409）；修改实现后两定向文件94项通过，零失败/错误/跳过。复现：`python3 -B -m pytest agent_py_agent/tests/test_workflow_engine.py agent_py_agent/tests/test_wave9_host_substrate_apis.py -q --tb=short -o cache_dir=/tmp/pytest-a2-r3`。任务卡指定五文件363项通过（JUnit零失败/错误/跳过）；指定Ruff全范围通过，`DOC_SYNC_PASS`，`IMPORT_BOUNDARIES findings=0`。额外运行 `test_workflow_script_engine.py` 与 `test_scripts_and_workflows_tools.py` 共278项，零失败/错误/跳过。Astra high只读独审结论可合入、无阻塞缺陷。收尾必须在实际提交后运行 `git diff --check db4d5de92..HEAD` 并逐提交核对，不能只用未提交工作树的检查代替。测试报告保留在本轮私人工作目录，不纳入仓库。
+
+未验证：无外层Seatbelt的原生macOS、Linux/bwrap与Windows车道，真实IM送达、生产Gateway或门户UI、live LLM、IdP及全仓CI。当前TUI环境不强制嵌套sandbox_apply，也不以该环境通过冒充跨平台实测。通知显式True可写原通知账/outbox，`persisted=False` 不表示禁止该已许可业务副作用。未推送、安装或部署。
+
 ## 2026-10-28 Wave 9 A2 Round 2：TOTP密文、安全默认调试及响应合同
 
 来源：完整阅读 `07-tasks/fix-wave9-a2.md`（62行）。实际起点 `e47515c72b335fcbac5d339a01229a46c275bd4f`，任务基线 `db4d5de92`；全部修改、测试和提交仅在 `wt-wave9-a2` / `wave9-a2`。没有安装、推送、部署或变更生产认证资料。

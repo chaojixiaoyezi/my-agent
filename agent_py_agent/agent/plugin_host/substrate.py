@@ -1,10 +1,11 @@
-# LLM: 只接真实AuthorizedCall；debug默认预览，模型缺席时仅确定性mock，不把本机管理员能力扩给普通caller。
-# 模块用途: 接通包管理、安全调试和认证底座，复用安装、制品和session权威。
+# LLM: 仅真实AuthorizedCall；debug DTO原样透传，摘要别名全部验证且统一400，不扩本机管理员的caller边界。
+# 模块用途: 接通包管理、安全调试及认证，复用安装、制品、会话和领域响应权威。
 from __future__ import annotations
 
 import base64
 import binascii
 import hashlib
+import re
 from pathlib import Path
 
 from ..common.nofollow_fs import read_bytes_beneath
@@ -98,8 +99,8 @@ class GatewaySubstrateDomain:
             actor_id='local/main', channel='plugin', conversation_id=authorized.binding.installation_ref, is_admin=True)
         return PluginManagement(management)
 
-    # LLM: schema/能力/身份先于IO；debug布尔缺省False显式透传，可信注入负责原外部执行授权，认证不缓存秘密。
-    # 函数用途: 分派已授权底座动作，安全调试缺live模型时使用纯内存预览。
+    # LLM: schema/能力/身份先于IO；debug布尔缺省False，原样保留DTO新旧键和persisted=False，认证不缓存秘密。
+    # 函数用途: 分派已授权动作，调试只透传引擎事实，不在HTTP层拼第二份节点状态。
     def call(self, authorized):
         context = self._context(authorized)
         action = authorized.call.action
@@ -148,11 +149,14 @@ class GatewaySubstrateDomain:
             return service.complete_sso_callback(**data)
         raise HostAPIError('UNSUPPORTED_ACTION')
 
-    # LLM: 三种来源互斥，摘要校验原上传字节，不匹配统一PACKAGE_SHA256_MISMATCH且先于任何安装写入。
-    # 函数用途: 从授权来源取得有界包，先验证SHA256和manifest再安全规范化安装输入。
+    # LLM: 三来源互斥；两个摘要别名均须有效且匹配原字节，坏格式/不匹配统一400，先于安装写入且不能相互覆盖。
+    # 函数用途: 校验SHA256格式、内容及manifest后规范化授权输入，十六进制大小写不改变摘要含义。
     def _candidate(self, authorized, context, data):
         if sum(key in data for key in ('package_base64', 'package_path', 'artifact_ref')) != 1:
             raise HostAPIError('INVALID_SCHEMA')
+        expected = [data[key] for key in ('sha256', 'expected_sha256') if key in data]
+        if any(not isinstance(value, str) or re.fullmatch(r'[a-fA-F0-9]{64}', value) is None for value in expected):
+            raise HostAPIError('PACKAGE_SHA256_MISMATCH', 400)
         try:
             if 'package_base64' in data:
                 raw = base64.b64decode(data['package_base64'], validate=True)
@@ -161,8 +165,9 @@ class GatewaySubstrateDomain:
             else:
                 reader = self.observations.routes['workspace']
                 raw = reader.read_registered_bytes(authorized, context, data['artifact_ref'], max_bytes=HOST_PACKAGE_LIMITS.archive_bytes)
-            if 'sha256' in data and hashlib.sha256(raw).hexdigest() != data['sha256']:
-                raise HostAPIError('PACKAGE_SHA256_MISMATCH', 409)
+            actual = hashlib.sha256(raw).hexdigest()
+            if any(actual != value.lower() for value in expected):
+                raise HostAPIError('PACKAGE_SHA256_MISMATCH', 400)
             package = inspect_plugin_package(normalize_plugin_archive_bytes(raw), limits=HOST_PACKAGE_LIMITS)
             if data.get('plugin_id', package.manifest.plugin_id) != package.manifest.plugin_id:
                 raise HostAPIError('PACKAGE_ID_MISMATCH', 409)
