@@ -1,4 +1,4 @@
-# LLM: HTTP分发唯一路由表；OAuth公开回调仍须原交互MAC与actor验证，不接收宿主凭据头作为本人授权，插件v2调用与SSE流统一经plugin_token鉴权。
+# LLM: HTTP唯一路由表；remote push独立push_token只入队，不能成为宿主/插件凭据；OAuth与插件仍沿各自原鉴权。
 # 模块用途: 声明Gateway路由及有界观察档位，私人交互、本人OAuth与Plugin Host v2由各自处理器验证准确身份。
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ GATEWAY_HTTP_ROUTES = {
         GatewayHTTPRoute("/metrics", "_handle_metrics", "public"),
     ),
     "POST": (
+        GatewayHTTPRoute("/remote-agent/push", "handle_remote_push", "push_token", ".remote_push_service"),
         GatewayHTTPRoute("/ask", "_handle_ask", "credential"),
         GatewayHTTPRoute("/channel-observations", "handle_channel_observation", "credential", ".channel_observations"),
         GatewayHTTPRoute("/control", "_handle_control", "credential"),

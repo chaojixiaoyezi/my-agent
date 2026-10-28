@@ -1,5 +1,5 @@
 # LLM: 路径裁决只有这一份实现；每个策略在构造时冻结宿主根，跨进程运输不得重新猜测。Darwin压缩投影不减少Python/Linux具体保护，动态来源不缓存。
-# 模块用途: 判断目标是否处于当前 owner、已授权工作根或普通路径策略允许的范围，不读取文件内容。
+# 模块用途: 判断路径范围；远端推送配置及防重放账本也属于模型不可改写的宿主权威。
 
 from __future__ import annotations
 
@@ -73,7 +73,7 @@ ADMIN_READABLE_SERVICE_LOG_OWNER_PARTS: frozenset[tuple[str, ...]] = frozenset({
 #   （capability_config.yaml）。必须与 home_layout 的 config_dir、system_config_dir 及 runtime_config_reload.default_capability_config_path
 #   一致（test_host_files_access 有守卫用例）。本模块被原样打进插件 SDK，所以写成路径片段。
 # 常量用途: 列出对模型工具只读的宿主配置目录（分别相对数据根、相对 owner home）。
-HOST_CONFIG_HOME_PARTS: tuple[tuple[str, ...], ...] = (("config",), ("system", "config"))
+HOST_CONFIG_HOME_PARTS: tuple[tuple[str, ...], ...] = (("config",), ("system", "config"), ("remote_push",))
 HOST_CONFIG_OWNER_PARTS: tuple[tuple[str, ...], ...] = (("config",),)
 
 # H3 宿主运行状态（3a 2026-10-02 扩项，A 类“绝对只读”的唯一声明）：owner home 里只由宿主写的权威账本、控制面和派生数据，模型的

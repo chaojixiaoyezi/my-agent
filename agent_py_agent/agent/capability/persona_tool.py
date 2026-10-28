@@ -3,7 +3,7 @@
 #   长期记忆,按相关性召回)。用户表达"以后叫我X/我是做Y的/你说话别太正式"这类长期设定时用本工具,不用 remember。
 #   写入前 scan_memory_content 注入扫描(人格文件每轮注入=注入长效面)；首次写入保留 version 0 修改前基线。
 #   改动时同步 tests/test_persona_tool.py。
-# 模块用途: 向模型暴露按 owner 隔离的人格增删改查、历史和回滚；提交前拒绝可纠正，写入中断仍按未知副作用保护。
+# 模块用途: 提供按owner隔离的人格操作；不可信外部/自动来源仅能查看，写入中断仍保留未知副作用。
 from __future__ import annotations
 
 import copy
@@ -181,7 +181,7 @@ def build_update_persona_model_spec() -> ToolModelSpec:
 
 
 # LLM: 模型可读AGENTS的list/status/history，但不能签发正式修改授权；USER/SOUL仍走既有工具权限和群lease。
-# 类用途: 提供人格查看及已有允许的人格编辑，AGENTS编辑导航到用户预览确认入口。
+# 类用途: 提供本人设定操作；外部推送及不可学习后代不成为人格确认，AGENTS仍导航真人入口。
 class UpdatePersonaTool(BaseTool):
     model_spec = build_update_persona_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -221,12 +221,19 @@ class UpdatePersonaTool(BaseTool):
             )
         return ToolAvailability.ready()
 
-    # LLM: 先解析结构化参数并按目标拒绝AGENTS修改；模型confirmed/source_quote不自证，不能顺带拒绝USER/SOUL原合法写。
-    # 函数用途: 执行人格查看或现有允许的编辑，并保留群授权边界。
+    # LLM: AGENTS仍本人控制；显式不可学习的外部/自动来源不能把画像工具当真人人格确认，读入口及原合法用户写不变。
+    # 函数用途: 查看或处理本人设定，先拒绝不可信事件及其后代对人格的修改。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         request = _parse_persona_tool_request(params)
         if isinstance(request, ToolHandlerOutcome):
             return request
+        from ..conversation.learning_source import thread_source_projection
+
+        current = getattr(self.agent, "_current_run_params", None)
+        source = thread_source_projection((getattr(current, "task_attributes", None) or {}).get("learning_source"))
+        if request.action not in {"list", "status", "history"} and source is not None and source.get("can_learn") is False:
+            return _err("外部事件或自动来源不能代替用户修改人格，请由本人在原会话确认。",
+                        "PERSONA_USER_REQUEST_REQUIRED", effect_outcome="not_started")
         if request.target == "agents" and request.action not in {"list", "status", "history"}:
             return _err("AGENTS规则只能由用户在当前请求通过 /agents 预览并确认修改；本次未写入。",
                         "AGENTS_WRITE_USER_ONLY", hint="请使用 /agents show 查看，或 /agents write <JSON字符串> 预览。",

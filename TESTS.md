@@ -1,3 +1,150 @@
+## 2026-10-28 Wave 9 A1 Round 5：字符不相交标记与真实字段名边界
+
+来源：先完整阅读 `07-tasks/fix-r5-wave9-a1.md` 全35行；后续用户明确裁定只移除含8字符固定公共字段名片段的 `preview": "[` 参数，保留真实跨边界后缀 `iew": "[`，严格全输出8字符窗口零残留断言不变。干净起点 `844a3959464fcc46bc93176fa88ea31d56e491ef`，提交分支 `wave9-a1`；所有项目/临时文件修改仅在 `/tmp/wt-wave9-a1`，未碰其他工作树或my-agent-dsh。门禁基线仍为 `db4d5de92`；不推送或部署。
+
+### 已实现并实测的范围
+
+- `_safe_redaction_marker` 先计算原秘密及一次URL解码值的casefold字符集；任一方括号存在即走不相交符号退避，不再靠字段名长度推测边界。无方括号时保留可读标记之前，按四字符窗口检查原标记、JSON/repr/转义/URL包装，并加入reported_output_preview/error/detail/message真实键。退避同时排除候选符号的序号百分号形式及UTF-8百分号形式；原8字符回显清洗、机器事实、网络门及coordinator未改。
+- 两个既有边界测试均加入 `iew": "[`、`"[`、`]"`，保留所有R4边界参数；真实HTTP继续覆盖完整/全百分号大写/小写回显，直接检查工具output、LocalStore已解码output及内层preview值。另补单侧/百分号方括号、四字符内部标记与字段上下文、Unicode候选百分号碰撞的纯函数性质测试。
+- R5按全部包装检查四字符的保守规则，旧 `ordinary-safe-tail` 中tail命中detail；原输入保留为符号退避对照，另加plain-ok明确守住普通可读标记。未放松秘密8字符及幂等/机器事实断言，无skip或xfail。两处全8字符窗口断言与起点HEAD逐一AST比对完全相同；矩阵仅按上述裁定移除不适用的公共字段名参数，没有改成仅检查preview值、排除特定窗口或给匹配开白名单。
+- 先在R4原源码运行未裁定矩阵 **44项、18失败、0错误/跳过**（`.pytest_cache/r5-red.xml`），保留真实先红证据。修复后裁定前完整文件 **163项、4失败、0错误/跳过**（`.pytest_cache/r5-current.xml`），四条剩余失败均为公共固定字段名自身匹配，不是跨标记残留；不能声称这四条是代码修复转绿。用户明确裁定后只调整两处参数列表，产品源码字节与已审版本相同。
+- 最终工作树根运行指定完整测试文件，JUnit实际读回 **159 passed / 0 failed / 0 errors / 0 skipped**（`.pytest_cache/r5-approved.xml`）；读取完整运行输出并核对源码/测试冻结摘要前后未变。原 `iew": "[` 三种真实回显及纯函数反例均通过。Ruff全指定范围通过，导入边界JSON为 `[]`；文档同步及最终提交区间门禁按下列命令执行，最终交接附提交与结果。
+- 新增/修改5个函数保持 `# LLM:` + `# 函数用途:` 双层中文注释。复用同字节产品源码的独立高深度静态审查；其未读取/修改项目或运行测试，动态证据来自本会话实际执行。审查指出的非ASCII候选casefold变化和JSON的Unicode转义风险尚未动态复现、未纳入本次已验范围，不宣称任意Unicode/编码情形均受保证。
+
+### 已裁定的公共字段名对照与适用边界
+
+`preview": "[` 秘密中已经包含 `preview"`、`review":`、`eview": `、`view": "` 四个8字符窗口。它们也位于固定公共JSON键 `"reported_output_preview": "` 内，均在标记之前。最小原生JSON探针对默认标记、8个感叹号、空串及当前不相交符号逐一验证：四个公共窗口始终存在；只有真正跨标记的 `iew": "[` 消失。这不是把原秘密内容传出了，而是公共固定文本与人为令牌的字面重合。
+
+因此，用户明确将此参数移出跨标记边界测试矩阵；保留 `iew": "[` 精确8字符跨边界反例，并保持对整个output、已解码账本output和preview值的严格8字符窗口检查。没有修改coordinator序列化、固定字段或机器事实。本节不将标记边界性质外推为整个公共JSON文本不可能与任意人工秘密重合；生产部署、跨机网络、真实模型消费、全仓及跨平台CI未验证。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --junitxml=.pytest_cache/r5-approved.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+## 2026-10-28 Wave 9 A1 Round 4：脱敏标记与JSON包装边界
+
+来源：完整读取 `07-tasks/fix-r4-wave9-a1.md` 全36行；用户随后明确c4已停止，由本会话独占接管 `/tmp/wt-wave9-a1` / `wave9-a1`，核验既有R4改动并提交。起点 `24ecb90945ac348ccdbb7bc44cd588941d242d48`，门禁基线仍为 `db4d5de92`。不推送、部署、切分支或操作生产服务。
+
+### 处理与真实证据
+
+- 保留已有 `_safe_redaction_marker` 的原/URL解码秘密6字符窗口及原始标记、JSON/repr、键值/数组、引号转义、百分号包装检查；`scrub_push_outcome` 仍按8字符窗口识别完整、片段及混合编码回显，整字段替换，不改变布尔、数值和执行效果事实。
+- 接管后的完整指定文件实测 **137项中4失败、0错误/跳过**（`/tmp/pytest-a1-r4/submission.xml`）：既有退避返回空串，与 `reported_output_preview` 的键尾、冒号及空字符串引号仍重拼秘密末8字符。完整回显、全百分号大写/小写三个真实回环HTTP→原执行器→LocalStore读回用例及一个纯函数用例均先红。此前133通过的旧版本结果未当作当前验收。
+- 仅补这一退避分支：碰撞时使用与原秘密及URL解码秘密字符不相交的可打印符号重复8次，避开引号、反斜杠、百分号、空白和字母数字；不再让空字符串的两侧JSON边界直接相邻。正常安全令牌仍使用原可读标记。配置凭据最多512字符，符号选择有充足字符空间；无网络、凭据库或日志副作用。
+- **测试文件原样保留**，没有删断言、skip、xfail或放宽用例。最终完整文件 **137 passed / 0 failed / 0 errors / 0 skipped**（`/tmp/pytest-a1-r4/final-submission.xml`），上述四条真实失败已转绿。另用三组含全部ASCII标点、全部可打印ASCII及全百分号编码的合成输入验证非空符号退避、包装后无8字符残留及机器事实不变；这是纯函数补充控制，不外推为Unicode HTTP认证头支持。
+- 当前新增/修改的5个函数或嵌套定义均经AST核验，完整保留 `# LLM:` + `# 函数用途:` 双层中文注释。源码及测试摘要在最终pytest前后未变。指定全范围Ruff通过；导入边界 `--json` 为 `[]`、退出0；文档同步及提交区间检查在本节更新/提交后执行，最终交接附结果。本轮不再追加独立子代理评审，不将父级核对称作独立审查。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --junitxml=/tmp/pytest-a1-r4/final-submission.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+边界：本机临时HTTP、实际执行器和SQLite读回已验；未验证生产部署、跨机网络、真实模型消费、全仓及跨平台CI，也不宣称任意层数编码或任意公共机器字段与人为选定秘密之间的碰撞都已覆盖。下方历史R3风险及旧结果仅代表当轮状态，不覆盖本轮最终回归。
+
+## 2026-10-28 Wave 9 A1 Round 3：凭据片段/编码净化与专用禁网码
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-a1.md` 的两项返工要求；准确起点 `717e1e94b5ed9471775e76720b90a0a683141052`，功能基线仍为 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在 `/tmp/wt-wave9-a1` / `wave9-a1` 编辑、测试及提交；未改已验收的IPv6双检、单次pin或线程命名域，未推送、部署或操作真实服务。
+
+### 做法与边界
+
+- `scrub_push_outcome` 预建去重的全部8字符窗口；任意更长连续片段都含一个该窗口。每个字符允许字面值或对应UTF-8字节的百分号编码，大小写不敏感，另用 `unquote(...).casefold()` 检查解码变体。模式只含固定窗口的有限选择，不按所有长度二次方枚举，也不进行无限递归解码。
+- 命中后将**整个文本字段**换成 `[REDACTED_PUSH_SECRET]`，宁可丢弃更多错误描述，也不保留片段尾巴或依赖变长编码的位置映射。递归处理全部结果字段、嵌套dict键值、list/tuple，布尔与数字不变。固定标记本身若含秘密的8字符窗口则改为空串，避免标记自己泄密；整字段处理不产生邻接标记重拼，二次调用保持稳定。未命中的文本不改写为解码文本。
+- `assert_push_network` 只将禁网码改为 `REMOTE_AGENT_PUSH_NETWORK_DISABLED`；错误目录同步登记 `permission`、不可重试及不绕过宿主禁网的恢复提示，防止原执行器将新码降成未知错误。原本解密/DNS前拒绝和请求级隔离逻辑不变。
+- 新增真实回环HTTP → 原ToolExecutor/Registry → LocalStore操作账的十种回显：完整令牌、前12/中12/末8字符、URL编码整串/片段、全百分号小写/大写/片段、逐字符混合编码。工具结果和持久操作账分别断言新标记及任意8字符窗口均无残留。纯函数另枚举ASCII/中文Token的全部8字符窗口，覆盖五种表示、嵌套键值及二次幂等；这不代表HTTP认证头已支持中文Token。原99项保留，没有删测或放宽断言。
+
+### 验证记录
+
+- 实现前定向37项：34个预期断言失败、3通过、0错误/跳过，见 `.pytest_cache/r3-w9-red.xml`。失败覆盖新标记、片段/编码脱敏和专用禁网码；不是导入或夹具报错。完整令牌的原安全行为仍作控制，不把仅标记升级的失败误称为新泄密。
+- 实现后专属全套 **119项通过、0失败/错误/跳过**：`.pytest_cache/r3-w9-green.xml`。与Round 2最终99项按测试名对比缺失为0，本轮新增20项。
+- 指定全范围 `ruff check agent_py_agent scripts` 为 `All checks passed!`；`check_doc_sync.py --base db4d5de92` 为 `DOC_SYNC_PASS`；`check_import_boundaries.py --json` 实际返回空数组 `[]`、退出0。提交后另核对 `git diff --check db4d5de92..HEAD` 与干净工作树。生产AST核对只有 `scrub_push_outcome` / `assert_push_network` 变化，其余推送逻辑未改。
+- 独立 `gpt-6-astra max` 已完成只读源码摘录复核，未访问工作树或运行测试：未指出规定字符串编码匹配本身的漏网，提出数值叶节点、JSON引号与标记重拼、固定禁网码碰撞三项意见。父级核对原接收器只导出四个严格字符串字段，不透传任意JSON数值；禁网检查在解析/解密Token前返回，不能直接把纯函数构造的数值或错误码碰撞当作已复现的HTTP漏洞。两项链路反例未补实测，泛化数值清洗未纳入本轮。
+- **已知未消除的复核风险**：Token尾部若为 `SECRET]"`，与标记末尾加JSON结束引号可形成同样的8字符窗口。该反例静态成立，但真实返回/操作账链路未复现，当前119项未覆盖；递归helper对任意深度对象也未作额外保证。最新 `07-tasks/commit-wave9-a1.md` 明确要求立即提交当前119项版本，故不在提交派活中追加行为改动。这不是“所有复核意见已解决”，由集成者决定后续针对性修补。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --basetemp=.pytest_cache/r3-w9-green-tmp --junitxml=.pytest_cache/r3-w9-green.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+**未验证**：全仓/跨平台测试、外部网络或另一台机器可达、生产TLS/代理、真实模型消费到完成及长负载；未对范围外编码（如任意层数编码、Base64）宣称完全覆盖。上轮证据及未验证项保留如下。
+
+## 2026-10-28 Wave 9 A1 Round 2：错误脱敏、禁网与推送隔离返工
+
+来源：完整读取 `07-tasks/fix-wave9-a1.md` 的六项要求；准确返工起点 `1e2192e3543a01ddd2425b14518aba6d582647a2`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。编辑、测试及提交只在 `/tmp/wt-wave9-a1` / `wave9-a1`；未推送、部署或启停真实Gateway，不运行已退休的尺寸检查。
+
+### 修复与回归
+
+1. `remote_agent_push_tool.scrub_push_outcome` 在返回原执行器前递归净化全部结果文本字段、envelope键值及嵌套列表；大小写不敏感替换覆盖 `Content-Encoding` 的小写规范化。替换后再核对，若标记与相邻文本重新拼出秘密则清空整个字段，不靠固定次数重复替换。真实回环服务将本次Token分别回显到不支持的编码头和HTTP错误正文，通过原ToolExecutor及LocalStore核对结果和操作账；没有只检查模型output而漏掉恢复提示/预览。远端错误正文仍不返回，已捕获异常仍仅给固定机器码。
+2. 正式调用通过 `execute_scoped` 消费本次冻结的只读网络事实，直接调用兼容宿主运行边界；同时核对当前owner持久网络权限和已冻结上界。`endpoint_ref` / `endpoint_url` 均在解密/DNS之前拒绝 `network_access_mode=disabled` 或 `network_enabled=False`。原执行器两入口、owner持久禁网、缓存上界及直接调用边界均有回归；同一handler并发禁网/有网调用只让有网的一次真实入队，不借用可变Agent当前边界，也不修改共享handler或接受模型授权字段。
+3. `remote_push_pin` 对每个DNS回答的原生地址及已知IPv4投影分别检查私网、回环、保留及非全局状态；任何一侧的link-local、multicast、unspecified或元数据地址永久拒绝。ULA/ISATAP公网投影、链路本地公网投影、IPv6白名单不能豁免投影回环等反例均覆盖，准确ULA例外及纯公网ISATAP仍有正向控制。
+4. 一次投递的pin闭包只能放行第一次连接；即使同URL的301/302/303/307/308也在第二跳连接前拒绝。测试服务同时接收并记录POST/GET，断言总请求数为1；未知投递效果继续保持unknown，不自动重放。
+5. 业务幂等键不变；线程hash的第三项改为 `new_thread:<idempotency_key>` / `reuse_key:<thread_reuse_key>`。相同标签不再混线，新线程同事件重试和复用线程不同事件仍各守原合同。旧prepared/accepted回执保留原ID；升级后首次新事件的复用键进入新域，不自动续接旧版复用线程，不迁移或改写旧线程数据。
+6. 补 `docs/modules/gateway/02-progress.md`、`04-structure.md` 的 `remote_push_service.py` / `POST /remote-agent/push` 与准确验收边界；宿主文件保护测试补 `# LLM:` / `# 模块用途:`，原强断言不变。
+
+### 已取得的证据
+
+- 有效先红后绿：编码头回显进入结果/操作账的断言失败记录在 `.pytest_cache/fix-w9-reflect-red.xml`；原执行器禁网和IPv6/重定向/命名域反例见 `.pytest_cache/fix-w9-red.xml`、`fix-w9-red2.xml`、`fix-w9-ipv6-red.xml`。最初账本夹具两处字段名不符已按实际类型修正，不能算产品缺陷复现；错误正文回显和发送后ValueError原本已安全，作为正向控制保留。
+- 第一组修复后22项通过：`.pytest_cache/fix-w9-first-green.xml`；先前整套95项及追加并发控制后的96项也已通过。独立复核意见处理后最终专属99项通过、0失败/错误/跳过：`.pytest_cache/fix-w9-delivery.xml`，对照上轮最终62项无缺失，新增37项。两条原宿主配置/shell保护声明通过：`.pytest_cache/fix-w9-host.xml`。测试用临时home及回环HTTP，不访问外部站点。
+- 指定Ruff范围 `All checks passed!`；`check_doc_sync.py --base db4d5de92` 从缺Gateway两文档的 `DOC_SYNC_FAIL` 转为 `DOC_SYNC_PASS`；`check_import_boundaries.py` 为 `IMPORT_BOUNDARIES findings=0`。原基线至候选变更的工作区空白检查通过，提交后仍按下列区间命令核对。
+- 独立 `gpt-6-astra max` 只读摘录复核指出替换标记重拼Token的P2，已在真实HTTP/操作账复现后修复（`.pytest_cache/fix-w9-review-red.xml` 为5项中1条准确失败，最终对应全绿）。其HTTPException证据缺口由父级核对原 `web_fetch_runtime._do_hop` 的捕获分支并补真实 `BadStatusLine` 状态行回显测试：结果/账本仅保留异常类名，不含远端原文或Token。该分支原本安全，没有扩宽异常吞噬。审查者未访问工作树或跑测试，不将此描述为完整仓库/真实E2E审计。
+
+复现（均在工作树根，临时文件限工作树内）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --basetemp=.pytest_cache/fix-w9-delivery-tmp --junitxml=.pytest_cache/fix-w9-delivery.xml
+ruff check agent_py_agent/agent/gateway_parts agent_py_agent/agent/plugin_host agent_py_agent/agent/tooling agent_py_agent/agent/conversation agent_py_agent/tests/test_wave9_remote_agent_push.py agent_py_agent/tests/test_host_files_access.py
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py
+git diff --check db4d5de92..HEAD
+```
+
+**未验证**：全仓/跨平台测试、另一台机器或真实公网可达、生产TLS/反向代理、真实模型从消费到最终完成、正多进程C/W生命周期和长负载。上一轮扩展回归及真正基线复核记录保留在下一节，本轮没有把其未过项目改写为通过。
+
+## 2026-10-28 Wave 9 A1：单向远端推送、上下文快照与安全边界（源码候选）
+
+来源：完整阅读 `07-tasks/wave9-a1.md`，按主参考 Item 8 / Section 7 的单向事件合同实现；基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`，分支 `wave9-a1`，仅修改派工工作树。未推送、部署，未运行已退休的尺寸检查。
+
+### 做法及协议
+
+- 实际 `POST /remote-agent/push` 接入原HTTP分发表。独立 `X-Agent-Push-Token` 头出现在任何其它路由或方法均先返回 `REMOTE_PUSH_TOKEN_SCOPE_DENIED`，不参与Gateway/Host v2认证。Token配置必须启用、未过期、允许准确目标，且动作仅为 `push_event`；默认来源IP不限，非空时按CIDR及右向左可信代理链检查。
+- 只存SHA256验证器；已通过验证的本次Token仅在内存作HMAC密钥，不另存明文副本。时间窗±300秒，签名绑定原始bytes和nonce；nonce在原文件锁内消费，600秒包含边界仍拒重放，超期清理。拒绝重复JSON键、重复认证头、NaN/Infinity/数字溢出、超64KiB正文和客户端授权/路径等额外字段。
+- 原业务键为 `(token_id, target_owner, idempotency_key)`；同键异正文409，相同业务重试带新nonce复用原短回执。prepared状态先耐久落盘，再沿原输入T→C末门和原请求回执提交；提交后中断重试不产生第二队列记录或第二份历史。`new_thread` 专用线程，`reuse_key` 仍按Token和目标owner隔离。`run_id` 是已接纳排队回合的request id，不声称模型已经执行，也不提供报告查询。
+- `remote_agent_push` 只接受配置别名或准确匹配已有配置的显式URL，不接受模型明文Token参数。原宿主帮助函数 `save_remote_endpoint` 保存Fernet密文；owner节点只给本人，host节点默认仅main，额外调用者须准确 `allowed_callers`。显式URL不继承别名的私网例外。所有DNS回答核验后固定连接IP，禁止重定向；HTTP还须本次实际IP命中节点白名单，公网默认HTTPS。元数据/link-local即使列入白名单仍拒绝。发送阶段异常保留unknown，不自动重放。
+- 本地及跨实例都经 `thread_fork_service.fork_untrusted_context` 导入脱敏文本；来源线程先核当前owner，管理员例外按任务保留且仅在明确提供的当前库内查询，不枚举他人磁盘。最多256条/48KiB，超限拒绝、不悄悄截断。去掉原metadata和系统/工具协议，公共秘密净化加绝对/UNC路径移除；无法识别的任意自然语言秘密不作零泄漏保证。目标明确 `input_origin=remote_push`、不可学习，原Gateway属性投影仍保持该来源，USER/SOUL/AGENTS写入拒绝，不能把外部slash文字变成真人控制。
+- Token/nonce/receipt/host节点根纳入原文件及shell只读保护。单份幂等账本最多10000项、nonce最多100000项，满后明确503而不是丢掉旧幂等事实；回执锁繁忙时同样503。长期运行的账本迁移/容量治理需运维规划，不在本轮自动删除旧回执。
+
+### 实测及未验证
+
+首批18项在真实HTTP入口跑出缺功能断言失败；入站19项首先转绿。后续补充坏输入、配置写保护、发送效果、真实跨owner路径与秘密/路径canary，确认并修复实际失败。独立摘录审查提出的UNC、HTTP名单与nonce边界又各自跑红后修复；其要求删除main来源例外与任务第29行冲突，未采纳。独立审查未读完整仓库或跑测试，实际复核由父级完成。
+
+- 专属最终证据：`.pytest_cache/w9-a1-delivery.xml`，推送62项及两条原宿主配置/shell声明共64项通过、0失败/错误/跳过；涵盖独立发送/接收home的真实本机HTTP、来源不变、代理/IP、双Token隔离、监听器重启、跨进程nonce、队列提交后中断、SSRF所有DNS回答及重定向前拒绝。两条原保护声明用例随新增宿主根同步验证。最终导入边界0发现、全范围Ruff及差异空白检查通过。
+- 额外7文件324项扩展：首次22失败、3跳过，其余通过（`.pytest_cache/w9-a1-regression.xml`）。新增保护根造成的一条旧shell根列表断言已同步为更严格合同。其余21个失败在上述真正基线的完整 `git archive` 快照中逐一复现（`.pytest_cache/w9-a1-baseline.xml`，导入origin已核对快照内）；未修改/跳过这些测试。观察包含硬链接EPERM、shell返回71及搜索未命中，不把它们一概归因为沙箱，也不把扩展回归说成全通过。
+- **未验证**：真实外部网络/另一台主机可达、生产反向代理与TLS部署、正多进程C/W生命周期、真实模型消费至最终任务完成、长期高负载与完整自学习晋升链路。当前证据是本机协议/原队列/来源投影和拒绝门，不外推这些端到端结果。
+
+复现（工作树根；本机测试的临时文件放入工作树内）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_host_files_access.py::test_shell_lists_host_files_per_mode agent_py_agent/tests/test_host_files_access.py::test_declarations_match_the_canonical_layout -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。

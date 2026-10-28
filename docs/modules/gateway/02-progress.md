@@ -1,3 +1,9 @@
+## 2026-10-28 Wave 9 A1 Round 2：单向远端推送（本地候选，未部署）
+
+- `gateway_parts/remote_push_service.py` 承接唯一 `POST /remote-agent/push`。独立push Token仅允许目标owner的事件入队，时间窗/HMAC、跨进程nonce及持久业务幂等先于原Gateway输入T→C提交；回执不含消息正文，`run_id`仅指排队请求，不证明模型执行完成。其他路由不接受push Token作为读取或控制身份。
+- `remote_agent_push` 仅投递到宿主加密配置的节点，不接受模型明文Token；Round 2在原操作账记录前统一清洗错误结果的所有文本和嵌套字段，别名与显式URL均遵守本次冻结禁网及当前owner权限。DNS同时检查原IPv6和IPv4投影，重定向即使同URL也不得产生第二次连接；线程hash加入 `new_thread:` / `reuse_key:` 防止同标签混线。
+- 本机真实HTTP、原执行器/操作账、来源禁学和队列去重的证据及准确测试结果见 [TESTS](../../../TESTS.md) 本轮小节；结构见 [04-structure](04-structure.md)。未验证另一台主机、生产TLS/代理、真实模型完成或正多进程C/W生命周期，不把源码候选写成生产验收。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理CLI轻上下文（本地候选）
 
 管理入口不再为配置/路径解析创建SimpleAgent；共用原owner权限、冻结配置及runtime paths，真实执行组合根不变。common与gateway_loops的传递core导入已解除，原工厂注入仍兼容；原日志索引只在实际写日志时按需构造，普通解析和关闭的事件镜像不建库。冷子进程、原路径对照和真实构造禁止回归，以及实际验证边界见[TESTS](../../../TESTS.md)本轮小节；结构见[04-structure](04-structure.md)。不代表生产Gateway、真实TUI/IM或跨平台已验收，尚未部署。

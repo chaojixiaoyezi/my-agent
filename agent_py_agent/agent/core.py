@@ -8,7 +8,7 @@
 # 模块直接导入，不保留无人消费的旧 re-export；来源 resolver/schema 成对绑定，显式派工后端注入也须隔离到线程。
 # LLM: 记忆真实构造叶与嵌入工厂已纯提取；本模块保原字段赋值顺序、startup快照和curator后半段，不能借此接冷HTTP。
 # LLM: 普通 MCP 的管理员全盘免确认只在 registry 每调用读取原 owner 模式并核当前有效边界，不从配置字符串独自签权。
-# 模块用途: 组装模型后端、同源工具声明、记忆、会话和子代理；源码和无源码发行共用工作区裁决；只读self_map沿各领域原公开读口装配。
+# 模块用途: 装配当前owner的模型、工具、记忆、会话及单向推送宿主；不从模型参数恢复节点凭据或来源权限。
 
 from __future__ import annotations
 
@@ -1003,6 +1003,8 @@ TOOL_RETRIEVAL_LIMIT_COUNT = 12
 
 # LLM: ToolRegistry唯一装配入口；原defer/owner/凭据/审批不变，动态内网名单缺agent.config时按空集关闭而非异常。
 # 函数用途: 按身份和工作区装配工具及动态内网配置，完整agent与显式配置装配宿主共用原接线。
+# LLM: 只给当前owner工具表注入真实Agent供节点库/源会话读取；推送仍走原Registry审批和出站单向网络门，构造不外发。
+# 函数用途: 构造当前用户工具表并绑定原宿主依赖，不复用另一owner的推送上下文。
 def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_connect: bool = False) -> ToolRegistry:
     from functools import partial
 
@@ -1034,6 +1036,7 @@ def _build_tool_registry(agent: SimpleAgent, config: AgentConfig, *, defer_mcp_c
             owner_scope_root=owner_scope_root,
             owner_type=_tool_registry_owner_type(agent),
             protected_persona_root=_protected_persona_root(agent),
+            remote_push_agent=agent,
             # 沙箱只在 owner 隔离时用它拒绝读取其它 owner 与配置（开关打开时对非本机管理员还有用户家目录）；
             # full access 视图不生效，所以这里无条件给出。
             host_private_roots=owner_hidden_host_roots(

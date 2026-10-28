@@ -1,3 +1,5 @@
+# LLM: H3回归保留原文件与Shell强断言，remote_push配置根必须和规范布局同步，不因新增路径降低保护。
+# 模块用途: 验证宿主托管配置、运行状态及凭据的读写隔离。
 """H3 合同单测：宿主托管文件对模型只读，宿主凭据对文件工具不可读。
 
 来源：be 复审语义记忆时发现管理员的文件工具和命令能直接写 ~/.my-agent/config/（绕过参数中心的边界键、修改账本、撤销和
@@ -250,6 +252,8 @@ def test_isolated_owner_keeps_old_codes_and_cannot_write_its_own_host_files(tmp_
     assert policy.check(home["feishu"] / "config" / "capability_config.yaml").code == "PATH_CROSS_OWNER_BLOCKED"
 
 
+# LLM: 新增远端推送根是任务声明的宿主权威目录，继续与原配置布局一起验证，只读不授予模型写入。
+# 函数用途: 验证宿主配置与推送根的路径保护声明完整。
 def test_declarations_match_the_canonical_layout(tmp_path):
     """守卫：路径策略为能原样打进插件 SDK 写成路径片段，必须与宿主布局函数一致。"""
     from agent_py_agent.agent.capability.runtime_config_reload import default_capability_config_path
@@ -271,7 +275,7 @@ def test_declarations_match_the_canonical_layout(tmp_path):
 
     root = tmp_path.resolve()
     paths = home_paths(root)
-    assert {paths.config_dir, paths.system_config_dir} == {root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS}
+    assert {paths.config_dir, paths.system_config_dir, root / "remote_push"} == {root.joinpath(*parts) for parts in HOST_CONFIG_HOME_PARTS}
     owner = resolve_owner_home(root, OwnerIdentity.provider_user("feishu", "u-1")).home_dir
     capability = default_capability_config_path(owner)
     assert host_config_root_for_path(capability, root) == capability.parent
@@ -406,6 +410,8 @@ def test_write_boundary_and_plugin_contexts_apply_the_same_rules(tmp_path, monke
 # ---------------------------------------------------------------- 命令沙箱
 
 
+# LLM: 推送权威根沿唯一配置声明进入原shell只读覆盖；不能只在文件工具层保护。
+# 函数用途: 核对隔离及管理员命令执行的完整宿主只读根。
 def test_shell_lists_host_files_per_mode(tmp_path):
     from agent_py_agent.agent.tooling.shell import host_readonly_paths_for
 
@@ -420,7 +426,7 @@ def test_shell_lists_host_files_per_mode(tmp_path):
     assert scoped == {main / "config", *(main / name for name in state)}
     full = set(host_readonly_paths_for("", str(main)))
     owners = (main, feishu, bare)
-    assert full == {root / "config", root / "system" / "config", *(home_dir / "config" for home_dir in owners),
+    assert full == {root / "config", root / "system" / "config", root / "remote_push", *(home_dir / "config" for home_dir in owners),
                     *(home_dir / name for home_dir in owners for name in state)}
     assert home["verification"] not in full | scoped and task, "任务核验记录只按写边界的 task_root 给（3a 定），不从路径反推"
     assert host_readonly_paths_for(str(tmp_path / "loose-owner"), "") == (), "非规范布局推不出数据根时不加覆盖"

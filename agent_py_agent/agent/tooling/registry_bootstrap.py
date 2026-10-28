@@ -1,6 +1,6 @@
 # LLM: 工具注册的装配点，按注册参数构造内置工具；可信来源合同和语法反馈开关由 core 注入，构造不读私有资源，
 #   只注册不执行，权限仍由原动作策略逐调用裁决。
-# 模块用途: 把文件、归档读取、命令、网页等内置工具注册进工具表，让来源与可选诊断沿同一权限链连接。
+# 模块用途: 装配文件、网页与单向推送等工具；推送仅绑定当前owner宿主，构造不解密或外发。
 from __future__ import annotations
 
 from typing import Any
@@ -103,9 +103,12 @@ def _register_filesystem_tools(registry: Any, params: Any) -> None:
     registry.register(EditFileTool(registry.workspace_root, workspace_roots, access_options))
 
 
-# LLM: 抓取工具沿 G4 端口守门；命令工具携带宿主冻结凭据来源，不能从模型参数覆盖环境擦洗规则。
-# 函数用途: 注册网络工具并传入配置端口及内网白名单；实际绑定端口每跳从统一注册表读取。
+# LLM: 抓取沿原G4门；单向推送另有固定路径/节点凭据/私网门，不变成任意Gateway请求。构造不执行网络。
+# 函数用途: 装配网络和单向推送工具，保留命令凭据擦洗与原进程工具链。
 def _register_network_tools(registry: Any, params: Any) -> None:
+    from .remote_agent_push_tool import RemoteAgentPushTool
+
+    registry.register(RemoteAgentPushTool(getattr(params, "remote_push_agent", None), timeout=params.http_timeout))
     registry.register(WebSearchTool(max_results=params.max_matches, timeout=params.http_timeout))
     hosts_provider = getattr(params, "allowed_private_hosts_provider", None)
     registry.register(
