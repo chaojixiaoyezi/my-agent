@@ -28,6 +28,8 @@
 
 任务指定回归（在工作树根执行）：
 
+2026-10-28 状态补充：以下保留当时的任务命令及其结果；尺寸数值门已退役，后续复验不运行其中的尺寸 checker。其余回归与验证按现行 AGENTS 执行，不因退役跳过真实进程与平台检查。
+
 ```bash
 python3 -m pytest agent_py_agent/tests/test_landlock_launcher.py agent_py_agent/tests/test_sandbox_output_capture.py agent_py_agent/tests/test_shell_foreground_cleanup.py agent_py_agent/tests/test_host_files_access.py agent_py_agent/tests/test_artifact_registry.py agent_py_agent/tests/test_tools/test_shell_tool.py agent_py_agent/tests/test_linux_shell_latency.py agent_py_agent/tests/test_registry_projection_cache.py -q --tb=short
 ruff check agent_py_agent/agent/tooling/shell.py agent_py_agent/agent/path_access_policy.py agent_py_agent/agent/tooling/process_output_capture.py agent_py_agent/agent/tooling/process_pipe_pump.py agent_py_agent/agent/attempt/process_run.py agent_py_agent/agent/artifacts/registry.py agent_py_agent/agent/artifacts/registry_projection_cache.py
@@ -52,4 +54,4 @@ git diff --check
 
 本地执行 `/bin/ps` 明确报 `Operation not permitted`，前台出生身份/僵尸核验无法取得真实事实。指定范围加 `-x -o addopts=''` 的检查得到 **45 passed、3 skipped、1 failed**，首个失败为 `test_natural_exit_cleans_child_after_outer_pipes_close[False-0]` 中出生身份为空；停止于首失败，后续未执行项不能记通过。更早不提前停止的相关检查持续遇到拒绝/超时，已停止，不作为全套结果。
 
-真实 Linux 隔离、完整指定回归及实际 Windows 平台尚未验证。合流前须在具备原进程观测权限的目标环境运行上面未加 `-x` 的完整命令；不通过不能据此文档宣布完成验收。
+真实 Linux 隔离、完整指定回归及实际 Windows 平台尚未验证。合流前须在具备原进程观测权限的目标环境运行上面未加 `-x` 的完整相关回归及当前有效门禁（不含已退役尺寸命令）；不通过不能据此文档宣布完成验收。

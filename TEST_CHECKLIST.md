@@ -1300,6 +1300,6 @@
 - [x] 在 R2 准确候选上保留 F4 learning_source/source-CAS、F5 self_map、F2 scopes/metrics 及当前媒体。
 - [x] 定向验证连续前缀、工具配对、当前/历史图、原小窗口分段与容量前置裁决，取消/网络/身份异常不进入容量分路。
 - [x] 验证真实采样绑定与迟到 generation/revision CAS、缺绑定只弃遥测，主/摘要 usage 和排队/物理尝试分开。
-- [ ] 运行 Ruff、文档同步、strict code-size、diff、clean-package；根统一全仓/线上 CI 与最终发行验收。
+- [ ] 运行 Ruff、导入边界、带实际基线的文档同步、diff、clean-package；根统一全仓/线上 CI 与最终发行验收。2026-10-28 起尺寸数值门退役，之前已勾选的尺寸验收保留为历史结果，不再作为新验收要求。
 
 上述均只使用 pytest 显式临时 my_agent_home；不以本地相同请求表面推断真实 provider 命中，不操作日常服务或网络策略。

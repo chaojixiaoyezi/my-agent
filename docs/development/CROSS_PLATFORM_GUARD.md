@@ -22,7 +22,7 @@ Run from PowerShell:
 python -m compileall -q agent_py_agent scripts
 python -m pytest agent_py_agent/tests/test_process_control.py agent_py_agent/tests/test_daemon_control.py agent_py_agent/tests/test_supervisor.py agent_py_agent/tests/test_dispatch_loop.py agent_py_agent/tests/test_runtime_gate_contracts.py agent_py_agent/tests/test_subagent_policies.py agent_py_agent/tests/test_subagent_manager_core.py -q
 python scripts/check_doc_sync.py
-python scripts/check_code_size.py --mode warn
+python scripts/check_import_boundaries.py --json
 git diff --check
 ```
 

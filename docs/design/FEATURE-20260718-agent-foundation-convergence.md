@@ -119,7 +119,7 @@ tool、artifact 和 conversation 事实，不增加自然语言硬判断或 IM �
   claim/restart、verification stale。
 - 合同：owner/group/shared 黑名单、子代理权限非扩张、普通自然语言不能触发硬状态。
 - 集成：同一 thread compact 后继续、小任务连续累积、定时唤醒复用同一 thread。
-- 本地 CI：pytest 全量、Ruff、compileall、import/offline/code-size/doc-sync/clean-package/artifact gates。
+- 本地 CI：pytest 全量、Ruff、compileall、导入边界、offline 合同、带实际基线的 doc-sync、clean-package 与 artifact gates；2026-10-28 起尺寸数值门退役，不删其他检查。
 - 真实：1.10 飞书双 owner、多长任务、并发聊天、`/btw`、`/stop`、compact、Memory/Persona/Skill
   隔离与无协议泄漏。
 

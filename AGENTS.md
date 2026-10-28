@@ -160,7 +160,7 @@ def example(...):
 - 注释内容要按当前代码真实职责写，不能用“处理某函数这一小段逻辑”这类机械话。
 - 新增或修改模块、class、def、method 时，同一批 diff 必须同步更新对应注释；不能只改实现。
 - 如果某个函数有写文件、发请求、启动进程、改状态、更新索引等副作用，注释里必须点出来。
-- code-size 统计按实现代码口径扣除注释和 docstring 行；不要为了过尺寸守卫删弱注释，真实实现接近阈值时要拆函数/类/文件。
+- 不为满足行数、参数数或 Mixin 数量而删弱注释、拆分实现、增加 bundle 或转发层；按真实职责、状态所有权、调用边界和接口合同决定拆分或合并。
 - 测试代码不强制每个测试函数都写双层注释，但测试 helper 如果会成为产品接口参考，也要写清楚。
 
 ## 文档和记录
@@ -206,8 +206,8 @@ def example(...):
 ```bash
 python3 -m pytest <与改动直接相关的测试文件> -q --tb=short
 ruff check agent_py_agent scripts
-python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base <本轮实际基线提交>
 git diff --check
 python3 scripts/check_clean_package.py .
 ```
@@ -216,8 +216,9 @@ python3 scripts/check_clean_package.py .
 - 默认只跑与改动直接相关的 focused tests；不要为了常规小中型改动重复跑全仓 pytest。
 - 仅当本轮生产代码和测试代码的新增、删除累计达到约 10,000 行，或用户另行明确要求时，才在 focused tests
   之外追加 `python3 -m pytest -q --tb=short` 全仓测试。
-- Ruff、doc sync、strict code-size、diff 和 clean-package 仍属于远端提交前严格 gate，不受上述 pytest
+- Ruff、导入边界、doc sync、diff 和 clean-package 仍属于远端提交前严格 gate，不受上述 pytest
   频率限制。
+- 2026-10-28 起代码尺寸数值门退役：不再运行尺寸 checker，生成/维护尺寸报告或 baseline，也不以新增尺寸告警清零作为提交条件。历史验收记录保留，当前治理依据是职责、边界和真实回归；退役清单与集成状态见 `DESIGN_LEDGER.md` 当日 Wave 8 条目。
 - 任一命令失败时，默认不得推送远端、不得合并到 `main`；除非用户明确要求绕过，并且最终汇报写清失败命令、风险和原因。
 - 推送 `main` 前先看上一轮线上 CI 是否全绿；推送后跟到全部工作流全绿为止，红了先修，不在红的 `main` 上接着推新功能。
 - 只在线上才暴露的问题，推送前要在接近 GitHub runner 的环境复现：Linux 用非 root 用户、Python 解释器不在系统目录、3.11/3.12 版本（支持范围 Python 3.11–3.14）、单用例 60 秒超时；改到文件系统、进程、路径这类平台相关代码时，先在分支上手动触发 Cross-platform guard（Windows 只能在线上跑）。

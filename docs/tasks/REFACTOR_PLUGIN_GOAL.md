@@ -258,7 +258,7 @@ Audit/摄取重构、auth 和 Jev 不在本轮范围，原有功能保留；共�
 ## 发布与部署前置条件
 
 1. 审查从远端 main 到候选提交的全部相关 diff，确认当前文档与行为一致，隐私和原始测试资料不入仓库。
-2. 跑相关 focused tests；发布范围的生产/测试增删超过约一万行时追加全仓 pytest。Ruff、doc sync、strict code-size、diff 与 clean-package 均通过后才能推送 main。
+2. 跑相关 focused tests；发布范围的生产/测试增删超过约一万行时追加全仓 pytest。Ruff、导入边界、带实际基线的 doc sync、diff 与 clean-package 均通过后才能推送 main。2026-10-28 起尺寸数值门退役，前文已完成里程碑的尺寸验收只保留历史事实。
 3. 核对远端 main 最新值，按正常快进发布；不覆盖其他人的新提交，不强推。确认远端实际 SHA，线上 CI 单独记状态。
 4. 同一提交构建一个 non-editable wheel，记录校验和；本机和确认的测试机使用同一 wheel，各自保存旧 runtime、启动配置与回滚证据。
 5. 在停止 Gateway 前确认活动任务和资源归属；每台机器只有一个 Gateway，默认 TUI 和 Gateway 使用同一个新 runtime。原会话、工作目录、权限和个人模型配置保留。

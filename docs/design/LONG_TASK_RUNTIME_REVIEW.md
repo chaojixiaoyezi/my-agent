@@ -699,8 +699,8 @@ T 负责控制链及 `conversation/runtime.py` 的输入和前后台交接函数
 ```bash
 python3 -m pytest <与本次改动直接相关的测试文件> -q --tb=short
 ruff check agent_py_agent scripts
-python3 scripts/check_doc_sync.py
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base <本轮实际基线提交>
 git diff --check
 python3 scripts/check_clean_package.py .
 ```

@@ -9302,3 +9302,86 @@ F1/F2/F4–F7及当前F3修复已在开发工作树整合。S11四机160定向�
 3. **TUI 顶部“上一条我说的话”常驻显示与阶梯式点击跳转栏**：
    - **交互语义**：在 TUI 聊天视口最上方常驻显示当前视口顶部上方最近的一条用户消息（`role == "user"`）摘要；鼠标左键点击该顶栏即可将视口直接向上跳转到该条用户消息所在位置；跳转到位后，顶栏自动更新为再上一条用户消息，再次点击可继续向上逐条回溯历史提问。
 
+
+## 2026-10-28 Wave 8 代码尺寸数值门退役、CLI/Runtime 正式边界收口与多 Owner 内存瘦身（Phase 0 + Phase 1 已实现）
+
+### 状态与证据口径
+
+本条按 Wave 8 派单的“Phase 0 + Phase 1 已实现”口径汇总集成内容及必须保持的合同，不把派单状态等同于本分支已合入或本轮已验收。文档分支 `wave8-t1-w4` 从 `9ee9bdc018f6587ac366f3565c0b7f06bcffe642` 切出；本轮核对时，主干及各 Wave 8 施工分支引用仍在此基点，新模块、尺寸文件删除与下面的优化尚不能由这些引用证明已合入。目录树因此标为集成目标；实现 SHA、实际回归与部署状态由集成者在合入后逐项补证。本条不覆盖紧邻上方的闲置自动 Compact、后台进程观察瞬态误报和用户发言连续跳转栏条目；三项仍为已确认、待实现的独立需求。
+
+依据：本轮文档治理派单、focused-refactor-v2 的 `CODE_SIZE_RETIREMENT.md` / `EXECUTION_PROMPT.md` 及同侪审计 Section 4.2。参考蓝图的旧快照只用于说明责任与合同，不机械采用其中的旧行号、失效文件名或设想接口；本轮没有修改任何 Python、测试代码、CI workflow 或运行数据。
+
+### 1. 数值尺寸治理完整退役，其他质量门保留
+
+2026-10-28 起取消以文件/函数/类/Mixin 行数、参数数、嵌套层数、Mixin 数量及 soft/high-risk 告警数量决定拆分和提交的规则。strict/hard、warn/advisory、报告、两份 baseline 和新增告警清零要求一起退役，不留下空 checker、恒定成功、占位报告或换名后的数值门。既有 bundle、Mixin 和服务对象若承担快照、事务、初始化顺序或生命周期职责，继续保留；不因取消数字而批量拆除。
+
+T1 W1 负责删除的专属文件清单为以下 11 项；本 T1 W4 只解除现行文档指令和失效导航，不重复修改 W1 的文件：
+
+- `scripts/check_code_size.py`
+- `scripts/code_size_ast_checks.py`
+- `scripts/code_size_docstrings.py`
+- `scripts/code_size_report.py`
+- `scripts/code_size_rules.py`
+- `scripts/code_size_thresholds.py`
+- `CODE_SIZE_POLICY.md`
+- `CODE_SIZE_REPORT.md`
+- `CODE_SIZE_BASELINE.json`
+- `.code_size_baseline.json`
+- `agent_py_agent/tests/test_code_size_script.py`
+
+三处 CI 尺寸步骤分别位于 `.github/workflows/lint.yml`（`Check code size guardrails`）、`cross-platform-guard.yml`（`Check code size budget`）、`full-tests.yml`（`Check local complexity guardrails`）。只退役这些步骤，不删除所在 job，也不删除 Ruff、语法、导入/分发边界、clean-package、doc-sync、架构及平台回归。
+
+必要消费者须同批解耦：offline contract matrix 删除尺寸报告读取和 `code_size_blocked/high_risk/soft` 输出，保留真实 `REQUIRED_AREAS` 缺项失败；架构文档存在性检查移除两份尺寸文档要求；测试树守卫删除尺寸报告 fingerprint 分支但保留 MagicMock 污染检测/清理；doc-sync 删除尺寸专属豁免但不放宽其他模块同步要求；W1 更新 `CLEAN_PACKAGE_POLICY.md` 的打包清单，不能留下不存在的文件。
+
+现行治理依据为真实职责、状态所有权、调用边界和接口合同。保留 `ruff check agent_py_agent scripts`、`scripts/check_import_boundaries.py --json`、`scripts/check_doc_sync.py --base <本轮实际基线提交>`、`scripts/check_clean_package.py .` 及相关合同回归。CLI/Agent 专项入口 `check_cli_agent_imports.py` 在本基点不存在；若施工分支提供它，集成者须核对真实文件及调用再运行，不能在本分支伪造入口或宣称已通过。UTF-8/AST、星号导入、命名、权限、超时、并发、费用和运行时 token 约束不随尺寸门退役。
+
+历史处理：本台账只追加；过去的测试数量、失败、通过、报告污染、里程碑和提交事实原样保留。ADR 与历史交接中的旧尺寸引用仅表示当时规则，不继续驱动新验收；现行入口不再要求生成、恢复、比较或提交尺寸报告。`docs/reviews/`、`docs/modules/` 与 fixture 原字节未改。指定清单中的 `RUFF_GATE_PLAN.md`、`CONFIG_AND_BOUNDARIES.md`、`REAL_TASK_CLOSURE_PROGRAM.md`、`SUBAGENT_ORCHESTRATION.md` 在本基点未找到，不为凑清单新建或猜测继任文件。仓库外尺寸辅助脚本与旧发布物不在本单范围，未扫描、未删除。
+
+### 2. Runtime 局部去耦与正式 CLI/Agent 边界
+
+- `runtime/run_params.py`：收敛 `RunKeywordFields → run_params_from_keywords → run_params_from_values` 的纯打包/展开重复，保留 `SimpleAgent.run` 的公开调用方式、`None` / 显式 `False` / 空列表差异、默认值及请求身份补齐；不重做整个参数体系。
+- `FinalizeParams` 与构造接线局部合并去重；保留必要冻结、默认值、用量与收尾生命周期，不为删除类型而改变异常、取消或终态协议。`_get_finalization_service` 直接取得/复用真正的 `FinalizationService`，不再为单字段搬运保留 `_RuntimeServices` / `_get_services` 空包装。
+- `interrupted_conversation_response` 将运行层反向依赖的纯响应构造归回合适责任层；`_route_action` 收敛局部状态翻译，结束、失败、取消仍是不同语义，不压成单个布尔值。`RuntimeLoopParams`、`PreparedRuntimeContext` 和 Compact 原有身份/事务边界保持。
+- `agent/conversation/turn_timing.py` 承载耗时、完成时间和完成行的纯格式化，供 `background_history.py` 与 CLI 共用；CLI 计时器/TUI 状态留在 CLI，历史事件格式不变，不以 CLI re-export 保留新的空转发层。
+- `agent/memory_api.py` 暴露冷 Owner curator 预检的 `due / not_due / unknown` 三态及 urgent 恢复标记。CLI 不再拿到 `MemoryCuratorState` 或自行解析 `curator/state.json`；只读预检不得创建 Agent、调用模型或将 unknown 当作没有待办。
+- `SubAgentIndexingService.rebuild_subagent_index` 作为公开的子代理索引重建入口；CLI 保留展示，移除 `local_storage/records.py` 的临时私有转发，不改变索引格式、任务过期策略或后台调度。
+- 删除确认无外部合同的 `cli/chat_parts/input_loop.py` 内部 re-export，必要消费者直接迁到实际 `slash_commands` 入口；不以放宽导入白名单替代迁移。
+- 共用 `tooling/tool_spec.py` 的内置 `ToolModelSpec` 纯构造辅助，以及 `assets/descriptor.py` 的定义构造/校验。保留 `AssetDescriptor.from_dict` 兼容、标准 Key、id/kind 一致性、schema 与异常合同；`_policy/_dispatch/_outcome/_owner/_validate`、Store 锁、凭据、执行和提交后读回仍在原责任层，不新造综合工具框架。
+
+### 3. Phase 0（P0-1..P0-6）：轻入口、连接生命周期与后台资源
+
+| 项目 | 集成内容与保持边界 |
+| --- | --- |
+| P0-1 | `resume` / Gateway 聊天客户端按真实模式选轻上下文，恢复缺失 session 登记沿原只读 ConversationStore 与可信 owner/线程范围；进入聊天前释放不再使用的临时完整 Agent 及其自有连接，不保留两套常驻资源。 |
+| P0-2 | Gateway/adapter 的启动前路径准备及 status/stop/logs 等薄入口使用轻量宿主路径上下文，与完整 Agent 的路径解析一致；`gateway run` / `supervisor run` 等真正组合根保留完整 Agent，不因减内存而改 inbox、owner 或默认路径。 |
+| P0-3 | Owner 池和 worker 构造延迟连接 MCP，预检阶段不启动多套进程；配置继承、权限收窄与线程档案副作用仍沿原入口。延迟语义是“激活不连，首个真正 run 在冻结工具快照前连接”，不冒称已改成每个 MCP 工具调用时才连。 |
+| P0-4 | `ToolRegistry.reopen_mcp_clients()` 在同一连接准备锁下清理关闭状态、复位 connected/retry 状态，保证下一次准备能够重连；池的获取/pin/逐出不得留下被 pin 后又遭迟到 close 的竞态。`GatewayAdmission` 以结构化 `owner_capacity` 背压沿原等待/inbox 协议处理，持久准入同步，不在已 pin 的执行中阻塞等槽位。 |
+| P0-5 | Gateway 复用 `common/json_io.py` 的 `path_thread_lock` 包装与弱引用锁表，临界区持 handle 强引用，避免一条路径出现两把活锁。PTY 空闲超时冻结到各 session，按会话自己的配置清理，巡检线程惰性启动；任一 Owner/overlay 的零值不能关闭别人的兜底。任务级日志覆盖不改全进程 logger，配置边界与敏感日志规则保持。 |
+| P0-6 | 增加受控后台资源/内存观察能力；诊断只在显式管理员授权入口按实际配置启动，默认关闭、有界运行并清理，输出脱敏的分配/池/进程事实而非对象或会话正文。未同口径测量就不宣称内存、CPU 或延迟收益。 |
+
+### 4. Phase 1（P1-1..P1-4）：缓存信任与同 Owner MCP 共享
+
+| 项目 | 集成内容与保持边界 |
+| --- | --- |
+| P1-1 | `conversation/message_selection.py` 复用位置索引/前缀摘要并对选中行惰性 `deepcopy`，避免 predicate 尚未读取就复制全部缓存行。跨调用缓存的信任条件明确为 `(dev, ino) + 单调不减的 size + tail anchor + mtime_ns`；替换、截断、尾锚或时间签名不符须回退重新核验。该模型依赖 append-only：不能把尾锚当成任意中段改写的密码学证明，也不能声称持久化 prefix hash 本身让完整前缀验证变成 O(1)。复用已有 Compact 字节检查点，不新造第二套持久游标。 |
+| P1-2 | `capability/skill_service.py` 对同一正文只读一次，hash、解析卡片和元数据来自同份文本，修复两次读取之间的 TOCTOU。guard 缓存必须绑定 Skill 目录中实际资源的完整签名，而非仅 SKILL.md 的 path/mtime/size；脚本等资源变化必须使缓存失效。Owner 的 enabled、策略与授权结论继续逐 Owner 核验，不能跨 Owner 复用可变策略。 |
+| P1-3 | `ToolModelSpec` schema hash 与 provider schema 投影按真实内容及不可变性边界缓存；保留 `assert_schema_hash` 对就地改写的检测，不用裸对象 id 或旧 hash 跳过验证。若采用构造期深冻结，必须同时保持 schema/错误与序列化合同；缓存结果不可成为多个 Owner 共用的可变 dict，MCP 刷新后的新 spec 不沿用旧投影。 |
+| P1-4 | worker 保留自己的 `SimpleAgent` 门面、agent-bound 工具、运行身份及权限快照；只在同 Owner、同进程、MCP 配置/凭据范围一致时共享底层 MCP 状态。`owns_mcp_lifecycle()` 决定关闭权，access-policy 视图与借用方退出不得关闭父连接；父逐出与借用引用/pin 必须协调，不能仍靠对象 `is` 猜所有权。不同 Owner 不共享连接；共享 stdio 客户端的串行锁/超时语义必须纳入验收，不能据资源复用推断延迟更低。 |
+
+Owner 墙继续采用原有收紧方向的配置回退，不能把请求漏传围栏解释为无墙访问。`ThreadLocalAgentAttribute`、ModelScoped/ContextVar、配置和权限快照不移到父子共用的可变字段；GUI/MCP 等底层复用不等于复用父 agent-bound 工具或授予子代理父权限。
+
+### 5. Phase 2 / Phase 3 延后项（暂不实施，待后续压测触发）
+
+对照 `my-agent-memory-slimming-evaluation` 评估提案，以下中远期演进项在本轮明确登记为**延后未实施（Deferred）**，不在 Phase 0 / Phase 1 中提前引入复杂度：
+- **Phase 2（高频数据结构紧凑化与惰性索引加载，状态：暂不实施）**：
+  - 范围：对高频消息/事件/候选记录 dataclass 全面引入 `__slots__`、拆分冷热字段（cold-field compaction）、将会话/运行索引改为按需分片映射。
+  - 延后原因与恢复实施前置条件：Phase 0 + Phase 1 已消除冗余 `SimpleAgent` 构造、MCP 重复子进程、无界锁字典及全量 `deepcopy`；仅当完成 Phase 0 + Phase 1 后的真实多 Owner 压测显示 Python 对象头或冷字段仍占常驻 RSS 主导比例（>20%），且完成序列化/反射兼容评估后，才立项实施 Phase 2。
+- **Phase 3（Subagent 常驻进程池与 Gateway 多 Worker 进程模型，状态：暂不实施）**：
+  - 范围：跨任务复用的 Subagent Worker 常驻进程池、Gateway 多进程 Worker + IPC 共享状态总线。
+  - 延后原因与恢复实施前置条件：跨任务复用子代理进程或拆分为多进程 Gateway 会引入跨任务/跨 Owner 残留状态污染与分布式锁复杂度；仅在单进程单 Owner 池化 + 背压 + 同 Owner 线程级资源共享仍无法满足真实千级并发吞吐/隔离指标，且具备完整进程级沙箱重置与 IPC 合同验证时，才启动 Phase 3 架构设计。
+
+### 6. 验证、接入与未验证边界
+
+本单只同步现行 Markdown、目录树和本条账本，规定的验证是 `git diff --check`；实际执行及提交状态见本轮交接，不将蓝图中的命令当作已通过结果。集成者应在 W1/W2/W3 与 Track 2 源码合入后核对退役 11 项、三处 CI、真实合同缺项仍失败、导入边界和各局部行为回归，并运行实际新增的 `test_dual_owner_concurrent_canary.py`，确认双 Owner 并发及同 Owner MCP 借用/关闭隔离。该 canary 的文档登记不代表本轮已执行，更不代表真实模型、部署或外部用户端到端已验证。
+
+本轮未运行已退役的尺寸 checker，也未删除测试、放宽权限/导入门或修改运行数据。没有本轮实测的全仓、Linux、真实 LLM、真实 TUI、跨机器性能与已部署结果，一律不作为本单完成证据。

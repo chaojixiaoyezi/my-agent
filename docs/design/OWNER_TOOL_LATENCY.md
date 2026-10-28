@@ -79,11 +79,11 @@ PYTHONPATH=. python3 -m pytest \
 - Manifest：旧算法独立 oracle 的多种预算/种子逐字节对比，中文/emoji/JSON 转义，18/8 恰好预算，9/99 计数边界，核心字典同分/非字典和 state 字符边界。通过统计实际编码总字节而非不稳定耗时阈值，约束线性序列化工作量。
 - 计量：16 个真实并发线程在 producer/waiter 都进入后才释放，只计算一次；全部等待者得到原异常，同 key 重试、独立 components 副本、不同 key 并行、None key、重入、私有 holder 初始化，以及指导/media/压缩/身份变化失效。原 Q2 用例继续覆盖中段消息/schema/工具调用追加。
 
-另跑与嵌套接线直接相关的 `test_tool_program.py`。lint 范围为派单十个生产 Python 文件及四个新增测试；尺寸除 strict 基线门禁外，对改变的 AST 定义检查函数 ≤60 行、参数 ≤6、嵌套 ≤3、类 ≤250，并核对双层注释。
+另跑与嵌套接线直接相关的 `test_tool_program.py`。lint 范围为派单十个生产 Python 文件及四个新增测试；复验聚焦单一职责边界、导入分层与双层注释（2026-10-28 状态补充：数值型 `check_code_size.py` 基线门禁与函数/参数/嵌套/类固定行数检查已正式退役，下节仅保留当期历史验收记录，不再作为现行复验命令）。
 
 ## 当前验收事实与限制
 
-Ruff（派单生产范围加四份新增测试）通过；`check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 返回 `hard=0, blocked=False`，不是全仓零历史告警。改变的定义单独按派单更紧的尺寸阈值检查，无违规；双层注释检查无缺口。门禁生成的 CODE_SIZE_REPORT.md 已还原，不随功能提交。`git diff --check` 通过。
+Ruff（派单生产范围加四份新增测试）通过；当期历史验收时 `check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json` 返回 `hard=0, blocked=False`（2026-10-28 起该数值门禁已退役，仅作历史记录保留），不是全仓零历史告警。改变的定义单独按派单更紧的尺寸阈值检查，无违规；双层注释检查无缺口。门禁生成的 CODE_SIZE_REPORT.md 已还原，不随功能提交。`git diff --check` 通过。
 
 最终指定套件：**269 passed，1 failed**。唯一失败是 `test_operation_store_robustness.py::test_s248_lock_rejects_hardlink_same_inode`，夹具执行 `os.link(first, second)` 时返回 `PermissionError: [Errno 1] Operation not permitted`，尚未进入被测锁的断言。没有跳过/放宽/修改该测试，也没有以这条结果宣称产品锁逻辑通过；未在真正基线工作树复现，因此不宣称“基线已失败”。需要集成者在允许创建硬链接的 Linux 车道重跑原用例和指定套件。
 

@@ -15,7 +15,7 @@ degrade.  This project enforces both functional correctness and structural hygie
 | **Integration**   | Multi-module workflows, real file I/O          | Medium  | Every PR             |
 | **Contract**      | CLI argument parsing, output format stability  | Fast    | Every commit         |
 | **Regression**    | Bug fix proof -- test that reproduces the bug  | Fast    | Every commit         |
-| **Architecture**  | Structural guardrails: imports, naming, sizes  | Fast    | Every commit         |
+| **Architecture**  | Structural guardrails: imports, naming, ownership | Fast | Every commit         |
 | **E2E / Stress**  | Full dispatch flow, concurrency, memory push   | Slow    | Before release       |
 
 ## 1.1 Default Testing Strategy / 默认测试策略
@@ -130,7 +130,7 @@ directory to `tmp_path`.
 - **Zero star-import baseline** -- no new `import *` may be introduced.
 - **Junk filename baseline** -- no new `utils.py`, `helpers.py`, `common.py`, etc.
 - **Runtime artifact detection** -- `.pyc`, `__pycache__`, `.coverage` must not be committed.
-- **Local complexity enforcement** -- functions/classes/params/nesting must stay within limits.
+- **职责与边界治理** -- 保留真实导入、命名、语法和接口合同回归；2026-10-28 起不再以函数/类/参数/嵌套数量或行数设尺寸门。
 
 These tests **must pass** on every commit.  If they fail, fix the violation or
 update the baseline with a documented reason and a task record.
@@ -188,7 +188,7 @@ the risk of the change:
 python -m compileall -q agent_py_agent scripts          # Syntax check
 python -m pytest agent_py_agent/tests/test_memory_routing_matcher.py -q -v  # Focused example
 python scripts/check_doc_sync.py                         # Docs sync when docs/modules changed
-python scripts/check_code_size.py --mode warn            # Size warnings for code changes
+python scripts/check_import_boundaries.py --json         # Import boundaries
 git diff --check                                         # Whitespace errors
 ```
 
@@ -208,8 +208,7 @@ add insertions and deletions together to satisfy this threshold.
 python3 -m pytest -q --tb=short                          # Full test suite
 ruff check agent_py_agent scripts setup.py package_boundary_policy.py  # Lint
 python3 scripts/check_import_boundaries.py               # Production/layer import boundaries
-python3 scripts/check_doc_sync.py                        # Docs sync
-python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json  # Local-complexity hard gate; file length is advisory
+python3 scripts/check_doc_sync.py --base <本轮实际基线提交> # Docs sync
 git diff --check                                         # Whitespace errors
 python3 scripts/check_clean_package.py --mode worktree . # tracked/untracked + runtime data visibility
 # 构建 wheel/tar 后另跑:python3 scripts/check_clean_package.py --mode artifact <artifact>
