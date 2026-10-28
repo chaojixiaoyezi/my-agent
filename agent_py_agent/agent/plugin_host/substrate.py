@@ -1,5 +1,5 @@
-# LLM: 只接真实AuthorizedCall和原领域；第一版变更要求当前本机管理员，不能借安装者或普通caller身份提权。
-# 模块用途: 接通通用插件包、无账本调试和认证底座，复用原安装表、制品注册账及session权威。
+# LLM: 只接真实AuthorizedCall；debug默认预览，模型缺席时仅确定性mock，不把本机管理员能力扩给普通caller。
+# 模块用途: 接通包管理、安全调试和认证底座，复用安装、制品和session权威。
 from __future__ import annotations
 
 import base64
@@ -17,6 +17,7 @@ from ..plugin_package import (
 )
 from ..user_space.owner_resolver import OwnerIdentity
 from ..user_space.totp_sso_auth import TotpSSOAuthService
+from ..workflows.debug_nodes import analysis_preview
 from .action_specs import action_spec, required_capabilities
 from .action_specs_substrate import SUBSTRATE_ACTIONS
 from .authorization import revalidate_call
@@ -56,8 +57,8 @@ def staged_package_bytes(context, raw_path):
         raise HostAPIError('PACKAGE_SOURCE_DENIED', 403) from None
 
 
-# LLM: 只由可信Gateway构造，不从HTTP注册回调；SSO就绪取真实验签器，原四端口和状态权威保持。
-# 类用途: 给三类通用底座提供Host领域适配，不混入门户或安全业务逻辑。
+# LLM: 只由可信Gateway构造；分析/节点执行器取宿主注入，缺live分析器仅给mock，SSO仍需真实验签器。
+# 类用途: 为通用包、预览调试及认证提供Host适配，不在JSON中注册执行回调或新增业务权威。
 class GatewaySubstrateDomain:
     # LLM: 构造零IO，仅保留同一Gateway的真实依赖；不构造主Agent或启动后台服务。
     # 函数用途: 保存Owner路径、原会话与制品读口。
@@ -97,8 +98,8 @@ class GatewaySubstrateDomain:
             actor_id='local/main', channel='plugin', conversation_id=authorized.binding.installation_ref, is_admin=True)
         return PluginManagement(management)
 
-    # LLM: schema/能力/身份先于IO；认证不经通用回执缓存seed或token；安装/生命周期继续原幂等事务。
-    # 函数用途: 分派一个已授权底座动作，不接受动态路由或可执行回调参数。
+    # LLM: schema/能力/身份先于IO；debug布尔缺省False显式透传，可信注入负责原外部执行授权，认证不缓存秘密。
+    # 函数用途: 分派已授权底座动作，安全调试缺live模型时使用纯内存预览。
     def call(self, authorized):
         context = self._context(authorized)
         action = authorized.call.action
@@ -113,7 +114,12 @@ class GatewaySubstrateDomain:
             raise HostAPIError('INVALID_SCHEMA')
         if action == 'workflows.steps.debug':
             from ..workflows.engine import WorkflowEngine
-            result = WorkflowEngine(context.owner_home.home_dir).debug_step(**data)
+            server = self.resources.server
+            analyzer = getattr(server, 'workflow_debug_analyzer', None)
+            result = WorkflowEngine(context.owner_home.home_dir,
+                analysis_handler=analyzer if callable(analyzer) else analysis_preview,
+                debug_node_handler=getattr(server, 'workflow_debug_node_handler', None)).debug_step(
+                    **{**data, 'allow_side_effects': data.get('allow_side_effects', False)})
             return DomainResult(200, result)
         return DomainResult(200, self._auth(authorized, data))
 
@@ -142,8 +148,8 @@ class GatewaySubstrateDomain:
             return service.complete_sso_callback(**data)
         raise HostAPIError('UNSUPPORTED_ACTION')
 
-    # LLM: 三种输入严格互斥；artifact_ref只走原注册账，sha256校验原上传字节，输出sha256对应规范化ZIP。
-    # 函数用途: 取得唯一来源的包字节并安全规范化，任何来源错误都先于安装写入。
+    # LLM: 三种来源互斥，摘要校验原上传字节，不匹配统一PACKAGE_SHA256_MISMATCH且先于任何安装写入。
+    # 函数用途: 从授权来源取得有界包，先验证SHA256和manifest再安全规范化安装输入。
     def _candidate(self, authorized, context, data):
         if sum(key in data for key in ('package_base64', 'package_path', 'artifact_ref')) != 1:
             raise HostAPIError('INVALID_SCHEMA')
@@ -156,7 +162,7 @@ class GatewaySubstrateDomain:
                 reader = self.observations.routes['workspace']
                 raw = reader.read_registered_bytes(authorized, context, data['artifact_ref'], max_bytes=HOST_PACKAGE_LIMITS.archive_bytes)
             if 'sha256' in data and hashlib.sha256(raw).hexdigest() != data['sha256']:
-                raise HostAPIError('PACKAGE_DIGEST_MISMATCH', 409)
+                raise HostAPIError('PACKAGE_SHA256_MISMATCH', 409)
             package = inspect_plugin_package(normalize_plugin_archive_bytes(raw), limits=HOST_PACKAGE_LIMITS)
             if data.get('plugin_id', package.manifest.plugin_id) != package.manifest.plugin_id:
                 raise HostAPIError('PACKAGE_ID_MISMATCH', 409)

@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 2：加密封套与默认预览（源码候选，未部署）
+
+按返工卡收紧：TOTP每Owner独立32字节私有密钥留在原宿主凭据保护域，版本/UID绑定的Encrypt-then-MAC封套先验后解；原认证状态、跨进程锁、epoch和session权威不变，旧明文只在首次锁内消费迁移。debug显式 `allow_side_effects=False` 默认预览，不能把“无账本”当成“无业务副作用”；True不撤销原沙箱/授权。固定mock函数按对象身份识别，不信analyzer自报纯属性。六种通用mode可保存和单步调试，正式DAG明确不隐式启用；外部节点只经可信宿主端口，缺失不伪造执行成功。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)，实际回归和边界见TESTS.md；不新增生产迁移任务或第二身份/运行权威。
+
 ## 2026-10-28 Wave 9 A2：通用Host安装、无账本调试与认证底座（源码候选，未部署）
 
 来源：`07-tasks/wave9-a2.md`，基线 `db4d5de92`。十个通用动作复用唯一Host目录、安装/工作流/本地用户/session权威；不增加门户专项域。新安装默认停用、更新显式CAS、启停沿原审批；新Host归档预算独立收紧，规范仍是当前根plugin.json。调试沿原runner传record_summary=False，不写run/摘要/通知/pin；旧受限execute不自动取得管理员空间调试权，新增plugins.manage/workflows.debug须独立批准。

@@ -1,5 +1,5 @@
-# LLM: 通用宿主底座的独立需求回归；仅临时Owner和受控脚本，不访问生产账号或外部IdP。
-# 模块用途: 验证归档安全、无账本单步调试和认证协议的安全边界。
+# LLM: 原底座回归继续验证真实脚本/沙箱/超时，按新合同显式allow_side_effects=True；默认安全预览另有独立回归。
+# 模块用途: 验证归档、显式许可的无账本调试及认证边界，不访问生产账号或IdP。
 from __future__ import annotations
 
 import importlib.util
@@ -120,11 +120,12 @@ def script(home, script_id, code):
         'io_contract': {'outputs': ['value']}}), code, interpreter='python3', entrypoint='main.py')
 
 
-# LLM: 不代替产品执行器；入口缺失与调试失败必须真实暴露。
-# 函数用途: 调用真实无账本单步调试并保留返回事实。
+# LLM: 旧真实执行用例显式请求副作用，不删除输出/超时/文件断言；安全默认由新测试直调产品验证。
+# 函数用途: 调用真实单步执行并保留全部原断言，适配新的默认只预览合同。
 def debug(engine, *args, **kwargs):
     call = getattr(engine, 'debug_step', None)
     assert callable(call), '缺少不写账的单节点调试入口'
+    kwargs.setdefault('allow_side_effects', True)
     return call(*args, **kwargs)
 
 
@@ -634,8 +635,8 @@ def test_host_lifecycle_dispatches_original_management(production_host, monkeypa
     assert seen == commands
 
 
-# LLM: 真实HTTP创建普通账号、MFA并执行管理员Owner脚本，不直接构造授权binding。
-# 函数用途: 核验认证/调试动作接到正确原Owner及无账本执行器。
+# LLM: 原HTTP真实执行用例显式许可副作用，不绕过授权或弱化输出断言，默认预览另有标记文件回归。
+# 函数用途: 核验MFA和显式脚本调试接入正确Owner及无账本执行器。
 def test_host_real_http_totp_and_debug_use_original_owner(production_host):
     from agent_py_agent.agent.plugin_host.action_specs import action_specs
     assert 'users.auth.totp.setup' in action_specs()
@@ -647,7 +648,8 @@ def test_host_real_http_totp_and_debug_use_original_owner(production_host):
     home = production_host[2].home_dir
     script(home, 'double', 'print(\'{"value":8}\')')
     WorkflowStore(home).save_workflow(definition({'step_id': 'one', 'mode': 'deterministic_script', 'script_id': 'double'}))
-    result = production_call(production_host, 'workflows.steps.debug', {'workflow_id': 'debug-flow', 'step_id': 'one'})
+    result = production_call(production_host, 'workflows.steps.debug',
+        {'workflow_id': 'debug-flow', 'step_id': 'one', 'allow_side_effects': True})
     assert result['status'] == 'succeeded' and result['output_data'] == {'value': 8}
     assert not (home / 'data/workflow_runs').exists()
 

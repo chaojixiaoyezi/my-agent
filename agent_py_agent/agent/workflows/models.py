@@ -1,5 +1,5 @@
-# LLM: 工作流运行记录的唯一内存与JSON合同；ephemeral_debug仅控制调试副作用，不授予执行权限。
-# 模块用途: 定义脚本结果、步骤快照、正式运行和内存调试记录。
+# LLM: 正式运行和StepDebugResult共用原JSON/脱敏合同；ephemeral_debug不授执行权，调试显式报告被阻止的副作用。
+# 模块用途: 定义脚本、步骤、正式运行及含渲染输入/条件分支的单节点调试结果。
 import json
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -49,6 +49,29 @@ class ScriptExecutionResult:
     needs_repair: bool = False
     escalation_context: dict[str, Any] = field(default_factory=dict)
     source_check: dict[str, Any] = field(default_factory=dict)
+
+
+# LLM: 仅内存返回，不可进入WorkflowRunStore；渲染输入与分支在失败和预览时也存在，输出统一脱敏。
+# 类用途: 给Python调用和Host HTTP提供同源单步调试合同，不把dry-run标成真实外部执行。
+@dataclass
+class StepDebugResult:
+    workflow_id: str
+    step_id: str
+    status: str
+    duration_ms: float
+    output_data: dict[str, Any]
+    rendered_input: dict[str, Any]
+    condition_branch: bool | str | None = None
+    logs: list[str] = field(default_factory=list)
+    error_detail: dict[str, Any] | None = None
+    dry_run: bool = False
+    side_effects_blocked: bool = False
+    ok: bool = True
+
+    # LLM: 只做JSON复制及敏感值投影，不写正式账本；字段类型与HTTP响应保持一致。
+    # 函数用途: 返回隔离、脱敏的公开调试字典。
+    def to_dict(self):
+        return redact_bearer_values(payload(self))
 
 
 # LLM: 状态仅接受 StepStatus；所有可变字段独立创建，供账本序列化。

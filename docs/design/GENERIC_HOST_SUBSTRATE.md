@@ -29,7 +29,7 @@
 - ZIP及gzip tar入口均限制归档、成员及实际文件展开总量10MiB、成员不超过256。gzip流额外允许1MiB元数据/padding预算，防止在解析tar前无限解压。tar先检查全部可见成员（含EOF零块后的拼接成员），拒绝危险路径、重复/大小写与Unicode别名、链接、设备、FIFO及稀疏成员，再以内存固定元数据生成ZIP；不调用extract。
 - 当前仓库规范为根 `plugin.json`，不是任务旧审计中的 `plugin.yaml`。沿原校验器、wheel/随包文件摘要及安装Store，不另造manifest格式。原非Host安装预算不变；旧格式更严格的成员限制不放宽。
 
-可选 `sha256` 校验**原上传字节**；输出 `sha256` 是**最终安装ZIP字节**的摘要，tar规范化后两者可能不同。响应含plugin_id、version、manifest、revision及真实当前status。
+可选 `sha256` 校验**原上传字节**，不匹配统一返回HTTP 409 / `PACKAGE_SHA256_MISMATCH`，发生在安装写入之前；输出 `sha256` 是**最终安装ZIP字节**的摘要，tar规范化后两者可能不同。响应含plugin_id、version、manifest、revision及真实当前status。
 
 新安装默认停用。已有包更新要求显式 `expected_revision` CAS，不能覆盖活跃包或跳过原工具/安装开关。变更要求原幂等键；来源快照同一事务只读一次，成功后的同键重放不因暂存源被清理而再次安装，但会复核当前安装未被替换/卸载。
 
@@ -37,21 +37,39 @@
 
 ## 无账本单节点调试
 
-`WorkflowEngine.debug_step(workflow_id, step_id, *, mock_inputs=None, context_overrides=None, timeout_seconds=30.0)`：
+`WorkflowEngine.debug_step(workflow_id, step_id, *, mock_inputs=None, context_overrides=None, timeout_seconds=30.0, allow_side_effects=False)`：
 
-- 读取原WorkflowStore定义与启停闸，只运行选定节点，不先跑上游DAG，也不根据正式条件跳过调试。
+- 读取原WorkflowStore定义与启停闸，只选择指定节点，不先跑上游DAG。原结构化 `condition` 先作为执行门求值，False时返回 `status=skipped`，不会执行被关闭的节点。
 - `mock_inputs` 是选定节点输入，并覆盖同名inputs_map；`context_overrides` 是 `{上游step_id: 输出对象}`，供剩余映射读取。引用 `$inputs` 仍读取本次mock输入。
 - 构造 `debug-<12hex>`、`ephemeral_debug=True` 的内存run；不调用正式 `_drive`、RunStore创建/保存、工作流/脚本摘要、通知或pin推进。沿原runner传 `record_summary=False`，保留数据源预检、启停、沙箱、输出合同、脱敏、超时和清理。
-- 失败不触发修复/escalation；成功或失败均返回有界脱敏日志预览。返回 `{ok, workflow_id, step_id, status, duration_ms, output_data, logs, error_detail}`；`ok=True/status=failed` 表示完成了一次失败调试，不代表业务成功。
-- “无账本”不代表脚本本身没有业务副作用。真实代码仍可能访问其原已授权数据源/输出；不要把调试当成只读预览或扩大原沙箱权限。
+- `allow_side_effects` 必须是严格bool，省略默认为False（Python与Host闭合schema一致）。默认在映射/条件求值后阻止脚本子进程、HTTP、工具调用、子流及任何外部分析器，返回 `dry_run=True, side_effects_blocked=True` 的安全预览，不把预览当业务已执行。不能用config/mock或分析器自报 `side_effect_free` 绕过。
+- 只有显式True才执行原脚本链或可信节点端口；仍保留原启停、数据源、输出、超时和沙箱门，且关闭正式账本、摘要、通知、pin及失败升级。脚本转换模式也必须传原definition，不能丢弃工作流数据源覆盖。
+- 失败不触发修复/escalation；返回 `StepDebugResult` 同源字典：`{ok, workflow_id, step_id, status, duration_ms, output_data, rendered_input, condition_branch, logs, error_detail, dry_run, side_effects_blocked}`。渲染输入和分支字段在失败、跳过及预览时也存在；无条件时branch为None。`ok=True/status=failed` 表示完成失败调试，不是业务成功。
 
-timeout有效范围为 `(0,3600]` 秒；真实脚本子进程的超时沿原执行器落实。Host冷构造没有注入模型分析器，分析节点会结构化失败；外部同步analysis回调的强制抢占/硬deadline、真实模型节点及门户调试UI **未验证**，不能从脚本超时用例外推。
+原三模式之外，Store与debug接受六种通用mode，参数放在严格JSON `config`：
+
+| mode | 单节点行为 |
+| --- | --- |
+| `script_transform` | 无script_id时计算 `config.mapping`（结构化引用）或 `config.expression`（JSON对象表达式）；有script_id则属于外部脚本，默认阻止 |
+| `condition` | 计算 `config.expression` 为布尔分支，或单独使用结构化condition；前置门不能覆盖节点自身表达式 |
+| `http_request` / `tool_call` / `subworkflow` | 默认预览；True时只调用可信 `debug_node_handler(spec, context, *, timeout_seconds)`，缺失明确 `NODE_EXECUTOR_UNAVAILABLE`，不自行遍历DAG或构造第二运行账 |
+| `llm_prompt` | 与 `llm_skill_analysis` 共用原分析链；Host无live analyzer时固定内存mock预览（`mock=True,llm_called=False`），不是模型调用成功 |
+
+表达式只支持JSON字面量、 `inputs[...]`、有界算术/逻辑/比较/三元式，不使用eval/exec/compile，不允许函数调用、属性、幂或字符串格式化；4096字符、128个AST节点，中间JSON值65,536字符，序列复制在分配前按完整嵌套成本检查。映射和表达式不能承载Python回调。
+
+Host仅从可信组合根读取 `server.workflow_debug_analyzer` 和 `server.workflow_debug_node_handler`，不接受插件JSON注册执行器。无模型时用固定 `workflows.debug_nodes.analysis_preview`，可由 `config.mock_output` 提供mock对象，缺省回显渲染输入；默认门只认可该固定函数对象，不认可任意analyzer的纯属性声明。通用六模式的**正式DAG执行不在本轮范围**，正式入口明确拒绝，原三模式的运行/恢复链不变。
+
+timeout有效范围为 `(0,3600]` 秒；真实脚本子进程沿原执行器落实。外部同步分析器/节点回调的强制抢占、真实HTTP/工具/子流适配、live LLM及门户UI **未验证**；trusted adapter须自行保持原权限、超时和无正式账本约束，不能从脚本超时或受控callback测试外推。
 
 ## TOTP 与原会话链
 
 标准库RFC6238：20字节种子、Base32、SHA1、6位、30秒、±1计数窗。setup为10分钟pending，不覆盖已启用MFA；8个64位随机恢复码只存SHA256，不能用恢复码激活pending。种子/URI/恢复码只在setup响应交付，不写通用控制回执。
 
 账号仍是原LocalUserStore已启用普通用户。认证记录在 `<host_root>/local_users_auth/<uid>.json`，私有600原子写、nofollow读取；同一跨进程锁下消费counter或恢复码，成功counter必须递增，10次失败进入持久限流。目录列入原宿主凭据/配置路径策略，模型文件工具不可读、命令不可写。
+
+TOTP种子在pending和active状态均只保存 `secret_ciphertext`，不保存明文 `secret`。每Owner独立32随机字节密钥置于同一宿主凭据保护目录 `local_users_auth/.keys/<uid>.key`（文件0600、新目录0700），而非可由Owner业务文件读口取得的路径。随机16字节nonce、域分离HMAC-SHA256计数PRF异或固定32字节Base32种子，Encrypt-then-MAC绑定版本、UID、nonce和密文；常量时间验MAC先于内存解密。setup安全响应仍交付一次原种子/URI，其他认证响应不返回种子。
+
+密钥与认证记录须成套保护和备份；该封套不是OS密钥链、磁盘或所有认证字段加密。缺失/损坏/链接密钥、坏封套或跨UID移植均失败关闭，不在verify时重新生成密钥；已有pending重新setup也先验证旧封套，不能掩盖丢钥。旧版本明文记录只在首次锁内消费时原位迁移，保留epoch、防重放计数和恢复码，不自行扫描或修改生产数据；未触达的旧记录/备份不因此声称已密文化。`confirm_totp` 与 `verify_totp` 共用原激活、防重放和锁合同。
 
 密码登录和SSO均走原 `user_auth._issue_session`。原密码入口新增可选 `totp_code`，启用MFA后缺码不能签发session；恢复码只是第二因素，不代替密码/IdP。MFA epoch及SSO配置revision并入原token的credential fingerprint，不增加session账。变更撤销旧token，签发冻结认证stamp并重核原账号；SSO消费state时冻结的stamp还必须与签发时一致，防止旧IdP判断获得新配置下的有效token。
 

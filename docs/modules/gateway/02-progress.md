@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 2：Host底座返工（源码候选）
+
+TOTP种子在pending/active均为每Owner认证密文；默认debug不执行脚本/HTTP/工具/子流/外部模型，显式True仍无正式账本。Host已接通布尔schema、完整输入/分支DTO和固定mock fallback，上传摘要不匹配统一 `PACKAGE_SHA256_MISMATCH`。真实回环HTTP与原认证/工作流/Host合同共537项当前源码回归通过；准确分组、红绿证据及未验入口见根 `TESTS.md`。未部署，不外推生产IdP、live LLM或外部适配通过。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理CLI轻上下文（本地候选）
 
 管理入口不再为配置/路径解析创建SimpleAgent；共用原owner权限、冻结配置及runtime paths，真实执行组合根不变。common与gateway_loops的传递core导入已解除，原工厂注入仍兼容；原日志索引只在实际写日志时按需构造，普通解析和关闭的事件镜像不建库。冷子进程、原路径对照和真实构造禁止回归，以及实际验证边界见[TESTS](../../../TESTS.md)本轮小节；结构见[04-structure](04-structure.md)。不代表生产Gateway、真实TUI/IM或跨平台已验收，尚未部署。

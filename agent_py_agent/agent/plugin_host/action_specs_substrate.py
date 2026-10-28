@@ -1,13 +1,13 @@
-# LLM: 通用底座静态合同仍合入唯一Host目录；能力声明不授管理员身份、路径、代码执行或IdP验签权。
-# 模块用途: 声明包管理、无账本调试和通用认证的十个Host v2动作。
+# LLM: 静态合同合入唯一Host目录；debug的allow_side_effects严格布尔且省略为False，不以声明授新权限。
+# 模块用途: 声明包管理、安全默认调试及认证动作，保持闭合schema和原能力检查。
 from __future__ import annotations
 
 from .action_specs import _spec, id_schema
 from .schemas import closed, integer, text
 
 
-# LLM: TOTP/SSO会改变单次状态但不写通用幂等账，防secret和登录票据被缓存；域内计数/state负责防重放。
-# 函数用途: 给通用底座提供闭合参数、明确权限和原状态所属范围。
+# LLM: 认证不进通用幂等缓存；debug默认安全预览，显式布尔才允许副作用且不绕过原权限/沙箱。
+# 函数用途: 生成闭合底座参数和独立权限，单次认证沿计数/state防重放。
 def substrate_action_specs():
     uid = {'user_id': text(64, 3, r'^[a-z][a-z0-9_-]{2,63}$')}
     code = {'code': text(64, 1)}
@@ -21,6 +21,7 @@ def substrate_action_specs():
             'action': {'enum': ['enable', 'disable', 'reload', 'uninstall', 'status']}}), 'admin'),
         _spec('workflows.steps.debug', 'execute', 'workflows.debug', closed({'workflow_id': id_schema(), 'step_id': id_schema()}, {
             'mock_inputs': {'type': 'object'}, 'context_overrides': {'type': 'object'},
+            'allow_side_effects': {'type': 'boolean'},
             'timeout_seconds': {'type': 'number', 'minimum': 0.001, 'maximum': 3600}}), 'admin owner_workflow'),
         _spec('users.auth.totp.setup', 'execute', 'users.manage', closed(uid), 'manageable_user'),
         _spec('users.auth.totp.verify', 'execute', 'users.manage', closed({**uid, **code}), 'manageable_user'),

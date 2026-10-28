@@ -1,3 +1,37 @@
+## 2026-10-28 Wave 9 A2 Round 2：TOTP密文、安全默认调试及响应合同
+
+来源：完整阅读 `07-tasks/fix-wave9-a2.md`（62行）。实际起点 `e47515c72b335fcbac5d339a01229a46c275bd4f`，任务基线 `db4d5de92`；全部修改、测试和提交仅在 `wt-wave9-a2` / `wave9-a2`。没有安装、推送、部署或变更生产认证资料。
+
+四项返工：pending/active TOTP只存UID绑定认证密文、Owner独立32字节私有密钥；debug的严格布尔 `allow_side_effects=False` 默认阻止真实副作用；完整 `StepDebugResult`（含失败/预览的rendered_input与condition_branch）、六种通用debug节点、固定mock分析器；包上传摘要失败统一 `PACKAGE_SHA256_MISMATCH`。合同与未验边界见 [通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)。
+
+任务卡点名的两份测试在起点不存在，新增 `test_wave9_host_substrate_apis.py`、`test_workflow_engine.py` 保存返工回归，保留原 `test_wave9_host_substrate_plugins_workflow_auth.py` / `test_workflow_script_engine.py`。旧真实脚本用例只补显式True，原输出/超时/无账本/pin断言未删除或放宽；安全默认另由直调和真实Host HTTP标记文件独立测试。
+
+先红后绿记录：明文磁盘与旧记录迁移先2红；默认脚本实际写出marker、缺字段/模式/布尔参数/错误码先26红；Host显式True被schema拒绝及缺mock先3红。Astra high两次只读**源码摘录**独审（不是全仓或独立运行验收）后，pending丢钥setup旁路、失败脚本丢分支及嵌套复制预算先5红；脚本转换丢工作流数据源及正式入口误执行先3红；前置条件掩盖业务表达式及analyzer自报纯属性绕过先4红，均补产品修复。数据源回归随后一次失败是fixture漏写原DataSourceSpec的 `evaluated_candidates=[]` 默认值；修正为完整规范输入，仍精确断言全部数据源，不改产品默认或弱化为字段存在。
+
+最终当前源码按三组运行、JUnit去重合计 **537项通过，0失败、0错误、0跳过**（Python 3.14.4；包origin确认来自本工作树）：
+
+| 文件组 | 结果 | 工作树内证据 |
+| --- | --- | --- |
+| 任务卡三文件：新Host底座、新workflow_engine、原plugin_package | 146通过 | `.pytest_cache/fix-a2-final-gate.xml` |
+| 原Host底座、原workflow_script_engine | 125通过 | `.pytest_cache/fix-a2-final-original.xml` |
+| 原local_user_auth、Host v2 contracts、gateway composition | 266通过 | `.pytest_cache/fix-a2-final-integration.xml` |
+
+复现时在工作树根执行，为避免临时样本落到树外，追加对应 `--basetemp=.pytest_cache/<独立目录>`；每组可追加 `--junitxml=.pytest_cache/<独立文件>.xml`：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_apis.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_workflow_engine.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py agent_py_agent/tests/test_workflow_script_engine.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_host_gateway_composition.py -q --tb=short
+ruff check agent_py_agent/agent/plugin_package.py agent_py_agent/agent/plugin_management.py agent_py_agent/agent/workflows agent_py_agent/agent/user_space agent_py_agent/agent/plugin_host agent_py_agent/tests/test_wave9_host_substrate_apis.py
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py
+git diff --check db4d5de92..HEAD
+```
+
+TOTP测试覆盖磁盘无明文、0600/0700、重载confirm/verify、篡改密文/tag、跨UID连key移植、缺/坏/链接key、pending再次setup拒绝、旧epoch保留和原会话/MFA主链。调试覆盖Python与真实回环Host HTTP默认不写marker、显式True真实写出、始终不写正式账本/摘要、条件与错误字段、上游mock映射、六模式存取、纯表达式禁调用/属性/幂/大复制、可信端口调用及缺失失败、固定模型mock、不接受自报纯属性、脚本转换保留数据源和正式泛型节点明确拒绝。
+
+未验证：生产Gateway/浏览器/IdP、live LLM及同步回调硬deadline、真实外部HTTP/工具/子流适配、Windows/Linux车道与全仓CI。通用六mode当前只支持保存和单步debug，不代表正式DAG支持。旧明文记录仅锁内首次消费迁移，未触达旧记录及历史备份不算已密文化。初次后台测试启动观察超时被终止且无输出，没有计入通过；后续取得真实红例与上述正式退出结果。未运行退役尺寸门或全仓pytest。
+
 ## 2026-10-28 Wave 9 A2：通用Host包管理、无账本调试与TOTP/SSO底座
 
 来源：完整阅读 `07-tasks/wave9-a2.md`（58行）及指定缺失API参考；仅在 `wt-wave9-a2` / `wave9-a2` 修改，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。不推送、部署、修改运行包或其他工作树，不运行退役尺寸检查。

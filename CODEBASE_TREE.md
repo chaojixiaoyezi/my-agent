@@ -1,3 +1,15 @@
+## 2026-10-28 Wave 9 A2 Round 2：密文与安全单步调试
+
+```text
+|-- agent_py_agent/agent/workflows/
+|   `-- debug_nodes.py # 有界纯AST表达式与固定mock分析预览，不执行任意代码或访问外部
+`-- agent_py_agent/tests/
+    |-- test_wave9_host_substrate_apis.py # 密文磁盘、重载、防篡改、真实Host预览/许可及SHA256错误码
+    `-- test_workflow_engine.py # 默认无副作用、完整输入/分支、六种节点及正式执行边界
+```
+
+关键文件说明：`workflows/models.py::StepDebugResult` 是调试字典同源DTO；`engine.py` 在外部调用前核严格副作用门，仅固定 `debug_nodes.analysis_preview` 可默认运行，正式DAG不隐式启用新mode。`assets/workflow_store.py` 保存九种mode及JSON config。`totp_sso_auth.py` 在原受保护认证目录使用每Owner独立密钥与UID绑定认证封套，丢钥/损坏失败关闭。接口、密钥备份和未验证范围见 `docs/design/GENERIC_HOST_SUBSTRATE.md`，测试见 `TESTS.md`。
+
 ## 2026-10-28 Wave 9 A2：通用Host包管理、无账本调试与TOTP/SSO底座（源码候选）
 
 ```text

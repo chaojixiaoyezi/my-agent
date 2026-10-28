@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 A2 Round 2：Host底座安全结构
+
+`plugin_host/action_specs_substrate.py` 闭合声明allow_side_effects，`substrate.py` 缺省False透传；`workflows/engine.py` 先映射/前置条件再核副作用，`models.StepDebugResult` 始终返回输入/分支字段。新 `workflows/debug_nodes.py` 仅做有界AST与固定mock（函数对象身份例外），外部执行器仅来自可信组合根。`user_space/totp_sso_auth.py` 复用原锁和认证记录，在 `local_users_auth/.keys/<uid>.key` 保存独立私钥、JSON只存认证封套；坏封套/丢钥包括pending重新setup均失败关闭。详细合同见[通用Host底座](../../design/GENERIC_HOST_SUBSTRATE.md)；六generic mode不隐式进入正式DAG。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

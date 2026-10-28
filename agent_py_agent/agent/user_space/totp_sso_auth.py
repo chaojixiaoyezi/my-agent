@@ -1,5 +1,5 @@
-# LLM: 认证底座仅使用标准库；账号/session沿原权威，SSO只接受宿主注入的验签器，不信callback自报claims。
-# 模块用途: 提供私有TOTP、防重放恢复码、SSO配置及有期限单次握手；不实现厂商或门户专属路由。
+# LLM: 标准库认证沿原账号/session权威；TOTP种子以每Owner分离的认证封套保存，SSO只信宿主验签器。
+# 模块用途: 提供磁盘密文TOTP、防重放恢复码和单次SSO握手；密钥丢失或封套损坏必须失败关闭。
 from __future__ import annotations
 
 import base64
@@ -16,7 +16,11 @@ from pathlib import Path
 from urllib.parse import quote, urlencode, urlsplit
 
 from ..common.directory_lock import locked_private_directory
-from ..common.nofollow_fs import read_bytes_beneath, write_text_atomic_beneath
+from ..common.nofollow_fs import (
+    read_bytes_beneath,
+    write_bytes_atomic_beneath,
+    write_text_atomic_beneath,
+)
 from ..common.strict_json import load_strict_json
 from ..plugin_host.errors import HostAPIError
 from ..plugin_host.owner_context import validate_local_user_id
@@ -75,8 +79,8 @@ class VerifiedSSOIdentity:
     roles: tuple[str, ...] = ()
 
 
-# LLM: 构造不物化账号或连接IdP；私有写按原目录锁，session只经user_auth签发；端口不可来自callback正文。
-# 类用途: 管理宿主通用MFA与SSO握手，缺少真实协议验签器时拒绝SSO登录。
+# LLM: 原跨进程锁内管理Owner密钥及密文；构造零IO，session只经user_auth，封套绑定UID且不自动换丢失密钥。
+# 类用途: 管理通用MFA与SSO握手，认证种子不明文落盘，缺可信协议验签器时拒绝SSO登录。
 class TotpSSOAuthService:
     # LLM: clock/verifier仅可信宿主注入；不接受插件指定回调或可执行路径，实例不缓存权限。
     # 函数用途: 绑定宿主根和可选IdP协议实现，默认只有配置/状态底座而没有伪造IdP验证。
@@ -97,17 +101,74 @@ class TotpSSOAuthService:
         LocalUserStore(self.root).require_enabled(uid)
         return uid
 
-    # LLM: 不能覆盖已启用MFA；pending十分钟过期，恢复码只以高熵哈希保存，响应secret仅用于安全交互。
-    # 函数用途: 生成160位种子和8个恢复码，写私有待激活设置，不提前启用MFA。
+    # LLM: 只在原认证锁内调用；密钥在宿主保护目录按UID隔离，读缺失密钥不能重新生成，原子创建先于密文提交。
+    # 函数用途: 加载32字节Owner密钥，仅新设置或旧记录迁移允许首次创建，不缓存密钥。
+    def _totp_key(self, uid, *, create=False):
+        parts = ('local_users_auth', '.keys', uid + '.key')
+        try:
+            key = read_bytes_beneath(self.root, parts, max_bytes=32, require_dir_fd=True)
+            if key is None and create:
+                key = secrets.token_bytes(32)
+                write_bytes_atomic_beneath(self.root, parts, key)
+            if key is None or len(key) != 32:
+                raise ValueError('TOTP master key unavailable')
+            return key
+        except (OSError, ValueError, TypeError):
+            raise HostAPIError('STORE_UNAVAILABLE', 503) from None
+
+    # LLM: 域分离和随机nonce的认证封套，创建密钥须初始化/迁移显式许可；MAC绑定版本/UID/nonce/密文。
+    # 函数用途: 将固定32字节Base32种子封装为密文，已有密文重新设置不能掩盖原密钥丢失。
+    def _seal_totp_secret(self, uid, secret, *, create_key=False):
+        key = self._totp_key(uid, create=create_key)
+        nonce = secrets.token_bytes(16)
+        encryption_key = hmac.digest(key, b'totp-encryption-v1', 'sha256')
+        authentication_key = hmac.digest(key, b'totp-authentication-v1', 'sha256')
+        raw = secret.encode('ascii')
+        stream = hmac.digest(encryption_key, nonce + struct.pack('>I', 0), 'sha256')
+        if len(raw) != 32 or len(base64.b32decode(raw)) != 20:
+            raise HostAPIError('STORE_UNAVAILABLE', 503)
+        body = b'\x01' + nonce + bytes(a ^ b for a, b in zip(raw, stream))
+        tag = hmac.digest(authentication_key, b'my-agent-totp-v1\0' + uid.encode() + b'\0' + body, 'sha256')
+        return base64.urlsafe_b64encode(body + tag).decode('ascii')
+
+    # LLM: 只读现有Owner密钥，严格尺寸/版本及常量时间验MAC先于解密；不同UID即使密钥相同也不可移植。
+    # 函数用途: 在计算动态码前短暂解密种子，坏封套只给安全错误，不回显密钥或原始异常。
+    def _open_totp_secret(self, uid, ciphertext):
+        try:
+            if type(ciphertext) is not str or len(ciphertext) != 108:
+                raise ValueError('TOTP envelope')
+            raw = base64.b64decode(ciphertext, altchars=b'-_', validate=True)
+            if len(raw) != 81 or raw[0] != 1:
+                raise ValueError('TOTP envelope')
+            key = self._totp_key(uid)
+            body, tag = raw[:-32], raw[-32:]
+            authentication_key = hmac.digest(key, b'totp-authentication-v1', 'sha256')
+            expected = hmac.digest(authentication_key, b'my-agent-totp-v1\0' + uid.encode() + b'\0' + body, 'sha256')
+            if not hmac.compare_digest(expected, tag):
+                raise ValueError('TOTP authentication')
+            encryption_key = hmac.digest(key, b'totp-encryption-v1', 'sha256')
+            stream = hmac.digest(encryption_key, body[1:17] + struct.pack('>I', 0), 'sha256')
+            secret = bytes(a ^ b for a, b in zip(body[17:], stream)).decode('ascii')
+            if len(base64.b32decode(secret)) != 20:
+                raise ValueError('TOTP secret')
+            return secret
+        except (OSError, ValueError, TypeError, UnicodeError):
+            raise HostAPIError('STORE_UNAVAILABLE', 503) from None
+
+    # LLM: 不能覆盖启用MFA；已有pending必须先验原密钥/封套再替换，丢钥/坏封套失败且不写；新设置才可建钥。
+    # 函数用途: 生成种子和恢复码并保存密文，原pending损坏时不能静默重新设置或改变原记录。
     def setup_totp(self, user_id):
         uid = self._user(user_id)
         with self._locked():
             row = _read(self.root, uid + '.json')
             if row.get('enabled'):
                 raise HostAPIError('TOTP_ALREADY_ENABLED', 409)
+            if 'secret_ciphertext' in row:
+                self._open_totp_secret(uid, row['secret_ciphertext'])
             secret = base64.b32encode(secrets.token_bytes(20)).decode('ascii')
             recovery = [secrets.token_hex(8) for _ in range(8)]
-            _write(self.root, uid + '.json', {'enabled': False, 'secret': secret,
+            _write(self.root, uid + '.json', {'enabled': False, 'secret_ciphertext': self._seal_totp_secret(
+                uid, secret, create_key='secret_ciphertext' not in row),
                 'pending_until': int(self.clock()) + 600, 'last_verified_counter': -1,
                 'auth_epoch': secrets.token_hex(16), 'recovery_hashes': [hashlib.sha256(code.encode()).hexdigest() for code in recovery]})
         return {'ok': True, 'user_id': uid, 'enabled': False, 'secret': secret,
@@ -115,20 +176,26 @@ class TotpSSOAuthService:
                 'secret': secret, 'issuer': 'my-agent', 'algorithm': 'SHA1', 'digits': 6, 'period': 30}),
             'recovery_codes': recovery}
 
-    # LLM: 调用方持同一锁；常量时间比对完整窗口，成功计数须递增；恢复码不能激活pending，失败持久限速。
-    # 函数用途: 原子消费动态码或单次恢复码，启用时也记录同一计数防重放。
+    # LLM: 同锁先迁移旧明文而保留epoch/counter，再验封套；成功计数递增，恢复码不能激活pending，失败限速。
+    # 函数用途: 在内存解密后消费动态码或恢复码，成功和失败写回均不保留旧secret字段。
     def _verify_locked(self, uid, code):
         row = _read(self.root, uid + '.json')
+        if 'secret' in row:
+            if 'secret_ciphertext' in row:
+                raise HostAPIError('STORE_UNAVAILABLE', 503)
+            row['secret_ciphertext'] = self._seal_totp_secret(uid, row.pop('secret'), create_key=True)
+            _write(self.root, uid + '.json', row)
         now = int(self.clock())
-        if not row.get('secret') or not row.get('enabled') and now >= row.get('pending_until', 0):
+        if not row.get('secret_ciphertext') or not row.get('enabled') and now >= row.get('pending_until', 0):
             raise HostAPIError('TOTP_NOT_CONFIGURED', 409)
+        secret = self._open_totp_secret(uid, row['secret_ciphertext'])
         if type(code) is not str or not code.isascii() or len(code) > 64:
             raise HostAPIError('TOTP_INVALID', 401)
         if row.get('failure_until', 0) > now and row.get('failures', 0) >= 10:
             raise HostAPIError('TOTP_RATE_LIMITED', 429)
         counter = now // 30
         matches = [candidate for candidate in range(max(0, counter - 1), counter + 2)
-                   if hmac.compare_digest(totp_code(row['secret'], candidate), code)] if re.fullmatch(r'[0-9]{6}', code) else []
+                   if hmac.compare_digest(totp_code(secret, candidate), code)] if re.fullmatch(r'[0-9]{6}', code) else []
         if matches:
             selected = max(matches)
             if selected <= row.get('last_verified_counter', -1):
@@ -158,6 +225,9 @@ class TotpSSOAuthService:
             result = self._verify_locked(uid, code)
             self._user(uid)
             return result
+
+    # confirm与verify共享原锁内激活和防重放合同，不另建激活状态或第二写入口。
+    confirm_totp = verify_totp
 
     # LLM: admin必须由宿主核当前操作者后调用，公开Host schema不允许布尔绕过；停用保留epoch以撤销旧session。
     # 函数用途: 验证有效第二因素后停用MFA，或由明确管理员执行重置。
