@@ -1,3 +1,5 @@
+# LLM: 保留真实PTY/进程身份与回收断言；巡检测试按正超时会话实际登记才启动的新合同验证，不跳过失败。
+# 模块用途: 验证交互终端、任务回收、访问范围及惰性唯一巡检线程。
 from __future__ import annotations
 
 import json
@@ -546,13 +548,23 @@ def test_idle_sweep_reclaims_idle_sessions_only(tmp_path, _unsandboxed_spawn):
         pty_session_registry.idle_timeout_seconds = 0.0
 
 
+# LLM: 使用独立注册表观察真实惰性启动；配置本身零线程，正超时会话实际创建后才启动，仍必须唯一且daemon。
+# 函数用途: 验证巡检线程在会话创建时惰性启动且重复配置不会多开。
 def test_idle_sweeper_thread_starts_once_and_is_daemon(tmp_path, _unsandboxed_spawn):
-    pty_session_registry.set_idle_timeout_minutes(30)
-    thread = pty_session_registry._idle_thread
-    assert thread is not None and thread.is_alive() and thread.daemon
-    pty_session_registry.set_idle_timeout_minutes(30)
-    assert pty_session_registry._idle_thread is thread
-    pty_session_registry.idle_timeout_seconds = 0.0
+    from agent_py_agent.agent.tooling.pty_sessions import PtySessionRegistry
+
+    registry = PtySessionRegistry()
+    registry.set_idle_timeout_minutes(30)
+    assert registry._idle_thread is None
+    session = registry.start(f"{shlex.quote(sys.executable)} -c 'import time; time.sleep(60)'", tmp_path)
+    try:
+        thread = registry._idle_thread
+        assert thread is not None and thread.is_alive() and thread.daemon
+        registry.set_idle_timeout_minutes(30)
+        assert registry._idle_thread is thread
+    finally:
+        registry.close(session.session_id)
+        registry.idle_timeout_seconds = 0.0
 
 
 # LLM: 终止确认依赖宿主能读完整进程表（本沙箱 /bin/ps 不可用，confirmed 恒为 False）并真跑沙箱内 PTY；
@@ -591,7 +603,8 @@ def test_subprocess_env_keeps_explicit_pagers(monkeypatch):
     assert env["PAGER"] == "less" and env["GIT_PAGER"] == "delta"
 
 
-# 函数用途: 并发设置空闲阈值只启动一条巡检线程（3a 终审：原实现在锁外 start，“已登记未启动”窗口里并发调用者会再开一条）。
+# LLM: 仅有正超时会话才触发巡检；保留start未完成时的并发配置插入，不能弱化唯一线程断言。
+# 函数用途: 验证已有会话时，并发启用默认超时仍只启动一条巡检线程。
 def test_idle_sweeper_starts_once_under_concurrent_configure(monkeypatch):
     import threading
     from types import SimpleNamespace
@@ -599,16 +612,29 @@ def test_idle_sweeper_starts_once_under_concurrent_configure(monkeypatch):
     from agent_py_agent.agent.tooling import pty_sessions as module
 
     registry = module.PtySessionRegistry()
+    registry._sessions["unit-session"] = module.PtySession(
+        session_id="unit-session", command="unit-test", process=SimpleNamespace(poll=lambda: None),
+        master_fd=-1, started_at=0.0, last_active_at=0.0,
+        access_scope=module._pty_access_scope(None, None),
+    )
     starts = []
     rivals = []
 
+    # LLM: 记录生产start调用，并在未完成窗口安排真实并发调用者，不运行后台巡检。
+    # 类用途: 观察并发线程启动是否重复。
     class _ProbeThread:
+        # LLM: 保留Thread构造参数合同，不执行目标函数。
+        # 函数用途: 初始化受控线程状态。
         def __init__(self, target=None, args=(), name="", daemon=None):
             self.started = False
 
+        # LLM: 未完成start时必须返回False，复现原竞态窗口。
+        # 函数用途: 返回当前启动状态。
         def is_alive(self):
             return self.started
 
+        # LLM: 并发调用者使用真实Thread，与生产锁交错；有界join不释放生产临界区。
+        # 函数用途: 记录启动并插入竞争的configure调用。
         def start(self):
             starts.append(self)
             if len(starts) == 1:

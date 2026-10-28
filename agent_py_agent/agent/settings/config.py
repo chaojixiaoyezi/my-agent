@@ -506,6 +506,10 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 都是先设的限制值(不是吞吐目标),按机器/模型承载力调。执行线程按需起、用后驻留复用。
     gateway_user_inflight_limit: int = 8
     gateway_global_inflight_limit: int = 500
+    # Gateway同时在途的不同Owner数量上限；0跟随owner_agent_pool_max_agents，实际准入由Gateway消费。
+    gateway_owner_inflight_limit: int = 0
+    # 是否开启Gateway内存与对象池诊断快照；默认关闭，不自动常驻tracemalloc。
+    enable_gateway_memory_diagnostics: bool = False
     gateway_processing_timeout_seconds: int = 900
     # 仅计 processing 租约失效的失败次数；服务重启续接不计，0 不限，副作用未知仍禁止盲目重放。
     gateway_request_max_attempts: int = 2

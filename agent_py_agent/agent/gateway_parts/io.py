@@ -29,6 +29,7 @@ from ..common.json_io import (
     append_private_jsonl_records,
     check_io_deadline,
     jsonl_lines,
+    path_thread_lock,
     serialize_private_json_no_newline,
     write_private_json_file_atomic_no_newline,
     write_private_json_file_atomic_no_newline_unlocked,
@@ -56,9 +57,8 @@ try:
 except ImportError:  # pragma: no cover - POSIX import guard.
     msvcrt = None
 
-_JSON_FILE_LOCKS: dict[str, threading.Lock] = {}
-_JSON_FILE_LOCKS_GUARD = threading.Lock()
 _GATEWAY_HISTORY_CACHE_LOCK = threading.Lock()
+_path_lock = path_thread_lock
 # 限制历史文件进程内快照缓存条目上限，防止多工作区长期运行无界增长。
 _MAX_GATEWAY_HISTORY_CACHE_ENTRIES = 64
 # 网关历史缓存允许缓存的单个文件最大字节数。
@@ -147,16 +147,6 @@ def validated_gateway_request_fingerprint(payload: dict, request_id: str) -> str
     if schema and schema != GATEWAY_REQUEST_FINGERPRINT_SCHEMA:
         raise DataCorruptionError("gateway request fingerprint schema is invalid")
     return expected
-
-
-def _path_lock(path: Path) -> threading.Lock:
-    key = str(path.resolve())
-    with _JSON_FILE_LOCKS_GUARD:
-        lock = _JSON_FILE_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _JSON_FILE_LOCKS[key] = lock
-        return lock
 
 
 def write_json_file(path: Path, payload: dict) -> None:
@@ -359,8 +349,8 @@ def _locked_json_path(path: Path, *, blocking: bool = True):
                 raise BlockingIOError("original_file_transition_busy")
             yield
         return
-    lock = _path_lock(path)
-    with lock:
+    handle = path_thread_lock(path)
+    with handle.lock:
         with _locked_file_path(path):
             yield
 
@@ -381,35 +371,45 @@ def locked_file_transition(path: Path, *, blocking: bool = True):
 
 # LLM: Read-only status paths may probe an active transaction without queueing behind provider IO.
 # A False result grants no authority to mutate; callers must return the last atomic receipt.
+#   common包装强引用覆盖整个等待/释放窗口，OS句柄关闭异常也必须归还线程锁。
 # 函数用途: 尝试领取逻辑文件事务锁，锁正被使用时立即返回 False 而不是阻塞。
 @contextmanager
 def try_locked_file_transition(path: Path):
-    lock = _path_lock(path)
-    if not lock.acquire(blocking=False):
+    handle = path_thread_lock(path)
+    if not handle.lock.acquire(blocking=False):
         yield False
         return
-    handle = None
+    file_handle = None
     os_lock_acquired = False
     try:
-        handle = _open_lock_handle(path)
-        os_lock_acquired = _try_flock_exclusive(handle)
+        file_handle = _open_lock_handle(path)
+        os_lock_acquired = _try_flock_exclusive(file_handle)
         if not os_lock_acquired:
             yield False
             return
         # LLM: 锁文件可能刚被孤儿清理器换掉：身份不符说明拿到的不是当前锁文件的锁，探测不能获得授权
         #   （fail-closed）；按"没拿到"返回，让调用方保留原事实。
-        if not _lock_handle_matches_path(handle, path.with_name(path.name + ".lock")):
+        if not _lock_handle_matches_path(file_handle, path.with_name(path.name + ".lock")):
             yield False
             return
         yield True
     finally:
-        if handle is not None:
-            try:
-                if os_lock_acquired:
-                    _flock_unlock(handle)
-            finally:
-                handle.close()
-        lock.release()
+        try:
+            _release_transition_file_handle(file_handle, os_lock_acquired)
+        finally:
+            handle.lock.release()
+
+
+# LLM: 先释放可能已取得的 OS 排他锁，再确保关闭底层锁文件描述符；任一步异常都不吞掉调用方归还线程锁。
+# 函数用途: 安全解锁并关闭非阻塞文件事务探测的 OS 锁文件句柄。
+def _release_transition_file_handle(file_handle, os_lock_acquired: bool) -> None:
+    if file_handle is None:
+        return
+    try:
+        if os_lock_acquired:
+            _flock_unlock(file_handle)
+    finally:
+        file_handle.close()
 
 
 # LLM: Every processing/inbox/terminal transition and active-turn ingress for one request must

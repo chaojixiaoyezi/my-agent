@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,7 +134,24 @@ class IndexCompactResult:
 #   放在索引同目录的一个小 sidecar 里（派生数据，丢了按"无记录"处理）。
 _LAST_COMPACT_BYTES: dict[str, int] = {}
 _LAST_COMPACT_AT: dict[str, float] = {}
+# 两份派生缓存成对更新、读取与淘汰；512项容纳近期索引，不随历史owner永久增长。
+_MAX_COMPACT_CACHE_ENTRIES = 512
+_COMPACT_CACHE_LOCK = threading.RLock()
 _SIDECAR_NAME = "compact_state.json"
+
+
+# LLM: 调用方只交已完整解析的派生事实；同锁维护两份缓存，重记路径移到队尾，最早记录成对淘汰。
+# 函数用途: 有界记住一份索引最近的压缩大小和时间。
+def _remember_compact_state(key: str, size: int, at: float) -> None:
+    with _COMPACT_CACHE_LOCK:
+        _LAST_COMPACT_BYTES.pop(key, None)
+        _LAST_COMPACT_AT.pop(key, None)
+        _LAST_COMPACT_BYTES[key] = size
+        _LAST_COMPACT_AT[key] = at
+        while len(_LAST_COMPACT_BYTES) > _MAX_COMPACT_CACHE_ENTRIES:
+            oldest = next(iter(_LAST_COMPACT_BYTES))
+            _LAST_COMPACT_BYTES.pop(oldest)
+            _LAST_COMPACT_AT.pop(oldest, None)
 
 
 # LLM: sidecar 与索引同目录；只存路径→大小/时间，不含任何正文。
@@ -142,7 +160,7 @@ def _sidecar_path(path: Path) -> Path:
     return path.parent / _SIDECAR_NAME
 
 
-# LLM: 读失败一律当"无记录"（派生数据），绝不影响压缩本身。
+# LLM: 读失败一律当无记录；两个值全部解析成功后才在原缓存锁内成对保存和淘汰。
 # 函数用途: 把持久化的上次压缩状态载入内存。
 def load_compact_state(path: str | Path) -> None:
     target = Path(path)
@@ -161,13 +179,14 @@ def load_compact_state(path: str | Path) -> None:
     if not isinstance(record, dict):
         return
     try:
-        _LAST_COMPACT_BYTES[key] = int(record.get("bytes") or 0)
-        _LAST_COMPACT_AT[key] = float(record.get("at") or 0.0)
+        size = int(record.get("bytes") or 0)
+        at = float(record.get("at") or 0.0)
     except (TypeError, ValueError):
         return
+    _remember_compact_state(key, size, at)
 
 
-# LLM: sidecar是原派生冷却事实；W/受限host先于I/O拒绝，C调用沿同一次canonical提交门，普通OSError仍保持原尽力语义。
+# LLM: sidecar是原派生冷却事实；先拒W/受限host，缓存锁内取成对快照，C提交门与普通OSError尽力语义保持。
 # 函数用途: 将当前压缩大小和时间原子保存到原sidecar，不为写失败补新账。
 def save_compact_state(path: str | Path) -> None:
     _require_coordinator_writer()
@@ -176,8 +195,10 @@ def save_compact_state(path: str | Path) -> None:
     target = Path(path)
     sidecar = _sidecar_path(target)
     key = str(target)
-    if key not in _LAST_COMPACT_BYTES and key not in _LAST_COMPACT_AT:
-        return
+    with _COMPACT_CACHE_LOCK:
+        if key not in _LAST_COMPACT_BYTES and key not in _LAST_COMPACT_AT:
+            return
+        record = {"bytes": int(_LAST_COMPACT_BYTES.get(key, 0)), "at": float(_LAST_COMPACT_AT.get(key, 0.0))}
     entries: dict[str, dict[str, object]] = {}
     try:
         raw = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -185,10 +206,7 @@ def save_compact_state(path: str | Path) -> None:
             entries = dict(raw["entries"])
     except (OSError, json.JSONDecodeError):
         entries = {}
-    entries[key] = {
-        "bytes": int(_LAST_COMPACT_BYTES.get(key, 0)),
-        "at": float(_LAST_COMPACT_AT.get(key, 0.0)),
-    }
+    entries[key] = record
     try:
         write_text_file_atomic_unlocked(
             sidecar,
@@ -209,12 +227,14 @@ def key_fields_for(path: Path) -> tuple[str, ...]:
     return key_fields_for_index_file(path)
 
 
-# LLM: 零扫描判据——不看内容、不估重复率（那要整读一遍，代价和压缩本身差不多）。
+# LLM: 零扫描判据不变；有界缓存缺失时仍读原sidecar，读大小和时间必须取同一锁内快照。
 # 函数用途: 判断一份索引文件现在该不该压缩，并给出原因码。
 def should_compact(path: str | Path, *, now: float | None = None) -> str:
     target = Path(path)
     key = str(target)
-    if key not in _LAST_COMPACT_BYTES and key not in _LAST_COMPACT_AT:
+    with _COMPACT_CACHE_LOCK:
+        cached = key in _LAST_COMPACT_BYTES or key in _LAST_COMPACT_AT
+    if not cached:
         load_compact_state(target)  # 进程内没有记录时，先看 sidecar（重启后也能守冷却）
     try:
         size = target.stat().st_size
@@ -222,10 +242,11 @@ def should_compact(path: str | Path, *, now: float | None = None) -> str:
         return "missing"
     if size < COMPACT_MIN_BYTES:
         return "below_min_bytes"
-    last_bytes = _LAST_COMPACT_BYTES.get(key, 0)
+    with _COMPACT_CACHE_LOCK:
+        last_bytes = _LAST_COMPACT_BYTES.get(key, 0)
+        last_at = _LAST_COMPACT_AT.get(key, 0.0)
     if size < max(COMPACT_MIN_BYTES, 2 * last_bytes):
         return "below_growth_ratio"
-    last_at = _LAST_COMPACT_AT.get(key, 0.0)
     current = float(now if now is not None else time.time())
     if last_at and (current - last_at) < COMPACT_COOLDOWN_SECONDS:
         return "in_cooldown"
@@ -405,16 +426,16 @@ def compact_index_file(path: str | Path, *, now: float | None = None, commit_tra
     )
 
 
-# LLM: 原锁内inode/tail/rename不改；canonical成功后才取时钟、更新原内存与sidecar，均在调用方同一C末门内，不能跨撤权窗口。
+# LLM: 原锁内inode/tail/rename及C末门不改；缓存成对更新到sidecar保存期间不允许被其它路径淘汰。
 # 函数用途: 完成一次短提交，保留main原Count0写入顺序和派生冷却语义。
 def _commit_compacted_file(target, tmp, source, now):
     prefix_len, stat0 = source
     after_bytes, failure = _append_tail_and_replace(target, tmp, prefix_len, stat0)
     if after_bytes is not None:
         current = float(now if now is not None else time.time())
-        _LAST_COMPACT_BYTES[str(target)] = after_bytes
-        _LAST_COMPACT_AT[str(target)] = current
-        save_compact_state(target)
+        with _COMPACT_CACHE_LOCK:
+            _remember_compact_state(str(target), after_bytes, current)
+            save_compact_state(target)
     return after_bytes, failure
 
 

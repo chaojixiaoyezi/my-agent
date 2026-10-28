@@ -84,7 +84,7 @@ _IDLE_SWEEP_INTERVAL_SECONDS = 30.0
 _MIN_IDLE_SWEEP_INTERVAL_SECONDS = 0.5
 
 
-# LLM: 访问快照与执行归属分别冻结；close_lock 串行同一进程的终止，回执确认后才宣称已停止。
+# LLM: 访问快照/执行归属/可选空闲超时分别冻结；None才继承注册表默认，close_lock串行终止，回执确认后才宣称已停止。
 # 类用途: 保存终端进程、增量输出、权限与所属执行，允许模型回合结束后仍按任务收口。
 @dataclass
 class PtySession:
@@ -112,6 +112,7 @@ class PtySession:
     retirement_thread: threading.Thread | None = field(default=None, repr=False)
     # macOS 上父进程保留的一份 slave FD（-1 表示未保留），与 master 一起在尾部排空后关闭。
     tail_hold_fd: int = -1
+    idle_timeout_seconds: float | None = None
 
     def append(self, chunk: bytes) -> None:
         with self.lock:
@@ -165,11 +166,12 @@ class _PtySandboxInputs:
     full_access_other_owner_homes: str = "read_only"
 
 
-# LLM: 继承原宿主环境/网络上界，只增加独立人格根；由Shell宿主装配，不能从模型参数构造许可。
-# 类用途: 在原host_policy参数内同时携带PTY所需的来源保护根，避免继续增长启动参数。
+# LLM: 继承原宿主环境/网络上界，只增加独立人格根与会话空闲超时；由Shell宿主装配，不能从模型参数构造许可。
+# 类用途: 在原host_policy参数内同时携带PTY所需的来源保护根与会话空闲超时，避免继续增长启动参数。
 @dataclass(frozen=True)
 class PtyHostPolicy(SandboxHostPolicy):
     protected_persona_root: object = None
+    idle_timeout_seconds: float | None = None
 
 
 # LLM: 预留和取消标记共用 registry 锁；取消只命中当时的启动，不阻止用户后续显式恢复。
@@ -237,13 +239,12 @@ class PtySessionRegistry:
         self._counter = 0
         self._lock = threading.Lock()
         self._pending_starts: dict[str, _PtyStart] = {}
-        # 空闲兜底阈值（秒，0=不限制）与唯一巡检线程；由工具装配点按配置设置，
-        # 未装配时保持 0，单元测试与嵌入式使用不会被后台线程打扰。
+        # 仅供未指定会话超时的直接调用继承；工具装配不再改它，巡检在正超时会话登记后惰性启动。
         self.idle_timeout_seconds = 0.0
         self._idle_thread: threading.Thread | None = None
         register_source_registry(self)
 
-    # LLM: 容量和执行身份一起预留；宿主来源名随本次 spawn 冻结，不入模型参数或持久会话权限账。
+    # LLM: 容量和执行身份一起预留；宿主来源及会话超时随spawn冻结，不入模型参数，不修改进程默认超时。
     # 函数用途: 有界创建终端，让明确的资源停止请求可以命中尚未完成的启动。
     def start(
         self,
@@ -258,6 +259,7 @@ class PtySessionRegistry:
         host_policy: SandboxHostPolicy | None = None,
     ) -> PtySession:
         host_policy = host_policy or SandboxHostPolicy()
+        idle_timeout_seconds = getattr(host_policy, "idle_timeout_seconds", None)
         if os.name == "nt":
             raise OSError("PTY_UNAVAILABLE: Windows requires a ConPTY backend")
         raise_if_cancelled()
@@ -277,14 +279,15 @@ class PtySessionRegistry:
                                         host_policy.host_credential_env_names, getattr(host_policy, "protected_persona_root", None),
                                         host_policy.full_access_other_owner_homes)
             with source_process_boundary():
-                return self._spawn(session_id, command, target, sandbox, run_scope)
+                return self._spawn(session_id, command, target, sandbox, run_scope, idle_timeout_seconds)
         finally:
             with self._lock:
                 self._pending_starts.pop(session_id, None)
 
-    # LLM: Popen 前后核对同一预留；环境只经 Shell 唯一擦洗入口，取消后的迟到进程仍登记并终止。
+    # LLM: Popen前后核对同一预留；环境仍经Shell擦洗，超时随会话登记，取消的迟到进程仍终止，仅正超时会话启巡检。
     # 函数用途: 启动 PTY 并排空输出，封住启动期间收到停止后留下孤儿进程的窗口。
-    def _spawn(self, session_id, command, target, sandbox: _PtySandboxInputs, run_scope) -> PtySession:
+    def _spawn(self, session_id, command, target, sandbox: _PtySandboxInputs, run_scope,
+               idle_timeout_seconds: float | None = None) -> PtySession:
         import pty
 
         owner_home = sandbox.owner_home
@@ -346,6 +349,7 @@ class PtySessionRegistry:
             access_scope=access_scope,
             execution_scope=launch.execution_scope,
             source_configurations=source_configurations,
+            idle_timeout_seconds=idle_timeout_seconds,
         )
         with self._lock:
             self._sessions[session_id] = session
@@ -354,6 +358,7 @@ class PtySessionRegistry:
             self.close(session_id)
             raise ToolCancelled("PTY 启动已被取消")
         threading.Thread(target=self._drain, args=(session,), daemon=True).start()
+        _ensure_sweeper_started(self)
         return session
 
     # LLM: Listing is an exact-scope projection over the bounded in-memory registry; never expose
@@ -479,8 +484,8 @@ class PtySessionRegistry:
         return tuple(dict.fromkeys([*pending, *(session.session_id for session in sessions)]))
 
     # LLM: 空闲兜底是回合/任务收口之外的第三道网：没等到收口的会话（崩溃回合、宿主停摆）按 last_active_at
-    #   自动回收。阈值 0=不限制；实现放模块级保持类体量在软阈值内，本方法只保留注册表 API。
-    # 函数用途: 设置空闲阈值（分钟）并在开启时启动唯一巡检线程；重复设置幂等。
+    #   自动回收。默认0仅影响未声明覆盖的会话；无会话时只配置，不起线程。
+    # 函数用途: 设置直接调用的默认空闲分钟数，有正超时会话时惰性确保唯一巡检线程。
     def set_idle_timeout_minutes(self, minutes: object) -> None:
         _configure_idle_timeout(self, minutes)
 
@@ -509,20 +514,31 @@ class PtySessionRegistry:
 pty_session_registry = PtySessionRegistry()
 
 
-# LLM: 空闲阈值归一化、空闲巡检、终态裁剪和 fd 关闭都在模块级实现（只操作注册表/会话已有状态），
-#   注册表类保留同名薄方法维持 API，类体量回到软阈值内。改动须同步类方法与调用点。
-#   线程在持锁期间登记并启动：若在锁外 start，并发调用者会在“已登记未启动”的窗口里看到线程不活而再开一个
-#   （ds10 初审探针实测多开 3 条）。巡检循环先 sleep 再取锁，持锁启动不会自锁。
-# 函数用途: 归一化分钟阈值并在开启时启动唯一巡检线程；重复设置、并发设置都只开一条。
+# LLM: 只改未声明会话超时的默认值，显式会话值不变；无正超时会话不建线程，直接setter API保持兼容。
+# 函数用途: 归一化默认空闲分钟数，并按现有会话惰性启动巡检。
 def _configure_idle_timeout(registry: PtySessionRegistry, minutes: object) -> None:
     try:
         value = float(minutes)
     except (TypeError, ValueError):
         value = 0.0
-    registry.idle_timeout_seconds = max(0.0, value) * 60.0
-    if registry.idle_timeout_seconds <= 0:
-        return
     with registry._lock:
+        registry.idle_timeout_seconds = max(0.0, value) * 60.0
+    _ensure_sweeper_started(registry)
+
+
+# LLM: 调用方在注册表锁内采样默认值与会话；显式0只关闭该会话，不得被全局默认覆盖。
+# 函数用途: 返回一个PTY会话此刻的有效空闲超时秒数。
+def _session_idle_timeout(registry: PtySessionRegistry, session: PtySession) -> float:
+    return float(session.idle_timeout_seconds if session.idle_timeout_seconds is not None else registry.idle_timeout_seconds)
+
+
+# LLM: 只有已登记的正超时未退役会话才启动线程；登记和start同持原锁，封住已登记未启动的并发重复窗口。
+# 函数用途: 按需启动唯一PTY空闲巡检线程，导入和空注册表构造零线程。
+def _ensure_sweeper_started(registry: PtySessionRegistry) -> None:
+    with registry._lock:
+        if not any(_session_idle_timeout(registry, session) > 0 and not _source_resource_retired(session)
+                   for session in registry._sessions.values()):
+            return
         if registry._idle_thread is not None and registry._idle_thread.is_alive():
             return
         thread = threading.Thread(target=_idle_sweeper_loop, args=(registry,),
@@ -531,17 +547,15 @@ def _configure_idle_timeout(registry: PtySessionRegistry, minutes: object) -> No
         thread.start()
 
 
-# LLM: 空闲选择覆盖所有未退役资源，父进程poll结果不解除后代责任；仅返回已请求清理的句柄。
+# LLM: 每个会话独立计算有效超时，跳过自身0值而非整表早退；父进程poll不解除后代责任，回执仍沿原close。
 # 函数用途: 请求收回超时终端，未确认者仍保留原注册表责任。
-def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None) -> tuple[str, ...]:
-    timeout = float(registry.idle_timeout_seconds or 0.0)
-    if timeout <= 0:
-        return ()
+def _sweep_idle_sessions(registry: PtySessionRegistry, now: float | None = None) -> tuple[str, ...]:
     moment = time.time() if now is None else float(now)
     with registry._lock:
         expired = [
             session for session in registry._sessions.values()
-            if not _source_resource_retired(session) and moment - session.last_active_at > timeout
+            if (timeout := _session_idle_timeout(registry, session)) > 0
+            and not _source_resource_retired(session) and moment - session.last_active_at > timeout
         ]
     reclaimed = []
     for session in expired:
@@ -584,13 +598,15 @@ def _close_session_fd(session: PtySession) -> None:
                 pass
 
 
-# LLM: 巡检周期按阈值收敛（阈值/4，夹在 0.5~30 秒）：默认 30 分钟阈值下每 30 秒查一次，
-#   小阈值测试里也能在几秒内触发；线程是 daemon，不阻塞进程退出。放模块级保持注册表类体量在阈值内。
+# LLM: 周期取未退役会话的最短正超时/4并夹在0.5~30秒；不能因全局默认0对已有正覆盖忙循环，daemon不阻塞退出。
 # 函数用途: 后台循环按间隔调用注册表的 sweep_idle，自动回收空闲 PTY 会话。
 def _idle_sweeper_loop(registry: PtySessionRegistry) -> None:
     while True:
+        with registry._lock:
+            timeouts = [_session_idle_timeout(registry, session) for session in registry._sessions.values()
+                        if not _source_resource_retired(session) and _session_idle_timeout(registry, session) > 0]
         interval = min(_IDLE_SWEEP_INTERVAL_SECONDS,
-                       max(_MIN_IDLE_SWEEP_INTERVAL_SECONDS, registry.idle_timeout_seconds / 4.0))
+                       max(_MIN_IDLE_SWEEP_INTERVAL_SECONDS, min(timeouts, default=_IDLE_SWEEP_INTERVAL_SECONDS * 4) / 4.0))
         time.sleep(interval)
         try:
             registry.sweep_idle()
@@ -858,6 +874,7 @@ class TerminalSessionTool(BaseTool):
         target = self.shell_tool._execution_target(params, command)
         if isinstance(target, ToolHandlerOutcome):
             return self._error(target.error_code, target.output)
+        timeout = self.shell_tool.pty_session_idle_timeout_seconds
         try:
             session = pty_session_registry.start(
                 command,
@@ -867,9 +884,14 @@ class TerminalSessionTool(BaseTool):
                 read_roots,
                 SandboxWriteProtection(tuple(protected_write_paths or ()), getattr(self.shell_tool, "_sandbox_forbidden_write_roots", ())),
                 params.get("__run_scope"),
-                host_policy=PtyHostPolicy(self.shell_tool.host_private_roots, getattr(self.shell_tool, '_sandbox_network_access', True),
-                                          self.shell_tool.host_credential_env_names, self.shell_tool.protected_persona_root,
-                                          full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only")),
+                host_policy=PtyHostPolicy(
+                    self.shell_tool.host_private_roots,
+                    getattr(self.shell_tool, "_sandbox_network_access", True),
+                    self.shell_tool.host_credential_env_names,
+                    self.shell_tool.protected_persona_root,
+                    full_access_other_owner_homes=getattr(self.shell_tool, "full_access_other_owner_homes", "read_only"),
+                    idle_timeout_seconds=timeout,
+                ),
             )
         except AgentsContractError as exc:
             return self._error("SANDBOX_UNAVAILABLE", exc.code)

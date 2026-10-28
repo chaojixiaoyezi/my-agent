@@ -65,7 +65,7 @@ _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES = {"run_command", "terminal_session", "lsp"}
 _BOUNDARY_CONTEXT_TOOL_NAMES = _BOUNDARY_FILESYSTEM_TOOL_NAMES | _SANDBOX_WRITE_BOUNDARY_TOOL_NAMES
 
 
-# LLM: 每次调用冻结权限及只读 execution 复查；不能修改共享 handler，复查不重跑审批或预算；观察回调只沿宿主字段传递。
+# LLM: 每次调用冻结权限及独立宿主owner身份；缺失身份兼容旧调用，两份非空身份不一致必须在handler前拒绝，不能修改共享handler。
 # 类用途: 固定工具参数、工作区、owner 墙和当前执行权威，在真正启动与交接时仍可核对原调用。
 @dataclass(frozen=True)
 class RegistryToolInvokeRequest:
@@ -88,6 +88,8 @@ class RegistryToolInvokeRequest:
     # run snapshot. Missing bindings fail closed; this is not a public adapter.
     runtime: ToolRuntime | None = None
     on_handler_started: Callable[[], None] | None = None
+    owner_id: str = ""
+    registry_owner_id: str = ""
 
 
 # LLM: 只有通过 registry 路径和快照门的宿主请求才能到这里；观察回调不接收参数，也不是授权来源。
@@ -161,9 +163,18 @@ def _read_boundary_denied(
     )
 
 
-# LLM: invoke 位于统一权限门之后，只消费已冻结的 runtime/handler；观察回调透传到所有边界门之后，不替换实现或重选授权。调整时保持 ToolExecutor、ActionPolicy 和 test_tool_runtime_scope 的同快照合同。
+# LLM: invoke只消费已冻结runtime/handler；先核独立宿主owner身份，再沿原快照/owner墙裁决，不从模型arguments补身份或重选授权。
 # 函数用途: 核对调用绑定、收窄工作目录与读写边界，再执行真实工具；取消上下文随调用传入，实际掉线由绑定的工具返回，不把可用性探针当作撤销。
 def invoke_registry_tool(request: RegistryToolInvokeRequest) -> ToolHandlerOutcome:
+    if request.owner_id and request.registry_owner_id and request.owner_id != request.registry_owner_id:
+        return apply_tool_execution_facts(
+            structured_tool_error(
+                request.tool_name, "owner_mismatch", "调用身份与工具注册表归属不一致，已拒绝执行。",
+                error_code="TOOL_PERMISSION_DENIED",
+            ),
+            failure_stage=ToolFailureStage.RUNTIME_GATE,
+            handler_executed=False,
+        )
     request = _with_effective_registry_workspace(request)
     runtime = request.runtime
     if runtime is None and request.runtime_snapshot is not None:
