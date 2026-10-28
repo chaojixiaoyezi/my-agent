@@ -1,3 +1,34 @@
+## 2026-10-28 Wave 9 A1 Round 3：凭据片段/编码净化与专用禁网码
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-a1.md` 的两项返工要求；准确起点 `717e1e94b5ed9471775e76720b90a0a683141052`，功能基线仍为 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在 `/tmp/wt-wave9-a1` / `wave9-a1` 编辑、测试及提交；未改已验收的IPv6双检、单次pin或线程命名域，未推送、部署或操作真实服务。
+
+### 做法与边界
+
+- `scrub_push_outcome` 预建去重的全部8字符窗口；任意更长连续片段都含一个该窗口。每个字符允许字面值或对应UTF-8字节的百分号编码，大小写不敏感，另用 `unquote(...).casefold()` 检查解码变体。模式只含固定窗口的有限选择，不按所有长度二次方枚举，也不进行无限递归解码。
+- 命中后将**整个文本字段**换成 `[REDACTED_PUSH_SECRET]`，宁可丢弃更多错误描述，也不保留片段尾巴或依赖变长编码的位置映射。递归处理全部结果字段、嵌套dict键值、list/tuple，布尔与数字不变。固定标记本身若含秘密的8字符窗口则改为空串，避免标记自己泄密；整字段处理不产生邻接标记重拼，二次调用保持稳定。未命中的文本不改写为解码文本。
+- `assert_push_network` 只将禁网码改为 `REMOTE_AGENT_PUSH_NETWORK_DISABLED`；错误目录同步登记 `permission`、不可重试及不绕过宿主禁网的恢复提示，防止原执行器将新码降成未知错误。原本解密/DNS前拒绝和请求级隔离逻辑不变。
+- 新增真实回环HTTP → 原ToolExecutor/Registry → LocalStore操作账的十种回显：完整令牌、前12/中12/末8字符、URL编码整串/片段、全百分号小写/大写/片段、逐字符混合编码。工具结果和持久操作账分别断言新标记及任意8字符窗口均无残留。纯函数另枚举ASCII/中文Token的全部8字符窗口，覆盖五种表示、嵌套键值及二次幂等；这不代表HTTP认证头已支持中文Token。原99项保留，没有删测或放宽断言。
+
+### 验证记录
+
+- 实现前定向37项：34个预期断言失败、3通过、0错误/跳过，见 `.pytest_cache/r3-w9-red.xml`。失败覆盖新标记、片段/编码脱敏和专用禁网码；不是导入或夹具报错。完整令牌的原安全行为仍作控制，不把仅标记升级的失败误称为新泄密。
+- 实现后专属全套 **119项通过、0失败/错误/跳过**：`.pytest_cache/r3-w9-green.xml`。与Round 2最终99项按测试名对比缺失为0，本轮新增20项。
+- 指定全范围 `ruff check agent_py_agent scripts` 为 `All checks passed!`；`check_doc_sync.py --base db4d5de92` 为 `DOC_SYNC_PASS`；`check_import_boundaries.py --json` 实际返回空数组 `[]`、退出0。提交后另核对 `git diff --check db4d5de92..HEAD` 与干净工作树。生产AST核对只有 `scrub_push_outcome` / `assert_push_network` 变化，其余推送逻辑未改。
+- 独立 `gpt-6-astra max` 已完成只读源码摘录复核，未访问工作树或运行测试：未指出规定字符串编码匹配本身的漏网，提出数值叶节点、JSON引号与标记重拼、固定禁网码碰撞三项意见。父级核对原接收器只导出四个严格字符串字段，不透传任意JSON数值；禁网检查在解析/解密Token前返回，不能直接把纯函数构造的数值或错误码碰撞当作已复现的HTTP漏洞。两项链路反例未补实测，泛化数值清洗未纳入本轮。
+- **已知未消除的复核风险**：Token尾部若为 `SECRET]"`，与标记末尾加JSON结束引号可形成同样的8字符窗口。该反例静态成立，但真实返回/操作账链路未复现，当前119项未覆盖；递归helper对任意深度对象也未作额外保证。最新 `07-tasks/commit-wave9-a1.md` 明确要求立即提交当前119项版本，故不在提交派活中追加行为改动。这不是“所有复核意见已解决”，由集成者决定后续针对性修补。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --basetemp=.pytest_cache/r3-w9-green-tmp --junitxml=.pytest_cache/r3-w9-green.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+**未验证**：全仓/跨平台测试、外部网络或另一台机器可达、生产TLS/代理、真实模型消费到完成及长负载；未对范围外编码（如任意层数编码、Base64）宣称完全覆盖。上轮证据及未验证项保留如下。
+
 ## 2026-10-28 Wave 9 A1 Round 2：错误脱敏、禁网与推送隔离返工
 
 来源：完整读取 `07-tasks/fix-wave9-a1.md` 的六项要求；准确返工起点 `1e2192e3543a01ddd2425b14518aba6d582647a2`，原功能基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。编辑、测试及提交只在 `/tmp/wt-wave9-a1` / `wave9-a1`；未推送、部署或启停真实Gateway，不运行已退休的尺寸检查。

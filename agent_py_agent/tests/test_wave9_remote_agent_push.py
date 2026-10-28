@@ -686,7 +686,7 @@ def test_untrusted_learning_origin_cannot_mutate_soul_even_with_tool_access(rece
     assert agent.home_paths.owner_soul_md.read_bytes() == before
 
 
-# LLM: 故障接收器只绑定回环，读取真实请求但不记录认证；退出必须关闭服务和线程。
+# LLM: 故障接收器只绑定回环，凭据回显仅供脱敏反例；可选片段/编码不写日志，退出关闭服务和线程。
 # 函数用途: 提供可回显Token或返回重定向的本机反例服务。
 @pytest.fixture
 def adverse_receiver():
@@ -704,14 +704,15 @@ def adverse_receiver():
             state["seen"].append(self.path)
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             token = self.headers["X-Agent-Push-Token"]
+            reflected = push_secret_echo(token, state.get("echo_form", "full"))
             if state["bad_status"]:
                 self.wfile.write(("not-http:" + token + "\r\n\r\n").encode())
                 self.close_connection = True
                 return
-            raw = ("receiver reflected " + token).encode()
+            raw = ("receiver reflected " + reflected).encode()
             self.send_response(state["status"])
             if state["encoding"]:
-                self.send_header("Content-Encoding", token + state["suffix"])
+                self.send_header("Content-Encoding", reflected + state["suffix"])
             if state["location"]:
                 self.send_header("Location", state["location"])
             self.send_header("Content-Length", str(len(raw)))
@@ -736,7 +737,7 @@ def adverse_receiver():
         thread.join(5)
 
 
-# LLM: 通过原ToolExecutor和LocalStore实测错误预览；断言实际进入handler及只发一次请求。
+# LLM: 原ToolExecutor和LocalStore实测新标记及错误预览；标记须防Token重叠拼回，断言只发一次请求。
 # 函数用途: 确认回显的出站Token不出现在工具结果、归档或操作账预览。
 @pytest.mark.parametrize("encoding", [False, True])
 @pytest.mark.parametrize("marker_overlap", [False, True])
@@ -770,7 +771,7 @@ def test_reflected_token_scrubbed_before_operation_ledger(receiver, adverse_rece
     rendered = json.dumps({"result": asdict(result), "operation": asdict(operation)}, default=str).casefold()
     assert secret.casefold() not in rendered
     if encoding and not marker_overlap:
-        assert "[redacted]" in rendered
+        assert "[redacted_push_secret]" in rendered
 
 
 # LLM: 注入真实传输返回形状，覆盖output之外的嵌套错误字段与异常，不把mock当网络验收。
@@ -803,7 +804,7 @@ def test_all_transport_failure_fields_are_scrubbed(receiver, monkeypatch, failur
     assert secret.casefold() not in json.dumps(asdict(result)).casefold()
 
 
-# LLM: 网络冻结事实来自原Executor的write_boundary，别名和显式URL都须在DNS之前拒绝。
+# LLM: 网络冻结事实来自原Executor的write_boundary；准确推送专用禁网合同码必须在DNS前返回。
 # 函数用途: 复现禁网任务仍能走remote_agent_push的问题。
 @pytest.mark.parametrize("endpoint_field", ["endpoint_ref", "endpoint_url"])
 @pytest.mark.parametrize("boundary", [
@@ -831,7 +832,7 @@ def test_push_honors_runner_network_disabled(receiver, tmp_path, monkeypatch, en
     result = execute_canonical_test_call(tmp_path, tools=agent.tools.tools, tool_name="remote_agent_push",
         arguments={endpoint_field: "blocked" if endpoint_field == "endpoint_ref" else url, **payload()},
         write_boundary=boundary).result
-    assert result.error_code == "NETWORK_ACCESS_DISABLED", result.output
+    assert result.error_code == "REMOTE_AGENT_PUSH_NETWORK_DISABLED", result.output
     assert result.effect_outcome == "not_started" and calls == []
 
 
@@ -880,7 +881,7 @@ def test_new_thread_and_reuse_key_namespaces_are_distinct(receiver):
     assert len(list(server.paths.inbox.glob("*.json"))) == 3
 
 
-# LLM: 实际用户权限及冻结owner上界都不能被别名或显式URL绕过；不访问外网。
+# LLM: 实际用户权限及冻结owner上界不能被别名或显式URL绕过；只接受推送专用禁网码，不访问外网。
 # 函数用途: 核对持久禁网、缓存上界及直接调用的宿主运行边界。
 @pytest.mark.parametrize("source", ["persisted", "cached", "direct_mode", "direct_permissions"])
 @pytest.mark.parametrize("endpoint_field", ["endpoint_ref", "endpoint_url"])
@@ -918,11 +919,11 @@ def test_push_honors_owner_and_direct_network_disabled(receiver, monkeypatch, so
         agent._current_run_params = SimpleNamespace(write_boundary=boundary)
     result = agent.tools.tools["remote_agent_push"].execute({
         endpoint_field: "blocked" if endpoint_field == "endpoint_ref" else url, **payload()})
-    assert result.error_code == "NETWORK_ACCESS_DISABLED", result.output
+    assert result.error_code == "REMOTE_AGENT_PUSH_NETWORK_DISABLED", result.output
     assert result.effect_outcome == "not_started" and calls == []
 
 
-# LLM: 两次正式调用共享同一handler但各持冻结权限；真实回环仅允许有网的一次入队，不借可变Agent当前边界串权。
+# LLM: 同一handler各持冻结权限；禁网返回专用合同码，有网一次真实入队，不借可变Agent当前边界串权。
 # 函数用途: 同时验证禁网拒绝、正常推送及请求级网络开关不会污染共享工具。
 def test_concurrent_scoped_network_permissions_do_not_leak(receiver, tmp_path):
     from concurrent.futures import ThreadPoolExecutor
@@ -948,7 +949,7 @@ def test_concurrent_scoped_network_permissions_do_not_leak(receiver, tmp_path):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         denied, accepted = list(pool.map(invoke, (False, True)))
-    assert not denied.ok and denied.error_code == "NETWORK_ACCESS_DISABLED"
+    assert not denied.ok and denied.error_code == "REMOTE_AGENT_PUSH_NETWORK_DISABLED"
     assert denied.effect_outcome == "not_started"
     assert accepted.ok and accepted.handler_executed, accepted.output
     assert len(list(server.paths.inbox.glob("*.json"))) == 1
@@ -979,3 +980,83 @@ def test_bad_http_status_line_never_leaks_token(receiver, adverse_receiver, tmp_
     rendered = json.dumps({"result": asdict(result), "operation": asdict(operation)})
     assert secret not in rendered and "not-http:" not in rendered
     assert "BadStatusLine" in rendered and state["seen"] == ["/remote-agent/push"]
+
+
+# LLM: 仅用于合成凭据反例；不读真实凭据，完整、片段及混合百分号编码共用同一确定转换。
+# 函数用途: 生成接收器故意回显的已知Token变体。
+def push_secret_echo(secret, form):
+    from urllib.parse import quote
+
+    if form == "fragment12":
+        return secret[:12]
+    if form == "middle12":
+        return secret[4:16]
+    if form == "exact8":
+        return secret[-8:]
+    if form == "url":
+        return quote(secret, safe="")
+    if form == "url_fragment":
+        return quote(secret[4:16], safe="")
+    if form in {"percent_lower", "percent_upper", "percent_fragment"}:
+        text = secret[4:16] if form == "percent_fragment" else secret
+        encoded = "".join(f"%{byte:02x}" for byte in text.encode())
+        return encoded.upper() if form == "percent_upper" else encoded
+    if form == "mixed":
+        return "".join(char if index % 2 else "".join(f"%{byte:02X}" for byte in char.encode())
+                       for index, char in enumerate(secret))
+    return secret
+
+
+# LLM: 原ToolExecutor加真实回环HTTP及LocalStore核对结果和持久操作账，不能以mock脱敏代替链路验证。
+# 函数用途: 拒绝完整Token、任意8字符以上片段、URL/全百分号及混合编码的回显残留。
+@pytest.mark.parametrize("form", ["full", "fragment12", "middle12", "exact8", "url", "url_fragment",
+                                 "percent_lower", "percent_upper", "percent_fragment", "mixed"])
+def test_secret_variants_scrubbed_in_real_http_and_ledger(receiver, adverse_receiver, tmp_path, form):
+    from dataclasses import asdict
+    from urllib.parse import unquote
+
+    from agent_py_agent.agent.local_storage import LocalStore
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import save_remote_endpoint
+    from agent_py_agent.tests._tool_runtime_harness import execute_canonical_test_call
+
+    _server, agent, _secret, _path = receiver
+    url, state = adverse_receiver
+    secret = "R3+Token/Key%:" + uuid.uuid4().hex + "?"
+    state.update(encoding=True, echo_form=form)
+    save_remote_endpoint(agent, "r3-reflect", url, secret, allowed_private_hosts=["127.0.0.1"])
+    store = LocalStore(tmp_path / "operations.db", enable_fts=False)
+    result = execute_canonical_test_call(tmp_path, tools=agent.tools.tools, tool_name="remote_agent_push",
+        arguments={"endpoint_ref": "r3-reflect", **payload()}, operation_store=store, operation_store_required=True).result
+    assert not result.ok and result.handler_executed and result.effect_outcome == "unknown"
+    assert state["seen"] == ["/remote-agent/push"] and result.operation is not None
+    record = store.get_tool_operation(owner_id="test-owner", run_id="test-run", operation_id=result.operation.operation_id)
+    assert record is not None and record.result
+    for value in (asdict(result), asdict(record)):
+        rendered = json.dumps(value, ensure_ascii=False)
+        assert "[REDACTED_PUSH_SECRET]" in rendered
+        normalized = unquote(rendered).casefold()
+        assert all(secret[index:index + 8].casefold() not in normalized for index in range(len(secret) - 7))
+        assert push_secret_echo(secret, form).casefold() not in rendered.casefold()
+
+
+# LLM: 纯字符串覆盖全部8字符窗口及UTF-8编码，不外推为Unicode HTTP头支持；机器布尔/数字不变。
+# 函数用途: 核对任意位置的最短受保护片段、嵌套键值和二次清洗稳定性。
+@pytest.mark.parametrize("secret", ["R3+Ab/cD%:EfGhIjKlMnOpQrStUvWxYz0123456789", "汉字片段令牌编码测试你好世界一二三四五六七八九十"])
+@pytest.mark.parametrize("form", ["full", "url", "percent_lower", "percent_upper", "mixed"])
+def test_each_eight_character_window_scrubbed_recursively(secret, form):
+    from dataclasses import asdict
+    from urllib.parse import unquote
+
+    from agent_py_agent.agent.tooling.models import ToolHandlerOutcome
+    from agent_py_agent.agent.tooling.remote_agent_push_tool import scrub_push_outcome
+
+    for index in range(len(secret) - 7):
+        reflected = push_secret_echo(secret[index:index + 8], form)
+        result = ToolHandlerOutcome("remote_agent_push", False, reflected, error_code="NETWORK_REQUEST_FAILED",
+            result_envelope={reflected: [reflected, (reflected, 202, False)]}, effect_outcome="unknown")
+        result = scrub_push_outcome(result, secret)
+        first = asdict(result)
+        assert first == asdict(scrub_push_outcome(result, secret))
+        assert "[REDACTED_PUSH_SECRET]" in json.dumps(first, ensure_ascii=False)
+        assert secret[index:index + 8].casefold() not in unquote(json.dumps(first, ensure_ascii=False)).casefold()
+        assert result.effect_outcome == "unknown"

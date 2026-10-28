@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import fields
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from ..common.json_io import locked_json_path
 from ..contracts.gates.network_safety import ipv4_projected, private_host_or_ip_is_allowlisted
@@ -108,18 +108,35 @@ def resolve_owner_main_home(agent):
     return resolve_owner_home(agent.home_paths.root, OwnerIdentity.local_main()).home_dir
 
 
-# LLM: 结果离开工具前净化全部文本字段及嵌套键值；大小写变体覆盖Content-Encoding规范化，不改宿主效果事实。
-# 函数用途: 防止已知出站秘密进入模型结果、恢复提示或操作账预览。
+# LLM: 全部8字符窗口已覆盖任意更长片段；逐字符核字面/UTF8百分号组合并补unquote检查，命中整字段清洗，不改机器事实。
+# 函数用途: 防止出站Token及片段、URL编码变体进入模型结果、恢复提示或操作账预览。
 def scrub_push_outcome(result, secret):
-    # LLM: 替换后再核密钥；标记与相邻文本重拼出秘密时清空整字段，不靠固定次数重复替换。
-    # 函数用途: 递归去掉所有结果字段中的当前凭据及其大小写变体。
+    fragments = {secret[index:index + 8] for index in range(max(0, len(secret) - 7))} if len(secret) >= 8 else {secret} - {""}
+    characters = {char: "(?:" + re.escape(char) + "|" + "".join(f"%{byte:02x}" for byte in char.encode()) + ")"
+                  for char in set(secret)}
+    pattern = re.compile("|".join("".join(characters[char] for char in fragment)
+                         for fragment in sorted(fragments)), re.IGNORECASE) if fragments else None
+    folded_fragments = {fragment.casefold() for fragment in fragments}
+
+    # LLM: 模式仅含固定8字符的有限选择，不枚举所有长度或递归解码；不依赖URL解码对字面百分号的歧义解释。
+    # 函数用途: 识别字面/百分号混合片段以及解码后的大小写变体。
+    def contains_secret(text):
+        if pattern is None:
+            return False
+        if pattern.search(text):
+            return True
+        decoded = unquote(text).casefold()
+        return any(fragment in decoded for fragment in folded_fragments)
+
+    marker = "[REDACTED_PUSH_SECRET]"
+    # 标记自己也可能包含凭据片段；此时空字段是唯一不再泄漏该片段的降级。
+    replacement = "" if contains_secret(marker) else marker
+
+    # LLM: 命中后整字段替换，不留下不足8字符的尾段，也不与邻接文本拼回；标记若撞秘密则清空，二次调用幂等。
+    # 函数用途: 遍历结果文本及嵌套键值，保留布尔、数字及其它宿主机器事实。
     def scrub(value):
         if isinstance(value, str):
-            if not secret:
-                return value
-            pattern = re.compile(re.escape(secret), re.IGNORECASE)
-            clean = pattern.sub("[REDACTED]", value)
-            return "" if pattern.search(clean) else clean
+            return replacement if contains_secret(value) else value
         if isinstance(value, dict):
             return {scrub(key): scrub(item) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
@@ -131,7 +148,7 @@ def scrub_push_outcome(result, secret):
     return result
 
 
-# LLM: 正式调用消费原Registry冻结的只读权限，直接调用兼容宿主当前边界；持久owner策略和冻结上界只可收紧。
+# LLM: 消费原Registry冻结权限，兼容宿主直接调用边界；持久owner上界只可收紧，禁网返回推送专用合同码。
 # 函数用途: 在解密节点或DNS前拒绝禁网任务，不能由endpoint_ref或endpoint_url绕过。
 def assert_push_network(agent, context):
     if context is not None:
@@ -145,7 +162,7 @@ def assert_push_network(agent, context):
             isinstance(effective, Mapping) and effective.get("network_enabled") is False)
     if (denied or getattr(getattr(agent, "owner_policy", None), "network_enabled", True) is False
             or not resolve_effective_owner_policy(agent.home_paths).network_enabled):
-        raise RemotePushError("NETWORK_ACCESS_DISABLED", 403)
+        raise RemotePushError("REMOTE_AGENT_PUSH_NETWORK_DISABLED", 403)
 
 
 # LLM: 所有DNS回答先核验再固定连接IP；原地址和IPv4投影各自核白名单，任何一侧的元数据/link-local永久拒绝。

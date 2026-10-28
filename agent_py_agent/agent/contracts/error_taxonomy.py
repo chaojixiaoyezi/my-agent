@@ -4317,8 +4317,12 @@ ERROR_CONTRACTS.update({
 })
 
 
-# LLM: 推送错误只有实际处理器能证明未发送；分类保留准确原因，不自动重复POST或借另一owner节点配置。
+# LLM: 推送错误由实际处理器证明未发送；专用禁网码保留permission分类，不归UNKNOWN或自动重复POST/借他人配置。
 ERROR_CONTRACTS.update({
+    "REMOTE_AGENT_PUSH_NETWORK_DISABLED": ErrorContract(
+        code="REMOTE_AGENT_PUSH_NETWORK_DISABLED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="当前任务或用户禁用网络，未发送远端推送；核对原宿主权限，不换入口、节点别名或他人身份绕过。"),
     **{code: ErrorContract(code=code, category="permission", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
         recovery_hint="核对准确节点配置、Token范围和来源；不要放宽SSRF、借他人身份或把外部事件当作真人授权。")
