@@ -47,7 +47,7 @@ def v2_action_specs():
               {"expected_revision": target["expected_revision"]}), "workspace asset"),
         _spec("conversations.threads.fork", "write", "threads.manage",
               closed({"source_thread_id": id_schema()}, {"up_to_message_id": id_schema(),
-                     "title": text(120), **workspace}), "source_thread workspace"),
+                     "source_message_id": id_schema(), "title": text(120), **workspace}), "source_thread workspace"),
         _spec("datasources.list", "read", "datasources.read", closed({}, workspace), "workspace datasource"),
         _spec("datasources.save", "write", "datasources.write", closed({"spec": {"type": "object"}},
               {"secret": {"type": "object"}, **target, "expected_revision": integer(2**63 - 1, 0)}), "workspace datasource"),

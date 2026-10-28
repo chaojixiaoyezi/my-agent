@@ -89,19 +89,40 @@ def _active_agent_workspace_root(agent):
     return getattr(agent, 'effective_workspace_root', getattr(agent, 'root', None))
 
 
-# LLM: main/user脚本保持，数据源与工作流动态读取当前目录和受限快照；治理仍只给可信管理员，目录开关不扩授权。
-# 函数用途: 登记Owner脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
+# LLM: 仅投递至当前Owner已绑定且支持proactive的同一渠道；无通道返回no_channel，发送异常或失败返回unavailable。
+# 函数用途: 将脚本源异常与工作流断点通知接入当前Agent的DeliveryService。
+def _agent_im_notifier(agent, notice):
+    from ..capability.channel_message_target import resolve_message_target
+    from ..conversation.channels import DeliveryContext, ReplyEnvelope
+    delivery = getattr(agent, 'delivery_service', None)
+    provider, target, owner_root, err = resolve_message_target(agent, '')
+    if err or delivery is None or owner_root is None or not target:
+        return 'no_channel'
+    if not delivery.registry.capabilities_for(provider).proactive:
+        return 'no_channel'
+    title = str(notice.get('title') or notice.get('event_type') or 'notification')
+    receipt = delivery.deliver(
+        DeliveryContext(channel=provider, target=target, mode='proactive'),
+        ReplyEnvelope(content=f"[{title}] {notice.get('message', '')}".strip()),
+    )
+    return 'queued' if getattr(receipt, 'delivery_status', '') == 'sent' else 'unavailable'
+
+
+# LLM: main/user脚本、数据源与工作流统一动态读取当前经校验工作区与受限快照；治理仍只给可信管理员，目录开关不扩授权。
+# 函数用途: 登记Owner与项目工作区脚本/数据源/工作流、管理员治理与目录入口，不刷新或启动领域服务。
 def register_self_map(agent):
     if str(getattr(agent.tools, "owner_type", "") or "") in {"main_agent", "user"}:
         owner_home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
         if owner_home is not None:
             ws_provider = functools.partial(_active_agent_workspace_root, agent)
-            agent.tools.register(ScriptsTool(owner_home))
+            im_notifier = functools.partial(_agent_im_notifier, agent)
+            agent.tools.register(ScriptsTool(owner_home, workspace_root_provider=ws_provider, im_notifier=im_notifier))
             agent.tools.register(DatasourcesTool(owner_home, workspace_root_provider=ws_provider))
             agent.tools.register(WorkflowsTool(owner_home,
                 workspace_root_provider=ws_provider,
                 skill_snapshot_provider=lambda: agent.current_skill_snapshot(),
-                analysis_handler=_workflow_analysis_handler(agent)))
+                analysis_handler=_workflow_analysis_handler(agent),
+                im_notifier=im_notifier))
             if is_permission_admin(getattr(agent, 'home_paths', None)):
                 agent.tools.register(RuntimeGovernanceTool(agent, is_admin=True))
     if not getattr(agent.config, "enable_self_map", True):

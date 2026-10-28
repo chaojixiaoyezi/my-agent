@@ -10,12 +10,15 @@ from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, thaw, validate_tree
 
 
-# LLM: Bot/审计扩展也只按静态集合分组，缺后端的动作由ready明确不可用，不借observations或main兜底。
-# 函数用途: 选择原四域、V2扩展或双Bot适配领域。
+# LLM: W7门户优先按静态集合选域，缺兄弟后端保持不可用；不能落入通用observations伪装已接线。
+# 函数用途: 选择原四域、门户、V2扩展或双Bot领域。
 def domain_name(action: str) -> str:
     action_spec(action)
     from .action_specs_audit_bots import AUDIT_BOT_ACTIONS
     from .action_specs_v2_ext import V2_ACTIONS
+    from .action_specs_v2_portal import PORTAL_V2_ACTIONS
+    if action in PORTAL_V2_ACTIONS:
+        return "portal_v2"
     if action in AUDIT_BOT_ACTIONS:
         return "audit_bots"
     if action in V2_ACTIONS:
@@ -31,10 +34,16 @@ def domain_name(action: str) -> str:
     return "observations"
 
 
-# LLM: 双Bot动作逐项核真实依赖，未接AG1或执行接缝保持不可用；原stream和call合同不变。
-# 函数用途: 核验当前组合根能否真正处理指定动作。
+# LLM: 门户与双Bot逐动作核真实依赖，惰性兄弟模块缺失时不可用，不借main执行器兜底。
+# 函数用途: 核验当前组合根是否真正具备指定动作的后端。
 def domain_ready(action: str, ports: HostDomainPorts) -> bool:
     name = domain_name(action)
+    if name == "portal_v2":
+        if action == "conversations.requests.interject":
+            return (getattr(ports.conversation, "request_ports", None) is not None
+                    and callable(getattr(ports.conversation, "require_thread", None)))
+        backend = getattr(ports.conversation, "portal_v2", None)
+        return bool(backend is not None and backend.ready(action))
     if name == "audit_bots":
         from .audit_bot_v2_handlers import audit_bots_ready
         return audit_bots_ready(action, ports)
@@ -72,7 +81,7 @@ def discover(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainResult
     return DomainResult(200, {"actions": rows, "capabilities": sorted(caps)})
 
 
-# LLM: 域调用固定入口，结果必须是公共DTO；异常不带原异常正文，写域未知结果不伪装成未执行。
+# LLM: execute即使无key也可能写入；进入handler后的未知异常保unknown，成功后撤权保committed，不泄露异常正文。
 # 函数用途: 分派调用并在返回前重新检查权限。
 def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainResult:
     revalidate_call(authorized)
@@ -91,7 +100,7 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     except HostAPIError:
         raise
     except Exception:
-        code = "OUTCOME_UNKNOWN" if action_spec(action).requires_idempotency else "STORE_UNAVAILABLE"
+        code = "OUTCOME_UNKNOWN" if _observed_outcome(action) == "committed" else "STORE_UNAVAILABLE"
         raise HostAPIError(code, 503, "unknown" if code == "OUTCOME_UNKNOWN" else "not_started") from None
     try:
         revalidate_call(authorized)
@@ -100,10 +109,16 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     return result
 
 
-# LLM: 双Bot分派沿原四端口和已授权对象，缺依赖直接拒绝，不能在组合根构造临时替身业务。
-# 函数用途: 执行原领域、V2扩展或已就绪Bot动作。
+# LLM: 门户只消费真实AuthorizedCall和生产端口，插话直接进入请求域；缺兄弟模块不构造替身业务。
+# 函数用途: 执行原领域、门户、V2扩展或已就绪Bot动作。
 def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     name = domain_name(authorized.call.action)
+    if name == "portal_v2":
+        if authorized.call.action == "conversations.requests.interject":
+            from .conversations import read_context
+            from .requests import RequestDomain
+            return RequestDomain(ports.conversation).call(authorized, read_context(authorized))
+        return ports.conversation.portal_v2.call(authorized)
     if name == "audit_bots":
         from .audit_bot_v2_handlers import call_audit_bots
         return call_audit_bots(authorized, ports)
@@ -130,10 +145,11 @@ def _c_result(result):
     return result
 
 
-# LLM: outcome只描述写副作用：合法写成功包括原受理回执提交，不代表202业务完成；纯读取无写入，异常中途不推断已提交。
+# LLM: outcome只描述副作用；execute与write/async同属可能写入，是否提供key不改变已执行事实，不代表202业务完成。
 # 函数用途: 标注已观察的同步结果是否包含写提交。
 def _observed_outcome(action: str) -> str:
-    return "committed" if action_spec(action).requires_idempotency else "not_started"
+    spec = action_spec(action)
+    return "committed" if spec.requires_idempotency or spec.mode == "execute" else "not_started"
 
 
 # LLM: 迭代器每个事件前后核原授权；stream关闭只结束订阅，不取消底层请求。

@@ -2,6 +2,7 @@
 # 模块用途: 编排纯脚本、条件跳过、技能分析、异常兜底与 Step 级断点续跑。
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -17,6 +18,11 @@ from ..assets.script_store import ScriptStore
 from ..assets.skill_adapter import get_owner_skill_descriptor
 from ..assets.workflow_store import WorkflowDefinition, WorkflowStore, with_workflow_step_refs
 from ..common.nofollow_fs import read_text_beneath, write_text_atomic_beneath
+from .datasource_runtime import (
+    bind_script_workspace,
+    emit_asset_im_notification,
+    run_script_with_datasources,
+)
 from .models import (
     AnalysisContext,
     StepExecutionRecord,
@@ -28,17 +34,17 @@ from .models import (
 )
 from .models import redact_bearer_values as redact_sensitive_value
 from .run_store import WorkflowRunStore
-from .script_runner import ScriptRunner, load_script, parse_script_output
+from .script_runner import ScriptRunner, _EntrypointMissing, load_script, parse_script_output
 
 SUCCESS = ('succeeded', 'escalated_recovered', 'skipped')
 
 
 # LLM: 定义恢复与refs派生只走资产层权威API，路径安全仍由引擎和Store检查。
 # 函数用途: 加载并复制规范执行定义。
-def _definition(home, value):
+def _definition(home, value, workspace_root=None):
     if isinstance(value, str):
         safe_path(home, value)
-        asset = WorkflowStore(home).get_workflow(value)
+        asset = WorkflowStore(home, workspace_root=workspace_root).get_workflow(value)
         value = asset.to_dict() if asset is not None else json.loads(read_text_beneath(home, ('workflows', value, 'workflow.json')) or '{}')
     value = with_workflow_step_refs(WorkflowDefinition.from_any(payload(value))).to_dict()
     descriptor = value['descriptor']
@@ -53,22 +59,23 @@ def _pending(spec):
                                'pending', 0, 0, 0, False, script_id=spec.get('script_id', ''))
 
 
-# LLM: 执行前须由宿主核验 Owner 与权限；回调只提供判断数据，不得自动应用脚本修复。
-# 类用途: 运行工作流并在失败或中断时保留已成功步骤。
-class WorkflowEngine:
-    # LLM: 构造不执行资产，宿主提供已授权正文读取器，所有回调协议固定。
+# LLM: 生命周期持有冻结定义、版本和断点合同，步骤调度由子类_drive提供，不建立另一执行器。
+# 类用途: 管理工作流创建、恢复与运行级合同，供公开引擎复用。
+class _WorkflowRunLifecycle:
+    # LLM: 构造不执行资产；项目根和正文读取器仅宿主提供，不从模型工作流正文授权。
     # 函数用途: 绑定Owner存储及分析、技能解析与详情依赖。
-    def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None, skill_details_resolver=None):
+    def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None, skill_details_resolver=None, workspace_root=None):
         self.owner_home = Path(owner_home).absolute()
-        self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home)
+        self.workspace_root = workspace_root
+        self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
         self.escalation_handler, self.analysis_handler = escalation_handler, analysis_handler
         self.skill_resolver = skill_resolver
         self.skill_details_resolver = skill_details_resolver
 
-    # LLM: 首次执行冻结定义，先核传入及当前canonical运行闸；owner_id只校验一致性，不能建立授权。
+    # LLM: 首次执行冻结定义及脚本版本/hash/来源；owner_id只校验一致性，不建立授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
     def run_workflow(self, workflow, inputs=None, trigger_kind='manual', owner_id=''):
-        definition, descriptor = _definition(self.owner_home, workflow)
+        definition, descriptor = _definition(self.owner_home, workflow, self.workspace_root)
         self._require_workflow_enabled(definition)
         if owner_id and descriptor.get('owner_id') and owner_id != descriptor['owner_id']:
             raise ValueError('工作流 Owner 不匹配')
@@ -76,14 +83,18 @@ class WorkflowEngine:
                                    trigger_kind, 'running', time.time(), 0, 0,
                                    steps=tuple(_pending(spec) for spec in definition['steps']),
                                    inputs=payload({} if inputs is None else inputs))
+        definition['_frozen_scripts'] = self._script_pins(definition['steps'])
+        record = replace(record, workflow_name=descriptor['name'], total_steps=len(definition['steps']))
         self.store.create_run(record, definition)
         with self.store.execution_lock(record.workflow_run_id):
             return self._drive(record, definition, 0)
 
-    # LLM: 恢复前重核当前Owner开关，旧启用快照不能复活停用资产；冻结输入/成功前缀及补丁来源合同不变。
-    # 函数用途: 在独占锁内注入带来源合法输出或数据源变更并续跑。
+    # LLM: 参数/补丁先完成无副作用验证，再核后缀版本；合法修复可重钉当前依赖，确认/漂移断点仍强制版本门。
+    # 函数用途: 在独占锁内校验修复请求、保存批准的快照变更并续跑，保留成功前缀。
     def resume_workflow_run(self, workflow_run_id, from_step_id=None, *, patched_step_output=None, updated_data_sources=None,
-                            resolution_origin: Literal['user', 'agent', 'system'] | None = None):
+                            resolution_origin: Literal['user', 'agent', 'system'] | None = None, allow_script_drift: bool = False):
+        if type(allow_script_drift) is not bool:
+            raise ValueError('allow_script_drift必须为布尔值')
         if resolution_origin is not None and resolution_origin not in ('user', 'agent', 'system'):
             raise ValueError('resolution_origin必须为user、agent或system')
         with self.store.execution_lock(workflow_run_id):
@@ -95,6 +106,9 @@ class WorkflowEngine:
                 raise ValueError('恢复步骤不存在')
             start = ids.index(from_step_id) if from_step_id is not None else next(
                 (i for i, step in enumerate(record.steps) if step.status not in SUCCESS), len(ids))
+            if (start == len(ids) and ids and record.status == 'failed'
+                    and (record.breakpoint or {}).get('error_code') == 'WORKFLOW_OUTPUT_CONTRACT_VIOLATION'):
+                start -= 1
             if any(step.status not in SUCCESS for step in record.steps[:start]):
                 raise ValueError('不能跳过未成功的前序步骤')
             repaired = None
@@ -102,9 +116,12 @@ class WorkflowEngine:
                 if start == len(ids):
                     raise ValueError('没有可注入修复输出的目标步骤')
                 repaired = self._patched_step(record.steps[start], definition['steps'][start], patched_step_output, resolution_origin)
+            if updated_data_sources is not None and not isinstance(updated_data_sources, (dict, list)):
+                raise ValueError('updated_data_sources必须为dict或list')
+            blocked = self._resume_script_gate(record, definition, start, allow_script_drift)
+            if blocked is not None:
+                return blocked
             if updated_data_sources is not None:
-                if not isinstance(updated_data_sources, (dict, list)):
-                    raise ValueError('updated_data_sources必须为dict或list')
                 definition.setdefault('descriptor', {})['data_sources'] = payload(updated_data_sources)
                 definition['_override_data_sources'] = True
                 self._save_definition(record, definition)
@@ -114,6 +131,7 @@ class WorkflowEngine:
                 _pending(spec) for spec in definition['steps'][start + bool(repaired):])
             record = replace(record, steps=steps, status='running', ended_at=0, failed_step_id='',
                              needs_repair=False, current_step_id='', final_output={}, resumed_from_step_id=ids[start] if start < len(ids) else '')
+            record = replace(record, breakpoint=None)
             if repaired:
                 self.store.save_step_result(workflow_run_id, repaired)
             self.store.save_run(record)
@@ -121,7 +139,125 @@ class WorkflowEngine:
 
     resume_workflow = resume_workflow_run
 
-    # LLM: 补丁仅替代输出；故障修复默认agent、正常确认默认user，保留既有模型参与事实和清理门。
+    # LLM: 项目覆盖走原只读Store，旧meta只在正式Store缺失时读；正文摘要不授执行权。
+    # 函数用途: 统一读取引擎当前作用域的脚本代码与元数据。
+    def _script_metadata(self, script_id):
+        return (ScriptStore(self.owner_home, workspace_root=self.workspace_root).get_script(script_id)
+                or load_script(self.owner_home, script_id)[1])
+
+    # LLM: 不可用依赖保留缺失pin，由实际步骤生成断点；代码摘要和资产版本不由输出正文推导。
+    # 函数用途: 冻结指定步骤脚本的revision、hash及来源。
+    def _script_pins(self, steps):
+        pins = {}
+        for spec in steps:
+            if not spec.get('script_id'):
+                continue
+            try:
+                row = self._script_metadata(spec['script_id'])
+                pins[spec['step_id']] = {'script_id': spec['script_id'], 'revision': row.get('revision', 0),
+                    'code_sha256': hashlib.sha256(row['code'].encode('utf-8')).hexdigest(),
+                    'source_scope': row.get('source_scope', 'owner'),
+                    'runtime_run_count': row.get('runtime_summary', {}).get('run_count', 0)}
+            except (OSError, ValueError, KeyError):
+                pins[spec['step_id']] = {'script_id': spec['script_id'], 'revision': None, 'code_sha256': '', 'source_scope': 'missing'}
+        return pins
+
+    # LLM: 仅接受一次原Store摘要推进，代码/来源不变且revision/run_count精确+1；只更新权威run内嵌pin，不创建修复旁件。
+    # 函数用途: 推进本次执行自己的摘要版本，避免正常恢复误报漂移。
+    def _advance_summary_pin(self, run, definition, spec):
+        frozen = definition.get('_frozen_scripts', {})
+        previous = frozen.get(spec['step_id'], {})
+        current = self._script_pins([spec]).get(spec['step_id'], {})
+        revision = previous.get('revision')
+        if not isinstance(revision, int):
+            return
+        identity = ('script_id', 'code_sha256', 'source_scope')
+        if (current.get('revision') != revision + 1
+                or current.get('runtime_run_count') != previous.get('runtime_run_count', 0) + 1
+                or any(current.get(key) != previous.get(key) for key in identity)):
+            return
+        for key, pin in tuple(frozen.items()):
+            if pin == previous:
+                frozen[key] = dict(current)
+        self.store.save_run(run, definition)
+
+    # LLM: 非漂移故障可修复当前依赖及后缀中完全相同原pin的同版本复用；其它后续/确认断点仍核原pin，前缀不变。
+    # 函数用途: 接纳当前故障资产修复，拦截其它后续漂移，仅在核验通过后发表新pin。
+    def _resume_script_gate(self, record, definition, start, allow):
+        current = self._script_pins(definition['steps'][start:])
+        frozen = definition.get('_frozen_scripts', {})
+        target = record.steps[start] if start < len(record.steps) else None
+        repaired = set()
+        if target and target.needs_repair and target.error_code != 'SCRIPT_REVISION_DRIFT' and target.step_id in current:
+            previous, replacement = frozen.get(target.step_id), current[target.step_id]
+            repaired = {key for key, value in current.items() if key == target.step_id
+                        or previous and frozen.get(key) == previous and value == replacement}
+        changed = next((key for key, value in current.items() if key not in repaired and frozen.get(key) != value), None)
+        if changed is None or allow:
+            approved = {key: value for key, value in current.items() if (allow or key in repaired) and frozen.get(key) != value}
+            if approved:
+                definition['_frozen_scripts'] = {**frozen, **approved}
+                self._save_definition(record, definition)
+            return None
+        index = next(i for i, step in enumerate(record.steps) if step.step_id == changed)
+        step = replace(record.steps[index], error_code='SCRIPT_REVISION_DRIFT',
+                       error_message='依赖脚本版本已变化，需显式allow_script_drift确认', ended_at=time.time(),
+                       status='paused_for_resume', needs_repair=True)
+        steps = record.steps[:index] + (step,) + record.steps[index + 1:]
+        blocked = replace(record, steps=steps, status='paused_for_resume', needs_repair=True, current_step_id=changed,
+                          failed_step_id=changed, ended_at=time.time(), breakpoint=self._breakpoint(step, index))
+        self.store.save_run(blocked)
+        self._notify_breakpoint(blocked)
+        return blocked
+
+    # LLM: 一基位置对应冻结定义，错误消息统一脱敏；主动暂停也有明确恢复选项，不推断执行身份。
+    # 函数用途: 构造公开断点对象。
+    def _breakpoint(self, step, index):
+        return redact_sensitive_value({'step_index': index + 1, 'step_id': step.step_id, 'step_name': step.name,
+            'status': 'failed' if step.needs_repair or step.error_code else step.status,
+            'error_code': step.error_code or 'WORKFLOW_PAUSED', 'error_message': step.error_message,
+            'failed_at': datetime.fromtimestamp(step.ended_at or time.time(), timezone.utc).isoformat(),
+            'can_resume': True, 'resume_options': ['rerun_from_step', 'updated_data_sources', 'patched_step_output']})
+
+    # LLM: 通知失败不覆盖已保存运行事实；只经当前Owner通知出口，不自行解析通道或发送认证。
+    # 函数用途: 把具体断点交给IM账本及可用outbox。
+    def _notify_breakpoint(self, record):
+        emit_asset_im_notification(self.owner_home, event_type='workflow_breakpoint', title=record.workflow_name,
+            message=f'{record.workflow_name}: {record.current_step_id}',
+            payload={'workflow_run_id': record.workflow_run_id, 'workflow_id': record.workflow_id,
+                     'total_steps': record.total_steps, 'completed_steps': record.completed_steps, 'breakpoint': record.breakpoint})
+
+    # LLM: 显式类型合同或完全空输出按成功步骤合并值校验，不采纳失败/跳过输出；旧非空无类型合同保持兼容。
+    # 函数用途: 更新进度、构造断点并核工作流合同，保留末步真实final_output。
+    def _finalize_record(self, record, definition):
+        record = replace(record, workflow_name=definition['descriptor']['name'], total_steps=len(record.steps),
+                         completed_steps=sum(step.status in SUCCESS for step in record.steps))
+        error = ''
+        if record.status == 'succeeded':
+            merged_outputs = {}
+            for step in record.steps:
+                if step.status in ('succeeded', 'escalated_recovered') and isinstance(step.output_snapshot, dict):
+                    merged_outputs.update(step.output_snapshot)
+            merged_outputs.update(record.final_output)
+            contract = definition['descriptor'].get('io_contract', {})
+            if contract.get('output_types') or not merged_outputs:
+                _, error = parse_script_output(json.dumps(merged_outputs), contract)
+        if error:
+            record = replace(record, status='failed', needs_repair=True,
+                current_step_id=record.steps[-1].step_id if record.steps else '',
+                failed_step_id=record.steps[-1].step_id if record.steps else '')
+        if record.status not in ('failed', 'paused_for_resume'):
+            return replace(record, breakpoint=None)
+        index = next((i for i, step in enumerate(record.steps) if step.step_id == record.current_step_id), max(len(record.steps) - 1, 0))
+        step = record.steps[index] if record.steps else StepExecutionRecord('', '工作流输出', '', 'failed', 0, record.ended_at, 0, False)
+        if error:
+            step = replace(step, needs_repair=True, error_code='WORKFLOW_OUTPUT_CONTRACT_VIOLATION', error_message=error)
+        return replace(record, breakpoint=self._breakpoint(step, index))
+
+# LLM: 复用原生命周期合同；本类只负责步骤输入/调度、修复和执行策略，不另建身份或作用域。
+# 类用途: 在Owner内顺序执行确定性、技能分析与混合步骤。
+class WorkflowEngine(_WorkflowRunLifecycle):
+    # LLM: 补丁仅替代输出；脚本合同来自当前授权作用域，故障默认agent/确认默认user，清理门保持。
     # 函数用途: 校验恢复输出并合成来源明确且输入不变的步骤。
     def _patched_step(self, target, spec, patched, resolution_origin: Literal['user', 'agent', 'system'] | None = None):
         origin = resolution_origin if resolution_origin is not None else ('agent' if target.needs_repair else 'user')
@@ -135,7 +271,7 @@ class WorkflowEngine:
         if spec.get('script_id'):
             contract = target.escalation_result.get('io_contract')
             if not contract:
-                contract = load_script(self.owner_home, spec['script_id'])[1].get('io_contract', {})
+                contract = self._script_metadata(spec['script_id']).get('io_contract', {})
             output, error = parse_script_output(json.dumps(output, allow_nan=False), contract)
             if error:
                 raise ValueError(f'修复输出不符合脚本契约: {error}')
@@ -152,10 +288,14 @@ class WorkflowEngine:
                                   json.dumps(safe, ensure_ascii=False, allow_nan=False) + '\n')
         self.store.save_run(record, definition)
 
-    # LLM: 摘要采用固定Store协议，派生视图失败不能覆盖运行事实或中断。
+    # LLM: 项目/全局命中不写同名Owner摘要；原Store协议和失败隔离保持，不扩大只读资产写权限。
     # 函数用途: 尽力回写最近状态、耗时及错误。
     def _record_summary(self, record):
         try:
+            if self.workspace_root is not None:
+                current = WorkflowStore(self.owner_home, workspace_root=self.workspace_root).get_workflow(record.workflow_id)
+                if current is not None and current.descriptor.scope_layer != 'owner':
+                    return
             summary = WorkflowStore(self.owner_home).record_run_summary
             error = next((f'{s.error_code}: {s.error_message}' for s in record.steps if s.step_id == record.failed_step_id), '')
             summary(record.workflow_id, record.status, record.duration_ms,
@@ -163,7 +303,7 @@ class WorkflowEngine:
         except Exception:
             pass
 
-    # LLM: 禁用异常保留机器码且硬失败，不走on_error兜底；原条件、暂停、账本与中断收口保持。
+    # LLM: 失败/暂停在真实步骤停住，结算前核最终合同并保存断点；中断仍先落盘再抛，通知不修改运行事实。
     # 函数用途: 调度后缀步骤，更新当前进度并结算整次运行。
     def _drive(self, record, definition, start):
         timer = time.monotonic()
@@ -185,7 +325,9 @@ class WorkflowEngine:
                 record = replace(record, status='paused_for_resume', needs_repair=True, failed_step_id=step.step_id,
                                  ended_at=time.time(), duration_ms=record.duration_ms + (time.monotonic() - timer) * 1000,
                                  final_output=next(reversed(outputs.values()), {}))
+                record = self._finalize_record(record, definition)
                 self.store.save_run(record)
+                self._notify_breakpoint(record)
                 self._record_summary(record)
                 raise
             except Exception as exc:
@@ -205,7 +347,10 @@ class WorkflowEngine:
             record = replace(record, status='succeeded', needs_repair=False, current_step_id='', failed_step_id='')
         record = replace(record, ended_at=time.time(), duration_ms=record.duration_ms + (time.monotonic() - timer) * 1000,
                          final_output=next(reversed(outputs.values()), {}))
+        record = self._finalize_record(record, definition)
         self.store.save_run(record)
+        if record.breakpoint:
+            self._notify_breakpoint(record)
         self._record_summary(record)
         return record
 
@@ -223,20 +368,24 @@ class WorkflowEngine:
         context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
         self._analysis_step(record, spec, context)
 
-    # LLM: 当前canonical定义是Owner开关权威；临时内联定义仍受同ID当前禁用约束，不改冻结步骤。
+    # LLM: 当前授权workspace/Owner定义决定开关，临时内联仍受同ID禁用约束，不改冻结步骤。
     # 函数用途: 在新建、恢复前拒绝已关闭工作流。
     def _require_workflow_enabled(self, definition):
         descriptor = definition['descriptor']
-        current = WorkflowStore(self.owner_home).get_workflow(descriptor['id'])
+        current = WorkflowStore(self.owner_home, workspace_root=self.workspace_root).get_workflow(descriptor['id'])
         if (definition.get('enabled', True) is False or descriptor.get('enabled', True) is False
                 or current is not None and not current.enabled):
             raise AssetDisabledError('workflow', descriptor['id'])
 
-    # LLM: 缺失资产继续由原执行/解析器分类，不能把未发现冒充授权；发现的明确False始终硬拒绝。
+    # LLM: 同workspace/Owner只读核验，明确False硬拒绝；确切入口缺失交后续版本门归类，其它坏元数据不吞。
     # 函数用途: 在运行任一步前核对脚本和显式技能是否停用。
     def _require_step_enabled(self, spec):
         if spec.get('script_id'):
-            script = ScriptStore(self.owner_home).get_script(spec['script_id'])
+            with bind_script_workspace(self.owner_home, self.workspace_root):
+                try:
+                    script = load_script(self.owner_home, spec['script_id'])[1]
+                except _EntrypointMissing:
+                    script = None
             if script is not None and script.get('enabled', True) is False:
                 raise AssetDisabledError('script', spec['script_id'])
         self._require_skills_enabled(spec.get('skill_ids', ()))
@@ -252,12 +401,15 @@ class WorkflowEngine:
             if descriptor.get('enabled', True) is False:
                 raise AssetDisabledError('skill', reference)
 
-    # LLM: 冻结数据源只覆盖本运行；兜底须满足原合同，清理未验证硬失败不能被回调覆盖，_pause_for_resume支持无错确认暂停。
-    # 函数用途: 执行脚本并记录结构化修复指引、主动暂停断点及实际恢复结果。
+    # LLM: 源缺失/空源/漂移不能skip或兜底；运行错误遵循显式策略；回调不得覆盖宿主指引和已脱敏清理事实。
+    # 函数用途: 执行脚本，记录修复上下文并应用明确注入的错误策略。
     def _script_step(self, record, spec, run, definition):
         sources = definition.get('descriptor', definition).get('data_sources')
         options = {'override_data_sources': payload(sources)} if sources or definition.get('_override_data_sources') else {}
-        result = self.runner.run_script(record.script_id, record.input_snapshot, timeout_seconds=spec.get('timeout_seconds'), **options)
+        result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
+            runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
+            expected_script_pin=definition.get('_frozen_scripts', {}).get(spec['step_id']), **options)
+        self._advance_summary_pin(run, definition, spec)
         record.output_snapshot, record.error_code = payload(result.output_data), result.error_code
         record.error_message = result.stderr_preview if not result.ok else ''
         record.status = 'succeeded' if result.ok else 'failed'
@@ -269,15 +421,19 @@ class WorkflowEngine:
         policy = spec.get('on_error', 'escalate_to_agent')
         record.escalation_result = redact_sensitive_value(payload(result.escalation_context or {}))
         cleanup = result.escalation_context.get('cleanup_error')
+        record.escalation_result['repair_guide'] = redact_sensitive_value({
+            'failed_step_id': record.step_id, 'script_id': record.script_id, 'error_code': result.error_code,
+            'io_contract': payload(result.escalation_context.get('io_contract', {})),
+            'resume_options': ['patched_step_output', 'updated_data_sources', 'rerun_from_step']})
+        hard_stop = result.error_code in {'SCRIPT_REVISION_DRIFT', 'DATASOURCE_MISSING', 'DATASOURCE_EMPTY'}
+        if hard_stop:
+            record.status = 'paused_for_resume' if policy == 'escalate_to_agent' else 'failed'
+            return
         if policy == 'skip' and not cleanup:
             record.status, record.needs_repair = 'skipped', False
             return
         if policy != 'escalate_to_agent':
             return
-        record.escalation_result['repair_guide'] = redact_sensitive_value({
-            'failed_step_id': record.step_id, 'script_id': record.script_id, 'error_code': result.error_code,
-            'io_contract': payload(result.escalation_context.get('io_contract', {})),
-            'resume_options': ['patched_step_output', 'updated_data_sources', 'rerun_from_step']})
         record.status = 'paused_for_resume'
         if self.escalation_handler is None:
             return
@@ -285,9 +441,9 @@ class WorkflowEngine:
         recovered = payload(self._escalate(spec, result, run))
         if not isinstance(recovered, dict):
             raise ValueError('兜底回调必须返回 JSON 对象')
-        record.escalation_result.update(redact_sensitive_value(recovered))
+        record.escalation_result.update({key: value for key, value in redact_sensitive_value(recovered).items()
+                                         if key not in ('repair_guide', 'cleanup_error')})
         if cleanup:
-            record.escalation_result['cleanup_error'] = payload(cleanup)
             return
         if recovered.get('recovered') is True:
             patched = recovered.get('patched_output', recovered.get('output_data'))
@@ -360,7 +516,7 @@ class WorkflowEngine:
             return payload(descriptor['data_sources'])
         merged = None
         for script_id in dict.fromkeys(s.get('script_id') for s in definition['steps'] if s.get('script_id')):
-            _, metadata = load_script(self.owner_home, script_id)
+            metadata = self._script_metadata(script_id)
             sources = metadata.get('data_sources', {})
             if merged is None:
                 merged = payload(sources)

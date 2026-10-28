@@ -1,3 +1,270 @@
+## 2026-10-27 Wave 7 W1 R2：恢复工作流兼容并保留预检硬门
+
+来源：`07-tasks/wave7-w1-r2-fixes.md`，返工起点 `65d2daaf4f26624dcf3b4b85ee8004692ad4cb12`。代码仅在 `/tmp/wt-wave7-w1` / `wt-wave7-w1` 修改，不部署、不启停服务。
+
+- `datasource_runtime` 只在连接登记表全空、非空查询范围且没有任何显式连接/访问键时兼容旧被动参数源。缺源、停用、空文件、空 SQL 结果和命名错配仍按原规则拦截；显式空列表或被动 dict 只清除本次预检，不改原 SDK 权限合同，非空结构化覆盖仍逐源检查。
+- `source_check.checked_at` 只缓存展示时间，按 Owner、workspace、脚本版本、源声明隔离并限量；健康状态仍每次重查。同进程、缓存未淘汰时的相同 get 保持稳定，源状态改变或显式 `check_sources` 刷新时间；时间不进入持久描述符或作为权限依据。缓存为 512 条进程内观察记录，不承诺跨淘汰、重启保持同一时间，也不为只读查询新增持久写入。
+- 只有 `DATASOURCE_MISSING`、`DATASOURCE_EMPTY`、`SCRIPT_REVISION_DRIFT` 不可被 skip/兜底绕过。运行错误恢复显式错误策略，默认仍暂停；提前保存 `repair_guide`，清理故障不被恢复结果覆盖，非法补丁在任何 pin/快照变更前拒绝。
+- 工作流合同按成功或合同已验证的修复步骤合并输出；显式 `output_types` 或完全空输出才强制校验，保留真实末步 `final_output`。修复当前非漂移故障脚本后重钉当前依赖；后缀中同原 pin、同修复版本的同资产复用同步采用，其他后续资产、确认断点和漂移断点仍须显式批准。正常运行摘要推进只更新权威运行内嵌 pin，不创建修复旁件。
+- 五套首轮另暴露 100ms 脚本预算耗在 SDK 无关导入的问题。导入剖析定位到 `workflows.__init__ -> engine -> skill_adapter` 及 `json_io -> runtime_errors -> model_call_ledger`；公开类改为按需取得原类型，JSON 错误报告用同签名延迟转交唯一原实现。没有修改超时、执行 deadline、SDK 可信预载、签名冻结、连接类或 SQL authorizer，也没有改旧四套测试。
+
+测试先行：首批 31 项定向验证实际 14 失败 / 17 通过，覆盖六类问题；另补轻量预载、编辑后非法补丁无持久副作用、错误转发身份与参数的红绿证据。按本轮新策略将 W1 原硬停用例改为三类预检错误不可绕过，并新增默认普通运行错误不能成功的验证；未删、跳过或放宽其他旧断言。
+
+首次五套组合 **503 passed / 0 failed / 0 errors / 0 skipped**，含 W1 71、工具 212、引擎 66、数据源权限 115、事件中心 39。原 100ms 错误分类和真实 timeout 用例在原预算、原断言下通过，证据 `.pytest_cache/w1-r2-final.xml`。原始失败保留为 `.pytest_cache/w1-r2-red.xml`、`w1-r2-first.xml`、`w1-r2-additional-red.xml`、`w1-r2-error-import-red.xml`。
+
+独立 Astra high 仅按所示关键函数片段只读静态复核，未读完整仓库或独立跑测试。其指出回调能覆盖 `repair_guide` 和清理分支重新放入未脱敏值，已用真实脚本失败后附加合成宿主诊断的两项红例复现（`.pytest_cache/w1-r2-review-red.xml`），修正为回调不覆盖宿主保留字段、保持原已脱敏清理事实。真实清理故障及完整 IM/Web 链路不由该合成测试证明。
+
+最终当前源码五套组合 **505 passed / 0 failed / 0 errors / 0 skipped**（W1 73、工具 212、引擎 66、数据源权限 115、事件 39），证据 `.pytest_cache/w1-r2-delivery-serial.xml`。此前与尺寸门并行的同版本组合有两项 100ms `SCRIPT_TIMEOUT`（`.pytest_cache/w1-r2-delivery.xml`），失败记录保留；停止本代理并行重活后原命令、原预算、原断言串行通过，不据此承诺其他机器/负载下的 100ms 稳定性，也不将并行竞争当作已证实原因。交付源码摘要与该次验证一致。
+
+另跑 JSON 错误报告、资产存储及公共端口三套 **181 passed / 0 failed / 0 skipped**，证据 `.pytest_cache/w1-r2-json-asset-extra.xml`；有两条原 `record_property` 与 JUnit xunit2 不兼容的 pytest 警告，未隐藏或改变测试。
+
+Ruff、差异检查和严格尺寸门通过（hard=0，blocked=False），报告按任务要求写 `/tmp/w1-r2-size.md`，不随功能提交。未运行全仓测试，也不以本地测试声称部署、真实 IM、Web/Hostv2 或飞书网络端到端已验证。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave7_broker_workflow_identity.py agent_py_agent/tests/test_scripts_and_workflows_tools.py agent_py_agent/tests/test_workflow_script_engine.py agent_py_agent/tests/test_datasource_keyring_and_script_binding.py agent_py_agent/tests/test_plugin_event_hub.py -q --tb=short --junitxml=.pytest_cache/w1-r2-delivery-serial.xml
+ruff check agent_py_agent scripts
+git diff --check
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w1-r2-size.md
+```
+
+## 2026-10-27 Wave 7 W2-R4：c16/c17 五项审计收口
+
+来源：完整读取 `07-tasks/wave7-w2-r4-fixes.md`（49 行），起点 `9ae8f13e08244c582beea2ea7be93da6334f2cb5`，仅修改派工工作树。五项修复及新增回归：
+
+- **F07**：真实默认核验输入是决定字段，不是任务书示意的 frontmatter 字典。Skill 必须有非空描述、至少两行非空正文及 Markdown 标题/列表/编号/命令结构；when_to_use、有效 tags 或明确触发节是适用信号。检查现有夹具后，保留“描述＋标题＋操作步骤”的完整旧 Skill 兼容路径；只有步骤、没有触发信息或完整旧分节的候选拒绝。空描述、无结构、缺触发分别给明确错误码；仍仅静态检查，不执行候选。
+- **F08**：入队/崩溃恢复共用规则最先拒绝两个非空且不同的 task_id；同 root、同轨迹甚至显式合并谱系均不能吞掉另一子任务。合法同任务归并逻辑不变。
+- **F11**：更新前从当前及已有历史提取真实 model/adopted 的 `(run_id, sha256)`，去重后保存最小身份到 `maintenance.historical_adoptions`。当前 observations/质量计数仍清零。无目标回执把当前与历史版本对一起核对，必须唯一且当前版本身实际采用；不把历史采用或质量迁移到新版。覆盖 A@v1→v2＋B、A两版同run、连续更新、只有旧版采用。
+- **F01**：当前树的真实提示入口为 `CapabilityRouter.render_skill_metadata_index`（没有任务书示意的 `render_recommended_skills_section`）。选中脚本/流程进入原预算和12k信封，行内显示 `[script]`/`[workflow]`、稳定 ref、原生 next_read；未选中或不在授权名卡里的资产不注入，不伪装成 Skill，不自动读正文/执行。
+- **B3**：四个已知 scope 维的空列表表示不限制，其它维与未知维规则保留。Gateway not_due 夹具改写真实 `last_maintenance_at`，不回退到 mtime；原运输 CAS 的 mtime 断言均保留。
+
+实现前：新增 25 项测试中 19 项断言失败、6 项兼容/安全正例通过，见 `.pytest_cache/w2-r4-red.xml`；原 Gateway 文件 21 项中 not_due 夹具实际 1 项失败，见 `w2-r4-gateway-before.xml`。修复后的定向组合为 **46 passed / 0 failed / 0 errors / 0 skipped**，见 `w2-r4-green.xml`。没有用导入报错代替红例，没有删除旧有效断言。
+
+最终当前源码结果（完整输出已读、JUnit 已实际解析）：
+
+| 验证范围 | 实际结果 | 证据 |
+| --- | --- | --- |
+| 任务规定完整组合：W2闭环＋全部Gateway discovery＋全部学习 glob＋Router glob | 403 passed / 0 failed / 0 errors / 1 skipped | `.pytest_cache/w2-r4-final.xml` |
+| 其中 W2 闭环 / Gateway discovery | 118 passed / 21 passed，均无失败或跳过 | 同 XML 按 classname 核对 |
+| 新增学习 / Router 回归 | 24 passed / 8 passed；含独审3个反例与两种长描述预算入口 | 同 XML |
+| 实际原Router套件＋包目录规模/推荐/投影/门槛 | 78 passed / 0 failed / 0 errors / 0 skipped | `.pytest_cache/w2-r4-related.xml` |
+| 全范围 Ruff、文档同步、diff check | 全部通过，`DOC_SYNC_PASS` | 当前源码命令退出码0 |
+| strict尺寸门 | hard=0、blocked=False；相对准确起点新增 soft 为0 | `/tmp/w2-r4-size.md`；基线前报告 `.pytest_cache/w2-r4-size-before.md` |
+
+尺寸报告原有 strict soft 数为1070，修复后仍为1070；另外使用原检查器 `_check_ast` 对五个改动生产文件逐项比较起点 `9ae8f13e08244c582beea2ea7be93da6334f2cb5`，新增 soft 身份集合为空，不以总数相同替代逐项对照。未改基线、检查器或受跟踪 `CODE_SIZE_REPORT.md`。
+
+独立审查为内联关键函数的局部静态检查，没有读全仓或运行测试。两项 F07 边界意见已由父级实跑三个断言全部复现，见 `.pytest_cache/w2-r4-review-red.xml`，并收紧为闭合非空代码块及本触发节内非空内容；三个反例均在最终完整组合转绿。真实提示的两种长说明预算观察点由父级实测，不冒充独审已验证。
+
+唯一跳过为原 confirmation 用例 `test_crash_intent_and_candidate_damage_fail_closed[hardlink]`，真实创建硬链接返回 `EPERM`，该观察点未验证，未放宽断言。额外套件的四个 catalog-scale 用例产生 `record_property` 与 JUnit xunit2 的兼容警告，不是测试失败。未跑全仓/Linux车道、未启动或部署Gateway、未验真实模型业务端到端；静态通过仍不等于业务执行成功。
+
+本轮新建真实 `test_capability_router_r4.py` 后，任务里的 Router glob 现已匹配；另补原 `test_capabilities.py`，没有将新用例当作对原 Router 回归的替代。复现（仓库根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_gateway_learning_discovery.py agent_py_agent/tests/test_skill_learning*.py agent_py_agent/tests/test_capability_router*.py -q --tb=short --junitxml=.pytest_cache/w2-r4-final.xml
+python3 -m pytest agent_py_agent/tests/test_capabilities.py agent_py_agent/tests/test_capability_package_catalog_scale.py agent_py_agent/tests/test_capability_package_recommendations.py agent_py_agent/tests/test_decision_skill_projection.py agent_py_agent/tests/test_pack_recommendation_threshold.py -q --tb=short --junitxml=.pytest_cache/w2-r4-related.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w2-r4-size.md
+git diff --check
+```
+
+## 2026-10-27 Wave 7 W2-R3：Astra 八项审计修复
+
+来源：完整读取 `07-tasks/wave7-w2-r3-astra-fixes.md`（96 行），准确起点 `4a12a701803f7e040bae3c3b6b967f7bfb0ddc52`；仅在派工工作树修改，尺寸报告按任务指定写 `/tmp/w2-r3-code-size.md`，不推送、不部署。
+
+- **F07**：`asset_promotion` 保留公开入口，生产晋升流程拆到 `skill_learning_promotion.py`，确定性验证拆到 `skill_learning_validation.py`。Runtime 默认及显式 `None` 都走内置核验；自主开关关闭仍只提出候选。默认实际检查名称/目标/脱敏/非空正文/Python语法/工作流DAG，原发布解析、guard、所有权、限额、CAS不放宽。AGENTS/SOUL 目标硬拒绝 `MANUAL_ONLY_TARGET`；生产调用 `select_asset_carrier` 并在事件及静态报告记录载体。
+- **核验等级不能混淆**：默认报告为 `verification_kind=deterministic_static, checks_executed=True, executed=False`，允许按本轮明确要求进入 trial，但 `business_validated(report)` 必须为 False。已有准确宿主执行证明仍可复用；静态检查不会写入真实业务证明缓存，不伪造 `user_confirmed`，不执行候选命令，不把语法正确外推成业务通过。
+- **F11**：真实 `authority/outcome/run_id/sha256` 采用字段不改。无目标只允许同 run 唯一资产版本对（包含旧版本采用的歧义核对）；显式目标支持 skill_id/skill_name/target_skill_id 等，必须提供同一引用内或顶层准确 hash，所有 hash 别名一致。旧正例补真实 hash，另有缺 hash/错 hash 反例，未删除旧拒绝断言。
+- **F01**：推荐投影保留 script/workflow 方法引用，并将原授权快照内 scripts/workflows 工具放回 shortlist、移出 deferred；不新增运行绑定或授权。
+- **F12**：stable v1→trial v2→trial v3 保留 v1 正文快照及对应验证元数据，回归回滚仍递增 revision。
+- **B3**：包卡片 scope 从直接字段或 metadata 读取；工作台、领域、工作区标签、渠道支持单复数别名、字符串序列/set、大小写归一、维间 AND/维内交集和 `*`/`all` 通配；未知 scalar 仍精确匹配，只排序不扩权。
+- **F08**：请求键绑定原 run/request 身份、task/root、显式 digest 及完整脱敏轨迹；队列恢复也核 digest 冲突，同材料重复幂等。仍要求真实 run/request，未放宽为只凭 thread 入队。
+- **F17**：生产 C 发现从同代 registry 正文读取独立 `last_maintenance_at`，缺失为 0；mtime 继续用于原运输 CAS，不再作冷维护时钟。
+- **F04**：包卡片传 activation_id，全局分页摘要绑定代次；返回 `total_count` 并保留 `total`。
+
+红绿证据：`.pytest_cache/w2-r3-red.xml` 和 `w2-r3-red-extra.xml` 留存实现前反例；F01 首次夹具缺 schema 校验方法的错误不计业务红例，修正为真实 ToolModelSpec 后实际复现执行工具丢失。新增 R3 用例 39 项通过（`w2-r3-green.xml`）；更新旧合同并保留准入规则后，48 项定向兼容通过（`w2-r3-compat-green.xml`）。最终当前版本已实际复跑，结果如下（不把早先 8 项旧合同失败改称通过）：
+
+| 当前验证范围 | 实际结果 | 证据 |
+| --- | --- | --- |
+| W2 闭环 + 全部 `test_skill_learning*.py` + 实际 Router 套件 | 362 passed / 0 failed / 1 skipped / 0 errors | `.pytest_cache/w2-r3-final.xml` |
+| 其中 W2 闭环文件 | 118 passed / 0 skipped | 同 XML，按 testcase classname 核对 |
+| 其中独审新增回归 | 7 passed | 同 XML，`test_r3_review_*` |
+| 额外推荐/提炼/候选/运输回归 | 160 passed / 0 failed / 0 skipped / 0 errors | `.pytest_cache/w2-r3-related-final.xml` |
+| 规定 Ruff、文档同步、strict 尺寸门、差异检查 | 全部通过，hard=0，blocked=False | 本轮命令退出码 0；报告 `/tmp/w2-r3-code-size.md` |
+
+独立复核只依据内联真实函数和合同静态检查，未读全仓或跑测试；主代理已实跑核对并修复三项：只用 AST 会放行重复形参/顶层 return、单边缺轨迹时误合并、不可哈希 Callable 分类报错；另补假值 callback 被隐式替成默认的反例。脚本改为 `compile(..., dont_inherit=True)` 后丢弃代码对象，有正例证明不执行候选；callback 按身份比较且仅 None 取默认。队列保留双方旧格式兼容，但一边缺失/冲突轨迹不能吞掉另一边已知材料。队列首个夹具 key 不合法不计业务红例，换真实 16 位 hex key 后两个方向均实际复现 1!=2，见 `w2-r3-review-queue-red.xml`；其余反例见 `w2-r3-review-red.xml`，当前七项已在最终组合转绿。
+
+额外 160 项明确覆盖 `test_pack_recommendation_threshold.py`、`test_capability_package_recommendations.py`、`test_decision_skill_projection.py`、`test_skill_proposals.py`、`test_turn_asset_extractor.py`，以及 `test_gateway_learning_discovery.py` 的四项原 FIFO、registry 代次拒绝、实际 C claim、due 精确边界测试；不是整个 gateway 测试文件通过的声明。唯一跳过项为原 confirmation 真实硬链接场景，创建返回 `EPERM`，该观察点未验证。尺寸报告使用显式外置路径，受跟踪 `CODE_SIZE_REPORT.md` 未变更。
+
+任务书的 `test_skill_learning_Confirmation.py` 大小写与磁盘不符，实际使用小写 `test_skill_learning_confirmation.py`；当前树没有 `test_capability_router*.py`，已核对 glob，实际 Router 回归位于 `test_capabilities.py`，并补包推荐/投影相关套件，不把不存在文件算作已跑。
+
+复现（仓库根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_skill_learning*.py agent_py_agent/tests/test_capabilities.py -q --tb=short --junitxml=.pytest_cache/w2-r3-final.xml
+ruff check agent_py_agent/agent/capability/ agent_py_agent/agent/workflows/script_runner.py agent_py_agent/agent/assets/turn_extractor.py agent_py_agent/agent/gateway_parts/multiprocess_background_discovery.py agent_py_agent/tests/test_wave7_autonomous_learning_closure.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w2-r3-code-size.md
+git diff --check
+```
+
+验证边界：默认核验实际运行的是确定性静态检查，不是候选业务代码。真实模型、CLI/TUI/IM、部署入口和全仓 Linux 车道未验证；真实硬链接观察点若沿原测试出现 EPERM，仍如实保留未验证，不改断言。
+
+## 2026-10-27 Wave 7 W2-R2：六项评审修复与跨线验收边界
+
+来源：`07-tasks/wave7-w2-r2-fixes.md`，起点 `54fc27d7e08d339222569cc021860beaa3aa2401`；只在派工工作树修改，不推送、不部署，不改 W1 生产文件。
+
+- F11：真实采用字段为 `authority/outcome/run_id/sha256`。无显式目标仅归给同 run 唯一当前版本；多技能不广播。显式单/多目标、顶层与嵌套 hash/身份别名全部核对，空目标和冲突字段拒绝。
+- F08：原队列、满额替换和崩溃投影共用成对比较。`root_task_id` 与 `task_id` 先规范为同一种任务身份，冲突不能退到 thread；旧请求缺较高层身份时保留 thread 兼容。同轨迹可压实，不同轨迹或缺轨迹的异 run 无合并谱系则保留独立材料。原 12 个失败断言未改。
+- F17：任务、监控、待审更新、子代理分别容错；一个来源失败不阻止其余引用加入，但完整性保持 False。仅 tasks 的空物理库可证明完整空集；没有可读活动索引且存在文件时不冒认完整。
+- 公开使用钩子过滤 `MISSING` 后展开 kwargs，保留台账已有 `params` 映射与关键字调用兼容，辅助记账异常不改变采用结果。
+- 应用范围的工作台、领域、工作区标签采用维间 AND、维内交集；读取属性别名的并集，保留未知维精确 scalar 匹配。它只排序已授权目录，不扩大权限。
+- 默认 Runtime 绑定内置机器核验器，Service 绑定原 Store；显式 `None` 仍只保留候选。内置核验只复用原 registry 中已由可信宿主 verifier 产生的准确候选证明，绑定 owner、完整渲染 hash、请求、run、轨迹、决策种类和 CAS。发布前先持久化证明，发布中断可复用；再次执行宿主核验前撤销同条件旧证明，异常或进程中断也不能保留旧通过。试用晋升 active 追加一次状态历史。
+- W1 的 F06/F14/F15 三个函数 AST 原样迁入 `test_wave7_w1_integration_contracts.py`，正常收集、不 skip/xfail；W2 文件改测自己的 Skill 晋升 CAS、Runner 冻结代码和脚本输出合同。W2 通过不代表 W1 接口已合入。
+
+红绿证据：准确起点七文件为 **314 passed / 19 failed / 1 skipped / 0 errors**，见 `.pytest_cache/w2-r2-baseline.xml`。新增定向反例先红后绿；独立 Astra high 仅根据内联函数及合同静态复核，补出 root/task 异名冲突、嵌套目标别名冲突、核验异常旧证明残留三项，实际回归先为 4 failed / 2 passed，修复后 6 passed（`w2-r2-review-red.xml` / `w2-r2-review-green.xml`）。独审没有读全仓、执行测试或真实模型，不能算完整端到端验收。
+
+最终当前版本（独审修复后）的实际结果：
+
+| 范围 | 结果 | 证据 |
+| --- | --- | --- |
+| 规定七文件组合 | 358 passed / 0 failed / 1 skipped / 0 errors | `.pytest_cache/w2-r2-final.xml` |
+| 其中 W2 闭环文件 | 72 passed / 0 failed / 0 skipped | 同上，按 testcase classname 分组 |
+| 额外六文件回归 | 84 passed / 0 failed / 0 skipped / 0 errors | `.pytest_cache/w2-r2-related-final.xml` |
+| 独立 W1 合同文件 | 3 failed / 0 skipped / 0 errors | `.pytest_cache/w2-r2-w1-final.xml` |
+| 全范围 Ruff / 文档同步 / strict 尺寸门 / diff 检查 | 全部通过；晋升模块 198 行；生成报告已还原 | 本轮命令退出码 0 |
+
+W1 三个函数已通过与准确起点 AST 相等核对。失败仍是 ScriptsTool 拒绝 `expected_revision`、恢复工作流执行了新脚本版本、工作流最终输出未被合同拒绝；本轮不修改 W1 生产代码，待集成者合入 W1 后复核，不能声称全仓全绿。额外回归覆盖 `test_capabilities.py`、`test_pack_recommendation_threshold.py`、`test_capability_package_recommendations.py`、`test_capability_package_catalog_scale.py`、`test_decision_skill_projection.py`、`test_skill_learning_versions.py`；其中四个 catalog-scale 用例有 JUnit 属性兼容警告，不影响断言结果。
+
+硬链接场景沿原测试真实 `EPERM` 记录未验证，不放宽断言。额外相关测试曾与尺寸报告生成并发，触发受跟踪 `CODE_SIZE_REPORT.md` 变化的 teardown 守卫；先还原生成物，再串行门禁和复跑，最新 84 passed 已无该错误，不将旧错误改记为产品通过。
+
+复现（仓库根；尺寸门结束并还原报告后再跑 pytest，不并发生成报告）：
+
+```bash
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout HEAD -- CODE_SIZE_REPORT.md
+python3 -m pytest agent_py_agent/tests/test_wave7_autonomous_learning_closure.py agent_py_agent/tests/test_skill_learning.py agent_py_agent/tests/test_skill_learning_host_feedback.py agent_py_agent/tests/test_skill_learning_confirmation.py agent_py_agent/tests/test_skill_learning_maintenance.py agent_py_agent/tests/test_skill_proposals.py agent_py_agent/tests/test_turn_asset_extractor.py -q --tb=short --junitxml=.pytest_cache/w2-r2-final.xml
+python3 -m pytest agent_py_agent/tests/test_wave7_w1_integration_contracts.py -q --tb=short
+git diff --check
+```
+
+边界：机器核验正向回归使用可信 verifier 回执替身，只证明宿主证明落盘、精确复用、故障恢复和发布接线；无可执行验证合同的新候选仍 pending，不能从生成前的成功任务或 guard 通过倒推生成后方法已经业务验证。首次新候选的真实自主执行验证、W1 合并后业务链路、真实模型/CLI/TUI/IM/部署均未验证。
+## 2026-10-27 Wave 7 W3 R4：跨段批次扣数与neutral窗口起点
+
+来源：`07-tasks/wave7-w3-r4-fix.md`；精确前置 `216fceb055402ba2fbadecea16149b81c21e4f92`，在 `/tmp/wt-wave7-w3` / `wt-wave7-w3` 续做。
+
+当前为**未提交生产候选**：原 W3 明令禁止新增状态字段，R4 未显式解除；实现与零失败证据已准备，但新增字段方案需要发起者明确批准后才能按 R4 消息提交。不能把“本轮未重申限制”视为自动授权。
+
+- 生产修复在状态转移时保存独立 `neutral_count` / `neutral_since`：batch 只推进原不计数提醒段，计数失败清空 neutral 窗口但保留累计 `batch_failures`，success 清空全部。隔离必须有五次 neutral 且从首个 neutral 起满 24 小时，不再扣历史 batch，也不借 batch 的早期起点。原同因、累计、重投上限及共享期限辨识不变。
+- 新字段有明确兼容边界：缺少字段的旧账按 `neutral_count=None` 读入；无 batch 的旧账可证明全段 neutral，有 batch 的歧义旧账不推断类型/首 neutral 时间，下一次真实 neutral 从当前时刻重新累计。仍严格拒绝未知键、布尔/小数计数、非有限时间和矛盾窗口。**这是新增持久字段的结构变更，不是原 R1“不新增字段”方案；新代码能读旧账，不代表旧二进制能读新账。降级/混跑须先由集成者处理新键兼容，未验证跨版本回滚。**
+- R3 跨段序列在 `86499` 不隔离、`86500` 隔离；纯 batch 对照保留。R4 `batch@0 -> neutral@90000..91200` 不隔离，`176399` 不隔离、`176400` 隔离。原历史 batch 用例补充 `86400` 不隔离，正向第五次输入按 R4 改为 `100+86400`，没有删除或放宽断言。另核旧状态碰撞、严格读回、歧义/纯neutral旧账、failure/success 重置。
+- 指定 store 测试的十个基线失败来自夹具出生值缺失：本机 `build_process_identity` 的 legacy ps 出生值实际为 None，内核出生观测可用；生产观察器正确保持未知。死亡夹具改为捕获真实子进程的完整同源出生身份，断言 live=True，握手结束并 wait 后再断言 dead=False；不复用父进程出生值替换 PID，不靠 0.3 秒 sleep。未改生产身份观察器/死亡准入，也未 mock 判死、跳过测试或删改原业务断言。此结果不证明 legacy ps 不可用时的默认生产身份链已修好。
+
+红绿证据：未改生产代码时，精确 HEAD 基线四文件为 `309` 项、`11 failures`（R3 一项及上述 store 十项），见 `tmp/w3-r4-baseline.xml`；目标窗口十项为五个真实断言失败、0 errors/skips，见 `tmp/w3-r4-red.xml`。第一轮组合为 `314 passed`；补严格字段用例后发现一项缺失的“无 reset 时 neutral+batch 不得超过原段次数”校验，`tmp/w3-r4-schema-red.xml` 为 15 项、1 failure，补齐后转绿。最终指定四文件 **329 passed / 0 failures / 0 errors / 0 skipped**，见 `tmp/w3-r4-final.xml`：wake poison 180、store 46、runtime stale 72、foundation 31。
+
+复现（cwd 为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wake_poison.py agent_py_agent/tests/test_wake_attempt_store.py agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/pytest-w3-r4-final --junitxml=tmp/w3-r4-final.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w3-r4-size.md
+git diff --check
+```
+
+Ruff 全范围通过；strict 尺寸门 `hard=0 / blocked=False`，没有改检查器或尺寸基线，生成报告按任务指定路径输出，不改受控 `CODE_SIZE_REPORT.md`。未运行全仓/Linux 车道、生产 Gateway 自愈、默认出生观测的跨平台端到端或性能测量；未部署、推送、启停服务或操作真实 owner 运行库。
+
+独立复核仅检查冻结内联逻辑，未发现指定跨段、纯 batch、legacy 主场景的确定反例；没有独立跑测试或核完整调用链。其指出的字段授权/降级边界按上文保留为提交阻塞；既有 R2 的 deadline 来源碰撞与后续 batch 时间反推延迟未在本轮改动或宣称解决。
+
+## 2026-10-27 Wave 7 W3 R2：隔离边界与结清后的副作用证明
+
+来源：`07-tasks/wave7-w3-r2-fixes.md`，精确前置为 `7fc4066bcafd779524e9d64aece93deb4dff88b8`；只在 `/tmp/wt-wave7-w3` / `wt-wave7-w3` 续做，不部署或操作真实运行库。
+
+- `quarantine_decision` 按 `uncounted_count - batch_failures >= 5` 和满 24 小时共同判定；纯 batch 豁免，历史 batch 不再永久阻止后续五次 neutral 的隔离。共享期限与重投期限相等时用最后重投时间，否则减 neutral 退避，不把未来期限当成已等待时间。状态字段和严格解析器不变。
+- 结清 current unknown attempt 时保留 run 已有的 `done/failed/cancelled/abandoned` 及其 `updated_at`，原死亡证明、事务、指针比较、未启动工具取消及事件留存不变。
+- 对 `cancelled + previous_attempt_status=unknown`，恢复仍先核工具终态/耐久记录，再核资源稳定性；任一失败保持 blocked，全干净才 not_required，不再次恢复或重放。为满足原尺寸门，把这两步提成只读共用函数，原 unknown 路径的结果字段和事务范围不变。
+
+新增回归覆盖少于五次、混合 batch、重投前后覆盖期限、真实临时唤醒结案、四种终态及时间戳、工具归档缺失/错配/执行中、DIRTY/MUTATING/STABLE、未启动工具、干净旧轮与同任务新运行，以及非 unknown 来源的 cancelled 原行为。最初针对性红例 `tmp/w3-r2-red.xml` 为 34 项、20 failures、0 errors/skips，修改实现前逐条核对为目标断言失败。首次四文件组合 `tmp/w3-r2-green.xml` 为 300 项、290 passed、10 failures、0 errors/skips；这是提取共用函数和补控制用例前的过程记录，不代替最终版本结果。
+
+10 个 wake store 死亡进程/矛盾账本断言已用本轮精确前置完整源码归档复核，见 `tmp/w3-r2-baseline.xml`：同 10 个测试全部失败，末尾断言输出一致。临时 worktree 创建在 `.git` 写入时被拒绝，未作为运行证据；改用 `git archive` 完整导出到 `tmp/w3-r2-baseline-src-7fc4066`，核对关键源码与 `git show` 字节相同、导入落在归档根，再只重跑这 10 个 ID。未将其归因为沙箱，也未修改或跳过原测试。
+
+最终版本指定四文件：`tmp/w3-r2-final.xml` 为 **304 项、294 passed、10 failures、0 errors/skips**；wake poison 155/155、runtime stale 72/72、foundation 31/31，wake store 36/46，失败 ID 及末尾断言与上述精确基线一致。原四次 neutral 提醒用例已自然通过，未修改该测试文件。Ruff 全范围通过；strict 尺寸门为 hard=0 / blocked=False（没有修改检查器或基线），生成报告按任务要求还原，不随功能提交。状态类与严格解析器、原两项副作用 helper 的 AST 均与前置一致。
+
+独立静态审阅分别覆盖 R2 三处边界与后续只读 helper 提取，均未发现给定契约下的确定缺陷；仅核内联冻结代码，未独立运行测试或查全仓。已按建议补 neutral 覆盖旧重投期限及非 unknown 来源 cancelled 的控制回归。
+
+复现（cwd 必须为工作树根）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_wake_poison.py agent_py_agent/tests/test_wake_attempt_store.py agent_py_agent/tests/test_runtime_db_recover_stale.py agent_py_agent/tests/test_foundation_bc_wave5.py -q --tb=short --basetemp=tmp/pytest-w3-r2-final --junitxml=tmp/w3-r2-final.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json
+git checkout -- CODE_SIZE_REPORT.md
+git diff --check
+```
+
+未运行全仓测试、Linux 车道、生产 Gateway 自愈或真实性能测量；这些观察点未验证。
+
+## 2026-10-27 Wave 7 W4 R3：原生消息追加后的统一 CAS
+
+来源：`07-tasks/wave7-w4-r3-fix.md` 的剩余 `W4-F1`，起点 `31401c8224c0e9314f0d4c78cd60d9b292b7539d`。仅在指定 `/tmp/wt-wave7-w4` / `wt-wave7-w4` 返工，不部署或启停服务。
+
+- 摘要与设置共用 `conversations.thread_revision`；四个设置写入口只接受当前唯一公共修订，删除旧设置基数的第二版本 fallback。未迁移线程读取不落盘，初始版本 1 严格满足任务明示条件；其它状态把线程记录和原消息账本的字节数/纳秒时间纳入指纹。覆盖 owner 的 `data/conversations/messages` 与 `conversations/messages` 两种原位置，以原 nofollow 只读入口取得文件 stat，不另建消息库。
+- 已迁移公共修订加入消息字节增长量。`msg_bytes` 在首次迁移时固定，后续设置写保留；旧插件状态缺该字段时以 0 为锚。连续同时间戳追加即使原 Store 插件计数未推进，也能逐次使旧 CAS 失效。领域改名继续只推进原 Store 计数，避免公共字节增量被重复写进计数造成 receipt 与落盘版本不符。
+- 首批 20 项 R3 用例在实现前 **19 failed / 1 passed / 0 errors**，见 `.pytest_cache/r3-red.xml`；覆盖空/默认模型初始绑定、两种布局、四个写入口、连续同 tick 追加、迁移后追加和设置再写、真实改名回执及幂等重放。另补两项零字节账本纯读校验：原任务要求 `msg_fp == (0, 0)` 才属未出现账本，存在空文件的非零时间仍按明示公式换版；未采纳独立静态复核中与该明文相反的“空文件也应返回 1”建议。
+- 保留原有测试语义：无 agent 压缩用例改为传消息追加后实际读出的 CAS，仍断言 503、无写、无丢消息；R2 修订用例仍断言原插件计数为 3，公共修订按明确字节增量核对，并保留拒绝旧 CAS 的断言。
+- 最终指定两文件 **180 passed / 0 failed / 0 errors / 0 skipped**，见 `.pytest_cache/r3-complete.xml`。额外六个宿主 v2 回归文件 **595 passed / 0 failed / 0 errors / 0 skipped**，见 `.pytest_cache/r3-host.xml`。独立 Astra high 仅依据完整内联核心与原 Store 合同静态核对，不冒充独立测试或真实 HTTP/LLM 端到端验收。
+
+复现（工作树根；临时目录保持在工作树内）：
+
+```bash
+TMPDIR=/tmp/wt-wave7-w4/.pytest_cache python3 -m pytest agent_py_agent/tests/test_plugin_host_thread_and_model_settings.py agent_py_agent/tests/test_plugin_host_v2_conversations.py -q --tb=short --basetemp=.pytest_cache/r3-complete-tmp --junitxml=.pytest_cache/r3-complete.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w4-r3-size.md
+```
+## 2026-10-27 Wave 7 W5 R4：消息FD竞态、Git根路径和时间线顺序
+
+来源：`07-tasks/wave7-w5-r4-fixes.md`（c9/c18），起点 `888cc8615ac7c0ac6d5bfb1c064ad9646374559e`。只在指定W5工作树修复，不部署、不启停服务。
+
+- `_messages` 保留线程双归属门，消息JSONL只从原 `open_readonly_file_beneath` 返回的FD读取512KiB尾窗，不再调用按路径重开的 `recent_report`。复用原 `MessageLogEntry` 解析，跳过损坏行和display/不同线程行，至多返回50条并经原递归脱敏；所有出口关闭原流。
+- `_forbid_internal` 在目录验证/I/O前拒绝根或目标任意大小写的完整 `.git` 组件，解析后的根再复核；共享 `_parts` 同样返回 `403 PATH_OUTSIDE_WORKSPACE`。普通 `project.git` 等名字不误杀，原宿主目录门、外部授权和nofollow仍保留。
+- `_steps` 保持原字符串列表回执和256KiB/末100行预算；JSON对象按 `ts_ms`、`ts`、ISO `timestamp` / `created_at` 归一为秒后稳定排序，无时区ISO固定UTC，原seq/正文不改。同值保留追加次序，未知时间及旧非JSON行稳定放末尾。
+- 首批新增46项回归已在原实现全部失败：真实消息FD打开后替换叶/父路径，观察到跨owner消息泄露；Git根被接受或错误码不符；`[30,10,20]` 仍按追加顺序。修复回归还核对真实流仅 `read(524288)`、末50条/脱敏/坏行跳过、FD关闭、根/相对路径大小写、跨单位/时区/稳定同值及旧时间线兼容。证据保留于 `.pytest_cache/w5-r4/`。
+- 独立只读复核后的16项追加回归也先复现失败：原生消息写入的U+0085/U+2028/U+2029会被 `splitlines` 错拆、`.git/..` 复合非法根先报通用400。尾读改为只按LF分行并兼容CRLF，原始Unicode正文完整保留；根校验将.git拒绝放在通用点点拒绝之前，不放宽任何路径。
+
+复现（工作树根）：`python3 -m pytest agent_py_agent/tests/test_plugin_host_subagents_and_workspace.py agent_py_agent/tests/test_plugin_host_v2_*.py -q --tb=short`。同时运行全范围Ruff、`scripts/check_doc_sync.py` 和strict尺寸门；报告指定 `/tmp/w5-r4-size.md`，不修改检查器或基线。窄窗口之外的历史不保证凑满50条消息/100行时间线，真实HTTP和部署链路不在本轮验收内。
+
+## 2026-10-27 Wave 7 W5 R3：从原生owner档案解析子代理模型名
+
+来源：`07-tasks/wave7-w5-r3-model-name.md`（c8 Finding 3），起点 `1751dc11a5c792801e0e5e2527fadcb927ca7c39`。
+
+- 原任务只冻结 `host_model_profile.v1.profile_id`，不含模型名；列表和详情现在按认证context重建owner路径，读取原生模型档案。列表每次请求只读一次目录，仅返回名称，不公开服务商凭据，不回写目录或任务。
+- 原记录显式名称优先；只有 `profile_id=default` 才回退注入agent的配置名称。未知/非字符串引用保持未知；坏模型目录返回结构化 `STORE_UNAVAILABLE`。停止回执只投影状态，不新增目录I/O。
+- 回归使用原 `execute_model_profile_operation` 保存有效档案，并为两个owner创建同ID不同名称；覆盖冷/热列表和详情、agent路径不同于认证context、目录单读、凭据不外泄与文件不变、default和未知引用、坏目录。原实现已实测返回 `None` 而不是档案名称，先红证据位于 `.pytest_cache/w5-r3/red.log` / `red.xml`。
+
+复现（工作树根）：`python3 -m pytest agent_py_agent/tests/test_plugin_host_subagents_and_workspace.py agent_py_agent/tests/test_plugin_host_v2_five_capabilities.py -q --tb=short`。本轮不验证真实模型调用、HTTP入口或部署；当前档案名称不等于历史调用证据。
+## 2026-10-27 Wave 7 W6 R2：真实兄弟签名、execute幂等与锁前校验
+
+来源：`07-tasks/wave7-w6-r2-fixes.md`，起点 `2210241509976f938a6dc6f31f15ed854a8efeb0`。只改W6工作树；W4/W5仅作只读参考，不推送、部署或启停服务。
+
+- `gateway_composition` 惰性识别W4线程/模型类，按当前Owner传入HomePaths、准确授权及可选同Owner Agent。兼容模块级三位置参数及旧Owner函数；W5接`(context, payload)`，内置插件按真实签名过滤关键字。先bind再调用，不捕获handler内部TypeError重试。能力包桥接原安装读口，缺导出保持未就绪。
+- `decode_call`仅对execute允许可选合法幂等key；write/async必填与read/stream禁止不变。带key门户execute沿原摘要控制账重放。组合根及Gateway内部末核均将已返回的execute标committed，进入后未知异常保unknown，不删原executing回执开放重放。
+- 插话沿原guidance稳定key和原请求关联去重；同key异文409，64项边界已关联重试不再计数。guidance已提交但关联未完成且配额已满的恢复窗口保unknown，不补成65项；不另建请求账。
+- 请求ID在构造原input transition之前用真实opaque validator校验。附件根及Owner内祖先拒链接，空相对路径拒绝；从Owner/文件系统根逐段nofollow读取，宿主控制目录及冻结原goal的约束保留。
+- 旧基础动作矩阵按任务授权同时减去独立覆盖的`V2_ACTIONS`与`PORTAL_V2_ACTIONS`，原全集等式及逐动作extra拒绝保留，不删案例或放宽payload。
+
+新增`test_plugin_host_w6_r2.py`定向回归54项，覆盖真实issuer/控制回执/guidance原账、精确兄弟签名、同Owner Agent、execute有无key及异文、handler内部异常/末核撤权、插话满额恢复和链接路径。缺陷反例实际先红后绿；保留旧读写边界的正反对照。
+
+独立Astra high仅依据内嵌相关源码做有限静态复核；线程模块旧签名缺口及两项边界风险均补反例修正。另在临时Owner中只读编译W4/W5真实源码作进程内组合联测，需包含W4的`conversations.py`新依赖；设置/选模、服务商、内置开关、工作区文件和子代理列表通过，无Agent的compact/steer明确503。源字节哈希前后核对一致。这不是实际挑入、部署、模型调用或真实停止验收。
+
+任务原指定命令中的`test_plugin_host_v2_execution.py`在本基线不存在，实际执行退出4，不创建占位测试。当前存在的全部Host v2文件及两轮W6回归按下列命令验证，完整结果保留在JUnit。尺寸报告必须外置，不能与pytest并行改写被跟踪的`CODE_SIZE_REPORT.md`。
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_plugin_host_requests_and_streams_v2.py agent_py_agent/tests/test_plugin_host_w6_r2.py agent_py_agent/tests/test_plugin_host_v2_*.py -q --tb=short --junitxml=.pytest_cache/w6-r2-full.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/w6-r2-size.md
+git diff --check
+```
+
+未改变的边界：只在线程上的统计仍不能冒充可归属单请求的计量；真实模型压缩、多模态消费、跨进程停止及W1安装读口合入后的能力包列表尚未端到端验证。插话key按任务给定原格式保存，不宣称新增了跨installation的独立key命名空间；宿主Owner根以上仍是原可信路径边界。
+
 ## 2026-10-26 Wave 5 Track A Round 5：渲染准入与访问确认一致
 
 来源：`07-tasks/wave5-tracka-r5-fix-20261026.md` 的 `R4-F1` / `R4-F2`，起点 `88794747ca25d7e945d8f9ff7058b7ccc44612f1`。仅在指定返工工作树修改和提交，不部署、不启停服务。

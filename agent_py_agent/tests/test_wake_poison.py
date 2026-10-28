@@ -276,13 +276,15 @@ class TestStreak:
         with pytest.raises(ValueError):
             next_poison_state(WakePoisonState(), WakeAttemptVerdict("mystery", "x"), now=1.0)
 
+    # LLM: W3中neutral不改变已有失败首末时间，但必须刷新自己的30秒冷却。
+    # 函数用途: 验证真实失败时间保留且未计数重试不立即到期。
     def test_failure_timestamps_keep_the_first_and_move_the_last(self):
         state = next_poison_state(WakePoisonState(), _failure("error:X"), now=100.0)
         assert (state.first_failed_at, state.last_failed_at) == (100.0, 100.0)
         state = next_poison_state(state, _failure("error:Y"), now=250.0)
         assert (state.first_failed_at, state.last_failed_at) == (100.0, 250.0)
         state = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=400.0)
-        assert (state.first_failed_at, state.last_failed_at, state.next_attempt_at) == (100.0, 250.0, 310.0)
+        assert (state.first_failed_at, state.last_failed_at, state.next_attempt_at) == (100.0, 250.0, 430.0)
 
     def test_abandoned_attempts_count_as_their_own_cause(self):
         state = _feed([WAKE_ATTEMPT_ABANDONED] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT)
@@ -321,12 +323,14 @@ class TestBatchIsolation:
 class TestUncountedStall:
     WAIT = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:PROVIDER_CONNECTION_FAILED")
 
+    # LLM: 两次neutral保持同一段起点、更新最新原因，并按第二次60秒退避而非保留零期限。
+    # 函数用途: 验证未计数段元数据及递增冷却共同落入状态。
     def test_uncounted_run_tracks_count_start_and_latest_reason(self):
         state = next_poison_state(WakePoisonState(), self.WAIT, now=100.0)
         state = next_poison_state(state, WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "admission:turn_interrupted"), now=200.0)
         assert (state.uncounted_count, state.uncounted_since, state.uncounted_reason_code) == (
             2, 100.0, "admission:turn_interrupted")
-        assert (state.same_cause_count, state.total_count, state.next_attempt_at) == (0, 0, 0.0)
+        assert (state.same_cause_count, state.total_count, state.next_attempt_at) == (0, 0, 260.0)
 
     def test_alert_fires_at_the_window_and_then_every_window(self):
         state = next_poison_state(WakePoisonState(), self.WAIT, now=0.0)
@@ -363,8 +367,205 @@ class TestUncountedStall:
     def test_uncounted_results_never_quarantine(self):
         assert quarantine_decision(_feed([self.WAIT] * 500)) is None
 
+    # LLM: R2至少五次neutral且满24小时才隔离；不新增字段，失败计数仍保持零。
+    # 函数用途: 验证达到最少次数后，临界点之前不隔离、恰满24小时隔离。
+    @pytest.mark.parametrize("reason", ["", "error:RUN_RECOVERY_REQUIRED"])
+    def test_uncounted_stall_quarantines_after_24h(self, reason):
+        verdict = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, reason)
+        state = _feed([verdict] * (WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1), start=100.0)
+        before = next_poison_state(state, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS - 1)
+        assert quarantine_decision(before) is None
+        at_limit = next_poison_state(before, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        decision = quarantine_decision(WakePoisonState.from_dict(at_limit.to_dict()))
+        assert decision is not None
+        assert decision.reason_code == (reason or "uncounted_stall_timeout")
+        assert (decision.same_cause_count, decision.total_count, decision.mixed_causes) == (0, 0, False)
+
+    # LLM: 旧提醒可证明时间跨度，但仍至少需要五次非batch尝试；纯批次始终豁免。
+    # 函数用途: 验证兼容旧未退避账且不足五次neutral不隔离。
+    def test_legacy_stall_alert_can_prove_timeout_but_batch_is_exempt(self):
+        state = mark_stall_alerted(_feed([self.WAIT] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, start=100.0),
+                                   now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        state = replace(state, next_attempt_at=0.0)
+        assert quarantine_decision(state) is not None
+        assert quarantine_decision(replace(state, batch_failures=1)) is None
+
+    # LLM: R2辨识重投写入的deadline，不能从900秒重投退避减去300秒neutral退避来造超时。
+    # 函数用途: 验证五次neutral后交错重投，在24小时前不提前隔离，恰满才隔离。
+    def test_redelivery_interleaving_does_not_quarantine_before_24h(self):
+        state = _feed([self.WAIT] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, start=0.0, step=100.0)
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        for now in (1000.0, 2000.0, 3000.0, 4000.0, 5000.0):
+            state = next_poison_state(state, redelivery, now=now)
+            assert quarantine_decision(state) is None
+        for now in (86300.0, 86390.0):
+            before = next_poison_state(state, redelivery, now=now)
+            assert quarantine_decision(before) is None
+        at_limit = next_poison_state(state, redelivery, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        decision = quarantine_decision(at_limit)
+        assert decision is not None and decision.reason_code == self.WAIT.reason_code
+
+    # LLM: 历史重投不代表当前deadline仍由它写入；后续neutral覆盖后必须走neutral时间还原。
+    # 函数用途: 验证共享期限不相等时不误用旧重投时间，仍能恰满一天结案。
+    def test_neutral_after_redelivery_uses_its_own_rewritten_deadline(self):
+        state = _feed([self.WAIT] * WAKE_POISON_SAME_CAUSE_LIMIT_COUNT, start=0.0, step=100.0)
+        redelivery = WakeAttemptVerdict(WAKE_VERDICT_REDELIVERY_FAILURE, WAKE_REASON_CHANNEL_UNAVAILABLE)
+        for now in (1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 86000.0):
+            state = next_poison_state(state, redelivery, now=now)
+        before = next_poison_state(state, self.WAIT, now=86390.0)
+        assert quarantine_decision(before) is None
+        at_limit = next_poison_state(before, self.WAIT, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(at_limit) is not None
+
+    # LLM: 提醒只证明时间，不代表已经重试至少五次；不足次数时任意提醒都不能隔离。
+    # 函数用途: 验证少于五次neutral的旧账即使等满一天仍保留。
+    @pytest.mark.parametrize("count", range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT))
+    def test_uncounted_stall_requires_at_least_five_neutral_attempts(self, count):
+        state = _feed([self.WAIT] * count, start=0.0)
+        if count:
+            state = mark_stall_alerted(state, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(state) is None
+
+    # LLM: batch保持历史累计；R4明确窗口从首个neutral@100起算，不能把batch@0算成neutral起点。
+    # 函数用途: 验证纯batch豁免，随后五次neutral在100+24小时才结案。
+    def test_historical_batch_then_five_neutrals_can_quarantine(self):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = _feed([batch] * 10, start=0.0, step=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(state) is None
+        state = next_poison_state(WakePoisonState(), batch, now=0.0)
+        for now in (100.0, 200.0, 300.0, 400.0):
+            state = next_poison_state(state, self.WAIT, now=now)
+            assert quarantine_decision(state) is None
+        before = next_poison_state(state, self.WAIT, now=WAKE_UNCOUNTED_STALL_SECONDS)
+        assert quarantine_decision(before) is None
+        state = next_poison_state(state, self.WAIT, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        assert (state.uncounted_count, state.batch_failures) == (6, 1)
+        decision = quarantine_decision(state)
+        assert decision is not None and decision.reason_code == self.WAIT.reason_code
+
+    # LLM: R3跨段批次累计不能扣掉新段neutral；两条分支各自只有五次neutral且走真实状态转移与严格读回。
+    # 函数用途: 复现batch@0、failure@30后新段五次neutral的24小时边界。
+    @pytest.mark.parametrize("latest,quarantines", [(86499.0, False), (86500.0, True)])
+    def test_cross_streak_batch_does_not_deduct_new_neutrals(self, latest, quarantines):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = next_poison_state(WakePoisonState(), batch, now=0.0)
+        state = next_poison_state(state, _failure("error:X"), now=30.0)
+        assert (state.batch_failures, state.uncounted_count, state.last_failed_at) == (1, 0, 30.0)
+        for now in (100.0, 200.0, 400.0, 800.0, latest):
+            state = next_poison_state(state, self.WAIT, now=now)
+            state = WakePoisonState.from_dict(state.to_dict())
+        assert (state.batch_failures, state.uncounted_count, state.uncounted_since) == (1, 5, 100.0)
+        assert needs_isolation(state) is True
+        decision = quarantine_decision(state)
+        assert (decision is not None) is quarantines
+        if decision is not None:
+            assert isinstance(decision, wake_poison.QuarantineDecision)
+            assert decision.reason_code == self.WAIT.reason_code
+            assert (decision.same_cause_count, decision.total_count, decision.mixed_causes) == (1, 1, False)
+
+    # LLM: 即使直接调用公开纯函数，在计数失败后再次喂纯batch也不得冒充neutral超时；提醒同样不能授权隔离。
+    # 函数用途: 保护跨段重置修复不会把长时间纯批次失败变成隔离结案。
+    @pytest.mark.parametrize("prior_batches", [0, 1, 7])
+    def test_cross_streak_pure_batches_remain_exempt(self, prior_batches):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = _feed([batch] * prior_batches, start=0.0, step=1.0)
+        state = next_poison_state(state, _failure("error:X"), now=30.0)
+        for now in (100.0, 200.0, 400.0, 800.0, 1000000.0):
+            state = next_poison_state(state, batch, now=now)
+            assert quarantine_decision(state) is None
+        state = mark_stall_alerted(state, now=1000000.0)
+        assert quarantine_decision(WakePoisonState.from_dict(state.to_dict())) is None
+
+    # LLM: R4隔离只看neutral自己的24小时窗口；旧batch提醒窗口继续保留，不得授权提前结案。
+    # 函数用途: 验证隔了一天才出现的五次neutral不能借用batch的起点。
+    @pytest.mark.parametrize("latest,quarantines", [(91200.0, False), (176399.0, False), (176400.0, True)])
+    def test_late_neutrals_start_their_own_stall_window(self, latest, quarantines):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = next_poison_state(WakePoisonState(), batch, now=0.0)
+        state = mark_stall_alerted(state, now=86400.0)
+        for now in (90000.0, 90100.0, 90300.0, 90600.0, latest):
+            state = next_poison_state(state, self.WAIT, now=now)
+            state = WakePoisonState.from_dict(state.to_dict())
+        assert (state.batch_failures, state.uncounted_count, state.uncounted_since) == (1, 6, 0.0)
+        assert (quarantine_decision(state) is not None) is quarantines
+
+    # LLM: 旧模型的两个真实历史会压成同一状态；修复必须保留新段类型信息而非从deadline猜测。
+    # 函数用途: 验证五次历史batch加新neutral与新纯batch不再混为同一持久状态。
+    def test_neutral_and_pure_batch_histories_have_distinct_durable_windows(self):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        neutral = WakeAttemptVerdict(WAKE_VERDICT_NEUTRAL, "error:X")
+        a = _feed([batch] * 5, start=0.0, step=1.0)
+        a = next_poison_state(a, _failure("error:X"), now=30.0)
+        b = next_poison_state(WakePoisonState(), _failure("error:X"), now=30.0)
+        for now in (100.0, 200.0, 400.0, 800.0, 86500.0):
+            a = next_poison_state(a, neutral, now=now)
+        for now in (100.0, 200.0, 400.0, 800.0, 86770.0):
+            b = next_poison_state(b, batch, now=now)
+        a, b = (WakePoisonState.from_dict(state.to_dict()) for state in (a, b))
+        assert a != b
+        assert quarantine_decision(a) is not None
+        assert quarantine_decision(b) is None
+
+    # LLM: 历史有batch且没有neutral窗口证据的旧账不能凭原起点结案；首次新neutral才开始可信窗口。
+    # 函数用途: 验证歧义旧账可读、不会误隔离，并在新窗口满24小时后实际收敛。
+    def test_ambiguous_legacy_batch_state_restarts_a_trusted_neutral_window(self):
+        legacy = WakePoisonState.from_dict({
+            "uncounted_count": 100, "uncounted_since": 0.0, "uncounted_reason_code": self.WAIT.reason_code,
+            "batch_failures": 1, "next_attempt_at": 90300.0,
+        })
+        assert quarantine_decision(legacy) is None
+        for now in (90000.0, 90100.0, 90300.0, 90600.0):
+            legacy = next_poison_state(legacy, self.WAIT, now=now)
+            assert quarantine_decision(legacy) is None
+        before = next_poison_state(legacy, self.WAIT, now=176399.0)
+        assert quarantine_decision(before) is None
+        at_limit = next_poison_state(legacy, self.WAIT, now=176400.0)
+        assert quarantine_decision(WakePoisonState.from_dict(at_limit.to_dict())) is not None
+
+    # LLM: 使用真实临时唤醒存储，不调模型、不发通知；至少五次neutral再核24小时隔离。
+    # 函数用途: 验证五次未计数阻塞且满一天最终写成failed_permanently。
+    def test_uncounted_timeout_moves_real_wake_to_quarantine(self, tmp_path):
+        from agent_py_agent.tests.test_wake_attempt_store import _raise, _store
+
+        store = _store(tmp_path)
+        signal = _raise(store)
+        verdict = verdict_for_error(RuntimeRecoveryRequiredError("blocked"))
+        for index in range(WAKE_POISON_SAME_CAUSE_LIMIT_COUNT - 1):
+            store.wakes.attempts.record(signal, verdict, now=100.0 + index * 1000.0)
+        result = store.wakes.attempts.record(signal, verdict, now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        assert result.decision is not None
+        settled = store.wakes.attempts.quarantine(signal.wake_signal_id, result.decision,
+                                                now=100.0 + WAKE_UNCOUNTED_STALL_SECONDS)
+        assert settled.settled is not None
+        assert settled.settled.status == wake_poison.WAKE_STATUS_FAILED_PERMANENTLY
+        assert store.wakes.pending_report()[0] == []
+
 
 class TestBackoff:
+    # LLM: RuntimeRecoveryRequiredError沿原neutral分类；只增加等待，不挪到计数失败或补成成功。
+    # 函数用途: 验证真实阻塞异常按30到300秒递增退避。
+    def test_uncounted_recovery_error_backs_off_without_counting_failures(self):
+        state = WakePoisonState()
+        verdict = verdict_for_error(RuntimeRecoveryRequiredError("unknown run"))
+        for index, delay in enumerate((30.0, 60.0, 120.0, 240.0, 300.0, 300.0), 1):
+            now = index * 1000.0
+            state = next_poison_state(state, verdict, now=now)
+            assert state.next_attempt_at == now + delay
+            assert (state.uncounted_count, state.uncounted_since) == (index, 1000.0)
+            assert (state.total_count, state.same_cause_count) == (0, 0)
+            assert WakePoisonState.from_dict(state.to_dict()) == state
+
+    # LLM: 回拨不得把重试期限放到当前未计数段起点或最近计数失败之前。
+    # 函数用途: 验证neutral退避的时间下界。
+    @pytest.mark.parametrize("state,expected", [
+        (WakePoisonState(uncounted_count=1, uncounted_since=1000.0), 1060.0),
+        (WakePoisonState(reason_code="error:X", same_cause_count=1, total_count=1,
+                         first_failed_at=2000.0, last_failed_at=2000.0), 2030.0),
+    ])
+    def test_uncounted_backoff_respects_recorded_clock_floor(self, state, expected):
+        result = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=940.0)
+        assert result.next_attempt_at == expected
+
     def test_counted_failures_back_off_30_60_120_240_then_cap(self):
         assert [poison_backoff_seconds(n) for n in range(0, 8)] == [0.0, 30.0, 60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
         state = next_poison_state(WakePoisonState(), _failure("error:X"), now=100.0)
@@ -509,6 +710,42 @@ class TestStateShape:
     def test_non_object_is_rejected(self):
         with pytest.raises(ValueError):
             WakePoisonState.from_dict(["not", "a", "dict"])
+
+
+class TestNeutralWindowSchema:
+    # LLM: 新字段的类型/窗口校验必须与原未知键拒绝共存；这里从真实状态构造再单独破坏一个条件。
+    # 函数用途: 验证坏neutral计数、时间、越界及与批次矛盾的账仍拒绝读入。
+    @pytest.mark.parametrize("patch", [
+        {"neutral_count": True}, {"neutral_count": -1}, {"neutral_count": 1.5}, {"neutral_count": "5"},
+        {"neutral_since": True}, {"neutral_since": -1.0}, {"neutral_since": float("inf")},
+        {"neutral_count": None, "neutral_since": 100.0}, {"neutral_count": 0, "neutral_since": 100.0},
+        {"neutral_count": 6}, {"neutral_since": 99.0}, {"batch_failures": 1}, {"neutral_future_key": 1},
+    ])
+    def test_invalid_neutral_windows_are_rejected(self, patch):
+        state = _feed([WAKE_ATTEMPT_NEUTRAL] * 5, start=100.0)
+        with pytest.raises(ValueError):
+            WakePoisonState.from_dict({**state.to_dict(), **patch})
+
+    # LLM: 缺少新键的无batch旧账仍证明全段neutral；新字段不是放宽未知键校验的借口。
+    # 函数用途: 验证旧纯neutral状态可读且保留已有24小时提醒证据。
+    def test_unambiguous_legacy_neutral_window_is_preserved(self):
+        state = WakePoisonState.from_dict({"uncounted_count": 5, "uncounted_since": 100.0,
+            "stall_alerts": 1, "last_stall_alert_at": 86500.0})
+        assert state.neutral_count is None
+        assert quarantine_decision(state) is not None
+
+    # LLM: counted failure终止旧窗口但不清掉批次隔离，success清空全部；下一次neutral必须重新起时。
+    # 函数用途: 验证新窗口与既有failure/success生命周期一致。
+    def test_failure_resets_window_but_success_clears_everything(self):
+        batch = WakeAttemptVerdict(WAKE_VERDICT_BATCH_FAILURE, "error:X")
+        state = next_poison_state(WakePoisonState(), batch, now=0.0)
+        state = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=100.0)
+        assert (state.neutral_count, state.neutral_since) == (1, 100.0)
+        state = next_poison_state(state, _failure("error:X"), now=700.0)
+        assert (state.neutral_count, state.neutral_since, state.batch_failures) == (0, 0.0, 1)
+        state = next_poison_state(state, WAKE_ATTEMPT_NEUTRAL, now=900.0)
+        assert (state.neutral_count, state.neutral_since) == (1, 900.0)
+        assert next_poison_state(state, WAKE_ATTEMPT_SUCCESS, now=1000.0) == WakePoisonState()
 
 
 class TestReplaysOfTodaysBadBuilds:

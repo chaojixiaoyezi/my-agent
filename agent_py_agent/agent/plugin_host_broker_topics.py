@@ -9,6 +9,7 @@ TOPIC_ACTIONS = {'assets_summary': 'assets.list', 'topology': 'assets.topology',
     'tool_stats': 'telemetry.tool_stats', 'workflow_runs': 'telemetry.workflows.runs.list',
     'workspace_context': 'conversations.threads.workspace.get', 'workspace_assets': 'assets.workspace.list',
     'datasources': 'datasources.list', 'recordings': 'recorder.sessions.get',
+    'capability_packages': 'capability_packages.list', 'identity': 'user_space.identity.resolve',
     'background_processes': 'processes.background.list', 'turns': 'conversations.turns.search'}
 
 
@@ -77,7 +78,7 @@ def _descriptor(value):
     return AssetDescriptor.from_dict({key: item for key, item in value.items() if key in names})
 
 
-# LLM: 只读当前 owner 的四个权威来源，不扫描别的用户；标准身份不能取自资产正文。
+# LLM: 只读本人权威来源，复用Store源检查给返回副本；不把展示字段传入严格描述符，不扫描别的用户。
 # 函数用途: 生成当前用户资产的完整拓扑并计算反向引用。
 def asset_topology(home, owner_id, root=None):
     from .assets.monitor_adapter import list_monitor_descriptors
@@ -88,7 +89,23 @@ def asset_topology(home, owner_id, root=None):
     rows = [*ScriptStore(home).list_scripts(), *WorkflowStore(home).list_workflows(),
             *list_monitor_descriptors(home), *list_owner_skill_descriptors(home)]
     descriptors = [replace(_descriptor(row), owner_id=owner_id) for row in rows]
-    return build_asset_topology(descriptors, root_key=root)
+    result = build_asset_topology(descriptors, root_key=root)
+    originals = {(row['kind'], row['id']): row for row in rows if isinstance(row, dict)}
+    result['nodes'] = [_project_asset(home, node, originals.get((node['kind'], node['id']))) for node in result['nodes']]
+    return result
+
+
+# LLM: 优先复用当前Store已检查结果；只给真实脚本加派生展示，不改变权威身份、来源或权限。
+# 函数用途: 让Broker资产列表和详情包含固定脚本字段。
+def _project_asset(home, record, original=None):
+    if record.get('kind') != 'script' or record.get('missing'):
+        return record
+    from .workflows.datasource_runtime import project_script_asset_fields
+    keys = ('script_name', 'summary', 'device_name', 'log_source_name', 'source_bindings', 'source_check')
+    source = original or record
+    projection = ({key: source[key] for key in keys} if all(key in source for key in keys)
+                  else project_script_asset_fields(home, source))
+    return {**record, **projection}
 
 
 # LLM: Skill 路径沿适配器同序发现并核对元数据ID；不把ID当目录，不接受额外根。

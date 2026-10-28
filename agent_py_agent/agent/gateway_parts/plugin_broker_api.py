@@ -10,6 +10,7 @@ from ..plugin_host.action_specs_v2_ext import V2_ACTIONS as HOST_V2_ACTIONS
 from ..workflows.models import redact_bearer_values
 
 READ_ACTIONS = frozenset(('assets.list', 'assets.get', 'assets.topology',
+    'capability_packages.list', 'user_space.identity.resolve',
     'telemetry.tasks.list', 'telemetry.tasks.get', 'telemetry.workflows.runs.list',
     'telemetry.workflows.runs.get', 'telemetry.tool_calls.list',
     'telemetry.tool_calls.get', 'telemetry.tool_stats'))
@@ -62,10 +63,10 @@ def _request_scope(home, owner_id, is_admin, action, payload):
 # LLM: 仅宿主构造；旧grant复验激活，v2来源每次重新decode/authorize/dispatch，不从构造参数或payload推导新权限。
 # 类用途: 固定一次插件会话的身份与受控执行入口。
 class PluginBrokerService:
-    # LLM: 所有参数均来自宿主认证上下文，不得解包外部payload；空run/task也绑定为空，不从请求补全。
+    # LLM: 参数和身份解析认证仅取宿主，不解包外部payload；空run/task仍绑定为空。
     # 函数用途: 初始化单个 owner 的 Broker。
     def __init__(self, owner_home, *, owner_id, is_admin=False, tool_invoker=None,
-                 include_asset_source: bool = True, trusted_run_id: str = '', trusted_task_id: str = ''):
+                 include_asset_source: bool = True, trusted_run_id: str = '', trusted_task_id: str = '', identity_credentials=None):
         self.home, self.owner_id = Path(owner_home), owner_id
         self.is_admin, self.invoker, self.grant = is_admin, tool_invoker, None
         if not isinstance(trusted_run_id, str) or not isinstance(trusted_task_id, str):
@@ -73,6 +74,7 @@ class PluginBrokerService:
         self.include_asset_source = include_asset_source is True
         self.trusted_run_id, self.trusted_task_id = trusted_run_id, trusted_task_id
         self.trusted_parent_run_id, self.trusted_root_run_id = '', ''
+        self.identity_credentials = identity_credentials
 
     # LLM: 旧grant不授管理员身份且每次复验；v9必须走A0范围门，禁止复用不理解其scope的旧Broker。
     # 函数用途: 从有效插件授权提取用户范围。
@@ -97,21 +99,42 @@ class PluginBrokerService:
     # LLM: 只收原DTO；此实例全部调用进入v2，不初始化或回退旧owner/执行路径，真伪登记仍由原发行器核验。
     # 函数用途: 将已认证v2来源和宿主领域端口接到Broker传输。
     @classmethod
-    def from_host_v2(cls, ingress, ports):
+    def from_host_v2(cls, ingress, ports, *, identity_credentials=None):
         from ..plugin_host.contracts import HostDomainPorts, PluginIngressSource
         if not isinstance(ingress, PluginIngressSource) or not isinstance(ports, HostDomainPorts):
             raise ValueError('需要真实Host v2来源和领域端口')
         service = cls.__new__(cls)
         service._host_v2_ingress, service._host_v2_ports = ingress, ports
+        service.identity_credentials = identity_credentials
         return service
 
-    # LLM: 复用完整原授权与幂等门；闭合schema拒绝身份字段，异常只公开结构化代码，不打印payload或秘密。
+    # LLM: 复用完整原授权与幂等门；闭合schema拒绝身份字段，Broker只读动作在v2来源下同样经原发行器核验。
     # 函数用途: 将Broker动作转换成原Host v2调用并返回公共结果。
     def _dispatch_host_v2(self, action, payload, idempotency_key):
+        from ..plugin_host.action_specs import action_specs
+        from ..plugin_host.composition import domain_ready
         from ..plugin_host.contracts import authorize_call, decode_call, dispatch_call
+        from ..plugin_host.conversations import read_context
         from ..plugin_host.errors import HostAPIError
         from ..plugin_host.schemas import canonical_json, thaw
-        envelope = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': {} if payload is None else payload}
+        body = {} if payload is None else payload
+        if (isinstance(action, str) and action in ('capability_packages.list', 'user_space.identity.resolve')
+                and (action not in action_specs() or not domain_ready(action, self._host_v2_ports)
+                     or (action == 'user_space.identity.resolve' and getattr(self, 'identity_credentials', None) is not None))):
+            if idempotency_key is not None or not isinstance(body, dict):
+                return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
+            try:
+                probe = decode_call(canonical_json({'schema': 'plugin_host_call.v2', 'action': 'conversations.threads.list', 'payload': {}}).encode('utf-8'))
+                authorized = authorize_call(self._host_v2_ingress, probe)
+                context = read_context(authorized)
+                data = self._route(context.owner_home.home_dir, context.owner_home.owner_id, action, dict(body))
+                read_context(authorized)
+                return {'ok': True, 'data': public_payload(data), 'http_status': 200}
+            except HostAPIError as error:
+                return {'ok': False, 'error_code': error.code, 'http_status': error.status, 'outcome': error.outcome}
+            except (TypeError, ValueError, KeyError):
+                return {'ok': False, 'error_code': 'INVALID_SCHEMA', 'http_status': 400, 'outcome': 'not_started'}
+        envelope = {'schema': 'plugin_host_call.v2', 'action': action, 'payload': body}
         if idempotency_key is not None:
             envelope['idempotency_key'] = idempotency_key
         try:
@@ -183,10 +206,21 @@ class PluginBrokerService:
         except (ImportError, OSError, RuntimeError):
             return {'ok': False, 'error_code': 'BROKER_UNAVAILABLE'}
 
-    # LLM: 路由保持显式白名单，不按请求字符串反射调用任意方法。
+    # LLM: 路由白名单；认证只取宿主绑定，body额外键拒绝，v2仍走原授权不能降级。
     # 函数用途: 将验证后的动作交给对应服务。
     def _route(self, home, owner_id, action, payload):
         from ..plugin_host_broker_topics import mutate_assets, project_asset, query_assets
+        if action == 'capability_packages.list':
+            from ..capability.package_provider import list_installed_capability_packages
+            if payload.keys() - {'include_disabled'} or type(payload.get('include_disabled', True)) is not bool:
+                raise ValueError('能力包查询条件无效')
+            return list_installed_capability_packages(home, include_disabled=payload.get('include_disabled', True))
+        if action == 'user_space.identity.resolve':
+            from ..adapter.feishu_profile import resolve_user_space_identity
+            if payload.keys() - {'targets', 'id', 'id_type'}:
+                raise ValueError('身份查询条件无效')
+            return resolve_user_space_identity(home, targets=payload.get('targets'), id_value=payload.get('id', ''),
+                id_type=payload.get('id_type', 'auto'), feishu_credentials=self.identity_credentials)
         if action in EXEC_ACTIONS:
             return self._execute(home, owner_id, action, payload)
         if action in WRITE_ACTIONS:
@@ -233,7 +267,7 @@ class PluginBrokerService:
             'result': result, 'telemetry_persisted': persisted}
 
 
-# LLM: 身份由Service裁决；恢复补丁及数据源仅透传给受控工具验证，不能覆盖宿主身份或路径。
+# LLM: 身份由Service裁决；恢复补丁/数据源/显式漂移确认只透传给受控工具，不覆盖宿主身份或路径。
 # 函数用途: 将脚本、工作流及其修复恢复动作转换为受控工具调用。
 def _execution_arguments(action, payload):
     if action == 'execute.tool':
@@ -245,6 +279,8 @@ def _execution_arguments(action, payload):
                                                ('from_step_id', 'patched_step_output', 'updated_data_sources'))}
         name, operation, id_key, options = mapping[action]
         arguments = {'action': operation, id_key: payload[id_key]}
+        if operation == 'resume':
+            options = (*options, 'allow_script_drift', 'resolution_origin')
         arguments.update({key: payload[key] for key in options if key in payload})
         if operation == 'run':
             arguments.setdefault('inputs', {})

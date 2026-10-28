@@ -7,6 +7,7 @@
 # 模块用途: 在主代理任务完成收口时，把本轮经历压成一份有界、脱敏的自动总结请求。
 from __future__ import annotations
 
+import hashlib
 import json
 
 from ..common.log_redaction import redact_sensitive_text, redact_sensitive_value
@@ -39,23 +40,28 @@ def learning_request_eligible(ctx: object, min_tool_rounds: int, *, include_back
     )
 
 
-# LLM: 不合格或缺少运行身份时返回 None；返回的字典就是要写进队列的请求，之后只读（重试时只改 attempts）。
+# LLM: 仍须run/request宿主身份；幂等键另绑定task/root、完整脱敏轨迹与显式digest，不同任务不撞键。
 # 函数用途: 从收口上下文构造一条学习请求。
 def build_learning_request(ctx: object, min_tool_rounds: int, *, include_background: bool = False) -> dict[str, object] | None:
     if not learning_request_eligible(ctx, min_tool_rounds, include_background=include_background):
         return None
-    identity = str(getattr(ctx, "run_id", "") or getattr(ctx, "request_id", "") or "").strip()
-    if not identity:
-        return None
     attrs = getattr(ctx, "task_attributes", None)
     attrs = attrs if isinstance(attrs, dict) else {}
+    identity = str(getattr(ctx, "run_id", "") or getattr(ctx, "request_id", "") or '').strip()
+    if not identity:
+        return None
     records = [item for item in (getattr(ctx, "archive_tool_calls", None) or []) if isinstance(item, dict)]
-    return {
+    task = str(getattr(ctx, 'task_id', '') or '')
+    root = str(attrs.get('root_task_id') or getattr(ctx, 'root_task_id', '') or '')
+    digest = str(getattr(ctx, 'trajectory_digest', '') or attrs.get('trajectory_digest') or '')
+    fingerprint = hashlib.sha256(json.dumps(redact_sensitive_value(records), sort_keys=True, default=str).encode()).hexdigest()
+    req: dict[str, object] = {
         "schema_version": REQUEST_SCHEMA_VERSION,
-        "request_key": request_key(identity),
+        "request_key": request_key(json.dumps([identity, task, root, digest, fingerprint], ensure_ascii=False)),
         "request_id": str(getattr(ctx, "request_id", "") or ""),
         "run_id": str(getattr(ctx, "run_id", "") or ""),
-        "task_id": str(getattr(ctx, "task_id", "") or ""),
+        "task_id": task,
+        "trajectory_digest": digest,
         "thread_id": str(attrs.get("conversation_thread_id") or ""),
         "source": str(getattr(ctx, "source", "") or ""),
         "tool_rounds": int(getattr(ctx, "tool_rounds", 0) or 0),
@@ -64,9 +70,15 @@ def build_learning_request(ctx: object, min_tool_rounds: int, *, include_backgro
         "user_prompt": bounded_text(getattr(ctx, "user_prompt", ""), TEXT_LIMIT_CHARS),
         "final_response": bounded_text(getattr(getattr(ctx, "final_response", None), "text", ""), TEXT_LIMIT_CHARS),
         "tool_calls_total": len(records),
-        "tool_trace": [_trace_entry(item) for item in records[:TRACE_COUNT]],
+        "root_task_id": root,
+        "trajectory_fingerprint": fingerprint,
+        "tool_trace": [_trace_entry(item) for item in _sample_learning_trace(records, limit=TRACE_COUNT)],
         "used_skill_ids": used_skill_ids(records),
     }
+    cand = getattr(ctx, "candidate_asset", None) or attrs.get("candidate_asset")
+    if isinstance(cand, dict):
+        req["candidate_asset"] = redact_sensitive_value(cand)
+    return req
 
 
 # LLM: 只投影收尾上下文的 memories（本轮实际注入模型的正式记忆）的编号、种类和先脱敏再截断的正文，有条数与字数上限；
@@ -86,7 +98,24 @@ def bounded_text(value: object, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-# LLM: 取模型可见参数（缺失时退回原参数），整体经 redact_sensitive_value 处理，敏感字段名的值一律遮蔽。
+# LLM: 原始调用顺序不变；头20/尾30优先，中段最多30条围绕错误到成功的转折，余量有界回填；不丢尾部验收。
+# 函数用途: 分段抽取长任务轨迹，避免失败前缀吃完全部材料预算。
+def _sample_learning_trace(records, *, limit=TRACE_COUNT):
+    if len(records) <= limit:
+        return records
+    head, tail = min(20, limit // 4), min(30, limit // 2)
+    selected = set(range(head)) | set(range(len(records)-tail, len(records)))
+    pivots = [i for i in range(1, len(records)) if records[i].get('ok') != records[i-1].get('ok')]
+    windows = [j for i in reversed(pivots) for j in range(max(head, i-2), min(len(records)-tail, i+3))]
+    middle = [*windows, *range(head, len(records)-tail)]
+    for index in middle:
+        if len(selected) >= limit:
+            break
+        selected.add(index)
+    return [records[index] for index in sorted(selected)]
+
+
+# LLM: 取模型可见参数及同条证据引用，整体脱敏后截断；引用只作来源，不自动算验证成功。
 # 函数用途: 把一条工具归档记录压成轨迹项。
 def _trace_entry(record: dict[str, object]) -> dict[str, object]:
     params = record.get("model_parameters")
@@ -99,6 +128,7 @@ def _trace_entry(record: dict[str, object]) -> dict[str, object]:
         "ok": record.get("ok") is True,
         "error_code": str(record.get("error_code") or "")[:80],
         "args": bounded_text(args, TRACE_ARGS_CHARS),
+        "evidence_refs": redact_sensitive_value(record.get("evidence_refs", []))[:8],
     }
 
 
@@ -113,14 +143,23 @@ def used_skill_ids(records: list[dict[str, object]]) -> list[str]:
     return found[:USED_SKILLS_COUNT]
 
 
-# LLM: 只认 tool=skill_search、ok=True、action=get 的原始参数；其它记录返回空串。
+# LLM: 只认成功get，规范回执stable_id/skill_id优于参数别名；JSON结果与字典结果同样处理，绝不读取失败正文。
 # 函数用途: 从一条工具记录取出被读取的 skill_id。
 def _read_skill_id(record: dict[str, object]) -> str:
     params = record.get("parameters")
     if record.get("tool") != _SKILL_TOOL or record.get("ok") is not True or not isinstance(params, dict):
         return ""
     action = str(params.get("action") or ("get" if params.get("skill_id") else "search")).strip()
-    return str(params.get("skill_id") or "").strip() if action == "get" else ""
+    if action != "get":
+        return ""
+    result = record.get("result", record.get("output", {}))
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            result = {}
+    result = result if isinstance(result, dict) else {}
+    return str(result.get("stable_id") or result.get("skill_id") or params.get("skill_id") or "").strip()
 
 
 __all__ = [

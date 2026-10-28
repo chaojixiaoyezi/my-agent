@@ -104,8 +104,8 @@ class GatewayPluginRequests:
     def __init__(self, resources):
         self.resources, self.conversation = resources, None
 
-    # LLM: Bot只使用manager已持久绑定的代次，不能取页面thread_id；普通消息仍保留原零工具合同。
-    # 函数用途: 准备普通或Bot消息的准确线程与模式执行信封。
+    # LLM: Bot只用已持久绑定代次；普通消息保留零工具/禁网络策略，仅显式打开原公开typed transcript出口。
+    # 函数用途: 准备准确线程、模式与公开流显示能力，不把显示能力当作执行授权。
     def prepare(self, authorized, context, execution, prepared):
         from .authorization import revalidate_call
         revalidate_call(authorized)
@@ -116,7 +116,7 @@ class GatewayPluginRequests:
         if authorized.call.payload.get("tool_policy", "none") != "none" or authorized.execution_policy.tool_names:
             raise HostAPIError("HOST_NOT_READY", 503)
         ensure_gateway_folders(self.resources.paths_for(context))
-        return {**prepared, "owner_id": context.owner_home.owner_id,
+        return {**prepared, "owner_id": context.owner_home.owner_id, "client_capabilities": {"rich_transcript": True},
                 "conversation": {"thread_id": authorized.call.payload["thread_id"]},
                 "metadata": {**prepared["metadata"], "plugin_execution_policy": {
                     "schema": "plugin_execution_policy.v1", "tool_names": [],
@@ -187,11 +187,24 @@ class GatewayPluginRequests:
                 "rolled_over": binding["rolled_over"], "previous_thread_id": binding["previous_thread_id"],
                 "rollover_reason": binding["rollover_reason"], "idempotent_replay": not fresh}
 
-    # LLM: 原cancel已持久标记；没有当前运行句柄时不假装成功杀进程。
-    # 函数用途: 对已受理请求保留取消请求，停止事实留待canonical观察。
+    # LLM: 原cancel已落原账才调用；只发准确request命名中断，不影响父兄弟；同Owner实际Agent可沿原控制补停，未核实不称停止。
+    # 函数用途: 把运行中取消接到真实线程信号及既有会话回合停止口。
     def cancel(self, authorized, context, row):
+        from ..concurrency.interrupt import interrupt_by_name
+        from ..conversation.control_commands import conversation_request_interrupt_name
+        from ..gateway_parts.session_task_stop import stop_session_task_turn
         from .authorization import revalidate_call
+
         revalidate_call(authorized)
+        if authorized.call.action != "conversations.requests.cancel" or row.get("id") != authorized.call.payload["request_id"]:
+            raise HostAPIError("TARGET_DENIED", 403)
+        provenance = row.get("metadata", {}).get("plugin_provenance", {})
+        thread = self.conversation.require_thread(self.resources.store_for(context), provenance["thread_id"], authorized, context)
+        interrupt_by_name(conversation_request_interrupt_name(row["id"]))
+        agent = getattr(self.resources.server, "agent", None)
+        home = getattr(getattr(agent, "home_paths", None), "owner_home_dir", None)
+        if home is not None and str(home) == str(context.owner_home.home_dir):
+            stop_session_task_turn(agent, target_thread=thread, turn_id=row["id"])
         return None
 
     # LLM: C上下文不能替代B线程范围，仍由真实AuthorizedCall读取同owner canonical线程。

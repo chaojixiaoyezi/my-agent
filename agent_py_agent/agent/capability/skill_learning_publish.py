@@ -73,6 +73,8 @@ class PublishRequest:
     guard_config: object | None = None
     expected_revision: int | None = None
     expected_sha256: str = ""
+    promotion_authority: str = "user_control"
+    verification_receipt: dict = field(default_factory=dict)
 
 
 # LLM: 入口只接受 create/update；skip 不应走到这里。整个发布在 state_lock 内完成，返回写账本用的事件。
@@ -105,22 +107,28 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
     name = publish.decision.name
     _require_new_name(store, registry, publish)
+    reusable = _family_record_locked(store, registry, publish) if publish.promotion_authority == 'autonomous_verified' else None
+    if reusable is not None:
+        return _event(EVENT_SKIPPED, reusable, publish, 'SKILL_LEARNING_FAMILY_REUSED')
     publish, redacted = _redacted_publish(publish)
     text = render_learned_skill(publish.decision)
     target = store.learned_root / name
     _stage_check_and_move(store, publish, text, target)
     now = utc_now()
     record = LearnedSkill(name, 1, skill_content_sha256(text), now, now, _runs((), publish.request), last_operation_id=str(publish.request.get("operation_id") or ""))
+    record = replace(record, maintenance={'state':'trial','quality':'trial',
+        'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
+        'promotion_history':['observed','candidate','validated','trial']})
     try:
         store.save_version(name, 1, text)
-        store.save_registry(replace(registry, skills={**registry.skills, name: record}))
+        store.save_registry(_registered_publication(store, registry, record, publish))
     except (OSError, SkillLearningStoreError) as exc:
         shutil.rmtree(target, ignore_errors=True)
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
     return _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else "")
 
 
-# LLM: 只更新登记在册、磁盘hash与总结开始时revision/hash均相符的自学Skill；内容没变记 skipped/UNCHANGED；登记表写失败时写回旧版本。
+# LLM: 更新须CAS且磁盘未被改；连续trial保留稳定快照/证明；历史采用只留身份防归因歧义，新版质量清零。
 #   副作用：原子替换 SKILL.md（保留同目录其它文件），写 versions/ 与 registry.json。
 # 函数用途: 在锁内更新一个自学 Skill。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
@@ -138,17 +146,62 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     path = store.skill_path(current.name)
     previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
     _stage_and_check(store, publish, text)
+    stable = current.maintenance.get('previous_stable') if current.maintenance.get('state') == 'trial' else None
     record = replace(current, version=current.revision + 1, revision=current.revision + 1, sha256=sha, updated_at=utc_now(),
-                     source_run_ids=_runs(current.source_run_ids, publish.request), last_operation_id=str(publish.request.get("operation_id") or ""))
+                     source_run_ids=_runs(current.source_run_ids, publish.request), last_operation_id=str(publish.request.get("operation_id") or ""),
+                     maintenance={**current.maintenance, 'state':'trial', 'quality':'trial', 'helped_count':0, 'hurt_count':0,
+                                   'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
+                                   'promotion_history':['observed','candidate','validated','trial'],
+                                   'historical_adoptions':_historical_adoptions(current),
+                                   'previous_verification':current.maintenance.get('previous_verification', {}) if stable else {key:current.maintenance.get(key) for key in ('promotion_authority','verification_receipt')},
+                                  'observations':[], 'previous_stable':stable or {'version':current.version,'revision':current.revision,'sha256':current.sha256}})
     try:
         store.check_write(path,text)
         replace_skill_file(path, text)
         store.save_version(current.name, record.version, text)
-        store.save_registry(replace(registry, skills={**registry.skills, current.name: record}))
+        store.save_registry(_registered_publication(store, registry, record, publish))
     except (OSError, SkillLearningStoreError) as exc:
         replace_skill_file(path, previous)
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
     return _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else "")
+
+
+# LLM: 调用方持发布锁；只保存真实model/adopted的run+hash身份，去重但不把旧版质量带到新版。
+# 函数用途: 跨连续更新保留采用过的版本，避免无目标回执遗忘旧版造成误归因。
+def _historical_adoptions(current):
+    facts = [*current.maintenance.get('historical_adoptions', []), *current.maintenance.get('observations', [])]
+    pairs = {(fact.get('run_id'), fact.get('sha256')) for fact in facts if isinstance(fact, dict)
+             and fact.get('authority') == 'model' and fact.get('outcome') == 'adopted'
+             and fact.get('run_id') and fact.get('sha256')}
+    return [{'authority':'model', 'outcome':'adopted', 'run_id':run, 'sha256':sha} for run, sha in sorted(pairs)]
+
+
+# LLM: 调用方持state锁，语义族仅复用仍存在且未被用户修改的正式Skill；不接管停用/归档/删除的方法。
+# 函数用途: 找到同族正式资产，防自动改名重复发布。
+def _family_record_locked(store, registry, publish):
+    from dataclasses import asdict
+
+    from .asset_promotion import task_family_fingerprint
+
+    family = task_family_fingerprint('skill', asdict(publish.decision))
+    name = registry.assets.get(family, {}).get('asset_id', '').removeprefix('owner:')
+    current = registry.skills.get(name)
+    if current is None or name in registry.blocked_names or current.maintenance.get('state') in {'disabled', 'archived'}:
+        return None
+    return _owned_record(store, registry, name)
+
+
+# LLM: 调用方持原发布锁；四类出处投影共用registry，登记失败由原创建/更新事务恢复正文。
+# 函数用途: 记录发布方法的语义族与来源，再一次保存当前技能版本。
+def _registered_publication(store, registry, record, publish):
+    from dataclasses import asdict
+
+    from .asset_promotion import register_asset_locked
+
+    registry, _ = register_asset_locked(store, registry, kind='skill', asset_id='owner:'+record.name,
+        asset=asdict(publish.decision), sha256=record.sha256, state='trial',
+        source={'origin':'S3','run_id':str(publish.request.get('run_id', ''))})
+    return replace(registry, skills={**registry.skills, record.name:record})
 
 
 # LLM: 回滚只作用于登记在册且未被用户改动的Skill；v1回滚等同删除。激活版本回退但revision单调递增，历史文件不可重用。

@@ -110,7 +110,7 @@ def test_decode_rejects_invalid_json_and_envelopes(raw):
     assert error.value.code == "INVALID_SCHEMA"
 
 
-# LLM: 原矩阵加入独立编写的审计/双Bot案例，全集等式和逐动作extra拒绝断言保留；WP-4仍由独立矩阵校验。
+# LLM: 基础全集仍精确相等并逐动作拒extra；WP-4与Portal分别由独立矩阵完整测试，不删减基础案例。
 # 函数用途: 验证基础与审计扩展的目录完整性、闭合字段及各自幂等要求。
 @pytest.mark.parametrize("action", tuple(action_cases()))
 def test_each_action_has_closed_payload_and_exact_mode(action):
@@ -119,7 +119,8 @@ def test_each_action_has_closed_payload_and_exact_mode(action):
     from agent_py_agent.agent.plugin_host.errors import HostAPIError
     payload, mode = action_cases()[action]
     from agent_py_agent.agent.plugin_host.action_specs_v2_ext import V2_ACTIONS
-    assert set(action_specs()) - set(V2_ACTIONS) == set(action_cases())
+    from agent_py_agent.agent.plugin_host.action_specs_v2_portal import PORTAL_V2_ACTIONS
+    assert set(action_specs()) - set(V2_ACTIONS) - set(PORTAL_V2_ACTIONS) == set(action_cases())
     assert action_specs()[action].mode == mode
     call = decode_call(wire(action, payload, mode, "alice" if action.startswith("execute.") else None))
     assert call.action == action

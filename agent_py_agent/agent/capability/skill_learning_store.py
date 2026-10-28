@@ -144,6 +144,8 @@ class SkillLearningRegistry:
     daily_calls: int = 0
     import_operations: dict = field(default_factory=dict)
     daily_history: dict[str, int] = field(default_factory=dict)
+    assets: dict[str, dict] = field(default_factory=dict)
+    last_maintenance_at: float = 0
 
     # LLM: 保持原schema和单日快照，另存有界每日调用历史；不改正式Skill登记事实。
     # 函数用途: 转成写入 registry.json 的字典。
@@ -155,10 +157,12 @@ class SkillLearningRegistry:
             "daily": {"date": self.daily_date, "calls": self.daily_calls},
             "daily_history": dict(self.daily_history),
             "import_operations":dict(self.import_operations),
+            "assets": dict(self.assets),
+            "last_maintenance_at": self.last_maintenance_at,
         }
 
 
-# LLM: 事件只含 ID、名字、版本、hash、结果码和有界 reason；绝不写 Skill 正文或对话内容。
+# LLM: 事件只含身份/hash/结果码/有界reason及可选载体；carrier仅展示静态选择，不授执行权，不写正文。
 # 类用途: 账本里的一条自学事件。
 @dataclass(frozen=True)
 class SkillLearningEvent:
@@ -170,8 +174,9 @@ class SkillLearningEvent:
     request_key: str = ""
     run_id: str = ""
     reason: str = ""
+    carrier: str = ""
 
-    # LLM: event_id 与时间在落盘时生成；reason 截到 200 字防止账本变成正文副本。
+    # LLM: event_id/时间落盘时生成，reason最多200字；只为有载体的新晋升附carrier，保留旧事件形状。
     # 函数用途: 转成写入 ledger.jsonl 的一行。
     def to_record(self) -> dict[str, object]:
         return {
@@ -186,6 +191,7 @@ class SkillLearningEvent:
             "request_key": self.request_key,
             "run_id": self.run_id,
             "reason": self.reason[:200],
+            **({'carrier':self.carrier} if self.carrier else {}),
         }
 
 
@@ -292,14 +298,13 @@ class SkillLearningStore:
         surviving, superseded = self._classify_requests([*hot, *overflow])
         return bool(superseded) or hot != surviving[:MAX_PENDING_REQUESTS]
 
-    # LLM: 从最新到最旧扫描，同文件名、request_key或非空thread_id/task_id只保留最新材料；不依赖队列是否满额。
-    # 函数用途: 区分全局FIFO有效请求与合并中断遗留的旧副本。
+    # LLM: 只读同文件/同键及可替代上下文；复用入队的同一比较器核轨迹与合并关系，不把相异任务误去重。
+    # 函数用途: 识别最新材料及崩溃遗留旧副本，不为发现写盘或建立另一索引。
     def _classify_requests(self, paths: list[Path]) -> tuple[list[Path], list[Path]]:
         ordered = sorted(paths, key=lambda item: (item.name, 0 if item.parent.name == "requests" else 1))
         seen_names: set[str] = set()
         seen_keys: set[str] = set()
-        seen_threads: set[str] = set()
-        seen_tasks: set[str] = set()
+        kept_payloads: list[dict] = []
         kept_reversed: list[Path] = []
         superseded: list[Path] = []
         for path in reversed(ordered):
@@ -308,22 +313,13 @@ class SkillLearningStore:
                 continue
             payload = self.read_request(path)
             req_key = str((payload or {}).get("request_key") or path.stem.rsplit("-", 1)[-1])
-            thread_id = str((payload or {}).get("thread_id") or "").strip()
-            task_id = str((payload or {}).get("task_id") or "").strip()
-            if (
-                req_key in seen_keys
-                or (thread_id and thread_id in seen_threads)
-                or (task_id and task_id in seen_tasks)
-            ):
+            if req_key in seen_keys or any(_mergeable_requests(payload or {}, kept) for kept in kept_payloads):
                 superseded.append(path)
                 continue
             seen_names.add(path.name)
             if req_key:
                 seen_keys.add(req_key)
-            if thread_id:
-                seen_threads.add(thread_id)
-            if task_id:
-                seen_tasks.add(task_id)
+            kept_payloads.append(payload or {})
             kept_reversed.append(path)
         kept_reversed.reverse()
         return kept_reversed, superseded
@@ -365,14 +361,11 @@ class SkillLearningStore:
         self._recover_requests_locked()
         return "queued", None
 
-    # LLM: 同类仅凭非空结构化thread_id/task_id精确相等，不能从正文、请求时间或名字猜测关系。
-    # 函数用途: 判断满队列中一条待处理请求是否可被新材料替代。
+    # LLM: 原队列与崩溃投影共用成对比较；准确task冲突不能退到thread，不同轨迹无合并关系不得覆盖。
+    # 函数用途: 判断满队列中的旧材料是否允许由这条新请求替代。
     def _same_request_context(self, path: Path, request: dict[str, object]) -> bool:
         previous = self.read_request(path)
-        return previous is not None and any(
-            isinstance(request.get(key), str) and request[key].strip() and previous.get(key) == request[key]
-            for key in ("thread_id", "task_id")
-        )
+        return previous is not None and _mergeable_requests(previous, request)
 
     # LLM: 只在原state/配额事务内写固定目录；新记录先原子落盘，不改变请求正文协议或确认权限。
     # 函数用途: 安全写入一条热请求或重试记录。
@@ -537,7 +530,7 @@ class SkillLearningStore:
 
         return load_skill_usage_summary(self)
 
-    # LLM: feedback负责adopted权限与claim；显式字段归一为台账参数字典，保留省略值，复用统一软失败写口。
+    # LLM: feedback负责adopted权限与claim；过滤MISSING后按公开关键字形状调用台账，保留显式None与故障软失败。
     # 函数用途: 接通现有采用反馈的可选写账钩子，不确认或发布任何Skill内容。
     def record_skill_usage(
         self, *, event, skill_id, source, kind="skill",
@@ -547,7 +540,7 @@ class SkillLearningStore:
 
         params = dict(event=event, skill_id=skill_id, source=source, kind=kind,
                       request_id=request_id, thread_id=thread_id, task_id=task_id, chars=chars)
-        record_skill_usage_event(self, params={key: value for key, value in params.items() if value is not MISSING})
+        record_skill_usage_event(self, **{key: value for key, value in params.items() if value is not MISSING})
 
     # LLM: 每个发布修订存不可变全文供回滚和在途快照；同编号异内容拒绝，暂不清理仍可能被引用的版本。调用方必须已持 state_lock，
     #   所以用不再取 per-path 锁的原子写，版本目录里不会留下 .lock 文件。副作用：写 versions/<name>/。
@@ -588,6 +581,42 @@ class SkillLearningStore:
         return self.learned_root / name / "SKILL.md"
 
 
+# LLM: owner由Store路径隔离，root/task优先，旧请求才退thread/run；成对轨迹与谱系检查由_mergeable_requests承担。
+# 函数用途: 计算规范请求上下文，不让不同task因共享thread而撞名。
+def _request_context(request):
+    for key in ('root_task_id', 'task_id', 'thread_id', 'run_id'):
+        value = str(request.get(key) or '').strip()
+        if value:
+            return ('task_id' if key == 'root_task_id' else key), value
+    return ()
+
+
+# LLM: 显式不同task先拒绝，共同root或谱系不能覆盖子任务身份；同task轨迹/旧run兼容规则不变。
+# 函数用途: 统一入队与崩溃恢复的安全替代规则，保留独立任务材料。
+def _mergeable_requests(left, right):
+    if left.get('task_id') and right.get('task_id') and left['task_id'] != right['task_id']:
+        return False
+    contexts = _request_context(left), _request_context(right)
+    common = [key for key in ('root_task_id', 'task_id', 'thread_id', 'run_id') if left.get(key) and right.get(key)]
+    if all(context and context[0] == 'task_id' for context in contexts):
+        matches = contexts[0] == contexts[1]
+    else:
+        matches = bool(common and left[common[0]] == right[common[0]])
+    if not matches:
+        return False
+    for newer, older in ((left, right), (right, left)):
+        refs = newer.get('merge_from_request_ids')
+        if isinstance(refs, list) and older.get('request_key') in refs:
+            return True
+    first, second = left.get('trajectory_fingerprint'), right.get('trajectory_fingerprint')
+    if any((left.get(key) or right.get(key)) and left.get(key) != right.get(key) for key in ('trajectory_digest', 'trajectory_fingerprint')):
+        return False
+    if first and second:
+        return first == second
+    runs = left.get('run_id'), right.get('run_id')
+    return not all(runs) or runs[0] == runs[1]
+
+
 # LLM: request_key 只由运行身份决定，同一次运行重复收口不会重复入队。
 # 函数用途: 计算学习请求的稳定键（16 位十六进制）。
 def request_key(identity: str) -> str:
@@ -620,8 +649,11 @@ def _registry_from(payload: object) -> SkillLearningRegistry:
         raise ValueError("registry daily calls must be a non-negative integer")
     daily_date = str(daily.get("date") or "")
     history = _registry_daily_history(payload.get("daily_history", {}), daily_date, calls)
+    assets, clock = payload.get('assets', {}), payload.get('last_maintenance_at', 0)
+    if not isinstance(assets, dict) or type(clock) not in (int, float) or not 0 <= clock < float('inf'):
+        raise ValueError('registry assets/maintenance invalid')
     return SkillLearningRegistry(skills, tuple(str(item) for item in blocked), daily_date, calls,
-                                 dict(payload.get("import_operations") or {}), history)
+                                 dict(payload.get("import_operations") or {}), history, assets, clock)
 
 
 # LLM: 每日历史只保留UTC最近30天的整数计数；合法ISO日期作结构化键，不靠展示文字推断日期。

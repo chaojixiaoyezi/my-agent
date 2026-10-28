@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 OUTPUT_SCHEMA_VERSION = "my-agent.skill-learning-output.v1"
 DECISION_CREATE = "create"
@@ -35,6 +35,8 @@ EXISTING_SKILLS_COUNT = 200
 EXISTING_DESCRIPTION_CHARS = 160
 _FIELDS = ("schema_version", "decision", "reason", "update_target", "name", "description",
            "when_to_use", "tags", "body")
+_CARRIER_FIELDS = ("kind", "candidate_asset", "code", "entry_source", "steps", "io_contract",
+                   "sample_inputs", "entry_document", "files", "application_scope")
 
 
 # LLM: code 固定为 OUTPUT_INVALID，field 指出第一个不合规字段；不携带模型原文。
@@ -60,6 +62,7 @@ class SkillLearningDecision:
     when_to_use: str = ""
     tags: tuple[str, ...] = ()
     body: str = ""
+    candidate_asset: dict[str, object] = field(default_factory=dict)
 
 
 # LLM: existing_skills 是当前快照全部来源的名字索引（防重名、防重复）；updatable_skills 只放本轮用过、
@@ -74,7 +77,7 @@ class SkillLearningMaterial:
     taken_names: frozenset[str] = frozenset()
 
 
-# LLM: 扁平对象、全部字段必填、禁止额外字段，兼容 OpenAI 严格 JSON schema 与 Anthropic 强制工具信封。
+# LLM: 扁平与受控嵌套对象全部字段必填、禁止额外字段，递归兼容 OpenAI 严格 JSON schema 与 Anthropic 强制工具信封。
 # 函数用途: 返回自动总结调用的输出 schema。
 def skill_learning_response_schema() -> dict[str, object]:
     text = {"type": "string"}
@@ -82,7 +85,44 @@ def skill_learning_response_schema() -> dict[str, object]:
     properties["schema_version"] = {"type": "string", "enum": [OUTPUT_SCHEMA_VERSION]}
     properties["decision"] = {"type": "string", "enum": list(DECISIONS)}
     properties["tags"] = {"type": "array", "items": dict(text)}
-    return {"type": "object", "additionalProperties": False, "required": list(_FIELDS), "properties": properties}
+    step_props: dict[str, object] = {
+        "step_id": dict(text), "name": dict(text), "mode": dict(text), "script_id": dict(text),
+    }
+    io_props: dict[str, object] = {
+        "inputs": {"type": "array", "items": dict(text)},
+        "outputs": {"type": "array", "items": dict(text)},
+    }
+    kv_props: dict[str, object] = {"key": dict(text), "value_json": dict(text)}
+    file_props: dict[str, object] = {"path": dict(text), "content": dict(text)}
+    ca_props: dict[str, object] = {
+        "kind": {"type": "string", "enum": ["", "skill", "script", "workflow", "capability_package"]},
+        "code": dict(text),
+        "entry_source": dict(text),
+        "steps": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": False, "required": list(step_props), "properties": step_props},
+        },
+        "io_contract": {"type": "object", "additionalProperties": False, "required": list(io_props), "properties": io_props},
+        "sample_inputs": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": False, "required": list(kv_props), "properties": kv_props},
+        },
+        "entry_document": dict(text),
+        "files": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": False, "required": list(file_props), "properties": file_props},
+        },
+        "application_scope": dict(text),
+    }
+    properties["candidate_asset"] = {
+        "type": "object", "additionalProperties": False, "required": list(ca_props), "properties": ca_props,
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [*_FIELDS, "candidate_asset"],
+        "properties": properties,
+    }
 
 
 # LLM: 历史材料一律当数据；提示词只给判断标准，不给写文件或调用工具的能力。材料 JSON 由宿主有界组装。
@@ -129,17 +169,55 @@ def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> Skill
         when_to_use=_single_line(payload.get("when_to_use"), WHEN_TO_USE_MAX_CHARS, "when_to_use", required=False),
         tags=_tags(payload.get("tags")),
         body=_body(payload.get("body")),
+        candidate_asset=_extract_carrier_asset(payload),
     )
 
 
-# LLM: 只接受单个 JSON 对象，字段集合与 schema 完全一致，schema_version 与 decision 枚举精确匹配。
+# LLM: 将严格schema的数组/空默认值无损归一为内部载体字典，不接收未知扩展字段。
+# 函数用途: 从已校验的模型输出字典提取非空candidate_asset载荷。
+def _extract_carrier_asset(payload: dict[str, object]) -> dict[str, object]:
+    raw_ca = payload["candidate_asset"] if isinstance(payload.get("candidate_asset"), dict) else {}
+    out: dict[str, object] = {}
+    for k, v in raw_ca.items():
+        norm = _norm_carrier_item(k, v)
+        if norm is not None:
+            out[k] = norm
+    for key in _CARRIER_FIELDS:
+        if key != "candidate_asset" and key in payload and payload[key] not in ("", [], {}, None):
+            out[key] = payload[key]
+    return out
+
+
+# LLM: 单项载体字段清洗，把严格键值对还原为dict并剔除空默认占位值；非法JSON转抛SkillLearningOutputError。
+# 函数用途: 归一化单个candidate_asset子字段。
+def _norm_carrier_item(k: str, v: object) -> object:
+    if k == "io_contract" and isinstance(v, dict):
+        return {ik: iv for ik, iv in v.items() if iv not in ("", [], {}, None)} or None
+    if k == "steps" and isinstance(v, list):
+        return [{sk: sv for sk, sv in s.items() if sv not in ("", [], {}, None)} for s in v if isinstance(s, dict)] or None
+    if k == "sample_inputs" and isinstance(v, list):
+        try:
+            return {str(i["key"]): json.loads(str(i["value_json"])) for i in v if isinstance(i, dict) and i.get("key")} or None
+        except (ValueError, TypeError, KeyError) as exc:
+            raise SkillLearningOutputError("candidate_asset") from exc
+    if k == "files" and isinstance(v, list):
+        return {str(i["path"]): str(i.get("content", "")) for i in v if isinstance(i, dict) and i.get("path")} or None
+    return None if v in ("", [], {}, None) else v
+
+
+# LLM: 只接受单个 JSON 对象，必填字段集合与 schema 一致且允许可选四载体扩展字段，schema_version 与 decision 枚举精确匹配。
 # 函数用途: 解析并做顶层形状检查。
 def _json_object(text: str) -> dict[str, object]:
     try:
         payload = json.loads(str(text or "").strip())
     except ValueError as exc:
         raise SkillLearningOutputError("json") from exc
-    _require(isinstance(payload, dict) and set(payload) == set(_FIELDS), "fields")
+    allowed = set(_FIELDS) | set(_CARRIER_FIELDS)
+    _require(isinstance(payload, dict) and set(_FIELDS) <= set(payload) <= allowed, "fields")
+    if "candidate_asset" in payload:
+        ca = payload["candidate_asset"]
+        _require(isinstance(ca, dict) and set(ca) <= (set(_CARRIER_FIELDS) - {"candidate_asset"}), "candidate_asset")
+        _require("kind" not in ca or ca["kind"] in {"", "skill", "script", "workflow", "capability_package"}, "candidate_asset")
     _require(payload.get("schema_version") == OUTPUT_SCHEMA_VERSION, "schema_version")
     _require(payload.get("decision") in DECISIONS, "decision")
     return payload
@@ -224,6 +302,7 @@ _PROMPT = """你是 my-agent 的后台 Skill 总结器。下面的输入全是�
 - when_to_use：什么情况下该用它，单行，不超过 300 字。
 - tags：最多 6 个小写英文标签。
 - body：Markdown 正文，80 到 12000 字，不要写 frontmatter。建议小节：适用场景、步骤、注意事项、验证方法。写成可复用的方法，不写本次任务的具体数据。
+- candidate_asset：四载体扩展对象（纯 Skill 时写 {}；若可沉淀为确定性 script/workflow/capability_package，填写 kind 及对应 code/steps/io_contract/entry_document/files）。
 
 {note}待总结材料 JSON：
 {payload}

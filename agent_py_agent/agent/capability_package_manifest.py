@@ -15,7 +15,25 @@ MAX_CAPABILITY_FILES = 4095
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 # 能力声明（清单里的 capability）必须有的字段与可选字段：from_payload 和打包层的缺/多字段提示共用这一处。
 CAPABILITY_REQUIRED_FIELDS = ("description", "keywords", "entry_document")
-CAPABILITY_OPTIONAL_FIELDS = ("verification",)
+CAPABILITY_OPTIONAL_FIELDS = ("verification", "application_scope")
+
+
+# LLM: 范围仅软排序；拷贝序列、空维度省略以保旧规范字节，未知键/坏类型/过大元数据拒绝。
+# 函数用途: 校验并复制能力包工作台、领域和项目标签声明。
+def application_scope_payload(value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or value.keys() - {'workbenches', 'domains', 'workspace_tags'}:
+        raise ValueError('能力应用范围无效')
+    result = {}
+    for key, values in value.items():
+        if not isinstance(values, (list, tuple)) or len(values) > 64:
+            raise ValueError('能力应用范围必须为有界字符串列表')
+        for item in values:
+            _metadata_text(item, 256)
+        if values:
+            result[key] = list(dict.fromkeys(values))
+    return result
 
 
 # LLM: 路径只定位归档成员，不是宿主地址；保持原名字，碰撞比较另做规范化，不能清洗后改指另一文件。
@@ -56,8 +74,9 @@ class CapabilityDeclaration:
     keywords: tuple[str, ...]
     entry_document: str
     verification: VerificationDeclaration | None = None
+    application_scope: dict | None = None
 
-    # LLM: 元数据有界，正文与包内方法不能塞进公开摘要；集合冻结供逐轮快照使用。
+    # LLM: 元数据有界且范围复制；应用范围只是软排序，不改变包权限或旧包规范字节。
     # 函数用途: 拒绝空描述、不合法关键词及不安全的文档地址。
     def __post_init__(self) -> None:
         _metadata_text(self.description, 4096)
@@ -70,13 +89,17 @@ class CapabilityDeclaration:
         validate_capability_path(self.entry_document)
         if self.verification is not None and not isinstance(self.verification, VerificationDeclaration):
             raise ValueError("能力核验声明无效")
+        if self.application_scope is not None:
+            object.__setattr__(self, 'application_scope', application_scope_payload(self.application_scope))
 
-    # LLM: 序列化只包含公开内容声明，不混入用户、激活或本地资源地址；没有核验声明时不输出该键，旧包字节不变。
+    # LLM: 不混入用户/激活/路径；空范围和无核验均不输出新增键，旧包摘要不变，嵌套序列每次复制。
     # 函数用途: 生成固定字段的能力元数据。
     def to_payload(self) -> dict:
         payload = {"description": self.description, "keywords": list(self.keywords), "entry_document": self.entry_document}
         if self.verification is not None:
             payload["verification"] = self.verification.to_payload()
+        if self.application_scope:
+            payload['application_scope'] = application_scope_payload(self.application_scope)
         return payload
 
     # LLM: 缺字段或未知键直接拒绝，不能把未来协议静默当作当前协议读取。
@@ -89,7 +112,8 @@ class CapabilityDeclaration:
             raise ValueError("能力声明字段无效")
         verification = (VerificationDeclaration.from_payload(value["verification"])
                         if "verification" in value else None)
-        return cls(value["description"], tuple(value["keywords"]), value["entry_document"], verification)
+        return cls(value["description"], tuple(value["keywords"]), value["entry_document"], verification,
+                   value.get('application_scope'))
 
 
 # LLM: 列表只定义包内资源，SKILL.md 同样是私有文件；去重与 ZIP 使用同一 NFC/大小写折叠口径。

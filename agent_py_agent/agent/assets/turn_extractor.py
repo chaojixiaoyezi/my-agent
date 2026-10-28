@@ -456,7 +456,7 @@ def _target_types(values):
     return (*kinds, 'script') if 'workflow' in kinds and 'script' not in kinds else kinds
 
 
-# LLM: asset_types兼容别名不能与target_types冲突；预览不取锁/落盘，workflow连带依赖且拒绝空候选。
+# LLM: 同源同scope/type复用稳定提案编号，重复提取不造UUID；预览不落盘，变化内容须新来源/显式编辑。
 # 函数用途: 从选中回合生成脱敏草稿，默认保存DRAFT，显式预览仅返回内存结果。
 def propose_assets_from_turns(conversation_store, *, owner_home: Path, turn_refs: Sequence[Mapping[str, object]],
                               target_types: Sequence[str] = ('all',), **options) -> dict[str, object]:
@@ -474,7 +474,8 @@ def propose_assets_from_turns(conversation_store, *, owner_home: Path, turn_refs
     bundles = _redact(collect_turn_execution_bundles(conversation_store, turn_refs, owner_home=owner_home), redacted_secrets=redacted_secrets)
     if not bundles:
         raise ValueError('EXTRACTION_EMPTY_SELECTION')
-    proposal_id = 'exp_' + uuid4().hex[:16]
+    identity = [scope, str(project or ''), kinds, bundles]
+    proposal_id = 'exp_' + hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
     title = _redact(str(options.get('title_hint') or bundles[0]['user_prompt'][:100] or '回合提炼'), redacted_secrets=redacted_secrets)
     analyzer: Callable | None = options.get('analyzer')
     candidates = analyzer(bundles, kinds) if analyzer is not None else _synthesize(bundles, kinds, proposal_id, title)
@@ -493,6 +494,9 @@ def propose_assets_from_turns(conversation_store, *, owner_home: Path, turn_refs
     if options.get('preview_only') is True:
         return proposal
     with _record_lock(owner_home, _PROPOSALS):
+        existing = read_bytes_beneath(owner_home, ('data', _PROPOSALS, proposal_id+'.json'), max_bytes=MAX_ASSET_BYTES)
+        if existing is not None:
+            return get_extraction_proposal(owner_home, proposal_id)
         _write_record(owner_home, _PROPOSALS, proposal, 'proposal_id')
     return proposal
 
@@ -500,7 +504,7 @@ def propose_assets_from_turns(conversation_store, *, owner_home: Path, turn_refs
 # LLM: 纯workflow请求仅以有真实可执行命令证据的回合生成伴随脚本；纯文字或仅非命令工具可单独提Skill，不编造空命令流水线。
 # 函数用途: 确定性合成三类资产的最小结构。
 def _synthesize(bundles, kinds, proposal_id, title):
-    prefix = proposal_id.replace('exp_', 'extracted_')
+    prefix = proposal_id.replace('exp_', 'extracted-')
     script_bundles = bundles
     if 'workflow' in kinds and 'skill' not in kinds:
         script_bundles = [bundle for bundle in bundles if bundle['commands_executed']]
@@ -719,7 +723,7 @@ def commit_extracted_assets(owner_home: Path, *, proposal_id: str, selected_asse
         return _commit_batch(owner_home, root, proposal, chosen, scope, key)
 
 
-# LLM: 根锁仅取一次，再按scripts/workflows固定顺序取集合锁；锁内只用私有读取，失败回滚不吞中断。
+# LLM: 原资产集合锁后登记唯一learning registry；登记失败随原资产叶回滚，不自动执行提炼代码。
 # 函数用途: 执行一次无覆盖的批量写入并持久保存COMMITTED回执。
 def _commit_batch(home, root, proposal, chosen, scope, key):
     ensure_private_dir(root)
@@ -737,10 +741,12 @@ def _commit_batch(home, root, proposal, chosen, scope, key):
         receipt = {'ok': True, 'proposal_id': proposal['proposal_id'], 'status': 'COMMITTED', 'committed_assets': assets}
         updated = {**proposal, 'status': 'COMMITTED', 'revision': proposal['revision'] + 1,
                    'committed_assets': assets, 'commit_key': key, 'commit_result': receipt}
+        from ..capability.asset_promotion import register_extracted_assets
         try:
-            for parts, text in files.items():
-                write_text_atomic_beneath(root, parts, text)
-            _write_record(home, _PROPOSALS, updated, 'proposal_id')
+            with register_extracted_assets(home, chosen, proposal, scope):
+                for parts, text in files.items():
+                    write_text_atomic_beneath(root, parts, text)
+                _write_record(home, _PROPOSALS, updated, 'proposal_id')
         except BaseException:
             _rollback_files(root, files)
             _write_record(home, _PROPOSALS, proposal, 'proposal_id')

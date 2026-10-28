@@ -22,6 +22,33 @@ from .observations import _has_agents, process_visible, workspace_asset_rows, wo
 from .schemas import canonical_json, thaw
 
 
+# LLM: 仅公开包卡字段，不复制安装路径/reader；旧manifest缺应用声明时保留空映射。
+# 函数用途: 给W4包列表/详情委派提供含应用范围的公共投影。
+def _package_dict(record):
+    cap = getattr(record, "capability", None) or getattr(getattr(record, "manifest", None), "capability", None)
+    return {"package_id": getattr(record, "package_id", ""), "name": getattr(record, "name", ""),
+            "enabled": bool(getattr(record, "enabled", False)),
+            "application_scope": dict(getattr(cap, "application_scope", None) or {})}
+
+
+# LLM: 不从payload接受身份，也不以包/管理员安装身份代替有效owner；鲜活授权仍唯一归原解析器。
+# 函数用途: 向W4身份接口委派原owner解析入口。
+def user_space_identity_resolve(authorized):
+    return read_context(authorized)
+
+# LLM: 不resolve或清洗相对路径；任意大小写.git组件都以403拒绝，不能作为文件浏览入口。
+# 函数用途: 为W5文件委派拆出安全非空相对组件。
+def _parts(value):
+    if not isinstance(value, str) or len(value) > 4096 or "\x00" in value or "\\" in value:
+        raise HostAPIError("WORKSPACE_PATH_INVALID")
+    parts = tuple(value.split("/"))
+    if any(part.casefold() == ".git" for part in parts):
+        raise HostAPIError("PATH_OUTSIDE_WORKSPACE", 403)
+    if any(part in {"", ".", ".."} for part in parts):
+        raise HostAPIError("WORKSPACE_PATH_INVALID")
+    return parts
+
+
 # LLM: 导入地址仅来自本模块静态表；只对准确缺模块返回未就绪，不吞掉模块内部依赖错误。
 # 函数用途: 装入一个已经固定在产品代码中的领域实现。
 def _module(name):
@@ -75,7 +102,7 @@ def call_capabilities_v2(authorized, ports):
     action = authorized.call.action
     if action not in V2_ACTIONS:
         raise HostAPIError("UNSUPPORTED_ACTION")
-    context = read_context(authorized)
+    context = user_space_identity_resolve(authorized)
     if not required_capabilities(action, authorized.call.payload) <= authorized.binding.capabilities:
         raise HostAPIError("CAPABILITY_DENIED", 403)
     payload = action_spec(action).validate_payload(thaw(authorized.call.payload))
@@ -248,13 +275,14 @@ def _effect(action, payload, authorized, context, ports, store):
 # LLM: 先检查源线程及允许创建范围；克隆后只为新线程固定本安装来源，绝不改源线程或沿用其它安装回执。
 # 函数用途: 调用WP-1主会话分叉并将新线程接回原插件范围。
 def _fork(payload, authorized, context, conversation, store):
-    conversation.require_thread(store, payload["source_thread_id"], authorized, context)
+    source = conversation.require_thread(store, payload["source_thread_id"], authorized, context)
     for scope in (authorized.binding.grant["threads"], authorized.resource_scope["threads"]):
         if scope.get("created_by_installation") is not True:
             raise HostAPIError("CAPABILITY_DENIED", 403)
     directory = _workspace(payload, authorized, context, conversation, store)
     result = _module("conversation.thread_fork_service").fork_conversation_thread(store,
-        source_thread_id=payload["source_thread_id"], up_to_message_id=payload.get("up_to_message_id"),
+        source_thread_id=payload["source_thread_id"],
+        up_to_message_id=payload.get("up_to_message_id", payload.get("source_message_id")),
         title=payload.get("title"), workspace_dir=str(directory) if directory else None,
         owner_home=context.owner_home.home_dir, is_admin=context.identity == OwnerIdentity.local_main())
 
@@ -264,7 +292,9 @@ def _fork(payload, authorized, context, conversation, store):
         read_context(authorized)
         if row.owner_id != context.owner_home.owner_id or row.owner_home != str(context.owner_home.home_dir):
             raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
-        state = {"installation_ref": authorized.binding.installation_ref, "revision": 1, "workspace_ref": "default"}
+        prefs = {k: v for k, v in source.metadata.get("plugin_host_v2", {}).items()
+                 if k in {"permission_mode", "preferred_pack_ids"}}
+        state = {**prefs, "installation_ref": authorized.binding.installation_ref, "revision": 1, "workspace_ref": "default"}
         return replace(row, metadata={**row.metadata, "plugin_host_v2": state})
 
     branch = store.threads.update_atomic(result["thread_id"], bind)

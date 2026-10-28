@@ -81,10 +81,10 @@ v8 两语言启用都要求用户本人确认入口/文件/解释器、订阅正
 
 写订阅事件的插件时按本表读字段，不要凭印象猜名字。**以实现为准**：公共字段来源
 `agent_py_agent/agent/plugin_events/protocol.py`，每类事件的 `facts` 来源
-`agent_py_agent/agent/plugin_events/points.py` 的 `_EVENT_FACT_FIELDS`；**B4 定稿后 3a 会再核一次**，
+`agent_py_agent/agent/plugin_events/points.py` 的 `_EVENT_FACT_FIELDS`；
 本表与那两处不一致时以代码为准。
 
-### 一条事件的公共字段（9 个）
+### 一条事件的公共字段
 
 | 字段 | 含义 |
 | --- | --- |
@@ -95,7 +95,10 @@ v8 两语言启用都要求用户本人确认入口/文件/解释器、订阅正
 | `dropped_before` | 这类事件自上次送达后被合并掉几条（只留最新），`0` 表示没丢 |
 | `channel` | 渠道名（`tui` / `feishu` / …），空串表示没有渠道信息 |
 | `thread_ref` | 会话编号的哈希（**不是原编号**），空串表示无会话 |
+| `channel_conversation_ref` | 宿主提供的渠道会话引用；空串表示不可用，不据此猜其它Owner身份 |
 | `actor` | 谁发起的：`main`（主模型）/ `subagent`（子代理）/ `decision`（决策模型自动执行）；非法值归为 `main` |
+| `actor_user_ref` | 宿主已绑定的发起用户引用；未提供时为空，不用模型参数或显示名补身份 |
+| `actor_display_name` | 发起者的可选显示名；不可用时为空，仅用于展示，不能作权限判据 |
 | `facts` | 该类事件自己的结构化字段，见下表；**永远不含工具参数原文与输出** |
 
 ### 六类事件各自的 `facts` 字段
@@ -133,9 +136,21 @@ v8 两语言启用都要求用户本人确认入口/文件/解释器、订阅正
 
 ## 安装启用边界
 
-**B7 前 v8 只能保存安装包，生产启用一律 `plugin_events_disabled`，即使正确码也拒绝。**
-B7 启用必须同时守总开关、仅 `local/main`、强制沙箱（不可用拒绝）、默认断网和收窄读；
-插件读不到宿主配置、会话、记忆，只能拿到声明且用户确认过的数据。B9 没有实现或验证这些宿主接线。
+`plugin_events_enabled` 是v8观察/收紧的宿主总开关；关闭时返回 `plugin_events_disabled`。
+启用仍须同时满足当前支持的Owner范围、用户确认、强制沙箱（不可用拒绝）、默认断网及收窄读；
+插件读不到宿主配置、会话、记忆，只能拿到声明且用户确认过的数据。组件测试不验证真实接线与启用。
 `permissions.network` 是真布尔、默认 false；联网必须明确声明 true，并进入用户确认码；不能把断网降成普通建议。
 安装与启用只由用户在产品界面操作。模型看不到管理工具；也不能经 shell、内部 API、安装表或自动化代操作。
 交付统一提示“请用 /plugins install <路径> 安装，启用时按界面提示输确认码”，不要替用户获取或输入确认码。
+
+## 只读Broker：身份与能力包目录
+
+动作仍须在Host/Broker登记、授权并通过原Owner范围门；只读不等于可跨用户查询。不得从页面参数、事件显示名或旧连接恢复身份授权。现行v8声明仍不能混用 `host_api`，不要把下列动作硬塞进v8订阅模板；这是已获授权Broker客户端的查询合同。
+
+- `user_space.identity.resolve`：单目标 `{"id":"ou_example","id_type":"user"}`，群用 `oc_example` 与 `chat`；也支持 `{"targets":[{"id":"ou_example","id_type":"user"},{"id":"oc_example","id_type":"chat"}]}`，批量最多64项，返回 `items`。省略单目标时解析当前Owner本人，批量空ID不是本人默认值。
+- 身份项固定包含 `id/id_type/source/resolved/display_name/reason`。只公开显示名，不返回电话、邮箱、部门、凭据或远端资料；网络/认证失败返回 `resolved:false, display_name:null`，前端显示原ID或未知即可，不中断业务。认证只由宿主注入，页面不能传 `feishu_credentials`。缓存至少30分钟，按Owner/凭据/目标隔离，同目标并发去重。
+- `capability_packages.list`：可传 `include_disabled`（默认true），直接读取唯一安装表；卸载后消失、停用行显示 `enabled:false`。字段包括 `package_id/name/version/summary/enabled/installation_scope/application_scope/assets/asset_counts/digest/revision`；`assets` 按 `skills/scripts/workflows` 给声明资源索引，不预读正文，不把私有资源变成全局Skill或自动赋予执行权。
+- `application_scope` 支持 `workbenches/domains/workspace_tags` 字符串列表；工作台、领域、标签和显式偏好ID只影响软排序，不启用包、不扩大授权。空范围不写入规范清单，旧包摘要保持不变。
+- 脚本资产展示包含固定四列 `script_name/summary/device_name/log_source_name`，并有 `source_bindings/source_check`。它们是返回投影，不可写入严格 `AssetDescriptor`；缺源/空源硬停，新增同设备/系统源会提示而不自动绑定。无数据源的工具脚本显示空设备/日志源与 `not_applicable`。
+- 工作流运行返回 `workflow_name/total_steps/completed_steps/breakpoint`；断点使用一基步骤位置、稳定机器码及恢复选项。步骤级版本漂移（`SCRIPT_REVISION_DRIFT`）与缺源/空源（`DATASOURCE_MISSING/DATASOURCE_EMPTY`）属于预检硬停，不能靠步骤级 `on_error: skip` 跳过或自动伪造成功；工作流最终输出合同错误（`WORKFLOW_OUTPUT_CONTRACT_VIOLATION`）在汇总收口阶段同样属于硬停；普通步骤脚本运行或输出错误仅在步骤显式配置 `on_error: skip` 时可跳过该步，但最终合并输出仍须满足工作流级输出合同。恢复默认拦截 `SCRIPT_REVISION_DRIFT`，只有显式 `allow_script_drift:true`（或当前失败步骤属于非漂移错误且在修复后重新固定版本）才采用新版本，成功前缀不重跑。
+- 源差异/断点先写通知账本，可用的宿主IM回调仅入队；`queued` 不表示外部用户已收到。无通道或通道失败时不影响原业务，真实IM送达须单独验证。

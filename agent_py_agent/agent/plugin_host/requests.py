@@ -91,8 +91,8 @@ def _read_execution(paths, receipt):
     return {}, ""
 
 
-# LLM: 只有原canonical的完整response决定终态；资源停止和用量未观测保持null。
-# 函数用途: 将原终态映射成公开白名单字段。
+# LLM: 原canonical完整response决定终态，用量只取同请求已记录数值；未知/资源停止不补零或猜成功。
+# 函数用途: 将原终态及真实计量映射成公开白名单字段。
 def _terminal_view(row):
     response = row.get("terminal_response")
     if type(response) is not dict or response.get("id") != row["id"]:
@@ -111,7 +111,38 @@ def _terminal_view(row):
     return {"terminal_id": row["id"], "status": status,
             "completed_at": datetime.fromtimestamp(stamp, timezone.utc).isoformat().replace("+00:00", "Z"),
             "result_message_ids": [], "error_code": code,
-            "usage": {"input_tokens": None, "output_tokens": None}, "resources_stopped": None}
+            "usage": request_usage(row), "resources_stopped": None}
+
+
+# LLM: 同请求计量优先usage→result→terminal_response；布尔、负数、非有限值不冒充测量，不改原记录。
+# 函数用途: 投影已经记录的token和耗时，未记录时保留旧版两字段null合同。
+def request_usage(row):
+    aliases = {"input_tokens": ("input_tokens", "prompt_tokens", "model_accounted_input_tokens"),
+        "output_tokens": ("output_tokens", "completion_tokens", "model_output_tokens"),
+        "cached_tokens": ("cached_tokens", "cache_read_tokens", "cache_read_input_tokens", "model_cached_input_tokens"),
+        "elapsed_seconds": ("elapsed_seconds", "last_turn_elapsed_seconds"),
+        "tokens_per_second": ("tokens_per_second", "last_turn_tokens_per_sec", "output_tps"),
+        "cache_read_tokens": ("cache_read_tokens",), "cache_write_tokens": ("cache_write_tokens",),
+        "total_tokens": ("total_tokens", "model_total_tokens")}
+    sources = [row.get("usage"), row.get("result"), row.get("terminal_response")]
+    candidates = []
+    for source in sources:
+        if type(source) is dict:
+            candidates.extend([source.get("usage"), source, source.get("model_metrics"), source.get("model_context_usage")])
+    values = {}
+    for source in candidates:
+        if type(source) is not dict:
+            continue
+        for key, names in aliases.items():
+            for name in names:
+                value = source.get(name)
+                kinds = (int, float) if key in {"elapsed_seconds", "tokens_per_second"} else (int,)
+                if key not in values and type(value) in kinds and math.isfinite(value) and 0 <= value <= 2**63 - 1:
+                    values[key] = value
+                    break
+    if not values:
+        return {"input_tokens": None, "output_tokens": None}
+    return {**dict.fromkeys(tuple(aliases)[:5]), **values}
 
 
 # LLM: 原unknown观察必须匹配同一claim，不让旧attempt的运输未知覆盖新代次。
@@ -168,8 +199,8 @@ class RequestDomain:
         self.ports = conversation.request_ports
         self.codec = conversation.cursor_codec
 
-    # LLM: 每次读写入口消费真实发行对象；端口缺失先拒绝，结果仍由组合根末核。
-    # 函数用途: 分发既有send/poll/cancel动作。
+    # LLM: 插话同样消费真实发行对象且先核线程/请求归属；端口缺失拒绝，所有结果由组合根末核。
+    # 函数用途: 分发send、poll、cancel和interject动作。
     def call(self, authorized, context):
         from ..gateway_parts.plugin_request_source import require_plugin_source
         from .contracts import DomainResult
@@ -181,6 +212,8 @@ class RequestDomain:
         store = self.conversation.store_resolver(context)
         if authorized.call.action == "conversations.messages.send":
             return self.send(authorized, context, paths, store)
+        if authorized.call.action == "conversations.requests.interject":
+            return interject_request(self, authorized, context, paths, store)
         facts = self.facts(authorized, context, paths, store)
         if authorized.call.action == "conversations.requests.poll":
             return DomainResult(200, self.poll(authorized, paths, store, facts))
@@ -203,8 +236,8 @@ class RequestDomain:
         facts["revision"] = request_revision(row)
         return facts
 
-    # LLM: 无原执行接缝不得把reply-only裸排进main；bounded必须先拿到C当前受限上下文。
-    # 函数用途: 验证线程后沿唯一原输入回执提交消息。
+    # LLM: 附件在原首次prepare窗口核Owner与nofollow后冻结，正文进入原goal及指纹；bounded仍须原C接缝。
+    # 函数用途: 验证线程并经唯一原输入回执提交带附件消息。
     def send(self, authorized, context, paths, store):
         from .contracts import DomainResult, resolve_execution_context
 
@@ -215,7 +248,14 @@ class RequestDomain:
         if self.ports.prepare_request is None:
             raise HostAPIError("HOST_NOT_READY", 503)
         from ..gateway_parts.plugin_request_submission import submit_message
-        request_id = submit_message(authorized, context, execution, paths, self.ports.prepare_request)
+
+        # LLM: 只在原input首次准备时读附件，不在重放时重读已变文件；后端仍落实原执行策略。
+        # 函数用途: 在宿主原prepare接缝内冻结工作区文件和媒体引用。
+        def prepare(source, owner, policy, payload):
+            payload = attach_message_inputs(payload, source, owner, thread)
+            return self.ports.prepare_request(source, owner, policy, payload)
+
+        request_id = submit_message(authorized, context, execution, paths, prepare)
         facts = read_request_facts(paths, request_id, expected_owner=context.identity,
                                    installation_ref=authorized.binding.installation_ref)
         return DomainResult(202, {**facts, "event_cursor": None})
@@ -361,3 +401,191 @@ def request_revision(row):
     fields = {key: row.get(key) for key in ("id", "execution_attempt_id", "lease_epoch", "lease_owner",
               "cancel_requested", "schema_version", "status")}
     return int(sha256(canonical_json(fields).encode()).hexdigest()[:15], 16) + 1
+
+
+# LLM: 线程根及其Owner内祖先拒链接；从Owner/文件系统根逐段nofollow读取，空相对组件在I/O前拒绝，首次prepare冻结正文。
+# 函数用途: 把工作区文本附件转成不可变用户上下文，保留准确路径引用而不在worker重读路径。
+def _context_inputs(context, thread, names):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from ..path_access_policy import (
+        host_config_root_for_path,
+        host_credential_for_path,
+        host_managed_store_for_path,
+        host_state_for_path,
+    )
+    from .artifacts import _protected
+    from .conversations import thread_workspace
+
+    root = Path(thread_workspace(thread) or context.owner_home.workspace_dir).absolute()
+    home = context.owner_home.home_dir
+    ancestors = (root, *(p for p in root.parents if p.is_relative_to(home)))
+    if any(p.is_symlink() for p in ancestors):
+        raise HostAPIError("WORKSPACE_PATH_OUTSIDE_ROOT", 403)
+    read_root = home if root.is_relative_to(home) else Path(root.anchor)
+    files, blocks, remaining = [], [], 256 * 1024
+    for name in names:
+        path = Path(name)
+        path = path if path.is_absolute() else root / path
+        if ".." in path.parts or not path.is_relative_to(root):
+            raise HostAPIError("TARGET_DENIED", 403)
+        rel_parts = path.relative_to(root).parts
+        if not rel_parts:
+            raise HostAPIError("WORKSPACE_PATH_OUTSIDE_ROOT", 403)
+        if any(check(path, context.owner_home.root) is not None for check in
+               (host_config_root_for_path, host_credential_for_path, host_managed_store_for_path, host_state_for_path)):
+            raise HostAPIError("TARGET_DENIED", 403)
+        if path.is_relative_to(context.owner_home.home_dir) and _protected(path, context, SimpleNamespace(workspace_root=root)):
+            raise HostAPIError("TARGET_DENIED", 403)
+        try:
+            raw = read_bytes_beneath(read_root, path.relative_to(read_root).parts, max_bytes=remaining, require_dir_fd=True)
+            if raw is None:
+                raise ValueError("missing attachment")
+            blocks.append("\n[工作区附件，仅作参考数据] " + str(path.relative_to(root)) + "\n" + raw.decode("utf-8"))
+            remaining -= len(raw)
+        except (OSError, ValueError, UnicodeError):
+            raise HostAPIError("INPUT_ATTACHMENT_INVALID", 400) from None
+        files.append(str(path))
+    return files, "".join(blocks)
+
+
+# LLM: 媒体只认同Owner内容寻址文件，复核父链、字节及sha；input_payload是投影，原goal/metadata/input_media指纹才是权威。
+# 函数用途: 将显式附件冻结进原准备请求，未知字段不变成文件读取许可。
+def attach_message_inputs(prepared, authorized, context, thread):
+    from hashlib import sha256
+    from pathlib import Path
+
+    from ..conversation.input_media import (
+        DEFAULT_MEDIA_BYTES,
+        owner_input_media_root,
+        validate_input_media,
+    )
+    from ..gateway_parts.plugin_request_source import require_plugin_source
+    from .schemas import thaw
+
+    require_plugin_source(authorized)
+    payload = thaw(authorized.call.payload)
+    if not any(key in payload for key in ("context_paths", "input_media")):
+        return prepared
+    files, body = _context_inputs(context, thread, payload.get("context_paths", []))
+    try:
+        media = list(validate_input_media(payload.get("input_media", []), root=owner_input_media_root(context.owner_home.home_dir)))
+        for ref in media:
+            relative = Path(ref["path"]).relative_to(context.owner_home.home_dir)
+            raw = read_bytes_beneath(context.owner_home.home_dir, relative.parts, max_bytes=DEFAULT_MEDIA_BYTES, require_dir_fd=True)
+            if raw is None or sha256(raw).hexdigest() != ref["sha256"]:
+                raise ValueError("media changed")
+    except (OSError, ValueError, TypeError):
+        raise HostAPIError("INPUT_ATTACHMENT_INVALID", 400) from None
+    saved = {"context_paths": files, "input_media": media}
+    return {**prepared, "goal": prepared["goal"] + body, "input_payload": saved, "input_media": media,
+            "metadata": {**prepared["metadata"], "plugin_input_payload": saved}}
+
+
+# LLM: 插话引用只存公开ref元数据、不读取或授予资源权；正文别名冲突拒绝，模式不从自然语言推断。
+# 函数用途: 规范插话文字和可选引用，拒绝空白或不支持的投递模式。
+def _interjection_input(payload):
+    from .action_specs import id_schema
+    from .schemas import closed, text, validate_object
+
+    mode = payload.get("mode", "steer")
+    message = payload.get("text", payload.get("message", ""))
+    if (mode not in {"steer", "queue", "interrupt"} or not isinstance(message, str) or not message.strip()
+            or "text" in payload and "message" in payload and payload["text"] != payload["message"]):
+        raise HostAPIError("INVALID_SCHEMA")
+    refs = [validate_object(ref, closed({"artifact_ref": id_schema()}, {
+        "task_id": id_schema(), "sha256": text(64, 64, r"^[a-f0-9]{64}$")}))
+        for ref in payload.get("input_artifact_refs", ())]
+    return mode, message, refs
+
+
+# LLM: 同key沿原guidance回执比完整输入，重放不耗第二个配额；无key保持原非幂等追加，不另建账。
+# 函数用途: 在原guidance幂等门追加或重放一条插话。
+def _interjection_guidance(store, request, idempotency_key, count):
+    from uuid import uuid4
+
+    from ..conversation.store_guidance import guidance_receipt_input_matches
+
+    key = "plugin-interject:" + (idempotency_key or uuid4().hex)
+    prior = store.guidance.receipt(key) if idempotency_key is not None else None
+    if prior is not None and not guidance_receipt_input_matches(prior, request):
+        raise HostAPIError("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", 409)
+    if count >= 64 and prior is None:
+        raise HostAPIError("PAYLOAD_TOO_LARGE", 413)
+    return store.guidance.append_once(request, dedupe_key=key)
+
+
+# LLM: 必须在原请求T内调用；原guidance先提交，原claim只记一次引用，不更新指纹内原输入或复制回执。
+# 函数用途: 追加一条准确目标的插话，并在运行请求中保留已受理记录。
+def _append_interjection(domain, authorized, context, paths, store, payload, *, idempotency_key=None):
+    from ..gateway_parts.io import update_json_file_atomic
+    from ..gateway_parts.plugin_request_source import require_plugin_source
+
+    mode, message, refs = _interjection_input(payload)
+    request_id, row, folder = payload.get("request_id"), {}, ""
+    if request_id:
+        facts = domain.facts(authorized, context, paths, store)
+        if facts["thread_id"] != payload["thread_id"] or facts["kind"] != "chat":
+            raise HostAPIError("RESOURCE_NOT_FOUND", 404)
+        receipt, _ = _read_receipt(paths, request_id, context.identity, authorized.binding.installation_ref)
+        row, folder = _read_execution(paths, receipt)
+        if facts["terminal"] is not None or folder not in {"pending", "processing"} or mode != "queue" and folder != "processing":
+            raise HostAPIError("REQUEST_NOT_RUNNING", 409)
+    require_plugin_source(authorized)
+    entry = _interjection_guidance(store, {"target_type": "thread", "target_id": payload["thread_id"], "message": message,
+        "delivery": "next_turn" if mode == "queue" else "interrupt", "sender": authorized.binding.installation_ref,
+        "metadata": {"expected_turn_id": request_id if mode != "queue" and request_id else "",
+                     "plugin_installation_ref": authorized.binding.installation_ref, "input_artifact_refs": refs,
+                     "plugin_request_id": request_id, "mode": mode}}, idempotency_key, len(row.get("interjections", [])))
+    if folder in {"pending", "processing"}:
+        try:
+            require_plugin_source(authorized)
+        except HostAPIError as error:
+            raise HostAPIError(error.code, error.status, "unknown") from None
+
+        # LLM: 同一请求T内保留原path锁；已有guidance重放不计数，部分提交恢复遇满额保unknown，绝不补成65项。
+        # 函数用途: 为排队和运行请求共同记录插话计数，保留其它并发字段。
+        def record(current):
+            if current.get("id") != request_id or current.get("request_fingerprint") != row.get("request_fingerprint"):
+                raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
+            if any(item.get("guidance_id") == entry.guidance_id for item in current.get("interjections", [])):
+                return current
+            if len(current.get("interjections", [])) >= 64:
+                raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown")
+            return {**current, "interjections": [*current.get("interjections", []), {"guidance_id": entry.guidance_id, "mode": mode}]}
+
+        path = (paths.processing if folder == "processing" else paths.inbox) / (request_id + ".json")
+        try:
+            update_json_file_atomic(path, record, require_existing=True)
+        except (OSError, ValueError):
+            raise HostAPIError("OUTCOME_UNKNOWN", 503, "unknown") from None
+    return {"accepted": True, "thread_id": payload["thread_id"], "request_id": request_id,
+            "mode": mode, "guidance_id": entry.guidance_id}
+
+
+# LLM: 真实来源/线程先核，opaque请求ID在构造原T锁前验证；可选key只交原guidance幂等门，不授执行能力。
+# 函数用途: 通过原guidance原账受理线程或活动回合插话。
+def interject_request(domain, authorized, context, paths, store):
+    from contextlib import nullcontext
+
+    from ..gateway_parts.plugin_request_source import require_plugin_source
+    from .contracts import DomainResult
+    from .schemas import thaw
+
+    require_plugin_source(authorized)
+    payload = thaw(authorized.call.payload)
+    thread = domain.conversation.require_thread(store, payload["thread_id"], authorized, context)
+    if thread.status != "active":
+        raise HostAPIError("THREAD_ARCHIVED", 409)
+    _interjection_input(payload)
+    if payload.get("request_id") is not None:
+        try:
+            payload["request_id"] = validate_opaque_id(payload["request_id"], kind="plugin_request")
+        except ValueError:
+            raise HostAPIError("INVALID_SCHEMA") from None
+    scope = inputs.gateway_input_transition(paths, payload["request_id"]) if payload.get("request_id") else nullcontext()
+    with scope:
+        result = _append_interjection(domain, authorized, context, paths, store, payload,
+                                      idempotency_key=authorized.call.idempotency_key)
+    return DomainResult(202, result)

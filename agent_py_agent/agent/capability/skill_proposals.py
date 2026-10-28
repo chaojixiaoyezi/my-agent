@@ -215,17 +215,25 @@ class SkillProposalService:
         self.config = config
         self.home_paths = home_paths
 
-    # LLM: 只处理 lesson_candidate_eligible 通过的候选；同一 candidate+hash 的提案用 O_EXCL 创建，已存在（含已拒绝）
-    #   即跳过，所以重放、重复 run 或用户拒绝后都不会重复提案。副作用：首次创建提案目录与提案文件。
+    # LLM: 合格来源生成原幂等提案，锁外登记同owner唯一registry语义族；不以来源资格冒充内容验证或用户确认。
     # 函数用途: 把本批子代理 lesson 候选转成新的待确认提案，返回本次新建的提案。
     def propose_from_candidates(self, candidates: Iterable[object]) -> list[SkillProposal]:
         eligible = [item for item in candidates if lesson_candidate_eligible(item)]
         if not eligible:
             return []
         now = _utc_now()
+        drafts = [build_lesson_proposal(item, now=now) for item in eligible]
         with self._locked():
-            created = [self._create_if_absent(build_lesson_proposal(item, now=now)) for item in eligible]
-        return [item for item in created if item is not None]
+            created = [self._create_if_absent(item) for item in drafts]
+        result = [item for item in created if item is not None]
+        from .asset_promotion import register_asset
+        from .skill_learning_store import SkillLearningStore
+        for draft in drafts:
+            item = self.show(draft.proposal_id)
+            register_asset(SkillLearningStore.for_home(self.home_paths), kind='skill',
+                asset_id=item.target.skill_name, asset={'body':item.draft.body}, sha256=item.draft.sha256,
+                source={'origin':'S1','proposal_id':item.proposal_id}, state='trial' if item.status == PROPOSAL_COMMITTED else 'candidate')
+        return result
 
     # LLM: 目录不存在时直接返回空列表且不创建目录；任何损坏文件都抛 SKILL_PROPOSAL_CORRUPT，不跳过坏记录。
     # 函数用途: 按创建时间列出当前 owner 的提案，可按状态过滤。

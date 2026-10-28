@@ -37,7 +37,10 @@ from agent_py_agent.agent.conversation.wake_poison import (
     WakePoisonState,
     ledger_corrupt_decision,
 )
-from agent_py_agent.agent.gateway_parts.daemon_metadata import build_process_identity
+from agent_py_agent.agent.gateway_parts.daemon_metadata import (
+    build_process_identity,
+    process_identity_is_live,
+)
 from agent_py_agent.agent.memory_store.retention_scan import _conversation_related_paths
 from agent_py_agent.agent.runtime_errors import DataCorruptionError
 
@@ -72,10 +75,26 @@ def _poison(store, signal, *, verdict=BUG):
     return outcome
 
 
-def _dead_pid() -> int:
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    child.wait(timeout=10)
-    return child.pid
+# LLM: Capture a real child's birth before exit and verify both live/dead through the unchanged
+# product observer. Darwin's kernel producer is used only when legacy ps birth is unavailable.
+# 函数用途: 给死亡夹具提供真实同源出生证明，不拿父进程出生值替换子PID，也不把未知判成已死。
+def _dead_process_identity() -> dict[str, object]:
+    from agent_py_agent.agent.gateway_parts.multiprocess_executor_identity import process_birth
+
+    with subprocess.Popen([sys.executable, "-c", 'import sys; print("ready", flush=True); sys.stdin.readline()'],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as child:
+        try:
+            assert child.stdout.readline().strip() == "ready"
+            identity = build_process_identity(child.pid)
+            if identity["start_time"] is None and sys.platform == "darwin":
+                identity["start_time"] = process_birth(child.pid)
+            assert identity["start_time"] is not None
+            assert process_identity_is_live(identity) is True
+        finally:
+            child.communicate("\n", timeout=10)
+        assert child.returncode == 0
+    assert process_identity_is_live(identity) is False
+    return identity
 
 
 def _json(path):
@@ -111,6 +130,8 @@ class TestLedger:
         assert not store.storage.wake_attempt_path(signal.wake_signal_id).exists()
         assert store.wakes.attempts.state_report(signal.wake_signal_id) == (WakePoisonState(), None)
 
+    # LLM: Preserve all live/dead assertions; supply an observed child birth rather than a racing fixed sleep.
+    # 函数用途: 验证真实出生的子进程退出后才被补记死亡，活着的在途账不动。
     def test_dead_in_flight_attempt_is_counted_as_abandoned_but_a_live_one_is_not(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)
@@ -118,9 +139,7 @@ class TestLedger:
         store.wakes.attempts.begin(signal, WakeAttemptStart("live"), now=1.0)
         live = store.wakes.attempts.begin(signal, WakeAttemptStart("again"), now=2.0)
         assert live.abandoned is False and live.state == WakePoisonState()
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.3)"])
-        dead = build_process_identity(child.pid)
-        child.wait(timeout=10)
+        dead = _dead_process_identity()
         ledger = _json(path)
         ledger["in_flight"]["owner_process"] = dead
         path.write_text(json.dumps(ledger), encoding="utf-8")
@@ -129,6 +148,8 @@ class TestLedger:
         assert (outcome.state.reason_code, outcome.state.same_cause_count) == ("attempt:abandoned", 1)
         assert _json(path)["in_flight"]["claim_id"] == "after-crash"
 
+    # LLM: The dead fixture has a complete captured identity; batch isolation assertions remain unchanged.
+    # 函数用途: 验证真实已死批次只隔离，不错误累计单条失败。
     def test_a_batch_that_died_mid_attempt_only_isolates_its_members(self, tmp_path):
         store = _store(tmp_path)
         signal = _raise(store)
@@ -136,7 +157,7 @@ class TestLedger:
         store.wakes.attempts.begin(signal, WakeAttemptStart("batch", batch_size=3), now=1.0)
         ledger = _json(path)
         assert ledger["in_flight"]["batch_size"] == 3
-        ledger["in_flight"]["owner_process"] = {**ledger["in_flight"]["owner_process"], "pid": _dead_pid()}
+        ledger["in_flight"]["owner_process"] = _dead_process_identity()
         path.write_text(json.dumps(ledger), encoding="utf-8")
         outcome = store.wakes.attempts.begin(signal, WakeAttemptStart("alone"), now=2.0)
         assert outcome.abandoned is True and outcome.decision is None
@@ -191,6 +212,8 @@ class TestLedger:
         assert path.read_bytes() == before
 
     # 写账前按读回同一口径校验：判定层即使算出自相矛盾的状态，也不会被写成一份读不回来的坏账。
+    # LLM: Retain corruption and no-write assertions, with actual child-death proof so begin reaches validation.
+    # 函数用途: 验证死亡补记和直接记录都拒绝写入矛盾状态，不让未知进程挡住被测分支。
     @pytest.mark.parametrize("entry", ["record", "begin"])
     def test_a_contradictory_state_is_never_written(self, tmp_path, monkeypatch, entry):
         from agent_py_agent.agent.conversation import store_wake_attempts
@@ -200,7 +223,7 @@ class TestLedger:
         path = store.storage.wake_attempt_path(signal.wake_signal_id)
         store.wakes.attempts.begin(signal, WakeAttemptStart("batch", batch_size=1), now=1.0)
         ledger = _json(path)
-        ledger["in_flight"]["owner_process"] = {**ledger["in_flight"]["owner_process"], "pid": _dead_pid()}
+        ledger["in_flight"]["owner_process"] = _dead_process_identity()
         path.write_text(json.dumps(ledger), encoding="utf-8")
         before = path.read_bytes()
         broken = WakePoisonState(reason_code="", same_cause_count=1, total_count=1, first_failed_at=2.0, last_failed_at=2.0)
@@ -351,10 +374,12 @@ def test_thread_deletion_collects_this_threads_poison_files_only(tmp_path):
     assert f"wake_queue/attempts/{other.wake_signal_id}.json" not in names
 
 
+# LLM: Set only the fixture identity and optional stopping mark; product liveness and settlement remain real.
+# 函数用途: 用真实已退出子进程的完整身份准备在途死亡账。
 def _kill_in_flight(path, *, stopping_at=None):
     """把尝试账里的 in_flight 改成已死进程；stopping_at 非空时再打上停机标记。"""
     ledger = _json(path)
-    ledger["in_flight"]["owner_process"] = {**ledger["in_flight"]["owner_process"], "pid": _dead_pid()}
+    ledger["in_flight"]["owner_process"] = _dead_process_identity()
     if stopping_at is not None:
         ledger["in_flight"]["stopping_at"] = stopping_at
     path.write_text(json.dumps(ledger), encoding="utf-8")
