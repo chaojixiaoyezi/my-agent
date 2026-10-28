@@ -22,7 +22,7 @@
 #   多进程记录、分区和预留拒绝保留原责任，不自动重放、补造记录或用投影释放占用。
 #   有界调用退出未确认独立于业务失败和未发送；保留原调用及清理责任，不因超时清表或自动重跑。
 #   单进程生命周期及拓扑迁移拒绝须核原锁、来源和结构化原因；分类不能签发接手许可或重放业务。
-# 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别、重试性与处理建议。
+# 模块用途: 给工具结果、恢复状态机和用户汇报提供一致的错误类别；未认证告警目标不能归为未知或自动改地址。
 
 from __future__ import annotations
 
@@ -1784,6 +1784,11 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         retryable=True,
         recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
         recovery_hint="工具调用超过当前速率或预算；等待结构化退避时间后再试，不能用别名绕过。",
+    ),
+    "SCHEDULE_DELIVERY_TARGET_UNAUTHORIZED": ErrorContract(
+        code="SCHEDULE_DELIVERY_TARGET_UNAUTHORIZED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="通知目标未在当前用户的认证绑定中；读取schedule delivery_targets并选准确引用，不猜地址或跨用户投递。",
     ),
     "SCHEDULER_INVALID_SCHEDULE": ErrorContract(
         code="SCHEDULER_INVALID_SCHEDULE",

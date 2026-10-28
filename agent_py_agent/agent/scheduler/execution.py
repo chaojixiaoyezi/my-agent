@@ -1,5 +1,5 @@
 # LLM: 来源沿原ThreadStore/HostActor与run；旧work双引用证明仅交原queued CAS规范，不产生第二个权限、迁移或模型账。
-# 模块用途: 冻结规范定时来源并物化独立线程；原认证通知与普通结果策略分开，失败重投不重执业务。
+# 模块用途: 冻结规范定时来源并物化独立线程；同通道通知沿显式继任链解析，执行来源不迁移，失败重投不重执业务。
 from __future__ import annotations
 
 import time
@@ -150,7 +150,7 @@ def _origin_bindings(service, run, origin):
 
 
 # LLM: 只读当前任务精确 run，不信 wake 里的模型配置或正文；run/线程不匹配必须报错，不扩大到其他任务。
-# 函数用途: 在原调度账本定位本次后台执行的冻结策略。
+# 函数用途: 读取原活动运行；终态多目标只允许原wake冻结欠账定位策略，不恢复业务执行。
 def execution_run(agent, request) -> dict | None:
     repository = getattr(agent, "scheduler_repository", None)
     task_id = str(getattr(request, "task_id", "") or "")
@@ -159,7 +159,10 @@ def execution_run(agent, request) -> dict | None:
     run = repository.get_active_run(task_id)
     if run is None and task_id.startswith('srun_'):
         candidate = repository.effect_run(task_id)
-        if candidate is not None and candidate.get('event_source') is not None:
+        wake = getattr(request, 'wake_signal', None) or {}
+        cached = (wake.get('metadata') or {}).get('owner_delivery')
+        if candidate is not None and (candidate.get('event_source') is not None or cached
+                and (candidate.get('delivery') or {}).get('mode') in {'bound', 'multi'}):
             run = candidate
     if run is not None and str(run["thread_id"]) != request.thread_id:
         raise ValueError("定时执行线程与任务不匹配")
@@ -214,7 +217,7 @@ def scheduled_model_scope(agent, thread, request):
 
 
 # LLM: 两种定时执行模式都使用触发时冻结的绑定或明确通知接管引用；旧线程缺 owner 字段时只投影原 run 的准确 owner，不能回落管理员。
-# 函数用途: 为原后台路由器提供原会话投影，不给运行线程添加或修改通道绑定。
+# 函数用途: 为后台路由器提供同通道最新继任投影；执行线程和冻结来源记录均不修改。
 def delivery_thread(agent, thread, request):
     from ..conversation.models import ChannelBinding
 
@@ -234,7 +237,20 @@ def delivery_thread(agent, thread, request):
     if origin is None:
         raise KeyError("定时交付来源会话不存在")
     bindings = tuple(ChannelBinding(**item) for item in context.get("origin_bindings", ()))
+    origin = _follow_delivery_origin(agent, origin, bindings)
     return replace(origin, channel_bindings=bindings, owner_id=origin.owner_id or str(run['owner']['id']))
+
+
+# LLM: 仅原冻结三元组与/new范围相同才沿最多16跳的共享校验；其它通道仍留原线程，不能使用owner最近会话。
+# 函数用途: 为origin投递选择同通道继任，不改定时任务的执行、creator或模型来源。
+def _follow_delivery_origin(agent, origin, bindings):
+    from ..conversation.store_threads import resolve_thread_successor_chain
+
+    if origin.metadata.get("successor_thread_id") and any(
+            origin.metadata.get("succession_binding") == [row.channel, row.channel_user_id, row.channel_conversation_id]
+            for row in bindings):
+        return agent.conversation_store.threads.require(resolve_thread_successor_chain(agent.conversation_store, origin.thread_id))
+    return origin
 
 
 # LLM: 普通请求保持原 route；所有定时执行只以冻结来源绑定调用原路由器，不能沿用 wake 中的错误目标。
@@ -256,7 +272,7 @@ def resolve_delivery(agent, thread, request, channel: str, target: str):
 
 
 # LLM: 只读原冻结绑定/代次/目标；此快照不能替代运输前原begin CAS。admitted_completion仅用于已external_sent冻结回执补canonical，不授新发送。
-# 函数用途: 核对原会话归属与事件代次，普通任务零写；已外发重投沿原回执收尾，未外发失败仍交原outbox不重跑模型。
+# 函数用途: 核原来源后继或多线认证目标与事件代次；已发送目标只按原outbox补账，不授权任意目标。
 def validate_delivery_origin(agent, request, context, *, admitted_completion=False) -> bool:
     run = execution_run(agent, request)
     if run is not None and not admitted_completion and not agent.scheduler_repository.event_run_is_current(run):
@@ -265,6 +281,9 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
         return context.thread_id == run["thread_id"] and context.channel == "internal" and context.target == run["thread_id"]
     if run is None:
         return True
+    if (run.get('delivery') or {}).get('mode') in {'bound', 'multi'}:
+        from .alert_delivery import validate_alert_delivery
+        return validate_alert_delivery(agent, request, context, run, admitted_completion=admitted_completion)
     if run.get('notification_binding') is not None:
         from ..conversation.channels import binding_delivery_target
         from .notification_binding import bound_notification_thread
@@ -278,11 +297,17 @@ def validate_delivery_origin(agent, request, context, *, admitted_completion=Fal
             return False
     frozen = run.get("execution_context") or {}
     origin_id = str(frozen.get("origin_thread_id") or "")
-    if context.thread_id != origin_id:
-        return False
     store = agent.conversation_store
     origin = store.threads.load(origin_id)
     if origin is None or (origin.owner_id and origin.owner_id != run['owner']['id']):
+        return False
+    from ..conversation.models import ChannelBinding
+    try:
+        origin = _follow_delivery_origin(agent, origin, tuple(ChannelBinding(**row) for row in frozen.get("origin_bindings", ())))
+    except (ValueError, KeyError):
+        return False
+    origin_id = origin.thread_id
+    if context.thread_id != origin_id:
         return False
     for binding in frozen.get("origin_bindings", ()):
         if binding["channel"] != context.channel:

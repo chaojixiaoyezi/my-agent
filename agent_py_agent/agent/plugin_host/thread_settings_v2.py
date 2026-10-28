@@ -1,5 +1,5 @@
 # LLM: 仅接已授权宿主上下文；A0路由归W5/W6。设置CAS与原Store共锁，真实Compact不持线程锁调用模型。
-# 模块用途: 统一线程设置及别名的领域处理、数值用量、压缩、删除和分叉，不建立第二会话库。
+# 模块用途: 统一线程设置、原地新会话及生命周期；前台忙碌拒绝，新会话不停止后台任务或复制历史。
 from __future__ import annotations
 
 import time
@@ -80,6 +80,21 @@ class ThreadSettingsV2Handlers:
     # 函数用途: 读取一个本owner线程的有效设置。
     def get_thread_settings(self, params):
         return self._settings(self._require(params))
+
+    # LLM: 原ThreadStore事务内重核owner/范围/CAS和前台claim；不沿归档服务停止背景任务或提升显式线程范围。
+    # 函数用途: Web在同workspace创建空白会话并返回原历史和后台继续的结构化回执。
+    def new_thread(self, params):
+        row = self._require(params)
+        title = params.get("title", "")
+        if not isinstance(title, str) or len(title) > 200 or "\n" in title:
+            raise HostAPIError("INVALID_SCHEMA")
+        try:
+            new = self.store.threads.succeed(row.thread_id, title=title, validate=lambda latest: self._require(params, latest))
+        except ValueError as exc:
+            raise HostAPIError(str(exc), 409) from exc
+        return {"thread_id": new.thread_id, "predecessor_thread_id": row.thread_id,
+            "workspace_root": new.workspace_root, "view_reset": True, "background_tasks_continued": True,
+            "archived_thread_id": row.thread_id, "thread": new.to_dict()}
 
     # LLM: 空thread只接受owner权限默认；真实权限写沿原审批入口，线程设置在原update_atomic锁内CAS。
     # 函数用途: 原子更新选中字段、保留其余元数据并递增线程版本。

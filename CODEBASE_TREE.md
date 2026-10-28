@@ -1,3 +1,15 @@
+## 2026-10-28 Wave 9 B3：原地新会话与逐目标告警
+
+```text
+agent_py_agent/
+|-- agent/conversation/new_session.py       # 原ThreadStore继任事务的共享控制回执，不停止后台任务
+|-- agent/scheduler/alert_delivery.py        # 验证绑定展开、原sender多线投递及逐目标欠账修复
+|-- agent/plugin_host/monitor_delivery_v2.py # Web通知目录/策略读写桥接，沿原schedule权限与CAS
+`-- tests/test_wave9_new_session_and_alert_delivery.py # 显式后继、越界拒绝、通知跟随与故障重投合同
+```
+
+既有接线：`conversation/store_threads.py` 保存前后关系和有限同通道解析；`scheduler/execution.py` 与 `notification_binding.py` 只迁移通知路由，不改执行来源；`scheduler/repository.py` 在原 job 保存 `delivery_outbox`，`delivery_policy.py` 认证实际 owner 绑定；`plugin_host/thread_settings_v2.py` 提供 Web 新会话，TUI 通过 `conversation_reset` 事件清空旧显示。该基线没有独立的 `scheduler/models.py`，继续使用现有字典模型与唯一 `delivery` 策略，不新建平行模型。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

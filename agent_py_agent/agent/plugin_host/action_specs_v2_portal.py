@@ -1,5 +1,5 @@
 # LLM: W7门户目录只声明静态合同；真实owner、线程范围、CAS及后端就绪仍由授权和领域核验。
-# 模块用途: 统一编码与渗透门户的通用宿主动作，不增加专项任务接口或第二分发账。
+# 模块用途: 统一门户通用宿主动作与新会话/通知控制，不增加第二会话、调度或分发账。
 from __future__ import annotations
 
 from .action_specs import _spec, id_schema
@@ -13,7 +13,7 @@ def references(items=None):
 
 
 # LLM: 设置只接受显式可写字段，不接受owner/权限来源对象；修订及包名归属由W4原Store再核。
-# 函数用途: 声明线程设置与生命周期的九个门户动作。
+# 函数用途: 声明线程设置及新会话生命周期，写前仍核owner、范围及修订。
 def _thread_specs():
     thread = {"thread_id": id_schema()}
     revision = {"expected_revision": integer(2**63 - 1, 0)}
@@ -36,6 +36,7 @@ def _thread_specs():
         _spec("conversations.threads.compact", "execute", "chat threads.manage",
             closed(thread, {**revision, "instruction": text(4000)}), scope),
         _spec("conversations.threads.delete", "write", "threads.manage", closed(thread, revision), scope),
+        _spec("conversations.threads.new", "write", "threads.manage", closed(thread, {**revision, "title": text(200)}), scope),
     ]
 
 
@@ -104,10 +105,23 @@ def _workspace_specs():
     ]
 
 
+# LLM: 告警策略复用原schema及monitor授权范围，不能由参数选择owner或任意地址。
+# 函数用途: 声明已认证目标目录和原监控通知方式的读写入口。
+def _delivery_specs():
+    from ..scheduler.delivery_policy import DELIVERY_SCHEMA
+    monitor = {"monitor_id": id_schema()}
+    return [
+        _spec("monitors.delivery.targets.list", "read", "read assets.read", closed({})),
+        _spec("monitors.delivery.get", "read", "read assets.read", closed(monitor)),
+        _spec("monitors.delivery.update", "write", "write assets.write", closed({**monitor,
+            "expected_version": integer(2**63 - 1, 1), "delivery_policy": DELIVERY_SCHEMA})),
+    ]
+
+
 # LLM: 单一动作目录合并时拒绝重名；返回新spec列表，不缓存动态授权或运行就绪事实。
-# 函数用途: 将29个门户动作交给既有Host目录统一发行。
+# 函数用途: 将门户和通知动作交给既有Host目录统一发行，不绕过通用授权。
 def portal_v2_action_specs():
-    return _thread_specs() + _control_specs() + _settings_specs() + _workspace_specs()
+    return _thread_specs() + _control_specs() + _settings_specs() + _workspace_specs() + _delivery_specs()
 
 
 PORTAL_V2_ACTIONS = frozenset(spec.name for spec in portal_v2_action_specs())

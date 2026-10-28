@@ -472,8 +472,14 @@ def _ensure_control_operation_reconciler(
     # LLM: Compact command completion and transcript mutation are separate typed facts. ``ok``
     # closes the command without an error (including an empty-history no-op); only a positive
     # canonical generation may advance the visible compact boundary. Prose never changes state.
-    # 函数用途: 展示控制结果；无需压缩时正常收口，真正提交时才刷新历史边界和固定状态栏。
+    # 函数用途: 只按结构化成功回执重置新会话视图；压缩则按真实代次刷新，不根据文案猜状态。
     def on_complete(entry, result) -> None:
+        if entry.command_kind == "new":
+            details = result.details or {}
+            if result.ok and details.get("view_reset") is True and details.get("thread_id"):
+                runtime.publish_conversation_reset(details["thread_id"])
+            runtime.write_console(result.message or "新会话操作已结束。")
+            return
         if entry.command_kind == "stop":
             # 后台主回合已经让出时没有 turn_interrupted 事件；只用短 notice 会在
             # 子代理名单刷新前消失，让用户看不出 /stop 是否生效。沿用 会话运行时 的

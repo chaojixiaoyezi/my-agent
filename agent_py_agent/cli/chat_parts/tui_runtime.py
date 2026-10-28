@@ -1420,6 +1420,19 @@ class _TuiSessionRuntimeMixin(
         self._permission_coordinator = TuiPermissionCoordinator(self)
         self._background_activity = _TuiBackgroundActivityController(self)
 
+    # LLM: 只能在/new服务端成功后调用；transport session_id保持同一chat，不取消任务、进程或监控，只发布显示事件。
+    # 函数用途: 清空旧历史游标与显示投影，新会话继续使用原终端通道。
+    def publish_conversation_reset(self, thread_id: str) -> JournalAppendResult:
+        with self._lock:
+            self.background_message_cursor = 0
+            self.history_before_cursor = 0
+            self.background_event_stream_id = ""
+            self._turns.clear()
+            self._execution_target = None
+            self._pending_steers.clear()
+            self._queued_prompts.clear()
+            return self._publish("conversation_reset", "completed", f"new:{thread_id}", {"thread_id": thread_id})
+
     # LLM: 仅将后台完整读取结果投影为 UI 健康事件；重复结果不写 journal，不改 Gateway/turn/队列状态。
     # 函数用途: 刷新失败时通知界面显示旧状态提示，恢复后清除；返回是否需要重绘。
     def publish_background_sync_status(self, *, ok: bool) -> bool:

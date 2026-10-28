@@ -3,7 +3,7 @@
 # /admin、/approve 的密码只在 command.value 中，任何持久化之前经 persisted_control_command_text 脱敏。
 # /effort 的八档白名单取唯一换算表，TUI/IM 共用解析，不按模型名或展示文字扩大取值。
 # /dir和/fork只解析结构化参数，执行必须另由已认证owner调用工作区领域服务，不从路径授予管理员身份。
-# 模块用途: 解析显式控制及本地用户管理，敏感密码只存活命令，回执沿统一脱敏函数。
+# 模块用途: 解析显式控制及原地新会话；/new 的标题仅作展示，不授权停止、换目录或更改投递。
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ from .authority import (
 from .channels import redact_host_absolute_paths
 
 ControlKind = Literal[
+    "new",
     "delivery",
     "dir",
     "fork",
@@ -237,7 +238,7 @@ def _personal_storage_command(name, trailing):
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
 # /restart 的尾随文字只作为展示用原因；/group 只承载人工固定语法，普通对话不能产生群授权。
-# /memory仅显式candidates子树进入人工控制；普通搜索不被改成模型批准。
+# /memory仅显式candidates子树进入人工控制；/new 只携带标题，忙态和继任由宿主裁决。
 def parse_conversation_command(
     text: object,
     *,
@@ -255,6 +256,10 @@ def parse_conversation_command(
     if plugin_namespace(raw) is not None:
         return ConversationControlCommand("plugins", value=raw)
     name, trailing = match_conversation_command(raw) or ("", None)
+    if name == "new":
+        title = str(trailing or "").strip()
+        return ConversationControlCommand("new", value=title, valid=len(title) <= 200 and "\n" not in title,
+                                          usage="用法：/new [新会话标题（不超过200字）]")
     if name in {"help", "delegate", "schedule", "memory", "agents", "group", "sessions"}:
         return _catalog_front_command(name, trailing)
     if name == "status":

@@ -1,3 +1,30 @@
+## 2026-10-28 Wave 9 B3：原地新会话、同通道继任与多线告警
+
+来源：`07-tasks/wave9-b3.md` 及批次计划 Item 4；基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅修改派工工作树，不推送、部署或运行已退休的尺寸检查。
+
+- `/new [标题]` 进入共享 typed control，Gateway/CLI/Web 共用原 ThreadStore 继任事务。新线程继承实际目录、类型化模型选择、权限及能力包偏好；不复制历史、摘要或任务执行权。旧线程归档但保留原 TaskLink/claim，不调用停止或资源回收；前台回合/claim 忙碌则拒绝。
+- 原线程的 `successor_thread_id`/`succeeded_at` 是逻辑发表点；带 `predecessor_thread_id` 的未发表候选对 load/list 不可见。每跳复核准确 owner/home 和固定 `(channel, actor/account, conversation/chat)` 三元组，最多 16 跳；错误和缺失失败关闭。重复旧 ID 修复原绑定索引，不跨另一条绑定；ID 碰撞不删除既有文件。
+- 通知沿显式同通道后继解析，原 run 的执行线程、creator、模型来源和冻结业务不迁移。管理员通知接管继续核验原认证代次。
+- 原 `job/run.delivery` 是唯一策略权威，`delivery_policy`/`notify_mode` 只作输入兼容及公开投影。支持 origin/local/none/bound/multi、认证 binding 引用和 include_origin 去重；创建/更新同时核验每一条规则覆盖。未认证、跨 owner 或重绑旧引用返回 `SCHEDULE_DELIVERY_TARGET_UNAUTHORIZED`。
+- 双线仍调用原 owner sender/DeliveryService 和原事件发送前 CAS。原 job 的 `delivery_outbox[run_id][target_key]` 保存逐目标回执及欠账信封，committed 不降级；失败重投不再调用模型，不重复发送已成功路线。外发与本地 canonical 写入分别记账，本地优先写失败也先冻整封结果，不把部分成功当整条 wake 完成。
+- 独立审查的反例逐项复现后修正：远端 `local_only` 仍欠外发；已发路线撤权或 `/new` 后仅补原 canonical；未发送路线独立核验当前授权；目标 I/O 故障保留欠账但推进健康路线，共享 outbox/wake 写失败则立即上抛。新目标从原业务快照重建，不能使用另一目标的脱敏 freeze；主动运输清空旧回复/进度句柄并重算目标 transcript 能力。只有所有计划角色都已登记且全部 committed 才压缩正文，保留最近 128 条完成运行的轻量回执，未完成及尚未登记完的债务不清理。
+- Web 增加 `conversations.threads.new`、`monitors.delivery.targets.list`、`monitors.delivery.get`、`monitors.delivery.update` 领域接线；原权限、owner/creator、群能力与 CAS 继续生效。TUI 只在结构化成功回执后发布视图重置事件，transport session/chat 身份不变。
+
+专测：`agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py`。包含真实文件账本、Gateway 控制领域、Web 领域、TUI reducer、原调度器触发和故障注入；模型与 IM 运输使用替身，不是实网或真实浏览器验收。
+
+复现命令（工作树根目录）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
+python3 scripts/check_import_boundaries.py
+ruff check agent_py_agent scripts
+git diff --check
+```
+
+扩展回归已覆盖原控制、调度、通知策略、IM 来源、Web 设置/请求及 TUI 控制。`test_chat_control_runtime.py::test_local_interrupt_stops_foreground_shell_without_resource_reclaim` 在当前候选和从上述基线直接 `git archive` 提取的隔离副本中同样失败：子 shell 返回 71、`handler_executed=False`，未生成启动标记。未将其改为跳过或放宽断言，也未据此推断具体失败原因。另三项原 Gateway 资源控制测试报告缺少 `nested_sandbox_exec` 能力而跳过，不能算通过。
+
+未验证：真实飞书收件、浏览器点击链路、真实 TUI 键盘操作和断电恢复；远端发送已发生但本机回执尚未持久化的崩溃窗口仍依赖原渠道幂等能力，不承诺跨系统 exactly-once。隐藏未发表候选的真实进程崩溃回收不在本轮实测范围。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 
 来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。
