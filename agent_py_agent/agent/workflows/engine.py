@@ -1,9 +1,10 @@
-# LLM: 公开引擎仅使用宿主注入的模型回调；运行事实和恢复位置来自账本，不从自然语言推断。
-# 模块用途: 编排纯脚本、条件跳过、技能分析、异常兜底与 Step 级断点续跑。
+# LLM: 正式运行沿原账本；debug默认无外部副作用，显式许可仍禁正式账本/摘要/pin；通知仅走原Owner出口。
+# 模块用途: 编排正式执行及安全单节点调试，保留模式别名、审批等待和真实通知投递状态。
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import uuid
 from dataclasses import replace
@@ -25,6 +26,7 @@ from .datasource_runtime import (
 )
 from .models import (
     AnalysisContext,
+    StepDebugResult,
     StepExecutionRecord,
     WorkflowRunRecord,
     output_value,
@@ -62,15 +64,17 @@ def _pending(spec):
 # LLM: 生命周期持有冻结定义、版本和断点合同，步骤调度由子类_drive提供，不建立另一执行器。
 # 类用途: 管理工作流创建、恢复与运行级合同，供公开引擎复用。
 class _WorkflowRunLifecycle:
-    # LLM: 构造不执行资产；项目根和正文读取器仅宿主提供，不从模型工作流正文授权。
-    # 函数用途: 绑定Owner存储及分析、技能解析与详情依赖。
-    def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None, skill_details_resolver=None, workspace_root=None):
+    # LLM: 构造不执行资产；外部debug执行器/分析器只由可信宿主注入，定义JSON不授新权限。
+    # 函数用途: 绑定Owner存储、分析及可选通用外部节点执行端口，默认不具备外部节点执行能力。
+    def __init__(self, owner_home, *, escalation_handler=None, analysis_handler=None, skill_resolver=None,
+                 skill_details_resolver=None, workspace_root=None, debug_node_handler=None):
         self.owner_home = Path(owner_home).absolute()
         self.workspace_root = workspace_root
         self.store, self.runner = WorkflowRunStore(owner_home), ScriptRunner(owner_home, workspace_root=workspace_root)
         self.escalation_handler, self.analysis_handler = escalation_handler, analysis_handler
         self.skill_resolver = skill_resolver
         self.skill_details_resolver = skill_details_resolver
+        self.debug_node_handler = debug_node_handler
 
     # LLM: 首次执行冻结定义及脚本版本/hash/来源；owner_id只校验一致性，不建立授权。
     # 函数用途: 新建运行账本并顺序执行步骤。
@@ -254,9 +258,53 @@ class _WorkflowRunLifecycle:
             step = replace(step, needs_repair=True, error_code='WORKFLOW_OUTPUT_CONTRACT_VIOLATION', error_message=error)
         return replace(record, breakpoint=self._breakpoint(step, index))
 
-# LLM: 复用原生命周期合同；本类只负责步骤输入/调度、修复和执行策略，不另建身份或作用域。
-# 类用途: 在Owner内顺序执行确定性、技能分析与混合步骤。
+# LLM: 复用原执行链；debug显式副作用许可与内存标志由调用方传入，不能从config/mock授予权限。
+# 类用途: 执行正式工作流，或默认只预览一个节点而不改变正式运行、资产修订及外部业务。
 class WorkflowEngine(_WorkflowRunLifecycle):
+    # LLM: 默认False在映射/条件后阻止业务副作用；显式True不写RunStore/摘要/pin或升级，返回原mode与新旧DTO键。
+    # 函数用途: 只调试目标节点，报告渲染输入、分支、预览和未持久化正式运行；脚本仍走原沙箱。
+    def debug_step(self, workflow_id: str, step_id: str, *, mock_inputs: dict | None = None,
+                   context_overrides: dict | None = None, timeout_seconds: float = 30.0,
+                   allow_side_effects: bool = False):
+        if type(allow_side_effects) is not bool:
+            raise ValueError('allow_side_effects必须为布尔值')
+        if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
+                or not 0 < timeout_seconds <= 3600):
+            raise ValueError('调试超时必须为(0,3600]秒')
+        if any(value is not None and not isinstance(value, dict) for value in (mock_inputs, context_overrides)):
+            raise ValueError('调试输入和上下文必须是对象')
+        definition, descriptor = _definition(self.owner_home, workflow_id, self.workspace_root)
+        self._require_workflow_enabled(definition)
+        selected = next((spec for spec in definition['steps'] if spec['step_id'] == step_id), None)
+        if selected is None:
+            raise ValueError('调试步骤不存在')
+        spec = payload(selected)
+        inputs, outputs = payload(mock_inputs or {}), payload(context_overrides or {})
+        spec['inputs_map'] = {key: value for key, value in spec.get('inputs_map', {}).items() if key not in inputs}
+        spec['timeout_seconds'] = min(float(spec.get('timeout_seconds') or timeout_seconds), timeout_seconds)
+        # 失败调试不能通过escalation回调间接持久化修复；debug保留原失败，不触发兜底。
+        spec['on_error'] = 'fail'
+        run = WorkflowRunRecord(f'debug-{uuid.uuid4().hex[:12]}', descriptor['id'],
+            descriptor.get('owner_id', ''), 'debug', 'running', time.time(), 0, 0,
+            inputs=inputs, ephemeral_debug=True)
+        record = replace(_pending(spec), status='running', input_snapshot=payload(inputs), started_at=time.time())
+        timer = time.monotonic()
+        try:
+            self._perform(record, spec, outputs, definition, run, record_summary=False,
+                          allow_side_effects=allow_side_effects)
+        except Exception as exc:
+            record.status, record.error_code = 'failed', getattr(exc, 'error_code', 'STEP_EXECUTION_ERROR')
+            record.error_message = '调试步骤执行失败'
+        status = ('skipped' if record.status == 'skipped' else 'succeeded'
+                  if record.status in ('succeeded', 'escalated_recovered', 'paused_for_resume') else 'failed')
+        return StepDebugResult(workflow_id=descriptor['id'], step_id=step_id, step_type=record.mode, status=status,
+            duration_ms=(time.monotonic() - timer) * 1000, output_data=record.output_snapshot,
+            rendered_input=record.input_snapshot, condition_branch=record.escalation_result.get('condition_branch'),
+            logs=record.escalation_result.get('debug_logs', []),
+            dry_run=record.escalation_result.get('dry_run', False),
+            side_effects_blocked=record.escalation_result.get('side_effects_blocked', False),
+            error_detail={'code': record.error_code, 'message': record.error_message} if status == 'failed' else None).to_dict()
+
     # LLM: 补丁仅替代输出；脚本合同来自当前授权作用域，故障默认agent/确认默认user，清理门保持。
     # 函数用途: 校验恢复输出并合成来源明确且输入不变的步骤。
     def _patched_step(self, target, spec, patched, resolution_origin: Literal['user', 'agent', 'system'] | None = None):
@@ -354,19 +402,95 @@ class WorkflowEngine(_WorkflowRunLifecycle):
         self._record_summary(record)
         return record
 
-    # LLM: 步骤引用先核运行闸，禁用依赖不能执行hybrid前半步或on_error=skip；输入映射与独立上下文不变。
-    # 函数用途: 执行脚本或技能步骤，混合步先采集再完整分析。
-    def _perform(self, record, spec, outputs, definition, run):
+    # LLM: 正式链仍只原三模式；条件别名纯求值，脚本别名及审批/通知都先过debug副作用门，内置mock例外不变。
+    # 函数用途: 复用旧脚本执行链并安全分派单节点，不能从mode别名/config或分析器属性取得新权限。
+    def _perform(self, record, spec, outputs, definition, run, *, record_summary=True, allow_side_effects=True):
+        from .debug_nodes import analysis_preview
         self._require_step_enabled(spec)
+        if not run.ephemeral_debug and record.mode not in ('deterministic_script', 'llm_skill_analysis', 'hybrid'):
+            record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
+            record.error_message = '通用节点当前仅支持单节点调试，不支持正式DAG执行'
+            record.needs_repair = True
+            return
         for key, reference in spec.get('inputs_map', {}).items():
             record.input_snapshot[key] = output_value(reference, outputs, run.inputs) if isinstance(reference, dict) and 'step_id' in reference else payload(reference)
-        if record.mode in ('deterministic_script', 'hybrid'):
-            self._script_step(record, spec, run, definition)
-            if record.status not in ('succeeded', 'escalated_recovered') or record.mode == 'deterministic_script':
+        if run.ephemeral_debug and spec.get('condition'):
+            condition = spec['condition']
+            if not isinstance(condition, dict) or 'equals' not in condition:
+                raise ValueError('条件必须是结构化比较')
+            matched = output_value(condition, outputs, run.inputs) == condition['equals']
+            record.escalation_result['condition_branch'] = matched
+            if not matched:
+                record.status = 'skipped'
+                return
+        pure = record.mode in ('condition', 'condition_branch') or record.mode == 'script_transform' and not spec.get('script_id')
+        local_analysis = (record.mode in ('llm_skill_analysis', 'llm_prompt')
+                          and self.analysis_handler is analysis_preview)
+        if run.ephemeral_debug and not allow_side_effects and not pure:
+            record.escalation_result.update(dry_run=True, side_effects_blocked=True)
+            if not local_analysis:
+                record.status = 'succeeded'
+                record.escalation_result['debug_logs'] = ['仅预览：未执行脚本、外部分析器、网络、工具或子工作流']
+                return
+        if record.mode in ('condition', 'condition_branch', 'script_transform', 'http_request', 'tool_call',
+                           'subworkflow', 'approval_wait', 'notification'):
+            self._generic_debug_step(record, spec, outputs, definition, run)
+            return
+        if record.mode in ('deterministic_script', 'script', 'hybrid'):
+            self._script_step(record, spec, run, definition, record_summary=record_summary)
+            if record.status not in ('succeeded', 'escalated_recovered') or record.mode in ('deterministic_script', 'script'):
                 return
             outputs = {**outputs, record.step_id: payload(record.output_snapshot)}
         context = AnalysisContext(outputs, run.inputs, record.input_snapshot, data_sources=self._sources(definition))
         self._analysis_step(record, spec, context)
+
+    # LLM: 仅debug通过副作用门后进入；审批不自批，通知只走原Owner通知账/outbox并保留真实状态，不写正式run。
+    # 函数用途: 计算条件/转换、审批等待或显式通知；其它外部节点仍需可信执行器，脚本源合同不变。
+    def _generic_debug_step(self, record, spec, outputs, definition, run):
+        from .debug_nodes import approval_wait_result, evaluate_expression
+        config = spec.get('config', {})
+        if record.mode in ('condition', 'condition_branch'):
+            if 'expression' in config:
+                matched = bool(evaluate_expression(config['expression'], record.input_snapshot))
+            else:
+                matched = record.escalation_result.get('condition_branch')
+                if matched is None:
+                    raise ValueError('条件节点缺少表达式或结构化比较')
+            record.escalation_result['condition_branch'] = matched
+            record.output_snapshot = {'matched': matched}
+        elif record.mode == 'script_transform' and not spec.get('script_id'):
+            if 'expression' in config:
+                output = evaluate_expression(config['expression'], record.input_snapshot)
+            else:
+                output = {key: output_value(value, outputs, record.input_snapshot)
+                          if isinstance(value, dict) and 'step_id' in value else payload(value)
+                          for key, value in config.get('mapping', record.input_snapshot).items()}
+            if not isinstance(output, dict):
+                raise ValueError('转换输出必须是JSON对象')
+            record.output_snapshot = output
+        elif record.mode == 'script_transform':
+            self._script_step(record, spec, run, definition, record_summary=False)
+            return
+        elif record.mode == 'approval_wait':
+            record.output_snapshot = approval_wait_result(record.input_snapshot)
+        elif record.mode == 'notification':
+            title, message = config.get('title', record.name), config.get('message', record.input_snapshot.get('message', ''))
+            if not isinstance(title, str) or not isinstance(message, str):
+                raise ValueError('通知title/message必须是字符串')
+            notice = redact_sensitive_value({'title': title, 'message': message, 'payload': record.input_snapshot})
+            dispatched = emit_asset_im_notification(self.owner_home, event_type='workflow_debug_notification', **notice)
+            record.output_snapshot = {'dispatch_result': dispatched}
+        elif not run.ephemeral_debug or not callable(self.debug_node_handler):
+            record.status, record.error_code = 'failed', 'NODE_EXECUTOR_UNAVAILABLE'
+            record.error_message = '未配置可信单节点执行器'
+            return
+        else:
+            context = AnalysisContext(outputs, run.inputs, record.input_snapshot)
+            output = payload(self.debug_node_handler(payload(spec), context, timeout_seconds=spec['timeout_seconds']))
+            if not isinstance(output, dict):
+                raise ValueError('节点执行器必须返回JSON对象')
+            record.output_snapshot = output
+        record.status = 'succeeded'
 
     # LLM: 当前授权workspace/Owner定义决定开关，临时内联仍受同ID禁用约束，不改冻结步骤。
     # 函数用途: 在新建、恢复前拒绝已关闭工作流。
@@ -401,15 +525,21 @@ class WorkflowEngine(_WorkflowRunLifecycle):
             if descriptor.get('enabled', True) is False:
                 raise AssetDisabledError('skill', reference)
 
-    # LLM: 源缺失/空源/漂移不能skip或兜底；运行错误遵循显式策略；回调不得覆盖宿主指引和已脱敏清理事实。
-    # 函数用途: 执行脚本，记录修复上下文并应用明确注入的错误策略。
-    def _script_step(self, record, spec, run, definition):
+    # LLM: 源/漂移门不变；debug禁摘要/pin与失败升级，替换脚本错误上下文时仍保留已评估分支及预览事实。
+    # 函数用途: 沿原脚本链执行并保留成功/失败日志及调试合同，内存调试不写资产或运行账。
+    def _script_step(self, record, spec, run, definition, *, record_summary=True):
         sources = definition.get('descriptor', definition).get('data_sources')
         options = {'override_data_sources': payload(sources)} if sources or definition.get('_override_data_sources') else {}
+        if not record_summary:
+            options['options'] = {'record_summary': False}
         result = run_script_with_datasources(self.owner_home, record.script_id, record.input_snapshot,
             runner=self.runner, workspace_root=self.workspace_root, timeout_seconds=spec.get('timeout_seconds'),
             expected_script_pin=definition.get('_frozen_scripts', {}).get(spec['step_id']), **options)
-        self._advance_summary_pin(run, definition, spec)
+        if record_summary:
+            self._advance_summary_pin(run, definition, spec)
+        else:
+            record.escalation_result['debug_logs'] = [text for text in
+                (result.stdout_preview, result.stderr_preview) if text]
         record.output_snapshot, record.error_code = payload(result.output_data), result.error_code
         record.error_message = result.stderr_preview if not result.ok else ''
         record.status = 'succeeded' if result.ok else 'failed'
@@ -419,7 +549,12 @@ class WorkflowEngine(_WorkflowRunLifecycle):
                 record.status, record.needs_repair = 'paused_for_resume', False
             return
         policy = spec.get('on_error', 'escalate_to_agent')
+        debug_logs = record.escalation_result.get('debug_logs', [])
+        debug_metadata = {key: record.escalation_result[key] for key in
+                          ('condition_branch', 'dry_run', 'side_effects_blocked') if key in record.escalation_result}
         record.escalation_result = redact_sensitive_value(payload(result.escalation_context or {}))
+        if not record_summary:
+            record.escalation_result.update(debug_logs=debug_logs, **debug_metadata)
         cleanup = result.escalation_context.get('cleanup_error')
         record.escalation_result['repair_guide'] = redact_sensitive_value({
             'failed_step_id': record.step_id, 'script_id': record.script_id, 'error_code': result.error_code,

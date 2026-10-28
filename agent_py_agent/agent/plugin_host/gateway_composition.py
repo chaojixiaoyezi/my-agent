@@ -1,5 +1,5 @@
-# LLM: 生产组合沿原四端口接入V2静态扩展；21个投递/治理动作惰性适配领域，不初始化Agent或复制main执行器。
-# 模块用途: 为真实HTTP入口组装四域和普通用户工厂。
+# LLM: 生产组合沿原四端口接通静态扩展和通用底座；不初始化Agent，SSO协议验证只取可信宿主端口。
+# 模块用途: 为HTTP入口组装原四域、普通用户工厂和包/调试/认证底座。
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -117,8 +117,8 @@ class GatewayHostResources:
         return stop_owner_requests(self, uid, revision)
 
 
-# LLM: builder只在可信启动链绑定门户及原四端口；兄弟模块延后导入，构造不物化Owner或运行模型。
-# 函数用途: 将真实Gateway依赖、请求控制和门户路由组装到同一宿主。
+# LLM: builder只在可信启动链绑定底座/门户和原四端口，不从HTTP指定实现，构造不物化Owner或执行模型。
+# 函数用途: 将真实Gateway依赖、观察端口及通用底座组装到同一宿主。
 def build_gateway_host_composition(server, paths):
     root = gateway_host_root(server, paths)
     if root is None:
@@ -134,8 +134,11 @@ def build_gateway_host_composition(server, paths):
     requests.conversation = conversation
     execution = ExecutionDomain(resources.resolver.factory, ExecutionQueuePorts(
         requests.enqueue, requests.require_thread, requests.read_asset))
+    observations = GatewayObservations(resources, conversation, composition.cursors)
+    from .substrate import GatewaySubstrateDomain
+    conversation.substrate = GatewaySubstrateDomain(resources, conversation, observations)
     composition.ports = HostDomainPorts(conversation, LocalUsersDomain(resources.resolver.factory,
-        resources.usage, resources.stop_resources), execution, GatewayObservations(resources, conversation, composition.cursors))
+        resources.usage, resources.stop_resources), execution, observations)
     return composition
 
 

@@ -1,5 +1,5 @@
-# LLM: 工作流运行记录的唯一内存与 JSON 字段契约；不保存脚本秘密或执行权限。
-# 模块用途: 定义脚本结果、步骤快照和工作流断点记录。
+# LLM: 正式运行和StepDebugResult共用JSON/脱敏合同；调试别名从原字段派生，persisted仅声明不写正式运行账。
+# 模块用途: 定义执行记录及新旧字段并存、含渲染输入和条件分支的单节点调试结果。
 import json
 import re
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -51,6 +51,33 @@ class ScriptExecutionResult:
     source_check: dict[str, Any] = field(default_factory=dict)
 
 
+# LLM: 仅内存返回，不可进入WorkflowRunStore；step_type保留保存的mode，所有状态新旧别名统一脱敏。
+# 类用途: 给Python与HTTP提供同源单步结果，persisted=False不否认显式许可的业务副作用。
+@dataclass
+class StepDebugResult:
+    workflow_id: str
+    step_id: str
+    status: str
+    duration_ms: float
+    output_data: dict[str, Any]
+    rendered_input: dict[str, Any]
+    condition_branch: bool | str | None = None
+    logs: list[str] = field(default_factory=list)
+    error_detail: dict[str, Any] | None = None
+    dry_run: bool = False
+    side_effects_blocked: bool = False
+    ok: bool = True
+    step_type: str = ''
+
+    # LLM: 先脱敏再从旧字段复制别名，不存第二份状态；调用方修改一份输出不影响另一份或DTO。
+    # 函数用途: 返回新旧字段一致的独立调试字典，明确没有持久化正式运行。
+    def to_dict(self):
+        result = redact_bearer_values(payload(self))
+        result.update(output=payload(result['output_data']), error=payload(result['error_detail']),
+            side_effects_suppressed=bool(result['side_effects_blocked']), persisted=False)
+        return result
+
+
 # LLM: 状态仅接受 StepStatus；所有可变字段独立创建，供账本序列化。
 # 类用途: 记录一步的输入、输出、模型参与情况和恢复草案。
 @dataclass
@@ -86,8 +113,8 @@ class StepExecutionRecord:
         return cls(**{**payload(value), 'resolved_skill_ids': tuple(value.get('resolved_skill_ids', ()))})
 
 
-# LLM: 运行身份不由模型正文推导；该结构仅是账本事实，不能授予 Owner 权限。
-# 类用途: 保存整个工作流运行的进度及断点位置。
+# LLM: 身份不由正文推导；debug只由引擎内存创建，禁止调试记录进入正式运行Store。
+# 类用途: 保存工作流运行或内存调试的进度及断点，不授予Owner权限。
 @dataclass
 class WorkflowRunRecord:
     workflow_run_id: str
@@ -110,6 +137,7 @@ class WorkflowRunRecord:
     total_steps: int = 0
     completed_steps: int = 0
     breakpoint: dict[str, Any] | None = None
+    ephemeral_debug: bool = False
 
     # LLM: 嵌套步骤、进度和断点一起序列化；旧记录缺字段由默认值兼容，不清除历史失败。
     # 函数用途: 输出完整运行JSON快照。

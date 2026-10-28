@@ -1,3 +1,17 @@
+## 2026-10-28 Wave 9 A2 Round 3 v2：单步合同对齐（源码候选，未部署）
+
+按R3 v2卡补齐调试DTO五个合同键，别名只从旧字段投影，不建立第二状态源；Store唯一 `WORKFLOW_STEP_MODES` 纳入条件/脚本别名与审批/通知。审批结果始终待批准，通知显式True走原Owner通知账/outbox并保留实际投递状态；`persisted=False` 仅指正式工作流run不持久化，正式DAG仍拒绝通用新增mode。摘要两字段字符串交领域统一400，不放宽包来源/安装授权。沙箱夹具只改观察通道为stderr+真实透传spy，不修改runner或嵌套判断。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)及TESTS.md；无新运行/审批权威、无部署。
+
+## 2026-10-28 Wave 9 A2 Round 2：加密封套与默认预览（源码候选，未部署）
+
+按返工卡收紧：TOTP每Owner独立32字节私有密钥留在原宿主凭据保护域，版本/UID绑定的Encrypt-then-MAC封套先验后解；原认证状态、跨进程锁、epoch和session权威不变，旧明文只在首次锁内消费迁移。debug显式 `allow_side_effects=False` 默认预览，不能把“无账本”当成“无业务副作用”；True不撤销原沙箱/授权。固定mock函数按对象身份识别，不信analyzer自报纯属性。六种通用mode可保存和单步调试，正式DAG明确不隐式启用；外部节点只经可信宿主端口，缺失不伪造执行成功。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)，实际回归和边界见TESTS.md；不新增生产迁移任务或第二身份/运行权威。
+
+## 2026-10-28 Wave 9 A2：通用Host安装、无账本调试与认证底座（源码候选，未部署）
+
+来源：`07-tasks/wave9-a2.md`，基线 `db4d5de92`。十个通用动作复用唯一Host目录、安装/工作流/本地用户/session权威；不增加门户专项域。新安装默认停用、更新显式CAS、启停沿原审批；新Host归档预算独立收紧，规范仍是当前根plugin.json。调试沿原runner传record_summary=False，不写run/摘要/通知/pin；旧受限execute不自动取得管理员空间调试权，新增plugins.manage/workflows.debug须独立批准。
+
+TOTP和SSO共私有跨进程消费锁，认证epoch/SSOrevision进入原session指纹；SSO单次state绑定期限、nonce、浏览器关联和配置快照。可信协议验签器是构造依赖，不由客户端声明，缺失时callback不可用。SSO/MFA失败不恢复旧state，当前契约要求重新握手；MFA continuation、真实IdP/浏览器接入及外部同步分析回调硬deadline仍未交付/验证。详见 [通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)，实际验证见TESTS.md。
+
 ## 2026-10-27 CI C8：目录切换与真正继任的状态分界（本地候选）
 
 切走一个真实目录时尚无同目录继任者，旧活动代应interrupted而非无边superseded；返回时沿原有界链解析，由原原子写口发表superseded和同线程同目录继任边。无目录占位退休不充当可复用工作区。初始工具折叠不撤销授权，quota失败也不能因物理窗口足够就降级烧同一额度；不新增事实源或放宽坏链保护。验证及未验边界见TESTS.md。

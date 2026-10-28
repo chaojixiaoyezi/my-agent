@@ -1,5 +1,5 @@
-# LLM: 命令分路只消费宿主身份、权限与原线程 Store；业务和收尾状态分别投影，联测原宿主运行及重复查询。
-# 模块用途: 组合插件目录、装卸、调用和原请求查询，不借用聊天回合，也不把业务结果当作资源已释放。
+# LLM: 管理命令和Host字节安装共用原上下文及唯一安装Store；生命周期仍经原命令/ToolExecutor，不伪造释放。
+# 模块用途: 组合插件目录、静态包安装、装卸和请求查询，不借聊天回合或增加安装状态库。
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from .plugin_disable_tool import PLUGIN_DISABLE_TOOL, PluginDisableTool
 from .plugin_enable_tool import PLUGIN_ENABLE_TOOL, PluginEnablePolicy, PluginEnableTool
 from .plugin_install_store import PluginInstallStore
 from .plugin_install_tool import PLUGIN_INSTALL_TOOL, PluginInstallTool
+from .plugin_installation import PluginInstallationError
 from .plugin_invocation import (
     PluginInvocation,
     execute_plugin_invocation,
@@ -206,14 +207,52 @@ def _normalize_management_context(context: PluginManagementContext) -> PluginMan
                        owner_scope_root=context.owner.home_dir, agent_home_root=policy.agent_home_root))
 
 
-# LLM: owner 只有原安装 Store/runtime.db；实例不建后台任务或业务历史，结果投影须保留 finalization_pending。
-# 类用途: 承接管理和业务命令，安装默认停用、调用遵守审批、撤销精确资源，查询区分业务结束与运行收尾。
+# LLM: 只使用原安装Store/runtime.db；Host字节入口仍核管理上下文，安装默认停用，启停继续原命令审批。
+# 类用途: 承接命令与已授权Host包安装，保留原生命周期及未知收尾事实。
 class PluginManagement:
     # LLM: 构造不创建目录；普通owner固定原owner墙和进程沙箱，不因宽配置或管理员HTTP角色提权。
     # 函数用途: 保存这次已鉴权入口的必要依赖。
     def __init__(self, context: PluginManagementContext) -> None:
         self.context = _normalize_management_context(context)
         self.installations = PluginInstallStore(self.context.owner)
+
+    # LLM: bytes已由Host校验来源但这里仍复验包；开关/工具禁用/管理权限先核，更新要求明确CAS且激活已结清。
+    # 函数用途: 让Host上传沿唯一安装表保存或更新静态包，不启动插件、不自动批准权限。
+    def install_package_bytes(self, content: bytes, *, operation_id: str, expected_revision: int = 0):
+        from .plugin_installation import PluginInstallRequest
+        from .plugin_package import HOST_PACKAGE_LIMITS, inspect_plugin_package
+        from .plugin_update import PluginUpdateRequest
+        if not _can_manage(self.context) or not self._allowed(PLUGIN_INSTALL_TOOL):
+            raise PluginInstallationError('permission_denied', '当前插件安装不可用。')
+        package = inspect_plugin_package(content, limits=HOST_PACKAGE_LIMITS)
+        existing = next((row for row in self.installations.snapshot() if row.manifest.plugin_id == package.manifest.plugin_id), None)
+        if existing is None:
+            return self.installations.install(PluginInstallRequest(package, operation_id, expected_revision))
+        if not self._allowed(PLUGIN_UPDATE_TOOL):
+            raise PluginInstallationError('permission_denied', '当前插件更新不可用。')
+        return self.installations.update_package(PluginUpdateRequest(existing.manifest.plugin_id, package,
+            operation_id, expected_revision, installation_scope=existing.installation_scope))
+
+    # LLM: 状态冷读原安装；变更不绕过原管理命令和审批，reload仅在已确认停用后启用；不按文案判定成功。
+    # 函数用途: 为Host通用动作复用插件enable/disable/reload/uninstall/status的唯一生命周期。
+    def package_lifecycle(self, plugin_id: str, action: str, *, operation_id: str):
+        import shlex
+        if action not in {'enable', 'disable', 'reload', 'uninstall', 'status'} or not _can_manage(self.context):
+            raise PluginInstallationError('permission_denied', '插件管理请求不可执行。')
+        entry = next((row for row in self.installations.snapshot() if row.manifest.plugin_id == plugin_id), None)
+        if entry is None:
+            raise PluginInstallationError('plugin_missing', '插件未安装。')
+        if action == 'status':
+            return entry, None
+        actions = ('disable', 'enable') if action == 'reload' else ('remove' if action == 'uninstall' else action,)
+        result = None
+        for index, command in enumerate(actions):
+            result = self.command('/plugins ' + command + ' ' + shlex.quote(plugin_id),
+                revision=self.catalog().revision, request_id=operation_id + '-' + str(index))
+            if result.get('state') != 'succeeded':
+                break
+        current = next((row for row in self.installations.snapshot() if row.manifest.plugin_id == plugin_id), None)
+        return current, result
 
     # LLM: 本人私有优先；仅冷读main公共条目，不显示其他owner私有条目或私有配置。
     # 函数用途: 为帮助与补全读取当前 owner 的公开声明。

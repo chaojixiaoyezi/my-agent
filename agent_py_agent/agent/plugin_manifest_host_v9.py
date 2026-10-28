@@ -1,16 +1,16 @@
-# LLM: v9显式区分资产/治理读写能力；旧协议不扩权，声明仅申请，批准及实时范围仍独立核验。
+# LLM: 包管理和主空间调试需要显式独立能力；旧write/execute不自动获得新权限，批准及实时范围独立核验。
 # 模块用途: 校验插件宿主v2能力清单，不让新接口借旧插件或管理员安装身份提权。
 from __future__ import annotations
 
 
-# LLM: 审计read/invoke各自批准，不由管理员安装或write自动推导；仍逐调用核对当前成员资格。
-# 函数用途: 列出v9能力词汇，包含审计组只读与受控调用。
+# LLM: plugins.manage/workflows.debug必须独立申请批准，不由write/execute或安装者身份推导。
+# 函数用途: 列出v9通用能力词汇，明确区分包管理、管理员调试与旧受限执行。
 def host_capabilities() -> frozenset[str]:
     return frozenset({"read", "write", "chat.history", "chat", "threads.manage", "requests.cancel", "execute",
                       "users.read", "users.manage", "act_as_user", "interactions.read", "interactions.respond",
                       "tasks.read", "tasks.control", "goals.read", "goals.control", "memory.read", "artifacts.read",
                       "assets.read", "assets.write", "datasources.read", "datasources.write", "recorder.control",
-                      "audit_group.read", "audit_group.invoke"})
+                      "audit_group.read", "audit_group.invoke", "plugins.manage", "workflows.debug"})
 
 
 # LLM: list/tuple入口由调用者指定，不做字符串拆分或去重清洗。

@@ -1,5 +1,5 @@
-# LLM: 仅执行宿主授权脚本的nofollow代码快照；数据源按冻结合同注入，严格模式强制平台沙箱，不冒称内核隔离。
-# 模块用途: 执行Owner脚本、注入run级数据源、清洗全部返回内容并回写安全摘要。
+# LLM: 仅执行授权nofollow快照；debug可禁摘要但不绕过数据源、沙箱、超时或清理，不冒称内核隔离。
+# 模块用途: 执行Owner脚本并脱敏回执，正式运行回写摘要，内存调试不改资产计数和修订。
 from __future__ import annotations
 
 import inspect
@@ -678,10 +678,12 @@ class ScriptRunner:
             finally:
                 shutil.rmtree(folder, ignore_errors=True)
 
-    # LLM: 禁用错误按原结构化码返回且绝不执行，单次覆盖和秘密清洗不变；摘要不得把禁用变成成功。
-    # 函数用途: 执行脚本，保留失败与清理事实并返回不含解析秘密的完整回执。
+    # LLM: record_summary仅由可信执行器传入；False不改脚本修订/计数，沙箱、数据源、超时与清理保持原执行链。
+    # 函数用途: 执行脚本并返回结构化结果，单步调试可显式禁止资产摘要写入。
     def run_script(self, script_id, inputs=None, *, timeout_seconds: int | float | None = None,
-                   override_data_sources=None, network_access: bool | None = None):
+                   override_data_sources=None, network_access: bool | None = None, record_summary: bool = True):
+        if type(record_summary) is not bool:
+            raise ValueError('record_summary必须是布尔值')
         started_at, timer = time.time(), time.monotonic()
         metadata, sources, output, stdout, stderr, error, exit_code = {}, {}, {}, '', '', '', None
         cleanup, capture, execution_error = {}, {}, {}
@@ -727,5 +729,6 @@ class ScriptRunner:
         result = ScriptExecutionResult(script_id, not error, exit_code, elapsed, started_at, ended_at,
                                        output, stdout[:PREVIEW_CHARS], stderr[:PREVIEW_CHARS], error,
                                        bool(error), redact_sensitive_value(context) if error else {})
-        _record_summary(self.owner_home, result)
+        if record_summary:
+            _record_summary(self.owner_home, result)
         return result

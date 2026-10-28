@@ -107,6 +107,45 @@ git diff --check db4d5de92..HEAD
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short --basetemp=.pytest_cache/fix-w9-delivery-tmp --junitxml=.pytest_cache/fix-w9-delivery.xml
 ruff check agent_py_agent/agent/gateway_parts agent_py_agent/agent/plugin_host agent_py_agent/agent/tooling agent_py_agent/agent/conversation agent_py_agent/tests/test_wave9_remote_agent_push.py agent_py_agent/tests/test_host_files_access.py
+
+## 2026-10-28 Wave 9 A2 Round 3 v2：沙箱夹具、调试别名与摘要400合同
+
+来源：完整阅读 `07-tasks/fix-r3-wave9-a2.md`（65行，v2）；起点 `4d2f4a4c6206ecfab3531215355b8da14d113171`，任务基线 `db4d5de92`。仅在 `wt-wave9-a2` / `wave9-a2` 修复四项，不修改生产沙箱、ScriptRunner或外层Seatbelt判断。
+
+- 三个原marker夹具改为stderr `MARKER_EXECUTED` + `ScriptRunner.run_script`真实透传计数 + JSON输出。默认/条件False要求零调用且无诊断；显式True且条件True要求一次真实调用、诊断和正确输出。没有向只读Owner根写marker，也没有mock执行结果或 `_outer_seatbelt_active`。
+- `StepDebugResult` 增加原mode的 `step_type`；`output/error/side_effects_suppressed` 从已脱敏旧字段派生，`persisted=False` 表示不写正式工作流运行账。覆盖成功、失败、跳过、预览、DTO独立快照和真实Host HTTP。
+- 原 `WORKFLOW_STEP_MODES` 唯一目录增加 `condition_branch/approval_wait/notification/script`；条件别名共用有界AST，脚本别名仍走原runner。审批/通知默认抑制；显式执行仅返回待审批状态或沿原Owner通知出口返回真实recorded/delivery_status，拒绝自报approved，正式DAG仍拒绝新增模式。测试核通知本地账与零正式运行/摘要，不冒称实际送达。
+- `sha256/expected_sha256` 的字符串通过schema，在领域层对所有提供值检查hex/长度和原上传字节摘要；坏格式、冲突或不匹配统一HTTP400 / `PACKAGE_SHA256_MISMATCH`。含空串、非hex、63/65位、错误摘要、正确大小写和双字段不能相互覆盖的HTTP回归。
+
+先只补测试，在旧实现观察到46个缺合同失败（未知mode、缺别名、摘要错误码/409）；修改实现后两定向文件94项通过，零失败/错误/跳过。复现：`python3 -B -m pytest agent_py_agent/tests/test_workflow_engine.py agent_py_agent/tests/test_wave9_host_substrate_apis.py -q --tb=short -o cache_dir=/tmp/pytest-a2-r3`。任务卡指定五文件363项通过（JUnit零失败/错误/跳过）；指定Ruff全范围通过，`DOC_SYNC_PASS`，`IMPORT_BOUNDARIES findings=0`。额外运行 `test_workflow_script_engine.py` 与 `test_scripts_and_workflows_tools.py` 共278项，零失败/错误/跳过。Astra high只读独审结论可合入、无阻塞缺陷。收尾必须在实际提交后运行 `git diff --check db4d5de92..HEAD` 并逐提交核对，不能只用未提交工作树的检查代替。测试报告保留在本轮私人工作目录，不纳入仓库。
+
+未验证：无外层Seatbelt的原生macOS、Linux/bwrap与Windows车道，真实IM送达、生产Gateway或门户UI、live LLM、IdP及全仓CI。当前TUI环境不强制嵌套sandbox_apply，也不以该环境通过冒充跨平台实测。通知显式True可写原通知账/outbox，`persisted=False` 不表示禁止该已许可业务副作用。未推送、安装或部署。
+
+## 2026-10-28 Wave 9 A2 Round 2：TOTP密文、安全默认调试及响应合同
+
+来源：完整阅读 `07-tasks/fix-wave9-a2.md`（62行）。实际起点 `e47515c72b335fcbac5d339a01229a46c275bd4f`，任务基线 `db4d5de92`；全部修改、测试和提交仅在 `wt-wave9-a2` / `wave9-a2`。没有安装、推送、部署或变更生产认证资料。
+
+四项返工：pending/active TOTP只存UID绑定认证密文、Owner独立32字节私有密钥；debug的严格布尔 `allow_side_effects=False` 默认阻止真实副作用；完整 `StepDebugResult`（含失败/预览的rendered_input与condition_branch）、六种通用debug节点、固定mock分析器；包上传摘要失败统一 `PACKAGE_SHA256_MISMATCH`。合同与未验边界见 [通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)。
+
+任务卡点名的两份测试在起点不存在，新增 `test_wave9_host_substrate_apis.py`、`test_workflow_engine.py` 保存返工回归，保留原 `test_wave9_host_substrate_plugins_workflow_auth.py` / `test_workflow_script_engine.py`。旧真实脚本用例只补显式True，原输出/超时/无账本/pin断言未删除或放宽；安全默认另由直调和真实Host HTTP标记文件独立测试。
+
+先红后绿记录：明文磁盘与旧记录迁移先2红；默认脚本实际写出marker、缺字段/模式/布尔参数/错误码先26红；Host显式True被schema拒绝及缺mock先3红。Astra high两次只读**源码摘录**独审（不是全仓或独立运行验收）后，pending丢钥setup旁路、失败脚本丢分支及嵌套复制预算先5红；脚本转换丢工作流数据源及正式入口误执行先3红；前置条件掩盖业务表达式及analyzer自报纯属性绕过先4红，均补产品修复。数据源回归随后一次失败是fixture漏写原DataSourceSpec的 `evaluated_candidates=[]` 默认值；修正为完整规范输入，仍精确断言全部数据源，不改产品默认或弱化为字段存在。
+
+最终当前源码按三组运行、JUnit去重合计 **537项通过，0失败、0错误、0跳过**（Python 3.14.4；包origin确认来自本工作树）：
+
+| 文件组 | 结果 | 工作树内证据 |
+| --- | --- | --- |
+| 任务卡三文件：新Host底座、新workflow_engine、原plugin_package | 146通过 | `.pytest_cache/fix-a2-final-gate.xml` |
+| 原Host底座、原workflow_script_engine | 125通过 | `.pytest_cache/fix-a2-final-original.xml` |
+| 原local_user_auth、Host v2 contracts、gateway composition | 266通过 | `.pytest_cache/fix-a2-final-integration.xml` |
+
+复现时在工作树根执行，为避免临时样本落到树外，追加对应 `--basetemp=.pytest_cache/<独立目录>`；每组可追加 `--junitxml=.pytest_cache/<独立文件>.xml`：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_apis.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_workflow_engine.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py agent_py_agent/tests/test_workflow_script_engine.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_plugin_host_gateway_composition.py -q --tb=short
+ruff check agent_py_agent/agent/plugin_package.py agent_py_agent/agent/plugin_management.py agent_py_agent/agent/workflows agent_py_agent/agent/user_space agent_py_agent/agent/plugin_host agent_py_agent/tests/test_wave9_host_substrate_apis.py
 python3 scripts/check_doc_sync.py --base db4d5de92
 python3 scripts/check_import_boundaries.py
 git diff --check db4d5de92..HEAD
@@ -140,10 +179,37 @@ git diff --check db4d5de92..HEAD
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_remote_agent_push.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_host_files_access.py::test_shell_lists_host_files_per_mode agent_py_agent/tests/test_host_files_access.py::test_declarations_match_the_canonical_layout -q --tb=short
+
+TOTP测试覆盖磁盘无明文、0600/0700、重载confirm/verify、篡改密文/tag、跨UID连key移植、缺/坏/链接key、pending再次setup拒绝、旧epoch保留和原会话/MFA主链。调试覆盖Python与真实回环Host HTTP默认不写marker、显式True真实写出、始终不写正式账本/摘要、条件与错误字段、上游mock映射、六模式存取、纯表达式禁调用/属性/幂/大复制、可信端口调用及缺失失败、固定模型mock、不接受自报纯属性、脚本转换保留数据源和正式泛型节点明确拒绝。
+
+未验证：生产Gateway/浏览器/IdP、live LLM及同步回调硬deadline、真实外部HTTP/工具/子流适配、Windows/Linux车道与全仓CI。通用六mode当前只支持保存和单步debug，不代表正式DAG支持。旧明文记录仅锁内首次消费迁移，未触达旧记录及历史备份不算已密文化。初次后台测试启动观察超时被终止且无输出，没有计入通过；后续取得真实红例与上述正式退出结果。未运行退役尺寸门或全仓pytest。
+
+## 2026-10-28 Wave 9 A2：通用Host包管理、无账本调试与TOTP/SSO底座
+
+来源：完整阅读 `07-tasks/wave9-a2.md`（58行）及指定缺失API参考；仅在 `wt-wave9-a2` / `wave9-a2` 修改，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。不推送、部署、修改运行包或其他工作树，不运行退役尺寸检查。
+
+实现与接口约束见 [通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)。当前规范为根plugin.json，与旧审计的plugin.yaml不符；新Host入口独立收紧10MiB/256预算，不修改旧安装权威。新plugins.manage/workflows.debug需独立批准；第一版caller/actor/effective_owner均为本机管理员，artifact引用另核artifacts.read和原task范围。
+
+新增专属回归 **59项**：ZIP保持、tar确定性规范化、路径/链接/特殊成员与炸弹/EOF后拼接拒绝；真实回环HTTP的base64/暂存tar/大于JSON容量的注册制品安装、CAS更新、清理源后稳定键重放、status/uninstall；enable/disable/reload通过受控命令边界核验原分派，不当成真实插件进程启停。调试覆盖mock/上游输入、只执行选中节点、零RunStore/摘要写、资产文件精确对照、真实暂停run恢复无SCRIPT_REVISION_DRIFT、真实脚本超时及失败日志保留。
+
+认证覆盖六个RFC6238六位SHA1向量、私有待激活设置、同counter重放、单次哈希恢复码、停用、旧密码入口强制MFA与旧session撤销；SSO状态签名/nonce/浏览器关联/期限/修订/重放、无真实verifier失败关闭、管理员映射拒绝、验签器输入深隔离、提交至签发的配置竞态、原Host DTO入站、合法UID与配置/state文件不冲突、MFA失败必须重新握手。两个独立Python解释器竞争同一磁盘TOTP、恢复码与SSO state，分别最多成功一次。
+
+tar尾部、验签器嵌套别名、原Host DTO、SSO配置竞态、UID命名冲突、失败日志均先有实际红例再修复。TOTP/SSO经两次astra high只读架构/关键代码摘录复核，提出的问题按真实代码和反例核验，不把摘录审查当成全仓安全审计。旧Host动作矩阵扩充十个独立需求用例，目录就绪测试区分缺IdP端口的callback；未删断言或新增skip/xfail。
+
+最终9文件联合回归：**602通过，0失败、0错误、0跳过**（Python 3.14.4；导入origin确认来自本工作树）。其中专属59、workflow_script_engine 66、plugin_package 97、plugin_management 27、gateway_composition 28、Host v2 contracts 182、原本地用户认证56、Host grants 73、路径错误码14。证据为工作树 `.pytest_cache/wave9-a2-final.xml`，数字从实际JUnit回读；此前58项及543项分开结果保留，不代替最终当前版本联合结果。导入边界0 findings、全范围Ruff及diff空白检查通过。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_wave9_host_substrate_plugins_workflow_auth.py agent_py_agent/tests/test_workflow_script_engine.py agent_py_agent/tests/test_plugin_package.py agent_py_agent/tests/test_plugin_management.py agent_py_agent/tests/test_plugin_host_gateway_composition.py agent_py_agent/tests/test_plugin_host_v2_contracts.py agent_py_agent/tests/test_local_user_auth_and_password_api.py agent_py_agent/tests/test_plugin_host_v2_grants.py agent_py_agent/tests/test_path_access_error_codes.py -q --tb=short --junitxml=.pytest_cache/wave9-a2-final.xml
 python3 scripts/check_import_boundaries.py
 ruff check agent_py_agent scripts
 git diff --check
 ```
+
+
+未验证/未交付边界：真实OIDC/SAML协议验签器、真实IdP/浏览器与登录CSRF整链、远程网络、生产部署、插件物理进程完整启停、真实模型分析及外部同步analysis回调的强制硬deadline、其他OS/Python车道及全仓pytest。Host冷构造未注入分析器，分析节点结构化失败，脚本超时测试不能外推为所有模型节点已支持硬超时。SSO/MFA失败不恢复已消费IdP state，本版未实现MFA continuation，调用方须重新发起握手。上述边界不以mock、回环HTTP或目录显示就绪冒充通过。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 

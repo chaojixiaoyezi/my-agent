@@ -1,5 +1,5 @@
-# LLM: 组合根保持四个原端口，WP-4通过固定适配器复用它们；缺领域不借旧Broker或main invoker兜底。
-# 模块用途: 提供原动作与V2扩展（含21个投递/治理动作）的静态分发、真实依赖发现与返回前撤权复验。
+# LLM: 四个原端口保持，通用底座由conversation上的可信依赖承接；缺领域不能借main invoker或旧Broker兜底。
+# 模块用途: 静态分派原扩展与包/调试/认证底座，按真实依赖发现并在返回前复验撤权。
 from __future__ import annotations
 
 from .action_specs import action_spec, action_specs
@@ -10,13 +10,16 @@ from .errors import HostAPIError
 from .schemas import PAGE_MAX_BYTES, canonical_json, thaw, validate_tree
 
 
-# LLM: W7门户优先按静态集合选域，缺兄弟后端保持不可用；不能落入通用observations伪装已接线。
-# 函数用途: 选择原四域、门户、V2扩展或双Bot领域。
+# LLM: 底座和门户先按静态集合选域，缺后端保持不可用，不落入旧users/observations假装接线。
+# 函数用途: 选择原四域或静态通用扩展处理器。
 def domain_name(action: str) -> str:
     action_spec(action)
     from .action_specs_audit_bots import AUDIT_BOT_ACTIONS
+    from .action_specs_substrate import SUBSTRATE_ACTIONS
     from .action_specs_v2_ext import V2_ACTIONS
     from .action_specs_v2_portal import PORTAL_V2_ACTIONS
+    if action in SUBSTRATE_ACTIONS:
+        return 'substrate'
     if action in PORTAL_V2_ACTIONS:
         return "portal_v2"
     if action in AUDIT_BOT_ACTIONS:
@@ -34,10 +37,13 @@ def domain_name(action: str) -> str:
     return "observations"
 
 
-# LLM: 门户与双Bot逐动作核真实依赖，惰性兄弟模块缺失时不可用，不借main执行器兜底。
-# 函数用途: 核验当前组合根是否真正具备指定动作的后端。
+# LLM: 底座逐动作核真实依赖，SSO callback还要求可信验签器；目录存在不代表可认证或执行。
+# 函数用途: 核验本组合根当前动作的领域接线与真实就绪条件。
 def domain_ready(action: str, ports: HostDomainPorts) -> bool:
     name = domain_name(action)
+    if name == 'substrate':
+        backend = getattr(ports.conversation, 'substrate', None)
+        return bool(backend is not None and backend.ready(action))
     if name == "portal_v2":
         if action == "conversations.requests.interject":
             return (getattr(ports.conversation, "request_ports", None) is not None
@@ -109,10 +115,12 @@ def dispatch_call(authorized: AuthorizedCall, ports: HostDomainPorts) -> DomainR
     return result
 
 
-# LLM: 门户只消费真实AuthorizedCall和生产端口，插话直接进入请求域；缺兄弟模块不构造替身业务。
-# 函数用途: 执行原领域、门户、V2扩展或已就绪Bot动作。
+# LLM: 底座和门户只消费真实AuthorizedCall；缺领域拒绝，不构造替身业务或提升原安装者为操作者。
+# 函数用途: 调用原领域或已就绪的静态扩展后端。
 def _invoke(authorized: AuthorizedCall, ports: HostDomainPorts):
     name = domain_name(authorized.call.action)
+    if name == 'substrate':
+        return ports.conversation.substrate.call(authorized)
     if name == "portal_v2":
         if authorized.call.action == "conversations.requests.interject":
             from .conversations import read_context

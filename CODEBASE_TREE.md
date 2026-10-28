@@ -17,6 +17,37 @@
 
 本机组件证据与部署限制见 `TESTS.md` 本节；接收回执不是任务完成报告，未部署或验证另一台机器可达。
 
+## 2026-10-28 Wave 9 A2 Round 3 v2：原文件职责补充（无新增路径）
+
+`workflows/models.py::StepDebugResult` 是新旧调试键的同源DTO；`debug_nodes.py` 增加不自批的纯待审批值；`engine.py` 为条件/脚本别名复用旧计算链，通知显式许可后走原Owner出口。模式仍仅由 `assets/workflow_store.py::WORKFLOW_STEP_MODES` 定义。`plugin_host/action_specs_substrate.py` 接收两种摘要字符串，`substrate.py` 同时验证所有值并统一HTTP400。两个R2测试文件补R3合同和沙箱无写marker回归；无新执行器、运行账或审批账。详见[通用Host底座](docs/design/GENERIC_HOST_SUBSTRATE.md)。
+
+## 2026-10-28 Wave 9 A2 Round 2：密文与安全单步调试
+
+```text
+|-- agent_py_agent/agent/workflows/
+|   `-- debug_nodes.py # 有界纯AST表达式与固定mock分析预览，不执行任意代码或访问外部
+`-- agent_py_agent/tests/
+    |-- test_wave9_host_substrate_apis.py # 密文磁盘、重载、防篡改、真实Host预览/许可及SHA256错误码
+    `-- test_workflow_engine.py # 默认无副作用、完整输入/分支、六种节点及正式执行边界
+```
+
+关键文件说明：`workflows/models.py::StepDebugResult` 是调试字典同源DTO；`engine.py` 在外部调用前核严格副作用门，仅固定 `debug_nodes.analysis_preview` 可默认运行，正式DAG不隐式启用新mode。`assets/workflow_store.py` 保存九种mode及JSON config。`totp_sso_auth.py` 在原受保护认证目录使用每Owner独立密钥与UID绑定认证封套，丢钥/损坏失败关闭。接口、密钥备份和未验证范围见 `docs/design/GENERIC_HOST_SUBSTRATE.md`，测试见 `TESTS.md`。
+
+## 2026-10-28 Wave 9 A2：通用Host包管理、无账本调试与TOTP/SSO底座（源码候选）
+
+```text
+|-- agent_py_agent/agent/plugin_host/
+|   |-- action_specs_substrate.py # 十个通用底座动作、闭合Schema和显式管理/调试能力
+|   `-- substrate.py # 原安装管理、注册制品、工作流调试和认证服务的管理员Host适配
+|-- agent_py_agent/agent/user_space/
+|   `-- totp_sso_auth.py # 标准库TOTP、防重放恢复码、SSO配置与可信验签器握手边界
+|-- agent_py_agent/tests/
+|   `-- test_wave9_host_substrate_plugins_workflow_auth.py # 安全归档、真实HTTP、零账本/pin、MFA和跨进程单次消费回归
+`-- docs/design/GENERIC_HOST_SUBSTRATE.md # 通用接口、批准范围、状态路径和未验证边界
+```
+
+关键文件说明：`plugin_package.py` 在新Host入口独立执行10MiB/256成员ZIP/tar预算，仍以根 `plugin.json` 和原安装表为权威；`plugin_management.py` 复用原生命周期与审批。`workflows/engine.py`、`script_runner.py`、`datasource_runtime.py` 显式禁止调试摘要、通知和pin推进，不改变正式暂停恢复。`user_auth.py` 在唯一签发/验证链加入MFA和认证版本撤销；`plugin_host/authorization.py` 读取原认证DTO的effective_owner。新 `plugins.manage` / `workflows.debug` 需明确批准，不由旧write/execute隐式获得。真实IdP与浏览器、真实模型硬deadline及插件物理启停未作为本轮验收；细节见设计说明和TESTS.md。
+
 ## 2026-10-27 Wave 7：底座能力闭环、自主学习全闭环、Gateway 自愈与 Web 插件契约接口（W1–W6）
 
 ```text

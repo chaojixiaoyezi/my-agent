@@ -1,5 +1,5 @@
-# LLM: 工作流只描述不执行；workspace读取优先，写入看显式target_scope并在根锁/集合锁内检查CAS。
-# 模块用途: 分层管理工作流定义、项目覆盖、说明、Skill绑定、自动引用及运行摘要。
+# LLM: 所有步骤mode只由WORKFLOW_STEP_MODES校验；存储支持调试别名/控制节点，不授正式DAG新执行权。
+# 模块用途: 分层保存工作流、节点配置、Skill绑定和摘要，保留原scope/CAS及执行权限边界。
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -15,12 +15,14 @@ from . import (
 )
 from .descriptor import AssetDescriptor, _Record
 
-WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid")
+WORKFLOW_STEP_MODES = ("deterministic_script", "llm_skill_analysis", "hybrid",
+                       "http_request", "script_transform", "condition", "tool_call", "llm_prompt", "subworkflow",
+                       "condition_branch", "approval_wait", "notification", "script")
 WORKFLOW_ON_ERROR_POLICIES = ("escalate_to_agent", "fail", "skip")
 
 
-# LLM: mode只允许三种结构化执行声明；condition保留空字符串或JSON比较结构，inputs_map同为数据，均不在存储层执行。
-# 类用途: 定义工作流一步的脚本、Skill、条件、错误策略及超时。
+# LLM: 旧模式及调试别名/控制节点共用原值对象；config仅有限JSON，不承载回调、审批或执行授权。
+# 类用途: 定义一步的模式、脚本、配置、结构化条件及预算，不在保存时执行节点。
 @dataclass(frozen=True)
 class WorkflowStepSpec(_Record):
     step_id: str
@@ -33,6 +35,7 @@ class WorkflowStepSpec(_Record):
     on_error: str = "escalate_to_agent"
     inputs_map: dict[str, object] = field(default_factory=dict)
     timeout_seconds: float = 120
+    config: dict[str, object] = field(default_factory=dict)
 
     # LLM: 资产层唯一校验步骤；Skill引用允许来源前缀，脚本目录ID仍严格，模式/策略/超时不静默修正。
     # 函数用途: 在构造或JSON恢复时拒绝非法工作流步骤。

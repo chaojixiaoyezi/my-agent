@@ -62,6 +62,8 @@ def production_host(tmp_path, request):
     if options.get("extra"):
         grant["target_user_ids"].append(options["extra"])
     grant.update(manageable_user_ids=["alice"], creatable_user_ids=["alice"])
+    if options.get('task_ids'):
+        grant['tasks']['explicit_ids'] = list(options['task_ids'])
     default_calls = 4 if _grants.installed_grant.__name__ == "installed_grant" else grant["execution"]["max_tool_calls"]
     grant["execution"].update(tool_names=["read_file", "write_file"], max_tool_calls=options.get("max_tool_calls", default_calls),
         asset_refs=options.get("asset_refs") or [{"kind": "script", "id": "script-one", "revision": 1, "sha256": "a" * 64}])
@@ -100,13 +102,16 @@ def production_call(host, action, payload=None, *, user=None, key=None, status=2
     return body["data"]
 
 
-# LLM: 显式空HostComposition旧单测保持不变；此处构造真实paths而不替换端口。
-# 函数用途: 证明实际Gateway发现目录与当前完整动作合同一致，且每项都真实可用。
+# LLM: 显式空组合仍不可用；callback只有真实验签端口存在才就绪，不用目录登记假报已接IdP。
+# 函数用途: 验证完整HTTP目录和逐动作依赖，缺IdP适配器明确不可用、注入后恢复就绪。
 def test_production_gateway_wires_all_actions(production_host):
     rows = production_call(production_host, "host.capabilities.get")["actions"]
     assert len(rows) == len(action_specs())
     assert {row["action"] for row in rows} == set(action_specs())
-    assert all(row["available"] for row in rows), [row["action"] for row in rows if not row["available"]]
+    assert {row['action'] for row in rows if not row['available']} == {'users.auth.sso.callback'}
+    production_host[0].sso_assertion_verifier = lambda *args: None
+    wired = production_call(production_host, 'host.capabilities.get')['actions']
+    assert all(row['available'] for row in wired)
 
 
 # LLM: A/C投影必须保留实际动作/实参/幂等键和获批资产，不能把请求替换成chat.send。

@@ -1,4 +1,4 @@
-# LLM: users.local域只接受宿主核验调用，账号与quota各保留唯一权威，运行用量必须来自宿主观察口。
+# LLM: 只接受宿主核验调用；认证含可选第二因素但不签发旁路session，账号与quota仍各有唯一权威。
 # 模块用途: 将普通用户管理及认证动作接到原生命周期、限域分页和统一认证服务。
 from __future__ import annotations
 
@@ -96,8 +96,8 @@ class LocalUsersDomain:
             return self.read_user(call.action, uid)
         return self.mutate(authorized, call, payload)
 
-    # LLM: schema闭合；认证选择器不是管理或执行目标，密码重置仍强制原管理范围、CAS和幂等来源。
-    # 函数用途: 校验本域动作与参数，拒绝额外身份字段或管理越权。
+    # LLM: schema闭合；totp_code仅沿原登录服务验证，认证选择器不授执行，管理CAS及原来源不变。
+    # 函数用途: 校验原用户与认证参数，不将第二因素或身份字段变为管理授权。
     def validate(self, call, payload):
         schemas = {
             "users.local.list": (set(), {"status", "limit", "cursor"}),
@@ -106,7 +106,7 @@ class LocalUsersDomain:
             "users.local.disable": ({"user_id", "expected_revision"}, {"reason"}),
             "users.local.enable": ({"user_id", "expected_revision"}, set()),
             "users.local.password.set": ({"user_id", "password", "expected_revision"}, set()),
-            "users.auth.login": ({"user_id", "password"}, {"account_source", "tenant_or_app_key", "ttl_seconds"}),
+            "users.auth.login": ({"user_id", "password"}, {"account_source", "tenant_or_app_key", "ttl_seconds", "totp_code"}),
             "users.auth.verify": ({"session_token"}, set()),
         }
         if call.action not in schemas:
@@ -241,12 +241,12 @@ class LocalUsersDomain:
                 self._cursors.popitem(last=False)
         return LocalUserDomainResult({"items": [self.user_data(user) for user in page], "next_cursor": next_cursor})
 
-    # LLM: 只能在call已经核原安装和管理能力后调用；密码交原统一服务，不进入审计正文或账号公开投影。
-    # 函数用途: 为插件用户域执行登录并返回有限期限普通用户会话。
+    # LLM: 原安装/能力必须已核；第二因素只传原唯一认证服务，不缓存secret或把验证码当作密码替代。
+    # 函数用途: 为插件入口提交密码及可选TOTP，返回原有限普通用户会话。
     def auth_login(self, call, payload):
         session = authenticate_user(self.factory.store.root, account_source=payload.get("account_source", "local"),
             user_id=payload["user_id"], password=payload["password"], tenant_or_app_key=payload.get("tenant_or_app_key", ""),
-            ttl_seconds=payload.get("ttl_seconds", 86400))
+            ttl_seconds=payload.get("ttl_seconds", 86400), **({'totp_code': payload['totp_code']} if 'totp_code' in payload else {}))
         return LocalUserDomainResult(session.public_view())
 
     # LLM: token只读验证当前账号与凭据，不绑定as_user、不初始化执行器或继承安装者权限。

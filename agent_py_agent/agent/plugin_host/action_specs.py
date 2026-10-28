@@ -1,5 +1,5 @@
-# LLM: 静态动作目录统一原动作与WP-4扩展，不接受插件注册；目录声明不能替代领域范围及实时授权。
-# 模块用途: 定义宿主闭合参数与能力要求，扩展合同分文件维护而不增加第二套分发权威。
+# LLM: 静态目录合入原动作、WP-4和通用底座；插件不能注册路由，目录不能替代实时授权或领域范围。
+# 模块用途: 定义唯一Host闭合合同，包含包管理、内存调试及通用认证。
 from __future__ import annotations
 
 import json
@@ -102,8 +102,8 @@ def _conversation_specs() -> list[ActionSpec]:
     ]
 
 
-# LLM: 管理与认证沿原users.manage能力；密码重置强制CAS和幂等，登录及验会话不授代执行资格。
-# 函数用途: 声明本地用户生命周期和统一认证的闭合动作合同。
+# LLM: 认证沿原users.manage，密码重置CAS不变；可选totp_code只作第二因素，不替代密码或授代执行资格。
+# 函数用途: 声明原本地用户和统一认证合同，让已启用MFA的登录可提交第二因素。
 def _user_specs() -> list[ActionSpec]:
     uid = {"user_id": text(64, 3, r"^[a-z][a-z0-9_-]{2,63}$")}
     revision = {"expected_revision": integer(2**63 - 1, 1)}
@@ -121,7 +121,8 @@ def _user_specs() -> list[ActionSpec]:
                "password": text(4096, 1)}), "manageable_user"),
         _spec("users.auth.login", "read", "users.manage", closed({"user_id": text(256, 1), "password": text(4096, 1)}, {
             "account_source": {"enum": ["local", "feishu"], "default": "local"},
-            "tenant_or_app_key": {**text(256), "default": ""}, "ttl_seconds": {**integer(604800, 1), "default": 86400}})),
+            "tenant_or_app_key": {**text(256), "default": ""}, "ttl_seconds": {**integer(604800, 1), "default": 86400},
+            "totp_code": text(64, 1)})),
         _spec("users.auth.verify", "read", "users.manage", closed({"session_token": text(8192, 1)})),
     ]
 
@@ -198,15 +199,17 @@ def _read_specs() -> list[ActionSpec]:
     ]
 
 
-# LLM: 门户、双Bot/审计均惰性合入唯一目录，重名拒绝；缓存不含动态资格或执行许可。
-# 函数用途: 合并原动作、V2扩展、双Bot及W7门户动作。
+# LLM: 底座、门户及审计惰性合入同一目录，重名拒绝；缓存不包含动态资格、路径或执行许可。
+# 函数用途: 将通用底座和原扩展组合为唯一Host动作合同。
 @lru_cache(maxsize=1)
 def action_specs():
     from .action_specs_audit_bots import audit_bot_specs
+    from .action_specs_substrate import substrate_action_specs
     from .action_specs_v2_ext import v2_action_specs
     from .action_specs_v2_portal import portal_v2_action_specs
     rows = (_conversation_specs() + _user_specs() + _execution_specs() + _interaction_specs()
-            + _task_goal_specs() + _read_specs() + v2_action_specs() + audit_bot_specs() + portal_v2_action_specs())
+            + _task_goal_specs() + _read_specs() + v2_action_specs() + audit_bot_specs() + portal_v2_action_specs()
+            + substrate_action_specs())
     if len({row.name for row in rows}) != len(rows):
         raise ValueError("宿主动作重名")
     return MappingProxyType({row.name: row for row in rows})
@@ -220,10 +223,12 @@ def action_spec(action: str) -> ActionSpec:
     return action_specs()[action]
 
 
-# LLM: 插话的资源引用也须artifacts.read；bounded消息仍需execute，静态能力不代替运行范围。
-# 函数用途: 计算带附件消息、Bot消息和插话的参数相关能力。
+# LLM: 注册制品安装同样要求artifacts.read；消息/插话能力保持，不以plugins.manage隐式授予制品读取。
+# 函数用途: 计算引用制品、附件和有界执行的参数相关能力交集。
 def required_capabilities(action: str, payload: dict) -> frozenset[str]:
     required = set(action_spec(action).capabilities)
+    if action == 'plugins.packages.install' and payload.get('artifact_ref'):
+        required.add('artifacts.read')
     if action == "conversations.messages.send" and (payload.get("context_paths") or payload.get("input_media")):
         required.add("read")
     if action == "conversations.requests.interject" and payload.get("input_artifact_refs"):
