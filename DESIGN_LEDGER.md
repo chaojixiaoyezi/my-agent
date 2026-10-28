@@ -9286,20 +9286,23 @@ F1/F2/F4–F7及当前F3修复已在开发工作树整合。S11四机160定向�
 
 状态：已实现并通过全量合同单测与 4 台 Linux + 真实 MiniMax-M2.7 端到端对比验证。涵盖：1）出站全请求 token 计量与校准来源透传、前缀缓存工具顺序稳定化；2）`list_tools`/`tool_search` 紧凑回执、前台核心工具精简与后台按需唤醒加载、中文复合意图发现；3）系统提示词去重、版本化出厂 `AGENTS.md` 种子增量投影、动态能力族目录；4）Skill/工作区事实/人格/正式记忆全信封预算与子代理/Goal/Gateway 修订去重；5）统一 `SkillsService` 与资产目录、真实工作流宿主分析器注入、提交后读回 `unknown` 副作用分类、风险分级原生创作快路径；6）领域感知工具输出 reducer 与有界反向尾行读取器。
 
-## 2026-10-28 闲置自动 Compact、TUI 后台进程观察瞬态误报修复与 TUI 顶部用户发言连续跳转栏（已确认需求，待实现）
+## 2026-10-28 闲置自动 Compact、TUI 交互与视口修复、`/new` 会话与多通道监控告警、中途 `COMPACT_*` 无感续跑、多级压缩比例治理、`astra` 缓存命中率对齐 Codex、内外网单接口告警推送联动与提示词渐进寻址（已确认需求，待实现）
 
-状态：用户已确认需求，待收集完其他问题后一并实现。
+状态：用户已确认需求，待收集完其他问题后一并实现（其中最后第 9 项提示词与内部能力寻址明确放在最后一个阶段，后续可慢慢迭代更新优化）。
 
-1. **会话闲置自动 Compact（Idle Auto-Compact，参数可配置）**：
+1. **会话闲置自动 Compact（Idle Auto-Compact，参数可配置 + 暴露接口）**：
    - **触发语义**：当会话上下文占用超过配置的百分比阈值（如默认 `60%`），且距离该会话最后一次用户发言/交互闲置达到配置的时长（如默认 `7200` 秒即 2 小时）时，自动触发一次会话 Compact；只要用户有新发言即重新从 0 开始计时，本次闲置 Compact 完成后停表，直到下次产生新发言才重新计时。
    - **配置项（需同步更新 `agent_py_agent/config/agent_config.yaml` 与 `AgentConfig` dataclass）**：
      - `memory_compact_idle_trigger_percent`（会话水位阈值百分比，默认 `60`，`0` 表示关闭闲置自动 Compact）
      - `memory_compact_idle_seconds`（闲置触发秒数，默认 `7200` 即 2 小时，`0` 表示关闭）
    - **并发边界**：复用现有 `prepare_conversation_context` 与 CAS 提交门；在途请求或用户新消息到达时立即让路。
-2. **修复 TUI `后台进程观察刷新失败；仅保留同会话上次结果` 误报 Bug**：
+   - **需暴露接口**：
+     - **Web / Plugin Host v2 接口**：在全局/用户压缩策略读写接口与 `conversations.threads.usage.get` 中暴露 `idle_compact_trigger_percent`、`idle_compact_seconds` 及当前会话闲置倒计时/最近闲置压缩状态。
+     - **TUI / IM 命令与 Agent 工具接口**：支持在 `/compact` / `/context` 及管理员设置工具/`self_map(section="settings")` 中查看和修改闲置压缩阈值与时长。
+2. **修复 TUI `后台进程观察刷新失败；仅保留同会话上次结果` 误报 Bug（内部稳定性修复，无需新增外部接口）**：
    - **定位**：`agent_py_agent/agent/conversation/background_process_view.py:_directory_snapshots` 在扫描后台进程目录时遇到并发原子写导致目录 `mtime` 变化（`DIRECTORY_CHANGED_DURING_READ`）时零重试直接报 `projection_ok=False`，以及新会话 `thread_id=None` 时 `_unrelated_error` 将其他会话记录错误归入当前会话，触发 `tui_threading.py:845` 底部错误提示。
    - **修复方向**：对目录并发换代做有界重试并在瞬态冲突时复用上一帧有效快照；`thread_id=None` 时隔离明确属于其他线程的坏记录。
-3. **TUI 顶部“上一条我说的话”常驻显示与阶梯式点击跳转栏**：
+3. **TUI 顶部“上一条我说的话”常驻显示与阶梯式点击跳转栏（TUI 纯前端视口交互，无需新增外部接口）**：
    - **交互语义**：在 TUI 聊天视口最上方常驻显示当前视口顶部上方最近的一条用户消息（`role == "user"`）摘要；鼠标左键点击该顶栏即可将视口直接向上跳转到该条用户消息所在位置；跳转到位后，顶栏自动更新为再上一条用户消息，再次点击可继续向上逐条回溯历史提问。
 
 
@@ -9385,3 +9388,64 @@ Owner 墙继续采用原有收紧方向的配置回退，不能把请求漏传�
 本单只同步现行 Markdown、目录树和本条账本，规定的验证是 `git diff --check`；实际执行及提交状态见本轮交接，不将蓝图中的命令当作已通过结果。集成者应在 W1/W2/W3 与 Track 2 源码合入后核对退役 11 项、三处 CI、真实合同缺项仍失败、导入边界和各局部行为回归，并运行实际新增的 `test_dual_owner_concurrent_canary.py`，确认双 Owner 并发及同 Owner MCP 借用/关闭隔离。该 canary 的文档登记不代表本轮已执行，更不代表真实模型、部署或外部用户端到端已验证。
 
 本轮未运行已退役的尺寸 checker，也未删除测试、放宽权限/导入门或修改运行数据。没有本轮实测的全仓、Linux、真实 LLM、真实 TUI、跨机器性能与已部署结果，一律不作为本单完成证据。
+
+4. **`/new` 原地开启新会话 + 监控通知同通道跟随 + Owner Agent 多通道告警控制（需暴露命令、Plugin Host 与 Agent 工具接口）**：
+   - **`/new` 语义（仅保留 `/new` 唯一命令，不设 `/clear`）**：在 TUI 或 IM 中原地开启全新会话（清空当前屏幕与上下文，旧会话完整保留在 `/sessions` 历史中）；若当前会话有运行中任务则先提示 `/stop` 或等待完成。
+   - **与 Web 插件页面及外部 IM 监控互不干扰**：监控任务本身归属 Owner 账本（Web 页面按 Owner 实时展示全部监控与运行历史，不受 `/new` 影响）；`/new` 仅将原本指向“当前同通道旧会话”的通知接收端顺延至新会话，不覆盖已绑定到飞书等外部 IM 的推送目标。
+   - **需暴露接口**：
+     - **TUI / IM 命令接口**：新增 `/new` 命令（TUI 本地与 IM 网关统一支持，原地创建并切换绑定新 `thread_id`，自动顺延同通道监控通知绑定）。
+     - **Web / Plugin Host v2 接口**：在会话与监控/资产接口中暴露监控任务的 `notification_bindings` / `delivery_targets`（支持已认证多通道列表，如 Web + 飞书 + 其它 IM 双线/多线告警）及更新接口，供后续 Web 插件页面直接展示与配置告警目标。
+     - **Owner Agent 内部工具与 `self_map` 接口**：扩展 `schedule` 工具（支持查看/切换告警通道、配置双线或多线告警）与 `self_map`（暴露 Owner 当前已绑定的全部 IM 通道清单与监控投递去向），支持 Owner 直接用自然语言让 Agent 切换告警通道或开启双线告警。
+5. **修复多步工具循环中途（查到一半）误触发 `COMPACT_*` 硬中断、必须人工发“继续”才能走下去的 Bug（内部运行时恢复修复，无需新增外部接口）**：
+   - **现象与复现链路**：Agent 在执行多轮工具排查中途（`tool_rounds > 0`），突然报错 `错误: 上下文压缩未完成，原始历史和任务文件仍保留，本轮没有继续执行。请查看压缩诊断；切换更大上下文的模型后可继续原会话。` 并中止当前回合；但用户不用换模型，紧接着发一句“继续”又能立刻正常跑下去（飞书与 TUI 均复现）。
+   - **三大根因**：
+     1. **回合内软阈值实时压缩失败缺少兜底续跑**：`_fit_native_ir_to_shared_budget`（`_tool_loop_service.py:462-888`）在工具循环中途一旦达到软阈值（`before_tokens >= policy.trigger_tokens`），即便距离 100% 物理窗口上限（`model_request_input_ceiling`）还有充足余量，只要 `_summarize_live_compact` 偶发空摘要、远端抖动或候选未过，就在 L720/L792/L887 直接 `raise ConversationCompactError` 硬杀当前回合，没有像回合初 preflight（`_restore_optional_preflight`）那样回退原上下文继续跑完当前步。
+     2. **Gateway 溢出续跑把 `preflight` 软阈值当成 `force=True` 硬溢出处理**：当回合内因软阈值返回 `runtime_status="context_overflow", runtime_source="preflight"` 进入 `_gateway_compact_overflowing_turn`（`request_execution.py:689-743`）时，调用 `prepare_gateway_compact_recovery` 默认传了 `force=True`，导致 `_restore_optional_preflight`（`compact_request_recovery.py:343`：`if recovery.force: return False`）被彻底封死，一旦本轮新增工具较多而旧历史不足以单独切分或摘要偶发失败，就直接向用户抛 `COMPACT_*` 错误。
+     3. **为什么人工发一句“继续”就能过**：上一轮抛错触发了 `record_compact_circuit_failure` 熔断器，且已跑完的工具结果已落盘进会话历史；用户发“继续”开启新回合时走的是 `force=False` 的回合初 preflight，命中 `_automatic_recovery_noop`（`compact_request_recovery.py:330`，未超物理窗口上限直接放行）或基于已落盘完整消息成功压缩，所以立刻就能接着跑。
+   - **修复方案**：
+     1. **软阈值压缩失败自动无感续跑**：在 `_fit_native_ir_to_shared_budget` 与 `_gateway_compact_overflowing_turn`（当 `runtime_source == "preflight"` 且当前真实 Token 仍低于 `model_request_input_ceiling` 物理安全线时），若自动重试一次摘要仍未完成，记录熔断器并保留原 `native_ir` 无感继续执行当前工具循环，绝不中途卡停等用户喊“继续”。
+     2. **逼近物理硬上限时的确定性旧工具输出折叠降级**：当确实逼近 100% 物理窗口上限或属于 `provider_overflow`、且摘要生成失败时，自动降级为确定性的回合内旧工具大输出归档折叠（`compact_native_ir_to_token_budget` + 磁盘归档指针保留），释放窗口后自动继续当前回合。
+6. **多级会话压缩触发比例配置与管理员强制开关/单改/批量管控（需暴露 Web/Plugin Host、TUI/IM 命令与 Agent 治理接口）**：
+   - **三级配置与管理员强制开关语义**：
+     - **管理员全局比例 + 强制开关**（如 `memory_compact_admin_force_trigger_percent: bool = False`，以及管理员全局默认比例 `memory_compact_auto_trigger_percent`）：
+       - 当**管理员强制开关开启**时：所有用户、所有会话一律强制按管理员设定的全局比例执行压缩。
+       - 当**管理员强制开关关闭**时：按 **`当前会话（Thread / TUI 会话）级比例 > 当前用户（Owner）级默认比例 > 管理员全局默认比例`** 优先级解析（用户/会话未设置时走管理员默认，设置了则走用户/会话自己的设置）。
+     - **TUI 与会话级支持**：每个 TUI、每个用户的每个会话都能单独设置自己的压缩比例（TUI 一般即为管理员/Owner，既可设置当前 TUI 会话或自身默认比例，也可直接操控管理员强制开关和用户比例）。
+     - **管理员单改与批量改用户比例**：管理员有权查看、修改任意单个用户的默认压缩比例，并支持**批量修改**（一键修改全部用户或指定一批用户的压缩比例，或批量清空自定义恢复跟随管理员默认）。
+   - **权威落点**：统一收口在 `runtime_compact_policy`（`context_compactor.py`），读取管理员全局设置、Owner 用户设置与 `ConversationThread.compact_trigger_percent` 结构化字段，确保回合初 preflight、回合内 live compact、finalization 与闲置自动 compact 全部走同一权威入口。
+   - **需暴露接口**：
+     - **Web / Plugin Host v2 接口**：
+       1. **会话级（Thread）**：扩展 `conversations.threads.settings.get` / `conversations.threads.settings.update` 与 `conversations.threads.usage.get`，支持读写当前会话 `compact_trigger_percent`（允许设为具体百分比或清空跟随上级），并返回当前实际生效比例 `effective_compact_trigger_percent` 与生效来源 `effective_source`（`admin_forced | thread | user | admin_default`）。
+       2. **用户级与管理员单改/批量治理**：扩展 `users.managed.overview.get` / `users.managed.policy.set` 支持读写单个用户的 `compact_trigger_percent`，并新增批量与全局压缩策略动作（或在受管用户治理目录新增 `users.managed.policy.batch_set` / 全局压缩策略设置接口），支持管理员开关 `admin_force_trigger_percent`、修改全局默认比例、以及对指定一批用户或全量用户批量设置/重置压缩比例。
+     - **TUI / IM 命令接口**：扩展 `/compact`（或 `/context`）子命令，支持用户/TUI 设置当前会话比例、个人默认比例；支持管理员在 TUI/IM 中直接开启/关闭强制开关、单改或批量修改用户比例。
+     - **Owner/Admin Agent 内部工具与 `self_map` 接口**：在 `self_map(section="settings")` 与参数/受管用户治理工具中暴露上述能力，使管理员或用户可直接用自然语言让 Agent 调整当前会话、个人或批量用户的压缩比例及强制开关。
+7. **对齐官方 Codex 源码优化 `gpt-6-astra` 缓存命中率（从 91-92% 提升至 97-99%，且零损伤 `deepseek` 99%+ 与 `gpt-6.1-sol` 97%+；底层传输与远端压缩优化，复用既有 `usage.get` 诊断接口）**：
+   - **真机账本与官方 Codex（`codex-rs`）源码对照定位的三大根因**：
+     1. **WebSocket 每步建连即关 + 缺失 `x-codex-turn-state` 粘性路由与同连接复用（核心传输差距）**：
+        - 官方 Codex（`codex-rs/core/src/client.rs:206-247, 847-999`）在回合内及跨回合**持久复用同一条 WebSocket 连接**（`cached_websocket_session`），并在握手响应头捕获 `x-codex-turn-state` 粘性路由令牌在同回合内全程回放，且在复用连接上支持 `previous_response_id` 增量请求；
+        - 而当前 `responses_websocket.py:76-100` **每一次模型调用都新建一条 WebSocket 连接并在 `finally` 立即 `close()`**，且未保存/回放 `x-codex-turn-state`！`astra`（`max` 档）后端算力池分片更散，实测账本（如 `thread-cfb453fb03b04664` 的 `#11`/`#47`）中每 8～12 次重新建连就有 1 次漂移到无热缓存的后端节点，单次直接 0% 命中（丢 ~20 万 Token），瞬间把整轮命中率从 98% 拉低到 83%～91%。
+     2. **272K 窗口高频触发远端 Compact（单会话高达 39～175 次）+ 压缩后保留 60% 尾部导致 `messages[0]` 换密文后 13 万 Token 尾部整段缓存失效**：
+        - `6.1-sol` 窗口为 500K（触发线 400K），而 `astra` 窗口为 272K（触发线 217.6K）。实测 `astra` 会话（如 `thread-3380a6fd96d249f9`）44 轮里触发了 **175 次** Compact；
+        - 官方 Codex（`compact_remote_v2.rs:335-355`）在远端压缩后把已压缩进密文的旧工具历史全部清掉（仅保留用户消息 + 尾部 `compaction` 项，压缩后仅剩 1～2 万 Token）；而当前 `my-agent` 按 `recovery_target_percent=60%` 保留了 **~13 万 Token 的 `retained_tail`**，同时把新 `responses_compaction` 密文放在 `messages[0]`，导致每次压缩后紧接着的第一次主调用中，`messages[0]` 之后的 **13 万 Token 保留尾部因前缀改变 100% 缓存失效**，且仅余 5 万 Token 空间、再跑 3～5 步又再次触发压缩！
+     3. **WebSocket 传输漏接 `cache_diagnostics`（`request_surface`）**：`responses_websocket.py:110-122` 未像 HTTP 路径（`gateway_helpers.py:720`）那样上报 `request_surface`，导致 WebSocket 模型（`astra`）在 `model_metrics` 中缺失前缀变化诊断。
+   - **无损优化方案（严格隔离在 `openai_responses` / WebSocket 与远端 `responses_compaction` 路径，100% 不触碰 `deepseek` 等 `openai_compatible` / `anthropic_compatible` 路径）**：
+     1. **WebSocket 会话级连接复用 + `x-codex-turn-state` 粘性路由头回放**：在 `responses_websocket.py` 按会话复用健康的 WebSocket 连接，捕获握手响应头 `x-codex-turn-state` 并在同回合重连/请求中回放，死死钉住同一台后端缓存实例（对同样走 `chatgpt` 订阅的 `6.1-sol` 还能进一步提升）。
+     2. **对齐 Codex `compact_remote_v2` 的远端压缩保留策略与压缩跨度**：当使用服务端 `responses_compaction`（`compact_remote`）时，远端 `compaction` 密文已完整编码被压缩历史，不再保留高达 60%（13 万 Token）的冗余旧工具尾部，并将 `compaction` 项放置在已压缩段边界，彻底消除“每压一次就作废 13 万 Token 尾部缓存 + 隔 3 步又重压”的恶性循环。
+     3. **补齐 `responses_websocket.py` 的 `request_surface` 诊断挂载**，使 `astra` 的缓存变化原因在状态行与 `conversations.threads.usage.get` 账本中完全透明可观测。
+8. **跨实例 Agent / 外部事件单向推送触发联动（只开“内对外”单接口单向策略，报告不回传；天然兼容内网告警推送与外部工单/漏洞复测触发）**：
+   - **核心安全与网络策略（只开单接口单向投递，报告不回传，且不做特定外部系统的专项合同）**：
+     - **单接口接收（外网/执行端 Agent 侧，远端常驻可用 + 可选来源 IP 白名单）**：暴露常驻可用的**唯一通用受限推送接收接口**（如 `POST /remote-agent/push`，不彻底关死远端），使用**仅具单向入队权限的专用 256-bit Scoped Push Token + HMAC 时间戳签名**（`X-Agent-Push-Token`）鉴权，并支持配置**可选来源 IP / CIDR 白名单（`allowed_source_ips`）**（同时对 `Plugin Host v2` 支持可选受信任远端 IP 白名单 `plugin_host_allowed_ips` 以备后续异机 Web 接入）；绝不复用宿主全局管理员 `X-Gateway-Token`，且该接口**只写不读**（只返回 `202 Accepted` + 入队回执与幂等状态，不对外暴露任何查询、历史、文件或管理能力）。
+     - **通用触发信封（既接内网攻击告警，也兼容外部 SOC 工单复测触发）**：接收闭合的通用任务触发信封（`event_id` 幂等键、`source_kind`、结构化上下文 `context_payload`、目标复现/复测指令、可选 `source_thread_id` 用于从原漏洞发现会话 `fork` 分叉复测、可选 `pack_ids` 指定加载渗透能力包）。
+       - **场景 A（内网监测 Agent -> 外网渗透 Agent）**：内网发现攻击类告警后单向推送给外网渗透 Agent 独立复现，**不回传报告**，外网 Agent 直接在自身绑定的飞书/IM/Web 面板出报告；
+       - **场景 B（外部 SOC 工单系统对接）**：具体 SOC 工单系统的字段映射、调 SOC 接口生成工单、接收 SOC Webhook 均直接在 **Web 插件层**（或通用数据源/脚本 Skill）完成，无需在 `my-agent` 底座写 SOC 专用接口；当对方在 SOC 提交工单要求“针对某漏洞做绕过复测”时，Web 插件直接调用现有 Plugin Host v2（`conversations.threads.fork` / `conversations.threads.create` + `conversations.messages.send`）或转发至本单接口，即可拉起 Agent 针对该漏洞单独执行绕过复测。
+     - **幂等防爆与凭据隔离**：内网侧远端节点配置（外网 URL + Push Token）存入加密凭据库，模型与监控规则仅引用节点 ID（如 `extranet-pentest`），密钥不进提示词；接收端按 `event_id` / 指纹做幂等与冷却去重，防止重复触发。
+   - **需暴露接口**：
+     - **Gateway 唯一外部单向接收接口**：`POST /remote-agent/push`（专用 `push_token` 鉴权、通用闭合触发信封 schema、支持新建会话或按 `source_thread_id` 分叉会话复测、幂等入队）。
+     - **Web / Plugin Host v2 接口**：提供远端推送节点管理与推送账本查看接口（配置远端节点地址/Token、启停、查看已推送记录）；SOC 工单触发复测直接复用既有 `conversations.threads.create` / `conversations.threads.fork` / `conversations.messages.send`。
+     - **Owner Agent 内部工具与监控投递接口**：支持监控规则命中攻击类告警时自动推送，或由内网 Agent 调用 `remote_agent_push(peer_id=..., payload=...)` 工具单向推送，并在 `self_map` 暴露已配置的远端节点名称。
+9. **内部底座能力渐进式寻址与初始提示词去重瘦身（明确放在最后一个阶段，后续可慢慢迭代更新优化）**：
+   - **排期定位**：作为全部功能与接口落地后的**最后一项收口任务**，并且支持后续根据实际使用反馈**持续、渐进式慢慢更新优化**。
+   - **核心目标**：解决 Agent 对自身内部底座能力（监控、多通道告警切换、远端 Agent 单向推送、压缩比例配置、设置、资产、工作流、能力包等）“找不到地方、不完全知道自己能控制什么”的问题，同时**严禁往初始 System Prompt 硬塞长文档导致初始上下文从 22K 暴涨到 40K**。
+   - **设计方向（Level 0 极简寻址目录 + Level 1 按需展开 + 提示词去重）**：
+     - **Level 0（常驻 System Prompt，极简一行式寻址表）**：只保留一张高密度“内部能力与工具寻址索引”（某类内部事态归哪个工具/哪个 `self_map` 分区管，包含本次新增的 `/new`、多通道告警切换、多级压缩比例治理、跨实例单向推送等入口），消灭同义反复叮嘱与大段重复规则，反压初始上下文体积；
+     - **Level 1（按需读取）**：仅当用户涉及对应内部管理动作时，Agent 通过 `self_map(section=...)` / `tool_search` 按需拉取该模块的精确状态与操作 schema，平时零额外 Token 开销。
