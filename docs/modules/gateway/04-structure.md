@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 8 T2 W2 Round 3：原子租约与预检后容量回队
+
+- `OwnerScopedAgentPool.acquire_pinned` 在同一次池锁临界区内完成实例命中/软升级/构建发布与 `_pins` 登记；`request_worker._requeue_owner_capacity` 在业务执行前捕获瞬时 `PoolCapacityExceededError` 并原子回队 `inbox`（`status="pending", admission_wait_reason="owner_capacity"`）。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

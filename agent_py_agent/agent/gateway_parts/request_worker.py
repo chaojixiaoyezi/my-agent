@@ -6,6 +6,7 @@
 #   SQLite复用仅在已解析owner的请求范围内启用，结束时回收，不改变独立事务和终态提交。
 #   正count派发只消费原宿主owner和原P3准入/claim来源，后台pending仅重排同claim且保P3；Count0原公平链保持。
 #   Call/心跳停止未知只在活原claim记录既有unknown；退出后保留原P3，不从marker/晚到异常签发新来源或终态。
+#   普通owner解析原子取得租用；仅业务前瞬时容量不足沿同T/P5及claim CAS回队，业务后异常不重放。
 # 模块用途: 接收 Gateway 请求、写入队列并驱动后台 worker 可靠处理。
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -43,6 +44,7 @@ from ..observability.concurrency_metrics import (
     gateway_worker_busy,
     record_gateway_queue_wait,
 )
+from ..owner_scoped_pool import PoolCapacityExceededError
 from ..runtime_errors import DataCorruptionError
 from .io import (
     append_gateway_history_once,
@@ -320,24 +322,19 @@ class AdmissionLimits:
     owner_inflight: int = 0
     pool_can_acquire: Callable[[dict], bool] | None = field(default=None, compare=False, repr=False)
 
-    # LLM: Existing config remains authoritative; optional Agent binding observes its actual shared pool without creating one.
-    # 函数用途: 读取原容量（优先显式gateway_owner_inflight_limit，0则回退owner_agent_pool_max_agents）并绑定实时池预检。
+    # LLM: Explicit owner inflight config precedes the pool-budget fallback; the optional pool check is only a read-only hint.
+    # 函数用途: 优先读取用户配置的活跃owner上限，再用实例预算兜底并绑定真实池预检。
     @classmethod
     def from_config(cls, config: object, *, agent: object | None = None) -> AdmissionLimits:
-        configured_owner_limit = _positive_int(
-            getattr(config, "gateway_owner_inflight_limit", 0), 0
-        )
-        owner_inflight = (
-            configured_owner_limit
-            if configured_owner_limit > 0
-            else _positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64)
-        )
+        configured = _positive_int(getattr(config, "gateway_owner_inflight_limit", 0), 0)
+        if configured <= 0:
+            configured = _positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64)
         return cls(
             user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
             ),
-            owner_inflight=owner_inflight,
+            owner_inflight=configured,
             pool_can_acquire=partial(_request_pool_has_capacity, agent) if agent is not None else None,
         )
 
@@ -811,9 +808,9 @@ def _frozen_worker_owner(agent, request_payload: dict):
 
 
 
-# LLM: C/W只能消费原execution和冻结路由，拒绝后不能热解析owner；普通Count0仍使用main唯一hostowner与原owner池。
-# 函数用途: 为普通请求解析并取得当前实际 owner-scoped Agent。
-def _resolve_request_agent(agent, request_payload: dict):
+# LLM: C/W retain frozen execution/routing; a worker-supplied ExitStack acquires a pooled lease atomically without changing direct lookup callers.
+# 函数用途: 为请求取得唯一owner实例；执行入口传入租用栈，使解析到业务收尾全程受保护。
+def _resolve_request_agent(agent, request_payload: dict, lease_stack: ExitStack | None = None):
     """按请求 owner 取作用域 agent(多用户飞书 per-用户隔离)。
 
     本机/单 owner 请求没有远程 channel 身份时走基础 agent。开启后:飞书用户 A/B 各跑在自己
@@ -825,9 +822,12 @@ def _resolve_request_agent(agent, request_payload: dict):
     execution = current_worker_execution()
     if execution is not None:
         check_worker_transition(execution, request_payload)
+        pool = getattr(agent, "_owner_pool", None)
+        if lease_stack is not None and pool is not None and execution.agent is not agent:
+            return lease_stack.enter_context(pool.pin(execution.agent))
         return execution.agent
     owner = _frozen_worker_owner(agent, request_payload) or _resolve_request_owner_identity(agent, request_payload)
-    return _resolve_request_agent_for_owner(agent, owner)
+    return _resolve_request_agent_for_owner(agent, owner, lease_stack)
 
 
 # LLM: Agent与无业务Agent的C共用下方唯一解析实现；已落盘host owner先于热配置和绑定查询，不能因重放换归属。
@@ -865,10 +865,9 @@ def _resolve_request_owner_from_config(config, request_payload: dict, home_root=
     return owner
 
 
-# LLM: A persisted owner identity is machine authority. This path intentionally ignores later
-# owner-routing config changes and resolves exactly that owner or fails closed.
-# 函数用途: 根据已经持久化的 owner 身份取得唯一作用域 Agent，供控制回执恢复和对账。
-def _resolve_request_agent_for_owner(agent, owner):
+# LLM: Persisted owner identity remains authoritative; only pre-business pool capacity keeps its exact transient type, while other construction errors fail closed.
+# 函数用途: 取得唯一owner实例，可将原子租用交给调用方栈；容量不足不是永久身份错误。
+def _resolve_request_agent_for_owner(agent, owner, lease_stack: ExitStack | None = None):
     from ..user_space.owner_resolver import owner_identity_from_config
 
     base_owner = owner_identity_from_config(getattr(agent, "config", None))
@@ -876,7 +875,11 @@ def _resolve_request_agent_for_owner(agent, owner):
         return agent
     _record_active_owner(agent, owner)  # 登记进共享活跃表,让后台主代理循环能逐 owner tick 叫回
     try:
+        if lease_stack is not None:
+            return lease_stack.enter_context(_owner_pool(agent).acquire_pinned(owner))
         return _owner_pool(agent).get(owner)
+    except PoolCapacityExceededError:
+        raise
     except Exception as exc:
         raise OwnerScopeUnavailableError(
             f"无法建立 owner 隔离 agent(provider={owner.provider}, kind={owner.owner_kind})"
@@ -1104,9 +1107,9 @@ def _process_gateway_request_path(
         gateway_worker_busy(-1)
 
 
-# LLM: 原C/W冻结路由在取消/owner物化之前核；实际handler与结果落账复用同一原事务端口，SQLite/owner租用保持main区间，退出不释放P3。
+# LLM: 原C/W冻结路由在取消/owner物化之前核；原子租用覆盖业务及落账，仅业务开始前的容量异常回队，退出不释放P3。
 # LLM: 同词法pending槽涵盖handler后收尾；已有cause保持，finish或读回失败不签接收，原Future继续持同outer债务。
-# 函数用途: 处理准确已认领请求和原终态投影，短写只消费同源执行门，异常保留原claim与清理责任。
+# 函数用途: 处理准确claim并固定owner租用；业务前容量不足回队，其余异常保留原终态与清理责任。
 def _process_claimed_gateway_request_path(
     agent: SimpleAgent,
     paths: GatewayPaths,
@@ -1185,27 +1188,73 @@ def _process_claimed_gateway_request_path(
 
     timing = record_gateway_request_stage(processing_path, request_payload, "dispatched_at",
         at=float(request_payload.get("lease_started_at") or time.time()))
-    try:
-        request_agent = _resolve_request_agent(agent, request_payload)
-    except OwnerScopeUnavailableError as exc:
-        response = gateway_owner_scope_error_response(
-            processing_path,
-            request_payload,
-            exc,
-            request_id=request_id,
+    with ExitStack() as leases:
+        try:
+            request_agent = _resolve_request_agent(agent, request_payload, leases)
+        except PoolCapacityExceededError:
+            return _requeue_owner_capacity(paths, processing_path, request_payload)
+        except OwnerScopeUnavailableError as exc:
+            response = gateway_owner_scope_error_response(
+                processing_path, request_payload, exc, request_id=request_id,
+            )
+            _finish_claimed_gateway_request(
+                paths, processing_path, request_id, response,
+                expected_execution_attempt_id=expected_attempt_id,
+                expected_lease_epoch=expected_lease_epoch,
+            )
+            return True
+        context = _ClaimedGatewayRequestContext(
+            request_agent, processing_path, request_payload, request_id,
+            str((claim.lease_owner if claim is not None else "") or request_payload.get("lease_owner") or worker_id),
         )
-        _finish_claimed_gateway_request(
-            paths,
-            processing_path,
-            request_id,
-            response,
-            expected_execution_attempt_id=expected_attempt_id,
-            expected_lease_epoch=expected_lease_epoch,
+        return _execute_claimed_gateway_request(
+            context, paths, timing, (expected_attempt_id, expected_lease_epoch),
+            sqlite_reuse=bool(getattr(agent.config, "sqlite_connection_reuse", False)),
         )
-        return True
+
+
+# LLM: Only pre-business acquisition calls this; original T/P5 gate plus JSON lease/fingerprint CAS retain identity and reject pending/terminal collisions.
+# 函数用途: 将尚未开始业务的同一claim回到inbox，写原owner_capacity等待事实，不生成失败终态或释放持久P3。
+def _requeue_owner_capacity(paths: GatewayPaths, processing_path: Path, request_payload: dict) -> bool:
+    from .io import gateway_request_fingerprint
+    from .request_binding import GatewayActiveTurnTransition
+
+    request_id = str(request_payload.get("id") or processing_path.stem)
+    transition = GatewayActiveTurnTransition(processing_path, request_id, str(request_payload.get("execution_attempt_id") or ""))
+    target = paths.inbox / processing_path.name
+    with transition.scope("requeue"):
+        if processing_path != paths.processing / f"{request_id}.json" or target.exists():
+            raise DataCorruptionError("owner capacity requeue target conflicts with current claim")
+
+        # LLM: This updater runs under T then the existing JSON lock; never replace a newer claim, changed owner/prompt or concurrent cancellation.
+        # 函数用途: 从当前原字节保留请求内容和epoch，只清本次运输租约并恢复pending状态。
+        def pending(current: dict) -> dict:
+            keys = ("id", "execution_attempt_id", "lease_epoch", "lease_owner", "cancel_requested")
+            if (current.get("status") != "processing"
+                    or any(current.get(key) != request_payload.get(key) for key in keys)
+                    or gateway_request_fingerprint(current, request_id) != gateway_request_fingerprint(request_payload, request_id)):
+                raise DataCorruptionError("owner capacity requeue claim changed")
+            requeued = dict(current, status="pending")
+            for key in ("execution_attempt_id", "lease_owner", "lease_started_at", "lease_heartbeat_at", "lease_process_identity", "turn_phase"):
+                requeued.pop(key, None)
+            return requeued
+
+        requeued = update_json_file_atomic(processing_path, pending, require_existing=True)
+        _record_admission_wait(_PendingGatewayRequest(processing_path, requeued), reason="owner_capacity")
+        processing_path.replace(target)
+    return True
+
+
+# LLM: Caller holds the atomic owner lease through business and canonical settlement; post-business capacity errors must never trigger requeue/replay.
+# 函数用途: 在已固定的owner租用内执行和收尾，保留审批债务、未知结果与SQLite作用域的原边界。
+def _execute_claimed_gateway_request(context: _ClaimedGatewayRequestContext, paths: GatewayPaths, timing: dict, expected: tuple, *, sqlite_reuse: bool) -> bool:
+    from .request_binding import record_gateway_request_stage
+    from .request_transactions import request_transaction_ports_scope
+
+    request_agent, processing_path = context.agent, context.processing_path
+    request_payload, request_id = context.request_payload, context.request_id
+    expected_attempt_id, expected_lease_epoch = expected
     timing.update(record_gateway_request_stage(processing_path, request_payload, "owner_agent_ready_at"))
-    pool = getattr(agent, "_owner_pool", None)
-    lease = pool.pin(request_agent) if pool is not None and request_agent is not agent else nullcontext()
     from ..conversation.agent_tool_approval import (
         ApprovalRetirementUnconfirmedError,
         accept_approval_retirement_terminal,
@@ -1214,26 +1263,14 @@ def _process_claimed_gateway_request_path(
     from ..runtime_db.repository import request_stage_timing_scope
     from .io import gateway_request_fingerprint
 
-    with (request_stage_timing_scope(timing), lease, register_interruptible(conversation_request_interrupt_name(request_id)),
+    with (request_stage_timing_scope(timing), register_interruptible(conversation_request_interrupt_name(request_id)),
           request_transaction_ports_scope(request_agent),
-          sqlite_connection_scope(bool(getattr(agent.config, "sqlite_connection_reuse", False))),
+          sqlite_connection_scope(sqlite_reuse),
           approval_retirement_request_observation(request_agent, processing_path, request_payload,
               gateway_request_fingerprint(request_payload, request_id), receiver=True) as retirement_observation):
         try:
             try:
-                response = _process_claimed_gateway_request(
-                    _ClaimedGatewayRequestContext(
-                        request_agent,  # 多用户飞书:只在请求 owner 作用域的 agent 上跑；失败已在上方终态拒绝
-                        processing_path,
-                        request_payload,
-                        request_id,
-                        str(
-                            (claim.lease_owner if claim is not None else "")
-                            or request_payload.get("lease_owner")
-                            or worker_id
-                        ),
-                    )
-                )
+                response = _process_claimed_gateway_request(context)
             except Exception as error:
                 _raise_with_pending_approval_retirement(error, retirement_observation)
             try:

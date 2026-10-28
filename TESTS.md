@@ -19,6 +19,39 @@ python3 scripts/check_import_boundaries.py
 
 JUnit及红例保留在工作树 `.pytest_cache/t2-w1-fix-*.xml`；最终准确通过数及门禁结果见本轮交接。Python 3.11/3.12、Linux/Windows CI、真实模型/通道和全仓测试未作为本轮已验证证据。
 
+## 2026-10-28 Wave 8 T2 W2 Round 3：原子owner租用与瞬时容量回队（源码候选）
+
+来源：完整阅读 `07-tasks/fix-r3-wave8-t2-w2.md`。仅修改指定工作树 `/tmp/wt-wave8-t2-w2`、分支 `wave8-t2-w2` 的两份生产源码、两份指定测试及本文件和 Gateway 进度；起点 `e7af7b2ff3cca06f409711676e8c2d5ee33f5fc7`，任务区间基线仍为 `9ee9bdc01`。不推送、不部署、不改其它工作树，按本轮明确要求不运行已退休的 `check_code_size.py`。
+
+- **解决问题与原子边界**：旧 `get→pin` 间隔会让实例在业务开始前被逐出；缓存命中、软升级、构建发布现在于同一次池锁释放前登记 pin。新增 `acquire_pinned(owner, force_reload=...)`，原 `acquire` 共用此入口；普通无租用 `get` 保持签名并共用有界取得实现。构建、Future 等待与 MCP 关闭不持池锁，同 owner 合流、软拒绝、退役预算和强制刷新的原上限保持。归属后核失败与业务异常均释放本次租用。
+- **准入与异常**：`gateway_owner_inflight_limit` 正值优先，缺失/非正/无效值才回退 `owner_agent_pool_max_agents`。解析器原样抛出 `PoolCapacityExceededError`；其它构建/归属错误仍 fail-closed 为原身份错误。worker 的 `ExitStack` 从取得实例覆盖到业务终态收尾，冻结执行路径保留原精确实例 pin，SQLite 开关仍来自原 bootstrap 配置。
+- **回队与防重放**：只捕获解析/进入租用时的瞬时容量错误；原 T/P5 门内再次核当前 status、id、attempt、epoch、lease owner、取消与不可变请求指纹，拒绝已有 inbox/canonical terminal。保留原 id、owner、prompt、created_at、epoch 等内容，只清本次运输租约并恢复 pending，沿原 `_record_admission_wait(..., reason="owner_capacity")` 写等待信号后移动回 inbox。不生成永久失败、不释放持久 P3、不新建业务请求；原 dispatcher 释放进程内准入槽。业务开始后抛同型错误仍走原异常/未知结果链，绝不据此重排。
+- **确定性反例**：锁释放采样在旧冷构建/硬命中/软升级中都观察到 pin=0；两条受控线程在业务前确实逐出原实例。两个新 owner 都已通过真实只读预检和 dispatcher 后，第一条业务持剩余一槽，第二条必须回队；仅释放旧 retired-pin（第一条业务继续运行）即可重试成功，最终两条业务各执行一次且 pin/admission 清零。同步只用 Event/Barrier/Future，不以 sleep 猜交错。
+- **附加边界**：同 owner creator/waiter 构建成功/失败、锁外构造、force_reload 容量 1/2、软实例在途退役异常清理；旧 attempt/epoch/lease owner、prompt 改变、取消、已有 pending/terminal 均拒绝且字节不变；业务后容量异常不回队；冻结执行仍持 pin。
+- **独审返工**：Astra max 静态审阅指出 Future 等待者递归重取的累栈风险。新增真实 Future/两线程连续 25 代的“旧代在醒来前淘汰、新代已经开始构造”交错，旧实现实测栈深由 12 增至 60（`r3-t2-w2-waiter-red.xml`，未降低 Python 递归上限，也未声称已实测最终栈溢出）。等待分支已改为同层循环重核缓存/容量，命中时仍锁内一次 pin；当前回归不再随代数累栈。Astra high 对此循环及配置优先级的内联静态复评未见已确认 P1/P2；没有独立运行测试或复核全仓，不将其当作端到端验收。
+
+本轮证据（工作树根，Python 3.14.4；导入 origin 已核对为本工作树）：
+
+- 起点四文件 **136 通过、0 失败、0 跳过**：`.pytest_cache/r3-t2-w2-baseline.xml`。
+- 首批新增 14 项为 **10 失败、4 通过**：`r3-t2-w2-red.xml`；原始并发样本实际撞到 pin-entry 容量错误，随后将竞争次序固定为第一条已持 pin，再启动第二条，`r3-t2-w2-race-red.xml` 准确失败为 inbox=0（被永久终结）。不是把夹具超时算作修复证据。修复后首批 14 项全过：`r3-t2-w2-green.xml`。
+- 首轮 28 项新回归后，指定四文件 164 项全过（`r3-t2-w2-required-expanded.xml`、`r3-t2-w2-required-final.xml`）；独审追加 1 项防累栈回归后，本轮共新增 **29 项**，最终当前源码指定门 **165 通过、0 失败、0 错误、0 跳过**，见 `r3-t2-w2-delivery.xml`。
+- 相邻六文件 **240 通过、0 失败、3 跳过**：`r3-t2-w2-adjacent.xml`；迭代重查修复后同源重跑仍为 240 通过/3 跳过（`r3-t2-w2-adjacent-final.xml`）。三个节点为 `test_goal_and_task_resource_controls_are_independent` 的 `/goal pause`、`/goal clear`、`/stop`，原测试报告 `SANDBOX_CAPABILITY_MISSING[nested_sandbox_exec]`，未修改这些文件或跳过条件，不能当作真实控制链通过。
+
+复现与本轮指定门：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_dual_owner_concurrent_canary.py agent_py_agent/tests/test_owner_scoped_pool.py agent_py_agent/tests/test_gateway_two_tier_admission.py agent_py_agent/tests/test_gateway_dispatcher_resilience.py -q --tb=short --junitxml=.pytest_cache/r3-t2-w2-delivery.xml
+python3 scripts/check_doc_sync.py
+ruff check agent_py_agent scripts
+git diff --check 9ee9bdc01..HEAD
+```
+
+相邻验证文件：`test_gateway_per_user_scoping.py`、`test_gateway_sqlite_reuse.py`、`test_multiuser_concurrent_isolation.py`、`test_gateway_queue_recovery.py`、`test_gateway_admission_wait.py`、`test_gateway_conversation_control.py`，均位于 `agent_py_agent/tests/`。
+
+静态门：`ruff check agent_py_agent scripts` 和覆盖当前工作区的 `git diff --check 9ee9bdc01` 已通过；本轮 17 个新增/修改生产函数的双层注释按完整限定名 AST 核对通过。**文档同步门未通过**：原样运行 `python3 scripts/check_doc_sync.py` 报 `DOC_SYNC_FAIL`，明确要求 `docs/modules/gateway/04-structure.md` 也出现在差异中（规则见该脚本 63–81 行），但任务严格白名单没有该文件，因此没有越界修改或放宽检查。脚本默认只比 HEAD 与工作区，不能在提交后用空差异的绿结果掩盖此失败；集成复验应指定 `--base e7af7b2ff` 保留本片完整观察范围。
+
+未做全仓/远端 CI、真实生产 Gateway/MP/IM 或 600 用户负载验收；仅组件与受控线程证据，不代表已集成或已部署。独立审阅的首个归档引用因跨 run 不可读而受阻，不作为通过证据；后续内联静态审阅及局部复评的结论、实测返工见上。回队写 pending 与移动到 inbox 之间的进程崩溃恢复窗口未单独注入验证。
+
 ## 2026-10-28 Wave 8 T2 W2 Round 2：MCP重开、活实例预算与worker构造返工（源码候选）
 
 来源：完整阅读 `07-tasks/fix-wave8-t2-w2.md`（52行）。仅在指定工作树 `/tmp/wt-wave8-t2-w2`、分支 `wave8-t2-w2` 修改；返工起点为 `78c930f412b0ec29d06933502dedbff6654d804e`，原任务基线为 `9ee9bdc018f6587ac366f3565c0b7f06bcffe642`。不推送、不部署、不改其他工作树或运行包。

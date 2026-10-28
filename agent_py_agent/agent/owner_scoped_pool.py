@@ -1,5 +1,6 @@
 # LLM: 原池管理进程内实例；已登记本地账号先经C冷读闸门，不能继承main配置，空闲回收不删资料。
 # W仅运输原bootstrap并在构造/命中前后核分区及实际home，不复制池/配置/执行权；普通主线LRU、Future和凭据来源保持。
+# 原子owner租用在缓存命中/升级/发布的同一池锁内登记pin，显式对象pin仍保留原生命周期锁序。
 # 模块用途: 按用户隔离资源、合并首次构建，并向 Gateway 提供带在途保护的空闲回收入口。
 """按 owner 隔离的 agent 池(多用户飞书 per-用户隔离 + 审计 #2/#13)。
 
@@ -283,22 +284,32 @@ class OwnerScopedAgentPool:
         self._retired_agents: dict[int, Any] = {}
         self._building: dict[tuple, Future] = {}
 
-    # LLM: W/home checks and same-owner coalescing remain; force_reload cannot retire a pinned generation beyond the live budget.
-    # 函数用途: 复用或有界构造用户实例，满池时背压而不是堆积在途退役实例。
+    # LLM: Unleased lookup shares the canonical get path; execution callers use acquire_pinned, retaining W/home and live-budget checks.
+    # 函数用途: 只取得有界owner实例；业务租用另走原子入口，不能将本方法与稍后pin拼成原子操作。
     def get(self, owner: Any, *, hard: bool = True, touch: bool = True, force_reload: bool = False) -> Any | None:
+        return self._get(owner, hard=hard, touch=touch, force_reload=force_reload, pin=False)
+
+    # LLM: Shared lookup/build path; pin=True transfers one lease from the locked cache/publication boundary, including waiters.
+    # 函数用途: 统一有界取得实例；请求租用在返回前已登记，归属后核失败也必须归还租用。
+    def _get(self, owner: Any, *, hard: bool, touch: bool, force_reload: bool, pin: bool) -> Any | None:
         self._require_worker_owner(owner)
         key = (owner.provider, owner.owner_kind, owner.owner_id)
         if force_reload:
             _pool_reload_owner(self, key, hard=hard)
-        hit = self._get_cached(key, hard=hard)
+        hit = self._get_cached(key, hard=hard, pin=pin)
         if hit is None:
             if not hard and not self._room_for_soft():
                 return None
-            hit = self._build_once(key, owner, hard=hard)
+            hit = self._build_once(key, owner, hard=hard, pin=pin)
         with self._lock:
             if hit is not None and touch:
                 self._last_used[key] = time.monotonic()
-        self._require_worker_owner(owner, hit)
+        try:
+            self._require_worker_owner(owner, hit)
+        except BaseException:
+            if pin and hit is not None:
+                self._unpin(hit, touch=False)
+            raise
         return hit
 
     # LLM: 命中前后冷核本地账号；已登记账号拒绝通用构造，W继续核原分区、home及constructor roots。
@@ -328,18 +339,24 @@ class OwnerScopedAgentPool:
             require_worker_workspace(frozen, agent.root, agent.workspace_roots)
 
 
-    # LLM: Reserve capacity before the builder; publication consumes that reservation atomically, with failure shared by original waiters.
-    # 函数用途: 合流同owner首次构造，并限制不同owner同时构造的总量。
-    def _build_once(self, key: tuple, owner: Any, *, hard: bool) -> Any | None:
-        future, creator = _pool_reserve_build(self, key, hard=hard)
-        if future is None:
-            return None
-        if not creator:
+    # LLM: Builder/Future waits remain lock-external; waiters iteratively reacquire a current pinned cache entry, never recurse across evicted generations.
+    # 函数用途: 合流并有界构造实例；旧代在醒来前已淘汰时循环重查，避免竞争累积调用栈。
+    def _build_once(self, key: tuple, owner: Any, *, hard: bool, pin: bool = False) -> Any | None:
+        while True:
+            future, creator = _pool_reserve_build(self, key, hard=hard)
+            if future is None:
+                return None
+            if creator:
+                break
             result = future.result()
-            return self.get(owner, hard=True, touch=False) if hard else result
+            if not hard and not pin:
+                return result
+            hit = self._get_cached(key, hard=hard, pin=pin)
+            if hit is not None:
+                return hit
         try:
             candidate = self._builder(self._base_config, self._root, owner, self._workspace_roots)
-            result = self._store(key, candidate, hard=hard, reservation=future)
+            result = self._store(key, candidate, hard=hard, reservation=future, pin=pin)
             future.set_result(result)
             return result
         except BaseException as exc:
@@ -350,7 +367,7 @@ class OwnerScopedAgentPool:
                 if self._building.get(key) is future:
                     self._building.pop(key)
 
-    # LLM: 生命周期锁先于池锁；旧关闭先完成才可重开，或新pin先登记使旧关闭推迟，MCP I/O不持池锁。
+    # LLM: Legacy explicit-object pin preserves lifecycle-before-pool order; owner acquisition must use acquire_pinned to avoid an unleased gap.
     # 函数用途: 保护执行中的实例，并在最后一次释放后清理已淘汰实例的MCP资源。
     @contextmanager
     def pin(self, agent: Any, *, touch: bool = True):
@@ -376,30 +393,42 @@ class OwnerScopedAgentPool:
         try:
             yield agent
         finally:
-            ready = []
-            with self._lock:
-                count = self._pins[identity] - 1
-                if count:
-                    self._pins[identity] = count
-                else:
-                    self._pins.pop(identity, None)
-                    if identity in self._retired_agents:
-                        ready = self._retire_agent_locked(agent)
-                for key, value in (*self._hard_agents.items(), *self._soft_agents.items()):
-                    if value is agent and touch:
-                        self._last_used[key] = time.monotonic()
-            self._close_retired_agents(ready)
+            self._unpin(agent, touch=touch)
 
-    # LLM: Preserve owner validation/build coalescing; coordinated pin restores an agent evicted during get.
+    # LLM: Release exactly one acquired pin; retire after the last lease and perform MCP IO outside the pool mutex.
+    # 函数用途: 统一原子租用与显式pin的退出清理，业务异常不能遗留在途计数。
+    def _unpin(self, agent: Any, *, touch: bool) -> None:
+        identity, ready = id(agent), []
+        with self._lock:
+            count = self._pins[identity] - 1
+            if count:
+                self._pins[identity] = count
+            else:
+                self._pins.pop(identity, None)
+                if identity in self._retired_agents:
+                    ready = self._retire_agent_locked(agent)
+            for key, value in (*self._hard_agents.items(), *self._soft_agents.items()):
+                if value is agent and touch:
+                    self._last_used[key] = time.monotonic()
+        self._close_retired_agents(ready)
+
+    # LLM: Cache hits/promotions and build publication increment pins under that same mutex; no business code runs on an evictable result.
+    # 函数用途: 原子取得并租用owner实例，构造及等待Future不持池锁，退出或归属拒绝时归还租用。
+    @contextmanager
+    def acquire_pinned(self, owner: Any, *, force_reload: bool = False, hard: bool = True):
+        agent = self._get(owner, hard=hard, touch=True, force_reload=force_reload, pin=True)
+        try:
+            yield agent
+        finally:
+            if agent is not None:
+                self._unpin(agent, touch=True)
+
+    # LLM: Existing acquire callers now share atomic owner acquisition; soft refusal remains None and no capacity waiting is introduced.
     # 函数用途: 用一个上下文管理器取得并安全租用owner实例，不在池内等待容量。
     @contextmanager
     def acquire(self, owner: Any, *, hard: bool = True):
-        agent = self.get(owner, hard=hard)
-        if agent is None:
-            yield None
-        else:
-            with self.pin(agent):
-                yield agent
+        with self.acquire_pinned(owner, hard=hard) as agent:
+            yield agent
 
     # LLM: Pending eviction lists do not authorize close; recheck live references under the same lock order as pin/store.
     # 函数用途: 在真正关闭前重查缓存与租用，避免锁外旧关闭覆盖新租用。
@@ -472,33 +501,42 @@ class OwnerScopedAgentPool:
             return (_pool_total_live_locked(self) < self._max_agents
                     or any(not self._pins.get(id(agent)) for agent in self._soft_agents.values()))
 
-    def _get_cached(self, key: tuple, *, hard: bool) -> Any | None:
+    # LLM: Cache lookup, soft promotion and optional lease transfer share one mutex acquisition, before any evictor can observe the result.
+    # 函数用途: 命中缓存时同步登记租用，不留下get返回后再pin的空窗。
+    def _get_cached(self, key: tuple, *, hard: bool, pin: bool = False) -> Any | None:
         with self._lock:
             if hard:
                 existing = self._hard_agents.get(key)
                 if existing is not None:
                     self._hard_agents.move_to_end(key)  # LRU touch
-                    return existing
+                    return self._pin_result_locked(existing, pin=pin)
                 existing = self._soft_agents.pop(key, None)
                 if existing is not None:
                     # 软 owner 重新以硬身份被请求 → 升级(软表删除,硬表登记)
                     self._hard_agents[key] = existing
                     self._hard_agents.move_to_end(key)
-                    return existing
+                    return self._pin_result_locked(existing, pin=pin)
                 return None
             existing = self._soft_agents.get(key)
             if existing is not None:
                 self._soft_agents.move_to_end(key)
-                return existing
+                return self._pin_result_locked(existing, pin=pin)
             existing = self._hard_agents.get(key)
             if existing is not None:
                 self._hard_agents.move_to_end(key)  # 已硬不降级,只刷新活跃位置
-                return existing
+                return self._pin_result_locked(existing, pin=pin)
             return None
 
-    # LLM: 生命周期锁先于池锁，防止重新存入与旧关闭交错；保留原硬软/双检，所有MCP I/O仍在池锁外。
+    # LLM: Caller must hold the pool mutex and retain this result in a cache table; no lifecycle IO or reopening is needed.
+    # 函数用途: 在缓存仍持有对象时登记一个租用，供命中和构建发布共用。
+    def _pin_result_locked(self, agent: Any, *, pin: bool) -> Any:
+        if pin:
+            self._pins[id(agent)] = self._pins.get(id(agent), 0) + 1
+        return agent
+
+    # LLM: Lifecycle-before-pool order remains; consume reservation, publish/select and optionally pin before releasing the same pool mutex.
     # 函数用途: 存放初始化结果并回收被逐出或未采用实例的MCP资源，仍保护在途租用。
-    def _store(self, key: tuple, agent: Any, *, hard: bool, reservation: Future | None = None) -> Any | None:
+    def _store(self, key: tuple, agent: Any, *, hard: bool, reservation: Future | None = None, pin: bool = False) -> Any | None:
         ready = []
         exhausted = False
         with self._mcp_lifecycle_lock, self._lock:
@@ -523,6 +561,8 @@ class OwnerScopedAgentPool:
                     target.move_to_end(key)
                     # 同对象换键的旧引用不能导致仍在池的对象被关闭。
                     result = agent
+            if result is not None:
+                self._pin_result_locked(result, pin=pin)
         self._close_retired_agents(ready)
         if exhausted:
             raise PoolCapacityExceededError("owner pool live-instance capacity exhausted at publication")

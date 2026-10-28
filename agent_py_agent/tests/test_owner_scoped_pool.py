@@ -649,3 +649,269 @@ def test_force_reload_reuses_pinned_generation_at_capacity(tmp_path):
             assert pool.gauges()['total_live_instances'] <= pool._max_agents
         assert len(builds) == 1
     assert pool.get(owner, force_reload=True) is not first
+
+
+@pytest.mark.parametrize('cached', [None, 'hard', 'soft'])
+def test_atomic_acquire_pins_before_cache_mutex_release(tmp_path, cached):
+    pool, _ = _counting_pool(tmp_path, max_agents=1)
+    owner = OwnerIdentity.provider_user('test', 'atomic')
+    if cached:
+        pool.get(owner, hard=cached == 'hard')
+    mutex, snapshots = pool._lock, []
+    armed = True
+
+    # LLM: Observe the real mutex release, including build publication and soft promotion; never change the budget or pins.
+    # 类用途: 采样对象首次可被其它线程看见时是否已经受租用保护。
+    class ObservedLock:
+        def __enter__(self):
+            mutex.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            if armed:
+                key = ('test', 'user', 'atomic')
+                value = pool._hard_agents.get(key) or pool._soft_agents.get(key)
+                if value is not None:
+                    snapshots.append(pool._pins.get(id(value), 0))
+            mutex.release()
+
+    pool._lock = ObservedLock()
+    # Baseline uses the old public acquire so the red result exposes its gap, not merely a missing method.
+    acquire = getattr(pool, 'acquire_pinned', pool.acquire)
+    with acquire(owner) as agent:
+        armed = False
+        assert snapshots and all(count > 0 for count in snapshots), snapshots
+        assert pool._pins[id(agent)] == 1
+    assert not pool._pins
+    assert callable(getattr(pool, 'acquire_pinned', None))
+
+
+@pytest.mark.parametrize('cached', [False, True])
+def test_atomic_acquire_prevents_concurrent_eviction_before_yield(tmp_path, monkeypatch, cached):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    owner = OwnerIdentity.provider_user('test', 'victim')
+    if cached:
+        pool.get(owner)
+    checked, competed = threading.Event(), threading.Event()
+    validate = pool._require_worker_owner
+
+    # LLM: Delay only post-acquisition owner validation, after publication/cache lookup but before the context yields.
+    # 函数用途: 固定取得实例后、业务租用体开始前的真实并发淘汰压力。
+    def check(identity, agent=None):
+        validate(identity, agent)
+        if identity == owner and agent is not None:
+            checked.set()
+            assert competed.wait(10)
+
+    monkeypatch.setattr(pool, '_require_worker_owner', check)
+
+    def compete():
+        assert checked.wait(10)
+        try:
+            with pytest.raises(PoolCapacityExceededError):
+                pool.get(OwnerIdentity.provider_user('test', 'competitor'))
+        finally:
+            competed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        competition = executor.submit(compete)
+        try:
+            acquire = getattr(pool, 'acquire_pinned', pool.acquire)
+            with acquire(owner) as agent:
+                assert pool.peek(owner) is agent
+                assert closed == []
+        finally:
+            competed.set()
+        competition.result(timeout=10)
+    assert not pool._pins and not pool._retired_agents
+
+
+def test_atomic_acquire_releases_pin_on_validation_and_body_errors(tmp_path, monkeypatch):
+    pool, _ = _counting_pool(tmp_path, max_agents=1)
+    owner = OwnerIdentity.provider_user('test', 'a')
+    acquire = getattr(pool, 'acquire_pinned', None)
+    assert callable(acquire), 'atomic owner acquisition API is missing'
+    validate = pool._require_worker_owner
+
+    def reject(identity, agent=None):
+        validate(identity, agent)
+        if agent is not None:
+            raise PermissionError('owner validation changed')
+
+    monkeypatch.setattr(pool, '_require_worker_owner', reject)
+    with pytest.raises(PermissionError, match='validation changed'):
+        with acquire(owner):
+            pytest.fail('invalid owner reached business body')
+    assert not pool._pins
+    monkeypatch.setattr(pool, '_require_worker_owner', validate)
+    with pytest.raises(ValueError, match='business error'):
+        with acquire(owner):
+            raise ValueError('business error')
+    assert not pool._pins
+    assert pool.get(OwnerIdentity.provider_user('test', 'b')) is not None
+
+
+@pytest.mark.parametrize('build_error', [False, True])
+def test_atomic_acquire_coalesces_build_waiters_and_cleans_failure(tmp_path, monkeypatch, build_error):
+    import threading
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    from agent_py_agent.agent import owner_scoped_pool as module
+
+    pool, _ = _counting_pool(tmp_path, max_agents=1)
+    owner = OwnerIdentity.provider_user('test', 'same')
+    building, waiter, publish, release = (threading.Event() for _ in range(4))
+    entered = threading.Barrier(3)
+    builds = []
+
+    # LLM: The real Future still blocks and propagates the creator's result/exception; expose only actual waiter arrival.
+    # 类用途: 无sleep地确认第二个调用已经进入同owner构造合流。
+    class ObservedFuture(Future):
+        def result(self, timeout=None):
+            waiter.set()
+            return super().result(timeout=timeout)
+
+    monkeypatch.setattr(module, 'Future', ObservedFuture)
+
+    def build(_config, _root, identity, _roots):
+        assert pool._lock.acquire(blocking=False), 'builder held the pool mutex'
+        pool._lock.release()
+        builds.append(identity)
+        building.set()
+        assert publish.wait(10)
+        if build_error:
+            raise ValueError('build rejected')
+        return SimpleNamespace(owner_id=identity.owner_id)
+
+    pool._builder = build
+
+    def acquire():
+        with pool.acquire_pinned(owner) as agent:
+            entered.wait(timeout=10)
+            assert release.wait(10)
+            return agent
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(acquire)
+        futures = [first]
+        try:
+            assert building.wait(10)
+            futures.append(executor.submit(acquire))
+            assert waiter.wait(10)
+            assert pool.gauges()['building_count'] == 1
+            publish.set()
+            if build_error:
+                for future in futures:
+                    with pytest.raises(ValueError, match='build rejected'):
+                        future.result(timeout=10)
+            else:
+                entered.wait(timeout=10)
+                assert list(pool._pins.values()) == [2]
+                assert pool.gauges()['total_live_instances'] == 1
+        finally:
+            publish.set()
+            release.set()
+        if not build_error:
+            assert futures[0].result(timeout=10) is futures[1].result(timeout=10)
+    assert builds == [owner]
+    assert not pool._pins and not pool._building and not pool._retired_agents
+
+
+@pytest.mark.parametrize('capacity', [1, 2])
+def test_atomic_force_reload_accounts_for_retired_leases(tmp_path, capacity):
+    pool, _ = _counting_pool(tmp_path, max_agents=capacity)
+    owner = OwnerIdentity.provider_user('test', 'reload')
+    with pool.acquire_pinned(owner) as first:
+        with pool.acquire_pinned(owner, force_reload=True) as second:
+            assert (second is first) is (capacity == 1)
+            assert pool.gauges()['total_live_instances'] == capacity
+            assert pool.retired_count == capacity - 1
+        assert pool._pins[id(first)] == 1
+    assert not pool._pins and not pool._retired_agents
+
+
+def test_atomic_soft_retirement_releases_mcp_after_business_error(tmp_path):
+    pool, closed = _opt7_mcp_pool(tmp_path)
+    with pytest.raises(ValueError, match='business error'):
+        with pool.acquire_pinned(OwnerIdentity.provider_user('test', 'soft'), hard=False) as agent:
+            assert pool.evict_soft_agent_id(id(agent))
+            assert pool.retired_count == 1 and closed == []
+            raise ValueError('business error')
+    assert closed == [(agent, True)]
+    assert not pool._pins and not pool._retired_agents
+
+
+def test_atomic_waiter_retries_evicted_generations_without_stack_growth(tmp_path, monkeypatch):
+    import sys
+    import threading
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    from agent_py_agent.agent import owner_scoped_pool as module
+
+    pool, _ = _counting_pool(tmp_path, max_agents=1)
+    owner, competitor = (OwnerIdentity.provider_user('test', name) for name in ('a', 'b'))
+    rounds = 25
+    started = [threading.Event() for _ in range(rounds)]
+    waiting = [threading.Event() for _ in range(rounds)]
+    finished = threading.Event()
+    depths, built = [], []
+
+    # LLM: Only delay the real Future's waiter after publication, until the next real build has reserved its slot; do not forge cache state.
+    # 类用途: 固定每轮等待者醒来前旧代已淘汰、新代已开始构造的交错，并采样真实调用栈深度。
+    class ObservedFuture(Future):
+        def result(self, timeout=None):
+            index, depth, frame = len(depths), 0, sys._getframe()
+            while frame is not None:
+                depth += 1
+                frame = frame.f_back
+            depths.append(depth)
+            waiting[index].set()
+            result = super().result(timeout=timeout)
+            if index + 1 < rounds:
+                assert started[index + 1].wait(10)
+            return result
+
+    monkeypatch.setattr(module, 'Future', ObservedFuture)
+
+    def build(_config, _root, identity, _roots):
+        if identity == competitor:
+            return SimpleNamespace(owner_id='b')
+        index = len(built)
+        built.append(index)
+        started[index].set()
+        assert waiting[index].wait(10)
+        return SimpleNamespace(owner_id='a', generation=index)
+
+    pool._builder = build
+
+    def churn():
+        for index in range(rounds):
+            with pool.acquire_pinned(owner):
+                if index + 1 == rounds:
+                    assert finished.wait(10)
+            if index + 1 < rounds:
+                with pool.acquire_pinned(competitor):
+                    pass
+
+    def consume():
+        with pool.acquire_pinned(owner) as agent:
+            finished.set()
+            return agent.generation
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        creator = executor.submit(churn)
+        try:
+            assert started[0].wait(10)
+            waiter = executor.submit(consume)
+            assert waiter.result(timeout=30) == rounds - 1
+            creator.result(timeout=10)
+        finally:
+            finished.set()
+            for event in (*started, *waiting):
+                event.set()
+    assert len(depths) == rounds
+    assert max(depths) - min(depths) <= 2, depths
+    assert not pool._pins and not pool._building and not pool._retired_agents
