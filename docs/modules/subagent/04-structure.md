@@ -1,3 +1,8 @@
+## 2026-10-28 Wave 8：子代理公开索引重建服务与同 Owner Worker 单次构造结构
+
+- `services/indexing/service.py::SubAgentIndexingService.rebuild_subagent_index`：将 CLI `local_doctor` 重建索引所需的终态过期跳过（复用 `services/persistence/projections.py::_task_projection_expired`）与任务索引写入收拢为正式服务方法，CLI 仅保留文件源扫描与结果展示。
+- `agent_core/runner/worker.py::_build_worker_agent`：对原生 `SimpleAgent` 先通过宿主路径与 dispatch 权限门产出最终有效配置，再以 `defer_mcp_connect=True` 单次构造实例；同 Owner 子代理通过 `ToolRegistry` 借用门面共享底层 MCP 客户端，借用方 `close()` 仅释放引用而不终止父连接。
+
 ## 2026-10-27 CI 全绿收敛：子代理全文投影 TTL 时钟注入与常数单位对齐结构
 
 - `services/persistence/projections.py::_task_projection_expired(task, *, now=None)` 与 `_subagent_index_expired` 接受显式 `now` 时间戳，统一委托 `local_storage.records.derived_record_expired` 判断 30 天终态 TTL；`_SUBAGENT_FULLTEXT_RETENTION_SECONDS` 与 `_PROJECTION_LEDGER_MAX_LINES_COUNT` 对齐常数目录单位后缀。

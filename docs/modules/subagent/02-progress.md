@@ -1,3 +1,8 @@
+## 2026-10-28 Wave 8：子代理公开索引重建入口与同 Owner Worker 延迟/借用 MCP（已实现）
+
+- `subagents/services/indexing/service.py` 新增公开 `SubAgentIndexingService.rebuild_subagent_index` 方法，统一封装 30 天终态 TTL 过滤与 `manager_index` 重建，供 `cli/local_doctor.py` 直接调用，移除对 `local_storage.records._task_projection_expired` 私有符号的跨层依赖。
+- `agent_core/runner/worker.py` 在原生 `SimpleAgent` 路径上先解析配置、权限与继承模型，仅执行单次 `SimpleAgent(..., defer_mcp_connect=True)` 构造，并在同 Owner、同配置/凭据范围下安全借用父级底层 MCP 连接（退出时仅撤销借用侧代理、不关闭父连接）。
+
 ## 2026-10-27 CI 全绿收敛：子代理全文投影 TTL 显式时钟透传与常数目录对齐
 
 - `subagents/services/persistence/projections.py`：`_task_projection_expired(task, *, now=None)` 与 `_subagent_index_expired` 统一支持显式 `now` 时钟注入，并与常数目录单位后缀（`_SUBAGENT_FULLTEXT_RETENTION_SECONDS` / `_PROJECTION_LEDGER_MAX_LINES_COUNT`）保持一致。

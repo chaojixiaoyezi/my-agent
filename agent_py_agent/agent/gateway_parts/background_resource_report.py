@@ -46,7 +46,11 @@ def collect_runtime_memory_diagnostics(
     include_tracemalloc: bool | None = None,
     top_n: int = 15,
 ) -> dict[str, object]:
-    effective_config = config if config is not None else getattr(owner_pool, "_config", None)
+    effective_config = (
+        config
+        if config is not None
+        else (getattr(owner_pool, "_config", None) or getattr(owner_pool, "_base_config", None))
+    )
     effective_include_tracemalloc = (
         bool(getattr(effective_config, "enable_gateway_memory_diagnostics", False))
         if include_tracemalloc is None
