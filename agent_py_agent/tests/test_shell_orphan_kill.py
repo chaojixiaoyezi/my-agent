@@ -243,13 +243,19 @@ def test_termination_does_not_resnapshot_reused_root_pid(monkeypatch):
     [(12345, False, False), (90000, True, True), (None, True, False)],
 )
 def test_group_expansion_requires_same_present_independent_leader(
-    monkeypatch, root_group, same_identity, complete,
+    tmp_path, monkeypatch, root_group, same_identity, complete,
 ):
     from agent_py_agent.agent.tooling import process_registry as module
 
     rows = "12346 12345\n"
     if root_group is not None:
         rows += f"12345 {root_group}\n"
+    orig_path = module.Path
+    monkeypatch.setattr(
+        module,
+        "Path",
+        lambda value: tmp_path / "absent" if str(value) == "/proc" else orig_path(value),
+    )
     monkeypatch.setattr(module, "capture_process_birth_token", lambda pid: "original-birth")
     monkeypatch.setattr(module, "_same_process", lambda *args: same_identity)
     monkeypatch.setattr(module.os, "getpgrp", lambda: 90000)

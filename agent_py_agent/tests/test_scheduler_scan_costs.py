@@ -1276,9 +1276,8 @@ def test_fact_cache_is_bounded_and_signature_covers_read_paths(fact_cache, tmp_p
     assert any(name.startswith("wake_normal:") for name in names)
 
     for index in range(_FACT_MAX_ENTRY_COUNT + 2):
-        extra = _owner_home(owners, f"u{index:05d}")
-        discover_wake_pending_owners(owners)
-        del extra
+        _owner_home(owners, f"u{index:05d}")
+    discover_wake_pending_owners(owners)
     assert len(fact_cache._OWNER_FACT_CACHE) <= _FACT_MAX_ENTRY_COUNT
 
 

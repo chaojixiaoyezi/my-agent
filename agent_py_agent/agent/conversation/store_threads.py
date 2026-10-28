@@ -71,7 +71,7 @@ def _clone_cached_thread(thread: ConversationThread) -> ConversationThread:
     )
 
 
-# LLM: 单条64KiB/总量32MiB和条数限制不变；增减字节只在同一缓存锁内进行，覆盖/淘汰不遍历全表。
+# LLM: 单条64KiB/总量32MiB和条数限制不变；增减字节只在同一缓存锁内进行，空表时校准归零以兼容外部直接clear，覆盖/淘汰不遍历全表。
 # 函数用途: 保存独立线程快照，以O(1)更新预算并按需淘汰最旧记录。
 def _store_cached_thread(
     path: Path, fingerprint: tuple[int, int, int, int] | None, thread: ConversationThread,
@@ -83,8 +83,8 @@ def _store_cached_thread(
     snapshot = _clone_cached_thread(thread)
     key = str(path)
     with _THREAD_RECORD_CACHE_LOCK:
-        if len(_THREAD_RECORD_CACHE) <= 4:
-            _THREAD_RECORD_CACHE_TOTAL_BYTES = sum(item.size_bytes for item in _THREAD_RECORD_CACHE.values())
+        if not _THREAD_RECORD_CACHE:
+            _THREAD_RECORD_CACHE_TOTAL_BYTES = 0
         previous = _THREAD_RECORD_CACHE.pop(key, None)
         if previous is not None:
             _THREAD_RECORD_CACHE_TOTAL_BYTES -= previous.size_bytes

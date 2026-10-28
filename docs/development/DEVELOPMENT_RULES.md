@@ -123,7 +123,7 @@ before changing code.
 
 ## 1. Python Version / Python 版本
 
-- **Target**: Python 3.10+ (`requires-python = ">=3.10"` in pyproject.toml).
+- **Target**: Python 3.11–3.14 (`requires-python = ">=3.11"` in pyproject.toml).
 - Do **not** use backslashes inside f-string expressions (PEP 701, only valid in 3.12+).
   Use temporary variables or parenthesised sub-expressions instead.
 - For `tomllib`: use an import guard for `tomli` on Python < 3.11:

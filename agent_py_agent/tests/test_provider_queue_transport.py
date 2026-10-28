@@ -40,7 +40,7 @@ def test_physical_json_requests_are_limited_through_body_read(monkeypatch):
     class Body(io.BytesIO):
         def read(self, *args):
             nonlocal active
-            time.sleep(0.015)
+            time.sleep(0.06)
             result = super().read(*args)
             with lock:
                 active -= 1
@@ -442,11 +442,11 @@ def test_local_preparation_failure_after_admission_returns_slot(monkeypatch):
 
 @pytest.mark.parametrize("http_error", [False, True])
 def test_late_open_response_is_closed_and_slot_released(monkeypatch, http_error):
-    req = request(max_retries=0, deadline=time.monotonic() + 0.025)
+    req = request(max_retries=0, deadline=time.monotonic() + 0.15)
     body = io.BytesIO(b"{}")
 
     def send(*args, **kwargs):
-        time.sleep(0.04)
+        time.sleep(max(0.0, req.deadline - time.monotonic() + 0.02))
         if http_error:
             raise urllib.error.HTTPError(req.url, 503, "fixture late error", {}, body)
         return body

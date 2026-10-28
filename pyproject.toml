@@ -7,7 +7,7 @@ name = "my-agent"
 version = "0.3.0"
 description = "A small Python CLI agent with memory, tools, and auditable subagent workflows."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "超级小叶子 (chaojixiaoyezi)" }]
 dependencies = [

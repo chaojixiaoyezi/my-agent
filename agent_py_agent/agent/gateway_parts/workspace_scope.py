@@ -41,8 +41,8 @@ def gateway_request_workspace_scope(
     return str(cwd), tuple(str(path) for path in roots)
 
 
-# LLM: 远程config先拒绝，管理员须同时符合HomePaths身份；非Full Access不能覆盖家外目录，仅同一Full Access宿主原构造根可包含私有Home。
-# 函数用途: 核对用户及目录边界；允许请求复用宿主原项目，不借客户端路径为其它数据根祖先授权。
+# LLM: 远程config先拒绝，管理员须同时符合HomePaths身份；restricted/workspace-only与普通用户不能覆盖家外目录，仅同一Full Access宿主原构造根可包含私有Home。
+# 函数用途: 核对用户及目录边界；保持与CLI客户端一致的WorkspaceWrite外部项目规则，不借客户端路径为其它数据根祖先授权。
 def _validate_owner_workspace(agent: object, roots: list[Path]) -> None:
     from ..conversation.workspace_context import validate_workspace_directory
     from ..user_space.owner_access import is_local_admin_owner
@@ -73,7 +73,9 @@ def _validate_owner_workspace(agent: object, roots: list[Path]) -> None:
                     and root == Path(startup_root).expanduser().resolve(strict=False)))
     except ValueError as error:
         raise GatewayWorkspaceScopeError(str(error)) from error
-    if access in {"", "workspace-only"} and any(not path_is_within(root, owner_root) for root in roots):
+    if access in {"restricted", "workspace-only"} and any(
+        not path_is_within(root, owner_root) for root in roots
+    ):
         raise GatewayWorkspaceScopeError("WorkspaceOnly 不能覆盖 owner home 之外的工作目录；请先开启 Full Access")
 
 

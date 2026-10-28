@@ -22,8 +22,19 @@ from code_size_rules import Finding  # noqa: E402
 # 报告写到临时目录：仓库根的 CODE_SIZE_REPORT.md 是被跟踪文件，测试不能改写它（conftest 的仓库树防线会报错）。
 def test_check_code_size_warn_generates_report(tmp_path) -> None:
     report = tmp_path / "CODE_SIZE_REPORT.md"
+    baseline = tmp_path / "CODE_SIZE_BASELINE.json"
+    baseline.write_text(
+        '{"findings": [{"identity": "params:agent_py_agent/sample.py:many_params", "severity": "hard"}]}\n',
+        encoding="utf-8",
+    )
+    sample = tmp_path / "agent_py_agent" / "sample.py"
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_text(
+        "# LLM: test\n# 模块用途: test\n# LLM: test\n# 函数用途: test\ndef many_params(a, b, c, d, e, f, g, h, i):\n    pass\n",
+        encoding="utf-8",
+    )
     result = subprocess.run(
-        [sys.executable, "scripts/check_code_size.py", "--mode", "warn", "--report", str(report)],
+        [sys.executable, str(repo_root / "scripts" / "check_code_size.py"), "--mode", "warn", "--root", str(tmp_path)],
         cwd=repo_root,
         text=True,
         capture_output=True,
@@ -31,8 +42,47 @@ def test_check_code_size_warn_generates_report(tmp_path) -> None:
     )
 
     assert result.returncode == 0
-    assert "CODE_SIZE_REPORT.md" in result.stdout
+    assert "report=CODE_SIZE_REPORT.md" in result.stdout
     assert report.exists()
+    report_text = report.read_text(encoding="utf-8")
+    assert "- baseline_loaded: True" in report_text
+    assert "- baseline: CODE_SIZE_BASELINE.json" in report_text
+
+
+def test_check_code_size_strict_resolves_baseline_under_root(tmp_path) -> None:
+    report = tmp_path / "CODE_SIZE_REPORT.md"
+    baseline = tmp_path / "CODE_SIZE_BASELINE.json"
+    sample = tmp_path / "agent_py_agent" / "sample.py"
+    sample.parent.mkdir(parents=True, exist_ok=True)
+    sample.write_text(
+        "# LLM: test\n# 模块用途: test\n# LLM: test\n# 函数用途: test\ndef many_params(a, b, c, d, e, f, g, h, i):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    baseline.write_text(
+        '{"findings": [{"identity": "params:agent_py_agent/sample.py:many_params", "severity": "hard"}]}\n',
+        encoding="utf-8",
+    )
+    allowed = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "check_code_size.py"), "--mode", "strict", "--root", str(tmp_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert allowed.returncode == 0
+    assert "- blocked: False" in report.read_text(encoding="utf-8")
+
+    baseline.write_text('{"findings": []}\n', encoding="utf-8")
+    blocked = subprocess.run(
+        [sys.executable, str(repo_root / "scripts" / "check_code_size.py"), "--mode", "strict", "--root", str(tmp_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert blocked.returncode == 1
+    assert "- blocked: True" in report.read_text(encoding="utf-8")
 
 
 def test_large_file_size_does_not_create_a_finding(tmp_path, monkeypatch) -> None:

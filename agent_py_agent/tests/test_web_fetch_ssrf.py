@@ -534,8 +534,19 @@ def test_explicit_zero_port_is_rejected_before_transport(port):
 
 # LLM: extract模式必须共享同一resolved_by_host以拦截跨URL的公网转私网DNS重绑定，且临时上下文恢复不得固化动态provider旧快照。
 # 函数用途: 锁住extract模式的DNS重绑定防护与动态私网白名单热更新恢复。
-def test_extract_pins_resolved_ips_and_preserves_dynamic_provider(server):
+def test_extract_pins_resolved_ips_and_preserves_dynamic_provider(server, monkeypatch):
+    from agent_py_agent.agent.tooling import web_fetch_runtime
     from agent_py_agent.agent.tooling.registry_invoke import _execute_with_temporary_tool_context
+
+    orig_connect = web_fetch_runtime._PinnedHTTPConnection.connect
+
+    def _fast_pinned_connect(self):
+        if self._pin_ip == "93.184.216.34":
+            self.sock = web_fetch_runtime.socket.create_connection(("127.0.0.1", self.port), self.timeout)
+            return
+        return orig_connect(self)
+
+    monkeypatch.setattr(web_fetch_runtime._PinnedHTTPConnection, "connect", _fast_pinned_connect)
 
     answers = iter([("93.184.216.34",), ("127.0.0.1",)])
     live_hosts = ["10.0.0.0/8"]

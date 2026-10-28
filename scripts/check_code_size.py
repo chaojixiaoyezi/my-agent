@@ -229,10 +229,11 @@ def _finding_exceeds_baseline(item: Finding, baseline: dict[str, str]) -> bool:
 
 
 # LLM: --report 只改报告写到哪里，不改扫描范围和判定；不给时仍是仓库根的 CODE_SIZE_REPORT.md，门禁命令行为不变。
-# 函数用途: 解析命令行参数：模式、基线、写基线和报告位置。
+# 函数用途: 解析命令行参数：模式、扫描根、基线、写基线和报告位置。
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Check local complexity guardrails and report file-size signals.")
     parser.add_argument("--mode", choices=["warn", "strict"], default="warn")
+    parser.add_argument("--root", type=str, default=None, help="Override repository root for isolated testing")
     parser.add_argument("--baseline", type=str, default=None, help="Path to baseline JSON file")
     parser.add_argument("--write-baseline", type=str, default=None, help="Write current findings as baseline")
     parser.add_argument("--report", type=str, default=None,
@@ -240,16 +241,22 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# LLM: 相对基线路径必须按当前有效 ROOT 解析（而非进程 cwd），避免 --root 隔离扫描误读宿主仓库同名基线。
+# 函数用途: 加载可选基线 JSON 文件，不存在时输出告警并返回未加载状态。
 def _load_optional_baseline(path: str | None) -> tuple[dict[str, str] | None, bool]:
     if not path:
         return None, False
     baseline_path = Path(path)
+    if not baseline_path.is_absolute():
+        baseline_path = ROOT / baseline_path
     if baseline_path.exists():
         return load_baseline(baseline_path), True
     print(f"WARNING: baseline file not found: {path}", file=sys.stderr)
     return None, False
 
 
+# LLM: 未显式传 --baseline 时仅在当前有效 ROOT 下的 DEFAULT_BASELINE_PATH 存在时返回相对展示名。
+# 函数用途: 计算本次运行生效的基线参数文本。
 def _effective_baseline_arg(path: str | None) -> str | None:
     if path:
         return path
@@ -258,6 +265,8 @@ def _effective_baseline_arg(path: str | None) -> str | None:
     return None
 
 
+# LLM: 仅在显式请求 --write-baseline 时写盘；相对路径按给定位置写出。
+# 函数用途: 将当前发现项写入指定的基线文件。
 def _write_requested_baseline(findings: list[Finding], path: str | None) -> None:
     if not path:
         return
@@ -282,6 +291,7 @@ def _print_summary(findings: list[Finding], blocked: bool, report_path: Path) ->
     )
 
 
+# LLM: 优先相对当前有效 ROOT 展示路径，位于仓库外时保留原始字符串。
 # 函数用途: 报告位置在仓库内时返回相对仓库根的路径，否则原样返回。
 def _display_path(path: Path) -> str:
     try:
@@ -290,10 +300,15 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
-# LLM: 报告写到 --report 给的位置，不给时写仓库根的 CODE_SIZE_REPORT.md；其余流程、返回码与阻断口径不变。
+# LLM: 报告写到 --report 给的位置，不给时写当前有效 ROOT 的 CODE_SIZE_REPORT.md；--root 同步绑定默认报告与基线路径。
 # 函数用途: 收集 finding、按基线判定阻断、写报告并打印汇总。
 def main() -> int:
+    global ROOT, REPORT_PATH, DEFAULT_BASELINE_PATH
     args = _parse_args()
+    if args.root:
+        ROOT = Path(args.root).resolve()
+        REPORT_PATH = ROOT / "CODE_SIZE_REPORT.md"
+        DEFAULT_BASELINE_PATH = ROOT / "CODE_SIZE_BASELINE.json"
     report_path = Path(args.report) if args.report else REPORT_PATH
     findings = collect_findings()
     _write_requested_baseline(findings, args.write_baseline)

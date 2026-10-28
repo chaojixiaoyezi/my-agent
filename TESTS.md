@@ -1,3 +1,16 @@
+## 2026-10-28 CI Linux 跨平台回归收口与 Python 3.11–3.14 版本对齐
+
+- **Python 版本范围对齐**：`.github/workflows/test.yml` 移除 Python 3.10 矩阵项，保留 Python 3.11/3.12（`pyproject.toml` 同步更新为 `requires-python = ">=3.11"`，`AGENTS.md` 与 `docs/development/DEVELOPMENT_RULES.md` 同步声明面向 Python 3.11–3.14），并移除仅针对 3.10 的兼容分支。
+- **工作区外部目录合同统一**：`cli/workspace_resolution.py`（`validate_requested_workspace_roots`）、`cli/chat_client_context.py`（`make_gateway_chat_client`）与 `agent/gateway_parts/workspace_scope.py`（`_validate_owner_workspace`）统一遵循 `CAP-DIR` 权限合同：本机管理员（`local/main`）在 `workspace-write` 与 `full-access` 下可显式绑定安全外部项目目录，普通/远程用户或 `restricted`/`workspace-only` 受限模式禁止越出 `owner_home`；`test_chat_client_context.py` 与 `test_gateway_chat_conversation_context.py` 对应受限模式夹具显式传入 `access_mode="restricted"`。
+- **Linux 与并发确定性修复**：
+  - `test_gateway_supervisor_maintenance.py`：隔离 `cli.subprocess.run` 避免 Linux 宿主存在 `/bin/systemctl` 时探测真实用户 systemd 状态。
+  - `test_shell_orphan_kill.py`：`test_group_expansion_requires_same_present_independent_leader` 显式遮蔽 `/proc` 以在 Linux 上测试 `ps` 关系表解析分支，生产 `process_registry._process_group_map` 保持原生 `/proc` 判定不变。
+  - `test_sandbox_profile_perf.py`：在非 macOS 平台上未显式传入 `macos_sandbox_exec` 时提供测试默认路径 `"/usr/bin/sandbox-exec"`，仅用于构造 Seatbelt 规则字符串并度量生成耗时，不代表在 Linux 上执行真实 Seatbelt 沙箱。
+  - `test_web_fetch_ssrf.py`：在模块级拦截 `_PinnedHTTPConnection.connect` 避免首个 SSRF 回归用例直连示例公网 IP 超时，保留 DNS 钉扎与重定向复核断言。
+  - `test_workflow_script_engine.py` 与 `test_provider_queue_transport.py`：为非超时错误分类用例与并发队列槽位测试提供充足的子进程启动/请求 deadline 余量，保留 `SCRIPT_TIMEOUT` 与 `PROVIDER_QUEUE_WAIT_TIMEOUT` 原断言。
+  - `scripts/check_code_size.py`：`--root` 参数同步切换 `ROOT`、`REPORT_PATH` 与 `DEFAULT_BASELINE_PATH`，相对基线路径按 `ROOT` 解析。
+  - `timeout_budget_evidence.py`：按 `(abs_path, mtime_ns, size, rel)` 缓存单次纯 AST 扫描结果，不做原始文本子串预筛，保持相邻字符串字面量等完整 AST 语义并消除单测内重复全仓 parse。
+
 ## 2026-10-27 CI C2 v2：包页面归档投影与继任合同对齐
 
 来源：`07-tasks/ci-fix-c2-v2.md`，起点 `fb83bdf144a35318e38653240d1055929fd23720`。仅在 `/tmp/wt-ci-2` 工作，使用指定 `/tmp/ci-venv-312/bin/python3`。

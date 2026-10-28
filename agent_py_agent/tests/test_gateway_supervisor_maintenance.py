@@ -266,6 +266,7 @@ def test_cli_commands_roundtrip(case, monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "make_agent", lambda args: case._agent)
     monkeypatch.setattr(cli, "gateway_paths", lambda agent: case._paths)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cli.subprocess, "run", Mock(return_value=SimpleNamespace(returncode=0, stderr="", stdout="")))
     commands = [["maintenance-lock", "--reason", "upgrade", "--ttl", "30"], ["maintenance-unlock"],
                 ["supervisor-install-service", "--unit", "test.service", "--no-start"],
                 ["supervisor-uninstall-service", "--unit", "test.service"]]

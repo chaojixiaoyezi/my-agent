@@ -76,7 +76,7 @@ print(json.dumps({'value': inputs['number'], 'sources': json.loads(os.environ['M
     ('import time; time.sleep(5)', 'SCRIPT_TIMEOUT'),
 ])
 def test_script_failures_are_repairable(tmp_path, code, error):
-    script(tmp_path, code, timeout_seconds=0.1)
+    script(tmp_path, code, timeout_seconds=0.1 if error == 'SCRIPT_TIMEOUT' else 5.0)
     result = ScriptRunner(tmp_path).run_script('collect', {'task': 'sample'})
     assert result is not None
     assert result.ok is False and result.needs_repair is True

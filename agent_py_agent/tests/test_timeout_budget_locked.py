@@ -509,11 +509,12 @@ def test_production_source_scan_ignores_ancestor_directory_named_tests(tmp_path:
     repo = tmp_path / "tests" / "repo"
     for rel in ("agent_py_agent/agent/x.py", "agent_py_agent/agent/tests/t.py", "agent_py_agent/cli/y.py"):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
-        (repo / rel).write_text("probe = dict(is_probe=True)\n", encoding="utf-8")
+        (repo / rel).write_text('probe = dict(is_probe=True)\ntimeout_stage = "stream_" "idle"\n', encoding="utf-8")
     module.PKG_ROOT = repo
     files = [path.relative_to(repo / "agent_py_agent").as_posix() for path in module._production_source_files()]
     assert files == ["agent/x.py", "cli/y.py"], "上级目录叫 tests 不排除，包内 tests 子目录才排除"
     assert module.is_probe_production_sites() == ["agent/x.py:1", "cli/y.py:1"]
+    assert module.timeout_stage_production_sites() == ["agent/x.py:2:stream_idle", "cli/y.py:2:stream_idle"]
 
 
 # ---------------------------------------------------------------- 门槛2 终审边界②(seq1622-2): ledger 写入层 stage 封闭

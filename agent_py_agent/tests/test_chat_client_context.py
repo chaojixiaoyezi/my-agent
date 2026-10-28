@@ -342,7 +342,6 @@ def test_gateway_chat_client_rejects_external_workspace_without_full_access(
     monkeypatch,
 ) -> None:
     """Starting a TUI from /root or another project cannot silently widen WorkspaceOnly."""
-    from agent_py_agent.cli.bootstrap import DEFAULT_CONFIG
     from agent_py_agent.cli.chat_client_context import make_gateway_chat_client
 
     home = tmp_path / "home"
@@ -351,10 +350,11 @@ def test_gateway_chat_client_rejects_external_workspace_without_full_access(
     monkeypatch.setenv("MY_AGENT_HOME", str(home))
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
     monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
+    config_path = _config_with_access_mode(tmp_path, "restricted")
 
     with pytest.raises(ValueError, match="WorkspaceOnly"):
         make_gateway_chat_client(
-            SimpleNamespace(config=str(DEFAULT_CONFIG), workspace_root=str(external))
+            SimpleNamespace(config=config_path, workspace_root=str(external))
         )
 
 

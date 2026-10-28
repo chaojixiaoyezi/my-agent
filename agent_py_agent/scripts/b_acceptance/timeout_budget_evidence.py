@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import socket
 import sys
@@ -302,16 +303,42 @@ def _production_source_files() -> list[Path]:
     return sorted(files)
 
 
-# LLM: 取证的“探针埋点在哪”按源码结构化事实扫描，不写死文件名或行号（探测计量上线后旧的单一埋点说法已失效，
-#   行号也会随源码漂移）。返回 "相对 agent_py_agent 的路径:行号"，顺序按文件名、行号稳定。
+# LLM: 按文件 (绝对路径, mtime_ns, size, rel) 缓存单次纯 AST 扫描结果，不做任何原始文本子串预筛，
+#   确保相邻拼接字面量（如 "stream_" "idle"）或转义字符串 100% 保持原 AST 语义，同时避免同一进程内重复 parse 同一文件。
+# 函数用途: 一次 AST 解析同时提取文件内的 is_probe=True 埋点与 timeout_stage 阶段值埋点。
+@functools.lru_cache(maxsize=4096)
+def _cached_ast_sites_for_file(
+    abs_path: str, mtime_ns: int, size: int, rel: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    del mtime_ns, size
+    tree = ast.parse(Path(abs_path).read_text(encoding="utf-8"))
+    probe_lines: list[int] = []
+    stage_sites: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if _is_probe_true_keyword(node):
+            probe_lines.append(node.lineno)
+        for expression in _stage_value_expressions(node):
+            stage_sites.extend(_stage_literals(expression))
+    probes = tuple(f"{rel}:{lineno}" for lineno in probe_lines)
+    stages = tuple(f"{rel}:{line}:{value}" for line, value in sorted(set(stage_sites)))
+    return probes, stages
+
+
+# LLM: 读取文件当前 stat 指纹后委托纯 AST 缓存扫描，文件修改后自动失效。
+# 函数用途: 获取单个生产源码文件的 (is_probe 位置元组, timeout_stage 位置元组)。
+def _scan_file_ast_sites(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    stat_result = path.stat()
+    rel = path.relative_to(PKG_ROOT / "agent_py_agent").as_posix()
+    return _cached_ast_sites_for_file(
+        str(path.resolve()), stat_result.st_mtime_ns, stat_result.st_size, rel
+    )
+
+
+# LLM: 取证的“探针埋点在哪”按源码结构化事实（纯 AST 缓存 _scan_file_ast_sites）扫描，不写死文件名或行号
+#   （探测计量上线后旧的单一埋点说法已失效，行号也会随源码漂移）。返回 "相对 agent_py_agent 的路径:行号"，顺序按文件名、行号稳定。
 # 函数用途: 列出当前源码里所有把 is_probe=True 传给模型调用账本的生产调用点。
 def is_probe_production_sites() -> list[str]:
-    sites: list[str] = []
-    for path in _production_source_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        rel = path.relative_to(PKG_ROOT / "agent_py_agent").as_posix()
-        sites.extend(f"{rel}:{node.lineno}" for node in ast.walk(tree) if _is_probe_true_keyword(node))
-    return sites
+    return [site for path in _production_source_files() for site in _scan_file_ast_sites(path)[0]]
 
 
 # 会成为超时阶段值的参数名 / 变量名 / 字典键名：异常构造用 stage，账本参数与持久载荷用 timeout_stage。
@@ -375,15 +402,10 @@ def _stage_value_expressions(node: ast.AST) -> list[ast.AST]:
     return []
 
 
+# LLM: 纯 AST 扫描，不经过任何字符串子串预筛；与 _scan_file_ast_sites 共享单次 AST 解析结果。
 # 函数用途: 扫一个生产源码文件，返回 "相对路径:行号:阶段值"，按行号排序。
 def _stage_sites_in_file(path: Path) -> list[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    rel = path.relative_to(PKG_ROOT / "agent_py_agent").as_posix()
-    sites: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        for expression in _stage_value_expressions(node):
-            sites.extend(_stage_literals(expression))
-    return [f"{rel}:{line}:{value}" for line, value in sorted(set(sites))]
+    return list(_scan_file_ast_sites(path)[1])
 
 
 # LLM: 与 is_probe_production_sites 同一口径扫源码，不写死值或行号；值只可能是 TIMEOUT_STAGES 的成员，
@@ -398,6 +420,8 @@ def timeout_stage_production_values() -> list[str]:
     return sorted({site.rsplit(":", 1)[1] for site in timeout_stage_production_sites()})
 
 
+# LLM: 取证脚本内部辅助函数；复用 timeout_stage_production_sites 与 is_probe_production_sites 的单次扫描结果计算去重阶段集合，避免重复遍历。
+# 函数用途: 汇总模型调用账本在超时、失败、探测与阶段分布四个维度的结构化验收证据。
 def _scenario_ledger_evidence() -> dict[str, object]:
     # 生产路径: idle 掐断抛 ProviderTimeoutError -> except ProviderTimeoutError
     # (tool_model_generation.py:139) -> _record_provider_timeout -> record_model_call_timeout
@@ -429,6 +453,7 @@ def _scenario_ledger_evidence() -> dict[str, object]:
     )
     failed_record = ledger_failed.records()[0].to_dict()
 
+    stage_sites = timeout_stage_production_sites()
     return {
         "idle_cut_ledger_status": idle_record["status"],
         "idle_cut_timeout_stage": idle_record["timeout_stage"],
@@ -439,8 +464,8 @@ def _scenario_ledger_evidence() -> dict[str, object]:
         "failed_branch_timeout_stage": failed_record["timeout_stage"],
         "timeout_params_fields": list(ModelCallTimeoutParams.__dataclass_fields__.keys()),
         "has_elapsed_or_first_token_field": False,
-        "timeout_stage_production_values": timeout_stage_production_values(),  # 按源码扫描，不写死
-        "timeout_stage_production_sites": timeout_stage_production_sites(),
+        "timeout_stage_production_values": sorted({site.rsplit(":", 1)[1] for site in stage_sites}),  # 按源码扫描，不写死
+        "timeout_stage_production_sites": stage_sites,
         "is_probe_production_sites": is_probe_production_sites(),  # 按源码扫描，不写死行号
     }
 

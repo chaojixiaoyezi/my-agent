@@ -1,6 +1,6 @@
-## 2026-10-27 CI C8：原恢复与展示入口的合同对齐
+## 2026-10-27 CI C8 & Linux 工作区边界结构
 
-`conversation/background_tool_policy.py`只折叠首轮重工具；`agent_core/compact_request_recovery.py::_restore_optional_preflight`在原typed quota判定后拒绝恢复业务调用。`conversation/task_promotion.py`在跨目录切走时结束旧代为interrupted，返回后沿原继任链与CAS分配新代；`cli/chat_parts/tui_view_model.py::_align_history_timing`已对齐时不重分配显示槽位。没有增加状态源、工具、配置或文件；计时、消息回执、neutral退避仍各读原事实源。测试与验收边界见[TESTS](../../../TESTS.md)。
+`conversation/background_tool_policy.py`只折叠首轮重工具；`agent_core/compact_request_recovery.py::_restore_optional_preflight`在原typed quota判定后拒绝恢复业务调用。`conversation/task_promotion.py`在跨目录切走时结束旧代为interrupted，返回后沿原继任链与CAS分配新代；`cli/chat_parts/tui_view_model.py::_align_history_timing`已对齐时不重分配显示槽位。`gateway_parts/workspace_scope.py`、`cli/workspace_resolution.py` 与 `cli/chat_client_context.py` 对齐 `CAP-DIR` 规则，`local/main` 在 `workspace-write`/`full-access` 下允许外部安全项目根，在 `restricted`/`workspace-only` 下仅允许 `owner_home` 内目录。没有增加状态源、工具、配置或文件；计时、消息回执、neutral退避仍各读原事实源。测试与验收边界见[TESTS](../../../TESTS.md)。
 
 ## 2026-10-27 Wave 7 W1：Broker 只读主题与能力包/工作流恢复结构
 

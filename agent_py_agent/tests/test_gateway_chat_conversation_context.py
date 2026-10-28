@@ -240,7 +240,11 @@ def test_gateway_workspace_only_rejects_external_client_cwd(tmp_path):
     external = tmp_path / "external"
     external.mkdir()
     agent = SimpleAgent(
-        AgentConfig(model_backend="echo", my_agent_home=str(tmp_path / "home")),
+        AgentConfig(
+            model_backend="echo",
+            my_agent_home=str(tmp_path / "home"),
+            access_mode="restricted",
+        ),
         tmp_path / "service",
     )
 

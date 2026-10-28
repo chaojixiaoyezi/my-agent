@@ -658,7 +658,9 @@ def preflight_gateway_credential(agent: object) -> None:
 # LLM: Reuse canonical config layers and owner paths, but bind all thin clients to the local-main
 # process service. The scoped owner still owns sessions/workspace/memory and travels in HTTP auth.
 # This function may create the workspace directory but must not initialize model/tool services.
-# Workspace overrides require Full Access outside the owner home, checked before mkdir or credential IO.
+# Workspace overrides are validated via validate_requested_workspace_roots (CAP-DIR: local/main in
+# workspace-write/full-access may bind safe external project directories; restricted/workspace-only
+# or non-admin owners must stay inside owner_home), checked before mkdir or credential IO.
 # G2b：构造后立即预检凭据——开关开且不可用时在这里拒绝启动，不让首个请求才报错。
 # 函数用途: 构造连接同一个后台 Gateway、但会话和工作目录属于当前用户的轻量客户端。
 def make_gateway_chat_client(args) -> GatewayChatClientAgent:
@@ -678,11 +680,6 @@ def make_gateway_chat_client(args) -> GatewayChatClientAgent:
         current_dir=owner_home_workspace_root(config),
     )
     validate_requested_workspace_roots(config, roots)
-    access = str(getattr(config, "access_mode", "") or "").strip().lower().replace("_", "-")
-    if access in {"", "workspace-only"} and any(
-        not root.is_relative_to(owner.home_dir.resolve(strict=False)) for root in roots
-    ):
-        raise ValueError("WorkspaceOnly 不能覆盖 owner home 之外的工作目录；请先开启 Full Access")
     root = roots[0]
     root.mkdir(parents=True, exist_ok=True)
     base_owner = resolve_owner_home(base_home.root, OwnerIdentity.local_main())

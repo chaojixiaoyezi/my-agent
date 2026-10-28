@@ -52,6 +52,7 @@ def _spec(root, home, *, scoped=False, compact=False):
 # LLM: 走生产_macos_argv的完整拼接，不仅检查基础profile片段。
 # 函数用途: 取得将实际交给sandbox-exec的profile。
 def _profile(spec):
+    spec = replace(spec, macos_sandbox_exec=spec.macos_sandbox_exec or "/usr/bin/sandbox-exec")
     argv = AttemptExecutionSandbox(spec)._macos_argv(["/usr/bin/true"])
     return argv[argv.index("-p") + 1]
 

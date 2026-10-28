@@ -173,8 +173,8 @@ def _send_pidfd_signal(descriptor: int, sig: int) -> None:
         raise OSError(error, os.strerror(error))
 
 
-# LLM: 优先os.pidfd_open，便携Python缺接口时仅Linux x86_64/amd64经434号syscall打开句柄。
-# 函数用途: 打开指定PID的安全内核句柄，进程已消失抛ProcessLookupError，平台不支持抛ValueError。
+# LLM: 优先os.pidfd_open，便携Python缺接口时仅Linux x86_64/amd64经434号syscall打开句柄；ESRCH但目标身份仍在时按缺安全句柄拒绝。
+# 函数用途: 打开指定PID的安全内核句柄，进程已消失抛ProcessLookupError，平台或内核不支持抛ValueError。
 def _open_pidfd(pid: int) -> int:
     if hasattr(os, 'pidfd_open'):
         return os.pidfd_open(pid)
@@ -186,6 +186,8 @@ def _open_pidfd(pid: int) -> int:
     if descriptor < 0:
         error = ctypes.get_errno()
         if error == errno.ESRCH:
+            if _process_identity(pid) is not None:
+                raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')
             raise ProcessLookupError(error, os.strerror(error))
         if error in (errno.ENOSYS, errno.EPERM, errno.EINVAL):
             raise ValueError(f'缺少安全pidfd进程句柄，未自动终止 PID {pid}，请手动停止后重试')

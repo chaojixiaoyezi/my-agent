@@ -113,8 +113,10 @@ DEFAULT_DELEGATED_EXECUTION_PERSISTENCE = (
     "执行纪律：只要直接父级当前 goal 仍有你已知的未完成部分，"
     + _EXECUTION_PERSISTENCE_BODY
     + "直接父级给你的当前 goal 是本轮完整工作边界；保留该 goal 的全部要求，"
-    "不实现未交给你的兄弟计划项。"
-    + "验证纪律：验证必须覆盖当前 goal 实际要求"
+    "但不要因为根用户目标更大而实现未交给你的兄弟计划项。"
+    "不要停在阶段汇报或一份诚实的未完成清单；只显示欢迎信息的 demo 只能算该 goal 的阶段成果，不能替代该 goal 要求的完整功能。"
+    "先在普通 assistant 回复中直接回答或确认用户。"
+    + "验证纪律：验证必须覆盖当前 goal 实际要求，安装、构建、启动或关键路径失败时先修复再交付；"
     + _EXECUTION_VERIFICATION_SUFFIX
 )
 

@@ -75,8 +75,8 @@ def runtime_paths_for_config(config) -> dict[str, Path]:
     return runtime_paths_for_agent(config, owner.home_dir, scoped)
 
 
-# LLM: 声明不授权限；只有家内或本机管理员Full Access构造可允许待创建根及项目内私有Home，默认运行时仍严格；不写文件。
-# 函数用途: 先核实构造入口可创建的目录，其余绑定继续使用现存目录及宿主隔离规则。
+# LLM: 声明不授权限；本机管理员在workspace-write/full-access可绑定安全外部项目，restricted/workspace-only与普通owner仅限家内；不写文件。
+# 函数用途: 先核实构造入口可创建的目录，其余绑定继续使用现存目录及宿主隔离规则，与Gateway服务端保持同一权限合同。
 def validate_requested_workspace_roots(config, roots: list[Path], *, initializing: bool = False) -> None:
     from ..agent.conversation.workspace_context import validate_workspace_directory
 
@@ -93,6 +93,10 @@ def validate_requested_workspace_roots(config, roots: list[Path], *, initializin
             is_admin=is_admin, initializing=initializing and (
                 _is_relative_to(root, owner_home) or (is_admin and access == "full-access")),
             allow_home_ancestor=initializing and is_admin and access == "full-access")
+    if access in {"restricted", "workspace-only"} and any(
+        not _is_relative_to(root, owner_home) for root in roots
+    ):
+        raise ValueError("WorkspaceOnly 不能覆盖 owner home 之外的工作目录；请先开启 Full Access")
 
 
 # LLM: The first normalized root is the canonical primary workspace; callers needing all roots
