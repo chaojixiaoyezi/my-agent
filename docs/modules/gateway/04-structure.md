@@ -1,3 +1,7 @@
+## 2026-10-28 Wave 9 B3 Round 4：父页/子页独立围栏与锁外取数
+
+`_consume_gateway_background_snapshot` / `_consume_local_background_snapshot` 的父页回调只做内存发表，成功返回后才调用 `_consume_selected_agent_view`。后者在根 `TuiRuntime._lock` 冻结 `(generation, run_id, child_cursor)`，释放后走原HTTP/本地详情读取，再由原 `apply_conversation_snapshot` 验代次并核当前选择后更新子页。传入父页 `expected_generation` 防止已丢弃的旧父页继续取子页；不创建新锁或第二状态源。`_prepare_local_agent_permissions` 在锁外预取原审批列表，返回纯面板提交闭包，用户决定仍经原回写事务。测试与观察边界见 [TESTS](../../../TESTS.md) R4小节。
+
 ## 2026-10-28 Wave 9 B3 Round 3：采样、reset、提交共锁
 
 `tui_threading.py::_capture_background_poll_state` 只在 `TuiRuntime._lock` 内读取 `(generation, message_after, event_after, event_stream_id)`；两种 poll 都在起始网络/文件取数前调用，后续只消费这份不可变起点。该锁就是现有 `publish_conversation_reset` 与 `apply_conversation_snapshot` 使用的锁，不新增并行状态锁，采样助手不持锁执行 HTTP/文件读取。原提交回调内部行为不在本轮改动范围；旧代响应不会进入该回调，显示、去重和游标均不回填。测试及观察边界见 [TESTS](../../../TESTS.md)。

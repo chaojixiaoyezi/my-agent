@@ -1050,6 +1050,87 @@ def test_r2_tui_discards_poll_started_before_reset():
     assert not seen and cursor == [0]
 
 
+# LLM: 用真实导航与主/子runtime消费同代父页；仅替代HTTP/文件边界，在详情返回前精确reset或切页。
+# 函数用途: 验证agent-view和本地审批取数均不持reset锁，旧详情不能改变子页或推进游标。
+@pytest.mark.parametrize("transport", ["gateway", "local"])
+@pytest.mark.parametrize("reaction", ["keep", "reset", "switch"])
+def test_r4_selected_agent_view_reads_outside_reset_lock(alert_case, monkeypatch, transport, reaction):
+    from agent_py_agent.agent.conversation import (
+        agent_activity,
+        agent_tool_approval,
+        message_stream,
+    )
+    from agent_py_agent.cli.chat_parts.tui_agent_navigation import TuiAgentNavigationState
+    from agent_py_agent.cli.chat_parts.tui_runtime import TuiRuntime
+    from agent_py_agent.cli.chat_parts.tui_threading import (
+        _consume_gateway_background_snapshot,
+        _consume_local_background_snapshot,
+    )
+    case = alert_case
+    runtime = TuiRuntime("terminal-alerts")
+    navigation = TuiAgentNavigationState(runtime)
+    rows = [{"run_id": "child-r4-a", "status": "RUNNING"}, {"run_id": "child-r4-b", "status": "RUNNING"}]
+    navigation.update_rows("", rows)
+    assert navigation.move_selection(1) and navigation.enter_selected()
+    initial = {"ok": True, "agent": {**rows[0], "goal": "原子页任务"}, "children": [], "transcript_events": [],
+        "event_cursor": 2, "thread_id": "thread-r4-child", "final_response": "原子页内容", "final_response_message_id": "msg-r4-prior"}
+    assert navigation.apply_agent_view("child-r4-a", initial)
+    child = navigation.active_runtime()
+    prior = child.store.snapshot()
+    view_calls, sample_locks, permission_locks, invalidations = [], [], [], []
+    original_snapshot = navigation.snapshot
+    # LLM: 记录实际选择采样是否在根reset锁内；不替换导航锁、选择结果或快照提交。
+    # 函数用途: 防止把整个详情函数简单挪出锁后又遗漏起始采样保护。
+    def snapshot():
+        sample_locks.append(runtime._lock._is_owned())
+        return original_snapshot()
+    monkeypatch.setattr(navigation, "snapshot", snapshot)
+    activity = {"active_task_count": 2, "subagents": rows}
+    page = {"ok": True, "thread_id": case.local.thread_id, "cursor": 3, "event_cursor": 0,
+        "event_stream_id": "", "transcript_events": [], "notices": [], "agent_activity": activity}
+    # LLM: 详情读取是唯一故障注入边界；父页须先提交，reset在返回详情前真实执行，不靠sleep抢占。
+    # 函数用途: 捕获持锁状态并制造迟到详情，返回完整可由真实导航接纳的DTO。
+    def view(*_args, **kwargs):
+        view_calls.append((runtime._lock._is_owned(), runtime.background_message_cursor, kwargs))
+        if reaction == "reset":
+            runtime.publish_conversation_reset("thread-r4-new")
+        elif reaction == "switch":
+            assert navigation.back() and navigation.move_selection(1) and navigation.enter_selected()
+        return {**initial, "event_cursor": 11, "final_response": "R4新详情", "final_response_message_id": "msg-r4-new"}
+    # LLM: 本地审批原读取会触碰持久账本；只替代IO边界来断言锁归属，不制造审批结果或越权操作。
+    # 函数用途: 记录续租/列表读取时是否仍持有reset锁。
+    def permission_io(*_args, **_kwargs):
+        permission_locks.append(runtime._lock._is_owned())
+        return []
+    app_ref = [SimpleNamespace(invalidate=lambda: invalidations.append(True))]
+    if transport == "gateway":
+        agent = SimpleNamespace(request_background_notices=lambda *_args, **_kwargs: page, request_agent_view=view)
+        result = _consume_gateway_background_snapshot(agent, "terminal-alerts", runtime, app_ref, set(), [0], navigation)
+    else:
+        case.store.threads.update_atomic(case.local.thread_id, lambda row: replace(row, workspace_task_id="task-r4-parent"))
+        monkeypatch.setattr(agent_activity, "conversation_agent_activity", lambda *_args, **_kwargs: SimpleNamespace(to_dict=lambda: activity))
+        monkeypatch.setattr(agent_activity, "conversation_agent_view", view)
+        monkeypatch.setattr(agent_tool_approval, "renew_agent_tool_approval_consumer", permission_io)
+        monkeypatch.setattr(agent_tool_approval, "list_pending_agent_tool_approvals", permission_io)
+        monkeypatch.setattr(message_stream, "read_background_response_page", lambda *_args, **_kwargs: ([], 3, True))
+        result = _consume_local_background_snapshot(case.agent, case.store, "terminal-alerts", runtime, app_ref, set(), [0], navigation)
+    assert result
+    assert len(view_calls) == 1 and view_calls[0][0] is False, view_calls
+    assert view_calls[0][1] == 3, "父页必须在详情IO前完成提交"
+    assert sample_locks and all(sample_locks), sample_locks
+    assert len(permission_locks) == (2 if transport == "local" else 0)
+    assert all(locked is False for locked in permission_locks), permission_locks
+    if reaction == "keep":
+        assert navigation.event_cursor("child-r4-a") == 11
+        assert "R4新详情" in repr(child.store.snapshot().stable_blocks)
+        assert invalidations and runtime.background_message_cursor == 3
+    else:
+        assert navigation.event_cursor("child-r4-a") == 2
+        assert child.store.snapshot().stable_blocks == prior.stable_blocks
+        assert "R4新详情" not in repr(child.store.snapshot().stable_blocks)
+        assert runtime.background_message_cursor == (0 if reaction == "reset" else 3)
+
+
 # LLM: 在首次采样字段读出后精确启动另一线程reset；锁内只等待对方尝试，锁外则等reset完成，不用sleep赌时序。
 # 函数用途: 同时核对两种poll原子采样、锁外IO，以及旧页不能回写游标500。
 @pytest.mark.parametrize("transport", ["gateway", "local"])

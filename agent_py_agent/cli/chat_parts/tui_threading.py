@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -298,10 +298,16 @@ def _consume_gateway_background_snapshot(
         return _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor,
             agent_navigation, payload, message_after)
     apply = getattr(tui_runtime, "apply_conversation_snapshot", None)
-    return apply(generation, publish) if callable(apply) else publish()
+    if not (apply(generation, publish) if callable(apply) else publish()):
+        return False
+    view_ok, view_changed = _consume_selected_agent_view(agent, None, session_id, agent_navigation,
+        tui_runtime=tui_runtime, expected_generation=generation)
+    if view_changed and app_ref[0] is not None:
+        app_ref[0].invalidate()
+    return view_ok
 
 
-# LLM: 调用方已完成HTTP读取和reset代次核验；这里只消费原页，不重建执行或投递身份。
+# LLM: 调用方已完成HTTP读取和reset代次核验；这里只投影原页内存，不请求子页或重建执行/投递身份。
 # 函数用途: 同步已确认会话的消息、过程和显示游标。
 def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, payload, message_after):
     if not isinstance(payload, dict) or payload.get("ok") is not True:
@@ -349,19 +355,10 @@ def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, 
     if not transcript_ok:
         return False
     tui_runtime.background_message_cursor = cursor
-    agent_view_ok, agent_view_changed = _consume_selected_agent_view(
-        agent,
-        None,
-        session_id,
-        agent_navigation,
-    )
-    if not agent_view_ok:
-        return False
     if (
         fresh
         or activity_changed
         or transcript_changed
-        or agent_view_changed
         or permission_changed
     ) and app_ref[0] is not None:
         app_ref[0].invalidate()
@@ -436,20 +433,18 @@ def _consume_local_background_snapshot(
     )
     if not messages_ok:
         return False
+    permission_publisher = _prepare_local_agent_permissions(agent, thread, tui_runtime)
 
-    # LLM: 文件IO已在锁外完成；runtime在同一reset锁内校验代次，过期页不得触碰权限面板、显示、去重和游标。
+    # LLM: 页及审批IO已在锁外完成；回调只投影内存，旧代不得触碰权限面板、显示、去重和游标。
     # 函数用途: 原子发表当前本地快照，reset前启动的读取整页丢弃。
     def publish():
-        permission_changed = _sync_local_agent_permissions(agent, thread, tui_runtime)
+        permission_changed = permission_publisher() if permission_publisher is not None else False
         activity_changed = _publish_background_activity(tui_runtime, activity, agent_navigation=agent_navigation)
         transcript_ok, transcript_changed = _consume_background_transcript_projection(
             tui_runtime, transcript.get("events"), transcript.get("cursor"), event_cursor,
             stream_id=transcript.get("stream_id"),
         )
         if not transcript_ok:
-            return False
-        agent_view_ok, agent_view_changed = _consume_selected_agent_view(agent, store, session_id, agent_navigation)
-        if not agent_view_ok:
             return False
         for row in fresh:
             if not _publish_background_notice_row(tui_runtime, row, seen):
@@ -459,13 +454,18 @@ def _consume_local_background_snapshot(
             fresh
             or activity_changed
             or transcript_changed
-            or agent_view_changed
             or permission_changed
         ) and app_ref[0] is not None:
             app_ref[0].invalidate()
         return True
     guard = getattr(tui_runtime, "apply_conversation_snapshot", None)
-    return guard(generation, publish) if callable(guard) else publish()
+    if not (guard(generation, publish) if callable(guard) else publish()):
+        return False
+    view_ok, view_changed = _consume_selected_agent_view(agent, store, session_id, agent_navigation,
+        tui_runtime=tui_runtime, expected_generation=generation)
+    if view_changed and app_ref[0] is not None:
+        app_ref[0].invalidate()
+    return view_ok
 
 
 
@@ -501,17 +501,17 @@ def _sync_gateway_agent_permissions(
     return bool(syncer(value, decision_writer=write_decision))
 
 
-# LLM: 嵌入模式与 Gateway 复用同一审批桥和完整请求校验；consumer 续租仅表明界面在线，不构成批准。
-# 函数用途: 在不走 HTTP 的完整 Agent TUI 中同步并处理主/子后台审批。
-def _sync_local_agent_permissions(
+# LLM: 审批续租/列表读取由调用方在reset锁外执行；仅返回内存面板发表闭包，续租不构成批准。
+# 函数用途: 预取本地主/子审批，并把纯显示提交交回原代次围栏。
+def _prepare_local_agent_permissions(
     agent: object,
     thread: object,
     tui_runtime: object,
-) -> bool:
+) -> Callable[[], bool] | None:
     syncer = getattr(tui_runtime, "sync_agent_permission_requests", None)
     root_task_id = str(getattr(thread, "workspace_task_id", "") or "").strip()
     if not callable(syncer) or not root_task_id:
-        return False
+        return None
     from ...agent.conversation.agent_tool_approval import (
         list_pending_agent_tool_approvals,
         renew_agent_tool_approval_consumer,
@@ -525,10 +525,9 @@ def _sync_local_agent_permissions(
             root_task_id=root_task_id,
         )
     except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError):
-        return False
+        return None
 
-    # LLM: Local resolution still validates the full canonical request under
-    # the process-shared transition lock before changing pending state.
+    # LLM: 仅用户选择时沿原进程共享事务复核完整请求，预取与面板发表不调用这个回写器。
     # 函数用途: 将嵌入式 TUI 的选择写回同一审批账本。
     def write_decision(run_id, request, decision):
         return resolve_agent_tool_approval(
@@ -538,7 +537,11 @@ def _sync_local_agent_permissions(
             decision_value=decision,
         )
 
-    return bool(syncer(rows, decision_writer=write_decision))
+    # LLM: rows与回写器已在锁外准备；调用方只在原reset代次仍有效时更新内存面板。
+    # 函数用途: 发表已读取的审批列表，不在显示提交内续租或读文件。
+    def publish():
+        return bool(syncer(rows, decision_writer=write_decision))
+    return publish
 
 
 # LLM: A stream change rebases only the volatile cursor after successful publication; existing
@@ -647,26 +650,32 @@ def _publish_background_activity(
     return changed
 
 
-# LLM: The selected child page is polled only while its exact run id is active.
-# Gateway and embedded modes feed the same navigation projection, and failures
-# preserve the prior page for the caller's existing exponential backoff.
-# 函数用途: 拉取当前进入的子代理详情页并增量应用到独立 TUI runtime。
+# LLM: 根reset锁内采样代次及准确子代理选择，锁外取详情，提交时同锁重验代次和选择；失败保留旧页退避。
+# 函数用途: 两种模式共用独立详情围栏，迟到响应不得恢复新会话前的子页或推进其游标。
 def _consume_selected_agent_view(
     agent: object,
     store: object | None,
     session_id: str,
     agent_navigation: object | None,
+    *,
+    tui_runtime: object | None = None,
+    expected_generation: int | None = None,
 ) -> tuple[bool, bool]:
     snapshotter = getattr(agent_navigation, "snapshot", None)
     applier = getattr(agent_navigation, "apply_agent_view", None)
     cursor_reader = getattr(agent_navigation, "event_cursor", None)
     if not callable(snapshotter) or not callable(applier) or not callable(cursor_reader):
         return True, False
-    snapshot = snapshotter()
-    run_id = str(getattr(snapshot, "active_run_id", "") or "").strip()
-    if not run_id:
-        return True, False
-    cursor = max(0, int(cursor_reader(run_id) or 0))
+    root = tui_runtime if tui_runtime is not None else getattr(agent_navigation, "root_runtime", None)
+    with getattr(root, "_lock", nullcontext()):
+        generation = getattr(root, "conversation_reset_generation", 0)
+        if expected_generation is not None and generation != expected_generation:
+            return True, False
+        snapshot = snapshotter()
+        run_id = str(getattr(snapshot, "active_run_id", "") or "").strip()
+        if not run_id:
+            return True, False
+        cursor = max(0, int(cursor_reader(run_id) or 0))
     try:
         if store is None:
             fetcher = getattr(agent, "request_agent_view", None)
@@ -687,10 +696,21 @@ def _consume_selected_agent_view(
                 after=cursor,
             )
     except Exception:
-        return False, False
-    if not isinstance(payload, Mapping) or payload.get("ok") is not True:
-        return False, False
-    return True, bool(applier(run_id, payload))
+        payload = None
+    changed = False
+    # LLM: 只在同代且仍进入同一子代理时消费原DTO；不做IO，旧响应与旧错误都不能污染新页。
+    # 函数用途: 原子发表子页及其游标，并返回本次实际显示变化。
+    def publish():
+        nonlocal changed
+        if str(getattr(snapshotter(), "active_run_id", "") or "").strip() != run_id:
+            return True
+        if not isinstance(payload, Mapping) or payload.get("ok") is not True:
+            return False
+        changed = bool(applier(run_id, payload))
+        return True
+    guard = getattr(root, "apply_conversation_snapshot", None)
+    ok = guard(generation, publish) if callable(guard) else publish()
+    return ok, changed
 
 
 # LLM: user/process必须带canonical显示事件；process没有正文，发布后才确认消息游标，不改变运行或审批。

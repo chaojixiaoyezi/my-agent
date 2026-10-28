@@ -1,3 +1,27 @@
+## 2026-10-28 Wave 9 B3 Round 4：详情读取移出reset锁
+
+来源：`07-tasks/fix-r4-wave9-b3.md`；起点 `7978f83196ce4fa5197a272a98fed0c1b9bc8a38`，批次基线 `db4d5de92`。业务改动仅在指定工作树，未推送、未部署。
+
+- Gateway/本地父页的 `publish` 只发表内存投影；父页提交返回、释放根reset锁后再消费选中子代理详情。本地审批续租和列表读取也先在锁外完成，原代次回调只同步面板；原用户决定回写器、身份及审批事务不变，没有自动批准。
+- `_consume_selected_agent_view` 在原根锁内一起采样代次、准确run_id及子页游标，HTTP/本地详情取数在锁外；响应再沿同一 `apply_conversation_snapshot` 围栏提交。父页已过期时通过 `expected_generation` 跳过子页请求，详情期间reset或改选则丢弃正文和游标；实际变更才invalidate。
+- 新增6个参数化案例（Gateway/本地 × 正常/在途reset/在途切页），使用真实主子runtime与导航，仅替代HTTP/文件边界；旧版6例均先因详情IO持有根锁而失败。断言父页先提交、选择采样持锁、详情及审批取数不持锁，reset/切页后旧子页正文和游标不变。没有用sleep抢时序；新增函数及测试的中文双层注释放在装饰器上方。
+- 当前专项 **110 passed / 0 failed / 0 errors / 0 skipped**；threading/worker/navigation三文件 **49 passed**，runtime（含审批队列） **49 passed**，均无失败、错误或跳过。计数由本轮JUnit XML回读。
+- 独立Astra内联源码静态复核在所给范围未发现阻塞；未访问仓库或运行测试，不能代替门禁。首次跨代理输入引用不可读的复核已取消，未把读取失败算作通过，也未为此创建占位文件或扩目录权限。
+
+复现（工作树根目录；临时文件/报告限定本工作树）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='--basetemp=.pytest_cache/wave9-b3-r4-final-tmp --junitxml=.pytest_cache/wave9-b3-r4-final.xml' python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest agent_py_agent/tests/test_tui_threading.py agent_py_agent/tests/test_tui_worker_paths.py agent_py_agent/tests/test_tui_agent_navigation.py -q --tb=short --basetemp=.pytest_cache/wave9-b3-r4-tui-tmp --junitxml=.pytest_cache/wave9-b3-r4-tui.xml
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest agent_py_agent/tests/test_tui_runtime.py -q --tb=short --basetemp=.pytest_cache/wave9-b3-r4-runtime-tmp --junitxml=.pytest_cache/wave9-b3-r4-runtime.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+观察边界：本地真实RLock/导航状态下的确定性边界注入，`_is_owned()`仅用于测试。未验证真实HTTP传输、键盘 `/new`、浏览器、跨线程快速反复导航或其它Python实现；切页案例不代表所有并发导航交错已验收。
+
 ## 2026-10-28 Wave 9 B3 Round 3：轮询起点原子采样
 
 来源：`07-tasks/fix-r3-wave9-b3.md`；起点 `5cfbb4d56efe57dc966ac92aec7ddaf56e8e1b90`，批次基线 `db4d5de92`。业务文件改动仅限指定工作树，未推送、未部署。
