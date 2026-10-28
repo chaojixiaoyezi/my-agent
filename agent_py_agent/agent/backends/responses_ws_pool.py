@@ -1,4 +1,4 @@
-# LLM: Process-local Responses-only cache; keys bind host owner/thread, credential fingerprint, provider and exact endpoint.
+# LLM: Process-local Responses-only cache; keys bind host owner/thread, model, credential fingerprint, provider and exact endpoint.
 #   Idle entries NEVER own provider leases. State eviction/reset revokes in-flight returns by object identity.
 # 模块用途: 保存有界会话亲和状态与空闲WebSocket，主动TTL回收，不持久化秘密或历史。
 from __future__ import annotations
@@ -15,8 +15,9 @@ from .gateway_helpers import gateway_request_body
 from .provider_headers import current_provider_session
 
 
-# LLM: Scope comes only from the host ContextVar, never a model-controlled prompt_cache_key; all auth/custom headers affect identity.
-# 函数用途: 生成不含明文凭据的连接池键，无宿主身份时禁用复用。
+# LLM: 宿主ContextVar决定owner/thread隔离，所有认证/自定义头参与指纹；规范化模型名隔离socket与sticky状态。
+#   session保持为末项，原close(session)会一次清理同会话所有模型，不借prompt_cache_key推断宿主身份。
+# 函数用途: 生成不含明文凭据、含模型维度的连接池键，无宿主身份时禁用复用。
 def session_pool_key(request, provider_id: str = "") -> tuple | None:
     session = current_provider_session()
     if not session:
@@ -30,7 +31,8 @@ def session_pool_key(request, provider_id: str = "") -> tuple | None:
     endpoint = urlunsplit((url.scheme.lower(), authority, url.path.rstrip("/"), url.query, ""))
     headers = sorted((name.lower(), value) for name, value in request.headers.items() if name.lower() != "x-codex-turn-state")
     fingerprint = hashlib.sha256(json.dumps([request.api_key, headers], ensure_ascii=True).encode()).hexdigest()
-    return provider_id, endpoint, fingerprint, session
+    model = str((request.payload or {}).get("model") or "").strip()
+    return provider_id, endpoint, fingerprint, model, session
 
 
 # LLM: Values are opaque printable ASCII from provider response headers, not custom configuration or logs.
@@ -200,16 +202,20 @@ def incremental_payload(entry: ConnectionEntry, payload: dict) -> dict:
     return payload
 
 
-# LLM: Terminal output or ordered output_item.done is projected through the SAME native replay codec as the next generate call.
-# 函数用途: 保存当前物理连接的完整历史锚点，压缩响应不建立旧链。
+# LLM: 空终态output的完整done事件先复用既有collector排序/去重，保留_CollectedResponse的真实索引与冲突属性；
+#   非空终态output仍权威。随后用同一个native重放codec生成下轮前缀，压缩或结构冲突不建立旧链。
+# 函数用途: 按正常响应收集器同一顺序保存连接历史锚点，避免乱序done打断增量续接。
 def remember_completed(entry: ConnectionEntry, payload: dict, response: dict, done: list) -> None:
-    from .responses_wire import message_items, response_fields
+    from .responses_wire import collect_response, message_items, response_fields
 
     entry._ws_last_response_id, entry._ws_last_items, entry.options = "", b"", b""
-    output = response.get("output") or done
+    if not response.get("output") and done:
+        events = [*done, {"type": "response.completed", "response": response}]
+        response = collect_response((json.dumps(event, ensure_ascii=False) for event in events), None, None)
+    output = response.get("output") or []
     if any(item.get("type") in {"compaction", "compaction_trigger"} for item in [*payload.get("input", []), *output]):
         return
-    fields = response_fields({**response, "output": output}, str(payload.get("model") or ""))
+    fields = response_fields(response, str(payload.get("model") or ""))
     if fields.get("truncated"):
         return
     replay = message_items({"role": "assistant", "content": fields["assistant_content_blocks"]}, str(payload.get("model") or ""))

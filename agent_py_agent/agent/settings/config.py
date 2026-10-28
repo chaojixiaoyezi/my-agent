@@ -628,7 +628,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     model_queue_wait_seconds: float = 0.0
     # 每进程每HTTP origin的物理请求上限；0关闭，只按可信owner轮转，不跨进程计额。
     provider_max_concurrent_requests: int = 0
-    # Responses WebSocket idle TTL and process-local idle pool capacity; zero disables reuse.
+    # Responses会话WebSocket的空闲存活秒数与进程内空闲连接池容量；任一值为0即关闭复用。
     responses_ws_idle_ttl_seconds: int = 300
     responses_ws_max_idle_connections: int = 32
     max_tokens: int = DEFAULT_MODEL_MAX_TOKENS

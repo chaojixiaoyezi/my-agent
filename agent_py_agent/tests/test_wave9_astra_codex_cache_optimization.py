@@ -237,18 +237,26 @@ def test_generator_cancel_discards_connection(monkeypatch):
     assert conn.closed and provider_endpoint_counts(request()) == (0, 0)
 
 
-# LLM: Changing instructions/tools/options/model must not silently rely on an earlier server-side prefix.
-# 函数用途: 确认非input配置变化也会失效增量链。
+# LLM: 同模型instructions/tools变化在原连接上发全量；切模型必须另用连接，两者都不能继承旧响应ID。
+# 函数用途: 确认非input配置变化失效增量链，模型变化额外隔离物理连接。
 @pytest.mark.parametrize("change", [{"model": "new-model"}, {"instructions": "new-system"}, {"tools": []}])
 def test_option_changes_send_full_input(monkeypatch, change):
     conn = Socket([complete(), complete("r2")])
-    monkeypatch.setattr(ws, "_connect", lambda req: Socket([complete()]) if conn.closed else conn)
+    fresh = Socket([complete("new-model")])
+    opened = []
+    monkeypatch.setattr(ws, "_connect", lambda req: opened.append(req) or (conn if len(opened) == 1 else fresh))
     with provider_session_scope(("local", "a"), "one"):
         run(request())
         req = request([USER, RESULT])
         run(replace(req, payload={**req.payload, **change}))
     assert not conn.closed
-    assert "previous_response_id" not in json.loads(conn.sent[1])
+    if "model" in change:
+        assert len(opened) == 2 and not fresh.closed
+        sent = json.loads(fresh.sent[0])
+    else:
+        assert len(opened) == 1
+        sent = json.loads(conn.sent[1])
+    assert "previous_response_id" not in sent and sent["input"] == [USER, RESULT]
 
 
 # LLM: Verify public configuration propagation through real factory; never use setattr as a substitute for a declared key.
@@ -582,3 +590,150 @@ def test_native_loopback_websocket_reuses_connection():
             server.shutdown()
             worker.join(timeout=3)
         assert not worker.is_alive()
+
+
+# LLM: Red-test cleanup only; it runs after assertions and releases traceback-held leases so a regression cannot poison other tests.
+# 函数用途: 清理由失败回归保留的租约，不让故障断言依赖GC或污染后续测试。
+def _release_traceback_leases(error):
+    from agent_py_agent.agent.backends.request_scope import ProviderLease
+
+    traceback = error.__traceback__
+    while traceback is not None:
+        lease = traceback.tb_frame.f_locals.get("lease")
+        if isinstance(lease, ProviderLease):
+            lease.release()
+        traceback = traceback.tb_next
+
+
+# LLM: Retain the actual TypeError traceback and assert counts inside except, before fixture cleanup or any GC can release the lease.
+# 函数用途: 复现新连接诊断异常泄漏，并确认随后的同端点请求能立刻获准。
+def test_new_connection_diagnostic_failure_releases_lease_with_retained_traceback(monkeypatch):
+    import time
+
+    opened, retained = [], []
+    conn = Socket([complete()])
+    monkeypatch.setattr(ws, "_connect", lambda req: opened.append(req) or conn)
+    req = request()
+    invalid = replace(req, payload={**req.payload, "unsupported": object()})
+    try:
+        with provider_session_scope(("local", "a"), "diagnostic-failure"):
+            with provider_attempt_observer(lambda event: None, cache_diagnostics=True):
+                try:
+                    run(invalid)
+                except TypeError as error:
+                    retained.append(error)
+                    assert retained[0].__traceback__ is not None
+                    assert provider_endpoint_counts(req) == (0, 0)
+                    assert not opened, "the diagnostic failure must precede any physical connection"
+                    result = run(replace(req, deadline=time.monotonic() + 1))
+                    assert result["id"] == "r1" and len(opened) == 1
+                    assert provider_endpoint_counts(req) == (0, 0)
+                else:
+                    pytest.fail("cache diagnostics must reject a non-JSON payload")
+    finally:
+        for error in retained:
+            _release_traceback_leases(error)
+
+
+# LLM: BaseException at either admission diagnostic boundary must not depend on exception GC, and an opened-but-unreturned socket is owned here.
+# 函数用途: 验证诊断被中断时及时释放租约，并关闭尚未交给调用方的连接。
+@pytest.mark.parametrize("phase", ["started", "response_opened"])
+def test_connection_diagnostic_interrupt_releases_lease(monkeypatch, phase):
+    conn = Socket([complete()])
+    failure = KeyboardInterrupt("diagnostic interrupted")
+    monkeypatch.setattr(ws, "_connect", lambda req: conn)
+
+    # LLM: Fault injection targets host diagnostic emission, not the socket handshake or the provider error classifier.
+    # 函数用途: 在指定诊断阶段模拟真实BaseException中断。
+    def emit(event):
+        if event["status"] == phase:
+            raise failure
+
+    monkeypatch.setattr(ws, "_emit_provider_attempt", emit)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="diagnostic interrupted") as caught:
+            run(request())
+        assert caught.value is failure and caught.value.__traceback__ is not None
+        assert provider_endpoint_counts(request()) == (0, 0)
+        if phase == "response_opened":
+            assert conn.closed
+    finally:
+        _release_traceback_leases(failure)
+
+
+# LLM: Build next-turn history through the real collector/replay codec; the WS anchor must follow the same index, duplicate and unknown-index rules.
+# 函数用途: 钉住乱序done、重复done及未知索引锚点仍能接上下一轮增量链。
+@pytest.mark.parametrize("indices", [(1, 0), (1, 0, 1), (1, None, 0)])
+def test_out_of_order_done_events_preserve_incremental_anchor(monkeypatch, indices):
+    from agent_py_agent.agent.backends.responses_wire import message_items, response_fields
+
+    calls = [CALL, {**CALL, "call_id": "c2", "arguments": json.dumps({"path": "b"}, sort_keys=True)}]
+    note = {"id": "note", "type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "note"}]}
+    events = [{"type": "response.output_item.done", "item": note if index is None else calls[index],
+               **({"output_index": index} if index is not None else {})} for index in indices]
+    conn = Socket([[*events, *complete()], complete("r2")])
+    opened = []
+    monkeypatch.setattr(ws, "_connect", lambda req: opened.append(req) or conn)
+    results = [RESULT, {**RESULT, "call_id": "c2", "output": "second result"}]
+    with provider_session_scope(("local", "a"), "out-of-order"):
+        first = run(request())
+        blocks = response_fields(first, "m")["assistant_content_blocks"]
+        replay = message_items({"role": "assistant", "content": blocks}, "m")
+        assert [item["call_id"] for item in replay if item.get("type") == "function_call"] == ["c1", "c2"]
+        second = run(request([USER, *replay, *results]))
+    assert len(opened) == 1 and second["usage"]["ws_connection_reused"] is True
+    assert second["usage"]["incremental_chain_hit"] is True
+    sent = json.loads(conn.sent[1])
+    assert sent["previous_response_id"] == "r1" and sent["input"] == results
+
+
+# LLM: Model-specific sockets and turn-state must stay isolated under the same host identity; returning to model A should retain A's valid chain.
+# 函数用途: 验证同线程切模型分连接和路由状态，切回时仍复用原模型链，reset一次清理两者。
+def test_same_session_models_have_separate_sockets_and_state(monkeypatch):
+    from agent_py_agent.agent.backends.responses_ws_pool import session_pool_key
+
+    a = Socket([complete("a1"), complete("a2")], state="model-a-node")
+    b = Socket([complete("b1")], state="model-b-node")
+    sockets = iter([a, b])
+    opened = []
+    monkeypatch.setattr(ws, "_connect", lambda req: opened.append(req) or next(sockets))
+    base = request()
+    req_a = replace(base, payload={**base.payload, "model": "model-a"})
+    req_b = replace(base, payload={**base.payload, "model": "model-b"})
+    with provider_session_scope(("local", "a"), "same-model-thread"):
+        run(req_a)
+        second = run(req_b)
+        assert len(opened) == 2, "model-a and model-b must not share a physical websocket"
+        assert second["usage"]["ws_connection_reused"] is False
+        assert "x-codex-turn-state" not in opened[1].headers
+        assert json.loads(b.sent[0])["model"] == "model-b"
+        third = run(replace(req_a, payload={**req_a.payload, "input": [USER, RESULT]}))
+        assert len(opened) == 2 and third["usage"]["incremental_chain_hit"] is True
+        assert json.loads(a.sent[1])["previous_response_id"] == "a1"
+        assert json.loads(a.sent[1])["input"] == [RESULT]
+        assert session_pool_key(req_a) != session_pool_key(req_b)
+        spaced = replace(req_a, payload={**req_a.payload, "model": " model-a "})
+        assert session_pool_key(spaced) == session_pool_key(req_a)
+        ws.reset_responses_session()
+        assert a.closed and b.closed
+
+
+# LLM: Reusing the collector must preserve conflict metadata, not merely its sorted output list; malformed tool identities cannot seed a chain.
+# 函数用途: 补证done身份冲突在锚点回填中仍然有效，不因字典复制丢失拒绝工具标记。
+def test_conflicting_done_identity_does_not_seed_incremental_anchor(monkeypatch):
+    from agent_py_agent.agent.backends.responses_wire import response_fields
+    from agent_py_agent.agent.backends.responses_ws_pool import session_pool_key
+
+    second = {**CALL, "call_id": "conflicting-call"}
+    events = [{"type": "response.output_item.done", "output_index": 0, "item": item} for item in (CALL, second)]
+    conn = Socket([[*events, *complete()]])
+    monkeypatch.setattr(ws, "_connect", lambda req: conn)
+    with provider_session_scope(("local", "a"), "identity-conflict"):
+        response = run(request())
+        fields = response_fields(response, "m")
+        assert fields["truncated"] is True and not fields["tool_use_blocks"]
+        entry = ws._POOL.take(session_pool_key(request()))
+        try:
+            assert entry._ws_last_response_id == "" and entry._ws_last_items == b""
+        finally:
+            entry.discard()

@@ -90,6 +90,7 @@ def websocket_url(url: str) -> str:
 
 # LLM: The real collector stops at terminal yield: release/clean-pool return must PRECEDE it. Borrowed sockets are request-exclusive.
 #   Recovery is bounded to once, before output, only for structured previous-ID rejection/connection-close; max_retries=0 remains strict.
+#   done保留完整事件及output_index，增量锚点复用既有collector的排序、去重与未知索引规则，不另建到达顺序历史。
 # 函数用途: 按宿主会话复用连接和增量链，逐请求借还租约，脏连接即时丢弃。
 def iter_responses_websocket(request: GatewayRequest, *, provider_id: str = "", idle_ttl_seconds: float = 300,
                              max_idle: int = 32) -> Iterator[str]:
@@ -131,7 +132,7 @@ def iter_responses_websocket(request: GatewayRequest, *, provider_id: str = "", 
                         terminal_text = text
                         break
                     if kind == "response.output_item.done" and isinstance(event.get("item"), dict):
-                        done.append(event["item"])
+                        done.append(event)
                     visible = visible or kind not in {"response.created", "response.in_progress", "codex.rate_limits"}
                     yield text
             response = (terminal or {}).get("response", {})
@@ -276,26 +277,40 @@ def _close_admitted_connection(connection, completed: bool) -> None:
 
 
 # LLM: 握手失败按 HTTP 同一套可重试状态和网络错误判断；每次尝试都发布 started / failed / response_opened 观察事件，
-#   与 HTTP 传输的账本口径一致（method=WEBSOCKET）。用户停止优先，不进入重试。
-# 函数用途: 为首次物理请求取得名额并握手；成功名额只活到本次响应终态而非连接寿命。
+#   与HTTP传输的账本口径一致。取得lease后立即纳入BaseException保护；诊断异常原样抛出，不误归握手失败。
+#   连接返回前所有失败都归还名额；已打开但尚未交给调用方的连接同时关闭，取消不依赖traceback释放或GC。
+# 函数用途: 保护首次请求从取得名额到交出连接的全部步骤，失败立即归还而不留下隐形占用。
 def _open_connection(request: GatewayRequest):
     last_attempt = len(_RETRYABLE_HTTP_DELAYS_SECONDS) if request.max_retries is None else request.max_retries
     for attempt in range(last_attempt + 1):
+        connection = None
         lease = acquire_provider_request(request, _emit_provider_queue)
-        event = _attempt_event(request, attempt + 1)
-        _emit_provider_attempt({**event, "status": "started"})
         try:
-            connection = _connect_admitted(request, lease)
-        except Exception as exc:  # noqa: BLE001 握手/网络异常统一交给下面的分类，不吞掉
-            retry = _handshake_retry(exc, request, attempt, last_attempt)
-            _emit_provider_attempt({**event, "status": "failed", "error_type": type(exc).__name__,
-                                    "http_status": _status_code(exc), "retry_scheduled": retry})
-            if not retry:
-                raise _handshake_error(exc, request) from exc
-            _request_retry_wait(request, _network_retry_delay_seconds(attempt))
-            continue
-        _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
-        return connection
+            event = _attempt_event(request, attempt + 1)
+            _emit_provider_attempt({**event, "status": "started"})
+            try:
+                connection = _connect_admitted(request, lease)
+            except Exception as exc:  # noqa: BLE001 仅握手/网络异常进入既有分类与退避
+                retry = _handshake_retry(exc, request, attempt, last_attempt)
+                _emit_provider_attempt({**event, "status": "failed", "error_type": type(exc).__name__,
+                                        "http_status": _status_code(exc), "retry_scheduled": retry})
+                if not retry:
+                    raise _handshake_error(exc, request) from exc
+                _request_retry_wait(request, _network_retry_delay_seconds(attempt))
+                continue
+            _emit_provider_attempt({**event, "status": "response_opened", "http_status": 101})
+            return connection
+        except BaseException:
+            if lease is not None:
+                lease.release()
+            if connection is not None:
+                connection._provider_request_lease = None
+                try:
+                    connection.close_socket()
+                except BaseException:
+                    # 清理失败不能遮住原始诊断异常或用户中断；租约已经显式归还。
+                    pass
+            raise
     raise RuntimeError("unreachable websocket retry state")
 
 

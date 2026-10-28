@@ -1,3 +1,28 @@
+## 2026-10-28 Wave 9 B5 Round 2：诊断租约、done锚点顺序与模型隔离
+
+来源：`07-tasks/fix-wave9-b5.md`（Stage 3：c8/c16/Argon审计）；本轮干净起点`a702729602fb5cc65b83334f6a4c30b7ed0dab9b`，门禁比较基线仍用任务指定的`db4d5de92`。仅原派工工作树和`wave9-b5`分支，不推送、不合并main、不部署，不运行已退役的体积检查。
+
+逐项核实与修复：
+
+1. `_open_connection`取得租约后，诊断生成/started事件原先在保护范围外。现立即进入`BaseException`保护，诊断失败保留原异常，不误归握手/网络错误；交出连接前失败立即归还租约，已打开但未交出的socket一并关闭。复用连接的准入和诊断原本已经处于iterator的`try/finally`内，保留该链路。新增测试保留实际异常/traceback，在`except TypeError`内断言计数立即为`(0, 0)`并实际完成随后同端点请求；另覆盖started/response_opened诊断中断。原版3项均红，修复后通过。
+2. done集合现在保留完整事件及`output_index`；空terminal output的锚点通过既有`collect_response`排序/去重，直接把其返回载体交给`response_fields`，不再展开字典丢失真实索引/冲突属性。乱序`1→0`、重复`1→0→1`、未知索引混合`1→unknown→0`三项均先观察到增量命中False，修复后都只发送工具结果delta并带previous ID。
+3. 池键加入`str(model or "").strip()`，模型位于session之前，reset按末项仍能清该会话全部模型。回归实际运行同线程`model-a → model-b → model-a`：前两次必须开不同socket、B不继承A的sticky头，切回A仍走A的有效增量链；覆盖模型名空白归一及reset同时清理两者。原版只开1条socket而失败，修复后通过。原配置变化测试仍保留，切模型额外断言分连接；同模型变instructions/tools仍验证全量、无旧previous ID，没有删除/跳过测试。
+4. YAML与AgentConfig的TTL/容量说明改为中文；改动函数保留双层用途/契约注释。
+
+红绿证据：`.pytest_cache/b5-r2-lease-{red,green}.xml`、`b5-r2-order-{red,green}.xml`、`b5-r2-model-{red,green}.xml`。独立gpt-6-astra high静态审查仅使用内联源码，未发现本轮阻塞项；其建议的response_opened中断和identity conflict元数据补证均已由主代理实际测试覆盖，冲突响应不会建立增量锚点。不声称审查者实际跑过测试或验证真机缓存。
+
+最终结果：指定两测试文件**80项通过**（B5文件49项、队列传输31项）；扩展16测试文件**311项通过，0失败/报错/跳过**，覆盖WS、Responses组包/缓存键/推理/错误、OAuth、配置、物理队列和既有Chat/Messages后端。证据为`.pytest_cache/b5-r2-final.xml`、`.pytest_cache/b5-r2-regression.xml`。指定Ruff通过，`check_doc_sync.py --base db4d5de92`返回`DOC_SYNC_PASS`；基线区间及工作区diff检查通过。未删除测试、放宽断言或添加skip/xfail；旧“模型配置改变发全量”用例升级为同时核对模型物理连接隔离。
+
+本轮指定验收命令（cwd为工作树根）：
+```bash
+python3 -m pytest /tmp/wt-wave9-b5/agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py /tmp/wt-wave9-b5/agent_py_agent/tests/test_provider_queue_transport.py -q --tb=short
+ruff check /tmp/wt-wave9-b5/agent_py_agent/agent/backends /tmp/wt-wave9-b5/agent_py_agent/agent/settings /tmp/wt-wave9-b5/agent_py_agent/tests/test_wave9_astra_codex_cache_optimization.py
+python3 /tmp/wt-wave9-b5/scripts/check_doc_sync.py --base db4d5de92
+git -C /tmp/wt-wave9-b5 diff --check db4d5de92..HEAD
+```
+
+本轮未进行真实astra/sol计费调用、部署或生产长时间运行；不把模拟usage或本机loopback结果外推为真实服务商缓存命中率。
+
 ## 2026-10-28 Wave 9 B5：Responses会话WebSocket与Codex缓存亲和
 
 来源：`07-tasks/wave9-b5.md`，主参考总体计划第7项及任务内Stage 1合同；基线`db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅派工工作树改动，不推送、部署或运行退役的体积检查。
