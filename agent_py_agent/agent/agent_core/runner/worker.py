@@ -74,7 +74,7 @@ def _run_subagent_worker(params: RunSubagentWorkerParams) -> SubAgentRunnerResul
         _close_worker_mcp_clients(worker, params)
 
 
-# LLM: 仅清理worker独立tools；父身份取原运输scope，不猜owner或关闭共享注册表，异常只告警。
+# LLM: 父原tools身份仍跳过；独立门面一律调用close，由其所有权/借用计数决定关闭或释放，异常只告警。
 # 函数用途: 在worker被替换或退出时释放其MCP客户端，不掩盖业务返回或异常。
 def _close_worker_mcp_clients(worker, params: RunSubagentWorkerParams) -> None:
     tools = getattr(worker, "tools", None)
@@ -247,7 +247,7 @@ def _resume_direct_parent_after_session(worker: object, child_run_id: str) -> No
         )
 
 
-# LLM: 保原owner/dispatch授权与模型引用；配置重建前清理旧worker独立MCP，child原roots/dispatch来源保持。
+# LLM: 保原授权/模型/overlay及构造身份比较；两次构造均延迟MCP，只在最终同owner门面尝试进程内借用。
 # 函数用途: 构造子代理依赖并恢复正确模型配置，元数据在准确激活后才条件保存。
 def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
     worker = _construct_transported_worker(simple_agent_cls, params, params.config)
@@ -280,16 +280,23 @@ def _build_worker_agent(simple_agent_cls, params: RunSubagentWorkerParams):
         )
 
         capture_original_child_dispatch(params.request_transport, worker, task)
+    parent = getattr(getattr(getattr(params.request_transport, "scope", None), "execution", None), "agent", None)
+    if parent is not None and parent is not worker:
+        parent_tools, worker_tools = getattr(parent, "tools", None), getattr(worker, "tools", None)
+        share = getattr(worker_tools, "share_same_owner_mcp_state_from", None)
+        if (callable(share) and callable(getattr(parent_tools, "share_same_owner_mcp_state_from", None))
+                and worker_tools.operation_owner_id == parent_tools.operation_owner_id):
+            share(parent_tools)
     return worker
 
 
-# LLM: 无运输保main构造签名；真实child仅复用原scope实际Agent的constructor roots及W bootstrap，不从task/请求补根或更换owner。
+# LLM: 每次构造传真实SimpleAgent的defer_mcp_connect；运输仅复用原constructor roots/bootstrap，不从请求补权限。
 # 函数用途: 构造同来源子代理依赖，W不能借普通Agent初始化旁路绕过原资源门。
-def _construct_transported_worker(simple_agent_cls, params, config):
+def _construct_transported_worker(simple_agent_cls, params, config, *, defer_mcp_connect: bool = True):
     if params.request_transport is None:
-        return simple_agent_cls(config, params.root)
+        return simple_agent_cls(config, params.root, defer_mcp_connect=defer_mcp_connect)
     original = params.request_transport.scope.execution.agent
-    options = {"workspace_roots": original.workspace_roots}
+    options = {"workspace_roots": original.workspace_roots, "defer_mcp_connect": defer_mcp_connect}
     frozen = getattr(original, "_worker_bootstrap", None)
     if frozen is not None:
         options["worker_bootstrap"] = frozen

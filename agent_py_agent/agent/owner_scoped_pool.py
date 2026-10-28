@@ -82,7 +82,7 @@ def _config_with_owner(base_config: Any, owner: Any) -> Any:
     )
 
 
-# LLM: owner只由原池提供；已登记账号禁用通用配置克隆，W仍核原bootstrap及真实home。
+# LLM: owner只由原池提供；冷构造延迟MCP至首个run，已登记账号门及W bootstrap/home核验不变。
 # 函数用途: 为原owner构造唯一Agent，W不能用热配置改变冻结根或返回另一owner实例。
 def build_owner_scoped_agent(
     base_config: Any,
@@ -105,6 +105,7 @@ def build_owner_scoped_agent(
         root,
         workspace_roots=workspace_roots,
         channel_runtime_health_provider=channel_runtime_health_provider,
+        defer_mcp_connect=True,
         **worker_options,
     )
     if worker_bootstrap is not None:
@@ -157,7 +158,7 @@ class OwnerScopedAgentPool:
     池满不进,且被后来的硬 owner 逐出——软活可以等,硬活不能饿死。请求路/盯守路默认
     硬(用户正在交互),后台 seed 路按发现的事实类别显式传 hard。"""
 
-    # LLM: 初始化原池及退休暂存；仅在途离池对象由退休表持有，可选W bootstrap及容量/惰性/合流合同不变。
+    # LLM: 原池锁只管缓存；生命周期锁协调退休关闭与pin重开，MCP I/O始终不持缓存锁，W/合流合同不变。
     # 函数用途: 绑定构建依赖并准备有界缓存、首次构建协调和活动租用计数。
     def __init__(
         self,
@@ -188,6 +189,7 @@ class OwnerScopedAgentPool:
         self._hard_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._soft_agents: OrderedDict[tuple, Any] = OrderedDict()
         self._lock = threading.Lock()
+        self._mcp_lifecycle_lock = threading.RLock()
         self._last_used: dict[tuple, float] = {}
         self._pins: dict[int, int] = {}
         self._retired_agents: dict[int, Any] = {}
@@ -268,23 +270,24 @@ class OwnerScopedAgentPool:
             with self._lock:
                 self._building.pop(key, None)
 
-    # LLM: 租用只固定身份不授予任务权；若进入pin前已被逐出则恢复租用期MCP并在最后pin释放时退役，所有MCP操作移到池锁外。
+    # LLM: 生命周期锁先于池锁；旧关闭先完成才可重开，或新pin先登记使旧关闭推迟，MCP I/O不持池锁。
     # 函数用途: 保护执行中的实例，并在最后一次释放后清理已淘汰实例的MCP资源。
     @contextmanager
     def pin(self, agent: Any, *, touch: bool = True):
         identity = id(agent)
         reopen = False
-        with self._lock:
-            self._pins[identity] = self._pins.get(identity, 0) + 1
-            in_pool = (
-                any(value is agent for value in self._hard_agents.values())
-                or any(value is agent for value in self._soft_agents.values())
-            )
-            if not in_pool:
-                self._retired_agents[identity] = agent
-                reopen = True
-        if reopen:
-            _reopen_agent_mcp_clients(agent)
+        with self._mcp_lifecycle_lock:
+            with self._lock:
+                self._pins[identity] = self._pins.get(identity, 0) + 1
+                in_pool = (
+                    any(value is agent for value in self._hard_agents.values())
+                    or any(value is agent for value in self._soft_agents.values())
+                )
+                if not in_pool:
+                    self._retired_agents[identity] = agent
+                    reopen = True
+            if reopen:
+                _reopen_agent_mcp_clients(agent)
         try:
             yield agent
         finally:
@@ -300,8 +303,28 @@ class OwnerScopedAgentPool:
                 for key, value in (*self._hard_agents.items(), *self._soft_agents.items()):
                     if value is agent and touch:
                         self._last_used[key] = time.monotonic()
-            for retired in ready:
-                _close_agent_mcp_clients(retired)
+            self._close_retired_agents(ready)
+
+    # LLM: Preserve owner validation/build coalescing; coordinated pin restores an agent evicted during get.
+    # 函数用途: 用一个上下文管理器取得并安全租用owner实例，不在池内等待容量。
+    @contextmanager
+    def acquire(self, owner: Any, *, hard: bool = True):
+        agent = self.get(owner, hard=hard)
+        if agent is None:
+            yield None
+        else:
+            with self.pin(agent):
+                yield agent
+
+    # LLM: Pending eviction lists do not authorize close; recheck live references under the same lock order as pin/store.
+    # 函数用途: 在真正关闭前重查缓存与租用，避免锁外旧关闭覆盖新租用。
+    def _close_retired_agents(self, agents: list[Any]) -> None:
+        for agent in agents:
+            with self._mcp_lifecycle_lock:
+                with self._lock:
+                    ready = self._retire_agent_locked(agent)
+                if ready:
+                    _close_agent_mcp_clients(agent)
 
     # LLM: 调用方必须持池锁；身份仍被硬/软表引用则不退役，有pin时暂存强引用，无pin仅返回锁外待关闭列表。
     # 函数用途: 区分仍在池、等待最后租用释放和可以立即清理的实例，不在锁内关闭资源。
@@ -335,8 +358,7 @@ class OwnerScopedAgentPool:
             self._hard_agents.pop(key)
             self._last_used.pop(key, None)
             ready = self._retire_agent_locked(agent)
-        for retired in ready:
-            _close_agent_mcp_clients(retired)
+        self._close_retired_agents(ready)
         return True
 
     # LLM: Read-only polling may inspect an already-loaded owner, but it must not
@@ -384,11 +406,11 @@ class OwnerScopedAgentPool:
                 return existing
             return None
 
-    # LLM: 原硬软准入/双检及记账保持；替换完成后按身份判退役，未采用候选同样退役，关闭全部在锁外且不取消持久工作。
+    # LLM: 生命周期锁先于池锁，防止重新存入与旧关闭交错；保留原硬软/双检，所有MCP I/O仍在池锁外。
     # 函数用途: 存放初始化结果并回收被逐出或未采用实例的MCP资源，仍保护在途租用。
     def _store(self, key: tuple, agent: Any, *, hard: bool) -> Any | None:
         ready = []
-        with self._lock:
+        with self._mcp_lifecycle_lock, self._lock:
             # 双检期间多建的候选也须清理；若是同对象，退休检查会保留池内引用。
             existing = self._hard_agents.get(key)
             if existing is None:
@@ -414,9 +436,40 @@ class OwnerScopedAgentPool:
                 for old_agent in evicted:
                     ready.extend(self._retire_agent_locked(old_agent))
                 result = agent
-        for retired in ready:
-            _close_agent_mcp_clients(retired)
+        self._close_retired_agents(ready)
         return result
+
+    # LLM: Counts are a lock-consistent diagnostic projection, never admission or persistent-task authority.
+    # 函数用途: 返回硬软缓存、退役、租用及构建中的实例计数。
+    def gauges(self) -> dict[str, int]:
+        with self._lock:
+            return {"hard_count": len(self._hard_agents), "soft_count": len(self._soft_agents),
+                    "retired_count": len(self._retired_agents), "pinned_count": len(self._pins),
+                    "building_count": len(self._building)}
+
+    # LLM: Read-only gauge; does not touch LRU or create an agent.
+    # 函数用途: 返回硬缓存实例数。
+    @property
+    def hard_count(self) -> int:
+        return self.gauges()["hard_count"]
+
+    # LLM: Read-only gauge; does not touch LRU or create an agent.
+    # 函数用途: 返回软缓存实例数。
+    @property
+    def soft_count(self) -> int:
+        return self.gauges()["soft_count"]
+
+    # LLM: Read-only gauge; retired does not mean a persistent task has ended.
+    # 函数用途: 返回等待在途租用结束的离池实例数。
+    @property
+    def retired_count(self) -> int:
+        return self.gauges()["retired_count"]
+
+    # LLM: Count distinct pinned agents, not the sum of nested leases.
+    # 函数用途: 返回当前被租用的实例数。
+    @property
+    def pinned_count(self) -> int:
+        return self.gauges()["pinned_count"]
 
     def active_count(self) -> int:
         with self._lock:
@@ -453,8 +506,7 @@ class OwnerScopedAgentPool:
             agent = self._soft_agents.pop(matched_key)
             self._last_used.pop(matched_key, None)
             ready = self._retire_agent_locked(agent)
-        for retired in ready:
-            _close_agent_mcp_clients(retired)
+        self._close_retired_agents(ready)
         return True
 
 

@@ -2,6 +2,11 @@
 # 模块用途: 装配同源声明和可选反馈的工具并交给唯一执行器，沿原目录与搜索展示工具。
 from __future__ import annotations
 
+import hashlib
+import os
+import weakref
+from queue import SimpleQueue
+
 """Bind tools into one immutable runtime snapshot and delegate canonical calls.
 
 这个文件是工具系统的“前台服务台”：登记工具、冻结每轮可见工具集合、从同一快照渲染目录，
@@ -65,6 +70,55 @@ _allowed_tool_set = allowed_tool_set
 _DEFAULT_HIDDEN_TOOL_NAMES = frozenset({"controlled_exec", "capability_request", "record_lesson"})
 # 工具推荐检索纳入候选详情的最低匹配得分阈值。
 MIN_RECOMMENDED_TOOL_SCORE = 3.0
+# Adoption changes a registry's lock references; serialize that one-time handoff, never MCP requests.
+_MCP_SHARE_LOCK = threading.Lock()
+_MCP_BORROW_RELEASES = SimpleQueue()
+_MCP_BORROW_WORKER_LOCK = threading.Lock()
+_MCP_BORROW_WORKER: threading.Thread | None = None
+
+
+# LLM: GC only invokes the reentrant C SimpleQueue.put; one shared daemon does lock-taking/IO at a safe execution point.
+# 函数用途: 在独立安全线程完成回收借用，绝不在GC调用栈获取MCP锁或停止进程。
+def _drain_registry_borrow_releases() -> None:
+    while True:
+        owner, completed = _MCP_BORROW_RELEASES.get()
+        try:
+            _release_registry_borrow(owner)
+        except Exception:
+            logging.getLogger(__name__).exception("MCP borrowed lease release failed")
+        finally:
+            completed.set()
+
+
+# LLM: Start once per process during normal registry construction, never from a GC callback; no MCP connection is opened.
+# 函数用途: 按需启动进程内唯一的借用回收线程，不为每个owner另建线程。
+def _ensure_registry_borrow_worker() -> None:
+    global _MCP_BORROW_WORKER
+    with _MCP_BORROW_WORKER_LOCK:
+        if _MCP_BORROW_WORKER is None or not _MCP_BORROW_WORKER.is_alive():
+            _MCP_BORROW_WORKER = threading.Thread(target=_drain_registry_borrow_releases, name="mcp-borrow-release", daemon=True)
+            _MCP_BORROW_WORKER.start()
+
+
+# LLM: Caller holds the shared prepare lock; finalizer retains owner/completion only, not facade or its tools cycle.
+# 函数用途: 登记一份借用以及显式关闭和GC共用的单次释放凭据。
+def _register_registry_borrow(facade: ToolRegistry) -> None:
+    facade._mcp_adoption_open = False
+    facade._mcp_borrow_count[0] += 1
+    facade._mcp_borrow_release_completed = threading.Event()
+    facade._mcp_borrow_finalizer = weakref.finalize(
+        facade, _MCP_BORROW_RELEASES.put, (facade._mcp_catalog_owner, facade._mcp_borrow_release_completed))
+
+
+# LLM: Called only by explicit close or the release worker, never by GC; same lifecycle→prepare order as owner close/reopen.
+# 函数用途: 归还已消失或显式关闭的借用，最后一份退出后完成父级延迟关闭。
+def _release_registry_borrow(owner: ToolRegistry) -> None:
+    with owner._mcp_lifecycle_lock:
+        with owner._mcp_prepare_lock:
+            owner._mcp_borrow_count[0] = max(0, owner._mcp_borrow_count[0] - 1)
+            close_owner = owner._mcp_deferred_close_requested and owner._mcp_borrow_count[0] == 0
+        if close_owner:
+            _close_registry_clients(owner)
 # list_tools 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。
 _LIVE_LIST_TOOLS_MAX_BYTES = 12_000
 
@@ -641,7 +695,7 @@ def _register_native_tools(registry, params):
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
 # 类用途: 组合工具实现与原权限快照，在同一发现链中呈现本工作片可忽略的工具短名单。
 class ToolRegistry:
-    # LLM: 原生命周期和连接策略不变；审计组工具仅沿宿主真实owner绑定注册，权限不取插件安装者。
+    # LLM: 每个工具门面独立；MCP生命周期锁协调借用/关闭/重开，prepare锁仍仅串行连接与目录刷新。
     # 函数用途: 初始化owner工具表和唯一连接生命周期，按宿主参数决定何时首次连接。
     def __init__(
         self,
@@ -654,6 +708,16 @@ class ToolRegistry:
         self._mcp_clients: list[Any] = []
         self._mcp_connected_state: list[bool] = [False]
         self._mcp_catalog_owner = self
+        self._mcp_lifecycle_lock = threading.RLock()
+        self._mcp_borrowed = False
+        self._mcp_adoption_open = True
+        self._mcp_borrow_released = False
+        self._mcp_borrow_count = [0]
+        self._mcp_borrow_finalizer = None
+        self._mcp_borrow_release_completed = None
+        _ensure_registry_borrow_worker()
+        self._mcp_owner_pid = os.getpid()
+        self._mcp_deferred_close_requested = False
         self.workspace_root = params.workspace_root.resolve()
         self.workspace_roots = params.workspace_roots or [self.workspace_root]
         self.path_access_mode = params.path_access_mode
@@ -696,7 +760,7 @@ class ToolRegistry:
     def ensure_mcp_connected(self) -> bool:
         return _ensure_registry_mcp_connected(self)
 
-    # LLM: 权限视图只重建基础文件/进程工具；其他 handler、存储、MCP 连接仍共享原权威，不启动第二套服务。
+    # LLM: 权限视图只重建基础工具并取得一份MCP借用；创建/释放共生命周期锁，不授新owner权限。
     # 函数用途: 给一个工作片生成独立权限视图，避免切 Full Access 热改同用户其他正在执行的会话。
     def with_access_policy(self, *, access_mode: str, path_access_mode: str, owner_scope_root: str):
         from copy import copy
@@ -705,18 +769,65 @@ class ToolRegistry:
                          path_access_mode=path_access_mode, owner_scope_root=owner_scope_root)
         if params == self._construction_params:
             return self
-        view = copy(self)
-        view._construction_params = params
-        view.path_access_mode = path_access_mode
-        view.owner_scope_root = owner_scope_root
-        view.tools = {}
-        register_base_tools(view, params)
-        view.register(ToolSearchTool(view))
-        view.register(ListToolsTool(view))
-        for name, tool in self.tools.items():
-            if name not in view.tools:
-                view.register(tool)
-        return view
+        with self._mcp_lifecycle_lock, self._mcp_prepare_lock:
+            if self._mcp_closed.is_set() or self._mcp_borrow_released or self._mcp_catalog_owner._mcp_deferred_close_requested:
+                raise RuntimeError("MCP lifecycle is closing")
+            view = copy(self)
+            view._mcp_borrowed = True
+            view._mcp_borrow_released = False
+            view._construction_params = params
+            view.path_access_mode = path_access_mode
+            view.owner_scope_root = owner_scope_root
+            view.tools = {}
+            register_base_tools(view, params)
+            view.register(ToolSearchTool(view))
+            view.register(ListToolsTool(view))
+            for name, tool in self.tools.items():
+                if name not in view.tools:
+                    view.register(tool)
+            _register_registry_borrow(view)
+            return view
+
+    # LLM: Ownership is explicit, not inferred from tool-object identity or a shared Event.
+    # 函数用途: 判断当前门面是否负责底层MCP连接的最终关闭。
+    def owns_mcp_lifecycle(self) -> bool:
+        return getattr(self, "_mcp_catalog_owner", self) is self and not self._mcp_borrowed
+
+    # LLM: Actual construction DTO owns MCP config; server JSON includes timeout/connect_timeout, env/cwd and command/args.
+    # 函数用途: 计算MCP连接与宿主凭据环境边界的稳定指纹，不输出配置正文。
+    def _mcp_config_fingerprint(self) -> str:
+        params = self._construction_params
+        return hashlib.sha256(json.dumps({
+            "servers": params.mcp_servers or {},
+            "credential_env_names": sorted(params.host_credential_env_names),
+        }, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+    # LLM: Only a fresh same-owner same-process facade may adopt identical MCP config; no agent-bound handlers are copied.
+    # 函数用途: 引用计数借用同用户父注册表的连接状态，拒绝跨用户或配置漂移。
+    def share_same_owner_mcp_state_from(self, source: ToolRegistry) -> bool:
+        if not self.operation_owner_id or self.operation_owner_id != source.operation_owner_id:
+            raise PermissionError("Cross-owner MCP sharing is forbidden")
+        if self is source or os.getpid() != source._mcp_owner_pid:
+            return False
+        with _MCP_SHARE_LOCK:
+            if not self._mcp_adoption_open or self._mcp_borrowed or self._mcp_prepare_lock is source._mcp_prepare_lock:
+                return False
+            with self._mcp_lifecycle_lock, source._mcp_lifecycle_lock, self._mcp_prepare_lock, source._mcp_prepare_lock:
+                if (self._mcp_closed.is_set() or self._mcp_connected_state[0] or self._mcp_borrow_count[0]
+                        or self._mcp_clients or source._mcp_closed.is_set() or source._mcp_borrow_released
+                        or source._mcp_catalog_owner._mcp_deferred_close_requested):
+                    return False
+                if self._mcp_config_fingerprint() != source._mcp_config_fingerprint():
+                    return False
+                for attr in ("_mcp_prepare_lock", "_mcp_lifecycle_lock", "_mcp_closed", "_mcp_clients",
+                             "_mcp_connected_state", "_mcp_retry_state", "_mcp_catalog_owner", "_mcp_borrow_count"):
+                    setattr(self, attr, getattr(source, attr))
+                self._mcp_borrowed = True
+                self._mcp_borrow_released = False
+                _register_registry_borrow(self)
+                if self._mcp_connected_state[0]:
+                    _project_shared_mcp_tools(self)
+                return True
 
     # LLM: 注册表只存进程级实现；是否能给某个请求使用由 runtime_snapshot 决定。
     # 函数用途: 按稳定工具名登记一个实现；重复名称必须在装配期失败，不能静默换 handler。
@@ -784,9 +895,36 @@ class ToolRegistry:
             default_deferral_enabled=bool(self.catalog_default_deferral_enabled),
         )
 
+    # LLM: Lifecycle lock fences final close/reopen; do not hold prepare while stopping, since stop must interrupt blocked discovery.
+    # 函数用途: 借用者只释放一次，所有者延迟到最后借用退出才关闭底层连接。
     def close_mcp_clients(self) -> None:
-        """关闭所有已连接的 MCP server 子进程(进程生命周期收尾)。幂等。"""
-        _close_registry_clients(self)
+        with self._mcp_lifecycle_lock:
+            if self._mcp_borrowed:
+                with self._mcp_prepare_lock:
+                    if self._mcp_borrow_released:
+                        return
+                    self._mcp_borrow_released = True
+                    self._mcp_clients = []
+                    self._mcp_connected_state = [False]
+                if self._mcp_borrow_finalizer.detach() is not None:
+                    _release_registry_borrow(self._mcp_catalog_owner)
+                    self._mcp_borrow_release_completed.set()
+            elif self.owns_mcp_lifecycle():
+                self._mcp_deferred_close_requested = True
+                if not self._mcp_borrow_count[0]:
+                    _close_registry_clients(self)
+
+    # LLM: Only the owner may reopen, serialized with close; borrowed/released facades never revive parent state.
+    # 函数用途: 恢复重新租用实例的连接资格，空连接池下一轮重新初连。
+    def reopen_mcp_clients(self) -> None:
+        if not self.owns_mcp_lifecycle():
+            return
+        with self._mcp_lifecycle_lock, self._mcp_prepare_lock:
+            self._mcp_deferred_close_requested = False
+            self._mcp_closed.clear()
+            if not self._mcp_clients:
+                self._mcp_connected_state[0] = False
+            self._mcp_retry_state.clear()
 
     # LLM: 可用性检查始终无副作用；普通 MCP 恢复与插件按代接线只发生在新 run 冻结工具快照之前。
     # 函数用途: 为下一轮同步完整插件贡献和 MCP 连接，各权限视图分别生成自己的工具表。
@@ -1097,16 +1235,21 @@ def _execution_workspace_roots(
 # LLM: 初连与运行准备共用原锁/池/关闭事件；初连只向原owner发表目录，后继调用等发现完成后投影，不另建连接。
 # 函数用途: 为公开ensure入口完成唯一首次MCP连接，保留默认eager、失败退避和关闭不复活语义。
 def _ensure_registry_mcp_connected(registry: ToolRegistry) -> bool:
-    if registry._mcp_closed.is_set():
+    if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
         return False
+    # 与借用共门关闭首次接管窗口，再取得稳定的prepare锁；后续调用不经过全局门。
+    if registry._mcp_adoption_open:
+        with _MCP_SHARE_LOCK:
+            registry._mcp_adoption_open = False
     with registry._mcp_prepare_lock:
-        if registry._mcp_closed.is_set():
+        if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
             return False
         if registry._mcp_connected_state[0]:
             _project_shared_mcp_tools(registry)
             return False
         registry._mcp_connected_state[0] = True
-        clients = _connect_mcp_servers(registry._mcp_catalog_owner, registry._construction_params.mcp_servers)
+        owner = registry._mcp_catalog_owner
+        clients = _connect_mcp_servers(owner, owner._construction_params.mcp_servers)
         registry._mcp_clients.extend(clients)
         initial_retry_at = time.monotonic() + 1.0
         for client in clients:
@@ -1139,7 +1282,7 @@ def _close_registry_clients(registry: ToolRegistry) -> None:
 # LLM: 新注册表首次连接经原幂等入口；已携客户端池的旧装配没有延后初连状态时只做原恢复，不另建连接或猜配置。
 # 函数用途: 为新运行准备MCP连接并投影视图，保留旧宿主装配的退避与关闭语义。
 def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
-    if registry._mcp_closed.is_set():
+    if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
         return
     if hasattr(registry, "_mcp_connected_state"):
         registry.ensure_mcp_connected()
@@ -1148,7 +1291,7 @@ def _prepare_registry_clients_for_run(registry: ToolRegistry) -> None:
     if plugin_owner is None and (not clients or all(client.is_running() and not getattr(client, "tools_changed", False) for client in clients)):
         return
     with registry._mcp_prepare_lock:
-        if registry._mcp_closed.is_set():
+        if registry._mcp_closed.is_set() or getattr(registry, "_mcp_borrow_released", False):
             return
         if plugin_owner is not None:
             from .plugin_registration import project_plugin_tools, synchronize_plugin_clients

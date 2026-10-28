@@ -167,6 +167,8 @@ def _decrement_admission_counter(counters: dict[str, int], key: str) -> None:
         counters.pop(key, None)
 
 
+# LLM: Admission precedes claim; distinct-user capacity is backpressure, not execution or owner-routing authority.
+# 类用途: 在会话、用户、全局及活跃用户容量上做非阻塞准入记账。
 class GatewayAdmission:
     """三层在飞记账:同会话顺序执行 + 每用户小坑 + 全局大坑。
 
@@ -176,8 +178,11 @@ class GatewayAdmission:
     的 user/assistant 历史；同一用户的不同会话仍可并行。计数只在本进程网关
     派发路径动,claim 的原子性保证不会双记。"""
 
-    def __init__(self) -> None:
+    # LLM: Zero preserves existing callers; dispatch can supply the configured owner-pool limit per scan.
+    # 函数用途: 初始化线程安全的在途计数及可选owner容量。
+    def __init__(self, owner_limit: int = 0) -> None:
         self._lock = threading.Lock()
+        self._owner_limit = max(0, int(owner_limit))
         self._per_user: dict[str, int] = {}
         self._per_conversation: dict[str, int] = {}
         self._total = 0
@@ -199,7 +204,7 @@ class GatewayAdmission:
 
     # LLM: 准入失败必须给出**结构化原因**(哪一层限流),排队等待信号与诊断都只认这个原因码,
     # 不从文案或调用顺序推断。返回空串=已获取。
-    # 函数用途: 尝试获取准入并返回原因码(global_inflight/user_inflight/conversation_busy)。
+    # 函数用途: 尝试获取准入并返回容量或会话忙原因，不在池内等待。
     def try_acquire_report(
         self,
         user_key: str,
@@ -207,12 +212,16 @@ class GatewayAdmission:
         global_limit: int,
         *,
         conversation_key: str = "",
+        owner_limit: int | None = None,
     ) -> str:
         with self._lock:
             if self._total >= max(1, global_limit):
                 return "global_inflight"
             if self._per_user.get(user_key, 0) >= max(1, user_limit):
                 return "user_inflight"
+            capacity = self._owner_limit if owner_limit is None else owner_limit
+            if capacity > 0 and not self._per_user.get(user_key, 0) and len(self._per_user) >= capacity:
+                return "owner_capacity"
             if conversation_key and self._per_conversation.get(conversation_key, 0) >= 1:
                 return "conversation_busy"
             self._per_user[user_key] = self._per_user.get(user_key, 0) + 1
@@ -298,11 +307,16 @@ _ADMISSION_WAIT_REFRESH_SECONDS = 30.0
 _ADMISSION_WAIT_FIELDS = ("admission_wait_at", "admission_wait_reason", "admission_wait_count")
 
 
+# LLM: Existing public config supplies the owner cap; zero in manually constructed limits preserves legacy components.
+# 类用途: 保存当前扫描使用的准入上限，不新增用户配置键。
 @dataclass(frozen=True)
 class AdmissionLimits:
     user_inflight: int
     global_inflight: int
+    owner_inflight: int = 0
 
+    # LLM: Reuse owner_agent_pool_max_agents; invalid/non-positive values follow the pool's existing default 64.
+    # 函数用途: 从现有配置读取用户、全局及owner池容量。
     @classmethod
     def from_config(cls, config: object) -> AdmissionLimits:
         return cls(
@@ -310,6 +324,7 @@ class AdmissionLimits:
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
             ),
+            owner_inflight=_positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64),
         )
 
 
@@ -367,7 +382,7 @@ def dispatch_pending_requests(
 
 
 
-# LLM: 只按组合根是否提供原持久gate分流；Count0保持原计数/claim/失败退槽，C/W不使用内存slot或submit失败清P3。
+# LLM: 按原持久gate分流；Count0在claim前增加配置的活跃用户容量，C/W仍不借内存slot或submit失败清P3。
 # 函数用途: 让原派发算法消费对应的唯一准入门，不新增排队状态。
 def _admit_and_submit(
     paths: GatewayPaths,
@@ -385,6 +400,7 @@ def _admit_and_submit(
         limits.user_inflight,
         limits.global_inflight,
         conversation_key=conversation_key,
+        owner_limit=limits.owner_inflight or None,
     )
     if blocked_reason:
         # 合法排队:把"仍在等准入"这一事实写成结构化字段,客户端据此续期而不是误判超时。
@@ -404,7 +420,7 @@ def _admit_and_submit(
 
 
 
-# LLM: 只提交等待原因/码/时间候选，原T→JSON内重读并节流；C显式携同gate走原生命周期末门，不触碰status/lease/模型进展。
+# LLM: 内存快照只可省略同原因节流写；真正写入仍沿原T→JSON重读/CAS，不能用扫描正文覆盖当前身份。
 # 只按节流窗口决定是否再写一次,不按累计等待时长停止:停止续期等价于"前台报失败、后台照常执行",
 # 那是隐式语义。权威收口由取消/终态/真实失活负责。
 # 函数用途: 在被准入限流的排队请求上记录一次结构化"合法等待"信号(只做节流,不做累计上限)。
@@ -415,6 +431,8 @@ def _record_admission_wait(request: _PendingGatewayRequest, *, reason: str, erro
     }
     if paths is not None:
         fields["admission_wait_error_code"] = str(error_code or "")
+    if isinstance(request.payload, dict) and request.payload and not _current_admission_wait_fields(request.payload, request.path, fields):
+        return
     _write_admission_wait_field(request.path, fields, expected_payload=request.payload, paths=paths, admission_gate=admission_gate)
 
 
@@ -1662,6 +1680,29 @@ class OwnerRouteMismatchError(OwnerScopeUnavailableError):
 
 
 
+# LLM: 原gate始终核身份/输入/租约；满owner时仅收紧该次总量下界，原限制裁决前无新P3，最终只翻译容量原因。
+# 函数用途: 在多进程原准入之前为新owner背压，旧owner及旧路由仍由原gate裁决。
+def _durable_admission_decision(paths, request, gate, ownership, limits):
+    capacity = getattr(limits, "owner_inflight", 0)
+    if capacity <= 0:
+        return gate.admit(request.path, ownership, limits, snapshot=request.payload)
+    from .io import locked_file_transition
+    from .multiprocess_route import owner_digest
+
+    with locked_file_transition(paths.root / "admission" / "owner_capacity.transition"):
+        occupied = gate.occupied_snapshot()
+        if (not request.payload.get("route") and not occupied["unreadable"]
+                and occupied["total"] < limits.global_inflight
+                and not occupied["per_owner"].get(owner_digest(ownership[0]), 0)
+                and len(occupied["per_owner"]) >= capacity):
+            narrowed = AdmissionLimits(limits.user_inflight, min(limits.global_inflight, capacity), capacity)
+            decision = gate.admit(request.path, ownership, narrowed, snapshot=request.payload)
+            if decision.get("status") == "blocked" and decision.get("reason") == "global_inflight":
+                return {**decision, "reason": "owner_capacity"}
+            return decision
+        return gate.admit(request.path, ownership, limits, snapshot=request.payload)
+
+
 # LLM: C 只准入盖章；W 路由保留 pending 给冻结分区认领，只有 C 路由进入本地 claim/submit。
 #   预留只由规范终态释放：claim 失败/回退、submit 失败都不动预留（A3 屏障点），
 #   进程内字典计数在 count>0 时完全不参与（C 本地与各 worker 共用一个持久全局上限）。
@@ -1685,11 +1726,10 @@ def _admit_and_submit_durable(
         _record_admission_wait(request, reason="owner_scope_unavailable", paths=paths, admission_gate=gate)
         return "blocked"
     # mc4-1706：锁外扫描到的请求正文作为快照交给准入，锁内会用同一投影核对归属输入未漂移。
-    decision = gate.admit(
-        request.path,
+    decision = _durable_admission_decision(
+        paths, request, gate,
         (owner, session_scope_for_request(request.payload)),
         limits,
-        snapshot=request.payload,
     )
     status = str(decision.get("status") or "")
     if status == "blocked":
