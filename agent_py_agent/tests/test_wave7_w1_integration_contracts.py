@@ -400,7 +400,7 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     assert promoted_b_event.event == 'published' and promoted_b_event.skill_name == 'promoted-b'
     assert ScriptStore(owner_home).get_script('promoted-b') is not None
 
-    # R5-3: S3 严格 skill_learning_response_schema 包含 candidate_asset 且端到端模型输出自动晋升脚本
+    # R5-3 & R6-1: S3 严格 skill_learning_response_schema 递归满足 OpenAI strict=True 且端到端模型输出自动晋升脚本
     from agent_py_agent.agent.capability.skill_learning import (
         SkillLearningRuntime,
         SkillLearningService,
@@ -415,12 +415,30 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
         snapshot,
     )
     schema = skill_learning_response_schema()
-    assert 'candidate_asset' in schema['properties'] and 'candidate_asset' in schema['required']
+
+    def _assert_openai_strict(node):
+        if not isinstance(node, dict):
+            return
+        if node.get('type') == 'object':
+            assert node.get('additionalProperties') is False
+            props = node.get('properties')
+            assert isinstance(props, dict) and props
+            assert set(node.get('required', ())) == set(props.keys())
+            for sub in props.values():
+                _assert_openai_strict(sub)
+        elif node.get('type') == 'array':
+            _assert_openai_strict(node.get('items'))
+
+    _assert_openai_strict(schema)
     s3_json = json.dumps({
         'schema_version': 'my-agent.skill-learning-output.v1',
         'decision': 'create', 'update_target': '', 'reason': '沉淀确定性脚本', 'name': 's3-e2e-script',
         'description': 'S3端到端自动晋升脚本', 'when_to_use': '需要自动汇总时', 'tags': ['script'], 'body': BODY,
-        'candidate_asset': {'kind': 'script', 'code': 'print("{\\"total\\": 42}")', 'io_contract': {'outputs': ['total']}},
+        'candidate_asset': {
+            'kind': 'script', 'code': 'print("{\\"total\\": 42}")', 'entry_source': '',
+            'steps': [], 'io_contract': {'inputs': [], 'outputs': ['total']},
+            'entry_document': '', 'application_scope': '',
+        },
     })
     assert set(json.loads(s3_json)) == set(schema['required'])
     parsed_dec = parse_skill_learning_decision(s3_json, ())
@@ -436,3 +454,16 @@ def test_holistic_im_outbox_wiring_and_four_carrier_autonomous_promotion(tmp_pat
     assert s3_svc.enqueue_from_finalize(context('s3-script-run', calls=[{'tool': 'shell', 'ok': True, 'tool_round': 1}])) == 'queued'
     s3_res = s3_svc.run_pending()
     assert s3_res.status == 'published' and ScriptStore(owner_home).get_script('s3-e2e-script') is not None
+
+    # R6-2: 当既有正式脚本被改坏或停用后，提交同族新候选必须重新验证发布新脚本并替换失效记录
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    ScriptStore(owner_home).save_script(
+        AssetDescriptor(id='promoted-b', kind='script', name='已改坏脚本B', io_contract={'outputs': ['step']}),
+        'print("{}")',
+    )
+    replaced_c = promote_verified_asset(owner_home, {
+        'kind': 'script', 'name': 'promoted-c-fresh', 'description': '替换改坏同族的新脚本C',
+        'code': 'print("{\\"step\\": 7}")', 'io_contract': {'outputs': ['step']},
+    })
+    assert replaced_c is not None and replaced_c['asset_id'] == 'promoted-c-fresh' and not replaced_c.get('reused')
+    assert ScriptStore(owner_home).get_script('promoted-c-fresh') is not None

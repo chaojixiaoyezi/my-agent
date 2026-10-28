@@ -77,7 +77,7 @@ class SkillLearningMaterial:
     taken_names: frozenset[str] = frozenset()
 
 
-# LLM: 扁平对象、全部字段必填、禁止额外字段，兼容 OpenAI 严格 JSON schema 与 Anthropic 强制工具信封。
+# LLM: 扁平与受控嵌套对象全部字段必填、禁止额外字段，递归兼容 OpenAI 严格 JSON schema 与 Anthropic 强制工具信封。
 # 函数用途: 返回自动总结调用的输出 schema。
 def skill_learning_response_schema() -> dict[str, object]:
     text = {"type": "string"}
@@ -85,20 +85,27 @@ def skill_learning_response_schema() -> dict[str, object]:
     properties["schema_version"] = {"type": "string", "enum": [OUTPUT_SCHEMA_VERSION]}
     properties["decision"] = {"type": "string", "enum": list(DECISIONS)}
     properties["tags"] = {"type": "array", "items": dict(text)}
-    properties["candidate_asset"] = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "kind": {"type": "string", "enum": ["skill", "script", "workflow", "capability_package"]},
-            "code": dict(text),
-            "entry_source": dict(text),
-            "steps": {"type": "array", "items": {"type": "object"}},
-            "io_contract": {"type": "object"},
-            "sample_inputs": {"type": "object"},
-            "entry_document": dict(text),
-            "files": {"type": "object"},
-            "application_scope": dict(text),
+    step_props: dict[str, object] = {
+        "step_id": dict(text), "name": dict(text), "mode": dict(text), "script_id": dict(text),
+    }
+    io_props: dict[str, object] = {
+        "inputs": {"type": "array", "items": dict(text)},
+        "outputs": {"type": "array", "items": dict(text)},
+    }
+    ca_props: dict[str, object] = {
+        "kind": {"type": "string", "enum": ["", "skill", "script", "workflow", "capability_package"]},
+        "code": dict(text),
+        "entry_source": dict(text),
+        "steps": {
+            "type": "array",
+            "items": {"type": "object", "additionalProperties": False, "required": list(step_props), "properties": step_props},
         },
+        "io_contract": {"type": "object", "additionalProperties": False, "required": list(io_props), "properties": io_props},
+        "entry_document": dict(text),
+        "application_scope": dict(text),
+    }
+    properties["candidate_asset"] = {
+        "type": "object", "additionalProperties": False, "required": list(ca_props), "properties": ca_props,
     }
     return {
         "type": "object",
@@ -143,9 +150,21 @@ def parse_skill_learning_decision(text: str, updatable: frozenset[str]) -> Skill
     target = str(payload.get("update_target") or "").strip()
     _require(NAME_RE.fullmatch(name) is not None, "name")
     _require(decision == DECISION_CREATE or (target in updatable and name == target), "update_target")
-    carrier_ext = dict(payload["candidate_asset"]) if isinstance(payload.get("candidate_asset"), dict) else {}
+    raw_ca = payload["candidate_asset"] if isinstance(payload.get("candidate_asset"), dict) else {}
+    carrier_ext: dict[str, object] = {}
+    for k, v in raw_ca.items():
+        if k == "io_contract" and isinstance(v, dict):
+            io_clean = {ik: iv for ik, iv in v.items() if iv not in ("", [], {}, None)}
+            if io_clean:
+                carrier_ext[k] = io_clean
+        elif k == "steps" and isinstance(v, list):
+            steps_clean = [{sk: sv for sk, sv in s.items() if sv not in ("", [], {}, None)} for s in v if isinstance(s, dict)]
+            if steps_clean:
+                carrier_ext[k] = steps_clean
+        elif v not in ("", [], {}, None):
+            carrier_ext[k] = v
     for key in _CARRIER_FIELDS:
-        if key != "candidate_asset" and key in payload:
+        if key != "candidate_asset" and key in payload and payload[key] not in ("", [], {}, None):
             carrier_ext[key] = payload[key]
     return SkillLearningDecision(
         decision=decision,
@@ -172,7 +191,7 @@ def _json_object(text: str) -> dict[str, object]:
     if "candidate_asset" in payload:
         ca = payload["candidate_asset"]
         _require(isinstance(ca, dict) and set(ca) <= (set(_CARRIER_FIELDS) - {"candidate_asset"}), "candidate_asset")
-        _require("kind" not in ca or ca["kind"] in {"skill", "script", "workflow", "capability_package"}, "candidate_asset")
+        _require("kind" not in ca or ca["kind"] in {"", "skill", "script", "workflow", "capability_package"}, "candidate_asset")
     _require(payload.get("schema_version") == OUTPUT_SCHEMA_VERSION, "schema_version")
     _require(payload.get("decision") in DECISIONS, "decision")
     return payload
