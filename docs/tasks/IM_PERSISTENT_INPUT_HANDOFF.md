@@ -44,4 +44,4 @@ core 装配 `web_tool.credential_authenticator = lambda ref, request, send: cred
 
 ## 建议下一步
 
-根代理先集成 OAuth provider与core受控认证注册，复核已接入的原停止入口，再跑 focused/ruff/doc-sync/strict-size/diff/clean-package gate；审批、CLI、发现线可并行联验，但不要并发改本持久输入/凭据文件，不读取生产secret或用旁路产物代替被测任务结果。最后验证群后续聊天、主子孙输入恢复、真实私卡和发行版本，仍按原精确任务/actor/attempt守住取消及未知副作用边界。
+根代理先集成 OAuth provider与core受控认证注册，复核已接入的原停止入口，再跑 focused/ruff/doc-sync/import-boundaries/diff/clean-package gate（2026-10-28 状态补充：原 `strict-size` 数值门已退役，不再作为现行执行要求）；审批、CLI、发现线可并行联验，但不要并发改本持久输入/凭据文件，不读取生产secret或用旁路产物代替被测任务结果。最后验证群后续聊天、主子孙输入恢复、真实私卡和发行版本，仍按原精确任务/actor/attempt守住取消及未知副作用边界。

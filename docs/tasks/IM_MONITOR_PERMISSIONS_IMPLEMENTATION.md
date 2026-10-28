@@ -60,7 +60,7 @@
 1. 完成 R06/R07 的后台主子权限和 IM 审批接线，真实 ToolExecutor/生产派发验证，包含原父级能力裁决。
 2. 完成 R04/R05/R08～R13，原目录、身份、任务、调度和消息账各保持一个事实源。
 3. 联合 focused tests、fake tool/LLM/replay 后做隔离 Linux 实际 TUI/IM 验收；只给正常需求并观察原账，不代被测 Agent 写产物。
-4. 对最终提交执行 pytest focused、Ruff、doc sync、strict code-size、diff check、clean-package；累计生产/测试变更达到约 10000 行时再追加全仓 pytest。
+4. 对最终提交执行 pytest focused、Ruff、doc sync、import boundaries、diff check、clean-package（2026-10-28 状态补充：原 `strict code-size` 数值门已退役，不再作为后续执行要求；下文仅保留历史通过记录）；累计生产/测试变更达到约 10000 行时再追加全仓 pytest。
 5. Gate 全过后重新 fetch main，整合其它已授权主线变化，再合并 main 和推送、核对远端。线上 CI 若暂停，报告它未作为验收来源。
 
 建议下一步：继续完成全部范围，优先后台权限与审批链。独立展示/安装可由其它 agent 准备，但当前没有启用并行委派；每个核心状态模块保持单一修改负责人，避免串 owner、重复执行和覆盖他人工作。

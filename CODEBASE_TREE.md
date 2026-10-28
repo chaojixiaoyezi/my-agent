@@ -755,7 +755,10 @@
 |   |   `-- tooling/
 |   |       `-- tool_spec.py # 内置工具ToolModelSpec构造公共辅助函数，不接管Store、凭据或执行策略
 |   `-- tests/
-|       `-- test_dual_owner_concurrent_canary.py # 双Owner并发与同Owner MCP资源复用隔离金丝雀验收测试
+|       |-- test_cli_resume_and_gateway_client_lightweight.py # Gateway TUI轻量resume与CLI/adapter入口延迟连接MCP回归测试
+|       |-- test_dual_owner_concurrent_canary.py # 双Owner并发与同Owner MCP资源复用隔离金丝雀验收测试
+|       |-- test_wave8_p0_locks_pty_and_diagnostics.py # JSON路径锁复用、PTY会话级空闲超时与内存/资源诊断回归测试
+|       `-- test_wave8_p1_selection_skill_schema_caches.py # 消息位置缓存惰性深拷贝、Skill单次读取TOCTOU防护与工具Schema缓存回归测试
 ```
 
 ### 2026-10-25 七项核心底座与 Host v2 扩展（工作区源码增量，未发布）
@@ -1228,7 +1231,10 @@ B2 启动模式组件（不是实际 C/W ready 证明）：
 
 - `agent_py_agent/agent/conversation/turn_timing.py`：完成时间、耗时与完成行的共用纯格式化；CLI 计时器和界面状态留在 CLI，历史事件格式保持。
 - `agent_py_agent/agent/tooling/tool_spec.py`：内置工具 `ToolModelSpec` 的纯 schema 构造辅助；效果/审批分类、执行、写入及读回仍留在原责任层。
+- `agent_py_agent/tests/test_cli_resume_and_gateway_client_lightweight.py`：验证 Gateway TUI `cmd_resume` 不构造完整 `SimpleAgent`、保留缺失会话恢复与跨 Owner 失败关闭校验，以及 CLI/adapter 入口 `defer_mcp_connect=True` 契约。
 - `agent_py_agent/tests/test_dual_owner_concurrent_canary.py`：验证双 Owner 并发不串身份、权限或产物，同 Owner 借用 MCP 连接时资源复用与关闭所有权不串扰；文件登记不等于测试已执行。
+- `agent_py_agent/tests/test_wave8_p0_locks_pty_and_diagnostics.py`：验证 `common/json_io.py` 弱引用路径锁跨模块共享、PTY 会话级空闲超时冻结与惰性巡检、以及显式开启时的有界 `tracemalloc` 资源诊断快照。
+- `agent_py_agent/tests/test_wave8_p1_selection_skill_schema_caches.py`：验证消息位置索引容量与惰性 `deepcopy`、`skill_service.py` 单次读取 TOCTOU 防护与目录全量资源签名缓存、以及 `ToolModelSpec` 哈希校验后的 provider schema 投影缓存。
 
 ### 2026-10-25 七项能力的新增入口与直接测试
 

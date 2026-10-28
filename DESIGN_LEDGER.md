@@ -9370,7 +9370,17 @@ T1 W1 负责删除的专属文件清单为以下 11 项；本 T1 W4 只解除现
 
 Owner 墙继续采用原有收紧方向的配置回退，不能把请求漏传围栏解释为无墙访问。`ThreadLocalAgentAttribute`、ModelScoped/ContextVar、配置和权限快照不移到父子共用的可变字段；GUI/MCP 等底层复用不等于复用父 agent-bound 工具或授予子代理父权限。
 
-### 5. 验证、接入与未验证边界
+### 5. Phase 2 / Phase 3 延后项（暂不实施，待后续压测触发）
+
+对照 `my-agent-memory-slimming-evaluation` 评估提案，以下中远期演进项在本轮明确登记为**延后未实施（Deferred）**，不在 Phase 0 / Phase 1 中提前引入复杂度：
+- **Phase 2（高频数据结构紧凑化与惰性索引加载，状态：暂不实施）**：
+  - 范围：对高频消息/事件/候选记录 dataclass 全面引入 `__slots__`、拆分冷热字段（cold-field compaction）、将会话/运行索引改为按需分片映射。
+  - 延后原因与恢复实施前置条件：Phase 0 + Phase 1 已消除冗余 `SimpleAgent` 构造、MCP 重复子进程、无界锁字典及全量 `deepcopy`；仅当完成 Phase 0 + Phase 1 后的真实多 Owner 压测显示 Python 对象头或冷字段仍占常驻 RSS 主导比例（>20%），且完成序列化/反射兼容评估后，才立项实施 Phase 2。
+- **Phase 3（Subagent 常驻进程池与 Gateway 多 Worker 进程模型，状态：暂不实施）**：
+  - 范围：跨任务复用的 Subagent Worker 常驻进程池、Gateway 多进程 Worker + IPC 共享状态总线。
+  - 延后原因与恢复实施前置条件：跨任务复用子代理进程或拆分为多进程 Gateway 会引入跨任务/跨 Owner 残留状态污染与分布式锁复杂度；仅在单进程单 Owner 池化 + 背压 + 同 Owner 线程级资源共享仍无法满足真实千级并发吞吐/隔离指标，且具备完整进程级沙箱重置与 IPC 合同验证时，才启动 Phase 3 架构设计。
+
+### 6. 验证、接入与未验证边界
 
 本单只同步现行 Markdown、目录树和本条账本，规定的验证是 `git diff --check`；实际执行及提交状态见本轮交接，不将蓝图中的命令当作已通过结果。集成者应在 W1/W2/W3 与 Track 2 源码合入后核对退役 11 项、三处 CI、真实合同缺项仍失败、导入边界和各局部行为回归，并运行实际新增的 `test_dual_owner_concurrent_canary.py`，确认双 Owner 并发及同 Owner MCP 借用/关闭隔离。该 canary 的文档登记不代表本轮已执行，更不代表真实模型、部署或外部用户端到端已验证。
 
