@@ -51,9 +51,6 @@ jobs:
       - name: Lint with ruff
         run: ruff check agent_py_agent scripts setup.py package_boundary_policy.py
 
-      - name: Check code size guardrails
-        run: python3 scripts/check_code_size.py --mode warn
-
       - name: Run architecture guardrails
         run: python3 -m pytest agent_py_agent/tests/test_architecture_guardrails.py -q
 

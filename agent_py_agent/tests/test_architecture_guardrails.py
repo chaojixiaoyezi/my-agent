@@ -1,10 +1,12 @@
+# LLM: 保留语法、导入、命名、运行产物和凭据等非尺寸架构守卫；尺寸政策及报告不再是治理文档依赖。
+# 模块用途: 验证现存工程与权限边界，尺寸退役不放宽其他防线。
 from __future__ import annotations
 
 """LLM: freezes architecture debt baselines and blocks new drift.
 
 给人看的解释：
 这些测试不是业务功能测试，而是工程治理护栏。它们允许历史债务存在，
-但要求后续改动不能继续增加运行产物、星号导入、大入口文件和垃圾命名。
+但要求后续改动不能继续增加运行产物、星号导入和垃圾命名。
 """
 
 import ast
@@ -515,12 +517,12 @@ def test_no_macos_or_python_cache_artifacts() -> None:
     assert not bad, f"Found dirty tracked artifacts: {bad}"
 
 
+# LLM: 仅解除已退役的尺寸政策/报告存在性要求，其他治理文档缺失仍须报错。
+# 函数用途: 保留现存非尺寸治理文档的存在性检查。
 def test_governance_docs_exist() -> None:
     """Key governance documents must be present in the repo."""
 
     required_docs = [
-        "CODE_SIZE_POLICY.md",
-        "CODE_SIZE_REPORT.md",
         "ARCHITECTURE_EXEMPTIONS.md",
         "REFACTORING_BACKLOG.md",
         "CLEAN_PACKAGE_POLICY.md",
@@ -797,3 +799,14 @@ def test_gateway_script_credential_rule_self_check() -> None:
     wrong = [sample for sample, name, flagged in GATEWAY_SCRIPT_SELF_CHECK_SAMPLES
              if bool(_shell_text_offenders(sample, name) or _python_text_offenders(sample, name)) is not flagged]
     assert not wrong, "自检样本判定与期望不符：" + repr(wrong[0][:60])
+
+
+# LLM: 尺寸退役不得继续让历史报告路径豁免真实实现的同文件注释要求；模块文档齐全也不能触发旧旁路。
+# 函数用途: 验证含旧报告路径的变更仍受现存doc sync规则检查。
+def test_retired_size_report_cannot_waive_same_file_comments() -> None:
+    from scripts.check_doc_sync import evaluate_sync
+
+    path = "agent_py_agent/agent/subagents/services/base.py"
+    changes = [path, "CODE_SIZE_REPORT.md", "docs/modules/subagent/02-progress.md", "docs/modules/subagent/04-structure.md"]
+    problems = evaluate_sync(changes, {path: "+def changed():\n+    return True"})
+    assert any("no same-file comment/doc update" in problem for problem in problems)

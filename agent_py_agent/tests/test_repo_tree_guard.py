@@ -1,3 +1,5 @@
+# LLM: 尺寸报告分支退役后，MagicMock污染的指纹、违规判定、精确清理和并行诊断回归保持原样。
+# 模块用途: 验证测试树仍能发现并清理错误的MagicMock路径写入。
 """仓库树防线自检：MagicMock/ 的指纹、违规判定、清理与报错文字。"""
 from __future__ import annotations
 
@@ -5,16 +7,14 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from agent_py_agent.tests._repo_tree_guard import (
     MAGICMOCK_DIR_NAME,
-    REPO_ROOT,
-    TRACKED_REPORT_NAME,
     magicmock_failure_message,
     magicmock_fingerprint,
     magicmock_violation,
     remove_magicmock_dir,
-    tracked_report_failure_message,
-    tracked_report_fingerprint,
 )
 
 
@@ -63,19 +63,22 @@ def test_failure_message_names_the_test_the_place_and_the_fix(tmp_path):
     assert all("并行分片" in text and "单独重跑" in text for text in (created, kept))
 
 
-def test_tracked_report_rewrite_changes_the_fingerprint(tmp_path):
-    assert tracked_report_fingerprint(str(tmp_path)) is None
-    report = tmp_path / TRACKED_REPORT_NAME
-    report.write_text("old\n", encoding="utf-8")
-    os.utime(report, ns=(1, 1))
-    before = tracked_report_fingerprint(str(tmp_path))
-    assert tracked_report_fingerprint(str(tmp_path)) == before
-    report.write_text("old\n", encoding="utf-8")
-    assert tracked_report_fingerprint(str(tmp_path)) != before
+# LLM: 直接驱动共享fixture，确保移除尺寸分支后仍在teardown报错，且只删除本测试新建的MagicMock目录。
+# 函数用途: 验证自动防线清理新污染、保留旧残留的真实夹具行为。
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_repo_tree_fixture_keeps_magicmock_detection_and_cleanup(tmp_path, preexisting):
+    from types import SimpleNamespace
 
+    from agent_py_agent.tests.conftest import _repo_tree_guard
 
-def test_repo_root_matches_the_code_size_script_root():
-    assert (Path(REPO_ROOT) / "scripts" / "check_code_size.py").is_file()
-    message = tracked_report_failure_message("tests/test_x.py::test_y", REPO_ROOT)
-    assert "--report" in message and "tests/test_x.py::test_y" in message
-    assert "并行分片" in message and "单独重跑" in message
+    target = tmp_path / MAGICMOCK_DIR_NAME
+    if preexisting:
+        target.mkdir()
+    request = SimpleNamespace(config=SimpleNamespace(invocation_params=SimpleNamespace(dir=tmp_path)),
+                              node=SimpleNamespace(nodeid="fixture-self-check"))
+    guard = _repo_tree_guard.__wrapped__(request)
+    next(guard)
+    (target / "pollution").mkdir(parents=True)
+    with pytest.raises(pytest.fail.Exception, match="fixture-self-check"):
+        next(guard)
+    assert target.exists() is preexisting

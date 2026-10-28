@@ -53,8 +53,5 @@ jobs:
       - name: Check docs sync
         run: python scripts/check_doc_sync.py
 
-      - name: Check code size budget
-        run: python scripts/check_code_size.py --mode warn
-
       - name: Check formatting whitespace
         run: git diff --check

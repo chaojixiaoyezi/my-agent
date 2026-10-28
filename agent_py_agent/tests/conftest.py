@@ -1,4 +1,4 @@
-# LLM: 共享 pytest 防线；创建期绑定进程身份，最外层 teardown 精确回收，不扫描全机 PID 或吞掉原测试失败。
+# LLM: 共享pytest防线保留MagicMock污染检查和进程归属回收；尺寸报告已退役，不扫描全机PID或吞掉原测试失败。
 # 模块用途: 提供隔离 fixtures、桌面防线和测试派生进程的归属、共享寿命与回收诊断。
 """共享测试 fixtures - 为测试提供通用对象和 mock。"""
 from __future__ import annotations
@@ -27,13 +27,10 @@ from agent_py_agent.tests._desktop_open_guard import (
     failure_message,
 )
 from agent_py_agent.tests._repo_tree_guard import (
-    REPO_ROOT,
     magicmock_failure_message,
     magicmock_fingerprint,
     magicmock_violation,
     remove_magicmock_dir,
-    tracked_report_failure_message,
-    tracked_report_fingerprint,
 )
 from agent_py_agent.tests._sandbox_capabilities import (
     capabilities_required,
@@ -572,23 +569,23 @@ def pytest_sessionfinish(session, exitstatus):
         session.config.get_terminal_writer().line(f"测试派生进程清理未确认：{len(_UNCONFIRMED_PROCESS_REAPS)} 条，诊断已保留。")
 
 
+# LLM: 夹具仍按原MagicMock前后指纹判污染；仅清理本测试新建目录，保留既有残留与并行归因提示，不读取尺寸产物。
+# 函数用途: 在每条测试收尾检查并报告MagicMock目录污染，保留精确清理和原失败状态。
 @pytest.fixture(autouse=True)
 def _repo_tree_guard(request):
-    """仓库树防线：测试不能往起跑目录写 MagicMock/，也不能改写仓库根被跟踪的 CODE_SIZE_REPORT.md（见 _repo_tree_guard）。
+    """仓库树防线：测试不能往起跑目录写 MagicMock/（见 _repo_tree_guard）。
 
     起跑目录取 pytest 启动时的 cwd，测试里切目录不影响；前后指纹不同就让这条测试在收尾时报错，
-    这条测试新建的 MagicMock/ 顺手删掉，会话开始前的残留只比对不删除；报告文件只报错、不自动恢复。
+    这条测试新建的 MagicMock/ 顺手删掉，会话开始前的残留只比对不删除。
     """
     root = str(request.config.invocation_params.dir)
-    before, report_before = magicmock_fingerprint(root), tracked_report_fingerprint(REPO_ROOT)
+    before = magicmock_fingerprint(root)
     yield
     after, problems = magicmock_fingerprint(root), []
     if magicmock_violation(before, after):
         if before is None:
             remove_magicmock_dir(root)
         problems.append(magicmock_failure_message(request.node.nodeid, root, created=before is None))
-    if tracked_report_fingerprint(REPO_ROOT) != report_before:
-        problems.append(tracked_report_failure_message(request.node.nodeid, REPO_ROOT))
     if problems:
         pytest.fail("\n".join(problems), pytrace=False)
 

@@ -1,4 +1,5 @@
-
+# LLM: 仅按真实代码diff、模块文档和同文件注释检查同步，不读取尺寸产物或因旧报告路径豁免实现修改。
+# 模块用途: 保留现存模块文档和注释同步门，移除尺寸治理专属旁路。
 from __future__ import annotations
 
 """Check that module code changes move docs and teaching comments together.
@@ -154,15 +155,6 @@ def is_python_implementation(path: str) -> bool:
     return matching_rule(normalized) is not None
 
 
-def _module_docs_changed_for_path(path: str, changes: set[str]) -> bool:
-    rule = matching_rule(path)
-    return bool(rule and all(doc in changes for doc in rule.required_docs))
-
-
-def _is_code_size_cleanup(changes: set[str]) -> bool:
-    return "CODE_SIZE_REPORT.md" in changes
-
-
 def _added_lines(diff_text: str) -> list[str]:
     return [
         line[1:]
@@ -205,6 +197,8 @@ def _has_added_comment_or_doc(lines: list[str]) -> bool:
     return False
 
 
+# LLM: 纯diff判定，不执行或写文件；保留模块文档及同文件注释要求，尺寸报告变化不构成豁免。
+# 函数用途: 返回真实实现变更缺少对应文档或同文件注释的问题。
 def evaluate_sync(changes: list[str], diffs_by_path: dict[str, str]) -> list[str]:
     """Pure evaluation helper used by tests and by the CLI wrapper.
 
@@ -235,18 +229,13 @@ def evaluate_sync(changes: list[str], diffs_by_path: dict[str, str]) -> list[str
         if not is_python_implementation(path):
             continue
         added = _added_lines(diffs_by_path.get(path, ""))
-        has_code_size_module_docs = _is_code_size_cleanup(normalized_changes) and _module_docs_changed_for_path(
-            path,
-            normalized_changes,
-        )
         if (
             any(_is_added_code_line(line) for line in added)
             and not _has_added_comment_or_doc(added)
-            and not has_code_size_module_docs
         ):
             problems.append(
                 f"{path}: implementation code changed, but no same-file comment/doc update was added "
-                "(expected a useful comment, docstring, or matching module doc update)."
+                "(expected a useful same-file comment or docstring)."
             )
 
     return problems

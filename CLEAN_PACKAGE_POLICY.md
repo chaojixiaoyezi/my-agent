@@ -38,7 +38,7 @@ COPYFILE_DISABLE=1 tar \
   --exclude='.mutation_backups' \
   -czf my-agent-clean.tar.gz \
   agent_py_agent scripts docs .github pyproject.toml README.md LICENSE \
-  CODE_SIZE_POLICY.md CODE_SIZE_REPORT.md REFACTORING_BACKLOG.md \
+  REFACTORING_BACKLOG.md \
   ARCHITECTURE_EXEMPTIONS.md CLEAN_PACKAGE_POLICY.md TESTING_POLICY.md
 ```
 

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# LLM: 此开发检查只核对合同实现、测试文件及尺寸报告是否齐备，不执行验证或证明业务质量；修改索引须检查真实调用方和 matrix gate 测试。
+# LLM: 只核对合同实现与测试文件是否齐备，不读取尺寸产物或证明业务质量；保留真实缺项失败，并同步matrix gate测试。
 # 模块用途: 检查离线验证入口是否缺文件；实际行为由索引中的测试和真实 TUI 分别验收。
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -180,29 +179,24 @@ REQUIRED_AREAS = {
 }
 
 
+# LLM: 报告仅含真实合同覆盖结果；不保留已退役的尺寸派生字段或假零值。
+# 类用途: 保存缺失领域及对应文件问题，供CLI和离线覆盖检查读取。
 @dataclass(frozen=True)
 class OfflineContractMatrixReport:
     ok: bool
     missing_areas: tuple[str, ...]
-    code_size_blocked: bool
-    high_risk: int
-    soft: int
     findings: tuple[dict[str, str], ...]
 
 
+# LLM: 只读取REQUIRED_AREAS文件存在性，不运行合同测试；任何真实缺项仍失败，不再读取或生成尺寸报告。
+# 函数用途: 汇总离线合同实现与测试入口的缺项，不把覆盖索引当行为验收。
 def check_offline_contract_matrix(repo_root: Path) -> OfflineContractMatrixReport:
     root = Path(repo_root)
     findings: list[dict[str, str]] = []
     missing = _missing_areas(root, findings)
-    code_size_blocked, high_risk, soft = _code_size_status(
-        root / "CODE_SIZE_REPORT.md", findings
-    )
     return OfflineContractMatrixReport(
-        ok=not missing and not code_size_blocked and not findings,
+        ok=not missing and not findings,
         missing_areas=tuple(missing),
-        code_size_blocked=code_size_blocked,
-        high_risk=high_risk,
-        soft=soft,
         findings=tuple(findings),
     )
 
@@ -219,60 +213,12 @@ def _missing_areas(root: Path, findings: list[dict[str, str]]) -> list[str]:
     return missing
 
 
-def _code_size_status(
-    path: Path,
-    findings: list[dict[str, str]],
-) -> tuple[bool, int, int]:
-    """Read the code-size report without turning advisory debt into a hard gate.
-
-    ``check_code_size.py`` owns code-size policy and records its authoritative
-    decision in ``blocked``.  High-risk/soft counts are trend signals; treating
-    either as a failure here made the offline coverage matrix contradict the
-    actual strict gate.
-    """
-    if not path.exists():
-        findings.append(_finding("CODE_SIZE_REPORT_MISSING", "code_size", str(path)))
-        return True, 0, 0
-    text = path.read_text(encoding="utf-8", errors="replace")
-    high_risk = _strict_report_count(text, "high_risk")
-    soft = _strict_report_count(text, "soft")
-    blocked = _report_bool(text, "blocked")
-    if blocked:
-        findings.append(_finding("CODE_SIZE_GATE_BLOCKED", "code_size", str(path)))
-    return blocked, high_risk, soft
-
-
-def _report_bool(text: str, key: str) -> bool:
-    match = re.search(
-        rf"^\s*-\s+{re.escape(key)}:\s+(True|False)\s*$",
-        text,
-        flags=re.MULTILINE | re.IGNORECASE,
-    )
-    return bool(match and match.group(1).lower() == "true")
-
-
-def _strict_report_count(text: str, suffix: str) -> int:
-    strict_key = f"strict_scope_{suffix}_findings"
-    if re.search(rf"^\s*-\s+{re.escape(strict_key)}:\s+\d+\s*$", text, flags=re.MULTILINE):
-        return _report_count(text, strict_key)
-    if _report_is_advisory(text):
-        return 0
-    return _report_count(text, f"{suffix}_findings")
-
-
-def _report_is_advisory(text: str) -> bool:
-    return bool(re.search(r"^\s*-\s+blocked:\s+False\s*$", text, flags=re.MULTILINE))
-
-
-def _report_count(text: str, key: str) -> int:
-    match = re.search(rf"^\s*-\s+{re.escape(key)}:\s+(\d+)\s*$", text, flags=re.MULTILINE)
-    return int(match.group(1)) if match else 0
-
-
 def _finding(code: str, area: str, detail: str) -> dict[str, str]:
     return {"code": code, "area": area, "detail": detail}
 
 
+# LLM: 保留原CLI参数、真实缺项的非零退出和JSON输出模式；输出仅包含合同覆盖字段，不执行产品行为。
+# 函数用途: 检查离线合同文件索引并打印真实缺项，供本地和CI调用。
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate offline agent contract matrix coverage.")
     parser.add_argument("--repo-root", default=".", help="Repository root to validate.")
@@ -282,9 +228,6 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "ok": report.ok,
         "missing_areas": list(report.missing_areas),
-        "code_size_blocked": report.code_size_blocked,
-        "high_risk": report.high_risk,
-        "soft": report.soft,
         "findings": list(report.findings),
     }
     _print_report(payload, json_output=bool(args.json))
