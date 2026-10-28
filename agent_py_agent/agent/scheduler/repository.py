@@ -1,6 +1,6 @@
 # LLM: 原owner store是唯一任务权威；规范调度写按quota→资产root→store/CAS，pending先恢复；正常冷快照只复用已有读锁。
 #   便宜检查只缓存有界内容投影，时间条件每拍重算；关闭时保留原完整字节复核和waiting缓存。
-# 模块用途: 持久化监控、运行与历史，确保并发查询、崩溃恢复和正常收尾共用原 owner 账本。
+# 模块用途: 持久化监控、运行、逐目标outbox和历史；目标授权在写前核验，回执不改变运行或配置身份。
 from __future__ import annotations
 
 """Owner-scoped durable scheduler job and run repository.
@@ -360,11 +360,13 @@ class SchedulerRunFinish:
         object.__setattr__(self, "status", str(self.status or "").strip().lower())
 
 
+# LLM: CRUD只写原owner store，目标和每条规则写前校验，通知变更不复制调度或执行账。
+# 类用途: 提供同一仓库的计划创建、查询及版本化更新。
 class _SchedulerJobOperations:
     """Public job CRUD operations mixed into the owner repository."""
 
     # LLM: 别名由原 due_index 分配，复合规则和旧单任务仍写同一个 store。
-    # 函数用途: 别名由原 due_index 分配，复合规则和旧单任务仍写同一个 store。 修改需同步原控制、恢复或权限测试。
+    # 函数用途: 在原owner仓库登记计划；新多通道目标写前复核原认证账，不允许直调仓库绕过工具权限。
     def create_job(
         self,
         request: SchedulerJobCreateRequest,
@@ -375,6 +377,10 @@ class _SchedulerJobOperations:
             request=request,
             now=current,
         ))
+        from .delivery_policy import validate_repository_delivery
+        validate_repository_delivery(self, normalized.get("delivery"))
+        for rule in normalized.get("rules", []):
+            validate_repository_delivery(self, rule.get("delivery"))
         from .event_source_lifecycle import validate_event_job
         validate_event_job(normalized)
         with self._mutation_scope() as (store, admission):
@@ -410,6 +416,8 @@ class _SchedulerJobOperations:
             raise SchedulerNotFoundError(f"scheduler job not found: {job_id}")
         return deepcopy(job)
 
+    # LLM: 原CAS内规范patch，目标认证失败在任何store写入之前抛出；已预留run保持原冻结策略。
+    # 函数用途: 更新计划并验证多通道目标，不改原运行、创建者或执行位置。
     def update_job(
         self,
         job_id: str,
@@ -422,6 +430,10 @@ class _SchedulerJobOperations:
         with self._mutation_scope() as (store, admission):
             job = self._require_mutable_job(store, job_id, expected_version)
             updated = sync_event_sources(_updated_job(job, patch, now=current), job)
+            from .delivery_policy import validate_repository_delivery
+            validate_repository_delivery(self, updated.get("delivery"))
+            for rule in updated.get("rules", []):
+                validate_repository_delivery(self, rule.get("delivery"))
             from .event_source_lifecycle import cancel_retired_event_runs, validate_event_job
             validate_event_job(updated)
             updated = cancel_retired_event_runs(store, updated, now=current)
@@ -1335,6 +1347,54 @@ class _SchedulerStoreSupport:
             while len(_WAITING_PROJECTION_CACHE) > _WAITING_PROJECTION_MAX_ENTRIES_COUNT:
                 _WAITING_PROJECTION_CACHE.popitem(last=False)
         return projection
+
+    # LLM: 回执只读原job outbox；不创建run、不改变配置版本或恢复执行，目标引用由发送层校验。
+    # 函数用途: 读取一个准确运行的独立目标回执，不返回其它运行或owner内容。
+    def delivery_receipts(self, run_id, *, event_key=None):
+        run = self.effect_run(run_id)
+        if run is None or run['owner'] != self.owner:
+            raise SchedulerNotFoundError('定时运行不存在')
+        job = self.get_job(run['job_id'], include_deleted=True)
+        outbox = job.get('delivery_outbox', {})
+        key = f'{run_id}:{event_key}' if event_key is not None else run_id
+        if event_key is None and key not in outbox:
+            # 兼容只有一个事件的旧只读调用；多事件必须明确指定，不能猜最新一条来授权发送。
+            matches = [value for name, value in outbox.items() if name.startswith(f'{run_id}:')]
+            if len(matches) > 1:
+                raise SchedulerConflictError('通知运行包含多个事件，必须提供event_key')
+            return deepcopy(matches[0] if matches else {})
+        return deepcopy(outbox.get(key, {}))
+
+    # LLM: quota→原store锁内只更新原运行的outbox；committed不可降级，网络运输不在锁内。
+    # 函数用途: 原子保存每目标状态、整封已发回执和canonical编号，支持部分失败重投。
+    def record_delivery_receipt(self, run_id, target_key, receipt, *, event_key=None):
+        run = self.effect_run(run_id)
+        if run is None or run['owner'] != self.owner or not isinstance(target_key, str) or not target_key:
+            raise SchedulerNotFoundError('定时运行不存在')
+        with self._mutation_scope() as (store, admission):
+            job = self._require_job(store, run['job_id'])
+            outbox = job.setdefault('delivery_outbox', {})
+            outbox_key = f'{run_id}:{event_key}' if event_key is not None else run_id
+            targets = outbox.setdefault(outbox_key, {})
+            if targets.get(target_key, {}).get('state') == 'committed':
+                return
+            targets[target_key] = {**deepcopy(receipt), 'updated_at': time.time()}
+            policy = run.get('delivery', {})
+            expected = {spec.get('binding_id') or spec['target_kind'] for spec in policy.get('targets', [])}
+            if policy.get('include_origin'):
+                expected.add('origin')
+            if 'planned_specs' in receipt:
+                expected = set(receipt['planned_specs'])
+            covered = {spec for row in targets.values() for spec in row.get('specs', [])}
+            fallback_complete = policy.get('mode') == 'fallback_on_failure' and any(row.get('state') == 'committed' for row in targets.values())
+            if fallback_complete or expected <= covered and all(row.get('state') == 'committed' for row in targets.values()):
+                for row in targets.values():
+                    row['run_delivery_complete'] = True
+                    if fallback_complete and row.get('state') != 'committed' and not row.get('external_sent'):
+                        row['state'] = 'superseded'
+            _compact_delivery_outbox(outbox, outbox_key)
+            store['jobs'][run['job_id']] = job
+            self._write_store_unlocked(store, admission)
 
     # LLM: 原quota→原文件锁→历史追加→原子写顺序不变；成功写入后只失效当前实例解析缓存。
     # 函数用途: 持久化当前owner账本并阻止后续查询使用旧副本。
@@ -2286,6 +2346,27 @@ def _estimate_projection_payload_bytes(
         if total > _STORE_PROJECTION_MAX_BYTES_COUNT:
             return None
     return total
+
+
+# LLM: 仅所有计划角色都已登记且完成的运行可压缩；尚未登记完、未发或待补档的债务不删除，当前完成运行优先保留。
+# 函数用途: 去除已完成信封正文并只保留最近128条完成运行的轻量回执。
+def _compact_delivery_outbox(outbox, current_run_id):
+    complete = []
+    for run_id, targets in outbox.items():
+        if not targets or not all(row.get('state') in {'committed', 'superseded'} and row.get('run_delivery_complete') is True for row in targets.values()):
+            continue
+        for row in targets.values():
+            row.pop('frozen', None)
+            row.pop('business_result', None)
+        complete.append((max(float(row.get('updated_at', 0)) for row in targets.values()), run_id))
+    complete.sort(reverse=True)
+    keep = {current_run_id} if any(run_id == current_run_id for _stamp, run_id in complete) else set()
+    for _stamp, run_id in complete:
+        if len(keep) < 128:
+            keep.add(run_id)
+    for _stamp, run_id in complete:
+        if run_id not in keep:
+            outbox.pop(run_id)
 
 
 # LLM: 同锁登记与LRU逐出，不延长验证时钟、不写主账；key包含规范路径和owner。

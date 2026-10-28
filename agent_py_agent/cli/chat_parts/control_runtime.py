@@ -3,7 +3,7 @@
 # 模块用途: 将终端控制交给共享协议，保留会话身份、目录、可重试消息编号及不同控制的边界。
 # G3：Gateway 请求在原身份头入口附凭据；读取失败按 G2b 开关——开关开返回明确未发送的原因码，开关关降级不带凭据；direct 不读取凭据。
 # LLM: 控制身份、目录及菜单 CAS 来自同一持久输入，不能在运输层丢掉条件或重建 ID。
-# 模块用途: 路由本地与 Gateway 控制；direct 用户管理复用原服务，不进入模型。
+# 模块用途: 路由本地与 Gateway 控制；/new 在停止分支前切换原线程绑定，不停止后台或进入模型。
 from __future__ import annotations
 
 """CLI adapter for the shared ordinary-conversation control protocol.
@@ -431,13 +431,39 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
 # 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
 # context/compact/recover/endtask/wakes/effort、/model 文字形式、/skills、/settings 与会话插件控制依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
-# 未列出的类型会落到下面的停止分支，所以新增 Gateway 专用控制必须加进这个集合。
+# /new 在停止分支前单独处理；忙态拒绝而不发送停止或修改后台资源。
 def _execute_local_control(
     execution: ChatControlExecution,
     command: ConversationControlCommand,
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
+    if command.kind == "new":
+        if state.running or state.queued_count:
+            return ConversationControlResult("new", False, "前台回合仍在运行；请等待完成或先 /stop 再 /new。",
+                                             error_code="NEW_SESSION_BUSY")
+        from ...agent.conversation.new_session import new_session_result
+        store = execution.agent.conversation_store
+        home = getattr(execution.agent, "home_paths", None)
+        thread, error = store.threads.resolve_report(channel="chat", channel_conversation_id=state.session_id or "default",
+            channel_user_id="local-agent")
+        if error:
+            return ConversationControlResult("new", False, "会话绑定不可读，未切换。", error_code="THREAD_BINDING_UNAVAILABLE")
+        if thread is None:
+            thread = store.threads.get_or_create({"canonical_user_id": "local-agent", "channel": "chat",
+                "channel_conversation_id": state.session_id or "default", "channel_user_id": "local-agent",
+                "owner_id": getattr(home, "owner_id", ""), "owner_home": str(getattr(home, "owner_home_dir", "") or ""),
+                "cwd": str(getattr(execution.agent, "root", "") or "")})
+        binding = next((row for row in thread.channel_bindings if row.channel == "chat" and row.channel_user_id == "local-agent"
+            and row.channel_conversation_id == (state.session_id or "default")), None)
+        if binding is None:
+            return ConversationControlResult("new", False, "当前通道绑定不一致，未切换。", error_code="THREAD_SUCCESSOR_CHANNEL_MISMATCH")
+        # LLM: expected owner/home取当前Agent，不取被索引到的记录；继任原文件锁内重验，不能因坏索引跨owner归档。
+        # 函数用途: 拒绝Direct入口的外来或并发换主记录。
+        def validate_owner(latest):
+            if home is not None and (latest.owner_id, latest.owner_home) != (home.owner_id, str(home.owner_home_dir)):
+                raise ValueError("THREAD_SUCCESSOR_OWNER_MISMATCH")
+        return new_session_result(store, thread.thread_id, title=command.value, binding=binding, validate=validate_owner)
     if command.kind in {"context", "compact", "recover", "endtask", "wakes", "model", "effort", "skills", "settings", "plugins"}:
         return ConversationControlResult(
             command.kind,
@@ -724,8 +750,10 @@ def _recover_command_text(command: ConversationControlCommand) -> str:
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 委托专用还原器保留作用域，/model 保留 default 前缀，
 #   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
-# 函数用途: 还原服务端控制协议，保留用户管理和候选原参数，仅用于活请求运输。
+# 函数用途: 还原服务端控制协议，保留/new标题、用户管理和候选原参数，仅用于活请求运输。
 def _command_text(command: ConversationControlCommand) -> str:
+    if command.kind == "new":
+        return f"/new {command.value}".rstrip()
     if command.kind == "users":
         return f"/users {command.value}".rstrip()
     if command.kind == "plugins":

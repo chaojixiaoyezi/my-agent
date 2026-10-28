@@ -1,6 +1,6 @@
 # LLM: 公共命令目录只拥有声明、词法边界和展示事实；调用方仍负责身份、权限、控制回执及副作用。
 #   /effort 帮助列出用户八档，实际可发送值仍归 reasoning_control 的唯一换算表。
-# 模块用途: 统一 TUI/IM 命令目录；用户管理标记敏感且仅管理员，插件入口保留各自 owner 的服务鉴权。
+# 模块用途: 统一 TUI/IM 命令目录；/new 只切会话不停止后台，用户管理与插件保留各自鉴权。
 
 from __future__ import annotations
 
@@ -52,6 +52,8 @@ COMMAND_CATALOG = (
     CommandSpec("dir", "/dir [<路径>|reset]", "查看、切换或重置当前会话的显式工作目录（仅管理员）",
         submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$", admin_only=True),
     CommandSpec("fork", "/fork [--at <序号>] [--title <标题>]", "从当前会话或指定消息序号派生独立分支会话",
+        submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
+    CommandSpec("new", "/new [新会话标题]", "在当前目录原地开启空白会话，保留历史与后台任务",
         submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$"),
     CommandSpec("group", "/group", "查看当前群的监控授权", surfaces=("im",),
                 submit_on_enter=True, conversation_suffix=r"(?:\s+(.*))?$",

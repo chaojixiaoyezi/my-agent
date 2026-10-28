@@ -19,6 +19,22 @@
 
 `plugin_host/action_specs_substrate.py` 闭合声明allow_side_effects，`substrate.py` 缺省False透传；`workflows/engine.py` 先映射/前置条件再核副作用，`models.StepDebugResult` 始终返回输入/分支字段。新 `workflows/debug_nodes.py` 仅做有界AST与固定mock（函数对象身份例外），外部执行器仅来自可信组合根。`user_space/totp_sso_auth.py` 复用原锁和认证记录，在 `local_users_auth/.keys/<uid>.key` 保存独立私钥、JSON只存认证封套；坏封套/丢钥包括pending重新setup均失败关闭。详细合同见[通用Host底座](../../design/GENERIC_HOST_SUBSTRATE.md)；六generic mode不隐式进入正式DAG。
 
+## 2026-10-28 Wave 9 B3 Round 4：父页/子页独立围栏与锁外取数
+
+`_consume_gateway_background_snapshot` / `_consume_local_background_snapshot` 的父页回调只做内存发表，成功返回后才调用 `_consume_selected_agent_view`。后者在根 `TuiRuntime._lock` 冻结 `(generation, run_id, child_cursor)`，释放后走原HTTP/本地详情读取，再由原 `apply_conversation_snapshot` 验代次并核当前选择后更新子页。传入父页 `expected_generation` 防止已丢弃的旧父页继续取子页；不创建新锁或第二状态源。`_prepare_local_agent_permissions` 在锁外预取原审批列表，返回纯面板提交闭包，用户决定仍经原回写事务。测试与观察边界见 [TESTS](../../../TESTS.md) R4小节。
+
+## 2026-10-28 Wave 9 B3 Round 3：采样、reset、提交共锁
+
+`tui_threading.py::_capture_background_poll_state` 只在 `TuiRuntime._lock` 内读取 `(generation, message_after, event_after, event_stream_id)`；两种 poll 都在起始网络/文件取数前调用，后续只消费这份不可变起点。该锁就是现有 `publish_conversation_reset` 与 `apply_conversation_snapshot` 使用的锁，不新增并行状态锁，采样助手不持锁执行 HTTP/文件读取。原提交回调内部行为不在本轮改动范围；旧代响应不会进入该回调，显示、去重和游标均不回填。测试及观察边界见 [TESTS](../../../TESTS.md)。
+
+## 2026-10-28 Wave 9 B3 Round 2：会话继任与通知提交结构
+
+- `conversation/store_threads.py` 的 `succession_by_binding` 使用 `channel\x1faccount_id\x1fchat_id` 键；解析、索引重放和定时通知都按准确三元组查后继，保持 owner/home、双向前任、环和最多 16 跳校验。新候选仍先隐藏；前任事务提交后再写 `succession_published`，`plugin_host/conversations.py::check_archive` 阻止发表窗口删除锚点。
+- `cli/chat_parts/control_runtime.py` 先读绑定，再调用原继任事务并在原文件锁内复核 owner/home。`tui_actions.py` 把同一 runtime 交给 Direct slash，`tui_worker.py` 注册同一历史引用；`TuiRuntime.publish_conversation_reset` 清理原内存历史并递增代次。`tui_threading.py` 在 HTTP/本地整页读取后验证原代次，在同一 reset 锁内提交显示快照，不更换 transport session 或取消后台资源。
+- `plugin_host/gateway_composition.py` 向通知处理器显式传原 `AuthorizedCall`；`monitor_delivery_v2.py` 逐次重核 issuer、准确 owner/home/动作/载荷，再向 `ScheduleTool` 注入仅宿主可提供的授权器。非管理员使用独立请求视图承接原 creator/群校验；模型参数不能构造该授权器。只更新原仓库策略与 CAS，不新建 Agent 或借别人的运行上下文。
+- `scheduler/delivery_policy.py` 统一封闭策略、跟随开关及等级过滤；`execution.py` 在 run 首次准备时为固定模式冻结原目标线程，执行/creator/模型来源仍不迁移；`notification_binding.py` 保留管理员认证代次。`alert_delivery.py` 将稳定 wake/事件/幂等键（缺失才使用业务摘要）归一为事件键，逐目标复用原 sender 和事件发送前 CAS。
+- `scheduler/repository.py` 在原 quota/store 事务中写 `delivery_outbox[run_id:event_key][target_key]`。旧单事件只读接口可兼容；多事件必须明确指定，不能猜最新事件来授权。每事件保存完整计划角色，部分登记/部分提交不清正文；fallback 在已外发但 canonical 异常时停止推进，未补账不得结算。等级过滤后无目标的事件走原内部留档合同。完整业务冻结、目标 sent 回执、canonical 提交分别记账，wake 首次业务快照仍不可覆盖，不承诺跨系统 exactly-once。准确验证范围见 [TESTS](../../../TESTS.md)。
+
 ## 2026-10-28 Wave 8 T2 W1：冷管理上下文与执行构造分离
 
 `cli/common.py::agent_configuration` 继续作为CLI构造配置和工作目录的共同解析口；`make_lightweight_cli_agent_context` 复用原owner身份、持久化权限模式和runtime path resolver，返回 `gateway_parts/request_client.py::GatewayClientContext`。上下文保留constructor根、有效工作区、owner home及原服务路径，不执行Home初始化、凭据预检、模型/工具/记忆装配；仅在原CLI派生日志实际写入时惰性构造同一owner索引，日志关闭仍不建库。

@@ -1,5 +1,5 @@
 # LLM: 本模块是 typed TUI event 到可渲染快照的唯一 reducer；不得读取模型正文猜状态，也不得执行工具、权限或会话动作。
-# 模块用途: 管理历史、候选与界面状态；用户行索引类型仅供瞬态布局，不能写回事件或业务历史。
+# 模块用途: 管理历史、候选与界面状态；用户行索引类型仅供瞬态布局，新会话只清本地投影而不停止后台执行，终态不被旧回执改写。
 
 from __future__ import annotations
 
@@ -287,7 +287,7 @@ class _TuiPermissionReducerMixin:
 # 类用途: 顺序应用已通过 journal 的事件，并维持 active→stable 一次冻结。
 class TuiViewModelReducer(_TuiPermissionReducerMixin):
     # LLM: handler registry 明确列出显示事件；稳定块和近期去重身份分别有界，持久历史不在 reducer 保存。
-    # 函数用途: 初始化空 view model、确认后的模型显示名、独立的刷新健康标记和事件处理表。
+    # 函数用途: 初始化空显示和唯一事件表；会话重置走显式事件，不读取命令正文或改变真实任务。
     def __init__(
         self,
         *,
@@ -315,6 +315,7 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
         self._task_progress_plan_revision = 0
         self._handlers: dict[str, Callable[[TuiEvent], None]] = {
             "session_started": self._handle_session_started,
+            "conversation_reset": self._handle_conversation_reset,
             "session_model_selected": self._handle_session_model_selected,
             "connection_started": self._handle_connection_started,
             "connection_resolved": self._handle_connection_resolved,
@@ -377,6 +378,13 @@ class TuiViewModelReducer(_TuiPermissionReducerMixin):
             "history_page_prepended": self._handle_history_page_prepended,
             "foreground_request_attached": self._handle_foreground_request_attached,
         }
+
+    # LLM: 只消费服务端确认的重置事件；保留模型偏好和真实待处理审批显示，不调用业务、关闭进程或取消后台任务。
+    # 函数用途: 清空旧会话显示块及去重索引，新线程的历史从空视图开始恢复。
+    def _handle_conversation_reset(self, event: TuiEvent) -> None:
+        selected, permission = self.selected_model_name, self.permission
+        self.__init__(max_diagnostics=self.max_diagnostics, max_stable_blocks=self.max_stable_blocks)
+        self.selected_model_name, self.permission = selected, permission
 
     # LLM: Only typed foreground provenance selects disposable observer copies. Keep stable seen IDs
     # to reject late replay; do not touch canonical messages, other requests, queues, Todo or status.

@@ -117,6 +117,17 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
         return True
     if params.user == "/expand" or params.user.startswith("/expand "):
         return _tui_handle_expand_command(params.user, params.assistant_outputs)
+    # LLM: Direct与Gateway都只在真实成功回执后重置UI，历史引用仍属于同一worker，不停止后台业务。
+    # 函数用途: 执行原控制命令并应用结构化new回执。
+    def execute_control(command):
+        result = execute_chat_control(ChatControlExecution(agent=params.agent, use_gateway=params.use_gateway,
+            state=_tui_control_state(params)), command)
+        if result.ok and (result.details or {}).get("view_reset") is True:
+            runtime = getattr(params, "tui_runtime", None)
+            if runtime is not None:
+                runtime.publish_conversation_reset(result.details["thread_id"])
+            params.assistant_outputs.clear()
+        return result
     return handle_common_slash_command(
         params.user,
         ctx=SlashCommandContext(
@@ -130,14 +141,7 @@ def _tui_handle_command(*, params: TuiHandleCommandParams) -> bool:
             plugin_client=params.plugin_client,
             plugin_revision=params.plugin_revision,
             command_interaction=params.command_interaction,
-            control_executor=lambda command: execute_chat_control(
-                ChatControlExecution(
-                    agent=params.agent,
-                    use_gateway=params.use_gateway,
-                    state=_tui_control_state(params),
-                ),
-                command,
-            ),
+            control_executor=execute_control,
         ),
     )
 

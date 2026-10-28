@@ -445,6 +445,96 @@ python3 -m pytest agent_py_agent/tests/test_wave9_secops_portal_plugin_apis.py -
 ```bash
 python3 -m pytest agent_py_agent/tests/test_wave9_tui_bg_watch_and_sticky_user_bar.py -q --tb=short
 python3 -m pytest agent_py_agent/tests/test_tui_turn_completion_and_bg_watch.py agent_py_agent/tests/test_tui_view.py agent_py_agent/tests/test_tui_reading_position.py agent_py_agent/tests/test_tui_view_model.py agent_py_agent/tests/test_gateway_background_process_identity.py agent_py_agent/tests/test_tui_prompt_toolkit_pipe.py agent_py_agent/tests/test_tui_clipboard.py agent_py_agent/tests/test_tui_transcript.py agent_py_agent/tests/test_tui_terminal.py agent_py_agent/tests/test_tui_resource_lifetime.py agent_py_agent/tests/test_tui_threading.py agent_py_agent/tests/test_tui_combinatorial.py agent_py_agent/tests/test_tui_agent_navigation.py -q --tb=short
+
+## 2026-10-28 Wave 9 B3 Round 4：详情读取移出reset锁
+
+来源：`07-tasks/fix-r4-wave9-b3.md`；起点 `7978f83196ce4fa5197a272a98fed0c1b9bc8a38`，批次基线 `db4d5de92`。业务改动仅在指定工作树，未推送、未部署。
+
+- Gateway/本地父页的 `publish` 只发表内存投影；父页提交返回、释放根reset锁后再消费选中子代理详情。本地审批续租和列表读取也先在锁外完成，原代次回调只同步面板；原用户决定回写器、身份及审批事务不变，没有自动批准。
+- `_consume_selected_agent_view` 在原根锁内一起采样代次、准确run_id及子页游标，HTTP/本地详情取数在锁外；响应再沿同一 `apply_conversation_snapshot` 围栏提交。父页已过期时通过 `expected_generation` 跳过子页请求，详情期间reset或改选则丢弃正文和游标；实际变更才invalidate。
+- 新增6个参数化案例（Gateway/本地 × 正常/在途reset/在途切页），使用真实主子runtime与导航，仅替代HTTP/文件边界；旧版6例均先因详情IO持有根锁而失败。断言父页先提交、选择采样持锁、详情及审批取数不持锁，reset/切页后旧子页正文和游标不变。没有用sleep抢时序；新增函数及测试的中文双层注释放在装饰器上方。
+- 当前专项 **110 passed / 0 failed / 0 errors / 0 skipped**；threading/worker/navigation三文件 **49 passed**，runtime（含审批队列） **49 passed**，均无失败、错误或跳过。计数由本轮JUnit XML回读。
+- 独立Astra内联源码静态复核在所给范围未发现阻塞；未访问仓库或运行测试，不能代替门禁。首次跨代理输入引用不可读的复核已取消，未把读取失败算作通过，也未为此创建占位文件或扩目录权限。
+
+复现（工作树根目录；临时文件/报告限定本工作树）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='--basetemp=.pytest_cache/wave9-b3-r4-final-tmp --junitxml=.pytest_cache/wave9-b3-r4-final.xml' python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest agent_py_agent/tests/test_tui_threading.py agent_py_agent/tests/test_tui_worker_paths.py agent_py_agent/tests/test_tui_agent_navigation.py -q --tb=short --basetemp=.pytest_cache/wave9-b3-r4-tui-tmp --junitxml=.pytest_cache/wave9-b3-r4-tui.xml
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest agent_py_agent/tests/test_tui_runtime.py -q --tb=short --basetemp=.pytest_cache/wave9-b3-r4-runtime-tmp --junitxml=.pytest_cache/wave9-b3-r4-runtime.xml
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+观察边界：本地真实RLock/导航状态下的确定性边界注入，`_is_owned()`仅用于测试。未验证真实HTTP传输、键盘 `/new`、浏览器、跨线程快速反复导航或其它Python实现；切页案例不代表所有并发导航交错已验收。
+
+## 2026-10-28 Wave 9 B3 Round 3：轮询起点原子采样
+
+来源：`07-tasks/fix-r3-wave9-b3.md`；起点 `5cfbb4d56efe57dc966ac92aec7ddaf56e8e1b90`，批次基线 `db4d5de92`。业务文件改动仅限指定工作树，未推送、未部署。
+
+- `tui_threading._capture_background_poll_state` 在真实 TuiRuntime 已有 `_lock` 内一次取齐代次、消息游标、过程游标及流身份；Gateway/本地整页取数只用该快照，释放采样锁后执行消息页 HTTP/文件读取。沿原 `apply_conversation_snapshot` 在同一锁内核代次并提交，reset 和提交回调内部行为本轮不改，不据此声称原回调内所有其它读取均在锁外。
+- 新增 Gateway/本地双参数确定性回归：属性探针在首次读值后用事件启动 reset；旧代码稳定出现 Gateway 游标回写 500、本地代次读取未持锁。修复后同时核对锁归属、IO 出锁、完整旧代入参、迟到页不改变游标/显示/去重，以及本地过程流不在锁外重采样。没有用 sleep 抢时序，没有替代生产锁或修改已有有效断言。
+- 三处指定函数的英文契约注释改为中文；新增助手、测试类/函数/方法均使用中文双层注释，参数化装饰器在注释块下方。
+- 独立 Astra 局部静态复核在所给材料内未发现阻塞问题；其“补本地过程流入参断言”建议已纳入测试。复核未访问工作树或运行测试，不代表端到端验收。实际专项/门禁结果见本轮交接。
+
+复现（工作树根目录；pytest 临时文件和报告也限定在本工作树）：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTEST_ADDOPTS='--basetemp=.pytest_cache/wave9-b3-r3-final-tmp --junitxml=.pytest_cache/wave9-b3-r3-final.xml' python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_doc_sync.py --base db4d5de92
+python3 scripts/check_import_boundaries.py --json
+git diff --check db4d5de92..HEAD
+```
+
+观察边界：事件握手和真实 RLock 已在本地测试，HTTP/消息页为边界替身；未验证真实浏览器、键盘、外部网络和其它 Python 实现。测试用 `_is_owned()` 观察 CPython 锁归属，生产代码不依赖该私有方法。
+
+## 2026-10-28 Wave 9 B3 Round 2：会话与通知返修
+
+来源：`07-tasks/fix-wave9-b3.md` 六项独立评审意见；返修起点 `89e8fb8f0973e79b657d8da8fd5e520ac10efc31`，批次基线仍为 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只在指定工作树提交代码，不推送、部署或运行已退休的尺寸检查。
+
+- Direct `/new` 通过真实 slash/control/Store 清空显示及共享 worker 历史，保留选定 cwd/workspace_root；HTTP 与本地文件读取期间执行 reset 的旧 poll 整页丢弃。反例先失败，再修正；不是只调用 reducer 清屏代替入口验证。Direct 继任事务内再核当前 Agent 的 owner/home，坏索引不能跨 owner 归档。
+- 同一旧线程的两个绑定可以各自继任、独立重放；原测试将“其它已登记绑定一律拒绝”的旧合同更新为 R2 的独立继任要求，同时保留未登记绑定拒绝、owner/home/三元组/环/缺失等硬断言。实际 Web 删除空闲前任后，已发表后继仍可 load/list。
+- 冷 Host v2 回归使用真实安装、令牌、issuer、Portal 和原 scheduler，清空 `_current_run_params` 后可更新本人监控，不修改共享模型运行上下文。非通知 rules/schedule/prompt/cron 字段先复现 AttributeError 或越范围修改，再按 `SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID` 写前拒绝并核对原字节。没有借此放宽原 creator、群能力、目标认证或 CAS。
+- 两个真实 wake 共享同一 run，正文 A/B 分别外发一次，重复同事件不重发；消息工具已发主通道进入正式镜像入口时保留原 receipt，只补 canonical 和其它目标。原 outbox 故障替身只为新事件关键字更新签名，故障及“停止后续运输”断言不变。
+- 新增跟随 true/false、双绑定继任、固定多线目标、通知接管固定线程、主线/双线/按序 fallback、等级列表/最低等级/无过滤目标回归。策略、原执行身份和业务冻结仍分离。全部 fixture/parametrize 的双层注释移动到装饰器上方。
+- 独立静态复核提出的 provider 身份字段、本地在途 poll、空等级目标、装饰器位置均已修正并回归。fallback 的实测限定：原发送前重验已挡住第二次外发，但 canonical 异常后仍多建备用路线欠账；现已立即停止该循环，已发事实留在原目标 outbox，只补主线 canonical。wake 的首次业务快照仍不可覆盖，不把整封 wake 伪装成所有目标已发。
+- Provider 身份用真实 `OwnerIdentity`、Agent、原 creator/群门及 CAS 验证；只有认证上下文读口替代，不能声称完整 provider HTTP 链路已验收。非创建者的 `update_delivery` 按原合同拒绝 `CHANNEL_ACTOR_SCOPE_MISMATCH`，不套用只限 pause/cancel/delete 的离群代清理例外。
+
+当前源码实跑：专项 **102 passed / 0 failed / 0 skipped**；受影响 TUI 两文件 **34 passed**，scheduler policy/IM/execution **47 passed**，repository **43 passed**，Host v2 **70 passed**，各组均无失败、错误或跳过。计数由 JUnit XML 回读；相关回归与五项门禁的准确命令列于下方/交接。Ruff 通过，文档同步 `DOC_SYNC_PASS`，导入边界 `findings=0`；15 个带装饰器函数无错位注释，所有本轮变更函数双层注释静态检查通过。
+
+复现（工作树根目录；提交区间 diff 检查在提交后另跑）：
+
+```bash
+python3 -B -m pytest /tmp/wt-wave9-b3/agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short -o cache_dir=/tmp/pytest-b3-r2
+ruff check --no-cache /tmp/wt-wave9-b3/agent_py_agent/agent/conversation /tmp/wt-wave9-b3/agent_py_agent/agent/scheduler /tmp/wt-wave9-b3/agent_py_agent/agent/plugin_host /tmp/wt-wave9-b3/agent_py_agent/agent/gateway_parts /tmp/wt-wave9-b3/agent_py_agent/cli/chat_parts /tmp/wt-wave9-b3/agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py
+python3 -B /tmp/wt-wave9-b3/scripts/check_doc_sync.py --base db4d5de92
+python3 -B /tmp/wt-wave9-b3/scripts/check_import_boundaries.py
+git -C /tmp/wt-wave9-b3 diff --check db4d5de92..HEAD
+```
+
+观察边界：模型和 IM 运输用协议替身；真实 HTTP 网络传输、浏览器点击、TUI 键盘、断电恢复和多平台全仓均未验证。不能从本地合同测试外推外部用户可达，外发后本机落账前的崩溃窗口仍依赖原通道幂等能力。
+
+## 2026-10-28 Wave 9 B3：原地新会话、同通道继任与多线告警
+
+来源：`07-tasks/wave9-b3.md` 及批次计划 Item 4；基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。仅修改派工工作树，不推送、部署或运行已退休的尺寸检查。
+
+- `/new [标题]` 进入共享 typed control，Gateway/CLI/Web 共用原 ThreadStore 继任事务。新线程继承实际目录、类型化模型选择、权限及能力包偏好；不复制历史、摘要或任务执行权。旧线程归档但保留原 TaskLink/claim，不调用停止或资源回收；前台回合/claim 忙碌则拒绝。
+- 原线程的 `successor_thread_id`/`succeeded_at` 是逻辑发表点；带 `predecessor_thread_id` 的未发表候选对 load/list 不可见。每跳复核准确 owner/home 和固定 `(channel, actor/account, conversation/chat)` 三元组，最多 16 跳；错误和缺失失败关闭。重复旧 ID 修复原绑定索引，不跨另一条绑定；ID 碰撞不删除既有文件。
+- 通知沿显式同通道后继解析，原 run 的执行线程、creator、模型来源和冻结业务不迁移。管理员通知接管继续核验原认证代次。
+- 原 `job/run.delivery` 是唯一策略权威，`delivery_policy`/`notify_mode` 只作输入兼容及公开投影。支持 origin/local/none/bound/multi、认证 binding 引用和 include_origin 去重；创建/更新同时核验每一条规则覆盖。未认证、跨 owner 或重绑旧引用返回 `SCHEDULE_DELIVERY_TARGET_UNAUTHORIZED`。
+- 双线仍调用原 owner sender/DeliveryService 和原事件发送前 CAS。原 job 的 `delivery_outbox[run_id][target_key]` 保存逐目标回执及欠账信封，committed 不降级；失败重投不再调用模型，不重复发送已成功路线。外发与本地 canonical 写入分别记账，本地优先写失败也先冻整封结果，不把部分成功当整条 wake 完成。
+- 独立审查的反例逐项复现后修正：远端 `local_only` 仍欠外发；已发路线撤权或 `/new` 后仅补原 canonical；未发送路线独立核验当前授权；目标 I/O 故障保留欠账但推进健康路线，共享 outbox/wake 写失败则立即上抛。新目标从原业务快照重建，不能使用另一目标的脱敏 freeze；主动运输清空旧回复/进度句柄并重算目标 transcript 能力。只有所有计划角色都已登记且全部 committed 才压缩正文，保留最近 128 条完成运行的轻量回执，未完成及尚未登记完的债务不清理。
+- Web 增加 `conversations.threads.new`、`monitors.delivery.targets.list`、`monitors.delivery.get`、`monitors.delivery.update` 领域接线；原权限、owner/creator、群能力与 CAS 继续生效。TUI 只在结构化成功回执后发布视图重置事件，transport session/chat 身份不变。
+
+专测：`agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py`。包含真实文件账本、Gateway 控制领域、Web 领域、TUI reducer、原调度器触发和故障注入；模型与 IM 运输使用替身，不是实网或真实浏览器验收。
+
+复现命令（工作树根目录）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_wave9_new_session_and_alert_delivery.py -q --tb=short
 python3 scripts/check_import_boundaries.py
 ruff check agent_py_agent scripts
 git diff --check
@@ -460,6 +550,10 @@ git diff --check
 限制：真实 SIEM/EDR/企业 SSO、A1/A2 宿主、另一台远端节点、浏览器 UI、跨机可达性和 Windows 未验证；MCP 进程组启动当前明确只支持 POSIX。连接器需真实适配器配置；本地 owner 读取硬限 5000 条，超限明确拒绝而非无声截断。YAML 是显式拒绝 alias/tag 等构造的安全子集。未知 daemon 或中断的安全 pending 操作需可信运维核实，不能自动当作完成。
 
 验证边界：屏幕/点击用真实prompt_toolkit Window、Screen及MouseHandlers和DummyOutput驱动，每次按框架规则递增render_counter；不是人工终端或真实模型/通道端到端。两个独立只读审阅仅看内联关键函数，未发现节选可确证的P1/P2；不是完整diff审计。首次跨会话材料读取不可用的审阅已取消，不算成功复核。原目录reader全链、真实并发压力、不同Python/操作系统及发布后用户终端仍未独立端到端验证。索引/点击间极端并发换帧是审阅提出的条件性风险，未证实为实际串源，不宣称压力竞态已排除。
+
+扩展回归已覆盖原控制、调度、通知策略、IM 来源、Web 设置/请求及 TUI 控制。`test_chat_control_runtime.py::test_local_interrupt_stops_foreground_shell_without_resource_reclaim` 在当前候选和从上述基线直接 `git archive` 提取的隔离副本中同样失败：子 shell 返回 71、`handler_executed=False`，未生成启动标记。未将其改为跳过或放宽断言，也未据此推断具体失败原因。另三项原 Gateway 资源控制测试报告缺少 `nested_sandbox_exec` 能力而跳过，不能算通过。
+
+未验证：真实飞书收件、浏览器点击链路、真实 TUI 键盘操作和断电恢复；远端发送已发生但本机回执尚未持久化的崩溃窗口仍依赖原渠道幂等能力，不承诺跨系统 exactly-once。隐藏未发表候选的真实进程崩溃回收不在本轮实测范围。
 
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
 

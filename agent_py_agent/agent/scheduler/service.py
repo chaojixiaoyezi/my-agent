@@ -139,7 +139,7 @@ class SchedulerService:
 
     # LLM: follow_up 是组合根注入的 SchedulerFollowUpPolicy（task_follow_up 查询 + 从配置推出的宽限期），
     #   供 active_run_closeout 判定；未注入时一律保持原来的 waiting 行为（fail closed），不走限期结算。
-    # 函数用途: 绑定原账本、会话与取消重试能力；冷启动按准确来源迁移创建人，复核死亡 claim 并沿原终态写历史。
+    # 函数用途: 绑定原账本、会话与取消重试能力；仓库投递校验复用同一实际会话库，不能猜配置覆盖后的目录。
     def __init__(
         self,
         repository: SchedulerRepository,
@@ -151,6 +151,7 @@ class SchedulerService:
     ) -> None:
         self.repository = repository
         self.conversation_store = conversation_store
+        repository.conversation_store = conversation_store
         self.skill_snapshot_provider = skill_snapshot_provider
         self.follow_up = follow_up
         self.cancellation_handler = cancellation_handler

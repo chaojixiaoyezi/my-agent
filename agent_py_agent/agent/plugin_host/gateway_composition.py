@@ -143,14 +143,14 @@ def build_gateway_host_composition(server, paths):
 
 
 # LLM: 仅固定W4/W5模块；探测类方法不实例化，不吞内部导入错误；函数桩优先，能力包读口须真实可用。
-# 函数用途: 惰性定位门户动作的兄弟领域入口。
+# 函数用途: 惰性定位门户、原地新会话和监控通知的原领域入口，不创建替代服务。
 def portal_target(action):
     from importlib import import_module
 
     thread = {"settings.get": "get_thread_settings", "packs.get": "get_thread_settings",
         "settings.update": "update_thread_settings", "packs.set": "update_thread_settings",
         "model.set": "update_thread_settings", "permission_mode.set": "update_thread_settings",
-        "usage.get": "get_thread_usage", "compact": "compact_thread", "delete": "delete_thread"}
+        "usage.get": "get_thread_usage", "compact": "compact_thread", "delete": "delete_thread", "new": "new_thread"}
     routes = {"models.providers.list": ("model_settings_v2_handlers", "list_providers"),
         "models.providers.save": ("model_settings_v2_handlers", "save_provider"),
         "models.providers.delete": ("model_settings_v2_handlers", "delete_provider_or_profile"),
@@ -162,7 +162,10 @@ def portal_target(action):
         "subagents.steer": ("subagents_v2_handlers", "steer_subagent"),
         "subagents.stop": ("subagents_v2_handlers", "stop_subagent"),
         "processes.background.stop": ("subagents_v2_handlers", "stop_background_process"),
-        "capability_packages.list": ("capabilities_v2_handlers", "capability_packages_list")}
+        "capability_packages.list": ("capabilities_v2_handlers", "capability_packages_list"),
+        "monitors.delivery.targets.list": ("monitor_delivery_v2", "delivery_targets"),
+        "monitors.delivery.get": ("monitor_delivery_v2", "get_delivery"),
+        "monitors.delivery.update": ("monitor_delivery_v2", "update_delivery")}
     routes.update({"conversations.threads." + key: ("thread_settings_v2", value) for key, value in thread.items()})
     routes.update({"workspace." + key: ("workspace_v2_handlers", value) for key, value in {
         "files.list": "list_workspace_files", "files.read": "read_workspace_file", "files.upload": "upload_workspace_file",
@@ -329,7 +332,7 @@ class GatewayPortalDomain:
         if (authorized.call.action.startswith("conversations.threads.")
                 and _portal_binds(params, (store, context, dict(payload)))):
             return target(store, context, dict(payload))
-        options = _portal_keywords(params, {"agent": self._owner_agent(context), "store": store})
+        options = _portal_keywords(params, {"agent": self._owner_agent(context), "store": store, "authorized": authorized})
         if _portal_binds(params, (context, dict(payload)), options):
             return target(context, dict(payload), **options)
         if authorized.call.action.startswith("plugins.builtin."):

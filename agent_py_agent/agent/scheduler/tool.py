@@ -1,5 +1,5 @@
 # LLM: 持久计划经原owner/typed actor提交；成功回执的姓名沿原展示投影且在policy锁外补充，名字/回复不授权。
-# 模块用途: 统一登记管理计划，保留原聊天来源/工作审计和准确创建者；展示资料不改变写入结果或归属。
+# 模块用途: 统一登记管理计划及多通道通知；投递引用只认当前owner认证目录，展示资料不改变权限。
 from __future__ import annotations
 
 import json
@@ -23,7 +23,15 @@ from ..tooling.models import (
 from ..user_space.group_authorization import GroupAuthorizationError
 from ..user_space.group_authorization_context import group_capability_guard
 from ..user_space.owner_quota import OwnerQuotaExceeded, OwnerQuotaUnavailable
-from .delivery_policy import DELIVERY_SCHEMA, creation_delivery, normalize_delivery
+from .delivery_policy import (
+    DELIVERY_SCHEMA,
+    ScheduleDeliveryTargetUnauthorized,
+    available_delivery_targets,
+    creation_delivery,
+    delivery_from_params,
+    normalize_delivery,
+    validate_delivery_targets,
+)
 from .event_source_tool import (
     EVENT_SOURCE_INPUT_SCHEMA,
     EventSourceInputError,
@@ -50,12 +58,12 @@ from .schedule import ScheduleValidationError, build_schedule, iso_from_timestam
 if TYPE_CHECKING:
     from ..core import SimpleAgent
 
-_ACTIONS = ("create", "list", "get", "update", "pause", "resume", "delete", "takeover", "execution", "cancel", "recover", "run_now", "history", "status")
-_MUTATING_EXISTING_ACTIONS = frozenset({"update", "pause", "resume", "delete", "takeover", "cancel", "recover"})
+_ACTIONS = ("create", "list", "get", "update", "update_delivery", "delivery_targets", "pause", "resume", "delete", "takeover", "execution", "cancel", "recover", "run_now", "history", "status")
+_MUTATING_EXISTING_ACTIONS = frozenset({"update", "update_delivery", "pause", "resume", "delete", "takeover", "cancel", "recover"})
 
 
 # LLM: 公开单计划与每条规则只选择消息引用，原宿主解析canonical来源；发现元数据不路由/授权，完成只认repository回执。
-# 函数用途: 声明定时与事件监控的公开参数、发现用途和控制副作用，避免模型填写隐藏身份或把登记当立即执行。
+# 函数用途: 声明计划、认证投递目录与更新参数；新目标必须引用delivery_targets，不接受隐藏身份或任意地址。
 def build_schedule_tool_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="schedule",
@@ -120,6 +128,8 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
                 "execution": EXECUTION_SCHEMA,
                 "precheck": PRECHECK_SCHEMA,
                 "delivery": DELIVERY_SCHEMA,
+                "delivery_policy": DELIVERY_SCHEMA,
+                "notify_mode": {"enum": ["origin", "local", "none"], "description": "旧通知模式输入，与delivery_policy冲突时拒绝。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "list/history 的返回条数。"},
                 "metadata_only": {"type": "boolean", "description": "list/get/history/status 只输出状态、时间和编号，排除名字、提示词、回复预览及原始错误正文。"},
             },
@@ -158,9 +168,11 @@ def build_schedule_tool_model_spec() -> ToolModelSpec:
 # 类用途: 管理当前 owner 的计划并查询运行和交付状态。
 class ScheduleTool(BaseTool):
     # LLM: 新控制动作沿同一工具副作用和幂等策略；显式 ask 保持原权限裁决，不通过 slash 入口改变模型调用策略。
-    # 函数用途: 装配计划工具与准确动作策略，查询只读，删除和当前取消仍声明危险副作用。
-    def __init__(self, agent: SimpleAgent):
+    # host_authorizer只由认证宿主适配器注入，不进入模型参数或修改Agent共享run上下文。
+    # 函数用途: 装配计划工具与投递控制副作用；认证目录查询只读，更新通知仍需原CAS/creator授权。
+    def __init__(self, agent: SimpleAgent, *, host_authorizer=None):
         self.agent = agent
+        self._host_authorizer = host_authorizer
         self.model_spec = build_schedule_tool_model_spec()
         self.runtime_policy = ToolRuntimePolicy(
             effect_resolver=EffectResolverPolicy(
@@ -172,8 +184,10 @@ class ScheduleTool(BaseTool):
                         ("get", "read_only"),
                         ("history", "read_only"),
                         ("status", "read_only"),
+                        ("delivery_targets", "read_only"),
                         ("create", "mutating"),
                         ("update", "mutating"),
+                        ("update_delivery", "mutating"),
                         ("pause", "mutating"),
                         ("resume", "mutating"),
                         ("delete", "dangerous"),
@@ -192,7 +206,7 @@ class ScheduleTool(BaseTool):
         )
 
     # LLM: 群新工作在真实 actor 与原策略锁内写入；只读/停止不受新建授权门限制，失败不泄露正文。
-    # 函数用途: 校验动作后调用调度账本，写前权限失败保持 not_started，存储失败单独诊断。
+    # 函数用途: 校验动作后调用调度账本，未认证目标保持专用错误码和not_started，不降级为其它路由。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         action = str(params.get("action") or "").strip().lower()
         metadata_only = params.get("metadata_only", False)
@@ -202,12 +216,17 @@ class ScheduleTool(BaseTool):
             return _error("纯元数据模式仅支持查询动作", "TOOL_INVALID_ARGUMENTS", metadata_only=True)
         if action not in _ACTIONS:
             return _error("action 不受支持", "TOOL_INVALID_ARGUMENTS")
+        if action == "update_delivery" and set(params) - {"action", "job_id", "expected_version", "delivery", "delivery_policy",
+                "notify_mode", "metadata_only", "__tool_call_id", "__run_scope"}:
+            return _error("update_delivery 只能修改通知策略", "SCHEDULE_DELIVERY_UPDATE_FIELDS_INVALID")
         repository = getattr(self.agent, "scheduler_repository", None)
         if repository is None:
             return _error("当前 owner 的 scheduler 未装配", "TOOL_UNAVAILABLE")
         try:
             return self._execute(repository, action, params)
         except (GroupAuthorizationError, EventSourceInputError) as exc:
+            return _error(str(exc), exc.error_code, metadata_only=metadata_only)
+        except ScheduleDeliveryTargetUnauthorized as exc:
             return _error(str(exc), exc.error_code, metadata_only=metadata_only)
         except ScheduleValidationError as exc:
             return _error(str(exc), "SCHEDULER_INVALID_SCHEDULE", metadata_only=metadata_only)
@@ -230,9 +249,11 @@ class ScheduleTool(BaseTool):
             return _error("", "SCHEDULER_UNAVAILABLE", metadata_only=True)
 
     # LLM: 元数据查询原样早返回；写入沿原CAS，成功后退出policy锁再补本工具结构化job的姓名展示，不改变权限或效果字段。
-    # 函数用途: 执行查询和监控控制，成功创建/修改回执共用原创建者展示，诊断查询仍排除正文和名字。
+    # 函数用途: 执行查询和监控控制，投递目录与policy别名沿同一owner校验，旧诊断查询仍排除正文和名字。
     def _execute(self, repository, action: str, params: dict[str, object]) -> ToolHandlerOutcome:
         metadata_only = params.get("metadata_only", False) is True
+        if action == "delivery_targets":
+            return _success(action, {"delivery_targets": available_delivery_targets(self.agent)})
         if action == "status":
             facts = repository.runtime_snapshot()
             if getattr(getattr(self.agent, "home_paths", None), "owner_kind", "") == "group":
@@ -271,10 +292,13 @@ class ScheduleTool(BaseTool):
             return _error("目标监控不属于当前发起人，已拒绝操作", "SCHEDULER_NOT_AUTHORIZED")
         if action not in {'create', 'get', 'history', 'execution', 'delete', 'cancel', 'takeover', 'recover'}:
             from .control import authorize_job
-            thread_id, _task = _conversation_scope(self.agent)
-            authorize_job(repository, repository.get_job(job_id, include_deleted=action == 'delete'),
-                resolve_host_actor(self.agent, thread_id), home_root=getattr(getattr(self.agent, 'home_paths', None), 'root', None),
-                agent=self.agent, operation=action)
+            if self._host_authorizer is not None:
+                self._host_authorizer(repository.get_job(job_id), action)
+            else:
+                thread_id, _task = _conversation_scope(self.agent)
+                authorize_job(repository, repository.get_job(job_id, include_deleted=action == 'delete'),
+                    resolve_host_actor(self.agent, thread_id), home_root=getattr(getattr(self.agent, 'home_paths', None), 'root', None),
+                    agent=self.agent, operation=action)
         if action == 'execution':
             from .control import inspect_monitor_execution
             thread_id, _task = _conversation_scope(self.agent)
@@ -314,7 +338,7 @@ class ScheduleTool(BaseTool):
         return _with_creator_display(self.agent, outcome)
 
     # LLM: 已核原 job/creator 后才持群新工作门；写入沿原 CAS，未知编号不触发 provider 查询或泄露其它 owner。
-    # 函数用途: 执行已授权的立即运行或现有监控变更，停止取消保持原权限和原语义。
+    # 函数用途: 执行已授权监控变更；显式整体通知更新清除旧规则覆盖，只改未来策略，不重置执行统计。
     def _mutate_existing(self, repository, action, params, prepared):
         job_id = str(params.get('job_id') or '').strip()
         if action == "run_now":
@@ -335,6 +359,13 @@ class ScheduleTool(BaseTool):
                 return patch
             if not patch:
                 return _error("update 至少需要一个可修改字段", "TOOL_INVALID_ARGUMENTS")
+            if "delivery" in patch and "rules" not in patch and (action == "update_delivery"
+                    or "delivery_policy" in params or "notify_mode" in params):
+                from .monitor_state import _RUNTIME_FIELDS
+                current = repository.get_job(job_id)
+                if current.get("rules"):
+                    patch["rules"] = [{key: value for key, value in rule.items()
+                        if key not in _RUNTIME_FIELDS and key != "delivery"} for rule in current["rules"]]
             job = repository.update_job(
                 job_id,
                 patch=patch,
@@ -358,7 +389,7 @@ class ScheduleTool(BaseTool):
         return _success(action, {'job': _job_projection(job, include_prompt=True)})
 
     # LLM: 锁外事件证明与锁内群授权仍守原门；job source沿原ExecutionOrigin/typed actor规范，工作任务编号仅作原执行审计。
-    # 函数用途: 保存原聊天来源与准确后台位置的计划，避免委派work被误当投递/选模来源；非法策略不留下空后台线程。
+    # 函数用途: 保存原聊天来源与后台位置，认证目标在创建线程前验证；非法策略不留下空后台线程。
     def _create(self, repository, params: dict[str, object], prepared) -> ToolHandlerOutcome:
         name = str(params.get("name") or "").strip()
         prompt = str(params.get("prompt") or "").strip()
@@ -382,7 +413,7 @@ class ScheduleTool(BaseTool):
         execution = validate_execution_for_agent(self.agent, params.get("execution"))
         policy = normalize_policy(params.get("policy"))
         precheck = normalize_precheck(params.get("precheck"))
-        delivery = creation_delivery(self.agent, thread_id, params.get("delivery"))
+        delivery = validate_delivery_targets(self.agent, creation_delivery(self.agent, thread_id, delivery_from_params(params)))
         from .execution_policy import schedule_execution_thread, schedule_source_thread_id
 
         source_thread_id = schedule_source_thread_id(self.agent, thread_id)
@@ -415,12 +446,15 @@ class ScheduleTool(BaseTool):
         )
 
     # LLM: 只更新显式字段，事件来源使用同次锁外网络预检；已预留run保持原冻结策略，写入仍持原群权限锁。
-    # 函数用途: 将模型工具参数转换成原仓库的计划和通知修改，保留 null 关闭预检的含义。
+    # 函数用途: 将公开policy别名转换成唯一delivery字段，并在原CAS前验证目标，保留null关闭预检的含义。
     def _update_patch(self, params: dict[str, object], prepared) -> dict[str, object] | ToolHandlerOutcome:
         patch: dict[str, object] = {}
         for key in ("name", "prompt", "misfire_grace_seconds", "policy", "execution", "precheck", "delivery", "rules"):
             if key in params:
                 patch[key] = params[key]
+        delivery = delivery_from_params(params)
+        if delivery is not None:
+            patch["delivery"] = validate_delivery_targets(self.agent, delivery)
         if "execution" in patch:
             patch["execution"] = validate_execution_for_agent(self.agent, patch["execution"])
         if "rules" in patch:
@@ -451,9 +485,9 @@ class ScheduleTool(BaseTool):
 
 
 # LLM: 原 owner/creator 校验后才取群能力；查/停/取消/删除不申请新建许可，策略锁覆盖真正副作用。
-# 函数用途: 为监控新工作返回原群授权事务，非群保持原执行路径。
+# 函数用途: 更新通知也受原群监控能力门约束，避免新动作绕过群授权。
 def _monitor_work_guard(agent, action):
-    if action in {'create', 'update', 'resume', 'run_now'} and getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') == 'group':
+    if action in {'create', 'update', 'update_delivery', 'resume', 'run_now'} and getattr(getattr(agent, 'home_paths', None), 'owner_kind', '') == 'group':
         return group_capability_guard(agent, 'monitors.create', thread_id=_conversation_scope(agent)[0])
     return nullcontext()
 
@@ -596,7 +630,7 @@ def _source_request_id(agent: object, params: dict[str, object]) -> str:
 
 
 # LLM: 白名单投影原 job 与 active run；metadata_only 不读取 name/prompt/skill_refs，不从正文推导状态。
-# 函数用途: 展示计划、通知策略及在途执行，支持没有名称或正文的状态诊断。
+# 函数用途: 展示唯一delivery策略及delivery_policy公开别名；元数据模式不公开目标地址。
 def _job_projection(
     job: dict[str, object],
     *,
@@ -632,7 +666,9 @@ def _job_projection(
         "current_run": _run_projection(active_run, metadata_only=metadata_only) if active_run is not None else None,
     }
     if metadata_only:
+        payload["delivery"] = {key: value for key, value in payload["delivery"].items() if key in {"mode", "reply_policy", "include_origin"}}
         return payload
+    payload["delivery_policy"] = normalize_delivery(job.get("delivery"))
     payload["creator"] = job.get("creator")
     payload["name"] = job["name"]
     payload["creator_display"] = job.get("creator_display") or "创建者身份待核验"

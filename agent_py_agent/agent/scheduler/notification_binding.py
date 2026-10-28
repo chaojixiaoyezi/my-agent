@@ -1,5 +1,5 @@
 # LLM: 通知接管只冻结已认证管理员的原会话绑定，版本属于原 job/run；不改 creator、来源、模型或执行权限。
-# 模块用途: 校验持久通知接管引用，投递时重新核对原绑定及管理员登录代次。
+# 模块用途: 校验持久通知接管引用，投递时重核原绑定/登录代次；显式/new仅跟随同owner同三元组后继。
 from __future__ import annotations
 
 import math
@@ -35,8 +35,8 @@ def normalize_notification_binding(value):
 
 
 # LLM: 原认证登录代次和 ThreadStore 是投递锚；注销/重绑/重置使旧目标失效，不猜新管理员或借最新绑定。
-# 函数用途: 在接管写入和每次投递时核对准确私人通知目标，返回唯一原线程。
-def bound_notification_thread(agent, value):
+# 函数用途: 在接管写入和投递时核对准确私人目标，沿显式/new链返回同通道后继，不猜最近会话。
+def bound_notification_thread(agent, value, *, follow_latest_channel_session=True):
     value = normalize_notification_binding(value)
     home = agent.home_paths
     owner = {'provider': home.owner_provider, 'kind': home.owner_kind, 'id': home.owner_id}
@@ -47,12 +47,17 @@ def bound_notification_thread(agent, value):
     if identity is None or identity.bound_at != value['admin_bound_at']:
         raise HostActorError('CHANNEL_ACTOR_IDENTITY_CONFLICT')
     thread = agent.conversation_store.threads.require(value['source_thread_id'])
-    if thread.owner_id != owner['id'] or not any(
+    if follow_latest_channel_session:
+        from ..conversation.store_threads import resolve_thread_successor_chain
+        thread = agent.conversation_store.threads.require(resolve_thread_successor_chain(agent.conversation_store, thread.thread_id,
+            binding=[binding['channel'], binding['actor_id'], binding['conversation_id']]))
+    if thread.owner_id != owner['id'] or thread.owner_home != str(home.owner_home_dir) or not any(
             row.channel == binding['channel'] and row.channel_user_id == binding['actor_id']
             and row.channel_conversation_id == binding['conversation_id'] for row in thread.channel_bindings):
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
     resolved, error = agent.conversation_store.threads.resolve_report(channel=binding['channel'],
         channel_conversation_id=binding['conversation_id'], channel_user_id=binding['actor_id'])
-    if error or resolved is None or resolved.thread_id != thread.thread_id:
+    if error or resolved is None or (resolved.thread_id != thread.thread_id if follow_latest_channel_session else
+            resolved.owner_id != thread.owner_id or resolved.owner_home != thread.owner_home):
         raise HostActorError('CHANNEL_ACTOR_SCOPE_MISMATCH')
     return thread

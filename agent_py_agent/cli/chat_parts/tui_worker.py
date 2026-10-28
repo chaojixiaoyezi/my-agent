@@ -38,6 +38,12 @@ class TuiWorkerConfig:
     tui_runtime: Any | None = None
     local_run_ref: list = field(default_factory=lambda: [None])
 
+    # LLM: 注册原worker内存历史的同一引用，不另建历史源；reset只清会话上下文，不取消工作。
+    # 函数用途: 让Direct/new可以立即清空下一轮会读取的历史。
+    def __post_init__(self):
+        if self.tui_runtime is not None:
+            self.tui_runtime.bind_conversation_history(self.conversation_history, self.history_lock, self.assistant_outputs)
+
 
 # LLM: WorkerPathContext 把一个 job 与唯一 turn adapter 绑定；两条执行路径不得自行创建或 finalize adapter。
 # 类用途: 向本地或 Gateway 路径传递回合依赖和注入内容。

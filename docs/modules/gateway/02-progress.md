@@ -12,6 +12,22 @@
 
 TOTP种子在pending/active均为每Owner认证密文；默认debug不执行脚本/HTTP/工具/子流/外部模型，显式True仍无正式账本。Host已接通布尔schema、完整输入/分支DTO和固定mock fallback，上传摘要不匹配统一 `PACKAGE_SHA256_MISMATCH`。真实回环HTTP与原认证/工作流/Host合同共537项当前源码回归通过；准确分组、红绿证据及未验入口见根 `TESTS.md`。未部署，不外推生产IdP、live LLM或外部适配通过。
 
+## 2026-10-28 Wave 9 B3 Round 4：详情取数不阻塞reset（源码候选）
+
+父页内存提交并解锁后才读取选中子代理详情；详情自身在根锁内采样代次/选择/游标，锁外取数、同锁围栏提交。本地审批预取也移出提交回调；在途reset或改选的旧详情不回填，父页过期时不再请求子页。专项110例通过，准确命令及限制见 [TESTS](../../../TESTS.md) R4小节。未部署，真实网络/键盘及完整并发导航未验证。
+
+## 2026-10-28 Wave 9 B3 Round 3：轮询原子起点（源码候选）
+
+Gateway 与本地轮询在原 reset 锁内同时采样代次、消息游标和过程流位置，整页取数在锁外，提交继续沿同锁代次校验；防止旧游标配上新代次而越过 `/new`。已补双路径事件握手回归并翻译三处指定注释，准确验证及限制见 [TESTS](../../../TESTS.md) 的 R3 小节。未部署，不代表真实键盘或网络链路已验收。
+
+## 2026-10-28 Wave 9 B3 Round 2：原地新会话与事件级多线通知（源码候选）
+
+- Direct TUI 的 `/new` 成功后同时清空显示、游标和原 worker 内存历史；先解析现有绑定，不以 Agent 启动目录覆盖用户选定目录，并在继任事务内复核 owner/home。在途 Gateway 与本地文件通知页按单调 reset 代次提交，旧页不再恢复旧消息或游标。
+- ThreadStore 按准确 `(channel, account/actor, chat)` 保存独立后继映射；旧单通道字段继续兼容。双向发表后标记后继已发表，Web 删除空闲归档前任不会令后继隐身；发表标记未完成时不允许删除锚点。
+- Host v2 的通知更新使用原 issuer 认证的请求上下文，不依赖模型 run，也不修改 Agent 的共享运行参数。真正的本机管理员仅管理自己仓库；普通用户继续经过原 creator 与群能力门。`update_delivery` 的非通知字段在写前按专用错误码拒绝，版本 CAS 保留。
+- 原 job outbox 按 `run_id:event_key -> target_key` 保存独立通知欠账，同一 run 的不同事件互不吞掉，同事件重试沿原 sender 补账。已外发主通道保留原回执，次目标独立投递；不新增执行身份、调度队列或业务重跑。
+- `follow_latest_channel_session` 默认开启；关闭时保留原绑定线程。支持 `primary_only`、`dual_deliver`、`fallback_on_failure`、`severity_routed`，分别限定主线、全线、按序成功即停、结构化等级过滤；主线已发而历史失败只补该线，全部等级目标被过滤时按内部留档结算。专项102例通过；验证命令与尚未验证边界见根目录 [TESTS](../../../TESTS.md) 的 R2 小节。未推送、未部署；不代表实网 IM、真实浏览器或键盘链路已经验收。
+
 ## 2026-10-28 Wave 8 T2 W1 Round 2：管理CLI轻上下文（本地候选）
 
 管理入口不再为配置/路径解析创建SimpleAgent；共用原owner权限、冻结配置及runtime paths，真实执行组合根不变。common与gateway_loops的传递core导入已解除，原工厂注入仍兼容；原日志索引只在实际写日志时按需构造，普通解析和关闭的事件镜像不建库。冷子进程、原路径对照和真实构造禁止回归，以及实际验证边界见[TESTS](../../../TESTS.md)本轮小节；结构见[04-structure](04-structure.md)。不代表生产Gateway、真实TUI/IM或跨平台已验收，尚未部署。

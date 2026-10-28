@@ -560,6 +560,8 @@ def execute_gateway_conversation_control(
         from .plugin_command_service import execute_plugin_control
 
         return execute_plugin_control(agent, command, scope, event_hub=scope.event_hub)
+    if command.kind == "new":
+        return _execute_gateway_new_session(agent, paths, command, scope)
     if command.kind in {"dir", "fork"}:
         return _execute_gateway_workspace_control(agent, command, scope, is_admin=access.is_admin)
     steer_receipt: _SteerReceiptState | None = None
@@ -674,6 +676,33 @@ def execute_gateway_conversation_control(
     if command.kind == "steer":
         return _steer_active_request(agent, paths, active, command, scope)
     return ConversationControlResult(command.kind, False, "不支持的会话控制命令。", error_code="UNKNOWN_CONVERSATION_CONTROL")
+
+
+# LLM: 调用方已完成目录鉴权；/new只检查准确前台请求，不经stop/资源取消；新绑定仍由原ThreadStore事务提交。
+# 函数用途: 为Feishu、HTTP和TUI的同一控制入口创建空白后继，前台运行时明确拒绝。
+def _execute_gateway_new_session(base_agent, paths, command, scope):
+    from ..conversation.new_session import new_session_result
+
+    if _live_window_requests(paths, scope):
+        return ConversationControlResult("new", False, "前台回合仍在运行；请等待完成或先 /stop 再 /new。",
+                                         error_code="NEW_SESSION_BUSY")
+    agent = _request_agent_for_scope(base_agent, scope)
+    home = getattr(agent, "home_paths", None)
+    store = agent.conversation_store
+    current, error = store.threads.resolve_report(channel=scope.channel,
+        channel_conversation_id=scope.conversation_id, channel_user_id=scope.user_id)
+    if error:
+        return ConversationControlResult("new", False, "会话绑定不可读，未切换。", error_code="THREAD_BINDING_UNAVAILABLE")
+    if current is None:
+        current = store.threads.get_or_create({"canonical_user_id": scope.user_id, "channel": scope.channel,
+            "channel_user_id": scope.user_id, "channel_conversation_id": scope.conversation_id,
+            "owner_id": getattr(home, "owner_id", ""), "owner_home": str(getattr(home, "owner_home_dir", "")),
+            "cwd": str(getattr(agent, "effective_workspace_root", "") or getattr(home, "owner_home_dir", ""))})
+    if home is not None and (current.owner_id != home.owner_id or current.owner_home != str(home.owner_home_dir)):
+        return ConversationControlResult("new", False, "会话不属于当前用户。", error_code="THREAD_SUCCESSOR_OWNER_MISMATCH")
+    binding = next((row for row in current.channel_bindings if row.channel == scope.channel
+        and row.channel_user_id == scope.user_id and row.channel_conversation_id == scope.conversation_id), None)
+    return new_session_result(store, current.thread_id, title=command.value, binding=binding)
 
 
 # LLM: 调用方已完成命令鉴权；只从认证scope取owner及通道线程，缺HomePaths时用canonical storage.root，不猜基础Agent或最新线程。

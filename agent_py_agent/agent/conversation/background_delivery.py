@@ -1,5 +1,5 @@
 # LLM: 普通与必要通知先筛原结构化工具回执候选，再共核canonical工具及工作attempt；无候选不触发来源认领，原回复/运输路径仍自行核权，已外发在canonical前冻结，不能扩大owner/actor或重执业务。
-# 模块用途: 维护后台回复和必要失败提醒的原投递、发送前代次复核与冻结重投，回执仍唯一证明外发。
+# 模块用途: 维护后台回复原投递及冻结重投；多线沿同一sender逐目标记回执，不以部分成功确认整条wake。
 from __future__ import annotations
 
 import time
@@ -60,7 +60,7 @@ _ROUTE_UNDECLARED = "undeclared"
 # 未送达但有外发义务的正文必须整封冻结在唤醒上重投，不能在无记录的情况下确认唤醒；
 # frozen_retry 非空表示这是重投：整封 envelope（正文/附件/过程/metadata）都来自冻结载荷。
 # 已外发的冻结回执只补canonical，不受新准入否决而再次外发；未外发事件仍须原generation与开始CAS。
-# 函数用途: 委派只留原执行线程内部结果，其余沿原渠道/冻结回执提交；主sender的模型通知仍走原外发门。
+# 函数用途: 委派仅内部留档，普通及多线通知沿原sender和外发门提交；多线失败只重投欠账目标。
 def record_background_response(
     delivery: BackgroundDeliveryDependencies,
     request: BackgroundDeliveryRequest,
@@ -85,6 +85,17 @@ def record_background_response(
         assistant_commentaries=assistant_commentaries, display_snapshot=display_snapshot, frozen_retry=frozen_retry
     )) is not None:
         return internal
+    from ..scheduler.alert_delivery import record_alert_delivery
+
+    options = dict(public_receipt=public_receipt, delivery_artifacts=delivery_artifacts,
+        operation_verification=operation_verification, assistant_commentaries=assistant_commentaries,
+        display_snapshot=display_snapshot, deliver=deliver, delivery_reason=delivery_reason,
+        route_supports_transcript=route_supports_transcript, frozen_retry=frozen_retry,
+        local_transcript_only=local_transcript_only)
+    multi = record_alert_delivery(delivery, request, delivery_context, internal_content,
+        record_one=_record_background_owner_response, options=options)
+    if multi is not None:
+        return multi
     return _record_background_owner_response(
         delivery, request, delivery_context, internal_content, public_receipt=public_receipt,
         delivery_artifacts=delivery_artifacts, operation_verification=operation_verification,
@@ -94,7 +105,7 @@ def record_background_response(
 
 
 # LLM: 原owner信封提交保留冻结回执、代次、渠道与canonical的完整顺序；仅由上层排除未外发委派内部结果。
-# 函数用途: 执行普通后台通知或已外发回执补账，保持附件、历史和失败重投原语义。
+# 函数用途: 执行单路线通知或补账；观察器在运输回执后canonical前保存准确状态，本地写失败也可冻结整封。
 def _record_background_owner_response(
     delivery: BackgroundDeliveryDependencies,
     request: BackgroundDeliveryRequest,
@@ -111,6 +122,9 @@ def _record_background_owner_response(
     route_supports_transcript: bool | None = None,
     frozen_retry: FrozenOwnerDelivery | None = None,
     local_transcript_only: bool = False,
+    delivery_observer: Callable | None = None,
+    delivery_target_key: str = "",
+    delivery_event_key: str = "",
 ) -> BackgroundDeliveryCommit:
     local_transcript_only = local_transcript_only or scheduled_local_delivery(delivery.agent, request)
     if block := public_receipt_delivery_block(delivery.agent, request, public_receipt, internal_content,
@@ -149,6 +163,10 @@ def _record_background_owner_response(
     )
     if display_snapshot is not None and frozen_retry is None:
         message_metadata["goal_continuation_allowed"] = display_snapshot.get("goal_continuation_allowed") is True
+    if delivery_target_key:
+        message_metadata["scheduler_delivery_target_key"] = delivery_target_key
+    if delivery_event_key:
+        message_metadata["scheduler_delivery_event_key"] = delivery_event_key
     route = _local_only_route(_background_delivery_route(
         delivery.channels,
         delivery_context,
@@ -168,7 +186,9 @@ def _record_background_owner_response(
         evidence_refs=evidence_refs, message_metadata=message_metadata, delivery_status=delivery_status,
         receipt_id=str(getattr(receipt, 'receipt_id', '') or ''), target=delivery_context.target,
         ownership=route.ownership, canonical_record=route.canonical_record or delivery_status == 'sent', persisted=False)
-    if delivery_status == 'sent':
+    if delivery_observer is not None:
+        delivery_observer(freeze)
+    if delivery_status == 'sent' and delivery_observer is None:
         # 原外发已发生，先保存已有wake的整封回执；canonical失败后只能补账，不能重执模型或运输。
         _freeze_pending_owner_delivery(delivery.store, freeze)
     commit = _commit_background_response(
@@ -186,7 +206,8 @@ def _record_background_owner_response(
         display_snapshot=display_snapshot,
         audit_refs_settled=bool(frozen_retry is not None and frozen_retry.external_sent),
     )
-    frozen_now = _freeze_pending_owner_delivery(delivery.store, replace(freeze, persisted=commit.persisted))
+    # 多线observer已将完整目标回执和原结果写入同一outbox；共享账本错误由observer上抛，不伪装为单目标失败。
+    frozen_now = _freeze_pending_owner_delivery(delivery.store, replace(freeze, persisted=commit.persisted)) if delivery_observer is None else False
     return replace(commit, outbox_frozen=frozen_now) if frozen_now else commit
 
 
