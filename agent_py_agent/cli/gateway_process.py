@@ -1,4 +1,4 @@
-# LLM: Count0清理保原责任；GIL间隔只在Gateway执行入口调整，不在import时改变调用进程的解释器设置。
+# LLM: 管理入口只解析轻上下文，真实执行仍构造Agent；Count0清理保原责任，GIL间隔只在执行入口调整，不在import时改变解释器。
 
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ from ..agent.gateway_parts.status_rendering import (
     wait_for_gateway_readiness,
 )
 from ..agent.runtime_errors import runtime_error_report
-from .common import ROOT, make_agent
+from .common import ROOT, make_agent, make_lightweight_cli_agent_context
 from .gateway_host_guard import mark_hosting_gateway_process, refuse_stopping_hosting_gateway
 from .gateway_loops import (
     _gateway_background_main_loop,
@@ -1094,13 +1094,13 @@ def cmd_gateway_uninstall(args) -> int:
     return 0 if success else 1
 
 
-# LLM: 公开数量只读真实YAML；已运行拓扑不同先拒绝，数量相同且force才沿原托管自停门。
+# LLM: 启动器仅解析轻上下文和真实YAML数量；已运行拓扑不同先拒绝，同拓扑force才沿原托管自停门，业务Agent留给子进程。
 # 函数用途: 启动后台 Gateway；--force 时先停掉正在运行的实例再启动新进程，并等待就绪。
 def cmd_gateway_start(args) -> int:
     from .common import frozen_gateway_arguments
 
     args = frozen_gateway_arguments(args)
-    agent = make_agent(args)
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
     paths.root.mkdir(parents=True, exist_ok=True)
     pid = get_running_pid(paths.pid)
@@ -1292,11 +1292,11 @@ def _run_standalone_gateway(args, lifecycle) -> int:
     return exit_code
 
 
-# LLM: status延迟闲置MCP，分别展示实际配置和已读state拓扑，未知保持unknown；这些展示字段不改变原存活/就绪判据。
+# LLM: status仅用轻上下文，分别展示配置和state拓扑，未知保持unknown，不改变原存活/就绪判据或构造业务Agent。
 # 函数用途: 查看Gateway运行事实与配置目标，避免把改YAML说成运行拓扑已切换。
 def cmd_gateway_status(args) -> int:
     args._defer_mcp_connect = True
-    agent = make_agent(args)
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
     pid_record = read_pid_record(paths.pid)
     running = is_pid_alive(pid_record["pid"]) if pid_record else False
@@ -1360,11 +1360,11 @@ def _gateway_state_detail_for_display(running: bool, state: dict) -> dict:
 # 函数用途: 请求正在运行的 Gateway 排水退出，超时后按 --kill 强制结束；按显式要求停止遗留后台资源。
 # LLM: 只有 argparse 的显式布尔 drain=True 才走原两阶段排空，缺字段或其它对象不能成为控制指令。
 # 函数用途: 显式 drain 先完成原两阶段排空再停止，遗留后台清理仍沿原入口。 修改需同步原控制、恢复或权限测试。
-# LLM: Retain original agent/path/process identity and explicit background-stop contracts; control-only construction defers unrelated MCP.
+# LLM: 轻上下文保留原owner/path/进程身份与显式后台停止合同，不构造业务Agent或改变自停防线。
 # 函数用途: 沿原身份门停止所选Gateway，不为控制命令启动闲置MCP。
 def cmd_gateway_stop(args) -> int:
     args._defer_mcp_connect = True
-    agent = make_agent(args)
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
     background = _background_processes_for_stop(agent)
     pid = get_running_pid(paths.pid)
@@ -1491,7 +1491,7 @@ def _force_kill_gateway(agent, paths: GatewayPaths, pid: int) -> bool:
 # LLM: 默认走安全重启（gateway_restart_handover.safe_restart_from_cli），Gateway 未运行时才落到启动；
 #   --force 保持原来的先停后起（停止超时强制终止）。改动须同步 test_gateway_commands.py 与 test_gateway_safe_restart.py。
 # 函数用途: 终端重启 Gateway：默认先排空再换进程，--force 立即先停后起。
-# LLM: Defer MCP only in this control process; original topology freeze, coordinated handover and full-agent start/run composition stay unchanged.
+# LLM: 管理上下文不构造Agent；原拓扑冻结、交接及实际执行组合根不变，不将unknown重放为新请求。
 # 函数用途: 按原拓扑和交接协议重启Gateway，管理进程不急连MCP。
 def cmd_gateway_restart(args) -> int:
     args._defer_mcp_connect = True
@@ -1510,7 +1510,7 @@ def cmd_gateway_restart(args) -> int:
                               "running_worker_count": observed}, ensure_ascii=False), file=sys.stderr)
             return 2
     if not getattr(args, "force", False):
-        agent = make_agent(args)
+        agent = make_lightweight_cli_agent_context(args, factory=make_agent)
         safe_code = safe_restart_from_cli(agent, gateway_paths(agent))
         if safe_code is not None:
             return safe_code
@@ -1535,11 +1535,11 @@ def cmd_gateway_restart(args) -> int:
     return cmd_gateway_start(start_args)
 
 
-# LLM: Preserve the original canonical log path and current-generation reader; defer local MCP before read-only construction.
+# LLM: 保留原规范日志地址及当前代读取，只解析轻上下文，不初始化Agent或业务存储。
 # 函数用途: 查看原Gateway日志，不为只读命令启动MCP。
 def cmd_gateway_logs(args) -> int:
     args._defer_mcp_connect = True
-    agent = make_agent(args)
+    agent = make_lightweight_cli_agent_context(args, factory=make_agent)
     paths = gateway_paths(agent)
     if not paths.log.exists():
         print("没有日志文件")

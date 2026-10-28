@@ -1,3 +1,27 @@
+## 2026-10-28 Wave 8 T2 W1 Round 2：管理入口冷导入及轻上下文
+
+来源：`07-tasks/fix-wave8-t2-w1.md`；干净起点 `384de277e208f1a1bf833f3a49b7c7ca65eca2d5`，仅在派工工作树修复，不推送、部署或启停真实服务。
+
+- `cli/common.py` 将真实Agent导入延迟到执行构造；`gateway_loops.py` 的纯类型引用移入 `TYPE_CHECKING`，避免 `gateway_process` 传递加载core。六模块及common由新解释器实测，不用热进程的已导入状态代替冷导入观察。
+- 管理入口通过 `make_lightweight_cli_agent_context` 使用原配置层、冻结配置、持久化权限模式、owner身份和运行路径解析；`request_client.GatewayClientContext` 只承载这些事实，构造不建home、不预检TUI凭据、不启动模型、MCP或记忆运行时。原日志首次写入时按需调用同一 `build_owner_local_store`，关闭事件镜像仍不建库。真实Gateway执行及supervisor run的原构造组合根不变。
+- 原模块级及common级 `make_agent` 显式替换点保留；直接读取旧 `common.SimpleAgent` 符号时才导入core。未替换工厂的回归直接让真实 `SimpleAgent.__init__` 抛错，不能只观察私有defer标记或靠替换工厂掩盖完整构造。
+- 首批28项先全部失败：冷导入1项、19个管理入口、4个ensure/default分支、4种原路径对照。原六套190项保持通过。另补真实日志索引3项，正向两项先暴露缺属性失败，镜像关闭项原本通过；修复后验证真实记录、缓存同一Store及关闭时不建库。无删除断言、新增skip/xfail或放宽权限门。
+
+19个管理入口用真实配置/owner/路径解析，在原路径函数之后、进程或网络副作用之前停止观察；ensure/default执行完整管理分支，仅替换存活、启动和交互边界。四种路径对照使用真实SimpleAgent，覆盖Full Access外部项目、workspace-write的有效owner墙、restricted默认根和包入口；不把这些组件验证外推为真实Gateway/TUI/通道端到端。
+
+复现（工作树根）：
+
+```bash
+python3 -m pytest agent_py_agent/tests/test_cli_resume_and_gateway_client_lightweight.py agent_py_agent/tests/test_cli_chat.py agent_py_agent/tests/test_chat_client_context.py agent_py_agent/tests/test_gateway_client.py agent_py_agent/tests/test_adapter_daemon_cli.py agent_py_agent/tests/test_gateway_adapter.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_gateway_commands.py agent_py_agent/tests/test_gateway_supervisor_maintenance.py agent_py_agent/tests/test_gateway_control_plane_construction.py agent_py_agent/tests/test_gateway_control_plane_frozen_home.py -q --tb=short
+python3 scripts/check_import_boundaries.py
+python3 scripts/check_code_size.py --mode strict --baseline CODE_SIZE_BASELINE.json --report /tmp/t2-w1-size.md
+ruff check agent_py_agent scripts
+git diff --check 9ee9bdc01..HEAD
+```
+
+JUnit及红例保留在工作树 `.pytest_cache/t2-w1-fix-*.xml`；最终准确通过数及门禁结果见本轮交接。Python 3.11/3.12、Linux/Windows CI、真实模型/通道和全仓测试未作为本轮已验证证据。
+
 ## 2026-10-28 CI Linux 跨平台回归收口与 Python 3.11–3.14 版本对齐
 
 - **Python 版本范围对齐**：`.github/workflows/test.yml` 移除 Python 3.10 矩阵项，保留 Python 3.11/3.12（`pyproject.toml` 同步更新为 `requires-python = ">=3.11"`，`AGENTS.md` 与 `docs/development/DEVELOPMENT_RULES.md` 同步声明面向 Python 3.11–3.14），并移除仅针对 3.10 的兼容分支。

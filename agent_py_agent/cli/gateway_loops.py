@@ -1,7 +1,7 @@
 # LLM: bg-owner宿主停止复用准确claim中断与原job观察，共用原两秒预算；未退/未结交cleanup保持incomplete。
 # LLM: 原审批清理债务的真实异常链保同outer交原Future；普通无债错误保持原终态路径，查链不替代canonical核收。
 
-# LLM: 单 Gateway 的请求、后台会话和维护车道编排；执行权与事件保存在原队列/会话层，重试策略独立且不落盘。
+# LLM: 单Gateway的请求、后台和维护车道编排；Agent仅用于类型注解，不得因管理模块传递导入而加载core，执行权仍归原队列/会话层。
 #   C派发复用原持久gate/claim和同代execution，原线程池/Count0公平及恢复分页保持；线程返回不释放P3。
 #   C孤儿业务只走原独立来源请求，这里的旧owner扫车道不直接物化远端Agent；标志只收窄不授执行。
 #   C冷组合只运行同源metadata producer与请求盖章，心跳末写核原lease；Count0业务公平、三旧控制线程顺序不变。
@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..agent.concurrency import DurableDaemonThreadPoolExecutor
 from ..agent.conversation import (
@@ -31,7 +32,6 @@ from ..agent.conversation import (
     BackgroundMainAgentScheduler,
 )
 from ..agent.conversation.background_shutdown import BackgroundShutdown
-from ..agent.core import SimpleAgent
 from ..agent.delivery import DeliveryService
 from ..agent.gateway_parts import (
     GatewayInboxScanGate,
@@ -88,6 +88,9 @@ from ..agent.user_space.owner_resolver import (
 from .gateway_lane_retry import BackgroundLaneRetry
 from .gateway_loop_backoff import LoopErrorBackoff
 from .models import GatewayRunContext
+
+if TYPE_CHECKING:
+    from ..agent.core import SimpleAgent
 
 # 参数减量第 3 批 B 组（2026-09-27）：后台车道的三个节奏不再是配置项（原 gateway_request_poll_interval /
 # background_main_error_backoff_seconds / background_owner_wake_rescan_seconds），值不变；心跳节奏见 lease_service。

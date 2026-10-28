@@ -425,3 +425,188 @@ def test_adapter_file_passes_original_paths_to_gateway_start(tmp_path, monkeypat
     assert adapter.cmd_adapter_file(args) == 0
     factory.assert_called_once_with(args)
     started.assert_called_once_with(args, paths=paths)
+
+
+# LLM: 冷解释器以工作树根运行，避免已加载core或系统editable路径掩盖传递导入；不构造服务或调用网络。
+# 函数用途: 检查六个CLI模块及common在全新进程中都不加载core。
+def test_all_management_modules_remain_cold_without_core():
+    script = '''
+import sys
+import agent_py_agent.cli.chat
+import agent_py_agent.cli.chat_client_context
+import agent_py_agent.cli.adapter
+import agent_py_agent.cli.gateway_client
+import agent_py_agent.cli.gateway_process
+import agent_py_agent.cli.supervisor
+import agent_py_agent.cli.common
+assert 'agent_py_agent.agent.core' not in sys.modules
+'''
+    result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[2],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# LLM: 仅准备显式临时home/config，不创建Home、客户端凭据或业务存储；管理上下文不得靠完整Agent初始化补齐路径。
+# 函数用途: 为未替换工厂回归准备最小真实配置。
+def _management_args(tmp_path, monkeypatch):
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path / "cold-home"))
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG", raising=False)
+    monkeypatch.delenv("MY_AGENT_RUNTIME_CONFIG_LAYERS", raising=False)
+    config = tmp_path / "management.yaml"
+    config.write_text("model_backend: echo\nenable_plugins: false\nenable_subagents: false\n", encoding="utf-8")
+    return Namespace(config=str(config), workspace_root="", force=False)
+
+
+@pytest.mark.parametrize("module,command", [
+    ("gateway_client", "cmd_gateway_ask"), ("gateway_client", "cmd_gateway_result"),
+    ("adapter", "cmd_adapter_start"), ("adapter", "cmd_adapter_file"),
+    ("adapter", "cmd_adapter_status"), ("adapter", "cmd_adapter_stop"),
+    ("gateway_process", "cmd_gateway_start"), ("gateway_process", "cmd_gateway_status"),
+    ("gateway_process", "cmd_gateway_stop"), ("gateway_process", "cmd_gateway_logs"),
+    ("gateway_process", "cmd_gateway_restart"),
+    ("supervisor", "cmd_supervisor_start"), ("supervisor", "cmd_supervisor_status"),
+    ("supervisor", "cmd_supervisor_stop"), ("supervisor", "cmd_start_all"),
+    ("supervisor", "cmd_supervisor_install_service"), ("supervisor", "cmd_supervisor_uninstall_service"),
+    ("supervisor", "cmd_maintenance_lock"), ("supervisor", "cmd_maintenance_unlock"),
+])
+# LLM: 原make_agent保持未替换，只禁止真实SimpleAgent初始化；路径边界核对实际上下文后停止，绝不启动或停止真实宿主。
+# 函数用途: 逐个证明管理入口能在完整Agent构造被禁止时完成真实配置和路径解析。
+def test_unpatched_management_factories_never_construct_simple_agent(tmp_path, monkeypatch, module, command):
+    import importlib
+
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts.paths import gateway_paths
+    from agent_py_agent.cli import common
+
+    cli = importlib.import_module(f"agent_py_agent.cli.{module}")
+    args = _management_args(tmp_path, monkeypatch)
+    original = common.make_agent
+    constructor = Mock(side_effect=AssertionError("SimpleAgent must not be constructed"))
+    monkeypatch.setattr(SimpleAgent, "__init__", constructor)
+    if module == "gateway_process":
+        monkeypatch.setattr(cli, "get_running_pid", lambda _: None)
+
+    # LLM: 使用真正的路径函数确认同一临时home下的服务地址，然后在进程/网络副作用之前终止。
+    # 函数用途: 观察真实轻量上下文，既不替代配置解析也不伪造Agent。
+    def observe_context(context):
+        assert not isinstance(context, SimpleAgent)
+        paths = gateway_paths(context)
+        assert paths.root.is_relative_to(tmp_path / "cold-home")
+        assert context.config.config_path == args.config
+        raise _ConstructionObserved
+
+    monkeypatch.setattr(cli, "gateway_paths", observe_context)
+    with pytest.raises(_ConstructionObserved):
+        getattr(cli, command)(args)
+    assert common.make_agent is original
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("default_chat", [False, True])
+@pytest.mark.parametrize("already_running", [False, True])
+# LLM: 完整执行原ensure/default分支，保留未替换make_agent；只替换真实进程状态、启动和交互聊天边界。
+# 函数用途: 验证缺省路径的存活及启动分支和裸CLI入口均不构造SimpleAgent。
+def test_unpatched_default_gateway_paths_never_construct_simple_agent(tmp_path, monkeypatch, default_chat, already_running):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.cli import common, gateway_client
+
+    args = _management_args(tmp_path, monkeypatch)
+    original = common.make_agent
+    constructor = Mock(side_effect=AssertionError("SimpleAgent must not be constructed"))
+    monkeypatch.setattr(SimpleAgent, "__init__", constructor)
+    states = iter([already_running, True])
+    observed = []
+
+    # LLM: 观察管理解析出的真实服务路径，存活状态由测试控制，不接触真实PID。
+    # 函数用途: 模拟已运行或原启动完成后的就绪观察。
+    def running(paths):
+        assert paths.root.is_relative_to(tmp_path / "cold-home")
+        observed.append(paths.root)
+        return 123, next(states)
+
+    monkeypatch.setattr(gateway_client, "gateway_running", running)
+    start = Mock(return_value=0)
+    chat = Mock(return_value=17)
+    monkeypatch.setattr(gateway_client, "cmd_gateway_start", start)
+    monkeypatch.setattr(gateway_client, "cmd_chat", chat)
+    result = gateway_client.cmd_default(args) if default_chat else gateway_client.ensure_gateway_started(args)
+    assert result == (17 if default_chat else 0)
+    assert len(observed) == (1 if already_running else 2)
+    assert start.call_count == (0 if already_running else 1)
+    assert chat.call_count == int(default_chat)
+    if default_chat:
+        assert args.gateway is True
+    assert common.make_agent is original
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("access,project_mode", [
+    ("full-access", "project"), ("workspace-write", "project"),
+    ("restricted", "owner"), ("full-access", "package"),
+])
+# LLM: 与真实原Agent对照，不复制路径公式；构造轻上下文前后不得创建home/存储，且相对服务及审计路径不漂移。
+# 函数用途: 核对Full Access、owner墙和包入口下的原路径、配置与轻量管理解析一致。
+def test_management_context_matches_real_agent_paths_without_initializing_home(tmp_path, monkeypatch, access, project_mode):
+    from agent_py_agent.agent.gateway_parts.paths import adapter_paths, gateway_paths
+    from agent_py_agent.cli import common
+
+    args = _management_args(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    if project_mode == "package":
+        (project / "__main__.py").write_text("# package-entry fixture\n", encoding="utf-8")
+    args.workspace_root = str(project) if project_mode != "owner" else ""
+    with Path(args.config).open("a") as config:
+        config.write(f"access_mode: {access}\ngateway_workspace: gateway-relative\nadapter_workspace: adapter-relative\n"
+                     "audit_log_path: audit-relative\nconversation_workspace: conversations-relative\n")
+    builder = getattr(common, "make_lightweight_cli_agent_context", None)
+    assert callable(builder), "a dependency-light management context resolver is required"
+    home = tmp_path / "cold-home"
+    assert not home.exists()
+    context = builder(args)
+    assert not home.exists(), "path resolution must not initialize owner services"
+    args._defer_mcp_connect = True
+    host = common.make_agent(args)
+    try:
+        assert context.root == host.root and context.workspace_roots == host.workspace_roots
+        assert context.home_paths == host.home_paths
+        assert context.workspace == host.effective_workspace_root
+        assert context.paths == gateway_paths(context) == gateway_paths(host)
+        assert adapter_paths(context) == adapter_paths(host)
+        for field in ("gateway_workspace", "adapter_workspace", "audit_log_path", "conversation_workspace", "session_workspace"):
+            assert getattr(context.config, field) == getattr(host.config, field), field
+    finally:
+        host.tools.close_mcp_clients()
+
+
+@pytest.mark.parametrize("kind,mirror", [("payload", True), ("event", True), ("event", False)])
+# LLM: 管理上下文必须保留原CLI超时/控制事件的真实索引，不可把缺local_store吞成side-effect错误；只在首次日志写入初始化原Store。
+# 函数用途: 验证轻上下文不构造Agent，按需写原日志库且关闭镜像时不创建数据库。
+def test_management_context_preserves_lazy_gateway_logging(tmp_path, monkeypatch, capsys, kind, mirror):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.gateway_parts.logging import log_gateway_event, log_gateway_payload
+    from agent_py_agent.cli import common
+
+    args = _management_args(tmp_path, monkeypatch)
+    constructor = Mock(side_effect=AssertionError("SimpleAgent must not be constructed"))
+    monkeypatch.setattr(SimpleAgent, "__init__", constructor)
+    context = common.make_lightweight_cli_agent_context(args)
+    context.config.store_event_mirror_enabled = mirror
+    database = Path(context.config.local_store_path)
+    assert not database.exists() and not (tmp_path / "cold-home").exists()
+    payload = {"id": "native-client-timeout", "kind": "ask", "status": "timeout", "ok": False}
+    if kind == "payload":
+        log_gateway_payload(context, payload, event_type="gateway_request_timeout")
+    else:
+        log_gateway_event(context, "gateway_stop_requested", payload)
+    assert "gateway-side-effect-error" not in capsys.readouterr().err
+    constructor.assert_not_called()
+    if kind == "event" and not mirror:
+        assert not database.exists() and not (tmp_path / "cold-home").exists()
+        return
+    assert database.is_file()
+    store = context.local_store
+    assert context.local_store is store
+    records = store.list_recent(source_type="gateway_request" if kind == "payload" else "gateway_event")
+    assert len(records) == 1
+    assert records[0].metadata["status"] == "timeout"
