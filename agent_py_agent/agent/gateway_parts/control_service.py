@@ -1192,7 +1192,7 @@ def _execute_context_control(
 # LLM: Manual Compact is a first-class cancellable turn like 会话运行时's Compact task.  Register the
 # authenticated conversation plus original control message before any admission check so a TUI Esc
 # can target only this operation and provider transport can close its exact socket.
-# 比例设置只改同一线程metadata，不执行摘要；锁定错误原样保留结构化码。
+# status只读同一线程且不注册摘要；比例设置只改metadata，reset/default清除覆盖，锁定错误保留结构化码。
 # 函数用途: 设置当前线程比例，或为手动摘要建立精确中断身份。
 def _execute_compact_control(
     base_agent: object,
@@ -1200,6 +1200,11 @@ def _execute_compact_control(
     command: ConversationControlCommand,
     scope: GatewayControlScope,
 ) -> ConversationControlResult:
+    if command.operation == "status":
+        from ..conversation.compact_threshold_policy import compact_status_result
+
+        owner_agent = _request_agent_for_scope(base_agent, scope)
+        return compact_status_result(owner_agent, _conversation_thread_for_scope(owner_agent.conversation_store, scope))
     if command.operation == "threshold":
         from ..conversation.compact_threshold_policy import (
             resolve_thread_compact_policy,
@@ -1213,7 +1218,7 @@ def _execute_compact_control(
         if thread is None:
             return ConversationControlResult("compact", False, "当前会话尚未建立，无法设置压缩比例。", error_code="THREAD_UNAVAILABLE")
         try:
-            value = None if command.value == "default" else int(command.value)
+            value = None if command.value in {"reset", "default"} else int(command.value)
             updated = store.threads.update_atomic(thread.thread_id,
                 lambda row: thread_with_compact_threshold(owner_agent, row, value))
             policy = resolve_thread_compact_policy(owner_agent, updated, use_frozen=False)

@@ -118,7 +118,8 @@ def test_idle_commit_cas_does_not_clobber_concurrent_user_turn(conversation):
     with pytest.raises(RuntimeError, match="user activity"):
         store.threads.update_compact_state(row.thread_id, commit=commit,
             expected_generation=old.compact_generation,
-            expected_user_activity_generation=old.metadata["user_activity_generation"], idle_compact=True)
+            expected_user_activity_generation=old.metadata["user_activity_generation"], idle_compact=True,
+            expected_message_tail=store.messages.tail_marker_report(row.thread_id)[0])
     actual = store.threads.require(row.thread_id)
     assert actual.to_dict() == new.to_dict()
 
@@ -223,8 +224,11 @@ def test_idle_compact_guards_and_generation_idempotency(conversation, tmp_path, 
     metadata = {"last_user_activity_at": 100.0, "user_activity_generation": 1}
     if scenario == "already_compacted":
         metadata["last_idle_compacted_activity_gen"] = 1
+        metadata["idle_auto_compact"] = {"last_idle_compacted_activity_gen": 1,
+            "message_tail": store.messages.tail_marker_report(row.thread_id)[0]}
     if scenario == "regular_compacted":
         metadata["last_compacted_user_activity_gen"] = 1
+        metadata["last_compacted_message_tail"] = store.messages.tail_marker_report(row.thread_id)[0]
     row = store.threads.update_atomic(row.thread_id, lambda current: replace(current, metadata=metadata))
     config = AgentConfig()
     if scenario == "idle_disabled":
@@ -246,7 +250,8 @@ def test_idle_compact_guards_and_generation_idempotency(conversation, tmp_path, 
             compacted_through_message_id="idle-message", compacted_through_byte_offset=1, source_messages=1, source_tool_pairs=0)
         updated = store.threads.update_compact_state(thread.thread_id, commit=commit,
             expected_generation=thread.compact_generation,
-            expected_user_activity_generation=options.expected_user_activity_generation, idle_compact=options.idle_compact)
+            expected_user_activity_generation=options.expected_user_activity_generation, idle_compact=options.idle_compact,
+            expected_message_tail=options.expected_message_tail)
         return SimpleNamespace(compacted=True, thread=updated)
 
     monkeypatch.setattr(idle, "prepare_conversation_context", compact)
@@ -282,7 +287,8 @@ def test_idle_entry_aborts_when_user_speaks_during_summary(conversation, tmp_pat
         commit = ConversationCompactCommit(summary="stale", operation_evidence={}, checkpoint_id="idle-fixture",
             compacted_through_message_id="idle-message", compacted_through_byte_offset=1, source_messages=1, source_tool_pairs=0)
         store.threads.update_compact_state(thread.thread_id, commit=commit, expected_generation=thread.compact_generation,
-            expected_user_activity_generation=options.expected_user_activity_generation, idle_compact=True)
+            expected_user_activity_generation=options.expected_user_activity_generation, idle_compact=True,
+            expected_message_tail=options.expected_message_tail)
 
     monkeypatch.setattr(idle, "prepare_conversation_context", racing_summary)
     result = idle.maybe_auto_compact_idle_session(agent, store, row, now=7300.0)
@@ -468,7 +474,8 @@ def test_idle_uses_latest_policy_and_freezes_summary(conversation, tmp_path, mon
 
     store, stale = conversation
     latest = store.threads.update_atomic(stale.thread_id, lambda row: replace(row, updated_at=100.0,
-        metadata={"settings": {"compact_trigger_percent": 70}, "last_compacted_user_activity_gen": 0}))
+        metadata={"settings": {"compact_trigger_percent": 70}, "last_compacted_user_activity_gen": 0,
+                  "last_compacted_message_tail": store.messages.tail_marker_report(stale.thread_id)[0]}))
     agent = SimpleNamespace(config=AgentConfig(), home_paths=SimpleNamespace(owner_home_dir=tmp_path))
     monkeypatch.setattr(idle, "idle_compact_busy_state", lambda *_: "")
     monkeypatch.setattr(idle, "inspect_conversation_context", lambda *_: SimpleNamespace(projected_tokens=750, context_window_tokens=1000))
@@ -711,10 +718,12 @@ def test_idle_commit_requires_generation_and_cleanly_loses_race(conversation):
     with pytest.raises(ValueError):
         store.threads.update_compact_state(row.thread_id, commit=commit, expected_generation=0, idle_compact=True)
     winner = store.threads.update_compact_state(row.thread_id, commit=commit, expected_generation=0,
-        idle_compact=True, expected_user_activity_generation=0)
+        idle_compact=True, expected_user_activity_generation=0,
+        expected_message_tail=store.messages.tail_marker_report(row.thread_id)[0])
     with pytest.raises(IdleCompactActivityChanged):
         store.threads.update_compact_state(row.thread_id, commit=commit, expected_generation=0,
-            idle_compact=True, expected_user_activity_generation=0)
+            idle_compact=True, expected_user_activity_generation=0,
+            expected_message_tail=store.messages.tail_marker_report(row.thread_id)[0])
     assert store.threads.require(row.thread_id).to_dict() == winner.to_dict()
 
 

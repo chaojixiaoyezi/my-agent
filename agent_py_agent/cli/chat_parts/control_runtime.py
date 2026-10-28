@@ -429,7 +429,7 @@ def _http_error_body(exc: urllib.error.HTTPError) -> dict[str, object]:
 
 
 # LLM: 窗口只选择精确 request；停止委托原 worker 句柄和正式运行绑定，不能读另一线程的当前参数猜身份。
-# 函数用途: 在直接本地聊天里查询或控制当前回合，让单纯中断与任务资源停止保持不同边界。
+# 函数用途: 本地压缩status只读既有会话；其余控制保留中断、资源停止与Gateway专属操作的边界。
 # context/compact/recover/endtask/wakes/effort、/model 文字形式、/skills、/settings 与会话插件控制依赖 Gateway 的 canonical 会话、运行库和 owner 解析，本地模式直接拒绝并提示改用 Gateway。
 # 未列出的类型会落到下面的停止分支，所以新增 Gateway 专用控制必须加进这个集合。
 def _execute_local_control(
@@ -438,6 +438,13 @@ def _execute_local_control(
 ) -> ConversationControlResult:
     state = execution.state
     request_id = str(state.request_id or "").strip()
+    if command.kind == "compact" and command.operation == "status":
+        from ...agent.conversation.compact_threshold_policy import compact_status_result
+
+        store = execution.agent.conversation_store
+        thread = (store.threads.load(state.session_id) if state.session_id.startswith("thread-")
+                  else store.threads.resolve(channel="chat", channel_conversation_id=state.session_id, channel_user_id="local-agent"))
+        return compact_status_result(execution.agent, thread)
     if command.kind in {"context", "compact", "recover", "endtask", "wakes", "model", "effort", "skills", "settings", "plugins"}:
         return ConversationControlResult(
             command.kind,
@@ -724,7 +731,7 @@ def _recover_command_text(command: ConversationControlCommand) -> str:
 
 # LLM: 序列化显式控制操作，尤其不能将 interrupt 降级为暂停目标的 /stop；/recover 委托专用还原器保留作用域，/model 保留 default 前缀，
 #   /effort revert 保留子命令（解析后 value 只剩编号）；插件 value 已是完整命令，不能再拼第二个前缀。
-# 函数用途: 还原服务端控制协议，保留用户管理和候选原参数，仅用于活请求运输。
+# 函数用途: 还原服务端协议，保留status和threshold前缀，不能把设置/重置降成手动摘要。
 def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "users":
         return f"/users {command.value}".rstrip()
@@ -735,6 +742,10 @@ def _command_text(command: ConversationControlCommand) -> str:
     if command.kind == "context":
         return "/context"
     if command.kind == "compact":
+        if command.operation == "status":
+            return "/compact status"
+        if command.operation == "threshold":
+            return f"/compact threshold {command.value}"
         return f"/compact {command.value}".rstrip()
     if command.kind == "effort":
         # revert 的 value 只是编号，要把子命令拼回去

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 from collections.abc import Callable, Iterator
@@ -40,6 +41,34 @@ from .store_layout import ConversationStorage
 _Projected = TypeVar("_Projected")
 _READ_CONTEXT = "conversation.messages.read"
 _PARSE_CONTEXT = "conversation.messages.parse"
+
+
+# LLM: 只读canonical JSONL，逐行校验并流式哈希，含display/同长改写；首末文件签名变化或坏读拒绝，不新建锁/索引。
+# 函数用途: 获取消息总数、末ID、字节数和内容摘要，供闲置幂等与提交CAS核对完整规范消息状态。
+def canonical_message_tail_marker(path: Path, thread_id: str) -> dict[str, Any]:
+    digest, count, size, last = hashlib.sha256(), 0, 0, ""
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
+        return {"message_count": 0, "last_message_id": "", "byte_size": 0, "sha256": digest.hexdigest()}
+    with handle:
+        before = os.fstat(handle.fileno())
+        for raw in handle:
+            digest.update(raw)
+            size += len(raw)
+            if not raw.strip():
+                continue
+            row = json.loads(raw)
+            if (not raw.endswith(b"\n") or not isinstance(row, dict) or row.get("thread_id") != thread_id
+                    or not isinstance(row.get("message_id"), str) or not row["message_id"]):
+                raise DataCorruptionError("canonical message tail is invalid")
+            count += 1
+            last = row["message_id"]
+        after = path.stat()
+        keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if size != before.st_size or any(getattr(before, key) != getattr(after, key) for key in keys):
+            raise DataCorruptionError("canonical message source changed during tail observation")
+    return {"message_count": count, "last_message_id": last, "byte_size": size, "sha256": digest.hexdigest()}
 
 
 # LLM: 只在内存克隆已验证的前缀，源消息及嵌套metadata零修改；新消息ID映射交Compact重建引用。
@@ -248,6 +277,14 @@ def _message_entry_unfinished_tail(path: Path, target: str):
 # LLM: 消息追加、幂等提交和游标读取；只显式调用线程校验与活动更新，保留原 JSONL 和 display 边界；修改须核对直接调用方与原子存储测试。
 # 类用途: 消息追加、幂等提交和游标读取；只显式调用线程校验与活动更新，保留原 JSONL 和 display 边界。
 class MessageStore:
+    # LLM: 与原消息文件同源，不丢错误；此读口不取会创建sidecar的锁，提交端须在原append锁内重核。
+    # 函数用途: 只读消息尾部指纹，损坏或并发读变更时返回错误而不是空消息证明。
+    def tail_marker_report(self, thread_id: str):
+        try:
+            return canonical_message_tail_marker(self.storage.message_path(thread_id), thread_id), []
+        except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
+            return {}, [runtime_error_report(exc, context="conversation.messages.tail_marker")]
+
     # LLM: 只注入线程存在校验和原子更新；不能反向访问整棵 ConversationStore 或创建额外账本。
     # 函数用途: 绑定消息目录及写后活动更新能力，初始化不追加消息或改线程状态。
     def __init__(

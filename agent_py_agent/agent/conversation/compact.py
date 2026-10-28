@@ -179,7 +179,7 @@ class ConversationContextUsage:
 
 
 # LLM: 内部宿主复用原来源/projector/摘要面；手动请求可显式绕过自动冷却但仍记录结果，不绕过来源/CAS校验。
-# 类用途: 统一压缩输入、停止检查与缓存面，显式手动恢复允许重试并由成功提交重置熔断。
+# 类用途: 统一压缩输入、停止检查与缓存面；闲置输入同时固定活动代及规范消息指纹。
 @dataclass(frozen=True)
 class ConversationCompactOptions:
     current_prompt: str = ""
@@ -205,12 +205,13 @@ class ConversationCompactOptions:
     bypass_circuit_breaker: bool = False
     # 闲置维护沿原提交链核活动代；guard只在最终短提交门运行，不持锁调用模型。
     expected_user_activity_generation: int | None = None
+    expected_message_tail: dict[str, object] | None = field(default=None, repr=False)
     idle_compact: bool = False
     commit_guard: Callable[[], bool] | None = field(default=None, repr=False)
 
 
 # LLM: 不可变请求绑定原CAS状态、显式摘要作用域和已准备投影；局部候选不能回读全线程摘要。
-# 类用途: 将会话、可重放历史、范围及宿主准备交给候选和原提交链，不建立第二历史来源。
+# 类用途: 将会话、可重放历史和闲置消息CAS基线交给原提交链，不建立第二历史来源。
 @dataclass(frozen=True)
 class _CompactRunRequest:
     agent: SimpleAgent
@@ -241,6 +242,7 @@ class _CompactRunRequest:
     calibration: CompactRequestCalibration | None = field(default=None, kw_only=True, repr=False)
     trigger_source: str = field(default="", kw_only=True)
     expected_user_activity_generation: int | None = field(default=None, kw_only=True)
+    expected_message_tail: dict[str, object] | None = field(default=None, kw_only=True, repr=False)
     idle_compact: bool = field(default=False, kw_only=True)
     commit_guard: Callable[[], bool] | None = field(default=None, kw_only=True, repr=False)
 
@@ -420,14 +422,20 @@ def _prepare_compact_source(agent, store, thread, options):
     return source, compact_context
 
 
-# LLM: 显式来源先核验同线程/行/视图；仅显式bypass跳过自动冷却，摘要、失败账和提交CAS仍走原链。
-# 函数用途: 复用来源并构造压缩请求，允许手动恢复绕过冷却但不绕过来源或容量检查。
+# LLM: 原来源/冷却门保持；普通标记须先于来源冻结，显式来源不补造标记；闲置复用已冻结基线并在末写CAS。
+# 函数用途: 构造压缩请求，去重不认领来源冻结后的新消息，手动恢复不绕过来源或容量检查。
 def _prepare_compact_request(
     agent: SimpleAgent,
     store: ConversationStore,
     thread: ConversationThread,
     options: ConversationCompactOptions,
 ) -> ConversationCompactResult | _CompactRunRequest:
+    expected_message_tail = options.expected_message_tail
+    # 只为本次加载的来源捕获更早的观察；显式来源可能已冻结很久，不能把当前消息误记为已覆盖。
+    if expected_message_tail is None and options.source is None:
+        marker, errors = store.messages.tail_marker_report(thread.thread_id)
+        if not errors:
+            expected_message_tail = marker
     source, compact_context = _prepare_compact_source(agent, store, thread, options)
     # A gateway retry happens after the current user message was durably appended.
     # It is already represented by ``current_prompt`` and must remain outside the
@@ -531,6 +539,7 @@ def _prepare_compact_request(
         calibration=options.calibration,
         trigger_source=str(options.trigger_source or "").strip(),
         expected_user_activity_generation=options.expected_user_activity_generation,
+        expected_message_tail=expected_message_tail,
         idle_compact=options.idle_compact,
         commit_guard=options.commit_guard,
     )
@@ -1199,7 +1208,7 @@ def _fit_landmarks_to_target(
     return smaller if smaller.tokens < measured.tokens else measured
 
 
-# LLM: checkpoint/generation仍唯一CAS；闲置候选在用户登记短门内复核活动并传原Store代次CAS，不持门调用模型。
+# LLM: checkpoint/generation仍唯一CAS；闲置候选在用户登记短门内复核活动，并传规范消息指纹到原append锁内CAS。
 # 函数用途: 复验实际覆盖及保留来源后沿原CAS提交同一候选，局部范围和原始文件不变。
 def _commit_compact_candidate(
     request: _CompactRunRequest,
@@ -1287,7 +1296,9 @@ def _commit_compact_candidate(
             active_loaded_tool_names=selector(request.thread),
             active_tool_selector=selector,
             baseline_loaded_tool_names=tuple(request.thread.loaded_tool_names),
-            **({"expected_user_activity_generation": request.expected_user_activity_generation, "idle_compact": True}
+            **({"expected_message_tail": request.expected_message_tail} if request.expected_message_tail is not None else {}),
+            **({"expected_user_activity_generation": request.expected_user_activity_generation,
+                "idle_compact": True}
                if request.idle_compact else {}),
         )
     return ConversationCompactResult(

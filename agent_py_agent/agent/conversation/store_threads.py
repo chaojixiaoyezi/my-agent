@@ -495,7 +495,7 @@ class ThreadStore:
 
         return self.update_atomic(thread_id, apply)
 
-    # LLM: 唯一CAS推进提交链与活跃集；闲置提交同锁验证用户活动代次，拒绝新输入后旧候选，普通压缩合同不变。
+    # LLM: 唯一CAS推进提交链；闲置按append锁→线程锁核指纹及活动代；普通提交只保存摘要前消息观察供去重，不加新CAS。
     # 函数用途: 原子提交压缩与可选活跃工具收缩；局部视图只沿同链读取，不另建任务摘要表，也不改原始消息。
     def update_compact_state(
         self, thread_id: str, *, commit: ConversationCompactCommit, expected_generation: int,
@@ -503,6 +503,7 @@ class ThreadStore:
         baseline_loaded_tool_names: tuple[str, ...] | None = None,
         active_tool_selector: Callable[[ConversationThread], tuple[str, ...]] | None = None,
         expected_user_activity_generation: int | None = None,
+        expected_message_tail: dict[str, Any] | None = None,
         idle_compact: bool = False,
     ) -> ConversationThread:
         """Atomically advance one validated summary/checkpoint without touching raw messages."""
@@ -510,6 +511,8 @@ class ThreadStore:
             raise ValueError("compact publication scope must be an explicit boolean")
         if idle_compact and (type(expected_user_activity_generation) is not int or expected_user_activity_generation < 0):
             raise ValueError("idle compact requires a user activity generation")
+        if idle_compact and not isinstance(expected_message_tail, dict):
+            raise ValueError("idle compact requires a canonical message tail marker")
         current = now if now is not None else time.time()
 
         # LLM: 先检查generation，再以同锁最新线程合并发现差集；局部摘要不成为全局权限。
@@ -526,7 +529,9 @@ class ThreadStore:
                         or metadata.get("user_activity_generation", 0) != expected_user_activity_generation):
                     raise IdleCompactActivityChanged("conversation user activity changed while idle summary was being prepared")
                 if idle_compact:
-                    if metadata.get("last_idle_compacted_activity_gen") == expected_user_activity_generation:
+                    previous = metadata.get("idle_auto_compact", {})
+                    if (previous.get("last_idle_compacted_activity_gen") == expected_user_activity_generation
+                            and previous.get("message_tail") == expected_message_tail):
                         raise IdleCompactActivityChanged("conversation user activity already idle compacted")
             from .tool_discovery import compact_discovered_tools
             # selector仅计算展示名，不允许I/O；旧tuple调用方维持原合同。
@@ -534,8 +539,17 @@ class ThreadStore:
             tool_updates = compact_discovered_tools(thread, active, baseline_loaded_tool_names=baseline_loaded_tool_names)
             metadata.update(tool_updates.pop("metadata", {}))
             metadata["last_compacted_user_activity_gen"] = metadata.get("user_activity_generation", 0)
+            metadata.pop("last_compacted_message_tail", None)
+            if expected_message_tail is not None:
+                metadata["last_compacted_message_tail"] = dict(expected_message_tail)
             if idle_compact:
                 metadata["last_idle_compacted_activity_gen"] = expected_user_activity_generation
+                metadata["idle_auto_compact"] = {
+                    "last_idle_compacted_activity_gen": expected_user_activity_generation,
+                    "last_idle_compacted_message_id": expected_message_tail["last_message_id"],
+                    "last_idle_compacted_message_count": expected_message_tail["message_count"],
+                    "message_tail": dict(expected_message_tail),
+                }
             return replace(
                 thread, **tool_updates,
                 summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
@@ -560,6 +574,19 @@ class ThreadStore:
                 updated_at=current,
             )
 
+        if idle_compact:
+            from ..common.json_io import locked_json_path
+            from .store_messages import canonical_message_tail_marker
+
+            path = self.storage.message_path(thread_id)
+            with locked_json_path(path):
+                try:
+                    unchanged = canonical_message_tail_marker(path, thread_id) == expected_message_tail
+                except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
+                    raise IdleCompactActivityChanged("canonical messages unreadable before idle commit") from exc
+                if not unchanged:
+                    raise IdleCompactActivityChanged("canonical messages changed before idle commit")
+                return self.update_atomic(thread_id, apply)
         return self.update_atomic(thread_id, apply)
 
     # LLM: Provider usage calibration is small numeric thread telemetry. The compact generation

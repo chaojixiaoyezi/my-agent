@@ -11,7 +11,7 @@ from typing import Any
 
 # LLM: Curator 标签、关系与召回前/后各自默认关闭；点位的期限与模型引用只在决策设置覆盖层按点位设置，默认继承通用策略，
 #   不改变记忆证据规则；固定提炼模型只存档案编号，服务商连接仍由原模型目录解析。
-# 类用途: 保存校验后真正供 Memory 运行时使用的全部配置。
+# 类用途: 保存校验后的Memory运行配置，闲置每拍限额须同步AgentConfig与YAML默认。
 @dataclass(frozen=True)
 class MemorySettings:
     """Effective memory config after validation and default normalization."""
@@ -29,6 +29,7 @@ class MemorySettings:
     force_compact_trigger_percent: bool = False
     memory_compact_idle_trigger_percent: int = 60
     memory_compact_idle_seconds: int = 7200
+    memory_compact_idle_max_per_tick: int = 2
     memory_compact_auto_trigger_percent: int = 90
     memory_compact_auto_trigger_max_tokens: int = 300_000
     memory_compact_recovery_target_percent: int = 60

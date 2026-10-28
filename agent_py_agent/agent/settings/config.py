@@ -383,6 +383,8 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
     # 闲置压缩：任一为0即关闭；百分比0..95，启用后的最短静默时间60秒。
     memory_compact_idle_trigger_percent: int = 60
     memory_compact_idle_seconds: int = 7200
+    # 每个维护拍最多检查的会话数；0关闭该维护拍，不扫描或迁移线程。
+    memory_compact_idle_max_per_tick: int = 2
     memory_compact_auto_trigger_percent: int = 90
     # 自动压缩触发线的绝对 token 上限，与上面的百分比取小；0 表示不封顶（默认，行为不变）。1M 这类大窗口下百分比最低只到 50%，靠它把压缩提前。
     memory_compact_auto_trigger_max_tokens: int = 300_000
@@ -688,7 +690,7 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
         }
 
 
-# LLM: 决策字段在原 YAML 读取后严格校验，不用宽松 coercion 把非法时间变成另一有效设置。
+# LLM: 原YAML决策严格校验保持；两个管理员强制别名由规范化转换成唯一字段，不当未知键忽略。
 # 函数用途: 加载原部署配置与来源，拒绝无效决策字段，不创建 Agent 或发网络请求。
 def load_config(config_path: str | Path) -> AgentConfig:
 
@@ -696,6 +698,10 @@ def load_config(config_path: str | Path) -> AgentConfig:
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
     raw = load_simple_yaml(path)
+    if {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"} & raw.keys():
+        from .memory import normalize_memory_settings
+
+        raw["force_compact_trigger_percent"] = normalize_memory_settings(raw)[0].force_compact_trigger_percent
     from .decision_settings_defaults import validate_config_decision_fields
 
     raw.update(validate_config_decision_fields(raw, domain="agent"))
@@ -706,7 +712,8 @@ def load_config(config_path: str | Path) -> AgentConfig:
     # 过滤未知字段。运行时诊断字段只由 loader 写入，不能从 YAML 注入。
     allowed = _public_config_keys()
     raw_keys = set(raw)
-    unknown_keys = [key for key in raw_keys if key not in allowed]
+    unknown_keys = [key for key in raw_keys if key not in allowed
+                    and key not in {"admin_force_compact_trigger_percent", "memory_compact_admin_forced"}]
     for key in unknown_keys:
         config_warnings.append(f"unknown config key: {key!r}; ignored")
     resolved_path = str(path.expanduser().resolve())

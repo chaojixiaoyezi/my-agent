@@ -263,26 +263,33 @@ def activate_model_dependencies(agent: object, dependencies: ModelScopeDependenc
     lifetime.stack.enter_context(foreground_model_scope(agent.backend))
 
 
-# LLM: 最外层按canonical thread建立模型及压缩比例快照，覆盖Gateway预检到收口；后续模型采用不重解析比例。
-# 函数用途: 为本次执行绑定初始模型及选择版本，退出恢复宿主依赖，不新建 MCP。
+# LLM: 执行默认沿原模型迁移；initialize_thread=False只读旧空选择并借默认模型，不写线程或宣称已采用版本。
+# 函数用途: 绑定同源模型/压缩快照；只读维护可先核容量，退出恢复依赖，不新建MCP。
 @contextmanager
-def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True):
+def selected_model_scope(agent: object, *, inherited: bool = False, thread_id: str = "", active: bool = True,
+                         initialize_thread: bool = True):
     if not isinstance(getattr(type(agent), "config", None), ModelScopedAttribute) or id(agent) in (_BINDINGS.get() or {}):
         yield
         return
-    from .thread_model_selection import _require_owner, thread_model_profile_id
+    from .thread_model_selection import (
+        _require_owner,
+        default_model_profile_id,
+        thread_model_profile_id,
+    )
 
     selection = None
     if thread_id and not inherited:
-        thread_model_profile_id(agent, thread_id)
+        if initialize_thread:
+            thread_model_profile_id(agent, thread_id)
         thread = agent.conversation_store.threads.load(thread_id)
         if thread is None:
             from .model_profiles import ModelProfileError
 
             raise ModelProfileError("当前模型选择所属会话已不存在。")
         _require_owner(agent, thread)
-        model_config = selected_model_config(agent, profile_id=thread.model_profile_id)
-        selection = model_selection_snapshot(thread, model_config)
+        model_config = selected_model_config(agent, profile_id=thread.model_profile_id or default_model_profile_id(agent))
+        if thread.model_profile_id:
+            selection = model_selection_snapshot(thread, model_config)
     else:
         model_config = agent.config if inherited else selected_model_config(agent)
     dependencies = prepare_model_dependencies(agent, model_config, inherited=inherited)

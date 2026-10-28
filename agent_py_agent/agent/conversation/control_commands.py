@@ -237,7 +237,7 @@ def _personal_storage_command(name, trailing):
 # 函数用途: 区分即时控制与模型任务，保留暂停目标、中断本轮和停止资源三种语义；/recover 只解析结构化处置值，
 # /endtask 只解析任务 ID 与 confirm，/wakes 只解析 quarantined、replay、唤醒 ID 与 confirm，/model 只解析编号，
 # /restart 的尾随文字只作为展示用原因；/group 只承载人工固定语法，普通对话不能产生群授权。
-# /memory仅显式candidates子树进入人工控制；普通搜索不被改成模型批准。
+# /memory仅显式candidates子树进入人工控制；/compact status是只读，threshold/reset不落入摘要说明。
 def parse_conversation_command(
     text: object,
     *,
@@ -263,6 +263,8 @@ def parse_conversation_command(
         return _argumentless_command("context", trailing, "/context")
     if name == "compact":
         instructions = str(trailing or "").strip()
+        if instructions == "status":
+            return ConversationControlCommand("compact", value="status", operation="status")
         from .compact_threshold_policy import parse_compact_threshold_command
 
         threshold = parse_compact_threshold_command(instructions)

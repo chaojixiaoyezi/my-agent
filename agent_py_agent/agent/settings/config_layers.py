@@ -130,4 +130,11 @@ def compact_idle_parameters(config: object) -> tuple[int, int]:
     return min(95, max(0, threshold)), max(60, seconds) if seconds > 0 else 0
 
 
+# LLM: 三个显式管理员开关名共用严格bool并集；调用方须已选可信配置，用户覆盖层不能提供这些键。
+# 函数用途: 识别管理员强制压缩开关，不让别名被默认false遮住。
+def compact_admin_forced(config: object) -> bool:
+    keys = ("force_compact_trigger_percent", "admin_force_compact_trigger_percent", "memory_compact_admin_forced")
+    return any((config.get(key) if isinstance(config, Mapping) else getattr(config, key, False)) is True for key in keys)
+
+
 __all__ = ["ConfigLayer", "EffectiveConfig", "merge_config_layers", "resolve_compact_trigger_policy", "compact_idle_parameters"]

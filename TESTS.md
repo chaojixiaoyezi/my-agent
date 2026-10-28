@@ -1,3 +1,27 @@
+## 2026-10-28 Wave 9 B1 Round 2：只读命令、审批保护与消息CAS返工
+
+来源：完整阅读 `07-tasks/fix-wave9-b1.md` 66行；返工起点 `9b0a7ae0e68d9e463420f14f2e0206795a233e79`，原任务基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。功能修改仅在指定 `wave9-b1` 工作树，不推送、合并、部署或启停服务。任务部分旧路径/测试名不存在，按实际 `settings/config.py`、`cli/chat_parts/control_runtime.py` 修改，补齐指定的两个真实回归文件。
+
+- **查询与运输**：精确 `/compact status` 独立解析、返回六字段政策及闲置元数据，Gateway和CLI都不进入摘要、不迁移模型选择、不改线程字节/代数。`threshold reset/default` 共用清除覆盖，锁定仍403；CLI序列化保留threshold前缀，parser→serializer→parser往返不能降成手动摘要。
+- **只读资格**：任务/claim/subagent含错报告失败关闭；BLOCKED、WAITING_APPROVAL、OPEN申请及原审批/私卡未决状态阻止压缩。明确过期只跳过，坏期限失败关闭，不续租或清理；run原attributes定位同线程，避免别的线程被误阻塞。禁用先返回；只读模型scope不迁移旧空选择，禁用、未到时长、忙碌、低容量四种原生扫描逐字节不改线程。
+- **消息CAS**：规范JSONL流式校验，消息数/末ID/字节数/SHA256共同参与闲置幂等。直接追加assistant/user/tool、同长改写及最后guard之后追加，都使旧候选让位，`cas_aborted=true`，代数和失败计数不变。闲置最终提交沿原消息append锁→线程锁；普通压缩仅保存来源冻结前观察，不新增普通CAS。显式旧来源无可信marker时不补造，提交清除旧marker；普通去重门也须匹配消息状态，不能在新消息达到普通阈值时再次按旧活动代阻塞。
+- **配置**：每拍上限 `memory_compact_idle_max_per_tick=2` 同步真实dataclass/MemorySettings/校验/YAML，0关闭。三个管理员强制键归一，保留原布尔coercion与owner覆盖隔离；默认80及50..95不变。
+- **回归纪律**：缺陷先复现失败再修。旧闲置单测仅补传新增必需指纹及联合幂等夹具，原断言、输入比例和摘要/活动竞争要求不放宽。独立Astra high首审发现CLI运输、普通去重、确认期限三项，均有红绿回归。复评又定位普通marker晚于来源冻结的竞争，loader/显式来源两条真实链修前2失败（`.pytest_cache/b1-r2-source-race-red.xml`），前移观察后转绿；最终定向独审通过，普通/闲置CAS边界保持。复评限定实际变更，不冒称全仓审计。
+
+指定门禁（工作树根）：
+
+```bash
+python3 -B -m pytest /tmp/wt-wave9-b1/agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py /tmp/wt-wave9-b1/agent_py_agent/tests/test_compact_threshold_unification.py -q --tb=short -o cache_dir=/tmp/pytest-b1-fix
+ruff check --no-cache /tmp/wt-wave9-b1/agent_py_agent/agent/conversation /tmp/wt-wave9-b1/agent_py_agent/agent/settings /tmp/wt-wave9-b1/agent_py_agent/agent/gateway_parts /tmp/wt-wave9-b1/agent_py_agent/agent/plugin_host /tmp/wt-wave9-b1/agent_py_agent/tests/test_wave9_idle_compact_and_threshold_policy.py
+python3 -B /tmp/wt-wave9-b1/scripts/check_doc_sync.py --base db4d5de92
+python3 -B /tmp/wt-wave9-b1/scripts/check_import_boundaries.py
+git -C /tmp/wt-wave9-b1 diff --check db4d5de92..HEAD
+```
+
+指定两文件53项通过（0失败/错误/跳过，`.pytest_cache/b1-r2-required-final.xml`）。额外六文件230项通过（0失败/错误/跳过），覆盖原Wave9/continuation/Gateway摘要、配置默认一致性、Memory和runtime合同；日志及JUnit分别为 `.pytest_cache/b1-r2-expanded-final.log/.xml`。指定Ruff（含额外CLI/新配置回归）、文档同步、导入边界及差异空白检查均通过；提交后另查最终提交区间和干净工作树。不将本地假供应商、受控竞争或静态复核外推为生产Gateway/TUI/IM、真实供应商、多进程全拓扑或跨平台验收；这些未验证。
+
+额外CLI扩展中的 `test_local_interrupt_stops_foreground_shell_without_resource_reclaim` 失败：返回71、`started`标记未创建。原基线相同节点同现，未改断言或跳过，71原因未定位。本次创建临时Git worktree被 `Operation not permitted` 拒绝；随后复用基线源码导出，逐一核对其5193个Git blob与 `db4d5de92` 全部一致，确认import origin在该导出根，再运行该节点（`.pytest_cache/b1-r2-baseline-shell.xml`：1失败）。这里明确是已核字节的基线导出，不冒充成功创建的独立Git worktree。
+
 ## 2026-10-28 Wave 9 B1：空闲压缩与四层阈值（源码候选）
 
 来源：`07-tasks/wave9-b1.md` 全文及主计划 Item 1/6；指定分支 `wave9-b1`，基线 `db4d5de92e1e316cec56df7825dc7ea8a1ec7f84`。只修改派工工作树，不推送、合并、部署或启停真实服务；不运行已退役的尺寸检查器。

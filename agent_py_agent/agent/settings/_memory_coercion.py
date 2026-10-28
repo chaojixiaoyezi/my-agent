@@ -68,6 +68,7 @@ _FIELDS = (
     _FieldSpec("force_compact_trigger_percent", "bool"),
     _FieldSpec("memory_compact_idle_trigger_percent", "clamped_int", 0, 95),
     _FieldSpec("memory_compact_idle_seconds", "idle_seconds", 0, None),
+    _FieldSpec("memory_compact_idle_max_per_tick", "int", 0, None),
     _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
     # 0 表示不封顶；负数、非整数回到默认 300000，与 runtime 的 compact_trigger_max_tokens 同一口径。
     _FieldSpec("memory_compact_auto_trigger_max_tokens", "int", 0, None),
@@ -94,7 +95,7 @@ _FIELDS = (
 )
 
 
-# LLM: 原记忆字段维持既有 warning，新增决策字段严格校验，不将非法时间静默替换成另一有效配置。
+# LLM: 原warning及决策校验保持；管理员强制别名在配置源规范化，不进入用户覆盖可写字段。
 # 函数用途: 从配置源构造完整、已验证的 Memory 设置字典。
 def _build_memory_settings_dict(
     source: Mapping[str, Any] | object,
@@ -105,6 +106,10 @@ def _build_memory_settings_dict(
     result: dict[str, Any] = {}
     for spec in _FIELDS:
         result[spec.field_name] = _coerce_field(spec, source, defaults, warnings)
+    for key in ("admin_force_compact_trigger_percent", "memory_compact_admin_forced"):
+        raw = _lookup(source, key)
+        if raw is not _MISSING:
+            result["force_compact_trigger_percent"] |= _coerce_bool(key, raw, default=False, warnings=warnings)
     from .decision_settings_defaults import decision_config_fields, validate_config_decision_fields
 
     decision = {name: _lookup(source, name) for domain, name in decision_config_fields().values() if domain == "memory"}
