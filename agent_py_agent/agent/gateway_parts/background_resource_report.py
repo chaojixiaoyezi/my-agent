@@ -3,10 +3,17 @@
 #   terminate_process_tree 按进程组完成，孙进程随之结束（只给登记 pid 发信号会漏掉孙进程）。
 #   会话级 /stop（本地与 Gateway 两个入口）也从这里取"本会话遗留"的选择与回执渲染；Gateway 入口走任务停止同一个
 #   freeze_process_stop/cleanup_process_stop，不另造停止路径。
+#   内存诊断只供宿主显式采样，不自动启动线程或改变资源终态；仅计数和位置/字节数，不含对象正文。
 # 模块用途: 为 gateway stop 与会话内 /stop 提供"列出仍在运行的后台进程"与"按显式要求一并停止"的结构化事实。
 from __future__ import annotations
 
+import gc
+import sys
+import threading
 import time
+import tracemalloc
+from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +33,69 @@ from ..tooling.process_session_store import ProcessSessionStore, process_session
 DEFAULT_BACKGROUND_STOP_TIMEOUT_SECONDS = 10.0
 # 资源报告轮询间隔 0.1 秒：接近实时又不过度占 CPU。
 _POLL_SECONDS = 0.1
+# tracemalloc是进程全局设施；本入口串行短快照，不能互相停止对方的追踪窗口。
+_MEMORY_DIAGNOSTICS_LOCK = threading.Lock()
+
+
+# LLM: 仅宿主显式调用；ru_maxrss是历史峰值而非当前RSS，显式追踪只覆盖本次窗口，原已开启追踪不关闭。
+# 函数用途: 采集内存峰值、GC和池计数，可选给出不含正文的分配位置统计。
+def collect_runtime_memory_diagnostics(
+    *, owner_pool: object | None = None, include_tracemalloc: bool = False, top_n: int = 15,
+) -> dict[str, object]:
+    with _MEMORY_DIAGNOSTICS_LOCK:
+        already_tracing = tracemalloc.is_tracing()
+        started_here = include_tracemalloc and not already_tracing
+        if started_here:
+            tracemalloc.start()
+        try:
+            report: dict[str, object] = {
+                "rss_peak_bytes": _rss_peak_bytes(),
+                "rss_source": "resource.ru_maxrss (peak)",
+                "gc_counts": list(gc.get_count()),
+                "owner_pool": _owner_pool_memory_gauges(owner_pool),
+            }
+            if include_tracemalloc or already_tracing:
+                report["tracemalloc_scope"] = "existing_trace" if already_tracing else "snapshot_window"
+                report["tracemalloc_top"] = [
+                    {"location": f"{Path(stat.traceback[0].filename).name}:{stat.traceback[0].lineno}",
+                     "size_bytes": stat.size}
+                    for stat in tracemalloc.take_snapshot().statistics("lineno")[:max(0, int(top_n))]
+                ]
+            return report
+        finally:
+            if started_here:
+                tracemalloc.stop()
+
+
+# LLM: resource在Windows可能不可用；不可采样返回None而非伪造0，macOS字节与其余POSIX的KiB统一为字节。
+# 函数用途: 返回当前进程生命周期的RSS峰值字节数，不把峰值称为实时内存。
+def _rss_peak_bytes() -> int | None:
+    try:
+        import resource
+    except ImportError:
+        return None
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    return int(usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024))
+
+
+# LLM: 公开数值计数优先；现有owner池仅在原锁内统计容器和非零pin对象数，不读取/构造/repr池内对象。
+# 函数用途: 投影可取得的hard、soft、retired和pinned数量，缺失指标不猜成0。
+def _owner_pool_memory_gauges(owner_pool: object | None) -> dict[str, int]:
+    result: dict[str, int] = {}
+    with getattr(owner_pool, "_lock", None) or nullcontext():
+        for name, attribute in (
+            ("hard_count", "_hard_agents"), ("soft_count", "_soft_agents"),
+            ("retired_count", "_retired_agents"), ("pinned_count", "_pins"),
+        ):
+            value = getattr(owner_pool, name, None)
+            if type(value) is int:
+                result[name] = value
+                continue
+            values = getattr(owner_pool, attribute, None)
+            if isinstance(values, Mapping):
+                result[name] = (sum(1 for count in values.values() if count > 0)
+                                if name == "pinned_count" else len(values))
+    return result
 
 
 # LLM: 每个后台进程记录只投影结构化事实（归属、pid、启动时间、状态），不含命令正文、cwd 或输出路径。
@@ -261,6 +331,7 @@ __all__ = [
     "background_resource_lines",
     "background_store_root",
     "cleanup_session_leftover_processes",
+    "collect_runtime_memory_diagnostics",
     "freeze_session_leftover_processes",
     "list_running_background_processes",
     "session_background_processes",

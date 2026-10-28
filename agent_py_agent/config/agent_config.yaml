@@ -530,6 +530,10 @@ gateway_user_inflight_limit: 8
 # 后台服务同时最多处理多少个请求（所有会话加在一起）。
 # 一般远远用不到；只有在同一台机器上跑很多并发任务、或想限制资源占用时才需要调小。
 gateway_global_inflight_limit: 500
+# Gateway同时在途的不同Owner数量上限；0表示跟随owner_agent_pool_max_agents。
+gateway_owner_inflight_limit: 0
+# 是否开启Gateway内存与对象池诊断快照；默认关闭，不自动常驻tracemalloc。
+enable_gateway_memory_diagnostics: false
 # 一个请求开始处理之后，超过这个秒数还没结束就认为它卡住了（可以被重新安排）。
 # 正常请求远快于此；如果你有跑很久的合法任务被误判成卡住，可以调大。
 gateway_processing_timeout_seconds: 900

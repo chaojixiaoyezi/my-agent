@@ -1,19 +1,20 @@
-# LLM: 原 task overlay 只有一份路径、合并和规范化算法；只读候选投影不应用进程日志配置，正式 worker 仍沿原入口应用。
-# 模块用途: 读取子代理原配置覆盖并生成最终配置，把预览与日志级别应用副作用分开。
+# LLM: task overlay只有一份路径/合并/规范化算法；正式worker和预览都不修改进程日志级别，脱敏安装保持幂等。
+# 模块用途: 投影子代理配置并保留日志脱敏，不让单任务覆盖污染其他owner的logger。
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ..config import AgentConfig, apply_log_level
+from ...common.log_redaction import install_log_redaction
+from ..config import AgentConfig
 from ..memory import normalize_agent_memory_config
 from ..runtime_scope_config import load_runtime_config_layer, merge_runtime_config_layers
 from ..secret_ref import freeze_managed_secret_environment
 
 
-# LLM: worker 的原调用入口复用只读投影；只有实际存在覆盖时应用原日志级别，不改变原无覆盖对象身份。
-# 函数用途: 给正式子代理应用最终配置和进程日志设置，容量预览须调用 project 入口。
+# LLM: worker复用原投影；覆盖只保存在返回配置，不改变进程logger，仍安装原幂等脱敏器并保留无覆盖对象身份。
+# 函数用途: 应用子代理任务配置但不改共享日志级别，容量预览继续走project入口。
 def apply_task_runtime_config_overlay(
     base_config: AgentConfig,
     task: Any,
@@ -22,7 +23,7 @@ def apply_task_runtime_config_overlay(
 ) -> AgentConfig:
     config = project_task_runtime_config_overlay(base_config, task, workspace_root=workspace_root)
     if config is not base_config:
-        apply_log_level(config)
+        install_log_redaction()
     return config
 
 

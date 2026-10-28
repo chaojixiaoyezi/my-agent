@@ -45,16 +45,20 @@ except ImportError:  # pragma: no cover - POSIX import guard.
     msvcrt = None
 
 
+# LLM: 路径锁包装在持有/等待期间由调用方强引用，弱表只回收真正无人使用的锁，不依赖解释器裸锁的弱引用支持。
+# 类用途: 为同一路径提供可安全弱缓存的线程锁句柄。
 class _PathLock:
     """可弱引用的 per-path 锁包装。
 
-    threading.Lock 是 C 级对象不能被弱引用,故包一层暴露 __weakref__。语义:只要还有
+    包装统一暴露 __weakref__。语义:只要还有
     线程在临界区内、或在等这把锁,就持有本对象的强引用(见 _locked_json_path),弱字典不会
     回收它——互斥语义绝不破;一旦没人用了,GC 自动回收,锁表不再每见一个新文件就永久泄漏一把锁。
     """
 
     __slots__ = ("lock", "__weakref__")
 
+    # LLM: 包装拥有唯一非重入锁；持有者不能只保留裸锁而丢弃包装。
+    # 函数用途: 初始化此路径的唯一线程互斥锁。
     def __init__(self) -> None:
         self.lock = threading.Lock()
 
@@ -62,6 +66,8 @@ class _PathLock:
 # 弱值字典:某路径的锁无任何线程持有/等待时被 GC 自动摘除 → 长跑进程锁表只随"活跃文件数"而非
 # "历史见过的文件数"增长,根治无界泄漏(审计 #16,对照 _TEXT_LINES_CACHE 的 FIFO 上限同理)。
 _JSON_FILE_LOCKS: weakref.WeakValueDictionary[str, _PathLock] = weakref.WeakValueDictionary()
+# 同一弱表的诊断名称，不另建锁表；保留旧内部名称以兼容已有调用。
+_PATH_LOCKS = _JSON_FILE_LOCKS
 _JSON_FILE_LOCKS_GUARD = threading.Lock()
 
 
@@ -580,7 +586,9 @@ def _tighten_private_file(path: Path) -> None:
         return
 
 
-def _path_lock(path: Path) -> _PathLock:
+# LLM: common与Gateway共用此唯一工厂；返回包装的强引用必须保留至等待和临界区全部结束。
+# 函数用途: 取得同一规范路径可弱缓存的线程锁句柄。
+def path_thread_lock(path: Path) -> _PathLock:
     key = str(path.resolve())
     with _JSON_FILE_LOCKS_GUARD:
         handle = _JSON_FILE_LOCKS.get(key)
@@ -611,7 +619,7 @@ def locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callabl
 # 函数用途: 按原顺序取线程/OS锁，全部退出归还，FD出生可固定委托。
 @contextmanager
 def _locked_json_path(path: Path, *, blocking: bool = True, birth_commit: Callable | None = None):
-    handle = _path_lock(path)  # 持 _PathLock 强引用直到临界区结束 → 持锁期间弱字典绝不回收它
+    handle = path_thread_lock(path)  # 保持包装强引用直到临界区结束。
     if not handle.lock.acquire(blocking=blocking):
         raise BlockingIOError("共享文件线程锁繁忙")
     try:
@@ -826,3 +834,21 @@ def read_text_lines_cached(path: Path) -> tuple[str, ...]:
             _TEXT_LINES_CACHE.pop(next(iter(_TEXT_LINES_CACHE)))
         _TEXT_LINES_CACHE[key] = (signature, lines)
     return lines
+
+
+__all__ = [
+    "JsonObjectReadReport", "JsonlObjectsReadReport", "PrivateDirectoryChainResult",
+    "append_jsonl_capped", "append_jsonl_records", "append_private_jsonl_capped",
+    "append_private_jsonl_records", "append_private_jsonl_records_unlocked",
+    "append_private_text", "append_private_text_unlocked", "check_io_deadline",
+    "ensure_private_directory_chain", "jsonl_lines", "locked_json_path", "path_thread_lock",
+    "read_json_object", "read_json_object_report", "read_jsonl_objects",
+    "read_jsonl_objects_report", "read_jsonl_text_lines", "read_text_lines_cached",
+    "runtime_error_report", "serialize_private_json_no_newline", "write_json_file",
+    "write_json_file_atomic", "write_json_file_atomic_unlocked", "write_json_object",
+    "write_jsonl_records", "write_private_json_file_atomic",
+    "write_private_json_file_atomic_no_newline", "write_private_json_file_atomic_no_newline_unlocked",
+    "write_private_json_file_atomic_unlocked", "write_private_json_object",
+    "write_private_jsonl_records", "write_private_text_file_atomic",
+    "write_private_text_file_atomic_unlocked", "write_text_file_atomic", "write_text_file_atomic_unlocked",
+]

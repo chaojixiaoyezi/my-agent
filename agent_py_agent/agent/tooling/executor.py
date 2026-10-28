@@ -727,7 +727,7 @@ def _durable_operation_scopes(scopes: tuple[str, ...]) -> tuple[str, ...]:
     )
 
 
-# LLM: handler 必须读取原快照及已授权 owner 墙；operation_managed 和开始观察回调均由执行器注入，不从参数或可变注册表恢复。
+# LLM: handler读取原快照与owner墙；独立owner只取宿主顶层身份，嵌套旧run_scope仍由原入口规范化，不授身份断言权。
 # 函数用途: 把已通过权限门的调用和是否进入副作用账本的事实转成不可变 registry 执行请求。
 def _invoke_request(
     request: ToolExecutorRequest,
@@ -745,6 +745,8 @@ def _invoke_request(
         runtime,
         operation_managed=operation_managed,
     )
+    trusted = request.trusted_run_context or {}
+    owner_id = trusted.get("owner_id", "")
     return RegistryToolInvokeRequest(
         tool_name=call.tool_name,
         arguments=payload,
@@ -763,6 +765,8 @@ def _invoke_request(
         execution_authority_check=_operation_authority_check(request, call),
         tool_dispatch=_nested_dispatch(request, call),
         on_handler_started=request.on_handler_started,
+        owner_id=str(owner_id or ""),
+        registry_owner_id=request.operation_owner_id,
     )
 
 

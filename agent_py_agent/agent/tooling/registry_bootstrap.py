@@ -21,7 +21,7 @@ from .models import (
     VectorToolSearchProvider,
 )
 from .process_sessions import ProcessSessionTool
-from .pty_sessions import TerminalSessionTool, pty_session_registry
+from .pty_sessions import TerminalSessionTool
 from .shell import ShellTool, ShellToolOptions
 from .web import WebFetchTool
 from .web_search import WebSearchTool
@@ -139,6 +139,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
             full_access_other_owner_homes=getattr(params, "full_access_other_owner_homes", "read_only"),
             host_credential_env_names=params.host_credential_env_names,
             sandbox_boundary_facts=params.shell_sandbox_boundary_facts,
+            pty_session_idle_timeout_minutes=getattr(params, "pty_session_idle_timeout_minutes", 30),
         ),
     )
     registry.register(shell_tool)
@@ -150,10 +151,7 @@ def _register_network_tools(registry: Any, params: Any) -> None:
         )
     )
     registry.register(TerminalSessionTool(shell_tool))
-    # ptyleak：装配点按配置给进程级 PTY 注册表设置空闲兜底阈值；0=不限制，未设置时注册表保持关闭。
-    pty_session_registry.set_idle_timeout_minutes(
-        getattr(params, "pty_session_idle_timeout_minutes", 30)
-    )
+    # 空闲超时只随本工具传入新会话；构造registry不改变其它owner的会话或启动巡检线程。
     # controlled_exec is an internal tool used by capability grants.
     # flows, but ToolRegistry hides it from the default model-facing catalog.
     registry.register(ControlledExecTool(host_credential_env_names=params.host_credential_env_names))

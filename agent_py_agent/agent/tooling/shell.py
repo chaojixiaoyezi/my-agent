@@ -143,6 +143,8 @@ class ShellToolOptions:
     host_credential_env_names: frozenset[str] = field(default_factory=frozenset, repr=False)
     # 来自配置 shell_sandbox_boundary_facts：owner 隔离时命令以非零码退出，结果附带沙箱边界事实，说明里多一条边界提示。
     sandbox_boundary_facts: bool = True
+    # 仅宿主装配PTY空闲分钟数；None供直接调用继承注册表默认，0仅关闭本工具新建会话的空闲回收。
+    pty_session_idle_timeout_minutes: float | None = None
 
 
 # LLM: This immutable request carries the exact ActionPolicy operation decision into shell recovery;
@@ -1116,6 +1118,12 @@ class ShellTool(BaseTool):
         self.max_output_chars = max(0, int(options.max_output_chars))
         self.listen_scope_enforce = bool(options.listen_scope_enforce)
         self.sandbox_boundary_facts = bool(options.sandbox_boundary_facts)
+        self.pty_session_idle_timeout_seconds = None
+        if options.pty_session_idle_timeout_minutes is not None:
+            try:
+                self.pty_session_idle_timeout_seconds = max(0.0, float(options.pty_session_idle_timeout_minutes)) * 60.0
+            except (TypeError, ValueError):
+                self.pty_session_idle_timeout_seconds = 0.0
         self.model_spec = _build_shell_tool_model_spec(
             self.access_mode, self.default_timeout, self.max_output_chars,
             owner_sandbox_hint=self.sandbox_boundary_facts and self.path_access_policy.owner_scope_root is not None,
