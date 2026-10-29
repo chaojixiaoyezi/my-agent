@@ -226,3 +226,107 @@ def test_stub_rmdir_failure_is_retryable(tmp_path, monkeypatch):
     monkeypatch.setattr(module.os, "rmdir", original)
     assert module.prune_expired_display_archives(store, now=NOW + 31 * DAY)["removed"] == 1
     assert not directory.exists()
+
+
+# LLM: 用真实open FD跨过真实合页unlink，必须观察到nlink=0，不能伪造链接数。
+# 函数用途: 保证已打开页与无损合页交错仍返回原样内容。
+def test_open_page_survives_lossless_compaction(tmp_path, monkeypatch):
+    store, ref, directory = _case(tmp_path)
+    expected = archive.read_display_archive_page(store, ref, 0)
+    original = archive._open_archive_file
+    observed = []
+    # LLM: 返回页FD前完成维护，触发fstat看到已脱链的原inode。
+    # 函数用途: 安排单页读取与合页的确定性交错。
+    def compact(path, flags):
+        fd = original(path, flags)
+        if path == directory / "0.json" and not observed:
+            assert _maintenance().compact_display_archives(store, now=NOW)["compacted"] == 1
+            observed.append(os.fstat(fd).st_nlink)
+        return fd
+    monkeypatch.setattr(archive, "_open_archive_file", compact)
+    assert archive.read_display_archive_page(store, ref, 0) == expected
+    assert observed == [0]
+
+
+# LLM: manifest原子替换与页unlink都执行真实TTL；读者必须重读权威墓碑而非报损坏。
+# 函数用途: 验证两种已打开文件的过期错误码。
+@pytest.mark.parametrize("leaf", ["manifest.json", "0.json"])
+def test_open_file_expiry_keeps_expired_code(tmp_path, monkeypatch, leaf):
+    store, ref, directory = _case(tmp_path, age=15)
+    original = archive._open_archive_file
+    observed = []
+    # LLM: 仅在目标叶第一次打开后发表墓碑并删除正文。
+    # 函数用途: 让读者跨越真实TTL提交窗口。
+    def expire(path, flags):
+        fd = original(path, flags)
+        if path == directory / leaf and not observed:
+            assert _maintenance().prune_expired_display_archives(store, now=NOW)["expired"] == 1
+            observed.append(os.fstat(fd).st_nlink)
+        return fd
+    monkeypatch.setattr(archive, "_open_archive_file", expire)
+    with pytest.raises(archive.DisplayArchiveError) as error:
+        archive.read_display_archive_page(store, ref, 0)
+    assert observed == [0] and error.value.code == "DISPLAY_ARCHIVE_EXPIRED"
+
+
+# LLM: 记录真实目录open返回值，只在该FD的首次fstat注入EIO；最后由测试回收意外泄漏。
+# 函数用途: 确保UUID目录尚未交还调用者时异常也关闭FD。
+def test_archive_directory_fstat_failure_releases_opened_fd(tmp_path, monkeypatch):
+    store, ref, _ = _case(tmp_path)
+    module = _maintenance()
+    original_open, original_fstat = os.open, os.fstat
+    captured, injected = [], []
+    # LLM: 不替代真实open，仅记下目标UUID目录FD；保留dirfd能力集合。
+    # 函数用途: 跟踪本测试需要核验的目录资源。
+    def track(name, *args, **kwargs):
+        fd = original_open(name, *args, **kwargs)
+        if name == ref["archive_id"]:
+            captured.append(fd)
+        return fd
+    # LLM: 精确失败一次，后续核验仍用保存的真实fstat。
+    # 函数用途: 模拟目录设备读取异常。
+    def fail(fd):
+        if fd in captured and not injected:
+            injected.append(True)
+            raise OSError("injected fstat")
+        return original_fstat(fd)
+    monkeypatch.setattr(os, "open", track)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {track})
+    monkeypatch.setattr(os, "fstat", fail)
+    assert module.compact_display_archives(store, now=NOW)["errors"] == 1
+    leaked = []
+    for fd in captured:
+        try:
+            original_fstat(fd)
+        except OSError:
+            continue
+        leaked.append(fd)
+        os.close(fd)
+    assert injected and not leaked
+
+
+# LLM: rb验证manifest读口，wb验证bundle临时写口；失败时不留裸FD或丢原页。
+# 函数用途: 覆盖归档维护两个fdopen所有权交接点。
+@pytest.mark.parametrize("mode", ["rb", "wb"])
+def test_archive_fdopen_failure_releases_opened_fd(tmp_path, monkeypatch, mode):
+    store, _, directory = _case(tmp_path)
+    original, fstat = os.fdopen, os.fstat
+    captured = []
+    # LLM: 只拦截指定模式的首次构造，文件IO本身未被伪造。
+    # 函数用途: 模拟文件对象创建尚未接管描述符时失败。
+    def fail(fd, actual="r", *args, **kwargs):
+        if actual == mode and not captured:
+            captured.append(fd)
+            raise OSError("injected fdopen")
+        return original(fd, actual, *args, **kwargs)
+    monkeypatch.setattr(os, "fdopen", fail)
+    assert _maintenance().compact_display_archives(store, now=NOW)["errors"] == 1
+    leaked = []
+    for fd in captured:
+        try:
+            fstat(fd)
+        except OSError:
+            continue
+        leaked.append(fd)
+        os.close(fd)
+    assert captured and not leaked and (directory / "0.json").exists()

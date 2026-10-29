@@ -1,4 +1,4 @@
-# LLM: 显式维护展示副本；整档验证与bundle刷盘读回后才删页，TTL先发墓碑，不读取模型或业务账本。
+# LLM: 显式维护展示副本；整档验证后删页、TTL先发墓碑，open后立即承担FD清理，不读取模型或业务账本。
 # 模块用途: 在原归档根有界合页和按保留策略回收原文，不自动执行生产清理。
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from .display_archive import (
     DISPLAY_BUNDLE_SCHEMA,
     DisplayArchiveError,
     _bundle_limit,
+    _fdopen_owned,
     _validate_bundle,
     _validate_page_rows,
     validate_display_archive_reference,
@@ -60,24 +61,28 @@ def _locked_root(root):
         os.close(fd)
 
 
-# LLM: 从已固定父FD打开普通目录且核前后inode；绝不跟随目录链接。
+# LLM: 从固定父FD打开并核一次fstat；open成功后任一校验异常都关闭FD，成功才转交调用者。
 # 函数用途: 固定一个待维护的UUID目录。
 def _open_directory(parent, name):
     before = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if not stat.S_ISDIR(before.st_mode):
         raise OSError("归档目录形状无效")
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-    if (before.st_dev, before.st_ino) != (os.fstat(fd).st_dev, os.fstat(fd).st_ino):
+    try:
+        opened = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise OSError("归档目录已变更")
+        return fd
+    except BaseException:
         os.close(fd)
-        raise OSError("归档目录已变更")
-    return fd
+        raise
 
 
-# LLM: 只读普通单链接叶，前后stat一致且读取有界；返回stat供后续删除复核。
+# LLM: 普通单链接叶前后stat一致且有界；fdopen构造前也承担关闭责任，返回stat供删除复核。
 # 函数用途: 在同一归档描述符下读取JSON与其文件身份。
 def _read(fd, name, limit):
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-    with os.fdopen(descriptor, "rb") as stream:
+    with _fdopen_owned(descriptor, "rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
             raise ValueError("归档叶形状或大小无效")
@@ -97,13 +102,13 @@ def _signature(value):
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
 
 
-# LLM: 同目录0600临时叶完整刷盘后replace再刷父FD；失败不删原页。
+# LLM: 同目录0600临时叶刷盘后replace；fdopen失败关闭裸FD，失败不删原页并清理临时名。
 # 函数用途: 原子发表合页或过期墓碑并清理自己的临时文件。
 def _replace(fd, name, raw):
     temporary = f".{name}.{uuid.uuid4().hex}.tmp"
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-        with os.fdopen(descriptor, "wb") as stream:
+        with _fdopen_owned(descriptor, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             stream.write(raw)
             stream.flush()

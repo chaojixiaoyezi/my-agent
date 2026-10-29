@@ -1,4 +1,4 @@
-# LLM: 归档只含公开展示副本，不参与模型输入；合页仍无损分页，TTL墓碑必须报告过期而不是空内容。
+# LLM: 归档只含公开展示副本；脱链FD废弃并有限重读，合页保持无损、TTL读取权威墓碑，不接受多硬链接。
 # 模块用途: 把完整工具展示保存为有界原文页；不重新读取业务文件，不参与模型输入或 Compact。
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ def archive_display_rows(agent: object, *, thread_id: str, rows: Iterable[Mappin
     return reference
 
 
-# LLM: 调用方先认证owner/thread；只信磁盘索引，旧独立页优先、缺页才读有界bundle，墓碑单独报过期。
+# LLM: 调用方先认证owner/thread；只信有界重读的磁盘索引，脱链页按缺失重取墓碑和bundle，不吞危险叶错误。
 # 函数用途: 只读取引用指向的一页原文，拒绝路径、负页码、软链接或不完整归档。
 def read_display_archive_page(store: object, reference: object, page_index: object) -> dict[str, object]:
     archive_id, thread_id = validate_display_archive_reference(reference)
@@ -85,7 +85,7 @@ def read_display_archive_page(store: object, reference: object, page_index: obje
     directory = _archive_root(store) / archive_id
     if directory.is_symlink():
         raise DisplayArchiveError("DISPLAY_ARCHIVE_UNAVAILABLE", "原文归档不可读取。")
-    manifest = _read_json_bounded(directory / "manifest.json", 4096)
+    manifest = _read_manifest(directory)
     count = manifest.get("page_count")
     if (manifest.get("schema") != DISPLAY_ARCHIVE_SCHEMA or manifest.get("archive_id") != archive_id
             or manifest.get("thread_id") != thread_id or type(count) is not int or count < 1):
@@ -100,16 +100,28 @@ def read_display_archive_page(store: object, reference: object, page_index: obje
         if not isinstance(exc.__cause__, FileNotFoundError):
             raise
         try:
+            _raise_if_expired(_read_manifest(directory))
             bundle = _read_json_bounded(directory / "pages_bundle.json", _bundle_limit(count))
             pages = _validate_bundle(bundle, manifest)
             rows = pages[page_index]
         except DisplayArchiveError:
             # 过期提交先发表墓碑再删页；跨越这个窗口的读者也必须得到明确过期。
-            _raise_if_expired(_read_json_bounded(directory / "manifest.json", 4096))
+            _raise_if_expired(_read_manifest(directory))
             raise
     _validate_page_rows(rows)
     return {"ok": True, "reference": manifest, "rows": rows, "page_index": page_index,
             "page_count": count, "has_previous": page_index > 0, "has_next": page_index + 1 < count}
+
+
+# LLM: 只对缺失/已脱链manifest最多尝试三次；类型、链接、权限和损坏错误不被重试洗掉。
+# 函数用途: 跨TTL原子替换窗口重新读取当前权威墓碑。
+def _read_manifest(directory):
+    for attempt in range(3):
+        try:
+            return _read_json_bounded(directory / "manifest.json", 4096)
+        except DisplayArchiveError as exc:
+            if not isinstance(exc.__cause__, FileNotFoundError) or attempt == 2:
+                raise
 
 
 # LLM: 此状态来自磁盘manifest，不接受客户端引用中的元数据来触发过期。
@@ -162,26 +174,33 @@ def _archive_root(store: object) -> Path:
     return root
 
 
-# LLM: UUID目录及排他新建防止覆写；私有文件关闭前fsync，manifest发表仍由producer负责。
+# LLM: UUID目录及排他新建防覆写；fdopen失败也关闭裸FD，私有文件fsync后由producer发表manifest。
 # 函数用途: 保存一个不可覆写 JSON 页，关闭前落盘，确保发布后的页面完整。
 def _write_json_new(path: Path, payload: dict) -> None:
     descriptor = _open_archive_file(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+    with _fdopen_owned(descriptor, "w", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"))
         stream.flush()
         os.fsync(stream.fileno())
 
 
-# LLM: nofollow及普通单链接检查拒绝软硬链接和FIFO；有界读取失败保留原错误原因供缺页兼容分支判断。
+# LLM: nofollow拒绝危险叶；脱链FD不接受正文而按缺失交调用方有限重读，前后fstat仍拒绝多链接。
 # 函数用途: 安全读取小型原文页；缺失、损坏或过大的文件明确报错，不透露服务器路径。
 def _read_json_bounded(path: Path, maximum: int) -> dict:
     try:
         descriptor = _open_archive_file(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-        with os.fdopen(descriptor, "rb") as stream:
+        with _fdopen_owned(descriptor, "rb") as stream:
             metadata = os.fstat(stream.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink > 1:
                 raise ValueError("not regular")
+            if metadata.st_nlink == 0:
+                raise FileNotFoundError("archive leaf detached")
             raw = stream.read(maximum + 1)
+            after = os.fstat(stream.fileno())
+            if not stat.S_ISREG(after.st_mode) or after.st_nlink > 1:
+                raise ValueError("not regular")
+            if after.st_nlink == 0:
+                raise FileNotFoundError("archive leaf detached")
         if len(raw) > maximum:
             raise ValueError("oversize")
         payload = json.loads(raw)
@@ -190,6 +209,16 @@ def _read_json_bounded(path: Path, maximum: int) -> dict:
         return payload
     except (OSError, ValueError) as exc:
         raise DisplayArchiveError("DISPLAY_ARCHIVE_UNAVAILABLE", "完整原文缺失或损坏，请保留现有预览。") from exc
+
+
+# LLM: 成功返回后所有权仅归文件对象；构造抛错时本层关闭裸FD，不二次关闭成功封装的资源。
+# 函数用途: 为归档读写建立没有空档的FD交接。
+def _fdopen_owned(descriptor, mode, **kwargs):
+    try:
+        return os.fdopen(descriptor, mode, **kwargs)
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 # LLM: POSIX逐层nofollow打开根与UUID目录，避免替换竞态；无dirfd平台仍检查链接和归档内包含关系。
