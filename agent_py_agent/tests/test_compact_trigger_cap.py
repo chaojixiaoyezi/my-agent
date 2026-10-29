@@ -198,7 +198,7 @@ def test_r8_explicit_canonical_trigger_wins_over_co_specified_legacy_in_replace_
     assert env_applied.memory_compact_auto_trigger_percent == 85
 
 
-# LLM: replace同时显式传入host_home_snapshot与新旧比例时，不能因跳过前序字段读取而丢失显式新键优先级，且实例__dict__不残留私有临时键。
+# LLM: replace或copy.replace同时显式传入host_home_snapshot与新旧比例时，不能因跳过前序字段读取而丢失显式新键优先级，且实例__dict__不残留私有临时键。
 # 函数用途: 验证无论是否并列覆盖host_home_snapshot，显式memory_compact_trigger_percent在70/80下均保持权威且源对象无状态污染。
 @pytest.mark.parametrize("canonical_target", [70, 80])
 @pytest.mark.parametrize("include_snapshot", [False, True])
@@ -206,6 +206,7 @@ def test_r9_explicit_canonical_independent_of_host_snapshot_and_clean_dict(
     canonical_target,
     include_snapshot,
 ):
+    import copy
     from dataclasses import asdict
 
     cfg = AgentConfig(memory_compact_auto_trigger_percent=70)
@@ -220,6 +221,9 @@ def test_r9_explicit_canonical_independent_of_host_snapshot_and_clean_dict(
         overrides["host_home_snapshot"] = None
     result = replace(cfg, **overrides)
     assert result.memory_compact_trigger_percent == canonical_target
+    if hasattr(copy, "replace"):
+        copy_result = copy.replace(cfg, **overrides)
+        assert copy_result.memory_compact_trigger_percent == canonical_target
     assert cfg.memory_compact_trigger_percent == 70
     _ = asdict(cfg)
     _ = cfg.host_home_snapshot
@@ -242,15 +246,16 @@ def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
     reached, resume = threading.Event(), threading.Event()
     results, errors = [], []
     paused = False
+    replace_loop_code = getattr(dataclasses, "_replace", dataclasses.replace).__code__
 
-    # LLM: 仅在测试线程执行到dataclasses.replace的InitVar字段时暂停一次，放行主线程执行并发只读访问。
+    # LLM: 仅在测试线程执行到dataclasses.replace/_replace的InitVar字段时暂停一次，放行主线程执行并发只读访问。
     # 函数用途: 为并发replace测试提供确定性的线程交错点。
     def trace(frame, event, arg):
         nonlocal paused
         if (
             not paused
             and event == "line"
-            and frame.f_code is dataclasses.replace.__code__
+            and frame.f_code is replace_loop_code
             and getattr(frame.f_locals.get("f"), "name", None)
             == "_compact_trigger_previous_auto"
         ):

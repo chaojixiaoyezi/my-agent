@@ -16,6 +16,7 @@ from __future__ import annotations
 这里坚持只用标准库，目的是让项目在 Windows / Linux / macOS 上都能轻装运行。
 """
 
+import dataclasses
 import logging
 import re
 import sys
@@ -292,11 +293,21 @@ class _RuntimeBudgetConfigFields:
     background_main_agent_allowed_tools: list[str] = field(default_factory=list)
 
 
-# LLM: 仅在dataclasses.replace读取InitVar时从当前线程replace栈帧的changes字典判定新键是否由调用方显式传入；不修改源对象__dict__，也不拦截常规属性读取。
+_DATACLASS_REPLACE_CODES = frozenset(
+    code
+    for code in (
+        getattr(_dataclass_replace, "__code__", None),
+        getattr(getattr(dataclasses, "_replace", None), "__code__", None),
+    )
+    if code is not None
+)
+
+
+# LLM: 仅在dataclasses.replace或copy.replace读取InitVar时从当前线程replace栈帧的changes字典判定新键是否由调用方显式传入；不修改源对象__dict__，也不拦截常规属性读取。
 # 类用途: 为AgentConfig._compact_trigger_previous_auto提供无状态描述符，类级访问返回None，实例级访问返回(源对象旧比例, 新键是否继承自源对象)。
 class _CompactTriggerPrevAutoDescriptor:
-    # LLM: 类访问返回None供dataclass生成默认参数；实例访问只读检查当前线程replace帧中的changes字典，线程安全且无状态残留。
-    # 函数用途: 在dataclasses.replace复制memory_compact_trigger_percent前返回源对象的memory_compact_auto_trigger_percent与新键继承标记。
+    # LLM: 类访问返回None供dataclass生成默认参数；实例访问只读检查当前线程replace/_replace帧中的changes字典，兼容Python 3.10-3.14，线程安全且无状态残留。
+    # 函数用途: 在dataclasses.replace或copy.replace复制memory_compact_trigger_percent前返回源对象的memory_compact_auto_trigger_percent与新键继承标记。
     def __get__(
         self,
         instance: Any,
@@ -307,9 +318,9 @@ class _CompactTriggerPrevAutoDescriptor:
         trigger_copied = True
         frame = sys._getframe(1)
         while frame is not None:
-            if (
-                frame.f_code is _dataclass_replace.__code__
-                and frame.f_locals.get("obj") is instance
+            if frame.f_code in _DATACLASS_REPLACE_CODES and (
+                frame.f_locals.get("obj") is instance
+                or frame.f_locals.get("self") is instance
             ):
                 changes = frame.f_locals.get("changes")
                 if isinstance(changes, dict):

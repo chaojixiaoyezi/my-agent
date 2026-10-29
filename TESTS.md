@@ -6,7 +6,7 @@
 - B2：门户夹具三条个人地址替换为通用占位路径；测试默认固定仓库夹具，只有显式`MY_AGENT_PORTAL_SOURCE_DIR`覆盖。伪造存在的旧home目录后仍必须选择仓库版本。
 - 治理：真实权威类在`user_space/managed_user_governance.py`；新增只读`policy_path`投影复用原store根和prefix，压缩消费者不再拼目录。原nofollow有界读取、身份拒绝和损坏传播不变。
 - MCP：生命周期锁内、归还借用之前保存客户端tuple，最后借用导致owner原共享list清空后仍按tuple撤销门面代理。新增1/2借用者真实临时MCP回归，核对重复close幂等、基础工具保留、旧代理撤销及客户端关闭。
-- 配置：旧比例只联动默认80或仍等于先前旧比例（含50..95夹取后数值）且未显式指定新字段的配置；私有`InitVar`纳入`INTERNAL_RUNTIME_CONFIG_FIELDS`，通过无状态描述符`_CompactTriggerPrevAutoDescriptor`在`dataclasses.replace`读取时从当前线程`replace`栈帧的`changes`字典无副作用判定新键是否显式传入，不覆盖`__getattribute__`，不进入`fields()`、`asdict()`、实例`__dict__`或新增公开配置键。`runtime_config_task`与`runtime_config_env`在`replace`后写回已按层优先级裁决的`memory_compact_trigger_percent`，`test_subagent_runtime_compact`对齐`memory_compact_trigger_percent=90`。覆盖连续复制、范围外夹取后再恢复、源对象不变且`__dict__`零残留、显式新比例优先（含70/75/80并列覆盖及并列传入`host_home_snapshot`）、并发只读线程交错访问源配置、同值重赋、初始双字段显式相等及历史数值不得复活的边界。
+- 配置：旧比例只联动默认80或仍等于先前旧比例（含50..95夹取后数值）且未显式指定新字段的配置；私有`InitVar`纳入`INTERNAL_RUNTIME_CONFIG_FIELDS`，通过无状态描述符`_CompactTriggerPrevAutoDescriptor`在`dataclasses.replace`或`copy.replace`读取时从当前线程`replace`/`_replace`栈帧的`changes`字典无副作用判定新键是否显式传入（兼容Python 3.10–3.14），不覆盖`__getattribute__`，不进入`fields()`、`asdict()`、实例`__dict__`或新增公开配置键。`runtime_config_task`与`runtime_config_env`在`replace`后写回已按层优先级裁决的`memory_compact_trigger_percent`，`test_subagent_runtime_compact`对齐`memory_compact_trigger_percent=90`。覆盖连续复制、范围外夹取后再恢复、源对象不变且`__dict__`零残留、显式新比例优先（含70/75/80并列覆盖及并列传入`host_home_snapshot`与`copy.replace`）、并发只读线程交错访问源配置、同值重赋、初始双字段显式相等及历史数值不得复活的边界。
 
 红绿证据：首轮同12个聚焦节点为9失败/3通过，修复后12通过；独审提出的配置边界新增4节点先3失败/1通过，修正后全部9个配置专项节点通过。没有删测、skip、xfail或降低断言。
 
