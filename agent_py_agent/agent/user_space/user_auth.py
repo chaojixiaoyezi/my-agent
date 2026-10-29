@@ -74,6 +74,14 @@ def _feishu_service(root, uid):
     return service
 
 
+# LLM: 与_im_password共用_SERVICE_LOCK串行访问原SQLite密码库，防止并发unlock写活跃与只读timeout=0读取冲突。
+# 函数用途: 持有服务锁执行原飞书UnlockService密码核验与活跃写入，保留原暴破锁定窗语义。
+def _unlock_feishu_user(root, uid, password):
+    service = _feishu_service(root, uid)
+    with _SERVICE_LOCK:
+        return service.unlock(uid, password)
+
+
 # LLM: DTO不提供管理员标志或执行许可，token不进入repr；公开会话仅供新入口运输，再由原授权链求交。
 # 类用途: 返回已认证普通用户的稳定身份和有期限的签名会话。
 @dataclass(frozen=True)
@@ -317,7 +325,7 @@ def authenticate_user(root: Path, *, account_source: str, user_id: str, password
     current = _current_credential(root, account_source, uid, tenant_or_app_key)
     if account_source == "local":
         LocalUserLifecycle(LocalUserStore(root)).verify_user_password(uid, password)
-    elif not isinstance(password, str) or not _feishu_service(root, uid).unlock(uid, password):
+    elif not isinstance(password, str) or not _unlock_feishu_user(root, uid, password):
         raise HostAPIError("INVALID_CREDENTIALS", 401, message="invalid user_id or password")
     if _current_credential(root, account_source, uid, tenant_or_app_key) != current:
         raise HostAPIError("SESSION_REVOKED", 401)
