@@ -313,7 +313,7 @@ _ADMISSION_WAIT_REFRESH_SECONDS = 30.0
 _ADMISSION_WAIT_FIELDS = ("admission_wait_at", "admission_wait_reason", "admission_wait_count")
 
 
-# LLM: Existing public config supplies the owner cap; zero in manually constructed limits preserves legacy components.
+# LLM: 沿原公开配置读取Owner容量，手工构造时的零值保留旧组件兼容性，缺省用户容量为50。
 # 类用途: 保存当前扫描使用的准入上限，不新增用户配置键。
 @dataclass(frozen=True)
 class AdmissionLimits:
@@ -322,7 +322,7 @@ class AdmissionLimits:
     owner_inflight: int = 0
     pool_can_acquire: Callable[[dict], bool] | None = field(default=None, compare=False, repr=False)
 
-    # LLM: Explicit owner inflight config precedes the pool-budget fallback; the optional pool check is only a read-only hint.
+    # LLM: 显式owner上限优先，单用户缺省/坏值统一50；原池容量预检只是只读提示，不增加执行权。
     # 函数用途: 优先读取用户配置的活跃owner上限，再用实例预算兜底并绑定真实池预检。
     @classmethod
     def from_config(cls, config: object, *, agent: object | None = None) -> AdmissionLimits:
@@ -330,7 +330,7 @@ class AdmissionLimits:
         if configured <= 0:
             configured = _positive_int(getattr(config, "owner_agent_pool_max_agents", 64), 64)
         return cls(
-            user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 8), 8),
+            user_inflight=_positive_int(getattr(config, "gateway_user_inflight_limit", 50), 50),
             global_inflight=_positive_int(
                 getattr(config, "gateway_global_inflight_limit", 500), 500
             ),

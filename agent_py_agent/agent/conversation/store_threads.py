@@ -1,4 +1,4 @@
-# LLM: 原线程文件锁内核对身份及 Compact/设置 CAS；模型选择变化必须逐次前进且保留显式覆盖版本，不增加状态源。 C显式非阻塞模式只复用原锁，默认调用与权限不变。
+# LLM: 原线程文件锁内核对身份及CAS；JSON容器专用复制保留嵌套隔离，不对外暴露缓存引用或改变锁权限。
 # 模块用途: 保存会话元数据、目录与通道绑定；继任以原线程指针原子发表，新线程仅在前后指针成对时可见。
 from __future__ import annotations
 
@@ -54,20 +54,35 @@ _THREAD_RECORD_CACHE: OrderedDict[str, _CachedThread] = OrderedDict()
 _THREAD_RECORD_CACHE_TOTAL_BYTES: int = 0
 
 
-# LLM: frozen线程仍含可变成员；缓存出入均深拷贝字典和字典元组，空字典也新建，不共享调用者对象。
+# LLM: canonical线程来自JSON：精确内置容器递归复制、标量共享，非JSON扩展保留通用deepcopy，不把浅副本当隔离。
+# 函数用途: 低开销复制线程的嵌套元数据，避免对每个JSON标量重复通用类型分派。
+def _clone_thread_value(value):
+    kind = type(value)
+    if kind in (str, int, float, bool, type(None)):
+        return value
+    if kind is dict:
+        return {key: _clone_thread_value(item) for key, item in value.items()}
+    if kind is list:
+        return [_clone_thread_value(item) for item in value]
+    if kind is tuple:
+        return tuple(_clone_thread_value(item) for item in value)
+    return copy.deepcopy(value)
+
+
+# LLM: frozen线程仍含可变成员；缓存出入均复制全部嵌套可变容器，空字典也新建，不能共享调用者对象。
 # 函数用途: 克隆线程快照，隔离摘要证据、设置、诊断、宿主通知和会话方法账本。
 def _clone_cached_thread(thread: ConversationThread) -> ConversationThread:
     return replace(
         thread,
-        compact_operation_evidence=copy.deepcopy(thread.compact_operation_evidence) if thread.compact_operation_evidence else {},
-        provider_context_observation=copy.deepcopy(thread.provider_context_observation) if thread.provider_context_observation else {},
-        model_context_usage=copy.deepcopy(thread.model_context_usage) if thread.model_context_usage else {},
-        learning_source=copy.deepcopy(thread.learning_source) if thread.learning_source else {},
-        metadata=copy.deepcopy(thread.metadata) if thread.metadata else {},
-        decision_settings=copy.deepcopy(thread.decision_settings) if thread.decision_settings else {},
-        model_metrics=copy.deepcopy(thread.model_metrics) if thread.model_metrics else {},
-        pending_host_notices=copy.deepcopy(thread.pending_host_notices),
-        conversation_methods=copy.deepcopy(thread.conversation_methods),
+        compact_operation_evidence=_clone_thread_value(thread.compact_operation_evidence) if thread.compact_operation_evidence else {},
+        provider_context_observation=_clone_thread_value(thread.provider_context_observation) if thread.provider_context_observation else {},
+        model_context_usage=_clone_thread_value(thread.model_context_usage) if thread.model_context_usage else {},
+        learning_source=_clone_thread_value(thread.learning_source) if thread.learning_source else {},
+        metadata=_clone_thread_value(thread.metadata) if thread.metadata else {},
+        decision_settings=_clone_thread_value(thread.decision_settings) if thread.decision_settings else {},
+        model_metrics=_clone_thread_value(thread.model_metrics) if thread.model_metrics else {},
+        pending_host_notices=_clone_thread_value(thread.pending_host_notices),
+        conversation_methods=_clone_thread_value(thread.conversation_methods),
     )
 
 

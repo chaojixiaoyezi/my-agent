@@ -537,7 +537,7 @@ gateway_request_timeout: 300
 # - gateway_processing_timeout_seconds 用来判断 processing 请求是否已经卡死。
 # - gateway_request_max_attempts：processing 租约实际卡死的累计失败上限，默认 2 即首次重排、再次卡死归档 failed。
 #   服务重启接续同一回合不占失败次数；旧 attempts 只记执行代次。0 表示不卡死次数上限，未知副作用门不放宽。
-gateway_user_inflight_limit: 8
+gateway_user_inflight_limit: 50
 # 后台服务同时最多处理多少个请求（所有会话加在一起）。
 # 一般远远用不到；只有在同一台机器上跑很多并发任务、或想限制资源占用时才需要调小。
 gateway_global_inflight_limit: 500

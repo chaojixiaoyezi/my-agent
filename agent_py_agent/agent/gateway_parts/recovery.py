@@ -244,10 +244,7 @@ def _ensure_recovery_dirs(paths: GatewayPaths) -> None:
         folder.mkdir(parents=True, exist_ok=True)
 
 
-# LLM: Dispatch attempts fence executions but are not failure counts. Startup restores the
-# same turn; only expired live-service processing leases consume the recovery failure budget,
-# and unplanned startup resumes consume the separate resume cap (see _settle_stale_processing).
-# Keep terminal/CAS/unknown-operation fences unchanged and never derive cause from last_error prose.
+# LLM: 启动识别pending运输半态但不重做业务/累计续跑；全部动作仍沿原MP来源和T/terminal/指纹围栏，未知状态不放行。
 # 函数用途: 区分服务重启续接和真正卡死，避免一个健康长任务因部署多次就被错误终止。
 def _recover_one_processing_request(
     paths: GatewayPaths,
@@ -280,7 +277,33 @@ def _recover_one_processing_request(
         return recover_stale_processing(paths, request_path, payload, context, _settle_committed_terminal)
     if not _processing_request_stale(payload, request_path, context):
         return ""
+    if payload.get("status") == "pending":
+        return recover_stale_processing(paths, request_path, payload, context, _finish_interrupted_queue_move)
     return recover_stale_processing(paths, request_path, payload, context, _settle_stale_processing)
+
+
+# LLM: 只完成已落盘pending的运输，不重算恢复预算、不变执行/owner身份；原MP来源仍由外层核准，T内全文CAS且不覆盖inbox/terminal。
+# 函数用途: 收回认领rename后或重排rename前退出留下的pending-in-processing文件。
+def _finish_interrupted_queue_move(paths, request_path, payload, context):
+    from .multiprocess_processing_recovery import processing_metadata_scope
+
+    with processing_metadata_scope(paths, request_path.stem):
+        report = read_json_file_report(request_path, context="gateway.recovery.pending_transport.recheck")
+        if report.load_error is not None:
+            raise DataCorruptionError("interrupted queue move source is unreadable")
+        fresh = report.payload
+        if fresh != payload or fresh.get("status") != "pending":
+            return ""
+        if fresh.get("id") != request_path.stem:
+            raise DataCorruptionError("interrupted queue move request identity changed")
+        validated_gateway_request_fingerprint(fresh, request_path.stem)
+        if not _processing_request_stale(fresh, request_path, context):
+            return ""
+        target = paths.inbox / request_path.name
+        if target.exists() or (paths.terminal / request_path.name).exists():
+            raise DataCorruptionError("interrupted queue move conflicts with pending or terminal request")
+        request_path.replace(target)
+        return "requeued"
 
 
 # LLM: 已确认过期的请求三选一，只读结构化计数、不读 last_error 文本：服务内租约过期累计 processing_failure_count，

@@ -1,3 +1,17 @@
+## 2026-10-29 e905 sol-14：CPU 唤醒与 Gateway 六项缺陷
+
+来源：`task-e905-sol-14-cpu-wakeups.md`、`audit-and-fix-e905-sol-14-gateway-bugs.md`、`steer-sol-14-bug6.md`，基线 `4bea324e3`；不部署、不推送、不重启用户服务。
+
+- TUI 按用户块缓存摘要，常规视图复用稳定元组身份；完整 transcript 保留 source-row/complete-turn 计算。UIContent 按副作用后的状态单槽复用，sticky 的 H−1 预热顺序不变。
+- 静默动画在 2/10 秒后退避至 0.5/1 秒；显示事件/导航唤醒复位。后台通知仍为活动 1 秒、空闲 5 秒；不加入跨请求 notices TTL 或进程负缓存。
+- chunk 到达才重置 0.1 秒采样，单纯续租退避到 0.25 秒；executor wait/communicate 保留初次 poll 和 EOF 门，MCP 等待不超过剩余期限；lane 的 1ms 公平让出不动。
+- 默认单用户准入统一 50，显式 8 不覆盖；三个 WebSocket 头入口使用真实多值 Headers 回归，保持诊断脱敏。
+- 线程 JSON 专用复制仍隔离全部嵌套可变字段；子代理只读谱系使用 frozen 标量摘要，真实 manager 验证 copy=0、跨进程保存可见、删除与坏账。
+- 连续启动保留原请求与独立恢复计数。故障注入覆盖 claim rename 后与 requeue rename 前的 pending-in-processing 半态；专用搬运分支沿原锁、完整快照、指纹、终态/队列冲突及正 MP 恢复来源检查，不增加续跑次数。
+- 前台插话投影空窗沿 durable 请求 ID 交原 Gateway 复核，不伪造 claim；有效 request/task 目标始终优先，等待准入的本地请求不能覆盖它，新增两类反例先红后绿。通知空目标只保留同一正在观察的前台请求。启动子进程加安全路径环境与安全 cwd，run 入口清理外来同名包根。
+
+新增测试：`test_tui_cpu_wakeup_optimizations.py`、`test_gateway_restart_bugfixes.py`。复现：在树根执行 `python3 -B -m pytest agent_py_agent/tests/test_tui_cpu_wakeup_optimizations.py agent_py_agent/tests/test_gateway_restart_bugfixes.py -q --tb=short`；扩展回归与门禁、基线对照结果见交接报告。未据单测声称生产 CPU/GC 降幅或真实发布 Gateway 已启动。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

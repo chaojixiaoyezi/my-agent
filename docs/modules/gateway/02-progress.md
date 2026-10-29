@@ -1,3 +1,10 @@
+## 2026-10-29 e905 sol-14：唤醒与重启修复（本地候选，未部署）
+
+- 默认单用户准入及缺省回退统一 50；WebSocket 同名多值头不再通过 Mapping.items 触发异常。
+- CPU 优化限展示缓存和有界等待：保留 1ms lane 公平让出、1/5 秒通知发现、reset 代次和终态尾流，不做跨请求 notices TTL。
+- 新恢复分支辨认 pending-in-processing 运输半态，原锁内比完整快照和指纹，禁止覆盖 pending/terminal；不重算预算，正 MP 仍要求原恢复来源。
+- 前台插话仅在真实目标完全缺失时使用已提交请求 ID，已有 request/task 目标优先，等待准入不允许覆盖它，claim 仍由宿主复核；安全自举不把调用者源码 cwd 带入子进程。生产 CPU 与真实发布解释器启动未验证。
+
 ## 2026-10-28 Wave 9 A1 Round 2：单向远端推送（本地候选，未部署）
 
 - `gateway_parts/remote_push_service.py` 承接唯一 `POST /remote-agent/push`。独立push Token仅允许目标owner的事件入队，时间窗/HMAC、跨进程nonce及持久业务幂等先于原Gateway输入T→C提交；回执不含消息正文，`run_id`仅指排队请求，不证明模型执行完成。其他路由不接受push Token作为读取或控制身份。

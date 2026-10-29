@@ -270,10 +270,13 @@ class MCPFrameWriter:
             os.close(self.fd)
             self.complete.set()
 
-    # LLM: 这里只等待固定 writer；取消/期限不证明远端未收到部分帧，调用方必须废弃此 transport。
+    # LLM: 只等固定writer，事件等待至多50ms并夹到正剩余期限；取消/关闭分类沿原检查，部分帧失败仍由调用方废弃连接。
     # 函数用途: 检查发送完成、失败、关闭和取消，不无限等管道恢复。
     def wait(self, deadline: float, closed: threading.Event, *, allow_cancelled: bool) -> None:
-        while not self.complete.wait(timeout=0.01):
+        while True:
+            remaining = deadline - time.monotonic()
+            if self.complete.wait(timeout=min(0.05, max(0.0, remaining))):
+                break
             require_mcp_wait(deadline, closed, allow_cancelled=allow_cancelled)
         if self.error is not None:
             raise self.error

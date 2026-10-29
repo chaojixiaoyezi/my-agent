@@ -1,6 +1,6 @@
 # LLM: 本模块负责后台模型上下文准备，复用唯一会话与任务范围事实，不调度执行或外发消息。
 # task_runtime_state 的既有进度对账可能写任务账；保持调用顺序，修改时同步历史隔离、读取错误和展示排除测试。
-# 模块用途: 一次读取后台事实后纯渲染有界上下文，候选不重复进度对账或读取持久状态。
+# 模块用途: 一次读取后台事实后纯渲染有界上下文；谱系ID只读轻摘要，候选不重复对账。
 from __future__ import annotations
 
 import json
@@ -737,7 +737,7 @@ def _context_row_matches_task_ids(row: dict[str, Any], task_ids: set[str]) -> bo
     )
 
 
-# LLM: 从持久子代理树取得根与子运行编号，读取失败保留已证明的身份；不猜其他任务或按名字合并。
+# LLM: 优先使用不含可变字段的实时轻摘要；旧适配器仍可list_runs，失败只保留已证明身份，不按名字合并。
 # 函数用途: 解析本次任务的合法 lineage 集合，供历史和事件过滤使用。
 def _task_context_ids(state: BackgroundContextLoad) -> set[str]:
     """Resolve one task's persisted subagent lineage without using prompt text."""
@@ -755,7 +755,8 @@ def _task_context_ids(state: BackgroundContextLoad) -> set[str]:
     root_id = str(getattr(current, "root_id", "") or "").strip() or task_id
     task_ids.add(root_id)
     try:
-        runs = manager.list_runs()
+        summaries = getattr(manager, "list_run_summaries", None)
+        runs = summaries() if callable(summaries) else manager.list_runs()
     except Exception:
         return task_ids
     for run in runs:

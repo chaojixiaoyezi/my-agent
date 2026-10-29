@@ -1,4 +1,4 @@
-# LLM: 新job保原slash输入与显示摘要分离，HTTP宿主仍从原命令解析任务，不授客户端system_task权限。
+# LLM: 新job保原slash输入与显示摘要分离；活跃输入缺投影时仅携durable请求ID，claim/执行代次仍交宿主复核。
 # LLM: 本模块是 TUI 按键处理器的副作用边界：Gateway 网络请求、后台线程、控制/补充消息持久对账器与
 #   本地执行队列投递都在这里；tui_keybindings 只做按键注册与分派并显式导入这些入口。本模块运行时禁止
 #   导入 tui_keybindings（避免循环），TuiCreateKeybindingsParams 仅作类型注解在 TYPE_CHECKING 下导入。
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -573,7 +574,7 @@ def _ensure_control_operation_reconciler(
     return reconciler
 
 
-# LLM: 前后台输入共用稳定消息 ID 和持久回执；媒体与正文同一完整选项，目标仅来自 Gateway 实际绑定。
+# LLM: 前后台共用稳定输入ID与持久回执；仅在真实目标完全缺失时用durable请求ID兜底，不覆盖Gateway目标、不伪造claim。
 # 函数用途: 普通 Enter 进入当前主代理的安全点；只在明确拒绝或已排队时回到原任务队列。
 def _tui_submit_active_turn_input(
     params: TuiCreateKeybindingsParams,
@@ -592,6 +593,12 @@ def _tui_submit_active_turn_input(
     runtime = _required_tui_runtime(params)
     expected_execution = runtime.execution_target()
     expected_turn_id = str((expected_execution or {}).get("turn_id") or "")
+    with getattr(params, "state_lock", nullcontext()):
+        running = bool(getattr(params, "is_running_ref", [False])[0])
+        request_id = str(getattr(params, "running_request_id_ref", [""])[0] or "")
+    if running and request_id and not expected_execution and not expected_turn_id:
+        # 本地running可能只是等待准入；已发布目标优先，缺失时才交请求ID给宿主复核。
+        expected_turn_id, expected_execution = request_id, None
     if not expected_turn_id:
         return False
     if not callable(getattr(params.agent, "request_active_turn_input", None)):

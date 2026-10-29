@@ -1,3 +1,5 @@
+# LLM: 使用临时队列与替身worker校验准入容量和公平性，不启动真实Gateway；显式配置不被默认值覆盖。
+# 模块用途: 回归同会话串行、单用户与全局容量及缺省50的兼容边界。
 """三层准入(同会话顺序 + 每用户小坑 + 全局大坑)及派发公平性。"""
 
 from __future__ import annotations
@@ -98,6 +100,8 @@ class TestAdmissionAccounting:
         assert rw.request_conversation_key({}) == ""
 
 
+# LLM: 使用替身worker验证原准入两级容量，不启动真实服务；默认提升不覆盖显式小值。
+# 类用途: 覆盖队列调度、Owner公平与配置回退。
 class TestDispatchPending:
     def test_per_user_cap_queues_excess_and_serves_other_users(self, tmp_path, fresh_admission):
         paths = _paths(tmp_path)
@@ -181,6 +185,8 @@ class TestDispatchPending:
         assert rw.dispatch_pending_requests(paths, limits, submit) == 1
         assert submitted[-1][0] == "r1"
 
+    # LLM: 缺省和非法字段统一50/500，显式上限仍按配置消费。
+    # 函数用途: 防止单用户默认回退悄悄变回8。
     def test_limits_from_config_defaults_and_bad_values(self):
         class Cfg:
             gateway_user_inflight_limit = 8
@@ -194,7 +200,7 @@ class TestDispatchPending:
             gateway_global_inflight_limit = 0
 
         fallback = rw.AdmissionLimits.from_config(Bad())
-        assert (fallback.user_inflight, fallback.global_inflight) == (8, 500)
+        assert (fallback.user_inflight, fallback.global_inflight) == (50, 500)
 
 
 if __name__ == "__main__":

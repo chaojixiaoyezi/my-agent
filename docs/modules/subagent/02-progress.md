@@ -1,3 +1,9 @@
+## 2026-10-29 e905 sol-14：后台谱系轻摘要（本地候选）
+
+- manager/persistence 增加不可变标量运行摘要，后台上下文 ID 收集优先使用它，避免每次复制全部历史任务正文。
+- 保留原 canonical reader、逐文件指纹/粗 mtime、负缓存、排序与错误报告；公开完整任务读取隔离语义不变。
+- 新增真实 manager 回归覆盖热摘要 deepcopy 零调用、frozen 隔离、另一 manager 保存后立即可见、locator 删除与坏账；生产耗时和 GC 降幅未验证。
+
 ## 2026-10-28 Wave 8：子代理公开索引重建入口与同 Owner Worker 延迟/借用 MCP（已实现）
 
 - `subagents/services/indexing/service.py` 新增公开 `SubAgentIndexingService.rebuild_subagent_index` 方法，统一封装 30 天终态 TTL 过滤与 `manager_index` 重建，供 `cli/local_doctor.py` 直接调用，移除对 `local_storage.records._task_projection_expired` 私有符号的跨层依赖。

@@ -122,11 +122,12 @@ def _make_worker_config(*, params: WorkerConfigParams):
     )
 
 
-# LLM: worker 继承原 local_run_ref，刷新只读展示；应用退出沿共享 stop events，不等同停止任务资源。
+# LLM: worker继承原refs；通知只借同一前台请求refs核精确保留条件，不创建执行身份，退出仍沿原stop。
 # 函数用途: 启动 TUI 后台 worker 和动画刷新线程。
 def _start_worker_threads(*, params: StartWorkerParams) -> None:
     from .tui_worker import _tui_worker_body
 
+    params.tui_runtime._foreground_request_refs = (params.state_lock, params.is_running_ref, params.running_request_id_ref)
     worker_cfg = _make_worker_config(
         params=WorkerConfigParams(
             jobs=params.jobs,
@@ -200,9 +201,151 @@ class _NoticeWarnDebounce:
         )
 
 
-# LLM: 首拍立即读取；前后台任务/进程活动或观察页打开时一秒刷新，空闲五秒；原连接退避与提示去抖不变。
+# LLM: 原stop与显示事件必须都能打断等待；单个daemon只阻塞原stop.wait，不周期轮询、不修改共享stop的set方法。
+# 类用途: 合并停止、导航与显示唤醒，安静时不新增定时CPU唤醒。
+class _WakeableStop:
+    # LLM: 原stop是Event才建立阻塞转发线程，生命周期沿TUI的原退出事件；旧测试wait协议不创建线程。
+    # 函数用途: 创建可同时响应退出和交互的等待器，并串接原导航回调。
+    def __init__(self, stop=None, navigation=None):
+        self.stop, self.navigation = stop, navigation
+        self.event = threading.Event()
+        self.was_woken = False
+        self.previous_callback = None
+        if isinstance(stop, threading.Event):
+            threading.Thread(target=self._relay_stop, daemon=True, name="tui-stop-wake").start()
+        with getattr(navigation, "_lock", nullcontext()):
+            if hasattr(navigation, "_view_change"):
+                self.previous_callback = navigation._view_change
+                navigation._view_change = self.view_changed
+
+    # LLM: 只等待同一TUI退出事件一次，不轮询、不结束任何业务资源。
+    # 函数用途: 退出时唤醒正在等待显示事件的线程。
+    def _relay_stop(self):
+        self.stop.wait()
+        self.event.set()
+
+    # LLM: 先沿原导航回调发表新页面，异常也唤醒重取当前runtime，不复制或切换执行身份。
+    # 函数用途: 页面切换时打断慢速动画等待。
+    def view_changed(self, runtime):
+        try:
+            if self.previous_callback is not None:
+                self.previous_callback(runtime)
+        finally:
+            self.event.set()
+
+    # LLM: wait后的信号由本等待线程消费；退出前后都核原stop，转发线程覆盖检查后才set的竞争窗口。
+    # 函数用途: 等待定时间隔、显示变动或原TUI退出。
+    def wait(self, delay):
+        if not isinstance(self.stop, threading.Event):
+            self.was_woken = False
+            return self.stop.wait(delay)
+        if self.stop.is_set():
+            return True
+        self.was_woken = self.event.wait(delay)
+        self.event.clear()
+        return self.stop.is_set()
+
+    # LLM: 只恢复自己仍持有的导航包装；不能撤销后来注册的回调，也不能为清理而set业务stop。
+    # 函数用途: 退出等待循环时恢复导航入口。
+    def close(self):
+        with getattr(self.navigation, "_lock", nullcontext()):
+            if getattr(self.navigation, "_view_change", None) == self.view_changed:
+                self.navigation._view_change = self.previous_callback
+
+
+# LLM: 唤醒只来自显示交互，不写canonical状态；忽略本通知线程自己的发表，流式字节不触发额外网络查询。
+# 类用途: 用可唤醒事件缩短提交、停止、换线程和换代理后的通知等待。
+class _NoticeRefreshWake:
+    # LLM: 订阅原store并串接已有导航callback；close只恢复本实例仍拥有的callback，不覆盖后来注册者。
+    # 函数用途: 安装本通知循环的轻量交互唤醒器。
+    def __init__(self, runtime, navigation, stop=None):
+        self.waiter = _WakeableStop(stop)
+        self.event = self.waiter.event
+        self.lock = threading.Lock()
+        self.enabled, self.polling = True, False
+        self.thread = threading.get_ident()
+        self.states = {}
+        self.runtime, self.navigation = runtime, navigation
+        self.previous_callback = None
+        self.bind(runtime)
+        with getattr(navigation, "_lock", nullcontext()):
+            if hasattr(navigation, "_view_change"):
+                self.previous_callback = navigation._view_change
+                navigation._view_change = self.view_changed
+
+    # LLM: 仅比较typed阶段、reset代次和末尾用户输入/队列；不扫描大历史或把思考delta当用户操作。
+    # 函数用途: 生成控制交互的有界显示签名。
+    def signature(self, runtime, snapshot):
+        tail = snapshot.stable_blocks[-1] if snapshot.stable_blocks else None
+        return (getattr(runtime, "conversation_reset_generation", 0), snapshot.status.phase,
+                (tail.block_id, tail.updated_seq) if tail is not None and tail.role == "user" else None,
+                snapshot.queued_inputs)
+
+    # LLM: 每个原store最多订阅一次；关闭后的回调不读快照，避免退出循环仍产生额外观察。
+    # 函数用途: 为当前或新进入的代理接上同一唤醒器。
+    def bind(self, runtime):
+        store = getattr(runtime, "store", None)
+        if store is None or not callable(getattr(store, "subscribe", None)):
+            return
+        with self.lock:
+            if store in self.states:
+                return
+            self.states[store] = self.signature(runtime, store.snapshot())
+        store.subscribe(lambda: self.changed(runtime, store))
+
+    # LLM: 通知自身提交只更新签名不置event；其他线程的交互即使在HTTP读取期间发生也保留下一次立即刷新。
+    # 函数用途: 接收原store更新并合并唤醒意图。
+    def changed(self, runtime, store):
+        with self.lock:
+            if not self.enabled:
+                return
+            current = self.signature(runtime, store.snapshot())
+            previous = self.states[store]
+            self.states[store] = current
+            if current != previous and not (self.polling and threading.get_ident() == self.thread):
+                self.event.set()
+
+    # LLM: 导航原callback的显示副作用必须先执行，异常也不得吞掉唤醒；仅绑定显示store，不改变执行目标。
+    # 函数用途: 换页后立即请求新代理详情和后台通知。
+    def view_changed(self, runtime):
+        try:
+            if self.previous_callback is not None:
+                self.previous_callback(runtime)
+        finally:
+            self.bind(runtime)
+            self.event.set()
+
+    # LLM: 生产等待器同时响应原stop和交互；测试旧stop协议仍走原wait，不控制任何业务任务。
+    # 函数用途: 等待原轮询间隔或一次交互唤醒。
+    def wait(self, stop, delay):
+        if not isinstance(stop, threading.Event):
+            return stop.wait(delay)
+        return self.waiter.wait(delay)
+
+    # LLM: 仅撤销本唤醒器，不撤销别的订阅者或重写导航新callback；store无退订API故残留回调立即空返。
+    # 函数用途: 通知循环退出时停用轻量观察并恢复原导航入口。
+    def close(self):
+        with self.lock:
+            self.enabled = False
+        with getattr(self.navigation, "_lock", nullcontext()):
+            if getattr(self.navigation, "_view_change", None) == self.view_changed:
+                self.navigation._view_change = self.previous_callback
+
+
+# LLM: 循环生命周期负责撤销唤醒器，实际消费仍保持原游标/reset代次保护，不新增业务执行线程。
+# 函数用途: 为原通知轮询接上交互唤醒并保证退出时清理。
+def _background_notice_loop(stop_event, agent, session_id, tui_runtime, app_ref, agent_navigation=None, foreground_running_ref=None):
+    wake = _NoticeRefreshWake(tui_runtime, agent_navigation, stop_event)
+    try:
+        _run_background_notice_loop(stop_event, agent, session_id, tui_runtime, app_ref,
+                                    agent_navigation, foreground_running_ref, wake)
+    finally:
+        wake.close()
+
+
+# LLM: 首拍立即读取；前后台任务/进程活动或观察页打开时一秒刷新，空闲五秒；交互只提前唤醒，原连接退避与提示去抖不变。
 # 函数用途: 按游标同步会话，进程仍在跑或观察页打开时保持一秒节奏，失败只退避不终止任务。
-def _background_notice_loop(
+def _run_background_notice_loop(
     stop_event: threading.Event,
     agent: object,
     session_id: str,
@@ -210,12 +353,15 @@ def _background_notice_loop(
     app_ref: list,
     agent_navigation: object | None = None,
     foreground_running_ref: list[bool] | None = None,
+    wake: _NoticeRefreshWake | None = None,
 ) -> None:
     seen = TuiIdentityWindow()
     event_cursor = [0]
     failure_delay = TUI_BACKGROUND_NOTICE_FAILURE_INITIAL_SECONDS
     debounce = _NoticeWarnDebounce()
     while not stop_event.is_set():
+        if wake is not None:
+            wake.polling = True
         try:
             snapshot_ok = _consume_background_notices(
                 agent,
@@ -229,6 +375,9 @@ def _background_notice_loop(
         except Exception:
             # 监视失败不改业务状态；显示旧快照警告后沿原退避合同等待下一轮。
             snapshot_ok = False
+        finally:
+            if wake is not None:
+                wake.polling = False
         should_publish = debounce.should_publish(snapshot_ok, time.monotonic())
         health_publisher = getattr(tui_runtime, "publish_background_sync_status", None)
         if should_publish and callable(health_publisher) and health_publisher(ok=snapshot_ok):
@@ -261,7 +410,7 @@ def _background_notice_loop(
                 TUI_BACKGROUND_NOTICE_FAILURE_MAX_SECONDS,
                 failure_delay * 2.0,
             )
-        if stop_event.wait(delay):
+        if (wake.wait(stop_event, delay) if wake is not None else stop_event.wait(delay)):
             break
         if snapshot_ok:
             debounce.last_success_at = time.monotonic()
@@ -368,14 +517,24 @@ def _consume_gateway_background_snapshot(
     return view_ok
 
 
-# LLM: 调用方已完成HTTP读取和reset代次核验；这里只投影原页内存，不请求子页或重建执行/投递身份。
+# LLM: 同reset代次内发表；空target只保留同一本地durable前台请求旧投影，空闲/换请求仍清除，不保留后台task。
 # 函数用途: 同步已确认会话的消息、过程和显示游标。
 def _apply_gateway_background_snapshot(agent, session_id, tui_runtime, app_ref, seen, event_cursor, agent_navigation, payload, message_after):
     if not isinstance(payload, dict) or payload.get("ok") is not True:
         return False
     target_publisher = getattr(tui_runtime, "publish_execution_target", None)
     if callable(target_publisher):
-        target_publisher(payload.get("execution_target"))
+        raw_target = payload.get("execution_target")
+        refs = getattr(tui_runtime, "_foreground_request_refs", None)
+        current = tui_runtime.execution_target() if refs is not None else None
+        preserve = False
+        if raw_target is None and refs is not None and current is not None:
+            lock, running, request_id = refs
+            with lock:
+                preserve = bool(running[0] and request_id[0] and current.get("kind") == "request"
+                                and current.get("turn_id") == request_id[0])
+        if not preserve:
+            target_publisher(raw_target)
     if not _publish_gateway_background_watch_binding(tui_runtime, session_id, payload):
         return False
     permission_changed = _sync_gateway_agent_permissions(
@@ -806,24 +965,72 @@ def _publish_background_notice_row(
     return True
 
 
-# LLM: refresh loop 只在 runtime 报告存在可见动画/短提示时 invalidate；typed event 自带 redraw，空闲时必须零周期整屏重绘。
-# 函数用途: 仅在有活动时以 4 Hz 驱动动画；实际输入和流式事件独立触发重绘，空闲页不反复刷新。
+# LLM: 只维护当前runtime的易失观察时间；订阅只重置安静期，typed事件原有即时invalidate入口不变。
+# 类用途: 将动画刷新从最近更新的250ms逐级退避到500ms和1秒。
+class _RefreshCadence:
+    # LLM: 强持当前runtime/store/snapshot，不以裸id或正文hash判版本；时间使用monotonic。
+    # 函数用途: 建立单个刷新线程的安静期观察器。
+    def __init__(self, stop=None, navigation=None):
+        self.runtime = self.store = self.snapshot = None
+        self.signals = _WakeableStop(stop, navigation)
+        self.changed_at = time.monotonic()
+        self.lock = threading.Lock()
+        self.subscribed = set()
+
+    # LLM: 仅当前store事件能重置安静计时；旧页的迟到更新不能让当前页持续快刷。
+    # 函数用途: 在发布时立即记录最近显示事件时间。
+    def changed(self, store):
+        with self.lock:
+            if store is self.store:
+                self.changed_at = time.monotonic()
+                self.signals.event.set()
+
+    # LLM: store无revision时用其不可变snapshot强身份；未知旧替身沿初始快拍，小于250ms的测试覆盖值是上限。
+    # 函数用途: 返回当前页下一拍间隔，切换页或快照变化立即恢复快拍。
+    def delay(self, runtime):
+        store = getattr(runtime, "store", None)
+        reader = getattr(store, "snapshot", None)
+        snapshot = reader() if callable(reader) else None
+        now = time.monotonic()
+        with self.lock:
+            if runtime is not self.runtime or store is not self.store or snapshot is not self.snapshot:
+                self.runtime, self.store, self.snapshot = runtime, store, snapshot
+                self.changed_at = now
+            quiet = max(0.0, now - self.changed_at)
+        if store is not None and store not in self.subscribed and callable(getattr(store, "subscribe", None)):
+            self.subscribed.add(store)
+            store.subscribe(lambda: self.changed(store))
+        base = TUI_REFRESH_INTERVAL_SECONDS
+        if base < .25:
+            return base
+        return 1.0 if quiet >= 10 else .5 if quiet >= 2 else base
+
+
+# LLM: 只有当前runtime需要动画才invalidate；安静期退避不改变typed事件的即时重绘或业务状态。
+# 函数用途: 低频驱动等待动画，更新与换页恢复快拍，空闲不整屏重绘。
 def _refresh_loop(
     refresh_stop: threading.Event,
     app_ref: list,
     tui_runtime: object,
     agent_navigation: object | None = None,
 ) -> None:
-    while not refresh_stop.wait(TUI_REFRESH_INTERVAL_SECONDS):
-        active_runtime = tui_runtime
-        runtime_reader = getattr(agent_navigation, "active_runtime", None)
-        if callable(runtime_reader):
-            active_runtime = runtime_reader()
-        if (
-            app_ref[0] is not None
-            and active_runtime.needs_periodic_refresh()
-        ):
-            app_ref[0].invalidate()
+    cadence = _RefreshCadence(refresh_stop, agent_navigation)
+    try:
+        while True:
+            active_runtime = tui_runtime
+            runtime_reader = getattr(agent_navigation, "active_runtime", None)
+            if callable(runtime_reader):
+                active_runtime = runtime_reader()
+            if cadence.signals.wait(cadence.delay(active_runtime)):
+                break
+            if cadence.signals.was_woken:
+                continue
+            if callable(runtime_reader):
+                active_runtime = runtime_reader()
+            if app_ref[0] is not None and active_runtime.needs_periodic_refresh():
+                app_ref[0].invalidate()
+    finally:
+        cadence.signals.close()
 
 
 __all__ = ["_refresh_loop", "_start_worker_threads"]

@@ -1,3 +1,9 @@
+## 2026-10-29 e905 sol-14：不可变摘要查询结构
+
+- `SubAgentRunSummary` 只含 id/root_id/status/updated_at/created_at；`SubAgentRunSummariesReport` 每次提供独立结果和错误列表。
+- `SubAgentPersistenceService.list_run_summaries_report` 复用 `_cached_run_ref` 的原新鲜度检查，不返回私有任务对象；`SubAgentManager` 薄转发，`background_context._task_context_ids` 接入。
+- 不添加跨请求任务集合缓存，不改变调度权威、完整 `list_runs` / `load` 返回副本与原故障语义。
+
 ## 2026-10-28 Wave 8：子代理公开索引重建服务与同 Owner Worker 单次构造结构
 
 - `services/indexing/service.py::SubAgentIndexingService.rebuild_subagent_index`：将 CLI `local_doctor` 重建索引所需的终态过期跳过（复用 `services/persistence/projections.py::_task_projection_expired`）与任务索引写入收拢为正式服务方法，CLI 仅保留文件源扫描与结果展示。

@@ -1,3 +1,11 @@
+## 2026-10-29 e905 sol-14：展示缓存与原队列恢复结构
+
+- `tui_view`：每块摘要缓存、稳定元组索引和副作用后 UIContent 单槽缓存；完整来源行计算不改。
+- `tui_threading` / `gateway_client`：可唤醒静默退避、原通知游标/reset 校验、可见 chunk 与续租分离；插话保留条件绑定同一前台 durable 请求。
+- `multiprocess_native_executor_client` / `mcp_transport`：初次 poll、EOF 和取消分类不变，仅限制后续等待到剩余预算。
+- `recovery._finish_interrupted_queue_move`：在原 `recover_stale_processing` 与 `processing_metadata_scope` 中完成半途运输；终态先走原补投影，冲突保留文件并报告，不授予新执行权限。
+- `gateway_process`：子进程复制环境加 PYTHONSAFEPATH，cwd 固定原状态根；入口只清外来同名包搜索路径，不能纠正上层已经导入的错误包。
+
 ## 2026-10-28 Wave 9 A1 Round 2：单向推送接线与隔离
 
 - `http_routes.py` / `http_service.py` 将 `POST /remote-agent/push` 分派给 `remote_push_service.handle_remote_push`，其余路由携带push Token立即拒绝。`authenticate_push` 核独立Token的SHA256验证器、目标owner/action/IP、准确原文HMAC和时间窗；`consume_push_nonce` 在独立锁下耐久防重放。`accept_remote_push` 先保存prepared短回执，再经 `enqueue_remote_push`、`write_gateway_request_once`、`prepare_coordinator_input` 沿原T→C末门一次提交，不新增执行队列。
