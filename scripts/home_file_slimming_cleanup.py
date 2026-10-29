@@ -10,19 +10,23 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import stat
 import sys
-import tempfile
 import time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
+from uuid import uuid4
 
 DAY = 86400
 OWNER = Path("owners/local/main")
@@ -48,6 +52,49 @@ BACKUP = re.compile(
 )
 
 
+# LLM: 只加载同源码树的纯标准库YAML解析模块，不导入Agent/settings包或重读活动配置；模块摘要绑定审批策略。
+# 函数用途: 复用产品唯一简化YAML语法，避免为活动路径另造易漏判的字符串解析器。
+@lru_cache(maxsize=1)
+def _config_parser():
+    source = Path(__file__).resolve().parents[1] / "agent_py_agent/agent/settings/config_io.py"
+    spec = importlib.util.spec_from_file_location("_slimming_config_io", source)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_simple_yaml, hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+# LLM: 产品解析器的read_text适配器只消费已nofollow校验的内存文本，不再次按活动路径打开文件。
+# 类用途: 为原YAML解析器提供冻结配置快照。
+class ConfigSnapshot:
+    # LLM: 只保存本次已读文本，清单不得包含此对象或配置正文。
+    # 函数用途: 固定一次配置读取结果。
+    def __init__(self, text):
+        self.text = text
+
+    # LLM: 输入已经UTF-8解码，按原utf-8-sig合同移除BOM，无文件写入。
+    # 函数用途: 将相同快照交给产品解析器。
+    def read_text(self, encoding="utf-8-sig"):
+        return self.text.removeprefix("\ufeff")
+
+
+# LLM: 路径后缀采用保守超集；相对值缺运行根不能猜，类型/结构不明亦失败关闭，绝对值按父子关系保留。
+# 函数用途: 从原配置语法提取保护路径，并报告是否存在未知运行根。
+def _config_references(text):
+    loader, _digest = _config_parser()
+    raw = loader(ConfigSnapshot(text))
+    refs, known = [], True
+    if text.strip() and not raw and not all(not line.strip() or line.lstrip().startswith("#") for line in text.splitlines()):
+        known = False
+    for key, value in raw.items():
+        if not key.endswith(("_path", "_dir", "_workspace")) or value == "":
+            continue
+        if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
+            known = False
+        else:
+            refs.append(Path(value).expanduser().resolve())
+    return refs, known
+
+
 # LLM: 元数据指纹只读取文件身份，不读取正文；目录删除后mtime会改变，执行时须区分目录身份与文件版本。
 # 函数用途: 保存设备、inode、类型、链接数、大小及纳秒时间，供预演和删除前核对。
 def _identity(value):
@@ -62,22 +109,43 @@ def _identity(value):
     ]
 
 
-# LLM: 从已解析的home逐级O_NOFOLLOW打开；不把路径resolve之后的外部目标当白名单，异常交调用方失败关闭。
-# 函数用途: 固定一个目录FD，避免扫描和删除跟随中途的符号链接。
+# LLM: 从文件系统根逐段nofollow并固定设备/inode/模式；expected来自批准摘要，目录mtime不充当身份。
+# 函数用途: 打开并核对完整祖先链，返回末目录FD及各段身份，所有出口释放FD。
 @contextmanager
-def _directory(home, relative=Path()):
+def _open_chain(path, expected=None):
+    path = Path(path)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("目录必须是规范绝对路径")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    fd = os.open(home, flags)
+    fd = os.open(path.anchor, flags)
     try:
-        for part in Path(relative).parts:
-            if part in {"..", "."} or part.startswith("/"):
-                raise ValueError("非规范相对目录")
+        chain = {path.anchor: _identity(os.fstat(fd))[:3]}
+        prefix = Path(path.anchor)
+        if expected is not None and chain[path.anchor] != expected.get(path.anchor):
+            raise ValueError("祖先根身份变化")
+        for part in path.parts[1:]:
             next_fd = os.open(part, flags, dir_fd=fd)
             os.close(fd)
             fd = next_fd
-        yield fd
+            prefix /= part
+            identity = _identity(os.fstat(fd))[:3]
+            chain[str(prefix)] = identity
+            if expected is not None and identity != expected.get(str(prefix)):
+                raise ValueError("祖先目录身份变化")
+        yield fd, chain
     finally:
         os.close(fd)
+
+
+# LLM: 所有home相对路径仍经统一完整nofollow链，不允许..或绝对relative旁路。
+# 函数用途: 为只需末目录FD的扫描和读取保留简洁上下文接口。
+@contextmanager
+def _directory(home, relative=Path()):
+    relative = Path(relative)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("非规范相对目录")
+    with _open_chain(Path(home) / relative) as (fd, _chain):
+        yield fd
 
 
 # LLM: 小JSON读取沿父FD且拒绝链接、多链接、变化及过大正文；错误不能被解释为可删除资格。
@@ -108,6 +176,7 @@ def _protected(name):
 def _scan(home, relative):
     digest = hashlib.sha256()
     nodes, protected = [], []
+    ancestors = {}
     newest = 0.0
 
     # LLM: 递归使用父FD，保护标志只会收紧；遍历目录顺序固定，以便前后摘要一致。
@@ -125,6 +194,7 @@ def _scan(home, relative):
         if keep:
             protected.append(str(rel))
         if stat.S_ISDIR(info.st_mode):
+            ancestors[str(home / rel)] = identity[:3]
             fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
             try:
                 if _identity(os.fstat(fd)) != identity:
@@ -140,7 +210,9 @@ def _scan(home, relative):
         if not keep:
             nodes.append((str(rel), identity, getattr(info, "st_blocks", 0) * 512))
 
-    with _directory(home, relative.parent) as parent:
+    with _open_chain(home / relative.parent) as (parent, chain):
+        ancestors.update(chain)
+        digest.update(json.dumps(sorted(chain.items())).encode())
         visit(parent, relative.name, relative.parent)
     return {
         "fingerprint": digest.hexdigest(),
@@ -152,6 +224,7 @@ def _scan(home, relative):
         "protected_count": len(protected),
         "protected_examples": protected[:12],
         "nodes": nodes,
+        "ancestors": ancestors,
     }
 
 
@@ -175,6 +248,7 @@ def _scan_unit(home, candidate):
         newest_mtime=max(t["newest_mtime"] for _, t in trees),
         protected_examples=[],
         nodes=[node for _, t in trees for node in t["nodes"]],
+        ancestors={p: identity for _, t in trees for p, identity in t["ancestors"].items()},
     )
     return result
 
@@ -184,9 +258,11 @@ def _scan_unit(home, candidate):
 class Planner:
     # LLM: 参数须先验证，home固定后所有相对路径沿FD访问；不导入Agent或触发迁移。
     # 函数用途: 初始化本次清理策略和只读审计容器。
-    def __init__(self, home, now, age, keep):
+    def __init__(self, home, now, age, keep, active_configs=()):
         self.home, self.now, self.age, self.keep = home, now, age, keep
         self.today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+        self.today_dates = {self.today, self.today.replace("-", ""), "2026-10-29", "20261029"}
+        self.active_configs = active_configs
         self.candidates = []
         self.skips = Counter()
         self.examples = {}
@@ -212,10 +288,47 @@ class Planner:
             self.skip("unreadable_or_symlink_scope:" + type(exc).__name__, relative)
         return []
 
-    # LLM: 配置仅作额外保留依据，绝不输出正文；任一现存配置读错/符号链接时全部测试workspace清理失败关闭。
-    # 函数用途: 从固定配置位置及浅层当前链接收集保护引用，不读取凭据或其他owner。
+    # LLM: 选中配置遵循MY_AGENT_CONFIG/显式active-config来源；只用于收紧保护；读取前后版本不同则workspace失败关闭。
+    # 函数用途: 安全读取活动配置文本，不解析为权限或输出配置正文。
+    def config_text_at(self, path):
+        path = Path(path).expanduser().absolute()
+        # /tmp等系统别名只在首次选择时规范化；配置叶仍nofollow，父链完整核对。
+        parent_path = path.parent.resolve(strict=True)
+        with _open_chain(parent_path) as (parent, chain):
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                before = _identity(os.fstat(fd))
+                if not stat.S_ISREG(before[2]) or before[3] != 1 or before[4] > 4 * 1024**2:
+                    raise ValueError("活动配置形状非法")
+                data = os.read(fd, 4 * 1024**2 + 1)
+                if _identity(os.fstat(fd)) != before or len(data) != before[4]:
+                    raise ValueError("活动配置并发变化")
+                if _identity(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) != before:
+                    raise ValueError("活动配置被替换")
+                with _open_chain(parent_path, chain):
+                    pass
+                return data.decode("utf-8")
+            finally:
+                os.close(fd)
+
+    # LLM: 固定目录仅作额外保留；真正选中配置不能漏掉；缺失/坏配置使全部测试workspace保留。
+    # 函数用途: 从活动配置、固定位置和浅层当前链接收集保护引用，不输出正文。
     def _references(self):
         references, texts, okay = [], [], True
+        selected = str(os.environ.get("MY_AGENT_CONFIG") or "").strip()
+        config_paths = [*self.active_configs, selected or Path(__file__).resolve().parents[1] / "agent_py_agent/config/agent_config.yaml"]
+        for path in config_paths:
+            try:
+                text = self.config_text_at(path)
+                refs, known = _config_references(text)
+                texts.append(text)
+                references.extend(refs)
+                okay = okay and known
+                if not known:
+                    self.skip("active_configuration_unresolved_root", path)
+            except (OSError, ValueError, RuntimeError):
+                okay = False
+                self.skip("active_configuration_unavailable", path)
         for base in (Path("config"), OWNER / "config", OWNER / "workspace/runtime"):
             try:
                 with _directory(self.home, base):
@@ -232,15 +345,11 @@ class Planner:
                 path = self.home / base / name
                 if path.suffix in {".yaml", ".yml", ".toml", ".json"}:
                     try:
-                        with _directory(self.home, base) as parent:
-                            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
-                            try:
-                                info = os.fstat(fd)
-                                if not stat.S_ISREG(info.st_mode) or info.st_size > 4 * 1024**2:
-                                    raise ValueError("配置过大或非普通文件")
-                                texts.append(os.read(fd, 4 * 1024**2 + 1).decode("utf-8"))
-                            finally:
-                                os.close(fd)
+                        text = self.config_text_at(path)
+                        refs, known = _config_references(text)
+                        texts.append(text)
+                        references.extend(refs)
+                        okay = okay and known
                     except (OSError, ValueError):
                         okay = False
                         self.skip("configuration_unreadable", base / name)
@@ -315,7 +424,7 @@ class Planner:
 
     # LLM: 单元扫描后仅收录达到年龄的可删除节点；tmp根不删，嵌套报告、输出和正式数据逐项保留。
     # 函数用途: 为一个白名单候选建立元数据清单。
-    def add(self, relative, category, days=0, keep_root=False):
+    def add(self, relative, category, days=0, keep_root=False, kind="scratch"):
         try:
             tree = _scan(self.home, relative)
             if tree["newest_mtime"] >= self.now - days * DAY:
@@ -324,9 +433,9 @@ class Planner:
             if not tree["nodes"]:
                 self.skip("no_deletable_nodes", relative)
                 return
-            row = {key: value for key, value in tree.items() if key != "nodes"}
+            row = {key: value for key, value in tree.items() if key not in {"nodes", "ancestors"}}
             row.update(
-                path=str(relative), category=category, keep_root=keep_root, min_age_days=days
+                path=str(relative), category=category, keep_root=keep_root, min_age_days=days, kind=kind
             )
             self.candidates.append(row)
         except (OSError, ValueError, RecursionError):
@@ -336,7 +445,7 @@ class Planner:
     # 函数用途: 找出老任务的临时目录或旧归档中明确的tmp/work。
     def tasks(self, root, category, archive=False):
         for date in self.children(root):
-            if date in {self.today, "2026-10-29"}:
+            if date in self.today_dates:
                 self.skip("today_task", root / date)
                 continue
             for slug in self.children(root / date):
@@ -412,7 +521,7 @@ class Planner:
             )
             try:
                 tree = _scan_unit(self.home, row)
-                row.update({key: value for key, value in tree.items() if key != "nodes"})
+                row.update({key: value for key, value in tree.items() if key not in {"nodes", "ancestors"}})
                 self.candidates.append(row)
             except (OSError, ValueError):
                 self.skip("unsafe_backup_set", base)
@@ -426,7 +535,7 @@ class Planner:
         for name in self.children(agents):
             rel = agents / name
             if self.orphan(rel):
-                self.add(rel, CATEGORIES[4], 1)
+                self.add(rel, CATEGORIES[4], 1, kind="orphan")
             else:
                 self.skip("archive_agent_not_proven_orphan", rel)
         pending = [root]
@@ -435,6 +544,9 @@ class Planner:
             for name in self.children(base):
                 rel = base / name
                 path = self.home / rel
+                if base == root / "tasks" and name in self.today_dates:
+                    self.skip("today_task", rel)
+                    continue
                 if _protected(name) or path.is_symlink() or not path.is_dir():
                     continue
                 # tmp/work已由固定层级覆盖，不重复纳入其内部缓存。
@@ -451,7 +563,7 @@ class Planner:
         for name in self.children(OWNER / "agents"):
             relative = OWNER / "agents" / name
             if self.orphan(relative):
-                self.add(relative, CATEGORIES[0], 1)
+                self.add(relative, CATEGORIES[0], 1, kind="orphan")
             else:
                 self.skip("agent_not_proven_orphan", relative)
         self.tasks(OWNER / "tasks", CATEGORIES[1])
@@ -472,32 +584,120 @@ class Planner:
         return self.candidates
 
 
-# LLM: 删除表来自同次重新扫描，路径逐层nofollow；目录只rmdir空目录，绝不递归删除未知新文件；错误回传实际已删计数。
-# 函数用途: 删除一个版本未变的批准单元，逐文件记录准确逻辑字节。
+# LLM: 仅承载本清理器结构化安全拒绝原因，不包含文件正文；恢复位置放候选回执。
+# 类用途: 区分身份漂移、恢复冲突与普通文件系统故障。
+class SafetyError(ValueError):
+    # LLM: code只来自固定内部枚举，用于清单诊断而非授权。
+    # 函数用途: 保存此次拒绝的机器可读原因。
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+# LLM: 不用lexists+rename模拟排他恢复；内核原生no-replace避免覆盖恢复时晚出现的文件，缺能力须先拒绝。
+# 函数用途: 选择macOS/Linux原子不覆盖rename接口，其他平台不进行删除。
+def _rename_api():
+    library = ctypes.CDLL(None, use_errno=True)
+    name, flag = ("renameatx_np", 4) if sys.platform == "darwin" else ("renameat2", 1)
+    function = getattr(library, name, None)
+    if function is None:
+        raise SafetyError("exclusive_restore_unavailable")
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    return function, flag
+
+
+# LLM: 所有参数来自固定的源/隔离目录FD；失败保持隔离对象，不尝试覆盖回退。
+# 函数用途: 将隔离条目原子恢复到未被重新占用的原名。
+def _restore_entry(source_fd, source, destination_fd, destination):
+    function, flag = _rename_api()
+    if function(source_fd, os.fsencode(source), destination_fd, os.fsencode(destination), flag):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+# LLM: 隔离目录出生0700且名字排他，位于home的同级；只移除本次身份未变的空隔离目录，不递归清理残留。
+# 函数用途: 为一个单元创建专属隔离FD，恢复冲突时保留内容供人工处理。
+@contextmanager
+def _quarantine(home):
+    _rename_api()  # 先确认恢复能力，再允许发生任何移出。
+    with _open_chain(home.parent) as (parent, ancestors):
+        name = ".slimming-quarantine-" + uuid4().hex
+        os.mkdir(name, 0o700, dir_fd=parent)
+        path = home.parent / name
+        with _open_chain(path) as (fd, chain):
+            identity = _identity(os.fstat(fd))[:3]
+            try:
+                yield fd, path, chain
+            finally:
+                if not os.listdir(fd):
+                    with _open_chain(home.parent, ancestors):
+                        if _identity(os.stat(name, dir_fd=parent, follow_symlinks=False))[:3] == identity:
+                            os.rmdir(name, dir_fd=parent)
+
+
+# LLM: 叶子rename只容ctime自然变化；目录因先删子项只核身份且必须为空；异常绝不当成已删除。
+# 函数用途: 在私有隔离区检查真实取得的条目是否就是批准对象。
+def _verify_quarantined(fd, name, expected):
+    current = _identity(os.stat(name, dir_fd=fd, follow_symlinks=False))
+    if stat.S_ISDIR(expected[2]):
+        if current[:3] != expected[:3]:
+            raise SafetyError("quarantined_directory_replaced")
+        directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            if _identity(os.fstat(directory))[:3] != expected[:3] or os.listdir(directory):
+                raise SafetyError("quarantined_directory_changed")
+        finally:
+            os.close(directory)
+    elif current[:6] != expected[:6]:
+        raise SafetyError("quarantined_leaf_replaced")
+
+
+# LLM: 活目录只rename到专属隔离区；移出后核对象及原祖先身份，失败原子无覆盖恢复；不合作同权限写者不能获全局事务承诺。
+# 函数用途: 删除一个批准单元，只有核验后的隔离条目才能unlink/rmdir并累计成功数。
 def _delete_unit(home, candidate, tree, counters):
-    for relative, expected, blocks in tree["nodes"]:
-        path = Path(relative)
-        if candidate["keep_root"] and relative == candidate["path"]:
-            continue
-        with _directory(home, path.parent) as fd:
-            current = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
-            if stat.S_ISDIR(expected[2]):
-                # 子项删除会改变目录mtime/ctime/大小和nlink，仅身份及目录类型须保持。
-                if _identity(current)[:3] != expected[:3]:
-                    raise ValueError("目录身份变化，停止该单元")
+    with _quarantine(home) as (q_fd, q_path, q_chain):
+        for relative, expected, blocks in tree["nodes"]:
+            path = Path(relative)
+            if candidate["keep_root"] and relative == candidate["path"]:
+                continue
+            with _open_chain(home / path.parent, tree["ancestors"]) as (fd, _chain):
+                current = _identity(os.stat(path.name, dir_fd=fd, follow_symlinks=False))
+                directory = stat.S_ISDIR(expected[2])
+                if (current[:3] != expected[:3] if directory else current != expected) or _protected(path.name):
+                    raise SafetyError("source_version_changed")
+                if directory:
+                    with _open_chain(home / path, tree["ancestors"]) as (child, _):
+                        if os.listdir(child):
+                            continue  # 不移动含保护文件或新增条目的目录。
+                # 最后stat可能已触发并发迁移，先重新确认全链再允许移出。
+                with _open_chain(home / path.parent, tree["ancestors"]):
+                    pass
+                token = uuid4().hex
+                os.rename(path.name, token, src_dir_fd=fd, dst_dir_fd=q_fd)
                 try:
-                    os.rmdir(path.name, dir_fd=fd)
-                    counters["deleted_directories"] += 1
-                except OSError as exc:
-                    if exc.errno not in {39, 66}:  # ENOTEMPTY：保护项或新文件使目录保留
-                        raise
-            else:
-                if _identity(current) != expected or _protected(path.name):
-                    raise ValueError("文件版本变化，停止该单元")
-                os.unlink(path.name, dir_fd=fd)
-                counters["deleted_files"] += 1
-                counters["deleted_bytes"] += expected[4]
-                counters["deleted_allocated_bytes"] += blocks
+                    _verify_quarantined(q_fd, token, expected)
+                    with _open_chain(home / path.parent, tree["ancestors"]):
+                        pass
+                    with _open_chain(q_path, q_chain):
+                        pass
+                    if directory:
+                        os.rmdir(token, dir_fd=q_fd)
+                        counters["deleted_directories"] += 1
+                    else:
+                        os.unlink(token, dir_fd=q_fd)
+                        counters["deleted_files"] += 1
+                        counters["deleted_bytes"] += expected[4]
+                        counters["deleted_allocated_bytes"] += blocks
+                except BaseException:
+                    try:
+                        _restore_entry(q_fd, token, fd, path.name)
+                    except OSError as recovery_error:
+                        candidate.setdefault("recovery_required", []).append(
+                            {"source": relative, "quarantine": str(q_path / token), "errno": recovery_error.errno}
+                        )
+                        raise SafetyError("restore_conflict_preserved_in_quarantine") from recovery_error
+                    raise
 
 
 # LLM: 执行前重建资格并交集已审清单；每单元再核摘要，保护/配置有变化就跳过；apply不会纳入预演后新出现的垃圾。
@@ -511,6 +711,7 @@ def run_cleanup(
     keep_release_backups=2,
     approved_manifest=None,
     checkpoint=None,
+    active_configs=(),
 ):
     if (
         not math.isfinite(min_task_tmp_age_days)
@@ -528,11 +729,14 @@ def run_cleanup(
         raise ValueError("时间参数非法")
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise ValueError("平台缺少nofollow目录FD，拒绝清理")
-    planner = Planner(home, current, min_task_tmp_age_days, keep_release_backups)
+    active_configs = tuple(str(Path(path).expanduser().absolute()) for path in active_configs)
+    planner = Planner(home, current, min_task_tmp_age_days, keep_release_backups, active_configs)
     candidates = planner.plan()
     policy = {
         "min_task_tmp_age_days": min_task_tmp_age_days,
         "keep_release_backups": keep_release_backups,
+        "active_configs": list(active_configs),
+        "config_parser_sha256": _config_parser()[1],
     }
     script_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     if approved_manifest is not None:
@@ -585,14 +789,14 @@ def run_cleanup(
         for row in candidates:
             try:
                 # 在规划或此前单元耗时期间，配置可能切换、临时目标也可能重新出现。
-                fresh = Planner(home, current, min_task_tmp_age_days, keep_release_backups)
+                fresh = Planner(home, current, min_task_tmp_age_days, keep_release_backups, active_configs)
                 relative = Path(row["path"])
                 if row["category"] == CATEGORIES[2] and (
                     not fresh.config_ok or fresh.referenced(relative)
                 ):
                     row["status"] = "skipped_new_reference"
                     continue
-                if row["category"] == CATEGORIES[0] and not fresh.orphan(relative):
+                if row.get("kind") == "orphan" and not fresh.orphan(relative):
                     row["status"] = "skipped_target_reappeared"
                     continue
                 if row["category"] == CATEGORIES[3]:
@@ -614,7 +818,10 @@ def run_cleanup(
                 row["status"] = "applied"
             except (OSError, ValueError, RecursionError) as exc:
                 row["status"] = "stopped_on_error"
-                manifest["errors"].append({"path": row["path"], "type": type(exc).__name__})
+                manifest["errors"].append({
+                    "path": row["path"], "type": type(exc).__name__,
+                    "code": exc.code if isinstance(exc, SafetyError) else "filesystem_or_validation_error",
+                })
             finally:
                 if checkpoint is not None:
                     checkpoint(manifest)
@@ -623,19 +830,66 @@ def run_cleanup(
     return manifest
 
 
-# LLM: 清单是唯一外部写入；拒绝home内输出/现存文件，临时文件同父原子替换并fsync，不覆盖用户已有资料。
-# 函数用途: 将预演或执行进展持久化，删除中途异常也保留最近完整单元计数。
-def _save_manifest(path, payload):
-    fd, temporary = tempfile.mkstemp(prefix=".slimming-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+# LLM: 不按路径replace发表；对象只能来自本次O_EXCL创建，检查完整父链与单链接身份，后续写仅落到原FD。
+# 类用途: 持有清单文件与父目录的独占出生身份，为checkpoint提供受限写口。
+class ManifestOutput:
+    # LLM: FD由外层上下文拥有；此构造只冻结身份，不创建/关闭文件。
+    # 函数用途: 绑定安全父链、Home身份与本次清单inode。
+    def __init__(self, path, parent, chain, fd, home, home_chain):
+        self.path, self.parent, self.chain, self.fd = path, parent, chain, fd
+        self.home, self.home_chain = home, home_chain
+        self.identity = _identity(os.fstat(fd))[:3]
+
+    # LLM: 不以字符串resolve后继续写；重新nofollow逐段核身份，目录被搬动/换链接即拒绝。
+    # 函数用途: 确认输出仍指向本次唯一文件且父目录仍在Home之外。
+    def verify(self):
+        with _open_chain(self.home, self.home_chain):
+            pass
+        with _open_chain(self.path.parent, self.chain) as (_fd, chain):
+            home_identity = self.home_chain[str(self.home)][:2]
+            if any(value[:2] == home_identity for value in chain.values()):
+                raise SafetyError("manifest_parent_inside_home")
+        opened = _identity(os.fstat(self.fd))
+        named = _identity(os.stat(self.path.name, dir_fd=self.parent, follow_symlinks=False))
+        if (opened[:3] != self.identity or named != opened or opened[3] != 1
+                or not stat.S_ISREG(opened[2])):
+            raise SafetyError("manifest_identity_changed")
+
+    # LLM: 序列化完成才核身份并写原FD，拒绝叶替换；fsync持久化，但不承诺原地checkpoint的断电原子性。
+    # 函数用途: 更新本次清单，不重新解析输出路径或覆盖别人的文件。
+    def save(self, payload):
+        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        self.verify()
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        os.ftruncate(self.fd, 0)
+        view = memoryview(data)
+        while view:
+            written = os.write(self.fd, view)
+            if written <= 0:
+                raise OSError(errno.EIO, "清单写入无进展")
+            view = view[written:]
+        os.fsync(self.fd)
+        self.verify()
+
+
+# LLM: 初次父目录规范化后立即nofollow固定全链，再O_EXCL预留；异常只关闭FD，不删除可能被他人替换的输出名。
+# 函数用途: 在开始扫描前安全取得全新Home外清单文件。
+@contextmanager
+def _manifest_output(home, output):
+    home = home.resolve(strict=True)
+    output = output.parent.resolve(strict=True) / output.name
+    if output.is_relative_to(home):
+        raise SafetyError("manifest_destination_inside_home")
+    with _open_chain(home) as (_home_fd, home_chain), _open_chain(output.parent) as (parent, chain):
+        if any(value[:2] == home_chain[str(home)][:2] for value in chain.values()):
+            raise SafetyError("manifest_parent_inside_home")
+        fd = os.open(output.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        try:
+            destination = ManifestOutput(output, parent, chain, fd, home, home_chain)
+            destination.verify()
+            yield destination
+        finally:
+            os.close(fd)
 
 
 # LLM: CLI默认dry-run；显式apply才删除，已审预演仅收紧集合；返回非零表示未完整应用或参数不安全。
@@ -648,29 +902,26 @@ def main(argv=None):
     modes.add_argument("--apply", action="store_true")
     parser.add_argument("--manifest-out", type=Path, required=True)
     parser.add_argument("--approved-manifest", type=Path)
+    parser.add_argument("--active-config", type=Path, action="append", default=[], help="额外活动配置路径；不可读则保留全部测试workspace")
     parser.add_argument("--min-task-tmp-age-days", type=float, default=3.0)
     parser.add_argument("--keep-release-backups", type=int, default=2)
     args = parser.parse_args(argv)
     output = args.manifest_out.absolute()
     try:
-        if (
-            os.path.lexists(output)
-            or not output.parent.is_dir()
-            or output.resolve().is_relative_to(args.home_dir.resolve())
-        ):
-            raise ValueError("清单必须写在home以外的全新文件，父目录须已存在")
         approved = (
             json.loads(args.approved_manifest.read_text()) if args.approved_manifest else None
         )
-        result = run_cleanup(
-            args.home_dir,
-            apply=args.apply,
-            min_task_tmp_age_days=args.min_task_tmp_age_days,
-            keep_release_backups=args.keep_release_backups,
-            approved_manifest=approved,
-            checkpoint=lambda payload: _save_manifest(output, payload),
-        )
-        _save_manifest(output, result)
+        with _manifest_output(args.home_dir, output) as destination:
+            result = run_cleanup(
+                args.home_dir,
+                apply=args.apply,
+                min_task_tmp_age_days=args.min_task_tmp_age_days,
+                keep_release_backups=args.keep_release_backups,
+                approved_manifest=approved,
+                active_configs=args.active_config,
+                checkpoint=destination.save,
+            )
+            destination.save(result)
         print(
             json.dumps(
                 {

@@ -1,3 +1,25 @@
+## 2026-10-29 e905 sol-12 Round 1：清理隔离与清单身份修复
+
+来源：`fix-e905-sol-12-r1.md` 和 Astra-1/Astra-2 两份独立审查；起点 `e10d64afa843b9aee6d18aa62a145ec6c55a2275`。本轮只在隔离 `/tmp` 样本测试，不再对真实 Home 执行清理，不推送或部署。
+
+- 删除先逐段 nofollow 核对批准摘要里的祖先身份，再 rename 到同文件系统的专属 0700 隔离目录，复核叶子身份（rename 自然改变的 ctime 除外）、原祖先链和隔离链后才能 unlink/rmdir。空目录也走隔离核验，含保护项/新增内容的目录不递归删除。
+- 检查失败原子无覆盖恢复；使用 macOS `renameatx_np(RENAME_EXCL)` / Linux `renameat2(RENAME_NOREPLACE)`，缺能力失败关闭。恢复名被占用时保留隔离条目和新原名，在 `recovery_required` 中记录位置，不以覆盖回退。
+- 清单开始扫描前 nofollow 固定父链并以 O_EXCL/0600 创建；checkpoint 只写同一 FD，核对完整父链、Home 与单链接 inode，替换名和漂移链不能把写入导向别人的文件。原地清单 checkpoint 不承诺断电原子发表。
+- 归档孤儿保留结构化 kind 并复用执行前目标复活检查；固定 tasks 与通用归档缓存入口统一排除当天 ISO/compact 日期。测试全部模块/函数补中文双层注释。
+- Astra-2 F4 同步修复：读取 `MY_AGENT_CONFIG` 选中的真实外部配置，支持显式 `--active-config` / `active_configs` 追加来源；复用产品 `config_io.py` 的简化YAML解析器消费已核验内存快照，解析器摘要绑定审批策略。相对运行路径缺少运行根、选中配置缺失/坏类型/并发变化时 workspace 清理失败关闭，绝对路径按父子关系保留。不从三个猜测目录里“没查到”推断无活动引用。
+
+先红：原 44 项与 10 项新增回归同跑，9 项安全断言失败、45 项通过；覆盖最终 stat 换 inode、父目录迁入 output、清单名晚出现/父链换 Home 链接、归档目标复活、归档两种当天日期缓存与外部活动配置。正常 owner 孤儿复活控制保持通过。继续补隔离 rename 边界的替换/目录迁移、恢复冲突保留、空目录晚出现报告、显式配置和首 fstat 故障 FD 回收。独立复核追加的“合法相对路径/绝对父路径”两例经真实产品路径解析器确认引用后先2失败，再修正结构化路径保护。
+
+复现（从本工作树根）：
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_home_file_slimming_cleanup.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol12_fix1
+ruff check --no-cache agent_py_agent scripts
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_import_boundaries.py --json
+git diff --check 4bea324e3..HEAD
+```
+
+限制：同权限进程恶意修改专属隔离区或已持有 FD 继续写入，不属于仅靠 POSIX 路径核验能提供的全局事务；仍需可信隔离区与维护窗口。中断/断电可能遗留隔离条目，须按回执人工复核，不能自动扩范围清理。Linux原生接口、真实硬链接、真实 Home、部署与用户端到端结果未由本轮样本验证。最终测试/门禁、准确提交和独立复核结论追加在外部 DONE 的 Round 1 Fixes 中。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。
