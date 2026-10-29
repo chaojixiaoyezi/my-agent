@@ -23,6 +23,18 @@ CREATE TABLE IF NOT EXISTS private_chat_locks (
 """
 
 
+# LLM: Python标准库sqlite3.Connection.__exit__仅提交或回滚事务而不关闭连接；重写__exit__在with块结束时立即close，防止遗留连接由GC在任意线程异步触发WAL独占锁竞争。
+# 类用途: 在with上下文退出时完成事务结算并立即关闭底层SQLite连接。
+class _ClosingConnection(sqlite3.Connection):
+    # LLM: 先执行父类事务提交/回滚再无条件调用close；sqlite3重复close幂等，兼容显式再调close的调用方。
+    # 函数用途: 退出with块时同步关闭SQLite连接并释放文件锁与WAL句柄。
+    def __exit__(self, *exc_info: object) -> bool | None:
+        try:
+            return super().__exit__(*exc_info)
+        finally:
+            self.close()
+
+
 # LLM: 原密码及活跃行是唯一状态；只读模式禁止建库/迁移并拒绝显式锁等待，写方法仍由SQLite原模式拒绝。
 # 类用途: 保存或只读查询同一份个人锁，不将只读或缺库解释成解锁。
 class SessionLockStore:
@@ -45,16 +57,23 @@ class SessionLockStore:
             from .card_control import initialize_card_columns
             initialize_card_columns(conn)
 
-    # LLM: 只读URI不创建缺库且锁忙立即拒绝；Count0仍原10秒/同一表，模式只缩小权限，不产生密码认证。
-    # 函数用途: 为原状态方法打开对应模式的连接。
+    # LLM: 只读URI不创建缺库且锁忙立即拒绝；Count0仍原10秒/同一表，with块退出时由_ClosingConnection立即关闭连接。
+    # 函数用途: 为原状态方法打开对应模式且退出即关闭的SQLite连接。
     def _connect(self) -> sqlite3.Connection:
         address = Path(self._path).resolve().as_uri() + '?mode=ro' if self._read_only else self._path
-        conn = sqlite3.connect(address, timeout=0.0 if self._read_only else 10.0, uri=self._read_only)
+        conn = sqlite3.connect(
+            address,
+            timeout=0.0 if self._read_only else 10.0,
+            uri=self._read_only,
+            factory=_ClosingConnection,
+        )
         conn.row_factory = sqlite3.Row
         return conn
 
     # -- 私聊活跃时间 ------------------------------------------------------------
 
+    # LLM: 只读查询用户最近私聊活跃时间戳，无记录或为0时返回None，不修改数据库。
+    # 函数用途: 获取指定用户的最近私聊活跃时间。
     def last_activity(self, user_id: str) -> float | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -62,6 +81,8 @@ class SessionLockStore:
             ).fetchone()
         return float(row["last_activity_at"]) if row and row["last_activity_at"] else None
 
+    # LLM: 写入或更新用户最近活跃时间与更新时间并立即提交关闭连接，会写SQLite数据库。
+    # 函数用途: 记录指定用户的最新私聊活跃时间戳。
     def record_activity(self, user_id: str, *, now: float | None = None) -> None:
         moment = now if now is not None else time.time()
         with self._connect() as conn:
@@ -76,6 +97,8 @@ class SessionLockStore:
 
     # -- 密码 hash --------------------------------------------------------------
 
+    # LLM: 只读查询指定用户的scrypt密码散列，无记录或空串时返回None，查询后立即关闭连接。
+    # 函数用途: 读取用户在会话锁库中保存的密码散列字符串。
     def password_hash(self, user_id: str) -> str | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -83,9 +106,13 @@ class SessionLockStore:
             ).fetchone()
         return str(row["password_hash"]) if row and row["password_hash"] else None
 
+    # LLM: 基于password_hash判断用户是否已设置非空密码散列，不修改数据库状态。
+    # 函数用途: 检查指定用户是否已配置私聊解锁密码。
     def has_password(self, user_id: str) -> bool:
         return bool(self.password_hash(user_id))
 
+    # LLM: 写入或更新用户的scrypt密码散列与活跃时间戳并立即提交关闭连接，会写SQLite数据库。
+    # 函数用途: 保存指定用户的新密码散列并刷新活跃时间。
     def set_password_hash(self, user_id: str, password_hash: str, *, now: float | None = None) -> None:
         moment = now if now is not None else time.time()
         with self._connect() as conn:
