@@ -1,3 +1,5 @@
+# LLM: 唤醒发现回归使用隔离owner和真实runtime库，不读写生产home；孤儿投影不得冒充未完成工作。
+# 模块用途: 验证磁盘事实发现、分页、缓存和陈旧子代理投影过滤。
 """磁盘级 owner 唤醒发现(§1 睡死叫不醒):扫描判定、身份构造、登记表种入。"""
 
 from __future__ import annotations
@@ -1369,3 +1371,71 @@ def test_scaling_d_paused_run_resumes_without_date_directory_change(tmp_path):
     active.write_text(json.dumps({"task_id": "task-40", "status": "RUNNING"}))
     assert day.stat().st_mtime_ns == before
     assert discovery.unfinished_task_ids(home) == ["task-40"]
+
+
+# LLM: 用真实投影及runtime登记覆盖孤儿误唤醒；closeout始终优先于缺失工作区和权威终态。
+# 函数用途: 证明孤儿跳过不会吞掉真正活跃运行或待重试收口。
+@pytest.mark.parametrize("runtime_status,closeout,expected", [
+    (None, False, False), ("running", False, True), ("done", False, False),
+    ("failed", False, False), ("cancelled", False, False), ("done", True, True),
+])
+def test_e905_dangling_projection_uses_runtime_authority(tmp_path, runtime_status, closeout, expected):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    home = tmp_path / "home"
+    _write_run(home, "orphan", "PLANNING")
+    run = home / "agents/orphan"
+    (run / "workspace_locator.json").write_text(json.dumps({"workspace_root": str(tmp_path / "deleted")}))
+    state = json.loads((run / "state.json").read_text())
+    state["runtime_closeout_pending"] = closeout
+    (run / "state.json").write_text(json.dumps(state))
+    if runtime_status:
+        repo = RuntimeRepository(home / "runtime.db")
+        created = repo.record_run_creation(owner_id="local/main", goal="g", run_id="orphan")
+        if runtime_status != "running":
+            repo.settle_agent_run(agent_run_id=created["agent_run_id"], status=runtime_status,
+                                  attempt_id=created["attempt_id"])
+    assert discovery._has_unfinished_subagent_run(home) is expected
+
+
+# LLM: 没有locator也不能用旧RUNNING覆盖runtime明确终态。
+# 函数用途: 验证非孤儿陈旧状态也会受runtime终态过滤。
+def test_e905_existing_workspace_terminal_runtime_is_skipped(tmp_path):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+    from agent_py_agent.agent.runtime_db.repository import RuntimeRepository
+
+    home = tmp_path / "home"
+    _write_run(home, "settled", "RUNNING")
+    repo = RuntimeRepository(home / "runtime.db")
+    created = repo.record_run_creation(owner_id="local/main", goal="g", run_id="settled")
+    repo.settle_agent_run(agent_run_id=created["agent_run_id"], status="done", attempt_id=created["attempt_id"])
+    assert not discovery._has_unfinished_subagent_run(home)
+
+
+# LLM: 每轮预算有限但游标必须前进；不允许全量glob或永久饿死预算外运行。
+# 函数用途: 验证有界扫描最终看见所有运行目录。
+def test_e905_subagent_scan_is_bounded_and_eventually_visits_all(tmp_path, monkeypatch):
+    from agent_py_agent.agent import owner_wake_discovery as discovery
+
+    home = tmp_path / "home"
+    for index in range(9):
+        _write_run(home, f"run-{index}", "DONE")
+    monkeypatch.setattr(discovery, "_SUBAGENT_SCAN_MAX_DIRS", 2, raising=False)
+    real_read = Path.read_text
+    reads = []
+    # LLM: 只计数被测owner的state读取，不替代实际文件内容。
+    # 函数用途: 检查一次调用没有读取超预算状态文件。
+    def read(path, *args, **kwargs):
+        if path.name == "state.json" and home in path.parents:
+            reads.append(path)
+        return real_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read)
+    visited, outcomes = set(), []
+    for _ in range(6):
+        reads.clear()
+        outcomes.append(discovery._has_unfinished_subagent_run(home))
+        assert len(reads) <= 2
+        visited.update(reads)
+    assert len(visited) == 9
+    assert outcomes[:5] == [True, True, True, True, False]

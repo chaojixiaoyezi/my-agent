@@ -1029,8 +1029,30 @@ def _blocked_subagent_is_quiescent(owner_home: Path, run_id: str, payload: dict[
         return False
 
 
-# LLM: 收口重试始终优先；仅BLOCKED可由只读runtime快照排除，其他原未完成状态不受影响。
-# 函数用途: 从owner级子代理投影发现真正需要周期驱动的工作，不改静止子代理的可恢复状态。
+# 每次发现最多检查5000个目录项；跨轮内存迭代器避免大目录反复从头扫描。
+_SUBAGENT_SCAN_MAX_DIRS = 5000
+
+
+# LLM: 仅明示缺失工作区且无runtime活跃行才可跳过；读错、未知和closeout均保原唤醒，不改任何状态。
+# 函数用途: 识别已删除测试工作区留下的悬空投影，不将它们误作需要驱动的子代理。
+def _subagent_projection_is_dangling_orphan(owner_home: Path, run_dir: Path, payload: dict[str, object]) -> bool:
+    from .subagents.services.persistence.locator_hygiene import (
+        projection_runtime_facts,
+        projection_workspace_missing,
+    )
+    try:
+        if payload.get("runtime_closeout_pending") or payload.get("run_id", run_dir.name) != run_dir.name:
+            return False
+        if not projection_workspace_missing(run_dir, payload):
+            return False
+        status, pending = projection_runtime_facts(owner_home, run_dir.name, payload)
+        return not pending and (not status or status in AGENT_RUN_TERMINAL_STATUSES)
+    except (OSError, ValueError, TypeError, sqlite3.Error):
+        return False
+
+
+# LLM: 收口重试优先，缺失locator和runtime终态过滤仅作用于陈旧投影；公平有界分页不新建数据库。
+# 函数用途: 从owner级投影发现需驱动的子代理，跳过测试孤儿但不改变可恢复状态。
 def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     """owner 名下在册子代理 run 是否有未完成的(agents/<run-id>/state.json 的 status)。
 
@@ -1041,12 +1063,18 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
     除"未完成状态"外，``runtime_closeout_pending`` 同样是硬事实：runner 终态收口写库失败、
     或收口后父级通知前中断时，run/task 都已是终态、且还没有 wake 信号，如果这里不认它，
     Gateway 的 reconcile 车道就不会来推进这条待重试事实，恢复链永远跑不到。
-    倒序扫(run 目录名带时间戳,新的更可能未完成),命中即停;坏文件跳过。"""
+    每轮最多检查固定预算目录项，超大目录跨轮续扫，坏文件跳过。"""
+    from .subagents.services.persistence.locator_hygiene import (
+        agent_projection_page,
+        projection_runtime_facts,
+    )
+
     agents_dir = owner_home / "agents"
-    if not agents_dir.is_dir():
+    if agents_dir.is_symlink() or not agents_dir.is_dir():
         return False
     try:
-        task_files = sorted(agents_dir.glob("*/state.json"), reverse=True)
+        runs, exhausted = agent_projection_page(owner_home, _SUBAGENT_SCAN_MAX_DIRS, purpose="wake")
+        task_files = [run / "state.json" for run in runs]
     except OSError:
         return False
     for path in task_files:
@@ -1060,10 +1088,20 @@ def _has_unfinished_subagent_run(owner_home: Path) -> bool:
             return True
         status = str(payload.get("status") or "").strip().upper()
         if status in _UNFINISHED_RUN_STATUSES:
+            if _subagent_projection_is_dangling_orphan(owner_home, path.parent, payload):
+                continue
+            if status in {"PLANNING", "PENDING", "RUNNING"}:
+                try:
+                    runtime_status, pending = projection_runtime_facts(owner_home, path.parent.name, payload)
+                    if not pending and runtime_status in AGENT_RUN_TERMINAL_STATUSES:
+                        continue
+                except (OSError, ValueError, TypeError, sqlite3.Error):
+                    pass
             if status == "BLOCKED" and _blocked_subagent_is_quiescent(owner_home, path.parent.name, payload):
                 continue
             return True
-    return False
+    # 尚未检查到目录尾只能说未知，不能让预算外的活跃/closeout被当作不存在。
+    return not exhausted
 
 
 _TASK_STATUS_CACHE_MAX_ENTRIES_COUNT = 131072
