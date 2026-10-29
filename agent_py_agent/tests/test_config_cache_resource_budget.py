@@ -61,3 +61,31 @@ def test_subagent_cache_rechecks_canonical_fingerprint(tmp_path, monkeypatch):
     second = service._cached_run_copy(task.id, locator)
     assert first.current_step != second.current_step
     assert second.current_step == "fresh-canonical"
+
+
+# LLM: 固定指纹模拟粗时间戳碰撞，locator已老而canonical刚改时，命中和发布都必须拒绝缓存。
+# 函数用途: 验证双文件的信任年龄，而不是只依赖locator年龄。
+def test_subagent_cache_requires_canonical_trust_age(tmp_path, monkeypatch):
+    import os
+
+    from agent_py_agent.agent.subagents.services.persistence import service as module
+
+    manager = SubAgentManager(tmp_path)
+    task = manager.create_run(goal="双mtime", thought="保护canonical", plan=["读取"])
+    service = manager.persistence
+    locator = tmp_path / task.id / "task.json"
+    canonical = Path(task.agent_run_workspace_dir) / "canonical_state.json"
+    now = module._now()
+    monkeypatch.setattr(module, "_now", lambda: now)
+    monkeypatch.setattr(module, "cache_stat_signature", lambda _stat: (1, 1, 1, 1, 1))
+    os.utime(locator, (now - 60, now - 60))
+    os.utime(canonical, (now - 60, now - 60))
+    service._cached_run_copy(task.id, locator)
+    assert task.id in service._run_cache
+    raw = json.loads(canonical.read_text())
+    raw["current_step"] = "young-canonical"
+    canonical.write_text(json.dumps(raw))
+    os.utime(canonical, (now, now))
+    loaded = service._cached_run_copy(task.id, locator)
+    assert loaded.current_step == "young-canonical"
+    assert task.id not in service._run_cache

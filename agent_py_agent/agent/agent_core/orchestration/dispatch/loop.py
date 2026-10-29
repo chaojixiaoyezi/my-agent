@@ -215,7 +215,7 @@ def dispatch_loop(
     return report
 
 
-# LLM: 用与正式派工同一个候选闸统计剩余 runner，重跑次数取配置 runner_failure_retry_limit；读账本失败要如实返回错误，
+# LLM: 与正式派工共用失败预算和能力配置无进展阈值（0关闭）；读账本失败如实报告，
 #   不能伪装成“没有待跑任务”。只读，不启动 runner。
 # 函数用途: 派工循环结束后统计还有多少子代理 run 等着启动或重跑。
 def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
@@ -225,11 +225,15 @@ def _final_pending_runner_count(agent) -> tuple[int, dict[str, object]]:
             _dispatch_runner_candidates,
             runner_failure_retry_limit,
         )
+        from .tool_helpers import _dispatch_capability_config
 
         candidates = _dispatch_runner_candidates(
             agent.subagents.list_runs(),
             max_runners=999,
-            policy=RunnerCandidatePolicy(runner_retry_limit=runner_failure_retry_limit(agent.config)),
+            policy=RunnerCandidatePolicy(
+                runner_retry_limit=runner_failure_retry_limit(agent.config),
+                no_progress_attempt_limit=_dispatch_capability_config(agent).subagent_no_progress_attempt_limit,
+            ),
         )
         return len(candidates), {}
     except Exception as exc:

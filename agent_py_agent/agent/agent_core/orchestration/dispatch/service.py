@@ -232,7 +232,7 @@ def _patch_review_action(decision: object) -> str:
 # ---------------------------------------------------------------------------
 
 
-# LLM: 与正式派工同一个候选闸判断是否还有待跑工作，重跑次数取配置 runner_failure_retry_limit；只读，不启动 runner。
+# LLM: 与正式派工共用候选闸；失败预算和能力配置无进展阈值分别传入，保留0关闭，不启动runner。
 # 函数用途: 告诉派工循环是否还有子代理 run 需要启动或重跑。
 def update_pending_work_state(agent) -> bool:
     from ...runner.dispatch import (
@@ -240,11 +240,15 @@ def update_pending_work_state(agent) -> bool:
         _dispatch_runner_candidates,
         runner_failure_retry_limit,
     )
+    from .tool_helpers import _dispatch_capability_config
 
     candidates = _dispatch_runner_candidates(
         agent.subagents.list_runs(),
         max_runners=999,
-        policy=RunnerCandidatePolicy(runner_retry_limit=runner_failure_retry_limit(agent.config)),
+        policy=RunnerCandidatePolicy(
+            runner_retry_limit=runner_failure_retry_limit(agent.config),
+            no_progress_attempt_limit=_dispatch_capability_config(agent).subagent_no_progress_attempt_limit,
+        ),
     )
     return len(candidates) > 0
 

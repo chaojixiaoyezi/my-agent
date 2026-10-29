@@ -2,6 +2,7 @@
 # 模块用途: 验证子代理恢复建议和真实无进展熔断。
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent_py_agent.agent.subagents.manager import SubAgentManager
@@ -98,8 +99,15 @@ def test_recovery_strategy_suggests_takeover_for_dead_worker(tmp_path: Path) -> 
     assert "同一个任务目录" in result.runner_instruction
 
 
+# LLM: 保留99次审计历史与全部显式停止恢复断言；先构造完整既存快照，不能用一次save跳99轮制造真实unknown再绕过坏账门。
+# 函数用途: 验证合法的高审计次数用户停止任务仍从原checkpoint接续。
 def test_recovery_strategy_resumes_user_stopped_run_from_same_checkpoint(tmp_path: Path) -> None:
     manager, task = _saved_task(tmp_path, status="CANCELLED")
+    path = Path(task.agent_run_workspace_dir) / "canonical_state.json"
+    payload = json.loads(path.read_text())
+    payload["runner_attempts"] = 99
+    path.write_text(json.dumps(payload))
+    task = manager.load(task.id)
     task.failure_type = "cancelled"
     task.runner_attempts = 99
     task.attributes = {
@@ -109,6 +117,7 @@ def test_recovery_strategy_resumes_user_stopped_run_from_same_checkpoint(tmp_pat
         }
     }
     manager.save(task)
+    assert manager.load(task.id)._extra_fields["recovery_history_unknown_count"] == 0
 
     result = build_subagent_recovery_strategy(
         SubagentRecoveryStrategyRequest(task=manager.load(task.id))

@@ -71,9 +71,11 @@ def run_dispatch_runner_stage(
 
 
 # LLM: 普通失败的重跑次数只读配置 runner_failure_retry_limit（唯一的家）；候选接纳、协作请求合并与并发限流顺序不变，
-#   会预留 runner 启动并执行批次（有副作用）。
+#   无进展阈值按同一能力配置透传，0关闭；会预留runner启动并执行批次（有副作用）。
 # 函数用途: 挑出本次要跑的子代理 run 并按并发上限执行，返回派工记录。
 def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) -> list:
+    from .tool_helpers import _dispatch_capability_config
+
     records = list(batch.records)
     runner_retry_limit = runner_failure_retry_limit(agent.config)
     all_tasks = agent.subagents.list_runs()
@@ -87,7 +89,10 @@ def execute_runner_jobs(agent, ctx: DispatchContext, batch: RunnerBatchContext) 
     if selection_record is not None:
         records.append(selection_record)
         return records
-    runner_candidates = _runner_candidates_for_context(scoped_tasks, ctx, runner_retry_limit)
+    runner_candidates = _runner_candidates_for_context(
+        scoped_tasks, ctx, runner_retry_limit,
+        no_progress_attempt_limit=_dispatch_capability_config(agent).subagent_no_progress_attempt_limit,
+    )
     collaboration_report = collaboration_request_runner_candidates_report(agent, scoped_tasks)
     collaboration_candidates = collaboration_report.candidates
     if collaboration_report.load_errors:
@@ -128,10 +133,11 @@ def _merge_runner_candidates(primary: list, secondary: list, *, limit: int) -> l
     return merged[:limit]
 
 
-# LLM: 候选接纳只在 creation guard 内预留准确 pending；外部已冻结 map 缺项即拒绝，不重新领取。
+# LLM: 候选接纳只在creation guard内预留准确pending；恢复原因同样读取配置阈值，不暗用4；冻结map缺项即拒绝。
 # 函数用途: 选出可执行的工作并固定轮次，线程池稍后启动仍使用同一身份。
 def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: int, runner_candidates: list):
     from ....subagents.runner_start import reserve_runner_start
+    from .tool_helpers import _dispatch_capability_config
 
     pending_runner_jobs, dry_records = [], []
     supplied_attempts = ctx.expected_attempt_ids
@@ -152,7 +158,10 @@ def collect_runner_candidates(agent, ctx: DispatchContext, runner_retry_limit: i
             dry_records.append(conversation_lifecycle_gate_record(agent, ctx, task, decision))
             continue
         before = agent.subagents.load(task.id)
-        retry_reason = _runner_retry_reason(before, runner_retry_limit)
+        retry_reason = _runner_retry_reason(
+            before, runner_retry_limit,
+            no_progress_attempt_limit=_dispatch_capability_config(agent).subagent_no_progress_attempt_limit,
+        )
         if ctx.execution_plan.mutate_state:
             if ctx.should_start_runners:
                 expected = supplied_attempts[task.id] if supplied_attempts is not None else None

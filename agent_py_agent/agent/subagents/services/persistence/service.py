@@ -44,6 +44,7 @@ from ...models import (
     RETRYABLE_RUNNER_FAILURE_TYPES,
     SUBAGENT_FAILED_RESULT_STATUSES,
     SUBAGENT_RECOVERY_CLOSED_STATUSES,
+    SUBAGENT_RETRYABLE_FAILURE_STATUSES,
     CapabilityGap,
     CapabilityGrant,
     CapabilityRequest,
@@ -79,7 +80,7 @@ from ..output_alignment import (
     record_locked_files_change,
     sanitize_self_locked_delivery_targets,
 )
-from ..recovery.strategy import recovery_count
+from ..recovery.strategy import RECOVERY_COUNTER_NAMES, recovery_counters
 from ..takeover.readiness import write_takeover_readiness_files
 from ..task_workspace_adapter import sync_task_workspace_fields
 from .model_normalizers import (
@@ -131,8 +132,7 @@ def _canonical_runs_for_root(
     ]
 
 
-# LLM: This adapter keeps indexed selection outside the persistence class size budget. Managed
-# lookup failures remain explicit, while local-unmanaged callers intentionally use canonical scan.
+# LLM: 索引只挑候选，canonical核根；无索引回退同样规范化ID空白，不引入第二种根匹配语义。
 # 函数用途: 实现按根任务的“索引选 ID、文件复核”读取，并返回结构化错误。
 def _list_runs_for_root_report(
     service: SubAgentPersistenceService,
@@ -149,7 +149,7 @@ def _list_runs_for_root_report(
     tree_reader = getattr(local_store, "list_agent_tree", None)
     if not callable(tree_reader):
         return service.list_runs_selected_report(
-            lambda task: task.id == root_id or task.root_id == root_id,
+            lambda task: bool(_canonical_runs_for_root([task], root_id)),
         )
 
     try:
@@ -190,7 +190,7 @@ def _list_runs_for_root_report(
     return SubAgentListRunsReport(runs=canonical, load_errors=load_errors)
 
 
-# LLM: canonical文件仍是权威；公开列表只返回副本，私有引用仅供只读predicate，原指纹/负缓存/粗mtime门保持。
+# LLM: canonical文件仍是权威；锁外核双文件指纹与各自信任龄，公开副本经同一恢复坏账校验。
 # 类用途: 管理子代理持久化与实时列表筛选；复制优化不跨轮冻结任务集合。
 class SubAgentPersistenceService:
     """Read and write SubAgentTask records for SubAgentManager."""
@@ -336,7 +336,7 @@ class SubAgentPersistenceService:
 
     _DEFAULT_CACHED_RUN_COPY = _cached_run_copy
 
-    # LLM: stat/解析在缓存锁外，发布前重核双文件指纹；引用不可原地改，迟到读者不缓存跨代内容。
+    # LLM: stat/解析在锁外，命中/发布同时核locator与canonical年龄和指纹；引用不可改，年轻canonical绝不复用。
     # 函数用途: 核对locator和canonical后复用快照，不让慢磁盘占住其它run的缓存锁。
     def _cached_run_ref(self, run_id: str, task_file: Path) -> SubAgentTask:
         stat = task_file.stat()
@@ -350,7 +350,9 @@ class SubAgentPersistenceService:
             raise FileNotFoundError(f"子代理记录不存在: {run_id}")
         if cached is not None and cached[0] == signature and target is not None:
             try:
-                unchanged = cache_stat_signature(target[0].stat()) == target[1]
+                canonical_stat = target[0].stat()
+                unchanged = (cache_stat_signature(canonical_stat) == target[1]
+                             and _now() - canonical_stat.st_mtime_ns / 1e9 >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS)
             except OSError:
                 unchanged = False
             if unchanged and age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS:
@@ -386,7 +388,8 @@ class SubAgentPersistenceService:
                 cacheable = (before.st_size <= self._MAX_RUN_CACHE_ITEM_BYTES
                              and cache_stat_signature(canonical.stat()) == cache_stat_signature(before)
                              and cache_stat_signature(task_file.stat()) == signature
-                             and age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS)
+                             and age >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS
+                             and _now() - before.st_mtime_ns / 1e9 >= self._RUN_CACHE_COARSE_MTIME_GUARD_SECONDS)
             except OSError:
                 pass
         with self._run_cache_lock:
@@ -622,21 +625,13 @@ def _recovery_progress_fingerprint(task: SubAgentTask) -> dict[str, str | None] 
     return rows
 
 
-# LLM: 仅原持久化门写计数，损坏/部分缺失保留正unknown；进展比较绑定exact attempt启动基线，首次见旧产物不清零。
+# LLM: 原提交门消费统一校验快照；BLOCKED同样扣失败预算；未知观察单独可见，不制造进展或无进展证据。
 # 函数用途: 从真实attempt开始/收口边沿维护失败重试与无进展次数，保留原审计attempt和CAS。
 def _update_recovery_counters(task: SubAgentTask, previous: SubAgentTask | None, manager: Any) -> None:
     source = previous if previous is not None else task
     old_attempts = max(0, int(previous.runner_attempts or 0)) if previous is not None else 0
     current_attempts = max(0, int(task.runner_attempts or 0))
-    names = ("failure_retry_count", "provider_retry_count", "no_progress_count", "recovery_history_unknown_count")
-    counters = {name: recovery_count(source, name) or 0 for name in names}
-    source_extra = getattr(source, "_extra_fields", {})
-    pristine = (old_attempts == 0 and current_attempts == 0
-                and not any(name in source_extra or hasattr(source, name) for name in names))
-    if not pristine and any(recovery_count(source, name) is None for name in names):
-        counters["recovery_history_unknown_count"] = max(
-            1, old_attempts, current_attempts, counters["recovery_history_unknown_count"],
-        )
+    counters = recovery_counters(source)
     previous_extra = getattr(previous, "_extra_fields", {}) if previous is not None else {}
     extra = dict(getattr(task, "_extra_fields", {}))
     safe_resume = previous_extra.get("recovery_safe_resume") is True
@@ -646,7 +641,7 @@ def _update_recovery_counters(task: SubAgentTask, previous: SubAgentTask | None,
             extra["recovery_progress_baseline"] = _recovery_progress_fingerprint(task)
             extra["recovery_progress_baseline_attempt_id"] = task.runner_active_attempt_id
         starting = (bool(task.runner_active_attempt_id) and not previous.runner_active_attempt_id
-                    and task_status_in(previous.status, SUBAGENT_FAILED_RESULT_STATUSES))
+                    and task_status_in(previous.status, SUBAGENT_RETRYABLE_FAILURE_STATUSES))
         if starting and failure in RETRYABLE_RUNNER_FAILURE_TYPES:
             key = "provider_retry_count" if failure in PROVIDER_SUPPLY_FAILURE_TYPES else "failure_retry_count"
             counters[key] += 1
@@ -666,8 +661,10 @@ def _update_recovery_counters(task: SubAgentTask, previous: SubAgentTask | None,
                 counters["no_progress_count"] = 0
             elif (observed and task.failure_type in RETRYABLE_RUNNER_FAILURE_TYPES
                   and task.failure_type not in PROVIDER_SUPPLY_FAILURE_TYPES
-                  and task_status_in(task.status, SUBAGENT_FAILED_RESULT_STATUSES)):
+                  and task_status_in(task.status, SUBAGENT_RETRYABLE_FAILURE_STATUSES)):
                 counters["no_progress_count"] += 1
+            if not observed:
+                counters["no_progress_unknown_count"] += 1
             safe_resume = False
             if task.failure_type == FailureType.HOST_SHUTDOWN_INTERRUPTED.value and previous.runner_active_attempt_id:
                 from ....runtime_db.executor_liveness import exited_attempt_facts
@@ -1428,11 +1425,13 @@ def load_subagent_task(workspace: Path, run_id: str) -> SubAgentTask:
         raise FileNotFoundError(f"子代理记录不存在: {run_id}")
     return task_from_payload(_read_state_payload(path))
 
-# LLM: canonical未知字段逐字义深复制到私有_extra_fields，写回沿原canonical；模型已知字段仍由原normalizer处理。
+# LLM: 原始counter组在首次load即校验；缺失总次数不能被dataclass默认0遮住；纯读不写盘，旧记录迁移留结构化依据。
 # 函数用途: 恢复正式SubAgentTask并保留未来代际数据，不让旧schema读写抹字段。
 def task_from_payload(data: dict[str, Any]) -> SubAgentTask:
     """Build a normalized task from a canonical state payload."""
 
+    missing_attempts = "runner_attempts" not in data and any(name in data for name in RECOVERY_COUNTER_NAMES)
+    legacy_counters = not any(name in data for name in (*RECOVERY_COUNTER_NAMES, "no_progress_unknown_count"))
     extra = {key: value for key, value in data.items() if key not in _field_names(SubAgentTask)}
     extra = copy.deepcopy(extra) if extra else {}
     data = {key: value for key, value in data.items() if key in _field_names(SubAgentTask)}
@@ -1476,4 +1475,10 @@ def task_from_payload(data: dict[str, Any]) -> SubAgentTask:
     data["runtime_identity"] = normalize_runtime_identity(data.get("runtime_identity"))
     task = SubAgentTask(**data)
     task._extra_fields = extra
+    counters = recovery_counters(task)
+    if missing_attempts:
+        counters["recovery_history_unknown_count"] = max(1, counters["recovery_history_unknown_count"])
+    if legacy_counters and not counters["recovery_history_unknown_count"] and task.runner_attempts:
+        extra["recovery_counter_migration"] = {"source": "legacy_total_attempts", "runner_attempts": task.runner_attempts}
+    extra.update(counters)
     return task

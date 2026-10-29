@@ -166,7 +166,7 @@ def _check_status_issues(ctx: DueInspectionContext):
     ]
 
 
-# LLM: 只投影strategy已证实的canonical无进展计数，不把审计attempt当熔断证据。
+# LLM: 只投影strategy已证实的无进展失败累计，不说成连续切片；未知观察另在恢复回执呈现。
 # 函数用途: 展示无进展熔断、阈值及恢复引用。
 def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int):
     """Check whether repeated recovery attempts must stop automatic retry."""
@@ -188,7 +188,7 @@ def _check_no_progress_fuse_issues(ctx: DueInspectionContext, attempt_limit: int
                 "P0",
                 ISSUE_NO_PROGRESS_FUSE,
                 (
-                    f"任务已连续无进展 {recovery_count(ctx.task, 'no_progress_count')} 次，达到无进展熔断阈值 {attempt_limit}；"
+                    f"自上次已证实字节推进以来累计无进展失败 {recovery_count(ctx.task, 'no_progress_count')} 次，达到熔断阈值 {attempt_limit}；"
                     "停止自动重试和扩容，改为汇总 refs 后等待父级/用户决策。"
                 ),
                 ACTION_STOP_NO_PROGRESS_AND_ESCALATE,

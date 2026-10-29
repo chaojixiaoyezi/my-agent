@@ -924,9 +924,11 @@ def _scheduler_follow_up_policy(agent: SimpleAgent) -> SchedulerFollowUpPolicy:
 # LLM: 挂接的目录准备回调只在真实OPEN路由前执行，不在manager构造期连接MCP；子权限边界保持。
 #   子代理继承父级的有效项目根目录，但绝不从管理员Full Access会话继承缺失的owner边界墙；
 #   子代理权限独立封顶于WorkspaceWrite并留在结构化owner/task范围内；仅当enable_self_learning开启时挂载skill_proposals。
-# 函数用途: 创建子代理管理器；共享任务工作区事实，但不把管理员的全盘权限递归传给下级；
+# 函数用途: 创建子代理管理器并绑定原能力配置读口；共享工作区但不递归传递管理员全盘权限；
 # 同时按自学习开关接上当前 owner 的 Skill 提案服务。
 def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
+    from .capability.runtime_config_reload import capability_config_for_paths
+
     workspace_root = agent.effective_workspace_root
     workspace_roots = agent.effective_workspace_roots
     child_owner_scope_root = str(getattr(agent.home_paths, "owner_home_dir", "") or "")
@@ -949,6 +951,10 @@ def _build_subagent_manager(agent: SimpleAgent, paths: dict) -> SubAgentManager:
         owner_policy_snapshot=agent.owner_policy.to_dict(),
     )
     manager.home_paths = agent.home_paths
+    # 保留原构造root及准确覆盖路径，每次恢复读取同一配置权威，不从owner或任务目录猜位置。
+    manager.recovery_capability_config = partial(
+        capability_config_for_paths, root=agent.root, user_path=agent.capability_config_path,
+    )
     manager.skill_proposals = _skill_proposal_service(agent)
     agent.capability_router._ensure_mcp_catalog = partial(agent.ensure_mcp_catalog_ready, agent.capability_router)
     return manager

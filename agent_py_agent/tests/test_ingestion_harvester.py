@@ -1,5 +1,5 @@
-# LLM: 使用受控来源验证真实收割线程和事务；窗口完成用例明确声明来源上界，不从opaque游标猜测终点。
-# 模块用途: 验证后台采集的连续性、背压、固定窗口边界及重启续作。
+# LLM: 使用受控来源验证真实线程和事务；普通窗口不注入人工上界，末拍须补拉并如实记录无界partial。
+# 模块用途: 验证后台采集连续性、背压、窗口补拉收尾及重启续作。
 """后台连续摄取(harvester)钉子(§8-1 加难实锤:900 条/秒 + 源端滚动缓冲 ~6 分钟淘汰,
 模型研判期间无人拉流 → 淘汰即永久丢,命中全集中在早期序号)。
 
@@ -242,8 +242,8 @@ def test_close_stops_harvester_thread(owner_home):
     assert _wait_until(lambda: not handle.thread.is_alive(), timeout=10.0)
 
 
-# LLM: 该内存来源明确承诺ordinal语义和有限上界；仍验证真实线程到边界后退出。
-# 函数用途: 验证已证明来源终点的窗口能结束收割。
+# LLM: 不为普通来源人工注入finalization_boundary，实际收割线程须在到点补拉后退出。
+# 函数用途: 验证普通窗口结束后不会因缺少源端数字上界卡住。
 def test_window_complete_stops_harvester(owner_home, monkeypatch):
     source = _FakeSource()
     source.feed(10)
@@ -252,13 +252,12 @@ def test_window_complete_stops_harvester(owner_home, monkeypatch):
     state = _state(owner_home, opened["watch_id"])
     assert _wait_until(lambda: hv.harvesters.get_live(state.watch_id) is not None)
     handle = hv.harvesters.get_live(state.watch_id)
-    state.source_envelope["finalization_boundary"] = {"cursor_semantics": "record_ordinal", "end_cursor": 10}
     state.opened_at = time.time() - 120  # 把窗口拨到已走完
     assert _wait_until(lambda: not handle.thread.is_alive(), timeout=10.0)
 
 
-# LLM: 来源提供可验证的固定ordinal上界，新增窗口外记录不能使已完成边界移动。
-# 函数用途: 验证最后一拍追平、完成标记持久化与停止后不越界读取。
+# LLM: 无人工上界的普通游标源也必须执行末次有界补拉；结束后不得继续采新数据。
+# 函数用途: 验证积压补拉、完成标记持久化及停止后的游标不变。
 def test_window_deadline_commits_one_final_cursor_catch_up(owner_home):
     source = _FakeSource()
     source.feed(10)
@@ -273,7 +272,6 @@ def test_window_deadline_commits_one_final_cursor_catch_up(owner_home):
 
     cursor_before = state.cursor
     source.feed(20)
-    state.source_envelope["finalization_boundary"] = {"cursor_semantics": "record_ordinal", "end_cursor": 30}
     state.opened_at = time.time() - 30
 
     assert hv._harvest_once(state, source.handle) == "stop"
@@ -649,8 +647,8 @@ def test_ready_notification_rearms_when_ack_catches_prior_watermark(owner_home, 
     assert notifications == [5, 2]
 
 
-# LLM: 空来源也明确声明有限ordinal上界；通知只能发生在真正提交完成标记之后。
-# 函数用途: 验证窗口完成通知恰好一次且与磁盘提交一致。
+# LLM: 空来源不注入数字上界；无界末拍完成标记必须先耐久提交再通知。
+# 函数用途: 验证普通窗口收尾通知恰好一次且与磁盘提交一致。
 def test_harvester_notifies_once_after_final_boundary_commit(owner_home, monkeypatch):
     source = _FakeSource()
     tool = _tool(owner_home, source)
@@ -661,7 +659,6 @@ def test_harvester_notifies_once_after_final_boundary_commit(owner_home, monkeyp
         background_harvest=0,
     )
     state = _state(owner_home, opened["watch_id"])
-    state.source_envelope["finalization_boundary"] = {"cursor_semantics": "record_ordinal", "end_cursor": 0}
     state.opened_at = time.time() - 60
     ws.persist_state(state)
     notifications: list[float] = []

@@ -21,16 +21,19 @@ from .runner_selection import requested_include_ids
 
 
 # LLM: runner_retry_limit 来自配置 runner_failure_retry_limit（普通失败后最多重跑几次，0 = 不重跑）；
-#   显式 include 的恢复派工另走恢复指令判定。只挑候选，不改任务、不启动 runner。
+#   无进展阈值由生产调用方传能力配置，0关闭；显式include恢复另走原判定，不启动runner。
 # 函数用途: 按本次派工上下文挑出可以启动或重跑的子代理 run。
 def _runner_candidates_for_context(
     tasks: list,
     ctx: DispatchContext,
     runner_retry_limit: int,
+    *,
+    no_progress_attempt_limit: int | None = None,
 ) -> list:
     policy = RunnerCandidatePolicy(
         runner_retry_limit=runner_retry_limit,
         background_launch_id=ctx.background_launch_id,
+        no_progress_attempt_limit=no_progress_attempt_limit,
     )
     if requested_include_ids(ctx):
         candidates = _included_normal_runner_tasks(

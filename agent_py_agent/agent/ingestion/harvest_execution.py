@@ -1,5 +1,5 @@
-# LLM: 仅原Gateway harvester source/P3/P5同步consumer执行一拍；原heldC/受限host缺scope仍拒legacy daemon回落，Count0原线程不经此入口。
-# 模块用途: 把原watch快照、来源租约和一次收割接到新请求，长网络/扫描在T外，实际提交沿原短写门。
+# LLM: 原Gateway同步consumer执行一拍；收尾只认WAL冻结结果，非收尾背压在lease/WAL前返回，原scope硬门不变。
+# 模块用途: 将原watch与请求收割接合，网络在T外，短准入门重核调度并保持冻结与收尾模式一致。
 from __future__ import annotations
 
 import hashlib
@@ -76,8 +76,8 @@ def harvester_input_revision(payload):
         sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
-# LLM: 只读原metadata与canonical next_due_at预筛；到点不能绕过已持久化退避，父Audit/背压/claim仍由consumer重核。
-# 函数用途: 为原C发现循环筛选仍需收割的持久watch。
+# LLM: 只读canonical节拍；首次到点立即冻结，已有同deadline边界则继续服从正退避，consumer仍重核。
+# 函数用途: 在不写状态的发现阶段兼顾截止唤醒与错误节拍。
 def harvester_has_due_work(payload, now):
     if payload['closed'] or payload['window_finalized_at'] > 0:
         return False
@@ -86,7 +86,9 @@ def harvester_has_due_work(payload, now):
         return False
     control = (payload.get('source_checkpoint') or {}).get('_host_harvest', {})
     due = control.get('next_due_at') if isinstance(control, dict) else None
-    if type(due) in (int, float) and math.isfinite(due) and due > now:
+    freeze_due = harvest._harvest_deadline_needs_freeze(
+        payload['opened_at'], payload['watch_window_seconds'], payload.get('source_checkpoint'), now)
+    if type(due) in (int, float) and math.isfinite(due) and due > now and not freeze_due:
         return False
     window = payload['watch_window_seconds']
     # saved_at 是上一次原收割/工具快照时间；不生成持久timer或每轮新请求号。
@@ -224,8 +226,8 @@ def _check_plan(plan):
     _check_request_ref(plan.scope, plan.ref)
 
 
-# LLM: 原T先于state.lock/intent；重核持久退避并冻结一次上界，背压只延后读取不能延后冻结；不持锁等待网络。
-# 函数用途: 领取原收割记录并建立一份本次私有计算状态。
+# LLM: 原T先于state.lock/intent；租约前时钟只做背压/节拍准入，plan收尾模式直接取同一WAL的source_boundary事实。
+# 函数用途: 检查背压和节拍后创建原事务，不因冻结后fsync跨截止而把无边界拍升级为收尾。
 def _prepare(agent, state, ref, scope, observed):
     _check_request_ref(scope, ref)
     with state.lock:
@@ -240,7 +242,13 @@ def _prepare(agent, state, ref, scope, observed):
             return 'stopped'
         control = (working.source_checkpoint or {}).get('_host_harvest', {})
         due = control.get('next_due_at') if isinstance(control, dict) else None
-        if type(due) in (int, float) and math.isfinite(due) and due > time.time():
+        now = time.time()
+        freeze_due = harvest._harvest_deadline_needs_freeze(
+            working.opened_at, working.watch_window_seconds, working.source_checkpoint, now)
+        if type(due) in (int, float) and math.isfinite(due) and due > now and not freeze_due:
+            return 'busy'
+        finalize_window = harvest._window_deadline_reached(working)
+        if not finalize_window and harvest._backpressured(working):
             return 'busy'
         lease = _claim_request_lease(state, scope, observed.lease)
         if lease is None:
@@ -251,7 +259,7 @@ def _prepare(agent, state, ref, scope, observed):
             _check_lease(state, lease)
             harvest._lease_path(state).unlink()
             raise
-        return HarvestRequestPlan(state, working, transaction, lease, harvest._window_deadline_reached(working),
+        return HarvestRequestPlan(state, working, transaction, lease, isinstance(transaction.get('source_boundary'), dict),
                                   scope, deepcopy(ref), threading.get_ident(), observed.parent)
 
 

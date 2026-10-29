@@ -1,4 +1,6 @@
 
+# LLM: 子代理状态与失败分类的公共协议；重试状态集合由记账、派发、恢复共用，不扩展撤权或关闭资格。
+# 模块用途: 导出子代理模型与统一状态判据。
 """Public dataclass exports for subagent state.
 
 Concrete model families live in narrower modules; this file is the current
@@ -69,6 +71,8 @@ class VerificationStatus(str, Enum):
     FAILED = "FAILED"
 
 
+# LLM: 失败原因仅承载结构化分类；宿主中断接续须另有exact attempt安全收口证据，不凭枚举获得重跑权。
+# 类用途: 定义子代理失败分类与审计原因。
 class FailureType(str, Enum):
     """Current structured runner failure types used by subagent orchestration."""
 
@@ -97,8 +101,8 @@ class FailureType(str, Enum):
     NO_PROGRESS_FUSE = "no_progress_fuse"
     PERMISSION_BLOCKED = "permission_blocked"
     # 宿主（Gateway）优雅停机时这个 run 的执行器还在本进程里跑，随进程退出、没有返回结果；重启收尾凭执行器上的停机记号认出它。
-    # 和 MODEL_CALL_ADMISSION_CLOSED 一样不进自动重跑名单，重启后也不会自动重跑，父级按 recovery_decision 用同一 run 续派；
-    # 仍有持久工作的 Audit 来源例外（见 HOST_SHUTDOWN_FAILURE_TYPES）。
+    # 普通失败名单不包含它；仅宿主证实exact attempt停机收口且无未知效果、recovery_safe_resume为真时可同run接续。
+    # 准入关门仍不重跑；仍有持久工作的Audit来源沿原生命周期接续（见HOST_SHUTDOWN_FAILURE_TYPES）。
     HOST_SHUTDOWN_INTERRUPTED = "host_shutdown_interrupted"
     # Account/plan quota cannot be repaired by replaying the same provider
     # request.  Keep it distinct from transient overload so durable workers
@@ -169,6 +173,12 @@ DISPATCH_INELIGIBLE_STATUSES = frozenset({
     TaskStatus.FAILED.value,
     TaskStatus.TIMEOUT.value,
     TaskStatus.CHANNEL_ERROR.value,
+})
+# 同run失败重试的唯一状态集；CHANNEL_ERROR仍由原通道恢复处理，不因复用计数被自动重派。
+SUBAGENT_RETRYABLE_FAILURE_STATUSES = frozenset({
+    TaskStatus.BLOCKED.value,
+    TaskStatus.FAILED.value,
+    TaskStatus.TIMEOUT.value,
 })
 SUBAGENT_FAILURE_STATUSES = frozenset({
     TaskStatus.BLOCKED.value,

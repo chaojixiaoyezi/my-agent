@@ -78,7 +78,7 @@ class SubAgentManagerInitParams:
     owner_policy_snapshot: dict[str, object] | None = None
 
 # LLM: 服务共享原owner/RuntimeDB/canonical；选择API每次委托新鲜扫描，协调锁仍只包短事务。
-# 类用途: 提供子代理创建、执行和实时列表入口，不维护第二份状态或整轮快照。
+# 类用途: 提供子代理创建、执行和实时列表入口；恢复配置仅引用组合根读口，不复制配置或维护状态快照。
 class SubAgentManager(SubagentKernelMixin):
     """Coordinate focused subagent services behind one manager."""
 
@@ -441,6 +441,8 @@ def _attach_services(manager: SubAgentManager) -> None:
     manager.runner_result = SubAgentRunnerResultService(manager)
 
 
+# LLM: 规范状态与owner权限沿原参数装配；恢复能力配置由组合根绑定原读口，独立旧调用用随包默认，禁止从工作区猜配置路径。
+# 函数用途: 初始化原管理器依赖并预留唯一恢复配置读取依赖。
 def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params: SubAgentManagerInitParams) -> None:
     manager.workspace = Path(workspace)
     manager.workspace.mkdir(parents=True, exist_ok=True)
@@ -458,6 +460,7 @@ def _init_manager_state(manager: SubAgentManager, workspace: str | Path, params:
     manager.candidate_service = params.candidate_service
     manager.debug_trace_level = _normalize_debug_trace_level(params.debug_trace_level)
     manager.takeover_chain_max_depth = max(0, int(params.takeover_chain_max_depth or 0))
+    manager.recovery_capability_config = None
     _apply_owner_scope(manager, params)
     _attach_runtime_db(manager)
 

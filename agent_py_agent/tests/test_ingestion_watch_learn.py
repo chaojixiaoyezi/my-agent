@@ -320,3 +320,25 @@ def test_sample_keeps_partial_error_and_coverage(tmp_path, monkeypatch):
     assert data["sample_coverage"]["returned"] == 1
     assert data["sample_coverage"]["stop_reason"] == "source_error"
     assert ws.load_state(tmp_path, state.watch_id).last_sample_digest["sample_coverage"] == data["sample_coverage"]
+
+
+# LLM: 先真实保留统计再模拟0条失败；新错误不得清空旧证据，重启回读和高频拒配仍须成立。
+# 函数用途: 防止一次失败取样解除已知高频字段保护。
+def test_empty_failed_sample_preserves_previous_field_evidence(tmp_path, monkeypatch):
+    from agent.ingestion import watch_learn as learn
+    from agent.ingestion.puller import DrainResult
+
+    state = ws.new_state(tmp_path, "https://example.invalid/feed", {})
+    good = DrainResult(events=[(i, {"status": "ok"}) for i in range(20)], cursor=20, reached_end=True)
+    monkeypatch.setattr(learn, "drain_source", lambda *_args, **_kw: good)
+    assert learn.sample_source(None, state, {"sample_count": 20}).ok
+    previous = dict(state.last_sample_digest)
+    failed = DrainResult(events=[], cursor=0, error="sample unavailable", error_code="NETWORK_REQUEST_FAILED")
+    monkeypatch.setattr(learn, "drain_source", lambda *_args, **_kw: failed)
+    result = learn.sample_source(None, state, {"sample_count": 20})
+    assert not result.ok
+    restored = ws.load_state(tmp_path, state.watch_id)
+    assert restored.last_sample_digest["fields"] == previous["fields"]
+    assert restored.last_sample_digest["sampled_at"] == previous["sampled_at"]
+    assert restored.last_sample_digest["sample_coverage"]["returned"] == 0
+    assert not learn.configure_spec(restored, {"spec": {"result_field": "status", "target_values": ["ok"]}}).ok

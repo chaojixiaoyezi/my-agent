@@ -22,6 +22,7 @@ from ...subagents.models import (
     CAPABILITY_GRANTED_BLOCKER_FAILURE_TYPES,
     PROVIDER_SUPPLY_FAILURE_TYPES,
     RETRYABLE_RUNNER_FAILURE_TYPES,
+    SUBAGENT_RETRYABLE_FAILURE_STATUSES,
     TaskStatus,
     known_failure_type,
     task_has_status,
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
 
 
 # LLM: runner_retry_limit 是普通失败后还能自动重跑几次（0 = 不重跑）；只有调度入口按配置
-#   runner_failure_retry_limit 传入，规划、能力清扫等默认策略只接续不重跑。临时供应失败另走独立上限。
+#   runner_failure_retry_limit传入；no_progress_attempt_limit由生产调用方传能力配置，0关闭，None仅兼容纯函数策略默认值。
 # 类用途: 一次挑选 runner 候选时用到的重跑上限和本次后台启动标识。
 @dataclass(frozen=True)
 class RunnerCandidatePolicy:
@@ -126,24 +127,21 @@ def _provider_supply_retry_limit(failure_type: str, *, runtime_policy: object = 
     return runtime_guard_int("provider_transient_redispatch_limit", 8, policy=runtime_policy)
 
 
-# LLM: 重跑只读canonical失败计数；旧历史unknown不猜预算，正常切片不耗额度，原停止与未知效果门不变。
+# LLM: 读取统一验证后的计数，坏账即拒绝，干净旧记录保守迁移；正常切片不耗失败额度，0仅关闭无进展熔断。
 # 函数用途: 判断一个失败的run还有没有真实重试额度。
 def _runner_retry_reason(task: SubAgentTask, runner_retry_limit: int, *, no_progress_attempt_limit: int | None = None) -> str:
 
     if user_stopped_run_is_resumable(task):
         return "reason_code=conversation_user_stop; mode=same_run_resume"
     failure_type = _runner_failure_type(task)
+    if (recovery_count(task, "recovery_history_unknown_count") or 0) > 0:
+        return ""
     effective_max = max(max(0, int(runner_retry_limit or 0)), _provider_supply_retry_limit(failure_type))
     limit = (SubagentRecoveryStrategyRequest(task).no_progress_attempt_limit
              if no_progress_attempt_limit is None else no_progress_attempt_limit)
     if _no_progress_fuse(task, limit):
         return ""
-    retryable_statuses = frozenset({
-        TaskStatus.BLOCKED.value,
-        TaskStatus.FAILED.value,
-        TaskStatus.TIMEOUT.value,
-    })
-    if not task_status_in(task.status, retryable_statuses):
+    if not task_status_in(task.status, SUBAGENT_RETRYABLE_FAILURE_STATUSES):
         return ""
     if failure_type == "host_shutdown_interrupted" and getattr(task, "_extra_fields", {}).get("recovery_safe_resume") is True:
         return "reason_code=host_shutdown_interrupted; mode=same_run_resume"
@@ -263,8 +261,7 @@ def _limit_items(items: list, limit: int) -> list:
     return list(items)[:limit]
 
 
-# LLM: This is the single runner candidate gate. A typed direct-child wait is
-# an intentional suspension, not an orphan; prose and task-progress never enter.
+# LLM: 唯一候选门先拒坏恢复账，再按显式配置检查无进展熔断；真实等孩子不是孤儿，不读正文/进度猜资格。
 # 函数用途: 判断一个子代理 run 能否被启动或恢复，并排除正常等孩子的父级。
 def _is_dispatch_runner_candidate(
     task: SubAgentTask,
@@ -273,6 +270,8 @@ def _is_dispatch_runner_candidate(
 ) -> bool:
 
     effective_policy = candidate_policy(policy)
+    if (recovery_count(task, "recovery_history_unknown_count") or 0) > 0:
+        return False
     if not _source_worker_dispatch_allowed(task):
         return False
     from ...subagents.direct_parent_lifecycle import parent_wait_blocks_dispatch

@@ -1,5 +1,5 @@
-# LLM: T外仅操作一次收割的私有state/DrainResult/引擎结果；物理写只由原Gateway短门调用commit，不持久化第二plan账。
-# 模块用途: 分开网络及长扫描与原spool/audit/cursor事务，复用原结构化来源和引擎，不添加业务判定。
+# LLM: T外只操作私有state和结果；commit复用原宿主checkpoint及有限/无界收尾判据，不另建plan账。
+# 模块用途: 分开长读取与原事务提交，保持两条采集入口边界语义一致。
 from __future__ import annotations
 
 import time
@@ -48,8 +48,8 @@ def prepare_harvest_plan(plan, fetch_json):
     return drain, chunks
 
 
-# LLM: 原T/state.lock/lease/intent门不变；写所有原文件后发布游标，仅真实追平固定上界才finalize，错误退避同事务保存。
-# 函数用途: 将一拍计算结果按原事务顺序写到fragment、spool、audit及唯一state快照。
+# LLM: 原T/state.lock/lease/intent门不变；来源checkpoint保住宿主键，有限追平或无界末拍成功才收尾，错误待重试。
+# 函数用途: 按原顺序提交记录与游标，并保存准确的complete/partial窗口终态。
 def commit_harvest_plan(plan, drain, chunks):
     state, transaction = plan.working, plan.transaction
     harvest._assert_active_harvest_transaction(state, transaction)
@@ -70,14 +70,14 @@ def commit_harvest_plan(plan, drain, chunks):
             raise OSError('audit ledger append failed')
     state.cursor = drain.cursor
     if isinstance(drain.source_checkpoint, dict):
-        state.source_checkpoint = deepcopy(drain.source_checkpoint)
+        state.source_checkpoint = harvest._merge_harvest_checkpoint(state, drain.source_checkpoint)
     state.line_cursor = int(getattr(drain, 'aux_cursor', 0) or 0)
     if float(getattr(drain, 'fetched_at', 0) or 0) > 0:
         state.last_poll_at = float(drain.fetched_at)
     state.last_reached_end = drain.reached_end
     state.totals['gap_events'] += drain.gap_events
-    if plan.finalize_window and drain.reached_end and not drain.incomplete_fragment:
-        state.window_finalized_at = time.time()
+    if plan.finalize_window:
+        harvest._finalize_harvest_window(state, drain)
     harvest._record_harvest_schedule(state, drain)
     harvest._update_ingest_throughput(state, now=time.time())
     harvest._commit_harvest_transaction(state, transaction)

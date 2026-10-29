@@ -1,3 +1,9 @@
+## 2026-10-29 e905 sol-6 Round 1：恢复预算与采集边界修复（源码候选，未部署）
+
+来源：`07-tasks/fix-e905-sol-6-r1.md`、F1–F16 与 Astra-2 F5。普通/provider 重试与审计 attempts 分离，BLOCKED 失败同源扣账；干净 legacy 显式结构化迁移，损坏元组首次只读 load 即 fail-closed。无进展为宿主证实的失败累计，观察未知单列，并在正式恢复回执/原账本保留；阈值 0 关闭，派发、启动 preflight、树与恢复编排共用原能力配置来源。
+
+采集沿原 checkpoint/WAL：文件轮转代次、同事务冻结与 finalize 事实绑定；无数值终点的 cursor/adapter 最终有界补拉后明确 partial/unbounded 收口，不伪造全部数据完整。背压前置、deadline 唤醒、宿主控制信息合并及失败空样本旧证据保留。缓存 locator/canonical 双信任龄，删除无生产调用采样包装。详细字段、迁移、边界和未验范围见[恢复与采集合同](docs/design/SUBAGENT_RECOVERY_HARVEST.md)；验证及复现见 `TESTS.md`。不代表已部署、真实 Gateway 重启或外部网络 E2E 已验收。
+
 ## 2026-10-28 Wave 9 Item 9：12 域兼容的渐进能力寻址与初始提示瘦身（已集成，未部署）
 
 来源：`07-tasks/wave9-item9.md` 与 `batch_20261028_features_and_bugfixes_plan.md` Item 9，在集成工作树 `/tmp/wt-wave9-integrated`（`wave9-integrated`）落地。

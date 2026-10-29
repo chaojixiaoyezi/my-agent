@@ -59,7 +59,7 @@ AUDIT_SAMPLE_GUIDANCE = (
 )
 
 
-# LLM: 部分成功可返回可用样本，但原始错误和覆盖事实必须与同一批统计共同保存；不推进正式游标。
+# LLM: 部分成功保存本次统计；0条失败只更新覆盖/错误，保留旧fields及其原取样时间，不推进正式游标。
 # 函数用途: 返回带完整性回执的取样结果，失败不伪装成来源没有数据。
 def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> ToolHandlerOutcome:
     """抓一批原始样本(从源滚动缓冲最旧处顺读,不动盯守游标),给模型学判据。
@@ -70,7 +70,8 @@ def sample_source(fetch_json, state: WatchState, params: dict[str, Any]) -> Tool
     stats = _field_stats(events)
     if not state.audit_guarantee:
         with state.lock:
-            state.last_sample_digest = {**_sample_cache(len(events), stats), "sample_coverage": coverage}
+            digest = dict(state.last_sample_digest) if error and not events else _sample_cache(len(events), stats)
+            state.last_sample_digest = {**digest, "sample_coverage": coverage, "error": error, "error_code": error_code}
             persist_state(state)
     payload = {
         "ok": True,

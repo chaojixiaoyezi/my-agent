@@ -1,3 +1,29 @@
+## 2026-10-29 e905 sol-6 Round 1：恢复预算、首次只读坏账与采集边界
+
+来源：`fix-e905-sol-6-r1.md` 与 `steer-c15-sol6-f5.md`；基于 `ee2113192c28cd7cf7d89f8528458d3a27551565` 继续返工，原任务基线为 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。目标分支 `opt-e905/sol-6`，不推送、部署、启停真实服务。
+
+- F1/F2/F3/Astra-2 F5：真实 prepare + result 提交制造 BLOCKED 解析失败和供应断供，守住普通/provider 预算；旧相邻派发测试不改断言。只读 load 覆盖 bool/负数/非整数/部分字段/矛盾总和/缺原始 attempts；读前后 canonical 字节不变。干净 legacy 全缺字段按保守 total-1 迁移并在正常保存时写结构化来源，不能把坏账当旧格式。
+- F4/F5/F6/F8：未知观察独立记账，正式恢复报告与原恢复 JSONL 保留；所有生产派发构造、真实启动 preflight、树恢复及编排阈值一致，0 不被默认 4 覆盖。通过真实组合根和临时准确覆盖配置测试 0/10/2，读取实际 prepare 后指令，不调用模型。累计文案、宿主关闭注释及 canonical 扩展字段设计同步。
+- F7/F9：locator/canonical 双 mtime 信任龄；根匹配回退沿原 strip 规则。
+- F10/F11/F13：恢复原有三条无人工上界窗口 fixture；无界 cursor/adapter 必须实际最终补拉后 partial/unbounded 收口，错误不假完成。显式 ordinal 上界继续单测；首次冻结前大小不同的文件原子换代、冻结后换源以及入口/WAL 跨 deadline 两种次序分别验证，不能越过冻结目标或回退已提交游标。
+- F12/F14/F15/F16：非截止背压在 lease/WAL 前返回，截止后仍正退避；空失败样本保留旧 fields；drain/inline 更新来源 checkpoint 时严格保留宿主控制字段且不接纳来源伪造控制；adapter 完整合同断言同时保留全部原去重/游标/spool/raw 记录断言；删除死采样包装，测试真实 drain 原语。
+
+复评补强：坏账已有有效 refs 时，策略与正式编排/原账本必须返回准确的 unknown-history 人工复核原因，不得仍建议自动派发，也不得冒充无进展熔断。20 个只读坏账参数化用例先全部失败后修正；保留 load 前后 canonical 字节不变。用户停止旧夹具保留 99 次审计次数和全部原恢复断言，改为先构造完整既存 canonical 历史再正常 load/save，额外断言无坏账；不以一次 save 跳 99 轮制造 unknown，更不放开生产坏账门。
+
+当前候选的实际结果：指定 10 文件 `.pytest_cache/r1-final-required-v2.xml` 为 **224 passed**；额外 8 文件 `.pytest_cache/r1-final-extra.xml` 为 **167 passed**，合计 **391 项**，两批均 0 failure/error/skip。首次合并指定套件为 223 通过/1 失败，唯一失败即上述停止夹具，修正输入后重跑同一完整入口。计数均由 JUnit 解析核对。AST 双层注释盘点相对本轮起点为 29 模块/98 个改动定义，原指定基线为 30 模块/141 个定义，均无缺口；记录在 `.pytest_cache/r1-final-comment-inventory.json`。独立最终复评仅静态核对四项指定风险，未发现阻止本轮收口的问题，不冒称其独立运行了测试。
+
+复现（工作树根执行；相关结果以最后交接报告的当前版本 JUnit 为准）：
+```bash
+python3 -m pytest agent_py_agent/tests/test_opt_recovery_counters.py agent_py_agent/tests/test_opt_harvest_resume.py agent_py_agent/tests/test_config_cache_resource_budget.py agent_py_agent/tests/test_executor_exit_recovery.py agent_py_agent/tests/test_ingestion_harvester.py agent_py_agent/tests/test_ingestion_watch_learn.py agent_py_agent/tests/test_subagent_recovery_strategy.py agent_py_agent/tests/test_runner_dispatch.py agent_py_agent/tests/test_runner_dispatch_candidates.py agent_py_agent/tests/test_subagent_incomplete_continuation.py -q --tb=short
+python3 -m pytest agent_py_agent/tests/test_subagent_recovery_orchestrator.py agent_py_agent/tests/test_subagent_hierarchy_recovery.py agent_py_agent/tests/test_source_adapter.py agent_py_agent/tests/test_ingestion_sources.py agent_py_agent/tests/test_watch_audit_guarantee.py agent_py_agent/tests/test_watch_spool_takeover.py agent_py_agent/tests/test_ingestion_full_read.py agent_py_agent/tests/test_watch_judge_backpressure.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/check_doc_sync.py --base HEAD
+git diff --check
+```
+
+受控临时源/本地生命周期测试不等于真实 Gateway 重启接续、外部 cursor/adapter 网络、跨机器或 Windows 验收；未跑全仓 pytest。不删除、skip 或放宽坏账/边界/去重断言来做绿；独立复核结果及红绿证据留在交接报告。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

@@ -23,17 +23,19 @@ from ..recovery_eligibility import user_stopped_run_is_resumable
 from .recovery.strategy import (
     SubagentRecoveryStrategyRequest,
     build_subagent_recovery_strategy,
+    manager_no_progress_attempt_limit,
 )
 
 
 # LLM: 原创建锁覆盖 canonical 复读、准确激活和投影；文件消费与活动指针同次 mutate，先核对身份才可恢复链接与 Goal。
-# 函数用途: 在同一短事务里准备新执行轮和恢复目标，避免取消或插话在换代中间插入。
+# 函数用途: 用原配置阈值生成恢复指令，在同一短事务里准备执行轮和恢复目标，避免取消或插话换代竞态。
 # LLM: 原T/P3/P5短门先于既有业务锁；Count0零新增IO，保main原CAS/owner/attempt与用户确认，未知不自动写失败或释放。
 # 函数用途: 在原请求仍有效时完成这次已有写入，不持门等待模型或新建执行身份。
 def prepare_runner_attempt(
     manager: object, run_id: str, *, retry_reason: str = "",
     expected_attempt_id: str | None = None,
 ) -> SubAgentTask:
+    no_progress_limit = manager_no_progress_attempt_limit(manager)
     with gateway_short_transaction('child_attempt_prepare'):
         with manager.creation_guard():
             task = manager.load(run_id)
@@ -41,7 +43,7 @@ def prepare_runner_attempt(
             _assert_runner_attempt_start_allowed(task, resumable_user_stop=resumable_user_stop)
             previous = f"{task.status}/{task.failure_type or 'none'}"
             strategy = build_subagent_recovery_strategy(
-                SubagentRecoveryStrategyRequest(task=task)
+                SubagentRecoveryStrategyRequest(task=task, no_progress_attempt_limit=no_progress_limit)
             )
             attempt_id, runtime_task_id = _runtime_attempt_identity(manager, task, expected_attempt_id)
             if resumable_user_stop:

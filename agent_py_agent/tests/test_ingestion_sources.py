@@ -1,3 +1,5 @@
+# LLM: 文件头采样直接验证生产drain_file_source原语；其余来源与工具回归保留原断言和隔离fixture。
+# 模块用途: 覆盖文件记录边界、采样预算、续读和快照来源行为。
 """多形态数据源钉子:file 源(读大文件/日志 tail)+ poll 源(定时查快照接口)
 + judgment_note 轻量记忆(教一次别重教)。
 
@@ -29,7 +31,6 @@ from agent.ingestion.sources import (
     drain_watch_source,
     file_fragment_path,
     normalize_file_url,
-    sample_file_lines,
     source_kind,
 )
 from agent.ingestion.watch_tool import WatchStreamTool
@@ -148,10 +149,13 @@ def test_file_drain_missing_file_reports_error(tmp_path: Path):
     assert drain.error and not drain.events
 
 
+# LLM: 从0开始传入10条预算直接调用生产原语，不通过死包装；保留原样本内容和数量断言。
+# 函数用途: 验证文件头取样不会超过预算且不改变其它watch的正式游标。
 def test_file_sample_reads_head_without_cursor(tmp_path: Path):
     log = tmp_path / "big.log"
     log.write_text("".join(f'{{"n":{i}}}\n' for i in range(50)), encoding="utf-8")
-    events, error = sample_file_lines(log, 10)
+    drain = drain_file_source(log, 0, 0, _budget(max_events=10))
+    events, error = [event for _seq, event in drain.events], drain.error
     assert error == "" and len(events) == 10
     assert events[0] == {"n": 0}
 
