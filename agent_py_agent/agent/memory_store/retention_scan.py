@@ -31,7 +31,7 @@ from .candidates import (
     candidate_retention_eligible,
 )
 from .curator_run_log import _CURSOR_CHECKPOINT, _CURSOR_DELTA
-from .reference_pins import watch_pin_source
+from .reference_pins import target_pin_read, target_pin_read_enabled, watch_pin_source
 from .retention_models import (
     TASK_TERMINAL_STATUSES,
     MemoryRetentionAction,
@@ -562,12 +562,69 @@ def _recovery_roots(home: object) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(roots))
 
 
-# LLM: 固定一/二层发现不进入任务tmp/inputs；父链有链接则拒绝，绝不借glob跟随到外部。
-# 函数用途: 枚举旧扁平和日期分组两种规范布局的精确相对路径。
-def _fixed_depth_paths(root: Path, suffix: str):
-    paths = (*root.glob(f"*/*/{suffix}"), *root.glob(f"*/{suffix}"))
-    return sorted({path for path in paths if not any(
-        part.is_symlink() for part in (path, *path.parents) if part == root or root in part.parents)})
+# LLM: 只枚举本层目录且记录发现代次；仅ENOENT为空，权限/IO/链接/特殊类型必须上抛，不进入scratch正文。
+# 函数用途: 严格列出一个发现目录下的普通子目录，避免glob吞错。
+def _discovery_directories(root: Path):
+    watch_pin_source(root)
+    try:
+        info = root.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return ()
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(22, "unsafe task discovery directory", str(root))
+    children = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                try:
+                    member = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    # 一个成员消失不代表整个发现目录为空，继续检查其余活跃任务。
+                    continue
+                if stat.S_ISDIR(member.st_mode):
+                    children.append(Path(entry.path))
+                elif not stat.S_ISREG(member.st_mode):
+                    raise OSError(22, "unsafe task discovery member", entry.path)
+    except FileNotFoundError:
+        return ()
+    return tuple(sorted(children))
+
+
+# LLM: 精确suffix父链逐段lstat且监视缺失路径；work已存在而首次state发表也会使快照失效。
+# 函数用途: 检查任务的规范状态/临时目录，不递归枚举其中内容。
+def _discovery_suffix(base: Path, suffix: str):
+    path = base
+    for part in Path(suffix).parts:
+        path = path / part
+        watch_pin_source(path)
+        try:
+            info = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(info.st_mode) and (path.name != "state.json" or not stat.S_ISREG(info.st_mode)):
+            raise OSError(22, "unsafe task discovery suffix", str(path))
+    return path
+
+
+# LLM: 一/二层有界发现共用显式scandir；计划记录错误而pin调用上抛使complete=False，不递归任务内容；不得按合法任务名过滤。
+# 函数用途: 枚举扁平和日期分组任务的精确路径并监视work及缺失state。
+def _fixed_depth_paths(root: Path, suffix: str, errors=None):
+    paths = set()
+    try:
+        for child in _discovery_directories(root):
+            path = _discovery_suffix(child, suffix)
+            if path is not None:
+                paths.add(path)
+            for nested in _discovery_directories(child):
+                path = _discovery_suffix(nested, suffix)
+                if path is not None:
+                    paths.add(path)
+    except OSError as exc:
+        if errors is None:
+            raise
+        errors.append(_state_error("MEMORY_RETENTION_TASK_DISCOVERY_UNREADABLE", Path(exc.filename or root)))
+        return []
+    return sorted(paths)
 
 
 # LLM: 仅发现owner内两个规范DB位置，读取失败、链接或任何活跃锁均保守关闭，不创建DB或改PRAGMA持久设置。
@@ -665,7 +722,7 @@ def task_scratch_unlocked(home, task_root, held, now):
     return True
 
 
-# LLM: 只允许tasks/<date>/<task>/tmp，顶层output/inputs/work及文件从不作为目标；policy零关闭。
+# LLM: 只允许tasks/<date>/<task>/tmp；规划消费严格pin，坏源或任一子证据引用保护整棵，policy零关闭。
 # 函数用途: 规划三日闲置任务临时文件和空目录回收。
 def _task_tmp_actions(context, excluded):
     days = context.policy.task_tmp_idle_days
@@ -673,7 +730,12 @@ def _task_tmp_actions(context, excluded):
         return []
     cutoff = context.now.timestamp() - days * _DAY_SECONDS
     actions = []
-    for root in sorted(Path(context.home.owner_tasks_dir).glob("*/*/tmp")):
+    pins, complete = current_retention_pins(context.home, context.conversation_roots, context.errors, now=context.now)
+    if not complete and not pins.complete_for(Path(context.home.owner_tasks_dir), context.errors):
+        return []
+    for root in _fixed_depth_paths(Path(context.home.owner_tasks_dir), "tmp", context.errors):
+        if len(root.relative_to(Path(context.home.owner_tasks_dir)).parts) != 3 or pins.protects(root, context.errors):
+            continue
         if (any(part.is_symlink() for part in (root, root.parent, root.parent.parent))
                 or _inside_any(root, excluded)
                 or not task_scratch_unlocked(context.home, root.parent, context.held_task_ids, context.now)):
@@ -689,7 +751,7 @@ def _task_tmp_actions(context, excluded):
     return actions
 
 
-# LLM: 仅runs规范根中DB能证实的终态处理scratch；保留整个运行档案、output/inputs和顶层文件。
+# LLM: runs仅DB/状态证实终态且pin完整无子证据引用才清scratch，保留运行档案与output/inputs。
 # 函数用途: 将旧RUNNING档案的tmp/中间工具产物接入原留存计划。
 def _run_scratch_actions(context, excluded):
     days = context.policy.tmp_days
@@ -698,7 +760,10 @@ def _run_scratch_actions(context, excluded):
     cutoff = context.now.timestamp() - days * _DAY_SECONDS
     actions = []
     runs = Path(context.home.owner_home_dir) / "runs"
-    for authority in _fixed_depth_paths(runs, "work/state.json"):
+    pins, complete = current_retention_pins(context.home, context.conversation_roots, context.errors, now=context.now)
+    if not complete and not pins.complete_for(runs, context.errors):
+        return []
+    for authority in _fixed_depth_paths(runs, "work/state.json", context.errors):
         root = authority.parent.parent
         if _inside_any(root, excluded):
             continue
@@ -711,6 +776,8 @@ def _run_scratch_actions(context, excluded):
         if terminal is None or terminal[1] is None or terminal[1] >= cutoff or not _runtime_unlocked(context.home, context.now):
             continue
         for scratch in (root / "tmp", root / "work/tmp", root / "work/blobs/tool_outputs"):
+            if pins.protects(scratch, context.errors):
+                continue
             if not scratch.exists() or scratch.is_symlink():
                 continue
             try:
@@ -726,14 +793,12 @@ def _run_scratch_actions(context, excluded):
     return actions
 
 
-# LLM: 只枚举两个规范根下的 work/state.json；根不存在就跳过，不跟随符号链接，也不解析目录名。
+# LLM: 只枚举规范根下state，显式发现错误交调用方记录或上抛，不能把不可读当缺失。
 # 函数用途: 逐个产出恢复根与其下的任务状态文件路径。
-def _iter_task_states(home: object):
+def _iter_task_states(home: object, errors=None):
     owner_home = Path(home.owner_home_dir)
     for root in _recovery_roots(home):
-        if not root.exists():
-            continue
-        for state_path in _fixed_depth_paths(root, "work/state.json"):
+        for state_path in _fixed_depth_paths(root, "work/state.json", errors):
             task_root = state_path.parent.parent
             # 路径必须正好落在 workspace_paths 认定的规范深度上；深一层或浅一层都不算任务根。
             if canonical_task_root(owner_home, task_root) is None:
@@ -756,7 +821,7 @@ def _task_actions(
     cutoff = now.timestamp() - policy.completed_task_days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
     selected: set[Path] = set()
-    for root, state_path in _iter_task_states(home):
+    for root, state_path in _iter_task_states(home, errors):
         task_root = state_path.parent.parent
         state = _read_state(state_path, errors, code="MEMORY_RETENTION_TASK_STATE_INVALID")
         if state is None or not _safe_child(task_root, root) or task_root.is_symlink():
@@ -819,7 +884,7 @@ def _tool_output_actions(
     # 本片只扩 completed_task；tool output 侧维持原范围（仅旧 O/tasks），不随恢复根一起扩。
     root = Path(home.owner_tasks_dir)
     owner_home = Path(home.owner_home_dir)
-    for state_path in _fixed_depth_paths(root, "work/state.json"):
+    for state_path in _fixed_depth_paths(root, "work/state.json", errors):
         task_root = state_path.parent.parent
         # 只收窄：任务根必须落在规范深度上。运行中任务的 output 里嵌套一份「像任务」的目录
         # （带终态 state.json）时，它下面的 blobs/tool_outputs 不能被当成任务根移走（dev 2026-09-29）。
@@ -887,7 +952,7 @@ def _subagent_scratch_actions(
     owner_home = Path(home.owner_home_dir)
     cutoff = now.timestamp() - policy.subagent_scratch_days * _DAY_SECONDS
     actions: list[MemoryRetentionAction] = []
-    for agents_dir in _fixed_depth_paths(task_root_dir, "work/agents"):
+    for agents_dir in _fixed_depth_paths(task_root_dir, "work/agents", errors):
         task_root = agents_dir.parent.parent
         # 只收窄：同上，嵌套的「像任务」目录不算任务根，它下面的子代理 inbox 不能被动。
         if canonical_task_root(owner_home, task_root) is None:
@@ -1166,7 +1231,7 @@ def _expired_file_actions(
     return actions
 
 
-# LLM: purge只接受tombstone的moved_at，且当前pin完整并不再引用原路径/回收正文时才规划。
+# LLM: purge只接受moved_at；全局竞态可作一次目标FD快照复核，来源坏或相关引用仍保留，不能直接忽略complete。
 # 函数用途: 规划回收站最终删除，保留宽限期内重新被引用的材料。
 def _trash_actions(
     *,
@@ -1194,7 +1259,7 @@ def _trash_actions(
             if protection is None:
                 protection = current_retention_pins(home, conversation_roots, errors, now=now)
             pins, complete = protection
-            if not complete or trash_payload_pinned(pins, container, errors):
+            if (not complete and not pins.complete_for(container, errors)) or trash_payload_pinned(pins, container, errors):
                 continue
             actions.append(
                 _action(
@@ -1490,6 +1555,26 @@ class _RetentionPins:
     home: Path
     paths: set[Path] = field(default_factory=set)
     ids: set[str] = field(default_factory=set)
+    complete: bool = True
+    target_rebuild: Any = field(default=None, repr=False)
+    verified_targets: set[Path] = field(default_factory=set, repr=False)
+
+    # LLM: 只为确切目标重核全体来源；仅开读前追加可采用新FD快照，损坏/不可读/读中变化始终False。
+    # 函数用途: 将无关的读取起点竞态与目标保护解耦，绝不从源位置猜没有引用。
+    def complete_for(self, path: Path, errors: list[MemoryRetentionError]) -> bool:
+        target = path.resolve(strict=False)
+        if self.complete or target in self.verified_targets:
+            return True
+        if self.target_rebuild is None:
+            return False
+        with target_pin_read():
+            recovered, complete = self.target_rebuild(errors)
+        if not complete:
+            return False
+        self.paths.update(recovered.paths)
+        self.ids.update(recovered.ids)
+        self.verified_targets.add(target)
+        return True
 
     # LLM: 只收引用元数据；相对路径同时按owner和来源目录解释，保守多保护、不扩大删除范围。
     # 函数用途: 递归收集引用容器里的路径和ID，忽略摘要等正文。
@@ -1551,7 +1636,7 @@ class _PinReadChanged(OSError):
     pass
 
 
-# LLM: JSONL逐行释放而不物化全账本；源须普通文件且FD/路径首末一致，完整消费后方可认定零pins。
+# LLM: 正常读须完整代次一致；目标复核只容同inode在open前追加，以打开后FD为新起点，首末变化/缩短仍拒绝。
 # 函数用途: 流式严格读取pin来源；提前停止者须close，函数不创建锁或写文件。
 def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
     try:
@@ -1564,7 +1649,11 @@ def _pin_rows(path: Path, *, required: bool = False, jsonl: bool | None = None):
     if not stat.S_ISREG(before.st_mode):
         raise OSError("pin source is not a regular file")
     with io.TextIOWrapper(_fingerprint_source(path), encoding="utf-8") as source:
-        if _file_identity(before) != _file_identity(os.fstat(source.fileno())):
+        opened = os.fstat(source.fileno())
+        if target_pin_read_enabled() and (before.st_dev, before.st_ino, before.st_mode) == (
+                opened.st_dev, opened.st_ino, opened.st_mode) and opened.st_size >= before.st_size:
+            before = opened
+        if _file_identity(before) != _file_identity(opened):
             raise _PinReadChanged(11, "pin source changed before reading", str(path))
         is_jsonl = jsonl if jsonl is not None else path.suffix == ".jsonl"
         rows = (json.loads(line) for line in source if line.strip()) if is_jsonl else (json.load(source),)
@@ -1620,20 +1709,17 @@ def _formal_memory_pins(home: object, pins: _RetentionPins, now: datetime) -> No
             pins.collect({"source": record.source, "attributes": record.attributes}, path)
 
 
-# LLM: 活跃/未知任务和法律保留任务的引用始终保护；坏state不跳过，整组pin视图关闭。
+# LLM: 发现监视work/缺失state；法律保留优先，runs的DB终态只解除非hold运行的隐式根保护，显式证据仍保留。
 # 函数用途: 收集规范恢复任务状态引用与受保护恢复根。
-def _task_reference_pins(home: object, policy: MemoryRetentionPolicy, pins: _RetentionPins) -> None:
-    for root in _recovery_roots(home):
-        watch_pin_source(root)
-        for child in root.glob("*"):
-            if child.is_dir() and not child.is_symlink():
-                watch_pin_source(child)
-                for nested in child.glob("*"):
-                    if nested.is_dir() and not nested.is_symlink() and nested.name not in {"tmp", "inputs", "output"}:
-                        watch_pin_source(nested)
+def _task_reference_pins(home: object, policy: MemoryRetentionPolicy, pins: _RetentionPins, now: datetime) -> None:
     for _root, path in _iter_task_states(home):
         row = _pin_object(path)
         status = str(row.get("status") or "").upper()
+        if (status == "RUNNING" and path.is_relative_to(Path(home.owner_home_dir) / "runs")
+                and row.get("task_id") not in policy.legal_hold_task_ids
+                and runtime_terminal(home, path.parent.parent, row, now) is not None):
+            pins.collect(row, path)
+            continue
         if status not in TASK_TERMINAL_STATUSES or row.get("task_id") in policy.legal_hold_task_ids:
             pins.paths.add(path.parent.parent.resolve(strict=False))
             pins.collect(row, path)
@@ -1674,7 +1760,7 @@ def _curator_reference_pins(curator: Path, pins: _RetentionPins) -> None:
                 pins.paths.add(path.resolve(strict=False))
 
 
-# LLM: 每次重建并核候选schema/重复ID和同owner冷详情；坏冷源complete=False；版本游标整片pin保跨日链，不按年龄裁断。
+# LLM: 正常读取最多三次退避；持续起点竞态保留目标重核入口，只有全源新FD快照完整才可解除特定域阻塞。
 # 函数用途: 扫描和执行前重核完整证据引用与游标链，冷归档损坏时关闭相关清理而非当作没有引用。
 def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[MemoryRetentionError],
                            *, now: datetime) -> tuple[_RetentionPins, bool]:
@@ -1687,7 +1773,16 @@ def current_retention_pins(home: object, roots: tuple[Path, ...], errors: list[M
                 continue
             errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(exc.filename or ""),
                                               "pin file remained unstable after three retries"))
-    return _RetentionPins(Path(home.owner_home_dir)), False
+    # LLM: 仅由已证实代次竞争触发，不为坏JSON或权限错误增设重试；作用域限定本次调用与owner。
+    # 函数用途: 在目标需要判定时严格重读全体来源一次。
+    def rebuild(target_errors):
+        try:
+            return _current_retention_pins_once(home, roots, target_errors, now=now)
+        except _PinReadChanged as exc:
+            target_errors.append(_state_error("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", Path(exc.filename or home.owner_home_dir)))
+            return _RetentionPins(Path(home.owner_home_dir), complete=False), False
+
+    return _RetentionPins(Path(home.owner_home_dir), complete=False, target_rebuild=rebuild), False
 
 
 # LLM: 单次流式读取仍严格校验全部来源；并发代次错误交外层有界重试，其余错误立即关闭相关引用域。
@@ -1713,7 +1808,7 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
                 candidate = _hydrate_candidate(candidate_path, candidate)
                 row = candidate.to_record()
             pins.collect(row, candidate_path)
-        _task_reference_pins(home, policy, pins)
+        _task_reference_pins(home, policy, pins, now)
         _conversation_reference_pins(home, _conversation_roots(home, roots), pins)
         curator = Path(home.owner_memory_curator_runs_dir)
         _curator_reference_pins(curator, pins)
@@ -1725,6 +1820,7 @@ def _current_retention_pins_once(home: object, roots: tuple[Path, ...], errors: 
     except (CandidateStoreCorruptError, OSError, ValueError, TypeError, KeyError, IndexError) as exc:
         errors.append(MemoryRetentionError("MEMORY_RETENTION_PIN_SOURCE_UNREADABLE", str(getattr(exc, "filename", "") or ""),
                                           type(exc).__name__))
+        pins.complete = False
         return pins, False
     return pins, True
 

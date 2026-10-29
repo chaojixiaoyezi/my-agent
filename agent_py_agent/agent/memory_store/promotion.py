@@ -53,7 +53,11 @@ from ..common.tool_output_paths import tool_output_index_paths_for_lookup
 from ..conversation.learning_source import projection_is_learnable
 from ..io.cursor_cache import CursorCache, file_stamp
 from ..user_space.owner_policy import read_learning_exclusions
-from ..user_space.owner_quota import OwnerQuotaAdmission
+from ..user_space.owner_quota import (
+    OwnerQuotaAdmission,
+    OwnerQuotaExceeded,
+    OwnerQuotaLockContention,
+)
 from .candidate_models import (
     MemoryCandidate,
     MemoryScope,
@@ -971,8 +975,8 @@ class MemoryPromotionService(_PromotionCommitMixin):
             rows = self.candidates.readonly_rows(statuses={"pending_review", "approved"}, limit=limit)
             return tuple(self.promote(row.candidate_id, automatic=True) for row in rows)
 
-    # LLM: 来源/证据/权威先核；治理阻断登记原审核队列，不改变候选状态，正式写前仍锁内复核。
-    # 函数用途: 准备默认落点与批准，兼容显式旧补全覆盖；精确恢复旧提交并登记治理责任。
+    # LLM: 来源/证据/权威/自动政策先核；准备失败同正式提交登记义务，未知执行异常原样传播不自动重放。
+    # 函数用途: 准备默认落点与批准，持久保留通过核门后被暂态存储或CAS阻断的提交责任。
     def _promote_snapshot(
         self,
         candidate_id: str,
@@ -1012,11 +1016,16 @@ class MemoryPromotionService(_PromotionCommitMixin):
             if policy_code:
                 _register_automatic_governance_review(self, candidate, policy_code)
                 return MemoryPromotionResult(candidate_id, False, candidate.status, policy_code)
-            candidate = self._apply_automatic_policy(candidate, reviewer)
+            try:
+                candidate = self._apply_automatic_policy(candidate, reviewer)
+            except _UNCERTAIN_PROMOTION_ERRORS:
+                raise
+            except CandidateStateChangedError:
+                return _defer_promotion_failure(self, candidate, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+            except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+                return _defer_promotion_failure(self, candidate, _recoverable_promotion_reason(exc))
         if candidate.status != "approved":
             return MemoryPromotionResult(candidate_id, False, candidate.status, "REVIEW_REQUIRED")
-        if _promotion_target(candidate) == "long_term":
-            _register_condense_debt(self.long_term, self.candidates, self.coordinator_io)
         return _commit_promotion_result(self, candidate, reviewer, confirmed)
 
     # LLM: 默认同次CAS补落点并批准；显式旧fill覆盖先消费其真实结果，不替它改写none，仍须完整快照CAS。
@@ -1411,13 +1420,15 @@ __all__ = [
 ]
 
 
-# LLM: 仅分类失败转回执；最终治理阻断在退出业务锁后登记原待审队列，不伪装已晋升或提交成功。
-# 函数用途: 把提交与清理的不同终态转换为准确晋升回执。
+# LLM: 正式提交前治理标记也受暂态失败处理；未知异常不得转义务重放，CAS不覆盖新终态。
+# 函数用途: 把提交与清理的不同终态转换为准确回执，并持久保留已核候选的履约退避。
 def _commit_promotion_result(service, candidate, reviewer, confirmed):
     from ._jsonl_indexing import RemovalCleanupError
 
     candidate_id = candidate.candidate_id
     try:
+        if _promotion_target(candidate) == "long_term":
+            _register_condense_debt(service.long_term, service.candidates, service.coordinator_io)
         outcome, promoted = service._commit_with_conflict_handling(
             candidate, reviewer, confirmed
         )
@@ -1429,21 +1440,50 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
                                      formal_memory_changed=exc.formal_memory_changed)
     except _PromotionBlocked as exc:
         if exc.status == candidate.status and candidate.status == "approved":
-            service.candidates.defer_commit(candidate, exc.reason_code)
+            result = _defer_promotion_failure(service, candidate, exc.reason_code)
+        else:
+            result = MemoryPromotionResult(candidate_id, False, exc.status, exc.reason_code)
         _register_automatic_governance_review(service, candidate, exc.reason_code)
-        return MemoryPromotionResult(
-            candidate.candidate_id,
-            False,
-            exc.status,
-            exc.reason_code,
-        )
-    except (OSError, TimeoutError) as exc:
-        # 未结运输/执行异常由原外层处理，绝不能标普通IO后重放。
-        if isinstance(exc, _UNCERTAIN_PROMOTION_ERRORS):
-            raise
-        service.candidates.defer_commit(candidate, "PROMOTION_IO_BLOCKED")
-        return MemoryPromotionResult(candidate_id, False, candidate.status, "PROMOTION_IO_BLOCKED")
+        return result
+    except _UNCERTAIN_PROMOTION_ERRORS:
+        raise
+    except CandidateStateChangedError:
+        return _defer_promotion_failure(service, candidate, "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+    except (OSError, OwnerQuotaExceeded, OwnerQuotaLockContention) as exc:
+        return _defer_promotion_failure(service, candidate, _recoverable_promotion_reason(exc))
     return service._finalize_promotion(promoted, reviewer, outcome)
+
+
+# LLM: 仅按异常类型分类已确认可恢复的失败，不从异常文字或超时推断执行状态；未知类型由调用方先排除。
+# 函数用途: 为批准准备和正式写入返回一致的IO、锁及容量退避原因。
+def _recoverable_promotion_reason(error):
+    if isinstance(error, OwnerQuotaExceeded):
+        return "PROMOTION_CAPACITY_BLOCKED"
+    if isinstance(error, (OwnerQuotaLockContention, BlockingIOError)):
+        return "PROMOTION_LOCK_BLOCKED"
+    return "PROMOTION_IO_BLOCKED"
+
+
+# LLM: 先CAS旧核验快照；竞争后只对当前自动候选重新核全部门并单次CAS登记退避，不推进状态或重放正式写。
+# 函数用途: 持久化准备及提交失败的义务；新终态或不再合格的快照保持原样，持续写失败则明确外抛。
+def _defer_promotion_failure(service, candidate, reason):
+    try:
+        saved = service.candidates.defer_commit(candidate, reason)
+    except CandidateStateChangedError:
+        current = service.candidates.get(candidate.candidate_id)
+        changed = MemoryPromotionResult(candidate.candidate_id, False, current.status,
+                                        "CANDIDATE_CHANGED_AFTER_VERIFICATION")
+        if (current.status not in {"pending_review", "approved"}
+                or _AUTOMATIC_PROMOTION.get() != (id(service), candidate.candidate_id)
+                or _promotion_precheck(current, True) is not None
+                or service._verify_evidence(current)
+                or _absolute_authority_block(replace(current, promotion_target=_promotion_target(current)))
+                or _automatic_policy_block(replace(current, promotion_target=_promotion_target(current)),
+                                           owner_home=service.persona.owner_home)):
+            return changed
+        service.candidates.defer_commit(current, reason)
+        return changed
+    return MemoryPromotionResult(candidate.candidate_id, False, saved.status, reason)
 
 
 # LLM: 只准确policy锁FD出生，原scope每次核当前来源；不保存callback或扩大权限。

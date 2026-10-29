@@ -2,9 +2,8 @@ from __future__ import annotations
 
 """Memory Curator provider 结构化输出 Schema 构造器。"""
 
-# LLM: Schema construction is isolated from parsing/runtime so every provider receives one
-# immutable contract without growing the Curator service into a second protocol layer.
-# 模块用途: 分段构造递归 strict 的 Curator JSON Schema，避免各 provider 出现字段分叉。
+# LLM: Schema构造独立于解析和运行时，各供应商共用同一不可变合同；候选链接只选择已有锚点，不成为第二套身份或权威来源。
+# 模块用途: 分段构造递归strict的Curator JSON Schema，保持候选提案和链接字段在各供应商间一致。
 
 from collections.abc import Collection
 from typing import Any
@@ -114,9 +113,8 @@ def _daily_schema(
     return _strict_object(properties)
 
 
-# LLM: Candidate Schema contains proposal fields only; candidate_id/status/reviewer remain
-# exclusively host-owned regardless of model or provider.
-# 函数用途: 构造统一候选观察的严格 Schema。
+# LLM: 候选Schema仅含提案字段；link_candidate_id只能选择输入已有锚点，candidate_id、状态和审核者仍由宿主独占，须同步检查提示字段清单。
+# 函数用途: 构造统一候选观察及可空锚点链接的严格Schema，不向模型开放候选身份或状态写入权。
 def _candidate_schema(
     message_reference: dict[str, Any],
     tool_reference: dict[str, Any],

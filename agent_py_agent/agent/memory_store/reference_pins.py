@@ -2,10 +2,29 @@
 # 模块用途: 记录pin视图读取的源代次，避免为每个目标重复解析全部候选、正式记忆和会话。
 from __future__ import annotations
 
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 
 _SOURCES: ContextVar[dict | None] = ContextVar("retention_pin_sources", default=None)
+_TARGET_READ: ContextVar[bool] = ContextVar("retention_pin_target_read", default=False)
+
+
+# LLM: 仅目标分域复核允许以已打开FD的新代次起读，首末仍严格稳定且禁止inode替换、缩短和读中变化。
+# 函数用途: 标记一次有界的目标引用复核，退出恢复原读取合同。
+@contextmanager
+def target_pin_read():
+    token = _TARGET_READ.set(True)
+    try:
+        yield
+    finally:
+        _TARGET_READ.reset(token)
+
+
+# LLM: 只提供同栈读取模式，不构成来源权威或跳过完整性检查。
+# 函数用途: 查询是否处于目标分域的FD快照复核中。
+def target_pin_read_enabled():
+    return _TARGET_READ.get()
 
 
 # LLM: nofollow元数据只用于否定缓存有效性，不授予删除或认定正文无引用；非ENOENT错误原样传播。
@@ -39,9 +58,9 @@ class ReferencePinSnapshot:
         self.home, self.roots, self.now, self.builder = home, roots, now, builder
         self.sources, self.value = {}, None
 
-    # LLM: 无缓存或任一源身份漂移才重建；重建期间又漂移直接拒绝本次删除，不返回旧视图。
+    # LLM: 任一源代次变即重建；target仅允许原pins的严格分域复核，坏源不得以旧缓存放行。
     # 函数用途: 返回经本次源代次复核的完整引用集合。
-    def current(self, errors):
+    def current(self, errors, *, target=None):
         try:
             if self.value is not None and all(source_stamp(path) == stamp for path, stamp in self.sources.items()):
                 return self.value
@@ -53,6 +72,8 @@ class ReferencePinSnapshot:
             watch_pin_source(self.home.owner_home_dir)
             watch_pin_source(self.home.owner_retention_json)
             result = self.builder(self.home, self.roots, errors, now=self.now)
+            if target is not None and not result[1] and result[0].complete_for(target, errors):
+                result = (result[0], True)
             stable = all(source_stamp(path) == stamp for path, stamp in sources.items())
         finally:
             _SOURCES.reset(token)

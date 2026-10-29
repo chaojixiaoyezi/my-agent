@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """从 ConversationStore 与 owner audit 增量构造有界 Curator 输入。"""
 
-# LLM: 本模块只读权威经历并生成预览；临时关系注释须同时绑定来源和正式版本，不写 cursor、不推断候选、不复制工具大输出。
-# 模块用途: 把精确 message/audit 游标后的新事件整理为后台模型的有限 JSON 输入。
+# LLM: 本模块只读权威经历并生成预览；临时关系注释绑定来源和正式版本，锚点复用权威范围键，不写cursor、不推断候选、不复制工具大输出。
+# 模块用途: 把精确message/audit游标后的新事件和同范围只读锚点整理为后台模型的有限JSON输入。
 
 import hashlib
 import json
@@ -19,6 +19,7 @@ from .curator_audit_cursor import AuditRead, collect_audit_window
 from .curator_formal import CuratorFormalMemoryInput
 from .curator_models import MemoryCuratorConfig, MemoryCuratorState
 from .learning_exclusions import thread_is_excluded
+from .scope_contract import canonical_scope_key
 
 # 消息预览最多 6000 字符：多轮消息给足上下文又不过载。
 _MESSAGE_PREVIEW_CHARS = 6_000
@@ -262,18 +263,19 @@ class CuratorInputBatch:
         return sum(1 for item in self.messages if item.role == "user")
 
 
-# LLM: 只注入本批宿主结构化scope匹配的lesson/HOT；每scope/type最多3条、总计12条，模型不得扩scope。
-# 函数用途: 提供可精确链接的候选锚点，避免同一经验反复新建一次票。
+# LLM: 会话和项目键复用scope_contract，与候选持久化保持一致；task别名归一为project，不从正文扩域。每scope/type最多3条、总计12条。
+# 函数用途: 按本批宿主结构化范围提供可精确链接的lesson/HOT锚点，避免同一经验因范围键漂移而反复新建。
 def attach_candidate_anchors(batch, candidates):
     scopes = {("personal", "personal"), ("global", "global")}
     for message in batch.messages:
-        scopes.add(("session", message.thread_id))
+        if message.thread_id:
+            scopes.add(("session", canonical_scope_key("session", message.thread_id)))
         task_id = str(message.metadata.get("task_id") or "")
         if task_id:
-            scopes.add(("project", "project:" + task_id))
+            scopes.add(("project", canonical_scope_key("project", task_id)))
     for event in batch.audit_events:
         if event.task_id:
-            scopes.add(("project", "project:" + event.task_id))
+            scopes.add(("project", canonical_scope_key("project", event.task_id)))
     anchors, counts = [], {}
     rows = candidates.readonly_rows(statuses={"pending_review", "approved", "observed", "blocked_missing_evidence"})
     for row in sorted(rows, key=lambda item: (item.last_observed_at, item.candidate_id), reverse=True):

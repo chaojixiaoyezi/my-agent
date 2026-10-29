@@ -54,6 +54,8 @@ def test_task_state_discovery_never_rglobs_scratch(tmp_path, monkeypatch):
     old_file(home.owner_tasks_dir / "2026-10-01" / "sample" / "tmp" / "deep" / "x")
     original = Path.rglob
 
+    # LLM: 仅监视路径枚举，不改变真实发现结果；禁止递归扫描任务根。
+    # 函数用途: 发现错误递归入口时让测试立即失败。
     def guarded(path, pattern, *args, **kwargs):
         assert path != home.owner_tasks_dir, "task root recursively traversed"
         return original(path, pattern, *args, **kwargs)
@@ -73,6 +75,8 @@ def test_pin_append_retry_and_domain_isolation(tmp_path, monkeypatch):
     calls = []
 
     # _pin_rows使用TextIOWrapper，底层read1是实际读取口；每次打开后直接append一次，可靠触发首末FD变化。
+    # LLM: 保留真实FD读写与异常，只有指定来源在打开后真实追加。
+    # 函数用途: 确定性制造pin读取前后的代次漂移。
     def racing_open(target):
         source = original(target)
         if target == path:
@@ -173,6 +177,8 @@ def test_scratch_ancestor_swap_cannot_redirect_unlink_into_output(tmp_path, monk
     moved = task.with_name("moved")
     swapped = False
 
+    # LLM: 仅在真实目录FD返回后移动目录，不替换删除器或指纹门。
+    # 函数用途: 注入祖先替换并验证output字节仍保留。
     def swapping(root, parts, **kwargs):
         nonlocal swapped
         descriptor = original(root, parts, **kwargs)
@@ -187,3 +193,325 @@ def test_scratch_ancestor_swap_cannot_redirect_unlink_into_output(tmp_path, monk
     service.apply(now=NOW)
     assert swapped, "must actually inject the ancestor replacement"
     assert (moved / "output/tmp/x").read_text() == "must survive outside tmp"
+
+
+# LLM: 只构造真实临时候选；approved和pending履约两种状态均须持久并保护原证据。
+# 函数用途: 为scratch回归写入一个不能回收的候选证据引用。
+def obligated_evidence(candidates, path, status):
+    from dataclasses import replace
+
+    from agent_py_agent.agent.memory_store.candidate_models import CandidateObservation, MemoryScope
+    from agent_py_agent.agent.memory_store.candidates import (
+        _NullAdmission,
+        _write_candidates_unlocked,
+    )
+
+    row = candidates.observe(CandidateObservation(candidate_type="lesson", content="证据必须保留",
+        subject_key="scratch.evidence", scope=MemoryScope("personal", "personal"),
+        origin="model_inferred", promotion_target="lesson", evidence_refs=({"path": str(path)},)))
+    if status == "approved":
+        return candidates.transition(row.candidate_id, "approved", reviewer="test")
+    row = replace(row, commit_obligation=True)
+    _write_candidates_unlocked(candidates.path, [row], admission=_NullAdmission())
+    return row
+
+
+# LLM: 两类scratch使用真实plan/apply；新增引用要在旧计划执行前同样生效，不可只改规划。
+# 函数用途: 验证待履约候选及其证据目录在规划和执行两端均受保护。
+@pytest.mark.parametrize("kind", ["task_tmp", "run_scratch"])
+@pytest.mark.parametrize("status", ["approved", "pending_review"])
+@pytest.mark.parametrize("late", [False, True])
+def test_obligated_scratch_evidence_is_pinned_in_plan_and_apply(tmp_path, kind, status, late):
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    if kind == "task_tmp":
+        root = home.owner_tasks_dir / "2026-10-01/sample/tmp"
+    else:
+        task = Path(home.owner_home_dir) / "runs/2026-10-01/run-1"
+        old_file(task / "work/state.json", json.dumps({"task_id": "task-1", "run_id": "run-1",
+            "status": "DONE", "updated_at": NOW.timestamp() - 20 * 86400}))
+        root = task / "work/blobs/tool_outputs"
+    evidence = old_file(root / "nested/proof.bin", "proof bytes")
+    old_file(root / "control.bin", "unreferenced")
+    plan = service.plan(now=NOW)
+    assert [a for a in plan.actions if a.path == root and a.category == kind]
+    obligated_evidence(candidates, evidence, status)
+    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    assert complete and pins.protects(root, []) and pins.protects(evidence, [])
+    if not late:
+        plan = service.plan(now=NOW)
+        assert not [a for a in plan.actions if a.path == root]
+    report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
+    assert evidence.read_text() == "proof bytes"
+    assert not [a for a in report.actions if a.path == root and a.status == "deleted"]
+
+
+# LLM: 来源损坏在规划及执行前分别发生，不接受把无法解析的候选当空引用。
+# 函数用途: 验证未知候选证据使scratch清理关闭，但不要求停掉独立cache清理。
+@pytest.mark.parametrize("late", [False, True])
+def test_corrupt_candidate_pins_preserve_scratch(tmp_path, late):
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    evidence = old_file(home.owner_tasks_dir / "2026-10-01/sample/tmp/x", "keep")
+    plan = service.plan(now=NOW)
+    old_file(candidates.path, "{broken\n")
+    if not late:
+        plan = service.plan(now=NOW)
+        assert not [a for a in plan.actions if a.path == evidence.parent]
+    report = execute_retention_plan(home=home, candidates=candidates, plan=plan, now=NOW)
+    assert evidence.read_text() == "keep" and (plan.errors or report.errors)
+
+
+# LLM: 在逐文件/逐目录真实open返回后移动，覆盖旧测试第一次探查以外的危险接缝。
+# 函数用途: 验证FD定位后重新核父链，移入output的文件和目录不得被删除。
+@pytest.mark.parametrize("directory", [False, True])
+def test_move_after_per_member_open_preserves_output(tmp_path, monkeypatch, directory):
+    from agent_py_agent.agent.memory_store import retention_apply as apply
+
+    home, _candidates, service = runtime(tmp_path)
+    task = home.owner_tasks_dir / "2026-10-01/sample"
+    old_file(task / "tmp/nested/x", "published")
+    (task / "output").mkdir()
+    original = apply.open_directory_beneath
+    calls, moved = [], task / "output/moved"
+
+    # LLM: 保留真实FD；第二次nested打开是rmdir接缝，第一次是unlink接缝。
+    # 函数用途: 在已拿到句柄后真实发布目录至output。
+    def moving(root, parts, **kwargs):
+        descriptor = original(root, parts, **kwargs)
+        if Path(root) == Path(home.owner_home_dir):
+            calls.append(tuple(parts))
+            wanted = tuple(parts)[-1:] == (("tmp",) if directory else ("nested",))
+            if wanted and not moved.exists() and (not directory or len(calls) >= 3):
+                (task / "tmp").rename(moved)
+        return descriptor
+
+    monkeypatch.setattr(apply, "open_directory_beneath", moving)
+    report = service.apply(now=NOW)
+    assert moved.exists(), calls
+    if directory:
+        assert (moved / "nested").is_dir()
+    else:
+        assert (moved / "nested/x").read_text() == "published"
+    assert not [a for a in report.actions if a.category == "task_tmp" and a.status == "deleted"]
+
+
+# LLM: 两个真实Daily动作之间首次发表state；不得重新生成计划掩盖缓存漏监视。
+# 函数用途: 锁定已有work首次state写入后下一动作重建pins。
+def test_first_state_publication_invalidates_next_action_snapshot(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import retention_apply as apply
+
+    home, _candidates, service = runtime(tmp_path)
+    first = old_file(home.owner_memory_daily_dir / "a-first.jsonl")
+    second = old_file(home.owner_memory_daily_dir / "b-pinned.jsonl")
+    work = home.owner_tasks_dir / "2026-10-01/sample/work"
+    work.mkdir(parents=True)
+    original = apply._apply_action
+    published = []
+
+    # LLM: 第一个真实动作完成后发布state，不修改第二个动作或pin函数。
+    # 函数用途: 模拟同阶段任务首次启动并新增证据引用。
+    def publish(**kwargs):
+        result = original(**kwargs)
+        if kwargs["action"].path == first:
+            assert result.status == "trashed"
+            old_file(work / "state.json", json.dumps({"task_id": "sample", "status": "RUNNING",
+                "updated_at": NOW.timestamp(), "source_refs": [{"path": str(second)}]}))
+            published.append(True)
+        return result
+
+    monkeypatch.setattr(apply, "_apply_action", publish)
+    report = service.apply(now=NOW)
+    assert published and not first.exists() and second.exists()
+    assert next(a for a in report.actions if a.path == second).status == "state_changed"
+
+
+# LLM: 仅日期/任务目录的scandir失败，必须真的经过注入且complete=False，不靠chmod行为猜权限。
+# 函数用途: 验证有界任务发现传播权限与IO错误而非零引用。
+@pytest.mark.parametrize("level", ["date", "task"])
+def test_unreadable_task_discovery_is_incomplete(tmp_path, monkeypatch, level):
+    home, _candidates, _service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "pin.jsonl")
+    task = home.owner_tasks_dir / "2026-10-01/sample"
+    old_file(task / "work/state.json", json.dumps({"task_id": "sample", "status": "RUNNING",
+        "updated_at": NOW.timestamp(), "source_refs": [str(target)]}))
+    original, calls = os.scandir, []
+    original_stat = Path.stat
+    blocked = task.parent if level == "date" else task
+
+    # LLM: 精确拒绝选中的发现目录，其它文件系统读取原样执行。
+    # 函数用途: 注入不会被Path.glob吞掉的目录权限错误。
+    def denied(path):
+        if level == "date" and Path(path) == blocked:
+            calls.append(path)
+            raise PermissionError(13, "denied", str(path))
+        return original(path)
+
+    # LLM: 精确任务后缀stat模拟真实父目录搜索权不足，不要求发现器为列名额外递归任务内容。
+    # 函数用途: 注入规范work父链不可读取的失败。
+    def denied_stat(path, *args, **kwargs):
+        if level == "task" and path == task / "work":
+            calls.append(path)
+            raise PermissionError(13, "denied", str(path))
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", denied)
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    errors = []
+    _pins, complete = scan.current_retention_pins(home, (), errors, now=NOW)
+    assert calls and not complete and errors
+
+
+# LLM: 真实过期trash容器在计划和执行均须独立验证；只瞬时追加不等于坏源，损坏/相关引用仍保留。
+# 函数用途: 锁定不依赖无关Curator竞态的purge以及相关故障关闭边界。
+@pytest.mark.parametrize("source_kind", ["unrelated", "referenced", "corrupt", "unreadable", "mid_read"])
+def test_trash_scoped_pins_revalidate_racing_source(tmp_path, monkeypatch, source_kind):
+    from datetime import timedelta
+
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    source = old_file(home.owner_memory_daily_dir / "expired.jsonl")
+    moved = next(a for a in service.apply(now=NOW).actions if a.path == source)
+    later = NOW + timedelta(days=31)
+    old_plan = service.plan(now=later)
+    assert [a for a in old_plan.actions if a.path == moved.destination]
+    path = home.owner_memory_curator_runs_dir / "racing.jsonl"
+    content = json.dumps({"source_refs": [str(source)]}) if source_kind == "referenced" else "{}"
+    old_file(path, content + "\n")
+    original, calls = scan._fingerprint_source, []
+
+    # LLM: 包装真实二进制FD，首个读取块后才追加，不能用FD打开前的竞态冒充读中变化。
+    # 类用途: 制造持久读中不稳定来源以检验分域复核仍失败关闭。
+    class MutatingReader:
+        # LLM: 借用真实原文件对象，仅用于测试有界读取，不修改关闭所有权。
+        # 函数用途: 保存被观察的实际读取器。
+        def __init__(self, raw):
+            self.raw, self.changed = raw, False
+
+        # LLM: TextIOWrapper需要原始reader属性，全部透传原对象。
+        # 函数用途: 保留真实二进制句柄接口。
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        # LLM: 每次read1取得数据后真实追加，首末fstat必须看到变化。
+        # 函数用途: 在读取途中制造一次追加。
+        def read1(self, size=-1):
+            data = self.raw.read1(size)
+            if not self.changed:
+                self.changed = True
+                with path.open("ab") as writer:
+                    writer.write(b"{}\n")
+            return data
+
+    # LLM: 仅目标来源在open后/读中改变，其它来源与真实删除器不替换。
+    # 函数用途: 精确区分瞬时追加、真正损坏和持续读中变化。
+    def racing(target):
+        if target == path and source_kind == "unreadable":
+            calls.append(target)
+            raise PermissionError(13, "denied", str(target))
+        raw = original(target)
+        if target == path:
+            calls.append(target)
+            if source_kind == "corrupt":
+                with path.open("ab") as writer:
+                    writer.write(b"{broken\n")
+            elif source_kind == "mid_read":
+                return MutatingReader(raw)
+            else:
+                with path.open("ab") as writer:
+                    writer.write(b"{}\n")
+        return raw
+
+    monkeypatch.setattr(scan, "_fingerprint_source", racing)
+    plan = service.plan(now=later)
+    assert bool([a for a in plan.actions if a.path == moved.destination]) is (source_kind == "unrelated")
+    report = execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=later)
+    assert calls
+    assert moved.destination.exists() is (source_kind != "unrelated")
+    action = next(a for a in report.actions if a.path == moved.destination)
+    assert (action.status == "deleted") is (source_kind == "unrelated")
+
+
+# LLM: DB终态只解除非hold运行的隐式活跃保护；法律保留仍保护整棵规范恢复根。
+# 函数用途: 防止终态回填绕过legal_hold_task_ids的引用保护。
+def test_terminal_db_reconciliation_preserves_held_run_pin(tmp_path):
+    home, _candidates, _service = runtime(tmp_path)
+    root = Path(home.owner_home_dir) / "runs/2026-10-01/run-1"
+    old_file(root / "work/state.json", json.dumps({"task_id": "task-1", "run_id": "run-1",
+        "status": "RUNNING", "updated_at": 1}))
+    target = old_file(root / "tmp/x")
+    terminal_db(home)
+    policy = json.loads(home.owner_retention_json.read_text())
+    home.owner_retention_json.write_text(json.dumps({**policy, "legal_hold_task_ids": ["task-1"]}))
+    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    assert complete and pins.protects(target, [])
+
+
+# LLM: 单个已消失成员不能把同目录剩余任务吞成空；夹具仅替换一个DirEntry的stat，真实活跃state仍解析。
+# 函数用途: 验证有界发现遇到局部ENOENT时继续读取其他引用。
+def test_disappearing_discovery_member_does_not_hide_active_sibling(tmp_path, monkeypatch):
+    home, _candidates, _service = runtime(tmp_path)
+    date = home.owner_tasks_dir / "2026-10-01"
+    target = old_file(home.owner_memory_daily_dir / "active.jsonl")
+    old_file(date / "sample/work/state.json", json.dumps({"task_id": "sample", "status": "RUNNING",
+        "updated_at": NOW.timestamp(), "source_refs": [str(target)]}))
+    original, calls = os.scandir, []
+
+    # LLM: 模拟枚举后恰好消失的兄弟条目，不改变活跃任务本身。
+    # 类用途: 提供明确ENOENT的目录成员元数据。
+    class Vanished:
+        # LLM: 不提供不存在对象的身份，精确报告本次成员消失。
+        # 函数用途: 制造局部而非整层目录缺失。
+        def stat(self, **kwargs):
+            calls.append(True)
+            raise FileNotFoundError(2, "gone", str(date / "gone"))
+
+    # LLM: 管理真实scandir寿命，仅在真实成员之前插入一个消失对象。
+    # 类用途: 保留全部真实任务枚举结果并注入局部竞态。
+    class Entries:
+        # LLM: 构造仅借用既有目录读取器。
+        # 函数用途: 保存实际scandir对象。
+        def __init__(self, raw):
+            self.raw = raw
+
+        # LLM: 真实条目完整保留，不能借测试替身抹掉后续活跃状态。
+        # 函数用途: 在枚举首项制造已消失成员。
+        def __enter__(self):
+            return iter([Vanished(), *self.raw.__enter__()])
+
+        # LLM: 原上下文负责关闭目录流，不吞异常。
+        # 函数用途: 释放真实scandir句柄。
+        def __exit__(self, *args):
+            return self.raw.__exit__(*args)
+
+    # LLM: 仅选中日期层包装，根及其它目录仍沿原os.scandir。
+    # 函数用途: 注入一个目录成员消失，不制造真实权限故障。
+    def vanishing(path):
+        raw = original(path)
+        return Entries(raw) if Path(path) == date else raw
+
+    monkeypatch.setattr(os, "scandir", vanishing)
+    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    assert calls and complete and pins.protects(target, [])
+
+
+# LLM: 日期层的任务名不受内部目录名称限制；沿真实plan与旧plan执行同时核验新引用。
+# 函数用途: 验证合法任务名tmp/work/inputs/output不会被发现器当作内部目录忽略。
+@pytest.mark.parametrize("task_name", ["tmp", "work", "inputs", "output"])
+def test_internal_directory_names_are_legal_task_names(tmp_path, task_name):
+    from agent_py_agent.agent.memory_store.retention_apply import execute_retention_plan
+
+    home, candidates, service = runtime(tmp_path)
+    target = old_file(home.owner_memory_daily_dir / "2000-01-01.jsonl")
+    old_plan = service.plan(now=NOW)
+    assert any(action.path == target for action in old_plan.actions)
+    old_file(home.owner_tasks_dir / "2026-10-01" / task_name / "work/state.json", json.dumps({
+        "task_id": task_name, "status": "RUNNING", "updated_at": NOW.timestamp(), "source_refs": [str(target)]}))
+    pins, complete = scan.current_retention_pins(home, (), [], now=NOW)
+    assert complete and pins.protects(target, [])
+    assert not any(action.path == target for action in service.plan(now=NOW).actions)
+    execute_retention_plan(home=home, candidates=candidates, plan=old_plan, now=NOW)
+    assert target.exists()

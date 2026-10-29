@@ -760,8 +760,8 @@ def _observation_index(rows: list[MemoryCandidate]) -> dict[str, set[int]]:
     return result
 
 
-# LLM: 全部冲突检查及新模型构造先于共享索引变更；拒绝项不留下观察键、候选行或目标绑定。
-# 函数用途: 将单条已规范观察成功合入现有索引，供批提交与可跳冲突预演复用。
+# LLM: 冲突检查先于共享索引变更；稳定来源别名允许补run但不混淆已知不同run，模型观察键不加票。
+# 函数用途: 按结构化来源合并单条观察，供批提交与可跳冲突预演复用。
 def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared):
     normalized, candidate_id, observation_key = prepared
     if normalized.link_candidate_id:
@@ -777,7 +777,7 @@ def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared
         existing = result[source_index]
         current_sources = set().union(*_observation_sources(existing))
         incoming_sources = _observation_sources(normalized)
-        new_sources = [sorted(group) for group in incoming_sources if not group.intersection(current_sources)]
+        new_sources = [sorted(group) for group in incoming_sources if not _source_aliases_overlap(group, current_sources)]
         if incoming_sources or normalized.link_candidate_id:
             # 已有来源任一别名命中即同一次观察；新来源键由宿主计算，不信模型observation_id。
             observation_key = (hashlib.sha256(json.dumps([candidate_id, sorted(new_sources)], sort_keys=True).encode()).hexdigest()
@@ -1170,12 +1170,13 @@ def _rejected_draft(current: MemoryCandidate) -> bool:
             and not current.content_redacted_at and not current.promotion_ref)
 
 
-# LLM: 首拒草稿仅用新证据重建；拒绝历史及旧来源—目标版本约束保留，旧引用/覆盖不贡献晋升资格。
-# 函数用途: 用独立新观察重新申请同一候选，避免一次失败证据永久污染后续合法重试。
+# LLM: 首拒草稿仅用新证据重建；未知字段独占保真，拒绝历史与版本约束保留，旧引用不贡献资格。
+# 函数用途: 用新观察重新申请同一候选，同时完整保留其未来合同和拒绝审计。
 def _retry_rejected_draft(current: MemoryCandidate, observation: CandidateObservation,
                           observation_key: str) -> MemoryCandidate:
     fresh = _new_candidate(observation, current.candidate_id, observation_key)
     return replace(fresh, created_at=current.created_at,
+                   _extra_fields=deepcopy(current._extra_fields),
                    target_evidence_bindings=binding_history(current),
                    promotion_exclusion=current.promotion_exclusion,
                    status_history=[*current.status_history, *fresh.status_history])
@@ -1285,17 +1286,20 @@ def _resolved_blocked_origin(
     return current.origin
 
 
-# LLM: 同条引用的operation/call/artifact为别名组，补字段不产生新票；无ref时才回退宿主run/task。
-# 函数用途: 提取独立来源及其等价别名，供链接和普通同候选合并共同去重。
+# LLM: 同条引用的operation/call/artifact_ref/artifact_id为别名组；有稳定ref时禁止退化为run级去重。
+# 函数用途: 提取独立来源及计数别名投影，不更改真实证据或其学习覆盖。
 def _observation_sources(subject):
     groups = []
     for ref in subject.source_message_refs:
         if ref.get("message_id"):
             groups.append(frozenset({("message", str(ref.get("thread_id") or ""), str(ref["message_id"]))}))
-    for ref in (*subject.source_tool_refs, *subject.source_artifact_refs):
-        aliases = frozenset(("call" if name in {"call_id", "tool_call_id"} else name,
-            str(ref.get("run_id") or ""), str(ref[name]))
-            for name in ("operation_id", "tool_call_id", "call_id", "artifact_ref") if ref.get(name))
+    refs = (*subject.source_tool_refs, *subject.source_artifact_refs)
+    contexts = _source_alias_contexts(refs)
+    for ref in refs:
+        keys = _source_ref_aliases(ref)
+        run = str(ref.get("run_id") or "")
+        runs = {run} if run else set().union(*(contexts.get(key, set()) for key in keys)) or {""}
+        aliases = frozenset((kind, context, value) for kind, value in keys for context in runs)
         if aliases:
             groups.append(aliases)
     if not groups:
@@ -1303,6 +1307,53 @@ def _observation_sources(subject):
     if not groups:
         groups.extend(frozenset({("task", "", str(value))}) for value in subject.source_task_ids)
     return groups
+
+
+# LLM: 只提取稳定的同次执行关联键，run单独保留上下文；不同artifact不能凭同run关联。
+# 函数用途: 统一工具与产物的别名类别，并兼容call/tool_call同名键。
+def _source_ref_aliases(ref):
+    return frozenset(("call" if name in {"call_id", "tool_call_id"} else name, str(ref[name]))
+                     for name in ("operation_id", "tool_call_id", "call_id", "artifact_ref", "artifact_id")
+                     if ref.get(name))
+
+
+# LLM: 只投影计数等价类；缺run的同组键共享已观察上下文，歧义保守合票，不伪造证据、学习资格或正式权威。
+# 函数用途: 让混合/链式历史空run别名收敛，避免单个遗留通配符吞新运行或重放虚增票。
+def _source_alias_contexts(refs):
+    contexts, pending = {}, []
+    for ref in refs:
+        aliases = _source_ref_aliases(ref)
+        run = str(ref.get("run_id") or "")
+        if run:
+            for alias in aliases:
+                contexts.setdefault(alias, set()).add(run)
+        elif aliases:
+            pending.append(aliases)
+    changed = True
+    while changed:
+        changed = False
+        for aliases in pending:
+            runs = set().union(*(contexts.get(alias, set()) for alias in aliases))
+            for alias in aliases:
+                known = contexts.setdefault(alias, set())
+                if not runs.issubset(known):
+                    known.update(runs)
+                    changed = True
+    return contexts
+
+
+# LLM: 相同类别/稳定ID才关联；已知run优先于历史空run，避免补全后旧通配符继续吞异run，原始引用不改写。
+# 函数用途: 判断新来源是否已出现，避免仅补执行元数据使重复证据虚增票数。
+def _source_aliases_overlap(incoming, existing):
+    contexts = {}
+    for kind, run, value in existing:
+        contexts.setdefault((kind, value), set()).add(run)
+    for kind, run, value in incoming:
+        runs = contexts.get((kind, value), set())
+        known_runs = runs - {""}
+        if runs and (not run or run in known_runs or not known_runs):
+            return True
+    return False
 
 
 # LLM: This check only reopens a structurally missing-evidence candidate after exact references

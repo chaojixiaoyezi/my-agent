@@ -223,7 +223,7 @@ class CandidateObservation:
 
 
 # LLM: 候选当前态唯一事实源；raw缓存仅实例属性，不属于dataclass字段/asdict，构造、比较、持久协议不含缓存。
-# 类用途: 保存候选正式字段；原行和摘要只用于内部复用，不能复制到对外序列化结果。
+# 类用途: 保存候选正式字段；每次构造隔离未知字段，原行和摘要仅供内部复用。
 @dataclass
 class MemoryCandidate:
     schema_version: str
@@ -284,6 +284,11 @@ class MemoryCandidate:
     _extra_fields: dict[str, object] = field(default_factory=dict, repr=False)
     _raw_json_line = ""
     _raw_state_digest = ""
+
+    # LLM: 所有构造及dataclass替换都独占未知字段树；重建路径仍须显式带回旧字段，不把缓存当事实源。
+    # 函数用途: 统一隔离候选重建后的未来字段，避免冷热转换或调用者修改污染旧快照。
+    def __post_init__(self) -> None:
+        self._extra_fields = deepcopy(self._extra_fields)
 
     # LLM: 字段赋值即时失效原行；嵌套变更由序列化器的完整状态摘要再次校验，不能依赖调用方自觉。
     # 函数用途: 避免状态、版本绑定或隐私字段改写后复用旧JSON。

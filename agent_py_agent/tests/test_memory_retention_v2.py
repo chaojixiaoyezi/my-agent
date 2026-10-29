@@ -1,3 +1,5 @@
+# LLM: 只操作pytest临时owner，沿真实plan/apply核验策略、候选、引用与可恢复回收；不清理真实记忆。
+# 模块用途: 保护Memory v2留存的原有安全合同，义务候选不得被普通过期规则误删。
 from __future__ import annotations
 
 import json
