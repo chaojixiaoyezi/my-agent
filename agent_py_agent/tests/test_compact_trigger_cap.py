@@ -198,6 +198,95 @@ def test_r8_explicit_canonical_trigger_wins_over_co_specified_legacy_in_replace_
     assert env_applied.memory_compact_auto_trigger_percent == 85
 
 
+# LLM: replace同时显式传入host_home_snapshot与新旧比例时，不能因跳过前序字段读取而丢失显式新键优先级，且实例__dict__不残留私有临时键。
+# 函数用途: 验证无论是否并列覆盖host_home_snapshot，显式memory_compact_trigger_percent在70/80下均保持权威且源对象无状态污染。
+@pytest.mark.parametrize("canonical_target", [70, 80])
+@pytest.mark.parametrize("include_snapshot", [False, True])
+def test_r9_explicit_canonical_independent_of_host_snapshot_and_clean_dict(
+    canonical_target,
+    include_snapshot,
+):
+    from dataclasses import asdict
+
+    cfg = AgentConfig(memory_compact_auto_trigger_percent=70)
+    base_keys = set(vars(cfg))
+    assert "_compact_replace_trigger_copied" not in base_keys
+    assert "_compact_trigger_previous_auto" not in base_keys
+    overrides = {
+        "memory_compact_trigger_percent": canonical_target,
+        "memory_compact_auto_trigger_percent": 85,
+    }
+    if include_snapshot:
+        overrides["host_home_snapshot"] = None
+    result = replace(cfg, **overrides)
+    assert result.memory_compact_trigger_percent == canonical_target
+    assert cfg.memory_compact_trigger_percent == 70
+    _ = asdict(cfg)
+    _ = cfg.host_home_snapshot
+    assert set(vars(cfg)) == base_keys
+
+
+# LLM: replace遍历字段期间若有其他线程并发调用configured_home_root或读取源配置属性，不能干扰当前线程replace对继承新键的同步。
+# 函数用途: 使用确定性线程交错验证只读并发访问源AgentConfig不会破坏legacy-only replace的新比例联动。
+@pytest.mark.parametrize("concurrent_home_read", [False, True])
+def test_r9_concurrent_readonly_home_resolution_does_not_affect_replace(
+    concurrent_home_read,
+):
+    import dataclasses
+    import sys
+    import threading
+
+    from agent_py_agent.agent.user_space.home_root import configured_home_root
+
+    cfg = AgentConfig(memory_compact_auto_trigger_percent=70)
+    reached, resume = threading.Event(), threading.Event()
+    results, errors = [], []
+    paused = False
+
+    # LLM: 仅在测试线程执行到dataclasses.replace的InitVar字段时暂停一次，放行主线程执行并发只读访问。
+    # 函数用途: 为并发replace测试提供确定性的线程交错点。
+    def trace(frame, event, arg):
+        nonlocal paused
+        if (
+            not paused
+            and event == "line"
+            and frame.f_code is dataclasses.replace.__code__
+            and getattr(frame.f_locals.get("f"), "name", None)
+            == "_compact_trigger_previous_auto"
+        ):
+            paused = True
+            reached.set()
+            assert resume.wait(5), "test schedule did not resume"
+        return trace
+
+    # LLM: 在受控trace下调用dataclasses.replace仅更新旧比例字段，收集克隆结果或异常。
+    # 函数用途: 模拟工作线程对共享基础配置执行replace克隆。
+    def clone():
+        sys.settrace(trace)
+        try:
+            results.append(replace(cfg, memory_compact_auto_trigger_percent=85))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            sys.settrace(None)
+
+    worker = threading.Thread(target=clone)
+    worker.start()
+    try:
+        assert reached.wait(5), "real dataclasses.replace did not reach InitVar"
+        if concurrent_home_read:
+            assert configured_home_root(cfg, env={}) is None
+    finally:
+        resume.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert not errors
+    assert len(results) == 1
+    assert results[0].memory_compact_auto_trigger_percent == 85
+    assert results[0].memory_compact_trigger_percent == 85
+    assert cfg.memory_compact_trigger_percent == 70
+
+
 # 函数用途: 造一个只带窗口与三项压缩配置的轻量 agent，给 runtime_compact_policy 用。
 def _agent(cap, *, percent=90, recovery=60):
     return SimpleNamespace(

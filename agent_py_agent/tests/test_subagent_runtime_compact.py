@@ -671,6 +671,8 @@ def test_child_and_grandchild_materialize_independent_agent_threads(
     assert child_errors == []
 
 
+# LLM: 验证task_local预检直接读取主权威字段memory_compact_trigger_percent计算精确压缩阈值，不依赖已退役的旧默认90%口径。
+# 函数用途: 回归测试子代理task_local上下文压力预检在899/1000 token且显式配置memory_compact_trigger_percent=90时不误触发压缩。
 def test_task_local_preflight_uses_the_configured_exact_compact_threshold(
     monkeypatch,
     tmp_path: Path,
