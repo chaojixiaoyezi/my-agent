@@ -8,6 +8,7 @@ import math
 import os
 import re
 import threading
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,13 +76,17 @@ def harvester_input_revision(payload):
         sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
-# LLM: 这里只作原metadata节拍预筛；真正父Audit/idle/背压/claim由consumer重核，不删除watch或授网络权。
+# LLM: 只读原metadata与canonical next_due_at预筛；到点不能绕过已持久化退避，父Audit/背压/claim仍由consumer重核。
 # 函数用途: 为原C发现循环筛选仍需收割的持久watch。
 def harvester_has_due_work(payload, now):
     if payload['closed'] or payload['window_finalized_at'] > 0:
         return False
     tuning = payload['tuning']
     if not payload['audit_guarantee'] and tuning.get('background_harvest', 1) != 1:
+        return False
+    control = (payload.get('source_checkpoint') or {}).get('_host_harvest', {})
+    due = control.get('next_due_at') if isinstance(control, dict) else None
+    if type(due) in (int, float) and math.isfinite(due) and due > now:
         return False
     window = payload['watch_window_seconds']
     # saved_at 是上一次原收割/工具快照时间；不生成持久timer或每轮新请求号。
@@ -219,7 +224,7 @@ def _check_plan(plan):
     _check_request_ref(plan.scope, plan.ref)
 
 
-# LLM: 原T先于state.lock/intent资源；准备仅保存旧原事务和原快照，不持锁等待来源。
+# LLM: 原T先于state.lock/intent；重核持久退避并冻结一次上界，背压只延后读取不能延后冻结；不持锁等待网络。
 # 函数用途: 领取原收割记录并建立一份本次私有计算状态。
 def _prepare(agent, state, ref, scope, observed):
     _check_request_ref(scope, ref)
@@ -233,7 +238,9 @@ def _prepare(agent, state, ref, scope, observed):
             return 'busy'
         if not parent_active:
             return 'stopped'
-        if harvest._backpressured(working):
+        control = (working.source_checkpoint or {}).get('_host_harvest', {})
+        due = control.get('next_due_at') if isinstance(control, dict) else None
+        if type(due) in (int, float) and math.isfinite(due) and due > time.time():
             return 'busy'
         lease = _claim_request_lease(state, scope, observed.lease)
         if lease is None:
@@ -312,7 +319,7 @@ def _recover_original_intent(plan):
         raise _uncertain_execution(plan.scope.transition, 'harvester_original_recovery') from error
 
 
-# LLM: 长网络/引擎在T及state.lock外；每个真实drain仅一次原请求，提交后metadata新SHA产生下一P3/P5，不常驻复用旧scope。
+# LLM: 网络/引擎在T与state.lock外；冻结前先核文件授权，partial只唤醒待处理工作，只有耐久finalized才能通知收尾。
 # 函数用途: 执行一拍原harvester，通知的任务/日志扫描在T外，各实际写者单独短提交，返回原桥结构结果。
 def execute_harvester_source(agent, ref, payload):
     from .harvest_parent import observe_harvest_parent
@@ -331,14 +338,13 @@ def execute_harvester_source(agent, ref, payload):
     observed_state = load_state(home, ref['source_id'])
     if observed_state is None:
         raise BackgroundSourceChanged()
+    tool = WatchStreamTool(agent)
+    if observed_state.source_url.startswith('file://') and not _file_access_policy(tool).check(file_path_of(observed_state.source_url)).allowed:
+        raise ValueError('background_harvester_source_path_denied')
     observed = HarvestObservations(_observe_lease(state), observe_harvest_parent(agent, observed_state))
     plan = background_short_operation('harvester_prepare', lambda: _prepare(agent, state, ref, scope, observed))
     if type(plan) is str:
         return {'outcome': 'pending' if plan == 'busy' else 'handled', 'status': plan}
-    tool = WatchStreamTool(agent)
-    if plan.working.source_url.startswith('file://') and not _file_access_policy(tool).check(file_path_of(plan.working.source_url)).allowed:
-        background_short_operation('harvester_finish', lambda: _recover(plan))
-        raise ValueError('background_harvester_source_path_denied')
     try:
         drain, chunks = prepare_harvest_plan(plan, tool._fetch_json)
         healthy = background_short_operation('harvester_commit', lambda: _commit(agent, plan, ref, drain, chunks))
@@ -354,7 +360,7 @@ def execute_harvester_source(agent, ref, payload):
     if plan.working.audit_guarantee:
         from .source_worker import settle_audit_source_worker, wake_audit_source_worker
 
-        callback = settle_audit_source_worker if plan.finalize_window else wake_audit_source_worker
+        callback = settle_audit_source_worker if plan.working.window_finalized_at > 0 else wake_audit_source_worker
         background_short_operation('harvester_notify_admission', lambda: _check_plan(plan))
         callback(agent, plan.state)
     background_short_operation('harvester_finish', lambda: _finish(plan))

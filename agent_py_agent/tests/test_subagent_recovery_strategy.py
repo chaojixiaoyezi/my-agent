@@ -1,3 +1,5 @@
+# LLM: 策略测试保留停止门与恢复语义，审计attempt与宿主无进展计数分开构造。
+# 模块用途: 验证子代理恢复建议和真实无进展熔断。
 from __future__ import annotations
 
 from pathlib import Path
@@ -66,9 +68,12 @@ def test_recovery_strategy_does_not_case_coerce_raw_status(tmp_path: Path) -> No
     assert result.recommended_action == "manual_review"
 
 
+# LLM: 熔断必须来自宿主no_progress_count，不能再把runner_attempts当成失败次数。
+# 函数用途: 验证达到真实无进展上限后停止自动恢复。
 def test_recovery_strategy_stops_after_repeated_failures(tmp_path: Path) -> None:
     _, task = _saved_task(tmp_path, status="FAILED")
     task.runner_attempts = 5
+    task._extra_fields["no_progress_count"] = 3
 
     result = build_subagent_recovery_strategy(
         SubagentRecoveryStrategyRequest(task=task, no_progress_attempt_limit=3)

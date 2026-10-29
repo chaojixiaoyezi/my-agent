@@ -246,11 +246,20 @@ def _is_closed(task: SubAgentTask) -> bool:
     return task_status_in(task_status(task), SUBAGENT_RECOVERY_CLOSED_STATUSES)
 
 
+# LLM: 只读canonical宿主计数，缺失或损坏保留unknown，不从审计attempt反推。
+# 函数用途: 读取失败重试及无进展次数。
+def recovery_count(task: SubAgentTask, name: str) -> int | None:
+    value = getattr(task, name, getattr(task, "_extra_fields", {}).get(name))
+    return value if type(value) is int and value >= 0 else None
+
+
+# LLM: 正常yield、child wait与compact不累计；strategy和board使用同一个已证实计数。
+# 函数用途: 依据宿主无进展事实判断是否熔断。
 def _no_progress_fuse(task: SubAgentTask, attempt_limit: int) -> bool:
     if attempt_limit <= 0:
         return False
     return (
-        task_int(task, "runner_attempts") >= attempt_limit
+        (recovery_count(task, "no_progress_count") or 0) >= attempt_limit
         and task_status_in(task_status(task), SUBAGENT_FAILURE_STATUSES)
     )
 

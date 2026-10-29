@@ -1,3 +1,5 @@
+# LLM: 沿用原采集事务与checkpoint，冻结有限窗口来源上界，未追平保持partial并持久化正退避。
+# 模块用途: 管理后台采集、游标续作与可靠的窗口完成判定。
 """后台连续摄取(harvester):把「脚本级吞吐」和「LLM 级判断」在时间上解耦。
 
 真机实锤(§8-1 加难回归):合计 900 条/秒 + 源端滚动缓冲 ~6 分钟淘汰,而 pull 只在
@@ -31,7 +33,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -272,6 +274,8 @@ def _backup_fragment_before_harvest(state: WatchState) -> dict[str, Any]:
     }
 
 
+# LLM: 原WAL先记录精确起点，再冻结窗口来源上界；上界随同一意图耐久化，崩溃后不能重新探更远的终点。
+# 函数用途: 开始一拍原收割事务并保存不可漂移的窗口目标。
 def _begin_harvest_transaction(state: WatchState) -> dict[str, Any]:
     marker = _harvest_transaction_path(state)
     with locked_json_path(marker):
@@ -297,6 +301,7 @@ def _begin_harvest_transaction(state: WatchState) -> dict[str, Any]:
                 "fragment": fragment,
             },
         }
+        transaction["source_boundary"] = _freeze_harvest_boundary(state)
         _write_harvest_transaction(marker, transaction)
     return transaction
 
@@ -419,6 +424,8 @@ def _recover_pending_harvest(
         )
 
 
+# LLM: 只回滚同一意图的字节/游标；边界控制事实可以先保存，恢复自身重复执行时也只接受原起点加同一边界。
+# 函数用途: 恢复未完成收割，保留原窗口上界而不扩大目标。
 def _recover_pending_harvest_unlocked(
     state: WatchState,
     *,
@@ -446,9 +453,14 @@ def _recover_pending_harvest_unlocked(
         return True
     start = dict(transaction["start"])
     restored = _state_snapshot(state)
+    initial_checkpoint = dict(start.get("source_checkpoint") or {})
+    boundary_checkpoint = deepcopy(initial_checkpoint)
+    boundary = transaction.get("source_boundary")
+    if isinstance(boundary, dict):
+        boundary_checkpoint.setdefault("_host_harvest", {})["boundary"] = deepcopy(boundary)
     if (
         restored.harvest_commit_id != str(start.get("harvest_commit_id") or "")
-        or restored.source_checkpoint != dict(start.get("source_checkpoint") or {})
+        or restored.source_checkpoint not in (initial_checkpoint, boundary_checkpoint)
         or restored.cursor != int(start.get("cursor") or 0)
         or restored.line_cursor != int(start.get("line_cursor") or 0)
         or restored.spool_seq != int(start.get("spool_seq") or 0)
@@ -469,6 +481,9 @@ def _recover_pending_harvest_unlocked(
     if not isinstance(fragment_facts, dict):
         raise _HarvestTransactionUnavailable("harvest fragment facts are missing")
     _restore_fragment_after_failed_harvest(state, fragment_facts)
+    if isinstance(boundary, dict):
+        restored.source_checkpoint = boundary_checkpoint
+        persist_state(restored)
     _copy_watch_state(state, restored)
     _clear_harvest_transaction_unlocked(
         state,
@@ -677,14 +692,20 @@ def _next_harvest_backoff(outcome: str, current: float) -> float:
     return min(_MAX_ERROR_BACKOFF_SECONDS, current + 1.0)
 
 
+# LLM: 截止前可以及时醒来冻结边界；截止后正退避不能被deadline钳成0，持久节拍与本地loop共用。
+# 函数用途: 算出下一拍等待，错误和背压都不热循环。
 def _next_harvest_wait(state: WatchState, backoff: float) -> float:
     """Sleep no later than the collection deadline so the final read is timely."""
-    regular = max(0.0, float(state.tuning.poll_interval_seconds) + float(backoff))
+    regular = max(0.1, float(state.tuning.poll_interval_seconds) + float(backoff))
+    control = (state.source_checkpoint or {}).get("_host_harvest", {})
+    due = control.get("next_due_at") if isinstance(control, dict) else None
+    if type(due) in (int, float) and math.isfinite(due) and due > time.time():
+        return max(regular if backoff > 0 else 0.1, due - time.time())
     window = int(state.watch_window_seconds or 0)
     if window <= 0 or float(state.window_finalized_at or 0.0) > 0:
         return regular
     until_deadline = float(state.opened_at or 0.0) + window - time.time()
-    return min(regular, max(0.0, until_deadline))
+    return min(regular, until_deadline) if until_deadline > 0 else regular
 
 
 def _locked_harvest_step(
@@ -709,6 +730,8 @@ def _locked_harvest_step(
         return "error"
 
 
+# LLM: 到期只要求冻结目标；单拍预算未追平不能stop。背压下仍先持久化同一上界，不进行来源读取。
+# 函数用途: 完成一拍有界收割，只有已提交finalized事实才结束窗口。
 def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
     """持 state.lock 跑一拍:先判停,再背压闸,再收割。"""
     with state.lock:
@@ -722,6 +745,10 @@ def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
             # 保证档只会因磁盘水位走到这里,单独记账(回执要能区分"判读慢"与"盘满")。
             key = "disk_backpressure_skips" if state.audit_guarantee else "backpressure_skips"
             state.totals[key] = int(state.totals.get(key, 0) or 0) + 1
+            if finalizing_window:
+                transaction = _begin_harvest_transaction(state)
+                _record_harvest_schedule(state, DrainResult(cursor=state.cursor))
+                _commit_harvest_transaction(state, transaction)
             return "ok"
         healthy = _harvest_cycle(
             state,
@@ -730,7 +757,7 @@ def _harvest_once(state: WatchState, fetch_json: Callable) -> str:
         )
         if not healthy:
             return "error"
-        return "stop" if finalizing_window else "ok"
+        return "stop" if state.window_finalized_at > 0 else "ok"
 
 
 def _effective_ceiling(state: WatchState) -> int:
@@ -804,6 +831,157 @@ def _window_deadline_reached(state: WatchState) -> bool:
     return time.time() >= float(state.opened_at or 0.0) + window
 
 
+# LLM: 复用原source_checkpoint的宿主命名空间，不另建进度账；对来源适配器出站前剥离该键。
+# 函数用途: 取得本watch持久化的收割边界、退避和partial控制事实。
+def _harvest_control(state: WatchState) -> dict:
+    checkpoint = deepcopy(state.source_checkpoint or {})
+    control = checkpoint.get("_host_harvest")
+    if not isinstance(control, dict):
+        control = {}
+    checkpoint["_host_harvest"] = control
+    state.source_checkpoint = checkpoint
+    return control
+
+
+# LLM: 首次到点在原WAL内冻结来源上界；文件认物理身份/字节，cursor只接受显式连续位次边界，不猜业务字段。
+# 函数用途: 固定窗口追赶目标，未知源能力保留unsupported，不把到期当作追平。
+def _freeze_harvest_boundary(state: WatchState) -> dict | None:
+    if not _window_deadline_reached(state):
+        return None
+    control = _harvest_control(state)
+    if (isinstance(control.get("boundary"), dict)
+            and control["boundary"].get("deadline") == state.opened_at + state.watch_window_seconds
+            and not control["boundary"].get("capture_error")):
+        return deepcopy(control["boundary"])
+    from .sources import file_path_of, source_kind
+
+    kind = source_kind(state.source_url, state.source_mode)
+    boundary = {"kind": kind, "captured_at": time.time(),
+                "deadline": state.opened_at + state.watch_window_seconds}
+    if kind == "file":
+        try:
+            stat = file_path_of(state.source_url).stat()
+            boundary.update(identity=f"{stat.st_dev}:{stat.st_ino}", end_cursor=stat.st_size)
+        except OSError as exc:
+            boundary["capture_error"] = str(exc)[:500]
+    elif kind == "cursor":
+        declared = (state.source_envelope or {}).get("finalization_boundary")
+        if (isinstance(declared, dict) and declared.get("cursor_semantics") == "record_ordinal"
+                and type(declared.get("end_cursor")) is int and declared["end_cursor"] >= 0):
+            boundary["end_cursor"] = declared["end_cursor"]
+        else:
+            boundary["supported"] = False
+    elif kind != "poll":
+        boundary["supported"] = False
+    control["boundary"] = deepcopy(boundary)
+    return boundary
+
+
+# LLM: 只限制原文件handle的读取上界，记录解析仍复用sources唯一的_drain_open_handle，不复制成条算法。
+# 类用途: 让增长文件在多个预算片内始终显示同一个固定EOF。
+class _BoundedHarvestFile:
+    # LLM: 调用方持有文件并已核对物理身份，wrapper不拥有或扩大文件权限。
+    # 函数用途: 保存本次已打开handle及固定字节上界。
+    def __init__(self, handle, upper):
+        self.handle, self.upper = handle, upper
+
+    # LLM: read永不越过原冻结上界，即使文件随后增长也不暴露窗口外字节。
+    # 函数用途: 给原记录读取器返回有界字节。
+    def read(self, size=-1):
+        remaining = max(0, self.upper - self.handle.tell())
+        return self.handle.read(remaining if size < 0 else min(size, remaining))
+
+    # LLM: 原读取器仅使用绝对seek；拒绝其它定位语义及越界位置。
+    # 函数用途: 保留原成条读取的回退能力但不跳出冻结文件范围。
+    def seek(self, offset, whence=0):
+        if whence != 0 or not 0 <= offset <= self.upper:
+            raise ValueError("harvest boundary seek out of range")
+        return self.handle.seek(offset)
+
+    # LLM: 当前位置直接来自同一原handle，不维护第二份文件游标。
+    # 函数用途: 供原解析器取得实际字节位置。
+    def tell(self):
+        return self.handle.tell()
+
+
+# LLM: 原租约/事务和文件授权已由调用方取得；文件换代/截短不重置游标，未完成片段不假装窗口完成。
+# 函数用途: 通过原记录解析器追赶冻结文件的剩余完整记录。
+def _drain_bounded_harvest_file(state, boundary, budget):
+    from .sources import _drain_open_handle, file_path_of, file_record_delimiter, load_file_fragment
+
+    result = DrainResult(cursor=state.cursor, aux_cursor=state.line_cursor)
+    upper = boundary.get("end_cursor")
+    if type(upper) is not int or upper < state.cursor:
+        result.error, result.error_code = "冻结文件边界不可核验", "SOURCE_ENVELOPE_INVALID"
+        return result
+    fragment = load_file_fragment(state)
+    if state.file_fragment_bytes > 0 and fragment is None:
+        result.error, result.error_code = "已保存片段不可用", "SOURCE_FRAGMENT_UNAVAILABLE"
+        return result
+    try:
+        with file_path_of(state.source_url).open("rb") as handle:
+            stat = os.fstat(handle.fileno())
+            identity = f"{stat.st_dev}:{stat.st_ino}"
+            if identity != boundary.get("identity") or stat.st_size < upper:
+                result.error, result.error_code = "冻结来源已换代或截短", "SOURCE_FRAGMENT_SOURCE_CHANGED"
+                return result
+            result.source_identity = identity
+            handle.seek(state.cursor)
+            result.reached_end = _drain_open_handle(
+                _BoundedHarvestFile(handle, upper), result, budget,
+                delimiter=file_record_delimiter(state), expected_fragment=fragment or b"",
+            )
+            result.reached_end = bool(not result.error and result.cursor == upper and not result.incomplete_fragment)
+    except OSError as exc:
+        result.error, result.error_code = str(exc)[:500], "NETWORK_REQUEST_FAILED"
+    return result
+
+
+# LLM: 本函数是两条原harvest入口共用的边界适配；来源永远看不到宿主控制元数据，未知快照能力显式失败。
+# 函数用途: 在单拍预算内读取固定上界，而不是在截止后无界追赶新数据。
+def _drain_harvest_source(state, fetch_json, budget, *, finalize_window=False):
+    from .sources import drain_watch_source
+
+    control = _harvest_control(state)
+    boundary = control.get("boundary") if finalize_window else None
+    if isinstance(boundary, dict) and boundary.get("capture_error"):
+        return DrainResult(cursor=state.cursor, error=boundary["capture_error"], error_code="NETWORK_REQUEST_FAILED")
+    if isinstance(boundary, dict) and boundary.get("supported") is False:
+        return DrainResult(cursor=state.cursor, error="来源缺少可冻结的窗口快照/上界，保留partial，不能确认完成",
+                           error_code="SOURCE_ENVELOPE_INVALID")
+    if isinstance(boundary, dict) and boundary.get("kind") == "file":
+        result = _drain_bounded_harvest_file(state, boundary, budget)
+    else:
+        view = replace(state, source_checkpoint={key: deepcopy(value) for key, value in state.source_checkpoint.items()
+                                                 if key != "_host_harvest"})
+        upper = boundary.get("end_cursor") if isinstance(boundary, dict) else None
+        if upper is not None:
+            external = view.source_checkpoint.get("external_cursor", state.cursor)
+            remaining = max(0, upper - external)
+            budget = replace(budget, max_events=min(budget.max_events, remaining),
+                             page_limit=max(1, min(budget.page_limit, remaining)))
+        result = drain_watch_source(view, fetch_json, budget, force_poll=finalize_window)
+        if upper is not None and not result.error:
+            external = (result.source_checkpoint or {}).get("external_cursor", external)
+            if external > upper:
+                result.error, result.error_code = "来源越过冻结上界，未提交本拍", "SOURCE_ENVELOPE_INVALID"
+            result.reached_end = external == upper
+    result.source_checkpoint = {**deepcopy(result.source_checkpoint or state.source_checkpoint),
+                                "_host_harvest": deepcopy(control)}
+    return result
+
+
+# LLM: next_due与partial随原cursor/spool事务提交；失败仍保留原游标，退避不因窗口到期归零。
+# 函数用途: 给本地loop与C/W发现层记录同一份真实重试节拍。
+def _record_harvest_schedule(state, drain):
+    control = _harvest_control(state)
+    backoff = _next_harvest_backoff("error" if drain.error else "ok", float(control.get("error_backoff_seconds") or 0))
+    control.update(error_backoff_seconds=backoff,
+                   next_due_at=time.time() + max(0.1, float(state.tuning.poll_interval_seconds) + backoff),
+                   partial=bool(drain.error or not drain.reached_end),
+                   stop_reason="source_error" if drain.error else "source_end" if drain.reached_end else "budget_exhausted")
+
+
 def _latest_cursor_update(state: WatchState) -> float:
     """读游标最近一次推进时刻(单消费者:一路一个基座游标)——消费活跃度信号,供 idle 自停判定。"""
     return float(read_spool_cursor(state).get("updated_at") or 0.0)
@@ -843,6 +1021,8 @@ def _harvest_cycle(
         raise
 
 
+# LLM: 原cursor/spool/audit提交顺序不变，边界读取与退避共用宿主控制字段；只有追平固定目标才能finalize。
+# 函数用途: 在原事务内提交一拍记录及准确的partial/完成事实。
 def _harvest_cycle_transaction(
     state: WatchState,
     fetch_json: Callable,
@@ -858,7 +1038,6 @@ def _harvest_cycle_transaction(
     """
     from .sources import (
         apply_cursor_page_feedback,
-        drain_watch_source,
         persist_file_fragment,
     )
     from .watch_feedback import consume_feedback_inbox
@@ -871,11 +1050,11 @@ def _harvest_cycle_transaction(
         page_limit=state.tuning.page_limit,
         deadline=time.time() + SOURCE_FETCH_TIMEOUT_SECONDS,
     )
-    drain = drain_watch_source(
+    drain = _drain_harvest_source(
         state,
         fetch_json,
         budget,
-        force_poll=finalize_window,
+        finalize_window=finalize_window,
     )
     _assert_active_harvest_transaction(state, transaction)
     apply_cursor_page_feedback(state, drain)
@@ -889,6 +1068,7 @@ def _harvest_cycle_transaction(
         state.totals["http_errors"] += 1
         state.last_error = drain.error
         state.last_error_code = drain.error_code or "NETWORK_REQUEST_FAILED"
+        _record_harvest_schedule(state, drain)
         _commit_harvest_transaction(state, transaction)
         return False
     state.last_error = ""
@@ -934,11 +1114,12 @@ def _harvest_cycle_transaction(
         state.last_poll_at = float(drain.fetched_at)
     state.last_reached_end = drain.reached_end
     state.totals["gap_events"] += drain.gap_events
-    if finalize_window:
+    if finalize_window and drain.reached_end and not drain.incomplete_fragment:
         # LLM: Persist this marker inside the cursor/spool commit transaction.
         # A takeover therefore sees either the whole boundary read or no marker.
         # 函数用途: 最终补拉与游标、原始队列一起原子落盘，消除崩溃后的重复或漏拉判断。
         state.window_finalized_at = time.time()
+    _record_harvest_schedule(state, drain)
     _update_ingest_throughput(state, now=time.time())
     _commit_harvest_transaction(state, transaction)
     # Rotation is a post-commit storage optimization.  It never participates in
@@ -950,10 +1131,14 @@ def _harvest_cycle_transaction(
     return True
 
 
+# LLM: 请求prepare只计算原source key差集，原最终短事务才写WAL；本地同步路径仍原地stage。
+# 函数用途: 沿唯一source-key索引去重，并支持锁外prepare而不提前持久化。
 def _deduplicate_source_records(
     state: WatchState,
     drain: DrainResult,
     transaction: dict[str, Any],
+    *,
+    persist: bool = True,
 ) -> None:
     """Filter adapter overlaps by their durable record keys before the engine."""
 
@@ -992,11 +1177,9 @@ def _deduplicate_source_records(
     drain.events = accepted_events
     drain.source_record_keys = accepted_keys
     drain.cursor = int(state.cursor) + len(accepted_events)
-    _stage_harvest_source_record_keys(
-        state,
-        transaction,
-        list(accepted_keys.values()),
-    )
+    transaction["source_record_keys"] = list(accepted_keys.values())
+    if persist:
+        _stage_harvest_source_record_keys(state, transaction, list(accepted_keys.values()))
 
 
 def judge_headroom(state: WatchState) -> int:
