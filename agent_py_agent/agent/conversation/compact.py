@@ -1270,6 +1270,8 @@ def _commit_compact_candidate(
     for rows in (candidate.compact_rows, candidate.retained_tail):
         if isinstance(rows, MessageSnapshotRows):
             rows.validate()
+    # 原CAS可能切换热inode；返回尾部须在切换前物化，不能在已提交后重放旧物理地址。
+    retained_tail = tuple(candidate.retained_tail)
     from . import tool_discovery
     selector = tool_discovery.compact_tool_selector(request.thread, request.pending)
     from contextlib import nullcontext
@@ -1309,13 +1311,13 @@ def _commit_compact_candidate(
         )
     return ConversationCompactResult(
         thread=updated,
-        messages=candidate.retained_tail,
+        messages=retained_tail,
         projected_tokens=candidate.projected_tokens_after,
         trigger_tokens=request.policy.trigger_tokens,
         compacted=True,
         request_projection=candidate.request_projection,
         recent_operation_evidence=_recent_operation_evidence(
-            candidate.retained_tail
+            retained_tail
         ),
     )
 

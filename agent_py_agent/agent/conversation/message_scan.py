@@ -17,6 +17,10 @@ from .display_checkpoint import is_display_checkpoint
 from .models import MessageLogEntry
 from .store_io import complete_jsonl_end
 
+TRANSCRIPT_ROTATE_BYTES = 1024 * 1024
+TRANSCRIPT_ROTATE_ROWS = 128
+_TRANSCRIPT_SEGMENT_BYTES = 1024 * 1024
+
 # 消息去重索引最多缓存的线程文件数量。
 _MAX_DEDUPE_INDEX_FILES = 64
 # 单个消息文件去重索引最多保留的幂等键数量。
@@ -118,7 +122,7 @@ def read_message_page(
     entries: list[MessageLogEntry] = []
     cursor = after
     try:
-        handle = path.open("rb")
+        handle = TranscriptReader(path)
     except FileNotFoundError:
         if after == 0 and through in (None, 0):
             return [], after
@@ -284,7 +288,9 @@ def _scan_dedupe_tail(handle: BinaryIO, end: int, key: str, key_offsets: Ordered
 def find_message_dedupe(path: Path, key: str) -> MessageLogEntry | None:
     cache_key = str(path)
     with _dedupe_file_lock(cache_key):
-        return _find_message_dedupe_locked(path, cache_key, key)
+        cold = cold_message_lookup(path, f'dedupe:{key}') if key else None
+        hot = _find_message_dedupe_locked(path, cache_key, key)
+        return cold[0] if cold is not None else hot
 
 
 # LLM: 调用方已持路径锁；全局LRU锁不覆盖I/O，失败直接在当前锁内冷扫，不递归获取路径锁。
@@ -383,3 +389,336 @@ def scan_message_snapshot(path: Path, thread_id: str, through: int, visitor, *, 
             del entry, line
         raise_if_compact_interrupted(interrupt_check)
     return digest.hexdigest()
+
+
+# LLM: 消息清单只描述物理冷热分段，不赋予Compact覆盖；pending按热文件inode选择旧/新视图，读口不写修复。
+# 函数用途: 恢复固定大小的消息布局，拒绝不完整或跨线程的清单。
+def transcript_manifest(path: Path):
+    from ..common.nofollow_fs import read_bytes_beneath
+
+    raw = read_bytes_beneath(path.parent, (path.with_suffix('.manifest.json').name,), max_bytes=65536)
+    if raw is None:
+        return None
+    try:
+        state = json.loads(raw)
+        if state.get('phase') == 'prepared':
+            stamp = path.stat()
+            identity = [stamp.st_dev, stamp.st_ino]
+            if identity == state['old_identity']:
+                state = state['before']
+            elif identity == state['new_identity']:
+                state = state['after']
+            else:
+                raise ValueError('pending transcript identity mismatches')
+        if state is None:
+            return None
+        if (type(state) is not dict or state.get('schema') != 'conversation_transcript_segments.v1'
+                or type(state.get('thread_id')) is not str or not state['thread_id']
+                or Path(state['thread_id']).name != state['thread_id'] or state['thread_id'] != path.stem
+                or any(type(state.get(name)) is not int or not 0 <= state[name] < 2 ** 63
+                       for name in ('hot_base', 'segment_count', 'cold_message_count'))):
+            raise ValueError('invalid transcript manifest')
+        return state
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise DataCorruptionError('canonical transcript segment manifest is invalid') from exc
+
+
+# LLM: writer必须已持原消息锁；回滚只撤销未rename的布局计划，冷孤儿不成为历史；已rename则完成新清单。
+# 函数用途: 在后续追加前收口崩溃留下的冷热文件转换，防止重放阶段覆盖迟到追加。
+def recover_transcript_transition(path: Path):
+    from ..common.nofollow_fs import read_bytes_beneath, write_text_atomic_beneath
+
+    name = path.with_suffix('.manifest.json').name
+    raw = read_bytes_beneath(path.parent, (name,), max_bytes=65536)
+    if raw is None:
+        return
+    state = json.loads(raw)
+    if state.get('phase') != 'prepared':
+        return
+    selected = transcript_manifest(path)
+    if selected is None:
+        # 空旧清单用显式零状态恢复，避免删除事务记录引入额外失败窗。
+        selected = {'schema': 'conversation_transcript_segments.v1', 'thread_id': state['after']['thread_id'],
+                    'hot_base': 0, 'segment_count': 0, 'cold_message_count': 0,
+                    'index': None, 'chain_sha256': hashlib.sha256(b'').hexdigest()}
+    write_text_atomic_beneath(path.parent, (name,), json.dumps(selected, sort_keys=True) + '\n')
+
+
+# LLM: 句柄冻结同次清单、完整尾界及热FD；冷热物理位置对外统一为从会话开始的虚拟字节坐标。
+# 类用途: 为显式历史/分页/来源查询提供可seek的完整会话，不让模型热选源打开冷段。
+class TranscriptReader:
+    # LLM: 默认冻结完整LF尾界；全量读取可显式选择物理EOF以校验半行，冷数据仍延迟读取且不创建索引或锁。
+    # 函数用途: 冻结当前冷热布局及两种尾界，后续轮转不重绑定这个读取快照。
+    def __init__(self, path: Path, *, complete_only=True):
+        from .store_io import ImmutableJsonIndex
+
+        self.path = path
+        for _attempt in range(4):
+            self.manifest = transcript_manifest(path)
+            self.hot = path.open('rb')
+            try:
+                current = transcript_manifest(path)
+                stamp = os.fstat(self.hot.fileno())
+                expected = self.manifest.get('hot_identity') if self.manifest else None
+                if current == self.manifest and (expected is None or expected == [stamp.st_dev, stamp.st_ino]):
+                    break
+            except BaseException:
+                self.hot.close()
+                raise
+            self.hot.close()
+        else:
+            raise DataCorruptionError('canonical transcript layout changed during snapshot open')
+        self.base = self.manifest['hot_base'] if self.manifest else 0
+        physical_end = self.hot.seek(0, 2)
+        self.complete_end = self.base + complete_jsonl_end(self.hot, physical_end)
+        self.end = self.complete_end if complete_only else self.base + physical_end
+        self.position, self.cached = 0, None
+        self.index = ImmutableJsonIndex(path.parent, ('archive', self.manifest['thread_id'], 'index')) if self.manifest else None
+
+    # LLM: 只管理本次句柄，不改变持久布局。
+    # 函数用途: 进入只读快照上下文。
+    def __enter__(self):
+        return self
+
+    # LLM: 失败和提前退出都关闭原热FD，冷块仅在内存中持有。
+    # 函数用途: 释放本次快照资源。
+    def __exit__(self, *_args):
+        self.hot.close()
+        self.cached = None
+
+    # LLM: 坐标始终是虚拟字节，不使用字符数或物理热文件偏移。
+    # 函数用途: 返回当前逻辑读取位置。
+    def tell(self):
+        return self.position
+
+    # LLM: seek允许EOF，不能越过冻结尾界；不读取或校验目标行正文。
+    # 函数用途: 在完整冷热消息空间内定位。
+    def seek(self, offset, whence=0):
+        position = offset if whence == 0 else (self.position if whence == 1 else self.end) + offset
+        if whence not in (0, 1, 2) or not 0 <= position <= self.end:
+            raise DataCorruptionError('message cursor exceeds canonical transcript')
+        self.position = position
+        return position
+
+    # LLM: 元数据来自清单封印的不可变根；二分仅服务显式冷查询，不进入热选源。
+    # 函数用途: 按虚拟偏移查找包含该字节的冷段。
+    def _segment(self):
+        if self.cached is not None and self.cached[0]['start'] <= self.position < self.cached[0]['end']:
+            return self.cached
+        from ..common.nofollow_fs import read_bytes_beneath
+
+        low, high = 1, self.manifest['segment_count']
+        while low <= high:
+            sequence = (low + high) // 2
+            descriptor = self.index.get(self.manifest['index'], f'segment:{sequence}')
+            if not isinstance(descriptor, dict):
+                raise DataCorruptionError('canonical transcript segment is missing')
+            if self.position < descriptor['start']:
+                high = sequence - 1
+            elif self.position >= descriptor['end']:
+                low = sequence + 1
+            else:
+                size = descriptor['end'] - descriptor['start']
+                if not 0 < size <= 64 * 1024 * 1024:
+                    raise DataCorruptionError('canonical transcript segment exceeds byte budget')
+                raw = read_bytes_beneath(self.path.parent, ('archive', self.manifest['thread_id'], f'seg-{sequence:020d}.jsonl'), max_bytes=size)
+                if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != descriptor['sha256']:
+                    raise DataCorruptionError('canonical transcript segment digest or length mismatches')
+                self.cached = descriptor, raw
+                return self.cached
+        raise DataCorruptionError('message cursor is outside canonical segments')
+
+    # LLM: 只在冻结尾界内逐段读取；每个冷段先核完整SHA，热段沿保留的同一FD读取，短读不能当EOF。
+    # 函数用途: 从虚拟会话中读取明确数量原始字节。
+    def read(self, size=-1):
+        remaining = self.end - self.position if size < 0 else min(size, self.end - self.position)
+        parts = []
+        while remaining:
+            if self.position >= self.base:
+                wanted = remaining
+                self.hot.seek(self.position - self.base)
+                raw = self.hot.read(wanted)
+            else:
+                descriptor, block = self._segment()
+                wanted = min(remaining, descriptor['end'] - self.position)
+                begin = self.position - descriptor['start']
+                raw = block[begin:begin + wanted]
+            if len(raw) != wanted:
+                raise DataCorruptionError('canonical transcript truncated during read')
+            parts.append(raw)
+            self.position += wanted
+            remaining -= wanted
+        return b''.join(parts)
+
+    # LLM: 冷段只在完整LF边界切分，跨段仍保持同一逻辑记录；字节预算由原分页调用方裁决。
+    # 函数用途: 读取一条真实消息行而不是按Unicode分隔符拆分正文。
+    def readline(self, size=-1):
+        if self.position == self.end or size == 0:
+            return b''
+        if self.position >= self.base:
+            self.hot.seek(self.position - self.base)
+            amount = self.end - self.position if size < 0 else min(size, self.end - self.position)
+            raw = self.hot.readline(amount)
+        else:
+            descriptor, block = self._segment()
+            begin = self.position - descriptor['start']
+            end = block.find(b'\n', begin) + 1
+            if not end:
+                raise DataCorruptionError('canonical transcript segment ends inside a row')
+            if size >= 0:
+                end = min(end, begin + size)
+            raw = block[begin:end]
+        if not raw:
+            raise DataCorruptionError('canonical transcript truncated during line read')
+        self.position += len(raw)
+        return raw
+
+
+# LLM: 冷索引仅指向本线程不可变冷段原行；必须按实际字节hash读回，不把缓存地址当证据。
+# 函数用途: 为精确ID及幂等键恢复冷消息与原虚拟位置。
+def cold_message_lookup(path: Path, key: str, *, reader=None):
+    if reader is None:
+        if not path.exists() and transcript_manifest(path) is None:
+            return None
+        with TranscriptReader(path) as frozen:
+            return cold_message_lookup(path, key, reader=frozen)
+    manifest = reader.manifest
+    if manifest is None:
+        return None
+    address = reader.index.get(manifest['index'], key)
+    if address is None:
+        return None
+    reader.seek(address['offset'])
+    raw = reader.read(address['length'])
+    if hashlib.sha256(raw).hexdigest() != address['sha256']:
+        raise DataCorruptionError('canonical cold message digest mismatches')
+    entry = _message_from_line(raw, manifest['thread_id'])
+    actual = f'id:{entry.message_id}' if key.startswith('id:') else f'dedupe:{entry.metadata.get("dedupe_key", "")}'
+    if actual != key:
+        raise DataCorruptionError('canonical cold message identity mismatches')
+    return entry, address
+
+
+# LLM: 仅原线程CAS成功后、持消息锁调用；检查点四元边界、thread scope及精确覆盖都成立才可物理冷转。
+# 对仍携带任务身份的来源保守保留，不把局部/活动工具摘要或调用方字节位置当全线程授权。
+# 函数用途: 将已覆盖且无局部任务引用的消息前缀冷存，保留边界本行及全部迟到尾部。
+def rotate_committed_transcript(storage, thread):
+    from ..common.nofollow_fs import write_bytes_atomic_beneath, write_text_atomic_beneath
+    from .compact_checkpoint import _cold_checkpoint
+    from .compact_scope import THREAD_COMPACT_SCOPE, CompactScope
+    from .compact_summary_view import _IndexedMessageCoverage
+    from .message_selection import _validated_positions, message_position_index
+    from .store_io import ImmutableJsonIndex
+
+    path = storage.message_path(thread.thread_id)
+    if not path.exists() or not thread.compact_checkpoint_id:
+        return
+    compact_root = storage.root.parent / 'compact'
+    row = _cold_checkpoint(compact_root, thread.thread_id, thread.compact_checkpoint_id)
+    if (row is None or row.get('schema') != 'conversation_compact_checkpoint.v3'
+            or CompactScope.from_dict(row['scope']) != THREAD_COMPACT_SCOPE
+            or row.get('source_kind') not in {'transcript', 'transcript_and_tool_archive'}
+            or row['generation'] != thread.compact_generation
+            or row['source_end_message_id'] != thread.compacted_through_message_id
+            or row['source_end_byte_offset'] != thread.compacted_through_byte_offset
+            or row['summary_sha256'] != hashlib.sha256(thread.summary.encode('utf-8')).hexdigest()
+            or 'carried_view' not in row):
+        return
+    recover_transcript_transition(path)
+    before = transcript_manifest(path)
+    base = before['hot_base'] if before else 0
+    through = complete_message_offset(path)
+    positions = message_position_index(path, through)
+    _validated_positions(positions, thread.thread_id)
+    boundary = positions.by_id.get(thread.compacted_through_message_id)
+    if boundary is None or base + boundary.address.offset + boundary.address.length != thread.compacted_through_byte_offset:
+        return
+    cut = boundary.address.offset
+    count = sum(position.address.offset < cut for position in positions.entries)
+    if not cut or (cut < TRANSCRIPT_ROTATE_BYTES and count < TRANSCRIPT_ROTATE_ROWS):
+        return
+    coverage_index = ImmutableJsonIndex(compact_root, ('evidence', thread.thread_id, 'indexes'))
+    meta = row['carried_view']
+    coverage = _IndexedMessageCoverage(meta['recent_messages'], coverage_index, meta['messages'], meta['message_count'])
+    with path.open('rb') as handle:
+        while handle.tell() < cut:
+            raw = handle.readline(cut - handle.tell())
+            entry = _message_from_line(raw, thread.thread_id, skip_blank=True)
+            if entry is None:
+                continue
+            if any(entry.metadata.get(name) for name in ('task_id', 'conversation_task_id', 'background_task_id')):
+                return
+            if entry.role in {'user', 'assistant'} and entry.message_id not in coverage:
+                from .models import is_audit_background_transcript_entry
+
+                if not is_audit_background_transcript_entry(entry):
+                    return
+    after = dict(before) if before else {
+        'schema': 'conversation_transcript_segments.v1', 'thread_id': thread.thread_id,
+        'hot_base': 0, 'segment_count': 0, 'cold_message_count': 0,
+        'index': None, 'chain_sha256': hashlib.sha256(b'').hexdigest(),
+    }
+    index = ImmutableJsonIndex(path.parent, ('archive', thread.thread_id, 'index'))
+    with path.open('rb') as handle:
+        start, lines, length = base, [], 0
+        while handle.tell() < cut:
+            raw = handle.readline(cut - handle.tell())
+            if len(raw) > 64 * 1024 * 1024:
+                raise MessagePageBudgetExceeded('canonical message row exceeds cold segment budget')
+            if lines and length + len(raw) > _TRANSCRIPT_SEGMENT_BYTES:
+                _save_transcript_segment(path, after, index, start, b''.join(lines))
+                start += length
+                lines, length = [], 0
+            lines.append(raw)
+            length += len(raw)
+        if lines:
+            _save_transcript_segment(path, after, index, start, b''.join(lines))
+        handle.seek(cut)
+        tail = handle.read()
+    after.update({'hot_base': base + cut, 'checkpoint_id': thread.compact_checkpoint_id,
+                  'generation': thread.compact_generation, 'boundary_message_id': thread.compacted_through_message_id,
+                  'summary_sha256': row['summary_sha256']})
+    stage = f'.{path.name}.rotation-{after["segment_count"]}.stage'
+    write_bytes_atomic_beneath(path.parent, (stage,), tail)
+    old_stat, new_stat = path.stat(), path.with_name(stage).stat()
+    after['hot_identity'] = [new_stat.st_dev, new_stat.st_ino]
+    pending = {'phase': 'prepared', 'before': before, 'after': after,
+               'old_identity': [old_stat.st_dev, old_stat.st_ino], 'new_identity': [new_stat.st_dev, new_stat.st_ino]}
+    write_text_atomic_beneath(path.parent, (path.with_suffix('.manifest.json').name,), json.dumps(pending, sort_keys=True) + '\n')
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.replace(stage, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    write_text_atomic_beneath(path.parent, (path.with_suffix('.manifest.json').name,), json.dumps(after, sort_keys=True) + '\n')
+
+
+# LLM: 原字节先耐久保存，再更新不可变地址根；首ID/首幂等键不能被后来相同身份覆盖，display也保存原样。
+# 函数用途: 保存单个完整冷段及精确来源/幂等索引，不发布消息清单。
+def _save_transcript_segment(path, manifest, index, start, raw):
+    from ..common.nofollow_fs import write_bytes_atomic_beneath
+
+    sequence = manifest['segment_count'] + 1
+    thread_id = manifest['thread_id']
+    write_bytes_atomic_beneath(path.parent, ('archive', thread_id, f'seg-{sequence:020d}.jsonl'), raw)
+    root, offset = manifest['index'], start
+    import io
+
+    for line in io.BytesIO(raw):
+        entry = _message_from_line(line, thread_id, skip_blank=True)
+        manifest['chain_sha256'] = hashlib.sha256(bytes.fromhex(manifest['chain_sha256']) + line).hexdigest()
+        if entry is not None:
+            manifest['cold_message_count'] += 1
+            address = {'offset': offset, 'length': len(line), 'sha256': hashlib.sha256(line).hexdigest()}
+            keys = [f'id:{entry.message_id}']
+            dedupe = str(entry.metadata.get('dedupe_key') or '').strip()
+            if dedupe and not is_display_checkpoint(entry):
+                keys.append(f'dedupe:{dedupe}')
+            for key in keys:
+                if index.get(root, key) is None:
+                    root = index.put(root, key, address)
+        offset += len(line)
+    descriptor = {'start': start, 'end': start + len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+    manifest['index'] = index.put(root, f'segment:{sequence}', descriptor)
+    manifest['segment_count'] = sequence

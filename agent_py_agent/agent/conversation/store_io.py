@@ -2,6 +2,7 @@
 # 模块用途: 为各领域共用账本读取、路径、时间和显式文件归档，避免领域对象反向依赖组装入口。
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections import deque
@@ -262,3 +263,161 @@ def unlink_quietly(path: Path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+# LLM: 内容寻址索引只存储调用领域给出的不可变投影，根引用必须由原CAS封印；不创建业务提交权威。
+# 类用途: 为有界热清单提供共享历史节点的固定深度键索引。
+class ImmutableJsonIndex:
+    # LLM: 固定根和命名空间由领域代码提供，不能把任意输入路径解释成授权。
+    # 函数用途: 绑定不可变节点的所有者目录。
+    def __init__(self, root: Path, parts: tuple[str, ...], *, ordered: bool = False):
+        self.root, self.parts, self.ordered = root, parts, ordered
+
+    # LLM: SHA256路由固定64层，每叶最多8个键；有序索引的键必须已是64位十六进制字串。
+    # 函数用途: 生成固定宽度路由，避免索引深度随历史代次无界增长。
+    def _route(self, key):
+        if not isinstance(key, str):
+            raise ValueError('immutable index requires a string key')
+        if self.ordered:
+            if len(key) != 64 or any(ch not in '0123456789abcdef' for ch in key):
+                raise ValueError('ordered index requires a 64 digit hexadecimal key')
+            return key
+        return hashlib.sha256(key.encode('utf-8', 'surrogatepass')).hexdigest()
+
+    # LLM: 最大代次只来自节点原值或已封印子引用；空值不参与范围最大值选择。
+    # 函数用途: 汇总时间子树的最高代次，不枚举子树历史。
+    @staticmethod
+    def _maximum(values):
+        candidates = [value for value in values if isinstance(value, dict) and type(value.get('generation')) is int]
+        return max(candidates, key=lambda value: value['generation'], default=None)
+
+    # LLM: 根由原领域清单封印，子引用由父节点SHA绑定；路径、长度及hash均严格检查，不容忍缺失节点。
+    # 函数用途: 从私有no-follow目录读取一个有界不可变节点。
+    def _load(self, reference):
+        from ..common.nofollow_fs import read_bytes_beneath
+
+        if type(reference) is not dict or set(reference) != {'ref', 'maximum'}:
+            raise OSError('immutable index root is invalid')
+        ref = reference['ref']
+        if type(ref) is not dict or set(ref) != {'sha256', 'byte_length', 'ref'}:
+            raise OSError('immutable index reference is invalid')
+        digest, size = ref['sha256'], ref['byte_length']
+        if (type(digest) is not str or len(digest) != 64 or any(ch not in '0123456789abcdef' for ch in digest)
+                or type(size) is not int or not 0 < size <= 1024 * 1024 or ref['ref'] != f'{digest}.json'):
+            raise OSError('immutable index reference is invalid')
+        raw = read_bytes_beneath(self.root, (*self.parts, ref['ref']), max_bytes=size)
+        if raw is None or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+            raise OSError('immutable index node digest or length mismatches')
+        try:
+            node = json.loads(raw)
+        except (ValueError, UnicodeError) as exc:
+            raise OSError('immutable index node is unreadable') from exc
+        if (type(node) is not dict or set(node) not in ({'entries'}, {'children'})
+                or type(next(iter(node.values()))) is not dict):
+            raise OSError('immutable index node shape is invalid')
+        if ('entries' in node and len(node['entries']) > 8) or ('children' in node and (
+            len(node['children']) > 16 or any(key not in '0123456789abcdef' or len(key) != 1 for key in node['children'])
+        )):
+            raise OSError('immutable index node exceeds its fanout')
+        return node
+
+    # LLM: 节点出生即0600，逐段no-follow且先刷盘再返回；重复内容只复用相同字节，不覆盖损坏对象。
+    # 函数用途: 保存一个不可变小节点并携带有序范围查询需要的子树最大代次。
+    def _save(self, node):
+        from ..common.nofollow_fs import read_bytes_beneath, write_bytes_atomic_beneath
+
+        raw = (json.dumps(node, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+        if len(raw) > 1024 * 1024:
+            raise ValueError('immutable index node exceeds byte budget')
+        digest = hashlib.sha256(raw).hexdigest()
+        parts = (*self.parts, f'{digest}.json')
+        previous = read_bytes_beneath(self.root, parts, max_bytes=len(raw))
+        if previous is not None and previous != raw:
+            raise OSError('immutable index node digest mismatches')
+        if previous is None:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            write_bytes_atomic_beneath(self.root, parts, raw)
+        values = node.get('entries', {}).values() if 'entries' in node else (
+            child.get('maximum') for child in node['children'].values()
+        )
+        return {'ref': {'sha256': digest, 'byte_length': len(raw), 'ref': parts[-1]},
+                'maximum': self._maximum(values)}
+
+    # LLM: 更新只复制命中路径，其它子树保留原引用；分裂有固定扇出，64层碰撞拒绝而非无限递归。
+    # 函数用途: 向不可变树插入一个键值，返回新根，旧根永远不变。
+    def _put(self, reference, key, value, route, depth):
+        node = self._load(reference) if reference is not None else {'entries': {}}
+        if 'entries' in node:
+            entries = {**node['entries'], key: value}
+            if len(entries) <= 8:
+                return self._save({'entries': entries})
+            if depth >= 64:
+                raise OSError('immutable index hash collision budget exceeded')
+            children = {}
+            for item, item_value in entries.items():
+                item_route = self._route(item)
+                digit = item_route[depth]
+                children[digit] = self._put(children.get(digit), item, item_value, item_route, depth + 1)
+        else:
+            if depth >= 64:
+                raise OSError('immutable index depth exceeds hash width')
+            children = dict(node['children'])
+            digit = route[depth]
+            children[digit] = self._put(children.get(digit), key, value, route, depth + 1)
+        return self._save({'children': children})
+
+    # LLM: 根是纯结果，调用方必须等原业务CAS确认后才可采用；写孤儿节点不产生业务提交。
+    # 函数用途: 添加或替换一个准确键并返回新根引用。
+    def put(self, reference, key: str, value):
+        return self._put(reference, key, value, self._route(key), 0)
+
+    # LLM: 每次至多访问64个分支加一叶，缺键返回None；坏节点不能当作缺键。
+    # 函数用途: 不枚举历史地查询一个准确键。
+    def get(self, reference, key: str):
+        route = self._route(key)
+        for depth in range(65):
+            if reference is None:
+                return None
+            node = self._load(reference)
+            if 'entries' in node:
+                return node['entries'].get(key)
+            if depth == 64:
+                raise OSError('immutable index depth exceeds hash width')
+            reference = node['children'].get(route[depth])
+        return None
+
+    # LLM: 显式全量遍历按实际历史量收费，不用于热摘要恢复或每轮选源；堆栈始终受64层限制。
+    # 函数用途: 逐节点产出全部键值，供显式核验与旧库一次性迁移。
+    def items(self, reference):
+        pending = [(reference, 0)]
+        while pending:
+            current, depth = pending.pop()
+            if current is None:
+                continue
+            if depth > 64:
+                raise OSError('immutable index depth exceeds hash width')
+            node = self._load(current)
+            if 'entries' in node:
+                yield from node['entries'].items()
+            else:
+                pending.extend((child, depth + 1) for child in node['children'].values())
+
+    # LLM: 小于边界的整个子树直接用父节点封印的最大值，只有相等分支继续下钻；不假设时钟单调。
+    # 函数用途: 在有序索引里求不晚于边界的最高代次，最多64层且每层最多16项。
+    def range_max(self, reference, boundary: str):
+        if not self.ordered:
+            raise ValueError('range query requires an ordered index')
+        self._route(boundary)
+        candidates = []
+        for depth in range(65):
+            if reference is None:
+                break
+            node = self._load(reference)
+            if 'entries' in node:
+                candidates.extend(value for key, value in node['entries'].items() if key <= boundary)
+                break
+            if depth == 64:
+                raise OSError('immutable index depth exceeds hash width')
+            candidates.extend(child['maximum'] for digit, child in node['children'].items() if digit < boundary[depth])
+            reference = node['children'].get(boundary[depth])
+        return self._maximum(candidates)

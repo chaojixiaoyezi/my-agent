@@ -364,6 +364,7 @@ def _load_gateway_thread(
 # LLM: Gateway预检与压缩共用已登记的请求中断；用户停止原样透传，压缩失败保留自己的类型化错误码，不得误报成会话记录损坏。
 # 原宿主传入的同片展示面沿原入口使用；普通preflight构造原默认面，不从thread重建选择。
 # defer只读固定完整尾界的范围来源；逐行selector不得重排行，错误保留原因，普通入口沿同一来源压缩。
+# Compact与主种子使用同一个history_row_selected；不得把后台审计、非聊天或当前请求中段加入覆盖。
 # 函数用途: 加载同源历史并冻结给自动压缩；可延后准备，停止与坏原文不降级为空。
 def _load_gateway_compact_context(
     inputs: GatewayConversationLoadRequest,
@@ -378,11 +379,12 @@ def _load_gateway_compact_context(
         scoped_audit_prepare = history_projection.is_scoped_audit_prepare(work_scope)
         scope = (CompactScope(kind="turn", task_id=str(work_scope.get("conversation_task_id") or ""),
                               turn_id=inputs.request_id) if scoped_audit_prepare else THREAD_COMPACT_SCOPE)
-        # LLM: 原Audit可见性编译为逐行bool，固定canonical来源由公共扫描验证；不能另造行或纳入兄弟Audit。
-        # 函数用途: 把原结构化工作范围交给公共扫描器，读取时只保留本轮允许归纳的历史行。
+        # LLM: 与_gateway_history_source共用唯一选择规则，范围仍由原typed工作事实裁决；不重排或删除原记录。
+        # 函数用途: 让Compact来源与模型主种子逐ID一致，排除后台审计、非聊天及本请求的所有历史位置。
         def selector_factory(_positions):
-            return lambda row: not scoped_audit_prepare or history_projection._history_row_visible_in_work_scope(
-                row.metadata, work_scope,
+            return partial(
+                history_projection.history_row_selected,
+                current_request_id=inputs.request_id, work_scope=work_scope,
             )
 
         source = load_conversation_compact_source(

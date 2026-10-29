@@ -12,7 +12,7 @@ from itertools import takewhile
 from pathlib import Path
 from typing import Any, TypeVar
 
-from ..common.json_io import append_private_jsonl_records
+from ..common.json_io import append_private_jsonl_records_unlocked, locked_json_path
 from ..gateway_parts.io import (
     locked_file_transition,
 )
@@ -23,7 +23,15 @@ from .display_checkpoint import (
     is_display_checkpoint,
 )
 from .message_cursor import locate_message_cursor, read_after_rows
-from .message_scan import complete_message_offset, find_message_dedupe, read_message_page
+from .message_scan import (
+    TranscriptReader,
+    cold_message_lookup,
+    complete_message_offset,
+    find_message_dedupe,
+    read_message_page,
+    recover_transcript_transition,
+    transcript_manifest,
+)
 from .models import (
     ConversationThread,
     MessageLogEntry,
@@ -46,15 +54,22 @@ _PARSE_CONTEXT = "conversation.messages.parse"
 # LLM: 只读canonical JSONL，逐行校验并流式哈希，含display/同长改写；首末文件签名变化或坏读拒绝，不新建锁/索引。
 # 函数用途: 获取消息总数、末ID、字节数和内容摘要，供闲置幂等与提交CAS核对完整规范消息状态。
 def canonical_message_tail_marker(path: Path, thread_id: str) -> dict[str, Any]:
-    digest, count, size, last = hashlib.sha256(), 0, 0, ""
     try:
-        handle = path.open("rb")
+        reader = TranscriptReader(path)
     except FileNotFoundError:
-        return {"message_count": 0, "last_message_id": "", "byte_size": 0, "sha256": digest.hexdigest()}
-    with handle:
+        if transcript_manifest(path) is not None:
+            raise DataCorruptionError('canonical hot transcript is missing') from None
+        return {"message_count": 0, "last_message_id": "", "byte_size": 0, "sha256": hashlib.sha256(b'').hexdigest()}
+    with reader:
+        manifest, handle = reader.manifest, reader.hot
+        digest = bytes.fromhex(manifest['chain_sha256']) if manifest else hashlib.sha256(b'').digest()
+        count = manifest['cold_message_count'] if manifest else 0
+        base = reader.base
+        size, last = 0, ''
+        handle.seek(0)
         before = os.fstat(handle.fileno())
         for raw in handle:
-            digest.update(raw)
+            digest = hashlib.sha256(digest + raw).digest()
             size += len(raw)
             if not raw.strip():
                 continue
@@ -68,7 +83,7 @@ def canonical_message_tail_marker(path: Path, thread_id: str) -> dict[str, Any]:
         keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
         if size != before.st_size or any(getattr(before, key) != getattr(after, key) for key in keys):
             raise DataCorruptionError("canonical message source changed during tail observation")
-    return {"message_count": count, "last_message_id": last, "byte_size": size, "sha256": digest.hexdigest()}
+    return {"message_count": count, "last_message_id": last, "byte_size": base + size, "sha256": digest.hex()}
 
 
 # LLM: 只在内存克隆已验证的前缀，源消息及嵌套metadata零修改；新消息ID映射交Compact重建引用。
@@ -215,6 +230,14 @@ def _message_entries(
     return entries, errors
 
 
+# LLM: 原热FD保持打开以防inode复用；热查询前后都核清单及路径身份，跨轮转不得返回无错误未命中。
+# 函数用途: 判断冷查快照与即将查询的物理热索引是否属于同一个布局。
+def _reader_layout_is_current(reader):
+    opened, current = os.fstat(reader.hot.fileno()), reader.path.stat()
+    return ((opened.st_dev, opened.st_ino) == (current.st_dev, current.st_ino)
+            and reader.manifest == transcript_manifest(reader.path))
+
+
 # LLM: 复用canonical完整前缀验证及首ID地址；只报告目标前的JSON错误和目标自身解析错误，不受目标后的坏行影响。
 # 函数用途: 用字节索引seek目标消息，保持精确证据查询的前缀损坏合同。
 def _message_entry_by_id_in_path(
@@ -314,6 +337,14 @@ class MessageStore:
     # LLM: 会话记录只追加；账本写入后的活动投影必须合并到最新线程，不能回写较早读取的线程快照。
     # 函数用途: 追加一条对话记录，并只刷新会话活动时间，避免迟到消息把新任务目录改回旧目录。
     def append(self, request: dict) -> MessageLogEntry:
+        path = self.storage.message_path(str(request.get('thread_id') or ''))
+        with locked_json_path(path):
+            recover_transcript_transition(path)
+            return self._append_unlocked(request)
+
+    # LLM: 仅供已持原消息锁的普通/幂等入口调用；消息写入与活动合并使用原方向，不递归获取非重入消息锁。
+    # 函数用途: 创建并追加真实消息，再合并当前线程活动时间。
+    def _append_unlocked(self, request: dict) -> MessageLogEntry:
         thread_id = str(request.get("thread_id") or "")
         thread = self._require_thread(thread_id)
         entry = MessageLogEntry(
@@ -327,7 +358,7 @@ class MessageStore:
             metadata=request.get("metadata") or {},
         )
         # 私有追加：0600/0700，存量宽权限消息账本下次写入即收紧；内容逐字节不变。
-        append_private_jsonl_records(self.storage.message_path(thread_id), [entry.to_dict()], sort_keys=True)
+        append_private_jsonl_records_unlocked(self.storage.message_path(thread_id), [entry.to_dict()], sort_keys=True)
         self._update_thread_atomic(
             thread.thread_id,
             lambda latest: replace(
@@ -352,7 +383,10 @@ class MessageStore:
         if display_checkpoint_event(entry) is None:
             raise ValueError("invalid canonical display checkpoint")
         # 私有追加：0600/0700，存量宽权限消息账本下次写入即收紧；内容逐字节不变。
-        append_private_jsonl_records(self.storage.message_path(thread.thread_id), [entry.to_dict()], sort_keys=True)
+        path = self.storage.message_path(thread.thread_id)
+        with locked_json_path(path):
+            recover_transcript_transition(path)
+            append_private_jsonl_records_unlocked(path, [entry.to_dict()], sort_keys=True)
         return entry
 
     # LLM: 原幂等锁内逐行核对完整历史、dedupe_key与内容；命中不跳过后续坏行，内存随最大行而非历史总量增长。
@@ -365,7 +399,8 @@ class MessageStore:
             raise ValueError("thread_id and dedupe_key are required")
         path = self.storage.message_path(thread_id)
         transition = path.with_name(f".{path.name}.append-once")
-        with locked_file_transition(transition):
+        with locked_file_transition(transition), locked_json_path(path):
+            recover_transcript_transition(path)
             try:
                 existing = find_message_dedupe(path, key)
             except Exception as exc:
@@ -386,7 +421,7 @@ class MessageStore:
                     "dedupe_key": key,
                 },
             }
-            return self.append(request)
+            return self._append_unlocked(request)
 
     # LLM: store_messages 的持久化合同：读取最近真实对话，需要坏行报告时使用 recent_report，展示块不占消息数；修改须同步本领域调用方与存储回归。
     # 函数用途: 读取最近真实对话，需要坏行报告时使用 recent_report，展示块不占消息数。
@@ -403,8 +438,41 @@ class MessageStore:
         limit: int = 20,
     ) -> tuple[list[MessageLogEntry], list[dict[str, Any]]]:
         message_path = self.storage.message_path(thread_id)
-        if not message_path.exists():
+        if not message_path.exists() and not message_path.with_suffix('.manifest.json').exists():
             return [], []
+        if transcript_manifest(message_path) is not None:
+            try:
+                if limit > 0:
+                    from .history_page import read_conversation_history_page
+
+                    with TranscriptReader(message_path, complete_only=False) as reader:
+                        selected, before = [], reader.complete_end
+                        if reader.complete_end < reader.end:
+                            reader.seek(reader.complete_end)
+                            entry = MessageLogEntry.from_dict(json.loads(reader.read()))
+                            if not is_display_checkpoint(entry):
+                                selected.append(entry)
+                    if len(selected) >= limit:
+                        return selected[-limit:], []
+                    while True:
+                        page = read_conversation_history_page(message_path, thread_id, before=before,
+                                                              limit=min(800, max(16, limit)))
+                        if page.errors:
+                            return [], list(page.errors)
+                        selected = [entry for entry in page.rows if not is_display_checkpoint(entry)] + selected
+                        if len(selected) >= limit or page.before == 0:
+                            return selected[-limit:], []
+                        before = page.before
+                with TranscriptReader(message_path, complete_only=False) as reader:
+                    entries = []
+                    while reader.tell() < reader.end:
+                        raw = reader.readline()
+                        if raw.strip():
+                            entries.append(MessageLogEntry.from_dict(json.loads(raw)))
+                selected = [entry for entry in entries if not is_display_checkpoint(entry)]
+                return (selected if limit <= 0 else selected[-limit:]), []
+            except Exception as exc:
+                return [], [jsonl_error(exc, _READ_CONTEXT, path=message_path)]
         read_limit = 0 if limit <= 0 else max(limit * 2, limit + 8)
         while True:
             report = read_jsonl_tail_report(
@@ -430,8 +498,11 @@ class MessageStore:
         if limit <= 0:
             raise ValueError("recent projection needs a positive limit")
         path = self.storage.message_path(thread_id)
-        if not path.exists():
+        if not path.exists() and not path.with_suffix('.manifest.json').exists():
             return [], []
+        if transcript_manifest(path) is not None:
+            rows, errors = self.recent_report(thread_id, limit=limit)
+            return [project(entry) for entry in reversed(rows)], errors
         read_limit = max(limit * 2, limit + 8)
         while True:
             projected, errors, rows, selected = _project_tail_window(
@@ -446,7 +517,28 @@ class MessageStore:
     # 函数用途: 顺序访问全部消息而不驻留全量正文，供搜索索引逐条投影；返回错误列表，非空时未访问任何条目。
     def visit_all_report(self, thread_id: str, visitor: Callable[[MessageLogEntry], object]) -> list[dict[str, Any]]:
         path = self.storage.message_path(thread_id)
-        if not path.exists():
+        if not path.exists() and not path.with_suffix('.manifest.json').exists():
+            return []
+        if transcript_manifest(path) is not None:
+            try:
+                reader = TranscriptReader(path, complete_only=False)
+            except Exception as exc:
+                return [jsonl_error(exc, _READ_CONTEXT, path=path)]
+            with reader:
+                try:
+                    while reader.tell() < reader.end:
+                        raw = reader.readline()
+                        if raw.strip():
+                            MessageLogEntry.from_dict(json.loads(raw))
+                except Exception as exc:
+                    return [jsonl_error(exc, _READ_CONTEXT, path=path)]
+                reader.seek(0)
+                while reader.tell() < reader.end:
+                    raw = reader.readline()
+                    if raw.strip():
+                        entry = MessageLogEntry.from_dict(json.loads(raw))
+                        if not is_display_checkpoint(entry):
+                            visitor(entry)
             return []
         try:
             errors, last_line, identity = _validate_all(path)
@@ -464,7 +556,10 @@ class MessageStore:
     def complete_offset_report(self, thread_id: str) -> tuple[int, list[dict[str, Any]]]:
         path = self.storage.message_path(thread_id)
         try:
-            return complete_message_offset(path), []
+            if not path.exists() and transcript_manifest(path) is None:
+                return 0, []
+            with TranscriptReader(path) as reader:
+                return reader.end, []
         except Exception as exc:
             return 0, [jsonl_error(exc, "conversation.messages.snapshot", path=path)]
 
@@ -518,10 +613,20 @@ class MessageStore:
     ) -> tuple[MessageLogEntry | None, list[dict[str, Any]]]:
         path = self.storage.message_path(thread_id)
         target = str(message_id or "").strip()
-        if not path.exists() or not target:
+        if not target or (not path.exists() and not path.with_suffix('.manifest.json').exists()):
             return None, []
         try:
-            return _message_entry_by_id_in_path(path, target)
+            for _attempt in range(4):
+                with TranscriptReader(path) as reader:
+                    cold = cold_message_lookup(path, f'id:{target}', reader=reader)
+                    if cold is not None:
+                        return cold[0], []
+                    if not _reader_layout_is_current(reader):
+                        continue
+                    result = _message_entry_by_id_in_path(path, target)
+                    if _reader_layout_is_current(reader):
+                        return result
+            raise DataCorruptionError('canonical transcript layout changed during message lookup')
         except Exception as exc:
             return None, [jsonl_error(exc, "conversation.messages.by_id", path=path)]
 
@@ -537,6 +642,15 @@ class MessageStore:
             return self.recent_report(thread.thread_id, limit=0)
         path = self.storage.message_path(thread.thread_id)
         try:
+            if transcript_manifest(path) is not None:
+                with TranscriptReader(path, complete_only=False) as handle:
+                    handle.seek(offset)
+                    data = handle.read()
+                rows, errors = [], []
+                for line in data.split(b'\n'):
+                    if line.strip():
+                        rows.append(MessageLogEntry.from_dict(json.loads(line)))
+                return [entry for entry in rows if not is_display_checkpoint(entry)], errors
             size = path.stat().st_size
             if offset > size:
                 raise DataCorruptionError(

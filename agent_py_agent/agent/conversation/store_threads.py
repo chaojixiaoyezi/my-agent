@@ -560,6 +560,13 @@ class ThreadStore:
                     "last_idle_compacted_message_count": expected_message_tail["message_count"],
                     "message_tail": dict(expected_message_tail),
                 }
+            import hashlib
+
+            metadata['compact_commit_boundary'] = {
+                'checkpoint_id': str(commit.checkpoint_id), 'generation': thread.compact_generation + 1,
+                'boundary_message_id': str(commit.compacted_through_message_id) if commit.publish_thread_view else thread.compacted_through_message_id,
+                'summary_sha256': hashlib.sha256((str(commit.summary).strip() if commit.publish_thread_view else thread.summary).encode('utf-8')).hexdigest(),
+            }
             return replace(
                 thread, **tool_updates,
                 summary=str(commit.summary).strip() if commit.publish_thread_view else thread.summary,
@@ -584,20 +591,41 @@ class ThreadStore:
                 updated_at=current,
             )
 
-        if idle_compact:
-            from ..common.json_io import locked_json_path
-            from .store_messages import canonical_message_tail_marker
+        from ..common.json_io import locked_json_path
+        from .message_scan import recover_transcript_transition, rotate_committed_transcript
+        from .store_messages import canonical_message_tail_marker
 
-            path = self.storage.message_path(thread_id)
-            with locked_json_path(path):
+        path = self.storage.message_path(thread_id)
+        with locked_json_path(path):
+            recover_transcript_transition(path)
+            if idle_compact:
                 try:
                     unchanged = canonical_message_tail_marker(path, thread_id) == expected_message_tail
                 except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
                     raise IdleCompactActivityChanged("canonical messages unreadable before idle commit") from exc
                 if not unchanged:
                     raise IdleCompactActivityChanged("canonical messages changed before idle commit")
-                return self.update_atomic(thread_id, apply)
-        return self.update_atomic(thread_id, apply)
+            updated = self.update_atomic(thread_id, apply)
+            if commit.publish_thread_view:
+                try:
+                    rotate_committed_transcript(self.storage, updated)
+                except (OSError, ValueError, TypeError, DataCorruptionError) as exc:
+                    # 已发布CAS不可伪装失败；热文件或prepared布局仍完整可读，显式留下维护待重试事实。
+                    error_type = type(exc).__name__
+                    # LLM: 只给同一获胜head记录维护错误，不覆盖后来提交，也不再次推进generation。
+                    # 函数用途: 将冷转I/O故障与已成功摘要提交分开报告。
+                    def maintenance_pending(latest):
+                        if latest.compact_checkpoint_id != updated.compact_checkpoint_id:
+                            return latest
+                        metadata = dict(latest.metadata)
+                        metadata['compact_transcript_maintenance'] = {
+                            'status': 'pending', 'error_type': error_type,
+                            'checkpoint_id': updated.compact_checkpoint_id,
+                        }
+                        return replace(latest, metadata=metadata)
+
+                    updated = self.update_atomic(thread_id, maintenance_pending)
+            return updated
 
     # LLM: 供应商用量校准只是少量数值线程遥测，以压缩代为CAS边界；模型活动不是用户可见活跃时间，因此不得推进 updated_at。
     # 压缩提交在自己的原子转换中清除该字段。

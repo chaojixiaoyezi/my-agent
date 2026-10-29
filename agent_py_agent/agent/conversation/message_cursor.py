@@ -97,11 +97,27 @@ def _remember(path: Path, target: str, cursor: MessageCursor) -> None:
 # LLM: byte_offset_after及after_report共用本入口；缓存缺失/替换/截断/改写时沿唯一完整扫描，不另留旧分支。
 # 函数用途: 返回消息精确首位置，IO失败和缺游标保持原损坏异常。
 def locate_message_cursor(path: Path, target: str) -> MessageCursor:
+    from .message_scan import TranscriptReader
+
     try:
-        with path.open("rb") as handle:
-            return _locate_open(handle, path, target)
+        with TranscriptReader(path) as reader:
+            return _locate_in_transcript(reader, target)
     except OSError as exc:
         raise DataCorruptionError(f"cannot read conversation transcript: {path}") from exc
+
+
+# LLM: 调用方已冻结清单和热FD；物理位置只留在原缓存，对外偏移统一加同次base，冷索引也使用同一读取器。
+# 函数用途: 在同一冷热快照上定位ID，避免再次打开路径跨越另一次轮转。
+def _locate_in_transcript(reader, target):
+    from .message_scan import cold_message_lookup
+
+    cold = cold_message_lookup(reader.path, f'id:{target}', reader=reader) if reader.manifest else None
+    if cold is not None:
+        address = cold[1]
+        return MessageCursor(file_stamp(os.fstat(reader.hot.fileno())), address['offset'],
+                             address['offset'] + address['length'], _EMPTY_SEEN_FILTER)
+    cursor = _locate_open(reader.hot, reader.path, target)
+    return replace(cursor, start=cursor.start + reader.base, end=cursor.end + reader.base)
 
 
 # LLM: 在同一真实描述符上校验/扫描后核对快照未变，避免把中途修改的偏移标作稳定缓存。
@@ -133,15 +149,18 @@ def _unchanged_end(path: Path, target: str) -> bool:
 # LLM: 初始空游标复用共享零位图作扫描起点；正limit/empty_tail和同fd首末stamp规则不变，不改变坏行处理。
 # 函数用途: 有界读取原消息尾部；已证从头空扫的稳定线程零打开，零预算不冒充扫描完成。
 def read_after_rows(path: Path, target: str, limit: int):
-    if (str(target or "").strip() or limit > 0) and _unchanged_end(path, target):
+    from .message_scan import TranscriptReader, transcript_manifest
+
+    if (str(target or "").strip() or limit > 0) and transcript_manifest(path) is None and _unchanged_end(path, target):
         return [], []
-    cursor = locate_message_cursor(path, target) if str(target or "").strip() else None
-    with path.open("rb") as handle:
-        stamp = file_stamp(os.fstat(handle.fileno()))
+    with TranscriptReader(path) as reader:
+        cursor = _locate_in_transcript(reader, target) if str(target or '').strip() else None
+        handle = reader if reader.manifest else reader.hot
+        stamp = file_stamp(os.fstat(reader.hot.fileno()))
         handle.seek(cursor.end if cursor else 0)
         seen = bytearray(cursor.seen if cursor else _EMPTY_SEEN_FILTER)
         rows, errors, positions = _read_tail(handle, path, limit, seen)
-        if (cursor is None or cursor.stamp.same_file(stamp)) and file_stamp(os.fstat(handle.fileno())) == stamp:
+        if reader.manifest is None and (cursor is None or cursor.stamp.same_file(stamp)) and file_stamp(os.fstat(reader.hot.fileno())) == stamp:
             _cache_read(path, stamp, (target, cursor), (rows, errors, positions, seen), limit=limit)
         return rows, errors
 
