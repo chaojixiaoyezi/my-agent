@@ -265,11 +265,11 @@ def _cycle_options(tmp_path, monkeypatch, cap):
     return options
 
 
-@pytest.mark.parametrize(("cap", "expected"), [(0, 0), (950_000, 0), (900_000, 0), (300_000, 300_000)])
+@pytest.mark.parametrize(("cap", "expected"), [(0, 0), (950_000, 0), (800_000, 0), (300_000, 300_000)])
 def test_finalization_cycle_receives_the_token_trigger_only_when_capped(tmp_path, monkeypatch, cap, expected):
     options = _cycle_options(tmp_path, monkeypatch, cap)
 
-    assert options.trigger_percent == 90 and options.max_context_tokens == WINDOW
+    assert options.trigger_percent == 80 and options.max_context_tokens == WINDOW
     assert options.trigger_tokens == expected
 
 
@@ -287,7 +287,7 @@ def test_context_view_says_the_trigger_is_capped():
 
 
 @pytest.mark.parametrize(("cap", "trigger", "capped"), [
-    (0, 900_000, False), (900_000, 900_000, False), (300_000, 300_000, True),
+    (0, 800_000, False), (800_000, 800_000, False), (300_000, 300_000, True),
 ])
 def test_context_inspection_reports_the_capped_trigger(tmp_path, cap, trigger, capped):
     agent = SimpleAgent(AgentConfig(

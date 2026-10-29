@@ -261,6 +261,31 @@ ERROR_CONTRACTS: dict[str, ErrorContract] = {
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="实际连接的内核peer无法核验；保留原责任并检查平台能力与端点，不用调用方PID、环境或JSON补授权。",
     ),
+    "NEW_SESSION_BUSY": ErrorContract(
+        code="NEW_SESSION_BUSY", category="state", retryable=True,
+        recommended_action=RecoveryAction.WAIT_FOR_EXISTING_OPERATION.value,
+        recovery_hint="原会话仍有未完成的前台回合或副作用占用，未切换新会话；等待当前回合收口或显式停止后再重试 /new。",
+    ),
+    "OWNER_MISMATCH": ErrorContract(
+        code="OWNER_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="请求或记录的 owner 身份与当前可信宿主上下文不一致，已拒绝跨 owner 访问；核对当前会话所属 owner，不借参数覆盖身份。",
+    ),
+    "THREAD_BINDING_UNAVAILABLE": ErrorContract(
+        code="THREAD_BINDING_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="当前通道会话绑定不可用或无法核验，未自动改绑其它线程；核对会话存储与通道绑定记录后再操作。",
+    ),
+    "THREAD_SUCCESSOR_OWNER_MISMATCH": ErrorContract(
+        code="THREAD_SUCCESSOR_OWNER_MISMATCH", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="后继会话线程的 owner 与原线程不一致，已拒绝跨 owner 续接；保持在当前 owner 范围内创建或绑定新线程。",
+    ),
+    "THREAD_UNAVAILABLE": ErrorContract(
+        code="THREAD_UNAVAILABLE", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="目标会话线程不存在或当前不可读取，未自动回退其它线程；核对 thread_id 与会话存储状态。",
+    ),
     "CONTROL_EXECUTOR_DEAD": ErrorContract(
         code="CONTROL_EXECUTOR_DEAD", category="state", retryable=False,
         recommended_action=RecoveryAction.CHANGE_STRATEGY.value,

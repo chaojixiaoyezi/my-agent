@@ -1,5 +1,5 @@
 # LLM: 共用宿主完整准备与原Compact/CAS；额度耗尽不恢复业务模型重试，公共层仍不得重跑准备或建立持久状态。
-# 模块用途: 三宿主共用准备和唯一软错分类；降级只恢复本轮视图并重锚定预检，计量/CAS/取消仍走原链。
+# 模块用途: 三宿主共用准备和唯一软错分类；无工具历史时严格按输入上限恢复种子，有工具时重计折叠，计量/CAS/取消仍走原链。
 from __future__ import annotations
 
 import logging
@@ -337,9 +337,11 @@ def _automatic_recovery_noop(recovery, frozen: ToolLoopRequestInput, tool_source
 
 # LLM: 只供select提交前失败；统一分类后恢复原种子，逼近容量/强制失败只接受更小的回合局部视图。
 #   软错资格只认共享分类器（含显式标记的JSON解析失败）；可计量native裁剪沿冻结校准重锚定本轮预检。
+#   仅有UserTurn等非工具IR时也无法折叠；没有ToolResult只允许非强制且严格低于输入上限恢复，上限相等或强制仍拒绝。
 #   未满足预算时重新解绑，不能推进CAS或重跑业务工具；权限、配额、取消及来源损坏仍拒绝。
 # 函数用途: 恢复安全原请求或临时折叠旧结果，记录本次失败压力及两套等价的结构化告警字段。
 def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, exc: Exception) -> bool:
+    from ..backends.tool_ir import ToolResult
     from .tool_request_projection import text_request_capacity_known
 
     allowed, reason = compact_failure_is_degradable(exc)
@@ -353,8 +355,9 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
     object.__setattr__(params, "provider_history_messages", restored)
     ceiling = model_request_input_ceiling(recovery.agent, recovery.source.policy.context_window_tokens)
     before = calibrated_compact_request_tokens(before_tokens, recovery.calibration)
-    if (recovery.force or before > int(ceiling * 0.92)
-            or (frozen.prompt_input is not None and params.tool_ir_history and text_request_capacity_known(params))):
+    has_tool_results = any(isinstance(item, ToolResult) for item in params.tool_ir_history)
+    if has_tool_results and (recovery.force or before > int(ceiling * 0.92)
+            or (frozen.prompt_input is not None and text_request_capacity_known(params))):
         from ._tool_loop_service import _continue_after_compact_failure
         from .model.context_pressure import model_visible_context_snapshot
 
@@ -377,7 +380,7 @@ def _restore_optional_preflight(recovery, params, frozen, before_tokens: int, ex
             if isinstance(failure, ConversationCompactError) and failure.code == "COMPACT_BUDGET_EXCEEDED":
                 return False
             raise
-    elif ceiling > 0:
+    elif not recovery.force and 0 <= before < ceiling:
         object.__setattr__(params, "compact_degradation_latched", True)
         object.__setattr__(params, "compact_degradation_reason", reason)
         object.__setattr__(params, "compact_degraded_baseline_tokens", before)

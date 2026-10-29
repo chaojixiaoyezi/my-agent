@@ -3089,6 +3089,7 @@ agent_py_agent/
 |   |-- test_plugin_any_language_samples.py # 跨语言读取检查一致性用例（Python 参考 + Node 移植）与 hello-node/hello-go 宿主链路
 |   |-- test_shuohao_novel_gates.py     # C14 M-B1：五阶段真实 Node MCP、74+20 读取向量、原样许可/NUL、自检、无写入与宿主链（环境失败保留）
 |   |-- fixtures/shuohao_skills/        # 固定上游 B 的五阶段自检/样例、三张镜头卡与 report 测试闭包；不进插件 ZIP
+|   |-- fixtures/web_portal_plugin_handoff/ # 独立 SecOps Web 工作台与插件打包脚本的仓内脱敏测试固件
 |   |-- test_plugin_sandbox.py         # 插件进程沙箱：开关默认值、bwrap 整根只读布局、包装与 TMPDIR、不可用拒绝、真实平台写边界
 |   |-- plugin_wheel_fixtures.py       # 合成标准 wheel 与导入陷阱，仅用于开发组件检查
 |   |-- test_plugin_wheels.py          # 固定依赖、extras、平台、摘要与归档预算检查

@@ -42,9 +42,13 @@ _DESCRIPTION_MAX_CHARS = 1024
 _PROCESS_SKILL_DIR_CACHE: dict[tuple[str, str], SkillManifestItem] = {}
 _PROCESS_BUILTIN_ROOT_CACHE: dict[tuple, _SkillTreeState] = {}
 _PROCESS_SKILL_CACHE_LOCK = threading.RLock()
+# 进程内单技能目录元数据缓存的最大条目数上限。
 _PROCESS_SKILL_CACHE_MAX_ENTRIES = 1024
+# 进程内单技能目录元数据缓存的最大累计字节上限。
 _PROCESS_SKILL_CACHE_MAX_BYTES = 16 * 1024 * 1024
+# 进程内内置技能根树状态缓存的最大根目录条目数上限。
 _PROCESS_ROOT_CACHE_MAX_ENTRIES = 128
+# 进程内内置技能根树状态缓存允许记录的最大路径总数上限。
 _PROCESS_ROOT_CACHE_MAX_PATHS = 65536
 
 

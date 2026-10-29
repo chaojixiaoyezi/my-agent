@@ -110,13 +110,12 @@ def _register_registry_borrow(facade: ToolRegistry) -> None:
         facade, _MCP_BORROW_RELEASES.put, (facade._mcp_catalog_owner, facade._mcp_borrow_release_completed))
 
 
-# LLM: Called only by explicit close or the release worker, never by GC; same lifecycle→prepare order as owner close/reopen.
+# LLM: Called only by explicit close or the release worker, never by GC; lifecycle lock serializes borrow count with owner close/reopen without blocking on prepare.
 # 函数用途: 归还已消失或显式关闭的借用，最后一份退出后完成父级延迟关闭。
 def _release_registry_borrow(owner: ToolRegistry) -> None:
     with owner._mcp_lifecycle_lock:
-        with owner._mcp_prepare_lock:
-            owner._mcp_borrow_count[0] = max(0, owner._mcp_borrow_count[0] - 1)
-            close_owner = owner._mcp_deferred_close_requested and owner._mcp_borrow_count[0] == 0
+        owner._mcp_borrow_count[0] = max(0, owner._mcp_borrow_count[0] - 1)
+        close_owner = owner._mcp_deferred_close_requested and owner._mcp_borrow_count[0] == 0
         if close_owner:
             _close_registry_clients(owner)
 # list_tools 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。
@@ -1198,19 +1197,15 @@ def _unregister_registry_mcp_proxies(registry, clients=None):
                                    else not isinstance(tool.client, PluginMCPClient)))}
 
 
-# LLM: Stopping remains outside prepare to interrupt discovery; borrowed facades detach exactly once without stopping the owner.
-# 函数用途: 提取生命周期关闭，并在丢弃借用客户端前清除本门面的旧代理。
+# LLM: Stopping remains outside prepare to interrupt discovery; borrowed facades detach and release owner lease before waiting on prepare cleanup.
+# 函数用途: 提取生命周期关闭，并在丢弃借用客户端前归还父级借用计数与清除本门面旧代理。
 def _close_registry_mcp_lifecycle(registry):
     _ensure_registry_lifecycle_fields(registry)
     with registry._mcp_lifecycle_lock:
         if getattr(registry, "_mcp_borrowed", False):
-            with registry._mcp_prepare_lock:
-                if registry._mcp_borrow_released:
-                    return
-                registry._mcp_borrow_released = True
-                _unregister_registry_mcp_proxies(registry, registry._mcp_clients)
-                registry._mcp_clients = []
-                registry._mcp_connected_state = [False]
+            if registry._mcp_borrow_released:
+                return
+            registry._mcp_borrow_released = True
             finalizer = getattr(registry, "_mcp_borrow_finalizer", None)
             if finalizer is not None and finalizer.detach() is not None:
                 _release_registry_borrow(registry._mcp_catalog_owner)
@@ -1219,6 +1214,13 @@ def _close_registry_mcp_lifecycle(registry):
             registry._mcp_deferred_close_requested = True
             if not registry._mcp_borrow_count[0]:
                 _close_registry_clients(registry)
+            return
+        else:
+            return
+    with registry._mcp_prepare_lock:
+        _unregister_registry_mcp_proxies(registry, registry._mcp_clients)
+        registry._mcp_clients = []
+        registry._mcp_connected_state = [False]
 
 
 # LLM: Only the owner reopens, serialized with close/discovery; empty-pool proxies cannot collide with the next generation.

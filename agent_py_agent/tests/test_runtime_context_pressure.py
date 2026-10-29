@@ -324,7 +324,7 @@ def test_preflight_checks_explicit_shared_window_against_sent_output_cap(monkeyp
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True, model_context_window_tokens=1_000,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
         ),
         backend=backend,
     )
@@ -361,7 +361,7 @@ def test_preflight_does_not_invent_output_reserve_without_wire_cap(monkeypatch) 
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True, model_context_window_tokens=1_000,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
         ),
         backend=backend,
     )
@@ -501,7 +501,7 @@ def test_live_context_snapshot_reuses_exact_total_and_exposes_no_content(monkeyp
         "private prompt",
     )
     assert snapshot.context_window_tokens == 128_000
-    assert snapshot.compact_trigger_tokens == 115_200
+    assert snapshot.compact_trigger_tokens == 102_400
     assert sum(
         (
             snapshot.prompt_tokens,
@@ -563,7 +563,7 @@ def test_unsaved_model_call_keeps_configured_trigger_without_enabling_compact(
     )
 
     assert snapshot.context_window_tokens == 128_000
-    assert snapshot.compact_trigger_tokens == 115_200
+    assert snapshot.compact_trigger_tokens == 102_400
     assert snapshot.current_tokens == 120_000
     assert response is None
 
@@ -572,7 +572,7 @@ def test_inline_tool_result_budget_reuses_current_compact_headroom(monkeypatch) 
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
             model_context_window_tokens=100_000,
         ),
         backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
@@ -630,7 +630,7 @@ def test_provider_observation_uses_actual_baseline_plus_conservative_growth(
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
             model_context_window_tokens=100_000,
         ),
         backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
@@ -735,7 +735,7 @@ def test_provider_observation_falls_back_after_rewrite_or_missing_usage(monkeypa
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
             model_context_window_tokens=100_000,
         ),
         backend=SimpleNamespace(context_window_tokens=100_000, name="fake"),
@@ -784,7 +784,7 @@ def test_provider_observation_survives_reconstructed_background_slice(
     agent = SimpleNamespace(
         config=AgentConfig(
             auto_save_memory=True,
-            memory_compact_auto_trigger_percent=90,
+            memory_compact_trigger_percent=90,
             model_context_window_tokens=100_000,
         ),
         backend=SimpleNamespace(

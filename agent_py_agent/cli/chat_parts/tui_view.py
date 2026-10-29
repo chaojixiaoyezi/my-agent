@@ -855,7 +855,7 @@ class _TuiStickyUserWindow(Window):
         self,
         content: TuiTranscriptControl,
         *,
-        get_vertical_scroll: Callable[[], int] | None = None,
+        get_vertical_scroll: Callable[[Window], int] | None = None,
         wrap_lines: bool = False,
         dont_extend_height: bool = False,
         always_hide_cursor: bool = True,

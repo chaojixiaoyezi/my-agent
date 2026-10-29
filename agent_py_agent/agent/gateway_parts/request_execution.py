@@ -717,6 +717,7 @@ def _run_gateway_turn_with_conversation_compact(
 # 每次overflow清前一恢复载体，不借持久结果重建展示选择；唯一产品调用方始终提供observer。
 # 触发来源从 run_params.compact_trigger_source（调用方按溢出结果的 runtime_source 写入）透传给恢复宿主。
 # LLM: soft preflight不等同provider硬溢出；降级由共享恢复分类器执行，不能在Gateway裸重放已执行工具。
+#   原生carry也会仅含UserTurn；只有真实AssistantTurn/ToolResult或工具归档才算新活动，未提交预检再次溢出须强制裁决。
 # 函数用途: 按真实触发来源安装同轮恢复，缺来源时停止，摘要瞬断交给共享两级续跑。
 def _gateway_compact_overflowing_turn(
     context: request_context.GatewayAskRunContext,
@@ -726,7 +727,21 @@ def _gateway_compact_overflowing_turn(
     carried_archive_tool_calls: list[dict[str, object]],
     *, observer=None,
 ) -> request_context.GatewayConversationContext:
+    from ..backends.tool_ir import AssistantTurn, ToolResult
+
     request = context.request
+    carry = getattr(run_params, "native_compact_carry", None)
+    had_new_turn_activity = bool(
+        carried_archive_tool_calls
+        or (carry is not None and any(isinstance(item, (AssistantTurn, ToolResult)) for item in carry.history))
+    )
+    prior_uncommitted = bool(
+        observer is not None
+        and observer.compact_recovery is not None
+        and observer.compact_recovery.consumed
+        and not observer.compact_recovery.committed
+        and not had_new_turn_activity
+    )
     if observer is not None:
         observer.compact_recovery = None
     load = build_gateway_compact_load_request(context, prompt, run_params, carried_archive_tool_calls)
@@ -740,7 +755,7 @@ def _gateway_compact_overflowing_turn(
 
         observer.compact_recovery = prepare_gateway_compact_recovery(
             context, refreshed, trigger_source=str(getattr(run_params, "compact_trigger_source", "") or ""),
-            force=str(getattr(run_params, "compact_trigger_source", "") or "") != COMPACT_TRIGGER_PREFLIGHT,
+            force=prior_uncommitted or str(getattr(run_params, "compact_trigger_source", "") or "") != COMPACT_TRIGGER_PREFLIGHT,
         )
         return refreshed
     if refreshed.compact_generation > current.compact_generation:

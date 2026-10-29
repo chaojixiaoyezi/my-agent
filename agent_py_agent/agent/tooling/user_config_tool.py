@@ -93,6 +93,7 @@ def _decision_only_spec(full_spec: ToolModelSpec) -> ToolModelSpec:
             "用户要求查看自己的决策模型设置、已保存模型或撤销当前实验授权",
             "用户明确要求测试已保存决策模型连接",
         ), avoid_when=("需要本机全局配置、凭据或其他用户设置时",),
+            keywords=("user_config", "配置项", "配置参数", "决策设置", "决策模型"),
             default_deferred=True, deferred_summary="查看或修改自己的决策模型设置"),
     )
 
@@ -261,6 +262,7 @@ class UserConfigTool(BaseTool):
                 "用户要求选择已保存的决策配置，或明确要求测试其连接",
             ),
             avoid_when=("需要改权限模式、危险路径或凭据时",),
+            keywords=("user_config", "配置项", "配置参数", "决策设置", "决策模型"),
             default_deferred=True,
             deferred_summary="查看或修改配置参数（参数中心，等同 /settings；含决策模型设置）",
         ),

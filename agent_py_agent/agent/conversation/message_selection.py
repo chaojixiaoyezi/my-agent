@@ -31,6 +31,7 @@ _POSITION_CACHE_MAX_ENTRIES = 131072
 _POSITION_CACHE_MAX_BYTES = 16 * 1024 * 1024
 # 单个消息位置索引可累计保留的轻量字段字节上限，正文仍按需读取。
 _LIGHT_FIELDS_MAX_BYTES = 128 * 1024
+# 消息物理位置缓存最多保留的底层会话文件个数上限。
 _POSITION_CACHE_MAX_FILES = 512
 _UNSET = object()
 

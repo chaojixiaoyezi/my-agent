@@ -17,6 +17,7 @@ from ..common.nofollow_fs import read_bytes_beneath
 from ..conversation.learning_source import unknown_projection
 from ..user_space.owner_resolver import OwnerIdentity, resolve_owner_home
 
+# 远端主代理推送接口单次允许接收的最大请求体字节数上限（64KB）。
 MAX_PUSH_BYTES = 65536
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
 

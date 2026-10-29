@@ -119,11 +119,11 @@ def test_directory_guide_is_shared_cache_stable_and_can_be_disabled(tmp_path):
     for rendered in (first, second):
         assert "# 家目录与整理约定" in rendered
         assert "tasks/{date}/{task_slug}" in rendered
-        assert "不用判断长期项目/短期任务状态" in rendered
+        assert "无须判断长短期" in rendered
         assert "主题或对象＋成果或动作" in rendered
-        assert "不要截取用户原话的开头" in rendered
-        assert "用户明确给了目录名则沿用" in rendered
-        assert "不为美化名称搬动旧项目" in rendered
+        assert "不截原话开头" in rendered
+        assert "用户指定名称、位置、组织方式优先" in rendered
+        assert "不为美化搬旧项目" in rendered
         assert "保留原件与来源" in rendered
         assert "SOUL.md" in rendered and "memory-hot.md" in rendered
     assert "# 家目录与整理约定" not in child

@@ -50,7 +50,7 @@ def test_close_collects_client_registered_after_first_close_snapshot(tmp_path, m
     with ThreadPoolExecutor(max_workers=2) as pool:
         preparing = pool.submit(view.prepare_for_run)
         assert entered.wait(5)
-        closing = pool.submit(registry.close_mcp_clients)
+        closing = pool.submit(lambda: (registry.close_mcp_clients(), view.close_mcp_clients()))
         try:
             assert registry._mcp_closed.wait(3)
         finally:

@@ -179,12 +179,12 @@ def test_executor_matching_or_missing_owner_keeps_read_path(tmp_path, trusted):
 # LLM: 默认字段必须同时属于真实dataclass与随包YAML，诊断默认关闭而非自动开启tracemalloc。
 # 函数用途: 核对两处配置默认值一致。
 def test_memory_diagnostics_config_defaults_match_yaml():
-    import yaml
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
 
     config = AgentConfig()
     assert getattr(config, "enable_gateway_memory_diagnostics", None) is False
     assert getattr(config, "gateway_owner_inflight_limit", None) == 0
-    defaults = yaml.safe_load((Path(__file__).parents[1] / "config" / "agent_config.yaml").read_text(encoding="utf-8"))
+    defaults = load_simple_yaml(Path(__file__).parents[1] / "config" / "agent_config.yaml")
     assert defaults["enable_gateway_memory_diagnostics"] is False
     assert defaults["gateway_owner_inflight_limit"] == 0
 

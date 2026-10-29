@@ -239,8 +239,8 @@ def _observe_http_worker(monkeypatch):
         if result is not None:
             claims.append(result)
         return result
-    def resolve_probe(agent, owner):
-        result = original_resolve(agent, owner)
+    def resolve_probe(agent, owner, *args, **kwargs):
+        result = original_resolve(agent, owner, *args, **kwargs)
         resolved.append(owner_identity_from_config(result.config))
         return result
     monkeypatch.setattr(request_worker, 'claim_request', claim_probe)

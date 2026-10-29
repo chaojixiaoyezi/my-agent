@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_by": "scripts/build_constants_catalog.py",
-  "count": 1197,
+  "count": 1207,
   "constants": [
     {
       "name": "_DEFAULT_CLAIM_TTL_SECONDS",
@@ -489,7 +489,7 @@
       "value": 90,
       "unit": "%",
       "category": "比例阈值",
-      "description": "模块用途: 统一计算模型窗口、精确触发点、近期尾部预算和连续失败冷却参数。"
+      "description": "旧数值辅助API维持90%缺省；会话四层默认80%由config_layers解析，不从这个兼容常量重建。"
     },
     {
       "name": "ARCHIVE_SUMMARY_CHARS",
@@ -2220,6 +2220,38 @@
       "description": "技能名最大字符数。"
     },
     {
+      "name": "_PROCESS_ROOT_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/capability/skill_service.py",
+      "value": 128,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "进程内内置技能根树状态缓存的最大根目录条目数上限。"
+    },
+    {
+      "name": "_PROCESS_ROOT_CACHE_MAX_PATHS",
+      "file": "agent_py_agent/agent/capability/skill_service.py",
+      "value": 65536,
+      "unit": "个路径",
+      "category": "上限预算",
+      "description": "进程内内置技能根树状态缓存允许记录的最大路径总数上限。"
+    },
+    {
+      "name": "_PROCESS_SKILL_CACHE_MAX_BYTES",
+      "file": "agent_py_agent/agent/capability/skill_service.py",
+      "value": 16777216,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "进程内单技能目录元数据缓存的最大累计字节上限。"
+    },
+    {
+      "name": "_PROCESS_SKILL_CACHE_MAX_ENTRIES",
+      "file": "agent_py_agent/agent/capability/skill_service.py",
+      "value": 1024,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "进程内单技能目录元数据缓存的最大条目数上限。"
+    },
+    {
       "name": "MAX_TRANSFER_BYTES",
       "file": "agent_py_agent/agent/capability/skill_transfer_manifest.py",
       "value": 8388608,
@@ -2700,6 +2732,14 @@
       "description": "后台静态快照必须重新核验的最长秒数，热命中不延长有效期。"
     },
     {
+      "name": "_DIR_SCAN_RETRY_BACKOFF_SECONDS",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 0.005,
+      "unit": "秒",
+      "category": "重试",
+      "description": "目录扫描遇到换代竞争时的单次退避等待秒数（5毫秒）。"
+    },
+    {
       "name": "_FILE_CACHE_MAX_ENTRIES",
       "file": "agent_py_agent/agent/conversation/background_process_view.py",
       "value": 2048,
@@ -2714,6 +2754,14 @@
       "unit": "个",
       "category": "上限预算",
       "description": "单个后台记录目录允许观察的记录数量上限，超限失败关闭。"
+    },
+    {
+      "name": "_MAX_SCAN_ATTEMPT_COUNT",
+      "file": "agent_py_agent/agent/conversation/background_process_view.py",
+      "value": 4,
+      "unit": "个",
+      "category": "重试",
+      "description": "显式换代或扫描边界瞬态异常总共最多尝试四次。"
     },
     {
       "name": "_PROCESS_LOG_TAIL_BYTES",
@@ -3386,6 +3434,14 @@
       "unit": "条",
       "category": "上限预算",
       "description": "消息物理位置缓存最多保留的行索引条数。"
+    },
+    {
+      "name": "_POSITION_CACHE_MAX_FILES",
+      "file": "agent_py_agent/agent/conversation/message_selection.py",
+      "value": 512,
+      "unit": "个文件",
+      "category": "上限预算",
+      "description": "消息物理位置缓存最多保留的底层会话文件个数上限。"
     },
     {
       "name": "THREAD_GOAL_OBJECTIVE_MAX_CHARS",
@@ -4386,6 +4442,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "只节流可重建投影；启动和每小时完整复核兜住原位改写，规范终态与结算仍逐条核验。"
+    },
+    {
+      "name": "MAX_PUSH_BYTES",
+      "file": "agent_py_agent/agent/gateway_parts/remote_push_service.py",
+      "value": 65536,
+      "unit": "字节",
+      "category": "上限预算",
+      "description": "远端主代理推送接口单次允许接收的最大请求体字节数上限（64KB）。"
     },
     {
       "name": "_SCAN_LIMIT_COUNT",
@@ -8460,6 +8524,14 @@
       "description": "函数用途: 低于这个大小不压缩，避免对小文件白跑一遍 IO。"
     },
     {
+      "name": "_MAX_COMPACT_CACHE_ENTRIES",
+      "file": "agent_py_agent/agent/user_space/home_index_compact.py",
+      "value": 512,
+      "unit": "条",
+      "category": "上限预算",
+      "description": "两份派生缓存成对更新、读取与淘汰；512项容纳近期索引，不随历史owner永久增长。"
+    },
+    {
       "name": "_YIELD_EVERY_LINES_COUNT",
       "file": "agent_py_agent/agent/user_space/home_index_compact.py",
       "value": 20000,
@@ -9162,6 +9234,14 @@
       "unit": "秒",
       "category": "其它",
       "description": "TUI 界面刷新最小间隔 0.25 秒，限频重绘"
+    },
+    {
+      "name": "_BG_WATCH_SILENT_TRANSIENT_FAILURE_COUNT",
+      "file": "agent_py_agent/cli/chat_parts/tui_threading.py",
+      "value": 2,
+      "unit": "个",
+      "category": "其它",
+      "description": "同owner/thread已验证帧最多静默保留两次瞬态刷新失败，第三次报告原观察告警。"
     },
     {
       "name": "APP_REDRAW_INTERVAL_SECONDS",

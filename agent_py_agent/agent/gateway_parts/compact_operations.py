@@ -175,7 +175,13 @@ def _compact_idle_candidate(agent, store, thread, *, now=None):
 # 函数用途: 有界维护基础及已加载owner的空闲会话，坏记录只计失败，不阻挡后续线程。
 def idle_compact_maintenance_tick(base_agent, *, cursor, now=None):
     pool = getattr(base_agent, "_owner_pool", None)
-    candidates = [base_agent, *(pool.active_agents() if pool is not None else [])]
+    candidates = [
+        item
+        for item in [base_agent, *(pool.active_agents() if pool is not None else [])]
+        if getattr(getattr(item, "home_paths", None), "owner_home_dir", None) is not None
+    ]
+    if not candidates:
+        return {"checked": 0, "compacted": 0, "failed": 0}
     agents = list({str(item.home_paths.owner_home_dir): item for item in candidates}.values())
     position = int(cursor.get("owner", 0))
     threads = cursor.setdefault("threads", {})

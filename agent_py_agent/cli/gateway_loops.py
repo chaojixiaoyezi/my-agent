@@ -1883,7 +1883,7 @@ class _GatewayOwnerMaintenanceController:
     def __init__(self, context: GatewayRunContext) -> None:
         self._startup_started_at = time.monotonic()
         self._base_agent = _gateway_agent_from_context(context)
-        self._base_home = self._base_agent.home_paths
+        self._base_home = getattr(self._base_agent, "home_paths", None)
         self._cursor: OwnerWakeCursor | None = None
         self._idle_compact_cursor: dict = {}
         self.interval = max(

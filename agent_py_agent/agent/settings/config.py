@@ -297,9 +297,9 @@ class _RuntimeBudgetConfigFields:
 @dataclass
 class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetConfigFields):
 
-    # LLM: 构造、replace、YAML 共用拓扑校验与白名单类型规范化；裸字符串/字典不产生网络授权。
-    # 函数用途: 校验部署数量并把内网白名单规范为字符串列表。
-    def __post_init__(self):
+    # LLM: 构造、replace、YAML 共用拓扑校验、白名单规范化与显式旧压缩比例兼容；裸字符串/字典不产生网络授权。
+    # 函数用途: 校验部署数量、规范内网白名单，并在显式传入非默认旧压缩比例时同步到新字段。
+    def __post_init__(self) -> None:
         validate_gateway_worker_process_count(self.gateway_worker_process_count)
         values = self.allowed_private_hosts
         self.allowed_private_hosts = (
@@ -307,6 +307,14 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
             if isinstance(values, (list, tuple, set, frozenset))
             else []
         )
+        if self.memory_compact_trigger_percent == 80 and self.memory_compact_auto_trigger_percent != 90:
+            from .config_layers import compact_policy_percent
+
+            object.__setattr__(
+                self,
+                "memory_compact_trigger_percent",
+                compact_policy_percent(self.memory_compact_auto_trigger_percent, 80),
+            )
 
     allowed_private_hosts: list[str] = field(default_factory=list)
 
@@ -695,6 +703,17 @@ class AgentConfig(_HomeProviderConfigFields, _ToolConfigFields, _RuntimeBudgetCo
             "sources": dict(self.config_sources),
         }
 
+    # LLM: 运行期动态修改旧键memory_compact_auto_trigger_percent时同步更新memory_compact_trigger_percent，同值重赋不覆盖新键。
+    # 函数用途: 保持动态属性赋值时新旧压缩触发比例字段同步。
+    def __setattr__(self, name: str, value: Any) -> None:
+        was_initialized = "memory_compact_auto_trigger_percent" in self.__dict__
+        prev_value = self.__dict__.get("memory_compact_auto_trigger_percent")
+        object.__setattr__(self, name, value)
+        if was_initialized and name == "memory_compact_auto_trigger_percent" and value != prev_value:
+            from .config_layers import compact_policy_percent
+
+            object.__setattr__(self, "memory_compact_trigger_percent", compact_policy_percent(value, 80))
+
 
 # LLM: 原YAML决策严格校验保持；两个管理员强制别名由规范化转换成唯一字段，不当未知键忽略。
 # 函数用途: 加载原部署配置与来源，拒绝无效决策字段，不创建 Agent 或发网络请求。
@@ -730,6 +749,11 @@ def load_config(config_path: str | Path) -> AgentConfig:
         path=path,
     )
     config = AgentConfig(**effective.values)
+    object.__setattr__(
+        config,
+        "memory_compact_trigger_percent",
+        effective.values["memory_compact_trigger_percent"],
+    )
     config.config_path = resolved_path
     config.config_warnings = config_warnings
     config.config_sources = effective.sources

@@ -29,8 +29,9 @@ from agent_py_agent.agent.tooling.registry import _declared_deferred_names
 # cancel_subagents 保持直出），生产在用的 terminal_session、read_artifact、session_search、process_session 等同样保持直出。
 DECLARED = {
     "asset_delivery", "datasources", "audit_group_invoke_asset", "audit_group_query",
-    "admin_controls", "cancel_session_task", "gateway_status",
-    "manage_models", "memory_search", "package_build", "package_install", "publish_audit_update", "restart_gateway", "runtime_governance", "schedule",
+    "admin_controls", "cancel_session_task", "compact_policy", "gateway_status",
+    "manage_models", "memory_search", "package_build", "package_install", "publish_audit_update",
+    "remote_agent_push", "restart_gateway", "runtime_governance", "schedule",
     "scripts", "send_message", "send_session_message", "skill_summarize", "stop_named_work", "update_persona",
     "user_config", "watch_stream", "workflows", "feishu_cloud", "feishu_auth", "skill_transfer", "tool_program",
 }

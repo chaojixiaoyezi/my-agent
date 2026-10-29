@@ -41,8 +41,9 @@ _FILE_CACHE_MAX_ENTRIES = 2048
 _MAX_DIRECTORY_RECORDS_COUNT = 4096
 # 后台静态快照必须重新核验的最长秒数，热命中不延长有效期。
 _CACHE_RECHECK_SECONDS = 60.0
-# 显式换代或扫描边界瞬态异常总共最多尝试四次，每次重试前退避5毫秒。
-_MAX_SCAN_ATTEMPTS = 4
+# 显式换代或扫描边界瞬态异常总共最多尝试四次。
+_MAX_SCAN_ATTEMPT_COUNT = 4
+# 目录扫描遇到换代竞争时的单次退避等待秒数（5毫秒）。
 _DIR_SCAN_RETRY_BACKOFF_SECONDS = 0.005
 _TRANSIENT_SCAN_ERRNOS = frozenset({errno.EINTR, errno.EAGAIN, errno.ENOENT, getattr(errno, "ESTALE", errno.ENOENT), errno.ESRCH})
 _PERMISSION_SCAN_ERRNOS = frozenset({errno.EACCES, errno.EPERM})
@@ -260,7 +261,7 @@ def _directory_projection_error(root, key, code, *, failure: OSError | None = No
 # LLM: 换代及准确瞬态异常共用四次完整尝试；权限优先立即失败，未知错误透传，不拿旧帧冒充稳定扫描。
 # 函数用途: 在扫描边界竞争时最多退避重试三次，耗尽统一报告目录读取期间换代。
 def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]:
-    for attempt in range(_MAX_SCAN_ATTEMPTS):
+    for attempt in range(_MAX_SCAN_ATTEMPT_COUNT):
         try:
             snapshots = _directory_snapshot_attempt(root, home, allow_initial_missing=attempt == 0)
         except OSError as exc:
@@ -276,7 +277,7 @@ def _directory_snapshots(root: Path, home: Path) -> tuple[_SessionSnapshot, ...]
             snapshots = _directory_projection_error(root, key, code, failure=exc)
         if not any(item.error_code == "DIRECTORY_CHANGED_DURING_READ" for item in snapshots):
             return snapshots
-        if attempt + 1 < _MAX_SCAN_ATTEMPTS:
+        if attempt + 1 < _MAX_SCAN_ATTEMPT_COUNT:
             time.sleep(_DIR_SCAN_RETRY_BACKOFF_SECONDS)
     return snapshots
 

@@ -242,7 +242,7 @@ def test_default_view_lists_only_the_common_parameters(monkeypatch, user_config)
     assert "- request_timeout = 300（改过，默认 240）：HTTP 基础超时秒数" in shown.message
     assert "dynamic_timeout_min" not in shown.message and "另外你还改过 1 个其它参数" in shown.message
     assert f"一共 {len(listed_parameters())} 项参数" in shown.message and "/settings all" in shown.message
-    assert "- memory_compact_auto_trigger_percent = 90：" in shown.message
+    assert "- memory_compact_trigger_percent = 80：" in shown.message
     # 布尔值按配置文件写法显示，不能因为 False 是假值就显示成“（空）”。
     assert "- enable_self_learning = false：自学习（默认关闭）" in shown.message
     assert "- enable_subagents = true：" in shown.message

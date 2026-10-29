@@ -322,6 +322,7 @@ def test_mixed_replacement_fits_when_transcript_only_exceeds_real_input_ceiling(
         tmp_path, backend="anthropic_compatible", detached=False, long_source=True,
     )
     agent.config.model_context_window_tokens = 16_000
+    agent.config.memory_compact_trigger_percent = 90
     agent.config.system_prompt += "\n" + "a" * 6_000
     agent.config.max_tokens = agent.backend.max_tokens = 1_024
     original_project = recovery_core._project_mixed_recovery_material

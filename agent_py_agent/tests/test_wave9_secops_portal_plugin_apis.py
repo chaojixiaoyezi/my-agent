@@ -15,9 +15,14 @@ from pathlib import Path
 
 import pytest
 
-SOURCE = Path(os.environ.get("MY_AGENT_PORTAL_SOURCE_DIR", str(
-    Path.home() / ".my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff"
-)))
+_DEFAULT_LOCAL_PORTAL_SOURCE = Path.home() / ".my-agent/releases/claude-tools/07-tasks/web-portal-plugin-handoff"
+_REPO_FIXTURE_PORTAL_SOURCE = Path(__file__).resolve().parent / "fixtures/web_portal_plugin_handoff"
+SOURCE = Path(
+    os.environ.get(
+        "MY_AGENT_PORTAL_SOURCE_DIR",
+        str(_DEFAULT_LOCAL_PORTAL_SOURCE if _DEFAULT_LOCAL_PORTAL_SOURCE.exists() else _REPO_FIXTURE_PORTAL_SOURCE),
+    )
+)
 
 
 # LLM: Regression/test helper, confined to temporary state and controlled loopback fixtures.

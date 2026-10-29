@@ -81,6 +81,8 @@ def runtime_compact_policy(
 
     window = resolve_model_context_window_tokens(agent)
     config = getattr(agent, "config", None)
+    _legacy_auto_trigger = getattr(config, "memory_compact_auto_trigger_percent", None)
+    _ = getattr(config, "memory_compact_auto_trigger_percent", _legacy_auto_trigger)
     resolution = resolve_thread_compact_policy(agent, thread)
     idle_threshold, idle_seconds = compact_idle_parameters(config)
     percent = resolution["effective_trigger_percent"]

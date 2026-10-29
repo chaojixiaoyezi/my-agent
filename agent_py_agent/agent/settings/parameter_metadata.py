@@ -38,6 +38,8 @@ _REFERENCE = re.compile(r"\.([A-Za-z_]\w*)|[\"']([A-Za-z_]\w*)[\"']")
 #   整数配置的范围表（供规范化校验），同属登记类（CI 修复，2026-10-07：它和真实消费方各引用 1 次时打平，取哪个看遍历顺序）。
 _DEFINITION_EXCLUDED = frozenset({
     _PACKAGE / "agent" / "settings" / "_memory_coercion.py",
+    _PACKAGE / "agent" / "settings" / "config_sources.py",
+    _PACKAGE / "agent" / "settings" / "runtime_scope_config.py",
     _PACKAGE / "agent" / "settings" / "services" / "_normalize.py",
     _PACKAGE / "agent" / "settings" / "services" / "runtime_tool_field_specs.py",
     _PACKAGE / "agent" / "settings" / "user_config_capability.py",

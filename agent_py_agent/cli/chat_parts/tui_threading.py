@@ -32,7 +32,7 @@ TUI_BACKGROUND_NOTICE_WARN_AFTER_FAILURE_COUNT = 2
 # 3 秒按 1 秒轮询节奏相当于"连续三个周期都没拿到"，足够排除单次抖动。
 TUI_BACKGROUND_NOTICE_WARN_AFTER_SECONDS = 3.0
 # 同owner/thread已验证帧最多静默保留两次瞬态刷新失败，第三次报告原观察告警。
-_BG_WATCH_SILENT_TRANSIENT_FAILURES = 2
+_BG_WATCH_SILENT_TRANSIENT_FAILURE_COUNT = 2
 _BG_WATCH_TRANSIENT_ERRNOS = frozenset({errno.ENOENT, getattr(errno, "ESTALE", errno.ENOENT), errno.EAGAIN})
 _TRANSIENT_BACKGROUND_VIEW_ERRORS = frozenset({"DIRECTORY_CHANGED_DURING_READ", "LOCK_TIMEOUT", "SNAPSHOT_PARSE_INCOMPLETE"})
 _HARD_BACKGROUND_VIEW_ERRORS = frozenset({"PERMISSION_DENIED", "OWNER_MISMATCH"})
@@ -955,7 +955,7 @@ def _sync_background_watch(agent: object, navigation: object | None, *, session_
             if transient and valid_prior:
                 count = getattr(navigation, "_bg_watch_consecutive_transient_failures", 0) + 1
                 navigation._bg_watch_consecutive_transient_failures = count
-                if count <= _BG_WATCH_SILENT_TRANSIENT_FAILURES:
+                if count <= _BG_WATCH_SILENT_TRANSIENT_FAILURE_COUNT:
                     return False
             else:
                 navigation._bg_watch_consecutive_transient_failures = 0

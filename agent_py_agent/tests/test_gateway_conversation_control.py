@@ -3179,7 +3179,7 @@ def test_context_control_reads_the_same_thread_and_auto_compact_policy(tmp_path)
     assert result.ok is True
     assert "模型：test-model" in result.message
     assert "20,000 tokens" in result.message
-    assert "90%" in result.message
+    assert "80%" in result.message
     assert "未压缩消息 1 条" in result.message
     assert unchanged is not None and unchanged.compact_generation == 0
 

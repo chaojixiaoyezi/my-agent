@@ -51,7 +51,7 @@ def test_snapshot_reports_raw_and_calibration_basis(monkeypatch, observed_raw, p
     assert public.get("counter_id") == ("provider_calibrated_v1" if kind == "calibrated_estimate" else "conservative_cjk_utf8_v1")
     assert public.get("count_scope") == "full_outbound_request"
     assert sum(public[key] for key in components) == expected
-    assert snapshot.context_window_tokens == 128_000 and snapshot.compact_trigger_tokens == 115_200
+    assert snapshot.context_window_tokens == 128_000 and snapshot.compact_trigger_tokens == 102_400
     assert public["estimated"] is True and "private" not in str(public)
 
 

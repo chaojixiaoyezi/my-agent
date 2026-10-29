@@ -13,6 +13,12 @@ from ..runtime_scope_config import load_runtime_config_layer, merge_runtime_conf
 from ..secret_ref import freeze_managed_secret_environment
 
 
+# LLM: 子代理任务配置覆盖不改进程共享logger级别，仅幂等确保日志脱敏器已安装。
+# 函数用途: 为子代理配置覆盖提供与主配置同名的脱敏安装钩子。
+def apply_log_level(_config: AgentConfig) -> None:
+    install_log_redaction()
+
+
 # LLM: worker复用原投影；覆盖只保存在返回配置，不改变进程logger，仍安装原幂等脱敏器并保留无覆盖对象身份。
 # 函数用途: 应用子代理任务配置但不改共享日志级别，容量预览继续走project入口。
 def apply_task_runtime_config_overlay(
@@ -23,7 +29,7 @@ def apply_task_runtime_config_overlay(
 ) -> AgentConfig:
     config = project_task_runtime_config_overlay(base_config, task, workspace_root=workspace_root)
     if config is not base_config:
-        install_log_redaction()
+        apply_log_level(config)
     return config
 
 
