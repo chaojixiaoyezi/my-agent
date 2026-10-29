@@ -1,136 +1,92 @@
-# LLM: 运行门配置从冻结 policy/task 属性读取；成功重复仅软提醒，不能复用只读 gate 的硬拦阈值。
-# 模块用途: 提供工具重复相关配置的统一默认值与覆盖读取入口。
+# LLM: 默认唯一归 typed RuntimeGuardPolicy；软提示可覆盖，硬门只允许任务收紧，不能关闭或放大宿主限制。
+# 模块用途: 为真实工具门解析冻结部署快照及原合法任务提示属性。
 from __future__ import annotations
 
-from ...settings.runtime_guard_config import runtime_guard_bool, runtime_guard_int
+from ...settings.runtime_guard_config import RuntimeGuardPolicy, _effective_policy
 
-# 重复失败判定次数阈值。
-DEFAULT_REPEAT_FAIL_THRESHOLD_COUNT = 10
-# 只读无进展连续次数阈值。
-DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT = 3
-# 重复成功提示的次数阈值。
-DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT = 5
-# 强返工提示阈值:同工具同类失败连续达该值时要求模型换策略，但默认不结束
-# 当前 turn。15 次既避免偶发构建失败过早触发，也能提醒明显的机械重试。
-DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT = 15
-# L4 阶梯:真硬门默认关;开启后同类失败达该值强制收口等用户介入。
-DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT = 15
+# 旧公开符号只作代码默认的投影，不能再维护另一份数字。
+DEFAULT_REPEAT_FAIL_THRESHOLD_COUNT = RuntimeGuardPolicy().repeat_fail_threshold
+DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT = RuntimeGuardPolicy().readonly_no_progress_threshold
+DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT = RuntimeGuardPolicy().repeated_success_hint_threshold
+DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT = RuntimeGuardPolicy().repeated_failure_halt_threshold
+DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT = RuntimeGuardPolicy().hard_failure_halt_threshold
 
 
-# LLM: 独立软提醒阈值由运行门配置管理，0 关闭，不影响失败/只读门或执行权限。
-# 函数用途: 读取成功工具重复提醒次数，优先本工作片显式配置，再读取冻结的部署配置。
+# LLM: 只有真实 typed 冻结快照或正式宿主加载器能提供策略，错误不吞成默认。
+# 函数用途: 取得当前工作片的守卫策略。
+def _policy(params: object) -> RuntimeGuardPolicy:
+    return _effective_policy(policy=getattr(params, "runtime_guard_policy", None))
+
+
+# LLM: 整数不得用 bool 冒充；不校正字符串、负值或任意动作正文。
+# 函数用途: 从原任务属性读取合法非负整数。
+def _task_int(params: object, key: str) -> int | None:
+    attrs = getattr(params, "task_attributes", None)
+    value = attrs.get(key) if isinstance(attrs, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
+# LLM: 此三项只产生策略/进展软提示，不授执行权限或关闭硬门；保留任务的显式0关闭提示。
+# 函数用途: 读取可以按任务覆盖的软提示阈值。
+def _soft_threshold(params: object, key: str) -> int:
+    candidate = _task_int(params, key)
+    return getattr(_policy(params), key) if candidate is None else candidate
+
+
+# LLM: 成功重复只是软提醒，与只读或失败硬门无关。
+# 函数用途: 读取成功重复提醒阈值。
 def repeated_success_hint_threshold(params: object) -> int:
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        parsed = _int_value(attrs.get("repeated_success_hint_threshold"))
-        if parsed >= 0:
-            return parsed
-    return runtime_guard_int(
-        "repeated_success_hint_threshold", DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT,
-        policy=getattr(params, "runtime_guard_policy", None),
-    )
+    return _soft_threshold(params, "repeated_success_hint_threshold")
 
 
+# LLM: 失败策略提示允许任务调整，但不改变独立硬失败上限。
+# 函数用途: 读取重复失败提示阈值。
 def repeat_fail_threshold(params: object) -> int:
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        parsed = _int_value(attrs.get("repeat_fail_threshold"))
-        if parsed >= 0:
-            return parsed
-    return runtime_guard_int(
-        "repeat_fail_threshold",
-        DEFAULT_REPEAT_FAIL_THRESHOLD_COUNT,
-        policy=getattr(params, "runtime_guard_policy", None),
-    )
+    return _soft_threshold(params, "repeat_fail_threshold")
 
 
+# LLM: 只读无进展提示允许原任务覆盖，不放大任何写入权限。
+# 函数用途: 读取只读无进展提示阈值。
 def readonly_no_progress_threshold(params: object) -> int:
+    return _soft_threshold(params, "readonly_no_progress_threshold")
+
+
+# LLM: 任务只能启用硬保护，false/字符串/数字均不能撤销宿主true；来源优先级不是授权。
+# 函数用途: 合并终端或硬失败保护开关。
+def _hard_enabled(params: object, key: str) -> bool:
     attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        parsed = _int_value(attrs.get("readonly_no_progress_threshold"))
-        if parsed >= 0:
-            return parsed
-    return runtime_guard_int(
-        "readonly_no_progress_threshold",
-        DEFAULT_READONLY_NO_PROGRESS_THRESHOLD_COUNT,
-        policy=getattr(params, "runtime_guard_policy", None),
-    )
+    requested = isinstance(attrs, dict) and attrs.get(key) is True
+    return getattr(_policy(params), key) or requested
 
 
+# LLM: 宿主正阈值下任务0或更大值不能放宽；宿主0未设此独立保护时任务可主动收紧为正数。
+# 函数用途: 取硬失败限制和合法任务收紧值的交集。
+def _hard_threshold(params: object, key: str) -> int:
+    limit, requested = getattr(_policy(params), key), _task_int(params, key)
+    if requested is None or requested == 0:
+        return limit
+    return min(limit, requested) if limit > 0 else requested
+
+
+# LLM: 不允许 task=false 解除宿主终端阻断。
+# 函数用途: 读取终端硬保护开关。
 def terminal_block_enabled(params: object) -> bool:
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict) and "terminal_block_enabled" in attrs:
-        value = attrs.get("terminal_block_enabled")
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        text = str(value or "").strip().lower()
-        return text in {"1", "true"}
-    else:
-        return runtime_guard_bool(
-            "terminal_block_enabled",
-            False,
-            policy=getattr(params, "runtime_guard_policy", None),
-        )
+    return _hard_enabled(params, "terminal_block_enabled")
 
 
-# LLM: 先读本工作片 task_attributes 的显式值，再读冻结的运行门配置；主代理用于强返工提示，主/子代理用于
-#   “同一调用同一失败”硬上限，子代理授权阶段同码连续失败的阻塞收口也读同一阈值，调用方不得另设第二份阈值。
-# 函数用途: 返回强返工提示、同调用失败上限与子代理授权阶段收口共用的连续失败次数阈值。
+# LLM: 此值也用于同调用失败上限及子代理授权阻塞收口，不能当纯提示放大。
+# 函数用途: 读取重复失败收口上限。
 def repeated_failure_halt_threshold(params: object) -> int:
-    """强返工提示阈值；同类失败只提示，另行启用 hard gate 才会按同类失败结束本轮。
-
-    主代理与子代理同一回合内同一调用（工具名＋参数摘要）以同一错误码连续失败达到该值时结束当前回合；
-    子代理（task_local）同一错误码在授权阶段连续失败达到该值时按阻塞收口并通知直属父级；
-    ≤0 时两项收口都不做。
-    """
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        parsed = _int_value(attrs.get("repeated_failure_halt_threshold"))
-        if parsed >= 0:
-            return parsed
-    return runtime_guard_int(
-        "repeated_failure_halt_threshold",
-        DEFAULT_REPEATED_FAILURE_HALT_THRESHOLD_COUNT,
-        policy=getattr(params, "runtime_guard_policy", None),
-    )
+    return _hard_threshold(params, "repeated_failure_halt_threshold")
 
 
+# LLM: 宿主启用后任务不能关闭此独立硬门。
+# 函数用途: 读取硬失败门开关。
 def hard_failure_halt_enabled(params: object) -> bool:
-    """L4 真硬门开关:默认关闭,开启后同类失败达硬阈值即强制收口等用户。"""
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict) and "hard_failure_halt_enabled" in attrs:
-        value = attrs.get("hard_failure_halt_enabled")
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(value)
-        text = str(value or "").strip().lower()
-        return text in {"1", "true"}
-    return runtime_guard_bool(
-        "hard_failure_halt_enabled",
-        False,
-        policy=getattr(params, "runtime_guard_policy", None),
-    )
+    return _hard_enabled(params, "hard_failure_halt_enabled")
 
 
+# LLM: 数值越小越严格；显式任务0不能取消宿主上限。
+# 函数用途: 读取硬失败门的收口阈值。
 def hard_failure_halt_threshold(params: object) -> int:
-    """L4 硬门阈值:开启后同类失败达该值强制收口。"""
-    attrs = getattr(params, "task_attributes", None)
-    if isinstance(attrs, dict):
-        parsed = _int_value(attrs.get("hard_failure_halt_threshold"))
-        if parsed >= 0:
-            return parsed
-    return runtime_guard_int(
-        "hard_failure_halt_threshold",
-        DEFAULT_HARD_FAILURE_HALT_THRESHOLD_COUNT,
-        policy=getattr(params, "runtime_guard_policy", None),
-    )
-
-
-def _int_value(value: object) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return -1
+    return _hard_threshold(params, "hard_failure_halt_threshold")

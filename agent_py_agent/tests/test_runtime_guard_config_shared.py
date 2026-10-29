@@ -1,3 +1,5 @@
+# LLM: 守卫默认迁到唯一 typed 部署策略，旧 YAML 不再参与；测试保留实际 gate 与预算行为断言。
+# 模块用途: 验证同一守卫快照到达重复调用、工程限流与供应恢复消费者。
 from __future__ import annotations
 
 
@@ -24,6 +26,8 @@ def test_runtime_guard_file_contains_tool_repeat_guard_defaults():
     assert hard_failure_halt_threshold(Params()) == 15
 
 
+# LLM: 宿主加载不接运行期覆写；测试使用直接 typed 冻结对象，不恢复第二个来源入口。
+# 函数用途: 验证成功重复提醒读取本次快照及原动作属性语义。
 def test_repeated_success_observation_defaults_and_frozen_overrides():
     from types import SimpleNamespace
 
@@ -33,14 +37,17 @@ def test_repeated_success_observation_defaults_and_frozen_overrides():
         repeated_success_hint_threshold,
     )
     from agent_py_agent.agent.contracts.gates.tool_guardrail import ToolGuardrailConfig
-    from agent_py_agent.agent.settings.runtime_guard_config import runtime_guard_policy
+    from agent_py_agent.agent.settings.runtime_guard_config import (
+        RuntimeGuardPolicy,
+        runtime_guard_policy,
+    )
 
     default_policy = runtime_guard_policy()
     assert default_policy.values["repeated_success_hint_threshold"] == 5
     assert DEFAULT_REPEATED_SUCCESS_HINT_THRESHOLD_COUNT == 5
     assert ToolGuardrailConfig().repeated_success_hint_threshold == 5
     params = SimpleNamespace(
-        runtime_guard_policy=runtime_guard_policy(overrides={"repeated_success_hint_threshold": 7}),
+        runtime_guard_policy=RuntimeGuardPolicy(repeated_success_hint_threshold=7),
         task_attributes={},
     )
     assert repeated_success_hint_threshold(params) == 7
@@ -86,15 +93,14 @@ def test_tool_rate_limit_boundary_policy_overrides_shared_defaults():
     assert policy.max_records == 64
 
 
+# LLM: 运行读取改用 typed 默认，不能把 AgentConfig 已退役副本复活进部署策略。
+# 函数用途: 检查唯一 typed 守卫只持有自己的字段。
 def test_runtime_guard_file_no_longer_carries_agent_config_copies():
     """参数减量第 2 批：工具轮上限、单代理工具预算、runner 重跑次数只在 AgentConfig 一个家；
     守卫文件里这些副本在有 AgentConfig 时从来读不到，已删除。"""
-    from agent_py_agent.agent.settings.config_io import load_simple_yaml
-    from agent_py_agent.agent.settings.runtime_guard_config import (
-        DEFAULT_RUNTIME_GUARD_CONFIG_PATH,
-    )
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
 
-    defaults = load_simple_yaml(DEFAULT_RUNTIME_GUARD_CONFIG_PATH)
+    defaults = RuntimeGuardPolicy().values
 
     for key in (
         "max_tool_rounds",
@@ -110,6 +116,8 @@ def test_runtime_guard_file_no_longer_carries_agent_config_copies():
     assert defaults["provider_transient_redispatch_limit"] == 8
 
 
+# LLM: 旧文件存在也不能替代唯一宿主 JSON；工具轮与代理预算仍由原 AgentConfig/代码规则负责。
+# 函数用途: 验证旧 YAML 的重复副本不会影响真实预算 gate。
 def test_tool_rounds_and_agent_budget_ignore_patched_guard_yaml(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -121,11 +129,9 @@ def test_tool_rounds_and_agent_budget_ignore_patched_guard_yaml(tmp_path, monkey
         ToolAgentBudgetRequest,
         check_tool_agent_budget,
     )
-    from agent_py_agent.agent.settings import runtime_guard_config
-
     config_path = tmp_path / "runtime_guard_config.yaml"
     config_path.write_text("max_tool_rounds: 17\ntool_agent_budget_max_calls: 1\n", encoding="utf-8")
-    monkeypatch.setattr(runtime_guard_config, "DEFAULT_RUNTIME_GUARD_CONFIG_PATH", config_path)
+    monkeypatch.setenv("MY_AGENT_HOME", str(tmp_path))
 
     agent = SimpleNamespace(config=SimpleNamespace())
     params = SimpleNamespace(task_attributes={})
@@ -135,11 +141,13 @@ def test_tool_rounds_and_agent_budget_ignore_patched_guard_yaml(tmp_path, monkey
         assert check_tool_agent_budget(ToolAgentBudgetRequest(agent, "run-1", "read_file", now=float(index))) is None
 
 
+# LLM: 直接构造同样走 typed 验证；冻结策略优先于默认，不恢复旧 values 字典入口。
+# 函数用途: 检查供应重派预算读取当前策略快照。
 def test_provider_supply_retry_limit_prefers_agent_policy_snapshot():
     from agent_py_agent.agent.agent_core.runner.dispatch import _provider_supply_retry_limit
     from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
 
-    policy = RuntimeGuardPolicy(values={"provider_transient_redispatch_limit": 5}, sources={})
+    policy = RuntimeGuardPolicy(provider_transient_redispatch_limit=5)
 
     assert _provider_supply_retry_limit("transient_error", runtime_policy=policy) == 5
     assert _provider_supply_retry_limit("transient_error") == 8
@@ -177,24 +185,17 @@ def test_agent_config_blank_tool_rounds_defaults_to_extreme_guard():
     assert _effective_max_tool_rounds(agent, params_override) == 17
 
 
+# LLM: 所有覆盖为明确 typed 字段，原守卫与限流 gate 的数值断言不变。
+# 函数用途: 检查实际注册表消费者使用传入快照而非另一份默认。
 def test_registry_runtime_gate_policy_uses_passed_runtime_policy():
     from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
     from agent_py_agent.agent.tooling.action_policy import _tool_guardrail_config
     from agent_py_agent.agent.tooling.registry_rate_limit_policy import tool_rate_limit_policy
 
-    policy = RuntimeGuardPolicy(
-        values={
-            "repeat_fail_threshold": 13,
-            "readonly_no_progress_threshold": 4,
-            "terminal_block_enabled": True,
-            "tool_rate_max_calls": 14,
-            "tool_rate_window_seconds": 15,
-            "tool_circuit_failure_threshold": 16,
-            "tool_circuit_backoff_seconds": [1, 3, 5],
-            "tool_rate_max_records": 17,
-        },
-        sources={},
-    )
+    policy = RuntimeGuardPolicy(repeat_fail_threshold=13, readonly_no_progress_threshold=4,
+                               terminal_block_enabled=True, tool_rate_max_calls=14, tool_rate_window_seconds=15,
+                               tool_circuit_failure_threshold=16, tool_circuit_backoff_seconds=(1, 3, 5),
+                               tool_rate_max_records=17)
 
     guardrail = _tool_guardrail_config(None, policy)
     rate = tool_rate_limit_policy(None, policy)
@@ -207,3 +208,42 @@ def test_registry_runtime_gate_policy_uses_passed_runtime_policy():
     assert rate.failure_threshold == 16
     assert rate.backoff_schedule_seconds == (1.0, 3.0, 5.0)
     assert rate.max_records == 17
+
+
+# LLM: 未授权动作属性只能收紧硬门，不能以 0/false/大阈值关闭部署保护；成功重复软提醒仍保原覆盖规则。
+# 函数用途: 通过真实 guard reader 验证任务属性不能放大硬限制。
+def test_config_task_attributes_cannot_weaken_host_hard_guards():
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.agent_core.tool_guard.call_guardrail_config import (
+        hard_failure_halt_enabled,
+        hard_failure_halt_threshold,
+        repeated_failure_halt_threshold,
+        terminal_block_enabled,
+    )
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    params = SimpleNamespace(runtime_guard_policy=RuntimeGuardPolicy(terminal_block_enabled=True,
+                             hard_failure_halt_enabled=True, hard_failure_halt_threshold=4,
+                             repeated_failure_halt_threshold=6),
+                             task_attributes={"terminal_block_enabled": False, "hard_failure_halt_enabled": False,
+                                              "hard_failure_halt_threshold": 100, "repeated_failure_halt_threshold": 0})
+    assert terminal_block_enabled(params) is True
+    assert hard_failure_halt_enabled(params) is True
+    assert hard_failure_halt_threshold(params) == 4
+    assert repeated_failure_halt_threshold(params) == 6
+    params.task_attributes = {"hard_failure_halt_threshold": 2, "repeated_failure_halt_threshold": 3}
+    assert hard_failure_halt_threshold(params) == 2
+    assert repeated_failure_halt_threshold(params) == 3
+# LLM: task 的恢复额度只能收紧宿主正上限；显式零不能把宿主额度改成无限。
+# 函数用途: 验证主代理自动恢复也遵守同一部署硬上限。
+def test_config_auto_resume_request_cannot_weaken_host_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.contracts import main_agent_auto_resume as module
+    from agent_py_agent.agent.settings.runtime_guard_config import RuntimeGuardPolicy
+
+    monkeypatch.setattr(module, "_configured_auto_resume_limit", lambda: 2)
+    for requested, expected in ((0, 2), (5, 2), (1, 1), (None, 2)):
+        assert module.auto_resume_limit(SimpleNamespace(max_auto_recovery_attempts=requested)) == expected
+    assert RuntimeGuardPolicy().main_agent_auto_resume_attempt_limit == module.DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT

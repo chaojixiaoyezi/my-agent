@@ -26,17 +26,14 @@ _FILENAME = "model_selection_structure.json"
 _SCHEMA = "model_selection_structure.v1"
 
 
-# LLM: 与 decision_point_mode_from_read 同一分层：配置默认 → owner 覆盖 → 本会话覆盖（选模型是会话范围点位）；值经共用校验。
+# LLM: 与正式投影同一代码默认 → owner → thread，不再读取旧配置对象的平铺字段；无文件或网络 I/O。
 # 函数用途: 读出选模型这一轮生效的询问节奏。
 def selection_cadence_from_read(config: object, owner_settings: dict, thread: object) -> str:
-    from ..settings.decision_settings_schema import (
-        validate_decision_field,
-        validate_decision_settings,
-    )
-    from ..settings.defaults import default_config_value
+    from ..settings.decision_settings_defaults import decision_defaults
+    from ..settings.decision_settings_schema import validate_decision_settings
 
-    path, attr = "points.model_selection.cadence", "decision_model_selection_cadence"
-    value = validate_decision_field(path, getattr(config, attr, default_config_value(attr)))
+    path = "points.model_selection.cadence"
+    value = decision_defaults(None)[0][path]
     layers = [validate_decision_settings(owner_settings)["overrides"]]
     if thread is not None:
         layers.append(validate_decision_settings(thread.decision_settings)["overrides"])

@@ -1,4 +1,4 @@
-# LLM: 所有记忆字段共用此类型表；模型引用只保留编号，存在、启用与用途由原模型目录解析器校验，不拼接聊天连接。
+# LLM: 所有记忆字段共用此类型表；压缩只规范化 canonical 字段，旧比例不再进入运行时 Memory 配置。
 # 模块用途: 校验 Memory/Curator 配置类型、枚举与范围，并生成不含秘密的结构化警告。
 """Coercion helpers for memory-related config fields."""
 
@@ -15,7 +15,7 @@ _MISSING = object()
 _INT_PATTERN = re.compile(r"-?[0-9]+")
 # 压缩点与压缩后恢复目标的有效范围：配置解析与 user_config 自助校验共用，并与运行时夹取一致（测试钉住），
 # 保证自助修改接受的值一定原样生效，不会再被运行时夹到别的值。
-COMPACT_TRIGGER_PERCENT_RANGE = (50, 100)
+COMPACT_TRIGGER_PERCENT_RANGE = (50, 95)
 COMPACT_RECOVERY_PERCENT_RANGE = (25, 80)
 
 
@@ -74,7 +74,6 @@ _FIELDS = (
     _FieldSpec("memory_compact_idle_trigger_percent", "clamped_int", 0, 95),
     _FieldSpec("memory_compact_idle_seconds", "idle_seconds", 0, None),
     _FieldSpec("memory_compact_idle_max_per_tick", "int", 0, None),
-    _FieldSpec("memory_compact_auto_trigger_percent", "compact_trigger_percent"),
     # 0 表示不封顶；负数、非整数回到默认 300000，与 runtime 的 compact_trigger_max_tokens 同一口径。
     _FieldSpec("memory_compact_auto_trigger_max_tokens", "int", 0, None),
     _FieldSpec("memory_compact_recovery_target_percent", "compact_recovery_percent"),
@@ -100,7 +99,7 @@ _FIELDS = (
 )
 
 
-# LLM: 原warning及决策校验保持；管理员强制别名在配置源规范化，不进入用户覆盖可写字段。
+# LLM: 只规范化 Memory schema 字段；旧平铺决策不在此读取，管理员强制别名不进入用户覆盖可写字段。
 # 函数用途: 从配置源构造完整、已验证的 Memory 设置字典。
 def _build_memory_settings_dict(
     source: Mapping[str, Any] | object,
@@ -115,11 +114,6 @@ def _build_memory_settings_dict(
         raw = _lookup(source, key)
         if raw is not _MISSING:
             result["force_compact_trigger_percent"] |= _coerce_bool(key, raw, default=False, warnings=warnings)
-    from .decision_settings_defaults import decision_config_fields, validate_config_decision_fields
-
-    decision = {name: _lookup(source, name) for domain, name in decision_config_fields().values() if domain == "memory"}
-    decision = {key: value for key, value in decision.items() if value is not _MISSING}
-    result.update(validate_config_decision_fields(decision, domain="memory"))
     return result
 
 
@@ -135,13 +129,21 @@ def _coerce_field(
     raw_value = _lookup(source, spec.field_name)
     default = getattr(defaults, spec.field_name)
     if spec.kind in {"clamped_int", "idle_seconds"}:
+        if raw_value is _MISSING:
+            return default
         number = _memory_int_number(raw_value)
         if number is None:
+            _warn(warnings, _WarningDraft(spec.field_name, raw_value, default, "expected an integer, not a boolean"))
             return default
-        number = max(spec.min_value or 0, number)
+        original = number
+        number = max(spec.min_value or 0, original)
         if spec.kind == "idle_seconds":
-            return max(60, number) if number else 0
-        return min(spec.max_value, number)
+            number = max(60, number) if number else 0
+        else:
+            number = min(spec.max_value, number)
+        if number != original:
+            _warn(warnings, _WarningDraft(spec.field_name, raw_value, number, "value clamped to the supported range"))
+        return number
     if spec.kind == "bool":
         return _coerce_bool(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "choice":
@@ -154,8 +156,6 @@ def _coerce_field(
             max_chars=spec.max_chars or 200,
             warnings=warnings,
         )
-    if spec.kind == "compact_trigger_percent":
-        return _coerce_compact_trigger_percent(spec.field_name, raw_value, default=default, warnings=warnings)
     if spec.kind == "compact_recovery_percent":
         return _coerce_compact_recovery_percent(
             spec.field_name,
@@ -197,35 +197,6 @@ def _coerce_string(
         _WarningDraft(field_name, raw_value, default, "expected a short single-line string"),
     )
     return default
-
-
-# LLM: 与运行时 compact_trigger_percent 同一边界（0 表示 100、低于下限夹到下限、高于上限夹到上限），范围取自
-# COMPACT_TRIGGER_PERCENT_RANGE；夹取都留结构化警告。改边界须同步运行时与 user_config 的一致性测试。
-# 函数用途: 校验自动压缩触发百分比，越界时限制到有效范围并留下配置警告。
-def _coerce_compact_trigger_percent(
-    field_name: str,
-    raw_value: Any,
-    *,
-    default: int,
-    warnings: list[MemoryConfigWarning],
-) -> int:
-    if raw_value is _MISSING:
-        return default
-    number = _memory_int_number(raw_value)
-    if number is None:
-        reason = "expected an integer, not a boolean" if isinstance(raw_value, bool) else "expected an integer"
-        _warn(warnings, _WarningDraft(field_name, raw_value, default, reason))
-        return default
-    low, high = COMPACT_TRIGGER_PERCENT_RANGE
-    if number <= 0:
-        return high
-    if number < low:
-        _warn(warnings, _WarningDraft(field_name, raw_value, low, f"expected 0 or value between {low} and {high}"))
-        return low
-    if number > high:
-        _warn(warnings, _WarningDraft(field_name, raw_value, high, f"expected value <= {high}"))
-        return high
-    return number
 
 
 # LLM: 配置解析与运行时压缩边界保持一致，YAML不得产生不同于直接构造AgentConfig的目标；被限幅的值仍须报告明确结构化告警。

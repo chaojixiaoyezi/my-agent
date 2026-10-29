@@ -1,3 +1,5 @@
+# LLM: 普通额度保留优先级，模型字段只能来自目录解析，不能由 YAML/env/task 平铺重建。
+# 模块用途: 验证配置分层来源与模型投影边界。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -124,6 +126,8 @@ def test_load_config_records_schema_and_file_sources(tmp_path) -> None:
     }
 
 
+# LLM: env 凭据迁到原模型目录后，普通 YAML 不得重新签发连接来源，也不能触发隐式导入。
+# 函数用途: 验证旧 YAML 凭据字段被忽略并留下迁移告警。
 def test_load_config_records_env_override_source(tmp_path, monkeypatch) -> None:
     path = tmp_path / "agent_config.yaml"
     path.write_text("api_key_env: TEST_MY_AGENT_KEY\napi_key: from_file\n", encoding="utf-8")
@@ -131,13 +135,13 @@ def test_load_config_records_env_override_source(tmp_path, monkeypatch) -> None:
 
     config = load_config(path)
 
-    assert config.api_key == "from_env"
-    assert config.config_source_for("api_key") == {
-        "source": "env:TEST_MY_AGENT_KEY",
-        "priority": 80,
-    }
+    assert config.api_key == "" and config.api_key_env == ""
+    assert not config.config_source_for("api_key")
+    assert any("api_key_env" in warning for warning in config.config_warnings)
 
 
+# LLM: 用户 YAML 不能注入加载器来源，也不能重新持有模型后端投影。
+# 函数用途: 验证来源元数据与模型字段均不被伪造。
 def test_load_config_rejects_yaml_config_source_injection(tmp_path) -> None:
     path = tmp_path / "agent_config.yaml"
     path.write_text(
@@ -155,10 +159,12 @@ def test_load_config_rejects_yaml_config_source_injection(tmp_path) -> None:
     config = load_config(path)
 
     assert config.config_path == str(path.resolve())
-    assert config.config_source_for("model_backend")["source"] == str(path.resolve())
+    assert config.model_backend == "" and not config.config_source_for("model_backend")
     assert any("config_sources" in warning for warning in config.config_warnings)
 
 
+# LLM: 普通额度保持原优先级，旧模型持久字段被忽略，来源不能造回已退役入口。
+# 函数用途: 验证运行层正常额度覆盖和模型来源边界。
 def test_runtime_config_layers_preserve_base_sources_and_owner_override(tmp_path) -> None:
     path = tmp_path / "agent_config.yaml"
     path.write_text("model_backend: echo\nmax_subagents: 17\n", encoding="utf-8")
@@ -179,17 +185,18 @@ def test_runtime_config_layers_preserve_base_sources_and_owner_override(tmp_path
         "source": "owner:local/main/config.yaml",
         "priority": 30,
     }
-    assert effective.source_for("model_backend") == {
-        "source": str(path.resolve()),
-        "priority": 20,
-    }
+    assert effective.value("model_backend") == ""
+    assert "model_backend" not in owner.values
 
 
+# LLM: base 是宿主已解析的连接投影；owner 不能覆盖模型目录凭据或冒充 env 来源。
+# 函数用途: 验证低优先级层不能污染已冻结连接。
 def test_runtime_config_lower_priority_layer_cannot_override_env_source(tmp_path, monkeypatch) -> None:
     path = tmp_path / "agent_config.yaml"
     path.write_text("api_key_env: TEST_MY_AGENT_KEY\napi_key: from_file\n", encoding="utf-8")
     monkeypatch.setenv("TEST_MY_AGENT_KEY", "from_env")
-    base = load_config(path)
+    base = AgentConfig(api_key="from_env", api_key_env="TEST_MY_AGENT_KEY",
+                       config_sources={"api_key": {"source": "env:TEST_MY_AGENT_KEY", "priority": 80}})
     owner = make_runtime_config_layer(
         RuntimeConfigLayerRequest(
             scope="owner",
@@ -208,11 +215,14 @@ def test_runtime_config_lower_priority_layer_cannot_override_env_source(tmp_path
     }
 
 
+# LLM: 运行层高优先级也不是凭据授权，已经解析的模型投影不接受平铺覆盖。
+# 函数用途: 验证 runtime 不能替代目录解析的 env 来源。
 def test_runtime_config_runtime_layer_can_override_env_source(tmp_path, monkeypatch) -> None:
     path = tmp_path / "agent_config.yaml"
     path.write_text("api_key_env: TEST_MY_AGENT_KEY\napi_key: from_file\n", encoding="utf-8")
     monkeypatch.setenv("TEST_MY_AGENT_KEY", "from_env")
-    base = load_config(path)
+    base = AgentConfig(api_key="from_env", api_key_env="TEST_MY_AGENT_KEY",
+                       config_sources={"api_key": {"source": "env:TEST_MY_AGENT_KEY", "priority": 80}})
     runtime = make_runtime_config_layer(
         RuntimeConfigLayerRequest(
             scope="runtime",
@@ -224,10 +234,13 @@ def test_runtime_config_runtime_layer_can_override_env_source(tmp_path, monkeypa
 
     effective = merge_runtime_config_layers(base, [runtime])
 
-    assert effective.value("api_key") == "from_runtime"
-    assert effective.source_for("api_key") == {"source": "run:override", "priority": 90}
+    assert effective.value("api_key") == "from_env"
+    assert effective.source_for("api_key") == {"source": "env:TEST_MY_AGENT_KEY", "priority": 80}
+    assert "api_key" not in runtime.values
 
 
+# LLM: 模型连接和加载器元数据都不能由 task 层注入；未知键保留告警。
+# 函数用途: 验证任务层不能伪造内部模型字段。
 def test_runtime_config_layer_rejects_unknown_and_internal_fields(tmp_path) -> None:
     path = tmp_path / "agent_config.yaml"
     path.write_text("model_backend: echo\n", encoding="utf-8")
@@ -247,7 +260,7 @@ def test_runtime_config_layer_rejects_unknown_and_internal_fields(tmp_path) -> N
 
     effective = merge_runtime_config_layers(base, [layer])
 
-    assert effective.value("model_backend") == "echo"
+    assert effective.value("model_backend") == "" and "model_backend" not in layer.values
     assert "config_sources" not in layer.values
     assert "not_a_config_field" not in layer.values
     assert any("config_sources" in warning for warning in layer.warnings)

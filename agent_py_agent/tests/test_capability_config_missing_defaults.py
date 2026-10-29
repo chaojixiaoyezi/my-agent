@@ -38,10 +38,12 @@ def test_missing_file_under_an_owner_home_root_returns_defaults(tmp_path) -> Non
     assert capability_config_for_agent(SimpleNamespace(root=owner_home)) == CapabilityConfig()
 
 
+# LLM: 真解码失败才是坏文件，已迁出的决策键不能冒充解析异常。
+# 函数用途: 验证损坏的能力文件仍返回失败值。
 def test_malformed_file_still_returns_none(tmp_path) -> None:
     """读取失败或格式错误保持原语义（None）；限流类调用方自己落到默认值，由会话工具测试覆盖。"""
     config_path = tmp_path / "capability_config.yaml"
-    config_path.write_text("decision_subagent_model_mode: bogus\n", encoding="utf-8")
+    config_path.write_text("\xff", encoding="latin-1")
 
     assert capability_config_for_agent(SimpleNamespace(capability_config_path=config_path)) is None
 
@@ -52,29 +54,34 @@ def _decision_context(config_path) -> SimpleNamespace:
                            capability_config_path=config_path)
 
 
+# LLM: 决策默认值唯一归决策代码；capability 文件里的旧值不能重新成为运行权威。
+# 函数用途: 验证旧文件不会污染决策默认值。
 def test_decision_defaults_read_the_capability_file_not_the_router_config(tmp_path) -> None:
-    """旧实现退到 capability_router.config（AgentConfig），文件里的决策字段永远读不到。"""
     config_path = tmp_path / "capability_config.yaml"
     config_path.write_text("decision_skill_tool_context_policy: metadata\n", encoding="utf-8")
 
     values, sources = decision_defaults(_decision_context(config_path))
 
-    assert values[POLICY] == "metadata"
-    assert sources[POLICY] == "capability_config.decision_skill_tool_context_policy"
+    assert values[POLICY] == "progressive"
+    assert sources[POLICY] == "decision_defaults"
 
 
+# LLM: 缺文件也不需要恢复已删除的 capability 决策字段，默认只归决策服务。
+# 函数用途: 验证缺失文件时采用唯一决策默认值。
 def test_decision_defaults_use_dataclass_defaults_when_the_file_is_missing(tmp_path) -> None:
     values, _sources = decision_defaults(_decision_context(tmp_path / "missing.yaml"))
 
-    assert values[POLICY] == CapabilityConfig().decision_skill_tool_context_policy == "progressive"
+    assert values[POLICY] == "progressive"
+    assert not hasattr(CapabilityConfig(), "decision_skill_tool_context_policy")
 
 
+# LLM: 注入旧形状对象同样没有配置权威，不得绕过迁移恢复旧键。
+# 函数用途: 验证旧 capability 对象不改变决策默认值。
 def test_decision_defaults_still_prefer_an_injected_capability_config(tmp_path) -> None:
-    """轻上下文直接注入的 capability_config 仍然优先，不去读文件。"""
-    injected = CapabilityConfig(decision_skill_tool_context_policy="metadata")
+    injected = SimpleNamespace(decision_skill_tool_context_policy="metadata")
     context = SimpleNamespace(config=AgentConfig(), capability_config=injected,
                               capability_config_path=tmp_path / "missing.yaml")
 
     values, _sources = decision_defaults(context)
 
-    assert values[POLICY] == "metadata"
+    assert values[POLICY] == "progressive"

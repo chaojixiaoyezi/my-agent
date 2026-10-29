@@ -2,7 +2,6 @@
 # 模块用途: 在可恢复网络故障中等待并重试当前模型调用，保留中断和既有次数预算，不重放工具副作用。
 from __future__ import annotations
 
-import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,9 +20,9 @@ from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_da
 
 _T = TypeVar("_T")
 
-DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS = (10.0, 25.0, 45.0, 100.0, 180.0)
+DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS = RuntimeGuardPolicy().provider_transient_auto_resume_delays_seconds
 # 一整个模型调用的自动重试总时长上限；0 表示不限（只受上面的次数阶梯约束）。
-DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS = 1800.0
+DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS = float(RuntimeGuardPolicy().provider_transient_auto_resume_total_budget_seconds)
 # 到总时长上限时的结构化错误码；上层按码识别，不读报错文字。
 PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED = "PROVIDER_TRANSIENT_RETRY_TIME_BUDGET_EXCEEDED"
 
@@ -49,42 +48,17 @@ class ProviderTransientRetryCallbacks:
     should_retry_result: Callable[[object], bool] | None = None
 
 
+# LLM: 策略已严格验证且冻结，空阶梯关闭重试；此消费点不维护默认副本或修补坏配置。
+# 函数用途: 读取服务商暂态故障的部署退避序列。
 def provider_transient_retry_delays(policy: RuntimeGuardPolicy | None = None) -> tuple[float, ...]:
-    value = runtime_guard_data(policy=policy).get(
-        "provider_transient_auto_resume_delays_seconds",
-        DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS,
-    )
-    if not isinstance(value, list | tuple):
-        value = DEFAULT_PROVIDER_TRANSIENT_RETRY_DELAYS_SECONDS
-    return tuple(value for value in _parsed_delays(value) if value > 0)
+    return tuple(value for value in runtime_guard_data(policy=policy)["provider_transient_auto_resume_delays_seconds"] if value > 0)
 
 
-def _parsed_delays(value: list | tuple) -> tuple[float, ...]:
-    parsed: list[float] = []
-    for item in value:
-        try:
-            parsed.append(float(item))
-        except (TypeError, ValueError):
-            continue
-    return tuple(parsed)
-
-
-# LLM: 只读运行护栏配置里的总时长上限；坏值、NaN、负数都回落默认 1800 秒，只有显式 0 表示不限
-#   （负数静默关掉护栏比回落默认更危险，注释与行为按此对齐）。缺键也回落默认。
+# LLM: 只读已严格校验的部署总时长上限；坏值在唯一 loader 拒绝，默认1800只归 typed 定义，显式0表示不限。
 #   计时只看结构化事实（时刻与尝试次数），不读任何报错文字。
 # 函数用途: 返回本次逻辑模型调用的自动重试总时长上限（秒），0 表示不限。
 def provider_transient_total_budget_seconds(policy: RuntimeGuardPolicy | None = None) -> float:
-    value = runtime_guard_data(policy=policy).get(
-        "provider_transient_auto_resume_total_budget_seconds",
-        DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS,
-    )
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS
-    if not math.isfinite(parsed) or parsed < 0:  # NaN/inf/负数：按坏值回落默认，防止静默关掉护栏
-        return DEFAULT_PROVIDER_TRANSIENT_TOTAL_BUDGET_SECONDS
-    return parsed
+    return float(runtime_guard_data(policy=policy)["provider_transient_auto_resume_total_budget_seconds"])
 
 
 # LLM: 共用瞬断恢复器：异常路径按结构化分类放行退避重试；响应级路径（callbacks.should_retry_result）

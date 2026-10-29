@@ -13,8 +13,8 @@ from ..backends.reasoning_control import normalize_reasoning_control
 from ..backends.sampling import validate_top_p
 from ..backends.structured_output_mode import JSON_OBJECT_BACKENDS, normalize_structured_output
 
-SCHEMA = "owner_model_profiles.v5"
-BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "typesafe_decision"}
+SCHEMA = "owner_model_profiles.v6"
+BACKENDS = {"openai_compatible", "anthropic_compatible", "openai_responses", "typesafe_decision", "echo"}
 CAPABILITIES = {"agentic", "embedding", "decision"}
 # 用途标签是开放的小写标识符（不是封闭枚举）；数量与长度只防止滥填撑大决策材料。
 _USAGE_TAG = re.compile(r"[a-z][a-z0-9_]{0,39}")
@@ -114,11 +114,15 @@ def validate_provider_id(value: object) -> str:
     return value
 
 
-# LLM: 保留/清除 secret 是明确字段操作；用途不从模型名猜，OAuth 状态只校验不公开。
+# LLM: secret/ref 互斥且同归 provider；环境引用只由离线迁移建立，普通表单写门在操作层，不从型号猜用途。
 # 函数用途: 检查服务商的明确用途和连接配置；允许无密钥保存草稿，发请求前另行检查。
 def validate_provider(value: object) -> dict:
     if not isinstance(value, dict):
         raise ModelProfileError("服务商配置须为对象。")
+    if value.get("transport") == "offline":
+        return _offline_provider(value)
+    if value.get("transport") not in (None, "", "http"):
+        raise ModelProfileError("服务商传输类型无效。")
     name = value.get("display_name", "")
     key = value.get("api_key", "")
     if any(not isinstance(text, str) or len(text) > 4096 or any(ord(c) < 32 for c in text) for text in (name, key)):
@@ -139,6 +143,13 @@ def validate_provider(value: object) -> dict:
     result = {"display_name": name.strip(), "api_base": validate_base_url(value.get("api_base")),
             "api_key": key.strip(), "enabled": enabled, "capabilities": sorted(set(capabilities)),
             "custom_headers": headers, "session_header": session}
+    if value.get("api_key_ref") not in (None, ""):
+        from .model_credentials import provider_environment_name
+
+        provider_environment_name(value["api_key_ref"])
+        if key.strip() or value.get("auth"):
+            raise ModelProfileError("服务商只能保存一种凭据来源。")
+        result["api_key_ref"] = value["api_key_ref"]
     if value.get("auth"):
         from .model_oauth_schema import stored_oauth
 
@@ -146,6 +157,19 @@ def validate_provider(value: object) -> dict:
             raise ModelProfileError("同一服务商不能同时保存 API Key 和 OAuth 登录，请分开创建。")
         result["auth"] = stored_oauth(value["auth"], result["api_base"])
     return result
+
+
+# LLM: 离线 tag 只配 echo/agentic，不能夹带网络地址、认证或请求头，也不会自动成为默认选择。
+# 函数用途: 校验原目录内的显式离线服务商分支。
+def _offline_provider(value: dict) -> dict:
+    if (any(value.get(key) for key in ("api_base", "api_key", "api_key_ref", "auth", "custom_headers", "session_header"))
+            or value.get("capabilities", ["agentic"]) != ["agentic"] or type(value.get("enabled", True)) is not bool):
+        raise ModelProfileError("离线服务商不能包含网络或凭据配置，且只能用于 Agentic。")
+    name = value.get("display_name")
+    if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 for c in name):
+        raise ModelProfileError("离线服务商名称无效。")
+    return {"transport": "offline", "display_name": name.strip(), "api_base": "", "api_key": "",
+            "enabled": value.get("enabled", True), "capabilities": ["agentic"], "custom_headers": {}, "session_header": ""}
 
 
 # LLM: Shared pure validation rejects bool before float conversion; callers keep their own fallback/formatting.
@@ -166,7 +190,8 @@ def parse_temperature(value: object) -> float | None:
 
 # LLM: 模型引用不持有第二份 secret；decision 只走独立决策协议，不能进入生成适配器；同步用途隔离测试。
 #   目录读取也经本函数重校验，未登记的字段会被丢弃；可选用途标签、输入模态和思考控制方式在此登记，决策模型都不接受。
-# 函数用途: 检查模型协议、用途、容量、适用采样和可选用途标签；型号允许透传，决策模型不接受无效的生成参数。
+# LLM: v6 容量 null 表示未声明，正整数保留真实小窗口；能力开关归当前档案，非法声明不静默丢弃。
+# 函数用途: 检查模型协议、用途、容量、采样与能力；型号允许透传，决策模型不接受无效的生成参数。
 def validate_model(value: object) -> dict:
     if not isinstance(value, dict) or not isinstance(value.get("model_backend"), str) or value["model_backend"] not in BACKENDS:
         raise ModelProfileError("请选择 OpenAI Chat、OpenAI Responses、Anthropic 或 TypeSafe 决策接口。")
@@ -174,21 +199,24 @@ def validate_model(value: object) -> dict:
     if not isinstance(name, str) or not name.strip() or len(name) > 4096 or any(ord(c) < 32 for c in name):
         raise ModelProfileError("模型名称不能为空或包含控制字符。")
     window = value.get("model_context_window_tokens")
-    if isinstance(window, bool) or not str(window).isascii() or not str(window).isdigit() or not 4096 <= int(window) <= 2**31 - 1:
-        raise ModelProfileError("上下文窗口请填写 4096 至 2147483647 之间的整数 tokens。")
+    if window is not None and (isinstance(window, bool) or not str(window).isascii()
+                               or not str(window).isdigit() or not 1 <= int(window) <= 2**31 - 1):
+        raise ModelProfileError("上下文窗口须留空或填写 1 至 2147483647 之间的整数 tokens。")
     capability = value.get("capability", "agentic")
     if not isinstance(capability, str) or capability not in CAPABILITIES or type(value.get("enabled", True)) is not bool:
         raise ModelProfileError("模型用途或启用状态不合法。")
     if (capability == "decision") != (value["model_backend"] == "typesafe_decision"):
         raise ModelProfileError("TypeSafe 决策接口必须配合 Decision 用途，不能用于聊天生成。")
+    if value["model_backend"] == "echo" and capability != "agentic":
+        raise ModelProfileError("Echo 离线模型只能用于 Agentic。")
     if capability == "decision" and any(value.get(key) not in (None, "") for key in ("temperature", "top_p", "model_queue_wait_seconds")):
         raise ModelProfileError("决策模型不使用温度、top_p 或生成排队预算；等待时间由决策设置控制。")
     # 可选扁平列表字段紧挨用途放：用途标签在此；将来的 input_modalities 按同一格式并列放这里。
     result = {"provider_id": validate_provider_id(value.get("provider_id")), "model_name": name.strip(),
-            "model_backend": value["model_backend"], "model_context_window_tokens": int(window),
+            "model_backend": value["model_backend"], "model_context_window_tokens": None if window is None else int(window),
             "capability": capability, "enabled": value.get("enabled", True), **_usage_tags_field(value, capability),
             **_input_modalities_field(value, capability), **_reasoning_control_field(value, capability),
-            **_reasoning_levels_field(value, capability),
+            **_reasoning_levels_field(value, capability), **_reasoning_update_items_field(value, capability),
             **_structured_output_field(value, capability)}
     temperature = parse_temperature(value.get("temperature"))
     if temperature is not None:
@@ -242,6 +270,19 @@ def _structured_output_field(value: dict, capability: str) -> dict:
     if mode == "json_object" and value.get("model_backend") not in JSON_OBJECT_BACKENDS:
         raise ModelProfileError("JSON 对象方式只适用于 OpenAI 兼容接口。")
     return {} if mode == "auto" else {"structured_output": mode}
+
+
+# LLM: 缺省 auto 不增加持久重复值，解析时总显式冻结；bool 或未知值不得被吞成默认。
+# 函数用途: 保存只属于当前生成模型的推理更新条目能力开关。
+def _reasoning_update_items_field(value: dict, capability: str) -> dict:
+    raw = value.get("reasoning_update_items")
+    if raw is None or raw == "":
+        return {}
+    if not isinstance(raw, str) or raw not in {"auto", "on", "off"}:
+        raise ModelProfileError("推理更新条目只接受 auto、on 或 off。")
+    if capability == "decision" and raw != "auto":
+        raise ModelProfileError("决策模型不使用生成侧推理更新条目开关。")
+    return {} if raw == "auto" else {"reasoning_update_items": raw}
 
 
 # LLM: 只在填写了标签时返回字段，缺省不写键；决策模型不接受标签，与它不接受生成采样字段同一口径。
@@ -339,6 +380,7 @@ def _reasoning_levels_field(value: dict, capability: str) -> dict:
 # LLM: 扁平输入立即变成 provider 引用；用途必须保留，不能在快捷新增中把 decision 降为 agentic。
 #   快捷新增白名单含可选 usage_tags、input_modalities、reasoning_control（只决定智能程度档位怎样发送）与
 #   structured_output（只决定后台结构化调用用哪种输出格式）。
+# LLM: v6 快捷新增同样经过唯一能力校验，推理更新条目不能在 provider/model 拆分时丢失。
 # 函数用途: 校验快捷新增的完整连接信息及用途；秘密仍只保存到服务商，非生成字段不传入 AgentConfig。
 def validate_model_profile(value: object) -> dict:
     if not isinstance(value, dict):
@@ -346,9 +388,9 @@ def validate_model_profile(value: object) -> dict:
     model = validate_model({**value, "provider_id": "validation"})
     provider = validate_provider({"display_name": model["model_name"], "capabilities": [model["capability"]], **value,
         "custom_headers": value.get("model_custom_headers", {}), "session_header": value.get("model_session_header", "")})
-    if not provider["api_key"]:
+    if not provider["api_key"] and provider.get("transport") != "offline":
         raise ModelProfileError("模型名称、地址和密钥不能为空。")
-    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "reasoning_levels", "structured_output") if key in model}
+    row = {key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds", "capability", "enabled", "usage_tags", "input_modalities", "reasoning_control", "reasoning_levels", "reasoning_update_items", "structured_output") if key in model}
     row.update(api_base=provider["api_base"], api_key=provider["api_key"])
     if provider["custom_headers"]:
         row["model_custom_headers"] = provider["custom_headers"]
@@ -402,11 +444,20 @@ def migrate_v4(data: dict) -> dict:
     return {**data, "schema": SCHEMA, "catalog_generation": None}
 
 
+# LLM: v5 只在内存提升版本，保留选择、记录、凭据和真实代次，不隐式落盘。
+# 函数用途: 让原模型目录的只读升级沿同一持久权威进入 v6。
+def migrate_v5(data: dict) -> dict:
+    validate_catalog_generation(data["catalog_generation"])
+    return {**data, "schema": SCHEMA}
+
+
 # LLM: 唯一解析点校验调用方所需用途，即使跳过启用检查也不能混用；失效原因结构化，OAuth 只返回绑定引用。
 #   声明了 input_modalities 时以 model_input_modalities 进入 AgentConfig（压缩策略消费）；思考控制方式总以
 #   model_reasoning_control 进入、结构化输出方式总以 model_structured_output 进入（未声明均为 auto）；用途标签仍不进运行时。
-# 函数用途: 获得指定用途的连接字段，默认只供聊天生成；决策消费者须显式请求 decision，不发网络请求。
+# LLM: 缺省采样、模态、队列和推理能力显式给空值；环境只在内存展开并承运擦洗名，不从旧部署继承。
+# 函数用途: 获得完整独立的指定用途连接快照；决策消费者须显式请求 decision，不发网络请求。
 def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True, capability: str = "agentic") -> dict:
+    from .model_credentials import provider_api_key, provider_environment_name
     from .model_oauth_schema import has_credential, oauth_binding
 
     model = data["profiles"][profile_id]
@@ -417,18 +468,23 @@ def resolved_model(data: dict, profile_id: str, *, require_enabled: bool = True,
         raise ModelProfileError("这个模型未启用。", reason="profile_disabled")
     if require_enabled and not provider["enabled"]:
         raise ModelProfileError("这个服务商未启用。", reason="provider_disabled")
-    if require_enabled and not has_credential(provider):
+    offline = provider.get("transport") == "offline"
+    if offline != (model["model_backend"] == "echo"):
+        raise ModelProfileError("离线模型与服务商传输类型不一致。", reason="capability_mismatch")
+    if require_enabled and not offline and not has_credential(provider):
         raise ModelProfileError("这个服务商缺少密钥或尚未登录。", reason="credential_missing")
     result = {**{key: model[key] for key in ("model_name", "model_backend", "model_context_window_tokens", "temperature", "top_p", "model_queue_wait_seconds") if key in model},
-            "api_base": provider["api_base"], "api_key": provider["api_key"],
+            "api_base": provider["api_base"], "api_key": provider_api_key(provider),
+             "api_key_env": provider_environment_name(provider.get("api_key_ref")),
             "model_custom_headers": dict(provider["custom_headers"]), "model_session_header": provider["session_header"],
             # 未声明即 auto，不继承部署配置里为其它模型写的控制方式；思考档位同理，未声明即空（只发通用档位）。
             "model_reasoning_control": model.get("reasoning_control") or "auto",
             "model_reasoning_levels": list(model.get("reasoning_levels") or []),
+            "model_reasoning_update_items": model.get("reasoning_update_items") or "auto",
+            "temperature": model.get("temperature"), "top_p": model.get("top_p"),
+            "model_queue_wait_seconds": model.get("model_queue_wait_seconds"),
+            "model_input_modalities": list(model.get("input_modalities") or []),
             "model_structured_output": model.get("structured_output") or "auto"}
-    if model.get("input_modalities"):
-        # 声明的输入模态进入运行时配置，供含图历史压缩判断能否随图摘要；它不是生成参数，也不证明容量。
-        result["model_input_modalities"] = list(model["input_modalities"])
     auth = provider.get("auth")
     if auth:
         if auth["mode"] == "chatgpt" and model["model_backend"] != "openai_responses":

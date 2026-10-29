@@ -1,3 +1,5 @@
+# LLM: 用户、部署和模型档案严格分域；脱敏不是修改部署凭据的授权。
+# 模块用途: 验证参数目录完整性、说明、层级与安全边界。
 """参数中心登记表（2026-09-27）：每个 AgentConfig 字段一条，说明取自随包 YAML 注释，安全等级结构化判定。
 
 锁定：登记表覆盖全部字段；凭据、权限、身份、路径、外部地址、会运行代码的设置、执行权威链与内部元数据不可由模型改；
@@ -34,7 +36,6 @@ from agent_py_agent.agent.settings.parameter_registry import (
 )
 from agent_py_agent.agent.settings.user_config_capability import (
     BOUNDARY_KEYS,
-    TUNABLE_KEYS,
     is_credential_key,
     mask_value,
 )
@@ -63,6 +64,8 @@ def test_file_header_block_is_not_the_first_key_description():
     assert _descriptions_from_lines(lines) == {"first": "第一个键自己的说明", "second": ""}
 
 
+# LLM: 空说明名单仍双向防烂，决策旧字段必须移除而非保留伪说明。
+# 函数用途: 验证中文说明与严格基线一致。
 def test_empty_descriptions_only_come_from_the_reasoned_baseline():
     """名单外新增空说明失败；名单里的参数有了说明或已删除也失败，逼着名单只减不增。"""
     groups = json.loads(_BASELINE.read_text(encoding="utf-8"))["groups"]
@@ -75,7 +78,7 @@ def test_empty_descriptions_only_come_from_the_reasoned_baseline():
     assert not added, f"这些参数没有中文说明，请在随包 agent_config.yaml 该键正上方（或行尾）写一句：{added}"
     stale = sorted(set(listed) - empty)
     assert not stale, f"这些参数已有说明或已不存在，请从 {_BASELINE.name} 删掉：{stale}"
-    assert registry["decision_timeout_seconds"].description == "前台单次等待；必须为有限正秒数"
+    assert "decision_timeout_seconds" not in registry
 
 
 def test_common_tier_is_a_closed_list_of_existing_non_boundary_parameters():
@@ -166,6 +169,8 @@ def test_registry_covers_every_config_field_with_yaml_descriptions():
     assert "0 = 不限" in fuse.description
 
 
+# LLM: capability按现存字段、守卫按 typed 部署默认登记，决策列表不再是普通配置。
+# 函数用途: 验证额外来源的精确字段、类型与说明。
 def test_extra_sources_are_registered_with_yaml_descriptions():
     """P17：capability（dataclass 默认值）、runtime_guard 两份配置全部进登记表并带说明。"""
     from agent_py_agent.agent.capability.config import CapabilityConfig
@@ -188,12 +193,14 @@ def test_extra_sources_are_registered_with_yaml_descriptions():
     # 默认值/类型与 dataclass 或 YAML 一致；说明全部非空（新键不允许进空说明基线）。
     assert registry["capability_candidate_limit"].default == CapabilityConfig().capability_candidate_limit == 5
     assert registry["capability_candidate_limit"].value_type == "int"
-    assert registry["decision_subagent_model_candidate_profile_ids"].value_type == "list"
+    assert "decision_subagent_model_candidate_profile_ids" not in registry
     assert registry["repeat_fail_threshold"].default == 10 and registry["repeat_fail_threshold"].value_type == "int"
-    assert registry["tool_circuit_backoff_seconds"].default == [1, 2, 4, 8, 16, 30]
+    assert registry["tool_circuit_backoff_seconds"].default == (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
     assert all(spec.description for key, spec in registry.items() if spec.source != "agent")
 
 
+# LLM: 模型字段须退出目录，其余权限边界仍拒写，不按任意缺失键跳过断言。
+# 函数用途: 验证所有安全字段拒绝模型写入。
 @pytest.mark.parametrize("key", [
     *sorted(BOUNDARY_KEYS), "api_base", "model_backend", "system_prompt", "prompt_files",
     "audit_enabled", "enable_tools", "enable_gateway_restart_tool", "additional_write_roots", "mcp_servers",
@@ -201,22 +208,30 @@ def test_extra_sources_are_registered_with_yaml_descriptions():
     "self_dev_worktree", "protect_running_runtime",
 ])
 def test_security_relevant_keys_are_never_model_writable(key):
-    spec = parameter_registry()[key]
-    assert spec.safety == SAFETY_BOUNDARY and spec.writable is False
+    registry = parameter_registry()
+    if key in {"api_key", "api_key_env", "api_base", "model_backend"}:
+        assert key not in registry
+    else:
+        spec = registry[key]
+        assert spec.safety == SAFETY_BOUNDARY and spec.writable is False
 
 
-@pytest.mark.parametrize("key", ["max_tokens", "request_timeout", "memory_compact_auto_trigger_percent",
+# LLM: 普通压缩只使用新键，模型可写性不复活旧别名。
+# 函数用途: 验证普通参数仍可经模型入口修改。
+@pytest.mark.parametrize("key", ["max_tokens", "request_timeout", "memory_compact_trigger_percent",
                                  "enable_self_learning", "tool_read_max_chars", "agent_name"])
 def test_ordinary_parameters_are_model_writable(key):
     assert parameter_registry()[key].writable is True
 
 
+# LLM: 凭据归部署或模型专用域，旧调优白名单不能恢复普通模型写权。
+# 函数用途: 验证登记凭据全部脱敏且不可由模型改。
 def test_secret_like_keys_are_writable_only_when_explicitly_listed_and_always_masked():
     for spec in parameter_registry().values():
         if spec.masked:
-            assert spec.writable is (spec.key in TUNABLE_KEYS), spec.key
+            assert not spec.writable, spec.key
     secret = parameter_registry()["feishu_app_secret"]
-    assert secret.masked and secret.writable
+    assert secret.masked and not secret.writable and secret.tier == "deployment"
 
 
 def test_search_prefers_key_matches_then_descriptions():
@@ -244,22 +259,34 @@ _CREDENTIALS = ["api_key", "gateway_auth_token", "feishu_app_secret",
                 "feishu_verification_token", "feishu_encrypt_key", "qq_app_secret"]
 
 
+# LLM: 数字参数不误判凭据，但宿主部署容量仍只读，只有明确用户项可调。
+# 函数用途: 验证数字参数的展示与部署写权限分离。
 @pytest.mark.parametrize("key", _NUMERIC_KNOBS)
 def test_numeric_knobs_with_pointer_like_names_are_free_and_shown_in_full(key):
     spec = parameter_registry()[key]
-    assert spec.value_type in {"int", "float"} and spec.safety != SAFETY_BOUNDARY and spec.writable and not spec.masked
+    assert spec.value_type in {"int", "float"} and spec.safety != SAFETY_BOUNDARY and not spec.masked
+    assert spec.writable is (key == "home_lesson_stale_caveat_days")
+    assert spec.tier == ("advanced" if key == "home_lesson_stale_caveat_days" else "deployment")
     assert mask_value(key, 1600) == "1600"
 
 
+# LLM: 模型api_key离开目录，余下登记凭据集合仍须精确，不误伤普通字段。
+# 函数用途: 验证登记凭据的完整集合。
 def test_new_credential_spellings_hit_no_registered_parameter():
     # is_credential_key 同时决定边界分类：补写法与开关键例外后核对，登记表里脱敏的仍只有这些真凭据，没有误伤普通参数
-    assert {key for key, spec in parameter_registry().items() if spec.masked} == set(_CREDENTIALS)
+    assert {key for key, spec in parameter_registry().items() if spec.masked} == set(_CREDENTIALS) - {"api_key"}
 
 
+# LLM: 迁出的模型凭据仍须验证脱敏，现存凭据继续守权限边界。
+# 函数用途: 验证历史和现行凭据的脱敏与归属。
 @pytest.mark.parametrize("key", _CREDENTIALS)
 def test_real_credentials_stay_masked_boundary_everywhere(key):
-    spec = parameter_registry()[key]
-    assert spec.masked and spec.safety == SAFETY_BOUNDARY and is_credential_key(key)
+    registry = parameter_registry()
+    if key == "api_key":
+        assert key not in registry
+    else:
+        assert registry[key].masked and registry[key].safety == SAFETY_BOUNDARY
+    assert is_credential_key(key)
     assert mask_value(key, "FAKE-1234567890") == "FAK***"  # 原来 api_key、gateway_auth_token 等在回显里是明文
 
 
@@ -280,6 +307,8 @@ def test_credential_names_match_whole_trailing_segments_only():
     assert classify_safety("bot_token", "int") == SAFETY_BOUNDARY and classify_safety("bot_token_limit", "int") != SAFETY_BOUNDARY
 
 
+# LLM: 退役审计期限不得残留，路径、身份和部署凭据均不能由模型写，不复活飞书例外。
+# 函数用途: 验证路径与治理参数的不可写边界。
 @pytest.mark.parametrize("key", [
     "additional_write_roots", "prompt_files", "system_prompt", "my_agent_home", "self_dev_worktree", "path_dangerous_roots",
     "my_agent_owner_provider", "my_agent_owner_kind", "my_agent_owner_id", "feishu_app_id", "feishu_app_secret",
@@ -288,9 +317,11 @@ def test_credential_names_match_whole_trailing_segments_only():
 ])
 def test_paths_write_scope_channel_credentials_and_owner_identity_stay_boundary(key):
     """收紧只放开数字类旋钮：路径、写入范围、飞书/QQ 凭据、owner 身份、访问锁与审计保留期仍是边界（飞书凭据另有显式放行）。"""
-    spec = parameter_registry()[key]
-    assert spec.safety == SAFETY_BOUNDARY
-    assert spec.writable is (key in TUNABLE_KEYS and key not in BOUNDARY_KEYS)
+    registry = parameter_registry()
+    if key == "cli_audit_cleanup_days":
+        assert key not in registry
+    else:
+        assert registry[key].safety == SAFETY_BOUNDARY and not registry[key].writable
 
 
 

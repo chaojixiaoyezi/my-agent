@@ -1,5 +1,5 @@
 # LLM: 公开配置三个写入口在验证、读盘或新建前消费原全局拒门；owner私有档案/决策及共用账本不加此门，同步全局写边界测试。
-# 模块用途: 受限进程不能直接写公开配置；默认单进程沿原参数校验、回读恢复和记账合同。
+# 模块用途: 受限进程先拒绝；标量与三项 typed 结构共用路径锁、CAS、正式预检、精确回滚和台账事务。
 # LLM: 参数中心唯一的写入口：写用户配置文件（当前进程实际加载的配置，见 user_config_capability.user_config_path），
 #   以及白名单里的模型档案字段（PROFILE_FIELDS，经 model_profiles 唯一的锁内保存入口，记在该用户档案旁的 .changes.jsonl，
 #   与配置账本同一格式、同一脱敏与回滚规则）。配置写入按登记表类型渲染值（布尔、数字不加引号），写后用正式 load_config
@@ -10,12 +10,16 @@
 # 模块用途: 让用户与 my-agent 修改参数、恢复默认、查看修改记录并按编号回滚。
 from __future__ import annotations
 
+import json
 import math
 import os
+import re
+import tempfile
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -23,13 +27,15 @@ from ..common.json_io import (
     append_private_jsonl_capped,
     locked_json_path,
     read_jsonl_objects_report,
+    write_private_text_file_atomic_unlocked,
 )
 from ..common.nofollow_fs import ensure_private_dir
-from .config_io import set_simple_yaml_raw, unset_simple_yaml_value
+from .config_io import parse_scalar, render_config_change, write_config_bytes_atomic_unlocked
 from .parameter_registry import (
     SOURCE_AGENT,
     SOURCE_CAPABILITY,
     SOURCE_RUNTIME_GUARD,
+    STRUCTURED_PARAMETER_KEYS,
     ParameterSpec,
     applied_value_with,
     parameter_registry,
@@ -57,6 +63,8 @@ _BOUNDARY_REASON = "属于安全边界（凭据、权限、身份、路径、外
 # 可经参数中心修改并记账的模型档案字段（其余字段只能在 /model 里编辑）；取值由档案 schema（validate_model）校验。
 PROFILE_FIELDS = frozenset({"reasoning_control"})
 _USER_SETTINGS_WRITE: ContextVar[bool] = ContextVar("user_settings_write", default=False)
+_LOCKED_LEDGER: ContextVar[Path | None] = ContextVar("config_transaction_ledger", default=None)
+_UNSPECIFIED = object()
 
 
 # LLM: 只能由 Gateway 已认证管理员控制入口进入；授权随调用退出还原，不接收客户端字段，不把 origin.actor 当授权。
@@ -88,6 +96,7 @@ class ChangeOrigin:
 class WritePaths:
     user_path: Path | None
     capability_path: Path | None = None
+    expected_revision: str | None = None
 
 
 # LLM: 账本里的一行在写入前的内容；previous/value 是配置文件里的原样标量文本（None 表示没有覆盖），凭据类由 _record 脱敏。
@@ -115,9 +124,12 @@ class ProfileFieldChange:
 # LLM: 只携带稳定错误码与给人看的中文说明；调用方把它转成 ok=False 的回执，不带路径或堆栈之外的秘密。
 # 类用途: 参数修改被拒绝或没能生效。
 class ParameterChangeError(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    # LLM: 原始错误经 cause 保留，恢复异常只作内部诊断；公开回执不得拼接异常或秘密文本。
+    # 函数用途: 保存稳定错误码与可选的回滚诊断。
+    def __init__(self, code: str, message: str, *, rollback_errors: tuple[BaseException, ...] = ()) -> None:
         super().__init__(message)
         self.code = code
+        self.rollback_errors = rollback_errors
 
 
 # LLM: 随包默认 YAML 不是用户配置；没有路径或文件不存在都拒绝写，不自动创建。只用于 agent 主配置。
@@ -174,11 +186,13 @@ def _writable_spec(key: str) -> ParameterSpec:
     spec = parameter_registry().get(str(key or "").strip())
     if spec is None:
         raise ParameterChangeError("PARAMETER_UNKNOWN", f"没有名为 '{key}' 的参数；可以先搜索参数名。")
-    if spec.source == SOURCE_RUNTIME_GUARD:
+    if spec.tier == "deployment":
         raise ParameterChangeError(
             "PARAMETER_SOURCE_READ_ONLY",
             f"'{spec.key}' 属于 {spec.source} 配置：运行时只读随包文件、没有用户覆盖层，改了也不会生效；只能查看和搜索。")
-    user_allowed = _USER_SETTINGS_WRITE.get() and spec.key in USER_SETTINGS_BOUNDARY_KEYS
+    if not spec.writer:
+        raise ParameterChangeError("PARAMETER_STRUCTURED", "没有支持该类型的参数 writer，不能修改。")
+    user_allowed = _USER_SETTINGS_WRITE.get() and spec.user_editable
     if not spec.writable and not user_allowed:
         reason = BOUNDARY_KEYS.get(spec.key, _BOUNDARY_REASON)
         raise ParameterChangeError("PARAMETER_BOUNDARY", f"'{spec.key}' 属于安全边界，不能由模型自行修改：{reason}")
@@ -189,6 +203,8 @@ def _writable_spec(key: str) -> ParameterSpec:
 #   文本拒绝换行和引号且限 500 字；列表/映射不在聊天里改。返回（期望生效值，写入文本）。
 # 函数用途: 把用户给的值解析并渲染成可写入的 YAML 标量。
 def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
+    if spec.key in STRUCTURED_PARAMETER_KEYS:
+        return _render_structured(spec.key, value)
     text = str(value if value is not None else "").strip()
     if spec.key in TUNABLE_KEYS:
         ok, error, normalized = TUNABLE_KEYS[spec.key].validate(value)
@@ -207,6 +223,49 @@ def _render(spec: ParameterSpec, value: object) -> tuple[object, str]:
             raise ParameterChangeError("PARAMETER_INVALID", f"'{spec.key}' 取值不合法：文本不能含引号或换行，且不超过 {_MAX_TEXT_CHARS} 字")
         return text, f'"{text}"'
     raise ParameterChangeError("PARAMETER_STRUCTURED", f"'{spec.key}' 是 {spec.value_type} 结构，请直接编辑用户配置文件。")
+
+
+# LLM: JSON 重复键不能静默取末项；本 helper 只解析用户候选，不生成执行或授权信息。
+# 函数用途: 将严格 JSON 对象键值对转换为无重复的映射。
+def _unique_json_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("重复 JSON 键")
+        result[key] = value
+    return result
+
+
+# LLM: 仅三项结构有 writer；列表必须非空字符串且不重复；期限保持 0/off/null/inherit/auto，拒绝 bool、负数及非有限数。
+# 函数用途: 归一 typed 结构并生成正式 mini-YAML 可解析的单行表示。
+def _render_structured(key: str, value: object) -> tuple[object, str]:
+    try:
+        if isinstance(value, str):
+            value = json.loads(value, object_pairs_hook=_unique_json_pairs)
+        if key != "runner_timeout_by_role":
+            if not isinstance(value, list) or any(not isinstance(v, str) or not v.strip() or v != v.strip()
+                                                  or any(c in v for c in "\r\n\x00") for v in value):
+                raise ValueError("分类必须是字符串列表")
+            if len(set(value)) != len(value):
+                raise ValueError("分类不能重复")
+            normalized = list(value)
+        else:
+            if not isinstance(value, dict):
+                raise ValueError("角色期限必须是映射")
+            normalized = {}
+            for raw_key, raw_value in value.items():
+                if not isinstance(raw_key, str) or not re.fullmatch(r"[A-Za-z0-9_.*-]+", raw_key.strip()):
+                    raise ValueError("角色键无效")
+                role = raw_key.strip().lower()
+                if role in normalized:
+                    raise ValueError("角色键大小写碰撞")
+                if raw_value is None or isinstance(raw_value, str) and raw_value in {"off", "inherit", "auto"} or type(raw_value) in (int, float) and math.isfinite(raw_value) and raw_value >= 0:
+                    normalized[role] = raw_value
+                else:
+                    raise ValueError("期限必须为非负有限秒数或 off/null/inherit/auto")
+        return normalized, repr(normalized)
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        raise ParameterChangeError("PARAMETER_INVALID", f"'{key}' 结构或类型无效，没有写入。") from None
 
 
 # 函数用途: 解析整数或小数参数；默认值非负时拒绝负数，小数拒绝 NaN/无穷。
@@ -250,6 +309,75 @@ def _same(expected: object, actual: object) -> bool:
     return type(expected) is type(actual) and expected == actual
 
 
+# LLM: 在原正式加载器上预检完整候选，临时文件始终 0600；不使用另一套 normalization，不触碰真实配置。
+# 函数用途: 取得候选配置按实际 reader 加载后的值。
+def _validated_candidate(path: Path, key: str, candidate: bytes) -> object:
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.validate-", suffix=".yaml", dir=path.parent)
+    stage = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(candidate)
+        return _effective(stage, key)
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+# LLM: 协作 writer 共享原路径锁；显式 revision 冲突不写；异常时分别恢复两份原字节，恢复故障不能短路另一份，须报告未恢复对象。
+# 函数用途: 为 set/reset/revert 执行唯一的配置与台账事务，回执只报告正式回读结果。
+def _config_transaction(spec, paths, rendered, origin, *, action, expected=_UNSPECIFIED, reverts=""):
+    path = _write_target(spec, paths)
+    if path.is_symlink():
+        raise ParameterChangeError("CONFIG_PATH_INVALID", "不向符号链接配置写入。")
+    path = path.resolve()
+    with locked_json_path(path):
+        if path.is_symlink():
+            raise ParameterChangeError("CONFIG_PATH_INVALID", "配置目标已改变。")
+        existed = path.is_file()
+        original = path.read_bytes() if existed else b""
+        revision = sha256(original).hexdigest()
+        if paths.expected_revision is not None and paths.expected_revision != revision:
+            raise ParameterChangeError("CONFIG_REVISION_CONFLICT", "配置版本已变化，请重新读取后修改。")
+        candidate, previous = render_config_change(original, spec.key, rendered, structured=spec.key in STRUCTURED_PARAMETER_KEYS)
+        if rendered is None and previous is None:
+            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有覆盖，已经是默认值。")
+        staged = _validated_candidate(path, spec.key, candidate)
+        if expected is not _UNSPECIFIED and not _same(expected, staged):
+            raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE", f"'{spec.key}' 正式预检与目标不一致，没有写入。")
+        if (path.read_bytes() if path.exists() else b"") != original:
+            raise ParameterChangeError("CONFIG_REVISION_CONFLICT", "预检期间配置发生变化，没有覆盖。")
+        ledger_base = paths.user_path if paths.user_path is not None else path
+        ledger = ledger_path(Path(ledger_base)).resolve()
+        with locked_json_path(ledger):
+            ledger_existed = ledger.is_file()
+            ledger_before = ledger.read_bytes() if ledger_existed else b""
+            token = _LOCKED_LEDGER.set(ledger)
+            try:
+                write_config_bytes_atomic_unlocked(path, candidate)
+                actual = _effective(path, spec.key)
+                if not _same(staged, actual):
+                    raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE", "正式回读与候选不一致，恢复原文件。")
+                row = _ChangeRow(action, previous, rendered, origin, reverts=reverts)
+                entry = _record(Path(ledger_base), spec, row)
+                return {**_receipt(path, spec, entry, actual), "previous_revision": revision,
+                        "revision": sha256(candidate).hexdigest()}
+            except BaseException as original_error:
+                failures = []
+                for label, target, content, was_present in (
+                    ("配置", path, original, existed), ("台账", ledger, ledger_before, ledger_existed)
+                ):
+                    try:
+                        _restore(target, content, was_present)
+                    except BaseException as rollback_error:
+                        failures.append((label, rollback_error))
+                if failures:
+                    names = "、".join(label for label, _ in failures)
+                    raise ParameterChangeError("CONFIG_ROLLBACK_INCOMPLETE", f"配置事务失败，{names}未能恢复；请勿自动重试，需人工核对。",
+                                               rollback_errors=tuple(error for _, error in failures)) from original_error
+                raise
+            finally:
+                _LOCKED_LEDGER.reset(token)
+
+
 # 函数用途: 账本路径：用户配置文件旁的 settings-changes.jsonl。
 def ledger_path(user_config: Path) -> Path:
     return Path(user_config).with_name(LEDGER_NAME)
@@ -262,6 +390,7 @@ def _record(path: Path, spec: ParameterSpec, row: _ChangeRow) -> dict[str, objec
 
 # LLM: 配置参数与模型档案字段共用的记账：所有值都经 mask_value 结构脱敏后才写（凭据、网址密码、请求头/环境变量等）；
 #   脱敏改动了值的记录标 masked，回滚据此拒绝。reason 截断到 200 字，target 与 reverts 有值才写。副作用：追加 ledger。
+#   事务已有台账锁时只写被锁定和快照的规范路径，不能原子替换符号链接本身导致回滚遗漏。
 # 函数用途: 往指定账本追加一条修改记录并返回它。
 def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dict[str, object]:
     previous, value = _ledger_text(key, row.previous), _ledger_text(key, row.value)
@@ -274,7 +403,14 @@ def _append_record(ledger: Path, key: str, row: _ChangeRow, masked: bool) -> dic
         "previous": previous, "value": value,
     }
     entry.update({name: item for name, item in (("target", row.target), ("reverts", row.reverts)) if item})
-    append_private_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORD_COUNT)
+    locked_ledger = _LOCKED_LEDGER.get()
+    if locked_ledger is not None and locked_ledger == ledger.resolve():
+        ledger = locked_ledger
+        records = read_jsonl_objects_report(ledger).records + [entry]
+        content = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records[-_MAX_LEDGER_RECORD_COUNT:])
+        write_private_text_file_atomic_unlocked(ledger, content)
+    else:
+        append_private_jsonl_capped(ledger, entry, max_records=_MAX_LEDGER_RECORD_COUNT)
     return entry
 
 
@@ -311,20 +447,8 @@ def set_parameter(key: object, value: object, *, paths: WritePaths, origin: Chan
 
     try:
         spec = _writable_spec(str(key or ""))
-        path = _write_target(spec, paths)
         expected, rendered = _render(spec, value)
-        existed = path.is_file()
-        original = path.read_text(encoding="utf-8") if existed else ""
-        if not existed:
-            _create_config_file(path)
-        previous, _line = set_simple_yaml_raw(path, spec.key, rendered)
-        actual = _effective(path, spec.key)
-        if not _same(expected, actual):
-            _restore(path, original, existed)
-            raise ParameterChangeError("PARAMETER_NOT_EFFECTIVE",
-                                       f"'{spec.key}' 写入后加载得到的值与目标不一致，已恢复原文件，没有生效。")
-        ledger = paths.user_path if paths.user_path is not None else path
-        return _receipt(path, spec, _record(ledger, spec, _ChangeRow("set", previous, rendered, origin)), actual)
+        return _config_transaction(spec, paths, rendered, origin, action="set", expected=expected)
     except ParameterChangeError as error:
         return _failure(error)
     except (OSError, ValueError) as error:
@@ -343,9 +467,9 @@ def _create_config_file(path: Path) -> None:
 
 # LLM: 文件原本不存在时恢复 = 删除新建文件，避免留下半截配置；原本存在则原样写回。
 # 函数用途: 把写入失败/不一致的目标文件恢复成写入前的样子。
-def _restore(path: Path, original: str, existed: bool) -> None:
+def _restore(path: Path, original: bytes, existed: bool) -> None:
     if existed:
-        path.write_text(original, encoding="utf-8")
+        write_config_bytes_atomic_unlocked(path, original)
     else:
         path.unlink(missing_ok=True)
 
@@ -361,15 +485,7 @@ def reset_parameter(key: object, *, paths: WritePaths, origin: ChangeOrigin) -> 
 
     try:
         spec = _writable_spec(str(key or ""))
-        path = _write_target(spec, paths)
-        if not path.is_file():
-            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有用户覆盖，已经是默认值。")
-        previous = unset_simple_yaml_value(path, spec.key)
-        if previous is None:
-            raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 没有用户覆盖，已经是默认值。")
-        actual = _effective(path, spec.key)
-        ledger = paths.user_path if paths.user_path is not None else path
-        return _receipt(path, spec, _record(ledger, spec, _ChangeRow("reset", previous, None, origin)), actual)
+        return _config_transaction(spec, paths, None, origin, action="reset")
     except ParameterChangeError as error:
         return _failure(error)
     except (OSError, ValueError) as error:
@@ -437,24 +553,13 @@ def revert_change(change_id: str, *, paths: WritePaths, origin: ChangeOrigin) ->
 # 函数用途: 执行一条修改记录的回滚写入与回读核对，返回结构化回执。
 def _revert_entry(paths: WritePaths, entry: dict[str, object], origin: ChangeOrigin) -> dict[str, object]:
     spec = _writable_spec(str(entry.get("key") or ""))
-    path = _write_target(spec, paths)
     if entry.get("masked"):
         raise ParameterChangeError("CHANGE_MASKED", f"'{spec.key}' 是凭据类参数，记录里只有脱敏值，不能回滚；请重新设置。")
     target = entry.get("previous")
-    existed = path.is_file()
-    original = path.read_text(encoding="utf-8") if existed else ""
-    if not existed and target is None:
-        raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
-    if not existed:
-        _create_config_file(path)
-    current = unset_simple_yaml_value(path, spec.key) if target is None else set_simple_yaml_raw(path, spec.key, str(target))[0]
-    actual = _effective(path, spec.key)
-    if target is None and current is None:
-        _restore(path, original, existed)
-        raise ParameterChangeError("PARAMETER_NOT_OVERRIDDEN", f"'{spec.key}' 当前已经是默认值，无需回滚。")
-    row = _ChangeRow("revert", current, None if target is None else str(target), origin, reverts=str(entry["id"]))
-    entry_out = _record(paths.user_path if paths.user_path is not None else path, spec, row)
-    return _receipt(path, spec, entry_out, actual)
+    if target is None:
+        return _config_transaction(spec, paths, None, origin, action="revert", reverts=str(entry["id"]))
+    expected, rendered = _render(spec, parse_scalar(str(target)))
+    return _config_transaction(spec, paths, rendered, origin, action="revert", expected=expected, reverts=str(entry["id"]))
 
 
 # LLM: 编号至少 6 位前缀，在给定记录里找唯一一条；找不到或不唯一都拒绝。只读。

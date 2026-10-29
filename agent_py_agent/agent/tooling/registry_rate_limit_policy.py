@@ -1,11 +1,9 @@
+# LLM: 部署默认直接取唯一 typed 守卫快照；原运行边界覆盖与 gate 仍独立，不增加授权。
+# 模块用途: 将宿主工程限流策略投影到工具 gate，避免重复默认与原始配置字典。
 from __future__ import annotations
 
 from ..contracts.gates.tool_rate_limit import ToolRateLimitPolicy
-from ..settings.runtime_guard_config import (
-    runtime_guard_data,
-    runtime_guard_float_tuple,
-    runtime_guard_int,
-)
+from ..settings.runtime_guard_config import runtime_guard_policy
 
 
 def tool_rate_limit_policy(boundary: dict[str, object] | None, policy: object = None) -> ToolRateLimitPolicy:
@@ -25,18 +23,16 @@ def tool_rate_limit_policy(boundary: dict[str, object] | None, policy: object = 
     )
 
 
+# LLM: 只读传入的冻结快照；无快照时读唯一宿主策略，损坏源不能回落另一套数字。
+# 函数用途: 将 typed 守卫字段一次投影为工具限流 gate 参数。
 def default_tool_rate_limit_policy(policy: object = None) -> ToolRateLimitPolicy:
-    data = runtime_guard_data(policy=policy)
+    effective = policy if policy is not None else runtime_guard_policy()
     return ToolRateLimitPolicy(
-        max_calls=runtime_guard_int("tool_rate_max_calls", 60, policy=policy),
-        window_seconds=_float_value(data.get("tool_rate_window_seconds"), 60.0),
-        failure_threshold=runtime_guard_int("tool_circuit_failure_threshold", 3, policy=policy),
-        backoff_schedule_seconds=runtime_guard_float_tuple(
-            "tool_circuit_backoff_seconds",
-            (1.0, 2.0, 4.0, 8.0, 16.0, 30.0),
-            policy=policy,
-        ),
-        max_records=runtime_guard_int("tool_rate_max_records", 256, policy=policy),
+        max_calls=effective.tool_rate_max_calls,
+        window_seconds=float(effective.tool_rate_window_seconds),
+        failure_threshold=effective.tool_circuit_failure_threshold,
+        backoff_schedule_seconds=effective.tool_circuit_backoff_seconds,
+        max_records=effective.tool_rate_max_records,
     )
 
 

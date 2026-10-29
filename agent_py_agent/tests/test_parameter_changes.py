@@ -1,3 +1,5 @@
+# LLM: 参数操作共用事务与权限门，迁走的模型和部署秘密不能借测试夹具恢复写权。
+# 模块用途: 验证真实参数工具、写入回读、回滚及秘密展示。
 """参数中心写入口（2026-09-27）：修改、恢复默认、修改记录与回滚，以及 my-agent 的 user_config 工具入口。
 
 锁定：值按字段类型写入（布尔不加引号，避免 "false" 被当成真）；写后用正式 load_config 回读，不一致恢复原文件；
@@ -42,12 +44,14 @@ def test_values_are_written_by_type_and_really_take_effect(tmp_path):
     assert (config.max_tokens, config.enable_self_learning, config.agent_name) == (32768, False, "小助手")
 
 
+# LLM: 已迁走的模型键不再登记；边界、非法值和未知键拒绝后不能改变原文或台账。
+# 函数用途: 验证所有参数拒绝路径无文件副作用。
 def test_refusals_leave_the_file_untouched(tmp_path):
     path = _user(tmp_path)
     before = path.read_text(encoding="utf-8")
-    cases = {("api_base", "http://evil.example/v1"): "PARAMETER_BOUNDARY", ("system_prompt", "x"): "PARAMETER_BOUNDARY",
+    cases = {("api_base", "http://evil.example/v1"): "PARAMETER_UNKNOWN", ("system_prompt", "x"): "PARAMETER_BOUNDARY",
              ("max_tokens", "abc"): "PARAMETER_INVALID", ("max_tokens", "-5"): "PARAMETER_INVALID",
-             ("agent_name", 'a"b'): "PARAMETER_INVALID", ("model_input_modalities", "text"): "PARAMETER_STRUCTURED",
+             ("agent_name", 'a"b'): "PARAMETER_INVALID", ("model_input_modalities", "text"): "PARAMETER_UNKNOWN",
              ("no_such_key", "1"): "PARAMETER_UNKNOWN"}
     for (key, value), code in cases.items():
         report = _set(path, key, value)
@@ -83,13 +87,20 @@ def test_reset_history_and_revert_chain(tmp_path):
     assert changes.revert_change("abc", paths=changes.WritePaths(user_path=path), origin=_ORIGIN)["code"] == "CHANGE_NOT_FOUND"
 
 
+# LLM: 部署秘密不能由参数中心修改；旧明文记录必须经展示出口脱敏，且不能借回滚恢复写权。
+# 函数用途: 验证秘密展示与部署写入边界。
 def test_secret_changes_are_masked_and_cannot_be_reverted(tmp_path):
     path = _user(tmp_path)
+    before = path.read_bytes()
     report = _set(path, "feishu_app_secret", "abcdefsecret")
-    assert report["ok"] and "abcdefsecret" not in json.dumps(report, ensure_ascii=False)
-    entry = changes.parameter_history(user_path=path)[0]
+    assert not report["ok"] and "abcdefsecret" not in json.dumps(report, ensure_ascii=False)
+    assert path.read_bytes() == before and changes.parameter_history(user_path=path) == []
+    changes.ledger_path(path).write_text(json.dumps({"id": "legacy-secret", "key": "feishu_app_secret", "action": "set",
+                                                   "value": "abcdefsecret", "previous": "old-secret", "masked": True}) + "\n")
+    entry = changes.displayed_change(changes.parameter_history(user_path=path)[0])
     assert entry["masked"] and "abcdefsecret" not in json.dumps(entry, ensure_ascii=False)
-    assert changes.revert_change(entry["id"], paths=changes.WritePaths(user_path=path), origin=_ORIGIN)["code"] == "CHANGE_MASKED"
+    assert changes.revert_change(entry["id"], paths=changes.WritePaths(user_path=path), origin=_ORIGIN)["code"] == "PARAMETER_SOURCE_READ_ONLY"
+    assert path.read_bytes() == before
 
 
 def _main_agent(path):
@@ -97,6 +108,8 @@ def _main_agent(path):
     return SimpleNamespace(home_paths=home, config=SimpleNamespace(config_path=str(path), max_tokens=65536))
 
 
+# LLM: 真实工具使用已加载路径，保存和回滚均走统一事务；现存安全边界依然拒绝模型写入。
+# 函数用途: 验证参数工具入口、台账、回滚和权限。
 def test_tool_uses_the_loaded_config_file_and_exposes_the_parameter_center(tmp_path, monkeypatch):
     monkeypatch.delenv("MY_AGENT_CONFIG", raising=False)
     path = _user(tmp_path)
@@ -117,7 +130,7 @@ def test_tool_uses_the_loaded_config_file_and_exposes_the_parameter_center(tmp_p
     assert saved.ok and json.loads(saved.output)["saved_to"] == str(path)
     history = json.loads(tool.execute({"action": "history"}).output)["changes"]
     assert history[0]["actor"] == "model" and history[0]["reason"] == "用户要求"
-    denied = tool.execute({"action": "set", "key": "api_base", "value": "http://x"})
+    denied = tool.execute({"action": "set", "key": "gateway_bind_host", "value": "http://x"})
     assert not denied.ok and denied.error_code == "TOOL_PERMISSION_DENIED"
     reverted = tool.execute({"action": "revert", "change_id": history[0]["id"]})
     assert reverted.ok and "max_tokens:" not in path.read_text(encoding="utf-8")

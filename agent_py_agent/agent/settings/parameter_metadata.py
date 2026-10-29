@@ -23,7 +23,6 @@ from ..backends.structured_output_mode import STRUCTURED_OUTPUT_MODES
 from ._memory_coercion import _FIELDS as MEMORY_FIELDS
 from ._memory_coercion import COMPACT_RECOVERY_PERCENT_RANGE, COMPACT_TRIGGER_PERCENT_RANGE
 from .config import AgentConfig
-from .decision_settings_defaults import decision_config_fields
 from .services._normalize import GatewayFieldsService
 from .services.runtime_tool_field_specs import TOOL_INT_FIELDS
 
@@ -44,6 +43,8 @@ _DEFINITION_EXCLUDED = frozenset({
     _PACKAGE / "agent" / "settings" / "services" / "runtime_tool_field_specs.py",
     _PACKAGE / "agent" / "settings" / "user_config_capability.py",
     _PACKAGE / "agent" / "settings" / "model_provider_schema.py",
+    # 离线迁移读取输入字段，不是这些配置的业务消费方。
+    _PACKAGE / "agent" / "settings" / "model_credentials.py",
 })
 # 推导模块自身和登记表会以字符串引用所有字段名，扫描时必须排除，否则每个字段都“被 settings 读取”。
 _SELF_EXCLUDED = {_DEFINITION, Path(__file__).resolve(),
@@ -125,7 +126,7 @@ def _memory_range_texts() -> dict[str, str]:
     return texts
 
 
-# LLM: 单独一层 if 链，避免把 for 与分支叠出过深嵌套；推不出的 kind 返回空串。
+# LLM: 单独一层 if 链，避免过深嵌套；clamped_int按同一规格的上下界展示，不能丢失canonical压缩的50–95范围。
 # 函数用途: 按 memory 字段的类型/范围种类生成单个字段的范围展示文本。
 def _memory_spec_range_text(spec: object) -> str:
     if spec.kind == "choice":
@@ -134,7 +135,7 @@ def _memory_spec_range_text(spec: object) -> str:
         return _range_text(COMPACT_TRIGGER_PERCENT_RANGE[0], COMPACT_TRIGGER_PERCENT_RANGE[1])
     if spec.kind == "compact_recovery_percent":
         return _range_text(COMPACT_RECOVERY_PERCENT_RANGE[0], COMPACT_RECOVERY_PERCENT_RANGE[1])
-    if spec.kind == "int":
+    if spec.kind in {"int", "clamped_int"}:
         return _range_text(spec.min_value, spec.max_value)
     return ""
 
@@ -179,9 +180,7 @@ def ranges() -> dict[str, str]:
 
 # LLM: 只读规范任务与产品代码；排除自身模块和定义文件，避免字符串键把“登记表”当成读取方。
 #   归属模块取引用最多的文件相对 agent_py_agent 的顶层（agent 包内细分到第二段），读取方返回该文件相对名。
-#   决策设置字段（decision_*/memory_decision_*）不直接以属性/字符串键出现在产品代码里，按
-#   test_config_field_readers 同一判据用 decision_config_fields() 映射补读取方：读取点在
-#   decision_settings_defaults.py（decision_defaults 用 getattr 读这些字段），归属 settings。
+#   已迁入目录的决策字段不再归 AgentConfig，不制造读取旧平铺值的虚假消费方。
 # 函数用途: 扫描产品代码，为每个配置字段找到主要读取方模块与归属顶层模块。
 @lru_cache(maxsize=1)
 def field_readers() -> dict[str, tuple[str, str]]:
@@ -201,9 +200,7 @@ def field_readers() -> dict[str, tuple[str, str]]:
     counts: dict[str, dict[str, int]] = {}
     for path in _PACKAGE.rglob("*.py"):
         _count_references(path, counts)
-    mapped = {field: ("settings", "agent/settings/decision_settings_defaults")
-              for _path, (domain, field) in decision_config_fields().items()
-              if domain in {"agent", "memory"}}
+    mapped = {}
     # log_level 经 apply_log_level 应用（定义在 config.py，已排除），调用点在 runtime_config_env/
     # runtime_config_task，没有直接的属性访问或字符串键引用，补显式映射指向真实消费方。
     mapped["log_level"] = ("settings", "agent/settings/services/runtime_config_env")

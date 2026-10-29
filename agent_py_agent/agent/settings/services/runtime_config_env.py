@@ -1,4 +1,4 @@
-# LLM: 环境覆盖只合并原用户配置键；重建 config 时保留宿主凭据来源上界，不接受层内伪造内部字段。
+# LLM: 环境覆盖只合并正式用户配置键，不使用压缩 setter 补偿；重建时保留宿主凭据来源上界，不接收内部字段。
 # 模块用途: 应用宿主声明的运行配置文件，保留来源诊断和子进程擦洗边界。
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ _ENV_RUNTIME_CONFIG_LAYERS = "MY_AGENT_RUNTIME_CONFIG_LAYERS"
 _ENV_RUNTIME_CONFIG_SCOPE = "MY_AGENT_RUNTIME_CONFIG_SCOPE"
 
 
-# LLM: 原无覆盖路径不改对象；有覆盖时先冻结 base 来源，再用 dataclass 原字段承运宿主上界，密钥值不另写盘。
+# LLM: 无覆盖路径不改对象；有覆盖时直接使用 canonical 字段 replace，保留 base 来源上界，密钥值不另写盘。
 # 函数用途: 合并明确的运行配置覆盖并应用原日志设置，后续 Shell 仍擦除原宿主环境来源。
 def apply_runtime_config_environment(base_config: AgentConfig, *, env: dict[str, str] | None = None) -> AgentConfig:
     runtime_env = env if env is not None else os.environ
@@ -31,11 +31,6 @@ def apply_runtime_config_environment(base_config: AgentConfig, *, env: dict[str,
         return base_config
     effective = merge_runtime_config_layers(base_config, layers, config_cls=type(base_config))
     config = freeze_managed_secret_environment(replace(freeze_managed_secret_environment(base_config), **effective.values))
-    object.__setattr__(
-        config,
-        "memory_compact_trigger_percent",
-        effective.values["memory_compact_trigger_percent"],
-    )
     config.config_path = base_config.config_path
     config.config_sources = effective.sources
     config.config_layers = list(effective.layers)

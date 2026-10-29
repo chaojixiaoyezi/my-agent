@@ -1,3 +1,5 @@
+# LLM: 规范化保持现有参数语义，已迁走模型字段只告警，不能造默认后端。
+# 模块用途: 验证配置类型、范围与迁移告警。
 from __future__ import annotations
 
 """配置解析验证测试。"""
@@ -146,6 +148,8 @@ def test_normalize_agent_config_out_of_range():
     assert normalized["max_tokens"] == defaults_normalized["max_tokens"]
 
 
+# LLM: 旧模型字段与未知键均只告警，不能因解析成功就恢复隐式 echo。
+# 函数用途: 验证文件加载的退役字段告警和未配置状态。
 def test_normalize_agent_config_unknown_keys(tmp_path):
     config_path = _write_config(
         tmp_path,
@@ -158,7 +162,8 @@ def test_normalize_agent_config_unknown_keys(tmp_path):
     config = load_config(config_path)
     assert any("future_feature_enabled" in w for w in config.config_warnings)
     assert any("nonexistent_setting" in w for w in config.config_warnings)
-    assert config.model_backend == "echo"
+    assert config.model_backend == ""
+    assert any("model_backend" in w for w in config.config_warnings)
 
 
 def test_normalize_agent_config_invalid_model_backend():
@@ -181,6 +186,8 @@ def test_normalize_agent_config_temperature_range():
     assert any("temperature" in w for w in warnings)
 
 
+# LLM: 正常运行额度照常生效，模型连接及采样参数只在目录里持久化。
+# 函数用途: 验证普通参数有效且迁出键有准确告警。
 def test_load_config_validates_and_keeps_warnings(tmp_path):
     config_path = _write_config(
         tmp_path,
@@ -192,10 +199,11 @@ def test_load_config_validates_and_keeps_warnings(tmp_path):
         ],
     )
     config = load_config(config_path)
-    assert config.model_backend == "echo"
+    assert config.model_backend == ""
     assert config.request_timeout == 30
     assert config.max_tokens == 1024
-    assert config.config_warnings == []
+    assert len(config.config_warnings) == 2
+    assert all(any(key in warning for warning in config.config_warnings) for key in ("model_backend", "temperature"))
 
 
 def test_load_config_warns_on_bad_values(tmp_path):

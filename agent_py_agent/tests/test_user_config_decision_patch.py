@@ -1,3 +1,5 @@
+# LLM: 决策由真实工具修改，显式离线模型只隔离网络，不伪造工具成功结果。
+# 模块用途: 验证模型工具决策修改的权限、回执和自然请求链路。
 """user_config 的 decision_patch 通道（2026-09-28，生产上连续被拒三次，Jev 设置改不了）。
 
 背景：user_config 各动作共用一份扁平 schema，reason、fields、profile_id、timeout_seconds 等别的动作的字段也能通过
@@ -146,8 +148,10 @@ class _AdjustWaitBackend(_TestNativeBackend):
             {"id": call_id, "name": "user_config", "input": arguments}])
 
 
+# LLM: 显式离线 echo 不等于配置缺失时自动造模型；假模型经真实工具入口操作决策覆盖。
+# 函数用途: 验证自然请求到决策修改的离线业务链路。
 def test_fake_model_adjusts_the_background_wait_from_a_natural_request(tmp_path):
-    agent = SimpleAgent(AgentConfig(enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home")),
+    agent = SimpleAgent(AgentConfig(model_backend="echo", enable_tools=True, memory_path="memory.jsonl", my_agent_home=str(tmp_path / "home")),
                         tmp_path)
     backend = _AdjustWaitBackend()
     agent.backend = backend

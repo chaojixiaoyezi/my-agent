@@ -14,7 +14,7 @@ from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -28,6 +28,7 @@ from .model_provider_schema import (
     migrate_v2,
     migrate_v3,
     migrate_v4,
+    migrate_v5,
     resolved_model,
     validate_catalog_generation,
     validate_model,
@@ -51,6 +52,21 @@ from .shared_model_catalog import (
 class SelectedModelRead:
     profile_id: str
     decision_settings: dict
+
+
+# LLM: 缺模型只清除目录投影，保留其它偏好和宿主秘密擦洗上界；不读磁盘或制造可调用连接。
+# 函数用途: 生成真实未配置载体，显式 echo 调试保持原对象。
+def _unconfigured_model_projection(base_config):
+    from .secret_ref import freeze_managed_secret_environment
+
+    if getattr(base_config, "model_backend", "") == "echo":
+        return base_config
+    defaults = type(base_config)()
+    empty = {item.name: getattr(defaults, item.name) for item in fields(defaults) if item.metadata.get("model_projection", False)}
+    config = replace(freeze_managed_secret_environment(base_config), **empty)
+    config.config_sources = {**getattr(config, "config_sources", {}), **{
+        key: {"source": "model_unconfigured", "priority": 90} for key in empty}}
+    return config
 
 
 _SELECTED_MODEL_READ: ContextVar[list[SelectedModelRead] | None] = ContextVar("selected_model_read", default=None)
@@ -98,11 +114,12 @@ def model_profiles_path(home_paths: object) -> Path:
     return Path(home_paths.config_dir) / "model-profiles" / f"{digest}.json"
 
 
-# LLM: 旧 schema 只经对应显式迁移，新版必须已有有效代次；未知版本不能用默认迁移猜测。
+# LLM: v1—v5 只经对应显式迁移；v5 保留真实代次，新版必须已有有效代次，未知版本不能猜测。
 # 函数用途: 归一原目录版本且保持只读，把版本分派与模型内容校验分开。
 def _migrated_profile_data(data: dict) -> dict:
     migrations = {"owner_model_profiles.v1": migrate_v1, "owner_model_profiles.v2": migrate_v2,
-                  "owner_model_profiles.v3": migrate_v3, "owner_model_profiles.v4": migrate_v4}
+                  "owner_model_profiles.v3": migrate_v3, "owner_model_profiles.v4": migrate_v4,
+                  "owner_model_profiles.v5": migrate_v5}
     migration = migrations.get(data["schema"])
     if migration is not None:
         return migration(data)
@@ -439,7 +456,7 @@ def selected_model_config(agent: object, *, profile_id: str | None = None, capab
     )
 
 
-# LLM: 部署默认由调用方显式给出；目录、捕获、共享与凭据仍沿唯一原算法，不接Agent形状、不建后端或写目录。
+# LLM: 目录、捕获、共享与凭据沿原算法；无目录选择就未配置，不回落部署连接；显式 echo 保持离线调试。
 # 函数用途: 从真实配置和owner home解析指定用途的模型档案，保持默认选择与读取捕获语义。
 def selected_model_config_for_resources(base_config: object, home_paths: object, *,
                                         profile_id: str | None = None, capability: str = "agentic"):
@@ -451,10 +468,10 @@ def selected_model_config_for_resources(base_config: object, home_paths: object,
     if selected == "default":
         selected = _default_for_owner_for_home(home_paths)
         if selected == "default":
-            return base_config
+            return _unconfigured_model_projection(base_config)
     row = _resolved_profile_for_home(home_paths, data, selected, capability=capability)
-    # 模型档案的窗口必填，写进 model_context_window_tokens 即显式容量；档案带温度就发送，没带沿用部署的 temperature（空 = 不发）。
-    config = replace(base_config, **row, api_key_env="")
+    # 未声明容量和采样保持未知/不发送；环境来源与凭据一同来自本次解析。
+    config = replace(base_config, **row)
     # 输出上限不在这里夹取（后端工厂按 effective_max_output_tokens 统一处理）；max_tokens 仍按模型档案优先级冻结，
     # 任务级覆盖配置改不动它，与原行为一致。
     fields = {*row, "api_key_env", "max_tokens"}
@@ -464,7 +481,7 @@ def selected_model_config_for_resources(base_config: object, home_paths: object,
     return config
 
 
-# LLM: 管理员（local/main）的 default 始终是部署配置；普通用户在管理员指定初始模型时得到该共享引用。
+# LLM: 管理员 default 表示未选目录模型，只有显式 echo 保留；普通用户的管理员初始模型仍按原共享引用解析。
 #   撤销共享会同次清除初始模型（回到部署配置）；原模型被删时由共享解析明确报错。共享目录损坏同样报错，不猜。只读。
 # 函数用途: 从原Agent委托显式home纯叶，保管理员初始模型和部署默认的原判断。
 def _default_for_owner(agent: object) -> str:

@@ -1,3 +1,5 @@
+# LLM: 仅使用临时假目录与凭据；v6 小窗口合法，溢出仍拒绝，不能以降低校验换取通过。
+# 模块用途: 验证模型秘密、owner 隔离、原子写入与执行快照。
 """用户模型配置的秘密、隔离、原子写入和执行快照定向验证。"""
 
 import json
@@ -67,13 +69,15 @@ def test_private_profile_roundtrip_and_default(tmp_path):
     assert not list(model_profiles_path(host.home_paths).parent.glob(".models-*"))
 
 
+# LLM: v6 允许 1..4095 真窗口，非法值测试改覆盖上溢，不删除原边界防线。
+# 函数用途: 检查非法档案被拒绝且错误不回显秘密。
 @pytest.mark.parametrize("values", [
     {"model_backend": "auth"}, {"model_name": ""}, {"api_key": ""},
     {"api_base": "file:///etc/passwd"}, {"api_base": "https://name:secret@example.test"},
     {"api_base": "https://example.test?key=secret"}, {"api_base": "https://example.test:bad"},
     {"api_key": "secret\ninjection"}, {"model_context_window_tokens": True},
     {"model_context_window_tokens": "-1"}, {"model_context_window_tokens": "12.5"},
-    {"model_context_window_tokens": "一万"}, {"model_context_window_tokens": "2048"},
+    {"model_context_window_tokens": "一万"}, {"model_context_window_tokens": "2147483648"},
 ])
 def test_invalid_profiles_rejected_without_secret(values):
     with pytest.raises(ValueError) as caught:

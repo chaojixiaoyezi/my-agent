@@ -168,8 +168,10 @@ def oauth_binding(provider: dict) -> str:
     return hashlib.sha256(json.dumps([provider["api_base"], config], sort_keys=True).encode()).hexdigest()
 
 
-# LLM: 这是可用性投影而非 token 验证；过期但有 refresh 的账号仍可选，由实际请求刷新或明确报错。
+# LLM: 这是可用性投影而非网络验证；环境引用必须实际非空，OAuth仍由实际请求刷新或明确报错。
 # 函数用途: 区分没有密钥的 OAuth 模型与真正未配置模型。
 def has_credential(provider: dict) -> bool:
+    from .model_credentials import provider_api_key
+
     auth = provider.get("auth", {})
-    return bool(auth.get("access_token") and auth.get("generation")) if auth else bool(provider.get("api_key"))
+    return bool(auth.get("access_token") and auth.get("generation")) if auth else bool(provider_api_key(provider))

@@ -1,5 +1,5 @@
-# LLM: gateway_worker_process_count属于宿主部署边界，模型和普通用户设置均不可写。
-# LLM: 本模块是"哪些配置项模型/用户可以自助改"的**唯一权威**，CLI(`config-set`)与模型工具都从这里取名单、
+# LLM: Gateway 进程数属于部署边界；用户并发额度留高级层，仅认证管理员控制入口可写，actor 字符串不授权。
+# LLM: 本模块是"哪些配置项模型/用户可以自助改"的**唯一权威**，CLI(`my-agent config set`)与模型工具都从这里取名单、
 #   校验和生效语义，不得各自维护第二份。安全边界（权限模式、危险根、凭据、模型密钥、宿主控制面路径）
 #   永不进白名单：不是"暂时没开放"，而是结构上不允许模型自行改变。
 #   生效语义必须如实报告：当前进程持有启动时加载的 AgentConfig，写盘后要等下一轮/下一次会话/网关重启，
@@ -109,12 +109,6 @@ TUNABLE_KEYS: dict[str, TunableSpec] = {
         key="memory_compact_trigger_percent",
         describe="会话压缩的管理员默认比例（50~95，默认80；管理员强制、会话和用户策略另行解析）",
         validate=_percent_within((50, 95)),
-        effect=EFFECT_GATEWAY_RESTART,
-    ),
-    "memory_compact_auto_trigger_percent": TunableSpec(
-        key="memory_compact_auto_trigger_percent",
-        describe="上下文用到百分之多少时自动 compact（50~100，默认 90）",
-        validate=_percent_within(COMPACT_TRIGGER_PERCENT_RANGE),
         effect=EFFECT_GATEWAY_RESTART,
     ),
     "memory_compact_recovery_target_percent": TunableSpec(
@@ -228,7 +222,7 @@ USER_SETTINGS_BOUNDARY_KEYS = frozenset(
      "plugin_tool_gate_timeout_ms",
      "plugin_legacy_sandbox_default",
      # 规则来源开关只允许现有可信用户/settings修改；不授予额外路径/网络许可。
-     "agents_source_enabled", "agents_source_network_enabled"})
+     "agents_source_enabled", "agents_source_network_enabled", "gateway_user_inflight_limit"})
 
 # 凭据名只按键名最后的完整片段认：input_media_token_reserve 里的 token 是计数单位，max_tokens 是复数，都不是凭据。
 # 常见缩写与组合（DB_PASS、MYSQL_PWD、SSH_PRIVATE_KEY、AWS_SECRET_ACCESS_KEY、BASIC_AUTH）同样按完整末尾片段认；
@@ -238,7 +232,7 @@ _CREDENTIAL_SUFFIXES = (
     "pass", "passwd", "pwd", "private_key", "secret_key", "access_key", "auth",
 )
 
-# LLM: 参数中心登记表、聊天 /settings、user_config 与命令行 config-get 共用这一条凭据判定，不再各自维护名单；
+# LLM: 参数中心登记表、聊天 /settings、user_config 与命令行 my-agent config get 共用这一条凭据判定，不再各自维护名单；
 #   键名等于凭据名或以 `_凭据名` 结尾才算（完整片段，不按子串）；退休字段没有回显例外。改规则须同步 test_parameter_registry 的脱敏用例。
 # 函数用途: 判断一个配置键是不是凭据（回显、记账都必须脱敏，也永远是安全边界）。
 def is_credential_key(key: object) -> bool:
@@ -504,6 +498,8 @@ def read_config_fact(
 
     spec = parameter_registry().get(name)
     from ..capability.runtime_config_reload import DEPLOYMENT_CAPABILITY_KEYS
+    if spec is not None and spec.source == "runtime_guard":
+        return _guard_config_fact(spec, config)
     if spec is not None and name in DEPLOYMENT_CAPABILITY_KEYS:
         return _deployment_config_fact(spec, config)
     user_path, default_path = _fact_paths(spec, user_path=user_path, default_path=default_path,
@@ -532,6 +528,31 @@ def read_config_fact(
         "packaged_default": mask_value(name, default_value) if default_value is not None else None,
         "boundary_reason": BOUNDARY_KEYS.get(name, ""),
     }
+
+
+# LLM: 只认实际运行配置中的宿主根；无可信来源报 unknown，不查 owner 同名 YAML，不把缺省说成显式 JSON。
+# 函数用途: 生成 typed 守卫的来源、显式值及默认值事实。
+def _guard_config_fact(spec: object, config: object | None) -> dict[str, object]:
+    from ..user_space.home_layout import home_paths
+    from ..user_space.home_root import configured_home_root
+    from .deployment_policy import DeploymentPolicyError
+    from .runtime_guard_config import runtime_guard_policy
+
+    value, source, configured = "unknown", "unknown", False
+    root = configured_home_root(config) if config is not None else None
+    if root and Path(root).expanduser().is_absolute():
+        try:
+            policy = runtime_guard_policy(trusted_host_paths=home_paths(root))
+            value = getattr(policy, spec.key)
+            configured = spec.key in policy._configured_fields
+            source = "deployment_policy" if configured else "python_default"
+        except (OSError, DeploymentPolicyError):
+            pass
+    return {"key": spec.key, "effective": mask_value(spec.key, value), "source": source,
+            "source_scope": "deployment", "source_readonly": True, "user_config_path": "",
+            "deployment_config_path": "<my_agent_home>/config/deployment_policy.json",
+            "user_value": mask_value(spec.key, value) if configured else None,
+            "packaged_default": mask_value(spec.key, spec.default), "boundary_reason": BOUNDARY_KEYS.get(spec.key, "")}
 
 
 # LLM: 部署事实与 running_value 共用 configured_home_root 和唯一加载器，环境覆盖后来源仍须指向实际宿主；

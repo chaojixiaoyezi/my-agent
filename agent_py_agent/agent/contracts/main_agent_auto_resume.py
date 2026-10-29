@@ -1,4 +1,6 @@
 
+# LLM: 主代理恢复预算只读宿主部署策略，请求只能收紧；台账仍按原流程记录真实尝试次数。
+# 模块用途: 判断并记录主代理失败后的有界自动恢复。
 from __future__ import annotations
 
 import json
@@ -7,12 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from ..settings.runtime_guard_config import runtime_guard_int
+from ..settings.runtime_guard_config import RuntimeGuardPolicy, runtime_guard_int
 from .state_machine import normalize_status
 
 SCHEMA_VERSION = "main-agent-auto-resume-ledger.v1"
 # 主代理自动恢复最多尝试的次数；超过后不再自动重试，避免故障循环消耗资源。
-DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT = 3
+DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT = RuntimeGuardPolicy().main_agent_auto_resume_attempt_limit
 
 
 class _RuntimeLike(Protocol):
@@ -74,15 +76,16 @@ def record_auto_resume_attempt(bundle: _BundleLike) -> dict[str, object]:
     return payload
 
 
+# LLM: request 只能收紧宿主正上限，零不是关闭宿主保护；宿主显式0仍保留原不限次数语义。
+# 函数用途: 计算主代理本次恢复请求与部署额度的交集。
 def auto_resume_limit(request: object) -> int:
     configured_default = _configured_auto_resume_limit()
     value = getattr(request, "max_auto_recovery_attempts", None)
-    if value is None:
-        value = configured_default
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
+    if type(value) is not int or value < 0:
         return configured_default
+    if configured_default > 0:
+        return min(value, configured_default) if value else configured_default
+    return value
 
 
 def auto_resume_remaining_timeout_seconds(bundle: _BundleLike) -> int:
@@ -113,6 +116,8 @@ def _read_ledger(path: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {"schema_version": SCHEMA_VERSION, "attempts": 0, "packet_refs": []}
 
 
+# LLM: 字段默认唯一归 RuntimeGuardPolicy，读失败不能恢复旧 YAML 或静默关闭。
+# 函数用途: 读取主代理自动恢复的部署上限。
 def _configured_auto_resume_limit() -> int:
     return runtime_guard_int("main_agent_auto_resume_attempt_limit", DEFAULT_AUTO_RECOVERY_ATTEMPT_COUNT)
 

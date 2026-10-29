@@ -23,13 +23,15 @@ def _model_id(value: object) -> str:
         raise ModelProfileError("模型配置编号无效。") from exc
 
 
-# LLM: 编辑空 key/headers 保留原值；OAuth 表单不能注入令牌，改变认证参数会丢弃旧登录，不能移送凭据。
+# LLM: 编辑空 key/headers 保留原值；表单不得建立宿主环境引用，新静态密钥或明确清除会丢弃旧引用，OAuth 不能注入令牌。
 # 函数用途: 校验服务商表单并更新单份连接配置。
 def _save_provider(data: dict, payload: dict) -> None:
     provider_id = validate_provider_id(payload.get("provider_id"))
     value = payload.get("provider")
     if not isinstance(value, dict):
         raise ModelProfileError("服务商配置须为对象。")
+    if "api_key_ref" in value:
+        raise ModelProfileError("环境凭据引用只能经显式离线迁移建立，不能由模型表单指定。")
     previous = data["providers"].get(provider_id, {})
     if previous and payload.get("editing") is not True:
         raise ModelProfileError("Provider ID 已存在，请进入编辑。")
@@ -49,6 +51,8 @@ def _save_provider(data: dict, payload: dict) -> None:
         unchanged = old_auth and previous["api_base"] == draft["api_base"] and oauth_config(old_auth, previous["api_base"]) == config
         draft["auth"] = old_auth if unchanged else config
     draft["api_key"] = "" if payload.get("clear_key") is True else value.get("api_key") or previous.get("api_key", "")
+    if payload.get("clear_key") is True or value.get("api_key"):
+        draft.pop("api_key_ref", None)
     if payload.get("clear_headers") is True:
         draft["custom_headers"] = {}
     elif value.get("custom_headers") is None:

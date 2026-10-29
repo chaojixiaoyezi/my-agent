@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 
 from ...contracts.gates.command_policy import analyze_command
-from ...settings.runtime_guard_config import runtime_guard_int
+from ...settings.runtime_guard_config import runtime_guard_data, runtime_guard_int
 from ...tooling.models import ToolHandlerOutcome
 
 # 单代理工具预算的固定滚动窗口（10 分钟）；次数只由 AgentConfig.tool_agent_budget_max_calls 决定（原窗口配置已并入）。
@@ -73,8 +73,8 @@ def check_unknown_command_budget(
     if executables and allowlist and all(item in allowlist for item in executables):
         return None
     policy = getattr(agent, "runtime_guard_policy", None)
-    max_calls = _guard_int("unknown_command_max_calls", policy=policy, default=200)
-    window_seconds = _guard_int("unknown_command_window_seconds", policy=policy, default=600)
+    max_calls = _guard_int("unknown_command_max_calls", policy=policy)
+    window_seconds = _guard_int("unknown_command_window_seconds", policy=policy)
     if max_calls <= 0 or window_seconds <= 0:
         return None
     stamp = float(time.monotonic() if now is None else now)
@@ -98,14 +98,11 @@ def check_unknown_command_budget(
 _COMMAND_POLICY_TOOL_NAMES = frozenset({"run_command"})
 
 
+# LLM: 同一 frozen 策略提供白名单与额度，未冻结时也只读宿主 JSON；不存在 owner 覆盖或独立默认。
+# 函数用途: 读取未知命令预算的准确部署豁免清单。
 def _unknown_command_allowlist(agent: object) -> frozenset[str]:
     policy = getattr(agent, "runtime_guard_policy", None)
-    values = getattr(policy, "values", None)
-    if not isinstance(values, dict):
-        return frozenset()
-    raw = values.get("unknown_command_allowlist")
-    items = raw if isinstance(raw, (list, tuple)) else ()
-    return frozenset(str(item).strip() for item in items if str(item).strip())
+    return frozenset(runtime_guard_data(policy=policy)["unknown_command_allowlist"])
 
 
 def _agent_events(agent: object) -> list[float]:
@@ -135,12 +132,10 @@ def _configured_max_calls(config: object) -> int:
         return 0
 
 
-# LLM: unknown 命令额度只在守卫文件（按代理的冻结策略优先，其次读随包文件）；不读 AgentConfig。
-# 函数用途: 读取守卫文件里的一个非负整数额度。
-def _guard_int(key: str, *, policy: object = None, default: int = 0) -> int:
-    if policy is not None and hasattr(policy, "int_value"):
-        return policy.int_value(key, default)
-    return max(0, runtime_guard_int(key, default))
+# LLM: unknown 命令额度只读代理冻结快照或宿主 JSON，不读 AgentConfig 或旧随包 YAML。
+# 函数用途: 读取唯一部署守卫里的非负整数额度。
+def _guard_int(key: str, *, policy: object = None) -> int:
+    return runtime_guard_int(key, policy=policy)
 
 
 def _budget_result(tool_name: str, max_calls: int, window_seconds: int) -> ToolHandlerOutcome:

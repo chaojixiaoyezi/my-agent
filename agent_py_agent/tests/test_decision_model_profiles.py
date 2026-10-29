@@ -1,3 +1,5 @@
+# LLM: 决策模型复用唯一v6目录，读取旧档案不得隐式写盘或改变默认生成选择。
+# 模块用途: 验证决策档案的本地选择、用途和目录升级。
 """决策模型复用原配置目录，但不能混入主/子代理生成选择；只做本地合同验收。"""
 
 import asyncio
@@ -91,6 +93,8 @@ def test_provider_purpose_and_disable_are_rechecked_at_resolution(tmp_path):
     assert row["available_for"] == []
 
 
+# LLM: 旧目录读取不写盘，显式保存才升级v6并保留原档案及凭据，不降回v5。
+# 函数用途: 验证旧目录的只读兼容与显式升级。
 def test_v2_migration_is_readonly_until_explicit_save(tmp_path):
     host = Host(tmp_path)
     key, _ = add(host)
@@ -103,14 +107,14 @@ def test_v2_migration_is_readonly_until_explicit_save(tmp_path):
     path.write_text(json.dumps(legacy))
     before = path.read_bytes()
     current = read_model_profiles(path)
-    assert current == {**legacy, "schema": "owner_model_profiles.v5", "catalog_generation": None, "decision_settings": {
+    assert current == {**legacy, "schema": "owner_model_profiles.v6", "catalog_generation": None, "decision_settings": {
         "schema": "decision_settings.v2", "revision": 0, "overrides": {}, "experiment_authorization": None,
     }}
     assert selected_model_config(host).api_key == "only-private-secret"
     assert path.read_bytes() == before
     decision(host)
     saved = json.loads(path.read_text())
-    assert saved["schema"] == "owner_model_profiles.v5" and saved["selected"] == key
+    assert saved["schema"] == "owner_model_profiles.v6" and saved["selected"] == key
     assert saved["profiles"][key] == legacy["profiles"][key]
     assert all(saved["providers"][k] == v for k, v in legacy["providers"].items())
 

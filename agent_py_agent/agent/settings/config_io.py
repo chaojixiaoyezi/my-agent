@@ -1,4 +1,4 @@
-# LLM: 配置解析和原子写回保持唯一读写实现；全局落盘前只查受限进程拒门，Count0与原权限复制保持。
+# LLM: 配置解析及原子写回唯一实现；纯文本编辑供事务预检，写叶检查全局拒门并 fsync；调用方负责锁/CAS与授权。
 # 模块用途: 读取简化YAML及原子保存配置，不负责认证、参数授权或多进程来源签发。
 
 from __future__ import annotations
@@ -97,10 +97,18 @@ def yaml_trailing_comment(line: str) -> str:
     return rest[1:].strip() if rest.startswith("#") else ""
 
 
+# LLM: 文件与事务候选共用同一个解析器；只读取指定来源，不迁移、写回或猜测来源。
+# 函数用途: 读取正式简化 YAML 文件。
 def load_simple_yaml(path: Path) -> dict[str, Any]:
+    return parse_simple_yaml_text(path.read_text(encoding="utf-8-sig"))
+
+
+# LLM: 纯解析与正式文件加载相同，不增加默认值或解释权限，供写前候选与旧节点取值。
+# 函数用途: 在内存中解析简化 YAML。
+def parse_simple_yaml_text(text: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
     current_key: str | None = None
-    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+    for raw in text.lstrip("\ufeff").splitlines():
         line = _strip_yaml_comment(raw)  # 引号感知去注释(原 split('#') 会截断引号内的 #)
         if not line.strip():
             continue
@@ -201,16 +209,30 @@ def _is_top_level_key_line(raw: str, key: str) -> bool:
 # LLM: 原子配置写前拒绝受限W/native执行器；默认C/Count0仍守原临时文件、权限复制和replace。
 # 函数用途: 在唯一配置落盘点检查进程写资格，不改变参数校验或配置正文。
 def _write_config_lines(path: Path, lines: list[str]) -> None:
+    write_config_bytes_atomic_unlocked(path, ("\n".join(lines) + "\n").encode("utf-8"))
+
+
+# LLM: 调用方持原路径锁；临时 FD 0600 出生，flush/fsync 后替换，保留既有权限；异常由事务决定是否恢复。
+# 函数用途: 原子写入完整原字节配置，兼供精确回滚使用。
+def write_config_bytes_atomic_unlocked(path: Path, content: bytes) -> None:
     from ..common.global_write_guard import require_global_writer
 
     require_global_writer("global_config")
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
         _copy_mode(path, tmp)
         os.replace(tmp, path)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -253,3 +275,46 @@ def unset_simple_yaml_value(path: Path, key: str) -> str | None:
     del lines[index]
     _write_config_lines(path, lines)
     return old
+
+
+# LLM: 纯编辑保留无关字节、注释、BOM、CRLF；重复目标键拒绝；仅已登记结构 writer 可替换多行列表，未知缩进映射拒绝。
+# 函数用途: 生成一次顶层配置变更及其可回滚旧值，不触碰磁盘。
+def render_config_change(original: bytes, key: str, rendered: str | None, *, structured: bool = False) -> tuple[bytes, str | None]:
+    if rendered is not None and any(mark in rendered for mark in ("\n", "\r")):
+        raise ValueError("配置值不能包含换行")
+    text = original.decode("utf-8-sig")
+    bom = b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b""
+    lines = text.splitlines(keepends=True)
+    matches = [i for i, line in enumerate(lines) if _is_top_level_key_line(line, key)]
+    if len(matches) > 1:
+        raise ValueError("配置目标键重复，拒绝不明确的覆盖")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    previous = None
+    if matches:
+        index = matches[0]
+        previous = _strip_yaml_comment(lines[index].split(":", 1)[1]).strip()
+        children = []
+        for i in range(index + 1, len(lines)):
+            line = lines[i]
+            clean = _strip_yaml_comment(line)
+            if not clean.strip():
+                continue
+            if line.lstrip().startswith("- "):
+                if not structured:
+                    raise ValueError("标量 writer 不能修改多行列表")
+                children.append(i)
+            elif line.startswith((" ", "\t")):
+                raise ValueError("不支持的缩进配置映射")
+            else:
+                break
+        if children:
+            previous = repr(parse_simple_yaml_text(text)[key])
+        replacement = "" if rendered is None else f"{key}: {rendered}{newline}"
+        lines[index] = replacement
+        for i in reversed(children):
+            del lines[i]
+    elif rendered is not None:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += newline
+        lines.append(f"{key}: {rendered}{newline}")
+    return bom + "".join(lines).encode("utf-8"), previous

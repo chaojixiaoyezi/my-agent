@@ -1,3 +1,5 @@
+# LLM: 决策覆盖唯一归模型目录，旧字段只作显式离线迁移输入；写入经真实设置服务。
+# 模块用途: 验证决策设置的原子性、继承、迁移与权限。
 """原 owner/thread 决策设置的离线原子性、继承、迁移与权限回归。"""
 import json
 import threading
@@ -313,6 +315,8 @@ def test_owner_and_thread_isolation_and_payload_cannot_supply_identity(tmp_path)
         execute(host, "read", {"owner_id": "bob"})
 
 
+# LLM: 读旧目录不隐式写盘，显式写入才升级 v6，保留其余扩展与模型内容。
+# 函数用途: 验证旧目录的只读兼容和原子升级。
 def test_v3_owner_migration_preserves_existing_fields_until_explicit_write(tmp_path):
     host = host_at(tmp_path)
     key, _ = add(host)
@@ -328,7 +332,7 @@ def test_v3_owner_migration_preserves_existing_fields_until_explicit_write(tmp_p
     assert path.read_bytes() == before
     patch(host, {"enabled": False})
     migrated = json.loads(path.read_text())
-    assert migrated["schema"] == "owner_model_profiles.v5"
+    assert migrated["schema"] == "owner_model_profiles.v6"
     assert isinstance(migrated["catalog_generation"], str) and migrated["catalog_generation"]
     assert migrated["extension"] == legacy["extension"]
     assert migrated["providers"] == legacy["providers"] and migrated["profiles"][key] == legacy["profiles"][key]
@@ -362,12 +366,16 @@ def test_unknown_thread_schema_and_invalid_current_envelope_rejected(data):
         ConversationThread.from_dict({"thread_id": "t", "canonical_user_id": "alice", **data})
 
 
+# LLM: 旧原始 YAML 只经离线迁移转 owner 覆盖，决策服务不再读旧配置对象；严格保留小数期限与点位继承。
+# 函数用途: 验证决策迁移、原设置服务和期限来源贯通。
 def test_defaults_follow_original_config_domains_and_fractional_yaml(tmp_path):
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+
     host = host_at(tmp_path)
-    host.config = AgentConfig(decision_timeout_seconds=2.5, memory_decision_recall_mode="observe",
-                              memory_decision_pre_recall_mode="apply")
-    host.capability_config = CapabilityConfig(decision_subagent_model_mode="apply")
-    result = execute(host, "read", {})
+    result = patch(host, migrate_legacy_decision_overrides(
+        {"decision_timeout_seconds": 2.5, "memory_decision_recall_mode": "observe", "memory_decision_pre_recall_mode": "apply"},
+        {"decision_subagent_model_mode": "apply"}))
     assert result["effective"]["points"]["recall"]["mode"] == "observe"
     assert result["effective"]["points"]["pre_recall"]["mode"] == "apply"
     # 点位期限与模型引用不再有配置字段：没有覆盖时继承通用值，来源写明继承；选模型两点另有 5 秒下限。
@@ -375,45 +383,54 @@ def test_defaults_follow_original_config_domains_and_fractional_yaml(tmp_path):
     assert result["sources"]["points.recall.timeout_seconds"].startswith("inherit:timeout_seconds:")
     assert result["effective"]["points"]["subagent_model"]["timeout_seconds"] == 5.0
     assert result["sources"]["points.subagent_model.timeout_seconds"] == "point_default:5"
-    assert result["sources"]["points.subagent_model.mode"] == "capability_config.decision_subagent_model_mode"
+    assert result["sources"]["points.subagent_model.mode"] == "owner"
     path = tmp_path / "agent.yaml"
     path.write_text("decision_timeout_seconds: 0.75\nmemory_decision_recall_timeout_seconds: 0.5\n"
                     "decision_planning_profile_id: someone\n")
     config = load_config(path)
-    assert config.decision_timeout_seconds == 0.75
+    assert not hasattr(config, "decision_timeout_seconds")
+    assert migrate_legacy_decision_overrides(load_simple_yaml(path), {}) == {"timeout_seconds": 0.75}
     assert not hasattr(config, "memory_decision_recall_timeout_seconds")
     assert {"memory_decision_recall_timeout_seconds", "decision_planning_profile_id"} <= {
         warning.split("'")[1] for warning in config.config_warnings if "unknown config key" in warning}
     capability = tmp_path / "capability.yaml"
     capability.write_text("decision_skill_tool_mode: observe\n")
-    assert load_capability_config(capability).decision_skill_tool_mode == "observe"
+    assert not hasattr(load_capability_config(capability), "decision_skill_tool_mode")
+    assert migrate_legacy_decision_overrides({}, load_simple_yaml(capability)) == {"points.skill_tool.mode": "observe"}
     # 2026-09-27 起与主配置一致：已删除的点位期限写在能力配置里只告警并忽略，不再拒绝加载。
     capability.write_text("decision_skill_tool_timeout_seconds: 0.25\n")
     stale = load_capability_config(capability)
     assert any("decision_skill_tool_timeout_seconds" in w for w in stale.config_warnings)
-    assert stale.decision_skill_tool_mode == "off"
+    assert not hasattr(stale, "decision_skill_tool_mode")
     memory, _ = normalize_memory_settings({"memory_decision_curator_mode": "observe"})
-    assert memory.memory_decision_curator_mode == "observe"
+    assert not hasattr(memory, "memory_decision_curator_mode")
     # 按点位单独设期限只走用户长期设置覆盖层。
     view = patch(host, {"points.planning.timeout_seconds": 1.5})
     assert view["effective"]["points"]["planning"]["timeout_seconds"] == 1.5
     assert view["sources"]["points.planning.timeout_seconds"] == "owner"
 
 
+# LLM: 真正的时间校验位于显式离线迁移，不许将布尔或非有限数静默改默认。
+# 函数用途: 验证旧 YAML 时间迁移的严格类型边界。
 @pytest.mark.parametrize("value", ["true", "false", "0", "-1", "NaN", "Infinity", "1e400"])
 def test_invalid_decision_time_in_yaml_is_not_silently_replaced(tmp_path, value):
+    from agent_py_agent.agent.settings.config_io import load_simple_yaml
+    from agent_py_agent.agent.settings.model_credentials import migrate_legacy_decision_overrides
+
     path = tmp_path / "agent.yaml"
     path.write_text(f"decision_timeout_seconds: {value}\n")
     with pytest.raises(ModelProfileError):
-        load_config(path)
+        migrate_legacy_decision_overrides(load_simple_yaml(path), {})
 
 
+# LLM: 通用默认只归决策代码，用户点位覆盖与阶段上界仍沿真实设置服务。
+# 函数用途: 验证前台默认与用户覆盖都不受旧 YAML 影响。
 def test_foreground_default_is_three_seconds_and_a_user_point_override_is_kept(tmp_path):
-    from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
+    from agent_py_agent.agent.settings.decision_settings_defaults import decision_defaults
 
     # 2026-10-01：前台单次期限默认 2→3 秒；随包 YAML 与 dataclass 必须是同一个值，点位不覆盖时继承它。
-    assert AgentConfig().decision_timeout_seconds == 3.0
-    assert load_config(packaged_config_path()).decision_timeout_seconds == 3.0
+    assert decision_defaults(None)[0]["timeout_seconds"] == 3.0
+    assert not hasattr(AgentConfig(), "decision_timeout_seconds")
     host = host_at(tmp_path)
     # 2026-10-02（已定做法 10）：选模型点位不覆盖时默认不低于 5 秒，阶段默认 5 秒，所以实际也能等满 5 秒。
     point = execute(host, "read", {})["effective"]["points"]["model_selection"]
@@ -425,16 +442,19 @@ def test_foreground_default_is_three_seconds_and_a_user_point_override_is_kept(t
     assert view["effective"]["points"]["planning"]["max_request_seconds"] == 3.0
 
 
+# LLM: 选模型两点的默认下限不影响显式 owner/thread 覆盖，阶段默认从唯一决策定义取得。
+# 函数用途: 验证选模型点位默认、继承与会话覆盖。
 def test_selection_points_default_to_at_least_five_seconds_and_overrides_still_win(tmp_path):
     from agent_py_agent.agent.settings.decision_settings_defaults import (
         POINT_TIMEOUT_FLOOR_SECONDS,
         SELECTION_POINT_TIMEOUT_SECONDS,
+        decision_defaults,
     )
-    from agent_py_agent.agent.settings.user_config_capability import packaged_config_path
     from agent_py_agent.cli.chat_parts.tui_decision_menu import _source
 
     assert SELECTION_POINT_TIMEOUT_SECONDS == 5.0 and set(POINT_TIMEOUT_FLOOR_SECONDS) == {"model_selection", "subagent_model"}
-    assert AgentConfig().decision_stage_timeout_seconds == load_config(packaged_config_path()).decision_stage_timeout_seconds == 5.0
+    assert decision_defaults(None)[0]["stage_timeout_seconds"] == 5.0
+    assert not hasattr(AgentConfig(), "decision_stage_timeout_seconds")
     host = host_at(tmp_path)
     view = execute(host, "read", {})
     for name in ("model_selection", "subagent_model"):

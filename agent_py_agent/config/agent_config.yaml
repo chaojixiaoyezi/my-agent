@@ -93,12 +93,6 @@ run_task_workspace_enabled: true
 # - 宿主运行记录单独留在 runs/，不自动占用或移动用户 tasks/ 中的文件，也不额外调用模型取目录名。
 workspace_task_path_template: "tasks/{date}/{task_slug}"
 
-# 模型后端：留空表示尚未配置，不预选任何供应商或模型。
-# 打开 /model 新增并选择模型后才可工作；echo 仅在显式选择时用于本地离线调试。
-# - echo: 本地离线调试
-# - openai_compatible: 走 /chat/completions
-# - anthropic_compatible: 走 /v1/messages
-model_backend: ""
 # 也支持 openai_compatible（Chat）或 openai_responses（Responses）；Auth 尚未实现。
 
 # 记忆文件路径：JSONL 格式，每行一条记录
@@ -226,9 +220,6 @@ memory_compact_idle_trigger_percent: 60
 memory_compact_idle_seconds: 7200
 # 每拍最多检查的会话数，默认2；0关闭扫描，不迁移会话模型选择。
 memory_compact_idle_max_per_tick: 2
-# 旧兼容比例键：只有同一YAML来源未提供 memory_compact_trigger_percent 时才迁移；新旧并列以新键为准。
-# 新配置和代码内运行期设置请使用上面的新键；旧比例迁移后的实际范围同样限制在50..95。
-memory_compact_auto_trigger_percent: 90
 # 自动压缩触发线的绝对上限（单位 tokens），和上面的百分比取小：实际触发线 = min(模型窗口 × 百分比, 这个数)。
 # 默认 0 表示不封顶，行为和以前完全一样。模型窗口很大（比如 1M）时百分比最低也只能压到 50%（50 万），
 # 长期运行的后台线程会在几十万 token 之间跑很久才压缩，几个线程并发时容易顶住服务商的每分钟 token 上限；
@@ -831,29 +822,9 @@ log_level: "info"
 # - 默认空列表表示不加载第三方执行代码。
 extension_plugins:
 
-# 真实模型接口地址；不设置默认端点，填写或通过 /model 保存。
-api_base: ""
 
-# API Key：
-# - 不要把真实 key 写进仓库
-# - 本地运行时优先从环境变量读取
-# - 如果你非常确定这是本地私有文件，也可以手动填到这里，但不建议
-api_key: ""
 
-# API Key 对应的环境变量名
-# Windows PowerShell 示例：$env:AGENT_API_KEY="你的key"
-# macOS / Linux 示例：export AGENT_API_KEY="你的key"
-api_key_env: "AGENT_API_KEY"
 
-# 可选自定义模型请求头（JSON/YAML 对象）；禁止覆盖认证、Cookie 和 HTTP 传输字段。
-model_custom_headers: {}
-# 可选稳定会话头名称，例如 OpenCode Go 的 x-opencode-session；值由宿主生成，勿写静态 UUID。
-model_session_header: ""
-# OAuth 运行引用由 /model 根据当前用户生成，不含令牌；请勿手填，登录在模型菜单中操作。
-model_auth_ref: {}
-# 慢模型或单槽模型的额外排队预算（秒，0 至 86400）；只延长首事件等待，不改变流式空闲超时。
-# /model 可针对每个模型设置；默认 0，普通模型请求不增加等待。
-model_queue_wait_seconds: 0
 # 每个Python进程、每个HTTP origin（协议/主机/端口）的物理请求上限，0关闭。
 # 开启按可信owner公平排队；同origin共用，不跨进程/代理别名计额，不保证消除RPM/TPM限制。
 provider_max_concurrent_requests: 0
@@ -863,8 +834,6 @@ responses_ws_idle_ttl_seconds: 300
 # Responses会话WebSocket进程内空闲连接池最大保留连接数（0至256，0表示关闭连接复用）。
 responses_ws_max_idle_connections: 32
 
-# 模型名称；不设置占位名称，不回退到其它模型。
-model_name: ""
 
 # HTTP 基础超时秒数：非流式请求把它当总时长下限；流式请求把它当首包后的滚动空闲窗口。
 # 首包等待会根据本轮输入量单独扩展，健康流式输出不会再被这个值当作整次总墙钟强杀。
@@ -876,24 +845,7 @@ request_timeout: 240
 # 所以窗口较小（如 128K）的模型调大本值会让压缩更早触发。
 max_tokens: 65536
 
-# 当前模型一次最多能看多少 token（上下文窗口）；决定什么时候自动压缩对话，也限制单次输出最多占窗口的四分之一：
-# - 留空（默认）= 先用服务商报告的窗口，拿不到就按 128000 算。
-# - 填数字 = 就按这个数算，不再看服务商报告的值（/model 里给每个模型填的窗口就是这种）。
-# - 只有服务商报“超出上下文”、或压缩明显太早/太晚时才需要填。
-model_context_window_tokens:
-# 当前模型声明的输入模态（例如 [text, image]）。通常由 /model 档案的"输入模态"字段带入；留空表示未知，
-# 含图历史压缩时会用一次结构化视觉探针判断能否随图摘要，不按模型名猜。
-model_input_modalities: []
 
-# 采样温度（0 到 2，越高回答越发散）：
-# - 留空（默认）= 不发送，用服务商自己的默认值，大多数模型这样最稳。
-# - 填数字 = 每次请求都带上这个温度；/model 里给单个模型填的温度优先。
-# - 一般不用改；只有明确知道某个模型需要固定温度时才填。
-temperature:
-# 核采样概率，留空沿用供应商默认，显式值为 0 至 1。
-# 已核对官方/OpenCode Go/Zen 的 DeepSeek V4 Flash 思考模式默认 0.95，低于 0.95 按协议提升。
-# 其它模型/私有代理未填写时不发送；/model 可按单个模型覆盖。
-top_p: null
 
 # 智能程度（推理强度）全局默认档位，会话里可用 /effort 单独设置，派子代理时可用 effort 单独指定：
 # - auto：不发任何推理参数，由服务商按默认方式思考（默认）。
@@ -901,22 +853,6 @@ top_p: null
 # - low / medium / high / xhigh / max / ultra：由低到高的思考深度；实际发送只取当前协议和模型允许的档位。
 # 实际怎么发送取决于当前模型的思考控制方式（下一项）；模型不支持时本设置不改变请求，/effort 会如实说明。
 model_reasoning_effort: auto
-# 当前模型的思考控制方式，通常由 /model 档案的"思考控制"字段带入：
-# - auto：只对实测确认过的服务商给默认值（DeepSeek 官方 OpenAI 兼容接口按档位发送 reasoning_effort；
-#   DeepSeek 官方 Anthropic 兼容接口按思考开关发送），其余一律视为不支持、不发参数。
-# - effort：按档位发送（OpenAI 兼容接口写 reasoning_effort，Anthropic 兼容接口写 output_config.effort）。
-# - budget：按思考预算发送（Anthropic 兼容接口写 thinking.budget_tokens；部分服务商只按开/关生效）。
-# - none：不支持调节，不发任何推理参数。
-model_reasoning_control: auto
-# 当前模型声明的服务商思考档位（例如 [low, medium, high, xhigh, max, ultra]），通常由 /model 档案带入（ChatGPT 订阅模型添加时
-# 从服务商目录自动带上）；所有 effort 控制协议只发声明内的值：
-# - 留空（默认）= 未声明，Responses 沿通用 low / medium / high，Chat/Messages 沿原 low / medium / high / max。
-# - Responses 的 xhigh 按 xhigh → high，ultra 按 ultra → max → xhigh → high；max 仍按 max → xhigh → high。
-# - Chat/Messages 的 xhigh 按 high、ultra 按 max → high；Responses 关闭思考只在声明了 none 或 minimal 时发送。
-model_reasoning_levels: []
-# 当前模型能不能在请求里追加 configuration_update 项改思考档位（OpenAI GPT-6 系列的 Responses 接口有这个能力，
-# 改档位不会让前缀缓存失配）：auto 按已核对的模型名前缀 gpt-6 判断，on / off 由档案显式声明。目前只有压缩降档用它。
-model_reasoning_update_items: auto
 # 智能程度自动检测：用户把 /effort 设成 auto 以外的档位，而当前模型没有声明思考控制方式、又不在上面已核对的名单里时，
 # 宿主用已保存的凭据在后台检测一次：同一道短题按“低”“最高”和不带参数各发 3 次，比较用量里的推理 token
 # （接口不单独报告推理 token 时比较输出 token）。确认支持就把这个模型档案的思考控制改为 effort（可用 /effort revert 撤销），
@@ -930,11 +866,6 @@ reasoning_control_auto_probe: true
 #   供应商不支持调节智能程度、或已是最低档时只如实记录、照常续跑。
 # - false：关闭。续跑完全按原来的提示和档位进行（与改动前行为一致）。
 model_truncation_thinking_downgrade: true
-# 当前模型的结构化输出方式（记忆整理、自动总结 Skill 等后台结构化调用使用），通常由 /model 档案的"结构化输出"字段带入：
-# - auto：只对实测确认过的服务商改用 json_object（DeepSeek 官方 OpenAI 兼容接口不接受 json_schema），其余用原生方式。
-# - native：用接口自带的严格方式（OpenAI 兼容接口发 json_schema，Anthropic 兼容接口用强制工具信封）。
-# - json_object：只适用于 OpenAI 兼容接口；发 JSON 对象模式，并把 schema 写进提示，结果仍由程序严格校验。
-model_structured_output: auto
 
 # ===== 嵌入服务（记忆和工具共用）=====
 # 语义检索要先把文字变成向量，这件事由下面配置的“嵌入模型档案”来做。记忆的语义召回（memory_semantic_recall）
@@ -1151,7 +1082,7 @@ tool_catalog_mode: "compact"
 tool_catalog_categories: []
 
 # 渐进式披露：这些 category 的工具仍注册、仍受相同权限控制，但不进初始模型 schema；
-# 模型通过 tool_search 搜索并加载命中工具，list_tools 可查看完整注册表。显式 allowed_tools
+# 模型通过 tool_search 搜索并加载命中工具，tool_search(action=catalog) 可查看完整注册表。显式 allowed_tools
 # 的后台/runner 回合本身已是结构化工具选择，不再延迟。默认收起协作、web、vision、meta 和 MCP；
 # orchestration 与 goal 不收起，直属代理和持久目标控制默认首次调用就可见，避免把计划误当作已建立目标。
 # 设为 [] 即恢复全部工具直出。
@@ -1166,13 +1097,13 @@ tool_catalog_deferred_categories: ["collaboration", "web", "vision", "meta", "mc
 #   每次调用约省 4.4K token 的工具说明）。关回 false 即恢复“全量直出”旧行为；修改后重启 Gateway 生效。
 tool_default_deferral_enabled: true
 
-# 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 list_tools/tool_search 读取。
+# 工具目录条目是否带示例；默认关闭以控制每轮上下文，完整示例仍可通过 tool_search(action=catalog) 读取。
 tool_catalog_include_examples: false
 
 # 每次注入 prompt 的“工具详细说明”条数已固定为代码常量（agent/core.TOOL_RETRIEVAL_LIMIT，2026-09-28 参数减量）。
 
 # 是否启用真实语义工具检索。向量来自“嵌入服务”一节的 embedding_model_profile 档案（与记忆语义召回共用）；没配档案时
-# 语义通道明确标为 unconfigured 并只走关键词；端点故障时也降级关键词，错误可从 list_tools.tool_retrieval 查看。
+# 语义通道明确标为 unconfigured 并只走关键词；端点故障时也降级关键词，检索状态可从工具目录事实查看。
 # 在 /model 里选了向量模型后，工具检索也会用它发嵌入请求；选向量模型的入口不会改本开关。
 tool_vector_search_enabled: true
 
@@ -1241,26 +1172,7 @@ conversation_terminal_tool_fold_enabled: true
 # 缓存仍可能有效时保留更完整的有界工具尾巴；过期后才切换成短折叠，避免一分钟内追问就主动破坏热前缀。
 # 0 表示立即短折叠。不同模型/网关缓存时长可能不同，应按 provider cache-read 账本校准，不按延迟猜测。
 conversation_terminal_tool_hot_tail_seconds: 300
-# 命令行清理旧审计记录时保留多少天。
-# 超过这个天数的审计条目会被删掉。
-# 调小会提前删除审计证据，所以只有在明确知道自己在放弃多久以前的记录时才改。
-# 写成 `0` 表示永久保留，清理时不删除任何记录；单次命令也可以用 `--days` 临时覆盖。
-# （安全边界：只能由用户在配置文件里改，模型不能改）
-cli_audit_cleanup_days: 90
 
-# 决策增强：默认关闭；保存设置不发网络请求。修改时间只作用后续请求，不重置已开始阶段的预算。
-decision_enabled: false
-decision_experiment_enabled: false  # 仅实验能力开关；另需宿主显式有界授权，当前缺可靠输入上界时禁止实验联网
-# observe 采样：开着只会给 observe 点位按自然小时限流，每点位每小时成功调用满 6 次就先停，这一小时不再问决策模型；
-# 失败和超时不算名额（出问题的点位会一直被观察），apply 点位完全不受影响。默认关=现在行为不变。
-decision_observe_sampling_enabled: false
-# observe 不挡回复：开着时，会话里处于观察模式的决策点改在后台问决策模型，回复不用再等它（观察结果照样记日志和用量）；
-# 后台等待上限用下面的 decision_background_timeout_seconds。apply（正式使用）、实验和后台点位不受影响。
-# 默认关：决策的行为与时序不变，只是结果日志每行多一个附加字段 blocking。
-decision_observe_nonblocking_enabled: false
-decision_timeout_seconds: 3.0  # 前台单次等待；必须为有限正秒数
-decision_stage_timeout_seconds: 5.0  # 同一阶段累计等待（前台点位实际等待取点位期限与它的较小值，选模型两点默认 5 秒）；必须为有限正秒数
-decision_background_timeout_seconds: 4.0  # 后台单次等待；必须为有限正秒数
 # 决策调用复用长连接：打开后同一进程里的决策请求复用已经建好的 HTTPS 连接，省掉每次约 0.9 秒的代理隧道与 TLS 握手
 # （2026-10-01 实测：复用后单次快约 1 秒）。空闲超过 60 秒的连接不再复用；复用连接上发送失败照常算一次失败，不会自动重发。
 # 默认关（新功能先关，线上验收后再开）：关着就是每次新建连接的老做法。不改请求内容、重试次数或等待期限。
@@ -1270,30 +1182,10 @@ decision_connection_reuse_enabled: false
 # 到达计数：每个点位每次检查的结果（真正调用了，或没调用的原因，如“这一步不是运行测试的命令”），只在进程内累加，每个用户最多每分钟合并写一次盘、保留 7 天。
 # audit_records 和 TUI 决策菜单据此用大白话说明“最近为什么没触发”，不会把 0 次误判为没接线。默认开着就好。
 decision_skip_records_enabled: true
-decision_profile_id: ""  # 原模型目录的 Decision 引用；空表示未绑定，不保存第二份凭据
-# 各决策点位的单次期限与决策模型不在配置文件里逐个设置：默认继承上面的通用期限与 decision_profile_id；
-# 需要给某个点位单独设时，用 TUI 决策菜单的“逐接入点设置”，或让 my-agent 用 user_config 的 decision_patch 按点位覆盖。
-decision_model_selection_mode: off  # off 关闭 / observe 仅观察建议与输入 token / apply 采用合法建议；不计算决策模型价格
-# 选模型多久问一次决策模型：every_turn 每条消息都问（默认，与以前一样）；structure_change 只在新会话、这次会话压缩之后、
-# 模型目录（可选模型）变化或当前模型被换掉时才问，结构没变就沿用上次的判断、不再调用。也可以在 TUI 决策菜单或让 my-agent 按会话单独设置。
-decision_model_selection_cadence: every_turn
 # - 规划（planning）、交付质量（delivery_quality）、动作候选（action_candidate）三个决策点位发给决策模型的当前请求字数：
 #   更长时自动取开头和结尾的节选（中间写明省略多少字），并如实标注为节选，决策照常进行；一般不用改。
 #   0 表示不截取，但仍受决策协议 256 KB 输入上限约束。选择模型点位的两段材料上限是内部常量（只截开头），不是用户参数。
 decision_request_max_chars: 2000
-decision_external_material_order_mode: off  # 已归档批量网页的阅读优先级提示；observe 仅观察，apply 追加建议，不删改原页或来源
-decision_planning_mode: off  # 现有 Todo 优先级建议；observe 仅观察，apply 只附软提示，不创建目标、待办或子代理
-decision_delivery_quality_mode: off  # 交付复核焦点：run_command 产生新验证事件后建议先复核哪个已有焦点；observe 仅观察，apply 只追加提示，不跑测试、不改结果或完成状态
-decision_action_candidate_mode: off  # 动作候选：插件只读观察工具返回宿主校验过的候选后，建议下一步先核对哪个候选；observe 仅观察，apply 只追加提示，不执行动作、不生成参数
-decision_skill_proposal_review_mode: off  # 仅用户长期设置：`skills proposals list` 有 2—30 条待确认 Skill 提案时请决策模型建议审核先后；observe 仅观察，apply 只重排展示并加标签，不确认、拒绝或改写提案/Skill
-memory_decision_pre_recall_mode: off  # 召回前补充查询建议；始终先执行原召回，不依据自然语言或决策跳过历史
-# 召回前补充查询的片段材料：query_text 只给片段文字（默认，与原做法相同）；
-# with_new_facts 时宿主先按原检索预检每个片段能新增的正式事实（不记访问），把条数与摘要交给决策模型，补不出新事实的片段不给选，
-# 全都补不出就不调用。每个片段多一次查询嵌入。也可以在 TUI 决策菜单或让 my-agent 按会话单独设置。
-memory_decision_pre_recall_fragment_material: query_text
-memory_decision_recall_mode: off  # 记忆召回决策；不绕过原读取权限
-memory_decision_curator_mode: off  # 记忆整理决策；不授予写人格或晋升权限
-memory_decision_curator_relation_mode: off  # 用户后台独立开关：新来源与完整、带版本正式条目的关系建议；不直接合并或晋升
 
 # AGENTS来源配置仅保存在当前owner的persona/agents_source.json；本开关不授予额外路径权限。
 agents_source_enabled: true

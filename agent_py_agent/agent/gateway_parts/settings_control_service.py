@@ -42,6 +42,7 @@ from ..settings.user_config_capability import (
     USER_SETTINGS_BOUNDARY_KEYS,
     effect_text,
     mask_value,
+    read_config_fact,
     user_config_path,
 )
 from ..user_space.owner_access import is_complete_local_admin_owner
@@ -229,7 +230,7 @@ def _common_line(spec: ParameterSpec, config: object, stored: dict, capability_p
         marks += f"（改过，默认 {_value(spec, spec.default)}）"
     if spec.key in stored and _compare_text(stored[spec.key]) != _compare_text(running):
         marks += f"（已改成 {_value(spec, stored[spec.key])}，发 /restart 后生效）"
-    note = "（随包默认、不可覆盖）" if spec.source == SOURCE_RUNTIME_GUARD else ""
+    note = "（宿主部署策略；未配置时用 Python 默认）" if spec.source == SOURCE_RUNTIME_GUARD else ""
     return f"- {spec.key} = {_value(spec, running)}{marks}{note}：{_brief(spec.description)}"
 
 
@@ -285,7 +286,7 @@ def _all(config: object, _argument: str, *, capability_config: object = None,
     path = _user_path(config)
     changed = set(_changed_keys(registry, _stored(config)))
     writable = sum(spec.writable for spec in registry.values())
-    lines = [f"全部参数：共 {len(registry)} 个，其中 {writable} 个可由 my-agent 或你在这里修改，其余属于安全边界。",
+    lines = [f"全部参数：共 {len(registry)} 个，其中 {writable} 个可由 my-agent 在这里修改；其它项以单项写入口说明为准。",
              f"用户配置：{path}（修改在重启 Gateway 后生效，发 /restart）",
              f"与默认值不同的参数：{len(changed)} 个（下面标［改过］）"]
     recent = parameter_history(user_path=path, limit=3)
@@ -316,10 +317,11 @@ def _category_lines(registry: dict[str, ParameterSpec], config: object, changed:
 def _all_line(spec: ParameterSpec, config: object, changed: set[str],
               capability_path: Path | None = None) -> str:
     marks = ("［改过］" if spec.key in changed else "") + ("" if spec.writable else "［安全边界］")
-    note = "（随包默认、不可覆盖）" if spec.source == SOURCE_RUNTIME_GUARD else ""
+    note = "（宿主部署策略；未配置时用 Python 默认）" if spec.source == SOURCE_RUNTIME_GUARD else ""
     return f"- {spec.key} = {_value(spec, running_value(spec, config, capability_path=capability_path))}{marks}{note}"
 
 
+# LLM: 搜索沿真实参数目录及来源，部署守卫标注宿主策略，不把邻接 YAML 当权威。
 # 函数用途: /settings search <关键词> —— 按参数名与中文说明找参数。
 def _search(config: object, argument: str, *, capability_path: Path | None = None) -> str:
     found = search_parameters(argument, limit=10)
@@ -329,7 +331,7 @@ def _search(config: object, argument: str, *, capability_path: Path | None = Non
     for spec in found:
         flag = "可改" if spec.writable else "安全边界"
         summary = spec.description[:60] + ("…" if len(spec.description) > 60 else "")
-        note = "（随包默认、不可覆盖）" if spec.source == SOURCE_RUNTIME_GUARD else ""
+        note = "（宿主部署策略；未配置时用 Python 默认）" if spec.source == SOURCE_RUNTIME_GUARD else ""
         lines.append(f"- {spec.key}［{flag}］当前 {_value(spec, running_value(spec, config, capability_path=capability_path))}{note}："
                      f"{summary or '（没有说明）'}")
     return "\n".join(lines)
@@ -369,6 +371,10 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
     path = _user_path(config)
     stored = load_simple_yaml(path) if path.is_file() else {}
     override = _override_text(spec, stored, capability_path)
+    if spec.source == SOURCE_RUNTIME_GUARD:
+        fact = read_config_fact(spec.key, user_path=path, default_path=path, config=config)
+        override = {"deployment_policy": "不适用（宿主部署策略有显式覆盖）", "python_default": "不适用（Python 默认）"}.get(
+            fact["source"], "未验证（缺少可信宿主策略）")
     writable = _writable_text(spec)
     if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
         writable = f"安全边界，仅用户经 /settings 修改，模型不能改；{effect_text(spec.effect)}"
@@ -376,12 +382,13 @@ def _show(config: object, argument: str, *, capability_path: Path | None = None)
     applied_line = ([f"实际效果：{applied[0]}（{applied[1]}；按默认模型计算，用 /model 切换过的会话可能不同）"]
                     if applied is not None else [])
     # 元数据行只在有值时显示：来源文件（非主配置）、单位、范围、归属模块、主要读取方。
-    metadata_lines = ([f"来源：{spec.source}_config.yaml"] if spec.source != "agent" else [])
+    metadata_lines = (["来源：宿主 config/deployment_policy.json（未配置时用 Python 默认）"] if spec.source == SOURCE_RUNTIME_GUARD
+                      else [f"来源：{spec.source}_config.yaml"] if spec.source != "agent" else [])
     metadata_lines += [line for field, label in (("unit", "单位"), ("range", "范围"),
                                                  ("owner_module", "归属模块"), ("reader", "读取方"))
                        if (line := _metadata_line(spec, field, label))]
     # 运行时没有覆盖层的来源（runtime_guard）只能看随包默认，修改会走只读拒绝。
-    readonly_note = ("（随包默认、不可覆盖：该配置运行时没有用户覆盖层，写了也不会生效）"
+    readonly_note = ("（宿主部署策略，不读取 owner/task/run YAML）"
                      if spec.source == SOURCE_RUNTIME_GUARD else "")
     return "\n".join([
         f"{spec.key}（{spec.category}，{spec.value_type}）",
@@ -402,8 +409,9 @@ def _writable_text(spec: ParameterSpec) -> str:
     if spec.writable:
         return f"可以修改，{effect_text(spec.effect)}"
     if spec.source == SOURCE_RUNTIME_GUARD:
-        return ("不能在这里修改：属于 runtime_guard 配置，运行时只读随包文件、没有用户覆盖层，"
-                "改了也不会生效；只能查看和搜索。")
+        return "不能在这里修改：由完整宿主管理员通过部署策略专用写入口维护，不接受 owner/task/run 覆盖。"
+    if spec.tier == "deployment":
+        return "不能在这里修改：仅部署配置，需使用对应的宿主部署入口。"
     if spec.key in USER_SETTINGS_BOUNDARY_KEYS:
         return f"安全边界，仅用户经 /settings 修改，模型不能改；{effect_text(spec.effect)}"
     return f"不能在这里修改：{BOUNDARY_KEYS.get(spec.key, _BOUNDARY_TEXT)}"

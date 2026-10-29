@@ -1,3 +1,5 @@
+# LLM: 参数元数据只面向现存配置，离线迁移不得冒充业务读取方，模型字段不再进参数中心。
+# 模块用途: 验证参数单位、范围、真实读取方与展示。
 """P8 参数登记表元数据：单位/范围/归属模块/读取方的推导与展示（2026-10-01）。
 
 来源：三线收口 P8（设计目标 1，见 docs/design/PARAMETER_CENTER.md 第 2 节）。
@@ -44,22 +46,26 @@ def test_unit_derived_from_key_suffix():
     assert unit_for_key("model_name") == ""
 
 
+# LLM: 无单位样本使用现存普通字段，迁走的模型字段不再保留为目录假项。
+# 函数用途: 验证真实登记字段的单位。
 def test_registry_units_attach_to_real_fields():
     """真实字段的单位进登记表；无单位的键留空，不硬猜。"""
     registry = parameter_registry()
     assert registry["memory_curator_interval_seconds"].unit == "秒"
     assert registry["tool_read_max_chars"].unit == "字符"
-    assert registry["model_name"].unit == ""
+    assert registry["agent_name"].unit == "" and "model_name" not in registry
 
 
+# LLM: canonical范围50–95，模型采样校验归档案 schema，不重建平铺 top_p。
+# 函数用途: 验证登记范围与有效校验一致。
 def test_range_from_validation_specs():
     """范围从现有校验规格取：整数 min-max / ≥min、百分比、枚举；没有校验的留空。"""
     registry = parameter_registry()
     assert registry["request_timeout"].range == "1-600"
     assert registry["max_tokens"].range == "≥1"
     assert registry["memory_curator_interval_seconds"].range == "60-604800"
-    assert registry["memory_compact_auto_trigger_percent"].range == "50-100"
-    assert registry["top_p"].range == "0-1"
+    assert registry["memory_compact_trigger_percent"].range == "50-95"
+    assert "memory_compact_auto_trigger_percent" not in registry and "top_p" not in registry
     assert registry["log_level"].range == "debug|info|warning|error|critical"
     assert registry["agent_name"].range == ""
 
@@ -84,17 +90,19 @@ def test_every_listed_key_has_a_reader():
                             if spec.source == "agent" and key not in LOADER_METADATA_KEYS}
 
 
+# LLM: 迁移器属于输入定义侧，不得压过真正的 compact_threshold_policy 消费方。
+# 函数用途: 验证读取方目录排除定义、规范化与离线迁移。
 def test_readers_exclude_definition_normalization_registration_files():
     """P8 验收后修订（2026-10-02）：定义/规范化/登记类文件不再当读取方——
     Wave9后memory_compact_auto_trigger_percent的真实消费方是compact_threshold_policy，运行策略不得用占位读取改变归属。"""
     registry = parameter_registry()
-    assert registry["memory_compact_auto_trigger_percent"].reader == "agent/conversation/compact_threshold_policy"
+    assert registry["memory_compact_trigger_percent"].reader == "agent/conversation/compact_threshold_policy"
     assert registry["memory_compact_recovery_target_percent"].reader == "agent/agent_core/runtime/context_compactor"
     assert registry["memory_compact_auto_trigger_max_tokens"].reader == "agent/agent_core/runtime/context_compactor"
     assert registry["memory_curator_interval_seconds"].reader == "agent/memory_store/curator_models"
     assert registry["memory_resume_auto_context_mode"].reader == "agent/memory_archive/resume_context"
     assert registry["log_level"].reader == "agent/settings/services/runtime_config_env"
-    assert registry["api_base"].reader == "agent/gateway_parts/model_control_cards"
+    assert "api_base" not in registry
 
 
 def test_readers_do_not_depend_on_file_walk_order(monkeypatch):
@@ -139,6 +147,8 @@ def _config_with_fields() -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
+# LLM: 空元数据用现存普通字段验证，已退役模型字段由专用入口查看。
+# 函数用途: 验证设置详情按真实元数据展示。
 def test_show_displays_metadata_only_when_present():
     """/settings show 显示单位/范围/归属模块/读取方；没推导出的不显示对应行。"""
     config = _config_with_fields()
@@ -146,7 +156,7 @@ def test_show_displays_metadata_only_when_present():
     assert "范围：1-600" in shown
     shown_unit = _show(config, "memory_curator_interval_seconds")
     assert "单位：秒" in shown_unit
-    bare = _show(config, "model_name")
+    bare = _show(config, "agent_name")
     assert "范围：" not in bare and "单位：" not in bare
 
 

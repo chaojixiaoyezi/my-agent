@@ -56,6 +56,8 @@ def describe_raw_value(key: object, value: object) -> str:
     return text[:_MAX_WARNING_VALUE_CHARS] + "…（已截断）"
 
 
+# LLM: 旧跨线规格表可能尚含已退役字段；只归一当前 schema 的整数，不重新生成已经删除的平铺入口。
+# 函数用途: 按当前字段定义应用整数校验，产生规范值及有界警告。
 def _apply_int_fields(
     out: dict[str, object],
     defaults: object,
@@ -63,6 +65,8 @@ def _apply_int_fields(
 ) -> list[str]:
     warnings: list[str] = []
     for key, min_val, max_val in specs:
+        if not hasattr(defaults, key):
+            continue
         value, warn = CoercionService.coerce_int(
             key, out.get(key), getattr(defaults, key),
             min_val=min_val, max_val=max_val,
@@ -407,7 +411,6 @@ _RUNTIME_BOOL_FIELDS = (
     "auto_save_memory", "local_store_fts_enabled",
     "sqlite_connection_reuse", "background_tick_cheap_checks",
     "enable_file_syntax_diagnostics", "decision_skip_records_enabled",
-    "decision_observe_sampling_enabled", "decision_observe_nonblocking_enabled",
     "conversation_terminal_tool_fold_enabled", "compact_recall_hint_enabled",
     "enable_subagents", "enable_self_learning", "enable_self_map", "self_learning_include_background",
     "audit_enabled",
