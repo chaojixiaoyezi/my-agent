@@ -229,6 +229,7 @@ class CuratorInputBatch:
     skipped_audit_cursor: str = ""
     # 消息级 learning_excluded 连续前缀被宿主核验跳过的线程游标；坏线程不写入此表。
     skipped_message_cursors: dict[str, str] = field(default_factory=dict)
+    candidate_anchors: tuple[dict[str, object], ...] = ()
 
     # LLM: 保持原材料顺序；标签校验来源 hash，关系同时校验正式 ref/hash/版本；缩批不能遗留尾部建议。
     # 函数用途: 生成一次后台模型调用的完整结构化输入。
@@ -238,6 +239,8 @@ class CuratorInputBatch:
             "audit_events": [item.to_model() for item in self.audit_events],
             "formal_memories": [item.to_model() for item in self.formal_memories],
         }
+        if self.candidate_anchors:
+            payload["candidate_anchors"] = list(self.candidate_anchors)
         refs = {("message", item.message_id, item.content_hash) for item in self.messages}
         refs.update(("audit", item.event_id, item.content_hash) for item in self.audit_events)
         annotations = [{**vars(item), "required_refs": [{"kind": kind, "ref": ref} for kind, ref in item.required_refs]}
@@ -257,6 +260,36 @@ class CuratorInputBatch:
     # 函数用途: 计算本批游标后的真实用户轮次数。
     def user_turns(self) -> int:
         return sum(1 for item in self.messages if item.role == "user")
+
+
+# LLM: 只注入本批宿主结构化scope匹配的lesson/HOT；每scope/type最多3条、总计12条，模型不得扩scope。
+# 函数用途: 提供可精确链接的候选锚点，避免同一经验反复新建一次票。
+def attach_candidate_anchors(batch, candidates):
+    scopes = {("personal", "personal"), ("global", "global")}
+    for message in batch.messages:
+        scopes.add(("session", message.thread_id))
+        task_id = str(message.metadata.get("task_id") or "")
+        if task_id:
+            scopes.add(("project", "project:" + task_id))
+    for event in batch.audit_events:
+        if event.task_id:
+            scopes.add(("project", "project:" + event.task_id))
+    anchors, counts = [], {}
+    rows = candidates.readonly_rows(statuses={"pending_review", "approved", "observed", "blocked_missing_evidence"})
+    for row in sorted(rows, key=lambda item: (item.last_observed_at, item.candidate_id), reverse=True):
+        scope = (row.scope["scope_type"], row.scope["scope_key"])
+        key = (*scope, row.candidate_type)
+        if (scope not in scopes or row.candidate_type not in {"lesson", "hot_rule"}
+                or row.proposed_action != "add" or counts.get(key, 0) >= 3):
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        anchors.append({"candidate_id": row.candidate_id, "candidate_type": row.candidate_type,
+            "content": row.content[:300], "subject_key": row.subject_key, "scope": dict(row.scope),
+            "promotion_target": row.promotion_target, "target_entry_id": row.target_entry_id,
+            "occurrence_count": row.occurrence_count, "last_observed_at": row.last_observed_at})
+        if len(anchors) >= 12:
+            break
+    return replace(batch, candidate_anchors=tuple(anchors))
 
 
 # LLM: This adapter reads only bounded metadata from the existing runtime-memory control plane;

@@ -479,7 +479,7 @@ def _retention_drafts(candidates):
             for row, (status, age) in zip(observed, specs, strict=True)]
     candidates.path.write_text("".join(json.dumps(row.to_record()) + "\n" for row in rows), encoding="utf-8")
     old_ids = {row.candidate_id for row, (status, age) in zip(rows, specs, strict=True)
-               if status != "promoted" and age > 30}
+               if status not in {"promoted", "approved"} and age > 30}
     return rows, old_ids
 
 
@@ -532,6 +532,11 @@ def test_retention_draft_binding_becomes_superseded_tombstone(tmp_path, status):
     old = replace(old, learning_source_coverage=initial_source_coverage(old))
     candidates.path.write_text(json.dumps(old.to_record()) + "\n", encoding="utf-8")
     applied = service.apply(now=NOW)
+    if status == "approved":
+        assert applied.ok and not applied.actions
+        assert candidates.get(row.candidate_id).content == old.content
+        assert candidates.get(row.candidate_id).commit_obligation
+        return
     assert applied.ok and [action.record_id for action in applied.actions] == [row.candidate_id]
     tombstone = candidates.get(row.candidate_id)
     assert tombstone.status == "superseded" and tombstone.content == ""

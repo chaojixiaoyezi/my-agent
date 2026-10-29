@@ -35,7 +35,7 @@ from .candidate_models import MemoryCandidate
 from .candidates import (
     RETENTION_ELIGIBLE_CANDIDATE_STATUSES,
     CandidateService,
-    _is_binding_tombstone,
+    candidate_retention_eligible,
 )
 from .reference_pins import ReferencePinSnapshot
 from .retention_models import (
@@ -45,12 +45,17 @@ from .retention_models import (
     MemoryRetentionReport,
 )
 from .retention_scan import (
+    _load_policy,
+    _runtime_unlocked,
     current_retention_pins,
     current_tool_manifest_references,
     file_fingerprint,
     paths_fingerprint,
+    runtime_terminal,
+    scratch_inventory,
     security_audit_content,
     security_audit_paths,
+    task_scratch_unlocked,
     trash_payload_pinned,
     tree_fingerprint,
     valid_fingerprint,
@@ -212,8 +217,7 @@ def _apply_candidate_actions(
 
         updated = _timestamp(candidate_retention_time(record))
         eligible = bool(
-            record.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
-            and not _is_binding_tombstone(record)
+            candidate_retention_eligible(record)
             and updated is not None
             and action.cutoff_timestamp is not None
             and updated < action.cutoff_timestamp
@@ -266,6 +270,8 @@ def _apply_action(
     _assert_safe_target(action.path, allowed_roots)
     if not valid_fingerprint(action.source_fingerprint):
         return replace(action, status="state_changed")
+    if action.operation == "scratch_clear":
+        return _clear_scratch(home, action, now)
     if action.operation == "security_audit_compact":
         if action.path not in security_audit_paths(home) or action.cutoff_timestamp is None:
             return replace(action, status="state_changed")
@@ -307,6 +313,80 @@ def _apply_action(
     if action.operation == "conversation_trash":
         return _trash_conversation(home=home, action=action, now=now)
     raise ValueError(f"unsupported retention operation: {action.operation}")
+
+
+# LLM: scratch仅接受规范tmp或runs中间产物；policy/DB/状态/元数据指纹逐次重核，父链nofollow。
+# 函数用途: 只删本次已验证的旧普通文件和空子目录，不递归删除新到文件或整个任务。
+def _clear_scratch(home, action, now):
+    if action.cutoff_timestamp is None:
+        return replace(action, status="state_changed")
+    policy, error = _load_policy(Path(home.owner_retention_json))
+    if error is not None or policy is None or policy.legal_hold or not _runtime_unlocked(home, now):
+        return replace(action, status="state_changed")
+    if action.category == "task_tmp":
+        try:
+            parts = action.path.relative_to(Path(home.owner_tasks_dir)).parts
+        except ValueError:
+            return replace(action, status="state_changed")
+        if (len(parts) != 3 or parts[-1] != "tmp" or policy.task_tmp_idle_days <= 0
+                or not task_scratch_unlocked(home, action.path.parent, policy.legal_hold_task_ids, now)):
+            return replace(action, status="state_changed")
+    elif action.category == "run_scratch":
+        authority = action.authority_path
+        if authority is None or file_fingerprint(authority) != action.authority_fingerprint:
+            return replace(action, status="state_changed")
+        task = authority.parent.parent
+        runs = Path(home.owner_home_dir) / "runs"
+        relative = task.relative_to(runs)
+        if len(relative.parts) not in {1, 2} or action.path not in {task / "tmp", task / "work/tmp", task / "work/blobs/tool_outputs"}:
+            return replace(action, status="state_changed")
+        report = read_json_object_report(authority, context="memory_retention.run_scratch")
+        if report.load_error or report.payload.get("task_id") in policy.legal_hold_task_ids or policy.tmp_days <= 0:
+            return replace(action, status="state_changed")
+        state = report.payload
+        status = str(state.get("status") or "").upper()
+        terminal = ((status, _timestamp(state.get("updated_at"))) if status in TASK_TERMINAL_STATUSES
+                    else runtime_terminal(home, task, state, now) if status == "RUNNING" else None)
+        if terminal is None or terminal[1] is None or terminal[1] >= action.cutoff_timestamp:
+            return replace(action, status="state_changed")
+    else:
+        return replace(action, status="state_changed")
+    try:
+        digest, members = scratch_inventory(action.path, action.cutoff_timestamp)
+        if digest != action.source_fingerprint:
+            return replace(action, status="state_changed")
+        # 从owner根逐段nofollow打开，避免中间目录被换成链接后误删兄弟输入/输出。
+        root_parts = action.path.relative_to(Path(home.owner_home_dir)).parts
+        fd = open_directory_beneath(Path(home.owner_home_dir), root_parts, require_dir_fd=True)
+        os.close(fd)
+        for relative, expected in members:
+            parts = Path(relative).parts
+            if stat.S_ISDIR(expected[-1]):
+                continue
+            descriptor = open_directory_beneath(Path(home.owner_home_dir), root_parts + parts[:-1], require_dir_fd=True)
+            try:
+                observed = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+                from .retention_scan import _file_identity
+
+                if _file_identity(observed) != expected:
+                    return replace(action, status="state_changed")
+                os.unlink(parts[-1], dir_fd=descriptor)
+            finally:
+                os.close(descriptor)
+        for relative, expected in sorted(members, key=lambda item: len(Path(item[0]).parts), reverse=True):
+            if stat.S_ISDIR(expected[-1]):
+                parts = Path(relative).parts
+                descriptor = open_directory_beneath(Path(home.owner_home_dir), root_parts + parts[:-1], require_dir_fd=True)
+                try:
+                    observed = os.stat(parts[-1], dir_fd=descriptor, follow_symlinks=False)
+                    if not stat.S_ISDIR(observed.st_mode) or (observed.st_dev, observed.st_ino) != expected[:2]:
+                        return replace(action, status="state_changed")
+                    os.rmdir(parts[-1], dir_fd=descriptor)
+                finally:
+                    os.close(descriptor)
+        return replace(action, status="deleted")
+    except (OSError, NoFollowPathError):
+        return replace(action, status="state_changed")
 
 
 # LLM: 只有计划和当前摘要均合法且相等才允许unlink；mtime仍须早于cutoff。

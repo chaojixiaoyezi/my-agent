@@ -64,6 +64,7 @@ from .curator_inputs import (
     CuratorInputBatch,
     CuratorMessageSource,
     CuratorToolReferenceSource,
+    attach_candidate_anchors,
     collect_curator_inputs,
 )
 from .curator_models import (
@@ -523,6 +524,7 @@ class _CuratorExecutionMixin:
             )
         # 按会话的主代理模型挑出这一次处理的那组会话；没有路由时全批照旧。
         batch = _apply_route(context, batch, self.dependencies.model_router)
+        batch = attach_candidate_anchors(batch, self.candidate_service)
         context.route["batch_thread_ids"] = tuple(dict.fromkeys(item.thread_id for item in batch.messages))
         # 先按最终提示实测长度裁进预算：超预算的积压只截尾部、留给下一轮重放，不能让同一批反复失败卡住游标。
         batch, fit_warnings = fit_batch_to_input_budget(batch, max_chars=self.config.max_input_chars)

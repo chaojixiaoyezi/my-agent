@@ -144,6 +144,7 @@ def _candidate_schema(
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "proposed_action": {"type": "string", "enum": sorted(actions)},
         "target_entry_id": nullable_string,
+        "link_candidate_id": nullable_string,
         "conflicts_with": strings,
         "promotion_target": {"type": "string", "enum": sorted(promotion_targets)},
     }

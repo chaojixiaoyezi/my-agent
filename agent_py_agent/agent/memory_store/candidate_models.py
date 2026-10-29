@@ -20,7 +20,7 @@ from typing import Any
 from ..common.text_norm import fold_key, nfc
 from .operations import memory_content_hash, normalized_memory_content
 
-CANDIDATE_SCHEMA_VERSION = "my-agent.memory-candidate.v2"
+CANDIDATE_SCHEMA_VERSION = "my-agent.memory-candidate.v3"
 
 CANDIDATE_TYPES = frozenset(
     {
@@ -70,12 +70,13 @@ CANDIDATE_STATUSES = frozenset(
         "rejected",
         "superseded",
         "expired",
+        "withdrawn",
         "blocked_missing_evidence",
         "blocked_conflict",
     }
 )
 TERMINAL_CANDIDATE_STATUSES = frozenset(
-    {"promoted", "rejected", "superseded", "expired"}
+    {"promoted", "rejected", "superseded", "expired", "withdrawn"}
 )
 
 _STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -83,6 +84,7 @@ _STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
         {
             "pending_review",
             "rejected",
+            "withdrawn",
             "superseded",
             "expired",
             "blocked_missing_evidence",
@@ -93,6 +95,7 @@ _STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
         {
             "approved",
             "rejected",
+            "withdrawn",
             "superseded",
             "expired",
             "blocked_missing_evidence",
@@ -100,15 +103,16 @@ _STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
         }
     ),
     "blocked_missing_evidence": frozenset(
-        {"pending_review", "rejected", "superseded", "expired"}
+        {"pending_review", "rejected", "withdrawn", "superseded", "expired"}
     ),
     "blocked_conflict": frozenset(
-        {"pending_review", "rejected", "superseded", "expired"}
+        {"pending_review", "rejected", "withdrawn", "superseded", "expired"}
     ),
     "approved": frozenset(
         {
             "promoted",
             "rejected",
+            "withdrawn",
             "superseded",
             "expired",
             "blocked_missing_evidence",
@@ -117,8 +121,9 @@ _STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
     ),
     "promoted": frozenset({"superseded", "expired"}),
     "rejected": frozenset(),
-    "superseded": frozenset(),
-    "expired": frozenset(),
+    "superseded": frozenset({"withdrawn"}),
+    "expired": frozenset({"withdrawn"}),
+    "withdrawn": frozenset(),
 }
 
 _SCOPE_KEY_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
@@ -213,6 +218,8 @@ class CandidateObservation:
     # LLM: 仅宿主输入快照或工具解析目标时填写，模型不得提出；None 是没有版本证明，不能推测为当前版本。
     # 字段用途: 固定本次观察所依据的正式目标版本。
     target_entry_version: int | None = None
+    # 宿主在当前输入锚点集合内核对后才能使用；不是正式目标ID或晋升权限。
+    link_candidate_id: str = ""
 
 
 # LLM: 候选当前态唯一事实源；raw缓存仅实例属性，不属于dataclass字段/asdict，构造、比较、持久协议不含缓存。
@@ -271,6 +278,10 @@ class MemoryCandidate:
     # Host-only immutable historical bindings; no body/quote, retained inside this authority only.
     target_evidence_bindings: list[dict[str, object]] = field(default_factory=list)
     cold_detail_ref: str = ""
+    commit_obligation: bool = False
+    obligation_blocked_reason: str = ""
+    obligation_retry_after: str = ""
+    _extra_fields: dict[str, object] = field(default_factory=dict, repr=False)
     _raw_json_line = ""
     _raw_state_digest = ""
 
@@ -282,11 +293,13 @@ class MemoryCandidate:
             object.__setattr__(self, "_raw_state_digest", "")
         object.__setattr__(self, name, value)
 
-    # LLM: 持久化前完整验证；只构造正式init字段，原行/摘要绝不复制到记录，空新增字段兼容旧v2。
+    # LLM: 未知字段深复制保真，已知字段始终优先，私有存储与原行缓存不进入协议。
     # 函数用途: 将候选转换为 JSONL 记录。
     def to_record(self) -> dict[str, object]:
         validate_candidate(self)
-        payload = {name: deepcopy(getattr(self, name)) for name, descriptor in self.__dataclass_fields__.items() if descriptor.init}
+        payload = deepcopy(self._extra_fields)
+        payload.update({name: deepcopy(getattr(self, name)) for name, descriptor in self.__dataclass_fields__.items()
+                        if descriptor.init and not name.startswith("_")})
         if not self.cold_detail_ref:
             payload.pop("cold_detail_ref", None)
         if not self.learning_source:
@@ -299,13 +312,20 @@ class MemoryCandidate:
             payload.pop("target_evidence_bindings", None)
         return payload
 
-    # LLM: 未知字段及私有非init缓存不进入构造；已知必填字段缺失或非法必须fail closed。
+    # LLM: v2显式升级并保留未知顶层字段；批准/用户提交义务保守恢复，坏已知字段仍关闭式拒绝。
     # 函数用途: 从 candidates.jsonl 行恢复当前候选对象。
     @classmethod
     def from_record(cls, payload: dict[str, object]) -> MemoryCandidate:
-        known = cls.__dataclass_fields__
+        known = {key: value for key, value in cls.__dataclass_fields__.items() if not key.startswith("_")}
+        values = deepcopy({key: value for key, value in payload.items() if key in known and known[key].init})
+        if values.get("schema_version") == "my-agent.memory-candidate.v2":
+            values["schema_version"] = CANDIDATE_SCHEMA_VERSION
+        if "commit_obligation" not in values:
+            values["commit_obligation"] = values.get("status") == "approved" or (
+                (values.get("origin") == "user_explicit" or payload.get("source_kind") == "user_explicit")
+                and values.get("status") not in {"promoted", "rejected", "withdrawn"})
         try:
-            candidate = cls(**{key: value for key, value in payload.items() if key in known and known[key].init})
+            candidate = cls(**values, _extra_fields=deepcopy({key: value for key, value in payload.items() if key not in known}))
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid memory candidate record") from exc
         validate_candidate(candidate)
@@ -600,6 +620,18 @@ def host_promotion_mode(candidate: object) -> str:
 # LLM: 每次读写校验Schema、观察版本、冷ref固定路径及来源覆盖；旧缺字段可读但不补猜权威。
 # 函数用途: 验证持久候选的所有枚举、引用、范围、时间和状态历史。
 def validate_candidate(candidate: MemoryCandidate) -> None:
+    if type(candidate.commit_obligation) is not bool:
+        raise ValueError("candidate commit_obligation must be boolean")
+    if candidate.status == "approved" or (candidate.origin == "user_explicit"
+            and candidate.status not in {"promoted", "rejected", "withdrawn"}):
+        candidate.commit_obligation = True
+    if candidate.status in {"promoted", "rejected", "withdrawn"}:
+        candidate.commit_obligation = False
+        candidate.obligation_blocked_reason = ""
+        candidate.obligation_retry_after = ""
+    candidate.obligation_retry_after = normalize_iso_time(candidate.obligation_retry_after)
+    if not isinstance(candidate.obligation_blocked_reason, str) or len(candidate.obligation_blocked_reason) > 160:
+        raise ValueError("candidate obligation_blocked_reason is invalid")
     if not isinstance(candidate.cold_detail_ref, str) or (candidate.cold_detail_ref and (
         candidate.status not in {"promoted", "superseded", "rejected"} or not re.fullmatch(
             r"candidates_archive/[0-9]{4}-(?:0[1-9]|1[0-2])\.jsonl#memory-candidate-[A-Za-z0-9_-]+:[0-9a-f]{64}",

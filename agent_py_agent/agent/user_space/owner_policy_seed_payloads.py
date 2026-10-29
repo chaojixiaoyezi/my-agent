@@ -47,6 +47,7 @@ def default_retention_payload() -> dict[str, object]:
         "subagent_scratch_days": 30,
         "cache_days": 30,
         "tmp_days": 7,
+        "task_tmp_idle_days": 3,
         "trash_days": 30,
         "legal_hold": False,
         "legal_hold_task_ids": [],

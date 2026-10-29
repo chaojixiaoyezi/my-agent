@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol
@@ -995,6 +995,9 @@ class MemoryPromotionService(_PromotionCommitMixin):
         early_result = _promotion_precheck(candidate, automatic)
         if early_result is not None:
             return early_result
+        if (automatic and candidate.commit_obligation and candidate.obligation_retry_after
+                and datetime.fromisoformat(candidate.obligation_retry_after) > datetime.now(timezone.utc)):
+            return MemoryPromotionResult(candidate_id, False, candidate.status, "COMMIT_OBLIGATION_BACKOFF")
         evidence_code = self._verify_evidence(candidate)
         if evidence_code:
             return self._block_missing_evidence(candidate, reviewer, evidence_code)
@@ -1425,6 +1428,8 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
         return MemoryPromotionResult(candidate_id, False, candidate.status, "REMOVE_CLEANUP_PENDING",
                                      formal_memory_changed=exc.formal_memory_changed)
     except _PromotionBlocked as exc:
+        if exc.status == candidate.status and candidate.status == "approved":
+            service.candidates.defer_commit(candidate, exc.reason_code)
         _register_automatic_governance_review(service, candidate, exc.reason_code)
         return MemoryPromotionResult(
             candidate.candidate_id,
@@ -1432,6 +1437,12 @@ def _commit_promotion_result(service, candidate, reviewer, confirmed):
             exc.status,
             exc.reason_code,
         )
+    except (OSError, TimeoutError) as exc:
+        # 未结运输/执行异常由原外层处理，绝不能标普通IO后重放。
+        if isinstance(exc, _UNCERTAIN_PROMOTION_ERRORS):
+            raise
+        service.candidates.defer_commit(candidate, "PROMOTION_IO_BLOCKED")
+        return MemoryPromotionResult(candidate_id, False, candidate.status, "PROMOTION_IO_BLOCKED")
     return service._finalize_promotion(promoted, reviewer, outcome)
 
 

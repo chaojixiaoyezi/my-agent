@@ -114,6 +114,16 @@ def validate_extraction(
         # 与候选提交使用同一目标ID口径，拒绝路径也必须先归一再查冻结版本和记录约束。
         observation = replace(observation, target_entry_id=str(observation.target_entry_id or "").strip())
         try:
+            if observation.link_candidate_id:
+                matches = [item for item in batch.candidate_anchors if item["candidate_id"] == observation.link_candidate_id]
+                if (len(matches) != 1 or observation.candidate_type not in {"lesson", "hot_rule"}
+                        or matches[0]["candidate_type"] != observation.candidate_type
+                        or matches[0]["subject_key"].casefold() != observation.subject_key.casefold()
+                        or matches[0]["scope"] != MemoryScope.from_value(observation.scope).to_dict()
+                        or matches[0]["promotion_target"] != observation.promotion_target
+                        or matches[0]["target_entry_id"] != observation.target_entry_id
+                        or observation.proposed_action != "add"):
+                    raise CuratorEvidenceError("candidate_link_outside_presented_scope")
             validated = _validated_candidate(
                 observation,
                 messages=messages,

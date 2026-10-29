@@ -392,6 +392,10 @@ def parse_curator_extraction(text: str) -> CuratorExtraction:
     # 结构化生成仍强制主字段;缺失补全是纯宿主侧确定性修复,不引入新权威。
     if missing:
         payload = {**payload, **{key: _EMPTY_FIELD_DEFAULT[key] for key in missing}}
+    # v3既有输出没有链接字段；仅补空值，不能替模型选择锚点。
+    if isinstance(payload.get("candidates"), list):
+        payload["candidates"] = [dict(item, link_candidate_id=item.get("link_candidate_id"))
+            if isinstance(item, dict) else item for item in payload["candidates"]]
     validate_curator_response_payload(payload, curator_response_schema())
     return CuratorExtraction(
         daily_events=tuple(_parse_daily_draft(item) for item in _object_array(payload, "daily_events")),
@@ -465,6 +469,7 @@ def _parse_candidate_observation(payload: dict[str, object]) -> CandidateObserva
         conflicts_with=tuple(_short_string_array(payload, "conflicts_with")),
         promotion_target=str(payload.get("promotion_target") or "long_term"),
         observation_id=str(payload.get("observation_id") or ""),
+        link_candidate_id=str(payload.get("link_candidate_id") or ""),
     )
 
 

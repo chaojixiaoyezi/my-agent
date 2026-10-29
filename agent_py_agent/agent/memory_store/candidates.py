@@ -73,6 +73,14 @@ from .scope_contract import canonical_scope_key
 # 保留清理只认合法的未晋升状态；扫描、执行与仓库删除共用同一集合，promoted 永不参与。
 RETENTION_ELIGIBLE_CANDIDATE_STATUSES = CANDIDATE_STATUSES - {"promoted"}
 
+
+# LLM: 扫描、执行及锁内仓库末门共用；approved及任何提交义务不受年龄覆盖。
+# 函数用途: 唯一裁定一个候选是否可按龄清理。
+def candidate_retention_eligible(candidate):
+    return (candidate.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
+            and candidate.status != "approved" and not candidate.commit_obligation
+            and not _is_binding_tombstone(candidate))
+
 # 记忆候选列表缓存最多跟踪的文件路径数。
 _CANDIDATE_LOAD_CACHE_MAX_PATHS = 8
 # 记忆候选列表缓存允许占用的最大总字节数。
@@ -449,6 +457,8 @@ class CandidateService:
                     cold_detail_ref="",
                     target_evidence_bindings=binding_history(current),
                     status=target,
+                    commit_obligation=(target == "approved" or current.commit_obligation)
+                        and target not in {"rejected", "withdrawn", "promoted"},
                     reviewer=actor,
                     review_note=str(review_note or "").strip(),
                     updated_at=now,
@@ -495,6 +505,23 @@ class CandidateService:
         expected = candidate_id if isinstance(candidate_id, MemoryCandidate) else self.get(candidate_id)
         target = effective_promotion_target(expected.promotion_target, expected.origin, expected.candidate_type)
         return self.transition(expected, "approved", reviewer=reviewer, review_note=reason, promotion_target=target)
+
+    # LLM: 在所有正式锁释放后按完整快照CAS记履约退避；不覆盖并发批准、拒绝或成功终态。
+    # 函数用途: 把暂时提交失败留在唯一候选账本，保留证据供后续安全重试。
+    def defer_commit(self, expected: MemoryCandidate, reason: str) -> MemoryCandidate:
+        with _quota_admission(self.quota_enforcer) as admission, self._locked_candidates():
+            rows = self._load_unlocked()
+            index = _candidate_index(rows, expected.candidate_id)
+            if rows[index] != expected:
+                raise CandidateStateChangedError(rows[index].status)
+            if expected.status in TERMINAL_CANDIDATE_STATUSES:
+                return expected
+            now = datetime.now(timezone.utc)
+            rows[index] = replace(expected, commit_obligation=True, obligation_blocked_reason=reason,
+                obligation_retry_after=(now + timedelta(minutes=5)).isoformat())
+            _write_candidates_unlocked(self.path, rows, admission=admission,
+                **({} if not self.coordinator_io else {"coordinator_io": True}))
+            return rows[index]
 
     # LLM: 正式落点提交成功后才能标 promoted；失败时保留 approved 供安全重试。
     # 函数用途: 记录唯一 PromotionService 已完成的正式引用。
@@ -603,7 +630,7 @@ class CandidateService:
         cutoff = before.astimezone(timezone.utc)
         result: list[str] = []
         for item in self.readonly_rows(statuses=RETENTION_ELIGIBLE_CANDIDATE_STATUSES):
-            if _is_binding_tombstone(item):
+            if not candidate_retention_eligible(item):
                 continue
             if datetime.fromisoformat(candidate_retention_time(item)) < cutoff:
                 result.append(item.candidate_id)
@@ -641,8 +668,7 @@ class CandidateService:
                     if expected is None:
                         continue
                     if (current is not None and _candidate_snapshot_matches(self.path, current, expected)
-                            and current.status in RETENTION_ELIGIBLE_CANDIDATE_STATUSES
-                            and not _is_binding_tombstone(current)):
+                            and candidate_retention_eligible(current)):
                         continue
                     ids.remove(cid)
                     if skipped_state_changed is not None:
@@ -650,7 +676,7 @@ class CandidateService:
             if not ids:
                 return 0
             for item in candidates:
-                if item.candidate_id in ids and item.status not in RETENTION_ELIGIBLE_CANDIDATE_STATUSES:
+                if item.candidate_id in ids and not _is_binding_tombstone(item) and not candidate_retention_eligible(item):
                     raise CandidateTransitionError(
                         f"candidate {item.candidate_id} is not retention-eligible"
                     )
@@ -738,6 +764,24 @@ def _observation_index(rows: list[MemoryCandidate]) -> dict[str, set[int]]:
 # 函数用途: 将单条已规范观察成功合入现有索引，供批提交与可跳冲突预演复用。
 def _merge_indexed_observation(result, by_id, by_observation, bindings, prepared):
     normalized, candidate_id, observation_key = prepared
+    if normalized.link_candidate_id:
+        linked = by_id.get(normalized.link_candidate_id)
+        if (linked is None or result[linked].status in TERMINAL_CANDIDATE_STATUSES
+                or result[linked].candidate_type not in {"lesson", "hot_rule"}
+                or not _same_candidate_identity(result[linked], normalized)):
+            raise CandidateIdentityConflictError("candidate link is not in the same typed scope")
+        candidate_id = normalized.link_candidate_id
+    source_index = by_id.get(candidate_id)
+    if (source_index is not None and result[source_index].candidate_type in {"lesson", "hot_rule"}
+            and _same_candidate_identity(result[source_index], normalized)):
+        existing = result[source_index]
+        current_sources = set().union(*_observation_sources(existing))
+        incoming_sources = _observation_sources(normalized)
+        new_sources = [sorted(group) for group in incoming_sources if not group.intersection(current_sources)]
+        if incoming_sources or normalized.link_candidate_id:
+            # 已有来源任一别名命中即同一次观察；新来源键由宿主计算，不信模型observation_id。
+            observation_key = (hashlib.sha256(json.dumps([candidate_id, sorted(new_sources)], sort_keys=True).encode()).hexdigest()
+                               if new_sources else existing.observation_keys[0])
     if bindings.conflicts(normalized):
         raise CandidateIdentityConflictError("candidate evidence cannot refresh target observation version")
     positions = sorted(by_observation.get(observation_key, ()))
@@ -869,7 +913,8 @@ def _promoted_rows(candidates, index, review):
     current = rows[index]
     now = utc_now_iso()
     if current.status != "promoted":
-        rows[index] = replace(current, status="promoted", reviewer=str(reviewer or "promotion-service").strip(),
+        rows[index] = replace(current, status="promoted", commit_obligation=False,
+            obligation_blocked_reason="", obligation_retry_after="", reviewer=str(reviewer or "promotion-service").strip(),
             review_note=str(review_note or "").strip(), promoted_at=now,
             promotion_ref=str(promotion_ref).strip(), updated_at=now,
             status_history=[*current.status_history,
@@ -1104,6 +1149,7 @@ def _new_candidate(
         learning_source=source_coverage_projection(coverage),
         learning_source_coverage=coverage,
         status=status,
+        commit_obligation=observation.origin == "user_explicit",
         reviewer="candidate-service" if status.startswith("blocked_") else "",
         review_note=_initial_review_note(status),
         created_at=now,
@@ -1161,6 +1207,8 @@ def _merge_candidate(
     merged = replace(
         current,
         origin=resolved_origin,
+        commit_obligation=(current.commit_obligation or resolved_origin == "user_explicit")
+            and current.status not in {"promoted", "rejected", "withdrawn"},
         # 未知引用不能继承另一条可学消息的资格；人工入口无投影语义单独保留。
         learning_source=source_coverage_projection(coverage),
         learning_source_coverage=coverage,
@@ -1211,14 +1259,18 @@ def _merge_candidate(
     return merged
 
 
-# LLM: A model label alone cannot rewrite provenance; correction requires the current candidate
-# to be blocked with no matching refs and the incoming origin to carry its own canonical refs.
-# 函数用途: 在缺证据终态下裁决能否把误标的 user_explicit/tool_verified 来源纠正为有真实引用的新来源。
+# LLM: 标签不能自证权威；仅用结构化引用的新来源修复非终态推断，正式回查仍由晋升服务负责。
+# 函数用途: 决定补充用户或工具引用后能否恢复正确来源并重新走自动晋升门。
 def _resolved_blocked_origin(
     current: MemoryCandidate,
     observation: CandidateObservation,
 ) -> str:
     incoming = str(observation.origin or "").strip().lower()
+    if current.origin == "model_inferred" and current.status not in TERMINAL_CANDIDATE_STATUSES:
+        if incoming == "user_explicit" and observation.source_message_refs:
+            return incoming
+        if incoming == "tool_verified" and observation.source_tool_refs:
+            return incoming
     if (
         current.status != "blocked_missing_evidence"
         or incoming == current.origin
@@ -1231,6 +1283,26 @@ def _resolved_blocked_origin(
     if incoming == "tool_verified" and observation.source_tool_refs:
         return incoming
     return current.origin
+
+
+# LLM: 同条引用的operation/call/artifact为别名组，补字段不产生新票；无ref时才回退宿主run/task。
+# 函数用途: 提取独立来源及其等价别名，供链接和普通同候选合并共同去重。
+def _observation_sources(subject):
+    groups = []
+    for ref in subject.source_message_refs:
+        if ref.get("message_id"):
+            groups.append(frozenset({("message", str(ref.get("thread_id") or ""), str(ref["message_id"]))}))
+    for ref in (*subject.source_tool_refs, *subject.source_artifact_refs):
+        aliases = frozenset(("call" if name in {"call_id", "tool_call_id"} else name,
+            str(ref.get("run_id") or ""), str(ref[name]))
+            for name in ("operation_id", "tool_call_id", "call_id", "artifact_ref") if ref.get(name))
+        if aliases:
+            groups.append(aliases)
+    if not groups:
+        groups.extend(frozenset({("run", "", str(value))}) for value in subject.source_run_ids)
+    if not groups:
+        groups.extend(frozenset({("task", "", str(value))}) for value in subject.source_task_ids)
+    return groups
 
 
 # LLM: This check only reopens a structurally missing-evidence candidate after exact references

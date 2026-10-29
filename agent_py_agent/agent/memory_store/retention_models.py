@@ -48,6 +48,7 @@ class MemoryRetentionPolicy:
     maintenance_interval_seconds: int = 86_400
     schema_version: str = RETENTION_SCHEMA_VERSION
     security_audit_days: int = 180
+    task_tmp_idle_days: int = 3
 
     # LLM: 原字段严格必填；新增安全审计缺失沿明确180天默认，提供时严格拒绝错类型/负值。
     # 函数用途: 从 retention.json 严格恢复一份可执行策略。
@@ -77,6 +78,9 @@ class MemoryRetentionPolicy:
         }
         values["security_audit_days"] = _strict_nonnegative_int(
             {"security_audit_days": payload.get("security_audit_days", 180)}, "security_audit_days"
+        )
+        values["task_tmp_idle_days"] = _strict_nonnegative_int(
+            {"task_tmp_idle_days": payload.get("task_tmp_idle_days", 3)}, "task_tmp_idle_days"
         )
         legal_hold = _strict_bool(payload, "legal_hold")
         maintenance_enabled = _strict_bool(payload, "maintenance_enabled")
