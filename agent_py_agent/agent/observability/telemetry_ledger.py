@@ -1,4 +1,4 @@
-# LLM: 权威 JSONL 只追加，使用流式分页而非丢历史的轮转；owner_home 必须来自宿主。
+# LLM: 权威JSONL只追加，读投影须披露coverage；owner_home必须来自可信宿主。
 # 模块用途: 保存脱敏工具调用，提供查询、时间过滤与工具耗时统计。
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from agent_py_agent.agent.common.nofollow_fs import (
 )
 
 from ..common.log_redaction import redact_sensitive_value
+from ..local_storage.owner_read_index import OwnerReadIndex, require_complete
 from ..workflows.models import redact_bearer_values
 
 SCHEMA = "tool_call_telemetry.v1"
@@ -163,6 +164,8 @@ class ToolTelemetryLedger:
     def __init__(self, owner_home, *, owner_id=""):
         self._home = Path(owner_home).absolute()
         self._owner_id = owner_id
+        # 同home允许其他owner记录，owner只作精确查询谓词。
+        self._read_index = OwnerReadIndex(self._home)
 
     # LLM: 不修改输入对象；owner 冲突、非法状态和数值写前拒绝，写入使用进程锁。
     # 函数用途: 规范化并耐久追加调用记录。
@@ -191,30 +194,70 @@ class ToolTelemetryLedger:
             append_text_beneath(self._home, (*PARTS, "tool_calls.jsonl"), line)
         return item
 
-    # LLM: 支持任务规定的关键字过滤；通过 kwargs 保持单函数参数数量不超过六个。
-    # 函数用途: 返回过滤后按追加顺序排列的一页字典。
-    def query_tool_calls(self, *, limit=100, cursor=0, **filters):
+    # LLM: 空字符串和None保持未指定口径，非空owner只匹配完全相同身份。
+    # 函数用途: 校验公开过滤键并补充本账本owner谓词。
+    def _query_filters(self, filters):
         allowed = {"task_id", "run_id", "workflow_run_id", "tool_name", "status", "min_duration_ms", "since", "until"}
         if filters.keys() - allowed:
             raise ValueError("unknown filter")
-        rows = (r for r in _entries(self._home) if (not self._owner_id or r["owner_id"] == self._owner_id) and _matches(r, filters))
-        return _page(rows, limit, cursor)
-
-    # LLM: 重复 call_id 按最后一条返回；完整历史仍保留用于审计。
-    # 函数用途: 获取单次调用明细。
-    def get_tool_call(self, call_id):
-        result = None
-        for row in _entries(self._home):
-            if row["call_id"] == call_id and (not self._owner_id or row["owner_id"] == self._owner_id):
-                result = row
+        result = {key: value for key, value in filters.items() if value is not None and value != ''}
+        if self._owner_id:
+            result['owner_id'] = self._owner_id
         return result
 
-    # LLM: 聚合保留全部历史，精确分位需要内存保存耗时；不设隐式保留窗口。
-    # 函数用途: 按工具名汇总调用统计。
+    # LLM: 显式view固定来源代次和through，续页不把新追加混入旧范围。
+    # 函数用途: 查询带coverage的有限遥测页。
+    def query_tool_calls_page(self, *, limit=100, cursor=0, view=None, **filters):
+        selected = self._query_filters(filters)
+        if view is None:
+            view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
+        return {**self._read_index.query(view, filters=selected, limit=limit, offset=cursor), 'view': view}
+
+    # LLM: 原cursor为过滤后偏移，大页拆成同一固定view的SQL页，未知不转成成功空值。
+    # 函数用途: 保持旧list返回合同及明确分页校验。
+    def query_tool_calls(self, *, limit=100, cursor=0, **filters):
+        if type(limit) is not int or type(cursor) is not int or min(limit, cursor) < 0:
+            raise ValueError('invalid pagination')
+        rows, view, remaining = [], None, limit
+        while True:
+            page = require_complete(self.query_tool_calls_page(
+                limit=min(remaining, 1000), cursor=cursor, view=view, **filters,
+            ))
+            rows.extend(page['rows'])
+            view = page['view']
+            count = len(page['rows'])
+            remaining -= count
+            cursor += count
+            if remaining <= 0 or count == 0:
+                return rows
+
+    # LLM: owner过滤先于最后身份选择，其他owner同名调用不能遮蔽本owner。
+    # 函数用途: 返回单次调用明细及覆盖报告。
+    def get_tool_call_report(self, call_id, *, view=None):
+        if not isinstance(call_id, str):
+            raise ValueError('call_id must be a string')
+        selected = self._query_filters({})
+        selected['call_id'] = call_id
+        if view is None:
+            view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
+        result = self._read_index.query(view, filters=selected, limit=1, descending=True)
+        return {'row': result['rows'][0] if result['rows'] else None,
+                'coverage': result['coverage'], 'view': view}
+
+    # LLM: 重复call_id取本owner最后一条，只有完整负查询才返回None。
+    # 函数用途: 保持原单条明细接口，未知时抛结构异常。
+    def get_tool_call(self, call_id):
+        return require_complete(self.get_tool_call_report(call_id))['row']
+
+    # LLM: 统计在固定view的SQL聚合中完成，不保存Python lifetime样本。
+    # 函数用途: 返回带coverage的精确工具统计报告。
+    def aggregate_tool_stats_report(self, *, since=None, until=None, view=None):
+        selected = self._query_filters({'since': since, 'until': until})
+        if view is None:
+            view = self._read_index.advance('telemetry', (*PARTS, 'tool_calls.jsonl'))
+        return self._read_index.telemetry_rollup(view, filters=selected)
+
+    # LLM: 旧字典只代表完整统计，不以零替代坏源、预算不足或busy。
+    # 函数用途: 保持工具统计成功形状。
     def aggregate_tool_stats(self, *, since=None, until=None):
-        groups = {}
-        for row in _entries(self._home):
-            if (not self._owner_id or row["owner_id"] == self._owner_id) and _matches(row, dict(since=since, until=until)):
-                groups.setdefault(row["tool_name"], []).append(row)
-        return {"schema": "tool_telemetry_stats.v1", "total_calls": sum(map(len, groups.values())),
-                "tools": {name: _stats(rows) for name, rows in sorted(groups.items())}}
+        return require_complete(self.aggregate_tool_stats_report(since=since, until=until))['value']

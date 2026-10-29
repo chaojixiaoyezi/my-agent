@@ -1,12 +1,10 @@
 
-# LLM: This module owns the model-visible local text-search contract and its
-# bounded rg/Python execution paths; keep matching semantics aligned across both.
+# LLM: 两后端只收命中；正文当前页按文件一次补上下文，预算和源变化必须进入查询覆盖证据。
 #   rg回收有界且kill后必须wait；stdout只由读线程finally关闭，取消回调不得跨线程关闭迭代流。
 # 模块用途: 提供工作区内文本搜索，统一参数说明、ripgrep 快速路径和 Python 后备扫描。
 from __future__ import annotations
 
 import contextlib
-import fnmatch
 import json
 import logging
 import os
@@ -15,17 +13,22 @@ import signal
 import subprocess
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
-from itertools import islice
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..common.cancellation import raise_if_cancelled, register_cancellation_callback
+from ..common.cancellation import ToolCancelled, raise_if_cancelled, register_cancellation_callback
 from ._filesystem_helpers import (
     _FALLBACK_SCAN_MAX_FILES,
     _FALLBACK_SCAN_MAX_SECONDS,
     _MAX_SEARCH_LINE_CHARS,
-    _read_text_safe,
+    _discovery_file_batch,
+    _discovery_identity,
+    _discovery_matches_glob,
+    _discovery_nofollow_stat,
+    _iter_discovery_files,
+    _safe_discovery_path,
     path_resolution_error_outcome,
 )
 from ._filesystem_read import (
@@ -38,7 +41,6 @@ from ._filesystem_search_models import (
     SearchMatch,
     SearchMatcher,
     SearchRequest,
-    path_has_ignored_part,
     render_files_with_matches,
     render_line_numbers,
     render_match_counts,
@@ -116,8 +118,7 @@ class MalformedRgOutput(Exception):
     pass
 
 
-# LLM: Python fallback search is a bounded streaming walk; this state is local
-# to one invocation and may affect result completeness, never path authority.
+# LLM: 逐调用状态通过ContextVar隔离；预算和源变化观察不产生路径权限。
 # 类用途: 记录没有 rg 时本轮已扫描多少文件，以及是否触发安全上限。
 @dataclass
 class SearchScanState:
@@ -125,6 +126,117 @@ class SearchScanState:
     candidates: int = 0
     limited: bool = False
     limit_reason: str = ""
+    backend: str = "rg"
+    read_bytes: int = 0
+    rg_stdout_bytes: int = 0
+    retained_bytes: int = 0
+    stale: bool = False
+    issues: list[str] = field(default_factory=list)
+    sources: dict[Path, tuple[int, ...]] = field(default_factory=dict)
+    tool: Any = None
+
+    # LLM: 原因列表有帽；后续命中不能抹去已观察到的失败或变化。
+    # 函数用途: 记录本轮读取预算或来源不完整事实。
+    def mark(self, reason: str, *, stale: bool = False) -> None:
+        self.limited = True
+        self.limit_reason = self.limit_reason or reason
+        self.stale = self.stale or stale
+        if reason not in self.issues and len(self.issues) < 32:
+            self.issues.append(reason)
+
+
+_SEARCH_READ_MAX_BYTES = 16 * 1024 * 1024
+_SEARCH_RETAIN_MAX_BYTES = 4 * 1024 * 1024
+_SEARCH_LINE_MAX_BYTES = 256 * 1024
+_SEARCH_RG_MAX_BYTES = 32 * 1024 * 1024
+_SEARCH_RG_RECORD_MAX_BYTES = 2 * 1024 * 1024
+_SEARCH_STATE: ContextVar[SearchScanState | None] = ContextVar('filesystem_search_state', default=None)
+
+
+# LLM: 本异常仅停止不能安全继续的文件，不捕获或替换取消异常。
+# 类用途: 将读取中止传递回结构化覆盖状态。
+class _SearchReadAbort(OSError):
+    pass
+
+
+# LLM: 只计真正保留的命中、来源指纹和上下文，不能先堆积后截断。
+# 函数用途: 为搜索结果分配有界内存保留预算。
+def _retain_search_bytes(size: int) -> bool:
+    state = _SEARCH_STATE.get()
+    if state is None:
+        return True
+    if state.retained_bytes + size > _SEARCH_RETAIN_MAX_BYTES:
+        state.mark('retained_byte_limit')
+        return False
+    state.retained_bytes += size
+    return True
+
+
+# LLM: 读前读后都复用原路径策略；指纹相等只称best_effort，绝非原子文件版本。
+# 函数用途: 登记或复核已授权来源的身份和变化。
+def _observe_search_source(tool, path: Path) -> tuple[int, ...]:
+    state = _SEARCH_STATE.get()
+    try:
+        safe = _safe_discovery_path(tool, path, root=path.parent,
+                                    include_ignored=True, ignored_names=())
+        if safe is None:
+            raise _SearchReadAbort('source_access_changed')
+        identity = _discovery_identity(_discovery_nofollow_stat(safe))
+    except (OSError, ValueError):
+        if state is not None:
+            state.mark('source_unavailable', stale=path in state.sources)
+        raise _SearchReadAbort('source_unavailable') from None
+    if state is not None:
+        previous = state.sources.get(safe)
+        if previous is not None and previous != identity:
+            state.mark('source_changed', stale=True)
+            raise _SearchReadAbort('source_changed')
+        if previous is None:
+            if len(state.sources) >= _FALLBACK_SCAN_MAX_FILES:
+                state.mark('source_file_limit')
+                raise _SearchReadAbort('source_file_limit')
+            if not _retain_search_bytes(len(str(safe).encode('utf-8', 'surrogatepass')) + 256):
+                raise _SearchReadAbort('retained_byte_limit')
+            state.sources[safe] = identity
+    return identity
+
+
+# LLM: 读取前比较真实FD与路径身份，返回前复核；这些检查不宣称消除所有文件系统竞态。
+# 函数用途: 在单次打开内维护源观察边界。
+@contextlib.contextmanager
+def _checked_search_file(tool, path: Path):
+    state = _SEARCH_STATE.get()
+    expected = _observe_search_source(tool, path)
+    with path.open('rb', buffering=0) as handle:
+        if _discovery_identity(os.fstat(handle.fileno())) != expected:
+            if state is not None:
+                state.mark('source_replaced_before_read', stale=True)
+            raise _SearchReadAbort('source_replaced_before_read')
+        _observe_search_source(tool, path)
+        try:
+            yield handle
+        finally:
+            try:
+                if _discovery_identity(os.fstat(handle.fileno())) != expected:
+                    if state is not None:
+                        state.mark('source_changed_during_read', stale=True)
+                _observe_search_source(tool, path)
+            except (OSError, ValueError):
+                if state is not None:
+                    state.mark('source_changed_after_read', stale=True)
+
+
+# LLM: 只复核本轮实际观察过的有帽来源，不把未观察路径称为已验证。
+# 函数用途: 在最终信封生成前发现源删除、替换或权限变化。
+def _validate_search_sources(tool) -> None:
+    state = _SEARCH_STATE.get()
+    if state is not None:
+        for path in tuple(state.sources):
+            raise_if_cancelled()
+            try:
+                _observe_search_source(tool, path)
+            except _SearchReadAbort:
+                continue
 
 
 @dataclass(frozen=True)
@@ -203,6 +315,8 @@ def build_search_text_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 工具实例不保存逐调用观察；先收命中和哨兵，再只补正文当前页的上下文。
+# 类用途: 提供有界本地搜索及真实覆盖披露。
 class SearchTextTool(FileSystemTool):
 
     model_spec = build_search_text_model_spec()
@@ -249,10 +363,18 @@ class SearchTextTool(FileSystemTool):
             ))
         return self._search_target(target, request)
 
-    # LLM: One search invocation prefers cancellable rg and otherwise owns one
-    # bounded fallback scan state whose incompleteness must reach the envelope.
-    # 函数用途: 在已解析的文件或目录中执行搜索，并如实标出后备扫描是否完整。
+    # LLM: ContextVar在finally恢复，不能让并行调用共享预算或来源状态。
+    # 函数用途: 为一次搜索绑定独立执行状态。
     def _search_target(self, target: Path, request: SearchRequest) -> ToolHandlerOutcome:
+        token = _SEARCH_STATE.set(SearchScanState(started_at=time.monotonic(), tool=self))
+        try:
+            return self._search_target_run(target, request)
+        finally:
+            _SEARCH_STATE.reset(token)
+
+    # LLM: 两后端收集不读context；正文只切页一次，补全失败保留原有哨兵事实。
+    # 函数用途: 执行搜索、当前页补全和结果投影。
+    def _search_target_run(self, target: Path, request: SearchRequest) -> ToolHandlerOutcome:
         try:
             matcher = SearchMatcher.from_request(request)
         except ValueError as exc:
@@ -260,11 +382,14 @@ class SearchTextTool(FileSystemTool):
             # (retryable=False)会让模型放弃整个搜索而非修正 query/pattern。
             return ToolHandlerOutcome("search_text", False, str(exc), error_code="TOOL_INVALID_ARGUMENTS")
         if request.output_mode == "count":
-            scan_state: SearchScanState | None = None
+            scan_state = _SEARCH_STATE.get()
             counts = _collect_counts_with_rg(self, target, request)
             if counts is None:
-                scan_state = SearchScanState(started_at=time.monotonic())
+                scan_state.backend = 'python'
+                scan_state.sources.clear()
+                scan_state.retained_bytes = 0
                 counts = self._collect_counts(target, request, matcher, scan_state)
+            _validate_search_sources(self)
             result_envelope = _search_result_envelope(
                 self,
                 target,
@@ -282,11 +407,16 @@ class SearchTextTool(FileSystemTool):
                 result_envelope=result_envelope,
             )
             return _search_result_with_source_projection(result, target, counts)
-        scan_state = None
+        scan_state = _SEARCH_STATE.get()
         hits = _collect_hits_with_rg(self, target, request)
         if hits is None:
-            scan_state = SearchScanState(started_at=time.monotonic())
+            scan_state.backend = 'python'
+            scan_state.sources.clear()
+            scan_state.retained_bytes = 0
             hits = self._collect_hits(target, request, matcher, scan_state)
+        _validate_search_sources(self)
+        content_page = (_hydrate_search_page(self, slice_hits(hits, request), request)
+                        if request.output_mode == 'content' else [])
         if request.output_mode == "files_with_matches":
             total_items = len(dict.fromkeys(hit.rel for hit in hits))
             result_envelope = _search_result_envelope(
@@ -343,7 +473,8 @@ class SearchTextTool(FileSystemTool):
             "search_text",
             True,
             _with_search_result_guidance(
-                self._render_content_hits(hits, request),
+                self._render_content_hits(content_page, request,
+                    has_more=len(hits) > request.offset + request.limit),
                 result_envelope,
             ),
             result_envelope=result_envelope,
@@ -354,8 +485,7 @@ class SearchTextTool(FileSystemTool):
             (hit.rel for hit in hits),
         )
 
-    # LLM: Candidate discovery is streaming and cancellation-aware; callers may
-    # stop after their page budget without materializing the remaining tree.
+    # LLM: 目录下降和候选交出都经过共享权限及忽略策略，取消异常直接传播。
     # 函数用途: 逐个产出可搜索文件，并在后备扫描达到存活上限时停止。
     def _iter_search_candidates(
         self,
@@ -363,27 +493,9 @@ class SearchTextTool(FileSystemTool):
         request: SearchRequest,
         scan_state: SearchScanState,
     ) -> Iterable[Path]:
-        if target.is_file():
-            if _admit_fallback_candidate(scan_state):
-                yield target
-            return
-        for root, dirnames, filenames in os.walk(target):
-            raise_if_cancelled()
-            dirnames.sort()
-            filenames.sort()
-            self._filter_search_dirs(dirnames, request)
-            items = [Path(root) / filename for filename in filenames]
-            items = [item for item in items if not item.is_symlink()]
-            if not request.include_ignored:
-                items = [item for item in items if not path_has_ignored_part(item, target)]
-            for item in items:
-                if not _admit_fallback_candidate(scan_state):
-                    return
-                yield item
-
-    def _filter_search_dirs(self, dirnames: list[str], request: SearchRequest) -> None:
-        if not request.include_ignored:
-            dirnames[:] = [name for name in dirnames if name not in _COMMON_FILE_DISCOVERY_IGNORES]
+        yield from _iter_discovery_files(self, target, include_ignored=request.include_ignored,
+            ignored_names=_COMMON_FILE_DISCOVERY_IGNORES,
+            scan_state=scan_state, admit=_admit_fallback_candidate)
 
     # LLM: Hit collection consumes only enough streamed candidates for one
     # requested page plus the has-more sentinel.
@@ -413,21 +525,24 @@ class SearchTextTool(FileSystemTool):
                 return hits
         return hits
 
+    # LLM: 提前收够哨兵时也关闭生成器，立即执行FD收口与末次来源检查。
+    # 函数用途: 收集不含上下文的单文件命中。
     def _append_item_hits(self, request: AppendItemHitsRequest) -> bool:
-        for hit in self._iter_search_item_hits(request.item, request.search, request.matcher):
-            if not _append_search_hit(RgHitAppendRequest(
-                hits=request.hits,
-                seen_files=request.seen_files,
-                hit=hit,
-                output_mode=request.search.output_mode,
-            )):
-                continue
-            if len(request.hits) >= request.hit_budget:
-                return True
-        return False
+        stream = self._iter_search_item_hits(request.item, request.search, request.matcher,
+                                            include_context=False)
+        with contextlib.closing(stream):
+            for hit in stream:
+                accepted = _append_search_hit(RgHitAppendRequest(request.hits,
+                    request.seen_files, hit, request.search.output_mode))
+                state = _SEARCH_STATE.get()
+                if state is not None and state.limited:
+                    return True
+                if accepted and len(request.hits) >= request.hit_budget:
+                    return True
+        state = _SEARCH_STATE.get()
+        return bool(state and state.limited)
 
-    # LLM: Count mode still obeys the same bounded fallback state; a partial
-    # count is explicitly marked incomplete by the caller.
+    # LLM: 计数不保留正文或上下文，字节预算和遍历上限同样作用于该模式。
     # 函数用途: 统计各文件命中数，同时遵守后备扫描的文件数和时间上限。
     def _collect_counts(
         self,
@@ -442,19 +557,25 @@ class SearchTextTool(FileSystemTool):
             if not self._should_search_item(item, request):
                 continue
             for hit in self._iter_search_item_hits(item, request, matcher, include_context=False):
+                if hit.rel not in counts and not _retain_search_bytes(len(hit.rel.encode('utf-8')) + 64):
+                    break
                 counts[hit.rel] = counts.get(hit.rel, 0) + 1
+            if scan_state.limited:
+                break
         return counts
 
     def _should_search_item(self, item: Path, request: SearchRequest) -> bool:
         return not request.file_glob or self._matches_file_glob(item, request.file_glob)
 
+    # LLM: 坏编码和读取失败进入覆盖状态，不能被跳过后返回complete；取消不在此捕获。
+    # 函数用途: 从单个安全来源流式生成匹配行。
     def _iter_search_item_hits(
         self,
         item: Path,
         request: SearchRequest,
         matcher: SearchMatcher,
         *,
-        include_context: bool = True,
+        include_context: bool = False,
     ):
         try:
             safe_item = self.resolve_path(item)
@@ -470,13 +591,22 @@ class SearchTextTool(FileSystemTool):
                 include_context=include_context,
             ))
         except UnicodeDecodeError:
+            state = _SEARCH_STATE.get()
+            if state is not None:
+                state.mark('source_decode_error')
             return
         except OSError:
+            state = _SEARCH_STATE.get()
+            if state is not None:
+                state.mark('source_read_error')
             return
 
-    def _render_content_hits(self, hits: list[SearchHit], request: SearchRequest) -> str:
+    # LLM: 输入已经是当前页，不得再次offset切片或重新读取来源。
+    # 函数用途: 以原逐命中格式渲染当前页及分页提示。
+    def _render_content_hits(self, page: list[SearchHit], request: SearchRequest,
+                             *, has_more: bool = False) -> str:
         matches: list[str] = []
-        for hit in slice_hits(hits, request):
+        for hit in page:
             _append_search_match(
                 SearchMatch(
                     rel=hit.rel,
@@ -487,16 +617,16 @@ class SearchTextTool(FileSystemTool):
                 ),
                 matches,
             )
-        if len(hits) > request.offset + request.limit:
+        if has_more:
             matches.append(search_page_notice(request.offset + request.limit, request.limit))
         return "\n".join(matches) or "没有找到匹配项"
 
+    # LLM: Python与原生候选批次共享glob语义，不继承平台默认的大小写折叠。
+    # 函数用途: 复用发现策略筛选搜索文件。
     def _matches_file_glob(self, item: Path, file_glob: str) -> bool:
-        display = self.display_path(item)
-        return fnmatch.fnmatch(item.name, file_glob) or fnmatch.fnmatch(display, file_glob)
+        return _discovery_matches_glob(self.display_path(item), item.name, file_glob)
 
-    # LLM: Pagination completeness combines hit paging with fallback traversal
-    # completeness; a scan fence can never produce complete=true.
+    # LLM: 扫描完整性与已观察到的后续页分开，context失败不能抹去has_more。
     # 函数用途: 生成搜索分页事实，并在后备扫描提前停止时附上结构化原因。
     def _page_window(
         self,
@@ -516,7 +646,7 @@ class SearchTextTool(FileSystemTool):
             "offset": request.offset,
             "limit": request.limit,
             "returned": returned,
-            "next_offset": request.offset + returned if has_more and not scan_limited else 0,
+            "next_offset": request.offset + returned if has_more else 0,
             "complete": not has_more and not scan_limited,
             "output_mode": request.output_mode,
         }
@@ -531,7 +661,7 @@ class SearchTextTool(FileSystemTool):
         return payload
 
 
-# LLM: 通用 query_evidence 包括真实条件/数量/分页；坏 rg JSON 必须转原后备实查，不能冒充正常零结果。
+# LLM: 两后端的分页、预算和源变化事实统一进入查询证据；坏rg协议仍回原Python实查。
 # No-match and incomplete-search decisions come only from typed execution facts. The
 # envelope does not infer repository absence or auto-route based on natural-language queries.
 # 函数用途: 统一记录本地搜索范围、匹配方式、后端和覆盖状态，让模型知道空结果究竟代表什么。
@@ -566,6 +696,9 @@ def _search_result_envelope(
             suggested_actions.append("use_explicit_regex")
         suggested_actions.append("use_web_search_for_internet_scope")
     from .query_evidence import QueryObservation, query_evidence
+    source_stale = bool(scan_state and scan_state.stale)
+    observation_error = ('FILE_SOURCE_STALE' if source_stale
+                         else 'LOCAL_SCAN_INCOMPLETE' if scan_limited else '')
     observation = QueryObservation(
         source="local_workspace", conditions={"query": request.query, "path": tool.display_path(target),
             "file_glob": request.file_glob, "literal": request.literal, "ignore_case": request.ignore_case,
@@ -574,9 +707,10 @@ def _search_result_envelope(
         returned_count=int(page_window["returned"]), observed_count=total_items,
         coverage="incomplete" if scan_limited else "page_window" if not page_window["complete"] else "complete",
         parser_version="local_text_search.v1", total_count=total_items if page_window["complete"] else None,
+        error_code=observation_error,
         count_unit="matching_files" if request.output_mode in {"count", "files_with_matches"} else "matching_lines",
     )
-    return {
+    envelope = {
         "query_evidence": query_evidence(observation),
         "page_window": page_window,
         "search_result": {
@@ -585,16 +719,28 @@ def _search_result_envelope(
             "source_path": tool.display_path(target),
             "match_mode": "literal" if request.literal else "regex",
             "ignore_case": request.ignore_case,
-            "backend": "python" if scan_state is not None else "rg",
+            "backend": scan_state.backend if scan_state is not None else "rg",
             "status": status,
             "hint_code": hint_code,
             "returned": page_window["returned"],
             "scan_complete": bool(page_window["complete"]),
             "scanned_files": scan_state.candidates if scan_state is not None else 0,
-            "scanned_files_known": scan_state is not None,
+            "scanned_files_known": bool(scan_state and scan_state.backend == 'python'),
             "suggested_actions": suggested_actions,
         },
     }
+    if scan_limited and scan_state is not None:
+        envelope['search_result'].update({
+            'consistency': 'stale' if source_stale else 'best_effort',
+            'partial': scan_limited, 'issues': list(scan_state.issues),
+            'source_error_code': observation_error, 'read_bytes': scan_state.read_bytes,
+            'read_byte_limit': _SEARCH_READ_MAX_BYTES,
+            'retained_bytes': scan_state.retained_bytes,
+            'retained_byte_limit': _SEARCH_RETAIN_MAX_BYTES,
+            'rg_stdout_bytes': scan_state.rg_stdout_bytes,
+            'rg_source_read_bytes_known': False,
+        })
+    return envelope
 
 
 # LLM: The fallback limit is an objective liveness fence, not a no-match claim;
@@ -680,23 +826,33 @@ def _append_search_match(match: SearchMatch, matches: list[str]) -> None:
         matches.append(f"{match.rel}:{idx}: {_make_snippet(line)}")
 
 
+# LLM: 非正文模式不保留行正文；offset之前和哨兵均不包含context。
+# 函数用途: 统一有帽命中保留及按文件去重。
 def _append_search_hit(request: RgHitAppendRequest) -> bool:
-    if request.output_mode != "files_with_matches":
-        request.hits.append(request.hit)
-        return True
-    if request.hit.rel in request.seen_files:
+    if request.output_mode == 'files_with_matches' and request.hit.rel in request.seen_files:
         return False
-    request.seen_files.add(request.hit.rel)
-    request.hits.append(request.hit)
+    hit = request.hit
+    if request.output_mode != 'content':
+        hit = replace(hit, line='', context_lines=())
+    if not _retain_search_bytes(len(hit.rel.encode('utf-8')) + len(hit.line.encode('utf-8')) + 128):
+        return False
+    if request.output_mode == 'files_with_matches':
+        request.seen_files.add(hit.rel)
+    request.hits.append(hit)
     return True
 
 
+# LLM: 收集阶段只有一次FD扫描；context在当前正文页确定后统一补全。
+# 函数用途: 用有界真实读取器生成匹配行。
 def _iter_matching_lines(request: MatchingLineRequest):
-    with request.path.open("r", encoding="utf-8") as handle:
-        yield from _non_null_hits(
-            _matching_line_hit(request, idx, raw_line)
-            for idx, raw_line in enumerate(handle, start=1)
-        )
+    state = _SEARCH_STATE.get()
+    if state is None or state.tool is None:
+        raise _SearchReadAbort('search_execution_state_missing')
+    with _checked_search_file(state.tool, request.path) as handle:
+        for idx, line in _bounded_source_lines(handle):
+            hit = _matching_line_hit(request, idx, line)
+            if hit is not None:
+                yield hit
 
 
 def _non_null_hits(hits):
@@ -706,6 +862,8 @@ def _non_null_hits(hits):
             yield hit
 
 
+# LLM: 收集阶段只构造匹配，不为跳过行、哨兵或非正文模式打开上下文窗口。
+# 函数用途: 将匹配行转换为无上下文命中。
 def _matching_line_hit(request: MatchingLineRequest, idx: int, raw_line: str) -> SearchHit | None:
     line = raw_line.rstrip("\n")
     if not request.matcher.matches(line):
@@ -714,7 +872,7 @@ def _matching_line_hit(request: MatchingLineRequest, idx: int, raw_line: str) ->
         rel=request.rel,
         line_number=idx,
         line=line,
-        context_lines=_line_window(request.path, idx, request.search.context) if request.include_context else (),
+        context_lines=(),
     )
 
 
@@ -750,6 +908,8 @@ def _collect_counts_with_rg(tool: SearchTextTool, target: Path, request: SearchR
         return _rg_counts_from_process(tool, process, request)
 
 
+# LLM: rg协议按原始字节有界读取；源读取量没有可核算接口，不把stdout量当来源量。
+# 函数用途: 启动本次可取消的rg进程。
 def _start_rg_process(
     tool: SearchTextTool,
     target: Path,
@@ -758,20 +918,26 @@ def _start_rg_process(
     rg_path = shutil.which("rg")
     if not rg_path:
         return None
+    state = _SEARCH_STATE.get()
+    candidates = _discovery_file_batch(tool, target, include_ignored=request.include_ignored,
+        ignored_names=_COMMON_FILE_DISCOVERY_IGNORES, scan_state=state,
+        admit=_admit_fallback_candidate, file_glob=request.file_glob)
+    if not candidates:
+        return None
     try:
         return subprocess.Popen(
-            rg_args(rg_path, target, request),
+            rg_args(rg_path, candidates, request),
             cwd=str(tool.workspace_root),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            text=False,
         )
     except Exception:
         _LOGGER.debug("rg spawn failed; falling back to python search", exc_info=True)
         return None
 
 
-# LLM: 保留rg返回码和原Python后备语义；正常、异常及BaseException退出都在读线程finally回收进程并关闭stdout。
+# LLM: 取消原样抛出，普通读失败走原Python后备；所有退出均在读线程finally回收进程并关闭stdout。
 # 函数用途: 收集rg命中并保证流和子进程收口，取消回调不碰读线程持有的stdout。
 def _rg_hits_from_process(
     tool: SearchTextTool,
@@ -781,6 +947,8 @@ def _rg_hits_from_process(
     try:
         hits, stopped_early = _read_rg_hits(tool, process, request)
         return_code = process.wait(timeout=2)
+    except ToolCancelled:
+        raise
     except Exception:
         _LOGGER.debug("rg hits read failed; falling back to python search", exc_info=True)
         return None
@@ -791,7 +959,8 @@ def _rg_hits_from_process(
             if process.stdout is not None:
                 with contextlib.suppress(OSError):
                     process.stdout.close()
-    if stopped_early or return_code == 1:
+    state = _SEARCH_STATE.get()
+    if stopped_early or return_code == 1 or (state is not None and state.limited):
         return hits
     return hits if return_code == 0 else None
 
@@ -808,7 +977,7 @@ def _read_rg_hits(
     stdout = process.stdout
     if stdout is None:
         raise RuntimeError("rg stdout missing")
-    for raw_line in stdout:
+    for raw_line in _bounded_rg_records(stdout):
         raise_if_cancelled()
         try:
             hit = _hit_from_rg_line(tool, raw_line, request)
@@ -816,6 +985,10 @@ def _read_rg_hits(
             _stop_process(process)
             raise
         if hit is None:
+            state = _SEARCH_STATE.get()
+            if state is not None and state.limited:
+                _stop_process(process)
+                return hits, True
             continue
         if not _append_search_hit(RgHitAppendRequest(
             hits=hits,
@@ -823,14 +996,22 @@ def _read_rg_hits(
             hit=hit,
             output_mode=request.output_mode,
         )):
+            state = _SEARCH_STATE.get()
+            if state is not None and state.limited:
+                _stop_process(process)
+                return hits, True
             continue
         if len(hits) >= request.offset + request.limit + 1:
             _stop_process(process)
             return hits, True
+    state = _SEARCH_STATE.get()
+    if state is not None and state.limited:
+        _stop_process(process)
+        return hits, True
     return hits, False
 
 
-# LLM: 命中统计返回值与原后备路径不变；读线程负责finally清理stdout，异常也执行有界进程回收。
+# LLM: 取消原样抛出，普通计数失败走原后备；读线程负责finally清理stdout并有界回收进程。
 # 函数用途: 读取rg计数并释放对应进程和管道，不让取消线程关闭正在读取的流。
 def _rg_counts_from_process(
     tool: SearchTextTool,
@@ -840,6 +1021,8 @@ def _rg_counts_from_process(
     try:
         counts = _read_rg_counts(tool, process, request)
         return_code = process.wait(timeout=2)
+    except ToolCancelled:
+        raise
     except Exception:
         _LOGGER.debug("rg counts read failed; falling back to python search", exc_info=True)
         return None
@@ -850,7 +1033,8 @@ def _rg_counts_from_process(
             if process.stdout is not None:
                 with contextlib.suppress(OSError):
                     process.stdout.close()
-    if return_code == 1:
+    state = _SEARCH_STATE.get()
+    if return_code == 1 or (state is not None and state.limited):
         return counts
     return counts if return_code == 0 else None
 
@@ -866,7 +1050,7 @@ def _read_rg_counts(
     stdout = process.stdout
     if stdout is None:
         raise RuntimeError("rg stdout missing")
-    for raw_line in stdout:
+    for raw_line in _bounded_rg_records(stdout):
         raise_if_cancelled()
         try:
             hit = _hit_from_rg_line(tool, raw_line, request, include_context=False)
@@ -874,16 +1058,62 @@ def _read_rg_counts(
             _stop_process(process)
             raise
         if hit is not None:
+            if hit.rel not in counts and not _retain_search_bytes(len(hit.rel.encode('utf-8')) + 64):
+                _stop_process(process)
+                return counts
             counts[hit.rel] = counts.get(hit.rel, 0) + 1
+        state = _SEARCH_STATE.get()
+        if state is not None and state.limited:
+            _stop_process(process)
+            return counts
+    state = _SEARCH_STATE.get()
+    if state is not None and state.limited:
+        _stop_process(process)
     return counts
 
 
+# LLM: 真实管道使用有界readline；迭代仅兼容既有替身，rg内部源读取量保持未知。
+# 函数用途: 限制单条JSON、累计stdout及记录间可协作时间。
+def _bounded_rg_records(stdout):
+    state = _SEARCH_STATE.get()
+    readline = getattr(stdout, 'readline', None)
+    iterator = None if callable(readline) else iter(stdout)
+    while True:
+        raise_if_cancelled()
+        if state is not None and time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+            state.mark('rg_time_limit')
+            return
+        remaining = _SEARCH_RG_MAX_BYTES - (state.rg_stdout_bytes if state is not None else 0)
+        if remaining <= 0:
+            if state is not None:
+                state.mark('rg_stdout_byte_limit')
+            return
+        size = min(_SEARCH_RG_RECORD_MAX_BYTES + 1, remaining)
+        raw = readline(size) if callable(readline) else next(iterator, b'')
+        if not raw:
+            return
+        encoded = raw.encode('utf-8') if isinstance(raw, str) else raw
+        if state is not None:
+            state.rg_stdout_bytes += len(encoded)
+        if (len(encoded) > _SEARCH_RG_RECORD_MAX_BYTES
+                or (callable(readline) and len(encoded) >= size and not encoded.endswith(b'\n'))):
+            if state is not None:
+                state.mark('rg_record_or_stdout_limit')
+            return
+        try:
+            yield encoded.decode('utf-8')
+        except UnicodeDecodeError:
+            raise MalformedRgOutput from None
+
+
+# LLM: begin/end只用于best_effort来源观察，不是原子文件版本；事件解析不补上下文。
+# 函数用途: 解析有界rg协议并观察来源。
 def _hit_from_rg_line(
     tool: SearchTextTool,
     raw_line: str,
     request: SearchRequest,
     *,
-    include_context: bool = True,
+    include_context: bool = False,
 ) -> SearchHit | None:
     if not raw_line.strip():
         return None
@@ -891,25 +1121,43 @@ def _hit_from_rg_line(
         event = json.loads(raw_line)
     except json.JSONDecodeError:
         raise MalformedRgOutput from None
-    if event.get("type") != "match":
+    if not isinstance(event, dict):
+        raise MalformedRgOutput
+    if event.get('type') in {'begin', 'end'}:
+        data = event.get('data')
+        if not isinstance(data, dict):
+            raise MalformedRgOutput
+        path_text = rg_text(data.get('path'))
+        if path_text:
+            try:
+                safe = tool.resolve_path(_rg_event_path(tool, path_text))
+                _observe_search_source(tool, safe)
+            except (OSError, ValueError):
+                state = _SEARCH_STATE.get()
+                if state is not None:
+                    state.mark('rg_source_unavailable')
+        return None
+    if event.get('type') != 'match':
         return None
     return _search_hit_from_rg_event(tool, event, request, include_context=include_context)
 
 
+# LLM: 只产生无context命中；offset前、哨兵和非正文模式不打开任何上下文窗口。
+# 函数用途: 将有效rg匹配转换为命中并复核来源。
 def _search_hit_from_rg_event(
     tool: SearchTextTool,
     event: dict[str, Any],
     request: SearchRequest,
     *,
-    include_context: bool = True,
+    include_context: bool = False,
 ) -> SearchHit | None:
-    data = event.get("data")
+    data = event.get('data')
     if not isinstance(data, dict):
-        return None
-    path_text = rg_text(data.get("path"))
-    line_number = data.get("line_number")
-    if not path_text or not isinstance(line_number, int):
-        return None
+        raise MalformedRgOutput
+    path_text = rg_text(data.get('path'))
+    line_number = data.get('line_number')
+    if not path_text or type(line_number) is not int or line_number < 1:
+        raise MalformedRgOutput
     raw_path = _rg_event_path(tool, path_text)
     if raw_path.is_symlink():
         return None
@@ -917,12 +1165,24 @@ def _search_hit_from_rg_event(
         safe_item = tool.resolve_path(raw_path)
     except ValueError:
         return None
-    return SearchHit(
-        rel=_item_relative_path(tool, raw_path, safe_item),
-        line_number=line_number,
-        line=rg_text(data.get("lines")).rstrip("\n"),
-        context_lines=_line_window(safe_item, line_number, request.context) if include_context else (),
-    )
+    try:
+        _observe_search_source(tool, safe_item)
+    except OSError:
+        return None
+    lines = data.get('lines')
+    if not isinstance(lines, dict) or not isinstance(lines.get('text'), str):
+        state = _SEARCH_STATE.get()
+        if state is not None:
+            state.mark('rg_source_decode_error')
+        return None
+    line = lines['text'].rstrip('\n').rstrip('\r')
+    if len(line.encode('utf-8')) > _SEARCH_LINE_MAX_BYTES:
+        state = _SEARCH_STATE.get()
+        if state is not None:
+            state.mark('line_byte_limit')
+        return None
+    return SearchHit(rel=_item_relative_path(tool, raw_path, safe_item),
+                     line_number=line_number, line=line, context_lines=())
 
 
 def _rg_event_path(tool: SearchTextTool, path_text: str) -> Path:
@@ -930,23 +1190,120 @@ def _rg_event_path(tool: SearchTextTool, path_text: str) -> Path:
     return raw_path if raw_path.is_absolute() else tool.workspace_root / raw_path
 
 
-def _line_window(path: Path, line_number: int, context: int) -> tuple[tuple[int, str], ...]:
-    if context <= 0:
-        return ()
-    start = max(1, line_number - context)
-    end = line_number + context
-    try:
-        return _line_window_rows(path, start, end)
-    except (OSError, UnicodeDecodeError):
-        return ()
+# LLM: 单次真实FD读取至多64KiB，空档和预读计入预算；单行不能无界分配。
+# 函数用途: 在时间、字节及行大小上限内解码来源。
+def _bounded_source_lines(handle):
+    state = _SEARCH_STATE.get()
+    pending = b''
+    index = 0
+    while True:
+        raise_if_cancelled()
+        if state is not None and time.monotonic() - state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+            state.mark('read_time_limit')
+            return
+        newline = pending.find(b'\n')
+        if newline >= 0:
+            if newline > _SEARCH_LINE_MAX_BYTES:
+                if state is not None:
+                    state.mark('line_byte_limit')
+                return
+            raw, pending = pending[:newline], pending[newline + 1:]
+            index += 1
+            yield index, raw.decode('utf-8').rstrip('\r')
+            continue
+        if len(pending) > _SEARCH_LINE_MAX_BYTES:
+            if state is not None:
+                state.mark('line_byte_limit')
+            return
+        remaining = _SEARCH_READ_MAX_BYTES - (state.read_bytes if state is not None else 0)
+        if remaining <= 0:
+            if state is not None:
+                state.mark('read_byte_limit')
+            return
+        chunk = handle.read(min(64 * 1024, remaining))
+        if state is not None:
+            state.read_bytes += len(chunk)
+        if not chunk:
+            if pending:
+                yield index + 1, pending.decode('utf-8').rstrip('\r')
+            return
+        pending += chunk
 
 
-def _line_window_rows(path: Path, start: int, end: int) -> tuple[tuple[int, str], ...]:
-    with path.open("r", encoding="utf-8") as handle:
-        return tuple(
-            (idx, line.rstrip("\n"))
-            for idx, line in enumerate(islice(handle, start - 1, end), start=start)
-        )
+# LLM: 合并只改变I/O次数，不改变每条命中的原显示窗口。
+# 函数用途: 合并当前文件当前页重叠或相邻的上下文区间。
+def _merged_search_windows(hits: list[SearchHit], context: int) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted((max(1, h.line_number - context), h.line_number + context) for h in hits):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+# LLM: 输入仅是当前content页；每文件补全只打开一次，不为offset之前或哨兵读取context。
+# 函数用途: 按文件合并读取并恢复逐命中上下文展示。
+def _hydrate_search_page(tool, page: list[SearchHit], request: SearchRequest) -> list[SearchHit]:
+    if request.context <= 0 or not page:
+        return page
+    state = _SEARCH_STATE.get()
+    grouped: dict[Path, list[tuple[int, SearchHit]]] = {}
+    result = list(page)
+    for position, hit in enumerate(page):
+        raise_if_cancelled()
+        try:
+            path = tool.resolve_path(hit.rel)
+            _observe_search_source(tool, path)
+        except (OSError, ValueError):
+            if state is not None:
+                state.mark('context_source_unavailable', stale=True)
+            continue
+        grouped.setdefault(path, []).append((position, hit))
+    for path, indexed_hits in grouped.items():
+        windows = _merged_search_windows([hit for _, hit in indexed_hits], request.context)
+        rows: dict[int, str] = {}
+        window_index = 0
+        failed = False
+        try:
+            with _checked_search_file(tool, path) as handle:
+                for number, line in _bounded_source_lines(handle):
+                    while window_index < len(windows) and number > windows[window_index][1]:
+                        window_index += 1
+                    if window_index == len(windows):
+                        break
+                    if windows[window_index][0] <= number <= windows[window_index][1]:
+                        if not _retain_search_bytes(len(line.encode('utf-8')) + 64):
+                            break
+                        rows[number] = line
+                    if number >= windows[-1][1]:
+                        break
+            failed = bool(state and state.limited)
+        except UnicodeDecodeError:
+            if state is not None:
+                state.mark('context_decode_error')
+            failed = True
+        except (OSError, ValueError):
+            if state is not None:
+                state.mark('context_read_error')
+            failed = True
+        if state is not None and state.stale:
+            continue
+        for position, hit in indexed_hits:
+            if rows.get(hit.line_number) != hit.line:
+                if state is not None:
+                    state.mark('context_hit_unavailable', stale=hit.line_number in rows or not failed)
+                continue
+            start, end = max(1, hit.line_number - request.context), hit.line_number + request.context
+            context_rows = []
+            for number, line in rows.items():
+                if start <= number <= end:
+                    if not _retain_search_bytes(len(line.encode('utf-8')) + 64):
+                        break
+                    context_rows.append((number, line))
+            result[position] = replace(hit, context_lines=tuple(context_rows))
+    _validate_search_sources(tool)
+    return result
 
 
 # LLM: 仅终止本调用创建的rg；TERM/KILL后wait均有界，kill成功后补wait以reap，不从取消回调关闭stdout。

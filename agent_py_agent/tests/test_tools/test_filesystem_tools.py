@@ -1,3 +1,5 @@
+# LLM: 文件发现只准入同策略候选；默认忽略不扩大，原生后端不接收未过滤目录。
+# 模块用途: 验证文件工具读写、发现范围、匹配与上下文行为。
 """LLM: tests for filesystem tools — write boundary, symlink, write/append, replace, search, params.
 
 给人看的解释：
@@ -1017,10 +1019,13 @@ def test_search_text_skips_common_noise_dirs_by_default(tmp_path: Path):
     assert "node_modules/pkg.py" in included.output
 
 
+# LLM: 原生匹配只收准入文件，旧glob下发断言迁为更强的显式文件范围断言，仍保留原native输出验证。
+# 函数用途: 确认原生后端匹配参数及宿主前置glob筛选真正接线。
 def test_search_text_uses_rg_backend_when_available(tmp_path: Path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "a.py").write_text("Needle one\n", encoding="utf-8")
+    (workspace / "excluded.txt").write_text("Needle two\n", encoding="utf-8")
     tool = SearchTextTool(workspace, max_matches=10)
     calls: list[list[str]] = []
 
@@ -1062,7 +1067,8 @@ def test_search_text_uses_rg_backend_when_available(tmp_path: Path, monkeypatch)
     assert calls
     assert calls[0][0] == "/usr/bin/rg"
     assert "--fixed-strings" in calls[0]
-    assert "--glob" in calls[0]
+    assert "--no-ignore" in calls[0] and "--glob" not in calls[0]
+    assert calls[0][calls[0].index('--') + 2:] == [str(workspace / 'a.py')]
 
 
 def test_search_text_streams_rg_and_stops_after_page(tmp_path: Path, monkeypatch):
@@ -1460,7 +1466,9 @@ def test_find_files_finds_glob_matches_and_skips_common_noise_dirs(tmp_path: Pat
     assert result.result_envelope["page_window"]["complete"] is True
 
 
-def test_find_files_explicit_glob_retries_common_noise_dirs(tmp_path: Path):
+# LLM: v2明确禁止零命中后扩大发现范围；仍保留显式true包含噪声目录的原能力覆盖。
+# 函数用途: 验证省略和false都排除噪声，只有显式true才纳入。
+def test_find_files_explicit_glob_requires_explicit_noise_inclusion(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     cache = workspace / "pkg" / "__pycache__"
@@ -1477,13 +1485,13 @@ def test_find_files_explicit_glob_retries_common_noise_dirs(tmp_path: Path):
         }
     )
 
-    assert result.ok
-    assert "pkg/__pycache__/module.pyc" in result.output
-    assert result.result_envelope["discovery"] == {
-        "included_ignored": True,
-        "reason": "explicit_pattern_no_visible_matches",
-    }
+    included = tool.execute({"pattern": "**/*.pyc", "path": ".", "include_ignored": True})
+    assert result.ok and excluded.ok and included.ok
+    assert "module.pyc" not in result.output
     assert "module.pyc" not in excluded.output
+    assert "pkg/__pycache__/module.pyc" in included.output
+    assert "discovery" not in result.result_envelope
+    assert "discovery" not in excluded.result_envelope
 
 
 def test_find_files_returns_structured_page_window_when_more_matches_remain(tmp_path: Path):

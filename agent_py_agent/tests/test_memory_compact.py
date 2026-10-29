@@ -1,6 +1,9 @@
+# LLM: 真实生成器必须使用canonical入口；旧CLI别名用例仅作为独立的兼容回归，不代表推荐命令已接通路由。
+# 模块用途: 验证压缩产物、恢复提示和历史兼容性，所有写入限于测试临时目录。
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import agent_py_agent.agent.memory_archive.compact_apply as compact_apply_module
@@ -13,9 +16,17 @@ from agent_py_agent.agent.memory_archive.compact_apply import (
     apply_bundle_payload,
     apply_memory_compact,
 )
+from agent_py_agent.agent.memory_archive.compact_continue_packet import (
+    CompactContinuePacketRequest,
+    build_compact_continue_packet,
+)
 from agent_py_agent.agent.memory_archive.compact_resume import (
     MemoryCompactResumeOptions,
     build_memory_compact_resume,
+)
+from agent_py_agent.agent.memory_archive.compact_resume.completion import (
+    CompactCompletionPromptRequest,
+    build_compact_completion_prompt,
 )
 from agent_py_agent.agent.memory_archive.compact_suggest import (
     MemoryCompactSuggestOptions,
@@ -125,6 +136,8 @@ def test_memory_compact_cli_outputs_json_plan(tmp_path: Path, capsys) -> None:
     assert payload["snapshots"]["file_count"] == 1
 
 
+# LLM: 风险与有原归档两条真实分支都必须给出canonical提示，不从源码字符串猜测行为。
+# 函数用途: 验证坏manifest披露和压缩计划的安全操作建议。
 def test_memory_compact_plan_reports_invalid_manifests(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
@@ -137,8 +150,12 @@ def test_memory_compact_plan_reports_invalid_manifests(tmp_path: Path) -> None:
     assert plan["tokens"]["invalid_count"] == 1
     assert "compression snapshot directory contains invalid JSON files" in plan["risks"]
     assert "token ledger directory contains invalid JSON files" in plan["risks"]
+    assert "Keep original raw/hook files until my-agent memory archive resume is verified after compact." in plan["recommended_actions"]
+    assert "Run my-agent memory doctor and local-doctor before applying compact." in plan["recommended_actions"]
 
 
+# LLM: 新默认actor须进入真实落盘metadata；不改写显式actor或历史产物。
+# 函数用途: 验证非破坏性apply与canonical默认actor。
 def test_apply_memory_compact_writes_non_destructive_artifacts(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
@@ -151,12 +168,15 @@ def test_apply_memory_compact_writes_non_destructive_artifacts(tmp_path: Path) -
     )
 
     artifacts = load_apply_artifacts(result)
+    assert json.loads(Path(result["refs"]["metadata"]).read_text())["actor"] == "my-agent memory compact"
     assert result["mode"] == "apply"
     _assert_apply_artifact_schemas(result, artifacts)
     _assert_successful_apply_payload(result, artifacts)
     assert_apply_preserved_sources(root)
 
 
+# LLM: 保留原hook事实、guard和自动恢复断言，仅迁移新生成的补全命令。
+# 函数用途: 验证无独立快照时的恢复事实与canonical补救提示。
 def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_real_run_archive_fixture(root)
@@ -186,7 +206,7 @@ def test_memory_compact_apply_reads_hook_recovery_state_without_snapshot_file(tm
     assert resume["completion_prompt"]["status"] == "needs_user_input"
     assert resume["completion_prompt"]["suggested_commands"]
     assert resume["completion_prompt"]["suggested_commands"][1] == (
-        "my-agent memory-compact --apply --session-id session-compact --request-id request-compact"
+        "my-agent memory compact --apply --session-id session-compact --request-id request-compact"
     )
     assert "验收条件" in resume["completion_prompt"]["prompt_template"]
     assert "Completion Prompt" in resume["context_block"]
@@ -421,6 +441,8 @@ def test_memory_resume_from_compact_cli_outputs_context_only(tmp_path: Path, cap
     assert apply_result["apply_id"] in captured.out
 
 
+# LLM: 三条建议按实际输出逐项断言；提示不能触发apply或自动动作。
+# 函数用途: 验证canonical建议保留原scope和手动确认边界。
 def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     write_compact_fixture(root)
@@ -444,4 +466,87 @@ def test_memory_compact_suggestion_prompts_without_applying(tmp_path: Path) -> N
     assert suggestion["owner"] == {"owner_type": "subagent_run", "owner_id": "run-compact"}
     assert suggestion["token_budget"]["ratio"] == 0.8
     assert suggestion["candidate_counts"]["archive_records"] == 2
-    assert suggestion["recommended_commands"][0].startswith("my-agent memory-compact --session-id session-compact")
+    assert suggestion["recommended_commands"] == [
+        "my-agent memory compact --session-id session-compact --request-id request-compact --dry-run",
+        "my-agent memory compact --session-id session-compact --request-id request-compact --apply",
+        "my-agent memory archive resume --from-compact <apply_id> --context-only",
+    ]
+
+
+# LLM: 缺失metadata仍须阻塞，不允许靠改提示放宽guard或隐式创建归档。
+# 函数用途: 验证失败恢复入口的canonical补救建议及只读行为。
+def test_canonical_missing_resume_preserves_blocked_guard(tmp_path):
+    root = tmp_path / "missing-root"
+    result = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref="missing"))
+    assert result["ok"] is False
+    assert result["action_guard"]["allowed_to_continue"] is False
+    assert result["next_actions"] == [
+        "Find a valid compact apply id or rerun my-agent memory compact --apply."
+    ]
+    assert not (root / "memory_archive").exists()
+
+
+# LLM: 两种guard分支均经公开packet构造器，canonical文案不得变成自动执行权限。
+# 函数用途: 验证延续包允许分支和阻塞分支的恢复说明。
+def test_canonical_continue_packet_preserves_guard_branches():
+    for allowed in (False, True):
+        result = build_compact_continue_packet(CompactContinuePacketRequest(
+            metadata={"apply_id": "a", "plan_id": "p"}, work_state={},
+            consistency={"status": "ok" if allowed else "blocked"},
+            action_guard={"allowed_to_continue": allowed}, handoff={},
+            recommended_read_paths=[], next_actions=[], main_context_bundle={},
+        ))
+        assert result["ready_to_continue"] is allowed
+        assert result["automatic_tool_execution"] == "none"
+        if allowed:
+            assert result["resume_instructions"][0] == "Continue from resume_focus.next_action first."
+        else:
+            assert result["resume_instructions"][-1] == (
+                "Rerun my-agent memory compact --apply and my-agent memory archive resume after facts are complete."
+            )
+
+
+# LLM: scope含空格和引号时须保持原shell转义合同；事实齐全时仍返回空建议。
+# 函数用途: 验证补全提示的canonical路径、scope值和空列表语义。
+def test_canonical_completion_commands_preserve_quoted_scope():
+    scope = {"session_id": "session space", "request_id": "request'quoted", "run_id": "run-one", "task_id": "task two"}
+    result = build_compact_completion_prompt(CompactCompletionPromptRequest(
+        apply_id="a", plan_id="p", work_state={"missing_fields": ["acceptance"], "scope": scope},
+    ))
+    argv = shlex.split(result["suggested_commands"][1])
+    assert argv[:4] == ["my-agent", "memory", "compact", "--apply"]
+    assert dict(zip(argv[4::2], argv[5::2], strict=True)) == {
+        "--session-id": scope["session_id"], "--request-id": scope["request_id"],
+        "--run-id": scope["run_id"], "--task-id": scope["task_id"],
+    }
+    assert result["suggested_commands"][2] == (
+        "my-agent memory archive resume --from-compact <new_apply_id> --compact-resume-mode auto"
+    )
+    complete = build_compact_completion_prompt(CompactCompletionPromptRequest(
+        apply_id="a", plan_id="p", work_state={"missing_fields": [], "scope": scope},
+    ))
+    assert complete["suggested_commands"] == []
+
+
+# LLM: 显式历史actor与v1产物仅为兼容fixture；恢复不得把它们静默改成新默认值。
+# 函数用途: 验证历史v1metadata仍可读且读恢复不重写原字节。
+def test_canonical_generation_does_not_rewrite_historical_v1(tmp_path):
+    root = tmp_path / "workspace"
+    write_compact_fixture(root)
+    applied = apply_memory_compact(root, MemoryCompactApplyOptions(
+        plan_options=MemoryCompactPlanOptions(session_id="session-compact", request_id="request-compact"),
+        actor="memory-compact",
+    ))
+    path = Path(applied["refs"]["metadata"])
+    metadata = json.loads(path.read_text())
+    metadata["version"] = 1
+    metadata.pop("schema", None)
+    metadata.pop("compaction_gate", None)
+    for field in ("compaction_state", "handoff_summary"):
+        metadata["refs"].pop(field, None)
+    path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    before = path.read_bytes()
+    resumed = build_memory_compact_resume(root, MemoryCompactResumeOptions(apply_ref=applied["apply_id"]))
+    assert resumed["ok"] is True
+    assert path.read_bytes() == before
+    assert json.loads(before)["actor"] == "memory-compact"

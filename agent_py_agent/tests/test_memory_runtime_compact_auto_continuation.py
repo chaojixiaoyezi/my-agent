@@ -1483,6 +1483,8 @@ def test_compact_continue_packet_keeps_captured_refs_compact() -> None:
     assert captured["artifact_refs"][0]["artifact_ref"] == "artifacts/read-12.json"
 
 
+# LLM: memory-resume为历史透传fixture，必须原样保留，不是当前推荐入口。
+# 函数用途: 验证延续包不改写归档中已记录的动作文本。
 def test_compact_continue_packet_preserves_recorded_next_actions() -> None:
     packet = build_compact_continue_packet(
         CompactContinuePacketRequest(
@@ -1509,12 +1511,15 @@ def test_compact_continue_packet_preserves_recorded_next_actions() -> None:
     assert packet["resume_focus"]["next_actions"] == ["如需恢复本次单轮 run，先查看 memory-resume 和 LocalStore 记录。"]
 
 
+# LLM: 旧名和canonical救援命令均不应挤入默认业务动作。
+# 函数用途: 验证默认恢复以继续用户目标为先，而非重复查恢复资料。
 def test_default_run_recovery_next_actions_are_action_first() -> None:
     actions = _default_run_recovery_next_actions()
 
     assert actions
     assert "继续当前用户请求" in actions[0]
     assert all("memory-resume" not in action for action in actions)
+    assert all("my-agent memory archive resume" not in action for action in actions)
     assert all("LocalStore" not in action for action in actions)
 
 

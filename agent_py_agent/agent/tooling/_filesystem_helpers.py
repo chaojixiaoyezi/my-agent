@@ -1,12 +1,18 @@
-# LLM: 文件参数与内部状态引用的共享读取辅助；上下文交接材料不是运行状态 API，读取仍服从 owner/path 边界。
-# 模块用途: 校验文件参数、定位可读产物并说明误读内部状态的原因；不能从文档内容推导执行权限。
+# LLM: 文件参数与内部引用共用原owner/path边界；发现候选在目录下降前剪枝，指纹只能否定变化而非制造强快照。
+# 模块用途: 校验参数、定位可读产物及有界枚举安全文件，不从文档、缓存或忽略参数推导权限。
 from __future__ import annotations
 
+import fnmatch
+import heapq
 import json
+import os
+import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..common.cancellation import raise_if_cancelled
 from ..contracts.error_taxonomy import ERROR_CONTRACTS
 from .models import ToolFailureStage, ToolHandlerOutcome
 
@@ -23,6 +29,7 @@ _MAX_WRITE_TEXT_CHARS = 1_000_000
 _FALLBACK_SCAN_MAX_FILES = 20_000
 # 无 ripgrep 时后备遍历最多 10 秒：超时标不完整，保护 Gateway 不被大目录占住。
 _FALLBACK_SCAN_MAX_SECONDS = 10.0
+_DISCOVERY_ARG_MAX_BYTES = 192 * 1024
 _INTERNAL_AGENT_STATUS_FILES = frozenset(
     {
         "final_report.md",
@@ -148,6 +155,142 @@ def _bool_param(value: Any, *, default: bool = False) -> bool:
         if text in {"0", "false"}:
             return False
     return default
+
+
+# LLM: 只有实际观察到链接才允许跳过，任意OSError消息不能代替结构化类型。
+# 类用途: 区分发现入口的链接排除与需要披露的I/O失败。
+class _DiscoverySymlink(OSError):
+    pass
+
+
+# LLM: 发现入口不继承直接读取链接的语义；逐级lstat只是变化检测，不声称原子文件系统快照。
+# 函数用途: 拒绝发现路径中的链接分量，保留普通读取工具原有语义。
+def _discovery_nofollow_stat(path: Path):
+    info = None
+    for component in reversed((path, *path.parents)):
+        info = component.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise _DiscoverySymlink()
+    return info
+
+
+# LLM: 只记录已观察身份和代次，不以相同mtime证明强快照。
+# 函数用途: 统一目录、文件与已打开FD的变化检测字段。
+def _discovery_identity(info) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+# LLM: include_ignored只改变噪声过滤，路径权限与宿主托管存储仍由原策略裁决；链接仅跳过而非终止整轮。
+# 函数用途: 在目录下降和文件交出前统一执行忽略、nofollow及权限检查。
+def _safe_discovery_path(tool, item: Path, *, root: Path, include_ignored: bool, ignored_names) -> Path | None:
+    try:
+        relative = item.relative_to(root)
+    except ValueError:
+        return None
+    if not include_ignored and any(part in ignored_names for part in relative.parts[:-1]):
+        return None
+    try:
+        info = _discovery_nofollow_stat(item)
+    except _DiscoverySymlink:
+        return None
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        return None
+    if not include_ignored and stat.S_ISDIR(info.st_mode) and relative.parts and item.name in ignored_names:
+        return None
+    if tool.path_access_policy.host_managed_store(item) is not None:
+        return None
+    try:
+        safe = tool.resolve_path(item)
+    except ValueError:
+        return None
+    return safe if safe == item else None
+
+
+# LLM: 目录排序键加尾斜线，使文件与子目录按同一Unicode路径序产出；候选入堆前即做权限剪枝。
+# 函数用途: 供find/search共用有界、可取消的安全候选流。
+def _iter_discovery_files(tool, target: Path, *, include_ignored: bool, ignored_names,
+                          scan_state, admit, observe=None):
+    pending = [('', target)]
+    examined = 0
+    try:
+        while pending:
+            raise_if_cancelled()
+            if time.monotonic() - scan_state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+                scan_state.limited = True
+                scan_state.limit_reason = scan_state.limit_reason or 'time_limit'
+                return
+            _, item = heapq.heappop(pending)
+            safe = _safe_discovery_path(tool, item, root=target, include_ignored=include_ignored,
+                                        ignored_names=ignored_names)
+            if safe is None:
+                continue
+            info = _discovery_nofollow_stat(safe)
+            if observe is not None:
+                observe(safe)
+            if stat.S_ISREG(info.st_mode):
+                if not admit(scan_state):
+                    return
+                yield safe
+                continue
+            with os.scandir(safe) as entries:
+                for entry in entries:
+                    raise_if_cancelled()
+                    examined += 1
+                    if examined > _FALLBACK_SCAN_MAX_FILES:
+                        scan_state.limited = True
+                        scan_state.limit_reason = scan_state.limit_reason or 'entry_limit'
+                        return
+                    if time.monotonic() - scan_state.started_at >= _FALLBACK_SCAN_MAX_SECONDS:
+                        scan_state.limited = True
+                        scan_state.limit_reason = scan_state.limit_reason or 'time_limit'
+                        return
+                    child = safe / entry.name
+                    accepted = _safe_discovery_path(tool, child, root=target,
+                        include_ignored=include_ignored, ignored_names=ignored_names)
+                    if accepted is None:
+                        continue
+                    child_info = _discovery_nofollow_stat(accepted)
+                    if observe is not None:
+                        observe(accepted)
+                    key = accepted.relative_to(target).as_posix()
+                    if stat.S_ISDIR(child_info.st_mode):
+                        key += '/'
+                    heapq.heappush(pending, (key, accepted))
+            if observe is not None:
+                observe(safe)
+    except OSError:
+        scan_state.limited = True
+        scan_state.limit_reason = scan_state.limit_reason or 'filesystem_error'
+
+
+# LLM: 两后端不再各自解释glob；前导双星允许零层目录，匹配始终区分大小写。
+# 函数用途: 对basename和工具显示路径执行同一明确的glob语义。
+def _discovery_matches_glob(display_path: str, basename: str, pattern: str) -> bool:
+    patterns = [pattern]
+    while patterns[-1].startswith('**/'):
+        patterns.append(patterns[-1][3:])
+    return any(fnmatch.fnmatchcase(display_path, item) or fnmatch.fnmatchcase(basename, item)
+               for item in patterns)
+
+
+# LLM: 原生程序不得自行遍历未经策略准入的目录；argv保留有帽，触顶是partial而非完整无匹配。
+# 函数用途: 生成可交给rg的有限文件批次，目录下降与文件筛选只执行共同发现政策。
+def _discovery_file_batch(tool, target: Path, *, include_ignored: bool, ignored_names,
+                          scan_state, admit, file_glob: str = '') -> list[Path]:
+    result: list[Path] = []
+    retained = 0
+    for item in _iter_discovery_files(tool, target, include_ignored=include_ignored,
+            ignored_names=ignored_names, scan_state=scan_state, admit=admit):
+        if file_glob and not _discovery_matches_glob(tool.display_path(item), item.name, file_glob):
+            continue
+        cost = len(os.fsencode(item)) + 64
+        if retained + cost > _DISCOVERY_ARG_MAX_BYTES:
+            scan_state.limited = True
+            scan_state.limit_reason = scan_state.limit_reason or 'candidate_byte_limit'
+            break
+        retained += cost
+        result.append(item)
+    return result
 
 
 def _discovery_result_envelope(

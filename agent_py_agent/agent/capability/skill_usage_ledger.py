@@ -1,4 +1,4 @@
-# LLM: 使用台账只保存身份与计数，不存方法正文；独立于学习开关，所有异常只能软降级。
+# LLM: 使用台账只保存身份与计数，写失败只告警；读取未知通过coverage或结构异常表达。
 # 模块用途: 统一记录 owner 的人工检索、读取、宿主注入与采用事实。
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from ..common.nofollow_fs import (
     unlink_file_beneath,
     write_text_atomic_beneath,
 )
+from ..local_storage.owner_read_index import OwnerReadIndex, OwnerReadUnavailable, require_complete
 from ..user_space.owner_quota import OwnerQuotaChange
 from .skill_learning_store import SkillLearningStore
 
@@ -71,17 +72,106 @@ def _record_usage_rows(store, events: list[dict]) -> None:
         _save_usage(store, admission, rows, summary)
 
 
-# LLM: 只读恢复已写明细尚未写汇总的事件，不创建目录或保存恢复状态；故障不影响报告主入口。
-# 函数用途: 读取 owner 使用汇总，失败时返回空计数。
+# LLM: 生命周期权威仍是原summary；未知不能转成空计数，原writer不依赖此读取口。
+# 函数用途: 保持完整成功时的原字典，失败时抛带coverage的异常。
 def load_skill_usage_summary(store_or_home) -> dict:
+    report = load_skill_usage_summary_report(store_or_home)
+    if report['coverage']['status'] != 'complete':
+        logging.getLogger(__name__).warning("SKILL_USAGE_SUMMARY_UNAVAILABLE")
+    return require_complete(report)['summary']
+
+
+# LLM: 只绑定Store原owner根，不从ledger父目录猜归属；构造不落盘。
+# 函数用途: 为同一Store复用纯派生读索引。
+def _usage_read_index(store):
+    index = getattr(store, '_usage_read_index', None)
+    if index is None:
+        index = OwnerReadIndex(store.skills_root.parent)
+        store._usage_read_index = index
+    return index
+
+
+# LLM: 明细不超过原writer保留上限，不扩大预算或重建丢失历史。
+# 函数用途: 固定view分页取得供原replay校验的有界最近明细。
+def _indexed_usage_rows(index, view):
+    first = require_complete(index.query(view, limit=1000))
+    total = first['total_count']
+    if total > MAX_USAGE_LEDGER_EVENTS:
+        raise OwnerReadUnavailable({'status': 'partial', 'reason': 'usage_detail_budget',
+                                    'source': first['coverage']})
+    if total == 0 and view.get('through', 0) > 0:
+        raise OwnerReadUnavailable({'status': 'unavailable', 'reason': 'missing_usage_projection',
+                                    'source': first['coverage']})
+    rows = first['rows']
+    while len(rows) < total:
+        page = require_complete(index.query(view, limit=min(1000, total - len(rows)), offset=len(rows)))
+        if not page['rows']:
+            raise OwnerReadUnavailable({'status': 'unavailable', 'reason': 'missing_usage_projection',
+                                        'source': page['coverage']})
+        rows.extend(page['rows'])
+    return rows
+
+
+# LLM: summary为lifetime基线，裁剪明细不能取代它；只读补记永不反写规范事实。
+# 函数用途: 返回使用汇总及独立的来源、生命周期和明细覆盖状态。
+def load_skill_usage_summary_report(store_or_home) -> dict:
+    sources = {}
     try:
         store = _usage_store(store_or_home)
-        summary = _read_summary(store)
+        index = _usage_read_index(store)
+        parts = store.directory.relative_to(store.skills_root.parent).parts
+        summary_view = index.advance('usage', (*parts, 'usage_summary.json'))
+        sources['summary'] = summary_view
+        projected = index.query(summary_view, limit=1)
+        sources['summary'] = projected['coverage']
+        require_complete(projected)
+        present = bool(projected['rows'])
+        if not present and projected['coverage'].get('reason') != 'source_absent':
+            raise ValueError('missing summary projection')
+        summary = projected['rows'][0] if present else _empty_summary()
+        detail_view = index.advance('usage', (*parts, 'usage_ledger.jsonl'))
+        sources['ledger'] = detail_view
+        rows = _indexed_usage_rows(index, detail_view)
+        numbered = next(((position, row['sequence']) for position, row in enumerate(rows)
+                         if 'sequence' in row), None)
+        if not present and numbered is not None and numbered[1] != numbered[0] + 1:
+            raise OwnerReadUnavailable({'status': 'unavailable', 'reason': 'missing_lifetime_summary'})
+        if (not isinstance(summary, dict) or not isinstance(summary.get('totals'), dict)
+                or not isinstance(summary.get('by_skill'), dict)
+                or not isinstance(summary.get('daily_history'), dict)):
+            raise ValueError('invalid usage summary')
+        _summary_sequence(summary)
+        _normalize_by_skill(summary)
+        _replay_usage_rows(summary, rows)
         _prune_daily(summary)
-        return summary
-    except Exception:  # noqa: BLE001 - 报告必须能在统计文件不可读时继续。
-        logging.getLogger(__name__).warning("SKILL_USAGE_SUMMARY_UNAVAILABLE")
-        return _empty_summary()
+        # 两来源均在全部处理结束后重新校验，替换或删除不能被早先读取掩盖。
+        for name, view in (('summary', summary_view), ('ledger', detail_view)):
+            check = index.query(view, limit=0)
+            sources[name] = check['coverage']
+            require_complete(check)
+        sequences = [row['sequence'] for row in rows]
+        complete_history = ((not sequences and summary['last_sequence'] == 0)
+                            or bool(sequences) and sequences[0] == 1
+                            and sequences[-1] == summary['last_sequence']
+                            and all(right == left + 1 for left, right in zip(sequences, sequences[1:])))
+        return {'summary': summary, 'coverage': {
+            'status': 'complete', 'reason': 'summary_and_retained_replay',
+            'scope': 'lifetime_summary', 'sources': sources,
+            'detail_history': {'status': 'complete' if complete_history else 'partial',
+                               'reason': 'covered' if complete_history else 'retained_or_missing_detail'},
+        }}
+    except OwnerReadUnavailable as error:
+        return {'summary': None, 'coverage': {
+            'status': error.coverage.get('status', 'unavailable'),
+            'reason': error.coverage.get('reason', 'usage_read_unavailable'),
+            'failure': error.coverage, 'sources': sources,
+        }}
+    except Exception as error:  # noqa: BLE001 - 读取保留未知，不修复规范来源。
+        return {'summary': None, 'coverage': {
+            'status': 'unavailable',
+            'reason': 'io_error' if isinstance(error, OSError) else 'invalid_usage_state',
+            'sources': sources,
+        }}
 
 
 # LLM: Agent 优先取当前 owner 的 home_paths；不能用 cwd、全局 home 或学习开关决定归属。

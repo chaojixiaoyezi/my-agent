@@ -30,7 +30,6 @@ from ._filesystem_helpers import (
     _required_path,
 )
 from .filesystem_artifact_guard import (
-    ToolOutputArtifactRedirectError,
     logical_reference_write_path_error,
     tool_output_artifact_typo_hint,
 )
@@ -224,9 +223,8 @@ class FileSystemTool(BaseTool):
             return nullcontext(None)
         return self.owner_quota.reserve(changes)
 
-    # LLM: PathAccessPolicy is the hard owner wall. Per-turn workspace roots may narrow paths but
-    # never authorize a path outside owner home; only an admin Full Access registry has no scope.
-    # 函数用途: 把相对路径落到当前工具目录，并先经过 owner/full-access 统一权限裁决。
+    # LLM: 原路径拒绝码始终保留；建议只核对存在性和同一策略，不自动访问或授权猜测目标。
+    # 函数用途: 解析并裁决原路径，拒绝时最多附带已经核实的拼写候选。
     def resolve_path(self, raw_path: str | Path) -> Path:
 
         raw_text = _required_path(raw_path)
@@ -240,31 +238,25 @@ class FileSystemTool(BaseTool):
         decision = self.check_path_access(candidate)
         if decision.allowed:
             return candidate
-        self._raise_for_typo_hint(raw_text, candidate)
-        raise PathAccessError(decision.message or "路径访问被拒绝。", decision.code)
+        hint = self._verified_typo_hint(raw_text, candidate)
+        message = decision.message or "路径访问被拒绝。"
+        raise PathAccessError(f"{message} {hint}".strip(), decision.code)
 
-    # LLM: 路径已经落在某个已知工作区根下时，它本身不可能写错前缀（根名就是在这条路径里匹配到的），
-    #   所谓的"拼写提示"只会给出同一个路径、诱导调用方原地重试并盖住真实的权限拒绝（2026-09-28 集成者裁定）。
-    #   只有不在任何已知根下、且建议目标确实不同于原路径时，才保留拼写提示。
-    #   实测（2026-09-28）：本方法的拼写分支只在**三者同时成立**时才真正抛出——
-    #   ① check_path_access 已拒绝该路径（在根内、或文件不存在时策略放行，都到不了这里）；
-    #   ② 该路径不在任何 workspace_root 之下；
-    #   ③ suggest_workspace_typo_target 给出的建议非空且不同于原路径。
-    #   所以它覆盖的是"把工作区根的**位置**写错"（根名出现在路径中段），不是"文件名拼错"。
-    # 函数用途: 命中"真拼写"场景时抛出对应异常；根内路径与拿不到建议的路径直接返回，交给权限拒绝处理。
-    def _raise_for_typo_hint(self, raw_text: str, candidate: Path) -> None:
+    # LLM: 提示不取代原裁决；仅推导一次，策略先于stat，预期路径异常只放弃提示。
+    # 函数用途: 为根外错位路径返回存在且被原策略允许的不同候选，不读取正文。
+    def _verified_typo_hint(self, raw_text: str, candidate: Path) -> str:
         if any(_path_is_under(candidate, root) for root in self.workspace_roots):
-            return
-        hint = _workspace_typo_error(raw_text, self.workspace_root, self.workspace_roots)
-        if not hint:
-            return
-        if tool_output_artifact_typo_hint(
-            raw_text,
-            self.workspace_root,
-            suggest_workspace_typo_target(raw_text, self.workspace_roots),
-        ):
-            raise ToolOutputArtifactRedirectError(hint)
-        raise ValueError(hint)
+            return ""
+        try:
+            suggested = suggest_workspace_typo_target(raw_text, self.workspace_roots)
+            if not suggested:
+                return ""
+            target = Path(suggested).resolve(strict=False)
+            if target == candidate or not self.check_path_access(target).allowed or not target.exists():
+                return ""
+            return _format_workspace_typo_hint(raw_text, self.workspace_root, str(target))
+        except (OSError, RuntimeError):
+            return ""
 
     # LLM: 只消费 registry 注入的墙外授权，裁决复用原路径策略；workspace_roots 不能自行产生权限，联测 owner/exact 读取边界。
     # 函数用途: 使用核心与插件共用的路径裁决，检查目标是否获准读取。
@@ -325,10 +317,18 @@ class FileSystemTool(BaseTool):
             return str(path).replace("\\", "/")
 
 
+# LLM: 保留旧内部调用合同，不证明权限或存在性；实际裁决入口使用已经核实的候选格式化叶。
+# 函数用途: 为调用方显示可能的工作区前缀误写，不否认原权限拒绝或自动重试。
 def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: list[Path]) -> str:
     suggested = suggest_workspace_typo_target(raw_path, workspace_roots)
     if not suggested:
         return ""
+    return _format_workspace_typo_hint(raw_path, workspace_root, suggested)
+
+
+# LLM: 只消费调用方提供的同一个候选，不重新解析或推导；此函数自身不是授权证据。
+# 函数用途: 格式化路径建议并保留原权限拒绝有效的说明。
+def _format_workspace_typo_hint(raw_path: str, workspace_root: Path, suggested: str) -> str:
     artifact_hint = tool_output_artifact_typo_hint(raw_path, workspace_root, suggested)
     if artifact_hint:
         return artifact_hint
@@ -336,7 +336,7 @@ def _workspace_typo_error(raw_path: str, workspace_root: Path, workspace_roots: 
         "路径疑似拼写错误，已拒绝访问。"
         f" suspected_path_typo=true target={raw_path} workspace_root={workspace_root}"
         f" suggested_target={suggested}。"
-        " 这是路径拼写错误，不是权限缺口；请使用 suggested_target 重试。"
+        " 原路径的权限拒绝仍然有效；候选不是自动授权，也未自动重试。"
     )
 
 

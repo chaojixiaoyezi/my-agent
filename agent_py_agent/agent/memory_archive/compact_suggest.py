@@ -83,14 +83,16 @@ def _suggestion_status(options: MemoryCompactSuggestOptions, ratio: float) -> st
     return "ready_to_compact" if reached else "ok"
 
 
+# LLM: 只在原should_prompt分支生成命令，保留scope和参数顺序，不重复添加my-agent前缀。
+# 函数用途: 提供canonical预演、apply和恢复命令，不执行操作。
 def _recommended_commands(plan: dict[str, Any], should_prompt: bool) -> list[str]:
     if not should_prompt:
         return []
     scope = _scope_flags(plan["scope"])
     return [
-        f"my-agent memory-compact{scope} --dry-run",
-        f"my-agent memory-compact{scope} --apply",
-        "my-agent memory-resume --from-compact <apply_id> --context-only",
+        f"my-agent memory compact{scope} --dry-run",
+        f"my-agent memory compact{scope} --apply",
+        "my-agent memory archive resume --from-compact <apply_id> --context-only",
     ]
 
 

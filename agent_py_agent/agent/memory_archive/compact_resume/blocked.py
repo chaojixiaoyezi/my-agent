@@ -1,4 +1,5 @@
-
+# LLM: 缺失损坏metadata继续阻塞；新补救提示不放宽一致性和action guard。
+# 模块用途: 构造压缩恢复失败回执，不创建文件或执行命令。
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ class BlockedCompactResumeRequest:
     metadata_load_error: dict[str, object] | None = None
 
 
+# LLM: 保留失败形状和权限，canonical apply仅为建议，不使缺失产物可恢复。
+# 函数用途: 返回阻塞结果及查找有效产物或重做apply的建议。
 def build_blocked_compact_resume(request: BlockedCompactResumeRequest) -> dict[str, Any]:
     consistency = _blocked_consistency(request)
     action_guard = _blocked_action_guard(request, consistency)
@@ -54,7 +57,7 @@ def build_blocked_compact_resume(request: BlockedCompactResumeRequest) -> dict[s
         "fail_safe_checkpoints": [],
         "completion_prompt": {},
         "recommended_read_paths": [str(request.metadata_path)],
-        "next_actions": ["Find a valid compact apply id or rerun memory-compact --apply."],
+        "next_actions": ["Find a valid compact apply id or rerun my-agent memory compact --apply."],
         "context_block": "",
     }
 

@@ -1,7 +1,8 @@
-
+# LLM: 只展示调用方恢复事实，不转换历史消息和next_actions。
+# 模块用途: 为canonical归档恢复整理简报，不读取文件或改状态。
 from __future__ import annotations
 
-"""builds concise human/LLM-readable recovery briefs for memory-resume.
+"""builds concise human/LLM-readable recovery briefs for my-agent memory archive resume.
 
 新手说明:
 这个文件只负责把归档线索、LocalStore 线索和任务事实源压成一份'恢复简报'。

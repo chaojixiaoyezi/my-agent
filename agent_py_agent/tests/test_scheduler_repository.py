@@ -1,3 +1,5 @@
+# LLM: 原事实事务、owner及claim合同不变，历史去重只查询本批ID且不能用坏读提供假阴性。
+# 模块用途: 验证调度仓库原合同及有覆盖证明的索引去重。
 from __future__ import annotations
 
 import json
@@ -390,66 +392,30 @@ def _jsonl_read_spy(monkeypatch, module):
     return calls
 
 
-# LLM: 包装真实二进制文件对象，记录每次 read 的起点和长度，不隐藏 seek/fstat 或读取错误。
-# 类用途: 为尾部增量扫描留下可复核的字节读取轨迹。
-class _HistoryReadTrace:
-    # LLM: 持有测试临时文件对象，不代替文件系统内容。
-    # 函数用途: 连接原文件对象与字节轨迹列表。
-    def __init__(self, handle, reads):
-        self.handle, self.reads = handle, reads
+# LLM: 完整前缀证明可重读原字节，但旧行不应重新解码；不再认可不安全的首尾锚点性能口径。
+# 函数用途: 旁听真实索引解码的记录数。
+def _history_decode_spy(monkeypatch, repository):
+    original, decoded = repository._history_read_index._decode, []
 
-    # LLM: 上下文生命周期沿原文件对象执行。
-    # 函数用途: 进入真实文件读取并返回计数包装器。
-    def __enter__(self):
-        self.handle.__enter__()
-        return self
+    # LLM: 原校验、解析和数据库提交照常运行。
+    # 函数用途: 收集本次真正解码的来源行。
+    def decode(raw, *args, **kwargs):
+        decoded.append(raw)
+        return original(raw, *args, **kwargs)
 
-    # LLM: 关闭原句柄，不吞掉读取异常。
-    # 函数用途: 结束字节轨迹收集并释放文件。
-    def __exit__(self, *args):
-        return self.handle.__exit__(*args)
-
-    # LLM: 其余文件操作全部透传，保持 seek/fileno 等行为。
-    # 函数用途: 代理未专门计数的原文件操作。
-    def __getattr__(self, name):
-        return getattr(self.handle, name)
-
-    # LLM: 返回真实 read 的原字节，记录实际而非请求字节数。
-    # 函数用途: 记录一次增量扫描的起点和长度。
-    def read(self, size=-1):
-        start = self.handle.tell()
-        data = self.handle.read(size)
-        self.reads.append((start, len(data)))
-        return data
+    monkeypatch.setattr(repository._history_read_index, "_decode", decode)
+    return decoded
 
 
-# LLM: 仅观察目标 history 的 rb 读取，其他账本和原文本读取继续真实执行。
-# 函数用途: 为实际历史去重路径安装字节读取计数。
-def _history_binary_spy(monkeypatch, path):
-    original = Path.open
-    reads = []
-
-    # LLM: 保持原模式和参数，不改变磁盘文件或调用方 seek 位置。
-    # 函数用途: 对目标二进制历史句柄加只读轨迹。
-    def open_file(self, mode="r", *args, **kwargs):
-        handle = original(self, mode, *args, **kwargs)
-        return _HistoryReadTrace(handle, reads) if self == path and mode == "rb" else handle
-
-    monkeypatch.setattr(Path, "open", open_file)
-    return reads
-
-
-# LLM: 真实 finish_run 必须先去重再追加；增量投影既不能从0重解析，也不能丢掉原历史ID。
-# 函数用途: 验证完成运行只扫描锚点和新追加字节，并保留跨批去重。
+# LLM: 真实finish仍先去重再追加；完整前缀校验不等于重新解码旧行。
+# 函数用途: 验证原完成入口只解码新增行并保留跨批去重。
 def test_opt7_finish_run_uses_incremental_history_ids(tmp_path, monkeypatch):
-    repository = _repository(tmp_path)
+    repository, _home = _indexed_history_repository(tmp_path)
     claim = _claimed_due_run(repository)
     repository.history_path.write_text(json.dumps({"run_id": "srun_old", "padding": "x" * 12000}) + "\n")
-    calls = _jsonl_read_spy(monkeypatch, repository_module)
+    decoded = _history_decode_spy(monkeypatch, repository)
     assert repository._new_history_rows_unlocked([{"run_id": "srun_old"}]) == []
-    assert len(calls) == 1
-    end = repository.history_path.stat().st_size
-    reads = _history_binary_spy(monkeypatch, repository.history_path)
+    assert len(decoded) == 1
     with repository.history_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"run_id": "srun_external", "summary": "保留\u2028同一行"}, ensure_ascii=False) + "\n")
     terminal = repository.finish_run(str(claim["run_id"]), str(claim["claim_id"]), SchedulerRunFinish("done", now=1010))
@@ -457,19 +423,19 @@ def test_opt7_finish_run_uses_incremental_history_ids(tmp_path, monkeypatch):
     assert repository._new_history_rows_unlocked([
         {"run_id": "srun_old"}, {"run_id": "srun_external"}, {"run_id": claim["run_id"]},
     ]) == []
-    assert len(calls) == 1
-    assert reads and all((start == 0 and size <= 4096) or start >= end - 4096 for start, size in reads)
-    assert sum(size for start, size in reads if start > 0) < end
+    assert len(decoded) == 3
+    assert repository._new_history_rows_unlocked([{"run_id": claim["run_id"]}]) == []
+    assert len(decoded) == 3
 
 
-# LLM: 替换、截断、同尺寸恢复mtime及锚点改写不能继续继承旧run_id集合。
-# 函数用途: 验证不满足追加协议时重读权威历史。
+# LLM: 替换、截断、同尺寸恢复mtime及首部改写均撤销投影，warm页不再解码旧行。
+# 函数用途: 验证各种非追加变化后的正确去重和真实解码成本。
 @pytest.mark.parametrize("change", ["replace", "truncate", "same-size", "anchor-rewrite"])
 def test_opt7_history_ids_fall_back_after_rewrites(tmp_path, monkeypatch, change):
-    repository = _repository(tmp_path)
+    repository, _home = _indexed_history_repository(tmp_path)
     original = json.dumps({"padding": "x" * 12000, "run_id": "srun_old"}) + "\n"
     repository.history_path.write_text(original)
-    calls = _jsonl_read_spy(monkeypatch, repository_module)
+    decoded = _history_decode_spy(monkeypatch, repository)
     assert repository._new_history_rows_unlocked([{"run_id": "srun_old"}]) == []
     stamp = repository.history_path.stat()
     updated = original.replace("srun_old", "srun_new")
@@ -486,26 +452,44 @@ def test_opt7_history_ids_fall_back_after_rewrites(tmp_path, monkeypatch, change
         os.utime(repository.history_path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     expected = [{"run_id": "srun_old"}]
     assert repository._new_history_rows_unlocked(expected + [{"run_id": "srun_new"}]) == expected
-    assert len(calls) == 2
+    assert len(decoded) == 2 + (change == "anchor-rewrite")
     repository._new_history_rows_unlocked(expected)
-    assert len(calls) == 2
+    assert len(decoded) == 2 + (change == "anchor-rewrite")
 
 
-# LLM: 公共JSONL坏行仍按原口径跳过；不能缓存错误结果或把未结束行误认成新行边界。
-# 函数用途: 验证坏追加和无换行尾行必须回退全读。
+# LLM: 坏行沿原过滤口径跳过，索引未知必须后备；无LF的合法末行不得丢失。
+# 函数用途: 验证坏追加重复读取及未完成尾行的真实去重语义。
 @pytest.mark.parametrize("suffix", ['{broken\n', '[]\n', '\ufffd\n', '{"run_id":"srun_tail"}'])
 def test_opt7_history_bad_or_unterminated_tail_does_not_stick(tmp_path, monkeypatch, suffix):
-    repository = _repository(tmp_path)
+    repository, _home = _indexed_history_repository(tmp_path)
     repository.history_path.write_text('{"run_id":"srun_old"}\n')
-    calls = _jsonl_read_spy(monkeypatch, repository_module)
+    scans = []
+    original = repository_module._history_membership_fallback
+
+    # LLM: 只旁听后备，不替换规范来源读取。
+    # 函数用途: 记录不完整索引的真实后备次数。
+    def fallback(*args, **kwargs):
+        scans.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repository_module, "_history_membership_fallback", fallback)
     assert repository._new_history_rows_unlocked([{"run_id": "srun_old"}]) == []
     with repository.history_path.open("a") as handle:
         handle.write(suffix)
-    repository._new_history_rows_unlocked([{"run_id": "srun_old"}])
-    assert len(calls) == 2
+    assert repository._new_history_rows_unlocked([{"run_id": "srun_old"}]) == []
     if suffix.endswith("\n"):
-        repository._new_history_rows_unlocked([{"run_id": "srun_old"}])
-        assert len(calls) == 3
+        assert len(scans) == 1
+        assert repository._new_history_rows_unlocked([{"run_id": "srun_old"}]) == []
+        assert len(scans) == 2
+    else:
+        # 合法无LF尾行可被索引；后续连写必须撤销它，不能继承旧行边界。
+        assert len(scans) == 0
+        assert repository._new_history_rows_unlocked([{"run_id": "srun_tail"}]) == []
+        with repository.history_path.open("a") as handle:
+            handle.write('{"run_id":"srun_late"}\n')
+        rows = [{"run_id": "srun_old"}, {"run_id": "srun_tail"}, {"run_id": "srun_late"}]
+        assert repository._new_history_rows_unlocked(rows) == rows[1:]
+        assert len(scans) == 1
 
 
 # LLM: 无LF末行自身合法，追加后若连成坏JSON必须失效，不能继续去重已不在权威记录中的ID。
@@ -520,21 +504,25 @@ def test_opt7_history_original_unterminated_row_is_not_append_boundary(tmp_path)
     assert repository._new_history_rows_unlocked(rows) == rows
 
 
-# LLM: helper返回set不能泄漏缓存内部集合；多线程调用同一历史投影必须保持完整ID。
-# 函数用途: 验证历史ID缓存并发、返回隔离及路径数量上界。
+# LLM: 只返回不可变本批命中，线程并发仍使用原事务锁；多来源只共享owner唯一数据库。
+# 函数用途: 迁移旧全集缓存测试并保留结果隔离、并发和有界返回覆盖。
 def test_opt7_history_ids_cache_is_private_thread_safe_and_bounded(tmp_path):
-    helper = getattr(repository_module, "_cached_history_run_ids", None)
-    assert callable(helper)
-    path = tmp_path / "history.jsonl"
-    path.write_text('{"run_id":"srun_one"}\n')
-    helper(path).clear()
+    repository, home = _indexed_history_repository(tmp_path)
+    repository.history_path.write_text(''.join(json.dumps({'run_id': f'srun_{n}'}) + '\n' for n in range(400)))
+    requested = frozenset({'srun_1', 'absent'})
+    result = _history_members(repository, requested)
+    assert result == frozenset({'srun_1'})
+    with pytest.raises(AttributeError):
+        result.clear()
     with ThreadPoolExecutor(max_workers=4) as pool:
-        assert all(rows == {"srun_one"} for rows in pool.map(helper, [path] * 12))
+        assert all(rows == frozenset({'srun_1'}) for rows in pool.map(
+            lambda ids: _history_members(repository, ids), [requested] * 12))
     for number in range(35):
-        other = tmp_path / f"history-{number}.jsonl"
-        other.write_text('{"run_id":"srun_one"}\n')
-        assert helper(other) == {"srun_one"}
-    assert len(repository_module._HISTORY_RUN_IDS_CACHE) <= 32
+        other, _home = _indexed_history_repository(tmp_path, relative=('data', f'history-{number}'))
+        other.history_path.write_text('{"run_id":"srun_one"}\n')
+        assert _history_members(other, {'srun_one', 'absent'}) == frozenset({'srun_one'})
+    assert list((home / 'cache').iterdir()) == [home / 'cache' / 'owner_read_index.sqlite3']
+    assert not hasattr(repository_module, '_HISTORY_RUN_IDS_CACHE')
 
 
 # LLM: effect_run仍按原owner/schema解析，返回嵌套对象必须独立，不因缓存复活已变更历史。
@@ -788,35 +776,179 @@ def test_store_snapshot_open_to_fstat_atomic_replace_retries_transient_race(tmp_
     assert caught.value.transient_open_race is False and len(hard_calls) == 1
 
 
-# LLM: 小于4KiB的历史追加（包括跨过4KiB边界）后必须同步更新head_digest；大于4KiB首部改写再追加必须重读。
-# 函数用途: 验证_cached_history_run_ids在小文件增量扩展后稳定命中缓存，且大文件首部篡改加追加时回退全量读取。
+# LLM: 保留小文件追加、跨4KiB和首部改写加追加覆盖，用真实索引解码代替已删除全集helper。
+# 函数用途: 验证增量只解码新增行，前缀改写撤销原membership。
 def test_history_run_ids_small_extend_updates_head_digest(tmp_path, monkeypatch):
-    history = tmp_path / "history.jsonl"
+    repository, _home = _indexed_history_repository(tmp_path)
+    history = repository.history_path
     history.write_text('{"run_id":"r1"}\n', encoding="utf-8")
-    reads = _jsonl_read_spy(monkeypatch, repository_module)
-    assert repository_module._cached_history_run_ids(history) == {"r1"}
+    reads = _history_decode_spy(monkeypatch, repository)
+    assert _history_members(repository, {'r1', 'absent'}) == frozenset({'r1'})
     assert len(reads) == 1
     with history.open("ab") as handle:
         handle.write(b'{"run_id":"r2"}\n')
-    assert repository_module._cached_history_run_ids(history) == {"r1", "r2"}
-    assert repository_module._cached_history_run_ids(history) == {"r1", "r2"}
-    assert len(reads) == 1
+    assert _history_members(repository, {'r1', 'r2'}) == frozenset({'r1', 'r2'})
+    assert _history_members(repository, {'r2'}) == frozenset({'r2'})
+    assert len(reads) == 2
     with history.open("ab") as handle:
         handle.write((json.dumps({"run_id": "r3", "pad": "x" * 5000}) + "\n").encode("utf-8"))
-    assert repository_module._cached_history_run_ids(history) == {"r1", "r2", "r3"}
-    assert repository_module._cached_history_run_ids(history) == {"r1", "r2", "r3"}
-    assert len(reads) == 1
+    assert _history_members(repository, {'r1', 'r2', 'r3'}) == frozenset({'r1', 'r2', 'r3'})
+    assert _history_members(repository, {'r3'}) == frozenset({'r3'})
+    assert len(reads) == 3
 
-    large = tmp_path / "large.jsonl"
+    large = history
     old_line = json.dumps({"run_id": "old-id", "pad": "x" * 12000}) + "\n"
     new_line = json.dumps({"run_id": "new-id", "pad": "x" * 12000}) + "\n"
     large.write_text(old_line, encoding="utf-8")
-    assert repository_module._cached_history_run_ids(large) == {"old-id"}
+    assert _history_members(repository, {'old-id', 'new-id', 'append'}) == frozenset({'old-id'})
     with large.open("r+b") as handle:
         handle.write(new_line.encode("utf-8"))
         handle.seek(0, 2)
         handle.write(b'{"run_id":"append"}\n')
-    assert repository_module._cached_history_run_ids(large) == {"new-id", "append"}
+    assert _history_members(repository, {'old-id', 'new-id', 'append'}) == frozenset({'new-id', 'append'})
+    assert len(reads) == 6
+
+
+# LLM: home只来自显式配额对象，构造不应提前创建读数据库。
+# 函数用途: 创建带可信owner根的调度测试实例。
+def _indexed_history_repository(tmp_path, *, relative=('data', 'scheduler')):
+    home = tmp_path / 'owner'
+    repository = SchedulerRepository(home.joinpath(*relative), owner_provider='feishu',
+        owner_kind='user', owner_id='u-1', quota_enforcer=OwnerQuotaEnforcer(home, max_bytes=0))
+    assert getattr(repository, '_history_read_index', None) is not None
+    return repository, home
+
+
+# LLM: 测试保持原变更事务锁序，不建立新的写方协议。
+# 函数用途: 在正式事务内取得本批去重身份。
+def _history_members(repository, ids):
+    membership = getattr(repository, '_history_membership_unlocked', None)
+    assert callable(membership), 'batch membership is not wired'
+    with repository._mutation_scope():
+        return membership(frozenset(ids))
+
+
+# LLM: 索引只解码增量，本批结果不能含其它lifetime ID；源中部改写仍必须重建。
+# 函数用途: 验证增量解码、固定owner数据库与完整前缀校验。
+def test_indexed_history_batch_and_middle_rewrite(tmp_path, monkeypatch):
+    repository, home = _indexed_history_repository(tmp_path)
+    assert not (home / 'cache').exists()
+    index, decoded = repository._history_read_index, []
+    original = index._decode
+
+    # LLM: 真实解码和来源检查照常执行，不用计时替代性能证据。
+    # 函数用途: 统计实际来源解码次数。
+    def decode(*args, **kwargs):
+        decoded.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(index, '_decode', decode)
+    head = json.dumps({'run_id': 'head', 'pad': 'h' * 5000}) + '\n'
+    middle = json.dumps({'run_id': 'old-middle', 'pad': 'm' * 5000}) + '\n'
+    tail = json.dumps({'run_id': 'tail', 'pad': 't' * 5000}) + '\n'
+    repository.history_path.write_text(head + middle + tail)
+    assert _history_members(repository, {'old-middle', 'absent'}) == frozenset({'old-middle'})
+    assert _history_members(repository, {'tail'}) == frozenset({'tail'})
+    assert len(decoded) == 3
+    with repository.history_path.open('ab') as handle:
+        handle.write(b'{"run_id":"added"}\n')
+    assert _history_members(repository, {'added'}) == frozenset({'added'})
+    assert len(decoded) == 4
+    with repository.history_path.open('r+b') as handle:
+        handle.seek(len(head.encode()))
+        handle.write(middle.replace('old-middle', 'new-middle').encode())
+        handle.seek(0, 2)
+        handle.write(b'{"run_id":"again"}\n')
+    assert _history_members(repository, {'old-middle', 'new-middle', 'again'}) == frozenset({'new-middle', 'again'})
+    assert (home / 'cache' / 'owner_read_index.sqlite3').is_file()
+    assert not (repository.root / 'cache').exists()
+
+
+# LLM: 不完整推进、不可用查询和落后边界都不能给当前写事务负membership。
+# 函数用途: 验证读索引故障回到真实规范流水，且不修改源。
+@pytest.mark.parametrize('fault', ['partial', 'unavailable', 'stale', 'membership'])
+def test_indexed_history_falls_back_without_false_negative(tmp_path, monkeypatch, fault):
+    repository, _home = _indexed_history_repository(tmp_path)
+    repository.history_path.write_text('{"run_id":"persisted"}\n')
+    index = repository._history_read_index
+    view = index.advance('scheduler', repository._history_source_parts)
+    assert view['status'] == 'complete'
+    changed = dict(view)
+    if fault in {'partial', 'unavailable'}:
+        changed['status'] = fault
+    elif fault == 'stale':
+        changed['through'] -= 1
+    monkeypatch.setattr(index, 'advance', lambda *_args, **_kwargs: changed)
+    if fault == 'membership':
+        monkeypatch.setattr(index, 'membership', lambda *_: {
+            'ids': frozenset(), 'coverage': {**view, 'status': 'unavailable'}})
+    before = repository.history_path.read_bytes()
+    assert _history_members(repository, {'persisted', 'fresh'}) == frozenset({'persisted'})
+    assert repository.history_path.read_bytes() == before
+
+
+# LLM: 索引查询期间即使出现外部追加，旧through的负结果也必须撤销。
+# 函数用途: 验证本次规范提交边界在membership之后再次检查。
+def test_indexed_history_rechecks_source_after_membership(tmp_path, monkeypatch):
+    repository, _home = _indexed_history_repository(tmp_path)
+    repository.history_path.write_text('{"run_id":"old"}\n')
+    index = repository._history_read_index
+    original = index.membership
+
+    # LLM: 先取得真实结果，再对规范历史追加真实行。
+    # 函数用途: 建立查询与返回之间的来源变化窗口。
+    def changed(view, ids):
+        result = original(view, ids)
+        with repository.history_path.open('ab') as handle:
+            handle.write(b'{"run_id":"late"}\n')
+        return result
+
+    monkeypatch.setattr(index, 'membership', changed)
+    assert _history_members(repository, {'late'}) == frozenset({'late'})
+
+
+# LLM: 去重保持原dict/run_id与同批重复语义，不套用公开history的owner/schema过滤。
+# 函数用途: 验证生产接点只请求本批ID而非复制全集。
+def test_new_history_rows_passes_only_batch_to_membership(tmp_path, monkeypatch):
+    repository = _repository(tmp_path)
+    original = getattr(repository, '_history_membership_unlocked', None)
+    assert callable(original)
+    repository.history_path.write_text('{"run_id":"present","owner":{"id":"other"}}\n{"unrelated":true}\n')
+    observed = []
+
+    # LLM: 不伪造去重结果，旁听生产实际传参。
+    # 函数用途: 记录实际批次身份。
+    def membership(ids):
+        observed.append(ids)
+        return original(ids)
+
+    monkeypatch.setattr(repository, '_history_membership_unlocked', membership)
+    rows = [{'run_id': 'present'}, {'run_id': 'fresh'}, {'run_id': 'fresh'}, {}]
+    with repository._mutation_scope():
+        assert repository._new_history_rows_unlocked(rows) == rows[1:3]
+    assert observed == [frozenset({'present', 'fresh', ''})]
+
+
+# LLM: 读不出历史不能把本批运行当成未出现；首次缺失和曾见来源删除也不相同。
+# 函数用途: 验证后备路径对UTF8、nofollow及删除失败关闭。
+@pytest.mark.parametrize('fault', ['utf8', 'symlink', 'deletion'])
+def test_history_read_failure_blocks_dedupe_decision(tmp_path, fault):
+    repository = _repository(tmp_path)
+    assert repository._new_history_rows_unlocked([{'run_id': 'fresh'}]) == [{'run_id': 'fresh'}]
+    repository.history_path.write_text('{"run_id":"old"}\n')
+    assert repository._new_history_rows_unlocked([{'run_id': 'old'}]) == []
+    if fault == 'utf8':
+        with repository.history_path.open('ab') as handle:
+            handle.write(b'\xff\n')
+    elif fault == 'symlink':
+        moved = repository.history_path.with_name('moved.jsonl')
+        repository.history_path.rename(moved)
+        repository.history_path.symlink_to(moved)
+    else:
+        repository.history_path.unlink()
+    with pytest.raises(SchedulerStateError) as caught:
+        repository._new_history_rows_unlocked([{'run_id': 'fresh'}])
+    assert caught.value.error_code == 'SCHEDULER_HISTORY_READ_FAILED'
 
 
 # LLM: 单条查询(get/locked_snapshot)命中缓存时只复制匹配项，避免大候选账本在晋升循环中每次深拷贝全量列表。

@@ -1,7 +1,8 @@
-
+# LLM: 按原事实投影与渲染交接包，不改写历史动作、工具名和来源引用。
+# 模块用途: 为canonical归档恢复构建交接包，不执行工具或写状态。
 from __future__ import annotations
 
-"""handoff package for memory-resume --from-compact."""
+"""handoff package for my-agent memory archive resume --from-compact."""
 
 import json
 from dataclasses import dataclass, field

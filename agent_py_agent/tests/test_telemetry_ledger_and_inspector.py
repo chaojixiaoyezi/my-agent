@@ -525,3 +525,80 @@ def test_model_rounds_aliases_and_atomic_create(tmp_path):
     detail = inspector.get_task_call_detail("new")
     assert len(detail["runs"]) == 1 and detail["token_usage"]["prompt_tokens"] == 3
     assert detail["runs"][0]["parent_run_id"] == "parent"
+
+
+# LLM: 同home其他owner合法，owner筛选先于最后身份选择，统计不物化lifetime样本。
+# 函数用途: 验证索引接线、重复身份隔离及精确工具分位。
+def test_indexed_telemetry_owner_last_wins_and_exact_stats(tmp_path, monkeypatch):
+    from agent_py_agent.agent.observability import telemetry_ledger as module
+
+    one = ToolTelemetryLedger(tmp_path, owner_id='one')
+    for index, duration in enumerate((10, 20, 30, 40)):
+        one.record_tool_call(call(index, duration_ms=duration,
+            status='ok' if index == 0 else 'error', error_code='' if index == 0 else 'E'))
+    ToolTelemetryLedger(tmp_path, owner_id='other').record_tool_call(call(3, duration_ms=999))
+
+    # LLM: 原始扫描和Python样本聚合被禁止，查询仍执行真实索引。
+    # 函数用途: 暴露漏接线入口。
+    def forbidden(*args, **kwargs):
+        raise AssertionError('legacy JSONL scan or lifetime aggregation')
+
+    monkeypatch.setattr(module, '_entries', forbidden)
+    monkeypatch.setattr(module, '_stats', forbidden)
+    assert one.get_tool_call('c3')['duration_ms'] == 40
+    assert len(one.query_tool_calls()) == 4
+    stats = one.aggregate_tool_stats()['tools']['read']
+    assert (stats['calls'], stats['succeeded'], stats['failed']) == (4, 1, 3)
+    assert stats['success_rate'] == .25
+    assert [stats[k] for k in ('avg_duration_ms', 'p50_duration_ms', 'p95_duration_ms')] == [25, 20, 40]
+    assert stats['error_codes'] == {'E': 3}
+
+
+# LLM: 固定through不因追加扩展，limit和无匹配过滤不能掩盖坏尾行。
+# 函数用途: 验证固定分页、warm解码复用及损坏后的结构化未知。
+def test_indexed_telemetry_fixed_view_and_corrupt_suffix(tmp_path, monkeypatch):
+    ledger = ToolTelemetryLedger(tmp_path)
+    assert callable(getattr(ledger, 'query_tool_calls_page', None))
+    for index in range(20):
+        ledger.record_tool_call(call(index))
+    first = ledger.query_tool_calls_page(limit=5)
+    assert first['coverage']['status'] == 'complete'
+    decoded, original = [], ledger._read_index._decode
+
+    # LLM: 不替换来源检查或SQL，仅旁听真实解码。
+    # 函数用途: 计量warm路径的旧行解码。
+    def observe(*args, **kwargs):
+        decoded.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ledger._read_index, '_decode', observe)
+    assert len(ledger.query_tool_calls_page(limit=5, cursor=5, view=first['view'])['rows']) == 5
+    assert ledger.get_tool_call('c19')['call_id'] == 'c19'
+    assert ledger.aggregate_tool_stats()['total_calls'] == 20
+    assert not decoded
+    ledger.record_tool_call(call(20))
+    second = ledger.query_tool_calls_page(limit=100, cursor=19, view=first['view'])
+    assert [row['call_id'] for row in second['rows']] == ['c19']
+    assert second['total_count'] == 20 and len(ledger.query_tool_calls()) == 21
+    with (tmp_path / 'data/telemetry/tool_calls.jsonl').open('a') as stream:
+        stream.write('broken\n')
+    report = ledger.query_tool_calls_page(limit=1, task_id='no-match')
+    assert report['coverage']['status'] == 'unavailable' and report['total_count'] is None
+    with pytest.raises(ValueError) as caught:
+        ledger.get_tool_call('missing')
+    assert caught.value.coverage['status'] == 'unavailable'
+
+
+# LLM: 真首次缺源有效零，实际预算部分推进未知，不得为读取修复规范来源。
+# 函数用途: 区分空读和不完整投影。
+def test_indexed_telemetry_absence_and_partial_are_distinct(tmp_path):
+    ledger = ToolTelemetryLedger(tmp_path)
+    assert callable(getattr(ledger, 'query_tool_calls_page', None))
+    empty = ledger.query_tool_calls_page()
+    assert empty['coverage']['status'] == 'complete' and empty['total_count'] == 0
+    assert not (tmp_path / 'cache').exists() and not (tmp_path / 'data').exists()
+    ledger.record_tool_call(call(0))
+    ledger.record_tool_call(call(1))
+    view = ledger._read_index.advance('telemetry', ('data', 'telemetry', 'tool_calls.jsonl'), max_rows=1)
+    report = ledger.query_tool_calls_page(view=view)
+    assert report['coverage']['status'] == 'partial' and report['total_count'] is None
