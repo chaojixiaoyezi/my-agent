@@ -1,5 +1,5 @@
-# LLM: 四类自动提炼资产共用原registry；不授工具、Owner或人格修改权限。
-# 模块用途: 为学习入口统一语义族、来源与机器验证晋升。
+# LLM: 四类提炼共用原registry；精确identity+正式binding才复用receipt，commit回调重入原来源短门，不扩Owner/工具/人格权限。
+# 模块用途: 用准确版本身份登记来源并安全晋升验证资产，语义族只供推荐。
 from __future__ import annotations
 
 import ast
@@ -18,6 +18,21 @@ from .skill_learning_validation import (
     default_machine_promotion_verifier as default_machine_promotion_verifier,
 )
 from .skill_snapshot import skill_content_sha256
+
+
+# LLM: 仅用于stage的FD回调栈，ExitStack保证逐一尝试关闭；已有业务首因时关闭异常只附note，不替换原对象。
+# 类用途: 同时保证目录资源独立释放与首异常保真，没有业务错误才传播关闭失败。
+class _StageFDStack(ExitStack):
+    # LLM: 保留传入的原异常对象；父栈会继续执行其它回调，即使某次os.close失败也不短路。
+    # 函数用途: 收尾多个FD时不让次生关闭错误盖住业务错误。
+    def __exit__(self, exc_type, primary, traceback):
+        try:
+            return super().__exit__(exc_type, primary, traceback)
+        except BaseException as close_error:
+            if primary is None:
+                raise
+            primary.add_note('stage_fd_close_failed:' + type(close_error).__name__)
+            return False
 
 
 # LLM: 纯结构分类，显式四类载体优先，否则按分支/步骤/命令归类；不解析自然语言授执行权。
@@ -228,8 +243,8 @@ def _restore_on_failure(store, parts, rollback):
     rollback.callback(unlink_file_beneath, store.directory, parts) if previous is None else rollback.callback(write_text_atomic_beneath, store.directory, parts, previous)
 
 
-# LLM: 仅从步骤明确引用的脚本取元数据与入口；逐段nofollow拒绝link/hardlink，缺失及损坏不回退。
-# 函数用途: 为工作流沙箱准备最小脚本依赖文件清单，不复制无关脚本或整个技能树。
+# LLM: 明确脚本依赖沿nofollow取元数据；坏JSON/非对象/缺入口统一LEARNING_DEPENDENCY_INVALID，缺失另码，不暴露原正文。
+# 函数用途: 为工作流准备最小依赖清单，不复制整库，损坏元数据返回稳定机器错误。
 def _workflow_dependencies(home, steps):
     from ..assets import safe_asset_id
     from .skill_learning_publish import SkillLearningGateError
@@ -242,8 +257,11 @@ def _workflow_dependencies(home, steps):
             text = read_text_beneath(home, ('scripts', script_id, 'script.json'))
             if text is None:
                 raise SkillLearningGateError('LEARNING_DEPENDENCY_MISSING')
-            entry = json.loads(text)['entrypoint']
-            safe_asset_id(entry)
+            try:
+                entry = json.loads(text)['entrypoint']
+                safe_asset_id(entry)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise SkillLearningGateError('LEARNING_DEPENDENCY_INVALID', {'field': 'entrypoint'}) from exc
             dependencies.extend((('scripts', script_id, 'script.json'), ('scripts', script_id, entry)))
         if step.get('skill_ids'):
             # A text method with executable side resources needs a declared frozen bundle, not a guessed whole-library copy.
@@ -264,77 +282,163 @@ def _dependency_hashes(home, steps):
     return result
 
 
-# LLM: 可信parent FD和准确stage inode贯穿生命周期；strict nofollow只复制显式依赖，失败清理或登记原对象，不删除替代目录。
-# 函数用途: 创建有预算的隔离执行区，准确回收本次目录并保留清理失败/登记失败的独立诊断。
+# LLM: parent/stage FD贯穿复制与yield；with_fd只供宿主发布器取固定FD，清理先随机墓碑改名再比原inode，首因显式捕获。
+# 函数用途: 创建有预算的执行区，依赖只经固定FD写入；失败回收本次对象或登记准确残留，不借外层except猜首因。
 @contextmanager
-def _stage_dir(home, *, dependencies=(), dependency_hashes=None):
+def _stage_dir(home, *, dependencies=(), dependency_hashes=None, with_fd=False):
     import logging
-    import shutil
-    import stat
-    import sys
     from uuid import uuid4
 
     from ..common.nofollow_fs import (
+        _openat_directory,
         open_directory_beneath,
         read_bytes_beneath,
-        write_bytes_atomic_beneath,
     )
     from .skill_learning_publish import SkillLearningGateError
 
     staging = home / 'data' / 'skill_learning' / ('_stage_' + uuid4().hex)
-    parent_fd, identity = None, None
-    try:
+    with _StageFDStack() as descriptors:
         parent_fd = open_directory_beneath(home, ('data', 'skill_learning'), create=True, require_dir_fd=True)
-        os.mkdir(staging.name, mode=0o700, dir_fd=parent_fd)
-        created = os.stat(staging.name, dir_fd=parent_fd, follow_symlinks=False)
-        identity = (created.st_dev, created.st_ino)
-        total = count = 0
-        for parts in dependencies:
-            if not isinstance(parts, tuple) or not parts or parts[0] not in {'scripts', 'skills'}:
-                raise SkillLearningGateError('LEARNING_DEPENDENCY_INVALID')
-            raw = read_bytes_beneath(home, parts, max_bytes=4 * 1024 * 1024, require_dir_fd=True)
-            if raw is None:
-                raise SkillLearningGateError('LEARNING_DEPENDENCY_MISSING')
-            if dependency_hashes is not None and dependency_hashes.get('/'.join(parts)) != hashlib.sha256(raw).hexdigest():
-                raise SkillLearningGateError('LEARNING_DEPENDENCY_CHANGED')
-            count, total = count + 1, total + len(raw)
-            if count > 256 or total > 16 * 1024 * 1024:
-                raise SkillLearningGateError('LEARNING_STAGING_BUDGET_EXCEEDED')
-            _require_stage_identity(home, staging, identity)
-            write_bytes_atomic_beneath(home, (*staging.relative_to(home).parts, *parts), raw)
-        _require_stage_identity(home, staging, identity)
-        yield staging
-        _require_stage_identity(home, staging, identity)
-        if any((staging / name).exists() or (staging / name).is_symlink() for name in ('AGENTS.md', 'SOUL.md')):
-            raise SkillLearningGateError('MANUAL_ONLY_TARGET')
-    finally:
-        primary = sys.exception()
+        descriptors.callback(os.close, parent_fd)
+        identity, stage_fd, primary = None, None, None
         try:
-            if identity is not None:
+            os.mkdir(staging.name, mode=0o700, dir_fd=parent_fd)
+            created = os.stat(staging.name, dir_fd=parent_fd, follow_symlinks=False)
+            identity = (created.st_dev, created.st_ino)
+            stage_fd = _openat_directory(parent_fd, staging.name)
+            descriptors.callback(os.close, stage_fd)
+            opened = os.fstat(stage_fd)
+            if (opened.st_dev, opened.st_ino) != identity:
+                raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
+            total = count = 0
+            for parts in dependencies:
+                if not isinstance(parts, tuple) or not parts or parts[0] not in {'scripts', 'skills'}:
+                    raise SkillLearningGateError('LEARNING_DEPENDENCY_INVALID')
+                raw = read_bytes_beneath(home, parts, max_bytes=4 * 1024 * 1024, require_dir_fd=True)
+                if raw is None:
+                    raise SkillLearningGateError('LEARNING_DEPENDENCY_MISSING')
+                if dependency_hashes is not None and dependency_hashes.get('/'.join(parts)) != hashlib.sha256(raw).hexdigest():
+                    raise SkillLearningGateError('LEARNING_DEPENDENCY_CHANGED')
+                count, total = count + 1, total + len(raw)
+                if count > 256 or total > 16 * 1024 * 1024:
+                    raise SkillLearningGateError('LEARNING_STAGING_BUDGET_EXCEEDED')
+                _require_stage_identity(home, staging, identity)
+                _write_stage_bytes(stage_fd, parts, raw)
+            _require_stage_identity(home, staging, identity)
+            yield (staging, stage_fd) if with_fd else staging
+            _require_stage_identity(home, staging, identity)
+            for name in ('AGENTS.md', 'SOUL.md'):
                 try:
-                    current = os.stat(staging.name, dir_fd=parent_fd, follow_symlinks=False)
-                    same = stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == identity
+                    os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
                 except FileNotFoundError:
-                    same = False
-                if not same:
-                    raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
-                if not shutil.rmtree.avoids_symlink_attacks:
-                    raise SkillLearningGateError('LEARNING_CLEANUP_UNSUPPORTED')
-                shutil.rmtree(staging.name, dir_fd=parent_fd)
-        except (OSError, SkillLearningGateError) as cleanup_error:
-            try:
-                write_text_atomic_beneath(home, ('data', 'skill_learning', 'cleanup_pending', staging.name + '.json'),
-                    json.dumps({'schema_version': 1, 'stage': staging.name, 'identity': identity, 'status': 'cleanup_pending'}))
-            except (OSError, ValueError) as receipt_error:
-                cleanup_error.add_note('cleanup_pending_write_failed:' + type(receipt_error).__name__)
-                logging.getLogger(__name__).error('LEARNING_CLEANUP_PENDING_WRITE_FAILED stage=%s identity=%s', staging.name, identity)
-            if primary is not None:
-                primary.add_note('learning_cleanup_failed:' + staging.name)
-                raise primary from cleanup_error
+                    continue
+                raise SkillLearningGateError('MANUAL_ONLY_TARGET')
+        except BaseException as exc:
+            primary = exc
             raise
         finally:
-            if parent_fd is not None:
-                os.close(parent_fd)
+            tombstone = '.purge_' + staging.name + '_' + uuid4().hex
+            try:
+                if identity is not None:
+                    _purge_directory(parent_fd, staging.name, identity, stage_fd, tombstone)
+            except (OSError, SkillLearningGateError) as cleanup_error:
+                try:
+                    write_text_atomic_beneath(home, ('data', 'skill_learning', 'cleanup_pending', staging.name + '.json'),
+                        json.dumps({'schema_version': 1, 'stage': staging.name, 'tombstone': tombstone,
+                                    'identity': identity, 'status': 'cleanup_pending'}))
+                except (OSError, ValueError) as receipt_error:
+                    cleanup_error.add_note('cleanup_pending_write_failed:' + type(receipt_error).__name__)
+                    logging.getLogger(__name__).error('LEARNING_CLEANUP_PENDING_WRITE_FAILED stage=%s identity=%s', staging.name, identity)
+                if primary is not None:
+                    primary.add_note('learning_cleanup_failed:' + staging.name)
+                else:
+                    raise
+
+
+# LLM: 只接受固定stage FD和经验证的相对段；父目录逐段nofollow，排他写入普通单链接文件，不重解析stage Path。
+# 函数用途: 将候选依赖/正文写进原暂存对象，目录被改名也不会写入同名替代物。
+def _write_stage_bytes(stage_fd, parts, raw):
+    from ..common.nofollow_fs import _openat_directory, _openat_file, _validate_relative_parts
+
+    _validate_relative_parts(parts)
+    with _StageFDStack() as descriptors:
+        parent_fd = os.dup(stage_fd)
+        descriptors.callback(os.close, parent_fd)
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, mode=0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            parent_fd = _openat_directory(parent_fd, part)
+            descriptors.callback(os.close, parent_fd)
+        descriptor = _openat_file(parent_fd, parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptors.callback(os.close, descriptor)
+        view = memoryview(raw)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError('short stage write')
+            view = view[written:]
+        os.fsync(descriptor)
+
+
+# LLM: 墓碑与原FD核同后仅从pinned_fd的点目录递归清内容，不按墓碑名重选删除根；最后rmdir只移除已核验的空目录。
+# 函数用途: 先隔离名字，再从固定对象回收文件，墓碑换入其他目录时保留替代物并登记清理欠账。
+def _purge_directory(parent_fd, name, identity, pinned_fd, tombstone):
+    import shutil
+    import stat
+    import sys
+
+    from .skill_learning_publish import SkillLearningGateError
+
+    current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    pinned = os.fstat(pinned_fd) if pinned_fd is not None else None
+    if (not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != identity
+            or pinned is None or (pinned.st_dev, pinned.st_ino) != identity):
+        raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise SkillLearningGateError('LEARNING_CLEANUP_UNSUPPORTED')
+    os.rename(name, tombstone, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    isolated = os.stat(tombstone, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(isolated.st_mode) or (isolated.st_dev, isolated.st_ino) != identity:
+        raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
+    _repair_stage_permissions(pinned_fd)
+    # 点目录的递归入口固定在原FD；有意保留顶层，随后单独按父目录移除空名字。
+    callback = {'onexc': _retain_stage_root} if sys.version_info >= (3, 12) else {'onerror': _retain_stage_root}
+    shutil.rmtree('.', dir_fd=pinned_fd, **callback)
+    remaining = os.stat(tombstone, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(remaining.st_mode) or (remaining.st_dev, remaining.st_ino) != identity:
+        raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
+    os.rmdir(tombstone, dir_fd=parent_fd)
+
+
+# LLM: rmtree('.')只清内容，顶层点目录故意不由它删除；只忽略这次精确EINVAL，任何子项/权限/IO失败原样抛。
+# 函数用途: 在固定FD清空树时保留顶层，让调用方核墓碑身份后移除空目录；兼容3.11/3.12回调签名。
+def _retain_stage_root(function, path, error):
+    import errno
+
+    if isinstance(error, tuple):
+        error = error[1]
+    if function is os.rmdir and path == '.' and isinstance(error, OSError) and error.errno == errno.EINVAL:
+        return
+    raise error
+
+
+# LLM: 仅在墓碑已与原FD核同后调用，逐层nofollow打开目录再fchmod；文件/链接不改权限，不作用于未核验替代物。
+# 函数用途: 修复候选留下的只读子目录，避免正常临时文件永远无法回收。
+def _repair_stage_permissions(descriptor):
+    import stat
+
+    from ..common.nofollow_fs import _openat_directory
+
+    os.fchmod(descriptor, stat.S_IMODE(os.fstat(descriptor).st_mode) | stat.S_IRWXU)
+    for name in os.listdir(descriptor):
+        metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISDIR(metadata.st_mode):
+            with _StageFDStack() as descriptors:
+                child = _openat_directory(descriptor, name)
+                descriptors.callback(os.close, child)
+                _repair_stage_permissions(child)
 
 
 # LLM: 逐段strict nofollow重开当前路径，只比对本次创建inode，不沿链接或用新目录替换原对象。
@@ -351,8 +455,8 @@ def _require_stage_identity(home, staging, identity):
         os.close(descriptor)
 
 
-# LLM: 先在隔离暂存区开启restrict_to_roots沙箱执行并核对业务合同，通过后才按CAS写入正式ScriptStore。
-# 函数用途: 验证并发布脚本候选，失败绝不覆盖或删除既有正式脚本。
+# LLM: 隔离沙箱验证后由commit回调在原来源短门CAS写入；返回准确提交的binding摘要str或None，不以晚到读回签版本。
+# 函数用途: 验证并发布脚本，失败不碰既有版本，成功交回正式版本摘要供精确receipt绑定。
 def _promote_script_asset(home, name, desc, candidate, *, commit=None):
     from ..assets.descriptor import AssetDescriptor
     from ..assets.script_store import ScriptStore
@@ -361,7 +465,7 @@ def _promote_script_asset(home, name, desc, candidate, *, commit=None):
     sstore = ScriptStore(home)
     existing = sstore.get_script(name)
     if existing is not None and candidate.get('expected_revision') != existing.get('revision'):
-        return False
+        return None
     target_rev = existing.get('revision') if existing is not None else 0
     code = candidate.get('entry_source', candidate.get('code', ''))
     desc_obj = AssetDescriptor.from_dict({'id': name, 'kind': 'script', 'name': name, 'summary': desc,
@@ -376,17 +480,17 @@ def _promote_script_asset(home, name, desc, candidate, *, commit=None):
         receipt = {'status': 'passed' if res.ok else 'failed', 'executed': True,
                    'contract_valid': bool(res.ok), 'output': out if isinstance(out, dict) else {}}
         if not business_validated(receipt):
-            return False
+            return None
     try:
         from .skill_learning_promotion import _commit
         submitted = _commit(commit, lambda: sstore.save_script(desc_obj, code, expected_revision=target_rev, **options))
     except ValueError:
-        return False
+        return None
     return _binding_from_record('script', submitted)
 
 
-# LLM: 工作流在隔离暂存区执行真实步骤（禁止注入假analysis_handler），通过后才按CAS写入正式WorkflowStore。
-# 函数用途: 验证并发布工作流候选，失败绝不污染正式定义或运行记录。
+# LLM: 工作流隔离执行后由commit回调重核冻结依赖并CAS写入；返回准确正式binding摘要str或None，不接受假analysis_handler。
+# 函数用途: 验证并发布工作流，在原来源短门保依赖身份，返回真实提交版本供精确回执绑定。
 def _promote_workflow_asset(home, name, desc, candidate, *, commit=None):
     from ..assets.workflow_store import WorkflowDefinition, WorkflowStore
     from ..workflows import ScriptRunner, WorkflowEngine
@@ -394,7 +498,7 @@ def _promote_workflow_asset(home, name, desc, candidate, *, commit=None):
     wstore = WorkflowStore(home)
     existing = wstore.get_workflow(name)
     if existing is not None and candidate.get('expected_revision') != existing.descriptor.revision:
-        return False
+        return None
     target_rev = existing.descriptor.revision if existing is not None else 0
     defn = WorkflowDefinition.from_any({
         'descriptor': {'id': name, 'kind': 'workflow', 'name': name, 'summary': desc, 'io_contract': candidate.get('io_contract', {})},
@@ -409,7 +513,7 @@ def _promote_workflow_asset(home, name, desc, candidate, *, commit=None):
         receipt = {'status': run.status, 'executed': True, 'contract_valid': run.status == 'succeeded',
                    'output': run.final_output if isinstance(run.final_output, dict) else {}}
         if not business_validated(receipt):
-            return False
+            return None
     try:
         from .skill_learning_promotion import _commit
         # LLM: 仅本次栈内Commit重核冻结依赖，不能用同script_id替代准确成员hash。
@@ -421,7 +525,7 @@ def _promote_workflow_asset(home, name, desc, candidate, *, commit=None):
             return wstore.save_workflow(defn, expected_revision=target_rev)
         submitted = _commit(commit, save)
     except ValueError:
-        return False
+        return None
     return _binding_from_record('workflow', submitted)
 
 
@@ -477,8 +581,8 @@ def _promote_package_asset(home, name, desc, candidate, *, commit=None):
     return _binding_from_record('capability_package', enabled)
 
 
-# LLM: Prepare/Verify不占原C短门；精确identity+正式binding才复用，发布/登记分别短Commit，取消/撤权不授写。
-# 函数用途: 四载体经过隔离验证与CAS后发布，保留真实receipt及正式版本绑定，绝不family-only复用。
+# LLM: Verify不占C短门；精确identity+正式binding才复用，缺Skill记录/receipt不成功；登记资产读回不得嵌套state锁。
+# 函数用途: 四载体验证/CAS后绑定真实回执，不用同族、缺失记录或晚到的新版本伪造成功。
 def promote_verified_asset(owner_home, candidate, *, commit=None):
     from copy import deepcopy
     from pathlib import Path
@@ -505,7 +609,10 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
         if event is None:
             return None
         rec = store.load_registry().skills.get(event.skill_name or name)
-        return {'carrier': 'skill', 'asset_id': event.skill_name or name, **rec.maintenance['verification_receipt']}
+        verification = rec.maintenance.get('verification_receipt') if rec is not None and isinstance(rec.maintenance, dict) else None
+        if not isinstance(verification, dict) or not verification:
+            return None
+        return {'carrier': 'skill', 'asset_id': event.skill_name or name, **verification}
     identity = asset_identity(carrier, candidate, home)
     previous = store.load_registry().assets.get(identity, {})
     binding = _formal_binding(home, carrier, name)
@@ -522,13 +629,14 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
     receipt = {'carrier': carrier, 'asset_id': name, 'verification_kind': 'runtime_execution' if executed else 'deterministic_static',
                'checks_executed': True, 'executed': executed, 'contract_valid': True, 'sha256': static['sha256'],
                'identity_sha256': identity, 'formal_binding': binding}
-    # LLM: 登记时重核正式版本，避免验证后并发替换导致receipt绑定到未验证的新版本。
-    # 函数用途: 短Commit里登记准确发布结果，不以晚到回执覆盖当前版本。
+    # LLM: 正式读回先于state锁，不能形成state→asset-batch反序；回执仍绑定准确提交摘要，后续使用重核当前版本。
+    # 函数用途: 在原短Commit先重核正式版本再登记，避免与提炼锁序死锁或误签并发版本。
     def record():
+        observed_binding = _formal_binding(home, carrier, name)
+        if carrier == 'workflow' and _dependency_hashes(home, candidate['steps']) != candidate['_dependency_hashes']:
+            raise SkillLearningGateError('LEARNING_DEPENDENCY_CHANGED')
         with store.state_lock():
-            if carrier == 'workflow' and _dependency_hashes(home, candidate['steps']) != candidate['_dependency_hashes']:
-                raise SkillLearningGateError('LEARNING_DEPENDENCY_CHANGED')
-            if _formal_binding(home, carrier, name) != binding:
+            if observed_binding != binding:
                 raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED')
             registry, row = register_asset_locked(store, store.load_registry(), kind=carrier, asset_id=name, asset=candidate,
                 source={'origin': 'autonomous_verified', 'receipt_id': static['receipt_id']}, sha256=static['sha256'], state='trial')

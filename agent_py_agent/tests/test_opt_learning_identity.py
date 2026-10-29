@@ -103,8 +103,8 @@ def test_asset_promotion_stage_dependency_failures_cleanup(tmp_path, damage, mon
     assert not list((home / 'data' / 'skill_learning').glob('_stage_*'))
 
 
-# LLM: 清理失败是独立失败而非成功；只登记本次准确stage，不记录任意路径或秘密。
-# 函数用途: 故障注入验证残留工作有可定位的cleanup_pending，不能ignore_errors吞掉。
+# LLM: 清理失败只登记本次stage/inode与墓碑名；测试自行按该残留定位回收，不假定原stage名字仍存在。
+# 函数用途: 故障注入验证cleanup_pending可定位同一残留对象，不能ignore_errors吞掉。
 def test_asset_promotion_cleanup_failure_is_recorded(tmp_path, monkeypatch):
     home = tmp_path / 'owner'
     home.mkdir()
@@ -114,7 +114,7 @@ def test_asset_promotion_cleanup_failure_is_recorded(tmp_path, monkeypatch):
     # LLM: 只拒绝本次stage清理，保留真实nofollow支持标记，pytest自己目录仍使用原清理。
     # 函数用途: 模拟磁盘或权限导致的暂存清理失败。
     def fail_stage(path, *args, **kwargs):
-        if '_stage_' in str(path):
+        if path == '.' or '_stage_' in str(path):
             raise OSError('cleanup failed')
         return original(path, *args, **kwargs)
 
@@ -126,7 +126,11 @@ def test_asset_promotion_cleanup_failure_is_recorded(tmp_path, monkeypatch):
                 stages.append(stage)
     receipt = home / 'data' / 'skill_learning' / 'cleanup_pending' / (stages[0].name + '.json')
     assert receipt.exists() and stages[0].name in receipt.read_text()
-    original(stages[0])
+    import json
+    row = json.loads(receipt.read_text())
+    tombstone = stages[0].parent / row['tombstone']
+    assert (tombstone.stat().st_dev, tombstone.stat().st_ino) == tuple(row['identity'])
+    original(tombstone)
 
 
 # LLM: 仅执行器结果为确定性替身，写入/CAS及并发B均为真Store；不声称这里验证了沙箱执行能力。
@@ -216,3 +220,371 @@ def test_asset_promotion_identity_tracks_full_verification_context(tmp_path, fie
     from agent_py_agent.agent.capability.asset_promotion import asset_identity
     candidate = {'name': 'one', 'body': 'method', 'sample_inputs': {'n': 1}, 'version': '1.0', 'files': {'a': 'old'}}
     assert asset_identity('capability_package', candidate, tmp_path) != asset_identity('capability_package', {**candidate, field: value}, tmp_path)
+
+
+# LLM: 交换发生在yield后首次写入前；保留真实publisher与文件系统，只有交错时点由wrapper指定。
+# 函数用途: 暂存名被换成根外链接时，SKILL正文不得先写出去再报错。
+def test_stage_yield_symlink_swap_never_writes_outside(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    original = module._staged_skill
+
+    # LLM: 重命名真实stage并放入真实软链接，后续正文写入、解析、扫描仍调用产品代码。
+    # 函数用途: 固定yield与_staged_skill之间的替换窗口。
+    def swap(store, stage, publish, text, **kwargs):
+        stage.rename(stage.with_name(stage.name + '-moved'))
+        stage.symlink_to(outside, target_is_directory=True)
+        return original(store, stage, publish, text, **kwargs)
+
+    monkeypatch.setattr(module, '_staged_skill', swap)
+    decision = SkillLearningDecision('create', '核对', name='safe-method', description='核对资料', body='# 检查\n1. 比较输入\n')
+    with pytest.raises((OSError, SkillLearningGateError)):
+        module.publish_learned_skill(store, PublishRequest(decision))
+    assert list(outside.iterdir()) == []
+    assert not store.load_registry().skills
+    assert not (store.learned_root / decision.name).exists()
+
+
+# LLM: 只代理asset_promotion本模块的stat，保留nofollow能力检测及真实rmtree；在最后核对返回后真实换目录。
+# 函数用途: 防清理检查与删除之间换入的用户文件被误删。
+def test_stage_cleanup_stat_swap_preserves_replacement(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import asset_promotion as module
+
+    home = tmp_path / 'home'
+    home.mkdir()
+    state = {'armed': False, 'swapped': False}
+    original_stat = os.stat
+
+    # LLM: 返回真实旧stat结果后才换目录，不能让前面的身份门提前发现并掩盖TOCTOU。
+    # 函数用途: 确定性复现pre-cleanup stat与rename/rmtree之间的交错。
+    def observe(name, *args, **kwargs):
+        result = original_stat(name, *args, **kwargs)
+        if state['armed'] and not state['swapped'] and name == stage.name and kwargs.get('dir_fd') is not None:
+            state['swapped'] = True
+            stage.rename(stage.with_name(stage.name + '-moved'))
+            stage.mkdir()
+            (stage / 'user.txt').write_text('keep-user-file')
+        return result
+
+    monkeypatch.setattr(module, 'os', SimpleNamespace(**{**vars(os), 'stat': observe}))
+    with pytest.raises((OSError, SkillLearningGateError)):
+        with module._stage_dir(home) as stage:
+            original_identity = (stage.stat().st_dev, stage.stat().st_ino)
+            state['armed'] = True
+    assert state['swapped']
+    files = list(stage.parent.rglob('user.txt'))
+    assert len(files) == 1 and files[0].read_text() == 'keep-user-file'
+    pending = json.loads((stage.parent / 'cleanup_pending' / (stage.name + '.json')).read_text())
+    assert tuple(pending['identity']) == original_identity
+
+
+# LLM: 真实只读子目录必须先对已核验FD修权限再清理；不修外部链接目标或用户替代目录。
+# 函数用途: 防候选留下只读子树使每次晋升都失败并积累残留。
+def test_stage_cleanup_repairs_readonly_subdirectories(tmp_path):
+    home = tmp_path / 'home'
+    home.mkdir()
+    with _stage_dir(home) as stage:
+        child = stage / 'readonly'
+        child.mkdir()
+        (child / 'result.txt').write_text('temporary')
+        child.chmod(0o500)
+    assert not stage.exists()
+    assert not list(stage.parent.glob('.purge_*'))
+    assert not list((stage.parent / 'cleanup_pending').glob('*.json'))
+
+
+# LLM: 仅第一次stage清理注入EACCES；正式发布/登记/回滚/重试全走真实组件。
+# 函数用途: 已移动Skill遇stage收尾失败必须一致回滚并可干净重试。
+def test_stage_cleanup_failure_after_move_rolls_back_and_retry_succeeds(tmp_path, monkeypatch):
+    import errno
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+    from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='retry-method', description='核对资料', body='# 检查\n1. 比较输入\n')
+    original, failures = shutil.rmtree, []
+
+    # LLM: 故障只命中stage/tombstone，不影响正式目录回滚及pytest临时目录清理。
+    # 函数用途: 在rename已完成后让stage清理失败一次。
+    def fail_once(path, *args, **kwargs):
+        if (path == '.' or '_stage_' in str(path)) and not failures:
+            failures.append(True)
+            raise PermissionError(errno.EACCES, 'injected stage cleanup')
+        return original(path, *args, **kwargs)
+
+    fail_once.avoids_symlink_attacks = original.avoids_symlink_attacks
+    with monkeypatch.context() as patch:
+        patch.setattr(shutil, 'rmtree', fail_once)
+        with pytest.raises(SkillLearningGateError):
+            module.publish_learned_skill(store, PublishRequest(decision))
+    assert failures
+    assert not (store.learned_root / decision.name).exists()
+    assert decision.name not in store.load_registry().skills
+    event = module.publish_learned_skill(store, PublishRequest(decision))
+    assert event.event == 'published'
+    text = (store.learned_root / decision.name / 'SKILL.md').read_text()
+    assert store.load_registry().skills[decision.name].sha256 == skill_content_sha256(text)
+
+
+# LLM: 支持旧路径重开与新版固定FD下子目录打开两个等价注入点；只有取得target_fd后的第二个资源获取失败。
+# 函数用途: EMFILE发生时，第一个目标目录FD必须已关闭。
+def test_stage_second_directory_open_failure_closes_target_fd(tmp_path, monkeypatch):
+    import errno
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+    from agent_py_agent.agent.common import nofollow_fs
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='fd-method', description='核对资料', body='# 核对\n1. 比较输入\n')
+    opened, injected = [], []
+    original, child_open = nofollow_fs.open_directory_beneath, nofollow_fs._openat_directory
+
+    # LLM: 第一次返回真实target_fd；旧版随后按stage路径重开时制造EMFILE，不替代其它打开。
+    # 函数用途: 捕获需要独立释放的第一个FD。
+    def directory(root, parts, **kwargs):
+        if opened and not parts and str(root).split('/')[-1].startswith('_stage_'):
+            injected.append(True)
+            raise OSError(errno.EMFILE, 'second directory acquisition')
+        result = original(root, parts, **kwargs)
+        if parts == ('skills', 'learned'):
+            opened.append(result)
+        return result
+
+    # LLM: 新版不重开stage路径，在固定stage FD下第二次取得Skill目录FD时制造相同资源失败。
+    # 函数用途: 保证改用FD以后仍真实覆盖第二个FD获取失败出口。
+    def child(parent_fd, name):
+        if opened and name == decision.name:
+            injected.append(True)
+            raise OSError(errno.EMFILE, 'second directory acquisition')
+        return child_open(parent_fd, name)
+
+    monkeypatch.setattr(nofollow_fs, 'open_directory_beneath', directory)
+    monkeypatch.setattr(nofollow_fs, '_openat_directory', child)
+    with pytest.raises(SkillLearningGateError):
+        module.publish_learned_skill(store, PublishRequest(decision))
+    assert injected and len(opened) == 1
+    with pytest.raises(OSError) as closed:
+        os.fstat(opened[0])
+    assert closed.value.errno == errno.EBADF
+
+
+# LLM: 在无关外层except中调用stage，清理失败只能归因本次cleanup，不能重抛/标注外层异常。
+# 函数用途: 防sys.exception把调用方异常冒认成本次首因。
+def test_stage_cleanup_does_not_capture_unrelated_outer_exception(tmp_path, monkeypatch):
+    original = shutil.rmtree
+
+    # LLM: 只拒绝本次stage/tombstone，保留真实rmtree的安全能力标记。
+    # 函数用途: 注入确定的清理失败供首因断言。
+    def fail_stage(path, *args, **kwargs):
+        if path == '.' or '_stage_' in str(path):
+            raise OSError('cleanup only')
+        return original(path, *args, **kwargs)
+
+    fail_stage.avoids_symlink_attacks = original.avoids_symlink_attacks
+    home = tmp_path / 'home'
+    home.mkdir()
+    failure = None
+    try:
+        raise ValueError('unrelated caller exception')
+    except ValueError as outer:
+        with monkeypatch.context() as patch:
+            patch.setattr(shutil, 'rmtree', fail_stage)
+            try:
+                with _stage_dir(home):
+                    pass
+            except BaseException as exc:
+                failure = exc
+        assert isinstance(failure, OSError), type(failure)
+        assert not getattr(outer, '__notes__', ())
+
+
+# LLM: 坏JSON、非对象、缺入口、无效入口均是损坏依赖，不能抛裸JSONDecodeError/KeyError或意外通过。
+# 函数用途: 为工作流依赖损坏提供稳定结构化错误码。
+@pytest.mark.parametrize('metadata', ['{', '{}', '[]', '{"entrypoint":null}'])
+def test_workflow_dependency_invalid_metadata_is_structured(tmp_path, metadata):
+    from agent_py_agent.agent.capability.asset_promotion import _workflow_dependencies
+
+    folder = tmp_path / 'scripts' / 'dep'
+    folder.mkdir(parents=True)
+    (folder / 'script.json').write_text(metadata)
+    with pytest.raises(SkillLearningGateError) as error:
+        _workflow_dependencies(tmp_path, [{'script_id': 'dep'}])
+    assert error.value.code == 'LEARNING_DEPENDENCY_INVALID'
+
+
+# LLM: 只替代Skill晋升结果制造并发记录缺失/旧版无receipt；原registry加载与载体分派保持真实。
+# 函数用途: Skill载体缺正式记录或验证证明时返回未晋升，而非崩溃或伪造成功。
+@pytest.mark.parametrize('missing', ['record', 'receipt'])
+def test_skill_carrier_missing_record_or_receipt_is_not_success(tmp_path, monkeypatch, missing):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import asset_promotion as module
+    from agent_py_agent.agent.capability.skill_learning_store import LearnedSkill
+
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    if missing == 'receipt':
+        record = LearnedSkill('legacy-method', 1, 'a'*64, 'now', 'now')
+        with store.state_lock():
+            store.save_registry(replace(store.load_registry(), skills={record.name: record}))
+    monkeypatch.setattr(module, 'promote_verified_skill', lambda *a, **kw: SimpleNamespace(skill_name='legacy-method'))
+    result = module.promote_verified_asset(tmp_path, {'kind': 'skill', 'name': 'legacy-method', 'description': '核对资料',
+        'body': '# 核对\n1. 检查输入和输出，保留异常证据。\n2. 失败时停止处理，不修改原件。\n' * 3})
+    assert result is None
+
+
+# LLM: 在随机墓碑的真实stat返回后替换目录，证明随机名字本身不是原inode保证；只代理本模块os。
+# 函数用途: 回归墓碑核验后的第二个清理窗口，替代目录中的用户文件不得删除。
+def test_stage_tombstone_swap_never_deletes_replacement_files(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import asset_promotion as module
+
+    home = tmp_path / 'home'
+    home.mkdir()
+    swapped = []
+    original_stat = os.stat
+
+    # LLM: 先取真实墓碑元信息再交换真实目录，后续修权限/删除仍由原产品执行。
+    # 函数用途: 把交错固定在墓碑身份检查之后，而不是最早的stage名字检查。
+    def observe(name, *args, **kwargs):
+        result = original_stat(name, *args, **kwargs)
+        if str(name).startswith('.purge_') and kwargs.get('dir_fd') is not None and not swapped:
+            swapped.append(True)
+            tombstone = home / 'data' / 'skill_learning' / name
+            tombstone.rename(tombstone.with_name(tombstone.name + '-moved'))
+            tombstone.mkdir()
+            (tombstone / 'user.txt').write_text('keep-after-tombstone-check')
+        return result
+
+    monkeypatch.setattr(module, 'os', SimpleNamespace(**{**vars(os), 'stat': observe}))
+    try:
+        with module._stage_dir(home):
+            pass
+    except (OSError, SkillLearningGateError):
+        pass
+    assert swapped
+    files = list((home / 'data' / 'skill_learning').rglob('user.txt'))
+    assert len(files) == 1 and files[0].read_text() == 'keep-after-tombstone-check'
+    assert list((home / 'data' / 'skill_learning' / 'cleanup_pending').glob('*.json'))
+
+
+# LLM: 业务首因与真实FD关闭后的注入异常同时出现，所有FD仍关闭，主异常必须是原对象。
+# 函数用途: 补足ExitStack继续关闭与不掩盖首因是两项不同保证。
+def test_stage_fd_close_failure_preserves_primary_exception(tmp_path, monkeypatch):
+    import errno
+
+    from agent_py_agent.agent.capability import asset_promotion as module
+
+    home = tmp_path / 'home'
+    home.mkdir()
+    original_close, failed, state = os.close, [], {'fd': None}
+    primary = SkillLearningGateError('ORIGINAL_BUSINESS_FAILURE')
+
+    # LLM: 实际关闭指定stage FD后再报错；只注入一次，不影响其他FD的真实释放。
+    # 函数用途: 让外层descriptor stack在已有业务错误时也遭遇关闭失败。
+    def close(descriptor):
+        original_close(descriptor)
+        if descriptor == state['fd'] and not failed:
+            failed.append(True)
+            raise OSError(errno.EIO, 'injected close failure')
+
+    observed = None
+    with monkeypatch.context() as patch:
+        patch.setattr(os, 'close', close)
+        try:
+            with module._stage_dir(home, with_fd=True) as (_, stage_fd):
+                state['fd'] = stage_fd
+                raise primary
+        except BaseException as exc:
+            observed = exc
+    assert failed
+    assert observed is primary, type(observed)
+    assert any('close' in note for note in getattr(primary, '__notes__', ()))
+    with pytest.raises(OSError) as error:
+        os.fstat(stage_fd)
+    assert error.value.errno == errno.EBADF
+
+
+# LLM: source名字在最后核验后换为另一真实目录；错误对象只能留隔离区，不能留在正式Skill名字下。
+# 函数用途: 防move后发现inode不符却把未登记替代物暴露给正式发现入口。
+def test_stage_source_swap_is_quarantined_before_formal_name(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='source-race', description='核对资料', body='# 核对\n1. 比较输入\n')
+    original_rename, swapped = os.rename, []
+
+    # LLM: 仅在第一次移动Skill子目录前换源；本模块局部os代理保留原nofollow能力检测与registry门。
+    # 函数用途: 把已扫描A替换为未扫描B，核对B不会出现在正式名称下。
+    def rename(source, target, **kwargs):
+        if source == decision.name and not swapped and kwargs.get('src_dir_fd') is not None:
+            swapped.append(True)
+            stage = next((store.skills_root.parent / 'data' / 'skill_learning').glob('_stage_*'))
+            (stage / source).rename(stage / (source + '-original'))
+            (stage / source).mkdir()
+            (stage / source / 'user.txt').write_text('unverified-replacement')
+        return original_rename(source, target, **kwargs)
+
+    monkeypatch.setattr(module, 'os', SimpleNamespace(**{**vars(os), 'rename': rename}))
+    with pytest.raises(SkillLearningGateError):
+        module.publish_learned_skill(store, PublishRequest(decision))
+    assert swapped
+    assert not (store.learned_root / decision.name).exists()
+    assert decision.name not in store.load_registry().skills
+    files = list((store.skills_root.parent / 'data' / 'skill_learning').rglob('user.txt'))
+    assert len(files) == 1 and files[0].read_text() == 'unverified-replacement'
+
+
+# LLM: 覆盖元数据准备及版本持久化的非OS异常，不把补偿限定为rmtree的EACCES一种形态。
+# 函数用途: 任何登记前错误都不能留下无registry的正式新Skill。
+@pytest.mark.parametrize('failure_at', ['metadata', 'version'])
+def test_stage_post_move_registration_failures_leave_no_unregistered_skill(tmp_path, monkeypatch, failure_at):
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='registration-failure', description='核对资料', body='# 核对\n1. 比较输入\n')
+
+    # LLM: 仅在指定的准备或持久化边界抛原ValueError，真实安装/registry及补偿路径不替代。
+    # 函数用途: 测出异常不在旧OSError捕获集合内时是否仍保磁盘/登记一致。
+    def fail(*args, **kwargs):
+        raise ValueError('injected registration failure')
+
+    monkeypatch.setattr(module, 'utc_now', fail) if failure_at == 'metadata' else monkeypatch.setattr(store, 'save_version', fail)
+    with pytest.raises(ValueError):
+        module.publish_learned_skill(store, PublishRequest(decision))
+    assert not (store.learned_root / decision.name).exists()
+    assert decision.name not in store.load_registry().skills
+
+
+# LLM: 更新真实已登记Skill后在版本保存处抛非OS错误，不能把新正文留给仍指旧hash的registry。
+# 函数用途: 登记前任意异常也要将更新正文恢复到旧版，而不把方法永久变成user_modified。
+def test_stage_update_registration_failure_restores_previous_text(tmp_path, monkeypatch):
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='update-failure', description='核对资料', body='# 核对\n1. 比较输入\n')
+    module.publish_learned_skill(store, PublishRequest(decision))
+    record = store.load_registry().skills[decision.name]
+    path = store.learned_root / decision.name / 'SKILL.md'
+    previous = path.read_text()
+
+    # LLM: 只拒绝更新版本文件的保存，真实原子正文替换与registry保持产品实现。
+    # 函数用途: 强制触发replace之后、registry提交之前的非OS失败。
+    def fail(*args, **kwargs):
+        raise ValueError('injected update version failure')
+
+    monkeypatch.setattr(store, 'save_version', fail)
+    update = replace(decision, decision='update', update_target=decision.name, body=decision.body + '2. 检查异常\n')
+    with pytest.raises(ValueError):
+        module.publish_learned_skill(store, PublishRequest(update, expected_revision=record.revision, expected_sha256=record.sha256))
+    assert path.read_text() == previous
+    assert store.load_registry().skills[decision.name] == record

@@ -1,3 +1,5 @@
+# LLM: 原W2真实Store/Router/Runner合同与故障注入回归，verifier替身仅验证晋升语义，不代表生产执行链通过。
+# 模块用途: 保留已观察失败的可执行断言，检查自主学习版本、身份与安全闭环，不删测或放宽门禁。
 """Wave7 W2: observed failures remain executable contracts, not report-only claims.
 
 来源: 2026-10-27 wave7-w2-autonomous-learning.md / F01–F17审计及原始复现。

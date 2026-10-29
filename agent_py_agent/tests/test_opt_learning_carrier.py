@@ -139,3 +139,79 @@ def test_skill_feedback_excludes_non_execution_receipts(tmp_path, extra):
     agent = SimpleNamespace(config=SimpleNamespace(enable_self_learning=True), home_paths=home, _current_run_params=params)
     observe_command_verification(agent, params, {'id': 1, 'status': 'passed', 'exit_code': 0, **extra})
     assert not any(row['authority'] == 'host' for row in store.load_registry().skills[dec.name].maintenance['observations'])
+
+
+# LLM: 子进程内用真实两把锁和确定性事件复现登记/提炼锁序；仅跳过与锁序无关的候选执行，挂住的daemon随子进程退出回收。
+# 函数用途: 给并发回归提供不会把死锁线程或FD泄漏给pytest的隔离探针。
+def _promotion_lock_probe(home):
+    import threading
+    from unittest.mock import patch
+
+    from agent_py_agent.agent.assets import asset_root_lock
+    from agent_py_agent.agent.assets.descriptor import AssetDescriptor
+    from agent_py_agent.agent.assets.script_store import ScriptStore
+    from agent_py_agent.agent.capability import asset_promotion as module
+
+    store = SkillLearningStore(home / 'data' / 'skill_learning', home / 'skills')
+    ScriptStore(home).save_script(AssetDescriptor(id='lock-probe', kind='script', name='lock-probe'), 'print("{}")')
+    original = module._formal_binding
+    expected = original(home, 'script', 'lock-probe')
+    ready, held, entering = (threading.Event() for _ in range(3))
+    errors, reads = [], []
+
+    # LLM: 只在record的第三次正式读回设置交错，不替代真实ScriptStore和锁实现。
+    # 函数用途: 让提炼线程在登记取资产锁之前先持有资产根锁。
+    def read_binding(*args):
+        reads.append(True)
+        if len(reads) == 3:
+            ready.set()
+            assert held.wait(3)
+            entering.set()
+        return original(*args)
+
+    # LLM: 执行真实promote登记，验证执行阶段仅返回既存正式版本摘要，不制造授权/执行结果。
+    # 函数用途: 运行会在旧版拿反序锁的登记一侧。
+    def promote():
+        try:
+            module.promote_verified_asset(home, {'kind': 'script', 'name': 'lock-probe', 'description': '检查锁序', 'code': 'print("{}")'})
+        except BaseException as exc:
+            errors.append(type(exc).__name__)
+
+    # LLM: 保留turn_extractor的真实asset_root_lock→state_lock顺序，不重入不可重入的资产根锁。
+    # 函数用途: 运行与登记竞争的提炼锁序一侧。
+    def extract():
+        try:
+            assert ready.wait(3)
+            with asset_root_lock(home):
+                held.set()
+                assert entering.wait(3)
+                with store.state_lock():
+                    store.load_registry()
+        except BaseException as exc:
+            errors.append(type(exc).__name__)
+
+    with patch.object(module, '_formal_binding', read_binding), patch.object(module, '_promote_script_asset', return_value=expected):
+        workers = [threading.Thread(target=action, daemon=True) for action in (promote, extract)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(3)
+        return {'stuck': [worker.is_alive() for worker in workers], 'errors': errors, 'interleaved': entering.is_set()}
+
+
+# LLM: 真正并发锁探针放到短命子进程，旧版死锁以结构化stuck失败，不把卡住线程留在测试进程。
+# 函数用途: 证明record和提炼的锁序不会相互等待。
+def test_promotion_record_and_extraction_lock_order_never_deadlocks(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    command = ('import json; from pathlib import Path; '
+               'from agent_py_agent.tests.test_opt_learning_carrier import _promotion_lock_probe; '
+               f'print(json.dumps(_promotion_lock_probe(Path({str(tmp_path)!r}))))')
+    result = subprocess.run([sys.executable, '-B', '-c', command], capture_output=True, text=True, timeout=18)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed['interleaved']
+    assert observed['stuck'] == [False, False], observed
+    assert not observed['errors'], observed
