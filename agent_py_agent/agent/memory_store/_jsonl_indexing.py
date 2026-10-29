@@ -177,3 +177,125 @@ def _purge_removed_indexes(memory, entry_id: str | set[str]) -> None:
 # 函数用途: 为现有C正式锁FD出生复用原同步末门。
 def _coordinator_index_write(operation):
     return execute_global_write(operation, require_scope=True)
+
+
+# LLM: 仅表示权威降级达到显式预算，不吞坏根、坏hash或nofollow权限错误。
+# 类用途: 让预算耗尽返回真实partial而非全库扫描。
+class _AuthorityScanLimit(Exception):
+    pass
+
+
+# LLM: stat只做提前预算与末尾漂移检测，实际读取仍走nofollow并设置字节硬上限。
+# 函数用途: 记录一条权威路径的本次物理身份，不创建文件。
+def _scan_stamp(path):
+    try:
+        value = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+
+
+# LLM: 控制源、墓碑与分片累计计费；换代最多重读两次且不重置预算，真损坏拒绝，未核全屏障不暴露正文。
+# 函数用途: 有界读取当前权威候选，并报告实际解析条数/字节与停止位置。
+def bounded_authority_records(memory, *, max_records, max_bytes):
+    import hashlib
+    import json
+
+    from ..common.nofollow_fs import NoFollowPathError, read_bytes_beneath
+    from ._jsonl_maintenance import require_maintenance_event
+    from .generation_manifest import MemoryGenerationStore
+    from .jsonl import (
+        _materialize_memory_events,
+        _memory_record_from_obj,
+        _tombstone_path,
+        _with_legacy_identity,
+        memory_content_hash,
+    )
+
+    store = MemoryGenerationStore(memory.path)
+    controls = [store.manifest_path, store.tombstones.path, _tombstone_path(memory.path)]
+    used, scanned = 0, 0
+
+    # LLM: 预算先于正文；底层最多多读一个拒绝探测字节，只转换明确超限错误，不吞完整性错误。
+    # 函数用途: 读取一个受预算约束的私有权威文件。
+    def read(path):
+        nonlocal used
+        stamp = _scan_stamp(path)
+        if stamp is not None and stamp[2] > max_bytes - used:
+            raise _AuthorityScanLimit()
+        try:
+            value = read_bytes_beneath(path.parent, (path.name,), max_bytes=max_bytes - used, require_dir_fd=True)
+        except ValueError as exc:
+            if str(exc) != "managed file exceeds read limit":
+                raise
+            used = max_bytes
+            raise _AuthorityScanLimit() from exc
+        used += len(value or b"")
+        return value
+
+    # LLM: 新账、旧墓碑及正文共用同一条数硬限，重复代次重读也累计，不凭去重后的条数少计。
+    # 函数用途: 在解码下一个权威记录前扣除预算。
+    def charge_record():
+        nonlocal scanned
+        if scanned >= max_records:
+            raise _AuthorityScanLimit()
+        scanned += 1
+
+    for attempt in range(3):
+        stamps = {path: _scan_stamp(path) for path in controls}
+        records, blocked, root, partial, cursor = [], None, None, False, None
+        try:
+            root = store.manifest(_read=read)
+            blocked = store.tombstones.load(_read=read, on_record=charge_record)
+            if root is None:
+                stamps[memory.path] = _scan_stamp(memory.path)
+                body = read(memory.path)
+                for line in (body or b"").splitlines():
+                    if not line.strip():
+                        continue
+                    charge_record()
+                    record = _memory_record_from_obj(json.loads(line))
+                    require_maintenance_event(record)
+                    records.append(_with_legacy_identity(record))
+            else:
+                for number, segment in enumerate(root["segments"]):
+                    cursor = [number, 0]
+                    if scanned >= max_records:
+                        raise _AuthorityScanLimit()
+                    body = read(memory.path.parent / segment["path"])
+                    if body is None or hashlib.sha256(body).hexdigest() != segment["sha256"]:
+                        raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                    lines = [line for line in body.splitlines() if line]
+                    if len(lines) != segment["count"]:
+                        raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                    for offset, line in enumerate(lines):
+                        cursor = [number, offset]
+                        charge_record()
+                        record = _memory_record_from_obj(json.loads(line))
+                        require_maintenance_event(record)
+                        records.append(record)
+                cursor = None
+        except _AuthorityScanLimit:
+            partial = True
+            if root is None or blocked is None:
+                records = []
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, (*_NATIVE_MEMORY_ERRORS, NoFollowPathError)):
+                raise
+            if not any(_scan_stamp(path) != stamp for path, stamp in stamps.items()):
+                raise
+            if attempt == 2:
+                raise ValueError("MEMORY_GENERATION_CHANGED") from exc
+            continue
+        if any(_scan_stamp(path) != stamp for path, stamp in stamps.items()):
+            if attempt < 2 and used < max_bytes and scanned < max_records:
+                continue
+            records, partial = [], True
+        if blocked is not None:
+            records = _materialize_memory_events([*records, *blocked.values()])
+            records = [r for r in records if not store.tombstones.excludes(r.entry_id,
+                memory_content_hash(r.content), records=blocked)]
+        break
+    return records, {"partial": partial, "scanned_records": scanned, "scanned_bytes": used,
+        "max_records": max_records, "max_bytes": max_bytes,
+        "continuation": {"operation_id": root["operation_id"], "cursor": cursor} if root and cursor else None}

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..common.nofollow_fs import ensure_private_dir, read_text_beneath
+from ..common.nofollow_fs import (
+    ensure_private_dir,
+    open_directory_beneath,
+    read_bytes_beneath,
+    read_text_beneath,
+)
 
 GENERATION_SCHEMA = "memory-generation.v1"
 TOMBSTONE_SCHEMA = "storage-tombstones.v1"
@@ -108,29 +115,58 @@ class StorageTombstones:
         self.path = self.memory_path.with_name(self.memory_path.name + ".storage_tombstones.json")
         self.owner = hashlib.sha256(str(self.memory_path.absolute()).encode()).hexdigest()
 
-    # LLM: 已迁移库的永久账缺失也fail closed；未迁移且首次无账才允许空集，读取不创建文件。
+    # LLM: 永久账叠加旧墓碑且不回滚hash；可共用调用方的字节/记录预算，未读完整不得返回部分屏障。
     # 函数用途: 读取并验证永久删除记录。
-    def load(self):
+    def load(self, *, max_bytes=None, on_read=None, _read=None, on_record=None):
         from ._jsonl_maintenance import require_maintenance_event
-        from .jsonl import _memory_record_from_obj
+        from .jsonl import _memory_record_from_obj, _tombstone_path
 
-        raw = read_text_beneath(self.path.parent, (self.path.name,))
+        body = (_read(self.path) if _read is not None else
+                read_bytes_beneath(self.path.parent, (self.path.name,), max_bytes=max_bytes))
+        used = len(body or b"")
+        if on_read is not None:
+            on_read(used)
+        raw = body.decode("utf-8") if body is not None else None
         if raw is None:
-            manifest = self.memory_path.name + ".manifest.json"
-            if read_text_beneath(self.path.parent, (manifest,)) is not None:
+            manifest = self.memory_path.with_name(self.memory_path.name + ".manifest.json")
+            marker = (_read(manifest) if _read is not None else
+                      read_text_beneath(self.path.parent, (manifest.name,)))
+            if marker is not None:
                 raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
-            return {}
-        payload = json.loads(raw)
+        payload = json.loads(raw) if raw is not None else {
+            "schema_version": TOMBSTONE_SCHEMA, "owner": self.owner, "records": {}}
         if (not isinstance(payload, dict) or payload.get("schema_version") != TOMBSTONE_SCHEMA
                 or payload.get("owner") != self.owner or not isinstance(payload.get("records"), dict)):
             raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
         result = {}
         for entry_id, row in payload["records"].items():
+            if on_record is not None:
+                on_record()
             record = _memory_record_from_obj(row)
             require_maintenance_event(record)
             if record.action != "remove" or record.entry_id != entry_id or row.get("attributes"):
                 raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
             result[entry_id] = record
+        legacy = _tombstone_path(self.memory_path)
+        body = (_read(legacy) if _read is not None else read_bytes_beneath(legacy.parent, (legacy.name,),
+                max_bytes=None if max_bytes is None else max_bytes - used))
+        if on_read is not None:
+            on_read(len(body or b""))
+        text = body.decode("utf-8") if body is not None else None
+        for line in (text or "").splitlines():
+            if not line.strip():
+                continue
+            if on_record is not None:
+                on_record()
+            record = _memory_record_from_obj(json.loads(line))
+            require_maintenance_event(record)
+            if record.action != "remove":
+                raise ValueError("MEMORY_TOMBSTONES_UNREADABLE")
+            old = result.get(record.entry_id)
+            selected = deepcopy(record if old is None or record.version >= old.version else old)
+            selected.removed_content_hashes = tuple(sorted(set(record.removed_content_hashes)
+                | set(old.removed_content_hashes if old else ())))
+            result[record.entry_id] = selected
         return result
 
     # LLM: 调用方持原formal锁；仅合并删除，不能由旧备份清空新墓碑；返回现成字节供quota和writer。
@@ -155,8 +191,8 @@ class StorageTombstones:
 
     # LLM: ID和正文hash均来自当前库删除账；lesson等跨线调用方可复用，不授读写权限。
     # 函数用途: 判断旧备份、候选或派生正文是否已被明确遗忘。
-    def excludes(self, entry_id, content_hash=""):
-        records = self.load()
+    def excludes(self, entry_id, content_hash="", *, records=None):
+        records = self.load() if records is None else records
         return entry_id in records or bool(content_hash and any(
             content_hash in row.removed_content_hashes for row in records.values()))
 
@@ -172,10 +208,14 @@ class MemoryGenerationStore:
         self.directory = self.path.with_name(self.path.name + ".generations")
         self.tombstones = StorageTombstones(self.path)
 
-    # LLM: nofollow读取且强校验owner/schema/分片相对路径；不接受外部路径或另一owner清单。
+    # LLM: nofollow读取且强校验owner/schema/分片相对路径；降级可复用同一预算reader，不接受外部owner清单。
     # 函数用途: 读取同代根清单，首次旧库返回None。
-    def manifest(self):
-        raw = read_text_beneath(self.path.parent, (self.manifest_path.name,))
+    def manifest(self, *, max_bytes=None, on_read=None, _read=None):
+        body = (_read(self.manifest_path) if _read is not None else
+                read_bytes_beneath(self.path.parent, (self.manifest_path.name,), max_bytes=max_bytes))
+        if on_read is not None:
+            on_read(len(body or b""))
+        raw = body.decode("utf-8") if body is not None else None
         if raw is None:
             return None
         root = json.loads(raw)
@@ -206,7 +246,7 @@ class MemoryGenerationStore:
             raise ValueError("MEMORY_GENERATION_UNREADABLE")
         return rows
 
-    # LLM: 正式全集只来自同代分片及当前不可回退墓碑；维护也走同一语义校验，不将索引当事实。
+    # LLM: 旧根遇合法发表/GC才最多重读两次；根未变的损坏保持原异常，绝不吞完整性错误。
     # 函数用途: 还原完整冷热事件快照并应用永久删除屏障。
     def events(self, root=None, *, tier=None):
         from ._jsonl_maintenance import require_maintenance_event
@@ -215,25 +255,47 @@ class MemoryGenerationStore:
         root = root or self.manifest()
         if root is None:
             return None
-        records, seen = [], set()
-        for segment in root["segments"]:
-            if tier is not None and segment["tier"] != tier:
+        for attempt in range(3):
+            records, seen = [], set()
+            try:
+                for segment in root["segments"]:
+                    if tier is not None and segment["tier"] != tier:
+                        continue
+                    for payload in self.segment_rows(segment):
+                        record = _memory_record_from_obj(payload)
+                        require_maintenance_event(record)
+                        if record.action not in {"add", "replace"} or record.entry_id in seen:
+                            raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                        records.append(record)
+                        seen.add(record.entry_id)
+            except (OSError, ValueError):
+                latest = self.manifest()
+                if attempt == 2 or latest is None or latest["operation_id"] == root["operation_id"]:
+                    raise
+                root = latest
                 continue
-            for payload in self.segment_rows(segment):
-                record = _memory_record_from_obj(payload)
-                require_maintenance_event(record)
-                if record.action not in {"add", "replace"} or record.entry_id in seen:
-                    raise ValueError("MEMORY_GENERATION_UNREADABLE")
-                records.append(record)
-                seen.add(record.entry_id)
-        records.sort(key=lambda r: (r.created_at, r.entry_id))
-        return [*records, *self.tombstones.load().values()]
+            latest = self.manifest()
+            if latest is not None and latest["operation_id"] == root["operation_id"]:
+                records.sort(key=lambda r: (r.created_at, r.entry_id))
+                blocked = self.tombstones.load()
+                return [*(r for r in records if not self.tombstones.excludes(
+                    r.entry_id, _content_hash(r.content), records=blocked)), *blocked.values()]
+            root = latest
+            if root is None:
+                raise ValueError("MEMORY_GENERATION_UNREADABLE")
+        raise ValueError("MEMORY_GENERATION_CHANGED")
 
     # LLM: 原formal锁内固定新分片、预期根与永久账CAS；额外保存真实前像可见ID以准确报告部分删除。
     # 函数用途: 生成可逐路径检查峰值配额的同代提交计划。
     def prepare(self, records, *, max_chars, pinned_ids=(), cold_ids=None, quarantine=None):
-        from .jsonl import _materialize_memory_events, _memory_events_text, _strict_memory_events
+        from .jsonl import (
+            _materialize_memory_events,
+            _memory_events_text,
+            _strict_memory_events,
+            _with_legacy_identity,
+        )
 
+        records = [_with_legacy_identity(record) for record in records]
         old = self.manifest()
         prior_deleted, expected_tombstones = self.tombstones.prepare(())
         visible_before = set()
@@ -250,18 +312,27 @@ class MemoryGenerationStore:
         if cold_ids is None:
             cold_ids = old_cold
         removed, tombstone_text = self.tombstones.prepare(records)
-        live = [r for r in records if r.action != "remove" and r.entry_id not in removed]
+        live = [r for r in records if r.action != "remove" and not self.tombstones.excludes(
+            r.entry_id, _content_hash(r.content), records=removed)]
         active, cold = partition_records(live, max_chars, cold_ids=cold_ids, pinned_ids=pinned_ids)
         operation = uuid.uuid4().hex
         files, segments = {}, []
+        reusable = {(item["tier"], item["sha256"], item["count"]): item for item in (old or {}).get("segments", [])}
+        index_material = []
         for tier, rows in (("active", active), ("cold", cold)):
             for offset in range(0, len(rows), 1000):
                 batch = rows[offset:offset + 1000]
                 text = _memory_events_text(batch)
                 relative = f"{self.directory.name}/{operation}/{tier}-{offset // 1000:06d}.jsonl"
-                files[self.path.parent / relative] = text
-                segments.append({"path": relative, "tier": tier, "count": len(batch),
-                                 "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                segment = reusable.get((tier, digest, len(batch)))
+                if segment is None:
+                    files[self.path.parent / relative] = text
+                    segment = {"path": relative, "tier": tier, "count": len(batch), "sha256": digest}
+                segments.append(segment)
+                from ..retrieval.text_vector_cache import index_text
+
+                index_material.append([(r.entry_id, r.version, _content_hash(r.content), index_text(r.content, r.attributes)) for r in batch])
         root = {"schema_version": GENERATION_SCHEMA, "owner": self.tombstones.owner,
                 "generation": 1 if old is None else old["generation"] + 1,
                 "operation_id": operation, "segments": segments, "tombstone_file": self.tombstones.path.name,
@@ -275,13 +346,14 @@ class MemoryGenerationStore:
             files[self.path.parent / relative] = quarantine
             root["legacy_quarantine"] = {"path": relative, "reason": "legacy_visibility_unknown",
                                          "count": sum(bool(line.strip()) for line in quarantine.split("\n"))}
+        root["index_signature"] = hashlib.sha256(json.dumps(index_material, ensure_ascii=False).encode()).hexdigest()
         root_text = json.dumps(root, ensure_ascii=False, sort_keys=True)
         return {"root": root, "files": files, "root_text": root_text, "tombstone_text": tombstone_text,
                 "has_tombstones": True, "expected_root": old,
                 "expected_tombstones": expected_tombstones,
                 "newly_removed": visible_before.intersection(removed)}
 
-    # LLM: 原锁内双CAS根/墓碑再核峰值；删除屏障先行生效时根失败须报告partial，绝不回滚永久账。
+    # LLM: 原锁内双CAS根/墓碑再核峰值；屏障先行根失败或根提交后GC失败均须报告准确partial，不回滚永久账。
     # 函数用途: 提交准备好的同代字节；中断留下的未引用分片不可见，删除屏障失败关闭。
     def publish(self, plan, *, write, admission=None, commit=None, redact=None):
         from ..user_space.owner_quota import OwnerQuotaChange
@@ -320,4 +392,59 @@ class MemoryGenerationStore:
             if changed:
                 raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
             raise
+        try:
+            self.collect_unreferenced(plan["root"], commit=commit)
+        except Exception as exc:
+            from ._jsonl_indexing import _NATIVE_MEMORY_ERRORS, RemovalCleanupError
+
+            if isinstance(exc, _NATIVE_MEMORY_ERRORS):
+                raise
+            raise RemovalCleanupError("MEMORY_GENERATION_COMMITTED_CLEANUP_PENDING", formal_memory_changed=True) from exc
         return plan["root"]
+
+    # LLM: 根成功提交且调用方持formal锁后回收；保留当前分片/隔离材料，nofollow固定目录，缺目录合法。
+    # 函数用途: 清理无引用旧代与失败暂存，不触碰永久墓碑或其它逻辑库。
+    def collect_unreferenced(self, root, *, commit=None):
+        retained = {item["path"] for item in root["segments"]}
+        if root.get("legacy_quarantine"):
+            retained.add(root["legacy_quarantine"]["path"])
+        try:
+            directories = list(self.directory.iterdir())
+        except FileNotFoundError:
+            return
+        for directory in directories:
+            if len(directory.name) != 32 or any(ch not in "0123456789abcdef" for ch in directory.name):
+                continue
+            fd = open_directory_beneath(self.path.parent, (self.directory.name, directory.name), require_dir_fd=True)
+            try:
+                for name in os.listdir(fd):
+                    relative = f"{self.directory.name}/{directory.name}/{name}"
+                    if relative in retained or not name.endswith(".jsonl"):
+                        continue
+                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                    if commit is None:
+                        os.unlink(name, dir_fd=fd)
+                    else:
+                        commit(lambda leaf=name, parent=fd: os.unlink(leaf, dir_fd=parent))
+                empty = not os.listdir(fd)
+            finally:
+                os.close(fd)
+            if empty:
+                parent = open_directory_beneath(self.path.parent, (self.directory.name,), require_dir_fd=True)
+                try:
+                    if commit is None:
+                        os.rmdir(directory.name, dir_fd=parent)
+                    else:
+                        commit(lambda leaf=directory.name, parent=parent: os.rmdir(leaf, dir_fd=parent))
+                finally:
+                    os.close(parent)
+
+
+# LLM: 复用唯一正式正文hash，不在代次层引入另一套规范化。
+# 函数用途: 统一永久遗忘及索引语义身份的正文摘要。
+def _content_hash(content):
+    from .operations import memory_content_hash
+
+    return memory_content_hash(content)

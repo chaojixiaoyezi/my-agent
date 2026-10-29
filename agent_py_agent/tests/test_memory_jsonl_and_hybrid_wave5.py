@@ -85,9 +85,11 @@ def test_failed_write_keeps_pending_and_success_preserves_concurrent_touch(tmp_p
     assert next(r for r in mem.all() if r.entry_id == rec.entry_id).last_accessed_at == 10
 
 
-# LLM: Wave5独立回归只使用临时样本与受控替身，保留真实入口及失败断言。
+# LLM: 压实已切至同代根，验证权威分片和永久账而非把旧schema标记当事件；不放宽版本/hash断言。
 # 函数用途: 验证版本与访问压实并保持墓碑恢复身份及hash。
 def test_compaction_folds_versions_touches_and_keeps_removal_recovery(tmp_path):
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
     mem = JsonlMemory(tmp_path / "memory.jsonl")
     rows = [dict(role="user", content="old", entry_id="a", version=1)]
     rows += [dict(role="user", content="current", entry_id="a", action="replace", version=2)]
@@ -98,15 +100,16 @@ def test_compaction_folds_versions_touches_and_keeps_removal_recovery(tmp_path):
     before = mem.committed_removal_hashes("gone", 18, "candidate:gone")
     mem._pending_access["a"] = 7
     mem.flush_access_events()
-    assert len(mem.path.read_text().splitlines()) <= 2
-    assert all(row["action"] != "touch" for row in map(json.loads, mem.path.read_text().splitlines()))
+    events = MemoryGenerationStore(mem.path).events()
+    assert len(events) == 2
+    assert all(row.action != "touch" for row in events)
     active = mem.all()[0]
     assert (active.version, active.last_accessed_at) == (2, 29)
     recovered = JsonlMemory(mem.path).committed_removal_record("gone")
     assert (recovered.version, recovered.source) == (19, "candidate:gone")
     assert set(before) <= set(recovered.removed_content_hashes)
     assert {str(i) for i in range(2, 20)} <= set(recovered.removed_content_hashes)
-    assert (tmp_path / "memory_tombstones.jsonl").exists()
+    assert MemoryGenerationStore(mem.path).tombstones.path.exists()
 
 
 # LLM: Wave5独立回归只使用临时样本与受控替身，保留真实入口及失败断言。
@@ -303,38 +306,49 @@ def test_lexical_query_and_scores_reused_between_search_and_rerank(tmp_path, mon
     assert len(calls) == 1
 
 
-# LLM: Wave5独立回归只使用临时样本与受控替身，保留真实入口及失败断言。
-# 函数用途: 在归档及热文件发表处注入失败验证恢复与待刷信号。
-@pytest.mark.parametrize("failure_stage", ["archive", "main"])
+# LLM: 新协议在永久账/根两处注入真实故障；账失败零删除，根失败已遗忘且须保清理责任，不回滚墓碑。
+# 函数用途: 在同代删除提交边界验证准确可见性、历史身份及pending信号。
+@pytest.mark.parametrize("failure_stage", ["tombstones", "root"])
 def test_archive_first_failure_keeps_committed_recovery_and_no_phantom_delete(tmp_path, monkeypatch, failure_stage):
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
     mem = JsonlMemory(tmp_path / "memory.jsonl")
     old = mem.add("user", "removed content")
     gone = mem.remove(old.entry_id, source="candidate:old", expected_version=1)
     active = mem.add("user", "live content")
     mem._pending_access[active.entry_id] = 25
     writer = jsonl.write_private_text_file_atomic_unlocked
+    store = MemoryGenerationStore(mem.path)
+    before = store.manifest()
 
-    # LLM: 测试helper只负责所述观察或注入，不改变生产断言或绕过授权。
-    # 函数用途: 在指定原子写入点注入失败。
+    # LLM: 仅阻断当前协议的永久账或根清单，不故障已退出权威链的旧热文件。
+    # 函数用途: 在正式删除屏障前后分别观察真实失败回执。
     def fail(path, raw, **kwargs):
-        if (failure_stage == "archive" and path == jsonl._tombstone_path(mem.path)) or (
-                failure_stage == "main" and path == mem.path):
+        if (failure_stage == "tombstones" and path == store.tombstones.path) or (
+                failure_stage == "root" and path == store.manifest_path):
             raise OSError("interrupted publication")
         return writer(path, raw, **kwargs)
 
-    # 把已归档墓碑放回热库，模拟升级前历史，再在两次原子发表处注入失败。
-    archive = jsonl._tombstone_path(mem.path)
-    if archive.exists():
-        mem.path.write_text(archive.read_text() + mem.path.read_text())
-        archive.write_text("")
     monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError if failure_stage == "tombstones" else RemovalCleanupError) as failure:
         mem.remove(active.entry_id, source="candidate:new", expected_version=1)
     reopened = JsonlMemory(mem.path)
-    assert [r.entry_id for r in reopened.all()] == [active.entry_id]
-    assert reopened.committed_removal_record(active.entry_id) is None
+    if failure_stage == "tombstones":
+        assert [r.entry_id for r in reopened.all()] == [active.entry_id]
+        assert reopened.committed_removal_record(active.entry_id) is None
+    else:
+        assert failure.value.formal_memory_changed is True
+        assert reopened.all() == []
+        assert reopened.committed_removal_record(active.entry_id).source == "candidate:new"
+    assert store.manifest() == before
     assert reopened.committed_removal_record(old.entry_id).source == gone.source
     assert mem._pending_access[active.entry_id] == 25
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    if failure_stage == "root":
+        reopened.purge_removed_indexes(active.entry_id)
+        assert store.manifest()["operation_id"] != before["operation_id"]
+        assert all(active.content.encode() not in p.read_bytes() for p in store.directory.glob("*/*.jsonl"))
 
 
 # LLM: Wave5独立回归只使用临时样本与受控替身，保留真实入口及失败断言。
@@ -437,9 +451,12 @@ def test_small_batch_remove_then_readd_never_keeps_deleted_plaintext(tmp_path):
     assert "private old" not in mem.path.read_text()
 
 
-# LLM: Wave5独立回归只使用临时样本与受控替身，保留真实入口及失败断言。
-# 函数用途: 验证重新激活条目的旧归档hash不因热库失败丢失。
+# LLM: 永久账现在覆盖旧墓碑；同ID旧复活不再合法，marker失败不得回滚hash或正式根。
+# 函数用途: 验证遗留删除hash在升代部分失败和重试中永久保留。
 def test_reactivated_archive_hashes_survive_main_publication_failure(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
+
     mem = JsonlMemory(tmp_path / "memory.jsonl")
     _write(jsonl._tombstone_path(mem.path), [dict(role="user", content="", entry_id="a", action="remove",
         version=2, source="first", removed_content_hashes=["oldhash"]),
@@ -447,8 +464,8 @@ def test_reactivated_archive_hashes_survive_main_publication_failure(tmp_path, m
     _write(mem.path, [dict(role="user", content="new life", entry_id="a")])
     writer = jsonl.write_private_text_file_atomic_unlocked
 
-    # LLM: 测试helper只负责所述观察或注入，不改变生产断言或绕过授权。
-    # 函数用途: 仅阻断热文件发表以观察归档证据。
+    # LLM: 根已提交后只阻断旧格式marker，不能将正式已变更冒充零副作用IO失败。
+    # 函数用途: 在迁移末尾注入失败并观察旧hash屏障。
     def fail_main(path, raw, **kwargs):
         if path == mem.path:
             raise OSError("main interrupted")
@@ -456,8 +473,16 @@ def test_reactivated_archive_hashes_survive_main_publication_failure(tmp_path, m
 
     mem._pending_access["a"] = 25
     monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_main)
-    with pytest.raises(OSError):
+    with pytest.raises(RemovalCleanupError) as failure:
         mem.flush_access_events()
+    assert failure.value.formal_memory_changed is True
     archive = jsonl._strict_memory_events(mem.path)
     assert any("oldhash" in r.removed_content_hashes for r in archive)
-    assert mem.all()[0].content == "new life"
+    assert mem.all() == []
+    assert StorageTombstones(mem.path).excludes("different-id", "oldhash")
+    assert mem._pending_access == {"a": 25}
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    mem.flush_access_events()
+    assert mem._pending_access == {}
+    assert JsonlMemory(mem.path).all() == []
+    assert StorageTombstones(mem.path).excludes("different-id", "oldhash")

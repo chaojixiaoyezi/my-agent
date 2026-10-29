@@ -582,7 +582,7 @@ class _JsonlMemoryMutationMixin:
                 from .generation_manifest import StorageTombstones
 
                 barriers = StorageTombstones(self.path).load()
-                if any(str(raw.get("action") or "add").strip().lower() == "add" and raw.get("entry_id") in barriers
+                if any(str(raw.get("action") or "add").strip().lower() == "add" and str(raw.get("entry_id") or "").strip() in barriers
                        for raw in operations if isinstance(raw, dict)):
                     raise ValueError("MEMORY_TOMBSTONED_ID")
                 latest_events = {record.entry_id: record for record in current_events if record.action != "touch"}
@@ -900,7 +900,13 @@ class _JsonlMemorySearchMixin:
         if top_k <= 0:
             return [], _scoped_retrieval_facts(None, 0, self._semantic_status)
         projected, coverage = self._search_tier_index(query, 1000) if self._embedder is None else (None, {"status": "semantic_full_scan"})
-        active = [record for record in (self.all() if projected is None else projected) if predicate(record)]
+        if projected is None:
+            from ._jsonl_indexing import bounded_authority_records
+
+            projected, scanned = bounded_authority_records(self, max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+                max_bytes=_AUTHORITY_SCAN_MAX_BYTES)
+            coverage = {**coverage, **scanned}
+        active = [record for record in projected if predicate(record)]
         retriever = None
         candidate_limit = max(top_k * 4, top_k + 8)
         # 混合检索:BM25 词面 + 向量语义 RRF 融合(治"换词就召不回"),替代原纯子串+自管 RRF;
@@ -1072,10 +1078,23 @@ class _JsonlMemorySearchMixin:
         if coverage["status"] != "unmigrated":
             load_errors.append({"context": "memory_store.read_index", "error_type": "MEMORY_READ_INDEX_PENDING",
                                 "coverage": coverage, "fallback": "committed_authority_scan"})
-        active_records = self.all()
+        from ._jsonl_indexing import bounded_authority_records
+
+        active_records, scanned = bounded_authority_records(self, max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+            max_bytes=_AUTHORITY_SCAN_MAX_BYTES)
+        coverage = {**coverage, **scanned}
+        if load_errors:
+            load_errors[-1]["coverage"] = coverage
+        elif scanned["partial"]:
+            load_errors.append({"context": "memory_store.read_index", "error_type": "MEMORY_AUTHORITY_SCAN_PARTIAL",
+                "coverage": coverage, "fallback": "bounded_authority_scan"})
         lexical = _MemoryLexicalQuery(query)
         source_records = _search_memory_records(active_records, query, candidate_limit, lexical=lexical)
         return _rerank_memory_records(source_records, query, top_k, lexical=lexical), load_errors
+
+
+_AUTHORITY_SCAN_MAX_RECORDS = 1000
+_AUTHORITY_SCAN_MAX_BYTES = 2 * 1024 * 1024
 
 
 # LLM: 生命周期治理与检索投影分离:Lifecycle 只做访问信号、总量闸与健康快照,不直接召回。
@@ -1233,7 +1252,9 @@ class _JsonlMemoryLifecycleMixin:
         active = self.active_records()
         if sum(len(record.content) for record in active) <= self.memory_policy().active_library_max_chars:
             return []
-        self.migrate_tiers()
+        from ._jsonl_maintenance import migrate_tiers
+
+        migrate_tiers(self, retier=True)
         remaining = {record.entry_id for record in self.active_records()}
         return [record for record in active if record.entry_id not in remaining]
 
@@ -2437,7 +2458,10 @@ def _compact_memory_events(events, pending):
             record = replace(latest_record, content="", attributes=None, tags=[], _extra_fields={})
         else:
             record.last_accessed_at = max(record.last_accessed_at or 0, pending.get(entry_id, 0))
-        record.removed_content_hashes = tuple(sorted(hashes[entry_id]))
+        historical = hashes[entry_id]
+        if record.action != "remove":
+            historical = (historical - {memory_content_hash(record.content)}) | set(record.removed_content_hashes)
+        record.removed_content_hashes = tuple(sorted(historical))
         result.append(record)
     return result
 
@@ -2459,7 +2483,8 @@ def _write_compacted_memory(memory, history, events, pending, admission, *, comm
 
     current = _compact_memory_events(events, pending)
     budget = memory.memory_policy().active_library_max_chars
-    if MemoryGenerationStore(memory.path).manifest() is not None or sum(len(r.content) for r in current) > budget:
+    if (MemoryGenerationStore(memory.path).manifest() is not None or any(r.action == "remove" for r in current)
+            or sum(len(r.content) for r in current) > budget):
         from ._jsonl_maintenance import publish_tier_generation
 
         publish_tier_generation(memory, current, admission=admission, commit=commit,

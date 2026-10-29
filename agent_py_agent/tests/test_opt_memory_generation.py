@@ -470,3 +470,493 @@ def test_memory_tier_reset_uses_manifest_when_legacy_marker_missing(tmp_path):
         indexed = None
     assert error is None, f"同代正式库仍完整却依赖旧标记: {error}"
     assert indexed == 2
+
+
+# LLM: 墓碑先成功而根失败后只走真实清理入口，不再次remove掩盖恢复缺口。
+# 函数用途: 验证永久删除可幂等推进滞后的根并清掉正文。
+def test_r1_purge_advances_root_after_tombstone_commit_failure(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    rows = _legacy(memory, [12000, 12000])
+    memory.migrate_tiers()
+    store = MemoryGenerationStore(memory.path)
+    writer = jsonl.write_private_text_file_atomic_unlocked
+    before = store.manifest()["operation_id"]
+
+    # LLM: 只故障根发表，墓碑及分片使用产品writer。
+    # 函数用途: 固定删除部分提交边界。
+    def fail_root(path, raw, **kwargs):
+        if path == store.manifest_path:
+            raise OSError("r1 root write failed")
+        return writer(path, raw, **kwargs)
+
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_root)
+    with pytest.raises(RemovalCleanupError):
+        memory.remove(rows[0].entry_id, source="candidate:r1")
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    assert memory.committed_removal_record(rows[0].entry_id).source == "candidate:r1"
+    error = None
+    try:
+        memory.purge_removed_indexes(rows[0].entry_id)
+    except RemovalCleanupError as exc:
+        error = exc
+    assert error is None, "已提交墓碑的恢复不能永远卡在旧根"
+    assert store.manifest()["operation_id"] != before
+    assert all(rows[0].content.encode() not in p.read_bytes() for p in tmp_path.rglob("*.jsonl"))
+    recovered = store.manifest()["operation_id"]
+    memory.purge_removed_indexes(rows[0].entry_id)
+    assert store.manifest()["operation_id"] == recovered
+
+
+# LLM: 零活记录的合法根不要求存在分片目录，重复purge不得报缺目录。
+# 函数用途: 验证tombstone-only空代清理。
+def test_r1_purge_tombstone_only_generation(tmp_path):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add("user", "只有墓碑的库")
+    memory.remove(row.entry_id)
+    assert memory.migrate_tiers()["total_records"] == 0
+    error = None
+    try:
+        memory.purge_removed_indexes(row.entry_id)
+        memory.purge_removed_indexes(row.entry_id)
+    except Exception as exc:
+        error = exc
+    assert error is None, f"合法空代不能视为损坏: {error}"
+
+
+# LLM: 相同正文/范围/查询只改变索引维护状态，三种原有效召回必须等价。
+# 函数用途: 锁定中文bigram、英文关键词及短中文混合查询。
+@pytest.mark.parametrize("content,attrs,query,scoped", [
+    ("祥子买了两次车。", {}, "祥子买车", True),
+    ("祥子买了两次车。", {"keywords_en": ["bicycle"]}, "bicycle", True),
+    ("我爱北京。", {}, "北京 travel", False),
+])
+def test_r1_complete_index_preserves_lexical_recall(tmp_path, content, attrs, query, scoped):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add_record(MemoryRecord("user", content, entry_id="lexical", attributes=attrs))
+    before = (memory.search_scoped_candidates_report(query, 5, lambda r: True)[0] if scoped
+              else memory.search_report(query, 5)[0])
+    assert [r.entry_id for r in before] == [row.entry_id]
+    memory.index_all()
+    after = (memory.search_scoped_candidates_report(query, 5, lambda r: True)[0] if scoped
+             else memory.search_report(query, 5)[0])
+    assert [r.entry_id for r in after] == [row.entry_id]
+
+
+# LLM: 备份没有ID时使用产品legacy身份，保留版本不同的独立正文且不修改输入对象。
+# 函数用途: 验证恢复后仍可普通新增，不生成缺ID分片。
+@pytest.mark.parametrize("count", [1, 2])
+def test_r1_restore_legacy_ids_before_dedup_and_publish(tmp_path, count):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    incoming = [MemoryRecord("user", f"旧格式事实{i}", created_at=i + 1, version=i + 1) for i in range(count)]
+    result = memory.restore_tier_records(incoming)
+    assert result["total_records"] == count
+    assert all(r.entry_id.startswith("memory-legacy-") for r in memory.all())
+    assert all(r.entry_id == "" for r in incoming)
+    saved = memory.add("user", "恢复后继续新增")
+    assert saved.entry_id in {r.entry_id for r in memory.all()}
+
+
+# LLM: 小库未迁移也必须永久记录删除；跨实例的旧ID重加不能成功回执。
+# 函数用途: 验证永久屏障覆盖原小库兼容写分支。
+@pytest.mark.parametrize("restart", [False, True])
+def test_r1_small_store_permanent_barrier(tmp_path, restart):
+    from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add_record(MemoryRecord("user", "明确遗忘", entry_id="A"))
+    memory.remove("A")
+    assert "A" in StorageTombstones(memory.path).load()
+    if restart:
+        memory = JsonlMemory(memory.path)
+    with pytest.raises(ValueError, match="MEMORY_TOMBSTONED_ID"):
+        memory.apply_batch([{"action": "add", "entry_id": "A", "content": "不许复活"}])
+
+
+# LLM: 删除屏障核验要先strip ID，不能提交后静默丢弃并给保存成功回执。
+# 函数用途: 验证空白等价身份被明确拒绝。
+def test_r1_tombstone_id_normalized_before_barrier(tmp_path):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add("user", "甲" * 21000)
+    memory.remove(row.entry_id)
+    with pytest.raises(ValueError, match="MEMORY_TOMBSTONED_ID"):
+        memory.apply_batch([{"action": "add", "entry_id": f" {row.entry_id} ", "content": "未保存的新文"}])
+
+
+# LLM: 换ID不能绕过永久正文hash屏障；小库与已迁移库使用同一合同。
+# 函数用途: 验证备份异ID同正文不复活。
+@pytest.mark.parametrize("migrate", [False, True])
+def test_r1_restore_different_id_same_forgotten_hash(tmp_path, migrate):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add_record(MemoryRecord("user", "永久遗忘的正文", entry_id="A"))
+    if migrate:
+        memory.migrate_tiers()
+    memory.remove("A")
+    result = memory.restore_tier_records([MemoryRecord("user", row.content, entry_id="B")])
+    assert result["total_records"] == 0
+    assert memory.all() == []
+
+
+# LLM: 一次性迁移幂等不能吞掉降预算维护；转冷不改变正文/业务版本。
+# 函数用途: 验证已迁移库condense按当前热预算重新规划。
+def test_r1_condense_retiers_migrated_store_after_budget_lowering(tmp_path):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add("user", "甲" * 2000)
+    memory.migrate_tiers()
+    (tmp_path / "memory_policy.json").write_text(json.dumps({"budget": {"active_library_max_chars": 100}}))
+    assert [r.entry_id for r in memory.condense()] == [row.entry_id]
+    assert sum(len(r.content) for r in memory.active_records()) <= 100
+    assert memory.all()[0].content == row.content
+
+
+# LLM: 只改变热片时冷片路径与字节不变；成功根发表后无引用暂存必须回收。
+# 函数用途: 验证不可变冷片复用和旧/失败代目录收敛。
+def test_r1_cold_reuse_and_superseded_generation_gc(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    _legacy(memory, [12000, 12000])
+    memory.migrate_tiers()
+    store = MemoryGenerationStore(memory.path)
+    cold = [s for s in store.manifest()["segments"] if s["tier"] == "cold"]
+    writer = jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 故障根而保留真实暂存，用下一次成功发布验证回收。
+    # 函数用途: 固定失败代残留场景。
+    def fail_root(path, text, **kwargs):
+        if path == store.manifest_path:
+            raise OSError("failed staging")
+        return writer(path, text, **kwargs)
+
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_root)
+    with pytest.raises(OSError):
+        memory.add("user", "失败的新增")
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    for i in range(3):
+        memory.add("user", f"新的热事实{i}")
+    root = store.manifest()
+    assert [s for s in root["segments"] if s["tier"] == "cold"] == cold
+    expected = {tmp_path / s["path"] for s in root["segments"]}
+    assert set(store.directory.glob("*/*.jsonl")) == expected
+
+
+# LLM: touch不改变词面身份或分片行序，持续元数据发表不能把每批索引游标归零。
+# 函数用途: 验证跨touch代次的增量建索引进度。
+def test_r1_index_cursor_survives_touch_generation(tmp_path):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    _legacy(memory, [21] * 1005)
+    memory.migrate_tiers()
+    first = memory.rebuild_read_index(batch_size=10)
+    memory._note_access("fact-1004")
+    memory.flush_access_events()
+    second = memory.rebuild_read_index(batch_size=10)
+    assert second["indexed_records"] == first["indexed_records"] + 10
+
+
+# LLM: 索引缺失时不得调用无界all；按真实条数预算报告partial和实际扫描范围。
+# 函数用途: 验证scoped/普通检索共用有界权威降级。
+@pytest.mark.parametrize("scoped", [False, True])
+def test_r1_fallback_search_is_bounded_and_partial(tmp_path, monkeypatch, scoped):
+    from agent_py_agent.agent.memory_store import jsonl
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    _legacy(memory, [30] * 6)
+    memory.migrate_tiers()
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_RECORDS", 3, raising=False)
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_BYTES", 1024 * 1024, raising=False)
+
+    # LLM: 观察权威入口，不替换检索结果。
+    # 函数用途: 阻止把全库读取伪装成有限降级。
+    def no_all():
+        pytest.fail("缺索引降级仍调用无界all")
+
+    monkeypatch.setattr(memory, "all", no_all)
+    rows, facts = (memory.search_scoped_candidates_report("一一", 5, lambda r: True) if scoped
+                   else memory.search_report("一一", 5))
+    coverage = facts["coverage"] if scoped else facts[-1]["coverage"]
+    assert coverage["partial"] is True
+    assert coverage["scanned_records"] == 3
+    assert len(rows) <= 3
+
+
+# LLM: 一个巨大片不能绕过字节预算，预算在读正文之前执行而不是全量读后截断。
+# 函数用途: 验证有界降级拒绝读超预算分片并如实partial。
+def test_r1_fallback_byte_budget_precedes_segment_read(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add("user", "巨" * 21000)
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_BYTES", 64, raising=False)
+
+    # LLM: 被超预算拦下时不得打开整片读取函数。
+    # 函数用途: 记录实际I/O入口是否被错误调用。
+    def no_segment(*args):
+        pytest.fail("字节预算生效前已经整读分片")
+
+    monkeypatch.setattr(MemoryGenerationStore, "segment_rows", no_segment)
+    rows, facts = memory.search_report("巨", 5)
+    assert rows == [] and facts[-1]["coverage"]["partial"] is True
+
+
+# LLM: 固定旧根读者与真实删除/purge交错，根变时有限重读，根不变损坏仍拒绝。
+# 函数用途: 验证并发发表不被误报为损坏，也不吞真损坏。
+def test_r1_reader_retries_after_concurrent_generation_purge(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    rows = _legacy(memory, [12000, 12000])
+    memory.migrate_tiers()
+    original = MemoryGenerationStore.segment_rows
+    fired = False
+
+    # LLM: 同步触发一次真正删除；重入读取不再次触发删除。
+    # 函数用途: 在旧根已固定后删除旧分片里的正文。
+    def concurrent(store, segment):
+        nonlocal fired
+        if not fired:
+            fired = True
+            JsonlMemory(memory.path).remove(rows[0].entry_id)
+        return original(store, segment)
+
+    monkeypatch.setattr(MemoryGenerationStore, "segment_rows", concurrent)
+    error = None
+    try:
+        records = memory.all()
+    except ValueError as exc:
+        error, records = exc, []
+    assert error is None, f"根已推进应重试最新代: {error}"
+    assert [r.entry_id for r in records] == [rows[1].entry_id]
+    monkeypatch.setattr(MemoryGenerationStore, "segment_rows", original)
+    store = MemoryGenerationStore(memory.path)
+    (tmp_path / store.manifest()["segments"][0]["path"]).write_text("corrupt")
+    with pytest.raises(ValueError, match="MEMORY_GENERATION_UNREADABLE"):
+        memory.all()
+
+
+# LLM: 真实发表与GC插入降级reader的旧分片读取点；根未变真损坏必须继续拒绝。
+# 函数用途: 验证索引不可用时也遵守换代有限重读合同。
+def test_r1_bounded_fallback_retries_concurrent_gc(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.memory_store._jsonl_indexing import bounded_authority_records
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    _legacy(memory, [12000, 12000])
+    memory.migrate_tiers()
+    reader = nofollow_fs.read_bytes_beneath
+    fired = False
+
+    # LLM: 只在旧分片实际打开前发表新代，所有数据仍由产品代码读写。
+    # 函数用途: 固定无锁降级读者撞上合法GC的窗口。
+    def concurrent(root, parts, **kwargs):
+        nonlocal fired
+        if not fired and str(parts[-1]).endswith(".jsonl") and "generations" in str(root):
+            fired = True
+            JsonlMemory(memory.path).add("user", "并发的新事实")
+        return reader(root, parts, **kwargs)
+
+    monkeypatch.setattr(nofollow_fs, "read_bytes_beneath", concurrent)
+    error = None
+    try:
+        records, facts = bounded_authority_records(memory, max_records=1000, max_bytes=1024 * 1024)
+    except (OSError, ValueError) as exc:
+        error, records, facts = exc, [], {}
+    assert fired and error is None, f"合法换代应有限重读而非报损坏: {error}"
+    assert {r.content for r in records} == {r.content for r in memory.all()}
+    assert facts["partial"] is False
+    monkeypatch.setattr(nofollow_fs, "read_bytes_beneath", reader)
+    store = MemoryGenerationStore(memory.path)
+    (tmp_path / store.manifest()["segments"][0]["path"]).write_text("corrupt")
+    with pytest.raises(ValueError, match="MEMORY_GENERATION_UNREADABLE"):
+        bounded_authority_records(memory, max_records=1000, max_bytes=1024 * 1024)
+
+
+# LLM: 根已成功而GC失败必须报告本轮正式状态已改变，不允许调用方误认为零副作用失败。
+# 函数用途: 验证失败回执和只补GC的幂等恢复。
+def test_r1_gc_failure_after_root_commit_reports_changed(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    _legacy(memory, [12000, 12000])
+    memory.migrate_tiers()
+    original = MemoryGenerationStore.collect_unreferenced
+
+    # LLM: 仅在提交后的清理叶抛IO错误，不影响根写入及事实读取。
+    # 函数用途: 构造正式已提交但历史材料待清理的准确状态。
+    def fail_gc(self, root, **kwargs):
+        raise OSError("injected post-commit gc failure")
+
+    monkeypatch.setattr(MemoryGenerationStore, "collect_unreferenced", fail_gc)
+    failure = None
+    try:
+        memory.add_record(MemoryRecord("user", "已经正式保存", entry_id="gc-committed"))
+    except Exception as exc:
+        failure = exc
+    assert isinstance(failure, RemovalCleanupError)
+    assert failure.formal_memory_changed is True
+    assert "gc-committed" in {r.entry_id for r in memory.all()}
+    monkeypatch.setattr(MemoryGenerationStore, "collect_unreferenced", original)
+    store = MemoryGenerationStore(memory.path)
+    committed = store.manifest()
+    with memory._locked_memory():
+        store.collect_unreferenced(committed)
+        store.collect_unreferenced(committed)
+    assert store.manifest() == committed
+    assert set(store.directory.glob("*/*.jsonl")) == {tmp_path / s["path"] for s in committed["segments"]}
+
+
+# LLM: 控制文件在预算预检后合法增长也不能漏成裸ValueError，不能返回未核全墓碑的正文。
+# 函数用途: 验证读取途中字节超限安全返回空partial。
+def test_r1_fallback_control_growth_returns_partial(tmp_path, monkeypatch):
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.memory_store import generation_manifest
+    from agent_py_agent.agent.memory_store._jsonl_indexing import bounded_authority_records
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add("user", "事实保留")
+    memory.migrate_tiers()
+    store = MemoryGenerationStore(memory.path)
+    reader = nofollow_fs.read_bytes_beneath
+    fired = False
+
+    # LLM: 在最终硬限读取前替换为合法但更大的JSON，不制造格式损坏。
+    # 函数用途: 固定stat与读之间的正常原子替换窗口。
+    def grow(root, parts, **kwargs):
+        nonlocal fired
+        if not fired and parts[-1] == store.tombstones.path.name:
+            fired = True
+            payload = json.loads(store.tombstones.path.read_text())
+            payload["future"] = "x" * 10000
+            store.tombstones.path.write_text(json.dumps(payload))
+        return reader(root, parts, **kwargs)
+
+    monkeypatch.setattr(nofollow_fs, "read_bytes_beneath", grow)
+    monkeypatch.setattr(generation_manifest, "read_bytes_beneath", grow)
+    failure = None
+    try:
+        records, facts = bounded_authority_records(memory, max_records=100, max_bytes=4000)
+    except ValueError as exc:
+        failure, records, facts = exc, [], {}
+    assert fired and failure is None, f"预算耗尽不能冒充数据错误: {failure}"
+    assert records == [] and facts["partial"] is True
+
+
+# LLM: 墓碑也是权威记录，未验证全账时不得继续召回正文；字节量小也受条数硬限。
+# 函数用途: 验证新永久账及旧墓碑都计入同一记录预算。
+@pytest.mark.parametrize("legacy", [False, True])
+def test_r1_fallback_counts_tombstones_in_record_budget(tmp_path, legacy):
+    from agent_py_agent.agent.memory_store._jsonl_indexing import bounded_authority_records
+    from agent_py_agent.agent.memory_store.generation_manifest import StorageTombstones
+    from agent_py_agent.agent.memory_store.jsonl import _tombstone_path
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    rows = [MemoryRecord("user", "", action="remove", entry_id=f"gone-{i}") for i in range(4)]
+    if legacy:
+        _tombstone_path(memory.path).write_text("".join(row.to_json() + "\n" for row in rows))
+    else:
+        ledger = StorageTombstones(memory.path)
+        ledger.path.write_text(ledger.prepare(rows)[1])
+    records, facts = bounded_authority_records(memory, max_records=2, max_bytes=1024 * 1024)
+    assert records == [] and facts["partial"] is True
+    assert facts["scanned_records"] == 2
+
+
+# LLM: 使用真实候选/正式库/恢复服务；只故障根writer，恢复不得再次提交业务remove或增业务版本。
+# 函数用途: 验证产品prepare/recover入口能收敛墓碑先行的删除。
+def test_r1_prepared_remove_recovery_repairs_root_without_new_delete(tmp_path, monkeypatch):
+    from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+    from agent_py_agent.agent.memory_store.promotion_remove_recovery import (
+        prepare_committed_remove,
+        recover_prepared_remove,
+    )
+    from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
+    from agent_py_agent.tests.test_remember_learning_source_review import _agent
+
+    agent = _agent(tmp_path, user_dialogue_projection(), {}, {})
+    tool = ConfirmedRememberWorkflow(agent)
+    added = tool.execute(dict(content="项目使用 UTC 保存时间", kind="project",
+                              origin="user_explicit", subject_key="source.review"))
+    assert added.ok and json.loads(added.output)["active_memory_changed"]
+    [target] = agent.memory.all()
+    agent.memory.migrate_tiers()
+    store = MemoryGenerationStore(agent.memory.path)
+    before = store.manifest()
+    params = agent._current_run_params
+    params.request_id, params.run_id = "req-r1-remove", "run-r1-remove"
+    agent.conversation_store.messages.append(dict(thread_id=params.task_attributes["conversation_thread_id"],
+        role="user", content="删除项目保存时间规则", metadata={"gateway_request_id": params.request_id}))
+    writer = jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 只阻断最终根清单，候选验证、墓碑落盘均保留真实执行。
+    # 函数用途: 让真实工具产生可由恢复入口识别的部分删除。
+    def fail_root(path, text, **kwargs):
+        if path == store.manifest_path:
+            raise OSError("r1 prepared removal root failure")
+        return writer(path, text, **kwargs)
+
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_root)
+    failed = tool.execute(dict(action="remove", entry_id=target.entry_id, origin="user_explicit"))
+    assert not json.loads(failed.output)["saved"]
+    assert store.manifest() == before
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    plan = prepare_committed_remove(agent.memory_promotion, target.entry_id)
+    assert plan is not None
+    tombstone = agent.memory.committed_removal_record(target.entry_id)
+    outcome = recover_prepared_remove(agent.memory_promotion, plan)
+    assert outcome.promoted and outcome.reason_code == "REMOVE_CLEANUP_RECOVERED", outcome
+    assert outcome.formal_memory_changed is False
+    assert store.manifest()["operation_id"] != before["operation_id"]
+    assert agent.memory.committed_removal_record(target.entry_id) == tombstone
+    assert all(not row.content for row in agent.memory_candidates.list())
+    assert all(target.content.encode() not in p.read_bytes() for p in store.directory.glob("*/*.jsonl"))
+    repaired = store.manifest()
+    retry = prepare_committed_remove(agent.memory_promotion, target.entry_id)
+    assert recover_prepared_remove(agent.memory_promotion, retry).promoted
+    assert store.manifest() == repaired
+
+
+# LLM: 每次读旧片前都真实换代；有限三次尝试后必须终止，重读不能隐式重置I/O预算。
+# 函数用途: 验证完整及降级读取在持续并发发表下不会无限循环。
+@pytest.mark.parametrize("bounded", [False, True])
+def test_r1_reader_retry_count_is_finite(tmp_path, monkeypatch, bounded):
+    from agent_py_agent.agent.common import nofollow_fs
+    from agent_py_agent.agent.memory_store._jsonl_indexing import bounded_authority_records
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add("user", "初始事实")
+    memory.migrate_tiers()
+    reader = nofollow_fs.read_bytes_beneath if bounded else MemoryGenerationStore.segment_rows
+    changing, changes = False, 0
+
+    # LLM: 重入的写者读取不触发新写入，只针对外层读者的三次旧快照制造冲突。
+    # 函数用途: 可重复地产生每次尝试均过期的分片坐标。
+    def concurrent(root, parts, **kwargs):
+        nonlocal changing, changes
+        eligible = not bounded or (str(parts[-1]).endswith(".jsonl") and "generations" in str(root))
+        if eligible and not changing:
+            changing = True
+            try:
+                JsonlMemory(memory.path).add("user", f"并发事实{changes}")
+                changes += 1
+            finally:
+                changing = False
+        return reader(root, parts, **kwargs)
+
+    monkeypatch.setattr(nofollow_fs if bounded else MemoryGenerationStore,
+        "read_bytes_beneath" if bounded else "segment_rows", concurrent)
+    with pytest.raises(ValueError, match="MEMORY_GENERATION_CHANGED|MEMORY_GENERATION_UNREADABLE"):
+        if bounded:
+            bounded_authority_records(memory, max_records=1000, max_bytes=1024 * 1024)
+        else:
+            memory.all()
+    assert changes == 3

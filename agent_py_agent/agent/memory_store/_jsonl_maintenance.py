@@ -3,6 +3,7 @@
 # 模块用途: 验证维护源并携带是否真正读到文件的事实，保护破坏性派生重建。
 import json
 import math
+from copy import deepcopy
 from dataclasses import dataclass
 
 
@@ -100,9 +101,9 @@ def reset_local_index(memory, *, require_source=False, rebuild_memory=True):
     return memory.index_all(require_source=require_source) if rebuild_memory else 0
 
 
-# LLM: 复用唯一quota→policy→formal锁序；dry-run不创建锁或代次文件，清单已存在时幂等。
+# LLM: 复用quota→policy→formal锁序；一次性迁移幂等，显式retier才重新应用当前热预算。
 # 函数用途: 将旧正式库按字符一次性分层，旧archive只隔离保存不猜可见性。
-def migrate_tiers(memory, *, dry_run=False):
+def migrate_tiers(memory, *, dry_run=False, retier=False):
     from ..common.nofollow_fs import read_text_beneath
     from .generation_manifest import MemoryGenerationStore, partition_records
     from .jsonl import (
@@ -118,9 +119,9 @@ def migrate_tiers(memory, *, dry_run=False):
     # 函数用途: 计算同一份迁移结果及隔离材料。
     def prepare():
         root = store.manifest()
-        if root:
+        if root and not retier:
             return root, None, None
-        events = _strict_memory_events(memory.path)
+        events = store.events(root) if root else _strict_memory_events(memory.path)
         live = _materialize_memory_events(events, include_expired=True)
         live_ids = {record.entry_id for record in live}
         tombstones = {record.entry_id: record for record in events
@@ -206,22 +207,26 @@ def restore_tier_records(memory, records):
         _quota_admission,
         _record_payload,
         _strict_memory_events,
+        _with_legacy_identity,
+        memory_content_hash,
     )
 
-    incoming = list(records)
+    incoming = deepcopy(list(records))
     for record in incoming:
         require_maintenance_event(record)
         if record.action not in {"add", "replace"}:
             raise ValueError("MEMORY_BACKUP_RECORD_INVALID")
+    incoming = [_with_legacy_identity(record) for record in incoming]
     owner = memory.path.parents[2] if len(memory.path.parents) >= 3 else memory.path.parent
     with _quota_admission(memory.quota_enforcer) as admission, _managed_policy_scope(owner):
         with memory._locked_memory():
             events = _strict_memory_events(memory.path)
             current = {r.entry_id: r for r in _materialize_memory_events(events, include_expired=True)}
             tombstones = {r.entry_id: r for r in events if r.action == "remove"}
-            tombstones.update(MemoryGenerationStore(memory.path).tombstones.load())
+            barrier = MemoryGenerationStore(memory.path).tombstones
+            tombstones.update(barrier.load())
             for record in incoming:
-                if record.entry_id in tombstones:
+                if barrier.excludes(record.entry_id, memory_content_hash(record.content), records=tombstones):
                     continue
                 existing = current.get(record.entry_id)
                 if existing is not None:
@@ -236,7 +241,7 @@ def restore_tier_records(memory, records):
             return publish_tier_generation(memory, [*current.values(), *tombstones.values()], admission=admission)
 
 
-# LLM: 删除屏障已提交后调用；只扫描本库固定代次目录及旧archive，失败由原REMOVE_CLEANUP_PENDING保留责任。
+# LLM: quota→policy→formal锁内先幂等修复墓碑先行旧根，再清历史；空代缺目录合法，故障保原责任。
 # 函数用途: 清除内部历史分片中的已删正文，并丢弃含旧正文的派生SQLite。
 def purge_tier_copies(memory):
     from ..common.nofollow_fs import NoFollowPathError, read_text_beneath
@@ -247,15 +252,24 @@ def purge_tier_copies(memory):
     store = MemoryGenerationStore(memory.path)
     if store.manifest() is None:
         return
-    with memory._locked_memory():
+    owner = memory.path.parents[2] if len(memory.path.parents) >= 3 else memory.path.parent
+    with jsonl._quota_admission(memory.quota_enforcer) as admission, jsonl._managed_policy_scope(owner), memory._locked_memory():
         root = store.manifest()
         blocked = store.tombstones.load()
         if not blocked:
             return
+        if any(store.tombstones.excludes(str(row.get("entry_id") or ""), jsonl.memory_content_hash(str(row.get("content") or "")), records=blocked)
+               for segment in root["segments"] for row in store.segment_rows(segment)):
+            publish_tier_generation(memory, store.events(root), admission=admission)
+            root = store.manifest()
         MemoryReadIndex(memory.path, coordinator_io=memory.coordinator_io).invalidate()
         current = {item["path"] for item in root["segments"]}
         files = [memory.path.with_name(memory.path.name + ".archive.jsonl")]
-        for directory in store.directory.iterdir():
+        try:
+            directories = list(store.directory.iterdir())
+        except FileNotFoundError:
+            directories = []
+        for directory in directories:
             if directory.is_symlink():
                 raise NoFollowPathError("invalid memory generation directory")
             if directory.is_dir():

@@ -49,7 +49,7 @@ class MemoryReadIndex:
         connection.row_factory = sqlite3.Row
         return connection
 
-    # LLM: 状态只对应精确operation_id；查询时复用调用方同一只读事务，坏库/未知owner不返回完整。
+    # LLM: 语义签名含坐标/ID/version/索引正文，touch不重置；仍以当前根绑定候选，旧格式索引需重建。
     # 函数用途: 查询派生水位，缺库时返回可观察的missing而非零条完整结果。
     def coverage(self, root=None, *, connection=None):
         root = root or self.store.manifest()
@@ -68,7 +68,8 @@ class MemoryReadIndex:
             state = {}
         except (sqlite3.Error, ValueError, TypeError):
             return {"status": "unavailable", "indexed_records": None, "total_records": root["total_records"]}
-        current = state.get("operation_id") == root["operation_id"] and state.get("owner") == self.store.tombstones.owner
+        current = (state.get("index_signature") == root.get("index_signature", root["operation_id"])
+                   and state.get("format_version") == 2 and state.get("owner") == self.store.tombstones.owner)
         return {"status": ("complete" if state.get("complete") else "partial") if current else "missing",
                 "operation_id": root["operation_id"], "generation": root["generation"],
                 "indexed_records": state.get("indexed_records", 0) if current else 0,
@@ -100,11 +101,12 @@ class MemoryReadIndex:
                 if record is None:
                     raise ValueError("MEMORY_AUTHORITY_UNREADABLE")
                 prepared.append((record.entry_id, record.version, memory_content_hash(record.content),
-                    segment_no, row_no, fold_key(record.content)))
+                    segment_no, row_no, _lexical_projection(record)))
                 row_no += 1
             if row_no == len(rows):
                 segment_no, row_no = segment_no + 1, 0
         state = {"owner": self.store.tombstones.owner, "operation_id": root["operation_id"],
+                 "index_signature": root.get("index_signature", root["operation_id"]), "format_version": 2,
                  "generation": root["generation"], "indexed_records": before["indexed_records"] + len(prepared),
                  "cursor": [segment_no, row_no], "complete": segment_no == len(root["segments"])}
         if admission is not None:
@@ -127,7 +129,7 @@ class MemoryReadIndex:
                 actual = json.loads(row[0]) if row else {}
                 if actual.get("owner") not in (None, state["owner"]):
                     raise ValueError("MEMORY_INDEX_OWNER_MISMATCH")
-                if actual.get("operation_id") != root["operation_id"]:
+                if (actual.get("index_signature") != state["index_signature"] or actual.get("format_version") != 2):
                     conn.execute("DELETE FROM entries")
                     conn.execute("DELETE FROM entries_fts")
                 elif actual.get("indexed_records", 0) != before["indexed_records"]:
@@ -141,15 +143,17 @@ class MemoryReadIndex:
             publish()
         return self.coverage(root)
 
-    # LLM: 水位与候选在同一只读事务，候选携operation_id；查询不追平、不建库，FTS参数化。
+    # LLM: 同一只读事务取水位及OR候选；短词/bigram编码成trigram可检索token，不丢英文关键词。
     # 函数用途: 从冷热读索引选取有界候选并附实际coverage。
     def query(self, query, *, limit=64):
         root = self.store.manifest()
         if root is None or not 1 <= limit <= 1000:
             return [], self.coverage(root)
         folded = fold_key(query)[:512]
-        terms = list(dict.fromkeys([folded, *folded.split(), *(folded[i:i + 4] for i in range(max(0, len(folded) - 3)))]))[:64]
-        terms = [term for term in terms if len(term) >= 3]
+        from ..retrieval.lexical import tokenize
+
+        terms = list(dict.fromkeys([*("z" + token.encode().hex() for token in tokenize(folded)),
+            *(term for term in [folded, *folded.split()] if len(term) >= 3)]))[:64]
         try:
             connection = self._connect()
         except FileNotFoundError:
@@ -190,7 +194,8 @@ class MemoryReadIndex:
             if not 0 <= offset < len(rows):
                 continue
             record = _memory_record_from_obj(rows[offset])
-            if (record is not None and record.entry_id not in blocked and record.entry_id == item["id"]
+            if (record is not None and not self.store.tombstones.excludes(record.entry_id,
+                    memory_content_hash(record.content), records=blocked) and record.entry_id == item["id"]
                     and (not record.expires_at or record.expires_at > time.time())
                     and record.version == item["version"] and memory_content_hash(record.content) == item["content_hash"]):
                 records.append(record)
@@ -198,7 +203,8 @@ class MemoryReadIndex:
         if current is None or current["operation_id"] != root["operation_id"]:
             raise MemoryReadIndexGenerationConflict("MEMORY_READ_INDEX_GENERATION_CONFLICT")
         blocked = self.store.tombstones.load()
-        return [record for record in records if record.entry_id not in blocked]
+        return [record for record in records if not self.store.tombstones.excludes(
+            record.entry_id, memory_content_hash(record.content), records=blocked)]
 
     # LLM: 删除后整份派生库可丢弃，清空字节后移除精确DB及journal/WAL/SHM；调用方持formal锁，无常驻连接。
     # 函数用途: 让已遗忘正文不留在SQLite空闲页或FTS历史段中。
@@ -225,3 +231,13 @@ class MemoryReadIndex:
             execute_global_write(erase, require_scope=True)
         else:
             erase()
+
+
+# LLM: 原词法分词与index_text为唯一语义；额外hex token只用于FTS候选，不作为正式正文。
+# 函数用途: 将完整可检索属性及中文短词投影进现有trigram索引。
+def _lexical_projection(record):
+    from ..retrieval.lexical import tokenize
+    from ..retrieval.text_vector_cache import index_text
+
+    text = index_text(record.content, record.attributes)
+    return fold_key(text) + " " + " ".join("z" + token.encode().hex() for token in dict.fromkeys(tokenize(text)))
