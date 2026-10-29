@@ -73,6 +73,8 @@ def test_scoped_candidates_only_touch_after_final_confirmation(tmp_path: Path) -
     assert memory.all()[0].last_accessed_at > 0.0
 
 
+# LLM: 已删正文由永久hash屏障拒绝；新事实用不同正文，继续验证旧候选失效和真实新候选越域不touch。
+# 函数用途: 保留候选确认的版本/范围保护断言，同时覆盖同文重加不得产生假保存。
 def test_scoped_candidate_replaced_or_out_of_scope_is_not_touched(tmp_path: Path) -> None:
     memory = _memory(tmp_path)
     original = _fact(memory, "memory-a", "祥子买了两次车。", origin="user_explicit")
@@ -84,10 +86,14 @@ def test_scoped_candidate_replaced_or_out_of_scope_is_not_touched(tmp_path: Path
     assert memory.confirm_scoped_access(candidates, lambda record: True) == []
     assert memory.flush_access_events() == 0
 
-    _fact(memory, "memory-b", "祥子买了两次车。", origin="user_explicit")
+    with pytest.raises(ValueError, match="MEMORY_TOMBSTONED_CONTENT"):
+        _fact(memory, "memory-b", "祥子买了两次车。", origin="user_explicit")
+    assert memory.all() == []
+    _fact(memory, "memory-b", "祥子买了三次车。", origin="user_explicit")
     fresh = memory.search_scoped_candidates(
         "祥子买车", top_k=5, predicate=lambda record: True,
     )
+    assert [record.entry_id for record in fresh] == ["memory-b"]
     assert memory.confirm_scoped_access(fresh, lambda record: False) == []
     assert memory.flush_access_events() == 0
 

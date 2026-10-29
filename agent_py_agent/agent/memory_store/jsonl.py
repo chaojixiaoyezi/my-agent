@@ -1,11 +1,5 @@
-# LLM: C仅存IO策略，原资源/锁/费用算法共用；formal成功比较清旧pending、archive与全部client清理末叶闭合，实际native先透传再到下一付费。
-# LLM: 新C snapshot flush只在成功search后由原活scope显式调用，锁出生及固定formal一次replace沿原末门；失败保pending，默认flush/apply_batch不变。
-# LLM: 本片只修原cache回收catch的四实际类型优先，原authority/记忆/删除/派生算法与权限保持不变。
-# 模块用途: 实现唯一冷热长期记忆逻辑库；原可选回收短门不把未结降级成零回收成功。
-
-# LLM: C recent显式path只读与原Agent虚方法链共用唯一scanner/materializer，不构造仓库或增加写权。
-# LLM: 记忆权威链保持原schema/path；后台缓存回收只把最终派生缓存改写接原claim短门，完整keep扫描在T外。
-# 模块用途: 管理版本化正式记忆与派生检索缓存，原读写策略和Count0副作用不变。
+# LLM: 共用原C末门、quota→policy→formal锁和费用计量；写前核ID/hash屏障，公共搜索复用有界权威，native错误保原类。
+# 模块用途: 管理唯一冷热长期记忆库、永久遗忘与派生检索，失败保留真实提交和清理责任。
 from __future__ import annotations
 
 """Owner 正式长期记忆 JSONL 权威仓库及其可重建检索投影。"""
@@ -561,7 +555,7 @@ class _JsonlMemoryMutationMixin:
     # 函数用途: 一次提交一批新增、替换或删除，任何权威校验失败都不写半批。
     # LLM: C原扫描/配额/编码/脱敏门外，formal准确一次末写成功才compare-delete本次pending；ops/清理仍原顺序且native不洗成功。
     # LLM: 统一quota→受管policy→formal锁；晋升活锁精确复用，锁ID与治理学习开关每次重核，source不授豁免。
-    # LLM: 20k只触发同代转冷；永久删除ID禁止旧写者重加，冷热事实共用原CAS、来源与权限门。
+    # LLM: 20k只触发同代转冷；ID/hash屏障先于批次内存变更，提交后清理只复用仍持有的外层准入。
     # 函数用途: 沿唯一原批量算法提交完整冷热事实，失败保真实已写与待落访问信号。
     def apply_batch(self, operations: list[dict[str, object]], *, _admission: OwnerQuotaAdmission | None = None) -> list[MemoryRecord]:
         """Validate and append a memory mutation batch as one locked commit.
@@ -581,10 +575,9 @@ class _JsonlMemoryMutationMixin:
                 active = {record.entry_id: record for record in working}
                 from .generation_manifest import StorageTombstones
 
-                barriers = StorageTombstones(self.path).load()
-                if any(str(raw.get("action") or "add").strip().lower() == "add" and str(raw.get("entry_id") or "").strip() in barriers
-                       for raw in operations if isinstance(raw, dict)):
-                    raise ValueError("MEMORY_TOMBSTONED_ID")
+                barrier = StorageTombstones(self.path)
+                barriers = barrier.load()
+                _require_memory_write_barriers(operations, barrier, barriers)
                 latest_events = {record.entry_id: record for record in current_events if record.action != "touch"}
                 committed = _prepare_memory_operations(
                     operations,
@@ -611,6 +604,10 @@ class _JsonlMemoryMutationMixin:
                     if record.entry_id in final_removed_ids and record.content
                 }
                 persisted = _persisted_remove_events(committed, current_events, final_removed_ids)
+                if final_removed_ids:
+                    batch_barriers = {**barriers, **{record.entry_id: record for record in persisted
+                                      if record.action == "remove"}}
+                    _require_memory_write_barriers(operations, barrier, batch_barriers)
                 # 被本次提交取代的旧正文：replace 会用新正文覆盖同 entry_id 的旧版本，
                 # 旧正文的缓存键必须在本次一并清掉，否则它只要事实还活着就永远留在缓存里（P2）。
                 superseded_versions = [
@@ -647,7 +644,7 @@ class _JsonlMemoryMutationMixin:
                     **({} if not self.coordinator_io else {"coordinator_io": True}),
                 )
             append_memory_operation_events(self.ops_path, persisted, **({} if not self.coordinator_io else {"coordinator_io": True}))
-            self._after_commit_indexes(persisted)
+            self._after_commit_indexes(persisted, _admission=_admission)
             # 已删除取全部历史版本；replace仅取被覆盖版本，新正文缓存不在清理范围内。
             if not final_removed_ids:
                 self._forget_cached_vectors(
@@ -753,10 +750,10 @@ class _JsonlMemorySearchMixin:
     #   嵌入请求按“召回”计入进程用量（S7，embedding_usage）。第二个返回值是这一次语义臂的降级原因（空串表示语义检索做成了，
     #   零命中也算做成），给 _fuse_semantic 记召回方式用，口径同 HybridRetriever：嵌入失败 embedding_failed，身份不符用身份原因码。
     # 函数用途: 返回经过正式 JSONL 二次核验的语义检索结果和降级原因，失败保留可观察降级状态。
-    # LLM: C在原identity检查后、query embedding前做已批准纯当前校验；实际scope/physical native先抛，普通降级不变。
-    # 函数用途: 执行同一次原语义召回，保持费用和active二次核验。
+    # LLM: 公共search显式传本次有界权威快照供候选复核，不再all；独立旧调用保原读法，C/native及嵌入计量不变。
+    # 函数用途: 执行同一次语义召回并拒绝已删除或陈旧向量，只使用调用方本轮已核事实。
     @counted_as("memory_recall")
-    def _semantic_records_report(self, query: str, top_k: int) -> tuple[list[MemoryRecord], str]:
+    def _semantic_records_report(self, query: str, top_k: int, *, _authority_records=None) -> tuple[list[MemoryRecord], str]:
         from ..retrieval.vector_store import VectorIdentityError
 
         try:
@@ -781,7 +778,8 @@ class _JsonlMemorySearchMixin:
             return [], "embedding_failed"
         self._record_semantic_health("identity")
         self._record_semantic_health("search")
-        active = {record.entry_id: record for record in self.all()}
+        authority = self.all() if _authority_records is None else _authority_records
+        active = {record.entry_id: record for record in authority}
         records: list[MemoryRecord] = []
         for hit in hits:
             record = _memory_record_from_obj(hit.metadata)
@@ -798,9 +796,8 @@ class _JsonlMemorySearchMixin:
     def _semantic_records(self, query: str, top_k: int) -> list[MemoryRecord]:
         return self._semantic_records_report(query, top_k)[0]
 
-    # LLM: 搜索结果最终必须回到 active JSONL，并按确定性规则去重排序。不带作用域的检索（Gateway 与 IM 的 /memory、agent.recall）
-    #   空库记 none 且不发查询嵌入；非空库按“每次检索记一次”计入 S7 召回方式。
-    # 函数用途: 返回不含陈旧索引正文的长期记忆召回结果。
+    # LLM: 与report共享一次有界扫描及空库事实，零命中不得再all；仅确知空库不发嵌入，未知partial不冒称为空。
+    # 函数用途: 返回经当前权威复核的长期召回，保持原语义融合与每次检索计量。
     def search(self, query: str, top_k: int = 5) -> list[MemoryRecord]:
         """优先从owner内读索引选候选，回读同代正文并应用墓碑；缺索引从正式源检索。
 
@@ -808,15 +805,20 @@ class _JsonlMemorySearchMixin:
         旧workspace的memory投影不参与任何召回。"""
 
         candidate_limit = max(top_k * 4, top_k + 8)
-        records, _load_errors = self.search_report(query, top_k=candidate_limit)
-        if not records and not self.all():
+        records, _load_errors, known_empty, authority = self._search_report_state(query, top_k=candidate_limit)
+        if not records and known_empty:
             EMBEDDING_USAGE.record_retrieval("none", "")
             return []
         if self._embedder is None:
             selected = _rerank_memory_records(records, query, top_k)
             EMBEDDING_USAGE.record_retrieval("keyword", _semantic_unavailable_reason(self._semantic_status))
         else:
-            fused = self._fuse_semantic(query, records, candidate_limit)
+            if authority is None:
+                from ._jsonl_indexing import bounded_authority_records
+
+                authority, _scanned = bounded_authority_records(self, max_records=_AUTHORITY_SCAN_MAX_RECORDS,
+                    max_bytes=_AUTHORITY_SCAN_MAX_BYTES)
+            fused = self._fuse_semantic(query, records, candidate_limit, _authority_records=authority)
             selected = _select_diverse_memory_records(fused, top_k)
         for record in selected:
             self._note_access(record.entry_id)
@@ -1039,12 +1041,12 @@ class _JsonlMemorySearchMixin:
 
         return [index_text(record.content, record.attributes) for record in records if record.content]
 
-    # LLM: RRF 只融合两个可重建候选列表，返回前仍使用稳定 entry ID 对齐。副作用：按语义臂这一次的结果记一次召回方式
-    #   （S7：做成了记 semantic，降级记 keyword 和原因码），只被不带作用域的 search 调用。
+    # LLM: RRF按稳定ID融合；公共search透传本次有界权威快照，不能在语义复核再次全读；每次仍记一次召回方式。
     # 函数用途: 合并关键词与语义召回顺序，并记下这次召回走的方式。
-    def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int) -> list[MemoryRecord]:
+    def _fuse_semantic(self, query: str, keyword_records: list[MemoryRecord], top_k: int, *, _authority_records=None) -> list[MemoryRecord]:
         """关键词召回 + 语义召回 RRF 融合(检索拓宽 #1)。语义为空则退回纯关键词(不崩不退化)。"""
-        semantic, fallback_reason = self._semantic_records_report(query, top_k)
+        semantic, fallback_reason = self._semantic_records_report(query, top_k,
+            **({} if _authority_records is None else {"_authority_records": _authority_records}))
         EMBEDDING_USAGE.record_retrieval("keyword" if fallback_reason else "semantic", fallback_reason)
         if not semantic:
             return keyword_records[:top_k]
@@ -1058,9 +1060,8 @@ class _JsonlMemorySearchMixin:
         )
         return [by_id[doc_id] for doc_id, _score in fused if doc_id in by_id][:top_k]
 
-    # LLM: report 保留索引读取错误并从 authority fallback；错误不能伪装成“没有记忆”。
-    # LLM: 查询归一、滑窗和词面分数在候选/rerank间复用，不跨查询缓存。
-    # 函数用途: 检索正式记忆并返回诊断，避免重复词面计算。
+    # LLM: 保留原公开二元返回形状，诊断和有界权威事实来自同一内部扫描，不跨请求缓存空库结论。
+    # 函数用途: 检索正式记忆并保留索引或预算降级诊断。
     def search_report(self, query: str, top_k: int = 5) -> tuple[list[MemoryRecord], list[dict]]:
         """搜索记忆并保留可恢复的索引读取错误。
 
@@ -1068,12 +1069,19 @@ class _JsonlMemorySearchMixin:
         不回退旧workspace或把索引不可用说成没有记忆。
         """
 
+        records, diagnostics, _known_empty, _authority = self._search_report_state(query, top_k)
+        return records, diagnostics
+
+    # LLM: 同一次扫描产出候选、诊断、确知空库事实及语义臂可复用的权威快照；索引候选不是全量权威，返回None。
+    # 函数用途: 让公共search与report复用读取结果，避免为判空再次扫描全库。
+    def _search_report_state(self, query: str, top_k: int):
         candidate_limit = max(top_k * 4, top_k + 8)
         projected, coverage = self._search_tier_index(query, candidate_limit)
         if projected is not None:
             diagnostics = ([{"context": "memory_store.read_index", "error_type": "MEMORY_READ_INDEX_TRUNCATED",
                              "coverage": coverage}] if coverage.get("result_truncated") else [])
-            return _rerank_memory_records(projected, query, top_k), diagnostics
+            return (_rerank_memory_records(projected, query, top_k), diagnostics,
+                    coverage.get("indexed_records") == 0, None)
         load_errors = []
         if coverage["status"] != "unmigrated":
             load_errors.append({"context": "memory_store.read_index", "error_type": "MEMORY_READ_INDEX_PENDING",
@@ -1090,7 +1098,8 @@ class _JsonlMemorySearchMixin:
                 "coverage": coverage, "fallback": "bounded_authority_scan"})
         lexical = _MemoryLexicalQuery(query)
         source_records = _search_memory_records(active_records, query, candidate_limit, lexical=lexical)
-        return _rerank_memory_records(source_records, query, top_k, lexical=lexical), load_errors
+        return (_rerank_memory_records(source_records, query, top_k, lexical=lexical), load_errors,
+                not active_records and not scanned["partial"], active_records)
 
 
 _AUTHORITY_SCAN_MAX_RECORDS = 1000
@@ -1946,8 +1955,24 @@ def _materialize_memory_events(
     ]
 
 
-# LLM: 整批操作先在内存副本全量校验，任一错误发生时权威文件保持不变。
-# 函数用途: 将结构化 add/replace/remove 请求转换为待提交版本事件。
+# LLM: 批次变更前检查规范ID及与写入相同strip/hash语义；也用于本批新增删除账的发表前校验。
+# 函数用途: 明确拒绝已遗忘正文，避免代次末端过滤制造假成功或覆盖活记录前像。
+def _require_memory_write_barriers(operations, barrier, barriers):
+    for index, raw in enumerate(operations, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"memory operation {index} must be an object")
+        if str(raw.get("action") or "add").strip().lower() not in {"add", "replace"}:
+            continue
+        entry_id = str(raw.get("entry_id") or "").strip()
+        if entry_id in barriers:
+            raise ValueError("MEMORY_TOMBSTONED_ID")
+        content = str(raw.get("content") or "").strip()
+        if content and barrier.excludes(entry_id, memory_content_hash(content), records=barriers):
+            raise ValueError("MEMORY_TOMBSTONED_CONTENT")
+
+
+# LLM: 所有操作只改变调用方临时active投影；先由公共入口验证永久遗忘屏障，再按原CAS准备。
+# 函数用途: 生成待发表的批次事件，坏操作不写权威或派生索引。
 def _prepare_memory_operations(
     operations: list[dict[str, object]],
     active: dict[str, MemoryRecord],

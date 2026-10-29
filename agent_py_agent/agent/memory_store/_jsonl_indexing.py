@@ -1,4 +1,4 @@
-# LLM: 正式文本投影只归MemoryReadIndex；旧LocalStore仅用于精确删除/审计脱敏，绝不查询、新增或重建memory投影。
+# LLM: 正式文本投影只归MemoryReadIndex；删除清理显式透传仍持有的quota准入，不重入非重入配额锁。
 # 模块用途: 复核冷热索引候选、保留向量CAS并执行删除后的派生正文清理。
 from __future__ import annotations
 
@@ -85,31 +85,31 @@ class JsonlMemoryIndexMixin:
         except Exception:
             return str(self.path)
 
-    # LLM: 正式提交后只写向量；文本索引由显式有界维护追平，不再将正式正文双写workspace。
+    # LLM: 正式提交后只写向量；外层晋升仍持quota时透传_admission，独立调用由清理入口重新准入。
     # 函数用途: 同步向量并批量清理已删除事实的所有派生副本。
-    def _after_commit_indexes(self, records: list[MemoryRecord]) -> None:
+    def _after_commit_indexes(self, records: list[MemoryRecord], *, _admission=None) -> None:
         removed = {record.entry_id for record in records if record.action == "remove"}
         if removed:
             try:
-                _purge_removed_indexes(self, removed)
+                _purge_removed_indexes(self, removed, admission=_admission)
             except RemovalCleanupError as exc:
                 raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
         for record in records:
             if record.action != "remove":
                 self._index_vector(record)
 
-    # LLM: 仅本轮正式删除后的入口，历史恢复不得虚增formal_memory_changed。
+    # LLM: 仅本轮正式删除后的入口，历史恢复不得虚增formal_memory_changed；已有活准入必须透传。
     # 函数用途: 保留删除已提交但隐私清理未完成的回执。
-    def _purge_committed_indexes(self, entry_id: str) -> None:
+    def _purge_committed_indexes(self, entry_id: str, *, _admission=None) -> None:
         try:
-            self.purge_removed_indexes(entry_id)
+            self.purge_removed_indexes(entry_id, _admission=_admission)
         except RemovalCleanupError as exc:
             raise RemovalCleanupError("REMOVE_CLEANUP_PENDING", formal_memory_changed=True) from exc
 
-    # LLM: 删除与恢复共用，禁用embedding也必须清理磁盘旧副本，失败可重试。
+    # LLM: 删除与恢复共用，外层quota活准入显式复用；禁用embedding仍须清理，失败可重试。
     # 函数用途: 严格清理当前owner精确记忆身份的派生正文。
-    def purge_removed_indexes(self, entry_id: str) -> None:
-        _purge_removed_indexes(self, entry_id)
+    def purge_removed_indexes(self, entry_id: str, *, _admission=None) -> None:
+        _purge_removed_indexes(self, entry_id, admission=_admission)
 
     # LLM: 旧workspace依赖仅保删除职责，不能借此新增或重建旧投影。
     # 函数用途: 尽力删除一个精确记忆ID的旧文本副本。
@@ -143,15 +143,15 @@ def _purge_text_vector_orphans(memory) -> int:
         return dropped
 
 
-# LLM: 批量删除每个精确ID后只扫描一次孤儿缓存；旧LocalStore只执行删除，原native异常先透传。
+# LLM: 批量删除精确ID并只扫描一次孤儿缓存；透传当前quota准入，原native异常先透传。
 # 函数用途: 清除冷热历史、SQLite、向量与外置正文，失败保待清理责任。
-def _purge_removed_indexes(memory, entry_id: str | set[str]) -> None:
+def _purge_removed_indexes(memory, entry_id: str | set[str], *, admission=None) -> None:
     from ..retrieval.vector_store import VectorStore
 
     try:
         from ._jsonl_maintenance import purge_tier_copies
 
-        purge_tier_copies(memory)
+        purge_tier_copies(memory, admission=admission)
         store = memory._vector_store()
         if store is None:
             if getattr(memory, "coordinator_io", False):

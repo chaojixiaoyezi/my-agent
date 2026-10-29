@@ -1,10 +1,11 @@
-# LLM: 正式库共用原JSONL锁、私有原子writer及quota；不可变分片先落盘，根清单最后发布，无第二套回滚器。
+# LLM: 共用原formal锁、writer与quota；根最后发布，GC只认本库分片及writer精确UUID暂存，不触碰未知文件。
 # 模块用途: 管理同一长期记忆逻辑库的冷热代次、永久删除屏障和无损分层策略。
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import stat
 import uuid
 from copy import deepcopy
@@ -402,8 +403,8 @@ class MemoryGenerationStore:
             raise RemovalCleanupError("MEMORY_GENERATION_COMMITTED_CLEANUP_PENDING", formal_memory_changed=True) from exc
         return plan["root"]
 
-    # LLM: 根成功提交且调用方持formal锁后回收；保留当前分片/隔离材料，nofollow固定目录，缺目录合法。
-    # 函数用途: 清理无引用旧代与失败暂存，不触碰永久墓碑或其它逻辑库。
+    # LLM: 调用方持formal锁且根已提交；保留当前引用，按原writer协议清.tmp，目录与叶均nofollow/单链接拒绝。
+    # 函数用途: 清理无引用JSONL和中断暂存及空代目录，不碰未知文件、永久墓碑或其它逻辑库。
     def collect_unreferenced(self, root, *, commit=None):
         retained = {item["path"] for item in root["segments"]}
         if root.get("legacy_quarantine"):
@@ -419,11 +420,21 @@ class MemoryGenerationStore:
             try:
                 for name in os.listdir(fd):
                     relative = f"{self.directory.name}/{directory.name}/{name}"
-                    if relative in retained or not name.endswith(".jsonl"):
+                    temporary = re.fullmatch(
+                        r"\.(?:(?:active|cold)-[0-9]{6,}|legacy-quarantine)\.jsonl\.[0-9a-f]{32}\.tmp", name)
+                    if relative in retained or not (name.endswith(".jsonl") or temporary):
                         continue
                     info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                         raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                    leaf = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                    try:
+                        opened = os.fstat(leaf)
+                        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+                            raise ValueError("MEMORY_GENERATION_UNREADABLE")
+                    finally:
+                        os.close(leaf)
                     if commit is None:
                         os.unlink(name, dir_fd=fd)
                     else:

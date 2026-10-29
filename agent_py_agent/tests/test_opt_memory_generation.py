@@ -960,3 +960,365 @@ def test_r1_reader_retry_count_is_finite(tmp_path, monkeypatch, bounded):
         else:
             memory.all()
     assert changes == 3
+
+
+# LLM: 子进程内运行真实确认/晋升/恢复；启用正数配额，故障只注入最终根writer。
+# 函数用途: 同时验证普通Remember删除和墓碑已提交后的prepare/recover不会重入配额锁。
+def _r2_quota_remove_worker(root, recovery):
+    from agent_py_agent.agent.conversation.learning_source import user_dialogue_projection
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+    from agent_py_agent.agent.memory_store.promotion_remove_recovery import (
+        prepare_committed_remove,
+        recover_prepared_remove,
+    )
+    from agent_py_agent.agent.user_space.owner_quota import OwnerQuotaEnforcer
+    from agent_py_agent.tests.memory_confirmation_fixtures import ConfirmedRememberWorkflow
+    from agent_py_agent.tests.test_remember_learning_source_review import _agent
+
+    agent = _agent(root, user_dialogue_projection(), {}, {})
+    tool = ConfirmedRememberWorkflow(agent)
+    assert tool.execute(dict(content="项目使用 UTC 保存时间", kind="project", origin="user_explicit",
+                             subject_key="source.review")).ok
+    [target] = agent.memory.all()
+    agent.memory.migrate_tiers()
+    store = MemoryGenerationStore(agent.memory.path)
+    before = store.manifest()
+    agent.memory.quota_enforcer = OwnerQuotaEnforcer(agent.memory.path.parents[2], max_bytes=1048576)
+    params = agent._current_run_params
+    params.request_id, params.run_id = "req-r2-remove", "run-r2-remove"
+    agent.conversation_store.messages.append(dict(thread_id=params.task_attributes["conversation_thread_id"],
+        role="user", content="删除项目保存时间规则", metadata={"gateway_request_id": params.request_id}))
+    writer = jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 不伪造墓碑或候选；失败前其它正式字节均由生产writer提交。
+    # 函数用途: 制造可真实恢复的墓碑先行故障。
+    def fail_root(path, text, **kwargs):
+        if path == store.manifest_path:
+            raise OSError("r2 quota removal root failure")
+        return writer(path, text, **kwargs)
+
+    if recovery:
+        jsonl.write_private_text_file_atomic_unlocked = fail_root
+    try:
+        outcome = tool.execute(dict(action="remove", entry_id=target.entry_id, origin="user_explicit"))
+    finally:
+        jsonl.write_private_text_file_atomic_unlocked = writer
+    if recovery:
+        assert not json.loads(outcome.output)["saved"]
+        assert store.manifest() == before
+        plan = prepare_committed_remove(agent.memory_promotion, target.entry_id)
+        assert plan is not None
+        tombstone = agent.memory.committed_removal_record(target.entry_id)
+        result = recover_prepared_remove(agent.memory_promotion, plan)
+        assert result.promoted and result.reason_code == "REMOVE_CLEANUP_RECOVERED", result
+        assert not result.formal_memory_changed
+        assert agent.memory.committed_removal_record(target.entry_id) == tombstone
+        repaired = store.manifest()
+        assert recover_prepared_remove(agent.memory_promotion,
+            prepare_committed_remove(agent.memory_promotion, target.entry_id)).promoted
+        assert store.manifest() == repaired
+    else:
+        assert outcome.ok and json.loads(outcome.output)["saved"], outcome
+    assert agent.memory.all() == []
+    assert all(not row.content for row in agent.memory_candidates.list())
+    assert all(target.content.encode() not in p.read_bytes() for p in store.directory.glob("*/*"))
+
+
+# LLM: 限时独立解释器防止锁缺陷挂住pytest；三秒后取真实栈，十五秒硬超时不当成功。
+# 函数用途: 保护正数配额删除回归，同时保留实际同线程锁重入证据。
+@pytest.mark.parametrize("recovery", [False, True])
+def test_r2_positive_quota_remember_remove_and_prepared_recovery(tmp_path, recovery):
+    import subprocess
+    import sys
+
+    script = ("import faulthandler; from pathlib import Path; "
+              "from agent_py_agent.tests.test_opt_memory_generation import _r2_quota_remove_worker; "
+              "faulthandler.dump_traceback_later(3); "
+              f"_r2_quota_remove_worker(Path({str(tmp_path)!r}), {recovery!r}); "
+              "faulthandler.cancel_dump_traceback_later()")
+    try:
+        result = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"正数配额真实删除未退出，调用栈：{exc.stderr!r}")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# LLM: 校验被遗忘ID/hash的普通add/replace及混合批次；坏批不动权威、ops或访问前像。
+# 函数用途: 防止成功回执描述被末端过滤的写入，以及replace误删原有活记录。
+@pytest.mark.parametrize("action", ["add", "replace"])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_r2_hash_barrier_rejects_before_mutating_live_preimage(tmp_path, action, mixed):
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add_record(MemoryRecord("user", "永久遗忘的正文", entry_id="forgotten"))
+    memory.remove("forgotten")
+    if action == "replace":
+        memory.add_record(MemoryRecord("user", "必须保留的活前像", entry_id="B"))
+    before = {r.entry_id: asdict(r) for r in memory.all()}
+    root = MemoryGenerationStore(memory.path).manifest()
+    files = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    memory._pending_access["B"] = 123.0
+    operations = ([dict(action="add", entry_id="good", content="独立有效事实")] if mixed else [])
+    operations.append(dict(action=action, entry_id="B", content=" 永久遗忘的正文 "))
+    with pytest.raises(ValueError, match="MEMORY_TOMBSTONED_CONTENT"):
+        memory.apply_batch(operations)
+    assert {r.entry_id: asdict(r) for r in JsonlMemory(memory.path).all()} == before
+    assert MemoryGenerationStore(memory.path).manifest() == root
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == files
+    assert memory._pending_access == {"B": 123.0}
+
+
+# LLM: 同批删除生成的新hash也要约束写入，否则generation过滤仍能制造假成功。
+# 函数用途: 禁止混合批次用新ID重加本批明确遗忘的同文。
+def test_r2_same_batch_remove_and_readd_cannot_claim_discarded_commit(tmp_path):
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add_record(MemoryRecord("user", "同批遗忘", entry_id="A"))
+    with pytest.raises(ValueError, match="MEMORY_TOMBSTONED_CONTENT"):
+        memory.apply_batch([dict(action="remove", entry_id="A"),
+                            dict(action="add", entry_id="B", content=row.content)])
+    assert [r.entry_id for r in memory.all()] == ["A"]
+    assert memory.committed_removal_record("A") is None
+
+
+# LLM: 首次小库删除只故障根writer；重开后连做两次真实purge，身份和版本必须不变。
+# 函数用途: 抓住无root时假清理成功及旧单文件明文残留。
+def test_r2_first_small_remove_root_failure_restart_purge_converges(tmp_path, monkeypatch):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import (
+        GENERATION_SCHEMA,
+        MemoryGenerationStore,
+    )
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add("user", "PRIVATE-R2-FIRST-DELETE")
+    store = MemoryGenerationStore(memory.path)
+    assert store.manifest() is None
+    writer = jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 永久账先行仍真实写入，根失败不能洗成零副作用。
+    # 函数用途: 中断首次根发表。
+    def fail_root(path, raw, **kwargs):
+        if path == store.manifest_path:
+            raise OSError("r2 first root failure")
+        return writer(path, raw, **kwargs)
+
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_root)
+    with pytest.raises(RemovalCleanupError) as error:
+        memory.remove(row.entry_id)
+    assert error.value.formal_memory_changed
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    memory = JsonlMemory(memory.path)
+    tombstone = memory.committed_removal_record(row.entry_id)
+    ledger = store.tombstones.path.read_bytes()
+    assert memory.all() == [] and tombstone is not None
+    memory.purge_removed_indexes(row.entry_id)
+    assert store.manifest() is not None
+    assert json.loads(memory.path.read_text())["schema_version"] == GENERATION_SCHEMA
+    repaired = store.manifest()
+    memory.purge_removed_indexes(row.entry_id)
+    assert store.manifest() == repaired
+    assert store.tombstones.path.read_bytes() == ledger
+    assert memory.committed_removal_record(row.entry_id) == tombstone
+    assert all(row.content.encode() not in p.read_bytes() for p in tmp_path.rglob("*") if p.is_file())
+
+
+# LLM: 子进程在真实私有writer已fsync而未replace时退出；不能手造暂存冒充进程中断证据。
+# 函数用途: 验证重跑迁移和正式remove都回收实际.tmp分片与空代目录。
+@pytest.mark.parametrize("resume", ["migrate", "remove"])
+def test_r2_writer_interruption_temporary_shard_is_physically_collected(tmp_path, resume):
+    import subprocess
+    import sys
+
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    row = memory.add("user", "PRIVATE-R2-INTERRUPTED-SHARD")
+    script = f'''
+import os
+from pathlib import Path
+from agent_py_agent.agent.common import json_io
+from agent_py_agent.agent.memory_store.jsonl import JsonlMemory
+original = json_io._replace_with_retry
+def interrupted(src, dst, **kwargs):
+    if ".generations" in str(dst) and Path(dst).suffix == ".jsonl":
+        os._exit(73)
+    return original(src, dst, **kwargs)
+json_io._replace_with_retry = interrupted
+JsonlMemory(Path({str(memory.path)!r})).migrate_tiers()
+'''
+    process = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True, text=True, timeout=15)
+    assert process.returncode == 73, process.stderr
+    store = MemoryGenerationStore(memory.path)
+    [temporary] = list(store.directory.glob("*/*.tmp"))
+    assert row.content.encode() in temporary.read_bytes()
+    directory = temporary.parent
+    assert store.manifest() is None
+    if resume == "migrate":
+        memory.migrate_tiers()
+        assert [r.content for r in memory.all()] == [row.content]
+    else:
+        memory.remove(row.entry_id)
+        assert memory.all() == []
+    assert not temporary.exists(), "真实writer的中断暂存仍残留"
+    assert not directory.exists(), "已清空失败代目录未回收"
+    if resume == "migrate":
+        memory.remove(row.entry_id)
+    assert all(row.content.encode() not in p.read_bytes() for p in tmp_path.rglob("*") if p.is_file())
+
+
+# LLM: GC只处理生产writer精确命名；真根引用及未知名字不得被误删，不安全链接必须报错。
+# 函数用途: 验证暂存回收的命名、nofollow和单链接边界。
+@pytest.mark.parametrize("shape", ["regular", "symlink", "hardlink"])
+def test_r2_temporary_gc_keeps_current_and_unknown_and_rejects_links(tmp_path, monkeypatch, shape):
+    import os
+
+    from agent_py_agent.agent.memory_store.generation_manifest import MemoryGenerationStore
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    memory.add("user", "current authority")
+    memory.migrate_tiers()
+    store = MemoryGenerationStore(memory.path)
+    root = store.manifest()
+    current = tmp_path / root["segments"][0]["path"]
+    before = current.read_bytes()
+    unknown = current.parent / ".active-000000.jsonl.not-a-uuid.tmp"
+    unknown.write_text("unknown retain")
+    temporary = current.parent / (".active-000000.jsonl." + "b" * 32 + ".tmp")
+    if shape == "regular":
+        temporary.write_text("staging discard")
+    elif shape == "symlink":
+        temporary.symlink_to(current)
+    else:
+        temporary.write_text("multiply-linked staging")
+        original_stat = os.stat
+
+        # LLM: 本机真实硬链接创建返回EPERM；仅注入该暂存叶的多链接元数据，不冒称物理硬链接实测。
+        # 函数用途: 验证GC必须拒绝nlink=2，所有其它stat仍读取真实文件系统。
+        def multiple_links(path, *args, **kwargs):
+            info = original_stat(path, *args, **kwargs)
+            if path == temporary.name and kwargs.get("dir_fd") is not None:
+                fields = list(info)
+                fields[3] = 2
+                return os.stat_result(fields)
+            return info
+
+        # 包装函数保留原stat的真实dir_fd能力，不能让能力探测提前挡掉本例的nlink断言。
+        monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {multiple_links})
+        monkeypatch.setattr(os, "stat", multiple_links)
+    with memory._locked_memory():
+        if shape == "regular":
+            store.collect_unreferenced(root)
+            assert not temporary.exists()
+        else:
+            with pytest.raises(ValueError, match="MEMORY_GENERATION_UNREADABLE"):
+                store.collect_unreferenced(root)
+            assert temporary.is_symlink() or temporary.exists()
+    assert current.read_bytes() == before
+    assert unknown.read_text() == "unknown retain"
+    assert store.manifest() == root
+
+
+# LLM: 仅故障root之后的GC或marker写；移除故障后重试只能补清理，不能重信legacy或增代。
+# 函数用途: 验证迁移真正完成的判据和收尾失败继续诚实报错。
+@pytest.mark.parametrize("failure_point", ["gc", "marker"])
+def test_r2_migration_retries_post_root_cleanup_without_new_generation(tmp_path, monkeypatch, failure_point):
+    from agent_py_agent.agent.memory_store import jsonl
+    from agent_py_agent.agent.memory_store._jsonl_indexing import RemovalCleanupError
+    from agent_py_agent.agent.memory_store.generation_manifest import (
+        GENERATION_SCHEMA,
+        MemoryGenerationStore,
+    )
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl")
+    rows = _legacy(memory, [100, 100])
+    store = MemoryGenerationStore(memory.path)
+    orphan_dir = store.directory / ("a" * 32)
+    orphan_dir.mkdir(parents=True)
+    orphan = orphan_dir / "active-000000.jsonl"
+    orphan.write_text(rows[0].to_json() + "\n")
+    gc, writer = MemoryGenerationStore.collect_unreferenced, jsonl.write_private_text_file_atomic_unlocked
+
+    # LLM: 错误只发生于提交后的清理，不替换发表或逻辑读取。
+    # 函数用途: 固定GC失败边界。
+    def fail_gc(self, root, **kwargs):
+        raise OSError("r2 post-root gc failure")
+
+    # LLM: 分片/墓碑/根真实写入，仅拒绝旧单文件marker的最后写叶。
+    # 函数用途: 固定迁移已发表但旧正文未擦除的边界。
+    def fail_marker(path, raw, **kwargs):
+        if path == memory.path:
+            raise OSError("r2 post-root marker failure")
+        return writer(path, raw, **kwargs)
+
+    if failure_point == "gc":
+        monkeypatch.setattr(MemoryGenerationStore, "collect_unreferenced", fail_gc)
+    else:
+        monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", fail_marker)
+    with pytest.raises(RemovalCleanupError) as error:
+        memory.migrate_tiers()
+    assert error.value.formal_memory_changed
+    root, ledger = store.manifest(), store.tombstones.path.read_bytes()
+    assert root is not None
+    memory = JsonlMemory(memory.path)
+    with pytest.raises(RemovalCleanupError) as retry_error:
+        memory.migrate_tiers()
+    assert not retry_error.value.formal_memory_changed
+    assert store.manifest() == root
+    monkeypatch.setattr(MemoryGenerationStore, "collect_unreferenced", gc)
+    monkeypatch.setattr(jsonl, "write_private_text_file_atomic_unlocked", writer)
+    # 已有根后即使legacy不是合法事件，也不能重新信任它来生成事实。
+    memory.path.write_text("obsolete plaintext is not authority\n")
+    for _ in range(2):
+        assert memory.migrate_tiers() == root
+        assert store.manifest() == root
+        assert json.loads(memory.path.read_text())["schema_version"] == GENERATION_SCHEMA
+        assert not orphan.exists() and not orphan_dir.exists()
+        assert {r.entry_id: r.content for r in memory.all()} == {r.entry_id: r.content for r in rows}
+        assert store.tombstones.path.read_bytes() == ledger
+
+
+# LLM: 公共search含语义臂的零命中也只消耗同一次有界权威扫描；本地hash嵌入无网络，观察真实扫描。
+# 函数用途: 防止report有界但公共调用为了判空再执行all全库读取。
+@pytest.mark.parametrize("semantic,indexed", [(False, False), (True, False), (True, True)])
+def test_r2_public_search_empty_hits_respects_authority_scan_budget(tmp_path, monkeypatch, semantic, indexed):
+    from agent_py_agent.agent.memory_store import _jsonl_indexing, jsonl
+    from agent_py_agent.tests._hashing_embedder import LocalHashingEmbedder
+
+    memory = JsonlMemory(tmp_path / "memory.jsonl", embedder=LocalHashingEmbedder(dim=64) if semantic else None)
+    if semantic:
+        # 通过真实写入口创建合法向量身份；其旧候选不属于下面的正式样本，仍必须经权威复核。
+        memory.add("user", "synthetic vector identity")
+        assert memory._vector_store().identity_status()[0]
+    _legacy(memory, [30] * 1005)
+    memory.migrate_tiers()
+    if indexed:
+        assert memory.rebuild_read_index(batch_size=1000)["status"] == "partial"
+        assert memory.rebuild_read_index(batch_size=1000)["status"] == "complete"
+    monkeypatch.setattr(jsonl, "_AUTHORITY_SCAN_MAX_RECORDS", 3)
+    scan = _jsonl_indexing.bounded_authority_records
+    all_records = memory.all
+    scans, all_counts = [], []
+
+    # LLM: 只记录生产扫描回执，实际字节与解析仍由真实reader执行。
+    # 函数用途: 证明总扫描次数和预算实际消耗。
+    def observe_scan(*args, **kwargs):
+        records, facts = scan(*args, **kwargs)
+        scans.append(facts)
+        return records, facts
+
+    # LLM: 不伪造all结果，错误全库读取会留下准确记录数。
+    # 函数用途: 捕获公共零命中分支的无界旁路。
+    def observe_all():
+        records = all_records()
+        all_counts.append(len(records))
+        return records
+
+    monkeypatch.setattr(_jsonl_indexing, "bounded_authority_records", observe_scan)
+    monkeypatch.setattr(memory, "all", observe_all)
+    assert memory.search("火星葡萄") == []
+    assert all_counts == [], f"公共入口额外全库读取：{all_counts}"
+    assert len(scans) == 1 and scans[0]["partial"]
+    assert scans[0]["scanned_records"] == 3

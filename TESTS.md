@@ -1,3 +1,27 @@
+## 2026-10-29 e905 sol-4 Round 2：删除屏障、故障收尾及搜索预算
+
+来源：`fix-e905-sol-4-r2.md` 与 Astra-1/Astra-2 二轮复核；从 `e4d1a8cef53420c8bfaf06ee6157e86853219898` 修复，不部署、不操作生产记忆。
+
+- 正数物理配额：正常 Remember 删除与真实 `prepare_committed_remove` → `recover_prepared_remove` 显式透传外层仍存活的 admission；独立清理重新准入，保持 quota→policy→candidate/formal 锁序，不改锁为可重入、不移除配额检查。
+- 写前统一核验规范 ID 与正文 hash 永久屏障，拒绝被遗忘的 add/replace 和混合批次；断言活记录前像、权威字节、ops 与 pending 均不变，不靠 generation 末端丢弃后虚报成功。
+- 首次小库根发表失败：永久账生效后重启，连续两次 purge 建立首根并擦除旧 JSONL；墓碑身份、版本和账字节不变。
+- 在真实私有 writer 已 fsync、尚未 replace 时，子进程 `os._exit(73)` 留下精确 UUID `.tmp` 分片；重跑迁移或正式 remove 都回收残片及空代目录。当前引用和未知暂存名保留，符号链接与多链接拒绝。多链接为单叶 nlink=2 元数据注入，不冒称真实硬链接验收。
+- 已有根的迁移重试只补 GC/schema marker，不增代、不重信 legacy 正文；重复收尾失败继续报告 pending，历史恢复不冒称本轮新增正式提交。
+- 公共 search 零命中使用本次有界读取的空库事实；词面降级与语义复核共享权威快照，完整索引时语义臂也有界，不再为判空/核旧向量无界 all。通过本地 hash embedder 验证，不访问模型网络。
+- 原候选访问测试保留旧候选失效和越域不 touch 断言，新增同文重加明确拒绝断言；新候选改用另一条真实可命中的正文，不能把空候选当作范围校验通过。
+
+复现（工作树根；缓存只用独立临时目录）：
+
+```bash
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_opt_memory_generation.py agent_py_agent/tests/test_memory_condense_v2.py agent_py_agent/tests/test_memory_jsonl_and_hybrid_wave5.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol4_r2fix
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_memory_semantic_recall.py -q --tb=short -o cache_dir=/tmp/pytest_cache_sol4_r2fix
+ruff check --no-cache agent_py_agent scripts
+python3 -B scripts/check_import_boundaries.py --json
+git diff --check
+```
+
+精确提交、JUnit、红绿对照及独立静态复核边界以本轮 `DONE-e905-sol-4.md` 为准；定向临时库验证不代生产/跨平台/全仓验收。物理配额不够暂存峰值时仍诚实拒绝，未承诺满额或磁盘真实耗尽时自动恢复。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。
