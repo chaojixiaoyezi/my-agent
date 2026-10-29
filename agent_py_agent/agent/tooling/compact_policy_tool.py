@@ -104,7 +104,7 @@ def _parse_percent(raw: Any) -> int | None:
     return None
 
 
-# LLM: 本地受管用户仅在管理员未锁定时可改自身default_trigger_percent，复用_GovernanceControl锁、CAS与镜像写口。
+# LLM: 本地受管用户仅在管理员未锁定时可改自身default_trigger_percent，统一委托ManagedUserGovernanceService.set_self_user_compact_policy完成锁、CAS与镜像写口。
 # 函数用途: 更新当前本地受管用户自己的默认压缩比例。
 def _update_self_user_policy(
     agent: Any,
@@ -113,10 +113,7 @@ def _update_self_user_policy(
     expected_revision: Any = None,
 ) -> ToolHandlerOutcome:
     from ..user_space.managed_user_governance import (
-        _GovernanceControl,
-        _policy_patch,
-        _require_revision,
-        now_utc,
+        ManagedUserGovernanceService,
         resolve_managed_local_user,
     )
 
@@ -128,18 +125,16 @@ def _update_self_user_policy(
     if home is None or getattr(home, "owner_provider", "") != "local" or getattr(home, "owner_kind", "") != "user":
         return _failure("TOOL_PERMISSION_DENIED", "当前身份不支持设置本地受管用户默认压缩比例。")
     try:
-        uid, _identity, _owner_home = resolve_managed_local_user(home.root, home.owner_id)
-        control = _GovernanceControl(home.root, uid)
-        with control.locked():
-            current = control.policy()
-            if current.get("user_compact_policy", {}).get("force_locked"):
-                return _failure("COMPACT_POLICY_LOCKED_BY_ADMIN", "当前账号压缩策略已被管理员锁定。")
-            _require_revision(expected_revision, current["revision"])
-            updated = _policy_patch(current, {"user_compact_policy": {"default_trigger_percent": value}})
-            updated.update(revision=current["revision"] + 1, updated_at=now_utc(), updated_by=home.owner_id)
-            control.write(("governance_policy.json",), updated, ("config", "governance_policy.json"))
-    except HostAPIError as exc:
-        return _failure(exc.code, str(exc))
+        _uid, identity, _owner_home = resolve_managed_local_user(home.root, home.owner_id)
+        service = ManagedUserGovernanceService(home.root, actor_owner=identity)
+        updated = service.set_self_user_compact_policy(
+            home.owner_id,
+            value,
+            expected_revision=expected_revision,
+        )
+    except (HostAPIError, ValueError) as exc:
+        code = getattr(exc, "code", "TOOL_INVALID_ARGUMENTS")
+        return _failure(str(code), str(exc))
     payload = _status_payload(agent, thread, admin=False)
     payload["revision"] = updated["revision"]
     return ToolHandlerOutcome("compact_policy", True, json.dumps(payload, ensure_ascii=False))

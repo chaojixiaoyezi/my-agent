@@ -422,21 +422,33 @@ def test_read_public_push_endpoints_strips_credentials_at_source(make_agent):
         assert set(row) <= {'endpoint_url', 'enabled', 'allowed_private_hosts', 'allowed_callers'}
 
 
-# LLM: 验证compact_policy在批量CAS版本冲突时不静默覆盖，且权威提交后镜像写失败如实报告failed（非not_started）与GOVERNANCE_MIRROR_FAILED。
-# 函数用途: 守住compact_policy写入口的CAS并发约束与写后部分失败回执合同。
+# LLM: 验证compact_policy在批量CAS版本冲突时不静默覆盖、多用户中途冲突保留partial=True与effect_outcome='failed'、
+#   受管用户自助写走ManagedUserGovernanceService.set_self_user_compact_policy公开入口，且权威提交后镜像写失败如实报告failed与GOVERNANCE_MIRROR_FAILED。
+# 函数用途: 守住compact_policy写入口的CAS并发约束、公开服务自助边界与写后部分失败回执合同。
 def test_compact_policy_batch_cas_and_mirror_failure_outcome(make_agent, monkeypatch):
+    import inspect
+    import json
+
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.tooling import compact_policy_tool
     from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
     from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
     from agent_py_agent.agent.user_space.managed_user_governance import (
         ManagedUserGovernanceService,
+        ManagedUserScopeDeniedError,
     )
+    from agent_py_agent.agent.user_space.owner_resolver import OwnerIdentity
     from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    assert '_GovernanceControl' not in inspect.getsource(compact_policy_tool)
 
     admin = make_agent()
     users = LocalUserStore(admin.home_paths.root)
-    LocalUserLifecycle(users).create('alice', idempotency_key='r3-review-create-alice-0001')
+    lifecycle = LocalUserLifecycle(users)
+    lifecycle.create('alice', idempotency_key='r3-review-create-alice-0001')
+    lifecycle.create('bob', idempotency_key='r5-review-create-bob-0001')
+    lifecycle.create('carol', idempotency_key='r5-review-create-carol-0001')
     user = SimpleAgent(
         replace(admin.config, my_agent_owner_kind='user', my_agent_owner_id='alice'),
         users.owner_home('alice').workspace_dir,
@@ -445,6 +457,15 @@ def test_compact_policy_batch_cas_and_mirror_failure_outcome(make_agent, monkeyp
         th = owner_thread(ag, f'cas-mirror-{ag.home_paths.owner_kind}')
         ag._current_run_params = RunParams(task_attributes={'conversation_thread_id': th.thread_id})
     service = ManagedUserGovernanceService(admin.home_paths.root)
+    alice_self_service = ManagedUserGovernanceService(
+        admin.home_paths.root,
+        actor_owner=OwnerIdentity.local_user('alice'),
+    )
+    with pytest.raises(ManagedUserScopeDeniedError):
+        service.set_self_user_compact_policy('alice', 72)
+    with pytest.raises(ManagedUserScopeDeniedError):
+        alice_self_service.set_self_user_compact_policy('bob', 72)
+
     prior = service.set_user_compact_policy('alice', {'default_trigger_percent': 71}, expected_revision=0)
     stale = execute_registry_test_call(
         admin.tools,
@@ -485,6 +506,30 @@ def test_compact_policy_batch_cas_and_mirror_failure_outcome(make_agent, monkeyp
     )
     assert not user_stale.ok and user_stale.error_code == 'REVISION_CONFLICT'
 
+    bob_prior = service.get_user_compact_policy('bob')
+    carol_prior = service.get_user_compact_policy('carol')
+    partial_batch = execute_registry_test_call(
+        admin.tools,
+        'compact_policy',
+        {
+            'action': 'admin_batch_users',
+            'user_ids': ['alice', 'bob', 'carol'],
+            'trigger_percent': 74,
+            'expected_revisions': {'alice': prior['revision'], 'bob': 99, 'carol': 0},
+        },
+        call_id='r5-batch-partial-conflict',
+    )
+    assert not partial_batch.ok and partial_batch.error_code == 'REVISION_CONFLICT'
+    assert partial_batch.effect_outcome == 'failed'
+    partial_payload = json.loads(partial_batch.output)
+    assert partial_payload['partial'] is True
+    assert [it['status'] for it in partial_payload['items']] == ['applied', 'revision_conflict', 'not_attempted']
+    assert service.get_user_compact_policy('alice')['default_trigger_percent'] == 74
+    assert service.get_user_compact_policy('bob') == bob_prior
+    assert service.get_user_compact_policy('carol') == carol_prior
+
+    mirror_path = admin.home_paths.root / 'owners/local/alice/config/governance_policy.json'
+    mirror_before = mirror_path.read_bytes()
     original_write = LocalUserStore.write_json
 
     # LLM: 仅在alice的可见镜像路径注入写失败，保留宿主权威文件写入成功以验证写后回执。
@@ -495,14 +540,17 @@ def test_compact_policy_batch_cas_and_mirror_failure_outcome(make_agent, monkeyp
         return original_write(store, parts, value)
 
     monkeypatch.setattr(LocalUserStore, 'write_json', fail_mirror)
-    for role, ag, params in (
-        ('admin', admin, {'action': 'admin_set_user', 'target_owner_id': 'alice', 'trigger_percent': 67}),
-        ('self', user, {'action': 'set_user', 'trigger_percent': 66}),
+    for role, ag, expected_pct, params in (
+        ('admin', admin, 67, {'action': 'admin_set_user', 'target_owner_id': 'alice', 'trigger_percent': 67}),
+        ('self', user, 66, {'action': 'set_user', 'trigger_percent': 66}),
+        ('batch', admin, 68, {'action': 'admin_batch_users', 'user_ids': ['alice'], 'trigger_percent': 68}),
     ):
         res = execute_registry_test_call(ag.tools, 'compact_policy', params, call_id=f'r3-mirror-{role}')
         assert not res.ok
         assert res.error_code == 'GOVERNANCE_MIRROR_FAILED'
         assert res.effect_outcome == 'failed' and res.effect_outcome != 'not_started'
+        assert service.get_user_compact_policy('alice')['default_trigger_percent'] == expected_pct
+        assert mirror_path.read_bytes() == mirror_before
 
 
 # LLM: 在临时原Store中构造已存在的错归属记录，查询必须在调用策略解析器前失败关闭，不回落owner默认。

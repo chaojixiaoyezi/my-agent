@@ -228,7 +228,7 @@ class _ManagedMemoryMutation:
     expected_revision: int | None
 
 
-# LLM: 主服务单用户先核resolver/actor，批量先核全体且逐项CAS，global另核local/main；updated_by不授权限。
+# LLM: 主服务单用户先核resolver/actor，受管用户自助写口仅允许本人改default_trigger_percent，批量先核全体且逐项CAS，global另核local/main；updated_by不授权限。
 # 类用途: 对已登记的普通本地用户提供统一治理服务。
 class ManagedUserGovernanceService:
     # LLM: root及actor为宿主构造依赖；默认供已鉴权host adapter，不供模型设置actor。
@@ -284,6 +284,41 @@ class ManagedUserGovernanceService:
         patch = _validated_policy_fields("user_compact_policy", policy_patch)
         policy = self.set_policy(target_owner_id, {"user_compact_policy": patch}, expected_revision)
         return {"owner_id": policy["owner_id"], "revision": policy["revision"], **policy["user_compact_policy"]}
+
+    # LLM: 仅允许已登记的本地受管用户本人（actor_owner == identity）在全局未强锁且个人force_locked=False时修改自身default_trigger_percent；
+    #   严禁修改force_locked或跨用户修改，全程在_GovernanceControl锁内执行CAS与镜像同步。
+    # 函数用途: 供本地受管用户自助设置或重置本人的默认压缩触发比例。
+    def set_self_user_compact_policy(
+        self,
+        target_owner_id: str,
+        default_trigger_percent: int | None,
+        *,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        uid, identity, home = resolve_managed_local_user(self.root_dir, target_owner_id)
+        if self.actor_owner != identity:
+            raise ManagedUserScopeDeniedError()
+        patch = _validated_policy_fields("user_compact_policy", {"default_trigger_percent": default_trigger_percent})
+        control = _GovernanceControl(self.root_dir, uid)
+        with control.locked():
+            if (read_global_compact_force_policy(self.root_dir) or {}).get("force_compact_trigger_percent"):
+                raise HostAPIError(
+                    "COMPACT_POLICY_LOCKED_BY_ADMIN",
+                    409,
+                    message="Compact trigger percent is locked by administrator global force policy.",
+                )
+            current = control.policy()
+            if current.get("user_compact_policy", {}).get("force_locked"):
+                raise HostAPIError(
+                    "COMPACT_POLICY_LOCKED_BY_ADMIN",
+                    409,
+                    message="User compact trigger percent is locked by administrator.",
+                )
+            _require_revision(expected_revision, current["revision"])
+            updated = _policy_patch(current, {"user_compact_policy": patch})
+            updated.update(revision=current["revision"] + 1, updated_at=now_utc(), updated_by=home.owner_id)
+            control.write(("governance_policy.json",), updated, ("config", "governance_policy.json"))
+            return {"owner_id": updated["owner_id"], "revision": updated["revision"], **updated["user_compact_policy"]}
 
     # LLM: 全部目标先核登记，写入仍逐项重核；原CAS独立，失败后停止并保留已提交/未知/未尝试结果。
     # 函数用途: 批量设置明确用户或全部受管用户，不宣称跨文件原子事务。
