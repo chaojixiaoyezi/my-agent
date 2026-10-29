@@ -494,7 +494,9 @@ def test_f07_machine_verified_promotion_never_forges_user_confirmation(tmp_path,
     assert personality == {name:(home.owner_home_dir/name).read_bytes() for name in personality}
 
 
-def test_f10_service_reuses_renamed_pending_method(tmp_path):
+# LLM: e905 DEL-MR-11改为精确规范ID合同；相似正文只能推荐，不吞掉另一个候选的身份。
+# 函数用途: 保留不同名字的独立提案，不使用旧family-only去重。
+def test_f10_service_keeps_renamed_pending_identity(tmp_path):
     from dataclasses import asdict
 
     from agent_py_agent.agent.capability.skill_learning import (
@@ -512,7 +514,7 @@ def test_f10_service_reuses_renamed_pending_method(tmp_path):
     for name in ('one-method', 'same-renamed'):
         output = json.dumps({'schema_version':OUTPUT_SCHEMA_VERSION, **asdict(decision(name))})
         service._decide(SkillLearningMaterial({'run_id':name}), output)
-    assert len(list_learning_proposals(store)) == 1
+    assert {row['decision']['name'] for row in list_learning_proposals(store)} == {'one-method', 'same-renamed'}
 
 
 def test_f16_s1_candidate_has_unified_provenance(tmp_path):
@@ -604,16 +606,23 @@ def test_f15_runner_final_output_must_pass_contract(tmp_path):
     assert not result.ok and result.error_code == 'SCRIPT_MISSING_OUTPUT_KEYS'
 
 
+# LLM: e905收敛family-only复用，不把B的代码/证明混进A；精确ID各自保留原hash和状态。
+# 函数用途: 检查同族不同规范ID的出处和版本不会串账。
 def test_review_same_family_provenance_keeps_exact_identity(tmp_path):
     from agent_py_agent.agent.capability.asset_promotion import register_asset
 
     store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
     register_asset(store,kind='script',asset_id='a',asset={'code':'print(1)'},source={'origin':'a'},sha256='a'*64,state='active')
     row = register_asset(store,kind='script',asset_id='b',asset={'code':'print( 1 )'},source={'origin':'b'},sha256='b'*64)
-    assert (row['asset_id'],row['sha256'],row['state']) == ('a','a'*64,'active')
-    assert len(row['provenance']) == 2
+    assert (row['asset_id'],row['sha256'],row['state']) == ('b','b'*64,'candidate')
+    rows = {item['asset_id']: item for item in store.load_registry().assets.values()}
+    assert (rows['a']['sha256'], rows['a']['state']) == ('a'*64, 'active')
+    assert rows['a']['provenance'] == [{'origin': 'a'}]
+    assert row['provenance'] == [{'origin': 'b'}]
 
 
+# LLM: 当前回执须保留真实执行类型，不能把已执行和纯静态trial混为同一质量事实。
+# 函数用途: 核对更新发布的准确hash、receipt和执行级别。
 def test_review_verified_update_persists_current_receipt(learned):
     from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
 
@@ -624,7 +633,8 @@ def test_review_verified_update_persists_current_receipt(learned):
     promote_verified_skill(store,request,lambda _,sha: {'sha256':sha,'status':'passed','executed':True,
         'contract_valid':True,'output':{},'receipt_id':'new-receipt'})
     row = store.load_registry().skills[current.name]
-    assert row.maintenance['verification_receipt'] == {'sha256':row.sha256,'receipt_id':'new-receipt'}
+    assert row.maintenance['verification_receipt'] == {'sha256':row.sha256,'receipt_id':'new-receipt',
+        'carrier': 'skill', 'verification_kind': 'runtime_execution', 'checks_executed': True, 'executed': True}
     assert row.maintenance['promotion_authority'] == 'autonomous_verified'
 
 
@@ -649,14 +659,16 @@ def test_review_extraction_registry_write_failure_restores_all(tmp_path,monkeypa
     assert not list((home/'skills').rglob('SKILL.md'))
 
 
-def test_review_formal_method_is_not_republished_under_rename(learned):
+# LLM: 新规范ID必须走自身静态/沙箱/安全/配额门，不借旧名字的正式版本证明。
+# 函数用途: 回归改名不会拿到旧Skill身份，两个名字的发布事实分开保存。
+def test_review_formal_method_rename_requires_own_publication(learned):
     from agent_py_agent.agent.capability.asset_promotion import propose_or_promote_skill
 
     _,store = learned
     result = propose_or_promote_skill(store,PublishRequest(decision('renamed')),
         verifier=lambda _,sha: {'sha256':sha,'status':'passed','executed':True,'contract_valid':True,'output':{},'receipt_id':'r'})
-    assert result.event == 'skipped'
-    assert len(store.load_registry().skills) == 1
+    assert result.event == 'published' and result.skill_name == 'renamed'
+    assert set(store.load_registry().skills) == {'csv-cleaner', 'renamed'}
 
 
 def test_f04_application_scope_prioritizes_relevant_package():

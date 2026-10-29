@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -92,7 +91,7 @@ def publish_learned_skill(store: SkillLearningStore, publish: PublishRequest) ->
 #   （空值会被解析器当成空列表）；正文原样接在 frontmatter 之后。
 # 函数用途: 把决定渲染成完整的 SKILL.md 文本。
 def render_learned_skill(decision: SkillLearningDecision) -> str:
-    lines = ["---", f"name: {decision.name}", f"description: {decision.description}"]
+    lines = ["---", f"name: {decision.name}", f"description: {decision.description}", "category: learned"]
     if decision.when_to_use:
         lines.append(f"when_to_use: {decision.when_to_use}")
     if decision.tags:
@@ -134,6 +133,8 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
     current = _owned_record(store, registry, publish.decision.name)
+    if publish.promotion_authority == 'autonomous_verified' and current.layout != 'learned':
+        raise SkillLearningGateError(CODE_NOT_LEARNED)
     if current.maintenance.get("state") in {"disabled","archived"}:
         raise SkillLearningGateError("SKILL_LEARNING_TARGET_DISABLED")
     if publish.expected_revision != current.revision or publish.expected_sha256 != current.sha256:
@@ -176,17 +177,14 @@ def _historical_adoptions(current):
     return [{'authority':'model', 'outcome':'adopted', 'run_id':run, 'sha256':sha} for run, sha in sorted(pairs)]
 
 
-# LLM: 调用方持state锁，语义族仅复用仍存在且未被用户修改的正式Skill；不接管停用/归档/删除的方法。
-# 函数用途: 找到同族正式资产，防自动改名重复发布。
+# LLM: 原state锁内只按同规范ID和完整渲染hash复用；family不证明身份，停用/归档/用户改动仍拒绝。
+# 函数用途: 查找当前候选的精确已发布版本，不将改名或不同内容映射到旧Skill。
 def _family_record_locked(store, registry, publish):
-    from dataclasses import asdict
-
-    from .asset_promotion import task_family_fingerprint
-
-    family = task_family_fingerprint('skill', asdict(publish.decision))
-    name = registry.assets.get(family, {}).get('asset_id', '').removeprefix('owner:')
+    name = publish.decision.name
     current = registry.skills.get(name)
     if current is None or name in registry.blocked_names or current.maintenance.get('state') in {'disabled', 'archived'}:
+        return None
+    if current.sha256 != skill_content_sha256(render_learned_skill(publish.decision)):
         return None
     return _owned_record(store, registry, name)
 
@@ -286,30 +284,37 @@ def _redacted_publish(publish: PublishRequest) -> tuple[PublishRequest, bool]:
     return replace(publish, decision=safe), safe != decision
 
 
-# LLM: 新建用：暂存检查通过后把整个暂存 Skill 目录 os.replace 到目标；替换前再查一次目标不存在。
-# 函数用途: 暂存、检查并安装一个新 Skill 目录。
+# LLM: stage复用原nofollow生命周期，learned目标parent按原skills根strict打开，不沿用户替换的父链接安装。
+# 函数用途: 检查新Skill后从准确stage移动到owner learned目录，不覆盖已有非空目标。
 def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, text: str, target: Path) -> None:
-    stage = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=store.directory))
+    from ..common.nofollow_fs import open_directory_beneath
+    from .asset_promotion import _stage_dir
     try:
-        staged = _staged_skill(store, stage, publish, text)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() or target.is_symlink():
-            raise SkillLearningGateError(CODE_NAME_TAKEN, {"skill_name": publish.decision.name})
-        os.replace(staged, target)
+        with _stage_dir(store.skills_root.parent) as stage:
+            staged = _staged_skill(store, stage, publish, text)
+            target_fd = open_directory_beneath(store.skills_root.parent, ('skills', 'learned'), create=True, require_dir_fd=True)
+            stage_fd = open_directory_beneath(stage, (), require_dir_fd=True)
+            try:
+                try:
+                    os.stat(target.name, dir_fd=target_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise SkillLearningGateError(CODE_NAME_TAKEN, {'skill_name': publish.decision.name})
+                os.rename(staged.name, target.name, src_dir_fd=stage_fd, dst_dir_fd=target_fd)
+            finally:
+                os.close(stage_fd)
+                os.close(target_fd)
     except OSError as exc:
-        raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        raise SkillLearningGateError(CODE_INSTALL_FAILED, {'error': type(exc).__name__}) from exc
 
 
-# LLM: 更新用：只做暂存检查，不移动；真正替换由调用方对原 SKILL.md 原子写完成。
-# 函数用途: 在临时目录检查一份将要写入的 SKILL.md。
+# LLM: 原state/配额锁内检查，stage始终沿strict nofollow且退出清理；不创建第二份持久状态或克隆整库。
+# 函数用途: 在隔离目录解析并安全扫描将发布的learned方法。
 def _stage_and_check(store: SkillLearningStore, publish: PublishRequest, text: str) -> None:
-    stage = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=store.directory))
-    try:
+    from .asset_promotion import _stage_dir
+    with _stage_dir(store.skills_root.parent) as stage:
         _staged_skill(store, stage, publish, text)
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
 
 
 # LLM: 解析必须带 frontmatter 且 name/description/when_to_use/tags 与决定逐字一致；guard 以 agent_generated

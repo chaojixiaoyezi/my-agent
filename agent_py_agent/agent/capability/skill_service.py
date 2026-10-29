@@ -163,10 +163,11 @@ class SkillsService:
             self._cache[cache_key] = snapshot
         return snapshot
 
-    # LLM: 每次核所有guard资源stat；force/clear仅逐出当前根的共享结果，保持原build_manifest单参数读口。
-    # 函数用途: 保留每Owner快照缓存，按完整目录签名决定是否重建。
+    # LLM: 仅宿主显式承诺不可变的公开根可按generation热命中；默认可编辑根仍核全部guard资源，force/clear必重扫。
+    # 函数用途: 保留Owner独立策略，按可信代次或完整目录签名失效manifest，不读取正文里的缓存指令。
     def _manifest_for(self, roots: tuple[SkillRoot, ...], *, force_reload: bool):
-        signature = _roots_signature(roots)
+        generations = getattr(self.home_paths, 'immutable_skill_root_generations', {})
+        signature = _roots_signature(roots, immutable_generations=generations)
         with self._lock:
             force_reload = force_reload or self._force_manifest_reload
             cached = self._manifest_cache
@@ -218,13 +219,19 @@ class SkillsService:
         return _dedupe_roots(roots)
 
 
-# LLM: 包括guard会扫描的隐藏/深层资源；builtin复用目录清单但逐项stat，不能仅凭根mtime沿用授权。
-# 函数用途: 计算每Owner来源指纹，共享builtin目录元信息以免重复遍历。
-def _roots_signature(roots: tuple[SkillRoot, ...]) -> str:
+# LLM: 只有宿主Home投影显式提供的不可变builtin/shared代次可免全树stat，默认不信任根mtime或磁盘自报token。
+# 函数用途: 按不可变发布代次或可编辑根完整stat计算来源指纹，撤销代次立即退回完整复核。
+def _roots_signature(roots: tuple[SkillRoot, ...], *, immutable_generations=None) -> str:
     digest = hashlib.sha256()
+    generations = immutable_generations if isinstance(immutable_generations, dict) else {}
     for root in roots:
         digest.update(repr((str(root.path), root.source)).encode())
-        digest.update(_skill_tree_state(root.path, builtin=root.source == "builtin").digest.encode())
+        generation = generations.get(str(root.path)) if root.source in {'builtin', 'shared'} else None
+        if isinstance(generation, str) and generation:
+            # 根替换/删除仍实时失效；内容不可变性是宿主安装发布合同，不适用于workspace/owner/plugin。
+            digest.update(repr(('immutable-release', generation, _path_stat_signature(root.path))).encode())
+        else:
+            digest.update(_skill_tree_state(root.path, builtin=root.source == "builtin").digest.encode())
     return digest.hexdigest()
 
 

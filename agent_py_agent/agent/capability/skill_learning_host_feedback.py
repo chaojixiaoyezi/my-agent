@@ -21,9 +21,12 @@ def observe_command_verifications(agent,call,evidence):
         observe_command_verification(agent,current,fact)
 
 
-# LLM: 调用点必须在原验证账本写入成功之后，receipt为原证据id；generic命令失败缺少内容/环境区分故不降分。
+# LLM: 仅原账本成功的真实执行回执可记分；明确dry_run/未执行/静态报告拒绝，缺内容/环境归因的普通失败不降分。
 # 函数用途: 登记项目明确声明的验证命令通过事实，不解释命令、输出或整轮状态。
 def observe_command_verification(agent, params, evidence):
+    if (evidence.get('dry_run') is True or evidence.get('executed') is False
+            or evidence.get('verification_kind') == 'deterministic_static'):
+        return
     if evidence.get('status') == 'passed' and evidence.get('exit_code') == 0 and type(evidence.get('id')) is int:
         _observe(agent,params,'effective',f"verification:{evidence['id']}", evidence)
 
@@ -112,15 +115,15 @@ def _target_matches(target, row):
 # LLM: 仅复用原registry已登记的准确宿主验证；不消费request中的passed/receipt，不执行模型命令或把guard当业务验证。
 # 函数用途: 默认机器核验入口，为相同候选和冻结输入的发布重试复用已有执行回执；缺证据保持候选。
 def builtin_machine_verifier(publish, sha256, *, store=None):
-    from .asset_promotion import task_family_fingerprint
+    from .asset_promotion import asset_identity
 
     if store is None:
         return None
     binding = _candidate_binding(store, publish, sha256)
     if binding is None:
         return None
-    family = task_family_fingerprint('skill', asdict(publish.decision))
-    proof = store.load_registry().assets.get(family, {}).get('candidate_verification', {})
+    identity = asset_identity('skill', asdict(publish.decision), store.skills_root.parent)
+    proof = store.load_registry().assets.get(identity, {}).get('candidate_verification', {})
     if proof.get('binding') != binding or not isinstance(proof.get('receipt_id'), str) or not proof['receipt_id']:
         return None
     return {'status':'passed', 'executed':True, 'contract_valid':True, 'output':{},
@@ -130,7 +133,7 @@ def builtin_machine_verifier(publish, sha256, *, store=None):
 # LLM: 仅原宿主verifier出口调用，原registry内保存最小证明或使旧证明失效；不保存输出，不把失败安装当正式Skill。
 # 函数用途: 耐久保留准确核验，发布中断可重用；同条件重新核验失败则撤销旧通过证明。
 def remember_verified_candidate(store, publish, receipt, *, sha256):
-    from .asset_promotion import business_validated, task_family_fingerprint
+    from .asset_promotion import asset_identity, business_validated
 
     binding = _candidate_binding(store, publish, sha256)
     if binding is None:
@@ -138,19 +141,19 @@ def remember_verified_candidate(store, publish, receipt, *, sha256):
     valid = (isinstance(receipt, dict) and business_validated(receipt) and receipt.get('sha256') == sha256
              and isinstance(receipt.get('receipt_id'), str) and bool(receipt['receipt_id']))
     proof = {'binding':binding, 'receipt_id':receipt['receipt_id']} if valid else {}
-    family = task_family_fingerprint('skill', asdict(publish.decision))
+    identity = asset_identity('skill', asdict(publish.decision), store.skills_root.parent)
     with store.state_lock():
         registry = store.load_registry()
-        row = registry.assets.get(family, {})
+        row = registry.assets.get(identity, {})
         if not valid and row.get('candidate_verification', {}).get('binding') != binding:
             return
         if row.get('candidate_verification') == proof:
             return
         row = {**row, 'candidate_verification':proof}
-        if not registry.assets.get(family):
-            row.update(kind='skill', asset_id=publish.decision.name, task_family_fingerprint=family,
+        if not registry.assets.get(identity):
+            row.update(kind='skill', asset_id=publish.decision.name, identity_sha256=identity,
                        sha256='', state='candidate', provenance=[{'origin':'host_verification', 'run_id':binding['run_id']}])
-        store.save_registry(replace(registry, assets={**registry.assets, family:row}))
+        store.save_registry(replace(registry, assets={**registry.assets, identity:row}))
 
 
 # LLM: 发布材料、原owner和原请求三重绑定；无准确轨迹不缓存，更新CAS与决策种类变更也使证明失效。
