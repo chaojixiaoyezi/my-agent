@@ -4435,4 +4435,29 @@ ERROR_CONTRACTS.update({
         recommended_action=RecoveryAction.REPORT_BLOCKER.value,
         recovery_hint="当前绑定的会话记录不可用或不属于当前用户，未读取或修改会话级策略；核对原会话绑定，不回退到其他会话。",
     ),
+    "GOVERNANCE_MIRROR_FAILED": ErrorContract(
+        code="GOVERNANCE_MIRROR_FAILED", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主权威治理策略已提交，但更新用户可见镜像失败；切勿当作未执行而盲目重放修改，先读取当前权威策略核对状态。",
+    ),
+    "REVISION_CONFLICT": ErrorContract(
+        code="REVISION_CONFLICT", category="state", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="目标策略修订号已变化，本次 CAS 更新未写入；先读取最新 revision 与策略状态后再决定是否重新提交。",
+    ),
+    "GOVERNANCE_STORE_INVALID": ErrorContract(
+        code="GOVERNANCE_STORE_INVALID", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="宿主治理策略存储格式损坏或不可验证，未放宽或覆盖现有策略；请管理员核查权威治理文件。",
+    ),
+    "MANAGED_USER_SCOPE_DENIED": ErrorContract(
+        code="MANAGED_USER_SCOPE_DENIED", category="permission", retryable=False,
+        recommended_action=RecoveryAction.REQUEST_PERMISSION.value,
+        recovery_hint="目标账号不在本机管理员受管本地用户范围内，或调用方无权操作该受管用户；核对 target_owner_id 与当前管理员身份。",
+    ),
+    "STORE_UNAVAILABLE": ErrorContract(
+        code="STORE_UNAVAILABLE", category="state", retryable=True,
+        recommended_action=RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        recovery_hint="底层本地用户或治理存储暂不可用；先核对原操作是否已生效，未生效时可稍后重试。",
+    ),
 })

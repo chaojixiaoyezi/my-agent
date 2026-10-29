@@ -390,7 +390,8 @@ def test_settings_next_read_navigation_and_compact_policy_execution(make_agent, 
     assert search_res.ok, search_res.output
     search_payload = json.loads(search_res.output)
     assert search_payload['matched_count'] > 0 and 'compact_policy' in search_payload['loaded_for_next_model_call']
-    after = item.get('after_expansion') or {'tool': 'compact_policy', 'arguments': {'action': 'status'}}
+    assert item['after_expansion'] == {'tool': 'compact_policy', 'arguments': {'action': 'status'}}
+    after = item['after_expansion']
     status_res = agent.tools.tools[after['tool']].execute(after['arguments'])
     assert status_res.ok, status_res.output
     status_payload = json.loads(status_res.output)
@@ -419,6 +420,67 @@ def test_read_public_push_endpoints_strips_credentials_at_source(make_agent):
     for row in rows.values():
         assert 'token_ciphertext' not in row and 'token_hash' not in row
         assert set(row) <= {'endpoint_url', 'enabled', 'allowed_private_hosts', 'allowed_callers'}
+
+
+# LLM: 验证compact_policy在批量CAS版本冲突时不静默覆盖，且权威提交后镜像写失败如实报告failed（非not_started）与GOVERNANCE_MIRROR_FAILED。
+# 函数用途: 守住compact_policy写入口的CAS并发约束与写后部分失败回执合同。
+def test_compact_policy_batch_cas_and_mirror_failure_outcome(make_agent, monkeypatch):
+    from agent_py_agent.agent.core import SimpleAgent
+    from agent_py_agent.agent.plugin_host.errors import HostAPIError
+    from agent_py_agent.agent.user_space.local_user_lifecycle import LocalUserLifecycle
+    from agent_py_agent.agent.user_space.local_user_store import LocalUserStore
+    from agent_py_agent.agent.user_space.managed_user_governance import (
+        ManagedUserGovernanceService,
+    )
+    from agent_py_agent.tests._tool_runtime_harness import execute_registry_test_call
+
+    admin = make_agent()
+    users = LocalUserStore(admin.home_paths.root)
+    LocalUserLifecycle(users).create('alice', idempotency_key='r3-review-create-alice-0001')
+    user = SimpleAgent(
+        replace(admin.config, my_agent_owner_kind='user', my_agent_owner_id='alice'),
+        users.owner_home('alice').workspace_dir,
+    )
+    for ag in (admin, user):
+        th = owner_thread(ag, f'cas-mirror-{ag.home_paths.owner_kind}')
+        ag._current_run_params = RunParams(task_attributes={'conversation_thread_id': th.thread_id})
+    service = ManagedUserGovernanceService(admin.home_paths.root)
+    prior = service.set_user_compact_policy('alice', {'default_trigger_percent': 71}, expected_revision=0)
+    stale = execute_registry_test_call(
+        admin.tools,
+        'compact_policy',
+        {'action': 'admin_batch_users', 'user_ids': ['alice'], 'trigger_percent': 69, 'expected_revision': 0},
+        call_id='r3-batch-stale',
+    )
+    assert not stale.ok and stale.error_code == 'REVISION_CONFLICT'
+    assert service.get_user_compact_policy('alice') == prior
+
+    user_stale = execute_registry_test_call(
+        user.tools,
+        'compact_policy',
+        {'action': 'set_user', 'trigger_percent': 65, 'expected_revision': 0},
+        call_id='r3-user-stale',
+    )
+    assert not user_stale.ok and user_stale.error_code == 'REVISION_CONFLICT'
+
+    original_write = LocalUserStore.write_json
+
+    # LLM: 仅在alice的可见镜像路径注入写失败，保留宿主权威文件写入成功以验证写后回执。
+    # 函数用途: 模拟宿主authority已落盘而用户镜像写入失败的确定性故障。
+    def fail_mirror(store, parts, value):
+        if tuple(parts) == ('owners', 'local', 'alice', 'config', 'governance_policy.json'):
+            raise HostAPIError('STORE_UNAVAILABLE', 503)
+        return original_write(store, parts, value)
+
+    monkeypatch.setattr(LocalUserStore, 'write_json', fail_mirror)
+    for role, ag, params in (
+        ('admin', admin, {'action': 'admin_set_user', 'target_owner_id': 'alice', 'trigger_percent': 67}),
+        ('self', user, {'action': 'set_user', 'trigger_percent': 66}),
+    ):
+        res = execute_registry_test_call(ag.tools, 'compact_policy', params, call_id=f'r3-mirror-{role}')
+        assert not res.ok
+        assert res.error_code == 'GOVERNANCE_MIRROR_FAILED'
+        assert res.effect_outcome == 'failed' and res.effect_outcome != 'not_started'
 
 
 # LLM: 在临时原Store中构造已存在的错归属记录，查询必须在调用策略解析器前失败关闭，不回落owner默认。

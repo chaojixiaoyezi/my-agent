@@ -78,15 +78,17 @@ def _status_payload(agent: Any, thread: Any | None, *, admin: bool) -> dict[str,
     return payload
 
 
-# LLM: 统一构造结构化失败回执，保持effect_outcome="not_started"，不泄漏内部异常堆栈。
-# 函数用途: 返回compact_policy工具的标准错误结果。
-def _failure(code: str, message: str) -> ToolHandlerOutcome:
+# LLM: 统一构造结构化失败回执；GOVERNANCE_MIRROR_FAILED代表权威已提交但镜像失败，必须标为failed而非not_started，其余写前拒绝保持not_started。
+# 函数用途: 返回compact_policy工具的标准错误结果，区分写前拒绝与写后部分失败。
+def _failure(code: str, message: str, *, effect_outcome: str | None = None) -> ToolHandlerOutcome:
+    resolved_outcome = effect_outcome or ("failed" if code == "GOVERNANCE_MIRROR_FAILED" else "not_started")
     return ToolHandlerOutcome(
         "compact_policy",
         False,
         json.dumps({"error": message, "error_code": code}, ensure_ascii=False),
         error_code=code,
-        effect_outcome="not_started",
+        reported_error_code=code,
+        effect_outcome=resolved_outcome,
     )
 
 
@@ -102,16 +104,24 @@ def _parse_percent(raw: Any) -> int | None:
     return None
 
 
-# LLM: 本地受管用户仅在管理员未锁定时可改自身default_trigger_percent，复用_GovernanceControl锁与镜像写口。
+# LLM: 本地受管用户仅在管理员未锁定时可改自身default_trigger_percent，复用_GovernanceControl锁、CAS与镜像写口。
 # 函数用途: 更新当前本地受管用户自己的默认压缩比例。
-def _update_self_user_policy(agent: Any, thread: Any | None, value: int | None) -> ToolHandlerOutcome:
+def _update_self_user_policy(
+    agent: Any,
+    thread: Any | None,
+    value: int | None,
+    expected_revision: Any = None,
+) -> ToolHandlerOutcome:
     from ..user_space.managed_user_governance import (
-         _GovernanceControl,
+        _GovernanceControl,
         _policy_patch,
+        _require_revision,
         now_utc,
         resolve_managed_local_user,
     )
 
+    if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
+        return _failure("TOOL_INVALID_ARGUMENTS", "expected_revision 必须是非负整数。")
     if resolve_thread_compact_policy(agent, thread, use_frozen=False)["force_locked"]:
         return _failure("COMPACT_POLICY_LOCKED_BY_ADMIN", "管理员已开启强制压缩阈值锁定，无法修改个人默认压缩比例。")
     home = getattr(agent, "home_paths", None)
@@ -124,19 +134,25 @@ def _update_self_user_policy(agent: Any, thread: Any | None, value: int | None) 
             current = control.policy()
             if current.get("user_compact_policy", {}).get("force_locked"):
                 return _failure("COMPACT_POLICY_LOCKED_BY_ADMIN", "当前账号压缩策略已被管理员锁定。")
+            _require_revision(expected_revision, current["revision"])
             updated = _policy_patch(current, {"user_compact_policy": {"default_trigger_percent": value}})
             updated.update(revision=current["revision"] + 1, updated_at=now_utc(), updated_by=home.owner_id)
             control.write(("governance_policy.json",), updated, ("config", "governance_policy.json"))
     except HostAPIError as exc:
         return _failure(exc.code, str(exc))
     payload = _status_payload(agent, thread, admin=False)
+    payload["revision"] = updated["revision"]
     return ToolHandlerOutcome("compact_policy", True, json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: 管理员动作只对is_complete_local_admin_owner开放，复用ManagedUserGovernanceService的全局锁、CAS与批量治理。
+# LLM: 管理员动作只对is_complete_local_admin_owner开放，复用ManagedUserGovernanceService的全局锁、CAS与批量治理；
+#   批量修改严禁静默忽略expected_revision，部分提交或镜像失败如实保留committed副作用与精确错误码。
 # 函数用途: 执行管理员全局强制开关、全局默认比例或受管用户单改/批量改。
 def _execute_admin_action(agent: Any, thread: Any | None, action: str, params: dict[str, Any]) -> ToolHandlerOutcome:
-    from ..user_space.managed_user_governance import ManagedUserGovernanceService
+    from ..user_space.managed_user_governance import (
+        ManagedUserGovernanceService,
+        resolve_managed_local_user,
+    )
     from ..user_space.owner_resolver import OwnerIdentity
 
     home = getattr(agent, "home_paths", None)
@@ -144,7 +160,7 @@ def _execute_admin_action(agent: Any, thread: Any | None, action: str, params: d
         return _failure("TOOL_PERMISSION_DENIED", "仅本机管理员可执行全局或跨用户压缩策略治理。")
     service = ManagedUserGovernanceService(home.root, actor_owner=OwnerIdentity.local_main())
     expected_revision = params.get("expected_revision")
-    if expected_revision is not None and type(expected_revision) is not int:
+    if expected_revision is not None and (type(expected_revision) is not int or expected_revision < 0):
         return _failure("TOOL_INVALID_ARGUMENTS", "expected_revision 必须是非负整数。")
     try:
         if action == "admin_force":
@@ -189,11 +205,50 @@ def _execute_admin_action(agent: Any, thread: Any | None, action: str, params: d
                 patch["force_locked"] = params["force_locked"]
             all_users = bool(params.get("all_users"))
             user_ids = params.get("user_ids")
+            raw_revisions = params.get("expected_revisions")
+            if expected_revision is not None and raw_revisions is not None:
+                return _failure("TOOL_INVALID_ARGUMENTS", "expected_revision 与 expected_revisions 不能同时提供。")
+            revisions_map: dict[str, int] | None = None
+            if raw_revisions is not None:
+                if not isinstance(raw_revisions, dict) or not raw_revisions:
+                    return _failure("TOOL_INVALID_ARGUMENTS", "expected_revisions 必须是非空用户修订号字典。")
+                revisions_map = {}
+                for target_key, rev_val in raw_revisions.items():
+                    if type(rev_val) is not int or rev_val < 0:
+                        return _failure("TOOL_INVALID_ARGUMENTS", "expected_revisions 中的修订号必须是非负整数。")
+                    uid, _ident, _ohome = resolve_managed_local_user(home.root, str(target_key))
+                    revisions_map[uid] = rev_val
+            elif expected_revision is not None:
+                if not all_users and isinstance(user_ids, list) and len(user_ids) == 1 and isinstance(user_ids[0], str):
+                    uid, _ident, _ohome = resolve_managed_local_user(home.root, user_ids[0])
+                    revisions_map = {uid: expected_revision}
+                else:
+                    return _failure(
+                        "TOOL_INVALID_ARGUMENTS",
+                        "多目标或全量 admin_batch_users 不支持单一 expected_revision，请使用 expected_revisions 映射或 admin_set_user。",
+                    )
             applied = service.batch_set_users_compact_policy(
                 patch,
                 user_ids=user_ids if isinstance(user_ids, list) else None,
                 scope="all_managed_users" if all_users else None,
+                expected_revisions=revisions_map,
             )
+            failed_items = [item for item in applied.get("items", []) if item.get("status") != "applied"]
+            if failed_items:
+                failed_code = str(failed_items[0].get("error_code") or "TOOL_EXECUTION_ERROR")
+                batch_effect = (
+                    "failed"
+                    if applied.get("partial") or failed_code == "GOVERNANCE_MIRROR_FAILED"
+                    else "not_started"
+                )
+                return ToolHandlerOutcome(
+                    "compact_policy",
+                    False,
+                    json.dumps(applied, ensure_ascii=False),
+                    error_code=failed_code,
+                    reported_error_code=failed_code,
+                    effect_outcome=batch_effect,
+                )
             return ToolHandlerOutcome("compact_policy", True, json.dumps(applied, ensure_ascii=False))
     except (HostAPIError, ValueError) as exc:
         code = getattr(exc, "code", "TOOL_INVALID_ARGUMENTS")
@@ -266,7 +321,12 @@ class CompactPolicyTool(BaseTool):
                 "expected_revision": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "可选 CAS 修订号。",
+                    "description": "单目标更新时可选 CAS 修订号。",
+                },
+                "expected_revisions": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                    "description": "action=admin_batch_users 时可选的逐用户 CAS 修订号字典（键为用户 ID，值为非负整数）。",
                 },
             },
             "required": ["action"],
@@ -353,7 +413,7 @@ class CompactPolicyTool(BaseTool):
             pct = None if action == "reset_user" else _parse_percent(params.get("trigger_percent"))
             if action == "set_user" and pct is None:
                 return _failure("TOOL_INVALID_ARGUMENTS", "trigger_percent 必须是 50 到 95 之间的整数。")
-            return _update_self_user_policy(self._agent, thread, pct)
+            return _update_self_user_policy(self._agent, thread, pct, params.get("expected_revision"))
         if action in {"admin_force", "admin_set_user", "admin_reset_user", "admin_batch_users"}:
             return _execute_admin_action(self._agent, thread, action, params)
         return _failure("TOOL_INVALID_ARGUMENTS", f"不支持的 compact_policy action：{action}")
