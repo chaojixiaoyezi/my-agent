@@ -214,9 +214,16 @@ def _execute_admin_action(agent: Any, thread: Any | None, action: str, params: d
                     return _failure("TOOL_INVALID_ARGUMENTS", "expected_revisions 必须是非空用户修订号字典。")
                 revisions_map = {}
                 for target_key, rev_val in raw_revisions.items():
+                    if type(target_key) is not str or not target_key.strip():
+                        return _failure("TOOL_INVALID_ARGUMENTS", "expected_revisions 的键必须是非空用户标识字符串。")
                     if type(rev_val) is not int or rev_val < 0:
                         return _failure("TOOL_INVALID_ARGUMENTS", "expected_revisions 中的修订号必须是非负整数。")
-                    uid, _ident, _ohome = resolve_managed_local_user(home.root, str(target_key))
+                    uid, _ident, _ohome = resolve_managed_local_user(home.root, target_key)
+                    if uid in revisions_map:
+                        return _failure(
+                            "TOOL_INVALID_ARGUMENTS",
+                            f"expected_revisions 包含指向同一受管用户（{uid}）的重复或别名键。",
+                        )
                     revisions_map[uid] = rev_val
             elif expected_revision is not None:
                 if not all_users and isinstance(user_ids, list) and len(user_ids) == 1 and isinstance(user_ids[0], str):

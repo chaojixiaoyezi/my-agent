@@ -455,6 +455,28 @@ def test_compact_policy_batch_cas_and_mirror_failure_outcome(make_agent, monkeyp
     assert not stale.ok and stale.error_code == 'REVISION_CONFLICT'
     assert service.get_user_compact_policy('alice') == prior
 
+    for idx, alias_revs in enumerate(
+        (
+            {'alice': 0, 'local/alice': 1},
+            {'local/alice': 1, 'alice': 0},
+            {'alice': 1, 'local/alice': 1},
+        )
+    ):
+        dup_alias = execute_registry_test_call(
+            admin.tools,
+            'compact_policy',
+            {
+                'action': 'admin_batch_users',
+                'user_ids': ['alice'],
+                'trigger_percent': 69,
+                'expected_revisions': alias_revs,
+            },
+            call_id=f'r4-batch-alias-{idx}',
+        )
+        assert not dup_alias.ok and dup_alias.error_code == 'TOOL_INVALID_ARGUMENTS'
+        assert dup_alias.effect_outcome == 'not_started'
+        assert service.get_user_compact_policy('alice') == prior
+
     user_stale = execute_registry_test_call(
         user.tools,
         'compact_policy',
