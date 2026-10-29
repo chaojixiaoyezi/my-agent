@@ -23,15 +23,9 @@ from ..agent.memory_api import (
     apply_agents_cleanup,
     plan_agents_cleanup,
 )
+from ..agent.user_space.home_doctor import DoctorService
 from ..agent.user_space.owner_access import is_complete_local_admin_owner
 from .common import make_agent
-from .memory_commands.memory_doctor_cmd import (
-    _build_archive_doctor,
-    _build_routing_doctor,
-    _config_warnings,
-    _memory_config_payload,
-    _resolve_index_path,
-)
 
 _BLOCKED_STATUSES = frozenset({"blocked_missing_evidence", "blocked_conflict"})
 
@@ -87,7 +81,11 @@ def cmd_memory_retention_apply(args: Any) -> int:
 # LLM: doctor 只聚合各正式 Service 的只读健康报告，不自动修复或写 marker。
 # 函数用途: 诊断 Memory v2 权威文件、后台状态、迁移和保留期。
 def cmd_memory_v2_doctor(args: Any) -> int:
-    return _run_admin_command(args, _doctor_payload)
+    if getattr(args, "compat_view", "") == "v1":
+        payload = DoctorService(make_agent(args)).report(args, scope="runtime", legacy=True)
+        _print_memory_doctor_report(payload, json_output=bool(getattr(args, "json", False)))
+        return 0
+    return _run_admin_command(args, _doctor_projection)
 
 
 # LLM: 迁移默认 plan；apply 标志只切换同一 MigrationService 的显式执行方法。
@@ -391,34 +389,6 @@ def _default_migration_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime())
 
 
-# LLM: doctor 只组合无正文健康摘要；候选正文、对话正文和工具大输出都不能出现在报告中。
-# 函数用途: 汇总 Memory v2 正式组件的只读诊断。
-def _doctor_payload(agent: Any, args: Any) -> dict[str, object]:
-    index_path = _resolve_index_path(
-        agent.root,
-        getattr(args, "index", None),
-        home_paths=getattr(agent, "home_paths", None),
-    )
-    routing = _build_routing_doctor(agent.root, index_path)
-    migration = _migration_service(agent).plan()
-    retention = _retention_service(agent).plan()
-    ok = not routing["load_error"] and migration.ok and retention.ok
-    return {
-        "ok": ok,
-        "command": "memory doctor",
-        "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
-        "workspace_root": str(agent.root),
-        "config": _memory_config_payload(agent.config),
-        "config_warnings": _config_warnings(agent.config),
-        "candidate": agent.memory_candidates.stats(),
-        "curator": agent.memory_curator.status(),
-        "routing": routing,
-        "archive": _build_archive_doctor(agent.root, agent.config),
-        "migration": migration.to_dict(),
-        "retention": retention.to_dict(),
-    }
-
-
 # LLM: status 只读预览：向量数量、元数据身份、原因码与可重建的 active 记忆数，不触发嵌入或清库。
 # 函数用途: 构造记忆向量库状态预览报告。
 def _vectors_status_payload(agent: Any, args: Any) -> dict[str, object]:
@@ -513,3 +483,71 @@ __all__ = [
     "cmd_memory_vectors_rebuild",
     "cmd_memory_vectors_status",
 ]
+
+
+# LLM: 薄CLI适配只注入原服务工厂并选择scope，诊断计算唯一归Home DoctorService。
+# 函数用途: 为规范CLI生成诊断投影，不重复聚合。
+def _doctor_projection(agent, args):
+    return DoctorService(agent, migration_factory=_migration_service, retention_factory=_retention_service).report(args, scope=getattr(args, "scope", "memory"))
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _print_memory_doctor_report 提供对应的诊断计算或显示字段。
+def _print_memory_doctor_report(payload: dict[str, Any], *, json_output: bool) -> None:
+
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return
+
+    print("MY-AGENT MEMORY DOCTOR")
+    print(f"ok={payload['ok']}")
+    print(f"workspace={payload['workspace_root']}")
+    _print_home_report(payload["home"])
+    _print_home_doctor_summary(payload["home_doctor"])
+    print("Config")
+    for key, value in payload["config"].items():
+        print(f"- {key}={value}")
+    print(f"warnings={len(payload['warnings'])}")
+    for warning in payload["warnings"]:
+        field_name = warning.get("field_name", "warning")
+        reason = warning.get("reason", warning.get("message", ""))
+        default = warning.get("default_value", "-")
+        print(f"- {field_name}: {reason} default={default}")
+    routing = payload["routing"]
+    print("Routing")
+    print(f"- index={routing['index']['path']} exists={routing['index']['exists']}")
+    print(f"- routes={routing['route_count']} validation_warnings={len(routing['validation_warnings'])}")
+    if routing["load_error"]:
+        print(f"- load_error={routing['load_error']}")
+    for item in routing["validation_warnings"]:
+        print(f"- warning: {item}")
+    archive = payload["archive"]
+    print("Archive")
+    print(
+        "- retention="
+        + json.dumps(archive["retention"], ensure_ascii=False, sort_keys=True)
+    )
+    for label in ("hook", "raw"):
+        state = archive[label]
+        recent = state["recent_files"][0]["name"] if state["recent_files"] else "-"
+        print(
+            f"- {label}: dir={state['dir']} exists={state['exists']} "
+            f"files={state['file_count']} recent={recent}"
+        )
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _print_home_report 提供对应的诊断计算或显示字段。
+def _print_home_report(home: dict[str, Any]) -> None:
+    print("Home")
+    print(f"- root={home['root']}")
+    print(f"- daily_files={home['counts']['daily_files']} task_workspaces={home['counts']['task_workspaces']}")
+    for name, state in home["directories"].items():
+        print(f"- {name}: exists={state['exists']}")
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _print_home_doctor_summary 提供对应的诊断计算或显示字段。
+def _print_home_doctor_summary(report: dict[str, Any]) -> None:
+    print("Home Doctor")
+    print(
+        f"- dangling_refs={report['indexes']['dangling_count']} "
+        f"retention_candidates={report['retention']['planned_count']}"
+    )

@@ -1,3 +1,5 @@
+# LLM: 使用隔离夹具保留原业务断言；生产服务和真实用户链路另行验收。
+# 模块用途: 验证维护锁、适配器恢复与规范监督进程入口。
 """维护锁、适配器恢复与服务安装；所有写入隔离在 tmp_path，不操作真实服务。"""
 import argparse
 import json
@@ -268,8 +270,8 @@ def test_cli_commands_roundtrip(case, monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(cli.subprocess, "run", Mock(return_value=SimpleNamespace(returncode=0, stderr="", stdout="")))
     commands = [["maintenance-lock", "--reason", "upgrade", "--ttl", "30"], ["maintenance-unlock"],
-                ["supervisor-install-service", "--unit", "test.service", "--no-start"],
-                ["supervisor-uninstall-service", "--unit", "test.service"]]
+                ["supervisor", "install-service", "--unit", "test.service", "--no-start"],
+                ["supervisor", "uninstall-service", "--unit", "test.service"]]
     for command in commands:
         args = parser.parse_args(["gateway", *command])
         assert args.func(args) == 0

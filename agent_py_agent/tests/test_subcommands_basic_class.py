@@ -1,3 +1,5 @@
+# LLM: 使用隔离解析器验证原参数，不执行真实业务handler。
+# 模块用途: 验证基础命令与规范Doctor登记。
 from __future__ import annotations
 
 """LLM: tests for subcommands_basic module.
@@ -177,6 +179,8 @@ class TestRememberParser:
         assert args.kind == "project"
 
 
+# LLM: 保留原参数断言，只将已退休的平铺Doctor期望迁到规范入口。
+# 类用途: 核对记忆子命令及规范Doctor登记。
 class TestMemorySubcommands:
     """测试 memory 相关子命令解析器。"""
 
@@ -193,9 +197,13 @@ class TestMemorySubcommands:
         """测试 memory-route 解析器存在。"""
         assert "memory-route" in parser_with_memory._subparsers._actions[1].choices
 
+    # LLM: 旧入口只能被输入解码，不能继续作为实际注册项存在。
+    # 函数用途: 验证规范Doctor可解析且平铺注册消失。
     def test_memory_doctor_parser_exists(self, parser_with_memory: argparse.ArgumentParser) -> None:
-        """测试 memory-doctor 解析器存在。"""
-        assert "memory-doctor" in parser_with_memory._subparsers._actions[1].choices
+        """旧平铺注册必须删除，规范memory doctor仍可解析。"""
+        from agent_py_agent.cli.parser import build_parser
+        assert "memory-doctor" not in parser_with_memory._subparsers._actions[1].choices
+        assert build_parser().parse_args(["memory", "doctor"]).func.__name__ == "cmd_memory_v2_doctor"
 
     def test_memory_archive_list_parser_exists(self, parser_with_memory: argparse.ArgumentParser) -> None:
         """测试 memory-archive-list 解析器存在。"""

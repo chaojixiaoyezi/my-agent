@@ -49,7 +49,7 @@ def _worker_local_path(ctx: Any) -> tuple[str, bool, TuiTurnSummary]:
             request_id=ctx.job.request_id,
             source="chat",
             resume_context=ctx.job.resume_context,
-            recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+            recovery_next_actions=["如需恢复本轮 chat，先用 memory archive resume 搜索用户消息或时间范围。"],
             on_chunk=ctx.turn_adapter,
             task_attributes=attrs,
         )

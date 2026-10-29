@@ -11,6 +11,7 @@ from ...agent.command_catalog import (
     COMMAND_CATALOG,
     COMMAND_INDEX,
     CommandAccessContext,
+    decode_slash_v1_input,
     render_command_help,
     system_slash_command_name,
     unavailable_command_message,
@@ -44,6 +45,9 @@ def handle_common_slash_command(
     ctx: SlashCommandContext,
     include_plain_help: bool = False,
 ) -> bool:
+    if user.strip().casefold() == "logout":
+        ctx.print_line(unavailable_command_message("logout"))
+        return True
     handlers: tuple[SlashHandler, ...] = (
         _handle_help_command,
         _handle_sessions_command,
@@ -561,7 +565,7 @@ def _handle_unsupported_slash_command(
 # 函数用途: 识别退出当前聊天界面的显式输入，不停止 Gateway 或其它会话。
 def is_exit_command(user: str) -> bool:
     spec = COMMAND_INDEX["exit"]
-    return user.lower() in {"exit", "logout", "退出", *("/" + name for name in (spec.name, *spec.aliases))}
+    return decode_slash_v1_input(user).lower() in {"exit", "退出", "/" + spec.name}
 
 
 # LLM: `/expand` 的帮助目录、plain TUI 与 rich TUI 必须共享这一解析器；显式 last

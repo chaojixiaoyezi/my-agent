@@ -1,3 +1,5 @@
+# LLM: 使用隔离夹具保留原业务断言；生产服务和真实用户链路另行验收。
+# 模块用途: 验证记忆命令与规范Doctor的当前读取点。
 """memory_commands CLI 命令测试。
 
 测试 memory route/doctor 命令及其辅助函数。
@@ -116,52 +118,34 @@ class TestCmdMemoryRoute:
             assert result == 0
 
 
+# LLM: 原退出码和JSON/文本合同改经真实版本化CLI边界验证，不恢复已删除的重复handler。
+# 类用途: 保留历史doctor输出性质，并核对它进入唯一诊断服务。
 class TestCmdMemoryDoctor:
-    """测试 cmd_memory_doctor 命令。"""
+    # LLM: 配置和owner数据全部位于测试临时目录，模型为echo，不访问真实home或网络。
+    # 函数用途: 建立隔离的历史CLI输入样本。
+    @pytest.fixture
+    def doctor_config(self, tmp_path):
+        path = tmp_path / "config.yaml"
+        path.write_text(f'model_backend: "echo"\nmy_agent_home: "{tmp_path / "home"}"\nworkspace_root: ""\n')
+        return path
 
-    def test_memory_doctor_basic(self, tmp_path: Path):
-        """正常执行 memory doctor 体检。"""
-        from agent_py_agent.cli.memory_commands import cmd_memory_doctor
+    # LLM: 测试仍要求历史固定0退出码，不能为新服务改成接受任意返回值。
+    # 函数用途: 核对真实旧argv的文本投影。
+    def test_memory_doctor_basic(self, doctor_config, capsys):
+        from agent_py_agent.cli.parser import build_parser
+        args = build_parser().parse_args(["--config", str(doctor_config), "memory-doctor"])
+        assert args.func(args) == 0
+        assert "MY-AGENT MEMORY DOCTOR" in capsys.readouterr().out
 
-        args = MagicMock()
-        args.config = str(tmp_path / "config.yaml")
-        args.index = None
-        args.json = False
-
-        mock_agent = MagicMock()
-        mock_agent.root = tmp_path
-        mock_agent.config = MagicMock()
-        mock_agent.config.memory_archive_level = 3
-        mock_agent.config.memory_hook_enabled = True
-        mock_agent.config.memory_rule_routing_mode = "soft"
-        mock_agent.config.memory_rule_auto_read_limit = 3
-        mock_agent.config.memory_config_warnings = []
-
-        with patch("agent_py_agent.cli.memory_commands.make_agent", return_value=mock_agent):
-            result = cmd_memory_doctor(args)
-            assert result == 0
-
-    def test_memory_doctor_json_output(self, tmp_path: Path):
-        """使用 --json 输出完整 JSON。"""
-        from agent_py_agent.cli.memory_commands import cmd_memory_doctor
-
-        args = MagicMock()
-        args.config = str(tmp_path / "config.yaml")
-        args.index = None
-        args.json = True
-
-        mock_agent = MagicMock()
-        mock_agent.root = tmp_path
-        mock_agent.config = MagicMock()
-        mock_agent.config.memory_archive_level = 3
-        mock_agent.config.memory_hook_enabled = True
-        mock_agent.config.memory_rule_routing_mode = "soft"
-        mock_agent.config.memory_rule_auto_read_limit = 3
-        mock_agent.config.memory_config_warnings = []
-
-        with patch("agent_py_agent.cli.memory_commands.make_agent", return_value=mock_agent):
-            result = cmd_memory_doctor(args)
-            assert result == 0
+    # LLM: JSON字段保持原runtime范围，不能因合并服务偷换为memory维护结果。
+    # 函数用途: 核对真实旧argv的JSON合同及退出码。
+    def test_memory_doctor_json_output(self, doctor_config, capsys):
+        from agent_py_agent.cli.parser import build_parser
+        args = build_parser().parse_args(["--config", str(doctor_config), "memory-doctor", "--json"])
+        assert args.func(args) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert {"home", "home_doctor", "warnings", "routing", "archive"} <= set(payload)
+        assert "candidate" not in payload
 
 
 class TestResolveIndexPath:
@@ -250,12 +234,16 @@ class TestResolveAutoReadLimit:
         assert result == 5
 
 
+# LLM: 只迁原测试读取点，不删测或弱化断言。
+# 类用途: 保留索引缺失和有效路由的原合同。
 class TestBuildRoutingDoctor:
     """测试 _build_routing_doctor 辅助函数。"""
 
+    # LLM: 使用原临时目录和失败判据，不把缺索引当健康零路由。
+    # 函数用途: 验证规范服务仍返回索引load_error。
     def test_build_routing_doctor_index_not_exists(self, tmp_path: Path):
         """测试索引文件不存在的场景。"""
-        from agent_py_agent.cli.memory_commands import _build_routing_doctor
+        from agent_py_agent.agent.user_space.home_doctor import _build_routing_doctor
 
         index_path = tmp_path / "nonexistent" / "INDEX.md"
         result = _build_routing_doctor(tmp_path, index_path)
@@ -263,9 +251,11 @@ class TestBuildRoutingDoctor:
         assert result["load_error"] != ""
         assert result["index"]["exists"] is False
 
+    # LLM: 保留原有效路由字段断言，仅替换规范服务导入。
+    # 函数用途: 验证有效索引的路由和校验结果。
     def test_build_routing_doctor_valid_index(self, tmp_path: Path):
         """测试有效索引文件的加载。"""
-        from agent_py_agent.cli.memory_commands import _build_routing_doctor
+        from agent_py_agent.agent.user_space.home_doctor import _build_routing_doctor
 
         # 创建临时索引文件
         index_dir = tmp_path / "memory" / "routing"

@@ -4486,3 +4486,23 @@ ERROR_CONTRACTS.update({
         recovery_hint="底层本地用户或治理存储暂不可用；先核对原操作是否已生效，未生效时可稍后重试。",
     ),
 })
+
+# LLM: e905跨域合同仅追加分类，不自动重试、迁移或授予确认权；真实触发点由各所属服务接线。
+# 配置用途: 统一新代存储、工具模式组合及候选待履约隔离的恢复口径。
+ERROR_CONTRACTS.update({
+    "STORE_SCHEMA_NEWER": ErrorContract(
+        code="STORE_SCHEMA_NEWER", category="state", retryable=False,
+        recommended_action=RecoveryAction.REPORT_BLOCKER.value,
+        recovery_hint="权威存储代次高于当前读写者支持范围；停止写入并由原部署者升级兼容版本，不降级、覆写新字段或把未知当空库。",
+    ),
+    "TOOL_SCHEMA_INVALID_MODE_COMBINATION": ErrorContract(
+        code="TOOL_SCHEMA_INVALID_MODE_COMBINATION", category="contract", retryable=False,
+        recommended_action=RecoveryAction.CHANGE_STRATEGY.value,
+        recovery_hint="工具模式与字段组合不符合当前schema；读取准确模式约束后修正参数，不删除有效校验、猜测旧模式或原样重试。",
+    ),
+    "MEMORY_COMMIT_OBLIGATION_QUARANTINED": ErrorContract(
+        code="MEMORY_COMMIT_OBLIGATION_QUARANTINED", category="state", retryable=False,
+        recommended_action=RecoveryAction.MANUAL_REVIEW.value,
+        recovery_hint="原记忆候选的待履约责任已隔离；保留原候选、证据pin和提交回执，沿原责任核对，不清理责任、不补造成功或重放未知晋升。",
+    ),
+})

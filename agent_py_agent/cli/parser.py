@@ -18,6 +18,7 @@ import sys
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from .argv_compat_v1 import CanonicalArgumentParser, CanonicalCommandRegistrar
 from .bootstrap import configure_stdio, default_config_path
 from .chat_command_parser import add_chat_subcommands, add_workspace_arguments
 
@@ -33,7 +34,8 @@ if TYPE_CHECKING:
 # 函数用途: 构建包含全部内置命令和扩展命令的解析器，供管理命令、测试和帮助页使用。
 def build_parser(extension_registry: ExtensionRegistry | None = None) -> argparse.ArgumentParser:
     parser = _build_root_parser()
-    subparsers = parser.add_subparsers(dest="command")
+    parser.add_subparsers(dest="command")
+    subparsers = CanonicalCommandRegistrar(parser)
 
     from .admin_identity_commands import add_admin_identity_subcommands
     from .background_main_agent import add_background_main_agent_subcommands
@@ -89,6 +91,11 @@ def build_parser(extension_registry: ExtensionRegistry | None = None) -> argpars
     if extension_registry is not None:
         extension_registry.register_cli_commands(subparsers)
 
+    memory = subparsers.choices["memory"]
+    memory_actions = next(a for a in memory._actions if isinstance(a, argparse._SubParsersAction))
+    doctor = memory_actions.choices["doctor"]
+    doctor.add_argument("--compat-view", choices=["v1"], default="", help=argparse.SUPPRESS)
+    doctor.add_argument("--scope", choices=["runtime", "memory", "all"], default="memory")
     return parser
 
 
@@ -105,7 +112,7 @@ def build_interactive_parser() -> argparse.ArgumentParser:
 # LLM: 顶层参数和显式目录由完整/轻量解析器复用；不得在注册期导入Agent或初始化状态。
 # 函数用途: 创建两种解析器共用的顶层参数，保证配置路径和普通终端开关语义一致。
 def _build_root_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = CanonicalArgumentParser(
         prog="my-agent",
         description="Simple Python3 CLI Agent with memory, dynamic prompt and subagents.",
     )
@@ -120,6 +127,7 @@ def _build_root_parser() -> argparse.ArgumentParser:
         help="使用普通终端聊天模式，不进入应用内滚动历史界面",
     )
     add_workspace_arguments(parser)
+    parser.legacy_input_boundary = True
     return parser
 
 

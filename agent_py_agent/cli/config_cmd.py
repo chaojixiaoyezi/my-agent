@@ -1,4 +1,6 @@
 
+# LLM: CLI保留原五键白名单，读写只委托typed参数服务与原全局写门，敏感值不明文回显。
+# 模块用途: 提供规范config命令的参数登记及安全读写。
 from __future__ import annotations
 
 """config-set / config-get:让普通用户或 agent 用一条命令可靠地设/读配置项(尤其飞书通道凭证),
@@ -13,8 +15,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from agent_py_agent.agent.settings.config_io import load_simple_yaml, set_simple_yaml_value
-from agent_py_agent.agent.settings.user_config_capability import mask_value
+from agent_py_agent.agent.settings import load_config
+from agent_py_agent.agent.settings.parameter_changes import ChangeOrigin, WritePaths, set_parameter
+from agent_py_agent.agent.settings.user_config_capability import (
+    mask_value,
+    packaged_config_path,
+    read_config_fact,
+)
 
 # 可自助设置的字段白名单:聚焦飞书通道接入。其他字段(尤其 path/access 等安全项)请手动编辑配置。
 _SETTABLE_KEYS = (
@@ -36,6 +43,8 @@ def add_config_subcommands(sub: argparse._SubParsersAction) -> None:
     getter.set_defaults(func=cmd_config_get)
 
 
+# LLM: CLI保留原五项白名单，写入只经现有typed参数服务及其全局写门、正式回读和脱敏账本，不授予Slash身份。
+# 函数用途: 校验允许的字段后委托唯一参数写服务，不再直接修改YAML。
 def cmd_config_set(args) -> int:
     key = str(args.key)
     if key not in _SETTABLE_KEYS:
@@ -46,27 +55,29 @@ def cmd_config_set(args) -> int:
     if not path.exists():
         print(f"❌ 配置文件不存在: {path}")
         return 1
-    try:
-        old, _new_line = set_simple_yaml_value(path, key, str(args.value))
-    except ValueError as exc:
-        print(f"❌ {exc}")
+    report = set_parameter(key, args.value, paths=WritePaths(user_path=path), origin=ChangeOrigin("cli"))
+    if not report.get("ok"):
+        print(f"❌ {report.get('code', 'CONFIG_WRITE_FAILED')}")
         return 1
-    before = mask_value(key, (old or "").strip('"')) if old is not None else "(新增)"
+    old = report.get("previous")
+    before = str(old) if old is not None else "(新增)"
     print(f"✅ 已设置 {key}: {before} → {mask_value(key, str(args.value))}\n   写入 {path}")
     return 0
 
 
+# LLM: 读取统一参数事实中的生效值和来源，服务端已脱敏；不再维护raw YAML优先级分支。
+# 函数用途: 从当前显式配置路径读取正式配置事实，缺失保持原0退出码。
 def cmd_config_get(args) -> int:
     path = Path(args.config)
     if not path.exists():
         print(f"❌ 配置文件不存在: {path}")
         return 1
-    data = load_simple_yaml(path)
     key = str(args.key)
-    if key not in data:
+    fact = read_config_fact(key, user_path=path, default_path=packaged_config_path(), config=load_config(path))
+    if fact["source"] == "missing":
         print(f"(未设置) {key}")
         return 0
-    print(f"{key}: {mask_value(key, data[key])}")  # 传原始值，映射和列表才能按结构脱敏
+    print(f"{key}: {fact['effective']}")
     return 0
 
 

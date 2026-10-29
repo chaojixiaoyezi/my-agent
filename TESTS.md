@@ -1,3 +1,29 @@
+## 2026-10-29 e905 sol-9：规范CLI、统一诊断与删除门
+
+来源：07 的 `task-e905-sol-9.md` v2（291行）及总规划4.2；工作树 `/tmp/wt-e905-sol-9`，分支 `opt-e905/sol-9`，真实基线 `4bea324e3209ef9b9ecc39b6c2378bacc078b374`。只改本分支；不推送、部署、修改真实owner数据或安装系统服务。
+
+- 内置70根/144旧路径接入唯一24根规范树，根输入纯解码；保留原扩展接口但拒绝占用规范根的别名。独审发现的分组帮助、动态子命令和别名污染4个反例已先跑红再修复；不通过删除有效扩展制造24根。
+- 真实守护入口从指定基线提取并冻结参数、默认值和handler，不捏造不存在的runtime模块。DoctorService统一在 `agent/user_space/home_doctor.py`，删除两份CLI旧聚合模块；默认memory保持原字段，runtime隔离，all的公共投影只输出一次。平铺v1输入仍固定退出0，规范诊断按原健康条件返回0/1。
+- `/logout`与裸logout歧义拒绝；明确`/exit`和v1输入`/quit`保留，`/admin logout`管理员撤销及MCP标准`list_tools`原测试保留。
+- 配置CLI保留原五键白名单，读写委托现有typed参数服务；统一追加三条跨域错误分类，不代替其他席位触发点接线。
+- 删除门保留全部383项、185项本任务配额、跨线实现责任与60项 `deferred_dynamic_check`。未知领域语义明确欠账，不把单席结构通过外推全仓完成。请求ID中的`subagent-run:`不是CLI调用，只按准确AST字段上下文保留。
+- Probe只测真实进程内parser构建/显式配置加载，保存样本及源码/输入摘要；不声称端到端、服务启动或跨机器性能。历史手册移到 `docs/history/CLI_REFERENCE_V1.md`，新手册只展示当前规范树。
+
+复现（必须从工作树根，用本树本地venv补齐测试依赖，不改全局环境）：
+```bash
+PATH="$PWD/.venv/bin:$PATH" python3 -m pytest agent_py_agent/tests -k "cli or command_catalog or control_commands or doctor" -q --tb=short
+PATH="$PWD/.venv/bin:$PATH" python3 -m pytest agent_py_agent/tests/test_opt_cli_contracts.py agent_py_agent/tests/test_opt_cross_domain_faults.py agent_py_agent/tests/test_performance_review_probe_contract.py agent_py_agent/tests/test_admin_identity_gateway.py agent_py_agent/tests/test_computer_use_observation_tools.py -q --tb=short
+ruff check agent_py_agent scripts
+python3 scripts/check_import_boundaries.py --json
+python3 scripts/verify_optimization_removal.py --worker sol-9 --json
+python3 scripts/verify_optimization_removal.py --worker all --json
+python3 scripts/performance_review_probe.py --iterations 3 --warmup 1 --json
+python3 scripts/benchmark_config_policy.py --config <隔离配置路径> --iterations 3 --warmup 1 --json
+git diff --check
+```
+
+宽`-k`同时命中`client`相关测试。已在准确基线源码归档上复现同名5个浏览器/MCP/插件进程失败，未把原因推断为沙箱、未skip/xfail或降低断言；最终当前版本结果与未验证项见本席DONE交接报告。二次Astra独审指出报告硬链接覆盖与可变报告引用风险，分别改为临时文件加`os.replace`和公开报告独立快照；原子替换、目录符号链接拒绝、修改报告后再读的3项聚焦回归通过。真实硬链接集成用例在构造fixture的`os.link`步骤收到`EPERM`，系统临时目录与本工作树缓存内均已观察到；保留该测试为失败，不skip或假称硬链接链路通过，交Linux车道复核。基线临时worktree创建被`.git`写权限拒绝后使用本树缓存内的`git archive`回退，并核对基线parser blob及导入来源；不是拿本分支的早先提交当基线。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

@@ -1,4 +1,6 @@
 
+# LLM: 真实模型场景须显式运行，保留原后端与任务边界；规范计划文案不构成API调用。
+# 模块用途: 建立并执行原多轮模型恢复场景。
 from __future__ import annotations
 
 """real-model multi-round recovery scenario.
@@ -87,6 +89,8 @@ def _tool_payload(tool_name: str) -> str:
     return '{"tool": "search_text", "query": "gateway", "path": "."}'
 
 
+# LLM: 不改变原模型、任务或执行授权，仅更新场景的规范计划提示。
+# 函数用途: 建立原多轮模型场景的Agent与任务。
 def _multi_round_setup(args):
     paths = create_scenario_workspace(args)
     print("MY-AGENT SCENARIO TEST")
@@ -104,7 +108,7 @@ def _multi_round_setup(args):
     task = agent.subagents.create_run(
         goal="real model multi-round recovery smoke test: read README, search gateway, wait for closeout",
         thought="verify real model API multi-round round-trip survives cross-day recovery.",
-        plan=["runner reads README.md via real model", "runner searches gateway via real model", "write structured result", "simulate cross-day", "memory-resume recovers multi-round evidence"],
+        plan=["runner reads README.md via real model", "runner searches gateway via real model", "write structured result", "simulate cross-day", "memory archive resume recovers multi-round evidence"],
         allowed_tools=["read_file", "search_text"],
         acceptance_checks=["must have read_file and search_text evidence", "recovery must recommend task fact sources", "caller decides closeout after recovery"],
     )

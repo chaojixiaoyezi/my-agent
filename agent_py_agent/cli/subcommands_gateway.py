@@ -213,34 +213,33 @@ def _add_gateway_ask_result_subcommands(gateway_sub):
 # LLM: 注册不运行服务；监护参数与安装维护入口分别保持原handler归属。
 # 函数用途: 注册监护的启动、停止、状态及维护命令。
 def _add_gateway_supervisor_subcommands(gateway_sub):
-    _add_gateway_maintenance_subcommands(gateway_sub)
-    supervisor_start = gateway_sub.add_parser("supervisor-start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
-    supervisor_start.set_defaults(func=cmd_supervisor_start)
-
-    supervisor_stop = gateway_sub.add_parser("supervisor-stop", help="停止 gateway 看门狗进程")
-    supervisor_stop.add_argument("--timeout", type=float, help="等待停止的秒数")
-    supervisor_stop.set_defaults(func=cmd_supervisor_stop)
-
-    supervisor_status = gateway_sub.add_parser("supervisor-status", help="查看 supervisor 和 gateway 状态")
-    supervisor_status.set_defaults(func=cmd_supervisor_status)
-
-    supervisor_run = gateway_sub.add_parser("supervisor", help="内部命令：前台运行 supervisor 循环")
+    supervisor_run = gateway_sub.add_parser("supervisor", help="运行看门狗；不带子动作时保持持久化的前台启动合同")
     supervisor_run.add_argument("--workspace-root", help="工作区根目录")
     supervisor_run.add_argument("--heartbeat-timeout", type=float, default=120.0, help="心跳超时秒数")
     supervisor_run.add_argument("--check-interval", type=float, default=10.0, help="健康检查间隔秒数")
     supervisor_run.add_argument("--max-restart-attempts", type=int, default=5, help="最大重启次数")
     supervisor_run.add_argument("--restart-cooldown", type=float, default=30.0, help="重启冷却时间（秒）")
     supervisor_run.set_defaults(func=cmd_supervisor_run)
+    supervisor_sub = supervisor_run.add_subparsers(dest="supervisor_command")
+    _add_gateway_maintenance_subcommands(gateway_sub, supervisor_sub)
+    supervisor_start = supervisor_sub.add_parser("start", help="启动 gateway 看门狗进程（自动重启崩溃的 gateway）")
+    supervisor_start.set_defaults(func=cmd_supervisor_start)
 
+    supervisor_stop = supervisor_sub.add_parser("stop", help="停止 gateway 看门狗进程")
+    supervisor_stop.add_argument("--timeout", type=float, help="等待停止的秒数")
+    supervisor_stop.set_defaults(func=cmd_supervisor_stop)
+
+    supervisor_status = supervisor_sub.add_parser("status", help="查看 supervisor 和 gateway 状态")
+    supervisor_status.set_defaults(func=cmd_supervisor_status)
 
 # LLM: 只声明参数和处理器，无文件/进程副作用；unit和TTL在执行时校验。
 # 函数用途: 把服务安装与维护锁四个入口加入Gateway CLI。
-def _add_gateway_maintenance_subcommands(gateway_sub):
-    install = gateway_sub.add_parser("supervisor-install-service", help="安装用户级systemd看门狗服务")
+def _add_gateway_maintenance_subcommands(gateway_sub, supervisor_sub):
+    install = supervisor_sub.add_parser("install-service", help="安装用户级systemd看门狗服务")
     install.add_argument("--unit", default="my-agent-gw-supervisor.service")
     install.add_argument("--no-start", action="store_true", help="仅安装，不启用服务")
     install.set_defaults(func=cmd_supervisor_install_service)
-    uninstall = gateway_sub.add_parser("supervisor-uninstall-service", help="卸载用户级systemd看门狗服务")
+    uninstall = supervisor_sub.add_parser("uninstall-service", help="卸载用户级systemd看门狗服务")
     uninstall.add_argument("--unit", default="my-agent-gw-supervisor.service")
     uninstall.set_defaults(func=cmd_supervisor_uninstall_service)
     lock = gateway_sub.add_parser("maintenance-lock", help="暂停看门狗自动恢复直至解锁或到期")

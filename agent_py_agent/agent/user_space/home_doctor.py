@@ -1,14 +1,19 @@
+# LLM: 当前owner的Home与Memory只读诊断由DoctorService统一；memory工厂由CLI显式注入，不反向依赖CLI。
+# 模块用途: 聚合Home健康与两个记忆诊断facet，不修复、不迁移、不调用模型。
 
 from __future__ import annotations
 
 import json
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from ..memory_archive import compression_snapshot_dir, raw_event_path_for, snapshot_path_for
 from .capability_requests import list_capability_requests_report
 from .home_backup import latest_home_backup_snapshots_report
 from .home_indexes import dangling_index_refs
-from .home_layout import MyAgentHomePaths
+from .home_layout import MyAgentHomePaths, resolve_route_index_target
 from .home_retention import plan_owner_retention
 from .home_runtime_query import home_runtime_status
 from .owner_policy import read_owner_policy_bundle_report
@@ -118,6 +123,8 @@ def _owner_lifecycle_findings(home_status: dict[str, Any]) -> list[dict[str, Any
     ]
 
 
+# LLM: 原调用方只消费建议，保持权限边界，不增加自动副作用。
+# 函数用途: 生成悬空索引的规范重建建议，不执行重建或清理。
 def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -127,7 +134,7 @@ def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "missing_path": str(record.get("missing_path") or ""),
             "resolution": _resolution(
                 "auto_repair",
-                command="my-agent home-index-rebuild --apply",
+                command="my-agent home index rebuild --apply",
                 note="rebuild owner/task/run/agent indexes from existing owner homes",
             ),
         }
@@ -135,6 +142,8 @@ def _dangling_findings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+# LLM: 原调用方只消费建议，保持权限边界，不增加自动副作用。
+# 函数用途: 将保留候选格式化为规范命令建议，不执行删除。
 def _retention_findings(actions: tuple[Any, ...]) -> list[dict[str, Any]]:
     if not actions:
         return []
@@ -146,7 +155,7 @@ def _retention_findings(actions: tuple[Any, ...]) -> list[dict[str, Any]]:
             "count": len(actions),
             "resolution": _resolution(
                 "auto_repair",
-                command="my-agent home-retention --apply",
+                command="my-agent home retention --apply",
                 note="delete only files selected by the explicit owner retention policy",
             ),
         }
@@ -319,4 +328,269 @@ def _temporary_grants_payload(home: MyAgentHomePaths) -> dict[str, Any]:
     }
 
 
-__all__ = ["build_home_doctor_report"]
+__all__ = ["build_home_doctor_report", "DoctorService"]
+
+
+MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT = 5
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _normalize_warning_item 提供对应的诊断计算或显示字段。
+def _normalize_warning_item(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return dict(item)
+    if hasattr(item, "to_dict"):
+        return item.to_dict()
+    if hasattr(item, "__dataclass_fields__"):
+        return asdict(item)
+    return {"message": str(item)}
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _config_warnings 提供对应的诊断计算或显示字段。
+def _config_warnings(config: object) -> list[dict[str, Any]]:
+    warnings = getattr(config, "memory_config_warnings", []) or []
+    return [_normalize_warning_item(item) for item in warnings]
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _memory_config_payload 提供对应的诊断计算或显示字段。
+def _memory_config_payload(config: object) -> dict[str, Any]:
+    fields = [
+        "memory_archive_level",
+        "memory_hook_enabled",
+        "memory_rule_routing_mode",
+        "memory_rule_auto_read_limit",
+    ]
+    return {field: getattr(config, field) for field in fields}
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _build_routing_doctor 提供对应的诊断计算或显示字段。
+def _build_routing_doctor(root: Path, index_path: Path, *, extended: bool = True) -> dict[str, Any]:
+    from ..memory_routing import load_routes, validate_routes
+
+    payload: dict[str, Any] = {
+        "index": _index_payload(index_path),
+        "routes": [],
+        "route_count": 0,
+        "validation_warnings": [],
+        "load_error": "",
+    }
+    if not index_path.exists():
+        payload["load_error"] = f"memory route index not found: {index_path}"
+        return payload
+    try:
+        routes = load_routes(index_path)
+    except Exception as exc:
+        payload["load_error"] = f"{type(exc).__name__}: {exc}"
+        return payload
+    payload["routes"] = [_route_payload(route) for route in routes]
+    if not extended:
+        for item in payload["routes"]:
+            item.pop("source_file", None)
+            item.pop("inject_mode", None)
+    payload["route_count"] = len(routes)
+    payload["validation_warnings"] = validate_routes(routes, root)
+    return payload
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _build_archive_doctor 提供对应的诊断计算或显示字段。
+def _build_archive_doctor(root: Path, config: object, *, include_snapshots: bool = True) -> dict[str, Any]:
+    hook_today_path = snapshot_path_for(root)
+    raw_today_path = raw_event_path_for(root)
+    result = {
+        # 参数减量第 1 批（2026-09-27）：memory_hook_retention_days 没有清理器读取，已从配置删除，不再回显。
+        "retention": {
+            "memory_hook_enabled": bool(getattr(config, "memory_hook_enabled", True)),
+            "memory_archive_level": int(getattr(config, "memory_archive_level", 3)),
+        },
+        "hook": _archive_dir_payload(hook_today_path.parent, hook_today_path, config=config),
+        "raw": _archive_dir_payload(raw_today_path.parent, raw_today_path, config=config),
+    }
+    if include_snapshots:
+        snapshot_dir = compression_snapshot_dir(root)
+        result["snapshots"] = _snapshot_dir_payload(snapshot_dir, config=config)
+        result["consistency_warnings"] = _archive_consistency_warnings(hook_today_path.parent, snapshot_dir)
+    return result
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _archive_dir_payload 提供对应的诊断计算或显示字段。
+def _archive_dir_payload(directory: Path, today_path: Path, *, config: object | None = None) -> dict[str, Any]:
+    files = sorted(
+        [path for path in directory.glob("*.jsonl") if path.is_file()] if directory.exists() else [],
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )
+    return {
+        "dir": str(directory),
+        "exists": directory.exists(),
+        "file_count": len(files),
+        "today_path": str(today_path),
+        "recent_files": [
+            _archive_file_payload(path)
+            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT]
+        ],
+    }
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _archive_file_payload 提供对应的诊断计算或显示字段。
+def _archive_file_payload(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "path": str(path),
+        "size_bytes": stat.st_size,
+        "modified_at": stat.st_mtime,
+    }
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _snapshot_dir_payload 提供对应的诊断计算或显示字段。
+def _snapshot_dir_payload(directory: Path, *, config: object) -> dict[str, Any]:
+    files = sorted(
+        [path for path in directory.glob("*.json") if path.is_file()] if directory.exists() else [],
+        key=lambda path: (path.stat().st_mtime, path.name),
+        reverse=True,
+    )
+    invalid_json_files: list[str] = []
+    for path in files:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            invalid_json_files.append(str(path))
+            continue
+        if not isinstance(payload, dict):
+            invalid_json_files.append(str(path))
+    return {
+        "dir": str(directory),
+        "exists": directory.exists(),
+        "file_count": len(files),
+        "invalid_json_files": invalid_json_files,
+        "recent_files": [
+            _archive_file_payload(path)
+            for path in files[:MEMORY_DOCTOR_RECENT_ARCHIVE_FILE_COUNT]
+        ],
+    }
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _archive_consistency_warnings 提供对应的诊断计算或显示字段。
+def _archive_consistency_warnings(hook_dir: Path, snapshot_dir: Path) -> list[str]:
+    warnings: list[str] = []
+    hook_exists = hook_dir.exists() and any(hook_dir.glob("*.jsonl"))
+    snapshot_exists = snapshot_dir.exists() and any(snapshot_dir.glob("*.json"))
+    if hook_exists and not snapshot_exists:
+        warnings.append("hook layer has records but memory_archive/snapshots is empty")
+    if snapshot_exists and not hook_exists:
+        warnings.append("snapshot JSON files exist but hook JSONL layer is empty")
+    return warnings
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _index_payload 提供对应的诊断计算或显示字段。
+def _index_payload(index_path: Path) -> dict[str, Any]:
+    return {
+        "path": str(index_path),
+        "exists": index_path.exists(),
+        "is_file": index_path.is_file(),
+    }
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _route_payload 提供对应的诊断计算或显示字段。
+def _route_payload(route) -> dict[str, Any]:
+    return {
+        "route_id": route.route_id,
+        "topic": route.topic,
+        "trigger_keywords": route.trigger_keywords,
+        "related_terms": route.related_terms,
+        "when_to_read": route.when_to_read,
+        "authority_path": route.authority_path,
+        "source_file": route.source_file,
+        "inject_mode": route.inject_mode,
+        "scope": route.scope,
+        "priority": route.priority,
+        "stale_check": route.stale_check,
+        "last_verified_at": route.last_verified_at,
+        "source_path": route.source_path,
+    }
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 类用途: 统一两种体检facet与请求内缓存。
+class DoctorService:
+    # LLM: 保存显式当前Agent与请求级缓存，不初始化任何持久服务或目录。
+    # 函数用途: 建立一次只读诊断请求。
+    def __init__(self, agent, *, migration_factory=None, retention_factory=None):
+        self.agent = agent
+        self.migration_factory = migration_factory
+        self.retention_factory = retention_factory
+        self._common_cache = {}
+
+    # LLM: 公开报告必须与请求内缓存隔离；外部修改返回字典不能改变后续健康判据。
+    # 函数用途: 返回一次诊断的独立快照，不暴露内部可变引用。
+    def report(self, args, *, scope="memory", legacy=False):
+        return deepcopy(self._report(args, scope=scope, legacy=legacy))
+
+    # LLM: scope与v1是封闭协议值；未知输入拒绝，v1只投影runtime，不能触发memory维护。
+    # 函数用途: 计算指定范围的诊断，默认memory保持既有机器字段。
+    def _report(self, args, *, scope="memory", legacy=False):
+        if scope not in {"runtime", "memory", "all"}:
+            raise ValueError("未知诊断范围")
+        if legacy:
+            return self._runtime(args)
+        if scope == "memory":
+            return self._memory(args)
+        if scope == "runtime":
+            facet = self._runtime(args)
+            return {"ok": facet["ok"], "scope": "runtime", "runtime": facet}
+        runtime, memory = self._runtime(args), self._memory(args)
+        common = {}
+        for key in ("config", "routing", "archive"):
+            runtime_value, memory_value = runtime.pop(key), memory.pop(key)
+            common[key] = runtime_value if runtime_value == memory_value else {"runtime": runtime_value, "memory": memory_value}
+        runtime_warnings, memory_warnings = runtime.pop("warnings"), memory.pop("config_warnings")
+        common["warnings"] = runtime_warnings if runtime_warnings == memory_warnings else {"runtime": runtime_warnings, "memory": memory_warnings}
+        return {"ok": runtime["ok"] and memory["ok"], "scope": "all", "common": common,
+                "runtime": runtime, "memory": memory}
+
+    # LLM: validation_root和archive_scope分别沿旧两条入口的事实，不为去重而扩大读取范围。
+    # 函数用途: 每个精确范围只生成一份公共配置、路由和归档结果。
+    def _common(self, args, *, runtime):
+        agent = self.agent
+        target = resolve_route_index_target(agent.root, getattr(args, "index", None), home_paths=getattr(agent, "home_paths", None))
+        root = target.authority_root if runtime else agent.root
+        key = (str(getattr(agent.home_paths, "owner_id", "")), str(root), str(target.path), runtime)
+        if key not in self._common_cache:
+            self._common_cache[key] = {
+                "config": _memory_config_payload(agent.config),
+                "warnings": _config_warnings(agent.config),
+                "routing": _build_routing_doctor(root, target.path, extended=not runtime),
+                "archive": _build_archive_doctor(agent.root, agent.config, include_snapshots=not runtime),
+            }
+        return self._common_cache[key]
+
+    # LLM: runtime只使用原home诊断，ok仍只取路由加载状态；不初始化候选、策展或迁移。
+    # 函数用途: 生成原平铺doctor的只读运行范围报告。
+    def _runtime(self, args):
+        common = self._common(args, runtime=True)
+        home = build_home_doctor_report(self.agent.home_paths)
+        return {"ok": not common["routing"]["load_error"], "workspace_root": str(self.agent.root),
+                **common, "home": home["home"], "home_doctor": home}
+
+    # LLM: memory只调用原服务的stats/status/plan，严禁apply、curator run、正式晋升或模型请求。
+    # 函数用途: 生成现有memory doctor合同的完整只读报告。
+    def _memory(self, args):
+        agent = self.agent
+        common = self._common(args, runtime=False)
+        if self.migration_factory is None or self.retention_factory is None:
+            raise ValueError("memory诊断依赖未装配，结果未知")
+        migration = self.migration_factory(agent).plan()
+        retention = self.retention_factory(agent).plan()
+        return {
+            "ok": not common["routing"]["load_error"] and migration.ok and retention.ok,
+            "command": "memory doctor", "owner_id": str(getattr(agent.home_paths, "owner_id", "") or "local/main"),
+            "workspace_root": str(agent.root), "config": common["config"], "config_warnings": common["warnings"],
+            "candidate": agent.memory_candidates.stats(), "curator": agent.memory_curator.status(),
+            "routing": common["routing"], "archive": common["archive"],
+            "migration": migration.to_dict(), "retention": retention.to_dict(),
+        }
+
+
+
+# LLM: 当前owner范围的只读诊断，保持原投影与错误条件，不初始化修复或模型。
+# 函数用途: _resolve_index_path 提供对应的诊断计算或显示字段。
+def _resolve_index_path(root: Path, raw_index: str | None, *, home_paths=None) -> Path:
+    return resolve_route_index_target(root, raw_index, home_paths=home_paths).path

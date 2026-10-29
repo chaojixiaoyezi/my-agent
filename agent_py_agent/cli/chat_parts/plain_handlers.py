@@ -138,7 +138,7 @@ def _plain_local_handle(ctx: PlainJobContext) -> tuple[str, bool]:
             request_id=ctx.job.request_id,
             source="chat",
             resume_context=resume_context_override(ctx.args),
-            recovery_next_actions=["如需恢复本轮 chat，先用 memory-resume 搜索用户消息或时间范围。"],
+            recovery_next_actions=["如需恢复本轮 chat，先用 memory archive resume 搜索用户消息或时间范围。"],
             on_chunk=on_chunk,
             task_attributes=attrs,
         )

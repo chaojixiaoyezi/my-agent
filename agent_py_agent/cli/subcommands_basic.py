@@ -1,4 +1,6 @@
 
+# LLM: 规范分组由唯一注册器负责；保留原参数和handler，不创建第二解析树或执行业务。
+# 模块用途: 登记基础、记忆、归档及事实命令的业务参数。
 from __future__ import annotations
 
 """basic / memory / local-store subcommand registration helpers.
@@ -35,7 +37,6 @@ from .memory_archive_commands import (
 from .memory_artifact_commands import cmd_memory_artifact_read
 from .memory_commands import cmd_memory_route
 from .memory_compact_commands import cmd_memory_compact
-from .memory_doctor import cmd_memory_doctor
 from .memory_fact_commands import cmd_memory_fact_write
 
 
@@ -149,11 +150,13 @@ def _add_archive_search_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
+# LLM: 保留原参数默认与作用域，帮助文案不触发恢复或Compact写入。
+# 函数用途: 登记原归档恢复参数并指向规范Compact入口。
 def _add_archive_resume_args(parser) -> None:
     parser.add_argument(
         "--from-compact",
         dest="from_compact",
-        help="调试/救援：从 memory-compact --apply 的 apply_id 或产物路径生成恢复上下文",
+        help="调试/救援：从 memory compact --apply 的 apply_id 或产物路径生成恢复上下文",
     )
     parser.add_argument(
         "--compact-resume-mode",
@@ -191,6 +194,8 @@ def _add_archive_resume_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
+# LLM: 只登记参数，不执行写事实；原权限与证据门由业务handler承担。
+# 函数用途: 登记事实参数，作用域提示与规范恢复保持一致。
 def _add_memory_fact_write_args(parser) -> None:
     parser.add_argument("--fact-id", default="", help="事实源目录名；通常使用 request_id/session_id/task_id/run_id")
     parser.add_argument("--from-compact", dest="from_compact", default="", help="可选：从 compact apply 读取目标和下一步")
@@ -198,9 +203,9 @@ def _add_memory_fact_write_args(parser) -> None:
         "--compact-owner-type",
         choices=["main_agent", "subagent_run"],
         default="main_agent",
-        help="通用 Compact 的运行作用域类型；与 memory-resume 保持一致",
+        help="通用 Compact 的运行作用域类型；与 memory archive resume 保持一致",
     )
-    parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；与 memory-resume 保持一致")
+    parser.add_argument("--compact-owner-id", default="", help="compact owner 标识；与 memory archive resume 保持一致")
     parser.add_argument("--goal", default="", help="可选：当前任务目标；未传时尝试从 --from-compact handoff 读取")
     parser.add_argument("--next-action", action="append", default=[], help="可重复：恢复后的下一步动作")
     parser.add_argument("--acceptance", action="append", default=[], help="可重复：用户确认的验收条件")
@@ -232,6 +237,8 @@ def _add_memory_compact_args(parser) -> None:
     parser.add_argument("--json", action="store_true", help="输出机器可读 JSON")
 
 
+# LLM: 保留原业务参数和处理器，已退休的独立Doctor不再注册。
+# 函数用途: 向唯一注册器登记原记忆业务。
 def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     add_memory_admin_subcommands(sub)
     add_home_runtime_subcommands(sub)
@@ -244,11 +251,6 @@ def add_memory_subcommands(sub: argparse._SubParsersAction) -> None:
     memory_route.add_argument("--auto-read-limit", type=int, help="最多升级多少条规则路径；默认使用配置")
     memory_route.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     memory_route.set_defaults(func=cmd_memory_route)
-
-    memory_doctor = sub.add_parser("memory-doctor", help="诊断 memory 配置、路由索引和归档目录")
-    memory_doctor.add_argument("--index", help="路由索引文件；相对路径按 workspace root 解析")
-    memory_doctor.add_argument("--json", action="store_true", help="输出机器可读 JSON")
-    memory_doctor.set_defaults(func=cmd_memory_doctor)
 
     _add_memory_archive_subcommands(sub)
 
