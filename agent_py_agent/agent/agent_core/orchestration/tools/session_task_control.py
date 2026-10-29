@@ -447,6 +447,8 @@ def build_get_session_task_model_spec() -> ToolModelSpec:
             use_cases=("想知道自己派出的任务进行到哪一步", "确认任务是否已结束"),
             avoid_when=("要取消任务用 cancel_session_task",),
             keywords=("任务状态", "查询任务", "session task status"),
+            default_deferred=True,
+            deferred_summary="查询已派会话任务的状态和结果引用",
             examples=('{"tool":"get_session_task","task_id":"stask-abc"}',),
         ),
     )

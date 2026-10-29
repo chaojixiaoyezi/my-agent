@@ -1,22 +1,7 @@
-# LLM: session_search 模型工具(对标 长期助手 tools/session_search_tool.py 三模式)。
-#   底子早就现成:LocalStore 已有 FTS5 全文检索(search)、最近列表(list_recent)、
-#   按锚时间窗(records_around)、records/timeline——只是从没暴露成模型可调用的工具。
-#   本工具把这些封装成单一工具、三种调用形态(由参数推断,无显式 mode 参数),
-#   零 LLM 成本、纯读 SQLite/FTS5:
-#     ① DISCOVERY  —— 传 query:trigram FTS5 全文检索历史记录,每条带 snippet。
-#     ② SCROLL     —— 传 around_id:以某条记录为锚,按时间序取前后窗口(无 FTS)。
-#     ③ BROWSE     —— 不传参:按时间倒序列出最近记录(标题/预览/时间)。
-#   与 长期助手 的差异:my-agent 的事实单元是 record(非逐条 message)。scroll 有
-#   结构化 thread_id 时限在同一会话；没有归属的旧记录明确标为时间邻居。
-#   另有两种会话原文形态（实现见 session_history_read.py，只读 canonical 消息文件）:
-#     ④ READ         —— 传 message_id:按字符游标分段读取一条会话消息的原文（压缩后回查原话）。
-#     ⑤ THREAD       —— current_thread=true:只在当前可信会话内检索(带 query)或按页浏览(不带 query)。
-#   scroll 每条正文有上限，超长时标 content_truncated 并提示用 message_id 分段读全文。
-#   返回字段 messages 是历史协议字段，不代表每项都是一条原始对话消息。Gateway 投影 host-authored
-#   task_ref，供“回到上次项目”拿到精确路径，不从自然语言猜 cwd。契约:只读零副作用;
-#   空库/无命中返回结构化提示不报错；给精确 input_schema（对齐原生 tool_use 改造规范）。
-# 模块用途: 让模型能检索/翻看本地历史记录(普通聊天、记忆、任务产物、归档),回答"我们之前
-#   对 X 怎么处理的/在哪聊过 Y",而不用把全部历史塞进 prompt。
+# LLM: 新输入只接受六种显式mode，旧参数推断移至宿主v1解码器；各mode复用原owner索引和可信会话reader。
+# 模块用途: 严格验证历史检索参数并读取同一事实源，保留task_ref、游标和owner边界。
+# 底层输出沿discover/browse/scroll旧协议；有归属锚点限同会话，无归属记录明确标为时间邻居。
+# 原文reader只读canonical消息；task_ref只取宿主已结束任务，不能从正文猜cwd或提升写权限。
 from __future__ import annotations
 
 import json
@@ -67,62 +52,73 @@ _SCROLL_CONTENT_CHARS = 2_000
 # 浏览当前会话历史时默认取多少条。
 _THREAD_BROWSE_DEFAULT_COUNT = 20
 _HISTORICAL_TASK_REF_STATUSES = frozenset({"done", "failed", "interrupted"})
+# 模型面与handler共用模式表，旧输入只在版本化边界转换。
+SESSION_SEARCH_MODES = {
+    "search": (("query",), ("query", "limit", "source_type")),
+    "recent": ((), ("limit", "source_type")),
+    "around": (("around_id",), ("around_id", "window", "source_type")),
+    "message": (("message_id",), ("message_id", "thread_id", "offset", "max_chars")),
+    "thread_search": (("query",), ("query", "limit", "source_type")),
+    "thread_browse": ((), ("limit", "cursor")),
+}
+try:
+    from ..contracts.error_taxonomy import TOOL_SCHEMA_INVALID_MODE_COMBINATION
+except ImportError:
+    TOOL_SCHEMA_INVALID_MODE_COMBINATION = "TOOL_SCHEMA_INVALID_MODE_COMBINATION"
 _SESSION_SEARCH_USE_CASES = (
     "用户问之前怎么解决或上次聊到哪时先检索历史",
     "用户要求回到刚才、先前或某个具名旧项目时，先按项目名检索 gateway_request 并读取 task_ref",
     "拿到一条命中后用 around_id 翻看前后上下文",
     "用户问最近在做什么时浏览最近记录",
     "上下文被压缩后需要早先的原话细节时，用摘要或检索结果里的 message_id 分段读回原文",
-    "只想找本次会话里说过的内容时，加 current_thread=true 检索或按页浏览",
+    "只想找本次会话内容时，用thread_search或thread_browse",
 )
 _SESSION_SEARCH_KEYWORDS = (
     "历史", "检索", "回顾", "之前", "上次", "刚才", "先前", "回到", "原项目", "旧项目",
     "记录", "session", "history", "search", "recall", "翻看", "找一下", "查一下",
 )
 _SESSION_SEARCH_EXAMPLES = (
-    '{"tool":"session_search","query":"记忆推送模式怎么落地的"}',
-    '{"tool":"session_search","query":"星河日志分析器","source_type":"gateway_request"}',
-    '{"tool":"session_search","around_id":"rec-abc123","window":8}',
-    '{"tool":"session_search"}',
-    '{"tool":"session_search","message_id":"msg-2a75a9b3a005400a","offset":0}',
-    '{"tool":"session_search","current_thread":true,"query":"金额保留两位小数"}',
+    '{"tool":"session_search","mode":"search","query":"记忆推送模式怎么落地的"}',
+    '{"tool":"session_search","mode":"search","query":"星河日志分析器","source_type":"gateway_request"}',
+    '{"tool":"session_search","mode":"around","around_id":"rec-abc123","window":8}',
+    '{"tool":"session_search","mode":"recent"}',
+    '{"tool":"session_search","mode":"message","message_id":"msg-2a75a9b3a005400a","offset":0}',
+    '{"tool":"session_search","mode":"thread_search","query":"金额保留两位小数"}',
 )
 
 
-# LLM: Tool instructions may explain how to consume typed task_ref, but must never infer a path
-# from natural-language history or turn a search hit into write authorization.
+# LLM: 六模式使用平铺schema及宿主字段表，不依赖根oneOf；task_ref是读取线索，不授权写入。
 # 函数用途: session_search 的工具说明书(进工具目录,引导模型先查历史再上网/翻盘)。
 def build_session_search_model_spec() -> ToolModelSpec:
     return ToolModelSpec(
         name="session_search",
         description=(
             "检索/翻看当前用户自己的本地历史记录(普通聊天、记忆、任务产物、归档),零成本纯读。"
-            "形态由参数推断:"
-            "①传 query=全文检索(FTS5,支持中文子串);②传 around_id=以某条记录为锚翻看前后上下文;"
-            "③都不传=按时间倒序列出最近记录。回答'我们之前对X怎么处理/在哪记过Y'优先用它,先于上网/翻文件。"
+            "必须指定mode：search全文检索、recent最近列表、around锚点窗口、message原文分段、"
+            "thread_search当前会话检索、thread_browse当前会话分页。各模式字段互斥。"
             "已结束的 Gateway 任务命中可能带 task_ref，并在默认检索结果里优先展示；"
             "其中 task_path 是该历史任务的精确目录，用户要求续作时优先使用。"
-            "④传 message_id=按字符游标分段读取一条会话消息的原文（上下文被压缩后回查原话细节），"
-            "按返回的 next_offset 续读；⑤传 current_thread=true=只在当前会话内检索（带 query）"
-            "或按页浏览全部用户与助手消息（不带 query，用 older_cursor 翻更早一页）。"
+            "message按next_offset续读，thread_browse用older_cursor翻页，会话归属只由宿主核验。"
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "全文检索词；留空则浏览最近记录。"},
-                "around_id": {"type": "string", "description": "记录 ID；以它为锚返回前后窗口，优先于 query。"},
+                "mode": {"type": "string", "enum": list(SESSION_SEARCH_MODES)},
+                "query": {"type": "string", "description": "search/thread_search必填非空检索词，其它模式不接受。"},
+                "around_id": {"type": "string", "description": "around必填记录ID，其它模式不接受。"},
                 "window": {"type": "integer", "minimum": 1, "maximum": _MAX_WINDOW_COUNT, "description": "锚点两侧各取几条，默认 5。"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIMIT_COUNT, "description": "检索或浏览返回条数。"},
                 "source_type": {"type": "string", "description": "限定来源类型，如 memory。"},
-                "message_id": {"type": "string", "description": "会话消息编号（压缩摘要或检索结果里给出）；读取这条消息原文，优先于其它形态。"},
+                "message_id": {"type": "string", "description": "message必填消息编号，取自检索结果或压缩摘要。"},
                 "thread_id": {"type": "string", "description": "配合 message_id 读取本人其它会话的消息，取自检索结果 scope；不传则读当前会话。"},
                 "offset": {"type": "integer", "minimum": 0, "description": "读取原文的起始字符位置，默认 0；长消息按返回的 next_offset 续读。"},
                 "max_chars": {"type": "integer", "minimum": READ_MIN_CHARS, "maximum": READ_MAX_CHARS,
                               "description": f"本次最多返回多少字符，默认 {READ_DEFAULT_CHARS}。"},
-                "current_thread": {"type": "boolean", "description": "只在当前会话内检索或浏览，包含已被上下文压缩掉的原始消息。"},
                 "cursor": {"type": "integer", "minimum": 0, "description": "浏览当前会话时翻到更早一页，取上一页返回的 older_cursor。"},
             },
             "additionalProperties": False,
+            "required": ["mode"],
+            "x-exclusive-argument-groups": [["query", "around_id", "message_id"], ["limit", "window"], ["offset", "cursor"]],
         },
         hints=ToolModelHints(
             category="capability",
@@ -134,6 +130,8 @@ def build_session_search_model_spec() -> ToolModelSpec:
     )
 
 
+# LLM: 六模式复用当前owner原索引与可信会话reader，不在handler猜旧参数优先级。
+# 类用途: 提供严格字段组合验证及唯一历史只读分派。
 class SessionSearchTool(BaseTool):
     model_spec = build_session_search_model_spec()
     runtime_policy = ToolRuntimePolicy(
@@ -143,7 +141,8 @@ class SessionSearchTool(BaseTool):
             parameter_kinds={"around_id": "logical", "query": "logical", "message_id": "logical", "thread_id": "logical"}),
     )
 
-    # 类用途: 把 LocalStore 的历史检索/翻看暴露成模型可调用的只读工具(三模式)。
+    # LLM: 仅绑定原Agent，不新建历史库或执行查询。
+    # 函数用途: 保存同owner历史读取依赖。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
 
@@ -152,6 +151,7 @@ class SessionSearchTool(BaseTool):
     # 函数用途: 把各形态分派交给 _dispatch;存储不可用/检索异常都给结构化码。
     def execute(self, params: dict[str, object]) -> ToolHandlerOutcome:
         try:
+            _validate_mode_params(params)
             payload = _dispatch(self.agent, _store_for(self.agent), params)
         except SessionHistoryRefusal as refusal:
             return _error(refusal.message, refusal.hint, refusal.code)
@@ -160,30 +160,47 @@ class SessionSearchTool(BaseTool):
         return ToolHandlerOutcome("session_search", True, json.dumps(payload, ensure_ascii=False))
 
 
-# LLM: 形态只由参数推断：message_id 读原文 > around_id 翻看 > current_thread 会话内检索/浏览 > query 检索 > 浏览。
-#   显式锚点压过 current_thread（翻看本就限在锚点所属会话）。current_thread 必须是布尔 true，会话编号只取宿主可信上下文。
-# 函数用途: 按参数推断并执行对应形态。
+# LLM: 错误组合在触盘前拒绝，bool不算int；字段表也用于schema，不允许旧字段混入规范mode。
+# 函数用途: 严格核验mode必填、允许字段、类型和范围。
+def _validate_mode_params(params):
+    mode = params.get("mode") if isinstance(params, dict) else None
+    rule = SESSION_SEARCH_MODES.get(mode) if isinstance(mode, str) else None
+    invalid = rule is None
+    if rule is not None:
+        required, allowed = rule
+        invalid = bool(set(params) - {"mode", *allowed}) or any(
+            not isinstance(params.get(key), str) or not params[key].strip() for key in required)
+        for key, value in params.items():
+            if key in {"query", "source_type", "around_id", "message_id", "thread_id"}:
+                invalid |= not isinstance(value, str)
+            if key in {"limit", "window", "offset", "cursor", "max_chars"}:
+                low, high = ((1, 20) if key in {"limit", "window"} else
+                    (READ_MIN_CHARS, READ_MAX_CHARS) if key == "max_chars" else (0, None))
+                invalid |= type(value) is not int or value < low or (high is not None and value > high)
+    if invalid:
+        raise SessionHistoryRefusal(TOOL_SCHEMA_INVALID_MODE_COMBINATION,
+            "mode字段组合或值无效", "按当前mode的required/allowed字段传参，不混用旧形态字段。")
+
+
+# LLM: 仅按规范mode分派；原输出形状和owner/thread硬门保留，不生成第二历史源。
+# 函数用途: 将六种模式交给现有只读服务。
 def _dispatch(agent: object, store: LocalStore | None, params: dict[str, object]) -> dict[str, Any]:
+    mode = params["mode"]
     source_type = _clean_str(params.get("source_type")) or None
-    message_id = _clean_str(params.get("message_id"))
-    if message_id:
-        return read_conversation_message(agent, message_id, params)
-    around_id = _clean_str(params.get("around_id"))
+    if mode == "message":
+        return read_conversation_message(agent, _clean_str(params["message_id"]), params)
     query = _clean_str(params.get("query"))
-    limit_default = _DEFAULT_DISCOVER_COUNT if query else _DEFAULT_BROWSE_COUNT
-    if params.get("current_thread") is True and not around_id:
-        if not query:
-            return browse_current_thread(agent, params, _safe_int(params.get("limit"), _THREAD_BROWSE_DEFAULT_COUNT, _MAX_LIMIT_COUNT))
-        search = ThreadSearch("", source_type or "conversation_message", _safe_int(params.get("limit"), limit_default, _MAX_LIMIT_COUNT))
+    if mode == "thread_browse":
+        return browse_current_thread(agent, params, params.get("limit", _THREAD_BROWSE_DEFAULT_COUNT))
+    if mode == "thread_search":
+        search = ThreadSearch("", source_type or "conversation_message", params.get("limit", _DEFAULT_DISCOVER_COUNT))
         return _discover_thread(agent, _required_store(store), query, search)
     store = _required_store(store)
-    # scroll 优先:显式锚点压过 query(模型明确要翻看某条的上下文)。
-    if around_id:
-        window = _safe_int(params.get("window"), _DEFAULT_WINDOW_COUNT, _MAX_WINDOW_COUNT)
-        return _scroll(store, around_id, window, source_type)
-    if query:
-        return _discover(store, query, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT_COUNT), source_type)
-    return _browse(store, _safe_int(params.get("limit"), limit_default, _MAX_LIMIT_COUNT), source_type)
+    if mode == "around":
+        return _scroll(store, params["around_id"].strip(), params.get("window", _DEFAULT_WINDOW_COUNT), source_type)
+    if mode == "search":
+        return _discover(store, query, params.get("limit", _DEFAULT_DISCOVER_COUNT), source_type)
+    return _browse(store, params.get("limit", _DEFAULT_BROWSE_COUNT), source_type)
 
 
 # LLM: 只有检索/翻看/浏览需要派生索引；读原文（message_id、current_thread 浏览）不经过这里。

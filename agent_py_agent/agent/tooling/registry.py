@@ -118,7 +118,7 @@ def _release_registry_borrow(owner: ToolRegistry) -> None:
         close_owner = owner._mcp_deferred_close_requested and owner._mcp_borrow_count[0] == 0
         if close_owner:
             _close_registry_clients(owner)
-# list_tools 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。
+# tool_search(action=catalog) 实时摘要输出最大字节数上限；完整 manifest 不受此展示预算影响。
 _LIVE_LIST_TOOLS_MAX_BYTES = 12_000
 
 
@@ -126,6 +126,8 @@ def _agent_config_int(key: str) -> int:
     return default_config_int(key)
 
 
+# LLM: 目录设置只控制展示，完整catalog仍读同一快照，deferred不改变执行授权。
+# 类用途: 冻结当前工具目录的分页、截断和按需展示选项。
 @dataclass(frozen=True)
 class CatalogRenderConfig:
     mode: str
@@ -137,7 +139,7 @@ class CatalogRenderConfig:
     show_truncated_notice: bool
     detail_max_chars: int
     # 渐进式披露:这些 category 的工具不进初始模型 schema，只在目录末尾留折叠清单。
-    # 模型通过 tool_search 加载命中工具；list_tools 仍可查看完整注册表。默认空=全量直出。
+    # 模型通过 tool_search 加载命中工具；tool_search(action=catalog) 仍可查看完整注册表。默认空=全量直出。
     deferred_categories: list[str] = field(default_factory=list)
     # 本轮由工具自己声明默认收起的名字（只在 tool_default_deferral_enabled 打开时非空）；目录给它们列“名字：一句用途”的索引。
     declared_deferred_names: frozenset[str] = frozenset()
@@ -241,87 +243,28 @@ class ToolRegistryParams:
     permission_state_reader: Callable[[], dict[str, object]] | None = None
 
 
-# LLM: list_tools 只能描述调用它的请求快照，不能退回进程级注册表或猜测 owner 类型。
-# 类用途: 把当前请求真正可见且可执行的工具清单渲染成机器可读 manifest。
-class ListToolsTool(BaseTool):
-    model_spec = ToolModelSpec(
-        name="list_tools",
-        description="查询本人当前身份、审批与文件网络边界，以及当前开放工具、不可用原因和正规使用入口。",
-        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
-        hints=ToolModelHints(
-            category="system",
-            use_cases=(
-                "不确定当前有哪些工具时，先查询机器可读工具清单",
-                "需要确认 run_command、write_file、apply_patch 等工具是否可用",
-            ),
-            avoid_when=("已经知道要用哪个工具时，直接调用目标工具",),
-            keywords=("list_tools", "tools", "工具清单", "tool manifest", "available tools"),
-            examples=('{"tool": "list_tools"}',),
-        ),
-    )
-    runtime_policy = ToolRuntimePolicy(
-        effect_resolver=EffectResolverPolicy("read_only"),
-        concurrency_policy=ConcurrencyPolicy("parallel_safe"),
-        resource_scopes=ResourceScopePolicy(mode="declared", static_scopes=("tool_registry",)),
-    )
+# LLM: 目录与搜索共用请求的权限快照；完整归档及有界现场视图同源，只读且不更新发现账或加载schema。
+# 函数用途: 为tool_search的catalog动作生成本人可见工具、不可用原因及执行边界。
+def tool_catalog_result(registry, snapshot, context=None) -> ToolHandlerOutcome:
+    from .self_context import registry_self_context
 
-    # LLM: 仅持有原 registry 引用，不读取配置或增加权限；需保持 scoped 调用回归。
-    # 函数用途: 为只读发现工具绑定当前 owner 的工具表。
-    def __init__(self, registry: Any):
-        self.registry = registry
-
-    # LLM: 直接调用仅供本地兼容和单测；真实 Tool Gateway 会走 execute_scoped 复用请求快照。
-    # 函数用途: 用当前 registry 的默认权限与可用性生成一次自洽工具清单。
-    def execute(self, params: dict[str, Any]) -> ToolHandlerOutcome:
-        _ = params
-        return self._execute_snapshot(self.registry.runtime_snapshot())
-
-    # LLM: 请求快照已经完成 owner、allowlist 与 availability 交集，目录工具不得重新放宽。
-    # 函数用途: 在统一执行入口中列出本轮实际可见工具。
-    def execute_scoped(
-        self,
-        params: dict[str, Any],
-        context: ToolInvocationContext,
-    ) -> ToolHandlerOutcome:
-        _ = params
-        return self._execute_snapshot(context.runtime_snapshot, context)
-
-    # LLM: 完整归档与紧凑 prompt 输出必须来自同一快照；宿主本人投影只读当次上下文，不能从模型参数指定身份。
-    # 函数用途: 把指定运行快照渲染为完整 manifest 和有界模型视图。
-    def _execute_snapshot(
-        self, snapshot: ToolRuntimeSnapshot, context: ToolInvocationContext | None = None,
-    ) -> ToolHandlerOutcome:
-        from .self_context import registry_self_context
-
-        self_context = registry_self_context(self.registry, snapshot, context)
-        provider = self.registry._construction_params.self_context_provider
-        if provider is not None:
-            self_context.update(provider(snapshot, context))
-        payload = tool_manifest_payload(snapshot)
-        payload["self_context"] = self_context
-        payload["permission_mode"] = self_context["permissions"]["mode"]
-        payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
-        payload["tool_retrieval"] = self.registry.retriever.status()
-        for item in payload["unavailable_tools"]:
-            tool = self.registry.tools.get(item["name"])
-            item["category"] = tool.model_spec.category if tool is not None else "general"
-        live_payload = _live_tool_manifest_payload(
-            payload,
-            snapshot,
-            {spec.name for spec in self.registry.specs_for_snapshot(snapshot)},
-            include_extended_context=context is not None,
-        )
-        return ToolHandlerOutcome(
-            "list_tools",
-            True,
-            json.dumps(payload, ensure_ascii=False),
-            result_envelope={
-                "tool_output_policy": {
-                    "preserve_prompt_output": False,
-                    "live_prompt_output": json.dumps(live_payload, ensure_ascii=False, separators=(",", ":")),
-                }
-            },
-        )
+    self_context = registry_self_context(registry, snapshot, context)
+    provider = registry._construction_params.self_context_provider
+    if provider is not None:
+        self_context.update(provider(snapshot, context))
+    payload = tool_manifest_payload(snapshot)
+    payload["self_context"] = self_context
+    payload["permission_mode"] = self_context["permissions"]["mode"]
+    payload["tool_failure_taxonomy"] = payload["failure_taxonomy"]
+    payload["tool_retrieval"] = registry.retriever.status()
+    for item in payload["unavailable_tools"]:
+        tool = registry.tools.get(item["name"])
+        item["category"] = tool.model_spec.category if tool is not None else "general"
+    live_payload = _live_tool_manifest_payload(payload, snapshot,
+        {spec.name for spec in registry.specs_for_snapshot(snapshot)}, include_extended_context=context is not None)
+    return ToolHandlerOutcome("tool_search", True, json.dumps(payload, ensure_ascii=False), result_envelope={
+        "tool_output_policy": {"preserve_prompt_output": False,
+            "live_prompt_output": json.dumps(live_payload, ensure_ascii=False, separators=(",", ":"))}})
 
 
 # LLM: tool_search 只能在请求快照中检索；命中即为下一模型回合展开并在同线程累计 Schema，但永远不能扩大 allowed_tools 或恢复不可用工具。
@@ -334,6 +277,7 @@ class ToolSearchTool(BaseTool):
     model_spec = ToolModelSpec(
         name="tool_search",
         description=(
+            "action=catalog查询本人完整工具目录、不可用原因及执行边界，不加载工具；默认action=search。"
             "按工具名查询完整参数，或按能力搜索当前授权的折叠工具。一次搜索即会在下一次模型调用中展开命中工具的 Schema，同一线程累计加载并跨 Compact 恢复，"
             "不需要再次调用或填写选择参数。"
             "当任务需要 /goal 生命周期、外部协作、web、vision 或 MCP，而当前工具列表里没有对应工具时使用。"
@@ -341,6 +285,7 @@ class ToolSearchTool(BaseTool):
         input_schema={
             "type": "object",
             "properties": {
+                "action": {"type": "string", "enum": ["search", "catalog"], "description": "catalog只接收action；search按query/names搜索并加载。"},
                 "query": {"type": "string", "minLength": 1, "description": "描述需要的工具能力或工具名；与 names 至少提供一项。"},
                 "names": {"type": "array", "minItems": 1, "maxItems": 16,
                           "items": {"type": "string", "minLength": 1},
@@ -353,7 +298,6 @@ class ToolSearchTool(BaseTool):
                     "description": "可选。query 搜索时最多返回多少个精简候选，默认 3。",
                 },
             },
-            "anyOf": [{"required": ["query"]}, {"required": ["names"]}],
             "additionalProperties": False,
         },
         hints=ToolModelHints(
@@ -392,7 +336,7 @@ class ToolSearchTool(BaseTool):
         params: dict[str, Any],
         context: ToolInvocationContext,
     ) -> ToolHandlerOutcome:
-        return self._execute_snapshot(params, context.runtime_snapshot)
+        return self._execute_snapshot(params, context.runtime_snapshot, context)
 
     # LLM: query/names 至少一项且各自合法；实际名字只在当前快照解析，搜索不能授予权限。
     # 函数用途: 校验批量名称、类别和查询上限后，生成同源加载回执。
@@ -400,7 +344,19 @@ class ToolSearchTool(BaseTool):
         self,
         params: dict[str, Any],
         snapshot: ToolRuntimeSnapshot,
+        context: ToolInvocationContext | None = None,
     ) -> ToolHandlerOutcome:
+        action = params.get("action", "search")
+        current = snapshot.runtime("tool_search")
+        if (current is not None and current.model_spec.input_schema.get("properties", {}).get("action", {}).get("enum") == ["catalog"]
+                and action != "catalog"):
+            return _tool_search_invalid_arguments("旧目录授权只允许catalog，不允许搜索或加载")
+        if action == "catalog":
+            if set(params) != {"action"}:
+                return _tool_search_invalid_arguments("catalog只接受action，不接受搜索参数")
+            return tool_catalog_result(self.registry, snapshot, context)
+        if action != "search" or set(params) - {"action", "query", "names", "category", "limit"}:
+            return _tool_search_invalid_arguments("未知动作或字段")
         query = params.get("query", "")
         if not isinstance(query, str) or ("query" in params and not query.strip()):
             return _tool_search_invalid_arguments("query 必须是非空字符串")
@@ -689,7 +645,6 @@ def _register_native_tools(registry, params):
     register_asset_delivery_tool(registry, params)
     register_audit_group_tools(registry, params)
     registry.register(ToolSearchTool(registry))
-    registry.register(ListToolsTool(registry))
 
 
 # LLM: 注册、Schema、搜索和执行由同一原快照派生；展示投影不能重建注册表、改变handler或伪造真实加载。
@@ -909,7 +864,7 @@ class ToolRegistry:
         by_name = {spec.name: spec for spec in searchable}
         return [by_name[hit.name] for hit in hits if hit.name in by_name]
 
-    # LLM: 目录沿同一原快照展示；可选短名单仅缩名卡，显式allowed忽略自适应投影，原完整list_tools仍可发现全部授权工具。
+    # LLM: 目录沿同一原快照展示；可选短名单仅缩名卡，显式allowed忽略自适应投影，原完整tool_search(action=catalog)仍可发现全部授权工具。
     # 函数用途: 渲染本轮工具提示和可找回的折叠清单，不把展示选择变成权限或加载事实。
     def render_catalog_section(
         self,
@@ -1110,7 +1065,6 @@ def _registry_with_access_policy(registry, access_mode, path_access_mode, owner_
         view.tools = {}
         register_base_tools(view, params)
         view.register(ToolSearchTool(view))
-        view.register(ListToolsTool(view))
         for name, tool in registry.tools.items():
             if name not in view.tools:
                 view.register(tool)
@@ -1149,10 +1103,14 @@ def _share_registry_mcp_state(registry, source):
             return True
 
 
-# LLM: Projection preserves the original hard permission intersection and fail-closed availability checks; it never connects clients.
+# LLM: 快照投影保留原硬权限交集与失败关闭的可用性检查，不连接客户端；旧目录授权只能投影catalog单动作。
 # 函数用途: 在独立辅助函数里生成同一份工具事实快照，保持所有目录和执行入口一致。
 def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root):
     allowed = allowed_tool_set(allowed_tools)
+    # 旧宿主白名单只迁为catalog-only schema，当前显式tool_search授权才含search/load。
+    catalog_only = allowed is not None and "list_tools" in allowed and "tool_search" not in allowed
+    if allowed is not None and "list_tools" in allowed:
+        allowed = (allowed - {"list_tools"}) | {"tool_search"}
     regime = path_scope_regime(registry.owner_scope_root if owner_scope_root is None else owner_scope_root,
                                registry.path_access_mode)
     runtimes: list[ToolRuntime] = []
@@ -1165,15 +1123,18 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
             continue
         spec = getattr(tool, "model_spec", None)
         exposure = getattr(tool, "exposure", None)
+        if catalog_only and name == "tool_search":
+            spec = _catalog_only_model_spec(spec)
         if isinstance(spec, ToolModelSpec) and (exposure is None or bool(getattr(exposure, "model_visible", True))):
             catalog_specs.append(spec)
-        if name in registry.disabled_tool_names:
+        if name in registry.disabled_tool_names or (catalog_only and name == "tool_search" and "list_tools" in registry.disabled_tool_names):
             continue
         availability = _safe_tool_availability(tool)
         if not availability.available:
             unavailable.append((name, availability.error_code or "TOOL_UNAVAILABLE", availability.reason))
             continue
-        runtimes.append(_snapshot_runtime(name, tool, availability, regime))
+        runtime = _snapshot_runtime(name, tool, availability, regime)
+        runtimes.append(replace(runtime, model_spec=spec) if catalog_only and name == "tool_search" else runtime)
     return ToolRuntimeSnapshot(
         run_id=str(run_id or ""), runtimes=tuple(runtimes),
         available_tool_names=frozenset(runtime.model_spec.name for runtime in runtimes),
@@ -1182,6 +1143,14 @@ def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root
         deferred_categories=tuple(sorted(registry.catalog_deferred_categories)),
         default_deferral_enabled=bool(registry.catalog_default_deferral_enabled),
     )
+
+
+# LLM: 旧list_tools授权只能变为catalog单动作；限制进入schema哈希，原快照与全局handler不改，不建立影子注册。
+# 函数用途: 为保存的旧目录白名单生成最窄规范合同。
+def _catalog_only_model_spec(spec):
+    return replace(spec, schema_hash="", description="只读本人完整工具目录，不允许搜索或加载。",
+        input_schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["catalog"]}},
+            "required": ["action"], "additionalProperties": False})
 
 
 # LLM: Caller holds prepare; remove by structural proxy/client identity before discarding references, never by a name prefix.
@@ -1707,7 +1676,7 @@ def _split_deferred_specs(
     return primary, deferred
 
 
-# LLM: 短名单只缩名字，完整数目和原tool_search/list_tools入口保留；省略名称不能成为权限或loaded事实。
+# LLM: 短名单只缩名字，完整数目和原tool_search/tool_search(action=catalog)入口保留；省略名称不能成为权限或loaded事实。
 #   declared_names（工具自己声明的默认收起）不进名字串，改在末尾按“名字：用途”列索引，且不受短名单裁剪；为空时逐字保留原输出。
 # 函数用途: 显示有界的本轮折叠名称提示，默认None逐字保留原完整折叠清单；被折叠的插件按插件 ID 与简介列出（仅展示）。
 def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlist_names: frozenset[str] | None = None,
@@ -1721,7 +1690,7 @@ def _render_deferred_notice(specs: list[ToolModelSpec], *, presentation_shortlis
     index = _declared_deferred_index(specs, declared_names)
     notice = (
         f"- ⊞ 另有 {len(specs)} 个工具已注册但未直接展开；需要时先用 tool_search 搜索并加载，"
-        "也可用 list_tools 查看完整清单"
+        "也可用 tool_search(action=catalog) 查看完整清单"
     )
     if presentation_shortlist_names is None:
         return notice + (f"：{names}" if shown or not index else "。") + index
@@ -1761,7 +1730,7 @@ def _render_catalog_spec(spec: ToolModelSpec, config: CatalogRenderConfig) -> st
     )
 
 
-# LLM: 分页大小是代码常量（core.TOOL_CATALOG_LIMIT_COUNT），模型改不了，所以提示指向 list_tools 看完整清单，不提配置键。只读。
+# LLM: 分页大小是代码常量（core.TOOL_CATALOG_LIMIT_COUNT），模型改不了，所以提示指向 tool_search(action=catalog) 看完整清单，不提配置键。只读。
 # 函数用途: 目录只列了一部分工具时，告诉模型总数、下一页位置和怎么看全部。
 def _catalog_page_notice(config: CatalogRenderConfig, *, total: int, returned: int) -> str:
     next_offset = config.offset + returned
@@ -1769,5 +1738,5 @@ def _catalog_page_notice(config: CatalogRenderConfig, *, total: int, returned: i
         return ""
     return (
         f"- more_tools：工具目录已分页，next_offset={next_offset} limit={config.limit} total={total}。"
-        " 其余工具可用 list_tools 查看完整清单。"
+        " 其余工具可用 tool_search(action=catalog) 查看完整清单。"
     )

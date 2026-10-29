@@ -262,14 +262,16 @@ def test_workspace_skills_never_expose_foreign_owner_snapshot_location(make_agen
     assert str(other) not in result.output
 
 
+# LLM: catalog与self_map只读同次权限上下文，插件与内置读取范围不能混淆。
+# 函数用途: 核对目录合并后两种读取边界仍标明真实作用域。
 @pytest.mark.parametrize('exact', [False, True])
 def test_list_tools_and_map_permissions_label_plugin_and_builtin_read_scopes(make_agent, exact):
     agent = make_agent(kind='user')
     target, boundary = _case(agent)
     if exact:
         boundary |= {'read_scope_mode': 'exact', 'allowed_read_roots': [str(target)]}
-    allowed = ['self_map', 'read_file', 'list_tools']
-    listing = execute_registry_test_call(agent.tools, 'list_tools', {}, allowed_tools=allowed, write_boundary=boundary)
+    allowed = ['self_map', 'read_file', 'tool_search']
+    listing = execute_registry_test_call(agent.tools, 'tool_search', {'action': 'catalog'}, allowed_tools=allowed, write_boundary=boundary)
     assert listing.ok, listing.output
     original = json.loads(listing.output)['self_context']['filesystem']
     mapped = execute_registry_test_call(agent.tools, 'self_map', {'section': 'permissions', 'item': 'current'},

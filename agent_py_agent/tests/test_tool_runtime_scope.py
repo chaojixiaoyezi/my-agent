@@ -1,3 +1,5 @@
+# LLM: 工具发现与执行共用请求scope，规范catalog只读本次owner权限和目录边界。
+# 模块用途: 回归受限工具清单、执行目录和远端身份投影。
 """LLM: Tool discovery and execution must share one structured runtime scope.
 
 These tests keep restricted main/sub-agent runs from learning or loading tools
@@ -76,15 +78,17 @@ def _agent(tmp_path) -> SimpleAgent:
     )
 
 
+# LLM: catalog仅投影当前授权快照，不能退回进程注册表泄露未授权工具。
+# 函数用途: 检查受限工具目录只含本次许可成员。
 def test_restricted_list_tools_only_reports_current_runtime_scope(tmp_path) -> None:
     """LLM: list_tools is a scoped discovery surface, not a process-wide registry dump."""
     agent = _agent(tmp_path)
 
     result = _execute(
         agent,
-        "list_tools",
-        {},
-        allowed_tools=["list_tools", "read_file"],
+        "tool_search",
+        {"action": "catalog"},
+        allowed_tools=["tool_search", "read_file"],
     )
 
     assert result.ok, result.output
@@ -92,7 +96,7 @@ def test_restricted_list_tools_only_reports_current_runtime_scope(tmp_path) -> N
         result.metadata["handler_details"]["tool_output_policy"]["live_prompt_output"]
     )
     names = {item["name"] for item in payload["tools"]}
-    assert names == {"list_tools", "read_file"}
+    assert names == {"tool_search", "read_file"}
 
 
 def test_restricted_tool_search_cannot_load_ungranted_deferred_tools(tmp_path) -> None:
@@ -170,6 +174,8 @@ class _SwitchTool(BaseTool):
         return ToolHandlerOutcome(self.model_spec.name, True, "executed")
 
 
+# LLM: 未配置工具不得进入授权快照，目录入口改名不能泄露其私有配置。
+# 函数用途: 检查可选工具缺配置时仍如实缺席且执行拒绝不泄密。
 def test_unconfigured_optional_tools_are_absent_and_report_unavailable(tmp_path) -> None:
     """LLM: registered adapters are not advertised as usable before their structured config exists."""
     agent = _agent(tmp_path)
@@ -194,7 +200,7 @@ def test_unconfigured_optional_tools_are_absent_and_report_unavailable(tmp_path)
         agent,
         "analyze_image",
         {"image": "missing.png"},
-        allowed_tools=["list_tools"],
+        allowed_tools=["tool_search"],
     )
     assert unauthorized.error_code == "TOOL_NOT_IN_RUNTIME_SNAPSHOT"
     assert "vision_api_base" not in unauthorized.output
@@ -275,6 +281,8 @@ def test_execution_uses_same_frozen_availability_snapshot_seen_by_model(tmp_path
     assert tool.executions == 1
 
 
+# LLM: 目录使用宿主已解析owner类型和原审批策略，不能因更名改归属或提权。
+# 函数用途: 检查远端owner的完整目录边界说明。
 def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
     """LLM: 审批模式来自 owner 原策略，owner 类型只表示作用域；自查不得混用两种事实。"""
     agent = SimpleAgent(
@@ -291,9 +299,9 @@ def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
 
     result = _execute(
         agent,
-        "list_tools",
-        {},
-        allowed_tools=["list_tools"],
+        "tool_search",
+        {"action": "catalog"},
+        allowed_tools=["tool_search"],
     )
 
     assert result.ok, result.output
@@ -303,4 +311,4 @@ def test_list_tools_uses_resolved_remote_owner_type(tmp_path) -> None:
     assert payload["permission_scope"] == "owner_scoped"
     assert payload["permission_mode"] == "auto"
     assert payload["visible_tool_count"] == 1
-    assert [item["name"] for item in payload["tools"]] == ["list_tools"]
+    assert [item["name"] for item in payload["tools"]] == ["tool_search"]

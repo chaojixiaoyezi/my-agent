@@ -73,7 +73,7 @@ def registry_self_context(registry, snapshot: ToolRuntimeSnapshot, context: Tool
             'owner_type': snapshot.owner_type, 'scope': 'current_owner_and_run',
             'permissions': {'mode': 'unknown', 'approval_mode': execution, 'source': 'unbound_owner'},
             'tool_states': states,
-            'usage': {'query': 'list_tools', 'tool_details': 'tool_search',
+            'usage': {'query': 'tool_search(action=catalog)', 'tool_details': 'tool_search',
                       'status': '/status', 'help': '/help',
                       'permissions': '由本人在正规权限面板或管理入口修改；查询不改变授权。',
                       'resource_authorization': '工具就绪仍须逐次核对具体文件、网络、凭据和通道资源授权。'}}

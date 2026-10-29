@@ -1,10 +1,12 @@
+# LLM: 按需加载只是展示事实，规范目录不产生loaded信封或改变执行上界。
+# 模块用途: 检查工具渐进披露、默认收起和搜索发现流程。
 from __future__ import annotations
 
 """工具渐进式披露单测 —— 延迟 category 通过 tool_search 按需加载。
 
 背景:每轮 prompt 原本把全部工具的完整 spec 平铺进主目录(`render_catalog_section`),
 一句问候也背着一堆垂直工具 → token 膨胀。本特性把 deferred category 从初始 schema 和主目录
-正文移出，只留折叠名单；模型用单步 tool_search 搜索并展开命中工具，list_tools 仍可查看完整注册表。
+正文移出，只留折叠名单；模型用单步 tool_search 搜索并展开命中工具，catalog 动作仍可查看完整注册表。
 普通对话大幅瘦身，垂直任务功能不丢，deferred=[] 完全恢复老行为。
 """
 
@@ -92,8 +94,11 @@ def test_tool_search_schema_supports_query_or_exact_names(tmp_path) -> None:
     agent = _agent(tmp_path)
     schema = agent.tools.tools["tool_search"].model_spec.input_schema
 
-    assert set(schema["properties"]) == {"query", "names", "category", "limit"}
-    assert schema["anyOf"] == [{"required": ["query"]}, {"required": ["names"]}]
+    assert set(schema["properties"]) == {"action", "query", "names", "category", "limit"}
+    assert schema["properties"]["action"]["enum"] == ["search", "catalog"]
+    assert "anyOf" not in schema
+    assert not agent.tools.tools["tool_search"].execute({}).ok
+    assert not agent.tools.tools["tool_search"].execute({"action": "catalog", "names": ["read_file"]}).ok
     assert schema["properties"]["names"]["maxItems"] == 16
     assert schema["additionalProperties"] is False
 
@@ -175,10 +180,11 @@ def test_normal_query_recommended_stays_small(tmp_path) -> None:
     assert rec.count("collaboration") == 0
 
 
-def test_list_tools_still_lists_all_including_deferred(tmp_path) -> None:
-    """list_tools 始终列全部工具(含被折叠的),作为兜底发现入口。"""
+# LLM: catalog列出包括折叠项的同范围快照，但不能偷偷加载工具。
+# 函数用途: 保留完整目录的兜底发现能力。
+def test_catalog_still_lists_all_including_deferred(tmp_path) -> None:
     agent = _agent(tmp_path)
-    result = agent.tools.tools["list_tools"].execute({})
+    result = agent.tools.tools["tool_search"].execute({"action": "catalog"})
     assert result.ok
     assert "get_goal" in result.output
     assert "create_goal" in result.output

@@ -1,3 +1,5 @@
+# LLM: 调用和结果沿唯一执行器运输，宿主迁移事实与模型参数分离，调用ID和幂等身份不随规范化改变。
+# 模块用途: 定义工具请求、执行结果与证据引用的共同数据合同。
 from __future__ import annotations
 
 """Canonical contracts carried across provider, policy, execution and replay.
@@ -12,8 +14,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from ..contracts.error_taxonomy import error_contract
 from ..contracts.idempotency import operation_idempotency_key
+from .versioned_input_decoder import canonical_error_contract as error_contract
 
 SourceProtocol = Literal["native", "text"]
 ToolChoiceMode = Literal["auto", "required", "specific", "none"]
@@ -123,6 +125,8 @@ class ToolProtocolSnapshot:
         object.__setattr__(self, "source_protocol", protocol)
 
 
+# LLM: 迁移事实来自未执行请求的宿主协议，不进入模型arguments，也不替代权限与幂等身份。
+# 类用途: 运输规范调用及执行前已核的原始输入来源。
 @dataclass(frozen=True)
 class ToolCall:
     """The sole internal authority for one proposed tool invocation."""
@@ -138,7 +142,10 @@ class ToolCall:
     required_action_id: str = ""
     operation_id: str = ""
     idempotency_key: str = ""
+    input_migration: dict[str, Any] = field(default_factory=dict)
 
+    # LLM: 身份与幂等沿原校验；迁移字典只复制宿主事实，不作为模型输入或权限。
+    # 函数用途: 冻结规范调用与执行前已核的版本迁移信息。
     def __post_init__(self) -> None:
         call_id = str(self.call_id or "").strip()
         tool_name = str(self.tool_name or "").strip()
@@ -179,11 +186,14 @@ class ToolCall:
         object.__setattr__(self, "required_action_id", str(self.required_action_id or "").strip())
         object.__setattr__(self, "operation_id", operation_id)
         object.__setattr__(self, "idempotency_key", idempotency_key)
+        object.__setattr__(self, "input_migration", deepcopy(self.input_migration))
 
     @property
     def args_hash(self) -> str:
         return tool_arguments_hash(self.arguments)
 
+    # LLM: 只有真实迁移才附信息，普通v2序列化逐字不增加字段，不携原始秘密参数。
+    # 函数用途: 输出规范调用与可选旧输入的指纹事实。
     def to_dict(self) -> dict[str, Any]:
         return {
             "call_id": self.call_id,
@@ -198,6 +208,7 @@ class ToolCall:
             "operation_id": self.operation_id,
             "idempotency_key": self.idempotency_key,
             "args_hash": self.args_hash,
+            **({"input_migration": deepcopy(self.input_migration)} if self.input_migration else {}),
         }
 
 
@@ -358,6 +369,8 @@ class ToolFailureFacts:
     status: ToolResultStatus = "failed"
 
 
+# LLM: 结果是历史、结算和归档的唯一运输合同；可信输入迁移事实须与原调用同时进入结果，不复用为授权。
+# 类用途: 保存工具执行的结构化结果、正文及来源，让归档和现场展示共用真实状态。
 @dataclass(frozen=True)
 class ToolResult:
     """The sole call result carried to history, settlement and finalization."""
@@ -463,6 +476,8 @@ class ToolResult:
     def is_error(self) -> bool:
         return not self.ok
 
+    # LLM: 迁移事实执行前已绑定call；归档和返回同源，不在执行后伪造持久化事实。
+    # 函数用途: 构造带可信输入来源的成功结果。
     @classmethod
     def succeeded(
         cls,
@@ -488,9 +503,11 @@ class ToolResult:
             refs=facts.refs,
             output_trust=facts.output_trust,
             output_redaction=facts.output_redaction,
-            metadata=facts.metadata,
+            metadata={**facts.metadata, **({"input_migration": call.input_migration} if call.input_migration else {})},
         )
 
+    # LLM: 拒绝与审批等待也保留宿主迁移事实，业务正文不可覆盖它。
+    # 函数用途: 构造带原始输入指纹的失败结果。
     @classmethod
     def failed(
         cls,
@@ -517,7 +534,7 @@ class ToolResult:
             refs=facts.refs,
             output_trust=facts.output_trust,
             output_redaction=facts.output_redaction,
-            metadata=facts.metadata,
+            metadata={**facts.metadata, **({"input_migration": call.input_migration} if call.input_migration else {})},
         )
 
     def with_execution_facts(

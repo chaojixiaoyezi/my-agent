@@ -1,4 +1,4 @@
-# LLM: 参数说明只补充工具级规则；嵌套 role 复用顶层索引，包引用经 allowed_skills 解析，不从资料线索推断授权。
+# LLM: 参数说明只补充工具级规则；role索引只挂item，包引用经 allowed_skills 解析，不从资料线索推断授权。
 #   effort 是用户八档而不是供应商原始字段，创建时冻结，发送时沿唯一换算表过滤模型声明。
 # 模块用途: 集中保存派工参数与示例；保留 exact covers、模型、角色、工作区和显式包授权含义。
 
@@ -23,11 +23,11 @@ _CREATE_USE_CASES = [
 ]
 _CREATE_KEYWORDS = ["子代理", "派工", "拆分", "任务", "分别", "分头", "并行", "不同项目", "各项目", "subagent", "delegate", "spawn"]
 _CREATE_PARAMETERS = {
-    "goal": "只派一个子代理时必填，写这个子代理的完整目标；使用 items 批量派工时可选，只作整批说明，不替代每项自己的 goal",
+    "goal": "每个item必填，只写这个子代理的完整目标；整批说明用batch_summary，不能替代每项goal。",
     "persistent_goal": "可选持续目标正文；提供时为这个 child 创建唯一 Goal，正常回合结束后继续到完成或明确阻塞。省略是普通 prompt 派工，子代理的 Todo 可自行选择使用",
     "items": (
-        "一次派多个可同时立即运行、彼此不等结果的任务时使用；每项必须自带独立 goal，顶层 goal 可省略。"
-        "编码项还必须在 goal 中说明互不重叠的文件或模块写入职责；可共享同一父级 task root。只派一个时直接传 goal"
+        "一项或多项统一用非空items数组，每项必须自带独立goal。"
+        "编码项还必须说明互不重叠的文件或模块写入职责；可共享同一父级task root。"
     ),
     "covers": '可选的 task_progress exact-id 映射（普通 items 或 coverage.targets，例如 ["req-03"]）；凡 child 原样承接一个已存在 open 项，都应复制该项 id，DONE 后系统按 id 打勾。只有额外工作或关系不能确定时才省略；省略后 child 用自己的 run_id 记进度，不关闭原 Todo',
     "description": "可选的 3-12 字职责短标题，只说明这个子代理大概负责什么，供 TUI/Web 单行展示",
@@ -49,9 +49,9 @@ _CREATE_PARAMETERS = {
     "audit_source_id": "仅当前命名 Audit 已发布结构化来源时使用；为这个叶子选择一个返回给你的精确 source_id。程序会把已验证的传输事实交给子代理，别把 URL 或 watch_id 重新写进任务步骤",
 }
 _CREATE_PARAMETER_DETAILS = {
-    "goal": "与用户命令 /goal 无关；普通聊天任务也可派工。单派时写清这个子代理要交付什么并保留全部硬约束；items 批量模式可省略顶层 goal，每项自己的 goal 才是 child 的完整工作边界。",
+    "goal": "与用户命令 /goal 无关；普通聊天任务也可派工。写清这个子代理要交付什么并保留全部硬约束，每项goal才是child的完整工作边界。",
     "items": (
-        "批量并行任务；非空列表，每项包含独立 goal，顶层 goal 可省略。依赖顺序与写入分工见工具说明。"
+        "独立派工项的非空列表，每项包含独立goal，一项也用数组。依赖顺序与写入分工见工具说明。"
         "资料放各 item.input_refs；covers/output_files 是可选结构化线索。"
     ),
     "description": "只写一句职责短标题，例如“实现超级玛丽核心玩法”；不要写过程、状态、路径或完整任务要求。省略时界面会截取 goal 开头。",
@@ -63,7 +63,7 @@ _CREATE_PARAMETER_DETAILS = {
     "allowed_tools": "一般省略；不完整列表不会剥夺子代理基础读写能力。",
     "allowed_skills": (
         "可选 Skill 名称或 stable_id 列表；能力包使用 capability:<package_id>。"
-        "批量派工可填各 item.allowed_skills，未单列时沿用顶层默认值；goal 或 input_refs 中提及包不等于授权。"
+        "授权分别填各item.allowed_skills；未填时沿宿主默认策略，goal或input_refs中提及包不等于授权。"
         "创建时解析为不可变快照引用，未知或禁用项整批拒绝，包内资源仍按需私有读取。"
     ),
     "input_refs": "这是交给子代理的资料线索；单个子代理自己的输入放在对应 item.input_refs。",
@@ -101,16 +101,15 @@ _CREATE_INPUT_MEDIA_DETAILS = {
     ),
 }
 _CREATE_ITEM_PARAMETER_DETAILS = {
-    "role": "与顶层 role 使用同一模板索引；省略时为 worker。",
     "goal": (
-        "每个 item 都必填；只写这一个子代理要完成和交付的具体工作，不要复制顶层整批 goal。"
+        "每个item都必填；只写这一个子代理要完成和交付的具体工作，不要复制batch_summary。"
         "该 goal 是 child 的完整工作边界，不要把兄弟 item 也塞进来；编码任务要同时写清共同目标目录"
         "以及与兄弟项互不重叠的文件或模块范围。"
     ),
-    "description": "每个 item 可选；职责短标题只用 3-12 字概括这一个子代理负责什么，不要复制顶层整批 description。",
+    "description": "每个item可选；职责短标题只用3-12字概括这一个子代理负责什么，不要复制整批说明。",
 }
 _CREATE_EXAMPLES = [
-    '{"tool":"create_subagents","goal":"完成现有 Todo","items":[{"goal":"实现 req-03 用户模块","covers":["req-03"],"description":"实现用户模块","output_files":["src/auth/"]},{"goal":"补齐 req-04 测试","covers":["req-04"],"description":"补齐模块测试","role":"tester"}]}',
-    '{"tool":"create_subagents","goal":"实现用户认证模块并写到 platform/auth/,要可运行","description":"实现用户认证","output_files":["platform/auth/"]}',
+    '{"tool":"create_subagents","batch_summary":"完成现有Todo","items":[{"goal":"实现req-03用户模块","covers":["req-03"],"description":"实现用户模块","output_files":["src/auth/"]},{"goal":"补齐req-04测试","covers":["req-04"],"description":"补齐模块测试","role":"tester"}]}',
+    '{"tool":"create_subagents","items":[{"goal":"实现用户认证模块并写到platform/auth/，要可运行","description":"实现用户认证","output_files":["platform/auth/"]}]}',
     '{"tool":"create_subagents","items":[{"goal":"完成清单外的独立资料A","description":"核对资料A","input_refs":["data/a.md"]},{"goal":"完成清单外的独立资料B","description":"核对资料B","input_refs":["data/b.md"]}]}',
 ]

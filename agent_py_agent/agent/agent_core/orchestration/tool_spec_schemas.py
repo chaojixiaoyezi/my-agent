@@ -16,7 +16,7 @@ from typing import Any
 from ...backends.reasoning_control import REASONING_LEVELS
 
 _CREATE_ITEM_PARAMETER_SCHEMA: dict[str, Any] = {
-    "goal": {"type": "string"},
+    "goal": {"type": "string", "minLength": 1},
     "persistent_goal": {"type": "string", "minLength": 1, "maxLength": 4000},
     # 计划绑定紧跟 goal 展示给模型；它仍是可选字段，但承接已有 Todo 时应优先被看到并填写。
     "covers": {"type": "array", "items": {"type": "string"}},
@@ -50,9 +50,10 @@ _CREATE_INPUT_MEDIA_ITEM_SCHEMA: dict[str, Any] = {
 def create_parameter_schema(*, input_media: bool = False) -> dict[str, Any]:
     item_schema = {**_CREATE_ITEM_PARAMETER_SCHEMA, **(_CREATE_INPUT_MEDIA_ITEM_SCHEMA if input_media else {})}
     return {
-        **item_schema,
+        "batch_summary": {"type": "string", "description": "整批简述，不替代每项goal或广播为子代理参数。"},
         "items": {
             "type": "array",
+            "minItems": 1,
             "items": {
                 "type": "object",
                 "properties": item_schema,

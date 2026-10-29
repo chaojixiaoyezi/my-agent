@@ -1,3 +1,5 @@
+# LLM: 守卫只使用结构化执行观察，目录输入用规范tool_search，不读取模型正文决定进展。
+# 模块用途: 回归工具重复调用、无进展门禁及恢复提示。
 from __future__ import annotations
 
 from dataclasses import replace
@@ -81,14 +83,16 @@ def _decision(agent: object, params: object, payload: dict[str, object]):
     )
 
 
+# LLM: 规范目录工具仍沿原重复读取守卫，不因入口合并改成无约束轮询。
+# 函数用途: 检查重复只读成功进入同一门禁。
 def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> None:
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
-    payload = {"tool": "list_tools"}
+    payload = {"tool": "tool_search"}
 
     for _ in range(3):
         record_tool_guard_observation(
-            agent, params, payload, ToolHandlerOutcome("list_tools", True, "same")
+            agent, params, payload, ToolHandlerOutcome("tool_search", True, "same")
         )
 
     decision = _decision(agent, params, payload)
@@ -97,14 +101,16 @@ def test_runtime_routes_repeated_read_only_successes_through_gate_pipeline() -> 
     assert "TOOL_GUARDRAIL_NO_PROGRESS_BLOCKED" in decision.reason_codes
 
 
+# LLM: 零阈值沿原无限语义，不能借工具名迁移改变运行策略。
+# 函数用途: 检查关闭无进展阈值时不误拦目录读取。
 def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 0})
-    payload = {"tool": "list_tools"}
+    payload = {"tool": "tool_search"}
 
     for _ in range(4):
         record_tool_guard_observation(
-            agent, params, payload, ToolHandlerOutcome("list_tools", True, "same")
+            agent, params, payload, ToolHandlerOutcome("tool_search", True, "same")
         )
 
     decision = _decision(agent, params, payload)
@@ -112,17 +118,19 @@ def test_runtime_no_progress_threshold_zero_is_unlimited() -> None:
     assert decision.allowed is True
 
 
+# LLM: 拒绝回执须保留真实原观察和恢复建议，不能伪造执行阶段。
+# 函数用途: 核对规范目录名下的重复读取拒绝说明。
 @pytest.mark.parametrize("failed", [False, True])
 def test_runtime_denial_keeps_original_observation_and_explains_recovery(failed) -> None:
     from agent_py_agent.agent.tooling.executor import _decision_message
 
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1, "repeat_fail_threshold": 1})
-    payload = {"tool": "list_tools"}
+    payload = {"tool": "tool_search"}
     for _ in range(3):
         record_tool_guard_observation(
             agent, params, payload,
-            ToolHandlerOutcome("list_tools", not failed, "same", error_code="TOOL_TIMEOUT" if failed else ""),
+            ToolHandlerOutcome("tool_search", not failed, "same", error_code="TOOL_TIMEOUT" if failed else ""),
         )
     original = tool_guardrail_records(agent)
     for _ in range(270):
@@ -143,18 +151,22 @@ def test_runtime_denial_keeps_original_observation_and_explains_recovery(failed)
     assert _decision(agent, params, {"tool": "web_search", "query": "a different step"}).allowed
 
 
+# LLM: 不相关失败不能清除之前读取观察，否则更名后会重新出现空转。
+# 函数用途: 检查跨工具失败不会绕过重复读取守卫。
 def test_runtime_unrelated_failure_does_not_forget_read_result() -> None:
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
     for _ in range(3):
-        record_tool_guard_observation(agent, params, {"tool": "list_tools"}, ToolHandlerOutcome("list_tools", True, "same"))
+        record_tool_guard_observation(agent, params, {"tool": "tool_search"}, ToolHandlerOutcome("tool_search", True, "same"))
     record_tool_guard_observation(
         agent, params, {"tool": "web_search", "query": "another step"},
         ToolHandlerOutcome("web_search", False, "offline", error_code="TOOL_TIMEOUT"),
     )
-    assert not _decision(agent, params, {"tool": "list_tools"}).allowed
+    assert not _decision(agent, params, {"tool": "tool_search"}).allowed
 
 
+# LLM: 守卫恢复信息须沿原记录及原生消息投影保留，不依赖退役工具名。
+# 函数用途: 验证规范化归档和展示仍携带恢复事实。
 def test_guardrail_recovery_survives_canonical_record_and_native_projection(tmp_path) -> None:
     from agent_py_agent.agent.agent_core._tool_loop_service import (
         ToolCallRecordParams,
@@ -167,9 +179,9 @@ def test_guardrail_recovery_survives_canonical_record_and_native_projection(tmp_
 
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
-    payload = {"tool": "list_tools"}
+    payload = {"tool": "tool_search"}
     for _ in range(3):
-        record_tool_guard_observation(agent, params, payload, ToolHandlerOutcome("list_tools", True, "same"))
+        record_tool_guard_observation(agent, params, payload, ToolHandlerOutcome("tool_search", True, "same"))
     decision = _decision(agent, params, payload)
     call = _canonical_call(agent, params, payload)
     result = ToolResult.failed(
@@ -226,15 +238,17 @@ def test_real_shell_executor_stops_repeats_and_accepts_progress(tmp_path) -> Non
     assert execution.result.ok and execution.result.handler_executed
 
 
+# LLM: 真正本地写进展可以重置读守卫，纯目录读取不能冒充进展。
+# 函数用途: 检查规范目录与实际写操作之间的进展判定。
 def test_runtime_repeated_read_guard_resets_after_local_progress() -> None:
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
-    read_payload = {"tool": "list_tools"}
+    read_payload = {"tool": "tool_search"}
     write_payload = {"tool": "write_file", "path": "outputs/source_index.json", "content": "{}"}
 
     for _ in range(3):
         record_tool_guard_observation(
-            agent, params, read_payload, ToolHandlerOutcome("list_tools", True, "same")
+            agent, params, read_payload, ToolHandlerOutcome("tool_search", True, "same")
         )
     blocked = _decision(agent, params, read_payload)
     assert blocked.allowed is False
@@ -355,20 +369,22 @@ def test_runtime_boundary_carries_guardrail_records_and_policy() -> None:
     assert boundary["tool_guardrail_records"] == tool_guardrail_records(agent)
 
 
+# LLM: provider换调用ID不能绕过相同工具输入的无进展判定。
+# 函数用途: 检查规范目录调用重复时仍合并观察。
 def test_runtime_guardrail_ignores_provider_call_id_for_same_tool_input() -> None:
     agent = _agent()
     params = _params(task_attributes={"readonly_no_progress_threshold": 1})
 
     for index in range(3):
-        payload = {"tool": "list_tools", "call_id": f"provider-call-{index}"}
+        payload = {"tool": "tool_search", "call_id": f"provider-call-{index}"}
         record_tool_guard_observation(
             agent,
             params,
             payload,
-            ToolHandlerOutcome("list_tools", True, "same"),
+            ToolHandlerOutcome("tool_search", True, "same"),
         )
 
-    next_payload = {"tool": "list_tools", "call_id": "provider-call-next"}
+    next_payload = {"tool": "tool_search", "call_id": "provider-call-next"}
     decision = _decision(agent, params, next_payload)
 
     assert decision.allowed is False
@@ -626,6 +642,8 @@ def _params(*, task_attributes: dict[str, object] | None = None):
     )
 
 
+# LLM: 夹具只构造同源策略工具，不启动真实模型或修改正式进度账。
+# 函数用途: 提供守卫测试用的原策略和工具集。
 def _agent():
     task_progress = _tool(
         "task_progress",
@@ -640,7 +658,7 @@ def _agent():
     return SimpleNamespace(
         local_store=None,
         tools={
-            "list_tools": _tool("list_tools", "read_only"),
+            "tool_search": _tool("tool_search", "read_only"),
             "web_search": _tool("web_search", "read_only"),
             "read_artifact": _tool("read_artifact", "read_only"),
             "write_file": _tool("write_file", "mutating"),
@@ -658,7 +676,11 @@ def _tool(
     return _FakeTool(name, effect, effect_by_parameter=effect_by_parameter)
 
 
+# LLM: 假工具只声明测试的读写效果，不能成为产品权限兜底。
+# 类用途: 为守卫测试提供可控的工具参数与策略。
 class _FakeTool(BaseTool):
+    # LLM: 构造只保存声明，不写盘、不联网或发出工具调用。
+    # 函数用途: 保存测试工具的名称和效果合同。
     def __init__(
         self,
         name: str,
@@ -667,7 +689,7 @@ class _FakeTool(BaseTool):
         effect_by_parameter: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (),
     ):
         properties = {
-            "list_tools": {},
+            "tool_search": {},
             "web_search": {"query": {"type": "string"}},
             "read_artifact": {"artifact_ref": {"type": "string"}},
             "write_file": {

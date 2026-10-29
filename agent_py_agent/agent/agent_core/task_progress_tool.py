@@ -1,4 +1,5 @@
-
+# LLM: 软进度只读写原owner/thread账本；旧create在宿主输入边界转换，规范业务只有read/update，不接管生命周期。
+# 模块用途: 校验并读写准确进度项，保留covers及纠错重开边界。
 from __future__ import annotations
 
 """LLM: Expose exact owner/thread progress ledgers as notes, never a lifecycle gate or workspace selector.
@@ -54,8 +55,7 @@ if TYPE_CHECKING:
     from ..core import SimpleAgent
 
 
-# LLM: This model tool owns only progress-ledger validation/projection. It must
-# never schedule another model turn or decide whether a task is complete.
+# LLM: 此模型工具仅负责原软进度账的校验和投影，不调度下一回合，也不决定业务任务是否完成。
 # 类用途: 提供软进度清单的读写入口，不负责催办、续跑或验收。
 class TaskProgressTool(BaseTool):
     model_spec = build_task_progress_model_spec()
@@ -63,7 +63,7 @@ class TaskProgressTool(BaseTool):
         effect_resolver=EffectResolverPolicy(
             "read_only",
             by_parameter=(
-                ("action", (("", "read_only"), ("read", "read_only"), ("update", "mutating"), ("create", "mutating"))),
+                ("action", (("", "read_only"), ("read", "read_only"), ("update", "mutating"))),
             ),
         ),
         idempotency_policy=IdempotencyPolicy("operation"),
@@ -338,13 +338,10 @@ def _invalid_status_result(params: dict[str, object]) -> ToolHandlerOutcome | No
     )
 
 
+# LLM: 规范动作只认read/update，旧create已由版本化输入边界解码。
+# 函数用途: 保留缺省read，不在业务层接受别名。
 def _normalized_action(value: object) -> str:
-    action = str(value or "read").strip()
-    # S-C1 延伸：MiniMax 用 create 建清单（账本不存在时 update 本就自动创建），
-    # 归一为 update，与 schema 枚举（read/update/create）一致。
-    if action == "create":
-        return "update"
-    return action if action in {"read", "update"} else action or "read"
+    return str(value or "read").strip()
 
 
 def _invalid_action_result(action: str) -> ToolHandlerOutcome | None:

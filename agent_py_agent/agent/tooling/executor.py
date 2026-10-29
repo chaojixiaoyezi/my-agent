@@ -137,9 +137,39 @@ class ToolExecutor:
     def __init__(self, policy: ActionPolicy | None = None) -> None:
         self.policy = policy or ActionPolicy()
 
-    # LLM: 宿主显式管理只可解除模型暴露检查；B5 收紧挂在 decide 后、原审批前，来源只取可信请求；前置拒绝不触发 B4 观察。
-    # 函数用途: 校验一次工具请求并执行或返回前置拒绝，副作用始终通过原操作协调器登记。
+    # LLM: 协议代次只读宿主trusted_run_context；v1归一发生在schema/effect/审批/claim前，不变更调用ID与幂等键。
+    # 函数用途: 在唯一执行链前解码旧输入，保留原请求迁移事实而不重执行历史。
     def execute(self, request: ToolExecutorRequest) -> ToolExecution:
+        from .versioned_input_decoder import decode_tool_input
+
+        version = (request.trusted_run_context or {}).get("tool_input_version", 2)
+        if version == 2 and type(version) is int:
+            return self._execute_current(request)
+        original = request.call
+        try:
+            name, arguments = decode_tool_input(original.tool_name, original.arguments, version=version)
+        except (TypeError, ValueError):
+            decision = ActionDecision("deny", ("TOOL_INVALID_ARGUMENTS",), {"failure_stage": "validation"})
+            return ToolExecution(original, decision, _decision_result(original, decision, time.monotonic()),
+                ("received", "validation_failed", "projected"))
+        snapshot = request.runtime_snapshot
+        runtime = snapshot.runtime(name)
+        migration = {"schema": "tool_input_migration.v1", "input_version": version,
+            "requested_tool_name": original.tool_name, "canonical_tool_name": name,
+            "original_schema_hash": original.schema_hash, "original_args_hash": original.args_hash,
+            "action": arguments.get("action", ""), "call_id_preserved": True}
+        if name == "create_subagents":
+            raw_items = original.arguments.get("items")
+            source_items = raw_items if raw_items else [original.arguments]
+            migration["create_projection"] = {"single": not bool(raw_items),
+                "item_allowed_tools_explicit": ["allowed_tools" in item for item in source_items]}
+        call = replace(original, tool_name=name, arguments=arguments, input_migration=migration,
+            schema_hash=runtime.model_spec.schema_hash if runtime is not None else original.schema_hash)
+        return self._execute_current(replace(request, call=call))
+
+    # LLM: 规范请求沿原唯一执行状态机；当前权限再核验，归一不能跳过B5、审批或原操作账。
+    # 函数用途: 校验规范调用并执行或前置拒绝。
+    def _execute_current(self, request: ToolExecutorRequest) -> ToolExecution:
         started_at = time.monotonic()
         states = ["received"]
         runtime = request.runtime_snapshot.runtime(request.call.tool_name)
@@ -510,12 +540,16 @@ def _precheck_before_approval(runtime: ToolRuntime, decision: ActionDecision) ->
     return decision if availability is None else _precheck_denial(decision, availability, "pre_approval")
 
 
+# LLM: 执行仍沿原操作协调器写账；迁移来源须在handler结果持久化前附入信封，不能事后装饰审计。
+# 函数用途: 按原读写及幂等策略执行一次已授权工具并保留可信迁移事实。
 def _invoke_with_operation_policy(
     request: ToolExecutorRequest,
     call: ToolCall,
     runtime: ToolRuntime,
     decision: ActionDecision,
 ) -> ToolHandlerOutcome:
+    # LLM: 只调用本次冻结的原handler；停止先拒绝，可信迁移信息不进入模型参数。
+    # 函数用途: 执行或拒绝当前调用，在原操作账写结果前附上迁移来源。
     def invoke() -> ToolHandlerOutcome:
         if _cancelled(request):
             return ToolHandlerOutcome(
@@ -526,13 +560,17 @@ def _invoke_with_operation_policy(
                 failure_stage=ToolFailureStage.RUNTIME_GATE.value,
                 handler_executed=False,
             )
-        return invoke_registry_tool(
+        outcome = invoke_registry_tool(
             _invoke_request(
                 request,
                 call,
                 operation_managed=decision.resolved_effect != "read_only",
             )
         )
+
+        if call.input_migration:
+            outcome.result_envelope["input_migration"] = dict(call.input_migration)
+        return outcome
 
     blocked = _require_operation_authority(request, call)
     if blocked is not None:
@@ -770,8 +808,7 @@ def _invoke_request(
     )
 
 
-# LLM: Model arguments stay immutable; only declared internal parameters may receive host facts.
-# The operation-managed flag must come from ActionPolicy, never model text or a handler guess.
+# LLM: 模型参数保持不变，只向声明的internal参数注入宿主事实；输入迁移与操作账状态不能来自模型字段。
 # 函数用途: 给工具实现补入 owner、调用身份、取消令牌和副作用账本接管状态等宿主字段。
 def _handler_arguments(
     request: ToolExecutorRequest,
@@ -794,6 +831,8 @@ def _handler_arguments(
         payload["__operation_id"] = call.operation_id
     if "__operation_managed" in internal_parameters and operation_managed is not None:
         payload["__operation_managed"] = operation_managed
+    if "__input_migration" in internal_parameters and call.input_migration:
+        payload["__input_migration"] = dict(call.input_migration)
     if "__cancellation_token" in internal_parameters:
         payload["__cancellation_token"] = request.cancellation_token
     if "__process_completion_target" in internal_parameters:

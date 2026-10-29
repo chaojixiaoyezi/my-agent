@@ -136,7 +136,7 @@ def test_list_tools_live_cards_preserve_full_archive_and_authority(tmp_path):
 
     registry = SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "m.jsonl")), str(tmp_path)).tools
     snapshot = registry.runtime_snapshot()
-    result = registry.tools["list_tools"]._execute_snapshot(snapshot)
+    result = registry.tools["tool_search"]._execute_snapshot({"action": "catalog"}, snapshot)
     full = json.loads(result.output)
     live = json.loads(result.result_envelope["tool_output_policy"]["live_prompt_output"])
     policy = result.result_envelope["tool_output_policy"]
@@ -177,11 +177,11 @@ def test_discovery_full_output_survives_real_externalization(tmp_path):
     from agent_py_agent.agent.settings import AgentConfig
 
     registry = SimpleAgent(AgentConfig(enable_tools=True, memory_path=str(tmp_path / "m.jsonl")), str(tmp_path)).tools
-    for name, params in (("list_tools", {}), ("tool_search", {"names": ["watch_stream"]})):
+    for index, (name, params) in enumerate((("tool_search", {"action": "catalog"}), ("tool_search", {"names": ["watch_stream"]}))):
         outcome = registry.tools[name].execute(params)
         assert outcome.ok
         record = externalize_tool_output_record(ExternalizeToolOutputRequest(
-            root=tmp_path, tool=name, call_id=name, output=outcome.output, ok=True,
+            root=tmp_path, tool=name, call_id=f"{name}-{index}", output=outcome.output, ok=True,
             result_envelope=outcome.result_envelope))
         assert record["output_externalized"] is True
         wrapper = json.loads(Path(record["output_path"]).read_text())

@@ -14,11 +14,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..contracts.error_taxonomy import error_contract
 from ..retrieval.embedding import EmbeddingProvider, cosine
 from ..retrieval.embedding_usage import counted_as, embedding_input_type
 from ..workspace_read_context import WorkspaceReadContext
 from ..workspace_write_context import WorkspaceWriteContext
+from .versioned_input_decoder import canonical_error_contract as error_contract
 
 
 class ToolFailureStage(str, Enum):
@@ -1176,7 +1176,7 @@ def _validate_trusted_source_ref(tool_name: str, source_ref: object) -> None:
 
 # LLM: 发现入口不能被自适应展示收起；此集合不是权限白名单，只保护当前快照中本来存在的入口。
 # 常量用途: 保留查找完整工具、Skill和自我目录的原发现路径；没有注册时不会凭空增加。
-TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "list_tools", "skill_search", "self_map"})
+TOOL_DISCOVERY_ENTRY_NAMES = frozenset({"tool_search", "skill_search", "self_map"})
 
 
 # LLM: 该快照固定原授权/就绪绑定及创建时展示策略；折叠类别、默认开关与可选展示名都不参与权限或snapshot_hash。

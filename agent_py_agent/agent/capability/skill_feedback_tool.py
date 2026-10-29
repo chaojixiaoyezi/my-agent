@@ -32,14 +32,12 @@ class _FeedbackArgumentsError(ValueError):
     pass
 
 
-# LLM: 两参数名为同一动作的显式别名；冲突拒绝，缺省只读，采用必须有准确技能编号。
-# 函数用途: 纯校验反馈动作，供调用前检查与handler共用。
+# LLM: 规范handler只认action；旧operation在宿主版本化边界转换，采用仍需要准确技能编号。
+# 函数用途: 在claim和业务存储前校验唯一反馈动作。
 def _feedback_operation(params):
-    if not isinstance(params, dict) or set(params) - {'operation', 'action', 'skill_id'}:
-        raise _FeedbackArgumentsError('参数须为对象，仅支持 operation、action、skill_id。')
-    if 'operation' in params and 'action' in params and params['operation'] != params['action']:
-        raise _FeedbackArgumentsError('operation 与 action 必须一致，不能指定冲突动作。')
-    operation = params.get('operation', params.get('action', 'status'))
+    if not isinstance(params, dict) or set(params) - {'action', 'skill_id'}:
+        raise _FeedbackArgumentsError('参数须为对象，仅支持action、skill_id。')
+    operation = params.get('action', 'status')
     if operation not in ('status', 'adopted'):
         raise _FeedbackArgumentsError('动作必须为 status / adopted。')
     if not isinstance(params.get('skill_id', ''), str):
@@ -198,13 +196,13 @@ def _adopt_feedback(agent, store, reference):
 # 类用途: 提供只读学习状态与受约束的模型采用登记，不把读取当成功。
 class SkillFeedbackTool(BaseTool):
     model_spec = ToolModelSpec(name='skill_feedback',description='确实采用本轮已授权的自学Skill时登记adopted；此声明不会增加有效性评分。status查看本owner状态。用户结果反馈通过/skills learned feedback，正式内容确认不能由此工具执行。',
-        input_schema={'type':'object','properties':{'operation':{'type':'string','enum':['adopted','status']},
-            'action':{'type':'string','enum':['adopted','status']},'skill_id':{'type':'string'}},'required':[],'additionalProperties':False})
-    # LLM: 当前policy用by_parameter表达by_action；两别名均声明写入下限，冲突取较高风险且handler拒绝；原operation幂等和资源域保持。
+        input_schema={'type':'object','properties':{'action':{'type':'string','enum':['adopted','status']},
+            'skill_id':{'type':'string'}},'required':[],'additionalProperties':False})
+    # LLM: 旧输入已在effect计算前归一为action；adopted仍是写操作，原幂等及技能资源域保持。
     # 常量用途: 查询只读，采用按原操作账去重和锁定技能资源。
     runtime_policy = ToolRuntimePolicy(
         effect_resolver=EffectResolverPolicy('read_only', by_parameter=tuple(
-            (key, (('status', 'read_only'), ('adopted', 'mutating'))) for key in ('operation', 'action'))),
+            (key, (('status', 'read_only'), ('adopted', 'mutating'))) for key in ('action',))),
         idempotency_policy=IdempotencyPolicy('operation'),
         resource_scopes=ResourceScopePolicy(mode='from_arguments', parameter_names=('skill_id',),
             parameter_kinds={'skill_id': 'logical'}, resource_domains={'skill_id': 'skill_learning'}),

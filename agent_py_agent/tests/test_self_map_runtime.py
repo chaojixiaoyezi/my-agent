@@ -1,3 +1,5 @@
+# LLM: 只用临时owner和真实registry验证冻结scope，不读取真实用户资料或调用外部服务。
+# 模块用途: 回归自我目录的状态、身份和只读权限投影。
 """沿真实registry、当前owner和冻结scope验自我目录，不调用外部服务。"""
 import json
 from dataclasses import replace
@@ -60,13 +62,15 @@ def test_overview_and_all_domains_are_read_only_without_body_or_network(make_age
     assert queue['state'] == 'not_observed' and queue['count'] is None
 
 
+# LLM: 当前禁用、不可用及未授权原因来自同一快照，不因替换目录名丢失。
+# 函数用途: 检查self_map工具目录的状态和原因。
 def test_tools_keep_main_disabled_unavailable_and_scoped_reasons(make_agent, monkeypatch):
     agent = make_agent()
     agent.tools.disabled_tool_names.add('read_file')
     monkeypatch.setattr(agent.tools.tools['write_file'], 'availability',
                         lambda: ToolAvailability(False, 'TOOL_UNAVAILABLE', '当前未配置'))
-    allowed = ['self_map', 'list_tools', 'tool_search', 'read_file', 'write_file']
-    listing = execute_registry_test_call(agent.tools, 'list_tools', {}, allowed_tools=allowed)
+    allowed = ['self_map', 'tool_search', 'read_file', 'write_file']
+    listing = execute_registry_test_call(agent.tools, 'tool_search', {'action': 'catalog'}, allowed_tools=allowed)
     assert listing.ok, listing.output
     original = json.loads(listing.output)['self_context']['tool_states']
     rows = _read(agent, 'tools', allowed=allowed)['items']
@@ -103,13 +107,15 @@ def test_new_tool_category_uses_original_metadata_without_closed_enum(make_agent
     assert value['completeness'] == 'complete'
 
 
+# LLM: 普通及群owner不能读取管理员私有安装和规则，即使能调用目录入口。
+# 函数用途: 检查非管理员self_map的隔离边界。
 @pytest.mark.parametrize('kind', ['user', 'group'])
 def test_nonadmin_does_not_read_admin_install_or_rule_inventory(make_agent, monkeypatch, kind):
     agent = make_agent(kind=kind)
     monkeypatch.setattr('agent_py_agent.agent.plugin_self_map.PluginInstallStore',
                         lambda *a, **k: pytest.fail('admin inventory read'))
     agent.agents_source_repository = SimpleNamespace(configuration=lambda: pytest.fail('parent rule source read'))
-    allowed = ['self_map', 'list_tools', 'tool_search', 'read_file']
+    allowed = ['self_map', 'tool_search', 'read_file']
     assert _read(agent, 'plugins', allowed=allowed)['items'] == []
     assert _read(agent, 'memory', allowed=allowed)['items'] == []
     assert _read(agent, 'config', allowed=allowed)['items'] == []

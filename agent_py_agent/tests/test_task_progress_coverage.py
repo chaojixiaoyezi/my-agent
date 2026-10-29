@@ -1,3 +1,5 @@
+# LLM: 规范进度只有read/update，显式v1测试单独解码；covers和开放覆盖字段语义不得改变。
+# 模块用途: 检查软覆盖账本、准确ID和旧create的版本化迁移。
 """task_progress coverage ledger tests."""
 
 from __future__ import annotations
@@ -780,7 +782,9 @@ class TestTaskProgressContinuationAndAliases:
         }
 
 
-def test_task_progress_accepts_create_as_update_alias(tmp_path):
+# LLM: 旧create只允许显式v1解码；现行validator不得保留第二套别名行为。
+# 函数用途: 验证旧fixture归一与规范update共享同一账本。
+def test_task_progress_accepts_explicit_v1_create_as_update_alias(tmp_path):
     """S-C1 延伸：create 归一为 update（账本不存在时自动创建），不再拒绝。
 
     真机实测（todo-verify）：MiniMax-M2.7 反复用 action=create 建清单，拒绝
@@ -790,8 +794,10 @@ def test_task_progress_accepts_create_as_update_alias(tmp_path):
     from agent_py_agent.agent.agent_core.task_progress_tool import _normalized_action
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
+    from agent_py_agent.agent.tooling.versioned_input_decoder import decode_tool_input
 
-    assert _normalized_action("create") == "update"
+    assert _normalized_action("create") == "create"
+    assert decode_tool_input("task_progress", {"action": "create"}, version=1) == ("task_progress", {"action": "update"})
     assert _normalized_action("update") == "update"
     assert _normalized_action("read") == "read"
 
@@ -801,7 +807,7 @@ def test_task_progress_accepts_create_as_update_alias(tmp_path):
     result = _execute_task_progress(
         agent,
         {
-            "action": "create",
+            "action": "update",
             "summary": "开始覆盖五个项目。",
             "items": [{"id": "p1", "title": "项目一", "status": "pending"}],
         }
@@ -810,8 +816,9 @@ def test_task_progress_accepts_create_as_update_alias(tmp_path):
     assert '"items"' in str(result.output)
 
 
-def test_task_progress_create_without_ledger_writes_and_reads_back(tmp_path):
-    """create（归一为 update）首次写入后，read 能读回同一账本。"""
+# LLM: 规范update不存在账本时自动创建，首次创建不需要第二个动作名。
+# 函数用途: 首次写入后真实读回同一账本。
+def test_task_progress_update_without_ledger_writes_and_reads_back(tmp_path):
     from agent_py_agent.agent.core import SimpleAgent
     from agent_py_agent.agent.settings import AgentConfig
 
@@ -821,7 +828,7 @@ def test_task_progress_create_without_ledger_writes_and_reads_back(tmp_path):
     wrote = _execute_task_progress(
         agent,
         {
-            "action": "create",
+            "action": "update",
             "summary": "清单已建。",
             "items": [{"id": "a", "title": "步骤A", "status": "pending"}],
         },

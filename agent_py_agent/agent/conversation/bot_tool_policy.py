@@ -17,7 +17,7 @@ BOT_MODES = frozenset({"query_readonly", "action_avatar"})
 _BOT_MODE_ALIASES = {"ops_config": "action_avatar", "execution": "action_avatar", "config_rw": "action_avatar"}
 READ_TOOLS = frozenset({
     "read_file", "list_files", "find_files", "search_text", "read_artifact",
-    "memory_search", "session_search", "self_map", "list_tools", "get_goal", "list_agents",
+    "memory_search", "session_search", "self_map", "tool_search", "get_goal", "list_agents",
     "get_session_task", "audit_records", "audit_group_owners_list", "audit_group_assets_summary",
     "audit_group_alerts_list", "audit_group_posture_overview", "audit_group_query",
 })

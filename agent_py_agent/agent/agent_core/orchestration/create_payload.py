@@ -327,30 +327,6 @@ def _string_items(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-_BASE_FIELDS_EXCLUDED_FROM_ITEM = {
-    "items",
-    "goal",
-    # 顶层 description 描述整批派工，不能扇出成每个 child 的同一句职责。
-    # 每个 item 自己的 description 才是该 child 的展示短标题；省略时只读
-    # 活动投影会退回该 item 的 goal 开头。
-    "description",
-    "plan",
-    "context_manifest",
-    # covers 是"该子代理负责哪些清单项"的逐个绑定;顶层值若扇出到每个 item,任何一个
-    # 子代理 DONE 都会把全部绑定项打勾(假 credit)。batch 模式各 item 自带 covers。
-    "covers",
-    # Top-level delivery targets belong to the parent/root output. In batch mode
-    # each child keeps its own explicit output refs; shared files are coordinated
-    # by the parent prompt and task tree instead of a hidden create-time gate.
-    "output_files",
-    "output_refs",
-    "artifact_refs",
-    "required_output_files",
-    "required_output_refs",
-    "deliverables",
-    "final_output",
-    "final_output_path",
-}
 _SHARED_DIRECTIVE_ROLES = frozenset(
     {
         "primary_directive",
@@ -367,10 +343,7 @@ class CreateSubagentItem:
     params: dict[str, object]
 
 
-# LLM: 一次 create_subagents 调用里每个待建子代理实际生效的接替来源，直接复用创建边界：批量 item 走
-#   create_items_from_params（顶层默认值在前、item 字段覆盖在后，item 的空列表会盖掉顶层），items 缺失或为空时按单个
-#   子代理用顶层参数；编号走 replacements.replacement_source_ids（去掉空白后必须非空）。创建边界会整批拒绝的调用返回
-#   一个空列表项。只读参数，不创建、不落账。
+# LLM: 接替来源只读规范items；无效整批请求返回空列表项，不回退旧顶层默认值；不创建、不落账。
 # 函数用途: 列出每个待建子代理的有效 replacement_for_run_ids，供运行时一次性编排守卫与创建边界用同一口径判断。
 def effective_replacement_ids_per_child(params: dict[str, object]) -> list[list[str]]:
     from .replacements import replacement_source_ids
@@ -382,21 +355,19 @@ def effective_replacement_ids_per_child(params: dict[str, object]) -> list[list[
     return [replacement_source_ids(view.get("replacement_for_run_ids")) for view in views]
 
 
+# LLM: 业务只消费非空canonical items；宿主控制字段不广播，v1兼容已在版本边界完成。
+# 函数用途: 整批解析独立派工项，不再猜单项模式或解析JSON字符串。
 def create_items_from_params(params: dict[str, object]) -> list[CreateSubagentItem] | str:
     protocol_error = _batch_protocol_error(params)
     if protocol_error:
         return protocol_error
     raw_items = params.get("items")
-    if raw_items is None:
-        return []
-    items = _json_list_param(raw_items)
-    if not items:
-        # items 显式传了但为空(模型很常反射性带一个 items:[] )——当作"没传 items",
-        # 落到单 goal 模式用顶层 goal,而不是硬拒报错。真机实测:模型把单个子代理规格放顶层
-        # (goal/output_files)却带空 items,旧逻辑直接 TOOL_INVALID_ARGUMENTS,导致子代理一个
-        # 都派不出去、主代理只能退回独自写。下游若连 goal 也没有,_prepare_single_mode 会给
-        # "缺少必填参数 goal" 的干净报错。
-        return []
+    if not isinstance(raw_items, list) or not raw_items:
+        return "create_subagents 必须提供非空items；一项也用items数组，每项自带非空goal。"
+    model_fields = {"goal", "role", "model", "effort", "allowed_tools", "allowed_skills", "covers", "description", "plan", "input_refs", "output_files", "artifact_refs", "persistent_goal", "agent_name", "tool_preset", "replacement_for_run_ids", "related_finding_id", "long_running", "service_window_seconds", "audit_source_id", "input_media_refs"}
+    if set(params) & model_fields:
+        return "派工字段必须放在各自items内；整批说明只接受batch_summary，不广播顶层默认值。"
+    items = raw_items
     parsed: list[CreateSubagentItem] = []
     # index 用 0 基下标:错误文案里 items[N] 是方括号数组写法,模型按 JSON 下标理解;
     # 旧的 1 基编号(items[2]=第2个)会让模型自纠时改错对象(真机空 goal 自纠场景)。
@@ -439,6 +410,8 @@ def _unsupported_replacement_key(params: dict[str, object]) -> str:
     return ""
 
 
+# LLM: canonical item已独立化；旧显式字段标记只取宿主迁移事实，不从展开后的字段重新推断递归意图。
+# 函数用途: 校验一个独立派工项并保留原始item的显式工具声明事实。
 def _create_item(
     base_params: dict[str, object],
     raw: object,
@@ -455,33 +428,27 @@ def _create_item(
             "说清这个子代理具体做什么、产出什么。整批未创建,一个也没派出;补上 goal 后重发完整 items。"
         )
     merged = _create_item_params(base_params, raw, goal)
+    migration = base_params.get("__input_migration") or {}
+    flags = (migration.get("create_projection") or {}).get("item_allowed_tools_explicit", [])
+    if index < len(flags) and type(flags[index]) is bool:
+        merged["_item_allowed_tools_explicit"] = flags[index]
     return CreateSubagentItem(goal=goal, params=merged)
 
 
-# LLM: item 字段覆盖顶层默认值；显式输入路径在合并 goal 路径之前记入内部键，后续参数整理只复制 params，不重算。
+# LLM: item已在输入边界独立化；显式字段来源来自宿主事实，输入路径在合并goal路径前冻结，不广播顶层字段。
 # 函数用途: 生成一个批量 item 的完整派工参数，并保留调用方显式声明的输入路径供创建前预检。
 def _create_item_params(
     base_params: dict[str, object],
     raw: dict[str, object],
     goal: str,
 ) -> dict[str, object]:
-    merged = _base_item_defaults(base_params)
+    merged = dict(raw)
     merged["_item_allowed_tools_explicit"] = "allowed_tools" in raw
-    merged.update(raw)
     merged["goal"] = goal
     # 并入 goal 文本扒出的路径之前先记下调用方显式声明的输入，创建前可见性预检只认这一份。
     merged[EXPLICIT_INPUT_REFS_KEY] = params_explicit_input_refs(merged)
     _merge_item_required_read_paths(merged, base_params, goal)
     return merged
-
-
-# 不自动变成每个子代理的硬输入依赖，避免一个来源清单卡住所有 worker。
-def _base_item_defaults(base_params: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in base_params.items()
-        if key not in _BASE_FIELDS_EXCLUDED_FROM_ITEM
-    }
 
 
 # 顶层 required_read_paths 不自动复制到每个 worker，避免把一组输入清单误变成所有子代理的读提示。

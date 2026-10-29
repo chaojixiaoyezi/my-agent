@@ -208,6 +208,8 @@ def build_list_owner_sessions_model_spec() -> ToolModelSpec:
             use_cases=("给另一个会话发消息或派活前，先查有哪些会话可选", "确认目标会话是否还在活动"),
             avoid_when=("要看会话里的具体内容（本工具不返回正文）",),
             keywords=("会话列表", "其他会话", "list sessions", "thread id"),
+            default_deferred=True,
+            deferred_summary="列出本人可发消息或派活的会话",
             examples=('{"tool":"list_owner_sessions"}', '{"tool":"list_owner_sessions","limit":5}'),
         ),
     )

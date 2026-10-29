@@ -1,3 +1,5 @@
+# LLM: 工具执行、路径和有界输出由同一Gateway裁决，catalog不得越过隐藏工具或请求目录墙。
+# 模块用途: 回归真实工具执行与输出合同，保留宿主类失败观察。
 """Canonical Tool Gateway execution, path, and bounded-output contracts."""
 
 from __future__ import annotations
@@ -157,11 +159,13 @@ def test_concurrent_web_invocations_do_not_mutate_shared_private_host_grants(
     assert shared_web.allow_private_resolution is None
 
 
+# LLM: catalog只能描述本次模型可见快照，不能暴露内部受控执行器。
+# 函数用途: 检查合并后的目录仍隐藏宿主专属工具。
 def test_tool_gateway_hides_controlled_exec_from_default_catalog(tmp_path: Path):
     registry = _registry(tmp_path)
 
     names = {spec.name for spec in registry.specs(include_orchestration=True)}
-    list_result = _execute(registry, "list_tools", {})
+    list_result = _execute(registry, "tool_search", {"action": "catalog"})
     live_manifest = list_result.metadata["handler_details"]["tool_output_policy"][
         "live_prompt_output"
     ]

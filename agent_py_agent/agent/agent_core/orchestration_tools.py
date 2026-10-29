@@ -203,17 +203,6 @@ def _indexed_item_params(
 # Explicit custom names remain untouched; only system placeholder names receive
 # the stable suffix used by TUI/Web human-readable control surfaces.
 # 函数用途: 给单个补派的系统默认名称续上同一父级的历史编号，避免每批都显示同名 worker。
-def _indexed_single_run_params(agent: SimpleAgent, run_params: CreateRunParams) -> CreateRunParams:
-    index = _next_system_lineage_index(agent, [run_params])
-    task_name = _indexed_agent_name(
-        run_params.agent_name,
-        role=run_params.role,
-        index=index,
-        require_index=True,
-    )
-    return CreateRunParams(**{**run_params.__dict__, "agent_name": task_name})
-
-
 def _indexed_agent_name(agent_name: str, *, role: str, index: int, require_index: bool = False) -> str:
     name = str(agent_name or "").strip()
     if _needs_system_lineage_name(name, role=role):
@@ -263,19 +252,15 @@ class CreateSubagentsTool(BaseTool):
         # output_files 是交付元数据和界面线索，不是文件所有权。与 会话运行时 一样，
         # 父子代理可以共享 cwd 并通过实际 diff/测试合并；只对精确的控制面
         # 身份保留持久逻辑互斥。
-        resource_scopes=ResourceScopePolicy(
-            parameter_names=("input_refs", "replacement_for_run_ids"),
-            parameter_kinds={
-                "input_refs": "logical",
-                "replacement_for_run_ids": "logical",
-            },
-        ),
+        resource_scopes=ResourceScopePolicy(mode="none"),
         input_policy=ToolInputPolicy(
-            internal_parameters=("dry_run", "extra_write_roots"),
+            internal_parameters=("dry_run", "extra_write_roots", "__input_migration"),
         ),
         promotes_task=True,
     )
 
+    # LLM: schema实例仍只受宿主媒体开关控制，不随模型参数变化。
+    # 函数用途: 绑定原代理与按开关生成的唯一items合同。
     def __init__(self, agent: SimpleAgent):
         self.agent = agent
         if getattr(capability_config_for_agent(agent), "subagent_input_media_enabled", False) is True:
@@ -297,6 +282,19 @@ class CreateSubagentsTool(BaseTool):
             return execute_create_subagents_service(self.agent, params)
         except ToolCancelled as exc:
             return _cancelled_create_subagents_result(exc)
+
+    # LLM: claim前从独立items提取原逻辑资源域；不能把整批JSON当锁，也不能因新形状丢掉接替锁。
+    # 函数用途: 为每个child保持原input_refs和replacement_for_run_ids逻辑锁。
+    def effective_resource_scopes(self, arguments, write_boundary, workspace_root):
+        from ..tooling.models import resource_scopes_for_runtime_policy
+
+        policy = replace(self.runtime_policy, resource_scopes=ResourceScopePolicy(
+            parameter_names=("input_refs", "replacement_for_run_ids"),
+            parameter_kinds={"input_refs": "logical", "replacement_for_run_ids": "logical"}))
+        items = arguments.get("items")
+        views = items if isinstance(items, list) and items else [arguments]
+        return tuple(dict.fromkeys("logical:" + scope for item in views if isinstance(item, dict)
+            for scope in resource_scopes_for_runtime_policy(policy, item)))
 
     # LLM: 原 ToolInvocationContext 快照同时提供创建工具上界和可选选择的 schema；只在本次 handler 绑定，不能补到共享 RunParams。
     # 函数用途: 给根/递归创建传递当前真实工具快照，退出恢复，防止并发工作片串用目录或估算。
@@ -331,15 +329,12 @@ def _cancelled_create_subagents_result(exc: ToolCancelled) -> ToolHandlerOutcome
     )
 
 
-# LLM: A descendant uses the same one-of contract as the root: one non-empty
-# goal or non-empty items whose entries each own a goal. This adapter only converts
-# the public batch shape into the hierarchy service's structured children list.
-# 函数用途: 把子代理发来的单目标或批量 items 转成下一层创建参数。
+# LLM: 递归与根工具共用规范items，不推断旧顶层goal；仅转换为原层级服务children，不改变权限。
+# 函数用途: 将每个独立派工项交给下一层原创建事务。
 def _nested_create_params(
     agent: SimpleAgent,
     params: dict[str, object],
 ) -> dict[str, object] | ToolHandlerOutcome:
-    goal = str(params.get("goal") or "").strip()
     items = create_items_from_params(params)
     if isinstance(items, str):
         return ToolHandlerOutcome(
@@ -348,14 +343,7 @@ def _nested_create_params(
             items,
             error_code="TOOL_INVALID_ARGUMENTS",
         )
-    if not goal and not items:
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            "create_subagents 需要一个非空 goal，或一个含独立 goal 的非空 items 批次。",
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    delegated_items = items or [CreateSubagentItem(goal=goal, params=dict(params))]
+    delegated_items = items
     allowed_tool_values = [subagent_allowed_tools(item.params) for item in delegated_items]
     if invalid := _planned_delegation_result(agent, delegated_items, allowed_tool_values):
         return invalid
@@ -432,115 +420,20 @@ def _create_subagents_transaction(agent: object):
         return nullcontext()
     return guard()
 
-# LLM: 所有根创建模式共用原检查且不物化；可选网络后的第二次调用必须重新读取容量、来源和模型引用。
-# 函数用途: 按单目标或批量 items 准备直属子代理，失败时整批不创建。
+# LLM: 所有请求共用规范items准备；旧单派仅从宿主迁移事实选择回执投影，不保留另一条创建实现。
+# 函数用途: 整批准备直属子代理，失败时不创建，v1兼容不改变事务或权限。
 def _prepare_create_subagents(agent: SimpleAgent, params: dict[str, object]) -> PreparedSubagentCreation | ToolHandlerOutcome:
     if not agent.config.enable_subagents:
         return ToolHandlerOutcome("create_subagents", False, "配置已禁用 subagent。", error_code="TOOL_UNAVAILABLE")
-    items_result = _items_result(agent, params)
-    if items_result is not None:
-        return items_result
-    if not str(params.get("goal") or "").strip():
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            "create_subagents 需要一个非空 goal，或一个含独立 goal 的非空 items 批次。"
-            "这里与用户是否使用 /goal 无关；普通聊天任务也可以派子代理。两种正确写法:"
-            '① 派一个: {"goal":"这个子代理要完成的具体任务"};'
-            '② 派多个不同任务: {"items":[{"goal":"任务A"},{"goal":"任务B"}]};'
-            "请补全其中一种后重试；别因为这个就改回自己写。",
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    if "count" in params:
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            "create_subagents 不接受 count 克隆同一任务。只派一个时直接传 goal；"
-            "需要并行时使用 items 明确列出互不重复的具体子任务和各自交付边界。",
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    related_params, relation_error = prepare_audit_finding_relation(
-        agent,
-        params,
-        goal=str(params.get("goal") or ""),
-    )
-    if relation_error:
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            relation_error,
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    single_items = [
-        CreateSubagentItem(
-            goal=str(related_params.get("goal") or "").strip(),
-            params=related_params,
-        )
-    ]
-    prepared = _prepare_single_mode(agent, related_params)
-    if isinstance(prepared, ToolHandlerOutcome):
-        return prepared
-    allowed_tools, run_params = prepared
-    if invalid := _planned_delegation_result(agent, single_items, [allowed_tools]):
-        return invalid
-    run_params = _indexed_single_run_params(agent, run_params)
-    task_params = [run_params]
-    if invalid := _replacement_preflight_result(agent, task_params):
-        return invalid
-    if invalid := _input_read_scope_result(agent, single_items, task_params):
-        return invalid
-    return PreparedSubagentCreation(task_params, single_items, [allowed_tools], related_params)
-
-
-# LLM: items 和单目标仍共用同一准备结果，不在形状分派处创建任务或发网络请求。
-# 函数用途: 解析批量形状并将全部条目交给原校验。
-def _items_result(agent: SimpleAgent, params: dict[str, object]) -> PreparedSubagentCreation | ToolHandlerOutcome | None:
     items = create_items_from_params(params)
     if isinstance(items, str):
         return ToolHandlerOutcome("create_subagents", False, items, error_code="TOOL_INVALID_ARGUMENTS")
-    if items:
-        return _prepare_items(agent, items, params)
-    return None
-
-
-# LLM: 单项参数和模型引用在持久化前构造；配置错误是可修参数错误，不能静默回到父模型。
-# 函数用途: 准备一个 child 的参数，无效配置不创建任务、不执行模型。
-def _prepare_single_mode(
-    agent: SimpleAgent,
-    params: dict[str, object],
-) -> tuple[list[str] | None, CreateRunParams] | ToolHandlerOutcome:
-    params = append_parent_shared_context(agent, params)
-    params, skill_error = _params_with_skill_snapshot_refs(agent, params)
-    if skill_error:
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            skill_error,
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    params, audit_scope_error = prepare_audit_child_creation_scope(agent, params)
-    if audit_scope_error:
-        return ToolHandlerOutcome(
-            "create_subagents",
-            False,
-            audit_scope_error,
-            error_code="TOOL_INVALID_ARGUMENTS",
-        )
-    goal = str(params.get("goal") or "").strip()
-    capacity = _checked_creation_capacity(agent)
-    if isinstance(capacity, ToolHandlerOutcome):
-        return capacity
-    slots, limits = capacity
-    if slots < 1:
-        return _subagent_quota_result(1, slots, limits)
-    allowed_tools = subagent_allowed_tools(params)
-    validation = _validate_single_goal(ValidateSingleGoalRequest(agent, params, goal, allowed_tools))
-    if validation:
-        return ToolHandlerOutcome("create_subagents", False, validation, error_code="TOOL_INVALID_ARGUMENTS")
-    try:
-        return allowed_tools, create_run_params(agent, params, goal, allowed_tools)
-    except (ModelProfileError, SubagentInputMediaError) as exc:
-        return _not_started_create_result(exc)
+    prepared = _prepare_items(agent, items, params)
+    migration = params.get("__input_migration") or {}
+    projection = migration.get("create_projection") or {}
+    if isinstance(prepared, PreparedSubagentCreation) and projection.get("single") is True:
+        prepared = replace(prepared, batch=False)
+    return prepared
 
 
 # LLM: A cancellation after materialization but before publication must leave the record visible

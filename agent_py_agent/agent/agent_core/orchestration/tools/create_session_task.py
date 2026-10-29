@@ -237,6 +237,8 @@ def build_create_session_task_model_spec() -> ToolModelSpec:
             use_cases=("要把一件完整工作交给同用户下的另一个会话", "另一端空闲时叫醒它接手"),
             avoid_when=("只想传一句话用 send_session_message", "要停止已派任务用 cancel_session_task"),
             keywords=("派任务", "会话任务", "delegate", "session task"),
+            default_deferred=True,
+            deferred_summary="把任务耐久派给本人的另一个会话",
             examples=(
                 '{"tool":"create_session_task","target_thread_id":"thread-abc","goal":"按 inputs/x.md 生成报告并把路径发我。"}',
             ),

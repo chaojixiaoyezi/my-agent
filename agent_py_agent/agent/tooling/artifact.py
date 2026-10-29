@@ -155,7 +155,7 @@ class ReadArtifactTool(BaseTool):
         hints=ToolModelHints(
             category="memory",
             use_cases=(
-                "memory-resume 只给出 artifact path/hash/size 后，需要显式查看正文片段",
+                "memory archive resume 只给出 artifact path/hash/size 后，需要显式查看正文片段",
                 "接管或救援时核对大工具输出的具体内容",
             ),
             avoid_when=(

@@ -33,6 +33,7 @@ DECLARED = {
     "manage_models", "memory_search", "package_build", "package_install", "publish_audit_update",
     "remote_agent_push", "restart_gateway", "runtime_governance", "schedule",
     "scripts", "send_message", "send_session_message", "skill_summarize", "stop_named_work", "update_persona",
+    "create_session_task", "get_session_task", "list_owner_sessions",
     "user_config", "watch_stream", "workflows", "feishu_cloud", "feishu_auth", "skill_transfer", "tool_program",
 }
 
@@ -172,10 +173,12 @@ def test_discovery_entry_stays_direct_even_if_it_declares_deferral(tmp_path):
     assert "tool_search" not in _declared_deferred_names(agent.tools.runtime_snapshot(), [], enabled=True)
 
 
+# LLM: 目录帮助只指向规范catalog，不恢复独立list_tools模型入口。
+# 函数用途: 检查折叠提示的完整目录指引和格式。
 def test_index_without_other_folded_names_has_no_dangling_name_list(tmp_path):
     agent = _agent(tmp_path, tool_default_deferral_enabled=True, tool_catalog_deferred_categories=[])
     section = agent.tools.render_catalog_section()
-    assert "也可用 list_tools 查看完整清单。\n  默认收起的工具" in section
+    assert "也可用 tool_search(action=catalog) 查看完整清单。\n  默认收起的工具" in section
     assert "完整清单：" not in section
 
 

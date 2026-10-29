@@ -1,3 +1,5 @@
+# LLM: 展示投影不改变原handler、插件代次或授权，隐藏的已授权工具仍能经规范入口发现。
+# 模块用途: 验证schema运输减量、完整目录与搜索恢复的同源合同。
 """原工具快照的宿主展示投影：真实 schema 减量、搜索可达与原权限/插件绑定保持。"""
 import json
 from dataclasses import FrozenInstanceError, replace
@@ -83,6 +85,8 @@ def search(registry, snapshot, query):
     return json.loads(result.output), result.metadata["handler_details"]["tool_search"]["loaded_tool_names"]
 
 
+# LLM: 无展示投影时逐字保留原schema及目录，完整目录帮助使用规范catalog。
+# 函数用途: 检查空投影不会改变实际工具暴露。
 def test_none_preserves_native_schema_catalog_and_original_deferred_notice_bytes(prepared):
     registry, snapshot, _a, _b, legacy = prepared
     original = native_schema(registry, snapshot), registry.render_catalog_section(runtime_snapshot=snapshot)
@@ -90,9 +94,11 @@ def test_none_preserves_native_schema_catalog_and_original_deferred_notice_bytes
     assert (native_schema(registry, explicit_none), registry.render_catalog_section(runtime_snapshot=explicit_none)) == original
     assert _render_deferred_notice([legacy.model_spec]) == (
         "- ⊞ 另有 1 个工具已注册但未直接展开；需要时先用 tool_search 搜索并加载，"
-        "也可用 list_tools 查看完整清单：presentation_legacy")
+        "也可用 tool_search(action=catalog) 查看完整清单：presentation_legacy")
 
 
+# LLM: 按需展示只能缩schema运输，搜索恢复原定义而不换handler或权限。
+# 函数用途: 检查渐进披露能完整找回原工具合同。
 def test_progressive_projection_removes_actual_native_schema_and_search_restores_exact_contract(prepared):
     registry, snapshot, a, b, legacy = prepared
     projected = replace(snapshot, presentation_deferred_names=frozenset({b.model_spec.name}),
@@ -100,7 +106,7 @@ def test_progressive_projection_removes_actual_native_schema_and_search_restores
     full, reduced = native_schema(registry, snapshot), native_schema(registry, projected)
     assert len(full) - len(reduced) > 1000
     assert b.model_spec.name not in reduced and a.model_spec.name in reduced and legacy.model_spec.name not in reduced
-    assert all(name in reduced for name in ("tool_search", "list_tools"))
+    assert "tool_search" in reduced and "list_tools" not in reduced
     payload, loaded = search(registry, projected, b.model_spec.name)
     result = next(row for row in payload["tools"] if row["name"] == b.model_spec.name)
     assert result["input_schema"] == b.model_spec.input_schema and result["schema_hash"] == b.model_spec.schema_hash
@@ -127,18 +133,20 @@ def test_metadata_only_shortens_name_cards_without_removing_direct_schema_or_loa
     assert not projected.presentation_deferred_names
 
 
+# LLM: 短名单不等于授权清单，省略展示的已授权工具仍须可搜索及查catalog。
+# 函数用途: 检查精简目录不丢失完整发现能力。
 def test_shortlist_omission_keeps_complete_deferred_search_and_manifest(prepared):
     registry, snapshot, _a, b, legacy = prepared
     projected = replace(snapshot, presentation_deferred_names=frozenset({b.model_spec.name}),
                         presentation_shortlist_names=frozenset())
     notice = registry.render_catalog_section(runtime_snapshot=projected)
     assert b.model_spec.name not in notice and legacy.model_spec.name not in notice
-    assert "另有 2 个工具" in notice and "tool_search" in notice and "list_tools" in notice
+    assert "另有 2 个工具" in notice and "tool_search(action=catalog)" in notice
     assert "没有授权" not in registry.render_recommended_tools_section("测试", runtime_snapshot=projected)
     for tool in (b, legacy):
         _payload, loaded = search(registry, projected, tool.model_spec.name)
         assert tool.model_spec.name in loaded
-    call = canonical_test_call(projected, "list_tools", {})
+    call = canonical_test_call(projected, "tool_search", {"action": "catalog"})
     result = registry.execute_tool(call, write_boundary=None, runtime_snapshot=projected).result
     assert result.ok
     manifest = json.loads(result.output)
@@ -178,7 +186,7 @@ def test_projection_rejects_mutable_or_non_authorized_names(prepared, field, nam
         replace(snapshot, **{field: names})
 
 
-@pytest.mark.parametrize("name", ["tool_search", "list_tools", "skill_search"])
+@pytest.mark.parametrize("name", ["tool_search", "self_map", "skill_search"])
 def test_original_discovery_entries_cannot_be_adaptively_deferred(prepared, name):
     registry, snapshot, *_ = prepared
     if name not in snapshot.available_tool_names:

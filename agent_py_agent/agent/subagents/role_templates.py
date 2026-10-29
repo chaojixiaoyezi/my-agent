@@ -3,6 +3,8 @@
 模块用途: 加载角色快照与通用工具默认值；自身发现、交互终端和命令都受原父授权交集控制。
 """
 
+# LLM: 角色模板只提供既有权限上界，统一发现入口用tool_search和self_map，不恢复退役模型工具。
+# 模块用途: 为直属及递归子代理提供一致的角色、工具偏好和权限模板。
 from __future__ import annotations
 
 import json
@@ -58,8 +60,8 @@ RETIRED_MODEL_SUBAGENT_CONTROL_TOOLS = frozenset(
 # 常量用途: 给普通执行子代理和后台续跑复用同一凭据、云资源与本人消息入口。
 OWNER_TASK_TOOLS = ("request_credentials", "feishu_cloud", "send_message")
 # LLM: 三个发现入口共用当前owner事实；子代理仍与父实时快照取交集，不因目录可见增加工具、路径或秘密权限。
-# 常量用途: 为主、子和后台复用list_tools、tool_search及只读self_map的统一入口组。
-SELF_DISCOVERY_TOOLS = ("list_tools", "tool_search", "self_map")
+# 常量用途: 为主、子和后台复用tool_search目录/搜索与只读self_map的统一入口组。
+SELF_DISCOVERY_TOOLS = ("tool_search", "self_map")
 ROLE_BASE_TOOLS = [
     *SELF_DISCOVERY_TOOLS,
     *AGENT_PROGRESS_TOOLS,

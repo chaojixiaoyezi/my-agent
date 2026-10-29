@@ -1,3 +1,5 @@
+# LLM: 普通及Compact目录沿同一快照，假模型仍走原调用签发和执行器，不授予新工具。
+# 模块用途: 验证自我目录和规范发现入口在模型面保持一致。
 """自我目录的普通/Compact模型面保持同源；假模型仍走原调用签发和执行器。"""
 # ruff: noqa: F811
 import json
@@ -75,18 +77,20 @@ def test_compact_and_ordinary_have_same_eligible_static_guidance(make_agent, all
     assert ('self_map' in {tool['name'] for tool in surface.tools}) is expected
 
 
+# LLM: 模板发现工具只能与父级可用快照求交，不能因目录收敛恢复不可用能力。
+# 函数用途: 验证子代理角色不会扩大父级工具授权。
 def test_parent_scope_never_grants_unavailable_self_map(make_agent):
     from agent_py_agent.agent.agent_core.orchestration.create_policy import create_run_params
     from agent_py_agent.agent.agent_core.orchestration.tool_grants import subagent_allowed_tools
     from agent_py_agent.agent.subagents.role_contracts import apply_role_contract_to_create_params
     agent = make_agent()
     for present in (False, True):
-        parent = agent.tools.runtime_snapshot(allowed_tools=['list_tools', 'tool_search', 'read_file'] + (['self_map'] if present else []))
+        parent = agent.tools.runtime_snapshot(allowed_tools=['tool_search', 'read_file'] + (['self_map'] if present else []))
         with bind_creation_tool_authority(parent):
             params = create_run_params(agent, {'role': 'worker'}, '读当前范围', subagent_allowed_tools({}))
         params = apply_role_contract_to_create_params(params)
         assert ('self_map' in params.allowed_tools) is present
-        assert {'list_tools', 'tool_search'} <= set(params.allowed_tools)
+        assert {'tool_search'} <= set(params.allowed_tools)
     assert not self_map_available(agent.tools.runtime_snapshot(allowed_tools=['tool_search']))
 
 

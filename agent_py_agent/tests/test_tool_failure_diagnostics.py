@@ -1,3 +1,5 @@
+# LLM: 失败诊断沿原统一执行器，模型面收敛不能把授权、协议或参数错误归为已执行。
+# 模块用途: 验证工具失败分类、阶段和恢复说明不失真。
 from __future__ import annotations
 
 from dataclasses import replace
@@ -99,6 +101,8 @@ def _call(
     ).result
 
 
+# LLM: 协议、授权、参数和运行期失败必须区分，工具入口改名不能混淆阶段事实。
+# 函数用途: 检查规范工具链保留四类失败诊断。
 def test_protocol_authorization_validation_and_runtime_gate_are_distinct(
     tmp_path: Path,
 ) -> None:
@@ -142,7 +146,7 @@ def test_protocol_authorization_validation_and_runtime_gate_are_distinct(
         tmp_path,
         auth_tool,
         {"value": 1},
-        allowed_tools=["list_tools"],
+        allowed_tools=["tool_search"],
     )
     assert authorization.failure_stage == ToolFailureStage.AUTHORIZATION.value
     assert authorization.handler_executed is False

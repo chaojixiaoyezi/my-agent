@@ -10,7 +10,6 @@ from ...tooling.models import ToolModelHints, ToolModelSpec
 from .tool_spec_data import (
     _CREATE_EXAMPLES,
     _CREATE_INPUT_MEDIA_DETAILS,
-    _CREATE_INPUT_MEDIA_PARAMETERS,
     _CREATE_ITEM_PARAMETER_DETAILS,
     _CREATE_KEYWORDS,
     _CREATE_PARAMETER_DETAILS,
@@ -61,47 +60,29 @@ def _hints(
     )
 
 
-# covers 绑定 Todo 的 exact id 主要在每个 item 里填（2d3bfa5cb 委派进度对齐）；input_media_refs 也是按 item 交给各自子代理的
-#   媒体（第 14 条）。这两个字段 item 级保留顶层完整说明。
-_ITEM_FIELDS_KEEPING_FULL_TEXT = frozenset({"covers", "input_media_refs"})
-
-
-# LLM: 嵌套参数保留本项专属说明（goal/description/role，见 _CREATE_ITEM_PARAMETER_DETAILS）以及 covers、input_media_refs 的完整
-#   说明；其余字段与顶层同名同义，只写“同顶层 X。”指回顶层完整说明，不在每轮请求里重复同一段文字。字段、类型、枚举和验证规则不变；
-#   input_media 为真时顶层与 items[] 各多一个 input_media_refs（说明与形状同源），为假时不出现这个字段。
-# 函数用途: 为 create_subagents 的每个 items[] 字段补齐说明，批量项也能选择相同工具、模型和角色。
+# LLM: 唯一items字段集保留完整语义，角色索引只在item说明出现；媒体开关不增加顶层重复字段。
+# 函数用途: 构造单项和多项共用的items模型schema。
 def _create_subagents_input_schema(*, input_media: bool = False) -> dict[str, object]:
-    parameters = {**_CREATE_PARAMETERS, **(_CREATE_INPUT_MEDIA_PARAMETERS if input_media else {})}
+    parameters = {"items": "独立派工项；一项也用数组，每项有完整goal。", "batch_summary": "整批简述，不广播给孩子。"}
     details = _with_role_template_index(
         {**_CREATE_PARAMETER_DETAILS, **(_CREATE_INPUT_MEDIA_DETAILS if input_media else {})}
     )
     schema = _input_schema(
         parameters,
         create_parameter_schema(input_media=input_media),
-        details=details,
-        required=(),
+        required=("items",),
     )
     properties = schema.get("properties")
     items_shape = properties.get("items") if isinstance(properties, dict) else None
     item_shape = items_shape.get("items") if isinstance(items_shape, dict) else None
     item_properties = item_shape.get("properties") if isinstance(item_shape, dict) else None
     if isinstance(item_properties, dict):
-        descriptions = {**parameters, **details}
+        descriptions = {**_CREATE_PARAMETERS, **details}
         for name, shape in item_properties.items():
             if isinstance(shape, dict):
-                shape["description"] = _item_field_description(name, descriptions)
+                shape["description"] = _CREATE_ITEM_PARAMETER_DETAILS.get(name, descriptions.get(name, name))
+    schema["properties"] = {name: shape for name, shape in schema["properties"].items() if name in {"items", "batch_summary"}}
     return schema
-
-
-# LLM: 只决定 items[] 字段的说明文字，不改字段集合；descriptions 是顶层同一份说明（details 覆盖 parameters）。
-#   顶层原文比“同顶层 X。”还短时直接用原文，引用只用来省掉长说明的重复。
-# 函数用途: 给一个 items[] 字段选说明：本项专属说明、保留的完整顶层说明，或“同顶层 X。”。
-def _item_field_description(name: str, descriptions: dict[str, str]) -> str:
-    if name in _CREATE_ITEM_PARAMETER_DETAILS:
-        return _CREATE_ITEM_PARAMETER_DETAILS[name]
-    full = descriptions[name]
-    reference = f"同顶层 {name}。"
-    return full if name in _ITEM_FIELDS_KEEPING_FULL_TEXT or len(full) <= len(reference) else reference
 
 
 # LLM: 工具级说明保留并发/分工语义，参数级说明负责 covers/output_files 细节；不宣称 owner 内业务目录互相隔离。
@@ -110,7 +91,7 @@ def build_create_subagents_model_spec(*, input_media: bool = False) -> ToolModel
     return ToolModelSpec(
         name="create_subagents",
         description=(
-            "将边界清楚且能并行的独立工作交给直属下级；主、子、孙共用。单派用goal，批量用items且每项goal必填；"
+            "将边界清楚且能并行的独立工作交给直属下级；主、子、孙共用。一项或多项统一用items，每项goal必填；"
             "所有items立即并发，文字中的先后顺序不生效。依赖前项结果或可能修改同一文件/模块的任务须分批。"
             "明确共同目录、独占范围、交付物与验收；output_files仅为协调线索，不是写集、锁或授权。"
             "承接现有open Todo时在covers复制exact id；返工先按原id重开，不能借无关id。child沿原owner工作区授权，"
@@ -136,14 +117,13 @@ def build_create_subagents_model_spec(*, input_media: bool = False) -> ToolModel
     )
 
 
-# LLM: Task progress is a soft self-check ledger; child summaries may enrich
-# lifecycle events but must not imply a parent-side inspection requirement.
+# LLM: task_progress只记录软自检，子代理摘要可补充生命周期事件，不强制父级复读正文或接管完成裁决。
 # 函数用途: 构造当前代理记录/读取软进度清单的模型合同。
 def build_task_progress_model_spec() -> ToolModelSpec:
     progress_item_schema = _task_progress_item_schema()
     coverage_target_schema = _task_progress_coverage_target_schema()
     parameters = {
-        "action": "read/update/create；不填默认 read。create 与 update 等效（账本不存在时自动创建，首次建清单也用 create 或 update），清单内容不会自动续跑普通任务，也不会阻止模型结束当前轮。",
+        "action": "read/update；不填默认read，首次建清单也用update；不负责续跑或完成判定。",
         "run_id": "省略时读写当前运行计划。主代理跨回合补充同一会话的旧计划时，read 和 update 都传 read 返回的精确 run_id；这不会切换工作区或重启旧任务。子代理只能更新自己的计划。",
         "summary": "可选。当前整体进展一句话",
         "next_action": "可选。下一步最应该做什么",
@@ -151,9 +131,8 @@ def build_task_progress_model_spec() -> ToolModelSpec:
         "coverage": "可选。覆盖账本，含 goal/dimensions/targets；targets 每项使用 id/title/status/checks/evidence/notes/next。",
     }
     property_schemas = {
-        # S-C1 延伸：MiniMax 自然习惯用 action=create 建清单；create 在工具层
-        # 归一为 update（账本不存在时自动创建），这里显式列入枚举避免模型盲试。
-        "action": {"type": "string", "enum": ["read", "update", "create"]},
+        # 首次建清单也用update，旧create只在显式v1输入边界归一。
+        "action": {"type": "string", "enum": ["read", "update"]},
         "run_id": {"type": "string"},
         "summary": {"type": "string"},
         "next_action": {"type": "string"},
