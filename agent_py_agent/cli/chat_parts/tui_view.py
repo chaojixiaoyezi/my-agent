@@ -55,8 +55,7 @@ class TuiTextSelection:
     focus: Point
 
 
-# LLM: Viewport snapshots are process-local presentation state keyed by the exact
-# typed store. They must never be persisted or treated as conversation position.
+# LLM: 视口快照是按精确 typed store 归档的进程内展示态，严禁持久化落盘或当作会话历史位置使用。
 # 类用途: 保存一个主代理或子代理页面离开时的滚动位置、跟随状态和未读基线。
 @dataclass(frozen=True)
 class _TuiViewportState:
@@ -178,9 +177,7 @@ class TuiFrameProvider:
         if self.transcript_state is not None:
             self.transcript_state.set_invalidate_callback(self.invalidate)
 
-    # LLM: View navigation may swap only the visible typed store and clear both user indexes. Every seen
-    # store remains subscribed to this provider. Rebind any expanded frozen snapshot to the
-    # selected store; canonical state and event sequencing stay inside their original runtimes.
+    # LLM: 视图导航只能替换当前可见的 typed store 并清空两类用户提问索引；已订阅的 store 保持订阅，展开态冻结快照重绑到新 store，权威状态仍留在原运行时。
     # 函数用途: 进入或返回代理详情时一起切换正文来源和详细模式快照，不能留下另一代理的旧画面。
     def set_state_store(self, state_store: TuiStateStore) -> None:
         if not isinstance(state_store, TuiStateStore):
@@ -314,9 +311,7 @@ class TuiFrameProvider:
             self._invalidate_callback = callback
 
 
-# LLM: Store switching mutates only one control's process-local viewport fields
-# under its lock. The provider swap remains owned by TuiTranscriptView so both
-# normal/modal controls move together before the next render.
+# LLM: store 切换只在控件自身锁内修改单个 control 的进程内视口字段；provider 切换仍由 TuiTranscriptView 统一编排，确保普通与详情控件在下一帧前同步迁移。
 # 函数用途: 保存当前代理页面滚动状态、恢复目标页面状态，并清掉不能跨页面使用的文本选区。
 def _switch_transcript_control_store(
     control: TuiTranscriptControl,
@@ -395,9 +390,7 @@ class TuiTranscriptControl(UIControl):
         self._last_reading_frame: TuiRenderFrame | None = None
         self._lock = threading.Lock()
 
-    # LLM: A source switch saves only viewport state under the exact typed store,
-    # restores an existing page, and may initialize a never-seen child page at
-    # its prompt boundary. Selection coordinates never cross agent boundaries.
+    # LLM: 数据源切换仅按精确 typed store 保存视口状态、恢复已访问页面，并允许首次访问的子代理详情页锚定在提示词边界；选区坐标严禁跨代理共享。
     # 函数用途: 切换主代理/子代理正文来源；首次详情页可从提示词顶部打开，重访仍恢复原位置。
     def switch_state_store(
         self,
@@ -473,9 +466,7 @@ class TuiTranscriptControl(UIControl):
             show_cursor=False,
         )
 
-    # LLM: The non-focusable normal Window cannot reliably infer a newly restored
-    # page's top row from its previous internal scroll. This callback derives the
-    # top row only from this control's typed anchor and current render height.
+    # LLM: 不可聚焦的普通 Window 无法可靠从旧内部滚动值推断新恢复页面的顶行；本回调只根据当前 control 的 typed 锚点与渲染高度计算顶行。
     # 函数用途: 每帧把主/子代理各自的滚动锚点落实到真实 Window，跟随时固定在页底。
     def preferred_vertical_scroll(self, _window: Window) -> int:
         with self._lock:
@@ -762,15 +753,13 @@ class TuiTranscriptControl(UIControl):
             self._selection_copied = False
             self._right_copy_armed = False
 
-    # LLM: Copy-on-select is a UI projection callback installed only after Application exists;
-    # selection coordinates and clipboard transport remain separate authorities.
+    # LLM: 松手自动复制是在 Application 创建后挂载的 UI 投影回调；选区坐标与剪贴板传输各自保持独立事实源。
     # 函数用途: 绑定鼠标松手后的复制动作；传入 None 时只保留高亮而不写剪贴板。
     def set_copy_on_select(self, callback: Callable[[str], None] | None) -> None:
         with self._lock:
             self._copy_on_select = callback
 
-    # LLM: Every terminal release shape, lost-release recovery, and fresh-press fallback must end
-    # one drag exactly once. The callback runs outside the selection lock to avoid UI re-entry.
+    # LLM: 任意终端松手形态、丢失 release 补偿与新按下收口都必须确保一次拖选只触发一次完成；剪贴板回调必须在选区锁外执行以避免 UI 重入。
     # 函数用途: 收口当前拖选、按可选终点更新范围，并把最终可见文本自动复制一次。
     def _finish_selection(self, point: Point | None = None) -> bool:
         callback: Callable[[str], None] | None = None
@@ -860,10 +849,28 @@ class TuiTranscriptControl(UIControl):
 # LLM: 保留Window原滚动/焦点接口；独立header仅切分绘制区域，不插入UIContent行或覆盖正文首行，短视口优先正文。
 # 类用途: 在普通及详情正文上方放一个可显隐的只读用户消息导航Window。
 class _TuiStickyUserWindow(Window):
-    # LLM: 仅接收本模块TuiTranscriptControl；header不持第二份状态或正文，鼠标回调仍回到同一control。
-    # 函数用途: 创建独立单行header而保持既有Window的全部调用接口。
-    def __init__(self, content: TuiTranscriptControl, **kwargs) -> None:
-        super().__init__(content=content, **kwargs)
+    # LLM: 仅接收本模块TuiTranscriptControl与显式Window布局参数；header不持第二份状态或正文，鼠标回调仍回到同一control。
+    # 函数用途: 创建独立单行header而保持既有Window的滚动、折行、游标与样式配置。
+    def __init__(
+        self,
+        content: TuiTranscriptControl,
+        *,
+        get_vertical_scroll: Callable[[], int] | None = None,
+        wrap_lines: bool = False,
+        dont_extend_height: bool = False,
+        always_hide_cursor: bool = True,
+        allow_scroll_beyond_bottom: bool = False,
+        style: str = "",
+    ) -> None:
+        super().__init__(
+            content=content,
+            get_vertical_scroll=get_vertical_scroll,
+            wrap_lines=wrap_lines,
+            dont_extend_height=dont_extend_height,
+            always_hide_cursor=always_hide_cursor,
+            allow_scroll_beyond_bottom=allow_scroll_beyond_bottom,
+            style=style,
+        )
         self.sticky_window = Window(
             content=FormattedTextControl(content.sticky_user_bar_fragments, show_cursor=False),
             height=1, wrap_lines=False, always_hide_cursor=True,
@@ -941,9 +948,7 @@ class TuiTranscriptView:
     agent_control: FormattedTextControl
     footer_control: FormattedTextControl
 
-    # LLM: Permission overlay stays bound to the root runtime even while the
-    # transcript provider shows a child page, so an owner never misses a queued
-    # child approval because of navigation.
+    # LLM: 即使正文 provider 正在展示子代理详情页，权限审批浮层仍始终绑定根运行时，确保用户不会因浏览子代理而漏掉待批请求。
     # 函数用途: 返回全局审批面板当前应占的终端行数。
     def overlay_line_count(self) -> int:
         return len(
@@ -952,10 +957,7 @@ class TuiTranscriptView:
             ).overlay_lines
         )
 
-    # LLM: Agent navigation must switch the provider and both normal/modal
-    # controls as one UI operation. Existing pages restore their own viewport;
-    # callers may anchor a never-seen detail page at its prompt without clearing
-    # either typed transcript or disabling later sticky-tail recovery.
+    # LLM: 代理页面导航必须作为单一 UI 操作同步切换 provider 及普通/详情两个 control；已访问页面恢复原视口，首次打开的详情页可锚定在提示词顶部而不清空消息或破坏后续贴底恢复。
     # 函数用途: 在主代理和子代理页面之间切换正文，并保留每页位置；首次详情可从提示词顶部打开。
     def set_state_store(
         self,
@@ -1049,8 +1051,7 @@ class TuiTranscriptView:
     def clear_selection(self) -> None:
         self._active_control().clear_selection()
 
-    # LLM: Both normal and detailed transcript controls share one clipboard projection callback;
-    # whichever viewport is active owns the selection and invokes it only when its drag settles.
+    # LLM: 普通与详情两个 transcript control 共享同一个剪贴板投影回调，仅由当前活动视口在自身拖选收口时触发。
     # 函数用途: 为普通与详细 transcript 同时启用松手自动复制。
     def set_copy_on_select(self, callback: Callable[[str], None] | None) -> None:
         self.control.set_copy_on_select(callback)
@@ -1121,6 +1122,8 @@ def make_tui_transcript_view(
     agent_control = FormattedTextControl(
         lambda: _flatten_lines(provider.frame(provider.last_width).agent_lines)
     )
+    # LLM: 根据 mode_state 结构化快照选择普通或详情正文控件，供底栏装饰器读取当前活动视口。
+    # 函数用途: 返回当前处于活动状态的 transcript 控件。
     def active_control() -> TuiTranscriptControl:
         return modal_control if mode_state.snapshot().active else control
 
