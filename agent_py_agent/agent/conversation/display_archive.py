@@ -1,4 +1,4 @@
-# LLM: Display archives contain already-public immutable presentation rows, never model context.
+# LLM: 归档只含公开展示副本，不参与模型输入；合页仍无损分页，TTL墓碑必须报告过期而不是空内容。
 # 模块用途: 把完整工具展示保存为有界原文页；不重新读取业务文件，不参与模型输入或 Compact。
 
 from __future__ import annotations
@@ -20,22 +20,23 @@ DISPLAY_PAGE_CHARS = 12_000
 DISPLAY_ROW_CHARS = 2_000
 # 展示归档单页最大 256000 字节：控制分页存储体积。
 _MAX_PAGE_BYTES = 256_000
+_MAX_BUNDLE_BYTES = 16 * 1024 * 1024
+DISPLAY_BUNDLE_SCHEMA = "display_archive_bundle.v1"
 _ID = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 _ARCHIVE_ID = re.compile(r"[0-9a-f]{32}\Z")
 
 
-# LLM: Public errors carry stable machine codes without exposing private disk paths.
+# LLM: 公开错误只带稳定机器码和安全说明，不透露服务器磁盘路径。
 # 类用途: 向 Gateway 返回原文缺失、引用非法或损坏的准确类别。
 class DisplayArchiveError(ValueError):
-    # LLM: Keep code separate from text so callers never infer authorization from a message.
+    # LLM: 错误码与说明分开保存，调用方不得按自然语言判断授权或归档状态。
     # 函数用途: 保存可公开的错误类型和说明。
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
 
 
-# LLM: Only trusted producers provide the canonical thread id and pre-sanitized rows; refs never
-# contain paths. Publishing the manifest last makes incomplete archives invisible after crashes.
+# LLM: 只接收可信producer提供的线程身份与已净化行；引用不含路径，先刷盘各页再发表manifest以隔离半成品。
 # 函数用途: 逐页保存本次真实显示快照，最后发布引用；返回后业务文件变化不影响历史原文。
 def archive_display_rows(agent: object, *, thread_id: str, rows: Iterable[Mapping]) -> dict[str, object]:
     store = agent.conversation_store
@@ -75,8 +76,7 @@ def archive_display_rows(agent: object, *, thread_id: str, rows: Iterable[Mappin
     return reference
 
 
-# LLM: Callers authorize the exact owner/thread before invoking this read. Client counts are
-# ignored; manifest identity and bounds are authoritative, and every file read is size-limited.
+# LLM: 调用方先认证owner/thread；只信磁盘索引，旧独立页优先、缺页才读有界bundle，墓碑单独报过期。
 # 函数用途: 只读取引用指向的一页原文，拒绝路径、负页码、软链接或不完整归档。
 def read_display_archive_page(store: object, reference: object, page_index: object) -> dict[str, object]:
     archive_id, thread_id = validate_display_archive_reference(reference)
@@ -90,16 +90,56 @@ def read_display_archive_page(store: object, reference: object, page_index: obje
     if (manifest.get("schema") != DISPLAY_ARCHIVE_SCHEMA or manifest.get("archive_id") != archive_id
             or manifest.get("thread_id") != thread_id or type(count) is not int or count < 1):
         raise DisplayArchiveError("DISPLAY_ARCHIVE_INVALID", "原文归档身份或索引损坏。")
+    _raise_if_expired(manifest)
     if page_index >= count:
         raise DisplayArchiveError("DISPLAY_PAGE_INVALID", "原文页码超出范围。")
-    data = _read_json_bounded(directory / f"{page_index}.json", _MAX_PAGE_BYTES)
-    rows = data.get("rows")
+    try:
+        data = _read_json_bounded(directory / f"{page_index}.json", _MAX_PAGE_BYTES)
+        rows = data.get("rows")
+    except DisplayArchiveError as exc:
+        if not isinstance(exc.__cause__, FileNotFoundError):
+            raise
+        try:
+            bundle = _read_json_bounded(directory / "pages_bundle.json", _bundle_limit(count))
+            pages = _validate_bundle(bundle, manifest)
+            rows = pages[page_index]
+        except DisplayArchiveError:
+            # 过期提交先发表墓碑再删页；跨越这个窗口的读者也必须得到明确过期。
+            _raise_if_expired(_read_json_bounded(directory / "manifest.json", 4096))
+            raise
     _validate_page_rows(rows)
     return {"ok": True, "reference": manifest, "rows": rows, "page_index": page_index,
             "page_count": count, "has_previous": page_index > 0, "has_next": page_index + 1 < count}
 
 
-# LLM: Only opaque identifiers cross the API; known path-like or extra fields are not accepted.
+# LLM: 此状态来自磁盘manifest，不接受客户端引用中的元数据来触发过期。
+# 函数用途: 让TTL缺页与损坏、暂时不可读保持不同错误码。
+def _raise_if_expired(manifest: dict) -> None:
+    if manifest.get("expired") is True:
+        raise DisplayArchiveError("DISPLAY_ARCHIVE_EXPIRED", "展示原文已按保留策略过期，请保留现有预览。")
+
+
+# LLM: 只用已校验的磁盘page_count估算读取上限，总大小始终受16MiB硬界限制。
+# 函数用途: 给合页读取保留JSON封装余量而不允许无界读取。
+def _bundle_limit(count: int) -> int:
+    return min(_MAX_BUNDLE_BYTES, max(_MAX_PAGE_BYTES, _MAX_PAGE_BYTES * count))
+
+
+# LLM: bundle必须绑定同一归档与线程且逐页满足原行合同；维护验证与读页共用此校验。
+# 函数用途: 校验合页内容并返回原样行列表。
+def _validate_bundle(bundle: dict, manifest: dict) -> list:
+    pages = bundle.get("pages")
+    if (bundle.get("schema") != DISPLAY_BUNDLE_SCHEMA
+            or bundle.get("archive_id") != manifest["archive_id"]
+            or bundle.get("thread_id") != manifest["thread_id"]
+            or not isinstance(pages, list) or len(pages) != manifest["page_count"]):
+        raise DisplayArchiveError("DISPLAY_ARCHIVE_INVALID", "原文合页身份或索引损坏。")
+    for rows in pages:
+        _validate_page_rows(rows)
+    return pages
+
+
+# LLM: API只接收不透明身份与原六字段引用；额外路径或TTL字段均不可作为调用引用。
 # 函数用途: 在任何文件访问前严格校验显示引用，计数仅供展示而非文件定位。
 def validate_display_archive_reference(reference: object) -> tuple[str, str]:
     allowed = {"schema", "archive_id", "thread_id", "page_count", "row_count", "char_count"}
@@ -113,7 +153,7 @@ def validate_display_archive_reference(reference: object) -> tuple[str, str]:
     return archive_id, thread_id
 
 
-# LLM: The archive lives only under the canonical owner ConversationStore, never client cwd.
+# LLM: 归档根只来自规范owner的ConversationStore，不读取客户端工作目录，也不跟随归档根链接。
 # 函数用途: 取得唯一显示归档目录，并阻止归档目录被软链接转向其它数据。
 def _archive_root(store: object) -> Path:
     root = Path(store.storage.root) / "display_archives"
@@ -122,7 +162,7 @@ def _archive_root(store: object) -> Path:
     return root
 
 
-# LLM: UUID directories and exclusive creation prevent accidental replacement; files are private.
+# LLM: UUID目录及排他新建防止覆写；私有文件关闭前fsync，manifest发表仍由producer负责。
 # 函数用途: 保存一个不可覆写 JSON 页，关闭前落盘，确保发布后的页面完整。
 def _write_json_new(path: Path, payload: dict) -> None:
     descriptor = _open_archive_file(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
@@ -132,13 +172,14 @@ def _write_json_new(path: Path, payload: dict) -> None:
         os.fsync(stream.fileno())
 
 
-# LLM: No-follow and regular-file checks stop symlink/FIFO escapes before reading bounded bytes.
+# LLM: nofollow及普通单链接检查拒绝软硬链接和FIFO；有界读取失败保留原错误原因供缺页兼容分支判断。
 # 函数用途: 安全读取小型原文页；缺失、损坏或过大的文件明确报错，不透露服务器路径。
 def _read_json_bounded(path: Path, maximum: int) -> dict:
     try:
         descriptor = _open_archive_file(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         with os.fdopen(descriptor, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 raise ValueError("not regular")
             raw = stream.read(maximum + 1)
         if len(raw) > maximum:
@@ -151,8 +192,7 @@ def _read_json_bounded(path: Path, maximum: int) -> dict:
         raise DisplayArchiveError("DISPLAY_ARCHIVE_UNAVAILABLE", "完整原文缺失或损坏，请保留现有预览。") from exc
 
 
-# LLM: POSIX opens each archive directory through no-follow descriptors, preventing directory
-# replacement races; platforms without dir_fd still enforce resolved archive containment.
+# LLM: POSIX逐层nofollow打开根与UUID目录，避免替换竞态；无dirfd平台仍检查链接和归档内包含关系。
 # 函数用途: 通过已打开的目录安全读写原文页，不能被替换目录的软链接导向其它位置。
 def _open_archive_file(path: Path, flags: int) -> int:
     directory, root = path.parent, path.parent.parent
@@ -175,7 +215,7 @@ def _open_archive_file(path: Path, flags: int) -> int:
         os.close(root_descriptor)
 
 
-# LLM: Disk is untrusted input too; corruption cannot turn a bounded page into unlimited rendering.
+# LLM: 磁盘行同样是不可信输入；单页行数、字符及分片字段受限，损坏不得变成无界渲染。
 # 函数用途: 校验磁盘页大小和分片字段，防止损坏记录拖垮终端。
 def _validate_page_rows(rows: object) -> None:
     valid = isinstance(rows, list) and len(rows) <= DISPLAY_PAGE_ROWS_COUNT
