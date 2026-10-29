@@ -36,6 +36,8 @@ BODY = ('# 数据整理\n\n## 步骤\n先核对表头、编码和输入合同，
         '输出前核对输入输出行数，保留原件，抽查首尾记录及字段类型。' * 3)
 
 
+# LLM: 默认把不同 run 放在同一线程，工具轨迹由调用方传入，便于分离任务身份与线程归属。
+# 函数用途: 构造带任务、请求标识及归档工具调用的学习请求测试上下文。
 def context(run='a', calls=()):
     return SimpleNamespace(do_save=True, context_scope='default', source='tui', tool_rounds=8,
                            run_id=run, task_id='task-'+run, request_id='request-'+run,
@@ -44,11 +46,15 @@ def context(run='a', calls=()):
                            archive_tool_calls=list(calls))
 
 
+# LLM: 名称可变但正文与其他元数据保持固定，避免身份测试被候选内容变化干扰。
+# 函数用途: 生成具有有效说明、适用条件和复用步骤的创建型学习决策。
 def decision(name='csv-cleaner'):
     return SkillLearningDecision('create', '可复用', name=name, description='合并CSV并核对结果',
                                  when_to_use='合并CSV时', tags=('csv',), body=BODY)
 
 
+# LLM: 每个用例使用独立临时 home，并经真实发布入口写入初始技能，不伪造登记表状态。
+# 函数用途: 为版本、反馈与队列回归提供已发布 csv-cleaner 的 home 和学习 Store。
 @pytest.fixture
 def learned(tmp_path):
     home = ensure_my_agent_home(tmp_path/'home')
@@ -57,6 +63,8 @@ def learned(tmp_path):
     return home, store
 
 
+# LLM: 重复形参和函数外 return 必须在编译检查中失败，不能因语法树可解析而通过，也不得执行候选。
+# 函数用途: 回归默认静态验证器对脚本编译错误的拒绝及未执行标记。
 @pytest.mark.parametrize('source', ['def run(value, value):\n    return value\n', 'return 1\n'])
 def test_r3_review_static_script_rejects_compile_errors(source):
     from agent_py_agent.agent.capability.asset_promotion import default_machine_promotion_verifier
@@ -66,6 +74,8 @@ def test_r3_review_static_script_rejects_compile_errors(source):
     assert result['status'] == 'failed' and result['executed'] is False
 
 
+# LLM: 候选一旦执行就会抛异常；静态检查通过只能说明编译成功，executed 必须保持 False。
+# 函数用途: 确认脚本编译验证不会运行候选顶层代码。
 def test_r3_review_script_compilation_does_not_execute():
     from agent_py_agent.agent.capability.asset_promotion import default_machine_promotion_verifier
 
@@ -75,6 +85,8 @@ def test_r3_review_script_compilation_does_not_execute():
     assert result['status'] == 'passed' and result['executed'] is False
 
 
+# LLM: 缺失轨迹字段不构成合并证据，两个入队顺序都不能吞掉带完整轨迹的请求。
+# 函数用途: 验证轨迹不完整的同 run 请求与已知轨迹请求分别保留。
 @pytest.mark.parametrize('reverse', [False, True])
 def test_r3_review_missing_trajectory_cannot_erase_known_material(learned, reverse):
     _, store = learned
@@ -87,17 +99,25 @@ def test_r3_review_missing_trajectory_cannot_erase_known_material(learned, rever
     assert len(store.pending_requests(refill=True)) == 2
 
 
+# LLM: 自定义 verifier 即使不可哈希或布尔值为假也不能被替换成默认验证器，其失败结论必须生效。
+# 函数用途: 检查特殊可调用对象被实际调用一次且不会误发布候选。
 @pytest.mark.parametrize('kind', ['unhashable', 'falsey'])
 def test_r3_review_custom_callable_is_not_implicitly_defaulted(learned, kind):
     from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
 
+    # LLM: 对象不可哈希，并可按参数呈现假值；调用次数用于辨别生产入口是否跳过了自定义验证器。
+    # 类用途: 构造返回拒绝回执的特殊可调用验证器替身。
     class Verifier:
         __hash__ = None
         calls = 0
 
+        # LLM: 仅 falsey 场景返回 False，但对象仍有有效的 __call__，不能据此当作未提供。
+        # 函数用途: 为验证器缺省选择回归控制对象的真假值。
         def __bool__(self):
             return kind != 'falsey'
 
+        # LLM: 回执绑定传入 hash 并明确失败；计数能揭示自定义 verifier 是否真的被调用。
+        # 函数用途: 记录一次候选验证调用并返回失败回执。
         def __call__(self, candidate, sha256):
             self.calls += 1
             return {'status':'failed', 'sha256':sha256, 'receipt_id':'rejected'}
@@ -109,6 +129,8 @@ def test_r3_review_custom_callable_is_not_implicitly_defaulted(learned, kind):
     assert verifier.calls == 1 and 'callable-probe' not in store.load_registry().skills
 
 
+# LLM: 线程相同不代表同一次学习任务；恢复队列后必须仍能读到两个不同 run 的请求。
+# 函数用途: 回归同线程不同运行的学习请求不会在队列恢复时互相覆盖。
 def test_f08_distinct_runs_in_same_thread_survive_queue_recovery(learned):
     _, store = learned
     for run in ('csv', 'ssh'):
@@ -116,6 +138,8 @@ def test_f08_distinct_runs_in_same_thread_survive_queue_recovery(learned):
     assert {store.read_request(path)['run_id'] for path in store.pending_requests(refill=True)} == {'csv', 'ssh'}
 
 
+# LLM: 即使 task_id 相同，旧轨迹与修复后轨迹也不能在没有显式合并证据时覆盖彼此。
+# 函数用途: 验证相同任务的不同轨迹保留为两个待处理请求。
 def test_f08_same_task_different_trajectory_is_not_overwritten(learned):
     _, store = learned
     for run in ('first', 'repaired'):
@@ -125,6 +149,8 @@ def test_f08_same_task_different_trajectory_is_not_overwritten(learned):
     assert len(store.pending_requests(refill=True)) == 2
 
 
+# LLM: 分别覆盖不同根任务及缺失任务字段，不能借共同线程或空字段推定不同 run 应当合并。
+# 函数用途: 检查缺少显式合并证据的不同运行均保留在队列中。
 @pytest.mark.parametrize('root,task', [('root-a', 'same-task'), ('', '')])
 def test_f08_distinct_runs_without_merge_evidence_survive(learned, root, task):
     _, store = learned
@@ -136,6 +162,8 @@ def test_f08_distinct_runs_without_merge_evidence_survive(learned, root, task):
     assert len(store.pending_requests(refill=True)) == 2
 
 
+# LLM: 新请求明确引用旧 request_key 才允许收敛，即使轨迹已变化，也应留下新 run 的材料。
+# 函数用途: 验证显式合并谱系能把旧请求更新为唯一的新请求。
 def test_f08_explicit_merge_lineage_converges_changed_trajectory(learned):
     _, store = learned
     first = build_learning_request(context('first'), 1)
@@ -148,6 +176,8 @@ def test_f08_explicit_merge_lineage_converges_changed_trajectory(learned):
     assert len(paths) == 1 and store.read_request(paths[0])['run_id'] == 'second'
 
 
+# LLM: root_task_id 与 task_id 的等价身份可合并，不同身份则必须分开，不能退回共同线程作去重键。
+# 函数用途: 回归根任务和任务字段别名在同轨迹请求去重中的一致性。
 @pytest.mark.parametrize('other_task,count', [('task-A', 1), ('task-B', 2)])
 def test_review_f08_root_and_task_aliases_do_not_fall_back_to_thread(learned, other_task, count):
     _, store = learned
@@ -160,6 +190,8 @@ def test_review_f08_root_and_task_aliases_do_not_fall_back_to_thread(learned, ot
     assert len(store.pending_requests(refill=True)) == count
 
 
+# LLM: 工具轨迹限长时仍须保留后段修复与验证回合及其证据引用，不能只留下早期失败。
+# 函数用途: 检查长轨迹压缩后保留最后修复、验证及可追溯证据。
 def test_f09_segmented_trace_keeps_fix_verifier_and_evidence():
     calls = [{'tool': 'run_command', 'ok': False, 'tool_round': n,
               'parameters': {'command': f'attempt-{n}'}} for n in range(1, 81)]
@@ -172,6 +204,8 @@ def test_f09_segmented_trace_keeps_fix_verifier_and_evidence():
     assert 'verification:82' in json.dumps(request)
 
 
+# LLM: 成功按裸名读取的 owner 技能应进入可更新材料；有规范 stable_id 回执时还须保存准确已用身份。
+# 函数用途: 验证裸名读取在有无规范结果两种情况下都能关联现有技能。
 @pytest.mark.parametrize('canonical_result', [False, True])
 def test_f13_bare_name_read_is_updatable(learned, canonical_result):
     _, store = learned
@@ -186,6 +220,8 @@ def test_f13_bare_name_read_is_updatable(learned, canonical_result):
         assert request['used_skill_ids'] == ['owner:csv-cleaner']
 
 
+# LLM: 两个技能都被采用时，带准确目标和当前 hash 的宿主回执只能记到指定技能，不能广播记功。
+# 函数用途: 检查各目标字段别名的验证回执只归属命中的当前版本。
 @pytest.mark.parametrize('target_field', ['skill_id', 'asset_id', 'asset_ref', 'target_skill_ids'])
 def test_f11_receipt_credits_only_named_current_version(learned, target_field):
     home, store = learned
@@ -203,6 +239,8 @@ def test_f11_receipt_credits_only_named_current_version(learned, target_field):
     assert not any(row['authority'] == 'host' for row in registry.skills['ssh-triage'].maintenance['observations'])
 
 
+# LLM: 多个已采用技能使无目标回执含糊，显式目标配旧 hash 也无效，两者都不能生成宿主正反馈。
+# 函数用途: 回归无归属或版本不匹配的命令验证不会给技能记功。
 def test_f11_unattributed_or_stale_hash_receipt_does_not_credit(learned):
     home, store = learned
     publish_learned_skill(store, PublishRequest(decision('ssh-triage')))
@@ -217,6 +255,8 @@ def test_f11_unattributed_or_stale_hash_receipt_does_not_credit(learned):
     assert not any(f['authority'] == 'host' for f in store.load_registry().skills[row.name].maintenance['observations'])
 
 
+# LLM: 单一采用可提供无歧义的默认归属，但错误 hash 或显式空目标必须阻止这种推断。
+# 函数用途: 检查单技能采用时宿主回执推断归属的允许与拒绝边界。
 @pytest.mark.parametrize('extra,credited', [({}, True), ({'sha256':'a'*64}, False),
                                           ({'content_hash':'a'*64}, False),
                                           ({'target_skill_ids':[]}, False)])
@@ -230,6 +270,8 @@ def test_f11_single_adoption_uses_unambiguous_host_receipt(learned, extra, credi
     assert any(f['authority'] == 'host' for f in store.load_registry().skills[row.name].maintenance['observations']) is credited
 
 
+# LLM: 同一回执里 skill_id 与 asset_ref 指向不同技能时，即使 hash 正确也不能只挑有利字段。
+# 函数用途: 确认相互冲突的显式目标不能匹配当前技能。
 def test_f11_conflicting_explicit_targets_do_not_credit(learned):
     from agent_py_agent.agent.capability.skill_learning_host_feedback import _receipt_targets
 
@@ -238,6 +280,8 @@ def test_f11_conflicting_explicit_targets_do_not_credit(learned):
     assert not _receipt_targets({'skill_id':'owner:csv-cleaner','asset_ref':'owner:unrelated','sha256':row.sha256},row)
 
 
+# LLM: 列表内目标的所有身份与 hash 别名也必须一致，不能忽略嵌套对象中冲突的别名。
+# 函数用途: 检查嵌套目标携带错误身份或内容摘要时被拒绝匹配。
 @pytest.mark.parametrize('conflict', [{'asset_id':'owner:unrelated'}, {'content_sha256':'a'*64}])
 def test_review_f11_nested_target_aliases_must_all_agree(learned, conflict):
     from agent_py_agent.agent.capability.skill_learning_host_feedback import _receipt_targets
@@ -248,6 +292,8 @@ def test_review_f11_nested_target_aliases_must_all_agree(learned, conflict):
     assert not _receipt_targets({'target_skill_ids':[target]}, row)
 
 
+# LLM: 损坏的快照引用索引不是合法空集合，必须显式报错，避免误判保护信息已完整收集。
+# 函数用途: 验证引用收集器拒绝格式错误的 skill_snapshot_refs。
 def test_f17_malformed_refs_are_not_a_complete_empty_set():
     from agent_py_agent.agent.capability.skill_learning_protection import _include_refs
 
@@ -255,6 +301,8 @@ def test_f17_malformed_refs_are_not_a_complete_empty_set():
         _include_refs(set(), {'skill_snapshot_refs':'broken index'})
 
 
+# LLM: 已稳定技能的正文 hash 变化后不能继承旧版质量和计数，但必须保存旧版版本、修订及 hash 供回退。
+# 函数用途: 检查更新发布重置试用状态并记录准确的上一稳定版本。
 def test_f12_new_hash_resets_trial_and_keeps_previous_stable(learned):
     _, store = learned
     current = store.load_registry().skills['csv-cleaner']
@@ -269,6 +317,8 @@ def test_f12_new_hash_resets_trial_and_keeps_previous_stable(learned):
     assert after.maintenance['previous_stable'] == {'version': current.version, 'revision': current.revision, 'sha256': current.sha256}
 
 
+# LLM: 说明中明确排除的源代码审计不能因关键词出现而加分，真正适用的审计卡片应获正分。
+# 函数用途: 回归路由评分对否定适用条件与正向用途的区分。
 def test_f02_negative_applicability_is_not_positive_keyword():
     from agent_py_agent.agent.capability.router import CapabilityCard, score_card
 
@@ -278,6 +328,8 @@ def test_f02_negative_applicability_is_not_positive_keyword():
     assert score_card('源代码审计', suited)[0] > 0
 
 
+# LLM: 漏洞发现与修复报告的改写表达应匹配证据整理包，明确排除证据整理的查询则不能强匹配。
+# 函数用途: 检查能力包强匹配同时识别任务改写和查询中的否定要求。
 def test_f03_package_paraphrase_and_query_negation():
     from agent_py_agent.agent.capability.router import CapabilityCard, has_strong_match
 
@@ -287,12 +339,16 @@ def test_f03_package_paraphrase_and_query_negation():
     assert not has_strong_match('别做证据整理，只扫描漏洞', card)
 
 
+# LLM: 快照使用固定指纹且只包含传入条目，不触发磁盘发现，便于隔离路由和分页合同。
+# 函数用途: 为搜索与推荐测试创建最小的冻结技能快照。
 def snapshot(entries=(), workspace='/unused'):
     from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshot
 
     return SkillSnapshot(tuple(entries), (), 'frozen', 'owner', str(workspace))
 
 
+# LLM: 大量无关内置技能不能在索引截断时挤掉精确适用的 Owner 技能，断言检查实际渲染结果。
+# 函数用途: 验证相关私有技能在大目录元数据索引中仍然可见。
 def test_f04_owner_exact_fit_is_not_truncated_by_builtin_catalog():
     from agent_py_agent.agent.capability.router import CapabilityRouter
     from agent_py_agent.agent.capability.skill_snapshot import SkillSnapshotEntry
@@ -304,6 +360,8 @@ def test_f04_owner_exact_fit_is_not_truncated_by_builtin_catalog():
     assert 'owner:alarm-summary' in router.render_skill_metadata_index(context_window_tokens=128000)
 
 
+# LLM: 连续分页必须保持准确总数且无遗漏；快照条目变化后旧游标必须失败，不能继续混读新目录。
+# 函数用途: 检查全局技能搜索的分页覆盖、结束标记及快照漂移拒绝。
 def test_f04_global_search_paginates_without_gaps_or_snapshot_drift():
     from agent_py_agent.agent.capability.router import CapabilityRouter
     from agent_py_agent.agent.capability.skill_search_tool import SkillSearchTool
@@ -322,6 +380,8 @@ def test_f04_global_search_paginates_without_gaps_or_snapshot_drift():
     assert not tool.execute({'query': '告警汇总', 'cursor': first['next_cursor']}).ok
 
 
+# LLM: 通过真实 Store 保存的脚本与工作流都应进入搜索摘要；该入口不得泄露代码或步骤，也不在此执行。
+# 函数用途: 验证已有脚本和工作流能够作为直接能力候选被发现。
 def test_f01_saved_scripts_and_workflows_are_direct_candidates(tmp_path):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     from agent_py_agent.agent.assets.script_store import ScriptStore
@@ -348,6 +408,8 @@ def test_f01_saved_scripts_and_workflows_are_direct_candidates(tmp_path):
     assert all('code' not in row and 'steps' not in row for row in matches)
 
 
+# LLM: 用工作区脚本的真实输出证明 Runner 执行了候选代码；显式关闭沙箱，不据此外推沙箱隔离能力。
+# 函数用途: 回归工作区作用域脚本能经真实 Runner 执行并返回业务数据。
 def test_f05_workspace_script_executes_actual_code(tmp_path):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     from agent_py_agent.agent.assets.script_store import ScriptStore
@@ -362,6 +424,8 @@ def test_f05_workspace_script_executes_actual_code(tmp_path):
     assert result.output_data['executed'] is True
 
 
+# LLM: 两个独立任务的宿主负反馈触发回退，旧正文与版本恢复但修订号仍须递增，不能倒退 CAS 身份。
+# 函数用途: 检查试用版本连续退化后恢复稳定内容并保持版本存储一致。
 def test_f12_trial_regressions_restore_previous_stable(learned):
     _, store = learned
     current = store.load_registry().skills['csv-cleaner']
@@ -378,6 +442,8 @@ def test_f12_trial_regressions_restore_previous_stable(learned):
     assert store.read_version(current.name, current.version) == store.skill_path(current.name).read_text()
 
 
+# LLM: 新采用反馈可以更新技能热度，却不能改写上次维护时钟并掩盖到期维护任务。
+# 函数用途: 确认热反馈后维护仍被发现为待处理，且维护时间保持原值。
 def test_f17_maintenance_clock_survives_hot_observation(learned):
     from agent_py_agent.agent.capability.skill_learning import (
         SkillLearningService,
@@ -394,6 +460,8 @@ def test_f17_maintenance_clock_survives_hot_observation(learned):
     assert store.load_registry().last_maintenance_at == 1
 
 
+# LLM: 大量已完成任务不应耗尽在途保护扫描，合法空快照引用也不应被当作保护来源失败。
+# 函数用途: 验证超过扫描限额的历史任务与空引用不阻止保护信息完整收集。
 def test_f17_empty_refs_and_completed_history_do_not_block_protection(learned, tmp_path):
     from agent_py_agent.agent.capability.skill_learning_protection import (
         learning_protection_for_agent,
@@ -404,6 +472,8 @@ def test_f17_empty_refs_and_completed_history_do_not_block_protection(learned, t
     directory.mkdir()
     for index in range(1002):
         (directory/f'{index:04}.json').write_text('{}')
+    # LLM: 只有指定末尾任务为 running，其余均完成；序列化结果显式携带合法空引用列表。
+    # 函数用途: 为保护扫描构造区分历史任务与在途任务的加载结果。
     def load(task):
         status = 'running' if task == '1001' else 'completed'
         return SimpleNamespace(status=status, skill_snapshot_refs=[], to_dict=lambda: {'skill_snapshot_refs':[]}), None
@@ -416,6 +486,8 @@ def test_f17_empty_refs_and_completed_history_do_not_block_protection(learned, t
     assert learning_protection_for_agent(agent, scan_limit=10)['protection_complete'] is True
 
 
+# LLM: 对同一对话轮次重复提取须复用提案身份；真正提交后技能登记与统一资产登记必须同时存在。
+# 函数用途: 回归轮次重放的幂等提案及提交后的统一登记。
 def test_f10_f16_turn_replay_reuses_one_registered_family(tmp_path):
     from agent_py_agent.agent.assets import turn_extractor as extract
     from agent_py_agent.tests.test_turn_asset_extractor import history
@@ -431,6 +503,8 @@ def test_f10_f16_turn_replay_reuses_one_registered_family(tmp_path):
     assert len(registry.assets) == 1
 
 
+# LLM: 载体判断使用命令、步骤依赖和分支等结构特征，不靠候选名称猜测应保存成何种资产。
+# 函数用途: 检查脚本、工作流和技能三类结构特征对应的载体选择。
 @pytest.mark.parametrize('kind,features', [('script', {'commands':['sort input.csv']}),
                                          ('workflow', {'steps':[{'id':'a'}, {'id':'b', 'depends_on':['a']}]}),
                                          ('skill', {'branches':True})])
@@ -440,6 +514,8 @@ def test_f07_carrier_selection_uses_structural_features(kind, features):
     assert asset_promotion.select_asset_carrier(features) == kind
 
 
+# LLM: 只改技能名不应改变语义族指纹；指纹相同不等于授权合并不同规范 ID 的发布身份。
+# 函数用途: 验证同一方法改名后仍生成相同的语义族摘要。
 def test_f10_semantic_family_ignores_skill_rename():
     from agent_py_agent.agent.capability import asset_promotion
 
@@ -448,6 +524,8 @@ def test_f10_semantic_family_ignores_skill_rename():
     assert asset_promotion.task_family_fingerprint('skill', a.__dict__) == asset_promotion.task_family_fingerprint('skill', b.__dict__)
 
 
+# LLM: 外层 succeeded 不能弥补 dry_run、未执行或缺失执行证明，静态成功不得冒充业务验证。
+# 函数用途: 检查业务验证判定拒绝空输出及非真实执行回执。
 @pytest.mark.parametrize('output', [{'dry_run':True}, {'executed':False}, {}])
 def test_f10_dry_run_is_not_business_validation(output):
     from agent_py_agent.agent.capability import asset_promotion
@@ -455,6 +533,8 @@ def test_f10_dry_run_is_not_business_validation(output):
     assert asset_promotion.business_validated({'status':'succeeded', 'output':output}) is False
 
 
+# LLM: 参数化 verifier 替身只验证晋升合同；错误 hash 或试跑不能发布，默认静态通过也不能伪造执行或用户确认。
+# 函数用途: 核对自主晋升的试用状态、回执等级与人格文件不变边界。
 @pytest.mark.parametrize('receipt_kind', ['verified', 'dry_run', 'wrong_hash', 'missing'])
 def test_f07_machine_verified_promotion_never_forges_user_confirmation(tmp_path, receipt_kind):
     from dataclasses import asdict
@@ -471,6 +551,8 @@ def test_f07_machine_verified_promotion_never_forges_user_confirmation(tmp_path,
     home = ensure_my_agent_home(tmp_path/'home')
     store = SkillLearningStore.for_home(home)
     personality = {name:(home.owner_home_dir/name).read_bytes() for name in ('AGENTS.md','SOUL.md')}
+    # LLM: 根据用例参数返回正确摘要、错误摘要或试跑输出，这些合成回执不代表实际执行候选。
+    # 函数用途: 提供控制晋升路径所需的宿主验证回执替身。
     def verifier(publish, sha):
         return {'status':'passed', 'executed':True, 'contract_valid':True,
                 'sha256':sha if receipt_kind != 'wrong_hash' else 'a'*64, 'receipt_id':'host-verifier-1',
@@ -519,6 +601,8 @@ def test_f10_service_keeps_renamed_pending_identity(tmp_path):
     assert {row['decision']['name'] for row in list_learning_proposals(store)} == {'one-method', 'same-renamed'}
 
 
+# LLM: 从 record_lesson 候选生成的提案应在统一资产表中保留同一个 proposal_id，不能丢失入口出处。
+# 函数用途: 检查 S1 候选提案与统一资产登记之间的来源关联。
 def test_f16_s1_candidate_has_unified_provenance(tmp_path):
     from agent_py_agent.tests.test_skill_proposals import _record_lesson, _runtime
 
@@ -528,6 +612,8 @@ def test_f16_s1_candidate_has_unified_provenance(tmp_path):
     assert any(ref.get('proposal_id') == proposal.proposal_id for row in rows for ref in row['provenance'])
 
 
+# LLM: 明显危险的候选必须先被安全门拒绝，验证器调用记录和技能登记都应保持为空。
+# 函数用途: 验证发布晋升在调用执行验证器之前先落实内容安全检查。
 def test_f07_guard_rejects_before_execution_verifier(tmp_path):
     from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
     from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
@@ -541,6 +627,8 @@ def test_f07_guard_rejects_before_execution_verifier(tmp_path):
     assert not store.load_registry().skills
 
 
+# LLM: 已待审的同一候选在获得匹配 hash 的验证回执后可转入发布，不能被待审身份永久挡住。
+# 函数用途: 回归待审学习候选向机器验证发布的状态转换。
 def test_f10_pending_candidate_can_become_machine_verified(tmp_path):
     from agent_py_agent.agent.capability.asset_promotion import propose_or_promote_skill
 
@@ -552,6 +640,8 @@ def test_f10_pending_candidate_can_become_machine_verified(tmp_path):
     assert result.event == 'published'
 
 
+# LLM: 步骤 ID 规范化不能误改 inputs_map 内同名的字面量，否则不同业务输入会得到同一语义指纹。
+# 函数用途: 检查工作流族指纹保留字面输入值的差异。
 def test_f10_workflow_literal_inputs_are_not_rewritten_as_step_ids():
     from agent_py_agent.agent.capability.asset_promotion import task_family_fingerprint
 
@@ -560,6 +650,8 @@ def test_f10_workflow_literal_inputs_are_not_rewritten_as_step_ids():
     assert task_family_fingerprint('workflow', a) != task_family_fingerprint('workflow', b)
 
 
+# LLM: 机器验证通过也不能绕过修订和 hash 的 CAS；同一旧请求第二次提交必须拒绝且不改当前正文。
+# 函数用途: 回归自主更新发布的成功路径与过期版本冲突保护。
 def test_f06_machine_verified_skill_update_honors_cas(learned):
     from agent_py_agent.agent.capability.asset_promotion import promote_verified_skill
     from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
@@ -568,6 +660,8 @@ def test_f06_machine_verified_skill_update_honors_cas(learned):
     row = store.load_registry().skills['csv-cleaner']
     update = PublishRequest(replace(decision(), decision='update', body=BODY+'\n复核列类型。'),
                             expected_revision=row.revision, expected_sha256=row.sha256)
+    # LLM: 合成成功回执只绑定本次候选 hash，使测试聚焦后续 CAS 门禁，而非候选执行链。
+    # 函数用途: 为版本冲突回归提供摘要匹配的验证器替身。
     def verifier(_, sha):
         return {'status':'passed', 'executed':True, 'contract_valid':True,
                 'sha256':sha, 'receipt_id':'cas-check', 'output':{}}
@@ -578,6 +672,8 @@ def test_f06_machine_verified_skill_update_honors_cas(learned):
     assert store.skill_path(row.name).read_bytes() == current
 
 
+# LLM: 在冻结后、执行前把 Store 改成新版，Runner 输出仍必须来自已冻结的旧代码，不能二次读库。
+# 函数用途: 检查脚本执行使用冻结正文而不受随后存储修改影响。
 def test_f14_runner_executes_frozen_code_not_later_store_edit(tmp_path, monkeypatch):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor
     from agent_py_agent.agent.assets.script_store import ScriptStore
@@ -588,6 +684,8 @@ def test_f14_runner_executes_frozen_code_not_later_store_edit(tmp_path, monkeypa
     descriptor = AssetDescriptor(id='tail', kind='script', name='tail')
     store.save_script(descriptor, 'print(\'{"version":1}\')')
     execute = script_runner._execute
+    # LLM: 只在进入真实执行函数前改写 Store，原调用参数原样传递，确保故障点位于冻结之后。
+    # 函数用途: 注入冻结代码与当前存储版本不同的执行时序。
     def change_after_freeze(*args):
         store.save_script(descriptor, 'print(\'{"version":2}\')')
         return execute(*args)
@@ -596,6 +694,8 @@ def test_f14_runner_executes_frozen_code_not_later_store_edit(tmp_path, monkeypa
     assert result.ok and result.output_data == {'version':1}
 
 
+# LLM: 脚本即使正常输出 JSON，缺少声明的 report_uri 也必须按输出合同失败，不能只看进程成功。
+# 函数用途: 验证 Runner 最终返回值必须满足必填输出字段合同。
 def test_f15_runner_final_output_must_pass_contract(tmp_path):
     from agent_py_agent.agent.assets.descriptor import AssetDescriptor, IOContract
     from agent_py_agent.agent.assets.script_store import ScriptStore
@@ -640,6 +740,8 @@ def test_review_verified_update_persists_current_receipt(learned):
     assert row.maintenance['promotion_authority'] == 'autonomous_verified'
 
 
+# LLM: 在真实登记写入后注入异常，提交必须恢复提案 DRAFT、清空本次资产登记并撤销技能及版本文件。
+# 函数用途: 回归对话提取提交在登记阶段失败时的跨存储回滚。
 def test_review_extraction_registry_write_failure_restores_all(tmp_path,monkeypatch):
     from agent_py_agent.agent.assets import turn_extractor as extract
     from agent_py_agent.tests.test_turn_asset_extractor import history
@@ -648,6 +750,8 @@ def test_review_extraction_registry_write_failure_restores_all(tmp_path,monkeypa
     proposal = extract.propose_assets_from_turns(store,owner_home=home,
         turn_refs=[{'thread_id':thread.thread_id,'message_id':first.message_id}],target_types=['skill'])
     original = SkillLearningStore.save_registry
+    # LLM: 先执行原始 save_registry 再报错，确保覆盖已替换登记文件后仍需恢复的事务窗口。
+    # 函数用途: 注入提取提交的写后登记失败。
     def fail(self, registry):
         original(self,registry)
         raise OSError('injected after registry replace')
@@ -673,6 +777,8 @@ def test_review_formal_method_rename_requires_own_publication(learned):
     assert set(store.load_registry().skills) == {'csv-cleaner', 'renamed'}
 
 
+# LLM: 两个包的查询匹配内容相同，当前 project_id 适用的包必须在实际索引中排到无关包之前。
+# 函数用途: 验证能力包应用范围参与元数据推荐排序。
 def test_f04_application_scope_prioritizes_relevant_package():
     from agent_py_agent.agent.capability.router import CapabilityCard, CapabilityRouter
 
@@ -681,8 +787,12 @@ def test_f04_application_scope_prioritizes_relevant_package():
                             metadata={'package_id':'z-current','stable_id':'capability:z-current','application_scope':{'project_id':'project-a'}})]
     router = CapabilityRouter(extra_cards=cards)
     agent = SimpleNamespace(_current_run_params=SimpleNamespace(user_prompt='查询',task_attributes={'project_id':'project-a'}))
+    # LLM: 绑定方法的所属对象提供当前任务参数，回调不制造额外技能快照，排序只依赖显式卡片和任务范围。
+    # 类用途: 为路由范围排序测试承载当前运行参数及快照提供方法。
     class Provider:
         _current_run_params = agent._current_run_params
+        # LLM: 返回 None 让路由保留额外卡片；任务上下文通过绑定对象属性传递，不从快照结果猜测。
+        # 函数用途: 提供不含技能快照的绑定回调以测试应用范围排序。
         def current(self):
             return None
     router._skill_snapshot_provider = Provider().current
@@ -690,6 +800,8 @@ def test_f04_application_scope_prioritizes_relevant_package():
     assert result.index('z-current') < result.index('a-other')
 
 
+# LLM: workbench、domain 和标签各维度都须满足交集，别名可以补充同维度取值，不能只匹配其中一维。
+# 函数用途: 检查能力包应用范围的多维交集和任务属性别名。
 @pytest.mark.parametrize('attrs,applies', [
     ({'workbench_id':'ops', 'domain':'alerts', 'tags':['prod']}, True),
     ({'workbench':'ops', 'domains':['alerts'], 'workspace_tags':['prod']}, True),
@@ -705,6 +817,8 @@ def test_r2_application_scope_intersects_each_dimension(attrs, applies):
     assert _package_priority(card, '', attrs)[1] is not applies
 
 
+# LLM: 任一保护来源异常都应标记采集不完整，但不能丢掉对话、定时任务、提案和子代理中其他来源的引用。
+# 函数用途: 回归保护引用收集的来源级故障隔离及不完整标记。
 @pytest.mark.parametrize('broken', ['conversations', 'scheduler', 'proposals', 'subagents'])
 def test_r2_protection_source_failure_preserves_other_references(learned, monkeypatch, broken):
     from agent_py_agent.agent.capability import skill_learning_proposals as proposals
@@ -713,6 +827,8 @@ def test_r2_protection_source_failure_preserves_other_references(learned, monkey
     )
 
     home, _ = learned
+    # LLM: 同一异常替身只替换参数指定的一个来源，其他来源保持返回有效引用，便于检验故障隔离。
+    # 函数用途: 模拟一个保护信息来源不可用。
     def fail(*args, **kwargs):
         raise RuntimeError('one source unavailable')
     task = SimpleNamespace(status='running', to_dict=lambda: {'allowed_skills':['owner:task']})
@@ -730,6 +846,8 @@ def test_r2_protection_source_failure_preserves_other_references(learned, monkey
     assert set(expected.values()) - {expected[broken]} <= set(result['protected_ids'])
 
 
+# LLM: 三个独立任务的采用及宿主有效反馈使试用转为 active，晋升历史应追加一次而非重写或重复追加。
+# 函数用途: 检查试用技能激活后的状态和完整晋升轨迹。
 def test_r2_trial_to_active_records_one_promotion_transition(learned):
     _, store = learned
     current = store.load_registry().skills['csv-cleaner']
@@ -742,6 +860,8 @@ def test_r2_trial_to_active_records_one_promotion_transition(learned):
     assert row.maintenance['promotion_history'] == ['observed','candidate','validated','trial','active']
 
 
+# LLM: 默认 Runtime 必须有宿主验证器；请求内自报的执行成功回执不可信，发布后应记录独立静态验证事实。
+# 函数用途: 验证默认机器验证接线及模型自报回执不能替代宿主证据。
 def test_r2_default_runtime_has_machine_verifier_and_ignores_request_claims(tmp_path):
     from dataclasses import asdict
 
@@ -768,6 +888,8 @@ def test_r2_default_runtime_has_machine_verifier_and_ignores_request_claims(tmp_
     assert receipt['verification_kind'] == 'deterministic_static' and receipt['executed'] is False
 
 
+# LLM: 合成宿主回执在发布中断后可由默认验证器复用，但候选 hash、请求身份字段或 Owner 改变都必须失效。
+# 函数用途: 检查晋升重试复用已保存回执的准确绑定边界。
 def test_r2_default_verifier_reuses_host_receipt_after_publish_interruption(tmp_path, monkeypatch):
     from dataclasses import asdict
 
@@ -787,6 +909,8 @@ def test_r2_default_verifier_reuses_host_receipt_after_publish_interruption(tmp_
     request = {'run_id':'verified-run', 'request_key':'original-request', 'trajectory_fingerprint':'original-input'}
     publish = PublishRequest(decision(), request)
     original = publisher.publish_learned_skill
+    # LLM: 只替换发布调用，保留前面的验证与回执保存流程，以构造已验证但尚未发布的重试场景。
+    # 函数用途: 在取得验证回执后注入发布中断。
     def interrupted(*args):
         raise OSError('publish interrupted after host verification')
     monkeypatch.setattr(publisher, 'publish_learned_skill', interrupted)
@@ -818,6 +942,8 @@ def test_r2_default_verifier_reuses_host_receipt_after_publish_interruption(tmp_
     assert row.maintenance['promotion_authority'] == 'autonomous_verified'
 
 
+# LLM: 对同一候选重新验证时，返回失败或抛异常都必须撤销旧成功回执，不能继续借旧证明晋升。
+# 函数用途: 回归再次验证失败后已缓存机器回执的失效处理。
 @pytest.mark.parametrize('throws', [False, True])
 def test_r2_failed_reverification_invalidates_previous_machine_receipt(tmp_path, monkeypatch, throws):
     from agent_py_agent.agent.capability import skill_learning_publish as publisher
@@ -830,6 +956,8 @@ def test_r2_failed_reverification_invalidates_previous_machine_receipt(tmp_path,
 
     store = SkillLearningStore.for_home(ensure_my_agent_home(tmp_path/'home'))
     publish = PublishRequest(decision(), {'run_id':'r', 'request_key':'q', 'trajectory_fingerprint':'f'})
+    # LLM: 发布失败前的合成成功回执应真实保存，后续用它确认再次验证确实清除了已有成功证据。
+    # 函数用途: 阻止初次发布完成以留下可供失效测试的旧回执。
     def interrupted(*args):
         raise OSError('interrupted publication')
     monkeypatch.setattr(publisher, 'publish_learned_skill', interrupted)
@@ -839,6 +967,8 @@ def test_r2_failed_reverification_invalidates_previous_machine_receipt(tmp_path,
             'receipt_id':'old-pass', 'output':{}})
     sha = skill_content_sha256(render_learned_skill(publish.decision))
     assert builtin_machine_verifier(publish, sha, store=store) is not None
+    # LLM: 分别覆盖验证器抛异常和正常返回 failed，两种失败都不能保留先前的成功回执。
+    # 函数用途: 为再次验证回归生成参数化失败结果。
     def failed(*args):
         if throws:
             raise RuntimeError('verifier failed')
@@ -851,6 +981,8 @@ def test_r2_failed_reverification_invalidates_previous_machine_receipt(tmp_path,
     assert builtin_machine_verifier(publish, sha, store=store) is None
 
 
+# LLM: 只给明确目标还不够，所有目标别名都必须配当前内容 hash；缺失或错误摘要不能记入当前版本。
+# 函数用途: 验证显式目标回执对准确版本摘要的强制要求。
 @pytest.mark.parametrize('field', ['skill_id', 'skill_name', 'target_skill_id'])
 @pytest.mark.parametrize('hash_value,expected', [(None, False), ('wrong', False), ('current', True)])
 def test_r3_f11_explicit_target_requires_exact_hash(learned, field, hash_value, expected):
@@ -864,6 +996,8 @@ def test_r3_f11_explicit_target_requires_exact_hash(learned, field, hash_value, 
     assert _receipt_targets(evidence, row) is expected
 
 
+# LLM: 同一 run 对同一技能采用过多个 hash 时，无目标回执也存在版本歧义，不能推定验证了当前版本。
+# 函数用途: 检查跨版本采用历史阻止无归属命令回执记功。
 def test_r3_f11_multiple_adopted_versions_are_ambiguous(learned):
     home, store = learned
     row = store.load_registry().skills['csv-cleaner']
@@ -881,6 +1015,8 @@ def test_r3_f11_multiple_adopted_versions_are_ambiguous(learned):
     assert not any(f['authority']=='host' for f in store.load_registry().skills[row.name].maintenance['observations'])
 
 
+# LLM: 连续试用更新必须一直保存最初稳定基线，最后试用版退化时不能回退到中间试用版。
+# 函数用途: 验证多次试用更新后的负反馈回退恢复原稳定正文和版本。
 def test_r3_f12_repeated_trial_updates_restore_original_stable(learned):
     _, store = learned
     stable = store.load_registry().skills['csv-cleaner']
@@ -902,6 +1038,8 @@ def test_r3_f12_repeated_trial_updates_restore_original_stable(learned):
     assert restored.revision > trial.revision
 
 
+# LLM: 任务、轨迹摘要或工具轨迹改变都应改变请求身份；无 run 的旧记录也须保留任务差异，相同重放则去重。
+# 函数用途: 检查请求主身份包含任务与轨迹信息且重复入队保持幂等。
 @pytest.mark.parametrize('difference', ['task', 'digest', 'trace', 'legacy'])
 def test_r3_f08_primary_identity_retains_task_and_trajectory(learned, difference):
     _, store = learned
@@ -924,6 +1062,8 @@ def test_r3_f08_primary_identity_retains_task_and_trajectory(learned, difference
     assert len(store.pending_requests(refill=True)) == 2
 
 
+# LLM: 作用域取值应统一别名、大小写及集合表示，通配符可免该维约束，但缺少非通配属性时仍须不匹配。
+# 函数用途: 回归包应用范围对别名、大小写、集合和通配符的匹配语义。
 @pytest.mark.parametrize('scope,attrs,expected', [
     ({'workbenches':['PenTest']}, {'workbench_id':'pentest'}, True),
     ({'workspace_tags':{'Prod'}, 'channels':['IM']}, {'workspace_tag':'prod', 'channel':['im']}, True),
@@ -937,6 +1077,8 @@ def test_r3_b3_scope_aliases_case_sets_and_wildcards(scope, attrs, expected):
     assert _scope_matches(scope, attrs) is expected
 
 
+# LLM: application_scope 位于包 metadata 内，即使 to_ref 只给包 ID，卡片投影也不能丢掉渠道范围。
+# 函数用途: 检查能力包应用范围在路由卡片投影中完整保留。
 def test_r3_b3_package_metadata_scope_survives_projection():
     from agent_py_agent.agent.capability.router import from_capability_package
 
@@ -946,6 +1088,8 @@ def test_r3_b3_package_metadata_scope_survives_projection():
     assert from_capability_package(package).metadata['application_scope'] == package.metadata['application_scope']
 
 
+# LLM: 刚写入登记文件的热 mtime 不能遮蔽陈旧维护时钟；最近维护过的来源才不应再次被发现。
+# 函数用途: 回归学习来源发现依据持久化维护时间判断是否到期。
 @pytest.mark.parametrize('clock,expected', [(0, 1), (1, 1), ('recent', 0)])
 def test_r3_f17_discovery_uses_maintenance_clock_not_hot_mtime(learned, clock, expected):
     import time
@@ -959,6 +1103,8 @@ def test_r3_f17_discovery_uses_maintenance_clock_not_hot_mtime(learned, clock, e
     assert len(refs) == expected
 
 
+# LLM: 分页要同时给出准确 total 和 total_count；内容 hash 不变但激活代次变化时旧游标仍必须失效。
+# 函数用途: 检查搜索总数别名及能力重新激活后的游标拒绝。
 def test_r3_f04_reactivation_rejects_old_cursor_and_counts_total():
     from agent_py_agent.agent.capability.skill_search_tool import _search_page
 
@@ -970,6 +1116,8 @@ def test_r3_f04_reactivation_rejects_old_cursor_and_counts_total():
         _search_page(hits, {'cursor':page['next_cursor']}, 'query', '', 1)
 
 
+# LLM: 选中脚本或工作流须保留资产引用，并将对应执行工具放入当前可见短名单，不能仍把执行入口延迟隐藏。
+# 函数用途: 验证能力决策投影同时保留所选资产身份与必要执行工具。
 @pytest.mark.parametrize('kind,tool', [('script','scripts'), ('workflow','workflows')])
 def test_r3_f01_selected_asset_keeps_execution_tool_and_reference(kind, tool):
     from agent_py_agent.agent.capability.decision_recommendation import _project
@@ -991,6 +1139,8 @@ def test_r3_f01_selected_asset_keeps_execution_tool_and_reference(kind, tool):
     assert row['ref'] in result.selected_skill_ids
 
 
+# LLM: 默认晋升可完成确定性静态检查并发布试用技能，但 checks_executed 不等于资产业务执行成功。
+# 函数用途: 核对默认发布回执记录静态验证级别且不被判为业务验证。
 def test_r3_f07_default_production_promotion_is_static_not_business_execution(tmp_path):
     from agent_py_agent.agent.capability import asset_promotion
 
@@ -1004,6 +1154,8 @@ def test_r3_f07_default_production_promotion_is_static_not_business_execution(tm
     assert not asset_promotion.business_validated(receipt)
 
 
+# LLM: 默认验证器应区分合法脚本、语法错误和空工作流等草稿结构；这些静态结果不证明业务执行。
+# 函数用途: 检查脚本与工作流候选的默认语法及结构验证结果。
 @pytest.mark.parametrize('kind,body,passed', [('script','print("ok")',True), ('script','def broken(',False),
     ('workflow',[{'step_id':'a','mode':'deterministic_script','script_id':'s'}],True), ('workflow',[],False)])
 def test_r3_f07_default_machine_verifier_checks_draft_syntax(kind, body, passed):
@@ -1016,6 +1168,8 @@ def test_r3_f07_default_machine_verifier_checks_draft_syntax(kind, body, passed)
     assert (verifier(draft)['status'] == 'passed') is passed
 
 
+# LLM: 人格文件目标、路径逃逸、空正文及疑似凭据内容都不得通过默认草稿门，其他有效字段不能抵消拒绝原因。
+# 函数用途: 回归默认技能验证器对越界目标和不安全或空内容的拒绝。
 @pytest.mark.parametrize('extra', [{'target':'agents'}, {'target':'SOUL.md'}, {'name':'../escape'}, {'body':''},
                                   {'body':'Authorization: Bearer '+'x'*50}])
 def test_r3_f07_default_verifier_rejects_unsafe_or_empty_drafts(extra):
@@ -1026,6 +1180,8 @@ def test_r3_f07_default_verifier_rejects_unsafe_or_empty_drafts(extra):
     assert verifier({'kind':'skill', 'name':'valid-name', 'description':'procedure', 'body':BODY, **extra})['status'] != 'passed'
 
 
+# LLM: 客户端只提交旧 cursor 而不额外提交激活字段时，游标自身仍须绑定旧代次并拒绝新激活目录。
+# 函数用途: 验证仅凭分页游标也能检测能力激活代次变化。
 def test_r3_f04_cursor_alone_binds_activation_generation():
     from agent_py_agent.agent.capability.skill_search_tool import _search_page
 
@@ -1036,6 +1192,8 @@ def test_r3_f04_cursor_alone_binds_activation_generation():
         _search_page(hits, {'cursor':page['next_cursor']}, 'query', '', 1)
 
 
+# LLM: 此处只断言显式 capability_package 载体可表示，不据此外推包构建、安装或发布链已经通过。
+# 函数用途: 检查载体选择器保留显式能力包类型。
 def test_r3_f07_package_carrier_is_representable():
     from agent_py_agent.agent.capability.asset_promotion import select_asset_carrier
 
@@ -1166,6 +1324,8 @@ def test_r2_stage_zero_mode_directory_is_cleaned(tmp_path):
             (stage / 'link').symlink_to(external, target_is_directory=True)
             child.chmod(0)
         assert not stage.exists()
+        assert not list(stage.parent.glob('.purge_*'))
+        assert not list((stage.parent / 'cleanup_pending').glob('*.json'))
         assert (external / 'keep').read_text() == 'keep'
         assert stat.S_IMODE(os.stat(external).st_mode) == 0o500
     finally:

@@ -52,6 +52,8 @@ _PROCESS_ROOT_CACHE_MAX_ENTRIES = 128
 _PROCESS_ROOT_CACHE_MAX_PATHS = 65536
 
 
+# LLM: 根路径与来源共同参与发现优先级和缓存身份；该值对象不自行解析路径或授予读取权限。
+# 类用途: 用不可变记录传递一个 Skill 扫描根及其来源标记。
 @dataclass(frozen=True)
 class SkillRoot:
     path: Path
@@ -479,6 +481,8 @@ def _card_from_manifest_text(item: SkillManifestItem) -> SkillCard:
     )
 
 
+# LLM: 正文 hash 来自同次 manifest，enabled 沿用上游决策；这里只投影卡片，不重新读盘或计算 Owner 授权。
+# 函数用途: 把技能卡片及发现事实转换为字段冻结的 Skill 快照条目。
 def _snapshot_entry(
     item: SkillManifestItem,
     card: SkillCard,
@@ -536,6 +540,8 @@ def _snapshot_fingerprint(
     return digest.hexdigest()
 
 
+# LLM: 这里只校验名称和说明的必填与字符上限，失败抛出 ValueError；内容安全仍由独立 guard 判定。
+# 函数用途: 拒绝缺少名称、说明或超过元数据长度限制的技能卡片。
 def _validate_card(card: SkillCard) -> None:
     if not card.name:
         raise ValueError("missing name")
@@ -547,6 +553,8 @@ def _validate_card(card: SkillCard) -> None:
         raise ValueError(f"description exceeds {_DESCRIPTION_MAX_CHARS} characters")
 
 
+# LLM: 仅筛选根内路径的目录深度和隐藏祖先；符号链接越界还须由 manifest 解析阶段拒绝。
+# 函数用途: 判断候选技能文件是否处在允许扫描的可见目录层级内。
 def _visible_skill_path(root: Path, path: Path) -> bool:
     try:
         relative = path.relative_to(root)
@@ -569,6 +577,8 @@ def _derived_category(root: Path, path: Path) -> str:
     return "/".join(rel_parts[:-2]) or "general"
 
 
+# LLM: 去重键同时包含来源与解析后的绝对路径，同路径不同来源不会合并，首次出现的顺序保持不变。
+# 函数用途: 规范化技能根路径并按来源和路径稳定去重。
 def _dedupe_roots(roots: list[SkillRoot]) -> tuple[SkillRoot, ...]:
     result: list[SkillRoot] = []
     seen: set[tuple[str, str]] = set()
@@ -580,12 +590,16 @@ def _dedupe_roots(roots: list[SkillRoot]) -> tuple[SkillRoot, ...]:
     return tuple(result)
 
 
+# LLM: 只提取字典 finding 中的非空 code；没有可用代码时给出通用拒绝说明，不重新解释 guard 决策。
+# 函数用途: 将安全门的结构化发现汇成逗号分隔的错误说明。
 def _guard_codes(decision: dict[str, object]) -> str:
     findings = decision.get("findings") if isinstance(decision, dict) else []
     codes = [str(item.get("code") or "") for item in findings if isinstance(item, dict)]
     return ",".join(code for code in codes if code) or "guard denied"
 
 
+# LLM: 错误保留原候选路径、来源和调用方给出的代码及消息，不在封装时重试发现或吞掉原因。
+# 函数用途: 为技能发现或加载失败构造带来源身份的错误记录。
 def _error(root: SkillRoot, path: Path, code: str, message: str) -> SkillLoadError:
     return SkillLoadError(path=str(path), code=code, message=message, source=root.source)
 

@@ -651,3 +651,204 @@ def test_r2_final_rename_source_swap_is_quarantined_and_not_discoverable(tmp_pat
     if fail_open:
         assert failure.value.__cause__.errno == errno.EMFILE
     assert module.publish_learned_skill(store, PublishRequest(decision)).event == 'published'
+
+
+# LLM: 仅本模块chmod模拟旧glibc，禁用O_PATH；真实stage、目录FD、pending和删除路径不替代。
+# 函数用途: 只读目录无需不支持的chmod；000失败也须结构化且关净全部FD。
+@pytest.mark.parametrize('mode', [0o500, 0o000])
+@pytest.mark.parametrize('unsupported', [ValueError, NotImplementedError])
+def test_r3_old_glibc_cleanup_is_safe_and_structured(tmp_path, monkeypatch, mode, unsupported):
+    import errno
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import asset_promotion as module
+    from agent_py_agent.agent.common import nofollow_fs
+
+    opened, chmod_calls = [], []
+    original_directory, original_child = nofollow_fs.open_directory_beneath, nofollow_fs._openat_directory
+
+    # LLM: 跟踪真实父目录FD，不改变nofollow能力检测。
+    # 函数用途: 记录必须由stage收尾的目录资源。
+    def directory(*args, **kwargs):
+        descriptor = original_directory(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    # LLM: 对000显式注入PermissionError使root跑测试也覆盖拒绝打开路径，其余返回真实FD。
+    # 函数用途: 跨UID稳定复现无读权限分支并追踪子目录FD。
+    def child(parent, name):
+        if name == 'restricted' and mode == 0:
+            raise PermissionError(errno.EACCES, 'unreadable directory')
+        descriptor = original_child(parent, name)
+        opened.append(descriptor)
+        return descriptor
+
+    # LLM: 只拒绝旧glibc不支持的参数组合，不替换fchmod及其它清理操作。
+    # 函数用途: 确定性模拟CPython的旧平台异常。
+    def chmod(path, value, **kwargs):
+        if kwargs.get('dir_fd') is not None and kwargs.get('follow_symlinks') is False:
+            chmod_calls.append(path)
+            raise unsupported('chmod: cannot use dir_fd and follow_symlinks together')
+        return os.chmod(path, value, **kwargs)
+
+    proxy = SimpleNamespace(**{key: value for key, value in vars(os).items() if key != 'O_PATH'})
+    proxy.chmod = chmod
+    failure = None
+    with monkeypatch.context() as patch:
+        patch.setattr(module, 'os', proxy)
+        patch.setattr(nofollow_fs, 'open_directory_beneath', directory)
+        patch.setattr(nofollow_fs, '_openat_directory', child)
+        try:
+            with module._stage_dir(tmp_path) as stage:
+                restricted = stage / 'restricted'
+                restricted.mkdir()
+                (restricted / 'result.txt').write_text('temporary')
+                restricted.chmod(mode)
+        except BaseException as exc:
+            failure = exc
+    try:
+        assert opened
+        for descriptor in opened:
+            with pytest.raises(OSError) as closed:
+                os.fstat(descriptor)
+            assert closed.value.errno == errno.EBADF
+        pending = list((stage.parent / 'cleanup_pending').glob('*.json'))
+        if mode:
+            assert failure is None
+            assert not chmod_calls and not stage.exists()
+            assert not list(stage.parent.glob('.purge_*')) and not pending
+        else:
+            assert isinstance(failure, SkillLearningGateError), repr(failure)
+            assert failure.code == 'LEARNING_CLEANUP_UNSUPPORTED'
+            assert chmod_calls == ['restricted'] and len(pending) == 1
+            row = json.loads(pending[0].read_text())
+            tombstone = stage.parent / row['tombstone']
+            assert (tombstone.stat().st_dev, tombstone.stat().st_ino) == tuple(row['identity'])
+    finally:
+        for tombstone in stage.parent.glob('.purge_*'):
+            (tombstone / 'restricted').chmod(0o700)
+            shutil.rmtree(tombstone)
+
+
+# LLM: 真实写版本和registry后才注入异常，直接覆盖版本事务补偿而非用mock伪造已提交状态。
+# 函数用途: 已落盘的新revision不能被后续异常误删版本文件。
+def test_r3_committed_revision_survives_late_registry_error(tmp_path, monkeypatch):
+    from contextlib import ExitStack
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+    from agent_py_agent.agent.capability.skill_learning_store import LearnedSkill
+    from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
+
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    text, original = '# 已提交\n', store.save_registry
+    record = LearnedSkill('committed', 2, skill_content_sha256(text), 'now', 'now', revision=2)
+    primary = ValueError('post-registry-write failure')
+
+    # LLM: 先运行真实原子保存再抛同一异常，迫使rollback读取落盘权威revision。
+    # 函数用途: 模拟写成功但返回阶段发生故障。
+    def save_then_fail(registry):
+        original(registry)
+        raise primary
+
+    monkeypatch.setattr(store, 'save_registry', save_then_fail)
+    with store.state_lock():
+        with pytest.raises(ValueError) as caught:
+            with ExitStack() as rollback:
+                module._save_version_with_rollback(store, record.name, 2, text, rollback)
+                store.save_registry(replace(store.load_registry(), skills={record.name: record}))
+                rollback.pop_all()
+        assert caught.value is primary
+        assert store.load_registry().skills[record.name].revision == 2
+        assert store.read_version(record.name, 2) == text
+
+
+# LLM: 第二次正式rename前真实换源为外部目录链接；发布器只可隔离链接自身，并登记准确位置与lstat身份。
+# 函数用途: 未扫描链接不进正式发现根，也不修改、修权限或删除外部内容。
+def test_r3_final_rename_symlink_is_quarantined_and_recorded(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+
+    store = SkillLearningStore(tmp_path / 'home' / 'data' / 'skill_learning', tmp_path / 'home' / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='symlink-source', description='核对资料', body='# 核对\n1. 比较输入\n')
+    outside = tmp_path / 'external'
+    outside.mkdir()
+    (outside / 'SKILL.md').write_text('unscanned external skill')
+    (outside / 'keep.txt').write_text('keep outside')
+    outside.chmod(0o500)
+    before = outside.stat()
+    rename, identities = os.rename, []
+
+    # LLM: 原prepare对象保留，替换为真实symlink，后续rename/open/quarantine仍由产品代码执行。
+    # 函数用途: 在最后一次检查之后注入链接替换。
+    def swap(source, target, **kwargs):
+        if str(source).startswith('.publish_') and target == decision.name and not identities:
+            prepared = store.directory / source
+            prepared.rename(prepared.with_name(prepared.name + '-original'))
+            prepared.symlink_to(outside, target_is_directory=True)
+            identities.append((prepared.lstat().st_dev, prepared.lstat().st_ino))
+        return rename(source, target, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, 'os', SimpleNamespace(**{**vars(os), 'rename': swap}))
+            with pytest.raises(SkillLearningGateError, match='SKILL_LEARNING_INSTALL_FAILED'):
+                module.publish_learned_skill(store, PublishRequest(decision))
+        assert identities
+        assert not os.path.lexists(store.learned_root / decision.name)
+        assert decision.name not in store.load_registry().skills
+        quarantined = list(store.directory.glob('.quarantine_*'))
+        assert len(quarantined) == 1 and quarantined[0].is_symlink()
+        assert (quarantined[0].lstat().st_dev, quarantined[0].lstat().st_ino) == identities[0]
+        assert os.readlink(quarantined[0]) == str(outside)
+        row = json.loads((store.directory / 'cleanup_pending' / (quarantined[0].name + '.json')).read_text())
+        assert row['location'] == ['data', 'skill_learning', quarantined[0].name]
+        assert tuple(row['identity']) == identities[0]
+        after = outside.stat()
+        assert (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns) == (before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns)
+        assert (outside / 'SKILL.md').read_text() == 'unscanned external skill'
+        assert (outside / 'keep.txt').read_text() == 'keep outside'
+    finally:
+        outside.chmod(0o700)
+
+
+# LLM: 经过真实创建/更新外层，registry已落盘后才抛普通异常或取消；版本保留不能同时把正式正文回滚掉。
+# 函数用途: 保证写后异常的registry、版本和正式安装仍一致，并保持原异常对象。
+@pytest.mark.parametrize('operation', ['create', 'update'])
+@pytest.mark.parametrize('failure_type', [ValueError, KeyboardInterrupt])
+def test_r3_published_commit_survives_late_registry_error(tmp_path, monkeypatch, operation, failure_type):
+    from agent_py_agent.agent.capability import skill_learning_publish as module
+    from agent_py_agent.agent.capability.skill_snapshot import skill_content_sha256
+
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='committed-publication', description='核对资料', body='# 核对\n1. 比较输入\n')
+    request = PublishRequest(decision)
+    if operation == 'update':
+        module.publish_learned_skill(store, request)
+        previous = store.load_registry().skills[decision.name]
+        request = PublishRequest(replace(decision, decision='update', body=decision.body + '2. 检查空值\n'),
+                                 expected_revision=previous.revision, expected_sha256=previous.sha256)
+    original = store.save_registry
+    primary = failure_type('failure after durable commit')
+    written = []
+
+    # LLM: 保存真实registry并保留本次记录，之后抛原异常，绝不模拟版本补偿或正文回滚函数。
+    # 函数用途: 用生产发布入口复现提交成功后返回失败的时序。
+    def save_then_fail(registry):
+        original(registry)
+        written.append(registry.skills[decision.name])
+        raise primary
+
+    monkeypatch.setattr(store, 'save_registry', save_then_fail)
+    with pytest.raises(failure_type) as failure:
+        module.publish_learned_skill(store, request)
+    assert failure.value is primary
+    assert len(written) == 1
+    record = store.load_registry().skills[decision.name]
+    assert record == written[0]
+    text = store.skill_path(record.name).read_text()
+    assert skill_content_sha256(text) == record.sha256
+    assert store.read_version(record.name, record.revision) == text
+    assert not list(store.directory.glob('.purge_*'))

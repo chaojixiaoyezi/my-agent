@@ -1,3 +1,32 @@
+## 2026-10-29 e905-sol-7 Round 3：旧 glibc 清理与发布回执绑定
+
+来源：`07-tasks/fix-e905-sol-7-r3.md`、Opus/Astra-1 三轮复审及原始回执探针；工作树 `/tmp/wt-e905-sol-7`，分支 `opt-e905/sol-7`，起点 `064a40e5283371f943e3e18ab40e2d9b4d93116b`。
+
+- 清理：可读子目录先 nofollow 打开、核 inode 后 `fchmod`；只有打开遇到 `PermissionError` 才尝试父 FD nofollow chmod。旧 glibc 不支持时以 Linux `O_PATH` 固定真实目录并经 `/proc/self/fd` 修权限；仍不可用则返回 `LEARNING_CLEANUP_UNSUPPORTED`，登记清理欠账并关闭 FD，不泄漏原始平台异常。
+- 回执：内部发布事件在登记回调前冻结目录/文件 inode 与完整 proof；原 `to_record()` 字段不变。资产入口在 state 锁内通过目录 FD 读取同一叶文件，比较 revision、hash、两层 inode 和完整 proof，任何变化均拒绝返回成功回执。
+- 隔离：最终 rename 被换成外部目录链接时只隔离链接本身；成功隔离也登记准确 location，未知对象不物理删除。
+- M5：补充真实登记落盘后抛异常的回归。独立审阅又发现外层仍会破坏已提交正文；创建/更新补偿现读取原始 registry，确认未提交才撤销正文，已提交或读回不明时保留。新增 create/update × ValueError/KeyboardInterrupt 四例先红后绿，断言原异常、registry、正式正文和历史版本一致。
+- 测试：加入 0500/000 × ValueError/NotImplementedError 的 FD/欠账断言、目录/文件及完整 proof 篡改反例、内部事件与公共序列化合同、M5 和 M13；原 000 用例增补无墓碑、无欠账断言。补齐 `skill_service.py` 与 wave7 测试的存量注释；全范围 11 个 Python 文件、337 个定义的 AST 检查为零缺失。
+
+最终指定三文件：macOS **198 passed**；Debian 11、glibc 2.31、Python 3.11.13、UID 1000 **198 passed**；两者均零失败/错误/跳过。原始回执探针 **3 passed**。Linux 0500/000 独立探针均无残留、无 pending，外部 0500 目录及文件不变。本机硬链接用例采用显式 nlink 模拟，真实硬链接观察点由 Linux 的 `real_os_link` 记录覆盖。全范围 Ruff、导入边界通过；独立静态复审确认上述 M5 P2 关闭且未发现新 P1/P2，运行证据由主代理核对。
+
+复现（工作树根）：
+```bash
+PYTHONPATH=/tmp/wt-e905-sol-7 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest \
+  agent_py_agent/tests/test_opt_learning_carrier.py \
+  agent_py_agent/tests/test_opt_learning_identity.py \
+  agent_py_agent/tests/test_wave7_autonomous_learning_closure.py \
+  -q --tb=short -o cache_dir=/tmp/pytest_cache_sol7_r3_fix \
+  --basetemp=/tmp/pytest_cache_sol7_r3_fix/tmp
+ruff check --no-cache agent_py_agent scripts
+python3 -B scripts/check_import_boundaries.py --json
+git diff --check 4bea324e3..HEAD
+```
+
+macOS JUnit：`/tmp/pytest_cache_sol7_r3_fix/gates-final.xml`；原探针：同目录 `probe-final.xml`。Linux、注释及汇总证据：`/Users/xiaoyezi/.my-agent/owners/local/main/tasks/2026-10-29/学习发布二轮修复/fix-r3/tmp/` 下的 `linux-final/repro.log`、`linux-final/repro.xml`、`comment-audit.json`、`verification-summary.json`。容器和原探针命令保持任务单原入口，容器额外传入上述 `linux-final` 输出目录。
+
+未跑全仓 pytest，未推送、部署或启停生产服务。上述结果不代表 Gateway/IM、多身份、跨机、Windows 或断电恢复验收；同 UID 绕过锁持续篡改不在原事务保证内，pending 未新增自动消费者。
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

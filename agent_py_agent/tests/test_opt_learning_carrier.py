@@ -314,3 +314,84 @@ def test_r2_skill_receipt_and_target_must_match_event(tmp_path, monkeypatch, dam
                  'body': '# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4}
     with pytest.raises(SkillLearningGateError, match='LEARNING_FORMAL_REVISION_CHANGED'):
         module.promote_verified_asset(tmp_path, candidate)
+
+
+# LLM: 真实发布后锁内换同字节目录、文件或proof字段；revision/hash不变仍须拒绝不同身份。
+# 函数用途: 防止相同正文掩盖不同的安装对象或验证证明。
+@pytest.mark.parametrize('change', ['directory_same_body', 'file_same_body', 'receipt_id_only', 'executed_only', 'kind_only'])
+def test_r3_receipt_binds_installed_objects_and_original_proof(tmp_path, monkeypatch, change):
+    from agent_py_agent.agent.capability import asset_promotion as module
+    from agent_py_agent.agent.capability.skill_learning_publish import SkillLearningGateError
+
+    original = module.promote_verified_skill
+    observed = []
+
+    # LLM: 只包装真实发布后的交错点，移动原对象避免inode复用；不伪造发布成功。
+    # 函数用途: 保持摘要相同，单独替换物理对象或证明字段。
+    def interleave(store, request, *args, **kwargs):
+        event = original(store, request, *args, **kwargs)
+        with store.state_lock():
+            registry = store.load_registry()
+            record = registry.skills[event.skill_name]
+            path = store.skill_path(record.name)
+            proof = dict(record.maintenance['verification_receipt'])
+            if change == 'directory_same_body':
+                body, previous = path.read_bytes(), path.parent.stat()
+                path.parent.rename(store.directory / 'original-installation')
+                path.parent.mkdir()
+                path.write_bytes(body)
+                (path.parent / 'extra.txt').write_text('unscanned extra member')
+                assert path.parent.stat().st_ino != previous.st_ino
+            elif change == 'file_same_body':
+                body, previous = path.read_bytes(), path.stat()
+                path.rename(store.directory / 'original-skill.md')
+                path.write_bytes(body)
+                assert path.stat().st_ino != previous.st_ino
+            else:
+                key, value = {'receipt_id_only': ('receipt_id', 'different-host-receipt'),
+                              'executed_only': ('executed', True),
+                              'kind_only': ('verification_kind', 'runtime_execution')}[change]
+                assert proof[key] != value
+                changed = replace(record, maintenance={**record.maintenance, 'verification_receipt': {**proof, key: value}})
+                store.save_registry(replace(registry, skills={**registry.skills, record.name: changed}))
+            observed.append(record.sha256)
+        return event
+
+    monkeypatch.setattr(module, 'promote_verified_skill', interleave)
+    candidate = {'kind': 'skill', 'name': 'original-proof', 'description': '核对资料',
+                 'body': '# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4}
+    with pytest.raises(SkillLearningGateError, match='LEARNING_FORMAL_REVISION_CHANGED'):
+        module.promote_verified_asset(tmp_path, candidate)
+    assert len(observed) == 1
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    assert store.load_registry().skills[candidate['name']].sha256 == observed[0]
+
+
+# LLM: 创建和更新均走真实发布；内部身份与proof冻结，to_record仍只输出原公共事件字段。
+# 函数用途: 检查绑定随真实写入换代，且不改变账本序列化格式。
+def test_r3_publish_event_retains_binding_without_changing_public_record(tmp_path):
+    import json
+
+    from agent_py_agent.agent.capability.skill_learning_promotion import promote_verified_skill
+    from agent_py_agent.agent.capability.skill_learning_publish import PublishRequest
+
+    store = SkillLearningStore(tmp_path / 'data' / 'skill_learning', tmp_path / 'skills')
+    decision = SkillLearningDecision('create', '核对', name='bound-event', description='核对资料',
+                                    body='# 核对\n1. 比较输入字段、编码与数据类型。\n2. 核对输出并保留原始数据。\n' * 4)
+    request = PublishRequest(decision)
+    for expected_event in ('published', 'updated'):
+        event = promote_verified_skill(store, request)
+        assert event.event == expected_event
+        record = store.load_registry().skills[decision.name]
+        path = store.skill_path(record.name)
+        directory, leaf = path.parent.stat(), path.stat()
+        assert getattr(event, 'target_dir_identity', None) == (directory.st_dev, directory.st_ino)
+        assert getattr(event, 'skill_file_identity', None) == (leaf.st_dev, leaf.st_ino)
+        frozen = getattr(event, 'verification_proof_json', '')
+        assert frozen and json.loads(frozen) == record.maintenance['verification_receipt']
+        record.maintenance['verification_receipt']['receipt_id'] = 'changed-local-copy'
+        assert event.verification_proof_json == frozen
+        assert set(event.to_record()) == {'schema_version', 'event_id', 'at', 'event', 'code', 'skill_name',
+                                          'version', 'sha256', 'request_key', 'run_id', 'reason', 'carrier'}
+        request = PublishRequest(replace(decision, decision='update', body=decision.body + '\n核对空值。'),
+                                 expected_revision=record.revision, expected_sha256=record.sha256)

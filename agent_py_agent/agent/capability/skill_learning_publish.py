@@ -76,6 +76,15 @@ class PublishRequest:
     verification_receipt: dict = field(default_factory=dict)
 
 
+# LLM: 仅发布器内部传递已安装inode和冻结proof；继承显式to_record，不改变外部账本格式。
+# 类用途: 把一次发布的物理身份与证明随事件带到读回核验处。
+@dataclass(frozen=True)
+class _PublishedSkillEvent(SkillLearningEvent):
+    target_dir_identity: tuple[int, int] | None = None
+    skill_file_identity: tuple[int, int] | None = None
+    verification_proof_json: str = ''
+
+
 # LLM: 入口只接受 create/update；skip 不应走到这里。整个发布在 state_lock 内完成，返回写账本用的事件。
 # 函数用途: 按决定新建或更新一个自学 Skill，被闸门拒绝时抛 SkillLearningGateError。
 def publish_learned_skill(store: SkillLearningStore, publish: PublishRequest) -> SkillLearningEvent:
@@ -100,8 +109,8 @@ def render_learned_skill(decision: SkillLearningDecision) -> str:
 
 
 # LLM: 名字闸门在前（删过的名字、快照重名、目录已存在、数量上限），通过后才渲染、检查、安装；
-#   元数据先准备再移动；登记失败清理本次新建且匹配的未提交版本，再按原inode补偿安装，取消首因不改类。
-# 函数用途: 在锁内新建自学Skill，普通错误、取消或stage收尾失败都不绕过准确安装回滚。
+#   元数据先准备再移动；仅确认登记未提交才补偿版本与原inode安装，已提交或状态不明时保留，取消首因不改类。
+# 函数用途: 在锁内新建自学Skill，失败时不删除已经提交的正式安装。
 def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
     name = publish.decision.name
@@ -117,7 +126,9 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     record = replace(record, maintenance={'state':'trial','quality':'trial',
         'promotion_authority':publish.promotion_authority,'verification_receipt':publish.verification_receipt,
         'promotion_history':['observed','candidate','validated','trial']})
-    installed_identity = _stage_check_and_move(store, publish, text, target)
+    installed_identity, file_identity = _stage_check_and_move(store, publish, text, target)
+    event = _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else '',
+                   binding=(installed_identity, file_identity))
     try:
         with ExitStack() as rollback:
             _save_version_with_rollback(store, name, 1, text, rollback)
@@ -125,18 +136,19 @@ def _create_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
             rollback.pop_all()
     except BaseException as exc:
         try:
-            _rollback_created_skill(store, target, installed_identity)
+            if _publication_uncommitted(store, record, exc):
+                _rollback_created_skill(store, target, installed_identity)
         except BaseException as rollback_error:
             exc.add_note('installed_skill_rollback_failed:' + type(rollback_error).__name__)
             raise exc from rollback_error
         if not isinstance(exc, (OSError, SkillLearningStoreError)):
             raise
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
-    return _event(EVENT_PUBLISHED, record, publish, CODE_REDACTED if redacted else "")
+    return event
 
 
-# LLM: 更新须CAS/磁盘hash一致，保稳定快照/历史身份；替换后任意登记前异常恢复旧文，取消/首因保持原类。
-#   副作用：原子替换SKILL.md且保同目录其它文件，写versions/registry，失败补偿正文与本次未提交版本。
+# LLM: 更新须CAS/磁盘hash一致，保稳定快照/历史身份；仅确认登记未提交才恢复旧文，取消/首因保持原类。
+#   副作用：原子替换SKILL.md且保同目录其它文件，写versions/registry，已提交或状态不明时禁止破坏性正文补偿。
 # 函数用途: 在锁内更新自学Skill，不让非OS持久化错误留下与registry不一致的新正文。
 def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
                    publish: PublishRequest) -> SkillLearningEvent:
@@ -151,7 +163,8 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     text = render_learned_skill(publish.decision)
     sha = skill_content_sha256(text)
     if sha == current.sha256:
-        return _event(EVENT_SKIPPED, current, publish, CODE_UNCHANGED)
+        _, directory_identity, file_identity = _read_skill_binding(store, current.name)
+        return _event(EVENT_SKIPPED, current, publish, CODE_UNCHANGED, binding=(directory_identity, file_identity))
     path = store.skill_path(current.name)
     previous = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
     _stage_and_check(store, publish, text)
@@ -167,20 +180,42 @@ def _update_locked(store: SkillLearningStore, registry: SkillLearningRegistry,
     try:
         store.check_write(path,text)
         replace_skill_file(path, text)
+        actual, directory_identity, file_identity = _read_skill_binding(store, current.name)
+        if actual != text:
+            raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'})
+        event = _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else '',
+                       binding=(directory_identity, file_identity))
         with ExitStack() as rollback:
             _save_version_with_rollback(store, current.name, record.version, text, rollback)
             store.save_registry(_registered_publication(store, registry, record, publish))
             rollback.pop_all()
     except BaseException as exc:
         try:
-            replace_skill_file(path, previous)
+            if _publication_uncommitted(store, record, exc):
+                replace_skill_file(path, previous)
         except BaseException as rollback_error:
             exc.add_note('updated_skill_rollback_failed:' + type(rollback_error).__name__)
             raise exc from rollback_error
         if not isinstance(exc, (OSError, SkillLearningStoreError)):
             raise
         raise SkillLearningGateError(CODE_INSTALL_FAILED, {"error": type(exc).__name__}) from exc
-    return _event(EVENT_UPDATED, record, publish, CODE_REDACTED if redacted else "")
+    return event
+
+
+# LLM: 创建/更新补偿在原state锁内读原始registry，不使用磁盘高水位迁移；已提交、身份变化或读回不明时不破坏正文。
+# 函数用途: 只在确认本次修订尚未登记时允许回滚正式安装，异常仅附首因备注。
+def _publication_uncommitted(store, record, primary):
+    try:
+        raw = read_text_beneath(store.directory, ('registry.json',))
+        current = json.loads(raw or '{}').get('skills', {}).get(record.name, {})
+        revision = int(current.get('revision', current.get('version', 0)))
+        if revision < record.revision:
+            return True
+        if revision != record.revision or current.get('sha256') != record.sha256:
+            primary.add_note('installed_skill_rollback_skipped:registry_identity_changed')
+    except BaseException as read_error:
+        primary.add_note('installed_skill_commit_state_unknown:' + type(read_error).__name__)
+    return False
 
 
 # LLM: 调用方持state锁并在registry提交后撤销回调；只清事务前不存在、内容仍匹配且未登记的版本；提交依据是持久化revision，不用磁盘高水位迁移值。
@@ -325,8 +360,8 @@ def _redacted_publish(publish: PublishRequest) -> tuple[PublishRequest, bool]:
 
 
 # LLM: state锁内先移到data准备区，stage收尾后才进正式名；移动后核验失败（含目标打开失败）用现有父FD隔离实际对象，不拿原身份删除。
-# 函数用途: 发布已扫描Skill；二次移动后未能验证的对象移出正式发现根，返回成功安装身份供登记失败补偿。
-def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, text: str, target: Path) -> tuple[int, int]:
+# 函数用途: 发布已扫描Skill；未能验证的对象移出正式发现根，返回原目录及文件身份供回执和补偿。
+def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, text: str, target: Path) -> tuple[tuple[int, int], tuple[int, int]]:
     from uuid import uuid4
 
     from ..common.nofollow_fs import _openat_directory, open_directory_beneath
@@ -343,7 +378,8 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
                 staged_fd = _openat_directory(stage_fd, name)
                 descriptors.callback(os.close, staged_fd)
                 observed = os.fstat(staged_fd)
-                if (observed.st_dev, observed.st_ino) != identity or _read_staged_text(staged_fd) != text:
+                staged_text, file_identity = _read_staged_text(staged_fd, with_identity=True)
+                if (observed.st_dev, observed.st_ino) != identity or staged_text != text:
                     raise SkillLearningGateError(CODE_DRAFT_INVALID, {'field': 'staged_identity'})
                 prepared_fd = open_directory_beneath(store.skills_root.parent, ('data', 'skill_learning'), require_dir_fd=True)
                 descriptors.callback(os.close, prepared_fd)
@@ -355,7 +391,7 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
                     raise SkillLearningGateError(CODE_INSTALL_FAILED, {'field': 'prepared_identity'})
             # 原stage清理完成后再发表正式名字；随机隔离名不属于Skill发现根。
             isolated = os.stat(prepared.name, dir_fd=prepared_fd, follow_symlinks=False)
-            if (isolated.st_dev, isolated.st_ino) != identity or _read_staged_text(staged_fd) != text:
+            if (isolated.st_dev, isolated.st_ino) != identity or _read_staged_text(staged_fd, with_identity=True) != (text, file_identity):
                 raise SkillLearningGateError(CODE_DRAFT_INVALID, {'field': 'prepared_identity'})
             try:
                 os.stat(target.name, dir_fd=target_fd, follow_symlinks=False)
@@ -370,7 +406,8 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
                 installed_fd = _openat_directory(target_fd, target.name)
                 descriptors.callback(os.close, installed_fd)
                 installed = os.fstat(installed_fd)
-                if (installed.st_dev, installed.st_ino) != identity:
+                if ((installed.st_dev, installed.st_ino) != identity
+                        or _read_staged_text(installed_fd, with_identity=True) != (text, file_identity)):
                     raise SkillLearningGateError(CODE_INSTALL_FAILED, {'field': 'installed_identity'})
             except BaseException as validation_error:
                 # 正式名此前为空且rename已成功；即使没有取得目标FD，也不能交给原身份删除补偿。
@@ -381,7 +418,7 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
                     validation_error.add_note('unverified_skill_quarantine_failed:' + type(quarantine_error).__name__)
                     raise validation_error from quarantine_error
                 raise
-        return moved_identity
+        return moved_identity, file_identity
     except BaseException as exc:
         if moved_identity is not None:
             try:
@@ -394,7 +431,7 @@ def _stage_check_and_move(store: SkillLearningStore, publish: PublishRequest, te
         raise
 
 
-# LLM: 仅在本次rename前正式名为空、移动后核验失败时调用；有目标FD用fstat，否则父FD下nofollow stat；固定父FD改名核实际inode，不删未知内容，失败记欠账。
+# LLM: 仅在本次rename前正式名为空、移动后核验失败时调用；有目标FD用fstat，否则父FD下nofollow stat；固定父FD改名核实际inode，不删未知内容，成功或失败均记定位欠账。
 # 函数用途: 不依赖再次分配目录FD，将移入正式根的未验证对象原样隔离，避免EMFILE绕过隔离。
 def _quarantine_unverified_skill(store, name, target_fd, data_fd, actual_fd):
     from uuid import uuid4
@@ -420,6 +457,10 @@ def _quarantine_unverified_skill(store, name, target_fd, data_fd, actual_fd):
         except Exception as pending_error:
             error.add_note('quarantine_pending_write_failed:' + type(pending_error).__name__)
         raise
+    else:
+        write_text_atomic_beneath(store.skills_root.parent, ('data', 'skill_learning', 'cleanup_pending', quarantine + '.json'),
+            json.dumps({'schema_version': 1, 'subject': 'unverified_skill', 'location': location,
+                        'identity': identity, 'quarantine': quarantine, 'status': 'cleanup_pending'}))
 
 
 # LLM: 只删除data准备区或learned下本次已验证inode；替代物不删，失败记录位置/身份；正式rename的已知换源由专门隔离函数处理。
@@ -499,9 +540,9 @@ def _staged_skill(store: SkillLearningStore, stage: Path, publish: PublishReques
     return decision.name, identity
 
 
-# LLM: 只读固定Skill目录FD内SKILL.md，原nofollow单链接门、4MiB预算和首末元数据一致，UTF-8损坏显式拒绝。
-# 函数用途: 取得真正暂存字节用于解析、guard与移动前重核，不跟随stage名字变化。
-def _read_staged_text(directory_fd):
+# LLM: 固定目录FD内读SKILL.md，nofollow单链接门、4MiB预算、首末元数据与叶名inode一致；可同时返回同一FD身份。
+# 函数用途: 取得真实字节供guard、移动和回执核验，不用二次按路径stat猜文件身份。
+def _read_staged_text(directory_fd, *, with_identity=False):
     from ..common.nofollow_fs import _openat_file
     from .asset_promotion import _StageFDStack
 
@@ -517,7 +558,33 @@ def _read_staged_text(directory_fd):
         after = os.fstat(leaf)
         if any(getattr(before, key) != getattr(after, key) for key in ('st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
             raise ValueError('staged skill changed during read')
-        return b''.join(pieces).decode('utf-8')
+        named = os.stat('SKILL.md', dir_fd=directory_fd, follow_symlinks=False)
+        identity = (before.st_dev, before.st_ino)
+        if (named.st_dev, named.st_ino) != identity:
+            raise ValueError('skill file identity changed during read')
+        text = b''.join(pieces).decode('utf-8')
+        return (text, identity) if with_identity else text
+
+
+# LLM: 调用方持state锁；按已登记layout逐段nofollow打开，目录FD与同FD下叶读出身份，读后核名字仍是原目录，独立关闭资源。
+# 函数用途: 在登记前冻结、或回执读回时取得正文及目录/文件物理身份，不对可变路径分离stat和读取。
+def _read_skill_binding(store, name):
+    from ..common.nofollow_fs import _openat_directory, open_directory_beneath
+    from .asset_promotion import _StageFDStack
+
+    parts = store.skill_path(name).parent.relative_to(store.skills_root).parts
+    with _StageFDStack() as descriptors:
+        parent_fd = open_directory_beneath(store.skills_root, parts[:-1], require_dir_fd=True)
+        descriptors.callback(os.close, parent_fd)
+        directory_fd = _openat_directory(parent_fd, parts[-1])
+        descriptors.callback(os.close, directory_fd)
+        directory = os.fstat(directory_fd)
+        text, file_identity = _read_staged_text(directory_fd, with_identity=True)
+        named = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        directory_identity = (directory.st_dev, directory.st_ino)
+        if (named.st_dev, named.st_ino) != directory_identity:
+            raise ValueError('skill directory identity changed during read')
+        return text, directory_identity, file_identity
 
 
 # LLM: staged Skill已证明恰好一个SKILL.md；复用原guard的限额、模式、严重级和裁决，扫描FD读取的同字节而非重开路径。
@@ -565,10 +632,10 @@ def _runs(existing: tuple[str, ...], request: dict[str, object]) -> tuple[str, .
     return tuple(runs[-MAX_SOURCE_RUN_COUNT:])
 
 
-# LLM: 事件只带结构化字段与有界 reason；reason 来自模型，只供人看。
-# 函数用途: 生成发布或更新事件。
-def _event(kind: str, record: LearnedSkill, publish: PublishRequest, code: str) -> SkillLearningEvent:
-    return SkillLearningEvent(
+# LLM: 在登记回调前冻结完整proof及安装身份；内部字段不进to_record，reason仍只供人看。
+# 函数用途: 生成带本次物理身份和原证明快照的发布或更新事件。
+def _event(kind: str, record: LearnedSkill, publish: PublishRequest, code: str, *, binding=(None, None)) -> SkillLearningEvent:
+    return _PublishedSkillEvent(
         event=kind,
         code=code,
         skill_name=record.name,
@@ -577,6 +644,9 @@ def _event(kind: str, record: LearnedSkill, publish: PublishRequest, code: str) 
         request_key=str(publish.request.get("request_key") or ""),
         run_id=str(publish.request.get("run_id") or ""),
         reason=publish.decision.reason,
+        target_dir_identity=binding[0],
+        skill_file_identity=binding[1],
+        verification_proof_json=json.dumps(record.maintenance.get('verification_receipt', {}), sort_keys=True, ensure_ascii=False),
     )
 
 

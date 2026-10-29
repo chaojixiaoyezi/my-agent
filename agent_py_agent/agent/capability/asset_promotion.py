@@ -424,8 +424,8 @@ def _retain_stage_root(function, path, error):
     raise error
 
 
-# LLM: 固定根内显式深度帧遍历，完成子树即关闭FD；缺权限的真实目录先在父FD下nofollow补权限，打开后核inode；异常由独立栈收尾。
-# 函数用途: 不依赖Python递归深度修复只读或000子目录；同UID并发换名不具备原子chmod保证。
+# LLM: 显式帧遍历；可读子目录先O_NOFOLLOW|O_DIRECTORY打开核inode再fchmod；000/PermissionError才父FD nofollow chmod或Linux O_PATH锚定，不支持则结构化拒绝。
+# 函数用途: 跨旧glibc安全修复只读子树，完成即关FD；000无法安全修复时交stage登记欠账，不外泄原始平台异常。
 def _repair_stage_permissions(descriptor):
     import stat
 
@@ -447,16 +447,45 @@ def _repair_stage_permissions(descriptor):
             if not stat.S_ISDIR(metadata.st_mode):
                 continue
             mode = stat.S_IMODE(metadata.st_mode)
-            if mode & stat.S_IRWXU != stat.S_IRWXU:
-                os.chmod(name, mode | stat.S_IRWXU, dir_fd=parent, follow_symlinks=False)
             child_lifetime = descriptors.enter_context(_StageFDStack())
-            child = _openat_directory(parent, name)
+            try:
+                child = _openat_directory(parent, name)
+            except PermissionError:
+                _repair_unreadable_directory(parent, name, metadata)
+                child = _openat_directory(parent, name)
             child_lifetime.callback(os.close, child)
             opened = os.fstat(child)
             if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
                 raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
-            os.fchmod(child, stat.S_IMODE(opened.st_mode) | stat.S_IRWXU)
+            if mode & stat.S_IRWXU != stat.S_IRWXU:
+                os.fchmod(child, stat.S_IMODE(opened.st_mode) | stat.S_IRWXU)
             pending.append((child, iter(os.listdir(child)), child_lifetime))
+
+
+# LLM: 仅供打开被拒的真实子目录；父FD nofollow chmod不可用才O_PATH|O_NOFOLLOW|O_DIRECTORY核inode，经/proc固定FD修权限，任何平台不支持转稳定错误。
+# 函数用途: 安全恢复000目录访问；不追随用户路径软链接，兜底FD独立关闭，失败留给stage登记清理欠账。
+def _repair_unreadable_directory(parent, name, metadata):
+    import stat
+
+    from .skill_learning_publish import SkillLearningGateError
+
+    mode = stat.S_IMODE(metadata.st_mode) | stat.S_IRWXU
+    try:
+        os.chmod(name, mode, dir_fd=parent, follow_symlinks=False)
+        return
+    except (NotImplementedError, ValueError) as unsupported:
+        if not all(getattr(os, flag, 0) for flag in ('O_PATH', 'O_NOFOLLOW', 'O_DIRECTORY')):
+            raise SkillLearningGateError('LEARNING_CLEANUP_UNSUPPORTED') from unsupported
+    try:
+        with _StageFDStack() as descriptors:
+            path_fd = os.open(name, os.O_PATH | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent)
+            descriptors.callback(os.close, path_fd)
+            opened = os.fstat(path_fd)
+            if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise SkillLearningGateError('LEARNING_STAGING_IDENTITY_CHANGED')
+            os.chmod(f'/proc/self/fd/{path_fd}', mode)
+    except (OSError, NotImplementedError, ValueError) as unsupported:
+        raise SkillLearningGateError('LEARNING_CLEANUP_UNSUPPORTED') from unsupported
 
 
 # LLM: 逐段strict nofollow重开当前路径，只比对本次创建inode，不沿链接或用新目录替换原对象。
@@ -599,7 +628,7 @@ def _promote_package_asset(home, name, desc, candidate, *, commit=None):
     return _binding_from_record('capability_package', enabled)
 
 
-# LLM: Verify不占C短门；Skill锁内读回须同时匹配正式事件revision/hash、receipt摘要和目标正文；非正式事件/缺证明不成功，非Skill不得嵌套资产锁。
+# LLM: Verify不占C短门；Skill锁内FD读回匹配原事件revision/hash、目录/文件inode及完整冻结proof；缺证明不成功，非Skill不得嵌套资产锁。
 # 函数用途: 四载体验证/CAS后绑定真实回执，不用同族、缺失记录或晚到的新版本伪造成功。
 def promote_verified_asset(owner_home, candidate, *, commit=None):
     from copy import deepcopy
@@ -607,7 +636,7 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
 
     from .skill_learning_promotion import _commit
     from .skill_learning_prompt import SkillLearningDecision
-    from .skill_learning_publish import PublishRequest, SkillLearningGateError
+    from .skill_learning_publish import PublishRequest, SkillLearningGateError, _read_skill_binding
 
     candidate = deepcopy(candidate)
     home = Path(owner_home).absolute()
@@ -634,14 +663,16 @@ def promote_verified_asset(owner_home, candidate, *, commit=None):
             if getattr(event, 'event', '') not in {'published', 'updated', 'skipped'}:
                 return None
             if (rec.revision != event.version or rec.sha256 != event.sha256
-                    or verification.get('sha256') != event.sha256):
+                    or verification.get('sha256') != event.sha256
+                    or json.dumps(verification, sort_keys=True, ensure_ascii=False) != getattr(event, 'verification_proof_json', '')):
                 raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'})
-            path = store.skill_path(rec.name)
             try:
-                actual = read_text_beneath(store.skills_root, path.relative_to(store.skills_root).parts)
+                actual, directory_identity, file_identity = _read_skill_binding(store, rec.name)
             except (OSError, ValueError) as exc:
                 raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'}) from exc
-            if actual is None or skill_content_sha256(actual) != event.sha256:
+            if (skill_content_sha256(actual) != event.sha256
+                    or directory_identity != getattr(event, 'target_dir_identity', None)
+                    or file_identity != getattr(event, 'skill_file_identity', None)):
                 raise SkillLearningGateError('LEARNING_FORMAL_REVISION_CHANGED', {'carrier': 'skill'})
             return {'carrier': 'skill', 'asset_id': event.skill_name or name, **verification}
     identity = asset_identity(carrier, candidate, home)
