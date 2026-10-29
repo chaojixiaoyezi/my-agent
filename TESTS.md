@@ -1,3 +1,21 @@
+## 2026-10-29 e905-sol-10 Round 2：活跃日志与精确故障注入
+
+来源：`fix-e905-sol-10-r2.md`、Astra-1 `R2-F1/R2-F2`。从 `e4357ddca` 在原工作树做收口，不启停服务、不维护生产日志。
+
+- 日志预览与隔离后持非阻塞 inode `flock`，枚举 `/proc/self/fd`、`/dev/fd` 中可见句柄，按真实 dev/ino 与 `F_GETFL/O_ACCMODE` 拒绝同 inode 的 WRONLY/RDWR 句柄；缺少观察能力时失败关闭，不查询 PID。
+- 全部待消费日志先隔离，最后引用检查后核 dev/ino/size/mtime、持锁 FD 与原始尾字节，静止才更新回执；消费前及裁剪临时件刷盘后再次复核。尚无日志消费时，活跃拒绝通过原回执字节/版本CAS恢复原字节、权限与mtime后才计 skipped；若回执已有外来更新则保留新版本并报恢复责任。已有部分日志消费时准确累计动作并计 errors/recovery_required，不能伪报纯跳过。
+- 新回归用真实追加 FD 覆盖 4/8 天裁剪/删除，隔离引用检查期间真实追加后关 FD，及保持 size/mtime 的尾部改写、真实只读 FD 持排他锁。日志 FD 故障钩子按实际 inode 命中，明确断言进入 `_preview`；入口回执故障另列测试。
+- 先红后绿：实现前新增安全反例 10 failed、两条精确 fdopen 用例 passed；中间资源变量误用已修复。独审指出保存后的拒绝被误报为纯跳过，二次窗口及部分提交用例先6 failed/4 passed，再修回执恢复与计数；后继“部分消费＋原名重建恢复冲突”先2 failed/2 passed，计数收口移到覆盖整个 ExitStack 寿命后修复。最终结果与独立复核记录见本轮 DONE 交接，不用历史通过数代替当前版本。
+- 边界：这是可见本进程 FD、协作 flock 与采样内容版本保护，不证明其它进程所有未加锁写 FD 已关闭；任意非协作写者在末次检查后的写入、跨文件断电事务和真实 Gateway 端到端均未验证。发表后的失败沿原人工恢复责任，不伪报原子多文件事务。
+
+复现（工作树根；样本、缓存、XML 在 `/tmp`）：
+```bash
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest agent_py_agent/tests/test_display_archive_slimming.py agent_py_agent/tests/test_background_job_hygiene.py -q --tb=short -o addopts= -o cache_dir=/tmp/pytest_cache_sol10_fixr2 --junitxml=/tmp/sol10-fixr2-final.xml
+ruff check --no-cache agent_py_agent scripts
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_import_boundaries.py --json
+git diff --check 4bea324e3..HEAD
+```
+
 ## 2026-10-28 Wave 9 Round 7：审计发现修复
 
 来源：完整读取`fix-wave9-r7-opus-findings-c4.md`；工作树`/tmp/wt-wave9-integrated`，分支`wave9-integrated`，起点`2bc752abbe40211029165c09393b660760a3511b`。不提交、不推送、不部署；仅工作树内代码、回归与本文档变化。

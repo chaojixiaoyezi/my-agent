@@ -301,22 +301,31 @@ def test_external_owner_process_session_store_maintains_workspace_background_job
     assert not log.exists() and (receipts / meta.name).exists()
 
 
-# LLM: 只注入fdopen构造错误；使用真实fstat核对并回收测试发现的泄漏，避免测试污染宿主。
+# LLM: 仅目标日志inode触发fdopen错误；真实进入_preview并核裸FD关闭，不在入口回执读取处提前失败。
 # 函数用途: 确保日志FD在交给文件对象之前失败也会关闭。
 def test_preview_fdopen_failure_releases_opened_fd(tmp_path, monkeypatch):
     from agent_py_agent.tools.shell_tools import background_job_hygiene as hygiene
-    _job(tmp_path)
+    _, log, _, _ = _job(tmp_path)
+    identity = log.stat()
     original, fstat, close = os.fdopen, os.fstat, os.close
-    captured = []
-    # LLM: 只在读取日志的rb模式拒绝构造，其余文件封装沿原实现。
-    # 函数用途: 在FD所有权交接点制造错误。
+    preview = hygiene._preview
+    captured, entered = [], []
+    # LLM: 不替代预览逻辑，仅记录真实日志入口已经到达。
+    # 函数用途: 避免回执读取失败冒充日志预览失败。
+    def trace(*args, **kwargs):
+        entered.append(args[1])
+        return preview(*args, **kwargs)
+    # LLM: 以真实FD的dev/ino精确选择目标，其它rb回执仍正常读取。
+    # 函数用途: 只在日志FD所有权交接点制造错误。
     def fail(fd, mode="r", *args, **kwargs):
-        if mode == "rb":
+        info = fstat(fd)
+        if mode == "rb" and (info.st_dev, info.st_ino) == (identity.st_dev, identity.st_ino):
             captured.append(fd)
             raise OSError("injected fdopen")
         return original(fd, mode, *args, **kwargs)
+    monkeypatch.setattr(hygiene, "_preview", trace)
     monkeypatch.setattr(os, "fdopen", fail)
-    assert _maintain(tmp_path)["errors"] == 1
+    result = _maintain(tmp_path)
     leaked = []
     for fd in captured:
         try:
@@ -325,7 +334,173 @@ def test_preview_fdopen_failure_releases_opened_fd(tmp_path, monkeypatch):
             continue
         leaked.append(fd)
         close(fd)
-    assert captured and not leaked
+    assert result["scanned"] == result["errors"] == 1
+    assert entered == [(log.name,)] and len(captured) == 1 and not leaked
+
+
+# LLM: 原rb故障观察点单独保留为入口回执读取，不声称进入日志预览。
+# 函数用途: 确认回执fdopen失败同样关闭裸FD。
+def test_receipt_fdopen_failure_releases_opened_fd(tmp_path, monkeypatch):
+    from agent_py_agent.tools.shell_tools import background_job_hygiene as hygiene
+    meta, _, _, _ = _job(tmp_path)
+    info = meta.stat()
+    fdopen, fstat = os.fdopen, os.fstat
+    captured = []
+    # LLM: 只拒绝目标回执inode的封装，保持其它文件行为不变。
+    # 函数用途: 准确注入初扫回执读口失败。
+    def fail(fd, mode="r", *args, **kwargs):
+        current = fstat(fd)
+        if mode == "rb" and (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+            captured.append(fd)
+            raise OSError("injected receipt fdopen")
+        return fdopen(fd, mode, *args, **kwargs)
+    monkeypatch.setattr(os, "fdopen", fail)
+    result = hygiene.maintain_background_jobs_dir(tmp_path, now=NOW)
+    assert result["errors"] == 1 and result["scanned"] == 0 and len(captured) == 1
+    with pytest.raises(OSError):
+        fstat(captured[0])
+
+
+# LLM: 真实未关闭WRONLY/RDWR追加FD不必写入也足以保护inode；维护不得修改日志或回执。
+# 函数用途: 覆盖4天裁剪与8天删除遇到残留写句柄的保守跳过。
+@pytest.mark.parametrize("age", [4, 8])
+@pytest.mark.parametrize("mode", [os.O_WRONLY, os.O_RDWR])
+def test_open_append_fd_preserves_log_and_receipt(tmp_path, age, mode):
+    meta, log, _, raw = _job(tmp_path, age=age)
+    before, inode = meta.read_bytes(), log.stat().st_ino
+    writer = os.open(log, mode | os.O_APPEND)
+    try:
+        result = _maintain(tmp_path)
+        assert log.exists() and log.read_bytes() == raw and log.stat().st_ino == inode
+        assert meta.read_bytes() == before
+        assert result["slimmed"] == result["logs_removed"] == result["errors"] == 0
+        assert result["skipped"] == 1
+    finally:
+        os.close(writer)
+
+
+# LLM: 回执保存前后两次隔离引用窗口才打开写FD；真实写完即关，分别验证版本/原始尾字节与回执恢复。
+# 函数用途: 追加或保持大小mtime的尾部改写都恢复完整原inode且不更新回执。
+@pytest.mark.parametrize("age", [4, 8])
+@pytest.mark.parametrize("mutation", ["append", "tail_same_stat"])
+@pytest.mark.parametrize("window", [1, 2])
+def test_log_changed_during_claimed_reference_check_is_restored(tmp_path, monkeypatch, age, mutation, window):
+    from agent_py_agent.tools.shell_tools import background_job_hygiene as hygiene
+    meta, log, _, raw = _job(tmp_path, age=age)
+    before, info = meta.read_bytes(), log.stat()
+    receipt_mode = meta.stat().st_mode
+    referenced, changed, windows = hygiene._referenced, [], []
+    extra = b"late-output-proof"
+    expected = raw + extra if mutation == "append" else raw[:-len(extra)] + extra
+    # LLM: 保留真实引用判定，只在claim_path存在后对隔离inode进行真实写入并关闭FD。
+    # 函数用途: 确定性安排预览与最终消费之间的日志变化。
+    def change(*args, **kwargs):
+        value = referenced(*args, **kwargs)
+        claim = kwargs.get("claim_path")
+        if claim is not None:
+            windows.append(claim)
+        if claim is not None and len(windows) == window and not changed:
+            changed.append(claim.stat().st_ino)
+            writer = os.open(claim, os.O_WRONLY | (os.O_APPEND if mutation == "append" else 0))
+            try:
+                if mutation != "append":
+                    os.lseek(writer, -len(extra), os.SEEK_END)
+                assert os.write(writer, extra) == len(extra)
+                os.fsync(writer)
+            finally:
+                os.close(writer)
+            if mutation == "tail_same_stat":
+                os.utime(claim, ns=(info.st_atime_ns, info.st_mtime_ns))
+        return value
+    monkeypatch.setattr(hygiene, "_referenced", change)
+    result = _maintain(tmp_path)
+    assert changed == [info.st_ino]
+    assert log.exists() and log.stat().st_ino == info.st_ino and log.read_bytes() == expected
+    assert meta.read_bytes() == before and not list(tmp_path.glob(".purge_*"))
+    assert meta.stat().st_mtime_ns == int((NOW - age * DAY) * 1_000_000_000)
+    assert meta.stat().st_mode == receipt_mode
+    assert result["slimmed"] == result["logs_removed"] == result["errors"] == 0
+    assert result["skipped"] == 1
+
+
+# LLM: 多日志第一个已消费后才对第二个真实追加；不得抹掉已发生动作或将部分提交算纯跳过。
+# 函数用途: 验证部分裁剪/删除的准确计数和显式恢复责任。
+@pytest.mark.parametrize("age", [4, 8])
+@pytest.mark.parametrize("recreate", [False, True])
+def test_active_second_log_reports_partial_commit(tmp_path, monkeypatch, age, recreate):
+    from agent_py_agent.tools.shell_tools import background_job_hygiene as hygiene
+    _, log, _, raw = _job(tmp_path, age=age)
+    other = log.with_suffix(".out")
+    other.write_bytes(raw)
+    referenced, windows = hygiene._referenced, []
+    extra = b"late-second-log"
+    # LLM: 第二个日志第二次隔离引用检查才真实追加，确保第一个日志已完成消费。
+    # 函数用途: 复现部分动作后活跃拒绝的状态收口。
+    def change(*args, **kwargs):
+        value = referenced(*args, **kwargs)
+        claim = kwargs.get("claim_path")
+        if claim is not None and args[1] == (other.name,):
+            windows.append(claim)
+            if len(windows) == 2:
+                with claim.open("ab") as stream:
+                    stream.write(extra)
+                if recreate:
+                    other.write_bytes(b"new-running-log")
+        return value
+    monkeypatch.setattr(hygiene, "_referenced", change)
+    result = _maintain(tmp_path)
+    assert len(windows) == 2
+    if recreate:
+        assert other.read_bytes() == b"new-running-log" and windows[-1].read_bytes() == raw + extra
+    else:
+        assert other.read_bytes() == raw + extra
+    assert result["errors"] == result["recovery_required"] == 1 and result["skipped"] == 0
+    assert result["logs_removed" if age == 8 else "slimmed"] == 1
+    assert not log.exists() if age == 8 else log.read_bytes() != raw
+
+
+# LLM: 活跃拒绝后的回执CAS发现外来更新必须保留新字节并报恢复责任，不能用原快照强行回滚。
+# 函数用途: 防止补偿恢复覆盖晚到的产物引用。
+def test_active_log_rollback_preserves_newer_receipt(tmp_path, monkeypatch):
+    from agent_py_agent.tools.shell_tools import background_job_hygiene as hygiene
+    meta, log, _, raw = _job(tmp_path)
+    referenced, windows, newer = hygiene._referenced, [], []
+    # LLM: 第二次隔离引用检查真实返回后同时写入新回执及日志，迫使活跃拒绝进入回滚CAS。
+    # 函数用途: 准确安排外来回执与补偿操作的冲突。
+    def change(*args, **kwargs):
+        value = referenced(*args, **kwargs)
+        claim = kwargs.get("claim_path")
+        if claim is not None:
+            windows.append(claim)
+            if len(windows) == 2:
+                newer.append(json.dumps({**json.loads(meta.read_text()), "artifact_refs": ["artifact:late"]}).encode())
+                meta.write_bytes(newer[0])
+                with claim.open("ab") as stream:
+                    stream.write(b"late")
+        return value
+    monkeypatch.setattr(hygiene, "_referenced", change)
+    result = _maintain(tmp_path)
+    assert log.read_bytes() == raw + b"late" and meta.read_bytes() == newer[0]
+    assert result["errors"] == result["recovery_required"] == 1
+    assert result["slimmed"] == result["logs_removed"] == result["skipped"] == 0
+
+
+# LLM: 只读句柄不命中写FD枚举，真实LOCK_EX冲突单独验证非阻塞inode锁防线。
+# 函数用途: 另一打开描述符持锁时裁剪和删除均无内容变更。
+@pytest.mark.parametrize("age", [4, 8])
+def test_log_flock_conflict_preserves_original(tmp_path, age):
+    import fcntl
+    meta, log, _, raw = _job(tmp_path, age=age)
+    before = meta.read_bytes()
+    reader = os.open(log, os.O_RDONLY)
+    try:
+        fcntl.flock(reader, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = _maintain(tmp_path)
+        assert log.exists() and log.read_bytes() == raw and meta.read_bytes() == before
+        assert result["slimmed"] == result["logs_removed"] == result["errors"] == 0
+        assert result["skipped"] == 1
+    finally:
+        os.close(reader)
 
 
 # LLM: 在真实保存边界另开锁FD做非阻塞flock，验证与ProcessSessionStore同名锁而非只锁目录inode。

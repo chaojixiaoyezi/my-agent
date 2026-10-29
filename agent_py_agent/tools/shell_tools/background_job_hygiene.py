@@ -1,4 +1,4 @@
-# LLM: 显式维护jobs_root；与权威Store共锁并隔离复核准确inode/回执字节，变更前重查全部共享引用，不探测PID。
+# LLM: 显式维护jobs_root；与权威Store共锁，隔离日志持inode锁并核可见写FD/版本/原始尾部，不探测PID。
 # 模块用途: 安全维护退出日志与内外置回执，运行态、pin、共享引用及并发替换均保守保留。
 from __future__ import annotations
 
@@ -33,6 +33,35 @@ _MAX_METADATA_BYTES = 1024 * 1024
 # 类用途: 让维护返回可识别的人工恢复责任计数。
 class _RecoveryRequired(OSError):
     pass
+
+
+# LLM: 已观察到写FD、锁冲突或日志版本变化是保留原件的跳过；恢复失败仍另报恢复责任。
+# 类用途: 区分活跃日志与损坏或系统错误。
+class _ActiveLog(OSError):
+    pass
+
+
+# LLM: 日志已有消费时不能回滚回执或伪报整项跳过；携带本次准确已完成动作供入口累计并报恢复责任。
+# 类用途: 表达活跃变化导致的部分提交。
+class _PartialLog(_RecoveryRequired):
+    # LLM: 只保存已完成数量，不用异常文字推断动作或恢复状态。
+    # 函数用途: 将部分成功结果带过异常收口。
+    def __init__(self, slimmed, removed):
+        super().__init__("活跃日志导致部分维护，需核对回执及剩余日志")
+        self.slimmed, self.removed = slimmed, removed
+
+
+# LLM: 动作计数覆盖整个隔离ExitStack寿命；恢复异常替代主异常后仍保留实际消费数，原因链不丢失。
+# 函数用途: 在所有日志恢复退出后统一收口部分提交，而不是让内部异常携带易被覆盖的计数。
+@contextmanager
+def _log_actions():
+    actions = [0, 0]
+    try:
+        yield actions
+    except (OSError, ValueError, TypeError) as exc:
+        if any(actions):
+            raise _PartialLog(*actions) from exc
+        raise
 
 
 # LLM: 只解析本机固定libc符号，缺原子不覆盖能力时失败关闭，不退回check-then-rename或硬链接。
@@ -167,21 +196,69 @@ def _fdopen_owned(descriptor, mode):
         raise
 
 
-# LLM: seek有界头尾且前后核FD；fdopen失败同样回收描述符，UTF8边界丢弃不完整码点。
-# 函数用途: 提取有界首2048字节和尾4096字节及原始大小。
+# LLM: 预览持非阻塞inode锁并核可见写FD；保留未解码尾部供隔离复核，fdopen失败关闭裸FD。
+# 函数用途: 提取有界UTF8摘要、准确版本和原始尾字节，不把活跃日志当静止快照。
 def _preview(root, parts):
     descriptor = open_readonly_file_beneath(root, parts)
     with _fdopen_owned(descriptor, "rb") as stream:
         before = os.fstat(stream.fileno())
+        _quiet_log(stream.fileno(), before)
         head = stream.read(2048)
         stream.seek(max(0, before.st_size - 4096))
         tail = stream.read(4096)
-        after = os.fstat(stream.fileno())
-    if _signature(before) != _signature(after):
-        raise OSError("日志读取期间变化")
+        _quiet_log(stream.fileno(), before)
+    raw_tail = tail
     head = head.decode("utf-8", errors="ignore").encode()
     tail = tail.decode("utf-8", errors="ignore").encode()
-    return head + _MARKER + tail, tail.decode(), before
+    return head + _MARKER + tail, tail.decode(), before, raw_tail
+
+
+# LLM: flock只约束协作写者；另用真实fstat/F_GETFL枚举本进程可见FD拒绝同inode写句柄，不外推其它进程。
+# 函数用途: 非阻塞锁住日志并拒绝写句柄或版本变化；缺少观察能力时失败关闭。
+def _quiet_log(descriptor, expected):
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        raise _ActiveLog("日志inode仍被占用") from exc
+    names, visible = set(), False
+    for directory in ("/proc/self/fd", "/dev/fd"):
+        try:
+            names.update(int(name) for name in os.listdir(directory) if name.isdecimal())
+            visible = True
+        except FileNotFoundError:
+            continue
+    if not visible:
+        raise OSError("无法观察本进程日志写句柄")
+    for opened in names - {descriptor}:
+        try:
+            info = os.fstat(opened)
+            if (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino):
+                continue
+            mode = fcntl.fcntl(opened, fcntl.F_GETFL) & os.O_ACCMODE
+        except OSError as exc:
+            if exc.errno == errno.EBADF:
+                continue
+            raise
+        if mode in (os.O_WRONLY, os.O_RDWR):
+            raise _ActiveLog("日志仍有打开的写句柄")
+    current = os.fstat(descriptor)
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or _signature(current) != _signature(expected)):
+        raise _ActiveLog("日志快照已变化")
+
+
+# LLM: 最后引用检查后及消费前核同parent隔离叶和持锁FD；按原始尾字节比较，不用UTF8忽略掩盖变化。
+# 函数用途: 确认裁剪或删除的仍是预览版本；变化时由_claimed原子恢复。
+def _quiet_claimed(fd, claimed, descriptor, expected, tail):
+    _quiet_log(descriptor, expected)
+    current = os.stat(claimed, dir_fd=fd, follow_symlinks=False)
+    actual = os.pread(descriptor, 4096, max(0, expected.st_size - 4096))
+    if (not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+            or _signature(current) != _signature(expected) or actual != tail):
+        raise _ActiveLog("隔离日志版本或尾部已变化")
+    _quiet_log(descriptor, expected)
 
 
 # LLM: 隔离rename可能改变ctime，合同使用dev/ino/size/mtime，普通单链接类型另行硬校验。
@@ -190,13 +267,14 @@ def _signature(value):
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
 
 
-# LLM: 持Store锁隔离旧叶再核inode和原字节；恢复用原子不覆盖rename，原名被占时保留责任且不删新对象。
+# LLM: 持Store锁隔离核inode/原字节；日志FD持flock至消费或恢复，原名冲突保留恢复责任。
 # 函数用途: 固定本次要变更的文件，退出时恢复未消费的隔离文件。
 @contextmanager
 def _claimed(root, parts, expected, *, raw=None, kind="log"):
     fd = open_directory_beneath(root, parts[:-1], require_dir_fd=True)
     name, temporary = parts[-1], f".purge_{kind}_{uuid.uuid4().hex}"
     moved = False
+    stream = None
     try:
         _exclusive_rename_api()
         current = os.stat(name, dir_fd=fd, follow_symlinks=False)
@@ -209,14 +287,18 @@ def _claimed(root, parts, expected, *, raw=None, kind="log"):
             raise OSError("隔离对象不是已验证版本")
         if raw is not None:
             descriptor = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-            with _fdopen_owned(descriptor, "rb") as stream:
-                opened = os.fstat(stream.fileno())
-                actual = stream.read(_MAX_METADATA_BYTES + 1)
-                after = os.fstat(stream.fileno())
+            with _fdopen_owned(descriptor, "rb") as receipt_stream:
+                opened = os.fstat(receipt_stream.fileno())
+                actual = receipt_stream.read(_MAX_METADATA_BYTES + 1)
+                after = os.fstat(receipt_stream.fileno())
             if (opened.st_nlink != 1 or after.st_nlink != 1 or _signature(opened) != _signature(expected)
                     or _signature(after) != _signature(expected) or actual != raw):
                 raise OSError("隔离回执原字节已变化")
-        yield fd, temporary
+        if kind == "log":
+            descriptor = os.open(temporary, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            stream = _fdopen_owned(descriptor, "rb")
+            _quiet_log(stream.fileno(), expected)
+        yield fd, temporary, stream.fileno() if stream is not None else None
     finally:
         try:
             if moved:
@@ -237,18 +319,25 @@ def _claimed(root, parts, expected, *, raw=None, kind="log"):
                     else:
                         raise _RecoveryRequired("原名已重建，保留隔离文件待恢复")
         finally:
-            os.close(fd)
+            try:
+                if stream is not None:
+                    stream.close()
+            finally:
+                os.close(fd)
 
 
-# LLM: 临时写入/发表/清理全锚定原parent FD；内核排他rename拒绝末刻重建，fsync失败保留隔离责任。
+# LLM: 临时写入/发表锚定原parent FD；日志刷盘后重核快照，回执回滚可恢复原mode/mtime；排他rename拒绝重建。
 # 函数用途: 原子不覆盖地发表完整新文件，再消费已核验旧叶。
-def _publish_claimed(root, parts, raw, fd, claimed):
+def _publish_claimed(root, parts, raw, fd, claimed, *, log_snapshot=None, restore_info=None):
     temporary = f".hygiene_new_{uuid.uuid4().hex}"
     try:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         with _fdopen_owned(descriptor, "wb") as stream:
             stream.write(raw)
             stream.flush()
+            if restore_info is not None:
+                os.fchmod(stream.fileno(), stat.S_IMODE(restore_info.st_mode))
+                os.utime(stream.fileno(), ns=(restore_info.st_atime_ns, restore_info.st_mtime_ns))
             os.fsync(stream.fileno())
         try:
             os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
@@ -256,6 +345,8 @@ def _publish_claimed(root, parts, raw, fd, claimed):
             pass
         else:
             raise OSError("发表目标被并发重建")
+        if log_snapshot is not None:
+            _quiet_claimed(fd, claimed, *log_snapshot)
         _rename_exclusive(fd, temporary, parts[-1])
         os.fsync(fd)
         os.unlink(claimed, dir_fd=fd)
@@ -273,12 +364,25 @@ def _save(root, parts, record, expected):
     raw = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode()
     if len(raw) > _MAX_METADATA_BYTES:
         raise ValueError("摘要回执超过上限")
-    with _claimed(root, parts, expected[1], raw=expected[0], kind="receipt") as (fd, claimed):
+    with _claimed(root, parts, expected[1], raw=expected[0], kind="receipt") as (fd, claimed, _):
         _publish_claimed(root, parts, raw, fd, claimed)
     _, current = _record(root, parts)
     if current[0] != raw:
         raise OSError("回执发表后变化")
     return current
+
+
+# LLM: 只在尚无日志消费且当前回执仍为本次发表版本时回滚准确原字节及mode/mtime；外来更新/恢复失败报责任，不覆写。
+# 函数用途: 在活跃拒绝的隔离恢复收口中撤销过早发表的维护标记，不重置回执年龄。
+def _restore_saved_receipt(root, parts, original, current):
+    try:
+        _, actual = _record(root, parts)
+        if actual[0] != current[0] or _signature(actual[1]) != _signature(current[1]):
+            raise OSError("回执已被其它写者更新，拒绝回滚")
+        with _claimed(root, parts, current[1], raw=current[0], kind="receipt") as (fd, claimed, _):
+            _publish_claimed(root, parts, original[0], fd, claimed, restore_info=original[1])
+    except (OSError, ValueError, TypeError) as exc:
+        raise _RecoveryRequired("活跃日志已保留，但回执回滚未完成") from exc
 
 
 # LLM: 仅选择jobs根及一层非隐藏子目录和显式权威Store，不全盘发现owner；危险目录不跟随。
@@ -301,9 +405,9 @@ def _store_directories(root, external):
     return tuple(sorted(roots))
 
 
-# LLM: 本次锁集合目录身份及当前回执版本必须仍一致；重扫全部其它引用，新目录/未知归属一律拒绝。
+# LLM: 锁集合身份/当前回执版本必须一致；重扫其它引用，仅忽略本事务准确隔离路径，不忽略旧残留。
 # 函数用途: 在日志变更前同时核当前回执及所有共享引用，不能只相信初扫清单。
-def _referenced(root, log, sources, identities, external, own, *, own_expected, claim_path=None):
+def _referenced(root, log, sources, identities, external, own, *, own_expected, claim_path=None, claim_paths=()):
     if _store_directories(root, external) != sources:
         raise OSError("回执目录清单已变化")
     _, actual = _record(*own)
@@ -313,7 +417,8 @@ def _referenced(root, log, sources, identities, external, own, *, own_expected, 
         current = source.lstat()
         if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != identities[source]:
             raise OSError("回执目录已替换")
-        ignored = (claim_path.name,) if claim_path is not None and claim_path.parent == source else ()
+        paths = (*claim_paths, *((claim_path,) if claim_path is not None else ()))
+        ignored = tuple(path.name for path in paths if path.parent == source)
         for parts in _receipts(source, ignored=ignored):
             if (source, parts) == own:
                 continue
@@ -323,7 +428,7 @@ def _referenced(root, log, sources, identities, external, own, *, own_expected, 
     return False
 
 
-# LLM: 持所有来源Store锁；原回执签名、隔离inode与共享引用每次变更均重核，先存摘要才消费日志。
+# LLM: 全部日志先隔离持锁核引用/写FD/尾部；活跃拒绝在零消费时CAS回滚回执，部分消费则准确报动作及恢复责任。
 # 函数用途: 处理准确终态版本，竞争或未知归属时保留原文件并拒绝变更。
 def _maintain_job(root, parts, record, original, now, slim_days, raw_days, summary_days, protected,
                   *, receipt_root, sources, identities, external):
@@ -344,35 +449,50 @@ def _maintain_job(root, parts, record, original, now, slim_days, raw_days, summa
     sizes = dict(record.get("original_log_bytes") or {})
     tails = dict(record.get("tail_preview") or {})
     updates = []
-    for log, summary, tail, info in previews:
+    for log, summary, tail, info, raw_tail in previews:
         if age >= raw_days or age >= slim_days and info.st_size > 8192:
             sizes.setdefault(log[-1], info.st_size)
             tails[log[-1]] = tail
-            updates.append((log, summary, info))
+            updates.append((log, summary, info, raw_tail))
     if updates:
         update.update(original_log_bytes=sizes, tail_preview=tails)
         update["raw_logs_removed_at" if age >= raw_days else "log_slimmed_at"] = now
     remove_receipt = age >= summary_days and not any(record.get(key) for key in ("artifact_refs", "artifact_ref", "output_artifact_ref"))
     if not updates and not remove_receipt:
         return 0, 0, 0
-    current = _save(receipt_root, parts, update, original)
-    for log, summary, info in updates:
-        if _referenced(root, log, sources, identities, external, own, own_expected=current):
-            raise OSError("日志已出现其它引用")
-        with _claimed(root, log, info) as (fd, claimed):
+    with _log_actions() as actions, ExitStack() as claims:
+        staged, paths = [], []
+        for log, summary, info, raw_tail in updates:
+            fd, claimed, descriptor = claims.enter_context(_claimed(root, log, info))
+            paths.append(root.joinpath(*log[:-1], claimed))
+            staged.append((log, summary, info, raw_tail, fd, claimed, descriptor))
+        for log, _, info, raw_tail, fd, claimed, descriptor in staged:
             if _referenced(root, log, sources, identities, external, own,
-                           own_expected=current, claim_path=root.joinpath(*log[:-1], claimed)):
+                           own_expected=original, claim_path=root.joinpath(*log[:-1], claimed), claim_paths=paths):
                 raise OSError("日志隔离后出现其它引用")
-            if age >= raw_days:
-                os.unlink(claimed, dir_fd=fd)
-                os.fsync(fd)
-            else:
-                _publish_claimed(root, log, summary, fd, claimed)
+            _quiet_claimed(fd, claimed, descriptor, info, raw_tail)
+        current = _save(receipt_root, parts, update, original)
+        try:
+            for log, summary, info, raw_tail, fd, claimed, descriptor in staged:
+                if _referenced(root, log, sources, identities, external, own,
+                               own_expected=current, claim_path=root.joinpath(*log[:-1], claimed), claim_paths=paths):
+                    raise OSError("日志提交前出现其它引用")
+                _quiet_claimed(fd, claimed, descriptor, info, raw_tail)
+                if age >= raw_days:
+                    os.unlink(claimed, dir_fd=fd)
+                    os.fsync(fd)
+                else:
+                    _publish_claimed(root, log, summary, fd, claimed, log_snapshot=(descriptor, info, raw_tail))
+                actions[int(age >= raw_days)] += 1
+        except _ActiveLog:
+            if not any(actions):
+                _restore_saved_receipt(receipt_root, parts, original, current)
+            raise
     if remove_receipt:
         # 即使策略被重排，也不遗留失去归属的大日志。
         if logs and age < raw_days:
             return len(updates), 0, 0
-        with _claimed(receipt_root, parts, current[1], raw=current[0], kind="receipt") as (fd, claimed):
+        with _claimed(receipt_root, parts, current[1], raw=current[0], kind="receipt") as (fd, claimed, _):
             os.unlink(claimed, dir_fd=fd)
             os.fsync(fd)
         # Store目录保留永久锁；不能删除锁文件使已等待的写者分裂成两把锁。
@@ -380,7 +500,7 @@ def _maintain_job(root, parts, record, original, now, slim_days, raw_days, summa
     return (0, len(updates), 0) if age >= raw_days else (len(updates), 0, 0)
 
 
-# LLM: 根flock后按固定顺序取所有实际Store锁并恢复原redo；支持显式外置根/owner推导，来源新增时拒绝旧快照变更。
+# LLM: 根flock后有序取Store锁并恢复redo；纯活跃跳过、部分消费准确计数并报责任；不探测其它进程句柄或PID。
 # 函数用途: 显式维护两种真实布局的退出作业；不自动上线清理、不查询PID，扫描不受动作额度限制。
 def maintain_background_jobs_dir(jobs_root: Path, *, now: float | None = None, slim_after_days: float = 3.0, raw_log_ttl_days: float = 7.0, summary_ttl_days: float = 30.0, pinned_job_ids: set[str] | None = None, max_jobs: int = 500, receipt_store_root: Path | None = None, owner_home: Path | None = None) -> dict[str, int]:
     now = time.time() if now is None else now
@@ -446,6 +566,14 @@ def maintain_background_jobs_dir(jobs_root: Path, *, now: float | None = None, s
                         result["receipts_removed"] += receipts
                         result["skipped"] += not (slimmed or removed or receipts)
                         changed_jobs += bool(slimmed or removed or receipts)
+                    except _ActiveLog:
+                        result["skipped"] += 1
+                    except _PartialLog as exc:
+                        result["slimmed"] += exc.slimmed
+                        result["logs_removed"] += exc.removed
+                        result["errors"] += 1
+                        result["recovery_required"] += 1
+                        changed_jobs += 1
                     except (OSError, ValueError, TypeError) as exc:
                         result["errors"] += 1
                         result["recovery_required"] += isinstance(exc, _RecoveryRequired)

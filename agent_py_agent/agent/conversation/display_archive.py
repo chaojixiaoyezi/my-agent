@@ -36,7 +36,7 @@ class DisplayArchiveError(ValueError):
         self.code = code
 
 
-# LLM: 只接收可信producer提供的线程身份与已净化行；引用不含路径，先刷盘各页再发表manifest以隔离半成品。
+# LLM: 可信producer靠独立UUID目录与manifest最后发表同维护根锁隔离，不获取维护锁；已发布页不可覆写，引用不含路径。
 # 函数用途: 逐页保存本次真实显示快照，最后发布引用；返回后业务文件变化不影响历史原文。
 def archive_display_rows(agent: object, *, thread_id: str, rows: Iterable[Mapping]) -> dict[str, object]:
     store = agent.conversation_store
