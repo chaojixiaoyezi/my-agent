@@ -1,3 +1,12 @@
+## 2026-10-29 顶格系统工程与代数性质大考（内核耗竭、毒化锁自愈、时间侧信道、Unicode规范化与十万性质测试）
+
+```text
+`-- agent_py_agent/tests/
+    `-- suite_ultimate_kernel_and_invariants.py # 内核EMFILE资源耗竭Fail-Closed、SIGKILL-9毒化锁极速自愈、微秒级时间侧信道盲测、Unicode四重规范化及十万次数学性质测试
+```
+
+关键文件说明：`agent_py_agent/tests/suite_ultimate_kernel_and_invariants.py` 覆盖 5 大工业级系统极限维度：内核无 FD 时的确定性安全关闭、物理 `kill -9` 强杀后排他锁的毫秒级自愈与孤儿锁清理、普通用户跨租户探针的时间盲化与信息零泄漏、Unicode 等价类（开尔文符号/全角/零宽/RLO）的安全收敛，以及 100,000 轮伪随机变异下核心代数不变量（`Allowed(p) ==> is_relative_to(OwnerScope)`）的严格保持。
+
 ## 2026-10-28 Wave 9 A1：跨实例单向事件推送（源码候选）
 
 ```text

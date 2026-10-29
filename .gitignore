@@ -91,3 +91,6 @@ yarn-error.log*
 /data/audit_guarantee_harness/
 /data/learning_drafts/
 blobs/
+
+# Background jobs runtime
+.background_jobs/

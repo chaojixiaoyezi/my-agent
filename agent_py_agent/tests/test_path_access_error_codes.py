@@ -196,3 +196,17 @@ def test_type_error_still_invalid_arguments(tmp_path, monkeypatch) -> None:
     assert outcome.ok is False
     assert outcome.error_code == "TOOL_INVALID_ARGUMENTS"
     assert outcome.failure_stage == ""
+
+
+def test_null_byte_path_rejected_as_resolution_failed(tmp_path, monkeypatch) -> None:
+    """零字节截断注入（null byte）在 PathAccessPolicy 中被稳健拦截为 PATH_RESOLUTION_FAILED 而不是抛出未捕获异常。"""
+    from agent.path_access_policy import PathAccessPolicy
+
+    policy = PathAccessPolicy.from_values(mode="normal", owner_scope_root=tmp_path)
+    decision_read = policy.check(f"{tmp_path}/valid.txt\x00/../../etc/shadow")
+    assert decision_read.allowed is False
+    assert decision_read.code == "PATH_RESOLUTION_FAILED"
+
+    decision_write = policy.check_write(f"{tmp_path}/valid.txt\x00/../../etc/cron")
+    assert decision_write.allowed is False
+    assert decision_write.code == "PATH_RESOLUTION_FAILED"
