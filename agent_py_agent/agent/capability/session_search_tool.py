@@ -1,4 +1,4 @@
-# LLM: 新输入只接受六种显式mode，旧参数推断移至宿主v1解码器；各mode复用原owner索引和可信会话reader。
+# LLM: 输入与回执下一跳统一显式mode；旧推断只在宿主v1边界，仍复用原owner索引和可信会话reader。
 # 模块用途: 严格验证历史检索参数并读取同一事实源，保留task_ref、游标和owner边界。
 # 底层输出沿discover/browse/scroll旧协议；有归属锚点限同会话，无归属记录明确标为时间邻居。
 # 原文reader只读canonical消息；task_ref只取宿主已结束任务，不能从正文猜cwd或提升写权限。
@@ -203,16 +203,17 @@ def _dispatch(agent: object, store: LocalStore | None, params: dict[str, object]
     return _browse(store, params.get("limit", _DEFAULT_BROWSE_COUNT), source_type)
 
 
-# LLM: 只有检索/翻看/浏览需要派生索引；读原文（message_id、current_thread 浏览）不经过这里。
+# LLM: 只有索引检索/翻看/最近浏览需要派生库；原文和thread_browse仍走canonical会话，错误提示不恢复旧语法。
 # 函数用途: 需要本地索引的形态在索引不可用时明确拒绝。
 def _required_store(store: LocalStore | None) -> LocalStore:
     if store is None:
-        raise SessionHistoryRefusal("TOOL_UNAVAILABLE", "本地历史存储不可用", "当前运行环境未配置 local_store；读原文可改用 message_id。")
+        raise SessionHistoryRefusal("TOOL_UNAVAILABLE", "本地历史存储不可用",
+            '当前环境未配置local_store；按摘要编号读取用 {"mode":"message","message_id":"摘要中的消息编号"}；'
+            '当前会话浏览用 {"mode":"thread_browse"}。')
     return store
 
 
-# LLM: 会话条件只取宿主可信上下文（覆盖 search 里的空会话编号），与索引 metadata 的结构化会话编号比对；
-#   search 带来源类型（默认只查会话消息记录）与条数。
+# LLM: 会话只取宿主可信上下文并与结构化索引比对；下一跳显式mode沿真实scope，不给旧字段猜测路径。
 # 函数用途: 只在当前会话内全文检索，结果带 message_id 供分段读回原文。
 def _discover_thread(agent: object, store: LocalStore, query: str, search: ThreadSearch) -> dict[str, Any]:
     thread_id, source = trusted_thread(agent)
@@ -222,8 +223,8 @@ def _discover_thread(agent: object, store: LocalStore, query: str, search: Threa
     return {
         "mode": "thread_discover", "query": query, "thread_id": thread_id, "results": results, "count": len(results),
         "scope_resolution": {"thread_source": source, "current_thread_id": thread_id},
-        "hint": ("用结果 scope 里的 message_id 调 session_search(message_id=...) 分段读取原文全文。"
-                 if results else "本会话没有命中；可换关键词，或 current_thread=true 不带 query 按页浏览。"),
+        "hint": (_message_read_hint(results[0]["scope"])
+                 if results else '本会话没有命中；可换关键词，或按页浏览 {"mode":"thread_browse"}。'),
     }
 
 
@@ -237,8 +238,7 @@ def _error(message: str, hint: str, code: str) -> ToolHandlerOutcome:
     )
 
 
-# LLM: Broad discovery overfetches locally so a lower-ranked host-authored historical task_ref
-# cannot be hidden by several prose rows. Stable partitioning keeps FTS order inside each group.
+# LLM: 本地过取并稳定优先宿主task_ref，保留FTS组内顺序；提示沿真实记录ID和规范mode，不从文本派生权限。
 # 函数用途: discovery 形态检索历史，并让可续作的精确任务引用优先出现。
 def _discover(store: LocalStore, query: str, limit: int, source_type: str | None) -> dict[str, Any]:
     fetch_limit = _MAX_LIMIT_COUNT if source_type in {None, "gateway_request"} else limit
@@ -254,12 +254,13 @@ def _discover(store: LocalStore, query: str, limit: int, source_type: str | None
         "hint": (
             (
                 f"已优先返回 {task_ref_count} 条可续作的精确 task_ref；"
-                "续作时使用其 task_path，或用 around_id 翻看前后上下文。"
+                "续作时使用其 task_path；翻看上下文参数："
+                + json.dumps({"mode": "around", "around_id": results[0]["around_id"]}, ensure_ascii=False)
             )
             if task_ref_count
-            else "用某条结果的 around_id 翻看它前后的上下文,或换关键词。"
+            else "翻看结果上下文参数：" + json.dumps({"mode": "around", "around_id": results[0]["around_id"]}, ensure_ascii=False)
             if results
-            else "没有命中的历史记录;可换关键词,或不传参浏览最近记录。"
+            else '没有命中的历史记录；可换关键词，或浏览最近记录 {"mode":"recent"}。'
         ),
     }
 
@@ -273,7 +274,7 @@ def _prioritize_historical_task_refs(results: list[dict[str, Any]]) -> list[dict
     return [*task_results, *prose_results]
 
 
-# LLM: around 结果必须说明是同会话记录还是无归属时间邻居，不可冒充完整聊天上下文。
+# LLM: around区分同会话记录与无归属时间邻居；前后翻页携带真实锚点及原过滤，不改变输出协议或冒充完整历史。
 # 函数用途: 翻看历史窗口，给模型返回实际会话范围和完整性边界。
 def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | None) -> dict[str, Any]:
     records, before, after = store.records_around(around_id, window=window, source_type=source_type)
@@ -283,7 +284,7 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
             "around_id": around_id,
             "messages": [],
             "count": 0,
-            "hint": f"未找到记录 id={around_id};它可能不存在或不属于该 source_type。",
+            "hint": f'未找到记录 id={around_id}；它可能不存在或不属于该source_type。可浏览 {{"mode":"recent"}}。',
         }
     anchor = next(rec for rec in records if rec.id == around_id)
     thread_id = record_thread_id(anchor.metadata)
@@ -300,14 +301,19 @@ def _scroll(store: LocalStore, around_id: str, window: int, source_type: str | N
         "hint": (
             ("同一会话的记录窗口，不等于完整逐条消息。" if thread_id else "无会话归属的时间邻近记录，不代表同一会话。")
             +
-            "向后翻:用最后一条的 id 当 around_id 再调;向前翻:用第一条的 id。"
-            " before/after 小于 window 说明已到历史的一端。"
-            " content_truncated 的条目可用 scope 里的 message_id 分段读取全文。"
+            "向后翻参数：" + json.dumps({"mode": "around", "around_id": records[-1].id, "window": window,
+                **({"source_type": source_type} if source_type else {})}, ensure_ascii=False)
+            + "；向前翻参数：" + json.dumps({"mode": "around", "around_id": records[0].id, "window": window,
+                **({"source_type": source_type} if source_type else {})}, ensure_ascii=False)
+            + " before/after 小于 window 说明已到历史的一端。"
+            + next((_message_read_hint(_history_scope(rec.metadata)) for rec in records
+                if _history_scope(rec.metadata).get("message_id")), "")
         ),
     }
 
 
-# 函数用途: browse 形态——不带话题时按时间倒序列出最近记录(标题/预览/时间)。
+# LLM: recent沿原索引倒序及来源过滤，输出仍为browse协议；只修改下一跳说明，不写状态或扩权限。
+# 函数用途: 列出最近历史并提供规范查询和上下文参数。
 def _browse(store: LocalStore, limit: int, source_type: str | None) -> dict[str, Any]:
     recents = store.list_recent(limit=limit, source_type=source_type)
     results = [_shape_record(rec, preview=True) for rec in recents]
@@ -316,11 +322,24 @@ def _browse(store: LocalStore, limit: int, source_type: str | None) -> dict[str,
         "results": results,
         "count": len(results),
         "hint": (
-            f"最近 {len(results)} 条记录。传 query= 检索具体话题,或 around_id= 翻看某条上下文。"
+            f'最近 {len(results)} 条记录。检索参数 {{"mode":"search","query":"话题"}}；上下文参数：'
+            + json.dumps({"mode": "around", "around_id": results[0]["id"]}, ensure_ascii=False)
             if results
-            else "本地还没有历史记录。"
+            else '本地还没有历史记录；新增记录后浏览用 {"mode":"recent"}。'
         ),
     }
+
+
+# LLM: 仅用结构化scope构造原文参数，显式会话仍由原reader核验owner；没有消息ID时不伪造读取凭据。
+# 函数用途: 返回可复制执行的原文读取提示，无消息ID则退回规范当前会话浏览。
+def _message_read_hint(scope: dict[str, str]) -> str:
+    message_id = scope.get("message_id")
+    if not message_id:
+        return '结果无消息编号；当前会话浏览用 {"mode":"thread_browse"}。'
+    params = {"mode": "message", "message_id": message_id}
+    if scope.get("thread_id"):
+        params["thread_id"] = scope["thread_id"]
+    return "按next_offset续读原文，首次参数：" + json.dumps(params, ensure_ascii=False)
 
 
 # LLM: Search hits may expose a typed task_ref only for host-indexed gateway_request rows; never

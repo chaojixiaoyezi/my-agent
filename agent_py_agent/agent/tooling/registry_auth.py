@@ -1,7 +1,20 @@
-
+# LLM: 注册表与派工共用宿主授权令牌；令牌不是可调用工具，不进入公共Schema，动作收窄随allowed_tools持久化。
+# 模块用途: 判定工具硬授权并保留只读目录动作上界，防止跨代或重建时恢复搜索权限。
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+CATALOG_ONLY_TOOL_GRANT = "tool_search:catalog"
+
+
+# LLM: 从真实执行快照schema读取动作上界；可用名字只是投影，不能替代可持久化动作约束；无IO。
+# 函数用途: 把当前有效工具和只读目录限制压成派工可保存的授权列表。
+def snapshot_tool_grants(snapshot) -> list[str]:
+    grants = sorted(snapshot.available_tool_names)
+    runtime = snapshot.runtime("tool_search")
+    if runtime is not None and runtime.model_spec.input_schema.get("properties", {}).get("action", {}).get("enum") == ["catalog"]:
+        grants.append(CATALOG_ONLY_TOOL_GRANT)
+    return grants
 
 
 # LLM: 工具授权只接受机器 allowlist、owner 禁用表和默认隐藏表；空 capability 标签不参与判定。

@@ -186,6 +186,8 @@ def test_projection_rejects_mutable_or_non_authorized_names(prepared, field, nam
         replace(snapshot, **{field: names})
 
 
+# LLM: 三个发现入口不得自适应收起；装饰器枚举与原快照发现硬门同步，不扩大执行权。
+# 函数用途: 防止展示优化把唯一发现链隐藏导致工具无法加载。
 @pytest.mark.parametrize("name", ["tool_search", "self_map", "skill_search"])
 def test_original_discovery_entries_cannot_be_adaptively_deferred(prepared, name):
     registry, snapshot, *_ = prepared

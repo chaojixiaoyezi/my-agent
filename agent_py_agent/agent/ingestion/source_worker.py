@@ -1,3 +1,5 @@
+# LLM: 原Audit状态/租约是唯一权威；内部派工也走规范items，血缘与精确权限留宿主字段，不扩公共模型Schema。
+# 模块用途: 为命名Audit持久维护一条来源对应一个工作者，不另建模型循环、调度或权限旁路。
 """Durable one-watch/one-worker binding for named Audit tasks.
 
 This module is deliberately a thin adapter over the existing subagent kernel.
@@ -188,6 +190,8 @@ def _provision_published_audit_source_workers(agent: object) -> dict[str, object
     }
 
 
+# LLM: 将已发布宿主来源绑定装入独立item并调用规范服务，保留资料/值守语义；会创建或复用真实child。
+# 函数用途: 为一条已发布Audit来源派工，按实际创建回执返回状态。
 def _provision_published_audit_source(
     agent: object,
     binding: dict[str, object],
@@ -205,7 +209,7 @@ def _provision_published_audit_source(
     ]
     result = execute_create_subagents_service(
         agent,
-        {
+        {"items": [{
             "goal": (
                 "持续处理当前命名 Audit 已发布的这一条来源。"
                 f"结构化 source_id={source_id} 已由宿主绑定；"
@@ -217,7 +221,7 @@ def _provision_published_audit_source(
             "audit_source_id": source_id,
             "context_manifest": {"required_read_paths": refs},
             "long_running": True,
-        },
+        }]},
     )
     payload = _tool_payload(result)
     created_ids = _payload_run_ids(payload, "created_run_ids")
@@ -2824,6 +2828,8 @@ def _acquire_or_renew_lease(
     }
 
 
+# LLM: 宿主血缘/attributes/精确tools只在规范item内透传，不能变成公共Schema或顶层默认；不执行创建。
+# 函数用途: 组装单来源工作者派工项，保持原根任务、资料边界和剩余值守窗口。
 def _source_worker_create_params(
     agent: object,
     state: WatchState,
@@ -2861,7 +2867,7 @@ def _source_worker_create_params(
     }
     if remaining > 0:
         params["service_window_seconds"] = remaining
-    return params
+    return {"items": [params]}
 
 
 def _source_worker_attributes(

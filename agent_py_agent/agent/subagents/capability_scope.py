@@ -1,7 +1,5 @@
 
-# LLM: Capability routing may narrow a child request but never widen the manager's owner wall beyond already-persisted explicit work roots.
-# or the direct parent's effective tool snapshot. Keep path/tool authority decisions here so
-# explicit, semantic, and lifecycle grant paths consume one structured rule instead of prose.
+# LLM: 能力路由只收窄既有工作根和直属父快照；工具名与动作令牌一并传承，显式/语义/生命周期不得按自然语言扩权。
 # 模块用途: 汇总能力申请范围，仅消费当前用户或既有声明工作根，并保持直属父级工具上限。
 from __future__ import annotations
 
@@ -14,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..contracts.gates.command_policy import command_source_too_large
+from ..tooling.registry_auth import CATALOG_ONLY_TOOL_GRANT, snapshot_tool_grants
 from .model_capabilities import CapabilityRequest
 from .model_task import SubAgentTask
 from .utils import _merge_list
@@ -186,8 +185,7 @@ def canonical_capability_tool_request_fields(
     return ordinary, mcp
 
 
-# LLM: Creation-time tool authority is copied from the exact immutable ToolRuntimeSnapshot
-# carried by the Tool Gateway invocation. The child cannot supply or widen this host-owned field.
+# LLM: 从Tool Gateway不可变执行快照复制名字和动作令牌，不接受child同名字段伪造；与create_policy和恢复测试同步。
 # 函数用途: 把父代理创建 child 当轮的真实工具上限压成可持久化快照，供跨进程能力裁决复用。
 def creation_tool_authority_snapshot(runtime_snapshot: Any) -> dict[str, object]:
     return {
@@ -199,6 +197,7 @@ def creation_tool_authority_snapshot(runtime_snapshot: Any) -> dict[str, object]
             if str(item or "").strip()
         ),
         "snapshot_hash": str(getattr(runtime_snapshot, "snapshot_hash", "") or ""),
+        "tool_grants": snapshot_tool_grants(runtime_snapshot),
         "owner_type": str(getattr(runtime_snapshot, "owner_type", "") or ""),
     }
 
@@ -279,9 +278,7 @@ def direct_parent_tool_authority(
     )
 
 
-# LLM: Root and nested authority lookup is shared by hard grant checks, semantic-router bypass,
-# and exact MCP alias canonicalization. Accept either the owning agent or its manager so the
-# lower-level routing service does not grow a reverse dependency on agent-core.
+# LLM: 硬授权/语义路由/MCP精确别名共用直属父事实；catalog令牌不能授完整tool_search；同一owner禁用及快照失败仍拒绝。
 # 函数用途: 读取直属父级当前真实工具集合，并返回来源与失败码供上层结构化记录。
 def _direct_parent_available_tools(
     agent_or_manager: Any,
@@ -315,21 +312,29 @@ def _direct_parent_available_tools(
         creation_snapshot = task_creation_tool_authority(task)
         if creation_snapshot:
             available = set(creation_snapshot["available_tool_names"])
+            available.update(creation_snapshot.get("tool_grants", []))
             source = "parent_creation_runtime_snapshot"
             error_code = ""
+        elif parent_run_id:
+            # 有委派边却缺失可信父证据时拒绝新增授权，不能把owner全权冒充父级上界。
+            available = set()
+            source = "parent_creation_runtime_snapshot"
+            error_code = "PARENT_CREATION_SNAPSHOT_MISSING"
         else:
-            # 旧任务没有创建时快照；同 owner、同部署 registry 仅作显式兼容来源，新的
-            # create_subagents 主链不会再走这里。失败时仍 fail closed。
+            # 仅无委派父边的历史根任务保留同owner兼容来源，失败仍拒绝。
             try:
                 registry = agent_or_manager.tools
                 snapshot = registry.runtime_snapshot(run_id=parent_run_id)
-                available = set(snapshot.available_tool_names)
+                available = set(snapshot_tool_grants(snapshot))
                 source = "legacy_process_runtime_snapshot"
                 error_code = "PARENT_CREATION_SNAPSHOT_MISSING"
             except Exception:
                 available = set()
                 source = "legacy_process_runtime_snapshot"
                 error_code = "PARENT_TOOL_SNAPSHOT_UNAVAILABLE"
+    if CATALOG_ONLY_TOOL_GRANT in available:
+        available.discard("tool_search")
+        available.add("list_tools")
     return available, source, error_code
 
 

@@ -53,7 +53,7 @@ from .models import (
     ToolRuntimePolicy,
     ToolRuntimeSnapshot,
 )
-from .registry_auth import allowed_tool_set
+from .registry_auth import CATALOG_ONLY_TOOL_GRANT, allowed_tool_set
 from .registry_bootstrap import build_tool_retriever, register_base_tools
 from .registry_workspace import effective_registry_cwd
 from .runtime_contracts import ToolCall, ToolResult
@@ -1042,7 +1042,7 @@ def _ensure_registry_lifecycle_fields(registry: ToolRegistry) -> None:
         registry._mcp_lifecycle_fields_ready = True
 
 
-# LLM: Acquire lifecycle before prepare; every policy facade retains one shared MCP lease, not new execution authority.
+# LLM: 先取生命周期锁再取prepare锁；权限视图只借用同一MCP租约，不新增执行授权或重建连接。
 # 函数用途: 提取原权限视图装配，不改变基础工具重建和借用收口合同。
 def _registry_with_access_policy(registry, access_mode, path_access_mode, owner_scope_root):
     from copy import copy
@@ -1103,14 +1103,18 @@ def _share_registry_mcp_state(registry, source):
             return True
 
 
-# LLM: 快照投影保留原硬权限交集与失败关闭的可用性检查，不连接客户端；旧目录授权只能投影catalog单动作。
+# LLM: 保留原权限交集/禁用/可用性门；旧目录grant归一为规范工具+持久化动作令牌，令牌优先于宽工具名，不连接客户端。
 # 函数用途: 在独立辅助函数里生成同一份工具事实快照，保持所有目录和执行入口一致。
 def _registry_runtime_snapshot(registry, allowed_tools, run_id, owner_scope_root):
     allowed = allowed_tool_set(allowed_tools)
     # 旧宿主白名单只迁为catalog-only schema，当前显式tool_search授权才含search/load。
-    catalog_only = allowed is not None and "list_tools" in allowed and "tool_search" not in allowed
-    if allowed is not None and "list_tools" in allowed:
-        allowed = (allowed - {"list_tools"}) | {"tool_search"}
+    catalog_only = allowed is not None and (CATALOG_ONLY_TOOL_GRANT in allowed
+        or ("list_tools" in allowed and "tool_search" not in allowed))
+    if allowed is not None:
+        if "list_tools" in allowed or CATALOG_ONLY_TOOL_GRANT in allowed:
+            allowed = (allowed - {"list_tools"}) | {"tool_search"}
+        if catalog_only:
+            allowed.add(CATALOG_ONLY_TOOL_GRANT)
     regime = path_scope_regime(registry.owner_scope_root if owner_scope_root is None else owner_scope_root,
                                registry.path_access_mode)
     runtimes: list[ToolRuntime] = []
